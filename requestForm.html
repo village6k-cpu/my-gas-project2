@@ -561,6 +561,7 @@ function registerRequest() {
   var btnReg = document.getElementById("btnRegister");
   btnReg.disabled = true;
 
+  // GAS 웹앱은 POST 시 302 리다이렉트 → manual로 잡아서 리다이렉트 URL을 GET으로 재요청
   fetch(API_URL, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
@@ -569,7 +570,14 @@ function registerRequest() {
       action: "등록",
       reqID: currentReqID
     }),
-    redirect: "follow"
+    redirect: "manual"
+  })
+  .then(function(r) {
+    if (r.type === "opaqueredirect" || r.status === 0) {
+      // GAS 리다이렉트: GET으로 재호출
+      return fetch(API_URL + "?key=village2026&action=등록&reqID=" + encodeURIComponent(currentReqID));
+    }
+    return r;
   })
   .then(function(r) { return r.json(); })
   .then(function(data) {
