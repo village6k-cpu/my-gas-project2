@@ -471,8 +471,18 @@ function insertAndCheckRequest(req) {
   }
   var reqID = prefix + "-" + String(maxNum + 1).padStart(3, "0");
 
-  // 행 입력
-  var startRow = lastRow + 1;
+  // 첫 번째 빈 행 찾기 (A열 기준)
+  var startRow = 2;
+  if (lastRow >= 2) {
+    var aCol = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var r = 0; r < aCol.length; r++) {
+      if (!aCol[r][0] || String(aCol[r][0]).trim() === "") {
+        startRow = r + 2;
+        break;
+      }
+      startRow = r + 3; // 마지막 데이터 다음 행
+    }
+  }
   var items = req.장비 || [];
   for (var i = 0; i < items.length; i++) {
     var row = startRow + i;
