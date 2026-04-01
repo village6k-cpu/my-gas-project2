@@ -205,7 +205,7 @@ a7s3 바디세트 2대
       </div>
       <div class="info-item">
         <label>연락처</label>
-        <input type="text" id="resPhone" placeholder="010-0000-0000">
+        <input type="tel" id="resPhone" placeholder="010-0000-0000" oninput="formatPhone(this)">
       </div>
       <div class="info-item">
         <label>반출일</label>
@@ -322,12 +322,9 @@ function parseChat() {
   // ── 연락처 파싱 ──
   var phoneMatch = text.match(/01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/);
   if (phoneMatch) {
-    result.phone = phoneMatch[0].replace(/[\s.]/g, "-");
-    // 하이픈이 없으면 추가
-    if (result.phone.indexOf("-") === -1 && result.phone.length >= 10) {
-      var p = result.phone;
-      result.phone = p.substring(0, 3) + "-" + p.substring(3, p.length - 4) + "-" + p.substring(p.length - 4);
-    }
+    // 숫자만 추출 후 하이픈 포맷팅
+    var digits = phoneMatch[0].replace(/\D/g, "");
+    result.phone = formatPhoneNumber(digits);
   }
 
   // ── 날짜/시간 파싱 ──
@@ -604,6 +601,24 @@ function goBackToEdit() {
   document.getElementById("step2").classList.remove("hidden");
 }
 
+// ━━━ 전화번호 포맷팅 ━━━
+function formatPhoneNumber(digits) {
+  if (!digits) return "";
+  digits = digits.replace(/\D/g, "");
+  if (digits.length === 11) {
+    return digits.substring(0,3) + "-" + digits.substring(3,7) + "-" + digits.substring(7);
+  } else if (digits.length === 10) {
+    return digits.substring(0,3) + "-" + digits.substring(3,6) + "-" + digits.substring(6);
+  }
+  return digits;
+}
+
+function formatPhone(el) {
+  var digits = el.value.replace(/\D/g, "");
+  if (digits.length > 11) digits = digits.substring(0, 11);
+  el.value = formatPhoneNumber(digits);
+}
+
 function showStatus(type, msg) {
   var el = document.getElementById("statusMsg");
   el.className = "status " + type;
@@ -686,7 +701,8 @@ function parsePhoto() {
 // ━━━ 파싱 결과 적용 (텍스트/사진 공용) ━━━
 function applyParsedResult(result) {
   document.getElementById("resName").value = result.name || result.예약자명 || "";
-  document.getElementById("resPhone").value = result.phone || result.연락처 || "";
+  var rawPhone = result.phone || result.연락처 || "";
+  document.getElementById("resPhone").value = formatPhoneNumber(rawPhone.replace(/\D/g, "")) || rawPhone;
   document.getElementById("startDate").value = result.startDate || result.반출일 || "";
   document.getElementById("startTime").value = result.startTime || result.반출시간 || "";
   document.getElementById("endDate").value = result.endDate || result.반납일 || "";
