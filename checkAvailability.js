@@ -368,13 +368,73 @@ function refreshEquipmentList() {
 
     const rule = SpreadsheetApp.newDataValidation()
       .requireValueInRange(listSheet.getRange("A2:A" + (sorted.length + 1)), true)
-      .setAllowInvalid(false)
+      .setAllowInvalid(true)
       .setHelpText("장비명 또는 세트명을 검색하세요")
       .build();
     range.setDataValidation(rule);
   }
 
   return sorted.length;
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 장비명 퍼지 매칭
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * 입력된 장비명을 목록에서 가장 유사한 이름과 매칭
+ * 정확히 매칭되면 그걸 사용, 아니면 부분 매칭 시도, 실패하면 원본 그대로 반환
+ */
+function fuzzyMatchEquipName(input, nameList) {
+  if (!input || nameList.length === 0) return input;
+
+  var inputLower = input.toLowerCase().replace(/\s+/g, "");
+
+  // 1. 정확히 일치
+  for (var i = 0; i < nameList.length; i++) {
+    if (nameList[i] === input) return nameList[i];
+  }
+
+  // 2. 대소문자/공백 무시 일치
+  for (var i = 0; i < nameList.length; i++) {
+    if (nameList[i].toLowerCase().replace(/\s+/g, "") === inputLower) return nameList[i];
+  }
+
+  // 3. 한쪽이 다른 쪽을 포함 (입력값이 목록 항목 포함 또는 반대)
+  var containMatches = [];
+  for (var i = 0; i < nameList.length; i++) {
+    var nameLower = nameList[i].toLowerCase().replace(/\s+/g, "");
+    if (nameLower.indexOf(inputLower) >= 0 || inputLower.indexOf(nameLower) >= 0) {
+      containMatches.push({ name: nameList[i], lenDiff: Math.abs(nameLower.length - inputLower.length) });
+    }
+  }
+  if (containMatches.length > 0) {
+    containMatches.sort(function(a, b) { return a.lenDiff - b.lenDiff; });
+    return containMatches[0].name;
+  }
+
+  // 4. 핵심 키워드 매칭 (숫자+영문 조합: a7s3, fx3, gm2 등)
+  var inputKeywords = inputLower.match(/[a-z]+\d+[a-z]*\d*|[a-z]{2,}/gi) || [];
+  if (inputKeywords.length > 0) {
+    var bestMatch = null;
+    var bestScore = 0;
+    for (var i = 0; i < nameList.length; i++) {
+      var nameLower = nameList[i].toLowerCase().replace(/\s+/g, "");
+      var score = 0;
+      for (var k = 0; k < inputKeywords.length; k++) {
+        if (nameLower.indexOf(inputKeywords[k].toLowerCase()) >= 0) score++;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = nameList[i];
+      }
+    }
+    if (bestMatch && bestScore >= 1) return bestMatch;
+  }
+
+  // 5. 매칭 실패 → 원본 그대로 반환 (시트에 입력은 됨)
+  return input;
 }
 
 
@@ -483,8 +543,22 @@ function insertAndCheckRequest(req) {
       startRow = r + 3; // 마지막 데이터 다음 행
     }
   }
+  // 장비명 매칭: 목록에서 가장 유사한 이름 찾기
+  var equipNames = [];
+  try {
+    var listSheet = ss.getSheetByName("목록");
+    if (listSheet && listSheet.getLastRow() >= 2) {
+      equipNames = listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1)
+        .getValues().flat().filter(function(v) { return v; }).map(String);
+    }
+  } catch(e) {}
+
   var items = req.장비 || [];
   for (var i = 0; i < items.length; i++) {
+    // 장비명 퍼지 매칭
+    var inputName = String(items[i].이름 || "").trim();
+    var matchedName = fuzzyMatchEquipName(inputName, equipNames);
+
     var row = startRow + i;
     var rowData = [
       reqID,                              // A: 요청ID
@@ -492,7 +566,7 @@ function insertAndCheckRequest(req) {
       i === 0 ? (req.반출시간 || "") : "",// C: 반출시간 (첫 행만)
       i === 0 ? req.반납일 : "",          // D: 반납일 (첫 행만)
       i === 0 ? (req.반납시간 || "") : "",// E: 반납시간 (첫 행만)
-      items[i].이름,            // F: 장비/세트명
+      matchedName,              // F: 장비/세트명 (매칭된 이름 또는 원본)
       items[i].수량 || 1,       // G: 수량
       "",                       // H: 확인 (아래에서 채움)
       "",                       // I: 결과
