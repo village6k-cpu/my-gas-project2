@@ -515,7 +515,9 @@ function runFunction(funcName, params) {
     "clearResults",
     "refreshEquipmentList",
     "syncAuditFromMaster",
-    "insertAndCheckRequest"
+    "insertAndCheckRequest",
+    "updateRequest",
+    "deleteRequest"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -531,6 +533,17 @@ function runFunction(funcName, params) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
       var reqID = insertAndCheckRequest(args);
       return { success: true, function: funcName, reqID: reqID, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "updateRequest" && params.args) {
+      var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var result = updateRequest(args);
+      return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "deleteRequest" && params.args) {
+      var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var reqID = typeof args === "string" ? args : args.reqID;
+      var result = deleteRequest(reqID);
+      return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     this[funcName]();
   } catch (e) {
