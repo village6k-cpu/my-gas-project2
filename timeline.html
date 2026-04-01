@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>빌리지 스케줄 타임라인</title>
+  <link href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #F0F2F5;
+      color: #1A1A2E;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── 상단 컨트롤 바 ── */
+    .topbar {
+      background: #1A1A2E;
+      color: #fff;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+
+    .topbar-title {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: #E2E8F0;
+      white-space: nowrap;
+    }
+
+    .search-wrap {
+      position: relative;
+      flex: 1;
+      min-width: 180px;
+      max-width: 280px;
+    }
+
+    .search-wrap input {
+      width: 100%;
+      padding: 7px 12px 7px 32px;
+      border-radius: 8px;
+      border: none;
+      background: rgba(255,255,255,0.12);
+      color: #fff;
+      font-size: 13px;
+      outline: none;
+      transition: background 0.2s;
+    }
+    .search-wrap input::placeholder { color: rgba(255,255,255,0.45); }
+    .search-wrap input:focus { background: rgba(255,255,255,0.2); }
+    .search-wrap .search-icon {
+      position: absolute;
+      left: 9px; top: 50%;
+      transform: translateY(-50%);
+      font-size: 13px;
+      opacity: 0.6;
+    }
+
+    .btn-group { display: flex; gap: 6px; }
+    .btn {
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.2);
+      background: rgba(255,255,255,0.08);
+      color: #E2E8F0;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s;
+      white-space: nowrap;
+    }
+    .btn:hover { background: rgba(255,255,255,0.18); }
+    .btn.active { background: #3B82F6; border-color: #3B82F6; }
+
+    /* ── 범례 ── */
+    .legend {
+      background: #fff;
+      padding: 7px 16px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-shrink: 0;
+      border-bottom: 1px solid #E2E8F0;
+      flex-wrap: wrap;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      color: #4A5568;
+    }
+    .legend-dot {
+      width: 11px; height: 11px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+    .stat-info {
+      margin-left: auto;
+      font-size: 12px;
+      color: #718096;
+    }
+
+    /* ── 타임라인 래퍼 ── */
+    .timeline-wrap {
+      flex: 1;
+      overflow: hidden;
+      background: #fff;
+      position: relative;
+    }
+
+    #timeline {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* ── vis.js 오버라이드 ── */
+    .vis-timeline {
+      border: none !important;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+    }
+
+    .vis-label .vis-inner {
+      font-size: 12px !important;
+      padding: 0 8px !important;
+      font-weight: 500;
+      color: #2D3748;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 160px;
+    }
+
+    .vis-item {
+      border-radius: 4px !important;
+      font-size: 11px !important;
+      font-weight: 500 !important;
+      border-width: 0 !important;
+      padding: 2px 6px !important;
+    }
+
+    .vis-item.status-대기       { background: #3B82F6 !important; color: #fff !important; }
+    .vis-item.status-반출중     { background: #F59E0B !important; color: #fff !important; }
+    .vis-item.status-반납완료   { background: #10B981 !important; color: #fff !important; }
+    .vis-item.status-취소       { background: #9CA3AF !important; color: #fff !important; opacity: 0.6 !important; }
+    .vis-item.status-기타       { background: #8B5CF6 !important; color: #fff !important; }
+
+    .vis-item.vis-selected {
+      box-shadow: 0 0 0 2px rgba(59,130,246,0.6) !important;
+    }
+
+    .vis-tooltip {
+      background: #1A1A2E !important;
+      color: #E2E8F0 !important;
+      border: 1px solid rgba(255,255,255,0.15) !important;
+      border-radius: 8px !important;
+      padding: 10px 14px !important;
+      font-size: 12px !important;
+      line-height: 1.7 !important;
+      max-width: 260px !important;
+      white-space: pre-wrap !important;
+      pointer-events: none !important;
+    }
+
+    .vis-time-axis .vis-text {
+      font-size: 11px !important;
+      color: #718096 !important;
+    }
+
+    .vis-panel.vis-left { border-right: 1px solid #E2E8F0 !important; }
+
+    /* ── 로딩 ── */
+    .loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255,255,255,0.95);
+      z-index: 100;
+      gap: 12px;
+      font-size: 14px;
+      color: #4A5568;
+    }
+    .spinner {
+      width: 36px; height: 36px;
+      border: 3px solid #E2E8F0;
+      border-top-color: #3B82F6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── 빈 상태 ── */
+    .empty-state {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: #9CA3AF;
+      font-size: 14px;
+      display: none;
+    }
+    .empty-icon { font-size: 40px; }
+  </style>
+</head>
+<body>
+
+<!-- 상단 컨트롤 -->
+<div class="topbar">
+  <span class="topbar-title">🗓 빌리지 스케줄</span>
+
+  <div class="search-wrap">
+    <span class="search-icon">🔍</span>
+    <input type="text" id="searchInput" placeholder="장비명 검색..." autocomplete="off">
+  </div>
+
+  <div class="btn-group">
+    <button class="btn" onclick="moveToday()">오늘</button>
+    <button class="btn" onclick="zoomIn()">확대 +</button>
+    <button class="btn" onclick="zoomOut()">축소 −</button>
+    <button class="btn" onclick="fitAll()">전체보기</button>
+  </div>
+
+  <div class="btn-group">
+    <button class="btn" id="btnAll" onclick="filterStatus('all')">전체</button>
+    <button class="btn" id="btnActive" onclick="filterStatus('active')">진행중</button>
+  </div>
+
+  <button class="btn" onclick="reload()" style="margin-left:auto;">↺ 새로고침</button>
+</div>
+
+<!-- 범례 -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#3B82F6"></div>대기</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#F59E0B"></div>반출중</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#10B981"></div>반납완료</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#9CA3AF"></div>취소</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#8B5CF6"></div>기타</div>
+  <div class="stat-info" id="statInfo">로딩 중...</div>
+</div>
+
+<!-- 타임라인 -->
+<div class="timeline-wrap">
+  <div id="timeline"></div>
+
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <span>스케줄 데이터 불러오는 중...</span>
+  </div>
+
+  <div class="empty-state" id="emptyState">
+    <div class="empty-icon">📭</div>
+    <span>검색 결과가 없습니다</span>
+  </div>
+</div>
+
+<script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+<script>
+  var timeline;
+  var allGroups = [];
+  var allItems  = [];
+  var groups    = new vis.DataSet();
+  var items     = new vis.DataSet();
+  var currentStatusFilter = 'all';
+
+  // ── 초기화 ──
+  function init() {
+    var container = document.getElementById('timeline');
+
+    var options = {
+      stack: false,
+      groupOrder: 'content',
+      orientation: { axis: 'top' },
+      zoomMin: 1000 * 60 * 60 * 6,       // 최소 6시간
+      zoomMax: 1000 * 60 * 60 * 24 * 90, // 최대 90일
+      start: new Date(Date.now() - 1000*60*60*24*3),
+      end:   new Date(Date.now() + 1000*60*60*24*14),
+      tooltip: { followMouse: true, overflowMethod: 'cap' },
+      groupHeightMode: 'fixed',
+      height: '100%',
+      margin: { item: { horizontal: 2, vertical: 3 }, axis: 4 },
+      locale: 'ko',
+      showCurrentTime: true,
+      moveable: true,
+      zoomable: true,
+      selectable: true,
+      multiselect: false,
+      snap: null,
+    };
+
+    timeline = new vis.Timeline(container, items, groups, options);
+
+    // 클릭 이벤트 (선택된 아이템 상세 보기)
+    timeline.on('select', function(props) {
+      // 선택 시 별도 동작 없음 (툴팁으로 충분)
+    });
+  }
+
+  // ── 데이터 로드 ──
+  function loadData() {
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(onDataLoaded)
+      .withFailureHandler(function(err) {
+        showLoading(false);
+        document.getElementById('statInfo').textContent = '오류: ' + err.message;
+      })
+      .getTimelineData();
+  }
+
+  function onDataLoaded(data) {
+    allGroups = data.groups || [];
+    allItems  = data.items  || [];
+    applyFilters();
+    showLoading(false);
+    updateStat();
+  }
+
+  // ── 필터 적용 ──
+  function applyFilters() {
+    var query  = document.getElementById('searchInput').value.trim().toLowerCase();
+
+    // 장비명 검색 필터
+    var visibleGroups = allGroups.filter(function(g) {
+      return !query || g.content.toLowerCase().indexOf(query) >= 0;
+    });
+
+    var visibleGroupIds = {};
+    visibleGroups.forEach(function(g) { visibleGroupIds[g.id] = true; });
+
+    // 상태 필터
+    var visibleItems = allItems.filter(function(item) {
+      if (!visibleGroupIds[item.group]) return false;
+      if (currentStatusFilter === 'active') {
+        return item.status === '대기' || item.status === '반출중';
+      }
+      return true;
+    });
+
+    groups.clear();
+    groups.add(visibleGroups);
+    items.clear();
+    items.add(visibleItems);
+
+    // 빈 상태 표시
+    document.getElementById('emptyState').style.display =
+      (visibleGroups.length === 0 ? 'flex' : 'none');
+
+    updateStat();
+  }
+
+  function updateStat() {
+    var query = document.getElementById('searchInput').value.trim();
+    var showing = groups.length;
+    var total   = allGroups.length;
+    var itemCnt = items.length;
+    var txt = query
+      ? showing + '/' + total + '개 장비 · ' + itemCnt + '건'
+      : total + '개 장비 · ' + allItems.length + '건';
+    document.getElementById('statInfo').textContent = txt;
+  }
+
+  // ── 컨트롤 함수 ──
+  function moveToday() {
+    var now = new Date();
+    timeline.setWindow(
+      new Date(now - 1000*60*60*24*3),
+      new Date(now.getTime() + 1000*60*60*24*14)
+    );
+  }
+
+  function zoomIn()  { timeline.zoomIn(0.5); }
+  function zoomOut() { timeline.zoomOut(0.5); }
+
+  function fitAll() {
+    if (allItems.length > 0) {
+      timeline.fit({ animation: { duration: 400 } });
+    }
+  }
+
+  function reload() {
+    document.getElementById('searchInput').value = '';
+    currentStatusFilter = 'all';
+    document.getElementById('btnAll').classList.add('active');
+    document.getElementById('btnActive').classList.remove('active');
+    loadData();
+  }
+
+  function filterStatus(type) {
+    currentStatusFilter = type;
+    document.getElementById('btnAll').classList.toggle('active', type === 'all');
+    document.getElementById('btnActive').classList.toggle('active', type === 'active');
+    applyFilters();
+  }
+
+  function showLoading(show) {
+    document.getElementById('loading').style.display = show ? 'flex' : 'none';
+  }
+
+  // ── 검색 이벤트 ──
+  document.getElementById('searchInput').addEventListener('input', applyFilters);
+
+  // ── 시작 ──
+  init();
+  loadData();
+  document.getElementById('btnAll').classList.add('active');
+</script>
+</body>
+</html>

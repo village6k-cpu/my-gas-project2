@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;800&display=swap');
+  
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Noto Sans KR', -apple-system, sans-serif;
+    background: #f5f7fa; color: #2d3436;
+    font-size: 13px; line-height: 1.55;
+  }
+
+  /* ── NAV TABS ── */
+  .tabs {
+    position: sticky; top: 0; z-index: 10;
+    background: #1e3a5f;
+    display: flex; flex-wrap: wrap;
+    padding: 6px 8px; gap: 4px;
+  }
+  .tab {
+    padding: 5px 10px; border-radius: 5px;
+    color: rgba(255,255,255,.65); font-size: 11px; font-weight: 600;
+    cursor: pointer; transition: all .15s; border: none; background: none;
+    white-space: nowrap;
+  }
+  .tab:hover { background: rgba(255,255,255,.12); color: #fff; }
+  .tab.on { background: rgba(255,255,255,.2); color: #fff; }
+
+  /* ── PANELS ── */
+  .panel { display: none; padding: 16px 14px 32px; }
+  .panel.on { display: block; }
+
+  /* ── SECTION TITLE ── */
+  .stitle {
+    font-size: 16px; font-weight: 800; color: #1e3a5f;
+    margin-bottom: 14px; padding-bottom: 6px;
+    border-bottom: 2.5px solid #1e3a5f;
+  }
+
+  /* ── FLOW STEPS ── */
+  .flow { display: flex; flex-direction: column; gap: 0; }
+  .fs {
+    display: flex; gap: 10px; position: relative;
+  }
+  .fs-left {
+    display: flex; flex-direction: column; align-items: center; width: 36px; flex-shrink: 0;
+  }
+  .fs-num {
+    width: 32px; height: 32px; border-radius: 50%;
+    background: #1e3a5f; color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 800;
+  }
+  .fs-line { flex: 1; width: 2px; background: #d5dbe0; min-height: 10px; }
+  .fs-card {
+    flex: 1; background: #fff; border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 8px;
+    border-left: 3px solid #1e3a5f;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  }
+  .fs-card h4 { font-size: 13px; font-weight: 700; color: #1e3a5f; margin-bottom: 4px; }
+  .fs.last .fs-line { display: none; }
+
+  .tag {
+    display: inline-block; padding: 1px 7px; border-radius: 3px;
+    font-size: 11px; font-weight: 700; color: #fff; margin-right: 3px;
+  }
+  .tag.b { background: #1e3a5f; }
+  .tag.y { background: #e67e22; }
+  .tag.g { background: #27ae60; }
+  .tag.r { background: #e74c3c; }
+
+  .badges { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .badge {
+    padding: 3px 8px; border-radius: 5px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge.ok { background: #d4efdf; color: #1e8449; }
+  .badge.w { background: #fef5e7; color: #b7950b; }
+  .badge.f { background: #fadbd8; color: #c0392b; }
+
+  .warn-text { color: #e74c3c; font-weight: 600; font-size: 11.5px; margin-top: 3px; }
+
+  /* ── MOD CARDS ── */
+  .mcard {
+    background: #fff; border-radius: 10px; padding: 14px;
+    margin-bottom: 10px; border-top: 3px solid #2c5f8a;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  }
+  .mcard h4 { font-size: 14px; font-weight: 700; color: #1e3a5f; margin-bottom: 8px; }
+  .mline {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 0; border-bottom: 1px solid #f2f2f2;
+    font-size: 12.5px;
+  }
+  .mline:last-of-type { border-bottom: none; }
+  .col {
+    background: #eef2f7; padding: 1px 7px; border-radius: 3px;
+    font-weight: 700; font-size: 11px; color: #1e3a5f; white-space: nowrap;
+  }
+  .mnote {
+    margin-top: 8px; font-size: 11px; color: #888;
+    background: #fafafa; padding: 6px 8px; border-radius: 5px;
+  }
+
+  /* ── ALERT ── */
+  .al {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 10px 12px; border-radius: 8px; margin-bottom: 8px;
+    font-size: 12.5px;
+  }
+  .al.d { background: #fdf0ed; border-left: 3px solid #e74c3c; }
+  .al.w { background: #fef9ed; border-left: 3px solid #f39c12; }
+  .al.i { background: #edf5fd; border-left: 3px solid #2c5f8a; }
+  .al-icon { font-size: 16px; flex-shrink: 0; line-height: 1; }
+  .al strong { color: #1e3a5f; }
+
+  /* ── ALARM TABLE ── */
+  .atable {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+    background: #fff; border-radius: 10px; overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  }
+  .atable th {
+    background: #1e3a5f; color: #fff; padding: 8px 10px;
+    font-weight: 600; text-align: left;
+  }
+  .atable td { padding: 8px 10px; border-bottom: 1px solid #f0f0f0; }
+  .atable tr:last-child td { border-bottom: none; }
+  .ab {
+    display: inline-block; padding: 2px 7px; border-radius: 3px;
+    font-size: 10px; font-weight: 700;
+  }
+  .ab.yes { background: #d4efdf; color: #1e8449; }
+  .ab.man { background: #fef5e7; color: #b7950b; }
+  .ab.no { background: #f0f0f0; color: #999; }
+
+  /* ── TIMELINE LEGEND ── */
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+  .leg { display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; }
+  .dot { width: 24px; height: 10px; border-radius: 3px; }
+  .dot.bl { background: #3498db; }
+  .dot.or { background: #e67e22; }
+  .dot.gr { background: #27ae60; }
+  .dot.gy { background: #bdc3c7; }
+
+  /* ── CAT FLOW ── */
+  .cflow {
+    display: flex; align-items: center; gap: 0; flex-wrap: wrap;
+    justify-content: center; margin: 14px 0 8px;
+  }
+  .cs {
+    background: #eef2f7; border-radius: 7px; padding: 8px 10px;
+    text-align: center; font-size: 11px; font-weight: 600; color: #1e3a5f;
+  }
+  .cs.hl { background: #fef5e7; border: 2px solid #f39c12; }
+  .cs.ok { background: #d4efdf; }
+  .ca { color: #c8d6e5; padding: 0 3px; font-size: 16px; }
+
+  .box {
+    background: #fff; border-radius: 10px; padding: 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  }
+</style>
+</head>
+<body>
+
+<div class="tabs">
+  <button class="tab on" data-t="t1">📝 신규예약</button>
+  <button class="tab" data-t="t2">✏️ 수정</button>
+  <button class="tab" data-t="t3">💬 알림톡</button>
+  <button class="tab" data-t="t4">📊 기타</button>
+  <button class="tab" data-t="t5">⚠️ 주의</button>
+</div>
+
+<!-- ═══════ 신규 예약 ═══════ -->
+<div class="panel on" id="t1">
+  <div class="stitle">📝 신규 예약 등록</div>
+  <div class="flow">
+
+    <div class="fs">
+      <div class="fs-left"><div class="fs-num">1</div><div class="fs-line"></div></div>
+      <div class="fs-card">
+        <h4>기본 정보 입력</h4>
+        <span class="tag b">B~E</span> 반출/반납 일시
+        <span class="tag b">F</span> 장비·세트
+        <span class="tag b">G</span> 수량
+        <span class="tag b">K~M</span> 예약자 정보
+        <p style="font-size:11px;color:#666;margin-top:4px;">→ A열 요청ID 자동생성 / 세트는 구성품 자동 펼침</p>
+      </div>
+    </div>
+
+    <div class="fs">
+      <div class="fs-left"><div class="fs-num">2</div><div class="fs-line"></div></div>
+      <div class="fs-card">
+        <h4>가용 확인</h4>
+        <span class="tag y">H열</span> → <strong>"확인"</strong> 선택
+        <div class="badges">
+          <span class="badge ok">✅ 가용</span>
+          <span class="badge w">⚠️ 부족 → 조정</span>
+          <span class="badge f">❌ 불가 → 변경</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="fs">
+      <div class="fs-left"><div class="fs-num">3</div><div class="fs-line"></div></div>
+      <div class="fs-card">
+        <h4>알림톡 발송</h4>
+        <span class="tag y">H열</span> → <strong>"발송승인"</strong> 선택
+        <p class="warn-text">⚠ 결과 확인 후 승인! 취소 불가</p>
+      </div>
+    </div>
+
+    <div class="fs last">
+      <div class="fs-left"><div class="fs-num" style="background:#27ae60;">4</div></div>
+      <div class="fs-card" style="border-left-color:#27ae60;">
+        <h4>예약 등록 완료 ✓</h4>
+        <span class="tag g">N열</span> → <strong>"등록"</strong> 선택
+        <p style="font-size:11px;color:#666;margin-top:3px;">→ 계약마스터·스케줄상세·개고생2.0 입력 + 계약서 생성 + 완료 알림톡 <strong>모두 자동</strong></p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══════ 수정 ═══════ -->
+<div class="panel" id="t2">
+  <div class="stitle">✏️ 예약 수정</div>
+  <div class="al w" style="margin-bottom:14px;">
+    <span class="al-icon">✋</span>
+    <span>수정 시 <strong>A열에 거래ID(YYMMDD-NNN)</strong> 직접 입력 필수!</span>
+  </div>
+
+  <div class="mcard">
+    <h4>➕ 장비 추가</h4>
+    <div class="mline"><span class="col">A열</span> 거래ID</div>
+    <div class="mline"><span class="col">F·G열</span> 장비 + 수량</div>
+    <div class="mline"><span class="col">H열</span> "확인" → 가용 체크</div>
+    <div class="mline"><span class="col">N열</span> "추가"</div>
+    <div class="mnote">기존 날짜 자동 참조 · 계약서 재생성</div>
+  </div>
+
+  <div class="mcard">
+    <h4>➖ 장비 삭제</h4>
+    <div class="mline"><span class="col">A열</span> 거래ID</div>
+    <div class="mline"><span class="col">F열</span> 삭제할 장비</div>
+    <div class="mline"><span class="col">N열</span> "삭제"</div>
+    <div class="mnote">가용 확인 불필요 · 계약서 재생성</div>
+  </div>
+
+  <div class="mcard">
+    <h4>📅 날짜 변경</h4>
+    <div class="mline"><span class="col">A열</span> 거래ID</div>
+    <div class="mline"><span class="col">B~E열</span> 새 날짜/시간</div>
+    <div class="mline"><span class="col">N열</span> "날짜변경"</div>
+    <div class="mnote">전체 장비 자동 가용체크 · 불가 장비 <span style="background:#f39c12;color:#fff;padding:0 3px;border-radius:2px;font-size:10px;">노란색</span> → N열 "삭제"로 제거</div>
+  </div>
+
+  <div class="al i" style="margin-top:6px;">
+    <span class="al-icon">💡</span>
+    <span>수정 시 알림톡은 <strong>발송되지 않습니다.</strong> 필요 시 별도 연락하세요.</span>
+  </div>
+</div>
+
+<!-- ═══════ 알림톡 ═══════ -->
+<div class="panel" id="t3">
+  <div class="stitle">💬 알림톡 발송 규칙</div>
+  <table class="atable">
+    <thead><tr><th>상황</th><th>발송</th><th>시점</th></tr></thead>
+    <tbody>
+      <tr><td>가용확인 결과</td><td><span class="ab man">수동</span></td><td>H열 "발송승인"</td></tr>
+      <tr><td>예약등록 완료</td><td><span class="ab yes">자동</span></td><td>N열 "등록"</td></tr>
+      <tr><td>추가/삭제/날짜변경</td><td><span class="ab no">안 감</span></td><td>별도 연락</td></tr>
+    </tbody>
+  </table>
+
+  <div style="margin-top:16px;">
+    <div class="al w">
+      <span class="al-icon">⚠</span>
+      <span><strong>"발송승인"</strong>은 결과 확인 후 선택 — 한 번 보내면 <strong>취소 불가</strong></span>
+    </div>
+    <div class="al i">
+      <span class="al-icon">💡</span>
+      <span>알림톡 장비 목록에는 <strong>세트명만</strong> 표시 (구성품 제외)</span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ 기타 ═══════ -->
+<div class="panel" id="t4">
+  <div class="stitle">📊 타임라인 보기</div>
+  <div class="box">
+    <p><strong>접근:</strong> 메뉴 → 📋 빌리지 스케줄 → 📊 타임라인 보기</p>
+    <p style="font-size:12px;color:#666;margin-top:4px;">왼쪽=장비명 / 바=예약자 / 마우스 올리면 상세 / 검색으로 필터</p>
+    <div class="legend">
+      <div class="leg"><div class="dot bl"></div>대기</div>
+      <div class="leg"><div class="dot or"></div>반출중</div>
+      <div class="leg"><div class="dot gr"></div>반납완료</div>
+      <div class="leg"><div class="dot gy"></div>취소</div>
+    </div>
+  </div>
+
+  <div class="stitle" style="margin-top:24px;">🔧 세트 & 카테고리 장비</div>
+  <div class="box">
+    <p>세트 구성품 중 여러 모델이 있는 장비 (예: 7인치 모니터)</p>
+    <div class="cflow">
+      <div class="cs">세트 선택</div><div class="ca">→</div>
+      <div class="cs">구성품 펼침</div><div class="ca">→</div>
+      <div class="cs hl">🟡 노란셀</div><div class="ca">→</div>
+      <div class="cs">모델 선택</div><div class="ca">→</div>
+      <div class="cs ok">등록 OK</div>
+    </div>
+    <p class="warn-text" style="text-align:center;margin-top:6px;">⛔ 모델 미선택 = 등록 차단</p>
+  </div>
+</div>
+
+<!-- ═══════ 주의사항 ═══════ -->
+<div class="panel" id="t5">
+  <div class="stitle">⚠️ 실수 방지 체크리스트</div>
+
+  <div class="al d"><span class="al-icon">🚫</span><span><strong>세트 구성품 행</strong> 직접 수정 금지 — 데이터 깨짐</span></div>
+  <div class="al d"><span class="al-icon">🚫</span><span><strong>발송승인</strong> 취소 불가 — 결과 확인 후 선택</span></div>
+  <div class="al w"><span class="al-icon">✋</span><span>수정 시 <strong>A열에 거래ID</strong> 직접 입력 (빈 칸 = 오류)</span></div>
+  <div class="al w"><span class="al-icon">✋</span><span><strong>노란색 셀</strong> 보이면 반드시 모델 선택 (미선택 = 등록 차단)</span></div>
+  <div class="al i"><span class="al-icon">💡</span><span>수정 시 <strong>알림톡 안 감</strong> — 필요 시 별도 연락</span></div>
+  <div class="al i"><span class="al-icon">💡</span><span>N열 자동처리 안 되면 → <strong>installable 트리거</strong> 확인 (최초 1회)</span></div>
+</div>
+
+<script>
+  document.querySelectorAll('.tab').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.tab').forEach(function(b) { b.classList.remove('on'); });
+      document.querySelectorAll('.panel').forEach(function(p) { p.classList.remove('on'); });
+      btn.classList.add('on');
+      document.getElementById(btn.dataset.t).classList.add('on');
+    });
+  });
+</script>
+</body>
+</html>
