@@ -560,8 +560,8 @@ function runFunction(funcName, params) {
   try {
     if (funcName === "insertAndCheckRequest" && params.args) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
-      var reqID = insertAndCheckRequest(args);
-      return { success: true, function: funcName, reqID: reqID, executionTime: (new Date() - startTime) + "ms" };
+      var result = insertAndCheckRequest(args);
+      return { success: true, function: funcName, reqID: result.reqID, results: result.results, executionTime: (new Date() - startTime) + "ms" };
     }
     this[funcName]();
   } catch (e) {

@@ -588,8 +588,22 @@ function insertAndCheckRequest(req) {
   SpreadsheetApp.flush();
   processByReqID(sheet, startRow);
 
+  // 가용확인 결과 읽기
+  SpreadsheetApp.flush();
+  var results = [];
+  for (var i = 0; i < items.length; i++) {
+    var row = startRow + i;
+    var rowData = sheet.getRange(row, 1, 1, 17).getDisplayValues()[0];
+    results.push({
+      장비명: rowData[5],   // F
+      수량: rowData[6],     // G
+      결과: rowData[8],     // I
+      상세: rowData[9]      // J
+    });
+  }
+
   Logger.log("확인요청 입력 + 가용확인 완료: " + reqID + " (" + items.length + "건)");
-  return reqID;
+  return { reqID: reqID, results: results };
 }
 
 
