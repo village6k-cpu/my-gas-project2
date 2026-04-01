@@ -145,6 +145,11 @@
   .photo-status.loading { background:#ebf5fb; color:#2980b9; }
   .photo-status.error { background:#fadbd8; color:#c0392b; }
 
+  /* 가용확인 결과 */
+  .result-ok { color:#27ae60; font-weight:700; }
+  .result-warn { color:#f39c12; font-weight:700; }
+  .result-fail { color:#e74c3c; font-weight:700; }
+
 </style>
 </head>
 <body>
@@ -235,6 +240,26 @@ a7s3 바디세트 2대
   <div class="card" style="padding:12px">
     <button class="btn btn-submit" onclick="submitRequest()">확인요청 입력</button>
     <button class="btn btn-reset" onclick="resetForm()">다시 입력</button>
+  </div>
+</div>
+
+<!-- STEP 3: 가용확인 결과 + 등록 -->
+<div id="step3" class="hidden">
+  <div class="card">
+    <h3>가용확인 결과</h3>
+    <div id="reqIdDisplay" style="font-size:14px; color:#888; margin-bottom:12px;"></div>
+    <table class="result-table">
+      <thead><tr><th>장비명</th><th>수량</th><th>결과</th></tr></thead>
+      <tbody id="resultList"></tbody>
+    </table>
+  </div>
+
+  <div id="registerStatusMsg"></div>
+
+  <div class="card" style="padding:12px">
+    <button class="btn btn-submit" onclick="registerRequest()" id="btnRegister">등록하기</button>
+    <button class="btn" style="background:#3498db; color:#fff; margin-top:8px;" onclick="goBackToEdit()">수정하기</button>
+    <button class="btn btn-reset" onclick="resetForm()">처음부터 다시</button>
   </div>
 </div>
 
@@ -459,7 +484,7 @@ function submitRequest() {
     }
   };
 
-  showStatus("loading", "확인요청 입력 중...");
+  showStatus("loading", "확인요청 입력 + 가용확인 중...");
   var btn = document.querySelector(".btn-submit");
   btn.disabled = true;
 
@@ -473,7 +498,8 @@ function submitRequest() {
   .then(function(data) {
     btn.disabled = false;
     if (data.success) {
-      showStatus("success", "입력 완료! 요청ID: " + (data.reqID || ""));
+      currentReqID = data.reqID;
+      showAvailabilityResults(data.reqID, data.results || []);
     } else {
       showStatus("error", "오류: " + (data.error || JSON.stringify(data)));
     }
@@ -482,6 +508,92 @@ function submitRequest() {
     btn.disabled = false;
     showStatus("error", "통신 오류: " + err.message);
   });
+}
+
+// ━━━ 가용확인 결과 표시 ━━━
+var currentReqID = "";
+
+function showAvailabilityResults(reqID, results) {
+  document.getElementById("step2").classList.add("hidden");
+  document.getElementById("step3").classList.remove("hidden");
+  document.getElementById("statusMsg").style.display = "none";
+
+  document.getElementById("reqIdDisplay").textContent = "요청ID: " + reqID;
+
+  var tbody = document.getElementById("resultList");
+  tbody.innerHTML = "";
+
+  var allOk = true;
+  results.forEach(function(r) {
+    var tr = document.createElement("tr");
+    var resultClass = "result-ok";
+    var resultText = r.결과 || "";
+    if (/부족|⚠/.test(resultText)) { resultClass = "result-warn"; allOk = false; }
+    if (/가용0|❌|없음/.test(resultText)) { resultClass = "result-fail"; allOk = false; }
+
+    tr.innerHTML =
+      '<td class="equip-name">' + (r.장비명 || "") + '</td>' +
+      '<td class="equip-qty" style="text-align:center">' + (r.수량 || "") + '</td>' +
+      '<td class="' + resultClass + '">' + resultText + '<br><span style="font-size:12px;color:#888;font-weight:400">' + (r.상세 || "") + '</span></td>';
+    tbody.appendChild(tr);
+  });
+
+  // 등록 버튼 상태
+  var btnReg = document.getElementById("btnRegister");
+  if (allOk) {
+    btnReg.style.background = "#27ae60";
+    btnReg.textContent = "등록하기";
+  } else {
+    btnReg.style.background = "#f39c12";
+    btnReg.textContent = "일부 부족 — 그래도 등록하기";
+  }
+}
+
+// ━━━ 등록 ━━━
+function registerRequest() {
+  if (!currentReqID) return alert("요청ID가 없습니다.");
+
+  var statusEl = document.getElementById("registerStatusMsg");
+  statusEl.className = "status loading";
+  statusEl.textContent = "등록 처리 중...";
+  statusEl.style.display = "block";
+
+  var btnReg = document.getElementById("btnRegister");
+  btnReg.disabled = true;
+
+  fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({
+      key: "village2026",
+      action: "등록",
+      reqID: currentReqID
+    }),
+    redirect: "follow"
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    btnReg.disabled = false;
+    if (data.status === "OK" || data.success) {
+      statusEl.className = "status success";
+      statusEl.textContent = "등록 완료! " + (data.message || "");
+      btnReg.style.display = "none";
+    } else {
+      statusEl.className = "status error";
+      statusEl.textContent = "오류: " + (data.message || data.error || JSON.stringify(data));
+    }
+  })
+  .catch(function(err) {
+    btnReg.disabled = false;
+    statusEl.className = "status error";
+    statusEl.textContent = "통신 오류: " + err.message;
+  });
+}
+
+// ━━━ 수정하기 (step3 → step2) ━━━
+function goBackToEdit() {
+  document.getElementById("step3").classList.add("hidden");
+  document.getElementById("step2").classList.remove("hidden");
 }
 
 function showStatus(type, msg) {
@@ -588,8 +700,14 @@ function applyParsedResult(result) {
 function resetForm() {
   document.getElementById("step1").classList.remove("hidden");
   document.getElementById("step2").classList.add("hidden");
+  document.getElementById("step3").classList.add("hidden");
   document.getElementById("chatInput").value = "";
   document.getElementById("statusMsg").style.display = "none";
+  document.getElementById("registerStatusMsg").style.display = "none";
+  currentReqID = "";
+  var btnReg = document.getElementById("btnRegister");
+  btnReg.style.display = "block";
+  btnReg.disabled = false;
   // 사진 초기화
   selectedImageBase64 = null;
   document.getElementById("photoPreview").innerHTML =
