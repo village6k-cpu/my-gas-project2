@@ -103,7 +103,9 @@ function handleRequest(e) {
         ));
 
       case "run":
-        return jsonResponse(runFunction(params.func || postBody.func, params));
+        var runParams = Object.assign({}, params);
+        if (postBody.args) runParams.args = postBody.args;
+        return jsonResponse(runFunction(params.func || postBody.func, runParams));
 
       // ━━━ 스케줄 관리 API ━━━
 
@@ -512,7 +514,8 @@ function runFunction(funcName, params) {
     "processAllPending",
     "clearResults",
     "refreshEquipmentList",
-    "syncAuditFromMaster"
+    "syncAuditFromMaster",
+    "insertAndCheckRequest"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -524,6 +527,11 @@ function runFunction(funcName, params) {
 
   const startTime = new Date();
   try {
+    if (funcName === "insertAndCheckRequest" && params.args) {
+      var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var reqID = insertAndCheckRequest(args);
+      return { success: true, function: funcName, reqID: reqID, executionTime: (new Date() - startTime) + "ms" };
+    }
     this[funcName]();
   } catch (e) {
     if (!e.message.includes("Cannot call")) {
