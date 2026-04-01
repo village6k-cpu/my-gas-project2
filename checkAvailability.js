@@ -443,6 +443,73 @@ function autoGenerateReqID(sheet, row) {
 
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 확인요청 일괄 입력 + 가용확인 (스크립트 호출용)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * 확인요청 시트에 데이터 입력 후 가용확인까지 자동 실행
+ * @param {Object} req - { 반출일, 반출시간, 반납일, 반납시간, 장비: [{이름, 수량}], 예약자명?, 연락처? }
+ */
+function insertAndCheckRequest(req) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("확인요청");
+  if (!sheet) throw new Error("확인요청 시트 없음");
+
+  // 요청ID 생성
+  const now = new Date();
+  const dateStr = Utilities.formatDate(now, "Asia/Seoul", "yyMMdd");
+  const prefix = "RQ-" + dateStr;
+  const lastRow = sheet.getLastRow();
+  let maxNum = 0;
+  if (lastRow >= 2) {
+    sheet.getRange(2, 1, lastRow - 1, 1).getValues().flat().forEach(function(id) {
+      if (id && id.toString().startsWith(prefix)) {
+        var num = parseInt(id.toString().split("-")[2]);
+        if (num > maxNum) maxNum = num;
+      }
+    });
+  }
+  var reqID = prefix + "-" + String(maxNum + 1).padStart(3, "0");
+
+  // 행 입력
+  var startRow = lastRow + 1;
+  var items = req.장비 || [];
+  for (var i = 0; i < items.length; i++) {
+    var row = startRow + i;
+    var rowData = [
+      reqID,                    // A: 요청ID
+      req.반출일,               // B: 반출일
+      req.반출시간 || "",       // C: 반출시간
+      req.반납일,               // D: 반납일
+      req.반납시간 || "",       // E: 반납시간
+      items[i].이름,            // F: 장비/세트명
+      items[i].수량 || 1,       // G: 수량
+      "",                       // H: 확인 (아래에서 채움)
+      "",                       // I: 결과
+      "",                       // J: 상세
+      req.예약자명 || "",       // K: 예약자명
+      req.연락처 || "",         // L: 연락처
+      "",                       // M: 업체명
+      "",                       // N: 등록
+      "",                       // O: 등록상태
+      "",                       // P: 거래ID
+      ""                        // Q: 비고
+    ];
+    sheet.getRange(row, 1, 1, 17).setValues([rowData]);
+  }
+  SpreadsheetApp.flush();
+
+  // 가용확인 실행
+  sheet.getRange(startRow, 8).setValue("확인");
+  SpreadsheetApp.flush();
+  processByReqID(sheet, startRow);
+
+  Logger.log("확인요청 입력 + 가용확인 완료: " + reqID + " (" + items.length + "건)");
+  return reqID;
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 가용 확인 — 같은 요청ID 일괄 처리
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2172,3 +2239,5 @@ function syncTemplateHiddenSheet() {
     );
   } catch(e) {}
 }
+
+
