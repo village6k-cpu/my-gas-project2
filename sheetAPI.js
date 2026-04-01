@@ -28,6 +28,28 @@ const API_KEY = "village2026";
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function doGet(e) {
+  var params = e.parameter || {};
+
+  // ── 페이지 라우팅 ──
+  if (params.page) {
+    var pageMap = {
+      "request":  { file: "requestForm",    title: "빌리지 확인요청" },
+      "timeline": { file: "timelineMobile", title: "빌리지 스케줄" }
+    };
+    var pg = pageMap[params.page];
+    if (pg) {
+      var html = HtmlService.createHtmlOutputFromFile(pg.file);
+      var webAppUrl = ScriptApp.getService().getUrl();
+      html.setContent(html.getContent().replace(
+        'var API_URL = "";',
+        'var API_URL = "' + webAppUrl + '";'
+      ));
+      html.setTitle(pg.title);
+      html.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+      return html;
+    }
+  }
+
   return handleRequest(e);
 }
 
@@ -106,6 +128,9 @@ function handleRequest(e) {
         var runParams = Object.assign({}, params);
         if (postBody.args) runParams.args = postBody.args;
         return jsonResponse(runFunction(params.func || postBody.func, runParams));
+
+      case "timeline":
+        return jsonResponse(getTimelineData());
 
       // ━━━ 스케줄 관리 API ━━━
 

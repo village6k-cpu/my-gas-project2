@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="확인요청">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1e3a5f">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%231e3a5f' width='100' height='100' rx='20'/><text x='50' y='62' text-anchor='middle' font-size='50'>V</text></svg>">
+<title>빌리지 확인요청</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700&display=swap');
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family:'Noto Sans KR',-apple-system,sans-serif;
+    background:#f5f7fa; color:#2d3436;
+    font-size:14px; line-height:1.5;
+    padding:16px; max-width:480px; margin:0 auto;
+  }
+
+  /* 헤더 */
+  .header {
+    background:#1e3a5f; color:#fff; padding:16px; border-radius:12px;
+    margin-bottom:16px; text-align:center;
+  }
+  .header h1 { font-size:18px; font-weight:700; }
+  .header p { font-size:12px; opacity:.7; margin-top:4px; }
+
+  /* 카드 */
+  .card {
+    background:#fff; border-radius:12px; padding:16px;
+    box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:12px;
+  }
+  .card h3 { font-size:14px; font-weight:700; color:#1e3a5f; margin-bottom:10px; }
+
+  /* 입력 */
+  textarea {
+    width:100%; min-height:180px; border:1.5px solid #ddd; border-radius:8px;
+    padding:12px; font-size:13px; font-family:inherit; resize:vertical;
+    line-height:1.6;
+  }
+  textarea:focus { outline:none; border-color:#3498db; }
+
+  input[type="text"], input[type="date"], input[type="time"] {
+    width:100%; border:1.5px solid #ddd; border-radius:8px;
+    padding:8px 12px; font-size:13px; font-family:inherit;
+  }
+  input:focus { outline:none; border-color:#3498db; }
+
+  /* 버튼 */
+  .btn {
+    display:block; width:100%; padding:14px; border:none; border-radius:10px;
+    font-size:15px; font-weight:700; font-family:inherit;
+    cursor:pointer; transition:all .15s;
+  }
+  .btn-parse { background:#3498db; color:#fff; margin-top:10px; }
+  .btn-parse:hover { background:#2980b9; }
+  .btn-submit { background:#27ae60; color:#fff; }
+  .btn-submit:hover { background:#229954; }
+  .btn-reset { background:#e74c3c; color:#fff; margin-top:8px; }
+  .btn-reset:hover { background:#c0392b; }
+  .btn:disabled { background:#bdc3c7; cursor:not-allowed; }
+
+  /* 결과 테이블 */
+  .result-table { width:100%; border-collapse:collapse; margin:10px 0; }
+  .result-table th {
+    background:#f0f4f8; padding:8px; text-align:left;
+    font-size:12px; color:#666; border-bottom:1.5px solid #e0e0e0;
+  }
+  .result-table td {
+    padding:8px; font-size:13px; border-bottom:1px solid #eee;
+  }
+  .result-table .equip-name { font-weight:600; }
+  .result-table .equip-qty { text-align:center; width:60px; }
+  .result-table input {
+    width:100%; border:1px solid #ddd; border-radius:4px;
+    padding:4px 8px; font-size:13px;
+  }
+  .result-table input.qty { width:50px; text-align:center; }
+
+  /* 인포 그리드 */
+  .info-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px; }
+  .info-item label { font-size:11px; color:#888; display:block; margin-bottom:3px; }
+
+  /* 상태 메시지 */
+  .status {
+    padding:12px; border-radius:8px; margin:10px 0;
+    font-size:13px; text-align:center; font-weight:600;
+  }
+  .status.success { background:#d5f5e3; color:#1e8449; }
+  .status.error { background:#fadbd8; color:#c0392b; }
+  .status.loading { background:#ebf5fb; color:#2980b9; }
+
+  /* 삭제 버튼 */
+  .btn-del {
+    background:none; border:none; color:#e74c3c; cursor:pointer;
+    font-size:16px; padding:2px 6px;
+  }
+
+  /* 장비 추가 */
+  .btn-add-row {
+    background:none; border:1.5px dashed #bbb; border-radius:6px;
+    padding:8px; width:100%; color:#888; cursor:pointer;
+    font-size:13px; margin-top:6px;
+  }
+  .btn-add-row:hover { border-color:#3498db; color:#3498db; }
+
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>빌리지 확인요청</h1>
+  <p>카카오톡 대화를 붙여넣으면 자동으로 파싱합니다</p>
+</div>
+
+<!-- STEP 1: 텍스트 입력 -->
+<div id="step1">
+  <div class="card">
+    <h3>카카오톡 대화 붙여넣기</h3>
+    <textarea id="chatInput" placeholder="예시:
+안녕하세요! 내일
+0402 12:00~0402 22:00
+a7s3 바디세트 2대
+70200gm2 2대
+예약 가능할까요?"></textarea>
+    <button class="btn btn-parse" onclick="parseChat()">파싱하기</button>
+  </div>
+</div>
+
+<!-- STEP 2: 파싱 결과 확인/수정 -->
+<div id="step2" class="hidden">
+  <div class="card">
+    <h3>예약 정보</h3>
+    <div class="info-grid">
+      <div class="info-item">
+        <label>예약자명</label>
+        <input type="text" id="resName">
+      </div>
+      <div class="info-item">
+        <label>연락처</label>
+        <input type="text" id="resPhone" placeholder="010-0000-0000">
+      </div>
+      <div class="info-item">
+        <label>반출일</label>
+        <input type="date" id="startDate">
+      </div>
+      <div class="info-item">
+        <label>반출시간</label>
+        <input type="time" id="startTime">
+      </div>
+      <div class="info-item">
+        <label>반납일</label>
+        <input type="date" id="endDate">
+      </div>
+      <div class="info-item">
+        <label>반납시간</label>
+        <input type="time" id="endTime">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>장비 목록</h3>
+    <table class="result-table">
+      <thead><tr><th>장비/세트명</th><th>수량</th><th></th></tr></thead>
+      <tbody id="equipList"></tbody>
+    </table>
+    <button class="btn-add-row" onclick="addEquipRow()">+ 장비 추가</button>
+  </div>
+
+  <div id="statusMsg"></div>
+
+  <div class="card" style="padding:12px">
+    <button class="btn btn-submit" onclick="submitRequest()">확인요청 입력</button>
+    <button class="btn btn-reset" onclick="resetForm()">다시 입력</button>
+  </div>
+</div>
+
+<script>
+// ━━━ 웹앱 URL (자기 자신) ━━━
+var API_URL = "";  // doGet에서 주입됨
+
+// ━━━ 카카오톡 텍스트 파싱 ━━━
+function parseChat() {
+  var text = document.getElementById("chatInput").value.trim();
+  if (!text) return alert("대화 내용을 붙여넣어 주세요.");
+
+  var result = { name: "", phone: "", startDate: "", startTime: "", endDate: "", endTime: "", items: [] };
+
+  var lines = text.split("\n").map(function(l) { return l.trim(); }).filter(function(l) { return l; });
+
+  // ── 날짜/시간 파싱 ──
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+
+    // 패턴1: "0402 12:00~0402 22:00" 또는 "0402 12:00 ~ 0402 22:00"
+    var m1 = line.match(/(\d{2,4})\s*(\d{1,2}:\d{2})\s*~\s*(\d{2,4})\s*(\d{1,2}:\d{2})/);
+    if (m1) {
+      result.startDate = parseShortDate(m1[1]);
+      result.startTime = m1[2];
+      result.endDate = parseShortDate(m1[3]);
+      result.endTime = m1[4];
+      continue;
+    }
+
+    // 패턴2: "4/2 12:00 ~ 4/3 22:00" 또는 "4월2일 12:00~4월3일 22:00"
+    var m2 = line.match(/(\d{1,2})[\/월](\d{1,2})[일]?\s*(\d{1,2}:\d{2})\s*~\s*(\d{1,2})[\/월](\d{1,2})[일]?\s*(\d{1,2}:\d{2})/);
+    if (m2) {
+      result.startDate = buildDate(m2[1], m2[2]);
+      result.startTime = m2[3];
+      result.endDate = buildDate(m2[4], m2[5]);
+      result.endTime = m2[6];
+      continue;
+    }
+
+    // 패턴3: 날짜만 "0402~0403" 또는 "4/2~4/3"
+    var m3 = line.match(/(\d{2,4})\s*~\s*(\d{2,4})(?!\s*\d{1,2}:)/);
+    if (m3 && !result.startDate) {
+      result.startDate = parseShortDate(m3[1]);
+      result.endDate = parseShortDate(m3[2]);
+      continue;
+    }
+
+    // 패턴4: 시간만 "12:00~22:00"
+    var m4 = line.match(/(\d{1,2}:\d{2})\s*~\s*(\d{1,2}:\d{2})/);
+    if (m4 && !result.startTime) {
+      result.startTime = m4[1];
+      result.endTime = m4[2];
+      continue;
+    }
+  }
+
+  // ── 장비 파싱 ──
+  // 제외 키워드 (대화 맥락에서 제외된 항목)
+  var excludePatterns = /예약|가능|확정|부탁|안녕|감독|혹시|이렇게|추가|제외|오즈모|그러면|이어도|없구|있습니|것 같|가능하실/;
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    // 날짜/시간 패턴이 있는 줄은 스킵
+    if (/\d{1,2}:\d{2}\s*~/.test(line) || /~\s*\d{1,2}:\d{2}/.test(line)) continue;
+    if (excludePatterns.test(line)) continue;
+
+    // "장비명 N대/세트/개" 패턴
+    var mEquip = line.match(/^(.+?)\s+(\d+)\s*(대|세트|개|ea)?$/i);
+    if (mEquip) {
+      result.items.push({ name: mEquip[1].trim(), qty: parseInt(mEquip[2]) });
+      continue;
+    }
+
+    // "장비명 N대" 가 중간에 있는 패턴
+    var mInline = line.match(/^(.+?)\s+(\d+)\s*(대|세트|개|ea)/i);
+    if (mInline) {
+      result.items.push({ name: mInline[1].trim(), qty: parseInt(mInline[2]) });
+      continue;
+    }
+
+    // 수량 없이 장비명만 있는 경우 (한글/영문/숫자 조합, 2글자 이상)
+    if (/^[가-힣a-zA-Z0-9\s\+\-\(\)\.]+$/.test(line) && line.length >= 2 && !/^\d+$/.test(line)) {
+      // 단순 인사/대화가 아닌 경우만
+      if (!/^(네|넵|아|음|혹시|그럼|저희)/.test(line)) {
+        result.items.push({ name: line.trim(), qty: 1 });
+      }
+    }
+  }
+
+  // ── 결과 표시 ──
+  document.getElementById("resName").value = result.name;
+  document.getElementById("resPhone").value = result.phone;
+  document.getElementById("startDate").value = result.startDate;
+  document.getElementById("startTime").value = result.startTime;
+  document.getElementById("endDate").value = result.endDate;
+  document.getElementById("endTime").value = result.endTime;
+
+  var tbody = document.getElementById("equipList");
+  tbody.innerHTML = "";
+  result.items.forEach(function(item) { addEquipRow(item.name, item.qty); });
+  if (result.items.length === 0) addEquipRow("", 1);
+
+  document.getElementById("step1").classList.add("hidden");
+  document.getElementById("step2").classList.remove("hidden");
+}
+
+// ━━━ 날짜 헬퍼 ━━━
+function parseShortDate(s) {
+  var now = new Date();
+  var year = now.getFullYear();
+  if (s.length === 4) {
+    // 0402 → 04-02
+    return year + "-" + s.substring(0,2) + "-" + s.substring(2,4);
+  } else if (s.length === 6) {
+    // 260402 → 2026-04-02
+    return "20" + s.substring(0,2) + "-" + s.substring(2,4) + "-" + s.substring(4,6);
+  } else if (s.length === 8) {
+    // 20260402
+    return s.substring(0,4) + "-" + s.substring(4,6) + "-" + s.substring(6,8);
+  }
+  return s;
+}
+
+function buildDate(m, d) {
+  var year = new Date().getFullYear();
+  return year + "-" + String(m).padStart(2,"0") + "-" + String(d).padStart(2,"0");
+}
+
+// ━━━ 장비 행 추가/삭제 ━━━
+function addEquipRow(name, qty) {
+  var tbody = document.getElementById("equipList");
+  var tr = document.createElement("tr");
+  tr.innerHTML =
+    '<td><input type="text" class="equip-name" value="' + (name || "") + '" placeholder="장비명"></td>' +
+    '<td><input type="text" class="qty equip-qty" value="' + (qty || 1) + '"></td>' +
+    '<td><button class="btn-del" onclick="this.closest(\'tr\').remove()">✕</button></td>';
+  tbody.appendChild(tr);
+}
+
+// ━━━ 확인요청 제출 ━━━
+function submitRequest() {
+  var startDate = document.getElementById("startDate").value;
+  var endDate = document.getElementById("endDate").value;
+  if (!startDate || !endDate) return alert("반출일/반납일을 입력해 주세요.");
+
+  var rows = document.querySelectorAll("#equipList tr");
+  var items = [];
+  rows.forEach(function(tr) {
+    var name = tr.querySelector(".equip-name").value.trim();
+    var qty = parseInt(tr.querySelector(".equip-qty").value) || 1;
+    if (name) items.push({ "이름": name, "수량": qty });
+  });
+  if (items.length === 0) return alert("장비를 1개 이상 입력해 주세요.");
+
+  var payload = {
+    key: "village2026",
+    action: "run",
+    func: "insertAndCheckRequest",
+    args: {
+      "반출일": startDate,
+      "반출시간": document.getElementById("startTime").value || "",
+      "반납일": endDate,
+      "반납시간": document.getElementById("endTime").value || "",
+      "예약자명": document.getElementById("resName").value || "",
+      "연락처": document.getElementById("resPhone").value || "",
+      "장비": items
+    }
+  };
+
+  showStatus("loading", "확인요청 입력 중...");
+  var btn = document.querySelector(".btn-submit");
+  btn.disabled = true;
+
+  fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify(payload),
+    redirect: "follow"
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    btn.disabled = false;
+    if (data.success) {
+      showStatus("success", "입력 완료! 요청ID: " + (data.reqID || ""));
+    } else {
+      showStatus("error", "오류: " + (data.error || JSON.stringify(data)));
+    }
+  })
+  .catch(function(err) {
+    btn.disabled = false;
+    showStatus("error", "통신 오류: " + err.message);
+  });
+}
+
+function showStatus(type, msg) {
+  var el = document.getElementById("statusMsg");
+  el.className = "status " + type;
+  el.textContent = msg;
+  el.style.display = "block";
+}
+
+// ━━━ 초기화 ━━━
+function resetForm() {
+  document.getElementById("step1").classList.remove("hidden");
+  document.getElementById("step2").classList.add("hidden");
+  document.getElementById("chatInput").value = "";
+  document.getElementById("statusMsg").style.display = "none";
+}
+</script>
+</body>
+</html>
