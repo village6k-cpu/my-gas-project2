@@ -88,26 +88,6 @@ function getTimelineData() {
       });
   }
 
-  // 개고생2.0 장비체크: 정상반납 완료된 거래ID 목록
-  var returnedSet = {};
-  try {
-    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
-    if (개고생URL) {
-      var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
-      var checkSheet = 개고생SS.getSheetByName("장비체크");
-      if (checkSheet && checkSheet.getLastRow() >= 2) {
-        var checkData = checkSheet.getRange(2, 1, checkSheet.getLastRow() - 1, 3).getValues(); // A=거래ID, C=반납상태
-        checkData.forEach(function(r) {
-          if (String(r[2]).trim() === "정상반납") {
-            returnedSet[String(r[0]).trim()] = true;
-          }
-        });
-      }
-    }
-  } catch (err) {
-    Logger.log("장비체크 조회 실패 (타임라인): " + err.message);
-  }
-
   if (!schedSheet || schedSheet.getLastRow() < 2) {
     return { groups: [], items: [] };
   }
@@ -133,9 +113,6 @@ function getTimelineData() {
     const 단가     = row[11] || 0;  // L
 
     if (!장비명 || !반출일 || !반납일) return;
-
-    // 정상반납 완료된 건 제외
-    if (returnedSet[String(거래ID).trim()]) return;
 
     // Date 파싱
     const startDT = parseDT(반출일, 반출시간);
