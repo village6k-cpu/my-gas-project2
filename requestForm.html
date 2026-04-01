@@ -109,6 +109,42 @@
   .btn-add-row:active { border-color:#3498db; color:#3498db; }
 
   .hidden { display:none; }
+
+  /* 입력 방식 탭 */
+  .tab-bar {
+    display:flex; gap:0; margin-bottom:14px;
+  }
+  .tab-btn {
+    flex:1; padding:14px; border:2px solid #ddd; background:#f8f9fa;
+    font-size:16px; font-weight:700; font-family:inherit;
+    cursor:pointer; text-align:center; color:#888;
+  }
+  .tab-btn:first-child { border-radius:10px 0 0 10px; }
+  .tab-btn:last-child { border-radius:0 10px 10px 0; }
+  .tab-btn.on { background:#1e3a5f; color:#fff; border-color:#1e3a5f; }
+
+  /* 사진 업로드 */
+  .photo-area {
+    border:2px dashed #ccc; border-radius:12px;
+    padding:30px 20px; text-align:center; color:#888;
+    cursor:pointer; position:relative;
+  }
+  .photo-area.has-img { border-style:solid; border-color:#3498db; padding:8px; }
+  .photo-area .photo-icon { font-size:48px; margin-bottom:10px; }
+  .photo-area .photo-text { font-size:15px; }
+  .photo-area .photo-sub { font-size:13px; color:#aaa; margin-top:6px; }
+  .photo-area img {
+    max-width:100%; max-height:300px; border-radius:8px;
+  }
+  .photo-area input { display:none; }
+
+  .photo-status {
+    padding:14px; border-radius:10px; margin-top:12px;
+    font-size:15px; text-align:center; font-weight:600;
+  }
+  .photo-status.loading { background:#ebf5fb; color:#2980b9; }
+  .photo-status.error { background:#fadbd8; color:#c0392b; }
+
 </style>
 </head>
 <body>
@@ -118,17 +154,38 @@
   <p>카카오톡 대화를 붙여넣으면 자동으로 파싱합니다</p>
 </div>
 
-<!-- STEP 1: 텍스트 입력 -->
+<!-- STEP 1: 입력 방식 선택 -->
 <div id="step1">
   <div class="card">
-    <h3>카카오톡 대화 붙여넣기</h3>
-    <textarea id="chatInput" placeholder="예시:
-안녕하세요! 내일
+    <div class="tab-bar">
+      <button class="tab-btn on" id="tabText" onclick="switchTab('text')">텍스트 붙여넣기</button>
+      <button class="tab-btn" id="tabPhoto" onclick="switchTab('photo')">사진 캡처</button>
+    </div>
+
+    <!-- 텍스트 입력 -->
+    <div id="inputText">
+      <textarea id="chatInput" placeholder="카카오톡 대화를 복사해서 붙여넣으세요
+
+예시:
 0402 12:00~0402 22:00
 a7s3 바디세트 2대
-70200gm2 2대
-예약 가능할까요?"></textarea>
-    <button class="btn btn-parse" onclick="parseChat()">파싱하기</button>
+70200gm2 2대"></textarea>
+      <button class="btn btn-parse" onclick="parseChat()">파싱하기</button>
+    </div>
+
+    <!-- 사진 입력 -->
+    <div id="inputPhoto" class="hidden">
+      <div class="photo-area" id="photoArea" onclick="document.getElementById('photoFile').click()">
+        <div id="photoPreview">
+          <div class="photo-icon">📷</div>
+          <div class="photo-text">사진 촬영 또는 앨범에서 선택</div>
+          <div class="photo-sub">카카오톡 대화 캡처 이미지를 올려주세요</div>
+        </div>
+        <input type="file" id="photoFile" accept="image/*" capture="environment" onchange="onPhotoSelected(event)">
+      </div>
+      <div id="photoStatus"></div>
+      <button class="btn btn-parse" onclick="parsePhoto()" id="btnParsePhoto" style="display:none">사진 파싱하기</button>
+    </div>
   </div>
 </div>
 
@@ -380,12 +437,115 @@ function showStatus(type, msg) {
   el.style.display = "block";
 }
 
+// ━━━ 탭 전환 ━━━
+function switchTab(tab) {
+  document.getElementById("tabText").classList.toggle("on", tab === "text");
+  document.getElementById("tabPhoto").classList.toggle("on", tab === "photo");
+  document.getElementById("inputText").classList.toggle("hidden", tab !== "text");
+  document.getElementById("inputPhoto").classList.toggle("hidden", tab !== "photo");
+}
+
+// ━━━ 사진 선택 ━━━
+var selectedImageBase64 = null;
+
+function onPhotoSelected(e) {
+  var file = e.target.files[0];
+  if (!file) return;
+
+  var reader = new FileReader();
+  reader.onload = function(ev) {
+    selectedImageBase64 = ev.target.result;
+    // 미리보기
+    document.getElementById("photoPreview").innerHTML =
+      '<img src="' + selectedImageBase64 + '">';
+    document.getElementById("photoArea").classList.add("has-img");
+    document.getElementById("btnParsePhoto").style.display = "block";
+    document.getElementById("photoStatus").innerHTML = "";
+  };
+  reader.readAsDataURL(file);
+}
+
+// ━━━ 사진 파싱 (Claude API via GAS) ━━━
+function parsePhoto() {
+  if (!selectedImageBase64) return alert("사진을 먼저 선택해주세요.");
+
+  var statusEl = document.getElementById("photoStatus");
+  statusEl.className = "photo-status loading";
+  statusEl.textContent = "AI가 이미지를 분석 중...";
+  document.getElementById("btnParsePhoto").disabled = true;
+
+  // base64에서 data:image/... 헤더 분리
+  var parts = selectedImageBase64.split(",");
+  var mediaType = parts[0].match(/data:(.*?);/)[1];
+  var base64Data = parts[1];
+
+  fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({
+      key: "village2026",
+      action: "parseImage",
+      image: base64Data,
+      mediaType: mediaType
+    }),
+    redirect: "follow"
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    document.getElementById("btnParsePhoto").disabled = false;
+    if (data.error) {
+      statusEl.className = "photo-status error";
+      statusEl.textContent = "오류: " + data.error;
+      return;
+    }
+    statusEl.innerHTML = "";
+    // 파싱 결과를 step2에 표시
+    applyParsedResult(data);
+  })
+  .catch(function(err) {
+    document.getElementById("btnParsePhoto").disabled = false;
+    statusEl.className = "photo-status error";
+    statusEl.textContent = "통신 오류: " + err.message;
+  });
+}
+
+// ━━━ 파싱 결과 적용 (텍스트/사진 공용) ━━━
+function applyParsedResult(result) {
+  document.getElementById("resName").value = result.name || result.예약자명 || "";
+  document.getElementById("resPhone").value = result.phone || result.연락처 || "";
+  document.getElementById("startDate").value = result.startDate || result.반출일 || "";
+  document.getElementById("startTime").value = result.startTime || result.반출시간 || "";
+  document.getElementById("endDate").value = result.endDate || result.반납일 || "";
+  document.getElementById("endTime").value = result.endTime || result.반납시간 || "";
+
+  var items = result.items || result.장비 || [];
+  var tbody = document.getElementById("equipList");
+  tbody.innerHTML = "";
+  items.forEach(function(item) {
+    addEquipRow(item.name || item.이름 || "", item.qty || item.수량 || 1);
+  });
+  if (items.length === 0) addEquipRow("", 1);
+
+  document.getElementById("step1").classList.add("hidden");
+  document.getElementById("step2").classList.remove("hidden");
+}
+
 // ━━━ 초기화 ━━━
 function resetForm() {
   document.getElementById("step1").classList.remove("hidden");
   document.getElementById("step2").classList.add("hidden");
   document.getElementById("chatInput").value = "";
   document.getElementById("statusMsg").style.display = "none";
+  // 사진 초기화
+  selectedImageBase64 = null;
+  document.getElementById("photoPreview").innerHTML =
+    '<div class="photo-icon">📷</div>' +
+    '<div class="photo-text">사진 촬영 또는 앨범에서 선택</div>' +
+    '<div class="photo-sub">카카오톡 대화 캡처 이미지를 올려주세요</div>';
+  document.getElementById("photoArea").classList.remove("has-img");
+  document.getElementById("btnParsePhoto").style.display = "none";
+  document.getElementById("photoStatus").innerHTML = "";
+  document.getElementById("photoFile").value = "";
 }
 </script>
 </body>
