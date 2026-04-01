@@ -251,6 +251,60 @@ function parseChat() {
 
   var lines = text.split("\n").map(function(l) { return l.trim(); }).filter(function(l) { return l; });
 
+  // ── 예약자명 파싱 (카톡 대화 상대방 이름) ──
+  // 카톡 복사 형식들:
+  // "유근일 오후 3:13" / "유근일 오전 10:30" / "[유근일] 오후 3:13"
+  // "유근일, [유근일] 오후 3:13" / "2024년 3월 29일 오후 3:13, 유근일"
+  var senderNames = [];
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    // 패턴1: "이름 오전/오후 H:MM" (가장 일반적)
+    var mName1 = line.match(/^(.+?)\s+[오][전후]\s*\d{1,2}:\d{2}/);
+    if (mName1) {
+      var n = mName1[1].replace(/[\[\]]/g, "").replace(/,\s*$/, "").trim();
+      if (n.length >= 2 && n.length <= 10 && !/\d{4}년/.test(n) && !/빌리지/.test(n)) {
+        senderNames.push(n);
+      }
+      continue;
+    }
+    // 패턴2: "[이름] 오전/오후 H:MM"
+    var mName2 = line.match(/^\[(.+?)\]\s*[오][전후]\s*\d{1,2}:\d{2}/);
+    if (mName2) {
+      var n2 = mName2[1].trim();
+      if (n2.length >= 2 && n2.length <= 10 && !/빌리지/.test(n2)) {
+        senderNames.push(n2);
+      }
+      continue;
+    }
+    // 패턴3: "날짜, 이름" 형식 (카톡 내보내기)
+    var mName3 = line.match(/\d{4}[년.]\s*\d{1,2}[월.]\s*\d{1,2}[일.]?\s*.+?,\s*(.+)/);
+    if (mName3) {
+      var n3 = mName3[1].trim();
+      if (n3.length >= 2 && n3.length <= 10 && !/빌리지/.test(n3)) {
+        senderNames.push(n3);
+      }
+    }
+  }
+  // 가장 많이 등장하는 이름 = 상대방 (빌리지/본인 제외)
+  if (senderNames.length > 0) {
+    var nameCount = {};
+    senderNames.forEach(function(n) { nameCount[n] = (nameCount[n] || 0) + 1; });
+    // 가장 빈도 높은 이름
+    var sorted = Object.keys(nameCount).sort(function(a, b) { return nameCount[b] - nameCount[a]; });
+    result.name = sorted[0] || "";
+  }
+
+  // ── 연락처 파싱 ──
+  var phoneMatch = text.match(/01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/);
+  if (phoneMatch) {
+    result.phone = phoneMatch[0].replace(/[\s.]/g, "-");
+    // 하이픈이 없으면 추가
+    if (result.phone.indexOf("-") === -1 && result.phone.length >= 10) {
+      var p = result.phone;
+      result.phone = p.substring(0, 3) + "-" + p.substring(3, p.length - 4) + "-" + p.substring(p.length - 4);
+    }
+  }
+
   // ── 날짜/시간 파싱 ──
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i];
