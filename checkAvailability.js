@@ -410,8 +410,43 @@ function fuzzyMatchEquipName(input, nameList) {
     if (bestMatch && bestScore >= 1) return bestMatch;
   }
 
-  // 5. 매칭 실패 → 원본 그대로 반환 (시트에 입력은 됨)
+  // 5. 레벤슈타인 거리 기반 유사도 매칭
+  var bestLev = null;
+  var bestDist = Infinity;
+  for (var i = 0; i < nameList.length; i++) {
+    var nameLower = nameList[i].toLowerCase().replace(/\s+/g, "");
+    var dist = levenshtein(inputLower, nameLower);
+    var maxLen = Math.max(inputLower.length, nameLower.length);
+    // 유사도 60% 이상이면 매칭
+    if (dist < bestDist && (1 - dist / maxLen) >= 0.6) {
+      bestDist = dist;
+      bestLev = nameList[i];
+    }
+  }
+  if (bestLev) return bestLev;
+
+  // 6. 매칭 실패 → 원본 그대로 반환
   return input;
+}
+
+/**
+ * 레벤슈타인 거리 계산
+ */
+function levenshtein(a, b) {
+  var m = a.length, n = b.length;
+  var dp = [];
+  for (var i = 0; i <= m; i++) {
+    dp[i] = [i];
+    for (var j = 1; j <= n; j++) {
+      if (i === 0) { dp[i][j] = j; continue; }
+      dp[i][j] = Math.min(
+        dp[i-1][j] + 1,
+        dp[i][j-1] + 1,
+        dp[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1)
+      );
+    }
+  }
+  return dp[m][n];
 }
 
 
@@ -558,6 +593,13 @@ function insertAndCheckRequest(req) {
       i === 0 ? (req.추가요청 || "") : ""  // R: 추가요청 (첫 행만)
     ];
     sheet.getRange(row, 1, 1, 18).setValues([rowData]);
+
+    // 첫 행: 굵은 글씨 + 배경색으로 예약 건 구분
+    if (i === 0) {
+      sheet.getRange(row, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
+    } else {
+      sheet.getRange(row, 1, 1, 18).setFontWeight("normal").setBackground(null);
+    }
   }
   SpreadsheetApp.flush();
 
@@ -766,12 +808,21 @@ function processByReqID(sheet, triggerRow) {
 
   // ── 같은 요청ID의 모든 행 처리 ──
   let expandedRows = false;
+  let isFirstRow = true;
   for (let i = 0; i < allData.length; i++) {
     if (allData[i][0] !== triggerReqID) continue;
 
     const row = i + 2;
     const 장비명 = allData[i][5]; // F열
     if (!장비명) continue;
+
+    // 첫 행 서식 (예약 건 구분)
+    if (isFirstRow) {
+      sheet.getRange(row, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
+      isFirstRow = false;
+    } else {
+      sheet.getRange(row, 1, 1, 18).setFontWeight("normal").setBackground(null);
+    }
 
     // 같은 요청ID 행에 "확인" 자동 채우기
     if (sheet.getRange(row, 8).getValue() !== "확인") {
@@ -786,20 +837,64 @@ function processByReqID(sheet, triggerRow) {
     }
   }
 
-  // 세트 펼침이 있었으면 데이터 다시 읽기
+  // 세트 펼침이 있었으면 중복 장비 통합 후 가용확인
   if (expandedRows) {
     SpreadsheetApp.flush();
+
+    // ── 중복 장비 통합: 같은 reqID의 구성품 중 같은 장비명은 수량 합산 ──
+    var mergeLastRow = sheet.getLastRow();
+    var mergeData = sheet.getRange(2, 1, mergeLastRow - 1, 18).getValues();
+    var equipMap = {};  // 장비명 → { row, qty, bigoList }
+    var rowsToDelete = [];
+
+    for (var mi = 0; mi < mergeData.length; mi++) {
+      if (mergeData[mi][0] !== triggerReqID) continue;
+      if (mergeData[mi][8] === "세트") continue;  // 세트 헤더 스킵
+      var eName = String(mergeData[mi][5]).trim();
+      if (!eName) continue;
+      var eQty = Number(mergeData[mi][6]) || 1;
+      var eBigo = String(mergeData[mi][16] || "");
+
+      if (equipMap[eName]) {
+        // 중복 → 수량 합산, 비고 병합, 이 행은 삭제 대상
+        equipMap[eName].qty += eQty;
+        if (eBigo && equipMap[eName].bigoList.indexOf(eBigo) < 0) {
+          equipMap[eName].bigoList.push(eBigo);
+        }
+        rowsToDelete.push(mi + 2);
+      } else {
+        equipMap[eName] = { row: mi + 2, qty: eQty, bigoList: eBigo ? [eBigo] : [] };
+      }
+    }
+
+    // 합산된 수량 반영
+    for (var ek in equipMap) {
+      var info = equipMap[ek];
+      sheet.getRange(info.row, 7).setValue(info.qty);
+      if (info.bigoList.length > 1) {
+        sheet.getRange(info.row, 17).setValue(info.bigoList.join(" + "));
+      }
+    }
+
+    // 중복 행 삭제 (아래부터)
+    for (var di = rowsToDelete.length - 1; di >= 0; di--) {
+      sheet.deleteRow(rowsToDelete[di]);
+    }
+
+    if (rowsToDelete.length > 0) SpreadsheetApp.flush();
+
+    // 데이터 다시 읽기
     const newLastRow = sheet.getLastRow();
-    const newAllData = sheet.getRange(2, 1, newLastRow - 1, 17).getValues();
+    const newAllData = sheet.getRange(2, 1, newLastRow - 1, 18).getValues();
 
     // 스케줄상세 데이터 미리 읽기
     const schedData = getScheduleData(schedSheet);
 
-      for (let i = 0; i < newAllData.length; i++) {
-        if (newAllData[i][0] !== triggerReqID) continue;
-        if (newAllData[i][8] === "세트") continue; // 세트 헤더 행 스킵 (가용확인 불필요)
-        const row = i + 2;
-        const 장비명 = newAllData[i][5];
+    for (let i = 0; i < newAllData.length; i++) {
+      if (newAllData[i][0] !== triggerReqID) continue;
+      if (newAllData[i][8] === "세트") continue;
+      const row = i + 2;
+      const 장비명 = newAllData[i][5];
       if (!장비명) continue;
 
       checkSingleRowWithData(sheet, row, triggerReqID, 반출일, 반출시간, 반납일, 반납시간,
@@ -1027,6 +1122,8 @@ function expandSetRows(sheet, setRow, reqID, components, qty) {
       sheet.getRange(newRow, 7).setValue((components[i].qty || 1) * qty); // G: 수량
       sheet.getRange(newRow, 8).setValue("확인");                       // H: 확인
       sheet.getRange(newRow, 17).setValue("[세트]" + setName);          // Q: 비고 - 세트 소속 태그
+      // 구성품 행은 일반 서식
+      sheet.getRange(newRow, 1, 1, 18).setFontWeight("normal").setBackground(null);
       if (components[i].alt) {
         sheet.getRange(newRow, 10).setValue("대체: " + components[i].alt); // J: 상세
       }

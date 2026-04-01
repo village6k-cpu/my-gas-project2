@@ -197,11 +197,12 @@ function generateContractFile(ss, 거래ID, 추가요청) {
       setCol = 8; nameCol = 9; qtyCol = 10; dayCol = 11; priceCol = 12;  // H,I,J,K,L
     }
 
-    if (item.세트명) ws.getRange(row, setCol).setValue(item.세트명);
     ws.getRange(row, nameCol).setValue(item.장비명);
     ws.getRange(row, qtyCol).setValue(item.수량);
     ws.getRange(row, dayCol).setValue(일수);
     ws.getRange(row, priceCol).setValue(item.단가);
+    // 서식 통일 (굵은 글씨 해제)
+    ws.getRange(row, setCol, 1, priceCol - setCol + 1).setFontWeight("normal");
     // ※ 금액(G열/M열)은 템플릿 수식이 자동 계산 → 건드리지 않음
   }
 
@@ -297,10 +298,17 @@ function findTemplateRows(ws) {
 
     if (rowText.includes("예약자") && rowText.includes("상호") && !result.lessee1) {
       result.lessee1 = i + 1;
-      // 연락처 열 찾기
+      // 연락처 열 찾기 — 라벨 이후 첫 번째 빈 셀에 값 입력
       for (let c = 0; c < data[i].length; c++) {
         if (String(data[i][c]).includes("연락처")) {
-          result.contactCol = c + 2;  // 연락처 라벨 다음 열에 값 입력
+          // 연락처 라벨 뒤에서 빈 셀 찾기
+          for (let v = c + 1; v < data[i].length; v++) {
+            if (!data[i][v] || String(data[i][v]).trim() === "") {
+              result.contactCol = v + 1;  // 1-based
+              break;
+            }
+          }
+          if (!result.contactCol) result.contactCol = c + 2;  // fallback
           break;
         }
       }
@@ -334,7 +342,9 @@ function findTemplateRows(ws) {
   // 못 찾은 경우 기본값 (기존 빌리지 계약서 템플릿 기준)
   if (!result.lessee1) result.lessee1 = 8;
   if (!result.lessee2) result.lessee2 = 9;
-  if (!result.contactCol) result.contactCol = 9;  // I열
+  if (!result.contactCol) result.contactCol = 6;  // F열
+
+  Logger.log("findTemplateRows 결과: " + JSON.stringify(result));
   if (!result.rentalStart) result.rentalStart = 10;
   if (!result.itemStart) result.itemStart = 14;
   if (!result.itemRows) result.itemRows = 22;
