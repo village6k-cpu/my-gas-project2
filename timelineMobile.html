@@ -24,30 +24,30 @@
   /* ── 상단 바 ── */
   .topbar {
     background:#1A1A2E; color:#fff;
-    padding:10px 12px;
-    display:flex; align-items:center; gap:8px;
+    padding:14px 16px;
+    display:flex; align-items:center; gap:10px;
     flex-shrink:0; flex-wrap:wrap;
   }
-  .topbar-title { font-size:15px; font-weight:700; white-space:nowrap; }
+  .topbar-title { font-size:19px; font-weight:700; white-space:nowrap; }
   .search-wrap {
-    position:relative; flex:1; min-width:120px;
+    position:relative; flex:1; min-width:140px;
   }
   .search-wrap input {
-    width:100%; padding:7px 10px 7px 28px;
-    border-radius:8px; border:none;
+    width:100%; padding:12px 14px 12px 36px;
+    border-radius:10px; border:none;
     background:rgba(255,255,255,.12);
-    color:#fff; font-size:13px; outline:none;
+    color:#fff; font-size:16px; outline:none;
   }
   .search-wrap input::placeholder { color:rgba(255,255,255,.45); }
   .search-wrap input:focus { background:rgba(255,255,255,.2); }
-  .search-icon { position:absolute; left:8px; top:50%; transform:translateY(-50%); font-size:12px; opacity:.6; }
+  .search-icon { position:absolute; left:10px; top:50%; transform:translateY(-50%); font-size:16px; opacity:.6; }
 
-  .btn-row { display:flex; gap:4px; flex-wrap:wrap; }
+  .btn-row { display:flex; gap:6px; flex-wrap:wrap; }
   .btn {
-    padding:6px 10px; border-radius:6px;
+    padding:10px 16px; border-radius:8px;
     border:1px solid rgba(255,255,255,.2);
     background:rgba(255,255,255,.08);
-    color:#E2E8F0; font-size:11px;
+    color:#E2E8F0; font-size:15px;
     cursor:pointer; white-space:nowrap;
   }
   .btn:active { background:rgba(255,255,255,.25); }
@@ -55,13 +55,13 @@
 
   /* ── 범례 ── */
   .legend {
-    background:#fff; padding:6px 12px;
-    display:flex; align-items:center; gap:10px;
+    background:#fff; padding:10px 16px;
+    display:flex; align-items:center; gap:14px;
     flex-shrink:0; border-bottom:1px solid #E2E8F0;
-    flex-wrap:wrap; font-size:11px; color:#4A5568;
+    flex-wrap:wrap; font-size:14px; color:#4A5568;
   }
-  .legend-item { display:flex; align-items:center; gap:4px; }
-  .legend-dot { width:10px; height:10px; border-radius:3px; flex-shrink:0; }
+  .legend-item { display:flex; align-items:center; gap:5px; }
+  .legend-dot { width:12px; height:12px; border-radius:3px; flex-shrink:0; }
   .stat-info { margin-left:auto; color:#718096; }
 
   /* ── 타임라인 ── */
@@ -73,15 +73,16 @@
   /* vis.js 오버라이드 */
   .vis-timeline { border:none !important; font-family:inherit !important; }
   .vis-label .vis-inner {
-    font-size:11px !important; padding:0 6px !important;
-    font-weight:500; color:#2D3748;
+    font-size:14px !important; padding:4px 10px !important;
+    font-weight:600; color:#2D3748;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-    max-width:120px;
+    max-width:140px;
   }
   .vis-item {
-    border-radius:4px !important; font-size:10px !important;
-    font-weight:500 !important; border-width:0 !important;
-    padding:2px 5px !important;
+    border-radius:6px !important; font-size:13px !important;
+    font-weight:600 !important; border-width:0 !important;
+    padding:4px 8px !important;
+    min-height:28px !important;
   }
   .vis-item.status-대기     { background:#3B82F6 !important; color:#fff !important; }
   .vis-item.status-반출중   { background:#F59E0B !important; color:#fff !important; }
@@ -93,12 +94,12 @@
   .vis-tooltip {
     background:#1A1A2E !important; color:#E2E8F0 !important;
     border:1px solid rgba(255,255,255,.15) !important;
-    border-radius:8px !important; padding:10px 12px !important;
-    font-size:11px !important; line-height:1.7 !important;
-    max-width:220px !important; white-space:pre-wrap !important;
+    border-radius:10px !important; padding:14px 16px !important;
+    font-size:14px !important; line-height:1.8 !important;
+    max-width:280px !important; white-space:pre-wrap !important;
     pointer-events:none !important;
   }
-  .vis-time-axis .vis-text { font-size:10px !important; color:#718096 !important; }
+  .vis-time-axis .vis-text { font-size:13px !important; color:#718096 !important; }
   .vis-panel.vis-left { border-right:1px solid #E2E8F0 !important; }
 
   /* 로딩 */
@@ -107,10 +108,10 @@
     display:flex; flex-direction:column;
     align-items:center; justify-content:center;
     background:rgba(255,255,255,.95); z-index:100;
-    gap:10px; font-size:13px; color:#4A5568;
+    gap:12px; font-size:16px; color:#4A5568;
   }
   .spinner {
-    width:32px; height:32px;
+    width:40px; height:40px;
     border:3px solid #E2E8F0; border-top-color:#3B82F6;
     border-radius:50%; animation:spin .8s linear infinite;
   }
@@ -120,7 +121,7 @@
     position:absolute; inset:0;
     display:none; flex-direction:column;
     align-items:center; justify-content:center;
-    gap:8px; color:#9CA3AF; font-size:13px;
+    gap:10px; color:#9CA3AF; font-size:16px;
   }
 
   /* 상세 팝업 */
@@ -131,29 +132,29 @@
   }
   .detail-overlay.show { display:flex; }
   .detail-card {
-    background:#fff; border-radius:16px 16px 0 0;
-    width:100%; max-width:480px; padding:20px;
+    background:#fff; border-radius:18px 18px 0 0;
+    width:100%; max-width:540px; padding:24px;
     max-height:60vh; overflow-y:auto;
     animation:slideUp .25s ease;
   }
   @keyframes slideUp { from { transform:translateY(100%); } to { transform:translateY(0); } }
-  .detail-card h4 { font-size:15px; margin-bottom:12px; color:#1A1A2E; }
+  .detail-card h4 { font-size:19px; margin-bottom:16px; color:#1A1A2E; }
   .detail-row {
     display:flex; justify-content:space-between;
-    padding:6px 0; border-bottom:1px solid #f0f0f0;
-    font-size:13px;
+    padding:10px 0; border-bottom:1px solid #f0f0f0;
+    font-size:16px;
   }
   .detail-row .label { color:#888; }
   .detail-row .value { font-weight:600; text-align:right; }
   .detail-close {
-    display:block; width:100%; padding:12px; margin-top:12px;
-    background:#f0f2f5; border:none; border-radius:8px;
-    font-size:14px; font-weight:600; cursor:pointer;
+    display:block; width:100%; padding:16px; margin-top:16px;
+    background:#f0f2f5; border:none; border-radius:10px;
+    font-size:17px; font-weight:600; cursor:pointer;
   }
 
   /* 자동갱신 표시 */
   .auto-refresh {
-    font-size:10px; color:rgba(255,255,255,.5);
+    font-size:13px; color:rgba(255,255,255,.5);
     white-space:nowrap;
   }
 </style>
