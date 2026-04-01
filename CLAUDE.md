@@ -4,6 +4,7 @@
 
 ## 배포
 - `clasp push` → GAS 편집기에서 웹앱 새 버전 배포 (sheetAPI.js의 doGet/doPost)
+- 웹앱 URL: https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec
 
 ## 파일 구조
 - **Code.js** — 트리거 (onEdit, onEditInstallable), 실사기록 동기화, 장비사진 열 설정
