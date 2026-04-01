@@ -519,6 +519,142 @@ function insertAndCheckRequest(req) {
 }
 
 
+/**
+ * 확인요청 수정 — reqID 기준으로 데이터 업데이트 후 가용확인 재실행
+ * req: { reqID: "RQ-...", 반출일?, 반출시간?, 반납일?, 반납시간?, 예약자명?, 연락처?, 장비?: [{이름, 수량}] }
+ */
+function updateRequest(req) {
+  if (!req.reqID) throw new Error("reqID 필수");
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("확인요청");
+  if (!sheet) throw new Error("확인요청 시트 없음");
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) throw new Error("데이터 없음");
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
+  var targetRows = [];
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim() === req.reqID) {
+      targetRows.push(i + 2);
+    }
+  }
+  if (targetRows.length === 0) throw new Error("요청ID를 찾을 수 없음: " + req.reqID);
+
+  var firstRow = targetRows[0];
+
+  // 장비 목록 변경이 있으면: 기존 행 삭제 후 재입력
+  if (req.장비 && req.장비.length > 0) {
+    // 기존 행 삭제 (아래부터 삭제해야 행 번호 안 꼬임)
+    for (var d = targetRows.length - 1; d >= 0; d--) {
+      sheet.deleteRow(targetRows[d]);
+    }
+    SpreadsheetApp.flush();
+
+    // 삭제 후 첫 번째 빈 행 찾기 (A열 기준)
+    var newLastRow = sheet.getLastRow();
+    var startRow = 2;
+    if (newLastRow >= 2) {
+      var aCol = sheet.getRange(2, 1, newLastRow - 1, 1).getValues();
+      for (var r = 0; r < aCol.length; r++) {
+        if (!aCol[r][0] || String(aCol[r][0]).trim() === "") {
+          startRow = r + 2;
+          break;
+        }
+        startRow = r + 3;
+      }
+    }
+
+    // 기존 데이터에서 날짜/시간/예약자명/연락처 가져오기 (req에 없으면)
+    var origFirst = data[targetRows[0] - 2];
+    var 반출일 = req.반출일 || origFirst[1];
+    var 반출시간 = req.반출시간 !== undefined ? req.반출시간 : origFirst[2];
+    var 반납일 = req.반납일 || origFirst[3];
+    var 반납시간 = req.반납시간 !== undefined ? req.반납시간 : origFirst[4];
+    var 예약자명 = req.예약자명 !== undefined ? req.예약자명 : origFirst[10];
+    var 연락처 = req.연락처 !== undefined ? req.연락처 : origFirst[11];
+
+    var items = req.장비;
+    for (var j = 0; j < items.length; j++) {
+      var row = startRow + j;
+      var rowData = [
+        req.reqID,
+        j === 0 ? 반출일 : "", j === 0 ? 반출시간 : "",
+        j === 0 ? 반납일 : "", j === 0 ? 반납시간 : "",
+        items[j].이름, items[j].수량 || 1,
+        "", "", "",
+        j === 0 ? 예약자명 : "", j === 0 ? 연락처 : "",
+        "", "", "", "", ""
+      ];
+      sheet.getRange(row, 1, 1, 17).setValues([rowData]);
+    }
+    SpreadsheetApp.flush();
+
+    // 가용확인 재실행
+    sheet.getRange(startRow, 8).setValue("확인");
+    SpreadsheetApp.flush();
+    processByReqID(sheet, startRow);
+
+    return { reqID: req.reqID, action: "수정", items: items.length, recheck: true };
+  }
+
+  // 장비 변경 없이 날짜/시간/예약자명/연락처만 수정
+  var changed = [];
+  if (req.반출일) { sheet.getRange(firstRow, 2).setValue(req.반출일); changed.push("반출일"); }
+  if (req.반출시간 !== undefined) { sheet.getRange(firstRow, 3).setValue(req.반출시간); changed.push("반출시간"); }
+  if (req.반납일) { sheet.getRange(firstRow, 4).setValue(req.반납일); changed.push("반납일"); }
+  if (req.반납시간 !== undefined) { sheet.getRange(firstRow, 5).setValue(req.반납시간); changed.push("반납시간"); }
+  if (req.예약자명 !== undefined) { sheet.getRange(firstRow, 11).setValue(req.예약자명); changed.push("예약자명"); }
+  if (req.연락처 !== undefined) { sheet.getRange(firstRow, 12).setValue(req.연락처); changed.push("연락처"); }
+
+  // 날짜/시간 변경 시 가용확인 재실행
+  var needRecheck = changed.some(function(c) { return ["반출일","반출시간","반납일","반납시간"].includes(c); });
+  if (needRecheck) {
+    // 결과 초기화
+    for (var t = 0; t < targetRows.length; t++) {
+      sheet.getRange(targetRows[t], 9, 1, 2).setValues([["", ""]]);
+    }
+    sheet.getRange(firstRow, 8).setValue("확인");
+    SpreadsheetApp.flush();
+    processByReqID(sheet, firstRow);
+  }
+
+  return { reqID: req.reqID, action: "수정", changed: changed, recheck: needRecheck };
+}
+
+
+/**
+ * 확인요청 삭제 — reqID의 모든 행 삭제
+ */
+function deleteRequest(reqID) {
+  if (!reqID) throw new Error("reqID 필수");
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("확인요청");
+  if (!sheet) throw new Error("확인요청 시트 없음");
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) throw new Error("데이터 없음");
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  var targetRows = [];
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim() === reqID) {
+      targetRows.push(i + 2);
+    }
+  }
+  if (targetRows.length === 0) throw new Error("요청ID를 찾을 수 없음: " + reqID);
+
+  // 아래부터 삭제
+  for (var d = targetRows.length - 1; d >= 0; d--) {
+    sheet.deleteRow(targetRows[d]);
+  }
+
+  return { reqID: reqID, action: "삭제", deletedRows: targetRows.length };
+}
+
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 가용 확인 — 같은 요청ID 일괄 처리
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
