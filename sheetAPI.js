@@ -132,6 +132,12 @@ function handleRequest(e) {
       case "timeline":
         return jsonResponse(getTimelineData());
 
+      case "parseImage":
+        return jsonResponse(parseImageWithClaude(
+          postBody.image,
+          postBody.mediaType
+        ));
+
       // ━━━ 스케줄 관리 API ━━━
 
       case "list":
@@ -583,6 +589,113 @@ function runFunction(funcName, params) {
     function: funcName,
     executionTime: (endTime - startTime) + "ms"
   };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 이미지 파싱 (Claude API)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * 카카오톡 캡처 이미지를 Claude API로 파싱하여 예약 정보 추출
+ * @param {string} base64Image - base64 인코딩된 이미지 데이터
+ * @param {string} mediaType - 이미지 MIME 타입 (image/png, image/jpeg 등)
+ * @returns {Object} 파싱된 예약 정보
+ */
+function parseImageWithClaude(base64Image, mediaType) {
+  if (!base64Image) return { error: "이미지 데이터가 없습니다" };
+
+  // Script Properties에서 Claude API 키 가져오기
+  var apiKey = PropertiesService.getScriptProperties().getProperty("CLAUDE_API_KEY");
+  if (!apiKey) {
+    return { error: "Claude API 키가 설정되지 않았습니다. GAS Script Properties에 CLAUDE_API_KEY를 추가해주세요." };
+  }
+
+  var prompt = '이 카카오톡 대화 캡처 이미지에서 렌탈 장비 예약 정보를 추출해주세요.\n\n' +
+    '다음 JSON 형식으로만 응답해주세요 (설명 없이 JSON만):\n' +
+    '{\n' +
+    '  "예약자명": "이름 (대화 상대방 이름)",\n' +
+    '  "연락처": "전화번호 (있으면)",\n' +
+    '  "반출일": "YYYY-MM-DD",\n' +
+    '  "반출시간": "HH:MM",\n' +
+    '  "반납일": "YYYY-MM-DD",\n' +
+    '  "반납시간": "HH:MM",\n' +
+    '  "장비": [{"이름": "장비명", "수량": 1}]\n' +
+    '}\n\n' +
+    '주의사항:\n' +
+    '- 날짜가 0402 같은 형식이면 올해 기준으로 2026-04-02로 변환\n' +
+    '- 대화에서 제외/취소된 장비는 목록에서 빼주세요\n' +
+    '- 대체 장비로 합의된 경우 대체된 장비명을 사용하세요\n' +
+    '- 수량이 명시되지 않으면 1로 설정\n' +
+    '- 예약자명은 카톡 대화 상대방 이름을 사용하세요';
+
+  try {
+    var response = UrlFetchApp.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      payload: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: mediaType || "image/png",
+                data: base64Image
+              }
+            },
+            {
+              type: "text",
+              text: prompt
+            }
+          ]
+        }]
+      }),
+      muteHttpExceptions: true
+    });
+
+    var status = response.getResponseCode();
+    var body = JSON.parse(response.getContentText());
+
+    if (status !== 200) {
+      return { error: "Claude API 오류 (" + status + "): " + (body.error && body.error.message || JSON.stringify(body)) };
+    }
+
+    // Claude 응답에서 JSON 추출
+    var text = body.content[0].text;
+    // ```json ... ``` 블록이 있으면 추출
+    var jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    var jsonStr = jsonMatch ? jsonMatch[1].trim() : text.trim();
+
+    var parsed = JSON.parse(jsonStr);
+    return parsed;
+
+  } catch (e) {
+    return { error: "파싱 실패: " + e.message };
+  }
+}
+
+/**
+ * Claude API 키 설정 헬퍼 (GAS 편집기에서 직접 실행)
+ * 사용법: GAS 편집기 → setupClaudeApiKey() 실행 → 프롬프트에 키 입력
+ */
+function setupClaudeApiKey() {
+  var ui = SpreadsheetApp.getUi();
+  var result = ui.prompt("Claude API 키 설정", "Anthropic API 키를 입력하세요 (sk-ant-...)", ui.ButtonSet.OK_CANCEL);
+  if (result.getSelectedButton() === ui.Button.OK) {
+    var key = result.getResponseText().trim();
+    if (key) {
+      PropertiesService.getScriptProperties().setProperty("CLAUDE_API_KEY", key);
+      ui.alert("API 키가 저장되었습니다.");
+    }
+  }
 }
 
 
