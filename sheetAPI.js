@@ -216,9 +216,9 @@ function doListPending() {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return jsonResponse({ status: "OK", count: 0, items: [] });
 
-  const data = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
+  const data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
   // Date → 문자열 변환용
-  const displayData = sheet.getRange(2, 1, lastRow - 1, 17).getDisplayValues();
+  const displayData = sheet.getRange(2, 1, lastRow - 1, 18).getDisplayValues();
 
   const pending = [];
   const seen = new Set();
@@ -255,6 +255,7 @@ function doListPending() {
         연락처: data[i][11] || "",       // L열
         업체명: data[i][12] || "",       // M열
         장비목록: items,
+        추가요청: data[i][17] || "",     // R열
         결과요약: result,
         등록상태: status || "대기"
       });

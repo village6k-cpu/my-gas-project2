@@ -71,7 +71,7 @@ function createContractFromMenu() {
  * @param {string} 거래ID
  * @returns {Object} { fileName, url, fileId }
  */
-function generateContractFile(ss, 거래ID) {
+function generateContractFile(ss, 거래ID, 추가요청) {
   const props = PropertiesService.getScriptProperties();
 
   // ── 설정값 가져오기 ──
@@ -203,6 +203,25 @@ function generateContractFile(ss, 거래ID) {
     ws.getRange(row, dayCol).setValue(일수);
     ws.getRange(row, priceCol).setValue(item.단가);
     // ※ 금액(G열/M열)은 템플릿 수식이 자동 계산 → 건드리지 않음
+  }
+
+  // ── 추가요청(악세사리 등) 품목 뒤에 추가 ──
+  if (추가요청) {
+    var 추가items = 추가요청.split("\n").filter(function(s) { return s.trim(); });
+    var nextIdx = items.length;
+    for (var ai = 0; ai < 추가items.length && nextIdx < ITEMS_PER_SIDE * 2; ai++) {
+      var row, nameCol, qtyCol;
+      if (nextIdx < ITEMS_PER_SIDE) {
+        row = rows.itemStart + nextIdx;
+        nameCol = 3; qtyCol = 4;  // C, D
+      } else {
+        row = rows.itemStart + (nextIdx - ITEMS_PER_SIDE);
+        nameCol = 9; qtyCol = 10;  // I, J
+      }
+      ws.getRange(row, nameCol).setValue(추가items[ai].trim());
+      ws.getRange(row, qtyCol).setValue(1);
+      nextIdx++;
+    }
   }
 
   // ── 장기할인 ──
