@@ -469,14 +469,12 @@ function buildDate(m, d) {
 var equipMasterList = [];
 
 function loadEquipList() {
-  fetch(API_URL + "?key=village2026&action=read&sheet=목록&range=A2:A500")
+  fetch(API_URL + "?key=village2026&action=read&sheet=목록&range=A1:A500")
     .then(function(r) { return r.json(); })
-    .then(function(data) {
-      if (data.values) {
-        equipMasterList = data.values.flat().filter(function(v) { return v; });
-      } else if (Array.isArray(data)) {
-        equipMasterList = data.flat().filter(function(v) { return v; });
-      }
+    .then(function(resp) {
+      // API 반환: { sheet, rowCount, headers, data: [[val], [val], ...] }
+      var list = resp.data || resp.values || [];
+      equipMasterList = list.flat().filter(function(v) { return v; }).map(String);
     })
     .catch(function(e) { console.log("장비 목록 로드 실패:", e); });
 }
