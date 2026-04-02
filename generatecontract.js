@@ -178,23 +178,23 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   ws.getRange(rows.rentalStart + 1, 3).setValue(반납일시);        // C: 반납일자(예정)
 
   // ── 품목 채우기 (좌우 분할 테이블) ──
-  // 기존 템플릿 구조:
-  //   좌측: B(SET), C(품목), D(수량), E(일수), F(단가) — G(금액)은 수식 자동계산
-  //   우측: H(SET), I(품목), J(수량), K(일수), L(단가) — M(금액)은 수식 자동계산
+  // 템플릿에서 B+C, H+I 이미 병합됨 (SET열 제거)
+  //   좌측: B(품목, 병합), D(수량), E(일수), F(단가) — G(금액)은 수식 자동계산
+  //   우측: H(품목, 병합), J(수량), K(일수), L(단가) — M(금액)은 수식 자동계산
   const ITEMS_PER_SIDE = rows.itemRows || 22;  // 한 쪽 행 수
 
   for (let i = 0; i < items.length && i < ITEMS_PER_SIDE * 2; i++) {
     const item = items[i];
-    let row, setCol, nameCol, qtyCol, dayCol, priceCol;
+    let row, nameCol, qtyCol, dayCol, priceCol;
 
     if (i < ITEMS_PER_SIDE) {
-      // 좌측
+      // 좌측: B(병합된 품목), D(수량), E(일수), F(단가)
       row = rows.itemStart + i;
-      setCol = 2; nameCol = 3; qtyCol = 4; dayCol = 5; priceCol = 6;  // B,C,D,E,F
+      nameCol = 2; qtyCol = 4; dayCol = 5; priceCol = 6;
     } else {
-      // 우측
+      // 우측: H(병합된 품목), J(수량), K(일수), L(단가)
       row = rows.itemStart + (i - ITEMS_PER_SIDE);
-      setCol = 8; nameCol = 9; qtyCol = 10; dayCol = 11; priceCol = 12;  // H,I,J,K,L
+      nameCol = 8; qtyCol = 10; dayCol = 11; priceCol = 12;
     }
 
     ws.getRange(row, nameCol).setValue(item.장비명);
@@ -202,7 +202,12 @@ function generateContractFile(ss, 거래ID, 추가요청) {
     ws.getRange(row, dayCol).setValue(일수);
     ws.getRange(row, priceCol).setValue(item.단가);
     // 서식 통일 (굵은 글씨 해제)
-    ws.getRange(row, setCol, 1, priceCol - setCol + 1).setFontWeight("normal");
+    ws.getRange(row, nameCol, 1, priceCol - nameCol + 1).setFontWeight("normal");
+
+    // 세트 헤더 행이면 연한 초록 배경 + 굵은 글씨
+    if (item.세트명 && item.장비명 === item.세트명) {
+      ws.getRange(row, nameCol).setBackground("#D9EAD3").setFontWeight("bold");
+    }
     // ※ 금액(G열/M열)은 템플릿 수식이 자동 계산 → 건드리지 않음
   }
 
@@ -214,10 +219,10 @@ function generateContractFile(ss, 거래ID, 추가요청) {
       var row, nameCol, qtyCol;
       if (nextIdx < ITEMS_PER_SIDE) {
         row = rows.itemStart + nextIdx;
-        nameCol = 3; qtyCol = 4;  // C, D
+        nameCol = 2; qtyCol = 4;  // B(병합), D
       } else {
         row = rows.itemStart + (nextIdx - ITEMS_PER_SIDE);
-        nameCol = 9; qtyCol = 10;  // I, J
+        nameCol = 8; qtyCol = 10;  // H(병합), J
       }
       ws.getRange(row, nameCol).setValue(추가items[ai].trim());
       ws.getRange(row, qtyCol).setValue(1);
@@ -319,11 +324,11 @@ function findTemplateRows(ws) {
     if (rowText.includes("대여일자") && !result.rentalStart) {
       result.rentalStart = i + 1;
     }
-    if (rowText.includes("품목") && rowText.includes("SET") && !itemHeaderRow) {
+    if (rowText.includes("품목") && (rowText.includes("SET") || rowText.includes("수량")) && !itemHeaderRow) {
       itemHeaderRow = i + 1;
       result.itemStart = i + 2;  // 헤더 다음 행
     }
-    if ((rowText.includes("라인") || rowText.includes("HDMI") || rowText.includes("기타")) && itemHeaderRow && !cableRow) {
+    if ((rowText.includes("라인") || rowText.includes("HDMI") || rowText.includes("기타") || rowText.includes("합계") || rowText.includes("특이사항") || rowText.includes("W/O")) && itemHeaderRow && !cableRow) {
       cableRow = i + 1;
     }
     if (rowText.includes("계약일자") && !result.signDate) {

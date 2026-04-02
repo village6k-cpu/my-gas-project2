@@ -34,7 +34,8 @@ function doGet(e) {
   if (params.page) {
     var pageMap = {
       "request":  { file: "requestForm",    title: "빌리지 확인요청" },
-      "timeline": { file: "timelineMobile", title: "빌리지 스케줄" }
+      "timeline": { file: "timelineMobile", title: "빌리지 스케줄" },
+      "dashboard": { file: "dashboard",    title: "빌리지 오늘 일정" }
     };
     var pg = pageMap[params.page];
     if (pg) {
@@ -131,6 +132,9 @@ function handleRequest(e) {
 
       case "timeline":
         return jsonResponse(getTimelineData());
+
+      case "dashboard":
+        return jsonResponse(getDashboardData());
 
       case "parseImage":
         return jsonResponse(parseImageWithClaude(

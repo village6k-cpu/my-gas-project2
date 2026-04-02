@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>빌리지 오늘 일정</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #f0f2f5;
+    color: #1a1a2e;
+    min-height: 100vh;
+  }
+
+  /* ── 헤더 ── */
+  .header {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    color: #fff;
+    padding: 20px 20px 16px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  }
+  .header-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .header h1 {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+  .header .date-label {
+    font-size: 14px;
+    color: rgba(255,255,255,0.7);
+    font-weight: 400;
+  }
+  .refresh-btn {
+    background: rgba(255,255,255,0.15);
+    border: none;
+    color: #fff;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s;
+  }
+  .refresh-btn:active { background: rgba(255,255,255,0.3); }
+  .refresh-btn.spinning { animation: spin 0.8s ease; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── 요약 카드 ── */
+  .summary-row {
+    display: flex;
+    gap: 10px;
+    padding: 0 4px;
+  }
+  .summary-card {
+    flex: 1;
+    background: rgba(255,255,255,0.12);
+    border-radius: 12px;
+    padding: 12px 14px;
+    text-align: center;
+    backdrop-filter: blur(10px);
+  }
+  .summary-card .num {
+    font-size: 28px;
+    font-weight: 800;
+    line-height: 1.1;
+  }
+  .summary-card .label {
+    font-size: 11px;
+    color: rgba(255,255,255,0.65);
+    margin-top: 4px;
+    font-weight: 500;
+  }
+  .summary-card.checkout .num { color: #5ce1e6; }
+  .summary-card.checkin .num { color: #ffb347; }
+  .summary-card.active .num { color: #98fb98; }
+
+  /* ── 경고 문구 ── */
+  .notice-bar {
+    background: #fff3cd;
+    color: #856404;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 10px 16px;
+    text-align: center;
+    line-height: 1.5;
+    border-bottom: 1px solid #ffc107;
+  }
+
+  /* ── 탭 ── */
+  .tabs {
+    display: flex;
+    padding: 12px 16px 0;
+    gap: 6px;
+    position: sticky;
+    top: 92px;
+    background: #f0f2f5;
+    z-index: 50;
+    padding-bottom: 12px;
+  }
+  .tab {
+    flex: 1;
+    padding: 10px 0;
+    border: none;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: #fff;
+    color: #666;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .tab.active {
+    background: #1a1a2e;
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(26,26,46,0.3);
+  }
+  .tab .badge {
+    display: inline-block;
+    background: rgba(0,0,0,0.1);
+    border-radius: 8px;
+    padding: 1px 7px;
+    font-size: 12px;
+    margin-left: 4px;
+  }
+  .tab.active .badge {
+    background: rgba(255,255,255,0.2);
+  }
+
+  /* ── 컨텐츠 ── */
+  .content {
+    padding: 0 16px 24px;
+  }
+  .section { display: none; }
+  .section.visible { display: block; }
+
+  .time-group {
+    margin-top: 16px;
+  }
+  .time-group-header {
+    font-size: 12px;
+    font-weight: 700;
+    color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 0 4px;
+    margin-bottom: 8px;
+  }
+
+  /* ── 일정 카드 ── */
+  .schedule-card {
+    background: #fff;
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    border-left: 4px solid #ddd;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .schedule-card:active {
+    transform: scale(0.98);
+  }
+  .schedule-card.type-checkout { border-left-color: #5ce1e6; }
+  .schedule-card.type-checkin { border-left-color: #ffb347; }
+
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .customer-name {
+    font-size: 16px;
+    font-weight: 700;
+    color: #1a1a2e;
+  }
+  .customer-company {
+    font-size: 12px;
+    color: #888;
+    margin-top: 1px;
+  }
+  .time-badge {
+    font-size: 13px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 8px;
+    white-space: nowrap;
+  }
+  .type-checkout .time-badge {
+    background: #e8fffe;
+    color: #0e8585;
+  }
+  .type-checkin .time-badge {
+    background: #fff4e6;
+    color: #c67700;
+  }
+
+  .card-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: #666;
+  }
+  .card-meta .icon {
+    font-size: 14px;
+    width: 18px;
+    text-align: center;
+  }
+
+  .equip-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .equip-tag {
+    background: #f3f4f6;
+    color: #444;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-weight: 500;
+  }
+  .equip-tag.set-tag {
+    background: #D9EAD3;
+    color: #2d5016;
+    font-weight: 600;
+  }
+
+  /* ── 상태 배지 ── */
+  .status-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-weight: 600;
+  }
+  .status-대기 { background: #e3f2fd; color: #1565c0; }
+  .status-반출중 { background: #e8f5e9; color: #2e7d32; }
+  .status-반납완료 { background: #f3e5f5; color: #7b1fa2; }
+
+  /* ── 빈 상태 ── */
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: #aaa;
+  }
+  .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+  .empty-state .text { font-size: 15px; }
+
+  /* ── 로딩 ── */
+  .loading {
+    text-align: center;
+    padding: 80px 20px;
+    color: #888;
+  }
+  .loading .spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid #e0e0e0;
+    border-top-color: #1a1a2e;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 16px;
+  }
+
+  /* ── 연락처 링크 ── */
+  .tel-link {
+    color: #1a73e8;
+    text-decoration: none;
+    font-weight: 500;
+  }
+
+  /* ── 카드 상세 펼침 ── */
+  .card-detail {
+    display: none;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #f0f0f0;
+  }
+  .card-detail.open { display: block; }
+  .detail-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    padding: 3px 0;
+    color: #555;
+  }
+  .detail-row .dl { font-weight: 600; color: #333; }
+</style>
+</head>
+<body>
+<script>var API_URL = "";</script>
+
+<!-- 헤더 -->
+<div class="header">
+  <div class="header-top">
+    <div>
+      <h1>오늘 일정</h1>
+      <div class="date-label" id="dateLabel"></div>
+    </div>
+    <button class="refresh-btn" onclick="refreshData()" id="refreshBtn">↻</button>
+  </div>
+  <div class="summary-row">
+    <div class="summary-card checkout">
+      <div class="num" id="sumCheckout">-</div>
+      <div class="label">반출</div>
+    </div>
+    <div class="summary-card checkin">
+      <div class="num" id="sumCheckin">-</div>
+      <div class="label">반납</div>
+    </div>
+    <div class="summary-card active">
+      <div class="num" id="sumActive">-</div>
+      <div class="label">현재 대여중</div>
+    </div>
+  </div>
+</div>
+
+<!-- 경고 문구 -->
+<div class="notice-bar">
+  ⚠️ 세부 구성품 및 추가 요청 사항 등은 반드시 카톡 대화 내용을 한번 더! 확인 후 완벽하게 세팅 바랍니다.<br>
+  ⚠️ 매직암, 라인, 배터리 등 기타 악세사리류 갯수 철저하게 체크 바랍니다.
+</div>
+
+<!-- 탭 -->
+<div class="tabs">
+  <button class="tab active" data-tab="checkout" onclick="switchTab('checkout')">
+    반출 <span class="badge" id="tabCheckout">0</span>
+  </button>
+  <button class="tab" data-tab="checkin" onclick="switchTab('checkin')">
+    반납 <span class="badge" id="tabCheckin">0</span>
+  </button>
+  <button class="tab" data-tab="all" onclick="switchTab('all')">
+    전체 <span class="badge" id="tabAll">0</span>
+  </button>
+</div>
+
+<!-- 컨텐츠 -->
+<div class="content">
+  <div id="loadingArea" class="loading">
+    <div class="spinner"></div>
+    <div>일정을 불러오는 중...</div>
+  </div>
+
+  <div id="checkoutSection" class="section">
+    <div id="checkoutList"></div>
+  </div>
+  <div id="checkinSection" class="section">
+    <div id="checkinList"></div>
+  </div>
+  <div id="allSection" class="section">
+    <div id="allList"></div>
+  </div>
+</div>
+
+<script>
+var dashboardData = null;
+
+// ── 초기화 ──
+document.addEventListener('DOMContentLoaded', function() {
+  var now = new Date();
+  var days = ['일','월','화','수','목','금','토'];
+  document.getElementById('dateLabel').textContent =
+    now.getFullYear() + '년 ' + (now.getMonth()+1) + '월 ' + now.getDate() + '일 (' + days[now.getDay()] + ')';
+  loadData();
+});
+
+// ── 데이터 로드 ──
+function loadData() {
+  document.getElementById('loadingArea').style.display = 'block';
+  document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('visible'); });
+
+  fetch(API_URL + '?key=village2026&action=dashboard')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      dashboardData = data;
+      renderDashboard(data);
+    })
+    .catch(function(err) {
+      document.getElementById('loadingArea').innerHTML =
+        '<div class="empty-state"><div class="icon">⚠️</div><div class="text">데이터 로드 실패<br>' + err.message + '</div></div>';
+    });
+}
+
+function refreshData() {
+  var btn = document.getElementById('refreshBtn');
+  btn.classList.add('spinning');
+  setTimeout(function() { btn.classList.remove('spinning'); }, 800);
+  loadData();
+}
+
+// ── 렌더링 ──
+function renderDashboard(data) {
+  document.getElementById('loadingArea').style.display = 'none';
+
+  // 요약
+  document.getElementById('sumCheckout').textContent = data.checkout.length;
+  document.getElementById('sumCheckin').textContent = data.checkin.length;
+  document.getElementById('sumActive').textContent = data.activeCount || 0;
+
+  // 탭 뱃지
+  document.getElementById('tabCheckout').textContent = data.checkout.length;
+  document.getElementById('tabCheckin').textContent = data.checkin.length;
+  document.getElementById('tabAll').textContent = data.checkout.length + data.checkin.length;
+
+  // 리스트 렌더
+  renderList('checkoutList', data.checkout, 'checkout');
+  renderList('checkinList', data.checkin, 'checkin');
+
+  // 전체 = 반출 + 반납 합쳐서 시간순 정렬
+  var all = data.checkout.map(function(c) { c._type = 'checkout'; return c; })
+    .concat(data.checkin.map(function(c) { c._type = 'checkin'; return c; }));
+  all.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
+  renderList('allList', all, 'all');
+
+  // 기본 탭 표시
+  switchTab('checkout');
+}
+
+function renderList(containerId, items, type) {
+  var container = document.getElementById(containerId);
+
+  if (!items || items.length === 0) {
+    container.innerHTML =
+      '<div class="empty-state"><div class="icon">' +
+      (type === 'checkout' ? '📦' : type === 'checkin' ? '📥' : '📋') +
+      '</div><div class="text">오늘 ' +
+      (type === 'checkout' ? '반출' : type === 'checkin' ? '반납' : '') +
+      ' 일정이 없습니다</div></div>';
+    return;
+  }
+
+  // 시간대별 그룹핑
+  var groups = {};
+  items.forEach(function(item) {
+    var timeKey = item.time || '시간 미정';
+    if (!groups[timeKey]) groups[timeKey] = [];
+    groups[timeKey].push(item);
+  });
+
+  var html = '';
+  var sortedKeys = Object.keys(groups).sort();
+
+  sortedKeys.forEach(function(timeKey) {
+    html += '<div class="time-group">';
+    html += '<div class="time-group-header">' + timeKey + '</div>';
+
+    groups[timeKey].forEach(function(item, idx) {
+      var cardType = item._type || type;
+      var cardId = cardType + '_' + timeKey + '_' + idx;
+
+      html += '<div class="schedule-card type-' + cardType + '" onclick="toggleDetail(\'' + cardId + '\')">';
+      html += '<div class="card-header">';
+      html += '<div>';
+      html += '<div class="customer-name">' + escHtml(item.name) + '</div>';
+      if (item.company) html += '<div class="customer-company">' + escHtml(item.company) + '</div>';
+      html += '</div>';
+      html += '<div class="time-badge">' + timeKey + '</div>';
+      html += '</div>';
+
+      // 연락처
+      if (item.tel) {
+        html += '<div class="card-meta">';
+        html += '<span class="icon">📞</span>';
+        html += '<a href="tel:' + item.tel + '" class="tel-link" onclick="event.stopPropagation()">' + escHtml(item.tel) + '</a>';
+        html += '</div>';
+      }
+
+      // 장비 태그
+      html += '<div class="equip-list">';
+      (item.equipments || []).forEach(function(eq) {
+        var tagClass = eq.isSet ? 'equip-tag set-tag' : 'equip-tag';
+        var label = eq.name + (eq.qty > 1 ? ' ×' + eq.qty : '');
+        html += '<span class="' + tagClass + '">' + escHtml(label) + '</span>';
+      });
+      html += '</div>';
+
+      // 상세 펼침
+      html += '<div class="card-detail" id="' + cardId + '">';
+      html += '<div class="detail-row"><span>거래ID</span><span class="dl">' + escHtml(item.tradeId) + '</span></div>';
+      var periodLabel = cardType === 'checkout' ? '반납 예정' : '반출일';
+      var periodValue = cardType === 'checkout' ? item.returnDate : item.checkoutDate;
+      if (periodValue) {
+        html += '<div class="detail-row"><span>' + periodLabel + '</span><span class="dl">' + escHtml(periodValue) + '</span></div>';
+      }
+      html += '<div class="detail-row"><span>상태</span><span class="status-badge status-' + (item.status || '대기') + '">' + (item.status || '대기') + '</span></div>';
+      if (item.equipments && item.equipments.length > 0) {
+        var totalQty = item.equipments.reduce(function(sum, eq) { return sum + (eq.qty || 1); }, 0);
+        html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + totalQty + '건</span></div>';
+      }
+      html += '</div>';
+
+      html += '</div>';
+    });
+
+    html += '</div>';
+  });
+
+  container.innerHTML = html;
+}
+
+// ── 탭 전환 ──
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(function(t) {
+    t.classList.toggle('active', t.dataset.tab === tab);
+  });
+  document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('visible'); });
+  document.getElementById(tab + 'Section').classList.add('visible');
+}
+
+// ── 상세 토글 ──
+function toggleDetail(id) {
+  var el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
+}
+
+// ── 유틸 ──
+function escHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>

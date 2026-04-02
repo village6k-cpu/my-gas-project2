@@ -30,6 +30,7 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu("📋 빌리지 스케줄")
     .addItem("📊 타임라인 보기", "showTimeline")
+    .addItem("📅 오늘 일정", "openDashboard")
     .addSeparator()
     .addItem("🔍 가용 확인 (수동 전체)", "manualProcessAll")
     .addItem("✅ 예약 등록 (수동)", "manualRegister")
@@ -68,6 +69,16 @@ function showTimeline() {
     .setHeight(680)
     .setTitle('빌리지 스케줄 타임라인');
   SpreadsheetApp.getUi().showModalDialog(html, '📊 스케줄 타임라인');
+}
+
+function openDashboard() {
+  var url = PropertiesService.getScriptProperties().getProperty('WEB_APP_URL');
+  if (!url) url = ScriptApp.getService().getUrl();
+  url += '?page=dashboard';
+  const html = HtmlService.createHtmlOutput(
+    '<script>window.open("' + url + '", "_blank");google.script.host.close();</script>'
+  ).setWidth(200).setHeight(50);
+  SpreadsheetApp.getUi().showModalDialog(html, '오늘 일정 열기');
 }
 
 /**
@@ -159,6 +170,138 @@ function getTimelineData() {
   });
 
   return { groups: groupList, items: itemList };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 오늘 반출/반납 대시보드 데이터
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function getDashboardData() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const schedSheet   = ss.getSheetByName('스케줄상세');
+  const contractSheet = ss.getSheetByName('계약마스터');
+
+  var today = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
+
+  // 계약마스터: 거래ID → { 예약자명, 연락처, 업체명 }
+  var contractMap = {};
+  if (contractSheet && contractSheet.getLastRow() >= 2) {
+    var cData = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 4).getValues();
+    cData.forEach(function(r) {
+      if (r[0]) contractMap[r[0]] = { name: r[1] || '', tel: r[2] || '', company: r[3] || '' };
+    });
+  }
+
+  if (!schedSheet || schedSheet.getLastRow() < 2) {
+    return { checkout: [], checkin: [], activeCount: 0 };
+  }
+
+  var data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getValues();
+
+  // 거래ID별 그룹핑
+  var tradeGroups = {};
+
+  data.forEach(function(row) {
+    var 거래ID   = row[1];  // B
+    var 세트명   = row[2];  // C
+    var 장비명   = row[3];  // D
+    var 수량     = row[4] || 1;  // E
+    var 반출일   = row[5];  // F
+    var 반출시간 = row[6];  // G
+    var 반납일   = row[7];  // H
+    var 반납시간 = row[8];  // I
+    var 상태     = row[9] || '대기';  // J
+
+    if (!장비명 || !반출일 || !반납일 || !거래ID) return;
+    if (상태 === '취소') return;
+
+    var 반출일str = 반출일 instanceof Date
+      ? Utilities.formatDate(반출일, 'Asia/Seoul', 'yyyy-MM-dd') : String(반출일).trim();
+    var 반납일str = 반납일 instanceof Date
+      ? Utilities.formatDate(반납일, 'Asia/Seoul', 'yyyy-MM-dd') : String(반납일).trim();
+
+    var 반출시간str = 반출시간 instanceof Date
+      ? Utilities.formatDate(반출시간, 'Asia/Seoul', 'HH:mm') : String(반출시간 || '').trim();
+    var 반납시간str = 반납시간 instanceof Date
+      ? Utilities.formatDate(반납시간, 'Asia/Seoul', 'HH:mm') : String(반납시간 || '').trim();
+
+    if (!tradeGroups[거래ID]) {
+      tradeGroups[거래ID] = {
+        거래ID: 거래ID,
+        반출일: 반출일str,
+        반출시간: 반출시간str,
+        반납일: 반납일str,
+        반납시간: 반납시간str,
+        상태: 상태,
+        equipments: []
+      };
+    }
+
+    var isSet = (세트명 && 장비명 === 세트명);
+    tradeGroups[거래ID].equipments.push({
+      name: 장비명,
+      qty: 수량,
+      isSet: isSet,
+      setName: 세트명 || ''
+    });
+  });
+
+  var checkoutList = [];
+  var checkinList = [];
+  var activeCount = 0;
+
+  Object.keys(tradeGroups).forEach(function(tid) {
+    var g = tradeGroups[tid];
+    var cust = contractMap[tid] || {};
+
+    // 세트 구성품 제외 (세트 헤더만 표시)
+    var setNames = {};
+    g.equipments.forEach(function(eq) { if (eq.isSet) setNames[eq.name] = true; });
+    var displayEquip = g.equipments.filter(function(eq) {
+      if (eq.setName && setNames[eq.setName] && !eq.isSet) return false;
+      return true;
+    });
+
+    var item = {
+      tradeId: tid,
+      name: cust.name || tid,
+      tel: cust.tel || '',
+      company: cust.company || '',
+      status: g.상태,
+      equipments: displayEquip
+    };
+
+    // 오늘 반출
+    if (g.반출일 === today) {
+      item.time = g.반출시간 || '시간 미정';
+      item.sortTime = g.반출시간 || '99:99';
+      item.returnDate = g.반납일 + (g.반납시간 ? ' ' + g.반납시간 : '');
+      item._type = 'checkout';
+      checkoutList.push(item);
+    }
+
+    // 오늘 반납
+    if (g.반납일 === today) {
+      var checkinItem = JSON.parse(JSON.stringify(item));
+      checkinItem.time = g.반납시간 || '시간 미정';
+      checkinItem.sortTime = g.반납시간 || '99:99';
+      checkinItem.checkoutDate = g.반출일 + (g.반출시간 ? ' ' + g.반출시간 : '');
+      checkinItem._type = 'checkin';
+      checkinList.push(checkinItem);
+    }
+
+    // 현재 대여중 (반출일 <= 오늘 <= 반납일, 취소 아님)
+    if (g.반출일 <= today && g.반납일 >= today && g.상태 !== '반납완료') {
+      activeCount++;
+    }
+  });
+
+  // 시간순 정렬
+  checkoutList.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
+  checkinList.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
+
+  return { checkout: checkoutList, checkin: checkinList, activeCount: activeCount };
 }
 
 
@@ -806,86 +949,53 @@ function processByReqID(sheet, triggerRow) {
     }
   }
 
-  // ── 같은 요청ID의 모든 행 처리 ──
+  // ── 같은 요청ID의 모든 행 수집 ──
   let expandedRows = false;
-  let isFirstRow = true;
+  var reqRows = [];
   for (let i = 0; i < allData.length; i++) {
     if (allData[i][0] !== triggerReqID) continue;
+    reqRows.push({ idx: i, row: i + 2, 장비명: allData[i][5], 수량: allData[i][6] || 1, result: allData[i][8] });
+  }
 
-    const row = i + 2;
-    const 장비명 = allData[i][5]; // F열
-    if (!장비명) continue;
-
-    // 첫 행 서식 (예약 건 구분)
-    if (isFirstRow) {
-      sheet.getRange(row, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
-      isFirstRow = false;
-    } else {
-      sheet.getRange(row, 1, 1, 18).setFontWeight("normal").setBackground(null);
+  // 첫 행 서식 (예약 건 구분)
+  if (reqRows.length > 0) {
+    sheet.getRange(reqRows[0].row, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
+    for (let r = 1; r < reqRows.length; r++) {
+      sheet.getRange(reqRows[r].row, 1, 1, 18).setFontWeight("normal").setBackground(null);
     }
+  }
 
-    // 같은 요청ID 행에 "확인" 자동 채우기
-    if (sheet.getRange(row, 8).getValue() !== "확인") {
-      sheet.getRange(row, 8).setValue("확인");
+  // 세트 펼침: 아래에서 위로 처리 (행 삽입으로 인한 번호 밀림 방지)
+  for (let r = reqRows.length - 1; r >= 0; r--) {
+    var ri = reqRows[r];
+    if (!ri.장비명) continue;
+
+    // 확인 자동 채우기
+    if (sheet.getRange(ri.row, 8).getValue() !== "확인") {
+      sheet.getRange(ri.row, 8).setValue("확인");
     }
 
     // 세트인지 확인 → 자동 펼침
-    const setComponents = getSetComponents(장비명, setSheet);
-    if (setComponents.length > 0 && !allData[i][8]) { // I열(결과)이 비어있을 때만 펼침
-      expandSetRows(sheet, row, triggerReqID, setComponents, allData[i][6] || 1);
+    const setComponents = getSetComponents(ri.장비명, setSheet);
+    if (setComponents.length > 0 && !ri.result) {
+      expandSetRows(sheet, ri.row, triggerReqID, setComponents, ri.수량);
       expandedRows = true;
     }
   }
 
-  // 세트 펼침이 있었으면 중복 장비 통합 후 가용확인
+  // 세트 펼침이 있었으면 데이터 다시 읽고 가용확인
   if (expandedRows) {
     SpreadsheetApp.flush();
-
-    // ── 중복 장비 통합: 같은 reqID의 구성품 중 같은 장비명은 수량 합산 ──
-    var mergeLastRow = sheet.getLastRow();
-    var mergeData = sheet.getRange(2, 1, mergeLastRow - 1, 18).getValues();
-    var equipMap = {};  // 장비명 → { row, qty, bigoList }
-    var rowsToDelete = [];
-
-    for (var mi = 0; mi < mergeData.length; mi++) {
-      if (mergeData[mi][0] !== triggerReqID) continue;
-      if (mergeData[mi][8] === "세트") continue;  // 세트 헤더 스킵
-      var eName = String(mergeData[mi][5]).trim();
-      if (!eName) continue;
-      var eQty = Number(mergeData[mi][6]) || 1;
-      var eBigo = String(mergeData[mi][16] || "");
-
-      if (equipMap[eName]) {
-        // 중복 → 수량 합산, 비고 병합, 이 행은 삭제 대상
-        equipMap[eName].qty += eQty;
-        if (eBigo && equipMap[eName].bigoList.indexOf(eBigo) < 0) {
-          equipMap[eName].bigoList.push(eBigo);
-        }
-        rowsToDelete.push(mi + 2);
-      } else {
-        equipMap[eName] = { row: mi + 2, qty: eQty, bigoList: eBigo ? [eBigo] : [] };
-      }
-    }
-
-    // 합산된 수량 반영
-    for (var ek in equipMap) {
-      var info = equipMap[ek];
-      sheet.getRange(info.row, 7).setValue(info.qty);
-      if (info.bigoList.length > 1) {
-        sheet.getRange(info.row, 17).setValue(info.bigoList.join(" + "));
-      }
-    }
-
-    // 중복 행 삭제 (아래부터)
-    for (var di = rowsToDelete.length - 1; di >= 0; di--) {
-      sheet.deleteRow(rowsToDelete[di]);
-    }
-
-    if (rowsToDelete.length > 0) SpreadsheetApp.flush();
-
-    // 데이터 다시 읽기
     const newLastRow = sheet.getLastRow();
     const newAllData = sheet.getRange(2, 1, newLastRow - 1, 18).getValues();
+
+    // 세트명 셀(F열)에 색상 표시
+    for (let i = 0; i < newAllData.length; i++) {
+      if (newAllData[i][0] !== triggerReqID) continue;
+      if (newAllData[i][8] === "세트") {
+        sheet.getRange(i + 2, 6).setBackground("#D9EAD3").setFontWeight("bold");  // F열만 연한 초록
+      }
+    }
 
     // 스케줄상세 데이터 미리 읽기
     const schedData = getScheduleData(schedSheet);
@@ -1109,6 +1219,7 @@ function expandSetRows(sheet, setRow, reqID, components, qty) {
 
   // ★ 세트 헤더 행 유지: F열 그대로, I열에 "세트" 표시
   sheet.getRange(setRow, 9).setValue("세트"); // I열: 결과 = "세트"
+  sheet.getRange(setRow, 6).setBackground("#D9EAD3").setFontWeight("bold");  // F열 세트명 셀만 연한 초록
 
   // 모든 구성품을 아래에 행 삽입
   if (numComponents > 0) {
@@ -1247,6 +1358,29 @@ function registerByReqID(sheet, triggerRow) {
       sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
       return;
     }
+  }
+
+  // ── 동시 등록 방지 (LockService) ──
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    sheet.getRange(triggerRow, 15).setValue("⚠️ 다른 등록 처리 중. 잠시 후 재시도");
+    sheet.getRange(triggerRow, 14).clearContent();
+    return;
+  }
+  try {
+    // 락 획득 후 O열 재확인 (동시 클릭 대비)
+    const recheckData = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
+    for (let i = 0; i < recheckData.length; i++) {
+      if (recheckData[i][0] === reqID && recheckData[i][14] === "등록완료") {
+        sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
+        sheet.getRange(triggerRow, 14).clearContent();
+        lock.releaseLock();
+        return;
+      }
+    }
+  } catch (lockErr) {
+    lock.releaseLock();
+    throw lockErr;
   }
 
   // ── 카테고리 미선택 장비 체크 (세트 구성품 중 구체 모델 미선택 차단) ──
@@ -1502,6 +1636,8 @@ function registerByReqID(sheet, triggerRow) {
     }
   } catch(err) { Logger.log('알림톡 발송 실패: ' + err.message); }
 
+  // ── 동시 등록 방지 락 해제 ──
+  lock.releaseLock();
 }
 
 
