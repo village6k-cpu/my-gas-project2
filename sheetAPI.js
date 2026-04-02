@@ -34,7 +34,8 @@ function doGet(e) {
   if (params.page) {
     var pageMap = {
       "request":  { file: "requestForm",    title: "빌리지 확인요청" },
-      "timeline": { file: "timelineMobile", title: "빌리지 스케줄" }
+      "timeline": { file: "timelineMobile", title: "빌리지 스케줄" },
+      "manage":   { file: "requestManage",  title: "확인요청 관리" }
     };
     var pg = pageMap[params.page];
     if (pg) {

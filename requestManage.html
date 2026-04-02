@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="확인요청">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1e3a5f">
+<title>확인요청 관리</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700&display=swap');
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family:'Noto Sans KR',-apple-system,sans-serif;
+    background:#f0f2f5; color:#2d3436;
+    font-size:16px; line-height:1.5;
+    -webkit-text-size-adjust:100%;
+  }
+
+  /* 헤더 */
+  .header {
+    background:#1e3a5f; color:#fff; padding:16px 18px;
+    display:flex; align-items:center; justify-content:space-between;
+    position:sticky; top:0; z-index:10;
+  }
+  .header h1 { font-size:19px; font-weight:700; }
+  .header-btn {
+    background:rgba(255,255,255,.15); border:none; color:#fff;
+    padding:8px 14px; border-radius:8px; font-size:14px;
+    font-family:inherit; cursor:pointer;
+  }
+  .header-btn:active { background:rgba(255,255,255,.3); }
+
+  /* 요약 바 */
+  .summary-bar {
+    background:#fff; padding:12px 18px; border-bottom:1px solid #e0e0e0;
+    font-size:14px; color:#666;
+    display:flex; align-items:center; gap:12px;
+  }
+  .summary-badge {
+    display:inline-block; padding:3px 10px; border-radius:12px;
+    font-size:13px; font-weight:700;
+  }
+  .badge-pending { background:#ebf5fb; color:#2980b9; }
+  .badge-count { background:#f0f0f0; color:#555; }
+
+  /* 카드 리스트 */
+  .card-list { padding:12px; }
+
+  .req-card {
+    background:#fff; border-radius:14px; padding:18px;
+    box-shadow:0 2px 8px rgba(0,0,0,.06); margin-bottom:12px;
+    border-left:5px solid #3498db;
+  }
+  .req-card.status-등록완료 { border-left-color:#27ae60; }
+  .req-card.status-거절 { border-left-color:#e74c3c; }
+  .req-card.status-보류 { border-left-color:#f39c12; }
+
+  .req-header {
+    display:flex; justify-content:space-between; align-items:flex-start;
+    margin-bottom:10px;
+  }
+  .req-id { font-size:13px; color:#888; font-weight:600; }
+  .req-status {
+    font-size:12px; font-weight:700; padding:3px 10px;
+    border-radius:6px;
+  }
+  .req-status.대기 { background:#ebf5fb; color:#2980b9; }
+  .req-status.등록완료 { background:#d5f5e3; color:#1e8449; }
+  .req-status.거절 { background:#fadbd8; color:#c0392b; }
+  .req-status.보류 { background:#fef9e7; color:#b7950b; }
+
+  .req-name { font-size:18px; font-weight:700; margin-bottom:4px; }
+  .req-date { font-size:14px; color:#666; margin-bottom:10px; }
+  .req-tel { font-size:13px; color:#888; }
+
+  /* 장비 목록 */
+  .equip-list { margin:10px 0; }
+  .equip-item {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:8px 0; border-bottom:1px solid #f5f5f5;
+    font-size:15px;
+  }
+  .equip-item:last-child { border-bottom:none; }
+  .equip-info { flex:1; }
+  .equip-result {
+    font-size:13px; font-weight:700; text-align:right;
+    max-width:120px;
+  }
+  .equip-result.ok { color:#27ae60; }
+  .equip-result.warn { color:#f39c12; }
+  .equip-result.fail { color:#e74c3c; }
+  .equip-detail { font-size:11px; color:#999; font-weight:400; display:block; }
+
+  /* 액션 버튼 */
+  .action-bar {
+    display:flex; gap:8px; margin-top:14px; flex-wrap:wrap;
+  }
+  .action-btn {
+    flex:1; min-width:70px; padding:12px 8px; border:none; border-radius:10px;
+    font-size:15px; font-weight:700; font-family:inherit;
+    cursor:pointer; text-align:center;
+  }
+  .action-btn:active { opacity:.8; }
+  .btn-confirm { background:#3498db; color:#fff; }
+  .btn-register { background:#27ae60; color:#fff; }
+  .btn-hold { background:#f39c12; color:#fff; }
+  .btn-reject { background:#e74c3c; color:#fff; }
+  .btn-send { background:#8e44ad; color:#fff; }
+  .action-btn:disabled { background:#bdc3c7; cursor:not-allowed; }
+
+  /* 에디트 모드 */
+  .edit-overlay {
+    display:none; position:fixed; inset:0;
+    background:rgba(0,0,0,.4); z-index:100;
+    align-items:flex-end; justify-content:center;
+  }
+  .edit-overlay.show { display:flex; }
+  .edit-panel {
+    background:#fff; border-radius:18px 18px 0 0;
+    width:100%; max-width:540px; padding:24px;
+    max-height:85vh; overflow-y:auto;
+    animation:slideUp .25s ease;
+  }
+  @keyframes slideUp { from{transform:translateY(100%)} to{transform:translateY(0)} }
+
+  .edit-panel h3 { font-size:18px; font-weight:700; margin-bottom:16px; color:#1e3a5f; }
+  .edit-field { margin-bottom:12px; }
+  .edit-field label { font-size:13px; color:#888; display:block; margin-bottom:4px; font-weight:600; }
+  .edit-field input, .edit-field select {
+    width:100%; padding:12px 14px; font-size:16px; font-family:inherit;
+    border:2px solid #ddd; border-radius:10px;
+  }
+  .edit-field input:focus { outline:none; border-color:#3498db; }
+  .edit-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .edit-equip-row {
+    display:flex; gap:8px; margin-bottom:8px; align-items:center;
+  }
+  .edit-equip-row input:first-child { flex:3; }
+  .edit-equip-row input:nth-child(2) { flex:1; text-align:center; }
+  .edit-equip-row button {
+    background:none; border:none; color:#e74c3c; font-size:20px; cursor:pointer; padding:4px 8px;
+  }
+
+  .edit-actions { display:flex; gap:8px; margin-top:16px; }
+  .edit-save {
+    flex:1; padding:14px; background:#27ae60; color:#fff;
+    border:none; border-radius:10px; font-size:16px; font-weight:700;
+    font-family:inherit; cursor:pointer;
+  }
+  .edit-cancel {
+    flex:1; padding:14px; background:#f0f2f5; color:#333;
+    border:none; border-radius:10px; font-size:16px; font-weight:700;
+    font-family:inherit; cursor:pointer;
+  }
+
+  /* 상태 메시지 */
+  .toast {
+    display:none; position:fixed; bottom:30px; left:50%; transform:translateX(-50%);
+    background:#1e3a5f; color:#fff; padding:14px 24px; border-radius:12px;
+    font-size:15px; font-weight:600; z-index:200;
+    box-shadow:0 4px 16px rgba(0,0,0,.2);
+  }
+  .toast.show { display:block; animation:fadeInUp .3s ease; }
+  @keyframes fadeInUp { from{opacity:0;transform:translate(-50%,20px)} to{opacity:1;transform:translate(-50%,0)} }
+
+  .empty-state {
+    text-align:center; padding:60px 20px; color:#aaa;
+  }
+  .empty-state .icon { font-size:48px; margin-bottom:12px; }
+  .empty-state .msg { font-size:16px; }
+
+  .loading-full {
+    text-align:center; padding:60px 20px; color:#888; font-size:16px;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>확인요청 관리</h1>
+  <button class="header-btn" onclick="loadRequests()">↺ 새로고침</button>
+</div>
+
+<div class="summary-bar" id="summaryBar">
+  <span>로딩 중...</span>
+</div>
+
+<div class="card-list" id="cardList">
+  <div class="loading-full">데이터 불러오는 중...</div>
+</div>
+
+<!-- 수정 패널 -->
+<div class="edit-overlay" id="editOverlay" onclick="if(event.target===this)closeEdit()">
+  <div class="edit-panel" id="editPanel"></div>
+</div>
+
+<!-- 토스트 -->
+<div class="toast" id="toast"></div>
+
+<script>
+var API_URL = "";
+var requestData = [];
+
+// ━━━ 데이터 로드 ━━━
+function loadRequests() {
+  fetch(API_URL + "?key=village2026&action=list")
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      requestData = data.items || [];
+      renderList();
+    })
+    .catch(function(e) {
+      document.getElementById("cardList").innerHTML =
+        '<div class="empty-state"><div class="icon">⚠️</div><div class="msg">로드 실패: ' + e.message + '</div></div>';
+    });
+}
+
+// ━━━ 목록 렌더링 ━━━
+function renderList() {
+  var el = document.getElementById("cardList");
+  var summary = document.getElementById("summaryBar");
+
+  if (requestData.length === 0) {
+    el.innerHTML = '<div class="empty-state"><div class="icon">📭</div><div class="msg">대기 중인 확인요청이 없습니다</div></div>';
+    summary.innerHTML = '<span class="summary-badge badge-count">0건</span> 대기 중';
+    return;
+  }
+
+  summary.innerHTML =
+    '<span class="summary-badge badge-pending">' + requestData.length + '건</span> 대기 중 · ' +
+    '<span style="font-size:12px;color:#aaa">' + new Date().toLocaleTimeString("ko-KR", {hour:"2-digit",minute:"2-digit"}) + ' 기준</span>';
+
+  el.innerHTML = requestData.map(function(req, idx) {
+    var statusClass = (req.등록상태 || "대기").replace(/\s/g, "");
+    var statusLabel = req.등록상태 || "대기";
+
+    var equipHtml = (req.장비목록 || []).map(function(e) {
+      var resultClass = "ok";
+      var r = e.결과 || "";
+      if (/부족|⚠/.test(r)) resultClass = "warn";
+      if (/가용0|❌|없음/.test(r)) resultClass = "fail";
+      return '<div class="equip-item">' +
+        '<div class="equip-info">' + e.장비명 + ' <span style="color:#888">×' + (e.수량||1) + '</span></div>' +
+        '<div class="equip-result ' + resultClass + '">' + r +
+          (e.상세 ? '<span class="equip-detail">' + e.상세 + '</span>' : '') +
+        '</div></div>';
+    }).join("");
+
+    var actionsHtml = '';
+    if (statusLabel === "대기" || !statusLabel) {
+      var hasResult = req.장비목록 && req.장비목록.some(function(e) { return e.결과; });
+      if (!hasResult) {
+        actionsHtml = '<button class="action-btn btn-confirm" onclick="doAction(\'확인\',\'' + req.reqID + '\')">확인</button>';
+      } else {
+        actionsHtml =
+          '<button class="action-btn btn-register" onclick="doAction(\'등록\',\'' + req.reqID + '\')">등록</button>' +
+          '<button class="action-btn btn-hold" onclick="doAction(\'보류\',\'' + req.reqID + '\')">보류</button>' +
+          '<button class="action-btn btn-reject" onclick="doAction(\'거절\',\'' + req.reqID + '\')">거절</button>';
+      }
+    }
+
+    return '<div class="req-card status-' + statusClass + '">' +
+      '<div class="req-header">' +
+        '<div><div class="req-id">' + req.reqID + '</div>' +
+          '<div class="req-name">' + (req.예약자명 || "이름 없음") + '</div></div>' +
+        '<div style="display:flex;gap:6px;align-items:center">' +
+          '<button style="background:none;border:none;font-size:20px;cursor:pointer" onclick="openEdit(' + idx + ')">✏️</button>' +
+          '<span class="req-status ' + statusLabel + '">' + statusLabel + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="req-date">📅 ' + (req.반출일||"") + ' ' + (req.반출시간||"") + ' → ' + (req.반납일||"") + ' ' + (req.반납시간||"") + '</div>' +
+      (req.연락처 ? '<div class="req-tel">📱 ' + req.연락처 + '</div>' : '') +
+      '<div class="equip-list">' + equipHtml + '</div>' +
+      (actionsHtml ? '<div class="action-bar">' + actionsHtml + '</div>' : '') +
+    '</div>';
+  }).join("");
+}
+
+// ━━━ 액션 실행 (확인/등록/보류/거절) ━━━
+function doAction(action, reqID) {
+  if (action === "등록" && !confirm("등록하시겠습니까?")) return;
+  if (action === "거절" && !confirm("거절하시겠습니까?")) return;
+
+  showToast(action + " 처리 중...");
+
+  // GET 방식으로 호출 (GAS 리다이렉트 문제 방지)
+  fetch(API_URL + "?key=village2026&action=" + encodeURIComponent(action) + "&reqID=" + encodeURIComponent(reqID))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.status === "OK") {
+        showToast(action + " 완료: " + reqID);
+        setTimeout(loadRequests, 1000);
+      } else {
+        showToast("오류: " + (data.message || JSON.stringify(data)));
+      }
+    })
+    .catch(function(e) { showToast("통신 오류: " + e.message); });
+}
+
+// ━━━ 수정 패널 ━━━
+function openEdit(idx) {
+  var req = requestData[idx];
+  if (!req) return;
+
+  var equipRows = (req.장비목록 || []).map(function(e, i) {
+    return '<div class="edit-equip-row">' +
+      '<input type="text" value="' + (e.장비명||"").replace(/"/g,"&quot;") + '" data-equip="' + i + '">' +
+      '<input type="text" value="' + (e.수량||1) + '" data-qty="' + i + '">' +
+      '<button onclick="this.parentElement.remove()">✕</button>' +
+    '</div>';
+  }).join("");
+
+  document.getElementById("editPanel").innerHTML =
+    '<h3>수정: ' + req.reqID + '</h3>' +
+    '<div class="edit-grid">' +
+      '<div class="edit-field"><label>예약자명</label><input type="text" id="editName" value="' + (req.예약자명||"") + '"></div>' +
+      '<div class="edit-field"><label>연락처</label><input type="tel" id="editTel" value="' + (req.연락처||"") + '"></div>' +
+      '<div class="edit-field"><label>반출일</label><input type="date" id="editStart" value="' + (req.반출일||"") + '"></div>' +
+      '<div class="edit-field"><label>반출시간</label><input type="time" id="editStartTime" value="' + (req.반출시간||"") + '"></div>' +
+      '<div class="edit-field"><label>반납일</label><input type="date" id="editEnd" value="' + (req.반납일||"") + '"></div>' +
+      '<div class="edit-field"><label>반납시간</label><input type="time" id="editEndTime" value="' + (req.반납시간||"") + '"></div>' +
+    '</div>' +
+    '<div class="edit-field"><label>장비 목록</label><div id="editEquipList">' + equipRows + '</div></div>' +
+    '<div class="edit-actions">' +
+      '<button class="edit-save" onclick="saveEdit(\'' + req.reqID + '\')">저장</button>' +
+      '<button class="edit-cancel" onclick="closeEdit()">취소</button>' +
+    '</div>';
+
+  document.getElementById("editOverlay").classList.add("show");
+}
+
+function closeEdit() {
+  document.getElementById("editOverlay").classList.remove("show");
+}
+
+function saveEdit(reqID) {
+  // 확인요청 시트에서 해당 reqID 행들을 업데이트
+  var name = document.getElementById("editName").value;
+  var tel = document.getElementById("editTel").value;
+  var startDate = document.getElementById("editStart").value;
+  var startTime = document.getElementById("editStartTime").value;
+  var endDate = document.getElementById("editEnd").value;
+  var endTime = document.getElementById("editEndTime").value;
+
+  var equipRows = document.querySelectorAll("#editEquipList .edit-equip-row");
+  var items = [];
+  equipRows.forEach(function(row) {
+    var name = row.querySelector("[data-equip]").value.trim();
+    var qty = row.querySelector("[data-qty]").value.trim();
+    if (name) items.push({ name: name, qty: qty });
+  });
+
+  // API로 업데이트 (search → update 방식)
+  showToast("저장 중...");
+  fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({
+      key: "village2026",
+      action: "run",
+      func: "updateRequest",
+      args: {
+        reqID: reqID,
+        예약자명: name,
+        연락처: tel,
+        반출일: startDate,
+        반출시간: startTime,
+        반납일: endDate,
+        반납시간: endTime,
+        장비: items
+      }
+    }),
+    redirect: "manual"
+  })
+  .then(function(r) {
+    if (r.type === "opaqueredirect" || r.status === 0) {
+      return fetch(API_URL + "?key=village2026&action=run&func=updateRequest&args=" +
+        encodeURIComponent(JSON.stringify({
+          reqID: reqID, 예약자명: name, 연락처: tel,
+          반출일: startDate, 반출시간: startTime,
+          반납일: endDate, 반납시간: endTime, 장비: items
+        })));
+    }
+    return r;
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.success || data.status === "OK") {
+      showToast("저장 완료!");
+      closeEdit();
+      setTimeout(loadRequests, 800);
+    } else {
+      showToast("오류: " + (data.error || data.message || ""));
+    }
+  })
+  .catch(function(e) { showToast("통신 오류: " + e.message); });
+}
+
+// ━━━ 토스트 ━━━
+function showToast(msg) {
+  var el = document.getElementById("toast");
+  el.textContent = msg;
+  el.className = "toast show";
+  clearTimeout(el._timer);
+  el._timer = setTimeout(function() { el.className = "toast"; }, 3000);
+}
+
+// ━━━ 시작 ━━━
+setTimeout(function() { if (API_URL) loadRequests(); }, 100);
+</script>
+</body>
+</html>
