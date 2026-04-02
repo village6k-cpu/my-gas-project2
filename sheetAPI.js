@@ -556,7 +556,8 @@ function runFunction(funcName, params) {
     "syncAuditFromMaster",
     "insertAndCheckRequest",
     "updateRequest",
-    "deleteRequest"
+    "deleteRequest",
+    "excludeEquipFromRequest"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -576,6 +577,11 @@ function runFunction(funcName, params) {
     if (funcName === "updateRequest" && params.args) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
       var result = updateRequest(args);
+      return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "excludeEquipFromRequest" && params.args) {
+      var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var result = excludeEquipFromRequest(args);
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "deleteRequest" && params.args) {

@@ -84,6 +84,8 @@
     font-size:15px;
   }
   .equip-item:last-child { border-bottom:none; }
+  .equip-check { display:flex; align-items:center; margin-right:10px; }
+  .equip-check input { width:22px; height:22px; accent-color:#27ae60; }
   .equip-info { flex:1; }
   .equip-result {
     font-size:13px; font-weight:700; text-align:right;
@@ -237,12 +239,15 @@ function renderList() {
     var statusClass = (req.등록상태 || "대기").replace(/\s/g, "");
     var statusLabel = req.등록상태 || "대기";
 
-    var equipHtml = (req.장비목록 || []).map(function(e) {
+    var equipHtml = (req.장비목록 || []).map(function(e, eIdx) {
       var resultClass = "ok";
       var r = e.결과 || "";
       if (/부족|⚠/.test(r)) resultClass = "warn";
       if (/가용0|❌|없음/.test(r)) resultClass = "fail";
+      var checkId = "chk_" + idx + "_" + eIdx;
+      var isAvail = !/가용0|❌/.test(r);
       return '<div class="equip-item">' +
+        '<label class="equip-check"><input type="checkbox" id="' + checkId + '" ' + (isAvail ? 'checked' : '') + '></label>' +
         '<div class="equip-info">' + e.장비명 + ' <span style="color:#888">×' + (e.수량||1) + '</span></div>' +
         '<div class="equip-result ' + resultClass + '">' + r +
           (e.상세 ? '<span class="equip-detail">' + e.상세 + '</span>' : '') +
@@ -256,9 +261,9 @@ function renderList() {
         actionsHtml = '<button class="action-btn btn-confirm" onclick="doAction(\'확인\',\'' + req.reqID + '\')">확인</button>';
       } else {
         actionsHtml =
-          '<button class="action-btn btn-register" onclick="doAction(\'등록\',\'' + req.reqID + '\')">등록</button>' +
-          '<button class="action-btn btn-hold" onclick="doAction(\'보류\',\'' + req.reqID + '\')">보류</button>' +
-          '<button class="action-btn btn-reject" onclick="doAction(\'거절\',\'' + req.reqID + '\')">거절</button>';
+          '<button class="action-btn btn-register" onclick="doRegisterSelected(' + idx + ')">선택 등록</button>' +
+          '<button class="action-btn btn-hold" onclick="doAction(\'보류\',\'' + req.reqID + '\')">전체 보류</button>' +
+          '<button class="action-btn btn-reject" onclick="doAction(\'거절\',\'' + req.reqID + '\')">전체 거절</button>';
       }
     }
 
@@ -277,6 +282,66 @@ function renderList() {
       (actionsHtml ? '<div class="action-bar">' + actionsHtml + '</div>' : '') +
     '</div>';
   }).join("");
+}
+
+// ━━━ 선택 등록 (체크된 장비만) ━━━
+function doRegisterSelected(idx) {
+  var req = requestData[idx];
+  if (!req) return;
+
+  var items = req.장비목록 || [];
+  var unchecked = [];
+
+  for (var i = 0; i < items.length; i++) {
+    var chk = document.getElementById("chk_" + idx + "_" + i);
+    if (chk && !chk.checked) {
+      unchecked.push(items[i].장비명);
+    }
+  }
+
+  var checkedCount = items.length - unchecked.length;
+  if (checkedCount === 0) return alert("등록할 장비를 1개 이상 선택하세요.");
+
+  var msg = checkedCount + "/" + items.length + "개 장비를 등록하시겠습니까?";
+  if (unchecked.length > 0) msg += "\n\n제외: " + unchecked.join(", ");
+  if (!confirm(msg)) return;
+
+  // 제외 장비가 있으면 먼저 해당 행을 보류 처리 후 등록
+  if (unchecked.length > 0) {
+    showToast("제외 장비 보류 처리 중...");
+    fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({
+        key: "village2026",
+        action: "run",
+        func: "excludeEquipFromRequest",
+        args: { reqID: req.reqID, 제외장비: unchecked }
+      }),
+      redirect: "manual"
+    })
+    .then(function(r) {
+      if (r.type === "opaqueredirect" || r.status === 0) {
+        return fetch(API_URL + "?key=village2026&action=" + encodeURIComponent("등록") + "&reqID=" + encodeURIComponent(req.reqID));
+      }
+      return r.json().then(function() {
+        return fetch(API_URL + "?key=village2026&action=" + encodeURIComponent("등록") + "&reqID=" + encodeURIComponent(req.reqID));
+      });
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.status === "OK") {
+        showToast("등록 완료! (" + checkedCount + "개)");
+        setTimeout(loadRequests, 1000);
+      } else {
+        showToast("오류: " + (data.message || ""));
+      }
+    })
+    .catch(function(e) { showToast("통신 오류: " + e.message); });
+  } else {
+    // 전체 등록
+    doAction("등록", req.reqID);
+  }
 }
 
 // ━━━ 액션 실행 (확인/등록/보류/거절) ━━━
