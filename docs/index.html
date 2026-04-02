@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="빌리지">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1e3a5f">
+<title>빌리지 관리</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family:-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;
+    background:#f0f2f5; color:#2d3436;
+    min-height:100vh; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; padding:20px;
+  }
+  .logo { font-size:48px; margin-bottom:8px; }
+  h1 { font-size:24px; font-weight:700; color:#1e3a5f; margin-bottom:6px; }
+  .sub { font-size:14px; color:#888; margin-bottom:32px; }
+  .menu { width:100%; max-width:400px; }
+  .menu-item {
+    display:flex; align-items:center; gap:16px;
+    background:#fff; border-radius:14px; padding:20px;
+    box-shadow:0 2px 8px rgba(0,0,0,.06);
+    margin-bottom:12px; text-decoration:none; color:#2d3436;
+    transition:transform .1s;
+  }
+  .menu-item:active { transform:scale(.98); }
+  .menu-icon { font-size:32px; }
+  .menu-text h3 { font-size:17px; font-weight:700; }
+  .menu-text p { font-size:13px; color:#888; margin-top:2px; }
+</style>
+</head>
+<body>
+  <div class="logo">🎬</div>
+  <h1>빌리지 관리</h1>
+  <p class="sub">렌탈샵 스케줄/재고/계약 관리</p>
+
+  <div class="menu">
+    <a class="menu-item" href="request.html">
+      <span class="menu-icon">📝</span>
+      <div class="menu-text">
+        <h3>확인요청 입력</h3>
+        <p>카톡 대화 파싱 → 예약 입력</p>
+      </div>
+    </a>
+    <a class="menu-item" href="manage.html">
+      <span class="menu-icon">📋</span>
+      <div class="menu-text">
+        <h3>확인요청 관리</h3>
+        <p>조회 / 수정 / 등록</p>
+      </div>
+    </a>
+    <a class="menu-item" href="timeline.html">
+      <span class="menu-icon">📅</span>
+      <div class="menu-text">
+        <h3>스케줄 타임라인</h3>
+        <p>장비별 일정 실시간 확인</p>
+      </div>
+    </a>
+  </div>
+</body>
+</html>

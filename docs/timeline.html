@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="스케줄">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1A1A2E">
+<title>빌리지 스케줄</title>
+<link href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css" rel="stylesheet">
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body {
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    background:#F0F2F5; color:#1A1A2E;
+    height:100vh; height:100dvh;
+    display:flex; flex-direction:column;
+    overflow:hidden;
+    -webkit-user-select:none; user-select:none;
+  }
+
+  /* ── 상단 바 ── */
+  .topbar {
+    background:#1A1A2E; color:#fff;
+    padding:14px 16px;
+    display:flex; align-items:center; gap:10px;
+    flex-shrink:0; flex-wrap:wrap;
+  }
+  .topbar-title { font-size:19px; font-weight:700; white-space:nowrap; }
+  .search-wrap {
+    position:relative; flex:1; min-width:140px;
+  }
+  .search-wrap input {
+    width:100%; padding:12px 14px 12px 36px;
+    border-radius:10px; border:none;
+    background:rgba(255,255,255,.12);
+    color:#fff; font-size:16px; outline:none;
+  }
+  .search-wrap input::placeholder { color:rgba(255,255,255,.45); }
+  .search-wrap input:focus { background:rgba(255,255,255,.2); }
+  .search-icon { position:absolute; left:10px; top:50%; transform:translateY(-50%); font-size:16px; opacity:.6; }
+
+  .btn-row { display:flex; gap:6px; flex-wrap:wrap; }
+  .btn {
+    padding:10px 16px; border-radius:8px;
+    border:1px solid rgba(255,255,255,.2);
+    background:rgba(255,255,255,.08);
+    color:#E2E8F0; font-size:15px;
+    cursor:pointer; white-space:nowrap;
+  }
+  .btn:active { background:rgba(255,255,255,.25); }
+  .btn.on { background:#3B82F6; border-color:#3B82F6; }
+
+  /* ── 범례 ── */
+  .legend {
+    background:#fff; padding:10px 16px;
+    display:flex; align-items:center; gap:14px;
+    flex-shrink:0; border-bottom:1px solid #E2E8F0;
+    flex-wrap:wrap; font-size:14px; color:#4A5568;
+  }
+  .legend-item { display:flex; align-items:center; gap:5px; }
+  .legend-dot { width:12px; height:12px; border-radius:3px; flex-shrink:0; }
+  .stat-info { margin-left:auto; color:#718096; }
+
+  /* ── 타임라인 ── */
+  .timeline-wrap {
+    flex:1; overflow:hidden; background:#fff; position:relative;
+  }
+  #timeline { width:100%; height:100%; }
+
+  /* vis.js 오버라이드 */
+  .vis-timeline { border:none !important; font-family:inherit !important; }
+  .vis-label .vis-inner {
+    font-size:14px !important; padding:4px 10px !important;
+    font-weight:600; color:#2D3748;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    max-width:140px;
+  }
+  .vis-item {
+    border-radius:6px !important; font-size:13px !important;
+    font-weight:600 !important; border-width:0 !important;
+    padding:4px 8px !important;
+    min-height:28px !important;
+  }
+  .vis-item.status-대기     { background:#3B82F6 !important; color:#fff !important; }
+  .vis-item.status-반출중   { background:#F59E0B !important; color:#fff !important; }
+  .vis-item.status-반납완료 { background:#10B981 !important; color:#fff !important; }
+  .vis-item.status-취소     { background:#9CA3AF !important; color:#fff !important; opacity:.6 !important; }
+  .vis-item.status-기타     { background:#8B5CF6 !important; color:#fff !important; }
+  .vis-item.vis-selected { box-shadow:0 0 0 2px rgba(59,130,246,.6) !important; }
+
+  .vis-tooltip {
+    background:#1A1A2E !important; color:#E2E8F0 !important;
+    border:1px solid rgba(255,255,255,.15) !important;
+    border-radius:10px !important; padding:14px 16px !important;
+    font-size:14px !important; line-height:1.8 !important;
+    max-width:280px !important; white-space:pre-wrap !important;
+    pointer-events:none !important;
+  }
+  .vis-time-axis .vis-text { font-size:13px !important; color:#718096 !important; }
+  .vis-panel.vis-left { border-right:1px solid #E2E8F0 !important; }
+
+  /* 로딩 */
+  .loading {
+    position:absolute; inset:0;
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    background:rgba(255,255,255,.95); z-index:100;
+    gap:12px; font-size:16px; color:#4A5568;
+  }
+  .spinner {
+    width:40px; height:40px;
+    border:3px solid #E2E8F0; border-top-color:#3B82F6;
+    border-radius:50%; animation:spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  .empty-state {
+    position:absolute; inset:0;
+    display:none; flex-direction:column;
+    align-items:center; justify-content:center;
+    gap:10px; color:#9CA3AF; font-size:16px;
+  }
+
+  /* 상세 팝업 */
+  .detail-overlay {
+    display:none; position:fixed; inset:0;
+    background:rgba(0,0,0,.4); z-index:200;
+    align-items:flex-end; justify-content:center;
+  }
+  .detail-overlay.show { display:flex; }
+  .detail-card {
+    background:#fff; border-radius:18px 18px 0 0;
+    width:100%; max-width:540px; padding:24px;
+    max-height:60vh; overflow-y:auto;
+    animation:slideUp .25s ease;
+  }
+  @keyframes slideUp { from { transform:translateY(100%); } to { transform:translateY(0); } }
+  .detail-card h4 { font-size:19px; margin-bottom:16px; color:#1A1A2E; }
+  .detail-row {
+    display:flex; justify-content:space-between;
+    padding:10px 0; border-bottom:1px solid #f0f0f0;
+    font-size:16px;
+  }
+  .detail-row .label { color:#888; }
+  .detail-row .value { font-weight:600; text-align:right; }
+  .detail-close {
+    display:block; width:100%; padding:16px; margin-top:16px;
+    background:#f0f2f5; border:none; border-radius:10px;
+    font-size:17px; font-weight:600; cursor:pointer;
+  }
+
+  /* 자동갱신 표시 */
+  .auto-refresh {
+    font-size:13px; color:rgba(255,255,255,.5);
+    white-space:nowrap;
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="topbar-title">📅 스케줄</span>
+  <div class="search-wrap">
+    <span class="search-icon">🔍</span>
+    <input type="text" id="searchInput" placeholder="장비명 검색..." autocomplete="off">
+  </div>
+  <div class="btn-row">
+    <button class="btn" onclick="moveToday()">오늘</button>
+    <button class="btn" id="btnAll" onclick="filterStatus('all')">전체</button>
+    <button class="btn" id="btnActive" onclick="filterStatus('active')">진행중</button>
+    <button class="btn" onclick="reload()">↺</button>
+  </div>
+  <span class="auto-refresh" id="refreshInfo"></span>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#3B82F6"></div>대기</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#F59E0B"></div>반출중</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#10B981"></div>반납완료</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#9CA3AF"></div>취소</div>
+  <div class="stat-info" id="statInfo">로딩 중...</div>
+</div>
+
+<div class="timeline-wrap">
+  <div id="timeline"></div>
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <span>스케줄 불러오는 중...</span>
+  </div>
+  <div class="empty-state" id="emptyState">
+    <div style="font-size:36px">📭</div>
+    <span>데이터가 없습니다</span>
+  </div>
+</div>
+
+<!-- 상세 팝업 -->
+<div class="detail-overlay" id="detailOverlay" onclick="closeDetail(event)">
+  <div class="detail-card" id="detailCard"></div>
+</div>
+
+<script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+<script>
+var API_URL = "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
+var timeline, allGroups = [], allItems = [];
+var groups = new vis.DataSet();
+var items = new vis.DataSet();
+var currentFilter = "all";
+var refreshTimer = null;
+var REFRESH_INTERVAL = 60000; // 1분
+
+// ━━━ 초기화 ━━━
+function init() {
+  var container = document.getElementById("timeline");
+  var options = {
+    stack: false,
+    groupOrder: "content",
+    orientation: { axis: "top" },
+    zoomMin: 1000*60*60*6,
+    zoomMax: 1000*60*60*24*90,
+    start: new Date(Date.now() - 1000*60*60*24*1),
+    end:   new Date(Date.now() + 1000*60*60*24*7),
+    tooltip: { followMouse: false, overflowMethod: "cap" },
+    groupHeightMode: "fixed",
+    height: "100%",
+    margin: { item: { horizontal: 2, vertical: 3 }, axis: 4 },
+    locale: "ko",
+    showCurrentTime: true,
+    moveable: true,
+    zoomable: true,
+    selectable: true,
+    snap: null
+  };
+  timeline = new vis.Timeline(container, items, groups, options);
+
+  // 아이템 클릭 → 상세 팝업
+  timeline.on("select", function(props) {
+    if (props.items.length > 0) showDetail(props.items[0]);
+  });
+}
+
+// ━━━ 데이터 로드 (API fetch) ━━━
+function loadData() {
+  showLoading(true);
+  fetch(API_URL + "?key=village2026&action=timeline")
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      allGroups = data.groups || [];
+      allItems = data.items || [];
+      applyFilters();
+      showLoading(false);
+      updateRefreshInfo();
+    })
+    .catch(function(err) {
+      showLoading(false);
+      document.getElementById("statInfo").textContent = "오류: " + err.message;
+    });
+}
+
+// ━━━ 필터 ━━━
+function applyFilters() {
+  var query = document.getElementById("searchInput").value.trim().toLowerCase();
+  var visibleGroups = allGroups.filter(function(g) {
+    return !query || g.content.toLowerCase().indexOf(query) >= 0;
+  });
+  var gids = {};
+  visibleGroups.forEach(function(g) { gids[g.id] = true; });
+
+  var visibleItems = allItems.filter(function(item) {
+    if (!gids[item.group]) return false;
+    if (currentFilter === "active") return item.status === "대기" || item.status === "반출중";
+    return true;
+  });
+
+  groups.clear(); groups.add(visibleGroups);
+  items.clear(); items.add(visibleItems);
+
+  document.getElementById("emptyState").style.display =
+    visibleGroups.length === 0 ? "flex" : "none";
+  updateStat();
+}
+
+function updateStat() {
+  var q = document.getElementById("searchInput").value.trim();
+  var s = groups.length, t = allGroups.length, ic = items.length;
+  document.getElementById("statInfo").textContent =
+    q ? s + "/" + t + "개 장비 · " + ic + "건"
+      : t + "개 장비 · " + allItems.length + "건";
+}
+
+// ━━━ 상세 팝업 ━━━
+function showDetail(itemId) {
+  var item = allItems.find(function(i) { return i.id === itemId; });
+  if (!item || !item.title) return;
+
+  var lines = item.title.split("\n");
+  var html = '<h4>' + (item.content || "") + '</h4>';
+  lines.forEach(function(line) {
+    var parts = line.split(": ");
+    if (parts.length >= 2) {
+      html += '<div class="detail-row"><span class="label">' + parts[0] +
+        '</span><span class="value">' + parts.slice(1).join(": ") + '</span></div>';
+    }
+  });
+  html += '<button class="detail-close" onclick="closeDetail()">닫기</button>';
+
+  document.getElementById("detailCard").innerHTML = html;
+  document.getElementById("detailOverlay").classList.add("show");
+}
+
+function closeDetail(e) {
+  if (!e || e.target === document.getElementById("detailOverlay")) {
+    document.getElementById("detailOverlay").classList.remove("show");
+  }
+}
+
+// ━━━ 컨트롤 ━━━
+function moveToday() {
+  var now = new Date();
+  timeline.setWindow(
+    new Date(now - 1000*60*60*24*1),
+    new Date(now.getTime() + 1000*60*60*24*7)
+  );
+}
+
+function filterStatus(type) {
+  currentFilter = type;
+  document.getElementById("btnAll").classList.toggle("on", type === "all");
+  document.getElementById("btnActive").classList.toggle("on", type === "active");
+  applyFilters();
+}
+
+function reload() {
+  document.getElementById("searchInput").value = "";
+  currentFilter = "all";
+  document.getElementById("btnAll").classList.add("on");
+  document.getElementById("btnActive").classList.remove("on");
+  loadData();
+}
+
+function showLoading(show) {
+  document.getElementById("loading").style.display = show ? "flex" : "none";
+}
+
+// ━━━ 자동 갱신 ━━━
+function startAutoRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(function() {
+    loadData();
+  }, REFRESH_INTERVAL);
+}
+
+function updateRefreshInfo() {
+  var now = new Date();
+  var t = ("0"+now.getHours()).slice(-2) + ":" + ("0"+now.getMinutes()).slice(-2);
+  document.getElementById("refreshInfo").textContent = t + " 갱신 · 1분마다";
+}
+
+// ━━━ 검색 ━━━
+document.getElementById("searchInput").addEventListener("input", applyFilters);
+
+// ━━━ 시작 ━━━
+init();
+loadData();
+startAutoRefresh();
+document.getElementById("btnAll").classList.add("on");
+</script>
+</body>
+</html>
