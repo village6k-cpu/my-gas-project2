@@ -35,7 +35,8 @@ function doGet(e) {
     var pageMap = {
       "request":  { file: "requestForm",    title: "빌리지 확인요청" },
       "timeline": { file: "timelineMobile", title: "빌리지 스케줄" },
-      "dashboard": { file: "dashboard",    title: "빌리지 오늘 일정" }
+      "dashboard": { file: "dashboard",    title: "빌리지 오늘 일정" },
+      "manage":   { file: "requestManage",  title: "확인요청 관리" }
     };
     var pg = pageMap[params.page];
     if (pg) {
