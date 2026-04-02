@@ -1358,13 +1358,19 @@ function registerByReqID(sheet, triggerRow) {
   var 추가요청텍스트 = 추가요청목록.join("\n");
 
   // ── 계약서 생성 (개고생2.0 입력 후 처리) ──
+  var contractResult = "";
   try {
     const templateId = PropertiesService.getScriptProperties().getProperty("CONTRACT_TEMPLATE_ID");
     if (templateId) {
       const result = generateContractFile(ss, 거래ID, 추가요청텍스트);
+      contractResult = "계약서생성완료";
       Logger.log("계약서 자동 생성 완료: " + 거래ID);
+    } else {
+      contractResult = "템플릿ID미설정";
+      Logger.log("CONTRACT_TEMPLATE_ID 미설정 — 계약서 생성 스킵");
     }
   } catch (err) {
+    contractResult = "계약서실패:" + err.message;
     Logger.log("계약서 자동 생성 실패 (계속 진행): " + err.message);
   }
 
@@ -1374,7 +1380,7 @@ function registerByReqID(sheet, triggerRow) {
       if (allData[i][14] === '거절' || allData[i][14] === '보류') continue;  // 거절/보류 스킵
     const row = i + 2;
     sheet.getRange(row, 14).setValue("등록");      // N열: 등록
-    sheet.getRange(row, 15).setValue("등록완료");   // O열: 등록상태
+    sheet.getRange(row, 15).setValue("등록완료" + (contractResult !== "계약서생성완료" ? " (" + contractResult + ")" : ""));   // O열: 등록상태
     sheet.getRange(row, 16).setValue(거래ID);       // P열: 거래ID
     sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
   }

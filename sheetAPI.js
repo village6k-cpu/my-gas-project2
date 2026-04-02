@@ -330,8 +330,14 @@ function doScheduleAction(action, reqID) {
       return jsonResponse({ status: "OK", action: "확인", reqID: reqID });
 
     case "등록":
-      registerByReqID(sheet, targetRow);
-      return jsonResponse({ status: "OK", action: "등록", reqID: reqID });
+      try {
+        registerByReqID(sheet, targetRow);
+      } catch (regErr) {
+        return jsonResponse({ status: "ERROR", action: "등록", reqID: reqID, message: regErr.message });
+      }
+      // 등록 후 O열 상태 읽어서 반환
+      var regStatus = sheet.getRange(targetRow, 15).getDisplayValue();
+      return jsonResponse({ status: "OK", action: "등록", reqID: reqID, message: regStatus });
 
     case "보류":
       holdByReqID(sheet, allData, reqID);
