@@ -183,6 +183,18 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   //   우측: H(품목, 병합), J(수량), K(일수), L(단가) — M(금액)은 수식 자동계산
   const ITEMS_PER_SIDE = rows.itemRows || 22;  // 한 쪽 행 수
 
+  // 품목 영역 데이터 유효성 검사 — 드롭다운 유지 + 엄격모드 해제 (코드 입력 허용)
+  var allItemRange = ws.getRange(rows.itemStart, 1, ITEMS_PER_SIDE, 14);  // A~N열
+  var validations = allItemRange.getDataValidations();
+  for (var ri = 0; ri < validations.length; ri++) {
+    for (var ci = 0; ci < validations[ri].length; ci++) {
+      if (validations[ri][ci]) {
+        validations[ri][ci] = validations[ri][ci].copy().setAllowInvalid(true).build();
+      }
+    }
+  }
+  allItemRange.setDataValidations(validations);
+
   for (let i = 0; i < items.length && i < ITEMS_PER_SIDE * 2; i++) {
     const item = items[i];
     let row, nameCol, qtyCol, dayCol, priceCol;

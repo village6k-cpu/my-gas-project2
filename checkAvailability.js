@@ -387,6 +387,9 @@ function handleScheduleEdit(e) {
   // N열(14): 등록/추가/삭제/날짜변경/거절/보류 드롭다운
   if (col === 14) {
     if (val === "등록") {
+      // API에서 이미 등록 처리한 경우 onEdit 이중 호출 방지
+      var oVal = sheet.getRange(row, 15).getValue();
+      if (String(oVal).indexOf("등록완료") >= 0) return;
       registerByReqID(sheet, row);
     } else if (val === "추가") {
       addEquipmentToContract(sheet, row);
@@ -1482,12 +1485,23 @@ function registerByReqID(sheet, triggerRow) {
 
   const 거래ID = `${prefix거래}-${String(maxNum + 1).padStart(3, "0")}`;
 
+  // ── 회차 계산 (24시간=1회차, 6시간 이내 초과는 같은 회차) ──
+  var 회차 = 1;
+  try {
+    var startDT = parseDT(반출일str, 반출시간str);
+    var endDT = parseDT(반납일str, 반납시간str);
+    if (startDT && endDT && endDT > startDT) {
+      var totalHours = (endDT - startDT) / (1000 * 60 * 60);
+      회차 = Math.max(1, Math.ceil((totalHours - 6) / 24));
+    }
+  } catch (e) { Logger.log("회차 계산 실패: " + e.message); }
+
   // ── 계약마스터에 등록 ──
   const newContractRow = contractLastRow + 1;
   contractSheet.getRange(newContractRow, 1, 1, 11).setValues([[
     거래ID, 예약자명, 연락처 || "", 업체명 || "",
     반출일str, 반출시간str, 반납일str, 반납시간str,
-    "", "예약", ""
+    회차, "예약", ""
   ]]);
 
 
