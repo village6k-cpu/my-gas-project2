@@ -110,6 +110,28 @@
 
   .hidden { display:none; }
 
+  /* 자동완성 드롭다운 */
+  .ac-wrap { position:relative; }
+  .ac-list {
+    display:none; position:absolute; top:100%; left:0; right:0;
+    background:#fff; border:2px solid #3498db; border-top:none;
+    border-radius:0 0 10px 10px; max-height:200px; overflow-y:auto;
+    z-index:50; box-shadow:0 4px 12px rgba(0,0,0,.15);
+  }
+  .ac-list.show { display:block; }
+  .ac-item {
+    padding:12px 14px; font-size:15px; cursor:pointer;
+    border-bottom:1px solid #f0f0f0;
+  }
+  .ac-item:active, .ac-item.selected { background:#ebf5fb; }
+  .ac-item .ac-match { color:#3498db; font-weight:700; }
+  .ac-badge {
+    display:inline-block; font-size:11px; color:#888;
+    background:#f0f0f0; border-radius:4px; padding:1px 6px; margin-left:6px;
+  }
+  .equip-matched { border-color:#27ae60 !important; }
+  .equip-unmatched { border-color:#e74c3c !important; }
+
   /* 입력 방식 탭 */
   .tab-bar {
     display:flex; gap:0; margin-bottom:14px;
@@ -266,6 +288,9 @@ a7s3 바디세트 2대
 <script>
 // ━━━ 웹앱 URL (자기 자신) ━━━
 var API_URL = "";  // doGet에서 주입됨
+
+// 페이지 로드 시 장비 목록 미리 로드
+setTimeout(function() { if (API_URL) loadEquipList(); }, 100);
 
 // ━━━ 카카오톡 텍스트 파싱 ━━━
 function parseChat() {
@@ -440,15 +465,165 @@ function buildDate(m, d) {
   return year + "-" + String(m).padStart(2,"0") + "-" + String(d).padStart(2,"0");
 }
 
+// ━━━ 장비 목록 로드 ━━━
+var equipMasterList = [];
+
+function loadEquipList() {
+  fetch(API_URL + "?key=village2026&action=read&sheet=목록&range=A2:A500")
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.values) {
+        equipMasterList = data.values.flat().filter(function(v) { return v; });
+      } else if (Array.isArray(data)) {
+        equipMasterList = data.flat().filter(function(v) { return v; });
+      }
+    })
+    .catch(function(e) { console.log("장비 목록 로드 실패:", e); });
+}
+
 // ━━━ 장비 행 추가/삭제 ━━━
 function addEquipRow(name, qty) {
   var tbody = document.getElementById("equipList");
   var tr = document.createElement("tr");
+
+  // 자동 매칭 시도
+  var matchedName = name ? clientFuzzyMatch(name) : "";
+  var isMatched = matchedName && equipMasterList.indexOf(matchedName) >= 0;
+  var displayName = matchedName || name || "";
+  var borderClass = name ? (isMatched ? "equip-matched" : "equip-unmatched") : "";
+
   tr.innerHTML =
-    '<td><input type="text" class="equip-name" value="' + (name || "") + '" placeholder="장비명"></td>' +
+    '<td class="ac-wrap">' +
+      '<input type="text" class="equip-name ' + borderClass + '" value="' + displayName.replace(/"/g, '&quot;') + '" placeholder="장비명 검색" autocomplete="off" onfocus="showAcList(this)" oninput="filterAcList(this)">' +
+      '<div class="ac-list"></div>' +
+    '</td>' +
     '<td><input type="text" class="qty equip-qty" value="' + (qty || 1) + '"></td>' +
     '<td><button class="btn-del" onclick="this.closest(\'tr\').remove()">✕</button></td>';
   tbody.appendChild(tr);
+}
+
+// ━━━ 자동완성 ━━━
+function showAcList(input) {
+  filterAcList(input);
+}
+
+function filterAcList(input) {
+  var wrap = input.closest(".ac-wrap");
+  var list = wrap.querySelector(".ac-list");
+  var query = input.value.trim().toLowerCase().replace(/\s+/g, "");
+
+  if (!query && equipMasterList.length === 0) {
+    list.classList.remove("show");
+    return;
+  }
+
+  // 필터링 + 점수
+  var scored = equipMasterList.map(function(name) {
+    var nameLower = name.toLowerCase().replace(/\s+/g, "");
+    var score = 0;
+    if (!query) { score = 1; }
+    else if (nameLower === query) { score = 100; }
+    else if (nameLower.indexOf(query) >= 0) { score = 80; }
+    else if (query.indexOf(nameLower) >= 0) { score = 60; }
+    else {
+      // 키워드 매칭
+      var keywords = query.match(/[a-z]+\d+[a-z]*\d*|[가-힣]{2,}|[a-z]{2,}/gi) || [];
+      keywords.forEach(function(kw) {
+        if (nameLower.indexOf(kw.toLowerCase()) >= 0) score += 20;
+      });
+    }
+    return { name: name, score: score };
+  }).filter(function(s) { return s.score > 0; })
+    .sort(function(a, b) { return b.score - a.score; })
+    .slice(0, 15);
+
+  if (scored.length === 0) {
+    list.classList.remove("show");
+    return;
+  }
+
+  list.innerHTML = scored.map(function(s) {
+    var display = highlightMatch(s.name, query);
+    return '<div class="ac-item" onmousedown="selectAcItem(this, \'' + s.name.replace(/'/g, "\\'") + '\')">' + display + '</div>';
+  }).join("");
+  list.classList.add("show");
+}
+
+function highlightMatch(name, query) {
+  if (!query) return name;
+  var idx = name.toLowerCase().replace(/\s+/g, "").indexOf(query);
+  // 단순 하이라이트 - 원문에서 찾기
+  var lowerName = name.toLowerCase();
+  var qi = 0;
+  var result = "";
+  for (var i = 0; i < name.length && qi < query.length; i++) {
+    if (name[i].toLowerCase() === query[qi] || (name[i] === " ")) {
+      if (name[i].toLowerCase() === query[qi]) {
+        result += '<span class="ac-match">' + name[i] + '</span>';
+        qi++;
+      } else {
+        result += name[i];
+      }
+    } else {
+      result += name[i];
+    }
+  }
+  result += name.substring(result.replace(/<[^>]*>/g, "").length);
+  return result || name;
+}
+
+function selectAcItem(el, name) {
+  var wrap = el.closest(".ac-wrap");
+  var input = wrap.querySelector(".equip-name");
+  input.value = name;
+  input.className = "equip-name equip-matched";
+  wrap.querySelector(".ac-list").classList.remove("show");
+}
+
+// 전역 클릭으로 드롭다운 닫기
+document.addEventListener("click", function(e) {
+  if (!e.target.closest(".ac-wrap")) {
+    document.querySelectorAll(".ac-list").forEach(function(l) { l.classList.remove("show"); });
+  }
+});
+
+// ━━━ 클라이언트 퍼지 매칭 ━━━
+function clientFuzzyMatch(input) {
+  if (!input || equipMasterList.length === 0) return input;
+  var q = input.toLowerCase().replace(/\s+/g, "");
+
+  // 정확 일치
+  for (var i = 0; i < equipMasterList.length; i++) {
+    if (equipMasterList[i].toLowerCase().replace(/\s+/g, "") === q) return equipMasterList[i];
+  }
+
+  // 포함 매칭 (가장 짧은 길이 차이)
+  var contains = [];
+  for (var i = 0; i < equipMasterList.length; i++) {
+    var n = equipMasterList[i].toLowerCase().replace(/\s+/g, "");
+    if (n.indexOf(q) >= 0 || q.indexOf(n) >= 0) {
+      contains.push({ name: equipMasterList[i], diff: Math.abs(n.length - q.length) });
+    }
+  }
+  if (contains.length > 0) {
+    contains.sort(function(a, b) { return a.diff - b.diff; });
+    return contains[0].name;
+  }
+
+  // 키워드 매칭
+  var keywords = q.match(/[a-z]+\d+[a-z]*\d*|[a-z]{2,}/gi) || [];
+  if (keywords.length > 0) {
+    var best = null, bestScore = 0;
+    for (var i = 0; i < equipMasterList.length; i++) {
+      var n = equipMasterList[i].toLowerCase().replace(/\s+/g, "");
+      var score = 0;
+      keywords.forEach(function(kw) { if (n.indexOf(kw.toLowerCase()) >= 0) score++; });
+      if (score > bestScore) { bestScore = score; best = equipMasterList[i]; }
+    }
+    if (best) return best;
+  }
+
+  return input; // 매칭 실패 시 원본
 }
 
 // ━━━ 확인요청 제출 ━━━
