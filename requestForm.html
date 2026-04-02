@@ -504,6 +504,12 @@ function addEquipRow(name, qty) {
 
 // ━━━ 자동완성 ━━━
 function showAcList(input) {
+  // 포커스 시: 미매칭(빨강)이면 입력값 비우고 전체 목록 표시
+  if (input.classList.contains("equip-unmatched")) {
+    input.dataset.original = input.value;
+    input.value = "";
+    input.placeholder = input.dataset.original + " → 선택하세요";
+  }
   filterAcList(input);
 }
 
@@ -512,7 +518,7 @@ function filterAcList(input) {
   var list = wrap.querySelector(".ac-list");
   var query = input.value.trim().toLowerCase().replace(/\s+/g, "");
 
-  if (!query && equipMasterList.length === 0) {
+  if (equipMasterList.length === 0) {
     list.classList.remove("show");
     return;
   }
@@ -535,15 +541,17 @@ function filterAcList(input) {
     return { name: name, score: score };
   }).filter(function(s) { return s.score > 0; })
     .sort(function(a, b) { return b.score - a.score; })
-    .slice(0, 15);
+    .slice(0, 30);
 
-  if (scored.length === 0) {
-    list.classList.remove("show");
-    return;
+  if (scored.length === 0 && query) {
+    // 검색 결과 없으면 전체 목록 표시
+    scored = equipMasterList.slice(0, 30).map(function(name) {
+      return { name: name, score: 1 };
+    });
   }
 
   list.innerHTML = scored.map(function(s) {
-    var display = highlightMatch(s.name, query);
+    var display = query ? highlightMatch(s.name, query) : s.name;
     return '<div class="ac-item" onmousedown="selectAcItem(this, \'' + s.name.replace(/'/g, "\\'") + '\')">' + display + '</div>';
   }).join("");
   list.classList.add("show");
