@@ -176,12 +176,12 @@ function getTimelineData() {
 // 오늘 반출/반납 대시보드 데이터
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function getDashboardData() {
+function getDashboardData(targetDate) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
 
-  var today = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
+  var today = targetDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
 
   // 계약마스터: 거래ID → { 예약자명, 연락처, 업체명 }
   var contractMap = {};

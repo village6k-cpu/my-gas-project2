@@ -134,7 +134,7 @@ function handleRequest(e) {
         return jsonResponse(getTimelineData());
 
       case "dashboard":
-        return jsonResponse(getDashboardData());
+        return jsonResponse(getDashboardData(params.date || postBody.date || null));
 
       // ━━━ 스케줄 관리 API ━━━
 
