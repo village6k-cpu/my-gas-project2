@@ -215,58 +215,63 @@ function doListPending() {
   if (lastRow < 2) return jsonResponse({ status: "OK", count: 0, items: [] });
 
   const data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
-  // Date → 문자열 변환용
-  const displayData = sheet.getRange(2, 1, lastRow - 1, 18).getDisplayValues();
 
-  const pending = [];
-  const seen = new Set();
+  // Date → 문자열 변환 헬퍼 (getDisplayValues 호출 제거)
+  function fmtCell(v) {
+    if (v instanceof Date) return Utilities.formatDate(v, "Asia/Seoul", "yyyy-MM-dd HH:mm");
+    return String(v || "");
+  }
+
+  // ── 단일 패스로 reqID별 그룹핑 ──
+  const groupMap = {};   // reqID → { firstIdx, items, isCompleted }
+  const groupOrder = []; // 출현 순서 보존
 
   for (let i = 0; i < data.length; i++) {
     const reqID = data[i][0];
-    if (!reqID || seen.has(reqID)) continue;
-    seen.add(reqID);
+    if (!reqID) continue;
 
-    // 같은 reqID의 모든 행에서 등록상태 확인
-    let isCompleted = false;
-    for (let k = 0; k < data.length; k++) {
-      if (data[k][0] === reqID) {
-        const rowStatus = String(data[k][14] || "").trim();
-        if (rowStatus === "등록완료" || rowStatus === "거절") {
-          isCompleted = true;
-          break;
-        }
-      }
+    if (!groupMap[reqID]) {
+      groupMap[reqID] = { firstIdx: i, items: [], isCompleted: false };
+      groupOrder.push(reqID);
+    }
+    const g = groupMap[reqID];
+
+    const rowStatus = String(data[i][14] || "").trim();
+    if (rowStatus === "등록완료" || rowStatus === "거절") {
+      g.isCompleted = true;
     }
 
-    if (!isCompleted) {
-      // 같은 reqID의 모든 장비 수집
-      const items = [];
-      for (let j = 0; j < data.length; j++) {
-        if (data[j][0] === reqID && data[j][5]) {
-          items.push({
-            장비명: data[j][5],
-            수량: data[j][6] || 1,
-            결과: data[j][8] || "",
-            상세: data[j][9] || ""
-          });
-        }
-      }
-
-      pending.push({
-        reqID: reqID,
-        반출일: displayData[i][1],
-        반출시간: displayData[i][2],
-        반납일: displayData[i][3],
-        반납시간: displayData[i][4],
-        예약자명: data[i][10] || "",     // K열
-        연락처: data[i][11] || "",       // L열
-        업체명: data[i][12] || "",       // M열
-        장비목록: items,
-        추가요청: data[i][17] || "",     // R열
-        결과요약: result,
-        등록상태: status || "대기"
+    if (data[i][5]) {
+      g.items.push({
+        장비명: data[i][5],
+        수량: data[i][6] || 1,
+        결과: data[i][8] || "",
+        상세: data[i][9] || ""
       });
     }
+  }
+
+  const pending = [];
+  for (let gi = 0; gi < groupOrder.length; gi++) {
+    const reqID = groupOrder[gi];
+    const g = groupMap[reqID];
+    if (g.isCompleted) continue;
+
+    const i = g.firstIdx;
+    pending.push({
+      reqID: reqID,
+      반출일: fmtCell(data[i][1]),
+      반출시간: fmtCell(data[i][2]),
+      반납일: fmtCell(data[i][3]),
+      반납시간: fmtCell(data[i][4]),
+      예약자명: data[i][10] || "",     // K열
+      연락처: data[i][11] || "",       // L열
+      업체명: data[i][12] || "",       // M열
+      장비목록: g.items,
+      추가요청: data[i][17] || "",     // R열
+      결과요약: data[i][8] || "",
+      등록상태: data[i][14] || "대기"
+    });
   }
 
   return jsonResponse({ status: "OK", count: pending.length, items: pending });
@@ -282,7 +287,7 @@ function doScanAll() {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return jsonResponse({ status: "OK", action: "scan", processed: 0 });
 
-  const data = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
+  const data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
   let processed = 0;
 
   for (let i = 0; i < data.length; i++) {
@@ -315,7 +320,7 @@ function doScheduleAction(action, reqID) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return jsonResponse({ status: "ERROR", message: "데이터 없음" });
 
-  const allData = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
+  const allData = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
 
   // 해당 reqID의 첫 번째 행 찾기
   let targetRow = -1;
