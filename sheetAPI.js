@@ -229,10 +229,19 @@ function doListPending() {
     if (!reqID || seen.has(reqID)) continue;
     seen.add(reqID);
 
-    const status = data[i][14] || "";  // O열: 등록상태
-    const result = data[i][8] || "";   // I열: 결과
+    // 같은 reqID의 모든 행에서 등록상태 확인
+    let isCompleted = false;
+    for (let k = 0; k < data.length; k++) {
+      if (data[k][0] === reqID) {
+        const rowStatus = String(data[k][14] || "").trim();
+        if (rowStatus === "등록완료" || rowStatus === "거절") {
+          isCompleted = true;
+          break;
+        }
+      }
+    }
 
-    if (status !== "등록완료" && status !== "거절") {
+    if (!isCompleted) {
       // 같은 reqID의 모든 장비 수집
       const items = [];
       for (let j = 0; j < data.length; j++) {
