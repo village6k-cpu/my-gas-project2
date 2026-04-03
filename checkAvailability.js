@@ -784,6 +784,35 @@ function insertAndCheckRequest(req) {
  * 확인요청 수정 — reqID 기준으로 데이터 업데이트 후 가용확인 재실행
  * req: { reqID: "RQ-...", 반출일?, 반출시간?, 반납일?, 반납시간?, 예약자명?, 연락처?, 장비?: [{이름, 수량}] }
  */
+/**
+ * 확인요청에서 특정 장비 행을 보류 처리 (등록 전 제외용)
+ */
+function excludeEquipFromRequest(req) {
+  if (!req.reqID || !req.제외장비 || req.제외장비.length === 0) return { status: "OK", excluded: 0 };
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("확인요청");
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { status: "OK", excluded: 0 };
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
+  var excluded = 0;
+
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim() !== req.reqID) continue;
+    var 장비명 = String(data[i][5] || "").trim();
+    if (req.제외장비.indexOf(장비명) >= 0) {
+      var row = i + 2;
+      sheet.getRange(row, 14).setValue("보류");     // N열
+      sheet.getRange(row, 15).setValue("보류");     // O열
+      excluded++;
+    }
+  }
+  SpreadsheetApp.flush();
+  return { status: "OK", excluded: excluded };
+}
+
+
 function updateRequest(req) {
   if (!req.reqID) throw new Error("reqID 필수");
 
@@ -1610,19 +1639,13 @@ function registerByReqID(sheet, triggerRow) {
   var 추가요청텍스트 = 추가요청목록.join("\n");
 
   // ── 계약서 생성 (개고생2.0 입력 후 처리) ──
-  var contractResult = "";
   try {
     const templateId = PropertiesService.getScriptProperties().getProperty("CONTRACT_TEMPLATE_ID");
     if (templateId) {
       const result = generateContractFile(ss, 거래ID, 추가요청텍스트);
-      contractResult = "계약서생성완료";
       Logger.log("계약서 자동 생성 완료: " + 거래ID);
-    } else {
-      contractResult = "템플릿ID미설정";
-      Logger.log("CONTRACT_TEMPLATE_ID 미설정 — 계약서 생성 스킵");
     }
   } catch (err) {
-    contractResult = "계약서실패:" + err.message;
     Logger.log("계약서 자동 생성 실패 (계속 진행): " + err.message);
   }
 
@@ -1632,7 +1655,7 @@ function registerByReqID(sheet, triggerRow) {
       if (allData[i][14] === '거절' || allData[i][14] === '보류') continue;  // 거절/보류 스킵
     const row = i + 2;
     sheet.getRange(row, 14).setValue("등록");      // N열: 등록
-    sheet.getRange(row, 15).setValue("등록완료" + (contractResult !== "계약서생성완료" ? " (" + contractResult + ")" : ""));   // O열: 등록상태
+    sheet.getRange(row, 15).setValue("등록완료");   // O열: 등록상태
     sheet.getRange(row, 16).setValue(거래ID);       // P열: 거래ID
     sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
   }
