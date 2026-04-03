@@ -323,7 +323,9 @@ function parseDT(dateVal, timeVal) {
       timeStr = String(timeVal).trim();
     }
 
-    return new Date(dateStr + 'T' + timeStr + ':00+09:00');
+    var dt = new Date(dateStr + 'T' + timeStr + ':00+09:00');
+    if (isNaN(dt.getTime())) return null;
+    return dt;
   } catch (e) { return null; }
 }
 
