@@ -1481,6 +1481,52 @@ function registerByReqID(sheet, triggerRow) {
         return;
       }
     }
+
+    // ── 스케줄상세 중복 등록 체크: 같은 예약자명 + 반출일 + 장비목록 ──
+    if (schedSheet && schedSheet.getLastRow() >= 2) {
+      var dupDate = "";
+      var dupEquips = [];
+      for (var di = 0; di < allData.length; di++) {
+        if (allData[di][0] !== reqID) continue;
+        if (allData[di][14] === "거절" || allData[di][14] === "보류") continue;
+        if (allData[di][1]) {
+          var dv = allData[di][1];
+          dupDate = dv instanceof Date ? Utilities.formatDate(dv, "Asia/Seoul", "yyyy-MM-dd") : String(dv).trim();
+        }
+        if (allData[di][5]) dupEquips.push(String(allData[di][5]).trim());
+      }
+      var dupEquipSet = dupEquips.sort().join("|");
+
+      if (dupDate && dupEquipSet && 예약자명) {
+        var schedData = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 6).getValues();
+        var cData = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 2).getValues();
+        var cMap = {};
+        cData.forEach(function(r) { if (r[0]) cMap[r[0]] = String(r[1] || "").trim(); });
+
+        var schedGroups = {};
+        for (var si = 0; si < schedData.length; si++) {
+          var tid = schedData[si][1];
+          if (!tid) continue;
+          if (!schedGroups[tid]) schedGroups[tid] = { date: "", equips: [] };
+          if (schedData[si][5]) {
+            var sv = schedData[si][5];
+            schedGroups[tid].date = sv instanceof Date ? Utilities.formatDate(sv, "Asia/Seoul", "yyyy-MM-dd") : String(sv).trim();
+          }
+          if (schedData[si][3]) schedGroups[tid].equips.push(String(schedData[si][3]).trim());
+        }
+        for (var tid in schedGroups) {
+          var sg = schedGroups[tid];
+          var schedName = cMap[tid] || "";
+          var schedEquipSet = sg.equips.sort().join("|");
+          if (schedName === 예약자명 && sg.date === dupDate && schedEquipSet === dupEquipSet) {
+            sheet.getRange(triggerRow, 15).setValue("⚠️ 중복: 동일 건이 이미 등록됨 (거래ID: " + tid + ")");
+            sheet.getRange(triggerRow, 14).clearContent();
+            lock.releaseLock();
+            return;
+          }
+        }
+      }
+    }
   } catch (lockErr) {
     lock.releaseLock();
     throw lockErr;
