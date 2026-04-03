@@ -686,9 +686,9 @@ function insertAndCheckRequest(req) {
   var reqDate = String(req.반출일 || "").trim();
 
   if (reqName && reqDate && reqEquipSet) {
-    var lastRow = sheet.getLastRow();
-    if (lastRow >= 2) {
-      var allData = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
+    var dupCheckLastRow = sheet.getLastRow();
+    if (dupCheckLastRow >= 2) {
+      var allData = sheet.getRange(2, 1, dupCheckLastRow - 1, 18).getValues();
       // reqID별로 그룹핑해서 비교
       var reqGroups = {};
       for (var di = 0; di < allData.length; di++) {
