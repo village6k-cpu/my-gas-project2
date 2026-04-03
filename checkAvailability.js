@@ -680,6 +680,70 @@ function insertAndCheckRequest(req) {
   const sheet = ss.getSheetByName("확인요청");
   if (!sheet) throw new Error("확인요청 시트 없음");
 
+  // ── 중복 체크: 같은 예약자명 + 반출일 + 장비목록 ──
+  var reqEquipSet = (req.장비 || []).map(function(e) { return String(e.이름 || "").trim(); }).sort().join("|");
+  var reqName = String(req.예약자명 || "").trim();
+  var reqDate = String(req.반출일 || "").trim();
+
+  if (reqName && reqDate && reqEquipSet) {
+    var lastRow = sheet.getLastRow();
+    if (lastRow >= 2) {
+      var allData = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
+      // reqID별로 그룹핑해서 비교
+      var reqGroups = {};
+      for (var di = 0; di < allData.length; di++) {
+        var rid = allData[di][0];
+        if (!rid) continue;
+        if (!reqGroups[rid]) reqGroups[rid] = { name: "", date: "", equips: [] };
+        if (allData[di][10]) reqGroups[rid].name = String(allData[di][10]).trim();  // K열: 예약자명
+        if (allData[di][1]) {  // B열: 반출일
+          var dv = allData[di][1];
+          reqGroups[rid].date = dv instanceof Date ? Utilities.formatDate(dv, "Asia/Seoul", "yyyy-MM-dd") : String(dv).trim();
+        }
+        if (allData[di][5]) reqGroups[rid].equips.push(String(allData[di][5]).trim());  // F열: 장비명
+      }
+      for (var rid in reqGroups) {
+        var g = reqGroups[rid];
+        var existEquipSet = g.equips.sort().join("|");
+        if (g.name === reqName && g.date === reqDate && existEquipSet === reqEquipSet) {
+          throw new Error("중복 요청: 동일한 예약자/반출일/장비 조합이 이미 존재합니다 (" + rid + ")");
+        }
+      }
+    }
+
+    // 스케줄상세(등록 완료된 건)에서도 중복 체크
+    var schedSheet = ss.getSheetByName("스케줄상세");
+    var contractSheet = ss.getSheetByName("계약마스터");
+    if (schedSheet && schedSheet.getLastRow() >= 2 && contractSheet && contractSheet.getLastRow() >= 2) {
+      // 계약마스터에서 거래ID → 예약자명 매핑
+      var cMap = {};
+      contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 2).getValues().forEach(function(r) {
+        if (r[0]) cMap[r[0]] = String(r[1] || "").trim();
+      });
+      // 스케줄상세: 거래ID별 반출일 + 장비목록
+      var schedData = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 6).getValues();
+      var schedGroups = {};
+      for (var si = 0; si < schedData.length; si++) {
+        var tid = schedData[si][1];  // B: 거래ID
+        if (!tid) continue;
+        if (!schedGroups[tid]) schedGroups[tid] = { date: "", equips: [] };
+        if (schedData[si][5]) {  // F: 반출일
+          var sv = schedData[si][5];
+          schedGroups[tid].date = sv instanceof Date ? Utilities.formatDate(sv, "Asia/Seoul", "yyyy-MM-dd") : String(sv).trim();
+        }
+        if (schedData[si][3]) schedGroups[tid].equips.push(String(schedData[si][3]).trim());  // D: 장비명
+      }
+      for (var tid in schedGroups) {
+        var sg = schedGroups[tid];
+        var schedName = cMap[tid] || "";
+        var schedEquipSet = sg.equips.sort().join("|");
+        if (schedName === reqName && sg.date === reqDate && schedEquipSet === reqEquipSet) {
+          throw new Error("중복 요청: 동일 건이 이미 예약 등록되어 있습니다 (거래ID: " + tid + ")");
+        }
+      }
+    }
+  }
+
   // 요청ID 생성
   const now = new Date();
   const dateStr = Utilities.formatDate(now, "Asia/Seoul", "yyMMdd");
