@@ -157,6 +157,22 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   // findRow() 로 자동 탐색
   const rows = findTemplateRows(ws);
 
+  // ── 전체 시트 데이터 유효성 검사 해제 (드롭다운 등으로 인한 입력 오류 방지) ──
+  var lastRowAll = ws.getLastRow();
+  var lastColAll = ws.getLastColumn();
+  if (lastRowAll > 0 && lastColAll > 0) {
+    var fullRange = ws.getRange(1, 1, lastRowAll, lastColAll);
+    var allValidations = fullRange.getDataValidations();
+    for (var ri = 0; ri < allValidations.length; ri++) {
+      for (var ci = 0; ci < allValidations[ri].length; ci++) {
+        if (allValidations[ri][ci]) {
+          allValidations[ri][ci] = allValidations[ri][ci].copy().setAllowInvalid(true).build();
+        }
+      }
+    }
+    fullRange.setDataValidations(allValidations);
+  }
+
   // ── 임차인 정보 (기존 템플릿 구조) ──
   // Row 8: 임차인 | 예약자(상호) → C열 | 연락처 → I열 부근
   // Row 9: 계약자(상호) → C열
@@ -182,18 +198,6 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   //   좌측: B(품목, 병합), D(수량), E(일수), F(단가) — G(금액)은 수식 자동계산
   //   우측: H(품목, 병합), J(수량), K(일수), L(단가) — M(금액)은 수식 자동계산
   const ITEMS_PER_SIDE = rows.itemRows || 22;  // 한 쪽 행 수
-
-  // 품목 영역 데이터 유효성 검사 — 드롭다운 유지 + 엄격모드 해제 (코드 입력 허용)
-  var allItemRange = ws.getRange(rows.itemStart, 1, ITEMS_PER_SIDE, 14);  // A~N열
-  var validations = allItemRange.getDataValidations();
-  for (var ri = 0; ri < validations.length; ri++) {
-    for (var ci = 0; ci < validations[ri].length; ci++) {
-      if (validations[ri][ci]) {
-        validations[ri][ci] = validations[ri][ci].copy().setAllowInvalid(true).build();
-      }
-    }
-  }
-  allItemRange.setDataValidations(validations);
 
   for (let i = 0; i < items.length && i < ITEMS_PER_SIDE * 2; i++) {
     const item = items[i];
