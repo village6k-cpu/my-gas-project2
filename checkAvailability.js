@@ -104,7 +104,6 @@ function getTimelineData() {
   }
 
   const data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getValues();
-
   // 장비명 → group id 매핑 (중복 제거, 순서 유지)
   const groupMap  = {};
   const groupList = [];
@@ -321,6 +320,12 @@ function parseDT(dateVal, timeVal) {
       timeStr = ('0' + timeVal.getHours()).slice(-2) + ':' + ('0' + timeVal.getMinutes()).slice(-2);
     } else if (timeVal && String(timeVal).trim() !== '') {
       timeStr = String(timeVal).trim();
+    }
+
+    // 한 자리 시간(예: "7:00")을 두 자리로 패딩 (ISO 형식 필수)
+    var timeParts = timeStr.split(':');
+    if (timeParts.length >= 2) {
+      timeStr = ('0' + timeParts[0]).slice(-2) + ':' + ('0' + timeParts[1]).slice(-2);
     }
 
     var dt = new Date(dateStr + 'T' + timeStr + ':00+09:00');
