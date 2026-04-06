@@ -81,8 +81,14 @@
   .vis-item {
     border-radius:6px !important; font-size:13px !important;
     font-weight:600 !important; border-width:0 !important;
-    padding:4px 8px !important;
-    min-height:28px !important;
+    padding:6px 10px !important;
+    min-height:32px !important;
+    line-height:20px !important;
+  }
+  .vis-item .vis-item-content {
+    white-space:nowrap !important;
+    overflow:hidden !important;
+    text-overflow:ellipsis !important;
   }
   .vis-item.status-대기     { background:#3B82F6 !important; color:#fff !important; }
   .vis-item.status-반출중   { background:#F59E0B !important; color:#fff !important; }
@@ -215,7 +221,7 @@ var REFRESH_INTERVAL = 60000; // 1분
 function init() {
   var container = document.getElementById("timeline");
   var options = {
-    stack: false,
+    stack: true,
     groupOrder: "content",
     orientation: { axis: "top" },
     zoomMin: 1000*60*60*6,
@@ -223,9 +229,9 @@ function init() {
     start: new Date(Date.now() - 1000*60*60*24*1),
     end:   new Date(Date.now() + 1000*60*60*24*7),
     tooltip: { followMouse: false, overflowMethod: "cap" },
-    groupHeightMode: "fixed",
+    groupHeightMode: "auto",
     height: "100%",
-    margin: { item: { horizontal: 2, vertical: 3 }, axis: 4 },
+    margin: { item: { horizontal: 2, vertical: 4 }, axis: 4 },
     locale: "ko",
     showCurrentTime: true,
     moveable: true,
