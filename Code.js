@@ -92,9 +92,86 @@ function onEditInstallable(e) {
   const row = e.range.getRow();
   if (row === 1) return;
 
+  // 확인요청 A열: 거래ID만 입력하면 자동으로 RQ- 붙이기
+  if (sheet.getName() === "확인요청" && col === 1 && row >= 2) {
+    var aVal = String(e.range.getValue()).trim();
+    if (aVal && !aVal.startsWith("RQ-") && /^\d{6}-\d{3}$/.test(aVal)) {
+      e.range.setValue("RQ-" + aVal);
+    }
+  }
+
   if (sheet.getName() === "확인요청" && col === 14) {
     handleScheduleEdit(e);
   }
+
+  // 계약마스터 J열(10) "취소" → 스케줄상세 삭제 + 개고생2.0 삭제
+  if (sheet.getName() === "계약마스터" && col === 10 && row >= 2) {
+    var val = e.range.getValue();
+    if (String(val).trim() === "취소") {
+      var 거래ID = String(sheet.getRange(row, 1).getValue()).trim();
+      if (거래ID) cancelContract(e.source, 거래ID, row);
+    }
+  }
+
+  // 스케줄상세 품목 수정 시 계약서 자동 재생성
+  if (sheet.getName() === "스케줄상세" && (col === 4 || col === 5) && row >= 2) {
+    try {
+      var 거래ID = sheet.getRange(row, 2).getValue();  // B열: 거래ID
+      if (거래ID) {
+        var ss = e.source;
+        deleteAndRegenerateContract(ss, String(거래ID).trim());
+        Logger.log("스케줄상세 수정 → 계약서 재생성 완료: " + 거래ID);
+      }
+    } catch (err) {
+      Logger.log("스케줄상세 수정 → 계약서 재생성 실패: " + err.message);
+    }
+  }
+}
+
+/**
+ * 계약 취소: 스케줄상세 삭제 + 개고생2.0 거래내역 삭제
+ */
+function cancelContract(ss, 거래ID, contractRow) {
+  var contractSheet = ss.getSheetByName("계약마스터");
+
+  // 1. 스케줄상세에서 해당 거래ID 행 삭제 (아래부터)
+  var schedSheet = ss.getSheetByName("스케줄상세");
+  if (schedSheet && schedSheet.getLastRow() >= 2) {
+    var schedData = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 2).getValues();
+    var deletedSched = 0;
+    for (var i = schedData.length - 1; i >= 0; i--) {
+      if (String(schedData[i][1]).trim() === 거래ID) {
+        schedSheet.deleteRow(i + 2);
+        deletedSched++;
+      }
+    }
+    Logger.log("스케줄상세 삭제: " + deletedSched + "행 (" + 거래ID + ")");
+  }
+
+  // 2. 개고생2.0 거래내역에서 해당 거래ID 행 삭제
+  try {
+    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    if (개고생URL) {
+      var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
+      var 거래시트 = 개고생SS.getSheetByName("거래내역");
+      if (거래시트 && 거래시트.getLastRow() >= 2) {
+        var ids = 거래시트.getRange(2, 4, 거래시트.getLastRow() - 1, 1).getValues();  // D열: 거래ID
+        for (var j = ids.length - 1; j >= 0; j--) {
+          if (String(ids[j][0]).trim() === 거래ID) {
+            거래시트.deleteRow(j + 2);
+            Logger.log("개고생2.0 거래내역 삭제: 행 " + (j + 2) + " (" + 거래ID + ")");
+          }
+        }
+      }
+    }
+  } catch (err) {
+    Logger.log("개고생2.0 거래내역 삭제 실패: " + err.message);
+  }
+
+  // 3. 계약마스터 행에 취소 표시
+  contractSheet.getRange(contractRow, 10).setBackground("#FFC7CE");
+
+  Logger.log("계약 취소 완료: " + 거래ID);
 }
 
 /**
