@@ -131,6 +131,21 @@
       color: var(--accent);
     }
 
+    .date-input {
+      padding: 5px 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      font-size: 12px;
+      color: var(--text-primary);
+      outline: none;
+      width: 130px;
+    }
+    .date-input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+    }
+
     /* ── 범례 + 통계 바 ── */
     .info-bar {
       background: var(--surface);
@@ -395,6 +410,10 @@
       <button class="pill" onclick="zoomOut()" title="축소">&minus;</button>
     </div>
 
+    <input type="date" id="dateFrom" class="date-input" title="시작일">
+    <span style="color:var(--text-muted);font-size:12px">~</span>
+    <input type="date" id="dateTo" class="date-input" title="종료일">
+
     <button class="icon-btn" onclick="moveToday()" title="오늘">T</button>
     <button class="icon-btn" onclick="fitAll()" title="전체보기">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -548,32 +567,15 @@
   function applyFilters() {
     var query = document.getElementById('searchInput').value.trim().toLowerCase();
 
-    var matchedGroupIds = {};
-
-    // 1) 그룹명(세트명) 매칭
-    allGroups.forEach(function(g) {
-      if (!query || g.content.toLowerCase().indexOf(query) >= 0) {
-        matchedGroupIds[g.id] = true;
-      }
-    });
-
-    // 2) 고객명 매칭 → 해당 그룹도 포함
-    if (query) {
-      allItems.forEach(function(item) {
-        if (item.custName && item.custName.toLowerCase().indexOf(query) >= 0) {
-          matchedGroupIds[item.group] = true;
-        }
-      });
-    }
-
-    // 아이템 필터
+    // 아이템 필터: 세트명 OR 고객명 매칭 + 상태 + 범례
     var visibleItems = allItems.filter(function(item) {
-      if (!matchedGroupIds[item.group]) {
-        if (query && item.custName && item.custName.toLowerCase().indexOf(query) >= 0) {
-          matchedGroupIds[item.group] = true;
-        } else {
-          return false;
-        }
+      // 검색어 필터: 세트명 또는 고객명에 매칭
+      if (query) {
+        var groupObj = allGroups.find(function(g) { return g.id === item.group; });
+        var setName = groupObj ? groupObj.content.toLowerCase() : '';
+        var custMatch = item.custName && item.custName.toLowerCase().indexOf(query) >= 0;
+        var setMatch = setName.indexOf(query) >= 0;
+        if (!custMatch && !setMatch) return false;
       }
 
       // 상태 필터
@@ -586,7 +588,7 @@
       return true;
     });
 
-    // 표시할 그룹
+    // 표시할 그룹: 필터된 아이템이 있는 그룹만
     var usedGroups = {};
     visibleItems.forEach(function(i) { usedGroups[i.group] = true; });
     var visibleGroups = allGroups.filter(function(g) { return usedGroups[g.id]; });
@@ -689,6 +691,28 @@
     el.textContent = msg;
     el.classList.add('show');
     setTimeout(function() { el.classList.remove('show'); }, 2500);
+  }
+
+  // ── 날짜 범위 선택 ──
+  document.getElementById('dateFrom').addEventListener('change', applyDateRange);
+  document.getElementById('dateTo').addEventListener('change', applyDateRange);
+
+  function applyDateRange() {
+    var from = document.getElementById('dateFrom').value;
+    var to   = document.getElementById('dateTo').value;
+    if (from && to) {
+      timeline.setWindow(
+        new Date(from + 'T00:00:00'),
+        new Date(to + 'T23:59:59'),
+        { animation: { duration: 400, easingFunction: 'easeInOutQuad' } }
+      );
+    } else if (from) {
+      timeline.setWindow(
+        new Date(from + 'T00:00:00'),
+        new Date(new Date(from).getTime() + 1000*60*60*24*10),
+        { animation: { duration: 400 } }
+      );
+    }
   }
 
   // ── 검색 디바운스 ──

@@ -118,6 +118,7 @@ function getTimelineData() {
     const 상태     = row[9] || '대기';  // J
     const 단가     = row[11] || 0;  // L
 
+    // 세트명 없는 개별 장비는 타임라인에서 제외
     if (!세트명 || !반출일 || !반납일) return;
 
     const startDT = parseDT(반출일, 반출시간);
@@ -137,6 +138,7 @@ function getTimelineData() {
         endDT:     endDT,
         상태:      상태,
         장비목록:  [],
+        수량목록:  [],
         총단가:    0,
         rowIndices: [],
         반출:      fmtDT(반출일, 반출시간),
@@ -145,10 +147,10 @@ function getTimelineData() {
     }
 
     var m = mergeMap[key];
-    m.장비목록.push(장비명 + (수량 > 1 ? ' x' + 수량 : ''));
+    m.장비목록.push(장비명);
+    m.수량목록.push(Number(수량) || 1);
     m.총단가 += (Number(단가) || 0) * (Number(수량) || 1);
     m.rowIndices.push(idx + 2);
-    // 가장 이른 반출, 가장 늦은 반납 사용
     if (startDT < m.startDT) m.startDT = startDT;
     if (endDT > m.endDT) m.endDT = endDT;
   });
@@ -168,31 +170,37 @@ function getTimelineData() {
       groupList.push({ id: groupMap[m.세트명], content: m.세트명 });
     }
 
+    // 세트 수 계산: 구성품 수량 중 최솟값 = 세트 수
+    var setCount = Math.min.apply(null, m.수량목록) || 1;
+
     // 상태 → 클래스
     const statusClass = ['대기','반출중','반납완료','취소'].indexOf(m.상태) >= 0
       ? 'status-' + m.상태 : 'status-기타';
 
-    itemList.push({
-      id:        'item_' + itemIdx++,
-      rowIndex:  m.rowIndices[0],  // 드래그 시 대표 행 업데이트
-      rowIndices: m.rowIndices,    // 전체 행 목록
-      group:     groupMap[m.세트명],
-      content:   m.custName,
-      start:     m.startDT.toISOString(),
-      end:       m.endDT.toISOString(),
-      className: statusClass,
-      status:    m.상태,
-      editable:  { updateTime: true, remove: false },
-      custName:  m.custName,
-      tel:       m.tel,
-      거래ID:    m.거래ID,
-      세트명:    m.세트명,
-      장비명:    m.장비목록.join(', '),
-      수량:      m.장비목록.length + '종',
-      반출:      m.반출,
-      반납:      m.반납,
-      단가:      m.총단가
-    });
+    // 세트 수만큼 바 생성
+    for (var s = 0; s < setCount; s++) {
+      itemList.push({
+        id:        'item_' + itemIdx++,
+        rowIndex:  m.rowIndices[0],
+        rowIndices: m.rowIndices,
+        group:     groupMap[m.세트명],
+        content:   m.custName,
+        start:     m.startDT.toISOString(),
+        end:       m.endDT.toISOString(),
+        className: statusClass,
+        status:    m.상태,
+        editable:  { updateTime: true, remove: false },
+        custName:  m.custName,
+        tel:       m.tel,
+        거래ID:    m.거래ID,
+        세트명:    m.세트명,
+        장비명:    m.장비목록.join(', '),
+        수량:      setCount + '세트',
+        반출:      m.반출,
+        반납:      m.반납,
+        단가:      Math.round(m.총단가 / setCount)
+      });
+    }
   });
 
   return { groups: groupList, items: itemList };
