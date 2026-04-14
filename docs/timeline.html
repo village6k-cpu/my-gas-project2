@@ -465,6 +465,7 @@ function init() {
     groupOrder: "content",
     orientation: { axis: "top" },
     timeAxis: { scale: "day", step: 1 },
+    verticalScroll: true,
     zoomMin:  1000 * 60 * 60 * 24 * 3,
     zoomMax:  1000 * 60 * 60 * 24 * 90,
     start:    new Date(now.getTime() - 1000*60*60*24*1),
@@ -578,6 +579,12 @@ function applyFilters() {
 
   groups.clear(); groups.add(visibleGroups);
   items.clear();  items.add(visibleItems);
+
+  // 검색/필터 후 스크롤 맨 위로
+  setTimeout(function() {
+    var el = document.querySelector('.vis-content');
+    if (el) el.scrollTop = 0;
+  }, 50);
 
   var txt = visibleGroups.length + "개 세트";
   if (visibleGroups.length < allGroups.length) txt = visibleGroups.length + "/" + allGroups.length + "개 세트";

@@ -502,6 +502,7 @@
       groupOrder: 'content',
       orientation: { axis: 'top' },
       timeAxis: { scale: 'day', step: 1 },
+      verticalScroll: true,
       zoomMin:  1000 * 60 * 60 * 24 * 3,
       zoomMax:  1000 * 60 * 60 * 24 * 90,
       start:    new Date(now.getTime() - 1000*60*60*24*1),
@@ -617,6 +618,12 @@
 
     groups.clear(); groups.add(visibleGroups);
     items.clear();  items.add(visibleItems);
+
+    // 검색/필터 후 스크롤 맨 위로
+    setTimeout(function() {
+      var el = document.querySelector('.vis-content');
+      if (el) el.scrollTop = 0;
+    }, 50);
 
     updateStat(visibleGroups.length, allGroups.length, visibleItems.length, allItems.length);
   }
