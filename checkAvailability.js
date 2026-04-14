@@ -103,20 +103,19 @@ function getTimelineData() {
 
   const data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getValues();
 
-  // 세트명이 있는 거래ID+세트명 조합 수집 (구성품 행 식별용)
-  const setKeys = {};  // "거래ID|세트명" → true
+  // 구성품 장비명 수집: 세트명이 있는 행의 장비명은 구성품
+  const componentNames = {};
   data.forEach(function(row) {
-    var tid = row[1], setName = String(row[2] || '').trim();
-    if (tid && setName) setKeys[tid + '|' + setName] = true;
+    var setName = String(row[2] || '').trim();
+    var equipName = String(row[3] || '').trim();
+    if (setName && equipName) componentNames[equipName] = true;
   });
 
-  // 대표 행만 추출: 같은 (거래ID + 세트명)에서 첫 행만 사용
-  // 세트명 있는 행 → 세트명으로 그룹, 같은 거래ID+세트명의 첫 행만 사용 (구성품 스킵)
-  // 세트명 없는 행 → 장비명으로 그룹 (개별 장비)
-  const seen = {};  // "거래ID|그룹명" → true (중복 방지)
+  const seen = {};   // "거래ID|그룹명" → true
   const entries = [];
 
-  data.forEach(function(row, idx) {
+  // 행 처리 함수
+  function processRow(row, idx, isSetPhase) {
     const 거래ID   = row[1];  // B
     const 세트명   = String(row[2] || '').trim();  // C
     const 장비명   = String(row[3] || '').trim();  // D
@@ -132,22 +131,20 @@ function getTimelineData() {
 
     var groupName, isSingleItem;
 
-    if (세트명) {
-      // 세트명 있는 행 → 세트명으로 그룹
+    if (isSetPhase) {
+      if (!세트명) return;  // Phase 1: 세트명 있는 행만
       groupName = 세트명;
       isSingleItem = false;
-    } else if (장비명) {
-      // 세트명 없고 장비명만 → 개별 장비로 표시
+    } else {
+      if (세트명) return;   // Phase 2: 세트명 없는 행만
+      if (!장비명) return;
+      if (componentNames[장비명]) return;  // 구성품이면 스킵
       groupName = 장비명;
       isSingleItem = true;
-    } else {
-      return;
     }
 
     const key = 거래ID + '|' + groupName;
-
-    // 세트인 경우: 같은 (거래ID+세트명)의 첫 행만 사용
-    if (!isSingleItem && seen[key]) return;
+    if (seen[key]) return;  // 중복 방지
     seen[key] = true;
 
     const startDT = parseDT(반출일, 반출시간);
@@ -156,7 +153,7 @@ function getTimelineData() {
 
     const cust = contractMap[거래ID] || {};
 
-    // 세트인 경우: 같은 거래ID+세트명의 모든 행 인덱스 수집
+    // 같은 거래ID+세트명의 모든 행 인덱스 수집
     var rowIndices = [];
     if (!isSingleItem) {
       data.forEach(function(r, i) {
@@ -183,7 +180,12 @@ function getTimelineData() {
       반납:      fmtDT(반납일, 반납시간),
       isSingleItem: isSingleItem
     });
-  });
+  }
+
+  // Phase 1: 세트 행 먼저 (세트명 있는 행)
+  data.forEach(function(row, idx) { processRow(row, idx, true); });
+  // Phase 2: 개별 장비 행 (세트명 없고 구성품 아닌 것만)
+  data.forEach(function(row, idx) { processRow(row, idx, false); });
 
   // 그룹 및 아이템 생성
   const groupMap  = {};
