@@ -103,102 +103,128 @@ function getTimelineData() {
 
   const data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getValues();
 
-  // 1단계: 같은 (거래ID + 세트명) 조합을 하나로 합침
-  const mergeMap = {};  // key: "거래ID|세트명" → merged info
+  // 세트명이 있는 거래ID+세트명 조합 수집 (구성품 행 식별용)
+  const setKeys = {};  // "거래ID|세트명" → true
+  data.forEach(function(row) {
+    var tid = row[1], setName = String(row[2] || '').trim();
+    if (tid && setName) setKeys[tid + '|' + setName] = true;
+  });
+
+  // 대표 행만 추출: 같은 (거래ID + 세트명)에서 첫 행만 사용
+  // 세트명 있는 행 → 세트명으로 그룹, 같은 거래ID+세트명의 첫 행만 사용 (구성품 스킵)
+  // 세트명 없는 행 → 장비명으로 그룹 (개별 장비)
+  const seen = {};  // "거래ID|그룹명" → true (중복 방지)
+  const entries = [];
 
   data.forEach(function(row, idx) {
     const 거래ID   = row[1];  // B
-    const 세트명   = row[2];  // C
-    const 장비명   = row[3];  // D
-    const 수량     = row[4] || 1;  // E
+    const 세트명   = String(row[2] || '').trim();  // C
+    const 장비명   = String(row[3] || '').trim();  // D
+    const 수량     = Number(row[4]) || 1;  // E
     const 반출일   = row[5];  // F
     const 반출시간 = row[6];  // G
     const 반납일   = row[7];  // H
     const 반납시간 = row[8];  // I
     const 상태     = row[9] || '대기';  // J
-    const 단가     = row[11] || 0;  // L
+    const 단가     = Number(row[11]) || 0;  // L
 
-    // 세트명 없는 개별 장비는 타임라인에서 제외
-    if (!세트명 || !반출일 || !반납일) return;
+    if (!반출일 || !반납일) return;
+
+    var groupName, isSingleItem;
+
+    if (세트명) {
+      // 세트명 있는 행 → 세트명으로 그룹
+      groupName = 세트명;
+      isSingleItem = false;
+    } else if (장비명) {
+      // 세트명 없고 장비명만 → 개별 장비로 표시
+      groupName = 장비명;
+      isSingleItem = true;
+    } else {
+      return;
+    }
+
+    const key = 거래ID + '|' + groupName;
+
+    // 세트인 경우: 같은 (거래ID+세트명)의 첫 행만 사용
+    if (!isSingleItem && seen[key]) return;
+    seen[key] = true;
 
     const startDT = parseDT(반출일, 반출시간);
     const endDT   = parseDT(반납일, 반납시간);
     if (!startDT || !endDT) return;
 
-    const key = 거래ID + '|' + 세트명;
+    const cust = contractMap[거래ID] || {};
 
-    if (!mergeMap[key]) {
-      const cust = contractMap[거래ID] || {};
-      mergeMap[key] = {
-        거래ID:    거래ID,
-        세트명:    세트명,
-        custName:  cust.name || 거래ID || '',
-        tel:       cust.tel || '',
-        startDT:   startDT,
-        endDT:     endDT,
-        상태:      상태,
-        장비목록:  [],
-        수량목록:  [],
-        총단가:    0,
-        rowIndices: [],
-        반출:      fmtDT(반출일, 반출시간),
-        반납:      fmtDT(반납일, 반납시간)
-      };
+    // 세트인 경우: 같은 거래ID+세트명의 모든 행 인덱스 수집
+    var rowIndices = [];
+    if (!isSingleItem) {
+      data.forEach(function(r, i) {
+        if (r[1] === 거래ID && String(r[2] || '').trim() === 세트명) {
+          rowIndices.push(i + 2);
+        }
+      });
+    } else {
+      rowIndices = [idx + 2];
     }
 
-    var m = mergeMap[key];
-    m.장비목록.push(장비명);
-    m.수량목록.push(Number(수량) || 1);
-    m.총단가 += (Number(단가) || 0) * (Number(수량) || 1);
-    m.rowIndices.push(idx + 2);
-    if (startDT < m.startDT) m.startDT = startDT;
-    if (endDT > m.endDT) m.endDT = endDT;
+    entries.push({
+      거래ID:    거래ID,
+      groupName: groupName,
+      custName:  cust.name || 거래ID || '',
+      tel:       cust.tel || '',
+      startDT:   startDT,
+      endDT:     endDT,
+      상태:      상태,
+      수량:      수량,
+      단가:      단가,
+      rowIndices: rowIndices,
+      반출:      fmtDT(반출일, 반출시간),
+      반납:      fmtDT(반납일, 반납시간),
+      isSingleItem: isSingleItem
+    });
   });
 
-  // 2단계: 그룹(세트명) 및 아이템 생성
+  // 그룹 및 아이템 생성
   const groupMap  = {};
   const groupList = [];
   const itemList  = [];
   var itemIdx = 0;
 
-  Object.keys(mergeMap).forEach(function(key) {
-    var m = mergeMap[key];
-
-    // 그룹 등록 (세트명 기준)
-    if (!groupMap[m.세트명]) {
-      groupMap[m.세트명] = 'g_' + groupList.length;
-      groupList.push({ id: groupMap[m.세트명], content: m.세트명 });
+  entries.forEach(function(e) {
+    // 그룹 등록
+    if (!groupMap[e.groupName]) {
+      groupMap[e.groupName] = 'g_' + groupList.length;
+      groupList.push({ id: groupMap[e.groupName], content: e.groupName });
     }
 
-    // 세트 수 계산: 구성품 수량 중 최솟값 = 세트 수
-    var setCount = Math.min.apply(null, m.수량목록) || 1;
+    var statusClass = ['대기','반출중','반납완료','취소'].indexOf(e.상태) >= 0
+      ? 'status-' + e.상태 : 'status-기타';
 
-    // 상태 → 클래스
-    const statusClass = ['대기','반출중','반납완료','취소'].indexOf(m.상태) >= 0
-      ? 'status-' + m.상태 : 'status-기타';
+    // 세트: 수량만큼 바 생성, 개별장비: 1개 바
+    var barCount = e.isSingleItem ? 1 : (e.수량 || 1);
 
-    // 세트 수만큼 바 생성
-    for (var s = 0; s < setCount; s++) {
+    for (var s = 0; s < barCount; s++) {
       itemList.push({
         id:        'item_' + itemIdx++,
-        rowIndex:  m.rowIndices[0],
-        rowIndices: m.rowIndices,
-        group:     groupMap[m.세트명],
-        content:   m.custName,
-        start:     m.startDT.toISOString(),
-        end:       m.endDT.toISOString(),
+        rowIndex:  e.rowIndices[0],
+        rowIndices: e.rowIndices,
+        group:     groupMap[e.groupName],
+        content:   e.custName,
+        start:     e.startDT.toISOString(),
+        end:       e.endDT.toISOString(),
         className: statusClass,
-        status:    m.상태,
+        status:    e.상태,
         editable:  { updateTime: true, remove: false },
-        custName:  m.custName,
-        tel:       m.tel,
-        거래ID:    m.거래ID,
-        세트명:    m.세트명,
-        장비명:    m.장비목록.join(', '),
-        수량:      setCount + '세트',
-        반출:      m.반출,
-        반납:      m.반납,
-        단가:      Math.round(m.총단가 / setCount)
+        custName:  e.custName,
+        tel:       e.tel,
+        거래ID:    e.거래ID,
+        세트명:    e.groupName,
+        장비명:    e.isSingleItem ? e.groupName : '세트 구성품',
+        수량:      e.isSingleItem ? e.수량 : barCount + '세트',
+        반출:      e.반출,
+        반납:      e.반납,
+        단가:      e.단가
       });
     }
   });
