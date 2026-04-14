@@ -5,57 +5,73 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>빌리지 오늘 일정</title>
 <style>
+  :root {
+    --bg: #FAFBFC;
+    --surface: #FFFFFF;
+    --border: #E8ECF0;
+    --text-primary: #1B2332;
+    --text-secondary: #5F6B7A;
+    --text-muted: #9AA5B4;
+    --accent: #2563EB;
+    --blue-bg: #D3E5FF;
+    --blue-text: #1D4ED8;
+    --amber-bg: #FEF3C7;
+    --amber-text: #B45309;
+    --green-bg: #D1FAE5;
+    --green-text: #065F46;
+    --red: #EF4444;
+    --radius: 10px;
+  }
+
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #f0f2f5;
-    color: #1a1a2e;
+    font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text-primary);
     min-height: 100vh;
+    -webkit-user-select: none; user-select: none;
   }
 
   /* ── 헤더 ── */
   .header {
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-    color: #fff;
-    padding: 20px 20px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 20px 14px;
     position: sticky;
     top: 0;
     z-index: 100;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
   }
   .header-top {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 12px;
+    margin-bottom: 14px;
   }
   .header h1 {
     font-size: 20px;
-    font-weight: 700;
-    letter-spacing: -0.5px;
+    font-weight: 800;
+    color: var(--text-primary);
   }
   .header .date-label {
-    font-size: 14px;
-    color: rgba(255,255,255,0.7);
-    font-weight: 400;
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 2px;
   }
-  .refresh-btn {
-    background: rgba(255,255,255,0.15);
-    border: none;
-    color: #fff;
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    font-size: 18px;
+
+  .icon-btn {
+    width: 34px; height: 34px;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
     cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.2s;
+    color: var(--text-secondary);
+    font-size: 16px;
+    transition: all 0.15s;
   }
-  .refresh-btn:active { background: rgba(255,255,255,0.3); }
-  .refresh-btn.spinning { animation: spin 0.8s ease; }
+  .icon-btn:active { background: var(--bg); }
+  .icon-btn.spinning { animation: spin 0.8s ease; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ── 날짜 네비 ── */
@@ -63,59 +79,57 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-top: 10px;
   }
   .date-nav-btn {
-    background: rgba(255,255,255,0.15);
-    border: none;
-    color: #fff;
-    width: 34px;
-    height: 34px;
-    border-radius: 50%;
-    font-size: 16px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .date-nav-btn:active { background: rgba(255,255,255,0.3); }
-  .date-input {
-    background: rgba(255,255,255,0.12);
-    border: none;
-    color: #fff;
-    padding: 8px 12px;
+    width: 34px; height: 34px;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border);
     border-radius: 8px;
-    font-size: 15px;
-    font-family: inherit;
+    background: var(--surface);
     cursor: pointer;
-    -webkit-appearance: none;
+    color: var(--text-secondary);
+    font-size: 13px;
   }
-  .date-input::-webkit-calendar-picker-indicator { filter: invert(1); }
+  .date-nav-btn:active { background: var(--bg); }
+
+  .date-input {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 14px;
+    font-family: inherit;
+    color: var(--text-primary);
+    background: var(--surface);
+    cursor: pointer;
+    outline: none;
+  }
+  .date-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+
   .today-btn {
-    background: rgba(255,255,255,0.15);
-    border: none;
+    border: 1px solid var(--accent);
+    background: var(--accent);
     color: #fff;
-    padding: 8px 14px;
+    padding: 7px 14px;
     border-radius: 8px;
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
+    font-family: inherit;
   }
-  .today-btn:active { background: rgba(255,255,255,0.3); }
+  .today-btn:active { opacity: 0.85; }
 
   /* ── 요약 카드 ── */
   .summary-row {
     display: flex;
     gap: 10px;
-    padding: 0 4px;
+    padding: 14px 20px;
   }
   .summary-card {
     flex: 1;
-    background: rgba(255,255,255,0.12);
-    border-radius: 12px;
-    padding: 12px 14px;
+    border-radius: var(--radius);
+    padding: 14px 16px;
     text-align: center;
-    backdrop-filter: blur(10px);
+    border: 1px solid var(--border);
   }
   .summary-card .num {
     font-size: 28px;
@@ -124,134 +138,132 @@
   }
   .summary-card .label {
     font-size: 11px;
-    color: rgba(255,255,255,0.65);
+    color: var(--text-muted);
     margin-top: 4px;
-    font-weight: 500;
+    font-weight: 600;
   }
-  .summary-card.checkout .num { color: #5ce1e6; }
-  .summary-card.checkin .num { color: #ffb347; }
-  .summary-card.active .num { color: #98fb98; }
+  .summary-card.checkout { background: #EFF6FF; border-color: #BFDBFE; }
+  .summary-card.checkout .num { color: var(--blue-text); }
+  .summary-card.checkin { background: #FFFBEB; border-color: #FDE68A; }
+  .summary-card.checkin .num { color: var(--amber-text); }
+  .summary-card.active { background: #ECFDF5; border-color: #A7F3D0; }
+  .summary-card.active .num { color: var(--green-text); }
 
   /* ── 경고 문구 ── */
   .notice-bar {
-    background: #fff3cd;
-    color: #856404;
-    font-size: 13px;
+    background: #FFFBEB;
+    color: var(--amber-text);
+    font-size: 12px;
     font-weight: 600;
-    padding: 10px 16px;
-    text-align: center;
-    line-height: 1.5;
-    border-bottom: 1px solid #ffc107;
+    padding: 10px 20px;
+    line-height: 1.6;
+    border-bottom: 1px solid #FDE68A;
   }
 
   /* ── 탭 ── */
   .tabs {
     display: flex;
-    padding: 12px 16px 0;
-    gap: 6px;
+    padding: 12px 20px 0;
+    gap: 4px;
+    background: var(--bg);
     position: sticky;
-    top: 92px;
-    background: #f0f2f5;
+    top: 108px;
     z-index: 50;
     padding-bottom: 12px;
   }
   .tab {
     flex: 1;
     padding: 10px 0;
-    border: none;
-    border-radius: 10px;
-    font-size: 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.2s;
-    background: #fff;
-    color: #666;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    background: var(--surface);
+    color: var(--text-secondary);
+    font-family: inherit;
+    transition: all 0.15s;
   }
   .tab.active {
-    background: #1a1a2e;
+    background: var(--accent);
     color: #fff;
-    box-shadow: 0 2px 8px rgba(26,26,46,0.3);
+    border-color: var(--accent);
   }
   .tab .badge {
     display: inline-block;
-    background: rgba(0,0,0,0.1);
-    border-radius: 8px;
+    background: rgba(0,0,0,0.06);
+    border-radius: 6px;
     padding: 1px 7px;
-    font-size: 12px;
+    font-size: 11px;
     margin-left: 4px;
   }
-  .tab.active .badge {
-    background: rgba(255,255,255,0.2);
-  }
+  .tab.active .badge { background: rgba(255,255,255,0.25); }
 
   /* ── 컨텐츠 ── */
-  .content {
-    padding: 0 16px 24px;
-  }
+  .content { padding: 0 20px 30px; }
   .section { display: none; }
   .section.visible { display: block; }
 
-  .time-group {
-    margin-top: 16px;
-  }
+  .time-group { margin-top: 16px; }
   .time-group-header {
     font-size: 12px;
     font-weight: 700;
-    color: #999;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    padding: 0 4px;
+    color: var(--text-muted);
+    letter-spacing: 0.3px;
+    padding: 0 2px;
     margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .time-group-header::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
   }
 
   /* ── 일정 카드 ── */
   .schedule-card {
-    background: #fff;
-    border-radius: 14px;
-    padding: 16px;
-    margin-bottom: 10px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-    border-left: 4px solid #ddd;
-    transition: transform 0.15s, box-shadow 0.15s;
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: box-shadow 0.15s;
   }
-  .schedule-card:active {
-    transform: scale(0.98);
-  }
-  .schedule-card.type-checkout { border-left-color: #5ce1e6; }
-  .schedule-card.type-checkin { border-left-color: #ffb347; }
+  .schedule-card:active { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+
+  .schedule-card.type-checkout { border-left: 3px solid #3B82F6; }
+  .schedule-card.type-checkin  { border-left: 3px solid #F59E0B; }
 
   .card-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
-    margin-bottom: 10px;
+    align-items: flex-start;
+    margin-bottom: 8px;
   }
   .customer-name {
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 700;
-    color: #1a1a2e;
+    color: var(--text-primary);
   }
   .customer-company {
     font-size: 12px;
-    color: #888;
-    margin-top: 1px;
+    color: var(--text-muted);
+    margin-top: 2px;
   }
   .time-badge {
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
-    padding: 4px 10px;
-    border-radius: 8px;
+    padding: 3px 10px;
+    border-radius: 6px;
     white-space: nowrap;
+    flex-shrink: 0;
   }
-  .type-checkout .time-badge {
-    background: #e8fffe;
-    color: #0e8585;
-  }
-  .type-checkin .time-badge {
-    background: #fff4e6;
-    color: #c67700;
-  }
+  .type-checkout .time-badge { background: var(--blue-bg); color: var(--blue-text); }
+  .type-checkin  .time-badge { background: var(--amber-bg); color: var(--amber-text); }
 
   .card-meta {
     display: flex;
@@ -259,74 +271,61 @@
     gap: 6px;
     margin-bottom: 8px;
     font-size: 13px;
-    color: #666;
+    color: var(--text-secondary);
   }
-  .card-meta .icon {
-    font-size: 14px;
-    width: 18px;
-    text-align: center;
-  }
+  .card-meta .icon { font-size: 13px; width: 16px; text-align: center; }
 
-  .equip-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
+  .equip-list { display: flex; flex-wrap: wrap; gap: 5px; }
   .equip-tag {
-    background: #f3f4f6;
-    color: #444;
-    font-size: 12px;
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-weight: 500;
+    background: var(--bg);
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 5px;
+    font-weight: 600;
+    border: 1px solid var(--border);
   }
   .equip-tag.set-tag {
-    background: #D9EAD3;
-    color: #2d5016;
-    font-weight: 600;
+    background: var(--green-bg);
+    color: var(--green-text);
+    border-color: #A7F3D0;
   }
 
   /* ── 상태 배지 ── */
   .status-badge {
     font-size: 11px;
     padding: 2px 8px;
-    border-radius: 6px;
+    border-radius: 5px;
     font-weight: 600;
   }
-  .status-대기 { background: #e3f2fd; color: #1565c0; }
-  .status-반출중 { background: #e8f5e9; color: #2e7d32; }
-  .status-반납완료 { background: #f3e5f5; color: #7b1fa2; }
+  .status-대기     { background: var(--blue-bg); color: var(--blue-text); }
+  .status-반출중   { background: var(--amber-bg); color: var(--amber-text); }
+  .status-반납완료 { background: var(--green-bg); color: var(--green-text); }
 
   /* ── 빈 상태 ── */
   .empty-state {
     text-align: center;
     padding: 60px 20px;
-    color: #aaa;
+    color: var(--text-muted);
   }
-  .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
-  .empty-state .text { font-size: 15px; }
+  .empty-state .icon { font-size: 40px; margin-bottom: 10px; opacity: 0.5; }
+  .empty-state .text { font-size: 14px; }
 
   /* ── 로딩 ── */
-  .loading {
-    text-align: center;
-    padding: 80px 20px;
-    color: #888;
-  }
+  .loading { text-align: center; padding: 80px 20px; color: var(--text-muted); }
   .loading .spinner {
-    width: 36px;
-    height: 36px;
-    border: 3px solid #e0e0e0;
-    border-top-color: #1a1a2e;
+    width: 32px; height: 32px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
     border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    margin: 0 auto 16px;
+    animation: spin 0.7s linear infinite;
+    margin: 0 auto 14px;
   }
 
-  /* ── 연락처 링크 ── */
   .tel-link {
-    color: #1a73e8;
+    color: var(--accent);
     text-decoration: none;
-    font-weight: 500;
+    font-weight: 600;
   }
 
   /* ── 카드 상세 펼침 ── */
@@ -334,30 +333,38 @@
     display: none;
     margin-top: 10px;
     padding-top: 10px;
-    border-top: 1px solid #f0f0f0;
+    border-top: 1px solid var(--border);
   }
   .card-detail.open { display: block; }
   .detail-row {
     display: flex;
     justify-content: space-between;
-    font-size: 13px;
-    padding: 3px 0;
-    color: #555;
+    font-size: 12px;
+    padding: 4px 0;
+    color: var(--text-secondary);
   }
-  .detail-row .dl { font-weight: 600; color: #333; }
+  .detail-row .dl { font-weight: 700; color: var(--text-primary); }
+
+  /* ── 반응형 ── */
+  @media (min-width: 768px) {
+    .header { padding: 16px 32px 14px; }
+    .summary-row { padding: 14px 32px; }
+    .notice-bar { padding: 10px 32px; }
+    .tabs { padding: 12px 32px 12px; }
+    .content { padding: 0 32px 30px; max-width: 800px; }
+  }
 </style>
 </head>
 <body>
 <script>var API_URL = "";</script>
 
-<!-- 헤더 -->
 <div class="header">
   <div class="header-top">
     <div>
-      <h1>오늘 일정</h1>
+      <h1 id="headerTitle">오늘 일정</h1>
       <div class="date-label" id="dateLabel"></div>
     </div>
-    <button class="refresh-btn" onclick="refreshData()" id="refreshBtn">↻</button>
+    <button class="icon-btn" onclick="refreshData()" id="refreshBtn" title="새로고침">↻</button>
   </div>
   <div class="date-nav">
     <button class="date-nav-btn" onclick="changeDate(-1)">◀</button>
@@ -365,29 +372,28 @@
     <button class="date-nav-btn" onclick="changeDate(1)">▶</button>
     <button class="today-btn" onclick="goToday()">오늘</button>
   </div>
-  <div class="summary-row" style="margin-top:10px">
-    <div class="summary-card checkout">
-      <div class="num" id="sumCheckout">-</div>
-      <div class="label">반출</div>
-    </div>
-    <div class="summary-card checkin">
-      <div class="num" id="sumCheckin">-</div>
-      <div class="label">반납</div>
-    </div>
-    <div class="summary-card active">
-      <div class="num" id="sumActive">-</div>
-      <div class="label">현재 대여중</div>
-    </div>
+</div>
+
+<div class="summary-row">
+  <div class="summary-card checkout">
+    <div class="num" id="sumCheckout">-</div>
+    <div class="label">반출</div>
+  </div>
+  <div class="summary-card checkin">
+    <div class="num" id="sumCheckin">-</div>
+    <div class="label">반납</div>
+  </div>
+  <div class="summary-card active">
+    <div class="num" id="sumActive">-</div>
+    <div class="label">현재 대여중</div>
   </div>
 </div>
 
-<!-- 경고 문구 -->
 <div class="notice-bar">
-  ⚠️ 세부 구성품 및 추가 요청 사항 등은 반드시 카톡 대화 내용을 한번 더! 확인 후 완벽하게 세팅 바랍니다.<br>
+  ⚠️ 세부 구성품 및 추가 요청 사항 등은 반드시 카톡 대화 내용을 한번 더 확인 후 완벽하게 세팅 바랍니다.<br>
   ⚠️ 매직암, 라인, 배터리 등 기타 악세사리류 갯수 철저하게 체크 바랍니다.
 </div>
 
-<!-- 탭 -->
 <div class="tabs">
   <button class="tab active" data-tab="checkout" onclick="switchTab('checkout')">
     반출 <span class="badge" id="tabCheckout">0</span>
@@ -400,29 +406,20 @@
   </button>
 </div>
 
-<!-- 컨텐츠 -->
 <div class="content">
   <div id="loadingArea" class="loading">
     <div class="spinner"></div>
     <div>일정을 불러오는 중...</div>
   </div>
-
-  <div id="checkoutSection" class="section">
-    <div id="checkoutList"></div>
-  </div>
-  <div id="checkinSection" class="section">
-    <div id="checkinList"></div>
-  </div>
-  <div id="allSection" class="section">
-    <div id="allList"></div>
-  </div>
+  <div id="checkoutSection" class="section"></div>
+  <div id="checkinSection" class="section"></div>
+  <div id="allSection" class="section"></div>
 </div>
 
 <script>
 var dashboardData = null;
 var currentDate = new Date();
 
-// ── 초기화 ──
 document.addEventListener('DOMContentLoaded', function() {
   updateDateDisplay();
   loadData();
@@ -435,9 +432,8 @@ function updateDateDisplay() {
     d.getFullYear() + '년 ' + (d.getMonth()+1) + '월 ' + d.getDate() + '일 (' + days[d.getDay()] + ')';
   document.getElementById('dateInput').value = formatDate(d);
 
-  // 오늘이면 "오늘 일정", 아닌 날이면 날짜 표시
   var today = formatDate(new Date());
-  document.querySelector('.header h1').textContent =
+  document.getElementById('headerTitle').textContent =
     formatDate(d) === today ? '오늘 일정' : (d.getMonth()+1) + '/' + d.getDate() + ' 일정';
 }
 
@@ -466,13 +462,11 @@ function goToday() {
   loadData();
 }
 
-// ── 데이터 로드 ──
 function loadData() {
   document.getElementById('loadingArea').style.display = 'block';
   document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('visible'); });
 
-  var dateParam = '&date=' + formatDate(currentDate);
-  fetch(API_URL + '?key=village2026&action=dashboard' + dateParam)
+  fetch(API_URL + '?key=village2026&action=dashboard&date=' + formatDate(currentDate))
     .then(function(r) { return r.json(); })
     .then(function(data) {
       dashboardData = data;
@@ -480,7 +474,7 @@ function loadData() {
     })
     .catch(function(err) {
       document.getElementById('loadingArea').innerHTML =
-        '<div class="empty-state"><div class="icon">⚠️</div><div class="text">데이터 로드 실패<br>' + err.message + '</div></div>';
+        '<div class="empty-state"><div class="icon">⚠️</div><div class="text">데이터 로드 실패</div></div>';
     });
 }
 
@@ -491,31 +485,25 @@ function refreshData() {
   loadData();
 }
 
-// ── 렌더링 ──
 function renderDashboard(data) {
   document.getElementById('loadingArea').style.display = 'none';
 
-  // 요약
   document.getElementById('sumCheckout').textContent = data.checkout.length;
   document.getElementById('sumCheckin').textContent = data.checkin.length;
   document.getElementById('sumActive').textContent = data.activeCount || 0;
 
-  // 탭 뱃지
   document.getElementById('tabCheckout').textContent = data.checkout.length;
   document.getElementById('tabCheckin').textContent = data.checkin.length;
   document.getElementById('tabAll').textContent = data.checkout.length + data.checkin.length;
 
-  // 리스트 렌더
-  renderList('checkoutList', data.checkout, 'checkout');
-  renderList('checkinList', data.checkin, 'checkin');
+  renderList('checkoutSection', data.checkout, 'checkout');
+  renderList('checkinSection', data.checkin, 'checkin');
 
-  // 전체 = 반출 + 반납 합쳐서 시간순 정렬
   var all = data.checkout.map(function(c) { c._type = 'checkout'; return c; })
     .concat(data.checkin.map(function(c) { c._type = 'checkin'; return c; }));
   all.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
-  renderList('allList', all, 'all');
+  renderList('allSection', all, 'all');
 
-  // 기본 탭 표시
   switchTab('checkout');
 }
 
@@ -526,13 +514,12 @@ function renderList(containerId, items, type) {
     container.innerHTML =
       '<div class="empty-state"><div class="icon">' +
       (type === 'checkout' ? '📦' : type === 'checkin' ? '📥' : '📋') +
-      '</div><div class="text">오늘 ' +
+      '</div><div class="text">' +
       (type === 'checkout' ? '반출' : type === 'checkin' ? '반납' : '') +
       ' 일정이 없습니다</div></div>';
     return;
   }
 
-  // 시간대별 그룹핑
   var groups = {};
   items.forEach(function(item) {
     var timeKey = item.time || '시간 미정';
@@ -541,67 +528,51 @@ function renderList(containerId, items, type) {
   });
 
   var html = '';
-  var sortedKeys = Object.keys(groups).sort();
-
-  sortedKeys.forEach(function(timeKey) {
+  Object.keys(groups).sort().forEach(function(timeKey) {
     html += '<div class="time-group">';
     html += '<div class="time-group-header">' + timeKey + '</div>';
 
     groups[timeKey].forEach(function(item, idx) {
       var cardType = item._type || type;
-      var cardId = cardType + '_' + timeKey + '_' + idx;
+      var cardId = cardType + '_' + timeKey.replace(/[: ]/g,'') + '_' + idx;
 
       html += '<div class="schedule-card type-' + cardType + '" onclick="toggleDetail(\'' + cardId + '\')">';
-      html += '<div class="card-header">';
-      html += '<div>';
+      html += '<div class="card-header"><div>';
       html += '<div class="customer-name">' + escHtml(item.name) + '</div>';
       if (item.company) html += '<div class="customer-company">' + escHtml(item.company) + '</div>';
       html += '</div>';
-      html += '<div class="time-badge">' + timeKey + '</div>';
-      html += '</div>';
+      html += '<div class="time-badge">' + timeKey + '</div></div>';
 
-      // 연락처
       if (item.tel) {
-        html += '<div class="card-meta">';
-        html += '<span class="icon">📞</span>';
-        html += '<a href="tel:' + item.tel + '" class="tel-link" onclick="event.stopPropagation()">' + escHtml(item.tel) + '</a>';
-        html += '</div>';
+        html += '<div class="card-meta"><span class="icon">📞</span>';
+        html += '<a href="tel:' + item.tel + '" class="tel-link" onclick="event.stopPropagation()">' + escHtml(item.tel) + '</a></div>';
       }
 
-      // 장비 태그
       html += '<div class="equip-list">';
       (item.equipments || []).forEach(function(eq) {
-        var tagClass = eq.isSet ? 'equip-tag set-tag' : 'equip-tag';
-        var label = eq.name + (eq.qty > 1 ? ' ×' + eq.qty : '');
-        html += '<span class="' + tagClass + '">' + escHtml(label) + '</span>';
+        var cls = eq.isSet ? 'equip-tag set-tag' : 'equip-tag';
+        html += '<span class="' + cls + '">' + escHtml(eq.name + (eq.qty > 1 ? ' ×' + eq.qty : '')) + '</span>';
       });
       html += '</div>';
 
-      // 상세 펼침
       html += '<div class="card-detail" id="' + cardId + '">';
       html += '<div class="detail-row"><span>거래ID</span><span class="dl">' + escHtml(item.tradeId) + '</span></div>';
-      var periodLabel = cardType === 'checkout' ? '반납 예정' : '반출일';
-      var periodValue = cardType === 'checkout' ? item.returnDate : item.checkoutDate;
-      if (periodValue) {
-        html += '<div class="detail-row"><span>' + periodLabel + '</span><span class="dl">' + escHtml(periodValue) + '</span></div>';
-      }
+      var pLabel = cardType === 'checkout' ? '반납 예정' : '반출일';
+      var pValue = cardType === 'checkout' ? item.returnDate : item.checkoutDate;
+      if (pValue) html += '<div class="detail-row"><span>' + pLabel + '</span><span class="dl">' + escHtml(pValue) + '</span></div>';
       html += '<div class="detail-row"><span>상태</span><span class="status-badge status-' + (item.status || '대기') + '">' + (item.status || '대기') + '</span></div>';
       if (item.equipments && item.equipments.length > 0) {
-        var totalQty = item.equipments.reduce(function(sum, eq) { return sum + (eq.qty || 1); }, 0);
-        html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + totalQty + '건</span></div>';
+        var total = item.equipments.reduce(function(s, eq) { return s + (eq.qty || 1); }, 0);
+        html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + total + '건</span></div>';
       }
-      html += '</div>';
-
-      html += '</div>';
+      html += '</div></div>';
     });
-
     html += '</div>';
   });
 
   container.innerHTML = html;
 }
 
-// ── 탭 전환 ──
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(function(t) {
     t.classList.toggle('active', t.dataset.tab === tab);
@@ -610,13 +581,11 @@ function switchTab(tab) {
   document.getElementById(tab + 'Section').classList.add('visible');
 }
 
-// ── 상세 토글 ──
 function toggleDetail(id) {
   var el = document.getElementById(id);
   if (el) el.classList.toggle('open');
 }
 
-// ── 유틸 ──
 function escHtml(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
