@@ -479,8 +479,6 @@
 <script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
 <script>
   var timeline, allGroups = [], allItems = [];
-  var groups = new vis.DataSet();
-  var items  = new vis.DataSet();
   var currentFilter = 'all';
   var hiddenStatuses = {};
 
@@ -492,21 +490,17 @@
     '기타':     '#8B5CF6'
   };
 
-  // ── 초기화 ──
-  function init() {
-    var container = document.getElementById('timeline');
-    var now = new Date();
-
+  function getTimelineOptions(startDate, endDate) {
     var maxH = document.querySelector('.timeline-area').clientHeight || 600;
-    timeline = new vis.Timeline(container, items, groups, {
+    return {
       stack: true,
       groupOrder: 'content',
       orientation: { axis: 'top' },
       timeAxis: { scale: 'day', step: 1 },
       zoomMin:  1000 * 60 * 60 * 24 * 3,
       zoomMax:  1000 * 60 * 60 * 24 * 90,
-      start:    new Date(now.getTime() - 1000*60*60*24*1),
-      end:      new Date(now.getTime() + 1000*60*60*24*14),
+      start:    startDate,
+      end:      endDate,
       maxHeight: maxH,
       margin:   { item: { horizontal: 2, vertical: 3 }, axis: 5 },
       locale:   'ko',
@@ -532,16 +526,35 @@
       },
       editable: { updateTime: true, remove: false, add: false, updateGroup: false },
       groupHeightMode: 'auto'
-    });
+    };
+  }
 
-    // 아이템 클릭 → 상세 패널
+  function buildTimeline(visibleGroups, visibleItems) {
+    var container = document.getElementById('timeline');
+
+    var startDate, endDate;
+    if (timeline) {
+      var win = timeline.getWindow();
+      startDate = win.start;
+      endDate = win.end;
+      timeline.destroy();
+    } else {
+      var now = new Date();
+      startDate = new Date(now.getTime() - 1000*60*60*24*1);
+      endDate = new Date(now.getTime() + 1000*60*60*24*14);
+    }
+
+    var groups = new vis.DataSet(visibleGroups);
+    var items  = new vis.DataSet(visibleItems);
+
+    timeline = new vis.Timeline(container, items, groups, getTimelineOptions(startDate, endDate));
+
     timeline.on('select', function(props) {
       if (props.items.length === 0) { closeDetail(); return; }
       var item = items.get(props.items[0]);
       if (item) showDetail(item);
     });
 
-    // 드래그 완료 → 시트 업데이트
     items.on('update', function(event, properties) {
       properties.items.forEach(function(id) {
         var item = items.get(id);
@@ -590,9 +603,7 @@
   function applyFilters() {
     var query = document.getElementById('searchInput').value.trim().toLowerCase();
 
-    // 아이템 필터: 세트명 OR 고객명 매칭 + 상태 + 범례
     var visibleItems = allItems.filter(function(item) {
-      // 검색어 필터: 세트명 또는 고객명에 매칭
       if (query) {
         var groupObj = allGroups.find(function(g) { return g.id === item.group; });
         var setName = groupObj ? groupObj.content.toLowerCase() : '';
@@ -600,66 +611,52 @@
         var setMatch = setName.indexOf(query) >= 0;
         if (!custMatch && !setMatch) return false;
       }
-
-      // 상태 필터
       if (currentFilter === 'active' && item.status !== '대기' && item.status !== '반출중') return false;
-
-      // 범례 토글
       var st = ['대기','반출중','반납완료','취소'].indexOf(item.status) >= 0 ? item.status : '기타';
       if (hiddenStatuses[st]) return false;
-
       return true;
     });
 
-    // 표시할 그룹: 필터된 아이템이 있는 그룹만
     var usedGroups = {};
     visibleItems.forEach(function(i) { usedGroups[i.group] = true; });
     var visibleGroups = allGroups.filter(function(g) { return usedGroups[g.id]; });
 
-    groups.clear(); groups.add(visibleGroups);
-    items.clear();  items.add(visibleItems);
+    buildTimeline(visibleGroups, visibleItems);
 
-    updateStat(visibleGroups.length, allGroups.length, visibleItems.length, allItems.length);
-  }
-
-  function updateStat(gShow, gTotal, iShow, iTotal) {
-    var txt = gShow + '개 세트';
-    if (gShow < gTotal) txt = gShow + '/' + gTotal + '개 세트';
-    txt += ' · ' + iShow + '건';
-    if (iShow < iTotal) txt += '/' + iTotal + '건';
+    var txt = visibleGroups.length + '개 세트';
+    if (visibleGroups.length < allGroups.length) txt = visibleGroups.length + '/' + allGroups.length + '개 세트';
+    txt += ' · ' + visibleItems.length + '건';
     document.getElementById('statInfo').textContent = txt;
   }
 
   // ── 상세 패널 ──
   function showDetail(item) {
-    var panel = document.getElementById('detailPanel');
     document.getElementById('detailTitle').textContent = item.custName || item.content;
-
     var statusColor = STATUS_COLORS[item.status] || STATUS_COLORS['기타'];
 
     var html =
-      row('거래ID', item['거래ID'] || '-') +
-      row('고객명', item.custName || '-') +
-      row('연락처', item.tel || '-') +
-      row('세트', item['세트명'] || '-') +
-      row('장비', item['장비명'] || '-') +
-      row('수량', item['수량'] || '-') +
-      row('반출', item['반출'] || '-') +
-      row('반납', item['반납'] || '-') +
-      row('상태', '<span class="status-badge" style="background:' + statusColor + '">' + (item.status || '-') + '</span>') +
-      (item['단가'] > 0 ? row('단가', Number(item['단가']).toLocaleString() + '원') : '');
+      dRow('거래ID', item['거래ID'] || '-') +
+      dRow('고객명', item.custName || '-') +
+      dRow('연락처', item.tel || '-') +
+      dRow('세트', item['세트명'] || '-') +
+      dRow('장비', item['장비명'] || '-') +
+      dRow('수량', item['수량'] || '-') +
+      dRow('반출', item['반출'] || '-') +
+      dRow('반납', item['반납'] || '-') +
+      dRow('상태', '<span class="status-badge" style="background:' + statusColor + '">' + (item.status || '-') + '</span>') +
+      (item['단가'] > 0 ? dRow('단가', Number(item['단가']).toLocaleString() + '원') : '');
 
     document.getElementById('detailBody').innerHTML = html;
-    panel.classList.add('open');
+    document.getElementById('detailPanel').classList.add('open');
   }
 
-  function row(label, value) {
+  function dRow(label, value) {
     return '<div class="detail-row"><span class="detail-label">' + label + '</span><span class="detail-value">' + value + '</span></div>';
   }
 
   function closeDetail() {
     document.getElementById('detailPanel').classList.remove('open');
-    timeline.setSelection([]);
+    if (timeline) timeline.setSelection([]);
   }
 
   // ── 범례 토글 ──
@@ -679,6 +676,7 @@
   }
 
   function moveToday() {
+    if (!timeline) return;
     var now = new Date();
     timeline.setWindow(
       new Date(now.getTime() - 1000*60*60*24*1),
@@ -687,11 +685,11 @@
     );
   }
 
-  function zoomIn()  { timeline.zoomIn(0.4); }
-  function zoomOut() { timeline.zoomOut(0.4); }
+  function zoomIn()  { if (timeline) timeline.zoomIn(0.4); }
+  function zoomOut() { if (timeline) timeline.zoomOut(0.4); }
 
   function fitAll() {
-    if (allItems.length > 0) timeline.fit({ animation: { duration: 400 } });
+    if (timeline && allItems.length > 0) timeline.fit({ animation: { duration: 400 } });
   }
 
   function reload() {
@@ -721,6 +719,7 @@
   document.getElementById('dateTo').addEventListener('change', applyDateRange);
 
   function applyDateRange() {
+    if (!timeline) return;
     var from = document.getElementById('dateFrom').value;
     var to   = document.getElementById('dateTo').value;
     if (from && to) {
@@ -751,7 +750,6 @@
   });
 
   // ── 시작 ──
-  init();
   loadData();
 </script>
 </body>

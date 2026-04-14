@@ -440,12 +440,11 @@
 <script>
 var API_URL = "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
 var timeline, allGroups = [], allItems = [];
-var groups = new vis.DataSet();
-var items  = new vis.DataSet();
 var currentFilter = "all";
 var hiddenStatuses = {};
 var refreshTimer = null;
 var REFRESH_INTERVAL = 60000;
+var savedWindow = null;
 
 var STATUS_COLORS = {
   '대기':     '#3B82F6',
@@ -455,21 +454,17 @@ var STATUS_COLORS = {
   '기타':     '#8B5CF6'
 };
 
-// ── 초기화 ──
-function init() {
-  var container = document.getElementById("timeline");
-  var now = new Date();
-
+function getTimelineOptions(startDate, endDate) {
   var maxH = document.querySelector('.timeline-area').clientHeight || 600;
-  timeline = new vis.Timeline(container, items, groups, {
+  return {
     stack: true,
     groupOrder: "content",
     orientation: { axis: "top" },
     timeAxis: { scale: "day", step: 1 },
     zoomMin:  1000 * 60 * 60 * 24 * 3,
     zoomMax:  1000 * 60 * 60 * 24 * 90,
-    start:    new Date(now.getTime() - 1000*60*60*24*1),
-    end:      new Date(now.getTime() + 1000*60*60*24*14),
+    start:    startDate,
+    end:      endDate,
     maxHeight: maxH,
     margin:   { item: { horizontal: 2, vertical: 3 }, axis: 5 },
     locale:   "ko",
@@ -495,7 +490,29 @@ function init() {
     },
     editable: { updateTime: true, remove: false, add: false, updateGroup: false },
     groupHeightMode: "auto"
-  });
+  };
+}
+
+function buildTimeline(visibleGroups, visibleItems) {
+  var container = document.getElementById("timeline");
+
+  // 현재 시간 범위 보존
+  var startDate, endDate;
+  if (timeline) {
+    var win = timeline.getWindow();
+    startDate = win.start;
+    endDate = win.end;
+    timeline.destroy();
+  } else {
+    var now = new Date();
+    startDate = new Date(now.getTime() - 1000*60*60*24*1);
+    endDate = new Date(now.getTime() + 1000*60*60*24*14);
+  }
+
+  var groups = new vis.DataSet(visibleGroups);
+  var items  = new vis.DataSet(visibleItems);
+
+  timeline = new vis.Timeline(container, items, groups, getTimelineOptions(startDate, endDate));
 
   // 클릭 → 상세 패널
   timeline.on("select", function(props) {
@@ -558,7 +575,6 @@ function loadData() {
 // ── 필터 ──
 function applyFilters() {
   var query = document.getElementById("searchInput").value.trim().toLowerCase();
-  // 아이템 필터: 세트명 OR 고객명 매칭 + 상태 + 범례
   var visibleItems = allItems.filter(function(item) {
     if (query) {
       var groupObj = allGroups.find(function(g) { return g.id === item.group; });
@@ -577,8 +593,7 @@ function applyFilters() {
   visibleItems.forEach(function(i) { usedGroups[i.group] = true; });
   var visibleGroups = allGroups.filter(function(g) { return usedGroups[g.id]; });
 
-  groups.clear(); groups.add(visibleGroups);
-  items.clear();  items.add(visibleItems);
+  buildTimeline(visibleGroups, visibleItems);
 
   var txt = visibleGroups.length + "개 세트";
   if (visibleGroups.length < allGroups.length) txt = visibleGroups.length + "/" + allGroups.length + "개 세트";
@@ -716,7 +731,6 @@ document.addEventListener("keydown", function(e) {
 });
 
 // ── 시작 ──
-init();
 loadData();
 startAutoRefresh();
 </script>
