@@ -476,10 +476,11 @@ function init() {
 
       var startISO = (item.start instanceof Date) ? item.start.toISOString() : item.start;
       var endISO   = (item.end instanceof Date)   ? item.end.toISOString()   : item.end;
+      var riParam  = original.rowIndices ? "&rowIndices=" + encodeURIComponent(JSON.stringify(original.rowIndices)) : "";
 
       fetch(API_URL + "?key=village2026&action=updateTime&row=" +
         original.rowIndex + "&start=" + encodeURIComponent(startISO) +
-        "&end=" + encodeURIComponent(endISO))
+        "&end=" + encodeURIComponent(endISO) + riParam)
         .then(function(r) { return r.json(); })
         .then(function(res) {
           if (res.success) {

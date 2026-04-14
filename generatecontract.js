@@ -220,8 +220,10 @@ function generateContractFile(ss, 거래ID, 추가요청) {
     // 서식 통일 (굵은 글씨 해제)
     ws.getRange(row, nameCol, 1, priceCol - nameCol + 1).setFontWeight("normal");
 
-    // 세트 헤더 행이면 연한 초록 배경 + 굵은 글씨
-    if (item.세트명 && item.장비명 === item.세트명) {
+    // 세트 헤더 또는 단가 있는 단일 품목 → 초록 배경 + 볼드
+    var isSetHeader = item.세트명 && item.장비명 === item.세트명;
+    var isPricedItem = !item.세트명 && item.단가 > 0;
+    if (isSetHeader || isPricedItem) {
       ws.getRange(row, nameCol).setBackground("#D9EAD3").setFontWeight("bold");
     }
     // ※ 금액(G열/M열)은 템플릿 수식이 자동 계산 → 건드리지 않음
@@ -246,27 +248,17 @@ function generateContractFile(ss, 거래ID, 추가요청) {
     }
   }
 
-  // ── 장기할인 ──
+  // ── 할인 드롭다운 초기화 — 사전(C44), 추가(I44), 장기(C45), 쿠폰(I45) ──
+  ws.getRange("C44").setValue("해당없음");
+  ws.getRange("I44").setValue("해당없음");
+  ws.getRange("C45").setValue("해당없음");
+  ws.getRange("I45").setValue("해당없음");
+
+  // ── 장기할인 (C45) ──
   if (일수 >= 2) {
-    const 할인율 = getLongTermDiscountRate(일수);
+    var 할인율 = getLongTermDiscountRate(일수);
     if (할인율 > 0) {
-      // 템플릿에서 "장기할인" 또는 "할인" 텍스트가 있는 셀 찾기
-      const lastRow = ws.getLastRow();
-      const allData = ws.getRange(1, 1, lastRow, 14).getValues();
-      for (let i = 0; i < allData.length; i++) {
-        const rowText = allData[i].join("|");
-        if (rowText.includes("장기할인") || rowText.includes("장기 할인")) {
-          // 같은 행에서 빈 셀 또는 숫자 셀 찾아서 할인율 입력
-          for (let c = 0; c < allData[i].length; c++) {
-            if (String(allData[i][c]).includes("장기할인") || String(allData[i][c]).includes("장기 할인")) {
-              // 할인율 텍스트 옆 셀 또는 같은 행 숫자 영역에 입력
-              ws.getRange(i + 1, c + 2).setValue(할인율 + "%");
-              break;
-            }
-          }
-          break;
-        }
-      }
+      ws.getRange("C45").setValue(할인율 + "%");
     }
   }
 
@@ -430,9 +422,6 @@ function deleteAndRegenerateContract(ss, 거래ID) {
   try {
     if (folderId) {
       const folder = DriveApp.getFolderById(folderId);
-      const files = folder.getFilesByName(
-        folder.getFiles() // 파일명이 정확히 일치하지 않으므로 전체 탐색
-      );
       // 파일명 prefix로 검색
       const iter = folder.getFiles();
       while (iter.hasNext()) {
@@ -575,6 +564,8 @@ function autoGenerateContract(ss, 거래ID) {
     Logger.log("계약서 자동 생성 실패: " + err.message);
   }
 }
+
+
 
 
 /**
