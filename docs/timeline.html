@@ -208,53 +208,60 @@
 
   .vis-labelset .vis-label { border-bottom: 1px solid var(--border) !important; }
   .vis-label .vis-inner {
-    font-size: 12px !important;
-    padding: 4px 12px !important;
+    font-size: 13px !important;
+    padding: 6px 14px !important;
     font-weight: 600;
     color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 180px;
+    max-width: 200px;
   }
 
   .vis-item {
-    border-radius: 5px !important;
+    border-radius: 4px !important;
     font-size: 11px !important;
     font-weight: 600 !important;
     border: none !important;
-    padding: 3px 8px !important;
-    line-height: 1.4 !important;
+    padding: 4px 10px !important;
+    line-height: 1.3 !important;
     cursor: grab !important;
-    transition: box-shadow 0.15s, transform 0.1s !important;
+    transition: box-shadow 0.15s !important;
+    height: 26px !important;
   }
-  .vis-item:hover {
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15) !important;
-    transform: translateY(-1px);
-  }
-  .vis-item.vis-selected {
-    box-shadow: 0 0 0 2px var(--accent), 0 4px 12px rgba(0,0,0,0.15) !important;
-  }
+  .vis-item .vis-item-overflow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vis-item:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.15) !important; }
+  .vis-item.vis-selected { box-shadow: 0 0 0 2px var(--accent), 0 4px 12px rgba(0,0,0,0.15) !important; }
 
-  .vis-item.status-대기 { background: linear-gradient(135deg, #60A5FA, #3B82F6) !important; color: #fff !important; }
-  .vis-item.status-반출중 { background: linear-gradient(135deg, #FBBF24, #F59E0B) !important; color: #fff !important; }
-  .vis-item.status-반납완료 { background: linear-gradient(135deg, #34D399, #10B981) !important; color: #fff !important; }
-  .vis-item.status-취소 { background: #E5E7EB !important; color: #9CA3AF !important; text-decoration: line-through !important; }
-  .vis-item.status-기타 { background: linear-gradient(135deg, #A78BFA, #8B5CF6) !important; color: #fff !important; }
+  /* 상태별 색상 — 플랫 단색 (노션 스타일) */
+  .vis-item.status-대기     { background: #D3E5FF !important; color: #1D4ED8 !important; }
+  .vis-item.status-반출중   { background: #FEF3C7 !important; color: #B45309 !important; }
+  .vis-item.status-반납완료 { background: #D1FAE5 !important; color: #065F46 !important; }
+  .vis-item.status-취소     { background: #F3F4F6 !important; color: #9CA3AF !important; text-decoration: line-through !important; }
+  .vis-item.status-기타     { background: #EDE9FE !important; color: #6D28D9 !important; }
 
   .vis-item.vis-dragging {
     opacity: 0.85 !important;
-    box-shadow: 0 6px 20px rgba(0,0,0,0.25) !important;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.2) !important;
     cursor: grabbing !important;
   }
 
-  .vis-time-axis .vis-text { font-size: 11px !important; color: var(--text-muted) !important; }
-  .vis-time-axis .vis-text.vis-major { font-weight: 600 !important; color: var(--text-secondary) !important; }
+  /* 시간축 — 노션 스타일 */
+  .vis-time-axis { border-bottom: 1px solid var(--border) !important; }
+  .vis-time-axis .vis-text { font-size: 12px !important; color: var(--text-muted) !important; padding: 4px 0 !important; }
+  .vis-time-axis .vis-text.vis-major { font-size: 13px !important; font-weight: 700 !important; color: var(--text-primary) !important; }
+  .vis-time-axis .vis-text.vis-minor { font-size: 12px !important; font-weight: 500 !important; color: var(--text-secondary) !important; }
+
+  .vis-grid.vis-minor { border-color: var(--border) !important; }
+  .vis-grid.vis-major { border-color: #D1D5DB !important; }
+  .vis-grid.vis-minor.vis-saturday,
+  .vis-grid.vis-minor.vis-sunday { background: rgba(0,0,0,0.02) !important; }
+
   .vis-panel.vis-left { border-right: 1px solid var(--border) !important; }
-  .vis-panel.vis-bottom { border-top: 1px solid var(--border) !important; }
+  .vis-panel.vis-bottom { border: none !important; }
   .vis-current-time { background-color: var(--red) !important; width: 2px !important; }
   .vis-foreground .vis-group { border-bottom: 1px solid var(--border) !important; }
-  .vis-foreground .vis-group:nth-child(even) { background: rgba(0,0,0,0.015); }
+  .vis-foreground .vis-group:nth-child(even) { background: rgba(0,0,0,0.012); }
 
   /* ── 상세 패널 ── */
   .detail-panel {
@@ -400,11 +407,11 @@
 <!-- 범례 -->
 <div class="info-bar">
   <div class="legend-group">
-    <span class="legend-chip" data-status="대기" onclick="toggleLegend(this)"><span class="legend-bar" style="background:var(--blue)"></span>대기</span>
-    <span class="legend-chip" data-status="반출중" onclick="toggleLegend(this)"><span class="legend-bar" style="background:var(--amber)"></span>반출중</span>
-    <span class="legend-chip" data-status="반납완료" onclick="toggleLegend(this)"><span class="legend-bar" style="background:var(--green)"></span>반납완료</span>
-    <span class="legend-chip" data-status="취소" onclick="toggleLegend(this)"><span class="legend-bar" style="background:var(--gray)"></span>취소</span>
-    <span class="legend-chip" data-status="기타" onclick="toggleLegend(this)"><span class="legend-bar" style="background:var(--purple)"></span>기타</span>
+    <span class="legend-chip" data-status="대기" onclick="toggleLegend(this)"><span class="legend-bar" style="background:#D3E5FF;border:1px solid #93C5FD"></span>대기</span>
+    <span class="legend-chip" data-status="반출중" onclick="toggleLegend(this)"><span class="legend-bar" style="background:#FEF3C7;border:1px solid #FCD34D"></span>반출중</span>
+    <span class="legend-chip" data-status="반납완료" onclick="toggleLegend(this)"><span class="legend-bar" style="background:#D1FAE5;border:1px solid #6EE7B7"></span>반납완료</span>
+    <span class="legend-chip" data-status="취소" onclick="toggleLegend(this)"><span class="legend-bar" style="background:#F3F4F6;border:1px solid #D1D5DB"></span>취소</span>
+    <span class="legend-chip" data-status="기타" onclick="toggleLegend(this)"><span class="legend-bar" style="background:#EDE9FE;border:1px solid #C4B5FD"></span>기타</span>
   </div>
   <span class="stat-text" id="statInfo">불러오는 중...</span>
 </div>
@@ -455,27 +462,37 @@ function init() {
 
   timeline = new vis.Timeline(container, items, groups, {
     stack: true,
-    stackSubgroups: true,
     groupOrder: "content",
-    orientation: { axis: "both" },
-    zoomMin:  1000 * 60 * 60 * 6,
-    zoomMax:  1000 * 60 * 60 * 24 * 120,
+    orientation: { axis: "top" },
+    timeAxis: { scale: "day", step: 1 },
+    zoomMin:  1000 * 60 * 60 * 24 * 3,
+    zoomMax:  1000 * 60 * 60 * 24 * 90,
     start:    new Date(now.getTime() - 1000*60*60*24*1),
-    end:      new Date(now.getTime() + 1000*60*60*24*10),
+    end:      new Date(now.getTime() + 1000*60*60*24*14),
     height:   "100%",
-    margin:   { item: { horizontal: 4, vertical: 4 }, axis: 5 },
+    margin:   { item: { horizontal: 2, vertical: 3 }, axis: 5 },
     locale:   "ko",
     showCurrentTime: true,
     moveable: true,
     zoomable: true,
     selectable: true,
     multiselect: false,
+    format: {
+      minorLabels: function(date) {
+        var d = new Date(date);
+        var days = ['일','월','화','수','목','금','토'];
+        return days[d.getDay()] + ' ' + d.getDate();
+      },
+      majorLabels: function(date) {
+        var d = new Date(date);
+        return d.getFullYear() + '년 ' + (d.getMonth()+1) + '월';
+      }
+    },
     snap: function(date) {
       var m = 30 * 60 * 1000;
       return new Date(Math.round(date.getTime() / m) * m);
     },
     editable: { updateTime: true, remove: false, add: false, updateGroup: false },
-    tooltip: { followMouse: false, overflowMethod: "cap" },
     groupHeightMode: "auto"
   });
 
