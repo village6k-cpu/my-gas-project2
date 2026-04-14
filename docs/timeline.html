@@ -201,7 +201,7 @@
     position: relative;
     background: var(--surface);
   }
-  #timeline { width: 100%; height: 100%; }
+  #timeline { width: 100%; }
 
   /* vis.js 오버라이드 */
   .vis-timeline { border: none !important; font-family: inherit !important; }
@@ -460,17 +460,17 @@ function init() {
   var container = document.getElementById("timeline");
   var now = new Date();
 
+  var maxH = document.querySelector('.timeline-area').clientHeight || 600;
   timeline = new vis.Timeline(container, items, groups, {
     stack: true,
     groupOrder: "content",
     orientation: { axis: "top" },
     timeAxis: { scale: "day", step: 1 },
-    verticalScroll: true,
     zoomMin:  1000 * 60 * 60 * 24 * 3,
     zoomMax:  1000 * 60 * 60 * 24 * 90,
     start:    new Date(now.getTime() - 1000*60*60*24*1),
     end:      new Date(now.getTime() + 1000*60*60*24*14),
-    height:   "100%",
+    maxHeight: maxH,
     margin:   { item: { horizontal: 2, vertical: 3 }, axis: 5 },
     locale:   "ko",
     showCurrentTime: true,
@@ -579,12 +579,6 @@ function applyFilters() {
 
   groups.clear(); groups.add(visibleGroups);
   items.clear();  items.add(visibleItems);
-
-  // 검색/필터 후 스크롤 맨 위로
-  setTimeout(function() {
-    var el = document.querySelector('.vis-content');
-    if (el) el.scrollTop = 0;
-  }, 50);
 
   var txt = visibleGroups.length + "개 세트";
   if (visibleGroups.length < allGroups.length) txt = visibleGroups.length + "/" + allGroups.length + "개 세트";
