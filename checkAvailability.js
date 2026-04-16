@@ -354,7 +354,6 @@ function refreshEquipmentList() {
     var timeList = [];
     for (var h = 0; h <= 23; h++) {
       timeList.push(("0" + h).slice(-2) + ":00");
-      timeList.push(("0" + h).slice(-2) + ":30");
     }
     var timeRule = SpreadsheetApp.newDataValidation()
       .requireValueInList(timeList, true)
