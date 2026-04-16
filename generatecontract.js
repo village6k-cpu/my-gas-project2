@@ -291,16 +291,6 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   // 저장
   SpreadsheetApp.flush();
 
-  // ── 시트 보호 (수동 편집 차단) ──
-  var protection = ws.protect().setDescription("계약서 자동 생성 — 수정 금지");
-  // 스크립트 소유자만 편집 가능, 나머지 전부 차단
-  protection.removeEditors(protection.getEditors());
-  if (protection.canDomainEdit()) {
-    protection.setDomainEdit(false);
-  }
-  // 경고 표시 설정
-  protection.setWarningOnly(false);
-
   // ── 개고생2.0 거래내역 M열에 계약서 링크 입력 ──
   updateContractLink(거래ID, newUrl);
 
@@ -606,6 +596,41 @@ function autoGenerateContract(ss, 거래ID) {
  * ★ 초기 설정 도우미 ★
  * 이 함수를 실행하면 필요한 스크립트 속성을 대화형으로 설정합니다.
  */
+/**
+ * 계약서 템플릿 원본에 시트 보호 적용
+ * GAS 편집기에서 한 번만 실행하면 됨
+ */
+function protectContractTemplate() {
+  var props = PropertiesService.getScriptProperties();
+  var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
+  if (!templateId) {
+    Logger.log("❌ CONTRACT_TEMPLATE_ID 미설정");
+    SpreadsheetApp.getUi().alert("❌ CONTRACT_TEMPLATE_ID가 설정되지 않았습니다.");
+    return;
+  }
+
+  var templateSS = SpreadsheetApp.openById(templateId);
+  var sheets = templateSS.getSheets();
+
+  sheets.forEach(function(sheet) {
+    // 기존 보호 제거 (중복 방지)
+    var existing = sheet.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+    existing.forEach(function(p) { p.remove(); });
+
+    // 새 보호 적용
+    var protection = sheet.protect().setDescription("계약서 템플릿 원본 — 수정 금지");
+    protection.removeEditors(protection.getEditors());
+    if (protection.canDomainEdit()) {
+      protection.setDomainEdit(false);
+    }
+    protection.setWarningOnly(false);
+  });
+
+  Logger.log("✅ 템플릿 보호 완료: " + templateSS.getName());
+  SpreadsheetApp.getUi().alert("✅ 계약서 템플릿 보호 완료\n\n" + templateSS.getName() + "\n\nUI에서 수동 편집이 차단됩니다.");
+}
+
+
 function setupContractSettings() {
   const ui = SpreadsheetApp.getUi();
   const props = PropertiesService.getScriptProperties();
