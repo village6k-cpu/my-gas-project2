@@ -2035,29 +2035,13 @@ function registerByReqID(sheet, triggerRow) {
     }
   } catch (e) { }
 
-  // ── 계약마스터 중복 체크 후 등록 ──
-  // 같은 예약자명+반출일 조합이 이미 있으면 거래ID 재사용
-  var existingContractID = null;
-  if (contractLastRow >= 2) {
-    var cmData = contractSheet.getRange(2, 1, contractLastRow - 1, 5).getValues();
-    for (var ci = 0; ci < cmData.length; ci++) {
-      if (String(cmData[ci][1]).trim() === 예약자명 &&
-          fmtDT(cmData[ci][4], "").split(" ")[0] === 반출일str) {
-        existingContractID = String(cmData[ci][0]).trim();
-        break;
-      }
-    }
-  }
-  if (existingContractID) {
-    거래ID = existingContractID;  // 기존 거래ID 재사용
-  } else {
-    const newContractRow = contractLastRow + 1;
-    contractSheet.getRange(newContractRow, 1, 1, 11).setValues([[
-      거래ID, 예약자명, 연락처 || "", 업체명 || "",
-      반출일str, 반출시간str, 반납일str, 반납시간str,
-      회차, "예약", ""
-    ]]);
-  }
+  // ── 계약마스터에 등록 ──
+  const newContractRow = contractLastRow + 1;
+  contractSheet.getRange(newContractRow, 1, 1, 11).setValues([[
+    거래ID, 예약자명, 연락처 || "", 업체명 || "",
+    반출일str, 반출시간str, 반납일str, 반납시간str,
+    회차, "예약", ""
+  ]]);
 
 
     // ── 스케줄상세에 장비 등록 (세트 헤더/구성품/개별 구분) ──
