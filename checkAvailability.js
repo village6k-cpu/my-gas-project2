@@ -1173,12 +1173,19 @@ function registerByReqID(sheet, triggerRow) {
     return;
   }
 
-  // ── 이미 등록된 건인지 확인 ──
+  // ── 이미 등록된 건인지 확인 (거절/보류된 건은 재등록 허용) ──
+  var hasCompleted = false;
+  var hasRejectedOrHeld = false;
   for (let i = 0; i < allData.length; i++) {
-    if (allData[i][0] === reqID && allData[i][14] === "등록완료") {
-      sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
-      return;
+    if (allData[i][0] === reqID) {
+      var rowStatus = String(allData[i][14] || "").trim();
+      if (rowStatus === "등록완료") hasCompleted = true;
+      if (rowStatus === "거절" || rowStatus === "보류") hasRejectedOrHeld = true;
     }
+  }
+  if (hasCompleted && !hasRejectedOrHeld) {
+    sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
+    return;
   }
 
   // ── 카테고리 미선택 장비 체크 (세트 구성품 중 구체 모델 미선택 차단) ──
