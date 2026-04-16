@@ -95,6 +95,11 @@ function onEditInstallable(e) {
   if (sheet.getName() === "확인요청" && col === 14) {
     handleScheduleEdit(e);
   }
+
+  // ── 계약마스터에서 행 삭제 시 스케줄상세 + 개고생2.0 연동 삭제 ──
+  if (sheet.getName() === "계약마스터") {
+    syncDeletedContracts(e.source);
+  }
 }
 
 /**
@@ -115,6 +120,79 @@ function setupInstallableTrigger() {
     .onEdit()
     .create();
   Logger.log("✅ onEditInstallable 트리거 등록 완료");
+}
+
+
+/**
+ * 계약마스터에서 삭제된 거래ID를 감지하여 스케줄상세 + 개고생2.0에서도 삭제
+ * 계약마스터의 거래ID 목록과 스케줄상세의 거래ID를 비교하여 차이를 찾음
+ */
+function syncDeletedContracts(ss) {
+  try {
+    var contractSheet = ss.getSheetByName("계약마스터");
+    var schedSheet = ss.getSheetByName("스케줄상세");
+    if (!contractSheet || !schedSheet) return;
+
+    // 계약마스터의 현재 거래ID 목록
+    var contractLastRow = contractSheet.getLastRow();
+    var contractIDs = new Set();
+    if (contractLastRow >= 2) {
+      contractSheet.getRange(2, 1, contractLastRow - 1, 1).getValues()
+        .flat().forEach(function(id) { if (id) contractIDs.add(String(id).trim()); });
+    }
+
+    // 스케줄상세에서 계약마스터에 없는 거래ID 행 삭제
+    var schedLastRow = schedSheet.getLastRow();
+    if (schedLastRow < 2) return;
+
+    var schedData = schedSheet.getRange(2, 1, schedLastRow - 1, 2).getValues(); // A:스케줄ID, B:거래ID
+    var deletedIDs = new Set();
+    var rowsToDelete = [];
+
+    for (var i = 0; i < schedData.length; i++) {
+      var 거래ID = String(schedData[i][1] || "").trim();
+      if (거래ID && !contractIDs.has(거래ID)) {
+        rowsToDelete.push(i + 2);
+        deletedIDs.add(거래ID);
+      }
+    }
+
+    // 뒤에서부터 삭제 (행 번호 꼬임 방지)
+    for (var d = rowsToDelete.length - 1; d >= 0; d--) {
+      schedSheet.deleteRow(rowsToDelete[d]);
+    }
+
+    // 개고생2.0 거래내역에서도 삭제
+    if (deletedIDs.size > 0) {
+      try {
+        var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+        if (개고생URL) {
+          var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
+          var 거래시트 = 개고생SS.getSheetByName("거래내역");
+          if (거래시트 && 거래시트.getLastRow() >= 2) {
+            var 거래Data = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, 4).getValues();
+            var 거래Rows = [];
+            for (var j = 0; j < 거래Data.length; j++) {
+              var tid = String(거래Data[j][3] || "").trim(); // D열: 거래ID
+              if (deletedIDs.has(tid)) {
+                거래Rows.push(j + 2);
+              }
+            }
+            for (var k = 거래Rows.length - 1; k >= 0; k--) {
+              거래시트.deleteRow(거래Rows[k]);
+            }
+            Logger.log("개고생2.0 거래내역 삭제: " + Array.from(deletedIDs).join(", "));
+          }
+        }
+      } catch (err) {
+        Logger.log("개고생2.0 거래내역 삭제 실패: " + err.message);
+      }
+
+      Logger.log("계약마스터 삭제 연동 완료 — 스케줄상세 " + rowsToDelete.length + "행 삭제, 거래ID: " + Array.from(deletedIDs).join(", "));
+    }
+  } catch (err) {
+    Logger.log("syncDeletedContracts 오류: " + err.message);
+  }
 }
 
 
