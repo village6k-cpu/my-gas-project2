@@ -412,7 +412,7 @@ function parseDT(dateVal, timeVal) {
 
     let timeStr = '09:00';
     if (timeVal instanceof Date) {
-      timeStr = ('0' + timeVal.getHours()).slice(-2) + ':' + ('0' + timeVal.getMinutes()).slice(-2);
+      timeStr = Utilities.formatDate(timeVal, 'Asia/Seoul', 'HH:mm');
     } else if (timeVal && String(timeVal).trim() !== '') {
       timeStr = String(timeVal).trim();
     }
@@ -437,7 +437,7 @@ function fmtDT(dateVal, timeVal) {
       d = Utilities.formatDate(dateVal, 'Asia/Seoul', 'yyyy-MM-dd');
     } else { d = String(dateVal || '').trim(); }
     if (timeVal instanceof Date) {
-      t = ('0' + timeVal.getHours()).slice(-2) + ':' + ('0' + timeVal.getMinutes()).slice(-2);
+      t = Utilities.formatDate(timeVal, 'Asia/Seoul', 'HH:mm');
     } else { t = String(timeVal || '').trim(); }
     return d + (t ? ' ' + t : '');
   } catch (e) { return String(dateVal || ''); }
@@ -2283,7 +2283,7 @@ function addEquipmentToContract(sheet, row) {
   const contractData = contractSheet.getRange(2, 1, Math.max(1, contractSheet.getLastRow() - 1), 8).getValues();
   let 반출일str, 반출시간str, 반납일str, 반납시간str;
   const fmtDate = (d) => { if (!d) return ""; if (d instanceof Date) return Utilities.formatDate(d, "Asia/Seoul", "yyyy-MM-dd"); return String(d); };
-  const fmtTime = (d) => { if (!d) return ""; if (d instanceof Date) { const h = d.getHours(), m = d.getMinutes(); return ("0"+h).slice(-2)+":"+("0"+m).slice(-2); } return String(d); };
+  const fmtTime = (d) => { if (!d) return ""; if (d instanceof Date) { return Utilities.formatDate(d, 'Asia/Seoul', 'HH:mm'); } return String(d); };
 
   var 예약자명_add = "";
   for (let i = 0; i < contractData.length; i++) {
