@@ -567,6 +567,19 @@ function refreshEquipmentList() {
       .setHelpText("장비명 또는 세트명을 검색하세요")
       .build();
     range.setDataValidation(rule);
+
+    // ── 확인요청 C열(반출시간), E열(반납시간) 시간 드롭다운 설정 ──
+    var timeList = [];
+    for (var h = 0; h <= 23; h++) {
+      timeList.push(("0" + h).slice(-2) + ":00");
+    }
+    var timeRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(timeList, true)
+      .setAllowInvalid(true)
+      .setHelpText("시간을 선택하세요")
+      .build();
+    reqSheet.getRange(2, 3, lastDataRow - 1, 1).setDataValidation(timeRule); // C열: 반출시간
+    reqSheet.getRange(2, 5, lastDataRow - 1, 1).setDataValidation(timeRule); // E열: 반납시간
   }
 
   // ── 스케줄상세 C열(세트명), D열(장비명)에 드롭다운 설정 ──
