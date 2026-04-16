@@ -2909,8 +2909,9 @@ function _getPopbillToken() {
  * @param {string} receiver - 수신 전화번호
  * @param {string} receiverName - 수신자 이름
  * @param {string} content - 메시지 내용
+ * @param {Object} [vars] - 템플릿 변수 (예: {"#{고객명}": "홍길동"})
  */
-function sendAlimtalk(templateCode, receiver, receiverName, content) {
+function sendAlimtalk(templateCode, receiver, receiverName, content, vars) {
   var props = PropertiesService.getScriptProperties();
   var corpNum = props.getProperty('POPBILL_CORP_NUM');
   var senderNum = props.getProperty('POPBILL_SENDER_NUM');
@@ -2918,13 +2919,20 @@ function sendAlimtalk(templateCode, receiver, receiverName, content) {
   var token = _getPopbillToken();
   var url = 'https://popbill.linkhub.co.kr/KakaoTalk';
 
+  var msgObj = {
+    rcv: receiver.replace(/-/g, ''),
+    rcvnm: receiverName
+  };
+  if (vars) {
+    msgObj.msg = content;
+    msgObj.altmsg = content;
+    msgObj.vars = vars;
+  }
+
   var body = {
     snd: senderNum,
     content: content,
-    msgs: [{
-      rcv: receiver.replace(/-/g, ''),
-      rcvnm: receiverName
-    }],
+    msgs: [msgObj],
     templateCode: templateCode,
     altSendType: 'A'
   };
@@ -2943,6 +2951,251 @@ function sendAlimtalk(templateCode, receiver, receiverName, content) {
   var response = UrlFetchApp.fetch(url + '/' + corpNum, options);
   return JSON.parse(response.getContentText());
 
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 반출/반납 안내톡 (3회 미만 고객 대상)
+// 반출: 반출 시간 12시간 전 발송
+// 반납: 반출 시간 + 3시간 후 발송
+// 발송 가능 시간: 09:00~21:00 (밖이면 09:00으로 지연)
+// 트리거: 30분마다 checkGuideAlimtalk 실행
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var TPL_CHECKOUT = '026040000902';  // 반출 안내
+var TPL_CHECKIN  = '026040000904';  // 반납 안내
+
+var GUIDE_SEND_START = 8;   // 발송 가능 시작 시각
+var GUIDE_SEND_END   = 22;  // 발송 가능 종료 시각
+
+/**
+ * 반출 안내톡 메시지 생성
+ */
+function _buildCheckoutMsg(customerName) {
+  return customerName + ' 감독님, 안녕하세요.\n'
+    + '빌리지 렌탈샵입니다.\n\n'
+    + '예약하신 장비 대여 건의 반출일이 다가와 안내드립니다.\n'
+    + '만약 직원이 부재할 시에 아래 내용을 참고해주세요 : )\n\n'
+    + '1. 문을 열고 들어오셔서 감독님 성함과 반출 시간이 적힌 테이블을 찾아주시고, 장비를 테스트 하신 후 반출해주시면 됩니다.\n\n'
+    + '모든 장비는 담당자가 확인을 마친 장비이며, 반출 시 확인하신 손상이나 이상은 사진과 함께 카톡으로 보내주시면 감사드리겠습니다.\n\n'
+    + '2. 결제는 반출 시 견적서상 금액을 상단계좌에 입금해주셔도 되고 반납 시에 결제해주셔도 됩니다. 카드 결제를 원하실 경우 아래 순서에 따라 직접 결제 해주셔도 좋습니다.\n\n'
+    + '1) 카드 넣기 2) 금액 입력 (계약서상 \'VAT포함가\') 3) 확인(녹색 버튼) 4) 사인 5) 최종 확인 버튼 6) 영수증 1부는 테이블 위에 놓고 가주시면 됩니다.\n\n'
+    + '감사합니다!';
+}
+
+/**
+ * 반납 안내톡 메시지 생성
+ */
+function _buildCheckinMsg(customerName) {
+  return customerName + ' 감독님, 안녕하세요.\n'
+    + '빌리지 렌탈샵입니다.\n\n'
+    + '예약하신 장비 대여 건의 반납일이 다가와 안내드립니다.\n'
+    + '만약 직원이 부재할 시에 아래 내용을 참고해주세요 : )\n\n'
+    + '1. 장비를 한쪽에 잘 모아서 반납하신 후 사진 촬영하여 카카오톡 채널로 공유 부탁드립니다.\n\n'
+    + '2. 나가실 때는 검정 철문은 닫지 마시고 나무로 된 문만 잘 닫힌 것 확인 후 가주시면 됩니다.\n\n'
+    + '감사합니다 : )\n\n'
+    + '*가급적이면 장비는 안쪽부터 차례대로 넣어주세요!';
+}
+
+/**
+ * 반출일 + 반출시간 → Date 객체 (KST 기준)
+ */
+function _parseCheckoutDateTime(dateVal, timeVal) {
+  var dateStr = dateVal instanceof Date
+    ? Utilities.formatDate(dateVal, 'Asia/Seoul', 'yyyy-MM-dd') : String(dateVal || '').trim();
+  var timeStr = timeVal instanceof Date
+    ? Utilities.formatDate(timeVal, 'Asia/Seoul', 'HH:mm') : String(timeVal || '').trim();
+
+  if (!dateStr) return null;
+  if (!timeStr) timeStr = '10:00';  // 시간 미입력 시 기본 10시
+
+  // yyyy-MM-dd HH:mm → Date (KST)
+  var parts = dateStr.split('-');
+  var timeParts = timeStr.split(':');
+  var dt = new Date(
+    parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]),
+    parseInt(timeParts[0]), parseInt(timeParts[1] || '0'), 0
+  );
+  return dt;
+}
+
+/**
+ * 발송 가능 시간 체크 (09:00~21:00 KST)
+ * @returns {boolean} 지금 발송 가능하면 true
+ */
+function _isInSendWindow(nowKST) {
+  var hour = parseInt(Utilities.formatDate(nowKST, 'Asia/Seoul', 'HH'));
+  return hour >= GUIDE_SEND_START && hour < GUIDE_SEND_END;
+}
+
+/**
+ * 30분마다 실행 — 반출/반납 안내톡 발송 시점 체크
+ *
+ * 반출 안내톡: 반출 시간 12시간 전 (발송 가능 시간 내에서)
+ * 반납 안내톡: 반출 시간 + 3시간 후 (발송 가능 시간 내에서)
+ * 대상: 3회 미만 고객만
+ */
+function checkGuideAlimtalk() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  var contractSheet = ss.getSheetByName('계약마스터');
+
+  if (!schedSheet || !contractSheet || schedSheet.getLastRow() < 2 || contractSheet.getLastRow() < 2) return;
+
+  var now = new Date();
+
+  // 발송 가능 시간 아니면 즉시 종료
+  if (!_isInSendWindow(now)) {
+    Logger.log('⏸ 발송 가능 시간 아님 (08:00~22:00 외)');
+    return;
+  }
+
+  var todayStr = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd');
+
+  // ── 계약마스터 데이터 로드 ──
+  // A=거래ID, B=예약자명, C=연락처
+  var cmLastRow = contractSheet.getLastRow();
+  var cmData = contractSheet.getRange(2, 1, cmLastRow - 1, 3).getValues();
+
+  var contractMap = {};   // 거래ID → { name, tel }
+  for (var ci = 0; ci < cmData.length; ci++) {
+    var tid = String(cmData[ci][0] || '').trim();
+    var name = String(cmData[ci][1] || '').trim();
+    var tel = String(cmData[ci][2] || '').trim();
+    if (tid) contractMap[tid] = { name: name, tel: tel };
+  }
+
+  // ── 고객DB에서 누적이용횟수 로드 ──
+  // A=연락처, B=예약자명, C=누적이용횟수
+  var dbSheet = ss.getSheetByName('고객DB');
+  var usageCount = {};  // 예약자명 → 누적이용횟수
+  if (dbSheet && dbSheet.getLastRow() >= 2) {
+    var dbData = dbSheet.getRange(2, 1, dbSheet.getLastRow() - 1, 3).getValues();
+    for (var di = 0; di < dbData.length; di++) {
+      var dbName = String(dbData[di][1] || '').trim();
+      var count = parseInt(dbData[di][2]) || 0;
+      if (dbName) usageCount[dbName] = count;
+    }
+  }
+
+  // ── 스케줄상세에서 거래ID별 반출일시 수집 ──
+  var schedData = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getValues();
+
+  // 거래ID → { checkoutDT: Date, 상태 }  (첫 행 기준, 중복 거래ID는 스킵)
+  var tradeInfo = {};
+
+  for (var si = 0; si < schedData.length; si++) {
+    var 거래ID = String(schedData[si][1] || '').trim();  // B
+    var 반출일 = schedData[si][5];   // F
+    var 반출시간 = schedData[si][6]; // G
+    var 상태 = String(schedData[si][9] || '').trim();  // J
+
+    if (!거래ID || 상태 === '취소') continue;
+    if (tradeInfo[거래ID]) continue;  // 같은 거래ID 첫 행만
+
+    var checkoutDT = _parseCheckoutDateTime(반출일, 반출시간);
+    if (!checkoutDT) continue;
+
+    tradeInfo[거래ID] = { checkoutDT: checkoutDT };
+  }
+
+  // ── 중복 발송 방지 ──
+  var props = PropertiesService.getScriptProperties();
+  var sentKey = 'GUIDE_SENT_' + todayStr;
+  var sentData = {};
+  try {
+    var sentRaw = props.getProperty(sentKey);
+    if (sentRaw) sentData = JSON.parse(sentRaw);
+  } catch(e) {}
+
+  var results = { sent: [], skipped: [], errors: [] };
+  var nowMs = now.getTime();
+
+  Object.keys(tradeInfo).forEach(function(tid) {
+    var info = tradeInfo[tid];
+    var cust = contractMap[tid];
+    if (!cust || !cust.name || !cust.tel) return;
+
+    // 3회 미만 고객만
+    if ((usageCount[cust.name] || 0) >= 3) return;
+
+    var checkoutMs = info.checkoutDT.getTime();
+
+    // ── 반출 안내톡: 반출 12시간 전 ──
+    var outSendMs = checkoutMs - (12 * 60 * 60 * 1000);
+    var outFlag = 'out_' + tid;
+    if (!sentData[outFlag] && nowMs >= outSendMs && nowMs < checkoutMs) {
+      try {
+        var outMsg = _buildCheckoutMsg(cust.name);
+        var outVars = { '#{고객명}': cust.name };
+        var outRes = sendAlimtalk(TPL_CHECKOUT, cust.tel, cust.name, outMsg, outVars);
+        sentData[outFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'HH:mm');
+        results.sent.push('반출 ' + tid + ' ' + cust.name);
+        Logger.log('✅ 반출 안내톡: ' + tid + ' ' + cust.name + ' → ' + JSON.stringify(outRes));
+      } catch(err) {
+        results.errors.push('반출 ' + tid + ': ' + err.message);
+        Logger.log('❌ 반출 안내톡 실패: ' + tid + ' ' + err.message);
+      }
+    }
+
+    // ── 반납 안내톡: 반출 3시간 후 ──
+    var inSendMs = checkoutMs + (3 * 60 * 60 * 1000);
+    var inFlag = 'in_' + tid;
+    // 반출 당일~다음날 사이에만 발송 (너무 지난 건 무시)
+    var inDeadlineMs = checkoutMs + (48 * 60 * 60 * 1000);
+    if (!sentData[inFlag] && nowMs >= inSendMs && nowMs < inDeadlineMs) {
+      try {
+        var inMsg = _buildCheckinMsg(cust.name);
+        var inVars = { '#{고객명}': cust.name };
+        var inRes = sendAlimtalk(TPL_CHECKIN, cust.tel, cust.name, inMsg, inVars);
+        sentData[inFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'HH:mm');
+        results.sent.push('반납 ' + tid + ' ' + cust.name);
+        Logger.log('✅ 반납 안내톡: ' + tid + ' ' + cust.name + ' → ' + JSON.stringify(inRes));
+      } catch(err) {
+        results.errors.push('반납 ' + tid + ': ' + err.message);
+        Logger.log('❌ 반납 안내톡 실패: ' + tid + ' ' + err.message);
+      }
+    }
+  });
+
+  // ── 발송 기록 저장 ──
+  props.setProperty(sentKey, JSON.stringify(sentData));
+
+  // ── 오래된 발송 기록 정리 (7일 이전) ──
+  var allKeys = props.getKeys();
+  var cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  var cutoffStr = 'GUIDE_SENT_' + Utilities.formatDate(cutoff, 'Asia/Seoul', 'yyyyMMdd');
+  allKeys.forEach(function(k) {
+    if (k.indexOf('GUIDE_SENT_') === 0 && k < cutoffStr) {
+      props.deleteProperty(k);
+    }
+  });
+
+  if (results.sent.length > 0 || results.errors.length > 0) {
+    Logger.log('📋 안내톡 결과: ' + JSON.stringify(results));
+  }
+  return results;
+}
+
+/**
+ * 반출/반납 안내톡 트리거 설정 (최초 1회 실행)
+ * 30분마다 checkGuideAlimtalk 자동 실행
+ */
+function setupGuideAlimtalkTrigger() {
+  // 기존 트리거 제거
+  var triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(function(t) {
+    if (t.getHandlerFunction() === 'checkGuideAlimtalk') {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  // 30분마다 트리거 생성
+  ScriptApp.newTrigger('checkGuideAlimtalk')
+    .timeBased()
+    .everyMinutes(30)
+    .create();
+
+  Logger.log('✅ 반출/반납 안내톡 트리거 설정 완료 (30분마다 체크)');
 }
 
 /**
