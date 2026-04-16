@@ -1789,9 +1789,6 @@ function getSetComponents(name, setSheet) {
  * 특정 행의 요청ID를 기준으로 같은 ID의 모든 행을 일괄 등록
  */
 function registerByReqID(sheet, triggerRow) {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) throw new Error("다른 등록 작업 진행 중. 잠시 후 다시 시도해주세요.");
-  try {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const contractSheet = ss.getSheetByName("계약마스터");
   const schedSheet = ss.getSheetByName("스케줄상세");
@@ -2212,7 +2209,6 @@ function registerByReqID(sheet, triggerRow) {
 
   // ── 대기열 자동 처리: "등록대기" 상태인 건 순차 처리 ──
   processRegistrationQueue_(sheet);
-  } finally { lock.releaseLock(); }
 }
 
 
