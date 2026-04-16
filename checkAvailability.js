@@ -2045,6 +2045,9 @@ function registerByReqID(sheet, triggerRow) {
 
 
     // ── 스케줄상세에 장비 등록 (세트 헤더/구성품/개별 구분) ──
+    sheet.getRange(triggerRow, 15).setValue("⏳ 스케줄상세 등록 중...");
+    SpreadsheetApp.flush();
+    try {
     let schedLastRow = schedSheet.getLastRow();
     let schedCount = 0;
 
