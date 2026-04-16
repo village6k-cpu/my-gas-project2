@@ -200,6 +200,21 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   //   우측: H(품목, 병합), J(수량), K(일수), L(단가) — M(금액)은 수식 자동계산
   const ITEMS_PER_SIDE = rows.itemRows || 22;  // 한 쪽 행 수
 
+  // 품목 영역 초기화 (템플릿에 미리 채워진 내용 제거)
+  for (let c = 0; c < ITEMS_PER_SIDE; c++) {
+    var clearRow = rows.itemStart + c;
+    // 좌측: B, D, E, F (C는 B와 병합)
+    ws.getRange(clearRow, 2).clearContent();  // B: 품목명
+    ws.getRange(clearRow, 4).clearContent();  // D: 수량
+    ws.getRange(clearRow, 5).clearContent();  // E: 일수
+    ws.getRange(clearRow, 6).clearContent();  // F: 단가
+    // 우측: H, J, K, L (I는 H와 병합)
+    ws.getRange(clearRow, 8).clearContent();  // H: 품목명
+    ws.getRange(clearRow, 10).clearContent(); // J: 수량
+    ws.getRange(clearRow, 11).clearContent(); // K: 일수
+    ws.getRange(clearRow, 12).clearContent(); // L: 단가
+  }
+
   for (let i = 0; i < items.length && i < ITEMS_PER_SIDE * 2; i++) {
     const item = items[i];
     let row, nameCol, qtyCol, dayCol, priceCol;
