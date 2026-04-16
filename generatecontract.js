@@ -291,6 +291,16 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   // 저장
   SpreadsheetApp.flush();
 
+  // ── 시트 보호 (수동 편집 차단) ──
+  var protection = ws.protect().setDescription("계약서 자동 생성 — 수정 금지");
+  // 스크립트 소유자만 편집 가능, 나머지 전부 차단
+  protection.removeEditors(protection.getEditors());
+  if (protection.canDomainEdit()) {
+    protection.setDomainEdit(false);
+  }
+  // 경고 표시 설정
+  protection.setWarningOnly(false);
+
   // ── 개고생2.0 거래내역 M열에 계약서 링크 입력 ──
   updateContractLink(거래ID, newUrl);
 
