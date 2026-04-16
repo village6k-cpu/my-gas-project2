@@ -2045,11 +2045,16 @@ function registerByReqID(sheet, triggerRow) {
 
 
     // ── 스케줄상세에 장비 등록 (세트 헤더/구성품/개별 구분) ──
-    sheet.getRange(triggerRow, 15).setValue("⏳ 스케줄상세 등록 중...");
-    SpreadsheetApp.flush();
-    try {
     let schedLastRow = schedSheet.getLastRow();
     let schedCount = 0;
+    // 스케줄상세 시트에 충분한 빈 행 확보
+    var neededRows = 0;
+    for (let ci = 0; ci < allData.length; ci++) {
+      if (allData[ci][0] === reqID && allData[ci][5] && allData[ci][14] !== "거절" && allData[ci][14] !== "보류") neededRows++;
+    }
+    if (schedLastRow + neededRows > schedSheet.getMaxRows()) {
+      schedSheet.insertRowsAfter(schedSheet.getMaxRows(), neededRows + 10);
+    }
 
     for (let i = 0; i < allData.length; i++) {
       if (allData[i][0] !== reqID) continue;
