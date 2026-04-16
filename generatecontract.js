@@ -488,38 +488,6 @@ function getLongTermDiscountRate(days) {
 }
 
 /**
- * 진단용: 특정 거래ID의 회차 계산 과정 확인
- * GAS 편집기에서 debugCalcDays() 실행 → 로그 확인
- */
-function debugCalcDays() {
-  var tid = '260414-009';
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var cs = ss.getSheetByName('계약마스터');
-  var data = cs.getRange(2, 1, cs.getLastRow() - 1, 11).getValues();
-  for (var i = 0; i < data.length; i++) {
-    if (data[i][0] === tid) {
-      var 반출일 = data[i][4], 반출시간 = data[i][5];
-      var 반납일 = data[i][6], 반납시간 = data[i][7];
-      var startDT = combineDT_contract(반출일, 반출시간);
-      var endDT = combineDT_contract(반납일, 반납시간);
-      var totalH = startDT && endDT ? (endDT - startDT) / 3600000 : 0;
-      var result = calcRentalDays(반출일, 반출시간, 반납일, 반납시간);
-      Logger.log('거래ID: ' + tid);
-      Logger.log('반출일 raw: ' + JSON.stringify(반출일) + ' (type: ' + typeof 반출일 + ')');
-      Logger.log('반출시간 raw: ' + JSON.stringify(반출시간) + ' (type: ' + typeof 반출시간 + ')');
-      Logger.log('반납일 raw: ' + JSON.stringify(반납일) + ' (type: ' + typeof 반납일 + ')');
-      Logger.log('반납시간 raw: ' + JSON.stringify(반납시간) + ' (type: ' + typeof 반납시간 + ')');
-      Logger.log('startDT: ' + startDT);
-      Logger.log('endDT: ' + endDT);
-      Logger.log('총 시간: ' + totalH + '시간');
-      Logger.log('계산 결과: ' + result + '회차');
-      return;
-    }
-  }
-  Logger.log(tid + ' 못 찾음');
-}
-
-/**
  * 대여일수 계산
  * 24시간 = 1일, 6시간 이내 초과 = 같은 일수, 6시간 초과 = +1일
  * 예: 30시간=1일, 31시간=2일, 54시간=2일, 55시간=3일
@@ -578,182 +546,16 @@ function formatContractDT(date, time) {
 
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 기존 계약서 일괄 수정 (1899 타임존 버그 픽스)
+// [삭제됨] 기존 계약서 일괄 수정/복원 함수 — 사용 금지
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/**
- * 빌리지2.0 거래내역 시트에 있는 건들의 계약서 일수/시간 재계산
- * GAS 편집기에서 fixAllContractTimezone() 실행
- *
- * 거래내역 M열(계약서링크)이 있는 건만 처리
- * 수정 항목:
- * 1. 대여일자/반납일자 표시 (시간 32분 오차 수정)
- * 2. 품목 일수 (E열/K열) 재계산
- * 3. 장기할인(C45) → 수식으로 교체
- */
-function fixAllContractTimezone() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var props = PropertiesService.getScriptProperties();
-
-  // ── 계약마스터 데이터 (getDisplayValues로 시간 정확히 읽기) ──
-  var contractSheet = ss.getSheetByName("계약마스터");
-  if (!contractSheet) { Logger.log("❌ 계약마스터 시트 없음"); return; }
-  var cLastRow = contractSheet.getLastRow();
-  if (cLastRow < 2) { Logger.log("❌ 계약마스터 데이터 없음"); return; }
-
-  var cData = contractSheet.getRange(2, 1, cLastRow - 1, 11).getValues();
-  var cDisplay = contractSheet.getRange(2, 1, cLastRow - 1, 11).getDisplayValues();
-
-  // 거래ID → {반출일, 반출시간(str), 반납일, 반납시간(str)} 매핑
-  var contractMap = {};
-  for (var i = 0; i < cData.length; i++) {
-    var tid = String(cData[i][0] || "").trim();
-    if (!tid) continue;
-    contractMap[tid] = {
-      반출일: cData[i][4],
-      반출시간: cDisplay[i][5],
-      반납일: cData[i][6],
-      반납시간: cDisplay[i][7],
-    };
-  }
-
-  // ── 빌리지2.0 거래내역에서 계약서링크(M열) 있는 건 수집 ──
-  var 개고생URL = props.getProperty("개고생2_URL");
-  var 거래시트;
-  if (개고생URL) {
-    거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
-  } else {
-    거래시트 = ss.getSheetByName("거래내역");
-  }
-  if (!거래시트) { Logger.log("❌ 거래내역 시트 없음"); return; }
-
-  var 거래LastRow = 거래시트.getLastRow();
-  if (거래LastRow < 2) { Logger.log("❌ 거래내역 데이터 없음"); return; }
-
-  // D열(4)=거래ID, M열(13)=계약서링크
-  var 거래Data = 거래시트.getRange(2, 1, 거래LastRow - 1, 13).getValues();
-
-  var fixedCount = 0;
-  var skippedCount = 0;
-  var errorCount = 0;
-  var logLines = [];
-
-  for (var idx = 0; idx < 거래Data.length; idx++) {
-    var 거래ID = String(거래Data[idx][3] || "").trim();   // D열 (0-based: 3)
-    var 계약서링크 = String(거래Data[idx][12] || "").trim(); // M열 (0-based: 12)
-    if (!거래ID || !계약서링크) continue;
-
-    // URL에서 파일 ID 추출
-    var fileId = extractSpreadsheetId(계약서링크);
-    if (!fileId) {
-      logLines.push("⏭ " + 거래ID + " → 링크에서 파일ID 추출 실패");
-      skippedCount++;
-      continue;
-    }
-
-    var master = contractMap[거래ID];
-
-    try {
-      var contractSS = SpreadsheetApp.openById(fileId);
-      var ws = contractSS.getSheets()[0];
-      var rows = findTemplateRows(ws);
-      var dayCell = "E" + rows.itemStart;
-
-      if (master) {
-        // ── 계약마스터에 있는 건: 일수/시간 전부 재계산 ──
-        var correctDays = calcRentalDays(master.반출일, master.반출시간, master.반납일, master.반납시간);
-        var correct반출 = formatContractDT(master.반출일, master.반출시간);
-        var correct반납 = formatContractDT(master.반납일, master.반납시간);
-
-        var current반출 = String(ws.getRange(rows.rentalStart, 3).getValue());
-        var currentDay = ws.getRange(rows.itemStart, 5).getValue();
-
-        // 1) 대여일자/반납일자 표시 수정
-        ws.getRange(rows.rentalStart, 3).setValue(correct반출);
-        ws.getRange(rows.rentalStart + 1, 3).setValue(correct반납);
-
-        // 2) 품목 일수 (좌측 E열 + 우측 K열) 수정
-        var ITEMS_PER_SIDE = rows.itemRows || 22;
-        for (var r = 0; r < ITEMS_PER_SIDE; r++) {
-          var itemRow = rows.itemStart + r;
-          if (ws.getRange(itemRow, 2).getValue()) {
-            ws.getRange(itemRow, 5).setValue(correctDays);
-          }
-          if (ws.getRange(itemRow, 8).getValue()) {
-            ws.getRange(itemRow, 11).setValue(correctDays);
-          }
-        }
-
-        // 3) 장기할인(C45) → 수식으로 교체
-        ws.getRange("C45").setFormula(
-          '=IF(' + dayCell + '>=20,"50%",IF(' + dayCell + '>=15,"45%",IF(' + dayCell + '>=10,"40%",IF(' + dayCell + '>=6,"35%",IF(' + dayCell + '>=3,"20%",IF(' + dayCell + '>=2,"10%","해당없음"))))))'
-        );
-
-        SpreadsheetApp.flush();
-
-        var changed = (current반출 !== correct반출 || currentDay != correctDays);
-        var status = changed ? "✅ 수정됨" : "✅ 확인 (변경없음)";
-        logLines.push(status + " " + 거래ID + " → 일수:" + correctDays + ", 반출:" + correct반출 + ", 반납:" + correct반납 + (changed ? " (이전: 일수=" + currentDay + ", 반출=" + current반출 + ")" : ""));
-
-      } else {
-        // ── 계약마스터에 없는 건: 계약서의 현재 일수 기준으로 장기할인만 체크 ──
-        var currentDay = ws.getRange(rows.itemStart, 5).getValue();
-        var currentC45 = String(ws.getRange("C45").getValue()).trim();
-        var c45Formula = ws.getRange("C45").getFormula();
-
-        // 이미 수식이면 OK, 아니면 현재 일수 기준으로 맞는지 확인
-        if (c45Formula) {
-          logLines.push("✅ 확인 (변경없음) " + 거래ID + " → 계약마스터 없음, 장기할인 수식 이미 적용됨 (일수:" + currentDay + ", C45:" + currentC45 + ")");
-        } else {
-          // 현재 일수 기반으로 올바른 장기할인 값 계산
-          var days = Number(currentDay) || 0;
-          var correctDiscount = days >= 20 ? "50%" : days >= 15 ? "45%" : days >= 10 ? "40%" : days >= 6 ? "35%" : days >= 3 ? "20%" : days >= 2 ? "10%" : "해당없음";
-
-          // 수식으로 교체 (수동 수정에도 자동 반영되게)
-          ws.getRange("C45").setFormula(
-            '=IF(' + dayCell + '>=20,"50%",IF(' + dayCell + '>=15,"45%",IF(' + dayCell + '>=10,"40%",IF(' + dayCell + '>=6,"35%",IF(' + dayCell + '>=3,"20%",IF(' + dayCell + '>=2,"10%","해당없음"))))))'
-          );
-          SpreadsheetApp.flush();
-
-          var wasWrong = (currentC45 !== correctDiscount && currentC45 !== "");
-          logLines.push((wasWrong ? "✅ 수정됨" : "✅ 수식 적용") + " " + 거래ID + " → 계약마스터 없음, 일수:" + currentDay + ", 장기할인: " + currentC45 + " → " + correctDiscount + " (수식)");
-        }
-      }
-
-      fixedCount++;
-
-    } catch (err) {
-      logLines.push("❌ " + 거래ID + " → " + err.message);
-      errorCount++;
-    }
-  }
-
-  // 결과 로그
-  Logger.log("═══ 계약서 일괄 수정 완료 ═══");
-  Logger.log("처리: " + fixedCount + " / 스킵: " + skippedCount + " / 에러: " + errorCount);
-  for (var l = 0; l < logLines.length; l++) {
-    Logger.log(logLines[l]);
-  }
-
-  try {
-    SpreadsheetApp.getUi().alert(
-      "계약서 일괄 수정 완료\n\n" +
-      "처리: " + fixedCount + "건\n" +
-      "스킵: " + skippedCount + "건\n" +
-      "에러: " + errorCount + "건\n\n" +
-      "상세 로그는 실행 로그에서 확인하세요."
-    );
-  } catch (e) { /* 트리거 등 UI 없는 환경 */ }
-}
-
-/** Google 스프레드시트 URL에서 파일 ID 추출 */
-function extractSpreadsheetId(url) {
-  if (!url) return null;
-  // https://docs.google.com/spreadsheets/d/FILE_ID/edit...
-  var match = String(url).match(/\/d\/([a-zA-Z0-9_-]+)/);
-  return match ? match[1] : null;
-}
-
+/** @deprecated 사용 금지 — 기존 계약서 건드리지 않음 */
+function fixAllContractTimezone() { Logger.log("⛔ 이 함수는 비활성화되었습니다."); return; }
+/** @deprecated 사용 금지 */
+function revertAllContracts() { Logger.log("⛔ 이 함수는 비활성화되었습니다."); return; }
+/** @deprecated 사용 금지 */
+function resetRevertProgress() { Logger.log("⛔ 이 함수는 비활성화되었습니다."); return; }
+function extractSpreadsheetId(url) { return null; }
 
 /**
  * 등록 완료 후 자동 계약서 생성 (registerByReqID에서 호출)
