@@ -1852,12 +1852,33 @@ function registerByReqID(sheet, triggerRow) {
     return;
   }
 
-  // ── 이미 등록된 건인지 확인 ──
+  // ── 이미 등록된 건인지 확인 (거절/보류된 건은 재등록 허용) ──
+  var hasCompleted = false;
+  var hasRejectedOrHeld = false;
   for (let i = 0; i < allData.length; i++) {
-    if (allData[i][0] === reqID && allData[i][14] === "등록완료") {
-      sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
-      return;
+    if (allData[i][0] === reqID) {
+      var rowStatus = String(allData[i][14] || "").trim();
+      if (rowStatus === "등록완료") hasCompleted = true;
+      if (rowStatus === "거절" || rowStatus === "보류") hasRejectedOrHeld = true;
     }
+  }
+  if (hasCompleted && !hasRejectedOrHeld) {
+    sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
+    return;
+  }
+  // 거절/보류 후 재등록 시 기존 상태 초기화
+  if (hasRejectedOrHeld) {
+    for (let i = 0; i < allData.length; i++) {
+      if (allData[i][0] === reqID) {
+        var rs = String(allData[i][14] || "").trim();
+        if (rs === "거절" || rs === "보류" || rs === "등록완료") {
+          sheet.getRange(i + 2, 14).clearContent();  // N열 초기화
+          sheet.getRange(i + 2, 15).clearContent();  // O열 초기화
+          sheet.getRange(i + 2, 15).setBackground(null);
+        }
+      }
+    }
+    SpreadsheetApp.flush();
   }
 
   // ── 동시 등록 방지 (LockService) ──
@@ -2016,13 +2037,29 @@ function registerByReqID(sheet, triggerRow) {
     }
   } catch (e) { }
 
-  // ── 계약마스터에 등록 ──
-  const newContractRow = contractLastRow + 1;
-  contractSheet.getRange(newContractRow, 1, 1, 11).setValues([[
-    거래ID, 예약자명, 연락처 || "", 업체명 || "",
-    반출일str, 반출시간str, 반납일str, 반납시간str,
-    회차, "예약", ""
-  ]]);
+  // ── 계약마스터 중복 체크 후 등록 ──
+  // 같은 예약자명+반출일 조합이 이미 있으면 거래ID 재사용
+  var existingContractID = null;
+  if (contractLastRow >= 2) {
+    var cmData = contractSheet.getRange(2, 1, contractLastRow - 1, 5).getValues();
+    for (var ci = 0; ci < cmData.length; ci++) {
+      if (String(cmData[ci][1]).trim() === 예약자명 &&
+          fmtDT(cmData[ci][4], "").split(" ")[0] === 반출일str) {
+        existingContractID = String(cmData[ci][0]).trim();
+        break;
+      }
+    }
+  }
+  if (existingContractID) {
+    거래ID = existingContractID;  // 기존 거래ID 재사용
+  } else {
+    const newContractRow = contractLastRow + 1;
+    contractSheet.getRange(newContractRow, 1, 1, 11).setValues([[
+      거래ID, 예약자명, 연락처 || "", 업체명 || "",
+      반출일str, 반출시간str, 반납일str, 반납시간str,
+      회차, "예약", ""
+    ]]);
+  }
 
 
     // ── 스케줄상세에 장비 등록 (세트 헤더/구성품/개별 구분) ──
