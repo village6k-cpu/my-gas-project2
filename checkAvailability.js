@@ -1866,7 +1866,7 @@ function registerByReqID(sheet, triggerRow) {
     sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
     return;
   }
-  // 거절/보류 후 재등록 시 기존 상태 초기화
+  // 거절/보류 후 재등록 시 기존 상태 초기화 (시트 + 메모리 allData 양쪽)
   if (hasRejectedOrHeld) {
     for (let i = 0; i < allData.length; i++) {
       if (allData[i][0] === reqID) {
@@ -1875,6 +1875,7 @@ function registerByReqID(sheet, triggerRow) {
           sheet.getRange(i + 2, 14).clearContent();  // N열 초기화
           sheet.getRange(i + 2, 15).clearContent();  // O열 초기화
           sheet.getRange(i + 2, 15).setBackground(null);
+          allData[i][14] = "";  // 메모리도 초기화 (스케줄상세 등록 시 스킵 방지)
         }
       }
     }
