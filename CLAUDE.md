@@ -127,6 +127,15 @@
 - Google Drive (계약서 파일 생성)
 - GitHub Pages (프론트엔드 직접 서빙 — 속도 개선)
 
+### 배포 순서 (반드시 준수)
+1. `clasp pull` → GAS 편집기에서 작업한 내용 로컬로 가져오기 (덮어쓰기 방지)
+2. 로컬에서 코드 수정
+3. `clasp push` → GAS에 반영
+4. `git add & commit & push` → 백업
+5. GAS 편집기에서 웹앱 새 버전 배포 (사용자에게 안내)
+
+**절대 clasp pull 없이 clasp push 하지 말 것** — GAS 편집기에서 직접 작업한 코드가 날아감
+
 ### 주의사항
 - doGet/doPost는 sheetAPI.js에만 정의
 - onOpen은 checkAvailability.js에만 정의
