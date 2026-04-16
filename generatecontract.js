@@ -200,15 +200,15 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   //   우측: H(품목, 병합), J(수량), K(일수), L(단가) — M(금액)은 수식 자동계산
   const ITEMS_PER_SIDE = rows.itemRows || 22;  // 한 쪽 행 수
 
-  // 품목 영역 초기화 (템플릿에 미리 채워진 내용 제거)
+  // 품목 영역 초기화 (템플릿에 미리 채워진 내용 제거, G/M 금액 수식은 보존)
   for (let c = 0; c < ITEMS_PER_SIDE; c++) {
     var clearRow = rows.itemStart + c;
-    // 좌측: B, D, E, F (C는 B와 병합)
+    // 좌측: B, D, E, F (C는 B와 병합, G 금액 수식 보존)
     ws.getRange(clearRow, 2).clearContent();  // B: 품목명
     ws.getRange(clearRow, 4).clearContent();  // D: 수량
     ws.getRange(clearRow, 5).clearContent();  // E: 일수
     ws.getRange(clearRow, 6).clearContent();  // F: 단가
-    // 우측: H, J, K, L (I는 H와 병합)
+    // 우측: H, J, K, L (I는 H와 병합, M 금액 수식 보존)
     ws.getRange(clearRow, 8).clearContent();  // H: 품목명
     ws.getRange(clearRow, 10).clearContent(); // J: 수량
     ws.getRange(clearRow, 11).clearContent(); // K: 일수
@@ -217,22 +217,29 @@ function generateContractFile(ss, 거래ID, 추가요청) {
 
   for (let i = 0; i < items.length && i < ITEMS_PER_SIDE * 2; i++) {
     const item = items[i];
-    let row, nameCol, qtyCol, dayCol, priceCol;
+    let row, nameCol, qtyCol, dayCol, priceCol, amtCol;
 
     if (i < ITEMS_PER_SIDE) {
-      // 좌측: B(병합된 품목), D(수량), E(일수), F(단가)
+      // 좌측: B(병합된 품목), D(수량), E(일수), F(단가), G(금액)
       row = rows.itemStart + i;
-      nameCol = 2; qtyCol = 4; dayCol = 5; priceCol = 6;
+      nameCol = 2; qtyCol = 4; dayCol = 5; priceCol = 6; amtCol = 7;
     } else {
-      // 우측: H(병합된 품목), J(수량), K(일수), L(단가)
+      // 우측: H(병합된 품목), J(수량), K(일수), L(단가), M(금액)
       row = rows.itemStart + (i - ITEMS_PER_SIDE);
-      nameCol = 8; qtyCol = 10; dayCol = 11; priceCol = 12;
+      nameCol = 8; qtyCol = 10; dayCol = 11; priceCol = 12; amtCol = 13;
     }
 
     ws.getRange(row, nameCol).setValue(item.장비명);
     ws.getRange(row, qtyCol).setValue(item.수량);
     ws.getRange(row, dayCol).setValue(일수);
     ws.getRange(row, priceCol).setValue(item.단가);
+
+    // 금액 수식 설정: 수량 × 일수 × 단가
+    var qtyRef = ws.getRange(row, qtyCol).getA1Notation();
+    var dayRef = ws.getRange(row, dayCol).getA1Notation();
+    var priceRef = ws.getRange(row, priceCol).getA1Notation();
+    ws.getRange(row, amtCol).setFormula("=" + qtyRef + "*" + dayRef + "*" + priceRef);
+
     // 서식 통일 (굵은 글씨 해제)
     ws.getRange(row, nameCol, 1, priceCol - nameCol + 1).setFontWeight("normal");
 
@@ -242,7 +249,6 @@ function generateContractFile(ss, 거래ID, 추가요청) {
     if (isSetHeader || isPricedItem) {
       ws.getRange(row, nameCol).setBackground("#D9EAD3").setFontWeight("bold");
     }
-    // ※ 금액(G열/M열)은 템플릿 수식이 자동 계산 → 건드리지 않음
   }
 
   // ── 추가요청(악세사리 등) 품목 뒤에 추가 ──
@@ -623,11 +629,11 @@ function protectContractTemplate() {
     if (protection.canDomainEdit()) {
       protection.setDomainEdit(false);
     }
-    protection.setWarningOnly(false);
+    protection.setWarningOnly(true);
   });
 
   Logger.log("✅ 템플릿 보호 완료: " + templateSS.getName());
-  SpreadsheetApp.getUi().alert("✅ 계약서 템플릿 보호 완료\n\n" + templateSS.getName() + "\n\nUI에서 수동 편집이 차단됩니다.");
+  SpreadsheetApp.getUi().alert("✅ 계약서 템플릿 보호 완료\n\n" + templateSS.getName() + "\n\n수정 시도 시 경고 팝업이 표시됩니다.\n(소유자는 차단 불가 — 경고만 표시)");
 }
 
 
