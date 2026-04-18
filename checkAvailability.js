@@ -580,6 +580,20 @@ function refreshEquipmentList() {
       .build();
     reqSheet.getRange(2, 3, lastDataRow - 1, 1).setDataValidation(timeRule); // C열: 반출시간
     reqSheet.getRange(2, 5, lastDataRow - 1, 1).setDataValidation(timeRule); // E열: 반납시간
+
+    // ── 확인요청 H열(확인) 드롭다운 설정 ──
+    var hRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(["확인", "발송승인"], true)
+      .setAllowInvalid(true)
+      .build();
+    reqSheet.getRange(2, 8, lastDataRow - 1, 1).setDataValidation(hRule);
+
+    // ── 확인요청 N열(등록) 드롭다운 설정 ──
+    var nRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(["등록", "추가", "삭제", "날짜변경", "거절", "보류"], true)
+      .setAllowInvalid(true)
+      .build();
+    reqSheet.getRange(2, 14, lastDataRow - 1, 1).setDataValidation(nRule);
   }
 
   // ── 스케줄상세 C열(세트명), D열(장비명)에 드롭다운 설정 ──
