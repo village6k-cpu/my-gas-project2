@@ -862,18 +862,20 @@ function insertAndCheckRequest(req) {
     }
   } catch(e) {}
 
-  // 연락처 미입력 시 고객DB에서 조회
+  // 연락처 미입력 시 고객DB에서 조회 (동명이인 시 자동입력 안 함)
   var resolvedPhone = req.연락처 || "";
   if (!resolvedPhone && req.예약자명) {
     var dbSheet = ss.getSheetByName("고객DB");
     if (dbSheet && dbSheet.getLastRow() >= 2) {
       var dbData = dbSheet.getDataRange().getValues();
+      var matches = [];
       for (var di = 1; di < dbData.length; di++) {
         if (String(dbData[di][1]).trim() === String(req.예약자명).trim()) {
-          resolvedPhone = String(dbData[di][0]).trim();
-          break;
+          matches.push(String(dbData[di][0]).trim());
         }
       }
+      if (matches.length === 1) resolvedPhone = matches[0];
+      // 2명 이상이면 자동입력 안 함 (동명이인 → 수동입력 필요)
     }
   }
 
@@ -1841,18 +1843,26 @@ function registerByReqID(sheet, triggerRow) {
     var dbSheet = ss.getSheetByName("고객DB");
     if (dbSheet && dbSheet.getLastRow() >= 2) {
       var dbData = dbSheet.getDataRange().getValues();
+      var matches2 = [];
       for (var di2 = 1; di2 < dbData.length; di2++) {
         if (String(dbData[di2][1]).trim() === String(예약자명).trim()) {
-          연락처 = String(dbData[di2][0]).trim();
-          // 확인요청 L열에 연락처 채우기
-          for (var fi = 0; fi < allData.length; fi++) {
-            if (allData[fi][0] === reqID && allData[fi][10]) {
-              sheet.getRange(fi + 2, 12).setValue(연락처);
-              break;
-            }
-          }
-          break;
+          matches2.push(String(dbData[di2][0]).trim());
         }
+      }
+      if (matches2.length === 1) {
+        연락처 = matches2[0];
+        for (var fi = 0; fi < allData.length; fi++) {
+          if (allData[fi][0] === reqID && allData[fi][10]) {
+            sheet.getRange(fi + 2, 12).setValue(연락처);
+            break;
+          }
+        }
+      } else if (matches2.length > 1) {
+        // 동명이인 → 연락처 직접 입력 필요
+        sheet.getRange(triggerRow, 15).setValue("❌ 동명이인 " + matches2.length + "명 존재 — 연락처 직접 입력 필요");
+        sheet.getRange(triggerRow, 15).setBackground("#FFC7CE");
+        sheet.getRange(triggerRow, 14).clearContent();
+        return;
       }
     }
   }

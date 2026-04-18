@@ -75,13 +75,37 @@ function onEdit(e) {
     if (col === 2 || col === 8) {
       handleScheduleEdit(e);
     }
-    // K열(11) 예약자명 입력 시 L열(12) 연락처 자동조회 수식 복원
+    // K열(11) 예약자명 입력 시 L열(12) 연락처 자동조회 수식 복원 + 동명이인 경고
     if (col === 11 && row >= 2) {
+      var kCell = sheet.getRange(row, 11);
       var lCell = sheet.getRange(row, 12);
-      if (!lCell.getFormula() && !lCell.getValue()) {
-        lCell.setFormula(
-          '=IF(K' + row + '="","",IFERROR(INDEX(\'고객DB\'!A:A,MATCH(K' + row + ',\'고객DB\'!B:B,0)),""))'
-        );
+      var kVal = String(kCell.getValue() || "").trim();
+      // 동명이인 체크: 고객DB에서 같은 이름이 몇 개 있는지 확인
+      var dupCount = 0;
+      try {
+        var dbSheet = e.source.getSheetByName("고객DB");
+        if (dbSheet && dbSheet.getLastRow() >= 2 && kVal) {
+          var dbNames = dbSheet.getRange(2, 2, dbSheet.getLastRow() - 1, 1).getValues();
+          for (var dni = 0; dni < dbNames.length; dni++) {
+            if (String(dbNames[dni][0]).trim() === kVal) dupCount++;
+          }
+        }
+      } catch(e1) {}
+
+      if (dupCount > 1) {
+        // 동명이인 존재 → L열 비우고 K열에 경고 메모
+        lCell.clearContent();
+        kCell.setNote("⚠️ 고객DB에 동명이인 " + dupCount + "명 존재\n연락처를 직접 입력하세요");
+        kCell.setBackground("#FFEB9C");
+      } else {
+        // 단일 또는 미등록 → 자동조회 수식 설정 + 경고 제거
+        kCell.clearNote();
+        kCell.setBackground(null);
+        if (!lCell.getFormula() && !lCell.getValue()) {
+          lCell.setFormula(
+            '=IF(K' + row + '="","",IFERROR(INDEX(\'고객DB\'!A:A,MATCH(K' + row + ',\'고객DB\'!B:B,0)),""))'
+          );
+        }
       }
     }
     // F열(6) 장비명 입력 시 위 행에서 요청ID만 자동 상속 (날짜는 첫 행만 유지)
