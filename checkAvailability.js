@@ -1840,6 +1840,15 @@ function getSetComponents(name, setSheet) {
  * 특정 행의 요청ID를 기준으로 같은 ID의 모든 행을 일괄 등록
  */
 function registerByReqID(sheet, triggerRow) {
+  // ── 전체 등록 프로세스 직렬화 (동시 실행 방지) ──
+  var regLock = LockService.getScriptLock();
+  if (!regLock.tryLock(30000)) {
+    sheet.getRange(triggerRow, 15).setValue("⏳ 등록대기");
+    sheet.getRange(triggerRow, 15).setBackground("#E8F0FE");
+    return;
+  }
+  try {
+  // 락 획득 후 시트 데이터를 새로 읽어야 정확함
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const contractSheet = ss.getSheetByName("계약마스터");
   const schedSheet = ss.getSheetByName("스케줄상세");
@@ -1938,50 +1947,35 @@ function registerByReqID(sheet, triggerRow) {
     SpreadsheetApp.flush();
   }
 
-  // ── 동시 등록 방지 (LockService) ──
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) {
-    // 락 실패 → 대기열에 등록
-    sheet.getRange(triggerRow, 15).setValue("⏳ 등록대기");
-    sheet.getRange(triggerRow, 15).setBackground("#E8F0FE");
-    return;
+  // ── O열 재확인 (동시 클릭 대비 — 락 안에서 실행) ──
+  var recheckData = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
+  for (let i = 0; i < recheckData.length; i++) {
+    if (recheckData[i][0] === reqID && recheckData[i][14] === "등록완료") {
+      sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
+      sheet.getRange(triggerRow, 14).clearContent();
+      return;
+    }
   }
-  try {
-    // 락 획득 후 O열 재확인 (동시 클릭 대비)
-    const recheckData = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
-    for (let i = 0; i < recheckData.length; i++) {
-      if (recheckData[i][0] === reqID && recheckData[i][14] === "등록완료") {
-        sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
-        sheet.getRange(triggerRow, 14).clearContent();
-        lock.releaseLock();
-        return;
-      }
-    }
 
-    // ── 스케줄상세 중복 등록 체크: 같은 예약자명 + 반출일 + 장비목록 ──
-    var dupDate = "";
-    var dupEquips = [];
-    for (var di = 0; di < allData.length; di++) {
-      if (allData[di][0] !== reqID) continue;
-      if (allData[di][14] === "거절" || allData[di][14] === "보류") continue;
-      if (allData[di][1]) {
-        var dv = allData[di][1];
-        dupDate = dv instanceof Date ? Utilities.formatDate(dv, "Asia/Seoul", "yyyy-MM-dd") : String(dv).trim();
-      }
-      if (allData[di][5]) dupEquips.push(String(allData[di][5]).trim());
+  // ── 스케줄상세 중복 등록 체크 ──
+  var dupDate = "";
+  var dupEquips = [];
+  for (var di = 0; di < allData.length; di++) {
+    if (allData[di][0] !== reqID) continue;
+    if (allData[di][14] === "거절" || allData[di][14] === "보류") continue;
+    if (allData[di][1]) {
+      var dv = allData[di][1];
+      dupDate = dv instanceof Date ? Utilities.formatDate(dv, "Asia/Seoul", "yyyy-MM-dd") : String(dv).trim();
     }
-    if (dupDate && dupEquips.length > 0 && 예약자명) {
-      var dupTid = checkDuplicateRequest(ss, 예약자명, dupDate, dupEquips);
-      if (dupTid) {
-        sheet.getRange(triggerRow, 15).setValue("⚠️ 중복: 동일 건이 이미 등록됨 (거래ID: " + dupTid + ")");
-        sheet.getRange(triggerRow, 14).clearContent();
-        lock.releaseLock();
-        return;
-      }
+    if (allData[di][5]) dupEquips.push(String(allData[di][5]).trim());
+  }
+  if (dupDate && dupEquips.length > 0 && 예약자명) {
+    var dupTid = checkDuplicateRequest(ss, 예약자명, dupDate, dupEquips);
+    if (dupTid) {
+      sheet.getRange(triggerRow, 15).setValue("⚠️ 중복: 동일 건이 이미 등록됨 (거래ID: " + dupTid + ")");
+      sheet.getRange(triggerRow, 14).clearContent();
+      return;
     }
-  } catch (lockErr) {
-    lock.releaseLock();
-    throw lockErr;
   }
 
   // ── 카테고리 미선택 장비 체크 (세트 구성품 중 구체 모델 미선택 차단) ──
@@ -2286,8 +2280,9 @@ function registerByReqID(sheet, triggerRow) {
     }
   } catch(err) { }
 
-  // ── 동시 등록 방지 락 해제 ──
-  lock.releaseLock();
+  } finally {
+    regLock.releaseLock();
+  }
 
   // ── 대기열 자동 처리: "등록대기" 상태인 건 순차 처리 ──
   processRegistrationQueue_(sheet);
