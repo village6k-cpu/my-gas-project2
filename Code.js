@@ -75,6 +75,15 @@ function onEdit(e) {
     if (col === 2 || col === 8) {
       handleScheduleEdit(e);
     }
+    // K열(11) 예약자명 입력 시 L열(12) 연락처 자동조회 수식 복원
+    if (col === 11 && row >= 2) {
+      var lCell = sheet.getRange(row, 12);
+      if (!lCell.getFormula() && !lCell.getValue()) {
+        lCell.setFormula(
+          '=IF(K' + row + '="","",IFERROR(INDEX(\'고객DB\'!A:A,MATCH(K' + row + ',\'고객DB\'!B:B,0)),""))'
+        );
+      }
+    }
   }
 }
 
