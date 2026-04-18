@@ -2151,6 +2151,37 @@ function registerByReqID(sheet, triggerRow) {
     거래시트.getRange(거래newRow, 4).setValue(거래ID);
     거래시트.getRange(거래newRow, 5).setNumberFormat("@").setValue(String(연락처 || ""));
     sheet.getRange(triggerRow, 15).setValue("✅ 개고생2.0 입력완료 (행" + 거래newRow + ")");
+
+    // ── 개고생2.0 고객DB에 신규고객 저장 ──
+    // 고객DB 구조: A=연락처(예약자ID), B=성함, C=소속
+    try {
+      var 고객DB시트 = 개고생SS.getSheetByName("고객DB");
+      if (고객DB시트 && 연락처 && 예약자명) {
+        var 고객lastRow = 고객DB시트.getLastRow();
+        var 기존여부 = false;
+        if (고객lastRow >= 2) {
+          var 고객data = 고객DB시트.getRange(2, 1, 고객lastRow - 1, 2).getValues();
+          var telClean = String(연락처).replace(/[-\s]/g, "");
+          for (var gi = 0; gi < 고객data.length; gi++) {
+            var existTel = String(고객data[gi][0] || "").replace(/[-\s]/g, "");
+            var existName = String(고객data[gi][1] || "").trim();
+            if (existTel === telClean || existName === String(예약자명).trim()) {
+              기존여부 = true;
+              break;
+            }
+          }
+        }
+        if (!기존여부) {
+          var 고객newRow = 고객lastRow + 1;
+          고객DB시트.getRange(고객newRow, 1).setNumberFormat("@").setValue(String(연락처));
+          고객DB시트.getRange(고객newRow, 2).setValue(예약자명);
+          if (업체명) 고객DB시트.getRange(고객newRow, 3).setValue(업체명);
+          Logger.log("신규고객 저장: " + 예약자명 + " " + 연락처);
+        }
+      }
+    } catch (dbErr) {
+      Logger.log("고객DB 저장 실패 (계속 진행): " + dbErr.message);
+    }
   } catch (err) {
     sheet.getRange(triggerRow, 15).setValue("❌ 개고생2.0 실패: " + err.message);
   }
