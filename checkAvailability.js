@@ -1335,26 +1335,6 @@ function _processByReqID(sheet, triggerRow) {
     // 펼침 없는 경우: 최신 데이터 다시 읽기 (고아 삭제 반영)
     var latestLastRow = sheet.getLastRow();
     var latestData = sheet.getRange(2, 1, latestLastRow - 1, 18).getValues();
-
-    // 서식 재적용 (재확인 시에도 첫 행 볼드+파란배경, 세트 F열 초록)
-    var isFirst = true;
-    for (let i = 0; i < latestData.length; i++) {
-      if (latestData[i][0] !== triggerReqID) continue;
-      var row = i + 2;
-      if (isFirst) {
-        sheet.getRange(row, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
-        if (latestData[i][8] === "세트") sheet.getRange(row, 6).setFontWeight("bold");
-        isFirst = false;
-      } else {
-        sheet.getRange(row, 1, 1, 18).setFontWeight("normal").setBackground(null);
-        if (latestData[i][8] === "세트") {
-          sheet.getRange(row, 6).setBackground("#D9EAD3").setFontWeight("bold");
-        } else if (setMasterNames.has(String(latestData[i][5]).trim())) {
-          sheet.getRange(row, 6).setBackground("#D9EAD3").setFontWeight("bold");
-        }
-      }
-    }
-
     for (let i = 0; i < latestData.length; i++) {
       if (latestData[i][0] !== triggerReqID) continue;
       const row = i + 2;
@@ -1371,6 +1351,41 @@ function _processByReqID(sheet, triggerRow) {
 
       checkSingleRowWithData(sheet, row, triggerReqID, 반출일, 반출시간, 반납일, 반납시간,
         장비명, latestData[i][6] || 1, schedData, equipSheet);
+    }
+  }
+
+  // ━━ 최종 서식 재적용 — 재확인해도 첫행 볼드+파란배경, 세트 F열 초록 유지 ━━
+  SpreadsheetApp.flush();
+  var finalLastRow2 = sheet.getLastRow();
+  if (finalLastRow2 >= 2) {
+    var finalData2 = sheet.getRange(2, 1, finalLastRow2 - 1, 18).getValues();
+    var isFirstRow = true;
+    for (let i = 0; i < finalData2.length; i++) {
+      if (String(finalData2[i][0]).trim() !== triggerReqID) continue;
+      var fRow = i + 2;
+      var fResult = String(finalData2[i][8] || "").trim();
+      var fEquip = String(finalData2[i][5] || "").trim();
+      var fQTag = String(finalData2[i][16] || "").trim();
+
+      if (isFirstRow) {
+        // 첫 행: 볼드 + 파란배경
+        sheet.getRange(fRow, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
+        isFirstRow = false;
+      } else {
+        // 나머지 행: 일반 텍스트 + 배경 제거
+        sheet.getRange(fRow, 1, 1, 18).setFontWeight("normal").setBackground(null);
+        // 세트 헤더 또는 세트마스터 존재 품목이면 F열만 초록
+        if (fResult === "세트" || (setMasterNames.has(fEquip) && fQTag.indexOf("[세트]") !== 0)) {
+          sheet.getRange(fRow, 6).setBackground("#D9EAD3").setFontWeight("bold");
+        }
+      }
+      // I/J열 결과 배경색은 보존
+      if (fResult) {
+        var color = fResult.indexOf("✅") >= 0 ? "#C6EFCE" :
+                    fResult.indexOf("⚠") >= 0 || fResult.indexOf("⚠️") >= 0 ? "#FFEB9C" :
+                    fResult.indexOf("❌") >= 0 ? "#FFC7CE" : null;
+        if (color) sheet.getRange(fRow, 9, 1, 2).setBackground(color);
+      }
     }
   }
 
