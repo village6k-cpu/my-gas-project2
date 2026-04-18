@@ -440,11 +440,16 @@
 <script>
 var API_URL = "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
 var timeline, allGroups = [], allItems = [];
+var groupsDS = new vis.DataSet();   // 영구 DataSet (재사용)
+var itemsDS = new vis.DataSet();
+var groupIndex = {};                 // id → name (소문자) 캐시
+var itemSearchCache = {};            // id → {custName, setName} 소문자 캐시
 var currentFilter = "all";
 var hiddenStatuses = {};
 var refreshTimer = null;
 var REFRESH_INTERVAL = 60000;
-var savedWindow = null;
+var searchDebounceTimer = null;
+var lastVisibleIds = new Set();      // 현재 표시 중인 item id
 
 var STATUS_COLORS = {
   '대기':     '#3B82F6',
@@ -493,43 +498,36 @@ function getTimelineOptions(startDate, endDate) {
   };
 }
 
-function buildTimeline(visibleGroups, visibleItems) {
+// 타임라인 최초 1회 생성 — 이후엔 DataSet만 갱신
+function initTimeline() {
   var container = document.getElementById("timeline");
+  var now = new Date();
+  var startDate = new Date(now.getTime() - 1000*60*60*24*1);
+  var endDate = new Date(now.getTime() + 1000*60*60*24*14);
 
-  // 현재 시간 범위 보존
-  var startDate, endDate;
-  if (timeline) {
-    var win = timeline.getWindow();
-    startDate = win.start;
-    endDate = win.end;
-    timeline.destroy();
-  } else {
-    var now = new Date();
-    startDate = new Date(now.getTime() - 1000*60*60*24*1);
-    endDate = new Date(now.getTime() + 1000*60*60*24*14);
-  }
-
-  var groups = new vis.DataSet(visibleGroups);
-  var items  = new vis.DataSet(visibleItems);
-
-  timeline = new vis.Timeline(container, items, groups, getTimelineOptions(startDate, endDate));
+  timeline = new vis.Timeline(container, itemsDS, groupsDS, getTimelineOptions(startDate, endDate));
 
   // 클릭 → 상세 패널
   timeline.on("select", function(props) {
     if (props.items.length === 0) { closeDetail(); return; }
-    var item = items.get(props.items[0]);
+    var item = itemsDS.get(props.items[0]);
     if (item) showDetail(item);
   });
 
   // 드래그 완료 → API로 시트 업데이트
-  items.on("update", function(event, properties) {
+  itemsDS.on("update", function(event, properties, senderId) {
+    if (senderId === "sync") return;  // 내부 동기화는 무시
     properties.items.forEach(function(id) {
-      var item = items.get(id);
+      var item = itemsDS.get(id);
       var original = allItems.find(function(i) { return i.id === id; });
       if (!item || !original || !original.rowIndex) return;
-
+      // 시간이 실제로 바뀐 것만 처리
       var startISO = (item.start instanceof Date) ? item.start.toISOString() : item.start;
       var endISO   = (item.end instanceof Date)   ? item.end.toISOString()   : item.end;
+      var origStart = (original.start instanceof Date) ? original.start.toISOString() : original.start;
+      var origEnd   = (original.end instanceof Date)   ? original.end.toISOString()   : original.end;
+      if (startISO === origStart && endISO === origEnd) return;
+
       var riParam  = original.rowIndices ? "&rowIndices=" + encodeURIComponent(JSON.stringify(original.rowIndices)) : "";
 
       fetch(API_URL + "?key=village2026&action=updateTime&row=" +
@@ -543,12 +541,12 @@ function buildTimeline(visibleGroups, visibleItems) {
             original.end   = item.end;
           } else {
             showToast("변경 실패");
-            items.update({ id: id, start: original.start, end: original.end });
+            itemsDS.update({ id: id, start: original.start, end: original.end }, "sync");
           }
         })
         .catch(function() {
           showToast("네트워크 오류");
-          items.update({ id: id, start: original.start, end: original.end });
+          itemsDS.update({ id: id, start: original.start, end: original.end }, "sync");
         });
     });
   });
@@ -562,6 +560,22 @@ function loadData() {
     .then(function(data) {
       allGroups = data.groups || [];
       allItems  = data.items  || [];
+
+      // 검색 캐시 미리 생성 (소문자 변환 한 번만)
+      groupIndex = {};
+      allGroups.forEach(function(g) {
+        groupIndex[g.id] = (g.content || "").toLowerCase();
+      });
+      itemSearchCache = {};
+      allItems.forEach(function(item) {
+        itemSearchCache[item.id] = {
+          cust: (item.custName || "").toLowerCase(),
+          group: groupIndex[item.group] || ""
+        };
+      });
+
+      // 최초 1회 타임라인 생성
+      if (!timeline) initTimeline();
       applyFilters();
       showLoading(false);
       updateRefreshInfo();
@@ -572,33 +586,66 @@ function loadData() {
     });
 }
 
-// ── 필터 ──
+// ── 필터 — 증분 업데이트 방식 (destroy 없이 빠름) ──
 function applyFilters() {
   var query = document.getElementById("searchInput").value.trim().toLowerCase();
-  var visibleItems = allItems.filter(function(item) {
-    if (query) {
-      var groupObj = allGroups.find(function(g) { return g.id === item.group; });
-      var setName = groupObj ? groupObj.content.toLowerCase() : "";
-      var custMatch = item.custName && item.custName.toLowerCase().indexOf(query) >= 0;
-      var setMatch = setName.indexOf(query) >= 0;
-      if (!custMatch && !setMatch) return false;
-    }
-    if (currentFilter === "active" && item.status !== "대기" && item.status !== "반출중") return false;
-    var st = ["대기","반출중","반납완료","취소"].indexOf(item.status) >= 0 ? item.status : "기타";
-    if (hiddenStatuses[st]) return false;
-    return true;
-  });
 
+  // 표시할 item id 목록 계산
+  var newVisibleIds = new Set();
   var usedGroups = {};
-  visibleItems.forEach(function(i) { usedGroups[i.group] = true; });
-  var visibleGroups = allGroups.filter(function(g) { return usedGroups[g.id]; });
+  var visibleCount = 0;
 
-  buildTimeline(visibleGroups, visibleItems);
+  for (var i = 0; i < allItems.length; i++) {
+    var item = allItems[i];
+    if (query) {
+      var cache = itemSearchCache[item.id];
+      if (!cache || (cache.cust.indexOf(query) < 0 && cache.group.indexOf(query) < 0)) continue;
+    }
+    if (currentFilter === "active" && item.status !== "대기" && item.status !== "반출중") continue;
+    var st = ["대기","반출중","반납완료","취소"].indexOf(item.status) >= 0 ? item.status : "기타";
+    if (hiddenStatuses[st]) continue;
 
-  var txt = visibleGroups.length + "개 세트";
-  if (visibleGroups.length < allGroups.length) txt = visibleGroups.length + "/" + allGroups.length + "개 세트";
-  txt += " · " + visibleItems.length + "건";
+    newVisibleIds.add(item.id);
+    usedGroups[item.group] = true;
+    visibleCount++;
+  }
+
+  // 그룹 증분 업데이트
+  var visibleGroupsList = [];
+  allGroups.forEach(function(g) { if (usedGroups[g.id]) visibleGroupsList.push(g); });
+  var currentGroupIds = groupsDS.getIds();
+  var newGroupIdSet = new Set(visibleGroupsList.map(function(g) { return g.id; }));
+
+  var groupsToRemove = currentGroupIds.filter(function(id) { return !newGroupIdSet.has(id); });
+  if (groupsToRemove.length) groupsDS.remove(groupsToRemove);
+  var groupsToAdd = visibleGroupsList.filter(function(g) { return currentGroupIds.indexOf(g.id) < 0; });
+  if (groupsToAdd.length) groupsDS.add(groupsToAdd);
+
+  // 아이템 증분 업데이트
+  var currentItemIds = itemsDS.getIds();
+  var itemsToRemove = currentItemIds.filter(function(id) { return !newVisibleIds.has(id); });
+  if (itemsToRemove.length) itemsDS.remove(itemsToRemove);
+
+  var itemsToAdd = [];
+  for (var j = 0; j < allItems.length; j++) {
+    if (newVisibleIds.has(allItems[j].id) && !lastVisibleIds.has(allItems[j].id)) {
+      itemsToAdd.push(allItems[j]);
+    }
+  }
+  if (itemsToAdd.length) itemsDS.add(itemsToAdd);
+
+  lastVisibleIds = newVisibleIds;
+
+  var txt = visibleGroupsList.length + "개 세트";
+  if (visibleGroupsList.length < allGroups.length) txt = visibleGroupsList.length + "/" + allGroups.length + "개 세트";
+  txt += " · " + visibleCount + "건";
   document.getElementById("statInfo").textContent = txt;
+}
+
+// 검색 debounce (타이핑 중 렌더링 방지)
+function applyFiltersDebounced() {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(applyFilters, 150);
 }
 
 // ── 상세 패널 ──
@@ -720,11 +767,7 @@ function applyDateRange() {
 }
 
 // ── 검색 디바운스 ──
-var searchTimer;
-document.getElementById("searchInput").addEventListener("input", function() {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(applyFilters, 200);
-});
+document.getElementById("searchInput").addEventListener("input", applyFiltersDebounced);
 
 document.addEventListener("keydown", function(e) {
   if (e.key === "Escape") closeDetail();
