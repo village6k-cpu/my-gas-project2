@@ -1335,6 +1335,26 @@ function _processByReqID(sheet, triggerRow) {
     // 펼침 없는 경우: 최신 데이터 다시 읽기 (고아 삭제 반영)
     var latestLastRow = sheet.getLastRow();
     var latestData = sheet.getRange(2, 1, latestLastRow - 1, 18).getValues();
+
+    // 서식 재적용 (재확인 시에도 첫 행 볼드+파란배경, 세트 F열 초록)
+    var isFirst = true;
+    for (let i = 0; i < latestData.length; i++) {
+      if (latestData[i][0] !== triggerReqID) continue;
+      var row = i + 2;
+      if (isFirst) {
+        sheet.getRange(row, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
+        if (latestData[i][8] === "세트") sheet.getRange(row, 6).setFontWeight("bold");
+        isFirst = false;
+      } else {
+        sheet.getRange(row, 1, 1, 18).setFontWeight("normal").setBackground(null);
+        if (latestData[i][8] === "세트") {
+          sheet.getRange(row, 6).setBackground("#D9EAD3").setFontWeight("bold");
+        } else if (setMasterNames.has(String(latestData[i][5]).trim())) {
+          sheet.getRange(row, 6).setBackground("#D9EAD3").setFontWeight("bold");
+        }
+      }
+    }
+
     for (let i = 0; i < latestData.length; i++) {
       if (latestData[i][0] !== triggerReqID) continue;
       const row = i + 2;
