@@ -84,22 +84,13 @@ function onEdit(e) {
         );
       }
     }
-    // F열(6) 장비명 입력 시 위 행에서 요청ID + 날짜/시간 자동 상속
+    // F열(6) 장비명 입력 시 위 행에서 요청ID만 자동 상속 (날짜는 첫 행만 유지)
     if (col === 6 && row >= 3 && e.range.getValue()) {
       var currentReqID = sheet.getRange(row, 1).getValue();
       if (!currentReqID) {
         var prevReqID = sheet.getRange(row - 1, 1).getValue();
         if (prevReqID && String(prevReqID).startsWith("RQ-")) {
           sheet.getRange(row, 1).setValue(prevReqID);
-          // 날짜/시간도 상속
-          var prevB = sheet.getRange(row - 1, 2).getValue();
-          var prevC = sheet.getRange(row - 1, 3).getValue();
-          var prevD = sheet.getRange(row - 1, 4).getValue();
-          var prevE = sheet.getRange(row - 1, 5).getValue();
-          if (prevB && !sheet.getRange(row, 2).getValue()) sheet.getRange(row, 2).setValue(prevB);
-          if (prevC && !sheet.getRange(row, 3).getValue()) sheet.getRange(row, 3).setValue(prevC);
-          if (prevD && !sheet.getRange(row, 4).getValue()) sheet.getRange(row, 4).setValue(prevD);
-          if (prevE && !sheet.getRange(row, 5).getValue()) sheet.getRange(row, 5).setValue(prevE);
         }
       }
     }
