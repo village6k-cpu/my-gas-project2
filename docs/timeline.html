@@ -493,6 +493,20 @@ function getTimelineOptions(startDate, endDate) {
       var m = 30 * 60 * 1000;
       return new Date(Math.round(date.getTime() / m) * m);
     },
+    // 드래그 시 원본 시간(HH:MM)을 강제 유지 — '일' 단위만 조정되게 함
+    onMoving: function(item, callback) {
+      var orig = allItems.find(function(i) { return i.id === item.id; });
+      if (!orig) { callback(item); return; }
+      var origStart = new Date(orig.start);
+      var origEnd   = new Date(orig.end);
+      var newStart  = new Date(item.start);
+      var newEnd    = new Date(item.end);
+      newStart.setHours(origStart.getHours(), origStart.getMinutes(), origStart.getSeconds(), origStart.getMilliseconds());
+      newEnd.setHours(origEnd.getHours(), origEnd.getMinutes(), origEnd.getSeconds(), origEnd.getMilliseconds());
+      item.start = newStart;
+      item.end   = newEnd;
+      callback(item);
+    },
     editable: { updateTime: true, remove: false, add: false, updateGroup: false },
     groupHeightMode: "auto"
   };

@@ -580,6 +580,7 @@ function runFunction(funcName, params) {
     "deleteRequest",
     "excludeEquipFromRequest",
     "formatScheduleSheet",
+    "formatContractSheet",
     "listAllTriggers"
   ];
 
@@ -618,6 +619,7 @@ function runFunction(funcName, params) {
       refreshEquipmentList: typeof refreshEquipmentList !== "undefined" ? refreshEquipmentList : null,
       syncAuditFromMaster: typeof syncAuditFromMaster !== "undefined" ? syncAuditFromMaster : null,
       formatScheduleSheet: typeof formatScheduleSheet !== "undefined" ? formatScheduleSheet : null,
+      formatContractSheet: typeof formatContractSheet !== "undefined" ? formatContractSheet : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {

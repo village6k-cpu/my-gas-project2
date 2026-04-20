@@ -37,6 +37,7 @@ function onOpen() {
     .addItem("📄 계약서 생성", "createContractFromMenu")
     .addSeparator()
     .addItem("🔄 장비 목록 갱신", "refreshEquipmentList")
+    .addItem("🎨 계약마스터 서식 적용", "formatContractSheet")
     .addItem("📸 실사기록 동기화", "syncAuditFromMaster")
     .addSeparator()
     .addItem("🗑️ 확인요청 초기화 (수동)", "clearAllRequests")
@@ -103,14 +104,6 @@ function getTimelineData() {
 
   const data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getValues();
 
-  // 구성품 장비명 수집: 세트명이 있는 행의 장비명은 구성품
-  const componentNames = {};
-  data.forEach(function(row) {
-    var setName = String(row[2] || '').trim();
-    var equipName = String(row[3] || '').trim();
-    if (setName && equipName) componentNames[equipName] = true;
-  });
-
   const seen = {};   // "거래ID|그룹명" → true
   const entries = [];
 
@@ -136,9 +129,8 @@ function getTimelineData() {
       groupName = 세트명;
       isSingleItem = false;
     } else {
-      if (세트명) return;   // Phase 2: 세트명 없는 행만
+      if (세트명) return;   // Phase 2: 세트명 없는 행만 (=사용자가 단독 추가한 장비)
       if (!장비명) return;
-      if (componentNames[장비명]) return;  // 구성품이면 스킵
       groupName = 장비명;
       isSingleItem = true;
     }
@@ -1402,35 +1394,6 @@ function _processByReqID(sheet, triggerRow) {
 function sendAvailAlimtalk(sheet, row) {
   // 코워크 에이전트가 직접 카카오톡 채널에서 발송하므로 자동발송 비활성화
   Logger.log("가용확인 발송승인 — 코워크 에이전트가 카톡으로 직접 발송");
-}
-    var 예약자명 = '';
-    var 연락처 = '';
-    for (var ai = 0; ai < allData.length; ai++) {
-      if (allData[ai][0] === reqID && allData[ai][10]) {
-        예약자명 = allData[ai][10];
-        연락처 = allData[ai][11] || '';
-        break;
-      }
-    }
-    if (!tplCode) { return; }
-    if (!예약자명 || !연락처) { return; }
-
-    var itemList = '';
-    for (var ai2 = 0; ai2 < allData.length; ai2++) {
-      if (allData[ai2][0] !== reqID) continue;
-      var r = ai2 + 2;
-      var name = allData[ai2][5];
-      var result = sheet.getRange(r, 9).getValue();
-      if (name) {
-        var mark = result.toString().indexOf('✅') >= 0 ? '✅ 가능' : '❌ 불가';
-        itemList += name + ' : ' + mark + '\n';
-      }
-    }
-    var msg = '[빌리지] 장비 예약 가능 여부 안내\n\n안녕하세요, ' + 예약자명 + '님.\n빌리지입니다.\n\n'
-      + '문의하신 장비의 예약 가능 여부를 안내드립니다.\n\n'
-      + itemList + '\n예약을 원하시면 편하게 말씀해주세요.\n감사합니다.';
-    sendAlimtalk(tplCode, 연락처, 예약자명, msg);
-  } catch(err) { }
 }
 
 
@@ -3382,4 +3345,89 @@ function clearValidation() {
   var sheet = ss.getSheetByName("확인요청");
   sheet.getRange(2, 1, 300, 18).clearDataValidations();
   refreshEquipmentList();
+}
+
+/**
+ * 계약마스터 시트 가독성 포맷팅
+ * - E,F 반출일/시간: 연파랑
+ * - G,H 반납일/시간: 연녹색
+ * - I 회차: 연노랑
+ * - J 계약상태: 기본 파랑, 조건부서식으로 "취소"→빨강+취소선, "완료"→회색
+ * - A,B,C,D,K 기타 정보: 흐린 회색 톤 (글자도 흐리게)
+ * - E~J 굵게
+ */
+function formatContractSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("계약마스터");
+  if (!sheet) return "계약마스터 시트 없음";
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return "데이터 없음";
+  var dataRows = lastRow - 1;
+  var lastCol = 11;
+
+  var COLOR_OUT       = "#DAE8FC"; // 반출
+  var COLOR_IN        = "#D5E8D4"; // 반납
+  var COLOR_SEQ       = "#FFF2CC"; // 회차
+  var COLOR_STAT_DEF  = "#BDD7EE"; // 계약상태 기본
+  var COLOR_DIM_BG    = "#F5F5F5";
+  var COLOR_DIM_FG    = "#A6A6A6";
+
+  // 1) 데이터 영역 초기화
+  var dataRange = sheet.getRange(2, 1, dataRows, lastCol);
+  dataRange.setBackground(null);
+  dataRange.setFontColor(null);
+  dataRange.setFontWeight(null);
+  dataRange.setFontStyle(null);
+
+  // 2) 흐린 열 (A, B, C, D, K)
+  [1, 2, 3, 4, 11].forEach(function(c) {
+    sheet.getRange(2, c, dataRows, 1)
+      .setBackground(COLOR_DIM_BG)
+      .setFontColor(COLOR_DIM_FG);
+  });
+
+  // 3) 주요 열 그룹 배경
+  sheet.getRange(2, 5, dataRows, 2).setBackground(COLOR_OUT);      // E,F 반출
+  sheet.getRange(2, 7, dataRows, 2).setBackground(COLOR_IN);       // G,H 반납
+  sheet.getRange(2, 9, dataRows, 1).setBackground(COLOR_SEQ);      // I 회차
+  sheet.getRange(2, 10, dataRows, 1).setBackground(COLOR_STAT_DEF);// J 계약상태 기본
+
+  // 4) E~J 굵게
+  sheet.getRange(2, 5, dataRows, 6).setFontWeight("bold");
+
+  // 5) 조건부 서식: 계약상태 기준 행 전체
+  var ruleRange = sheet.getRange(2, 1, dataRows, lastCol);
+  var existing = sheet.getConditionalFormatRules().filter(function(r) {
+    // 기존 계약마스터 2b 규칙 제거 (A2:K 범위 규칙만)
+    var ranges = r.getRanges();
+    if (!ranges || ranges.length === 0) return true;
+    var a1 = ranges[0].getA1Notation();
+    return !/^A2:K\d+$/.test(a1);
+  });
+
+  existing.push(
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=$J2="취소"')
+      .setBackground("#FFC7CE")
+      .setFontColor("#9C0006")
+      .setStrikethrough(true)
+      .setRanges([ruleRange])
+      .build()
+  );
+  existing.push(
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=$J2="완료"')
+      .setBackground("#E7E6E6")
+      .setFontColor("#7F7F7F")
+      .setRanges([ruleRange])
+      .build()
+  );
+
+  sheet.setConditionalFormatRules(existing);
+
+  // 6) 헤더 고정
+  sheet.setFrozenRows(1);
+
+  return "✅ " + dataRows + "행 서식 적용 완료";
 }
