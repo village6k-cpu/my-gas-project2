@@ -579,8 +579,11 @@ function setupMarqueeSelect(timeline) {
     var rect = box.getBoundingClientRect();
     box.remove(); box = null;
 
-    // 미세 이동은 그냥 클릭으로 간주 → 처리 안 함 (vis의 select가 처리)
-    if (rect.width < 5 && rect.height < 5) return;
+    // 빈 공간 단순 클릭 → 선택 해제 (Ctrl/Shift 누르면 유지)
+    if (rect.width < 5 && rect.height < 5) {
+      if (!additive) timeline.setSelection([]);
+      return;
+    }
 
     var ids = [];
     var items = timeline.itemSet && timeline.itemSet.items;
