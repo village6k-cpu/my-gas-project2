@@ -558,7 +558,7 @@ function refreshEquipmentList() {
   // ── 확인요청 F열에 드롭다운 설정 ──
   const reqSheet = ss.getSheetByName("확인요청");
   if (reqSheet) {
-    const lastDataRow = Math.max(reqSheet.getLastRow(), 200);
+    const lastDataRow = reqSheet.getMaxRows();
     const range = reqSheet.getRange(2, 6, lastDataRow - 1, 1);
 
     const rule = SpreadsheetApp.newDataValidation()
@@ -599,7 +599,7 @@ function refreshEquipmentList() {
   // ── 스케줄상세 C열(세트명), D열(장비명)에 드롭다운 설정 ──
   const schedSheet = ss.getSheetByName("스케줄상세");
   if (schedSheet) {
-    const schedLastRow = Math.max(schedSheet.getLastRow(), 200);
+    const schedLastRow = schedSheet.getMaxRows();
     const schedRule = SpreadsheetApp.newDataValidation()
       .requireValueInRange(listSheet.getRange("A2:A" + (sorted.length + 1)), true)
       .setAllowInvalid(true)
@@ -3376,4 +3376,10 @@ function listAllTriggers() {
   });
   Logger.log(JSON.stringify(result, null, 2));
   return result;
+}
+function clearValidation() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("확인요청");
+  sheet.getRange(2, 1, 300, 18).clearDataValidations();
+  refreshEquipmentList();
 }
