@@ -169,6 +169,140 @@ function onEditInstallable(e) {
       Logger.log("스케줄상세 수정 → 계약서 재생성 실패: " + err.message);
     }
   }
+
+  // 계약마스터 E-I열(반출일/시간 · 반납일/시간 · 회차) 수정 → 스케줄상세 + 거래내역 전파 + 계약서 재생성 예약
+  if (sheet.getName() === "계약마스터" && col >= 5 && col <= 9 && row >= 2) {
+    try {
+      var cm거래ID = String(sheet.getRange(row, 1).getValue()).trim();
+      if (cm거래ID) {
+        // 5-8열(날짜/시간): 스케줄상세/거래내역 즉시 반영. 9열(회차)은 계약서 재생성만
+        if (col >= 5 && col <= 8) {
+          propagateContractDates(e.source, sheet, row, cm거래ID);
+        }
+        scheduleContractRegen(cm거래ID);
+      }
+    } catch (err) {
+      Logger.log("계약마스터 일정 변경 처리 실패: " + err.message);
+    }
+  }
+}
+
+/**
+ * 계약마스터 반출/반납 일시 변경을 스케줄상세와 개고생2.0 거래내역에 즉시 전파.
+ * 같은 거래ID의 모든 스케줄상세 행은 계약마스터의 새 날짜/시간으로 통일됨.
+ */
+function propagateContractDates(ss, contractSheet, row, 거래ID) {
+  var 반출일   = contractSheet.getRange(row, 5).getValue();
+  var 반출시간 = contractSheet.getRange(row, 6).getValue();
+  var 반납일   = contractSheet.getRange(row, 7).getValue();
+  var 반납시간 = contractSheet.getRange(row, 8).getValue();
+
+  // 1) 스케줄상세 F~I열 덮어쓰기 (반출일/시간/반납일/시간)
+  var schedSheet = ss.getSheetByName("스케줄상세");
+  if (schedSheet && schedSheet.getLastRow() >= 2) {
+    var lastRow = schedSheet.getLastRow();
+    var bCol = schedSheet.getRange(2, 2, lastRow - 1, 1).getValues();  // B열: 거래ID
+    var updatedRows = 0;
+    for (var i = 0; i < bCol.length; i++) {
+      if (String(bCol[i][0]).trim() === 거래ID) {
+        schedSheet.getRange(i + 2, 6, 1, 4).setValues([[반출일, 반출시간, 반납일, 반납시간]]);
+        updatedRows++;
+      }
+    }
+    Logger.log("스케줄상세 일정 전파: " + updatedRows + "행 (" + 거래ID + ")");
+  }
+
+  // 2) 개고생2.0 거래내역 A열(반출일) 업데이트 — 거래내역엔 반납일 필드 없음
+  try {
+    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    if (개고생URL) {
+      var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
+      var 거래시트 = 개고생SS.getSheetByName("거래내역");
+      if (거래시트 && 거래시트.getLastRow() >= 2) {
+        var ids = 거래시트.getRange(2, 4, 거래시트.getLastRow() - 1, 1).getValues();  // D열: 거래ID
+        for (var j = 0; j < ids.length; j++) {
+          if (String(ids[j][0]).trim() === 거래ID) {
+            거래시트.getRange(j + 2, 1).setValue(반출일);
+            Logger.log("개고생2.0 거래내역 반출일 업데이트: 행 " + (j + 2) + " (" + 거래ID + ")");
+          }
+        }
+      }
+    }
+  } catch (err) {
+    Logger.log("개고생2.0 거래내역 업데이트 실패: " + err.message);
+  }
+}
+
+/**
+ * 계약서 재생성을 디바운스하여 예약.
+ * - ScriptProperties에 마지막 편집 타임스탬프 기록
+ * - regenPendingContracts 트리거가 없으면 3초 뒤 one-time 트리거 생성
+ * - 이미 예약된 트리거가 있으면 그대로 두고 타임스탬프만 갱신
+ * - 트리거가 fire되면 타임스탬프를 다시 읽어 안정 기간(2.8초) 지난 것만 처리
+ */
+function scheduleContractRegen(거래ID) {
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty('contractEditTS_' + 거래ID, String(Date.now()));
+
+  var exists = ScriptApp.getProjectTriggers().some(function(t) {
+    return t.getHandlerFunction() === 'regenPendingContracts';
+  });
+  if (!exists) {
+    ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
+  }
+}
+
+/**
+ * 디바운스 트리거 핸들러: 안정된 거래ID 계약서 재생성.
+ * 편집이 STABLE_MS 이상 없었던 거래ID만 처리하고, 남아있으면 다시 예약.
+ */
+function regenPendingContracts() {
+  var STABLE_MS = 2800;
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { return; }
+
+  try {
+    // 자기 자신(트리거) 먼저 삭제 — 재예약은 마지막에 결정
+    ScriptApp.getProjectTriggers().forEach(function(t) {
+      if (t.getHandlerFunction() === 'regenPendingContracts') {
+        ScriptApp.deleteTrigger(t);
+      }
+    });
+
+    var props = PropertiesService.getScriptProperties();
+    var all = props.getProperties();
+    var now = Date.now();
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var stillPending = false;
+
+    for (var key in all) {
+      if (!key.startsWith('contractEditTS_')) continue;
+      var 거래ID = key.substring('contractEditTS_'.length);
+
+      // 타임스탬프 재조회 — 루프 중 onEdit이 새로 썼을 수 있음
+      var freshTs = Number(props.getProperty(key));
+      if (!freshTs) continue;
+
+      var age = now - freshTs;
+      if (age >= STABLE_MS) {
+        try {
+          deleteAndRegenerateContract(ss, 거래ID);
+          Logger.log("계약서 재생성 완료(디바운스): " + 거래ID);
+        } catch (err) {
+          Logger.log("계약서 재생성 실패: " + 거래ID + " - " + err.message);
+        }
+        props.deleteProperty(key);
+      } else {
+        stillPending = true;
+      }
+    }
+
+    if (stillPending) {
+      ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
+    }
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /**
