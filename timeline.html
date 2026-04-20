@@ -566,9 +566,13 @@
 
     timeline.on('select', function(props) {
       if (props.items.length === 0) { closeDetail(); return; }
+      if (props.items.length > 1) { closeDetail(); return; }
       var item = items.get(props.items[0]);
       if (item) showDetail(item);
     });
+
+    // 바 영역 드래그로 박스 선택 (marquee) — 위 날짜축은 그대로 패닝
+    setupMarqueeSelect(timeline);
 
     items.on('update', function(event, properties) {
       properties.items.forEach(function(id) {
@@ -595,6 +599,81 @@
           .updateScheduleTime(original.rowIndex, item.start, item.end, riJSON);
       });
     });
+  }
+
+  // ── 드래그 박스 선택 (marquee) ──
+  // .vis-panel.vis-center 빈 공간 mousedown → 사각형 오버레이 → mouseup 시 교차 아이템 선택
+  // Ctrl/Meta/Shift 누르면 기존 선택에 추가
+  function setupMarqueeSelect(timeline) {
+    var center = document.querySelector('.vis-panel.vis-center');
+    if (!center) return;
+
+    var box = null, sx = 0, sy = 0, active = false, additive = false;
+
+    function onDown(e) {
+      if (e.button !== 0) return;
+      if (e.target.closest('.vis-item')) return;
+
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      e.preventDefault();
+
+      active = true;
+      additive = e.ctrlKey || e.metaKey || e.shiftKey;
+      sx = e.clientX;
+      sy = e.clientY;
+
+      box = document.createElement('div');
+      box.style.cssText = 'position:fixed;left:' + sx + 'px;top:' + sy +
+        'px;width:0;height:0;border:1.5px dashed #2196f3;background:rgba(33,150,243,0.08);pointer-events:none;z-index:9999;';
+      document.body.appendChild(box);
+    }
+
+    function onMove(e) {
+      if (!active || !box) return;
+      var l = Math.min(sx, e.clientX), t = Math.min(sy, e.clientY);
+      box.style.left   = l + 'px';
+      box.style.top    = t + 'px';
+      box.style.width  = Math.abs(e.clientX - sx) + 'px';
+      box.style.height = Math.abs(e.clientY - sy) + 'px';
+    }
+
+    function onUp() {
+      if (!active) return;
+      active = false;
+      if (!box) return;
+      var rect = box.getBoundingClientRect();
+      box.remove(); box = null;
+
+      if (rect.width < 5 && rect.height < 5) return;
+
+      var ids = [];
+      var items = timeline.itemSet && timeline.itemSet.items;
+      if (items) {
+        for (var id in items) {
+          var it = items[id];
+          if (!it.dom || !it.dom.box) continue;
+          var r = it.dom.box.getBoundingClientRect();
+          if (r.right < rect.left || r.left > rect.right ||
+              r.bottom < rect.top || r.top > rect.bottom) continue;
+          ids.push(id);
+        }
+      }
+
+      if (additive) {
+        var existing = timeline.getSelection() || [];
+        var merged = {};
+        existing.forEach(function(x) { merged[x] = true; });
+        ids.forEach(function(x) { merged[x] = true; });
+        timeline.setSelection(Object.keys(merged));
+      } else {
+        timeline.setSelection(ids);
+      }
+    }
+
+    center.addEventListener('mousedown', onDown, true);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   }
 
   // ── 데이터 로드 ──
