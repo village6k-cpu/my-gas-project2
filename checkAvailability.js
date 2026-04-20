@@ -1396,21 +1396,13 @@ function _processByReqID(sheet, triggerRow) {
 
 
 /**
- * H열 "발송" → 가용확인 결과 알림톡 발송 (결재 후 수동)
- * I열 결과가 이미 채워진 상태에서 발송
+ * H열 "발송승인" → 가용확인 결과 (코워크 에이전트가 카톡으로 직접 발송)
+ * 팝빌 알림톡 자동발송 제거됨
  */
 function sendAvailAlimtalk(sheet, row) {
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return;
-
-  const allData = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
-  const triggerIdx = row - 2;
-  const reqID = allData[triggerIdx][0];
-  if (!reqID) return;
-
-  try {
-    var props = PropertiesService.getScriptProperties();
-    var tplCode = props.getProperty('POPBILL_TPL_AVAIL');
+  // 코워크 에이전트가 직접 카카오톡 채널에서 발송하므로 자동발송 비활성화
+  Logger.log("가용확인 발송승인 — 코워크 에이전트가 카톡으로 직접 발송");
+}
     var 예약자명 = '';
     var 연락처 = '';
     for (var ai = 0; ai < allData.length; ai++) {
@@ -2254,31 +2246,8 @@ function registerByReqID(sheet, triggerRow) {
     sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
   }
 
-  // ── 알림톡 발송 — 예약 등록 완료 ──
-  try {
-    var props = PropertiesService.getScriptProperties();
-    var tplCode = props.getProperty('POPBILL_TPL_REGISTER');
-    if (tplCode && 예약자명 && 연락처) {
-      var itemList = '';
-      for (var ai = 0; ai < allData.length; ai++) {
-        if (allData[ai][0] !== reqID) continue;
-        if (allData[ai][14] === '거절' || allData[ai][14] === '보류') continue;
-        // 세트 구성품 행(Q열이 "[세트]"로 시작) 제외 → 세트 헤더와 개별 장비만 포함
-        if (String(allData[ai][16] || '').indexOf('[세트]') === 0) continue;
-        if (allData[ai][5]) itemList += allData[ai][5] + '\n';
-      }
-      var 반출일Str = Utilities.formatDate(new Date(반출일), 'Asia/Seoul', 'yyyy-MM-dd');
-      var 반납일Str = Utilities.formatDate(new Date(반납일), 'Asia/Seoul', 'yyyy-MM-dd');
-      var msg = '[빌리지] 장비 예약 등록 완료 안내\n\n안녕하세요, ' + 예약자명 + '님.\n빌리지입니다.\n\n'
-        + '요청하신 장비 예약이 등록되었습니다.\n\n'
-        + '■ 거래번호: ' + 거래ID + '\n'
-        + '■ 반출: ' + 반출일Str + ' ' + 반출시간 + '\n'
-        + '■ 반납: ' + 반납일Str + ' ' + 반납시간 + '\n'
-        + '■ 예약 장비:\n' + itemList
-        + '\n문의사항은 카카오톡 채널로 편하게 연락주세요.\n감사합니다.';
-      sendAlimtalk(tplCode, 연락처, 예약자명, msg);
-    }
-  } catch(err) { }
+  // ── 등록완료 알림톡 — 비활성화 (코워크 에이전트가 카톡으로 직접 발송) ──
+  // 반출/반납 안내톡(checkGuideAlimtalk)은 유지됨
 
   } finally {
     regLock.releaseLock();
