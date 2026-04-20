@@ -3370,30 +3370,21 @@ function formatContractSheet() {
   var COLOR_IN        = "#D5E8D4"; // 반납
   var COLOR_SEQ       = "#FFF2CC"; // 회차
   var COLOR_STAT_DEF  = "#BDD7EE"; // 계약상태 기본
-  var COLOR_DIM_BG    = "#F5F5F5";
-  var COLOR_DIM_FG    = "#A6A6A6";
 
-  // 1) 데이터 영역 초기화
+  // 1) 데이터 영역 초기화 (A~K 전부 기본값으로)
   var dataRange = sheet.getRange(2, 1, dataRows, lastCol);
   dataRange.setBackground(null);
   dataRange.setFontColor(null);
   dataRange.setFontWeight(null);
   dataRange.setFontStyle(null);
 
-  // 2) 흐린 열 (A, B, C, D, K)
-  [1, 2, 3, 4, 11].forEach(function(c) {
-    sheet.getRange(2, c, dataRows, 1)
-      .setBackground(COLOR_DIM_BG)
-      .setFontColor(COLOR_DIM_FG);
-  });
-
-  // 3) 주요 열 그룹 배경
+  // 2) 주요 열 그룹 배경 (E~J만 색칠 — 나머지는 기본 흰색/검정)
   sheet.getRange(2, 5, dataRows, 2).setBackground(COLOR_OUT);      // E,F 반출
   sheet.getRange(2, 7, dataRows, 2).setBackground(COLOR_IN);       // G,H 반납
   sheet.getRange(2, 9, dataRows, 1).setBackground(COLOR_SEQ);      // I 회차
   sheet.getRange(2, 10, dataRows, 1).setBackground(COLOR_STAT_DEF);// J 계약상태 기본
 
-  // 4) E~J 굵게
+  // 3) E~J 굵게
   sheet.getRange(2, 5, dataRows, 6).setFontWeight("bold");
 
   // 5) 조건부 서식: 계약상태 기준 행 전체
