@@ -671,9 +671,11 @@
       }
     }
 
-    center.addEventListener('mousedown', onDown, true);
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    // pointer events(모던 표준, Hammer.js 내부도 이것을 씀)를 capture phase에서 가로채야 vis의 패닝이 막힘
+    center.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onUp, true);
   }
 
   // ── 데이터 로드 ──
