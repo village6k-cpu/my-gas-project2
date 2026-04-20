@@ -557,6 +557,9 @@ function setupMarqueeSelect(timeline) {
     sx = e.clientX;
     sy = e.clientY;
 
+    // 새 드래그/클릭 시작: additive 아니면 기존 선택 즉시 해제
+    if (!additive) timeline.setSelection([]);
+
     box = document.createElement("div");
     box.style.cssText = "position:fixed;left:" + sx + "px;top:" + sy +
       "px;width:0;height:0;border:1.5px dashed #2196f3;background:rgba(33,150,243,0.08);pointer-events:none;z-index:9999;";
