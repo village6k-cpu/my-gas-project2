@@ -581,6 +581,7 @@ function runFunction(funcName, params) {
     "excludeEquipFromRequest",
     "formatScheduleSheet",
     "formatContractSheet",
+    "resyncAllContractDates",
     "listAllTriggers"
   ];
 
@@ -620,6 +621,7 @@ function runFunction(funcName, params) {
       syncAuditFromMaster: typeof syncAuditFromMaster !== "undefined" ? syncAuditFromMaster : null,
       formatScheduleSheet: typeof formatScheduleSheet !== "undefined" ? formatScheduleSheet : null,
       formatContractSheet: typeof formatContractSheet !== "undefined" ? formatContractSheet : null,
+      resyncAllContractDates: typeof resyncAllContractDates !== "undefined" ? resyncAllContractDates : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {

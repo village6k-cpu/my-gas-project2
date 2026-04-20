@@ -188,16 +188,34 @@ function onEditInstallable(e) {
 }
 
 /**
+ * 날짜/시간 값을 register가 쓰는 문자열 포맷으로 변환 (Date → 'yyyy-MM-dd' / 'HH:mm').
+ * Date 객체를 그대로 쓰면 스케줄상세 셀 서식이 1899-12-30으로 깨져서 반드시 문자열로.
+ */
+function _fmtDateStr(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Seoul', 'yyyy-MM-dd');
+  return String(v || '').trim();
+}
+function _fmtTimeStr(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Seoul', 'HH:mm');
+  return String(v || '').trim();
+}
+
+/**
  * 계약마스터 반출/반납 일시 변경을 스케줄상세와 개고생2.0 거래내역에 즉시 전파.
  * 같은 거래ID의 모든 스케줄상세 행은 계약마스터의 새 날짜/시간으로 통일됨.
  */
 function propagateContractDates(ss, contractSheet, row, 거래ID) {
-  var 반출일   = contractSheet.getRange(row, 5).getValue();
-  var 반출시간 = contractSheet.getRange(row, 6).getValue();
-  var 반납일   = contractSheet.getRange(row, 7).getValue();
-  var 반납시간 = contractSheet.getRange(row, 8).getValue();
+  var 반출일Raw   = contractSheet.getRange(row, 5).getValue();
+  var 반출시간Raw = contractSheet.getRange(row, 6).getValue();
+  var 반납일Raw   = contractSheet.getRange(row, 7).getValue();
+  var 반납시간Raw = contractSheet.getRange(row, 8).getValue();
 
-  // 1) 스케줄상세 F~I열 덮어쓰기 (반출일/시간/반납일/시간)
+  var 반출일str   = _fmtDateStr(반출일Raw);
+  var 반출시간str = _fmtTimeStr(반출시간Raw);
+  var 반납일str   = _fmtDateStr(반납일Raw);
+  var 반납시간str = _fmtTimeStr(반납시간Raw);
+
+  // 1) 스케줄상세 F~I열 덮어쓰기 (반출일/시간/반납일/시간) — 문자열 + 서식 복구
   var schedSheet = ss.getSheetByName("스케줄상세");
   if (schedSheet && schedSheet.getLastRow() >= 2) {
     var lastRow = schedSheet.getLastRow();
@@ -205,7 +223,11 @@ function propagateContractDates(ss, contractSheet, row, 거래ID) {
     var updatedRows = 0;
     for (var i = 0; i < bCol.length; i++) {
       if (String(bCol[i][0]).trim() === 거래ID) {
-        schedSheet.getRange(i + 2, 6, 1, 4).setValues([[반출일, 반출시간, 반납일, 반납시간]]);
+        var r = i + 2;
+        var rng = schedSheet.getRange(r, 6, 1, 4);
+        // 이전 버그로 셀 포맷이 '1899-12-30'으로 깨진 상태를 복구
+        rng.setNumberFormats([['yyyy-MM-dd', '@', 'yyyy-MM-dd', '@']]);
+        rng.setValues([[반출일str, 반출시간str, 반납일str, 반납시간str]]);
         updatedRows++;
       }
     }
@@ -222,7 +244,7 @@ function propagateContractDates(ss, contractSheet, row, 거래ID) {
         var ids = 거래시트.getRange(2, 4, 거래시트.getLastRow() - 1, 1).getValues();  // D열: 거래ID
         for (var j = 0; j < ids.length; j++) {
           if (String(ids[j][0]).trim() === 거래ID) {
-            거래시트.getRange(j + 2, 1).setValue(반출일);
+            거래시트.getRange(j + 2, 1).setValue(반출일Raw);  // 거래내역 A열은 Date 그대로 유지
             Logger.log("개고생2.0 거래내역 반출일 업데이트: 행 " + (j + 2) + " (" + 거래ID + ")");
           }
         }
@@ -231,6 +253,58 @@ function propagateContractDates(ss, contractSheet, row, 거래ID) {
   } catch (err) {
     Logger.log("개고생2.0 거래내역 업데이트 실패: " + err.message);
   }
+}
+
+/**
+ * 복구용 (스케줄상세 전용, 배치): 계약마스터 전체 1회 + 스케줄상세 F~I 1회 read/write.
+ * 거래내역(개고생2.0)은 건드리지 않음 — 복구 속도가 핵심이므로.
+ */
+function resyncAllContractDates() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var cm = ss.getSheetByName("계약마스터");
+  if (!cm || cm.getLastRow() < 2) return "계약마스터 없음";
+  var sched = ss.getSheetByName("스케줄상세");
+  if (!sched || sched.getLastRow() < 2) return "스케줄상세 없음";
+
+  // 계약마스터 한 번에 읽기 (A~H)
+  var cmData = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getValues();
+  var contractMap = {};
+  for (var i = 0; i < cmData.length; i++) {
+    var id = String(cmData[i][0]).trim();
+    if (!id) continue;
+    contractMap[id] = [
+      _fmtDateStr(cmData[i][4]),
+      _fmtTimeStr(cmData[i][5]),
+      _fmtDateStr(cmData[i][6]),
+      _fmtTimeStr(cmData[i][7])
+    ];
+  }
+
+  // 스케줄상세 B열(거래ID) + F~I열 한 번에 읽기
+  var sRows = sched.getLastRow() - 1;
+  var bCol = sched.getRange(2, 2, sRows, 1).getValues();
+  var existing = sched.getRange(2, 6, sRows, 4).getValues();
+
+  var newValues = [];
+  var newFormats = [];
+  var changed = 0;
+  for (var j = 0; j < bCol.length; j++) {
+    var id2 = String(bCol[j][0]).trim();
+    var c = contractMap[id2];
+    if (c) {
+      newValues.push(c);
+      changed++;
+    } else {
+      newValues.push(existing[j]);
+    }
+    newFormats.push(['yyyy-MM-dd', '@', 'yyyy-MM-dd', '@']);
+  }
+
+  var rng = sched.getRange(2, 6, sRows, 4);
+  rng.setNumberFormats(newFormats);
+  rng.setValues(newValues);
+
+  return "✅ 스케줄상세 " + changed + "행 재전파/서식복구 완료";
 }
 
 /**
