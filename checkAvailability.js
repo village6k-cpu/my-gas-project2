@@ -3387,8 +3387,9 @@ function formatContractSheet() {
   // 3) E~J 굵게
   sheet.getRange(2, 5, dataRows, 6).setFontWeight("bold");
 
-  // 5) 조건부 서식: 계약상태 기준 행 전체
-  var ruleRange = sheet.getRange(2, 1, dataRows, lastCol);
+  // 5) 조건부 서식: 계약상태 기준 행 전체 — 시트 최대 행까지 적용해 신규 행도 자동 커버
+  var maxRow = sheet.getMaxRows();
+  var ruleRange = sheet.getRange(2, 1, maxRow - 1, lastCol);
   var existing = sheet.getConditionalFormatRules().filter(function(r) {
     // 기존 계약마스터 2b 규칙 제거 (A2:K 범위 규칙만)
     var ranges = r.getRanges();

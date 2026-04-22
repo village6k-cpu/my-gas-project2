@@ -527,8 +527,11 @@ function cancelContract(ss, 거래ID, contractRow) {
     Logger.log("개고생2.0 거래내역 삭제 실패: " + err.message);
   }
 
-  // 3. 계약마스터 행에 취소 표시
-  contractSheet.getRange(contractRow, 10).setBackground("#FFC7CE");
+  // 3. 계약마스터 행 전체를 취소 스타일로 (연빨강 배경 + 취소선 + 어두운 글자)
+  var rowRange = contractSheet.getRange(contractRow, 1, 1, 11);  // A:K
+  rowRange.setBackground("#FFC7CE");
+  rowRange.setFontColor("#9C0006");
+  rowRange.setFontLine("line-through");
 
   Logger.log("계약 취소 완료: " + 거래ID);
 }
