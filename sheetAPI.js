@@ -582,6 +582,7 @@ function runFunction(funcName, params) {
     "formatScheduleSheet",
     "formatContractSheet",
     "resyncAllContractDates",
+    "scanCorruptedContractTimes",
     "listAllTriggers"
   ];
 
@@ -622,6 +623,7 @@ function runFunction(funcName, params) {
       formatScheduleSheet: typeof formatScheduleSheet !== "undefined" ? formatScheduleSheet : null,
       formatContractSheet: typeof formatContractSheet !== "undefined" ? formatContractSheet : null,
       resyncAllContractDates: typeof resyncAllContractDates !== "undefined" ? resyncAllContractDates : null,
+      scanCorruptedContractTimes: typeof scanCorruptedContractTimes !== "undefined" ? scanCorruptedContractTimes : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {

@@ -205,15 +205,16 @@ function _fmtTimeStr(v) {
  * 같은 거래ID의 모든 스케줄상세 행은 계약마스터의 새 날짜/시간으로 통일됨.
  */
 function propagateContractDates(ss, contractSheet, row, 거래ID) {
+  // 날짜는 Date→yyyy-MM-dd 포맷, 시간은 사용자가 보는 표시값 그대로 복사 (LMT 역해석 회피)
   var 반출일Raw   = contractSheet.getRange(row, 5).getValue();
-  var 반출시간Raw = contractSheet.getRange(row, 6).getValue();
   var 반납일Raw   = contractSheet.getRange(row, 7).getValue();
-  var 반납시간Raw = contractSheet.getRange(row, 8).getValue();
+  var 반출시간Disp = contractSheet.getRange(row, 6).getDisplayValue();
+  var 반납시간Disp = contractSheet.getRange(row, 8).getDisplayValue();
 
   var 반출일str   = _fmtDateStr(반출일Raw);
-  var 반출시간str = _fmtTimeStr(반출시간Raw);
+  var 반출시간str = String(반출시간Disp || "").trim();
   var 반납일str   = _fmtDateStr(반납일Raw);
-  var 반납시간str = _fmtTimeStr(반납시간Raw);
+  var 반납시간str = String(반납시간Disp || "").trim();
 
   // 1) 스케줄상세 F~I열 덮어쓰기 (반출일/시간/반납일/시간) — 문자열 + 서식 복구
   var schedSheet = ss.getSheetByName("스케줄상세");
@@ -256,8 +257,114 @@ function propagateContractDates(ss, contractSheet, row, 거래ID) {
 }
 
 /**
+ * LMT 복원: 저장된 Date 값에 +32분 8초 더하고 일(day) 정보 제거 → 순수 HH:mm 문자열.
+ * 1899-12-31 04:27:52 → 05:00
+ */
+function _lmtRestoreHHmm(dateVal) {
+  if (!(dateVal instanceof Date)) return String(dateVal || "").trim();
+  // 저장된 ms에 32m08s(= 1928000ms) 더함
+  var restored = new Date(dateVal.getTime() + 1928 * 1000);
+  return Utilities.formatDate(restored, "Asia/Seoul", "HH:mm");
+}
+
+/**
+ * 드라이런: scanCorruptedContractTimes 결과에 각 행의 제안 시간까지 붙여서 반환.
+ * 실제 시트는 건드리지 않음. 사용자 검토용.
+ */
+function previewContractTimeFix() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var cm = ss.getSheetByName("계약마스터");
+  if (!cm || cm.getLastRow() < 2) return [];
+  var data = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getValues();
+  var tz = "Asia/Seoul";
+  var out = [];
+  for (var i = 0; i < data.length; i++) {
+    var id = String(data[i][0]).trim();
+    if (!id) continue;
+    var ft = data[i][5], bt = data[i][7];
+    var fCorrupt = (ft instanceof Date) && Utilities.formatDate(ft, tz, "yyyy-MM-dd") !== "1899-12-30";
+    var bCorrupt = (bt instanceof Date) && Utilities.formatDate(bt, tz, "yyyy-MM-dd") !== "1899-12-30";
+    if (!fCorrupt && !bCorrupt) continue;
+    out.push({
+      row: i + 2,
+      거래ID: id,
+      반출_현재: ft instanceof Date ? Utilities.formatDate(ft, tz, "HH:mm:ss") : String(ft),
+      반출_제안: fCorrupt ? _lmtRestoreHHmm(ft) : (ft instanceof Date ? Utilities.formatDate(ft, tz, "HH:mm") : String(ft || "").trim()),
+      반납_현재: bt instanceof Date ? Utilities.formatDate(bt, tz, "HH:mm:ss") : String(bt),
+      반납_제안: bCorrupt ? _lmtRestoreHHmm(bt) : (bt instanceof Date ? Utilities.formatDate(bt, tz, "HH:mm") : String(bt || "").trim())
+    });
+  }
+  return { count: out.length, items: out };
+}
+
+/**
+ * 실제 적용: 계약마스터 F/H의 깨진 Date 값을 LMT 복원 문자열로 덮어쓰고
+ * 셀 서식을 '@'(text)로 변경. 그리고 스케줄상세까지 resync.
+ */
+function applyContractTimeFix() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var cm = ss.getSheetByName("계약마스터");
+  if (!cm || cm.getLastRow() < 2) return "계약마스터 없음";
+  var data = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getValues();
+  var tz = "Asia/Seoul";
+  var fixed = 0;
+  for (var i = 0; i < data.length; i++) {
+    var id = String(data[i][0]).trim();
+    if (!id) continue;
+    var ft = data[i][5], bt = data[i][7];
+    var fCorrupt = (ft instanceof Date) && Utilities.formatDate(ft, tz, "yyyy-MM-dd") !== "1899-12-30";
+    var bCorrupt = (bt instanceof Date) && Utilities.formatDate(bt, tz, "yyyy-MM-dd") !== "1899-12-30";
+    if (fCorrupt) {
+      cm.getRange(i + 2, 6).setNumberFormat("@").setValue(_lmtRestoreHHmm(ft));
+      fixed++;
+    }
+    if (bCorrupt) {
+      cm.getRange(i + 2, 8).setNumberFormat("@").setValue(_lmtRestoreHHmm(bt));
+    }
+  }
+  // 스케줄상세까지 동일한 새 값으로 재전파 (기존 배치 함수 재사용)
+  var resync = resyncAllContractDates();
+  return "✅ 계약마스터 시간 복원 완료 (" + fixed + "개 F/H 셀 수정) | " + resync;
+}
+
+/**
+ * 진단용: 계약마스터 F(반출시간) / H(반납시간) 중 1899-12-30이 아닌 Date 값(= 하루+이상 offset) 찾기.
+ * 이런 값은 내부 fraction이 1을 넘어 HH:mm이 의도한 값과 달라진 깨진 셀.
+ * 반환: [{row, 거래ID, 반출시간, 반납시간}, ...]
+ */
+function scanCorruptedContractTimes() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var cm = ss.getSheetByName("계약마스터");
+  if (!cm || cm.getLastRow() < 2) return [];
+
+  var data = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getValues();
+  var tz = "Asia/Seoul";
+  var bad = [];
+  for (var i = 0; i < data.length; i++) {
+    var id = String(data[i][0]).trim();
+    if (!id) continue;
+    var 반출시간 = data[i][5];
+    var 반납시간 = data[i][7];
+    var reason = [];
+    if (반출시간 instanceof Date) {
+      var d1 = Utilities.formatDate(반출시간, tz, "yyyy-MM-dd");
+      if (d1 !== "1899-12-30") reason.push("반출=" + d1 + " " + Utilities.formatDate(반출시간, tz, "HH:mm:ss"));
+    }
+    if (반납시간 instanceof Date) {
+      var d2 = Utilities.formatDate(반납시간, tz, "yyyy-MM-dd");
+      if (d2 !== "1899-12-30") reason.push("반납=" + d2 + " " + Utilities.formatDate(반납시간, tz, "HH:mm:ss"));
+    }
+    if (reason.length > 0) {
+      bad.push({ row: i + 2, 거래ID: id, 반출시간: String(반출시간), 반납시간: String(반납시간), reason: reason.join(" | ") });
+    }
+  }
+  return { count: bad.length, items: bad };
+}
+
+/**
  * 복구용 (스케줄상세 전용, 배치): 계약마스터 전체 1회 + 스케줄상세 F~I 1회 read/write.
  * 거래내역(개고생2.0)은 건드리지 않음 — 복구 속도가 핵심이므로.
+ * 사용자가 보는 그대로를 전파하려고 getDisplayValues 사용 — LMT 역해석으로 값이 밀리는 문제 회피.
  */
 function resyncAllContractDates() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -266,17 +373,18 @@ function resyncAllContractDates() {
   var sched = ss.getSheetByName("스케줄상세");
   if (!sched || sched.getLastRow() < 2) return "스케줄상세 없음";
 
-  // 계약마스터 한 번에 읽기 (A~H)
-  var cmData = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getValues();
+  // 계약마스터 한 번에 읽기 (A~H) — 시간 값은 표시값 그대로 사용
+  var cmRaw = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getValues();          // 날짜(Date)는 raw로
+  var cmDisp = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getDisplayValues();   // 시간 텍스트 보존용
   var contractMap = {};
-  for (var i = 0; i < cmData.length; i++) {
-    var id = String(cmData[i][0]).trim();
+  for (var i = 0; i < cmRaw.length; i++) {
+    var id = String(cmRaw[i][0]).trim();
     if (!id) continue;
     contractMap[id] = [
-      _fmtDateStr(cmData[i][4]),
-      _fmtTimeStr(cmData[i][5]),
-      _fmtDateStr(cmData[i][6]),
-      _fmtTimeStr(cmData[i][7])
+      _fmtDateStr(cmRaw[i][4]),       // E 반출일 (Date → 'yyyy-MM-dd')
+      String(cmDisp[i][5] || "").trim(), // F 반출시간 (사용자가 보는 텍스트 그대로)
+      _fmtDateStr(cmRaw[i][6]),       // G 반납일
+      String(cmDisp[i][7] || "").trim()  // H 반납시간
     ];
   }
 
