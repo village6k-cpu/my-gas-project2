@@ -583,6 +583,8 @@ function runFunction(funcName, params) {
     "formatContractSheet",
     "resyncAllContractDates",
     "scanCorruptedContractTimes",
+    "listPendingContractRegens",
+    "regenPendingContracts",
     "listAllTriggers"
   ];
 
@@ -624,6 +626,8 @@ function runFunction(funcName, params) {
       formatContractSheet: typeof formatContractSheet !== "undefined" ? formatContractSheet : null,
       resyncAllContractDates: typeof resyncAllContractDates !== "undefined" ? resyncAllContractDates : null,
       scanCorruptedContractTimes: typeof scanCorruptedContractTimes !== "undefined" ? scanCorruptedContractTimes : null,
+      listPendingContractRegens: typeof listPendingContractRegens !== "undefined" ? listPendingContractRegens : null,
+      regenPendingContracts: typeof regenPendingContracts !== "undefined" ? regenPendingContracts : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {
