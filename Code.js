@@ -156,6 +156,16 @@ function onEditInstallable(e) {
     }
   }
 
+  // 스케줄상세 B열(거래ID) 입력 시: 반출일/시간 · 반납일/시간 · 예약자명 · 상태 · 스케줄ID 자동 채움
+  if (sheet.getName() === "스케줄상세" && col === 2 && row >= 2) {
+    try {
+      var sd거래ID = String(e.range.getValue()).trim();
+      if (sd거래ID) autoFillScheduleRow(e.source, sheet, row, sd거래ID);
+    } catch (err) {
+      Logger.log("스케줄상세 자동완성 실패: " + err.message);
+    }
+  }
+
   // 스케줄상세 품목 수정 시 계약서 자동 재생성
   if (sheet.getName() === "스케줄상세" && (col === 4 || col === 5) && row >= 2) {
     try {
@@ -184,6 +194,72 @@ function onEditInstallable(e) {
     } catch (err) {
       Logger.log("계약마스터 일정 변경 처리 실패: " + err.message);
     }
+  }
+}
+
+/**
+ * 스케줄상세 B열(거래ID)이 입력되면 계약마스터에서 거래 정보를 읽어
+ * 반출일/시간/반납일/시간/예약자명/상태/스케줄ID를 자동으로 채움.
+ * 이미 값이 있는 셀은 건드리지 않음 — 사용자가 미리 입력한 건 존중.
+ * 장비추가 워크플로우 단순화의 핵심: 거래ID만 치면 나머지 거의 다 채워짐.
+ */
+function autoFillScheduleRow(ss, sheet, row, 거래ID) {
+  var cm = ss.getSheetByName("계약마스터");
+  if (!cm || cm.getLastRow() < 2) return;
+
+  var cmRaw  = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getValues();
+  var cmDisp = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getDisplayValues();
+  var found = -1;
+  for (var i = 0; i < cmRaw.length; i++) {
+    if (String(cmRaw[i][0]).trim() === 거래ID) { found = i; break; }
+  }
+  if (found === -1) {
+    sheet.getRange(row, 11).setValue("❌ 계약마스터에 없는 거래ID");
+    sheet.getRange(row, 11).setBackground("#FFC7CE");
+    return;
+  }
+
+  var 예약자명   = cmRaw[found][1];
+  var 반출일str   = _fmtDateStr(cmRaw[found][4]);
+  var 반납일str   = _fmtDateStr(cmRaw[found][6]);
+  var 반출시간str = String(cmDisp[found][5] || "").trim();
+  var 반납시간str = String(cmDisp[found][7] || "").trim();
+
+  // 스케줄ID 생성: 거래ID-NN (기존 최대 번호 + 1)
+  var sLast = sheet.getLastRow();
+  var sIds = sLast >= 2 ? sheet.getRange(2, 1, sLast - 1, 1).getValues().flat() : [];
+  var maxN = 0;
+  var re = new RegExp("^" + 거래ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "-(\\d+)$");
+  sIds.forEach(function(sid) {
+    var m = String(sid).match(re);
+    if (m) { var n = parseInt(m[1], 10); if (n > maxN) maxN = n; }
+  });
+  var newSid = 거래ID + "-" + ("0" + (maxN + 1)).slice(-2);
+
+  // 현재 행 상태 확인 (빈 셀만 채우기)
+  var rowData = sheet.getRange(row, 1, 1, 13).getValues()[0];
+  // A 스케줄ID
+  if (!rowData[0]) sheet.getRange(row, 1).setValue(newSid);
+  // F 반출일 (col 6)
+  if (!rowData[5]) { sheet.getRange(row, 6).setNumberFormat("yyyy-MM-dd").setValue(반출일str); }
+  // G 반출시간 (col 7)
+  if (!rowData[6]) { sheet.getRange(row, 7).setNumberFormat("@").setValue(반출시간str); }
+  // H 반납일 (col 8)
+  if (!rowData[7]) { sheet.getRange(row, 8).setNumberFormat("yyyy-MM-dd").setValue(반납일str); }
+  // I 반납시간 (col 9)
+  if (!rowData[8]) { sheet.getRange(row, 9).setNumberFormat("@").setValue(반납시간str); }
+  // J 상태
+  if (!rowData[9]) sheet.getRange(row, 10).setValue("대기");
+  // M 예약자명 (col 13)
+  if (!rowData[12]) sheet.getRange(row, 13).setValue(예약자명);
+
+  // 상태바(K열 비고 활용)에 안내 — 장비명만 선택하면 됨
+  var 장비명Cell = sheet.getRange(row, 4).getValue();
+  if (!장비명Cell) {
+    sheet.getRange(row, 11).setValue("👉 D열 장비명 선택하세요");
+    sheet.getRange(row, 11).setBackground("#FFF2CC");
+  } else {
+    sheet.getRange(row, 11).clearContent().setBackground(null);
   }
 }
 
