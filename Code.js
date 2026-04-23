@@ -166,17 +166,16 @@ function onEditInstallable(e) {
     }
   }
 
-  // 스케줄상세 품목 수정 시 계약서 자동 재생성
-  if (sheet.getName() === "스케줄상세" && (col === 4 || col === 5) && row >= 2) {
+  // 스케줄상세 품목/수량 수정 시 계약서 재생성 (디바운스) — 여러 건 연속 편집 시 단 1회 재생성
+  if (sheet.getName() === "스케줄상세" && (col === 3 || col === 4 || col === 5) && row >= 2) {
     try {
       var 거래ID = sheet.getRange(row, 2).getValue();  // B열: 거래ID
       if (거래ID) {
-        var ss = e.source;
-        deleteAndRegenerateContract(ss, String(거래ID).trim());
-        Logger.log("스케줄상세 수정 → 계약서 재생성 완료: " + 거래ID);
+        scheduleContractRegen(String(거래ID).trim());
+        Logger.log("스케줄상세 수정 → 계약서 재생성 예약: " + 거래ID);
       }
     } catch (err) {
-      Logger.log("스케줄상세 수정 → 계약서 재생성 실패: " + err.message);
+      Logger.log("스케줄상세 수정 → 재생성 예약 실패: " + err.message);
     }
   }
 
