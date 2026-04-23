@@ -3363,33 +3363,33 @@ function formatContractSheet() {
 
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return "데이터 없음";
-  var dataRows = lastRow - 1;
   var lastCol = 11;
+  var maxRow = sheet.getMaxRows();
+  var fullRows = maxRow - 1;   // 시트 전체(헤더 제외) — 신규 행도 자동으로 서식 받음
 
   var COLOR_OUT       = "#DAE8FC"; // 반출
   var COLOR_IN        = "#D5E8D4"; // 반납
   var COLOR_SEQ       = "#FFF2CC"; // 회차
   var COLOR_STAT_DEF  = "#BDD7EE"; // 계약상태 기본
 
-  // 1) 데이터 영역 초기화 (A~K 전부 기본값으로)
-  var dataRange = sheet.getRange(2, 1, dataRows, lastCol);
+  // 1) 전체 데이터 영역 초기화 (A~K 전부 기본값으로)
+  var dataRange = sheet.getRange(2, 1, fullRows, lastCol);
   dataRange.setBackground(null);
   dataRange.setFontColor(null);
   dataRange.setFontWeight(null);
   dataRange.setFontStyle(null);
 
-  // 2) 주요 열 그룹 배경 (E~J만 색칠 — 나머지는 기본 흰색/검정)
-  sheet.getRange(2, 5, dataRows, 2).setBackground(COLOR_OUT);      // E,F 반출
-  sheet.getRange(2, 7, dataRows, 2).setBackground(COLOR_IN);       // G,H 반납
-  sheet.getRange(2, 9, dataRows, 1).setBackground(COLOR_SEQ);      // I 회차
-  sheet.getRange(2, 10, dataRows, 1).setBackground(COLOR_STAT_DEF);// J 계약상태 기본
+  // 2) 주요 열 그룹 배경 (E~J 전체 행 — 빈 행 포함, 신규 등록 시 자동 적용)
+  sheet.getRange(2, 5, fullRows, 2).setBackground(COLOR_OUT);      // E,F 반출
+  sheet.getRange(2, 7, fullRows, 2).setBackground(COLOR_IN);       // G,H 반납
+  sheet.getRange(2, 9, fullRows, 1).setBackground(COLOR_SEQ);      // I 회차
+  sheet.getRange(2, 10, fullRows, 1).setBackground(COLOR_STAT_DEF);// J 계약상태 기본
 
-  // 3) E~J 굵게
-  sheet.getRange(2, 5, dataRows, 6).setFontWeight("bold");
+  // 3) E~J 굵게 (전체 행)
+  sheet.getRange(2, 5, fullRows, 6).setFontWeight("bold");
 
   // 5) 조건부 서식: 계약상태 기준 행 전체 — 시트 최대 행까지 적용해 신규 행도 자동 커버
-  var maxRow = sheet.getMaxRows();
-  var ruleRange = sheet.getRange(2, 1, maxRow - 1, lastCol);
+  var ruleRange = sheet.getRange(2, 1, fullRows, lastCol);
   var existing = sheet.getConditionalFormatRules().filter(function(r) {
     // 기존 계약마스터 2b 규칙 제거 (A2:K 범위 규칙만)
     var ranges = r.getRanges();
@@ -3421,5 +3421,5 @@ function formatContractSheet() {
   // 6) 헤더 고정
   sheet.setFrozenRows(1);
 
-  return "✅ " + dataRows + "행 서식 적용 완료";
+  return "✅ 시트 전체(" + fullRows + "행) 서식 적용 완료";
 }
