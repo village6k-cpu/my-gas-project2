@@ -166,6 +166,16 @@ function onEditInstallable(e) {
     }
   }
 
+  // 스케줄상세 C열(세트/장비명) 입력 시: 세트면 구성품 자동 펼침, 단품이면 D열·단가 자동 채움
+  if (sheet.getName() === "스케줄상세" && col === 3 && row >= 2) {
+    try {
+      var cVal = String(e.range.getValue()).trim();
+      if (cVal) autoExpandSetInSchedule(e.source, sheet, row, cVal);
+    } catch (err) {
+      Logger.log("스케줄상세 세트 펼침 실패: " + err.message);
+    }
+  }
+
   // 스케줄상세 품목/수량 수정 시 계약서 재생성 (디바운스) — 여러 건 연속 편집 시 단 1회 재생성
   if (sheet.getName() === "스케줄상세" && (col === 3 || col === 4 || col === 5) && row >= 2) {
     try {
@@ -193,6 +203,102 @@ function onEditInstallable(e) {
     } catch (err) {
       Logger.log("계약마스터 일정 변경 처리 실패: " + err.message);
     }
+  }
+}
+
+/**
+ * 스케줄상세 C열(세트/장비명)이 입력되면:
+ *   - 세트마스터에 세트로 등록되어 있으면 → 현재 행을 세트 대표행으로 만들고(D=세트명, 수량='1세트', 단가=세트단가),
+ *     구성품을 바로 아래 행들에 삽입(D=구성품, 수량=구성품수량, 단가=0).
+ *   - 세트가 아닌 단품이면 → D열에 동일값, 수량=1, 단가 자동 조회.
+ *   - 거래ID가 비어있으면 경고만 남기고 스킵.
+ * 기존 D열에 이미 값이 있는 경우는 덮어쓰지 않음(사용자 수동 편집 보존).
+ */
+function autoExpandSetInSchedule(ss, sheet, row, 세트명) {
+  var 거래ID = String(sheet.getRange(row, 2).getValue()).trim();
+  if (!거래ID) {
+    sheet.getRange(row, 11).setValue("❌ B열 거래ID 먼저 입력").setBackground("#FFC7CE");
+    return;
+  }
+  var setSheet = ss.getSheetByName("세트마스터");
+  if (!setSheet) return;
+
+  var currentD = String(sheet.getRange(row, 4).getValue()).trim();
+  var components = getSetComponents(세트명, setSheet);
+  var price = findSetPrice(세트명, setSheet);
+
+  if (components.length > 0) {
+    // === 세트 ===
+    // 현재 행을 세트 대표행으로 설정 (D가 비어있을 때만 덮어씀)
+    if (!currentD) sheet.getRange(row, 4).setValue(세트명);
+    if (!sheet.getRange(row, 5).getValue()) sheet.getRange(row, 5).setValue("1세트");
+    if (!sheet.getRange(row, 12).getValue()) sheet.getRange(row, 12).setValue(price);
+
+    // 이미 같은 세트의 구성품 행이 아래에 있으면 중복 생성 방지 체크
+    var lastRow = sheet.getLastRow();
+    var belowCheckRange = Math.min(components.length + 2, lastRow - row);
+    if (belowCheckRange > 0) {
+      var below = sheet.getRange(row + 1, 2, belowCheckRange, 2).getValues();  // B거래ID, C세트명
+      var hasComponents = 0;
+      for (var i = 0; i < below.length; i++) {
+        if (String(below[i][0]).trim() === 거래ID && String(below[i][1]).trim() === 세트명) {
+          hasComponents++;
+        } else break;
+      }
+      if (hasComponents >= components.length) {
+        sheet.getRange(row, 11).setValue("ℹ️ 이미 구성품 있음 — 재삽입 안 함").setBackground("#FFF2CC");
+        return;
+      }
+    }
+
+    // 구성품 행 삽입
+    var headerValues = sheet.getRange(row, 1, 1, 13).getValues()[0];
+    sheet.insertRowsAfter(row, components.length);
+
+    var maxN = 0;
+    var sLast2 = sheet.getLastRow();
+    if (sLast2 >= 2) {
+      var sIds = sheet.getRange(2, 1, sLast2 - 1, 1).getValues().flat();
+      var re = new RegExp("^" + 거래ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "-(\\d+)$");
+      sIds.forEach(function(sid) {
+        var m = String(sid).match(re);
+        if (m) { var n = parseInt(m[1], 10); if (n > maxN) maxN = n; }
+      });
+    }
+
+    var newRows = [];
+    for (var j = 0; j < components.length; j++) {
+      maxN++;
+      newRows.push([
+        거래ID + "-" + ("0" + maxN).slice(-2),  // A 스케줄ID
+        거래ID,                                   // B 거래ID
+        세트명,                                   // C 세트명 (그룹핑)
+        components[j].name,                      // D 구성품 장비명
+        components[j].qty || 1,                   // E 수량
+        headerValues[5],                          // F 반출일
+        headerValues[6],                          // G 반출시간
+        headerValues[7],                          // H 반납일
+        headerValues[8],                          // I 반납시간
+        "대기",                                   // J 상태
+        "",                                       // K 비고
+        0,                                        // L 단가 (구성품은 0, 대표행이 세트 단가)
+        headerValues[12]                          // M 예약자명
+      ]);
+    }
+    // 숫자열은 숫자로 남기고 텍스트(시간)는 @ 서식 유지하기 위해 범위 지정 후 setValues
+    sheet.getRange(row + 1, 1, newRows.length, 13).setValues(newRows);
+    sheet.getRange(row + 1, 6, newRows.length, 1).setNumberFormat("yyyy-MM-dd");
+    sheet.getRange(row + 1, 7, newRows.length, 1).setNumberFormat("@");
+    sheet.getRange(row + 1, 8, newRows.length, 1).setNumberFormat("yyyy-MM-dd");
+    sheet.getRange(row + 1, 9, newRows.length, 1).setNumberFormat("@");
+
+    sheet.getRange(row, 11).clearContent().setBackground(null);
+  } else {
+    // === 단품 ===
+    if (!currentD) sheet.getRange(row, 4).setValue(세트명);
+    if (!sheet.getRange(row, 5).getValue()) sheet.getRange(row, 5).setValue(1);
+    if (!sheet.getRange(row, 12).getValue() && price) sheet.getRange(row, 12).setValue(price);
+    sheet.getRange(row, 11).clearContent().setBackground(null);
   }
 }
 
