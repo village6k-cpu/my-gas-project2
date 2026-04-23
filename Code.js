@@ -224,7 +224,12 @@ function autoExpandSetInSchedule(ss, sheet, row, 세트명) {
   if (!setSheet) return;
 
   var currentD = String(sheet.getRange(row, 4).getValue()).trim();
-  var components = getSetComponents(세트명, setSheet);
+  // 세트마스터는 "단품 행"(A=이름, B=빈칸, G=단가)도 포함하므로,
+  // 실제 구성품(이름 있는 것)만 추려냄. 자기 자신과 같은 이름도 제거(무한 확장 방지).
+  var components = getSetComponents(세트명, setSheet).filter(function(c) {
+    var n = String(c.name || "").trim();
+    return n !== "" && n !== 세트명;
+  });
   var price = findSetPrice(세트명, setSheet);
 
   if (components.length > 0) {
