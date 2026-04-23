@@ -29,13 +29,19 @@ function createContractFromMenu() {
   let 거래ID;
 
   if (sheetName === "확인요청") {
-    거래ID = sheet.getRange(row, 16).getValue(); // P열: 거래ID
+    거래ID = String(sheet.getRange(row, 16).getValue()).trim(); // P열: 거래ID
     if (!거래ID) {
       ui.alert("❌ 선택한 행에 거래ID가 없습니다.\n먼저 예약 등록을 완료하세요.");
       return;
     }
   } else if (sheetName === "계약마스터") {
-    거래ID = sheet.getRange(row, 1).getValue(); // A열: 거래ID
+    거래ID = String(sheet.getRange(row, 1).getValue()).trim(); // A열: 거래ID
+    if (!거래ID) {
+      ui.alert("❌ 선택한 행에 거래ID가 없습니다.");
+      return;
+    }
+  } else if (sheetName === "스케줄상세") {
+    거래ID = String(sheet.getRange(row, 2).getValue()).trim(); // B열: 거래ID
     if (!거래ID) {
       ui.alert("❌ 선택한 행에 거래ID가 없습니다.");
       return;
@@ -47,8 +53,15 @@ function createContractFromMenu() {
     if (!거래ID) return;
   }
 
+  // 즉시 토스트로 진행 안내 (최종 결과는 alert로)
+  ss.toast("계약서 생성/재생성 중... (30초 정도)", "⏳ " + 거래ID, 40);
+
   try {
-    const result = generateContractFile(ss, 거래ID);
+    // 기존 파일 있으면 삭제 후 새로 생성 → 신규든 재생성이든 동일하게 처리
+    const result = deleteAndRegenerateContract(ss, 거래ID);
+    // 디바운스 대기 큐에 쌓여있었다면 정리
+    try { PropertiesService.getScriptProperties().deleteProperty('contractEditTS_' + 거래ID); } catch (e) {}
+    ss.toast("✅ 완료", "계약서 " + 거래ID, 5);
     ui.alert(
       `✅ 계약서 생성 완료!\n\n` +
       `파일명: ${result.fileName}\n` +
@@ -56,6 +69,7 @@ function createContractFromMenu() {
       `인쇄: 파일 열기 → Ctrl+P → A4 세로`
     );
   } catch (err) {
+    ss.toast("❌ 실패", "계약서 " + 거래ID, 5);
     ui.alert("❌ 계약서 생성 실패:\n" + err.message);
   }
 }

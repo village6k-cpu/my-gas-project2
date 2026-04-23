@@ -36,7 +36,6 @@ function onOpen() {
     .addItem("✅ 예약 등록 (수동)", "manualRegister")
     .addItem("📄 계약서 생성", "createContractFromMenu")
     .addSeparator()
-    .addItem("⚡ 계약서 지금 재생성 (선택 행)", "regenContractFromSelection")
     .addItem("📋 대기 중 계약서 일괄 재생성", "regenPendingContracts")
     .addSeparator()
     .addItem("🔄 장비 목록 갱신", "refreshEquipmentList")
@@ -3327,54 +3326,6 @@ function fixScheduleHeaders() {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-
-/**
- * 메뉴에서 "⚡ 계약서 지금 재생성" 클릭 시 실행.
- * - 계약마스터 행 선택: A열 거래ID 사용
- * - 스케줄상세 행 선택: B열 거래ID 사용
- * - 토스트로 진행 상황 표시
- * - 대기 큐에 있으면 함께 제거
- */
-function regenContractFromSelection() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getActiveSheet();
-  var range = sheet.getActiveCell();
-  var row = range.getRow();
-  var sheetName = sheet.getName();
-
-  if (row < 2) {
-    ss.toast("헤더 말고 데이터 행을 클릭한 뒤 다시 눌러주세요", "⚠️ 거래ID 없음", 5);
-    return;
-  }
-
-  var 거래ID = "";
-  if (sheetName === "계약마스터") {
-    거래ID = String(sheet.getRange(row, 1).getValue()).trim();
-  } else if (sheetName === "스케줄상세") {
-    거래ID = String(sheet.getRange(row, 2).getValue()).trim();
-  } else {
-    ss.toast("계약마스터 또는 스케줄상세 시트에서 행을 선택한 뒤 눌러주세요", "⚠️ 위치 오류", 5);
-    return;
-  }
-
-  if (!거래ID) {
-    ss.toast("선택한 행에 거래ID가 없습니다", "⚠️ 거래ID 없음", 5);
-    return;
-  }
-
-  ss.toast("계약서 재생성 중... (30초 정도 걸립니다)", "⏳ " + 거래ID, 40);
-  try {
-    var result = deleteAndRegenerateContract(ss, 거래ID);
-    // 큐에 남아있으면 정리
-    PropertiesService.getScriptProperties().deleteProperty('contractEditTS_' + 거래ID);
-    var url = (result && result.url) ? result.url : "";
-    ss.toast("✅ 완료" + (url ? " — 링크 복사 가능" : ""), "계약서 " + 거래ID, 8);
-    Logger.log("수동 계약서 재생성 완료: " + 거래ID);
-  } catch (err) {
-    ss.toast("❌ 실패: " + err.message, "재생성 오류 " + 거래ID, 10);
-    Logger.log("수동 계약서 재생성 실패: " + 거래ID + " — " + err.message);
-  }
-}
 
 /**
  * 진단: 현재 대기 중인 계약서 재생성 큐 + 마지막 편집부터 경과시간 반환.
