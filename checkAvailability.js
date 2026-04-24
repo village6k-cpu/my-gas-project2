@@ -608,9 +608,9 @@ function refreshEquipmentList() {
 
     // ── 확인요청 M열(할인유형) 드롭다운 설정 ──
     var mRule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(["일반", "학생", "개사프리", "단골", "제휴"], true)
+      .requireValueInList(["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"], true)
       .setAllowInvalid(true)
-      .setHelpText("일반=없음 / 학생=30% / 개사프리=20% / 단골=28% / 제휴=36%")
+      .setHelpText("일반=없음 / 학생=30% / 개인사업자/프리랜서=20% / 단골=개사프+10% / 제휴=개사프+20%")
       .build();
     reqSheet.getRange(2, 13, lastDataRow - 1, 1).setDataValidation(mRule);
   }

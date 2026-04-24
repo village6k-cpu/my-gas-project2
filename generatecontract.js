@@ -288,9 +288,27 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   ws.getRange(itemStart, 8, ITEMS_PER_SIDE, 5).setFontWeights(rightWeights.map(function(w) { return [w[0], w[0], w[0], w[0], w[0]]; }));
 
   // ── 할인 드롭다운 초기화 — 사전(C44), 추가(I44), 장기(C45), 쿠폰(I45) ──
-  // 배치: 개별 setValue 4회 → setValues 1회
-  ws.getRange("C44:C45").setValues([["해당없음"], ["해당없음"]]);
-  ws.getRange("I44:I45").setValues([["해당없음"], ["해당없음"]]);
+  // 계약마스터 L(할인유형)에 따라 사전/추가 할인을 자동 주입
+  //   일반 → 사전 해당없음, 추가 해당없음
+  //   학생 → 사전 "학생", 추가 해당없음
+  //   개인사업자/프리랜서 → 사전 "개인사업자/프리랜서", 추가 해당없음
+  //   단골 → 사전 "개인사업자/프리랜서", 추가 "단골10%"
+  //   제휴 → 사전 "개인사업자/프리랜서", 추가 "제휴업체 20%"
+  var 사전할인 = "해당없음";
+  var 추가할인 = "해당없음";
+  switch (String(contract.할인유형 || "").trim()) {
+    case "학생":
+      사전할인 = "학생"; break;
+    case "개인사업자/프리랜서":
+      사전할인 = "개인사업자/프리랜서"; break;
+    case "단골":
+      사전할인 = "개인사업자/프리랜서"; 추가할인 = "단골10%"; break;
+    case "제휴":
+      사전할인 = "개인사업자/프리랜서"; 추가할인 = "제휴업체 20%"; break;
+    default: break;  // 일반 또는 미지정
+  }
+  ws.getRange("C44:C45").setValues([[사전할인], ["해당없음"]]);
+  ws.getRange("I44:I45").setValues([[추가할인], ["해당없음"]]);
 
   // ── 장기할인 (C45) — E열 일수를 참조하는 수식 (수동 수정 시 자동 반영) ──
   var dayCell = "E" + rows.itemStart;
