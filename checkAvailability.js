@@ -37,6 +37,7 @@ function onOpen() {
     .addItem("📄 계약서 생성", "createContractFromMenu")
     .addSeparator()
     .addItem("📋 대기 중 계약서 일괄 재생성", "regenPendingContracts")
+    .addItem("🔍 선택 행 할인유형 재조회", "lookupDiscountForSelectedRow")
     .addSeparator()
     .addItem("🔄 장비 목록 갱신", "refreshEquipmentList")
     .addItem("🎨 계약마스터 서식 적용", "formatContractSheet")

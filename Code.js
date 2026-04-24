@@ -232,6 +232,51 @@ function _normPhone(v) {
   return s.length > 10 ? s.slice(-10) : s;
 }
 
+/**
+ * 메뉴에서 호출: 현재 선택한 확인요청 행의 할인유형을 고객DB에서 재조회.
+ * 성공/실패 토스트로 이유까지 표시 (진단 포함).
+ */
+function lookupDiscountForSelectedRow() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getActiveSheet();
+  var row = sheet.getActiveCell().getRow();
+
+  if (sheet.getName() !== "확인요청") {
+    ss.toast("확인요청 시트에서 행을 선택하고 다시 눌러주세요", "⚠️ 위치 오류", 5);
+    return;
+  }
+  if (row < 2) {
+    ss.toast("헤더가 아닌 데이터 행을 선택해주세요", "⚠️ 행 오류", 5);
+    return;
+  }
+
+  var 예약자명 = String(sheet.getRange(row, 11).getValue() || "").trim();
+  var 연락처Raw = sheet.getRange(row, 12).getValue();
+  var 연락처Norm = _normPhone(연락처Raw);
+  var mBefore = String(sheet.getRange(row, 13).getValue() || "").trim();
+
+  ss.toast("고객DB 조회 중... (이름:" + 예약자명 + " 폰:" + 연락처Norm + ")", "⏳ 재조회", 10);
+
+  // M열을 일시적으로 비워서 lookup이 덮어쓸 수 있게
+  var prev = mBefore;
+  if (prev && prev !== "일반") sheet.getRange(row, 13).clearContent();
+
+  try {
+    lookupDiscountFromCustomerDB(sheet, row);
+    var mAfter = String(sheet.getRange(row, 13).getValue() || "").trim();
+    if (mAfter && (mAfter === "단골" || mAfter === "제휴")) {
+      ss.toast("✅ " + 예약자명 + " → " + mAfter, "매칭 성공", 6);
+    } else {
+      // 복구
+      if (prev) sheet.getRange(row, 13).setValue(prev);
+      ss.toast("매칭 실패 — 고객DB I열에 '단골'/'제휴'가 정확히 있는지, 연락처가 맞는지 확인", "⚠️ " + 예약자명, 10);
+    }
+  } catch (err) {
+    if (prev) sheet.getRange(row, 13).setValue(prev);
+    ss.toast("❌ " + err.message, "오류", 10);
+  }
+}
+
 function lookupDiscountFromCustomerDB(sheet, row) {
   var mCell = sheet.getRange(row, 13);
   var existing = String(mCell.getValue() || "").trim();
