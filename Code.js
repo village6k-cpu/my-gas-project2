@@ -221,14 +221,26 @@ function onEditInstallable(e) {
  * 연락처 부재 시 이름으로 매칭 (동명이인은 이미 다른 로직이 경고 처리).
  * 이미 M열에 값이 있으면 덮어쓰지 않음(수동 입력 보존).
  */
+/**
+ * 연락처 정규화: 숫자만 남기고 맨 앞 0 제거 → 뒤 10자리로 통일.
+ * 예: "010-4506-6615" → "1045066615", 1045066615 (숫자) → "1045066615",
+ *     "82-10-4506-6615" → "82104506661510"? (국가코드 포함 시 주의 — 보통 010으로 저장됨)
+ * 매칭 기준: 끝 10자리만 비교 (가장 안전)
+ */
+function _normPhone(v) {
+  var s = String(v == null ? "" : v).replace(/[^0-9]/g, "");
+  return s.length > 10 ? s.slice(-10) : s;
+}
+
 function lookupDiscountFromCustomerDB(sheet, row) {
   var mCell = sheet.getRange(row, 13);
   var existing = String(mCell.getValue() || "").trim();
   if (existing && existing !== "일반") return; // 이미 입력됨
 
   var 예약자명 = String(sheet.getRange(row, 11).getValue() || "").trim();
-  var 연락처 = String(sheet.getRange(row, 12).getValue() || "").replace(/[-\s]/g, "");
-  if (!예약자명 && !연락처) return;
+  var 연락처Raw = sheet.getRange(row, 12).getValue();
+  var 연락처Norm = _normPhone(연락처Raw);
+  if (!예약자명 && !연락처Norm) return;
 
   var url = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
   if (!url) return;
@@ -243,12 +255,15 @@ function lookupDiscountFromCustomerDB(sheet, row) {
   var data = dbSheet.getRange(2, 1, dbSheet.getLastRow() - 1, 9).getValues();
   var matched = null;
   for (var i = 0; i < data.length; i++) {
-    var dbTel = String(data[i][0] || "").replace(/[-\s]/g, "");
+    var dbTel = _normPhone(data[i][0]);
     var dbName = String(data[i][1] || "").trim();
-    if (연락처 && dbTel === 연락처) { matched = data[i]; break; }
-    if (!연락처 && 예약자명 && dbName === 예약자명) { matched = data[i]; break; }
+    if (연락처Norm && dbTel && dbTel === 연락처Norm) { matched = data[i]; break; }
+    if (!연락처Norm && 예약자명 && dbName === 예약자명) { matched = data[i]; break; }
   }
-  if (!matched) return;
+  if (!matched) {
+    Logger.log("고객DB 매칭 실패 — 이름:" + 예약자명 + " 폰(norm):" + 연락처Norm);
+    return;
+  }
 
   var 할인 = String(matched[8] || "").trim();  // I열
   // 단골/제휴만 자동 채움. 학생/개사프리는 Cowork 파싱이 담당.
