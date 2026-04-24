@@ -46,10 +46,26 @@ function doGet(e) {
     if (pg) {
       var html = HtmlService.createHtmlOutputFromFile(pg.file);
       var webAppUrl = ScriptApp.getService().getUrl();
-      html.setContent(html.getContent().replace(
+      var content = html.getContent().replace(
         'var API_URL = "";',
         'var API_URL = "' + webAppUrl + '";'
-      ));
+      );
+
+      // ── dashboard는 초기 데이터를 HTML에 직접 박아서 fetch 왕복 1회 절약 ──
+      if (params.page === "dashboard") {
+        try {
+          var initialData = getDashboardData(params.date || null, false);
+          content = content.replace(
+            'var INITIAL_DATA = null;',
+            'var INITIAL_DATA = ' + JSON.stringify(initialData) + ';'
+          );
+        } catch (err) {
+          // 데이터 조회 실패해도 페이지는 로드 — 클라이언트가 fetch로 재시도
+          Logger.log("dashboard 초기 데이터 로드 실패: " + err.message);
+        }
+      }
+
+      html.setContent(content);
       html.setTitle(pg.title);
       html.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
       return html;
@@ -146,7 +162,9 @@ function handleRequest(e) {
       }
 
       case "dashboard":
-        return jsonResponse(getDashboardData(params.date || postBody.date || null));
+        // nocache=1 이면 캐시 우회 (새로고침 버튼용)
+        var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
+        return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache));
 
       // ━━━ 스케줄 관리 API ━━━
 
@@ -585,6 +603,7 @@ function runFunction(funcName, params) {
     "scanCorruptedContractTimes",
     "listPendingContractRegens",
     "regenPendingContracts",
+    "setupDiscountColumns",
     "listAllTriggers"
   ];
 
@@ -628,6 +647,7 @@ function runFunction(funcName, params) {
       scanCorruptedContractTimes: typeof scanCorruptedContractTimes !== "undefined" ? scanCorruptedContractTimes : null,
       listPendingContractRegens: typeof listPendingContractRegens !== "undefined" ? listPendingContractRegens : null,
       regenPendingContracts: typeof regenPendingContracts !== "undefined" ? regenPendingContracts : null,
+      setupDiscountColumns: typeof setupDiscountColumns !== "undefined" ? setupDiscountColumns : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {

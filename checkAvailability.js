@@ -265,12 +265,22 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
 // 오늘 반출/반납 대시보드 데이터
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function getDashboardData(targetDate) {
+function getDashboardData(targetDate, skipCache) {
+  var today = targetDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
+
+  // 캐시 30초 — 새로고침 버튼은 skipCache=true 로 우회
+  var cache = CacheService.getScriptCache();
+  var cacheKey = 'dashboard_' + today;
+  if (!skipCache) {
+    var cached = cache.get(cacheKey);
+    if (cached) {
+      try { return JSON.parse(cached); } catch (e) { /* fallthrough */ }
+    }
+  }
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
-
-  var today = targetDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
 
   // 계약마스터: 거래ID → { 예약자명, 연락처, 업체명 }
   var contractMap = {};
@@ -389,7 +399,9 @@ function getDashboardData(targetDate) {
   checkoutList.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
   checkinList.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
 
-  return { checkout: checkoutList, checkin: checkinList, activeCount: activeCount };
+  var result = { checkout: checkoutList, checkin: checkinList, activeCount: activeCount };
+  try { cache.put(cacheKey, JSON.stringify(result), 30); } catch (e) { /* 캐시 오버플로 무시 */ }
+  return result;
 }
 
 
@@ -473,7 +485,12 @@ function handleScheduleEdit(e) {
       if (isTradeID(aVal)) {
         checkModificationItem(sheet, row);  // 수정 행: 계약마스터에서 날짜 조회
       } else {
-        processByReqID(sheet, row);  // 신규 행: 기존 흐름
+        // 기존 reqID 그룹에 이미 결과가 있으면 추가 행만 처리
+        if (aVal && hasProcessedRows_(sheet, row, aVal)) {
+          processAdditionalRow_(sheet, row, aVal);
+        } else {
+          processByReqID(sheet, row);  // 신규 행: 기존 흐름
+        }
       }
     } else if (val === "발송승인") {
       sendAvailAlimtalk(sheet, row);  // 결재 후 가용확인 알림톡 발송
@@ -588,6 +605,14 @@ function refreshEquipmentList() {
       .setAllowInvalid(true)
       .build();
     reqSheet.getRange(2, 14, lastDataRow - 1, 1).setDataValidation(nRule);
+
+    // ── 확인요청 M열(할인유형) 드롭다운 설정 ──
+    var mRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(["일반", "학생", "개사프리", "단골", "제휴"], true)
+      .setAllowInvalid(true)
+      .setHelpText("일반=없음 / 학생=30% / 개사프리=20% / 단골=28% / 제휴=36%")
+      .build();
+    reqSheet.getRange(2, 13, lastDataRow - 1, 1).setDataValidation(mRule);
   }
 
   // ── 스케줄상세 C열(세트명), D열(장비명)에 드롭다운 설정 ──
@@ -1390,6 +1415,152 @@ function _processByReqID(sheet, triggerRow) {
 
 
 /**
+ * 같은 reqID의 다른 행에 이미 결과(I열)가 있는지 확인
+ */
+function hasProcessedRows_(sheet, triggerRow, reqID) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  var data = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+  for (var i = 0; i < data.length; i++) {
+    var r = i + 2;
+    if (r === triggerRow) continue;
+    if (String(data[i][0]).trim() === reqID && String(data[i][8]).trim() !== "") {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 기존에 이미 처리된 reqID 그룹에 새 행을 추가할 때
+ * 기존 행의 서식/결과를 건드리지 않고 새 행만 처리
+ */
+function processAdditionalRow_(sheet, triggerRow, reqID) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schedSheet = ss.getSheetByName("스케줄상세");
+  var equipSheet = ss.getSheetByName("장비마스터");
+  var setSheet = ss.getSheetByName("세트마스터");
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  var allData = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
+  var allDisplayData = sheet.getRange(2, 1, lastRow - 1, 17).getDisplayValues();
+  for (var di = 0; di < allData.length; di++) {
+    allData[di][2] = allDisplayData[di][2];
+    allData[di][4] = allDisplayData[di][4];
+  }
+
+  // 같은 reqID의 첫 행에서 날짜 정보 가져오기
+  var 반출일, 반출시간, 반납일, 반납시간;
+  for (var i = 0; i < allData.length; i++) {
+    if (String(allData[i][0]).trim() === reqID && allData[i][1]) {
+      반출일 = allData[i][1];
+      반출시간 = allData[i][2];
+      반납일 = allData[i][3];
+      반납시간 = allData[i][4];
+      break;
+    }
+  }
+
+  if (!반출일) return;
+
+  var idx = triggerRow - 2;
+  var 장비명 = String(allData[idx][5]).trim();
+  var 수량 = allData[idx][6] || 1;
+
+  if (!장비명) return;
+
+  if (!String(allData[idx][0]).trim()) {
+    sheet.getRange(triggerRow, 1).setValue(reqID);
+  }
+
+  if (!allData[idx][1]) {
+    sheet.getRange(triggerRow, 2).setValue(반출일);
+    sheet.getRange(triggerRow, 3).setValue(반출시간);
+    sheet.getRange(triggerRow, 4).setValue(반납일);
+    sheet.getRange(triggerRow, 5).setValue(반납시간);
+  }
+
+  var setComponents = getSetComponents(장비명, setSheet);
+  var schedData = getScheduleData(schedSheet);
+
+  if (setComponents.length > 0) {
+    // 세트 펼침
+    expandSetRows(sheet, triggerRow, reqID, setComponents, 수량);
+    SpreadsheetApp.flush();
+
+    // 세트 헤더 서식
+    sheet.getRange(triggerRow, 9).setValue("세트");
+    sheet.getRange(triggerRow, 6).setBackground("#D9EAD3").setFontWeight("bold");
+
+    // 세트 헤더 가용 정보
+    checkSetHeaderAvail(sheet, triggerRow, 장비명, 수량,
+      반출일, 반출시간, 반납일, 반납시간, schedData, equipSheet);
+
+    // 펼쳐진 구성품 각각 확인
+    var newLastRow = sheet.getLastRow();
+    var newData = sheet.getRange(2, 1, newLastRow - 1, 17).getValues();
+    var newDisplayData = sheet.getRange(2, 1, newLastRow - 1, 17).getDisplayValues();
+    for (var di2 = 0; di2 < newData.length; di2++) {
+      newData[di2][2] = newDisplayData[di2][2];
+      newData[di2][4] = newDisplayData[di2][4];
+    }
+
+    for (var ci = idx + 1; ci < newData.length; ci++) {
+      if (String(newData[ci][0]).trim() !== reqID) continue;
+      var compRow = ci + 2;
+      var qTag = String(newData[ci][16]).trim();
+      if (qTag.indexOf("[세트]") !== 0) continue;
+      var belongsTo = qTag.substring(4);
+      if (belongsTo !== 장비명) continue;
+
+      var comp장비 = String(newData[ci][5]).trim();
+      if (!comp장비) continue;
+
+      if (sheet.getRange(compRow, 8).getValue() !== "확인") {
+        sheet.getRange(compRow, 8).setValue("확인");
+      }
+
+      checkSingleRowWithData(sheet, compRow, reqID, 반출일, 반출시간, 반납일, 반납시간,
+        comp장비, newData[ci][6] || 1, schedData, equipSheet);
+
+      SpreadsheetApp.flush();
+      var compResult = String(sheet.getRange(compRow, 9).getValue()).trim();
+      if (compResult) {
+      var compColor = compResult.indexOf("✅") >= 0 ? "#C6EFCE" :
+                      compResult.indexOf("⚠") >= 0 ? "#FFE89C" :
+                      compResult.indexOf("❌") >= 0 ? "#FFC7CE" : null;
+        if (compColor) sheet.getRange(compRow, 9, 1, 2).setBackground(compColor);
+      }
+    }
+  } else {
+    // 단일 장비
+    var setMasterNames = new Set();
+    if (setSheet.getLastRow() >= 2) {
+      setSheet.getRange(2, 1, setSheet.getLastRow() - 1, 1).getValues().flat()
+        .forEach(function(n) { if (n) setMasterNames.add(n.toString().trim()); });
+    }
+    if (setMasterNames.has(장비명)) {
+      sheet.getRange(triggerRow, 6).setBackground("#D9EAD3").setFontWeight("bold");
+    }
+
+    checkSingleRowWithData(sheet, triggerRow, reqID, 반출일, 반출시간, 반납일, 반납시간,
+      장비명, 수량, schedData, equipSheet);
+  }
+
+  // 트리거 행 결과 색상 적용
+  SpreadsheetApp.flush();
+  var result = String(sheet.getRange(triggerRow, 9).getValue()).trim();
+  if (result && result !== "세트") {
+    var color = result.indexOf("✅") >= 0 ? "#C6EFCE" :
+                result.indexOf("⚠") >= 0 ? "#FFE89C" :
+                result.indexOf("❌") >= 0 ? "#FFC7CE" : null;
+    if (color) sheet.getRange(triggerRow, 9, 1, 2).setBackground(color);
+  }
+}
+
+
+/**
  * H열 "발송승인" → 가용확인 결과 (코워크 에이전트가 카톡으로 직접 발송)
  * 팝빌 알림톡 자동발송 제거됨
  */
@@ -1826,12 +1997,12 @@ function registerByReqID(sheet, triggerRow) {
   }
 
   // ── 예약자명 확인 ──
-  let 예약자명, 연락처, 업체명;
+  let 예약자명, 연락처, 할인유형;
   for (let i = 0; i < allData.length; i++) {
     if (allData[i][0] !== reqID) continue;
     if (allData[i][10]) { 예약자명 = allData[i][10]; }  // K열
     if (allData[i][11]) { 연락처 = allData[i][11]; }    // L열
-    if (allData[i][12]) { 업체명 = allData[i][12]; }    // M열
+    if (allData[i][12]) { 할인유형 = allData[i][12]; }  // M열 (과거 업체명 → 현재 할인유형)
   }
 
   if (!예약자명) {
@@ -1984,6 +2155,24 @@ function registerByReqID(sheet, triggerRow) {
   const 반납일str = 반납dtStr.split(' ')[0] || "";
   const 반납시간str = 반납dtStr.split(' ')[1] || "";
 
+    // ── 동일 예약자명+일정 기존 거래 합치기 모드 ──
+    var mergeMode = false;
+    var mergeTargetTID = null;
+    if (예약자명 && 반출일str && 반납일str) {
+      var _sLR = schedSheet.getLastRow();
+      if (_sLR >= 2) {
+        var _sData = schedSheet.getRange(2, 1, _sLR - 1, 13).getDisplayValues();
+        for (var si = 0; si < _sData.length; si++) {
+          if (_sData[si][12] && _sData[si][12].trim() === 예약자명.trim()
+              && _sData[si][5] === 반출일str && _sData[si][7] === 반납일str && _sData[si][1]) {
+            mergeTargetTID = _sData[si][1];
+            break;
+          }
+        }
+      }
+      if (mergeTargetTID) mergeMode = true;
+    }
+
   // ── 거래ID 생성: YYMMDD-NNN ──
   // 개고생2.0 거래내역과 동일한 포맷 사용
   const now = new Date();
@@ -2003,21 +2192,22 @@ function registerByReqID(sheet, triggerRow) {
     });
   }
 
-  // 개고생2.0 거래내역도 확인 (연결된 경우) — D열(4)이 거래ID
+  // 개고생2.0 거래내역도 확인 (연결된 경우)
+  // 2026-04-23 컬럼 재배치: 거래ID D(4) → E(5)
   try {
     const 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
     if (개고생URL) {
       const 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
       const 거래시트 = 개고생SS.getSheetByName("거래내역");
       if (거래시트) {
-          // D열(거래ID) 기준 실제 마지막 데이터 행 (data validation 빈 행 무시)
-            const _dCol = 거래시트.getRange(2, 4, Math.max(1, 거래시트.getLastRow() - 1), 1).getValues();
+          // E열(거래ID) 기준 실제 마지막 데이터 행 (data validation 빈 행 무시)
+            const _dCol = 거래시트.getRange(2, 5, Math.max(1, 거래시트.getLastRow() - 1), 1).getValues();
             let 거래lastRow = 1;
             for (let ri = _dCol.length - 1; ri >= 0; ri--) {
               if (_dCol[ri][0] !== "" && _dCol[ri][0] != null) { 거래lastRow = ri + 2; break; }
             }
             if (거래lastRow >= 2) {
-          const 거래ids = 거래시트.getRange(2, 4, 거래lastRow - 1, 1).getValues().flat();
+          const 거래ids = 거래시트.getRange(2, 5, 거래lastRow - 1, 1).getValues().flat();
           거래ids.forEach(id => {
             if (id && id.toString().startsWith(prefix거래 + "-")) {
               const parts = id.toString().split("-");
@@ -2032,7 +2222,12 @@ function registerByReqID(sheet, triggerRow) {
     // 개고생2.0 접근 실패 시 무시 (로컬 번호만 사용)
   }
 
-  const 거래ID = `${prefix거래}-${String(maxNum + 1).padStart(3, "0")}`;
+    var 거래ID;
+    if (mergeMode && mergeTargetTID) {
+      거래ID = mergeTargetTID;
+    } else {
+      거래ID = `${prefix거래}-${String(maxNum + 1).padStart(3, "0")}`;
+    }
 
   // ── 회차 계산 (24시간=1회차, 6시간 이내 초과는 같은 회차) ──
   var 회차 = 1;
@@ -2045,26 +2240,55 @@ function registerByReqID(sheet, triggerRow) {
     }
   } catch (e) { }
 
-  // ── 계약마스터에 등록 ──
+    if (!mergeMode) {
+  // ── 계약마스터에 등록 (A~L, 12열) ──
   const newContractRow = contractLastRow + 1;
-  contractSheet.getRange(newContractRow, 1, 1, 11).setValues([[
-    거래ID, 예약자명, 연락처 || "", 업체명 || "",
+  contractSheet.getRange(newContractRow, 1, 1, 12).setValues([[
+    거래ID, 예약자명, 연락처 || "", "",    // D 업체명/별명은 공란 (필요 시 수동)
     반출일str, 반출시간str, 반납일str, 반납시간str,
-    회차, "예약", ""
+    회차, "예약", "", 할인유형 || "일반"
   ]]);
+    }
 
 
     // ── 스케줄상세에 장비 등록 (세트 헤더/구성품/개별 구분) ──
     let schedLastRow = schedSheet.getLastRow();
     let schedCount = 0;
-    // 스케줄상세 시트에 충분한 빈 행 확보
-    var neededRows = 0;
-    for (let ci = 0; ci < allData.length; ci++) {
-      if (allData[ci][0] === reqID && allData[ci][5] && allData[ci][14] !== "거절" && allData[ci][14] !== "보류") neededRows++;
+    // 합치기 모드: 기존 거래의 최대 스케줄 번호부터 이어가기
+    if (mergeMode && mergeTargetTID && schedLastRow >= 2) {
+      var _es = schedSheet.getRange(2, 1, schedLastRow - 1, 2).getValues();
+      for (var esi = 0; esi < _es.length; esi++) {
+        if (String(_es[esi][1]).trim() === mergeTargetTID) {
+          var _p = String(_es[esi][0]).split('-');
+          var _n = parseInt(_p[_p.length - 1]);
+          if (!isNaN(_n) && _n > schedCount) schedCount = _n;
+        }
+      }
     }
-    if (schedLastRow + neededRows > schedSheet.getMaxRows()) {
-      schedSheet.insertRowsAfter(schedSheet.getMaxRows(), neededRows + 10);
-    }
+      var mergeSchedOffset = schedCount;
+      // --- writeBaseRow: merge mode uses insert position, normal uses bottom ---
+      var writeBaseRow = schedLastRow;
+      var neededRows = 0;
+      for (let ci = 0; ci < allData.length; ci++) {
+        if (allData[ci][0] === reqID && allData[ci][5] && allData[ci][14] !== "거절" &&
+            allData[ci][14] !== "보류") neededRows++;
+      }
+      if (mergeMode && mergeTargetTID) {
+        var _mrgData = schedSheet.getRange(2, 2, schedLastRow - 1, 1).getValues();
+        var mergeLastRow = 0;
+        for (var mi = _mrgData.length - 1; mi >= 0; mi--) {
+          if (String(_mrgData[mi][0]).trim() === mergeTargetTID) { mergeLastRow = mi + 2; break; }
+        }
+        if (mergeLastRow > 0) {
+          schedSheet.insertRowsAfter(mergeLastRow, neededRows + 2);
+          writeBaseRow = mergeLastRow - mergeSchedOffset;
+          schedLastRow = schedSheet.getLastRow();
+        }
+      } else {
+        if (schedLastRow + neededRows > schedSheet.getMaxRows()) {
+          schedSheet.insertRowsAfter(schedSheet.getMaxRows(), neededRows + 10);
+        }
+      }
 
     for (let i = 0; i < allData.length; i++) {
       if (allData[i][0] !== reqID) continue;
@@ -2081,7 +2305,7 @@ function registerByReqID(sheet, triggerRow) {
         const 세트단가 = findSetPrice(장비명, setSheet);
         schedCount++;
         const setSchedID = `${거래ID}-${String(schedCount).padStart(2, "0")}`;
-        const setRow = schedLastRow + schedCount;
+        const setRow = writeBaseRow + schedCount;
         schedSheet.getRange(setRow, 1, 1, 13).clearDataValidations();
         schedSheet.getRange(setRow, 1, 1, 13).setValues([[
           setSchedID, 거래ID, 장비명, 장비명, 수량,
@@ -2097,7 +2321,7 @@ function registerByReqID(sheet, triggerRow) {
         const 소속세트 = String(비고).replace("[세트]", "");
         schedCount++;
         const compID = `${거래ID}-${String(schedCount).padStart(2, "0")}`;
-        const compRow = schedLastRow + schedCount;
+        const compRow = writeBaseRow + schedCount;
         schedSheet.getRange(compRow, 1, 1, 13).clearDataValidations();
         schedSheet.getRange(compRow, 1, 1, 13).setValues([[
           compID, 거래ID, 소속세트, 장비명, 수량,
@@ -2113,7 +2337,7 @@ function registerByReqID(sheet, triggerRow) {
         const 단가 = findSetPrice(장비명, setSheet);
         schedCount++;
         const schedID = `${거래ID}-${String(schedCount).padStart(2, "0")}`;
-        const newRow = schedLastRow + schedCount;
+        const newRow = writeBaseRow + schedCount;
         schedSheet.getRange(newRow, 1, 1, 13).clearDataValidations();
         schedSheet.getRange(newRow, 1, 1, 13).setValues([[
           schedID, 거래ID, "", 장비명, 수량,
@@ -2129,6 +2353,7 @@ function registerByReqID(sheet, triggerRow) {
   // ── 스케줄상세 가독성 포맷팅 ──
   formatScheduleSheet(schedSheet);
 
+    if (!mergeMode) {
   // ── 개고생2.0 거래내역 입력 ──
   sheet.getRange(triggerRow, 15).setValue("⏳ 개고생2.0 입력 중...");
   try {
@@ -2142,10 +2367,13 @@ function registerByReqID(sheet, triggerRow) {
     for (let ri = _aCol.length - 1; ri >= 0; ri--) {
       if (_aCol[ri][0] !== "" && _aCol[ri][0] != null) { 거래newRow = ri + 3; break; }
     }
-    거래시트.getRange(거래newRow, 1).setValue(반출일);
-    거래시트.getRange(거래newRow, 2).setValue(예약자명);
-    거래시트.getRange(거래newRow, 4).setValue(거래ID);
-    거래시트.getRange(거래newRow, 5).setNumberFormat("@").setValue(String(연락처 || ""));
+    // 2026-04-23 컬럼 재배치 반영:
+    //   A(1)=날짜, B(2)=예약자명, C(3)=계약서링크, D(4)=입금자명,
+    //   E(5)=거래ID, F(6)=연락처
+    거래시트.getRange(거래newRow, 1).setValue(반출일);           // A: 날짜
+    거래시트.getRange(거래newRow, 2).setValue(예약자명);         // B: 예약자명
+    거래시트.getRange(거래newRow, 5).setValue(거래ID);           // E: 거래ID (구 D=4)
+    거래시트.getRange(거래newRow, 6).setNumberFormat("@").setValue(String(연락처 || ""));  // F: 연락처 (구 E=5)
     sheet.getRange(triggerRow, 15).setValue("✅ 개고생2.0 입력완료 (행" + 거래newRow + ")");
 
     // ── 개고생2.0 고객DB에 신규고객 저장 ──
@@ -2171,7 +2399,7 @@ function registerByReqID(sheet, triggerRow) {
           var 고객newRow = 고객lastRow + 1;
           고객DB시트.getRange(고객newRow, 1).setNumberFormat("@").setValue(String(연락처));
           고객DB시트.getRange(고객newRow, 2).setValue(예약자명);
-          if (업체명) 고객DB시트.getRange(고객newRow, 3).setValue(업체명);
+          // C 업체명, D 할인유형 은 수동 관리 (단골/제휴는 사장이 직접 지정)
           Logger.log("신규고객 저장: " + 예약자명 + " " + 연락처);
         }
       }
@@ -2199,6 +2427,7 @@ function registerByReqID(sheet, triggerRow) {
     }
   } catch (err) {
   }
+    } // end !mergeMode (skip 개고생2.0 + 계약서)
 
   // ── 확인요청에 등록 결과 표시 ──
   for (let i = 0; i < allData.length; i++) {
@@ -2206,7 +2435,7 @@ function registerByReqID(sheet, triggerRow) {
       if (allData[i][14] === '거절' || allData[i][14] === '보류') continue;  // 거절/보류 스킵
     const row = i + 2;
     sheet.getRange(row, 14).setValue("등록");      // N열: 등록
-    sheet.getRange(row, 15).setValue("등록완료");   // O열: 등록상태
+      sheet.getRange(row, 15).setValue(mergeMode ? "등록완료(합침)" : "등록완료");   // O열: 등록상태
     sheet.getRange(row, 16).setValue(거래ID);       // P열: 거래ID
     sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
   }
@@ -2579,12 +2808,13 @@ function changeDatesForContract(sheet, row) {
   });
 
   // 4. 개고생2.0 거래내역 A열(반출일) 업데이트
+  // 2026-04-23 컬럼 재배치: 거래ID D(4) → E(5). A열(반출일)은 위치 안 바뀜.
   try {
     const 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
     if (개고생URL) {
       const 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
       if (거래시트) {
-        const ids = 거래시트.getRange(2, 4, Math.max(1, 거래시트.getLastRow() - 1), 1).getValues().flat();
+        const ids = 거래시트.getRange(2, 5, Math.max(1, 거래시트.getLastRow() - 1), 1).getValues().flat();
         for (let i = 0; i < ids.length; i++) {
           if (ids[i] === 거래ID) { 거래시트.getRange(i + 2, 1).setValue(새반출일Raw); break; }
         }
@@ -3440,4 +3670,79 @@ function formatContractSheet() {
   sheet.setFrozenRows(1);
 
   return "✅ 시트 전체(" + fullRows + "행) 서식 적용 완료";
+}
+
+// ===================================================================
+// addEquipmentToRequest: 기존 reqID에 장비만 추가 (기존 행 건드리지 않음)
+// ===================================================================
+function addEquipmentToRequest(argsStr) {
+  var args = typeof argsStr === 'string' ? JSON.parse(argsStr) : argsStr;
+  var reqID = args.reqID;
+  var equipList = args['\uC7A5\uBE44']; // 장비
+
+  if (!reqID || !equipList || equipList.length === 0) {
+    return {success: false, error: "reqID\uC640 \uC7A5\uBE44 \uBAA9\uB85D \uD544\uC218"};
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("\uD655\uC778\uC694\uCCAD"); // 확인요청
+  var lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) return {success: false, error: "\uC2DC\uD2B8\uAC00 \uBE44\uC5B4\uC788\uC74C"};
+
+  // 기존 reqID에서 날짜/시간 정보 가져오기 (displayValues로 시간 1899 방지)
+  var data = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+  var displayData = sheet.getRange(2, 1, lastRow - 1, 5).getDisplayValues();
+  var outDate, outTime, inDate, inTime;
+
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim() === reqID && data[i][1]) {
+      outDate = data[i][1];
+      outTime = displayData[i][2];
+      inDate = data[i][3];
+      inTime = displayData[i][4];
+      break;
+    }
+  }
+
+  if (!outDate) return {success: false, error: "reqID\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC74C: " + reqID};
+
+  var results = [];
+  var startTime = new Date();
+
+  for (var e = 0; e < equipList.length; e++) {
+    var newRow = sheet.getLastRow() + 1;
+    sheet.getRange(newRow, 1).setValue(reqID);
+    sheet.getRange(newRow, 2).setValue(outDate);
+    sheet.getRange(newRow, 3).setValue(outTime);
+    sheet.getRange(newRow, 4).setValue(inDate);
+    sheet.getRange(newRow, 5).setValue(inTime);
+    sheet.getRange(newRow, 6).setValue(equipList[e]['\uC774\uB984']); // 이름
+    sheet.getRange(newRow, 7).setValue(equipList[e]['\uC218\uB7C9'] || 1); // 수량
+    sheet.getRange(newRow, 8).setValue("\uD655\uC778"); // 확인
+    SpreadsheetApp.flush();
+
+    // processAdditionalRow_로 가용확인 (기존 행 건드리지 않음)
+    processAdditionalRow_(sheet, newRow, reqID);
+    SpreadsheetApp.flush();
+
+    var result = String(sheet.getRange(newRow, 9).getValue());
+    var detail = String(sheet.getRange(newRow, 10).getValue());
+    results.push({
+      "\uC7A5\uBE44\uBA85": equipList[e]['\uC774\uB984'],
+      "\uC218\uB7C9": String(equipList[e]['\uC218\uB7C9'] || 1),
+      "\uACB0\uACFC": result,
+      "\uC0C1\uC138": detail
+    });
+  }
+
+  var elapsed = new Date() - startTime;
+  return {
+    success: true,
+    "function": "addEquipmentToRequest",
+    reqID: reqID,
+    addedCount: equipList.length,
+    results: results,
+    executionTime: elapsed + "ms"
+  };
 }

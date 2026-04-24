@@ -156,6 +156,15 @@ function onEditInstallable(e) {
     }
   }
 
+  // 확인요청 K(예약자명) / L(연락처) 변경 시: 개고생2.0 고객DB 매칭 → M열(할인유형) 자동 채움
+  if (sheet.getName() === "확인요청" && (col === 11 || col === 12) && row >= 2) {
+    try {
+      lookupDiscountFromCustomerDB(sheet, row);
+    } catch (err) {
+      Logger.log("고객DB 할인유형 조회 실패: " + err.message);
+    }
+  }
+
   // 스케줄상세 B열(거래ID) 입력 시: 반출일/시간 · 반납일/시간 · 예약자명 · 상태 · 스케줄ID 자동 채움
   if (sheet.getName() === "스케줄상세" && col === 2 && row >= 2) {
     try {
@@ -204,6 +213,90 @@ function onEditInstallable(e) {
       Logger.log("계약마스터 일정 변경 처리 실패: " + err.message);
     }
   }
+}
+
+/**
+ * 확인요청 K(예약자명) / L(연락처)을 입력하면 개고생2.0 고객DB에서 연락처로 매칭해
+ * 할인유형(D열)이 '단골' 또는 '제휴'이면 확인요청 M열에 자동 채움.
+ * 연락처 부재 시 이름으로 매칭 (동명이인은 이미 다른 로직이 경고 처리).
+ * 이미 M열에 값이 있으면 덮어쓰지 않음(수동 입력 보존).
+ */
+function lookupDiscountFromCustomerDB(sheet, row) {
+  var mCell = sheet.getRange(row, 13);
+  var existing = String(mCell.getValue() || "").trim();
+  if (existing && existing !== "일반") return; // 이미 입력됨
+
+  var 예약자명 = String(sheet.getRange(row, 11).getValue() || "").trim();
+  var 연락처 = String(sheet.getRange(row, 12).getValue() || "").replace(/[-\s]/g, "");
+  if (!예약자명 && !연락처) return;
+
+  var url = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  if (!url) return;
+  var dbSheet;
+  try {
+    dbSheet = SpreadsheetApp.openByUrl(url).getSheetByName("고객DB");
+  } catch (e) { return; }
+  if (!dbSheet || dbSheet.getLastRow() < 2) return;
+
+  // A=예약자ID(휴대폰), B=성함, C=누적이용횟수, D=소개건수, E=소개리워드발급,
+  // F=소개리워드사용, G=5회쿠폰발송, H=10회쿠폰발송, I=할인유형
+  var data = dbSheet.getRange(2, 1, dbSheet.getLastRow() - 1, 9).getValues();
+  var matched = null;
+  for (var i = 0; i < data.length; i++) {
+    var dbTel = String(data[i][0] || "").replace(/[-\s]/g, "");
+    var dbName = String(data[i][1] || "").trim();
+    if (연락처 && dbTel === 연락처) { matched = data[i]; break; }
+    if (!연락처 && 예약자명 && dbName === 예약자명) { matched = data[i]; break; }
+  }
+  if (!matched) return;
+
+  var 할인 = String(matched[8] || "").trim();  // I열
+  // 단골/제휴만 자동 채움. 학생/개사프리는 Cowork 파싱이 담당.
+  if (할인 === "단골" || 할인 === "제휴") {
+    mCell.setValue(할인);
+    Logger.log("고객DB 매칭 → " + 예약자명 + " 할인유형 " + 할인);
+  }
+}
+
+/**
+ * 개고생2.0 고객DB D열에 "할인유형" 헤더가 없으면 세팅.
+ * 계약마스터 L열에 "할인유형" 헤더가 없으면 세팅.
+ * 첫 배포 시 한 번만 호출하면 됨.
+ */
+function setupDiscountColumns() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var out = [];
+
+  // 계약마스터 L열
+  var cm = ss.getSheetByName("계약마스터");
+  if (cm) {
+    var l1 = cm.getRange(1, 12).getValue();
+    if (!l1) {
+      cm.getRange(1, 12).setValue("할인유형").setFontWeight("bold");
+      out.push("계약마스터 L1=할인유형 추가");
+    } else {
+      out.push("계약마스터 L1 이미 있음: " + l1);
+    }
+  }
+
+  // 고객DB I열
+  try {
+    var url = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    if (url) {
+      var dbSheet = SpreadsheetApp.openByUrl(url).getSheetByName("고객DB");
+      if (dbSheet) {
+        var i1 = dbSheet.getRange(1, 9).getValue();
+        if (!i1) {
+          dbSheet.getRange(1, 9).setValue("할인유형").setFontWeight("bold");
+          out.push("개고생2.0 고객DB I1=할인유형 추가");
+        } else {
+          out.push("고객DB I1 이미 있음: " + i1);
+        }
+      }
+    }
+  } catch (e) { out.push("고객DB 업데이트 실패: " + e.message); }
+
+  return out.join(" | ");
 }
 
 /**
@@ -428,10 +521,11 @@ function propagateContractDates(ss, contractSheet, row, 거래ID) {
       var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
       var 거래시트 = 개고생SS.getSheetByName("거래내역");
       if (거래시트 && 거래시트.getLastRow() >= 2) {
-        var ids = 거래시트.getRange(2, 4, 거래시트.getLastRow() - 1, 1).getValues();  // D열: 거래ID
+        // 2026-04-23 컬럼 재배치: 거래ID D(4) → E(5)
+        var ids = 거래시트.getRange(2, 5, 거래시트.getLastRow() - 1, 1).getValues();
         for (var j = 0; j < ids.length; j++) {
           if (String(ids[j][0]).trim() === 거래ID) {
-            거래시트.getRange(j + 2, 1).setValue(반출일Raw);  // 거래내역 A열은 Date 그대로 유지
+            거래시트.getRange(j + 2, 1).setValue(반출일Raw);  // 거래내역 A열(날짜)은 위치 안 바뀜
             Logger.log("개고생2.0 거래내역 반출일 업데이트: 행 " + (j + 2) + " (" + 거래ID + ")");
           }
         }
@@ -700,7 +794,8 @@ function cancelContract(ss, 거래ID, contractRow) {
       var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
       var 거래시트 = 개고생SS.getSheetByName("거래내역");
       if (거래시트 && 거래시트.getLastRow() >= 2) {
-        var ids = 거래시트.getRange(2, 4, 거래시트.getLastRow() - 1, 1).getValues();  // D열: 거래ID
+        // 2026-04-23 컬럼 재배치: 거래ID D(4) → E(5)
+        var ids = 거래시트.getRange(2, 5, 거래시트.getLastRow() - 1, 1).getValues();
         for (var j = ids.length - 1; j >= 0; j--) {
           if (String(ids[j][0]).trim() === 거래ID) {
             거래시트.deleteRow(j + 2);

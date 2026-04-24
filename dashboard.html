@@ -356,7 +356,7 @@
 </style>
 </head>
 <body>
-<script>var API_URL = "";</script>
+<script>var API_URL = ""; var INITIAL_DATA = null;</script>
 
 <div class="header">
   <div class="header-top">
@@ -422,7 +422,13 @@ var currentDate = new Date();
 
 document.addEventListener('DOMContentLoaded', function() {
   updateDateDisplay();
-  loadData();
+  // 서버가 INITIAL_DATA 박아 보냈으면 즉시 렌더 (fetch 왕복 1회 절약)
+  if (INITIAL_DATA) {
+    dashboardData = INITIAL_DATA;
+    renderDashboard(INITIAL_DATA);
+  } else {
+    loadData();
+  }
 });
 
 function updateDateDisplay() {
@@ -462,11 +468,14 @@ function goToday() {
   loadData();
 }
 
-function loadData() {
+function loadData(forceFresh) {
   document.getElementById('loadingArea').style.display = 'block';
   document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('visible'); });
 
-  fetch(API_URL + '?key=village2026&action=dashboard&date=' + formatDate(currentDate))
+  var url = API_URL + '?key=village2026&action=dashboard&date=' + formatDate(currentDate);
+  if (forceFresh) url += '&nocache=1';
+
+  fetch(url)
     .then(function(r) { return r.json(); })
     .then(function(data) {
       dashboardData = data;
@@ -482,7 +491,7 @@ function refreshData() {
   var btn = document.getElementById('refreshBtn');
   btn.classList.add('spinning');
   setTimeout(function() { btn.classList.remove('spinning'); }, 800);
-  loadData();
+  loadData(true);  // 캐시 우회 — 시트의 최신 데이터 강제 조회
 }
 
 function renderDashboard(data) {
