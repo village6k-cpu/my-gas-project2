@@ -109,7 +109,7 @@ function generateContractFile(ss, 거래ID, 추가요청) {
 
   const contractData = contractSheet.getRange(2, 1, contractLastRow - 1, 12).getValues();
   const contractDisplay = contractSheet.getRange(2, 1, contractLastRow - 1, 12).getDisplayValues();
-  // A:거래ID, B:예약자명, C:연락처, D:업체명, E:반출일, F:반출시간, G:반납일, H:반납시간, I:회차, J:계약상태, K:비고, L:할인유형
+  // A:거래ID, B:예약자명, C:연락처, D:업체명, E:반출일, F:반출시간, G:반납일, H:반납시간, I:회차, J:계약상태, K:할인유형, L:비고
 
   let contract = null;
   for (let i = 0; i < contractData.length; i++) {
@@ -123,7 +123,7 @@ function generateContractFile(ss, 거래ID, 추가요청) {
         반출시간: contractDisplay[i][5],   // 문자열로 읽어서 1899 타임존 버그 방지
         반납일: contractData[i][6],
         반납시간: contractDisplay[i][7],   // 문자열로 읽어서 1899 타임존 버그 방지
-        할인유형: String(contractData[i][11] || "").trim()  // L열
+        할인유형: String(contractData[i][10] || "").trim()  // K열
       };
       break;
     }

@@ -2241,12 +2241,12 @@ function registerByReqID(sheet, triggerRow) {
   } catch (e) { }
 
     if (!mergeMode) {
-  // ── 계약마스터에 등록 (A~L, 12열) ──
+  // ── 계약마스터에 등록 (A~L, 12열) — K=할인유형, L=비고 ──
   const newContractRow = contractLastRow + 1;
   contractSheet.getRange(newContractRow, 1, 1, 12).setValues([[
     거래ID, 예약자명, 연락처 || "", "",    // D 업체명/별명은 공란 (필요 시 수동)
     반출일str, 반출시간str, 반납일str, 반납시간str,
-    회차, "예약", "", 할인유형 || "일반"
+    회차, "예약", 할인유형 || "일반", ""
   ]]);
     }
 

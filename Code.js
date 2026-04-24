@@ -274,27 +274,65 @@ function lookupDiscountFromCustomerDB(sheet, row) {
 }
 
 /**
- * 개고생2.0 고객DB D열에 "할인유형" 헤더가 없으면 세팅.
- * 계약마스터 L열에 "할인유형" 헤더가 없으면 세팅.
- * 첫 배포 시 한 번만 호출하면 됨.
+ * 계약마스터 K/L 스왑 + 할인유형 드롭다운 + 헤더 서식 통일.
+ * 고객DB I열 '할인유형' 헤더도 세팅.
+ *
+ * 최종 구조: K=할인유형(드롭다운), L=비고
+ * 기존 L1='할인유형', K1='비고'였던 상태에서 호출하면
+ *   1) K열 전체를 L열로, L열 전체를 K열로 복사(헤더 포함)
+ *   2) 헤더 bold + 중앙정렬 기존 헤더들과 통일
+ *   3) K열 드롭다운 규칙 적용(일반/학생/개인사업자·프리랜서/단골/제휴)
+ * 멱등: 이미 K1='할인유형'이면 스왑 스킵, 드롭다운/서식만 갱신.
  */
 function setupDiscountColumns() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var out = [];
 
-  // 계약마스터 L열
   var cm = ss.getSheetByName("계약마스터");
   if (cm) {
-    var l1 = cm.getRange(1, 12).getValue();
-    if (!l1) {
-      cm.getRange(1, 12).setValue("할인유형").setFontWeight("bold");
-      out.push("계약마스터 L1=할인유형 추가");
+    var maxRow = cm.getMaxRows();
+    var lastRow = cm.getLastRow();
+    var k1 = String(cm.getRange(1, 11).getValue() || "").trim();
+    var l1 = String(cm.getRange(1, 12).getValue() || "").trim();
+
+    // 1) K↔L 스왑 (K1 !== 할인유형일 때만)
+    if (k1 !== "할인유형") {
+      if (lastRow >= 1) {
+        var kData = cm.getRange(1, 11, lastRow, 1).getValues();
+        var lData = cm.getRange(1, 12, lastRow, 1).getValues();
+        // 헤더 행 강제 세팅
+        kData[0][0] = "할인유형";
+        lData[0][0] = "비고";
+        cm.getRange(1, 11, lastRow, 1).setValues(kData.map(function(r, i) {
+          return i === 0 ? ["할인유형"] : [lData[i] ? lData[i][0] : ""];
+        }));
+        cm.getRange(1, 12, lastRow, 1).setValues(lData.map(function(r, i) {
+          return i === 0 ? ["비고"] : [kData[i] ? kData[i][0] : ""];
+        }));
+        out.push("계약마스터 K↔L 스왑 완료 (" + (lastRow - 1) + "행)");
+      } else {
+        cm.getRange(1, 11).setValue("할인유형");
+        cm.getRange(1, 12).setValue("비고");
+        out.push("계약마스터 K1/L1 헤더만 세팅 (데이터 없음)");
+      }
     } else {
-      out.push("계약마스터 L1 이미 있음: " + l1);
+      out.push("계약마스터 K1 이미 '할인유형'");
     }
+
+    // 2) 헤더 서식 통일 (A1:L1 bold + 가운데 정렬)
+    cm.getRange(1, 1, 1, 12).setFontWeight("bold").setHorizontalAlignment("center");
+
+    // 3) K열 할인유형 드롭다운 (시트 최대 행까지)
+    var disRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"], true)
+      .setAllowInvalid(true)
+      .setHelpText("일반/학생/개인사업자/프리랜서/단골/제휴")
+      .build();
+    cm.getRange(2, 11, maxRow - 1, 1).setDataValidation(disRule);
+    out.push("계약마스터 K열 드롭다운 적용");
   }
 
-  // 고객DB I열
+  // 4) 고객DB I열 헤더
   try {
     var url = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
     if (url) {
