@@ -31,7 +31,7 @@ function getCurrentBookingContext() {
  * 특정 행의 단계 판별.
  */
 function getBookingContextForRow(row) {
-  const sheet = SpreadsheetApp.getSheetByName('확인요청');
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('확인요청');
   if (!sheet) return null;
 
   const values = sheet.getRange(row, 1, 1, 18).getValues()[0];
