@@ -239,6 +239,7 @@ function _normPhone(v) {
 function lookupDiscountForSelectedRow() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getActiveSheet();
+  var ui = SpreadsheetApp.getUi();
   var row = sheet.getActiveCell().getRow();
 
   if (sheet.getName() !== "확인요청") {
@@ -253,28 +254,55 @@ function lookupDiscountForSelectedRow() {
   var 예약자명 = String(sheet.getRange(row, 11).getValue() || "").trim();
   var 연락처Raw = sheet.getRange(row, 12).getValue();
   var 연락처Norm = _normPhone(연락처Raw);
-  var mBefore = String(sheet.getRange(row, 13).getValue() || "").trim();
 
-  ss.toast("고객DB 조회 중... (이름:" + 예약자명 + " 폰:" + 연락처Norm + ")", "⏳ 재조회", 10);
-
-  // M열을 일시적으로 비워서 lookup이 덮어쓸 수 있게
-  var prev = mBefore;
-  if (prev && prev !== "일반") sheet.getRange(row, 13).clearContent();
-
+  var url = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  if (!url) { ui.alert("개고생2_URL 속성 없음"); return; }
+  var dbSheet;
   try {
-    lookupDiscountFromCustomerDB(sheet, row);
-    var mAfter = String(sheet.getRange(row, 13).getValue() || "").trim();
-    if (mAfter && (mAfter === "단골" || mAfter === "제휴")) {
-      ss.toast("✅ " + 예약자명 + " → " + mAfter, "매칭 성공", 6);
-    } else {
-      // 복구
-      if (prev) sheet.getRange(row, 13).setValue(prev);
-      ss.toast("매칭 실패 — 고객DB I열에 '단골'/'제휴'가 정확히 있는지, 연락처가 맞는지 확인", "⚠️ " + 예약자명, 10);
+    dbSheet = SpreadsheetApp.openByUrl(url).getSheetByName("고객DB");
+  } catch (e) { ui.alert("개고생2.0 열기 실패: " + e.message); return; }
+  if (!dbSheet || dbSheet.getLastRow() < 2) { ui.alert("고객DB 시트/데이터 없음"); return; }
+
+  var data = dbSheet.getRange(2, 1, dbSheet.getLastRow() - 1, 9).getValues();
+  var matches = [];
+  for (var i = 0; i < data.length; i++) {
+    var dbTel = _normPhone(data[i][0]);
+    var dbName = String(data[i][1] || "").trim();
+    var telMatch = 연락처Norm && dbTel && dbTel === 연락처Norm;
+    var nameMatch = 예약자명 && dbName === 예약자명;
+    if (telMatch || nameMatch) {
+      matches.push({
+        이름: dbName,
+        폰: String(data[i][0] || ""),
+        할인유형: String(data[i][8] || ""),
+        방식: telMatch ? "폰" : "이름"
+      });
     }
-  } catch (err) {
-    if (prev) sheet.getRange(row, 13).setValue(prev);
-    ss.toast("❌ " + err.message, "오류", 10);
   }
+
+  if (matches.length === 0) {
+    ui.alert(
+      "❌ 매칭 실패\n\n" +
+      "검색값:\n  이름 = " + (예약자명 || "(빈칸)") + "\n  폰(정규화) = " + (연락처Norm || "(빈칸)") + "\n\n" +
+      "→ 개고생2.0 고객DB에 이 고객 없음 또는 이름/폰 상이."
+    );
+    return;
+  }
+
+  var best = matches.find(function(m) { return m.할인유형 === "단골" || m.할인유형 === "제휴"; });
+  if (!best) {
+    var listStr = matches.map(function(m) {
+      return "· " + m.이름 + " / " + m.폰 + " / I열='" + (m.할인유형 || "(빈칸)") + "' (매칭:" + m.방식 + ")";
+    }).join("\n");
+    ui.alert(
+      "⚠️ 후보는 찾았지만 I열이 '단골'/'제휴'가 아님\n\n" + listStr +
+      "\n\n→ 개고생2.0 고객DB 해당 행 I열에 정확히 '단골' 또는 '제휴' 입력 필요."
+    );
+    return;
+  }
+
+  sheet.getRange(row, 13).setValue(best.할인유형);
+  ss.toast("✅ " + best.이름 + " → " + best.할인유형 + " (" + best.방식 + " 매칭)", "성공", 8);
 }
 
 function lookupDiscountFromCustomerDB(sheet, row) {
@@ -377,7 +405,7 @@ function setupDiscountColumns() {
     out.push("계약마스터 K열 드롭다운 적용");
   }
 
-  // 4) 고객DB I열 헤더
+  // 4) 고객DB I열 헤더 + 드롭다운
   try {
     var url = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
     if (url) {
@@ -390,6 +418,15 @@ function setupDiscountColumns() {
         } else {
           out.push("고객DB I1 이미 있음: " + i1);
         }
+        // I2:I 끝까지 드롭다운 적용 (단골/제휴만 자동 매칭 대상. '일반' 등 구분용)
+        var dbMaxRow = dbSheet.getMaxRows();
+        var dbDisRule = SpreadsheetApp.newDataValidation()
+          .requireValueInList(["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"], true)
+          .setAllowInvalid(true)
+          .setHelpText("단골/제휴만 확인요청 M열에 자동 채움됨")
+          .build();
+        dbSheet.getRange(2, 9, dbMaxRow - 1, 1).setDataValidation(dbDisRule);
+        out.push("고객DB I열 드롭다운 적용");
       }
     }
   } catch (e) { out.push("고객DB 업데이트 실패: " + e.message); }
