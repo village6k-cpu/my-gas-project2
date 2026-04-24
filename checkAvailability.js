@@ -29,6 +29,8 @@
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu("📋 빌리지 스케줄")
+    .addItem("🎓 동행 모드 열기", "showCompanionSidebar")
+    .addSeparator()
     .addItem("🔍 가용 확인 (수동 전체)", "manualProcessAll")
     .addItem("✅ 예약 등록 (수동)", "manualRegister")
     .addItem("📄 계약서 생성", "createContractFromMenu")
