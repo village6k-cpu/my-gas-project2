@@ -3771,3 +3771,122 @@ function addEquipmentToRequest(argsStr) {
     executionTime: elapsed + "ms"
   };
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 동행 모드 — N열 등록 설치형 트리거
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * 설치형 트리거 대상 함수.
+ * 트리거 등록 시 "onEdit" 이벤트 소스 = "스프레드시트" 로 설정.
+ *
+ * N열(14) 에 "등록" 입력 시:
+ * 1. 같은 요청ID 첫 행 기준으로 로컬 검증
+ * 2. 실패 시 N열 롤백 + alert
+ * 3. 통과 시 village-ai 호출 → warn/block/ok 분기
+ * 4. 통과 시 기존 onEdit (checkAvailability_v3 의 handleScheduleEdit) 이 이어서 처리
+ */
+function onEditInstallable_companion(e) {
+  try {
+    if (!e || !e.range) return;
+    const sheet = e.range.getSheet();
+    if (sheet.getName() !== '확인요청') return;
+    if (e.range.getColumn() !== 14) return;
+
+    const newValue = String(e.value || '').trim();
+    const oldValue = String(e.oldValue || '').trim();
+    if (newValue !== '등록' || oldValue === '등록') return;
+
+    const row = e.range.getRow();
+
+    const data = readRowData(sheet, row);
+    const firstRow = findFirstRowOfRequest(sheet, data.requestId, row);
+    const firstRowData = readRowData(sheet, firstRow);
+
+    // 1. 로컬 검증
+    const localBlocks = companion_localChecks(firstRowData, sheet, row);
+    if (localBlocks.length > 0) {
+      e.range.setValue('');
+      SpreadsheetApp.getUi().alert(
+        '❌ 등록 불가 (로컬 검증)',
+        localBlocks.join('\n\n'),
+        SpreadsheetApp.getUi().ButtonSet.OK
+      );
+      return;
+    }
+
+    // 2. village-ai 검증
+    let verdict;
+    try {
+      verdict = villageAi_adviseBooking(firstRowData);
+    } catch (err) {
+      verdict = {
+        verdict: 'warn',
+        blocks: [],
+        warnings: ['🟡 AI 판정 실패: ' + err.message.slice(0, 100)],
+        notes: []
+      };
+    }
+
+    if (verdict.verdict === 'block') {
+      e.range.setValue('');
+      SpreadsheetApp.getUi().alert(
+        '❌ 등록 불가',
+        (verdict.blocks || []).join('\n\n'),
+        SpreadsheetApp.getUi().ButtonSet.OK
+      );
+      return;
+    }
+
+    if (verdict.verdict === 'warn' && verdict.warnings && verdict.warnings.length > 0) {
+      const resp = SpreadsheetApp.getUi().alert(
+        '⚠️ 경고',
+        verdict.warnings.join('\n\n') + '\n\n그래도 진행할까요?',
+        SpreadsheetApp.getUi().ButtonSet.OK_CANCEL
+      );
+      if (resp !== SpreadsheetApp.getUi().Button.OK) {
+        e.range.setValue('');
+        return;
+      }
+    }
+
+    // 통과 — 기존 onEdit 트리거(Code.gs 의 handleScheduleEdit) 이 이어서 실제 등록 수행.
+  } catch (fatalErr) {
+    try { e.range.setValue(''); } catch (_) {}
+    console.error('onEditInstallable_companion 실패:', fatalErr);
+    try {
+      SpreadsheetApp.getUi().alert(
+        '❌ 동행 모드 오류',
+        '등록 검증 중 오류: ' + fatalErr.message + '\n다시 시도하거나 사장님께 연락',
+        SpreadsheetApp.getUi().ButtonSet.OK
+      );
+    } catch (_) {}
+  }
+}
+
+/**
+ * 설치형 트리거를 1회 등록 (사장님이 GAS 편집기에서 수동 실행).
+ * 중복 등록 방지 + 성공/실패 메시지.
+ */
+function installCompanionTrigger() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const triggers = ScriptApp.getProjectTriggers();
+
+  // 기존 동행 모드 트리거 제거
+  triggers.forEach(t => {
+    if (t.getHandlerFunction() === 'onEditInstallable_companion') {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  ScriptApp.newTrigger('onEditInstallable_companion')
+    .forSpreadsheet(ss)
+    .onEdit()
+    .create();
+
+  SpreadsheetApp.getUi().alert(
+    '✅ 동행 모드 트리거 등록 완료',
+    '이제 N열에 "등록" 입력 시 검증이 자동 작동합니다.',
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
