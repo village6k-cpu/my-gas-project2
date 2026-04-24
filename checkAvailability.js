@@ -29,18 +29,13 @@
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu("📋 빌리지 스케줄")
-    .addItem("📊 타임라인 보기", "showTimeline")
-    .addItem("📅 오늘 일정", "openDashboard")
-    .addSeparator()
     .addItem("🔍 가용 확인 (수동 전체)", "manualProcessAll")
     .addItem("✅ 예약 등록 (수동)", "manualRegister")
     .addItem("📄 계약서 생성", "createContractFromMenu")
     .addSeparator()
-    .addItem("📋 대기 중 계약서 일괄 재생성", "regenPendingContracts")
     .addItem("🔍 선택 행 할인유형 재조회", "lookupDiscountForSelectedRow")
     .addSeparator()
     .addItem("🔄 장비 목록 갱신", "refreshEquipmentList")
-    .addItem("🎨 계약마스터 서식 적용", "formatContractSheet")
     .addItem("📸 실사기록 동기화", "syncAuditFromMaster")
     .addSeparator()
     .addItem("🗑️ 확인요청 초기화 (수동)", "clearAllRequests")
