@@ -435,6 +435,37 @@ function setupDiscountColumns() {
 }
 
 /**
+ * 스케줄상세에서 새 행이 추가될 때 같은 거래ID 그룹의 기존 행 배경색을 복사.
+ * formatScheduleSheet 전체 재실행보다 훨씬 가벼움 (read 1행, write N행).
+ * @param {Sheet} sheet 스케줄상세
+ * @param {string} 거래ID
+ * @param {number[]} targetRows 배경 입힐 새 행들 (이 행들은 source 후보에서 제외)
+ */
+function _inheritGroupBackground(sheet, 거래ID, targetRows) {
+  if (!targetRows || targetRows.length === 0) return;
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  var lastCol = sheet.getLastColumn() || 13;
+
+  var bData = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+  var targetSet = {};
+  targetRows.forEach(function(r) { targetSet[r] = true; });
+
+  var sourceRow = null;
+  for (var i = 0; i < bData.length; i++) {
+    var rowNum = i + 2;
+    if (targetSet[rowNum]) continue;
+    if (String(bData[i][0]).trim() === 거래ID) { sourceRow = rowNum; break; }
+  }
+  if (!sourceRow) return;  // 새 거래ID — 배경 미상속, 다음 register 플로우에서 정렬됨
+
+  var bgs = sheet.getRange(sourceRow, 1, 1, lastCol).getBackgrounds();
+  targetRows.forEach(function(r) {
+    sheet.getRange(r, 1, 1, lastCol).setBackgrounds(bgs);
+  });
+}
+
+/**
  * 스케줄상세 C열(세트/장비명)이 입력되면:
  *   - 세트마스터에 세트로 등록되어 있으면 → 현재 행을 세트 대표행으로 만들고(D=세트명, 수량='1세트', 단가=세트단가),
  *     구성품을 바로 아래 행들에 삽입(D=구성품, 수량=구성품수량, 단가=0).
@@ -526,12 +557,20 @@ function autoExpandSetInSchedule(ss, sheet, row, 세트명) {
     sheet.getRange(row + 1, 9, newRows.length, 1).setNumberFormat("@");
 
     sheet.getRange(row, 11).clearContent().setBackground(null);
+
+    // 그룹 배경 상속 (대표행 + 구성품 행 모두)
+    var inheritRows = [row];
+    for (var ri = 0; ri < newRows.length; ri++) inheritRows.push(row + 1 + ri);
+    _inheritGroupBackground(sheet, 거래ID, inheritRows);
   } else {
     // === 단품 ===
     if (!currentD) sheet.getRange(row, 4).setValue(세트명);
     if (!sheet.getRange(row, 5).getValue()) sheet.getRange(row, 5).setValue(1);
     if (!sheet.getRange(row, 12).getValue() && price) sheet.getRange(row, 12).setValue(price);
     sheet.getRange(row, 11).clearContent().setBackground(null);
+
+    // 그룹 배경 상속
+    _inheritGroupBackground(sheet, 거래ID, [row]);
   }
 }
 
@@ -598,6 +637,13 @@ function autoFillScheduleRow(ss, sheet, row, 거래ID) {
     sheet.getRange(row, 11).setBackground("#FFF2CC");
   } else {
     sheet.getRange(row, 11).clearContent().setBackground(null);
+  }
+
+  // 같은 거래ID 그룹의 기존 행 배경 상속 (formatScheduleSheet 전체 재실행 회피)
+  _inheritGroupBackground(sheet, 거래ID, [row]);
+  // K열 안내 메시지가 있으면 노란 배경 유지 — 헬프 메시지 위치 보존
+  if (!장비명Cell) {
+    sheet.getRange(row, 11).setBackground("#FFF2CC");
   }
 }
 
