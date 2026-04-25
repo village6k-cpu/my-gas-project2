@@ -499,10 +499,29 @@ function goToday() {
 }
 
 function loadData(forceFresh) {
-  document.getElementById('loadingArea').style.display = 'block';
-  document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('visible'); });
+  var dateStr = formatDate(currentDate);
+  var lsKey = 'dashCache_v2_' + dateStr;
 
-  var url = API_URL + '?key=village2026&action=dashboard&date=' + formatDate(currentDate);
+  // ⚡ Stale-while-revalidate:
+  //   1) localStorage에 저장된 직전 응답이 있으면 0ms에 즉시 렌더 (스켈레톤 안 보이게)
+  //   2) 동시에 fresh fetch 시작 → 받아서 UI 업데이트
+  var cachedJson = null;
+  try { cachedJson = localStorage.getItem(lsKey); } catch (e) {}
+  if (cachedJson && !forceFresh) {
+    try {
+      var cachedData = JSON.parse(cachedJson);
+      dashboardData = cachedData;
+      renderDashboard(cachedData);
+    } catch (e) {
+      document.getElementById('loadingArea').style.display = 'block';
+      document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('visible'); });
+    }
+  } else {
+    document.getElementById('loadingArea').style.display = 'block';
+    document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('visible'); });
+  }
+
+  var url = API_URL + '?key=village2026&action=dashboard&date=' + dateStr;
   if (forceFresh) url += '&nocache=1';
 
   fetch(url)
@@ -510,10 +529,14 @@ function loadData(forceFresh) {
     .then(function(data) {
       dashboardData = data;
       renderDashboard(data);
+      try { localStorage.setItem(lsKey, JSON.stringify(data)); } catch (e) {}
     })
     .catch(function(err) {
-      document.getElementById('loadingArea').innerHTML =
-        '<div class="empty-state"><div class="icon">⚠️</div><div class="text">데이터 로드 실패</div></div>';
+      // 캐시 표시 중이면 에러 표시 안 함 (사용자 경험 우선)
+      if (!cachedJson) {
+        document.getElementById('loadingArea').innerHTML =
+          '<div class="empty-state"><div class="icon">⚠️</div><div class="text">데이터 로드 실패</div></div>';
+      }
     });
 }
 

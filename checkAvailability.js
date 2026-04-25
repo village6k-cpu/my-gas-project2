@@ -408,6 +408,38 @@ function getDashboardData(targetDate, skipCache) {
 }
 
 /**
+ * 백그라운드 캐시 워머 — 5분마다 트리거에서 호출.
+ * 오늘/어제/내일 데이터를 미리 계산해 캐시에 적재 → 사용자는 항상 warm cache 히트.
+ */
+function warmDashboardCache() {
+  try {
+    var today = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
+    var yest = Utilities.formatDate(new Date(Date.now() - 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
+    var tom = Utilities.formatDate(new Date(Date.now() + 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
+    [today, yest, tom].forEach(function(d) {
+      try { getDashboardData(d, true); } catch (e) { /* 개별 실패 무시 */ }
+    });
+  } catch (e) { /* ignore */ }
+}
+
+/**
+ * 캐시 워머 트리거 1회 셋업.
+ */
+function setupDashboardWarmerTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(function(t) {
+    if (t.getHandlerFunction() === 'warmDashboardCache') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('warmDashboardCache')
+    .timeBased()
+    .everyMinutes(5)
+    .create();
+  // 즉시 1회 실행해 캐시 적재
+  warmDashboardCache();
+  return "✅ warmDashboardCache 5분 트리거 등록 + 즉시 실행 완료";
+}
+
+/**
  * Dashboard 캐시 무효화. 등록/취소/일정변경 후 호출.
  */
 function invalidateDashboardCache() {

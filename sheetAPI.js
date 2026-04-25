@@ -613,6 +613,8 @@ function runFunction(funcName, params) {
     "inspectContractTemplateDiscounts",
     "setupContractTemplate",
     "fixSchedQuantityTextOne",
+    "setupDashboardWarmerTrigger",
+    "warmDashboardCache",
     "listAllTriggers"
   ];
 
@@ -660,6 +662,8 @@ function runFunction(funcName, params) {
       inspectContractTemplateDiscounts: typeof inspectContractTemplateDiscounts !== "undefined" ? inspectContractTemplateDiscounts : null,
       setupContractTemplate: typeof setupContractTemplate !== "undefined" ? setupContractTemplate : null,
       fixSchedQuantityTextOne: typeof fixSchedQuantityTextOne !== "undefined" ? fixSchedQuantityTextOne : null,
+      setupDashboardWarmerTrigger: typeof setupDashboardWarmerTrigger !== "undefined" ? setupDashboardWarmerTrigger : null,
+      warmDashboardCache: typeof warmDashboardCache !== "undefined" ? warmDashboardCache : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {
