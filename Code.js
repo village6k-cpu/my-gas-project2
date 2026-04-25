@@ -917,6 +917,9 @@ function scheduleContractRegen(거래ID) {
   if (!exists) {
     ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
   }
+
+  // 거래 변경이 있었으니 dashboard 캐시도 즉시 무효화 → 다음 fetch는 fresh
+  try { invalidateDashboardCache(); } catch (e) {}
 }
 
 /**
@@ -1018,6 +1021,9 @@ function cancelContract(ss, 거래ID, contractRow) {
   rowRange.setBackground("#FFC7CE");
   rowRange.setFontColor("#9C0006");
   rowRange.setFontLine("line-through");
+
+  // 4. dashboard 캐시 무효화
+  try { invalidateDashboardCache(); } catch (e) {}
 
   Logger.log("계약 취소 완료: " + 거래ID);
 }

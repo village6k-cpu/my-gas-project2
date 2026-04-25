@@ -255,6 +255,9 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
     sheet.getRange(r, 9).setValue(endTime);     // I: 반납시간
   });
 
+  // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh
+  try { invalidateDashboardCache(); } catch (e) {}
+
   return { success: true };
 }
 
@@ -2538,6 +2541,9 @@ function registerByReqID(sheet, triggerRow) {
 
   // ── 등록완료 알림톡 — 비활성화 (코워크 에이전트가 카톡으로 직접 발송) ──
   // 반출/반납 안내톡(checkGuideAlimtalk)은 유지됨
+
+  // dashboard 캐시 즉시 무효화 → 새로고침 안 해도 다음 fetch는 fresh
+  try { invalidateDashboardCache(); } catch (e) {}
 
   } finally {
     regLock.releaseLock();
