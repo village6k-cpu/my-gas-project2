@@ -604,6 +604,7 @@ function runFunction(funcName, params) {
     "listPendingContractRegens",
     "regenPendingContracts",
     "setupDiscountColumns",
+    "inspectContractTemplateDiscounts",
     "listAllTriggers"
   ];
 
@@ -648,6 +649,7 @@ function runFunction(funcName, params) {
       listPendingContractRegens: typeof listPendingContractRegens !== "undefined" ? listPendingContractRegens : null,
       regenPendingContracts: typeof regenPendingContracts !== "undefined" ? regenPendingContracts : null,
       setupDiscountColumns: typeof setupDiscountColumns !== "undefined" ? setupDiscountColumns : null,
+      inspectContractTemplateDiscounts: typeof inspectContractTemplateDiscounts !== "undefined" ? inspectContractTemplateDiscounts : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {

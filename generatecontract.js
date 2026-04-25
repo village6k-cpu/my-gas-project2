@@ -314,11 +314,17 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   ws.getRange("C44:C45").setValues([[사전할인], ["해당없음"]]);
   ws.getRange("I44:I45").setValues([[추가할인], ["해당없음"]]);
 
-  // ── 장기할인 (C45) — E열 일수를 참조하는 수식 (수동 수정 시 자동 반영) ──
-  var dayCell = "E" + rows.itemStart;
-  ws.getRange("C45").setFormula(
-    '=IF(' + dayCell + '>=20,"50%",IF(' + dayCell + '>=15,"45%",IF(' + dayCell + '>=10,"40%",IF(' + dayCell + '>=6,"35%",IF(' + dayCell + '>=3,"20%",IF(' + dayCell + '>=2,"10%","해당없음"))))))'
-  );
+  // ── 장기할인 (C45) — 일수 기반 직접 setValue + 드롭다운 적용 ──
+  // 기존엔 setFormula 결과 "10%" 값이 H46의 REGEXEXTRACT에 잡히지 않는 타이밍/캐시 이슈가 있어서
+  // 직접 정적 문자열 setValue + 드롭다운 데이터유효성 추가로 일관성 + 안정성 확보.
+  var ltRate = getLongTermDiscountRate(일수 || 1);
+  var ltText = ltRate === 0 ? "해당없음" : (ltRate + "%");
+  var ltRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(["해당없음", "10%", "20%", "35%", "40%", "45%", "50%"], true)
+    .setAllowInvalid(true)
+    .setHelpText("1일=해당없음 / 2일=10% / 3~5일=20% / 6~9일=35% / 10~14일=40% / 15~19일=45% / 20일+=50%")
+    .build();
+  ws.getRange("C45").setDataValidation(ltRule).setValue(ltText);
 
   // ── 계약일자 ──
   const today = new Date();
@@ -478,6 +484,55 @@ function updateContractLink(거래ID, contractUrl) {
  * @param {string} 거래ID
  * @returns {Object} { fileName, url, fileId }
  */
+/**
+ * 진단: 계약서 템플릿의 C44/C45/I44/I45 셀에 설정된 데이터 유효성 옵션 목록 + 현재 값 반환.
+ * 장기할인 드롭다운 옵션이 정확히 무엇인지 알아야 setValue로 매칭 가능.
+ */
+function inspectContractTemplateDiscounts() {
+  var props = PropertiesService.getScriptProperties();
+  var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
+  if (!templateId) return { error: "CONTRACT_TEMPLATE_ID 미설정" };
+
+  var ss = SpreadsheetApp.openById(templateId);
+  var ws = ss.getSheets()[0];
+  // 할인 영역 + 합계/결제 영역 모두 스캔 (43~48행)
+  var rng = ws.getRange("A43:M48");
+  var values = rng.getValues();
+  var formulas = rng.getFormulas();
+  var out = { discountCells: {}, scanArea: [] };
+
+  ["C44", "I44", "C45", "I45"].forEach(function(addr) {
+    var c = ws.getRange(addr);
+    var dv = c.getDataValidation();
+    var opts = null;
+    if (dv) {
+      try {
+        var crit = dv.getCriteriaValues();
+        if (crit && crit[0]) opts = crit[0];
+      } catch (e) {}
+    }
+    out.discountCells[addr] = {
+      value: c.getValue(),
+      formula: c.getFormula(),
+      validationOptions: opts,
+      validationType: dv ? String(dv.getCriteriaType()) : null
+    };
+  });
+
+  for (var r = 0; r < values.length; r++) {
+    var rowOut = [];
+    for (var col = 0; col < values[r].length; col++) {
+      var letter = String.fromCharCode(65 + col);
+      var v = values[r][col];
+      var f = formulas[r][col];
+      if (v === "" && !f) continue;
+      rowOut.push(letter + (43 + r) + ": " + (f ? "=" + f : JSON.stringify(v)));
+    }
+    if (rowOut.length) out.scanArea.push(rowOut.join(" | "));
+  }
+  return out;
+}
+
 function deleteAndRegenerateContract(ss, 거래ID) {
   const props = PropertiesService.getScriptProperties();
   const folderId = props.getProperty("CONTRACT_FOLDER_ID");
