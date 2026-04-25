@@ -311,12 +311,17 @@ function generateContractFile(ss, 거래ID, 추가요청) {
       사전할인 = "개인사업자/프리랜서20%"; 추가할인 = "제휴업체20%"; break;
     default: break;  // 일반 또는 미지정
   }
+  // ── 할인 셀 4개 모두 텍스트 포맷 강제 (중요!) ──
+  // setValue("10%") 처럼 % 포함 문자열을 percent 셀에 쓰면 Sheets가 0.1 숫자로 자동 변환.
+  // 그러면 H46의 REGEXEXTRACT(C45, "\d+")가 0.1에서 "0"만 추출해 할인 0% 처리됨.
+  // 텍스트 포맷(@)으로 강제해 "10%" 문자열 그대로 저장 → REGEXEXTRACT가 "10" 정확히 추출.
+  ws.getRange("C44:C45").setNumberFormat("@");
+  ws.getRange("I44:I45").setNumberFormat("@");
+
   ws.getRange("C44:C45").setValues([[사전할인], ["해당없음"]]);
   ws.getRange("I44:I45").setValues([[추가할인], ["해당없음"]]);
 
   // ── 장기할인 (C45) — 일수 기반 직접 setValue + 드롭다운 적용 ──
-  // 기존엔 setFormula 결과 "10%" 값이 H46의 REGEXEXTRACT에 잡히지 않는 타이밍/캐시 이슈가 있어서
-  // 직접 정적 문자열 setValue + 드롭다운 데이터유효성 추가로 일관성 + 안정성 확보.
   var ltRate = getLongTermDiscountRate(일수 || 1);
   var ltText = ltRate === 0 ? "해당없음" : (ltRate + "%");
   var ltRule = SpreadsheetApp.newDataValidation()
