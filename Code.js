@@ -441,6 +441,29 @@ function setupDiscountColumns() {
  * @param {string} 거래ID
  * @param {number[]} targetRows 배경 입힐 새 행들 (이 행들은 source 후보에서 제외)
  */
+/**
+ * 일회성 정리: 스케줄상세 E열에 박힌 '1세트' 텍스트를 모두 숫자 1로 교체.
+ * 과거 버그로 들어간 깨진 데이터 복구용.
+ */
+function fixSchedQuantityTextOne() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sched = ss.getSheetByName("스케줄상세");
+  if (!sched || sched.getLastRow() < 2) return "스케줄상세 비어있음";
+  var lastRow = sched.getLastRow();
+  var range = sched.getRange(2, 5, lastRow - 1, 1);  // E열
+  var values = range.getValues();
+  var fixed = 0;
+  for (var i = 0; i < values.length; i++) {
+    var v = String(values[i][0] || "").trim();
+    if (v === "1세트" || v === "1 세트") {
+      values[i][0] = 1;
+      fixed++;
+    }
+  }
+  if (fixed > 0) range.setValues(values);
+  return "✅ 스케줄상세 수량 '1세트' → 1 변환: " + fixed + "건";
+}
+
 function _inheritGroupBackground(sheet, 거래ID, targetRows) {
   if (!targetRows || targetRows.length === 0) return;
   var lastRow = sheet.getLastRow();
@@ -467,7 +490,7 @@ function _inheritGroupBackground(sheet, 거래ID, targetRows) {
 
 /**
  * 스케줄상세 C열(세트/장비명)이 입력되면:
- *   - 세트마스터에 세트로 등록되어 있으면 → 현재 행을 세트 대표행으로 만들고(D=세트명, 수량='1세트', 단가=세트단가),
+ *   - 세트마스터에 세트로 등록되어 있으면 → 현재 행을 세트 대표행으로 만들고(D=세트명, 수량=1, 단가=세트단가),
  *     구성품을 바로 아래 행들에 삽입(D=구성품, 수량=구성품수량, 단가=0).
  *   - 세트가 아닌 단품이면 → D열에 동일값, 수량=1, 단가 자동 조회.
  *   - 거래ID가 비어있으면 경고만 남기고 스킵.
@@ -495,7 +518,8 @@ function autoExpandSetInSchedule(ss, sheet, row, 세트명) {
     // === 세트 ===
     // 현재 행을 세트 대표행으로 설정 (D가 비어있을 때만 덮어씀)
     if (!currentD) sheet.getRange(row, 4).setValue(세트명);
-    if (!sheet.getRange(row, 5).getValue()) sheet.getRange(row, 5).setValue("1세트");
+    // 수량은 항상 숫자 1 (계약서 수식에서 수량×일수×단가 계산되므로 텍스트 '1세트' 쓰면 #VALUE 오류)
+    if (!sheet.getRange(row, 5).getValue()) sheet.getRange(row, 5).setValue(1);
     if (!sheet.getRange(row, 12).getValue()) sheet.getRange(row, 12).setValue(price);
 
     // 이미 같은 세트의 구성품 행이 아래에 있으면 중복 생성 방지 체크

@@ -606,6 +606,7 @@ function runFunction(funcName, params) {
     "setupDiscountColumns",
     "inspectContractTemplateDiscounts",
     "setupContractTemplate",
+    "fixSchedQuantityTextOne",
     "listAllTriggers"
   ];
 
@@ -652,6 +653,7 @@ function runFunction(funcName, params) {
       setupDiscountColumns: typeof setupDiscountColumns !== "undefined" ? setupDiscountColumns : null,
       inspectContractTemplateDiscounts: typeof inspectContractTemplateDiscounts !== "undefined" ? inspectContractTemplateDiscounts : null,
       setupContractTemplate: typeof setupContractTemplate !== "undefined" ? setupContractTemplate : null,
+      fixSchedQuantityTextOne: typeof fixSchedQuantityTextOne !== "undefined" ? fixSchedQuantityTextOne : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {
