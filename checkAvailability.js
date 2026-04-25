@@ -266,9 +266,9 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
 function getDashboardData(targetDate, skipCache) {
   var today = targetDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
 
-  // 캐시 30초 — 새로고침 버튼은 skipCache=true 로 우회
+  // 캐시 5분으로 확장. 등록/취소/일정변경 시 invalidateDashboardCache() 호출로 무효화.
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_' + today;
+  var cacheKey = 'dashboard_v2_' + today;
   if (!skipCache) {
     var cached = cache.get(cacheKey);
     if (cached) {
@@ -293,34 +293,32 @@ function getDashboardData(targetDate, skipCache) {
     return { checkout: [], checkin: [], activeCount: 0 };
   }
 
-  var data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getValues();
+  // ⚡ 최적화: getDisplayValues 사용 — Sheets가 이미 표시값 문자열로 반환하므로
+  //   행마다 Utilities.formatDate 6000회 호출 회피 (병목 제거)
+  var data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getDisplayValues();
 
   // 거래ID별 그룹핑
   var tradeGroups = {};
 
   data.forEach(function(row) {
-    var 거래ID   = row[1];  // B
+    var 거래ID   = String(row[1] || '').trim();  // B
     var 세트명   = row[2];  // C
     var 장비명   = row[3];  // D
     var 수량     = row[4] || 1;  // E
-    var 반출일   = row[5];  // F
-    var 반출시간 = row[6];  // G
-    var 반납일   = row[7];  // H
-    var 반납시간 = row[8];  // I
+    var 반출일str   = String(row[5] || '').trim();  // F (display value)
+    var 반출시간str = String(row[6] || '').trim();  // G
+    var 반납일str   = String(row[7] || '').trim();  // H
+    var 반납시간str = String(row[8] || '').trim();  // I
     var 상태     = row[9] || '대기';  // J
 
-    if (!장비명 || !반출일 || !반납일 || !거래ID) return;
+    if (!장비명 || !반출일str || !반납일str || !거래ID) return;
     if (상태 === '취소') return;
 
-    var 반출일str = 반출일 instanceof Date
-      ? Utilities.formatDate(반출일, 'Asia/Seoul', 'yyyy-MM-dd') : String(반출일).trim();
-    var 반납일str = 반납일 instanceof Date
-      ? Utilities.formatDate(반납일, 'Asia/Seoul', 'yyyy-MM-dd') : String(반납일).trim();
-
-    var 반출시간str = 반출시간 instanceof Date
-      ? Utilities.formatDate(반출시간, 'Asia/Seoul', 'HH:mm') : String(반출시간 || '').trim();
-    var 반납시간str = 반납시간 instanceof Date
-      ? Utilities.formatDate(반납시간, 'Asia/Seoul', 'HH:mm') : String(반납시간 || '').trim();
+    // 빠른 사전 필터: 오늘 반출/반납이 아닌 행은 그룹핑 자체 스킵 (활성건 카운트 위해 today 사이 제외)
+    var isCheckoutToday = (반출일str === today);
+    var isCheckinToday = (반납일str === today);
+    var isActiveToday = (반출일str <= today && 반납일str >= today && 상태 !== '반납완료');
+    if (!isCheckoutToday && !isCheckinToday && !isActiveToday) return;
 
     if (!tradeGroups[거래ID]) {
       tradeGroups[거래ID] = {
@@ -347,6 +345,9 @@ function getDashboardData(targetDate, skipCache) {
   var checkinList = [];
   var activeCount = 0;
 
+  // 반출세팅 완료 플래그 일괄 조회 (ScriptProperties 1회 호출)
+  var props = PropertiesService.getScriptProperties().getProperties();
+
   Object.keys(tradeGroups).forEach(function(tid) {
     var g = tradeGroups[tid];
     var cust = contractMap[tid] || {};
@@ -359,12 +360,15 @@ function getDashboardData(targetDate, skipCache) {
       return true;
     });
 
+    var setupDone = props['setupDone_' + tid] === '1';
+
     var item = {
       tradeId: tid,
       name: cust.name || tid,
       tel: cust.tel || '',
       company: cust.company || '',
       status: g.상태,
+      setupDone: setupDone,
       equipments: displayEquip
     };
 
@@ -398,8 +402,43 @@ function getDashboardData(targetDate, skipCache) {
   checkinList.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
 
   var result = { checkout: checkoutList, checkin: checkinList, activeCount: activeCount };
-  try { cache.put(cacheKey, JSON.stringify(result), 30); } catch (e) { /* 캐시 오버플로 무시 */ }
+  // 캐시 5분으로 확장 (등록/취소/일정변경 시 invalidateDashboardCache로 무효화)
+  try { cache.put(cacheKey, JSON.stringify(result), 300); } catch (e) { /* 캐시 오버플로 무시 */ }
   return result;
+}
+
+/**
+ * Dashboard 캐시 무효화. 등록/취소/일정변경 후 호출.
+ */
+function invalidateDashboardCache() {
+  try {
+    var cache = CacheService.getScriptCache();
+    var today = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
+    var yesterday = Utilities.formatDate(new Date(Date.now() - 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
+    var tomorrow = Utilities.formatDate(new Date(Date.now() + 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
+    [today, yesterday, tomorrow].forEach(function(d) {
+      cache.remove('dashboard_v2_' + d);
+    });
+  } catch (e) { /* ignore */ }
+}
+
+/**
+ * 거래ID 반출세팅 완료 토글 (Dashboard 카드 체크박스에서 호출).
+ * @param {string} tid 거래ID
+ * @param {boolean} done true=완료, false=미완료
+ * @returns {Object} { tid, setupDone }
+ */
+function toggleSetupDone(tid, done) {
+  if (!tid) return { error: "tid 필요" };
+  var key = 'setupDone_' + String(tid).trim();
+  var props = PropertiesService.getScriptProperties();
+  if (done === true || done === "true" || done === "1" || done === 1) {
+    props.setProperty(key, '1');
+  } else {
+    props.deleteProperty(key);
+  }
+  invalidateDashboardCache();
+  return { tid: tid, setupDone: done === true || done === "true" || done === "1" || done === 1 };
 }
 
 

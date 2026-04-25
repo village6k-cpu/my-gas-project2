@@ -238,6 +238,42 @@
   .schedule-card.type-checkout { border-left: 3px solid #3B82F6; }
   .schedule-card.type-checkin  { border-left: 3px solid #F59E0B; }
 
+  /* 반출세팅 완료 — 카드 흐릿 + 체크 아이콘 표시 */
+  .schedule-card.setup-done {
+    opacity: 0.55;
+    background: #F0FDF4;
+    border-left-color: #10B981 !important;
+  }
+  .schedule-card.setup-done .customer-name {
+    text-decoration: line-through;
+    color: var(--text-muted);
+  }
+
+  /* 세팅완료 토글 버튼 */
+  .setup-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: 1.5px solid #D1D5DB;
+    background: #fff;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 700;
+    color: #9CA3AF;
+    margin-right: 8px;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .setup-toggle:hover { border-color: #10B981; color: #10B981; }
+  .setup-toggle.checked {
+    background: #10B981;
+    border-color: #10B981;
+    color: #fff;
+  }
+
   .card-header {
     display: flex;
     justify-content: space-between;
@@ -539,11 +575,20 @@ function renderList(containerId, items, type) {
       var cardType = item._type || type;
       var cardId = cardType + '_' + timeKey.replace(/[: ]/g,'') + '_' + idx;
 
-      html += '<div class="schedule-card type-' + cardType + '" onclick="toggleDetail(\'' + cardId + '\')">';
-      html += '<div class="card-header"><div>';
+      var doneCls = item.setupDone ? ' setup-done' : '';
+      var toggleCls = item.setupDone ? 'setup-toggle checked' : 'setup-toggle';
+      var toggleIcon = item.setupDone ? '✓' : '';
+      html += '<div class="schedule-card type-' + cardType + doneCls + '" data-tid="' + escHtml(item.tradeId) + '" onclick="toggleDetail(\'' + cardId + '\')">';
+      html += '<div class="card-header">';
+      html += '<div style="display:flex;align-items:flex-start;gap:0;">';
+      // checkout 타입에서만 세팅완료 토글 노출 (반납엔 의미 없음)
+      if (cardType === 'checkout') {
+        html += '<button class="' + toggleCls + '" onclick="event.stopPropagation();toggleSetup(this,\'' + escHtml(item.tradeId) + '\')">' + toggleIcon + '</button>';
+      }
+      html += '<div>';
       html += '<div class="customer-name">' + escHtml(item.name) + '</div>';
       if (item.company) html += '<div class="customer-company">' + escHtml(item.company) + '</div>';
-      html += '</div>';
+      html += '</div></div>';
       html += '<div class="time-badge">' + timeKey + '</div></div>';
 
       if (item.tel) {
@@ -587,6 +632,28 @@ function switchTab(tab) {
 function toggleDetail(id) {
   var el = document.getElementById(id);
   if (el) el.classList.toggle('open');
+}
+
+function toggleSetup(btn, tid) {
+  var nowDone = !btn.classList.contains('checked');
+  // Optimistic UI
+  btn.classList.toggle('checked', nowDone);
+  btn.textContent = nowDone ? '✓' : '';
+  var card = btn.closest('.schedule-card');
+  if (card) card.classList.toggle('setup-done', nowDone);
+  // 모든 동일 거래ID 카드도 동기화 (반출/반납 양쪽)
+  document.querySelectorAll('.schedule-card[data-tid="' + tid + '"]').forEach(function(c) {
+    c.classList.toggle('setup-done', nowDone);
+  });
+
+  fetch(API_URL + '?key=village2026&action=toggleSetup&tid=' + encodeURIComponent(tid) + '&done=' + (nowDone ? '1' : '0'))
+    .then(function(r) { return r.json(); })
+    .catch(function() {
+      // 실패 시 롤백
+      btn.classList.toggle('checked', !nowDone);
+      btn.textContent = !nowDone ? '✓' : '';
+      if (card) card.classList.toggle('setup-done', !nowDone);
+    });
 }
 
 function escHtml(s) {

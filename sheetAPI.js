@@ -166,6 +166,12 @@ function handleRequest(e) {
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
         return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache));
 
+      case "toggleSetup":
+        return jsonResponse(toggleSetupDone(
+          params.tid || postBody.tid,
+          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
+        ));
+
       // ━━━ 스케줄 관리 API ━━━
 
       case "list":
