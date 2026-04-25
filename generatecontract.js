@@ -493,6 +493,54 @@ function updateContractLink(거래ID, contractUrl) {
  * 진단: 계약서 템플릿의 C44/C45/I44/I45 셀에 설정된 데이터 유효성 옵션 목록 + 현재 값 반환.
  * 장기할인 드롭다운 옵션이 정확히 무엇인지 알아야 setValue로 매칭 가능.
  */
+/**
+ * 계약서 템플릿 자체에 안전한 할인 셋업 적용 (1회 실행).
+ * - C44/C45/I44/I45 → 텍스트 포맷(@) 강제 (% 자동변환 방지)
+ * - C45 드롭다운: 해당없음 / 10% / 20% / 35% / 40% / 45% / 50%
+ * - C45 수식: 일수(E14) 기반 자동 적용
+ *     =IF(E14>=20,"50%",IF(E14>=15,"45%",IF(E14>=10,"40%",
+ *      IF(E14>=6,"35%",IF(E14>=3,"20%",IF(E14>=2,"10%","해당없음"))))))
+ *   → 템플릿 단독으로 열어 일수 입력해도 자동 계산됨
+ *   → 계약서 생성 코드도 setValue로 덮어쓰지만, 코드가 실패하더라도 템플릿이 안전망
+ */
+function setupContractTemplate() {
+  var props = PropertiesService.getScriptProperties();
+  var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
+  if (!templateId) return "❌ CONTRACT_TEMPLATE_ID 미설정";
+
+  var ss = SpreadsheetApp.openById(templateId);
+  var ws = ss.getSheets()[0];
+  var out = [];
+
+  // 1) 4개 할인 셀 모두 텍스트 포맷
+  ws.getRange("C44:C45").setNumberFormat("@");
+  ws.getRange("I44:I45").setNumberFormat("@");
+  out.push("C44/C45/I44/I45 텍스트 포맷 적용");
+
+  // 2) C45 드롭다운
+  var ltRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(["해당없음", "10%", "20%", "35%", "40%", "45%", "50%"], true)
+    .setAllowInvalid(true)
+    .setHelpText("1일=해당없음 / 2일=10% / 3~5일=20% / 6~9일=35% / 10~14일=40% / 15~19일=45% / 20일+=50%")
+    .build();
+  ws.getRange("C45").setDataValidation(ltRule);
+  out.push("C45 드롭다운 적용");
+
+  // 3) C45 수식 — 일수(E14) 기반 자동 계산
+  ws.getRange("C45").setFormula(
+    '=IF(E14>=20,"50%",IF(E14>=15,"45%",IF(E14>=10,"40%",IF(E14>=6,"35%",IF(E14>=3,"20%",IF(E14>=2,"10%","해당없음"))))))'
+  );
+  out.push("C45 수식 적용 (E14 일수 기반)");
+
+  // 4) 다른 할인 셀은 초기값을 '해당없음'으로 (드롭다운 옵션 일치)
+  ws.getRange("C44").setValue("해당없음");
+  ws.getRange("I44").setValue("해당없음");
+  ws.getRange("I45").setValue("해당없음");
+  out.push("C44/I44/I45 초기값 '해당없음'");
+
+  return "✅ 템플릿 셋업 완료: " + out.join(" | ");
+}
+
 function inspectContractTemplateDiscounts() {
   var props = PropertiesService.getScriptProperties();
   var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
