@@ -62,10 +62,14 @@ function findFirstRowOfRequest(sheet, requestId, currentRow) {
 }
 
 function readRowData(sheet, row) {
-  const values = sheet.getRange(row, 1, 1, 18).getValues()[0];
+  const range = sheet.getRange(row, 1, 1, 18);
+  const values = range.getValues()[0];
+  const display = range.getDisplayValues()[0];   // 시간(C/E)·날짜는 1899 LMT 버그 회피용 문자열
   return {
-    requestId: values[0], carryOutDate: values[1], carryOutTime: values[2],
-    returnDate: values[3], returnTime: values[4], equipment: values[5],
+    requestId: values[0],
+    carryOutDate: values[1], carryOutTime: display[2],   // 시간은 "13:30" 문자열
+    returnDate: values[3], returnTime: display[4],
+    equipment: values[5],
     quantity: values[6], confirm: values[7], result: values[8], detail: values[9],
     customerName: values[10], customerPhone: values[11], company: values[12],
     register: values[13], registerStatus: values[14], transactionId: values[15],
