@@ -238,19 +238,19 @@
   .schedule-card.type-checkout { border-left: 3px solid #3B82F6; }
   .schedule-card.type-checkin  { border-left: 3px solid #F59E0B; }
 
-  /* 반출세팅 완료 — 카드 흐릿 + 체크 아이콘 표시 */
-  .schedule-card.setup-done {
+  /* 처리 완료 — 카드 흐릿 + 체크 아이콘 (반출세팅완료 / 반납검수완료 공통) */
+  .schedule-card.task-done {
     opacity: 0.55;
     background: #F0FDF4;
     border-left-color: #10B981 !important;
   }
-  .schedule-card.setup-done .customer-name {
+  .schedule-card.task-done .customer-name {
     text-decoration: line-through;
     color: var(--text-muted);
   }
 
-  /* 세팅완료 토글 버튼 */
-  .setup-toggle {
+  /* 토글 버튼 — 반출세팅 / 반납검수 공통 */
+  .task-toggle {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -267,8 +267,8 @@
     transition: all 0.15s;
     flex-shrink: 0;
   }
-  .setup-toggle:hover { border-color: #10B981; color: #10B981; }
-  .setup-toggle.checked {
+  .task-toggle:hover { border-color: #10B981; color: #10B981; }
+  .task-toggle.checked {
     background: #10B981;
     border-color: #10B981;
     color: #fff;
@@ -598,15 +598,18 @@ function renderList(containerId, items, type) {
       var cardType = item._type || type;
       var cardId = cardType + '_' + timeKey.replace(/[: ]/g,'') + '_' + idx;
 
-      var doneCls = item.setupDone ? ' setup-done' : '';
-      var toggleCls = item.setupDone ? 'setup-toggle checked' : 'setup-toggle';
-      var toggleIcon = item.setupDone ? '✓' : '';
-      html += '<div class="schedule-card type-' + cardType + doneCls + '" data-tid="' + escHtml(item.tradeId) + '" onclick="toggleDetail(\'' + cardId + '\')">';
+      // 카드 타입별 done 플래그 분리: 반출=setupDone, 반납=returnDone
+      var taskDone = (cardType === 'checkout' ? item.setupDone : (cardType === 'checkin' ? item.returnDone : false));
+      var taskAction = (cardType === 'checkout' ? 'toggleSetup' : 'toggleReturn');
+      var doneCls = taskDone ? ' task-done' : '';
+      var toggleCls = taskDone ? 'task-toggle checked' : 'task-toggle';
+      var toggleIcon = taskDone ? '✓' : '';
+      html += '<div class="schedule-card type-' + cardType + doneCls + '" data-tid="' + escHtml(item.tradeId) + '" data-cardtype="' + cardType + '" onclick="toggleDetail(\'' + cardId + '\')">';
       html += '<div class="card-header">';
       html += '<div style="display:flex;align-items:flex-start;gap:0;">';
-      // checkout 타입에서만 세팅완료 토글 노출 (반납엔 의미 없음)
-      if (cardType === 'checkout') {
-        html += '<button class="' + toggleCls + '" onclick="event.stopPropagation();toggleSetup(this,\'' + escHtml(item.tradeId) + '\')">' + toggleIcon + '</button>';
+      // 반출/반납 모두 토글 노출
+      if (cardType === 'checkout' || cardType === 'checkin') {
+        html += '<button class="' + toggleCls + '" onclick="event.stopPropagation();toggleTask(this,\'' + escHtml(item.tradeId) + '\',\'' + taskAction + '\')">' + toggleIcon + '</button>';
       }
       html += '<div>';
       html += '<div class="customer-name">' + escHtml(item.name) + '</div>';
@@ -657,25 +660,21 @@ function toggleDetail(id) {
   if (el) el.classList.toggle('open');
 }
 
-function toggleSetup(btn, tid) {
+function toggleTask(btn, tid, action) {
+  // action = 'toggleSetup' (반출) 또는 'toggleReturn' (반납)
   var nowDone = !btn.classList.contains('checked');
-  // Optimistic UI
+  // Optimistic UI — 토글 버튼이 속한 카드만 업데이트 (반출과 반납 따로 관리)
   btn.classList.toggle('checked', nowDone);
   btn.textContent = nowDone ? '✓' : '';
   var card = btn.closest('.schedule-card');
-  if (card) card.classList.toggle('setup-done', nowDone);
-  // 모든 동일 거래ID 카드도 동기화 (반출/반납 양쪽)
-  document.querySelectorAll('.schedule-card[data-tid="' + tid + '"]').forEach(function(c) {
-    c.classList.toggle('setup-done', nowDone);
-  });
+  if (card) card.classList.toggle('task-done', nowDone);
 
-  fetch(API_URL + '?key=village2026&action=toggleSetup&tid=' + encodeURIComponent(tid) + '&done=' + (nowDone ? '1' : '0'))
+  fetch(API_URL + '?key=village2026&action=' + action + '&tid=' + encodeURIComponent(tid) + '&done=' + (nowDone ? '1' : '0'))
     .then(function(r) { return r.json(); })
     .catch(function() {
-      // 실패 시 롤백
       btn.classList.toggle('checked', !nowDone);
       btn.textContent = !nowDone ? '✓' : '';
-      if (card) card.classList.toggle('setup-done', !nowDone);
+      if (card) card.classList.toggle('task-done', !nowDone);
     });
 }
 

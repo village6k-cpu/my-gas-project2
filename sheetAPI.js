@@ -172,6 +172,12 @@ function handleRequest(e) {
           (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
         ));
 
+      case "toggleReturn":
+        return jsonResponse(toggleReturnDone(
+          params.tid || postBody.tid,
+          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
+        ));
+
       // ━━━ 스케줄 관리 API ━━━
 
       case "list":

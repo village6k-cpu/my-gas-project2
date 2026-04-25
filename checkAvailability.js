@@ -364,6 +364,7 @@ function getDashboardData(targetDate, skipCache) {
     });
 
     var setupDone = props['setupDone_' + tid] === '1';
+    var returnDone = props['returnDone_' + tid] === '1';
 
     var item = {
       tradeId: tid,
@@ -372,6 +373,7 @@ function getDashboardData(targetDate, skipCache) {
       company: cust.company || '',
       status: g.상태,
       setupDone: setupDone,
+      returnDone: returnDone,
       equipments: displayEquip
     };
 
@@ -467,13 +469,25 @@ function toggleSetupDone(tid, done) {
   if (!tid) return { error: "tid 필요" };
   var key = 'setupDone_' + String(tid).trim();
   var props = PropertiesService.getScriptProperties();
-  if (done === true || done === "true" || done === "1" || done === 1) {
-    props.setProperty(key, '1');
-  } else {
-    props.deleteProperty(key);
-  }
+  var isDone = done === true || done === "true" || done === "1" || done === 1;
+  if (isDone) props.setProperty(key, '1');
+  else props.deleteProperty(key);
   invalidateDashboardCache();
-  return { tid: tid, setupDone: done === true || done === "true" || done === "1" || done === 1 };
+  return { tid: tid, setupDone: isDone };
+}
+
+/**
+ * 거래ID 반납검수 완료 토글 (Dashboard 반납 카드 체크박스).
+ */
+function toggleReturnDone(tid, done) {
+  if (!tid) return { error: "tid 필요" };
+  var key = 'returnDone_' + String(tid).trim();
+  var props = PropertiesService.getScriptProperties();
+  var isDone = done === true || done === "true" || done === "1" || done === 1;
+  if (isDone) props.setProperty(key, '1');
+  else props.deleteProperty(key);
+  invalidateDashboardCache();
+  return { tid: tid, returnDone: isDone };
 }
 
 
