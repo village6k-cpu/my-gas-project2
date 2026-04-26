@@ -313,6 +313,52 @@
   }
   .equip-add-btn:hover { border-color: #3B82F6; color: #3B82F6; }
 
+  /* 장비 추가 모달 */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: #fff;
+    border-radius: 14px;
+    padding: 22px 22px 18px;
+    width: 100%;
+    max-width: 400px;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+  }
+  .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 14px; color: var(--text-primary); }
+  .modal-label { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; display: block; font-weight: 600; }
+  .modal-input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    font-size: 14px;
+    margin-bottom: 12px;
+    box-sizing: border-box;
+    outline: none;
+  }
+  .modal-input:focus { border-color: #3B82F6; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+  .modal-btn {
+    padding: 9px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .modal-btn-cancel { background: #fff; color: var(--text-secondary); border-color: var(--border); }
+  .modal-btn-confirm { background: #3B82F6; color: #fff; }
+  .modal-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
   .card-header {
     display: flex;
     justify-content: space-between;
@@ -758,6 +804,98 @@ function escHtml(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+// ── 장비 목록 캐시 + 모달 ─────────────────────
+var equipListCache = null;
+function loadEquipList() {
+  if (equipListCache) return Promise.resolve(equipListCache);
+  return fetch(API_URL + '?key=village2026&action=read&sheet=' + encodeURIComponent('목록') + '&range=A2:A1000')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var arr = (d && d.data) ? d.data : [];
+      equipListCache = arr.map(function(row) { return Array.isArray(row) ? row[0] : row; })
+                          .filter(function(x) { return x; })
+                          .map(String);
+      // datalist에 옵션 채우기
+      var dl = document.getElementById('equipDatalist');
+      if (dl) {
+        dl.innerHTML = equipListCache.map(function(n) {
+          return '<option value="' + escHtml(n) + '"></option>';
+        }).join('');
+      }
+      return equipListCache;
+    })
+    .catch(function() { equipListCache = []; return []; });
+}
+
+var pendingAddTid = null;
+
+function addEquip(tid) {
+  pendingAddTid = tid;
+  document.getElementById('equipInput').value = '';
+  document.getElementById('qtyInput').value = '1';
+  document.getElementById('addEquipModal').classList.add('open');
+  loadEquipList().then(function() {
+    setTimeout(function() {
+      var inp = document.getElementById('equipInput');
+      if (inp) inp.focus();
+    }, 50);
+  });
+}
+
+function closeAddEquipModal() {
+  document.getElementById('addEquipModal').classList.remove('open');
+  pendingAddTid = null;
+}
+
+function confirmAddEquip() {
+  if (!pendingAddTid) { closeAddEquipModal(); return; }
+  var name = (document.getElementById('equipInput').value || '').trim();
+  if (!name) { alert('장비/세트명을 입력하거나 선택하세요.'); return; }
+  var qty = parseInt(document.getElementById('qtyInput').value, 10);
+  if (!qty || qty < 1) qty = 1;
+
+  var btn = document.getElementById('addEquipConfirmBtn');
+  btn.disabled = true;
+  btn.textContent = '추가 중...';
+
+  var tid = pendingAddTid;
+  fetch(API_URL + '?key=village2026&action=addEquip&tid=' + encodeURIComponent(tid)
+    + '&equipName=' + encodeURIComponent(name) + '&qty=' + qty)
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      btn.disabled = false;
+      btn.textContent = '추가';
+      if (res.error) { alert('추가 실패: ' + res.error); return; }
+      closeAddEquipModal();
+      try { localStorage.removeItem('dashCache_v2_' + formatDate(currentDate)); } catch (e) {}
+      loadData(true);
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = '추가';
+      alert('네트워크 오류: ' + err.message);
+    });
+}
+
+// 페이지 로드 직후 장비 목록 미리 fetch (모달 열 때 즉시 표시)
+window.addEventListener('load', function() { loadEquipList(); });
 </script>
+
+<!-- 장비 추가 모달 -->
+<div id="addEquipModal" class="modal-overlay" onclick="if(event.target===this)closeAddEquipModal()">
+  <div class="modal-box">
+    <div class="modal-title">장비/세트 추가</div>
+    <label class="modal-label">장비/세트명</label>
+    <input id="equipInput" class="modal-input" list="equipDatalist" placeholder="입력하거나 목록에서 선택" autocomplete="off" />
+    <datalist id="equipDatalist"></datalist>
+    <label class="modal-label">수량</label>
+    <input id="qtyInput" class="modal-input" type="number" min="1" value="1" />
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-cancel" onclick="closeAddEquipModal()">취소</button>
+      <button id="addEquipConfirmBtn" class="modal-btn modal-btn-confirm" onclick="confirmAddEquip()">추가</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
