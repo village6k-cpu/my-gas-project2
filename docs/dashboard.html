@@ -359,6 +359,23 @@
   .modal-btn-confirm { background: #3B82F6; color: #fff; }
   .modal-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  /* 개고생2.0 점프 버튼 */
+  .gosu-link-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    background: #1F2937;
+    color: #fff;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+    margin-top: 8px;
+  }
+  .gosu-link-btn:hover { background: #111827; }
+  .gosu-link-btn:active { transform: scale(0.97); }
+
   .card-header {
     display: flex;
     justify-content: space-between;
@@ -727,6 +744,8 @@ function renderList(containerId, items, type) {
         var total = item.equipments.reduce(function(s, eq) { return s + (eq.qty || 1); }, 0);
         html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + total + '건</span></div>';
       }
+      // 개고생2.0 AppSheet 거래 점프
+      html += '<a class="gosu-link-btn" href="' + gosuAppsheetUrl(item.tradeId) + '" target="_blank" onclick="event.stopPropagation()">🔗 개고생2.0 거래 열기</a>';
       html += '</div></div>';
     });
     html += '</div>';
@@ -803,6 +822,13 @@ function toggleTask(btn, tid, action) {
 function escHtml(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── 개고생2.0 AppSheet 거래 점프 URL 빌더 ────
+// 원본 패턴(2026-04-26 기준): row=<거래ID> 부분만 치환
+var GOSU_APPSHEET_TEMPLATE = "https://www.appsheet.com/start/9508843a-cebb-4336-8dbe-a55dd3306a76?platform=desktop#appName=%EA%B0%9C%EA%B3%A0%EC%83%9D20-603028247-26-03-14&row={TID}&view=%EA%B1%B0%EB%9E%98%EC%83%81%EC%84%B8";
+function gosuAppsheetUrl(tid) {
+  return GOSU_APPSHEET_TEMPLATE.replace("{TID}", encodeURIComponent(tid));
 }
 
 // ── 장비 목록 캐시 + 모달 ─────────────────────
