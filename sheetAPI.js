@@ -178,6 +178,13 @@ function handleRequest(e) {
           (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
         ));
 
+      case "toggleItem":
+        return jsonResponse(toggleItemCheck(
+          params.scheduleId || postBody.scheduleId,
+          params.phase || postBody.phase,
+          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
+        ));
+
       case "addEquip":
         return jsonResponse(dashboardAddEquipment(
           params.tid || postBody.tid,

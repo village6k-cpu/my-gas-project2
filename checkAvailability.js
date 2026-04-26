@@ -335,12 +335,16 @@ function getDashboardData(targetDate, skipCache) {
       };
     }
 
-    var isSet = (세트명 && 장비명 === 세트명);
+    var 스케줄ID = String(row[0] || '').trim();
+    var setNameStr = String(세트명 || '').trim();
+    var equipNameStr = String(장비명 || '').trim();
+    var isHeader = setNameStr !== '' && setNameStr === equipNameStr;  // 대표행 또는 단품(C===D)
     tradeGroups[거래ID].equipments.push({
-      name: 장비명,
+      scheduleId: 스케줄ID,
+      name: equipNameStr,
       qty: 수량,
-      isSet: isSet,
-      setName: 세트명 || ''
+      setName: setNameStr,
+      isHeader: isHeader
     });
   });
 
@@ -355,12 +359,25 @@ function getDashboardData(targetDate, skipCache) {
     var g = tradeGroups[tid];
     var cust = contractMap[tid] || {};
 
-    // 세트 구성품 제외 (세트 헤더만 표시)
-    var setNames = {};
-    g.equipments.forEach(function(eq) { if (eq.isSet) setNames[eq.name] = true; });
-    var displayEquip = g.equipments.filter(function(eq) {
-      if (eq.setName && setNames[eq.setName] && !eq.isSet) return false;
-      return true;
+    // 세트(구성품 있는 것) 식별 — 대표행 표시에 'SET' 라벨 붙이기 위함
+    var setsWithComponents = {};
+    g.equipments.forEach(function(eq) {
+      if (!eq.isHeader && eq.setName) setsWithComponents[eq.setName] = true;
+    });
+
+    // 모든 행 표시 (세트 대표 + 구성품 + 단품). 각 행에 체크 상태 + isSet 라벨 부여.
+    var displayEquip = g.equipments.map(function(eq) {
+      return {
+        scheduleId: eq.scheduleId,
+        name: eq.name,
+        qty: eq.qty,
+        setName: eq.setName,
+        isHeader: eq.isHeader,                                       // 대표행 또는 단품
+        isSet: eq.isHeader && !!setsWithComponents[eq.name],          // 세트 대표(구성품 있음)
+        isComponent: !eq.isHeader,                                    // 구성품
+        checkedCheckout: props['itemCheck_' + eq.scheduleId + '_checkout'] === '1',
+        checkedCheckin:  props['itemCheck_' + eq.scheduleId + '_checkin']  === '1'
+      };
     });
 
     var setupDone = props['setupDone_' + tid] === '1';
@@ -488,6 +505,24 @@ function toggleReturnDone(tid, done) {
   else props.deleteProperty(key);
   invalidateDashboardCache();
   return { tid: tid, returnDone: isDone };
+}
+
+/**
+ * 개별 장비 행 체크 토글 (Dashboard 체크리스트).
+ * @param {string} scheduleId — 스케줄상세 A열 ID (e.g., "260423-001-01")
+ * @param {string} phase — "checkout" or "checkin"
+ * @param {boolean} done
+ */
+function toggleItemCheck(scheduleId, phase, done) {
+  if (!scheduleId || !phase) return { error: "scheduleId/phase 필수" };
+  if (phase !== 'checkout' && phase !== 'checkin') return { error: "phase는 checkout/checkin" };
+  var key = 'itemCheck_' + String(scheduleId).trim() + '_' + phase;
+  var props = PropertiesService.getScriptProperties();
+  var isDone = done === true || done === "true" || done === "1" || done === 1;
+  if (isDone) props.setProperty(key, '1');
+  else props.deleteProperty(key);
+  invalidateDashboardCache();
+  return { scheduleId: scheduleId, phase: phase, checked: isDone };
 }
 
 /**

@@ -274,34 +274,94 @@
     color: #fff;
   }
 
-  /* 장비 태그 안의 삭제 × 버튼 */
-  .equip-tag {
-    position: relative;
-    padding-right: 24px !important;
+  /* ── 체크리스트 스타일 ── */
+  .equip-checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+    margin-bottom: 8px;
   }
-  .equip-remove {
+  .equip-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: #fff;
+    border: 1px solid #E5E7EB;
+    font-size: 13px;
+    position: relative;
+  }
+  .equip-row.is-set { background: #ECFDF5; border-color: #A7F3D0; font-weight: 700; }
+  .equip-row.is-component { padding-left: 28px; background: #F9FAFB; border-color: transparent; font-size: 12px; color: #4B5563; }
+  .equip-row.is-component::before {
+    content: '└';
     position: absolute;
-    right: 6px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 14px;
-    height: 14px;
-    line-height: 12px;
+    left: 14px;
+    color: #9CA3AF;
+  }
+  .equip-row.is-single { background: #fff; }
+  .equip-row.checked { opacity: 0.55; }
+  .equip-row.checked .equip-name { text-decoration: line-through; }
+  .equip-checkbox {
+    width: 18px;
+    height: 18px;
+    border: 1.5px solid #D1D5DB;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    background: #fff;
+    color: transparent;
+    font-weight: 700;
+    font-size: 12px;
+    line-height: 1;
+  }
+  .equip-checkbox.checked {
+    background: #10B981;
+    border-color: #10B981;
+    color: #fff;
+  }
+  .equip-name { flex: 1; min-width: 0; word-break: break-word; }
+  .equip-set-tag {
+    display: inline-block;
+    background: #10B981;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .equip-qty {
+    color: #6B7280;
+    font-size: 11px;
+    font-weight: 600;
+    flex-shrink: 0;
+    margin-right: 4px;
+  }
+  .equip-row-remove {
+    width: 18px;
+    height: 18px;
+    line-height: 16px;
     text-align: center;
     color: #9CA3AF;
     cursor: pointer;
-    border-radius: 50%;
-    font-size: 11px;
+    border-radius: 4px;
+    font-size: 13px;
     font-weight: 700;
+    flex-shrink: 0;
   }
-  .equip-remove:hover {
-    background: #EF4444;
-    color: #fff;
-  }
+  .equip-row-remove:hover { background: #FEE2E2; color: #EF4444; }
+
   /* 장비 추가 버튼 */
   .equip-add-btn {
     display: inline-block;
-    padding: 4px 10px;
+    padding: 6px 12px;
     border: 1px dashed #9CA3AF;
     border-radius: 6px;
     color: #6B7280;
@@ -309,7 +369,8 @@
     font-weight: 600;
     cursor: pointer;
     background: transparent;
-    margin-left: 4px;
+    margin-top: 4px;
+    align-self: flex-start;
   }
   .equip-add-btn:hover { border-color: #3B82F6; color: #3B82F6; }
 
@@ -724,12 +785,33 @@ function renderList(containerId, items, type) {
         html += '<a href="tel:' + item.tel + '" class="tel-link" onclick="event.stopPropagation()">' + escHtml(item.tel) + '</a></div>';
       }
 
-      html += '<div class="equip-list">';
+      // ── 체크리스트 형태 (반출/반납 phase별 독립 체크) ──
+      html += '<div class="equip-checklist">';
       (item.equipments || []).forEach(function(eq) {
-        var cls = eq.isSet ? 'equip-tag set-tag' : 'equip-tag';
-        html += '<span class="' + cls + '">' + escHtml(eq.name + (eq.qty > 1 ? ' ×' + eq.qty : ''));
-        html += '<span class="equip-remove" onclick="event.stopPropagation();removeEquip(\'' + escHtml(item.tradeId) + '\',\'' + escHtml(eq.name).replace(/'/g, "\\'") + '\')" title="삭제">×</span>';
+        var rowCls = 'equip-row';
+        if (eq.isSet) rowCls += ' is-set';
+        else if (eq.isComponent) rowCls += ' is-component';
+        else rowCls += ' is-single';
+        var checked = (cardType === 'checkout' ? eq.checkedCheckout : eq.checkedCheckin);
+        if (checked) rowCls += ' checked';
+
+        var cbCls = 'equip-checkbox' + (checked ? ' checked' : '');
+        var phaseStr = (cardType === 'checkout' ? 'checkout' : 'checkin');
+        var sidEsc = escHtml(eq.scheduleId).replace(/'/g, "\\'");
+        var nameEsc = escHtml(eq.name).replace(/'/g, "\\'");
+
+        html += '<div class="' + rowCls + '" onclick="event.stopPropagation()">';
+        html += '<span class="' + cbCls + '" onclick="toggleItem(this,\'' + sidEsc + '\',\'' + phaseStr + '\')">' + (checked ? '✓' : '') + '</span>';
+        html += '<span class="equip-name">';
+        if (eq.isSet) html += '<span class="equip-set-tag">SET</span>';
+        html += escHtml(eq.name);
         html += '</span>';
+        if (eq.qty && eq.qty != 1) html += '<span class="equip-qty">×' + escHtml(eq.qty) + '</span>';
+        // 구성품에는 삭제 버튼 안 보임 (대표행 삭제하면 같이 삭제됨)
+        if (!eq.isComponent) {
+          html += '<span class="equip-row-remove" onclick="event.stopPropagation();removeEquip(\'' + escHtml(item.tradeId) + '\',\'' + nameEsc + '\')" title="삭제">×</span>';
+        }
+        html += '</div>';
       });
       html += '<button class="equip-add-btn" onclick="event.stopPropagation();addEquip(\'' + escHtml(item.tradeId) + '\')">+ 장비추가</button>';
       html += '</div>';
@@ -799,6 +881,25 @@ function removeEquip(tid, equipName) {
       loadData(true);
     })
     .catch(function(err) { alert("네트워크 오류: " + err.message); });
+}
+
+function toggleItem(cb, scheduleId, phase) {
+  var nowDone = !cb.classList.contains('checked');
+  cb.classList.toggle('checked', nowDone);
+  cb.textContent = nowDone ? '✓' : '';
+  var row = cb.closest('.equip-row');
+  if (row) row.classList.toggle('checked', nowDone);
+
+  fetch(API_URL + '?key=village2026&action=toggleItem'
+    + '&scheduleId=' + encodeURIComponent(scheduleId)
+    + '&phase=' + phase
+    + '&done=' + (nowDone ? '1' : '0'))
+    .then(function(r) { return r.json(); })
+    .catch(function() {
+      cb.classList.toggle('checked', !nowDone);
+      cb.textContent = !nowDone ? '✓' : '';
+      if (row) row.classList.toggle('checked', !nowDone);
+    });
 }
 
 function toggleTask(btn, tid, action) {
