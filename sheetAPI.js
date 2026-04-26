@@ -178,6 +178,19 @@ function handleRequest(e) {
           (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
         ));
 
+      case "addEquip":
+        return jsonResponse(dashboardAddEquipment(
+          params.tid || postBody.tid,
+          params.equipName || postBody.equipName,
+          params.qty || postBody.qty || 1
+        ));
+
+      case "removeEquip":
+        return jsonResponse(dashboardRemoveEquipment(
+          params.tid || postBody.tid,
+          params.equipName || postBody.equipName
+        ));
+
       // ━━━ 스케줄 관리 API ━━━
 
       case "list":

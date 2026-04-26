@@ -274,6 +274,45 @@
     color: #fff;
   }
 
+  /* 장비 태그 안의 삭제 × 버튼 */
+  .equip-tag {
+    position: relative;
+    padding-right: 24px !important;
+  }
+  .equip-remove {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 14px;
+    height: 14px;
+    line-height: 12px;
+    text-align: center;
+    color: #9CA3AF;
+    cursor: pointer;
+    border-radius: 50%;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .equip-remove:hover {
+    background: #EF4444;
+    color: #fff;
+  }
+  /* 장비 추가 버튼 */
+  .equip-add-btn {
+    display: inline-block;
+    padding: 4px 10px;
+    border: 1px dashed #9CA3AF;
+    border-radius: 6px;
+    color: #6B7280;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    background: transparent;
+    margin-left: 4px;
+  }
+  .equip-add-btn:hover { border-color: #3B82F6; color: #3B82F6; }
+
   .card-header {
     display: flex;
     justify-content: space-between;
@@ -625,8 +664,11 @@ function renderList(containerId, items, type) {
       html += '<div class="equip-list">';
       (item.equipments || []).forEach(function(eq) {
         var cls = eq.isSet ? 'equip-tag set-tag' : 'equip-tag';
-        html += '<span class="' + cls + '">' + escHtml(eq.name + (eq.qty > 1 ? ' ×' + eq.qty : '')) + '</span>';
+        html += '<span class="' + cls + '">' + escHtml(eq.name + (eq.qty > 1 ? ' ×' + eq.qty : ''));
+        html += '<span class="equip-remove" onclick="event.stopPropagation();removeEquip(\'' + escHtml(item.tradeId) + '\',\'' + escHtml(eq.name).replace(/'/g, "\\'") + '\')" title="삭제">×</span>';
+        html += '</span>';
       });
+      html += '<button class="equip-add-btn" onclick="event.stopPropagation();addEquip(\'' + escHtml(item.tradeId) + '\')">+ 장비추가</button>';
       html += '</div>';
 
       html += '<div class="card-detail" id="' + cardId + '">';
@@ -658,6 +700,40 @@ function switchTab(tab) {
 function toggleDetail(id) {
   var el = document.getElementById(id);
   if (el) el.classList.toggle('open');
+}
+
+function addEquip(tid) {
+  var name = prompt("추가할 장비/세트 이름을 입력하세요:");
+  if (!name || !name.trim()) return;
+  name = name.trim();
+  var qtyStr = prompt("수량 (기본 1):", "1");
+  var qty = parseInt(qtyStr, 10);
+  if (!qty || qty < 1) qty = 1;
+
+  fetch(API_URL + '?key=village2026&action=addEquip&tid=' + encodeURIComponent(tid)
+    + '&equipName=' + encodeURIComponent(name) + '&qty=' + qty)
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) { alert("추가 실패: " + res.error); return; }
+      // localStorage 캐시 무효화 후 fresh fetch
+      try { localStorage.removeItem('dashCache_v2_' + formatDate(currentDate)); } catch (e) {}
+      loadData(true);
+    })
+    .catch(function(err) { alert("네트워크 오류: " + err.message); });
+}
+
+function removeEquip(tid, equipName) {
+  if (!confirm('"' + equipName + '" 을(를) 삭제하시겠습니까?\n(같은 세트 구성품도 함께 삭제됩니다)')) return;
+
+  fetch(API_URL + '?key=village2026&action=removeEquip&tid=' + encodeURIComponent(tid)
+    + '&equipName=' + encodeURIComponent(equipName))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) { alert("삭제 실패: " + res.error); return; }
+      try { localStorage.removeItem('dashCache_v2_' + formatDate(currentDate)); } catch (e) {}
+      loadData(true);
+    })
+    .catch(function(err) { alert("네트워크 오류: " + err.message); });
 }
 
 function toggleTask(btn, tid, action) {

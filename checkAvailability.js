@@ -490,6 +490,122 @@ function toggleReturnDone(tid, done) {
   return { tid: tid, returnDone: isDone };
 }
 
+/**
+ * Dashboard에서 장비 추가 — 같은 거래ID의 기존 행에서 일자/시간/예약자명 가져와 새 행 생성.
+ * 세트인 경우 구성품도 자동 펼침. scheduleContractRegen으로 계약서 재생성 예약.
+ */
+function dashboardAddEquipment(tid, equipName, qty) {
+  if (!tid || !equipName) return { error: "tid와 장비명 필수" };
+  qty = parseInt(qty, 10) || 1;
+  tid = String(tid).trim();
+  equipName = String(equipName).trim();
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sched = ss.getSheetByName("스케줄상세");
+  if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
+
+  var lastRow = sched.getLastRow();
+  var data = sched.getRange(2, 1, lastRow - 1, 13).getValues();
+  var displayData = sched.getRange(2, 1, lastRow - 1, 13).getDisplayValues();
+  var srcIdx = -1;
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][1]).trim() === tid) { srcIdx = i; break; }
+  }
+  if (srcIdx === -1) return { error: "거래ID '" + tid + "' 못 찾음" };
+
+  var 반출일   = displayData[srcIdx][5];
+  var 반출시간 = displayData[srcIdx][6];
+  var 반납일   = displayData[srcIdx][7];
+  var 반납시간 = displayData[srcIdx][8];
+  var 예약자명 = displayData[srcIdx][12];
+
+  var setSheet = ss.getSheetByName("세트마스터");
+  var components = getSetComponents(equipName, setSheet).filter(function(c) {
+    var n = String(c.name || "").trim();
+    return n !== "" && n !== equipName;
+  });
+  var price = findSetPrice(equipName, setSheet);
+
+  var maxN = 0;
+  var re = new RegExp("^" + tid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "-(\\d+)$");
+  for (var k = 0; k < data.length; k++) {
+    var m = String(data[k][0]).match(re);
+    if (m) { var n = parseInt(m[1], 10); if (n > maxN) maxN = n; }
+  }
+
+  var newRows = [];
+  if (components.length > 0) {
+    maxN++;
+    newRows.push([
+      tid + "-" + ("0" + maxN).slice(-2),
+      tid, equipName, equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
+      "대기", "", price, 예약자명
+    ]);
+    components.forEach(function(c) {
+      maxN++;
+      newRows.push([
+        tid + "-" + ("0" + maxN).slice(-2),
+        tid, equipName, c.name, c.qty || 1, 반출일, 반출시간, 반납일, 반납시간,
+        "대기", "", 0, 예약자명
+      ]);
+    });
+  } else {
+    maxN++;
+    newRows.push([
+      tid + "-" + ("0" + maxN).slice(-2),
+      tid, equipName, equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
+      "대기", "", price, 예약자명
+    ]);
+  }
+
+  var nextRow = lastRow + 1;
+  sched.getRange(nextRow, 1, newRows.length, 13).setValues(newRows);
+  sched.getRange(nextRow, 6, newRows.length, 1).setNumberFormat("yyyy-MM-dd");
+  sched.getRange(nextRow, 7, newRows.length, 1).setNumberFormat("@");
+  sched.getRange(nextRow, 8, newRows.length, 1).setNumberFormat("yyyy-MM-dd");
+  sched.getRange(nextRow, 9, newRows.length, 1).setNumberFormat("@");
+
+  var inheritRows = [];
+  for (var ri = 0; ri < newRows.length; ri++) inheritRows.push(nextRow + ri);
+  if (typeof _inheritGroupBackground !== "undefined") {
+    try { _inheritGroupBackground(sched, tid, inheritRows); } catch (e) {}
+  }
+
+  scheduleContractRegen(tid);
+  return { success: true, addedRows: newRows.length, isSet: components.length > 0, equipName: equipName };
+}
+
+/**
+ * Dashboard에서 장비 삭제 — 같은 거래ID + 장비명/세트명 일치 행 모두 삭제.
+ * 세트면 대표행 + 구성품 행 전부 일괄 삭제.
+ */
+function dashboardRemoveEquipment(tid, equipName) {
+  if (!tid || !equipName) return { error: "tid와 장비명 필수" };
+  tid = String(tid).trim();
+  equipName = String(equipName).trim();
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sched = ss.getSheetByName("스케줄상세");
+  if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
+
+  var lastRow = sched.getLastRow();
+  var data = sched.getRange(2, 1, lastRow - 1, 4).getValues();
+  var rowsToDelete = [];
+  for (var i = data.length - 1; i >= 0; i--) {
+    if (String(data[i][1]).trim() !== tid) continue;
+    var c = String(data[i][2] || "").trim();
+    var d = String(data[i][3] || "").trim();
+    if (c === equipName || d === equipName) {
+      rowsToDelete.push(i + 2);
+    }
+  }
+  if (rowsToDelete.length === 0) return { error: "해당 장비 행 없음" };
+
+  rowsToDelete.forEach(function(r) { sched.deleteRow(r); });
+  scheduleContractRegen(tid);
+  return { success: true, removedRows: rowsToDelete.length };
+}
+
 
 /** "yyyy-MM-dd" + "HH:mm" → Date */
 function parseDT(dateVal, timeVal) {
