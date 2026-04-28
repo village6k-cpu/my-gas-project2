@@ -641,6 +641,8 @@ function runFunction(funcName, params) {
     "fixSchedQuantityTextOne",
     "setupDashboardWarmerTrigger",
     "warmDashboardCache",
+    "getInventoryConflicts",
+    "getInventoryConflictsSlackMessage",
     "listAllTriggers"
   ];
 
@@ -690,6 +692,8 @@ function runFunction(funcName, params) {
       fixSchedQuantityTextOne: typeof fixSchedQuantityTextOne !== "undefined" ? fixSchedQuantityTextOne : null,
       setupDashboardWarmerTrigger: typeof setupDashboardWarmerTrigger !== "undefined" ? setupDashboardWarmerTrigger : null,
       warmDashboardCache: typeof warmDashboardCache !== "undefined" ? warmDashboardCache : null,
+      getInventoryConflicts: typeof getInventoryConflicts !== "undefined" ? getInventoryConflicts : null,
+      getInventoryConflictsSlackMessage: typeof getInventoryConflictsSlackMessage !== "undefined" ? getInventoryConflictsSlackMessage : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {

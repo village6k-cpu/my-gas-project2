@@ -430,6 +430,124 @@ function getDashboardData(targetDate, skipCache) {
 }
 
 /**
+ * 향후 N시간 내 재고 충돌(동시 사용량 > 보유) 진단.
+ * 매일 아침 슬랙 보고서에 첨부하는 핵심 알림.
+ *
+ * @param {number} hoursAhead — 점검 윈도우 (기본 48 = 오늘+내일)
+ * @returns {Object} { windowStart, windowEnd, conflictCount, conflicts: [...] }
+ */
+function getInventoryConflicts(hoursAhead) {
+  hoursAhead = Number(hoursAhead) || 48;
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  var equipSheet = ss.getSheetByName('장비마스터');
+  if (!schedSheet || !equipSheet) return { error: "시트 없음" };
+
+  var now = new Date();
+  var windowStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);  // 오늘 00:00 KST
+  var windowEnd = new Date(windowStart.getTime() + hoursAhead * 60 * 60 * 1000);
+
+  var allSched = getScheduleData(schedSheet);
+
+  // 윈도우와 겹치는 미완료 예약만 (장비별 그룹핑)
+  var byEquip = {};
+  allSched.forEach(function(s) {
+    if (!s.equipment || !s.startDT || !s.endDT) return;
+    if (s.status === '취소' || s.status === '반납완료') return;
+    if (s.endDT <= windowStart || s.startDT >= windowEnd) return;
+    if (!byEquip[s.equipment]) byEquip[s.equipment] = [];
+    byEquip[s.equipment].push(s);
+  });
+
+  var conflicts = [];
+
+  Object.keys(byEquip).forEach(function(equipName) {
+    var schedules = byEquip[equipName];
+    if (schedules.length < 2) return;  // 단일 예약은 충돌 불가
+
+    var info = findEquipment(equipName, equipSheet);
+    if (!info) return;
+    var 총보유 = info.total;
+
+    // sweep-line: 모든 시작 시점에서 동시사용량 측정
+    var tps = {};
+    schedules.forEach(function(s) {
+      tps[s.startDT.getTime()] = true;
+      tps[s.endDT.getTime()] = true;
+    });
+    var sortedTPs = Object.keys(tps).map(Number).sort(function(a, b) { return a - b; });
+
+    var maxConcurrent = 0;
+    var conflictTime = null;
+    var conflictingPairs = [];
+
+    for (var i = 0; i < sortedTPs.length; i++) {
+      var t = sortedTPs[i];
+      var concurrent = 0;
+      var atThis = [];
+      schedules.forEach(function(s) {
+        if (s.startDT.getTime() <= t && s.endDT.getTime() > t) {
+          concurrent += s.qty;
+          atThis.push(s);
+        }
+      });
+      if (concurrent > 총보유 && conflictTime === null) {
+        conflictTime = new Date(t);
+        conflictingPairs = atThis;
+      }
+      if (concurrent > maxConcurrent) maxConcurrent = concurrent;
+    }
+
+    if (conflictTime) {
+      conflicts.push({
+        장비명: equipName,
+        총보유: 총보유,
+        최대동시사용: maxConcurrent,
+        부족수량: maxConcurrent - 총보유,
+        충돌시점: Utilities.formatDate(conflictTime, 'Asia/Seoul', 'M/d HH:mm'),
+        예약들: conflictingPairs.map(function(s) {
+          return {
+            거래ID: s.contractID,
+            예약자명: s.contractName || '',
+            반출: Utilities.formatDate(s.startDT, 'Asia/Seoul', 'M/d HH:mm'),
+            반납: Utilities.formatDate(s.endDT, 'Asia/Seoul', 'M/d HH:mm'),
+            수량: s.qty
+          };
+        })
+      });
+    }
+  });
+
+  return {
+    windowStart: Utilities.formatDate(windowStart, 'Asia/Seoul', 'yyyy-MM-dd HH:mm'),
+    windowEnd: Utilities.formatDate(windowEnd, 'Asia/Seoul', 'yyyy-MM-dd HH:mm'),
+    conflictCount: conflicts.length,
+    conflicts: conflicts
+  };
+}
+
+/**
+ * 슬랙용으로 포맷팅된 텍스트. 외부 슬랙 봇/n8n/코워크에서 fetch해서 그대로 메시지에 포함.
+ */
+function getInventoryConflictsSlackMessage(hoursAhead) {
+  var data = getInventoryConflicts(hoursAhead);
+  if (data.error) return "❌ 진단 실패: " + data.error;
+  if (data.conflictCount === 0) {
+    return "✅ 재고 충돌 없음 (" + data.windowStart.substring(5) + " ~ " + data.windowEnd.substring(5) + ")";
+  }
+  var lines = ["🚨 *재고 충돌 경고* (" + data.windowStart.substring(5) + " ~ " + data.windowEnd.substring(5) + ")\n"];
+  data.conflicts.forEach(function(c) {
+    lines.push("*📦 " + c.장비명 + "* (보유 " + c.총보유 + "개 / 최대 " + c.최대동시사용 + "개 사용 → *" + c.부족수량 + "개 부족*)");
+    lines.push("  ⏰ 충돌 시작: " + c.충돌시점);
+    c.예약들.forEach(function(p) {
+      lines.push("  • " + p.예약자명 + " (" + p.거래ID + ") " + p.반출 + " ~ " + p.반납 + (p.수량 > 1 ? " ×" + p.수량 : ""));
+    });
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+
+/**
  * 백그라운드 캐시 워머 — 5분마다 트리거에서 호출.
  * 오늘/어제/내일 데이터를 미리 계산해 캐시에 적재 → 사용자는 항상 warm cache 히트.
  */
