@@ -4,244 +4,452 @@
 <base target="_top">
 <meta charset="UTF-8">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;800&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap');
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     font-family: 'Noto Sans KR', -apple-system, sans-serif;
     background: #f5f7fa; color: #2d3436;
-    font-size: 13px; line-height: 1.6;
+    font-size: 13px; line-height: 1.55;
   }
 
-  .header {
-    padding: 18px 16px 14px;
+  /* ── 상단 ── */
+  .head {
     background: linear-gradient(135deg, #1e3a5f 0%, #2c5f8a 100%);
-    color: #fff;
+    color: #fff; padding: 14px 14px 10px;
   }
-  .header h1 { font-size: 18px; font-weight: 800; margin-bottom: 2px; }
-  .header p  { font-size: 12px; opacity: 0.85; }
+  .head h1 { font-size: 16px; font-weight: 800; }
+  .head p  { font-size: 11px; opacity: 0.85; margin-top: 2px; }
 
-  .panel { padding: 14px 14px 32px; }
-
-  /* 툴 카드 */
-  .tool {
+  /* ── 4툴 빠른 링크 (상단 고정) ── */
+  .quicklinks {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 6px; padding: 10px 12px;
     background: #fff;
-    border-radius: 12px;
-    padding: 16px 16px 14px;
-    margin-bottom: 14px;
-    border-left: 5px solid #1e3a5f;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+    border-bottom: 1px solid #e8ebf0;
   }
-  .tool.fav { border-left-color: #e74c3c; background: linear-gradient(180deg, #fff 0%, #fff8f6 100%); }
-  .tool.ai { border-left-color: #8e44ad; }
-  .tool.pay { border-left-color: #27ae60; }
-
-  .tool h2 {
-    font-size: 16px; font-weight: 800;
-    color: #1e3a5f; margin-bottom: 6px;
-    display: flex; align-items: center; gap: 6px;
+  .ql {
+    background: #f7f9fb; border: 1px solid #e1e6ed;
+    border-radius: 8px; padding: 8px 4px;
+    text-align: center; cursor: pointer;
+    text-decoration: none; color: #1e3a5f;
+    transition: all 0.15s;
   }
-  .tool.ai h2 { color: #8e44ad; }
-  .tool.pay h2 { color: #1e8449; }
-  .tool.fav h2 { color: #c0392b; }
+  .ql:hover { background: #1e3a5f; color: #fff; transform: translateY(-1px); }
+  .ql .ico { font-size: 18px; display: block; margin-bottom: 2px; }
+  .ql .nm { font-size: 10.5px; font-weight: 700; }
 
-  .tool-link {
+  /* ── 탭 스트립 ── */
+  .tabs {
+    position: sticky; top: 0; z-index: 5;
+    background: #fff;
+    display: flex; overflow-x: auto;
+    border-bottom: 2px solid #1e3a5f;
+    padding: 0 4px;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    flex-shrink: 0;
+    padding: 10px 14px; font-size: 12px; font-weight: 700;
+    color: #94a3b8; cursor: pointer; background: none; border: none;
+    border-bottom: 2.5px solid transparent;
+    margin-bottom: -2px;
+    white-space: nowrap;
+  }
+  .tab:hover { color: #1e3a5f; }
+  .tab.on { color: #1e3a5f; border-bottom-color: #e74c3c; }
+
+  /* ── 패널 ── */
+  .panel { display: none; padding: 14px 12px 32px; }
+  .panel.on { display: block; }
+
+  .stitle {
+    font-size: 14px; font-weight: 800; color: #1e3a5f;
+    margin-bottom: 10px;
+  }
+  .ssub {
+    font-size: 11.5px; color: #666; margin-top: -4px; margin-bottom: 12px;
+  }
+
+  /* ── 플로우 (수직) ── */
+  .flow { display: flex; flex-direction: column; }
+  .step {
+    display: flex; align-items: stretch; gap: 10px;
+    margin-bottom: 8px;
+  }
+  .step-num {
+    flex-shrink: 0; width: 28px;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .step-num .n {
+    width: 26px; height: 26px; border-radius: 50%;
+    background: #1e3a5f; color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 800;
+  }
+  .step-num .ln {
+    flex: 1; width: 2px; background: #d5dbe0;
+  }
+  .step:last-child .step-num .ln { display: none; }
+  .step.done .n { background: #27ae60; }
+  .step-body {
+    flex: 1; background: #fff; border-radius: 8px;
+    padding: 10px 12px;
+    border-left: 3px solid #1e3a5f;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    margin-bottom: 4px;
+  }
+  .step.done .step-body { border-left-color: #27ae60; }
+  .step-body h4 { font-size: 12.5px; color: #1e3a5f; margin-bottom: 3px; }
+  .step-body p  { font-size: 11.5px; color: #555; }
+  .step-body .tip { font-size: 11px; color: #8e44ad; margin-top: 4px; }
+  .step-body .warn { font-size: 11px; color: #c0392b; margin-top: 4px; font-weight: 600; }
+
+  /* ── 인라인 라벨 ── */
+  .col {
     display: inline-block;
-    font-size: 11px;
-    color: #2c5f8a;
-    word-break: break-all;
-    margin-bottom: 10px;
-    text-decoration: none;
-    background: #eef2f7;
-    padding: 4px 8px;
-    border-radius: 4px;
+    background: #eef2f7; padding: 0 5px; border-radius: 3px;
+    font-weight: 700; font-size: 11px; color: #1e3a5f;
+    margin-right: 2px;
   }
-  .tool-link:hover { background: #d6e4f0; }
+  .pill {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 10.5px; font-weight: 700; color: #fff; margin-right: 2px;
+  }
+  .pill.b { background: #1e3a5f; }
+  .pill.g { background: #27ae60; }
+  .pill.o { background: #e67e22; }
+  .pill.r { background: #e74c3c; }
 
-  .flow-arrow {
-    background: #f1f5f9;
-    padding: 8px 10px;
-    border-radius: 6px;
-    font-size: 12px;
-    color: #1e3a5f;
-    font-weight: 600;
-    margin-bottom: 10px;
-    text-align: center;
-    letter-spacing: 0.5px;
-  }
-  .flow-arrow strong { color: #c0392b; }
-
-  ul.bullets {
-    list-style: none;
-    padding-left: 0;
-  }
-  ul.bullets li {
-    padding: 5px 0 5px 18px;
-    position: relative;
-    font-size: 12.5px;
-    line-height: 1.55;
-  }
-  ul.bullets li::before {
-    content: "•";
-    position: absolute;
-    left: 4px;
-    color: #2c5f8a;
-    font-weight: 700;
-  }
-  ul.bullets li.warn::before { color: #e67e22; content: "⚠"; left: 0; }
-  ul.bullets li.tip::before  { color: #8e44ad; content: "💡"; left: 0; }
-  ul.bullets li.bad::before  { color: #e74c3c; content: "🚫"; left: 0; }
-  ul.bullets li strong { color: #1e3a5f; }
-
-  /* 인라인 강조 박스 */
+  /* ── 알림 박스 ── */
   .al {
-    display: flex; align-items: flex-start; gap: 8px;
-    padding: 9px 11px; border-radius: 7px; margin: 10px 0 6px;
-    font-size: 12px; line-height: 1.55;
+    display: flex; gap: 8px;
+    padding: 9px 11px; border-radius: 7px;
+    margin-bottom: 8px; font-size: 11.5px;
   }
   .al.d { background: #fdf0ed; border-left: 3px solid #e74c3c; }
   .al.w { background: #fef9ed; border-left: 3px solid #f39c12; }
   .al.i { background: #edf5fd; border-left: 3px solid #2c5f8a; }
-  .al-icon { font-size: 15px; flex-shrink: 0; line-height: 1; }
+  .al .ico { font-size: 14px; flex-shrink: 0; line-height: 1.2; }
   .al strong { color: #1e3a5f; }
 
-  .heart-tag {
-    display: inline-block;
-    font-size: 10px;
-    background: #e74c3c;
-    color: #fff;
-    padding: 1px 6px;
-    border-radius: 4px;
-    margin-left: 4px;
-    font-weight: 700;
+  /* ── 카드 ── */
+  .card {
+    background: #fff; border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 8px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  .card h4 { font-size: 12.5px; color: #1e3a5f; margin-bottom: 6px; }
+  .card .row {
+    display: flex; gap: 6px; padding: 4px 0;
+    border-bottom: 1px solid #f2f2f2;
+    font-size: 11.5px; align-items: center;
+  }
+  .card .row:last-child { border-bottom: none; }
+
+  /* ── 체크리스트 ── */
+  ul.chk {
+    list-style: none; padding: 0;
+  }
+  ul.chk li {
+    padding: 6px 8px 6px 24px;
+    position: relative;
+    font-size: 12px;
+    background: #fff;
+    border-radius: 6px;
+    margin-bottom: 4px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  ul.chk li::before {
+    content: "☐";
+    position: absolute; left: 8px; top: 5px;
+    font-size: 13px; color: #94a3b8;
+  }
+  ul.chk li.bad { background: #fdf0ed; }
+  ul.chk li.bad::before { content: "🚫"; color: #e74c3c; }
+  ul.chk li.warn { background: #fef9ed; }
+  ul.chk li.warn::before { content: "⚠"; color: #f39c12; font-size: 12px; }
+  ul.chk li.tip { background: #f3eef9; }
+  ul.chk li.tip::before { content: "💡"; }
+  ul.chk li strong { color: #1e3a5f; }
+
+  /* ── 미니 코드 ── */
+  code.k {
+    background: #f1f5f9; padding: 1px 5px; border-radius: 3px;
+    font-size: 11px; font-family: 'SF Mono', Consolas, monospace;
+    color: #c0392b;
   }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1>📖 빌리지 업무용 툴 정리</h1>
-  <p>업무 시작 전 한 번 정독, 헷갈릴 때 다시 확인.</p>
+<div class="head">
+  <h1>📖 빌리지 업무 매뉴얼</h1>
+  <p>막힐 때 탭에서 해당 작업 찾으세요</p>
 </div>
 
-<div class="panel">
-
-  <!-- ═══ 1. 확인요청 시트 ═══ -->
-  <div class="tool">
-    <h2>1️⃣ 확인요청 시트 — 업무의 시작점</h2>
-    <a class="tool-link" href="https://docs.google.com/spreadsheets/d/17cl0YlZYA6j9hlTqPFIe5J0UdjuLcfxZyQfKGF00Ksk/edit?gid=424226232#gid=424226232" target="_blank">
-      sheets.google.com/.../확인요청
-    </a>
-    <p style="font-size:12px;color:#c0392b;margin-bottom:8px;font-weight:600;">
-      여기서 실수하면 그 뒤로 줄줄이 사고. 신중하게.
-    </p>
-
-    <div class="flow-arrow">
-      확인요청 → 계약마스터 + 스케줄상세 → 거래내역
-    </div>
-
-    <ul class="bullets">
-      <li>기본은 <strong>AI가 자동 입력</strong>. 직원이 손댈 일 거의 없음.</li>
-      <li>수동 입력 필요할 때 → 메뉴 <strong>📋 빌리지 스케줄 → 🎓 동행 모드 열기</strong> 실행.
-        AI가 단계별로 코칭하니 충분히 숙지 후 입력.</li>
-      <li>이미 등록된 예약의 <strong>변경/취소/추가</strong>는 확인요청 거치지 말고
-        바로 <strong>계약마스터 + 스케줄상세</strong>에서 수정하는 게 편함.</li>
-    </ul>
-
-    <div class="al w">
-      <span class="al-icon">⚠</span>
-      <span>계약마스터 / 스케줄상세에서 직접 수정할 땐
-      반드시 <strong>빌리지 스케줄(타임라인)</strong>에서 가용여부 수동으로 체크 후 등록.</span>
-    </div>
-  </div>
-
-  <!-- ═══ 2. 거래내역 시트 ═══ -->
-  <div class="tool pay">
-    <h2>2️⃣ 거래내역 시트 — 결제 처리</h2>
-    <a class="tool-link" href="https://docs.google.com/spreadsheets/d/1ssb6EyuRRCU04Zf4UAtdbpYYkWcseGqnhWVONdrqol8/edit?gid=186038316#gid=186038316" target="_blank">
-      sheets.google.com/.../거래내역 (개고생2.0)
-    </a>
-
-    <ul class="bullets">
-      <li>각 거래에 <strong>계약서 링크</strong> 걸려있음 → 클릭해서 최종 점검.</li>
-      <li><strong>금액 정확히 확인 → 결제 받기 → 결제수단 입력</strong> 순서 지킬 것.</li>
-      <li>반납 완료 처리도 여기서 (개고생2.0 AppSheet에서도 가능).</li>
-    </ul>
-
-    <div class="al d">
-      <span class="al-icon">🚫</span>
-      <span>금액 미확인 상태로 결제 받지 말 것. 계약서 한 번 더 보고 금액 일치하는지 체크.</span>
-    </div>
-  </div>
-
-  <!-- ═══ 3. 빌리지 오늘 일정 웹앱 ═══ -->
-  <div class="tool fav">
-    <h2>3️⃣ 빌리지 오늘 일정 웹앱<span class="heart-tag">❤️ FAV</span></h2>
-    <a class="tool-link" href="https://village6k-cpu.github.io/my-gas-project2/dashboard.html" target="_blank">
-      village6k-cpu.github.io/.../dashboard.html
-    </a>
-
-    <ul class="bullets">
-      <li>오늘 <strong>반출 / 반납 일정 한눈에</strong> 파악.</li>
-      <li>각 거래 카드 펼치면 <strong>품목 체크리스트</strong> 노출 → 세팅·검수 진행하며 ✓ 체크.
-        <ul class="bullets" style="margin-top:4px;">
-          <li><strong>반출 카드</strong>: 들어가야 할 장비 다 챙겼나 ✓</li>
-          <li><strong>반납 카드</strong>: 들어온 장비 다 들어왔나 ✓</li>
-        </ul>
-      </li>
-      <li>장비 <strong>추가/삭제</strong>도 카드에서 바로 가능 → 즉시 스케줄상세에 반영.</li>
-      <li>각 카드 하단 <strong>🔗 개고생2.0 거래 열기</strong> 버튼 → AppSheet 해당 거래로 점프 → 거기서 반납완료 처리.</li>
-    </ul>
-
-    <div class="al i">
-      <span class="al-icon">💡</span>
-      <span>모바일/태블릿에서도 잘 작동함. 매장 돌아다니며 체크하기 좋음.</span>
-    </div>
-  </div>
-
-  <!-- ═══ 4. NotebookLM ═══ -->
-  <div class="tool ai">
-    <h2>4️⃣ NotebookLM <span style="color:#8e44ad;">VILLAGE.AI</span></h2>
-    <a class="tool-link" href="https://notebooklm.google.com/notebook/5ee3561b-6809-4fba-a3e2-2cf560828360" target="_blank">
-      notebooklm.google.com/.../VILLAGE.AI
-    </a>
-
-    <ul class="bullets">
-      <li>모르는 거 있을 때 <strong>사장님이나 단톡방에 묻기 전에</strong> 먼저 여기 검색.</li>
-      <li>기존 클로드 기반 툴은 <strong>폐지</strong>. 데이터 처리력은 NotebookLM이 압도적.</li>
-      <li class="tip">검색 결과에 <strong>이미지는 기본 미제공</strong> → 따로 요청하면
-        <strong>인포그래픽 / 슬라이드</strong> 형태로 만들어줌. 초보자에게 매우 유용.</li>
-    </ul>
-  </div>
-
-  <!-- ═══ 시스템 메뉴 빠른 참조 ═══ -->
-  <div class="tool" style="border-left-color:#7f8c8d;">
-    <h2 style="color:#34495e;">📋 시트 메뉴 빠른 참조</h2>
-    <p style="font-size:11px;color:#666;margin-bottom:8px;">계약마스터 또는 스케줄상세 시트 상단의 <strong>📋 빌리지 스케줄</strong> 메뉴.</p>
-    <ul class="bullets">
-      <li><strong>🎓 동행 모드 열기</strong> — 신규예약 수동 입력 시 AI가 코칭</li>
-      <li><strong>🔍 가용 확인 (수동 전체)</strong> — 확인요청 미처리분 일괄 가용 체크</li>
-      <li><strong>✅ 예약 등록 (수동)</strong> — 가용 확인된 건 일괄 등록</li>
-      <li><strong>📄 계약서 생성</strong> — 선택 행 거래의 계약서 즉시 재생성</li>
-      <li><strong>🔍 선택 행 할인유형 재조회</strong> — 단골/제휴 매칭 다시 시도</li>
-      <li><strong>🔄 장비 목록 갱신</strong> — F열 드롭다운 새로고침</li>
-      <li><strong>📸 실사기록 동기화</strong> — 장비마스터 ↔ 실사기록 정렬</li>
-    </ul>
-  </div>
-
-  <!-- ═══ 실수 방지 체크리스트 ═══ -->
-  <div class="tool" style="border-left-color:#e74c3c;">
-    <h2 style="color:#c0392b;">⚠️ 실수 방지 체크리스트</h2>
-    <ul class="bullets">
-      <li class="bad"><strong>세트 구성품 행</strong> 직접 수정 금지 — 데이터 깨짐.</li>
-      <li class="bad"><strong>'발송승인'</strong>은 결과 확인 후 선택 — 한 번 보내면 <strong>취소 불가</strong>.</li>
-      <li class="warn">계약마스터/스케줄상세 직접 수정 시 <strong>가용 체크 필수</strong>.</li>
-      <li class="warn"><strong>노란색 셀</strong>(카테고리 모델 미선택) 보이면 반드시 구체 모델 선택.</li>
-      <li class="tip">수정 시 <strong>고객에게 알림톡 안 나감</strong> — 필요 시 별도 연락.</li>
-      <li class="tip">금액 의심되면 <strong>계약서 한 번 더 열어 확인</strong>.</li>
-    </ul>
-  </div>
-
+<!-- 4툴 빠른 링크 -->
+<div class="quicklinks">
+  <a class="ql" href="https://docs.google.com/spreadsheets/d/17cl0YlZYA6j9hlTqPFIe5J0UdjuLcfxZyQfKGF00Ksk/edit?gid=424226232#gid=424226232" target="_blank">
+    <span class="ico">📋</span><span class="nm">확인요청</span>
+  </a>
+  <a class="ql" href="https://docs.google.com/spreadsheets/d/1ssb6EyuRRCU04Zf4UAtdbpYYkWcseGqnhWVONdrqol8/edit?gid=186038316#gid=186038316" target="_blank">
+    <span class="ico">💰</span><span class="nm">거래내역</span>
+  </a>
+  <a class="ql" href="https://village6k-cpu.github.io/my-gas-project2/dashboard.html" target="_blank">
+    <span class="ico">📅</span><span class="nm">오늘 일정</span>
+  </a>
+  <a class="ql" href="https://notebooklm.google.com/notebook/5ee3561b-6809-4fba-a3e2-2cf560828360" target="_blank">
+    <span class="ico">🤖</span><span class="nm">VILLAGE.AI</span>
+  </a>
 </div>
 
+<!-- 탭 -->
+<div class="tabs">
+  <button class="tab on" data-t="t1">🏁 시작</button>
+  <button class="tab" data-t="t2">🆕 신규</button>
+  <button class="tab" data-t="t3">✏️ 변경</button>
+  <button class="tab" data-t="t4">📦 반출</button>
+  <button class="tab" data-t="t5">📥 반납</button>
+  <button class="tab" data-t="t6">⚠️ 주의</button>
+</div>
+
+<!-- ═══════════ 탭1: 시작 ═══════════ -->
+<div class="panel on" id="t1">
+  <div class="stitle">전체 흐름</div>
+  <p class="ssub">고객 문의 → 예약 등록 → 반출 → 반납 → 결제완료</p>
+
+  <div class="flow">
+    <div class="step">
+      <div class="step-num"><div class="n">1</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>📋 확인요청 시트</h4>
+        <p>업무 시작점. 보통 <strong>AI가 자동 입력</strong>. 수동 시 동행모드.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"><div class="n">2</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>📅 오늘 일정 웹앱</h4>
+        <p>그날 반출/반납 카드에서 <strong>품목 ✓ 체크</strong>하며 진행.</p>
+      </div>
+    </div>
+    <div class="step done">
+      <div class="step-num"><div class="n">3</div></div>
+      <div class="step-body">
+        <h4>💰 거래내역 시트</h4>
+        <p>금액 확인 → 결제 → 결제수단 입력 → 마무리.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="al i" style="margin-top:14px;">
+    <span class="ico">💡</span>
+    <span><strong>막히면</strong> 사장님/단톡방에 묻기 전에 위 🤖 <strong>VILLAGE.AI</strong> 먼저 검색.</span>
+  </div>
+</div>
+
+<!-- ═══════════ 탭2: 신규 ═══════════ -->
+<div class="panel" id="t2">
+  <div class="stitle">신규 예약 등록</div>
+  <p class="ssub">기본은 AI 자동. 수동 시 동행모드.</p>
+
+  <div class="al i">
+    <span class="ico">🤖</span>
+    <span><strong>AI 자동 입력</strong> — 카톡 문의 → 자동으로 확인요청 시트에 행 생성.</span>
+  </div>
+
+  <div class="al w">
+    <span class="ico">✋</span>
+    <span><strong>수동 입력</strong> 필요 시 → 메뉴 <strong>📋 빌리지 스케줄 → 🎓 동행 모드 열기</strong>.
+      AI가 단계별로 코칭함.</span>
+  </div>
+
+  <div class="flow" style="margin-top:10px;">
+    <div class="step">
+      <div class="step-num"><div class="n">1</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>기본 정보 입력</h4>
+        <p><span class="col">B~E</span> 일시 <span class="col">F</span> 장비/세트 <span class="col">G</span> 수량 <span class="col">K~L</span> 예약자</p>
+        <p class="tip">A열 요청ID 자동생성 / 세트는 구성품 자동 펼침</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"><div class="n">2</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>가용 확인</h4>
+        <p><span class="col">H</span> = <span class="pill o">확인</span></p>
+        <p>✅ 가용 / ⚠ 부족 / ❌ 불가 결과 확인</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"><div class="n">3</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>알림톡 발송</h4>
+        <p><span class="col">H</span> = <span class="pill o">발송승인</span></p>
+        <p class="warn">⚠ 결과 확인 후 승인! 한 번 보내면 취소 불가.</p>
+      </div>
+    </div>
+    <div class="step done">
+      <div class="step-num"><div class="n">✓</div></div>
+      <div class="step-body">
+        <h4>예약 등록 완료</h4>
+        <p><span class="col">N</span> = <span class="pill g">등록</span></p>
+        <p class="tip">계약마스터·스케줄상세·개고생2.0·계약서·완료알림톡 모두 자동.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ 탭3: 변경 ═══════════ -->
+<div class="panel" id="t3">
+  <div class="stitle">예약 변경 / 취소 / 추가</div>
+  <p class="ssub">이미 등록된 건 — <strong>확인요청 거치지 말고 직접 수정</strong>이 편함.</p>
+
+  <div class="al w">
+    <span class="ico">✋</span>
+    <span>직접 수정 시 <strong>빌리지 스케줄(타임라인)</strong>에서 가용여부 수동 체크 필수.</span>
+  </div>
+
+  <div class="card">
+    <h4>📅 일정 변경</h4>
+    <div class="row"><span class="col">계약마스터</span> E~I열 직접 수정</div>
+    <div class="row"><span style="font-size:11px;color:#666;">→ 스케줄상세 / 거래내역 / 계약서 자동 동기화 (3초 디바운스)</span></div>
+  </div>
+
+  <div class="card">
+    <h4>➕ 장비 추가</h4>
+    <div class="row"><span class="col">A안</span> 오늘 일정 웹앱 카드 → <code class="k">+ 장비추가</code></div>
+    <div class="row"><span class="col">B안</span> 스케줄상세 빈 행 B열에 거래ID 입력 → 나머지 자동 / D열에 장비 선택</div>
+    <div class="row"><span style="font-size:11px;color:#666;">→ 계약서 자동 재생성</span></div>
+  </div>
+
+  <div class="card">
+    <h4>➖ 장비 삭제</h4>
+    <div class="row"><span class="col">A안</span> 오늘 일정 웹앱 카드 → <code class="k">×</code> 클릭</div>
+    <div class="row"><span class="col">B안</span> 스케줄상세 해당 행 우클릭 → 행 삭제</div>
+  </div>
+
+  <div class="card">
+    <h4>🚫 계약 취소</h4>
+    <div class="row"><span class="col">계약마스터 J</span> = <span class="pill r">취소</span> 선택</div>
+    <div class="row"><span style="font-size:11px;color:#666;">→ 스케줄상세 / 거래내역 자동 삭제 + 행 빨강+취소선 표시</span></div>
+  </div>
+
+  <div class="al i">
+    <span class="ico">💡</span>
+    <span>변경 시 알림톡은 <strong>안 나감</strong>. 필요 시 별도 연락.</span>
+  </div>
+</div>
+
+<!-- ═══════════ 탭4: 반출 ═══════════ -->
+<div class="panel" id="t4">
+  <div class="stitle">반출 처리 (오늘 반출 건)</div>
+  <p class="ssub">오늘 일정 웹앱 ❤️에서 진행</p>
+
+  <div class="flow">
+    <div class="step">
+      <div class="step-num"><div class="n">1</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>오늘 일정 웹앱 열기</h4>
+        <p>상단 📅 빠른 링크 또는 PC/모바일에서 직접.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"><div class="n">2</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>반출 카드 펼치기</h4>
+        <p>장비 <strong>품목 체크리스트</strong> 노출. 들어가야 할 장비 표시.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"><div class="n">3</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>세팅하며 ✓ 체크</h4>
+        <p>장비 챙길 때마다 체크박스 클릭. 빠진 게 없는지 확인.</p>
+        <p class="tip">누락 발견 시 <code class="k">+ 장비추가</code>로 추가.</p>
+      </div>
+    </div>
+    <div class="step done">
+      <div class="step-num"><div class="n">✓</div></div>
+      <div class="step-body">
+        <h4>전체 완료 토글</h4>
+        <p>카드 좌측 큰 ✓ 버튼 클릭 → 카드 흐림 처리. 다음 건으로 이동.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ 탭5: 반납 ═══════════ -->
+<div class="panel" id="t5">
+  <div class="stitle">반납 처리 (오늘 반납 건)</div>
+  <p class="ssub">웹앱 → 검수 → 개고생2.0 → 결제</p>
+
+  <div class="flow">
+    <div class="step">
+      <div class="step-num"><div class="n">1</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>반납 카드 펼치기</h4>
+        <p>오늘 일정 웹앱 → 반납 탭. 들어와야 할 장비 목록 노출.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"><div class="n">2</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>들어온 장비 ✓ 체크</h4>
+        <p>장비 받을 때마다 체크. 누락 없는지 확인.</p>
+        <p class="warn">누락/파손 발견 시 즉시 사장님 보고.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"><div class="n">3</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>🔗 개고생2.0 거래 열기</h4>
+        <p>카드 하단 검은 버튼 클릭 → AppSheet 거래 상세로 점프.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"><div class="n">4</div><div class="ln"></div></div>
+      <div class="step-body">
+        <h4>💰 결제 처리</h4>
+        <p>거래내역 시트에서 계약서 링크 → 금액 최종 점검 → 결제 받기 → 결제수단 입력.</p>
+      </div>
+    </div>
+    <div class="step done">
+      <div class="step-num"><div class="n">✓</div></div>
+      <div class="step-body">
+        <h4>반납완료 처리</h4>
+        <p>개고생2.0에서 반납완료 체크.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ 탭6: 주의 ═══════════ -->
+<div class="panel" id="t6">
+  <div class="stitle">실수 방지</div>
+  <p class="ssub">한 번이라도 어긴 항목 있으면 다시 읽고 진행</p>
+
+  <ul class="chk">
+    <li class="bad"><strong>세트 구성품 행</strong> 직접 수정 금지 — 데이터 깨짐</li>
+    <li class="bad"><strong>발송승인은 취소 불가</strong> — 결과 확인 후 신중히</li>
+    <li class="bad">금액 미확인 결제 받지 말 것 — 계약서 한 번 더 확인</li>
+    <li class="warn">계약마스터·스케줄상세 직접 수정 시 <strong>가용 체크 필수</strong></li>
+    <li class="warn">노란색 셀(카테고리 미선택) 보이면 <strong>구체 모델 선택</strong></li>
+    <li class="warn">변경/취소/추가 시 <strong>고객 알림톡 안 나감</strong> — 별도 연락</li>
+    <li class="tip">동행모드 메뉴 안 보이면 → <strong>시트 탭 닫고 새로 열기</strong></li>
+    <li class="tip">막히면 <strong>VILLAGE.AI(NotebookLM)</strong> 먼저 검색</li>
+  </ul>
+</div>
+
+<script>
+  document.querySelectorAll('.tab').forEach(function(b) {
+    b.addEventListener('click', function() {
+      document.querySelectorAll('.tab').forEach(function(x) { x.classList.remove('on'); });
+      document.querySelectorAll('.panel').forEach(function(x) { x.classList.remove('on'); });
+      b.classList.add('on');
+      document.getElementById(b.dataset.t).classList.add('on');
+    });
+  });
+</script>
 </body>
 </html>
