@@ -720,6 +720,8 @@ function propagateContractDates(ss, contractSheet, row, 거래ID) {
   }
 
   // 2) 개고생2.0 거래내역 A열(반출일) 업데이트 — 거래내역엔 반납일 필드 없음
+  // ⚠️ 값이 실제로 다를 때만 setValue. 같은 값이면 setValue 안 함 →
+  //    개고생2.0의 autoContract 트리거 폭주 방지 (AppSheet 부하 감소).
   try {
     var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
     if (개고생URL) {
@@ -727,12 +729,26 @@ function propagateContractDates(ss, contractSheet, row, 거래ID) {
       var 거래시트 = 개고생SS.getSheetByName("거래내역");
       if (거래시트 && 거래시트.getLastRow() >= 2) {
         // 2026-04-23 컬럼 재배치: 거래ID D(4) → E(5)
-        var ids = 거래시트.getRange(2, 5, 거래시트.getLastRow() - 1, 1).getValues();
-        for (var j = 0; j < ids.length; j++) {
-          if (String(ids[j][0]).trim() === 거래ID) {
-            거래시트.getRange(j + 2, 1).setValue(반출일Raw);  // 거래내역 A열(날짜)은 위치 안 바뀜
-            Logger.log("개고생2.0 거래내역 반출일 업데이트: 행 " + (j + 2) + " (" + 거래ID + ")");
+        var lastR = 거래시트.getLastRow();
+        // 거래ID(E) + 반출일(A) 한 번에 읽기 — 행마다 getValue 호출 회피
+        var aCol = 거래시트.getRange(2, 1, lastR - 1, 1).getValues();
+        var eCol = 거래시트.getRange(2, 5, lastR - 1, 1).getValues();
+        // 비교용으로 새 반출일을 'yyyy-MM-dd' 문자열 정규화
+        var 새반출일str = (반출일Raw instanceof Date)
+          ? Utilities.formatDate(반출일Raw, 'Asia/Seoul', 'yyyy-MM-dd')
+          : String(반출일Raw || '').trim();
+        for (var j = 0; j < eCol.length; j++) {
+          if (String(eCol[j][0]).trim() !== 거래ID) continue;
+          var 기존A = aCol[j][0];
+          var 기존str = (기존A instanceof Date)
+            ? Utilities.formatDate(기존A, 'Asia/Seoul', 'yyyy-MM-dd')
+            : String(기존A || '').trim();
+          if (기존str === 새반출일str) {
+            // 동일 값 — 쓰기 스킵 (autoContract 폭주 방지)
+            continue;
           }
+          거래시트.getRange(j + 2, 1).setValue(반출일Raw);
+          Logger.log("개고생2.0 거래내역 반출일 갱신: " + 기존str + " → " + 새반출일str + " (행 " + (j + 2) + " / " + 거래ID + ")");
         }
       }
     }
