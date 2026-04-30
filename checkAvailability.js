@@ -35,6 +35,7 @@ function onOpen() {
     .addItem("✅ 예약 등록 (수동)", "manualRegister")
     .addItem("📄 계약서 생성", "createContractFromMenu")
     .addItem("🐞 가용확인 디버그 (선택행)", "debugCheckAvailForSelected")
+    .addItem("⚡ 가용확인 강제 재실행 (선택행 reqID)", "forceRerunCheckAvailForSelected")
     .addSeparator()
     .addItem("🔍 선택 행 할인유형 재조회", "lookupDiscountForSelectedRow")
     .addSeparator()
@@ -4361,6 +4362,67 @@ function debugCheckAvailForSelected() {
     }
     lines.push('  요약: 매칭=' + matched + ' / OVERLAP=' + overlapped + ' (qty합=' + concurrentSum + ') / parseDT실패=' + nullParsed + ' / status제외=' + lostByStatus);
   });
+
+  showLog_(lines);
+}
+
+/**
+ * 강제 재실행: 선택 행의 reqID에 대해 가용확인을 강제로 다시 돌리고
+ * 모든 행의 I열/J열 결과를 출력. processByReqID와 동일한 코드 경로.
+ * 단, "이미 결과 있으면 스킵" 우회 위해 I/J열을 먼저 비우고 실행.
+ */
+function forceRerunCheckAvailForSelected() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getActiveSheet();
+  if (sheet.getName() !== "확인요청") {
+    SpreadsheetApp.getUi().alert("확인요청 시트에서 행을 선택한 후 실행하세요.");
+    return;
+  }
+  var row = sheet.getActiveCell().getRow();
+  if (row < 2) { SpreadsheetApp.getUi().alert("데이터 행을 선택하세요."); return; }
+
+  var lastRowReq = sheet.getLastRow();
+  var allReqVals = sheet.getRange(2, 1, lastRowReq - 1, 17).getValues();
+  var triggerReqID = String(allReqVals[row - 2][0] || '').trim();
+  if (!triggerReqID) { SpreadsheetApp.getUi().alert("요청ID 없는 행입니다."); return; }
+
+  var lines = [];
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  lines.push('강제 재실행: triggerReqID=' + triggerReqID);
+
+  // I/J열 비우기 (스킵 로직 우회) — 단, 첫 행(세트 헤더)은 "세트" 유지
+  var triggerRowAbs = row;
+  var sameReqRows = [];
+  for (var i = 0; i < allReqVals.length; i++) {
+    if (String(allReqVals[i][0]).trim() === triggerReqID) sameReqRows.push(i + 2);
+  }
+  lines.push('같은 reqID 행 수=' + sameReqRows.length);
+  sameReqRows.forEach(function(r) {
+    sheet.getRange(r, 9, 1, 2).clearContent();
+  });
+  SpreadsheetApp.flush();
+  lines.push('I/J열 비움 완료. processByReqID 호출…');
+
+  // 진짜 가용확인 함수 호출 (락 포함)
+  processByReqID(sheet, triggerRowAbs);
+  SpreadsheetApp.flush();
+  lines.push('processByReqID 완료. 결과 읽는 중…');
+  lines.push('');
+
+  // 결과 출력
+  var newLastRow = sheet.getLastRow();
+  var newAllVals = sheet.getRange(2, 1, newLastRow - 1, 18).getValues();
+  for (var i = 0; i < newAllVals.length; i++) {
+    if (String(newAllVals[i][0]).trim() !== triggerReqID) continue;
+    var r = i + 2;
+    var equip = String(newAllVals[i][5] || '');
+    var qty = newAllVals[i][6];
+    var iCol = String(newAllVals[i][8] || '').replace(/\n/g, ' ⏎ ');
+    var jCol = String(newAllVals[i][9] || '').replace(/\n/g, ' ⏎ ');
+    lines.push('row=' + r + ' / 장비명=' + JSON.stringify(equip) + ' / qty=' + qty);
+    lines.push('  I열(결과) = ' + JSON.stringify(iCol));
+    lines.push('  J열(상세) = ' + JSON.stringify(jCol));
+  }
 
   showLog_(lines);
 }
