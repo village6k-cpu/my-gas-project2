@@ -4253,9 +4253,8 @@ function installCompanionTrigger() {
 }
 
 /**
- * 디버그: 선택한 확인요청 행의 가용확인 과정을 단계별로 추적해서
- * 스케줄상세에서 매칭/필터링되는 항목과 시간 비교 결과를 출력.
- * 사용법: 확인요청 시트에서 가용확인 결과가 의심스러운 행을 클릭한 뒤 메뉴 실행.
+ * 디버그: 선택한 확인요청 행이 속한 reqID의 모든 행을 한번에 추적.
+ * 헤더 + 모든 구성품 각각에 대해 schedSheet 매칭 결과를 출력.
  */
 function debugCheckAvailForSelected() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -4270,51 +4269,43 @@ function debugCheckAvailForSelected() {
     return;
   }
 
-  var rowVals = sheet.getRange(row, 1, 1, 7).getValues()[0];
-  var rowDisp = sheet.getRange(row, 1, 1, 7).getDisplayValues()[0];
-  var reqID = rowVals[0];
-  var 반출일 = rowVals[1];
-  var 반출시간 = rowDisp[2];
-  var 반납일 = rowVals[3];
-  var 반납시간 = rowDisp[4];
-  var 장비명 = String(rowVals[5] || '').trim();
-  var 수량 = rowVals[6] || 1;
+  var lastRowReq = sheet.getLastRow();
+  var allReqVals = sheet.getRange(2, 1, lastRowReq - 1, 7).getValues();
+  var allReqDisp = sheet.getRange(2, 1, lastRowReq - 1, 7).getDisplayValues();
+  var triggerReqID = String(allReqVals[row - 2][0] || '').trim();
 
   var lines = [];
   lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  lines.push('선택 행: ' + row + ' / reqID=' + reqID);
-  lines.push('장비명=' + JSON.stringify(장비명) + ' / 수량=' + 수량);
-  lines.push('반출일 raw=' + JSON.stringify(반출일) + ' / typeof=' + typeof 반출일 + ' / isDate=' + (반출일 instanceof Date));
-  lines.push('반출시간(disp)=' + JSON.stringify(반출시간));
-  lines.push('반납일 raw=' + JSON.stringify(반납일) + ' / typeof=' + typeof 반납일 + ' / isDate=' + (반납일 instanceof Date));
-  lines.push('반납시간(disp)=' + JSON.stringify(반납시간));
+  lines.push('선택 행=' + row + ' / triggerReqID=' + triggerReqID);
+
+  if (!triggerReqID) { lines.push('⚠️ 요청ID 없음'); showLog_(lines); return; }
+
+  // 같은 reqID의 첫 행에서 날짜/시간 가져오기
+  var 반출일=null, 반출시간=null, 반납일=null, 반납시간=null;
+  for (var i = 0; i < allReqVals.length; i++) {
+    if (String(allReqVals[i][0]).trim() === triggerReqID && allReqVals[i][1]) {
+      반출일 = allReqVals[i][1];
+      반출시간 = allReqDisp[i][2];
+      반납일 = allReqVals[i][3];
+      반납시간 = allReqDisp[i][4];
+      break;
+    }
+  }
 
   var reqStartDT = parseDT(반출일, 반출시간);
   var reqEndDT = parseDT(반납일, 반납시간);
-  lines.push('reqStartDT=' + (reqStartDT ? reqStartDT.toISOString() + ' (KST ' + Utilities.formatDate(reqStartDT, 'Asia/Seoul', 'M/d HH:mm') + ')' : 'NULL'));
-  lines.push('reqEndDT  =' + (reqEndDT ? reqEndDT.toISOString() + ' (KST ' + Utilities.formatDate(reqEndDT, 'Asia/Seoul', 'M/d HH:mm') + ')' : 'NULL'));
+  lines.push('기간: KST ' +
+    (reqStartDT ? Utilities.formatDate(reqStartDT,'Asia/Seoul','M/d HH:mm') : 'NULL') + ' ~ ' +
+    (reqEndDT ? Utilities.formatDate(reqEndDT,'Asia/Seoul','M/d HH:mm') : 'NULL'));
 
-  if (!reqStartDT || !reqEndDT) {
-    lines.push('⚠️ reqStartDT/reqEndDT 파싱 실패 — 가용확인 못 돌아감');
-    showLog_(lines);
-    return;
-  }
+  if (!reqStartDT || !reqEndDT) { lines.push('⚠️ 파싱 실패'); showLog_(lines); return; }
 
   var schedSheet = ss.getSheetByName('스케줄상세');
   if (!schedSheet) { lines.push('스케줄상세 시트 없음'); showLog_(lines); return; }
-
   var lastRow = schedSheet.getLastRow();
   lines.push('스케줄상세 lastRow=' + lastRow);
 
-  // raw 데이터를 직접 읽어서 같은 장비명만 필터하고 각 행의 cell 타입/값 출력
   var rawData = schedSheet.getRange(2, 1, lastRow - 1, 11).getValues();
-  var matched = 0;
-  var overlapped = 0;
-  var nullParsed = 0;
-  var lostByStatus = 0;
-  var lostByEquipName = 0;
-  var debugLimit = 30; // 출력 행수 제한
-  var debugShown = 0;
 
   // 거래마스터 매핑
   var contractSheet = ss.getSheetByName('계약마스터');
@@ -4324,61 +4315,52 @@ function debugCheckAvailForSelected() {
     contracts.forEach(function(c) { contractMap[c[0]] = c[1] || ''; });
   }
 
-  for (var i = 0; i < rawData.length; i++) {
-    var r = rawData[i];
-    var schedID = r[0];
-    var contractID = r[1];
-    var equip = String(r[3] || '');
-    var status = r[9];
-    if (equip !== 장비명) {
-      // 장비명 비슷한지 확인 (FX3 바디 같은 게 다른 형태로 들어가있나)
-      if (equip && 장비명 && equip.indexOf('FX3') >= 0 && 장비명.indexOf('FX3') >= 0 && equip !== 장비명) {
-        if (debugShown < debugLimit) {
-          lines.push('[장비명 다름] row=' + (i+2) + ' equip=' + JSON.stringify(equip) + ' (len=' + equip.length + ') vs 검색=' + JSON.stringify(장비명) + ' (len=' + 장비명.length + ')');
-          debugShown++;
-          lostByEquipName++;
-        }
-      }
-      continue;
-    }
-    matched++;
-
-    if (status === '반납완료' || status === '취소') {
-      lostByStatus++;
-      lines.push('[status제외] row=' + (i+2) + ' tid=' + contractID + ' status=' + JSON.stringify(status));
-      continue;
-    }
-
-    var startDT = parseDT(r[5], r[6]);
-    var endDT = parseDT(r[7], r[8]);
-
-    var info = 'row=' + (i+2) + ' tid=' + contractID + ' name=' + (contractMap[contractID] || '?');
-    info += ' qty=' + r[4];
-    info += ' / 반출일 raw=' + JSON.stringify(r[5]) + ' isDate=' + (r[5] instanceof Date);
-    info += ' / 반출시간 raw=' + JSON.stringify(r[6]) + ' isDate=' + (r[6] instanceof Date);
-    info += ' / 반납일 raw=' + JSON.stringify(r[7]) + ' isDate=' + (r[7] instanceof Date);
-    info += ' / 반납시간 raw=' + JSON.stringify(r[8]) + ' isDate=' + (r[8] instanceof Date);
-
-    if (!startDT || !endDT) {
-      nullParsed++;
-      lines.push('[parseDT 실패] ' + info + ' → startDT=' + startDT + ', endDT=' + endDT);
-      continue;
-    }
-
-    info += ' / startDT=KST ' + Utilities.formatDate(startDT, 'Asia/Seoul', 'M/d HH:mm');
-    info += ' / endDT=KST ' + Utilities.formatDate(endDT, 'Asia/Seoul', 'M/d HH:mm');
-
-    var overlap = startDT < reqEndDT && endDT > reqStartDT;
-    if (overlap) {
-      overlapped++;
-      lines.push('[OVERLAP ✓] ' + info);
-    } else {
-      lines.push('[no overlap] ' + info);
-    }
+  // 같은 reqID의 모든 행 (장비명) 수집
+  var targetEquips = [];
+  for (var i = 0; i < allReqVals.length; i++) {
+    if (String(allReqVals[i][0]).trim() !== triggerReqID) continue;
+    var eq = String(allReqVals[i][5] || '').trim();
+    if (!eq) continue;
+    targetEquips.push({ row: i + 2, 장비명: eq, 수량: allReqVals[i][6] || 1 });
   }
+  lines.push('확인요청 같은 reqID 행 수=' + targetEquips.length);
 
-  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  lines.push('총 매칭(같은 장비명)=' + matched + ' / 겹침=' + overlapped + ' / parseDT실패=' + nullParsed + ' / status제외=' + lostByStatus + ' / 장비명비슷but다름=' + lostByEquipName);
+  // 각 장비명에 대해 schedSheet 매칭
+  targetEquips.forEach(function(t) {
+    lines.push('');
+    lines.push('▶▶ 검사: row=' + t.row + ' 장비명=' + JSON.stringify(t.장비명) + ' (len=' + t.장비명.length + ') 수량=' + t.수량);
+    var matched = 0, overlapped = 0, nullParsed = 0, lostByStatus = 0;
+    var concurrentSum = 0;  // OVERLAP된 행들의 qty 합
+    for (var i = 0; i < rawData.length; i++) {
+      var r = rawData[i];
+      var equip = String(r[3] || '');
+      if (equip !== t.장비명) continue;
+      matched++;
+      var status = r[9];
+      if (status === '반납완료' || status === '취소') {
+        lostByStatus++;
+        lines.push('  [status제외] row=' + (i+2) + ' tid=' + r[1] + ' status=' + JSON.stringify(status));
+        continue;
+      }
+      var startDT = parseDT(r[5], r[6]);
+      var endDT = parseDT(r[7], r[8]);
+      if (!startDT || !endDT) {
+        nullParsed++;
+        lines.push('  [parseDT실패] row=' + (i+2) + ' tid=' + r[1] + ' / 반출일=' + JSON.stringify(r[5]) + ' isDate=' + (r[5] instanceof Date) + ' / 반출시간=' + JSON.stringify(r[6]));
+        continue;
+      }
+      var overlap = startDT < reqEndDT && endDT > reqStartDT;
+      if (overlap) {
+        overlapped++;
+        concurrentSum += (r[4] || 1);
+        lines.push('  [OVERLAP ✓] row=' + (i+2) + ' tid=' + r[1] + ' name=' + (contractMap[r[1]] || '?') +
+          ' qty=' + r[4] +
+          ' / 반출일raw=' + JSON.stringify(r[5]) + ' isDate=' + (r[5] instanceof Date) +
+          ' / KST ' + Utilities.formatDate(startDT,'Asia/Seoul','M/d HH:mm') + ' ~ ' + Utilities.formatDate(endDT,'Asia/Seoul','M/d HH:mm'));
+      }
+    }
+    lines.push('  요약: 매칭=' + matched + ' / OVERLAP=' + overlapped + ' (qty합=' + concurrentSum + ') / parseDT실패=' + nullParsed + ' / status제외=' + lostByStatus);
+  });
 
   showLog_(lines);
 }
