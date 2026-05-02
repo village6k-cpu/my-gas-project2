@@ -138,6 +138,31 @@
 
 **재배포 자동화**: 사용자는 매번 수동 배포하는 걸 원하지 않음. 코드 변경 작업은 4번까지 항상 자동 실행하고 "재배포할까요" 묻지 말 것.
 
+### 두 맥 오갈 때 워크플로우 (스크립트 자동화)
+두 맥 오가며 작업할 때 sync 빼먹어서 작업분 날리지 않도록 자동화 스크립트 사용.
+
+**작업 시작 시:**
+```
+./scripts/startwork.sh
+```
+→ git fetch+pull, clasp pull, 동기화 상태 점검까지 자동.
+GAS에 git 미반영분이 있으면 멈추고 안내함.
+
+**작업 종료 시:**
+```
+./scripts/endwork.sh "커밋 메시지"
+```
+→ clasp push, clasp deploy, git commit+push까지 자동.
+메시지 생략하면 프롬프트로 물음.
+
+**상태 진단 (읽기 전용):**
+```
+./scripts/synccheck.sh
+```
+→ 로컬/원격/GAS 동기화 상태 확인. 변경 없음.
+
+**원칙: 떠나는 맥에서 endwork, 도착하는 맥에서 startwork.** 빼먹으면 다른 맥 작업분이 GAS와 git 사이에서 어긋남.
+
 ### 주의사항
 - doGet/doPost는 sheetAPI.js에만 정의
 - onOpen은 checkAvailability.js에만 정의
