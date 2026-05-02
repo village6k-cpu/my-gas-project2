@@ -127,11 +127,41 @@
 - Google Drive (계약서 파일 생성)
 - GitHub Pages (프론트엔드 직접 서빙 — 속도 개선)
 
+### 배포 순서 (반드시 준수, 전부 자동 실행)
+1. `clasp pull` → GAS 편집기에서 작업한 내용 로컬로 가져오기 (덮어쓰기 방지)
+2. 로컬에서 코드 수정
+3. `clasp push` → GAS에 반영
+4. `clasp deploy -i AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT -d "변경 요약"` → 기존 웹앱 URL 유지한 채 새 버전 배포
+5. `git add & commit & push` → 백업 + GitHub Pages(docs/) 자동 반영
+
+**절대 clasp pull 없이 clasp push 하지 말 것** — GAS 편집기에서 직접 작업한 코드가 날아감
+
+**재배포 자동화**: 사용자는 매번 수동 배포하는 걸 원하지 않음. 코드 변경 작업은 4번까지 항상 자동 실행하고 "재배포할까요" 묻지 말 것.
+
 ### 주의사항
 - doGet/doPost는 sheetAPI.js에만 정의
 - onOpen은 checkAvailability.js에만 정의
 - .clasp.json의 scriptId로 GAS 프로젝트 식별
 - GAS는 같은 프로젝트 내 모든 .js 파일이 전역 스코프 공유
-- clasp push 후 반드시 GAS 편집기에서 새 버전 배포해야 웹앱 반영
 - docs/ 폴더 변경은 git push만 하면 GitHub Pages 자동 반영
 - 계약서 생성 시 전체 시트 데이터 유효성 해제 (setAllowInvalid) 필수
+
+## Skill routing
+
+When the user's request matches an available skill, ALWAYS invoke it using the Skill
+tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
+The skill has specialized workflows that produce better results than ad-hoc answers.
+
+Key routing rules:
+- Product ideas, "is this worth building", brainstorming → invoke office-hours
+- Bugs, errors, "why is this broken", 500 errors → invoke investigate
+- Ship, deploy, push, create PR → invoke ship
+- QA, test the site, find bugs → invoke qa
+- Code review, check my diff → invoke review
+- Update docs after shipping → invoke document-release
+- Weekly retro → invoke retro
+- Design system, brand → invoke design-consultation
+- Visual audit, design polish → invoke design-review
+- Architecture review → invoke plan-eng-review
+- Save progress, checkpoint, resume → invoke checkpoint
+- Code quality, health check → invoke health
