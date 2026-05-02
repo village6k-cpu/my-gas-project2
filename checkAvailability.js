@@ -2685,7 +2685,6 @@ function registerByReqID(sheet, triggerRow) {
         schedCount++;
         const setSchedID = `${거래ID}-${String(schedCount).padStart(2, "0")}`;
         const setRow = writeBaseRow + schedCount;
-        schedSheet.getRange(setRow, 1, 1, 13).clearDataValidations();
         schedSheet.getRange(setRow, 1, 1, 13).setValues([[
           setSchedID, 거래ID, 장비명, 장비명, 수량,
           반출일str, 반출시간str, 반납일str, 반납시간str,
@@ -2701,7 +2700,6 @@ function registerByReqID(sheet, triggerRow) {
         schedCount++;
         const compID = `${거래ID}-${String(schedCount).padStart(2, "0")}`;
         const compRow = writeBaseRow + schedCount;
-        schedSheet.getRange(compRow, 1, 1, 13).clearDataValidations();
         schedSheet.getRange(compRow, 1, 1, 13).setValues([[
           compID, 거래ID, 소속세트, 장비명, 수량,
           반출일str, 반출시간str, 반납일str, 반납시간str,
@@ -2717,7 +2715,6 @@ function registerByReqID(sheet, triggerRow) {
         schedCount++;
         const schedID = `${거래ID}-${String(schedCount).padStart(2, "0")}`;
         const newRow = writeBaseRow + schedCount;
-        schedSheet.getRange(newRow, 1, 1, 13).clearDataValidations();
         schedSheet.getRange(newRow, 1, 1, 13).setValues([[
           schedID, 거래ID, "", 장비명, 수량,
           반출일str, 반출시간str, 반납일str, 반납시간str,
@@ -2985,7 +2982,6 @@ function addEquipmentToContract(sheet, row) {
   const 단가 = findSetPrice(장비명, setSheet);
 
   const newRow = schedLastRow + 1;
-  schedSheet.getRange(newRow, 1, 1, 13).clearDataValidations();
   schedSheet.getRange(newRow, 1, 1, 13).setValues([[
     schedID, 거래ID, "", 장비명, 수량,
     반출일str, 반출시간str, 반납일str, 반납시간str,
