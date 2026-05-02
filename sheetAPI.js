@@ -22,6 +22,11 @@
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const API_KEY = "village2026";
 
+// 쓰기 허용 시트 화이트리스트
+const WRITABLE_SHEETS = ["확인요청", "스케줄상세", "신규장비 추가", "실사 기록"];
+function isWritableSheet(sheetName) {
+  return WRITABLE_SHEETS.indexOf(sheetName) !== -1;
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 웹앱 엔드포인트 (프로젝트 전체에서 유일)
@@ -41,10 +46,26 @@ function doGet(e) {
     if (pg) {
       var html = HtmlService.createHtmlOutputFromFile(pg.file);
       var webAppUrl = ScriptApp.getService().getUrl();
-      html.setContent(html.getContent().replace(
+      var content = html.getContent().replace(
         'var API_URL = "";',
         'var API_URL = "' + webAppUrl + '";'
-      ));
+      );
+
+      // ── dashboard는 초기 데이터를 HTML에 직접 박아서 fetch 왕복 1회 절약 ──
+      if (params.page === "dashboard") {
+        try {
+          var initialData = getDashboardData(params.date || null, false);
+          content = content.replace(
+            'var INITIAL_DATA = null;',
+            'var INITIAL_DATA = ' + JSON.stringify(initialData) + ';'
+          );
+        } catch (err) {
+          // 데이터 조회 실패해도 페이지는 로드 — 클라이언트가 fetch로 재시도
+          Logger.log("dashboard 초기 데이터 로드 실패: " + err.message);
+        }
+      }
+
+      html.setContent(content);
       html.setTitle(pg.title);
       html.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
       return html;
@@ -98,25 +119,23 @@ function handleRequest(e) {
           parseInt(params.limit) || 0
         ));
 
-      case "write":
-        return jsonResponse(writeSheet(
-          postBody.sheet,
-          postBody.range,
-          postBody.values
-        ));
+      case "write": {
+        var wSheet = postBody.sheet;
+        if (!isWritableSheet(wSheet)) return jsonResponse({ error: "쓰기 허용되지 않은 시트: " + wSheet });
+        return jsonResponse(writeSheet(wSheet, postBody.range, postBody.values));
+      }
 
-      case "append":
-        return jsonResponse(appendRows(
-          postBody.sheet,
-          postBody.values
-        ));
+      case "append": {
+        var aSheet = postBody.sheet;
+        if (!isWritableSheet(aSheet)) return jsonResponse({ error: "쓰기 허용되지 않은 시트: " + aSheet });
+        return jsonResponse(appendRows(aSheet, postBody.values));
+      }
 
-      case "update":
-        return jsonResponse(updateCell(
-          params.sheet || postBody.sheet,
-          params.cell || postBody.cell,
-          params.value !== undefined ? params.value : postBody.value
-        ));
+      case "update": {
+        var uSheet = params.sheet || postBody.sheet;
+        if (!isWritableSheet(uSheet)) return jsonResponse({ error: "쓰기 허용되지 않은 시트: " + uSheet });
+        return jsonResponse(updateCell(uSheet, params.cell || postBody.cell, params.value !== undefined ? params.value : postBody.value));
+      }
 
       case "search":
         return jsonResponse(searchSheet(
@@ -133,8 +152,51 @@ function handleRequest(e) {
       case "timeline":
         return jsonResponse(getTimelineData());
 
+      case "updateTime": {
+        var row = Number(params.row || postBody.row);
+        var newStart = params.start || postBody.start;
+        var newEnd   = params.end   || postBody.end;
+        var rowIndices = params.rowIndices || postBody.rowIndices || null;
+        if (!row || !newStart || !newEnd) return jsonResponse({ success: false, message: "row, start, end 필수" });
+        return jsonResponse(updateScheduleTime(row, newStart, newEnd, rowIndices));
+      }
+
       case "dashboard":
-        return jsonResponse(getDashboardData(params.date || postBody.date || null));
+        // nocache=1 이면 캐시 우회 (새로고침 버튼용)
+        var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
+        return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache));
+
+      case "toggleSetup":
+        return jsonResponse(toggleSetupDone(
+          params.tid || postBody.tid,
+          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
+        ));
+
+      case "toggleReturn":
+        return jsonResponse(toggleReturnDone(
+          params.tid || postBody.tid,
+          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
+        ));
+
+      case "toggleItem":
+        return jsonResponse(toggleItemCheck(
+          params.scheduleId || postBody.scheduleId,
+          params.phase || postBody.phase,
+          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
+        ));
+
+      case "addEquip":
+        return jsonResponse(dashboardAddEquipment(
+          params.tid || postBody.tid,
+          params.equipName || postBody.equipName,
+          params.qty || postBody.qty || 1
+        ));
+
+      case "removeEquip":
+        return jsonResponse(dashboardRemoveEquipment(
+          params.tid || postBody.tid,
+          params.equipName || postBody.equipName
+        ));
 
       // ━━━ 스케줄 관리 API ━━━
 
@@ -561,14 +623,27 @@ function runFunction(funcName, params) {
   if (!funcName) return { error: "func 파라미터가 필요합니다" };
 
   const allowedFunctions = [
-    "processAllPending",
-    "clearResults",
     "refreshEquipmentList",
     "syncAuditFromMaster",
     "insertAndCheckRequest",
     "updateRequest",
     "deleteRequest",
-    "excludeEquipFromRequest"
+    "excludeEquipFromRequest",
+    "formatScheduleSheet",
+    "formatContractSheet",
+    "resyncAllContractDates",
+    "scanCorruptedContractTimes",
+    "listPendingContractRegens",
+    "regenPendingContracts",
+    "setupDiscountColumns",
+    "inspectContractTemplateDiscounts",
+    "setupContractTemplate",
+    "fixSchedQuantityTextOne",
+    "setupDashboardWarmerTrigger",
+    "warmDashboardCache",
+    "getInventoryConflicts",
+    "getInventoryConflictsSlackMessage",
+    "listAllTriggers"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -600,6 +675,30 @@ function runFunction(funcName, params) {
       var reqID = typeof args === "string" ? args : args.reqID;
       var result = deleteRequest(reqID);
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    // 일반 함수 호출 (인자 없는 함수)
+    var globalFuncs = {
+      refreshEquipmentList: typeof refreshEquipmentList !== "undefined" ? refreshEquipmentList : null,
+      syncAuditFromMaster: typeof syncAuditFromMaster !== "undefined" ? syncAuditFromMaster : null,
+      formatScheduleSheet: typeof formatScheduleSheet !== "undefined" ? formatScheduleSheet : null,
+      formatContractSheet: typeof formatContractSheet !== "undefined" ? formatContractSheet : null,
+      resyncAllContractDates: typeof resyncAllContractDates !== "undefined" ? resyncAllContractDates : null,
+      scanCorruptedContractTimes: typeof scanCorruptedContractTimes !== "undefined" ? scanCorruptedContractTimes : null,
+      listPendingContractRegens: typeof listPendingContractRegens !== "undefined" ? listPendingContractRegens : null,
+      regenPendingContracts: typeof regenPendingContracts !== "undefined" ? regenPendingContracts : null,
+      setupDiscountColumns: typeof setupDiscountColumns !== "undefined" ? setupDiscountColumns : null,
+      inspectContractTemplateDiscounts: typeof inspectContractTemplateDiscounts !== "undefined" ? inspectContractTemplateDiscounts : null,
+      setupContractTemplate: typeof setupContractTemplate !== "undefined" ? setupContractTemplate : null,
+      fixSchedQuantityTextOne: typeof fixSchedQuantityTextOne !== "undefined" ? fixSchedQuantityTextOne : null,
+      setupDashboardWarmerTrigger: typeof setupDashboardWarmerTrigger !== "undefined" ? setupDashboardWarmerTrigger : null,
+      warmDashboardCache: typeof warmDashboardCache !== "undefined" ? warmDashboardCache : null,
+      getInventoryConflicts: typeof getInventoryConflicts !== "undefined" ? getInventoryConflicts : null,
+      getInventoryConflictsSlackMessage: typeof getInventoryConflictsSlackMessage !== "undefined" ? getInventoryConflictsSlackMessage : null,
+      listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
+    };
+    if (globalFuncs[funcName]) {
+      var fnResult = globalFuncs[funcName]();
+      return { success: true, function: funcName, result: fnResult || "완료", executionTime: (new Date() - startTime) + "ms" };
     }
     this[funcName]();
   } catch (e) {

@@ -414,7 +414,7 @@ function saveEdit(reqID) {
   equipRows.forEach(function(row) {
     var name = row.querySelector("[data-equip]").value.trim();
     var qty = row.querySelector("[data-qty]").value.trim();
-    if (name) items.push({ name: name, qty: qty });
+    if (name) items.push({ 이름: name, 수량: qty });
   });
 
   // API로 업데이트 (search → update 방식)

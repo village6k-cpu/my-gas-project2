@@ -4,345 +4,824 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="스케줄">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#1A1A2E">
+<meta name="theme-color" content="#FAFBFC">
 <title>빌리지 스케줄</title>
 <link href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css" rel="stylesheet">
 <style>
-  * { box-sizing:border-box; margin:0; padding:0; }
+  :root {
+    --bg: #FAFBFC;
+    --surface: #FFFFFF;
+    --border: #E8ECF0;
+    --text-primary: #1B2332;
+    --text-secondary: #5F6B7A;
+    --text-muted: #9AA5B4;
+    --accent: #2563EB;
+    --blue: #3B82F6;
+    --amber: #F59E0B;
+    --green: #10B981;
+    --gray: #9CA3AF;
+    --purple: #8B5CF6;
+    --red: #EF4444;
+    --radius: 8px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
   body {
-    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-    background:#F0F2F5; color:#1A1A2E;
-    height:100vh; height:100dvh;
-    display:flex; flex-direction:column;
-    overflow:hidden;
-    -webkit-user-select:none; user-select:none;
+    font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text-primary);
+    height: 100vh; height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-user-select: none; user-select: none;
   }
 
-  /* ── 상단 바 ── */
-  .topbar {
-    background:#1A1A2E; color:#fff;
-    padding:14px 16px;
-    display:flex; align-items:center; gap:10px;
-    flex-shrink:0; flex-wrap:wrap;
+  /* ── 헤더 ── */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
   }
-  .topbar-title { font-size:19px; font-weight:700; white-space:nowrap; }
-  .search-wrap {
-    position:relative; flex:1; min-width:140px;
-  }
-  .search-wrap input {
-    width:100%; padding:12px 14px 12px 36px;
-    border-radius:10px; border:none;
-    background:rgba(255,255,255,.12);
-    color:#fff; font-size:16px; outline:none;
-  }
-  .search-wrap input::placeholder { color:rgba(255,255,255,.45); }
-  .search-wrap input:focus { background:rgba(255,255,255,.2); }
-  .search-icon { position:absolute; left:10px; top:50%; transform:translateY(-50%); font-size:16px; opacity:.6; }
 
-  .btn-row { display:flex; gap:6px; flex-wrap:wrap; }
-  .btn {
-    padding:10px 16px; border-radius:8px;
-    border:1px solid rgba(255,255,255,.2);
-    background:rgba(255,255,255,.08);
-    color:#E2E8F0; font-size:15px;
-    cursor:pointer; white-space:nowrap;
+  .header-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-primary);
+    white-space: nowrap;
   }
-  .btn:active { background:rgba(255,255,255,.25); }
-  .btn.on { background:#3B82F6; border-color:#3B82F6; }
+
+  .search-box {
+    position: relative;
+    flex: 1;
+    min-width: 160px;
+    max-width: 320px;
+  }
+  .search-box input {
+    width: 100%;
+    padding: 8px 12px 8px 36px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    font-size: 14px;
+    color: var(--text-primary);
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .search-box input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+  }
+  .search-box input::placeholder { color: var(--text-muted); }
+  .search-box svg {
+    position: absolute;
+    left: 10px; top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-muted);
+  }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+
+  .pill-group {
+    display: flex;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .pill {
+    padding: 6px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .pill:not(:last-child) { border-right: 1px solid var(--border); }
+  .pill:hover { background: rgba(0,0,0,0.03); }
+  .pill.active { background: var(--accent); color: #fff; }
+
+  .icon-btn {
+    width: 32px; height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    cursor: pointer;
+    color: var(--text-secondary);
+    transition: all 0.15s;
+    font-size: 14px;
+  }
+  .icon-btn:hover {
+    background: var(--bg);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .date-input {
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    font-size: 12px;
+    color: var(--text-primary);
+    outline: none;
+    width: 130px;
+  }
+  .date-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+  }
+
+  .refresh-info {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
 
   /* ── 범례 ── */
-  .legend {
-    background:#fff; padding:10px 16px;
-    display:flex; align-items:center; gap:14px;
-    flex-shrink:0; border-bottom:1px solid #E2E8F0;
-    flex-wrap:wrap; font-size:14px; color:#4A5568;
+  .info-bar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 6px 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-shrink: 0;
+    font-size: 12px;
+    flex-wrap: wrap;
   }
-  .legend-item { display:flex; align-items:center; gap:5px; }
-  .legend-dot { width:12px; height:12px; border-radius:3px; flex-shrink:0; }
-  .stat-info { margin-left:auto; color:#718096; }
+  .legend-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .legend-chip {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+  }
+  .legend-chip.dimmed { opacity: 0.35; }
+  .legend-bar {
+    width: 14px; height: 14px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .stat-text {
+    margin-left: auto;
+    color: var(--text-muted);
+  }
 
   /* ── 타임라인 ── */
-  .timeline-wrap {
-    flex:1; overflow:hidden; background:#fff; position:relative;
+  .timeline-area {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    background: var(--surface);
   }
-  #timeline { width:100%; height:100%; }
+  #timeline { width: 100%; }
 
   /* vis.js 오버라이드 */
-  .vis-timeline { border:none !important; font-family:inherit !important; }
+  .vis-timeline { border: none !important; font-family: inherit !important; }
+
+  .vis-labelset .vis-label { border-bottom: 1px solid var(--border) !important; }
   .vis-label .vis-inner {
-    font-size:14px !important; padding:4px 10px !important;
-    font-weight:600; color:#2D3748;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-    max-width:140px;
+    font-size: 13px !important;
+    padding: 6px 14px !important;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
   }
+
   .vis-item {
-    border-radius:6px !important; font-size:13px !important;
-    font-weight:600 !important; border-width:0 !important;
-    padding:6px 10px !important;
-    min-height:32px !important;
-    line-height:20px !important;
+    border-radius: 4px !important;
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    border: none !important;
+    padding: 4px 10px !important;
+    line-height: 1.3 !important;
+    cursor: grab !important;
+    transition: box-shadow 0.15s !important;
+    height: 26px !important;
   }
-  .vis-item .vis-item-content {
-    white-space:nowrap !important;
-    overflow:hidden !important;
-    text-overflow:ellipsis !important;
-  }
-  .vis-item.status-대기     { background:#3B82F6 !important; color:#fff !important; }
-  .vis-item.status-반출중   { background:#F59E0B !important; color:#fff !important; }
-  .vis-item.status-반납완료 { background:#10B981 !important; color:#fff !important; }
-  .vis-item.status-취소     { background:#9CA3AF !important; color:#fff !important; opacity:.6 !important; }
-  .vis-item.status-기타     { background:#8B5CF6 !important; color:#fff !important; }
-  .vis-item.vis-selected { box-shadow:0 0 0 2px rgba(59,130,246,.6) !important; }
+  .vis-item .vis-item-overflow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vis-item:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.15) !important; }
+  .vis-item.vis-selected { box-shadow: 0 0 0 2px var(--accent), 0 4px 12px rgba(0,0,0,0.15) !important; }
 
-  .vis-tooltip {
-    background:#1A1A2E !important; color:#E2E8F0 !important;
-    border:1px solid rgba(255,255,255,.15) !important;
-    border-radius:10px !important; padding:14px 16px !important;
-    font-size:14px !important; line-height:1.8 !important;
-    max-width:280px !important; white-space:pre-wrap !important;
-    pointer-events:none !important;
-  }
-  .vis-time-axis .vis-text { font-size:13px !important; color:#718096 !important; }
-  .vis-panel.vis-left { border-right:1px solid #E2E8F0 !important; }
+  /* 상태별 색상 — 플랫 단색 (노션 스타일) */
+  .vis-item.status-대기     { background: #D3E5FF !important; color: #1D4ED8 !important; }
+  .vis-item.status-반출중   { background: #FEF3C7 !important; color: #B45309 !important; }
+  .vis-item.status-반납완료 { background: #D1FAE5 !important; color: #065F46 !important; }
+  .vis-item.status-취소     { background: #F3F4F6 !important; color: #9CA3AF !important; text-decoration: line-through !important; }
+  .vis-item.status-기타     { background: #EDE9FE !important; color: #6D28D9 !important; }
 
-  /* 로딩 */
-  .loading {
-    position:absolute; inset:0;
-    display:flex; flex-direction:column;
-    align-items:center; justify-content:center;
-    background:rgba(255,255,255,.95); z-index:100;
-    gap:12px; font-size:16px; color:#4A5568;
-  }
-  .spinner {
-    width:40px; height:40px;
-    border:3px solid #E2E8F0; border-top-color:#3B82F6;
-    border-radius:50%; animation:spin .8s linear infinite;
-  }
-  @keyframes spin { to { transform:rotate(360deg); } }
-
-  .empty-state {
-    position:absolute; inset:0;
-    display:none; flex-direction:column;
-    align-items:center; justify-content:center;
-    gap:10px; color:#9CA3AF; font-size:16px;
+  .vis-item.vis-dragging {
+    opacity: 0.85 !important;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.2) !important;
+    cursor: grabbing !important;
   }
 
-  /* 상세 팝업 */
-  .detail-overlay {
-    display:none; position:fixed; inset:0;
-    background:rgba(0,0,0,.4); z-index:200;
-    align-items:flex-end; justify-content:center;
+  /* 시간축 — 노션 스타일 */
+  .vis-time-axis { border-bottom: 1px solid var(--border) !important; }
+  .vis-time-axis .vis-text { font-size: 12px !important; color: var(--text-muted) !important; padding: 4px 0 !important; }
+  .vis-time-axis .vis-text.vis-major { font-size: 13px !important; font-weight: 700 !important; color: var(--text-primary) !important; }
+  .vis-time-axis .vis-text.vis-minor { font-size: 12px !important; font-weight: 500 !important; color: var(--text-secondary) !important; }
+
+  .vis-grid.vis-minor { border-color: var(--border) !important; }
+  .vis-grid.vis-major { border-color: #D1D5DB !important; }
+  .vis-grid.vis-minor.vis-saturday,
+  .vis-grid.vis-minor.vis-sunday { background: rgba(0,0,0,0.02) !important; }
+
+  .vis-panel.vis-left { border-right: 1px solid var(--border) !important; }
+  .vis-panel.vis-bottom { border: none !important; }
+  .vis-current-time { background-color: var(--red) !important; width: 2px !important; }
+  .vis-foreground .vis-group { border-bottom: 1px solid var(--border) !important; }
+  .vis-foreground .vis-group:nth-child(even) { background: rgba(0,0,0,0.012); }
+
+  /* ── 상세 패널 ── */
+  .detail-panel {
+    display: none;
+    position: absolute;
+    right: 0; top: 0; bottom: 0;
+    width: 320px;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    box-shadow: -4px 0 16px rgba(0,0,0,0.06);
+    z-index: 200;
+    flex-direction: column;
+    overflow-y: auto;
   }
-  .detail-overlay.show { display:flex; }
-  .detail-card {
-    background:#fff; border-radius:18px 18px 0 0;
-    width:100%; max-width:540px; padding:24px;
-    max-height:60vh; overflow-y:auto;
-    animation:slideUp .25s ease;
+  .detail-panel.open { display: flex; }
+
+  .detail-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
-  @keyframes slideUp { from { transform:translateY(100%); } to { transform:translateY(0); } }
-  .detail-card h4 { font-size:19px; margin-bottom:16px; color:#1A1A2E; }
-  .detail-row {
-    display:flex; justify-content:space-between;
-    padding:10px 0; border-bottom:1px solid #f0f0f0;
-    font-size:16px;
-  }
-  .detail-row .label { color:#888; }
-  .detail-row .value { font-weight:600; text-align:right; }
+  .detail-header h3 { font-size: 15px; font-weight: 700; }
   .detail-close {
-    display:block; width:100%; padding:16px; margin-top:16px;
-    background:#f0f2f5; border:none; border-radius:10px;
-    font-size:17px; font-weight:600; cursor:pointer;
+    width: 28px; height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: var(--bg);
+    border-radius: 6px; cursor: pointer;
+    font-size: 16px; color: var(--text-secondary);
+  }
+  .detail-body { padding: 16px 20px; }
+  .detail-row {
+    display: flex;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .detail-row:last-child { border-bottom: none; }
+  .detail-label { width: 72px; flex-shrink: 0; color: var(--text-muted); font-weight: 500; }
+  .detail-value { color: var(--text-primary); font-weight: 500; }
+  .status-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 11px; font-weight: 600; color: #fff;
   }
 
-  /* 자동갱신 표시 */
-  .auto-refresh {
-    font-size:13px; color:rgba(255,255,255,.5);
-    white-space:nowrap;
+  /* 모바일 상세 (오버레이) */
+  @media (max-width: 600px) {
+    .detail-panel {
+      width: 100%;
+      border-radius: 16px 16px 0 0;
+      top: auto;
+      max-height: 60vh;
+      border-left: none;
+      box-shadow: 0 -4px 20px rgba(0,0,0,0.12);
+    }
+  }
+
+  /* ── 로딩 ── */
+  .loading-overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.92);
+    z-index: 300; gap: 12px;
+  }
+  .loader {
+    width: 32px; height: 32px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text { font-size: 13px; color: var(--text-secondary); }
+
+  /* ── 토스트 ── */
+  .toast {
+    position: fixed;
+    bottom: 20px; left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: var(--text-primary);
+    color: #fff;
+    padding: 10px 20px;
+    border-radius: var(--radius);
+    font-size: 13px; font-weight: 500;
+    z-index: 500; opacity: 0;
+    transition: all 0.3s ease;
+    pointer-events: none;
+  }
+  .toast.show {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
   }
 </style>
 </head>
 <body>
 
-<div class="topbar">
-  <span class="topbar-title">📅 스케줄</span>
-  <div class="search-wrap">
-    <span class="search-icon">🔍</span>
-    <input type="text" id="searchInput" placeholder="장비명 검색..." autocomplete="off">
+<!-- 헤더 -->
+<div class="header">
+  <span class="header-title">스케줄 타임라인</span>
+
+  <div class="search-box">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+    <input type="text" id="searchInput" placeholder="세트명 또는 고객명 검색..." autocomplete="off">
   </div>
-  <div class="btn-row">
-    <button class="btn" onclick="moveToday()">오늘</button>
-    <button class="btn" id="btnAll" onclick="filterStatus('all')">전체</button>
-    <button class="btn" id="btnActive" onclick="filterStatus('active')">진행중</button>
-    <button class="btn" onclick="reload()">↺</button>
+
+  <div class="controls">
+    <div class="pill-group">
+      <button class="pill active" id="btnAll" onclick="setFilter('all')">전체</button>
+      <button class="pill" id="btnActive" onclick="setFilter('active')">진행중</button>
+    </div>
+
+    <div class="pill-group" style="margin-left:4px">
+      <button class="pill" onclick="zoomIn()">+</button>
+      <button class="pill" onclick="zoomOut()">&minus;</button>
+    </div>
+
+    <input type="date" id="dateFrom" class="date-input" title="시작일">
+    <span style="color:var(--text-muted);font-size:12px">~</span>
+    <input type="date" id="dateTo" class="date-input" title="종료일">
+
+    <button class="icon-btn" onclick="moveToday()" title="오늘">T</button>
+    <button class="icon-btn" onclick="fitAll()" title="전체보기">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
+        <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
+      </svg>
+    </button>
+    <button class="icon-btn" onclick="reload()" title="새로고침">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+      </svg>
+    </button>
+    <span class="refresh-info" id="refreshInfo"></span>
   </div>
-  <span class="auto-refresh" id="refreshInfo"></span>
 </div>
 
-<div class="legend">
-  <div class="legend-item"><div class="legend-dot" style="background:#3B82F6"></div>대기</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#F59E0B"></div>반출중</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#10B981"></div>반납완료</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#9CA3AF"></div>취소</div>
-  <div class="stat-info" id="statInfo">로딩 중...</div>
+<!-- 범례 -->
+<div class="info-bar">
+  <div class="legend-group">
+    <span class="legend-chip" data-status="대기" onclick="toggleLegend(this)"><span class="legend-bar" style="background:#D3E5FF;border:1px solid #93C5FD"></span>대기</span>
+    <span class="legend-chip" data-status="반출중" onclick="toggleLegend(this)"><span class="legend-bar" style="background:#FEF3C7;border:1px solid #FCD34D"></span>반출중</span>
+    <span class="legend-chip" data-status="반납완료" onclick="toggleLegend(this)"><span class="legend-bar" style="background:#D1FAE5;border:1px solid #6EE7B7"></span>반납완료</span>
+    <span class="legend-chip" data-status="취소" onclick="toggleLegend(this)"><span class="legend-bar" style="background:#F3F4F6;border:1px solid #D1D5DB"></span>취소</span>
+    <span class="legend-chip" data-status="기타" onclick="toggleLegend(this)"><span class="legend-bar" style="background:#EDE9FE;border:1px solid #C4B5FD"></span>기타</span>
+  </div>
+  <span class="stat-text" id="statInfo">불러오는 중...</span>
 </div>
 
-<div class="timeline-wrap">
+<!-- 타임라인 + 상세 -->
+<div class="timeline-area">
   <div id="timeline"></div>
-  <div class="loading" id="loading">
-    <div class="spinner"></div>
-    <span>스케줄 불러오는 중...</span>
+
+  <div class="detail-panel" id="detailPanel">
+    <div class="detail-header">
+      <h3 id="detailTitle">상세 정보</h3>
+      <button class="detail-close" onclick="closeDetail()">&#10005;</button>
+    </div>
+    <div class="detail-body" id="detailBody"></div>
   </div>
-  <div class="empty-state" id="emptyState">
-    <div style="font-size:36px">📭</div>
-    <span>데이터가 없습니다</span>
+
+  <div class="loading-overlay" id="loading">
+    <div class="loader"></div>
+    <span class="loading-text">스케줄 불러오는 중...</span>
   </div>
 </div>
 
-<!-- 상세 팝업 -->
-<div class="detail-overlay" id="detailOverlay" onclick="closeDetail(event)">
-  <div class="detail-card" id="detailCard"></div>
-</div>
+<div class="toast" id="toast"></div>
 
 <script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
 <script>
 var API_URL = "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
 var timeline, allGroups = [], allItems = [];
-var groups = new vis.DataSet();
-var items = new vis.DataSet();
+var groupsDS = new vis.DataSet();   // 영구 DataSet (재사용)
+var itemsDS = new vis.DataSet();
+var groupIndex = {};                 // id → name (소문자) 캐시
+var itemSearchCache = {};            // id → {custName, setName} 소문자 캐시
 var currentFilter = "all";
+var hiddenStatuses = {};
 var refreshTimer = null;
-var REFRESH_INTERVAL = 60000; // 1분
+var REFRESH_INTERVAL = 60000;
+var searchDebounceTimer = null;
+var lastVisibleIds = new Set();      // 현재 표시 중인 item id
 
-// ━━━ 초기화 ━━━
-function init() {
-  var container = document.getElementById("timeline");
-  var options = {
+var STATUS_COLORS = {
+  '대기':     '#3B82F6',
+  '반출중':   '#F59E0B',
+  '반납완료': '#10B981',
+  '취소':     '#9CA3AF',
+  '기타':     '#8B5CF6'
+};
+
+function getTimelineOptions(startDate, endDate) {
+  var maxH = document.querySelector('.timeline-area').clientHeight || 600;
+  return {
     stack: true,
     groupOrder: "content",
     orientation: { axis: "top" },
-    zoomMin: 1000*60*60*6,
-    zoomMax: 1000*60*60*24*90,
-    start: new Date(Date.now() - 1000*60*60*24*1),
-    end:   new Date(Date.now() + 1000*60*60*24*7),
-    tooltip: { followMouse: false, overflowMethod: "cap" },
-    groupHeightMode: "auto",
-    height: "100%",
-    margin: { item: { horizontal: 2, vertical: 4 }, axis: 4 },
-    locale: "ko",
+    timeAxis: { scale: "day", step: 1 },
+    zoomMin:  1000 * 60 * 60 * 24 * 3,
+    zoomMax:  1000 * 60 * 60 * 24 * 90,
+    start:    startDate,
+    end:      endDate,
+    maxHeight: maxH,
+    margin:   { item: { horizontal: 2, vertical: 3 }, axis: 5 },
+    locale:   "ko",
     showCurrentTime: true,
     moveable: true,
     zoomable: true,
     selectable: true,
-    snap: null
+    multiselect: true,
+    multiselectPerGroup: false,
+    format: {
+      minorLabels: function(date) {
+        var d = new Date(date);
+        var days = ['일','월','화','수','목','금','토'];
+        return days[d.getDay()] + ' ' + d.getDate();
+      },
+      majorLabels: function(date) {
+        var d = new Date(date);
+        return d.getFullYear() + '년 ' + (d.getMonth()+1) + '월';
+      }
+    },
+    snap: function(date) {
+      var m = 30 * 60 * 1000;
+      return new Date(Math.round(date.getTime() / m) * m);
+    },
+    // 드래그 시 원본 시간(HH:MM)을 강제 유지 — '일' 단위만 조정되게 함
+    onMoving: function(item, callback) {
+      var orig = allItems.find(function(i) { return i.id === item.id; });
+      if (!orig) { callback(item); return; }
+      var origStart = new Date(orig.start);
+      var origEnd   = new Date(orig.end);
+      var newStart  = new Date(item.start);
+      var newEnd    = new Date(item.end);
+      newStart.setHours(origStart.getHours(), origStart.getMinutes(), origStart.getSeconds(), origStart.getMilliseconds());
+      newEnd.setHours(origEnd.getHours(), origEnd.getMinutes(), origEnd.getSeconds(), origEnd.getMilliseconds());
+      item.start = newStart;
+      item.end   = newEnd;
+      callback(item);
+    },
+    editable: { updateTime: true, remove: false, add: false, updateGroup: false },
+    groupHeightMode: "auto"
   };
-  timeline = new vis.Timeline(container, items, groups, options);
+}
 
-  // 아이템 클릭 → 상세 팝업
+// 타임라인 최초 1회 생성 — 이후엔 DataSet만 갱신
+function initTimeline() {
+  var container = document.getElementById("timeline");
+  var now = new Date();
+  var startDate = new Date(now.getTime() - 1000*60*60*24*1);
+  var endDate = new Date(now.getTime() + 1000*60*60*24*14);
+
+  timeline = new vis.Timeline(container, itemsDS, groupsDS, getTimelineOptions(startDate, endDate));
+
+  // 클릭 → 상세 패널 (단일 선택일 때만)
   timeline.on("select", function(props) {
-    if (props.items.length > 0) showDetail(props.items[0]);
+    if (props.items.length === 0) { closeDetail(); return; }
+    if (props.items.length > 1) { closeDetail(); return; }
+    var item = itemsDS.get(props.items[0]);
+    if (item) showDetail(item);
+  });
+
+  // 바 영역 드래그로 박스 선택 (marquee) — 위 날짜축은 그대로 패닝
+  setupMarqueeSelect(timeline);
+}
+
+// ── 드래그 박스 선택 (marquee) ──
+// .vis-panel.vis-center 빈 공간 mousedown → 사각형 오버레이 → mouseup 시 교차 아이템 선택
+// Ctrl/Meta 누르면 기존 선택에 추가/토글
+function setupMarqueeSelect(timeline) {
+  var center = document.querySelector(".vis-panel.vis-center");
+  if (!center) return;
+
+  var box = null, sx = 0, sy = 0, active = false, additive = false;
+
+  function onDown(e) {
+    if (e.button !== 0) return;                 // 좌클릭만
+    if (e.target.closest(".vis-item")) return;  // 아이템은 vis가 처리 (이동)
+
+    // vis 패닝 차단
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    e.preventDefault();
+
+    active = true;
+    additive = e.ctrlKey || e.metaKey || e.shiftKey;
+    sx = e.clientX;
+    sy = e.clientY;
+
+    // 새 드래그/클릭 시작: additive 아니면 기존 선택 즉시 해제
+    if (!additive) timeline.setSelection([]);
+
+    box = document.createElement("div");
+    box.style.cssText = "position:fixed;left:" + sx + "px;top:" + sy +
+      "px;width:0;height:0;border:1.5px dashed #2196f3;background:rgba(33,150,243,0.08);pointer-events:none;z-index:9999;";
+    document.body.appendChild(box);
+  }
+
+  function onMove(e) {
+    if (!active || !box) return;
+    var l = Math.min(sx, e.clientX), t = Math.min(sy, e.clientY);
+    box.style.left   = l + "px";
+    box.style.top    = t + "px";
+    box.style.width  = Math.abs(e.clientX - sx) + "px";
+    box.style.height = Math.abs(e.clientY - sy) + "px";
+  }
+
+  function onUp() {
+    if (!active) return;
+    active = false;
+    if (!box) return;
+    var rect = box.getBoundingClientRect();
+    box.remove(); box = null;
+
+    // 빈 공간 단순 클릭 → 선택 해제 (Ctrl/Shift 누르면 유지)
+    if (rect.width < 5 && rect.height < 5) {
+      if (!additive) timeline.setSelection([]);
+      return;
+    }
+
+    var ids = [];
+    var items = timeline.itemSet && timeline.itemSet.items;
+    if (items) {
+      for (var id in items) {
+        var it = items[id];
+        if (!it.dom || !it.dom.box) continue;
+        var r = it.dom.box.getBoundingClientRect();
+        if (r.right < rect.left || r.left > rect.right ||
+            r.bottom < rect.top || r.top > rect.bottom) continue;
+        ids.push(id);
+      }
+    }
+
+    if (additive) {
+      var existing = timeline.getSelection() || [];
+      var merged = {};
+      existing.forEach(function(x) { merged[x] = true; });
+      ids.forEach(function(x) { merged[x] = true; });
+      timeline.setSelection(Object.keys(merged));
+    } else {
+      timeline.setSelection(ids);
+    }
+  }
+
+  // pointer events(모던 표준, Hammer.js 내부도 이것을 씀)를 capture phase에서 가로채야 vis의 패닝이 막힘
+  center.addEventListener("pointerdown", onDown, true);
+  window.addEventListener("pointermove", onMove, true);
+  window.addEventListener("pointerup", onUp, true);
+  window.addEventListener("pointercancel", onUp, true);
+
+  // 드래그 완료 → API로 시트 업데이트
+  itemsDS.on("update", function(event, properties, senderId) {
+    if (senderId === "sync") return;  // 내부 동기화는 무시
+    properties.items.forEach(function(id) {
+      var item = itemsDS.get(id);
+      var original = allItems.find(function(i) { return i.id === id; });
+      if (!item || !original || !original.rowIndex) return;
+      // 시간이 실제로 바뀐 것만 처리
+      var startISO = (item.start instanceof Date) ? item.start.toISOString() : item.start;
+      var endISO   = (item.end instanceof Date)   ? item.end.toISOString()   : item.end;
+      var origStart = (original.start instanceof Date) ? original.start.toISOString() : original.start;
+      var origEnd   = (original.end instanceof Date)   ? original.end.toISOString()   : original.end;
+      if (startISO === origStart && endISO === origEnd) return;
+
+      var riParam  = original.rowIndices ? "&rowIndices=" + encodeURIComponent(JSON.stringify(original.rowIndices)) : "";
+
+      fetch(API_URL + "?key=village2026&action=updateTime&row=" +
+        original.rowIndex + "&start=" + encodeURIComponent(startISO) +
+        "&end=" + encodeURIComponent(endISO) + riParam)
+        .then(function(r) { return r.json(); })
+        .then(function(res) {
+          if (res.success) {
+            showToast("일정이 변경되었습니다");
+            original.start = item.start;
+            original.end   = item.end;
+          } else {
+            showToast("변경 실패");
+            itemsDS.update({ id: id, start: original.start, end: original.end }, "sync");
+          }
+        })
+        .catch(function() {
+          showToast("네트워크 오류");
+          itemsDS.update({ id: id, start: original.start, end: original.end }, "sync");
+        });
+    });
   });
 }
 
-// ━━━ 데이터 로드 (API fetch) ━━━
+// ── 데이터 로드 ──
 function loadData() {
   showLoading(true);
   fetch(API_URL + "?key=village2026&action=timeline")
     .then(function(r) { return r.json(); })
     .then(function(data) {
       allGroups = data.groups || [];
-      allItems = data.items || [];
+      allItems  = data.items  || [];
+
+      // 검색 캐시 미리 생성 (소문자 변환 한 번만)
+      groupIndex = {};
+      allGroups.forEach(function(g) {
+        groupIndex[g.id] = (g.content || "").toLowerCase();
+      });
+      itemSearchCache = {};
+      allItems.forEach(function(item) {
+        itemSearchCache[item.id] = {
+          cust: (item.custName || "").toLowerCase(),
+          group: groupIndex[item.group] || ""
+        };
+      });
+
+      // 최초 1회 타임라인 생성
+      if (!timeline) initTimeline();
       applyFilters();
       showLoading(false);
       updateRefreshInfo();
     })
     .catch(function(err) {
       showLoading(false);
-      document.getElementById("statInfo").textContent = "오류: " + err.message;
+      showToast("데이터 로드 실패");
     });
 }
 
-// ━━━ 필터 ━━━
+// ── 필터 — 증분 업데이트 방식 (destroy 없이 빠름) ──
 function applyFilters() {
   var query = document.getElementById("searchInput").value.trim().toLowerCase();
-  var visibleGroups = allGroups.filter(function(g) {
-    return !query || g.content.toLowerCase().indexOf(query) >= 0;
-  });
-  var gids = {};
-  visibleGroups.forEach(function(g) { gids[g.id] = true; });
 
-  var visibleItems = allItems.filter(function(item) {
-    if (!gids[item.group]) return false;
-    if (currentFilter === "active") return item.status === "대기" || item.status === "반출중";
-    return true;
-  });
+  // 표시할 item id 목록 계산
+  var newVisibleIds = new Set();
+  var usedGroups = {};
+  var visibleCount = 0;
 
-  groups.clear(); groups.add(visibleGroups);
-  items.clear(); items.add(visibleItems);
-
-  document.getElementById("emptyState").style.display =
-    visibleGroups.length === 0 ? "flex" : "none";
-  updateStat();
-}
-
-function updateStat() {
-  var q = document.getElementById("searchInput").value.trim();
-  var s = groups.length, t = allGroups.length, ic = items.length;
-  document.getElementById("statInfo").textContent =
-    q ? s + "/" + t + "개 장비 · " + ic + "건"
-      : t + "개 장비 · " + allItems.length + "건";
-}
-
-// ━━━ 상세 팝업 ━━━
-function showDetail(itemId) {
-  var item = allItems.find(function(i) { return i.id === itemId; });
-  if (!item || !item.title) return;
-
-  var lines = item.title.split("\n");
-  var html = '<h4>' + (item.content || "") + '</h4>';
-  lines.forEach(function(line) {
-    var parts = line.split(": ");
-    if (parts.length >= 2) {
-      html += '<div class="detail-row"><span class="label">' + parts[0] +
-        '</span><span class="value">' + parts.slice(1).join(": ") + '</span></div>';
+  for (var i = 0; i < allItems.length; i++) {
+    var item = allItems[i];
+    if (query) {
+      var cache = itemSearchCache[item.id];
+      if (!cache || (cache.cust.indexOf(query) < 0 && cache.group.indexOf(query) < 0)) continue;
     }
-  });
-  html += '<button class="detail-close" onclick="closeDetail()">닫기</button>';
+    if (currentFilter === "active" && item.status !== "대기" && item.status !== "반출중") continue;
+    var st = ["대기","반출중","반납완료","취소"].indexOf(item.status) >= 0 ? item.status : "기타";
+    if (hiddenStatuses[st]) continue;
 
-  document.getElementById("detailCard").innerHTML = html;
-  document.getElementById("detailOverlay").classList.add("show");
-}
-
-function closeDetail(e) {
-  if (!e || e.target === document.getElementById("detailOverlay")) {
-    document.getElementById("detailOverlay").classList.remove("show");
+    newVisibleIds.add(item.id);
+    usedGroups[item.group] = true;
+    visibleCount++;
   }
+
+  // 그룹 증분 업데이트
+  var visibleGroupsList = [];
+  allGroups.forEach(function(g) { if (usedGroups[g.id]) visibleGroupsList.push(g); });
+  var currentGroupIds = groupsDS.getIds();
+  var newGroupIdSet = new Set(visibleGroupsList.map(function(g) { return g.id; }));
+
+  var groupsToRemove = currentGroupIds.filter(function(id) { return !newGroupIdSet.has(id); });
+  if (groupsToRemove.length) groupsDS.remove(groupsToRemove);
+  var groupsToAdd = visibleGroupsList.filter(function(g) { return currentGroupIds.indexOf(g.id) < 0; });
+  if (groupsToAdd.length) groupsDS.add(groupsToAdd);
+
+  // 아이템 증분 업데이트
+  var currentItemIds = itemsDS.getIds();
+  var itemsToRemove = currentItemIds.filter(function(id) { return !newVisibleIds.has(id); });
+  if (itemsToRemove.length) itemsDS.remove(itemsToRemove);
+
+  var itemsToAdd = [];
+  for (var j = 0; j < allItems.length; j++) {
+    if (newVisibleIds.has(allItems[j].id) && !lastVisibleIds.has(allItems[j].id)) {
+      itemsToAdd.push(allItems[j]);
+    }
+  }
+  if (itemsToAdd.length) itemsDS.add(itemsToAdd);
+
+  lastVisibleIds = newVisibleIds;
+
+  var txt = visibleGroupsList.length + "개 세트";
+  if (visibleGroupsList.length < allGroups.length) txt = visibleGroupsList.length + "/" + allGroups.length + "개 세트";
+  txt += " · " + visibleCount + "건";
+  document.getElementById("statInfo").textContent = txt;
 }
 
-// ━━━ 컨트롤 ━━━
+// 검색 debounce (타이핑 중 렌더링 방지)
+function applyFiltersDebounced() {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(applyFilters, 150);
+}
+
+// ── 상세 패널 ──
+function showDetail(item) {
+  document.getElementById("detailTitle").textContent = item.custName || item.content;
+  var statusColor = STATUS_COLORS[item.status] || STATUS_COLORS["기타"];
+
+  var html =
+    dRow("거래ID", item["거래ID"] || "-") +
+    dRow("고객명", item.custName || "-") +
+    dRow("연락처", item.tel || "-") +
+    dRow("세트", item["세트명"] || "-") +
+    dRow("장비", item["장비명"] || "-") +
+    dRow("수량", item["수량"] || "-") +
+    dRow("반출", item["반출"] || "-") +
+    dRow("반납", item["반납"] || "-") +
+    dRow("상태", '<span class="status-badge" style="background:' + statusColor + '">' + (item.status || "-") + "</span>") +
+    (item["단가"] > 0 ? dRow("단가", Number(item["단가"]).toLocaleString() + "원") : "");
+
+  document.getElementById("detailBody").innerHTML = html;
+  document.getElementById("detailPanel").classList.add("open");
+}
+
+function dRow(label, value) {
+  return '<div class="detail-row"><span class="detail-label">' + label + '</span><span class="detail-value">' + value + "</span></div>";
+}
+
+function closeDetail() {
+  document.getElementById("detailPanel").classList.remove("open");
+  timeline.setSelection([]);
+}
+
+// ── 범례 토글 ──
+function toggleLegend(el) {
+  var status = el.getAttribute("data-status");
+  hiddenStatuses[status] = !hiddenStatuses[status];
+  el.classList.toggle("dimmed", !!hiddenStatuses[status]);
+  applyFilters();
+}
+
+// ── 컨트롤 ──
+function setFilter(type) {
+  currentFilter = type;
+  document.getElementById("btnAll").classList.toggle("active", type === "all");
+  document.getElementById("btnActive").classList.toggle("active", type === "active");
+  applyFilters();
+}
+
 function moveToday() {
   var now = new Date();
   timeline.setWindow(
-    new Date(now - 1000*60*60*24*1),
-    new Date(now.getTime() + 1000*60*60*24*7)
+    new Date(now.getTime() - 1000*60*60*24*1),
+    new Date(now.getTime() + 1000*60*60*24*10),
+    { animation: { duration: 400, easingFunction: "easeInOutQuad" } }
   );
 }
 
-function filterStatus(type) {
-  currentFilter = type;
-  document.getElementById("btnAll").classList.toggle("on", type === "all");
-  document.getElementById("btnActive").classList.toggle("on", type === "active");
-  applyFilters();
+function zoomIn()  { timeline.zoomIn(0.4); }
+function zoomOut() { timeline.zoomOut(0.4); }
+
+function fitAll() {
+  if (allItems.length > 0) timeline.fit({ animation: { duration: 400 } });
 }
 
 function reload() {
   document.getElementById("searchInput").value = "";
   currentFilter = "all";
-  document.getElementById("btnAll").classList.add("on");
-  document.getElementById("btnActive").classList.remove("on");
+  hiddenStatuses = {};
+  document.querySelectorAll(".legend-chip").forEach(function(el) { el.classList.remove("dimmed"); });
+  document.getElementById("btnAll").classList.add("active");
+  document.getElementById("btnActive").classList.remove("active");
+  closeDetail();
   loadData();
 }
 
@@ -350,28 +829,57 @@ function showLoading(show) {
   document.getElementById("loading").style.display = show ? "flex" : "none";
 }
 
-// ━━━ 자동 갱신 ━━━
+function showToast(msg) {
+  var el = document.getElementById("toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  setTimeout(function() { el.classList.remove("show"); }, 2500);
+}
+
+// ── 자동 갱신 ──
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(function() {
-    loadData();
-  }, REFRESH_INTERVAL);
+  refreshTimer = setInterval(loadData, REFRESH_INTERVAL);
 }
 
 function updateRefreshInfo() {
   var now = new Date();
   var t = ("0"+now.getHours()).slice(-2) + ":" + ("0"+now.getMinutes()).slice(-2);
-  document.getElementById("refreshInfo").textContent = t + " 갱신 · 1분마다";
+  document.getElementById("refreshInfo").textContent = t + " · 1분마다";
 }
 
-// ━━━ 검색 ━━━
-document.getElementById("searchInput").addEventListener("input", applyFilters);
+// ── 날짜 범위 선택 ──
+document.getElementById("dateFrom").addEventListener("change", applyDateRange);
+document.getElementById("dateTo").addEventListener("change", applyDateRange);
 
-// ━━━ 시작 ━━━
-init();
+function applyDateRange() {
+  var from = document.getElementById("dateFrom").value;
+  var to   = document.getElementById("dateTo").value;
+  if (from && to) {
+    timeline.setWindow(
+      new Date(from + "T00:00:00"),
+      new Date(to + "T23:59:59"),
+      { animation: { duration: 400, easingFunction: "easeInOutQuad" } }
+    );
+  } else if (from) {
+    timeline.setWindow(
+      new Date(from + "T00:00:00"),
+      new Date(new Date(from).getTime() + 1000*60*60*24*10),
+      { animation: { duration: 400 } }
+    );
+  }
+}
+
+// ── 검색 디바운스 ──
+document.getElementById("searchInput").addEventListener("input", applyFiltersDebounced);
+
+document.addEventListener("keydown", function(e) {
+  if (e.key === "Escape") closeDetail();
+});
+
+// ── 시작 ──
 loadData();
 startAutoRefresh();
-document.getElementById("btnAll").classList.add("on");
 </script>
 </body>
 </html>

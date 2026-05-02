@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 12px; background: #F5F4EF; color: #191919; font-size: 13px; }
+    .title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+    .sub { color: #7A7872; font-size: 11px; margin-bottom: 12px; }
+    .box { background: white; border: 1px solid #E6E1D6; border-radius: 12px; padding: 12px; margin-bottom: 8px; }
+    .step-label { color: #7A7872; font-size: 11px; margin-bottom: 4px; }
+    .step-title { font-weight: 600; margin-bottom: 6px; }
+    .action { background: #FAF9F5; border-left: 3px solid #CC785C; padding: 8px 10px; border-radius: 4px; margin-bottom: 8px; }
+    .tip { color: #5C5B57; font-size: 12px; margin-top: 4px; }
+    .tip::before { content: "⚠️ "; }
+    .error { background: #FEF2F2; border-left: 3px solid #DC2626; color: #991B1B; padding: 8px 10px; border-radius: 4px; }
+    .ask-btn { display: block; width: 100%; padding: 8px; margin-top: 12px; background: #191919; color: white; border: none; border-radius: 999px; cursor: pointer; font-size: 13px; }
+    .ask-btn:hover { background: #2E2E2E; }
+    .loading { color: #7A7872; font-style: italic; }
+  </style>
+</head>
+<body>
+  <div class="title">🎓 동행 모드</div>
+  <div class="sub">확인요청 시트</div>
+
+  <div id="root" class="loading">행 선택 대기 중...</div>
+
+  <button class="ask-btn" onclick="openChatbot()">❓ 빌리지AI한테 물어보기</button>
+
+  <script>
+    const VILLAGE_AI_BASE = 'https://notebooklm.google.com/notebook/5ee3561b-6809-4fba-a3e2-2cf560828360';
+
+    function openChatbot() {
+      window.open(VILLAGE_AI_BASE, '_blank');
+    }
+
+    function render(ctx) {
+      const root = document.getElementById('root');
+      if (!ctx) {
+        root.innerHTML = '<div class="loading">확인요청 시트에서 행을 선택하세요</div>';
+        return;
+      }
+      const stepBlock = `
+        <div class="box">
+          <div class="step-label">📍 현재 단계 ${ctx.step}/8</div>
+          <div class="step-title">${escape(ctx.stepName)}</div>
+        </div>
+      `;
+      const actionBlock = ctx.action ? `<div class="action">👉 ${escape(ctx.action)}</div>` : '';
+      const errorBlock = ctx.error ? `<div class="error">${escape(ctx.error)}</div>` : '';
+      const tipsBlock = (ctx.tips || []).length > 0
+        ? '<div class="box">' + ctx.tips.map(t => `<div class="tip">${escape(t)}</div>`).join('') + '</div>'
+        : '';
+      root.innerHTML = stepBlock + actionBlock + errorBlock + tipsBlock;
+    }
+
+    function escape(s) {
+      return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    window.updateContext = function(ctx) {
+      render(ctx);
+    };
+
+    let lastCtx = null;
+    function poll() {
+      google.script.run
+        .withSuccessHandler(ctx => {
+          const key = ctx ? `${ctx.step}|${ctx.stepName}|${ctx.action}` : 'null';
+          const prevKey = lastCtx ? `${lastCtx.step}|${lastCtx.stepName}|${lastCtx.action}` : 'null';
+          if (key !== prevKey) {
+            lastCtx = ctx;
+            render(ctx);
+          }
+        })
+        .withFailureHandler(err => {
+          render({ step: 0, stepName: '오류', action: '', tips: [], error: String(err) });
+        })
+        .getCurrentBookingContext();
+    }
+    poll();
+    setInterval(poll, 1200);
+  </script>
+</body>
+</html>

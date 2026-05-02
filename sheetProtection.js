@@ -1,7 +1,3 @@
-function scanFormulas() {
-  // 이전 스캔 함수 유지
-}
-
 function protectSheets() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var results = [];
