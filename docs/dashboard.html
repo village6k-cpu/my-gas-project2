@@ -544,6 +544,20 @@
   }
   .detail-row .dl { font-weight: 700; color: var(--text-primary); }
 
+  /* ── Nav Link ── */
+  .nav-link {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent);
+    text-decoration: none;
+    padding: 5px 10px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .nav-link:hover { background: var(--accent); color: #fff; }
+
   /* ── 반응형 ── */
   @media (min-width: 768px) {
     .header { padding: 16px 32px 14px; }
@@ -563,7 +577,10 @@
       <h1 id="headerTitle">오늘 일정</h1>
       <div class="date-label" id="dateLabel"></div>
     </div>
-    <button class="icon-btn" onclick="refreshData()" id="refreshBtn" title="새로고침">↻</button>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <a href="timeline.html" class="nav-link" title="스케줄 타임라인">📊 스케줄</a>
+      <button class="icon-btn" onclick="refreshData()" id="refreshBtn" title="새로고침">↻</button>
+    </div>
   </div>
   <div class="date-nav">
     <button class="date-nav-btn" onclick="changeDate(-1)">◀</button>
@@ -620,6 +637,12 @@ var dashboardData = null;
 var currentDate = new Date();
 
 document.addEventListener('DOMContentLoaded', function() {
+  // URL 파라미터로 날짜 전달 받기
+  var urlParams = new URLSearchParams(window.location.search);
+  var dateParam = urlParams.get('date');
+  if (dateParam) {
+    currentDate = new Date(dateParam + 'T00:00:00');
+  }
   updateDateDisplay();
   loadData();
 });
@@ -828,6 +851,7 @@ function renderList(containerId, items, type) {
       }
       // 개고생2.0 AppSheet 거래 점프
       html += '<a class="gosu-link-btn" href="' + gosuAppsheetUrl(item.tradeId) + '" target="_blank" onclick="event.stopPropagation()">🔗 개고생2.0 거래 열기</a>';
+      html += '<a class="gosu-link-btn" href="timeline.html?search=' + encodeURIComponent(item.name) + '" target="_blank" onclick="event.stopPropagation()">📊 타임라인에서 보기</a>';
       html += '</div></div>';
     });
     html += '</div>';

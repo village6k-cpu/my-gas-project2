@@ -783,6 +783,34 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-text { font-size: 13px; color: var(--text-secondary); }
 
+/* ── Nav Link ── */
+.nav-link {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 5px 10px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.nav-link:hover { background: var(--accent); color: #fff; }
+.detail-link {
+  display: block;
+  margin-top: 12px;
+  padding: 8px 12px;
+  text-align: center;
+  color: var(--accent);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+.detail-link:hover { background: var(--bg); }
+
 /* ── Responsive ── */
 @media (max-width: 768px) {
   .header { padding: 8px 10px; gap: 6px; }
@@ -823,6 +851,7 @@ body {
 <!-- Header -->
 <div class="header">
   <span class="header-title">빌리지 스케줄</span>
+  <a href="dashboard.html" class="nav-link">오늘 일정</a>
   <div class="view-tabs">
     <button class="view-tab active">타임라인</button>
     <button class="view-tab" onclick="showToast('캘린더 뷰는 준비 중입니다')">캘린더</button>
@@ -1666,6 +1695,7 @@ function showDetail(item) {
     dRow("반납", escHtml(item["반납"] || "-")) +
     dRow("상태", '<span class="status-badge ' + STATUS_BADGE[sk] + '">' + escHtml(item.status || "-") + '</span>') +
     (item["단가"] > 0 ? dRow("단가", Number(item["단가"]).toLocaleString() + "원") : "");
+  html += '<a href="dashboard.html?date=' + toDateStr(new Date(item.start)) + '" class="detail-link" target="_blank">📅 오늘 일정에서 보기</a>';
   document.getElementById("detailBody").innerHTML = html;
   document.getElementById("detailOverlay").classList.add("open");
 }
@@ -2225,6 +2255,16 @@ document.getElementById("dateTo").addEventListener("change", function() {
   computeDateRange();
   render();
 });
+
+// ── URL 파라미터 처리 ──
+(function() {
+  var urlParams = new URLSearchParams(window.location.search);
+  var searchParam = urlParams.get('search');
+  if (searchParam) {
+    document.getElementById('searchInput').value = searchParam;
+    searchQuery = searchParam;
+  }
+})();
 
 // ── Init ──
 setupScrollSync();
