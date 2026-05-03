@@ -100,6 +100,21 @@ function getTimelineData() {
       });
   }
 
+  // 장비마스터: 장비명 → 재고수량
+  var stockMap = {};
+  var equipSheet = ss.getSheetByName('장비마스터');
+  if (equipSheet && equipSheet.getLastRow() >= 2) {
+    var equipData = equipSheet.getRange(2, 1, equipSheet.getLastRow() - 1, equipSheet.getLastColumn()).getValues();
+    var headers = equipSheet.getRange(1, 1, 1, equipSheet.getLastColumn()).getValues()[0];
+    var nameCol = headers.indexOf('장비명');
+    var stockCol = headers.indexOf('재고수량');
+    if (nameCol >= 0 && stockCol >= 0) {
+      equipData.forEach(function(r) {
+        if (r[nameCol]) stockMap[String(r[nameCol]).trim()] = Number(r[stockCol]) || 1;
+      });
+    }
+  }
+
   if (!schedSheet || schedSheet.getLastRow() < 2) {
     return { groups: [], items: [] };
   }
@@ -159,6 +174,11 @@ function getTimelineData() {
       rowIndices = [idx + 2];
     }
 
+    var 반출시간Str = 반출시간 ? String(반출시간).trim() : '';
+    var 반납시간Str = 반납시간 ? String(반납시간).trim() : '';
+    if (반출시간Str && 반출시간Str.indexOf(':') < 0) 반출시간Str = '';
+    if (반납시간Str && 반납시간Str.indexOf(':') < 0) 반납시간Str = '';
+
     entries.push({
       거래ID:    거래ID,
       groupName: groupName,
@@ -172,7 +192,11 @@ function getTimelineData() {
       rowIndices: rowIndices,
       반출:      fmtDT(반출일, 반출시간),
       반납:      fmtDT(반납일, 반납시간),
-      isSingleItem: isSingleItem
+      isSingleItem: isSingleItem,
+      반출시간:  반출시간Str,
+      반납시간:  반납시간Str,
+      장비명:    장비명,
+      세트명원본: 세트명
     });
   }
 
@@ -180,6 +204,15 @@ function getTimelineData() {
   data.forEach(function(row, idx) { processRow(row, idx, true); });
   // Phase 2: 개별 장비 행 (세트명 없고 구성품 아닌 것만)
   data.forEach(function(row, idx) { processRow(row, idx, false); });
+
+  // 회차 계산: 같은 예약자+그룹의 몇 번째 예약인지
+  var 회차Map = {};
+  entries.forEach(function(e) {
+    var hkey = (e.custName || '') + '|' + e.groupName;
+    if (!회차Map[hkey]) 회차Map[hkey] = 0;
+    회차Map[hkey]++;
+    e.회차 = 회차Map[hkey];
+  });
 
   // 그룹 및 아이템 생성
   const groupMap  = {};
@@ -216,11 +249,16 @@ function getTimelineData() {
         tel:       e.tel,
         거래ID:    e.거래ID,
         세트명:    e.groupName,
-        장비명:    e.isSingleItem ? e.groupName : '세트 구성품',
+        장비명:    e.isSingleItem ? e.groupName : e.장비명,
         수량:      e.isSingleItem ? e.수량 : barCount + '세트',
         반출:      e.반출,
         반납:      e.반납,
-        단가:      e.단가
+        단가:      e.단가,
+        반출시간:  e.반출시간 || '',
+        반납시간:  e.반납시간 || '',
+        회차:      e.회차 || 1,
+        재고:      stockMap[e.isSingleItem ? e.groupName : e.장비명] || 1,
+        세트명원본: e.세트명원본 || e.groupName
       });
     }
   });
