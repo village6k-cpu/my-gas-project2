@@ -940,6 +940,9 @@ var zoomLevels = [
   { name: "일", colW: 120 }
 ];
 var currentZoomIdx = 2; // 일
+var continuousColW = 120; // 연속 줌용 실제 colW 값
+var MIN_COL_W = 10;
+var MAX_COL_W = 200;
 var dateRange = { start: null, end: null, days: 0 };
 var viewStart = null;  // Date — left edge of visible grid
 var viewEnd = null;    // Date — right edge of visible grid
@@ -987,7 +990,7 @@ function getWeekday(d) {
   return ["일","월","화","수","목","금","토"][d.getDay()];
 }
 function isWeekend(d) { var w = d.getDay(); return w === 0 || w === 6; }
-function getColW() { return zoomLevels[currentZoomIdx].colW; }
+function getColW() { return continuousColW; }
 function statusKey(s) {
   if (["대기","반출중","반납완료","취소"].indexOf(s) >= 0) return s;
   return "기타";
@@ -1760,26 +1763,65 @@ document.getElementById("searchInput").addEventListener("input", function() {
 
 // ── Zoom ──
 function zoomIn() {
-  if (currentZoomIdx < zoomLevels.length - 1) {
-    currentZoomIdx++;
-    applyZoom();
-  }
+  continuousColW = Math.min(MAX_COL_W, continuousColW * 1.3);
+  applyZoom();
 }
 function zoomOut() {
-  if (currentZoomIdx > 0) {
-    currentZoomIdx--;
-    applyZoom();
-  }
+  continuousColW = Math.max(MIN_COL_W, continuousColW / 1.3);
+  applyZoom();
 }
 function applyZoom() {
-  document.getElementById("zoomLevel").textContent = zoomLevels[currentZoomIdx].name;
-  document.documentElement.style.setProperty("--col-w", zoomLevels[currentZoomIdx].colW + "px");
+  // 줌 레벨 라벨 업데이트
+  var label = continuousColW >= 80 ? "일" : continuousColW >= 30 ? "주" : "월";
+  document.getElementById("zoomLevel").textContent = label;
+  document.documentElement.style.setProperty("--col-w", Math.round(continuousColW) + "px");
   render();
 }
 window.zoomIn = zoomIn;
 window.zoomOut = zoomOut;
 
-// Pinch zoom for mobile
+// ── 마우스 휠 줌 (날짜 헤더 + 그리드 위에서) ──
+// 커서 위치 기준으로 줌: 커서가 가리키는 날짜가 줌 후에도 같은 화면 위치에 있도록
+(function() {
+  var gridScroll = document.getElementById("gridScroll");
+  var wheelDebounce = null;
+
+  function handleWheelZoom(e) {
+    // Ctrl+Wheel 또는 그냥 Wheel (세로 스크롤이 아닌 경우에만)
+    // Ctrl 누른 상태에서만 줌 (일반 스크롤과 구분)
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+
+    var rect = gridScroll.getBoundingClientRect();
+    var mouseX = e.clientX - rect.left + gridScroll.scrollLeft;
+    var oldColW = continuousColW;
+
+    // deltaY > 0 = 줌 아웃, deltaY < 0 = 줌 인
+    var factor = e.deltaY > 0 ? 0.92 : 1.08;
+    continuousColW = Math.max(MIN_COL_W, Math.min(MAX_COL_W, continuousColW * factor));
+
+    if (continuousColW === oldColW) return;
+
+    // 커서 위치 기준 스크롤 보정
+    var ratio = continuousColW / oldColW;
+    var newScrollLeft = mouseX * ratio - (e.clientX - rect.left);
+
+    // debounce render (빠른 스크롤 시 렌더링 줄이기)
+    if (wheelDebounce) cancelAnimationFrame(wheelDebounce);
+    wheelDebounce = requestAnimationFrame(function() {
+      var label = continuousColW >= 80 ? "일" : continuousColW >= 30 ? "주" : "월";
+      document.getElementById("zoomLevel").textContent = label;
+      document.documentElement.style.setProperty("--col-w", Math.round(continuousColW) + "px");
+      render();
+      gridScroll.scrollLeft = Math.max(0, newScrollLeft);
+    });
+  }
+
+  gridScroll.addEventListener("wheel", handleWheelZoom, { passive: false });
+  document.getElementById("dateHeader").addEventListener("wheel", handleWheelZoom, { passive: false });
+})();
+
+// ── 모바일 핀치 줌 ──
 var lastPinchDist = 0;
 document.getElementById("gridScroll").addEventListener("touchstart", function(e) {
   if (e.touches.length === 2) {
@@ -1797,8 +1839,9 @@ document.getElementById("gridScroll").addEventListener("touchmove", function(e) 
     );
     if (lastPinchDist > 0) {
       var ratio = dist / lastPinchDist;
-      if (ratio > 1.3) { zoomIn(); lastPinchDist = dist; }
-      else if (ratio < 0.7) { zoomOut(); lastPinchDist = dist; }
+      continuousColW = Math.max(MIN_COL_W, Math.min(MAX_COL_W, continuousColW * ratio));
+      lastPinchDist = dist;
+      applyZoom();
     }
   }
 }, { passive: true });
