@@ -722,6 +722,29 @@ body {
 }
 .ac-item:hover, .ac-item.active { background: var(--bg); }
 .ac-item .ac-match { font-weight: 700; color: var(--accent); }
+.mode-tabs { display: flex; gap: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.mode-tab {
+  flex: 1; padding: 8px; font-size: 13px; font-weight: 500;
+  border: none; background: var(--bg); color: var(--text-secondary);
+  cursor: pointer; transition: all 0.15s; text-align: center;
+}
+.mode-tab:not(:last-child) { border-right: 1px solid var(--border); }
+.mode-tab.active { background: var(--accent); color: #fff; }
+.booking-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; }
+.booking-card {
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); cursor: pointer; transition: all 0.15s; font-size: 12px;
+}
+.booking-card:hover { border-color: var(--accent); background: var(--today-bg); }
+.booking-card.selected { border-color: var(--accent); background: var(--today-bg); box-shadow: 0 0 0 2px rgba(35,131,226,0.2); }
+.booking-card .bc-title { font-weight: 600; font-size: 13px; color: var(--text-primary); }
+.booking-card .bc-detail { color: var(--text-secondary); margin-top: 3px; }
+.booking-info {
+  padding: 10px 12px; border-radius: var(--radius);
+  background: var(--today-bg); border: 1px solid rgba(35,131,226,0.2);
+  font-size: 12px; color: var(--text-secondary);
+}
+.booking-info strong { color: var(--text-primary); }
 .form-row .form-group { flex: 1; }
 #addModal .modal-box { padding: 0; width: 400px; }
 
@@ -896,40 +919,69 @@ body {
 <div class="modal-overlay" id="addModal" style="display:none" onclick="if(event.target===this)closeAddModal()">
   <div class="modal-box">
     <div class="modal-header">
-      <h3>예약 추가</h3>
+      <h3>장비 추가</h3>
       <button class="modal-close" onclick="closeAddModal()">&#10005;</button>
     </div>
     <div class="modal-body">
+      <!-- 모드 선택 -->
       <div class="form-group">
-        <label class="form-label">고객명 *</label>
-        <input type="text" id="addCustName" class="form-input" placeholder="예약자 이름">
+        <div class="mode-tabs">
+          <button class="mode-tab active" id="modeExisting" onclick="setAddMode('existing')">기존 예약건에 추가</button>
+          <button class="mode-tab" id="modeNew" onclick="setAddMode('new')">신규 예약</button>
+        </div>
       </div>
+
+      <!-- 기존 예약건 모드 -->
+      <div id="existingSection">
+        <div class="form-group" style="position:relative">
+          <label class="form-label">고객명 *</label>
+          <input type="text" id="addCustName" class="form-input" placeholder="고객명 입력..." autocomplete="off" spellcheck="false">
+          <div class="ac-dropdown" id="acCustDropdown"></div>
+        </div>
+        <div class="form-group" id="bookingSelectGroup" style="display:none">
+          <label class="form-label">예약건 선택 *</label>
+          <div id="bookingList" class="booking-list"></div>
+        </div>
+      </div>
+
+      <!-- 신규 예약 모드 (기존건 선택 시 숨김) -->
+      <div id="newSection" style="display:none">
+        <div class="form-group">
+          <label class="form-label">고객명 *</label>
+          <input type="text" id="addNewCustName" class="form-input" placeholder="예약자 이름">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">반출일 *</label>
+            <input type="date" id="addFromDate" class="form-input">
+          </div>
+          <div class="form-group">
+            <label class="form-label">반출시간</label>
+            <input type="time" id="addFromTime" class="form-input" value="10:00">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">반납일 *</label>
+            <input type="date" id="addToDate" class="form-input">
+          </div>
+          <div class="form-group">
+            <label class="form-label">반납시간</label>
+            <input type="time" id="addToTime" class="form-input" value="18:00">
+          </div>
+        </div>
+      </div>
+
+      <!-- 공통: 세트명 -->
       <div class="form-group" style="position:relative">
         <label class="form-label">세트명 *</label>
         <input type="text" id="addSetName" class="form-input" placeholder="세트명 입력 또는 선택..." autocomplete="off" spellcheck="false">
         <div class="ac-dropdown" id="acDropdown"></div>
         <div id="addSetNameError" style="font-size:11px;color:var(--red);margin-top:3px;display:none">세트마스터에 등록된 세트만 선택 가능합니다</div>
       </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">반출일 *</label>
-          <input type="date" id="addFromDate" class="form-input">
-        </div>
-        <div class="form-group">
-          <label class="form-label">반출시간</label>
-          <input type="time" id="addFromTime" class="form-input" value="10:00">
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">반납일 *</label>
-          <input type="date" id="addToDate" class="form-input">
-        </div>
-        <div class="form-group">
-          <label class="form-label">반납시간</label>
-          <input type="time" id="addToTime" class="form-input" value="18:00">
-        </div>
-      </div>
+
+      <!-- 선택된 예약건 정보 요약 -->
+      <div id="selectedBookingInfo" class="booking-info" style="display:none"></div>
     </div>
     <div class="modal-footer">
       <button class="hdr-btn" onclick="closeAddModal()">취소</button>
@@ -1752,6 +1804,144 @@ function loadEquipNames() {
   }
 })();
 
+var addMode = "existing"; // "existing" | "new"
+var selectedBooking = null; // 선택된 기존 예약건 { 거래ID, custName, 반출, 반납, ... }
+
+function setAddMode(mode) {
+  addMode = mode;
+  document.getElementById("modeExisting").classList.toggle("active", mode === "existing");
+  document.getElementById("modeNew").classList.toggle("active", mode === "new");
+  document.getElementById("existingSection").style.display = mode === "existing" ? "block" : "none";
+  document.getElementById("newSection").style.display = mode === "new" ? "block" : "none";
+  selectedBooking = null;
+  document.getElementById("selectedBookingInfo").style.display = "none";
+  document.getElementById("bookingSelectGroup").style.display = "none";
+}
+window.setAddMode = setAddMode;
+
+// 고객명 자동완성: 현재 로드된 타임라인 데이터에서 고객명 목록 추출
+function getCustNames() {
+  var unique = {};
+  (rawItems || []).forEach(function(item) {
+    if (item.custName) unique[item.custName] = true;
+  });
+  return Object.keys(unique).sort();
+}
+
+// 고객명으로 예약건 목록 가져오기
+function getBookingsForCust(custName) {
+  var seen = {};
+  var bookings = [];
+  (rawItems || []).forEach(function(item) {
+    if (item.custName !== custName) return;
+    var txId = item["거래ID"];
+    if (!txId || seen[txId]) return;
+    seen[txId] = true;
+    bookings.push({
+      거래ID: txId,
+      custName: item.custName,
+      세트명: item.세트명 || item["세트명원본"] || "",
+      반출: item.반출 || "",
+      반납: item.반납 || "",
+      반출시간: item.반출시간 || "",
+      반납시간: item.반납시간 || "",
+      start: item.start,
+      end: item.end,
+      status: item.status
+    });
+  });
+  // 최신순 정렬
+  bookings.sort(function(a, b) { return (b.start || "").localeCompare(a.start || ""); });
+  return bookings;
+}
+
+function showBookingList(custName) {
+  var bookings = getBookingsForCust(custName);
+  var container = document.getElementById("bookingList");
+  var group = document.getElementById("bookingSelectGroup");
+
+  if (bookings.length === 0) {
+    group.style.display = "none";
+    return;
+  }
+
+  group.style.display = "block";
+  container.innerHTML = "";
+  bookings.forEach(function(b) {
+    var card = document.createElement("div");
+    card.className = "booking-card";
+    card.innerHTML = '<div class="bc-title">' + escHtml(b.세트명) + '</div>'
+      + '<div class="bc-detail">' + escHtml(b.반출 + " ~ " + b.반납) + ' · ' + escHtml(b.거래ID) + '</div>';
+    card.addEventListener("click", function() {
+      container.querySelectorAll(".booking-card").forEach(function(c) { c.classList.remove("selected"); });
+      card.classList.add("selected");
+      selectedBooking = b;
+      // 요약 표시
+      var info = document.getElementById("selectedBookingInfo");
+      info.style.display = "block";
+      info.innerHTML = '<strong>' + escHtml(b.custName) + '</strong> · '
+        + escHtml(b.반출 + " ~ " + b.반납)
+        + '<br>거래ID: ' + escHtml(b.거래ID) + ' · 여기에 세트를 추가합니다';
+    });
+    container.appendChild(card);
+  });
+}
+
+// 고객명 자동완성 드롭다운
+(function() {
+  var input = document.getElementById("addCustName");
+  var dropdown = document.getElementById("acCustDropdown");
+  var activeIdx = -1;
+
+  function showCustDD(filter) {
+    var list = getCustNames();
+    var q = (filter || "").toLowerCase();
+    var filtered = q ? list.filter(function(n) { return n.toLowerCase().indexOf(q) >= 0; }) : list;
+    if (filtered.length === 0) { dropdown.style.display = "none"; return; }
+    activeIdx = -1;
+    dropdown.innerHTML = "";
+    filtered.forEach(function(name) {
+      var div = document.createElement("div");
+      div.className = "ac-item";
+      if (q) {
+        var idx = name.toLowerCase().indexOf(q);
+        div.innerHTML = escHtml(name.slice(0, idx))
+          + '<span class="ac-match">' + escHtml(name.slice(idx, idx + q.length)) + '</span>'
+          + escHtml(name.slice(idx + q.length));
+      } else {
+        div.textContent = name;
+      }
+      div.addEventListener("mousedown", function(e) {
+        e.preventDefault();
+        input.value = name;
+        dropdown.style.display = "none";
+        showBookingList(name);
+      });
+      dropdown.appendChild(div);
+    });
+    dropdown.style.display = "block";
+  }
+
+  input.addEventListener("focus", function() { showCustDD(this.value.trim()); });
+  input.addEventListener("input", function() {
+    showCustDD(this.value.trim());
+    // 고객명 바뀌면 예약건 선택 초기화
+    selectedBooking = null;
+    document.getElementById("selectedBookingInfo").style.display = "none";
+    var val = this.value.trim();
+    if (val) showBookingList(val); else document.getElementById("bookingSelectGroup").style.display = "none";
+  });
+  input.addEventListener("blur", function() { setTimeout(function() { dropdown.style.display = "none"; }, 150); });
+  input.addEventListener("keydown", function(e) {
+    var items = dropdown.querySelectorAll(".ac-item");
+    if (!items.length) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, items.length - 1); items.forEach(function(el, i) { el.classList.toggle("active", i === activeIdx); }); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); items.forEach(function(el, i) { el.classList.toggle("active", i === activeIdx); }); }
+    else if (e.key === "Enter" && activeIdx >= 0) { e.preventDefault(); input.value = items[activeIdx].textContent; dropdown.style.display = "none"; showBookingList(input.value); }
+    else if (e.key === "Escape") { dropdown.style.display = "none"; }
+  });
+})();
+
 function openAddModal(fromDate, toDate) {
   var today = new Date();
   var fromStr = fromDate ? toDateStr(fromDate) : toDateStr(today);
@@ -1761,7 +1951,14 @@ function openAddModal(fromDate, toDate) {
   document.getElementById("addFromTime").value = "10:00";
   document.getElementById("addToTime").value = "18:00";
   document.getElementById("addCustName").value = "";
+  document.getElementById("addNewCustName").value = "";
   document.getElementById("addSetName").value = "";
+  document.getElementById("addSetNameError").style.display = "none";
+  document.getElementById("addSetName").style.borderColor = "";
+  selectedBooking = null;
+  document.getElementById("selectedBookingInfo").style.display = "none";
+  document.getElementById("bookingSelectGroup").style.display = "none";
+  setAddMode("existing");
   document.getElementById("addModal").style.display = "flex";
 }
 
@@ -1770,26 +1967,36 @@ function closeAddModal() {
 }
 
 function submitAddBooking() {
-  var custName = document.getElementById("addCustName").value.trim();
   var setName = document.getElementById("addSetName").value.trim();
-  var fromDate = document.getElementById("addFromDate").value;
-  var fromTime = document.getElementById("addFromTime").value || "10:00";
-  var toDate = document.getElementById("addToDate").value;
-  var toTime = document.getElementById("addToTime").value || "18:00";
-
-  if (!custName) { showToast("고객명을 입력해주세요"); return; }
   if (!setName) { showToast("세트명을 입력해주세요"); return; }
   if (!equipNames[setName]) { showToast("세트마스터에 없는 세트명입니다"); return; }
-  if (!fromDate || !toDate) { showToast("반출일/반납일을 입력해주세요"); return; }
-  if (fromDate > toDate) { showToast("반납일이 반출일보다 빠릅니다"); return; }
 
-  // Generate 거래ID: YYMMDD-NNN format
-  var now = new Date();
-  var yy = String(now.getFullYear()).slice(-2);
-  var mm = pad2(now.getMonth() + 1);
-  var dd = pad2(now.getDate());
-  var seq = pad2(now.getHours()) + pad2(now.getMinutes());
-  var txID = yy + mm + dd + "-" + seq.slice(0, 3);
+  var txID, custName, fromDate, fromTime, toDate, toTime;
+
+  if (addMode === "existing") {
+    if (!selectedBooking) { showToast("예약건을 선택해주세요"); return; }
+    txID = selectedBooking["거래ID"];
+    custName = selectedBooking.custName;
+    // 기존 예약건의 날짜/시간 사용
+    var startDT = new Date(selectedBooking.start);
+    var endDT = new Date(selectedBooking.end);
+    fromDate = toDateStr(startDT);
+    toDate = toDateStr(endDT);
+    fromTime = selectedBooking.반출시간 || pad2(startDT.getHours()) + ":" + pad2(startDT.getMinutes());
+    toTime = selectedBooking.반납시간 || pad2(endDT.getHours()) + ":" + pad2(endDT.getMinutes());
+  } else {
+    custName = document.getElementById("addNewCustName").value.trim();
+    if (!custName) { showToast("고객명을 입력해주세요"); return; }
+    fromDate = document.getElementById("addFromDate").value;
+    fromTime = document.getElementById("addFromTime").value || "10:00";
+    toDate = document.getElementById("addToDate").value;
+    toTime = document.getElementById("addToTime").value || "18:00";
+    if (!fromDate || !toDate) { showToast("반출일/반납일을 입력해주세요"); return; }
+    if (fromDate > toDate) { showToast("반납일이 반출일보다 빠릅니다"); return; }
+    // 신규 거래ID 생성
+    var now = new Date();
+    txID = String(now.getFullYear()).slice(-2) + pad2(now.getMonth() + 1) + pad2(now.getDate()) + "-" + pad2(now.getHours()) + pad2(now.getMinutes()).slice(0, 1);
+  }
 
   var submitBtn = document.getElementById("addSubmitBtn");
   submitBtn.disabled = true;
