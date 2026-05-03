@@ -1633,9 +1633,10 @@ var equipNames = {}; // 세트명 → true (유효 목록)
 function loadEquipNames() {
   fetch(API_URL + "?key=village2026&action=read&sheet=" + encodeURIComponent("세트마스터") + "&range=A:A")
     .then(function(r) { return r.json(); })
-    .then(function(data) {
+    .then(function(res) {
       var unique = {};
-      (data.values || []).forEach(function(row) {
+      var rows = res.data || res.values || [];
+      rows.forEach(function(row) {
         var name = String(row[0] || "").trim();
         if (name && name !== "세트명") unique[name] = true;
       });
