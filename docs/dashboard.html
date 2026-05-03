@@ -3,30 +3,32 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#F7F7F5">
 <title>빌리지 오늘 일정</title>
 <style>
   :root {
-    --bg: #FAFBFC;
+    --bg: #F7F7F5;
     --surface: #FFFFFF;
-    --border: #E8ECF0;
-    --text-primary: #1B2332;
-    --text-secondary: #5F6B7A;
-    --text-muted: #9AA5B4;
-    --accent: #2563EB;
-    --blue-bg: #D3E5FF;
-    --blue-text: #1D4ED8;
-    --amber-bg: #FEF3C7;
-    --amber-text: #B45309;
-    --green-bg: #D1FAE5;
-    --green-text: #065F46;
-    --red: #EF4444;
-    --radius: 10px;
+    --border: #E9E9E7;
+    --border-light: #F0F0EE;
+    --text-primary: #37352F;
+    --text-secondary: #787774;
+    --text-muted: #B4B4B0;
+    --accent: #2383E2;
+    --blue-bg: #D3E5EF;
+    --blue-text: #24609C;
+    --amber-bg: #FDECC8;
+    --amber-text: #93640D;
+    --green-bg: #DBEDDB;
+    --green-text: #2B6B2B;
+    --red: #EB5757;
+    --radius: 6px;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
   body {
-    font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans KR', sans-serif;
     background: var(--bg);
     color: var(--text-primary);
     min-height: 100vh;
@@ -63,13 +65,14 @@
     width: 34px; height: 34px;
     display: flex; align-items: center; justify-content: center;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius);
     background: var(--surface);
     cursor: pointer;
     color: var(--text-secondary);
     font-size: 16px;
     transition: all 0.15s;
   }
+  .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
   .icon-btn:active { background: var(--bg); }
   .icon-btn.spinning { animation: spin 0.8s ease; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -84,17 +87,19 @@
     width: 34px; height: 34px;
     display: flex; align-items: center; justify-content: center;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius);
     background: var(--surface);
     cursor: pointer;
     color: var(--text-secondary);
     font-size: 13px;
+    transition: all 0.15s;
   }
+  .date-nav-btn:hover { border-color: var(--accent); color: var(--accent); }
   .date-nav-btn:active { background: var(--bg); }
 
   .date-input {
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius);
     padding: 7px 12px;
     font-size: 14px;
     font-family: inherit;
@@ -102,20 +107,23 @@
     background: var(--surface);
     cursor: pointer;
     outline: none;
+    transition: border-color 0.2s;
   }
-  .date-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+  .date-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(35,131,226,0.15); }
 
   .today-btn {
     border: 1px solid var(--accent);
     background: var(--accent);
     color: #fff;
     padding: 7px 14px;
-    border-radius: 8px;
+    border-radius: var(--radius);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
+    transition: opacity 0.15s;
   }
+  .today-btn:hover { opacity: 0.9; }
   .today-btn:active { opacity: 0.85; }
 
   /* ── 요약 카드 ── */
@@ -142,48 +150,58 @@
     margin-top: 4px;
     font-weight: 600;
   }
-  .summary-card.checkout { background: #EFF6FF; border-color: #BFDBFE; }
+  .summary-card.checkout { background: var(--blue-bg); border-color: #B8D4E8; }
   .summary-card.checkout .num { color: var(--blue-text); }
-  .summary-card.checkin { background: #FFFBEB; border-color: #FDE68A; }
+  .summary-card.checkin { background: var(--amber-bg); border-color: #F0D5A0; }
   .summary-card.checkin .num { color: var(--amber-text); }
-  .summary-card.active { background: #ECFDF5; border-color: #A7F3D0; }
+  .summary-card.active { background: var(--green-bg); border-color: #B8D8B8; }
   .summary-card.active .num { color: var(--green-text); }
 
   /* ── 경고 문구 ── */
   .notice-bar {
-    background: #FFFBEB;
+    background: var(--amber-bg);
     color: var(--amber-text);
     font-size: 12px;
     font-weight: 600;
     padding: 10px 20px;
     line-height: 1.6;
-    border-bottom: 1px solid #FDE68A;
+    border-bottom: 1px solid #F0D5A0;
   }
 
   /* ── 탭 ── */
   .tabs {
     display: flex;
-    padding: 12px 20px 0;
-    gap: 4px;
-    background: var(--bg);
+    padding: 10px 20px;
+    gap: 0;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
     position: sticky;
     top: 108px;
     z-index: 50;
-    padding-bottom: 12px;
+  }
+  .tabs-inner {
+    display: flex;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
   }
   .tab {
     flex: 1;
-    padding: 10px 0;
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    padding: 6px 14px;
+    border: none;
+    border-right: 1px solid var(--border);
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 500;
     cursor: pointer;
-    background: var(--surface);
+    background: transparent;
     color: var(--text-secondary);
     font-family: inherit;
     transition: all 0.15s;
+    white-space: nowrap;
   }
+  .tab:last-child { border-right: none; }
+  .tab:hover { background: rgba(0,0,0,0.03); }
   .tab.active {
     background: var(--accent);
     color: #fff;
@@ -191,8 +209,8 @@
   }
   .tab .badge {
     display: inline-block;
-    background: rgba(0,0,0,0.06);
-    border-radius: 6px;
+    background: rgba(0,0,0,0.08);
+    border-radius: 10px;
     padding: 1px 7px;
     font-size: 11px;
     margin-left: 4px;
@@ -231,18 +249,19 @@
     margin-bottom: 8px;
     border: 1px solid var(--border);
     cursor: pointer;
-    transition: box-shadow 0.15s;
+    transition: box-shadow 0.15s, border-color 0.15s;
   }
-  .schedule-card:active { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .schedule-card:hover { box-shadow: 0 1px 4px rgba(55,53,47,0.08); border-color: #D4D4D0; }
+  .schedule-card:active { box-shadow: 0 2px 8px rgba(55,53,47,0.1); }
 
-  .schedule-card.type-checkout { border-left: 3px solid #3B82F6; }
-  .schedule-card.type-checkin  { border-left: 3px solid #F59E0B; }
+  .schedule-card.type-checkout { border-left: 3px solid var(--blue-text); }
+  .schedule-card.type-checkin  { border-left: 3px solid var(--amber-text); }
 
   /* 처리 완료 — 카드 흐릿 + 체크 아이콘 (반출세팅완료 / 반납검수완료 공통) */
   .schedule-card.task-done {
     opacity: 0.55;
-    background: #F0FDF4;
-    border-left-color: #10B981 !important;
+    background: var(--green-bg);
+    border-left-color: var(--green-text) !important;
   }
   .schedule-card.task-done .customer-name {
     text-decoration: line-through;
@@ -256,21 +275,21 @@
     justify-content: center;
     width: 28px;
     height: 28px;
-    border-radius: 8px;
-    border: 1.5px solid #D1D5DB;
-    background: #fff;
+    border-radius: var(--radius);
+    border: 1.5px solid var(--border);
+    background: var(--surface);
     cursor: pointer;
     font-size: 14px;
     font-weight: 700;
-    color: #9CA3AF;
+    color: var(--text-muted);
     margin-right: 8px;
     transition: all 0.15s;
     flex-shrink: 0;
   }
-  .task-toggle:hover { border-color: #10B981; color: #10B981; }
+  .task-toggle:hover { border-color: var(--green-text); color: var(--green-text); }
   .task-toggle.checked {
-    background: #10B981;
-    border-color: #10B981;
+    background: var(--green-text);
+    border-color: var(--green-text);
     color: #fff;
   }
 
@@ -287,48 +306,49 @@
     align-items: center;
     gap: 8px;
     padding: 6px 8px;
-    border-radius: 6px;
-    background: #fff;
-    border: 1px solid #E5E7EB;
+    border-radius: var(--radius);
+    background: var(--surface);
+    border: 1px solid var(--border);
     font-size: 13px;
     position: relative;
   }
-  .equip-row.is-set { background: #ECFDF5; border-color: #A7F3D0; font-weight: 700; }
-  .equip-row.is-component { padding-left: 28px; background: #F9FAFB; border-color: transparent; font-size: 12px; color: #4B5563; }
+  .equip-row.is-set { background: var(--green-bg); border-color: #B8D8B8; font-weight: 700; }
+  .equip-row.is-component { padding-left: 28px; background: var(--bg); border-color: transparent; font-size: 12px; color: var(--text-secondary); }
   .equip-row.is-component::before {
     content: '└';
     position: absolute;
     left: 14px;
-    color: #9CA3AF;
+    color: var(--text-muted);
   }
-  .equip-row.is-single { background: #fff; }
+  .equip-row.is-single { background: var(--surface); }
   .equip-row.checked { opacity: 0.55; }
   .equip-row.checked .equip-name { text-decoration: line-through; }
   .equip-checkbox {
     width: 18px;
     height: 18px;
-    border: 1.5px solid #D1D5DB;
+    border: 1.5px solid var(--border);
     border-radius: 4px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
     flex-shrink: 0;
-    background: #fff;
+    background: var(--surface);
     color: transparent;
     font-weight: 700;
     font-size: 12px;
     line-height: 1;
+    transition: all 0.15s;
   }
   .equip-checkbox.checked {
-    background: #10B981;
-    border-color: #10B981;
+    background: var(--green-text);
+    border-color: var(--green-text);
     color: #fff;
   }
   .equip-name { flex: 1; min-width: 0; word-break: break-word; }
   .equip-set-tag {
     display: inline-block;
-    background: #10B981;
+    background: var(--green-text);
     color: #fff;
     font-size: 9px;
     font-weight: 700;
@@ -338,7 +358,7 @@
     vertical-align: middle;
   }
   .equip-qty {
-    color: #6B7280;
+    color: var(--text-secondary);
     font-size: 11px;
     font-weight: 600;
     flex-shrink: 0;
@@ -349,30 +369,31 @@
     height: 18px;
     line-height: 16px;
     text-align: center;
-    color: #9CA3AF;
+    color: var(--text-muted);
     cursor: pointer;
     border-radius: 4px;
     font-size: 13px;
     font-weight: 700;
     flex-shrink: 0;
   }
-  .equip-row-remove:hover { background: #FEE2E2; color: #EF4444; }
+  .equip-row-remove:hover { background: #FAE0E0; color: var(--red); }
 
   /* 장비 추가 버튼 */
   .equip-add-btn {
     display: inline-block;
     padding: 6px 12px;
-    border: 1px dashed #9CA3AF;
-    border-radius: 6px;
-    color: #6B7280;
+    border: 1px dashed var(--text-muted);
+    border-radius: var(--radius);
+    color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
     cursor: pointer;
     background: transparent;
     margin-top: 4px;
     align-self: flex-start;
+    transition: all 0.15s;
   }
-  .equip-add-btn:hover { border-color: #3B82F6; color: #3B82F6; }
+  .equip-add-btn:hover { border-color: var(--accent); color: var(--accent); }
 
   /* 장비 추가 모달 */
   .modal-overlay {
@@ -387,37 +408,46 @@
   }
   .modal-overlay.open { display: flex; }
   .modal-box {
-    background: #fff;
-    border-radius: 14px;
+    background: var(--surface);
+    border-radius: var(--radius);
     padding: 22px 22px 18px;
     width: 100%;
     max-width: 400px;
-    box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+    box-shadow: 0 8px 30px rgba(55,53,47,0.15), 0 1px 4px rgba(55,53,47,0.08);
+    border: 1px solid var(--border);
   }
   .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 14px; color: var(--text-primary); }
-  .modal-label { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; display: block; font-weight: 600; }
+  .modal-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; display: block; font-weight: 600; }
   .modal-input {
     width: 100%;
-    padding: 10px 12px;
-    border: 1.5px solid var(--border);
-    border-radius: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     font-size: 14px;
+    font-family: inherit;
+    color: var(--text-primary);
+    background: var(--bg);
     margin-bottom: 12px;
     box-sizing: border-box;
     outline: none;
+    transition: border-color 0.2s;
   }
-  .modal-input:focus { border-color: #3B82F6; }
+  .modal-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(35,131,226,0.15); }
   .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
   .modal-btn {
-    padding: 9px 16px;
-    border-radius: 8px;
+    padding: 7px 14px;
+    border-radius: var(--radius);
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 500;
     cursor: pointer;
     border: 1px solid transparent;
+    font-family: inherit;
+    transition: all 0.15s;
   }
-  .modal-btn-cancel { background: #fff; color: var(--text-secondary); border-color: var(--border); }
-  .modal-btn-confirm { background: #3B82F6; color: #fff; }
+  .modal-btn-cancel { background: var(--surface); color: var(--text-secondary); border-color: var(--border); }
+  .modal-btn-cancel:hover { border-color: var(--accent); color: var(--accent); }
+  .modal-btn-confirm { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .modal-btn-confirm:hover { opacity: 0.9; }
   .modal-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* 개고생2.0 점프 버튼 */
@@ -487,19 +517,20 @@
   .equip-tag.set-tag {
     background: var(--green-bg);
     color: var(--green-text);
-    border-color: #A7F3D0;
+    border-color: #B8D8B8;
   }
 
   /* ── 상태 배지 ── */
   .status-badge {
     font-size: 11px;
     padding: 2px 8px;
-    border-radius: 5px;
+    border-radius: 10px;
     font-weight: 600;
   }
   .status-대기     { background: var(--blue-bg); color: var(--blue-text); }
   .status-반출중   { background: var(--amber-bg); color: var(--amber-text); }
   .status-반납완료 { background: var(--green-bg); color: var(--green-text); }
+  .status-취소     { background: #E8E8E5; color: #787774; }
 
   /* ── 빈 상태 ── */
   .empty-state {
@@ -546,24 +577,25 @@
 
   /* ── Nav Link ── */
   .nav-link {
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 500;
-    color: var(--accent);
+    color: var(--text-secondary);
     text-decoration: none;
     padding: 5px 10px;
-    border: 1px solid var(--accent);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
     transition: all 0.15s;
     white-space: nowrap;
+    background: var(--surface);
   }
-  .nav-link:hover { background: var(--accent); color: #fff; }
+  .nav-link:hover { border-color: var(--accent); color: var(--accent); }
 
   /* ── 반응형 ── */
   @media (min-width: 768px) {
     .header { padding: 16px 32px 14px; }
     .summary-row { padding: 14px 32px; }
     .notice-bar { padding: 10px 32px; }
-    .tabs { padding: 12px 32px 12px; }
+    .tabs { padding: 10px 32px; }
     .content { padding: 0 32px 30px; }
   }
 </style>
@@ -611,15 +643,17 @@
 </div>
 
 <div class="tabs">
-  <button class="tab active" data-tab="checkout" onclick="switchTab('checkout')">
-    반출 <span class="badge" id="tabCheckout">0</span>
-  </button>
-  <button class="tab" data-tab="checkin" onclick="switchTab('checkin')">
-    반납 <span class="badge" id="tabCheckin">0</span>
-  </button>
-  <button class="tab" data-tab="all" onclick="switchTab('all')">
-    전체 <span class="badge" id="tabAll">0</span>
-  </button>
+  <div class="tabs-inner">
+    <button class="tab active" data-tab="checkout" onclick="switchTab('checkout')">
+      반출 <span class="badge" id="tabCheckout">0</span>
+    </button>
+    <button class="tab" data-tab="checkin" onclick="switchTab('checkin')">
+      반납 <span class="badge" id="tabCheckin">0</span>
+    </button>
+    <button class="tab" data-tab="all" onclick="switchTab('all')">
+      전체 <span class="badge" id="tabAll">0</span>
+    </button>
+  </div>
 </div>
 
 <div class="content">
