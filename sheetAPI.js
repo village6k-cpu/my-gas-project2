@@ -161,6 +161,14 @@ function handleRequest(e) {
         return jsonResponse(updateScheduleTime(row, newStart, newEnd, rowIndices));
       }
 
+      case "updateStatus": {
+        var row = Number(params.row || postBody.row);
+        var newStatus = params.status || postBody.status;
+        var rowIndices = params.rowIndices || postBody.rowIndices || null;
+        if (!row || !newStatus) return jsonResponse({ success: false, message: "row, status 필수" });
+        return jsonResponse(updateScheduleStatus(row, newStatus, rowIndices));
+      }
+
       case "dashboard":
         // nocache=1 이면 캐시 우회 (새로고침 버튼용)
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');

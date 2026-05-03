@@ -4464,3 +4464,36 @@ function showLog_(lines) {
   SpreadsheetApp.getUi().showModalDialog(out, '🐞 가용확인 디버그 결과');
   Logger.log(lines.join('\n'));
 }
+
+/**
+ * 스케줄상세 상태 변경
+ * @param {number} rowIndex - 대표 행 번호
+ * @param {string} newStatus - 새 상태 (대기/반출중/반납완료/취소)
+ * @param {string} [rowIndices] - 같은 세트 전체 행 JSON
+ */
+function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('스케줄상세');
+  if (!sheet) return { success: false, message: '스케줄상세 시트 없음' };
+
+  var validStatuses = ['대기', '반출중', '반납완료', '취소'];
+  if (validStatuses.indexOf(newStatus) < 0) {
+    return { success: false, message: '유효하지 않은 상태: ' + newStatus };
+  }
+
+  var rows = [];
+  if (rowIndices) {
+    try { rows = JSON.parse(rowIndices); } catch(e) { rows = [rowIndex]; }
+  } else {
+    rows = [rowIndex];
+  }
+
+  rows.forEach(function(r) {
+    var ri = Number(r);
+    if (ri >= 2) {
+      sheet.getRange(ri, 10).setValue(newStatus);  // J열 = 10번째 = 상태
+    }
+  });
+
+  return { success: true, message: rows.length + '행 상태 변경 완료', newStatus: newStatus };
+}
