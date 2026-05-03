@@ -150,6 +150,20 @@ body {
   border-color: var(--accent);
 }
 .hdr-btn.primary:hover { opacity: 0.9; }
+.date-input {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--text-primary);
+  outline: none;
+  width: 120px;
+}
+.date-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(35,131,226,0.15);
+}
 .refresh-info {
   font-size: 11px;
   color: var(--text-muted);
@@ -822,6 +836,9 @@ body {
   <div class="header-controls">
     <button class="hdr-btn" id="filterBtn" onclick="toggleActiveFilter()">필터</button>
     <button class="hdr-btn" onclick="scrollToToday()">오늘</button>
+    <input type="date" class="date-input" id="dateFrom" title="시작일">
+    <span style="color:var(--text-muted);font-size:12px">~</span>
+    <input type="date" class="date-input" id="dateTo" title="종료일">
     <button class="hdr-btn primary" onclick="openAddModal()">+ 예약</button>
     <span class="refresh-info" id="refreshInfo"></span>
   </div>
@@ -941,6 +958,10 @@ var zoomLevels = [
 ];
 var currentZoomIdx = 2; // 일
 var dateRange = { start: null, end: null, days: 0 };
+var viewStart = null;  // Date — left edge of visible grid
+var viewEnd = null;    // Date — right edge of visible grid
+var filterStart = null; // Date — user-set filter start (null = auto)
+var filterEnd = null;   // Date — user-set filter end (null = auto)
 var refreshTimer = null;
 var ctxTarget = null; // item for context menu
 var searchDebounce = null;
@@ -1017,17 +1038,22 @@ function loadData() {
 
 function computeDateRange() {
   var today = dateOnly(new Date());
-  var minD = addDays(today, -7);
-  var maxD = addDays(today, 30);
-  rawItems.forEach(function(it) {
-    if (it._startDay < minD) minD = it._startDay;
-    if (it._endDay > maxD) maxD = it._endDay;
-  });
-  minD = addDays(minD, -2);
-  maxD = addDays(maxD, 3);
-  dateRange.start = minD;
-  dateRange.end = maxD;
-  dateRange.days = daysBetween(minD, maxD) + 1;
+  if (filterStart && filterEnd) {
+    viewStart = dateOnly(filterStart);
+    viewEnd = dateOnly(filterEnd);
+  } else if (filterStart) {
+    viewStart = dateOnly(filterStart);
+    viewEnd = addDays(viewStart, 21);
+  } else if (filterEnd) {
+    viewEnd = dateOnly(filterEnd);
+    viewStart = addDays(viewEnd, -21);
+  } else {
+    viewStart = addDays(today, -7);
+    viewEnd = addDays(today, 14);
+  }
+  dateRange.start = viewStart;
+  dateRange.end = viewEnd;
+  dateRange.days = daysBetween(viewStart, viewEnd) + 1;
 }
 
 // ── Grouping ──
@@ -1046,6 +1072,10 @@ function buildGroups() {
                   (it["장비명"] || "").toLowerCase().indexOf(q) >= 0 ||
                   (it["거래ID"] || "").toLowerCase().indexOf(q) >= 0;
       if (!match) return false;
+    }
+    // Date overlap filter: item must overlap with [viewStart, viewEnd]
+    if (viewStart && viewEnd) {
+      if (it._endDay < viewStart || it._startDay > viewEnd) return false;
     }
     return true;
   });
@@ -1235,9 +1265,15 @@ function render() {
           gridHtml += '<div class="' + ccls2 + '" style="width:' + colW + 'px;min-width:' + colW + 'px"></div>';
         }
 
-        // Bar
-        var startOff = daysBetween(dateRange.start, it._startDay);
-        var span = daysBetween(it._startDay, it._endDay) + 1;
+        // Bar — clip to viewport
+        var clipLeft = false, clipRight = false;
+        var barStartDay = it._startDay;
+        var barEndDay = it._endDay;
+        if (barStartDay < dateRange.start) { barStartDay = dateRange.start; clipLeft = true; }
+        if (barEndDay > dateRange.end) { barEndDay = dateRange.end; clipRight = true; }
+
+        var startOff = daysBetween(dateRange.start, barStartDay);
+        var span = daysBetween(barStartDay, barEndDay) + 1;
         var barLeft = startOff * colW + 2;
         var barWidth = span * colW - 4;
         if (barWidth < 8) barWidth = 8;
@@ -1248,9 +1284,11 @@ function render() {
         if (isSameDay(it._startDay, today)) barCls += " today-out";
         if (isSameDay(it._endDay, today)) barCls += " today-in";
 
-        var barText = escHtml(it["세트명원본"] || "") + " / " + escHtml(it.custName || "") + " / " +
+        var clipPrefix = clipLeft ? "\u25C0 " : "";
+        var clipSuffix = clipRight ? " \u25B6" : "";
+        var barText = clipPrefix + escHtml(it["세트명원본"] || "") + " / " + escHtml(it.custName || "") + " / " +
           escHtml(it["반출시간"] || "") + "-" + escHtml(it["반납시간"] || "") +
-          (it["회차"] ? "(" + it["회차"] + "회차)" : "");
+          (it["회차"] ? "(" + it["회차"] + "회차)" : "") + clipSuffix;
         var barTitle = barText.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">");
 
         barHtml += '<div class="' + barCls + '" data-item-id="' + escHtml(it.id) + '" ' +
@@ -1769,6 +1807,20 @@ document.addEventListener("keydown", function(e) {
 // Click on modal overlay
 document.getElementById("addModal").addEventListener("click", function(e) {
   if (e.target === this) closeAddModal();
+});
+
+// ── Date Range Filter ──
+document.getElementById("dateFrom").addEventListener("change", function() {
+  var v = this.value;
+  filterStart = v ? new Date(v + "T00:00:00") : null;
+  computeDateRange();
+  render();
+});
+document.getElementById("dateTo").addEventListener("change", function() {
+  var v = this.value;
+  filterEnd = v ? new Date(v + "T00:00:00") : null;
+  computeDateRange();
+  render();
 });
 
 // ── Init ──
