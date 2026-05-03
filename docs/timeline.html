@@ -700,6 +700,29 @@ body {
 }
 .form-input:focus { border-color: var(--accent); }
 .form-row { display: flex; gap: 12px; }
+.ac-dropdown {
+  display: none;
+  position: absolute;
+  left: 0; right: 0;
+  top: 100%;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  z-index: 210;
+}
+.ac-dropdown.open { display: block; }
+.ac-item {
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.ac-item:hover, .ac-item.active { background: var(--bg); }
+.ac-item .ac-match { font-weight: 700; color: var(--accent); }
 .form-row .form-group { flex: 1; }
 #addModal .modal-box { padding: 0; width: 400px; }
 
@@ -882,10 +905,10 @@ body {
         <label class="form-label">고객명 *</label>
         <input type="text" id="addCustName" class="form-input" placeholder="예약자 이름">
       </div>
-      <div class="form-group">
+      <div class="form-group" style="position:relative">
         <label class="form-label">세트명 *</label>
-        <input type="text" id="addSetName" class="form-input" list="equipList" placeholder="세트명 입력..." autocomplete="off">
-        <datalist id="equipList"></datalist>
+        <input type="text" id="addSetName" class="form-input" placeholder="세트명 입력 또는 선택..." autocomplete="off">
+        <div class="ac-dropdown" id="acDropdown"></div>
         <div id="addSetNameError" style="font-size:11px;color:var(--red);margin-top:3px;display:none">세트마스터에 등록된 세트만 선택 가능합니다</div>
       </div>
       <div class="form-row">
@@ -1630,21 +1653,110 @@ function loadEquipNames() {
     .catch(function() {});
 }
 
-// 입력값 실시간 검증
-document.getElementById("addSetName").addEventListener("input", function() {
-  var val = this.value.trim();
+// ── 커스텀 자동완성 드롭다운 ──
+(function() {
+  var input = document.getElementById("addSetName");
+  var dropdown = document.getElementById("acDropdown");
   var errEl = document.getElementById("addSetNameError");
-  if (!val) {
-    errEl.style.display = "none";
-    this.style.borderColor = "";
-  } else if (equipNames[val]) {
-    errEl.style.display = "none";
-    this.style.borderColor = "var(--green-text)";
-  } else {
-    errEl.style.display = "block";
-    this.style.borderColor = "var(--red)";
+  var activeIdx = -1;
+
+  function getList() { return Object.keys(equipNames).sort(); }
+
+  function showDropdown(filter) {
+    var list = getList();
+    var q = (filter || "").toLowerCase();
+    var filtered = q ? list.filter(function(n) { return n.toLowerCase().indexOf(q) >= 0; }) : list;
+
+    if (filtered.length === 0) {
+      dropdown.classList.remove("open");
+      return;
+    }
+
+    activeIdx = -1;
+    dropdown.innerHTML = "";
+    filtered.forEach(function(name, i) {
+      var div = document.createElement("div");
+      div.className = "ac-item";
+      div.setAttribute("data-idx", i);
+      // 매칭 부분 하이라이트
+      if (q) {
+        var idx = name.toLowerCase().indexOf(q);
+        div.innerHTML = escHtml(name.slice(0, idx))
+          + '<span class="ac-match">' + escHtml(name.slice(idx, idx + q.length)) + '</span>'
+          + escHtml(name.slice(idx + q.length));
+      } else {
+        div.textContent = name;
+      }
+      div.addEventListener("mousedown", function(e) {
+        e.preventDefault(); // blur 방지
+        input.value = name;
+        dropdown.classList.remove("open");
+        validateInput();
+      });
+      dropdown.appendChild(div);
+    });
+    dropdown.classList.add("open");
   }
-});
+
+  function validateInput() {
+    var val = input.value.trim();
+    if (!val) {
+      errEl.style.display = "none";
+      input.style.borderColor = "";
+    } else if (equipNames[val]) {
+      errEl.style.display = "none";
+      input.style.borderColor = "var(--green-text)";
+    } else {
+      errEl.style.display = "block";
+      input.style.borderColor = "var(--red)";
+    }
+  }
+
+  input.addEventListener("focus", function() {
+    showDropdown(this.value.trim());
+  });
+
+  input.addEventListener("input", function() {
+    showDropdown(this.value.trim());
+    validateInput();
+  });
+
+  input.addEventListener("blur", function() {
+    setTimeout(function() { dropdown.classList.remove("open"); }, 150);
+    validateInput();
+  });
+
+  input.addEventListener("keydown", function(e) {
+    var items = dropdown.querySelectorAll(".ac-item");
+    if (!items.length) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      activeIdx = Math.min(activeIdx + 1, items.length - 1);
+      updateActive(items);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      activeIdx = Math.max(activeIdx - 1, 0);
+      updateActive(items);
+    } else if (e.key === "Enter" && activeIdx >= 0) {
+      e.preventDefault();
+      input.value = items[activeIdx].textContent;
+      dropdown.classList.remove("open");
+      validateInput();
+    } else if (e.key === "Escape") {
+      dropdown.classList.remove("open");
+    }
+  });
+
+  function updateActive(items) {
+    items.forEach(function(el, i) {
+      el.classList.toggle("active", i === activeIdx);
+    });
+    if (activeIdx >= 0 && items[activeIdx]) {
+      items[activeIdx].scrollIntoView({ block: "nearest" });
+    }
+  }
+})();
 
 function openAddModal(fromDate, toDate) {
   var today = new Date();
