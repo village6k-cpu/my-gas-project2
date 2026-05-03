@@ -671,6 +671,38 @@ body {
   border-color: var(--accent);
 }
 
+/* ── Add Modal ── */
+.modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-header h3 { font-size: 16px; font-weight: 700; margin-bottom: 0; }
+.modal-close {
+  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+  border: none; background: var(--bg); border-radius: 6px; cursor: pointer;
+  font-size: 14px; color: var(--text-secondary);
+}
+.modal-close:hover { background: var(--border); }
+.modal-body { padding: 16px 20px; }
+.modal-footer {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+}
+.form-group { margin-bottom: 12px; }
+.form-label { display: block; font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 4px; }
+.form-input {
+  width: 100%; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); font-size: 13px; color: var(--text-primary);
+  outline: none; transition: border-color 0.15s;
+}
+.form-input:focus { border-color: var(--accent); }
+.form-row { display: flex; gap: 12px; }
+.form-row .form-group { flex: 1; }
+#addModal .modal-box { padding: 0; width: 400px; }
+
 /* ── Toast ── */
 .toast {
   position: fixed;
@@ -839,15 +871,47 @@ body {
 </div>
 
 <!-- Add Modal -->
-<div class="modal-overlay" id="addModal">
+<div class="modal-overlay" id="addModal" style="display:none" onclick="if(event.target===this)closeAddModal()">
   <div class="modal-box">
-    <h3>예약 추가</h3>
-    <div class="modal-field"><label>고객명</label><input type="text" id="modalCust" placeholder="고객명"></div>
-    <div class="modal-field"><label>반출일</label><input type="date" id="modalStart"></div>
-    <div class="modal-field"><label>반납일</label><input type="date" id="modalEnd"></div>
-    <div class="modal-actions">
-      <button onclick="closeAddModal()">취소</button>
-      <button class="primary" onclick="submitAddModal()">등록</button>
+    <div class="modal-header">
+      <h3>예약 추가</h3>
+      <button class="modal-close" onclick="closeAddModal()">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">고객명 *</label>
+        <input type="text" id="addCustName" class="form-input" placeholder="예약자 이름">
+      </div>
+      <div class="form-group">
+        <label class="form-label">세트명 *</label>
+        <select id="addSetName" class="form-input">
+          <option value="">세트 선택...</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">반출일 *</label>
+          <input type="date" id="addFromDate" class="form-input">
+        </div>
+        <div class="form-group">
+          <label class="form-label">반출시간</label>
+          <input type="time" id="addFromTime" class="form-input" value="10:00">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">반납일 *</label>
+          <input type="date" id="addToDate" class="form-input">
+        </div>
+        <div class="form-group">
+          <label class="form-label">반납시간</label>
+          <input type="time" id="addToTime" class="form-input" value="18:00">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="hdr-btn" onclick="closeAddModal()">취소</button>
+      <button class="hdr-btn primary" id="addSubmitBtn" onclick="submitAddBooking()">등록</button>
     </div>
   </div>
 </div>
@@ -1539,19 +1603,105 @@ function closeDetail() {
 window.closeDetail = closeDetail;
 
 // ── Add Modal ──
-function openAddModal() {
-  document.getElementById("addModal").classList.add("open");
+var setNames = []; // cached set name list
+
+function loadSetNames() {
+  fetch(API_URL + "?key=village2026&action=read&sheet=%EC%84%B8%ED%8A%B8%EB%A7%88%EC%8A%A4%ED%84%B0&range=A:A")
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var vals = data.values || [];
+      var unique = {};
+      vals.forEach(function(row) {
+        var name = String(row[0] || "").trim();
+        if (name && name !== "세트명") unique[name] = true;
+      });
+      setNames = Object.keys(unique).sort();
+      var select = document.getElementById("addSetName");
+      select.innerHTML = '<option value="">세트 선택...</option>';
+      setNames.forEach(function(name) {
+        select.innerHTML += '<option value="' + escHtml(name) + '">' + escHtml(name) + '</option>';
+      });
+    })
+    .catch(function() { /* silently fail */ });
 }
+
+function openAddModal(fromDate, toDate) {
+  var today = new Date();
+  var fromStr = fromDate ? toDateStr(fromDate) : toDateStr(today);
+  var toStr = toDate ? toDateStr(toDate) : toDateStr(addDays(today, 1));
+  document.getElementById("addFromDate").value = fromStr;
+  document.getElementById("addToDate").value = toStr;
+  document.getElementById("addFromTime").value = "10:00";
+  document.getElementById("addToTime").value = "18:00";
+  document.getElementById("addCustName").value = "";
+  document.getElementById("addSetName").value = "";
+  document.getElementById("addModal").style.display = "flex";
+}
+
 function closeAddModal() {
-  document.getElementById("addModal").classList.remove("open");
+  document.getElementById("addModal").style.display = "none";
 }
-function submitAddModal() {
-  closeAddModal();
-  showToast("확인요청 시트를 통해 등록해주세요");
+
+function submitAddBooking() {
+  var custName = document.getElementById("addCustName").value.trim();
+  var setName = document.getElementById("addSetName").value.trim();
+  var fromDate = document.getElementById("addFromDate").value;
+  var fromTime = document.getElementById("addFromTime").value || "10:00";
+  var toDate = document.getElementById("addToDate").value;
+  var toTime = document.getElementById("addToTime").value || "18:00";
+
+  if (!custName) { showToast("고객명을 입력해주세요"); return; }
+  if (!setName) { showToast("세트명을 선택해주세요"); return; }
+  if (!fromDate || !toDate) { showToast("반출일/반납일을 입력해주세요"); return; }
+  if (fromDate > toDate) { showToast("반납일이 반출일보다 빠릅니다"); return; }
+
+  // Generate 거래ID: YYMMDD-NNN format
+  var now = new Date();
+  var yy = String(now.getFullYear()).slice(-2);
+  var mm = pad2(now.getMonth() + 1);
+  var dd = pad2(now.getDate());
+  var seq = pad2(now.getHours()) + pad2(now.getMinutes());
+  var txID = yy + mm + dd + "-" + seq.slice(0, 3);
+
+  var submitBtn = document.getElementById("addSubmitBtn");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "등록 중...";
+
+  // Row: [스케줄ID, 거래ID, 세트명, 장비명, 수량, 반출일, 반출시간, 반납일, 반납시간, 상태, "", 단가]
+  var rowData = ["", txID, setName, setName, 1, fromDate, fromTime, toDate, toTime, "대기", "", 0];
+
+  fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      key: "village2026",
+      action: "append",
+      sheet: "스케줄상세",
+      values: [rowData]
+    })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "등록";
+      if (res.error) {
+        showToast("등록 실패: " + res.error);
+      } else {
+        showToast(custName + " / " + setName + " 예약이 등록되었습니다");
+        closeAddModal();
+        loadData();
+      }
+    })
+    .catch(function() {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "등록";
+      showToast("네트워크 오류");
+    });
 }
+
 window.openAddModal = openAddModal;
 window.closeAddModal = closeAddModal;
-window.submitAddModal = submitAddModal;
+window.submitAddBooking = submitAddBooking;
 
 // ── Scroll to Today ──
 function scrollToToday() {
@@ -1687,11 +1837,6 @@ document.addEventListener("keydown", function(e) {
   }
 });
 
-// Click on modal overlay
-document.getElementById("addModal").addEventListener("click", function(e) {
-  if (e.target === this) closeAddModal();
-});
-
 // ── Date Range Filter ──
 document.getElementById("dateFrom").addEventListener("change", function() {
   var v = this.value;
@@ -1709,6 +1854,7 @@ document.getElementById("dateTo").addEventListener("change", function() {
 // ── Init ──
 setupScrollSync();
 loadData();
+loadSetNames();
 startAutoRefresh();
 
 // After first render, scroll to today
