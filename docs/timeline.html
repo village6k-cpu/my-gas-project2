@@ -884,9 +884,9 @@ body {
       </div>
       <div class="form-group">
         <label class="form-label">세트명 *</label>
-        <select id="addSetName" class="form-input">
-          <option value="">세트 선택...</option>
-        </select>
+        <input type="text" id="addSetName" class="form-input" list="equipList" placeholder="세트명 입력..." autocomplete="off">
+        <datalist id="equipList"></datalist>
+        <div id="addSetNameError" style="font-size:11px;color:var(--red);margin-top:3px;display:none">세트마스터에 등록된 세트만 선택 가능합니다</div>
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -1606,27 +1606,45 @@ function closeDetail() {
 window.closeDetail = closeDetail;
 
 // ── Add Modal ──
-var setNames = []; // cached set name list
+var equipNames = {}; // 세트명 → true (유효 목록)
 
-function loadSetNames() {
-  fetch(API_URL + "?key=village2026&action=read&sheet=%EC%84%B8%ED%8A%B8%EB%A7%88%EC%8A%A4%ED%84%B0&range=A:A")
+function loadEquipNames() {
+  fetch(API_URL + "?key=village2026&action=read&sheet=" + encodeURIComponent("세트마스터") + "&range=A:A")
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      var vals = data.values || [];
       var unique = {};
-      vals.forEach(function(row) {
+      (data.values || []).forEach(function(row) {
         var name = String(row[0] || "").trim();
         if (name && name !== "세트명") unique[name] = true;
       });
-      setNames = Object.keys(unique).sort();
-      var select = document.getElementById("addSetName");
-      select.innerHTML = '<option value="">세트 선택...</option>';
-      setNames.forEach(function(name) {
-        select.innerHTML += '<option value="' + escHtml(name) + '">' + escHtml(name) + '</option>';
+      equipNames = unique;
+      var list = Object.keys(unique).sort();
+      var datalist = document.getElementById("equipList");
+      datalist.innerHTML = "";
+      list.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        datalist.appendChild(opt);
       });
     })
-    .catch(function() { /* silently fail */ });
+    .catch(function() {});
 }
+
+// 입력값 실시간 검증
+document.getElementById("addSetName").addEventListener("input", function() {
+  var val = this.value.trim();
+  var errEl = document.getElementById("addSetNameError");
+  if (!val) {
+    errEl.style.display = "none";
+    this.style.borderColor = "";
+  } else if (equipNames[val]) {
+    errEl.style.display = "none";
+    this.style.borderColor = "var(--green-text)";
+  } else {
+    errEl.style.display = "block";
+    this.style.borderColor = "var(--red)";
+  }
+});
 
 function openAddModal(fromDate, toDate) {
   var today = new Date();
@@ -1654,7 +1672,8 @@ function submitAddBooking() {
   var toTime = document.getElementById("addToTime").value || "18:00";
 
   if (!custName) { showToast("고객명을 입력해주세요"); return; }
-  if (!setName) { showToast("세트명을 선택해주세요"); return; }
+  if (!setName) { showToast("세트명을 입력해주세요"); return; }
+  if (!equipNames[setName]) { showToast("세트마스터에 없는 세트명입니다"); return; }
   if (!fromDate || !toDate) { showToast("반출일/반납일을 입력해주세요"); return; }
   if (fromDate > toDate) { showToast("반납일이 반출일보다 빠릅니다"); return; }
 
@@ -1897,7 +1916,7 @@ document.getElementById("dateTo").addEventListener("change", function() {
 // ── Init ──
 setupScrollSync();
 loadData();
-loadSetNames();
+loadEquipNames();
 startAutoRefresh();
 
 // After first render, scroll to today
