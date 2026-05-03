@@ -29,7 +29,6 @@
   --radius: 6px;
   --col-w: 120px;
   --row-h: 40px;
-  --label-w: 220px;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -221,85 +220,6 @@ body {
   position: relative;
 }
 
-/* ── Label Panel ── */
-.label-panel {
-  width: var(--label-w);
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--border);
-  background: var(--surface);
-  z-index: 10;
-}
-.label-header {
-  height: 52px;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  flex-shrink: 0;
-  background: var(--bg);
-}
-.label-body {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-}
-.label-body::-webkit-scrollbar { width: 0; }
-
-.label-group-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 12px;
-  height: var(--row-h);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  cursor: pointer;
-  background: var(--bg);
-  border-bottom: 1px solid var(--border-light);
-  user-select: none;
-  position: sticky;
-  top: 0;
-  z-index: 2;
-}
-.label-group-header:hover { background: #EDEDEB; }
-.label-group-toggle {
-  font-size: 10px;
-  color: var(--text-muted);
-  transition: transform 0.2s;
-  width: 16px;
-  text-align: center;
-  flex-shrink: 0;
-}
-.label-group-toggle.collapsed { transform: rotate(-90deg); }
-.label-group-count {
-  margin-left: auto;
-  background: var(--border);
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 8px;
-}
-.label-item-row {
-  display: flex;
-  align-items: center;
-  padding: 0 12px 0 34px;
-  height: var(--row-h);
-  font-size: 12px;
-  color: var(--text-secondary);
-  border-bottom: 1px solid var(--border-light);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.label-item-row:hover { background: var(--bg); }
-
 /* ── Grid Panel ── */
 .grid-panel {
   flex: 1;
@@ -370,8 +290,41 @@ body {
   height: var(--row-h);
   border-bottom: 1px solid var(--border-light);
 }
-.grid-row.group-header-row {
+/* ── Inline Group Header Row ── */
+.group-header-row {
+  height: var(--row-h);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
   background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  position: sticky;
+  left: 0;
+  z-index: 5;
+  min-width: fit-content;
+}
+.group-header-row:hover { background: #EFEEEB; }
+.group-header-row .chevron {
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform 0.2s;
+  width: 16px;
+  text-align: center;
+}
+.group-header-row.collapsed .chevron { transform: rotate(-90deg); }
+.group-header-row .group-count {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  background: var(--surface);
+  padding: 1px 8px;
+  border-radius: 10px;
 }
 .grid-cell {
   width: var(--col-w);
@@ -478,7 +431,7 @@ body {
   z-index: 5;
 }
 .revenue-label {
-  width: var(--label-w);
+  width: 80px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -753,38 +706,12 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-text { font-size: 13px; color: var(--text-secondary); }
 
-/* ── Mobile Toggle ── */
-.mobile-label-toggle {
-  display: none;
-  position: fixed;
-  top: 50%;
-  left: 0;
-  transform: translateY(-50%);
-  width: 24px;
-  height: 48px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-left: none;
-  border-radius: 0 var(--radius) var(--radius) 0;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  color: var(--text-muted);
-  cursor: pointer;
-  z-index: 15;
-}
-
 /* ── Responsive ── */
 @media (max-width: 768px) {
-  :root { --label-w: 160px; }
   .header { padding: 8px 10px; gap: 6px; }
   .search-box { max-width: 160px; min-width: 80px; }
 }
 @media (max-width: 600px) {
-  .label-panel { display: none; position: fixed; left: 0; top: 0; bottom: 0; z-index: 50; box-shadow: 4px 0 16px rgba(0,0,0,0.1); }
-  .label-panel.mobile-open { display: flex; }
-  .mobile-label-toggle { display: flex; }
-  .label-panel.mobile-open ~ .mobile-label-toggle { left: var(--label-w); }
   .revenue-bar-area { display: none; }
   .view-tabs { display: none; }
   .group-select { display: none; }
@@ -856,11 +783,6 @@ body {
 <!-- Main Area -->
 <div class="main-area">
   <div class="grid-wrapper">
-    <!-- Label Panel -->
-    <div class="label-panel" id="labelPanel">
-      <div class="label-header">장비 / 그룹</div>
-      <div class="label-body" id="labelBody"></div>
-    </div>
     <!-- Grid Panel -->
     <div class="grid-panel" id="gridPanel">
       <div class="date-header" id="dateHeader">
@@ -873,7 +795,7 @@ body {
   </div>
   <!-- Revenue Chart -->
   <div class="revenue-bar-area" id="revenueArea">
-    <div class="revenue-label">일별매출</div>
+    <div class="revenue-label">매출</div>
     <div class="revenue-scroll" id="revenueScroll">
       <div class="revenue-inner" id="revenueInner"></div>
     </div>
@@ -884,9 +806,6 @@ body {
     <span class="loading-text">스케줄 불러오는 중...</span>
   </div>
 </div>
-
-<!-- Mobile Label Toggle -->
-<button class="mobile-label-toggle" id="mobileToggle" onclick="toggleMobileLabel()">&#9654;</button>
 
 <!-- Zoom Control -->
 <div class="zoom-control">
@@ -1221,8 +1140,7 @@ function render() {
   dhInner.innerHTML = dhHtml;
   dhInner.style.width = totalW + "px";
 
-  // Build label panel + grid rows
-  var labelHtml = "";
+  // Build grid rows (inline group headers + item rows)
   var gridHtml = "";
   var barHtml = "";
   var rowIdx = 0;
@@ -1231,30 +1149,15 @@ function render() {
     var items = gd.items[gname];
     var isCollapsed = !!collapsedGroups[gname];
 
-    // Group header label
-    labelHtml += '<div class="label-group-header" onclick="toggleGroup(\'' + escHtml(gname).replace(/'/g,"&#39;") + '\')">' +
-      '<span class="label-group-toggle' + (isCollapsed ? " collapsed" : "") + '">\u25BC</span>' +
-      '<span style="overflow:hidden;text-overflow:ellipsis">' + escHtml(gname) + '</span>' +
-      '<span class="label-group-count">' + items.length + '</span></div>';
-
-    // Group header grid row
-    gridHtml += '<div class="grid-row group-header-row" style="width:' + totalW + 'px">';
-    for (var d = 0; d < dateRange.days; d++) {
-      var day = addDays(dateRange.start, d);
-      var ccls = "grid-cell";
-      if (isWeekend(day)) ccls += " weekend";
-      if (isSameDay(day, today)) ccls += " today";
-      gridHtml += '<div class="' + ccls + '" style="width:' + colW + 'px;min-width:' + colW + 'px"></div>';
-    }
-    gridHtml += '</div>';
+    // Inline group header row
+    gridHtml += '<div class="group-header-row' + (isCollapsed ? " collapsed" : "") + '" data-group="' + escHtml(gname).replace(/"/g,"&quot;") + '" onclick="toggleGroup(\'' + escHtml(gname).replace(/'/g,"&#39;") + '\')" style="width:' + totalW + 'px">' +
+      '<span class="chevron">\u25BC</span>' +
+      '<span class="group-name">' + escHtml(gname) + '</span>' +
+      '<span class="group-count">' + items.length + '건</span></div>';
     rowIdx++;
 
     if (!isCollapsed) {
       items.forEach(function(it) {
-        // Label row
-        var itemLabel = it["장비명"] || it["세트명원본"] || it.content || "";
-        labelHtml += '<div class="label-item-row" title="' + escHtml(itemLabel) + '">' + escHtml(itemLabel) + '</div>';
-
         // Grid row
         gridHtml += '<div class="grid-row" data-row-idx="' + rowIdx + '" style="width:' + totalW + 'px;position:relative">';
         for (var d2 = 0; d2 < dateRange.days; d2++) {
@@ -1306,7 +1209,6 @@ function render() {
     }
   });
 
-  document.getElementById("labelBody").innerHTML = labelHtml;
   var gridBody = document.getElementById("gridBody");
   gridBody.innerHTML = gridHtml + '<div style="position:absolute;top:0;left:0;width:' + totalW + 'px;height:' + (rowIdx * 40) + 'px;pointer-events:none"></div>';
   gridBody.style.width = totalW + "px";
@@ -1369,23 +1271,14 @@ function renderRevenue() {
 // ── Scroll Sync ──
 function setupScrollSync() {
   var gridScroll = document.getElementById("gridScroll");
-  var labelBody = document.getElementById("labelBody");
   var dateHeader = document.getElementById("dateHeader");
   var revenueScroll = document.getElementById("revenueScroll");
 
   gridScroll.addEventListener("scroll", function() {
     if (scrollSyncFlag) return;
     scrollSyncFlag = true;
-    labelBody.scrollTop = gridScroll.scrollTop;
     dateHeader.scrollLeft = gridScroll.scrollLeft;
     revenueScroll.scrollLeft = gridScroll.scrollLeft;
-    scrollSyncFlag = false;
-  });
-
-  labelBody.addEventListener("scroll", function() {
-    if (scrollSyncFlag) return;
-    scrollSyncFlag = true;
-    gridScroll.scrollTop = labelBody.scrollTop;
     scrollSyncFlag = false;
   });
 }
@@ -1759,16 +1652,6 @@ document.getElementById("gridScroll").addEventListener("touchmove", function(e) 
     }
   }
 }, { passive: true });
-
-// ── Mobile Label Toggle ──
-function toggleMobileLabel() {
-  var lp = document.getElementById("labelPanel");
-  lp.classList.toggle("mobile-open");
-  var btn = document.getElementById("mobileToggle");
-  btn.innerHTML = lp.classList.contains("mobile-open") ? "&#9664;" : "&#9654;";
-  btn.style.left = lp.classList.contains("mobile-open") ? "var(--label-w)" : "0";
-}
-window.toggleMobileLabel = toggleMobileLabel;
 
 // ── Loading ──
 function showLoading(show) {
