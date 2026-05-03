@@ -907,8 +907,8 @@ body {
       </div>
       <div class="form-group" style="position:relative">
         <label class="form-label">세트명 *</label>
-        <input type="text" id="addSetName" class="form-input" placeholder="세트명 입력 또는 선택..." autocomplete="off">
-        <div class="ac-dropdown" id="acDropdown"></div>
+        <input type="text" id="addSetName" class="form-input" placeholder="세트명 입력 또는 선택..." autocomplete="off" spellcheck="false">
+        <div class="ac-dropdown" id="acDropdown" style="display:none"></div>
         <div id="addSetNameError" style="font-size:11px;color:var(--red);margin-top:3px;display:none">세트마스터에 등록된 세트만 선택 가능합니다</div>
       </div>
       <div class="form-row">
@@ -1641,14 +1641,6 @@ function loadEquipNames() {
         if (name && name !== "세트명") unique[name] = true;
       });
       equipNames = unique;
-      var list = Object.keys(unique).sort();
-      var datalist = document.getElementById("equipList");
-      datalist.innerHTML = "";
-      list.forEach(function(name) {
-        var opt = document.createElement("option");
-        opt.value = name;
-        datalist.appendChild(opt);
-      });
     })
     .catch(function() {});
 }
