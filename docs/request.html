@@ -688,37 +688,37 @@ function parseDate(text) {
    Time Parser
    ====================================================== */
 function parseTimes(text) {
+  // 전화번호를 먼저 제거 (시간으로 오인 방지)
+  var cleaned = text.replace(/01[016789][\-\s]?\d{3,4}[\-\s]?\d{4}/g, '');
   var times = [];
 
   // 오전/오후 N시 (MM분)
-  var r1 = text.matchAll(/(오전|오후)\s*(\d{1,2})\s*시\s*(?:(\d{1,2})\s*분)?/g);
+  var r1 = cleaned.matchAll(/(오전|오후)\s*(\d{1,2})\s*시\s*(?:(\d{1,2})\s*분)?/g);
   for (var m of r1) {
     var h = +m[2];
     var min = m[3] ? +m[3] : 0;
     if (m[1] === '오후' && h < 12) h += 12;
     if (m[1] === '오전' && h === 12) h = 0;
-    times.push(pad2(h) + ':' + pad2(min));
+    if (h >= 0 && h <= 23) times.push(pad2(h) + ':' + pad2(min));
   }
 
   // N시 (MM분) — without 오전/오후
-  var r2 = text.matchAll(/(?<!오[전후]\s?)(\d{1,2})\s*시\s*(?:(\d{1,2})\s*분)?/g);
+  var r2 = cleaned.matchAll(/(?<!오[전후]\s?)(\d{1,2})\s*시\s*(?:(\d{1,2})\s*분)?/g);
   for (var m of r2) {
     var h = +m[1];
     var min = m[2] ? +m[2] : 0;
-    // Avoid duplicates from 오전/오후 matches
+    if (h < 0 || h > 23) continue;
     var t = pad2(h) + ':' + pad2(min);
-    if (times.indexOf(t) === -1) {
-      times.push(t);
-    }
+    if (times.indexOf(t) === -1) times.push(t);
   }
 
-  // HH:MM
-  var r3 = text.matchAll(/(\d{1,2}):(\d{2})(?!\d)/g);
+  // HH:MM (0~23시만)
+  var r3 = cleaned.matchAll(/(?<!\d)(\d{1,2}):(\d{2})(?!\d)/g);
   for (var m of r3) {
-    var t = pad2(+m[1]) + ':' + m[2];
-    if (times.indexOf(t) === -1) {
-      times.push(t);
-    }
+    var h = +m[1];
+    if (h < 0 || h > 23) continue;
+    var t = pad2(h) + ':' + m[2];
+    if (times.indexOf(t) === -1) times.push(t);
   }
 
   return times;
@@ -743,8 +743,13 @@ function parseName(text) {
   // 2) "홍길동입니다", "홍길동이라고 합니다", "홍길동이에요"
   m = text.match(/([가-힣]{2,4})(?:입니다|이라고|이에요|이구요|이고요|이요|이며|인데요)/);
   if (m) return m[1];
-  // 3) 줄 시작에 나오는 2~3글자 한글 이름 (첫 줄에서)
-  var firstLine = text.split(/[\n\r]/)[0] || '';
+  // 3) 첫 줄이 2~3글자 한글만 (이름일 가능성 높음)
+  var firstLine = (text.split(/[\n\r]/)[0] || '').trim();
+  if (/^[가-힣]{2,3}$/.test(firstLine)) return firstLine;
+  // 4) "홍길동 / 010-" 패턴 (슬래시로 구분된 이름)
+  m = text.match(/([가-힣]{2,4})\s*[\/|]\s*01[016789]/);
+  if (m) return m[1];
+  // 5) 줄 시작의 2~3글자 한글 + 공백/줄바꿈
   m = firstLine.match(/^([가-힣]{2,3})\s/);
   if (m) return m[1];
   return '';
@@ -774,33 +779,98 @@ function extractSuffix(segment) {
    ====================================================== */
 function parseEquipment(text) {
   var items = [];
-  var found = {}; // 중복 방지: search키 → true
+  var found = {}; // 중복 방지
 
-  // 전체 텍스트에서 모든 EQUIP_ALIASES 패턴을 스캔
-  for (var i = 0; i < EQUIP_ALIASES.length; i++) {
-    var alias = EQUIP_ALIASES[i];
-    for (var j = 0; j < alias.patterns.length; j++) {
-      var m = text.match(alias.patterns[j]);
-      if (m) {
-        // 매치 주변 텍스트에서 suffix와 수량 추출 (매치 위치 +-30자)
-        var start = Math.max(0, m.index - 10);
-        var end = Math.min(text.length, m.index + m[0].length + 30);
-        var context = text.slice(start, end);
-        var suffix = extractSuffix(context);
-        var qty = parseQty(context);
-        var searchKey = alias.search + suffix;
+  // 1단계: 줄 단위로 "장비명 N개" 패턴 추출
+  var lines = text.split(/[\n\r]+/);
+  lines.forEach(function(line) {
+    line = line.trim();
+    if (!line) return;
 
-        if (!found[searchKey]) {
-          found[searchKey] = true;
-          items.push({
-            raw: m[0].trim(),
-            search: searchKey,
-            qty: qty,
-            official: null,
-            warn: false
-          });
+    // "장비명 N개" 또는 "장비명 (Nkit) N개" 패턴
+    var qtyMatch = line.match(/^(.+?)\s*(?:\(\d+kit\)\s*)?(\d+)\s*(?:개|대|세트|ea|EA)\s*$/);
+    if (qtyMatch) {
+      var rawName = qtyMatch[1].trim();
+      var qty = +qtyMatch[2] || 1;
+
+      // EQUIP_ALIASES로 변환 시도
+      var searchKey = null;
+      for (var i = 0; i < EQUIP_ALIASES.length; i++) {
+        var alias = EQUIP_ALIASES[i];
+        for (var j = 0; j < alias.patterns.length; j++) {
+          if (alias.patterns[j].test(rawName)) {
+            var suffix = extractSuffix(rawName);
+            searchKey = alias.search + suffix;
+            break;
+          }
         }
-        break; // 같은 alias의 다른 패턴은 스킵
+        if (searchKey) break;
+      }
+
+      // 변환 안 되면 원문 그대로 검색 키워드로 사용
+      if (!searchKey) searchKey = rawName;
+
+      if (!found[searchKey]) {
+        found[searchKey] = true;
+        items.push({
+          raw: rawName,
+          search: searchKey,
+          qty: qty,
+          official: null,
+          warn: false
+        });
+      }
+      return;
+    }
+
+    // "장비명" (수량 없이 한 줄에 하나) — EQUIP_ALIASES 매칭만
+    for (var i = 0; i < EQUIP_ALIASES.length; i++) {
+      var alias = EQUIP_ALIASES[i];
+      for (var j = 0; j < alias.patterns.length; j++) {
+        if (alias.patterns[j].test(line)) {
+          var suffix = extractSuffix(line);
+          var searchKey = alias.search + suffix;
+          if (!found[searchKey]) {
+            found[searchKey] = true;
+            items.push({
+              raw: line,
+              search: searchKey,
+              qty: 1,
+              official: null,
+              warn: false
+            });
+          }
+          return;
+        }
+      }
+    }
+  });
+
+  // 2단계: 줄 단위에서 못 찾으면 전체 텍스트에서 EQUIP_ALIASES 패턴 스캔
+  if (items.length === 0) {
+    for (var i = 0; i < EQUIP_ALIASES.length; i++) {
+      var alias = EQUIP_ALIASES[i];
+      for (var j = 0; j < alias.patterns.length; j++) {
+        var m = text.match(alias.patterns[j]);
+        if (m) {
+          var start = Math.max(0, m.index - 10);
+          var end = Math.min(text.length, m.index + m[0].length + 30);
+          var context = text.slice(start, end);
+          var suffix = extractSuffix(context);
+          var qty = parseQty(context);
+          var searchKey = alias.search + suffix;
+          if (!found[searchKey]) {
+            found[searchKey] = true;
+            items.push({
+              raw: m[0].trim(),
+              search: searchKey,
+              qty: qty,
+              official: null,
+              warn: false
+            });
+          }
+          break;
+        }
       }
     }
   }
