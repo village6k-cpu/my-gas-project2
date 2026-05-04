@@ -1363,14 +1363,17 @@ function insertAndCheckRequest(req) {
   SpreadsheetApp.flush();
   processByReqID(sheet, startRow);
 
-  // 가용확인 결과 읽기
+  // 가용확인 결과 읽기 — 세트 전개로 행이 늘어날 수 있으므로 reqID 기준으로 전체 읽기
   SpreadsheetApp.flush();
   var results = [];
-  for (var i = 0; i < items.length; i++) {
-    var row = startRow + i;
-    var rowData = sheet.getRange(row, 1, 1, 17).getDisplayValues()[0];
+  var lastRow = sheet.getLastRow();
+  for (var r = startRow; r <= lastRow; r++) {
+    var rowData = sheet.getRange(r, 1, 1, 17).getDisplayValues()[0];
+    if (rowData[0] !== reqID) break;  // 다른 reqID가 나오면 종료
+    var equipName = rowData[5];  // F
+    if (!equipName) continue;    // 빈 행 스킵
     results.push({
-      장비명: rowData[5],   // F
+      장비명: equipName,
       수량: rowData[6],     // G
       결과: rowData[8],     // I
       상세: rowData[9]      // J
