@@ -923,34 +923,62 @@ function parseEquipment(text) {
    세트마스터 API search
    ====================================================== */
 function searchEquipAPI(keyword) {
+  var kw = keyword.toLowerCase();
+  // 핵심 키워드 추출 (첫 2~3글자 또는 영문/숫자 부분)
+  var kwParts = kw.replace(/[^\w가-힣]/g, ' ').split(/\s+/).filter(function(p) { return p.length > 0; });
+
   return new Promise(function(resolve, reject) {
+    // 1차: 세트명(A열, col=1)으로 검색
     var url = API_URL + '?key=' + API_KEY + '&action=search&sheet=' + encodeURIComponent('세트마스터') + '&col=1&query=' + encodeURIComponent(keyword);
     fetch(url)
       .then(function(r) { return r.json(); })
       .then(function(data) {
-        if (data && data.results && data.results.length > 0) {
-          // results: [{ row: N, data: ["세트명", "구성장비명", ...] }, ...]
-          // 세트명(A열, data[0])만 추출 + 중복제거
-          var unique = {};
-          var names = [];
-          data.results.forEach(function(r) {
-            var name = r.data ? r.data[0] : (Array.isArray(r) ? r[0] : r);
-            if (name && !unique[name]) {
-              unique[name] = true;
-              names.push(name);
-            }
-          });
+        var names = extractMatchingNames(data, kw, kwParts);
+        if (names.length > 0) {
           resolve(names);
-        } else if (data && Array.isArray(data)) {
-          resolve(data);
-        } else {
-          resolve([]);
+          return;
         }
+        // 2차: 구성장비명(B열, col=2)으로 검색
+        var url2 = API_URL + '?key=' + API_KEY + '&action=search&sheet=' + encodeURIComponent('세트마스터') + '&col=2&query=' + encodeURIComponent(keyword);
+        return fetch(url2).then(function(r) { return r.json(); }).then(function(data2) {
+          // B열 매칭 시 구성장비명(data[1])을 반환
+          var names2 = [];
+          var unique2 = {};
+          if (data2 && data2.results) {
+            data2.results.forEach(function(r) {
+              var equipName = r.data ? r.data[1] : '';
+              var setName = r.data ? r.data[0] : '';
+              // 구성장비명이 키워드를 포함하면 구성장비명을, 아니면 세트명을
+              var pick = (equipName && equipName.toLowerCase().indexOf(kw) >= 0) ? equipName : setName;
+              if (pick && !unique2[pick]) {
+                unique2[pick] = true;
+                names2.push(pick);
+              }
+            });
+          }
+          resolve(names2);
+        });
       })
-      .catch(function(err) {
-        reject(err);
-      });
+      .catch(function(err) { reject(err); });
   });
+}
+
+function extractMatchingNames(data, kw, kwParts) {
+  if (!data || !data.results || data.results.length === 0) return [];
+  var unique = {};
+  var names = [];
+  data.results.forEach(function(r) {
+    var name = r.data ? r.data[0] : (Array.isArray(r) ? r[0] : r);
+    if (!name || unique[name]) return;
+    // 세트명이 검색어의 핵심 키워드를 포함하는지 확인
+    var nameLower = name.toLowerCase();
+    var matches = kwParts.some(function(p) { return nameLower.indexOf(p) >= 0; });
+    if (matches) {
+      unique[name] = true;
+      names.push(name);
+    }
+  });
+  return names;
 }
 
 /* ======================================================
