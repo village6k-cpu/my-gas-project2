@@ -1366,8 +1366,8 @@ function insertAndCheckRequest(req) {
   // 가용확인 결과 읽기 — 세트 전개로 행이 늘어날 수 있으므로 reqID 기준으로 전체 읽기
   SpreadsheetApp.flush();
   var results = [];
-  var lastRow = sheet.getLastRow();
-  for (var r = startRow; r <= lastRow; r++) {
+  var sheetLastRow = sheet.getLastRow();
+  for (var r = startRow; r <= sheetLastRow; r++) {
     var rowData = sheet.getRange(r, 1, 1, 17).getDisplayValues()[0];
     if (rowData[0] !== reqID) break;  // 다른 reqID가 나오면 종료
     var equipName = rowData[5];  // F
