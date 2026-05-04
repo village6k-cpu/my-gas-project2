@@ -239,6 +239,29 @@ body {
 .equip-name-edit:focus {
   border-color: var(--accent);
 }
+.equip-edit-dd {
+  display: none;
+  position: absolute;
+  left: 0; right: 0; top: 100%;
+  max-height: 180px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+  z-index: 220;
+}
+.equip-edit-option {
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-primary);
+  transition: background 0.08s;
+}
+.equip-edit-option:hover {
+  background: var(--bg);
+}
 .equip-item .equip-warn {
   font-size: 11px;
   color: var(--amber-text);
@@ -1163,16 +1186,14 @@ function renderEquipList() {
   parsedEquip.forEach(function(item, idx) {
     var displayName = item.official || item.search;
     html += '<div class="equip-item">';
+    html += '<div class="equip-edit-wrap" style="flex:1;position:relative">';
     html += '<input type="text" class="equip-name-edit" value="' + escHtml(displayName) + '" '
-      + 'onchange="updateEquipName(' + idx + ', this.value)" '
-      + 'list="equipSuggest-' + idx + '">';
-    html += '<datalist id="equipSuggest-' + idx + '">';
-    // 로컬 캐시에서 비슷한 것 5개 제안
-    var q = displayName.toLowerCase();
-    allSetNames.filter(function(n) { return n.toLowerCase().indexOf(q) >= 0; }).slice(0, 5).forEach(function(n) {
-      html += '<option value="' + escHtml(n) + '">';
-    });
-    html += '</datalist>';
+      + 'data-idx="' + idx + '" autocomplete="off" spellcheck="false" '
+      + 'oninput="onEquipEditInput(this)" onfocus="onEquipEditInput(this)" '
+      + 'onblur="setTimeout(function(){closeEquipEditDD()},150)" '
+      + 'onkeydown="onEquipEditKeydown(event, this)">';
+    html += '<div class="equip-edit-dd" id="equipEditDD-' + idx + '"></div>';
+    html += '</div>';
     if (item.warn) {
       html += '<span class="equip-warn">미확인</span>';
     }
@@ -1183,12 +1204,95 @@ function renderEquipList() {
   el.innerHTML = html;
 }
 
-function updateEquipName(idx, val) {
-  val = val.trim();
-  if (!val) return;
-  parsedEquip[idx].official = val;
-  parsedEquip[idx].search = val;
-  parsedEquip[idx].warn = false;
+// ── 장비명 수정 커스텀 드롭다운 ──
+var editDDActiveIdx = -1;
+var editDDActiveEl = null;
+
+function onEquipEditInput(input) {
+  var q = input.value.trim().toLowerCase();
+  var idx = input.getAttribute('data-idx');
+  var dd = document.getElementById('equipEditDD-' + idx);
+  editDDActiveIdx = -1;
+  editDDActiveEl = dd;
+
+  // 값 즉시 반영
+  var i = parseInt(idx);
+  if (input.value.trim()) {
+    parsedEquip[i].official = input.value.trim();
+    parsedEquip[i].search = input.value.trim();
+  }
+
+  if (q.length < 1) { dd.style.display = 'none'; return; }
+
+  var filtered = allSetNames.filter(function(n) { return n.toLowerCase().indexOf(q) >= 0; }).slice(0, 15);
+  if (filtered.length === 0) { dd.style.display = 'none'; return; }
+
+  dd.innerHTML = '';
+  filtered.forEach(function(name, fi) {
+    var opt = document.createElement('div');
+    opt.className = 'equip-edit-option';
+    opt.setAttribute('data-fi', fi);
+    // 매칭 부분 하이라이트
+    var li = name.toLowerCase().indexOf(q);
+    if (li >= 0) {
+      opt.innerHTML = escHtml(name.slice(0, li))
+        + '<strong style="color:var(--accent)">' + escHtml(name.slice(li, li + q.length)) + '</strong>'
+        + escHtml(name.slice(li + q.length));
+    } else {
+      opt.textContent = name;
+    }
+    opt.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      input.value = name;
+      parsedEquip[parseInt(idx)].official = name;
+      parsedEquip[parseInt(idx)].search = name;
+      parsedEquip[parseInt(idx)].warn = false;
+      dd.style.display = 'none';
+    });
+    dd.appendChild(opt);
+  });
+  dd.style.display = 'block';
+}
+
+function onEquipEditKeydown(e, input) {
+  var idx = input.getAttribute('data-idx');
+  var dd = document.getElementById('equipEditDD-' + idx);
+  var items = dd.querySelectorAll('.equip-edit-option');
+  if (!items.length) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    editDDActiveIdx = Math.min(editDDActiveIdx + 1, items.length - 1);
+    highlightEditDD(items);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    editDDActiveIdx = Math.max(editDDActiveIdx - 1, 0);
+    highlightEditDD(items);
+  } else if (e.key === 'Enter' && editDDActiveIdx >= 0) {
+    e.preventDefault();
+    var name = items[editDDActiveIdx].textContent;
+    input.value = name;
+    parsedEquip[parseInt(idx)].official = name;
+    parsedEquip[parseInt(idx)].search = name;
+    parsedEquip[parseInt(idx)].warn = false;
+    dd.style.display = 'none';
+  } else if (e.key === 'Escape') {
+    dd.style.display = 'none';
+  }
+}
+
+function highlightEditDD(items) {
+  items.forEach(function(el, i) {
+    el.style.background = i === editDDActiveIdx ? 'var(--bg)' : '';
+    el.style.color = i === editDDActiveIdx ? 'var(--accent)' : '';
+  });
+  if (editDDActiveIdx >= 0 && items[editDDActiveIdx]) {
+    items[editDDActiveIdx].scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function closeEquipEditDD() {
+  document.querySelectorAll('.equip-edit-dd').forEach(function(dd) { dd.style.display = 'none'; });
 }
 
 function updateEquipQty(idx, val) {
