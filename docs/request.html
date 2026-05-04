@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="예약입력">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#F7F7F5">
+<title>빌리지 예약 입력</title>
+<style>
+:root {
+  --bg: #F7F7F5;
+  --surface: #FFFFFF;
+  --border: #E9E9E7;
+  --border-light: #F0F0EE;
+  --text-primary: #37352F;
+  --text-secondary: #787774;
+  --text-muted: #B4B4B0;
+  --accent: #2383E2;
+  --blue-bg: #D3E5EF; --blue-text: #24609C;
+  --amber-bg: #FDECC8; --amber-text: #93640D;
+  --green-bg: #DBEDDB; --green-text: #2B6B2B;
+  --gray-bg: #E8E8E5; --gray-text: #787774;
+  --red: #EB5757;
+  --radius: 6px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans KR', sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* ── Header ── */
+.header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.header-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.header-nav {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.nav-btn {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.nav-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Main Container ── */
+.container {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Card ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ── Textarea ── */
+.paste-area {
+  width: 100%;
+  min-height: 160px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg);
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.2s;
+  line-height: 1.6;
+}
+.paste-area:focus { border-color: var(--accent); }
+.paste-area::placeholder { color: var(--text-muted); }
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.btn.primary:hover { background: #1B6FC2; }
+.btn.primary:disabled { background: var(--text-muted); border-color: var(--text-muted); }
+.btn-full { width: 100%; }
+.btn-danger { color: var(--red); }
+.btn-danger:hover { border-color: var(--red); color: var(--red); }
+.btn-sm {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+/* ── Form ── */
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.form-group.full { grid-column: 1 / -1; }
+.form-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.form-input {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--surface);
+  outline: none;
+  transition: border-color 0.2s;
+}
+.form-input:focus { border-color: var(--accent); }
+.form-select {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--surface);
+  outline: none;
+  cursor: pointer;
+}
+
+/* ── Equipment List ── */
+.equip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.equip-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+}
+.equip-item .equip-name {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.equip-item .equip-warn {
+  font-size: 11px;
+  color: var(--amber-text);
+  background: var(--amber-bg);
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.equip-item .equip-qty {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.equip-item .equip-qty input {
+  width: 40px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  text-align: center;
+  outline: none;
+  background: var(--surface);
+}
+.equip-item .equip-qty input:focus { border-color: var(--accent); }
+.equip-remove {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.equip-remove:hover { color: var(--red); background: rgba(235,87,87,0.08); }
+
+/* ── Add Equipment ── */
+.add-equip-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.add-equip-input-wrap {
+  flex: 1;
+  position: relative;
+}
+.add-equip-input {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--surface);
+  outline: none;
+}
+.add-equip-input:focus { border-color: var(--accent); }
+.add-equip-input::placeholder { color: var(--text-muted); }
+.autocomplete-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 50;
+  display: none;
+}
+.autocomplete-dropdown.show { display: block; }
+.autocomplete-item {
+  padding: 8px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.autocomplete-item:hover { background: var(--bg); }
+
+/* ── Parse Log ── */
+.parse-log {
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.8;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.parse-log .log-ok { color: var(--green-text); }
+.parse-log .log-warn { color: var(--amber-text); }
+.parse-log .log-err { color: var(--red); }
+
+/* ── Result ── */
+.result-card { display: none; }
+.result-card.show { display: block; }
+.result-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 14px;
+}
+.result-label {
+  font-weight: 500;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.result-value {
+  font-weight: 600;
+}
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge-green { background: var(--green-bg); color: var(--green-text); }
+.badge-amber { background: var(--amber-bg); color: var(--amber-text); }
+.badge-red { background: #FFDEDE; color: #C4454D; }
+.badge-blue { background: var(--blue-bg); color: var(--blue-text); }
+
+/* ── Spinner ── */
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Hidden ── */
+.hidden { display: none !important; }
+
+/* ── Mobile ── */
+@media (max-width: 480px) {
+  .form-grid { grid-template-columns: 1fr; }
+  .form-grid .form-group.half-row { grid-column: auto; }
+  .container { padding: 10px; gap: 12px; }
+  .card { padding: 12px; }
+  .paste-area { min-height: 120px; font-size: 13px; }
+  .header-title { font-size: 14px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <span class="header-title">빌리지 예약 입력</span>
+  <div class="header-nav">
+    <a href="timeline.html" class="nav-btn">스케줄</a>
+    <a href="dashboard.html" class="nav-btn">오늘 일정</a>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- ── Paste Section ── -->
+  <div class="card">
+    <div class="card-title">카톡 문의 붙여넣기</div>
+    <textarea id="pasteInput" class="paste-area" placeholder="고객 카카오톡 문의 내용을 붙여넣으세요.
+
+예시:
+안녕하세요, 5/10~5/12 FX3 바디세트 1대, 24-70 gm2 렌즈 빌리고 싶습니다.
+반출 오전 10시, 반납 오후 6시
+홍길동 010-1234-5678
+대학교 졸업작품입니다."></textarea>
+    <div style="margin-top: 10px; text-align: center;">
+      <button id="parseBtn" class="btn primary" onclick="doParse()">파싱하기</button>
+    </div>
+  </div>
+
+  <!-- ── Parsed Result Form ── -->
+  <div id="formCard" class="card hidden">
+    <div class="card-title">파싱 결과 (편집 가능)</div>
+
+    <div class="form-grid">
+      <div class="form-group">
+        <label class="form-label">예약자명</label>
+        <input id="fName" type="text" class="form-input" placeholder="이름 입력">
+      </div>
+      <div class="form-group">
+        <label class="form-label">연락처</label>
+        <input id="fPhone" type="tel" class="form-input" placeholder="010-0000-0000">
+      </div>
+      <div class="form-group">
+        <label class="form-label">할인유형</label>
+        <select id="fDiscount" class="form-select">
+          <option value="일반">일반</option>
+          <option value="학생">학생</option>
+          <option value="개인사업자/프리랜서">개인사업자/프리랜서</option>
+        </select>
+      </div>
+      <div class="form-group"></div>
+      <div class="form-group">
+        <label class="form-label">반출일</label>
+        <input id="fOutDate" type="date" class="form-input">
+      </div>
+      <div class="form-group">
+        <label class="form-label">반출시간</label>
+        <input id="fOutTime" type="time" class="form-input" value="10:00">
+      </div>
+      <div class="form-group">
+        <label class="form-label">반납일</label>
+        <input id="fInDate" type="date" class="form-input">
+      </div>
+      <div class="form-group">
+        <label class="form-label">반납시간</label>
+        <input id="fInTime" type="time" class="form-input" value="18:00">
+      </div>
+    </div>
+
+    <div style="margin-top: 16px;">
+      <div class="form-label" style="margin-bottom: 8px;">장비 목록</div>
+      <div id="equipList" class="equip-list"></div>
+
+      <div class="add-equip-row">
+        <div class="add-equip-input-wrap">
+          <input id="addEquipInput" type="text" class="add-equip-input" placeholder="장비명 검색..." oninput="onEquipSearch(this.value)" onkeydown="onEquipKeydown(event)">
+          <div id="acDropdown" class="autocomplete-dropdown"></div>
+        </div>
+        <button class="btn btn-sm" onclick="addEquipFromInput()">+ 추가</button>
+      </div>
+    </div>
+
+    <div id="parseLogWrap" style="margin-top: 16px;">
+      <div class="form-label" style="margin-bottom: 6px;">파싱 로그</div>
+      <div id="parseLog" class="parse-log"></div>
+    </div>
+
+    <div style="margin-top: 16px; text-align: center;">
+      <button id="submitBtn" class="btn primary btn-full" onclick="doSubmit()">확인요청 등록</button>
+    </div>
+  </div>
+
+  <!-- ── Result ── -->
+  <div id="resultCard" class="card result-card">
+    <div class="card-title">등록 결과</div>
+    <div id="resultBody"></div>
+  </div>
+
+</div>
+
+<script>
+/* ======================================================
+   Config
+   ====================================================== */
+var API_URL = 'https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec';
+var API_KEY = 'village2026';
+
+/* ======================================================
+   Utility
+   ====================================================== */
+function escHtml(s) {
+  var d = document.createElement('div');
+  d.appendChild(document.createTextNode(s));
+  return d.innerHTML;
+}
+function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+function todayStr() { var d = new Date(); return d.getFullYear() + '-' + pad2(d.getMonth()+1) + '-' + pad2(d.getDate()); }
+
+/* ======================================================
+   Equipment Alias Table
+   ====================================================== */
+var EQUIP_ALIASES = [
+  // Cameras
+  { patterns: [/a7s3/i, /a7s\s*III/i, /a7s\s*3/i], search: "A7S3" },
+  { patterns: [/fx3/i], search: "FX3" },
+  { patterns: [/fx6/i], search: "FX6" },
+  { patterns: [/fx9/i], search: "FX9" },
+  { patterns: [/코모도/i, /komodo/i], search: "코모도" },
+  { patterns: [/부라노/i, /burano/i], search: "부라노" },
+  { patterns: [/a7m4/i, /a7\s*IV/i, /a7\s*4/i], search: "A7M4" },
+  { patterns: [/a7c2/i, /a7c\s*II/i, /a7c\s*2/i], search: "A7C2" },
+  // Lenses
+  { patterns: [/70[\-~]200\s*gm\s*2/i, /70[\-~]200\s*gm\s*II/i], search: "소니 GM 70-200mm II" },
+  { patterns: [/24[\-~]70\s*gm\s*2/i, /24[\-~]70\s*gm\s*II/i], search: "소니 GM 24-70mm II" },
+  { patterns: [/24[\-~]70\s*gm(?!\s*2|\s*II)/i], search: "소니 GM 24-70mm" },
+  { patterns: [/16[\-~]35/i], search: "소니 GM 16-35mm" },
+  // Tripods/Gimbals
+  { patterns: [/서큘러/i, /셔틀러\s*에이스/i, /AI\s*플러스\s*에이스/i], search: "셔틀러에이스 M" },
+  { patterns: [/로닌\s*rs4\s*프로/i, /rs4\s*pro/i], search: "로닌 RS4 프로" },
+  { patterns: [/로닌\s*rs2\s*프로/i, /rs2\s*pro/i], search: "로닌 RS2 프로" },
+  // Lights
+  { patterns: [/600x/i], search: "어퓨쳐 600X" },
+  { patterns: [/시네로이드/i], search: "시네로이드 CFL-800" },
+  { patterns: [/파[보뷰]튜브.*30xr/i, /30xr/i], search: "파보튜브 II 30XR" },
+  { patterns: [/파[보뷰]튜브.*30x(?!r)/i, /30x(?!r)/i], search: "파보튜브 II 30X" },
+  { patterns: [/파[보뷰]튜브.*6c/i, /파[보뷰]트브.*6c/i], search: "파보튜브 II 6C" },
+  // Accessories
+  { patterns: [/시대|C대|c스탠드|C-?stand/i], search: "C스탠드" },
+  { patterns: [/V마운트|v-?mount/i], search: "V마운트 배터리" },
+  { patterns: [/BP\s*배터리/i], search: "FX9/6 배터리" },
+  { patterns: [/970\s*배터리/i], search: "970 배터리" },
+  { patterns: [/970.*충전기|나이트코어.*2구/i], search: "나이트코어 2구 충전기" },
+  { patterns: [/소니\s*배터리|NP-?FZ100(?!\s*충전)/i], search: "NP-FZ100" },
+  { patterns: [/소니\s*충전기|NP-?FZ100\s*충전/i], search: "NP-FZ100 충전기" },
+  { patterns: [/줌\s*F6|윈\s*F6/i], search: "줌 F6" },
+  { patterns: [/붐마이크|ECM[\-\s]*673/i], search: "소니 ECM-673" },
+  { patterns: [/ATH[\-\s]*M50X/i], search: "헤드폰 ATH-M50X" },
+  { patterns: [/e\s*to\s*ef|EF[\-\s]*NEX/i], search: "VILTROX Mount Adapter" },
+  { patterns: [/애플박스/i], search: "애플박스 풀 단품" },
+  { patterns: [/모노포드/i], search: "맨프로토(모노포드)" },
+  { patterns: [/MC\s*트래블/i], search: "어퓨쳐 MC4 트래블" },
+  { patterns: [/홀리랜드.*마스|마스\s*M1/i], search: "마스 M1" },
+  { patterns: [/XLR[\-\s]*K3M/i], search: "소니 XLR-K3M" },
+  { patterns: [/슈퍼클램프/i], search: "슈퍼클램프" },
+  { patterns: [/웨건/i], search: "웨건" },
+];
+
+/* ======================================================
+   State
+   ====================================================== */
+var parsedEquip = [];   // [{name, qty, official, warn}]
+var logLines = [];
+var acResults = [];
+var acIndex = -1;
+var searchTimer = null;
+
+/* ======================================================
+   Logging
+   ====================================================== */
+function logOk(msg) { logLines.push('<span class="log-ok">' + escHtml(msg) + '</span>'); }
+function logWarn(msg) { logLines.push('<span class="log-warn">' + escHtml(msg) + '</span>'); }
+function logErr(msg) { logLines.push('<span class="log-err">' + escHtml(msg) + '</span>'); }
+function flushLog() {
+  document.getElementById('parseLog').innerHTML = logLines.join('<br>');
+}
+
+/* ======================================================
+   Phone Parser
+   ====================================================== */
+function parsePhone(text) {
+  var m = text.match(/01[016789][\-\s]?\d{3,4}[\-\s]?\d{4}/);
+  if (m) {
+    var raw = m[0].replace(/[\-\s]/g, '');
+    return raw.slice(0,3) + '-' + raw.slice(3, raw.length-4) + '-' + raw.slice(-4);
+  }
+  return '';
+}
+
+/* ======================================================
+   Date Parser
+   ====================================================== */
+function parseDate(text) {
+  var today = new Date();
+  var year = today.getFullYear();
+  var dates = [];
+
+  // YYYY-MM-DD or YYYY.MM.DD
+  var r1 = text.matchAll(/(\d{4})[\-\.](\d{1,2})[\-\.](\d{1,2})/g);
+  for (var m of r1) {
+    dates.push({ y: +m[1], m: +m[2], d: +m[3], idx: m.index });
+  }
+
+  // MM/DD or M/D (but not part of YYYY-MM-DD)
+  var r2 = text.matchAll(/(?<!\d[\-\.])(\d{1,2})\/(\d{1,2})(?!\/\d)/g);
+  for (var m of r2) {
+    dates.push({ y: year, m: +m[1], d: +m[2], idx: m.index });
+  }
+
+  // MM월 DD일
+  var r3 = text.matchAll(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/g);
+  for (var m of r3) {
+    dates.push({ y: year, m: +m[1], d: +m[2], idx: m.index });
+  }
+
+  // Range: 5/3~5/5, 5/3-5/5
+  var r4 = text.matchAll(/(\d{1,2})\/(\d{1,2})\s*[\-~]\s*(\d{1,2})\/(\d{1,2})/g);
+  for (var m of r4) {
+    dates = [];
+    dates.push({ y: year, m: +m[1], d: +m[2], idx: m.index });
+    dates.push({ y: year, m: +m[3], d: +m[4], idx: m.index + 5 });
+    break;
+  }
+
+  // Range: N일부터 N일까지 (same month context)
+  var r5 = text.match(/(\d{1,2})\s*일?\s*부터\s*(\d{1,2})\s*일?\s*까지/);
+  if (r5 && dates.length === 0) {
+    // Try to extract month from nearby context
+    var monthMatch = text.match(/(\d{1,2})\s*월/);
+    var mon = monthMatch ? +monthMatch[1] : today.getMonth() + 1;
+    dates.push({ y: year, m: mon, d: +r5[1], idx: r5.index });
+    dates.push({ y: year, m: mon, d: +r5[2], idx: r5.index + 5 });
+  }
+
+  // Relative dates
+  var relMap = { '내일': 1, '모레': 2, '글피': 3 };
+  for (var key in relMap) {
+    if (text.includes(key)) {
+      var rd = new Date(today);
+      rd.setDate(rd.getDate() + relMap[key]);
+      dates.push({ y: rd.getFullYear(), m: rd.getMonth()+1, d: rd.getDate(), idx: text.indexOf(key) });
+    }
+  }
+
+  // 이번 주 요일
+  var dayNames = ['일요일','월요일','화요일','수요일','목요일','금요일','토요일',
+                  '일','월','화','수','목','금','토'];
+  var dowMatch = text.match(/이번\s*주\s*(일요일|월요일|화요일|수요일|목요일|금요일|토요일|일|월|화|수|목|금|토)/);
+  if (dowMatch) {
+    var targetDay = dayNames.indexOf(dowMatch[1]) % 7;
+    var currentDay = today.getDay();
+    var diff = targetDay - currentDay;
+    if (diff < 0) diff += 7;
+    var rd = new Date(today);
+    rd.setDate(rd.getDate() + diff);
+    dates.push({ y: rd.getFullYear(), m: rd.getMonth()+1, d: rd.getDate(), idx: dowMatch.index });
+  }
+
+  // Deduplicate and sort by index
+  dates.sort(function(a, b) { return a.idx - b.idx; });
+
+  // Adjust year for past dates
+  dates.forEach(function(dt) {
+    var check = new Date(dt.y, dt.m - 1, dt.d);
+    if (check < today && dt.y === year) {
+      var nextYearCheck = new Date(dt.y + 1, dt.m - 1, dt.d);
+      // Only bump if it's more than a week in the past
+      var diffMs = today - check;
+      if (diffMs > 7 * 24 * 3600 * 1000) {
+        dt.y = dt.y + 1;
+      }
+    }
+  });
+
+  // Deduplicate by date string
+  var seen = {};
+  var unique = [];
+  dates.forEach(function(dt) {
+    var key = dt.y + '-' + pad2(dt.m) + '-' + pad2(dt.d);
+    if (!seen[key]) {
+      seen[key] = true;
+      unique.push(dt);
+    }
+  });
+
+  return unique.map(function(dt) {
+    return dt.y + '-' + pad2(dt.m) + '-' + pad2(dt.d);
+  });
+}
+
+/* ======================================================
+   Time Parser
+   ====================================================== */
+function parseTimes(text) {
+  var times = [];
+
+  // 오전/오후 N시 (MM분)
+  var r1 = text.matchAll(/(오전|오후)\s*(\d{1,2})\s*시\s*(?:(\d{1,2})\s*분)?/g);
+  for (var m of r1) {
+    var h = +m[2];
+    var min = m[3] ? +m[3] : 0;
+    if (m[1] === '오후' && h < 12) h += 12;
+    if (m[1] === '오전' && h === 12) h = 0;
+    times.push(pad2(h) + ':' + pad2(min));
+  }
+
+  // N시 (MM분) — without 오전/오후
+  var r2 = text.matchAll(/(?<!오[전후]\s?)(\d{1,2})\s*시\s*(?:(\d{1,2})\s*분)?/g);
+  for (var m of r2) {
+    var h = +m[1];
+    var min = m[2] ? +m[2] : 0;
+    // Avoid duplicates from 오전/오후 matches
+    var t = pad2(h) + ':' + pad2(min);
+    if (times.indexOf(t) === -1) {
+      times.push(t);
+    }
+  }
+
+  // HH:MM
+  var r3 = text.matchAll(/(\d{1,2}):(\d{2})(?!\d)/g);
+  for (var m of r3) {
+    var t = pad2(+m[1]) + ':' + m[2];
+    if (times.indexOf(t) === -1) {
+      times.push(t);
+    }
+  }
+
+  return times;
+}
+
+/* ======================================================
+   Discount Parser
+   ====================================================== */
+function parseDiscount(text) {
+  if (/학생|대학|졸작|과제|졸업/i.test(text)) return '학생';
+  if (/프리랜서|사업자|크리에이터|1인\s*미디어/i.test(text)) return '개인사업자/프리랜서';
+  return '일반';
+}
+
+/* ======================================================
+   Name Parser
+   ====================================================== */
+function parseName(text) {
+  // 예약자: XXX, 이름: XXX
+  var m = text.match(/(?:예약자|이름|성함|예약\s*자\s*명?)\s*[:：]?\s*([가-힣]{2,4})/);
+  if (m) return m[1];
+  return '';
+}
+
+/* ======================================================
+   Quantity Parser
+   ====================================================== */
+function parseQty(segment) {
+  var m = segment.match(/(\d+)\s*(?:대|개|세트|ea)/i);
+  if (m) return +m[1];
+  m = segment.match(/[x×]\s*(\d+)/i);
+  if (m) return +m[1];
+  return 1;
+}
+
+/* ======================================================
+   Suffix Extractor
+   ====================================================== */
+function extractSuffix(segment) {
+  var m = segment.match(/(풀세트|바디세트|바디|세트)/i);
+  return m ? ' ' + m[1] : '';
+}
+
+/* ======================================================
+   Equipment Parser
+   ====================================================== */
+function parseEquipment(text) {
+  var items = [];
+  // Split by common delimiters
+  var segments = text.split(/[,\n\r]+|(?:\s+및\s+)/);
+
+  segments.forEach(function(seg) {
+    seg = seg.trim();
+    if (!seg) return;
+
+    for (var i = 0; i < EQUIP_ALIASES.length; i++) {
+      var alias = EQUIP_ALIASES[i];
+      for (var j = 0; j < alias.patterns.length; j++) {
+        if (alias.patterns[j].test(seg)) {
+          var suffix = extractSuffix(seg);
+          var qty = parseQty(seg);
+          items.push({
+            raw: seg.trim(),
+            search: alias.search + suffix,
+            qty: qty,
+            official: null,
+            warn: false
+          });
+          return; // matched, move to next segment
+        }
+      }
+    }
+
+    // Also check the entire text for matches not split by segments
+  });
+
+  // If segments didn't find much, try matching whole text line by line
+  if (items.length === 0) {
+    var lines = text.split(/[\n\r]+/);
+    lines.forEach(function(line) {
+      line = line.trim();
+      if (!line) return;
+
+      for (var i = 0; i < EQUIP_ALIASES.length; i++) {
+        var alias = EQUIP_ALIASES[i];
+        for (var j = 0; j < alias.patterns.length; j++) {
+          if (alias.patterns[j].test(line)) {
+            // Check not already found
+            var alreadyFound = items.some(function(it) { return it.search.startsWith(alias.search); });
+            if (!alreadyFound) {
+              var suffix = extractSuffix(line);
+              var qty = parseQty(line);
+              items.push({
+                raw: line.trim(),
+                search: alias.search + suffix,
+                qty: qty,
+                official: null,
+                warn: false
+              });
+            }
+          }
+        }
+      }
+    });
+  }
+
+  return items;
+}
+
+/* ======================================================
+   세트마스터 API search
+   ====================================================== */
+function searchEquipAPI(keyword) {
+  return new Promise(function(resolve, reject) {
+    var url = API_URL + '?key=' + API_KEY + '&action=search&sheet=' + encodeURIComponent('세트마스터') + '&col=1&query=' + encodeURIComponent(keyword);
+    fetch(url)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data && data.results) {
+          resolve(data.results);
+        } else if (data && Array.isArray(data)) {
+          resolve(data);
+        } else {
+          resolve([]);
+        }
+      })
+      .catch(function(err) {
+        reject(err);
+      });
+  });
+}
+
+/* ======================================================
+   Main Parse
+   ====================================================== */
+async function doParse() {
+  var text = document.getElementById('pasteInput').value.trim();
+  if (!text) { alert('텍스트를 붙여넣어 주세요.'); return; }
+
+  logLines = [];
+  parsedEquip = [];
+
+  var parseBtn = document.getElementById('parseBtn');
+  parseBtn.disabled = true;
+  parseBtn.innerHTML = '<span class="spinner"></span> 파싱 중...';
+
+  try {
+    // Phone
+    var phone = parsePhone(text);
+    if (phone) {
+      logOk('연락처 감지: ' + phone);
+    } else {
+      logWarn('연락처를 찾을 수 없습니다. 직접 입력해 주세요.');
+    }
+
+    // Name
+    var name = parseName(text);
+    if (name) {
+      logOk('예약자명 감지: ' + name);
+    } else {
+      logWarn('예약자명을 찾을 수 없습니다. 직접 입력해 주세요.');
+    }
+
+    // Dates
+    var dates = parseDate(text);
+    if (dates.length >= 2) {
+      logOk('날짜 감지: 반출 ' + dates[0] + ', 반납 ' + dates[1]);
+    } else if (dates.length === 1) {
+      logOk('날짜 감지: ' + dates[0] + ' (반납일을 직접 입력해 주세요)');
+    } else {
+      logWarn('날짜를 찾을 수 없습니다. 직접 입력해 주세요.');
+    }
+
+    // Times
+    var times = parseTimes(text);
+    if (times.length >= 2) {
+      logOk('시간 감지: 반출 ' + times[0] + ', 반납 ' + times[1]);
+    } else if (times.length === 1) {
+      logOk('시간 감지: ' + times[0]);
+    } else {
+      logOk('시간 미감지 - 기본값 적용 (반출 10:00, 반납 18:00)');
+    }
+
+    // Discount
+    var discount = parseDiscount(text);
+    if (discount !== '일반') {
+      logOk('할인유형 감지: ' + discount);
+    }
+
+    // Equipment
+    var equipItems = parseEquipment(text);
+    if (equipItems.length > 0) {
+      logOk(equipItems.length + '개 장비 감지. 세트마스터 검색 중...');
+      flushLog();
+
+      // Search API for each item
+      for (var i = 0; i < equipItems.length; i++) {
+        var item = equipItems[i];
+        try {
+          var results = await searchEquipAPI(item.search);
+          if (results.length > 0) {
+            // Use first result's first column as official name
+            var officialName = Array.isArray(results[0]) ? results[0][0] : results[0];
+            item.official = officialName;
+            logOk(item.raw + ' -> ' + officialName + ' (세트마스터 매칭)');
+          } else {
+            item.warn = true;
+            item.official = item.search;
+            logWarn(item.raw + ' -> "' + item.search + '" 세트마스터에서 찾을 수 없음');
+          }
+        } catch (e) {
+          item.warn = true;
+          item.official = item.search;
+          logErr(item.raw + ' -> API 검색 실패');
+        }
+      }
+      parsedEquip = equipItems;
+    } else {
+      logWarn('장비를 감지하지 못했습니다. 직접 추가해 주세요.');
+    }
+
+    // Fill form
+    document.getElementById('fName').value = name;
+    document.getElementById('fPhone').value = phone;
+    document.getElementById('fDiscount').value = discount;
+    document.getElementById('fOutDate').value = dates[0] || '';
+    document.getElementById('fInDate').value = dates[1] || dates[0] || '';
+    document.getElementById('fOutTime').value = times[0] || '10:00';
+    document.getElementById('fInTime').value = times[1] || '18:00';
+
+    renderEquipList();
+    flushLog();
+
+    document.getElementById('formCard').classList.remove('hidden');
+    document.getElementById('resultCard').classList.remove('show');
+
+    // Scroll to form
+    document.getElementById('formCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  } finally {
+    parseBtn.disabled = false;
+    parseBtn.innerHTML = '파싱하기';
+  }
+}
+
+/* ======================================================
+   Equipment List Rendering
+   ====================================================== */
+function renderEquipList() {
+  var el = document.getElementById('equipList');
+  if (parsedEquip.length === 0) {
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:8px 0;">장비가 없습니다. 아래에서 추가해 주세요.</div>';
+    return;
+  }
+  var html = '';
+  parsedEquip.forEach(function(item, idx) {
+    html += '<div class="equip-item">';
+    html += '<span class="equip-name">' + escHtml(item.official || item.search) + '</span>';
+    if (item.warn) {
+      html += '<span class="equip-warn">미확인</span>';
+    }
+    html += '<span class="equip-qty">수량: <input type="number" min="1" max="99" value="' + item.qty + '" onchange="updateEquipQty(' + idx + ', this.value)"></span>';
+    html += '<button class="equip-remove" onclick="removeEquip(' + idx + ')" title="제거">&times;</button>';
+    html += '</div>';
+  });
+  el.innerHTML = html;
+}
+
+function updateEquipQty(idx, val) {
+  var q = parseInt(val) || 1;
+  if (q < 1) q = 1;
+  parsedEquip[idx].qty = q;
+}
+
+function removeEquip(idx) {
+  parsedEquip.splice(idx, 1);
+  renderEquipList();
+}
+
+/* ======================================================
+   Add Equipment (Autocomplete)
+   ====================================================== */
+function onEquipSearch(val) {
+  clearTimeout(searchTimer);
+  acIndex = -1;
+  if (val.trim().length < 1) {
+    hideAcDropdown();
+    return;
+  }
+  searchTimer = setTimeout(function() {
+    searchEquipAPI(val.trim()).then(function(results) {
+      acResults = results.map(function(r) { return Array.isArray(r) ? r[0] : r; });
+      renderAcDropdown();
+    }).catch(function() {
+      acResults = [];
+      hideAcDropdown();
+    });
+  }, 300);
+}
+
+function renderAcDropdown() {
+  var dd = document.getElementById('acDropdown');
+  if (acResults.length === 0) { hideAcDropdown(); return; }
+  var html = '';
+  acResults.forEach(function(name, i) {
+    html += '<div class="autocomplete-item' + (i === acIndex ? ' style="background:var(--bg)"' : '') + '" onclick="selectAcItem(' + i + ')">' + escHtml(name) + '</div>';
+  });
+  dd.innerHTML = html;
+  dd.classList.add('show');
+}
+
+function hideAcDropdown() {
+  document.getElementById('acDropdown').classList.remove('show');
+}
+
+function selectAcItem(idx) {
+  var name = acResults[idx];
+  parsedEquip.push({ raw: name, search: name, qty: 1, official: name, warn: false });
+  renderEquipList();
+  document.getElementById('addEquipInput').value = '';
+  hideAcDropdown();
+}
+
+function onEquipKeydown(e) {
+  var dd = document.getElementById('acDropdown');
+  if (!dd.classList.contains('show')) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    acIndex = Math.min(acIndex + 1, acResults.length - 1);
+    renderAcDropdown();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    acIndex = Math.max(acIndex - 1, 0);
+    renderAcDropdown();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (acIndex >= 0 && acIndex < acResults.length) {
+      selectAcItem(acIndex);
+    } else {
+      addEquipFromInput();
+    }
+  } else if (e.key === 'Escape') {
+    hideAcDropdown();
+  }
+}
+
+function addEquipFromInput() {
+  var input = document.getElementById('addEquipInput');
+  var val = input.value.trim();
+  if (!val) return;
+
+  // Check if there's a selected autocomplete result
+  if (acResults.length > 0 && acIndex >= 0) {
+    selectAcItem(acIndex);
+    return;
+  }
+
+  // Otherwise search and add first result, or add raw
+  searchEquipAPI(val).then(function(results) {
+    if (results.length > 0) {
+      var name = Array.isArray(results[0]) ? results[0][0] : results[0];
+      parsedEquip.push({ raw: val, search: val, qty: 1, official: name, warn: false });
+    } else {
+      parsedEquip.push({ raw: val, search: val, qty: 1, official: val, warn: true });
+    }
+    renderEquipList();
+    input.value = '';
+    hideAcDropdown();
+  }).catch(function() {
+    parsedEquip.push({ raw: val, search: val, qty: 1, official: val, warn: true });
+    renderEquipList();
+    input.value = '';
+    hideAcDropdown();
+  });
+}
+
+// Close dropdown on outside click
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.add-equip-input-wrap')) {
+    hideAcDropdown();
+  }
+});
+
+/* ======================================================
+   Submit
+   ====================================================== */
+async function doSubmit() {
+  var name = document.getElementById('fName').value.trim();
+  var phone = document.getElementById('fPhone').value.trim();
+  var discount = document.getElementById('fDiscount').value;
+  var outDate = document.getElementById('fOutDate').value;
+  var outTime = document.getElementById('fOutTime').value;
+  var inDate = document.getElementById('fInDate').value;
+  var inTime = document.getElementById('fInTime').value;
+
+  // Validate
+  var errors = [];
+  if (!name) errors.push('예약자명');
+  if (!phone) errors.push('연락처');
+  if (!outDate) errors.push('반출일');
+  if (!inDate) errors.push('반납일');
+  if (parsedEquip.length === 0) errors.push('장비 목록');
+
+  if (errors.length > 0) {
+    alert('필수 항목을 입력해 주세요: ' + errors.join(', '));
+    return;
+  }
+
+  // Phone format validation
+  if (!/^01[016789]-\d{3,4}-\d{4}$/.test(phone)) {
+    alert('연락처 형식을 확인해 주세요. (예: 010-1234-5678)');
+    return;
+  }
+
+  // Date validation
+  if (outDate > inDate) {
+    alert('반납일이 반출일보다 이전입니다.');
+    return;
+  }
+
+  var submitBtn = document.getElementById('submitBtn');
+  submitBtn.disabled = true;
+  submitBtn.innerHTML = '<span class="spinner"></span> 등록 중...';
+
+  var args = {
+    "반출일": outDate,
+    "반출시간": outTime || "10:00",
+    "반납일": inDate,
+    "반납시간": inTime || "18:00",
+    "예약자명": name,
+    "연락처": phone,
+    "할인유형": discount,
+    "장비": parsedEquip.map(function(item) {
+      return { "이름": item.official || item.search, "수량": item.qty };
+    })
+  };
+
+  var url = API_URL + '?key=' + API_KEY + '&action=run&func=insertAndCheckRequest&args=' + encodeURIComponent(JSON.stringify(args));
+
+  try {
+    var resp = await fetch(url);
+    var data = await resp.json();
+
+    var resultCard = document.getElementById('resultCard');
+    var resultBody = document.getElementById('resultBody');
+
+    if (data.error) {
+      resultBody.innerHTML = '<div class="result-row"><span class="badge badge-red">' + escHtml(data.error) + '</span></div>';
+      resultCard.classList.add('show');
+      resultCard.scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+
+    var html = '';
+
+    // Request ID
+    var reqId = data.reqId || data.requestId || data.id || '';
+    if (reqId) {
+      html += '<div class="result-row"><span class="result-label">요청ID:</span> <span class="result-value">' + escHtml(reqId) + '</span></div>';
+    }
+
+    // Availability result
+    var avail = data.availability || data.result || data.status || '';
+    if (typeof avail === 'string') {
+      var badgeClass = 'badge-blue';
+      var icon = '';
+      if (/가용|가능|OK/i.test(avail)) { badgeClass = 'badge-green'; icon = '\u2705 '; }
+      else if (/겹침|일부|partial/i.test(avail)) { badgeClass = 'badge-amber'; icon = '\u26A0\uFE0F '; }
+      else if (/불가|없|fail/i.test(avail)) { badgeClass = 'badge-red'; icon = '\u274C '; }
+      html += '<div class="result-row"><span class="result-label">가용결과:</span> <span class="badge ' + badgeClass + '">' + icon + escHtml(avail) + '</span></div>';
+    }
+
+    // Message
+    var msg = data.message || data.msg || '';
+    if (msg) {
+      html += '<div class="result-row" style="margin-top:4px;font-size:13px;color:var(--text-secondary);">' + escHtml(msg) + '</div>';
+    }
+
+    // Detail rows (if data has details array)
+    if (data.details && Array.isArray(data.details)) {
+      html += '<div style="margin-top:8px;">';
+      data.details.forEach(function(d) {
+        var dName = d.name || d.equip || '';
+        var dStatus = d.status || d.result || '';
+        var bc = 'badge-green';
+        if (/겹침|충돌|conflict/i.test(dStatus)) bc = 'badge-amber';
+        if (/불가/i.test(dStatus)) bc = 'badge-red';
+        html += '<div class="result-row"><span style="font-size:13px;">' + escHtml(dName) + '</span> <span class="badge ' + bc + '" style="font-size:11px;">' + escHtml(dStatus) + '</span></div>';
+      });
+      html += '</div>';
+    }
+
+    // If we got the whole response as a simple string
+    if (!reqId && !avail && !msg && typeof data === 'object') {
+      html += '<div class="result-row" style="font-size:13px;color:var(--text-secondary);word-break:break-all;">' + escHtml(JSON.stringify(data)) + '</div>';
+    }
+
+    // Timeline link
+    if (reqId) {
+      html += '<div style="margin-top:12px;"><a href="timeline.html?search=' + encodeURIComponent(name) + '" class="btn" style="text-decoration:none;">타임라인에서 보기</a></div>';
+    }
+
+    resultBody.innerHTML = html;
+    resultCard.classList.add('show');
+    resultCard.scrollIntoView({ behavior: 'smooth' });
+
+  } catch (err) {
+    var resultCard = document.getElementById('resultCard');
+    var resultBody = document.getElementById('resultBody');
+    resultBody.innerHTML = '<div class="result-row"><span class="badge badge-red">네트워크 오류: ' + escHtml(err.message || '알 수 없는 오류') + '</span></div>';
+    resultCard.classList.add('show');
+    resultCard.scrollIntoView({ behavior: 'smooth' });
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = '확인요청 등록';
+  }
+}
+</script>
+</body>
+</html>
