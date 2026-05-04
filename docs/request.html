@@ -366,6 +366,35 @@ body {
   font-weight: 500;
   color: var(--text-primary);
 }
+.model-select-wrap { position: relative; }
+.model-search { font-size: 12px !important; padding: 5px 8px !important; }
+.model-dropdown {
+  display: none;
+  position: absolute;
+  left: 0; right: 0; top: 100%;
+  max-height: 160px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  z-index: 210;
+}
+.model-dropdown.open { display: block; }
+.model-option {
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.model-option:hover { background: var(--bg); }
+.model-selected {
+  font-size: 12px;
+  color: var(--green-text);
+  font-weight: 600;
+  margin-top: 4px;
+}
 .badge {
   display: inline-block;
   padding: 2px 8px;
@@ -503,12 +532,12 @@ F10 프레넬 1개
       </div>
 
       <div style="margin-top: 16px; text-align: center;">
-        <button id="submitBtn" class="btn primary btn-full" onclick="doSubmit()">확인요청 등록</button>
+        <button id="submitBtn" class="btn primary btn-full" onclick="doSubmit()">가용 체크</button>
       </div>
     </div>
 
     <div id="resultCard" class="card result-card">
-      <div class="card-title">등록 결과</div>
+      <div class="card-title">가용 체크 결과</div>
       <div id="resultBody"></div>
     </div>
   </div>
@@ -1275,7 +1304,7 @@ async function doSubmit() {
 
   var submitBtn = document.getElementById('submitBtn');
   submitBtn.disabled = true;
-  submitBtn.innerHTML = '<span class="spinner"></span> 등록 중...';
+  submitBtn.innerHTML = '<span class="spinner"></span> 가용 체크 중...';
 
   var note = document.getElementById('fNote').value.trim();
 
@@ -1333,9 +1362,23 @@ async function doSubmit() {
         if (/가용0|불가/i.test(detail)) { bc = 'badge-red'; allAvailable = false; }
         if (/✅|가용/i.test(detail)) { bc = 'badge-green'; }
         if (/⚠|겹침|부족|충돌/i.test(detail)) { bc = 'badge-amber'; hasConflict = true; }
-        html += '<div class="result-equip-row">'
-          + '<span class="result-equip-name">' + escHtml(equipName) + '</span>'
-          + '<span class="badge ' + bc + '">' + escHtml(detail) + '</span>'
+        // 모델 선택이 필요한 경우 드롭다운 표시
+        var needsSelect = /선택|드롭다운|모델/i.test(detail);
+        var rowId = 'result-equip-' + results.indexOf(r);
+        html += '<div class="result-equip-row" id="' + rowId + '">'
+          + '<div style="flex:1">'
+          + '<span class="result-equip-name">' + escHtml(equipName) + '</span>';
+        if (needsSelect) {
+          html += '<div class="model-select-wrap" style="margin-top:6px">'
+            + '<input type="text" class="form-input model-search" placeholder="구체 모델명 검색..." '
+            + 'data-reqid="' + escHtml(reqId) + '" data-equipname="' + escHtml(equipName) + '" '
+            + 'oninput="onModelSearch(this)" onfocus="onModelSearch(this)" '
+            + 'onblur="setTimeout(function(){closeModelDD()},150)" autocomplete="off" spellcheck="false">'
+            + '<div class="model-dropdown" id="modelDD-' + results.indexOf(r) + '"></div>'
+            + '</div>';
+        }
+        html += '</div>'
+          + '<span class="badge ' + bc + '" style="flex-shrink:0">' + escHtml(detail) + '</span>'
           + '</div>';
       });
       html += '</div>';
@@ -1350,12 +1393,13 @@ async function doSubmit() {
       html += '<div style="font-size:11px;color:var(--text-muted);margin-top:4px">처리 시간: ' + escHtml(data.executionTime) + '</div>';
     }
 
-    // 바로 등록 버튼 — 항상 표시 (경고 있어도 등록 가능)
+    // 액션 버튼
     if (reqId) {
       html += '<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">';
+      html += '<button class="btn" onclick="showToast(\'확인요청 시트에 저장되었습니다 (' + escHtml(reqId) + ')\')" style="font-weight:600">'
+        + '확인요청으로 남기기</button>';
       html += '<button class="btn btn-register" onclick="registerNow(\'' + escHtml(reqId) + '\')" id="registerBtn">'
-        + '계약마스터+스케줄 바로 등록</button>';
-      html += '<a href="timeline.html?search=' + encodeURIComponent(name) + '" class="btn" style="text-decoration:none;">타임라인에서 보기</a>';
+        + '바로 등록 (계약+스케줄)</button>';
       html += '</div>';
     }
 
@@ -1371,8 +1415,117 @@ async function doSubmit() {
     resultCard.scrollIntoView({ behavior: 'smooth' });
   } finally {
     submitBtn.disabled = false;
-    submitBtn.innerHTML = '확인요청 등록';
+    submitBtn.innerHTML = '가용 체크';
   }
+}
+
+/* ======================================================
+   모델 선택 드롭다운 (결과 영역)
+   ====================================================== */
+var activeModelDD = null;
+
+function onModelSearch(input) {
+  var q = input.value.trim().toLowerCase();
+  var wrap = input.closest('.model-select-wrap');
+  var dd = wrap.querySelector('.model-dropdown');
+
+  if (q.length < 1) { dd.classList.remove('open'); return; }
+
+  var filtered = allSetNames.filter(function(n) { return n.toLowerCase().indexOf(q) >= 0; }).slice(0, 15);
+  if (filtered.length === 0) { dd.classList.remove('open'); return; }
+
+  dd.innerHTML = '';
+  filtered.forEach(function(name) {
+    var opt = document.createElement('div');
+    opt.className = 'model-option';
+    opt.textContent = name;
+    opt.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      selectModel(input, name);
+    });
+    dd.appendChild(opt);
+  });
+  dd.classList.add('open');
+  activeModelDD = dd;
+}
+
+function closeModelDD() {
+  if (activeModelDD) activeModelDD.classList.remove('open');
+}
+
+function selectModel(input, modelName) {
+  var reqId = input.getAttribute('data-reqid');
+  var equipName = input.getAttribute('data-equipname');
+  var wrap = input.closest('.model-select-wrap');
+  var dd = wrap.querySelector('.model-dropdown');
+  dd.classList.remove('open');
+
+  // UI 즉시 업데이트
+  input.value = modelName;
+  input.disabled = true;
+  input.style.borderColor = 'var(--green-text)';
+
+  var info = document.createElement('div');
+  info.className = 'model-selected';
+  info.textContent = '✅ ' + modelName + ' 선택됨 — 시트 업데이트 중...';
+  wrap.appendChild(info);
+
+  // 확인요청 시트에서 해당 reqID + 장비명 행 찾아서 F열 업데이트
+  var searchUrl = API_URL + '?key=' + API_KEY + '&action=search&sheet=' + encodeURIComponent('확인요청') + '&col=1&query=' + encodeURIComponent(reqId);
+  fetch(searchUrl)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.results || data.results.length === 0) {
+        info.textContent = '⚠️ 요청 행을 찾을 수 없습니다';
+        info.style.color = 'var(--amber-text)';
+        return;
+      }
+      // F열(6번째)이 equipName과 매칭되는 행 찾기
+      var targetRow = null;
+      data.results.forEach(function(r) {
+        var fVal = r.data ? r.data[5] : ''; // F열 = index 5
+        if (fVal && fVal.indexOf(equipName) >= 0) targetRow = r.row;
+      });
+      if (!targetRow) {
+        // 정확 매칭 실패 → 첫 번째 빈 F열이나 가장 가까운 행
+        data.results.forEach(function(r) {
+          if (!targetRow) targetRow = r.row;
+        });
+      }
+      if (!targetRow) {
+        info.textContent = '⚠️ 매칭 행을 찾을 수 없습니다';
+        return;
+      }
+      // F열 업데이트
+      return fetch(API_URL + '?key=' + API_KEY + '&action=update&sheet=' + encodeURIComponent('확인요청') + '&cell=F' + targetRow + '&value=' + encodeURIComponent(modelName));
+    })
+    .then(function(r) { if (r) return r.json(); })
+    .then(function(res) {
+      if (res) {
+        info.textContent = '✅ ' + modelName + ' — 시트 업데이트 완료';
+      }
+    })
+    .catch(function() {
+      info.textContent = '⚠️ 시트 업데이트 실패 — 수동으로 F열을 수정해주세요';
+      info.style.color = 'var(--amber-text)';
+    });
+}
+
+function showToast(msg) {
+  var el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    el.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--text-primary);color:#fff;padding:10px 20px;border-radius:var(--radius);font-size:13px;font-weight:500;z-index:500;opacity:0;transition:all 0.3s;pointer-events:none;';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = '1';
+  el.style.transform = 'translateX(-50%) translateY(0)';
+  setTimeout(function() {
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(-50%) translateY(100px)';
+  }, 3000);
 }
 
 /* ======================================================
