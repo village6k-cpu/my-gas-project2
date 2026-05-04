@@ -1538,7 +1538,7 @@ async function registerNow(reqId) {
   if (!confirm('계약마스터 + 스케줄상세에 바로 등록합니다.\n계속하시겠습니까?')) return;
 
   btn.disabled = true;
-  btn.textContent = '등록 중...';
+  btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></span>등록 중... (계약서 생성 포함, 최대 1분 소요)';
 
   try {
     var url = API_URL + '?key=' + API_KEY + '&action=scan&reqID=' + encodeURIComponent(reqId) + '&do=' + encodeURIComponent('등록');
@@ -1561,12 +1561,12 @@ async function registerNow(reqId) {
       resultBody.appendChild(extra);
     } else {
       btn.disabled = false;
-      btn.textContent = '계약마스터+스케줄 바로 등록';
+      btn.textContent = '바로 등록 (계약+스케줄)';
       alert('등록 실패: ' + (data.message || JSON.stringify(data)));
     }
   } catch (err) {
     btn.disabled = false;
-    btn.textContent = '계약마스터+스케줄 바로 등록';
+    btn.textContent = '바로 등록 (계약+스케줄)';
     alert('네트워크 오류: ' + (err.message || ''));
   }
 }
