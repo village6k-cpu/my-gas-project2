@@ -349,7 +349,8 @@ body {
   cursor: pointer;
   transition: background 0.1s;
 }
-.autocomplete-item:hover { background: var(--bg); }
+.autocomplete-item:hover, .autocomplete-item.active { background: var(--bg); color: var(--accent); }
+.autocomplete-item .ac-match { font-weight: 700; color: var(--accent); }
 
 /* ── Parse Log ── */
 .parse-log {
@@ -421,7 +422,7 @@ body {
   cursor: pointer;
   color: var(--text-primary);
 }
-.model-option:hover { background: var(--bg); }
+.model-option:hover, .model-option.active { background: var(--bg); color: var(--accent); }
 .model-selected {
   font-size: 12px;
   color: var(--green-text);
@@ -1544,12 +1545,30 @@ function onEquipSearch(val) {
 function renderAcDropdown() {
   var dd = document.getElementById('acDropdown');
   if (acResults.length === 0) { hideAcDropdown(); return; }
+  var q = (document.getElementById('addEquipInput').value || '').trim().toLowerCase();
   var html = '';
   acResults.forEach(function(name, i) {
-    html += '<div class="autocomplete-item' + (i === acIndex ? ' style="background:var(--bg)"' : '') + '" onclick="selectAcItem(' + i + ')">' + escHtml(name) + '</div>';
+    var cls = 'autocomplete-item' + (i === acIndex ? ' active' : '');
+    var display = name;
+    if (q) {
+      var li = name.toLowerCase().indexOf(q);
+      if (li >= 0) {
+        display = escHtml(name.slice(0, li)) + '<span class="ac-match">' + escHtml(name.slice(li, li + q.length)) + '</span>' + escHtml(name.slice(li + q.length));
+      } else {
+        display = escHtml(name);
+      }
+    } else {
+      display = escHtml(name);
+    }
+    html += '<div class="' + cls + '" onclick="selectAcItem(' + i + ')">' + display + '</div>';
   });
   dd.innerHTML = html;
   dd.classList.add('show');
+  // 활성 항목 스크롤
+  if (acIndex >= 0) {
+    var activeEl = dd.querySelectorAll('.autocomplete-item')[acIndex];
+    if (activeEl) activeEl.scrollIntoView({ block: 'nearest' });
+  }
 }
 
 function hideAcDropdown() {
@@ -1732,7 +1751,7 @@ async function doSubmit() {
           html += '<div class="model-select-wrap" style="margin-top:6px">'
             + '<input type="text" class="form-input model-search" placeholder="구체 모델명 검색..." '
             + 'data-reqid="' + escHtml(reqId) + '" data-equipname="' + escHtml(equipName) + '" '
-            + 'oninput="onModelSearch(this)" onfocus="onModelSearch(this)" '
+            + 'oninput="onModelSearch(this)" onfocus="onModelSearch(this)" onkeydown="onModelKeydown(event,this)" '
             + 'onblur="setTimeout(function(){closeModelDD()},150)" autocomplete="off" spellcheck="false">'
             + '<div class="model-dropdown" id="modelDD-' + results.indexOf(r) + '"></div>'
             + '</div>';
@@ -1783,34 +1802,66 @@ async function doSubmit() {
    모델 선택 드롭다운 (결과 영역)
    ====================================================== */
 var activeModelDD = null;
+var modelDDIdx = -1;
 
 function onModelSearch(input) {
   var q = input.value.trim().toLowerCase();
   var wrap = input.closest('.model-select-wrap');
   var dd = wrap.querySelector('.model-dropdown');
+  modelDDIdx = -1;
 
-  if (q.length < 1) { dd.classList.remove('open'); return; }
+  if (q.length < 1) { dd.style.display = 'none'; return; }
 
   var filtered = allSetNames.filter(function(n) { return n.toLowerCase().indexOf(q) >= 0; }).slice(0, 15);
-  if (filtered.length === 0) { dd.classList.remove('open'); return; }
+  if (filtered.length === 0) { dd.style.display = 'none'; return; }
 
   dd.innerHTML = '';
-  filtered.forEach(function(name) {
+  filtered.forEach(function(name, i) {
     var opt = document.createElement('div');
     opt.className = 'model-option';
-    opt.textContent = name;
+    opt.setAttribute('data-i', i);
+    var li = name.toLowerCase().indexOf(q);
+    if (li >= 0) {
+      opt.innerHTML = escHtml(name.slice(0, li)) + '<strong style="color:var(--accent)">' + escHtml(name.slice(li, li + q.length)) + '</strong>' + escHtml(name.slice(li + q.length));
+    } else {
+      opt.textContent = name;
+    }
     opt.addEventListener('mousedown', function(e) {
       e.preventDefault();
       selectModel(input, name);
     });
     dd.appendChild(opt);
   });
-  dd.classList.add('open');
+  dd.style.display = 'block';
   activeModelDD = dd;
 }
 
+function onModelKeydown(e, input) {
+  var wrap = input.closest('.model-select-wrap');
+  var dd = wrap.querySelector('.model-dropdown');
+  var items = dd.querySelectorAll('.model-option');
+  if (!items.length) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    modelDDIdx = Math.min(modelDDIdx + 1, items.length - 1);
+    items.forEach(function(el, i) { el.classList.toggle('active', i === modelDDIdx); });
+    if (items[modelDDIdx]) items[modelDDIdx].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    modelDDIdx = Math.max(modelDDIdx - 1, 0);
+    items.forEach(function(el, i) { el.classList.toggle('active', i === modelDDIdx); });
+    if (items[modelDDIdx]) items[modelDDIdx].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter' && modelDDIdx >= 0) {
+    e.preventDefault();
+    selectModel(input, items[modelDDIdx].textContent);
+  } else if (e.key === 'Escape') {
+    dd.style.display = 'none';
+  }
+}
+
 function closeModelDD() {
-  if (activeModelDD) activeModelDD.classList.remove('open');
+  if (activeModelDD) activeModelDD.style.display = 'none';
 }
 
 function selectModel(input, modelName) {
