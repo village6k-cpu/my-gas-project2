@@ -77,13 +77,16 @@ body {
 
 /* ── Main Container ── */
 .container {
-  max-width: 640px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 16px;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 16px;
 }
+.container .input-col { display: flex; flex-direction: column; gap: 16px; }
+.container .result-col { display: flex; flex-direction: column; gap: 16px; }
+.full-width { grid-column: 1 / -1; }
 
 /* ── Card ── */
 .card {
@@ -349,6 +352,20 @@ body {
 .result-value {
   font-weight: 600;
 }
+.result-equip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+.result-equip-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
 .badge {
   display: inline-block;
   padding: 2px 8px;
@@ -380,7 +397,8 @@ body {
 @media (max-width: 480px) {
   .form-grid { grid-template-columns: 1fr; }
   .form-grid .form-group.half-row { grid-column: auto; }
-  .container { padding: 10px; gap: 12px; }
+  .container { padding: 10px; gap: 12px; grid-template-columns: 1fr; }
+  .full-width { grid-column: 1; }
   .card { padding: 12px; }
   .paste-area { min-height: 120px; font-size: 13px; }
   .header-title { font-size: 14px; }
@@ -399,88 +417,93 @@ body {
 
 <div class="container">
 
-  <!-- ── Paste Section ── -->
-  <div class="card">
-    <div class="card-title">카톡 문의 붙여넣기</div>
-    <textarea id="pasteInput" class="paste-area" placeholder="고객 카카오톡 문의 내용을 붙여넣으세요.
+  <!-- 좌측: 입력 -->
+  <div class="input-col">
+    <div class="card">
+      <div class="card-title">카톡 문의 붙여넣기</div>
+      <textarea id="pasteInput" class="paste-area" placeholder="고객 카카오톡 문의 내용을 붙여넣으세요.
 
 예시:
-안녕하세요, 5/10~5/12 FX3 바디세트 1대, 24-70 gm2 렌즈 빌리고 싶습니다.
-반출 오전 10시, 반납 오후 6시
-홍길동 010-1234-5678
-대학교 졸업작품입니다."></textarea>
-    <div style="margin-top: 10px; text-align: center;">
-      <button id="parseBtn" class="btn primary" onclick="doParse()">파싱하기</button>
-    </div>
-  </div>
-
-  <!-- ── Parsed Result Form ── -->
-  <div id="formCard" class="card hidden">
-    <div class="card-title">파싱 결과 (편집 가능)</div>
-
-    <div class="form-grid">
-      <div class="form-group">
-        <label class="form-label">예약자명</label>
-        <input id="fName" type="text" class="form-input" placeholder="이름 입력">
-      </div>
-      <div class="form-group">
-        <label class="form-label">연락처</label>
-        <input id="fPhone" type="tel" class="form-input" placeholder="010-0000-0000">
-      </div>
-      <div class="form-group">
-        <label class="form-label">할인유형</label>
-        <select id="fDiscount" class="form-select">
-          <option value="일반">일반</option>
-          <option value="학생">학생</option>
-          <option value="개인사업자/프리랜서">개인사업자/프리랜서</option>
-        </select>
-      </div>
-      <div class="form-group"></div>
-      <div class="form-group">
-        <label class="form-label">반출일</label>
-        <input id="fOutDate" type="date" class="form-input">
-      </div>
-      <div class="form-group">
-        <label class="form-label">반출시간</label>
-        <input id="fOutTime" type="time" class="form-input" value="10:00">
-      </div>
-      <div class="form-group">
-        <label class="form-label">반납일</label>
-        <input id="fInDate" type="date" class="form-input">
-      </div>
-      <div class="form-group">
-        <label class="form-label">반납시간</label>
-        <input id="fInTime" type="time" class="form-input" value="18:00">
+배성우
+배성우 / 010-3150-9020 / 학생
+Evoke 1200B 1개
+Aputure 600X 1개
+F10 프레넬 1개
+5/15~5/17"></textarea>
+      <div style="margin-top: 10px; text-align: center;">
+        <button id="parseBtn" class="btn primary" onclick="doParse()">파싱하기</button>
       </div>
     </div>
 
-    <div style="margin-top: 16px;">
-      <div class="form-label" style="margin-bottom: 8px;">장비 목록</div>
-      <div id="equipList" class="equip-list"></div>
-
-      <div class="add-equip-row">
-        <div class="add-equip-input-wrap">
-          <input id="addEquipInput" type="text" class="add-equip-input" placeholder="장비명 검색..." oninput="onEquipSearch(this.value)" onkeydown="onEquipKeydown(event)">
-          <div id="acDropdown" class="autocomplete-dropdown"></div>
-        </div>
-        <button class="btn btn-sm" onclick="addEquipFromInput()">+ 추가</button>
-      </div>
-    </div>
-
-    <div id="parseLogWrap" style="margin-top: 16px;">
-      <div class="form-label" style="margin-bottom: 6px;">파싱 로그</div>
+    <div id="parseLogWrap" class="card" style="display:none">
+      <div class="card-title">파싱 로그</div>
       <div id="parseLog" class="parse-log"></div>
     </div>
-
-    <div style="margin-top: 16px; text-align: center;">
-      <button id="submitBtn" class="btn primary btn-full" onclick="doSubmit()">확인요청 등록</button>
-    </div>
   </div>
 
-  <!-- ── Result ── -->
-  <div id="resultCard" class="card result-card">
-    <div class="card-title">등록 결과</div>
-    <div id="resultBody"></div>
+  <!-- 우측: 결과 폼 + 등록 결과 -->
+  <div class="result-col">
+    <div id="formCard" class="card hidden">
+      <div class="card-title">파싱 결과 (편집 가능)</div>
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label">예약자명</label>
+          <input id="fName" type="text" class="form-input" placeholder="이름 입력">
+        </div>
+        <div class="form-group">
+          <label class="form-label">연락처</label>
+          <input id="fPhone" type="tel" class="form-input" placeholder="010-0000-0000">
+        </div>
+        <div class="form-group">
+          <label class="form-label">할인유형</label>
+          <select id="fDiscount" class="form-select">
+            <option value="일반">일반</option>
+            <option value="학생">학생</option>
+            <option value="개인사업자/프리랜서">개인사업자/프리랜서</option>
+          </select>
+        </div>
+        <div class="form-group"></div>
+        <div class="form-group">
+          <label class="form-label">반출일</label>
+          <input id="fOutDate" type="date" class="form-input">
+        </div>
+        <div class="form-group">
+          <label class="form-label">반출시간</label>
+          <input id="fOutTime" type="time" class="form-input" value="10:00">
+        </div>
+        <div class="form-group">
+          <label class="form-label">반납일</label>
+          <input id="fInDate" type="date" class="form-input">
+        </div>
+        <div class="form-group">
+          <label class="form-label">반납시간</label>
+          <input id="fInTime" type="time" class="form-input" value="18:00">
+        </div>
+      </div>
+
+      <div style="margin-top: 16px;">
+        <div class="form-label" style="margin-bottom: 8px;">장비 목록</div>
+        <div id="equipList" class="equip-list"></div>
+
+        <div class="add-equip-row">
+          <div class="add-equip-input-wrap">
+            <input id="addEquipInput" type="text" class="add-equip-input" placeholder="장비명 검색..." oninput="onEquipSearch(this.value)" onkeydown="onEquipKeydown(event)">
+            <div id="acDropdown" class="autocomplete-dropdown"></div>
+          </div>
+          <button class="btn btn-sm" onclick="addEquipFromInput()">+ 추가</button>
+        </div>
+      </div>
+
+      <div style="margin-top: 16px; text-align: center;">
+        <button id="submitBtn" class="btn primary btn-full" onclick="doSubmit()">확인요청 등록</button>
+      </div>
+    </div>
+
+    <div id="resultCard" class="card result-card">
+      <div class="card-title">등록 결과</div>
+      <div id="resultBody"></div>
+    </div>
   </div>
 
 </div>
@@ -1029,6 +1052,7 @@ async function doParse() {
     flushLog();
 
     document.getElementById('formCard').classList.remove('hidden');
+    document.getElementById('parseLogWrap').style.display = 'block';
     document.getElementById('resultCard').classList.remove('show');
 
     // Scroll to form
@@ -1247,53 +1271,49 @@ async function doSubmit() {
 
     var html = '';
 
-    // Request ID
-    var reqId = data.reqId || data.requestId || data.id || '';
+    // 실제 API 응답: { success, function, reqID, results: [{장비명,수량,결과,상세},...], executionTime }
+    var reqId = data.reqID || data.reqId || data.requestId || data.id || '';
     if (reqId) {
-      html += '<div class="result-row"><span class="result-label">요청ID:</span> <span class="result-value">' + escHtml(reqId) + '</span></div>';
+      html += '<div class="result-row"><span class="result-label">요청ID:</span> <span class="result-value" style="font-weight:700">' + escHtml(reqId) + '</span></div>';
     }
 
-    // Availability result
-    var avail = data.availability || data.result || data.status || '';
-    if (typeof avail === 'string') {
-      var badgeClass = 'badge-blue';
-      var icon = '';
-      if (/가용|가능|OK/i.test(avail)) { badgeClass = 'badge-green'; icon = '\u2705 '; }
-      else if (/겹침|일부|partial/i.test(avail)) { badgeClass = 'badge-amber'; icon = '\u26A0\uFE0F '; }
-      else if (/불가|없|fail/i.test(avail)) { badgeClass = 'badge-red'; icon = '\u274C '; }
-      html += '<div class="result-row"><span class="result-label">가용결과:</span> <span class="badge ' + badgeClass + '">' + icon + escHtml(avail) + '</span></div>';
-    }
-
-    // Message
-    var msg = data.message || data.msg || '';
-    if (msg) {
-      html += '<div class="result-row" style="margin-top:4px;font-size:13px;color:var(--text-secondary);">' + escHtml(msg) + '</div>';
-    }
-
-    // Detail rows (if data has details array)
-    if (data.details && Array.isArray(data.details)) {
+    // 장비별 가용 결과
+    var results = data.results || data.details || [];
+    var allAvailable = true;
+    var hasConflict = false;
+    if (results.length > 0) {
       html += '<div style="margin-top:8px;">';
-      data.details.forEach(function(d) {
-        var dName = d.name || d.equip || '';
-        var dStatus = d.status || d.result || '';
+      html += '<div class="result-label" style="margin-bottom:6px">장비별 가용 결과:</div>';
+      results.forEach(function(r) {
+        var equipName = r['장비명'] || r.name || r.equip || '';
+        var detail = r['상세'] || r.status || r.result || '';
+        var result = r['결과'] || '';
         var bc = 'badge-green';
-        if (/겹침|충돌|conflict/i.test(dStatus)) bc = 'badge-amber';
-        if (/불가/i.test(dStatus)) bc = 'badge-red';
-        html += '<div class="result-row"><span style="font-size:13px;">' + escHtml(dName) + '</span> <span class="badge ' + bc + '" style="font-size:11px;">' + escHtml(dStatus) + '</span></div>';
+        if (/미등록|없|fail|선택/i.test(detail) || /⚠|🔴|❌|미등록/i.test(detail)) { bc = 'badge-amber'; allAvailable = false; hasConflict = true; }
+        if (/가용0|불가/i.test(detail)) { bc = 'badge-red'; allAvailable = false; }
+        if (/✅|가용/i.test(detail)) { bc = 'badge-green'; }
+        if (/⚠|겹침|부족|충돌/i.test(detail)) { bc = 'badge-amber'; hasConflict = true; }
+        html += '<div class="result-equip-row">'
+          + '<span class="result-equip-name">' + escHtml(equipName) + '</span>'
+          + '<span class="badge ' + bc + '">' + escHtml(detail) + '</span>'
+          + '</div>';
       });
       html += '</div>';
     }
 
-    // If we got the whole response as a simple string
-    if (!reqId && !avail && !msg && typeof data === 'object') {
-      html += '<div class="result-row" style="font-size:13px;color:var(--text-secondary);word-break:break-all;">' + escHtml(JSON.stringify(data)) + '</div>';
+    // 종합 판단
+    var overallBadge = allAvailable ? 'badge-green' : (hasConflict ? 'badge-amber' : 'badge-red');
+    var overallText = allAvailable ? '✅ 전체 가용' : (hasConflict ? '⚠️ 일부 확인 필요' : '❌ 가용 불가');
+    html += '<div class="result-row" style="margin-top:12px"><span class="result-label">종합:</span> <span class="badge ' + overallBadge + '">' + overallText + '</span></div>';
+
+    if (data.executionTime) {
+      html += '<div style="font-size:11px;color:var(--text-muted);margin-top:4px">처리 시간: ' + escHtml(data.executionTime) + '</div>';
     }
 
-    // 바로 등록 버튼 (가용 결과가 OK인 경우)
+    // 바로 등록 버튼
     if (reqId) {
-      var isAvailable = /가용|가능|OK/i.test(avail);
       html += '<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">';
-      if (isAvailable) {
+      if (allAvailable) {
         html += '<button class="btn btn-register" onclick="registerNow(\'' + escHtml(reqId) + '\')" id="registerBtn">'
           + '계약마스터+스케줄 바로 등록</button>';
       }
