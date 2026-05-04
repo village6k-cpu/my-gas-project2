@@ -664,7 +664,8 @@ function runFunction(funcName, params) {
     "warmDashboardCache",
     "getInventoryConflicts",
     "getInventoryConflictsSlackMessage",
-    "listAllTriggers"
+    "listAllTriggers",
+    "getClaudeApiKey"
   ];
 
   if (!allowedFunctions.includes(funcName)) {

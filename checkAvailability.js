@@ -4565,6 +4565,14 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
 }
 
 /**
+ * Claude API 키를 Script Properties에서 반환 (클라이언트에서 직접 호출용)
+ */
+function getClaudeApiKey() {
+  var key = PropertiesService.getScriptProperties().getProperty("ANTHROPIC_API_KEY");
+  return { key: key || "" };
+}
+
+/**
  * Claude API를 사용하여 예약 문의 텍스트/이미지를 파싱
  * @param {string} text - 파싱할 텍스트 (optional)
  * @param {string} imageBase64 - base64 이미지 (optional)
