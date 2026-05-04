@@ -1310,13 +1310,11 @@ async function doSubmit() {
       html += '<div style="font-size:11px;color:var(--text-muted);margin-top:4px">처리 시간: ' + escHtml(data.executionTime) + '</div>';
     }
 
-    // 바로 등록 버튼
+    // 바로 등록 버튼 — 항상 표시 (경고 있어도 등록 가능)
     if (reqId) {
       html += '<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">';
-      if (allAvailable) {
-        html += '<button class="btn btn-register" onclick="registerNow(\'' + escHtml(reqId) + '\')" id="registerBtn">'
-          + '계약마스터+스케줄 바로 등록</button>';
-      }
+      html += '<button class="btn btn-register" onclick="registerNow(\'' + escHtml(reqId) + '\')" id="registerBtn">'
+        + '계약마스터+스케줄 바로 등록</button>';
       html += '<a href="timeline.html?search=' + encodeURIComponent(name) + '" class="btn" style="text-decoration:none;">타임라인에서 보기</a>';
       html += '</div>';
     }
