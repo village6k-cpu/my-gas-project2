@@ -1540,60 +1540,56 @@ async function registerNow(reqId) {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></span>등록 중... (계약서 생성 포함, 최대 1분 소요)';
 
-  try {
-    var url = API_URL + '?key=' + API_KEY + '&action=scan&reqID=' + encodeURIComponent(reqId) + '&do=' + encodeURIComponent('등록');
+  var resultBody = document.getElementById('resultBody');
+  var statusEl = document.createElement('div');
+  statusEl.className = 'result-row';
+  statusEl.style.marginTop = '8px';
+  statusEl.innerHTML = '<span class="badge badge-amber">⏳ 등록 처리 중... (계약서 생성 포함, 1~3분)</span>';
+  resultBody.appendChild(statusEl);
 
-    // 타임아웃 120초 — GAS 계약서 생성이 오래 걸림
-    var controller = new AbortController();
-    var timeout = setTimeout(function() { controller.abort(); }, 120000);
+  // Fire-and-forget: API 호출 시작하고 바로 폴링
+  var url = API_URL + '?key=' + API_KEY + '&action=scan&reqID=' + encodeURIComponent(reqId) + '&do=' + encodeURIComponent('등록');
+  fetch(url).then(function(r) { return r.json(); }).then(function(data) {
+    // 응답이 오면 바로 완료 표시
+    clearInterval(pollTimer);
+    showRegisterDone(btn, statusEl, data);
+  }).catch(function() {
+    // 타임아웃이나 에러 — 폴링으로 확인
+  });
 
-    var resp = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    var data = await resp.json();
-
-    if (data.status === 'OK') {
-      btn.textContent = '✅ 등록 완료';
-      btn.style.background = 'var(--green-bg)';
-      btn.style.color = 'var(--green-text)';
-      btn.style.borderColor = 'var(--green-text)';
-
-      var msg = data.message || '계약마스터 + 스케줄상세 등록 완료';
-      var resultBody = document.getElementById('resultBody');
-      var extra = document.createElement('div');
-      extra.className = 'result-row';
-      extra.style.marginTop = '8px';
-      extra.innerHTML = '<span class="badge badge-green">✅ ' + escHtml(msg) + '</span>';
-      resultBody.appendChild(extra);
-    } else {
+  // 10초마다 확인요청 O열 폴링
+  var pollCount = 0;
+  var pollTimer = setInterval(async function() {
+    pollCount++;
+    if (pollCount > 30) { // 5분 초과
+      clearInterval(pollTimer);
+      statusEl.innerHTML = '<span class="badge badge-amber">⏳ 시간 초과 — 시트에서 직접 확인해주세요</span>';
       btn.disabled = false;
       btn.textContent = '바로 등록 (계약+스케줄)';
-      alert('등록 실패: ' + (data.message || JSON.stringify(data)));
+      return;
     }
-  } catch (err) {
-    clearTimeout(timeout);
-    btn.disabled = false;
+    try {
+      var checkUrl = API_URL + '?key=' + API_KEY + '&action=search&sheet=' + encodeURIComponent('확인요청') + '&col=1&query=' + encodeURIComponent(reqId);
+      var resp = await fetch(checkUrl);
+      var data = await resp.json();
+      if (data.results && data.results.length > 0) {
+        var oVal = data.results[0].data[14] || ''; // O열 = index 14 = 등록상태
+        if (/등록완료/.test(oVal)) {
+          clearInterval(pollTimer);
+          showRegisterDone(btn, statusEl, { status: 'OK', message: oVal });
+        }
+      }
+    } catch(e) {}
+  }, 10000);
+}
 
-    if (err.name === 'AbortError') {
-      // 타임아웃 — 서버에서는 처리 중일 수 있음
-      btn.textContent = '⏳ 시간 초과';
-      btn.style.background = 'var(--amber-bg)';
-      btn.style.color = 'var(--amber-text)';
-      btn.style.borderColor = 'var(--amber-text)';
-
-      var resultBody = document.getElementById('resultBody');
-      var extra = document.createElement('div');
-      extra.className = 'result-row';
-      extra.style.marginTop = '8px';
-      extra.innerHTML = '<span class="badge badge-amber">⏳ 응답 시간 초과 (2분)</span>'
-        + '<div style="font-size:12px;color:var(--text-secondary);margin-top:4px">'
-        + '서버에서 등록이 진행 중일 수 있습니다.<br>'
-        + '1~2분 후 <strong>계약마스터</strong> 시트에서 ' + escHtml(reqId) + ' 확인해주세요.</div>';
-      resultBody.appendChild(extra);
-    } else {
-      btn.textContent = '바로 등록 (계약+스케줄)';
-      alert('네트워크 오류: ' + (err.message || ''));
-    }
-  }
+function showRegisterDone(btn, statusEl, data) {
+  btn.textContent = '✅ 등록 완료';
+  btn.style.background = 'var(--green-bg)';
+  btn.style.color = 'var(--green-text)';
+  btn.style.borderColor = 'var(--green-text)';
+  var msg = (data && data.message) || '계약마스터 + 스케줄상세 등록 완료';
+  statusEl.innerHTML = '<span class="badge badge-green">✅ ' + escHtml(msg) + '</span>';
 }
 </script>
 </body>
