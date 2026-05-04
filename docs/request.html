@@ -1576,42 +1576,34 @@ async function registerNow(reqId) {
   if (!confirm('계약마스터 + 스케줄상세에 바로 등록합니다.\n계속하시겠습니까?')) return;
 
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></span>등록 중... (계약서 생성 포함, 최대 1분 소요)';
+  btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></span>등록 요청 중...';
 
   var resultBody = document.getElementById('resultBody');
   var statusEl = document.createElement('div');
   statusEl.className = 'result-row';
   statusEl.style.marginTop = '8px';
+  statusEl.innerHTML = '<span class="badge badge-amber">⏳ 등록 처리 중... 계약서 생성 포함 1~5분 소요. 이 페이지를 닫아도 됩니다.</span>';
+  resultBody.appendChild(statusEl);
 
-  try {
-    // registerAsync API — 즉시 응답, 백그라운드에서 등록 처리
-    var url = API_URL + '?key=' + API_KEY + '&action=registerAsync&reqID=' + encodeURIComponent(reqId);
-    var resp = await fetch(url);
-    var data = await resp.json();
+  // Fire-and-forget: scan&do=등록 호출 (응답 안 기다림)
+  var registerUrl = API_URL + '?key=' + API_KEY + '&action=scan&reqID=' + encodeURIComponent(reqId) + '&do=' + encodeURIComponent('등록');
+  fetch(registerUrl).then(function(r) { return r.json(); }).then(function(data) {
+    // 응답 왔으면 바로 완료 (폴링 종료)
+    clearInterval(pollTimer);
+    showRegisterDone(btn, statusEl, data);
+  }).catch(function() {
+    // 타임아웃 — 폴링이 이어서 확인
+  });
 
-    if (!data.success) {
-      btn.disabled = false;
-      btn.textContent = '바로 등록 (계약+스케줄)';
-      alert('등록 요청 실패: ' + (data.error || JSON.stringify(data)));
-      return;
-    }
+  btn.innerHTML = '⏳ 등록 처리 중...';
 
-    statusEl.innerHTML = '<span class="badge badge-amber">⏳ 백그라운드 등록 중... (계약서 생성 포함, 1~3분)</span>';
-    resultBody.appendChild(statusEl);
-  } catch (err) {
-    btn.disabled = false;
-    btn.textContent = '바로 등록 (계약+스케줄)';
-    alert('네트워크 오류: ' + (err.message || ''));
-    return;
-  }
-
-  // 10초마다 확인요청 O열 폴링
+  // 15초마다 확인요청 O열 폴링 (fetch 응답보다 먼저 완료 감지 가능)
   var pollCount = 0;
   var pollTimer = setInterval(async function() {
     pollCount++;
-    if (pollCount > 30) { // 5분 초과
+    if (pollCount > 24) { // 6분 초과
       clearInterval(pollTimer);
-      statusEl.innerHTML = '<span class="badge badge-amber">⏳ 시간 초과 — 시트에서 직접 확인해주세요</span>';
+      statusEl.innerHTML = '<span class="badge badge-amber">⏳ 시간 초과 — 계약마스터 시트에서 직접 확인해주세요</span>';
       btn.disabled = false;
       btn.textContent = '바로 등록 (계약+스케줄)';
       return;
@@ -1625,10 +1617,13 @@ async function registerNow(reqId) {
         if (/등록완료/.test(oVal)) {
           clearInterval(pollTimer);
           showRegisterDone(btn, statusEl, { status: 'OK', message: oVal });
+        } else {
+          // 진행 상태 표시
+          statusEl.innerHTML = '<span class="badge badge-amber">⏳ ' + escHtml(oVal || '처리 중...') + ' (' + (pollCount * 15) + '초 경과)</span>';
         }
       }
     } catch(e) {}
-  }, 10000);
+  }, 15000);
 }
 
 function showRegisterDone(btn, statusEl, data) {
