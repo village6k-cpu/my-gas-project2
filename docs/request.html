@@ -146,6 +146,13 @@ body {
 }
 .btn.primary:hover { background: #1B6FC2; }
 .btn.primary:disabled { background: var(--text-muted); border-color: var(--text-muted); }
+.btn-register {
+  background: var(--green-bg);
+  color: var(--green-text);
+  border-color: var(--green-text);
+  font-weight: 600;
+}
+.btn-register:hover { background: #C2E8C2; }
 .btn-full { width: 100%; }
 .btn-danger { color: var(--red); }
 .btn-danger:hover { border-color: var(--red); color: var(--red); }
@@ -1210,9 +1217,16 @@ async function doSubmit() {
       html += '<div class="result-row" style="font-size:13px;color:var(--text-secondary);word-break:break-all;">' + escHtml(JSON.stringify(data)) + '</div>';
     }
 
-    // Timeline link
+    // 바로 등록 버튼 (가용 결과가 OK인 경우)
     if (reqId) {
-      html += '<div style="margin-top:12px;"><a href="timeline.html?search=' + encodeURIComponent(name) + '" class="btn" style="text-decoration:none;">타임라인에서 보기</a></div>';
+      var isAvailable = /가용|가능|OK/i.test(avail);
+      html += '<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">';
+      if (isAvailable) {
+        html += '<button class="btn btn-register" onclick="registerNow(\'' + escHtml(reqId) + '\')" id="registerBtn">'
+          + '계약마스터+스케줄 바로 등록</button>';
+      }
+      html += '<a href="timeline.html?search=' + encodeURIComponent(name) + '" class="btn" style="text-decoration:none;">타임라인에서 보기</a>';
+      html += '</div>';
     }
 
     resultBody.innerHTML = html;
@@ -1228,6 +1242,49 @@ async function doSubmit() {
   } finally {
     submitBtn.disabled = false;
     submitBtn.innerHTML = '확인요청 등록';
+  }
+}
+
+/* ======================================================
+   바로 등록 — 계약마스터 + 스케줄상세 + 계약서 생성
+   ====================================================== */
+async function registerNow(reqId) {
+  var btn = document.getElementById('registerBtn');
+  if (!btn) return;
+
+  if (!confirm('계약마스터 + 스케줄상세에 바로 등록합니다.\n계속하시겠습니까?')) return;
+
+  btn.disabled = true;
+  btn.textContent = '등록 중...';
+
+  try {
+    var url = API_URL + '?key=' + API_KEY + '&action=scan&reqID=' + encodeURIComponent(reqId) + '&do=' + encodeURIComponent('등록');
+    var resp = await fetch(url);
+    var data = await resp.json();
+
+    if (data.status === 'OK') {
+      btn.textContent = '등록 완료';
+      btn.style.background = 'var(--green-bg)';
+      btn.style.color = 'var(--green-text)';
+      btn.style.borderColor = 'var(--green-text)';
+
+      // 결과 메시지 추가
+      var msg = data.message || '계약마스터 + 스케줄상세 등록 완료';
+      var resultBody = document.getElementById('resultBody');
+      var extra = document.createElement('div');
+      extra.className = 'result-row';
+      extra.style.marginTop = '8px';
+      extra.innerHTML = '<span class="badge badge-green">✅ ' + escHtml(msg) + '</span>';
+      resultBody.appendChild(extra);
+    } else {
+      btn.disabled = false;
+      btn.textContent = '계약마스터+스케줄 바로 등록';
+      alert('등록 실패: ' + (data.message || JSON.stringify(data)));
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = '계약마스터+스케줄 바로 등록';
+    alert('네트워크 오류: ' + (err.message || ''));
   }
 }
 </script>
