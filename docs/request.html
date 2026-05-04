@@ -809,7 +809,9 @@ function parseQty(segment) {
    Suffix Extractor
    ====================================================== */
 function extractSuffix(segment) {
-  var m = segment.match(/(풀세트|바디세트|바디|세트)/i);
+  // 배터리, 충전기, 스탠드 등 악세서리에는 suffix 안 붙임
+  if (/배터리|충전기|스탠드|클램프|박스|포드|웨건/i.test(segment)) return '';
+  var m = segment.match(/(풀세트|바디세트|바디(?![\uAC00-\uD7AF]))/i);
   return m ? ' ' + m[1] : '';
 }
 
