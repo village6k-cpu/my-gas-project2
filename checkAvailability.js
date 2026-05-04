@@ -4563,3 +4563,94 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
 
   return { success: true, message: rows.length + '행 상태 변경 완료', newStatus: newStatus };
 }
+
+/**
+ * Claude API를 사용하여 예약 문의 텍스트/이미지를 파싱
+ * @param {string} text - 파싱할 텍스트 (optional)
+ * @param {string} imageBase64 - base64 이미지 (optional)
+ * @param {string} imageMediaType - image/png, image/jpeg 등 (optional)
+ * @returns {object} 파싱된 예약 정보
+ */
+function parseWithClaude(text, imageBase64, imageMediaType) {
+  // API 키는 GAS Script Properties에 저장 (코드에 하드코딩 금지)
+  // 설정: GAS 편집기 → 프로젝트 설정 → 스크립트 속성 → ANTHROPIC_API_KEY
+  var apiKey = PropertiesService.getScriptProperties().getProperty("ANTHROPIC_API_KEY");
+  if (!apiKey) return { error: "ANTHROPIC_API_KEY가 스크립트 속성에 설정되지 않았습니다" };
+
+  var systemPrompt = "너는 카메라 렌탈샵 '빌리지'의 예약 문의 파서야. 카카오톡 메시지나 채팅 캡쳐 이미지를 받아서 예약 정보를 JSON으로 추출해.\n\n반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없이):\n{\n  \"예약자명\": \"이름 또는 빈 문자열\",\n  \"연락처\": \"010-XXXX-XXXX 형식 또는 빈 문자열\",\n  \"반출일\": \"YYYY-MM-DD 또는 빈 문자열\",\n  \"반출시간\": \"HH:MM 또는 빈 문자열 (기본 10:00)\",\n  \"반납일\": \"YYYY-MM-DD 또는 빈 문자열\",\n  \"반납시간\": \"HH:MM 또는 빈 문자열 (기본 18:00)\",\n  \"할인유형\": \"일반|학생|개인사업자/프리랜서\",\n  \"장비\": [{\"이름\": \"정확한 장비명\", \"수량\": 1}],\n  \"비고\": \"추가 메모\"\n}\n\n장비명 변환 규칙:\n- FX3, fx3 → 소니 FX3 (풀세트/바디세트/바디 구분은 고객 표현 그대로)\n- A7S3, a7s III → 소니 A7S3\n- 코모도, komodo → 레드 코모도\n- 부라노, burano → 부라노\n- A7M4 → 소니 A7M4\n- 70-200 GM2 → 소니 GM 70-200mm II\n- 24-70 GM2 → 소니 GM 24-70mm II\n- 600X → 어퓨쳐 600X\n- V마운트 배터리 → V마운트 배터리\n- C대, 시대 → C스탠드\n- 장비명은 최대한 정확하게, 모호하면 원문 그대로\n\n할인유형:\n- 학생/대학/졸작/과제 → \"학생\"\n- 프리랜서/사업자/크리에이터 → \"개인사업자/프리랜서\"\n- 그 외 → \"일반\"\n\n날짜:\n- 상대 날짜(내일, 모레 등)는 오늘 기준으로 계산. 오늘: " + Utilities.formatDate(new Date(), "Asia/Seoul", "yyyy-MM-dd") + "\n- 시간 미언급 시: 반출 10:00, 반납 18:00\n\n이미지인 경우 채팅 내용을 읽어서 동일하게 파싱해.";
+
+  var messages = [];
+  var content = [];
+
+  if (imageBase64 && imageMediaType) {
+    content.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: imageMediaType,
+        data: imageBase64
+      }
+    });
+  }
+
+  if (text) {
+    content.push({
+      type: "text",
+      text: text
+    });
+  } else if (!imageBase64) {
+    return { error: "텍스트 또는 이미지가 필요합니다" };
+  }
+
+  if (content.length === 0) {
+    return { error: "파싱할 내용이 없습니다" };
+  }
+
+  messages.push({ role: "user", content: content });
+
+  var payload = {
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1024,
+    system: systemPrompt,
+    messages: messages
+  };
+
+  try {
+    var response = UrlFetchApp.fetch("https://api.anthropic.com/v1/messages", {
+      method: "post",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    var result = JSON.parse(response.getContentText());
+
+    if (result.error) {
+      return { error: "Claude API 오류: " + (result.error.message || JSON.stringify(result.error)) };
+    }
+
+    var textContent = "";
+    if (result.content && result.content.length > 0) {
+      textContent = result.content[0].text || "";
+    }
+
+    // JSON 파싱 시도
+    try {
+      // JSON 블록 추출 (마크다운 코드블록 안에 있을 수 있음)
+      var jsonMatch = textContent.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        var parsed = JSON.parse(jsonMatch[0]);
+        return { success: true, parsed: parsed };
+      }
+      return { error: "JSON 파싱 실패", raw: textContent };
+    } catch (jsonErr) {
+      return { error: "JSON 파싱 실패: " + jsonErr.message, raw: textContent };
+    }
+  } catch (fetchErr) {
+    return { error: "API 호출 실패: " + fetchErr.message };
+  }
+}

@@ -169,6 +169,13 @@ function handleRequest(e) {
         return jsonResponse(updateScheduleStatus(row, newStatus, rowIndices));
       }
 
+      case "aiParse": {
+        var text = params.text || postBody.text || "";
+        var imageBase64 = postBody.image || "";
+        var imageMediaType = postBody.imageType || "image/png";
+        return jsonResponse(parseWithClaude(text, imageBase64, imageMediaType));
+      }
+
       case "registerAsync": {
         var reqID = params.reqID || postBody.reqID;
         if (!reqID) return jsonResponse({ success: false, error: "reqID 필수" });

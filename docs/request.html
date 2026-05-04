@@ -440,6 +440,50 @@ body {
 .badge-red { background: #FFDEDE; color: #C4454D; }
 .badge-blue { background: var(--blue-bg); color: var(--blue-text); }
 
+/* ── Image Preview ── */
+.image-preview {
+  margin-top: 8px;
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg);
+}
+.image-preview img {
+  max-width: 100%;
+  max-height: 300px;
+  display: block;
+  margin: 0 auto;
+}
+.image-remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 10px;
+  border: none;
+  border-radius: var(--radius);
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.drop-hint {
+  display: none;
+  text-align: center;
+  padding: 20px;
+  margin-top: 8px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  background: var(--today-bg);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 500;
+}
+.paste-area.dragover {
+  border-color: var(--accent);
+  background: var(--today-bg);
+}
+
 /* ── Spinner ── */
 .spinner {
   display: inline-block;
@@ -490,17 +534,14 @@ body {
   <div class="input-col">
     <div class="card">
       <div class="card-title">카톡 문의 붙여넣기</div>
-      <textarea id="pasteInput" class="paste-area" placeholder="고객 카카오톡 문의 내용을 붙여넣으세요.
-
-예시:
-배성우
-배성우 / 010-3150-9020 / 학생
-Evoke 1200B 1개
-Aputure 600X 1개
-F10 프레넬 1개
-5/15~5/17"></textarea>
+      <textarea id="pasteInput" class="paste-area" placeholder="텍스트를 붙여넣거나, 캡처 이미지를 Ctrl+V 또는 드래그하세요."></textarea>
+      <div id="imagePreview" class="image-preview" style="display:none">
+        <img id="previewImg" src="">
+        <button class="image-remove" onclick="removeImage()">&#10005; 이미지 제거</button>
+      </div>
+      <div class="drop-hint" id="dropHint">이미지를 여기에 드롭</div>
       <div style="margin-top: 10px; text-align: center;">
-        <button id="parseBtn" class="btn primary" onclick="doParse()">파싱하기</button>
+        <button id="parseBtn" class="btn primary" onclick="doParse()">AI 파싱</button>
       </div>
     </div>
 
@@ -662,6 +703,7 @@ var logLines = [];
 var acResults = [];
 var acIndex = -1;
 var searchTimer = null;
+var attachedImage = null;  // { base64: string, mediaType: string }
 var allSetNames = [];   // 세트마스터 전체 목록 (페이지 로드 시 캐시)
 
 // 페이지 로드 시 세트마스터 전체 목록 미리 로드
@@ -678,6 +720,62 @@ var allSetNames = [];   // 세트마스터 전체 목록 (페이지 로드 시 �
     })
     .catch(function() {});
 })();
+
+/* ======================================================
+   Image Paste / Drag & Drop
+   ====================================================== */
+// Image paste (Ctrl+V)
+document.getElementById('pasteInput').addEventListener('paste', function(e) {
+  var items = (e.clipboardData || {}).items || [];
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].type.indexOf('image') >= 0) {
+      e.preventDefault();
+      var file = items[i].getAsFile();
+      handleImageFile(file);
+      return;
+    }
+  }
+});
+
+// Image drag and drop
+var pasteArea = document.getElementById('pasteInput');
+pasteArea.addEventListener('dragover', function(e) {
+  e.preventDefault();
+  this.classList.add('dragover');
+});
+pasteArea.addEventListener('dragleave', function() {
+  this.classList.remove('dragover');
+});
+pasteArea.addEventListener('drop', function(e) {
+  e.preventDefault();
+  this.classList.remove('dragover');
+  var files = e.dataTransfer.files;
+  for (var i = 0; i < files.length; i++) {
+    if (files[i].type.indexOf('image') >= 0) {
+      handleImageFile(files[i]);
+      return;
+    }
+  }
+});
+
+function handleImageFile(file) {
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var dataUrl = e.target.result;
+    var base64 = dataUrl.split(',')[1];
+    var mediaType = file.type || 'image/png';
+    attachedImage = { base64: base64, mediaType: mediaType };
+    document.getElementById('previewImg').src = dataUrl;
+    document.getElementById('imagePreview').style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+}
+
+function removeImage() {
+  attachedImage = null;
+  document.getElementById('imagePreview').style.display = 'none';
+  document.getElementById('previewImg').src = '';
+}
 
 /* ======================================================
    Logging
@@ -1061,115 +1159,204 @@ function extractMatchingNames(data, kw, kwParts) {
 }
 
 /* ======================================================
-   Main Parse
+   Regex Parse (fallback)
+   ====================================================== */
+async function doRegexParse(text) {
+  // Phone
+  var phone = parsePhone(text);
+  if (phone) {
+    logOk('연락처 감지: ' + phone);
+  } else {
+    logWarn('연락처를 찾을 수 없습니다. 직접 입력해 주세요.');
+  }
+
+  // Name
+  var name = parseName(text);
+  if (name) {
+    logOk('예약자명 감지: ' + name);
+  } else {
+    logWarn('예약자명을 찾을 수 없습니다. 직접 입력해 주세요.');
+  }
+
+  // Dates
+  var dates = parseDate(text);
+  if (dates.length >= 2) {
+    logOk('날짜 감지: 반출 ' + dates[0] + ', 반납 ' + dates[1]);
+  } else if (dates.length === 1) {
+    logOk('날짜 감지: ' + dates[0] + ' (반납일을 직접 입력해 주세요)');
+  } else {
+    logWarn('날짜를 찾을 수 없습니다. 직접 입력해 주세요.');
+  }
+
+  // Times
+  var times = parseTimes(text);
+  if (times.length >= 2) {
+    logOk('시간 감지: 반출 ' + times[0] + ', 반납 ' + times[1]);
+  } else if (times.length === 1) {
+    logOk('시간 감지: ' + times[0]);
+  } else {
+    logOk('시간 미감지 - 기본값 적용 (반출 10:00, 반납 18:00)');
+  }
+
+  // Discount
+  var discount = parseDiscount(text);
+  if (discount !== '일반') {
+    logOk('할인유형 감지: ' + discount);
+  }
+
+  // Equipment
+  var equipItems = parseEquipment(text);
+  if (equipItems.length > 0) {
+    logOk(equipItems.length + '개 장비 감지. 세트마스터 검색 중...');
+    flushLog();
+
+    // Search API for each item
+    for (var i = 0; i < equipItems.length; i++) {
+      var item = equipItems[i];
+      try {
+        var results = await searchEquipAPI(item.search);
+        if (results.length > 0) {
+          var officialName = String(results[0]);
+          item.official = officialName;
+          logOk(item.raw + ' -> ' + officialName + ' (세트마스터 매칭)');
+        } else {
+          item.warn = true;
+          item.official = item.search;
+          logWarn(item.raw + ' -> "' + item.search + '" 세트마스터에서 찾을 수 없음');
+        }
+      } catch (e) {
+        item.warn = true;
+        item.official = item.search;
+        logErr(item.raw + ' -> API 검색 실패');
+      }
+    }
+    parsedEquip = equipItems;
+  } else {
+    logWarn('장비를 감지하지 못했습니다. 직접 추가해 주세요.');
+  }
+
+  // Fill form
+  document.getElementById('fName').value = name;
+  document.getElementById('fPhone').value = phone;
+  document.getElementById('fDiscount').value = discount;
+  document.getElementById('fOutDate').value = dates[0] || '';
+  document.getElementById('fInDate').value = dates[1] || dates[0] || '';
+  document.getElementById('fOutTime').value = times[0] || '10:00';
+  document.getElementById('fInTime').value = times[1] || '18:00';
+}
+
+/* ======================================================
+   Main Parse (AI first, regex fallback)
    ====================================================== */
 async function doParse() {
   var text = document.getElementById('pasteInput').value.trim();
-  if (!text) { alert('텍스트를 붙여넣어 주세요.'); return; }
+  if (!text && !attachedImage) { alert('텍스트를 입력하거나 이미지를 첨부해주세요.'); return; }
 
   logLines = [];
   parsedEquip = [];
 
   var parseBtn = document.getElementById('parseBtn');
   parseBtn.disabled = true;
-  parseBtn.innerHTML = '<span class="spinner"></span> 파싱 중...';
+  parseBtn.innerHTML = '<span class="spinner"></span> AI 파싱 중...';
 
   try {
-    // Phone
-    var phone = parsePhone(text);
-    if (phone) {
-      logOk('연락처 감지: ' + phone);
-    } else {
-      logWarn('연락처를 찾을 수 없습니다. 직접 입력해 주세요.');
+    // AI 파싱 시도
+    var body = { key: API_KEY, action: 'aiParse' };
+    if (text) body.text = text;
+    if (attachedImage) {
+      body.image = attachedImage.base64;
+      body.imageType = attachedImage.mediaType;
     }
 
-    // Name
-    var name = parseName(text);
-    if (name) {
-      logOk('예약자명 감지: ' + name);
-    } else {
-      logWarn('예약자명을 찾을 수 없습니다. 직접 입력해 주세요.');
-    }
+    var resp = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    var data = await resp.json();
 
-    // Dates
-    var dates = parseDate(text);
-    if (dates.length >= 2) {
-      logOk('날짜 감지: 반출 ' + dates[0] + ', 반납 ' + dates[1]);
-    } else if (dates.length === 1) {
-      logOk('날짜 감지: ' + dates[0] + ' (반납일을 직접 입력해 주세요)');
-    } else {
-      logWarn('날짜를 찾을 수 없습니다. 직접 입력해 주세요.');
-    }
+    if (data.success && data.parsed) {
+      var p = data.parsed;
+      logOk('AI 파싱 성공');
 
-    // Times
-    var times = parseTimes(text);
-    if (times.length >= 2) {
-      logOk('시간 감지: 반출 ' + times[0] + ', 반납 ' + times[1]);
-    } else if (times.length === 1) {
-      logOk('시간 감지: ' + times[0]);
-    } else {
-      logOk('시간 미감지 - 기본값 적용 (반출 10:00, 반납 18:00)');
-    }
+      // Fill form
+      document.getElementById('fName').value = p['예약자명'] || '';
+      document.getElementById('fPhone').value = p['연락처'] || '';
+      document.getElementById('fDiscount').value = p['할인유형'] || '일반';
+      document.getElementById('fOutDate').value = p['반출일'] || '';
+      document.getElementById('fInDate').value = p['반납일'] || '';
+      document.getElementById('fOutTime').value = p['반출시간'] || '10:00';
+      document.getElementById('fInTime').value = p['반납시간'] || '18:00';
+      document.getElementById('fNote').value = p['비고'] || '';
 
-    // Discount
-    var discount = parseDiscount(text);
-    if (discount !== '일반') {
-      logOk('할인유형 감지: ' + discount);
-    }
+      if (p['예약자명']) logOk('예약자명: ' + p['예약자명']);
+      if (p['연락처']) logOk('연락처: ' + p['연락처']);
+      if (p['반출일']) logOk('반출일: ' + p['반출일'] + ' ' + (p['반출시간'] || '10:00'));
+      if (p['반납일']) logOk('반납일: ' + p['반납일'] + ' ' + (p['반납시간'] || '18:00'));
+      if (p['할인유형'] && p['할인유형'] !== '일반') logOk('할인유형: ' + p['할인유형']);
 
-    // Equipment
-    var equipItems = parseEquipment(text);
-    if (equipItems.length > 0) {
-      logOk(equipItems.length + '개 장비 감지. 세트마스터 검색 중...');
-      flushLog();
+      // Equipment -- search each in 세트마스터 for exact name
+      var equips = p['장비'] || [];
+      if (equips.length > 0) {
+        logOk(equips.length + '개 장비 감지. 세트마스터 확인 중...');
+        flushLog();
 
-      // Search API for each item
-      for (var i = 0; i < equipItems.length; i++) {
-        var item = equipItems[i];
-        try {
-          var results = await searchEquipAPI(item.search);
-          if (results.length > 0) {
-            var officialName = String(results[0]);
-            item.official = officialName;
-            logOk(item.raw + ' -> ' + officialName + ' (세트마스터 매칭)');
-          } else {
-            item.warn = true;
-            item.official = item.search;
-            logWarn(item.raw + ' -> "' + item.search + '" 세트마스터에서 찾을 수 없음');
+        for (var i = 0; i < equips.length; i++) {
+          var eq = equips[i];
+          var searchName = eq['이름'] || '';
+          var qty = eq['수량'] || 1;
+
+          try {
+            var searchResp = await fetch(API_URL + '?key=' + API_KEY + '&action=search&sheet=' + encodeURIComponent('세트마스터') + '&col=1&query=' + encodeURIComponent(searchName));
+            var searchData = await searchResp.json();
+            var names = extractMatchingNames(searchData, searchName.toLowerCase(), searchName.toLowerCase().split(/\s+/));
+
+            if (names.length > 0) {
+              parsedEquip.push({ raw: searchName, search: names[0], qty: qty, official: names[0], warn: false });
+              logOk(searchName + ' -> ' + names[0] + ' (세트마스터 매칭)');
+            } else {
+              parsedEquip.push({ raw: searchName, search: searchName, qty: qty, official: searchName, warn: true });
+              logWarn(searchName + ' -> 세트마스터에서 찾을 수 없음 (직접 확인 필요)');
+            }
+          } catch (e) {
+            parsedEquip.push({ raw: searchName, search: searchName, qty: qty, official: searchName, warn: true });
+            logErr(searchName + ' -> 검색 실패');
           }
-        } catch (e) {
-          item.warn = true;
-          item.official = item.search;
-          logErr(item.raw + ' -> API 검색 실패');
         }
+      } else {
+        logWarn('AI가 장비를 감지하지 못했습니다. 직접 추가해주세요.');
       }
-      parsedEquip = equipItems;
-    } else {
-      logWarn('장비를 감지하지 못했습니다. 직접 추가해 주세요.');
-    }
 
-    // Fill form
-    document.getElementById('fName').value = name;
-    document.getElementById('fPhone').value = phone;
-    document.getElementById('fDiscount').value = discount;
-    document.getElementById('fOutDate').value = dates[0] || '';
-    document.getElementById('fInDate').value = dates[1] || dates[0] || '';
-    document.getElementById('fOutTime').value = times[0] || '10:00';
-    document.getElementById('fInTime').value = times[1] || '18:00';
+      if (p['비고']) logOk('비고: ' + p['비고']);
+
+    } else {
+      // AI 실패 -> 기존 정규식 파싱 폴백
+      logWarn('AI 파싱 실패: ' + (data.error || '알 수 없는 오류'));
+      logWarn('정규식 파싱으로 대체합니다...');
+      await doRegexParse(text);
+    }
 
     renderEquipList();
     flushLog();
-
     document.getElementById('formCard').classList.remove('hidden');
     document.getElementById('parseLogWrap').style.display = 'block';
     document.getElementById('resultCard').classList.remove('show');
-
-    // Scroll to form
     document.getElementById('formCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
+  } catch (err) {
+    logErr('파싱 오류: ' + (err.message || ''));
+    // 폴백
+    if (text) {
+      logWarn('정규식 파싱으로 대체합니다...');
+      await doRegexParse(text);
+      renderEquipList();
+    }
+    flushLog();
+    document.getElementById('formCard').classList.remove('hidden');
+    document.getElementById('parseLogWrap').style.display = 'block';
   } finally {
     parseBtn.disabled = false;
-    parseBtn.innerHTML = '파싱하기';
+    parseBtn.innerHTML = 'AI 파싱';
   }
 }
 
