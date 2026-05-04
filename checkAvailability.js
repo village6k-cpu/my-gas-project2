@@ -2385,6 +2385,69 @@ function getSetComponents(name, setSheet) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
+ * 비동기 등록 — 1초 후 시간 기반 트리거로 registerByReqID 실행.
+ * API에서 즉시 응답을 반환하고, 실제 등록은 백그라운드에서 처리.
+ * @param {string} reqID - 요청 ID (RQ-YYMMDD-NNN)
+ */
+function scheduleRegister(reqID) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("확인요청");
+  if (!sheet) return { success: false, error: "확인요청 시트 없음" };
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { success: false, error: "데이터 없음" };
+
+  var allData = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  var targetRow = -1;
+  for (var i = 0; i < allData.length; i++) {
+    if (allData[i][0] === reqID) { targetRow = i + 2; break; }
+  }
+  if (targetRow < 0) return { success: false, error: "요청ID를 찾을 수 없음: " + reqID };
+
+  // O열에 처리중 표시
+  sheet.getRange(targetRow, 15).setValue("⏳ 등록 처리중...");
+
+  // PropertiesService에 reqID + targetRow 저장 (트리거에서 읽기 위해)
+  PropertiesService.getScriptProperties().setProperty("_pendingRegister", JSON.stringify({ reqID: reqID, row: targetRow }));
+
+  // 1초 후 실행되는 트리거 생성
+  ScriptApp.newTrigger("_runPendingRegister")
+    .timeBased()
+    .after(1000)
+    .create();
+
+  return { success: true, message: "등록이 백그라운드에서 시작됩니다. 1~3분 후 완료됩니다.", reqID: reqID };
+}
+
+/**
+ * 시간 기반 트리거에서 호출 — pendingRegister 처리
+ */
+function _runPendingRegister() {
+  // 트리거 자기 자신 삭제
+  var triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(function(t) {
+    if (t.getHandlerFunction() === "_runPendingRegister") {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  var prop = PropertiesService.getScriptProperties().getProperty("_pendingRegister");
+  if (!prop) return;
+  PropertiesService.getScriptProperties().deleteProperty("_pendingRegister");
+
+  var info = JSON.parse(prop);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("확인요청");
+  if (!sheet) return;
+
+  try {
+    registerByReqID(sheet, info.row);
+  } catch (e) {
+    sheet.getRange(info.row, 15).setValue("❌ 등록 실패: " + e.message);
+  }
+}
+
+/**
  * 특정 행의 요청ID를 기준으로 같은 ID의 모든 행을 일괄 등록
  */
 function registerByReqID(sheet, triggerRow) {

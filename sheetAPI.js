@@ -169,6 +169,12 @@ function handleRequest(e) {
         return jsonResponse(updateScheduleStatus(row, newStatus, rowIndices));
       }
 
+      case "registerAsync": {
+        var reqID = params.reqID || postBody.reqID;
+        if (!reqID) return jsonResponse({ success: false, error: "reqID 필수" });
+        return jsonResponse(scheduleRegister(reqID));
+      }
+
       case "dashboard":
         // nocache=1 이면 캐시 우회 (새로고침 버튼용)
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');

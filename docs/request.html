@@ -1555,18 +1555,28 @@ async function registerNow(reqId) {
   var statusEl = document.createElement('div');
   statusEl.className = 'result-row';
   statusEl.style.marginTop = '8px';
-  statusEl.innerHTML = '<span class="badge badge-amber">⏳ 등록 처리 중... (계약서 생성 포함, 1~3분)</span>';
-  resultBody.appendChild(statusEl);
 
-  // Fire-and-forget: API 호출 시작하고 바로 폴링
-  var url = API_URL + '?key=' + API_KEY + '&action=scan&reqID=' + encodeURIComponent(reqId) + '&do=' + encodeURIComponent('등록');
-  fetch(url).then(function(r) { return r.json(); }).then(function(data) {
-    // 응답이 오면 바로 완료 표시
-    clearInterval(pollTimer);
-    showRegisterDone(btn, statusEl, data);
-  }).catch(function() {
-    // 타임아웃이나 에러 — 폴링으로 확인
-  });
+  try {
+    // registerAsync API — 즉시 응답, 백그라운드에서 등록 처리
+    var url = API_URL + '?key=' + API_KEY + '&action=registerAsync&reqID=' + encodeURIComponent(reqId);
+    var resp = await fetch(url);
+    var data = await resp.json();
+
+    if (!data.success) {
+      btn.disabled = false;
+      btn.textContent = '바로 등록 (계약+스케줄)';
+      alert('등록 요청 실패: ' + (data.error || JSON.stringify(data)));
+      return;
+    }
+
+    statusEl.innerHTML = '<span class="badge badge-amber">⏳ 백그라운드 등록 중... (계약서 생성 포함, 1~3분)</span>';
+    resultBody.appendChild(statusEl);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = '바로 등록 (계약+스케줄)';
+    alert('네트워크 오류: ' + (err.message || ''));
+    return;
+  }
 
   // 10초마다 확인요청 O열 폴링
   var pollCount = 0;
