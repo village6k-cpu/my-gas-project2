@@ -737,8 +737,15 @@ function parseDiscount(text) {
    Name Parser
    ====================================================== */
 function parseName(text) {
-  // 예약자: XXX, 이름: XXX
-  var m = text.match(/(?:예약자|이름|성함|예약\s*자\s*명?)\s*[:：]?\s*([가-힣]{2,4})/);
+  // 1) "예약자: 홍길동", "이름: 홍길동" 등 키워드 패턴
+  var m = text.match(/(?:예약자|이름|성함|예약\s*자\s*명?|고객명?)\s*[:：\s]\s*([가-힣]{2,4})/);
+  if (m) return m[1];
+  // 2) "홍길동입니다", "홍길동이라고 합니다", "홍길동이에요"
+  m = text.match(/([가-힣]{2,4})(?:입니다|이라고|이에요|이구요|이고요|이요|이며|인데요)/);
+  if (m) return m[1];
+  // 3) 줄 시작에 나오는 2~3글자 한글 이름 (첫 줄에서)
+  var firstLine = text.split(/[\n\r]/)[0] || '';
+  m = firstLine.match(/^([가-힣]{2,3})\s/);
   if (m) return m[1];
   return '';
 }
@@ -767,62 +774,35 @@ function extractSuffix(segment) {
    ====================================================== */
 function parseEquipment(text) {
   var items = [];
-  // Split by common delimiters
-  var segments = text.split(/[,\n\r]+|(?:\s+및\s+)/);
+  var found = {}; // 중복 방지: search키 → true
 
-  segments.forEach(function(seg) {
-    seg = seg.trim();
-    if (!seg) return;
+  // 전체 텍스트에서 모든 EQUIP_ALIASES 패턴을 스캔
+  for (var i = 0; i < EQUIP_ALIASES.length; i++) {
+    var alias = EQUIP_ALIASES[i];
+    for (var j = 0; j < alias.patterns.length; j++) {
+      var m = text.match(alias.patterns[j]);
+      if (m) {
+        // 매치 주변 텍스트에서 suffix와 수량 추출 (매치 위치 +-30자)
+        var start = Math.max(0, m.index - 10);
+        var end = Math.min(text.length, m.index + m[0].length + 30);
+        var context = text.slice(start, end);
+        var suffix = extractSuffix(context);
+        var qty = parseQty(context);
+        var searchKey = alias.search + suffix;
 
-    for (var i = 0; i < EQUIP_ALIASES.length; i++) {
-      var alias = EQUIP_ALIASES[i];
-      for (var j = 0; j < alias.patterns.length; j++) {
-        if (alias.patterns[j].test(seg)) {
-          var suffix = extractSuffix(seg);
-          var qty = parseQty(seg);
+        if (!found[searchKey]) {
+          found[searchKey] = true;
           items.push({
-            raw: seg.trim(),
-            search: alias.search + suffix,
+            raw: m[0].trim(),
+            search: searchKey,
             qty: qty,
             official: null,
             warn: false
           });
-          return; // matched, move to next segment
         }
+        break; // 같은 alias의 다른 패턴은 스킵
       }
     }
-
-    // Also check the entire text for matches not split by segments
-  });
-
-  // If segments didn't find much, try matching whole text line by line
-  if (items.length === 0) {
-    var lines = text.split(/[\n\r]+/);
-    lines.forEach(function(line) {
-      line = line.trim();
-      if (!line) return;
-
-      for (var i = 0; i < EQUIP_ALIASES.length; i++) {
-        var alias = EQUIP_ALIASES[i];
-        for (var j = 0; j < alias.patterns.length; j++) {
-          if (alias.patterns[j].test(line)) {
-            // Check not already found
-            var alreadyFound = items.some(function(it) { return it.search.startsWith(alias.search); });
-            if (!alreadyFound) {
-              var suffix = extractSuffix(line);
-              var qty = parseQty(line);
-              items.push({
-                raw: line.trim(),
-                search: alias.search + suffix,
-                qty: qty,
-                official: null,
-                warn: false
-              });
-            }
-          }
-        }
-      }
-    });
   }
 
   return items;
@@ -837,8 +817,19 @@ function searchEquipAPI(keyword) {
     fetch(url)
       .then(function(r) { return r.json(); })
       .then(function(data) {
-        if (data && data.results) {
-          resolve(data.results);
+        if (data && data.results && data.results.length > 0) {
+          // results: [{ row: N, data: ["세트명", "구성장비명", ...] }, ...]
+          // 세트명(A열, data[0])만 추출 + 중복제거
+          var unique = {};
+          var names = [];
+          data.results.forEach(function(r) {
+            var name = r.data ? r.data[0] : (Array.isArray(r) ? r[0] : r);
+            if (name && !unique[name]) {
+              unique[name] = true;
+              names.push(name);
+            }
+          });
+          resolve(names);
         } else if (data && Array.isArray(data)) {
           resolve(data);
         } else {
@@ -920,8 +911,7 @@ async function doParse() {
         try {
           var results = await searchEquipAPI(item.search);
           if (results.length > 0) {
-            // Use first result's first column as official name
-            var officialName = Array.isArray(results[0]) ? results[0][0] : results[0];
+            var officialName = String(results[0]);
             item.official = officialName;
             logOk(item.raw + ' -> ' + officialName + ' (세트마스터 매칭)');
           } else {
