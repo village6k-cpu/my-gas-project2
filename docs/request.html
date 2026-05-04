@@ -560,6 +560,22 @@ var logLines = [];
 var acResults = [];
 var acIndex = -1;
 var searchTimer = null;
+var allSetNames = [];   // 세트마스터 전체 목록 (페이지 로드 시 캐시)
+
+// 페이지 로드 시 세트마스터 전체 목록 미리 로드
+(function() {
+  fetch(API_URL + '?key=' + API_KEY + '&action=read&sheet=' + encodeURIComponent('세트마스터') + '&range=A:A')
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      var unique = {};
+      (res.data || res.values || []).forEach(function(row) {
+        var name = String(row[0] || '').trim();
+        if (name && name !== '세트명') unique[name] = true;
+      });
+      allSetNames = Object.keys(unique).sort();
+    })
+    .catch(function() {});
+})();
 
 /* ======================================================
    Logging
@@ -1062,21 +1078,17 @@ function removeEquip(idx) {
    Add Equipment (Autocomplete)
    ====================================================== */
 function onEquipSearch(val) {
-  clearTimeout(searchTimer);
   acIndex = -1;
-  if (val.trim().length < 1) {
+  var q = val.trim().toLowerCase();
+  if (q.length < 1) {
     hideAcDropdown();
     return;
   }
-  searchTimer = setTimeout(function() {
-    searchEquipAPI(val.trim()).then(function(results) {
-      acResults = results.map(function(r) { return Array.isArray(r) ? r[0] : r; });
-      renderAcDropdown();
-    }).catch(function() {
-      acResults = [];
-      hideAcDropdown();
-    });
-  }, 300);
+  // 로컬 필터링 — 즉시 표시
+  acResults = allSetNames.filter(function(name) {
+    return name.toLowerCase().indexOf(q) >= 0;
+  }).slice(0, 20); // 최대 20개
+  renderAcDropdown();
 }
 
 function renderAcDropdown() {
