@@ -1265,7 +1265,8 @@ async function doParse() {
     if (!window._claudeApiKey) {
       var keyResp = await fetch(API_URL + '?key=' + API_KEY + '&action=run&func=getClaudeApiKey');
       var keyData = await keyResp.json();
-      window._claudeApiKey = keyData.key || '';
+      var r = keyData.result || keyData;
+      window._claudeApiKey = (r && r.key) || keyData.key || '';
     }
     if (!window._claudeApiKey) throw new Error('Claude API 키를 가져올 수 없습니다');
 
