@@ -497,6 +497,11 @@ F10 프레넬 1개
         </div>
       </div>
 
+      <div style="margin-top: 16px;">
+        <div class="form-label" style="margin-bottom: 6px;">비고 (무료 제공 품목, 특이사항 등)</div>
+        <textarea id="fNote" class="form-input" rows="2" placeholder="예: 릴선 1개, C대 1개 무료 제공 / 새벽 픽업 요청" style="resize:vertical;"></textarea>
+      </div>
+
       <div style="margin-top: 16px; text-align: center;">
         <button id="submitBtn" class="btn primary btn-full" onclick="doSubmit()">확인요청 등록</button>
       </div>
@@ -1272,6 +1277,8 @@ async function doSubmit() {
   submitBtn.disabled = true;
   submitBtn.innerHTML = '<span class="spinner"></span> 등록 중...';
 
+  var note = document.getElementById('fNote').value.trim();
+
   var args = {
     "반출일": outDate,
     "반출시간": outTime || "10:00",
@@ -1280,6 +1287,7 @@ async function doSubmit() {
     "예약자명": name,
     "연락처": phone,
     "할인유형": discount,
+    "비고": note,
     "장비": parsedEquip.map(function(item) {
       return { "이름": item.official || item.search, "수량": item.qty };
     })

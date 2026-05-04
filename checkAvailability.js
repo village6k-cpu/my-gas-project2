@@ -1344,7 +1344,7 @@ function insertAndCheckRequest(req) {
       "",                       // N: 등록
       "",                       // O: 등록상태
       "",                       // P: 거래ID
-      "",                       // Q: 비고
+      i === 0 ? (req.비고 || "") : "",       // Q: 비고 (첫 행만)
       i === 0 ? (req.추가요청 || "") : ""  // R: 추가요청 (첫 행만)
     ];
     sheet.getRange(row, 1, 1, 18).setValues([rowData]);
