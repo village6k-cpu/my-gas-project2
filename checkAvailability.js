@@ -2342,7 +2342,8 @@ function expandSetRows(sheet, setRow, reqID, components, qty) {
     if (listLastRow >= 2) {
       const rule = SpreadsheetApp.newDataValidation()
         .requireValueInRange(listSheet.getRange("A2:A" + listLastRow), true)
-        .setAllowInvalid(false)
+        .setAllowInvalid(true)
+        .setHelpText("장비명 또는 세트명을 검색하세요")
         .build();
       for (let i = 0; i < numComponents; i++) {
         const cellRow = setRow + 1 + i;
