@@ -961,9 +961,8 @@ function syncTemplateMasterFromSetMaster() {
   var sheetName = masterSheet.getName();
 
   // ── 헤더 행에 ARRAYFORMULA 배치 ──
-  // 핵심: ARRAYFORMULA 소스를 헤더 행(itemStart-1)에 넣는다.
-  // {"라벨"; ARRAYFORMULA(...)} 구문으로 헤더 라벨 + 아래 데이터를 한 셀에서 관리.
-  // 사용자가 데이터 영역을 전체 선택해서 Delete 눌러도 헤더는 안 지우니까 수식이 살아남는다.
+  // {"라벨"; ARRAYFORMULA(...)} 구문으로 헤더 행에 수식 배치.
+  // 데이터 영역을 전체 선택해서 Delete 눌러도 헤더 행의 수식은 유지됨.
   var headerRow = itemStart - 1;
   var itemEnd = itemStart + itemRows - 1;
 
