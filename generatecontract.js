@@ -946,7 +946,29 @@ function syncTemplateMasterFromSetMaster() {
   // 단가 열 숫자 포맷
   masterSheet.getRange(2, 2, writeData.length, 1).setNumberFormat("#,##0");
 
-  var summary = "✅ 템플릿 마스터 동기화 완료: " + writeData.length + "건 (세트마스터 기준)";
+  // ── 계약서 메인 시트에 단가 VLOOKUP 수식 세팅 ──
+  var mainSheet = templateSS.getSheets()[0];
+  var rows = findTemplateRows(mainSheet);
+  var itemStart = rows.itemStart;
+  var itemRows = rows.itemRows || 22;
+  var sheetName = masterSheet.getName();
+
+  // 좌측 F열(6열): B열 품목명 → 마스터 시트 VLOOKUP
+  // 우측 L열(12열): H열 품목명 → 마스터 시트 VLOOKUP
+  var leftFormulas = [];
+  var rightFormulas = [];
+  for (var r = 0; r < itemRows; r++) {
+    var rowNum = itemStart + r;
+    leftFormulas.push(['=IFERROR(VLOOKUP(B' + rowNum + ',' + sheetName + '!A:B,2,FALSE),"")']);
+    rightFormulas.push(['=IFERROR(VLOOKUP(H' + rowNum + ',' + sheetName + '!A:B,2,FALSE),"")']);
+  }
+
+  mainSheet.getRange(itemStart, 6, itemRows, 1).setFormulas(leftFormulas);   // F열
+  mainSheet.getRange(itemStart, 12, itemRows, 1).setFormulas(rightFormulas);  // L열
+
+  Logger.log("VLOOKUP 수식 세팅: F" + itemStart + "~F" + (itemStart + itemRows - 1) + ", L" + itemStart + "~L" + (itemStart + itemRows - 1));
+
+  var summary = "✅ 템플릿 마스터 동기화 완료: " + writeData.length + "건 + VLOOKUP 수식 " + (itemRows * 2) + "셀 세팅";
   Logger.log(summary);
   return summary;
 }
