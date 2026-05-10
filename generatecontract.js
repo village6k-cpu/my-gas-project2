@@ -963,12 +963,26 @@ function syncTemplateMasterFromSetMaster() {
     rightFormulas.push(['=IFERROR(VLOOKUP(H' + rowNum + ',' + sheetName + '!A:B,2,FALSE),"")']);
   }
 
-  mainSheet.getRange(itemStart, 6, itemRows, 1).setFormulas(leftFormulas);   // F열
-  mainSheet.getRange(itemStart, 12, itemRows, 1).setFormulas(rightFormulas);  // L열
+  // 좌측 G열(7열): 금액 = 수량(D) * 일수(E) * 단가(F)
+  // 우측 M열(13열): 금액 = 수량(J) * 일수(K) * 단가(L)
+  var leftAmountFormulas = [];
+  var rightAmountFormulas = [];
+  for (var r2 = 0; r2 < itemRows; r2++) {
+    var rn = itemStart + r2;
+    leftAmountFormulas.push(['=IFERROR(D' + rn + '*E' + rn + '*F' + rn + ',"")']);
+    rightAmountFormulas.push(['=IFERROR(J' + rn + '*K' + rn + '*L' + rn + ',"")']);
+  }
+
+  mainSheet.getRange(itemStart, 6, itemRows, 1).setFormulas(leftFormulas);    // F열 단가
+  mainSheet.getRange(itemStart, 7, itemRows, 1).setFormulas(leftAmountFormulas);  // G열 금액
+  mainSheet.getRange(itemStart, 12, itemRows, 1).setFormulas(rightFormulas);   // L열 단가
+  mainSheet.getRange(itemStart, 13, itemRows, 1).setFormulas(rightAmountFormulas); // M열 금액
 
   Logger.log("VLOOKUP 수식 세팅: F" + itemStart + "~F" + (itemStart + itemRows - 1) + ", L" + itemStart + "~L" + (itemStart + itemRows - 1));
 
-  var summary = "✅ 템플릿 마스터 동기화 완료: " + writeData.length + "건 + VLOOKUP 수식 " + (itemRows * 2) + "셀 세팅";
+  Logger.log("수식 세팅: F(단가VLOOKUP) + G(금액=D*E*F) + L(단가VLOOKUP) + M(금액=J*K*L), 각 " + itemRows + "행");
+
+  var summary = "✅ 템플릿 마스터 동기화 완료: " + writeData.length + "건 + 수식 " + (itemRows * 4) + "셀 (단가+금액)";
   Logger.log(summary);
   return summary;
 }
