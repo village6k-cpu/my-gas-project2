@@ -344,6 +344,55 @@
     color: var(--text-secondary);
   }
   .detail-row .dl { font-weight: 700; color: var(--text-primary); }
+  .detail-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+  }
+  .action-link, .action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 34px;
+    padding: 7px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    text-decoration: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .action-link.primary, .action-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .payment-select {
+    width: 140px;
+    min-height: 34px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    padding: 6px 8px;
+    outline: none;
+  }
+  .payment-select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+  }
+  .detail-note {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 8px;
+    line-height: 1.4;
+  }
 
   /* ── 반응형 ── */
   @media (min-width: 768px) {
@@ -574,6 +623,16 @@ function renderList(containerId, items, type) {
         var total = item.equipments.reduce(function(s, eq) { return s + (eq.qty || 1); }, 0);
         html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + total + '건</span></div>';
       }
+      html += '<div class="detail-row"><span>결제수단</span><span class="dl">' + paymentSelectHtml(item) + '</span></div>';
+      html += '<div class="detail-actions">';
+      if (item.contractUrl) {
+        html += '<a class="action-link primary" href="' + escAttr(item.contractUrl) + '" target="_blank" onclick="event.stopPropagation()">계약서 열기</a>';
+        html += '<button class="action-btn" onclick="event.stopPropagation();openContractPrint(\'' + escJs(item.contractUrl) + '\')">인쇄용 열기</button>';
+      } else {
+        html += '<button class="action-btn" onclick="event.stopPropagation()" disabled>계약서 링크 없음</button>';
+      }
+      html += '</div>';
+      if (item.paymentWarning) html += '<div class="detail-note">' + escHtml(item.paymentWarning) + '</div>';
       html += '</div></div>';
     });
     html += '</div>';
@@ -595,10 +654,61 @@ function toggleDetail(id) {
   if (el) el.classList.toggle('open');
 }
 
+function paymentSelectHtml(item) {
+  var options = ['', '미정', '계좌', '카드', '현금', '기타'];
+  var current = item.paymentMethod || '';
+  var html = '<select class="payment-select" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updatePaymentMethod(event,this,\'' + escJs(item.tradeId) + '\')">';
+  options.forEach(function(opt) {
+    var label = opt || '선택';
+    html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(label) + '</option>';
+  });
+  html += '</select>';
+  return html;
+}
+
+function updatePaymentMethod(event, select, tradeId) {
+  event.stopPropagation();
+  var prev = select.getAttribute('data-prev') || '';
+  var method = select.value;
+  select.disabled = true;
+  fetch(API_URL + '?key=village2026&action=updatePayment&tid=' + encodeURIComponent(tradeId) + '&method=' + encodeURIComponent(method))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      select.disabled = false;
+      if (res.error) {
+        alert('결제수단 저장 실패: ' + res.error);
+        select.value = prev;
+        return;
+      }
+      select.setAttribute('data-prev', method);
+      if (res.warning) alert(res.warning);
+      loadData(true);
+    })
+    .catch(function(err) {
+      select.disabled = false;
+      select.value = prev;
+      alert('결제수단 저장 실패: ' + err.message);
+    });
+}
+
+function openContractPrint(url) {
+  var printUrl = buildSheetsPdfUrl(url);
+  window.open(printUrl || url, '_blank');
+}
+
+function buildSheetsPdfUrl(url) {
+  var m = String(url || '').match(/\/spreadsheets\/d\/([^/]+)/);
+  if (!m) return '';
+  return 'https://docs.google.com/spreadsheets/d/' + m[1] +
+    '/export?format=pdf&size=A4&portrait=true&fitw=true&sheetnames=false&printtitle=false&pagenumbers=false&gridlines=false&fzr=false';
+}
+
 function escHtml(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+function escAttr(s) { return escHtml(s).replace(/'/g,'&#39;'); }
+function escJs(s) { return String(s || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,' '); }
 </script>
 </body>
 </html>

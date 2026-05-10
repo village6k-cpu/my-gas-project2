@@ -466,6 +466,20 @@
   }
   .gosu-link-btn:hover { background: #111827; }
   .gosu-link-btn:active { transform: scale(0.97); }
+  .gosu-link-btn.primary { background: var(--accent); }
+  .payment-select {
+    min-height: 30px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    padding: 5px 8px;
+    outline: none;
+  }
+  .payment-select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(35,131,226,0.15); }
+  .detail-note { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
 
   .card-header {
     display: flex;
@@ -884,9 +898,15 @@ function renderList(containerId, items, type) {
         var total = item.equipments.reduce(function(s, eq) { return s + (eq.qty || 1); }, 0);
         html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + total + '건</span></div>';
       }
+      html += '<div class="detail-row"><span>결제수단</span><span class="dl">' + paymentSelectHtml(item) + '</span></div>';
+      if (item.contractUrl) {
+        html += '<a class="gosu-link-btn primary" href="' + escAttr(item.contractUrl) + '" target="_blank" onclick="event.stopPropagation()">📄 계약서 열기</a>';
+        html += '<a class="gosu-link-btn" href="' + escAttr(contractPdfUrl(item.contractUrl)) + '" target="_blank" onclick="event.stopPropagation()">🖨️ 인쇄용 PDF</a>';
+      }
       // 개고생2.0 AppSheet 거래 점프
       html += '<a class="gosu-link-btn" href="' + gosuAppsheetUrl(item.tradeId) + '" target="_blank" onclick="event.stopPropagation()">🔗 개고생2.0 거래 열기</a>';
       html += '<a class="gosu-link-btn" href="timeline.html?search=' + encodeURIComponent(item.name) + '" target="_blank" onclick="event.stopPropagation()">📊 타임라인에서 보기</a>';
+      if (item.paymentWarning) html += '<div class="detail-note">' + escHtml(item.paymentWarning) + '</div>';
       html += '</div></div>';
     });
     html += '</div>';
@@ -979,10 +999,56 @@ function toggleTask(btn, tid, action) {
     });
 }
 
+function paymentSelectHtml(item) {
+  var options = ['', '미정', '계좌', '카드', '현금', '기타'];
+  var current = item.paymentMethod || '';
+  var html = '<select class="payment-select" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updatePaymentMethod(event,this,\'' + escJs(item.tradeId) + '\')">';
+  options.forEach(function(opt) {
+    html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(opt || '선택') + '</option>';
+  });
+  html += '</select>';
+  return html;
+}
+
+function updatePaymentMethod(event, select, tradeId) {
+  event.stopPropagation();
+  var prev = select.getAttribute('data-prev') || '';
+  var method = select.value;
+  select.disabled = true;
+  fetch(API_URL + '?key=village2026&action=updatePayment&tid=' + encodeURIComponent(tradeId) + '&method=' + encodeURIComponent(method))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      select.disabled = false;
+      if (res.error) {
+        alert('결제수단 저장 실패: ' + res.error);
+        select.value = prev;
+        return;
+      }
+      select.setAttribute('data-prev', method);
+      if (res.warning) alert(res.warning);
+      try { localStorage.removeItem('dashCache_v2_' + formatDate(currentDate)); } catch (e) {}
+      loadData(true);
+    })
+    .catch(function(err) {
+      select.disabled = false;
+      select.value = prev;
+      alert('결제수단 저장 실패: ' + err.message);
+    });
+}
+
+function contractPdfUrl(url) {
+  var m = String(url || '').match(/\/spreadsheets\/d\/([^/]+)/);
+  if (!m) return url || '#';
+  return 'https://docs.google.com/spreadsheets/d/' + m[1] +
+    '/export?format=pdf&size=A4&portrait=true&fitw=true&sheetnames=false&printtitle=false&pagenumbers=false&gridlines=false&fzr=false';
+}
+
 function escHtml(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+function escAttr(s) { return escHtml(s).replace(/'/g,'&#39;'); }
+function escJs(s) { return String(s || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,' '); }
 
 // ── 개고생2.0 AppSheet 거래 점프 URL 빌더 ────
 // 원본 패턴(2026-04-26 기준): row=<거래ID> 부분만 치환

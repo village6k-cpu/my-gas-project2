@@ -151,12 +151,44 @@
     background:#f0f2f5; border:none; border-radius:10px;
     font-size:17px; font-weight:600; cursor:pointer;
   }
+  .detail-actions { display:flex; gap:8px; margin-top:14px; }
+  .detail-action {
+    flex:1; border:none; border-radius:10px; padding:13px 10px;
+    font-size:15px; font-weight:700; cursor:pointer;
+    background:#EEF2FF; color:#1D4ED8;
+  }
+  .detail-action.danger { background:#FEE2E2; color:#B91C1C; }
 
   /* 자동갱신 표시 */
   .auto-refresh {
     font-size:13px; color:rgba(255,255,255,.5);
     white-space:nowrap;
   }
+  .modal-overlay {
+    display:none; position:fixed; inset:0; z-index:260;
+    background:rgba(0,0,0,.45); align-items:flex-end; justify-content:center;
+  }
+  .modal-overlay.show { display:flex; }
+  .modal-box {
+    width:100%; max-width:560px; max-height:86vh; overflow-y:auto;
+    background:#fff; border-radius:18px 18px 0 0; padding:22px;
+  }
+  .modal-title { font-size:19px; font-weight:800; margin-bottom:14px; color:#1A1A2E; }
+  .modal-label { display:block; font-size:13px; font-weight:700; color:#4A5568; margin:12px 0 6px; }
+  .modal-input, .modal-select {
+    width:100%; padding:13px 12px; border:1px solid #CBD5E1; border-radius:10px;
+    font-size:16px; outline:none; background:#fff;
+  }
+  .modal-input:focus, .modal-select:focus { border-color:#3B82F6; box-shadow:0 0 0 3px rgba(59,130,246,.12); }
+  .modal-row { display:grid; grid-template-columns:1fr 96px; gap:10px; }
+  .modal-actions { display:flex; gap:8px; margin-top:16px; }
+  .modal-btn {
+    flex:1; border:none; border-radius:10px; padding:14px 10px;
+    font-size:16px; font-weight:800; cursor:pointer;
+    background:#E5E7EB; color:#374151;
+  }
+  .modal-btn.primary { background:#2563EB; color:#fff; }
+  .modal-btn:disabled { opacity:.5; cursor:not-allowed; }
 </style>
 </head>
 <body>
@@ -171,6 +203,7 @@
     <button class="btn" onclick="moveToday()">오늘</button>
     <button class="btn" id="btnAll" onclick="filterStatus('all')">전체</button>
     <button class="btn" id="btnActive" onclick="filterStatus('active')">진행중</button>
+    <button class="btn" onclick="openAddModal()">추가</button>
     <button class="btn" onclick="reload()">↺</button>
   </div>
   <span class="auto-refresh" id="refreshInfo"></span>
@@ -201,6 +234,37 @@
   <div class="detail-card" id="detailCard"></div>
 </div>
 
+<!-- 장비 추가 모달 -->
+<div class="modal-overlay" id="addModal" onclick="if(event.target===this)closeAddModal()">
+  <div class="modal-box">
+    <div class="modal-title">기존 예약에 장비 추가</div>
+    <label class="modal-label">추가할 장비/세트</label>
+    <div class="modal-row">
+      <input id="addEquipInput" class="modal-input" list="equipDatalist" placeholder="예: FX3, 70-200" autocomplete="off">
+      <input id="addQtyInput" class="modal-input" type="number" min="1" value="1">
+    </div>
+    <datalist id="equipDatalist"></datalist>
+
+    <label class="modal-label">예약 반출일</label>
+    <input id="candidateDateInput" class="modal-input" type="date">
+
+    <label class="modal-label">감독/거래ID 검색</label>
+    <input id="candidateNameInput" class="modal-input" placeholder="예약자명, 업체명, 거래ID">
+
+    <div class="modal-actions">
+      <button class="modal-btn" onclick="findCandidates()">후보 찾기</button>
+    </div>
+
+    <label class="modal-label">추가할 예약 건</label>
+    <select id="candidateSelect" class="modal-select"></select>
+
+    <div class="modal-actions">
+      <button class="modal-btn" onclick="closeAddModal()">취소</button>
+      <button class="modal-btn primary" id="confirmAddBtn" onclick="confirmScheduleAdd()">가용 확인 후 추가</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
 <script>
 var API_URL = "";
@@ -210,6 +274,7 @@ var items = new vis.DataSet();
 var currentFilter = "all";
 var refreshTimer = null;
 var REFRESH_INTERVAL = 60000; // 1분
+var equipListCache = null;
 
 // ━━━ 초기화 ━━━
 function init() {
@@ -293,21 +358,30 @@ function updateStat() {
 // ━━━ 상세 팝업 ━━━
 function showDetail(itemId) {
   var item = allItems.find(function(i) { return i.id === itemId; });
-  if (!item || !item.title) return;
+  if (!item) return;
 
-  var lines = item.title.split("\n");
-  var html = '<h4>' + (item.content || "") + '</h4>';
-  lines.forEach(function(line) {
-    var parts = line.split(": ");
-    if (parts.length >= 2) {
-      html += '<div class="detail-row"><span class="label">' + parts[0] +
-        '</span><span class="value">' + parts.slice(1).join(": ") + '</span></div>';
-    }
-  });
+  var html = '<h4>' + escHtml(item.content || item.custName || "") + '</h4>';
+  html += detailRow('거래ID', item['거래ID'] || '-');
+  html += detailRow('고객명', item.custName || '-');
+  html += detailRow('연락처', item.tel || '-');
+  html += detailRow('세트/장비', item['세트명'] || item['장비명'] || '-');
+  html += detailRow('수량', item['수량'] || '-');
+  html += detailRow('반출', item['반출'] || '-');
+  html += detailRow('반납', item['반납'] || '-');
+  html += detailRow('상태', item.status || '-');
+  html += '<div class="detail-actions">';
+  html += '<button class="detail-action" onclick="event.stopPropagation();openAddModal(\'' + escJs(item['거래ID']) + '\')">장비 추가</button>';
+  html += '<button class="detail-action danger" onclick="event.stopPropagation();deleteTimelineEquip(\'' + escJs(item['거래ID']) + '\',\'' + escJs(item['세트명'] || item['장비명']) + '\')">삭제</button>';
+  html += '</div>';
   html += '<button class="detail-close" onclick="closeDetail()">닫기</button>';
 
   document.getElementById("detailCard").innerHTML = html;
   document.getElementById("detailOverlay").classList.add("show");
+}
+
+function detailRow(label, value) {
+  return '<div class="detail-row"><span class="label">' + escHtml(label) +
+    '</span><span class="value">' + escHtml(value) + '</span></div>';
 }
 
 function closeDetail(e) {
@@ -361,10 +435,123 @@ function updateRefreshInfo() {
 // ━━━ 검색 ━━━
 document.getElementById("searchInput").addEventListener("input", applyFilters);
 
+function todayStr() {
+  var d = new Date();
+  return d.getFullYear() + '-' + ('0'+(d.getMonth()+1)).slice(-2) + '-' + ('0'+d.getDate()).slice(-2);
+}
+
+function loadEquipList() {
+  if (equipListCache) return Promise.resolve(equipListCache);
+  return fetch(API_URL + '?key=village2026&action=read&sheet=' + encodeURIComponent('목록') + '&range=A2:A1000')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var rows = data.data || [];
+      equipListCache = rows.map(function(r) { return Array.isArray(r) ? r[0] : r; })
+        .filter(function(v) { return !!v; })
+        .map(String);
+      document.getElementById('equipDatalist').innerHTML = equipListCache.map(function(n) {
+        return '<option value="' + escAttr(n) + '"></option>';
+      }).join('');
+      return equipListCache;
+    })
+    .catch(function() { equipListCache = []; return []; });
+}
+
+function openAddModal(prefillTid) {
+  var search = document.getElementById('searchInput').value.trim();
+  document.getElementById('addEquipInput').value = search;
+  document.getElementById('addQtyInput').value = '1';
+  document.getElementById('candidateDateInput').value = todayStr();
+  document.getElementById('candidateNameInput').value = prefillTid || '';
+  document.getElementById('candidateSelect').innerHTML = '<option value="">후보를 먼저 찾으세요</option>';
+  document.getElementById('addModal').classList.add('show');
+  loadEquipList().then(function() {
+    setTimeout(function() { document.getElementById('addEquipInput').focus(); }, 50);
+    if (prefillTid) findCandidates();
+  });
+}
+
+function closeAddModal() {
+  document.getElementById('addModal').classList.remove('show');
+}
+
+function findCandidates() {
+  var name = document.getElementById('candidateNameInput').value.trim();
+  var date = document.getElementById('candidateDateInput').value;
+  var select = document.getElementById('candidateSelect');
+  select.innerHTML = '<option value="">검색 중...</option>';
+  fetch(API_URL + '?key=village2026&action=tradeCandidates&name=' + encodeURIComponent(name) + '&date=' + encodeURIComponent(date))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      var arr = res.candidates || [];
+      if (arr.length === 0) {
+        select.innerHTML = '<option value="">후보 없음</option>';
+        return;
+      }
+      select.innerHTML = arr.map(function(c) {
+        var label = c.tradeId + ' · ' + (c.name || '-') + ' · ' + c.checkout + ' → ' + c.checkin;
+        return '<option value="' + escAttr(c.tradeId) + '">' + escHtml(label) + '</option>';
+      }).join('');
+    })
+    .catch(function(err) {
+      select.innerHTML = '<option value="">검색 실패</option>';
+      alert('후보 검색 실패: ' + err.message);
+    });
+}
+
+function confirmScheduleAdd() {
+  var tid = document.getElementById('candidateSelect').value;
+  var equip = document.getElementById('addEquipInput').value.trim();
+  var qty = parseInt(document.getElementById('addQtyInput').value, 10) || 1;
+  if (!tid) { alert('추가할 예약 건을 선택하세요.'); return; }
+  if (!equip) { alert('장비/세트명을 입력하세요.'); return; }
+  var btn = document.getElementById('confirmAddBtn');
+  btn.disabled = true;
+  btn.textContent = '확인 중...';
+  fetch(API_URL + '?key=village2026&action=scheduleAddEquip&tid=' + encodeURIComponent(tid) +
+    '&equipName=' + encodeURIComponent(equip) + '&qty=' + encodeURIComponent(qty))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      btn.disabled = false;
+      btn.textContent = '가용 확인 후 추가';
+      if (res.error) { alert(res.error); return; }
+      closeAddModal();
+      closeDetail();
+      loadData();
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = '가용 확인 후 추가';
+      alert('추가 실패: ' + err.message);
+    });
+}
+
+function deleteTimelineEquip(tid, equipName) {
+  if (!tid || !equipName) return;
+  if (!confirm(equipName + ' 을(를) 이 거래에서 삭제할까요?')) return;
+  fetch(API_URL + '?key=village2026&action=scheduleRemoveEquip&tid=' + encodeURIComponent(tid) +
+    '&equipName=' + encodeURIComponent(equipName))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) { alert('삭제 실패: ' + res.error); return; }
+      closeDetail();
+      loadData();
+    })
+    .catch(function(err) { alert('삭제 실패: ' + err.message); });
+}
+
+function escHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) { return escHtml(s).replace(/'/g,'&#39;'); }
+function escJs(s) { return String(s || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,' '); }
+
 // ━━━ 시작 ━━━
 init();
 loadData();
 startAutoRefresh();
+loadEquipList();
 document.getElementById("btnAll").classList.add("on");
 </script>
 </body>

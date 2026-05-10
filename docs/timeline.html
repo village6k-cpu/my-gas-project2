@@ -930,6 +930,7 @@ body {
   <div class="ctx-item" onclick="ctxAction('contract')">&#x1F4C4; 계약서 열기</div>
   <div class="ctx-item" onclick="ctxAction('alimtalk')">&#x1F4AC; 알림톡 발송</div>
   <div class="ctx-sep"></div>
+  <div class="ctx-item danger" onclick="ctxAction('deleteEquip')">&#x1F5D1; 이 장비 삭제</div>
   <div class="ctx-item danger" onclick="ctxAction('취소')">&#x274C; 취소</div>
 </div>
 
@@ -1655,6 +1656,24 @@ function ctxAction(action) {
     showToast("알림톡 발송: " + (item.custName || ""));
     return;
   }
+  if (action === "deleteEquip") {
+    var equipName = item["세트명"] || item["장비명"];
+    if (!item["거래ID"] || !equipName) {
+      showToast("삭제할 거래/장비 정보를 찾지 못했습니다");
+      return;
+    }
+    if (!confirm(equipName + " 을(를) 이 거래에서 삭제할까요?")) return;
+    fetch(API_URL + "?key=village2026&action=scheduleRemoveEquip&tid=" + encodeURIComponent(item["거래ID"]) +
+      "&equipName=" + encodeURIComponent(equipName))
+      .then(function(r) { return r.json(); })
+      .then(function(res) {
+        if (res.error) { showToast("삭제 실패: " + res.error); return; }
+        showToast("삭제 완료");
+        loadData();
+      })
+      .catch(function() { showToast("네트워크 오류"); });
+    return;
+  }
 
   // Status change
   if (action === "반출중" || action === "반납완료" || action === "취소") {
@@ -2033,7 +2052,30 @@ function submitAddBooking() {
   submitBtn.disabled = true;
   submitBtn.textContent = "등록 중...";
 
-  // Row: [스케줄ID, 거래ID, 세트명, 장비명, 수량, 반출일, 반출시간, 반납일, 반납시간, 상태, "", 단가]
+  if (addMode === "existing") {
+    fetch(API_URL + "?key=village2026&action=scheduleAddEquip&tid=" + encodeURIComponent(txID)
+      + "&equipName=" + encodeURIComponent(setName) + "&qty=1")
+      .then(function(r) { return r.json(); })
+      .then(function(res) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "등록";
+        if (res.error) {
+          showToast("추가 실패: " + res.error);
+        } else {
+          showToast(custName + " / " + setName + " 추가 완료");
+          closeAddModal();
+          loadData();
+        }
+      })
+      .catch(function() {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "등록";
+        showToast("네트워크 오류");
+      });
+    return;
+  }
+
+  // 신규 예약 Row: [스케줄ID, 거래ID, 세트명, 장비명, 수량, 반출일, 반출시간, 반납일, 반납시간, 상태, "", 단가]
   var rowData = ["", txID, setName, setName, 1, fromDate, fromTime, toDate, toTime, "대기", "", 0];
 
   fetch(API_URL, {

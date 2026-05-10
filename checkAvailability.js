@@ -393,10 +393,12 @@ function getDashboardData(targetDate, skipCache) {
 
   // 반출세팅 완료 플래그 일괄 조회 (ScriptProperties 1회 호출)
   var props = PropertiesService.getScriptProperties().getProperties();
+  var tradeExtras = getTradeExtrasForIds_(Object.keys(tradeGroups), props);
 
   Object.keys(tradeGroups).forEach(function(tid) {
     var g = tradeGroups[tid];
     var cust = contractMap[tid] || {};
+    var extra = tradeExtras[tid] || {};
 
     // 세트(구성품 있는 것) 식별 — 대표행 표시에 'SET' 라벨 붙이기 위함
     var setsWithComponents = {};
@@ -430,6 +432,10 @@ function getDashboardData(targetDate, skipCache) {
       status: g.상태,
       setupDone: setupDone,
       returnDone: returnDone,
+      contractUrl: extra.contractUrl || '',
+      paymentMethod: extra.paymentMethod || '',
+      paymentSource: extra.paymentSource || '',
+      paymentWarning: extra.paymentWarning || '',
       equipments: displayEquip
     };
 
@@ -683,6 +689,250 @@ function toggleItemCheck(scheduleId, phase, done) {
 }
 
 /**
+ * 개고생2.0 거래내역에서 계약서 링크/결제수단을 읽어 대시보드에 붙인다.
+ * 결제수단 열이 없으면 ScriptProperties 값만 사용하고 경고를 반환한다.
+ */
+function getTradeExtrasForIds_(tradeIds, props) {
+  var result = {};
+  props = props || PropertiesService.getScriptProperties().getProperties();
+  (tradeIds || []).forEach(function(tid) {
+    result[tid] = {
+      contractUrl: '',
+      paymentMethod: props['paymentMethod_' + tid] || '',
+      paymentSource: props['paymentMethod_' + tid] ? 'script' : '',
+      paymentWarning: ''
+    };
+  });
+  if (!tradeIds || tradeIds.length === 0) return result;
+
+  try {
+    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    if (!개고생URL) return result;
+    var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
+    if (!거래시트 || 거래시트.getLastRow() < 2) return result;
+
+    var lastCol = Math.max(거래시트.getLastColumn(), 6);
+    var headers = 거래시트.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
+    var idCol = _findHeaderCol_(headers, ["거래ID", "거래 Id", "거래id"]) || 5;
+    var contractCol = _findHeaderCol_(headers, ["계약서링크", "계약서 링크", "계약서", "계약서URL", "계약서 URL"]) || 3;
+    var paymentCol = _findHeaderCol_(headers, ["결제수단", "결제 수단", "결제방법", "결제 방법", "결제"]);
+    var values = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, lastCol).getDisplayValues();
+    var wanted = {};
+    tradeIds.forEach(function(tid) { wanted[String(tid)] = true; });
+
+    values.forEach(function(row) {
+      var tid = String(row[idCol - 1] || '').trim();
+      if (!wanted[tid]) return;
+      if (!result[tid]) result[tid] = {};
+      result[tid].contractUrl = String(row[contractCol - 1] || '').trim();
+      if (paymentCol) {
+        result[tid].paymentMethod = String(row[paymentCol - 1] || '').trim() || result[tid].paymentMethod || '';
+        result[tid].paymentSource = result[tid].paymentMethod ? 'sheet' : result[tid].paymentSource || '';
+      } else if (result[tid].paymentMethod) {
+        result[tid].paymentWarning = "거래내역에 결제수단 열이 없어 임시 저장됨";
+      }
+    });
+  } catch (err) {
+    Object.keys(result).forEach(function(tid) {
+      result[tid].paymentWarning = "거래내역 조회 실패: " + err.message;
+    });
+  }
+  return result;
+}
+
+function _findHeaderCol_(headers, candidates) {
+  var normalized = headers.map(function(h) {
+    return String(h || '').replace(/\s+/g, '').toLowerCase();
+  });
+  for (var i = 0; i < candidates.length; i++) {
+    var needle = String(candidates[i]).replace(/\s+/g, '').toLowerCase();
+    var idx = normalized.indexOf(needle);
+    if (idx >= 0) return idx + 1;
+  }
+  return 0;
+}
+
+/**
+ * 오늘일정/스케줄 웹앱에서 결제수단을 저장한다.
+ * 거래내역에 결제수단 열이 있으면 같이 쓰고, 없으면 ScriptProperties에 임시 저장한다.
+ */
+function updateTradePaymentMethod(tid, method) {
+  if (!tid) return { error: "tid 필요" };
+  tid = String(tid).trim();
+  method = String(method || '').trim();
+  var allowed = ["", "미정", "계좌", "카드", "현금", "기타"];
+  if (allowed.indexOf(method) < 0) return { error: "허용되지 않은 결제수단: " + method };
+
+  var props = PropertiesService.getScriptProperties();
+  if (method) props.setProperty('paymentMethod_' + tid, method);
+  else props.deleteProperty('paymentMethod_' + tid);
+
+  var wroteSheet = false;
+  var warning = "";
+  try {
+    var 개고생URL = props.getProperty("개고생2_URL");
+    if (개고생URL) {
+      var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
+      if (거래시트 && 거래시트.getLastRow() >= 2) {
+        var lastCol = Math.max(거래시트.getLastColumn(), 6);
+        var headers = 거래시트.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
+        var idCol = _findHeaderCol_(headers, ["거래ID", "거래 Id", "거래id"]) || 5;
+        var paymentCol = _findHeaderCol_(headers, ["결제수단", "결제 수단", "결제방법", "결제 방법", "결제"]);
+        if (paymentCol) {
+          var ids = 거래시트.getRange(2, idCol, 거래시트.getLastRow() - 1, 1).getDisplayValues();
+          for (var i = 0; i < ids.length; i++) {
+            if (String(ids[i][0] || '').trim() === tid) {
+              거래시트.getRange(i + 2, paymentCol).setValue(method);
+              wroteSheet = true;
+              break;
+            }
+          }
+          if (!wroteSheet) warning = "거래내역에서 거래ID를 찾지 못해 임시 저장됨";
+        } else {
+          warning = "거래내역에 결제수단 열이 없어 임시 저장됨";
+        }
+      }
+    }
+  } catch (err) {
+    warning = "거래내역 결제수단 반영 실패: " + err.message;
+  }
+  invalidateDashboardCache();
+  return { success: true, tid: tid, method: method, wroteSheet: wroteSheet, warning: warning };
+}
+
+/**
+ * 스케줄 웹앱 장비 추가용 거래 후보 검색.
+ * 이름은 예약자명/업체명/거래ID 부분검색, 날짜는 계약마스터 반출일 기준.
+ */
+function findTradeCandidatesForSchedule(name, date) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("계약마스터");
+  if (!sheet || sheet.getLastRow() < 2) return { candidates: [] };
+
+  var q = String(name || '').trim().toLowerCase();
+  var dateStr = String(date || '').trim();
+  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 10).getValues();
+  var display = sheet.getRange(2, 1, sheet.getLastRow() - 1, 10).getDisplayValues();
+  var out = [];
+
+  for (var i = 0; i < data.length; i++) {
+    var tid = String(data[i][0] || '').trim();
+    if (!tid) continue;
+    var 예약자명 = String(data[i][1] || '').trim();
+    var 업체명 = String(data[i][3] || '').trim();
+    var 상태 = String(data[i][9] || '').trim();
+    if (상태 === "취소") continue;
+
+    var 반출일 = _fmtDateForApi_(data[i][4], display[i][4]);
+    if (dateStr && 반출일 !== dateStr) continue;
+    if (q) {
+      var hay = (tid + " " + 예약자명 + " " + 업체명).toLowerCase();
+      if (hay.indexOf(q) < 0) continue;
+    }
+
+    out.push({
+      tradeId: tid,
+      name: 예약자명,
+      company: 업체명,
+      checkout: 반출일 + (display[i][5] ? " " + display[i][5] : ""),
+      checkin: _fmtDateForApi_(data[i][6], display[i][6]) + (display[i][7] ? " " + display[i][7] : ""),
+      status: 상태 || "대기"
+    });
+    if (out.length >= 20) break;
+  }
+  return { candidates: out };
+}
+
+function _fmtDateForApi_(raw, display) {
+  if (raw instanceof Date) return Utilities.formatDate(raw, "Asia/Seoul", "yyyy-MM-dd");
+  return String(display || raw || '').trim();
+}
+
+function resolveEquipmentName_(input, ss) {
+  var raw = String(input || '').trim();
+  if (!raw) return raw;
+  var names = [];
+  var listSheet = ss.getSheetByName("목록");
+  if (listSheet && listSheet.getLastRow() >= 2) {
+    names = listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues()
+      .map(function(r) { return String(r[0] || '').trim(); })
+      .filter(function(v) { return !!v; });
+  }
+  return names.length ? fuzzyMatchEquipName(raw, names) : raw;
+}
+
+function buildAvailabilityItems_(equipName, qty, components) {
+  var map = {};
+  qty = Number(qty) || 1;
+  if (components && components.length > 0) {
+    components.forEach(function(c) {
+      var n = String(c.name || '').trim();
+      if (!n) return;
+      map[n] = (map[n] || 0) + ((Number(c.qty) || 1) * qty);
+    });
+  } else {
+    map[String(equipName || '').trim()] = qty;
+  }
+  return Object.keys(map).map(function(name) { return { name: name, qty: map[name] }; });
+}
+
+function checkAvailabilityForAdd_(itemsToAdd, startDT, endDT, equipSheet, schedSheet) {
+  var conflicts = [];
+  if (!equipSheet) return { ok: false, conflicts: [{ message: "장비마스터 없음" }] };
+  var schedData = getScheduleData(schedSheet);
+
+  (itemsToAdd || []).forEach(function(item) {
+    var equipName = String(item.name || '').trim();
+    var reqQty = Number(item.qty) || 1;
+    var equipInfo = findEquipment(equipName, equipSheet);
+    if (!equipInfo) {
+      conflicts.push({ equipment: equipName, message: equipName + " 미등록" });
+      return;
+    }
+
+    var overlaps = schedData.filter(function(s) {
+      return s.equipment === equipName &&
+        s.status !== "반납완료" &&
+        s.status !== "취소" &&
+        s.startDT < endDT &&
+        s.endDT > startDT;
+    });
+    var points = [startDT.getTime()];
+    overlaps.forEach(function(s) {
+      if (s.startDT >= startDT && s.startDT < endDT) points.push(s.startDT.getTime());
+      if (s.endDT > startDT && s.endDT < endDT) points.push(s.endDT.getTime());
+    });
+    var seen = {};
+    points = points.filter(function(p) {
+      if (seen[p]) return false;
+      seen[p] = true;
+      return true;
+    });
+
+    var maxConcurrent = 0;
+    points.forEach(function(tp) {
+      var concurrent = 0;
+      overlaps.forEach(function(s) {
+        if (s.startDT.getTime() <= tp && s.endDT.getTime() > tp) concurrent += Number(s.qty) || 1;
+      });
+      if (concurrent > maxConcurrent) maxConcurrent = concurrent;
+    });
+
+    var available = (Number(equipInfo.total) || 0) - maxConcurrent;
+    if (available < reqQty) {
+      conflicts.push({
+        equipment: equipName,
+        total: Number(equipInfo.total) || 0,
+        available: available,
+        requested: reqQty,
+        message: equipName + " 가용 " + available + "/" + reqQty
+      });
+    }
+  });
+  return { ok: conflicts.length === 0, conflicts: conflicts };
+}
+
+/**
  * Dashboard에서 장비 추가 — 같은 거래ID의 기존 행에서 일자/시간/예약자명 가져와 새 행 생성.
  * 세트인 경우 구성품도 자동 펼침. scheduleContractRegen으로 계약서 재생성 예약.
  */
@@ -692,90 +942,113 @@ function dashboardAddEquipment(tid, equipName, qty) {
   tid = String(tid).trim();
   equipName = String(equipName).trim();
 
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sched = ss.getSheetByName("스케줄상세");
-  if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
 
-  var lastRow = sched.getLastRow();
-  var data = sched.getRange(2, 1, lastRow - 1, 13).getValues();
-  var displayData = sched.getRange(2, 1, lastRow - 1, 13).getDisplayValues();
-  var srcIdx = -1;
-  for (var i = 0; i < data.length; i++) {
-    if (String(data[i][1]).trim() === tid) { srcIdx = i; break; }
-  }
-  if (srcIdx === -1) return { error: "거래ID '" + tid + "' 못 찾음" };
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sched = ss.getSheetByName("스케줄상세");
+    var equipSheet = ss.getSheetByName("장비마스터");
+    if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
 
-  var 반출일   = displayData[srcIdx][5];
-  var 반출시간 = displayData[srcIdx][6];
-  var 반납일   = displayData[srcIdx][7];
-  var 반납시간 = displayData[srcIdx][8];
-  var 예약자명 = displayData[srcIdx][12];
+    var setSheet = ss.getSheetByName("세트마스터");
+    equipName = resolveEquipmentName_(equipName, ss);
 
-  var setSheet = ss.getSheetByName("세트마스터");
-  var components = getSetComponents(equipName, setSheet).filter(function(c) {
-    var n = String(c.name || "").trim();
-    return n !== "" && n !== equipName;
-  });
-  var price = findSetPrice(equipName, setSheet);
+    var lastRow = sched.getLastRow();
+    var data = sched.getRange(2, 1, lastRow - 1, 13).getValues();
+    var displayData = sched.getRange(2, 1, lastRow - 1, 13).getDisplayValues();
+    var srcIdx = -1;
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][1]).trim() === tid) { srcIdx = i; break; }
+    }
+    if (srcIdx === -1) return { error: "거래ID '" + tid + "' 못 찾음" };
 
-  var maxN = 0;
-  var re = new RegExp("^" + tid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "-(\\d+)$");
-  for (var k = 0; k < data.length; k++) {
-    var m = String(data[k][0]).match(re);
-    if (m) { var n = parseInt(m[1], 10); if (n > maxN) maxN = n; }
-  }
+    var 반출일   = displayData[srcIdx][5];
+    var 반출시간 = displayData[srcIdx][6];
+    var 반납일   = displayData[srcIdx][7];
+    var 반납시간 = displayData[srcIdx][8];
+    var 예약자명 = displayData[srcIdx][12];
+    var startDT = parseDT(반출일, 반출시간);
+    var endDT = parseDT(반납일, 반납시간);
+    if (!startDT || !endDT) return { error: "거래ID의 반출/반납 일시를 읽지 못했습니다" };
 
-  var newRows = [];
-  if (components.length > 0) {
-    maxN++;
-    newRows.push([
-      tid + "-" + ("0" + maxN).slice(-2),
-      tid, equipName, equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
-      "대기", "", price, 예약자명
-    ]);
-    components.forEach(function(c) {
+    var components = getSetComponents(equipName, setSheet).filter(function(c) {
+      var n = String(c.name || "").trim();
+      return n !== "" && n !== equipName;
+    });
+    var checkItems = buildAvailabilityItems_(equipName, qty, components);
+    var availability = checkAvailabilityForAdd_(checkItems, startDT, endDT, equipSheet, sched);
+    if (!availability.ok) {
+      return {
+        error: "가용 불가: " + availability.conflicts.map(function(c) { return c.message; }).join(", "),
+        conflicts: availability.conflicts
+      };
+    }
+
+    var price = findSetPrice(equipName, setSheet);
+    var maxN = 0;
+    var re = new RegExp("^" + tid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "-(\\d+)$");
+    for (var k = 0; k < data.length; k++) {
+      var m = String(data[k][0]).match(re);
+      if (m) { var n = parseInt(m[1], 10); if (n > maxN) maxN = n; }
+    }
+
+    var newRows = [];
+    if (components.length > 0) {
       maxN++;
       newRows.push([
         tid + "-" + ("0" + maxN).slice(-2),
-        tid, equipName, c.name, c.qty || 1, 반출일, 반출시간, 반납일, 반납시간,
+        tid, equipName, equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
+        "대기", "", price, 예약자명
+      ]);
+      components.forEach(function(c) {
+        maxN++;
+        newRows.push([
+          tid + "-" + ("0" + maxN).slice(-2),
+          tid, equipName, c.name, (c.qty || 1) * qty, 반출일, 반출시간, 반납일, 반납시간,
+          "대기", "", 0, 예약자명
+        ]);
+      });
+    } else {
+      maxN++;
+      newRows.push([
+        tid + "-" + ("0" + maxN).slice(-2),
+        tid, "", equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
         "대기", "", 0, 예약자명
       ]);
-    });
-  } else {
-    maxN++;
-    newRows.push([
-      tid + "-" + ("0" + maxN).slice(-2),
-      tid, equipName, equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
-      "대기", "", price, 예약자명
-    ]);
-  }
+      newRows[0][11] = price;
+    }
 
-  // 같은 거래ID의 마지막 행 찾기 → 바로 아래에 삽입
-  var lastTidRow = -1;
-  for (var j = 0; j < data.length; j++) {
-    if (String(data[j][1]).trim() === tid) lastTidRow = j;
-  }
-  var insertRow = (lastTidRow >= 0) ? (lastTidRow + 2 + 1) : (lastRow + 1);
-  // lastTidRow는 0-based data index, +2 = 시트행(헤더1행+1), +1 = 그 다음 행
+    // 같은 거래ID의 마지막 행 찾기 → 바로 아래에 삽입
+    var lastTidRow = -1;
+    for (var j = 0; j < data.length; j++) {
+      if (String(data[j][1]).trim() === tid) lastTidRow = j;
+    }
+    var insertRow = (lastTidRow >= 0) ? (lastTidRow + 2 + 1) : (lastRow + 1);
+    // lastTidRow는 0-based data index, +2 = 시트행(헤더1행+1), +1 = 그 다음 행
 
-  // 행 삽입 (시트 중간에 끼워넣기)
-  if (insertRow <= lastRow) {
-    sched.insertRowsAfter(insertRow - 1, newRows.length);
-  }
-  sched.getRange(insertRow, 1, newRows.length, 13).setValues(newRows);
-  sched.getRange(insertRow, 6, newRows.length, 1).setNumberFormat("yyyy-MM-dd");
-  sched.getRange(insertRow, 7, newRows.length, 1).setNumberFormat("@");
-  sched.getRange(insertRow, 8, newRows.length, 1).setNumberFormat("yyyy-MM-dd");
-  sched.getRange(insertRow, 9, newRows.length, 1).setNumberFormat("@");
+    // 행 삽입 (시트 중간에 끼워넣기)
+    if (insertRow <= lastRow) {
+      sched.insertRowsAfter(insertRow - 1, newRows.length);
+    }
+    sched.getRange(insertRow, 1, newRows.length, 13).setValues(newRows);
+    sched.getRange(insertRow, 6, newRows.length, 1).setNumberFormat("yyyy-MM-dd");
+    sched.getRange(insertRow, 7, newRows.length, 1).setNumberFormat("@");
+    sched.getRange(insertRow, 8, newRows.length, 1).setNumberFormat("yyyy-MM-dd");
+    sched.getRange(insertRow, 9, newRows.length, 1).setNumberFormat("@");
 
-  var inheritRows = [];
-  for (var ri = 0; ri < newRows.length; ri++) inheritRows.push(insertRow + ri);
-  if (typeof _inheritGroupBackground !== "undefined") {
-    try { _inheritGroupBackground(sched, tid, inheritRows); } catch (e) {}
-  }
+    var inheritRows = [];
+    for (var ri = 0; ri < newRows.length; ri++) inheritRows.push(insertRow + ri);
+    if (typeof _inheritGroupBackground !== "undefined") {
+      try { _inheritGroupBackground(sched, tid, inheritRows); } catch (e) {}
+    }
 
-  scheduleContractRegen(tid);
-  return { success: true, addedRows: newRows.length, isSet: components.length > 0, equipName: equipName };
+    try { formatScheduleSheet(sched); } catch (e) {}
+    scheduleContractRegen(tid);
+    return { success: true, addedRows: newRows.length, isSet: components.length > 0, equipName: equipName };
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
 }
 
 /**
@@ -787,26 +1060,34 @@ function dashboardRemoveEquipment(tid, equipName) {
   tid = String(tid).trim();
   equipName = String(equipName).trim();
 
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sched = ss.getSheetByName("스케줄상세");
-  if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
 
-  var lastRow = sched.getLastRow();
-  var data = sched.getRange(2, 1, lastRow - 1, 4).getValues();
-  var rowsToDelete = [];
-  for (var i = data.length - 1; i >= 0; i--) {
-    if (String(data[i][1]).trim() !== tid) continue;
-    var c = String(data[i][2] || "").trim();
-    var d = String(data[i][3] || "").trim();
-    if (c === equipName || d === equipName) {
-      rowsToDelete.push(i + 2);
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sched = ss.getSheetByName("스케줄상세");
+    if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
+
+    var lastRow = sched.getLastRow();
+    var data = sched.getRange(2, 1, lastRow - 1, 4).getValues();
+    var rowsToDelete = [];
+    for (var i = data.length - 1; i >= 0; i--) {
+      if (String(data[i][1]).trim() !== tid) continue;
+      var c = String(data[i][2] || "").trim();
+      var d = String(data[i][3] || "").trim();
+      if (c === equipName || d === equipName) {
+        rowsToDelete.push(i + 2);
+      }
     }
-  }
-  if (rowsToDelete.length === 0) return { error: "해당 장비 행 없음" };
+    if (rowsToDelete.length === 0) return { error: "해당 장비 행 없음" };
 
-  rowsToDelete.forEach(function(r) { sched.deleteRow(r); });
-  scheduleContractRegen(tid);
-  return { success: true, removedRows: rowsToDelete.length };
+    rowsToDelete.forEach(function(r) { sched.deleteRow(r); });
+    try { formatScheduleSheet(sched); } catch (e) {}
+    scheduleContractRegen(tid);
+    return { success: true, removedRows: rowsToDelete.length, equipName: equipName };
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
 }
 
 
@@ -2370,6 +2651,7 @@ function expandSetRows(sheet, setRow, reqID, components, qty) {
  */
 function getSetComponents(name, setSheet) {
   if (!name) return [];
+  if (!setSheet) return [];
   const lastRow = setSheet.getLastRow();
   if (lastRow < 2) return [];
 
