@@ -2118,36 +2118,9 @@ function submitAddBooking() {
     return;
   }
 
-  // 신규 예약 Row: [스케줄ID, 거래ID, 세트명, 장비명, 수량, 반출일, 반출시간, 반납일, 반납시간, 상태, "", 단가]
-  var rowData = ["", txID, setName, setName, 1, fromDate, fromTime, toDate, toTime, "대기", "", 0];
-
-  fetch(API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      key: "village2026",
-      action: "append",
-      sheet: "스케줄상세",
-      values: [rowData]
-    })
-  })
-    .then(function(r) { return r.json(); })
-    .then(function(res) {
-      submitBtn.disabled = false;
-      submitBtn.textContent = "등록";
-      if (res.error) {
-        showToast("등록 실패: " + res.error);
-      } else {
-        showToast(custName + " / " + setName + " 예약이 등록되었습니다");
-        closeAddModal();
-        loadData();
-      }
-    })
-    .catch(function() {
-      submitBtn.disabled = false;
-      submitBtn.textContent = "등록";
-      showToast("네트워크 오류");
-    });
+  submitBtn.disabled = false;
+  submitBtn.textContent = addSubmitLabel();
+  showToast("신규 예약은 확인요청에서 등록하세요");
 }
 
 window.openAddModal = openAddModal;
