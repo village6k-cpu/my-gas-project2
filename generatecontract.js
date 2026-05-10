@@ -346,6 +346,13 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   // 저장
   SpreadsheetApp.flush();
 
+  // ── 링크가 있는 사람은 누구나 열람 가능 (직원 PC 열람용) ──
+  try {
+    newFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (shareErr) {
+    Logger.log("공유 설정 실패 (무시): " + shareErr.message);
+  }
+
   // ── 개고생2.0 거래내역 C열(이동 후)에 계약서 링크 입력 ──
   updateContractLink(거래ID, newUrl);
 
@@ -1000,7 +1007,79 @@ function syncTemplateMasterFromSetMaster() {
   Logger.log("수식 보호 적용: F~G, L~M (warning only)");
   Logger.log("수식 세팅: F(단가VLOOKUP) + G(금액=D*E*F) + L(단가VLOOKUP) + M(금액=J*K*L), 각 " + itemRows + "행");
 
+  // ── 템플릿도 링크 열람 가능하게 ──
+  try {
+    templateSS.getUrl(); // 접근 확인
+    var templateFile = DriveApp.getFileById(templateId);
+    templateFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (e) {
+    Logger.log("템플릿 공유 설정 실패 (무시): " + e.message);
+  }
+
   var summary = "✅ 템플릿 마스터 동기화 완료: " + writeData.length + "건 + 수식 " + (itemRows * 4) + "셀 + 보호 적용";
+  Logger.log(summary);
+  return summary;
+}
+
+/**
+ * 템플릿 수식 자동 복구 트리거 설치.
+ * 매시간 syncTemplateMasterFromSetMaster() 실행 → 수식 삭제돼도 자동 복구.
+ * GAS 편집기에서 한 번만 실행하면 됨.
+ */
+function installTemplateSyncTrigger() {
+  // 기존 동일 트리거 제거 (중복 방지)
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'syncTemplateMasterFromSetMaster') {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  ScriptApp.newTrigger('syncTemplateMasterFromSetMaster')
+    .timeBased()
+    .everyHours(1)
+    .create();
+
+  Logger.log("✅ 템플릿 동기화 트리거 설치 완료 (매 1시간)");
+  return "✅ 매시간 자동 동기화 트리거 설치됨";
+}
+
+/**
+ * 기존 계약서 파일 일괄 열람 공유 설정.
+ * CONTRACT_FOLDER_ID 폴더 내 모든 스프레드시트에
+ * "링크가 있는 사람 → 뷰어" 권한을 설정한다.
+ * GAS 편집기에서 한 번 실행하면 됨.
+ */
+function shareAllContractsAsViewable() {
+  var props = PropertiesService.getScriptProperties();
+  var folderId = props.getProperty("CONTRACT_FOLDER_ID");
+  if (!folderId) {
+    Logger.log("❌ CONTRACT_FOLDER_ID 미설정");
+    return "❌ CONTRACT_FOLDER_ID 미설정";
+  }
+
+  var folder = DriveApp.getFolderById(folderId);
+  var files = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+  var count = 0;
+
+  while (files.hasNext()) {
+    var file = files.next();
+    try {
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      count++;
+    } catch (e) {
+      Logger.log("공유 실패: " + file.getName() + " - " + e.message);
+    }
+  }
+
+  // 폴더 자체도 링크 열람 설정
+  try {
+    folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    Logger.log("폴더 공유 설정 완료");
+  } catch (e) {
+    Logger.log("폴더 공유 설정 실패: " + e.message);
+  }
+
+  var summary = "✅ 계약서 " + count + "개 파일 열람 공유 설정 완료";
   Logger.log(summary);
   return summary;
 }
