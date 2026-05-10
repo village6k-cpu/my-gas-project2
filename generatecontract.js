@@ -833,8 +833,123 @@ function setupContractSettings() {
 
 
 // ====================================================================
-// 계약서 템플릿 마스터 시트 관리
+// 계약서 템플릿 마스터 시트 — 세트마스터 동기화
 // ====================================================================
+
+/**
+ * 세트마스터 → 계약서 템플릿 마스터 시트 동기화.
+ *
+ * 세트마스터(A:세트명, B:구성장비명, G:단가)에서
+ *   - 세트 상품: A열에 이름이 있고, B열이 비어있지 않은 첫 행 → G열 단가
+ *   - 개별 장비: A열에 이름, B열이 빈 행 → G열 단가
+ * 를 읽어서, 계약서 템플릿 내부 마스터 시트를 통째로 덮어쓴다.
+ *
+ * 사용법:
+ *   1) GAS 편집기에서 수동 실행
+ *   2) 또는 onOpen 메뉴에 연결해서 필요할 때 클릭
+ *   3) 또는 시간 기반 트리거로 매일 자동 실행
+ */
+function syncTemplateMasterFromSetMaster() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var setSheet = ss.getSheetByName("세트마스터");
+  if (!setSheet) {
+    Logger.log("❌ 세트마스터 시트 없음");
+    return "❌ 세트마스터 시트 없음";
+  }
+
+  var props = PropertiesService.getScriptProperties();
+  var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
+  if (!templateId) {
+    Logger.log("❌ CONTRACT_TEMPLATE_ID 미설정");
+    return "❌ CONTRACT_TEMPLATE_ID 미설정";
+  }
+
+  // ── 세트마스터에서 장비명 → 단가 맵 구축 ──
+  var lastRow = setSheet.getLastRow();
+  if (lastRow < 2) {
+    Logger.log("❌ 세트마스터에 데이터 없음");
+    return "❌ 세트마스터에 데이터 없음";
+  }
+
+  var data = setSheet.getRange(2, 1, lastRow - 1, 7).getValues();
+  // A(0):세트명/장비명, B(1):구성장비명, C(2):수량, D(3):비고, E(4):대체가능장비, F(5):가용체크, G(6):단가
+  //
+  // 단가가 있는 행만 수집:
+  //   세트 헤더: A열=세트명, B열 비어있지않음 → 세트 단가 (첫 행만)
+  //   개별 장비: A열=장비명, B열 빈칸 → 개별 단가
+  var priceMap = {};  // { 장비명: 단가 }
+  var seenSets = {};  // 세트 중복 방지
+
+  for (var i = 0; i < data.length; i++) {
+    var name = String(data[i][0] || "").trim();
+    var sub = String(data[i][1] || "").trim();
+    var price = data[i][6];
+
+    if (!name) continue;
+
+    if (!sub) {
+      // 개별 장비 (B열 빈칸)
+      if (price && Number(price) > 0) {
+        priceMap[name] = Number(price);
+      }
+    } else {
+      // 세트 상품 (B열에 구성장비 있음) — 첫 행의 단가만 사용
+      if (!seenSets[name] && price && Number(price) > 0) {
+        priceMap[name] = Number(price);
+        seenSets[name] = true;
+      }
+    }
+  }
+
+  var entries = Object.keys(priceMap);
+  if (entries.length === 0) {
+    Logger.log("❌ 세트마스터에서 단가 있는 항목을 찾지 못함");
+    return "❌ 단가 있는 항목 0건";
+  }
+
+  // ── 계약서 템플릿 마스터 시트 열기 ──
+  var templateSS = SpreadsheetApp.openById(templateId);
+  var sheets = templateSS.getSheets();
+
+  var masterSheet = null;
+  for (var s = 0; s < sheets.length; s++) {
+    if (sheets[s].getName().indexOf("마스터") >= 0) {
+      masterSheet = sheets[s];
+      break;
+    }
+  }
+
+  if (!masterSheet) {
+    // 마스터 시트가 없으면 새로 생성
+    masterSheet = templateSS.insertSheet("마스터");
+    Logger.log("마스터 시트 새로 생성됨");
+  }
+
+  // ── 기존 데이터 클리어 후 덮어쓰기 ──
+  masterSheet.clearContents();
+
+  // 헤더
+  masterSheet.getRange(1, 1).setValue("장비명");
+  masterSheet.getRange(1, 2).setValue("단가");
+
+  // 데이터 (배치 쓰기)
+  var writeData = [];
+  entries.sort(); // 가나다순 정렬
+  for (var e = 0; e < entries.length; e++) {
+    writeData.push([entries[e], priceMap[entries[e]]]);
+  }
+
+  if (writeData.length > 0) {
+    masterSheet.getRange(2, 1, writeData.length, 2).setValues(writeData);
+  }
+
+  // 단가 열 숫자 포맷
+  masterSheet.getRange(2, 2, writeData.length, 1).setNumberFormat("#,##0");
+
+  var summary = "✅ 템플릿 마스터 동기화 완료: " + writeData.length + "건 (세트마스터 기준)";
+  Logger.log(summary);
+  return summary;
+}
 
 /**
  * 진단용: 템플릿 마스터 시트 구조와 현재 데이터를 로그로 출력.
@@ -891,14 +1006,10 @@ function readTemplateMasterSheet() {
   return out.join("\n");
 }
 
-/**
- * 홈페이지 기준 최신 가격으로 템플릿 마스터 시트 업데이트.
- * 2026-05-10 village6k.co.kr 기준.
- *
- * 사용법: GAS 편집기에서 이 함수 실행.
- * ※ 마스터 시트 구조(열 순서)를 자동 감지함.
- */
-function updateTemplateMasterPrices() {
+// ── 아래 함수는 deprecated — syncTemplateMasterFromSetMaster() 사용 ──
+// 홈페이지 하드코딩 가격 대신 세트마스터에서 실시간 동기화하므로 더 이상 불필요.
+// 혹시 모를 참고용으로 남겨둠. 삭제해도 무방.
+function updateTemplateMasterPrices_DEPRECATED() {
   var props = PropertiesService.getScriptProperties();
   var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
   if (!templateId) {
