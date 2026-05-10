@@ -370,7 +370,7 @@ function showDetail(itemId) {
   html += detailRow('반납', item['반납'] || '-');
   html += detailRow('상태', item.status || '-');
   html += '<div class="detail-actions">';
-  html += '<button class="detail-action" onclick="event.stopPropagation();openAddModal(\'' + escJs(item['거래ID']) + '\')">장비 추가</button>';
+  html += '<button class="detail-action" onclick="event.stopPropagation();openAddModal(\'' + escJs(item['거래ID']) + '\',\'' + escJs(candidateDateForItem(item)) + '\')">장비 추가</button>';
   html += '<button class="detail-action danger" onclick="event.stopPropagation();deleteTimelineEquip(\'' + escJs(item['거래ID']) + '\',\'' + escJs(item['세트명'] || item['장비명']) + '\')">삭제</button>';
   html += '</div>';
   html += '<button class="detail-close" onclick="closeDetail()">닫기</button>';
@@ -440,6 +440,12 @@ function todayStr() {
   return d.getFullYear() + '-' + ('0'+(d.getMonth()+1)).slice(-2) + '-' + ('0'+d.getDate()).slice(-2);
 }
 
+function candidateDateForItem(item) {
+  var checkout = String((item && item['반출']) || '').slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(checkout)) return checkout;
+  return '';
+}
+
 function loadEquipList() {
   if (equipListCache) return Promise.resolve(equipListCache);
   return fetch(API_URL + '?key=village2026&action=read&sheet=' + encodeURIComponent('목록') + '&range=A2:A1000')
@@ -457,11 +463,11 @@ function loadEquipList() {
     .catch(function() { equipListCache = []; return []; });
 }
 
-function openAddModal(prefillTid) {
+function openAddModal(prefillTid, prefillDate) {
   var search = document.getElementById('searchInput').value.trim();
   document.getElementById('addEquipInput').value = search;
   document.getElementById('addQtyInput').value = '1';
-  document.getElementById('candidateDateInput').value = todayStr();
+  document.getElementById('candidateDateInput').value = prefillDate || todayStr();
   document.getElementById('candidateNameInput').value = prefillTid || '';
   document.getElementById('candidateSelect').innerHTML = '<option value="">후보를 먼저 찾으세요</option>';
   document.getElementById('addModal').classList.add('show');

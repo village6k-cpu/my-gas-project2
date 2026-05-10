@@ -959,7 +959,7 @@ body {
       <div class="form-group">
         <div class="mode-tabs">
           <button class="mode-tab active" id="modeExisting" onclick="setAddMode('existing')">기존 예약건에 추가</button>
-          <button class="mode-tab" id="modeNew" onclick="setAddMode('new')">신규 예약</button>
+          <button class="mode-tab" id="modeNew" onclick="setAddMode('new')" style="display:none">신규 예약</button>
         </div>
       </div>
 
@@ -1004,12 +1004,12 @@ body {
         </div>
       </div>
 
-      <!-- 공통: 세트명 -->
+      <!-- 공통: 장비/세트명 -->
       <div class="form-group" style="position:relative">
-        <label class="form-label">세트명 *</label>
-        <input type="text" id="addSetName" class="form-input" placeholder="세트명 입력 또는 선택..." autocomplete="off" spellcheck="false">
+        <label class="form-label">장비/세트명 *</label>
+        <input type="text" id="addSetName" class="form-input" placeholder="장비 또는 세트명 입력..." autocomplete="off" spellcheck="false">
         <div class="ac-dropdown" id="acDropdown"></div>
-        <div id="addSetNameError" style="font-size:11px;color:var(--red);margin-top:3px;display:none">세트마스터에 등록된 세트만 선택 가능합니다</div>
+        <div id="addSetNameError" style="font-size:11px;color:var(--red);margin-top:3px;display:none">목록에 등록된 장비/세트만 선택 가능합니다</div>
       </div>
 
       <!-- 선택된 예약건 정보 요약 -->
@@ -1735,17 +1735,17 @@ function closeDetail() {
 window.closeDetail = closeDetail;
 
 // ── Add Modal ──
-var equipNames = {}; // 세트명 → true (유효 목록)
+var equipNames = {}; // 장비/세트명 → true (유효 목록)
 
 function loadEquipNames() {
-  fetch(API_URL + "?key=village2026&action=read&sheet=" + encodeURIComponent("세트마스터") + "&range=A:A")
+  fetch(API_URL + "?key=village2026&action=read&sheet=" + encodeURIComponent("목록") + "&range=A:A")
     .then(function(r) { return r.json(); })
     .then(function(res) {
       var unique = {};
       var rows = res.data || res.values || [];
       rows.forEach(function(row) {
         var name = String(row[0] || "").trim();
-        if (name && name !== "세트명") unique[name] = true;
+        if (name && name !== "장비/세트명" && name !== "세트명") unique[name] = true;
       });
       equipNames = unique;
     })
@@ -1867,6 +1867,10 @@ function addSubmitLabel() {
 }
 
 function setAddMode(mode) {
+  if (mode === "new") {
+    showToast("신규 예약은 확인요청에서 등록하세요");
+    mode = "existing";
+  }
   addMode = mode;
   document.getElementById("modeExisting").classList.toggle("active", mode === "existing");
   document.getElementById("modeNew").classList.toggle("active", mode === "new");
@@ -1941,7 +1945,7 @@ function showBookingList(custName) {
       info.style.display = "block";
       info.innerHTML = '<strong>' + escHtml(b.custName) + '</strong> · '
         + escHtml(b.반출 + " ~ " + b.반납)
-        + '<br>거래ID: ' + escHtml(b.거래ID) + ' · 여기에 세트를 추가합니다';
+        + '<br>거래ID: ' + escHtml(b.거래ID) + ' · 여기에 장비/세트를 추가합니다';
     });
     container.appendChild(card);
   });
@@ -2046,7 +2050,7 @@ function openAddModalForBooking(item) {
   info.style.display = "block";
   info.innerHTML = '<strong>' + escHtml(selectedBooking.custName || '-') + '</strong> · '
     + escHtml((selectedBooking.반출 || '-') + ' ~ ' + (selectedBooking.반납 || '-'))
-    + '<br>거래ID: ' + escHtml(selectedBooking.거래ID) + ' · 이 예약에 세트를 추가합니다';
+    + '<br>거래ID: ' + escHtml(selectedBooking.거래ID) + ' · 이 예약에 장비/세트를 추가합니다';
   document.getElementById("bookingSelectGroup").style.display = "none";
   setTimeout(function() { document.getElementById("addSetName").focus(); }, 50);
 }
@@ -2057,8 +2061,8 @@ function closeAddModal() {
 
 function submitAddBooking() {
   var setName = document.getElementById("addSetName").value.trim();
-  if (!setName) { showToast("세트명을 입력해주세요"); return; }
-  if (!equipNames[setName]) { showToast("세트마스터에 없는 세트명입니다"); return; }
+  if (!setName) { showToast("장비/세트명을 입력해주세요"); return; }
+  if (!equipNames[setName]) { showToast("목록에 없는 장비/세트명입니다"); return; }
 
   var txID, custName, fromDate, fromTime, toDate, toTime;
 

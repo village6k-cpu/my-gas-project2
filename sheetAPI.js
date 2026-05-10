@@ -692,8 +692,7 @@ function runFunction(funcName, params) {
     "warmDashboardCache",
     "getInventoryConflicts",
     "getInventoryConflictsSlackMessage",
-    "listAllTriggers",
-    "getClaudeApiKey"
+    "listAllTriggers"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -744,8 +743,7 @@ function runFunction(funcName, params) {
       warmDashboardCache: typeof warmDashboardCache !== "undefined" ? warmDashboardCache : null,
       getInventoryConflicts: typeof getInventoryConflicts !== "undefined" ? getInventoryConflicts : null,
       getInventoryConflictsSlackMessage: typeof getInventoryConflictsSlackMessage !== "undefined" ? getInventoryConflictsSlackMessage : null,
-      listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null,
-      getClaudeApiKey: typeof getClaudeApiKey !== "undefined" ? getClaudeApiKey : null
+      listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {
       var fnResult = globalFuncs[funcName]();

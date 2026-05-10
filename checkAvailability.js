@@ -64,11 +64,13 @@ function showManual() {
 }
 
 function showTimeline() {
-  const html = HtmlService.createHtmlOutputFromFile('timeline')
-    .setWidth(1200)
-    .setHeight(680)
-    .setTitle('빌리지 스케줄 타임라인');
-  SpreadsheetApp.getUi().showModalDialog(html, '📊 스케줄 타임라인');
+  var url = PropertiesService.getScriptProperties().getProperty('WEB_APP_URL');
+  if (!url) url = ScriptApp.getService().getUrl();
+  url += '?page=timeline';
+  const html = HtmlService.createHtmlOutput(
+    '<script>window.open("' + url + '", "_blank");google.script.host.close();</script>'
+  ).setWidth(200).setHeight(50);
+  SpreadsheetApp.getUi().showModalDialog(html, '스케줄 열기');
 }
 
 function openDashboard() {
@@ -1410,8 +1412,12 @@ function refreshEquipmentList() {
   const equipSheet = ss.getSheetByName("장비마스터");
   const setSheet = ss.getSheetByName("세트마스터");
 
-  // ── 목록 생성: 세트마스터 A열에서만 (중복 제거 + 정렬) ──
+  // ── 목록 생성: 장비마스터 D열 + 세트마스터 A열 (중복 제거 + 정렬) ──
   const names = new Set();
+  if (equipSheet && equipSheet.getLastRow() >= 2) {
+    equipSheet.getRange(2, 4, equipSheet.getLastRow() - 1, 1)
+      .getValues().flat().forEach(n => { if (n) names.add(n.toString().trim()); });
+  }
   if (setSheet && setSheet.getLastRow() >= 2) {
     setSheet.getRange(2, 1, setSheet.getLastRow() - 1, 1)
       .getValues().flat().forEach(n => { if (n) names.add(n.toString().trim()); });
@@ -4923,11 +4929,10 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
 }
 
 /**
- * Claude API 키를 Script Properties에서 반환 (클라이언트에서 직접 호출용)
+ * 과거 호환용 stub. 클라이언트에 Claude API 키를 반환하면 안 된다.
  */
 function getClaudeApiKey() {
-  var key = PropertiesService.getScriptProperties().getProperty("ANTHROPIC_API_KEY");
-  return { key: key || "" };
+  return { error: "disabled: use aiParse endpoint" };
 }
 
 /**

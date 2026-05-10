@@ -308,24 +308,12 @@ function doRegisterSelected(idx) {
   // 제외 장비가 있으면 먼저 해당 행을 보류 처리 후 등록
   if (unchecked.length > 0) {
     showToast("제외 장비 보류 처리 중...");
-    fetch(API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({
-        key: "village2026",
-        action: "run",
-        func: "excludeEquipFromRequest",
-        args: { reqID: req.reqID, 제외장비: unchecked }
-      }),
-      redirect: "manual"
-    })
-    .then(function(r) {
-      if (r.type === "opaqueredirect" || r.status === 0) {
-        return fetch(API_URL + "?key=village2026&action=" + encodeURIComponent("등록") + "&reqID=" + encodeURIComponent(req.reqID));
-      }
-      return r.json().then(function() {
-        return fetch(API_URL + "?key=village2026&action=" + encodeURIComponent("등록") + "&reqID=" + encodeURIComponent(req.reqID));
-      });
+    var excludeArgs = encodeURIComponent(JSON.stringify({ reqID: req.reqID, 제외장비: unchecked }));
+    fetch(API_URL + "?key=village2026&action=run&func=excludeEquipFromRequest&args=" + excludeArgs)
+    .then(function(r) { return r.json(); })
+    .then(function(excludeRes) {
+      if (excludeRes.error) throw new Error(excludeRes.error);
+      return fetch(API_URL + "?key=village2026&action=" + encodeURIComponent("등록") + "&reqID=" + encodeURIComponent(req.reqID));
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
