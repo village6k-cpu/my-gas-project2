@@ -783,6 +783,8 @@ function inspectTradePaymentColumn() {
     paymentColumn: "J",
     header: "",
     options: [],
+    columns: [],
+    sampleRowsByPayment: [],
     note: "스크립트 setValue/API 변경은 일반적으로 대상 스프레드시트의 onEdit 트리거를 실행하지 않습니다."
   };
   try {
@@ -796,19 +798,89 @@ function inspectTradePaymentColumn() {
       info.error = "거래내역 시트 없음";
       return info;
     }
-    info.header = String(거래시트.getRange(1, 10).getDisplayValue() || "");
+    var lastCol = Math.min(Math.max(거래시트.getLastColumn(), 18), 30);
+    var lastRow = 거래시트.getLastRow();
+    var headers = 거래시트.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
+    var idCol = _findHeaderCol_(headers, ["거래ID", "거래 Id", "거래id"]) || 5;
+    info.header = String(headers[9] || "");
+    info.lastColumn = columnToLetter_(lastCol);
+    info.idColumn = columnToLetter_(idCol);
     info.options = getTradePaymentOptions_();
     info.sampleValidationA1 = "";
-    for (var r = 2; r <= Math.min(거래시트.getMaxRows(), 51); r++) {
-      if (거래시트.getRange(r, 10).getDataValidation()) {
-        info.sampleValidationA1 = "J" + r;
-        break;
+
+    var validationRows = Math.min(Math.max(거래시트.getMaxRows() - 1, 1), 50);
+    var validationGrid = 거래시트.getRange(2, 10, validationRows, lastCol - 9).getDataValidations();
+    for (var c = 10; c <= lastCol; c++) {
+      var sampleRule = null;
+      var sampleA1 = "";
+      for (var r = 0; r < validationGrid.length; r++) {
+        sampleRule = validationGrid[r][c - 10];
+        if (sampleRule) {
+          sampleA1 = columnToLetter_(c) + (r + 2);
+          break;
+        }
       }
+      if (c === 10 && sampleA1) info.sampleValidationA1 = sampleA1;
+      info.columns.push({
+        column: columnToLetter_(c),
+        header: String(headers[c - 1] || ""),
+        sampleValidationA1: sampleA1,
+        validationOptions: paymentOptionsFromRule_(sampleRule),
+        validationType: sampleRule ? String(sampleRule.getCriteriaType()) : ""
+      });
+    }
+
+    if (lastRow >= 2) {
+      var scanRows = Math.min(lastRow - 1, 500);
+      var display = 거래시트.getRange(2, 1, scanRows, lastCol).getDisplayValues();
+      var formulas = 거래시트.getRange(2, 1, scanRows, lastCol).getFormulas();
+      var seen = {};
+      var samples = [];
+      for (var i = 0; i < display.length; i++) {
+        var payment = String(display[i][9] || "").trim();
+        if (!payment || seen[payment]) continue;
+        seen[payment] = true;
+        samples.push(compactPaymentInspectRow_(i + 2, idCol, headers, display[i], formulas[i], lastCol));
+        if (samples.length >= 10) break;
+      }
+      info.sampleRowsByPayment = samples;
     }
   } catch (err) {
     info.error = err.message;
   }
   return info;
+}
+
+function columnToLetter_(col) {
+  var s = "";
+  while (col > 0) {
+    var mod = (col - 1) % 26;
+    s = String.fromCharCode(65 + mod) + s;
+    col = Math.floor((col - mod) / 26);
+  }
+  return s;
+}
+
+function compactPaymentInspectRow_(rowNumber, idCol, headers, displayRow, formulaRow, lastCol) {
+  var after = {};
+  var formulas = {};
+  for (var c = 11; c <= lastCol; c++) {
+    var header = String(headers[c - 1] || "").trim();
+    var label = columnToLetter_(c) + (header ? ":" + header : "");
+    var val = String(displayRow[c - 1] || "").trim();
+    var formula = String(formulaRow[c - 1] || "").trim();
+    if (val || formula || header) {
+      after[label] = val;
+      if (formula) formulas[label] = formula;
+    }
+  }
+  return {
+    row: rowNumber,
+    tradeId: String(displayRow[idCol - 1] || "").trim(),
+    payment: String(displayRow[9] || "").trim(),
+    afterPaymentColumns: after,
+    formulasAfterPayment: formulas
+  };
 }
 
 function _findHeaderCol_(headers, candidates) {
