@@ -873,7 +873,7 @@ body {
     <input type="date" class="date-input" id="dateFrom" title="시작일">
     <span style="color:var(--text-muted);font-size:12px">~</span>
     <input type="date" class="date-input" id="dateTo" title="종료일">
-    <button class="hdr-btn primary" onclick="openAddModal()">+ 예약</button>
+    <button class="hdr-btn primary" onclick="openAddModal()">+ 장비 추가</button>
     <span class="refresh-info" id="refreshInfo"></span>
   </div>
 </div>
@@ -928,6 +928,7 @@ body {
   <div class="ctx-sep"></div>
   <div class="ctx-item" onclick="ctxAction('detail')">&#x1F4CB; 상세 보기</div>
   <div class="ctx-item" onclick="ctxAction('contract')">&#x1F4C4; 계약서 열기</div>
+  <div class="ctx-item" onclick="ctxAction('addEquip')">&#x2795; 이 예약에 장비 추가</div>
   <div class="ctx-item" onclick="ctxAction('alimtalk')">&#x1F4AC; 알림톡 발송</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item danger" onclick="ctxAction('deleteEquip')">&#x1F5D1; 이 장비 삭제</div>
@@ -1652,6 +1653,10 @@ function ctxAction(action) {
     showToast("계약서 열기: " + (item["거래ID"] || ""));
     return;
   }
+  if (action === "addEquip") {
+    openAddModalForBooking(item);
+    return;
+  }
   if (action === "alimtalk") {
     showToast("알림톡 발송: " + (item.custName || ""));
     return;
@@ -1857,6 +1862,10 @@ function loadEquipNames() {
 var addMode = "existing"; // "existing" | "new"
 var selectedBooking = null; // 선택된 기존 예약건 { 거래ID, custName, 반출, 반납, ... }
 
+function addSubmitLabel() {
+  return addMode === "existing" ? "가용 확인 후 추가" : "등록";
+}
+
 function setAddMode(mode) {
   addMode = mode;
   document.getElementById("modeExisting").classList.toggle("active", mode === "existing");
@@ -1866,6 +1875,7 @@ function setAddMode(mode) {
   selectedBooking = null;
   document.getElementById("selectedBookingInfo").style.display = "none";
   document.getElementById("bookingSelectGroup").style.display = "none";
+  document.getElementById("addSubmitBtn").textContent = addSubmitLabel();
 }
 window.setAddMode = setAddMode;
 
@@ -2012,6 +2022,35 @@ function openAddModal(fromDate, toDate) {
   document.getElementById("addModal").style.display = "flex";
 }
 
+function openAddModalForBooking(item) {
+  if (!item || !item["거래ID"]) {
+    showToast("추가할 예약건 정보를 찾지 못했습니다");
+    return;
+  }
+  openAddModal(item.start ? new Date(item.start) : null, item.end ? new Date(item.end) : null);
+  setAddMode("existing");
+  document.getElementById("addCustName").value = item.custName || "";
+  selectedBooking = {
+    거래ID: item["거래ID"],
+    custName: item.custName || "",
+    세트명: item.세트명 || item["세트명원본"] || item["장비명"] || "",
+    반출: item.반출 || "",
+    반납: item.반납 || "",
+    반출시간: item.반출시간 || "",
+    반납시간: item.반납시간 || "",
+    start: item.start,
+    end: item.end,
+    status: item.status
+  };
+  var info = document.getElementById("selectedBookingInfo");
+  info.style.display = "block";
+  info.innerHTML = '<strong>' + escHtml(selectedBooking.custName || '-') + '</strong> · '
+    + escHtml((selectedBooking.반출 || '-') + ' ~ ' + (selectedBooking.반납 || '-'))
+    + '<br>거래ID: ' + escHtml(selectedBooking.거래ID) + ' · 이 예약에 세트를 추가합니다';
+  document.getElementById("bookingSelectGroup").style.display = "none";
+  setTimeout(function() { document.getElementById("addSetName").focus(); }, 50);
+}
+
 function closeAddModal() {
   document.getElementById("addModal").style.display = "none";
 }
@@ -2058,7 +2097,7 @@ function submitAddBooking() {
       .then(function(r) { return r.json(); })
       .then(function(res) {
         submitBtn.disabled = false;
-        submitBtn.textContent = "등록";
+        submitBtn.textContent = addSubmitLabel();
         if (res.error) {
           showToast("추가 실패: " + res.error);
         } else {
@@ -2069,7 +2108,7 @@ function submitAddBooking() {
       })
       .catch(function() {
         submitBtn.disabled = false;
-        submitBtn.textContent = "등록";
+        submitBtn.textContent = addSubmitLabel();
         showToast("네트워크 오류");
       });
     return;
@@ -2108,6 +2147,7 @@ function submitAddBooking() {
 }
 
 window.openAddModal = openAddModal;
+window.openAddModalForBooking = openAddModalForBooking;
 window.closeAddModal = closeAddModal;
 window.submitAddBooking = submitAddBooking;
 
