@@ -994,7 +994,8 @@ function syncTemplateMasterFromSetMaster() {
 
   for (var fr = 0; fr < formulaRanges.length; fr++) {
     var prot = formulaRanges[fr].protect().setDescription("수식 보호 — 단가/금액 자동 계산");
-    prot.setWarningOnly(true);  // 경고만 표시, 완전 차단은 아님
+    prot.removeEditors(prot.getEditors());
+    if (prot.canDomainEdit()) prot.setDomainEdit(false);
   }
 
   Logger.log("수식 보호 적용: F~G, L~M (warning only)");
