@@ -1021,27 +1021,6 @@ function syncTemplateMasterFromSetMaster() {
   return summary;
 }
 
-/**
- * 템플릿 수식 자동 복구 트리거 설치.
- * 매시간 syncTemplateMasterFromSetMaster() 실행 → 수식 삭제돼도 자동 복구.
- * GAS 편집기에서 한 번만 실행하면 됨.
- */
-function installTemplateSyncTrigger() {
-  // 기존 동일 트리거 제거 (중복 방지)
-  ScriptApp.getProjectTriggers().forEach(function(t) {
-    if (t.getHandlerFunction() === 'syncTemplateMasterFromSetMaster') {
-      ScriptApp.deleteTrigger(t);
-    }
-  });
-
-  ScriptApp.newTrigger('syncTemplateMasterFromSetMaster')
-    .timeBased()
-    .everyHours(1)
-    .create();
-
-  Logger.log("✅ 템플릿 동기화 트리거 설치 완료 (매 1시간)");
-  return "✅ 매시간 자동 동기화 트리거 설치됨";
-}
 
 /**
  * 기존 계약서 파일 일괄 열람 공유 설정.
