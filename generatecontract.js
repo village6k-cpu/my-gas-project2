@@ -348,7 +348,7 @@ function generateContractFile(ss, 거래ID, 추가요청) {
 
   // ── 링크가 있는 사람은 누구나 열람 가능 (직원 PC 열람용) ──
   try {
-    newFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    newFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.EDIT);
   } catch (shareErr) {
     Logger.log("공유 설정 실패 (무시): " + shareErr.message);
   }
@@ -1028,7 +1028,7 @@ function shareAllContractsAsViewable() {
   while (files.hasNext()) {
     var file = files.next();
     try {
-      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.EDIT);
       count++;
     } catch (e) {
       Logger.log("공유 실패: " + file.getName() + " - " + e.message);
@@ -1037,7 +1037,7 @@ function shareAllContractsAsViewable() {
 
   // 폴더 자체도 링크 열람 설정
   try {
-    folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.EDIT);
     Logger.log("폴더 공유 설정 완료");
   } catch (e) {
     Logger.log("폴더 공유 설정 실패: " + e.message);
