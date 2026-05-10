@@ -830,3 +830,467 @@ function setupContractSettings() {
     "이제 메뉴 → 📄 계약서 생성으로 사용하실 수 있습니다."
   );
 }
+
+
+// ====================================================================
+// 계약서 템플릿 마스터 시트 관리
+// ====================================================================
+
+/**
+ * 진단용: 템플릿 마스터 시트 구조와 현재 데이터를 로그로 출력.
+ * GAS 편집기 → 실행 → 로그 확인.
+ */
+function readTemplateMasterSheet() {
+  var props = PropertiesService.getScriptProperties();
+  var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
+  if (!templateId) {
+    Logger.log("❌ CONTRACT_TEMPLATE_ID 미설정");
+    return "❌ CONTRACT_TEMPLATE_ID 미설정";
+  }
+
+  var ss = SpreadsheetApp.openById(templateId);
+  var sheets = ss.getSheets();
+  var out = [];
+
+  out.push("=== 템플릿 시트 목록 ===");
+  sheets.forEach(function(s, i) {
+    out.push(i + ": " + s.getName() + " (" + s.getLastRow() + "행 x " + s.getLastColumn() + "열)");
+  });
+
+  // 마스터 시트 찾기 (이름에 '마스터' 포함)
+  var masterSheet = null;
+  sheets.forEach(function(s) {
+    if (s.getName().indexOf("마스터") >= 0) masterSheet = s;
+  });
+
+  if (!masterSheet) {
+    out.push("\n❌ '마스터' 시트를 찾을 수 없음");
+    Logger.log(out.join("\n"));
+    return out.join("\n");
+  }
+
+  out.push("\n=== 마스터 시트: " + masterSheet.getName() + " ===");
+
+  var lastRow = masterSheet.getLastRow();
+  var lastCol = masterSheet.getLastColumn();
+  if (lastRow < 1 || lastCol < 1) {
+    out.push("비어있음");
+    Logger.log(out.join("\n"));
+    return out.join("\n");
+  }
+
+  // 헤더 + 전체 데이터
+  var data = masterSheet.getRange(1, 1, lastRow, lastCol).getDisplayValues();
+  out.push("헤더: " + JSON.stringify(data[0]));
+  out.push("---");
+  for (var i = 1; i < data.length; i++) {
+    out.push("행" + (i + 1) + ": " + JSON.stringify(data[i]));
+  }
+
+  Logger.log(out.join("\n"));
+  return out.join("\n");
+}
+
+/**
+ * 홈페이지 기준 최신 가격으로 템플릿 마스터 시트 업데이트.
+ * 2026-05-10 village6k.co.kr 기준.
+ *
+ * 사용법: GAS 편집기에서 이 함수 실행.
+ * ※ 마스터 시트 구조(열 순서)를 자동 감지함.
+ */
+function updateTemplateMasterPrices() {
+  var props = PropertiesService.getScriptProperties();
+  var templateId = props.getProperty("CONTRACT_TEMPLATE_ID");
+  if (!templateId) {
+    Logger.log("❌ CONTRACT_TEMPLATE_ID 미설정");
+    return "❌ CONTRACT_TEMPLATE_ID 미설정";
+  }
+
+  var ss = SpreadsheetApp.openById(templateId);
+  var sheets = ss.getSheets();
+
+  // 마스터 시트 찾기
+  var masterSheet = null;
+  sheets.forEach(function(s) {
+    if (s.getName().indexOf("마스터") >= 0) masterSheet = s;
+  });
+
+  if (!masterSheet) {
+    Logger.log("❌ '마스터' 시트를 찾을 수 없음");
+    return "❌ '마스터' 시트를 찾을 수 없음";
+  }
+
+  var lastRow = masterSheet.getLastRow();
+  var lastCol = masterSheet.getLastColumn();
+
+  if (lastRow < 1 || lastCol < 1) {
+    Logger.log("❌ 마스터 시트가 비어있음");
+    return "❌ 마스터 시트가 비어있음";
+  }
+
+  // 헤더 읽기 → 장비명/단가 열 자동 감지
+  var headers = masterSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+
+  var nameCol = -1;
+  var priceCol = -1;
+
+  for (var c = 0; c < headers.length; c++) {
+    var h = String(headers[c]).trim();
+    if (h === "장비명" || h === "품목" || h === "이름" || h === "품명" || h === "장비") nameCol = c;
+    if (h === "단가" || h === "가격" || h === "정가" || h === "1일" || h === "대여료" || h === "렌탈료") priceCol = c;
+  }
+
+  // 헤더 매칭 실패 시 — 2열(A=장비명, B=단가) 기본 구조로 폴백
+  if (nameCol < 0) nameCol = 0;
+  if (priceCol < 0) priceCol = (lastCol >= 2) ? 1 : 0;
+
+  Logger.log("마스터 시트: " + masterSheet.getName());
+  Logger.log("헤더: " + JSON.stringify(headers));
+  Logger.log("장비명 열: " + (nameCol + 1) + " (0-idx " + nameCol + ")");
+  Logger.log("단가 열: " + (priceCol + 1) + " (0-idx " + priceCol + ")");
+
+  // 2026-05-10 홈페이지(village6k.co.kr) 기준 가격표 (정가, 원/24h)
+  var latestPrices = {
+    // ── 카메라 풀세트 ──
+    "픽시스 6K 풀세트 (PL 마운트) - 입고 예정": 150000,
+    "소니 BURANO 베이직 세트(뉴클, 무선 제외)": 200000,
+    "소니 BURANO 풀세트": 250000,
+    "소니 FX6 바디 세트 (CF-A 메모리, 배터리 포함)": 60000,
+    "소니 FX6 바디 세트": 60000,
+    "소니 A7S3 풀세트": 80000,
+    "소니 FX3 풀세트": 90000,
+    "소니 FX6 바디 세트 + FE 28-135 렌즈": 90000,
+    "소니 FX9 바디 세트 + FE 28-135 렌즈": 90000,
+    "소니 FX9 바디 세트 (XQD 메모리, 배터리 포함)": 60000,
+    "소니 FX9 바디 세트": 60000,
+    "RED 코모도 풀세트(EF/PL마운트 중 선택)": 100000,
+    "RED 코모도 풀세트": 100000,
+    "소니 FX6 풀세트": 130000,
+    "소니 FX9 풀세트": 130000,
+    "BMPCC 6K Pro 풀세트": 60000,
+    "BMPCC 6K 풀세트": 50000,
+    // ── 카메라 ──
+    "인스타360 X5 (+인비져블 셀피스틱)": 30000,
+    "인스타360 X5": 30000,
+    "소니 Z-90 캠코더(4K)": 50000,
+    "소니 Z-90 캠코더": 50000,
+    "소니 AX43A 캠코더(4K)": 30000,
+    "소니 AX43A 캠코더": 30000,
+    "캐논 R6 MARK II + RF 100-500 (또는 100-400)": 60000,
+    "캐논 R6 MARK II + RF 100-500": 60000,
+    "소니 AX-700 캠코더(4K)": 30000,
+    "소니 AX-700 캠코더": 30000,
+    "소니 A7S3 바디 세트 (CF-A 메모리, 배터리 포함)": 40000,
+    "소니 A7S3 바디 세트": 40000,
+    "소니 A7S3 바디": 40000,
+    "소니 FX3 바디 세트 (CF-A 메모리, 배터리 포함)": 50000,
+    "소니 FX3 바디 세트": 50000,
+    "소니 FX3 바디": 50000,
+    "소니 A7S3 바디 세트 + FE 28-135 렌즈": 70000,
+    "소니 A7S3 바디 세트 + 24-70 GM 렌즈": 65000,
+    "소니 FX3 바디 세트 + FE 28-135 렌즈": 80000,
+    "소니 FX3 바디 세트 + 24-70 GM 렌즈": 75000,
+    "고프로 히어로11 블랙 패키지": 20000,
+    "고프로 히어로10 블랙 패키지": 20000,
+    "오막포+백사투": 50000,
+    "오즈모 포켓3": 20000,
+    "캐논 R6 MARK II": 40000,
+    "캐논 5D MARK IV(오막포)": 30000,
+    "캐논 5D MARK IV": 30000,
+    "맨프로토 143A (카메라 거치 가능 대형 매직암)": 5000,
+    "맨프로토 143A": 5000,
+    // ── 삼각대 ──
+    "울란지 Video Fast (75볼- 셔틀러 플로우텍 스타일)": 15000,
+    "울란지 Video Fast": 15000,
+    "셔틀러 플로우텍 aktiv8 GS": 30000,
+    "셔틀러 비디오 20": 35000,
+    "맨프로토 MVMX PRO 500(모노포드)": 10000,
+    "맨프로토 MVMX PRO 500": 10000,
+    "서튼 ST-V15(100볼)": 15000,
+    "서튼 ST-V15": 15000,
+    "캠기어 엘리트 15(100볼)": 20000,
+    "캠기어 엘리트 15": 20000,
+    "캠기어 마크4(75볼)": 10000,
+    "캠기어 마크4": 10000,
+    "셔틀러 에이스 CF XL(75볼)": 20000,
+    "셔틀러 에이스 CF XL": 20000,
+    "셔틀러 에이스 CF M(75볼)": 10000,
+    "셔틀러 에이스 CF M": 10000,
+    "미니 삼각대": 5000,
+    // ── 렌즈 ──
+    "삼양 XEEN 렌즈 세트": 50000,
+    "DZOFILM CATTA ACE 3 Lens 세트": 100000,
+    "DZOFILM CATTA ACE": 100000,
+    "캐논 RF 100-500": 30000,
+    "쿠크 COOKE SP3 렌즈 세트": 200000,
+    "COOKE SP3 렌즈 세트": 200000,
+    "니시 아테나 프라임 단렌즈 세트": 100000,
+    "라오와 24mm f/14 Probe (PL/E/EF)": 30000,
+    "라오와 24mm f/14 Probe": 30000,
+    "소니 90mm 매크로 렌즈": 20000,
+    "캐논 100-400mm II(백사투)": 30000,
+    "캐논 100-400mm II": 30000,
+    "소니 100-400 GM": 30000,
+    "시그마 FF High Speed Prime 렌즈 세트": 100000,
+    "소니 GM 단렌즈 세트": 90000,
+    "삼양 XEEN CF 렌즈 세트": 80000,
+    "소니 GM 렌즈 세트(단품 대여 가능)": 70000,
+    "소니 GM 렌즈 세트": 70000,
+    "소니 24-70 GM II": 25000,
+    "소니 70-200 GM II": 30000,
+    "소니 FE 28-135 렌즈 (E 마운트)": 30000,
+    "소니 FE 28-135 렌즈": 30000,
+    "소니 FE 28-135": 30000,
+    "소니 FE 24-105mm 렌즈 (E 마운트)": 20000,
+    "소니 FE 24-105mm 렌즈": 20000,
+    "소니 FE 24-105mm": 20000,
+    "시그마 아트 줌렌즈 세트": 40000,
+    "삼양 VDSLR MK2 세트": 50000,
+    "삼양 100mm 매크로 렌즈": 10000,
+    "라오와 12mm T2.9 Zero-D Cine": 35000,
+    "아이릭스 150mm CINE 매크로 렌즈": 20000,
+    "틸타 MB-T12 매트박스 (4x5.65, 3stages)": 20000,
+    "틸타 MB-T12 매트박스": 20000,
+    "틸타 MB-T16 미라지 매트박스 (4x5.65, 경량형)": 15000,
+    "틸타 MB-T16 미라지 매트박스": 15000,
+    "매트박스 미니(틸타 or 스몰리그)": 7000,
+    "매트박스 미니": 7000,
+    "NiSi PL 필터 (4x5.65)": 10000,
+    "NiSi PL 필터": 10000,
+    "NiSi True-Color PL 필터 (4x5.65)": 10000,
+    "NiSi True-Color PL 필터": 10000,
+    "티펜 Black Pro-Mist 필터 (4x5.65 or 67-82mm)": 10000,
+    "티펜 Black Pro-Mist 필터": 10000,
+    "슈나이더 Hollywood Black Magic 필터 (4x5.65 or 67-82mm)": 10000,
+    "슈나이더 Hollywood Black Magic 필터": 10000,
+    "H&Y REVORING (3-1000 ND + CPL 필터)": 10000,
+    "H&Y REVORING": 10000,
+    "메타본즈(PL to E)": 10000,
+    "메타본즈": 10000,
+    "IR ND 필터": 10000,
+    "H&Y 가변 어댑터링 (필터 어댑터, 67-82mm)": 5000,
+    "H&Y 가변 어댑터링": 5000,
+    "시그마 MC-11 (렌즈 어댑터, EF to E)": 5000,
+    "시그마 MC-11": 5000,
+    // ── 조명 ──
+    "어퓨쳐 스톰 80C": 20000,
+    "아마란 F21C": 20000,
+    "난룩스 Evoke 1200B": 50000,
+    "파보튜브II 30XR 2KIT": 35000,
+    "어퓨쳐 600D(최대 광량 600X의 약 1.6배)": 30000,
+    "어퓨쳐 600D": 30000,
+    "아마란 PT4C 4KIT": 60000,
+    "아마란 PT4C 2KIT": 30000,
+    "어퓨쳐 LS 60X": 20000,
+    "어퓨쳐 300X 세트 (2세트 5만원)": 25000,
+    "어퓨쳐 300X 세트": 25000,
+    "어퓨쳐 아마란 300C 세트(RGBWW)": 20000,
+    "어퓨쳐 아마란 300C 세트": 20000,
+    "아마란 300C 세트": 20000,
+    "어퓨쳐 노바 P300C 세트(2세트 6만원)": 30000,
+    "어퓨쳐 노바 P300C 세트": 30000,
+    "어퓨쳐 600X 프로 세트": 35000,
+    "어퓨쳐 600C 프로 세트 (RGBWW)": 40000,
+    "어퓨쳐 600C 프로 세트": 40000,
+    "시네로이드 CFL-800 세트": 20000,
+    "아마란 F22C": 35000,
+    "캐논 스피드라이트 430EX III-RT (스트로보)": 15000,
+    "캐논 스피드라이트 430EX III-RT": 15000,
+    "파보튜브II 30X 2KIT": 30000,
+    "파보튜브II 30X 4KIT": 60000,
+    "파보튜브II 6C": 5000,
+    "어퓨쳐 B7C 2KIT": 20000,
+    "어퓨쳐 B7C 8KIT": 40000,
+    "어퓨쳐 MC4 트래블 KIT": 20000,
+    "어퓨쳐 Spotlight 마운트(아이리스 제공)": 10000,
+    "어퓨쳐 Spotlight 마운트": 10000,
+    "어퓨쳐 F10 프레넬 렌즈+반도어(600용)": 10000,
+    "어퓨쳐 F10 프레넬 렌즈": 10000,
+    "어퓨쳐 2X 프레넬 렌즈(300용)": 5000,
+    "어퓨쳐 2X 프레넬 렌즈": 5000,
+    "어퓨쳐 파워스테이션": 10000,
+    "스크림 세트(고보)": 10000,
+    "스크림 세트": 10000,
+    "C-BOOM (AVENGER D600)": 5000,
+    "C-BOOM": 5000,
+    "C스탠드(그립암, 그립헤드 포함)": 5000,
+    "C스탠드": 5000,
+    "콤보 스탠드": 5000,
+    "석자/넉자 플로피": 5000,
+    "석자/넉자 디퓨젼, 그리드": 5000,
+    "반사판": 5000,
+    "탑 클램프": 5000,
+    "매슬리니": 3000,
+    // ── 모니터/무선 ──
+    "17인치 모니터(구형)": 25000,
+    "17인치 모니터": 25000,
+    "TVLogic LVM-180A": 35000,
+    "DJI SDR Transmission (무선송수신기)": 20000,
+    "DJI SDR Transmission": 20000,
+    "홀리랜드 파이로 7": 20000,
+    "홀리랜드 파이로 S": 30000,
+    "PDMOVIE LIVE AIR 3 Smart LiDAR": 20000,
+    "PDMOVIE LIVE AIR 3": 20000,
+    "틸타 뉴클리어스 Nano II": 20000,
+    "홀리랜드 솔리드컴 C1 PRO - 6S": 70000,
+    "홀리랜드 솔리드컴 C1 PRO - 4S": 50000,
+    "TVLogic VFM-055A": 20000,
+    "TVLogic F-7HS (신형 7인치 모니터)": 30000,
+    "TVLogic F-7HS": 30000,
+    "홀리랜드 마스 4K (1:2 가능, 앱 모니터링 가능)": 25000,
+    "홀리랜드 마스 4K": 25000,
+    "홀리랜드 마스 M1": 20000,
+    "홀리랜드 마스 400S 프로 (1:2 가능, 앱 모니터링 가능)": 20000,
+    "홀리랜드 마스 400S 프로": 20000,
+    "홀리랜드 마스 400S (앱 모니터링 가능)": 20000,
+    "홀리랜드 마스 400S": 20000,
+    "테라덱 볼트 1000XT (1:2 가능)": 30000,
+    "테라덱 볼트 1000XT": 30000,
+    "테라덱 볼트 500LT": 25000,
+    "바식스 아톰 500 (앱 모니터링 가능)": 20000,
+    "바식스 아톰 500": 20000,
+    "5인치 프리뷰 모니터(포트키, TVlogic)": 20000,
+    "5인치 프리뷰 모니터": 20000,
+    "7인치 프리뷰 모니터(포트키)": 20000,
+    "7인치 프리뷰 모니터": 20000,
+    "스몰HD INDIE7 (케이지 세팅)": 25000,
+    "스몰HD INDIE7": 25000,
+    "TVLogic LVM-170A": 30000,
+    "블랙매직 멀티뷰 4HD (4채널 모니터링 어댑터)": 15000,
+    "블랙매직 멀티뷰 4HD": 15000,
+    "틸타 뉴클리어스-M": 20000,
+    "틸타 뉴클리어스-N": 10000,
+    "무선세트(17인치)": 50000,
+    "무선세트(7인치)": 50000,
+    "애플 아이패드(무선 모니터링 가능)": 10000,
+    "애플 아이패드": 10000,
+    // ── 짐벌/그립/달리 ──
+    "MOVMAX RAZOR ARM": 50000,
+    "로닌 RS4 프로": 30000,
+    "핫도그 슬라이더(앱 컨트롤 가능, 최대 길이 120cm)": 30000,
+    "핫도그 슬라이더": 30000,
+    "시네 카트": 20000,
+    "틸타 시네 슬라이더": 50000,
+    "로닌 RS3 프로": 30000,
+    "로닌 RS2 프로": 30000,
+    "모션나인 카트 M1": 20000,
+    "숄더리그": 10000,
+    // ── 오디오 ──
+    "JBL 파티박스 스테이지 320 + 마이크 2대": 30000,
+    "JBL 파티박스 스테이지 320": 30000,
+    "DJI 무선마이크 (1TX + 2RX 구성)": 10000,
+    "DJI 무선마이크": 10000,
+    "젠하이져 MKH-416P(붐마이크 세팅) - 렌탈 일시 중지": 15000,
+    "젠하이져 MKH-416P(붐마이크 세팅)": 15000,
+    "젠하이져 MKH-416P": 15000,
+    "모토로라 T82EX 4세트(고성능 무전기)": 20000,
+    "모토로라 T82EX 4세트": 20000,
+    "소니 UWP-D21": 10000,
+    "로데 비디오 마이크 프로 +": 10000,
+    "로데 비디오 마이크 프로+": 10000,
+    "소니 ECM - 673(붐마이크 세팅)": 10000,
+    "소니 ECM-673(붐마이크 세팅)": 10000,
+    "소니 ECM - 673": 10000,
+    "소니 ECM-673": 10000,
+    "줌 F6": 20000,
+    "줌 H8(핸디 레코더)": 20000,
+    "줌 H8": 20000,
+    "붐마이크 거치대 홀더": 5000,
+    "소니 XLR-K3M 외장마이크": 10000,
+    "소니 XLR-K3M": 10000,
+    "오디오 테크니카 ATH-M50X": 10000,
+    "TAKSTAR CM-63 (콘덴서 마이크)": 10000,
+    "TAKSTAR CM-63": 10000,
+    // ── 기타 ──
+    "강풍기": 5000,
+    "슬레이트": 5000,
+    "고릴라포드": 5000,
+    "모션나인 C-BED": 5000,
+    "KSH17 프롬프터 (100볼 트라이 포함)": 60000,
+    "KSH17 프롬프터": 60000,
+    "에코플로우 델타2 맥스(파워뱅크, 2048Wh, 최대 출력 6kW)": 60000,
+    "에코플로우 델타2 맥스": 60000,
+    "에코플로우 델타2 (파워뱅크, 1024Wh, 2시간 내 완충)": 50000,
+    "에코플로우 델타2": 50000,
+    "지윤 크레인 3S": 30000,
+    "하만카돈 Go+Play (100W 출력, 블루투스 스피커, 2대 페어링 가능)": 10000,
+    "하만카돈 Go+Play": 10000,
+    "Bowers&Wilkins Formation Flex(2조)": 50000,
+    "Bowers&Wilkins Formation Flex": 50000,
+    "더블 헤더": 5000,
+    "CINE SADDLE": 5000,
+    "L 플레이트": 5000,
+    "오토폴": 5000,
+    "V마운트 배터리 세트(3개)": 10000,
+    "V마운트 배터리 세트": 10000,
+    "슈퍼클램프": 3000,
+    "툴콘 TG-1800K (1.8kW, 16kg)": 30000,
+    "툴콘 TG-1800K": 30000,
+    "인터컴 (5세트, 이어셋 포함)": 30000,
+    "인터컴": 30000,
+    "아템 미니 익스트림 ISO": 30000,
+    "애플박스 세트 (풀/하프/쿼터/팬케잌)": 5000,
+    "애플박스 세트": 5000,
+    "사다리": 5000,
+    "포그 머신 (용액 포함)": 20000,
+    "포그 머신": 20000,
+    "헤이저 머신 (용액 포함, 지속 분사)": 30000,
+    "헤이저 머신": 30000,
+    "촬영용 턴테이블 (직경 60cm, 하중 80kg)": 20000,
+    "촬영용 턴테이블": 20000,
+    "클라우드 백업 서비스 (1캠 기준)": 10000,
+    "클라우드 백업 서비스": 10000
+  };
+
+  // 현재 데이터 읽기
+  var data = masterSheet.getRange(1, 1, lastRow, lastCol).getValues();
+
+  var updated = 0;
+  var notFound = [];
+  var log = [];
+
+  for (var i = 1; i < data.length; i++) {
+    var name = String(data[i][nameCol]).trim();
+    if (!name) continue;
+
+    // 1차: 정확히 일치
+    var newPrice = latestPrices[name];
+
+    // 2차: 괄호 등 부가설명 제거 후 매칭
+    if (newPrice === undefined) {
+      var stripped = name.replace(/\s*[\(（].*$/, "").trim();
+      newPrice = latestPrices[stripped];
+    }
+
+    // 3차: 공백/하이픈 정규화
+    if (newPrice === undefined) {
+      var normalized = name.replace(/[\s\-·]/g, "");
+      var keys = Object.keys(latestPrices);
+      for (var k = 0; k < keys.length; k++) {
+        if (keys[k].replace(/[\s\-·]/g, "") === normalized) {
+          newPrice = latestPrices[keys[k]];
+          break;
+        }
+      }
+    }
+
+    if (newPrice !== undefined) {
+      var oldPrice = data[i][priceCol];
+      if (Number(oldPrice) !== newPrice) {
+        log.push("행" + (i + 1) + " [" + name + "] " + oldPrice + " → " + newPrice);
+        masterSheet.getRange(i + 1, priceCol + 1).setValue(newPrice);
+        updated++;
+      }
+    } else {
+      notFound.push(name);
+    }
+  }
+
+  var summary = "✅ 마스터 시트 가격 업데이트 완료\n";
+  summary += "업데이트: " + updated + "건\n";
+  if (log.length > 0) summary += "\n변경 내역:\n" + log.join("\n");
+  if (notFound.length > 0) summary += "\n\n⚠️ 홈페이지에서 매칭 안 된 항목:\n" + notFound.join(", ");
+
+  Logger.log(summary);
+  return summary;
+}

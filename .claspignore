@@ -1,0 +1,12 @@
+# Git worktrees (clasp가 중복 파일 감지하는 것 방지)
+.claude/worktrees/**
+
+# GitHub Pages (GAS에 올릴 필요 없음)
+docs/**
+
+# 기타
+node_modules/**
+wiki/**
+scripts/**
+.git/**
+*.md
