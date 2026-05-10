@@ -970,26 +970,6 @@ function toggleDetail(id) {
   if (el) el.classList.toggle('open');
 }
 
-function addEquip(tid) {
-  var name = prompt("추가할 장비/세트 이름을 입력하세요:");
-  if (!name || !name.trim()) return;
-  name = name.trim();
-  var qtyStr = prompt("수량 (기본 1):", "1");
-  var qty = parseInt(qtyStr, 10);
-  if (!qty || qty < 1) qty = 1;
-
-  fetch(API_URL + '?key=village2026&action=addEquip&tid=' + encodeURIComponent(tid)
-    + '&equipName=' + encodeURIComponent(name) + '&qty=' + qty)
-    .then(function(r) { return r.json(); })
-    .then(function(res) {
-      if (res.error) { alert("추가 실패: " + res.error); return; }
-      // localStorage 캐시 무효화 후 fresh fetch
-      try { localStorage.removeItem('dashCache_v2_' + formatDate(currentDate)); } catch (e) {}
-      loadData(true);
-    })
-    .catch(function(err) { alert("네트워크 오류: " + err.message); });
-}
-
 function removeEquip(tid, equipName) {
   if (!confirm('"' + equipName + '" 을(를) 삭제하시겠습니까?\n(같은 세트 구성품도 함께 삭제됩니다)')) return;
 
@@ -1114,6 +1094,8 @@ function addEquip(tid) {
   pendingAddTid = tid;
   document.getElementById('equipInput').value = '';
   document.getElementById('qtyInput').value = '1';
+  document.getElementById('addEquipConfirmBtn').disabled = false;
+  document.getElementById('addEquipConfirmBtn').textContent = '가용 확인 후 추가';
   document.getElementById('addEquipModal').classList.add('open');
   loadEquipList().then(function() {
     setTimeout(function() {
@@ -1131,13 +1113,13 @@ function closeAddEquipModal() {
 function confirmAddEquip() {
   if (!pendingAddTid) { closeAddEquipModal(); return; }
   var name = (document.getElementById('equipInput').value || '').trim();
-  if (!name) { alert('장비/세트명을 입력하거나 선택하세요.'); return; }
+  if (!name) { alert('장비명을 입력하거나 선택하세요.'); return; }
   var qty = parseInt(document.getElementById('qtyInput').value, 10);
   if (!qty || qty < 1) qty = 1;
 
   var btn = document.getElementById('addEquipConfirmBtn');
   btn.disabled = true;
-  btn.textContent = '추가 중...';
+  btn.textContent = '가용 확인 중...';
 
   var tid = pendingAddTid;
   fetch(API_URL + '?key=village2026&action=addEquip&tid=' + encodeURIComponent(tid)
@@ -1145,15 +1127,19 @@ function confirmAddEquip() {
     .then(function(r) { return r.json(); })
     .then(function(res) {
       btn.disabled = false;
-      btn.textContent = '추가';
-      if (res.error) { alert('추가 실패: ' + res.error); return; }
+      btn.textContent = '가용 확인 후 추가';
+      if (res.error) {
+        alert(res.error.indexOf('가용 불가') === 0 ? res.error : '추가 실패: ' + res.error);
+        return;
+      }
       closeAddEquipModal();
       try { localStorage.removeItem('dashCache_v2_' + formatDate(currentDate)); } catch (e) {}
       loadData(true);
+      alert('가용 확인 완료. 장비를 추가했습니다.');
     })
     .catch(function(err) {
       btn.disabled = false;
-      btn.textContent = '추가';
+      btn.textContent = '가용 확인 후 추가';
       alert('네트워크 오류: ' + err.message);
     });
 }
@@ -1165,15 +1151,15 @@ window.addEventListener('load', function() { loadEquipList(); });
 <!-- 장비 추가 모달 -->
 <div id="addEquipModal" class="modal-overlay" onclick="if(event.target===this)closeAddEquipModal()">
   <div class="modal-box">
-    <div class="modal-title">장비/세트 추가</div>
-    <label class="modal-label">장비/세트명</label>
+    <div class="modal-title">장비 추가</div>
+    <label class="modal-label">장비명</label>
     <input id="equipInput" class="modal-input" list="equipDatalist" placeholder="입력하거나 목록에서 선택" autocomplete="off" />
     <datalist id="equipDatalist"></datalist>
     <label class="modal-label">수량</label>
     <input id="qtyInput" class="modal-input" type="number" min="1" value="1" />
     <div class="modal-actions">
       <button class="modal-btn modal-btn-cancel" onclick="closeAddEquipModal()">취소</button>
-      <button id="addEquipConfirmBtn" class="modal-btn modal-btn-confirm" onclick="confirmAddEquip()">추가</button>
+      <button id="addEquipConfirmBtn" class="modal-btn modal-btn-confirm" onclick="confirmAddEquip()">가용 확인 후 추가</button>
     </div>
   </div>
 </div>

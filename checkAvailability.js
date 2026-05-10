@@ -1232,7 +1232,14 @@ function dashboardAddEquipment(tid, equipName, qty) {
 
     try { formatScheduleSheet(sched); } catch (e) {}
     scheduleContractRegen(tid);
-    return { success: true, addedRows: newRows.length, isSet: components.length > 0, equipName: equipName };
+    return {
+      success: true,
+      availabilityChecked: true,
+      addedRows: newRows.length,
+      isSet: components.length > 0,
+      equipName: equipName,
+      message: "가용 확인 완료 후 추가"
+    };
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
