@@ -346,6 +346,7 @@
   .detail-row .dl { font-weight: 700; color: var(--text-primary); }
   .detail-actions {
     display: flex;
+    align-items: center;
     gap: 8px;
     flex-wrap: wrap;
     margin-top: 12px;
@@ -623,16 +624,14 @@ function renderList(containerId, items, type) {
         var total = item.equipments.reduce(function(s, eq) { return s + (eq.qty || 1); }, 0);
         html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + total + '건</span></div>';
       }
-      html += '<div class="detail-row"><span>결제수단</span><span class="dl">' + paymentSelectHtml(item) + '</span></div>';
+      html += '<div class="detail-actions">';
       if (item.contractUrl) {
-        html += '<div class="detail-actions">';
         html += '<a class="action-link primary" href="' + escAttr(item.contractUrl) + '" target="_blank" onclick="event.stopPropagation()">계약서 열기</a>';
-        html += '</div>';
       } else {
-        html += '<div class="detail-actions">';
         html += '<button class="action-btn" onclick="event.stopPropagation()" disabled>계약서 링크 없음</button>';
-        html += '</div>';
       }
+      html += paymentSelectHtml(item);
+      html += '</div>';
       if (item.paymentWarning) html += '<div class="detail-note">' + escHtml(item.paymentWarning) + '</div>';
       html += '</div></div>';
     });
