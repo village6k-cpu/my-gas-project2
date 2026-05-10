@@ -901,10 +901,7 @@ function renderList(containerId, items, type) {
       html += '<div class="detail-row"><span>결제수단</span><span class="dl">' + paymentSelectHtml(item) + '</span></div>';
       if (item.contractUrl) {
         html += '<a class="gosu-link-btn primary" href="' + escAttr(item.contractUrl) + '" target="_blank" onclick="event.stopPropagation()">📄 계약서 열기</a>';
-        html += '<a class="gosu-link-btn" href="' + escAttr(contractPdfUrl(item.contractUrl)) + '" target="_blank" onclick="event.stopPropagation()">🖨️ 인쇄용 PDF</a>';
       }
-      // 개고생2.0 AppSheet 거래 점프
-      html += '<a class="gosu-link-btn" href="' + gosuAppsheetUrl(item.tradeId) + '" target="_blank" onclick="event.stopPropagation()">🔗 개고생2.0 거래 열기</a>';
       html += '<a class="gosu-link-btn" href="timeline.html?search=' + encodeURIComponent(item.name) + '" target="_blank" onclick="event.stopPropagation()">📊 타임라인에서 보기</a>';
       if (item.paymentWarning) html += '<div class="detail-note">' + escHtml(item.paymentWarning) + '</div>';
       html += '</div></div>';
@@ -1000,7 +997,7 @@ function toggleTask(btn, tid, action) {
 }
 
 function paymentSelectHtml(item) {
-  var options = ['', '미정', '계좌', '카드', '현금', '기타'];
+  var options = [''].concat((dashboardData && dashboardData.paymentOptions) || ['미정', '계좌', '카드', '현금', '기타']);
   var current = item.paymentMethod || '';
   var html = '<select class="payment-select" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updatePaymentMethod(event,this,\'' + escJs(item.tradeId) + '\')">';
   options.forEach(function(opt) {
@@ -1036,26 +1033,12 @@ function updatePaymentMethod(event, select, tradeId) {
     });
 }
 
-function contractPdfUrl(url) {
-  var m = String(url || '').match(/\/spreadsheets\/d\/([^/]+)/);
-  if (!m) return url || '#';
-  return 'https://docs.google.com/spreadsheets/d/' + m[1] +
-    '/export?format=pdf&size=A4&portrait=true&fitw=true&sheetnames=false&printtitle=false&pagenumbers=false&gridlines=false&fzr=false';
-}
-
 function escHtml(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function escAttr(s) { return escHtml(s).replace(/'/g,'&#39;'); }
 function escJs(s) { return String(s || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,' '); }
-
-// ── 개고생2.0 AppSheet 거래 점프 URL 빌더 ────
-// 원본 패턴(2026-04-26 기준): row=<거래ID> 부분만 치환
-var GOSU_APPSHEET_TEMPLATE = "https://www.appsheet.com/start/9508843a-cebb-4336-8dbe-a55dd3306a76?platform=desktop#appName=%EA%B0%9C%EA%B3%A0%EC%83%9D20-603028247-26-03-14&row={TID}&view=%EA%B1%B0%EB%9E%98%EC%83%81%EC%84%B8";
-function gosuAppsheetUrl(tid) {
-  return GOSU_APPSHEET_TEMPLATE.replace("{TID}", encodeURIComponent(tid));
-}
 
 // ── 장비 목록 캐시 + 모달 ─────────────────────
 var equipListCache = null;

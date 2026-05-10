@@ -244,6 +244,9 @@ function handleRequest(e) {
           params.method || postBody.method || ""
         ));
 
+      case "paymentMeta":
+        return jsonResponse(inspectTradePaymentColumn());
+
       // ━━━ 스케줄 관리 API ━━━
 
       case "list":

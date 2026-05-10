@@ -624,14 +624,15 @@ function renderList(containerId, items, type) {
         html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + total + '건</span></div>';
       }
       html += '<div class="detail-row"><span>결제수단</span><span class="dl">' + paymentSelectHtml(item) + '</span></div>';
-      html += '<div class="detail-actions">';
       if (item.contractUrl) {
+        html += '<div class="detail-actions">';
         html += '<a class="action-link primary" href="' + escAttr(item.contractUrl) + '" target="_blank" onclick="event.stopPropagation()">계약서 열기</a>';
-        html += '<button class="action-btn" onclick="event.stopPropagation();openContractPrint(\'' + escJs(item.contractUrl) + '\')">인쇄용 열기</button>';
+        html += '</div>';
       } else {
+        html += '<div class="detail-actions">';
         html += '<button class="action-btn" onclick="event.stopPropagation()" disabled>계약서 링크 없음</button>';
+        html += '</div>';
       }
-      html += '</div>';
       if (item.paymentWarning) html += '<div class="detail-note">' + escHtml(item.paymentWarning) + '</div>';
       html += '</div></div>';
     });
@@ -655,7 +656,7 @@ function toggleDetail(id) {
 }
 
 function paymentSelectHtml(item) {
-  var options = ['', '미정', '계좌', '카드', '현금', '기타'];
+  var options = [''].concat((dashboardData && dashboardData.paymentOptions) || ['미정', '계좌', '카드', '현금', '기타']);
   var current = item.paymentMethod || '';
   var html = '<select class="payment-select" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updatePaymentMethod(event,this,\'' + escJs(item.tradeId) + '\')">';
   options.forEach(function(opt) {
@@ -689,18 +690,6 @@ function updatePaymentMethod(event, select, tradeId) {
       select.value = prev;
       alert('결제수단 저장 실패: ' + err.message);
     });
-}
-
-function openContractPrint(url) {
-  var printUrl = buildSheetsPdfUrl(url);
-  window.open(printUrl || url, '_blank');
-}
-
-function buildSheetsPdfUrl(url) {
-  var m = String(url || '').match(/\/spreadsheets\/d\/([^/]+)/);
-  if (!m) return '';
-  return 'https://docs.google.com/spreadsheets/d/' + m[1] +
-    '/export?format=pdf&size=A4&portrait=true&fitw=true&sheetnames=false&printtitle=false&pagenumbers=false&gridlines=false&fzr=false';
 }
 
 function escHtml(s) {

@@ -468,7 +468,12 @@ function getDashboardData(targetDate, skipCache) {
   checkoutList.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
   checkinList.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
 
-  var result = { checkout: checkoutList, checkin: checkinList, activeCount: activeCount };
+  var result = {
+    checkout: checkoutList,
+    checkin: checkinList,
+    activeCount: activeCount,
+    paymentOptions: getTradePaymentOptions_()
+  };
   // 캐시 5분으로 확장 (등록/취소/일정변경 시 invalidateDashboardCache로 무효화)
   try { cache.put(cacheKey, JSON.stringify(result), 300); } catch (e) { /* 캐시 오버플로 무시 */ }
   return result;
@@ -689,8 +694,7 @@ function toggleItemCheck(scheduleId, phase, done) {
 }
 
 /**
- * 개고생2.0 거래내역에서 계약서 링크/결제수단을 읽어 대시보드에 붙인다.
- * 결제수단 열이 없으면 ScriptProperties 값만 사용하고 경고를 반환한다.
+ * 개고생2.0/빌리지2.0 거래내역에서 계약서 링크와 J열 결제수단을 읽어 대시보드에 붙인다.
  */
 function getTradeExtrasForIds_(tradeIds, props) {
   var result = {};
@@ -698,8 +702,8 @@ function getTradeExtrasForIds_(tradeIds, props) {
   (tradeIds || []).forEach(function(tid) {
     result[tid] = {
       contractUrl: '',
-      paymentMethod: props['paymentMethod_' + tid] || '',
-      paymentSource: props['paymentMethod_' + tid] ? 'script' : '',
+      paymentMethod: '',
+      paymentSource: '',
       paymentWarning: ''
     };
   });
@@ -715,8 +719,8 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var headers = 거래시트.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
     var idCol = _findHeaderCol_(headers, ["거래ID", "거래 Id", "거래id"]) || 5;
     var contractCol = _findHeaderCol_(headers, ["계약서링크", "계약서 링크", "계약서", "계약서URL", "계약서 URL"]) || 3;
-    var paymentCol = _findHeaderCol_(headers, ["결제수단", "결제 수단", "결제방법", "결제 방법", "결제"]);
-    var values = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, lastCol).getDisplayValues();
+    var paymentCol = 10; // J열: 결제수단
+    var values = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, Math.max(lastCol, paymentCol)).getDisplayValues();
     var wanted = {};
     tradeIds.forEach(function(tid) { wanted[String(tid)] = true; });
 
@@ -725,12 +729,8 @@ function getTradeExtrasForIds_(tradeIds, props) {
       if (!wanted[tid]) return;
       if (!result[tid]) result[tid] = {};
       result[tid].contractUrl = String(row[contractCol - 1] || '').trim();
-      if (paymentCol) {
-        result[tid].paymentMethod = String(row[paymentCol - 1] || '').trim() || result[tid].paymentMethod || '';
-        result[tid].paymentSource = result[tid].paymentMethod ? 'sheet' : result[tid].paymentSource || '';
-      } else if (result[tid].paymentMethod) {
-        result[tid].paymentWarning = "거래내역에 결제수단 열이 없어 임시 저장됨";
-      }
+      result[tid].paymentMethod = String(row[paymentCol - 1] || '').trim();
+      result[tid].paymentSource = result[tid].paymentMethod ? 'sheet:J' : '';
     });
   } catch (err) {
     Object.keys(result).forEach(function(tid) {
@@ -738,6 +738,77 @@ function getTradeExtrasForIds_(tradeIds, props) {
     });
   }
   return result;
+}
+
+function getTradePaymentOptions_() {
+  try {
+    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    if (!개고생URL) return defaultPaymentOptions_();
+    var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
+    if (!거래시트) return defaultPaymentOptions_();
+
+    var maxRows = Math.max(거래시트.getMaxRows(), 2);
+    var scanRows = Math.min(Math.max(maxRows - 1, 1), 50);
+    for (var r = 2; r < 2 + scanRows; r++) {
+      var rule = 거래시트.getRange(r, 10).getDataValidation(); // J열
+      var opts = paymentOptionsFromRule_(rule);
+      if (opts.length > 0) return opts;
+    }
+  } catch (err) {}
+  return defaultPaymentOptions_();
+}
+
+function defaultPaymentOptions_() {
+  return ["미정", "계좌", "카드", "현금", "기타"];
+}
+
+function paymentOptionsFromRule_(rule) {
+  if (!rule) return [];
+  try {
+    var type = rule.getCriteriaType();
+    var vals = rule.getCriteriaValues();
+    if (type === SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) {
+      return (vals[0] || []).map(String).map(function(v) { return v.trim(); }).filter(Boolean);
+    }
+    if (type === SpreadsheetApp.DataValidationCriteria.VALUE_IN_RANGE && vals[0]) {
+      return vals[0].getDisplayValues().map(function(r) { return String(r[0] || '').trim(); }).filter(Boolean);
+    }
+  } catch (err) {}
+  return [];
+}
+
+function inspectTradePaymentColumn() {
+  var info = {
+    sheet: "거래내역",
+    paymentColumn: "J",
+    header: "",
+    options: [],
+    note: "스크립트 setValue/API 변경은 일반적으로 대상 스프레드시트의 onEdit 트리거를 실행하지 않습니다."
+  };
+  try {
+    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    if (!개고생URL) {
+      info.error = "개고생2_URL 미설정";
+      return info;
+    }
+    var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
+    if (!거래시트) {
+      info.error = "거래내역 시트 없음";
+      return info;
+    }
+    info.header = String(거래시트.getRange(1, 10).getDisplayValue() || "");
+    info.options = getTradePaymentOptions_();
+    info.sampleValidationA1 = "";
+    for (var r = 2; r <= Math.min(거래시트.getMaxRows(), 51); r++) {
+      if (거래시트.getRange(r, 10).getDataValidation()) {
+        info.sampleValidationA1 = "J" + r;
+        break;
+      }
+    }
+  } catch (err) {
+    info.error = err.message;
+  }
+  return info;
 }
 
 function _findHeaderCol_(headers, candidates) {
@@ -753,19 +824,16 @@ function _findHeaderCol_(headers, candidates) {
 }
 
 /**
- * 오늘일정/스케줄 웹앱에서 결제수단을 저장한다.
- * 거래내역에 결제수단 열이 있으면 같이 쓰고, 없으면 ScriptProperties에 임시 저장한다.
+ * 오늘일정 웹앱에서 결제수단을 빌리지2.0 거래내역 J열에 저장한다.
  */
 function updateTradePaymentMethod(tid, method) {
   if (!tid) return { error: "tid 필요" };
   tid = String(tid).trim();
   method = String(method || '').trim();
-  var allowed = ["", "미정", "계좌", "카드", "현금", "기타"];
+  var allowed = [""].concat(getTradePaymentOptions_());
   if (allowed.indexOf(method) < 0) return { error: "허용되지 않은 결제수단: " + method };
 
   var props = PropertiesService.getScriptProperties();
-  if (method) props.setProperty('paymentMethod_' + tid, method);
-  else props.deleteProperty('paymentMethod_' + tid);
 
   var wroteSheet = false;
   var warning = "";
@@ -777,27 +845,31 @@ function updateTradePaymentMethod(tid, method) {
         var lastCol = Math.max(거래시트.getLastColumn(), 6);
         var headers = 거래시트.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
         var idCol = _findHeaderCol_(headers, ["거래ID", "거래 Id", "거래id"]) || 5;
-        var paymentCol = _findHeaderCol_(headers, ["결제수단", "결제 수단", "결제방법", "결제 방법", "결제"]);
-        if (paymentCol) {
-          var ids = 거래시트.getRange(2, idCol, 거래시트.getLastRow() - 1, 1).getDisplayValues();
-          for (var i = 0; i < ids.length; i++) {
-            if (String(ids[i][0] || '').trim() === tid) {
-              거래시트.getRange(i + 2, paymentCol).setValue(method);
-              wroteSheet = true;
-              break;
-            }
+        var paymentCol = 10; // J열: 결제수단
+        var ids = 거래시트.getRange(2, idCol, 거래시트.getLastRow() - 1, 1).getDisplayValues();
+        for (var i = 0; i < ids.length; i++) {
+          if (String(ids[i][0] || '').trim() === tid) {
+            거래시트.getRange(i + 2, paymentCol).setValue(method);
+            wroteSheet = true;
+            break;
           }
-          if (!wroteSheet) warning = "거래내역에서 거래ID를 찾지 못해 임시 저장됨";
-        } else {
-          warning = "거래내역에 결제수단 열이 없어 임시 저장됨";
         }
+        if (!wroteSheet) warning = "거래내역에서 거래ID를 찾지 못했습니다";
       }
     }
   } catch (err) {
     warning = "거래내역 결제수단 반영 실패: " + err.message;
   }
   invalidateDashboardCache();
-  return { success: true, tid: tid, method: method, wroteSheet: wroteSheet, warning: warning };
+  return {
+    success: wroteSheet,
+    tid: tid,
+    method: method,
+    wroteSheet: wroteSheet,
+    warning: warning,
+    onEditTriggered: false,
+    note: "스크립트 setValue/API 변경은 대상 거래내역 시트의 onEdit 트리거를 실행하지 않습니다."
+  };
 }
 
 /**
