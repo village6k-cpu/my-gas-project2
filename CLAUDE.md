@@ -127,41 +127,53 @@
 - Google Drive (계약서 파일 생성)
 - GitHub Pages (프론트엔드 직접 서빙 — 속도 개선)
 
-### 배포 순서 (반드시 준수, 전부 자동 실행)
-1. `clasp pull` → GAS 편집기에서 작업한 내용 로컬로 가져오기 (덮어쓰기 방지)
+### 소스 오브 트루스
+**GAS 편집기/원격 Apps Script가 최종본이다.**
+
+맥북, 스튜디오맥, Claude, Codex를 오가며 작업하므로 로컬이나 GitHub가 GAS를 무조건 덮어쓰면 안 된다. 작업 전후에는 반드시 아래 스크립트를 사용한다.
+
+### 배포 순서
+직접 `clasp push -f`를 먼저 치지 말 것. 항상 스크립트가 GitHub/GAS 상태를 확인하고 백업한 뒤 진행한다.
+
+1. 작업 시작: `./scripts/startwork.sh`
 2. 로컬에서 코드 수정
-3. `clasp push` → GAS에 반영
-4. `clasp deploy -i AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT -d "변경 요약"` → 기존 웹앱 URL 유지한 채 새 버전 배포
-5. `git add & commit & push` → 백업 + GitHub Pages(docs/) 자동 반영
+3. 작업 종료: `./scripts/endwork.sh "변경 요약"`
 
-**절대 clasp pull 없이 clasp push 하지 말 것** — GAS 편집기에서 직접 작업한 코드가 날아감
+**절대 startwork 없이 endwork/push 하지 말 것** — 다른 맥 또는 GAS 편집기에서 작업한 코드가 날아갈 수 있다.
 
-**재배포 자동화**: 사용자는 매번 수동 배포하는 걸 원하지 않음. 코드 변경 작업은 4번까지 항상 자동 실행하고 "재배포할까요" 묻지 말 것.
+**재배포 자동화**: 사용자는 매번 수동 배포하는 걸 원하지 않음. 코드 변경 작업은 `endwork.sh`가 `clasp push`와 `clasp deploy`까지 자동 실행한다.
 
 ### 두 맥 오갈 때 워크플로우 (스크립트 자동화)
-두 맥 오가며 작업할 때 sync 빼먹어서 작업분 날리지 않도록 자동화 스크립트 사용.
+두 맥 오가며 작업할 때 sync를 빼먹어서 작업분 날리지 않도록 자동화 스크립트 사용.
 
 **작업 시작 시:**
 ```
 ./scripts/startwork.sh
 ```
-→ git fetch+pull, clasp pull, 동기화 상태 점검까지 자동.
-GAS에 git 미반영분이 있으면 멈추고 안내함.
+→ git fetch+pull, GAS 원격 읽기 전용 비교, 차이가 있으면 백업 후 `clasp pull`.
+GAS 기준 변경분이 있으면 GitHub에 반영하도록 멈추고 안내함.
 
 **작업 종료 시:**
 ```
 ./scripts/endwork.sh "커밋 메시지"
 ```
-→ clasp push, clasp deploy, git commit+push까지 자동.
+→ GitHub가 앞서 있으면 중단, GAS가 HEAD 이후 바뀌었으면 중단, GAS 백업 후 `clasp push`, `clasp deploy`, git commit+push까지 자동.
 메시지 생략하면 프롬프트로 물음.
+로컬 변경사항이 없으면 GAS를 덮어쓰지 않고 종료함.
 
 **상태 진단 (읽기 전용):**
 ```
 ./scripts/synccheck.sh
 ```
-→ 로컬/원격/GAS 동기화 상태 확인. 변경 없음.
+→ 로컬/원격/GAS 동기화 상태 확인. GAS는 임시 폴더로 clone해서 비교하므로 로컬 변경 없음.
 
 **원칙: 떠나는 맥에서 endwork, 도착하는 맥에서 startwork.** 빼먹으면 다른 맥 작업분이 GAS와 git 사이에서 어긋남.
+
+### 안전장치
+- `~/gas-project-backups/`에 push/pull 전 백업 tar.gz를 남긴다.
+- `backup/...` Git 브랜치/태그를 만들어 로컬 이전 상태를 되돌릴 수 있게 한다.
+- `.claspignore`는 docs/scripts/wiki/agent scratch 파일과 GAS에 없는 로컬 보조 파일을 업로드 대상에서 제외한다.
+- `scripts/synccheck.sh`는 읽기 전용 진단이며, 로컬 파일을 덮어쓰지 않는다.
 
 ### 주의사항
 - doGet/doPost는 sheetAPI.js에만 정의

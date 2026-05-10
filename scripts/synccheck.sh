@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # 동기화 상태 진단 — git 로컬 / 원격 / GAS 비교
-# 변경 없이 읽기만 함
+# 변경 없이 읽기만 함. GAS는 임시 폴더로 clone해서 비교한다.
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 BRANCH="$(git branch --show-current)"
+SCRIPT_ID="$(node -e "console.log(require('./.clasp.json').scriptId)")"
+TMPDIR="$(mktemp -d /tmp/gas-synccheck.XXXXXX)"
+cleanup() { rm -rf "$TMPDIR"; }
+trap cleanup EXIT
 
 echo "=========================================="
 echo " 동기화 상태 진단"
@@ -37,10 +41,34 @@ if [[ "$LOCAL_AHEAD" != "0" ]]; then
 fi
 echo ""
 
-# 3. GAS와의 차이 (clasp pull 시뮬레이션은 destructive하므로 안내만)
-echo "[3] GAS 동기화"
-echo "  실제 GAS와 비교하려면: clasp pull 후 git status"
-echo "  (위 명령은 로컬 파일을 GAS 내용으로 덮어쓰므로 주의)"
+# 3. GAS와의 차이 (읽기 전용)
+echo "[3] GAS 동기화 (읽기 전용)"
+(
+  cd "$TMPDIR" || exit 1
+  clasp clone "$SCRIPT_ID" --rootDir "$TMPDIR" >/dev/null 2>&1
+)
+GAS_FILE_LIST="$(find "$TMPDIR" -maxdepth 1 -type f ! -name '.clasp.json' -exec basename {} \; | sort)"
+
+if [[ -z "$GAS_FILE_LIST" ]]; then
+  echo "  ❌ GAS 파일을 가져오지 못했습니다."
+else
+  DIFF_COUNT=0
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    if [[ ! -f "$f" ]]; then
+      echo "  ❌ 로컬에 없음: $f"
+      DIFF_COUNT=$((DIFF_COUNT + 1))
+    elif ! diff -q "$TMPDIR/$f" "$f" >/dev/null; then
+      echo "  ⚠️  내용 다름: $f"
+      DIFF_COUNT=$((DIFF_COUNT + 1))
+    fi
+  done <<< "$GAS_FILE_LIST"
+  if [[ "$DIFF_COUNT" -eq 0 ]]; then
+    echo "  ✅ GAS 파일과 로컬 파일 내용 일치"
+  else
+    echo "  → GAS가 최종본이면 ./scripts/startwork.sh 로 로컬을 맞추세요."
+  fi
+fi
 echo ""
 
 # 4. 최근 커밋
