@@ -48,6 +48,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
     margin-bottom: 14px;
   }
   .header h1 {
@@ -60,6 +62,34 @@
     color: var(--text-muted);
     margin-top: 2px;
   }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .app-switcher {
+    display: flex;
+    overflow: hidden;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .app-tab {
+    display: inline-flex;
+    align-items: center;
+    min-height: 30px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 650;
+    color: var(--text-secondary);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .app-tab:not(:last-child) { border-right: 1px solid var(--border); }
+  .app-tab.active { background: var(--accent); color: #fff; }
+  a.app-tab:hover { color: var(--accent); background: rgba(0,0,0,0.03); }
 
   .icon-btn {
     width: 34px; height: 34px;
@@ -611,6 +641,11 @@
   .nav-link:hover { border-color: var(--accent); color: var(--accent); }
 
   /* ── 반응형 ── */
+  @media (max-width: 600px) {
+    .header-actions { width: 100%; justify-content: flex-start; }
+    .app-switcher { flex: 1; }
+    .app-tab { flex: 1; justify-content: center; }
+  }
   @media (min-width: 768px) {
     .header { padding: 16px 32px 14px; }
     .summary-row { padding: 14px 32px; }
@@ -629,9 +664,12 @@
       <h1 id="headerTitle">오늘 일정</h1>
       <div class="date-label" id="dateLabel"></div>
     </div>
-    <div style="display:flex;align-items:center;gap:8px;">
-      <a href="timeline.html" class="nav-link" title="스케줄 타임라인">📊 스케줄</a>
-      <a href="request.html" class="nav-link" title="예약 입력">📝 예약 입력</a>
+    <div class="header-actions">
+      <div class="app-switcher" aria-label="운영 화면 전환">
+        <span class="app-tab active">오늘 일정</span>
+        <a href="timeline.html" class="app-tab">빌리지 스케줄</a>
+      </div>
+      <a href="request.html" class="nav-link" title="예약 입력">예약 입력</a>
       <button class="icon-btn" onclick="refreshData()" id="refreshBtn" title="새로고침">↻</button>
     </div>
   </div>

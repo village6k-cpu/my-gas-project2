@@ -46,6 +46,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
     margin-bottom: 14px;
   }
   .header h1 {
@@ -58,6 +60,49 @@
     color: var(--text-muted);
     margin-top: 2px;
   }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .app-switcher {
+    display: flex;
+    overflow: hidden;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .app-tab {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .app-tab:not(:last-child) { border-right: 1px solid var(--border); }
+  .app-tab.active { background: var(--accent); color: #fff; }
+  a.app-tab:active { background: var(--bg); }
+  .nav-link {
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    background: var(--surface);
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .nav-link:active { background: var(--bg); }
 
   .icon-btn {
     width: 34px; height: 34px;
@@ -396,6 +441,11 @@
   }
 
   /* ── 반응형 ── */
+  @media (max-width: 600px) {
+    .header-actions { width: 100%; justify-content: flex-start; }
+    .app-switcher { flex: 1; }
+    .app-tab { flex: 1; justify-content: center; }
+  }
   @media (min-width: 768px) {
     .header { padding: 16px 32px 14px; }
     .summary-row { padding: 14px 32px; }
@@ -414,7 +464,14 @@
       <h1 id="headerTitle">오늘 일정</h1>
       <div class="date-label" id="dateLabel"></div>
     </div>
-    <button class="icon-btn" onclick="refreshData()" id="refreshBtn" title="새로고침">↻</button>
+    <div class="header-actions">
+      <div class="app-switcher" aria-label="운영 화면 전환">
+        <span class="app-tab active">오늘 일정</span>
+        <a href="?page=timeline" class="app-tab">빌리지 스케줄</a>
+      </div>
+      <a href="https://village6k-cpu.github.io/my-gas-project2/request.html" class="nav-link">예약 입력</a>
+      <button class="icon-btn" onclick="refreshData()" id="refreshBtn" title="새로고침">↻</button>
+    </div>
   </div>
   <div class="date-nav">
     <button class="date-nav-btn" onclick="changeDate(-1)">◀</button>

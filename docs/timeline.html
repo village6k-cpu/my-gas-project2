@@ -56,33 +56,31 @@ body {
   flex-wrap: wrap;
   z-index: 100;
 }
-.header-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text-primary);
-  white-space: nowrap;
-}
-.view-tabs {
+.app-switcher {
   display: flex;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
+  flex-shrink: 0;
 }
-.view-tab {
-  padding: 5px 12px;
+.app-tab {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 13px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 650;
   color: var(--text-secondary);
-  cursor: pointer;
   border: none;
   background: transparent;
+  text-decoration: none;
   transition: all 0.15s;
   white-space: nowrap;
 }
-.view-tab:not(:last-child) { border-right: 1px solid var(--border); }
-.view-tab:hover { background: rgba(0,0,0,0.03); }
-.view-tab.active { background: var(--accent); color: #fff; }
+.app-tab:not(:last-child) { border-right: 1px solid var(--border); }
+a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
+.app-tab.active { background: var(--accent); color: #fff; }
 
 .group-select {
   padding: 5px 8px;
@@ -131,6 +129,10 @@ body {
   margin-left: auto;
 }
 .hdr-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
   padding: 5px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -141,6 +143,7 @@ body {
   cursor: pointer;
   transition: all 0.15s;
   white-space: nowrap;
+  text-decoration: none;
 }
 .hdr-btn:hover { border-color: var(--accent); color: var(--accent); }
 .hdr-btn.primary {
@@ -149,6 +152,16 @@ body {
   border-color: var(--accent);
 }
 .hdr-btn.primary:hover { opacity: 0.9; }
+.hdr-btn.request-btn {
+  background: var(--bg);
+  color: var(--text-primary);
+}
+.header-separator {
+  width: 1px;
+  height: 24px;
+  background: var(--border);
+  margin: 0 2px 0 4px;
+}
 .date-input {
   padding: 4px 8px;
   border: 1px solid var(--border);
@@ -167,42 +180,6 @@ body {
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
-}
-
-/* ── Filter Bar ── */
-.filter-bar {
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  padding: 6px 16px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  font-size: 12px;
-  flex-wrap: wrap;
-}
-.status-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  border-radius: 12px;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: opacity 0.15s;
-  user-select: none;
-}
-.status-chip.dimmed { opacity: 0.3; }
-.status-chip[data-status="대기"] { background: var(--blue-bg); color: var(--blue-text); }
-.status-chip[data-status="반출중"] { background: var(--amber-bg); color: var(--amber-text); }
-.status-chip[data-status="반납완료"] { background: var(--green-bg); color: var(--green-text); }
-.status-chip[data-status="취소"] { background: var(--gray-bg); color: var(--gray-text); }
-.status-chip[data-status="기타"] { background: var(--purple-bg); color: var(--purple-text); }
-.filter-stats {
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 12px;
 }
 
 /* ── Main Layout ── */
@@ -783,19 +760,6 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-text { font-size: 13px; color: var(--text-secondary); }
 
-/* ── Nav Link ── */
-.nav-link {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--accent);
-  text-decoration: none;
-  padding: 5px 10px;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius);
-  transition: all 0.15s;
-  white-space: nowrap;
-}
-.nav-link:hover { background: var(--accent); color: #fff; }
 .detail-link {
   display: block;
   margin-top: 12px;
@@ -815,11 +779,14 @@ body {
 @media (max-width: 768px) {
   .header { padding: 8px 10px; gap: 6px; }
   .search-box { max-width: 160px; min-width: 80px; }
+  .header-controls { width: 100%; margin-left: 0; }
+  .refresh-info { margin-left: auto; }
 }
 @media (max-width: 600px) {
   .revenue-bar-area { display: none; }
-  .view-tabs { display: none; }
   .group-select { display: none; }
+  .app-switcher { width: 100%; }
+  .app-tab { flex: 1; justify-content: center; }
   .detail-overlay.open { align-items: flex-end; }
   .detail-panel {
     width: 100%;
@@ -850,13 +817,9 @@ body {
 
 <!-- Header -->
 <div class="header">
-  <span class="header-title">빌리지 스케줄</span>
-  <a href="dashboard.html" class="nav-link">오늘 일정</a>
-  <a href="request.html" class="nav-link">예약 입력</a>
-  <div class="view-tabs">
-    <button class="view-tab active">타임라인</button>
-    <button class="view-tab" onclick="showToast('캘린더 뷰는 준비 중입니다')">캘린더</button>
-    <button class="view-tab" onclick="showToast('리스트 뷰는 준비 중입니다')">리스트</button>
+  <div class="app-switcher" aria-label="운영 화면 전환">
+    <span class="app-tab active">빌리지 스케줄</span>
+    <a href="dashboard.html" class="app-tab">오늘 일정</a>
   </div>
   <select class="group-select" id="groupMode" onchange="changeGroupMode(this.value)">
     <option value="세트별">세트별</option>
@@ -868,23 +831,15 @@ body {
     <input type="text" id="searchInput" placeholder="검색..." autocomplete="off">
   </div>
   <div class="header-controls">
-    <button class="hdr-btn" id="filterBtn" onclick="toggleActiveFilter()">필터</button>
     <button class="hdr-btn" onclick="scrollToToday()">오늘</button>
     <input type="date" class="date-input" id="dateFrom" title="시작일">
     <span style="color:var(--text-muted);font-size:12px">~</span>
     <input type="date" class="date-input" id="dateTo" title="종료일">
     <button class="hdr-btn primary" onclick="openAddModal()">+ 장비 추가</button>
     <span class="refresh-info" id="refreshInfo"></span>
+    <span class="header-separator" aria-hidden="true"></span>
+    <a href="request.html" class="hdr-btn request-btn">예약 입력</a>
   </div>
-</div>
-
-<!-- Filter Bar -->
-<div class="filter-bar" id="filterBar">
-  <span class="status-chip" data-status="대기" onclick="toggleStatusChip(this)">대기 <span class="chip-count">0</span></span>
-  <span class="status-chip" data-status="반출중" onclick="toggleStatusChip(this)">반출중 <span class="chip-count">0</span></span>
-  <span class="status-chip" data-status="반납완료" onclick="toggleStatusChip(this)">반납완료 <span class="chip-count">0</span></span>
-  <span class="status-chip" data-status="취소" onclick="toggleStatusChip(this)">취소 <span class="chip-count">0</span></span>
-  <span class="filter-stats" id="filterStats">불러오는 중...</span>
 </div>
 
 <!-- Main Area -->
@@ -1036,8 +991,6 @@ var REFRESH_INTERVAL = 60000;
 var rawGroups = [];
 var rawItems = [];
 var groupMode = "세트별";
-var hiddenStatuses = {};
-var activeFilterOn = false;
 var searchQuery = "";
 var collapsedGroups = {};
 var zoomLevels = [
@@ -1154,9 +1107,6 @@ function buildGroups() {
   var itemsByGroup = {};
 
   var filtered = rawItems.filter(function(it) {
-    if (activeFilterOn && it.status !== "대기" && it.status !== "반출중") return false;
-    var sk = statusKey(it.status);
-    if (hiddenStatuses[sk]) return false;
     if (searchQuery) {
       var q = searchQuery.toLowerCase();
       var match = (it.custName || "").toLowerCase().indexOf(q) >= 0 ||
@@ -1231,25 +1181,6 @@ function computeConflicts() {
   return conflictIds;
 }
 
-// ── Today counts ──
-function todayCounts() {
-  var today = dateOnly(new Date());
-  var out = 0, inn = 0;
-  rawItems.forEach(function(it) {
-    if (it.status === "취소") return;
-    if (isSameDay(it._startDay, today)) out++;
-    if (isSameDay(it._endDay, today)) inn++;
-  });
-  return { out: out, inn: inn };
-}
-
-// ── Status counts ──
-function statusCounts() {
-  var counts = { "대기": 0, "반출중": 0, "반납완료": 0, "취소": 0, "기타": 0 };
-  rawItems.forEach(function(it) { counts[statusKey(it.status)]++; });
-  return counts;
-}
-
 // ── Revenue Data ──
 function revenueByDay() {
   var rev = {};
@@ -1275,20 +1206,6 @@ function render() {
   var today = dateOnly(new Date());
   var colW = getColW();
   var totalW = dateRange.days * colW;
-
-  // Update status chips
-  var sc = statusCounts();
-  document.querySelectorAll(".status-chip").forEach(function(el) {
-    var s = el.getAttribute("data-status");
-    var cnt = el.querySelector(".chip-count");
-    if (cnt) cnt.textContent = sc[s] || 0;
-  });
-
-  // Stats
-  var tc = todayCounts();
-  var statsEl = document.getElementById("filterStats");
-  statsEl.textContent = gd.filteredCount + "건" +
-    (tc.out > 0 || tc.inn > 0 ? " \u00B7 오늘 반출 " + tc.out + " 반납 " + tc.inn : "");
 
   // Build date header
   var dhInner = document.getElementById("dateHeaderInner");
@@ -2138,26 +2055,6 @@ function scrollToToday() {
   gridScroll.scrollTo({ left: Math.max(0, target), behavior: "smooth" });
 }
 window.scrollToToday = scrollToToday;
-
-// ── Status Chips ──
-function toggleStatusChip(el) {
-  var s = el.getAttribute("data-status");
-  hiddenStatuses[s] = !hiddenStatuses[s];
-  el.classList.toggle("dimmed", !!hiddenStatuses[s]);
-  render();
-}
-window.toggleStatusChip = toggleStatusChip;
-
-// ── Active Filter ──
-function toggleActiveFilter() {
-  activeFilterOn = !activeFilterOn;
-  var btn = document.getElementById("filterBtn");
-  btn.style.background = activeFilterOn ? "var(--accent)" : "";
-  btn.style.color = activeFilterOn ? "#fff" : "";
-  btn.style.borderColor = activeFilterOn ? "var(--accent)" : "";
-  render();
-}
-window.toggleActiveFilter = toggleActiveFilter;
 
 // ── Group Collapse ──
 function toggleGroup(name) {
