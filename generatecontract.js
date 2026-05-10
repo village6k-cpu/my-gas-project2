@@ -960,52 +960,36 @@ function syncTemplateMasterFromSetMaster() {
   var itemRows = rows.itemRows || 22;
   var sheetName = masterSheet.getName();
 
-  // 좌측 F열(6열): B열 품목명 → 마스터 시트 VLOOKUP
-  // 우측 L열(12열): H열 품목명 → 마스터 시트 VLOOKUP
-  var leftFormulas = [];
-  var rightFormulas = [];
-  for (var r = 0; r < itemRows; r++) {
-    var rowNum = itemStart + r;
-    leftFormulas.push(['=IFERROR(VLOOKUP(B' + rowNum + ',' + sheetName + '!A:B,2,FALSE),"")']);
-    rightFormulas.push(['=IFERROR(VLOOKUP(H' + rowNum + ',' + sheetName + '!A:B,2,FALSE),"")']);
-  }
+  // ── ARRAYFORMULA로 단가/금액 세팅 ──
+  // ARRAYFORMULA: 한 셀에 수식이 들어가고 아래 셀들은 자동 채워짐.
+  // 개별 셀 삭제 불가 → 소유자든 누구든 실수로 못 지움.
+  var itemEnd = itemStart + itemRows - 1;
 
-  // 좌측 G열(7열): 금액 = 수량(D) * 일수(E) * 단가(F)
-  // 우측 M열(13열): 금액 = 수량(J) * 일수(K) * 단가(L)
-  var leftAmountFormulas = [];
-  var rightAmountFormulas = [];
-  for (var r2 = 0; r2 < itemRows; r2++) {
-    var rn = itemStart + r2;
-    leftAmountFormulas.push(['=IFERROR(D' + rn + '*E' + rn + '*F' + rn + ',"")']);
-    rightAmountFormulas.push(['=IFERROR(J' + rn + '*K' + rn + '*L' + rn + ',"")']);
-  }
+  // 기존 개별 수식 클리어 (ARRAYFORMULA 전환 시 충돌 방지)
+  mainSheet.getRange(itemStart, 6, itemRows, 2).clearContent();   // F~G
+  mainSheet.getRange(itemStart, 12, itemRows, 2).clearContent();  // L~M
 
-  mainSheet.getRange(itemStart, 6, itemRows, 1).setFormulas(leftFormulas);    // F열 단가
-  mainSheet.getRange(itemStart, 7, itemRows, 1).setFormulas(leftAmountFormulas);  // G열 금액
-  mainSheet.getRange(itemStart, 12, itemRows, 1).setFormulas(rightFormulas);   // L열 단가
-  mainSheet.getRange(itemStart, 13, itemRows, 1).setFormulas(rightAmountFormulas); // M열 금액
+  // F열 단가: B열 품목명 → 마스터 VLOOKUP
+  mainSheet.getRange(itemStart, 6).setFormula(
+    '=ARRAYFORMULA(IFERROR(VLOOKUP(B' + itemStart + ':B' + itemEnd + ',' + sheetName + '!A:B,2,FALSE),""))'
+  );
 
-  // ── 수식 셀(F, G, L, M) 보호 — 실수로 지우는 거 방지 ──
-  // 기존 수식 보호 제거 후 재설정 (중복 방지)
-  var existingProtections = mainSheet.getProtections(SpreadsheetApp.ProtectionType.RANGE);
-  for (var p = 0; p < existingProtections.length; p++) {
-    if (existingProtections[p].getDescription().indexOf("수식 보호") >= 0) {
-      existingProtections[p].remove();
-    }
-  }
+  // G열 금액: 수량(D) * 일수(E) * 단가(F)
+  mainSheet.getRange(itemStart, 7).setFormula(
+    '=ARRAYFORMULA(IFERROR(IF(D' + itemStart + ':D' + itemEnd + '="","",D' + itemStart + ':D' + itemEnd + '*E' + itemStart + ':E' + itemEnd + '*F' + itemStart + ':F' + itemEnd + '),""))'
+  );
 
-  var formulaRanges = [
-    mainSheet.getRange(itemStart, 6, itemRows, 2),   // F~G열 (단가+금액)
-    mainSheet.getRange(itemStart, 12, itemRows, 2)    // L~M열 (단가+금액)
-  ];
+  // L열 단가: H열 품목명 → 마스터 VLOOKUP
+  mainSheet.getRange(itemStart, 12).setFormula(
+    '=ARRAYFORMULA(IFERROR(VLOOKUP(H' + itemStart + ':H' + itemEnd + ',' + sheetName + '!A:B,2,FALSE),""))'
+  );
 
-  for (var fr = 0; fr < formulaRanges.length; fr++) {
-    var prot = formulaRanges[fr].protect().setDescription("수식 보호 — 단가/금액 자동 계산");
-    prot.setWarningOnly(true);
-  }
+  // M열 금액: 수량(J) * 일수(K) * 단가(L)
+  mainSheet.getRange(itemStart, 13).setFormula(
+    '=ARRAYFORMULA(IFERROR(IF(J' + itemStart + ':J' + itemEnd + '="","",J' + itemStart + ':J' + itemEnd + '*K' + itemStart + ':K' + itemEnd + '*L' + itemStart + ':L' + itemEnd + '),""))'
+  );
 
-  Logger.log("수식 보호 적용: F~G, L~M (warning only)");
-  Logger.log("수식 세팅: F(단가VLOOKUP) + G(금액=D*E*F) + L(단가VLOOKUP) + M(금액=J*K*L), 각 " + itemRows + "행");
+  Logger.log("ARRAYFORMULA 세팅: F" + itemStart + "(단가), G" + itemStart + "(금액), L" + itemStart + "(단가), M" + itemStart + "(금액)");
 
   // ── 템플릿도 링크 열람 가능하게 ──
   try {
