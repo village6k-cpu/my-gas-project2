@@ -960,36 +960,38 @@ function syncTemplateMasterFromSetMaster() {
   var itemRows = rows.itemRows || 22;
   var sheetName = masterSheet.getName();
 
-  // ── ARRAYFORMULA로 단가/금액 세팅 ──
-  // ARRAYFORMULA: 한 셀에 수식이 들어가고 아래 셀들은 자동 채워짐.
-  // 개별 셀 삭제 불가 → 소유자든 누구든 실수로 못 지움.
+  // ── 헤더 행에 ARRAYFORMULA 배치 ──
+  // 핵심: ARRAYFORMULA 소스를 헤더 행(itemStart-1)에 넣는다.
+  // {"라벨"; ARRAYFORMULA(...)} 구문으로 헤더 라벨 + 아래 데이터를 한 셀에서 관리.
+  // 사용자가 데이터 영역을 전체 선택해서 Delete 눌러도 헤더는 안 지우니까 수식이 살아남는다.
+  var headerRow = itemStart - 1;
   var itemEnd = itemStart + itemRows - 1;
 
-  // 기존 개별 수식 클리어 (ARRAYFORMULA 전환 시 충돌 방지)
-  mainSheet.getRange(itemStart, 6, itemRows, 2).clearContent();   // F~G
-  mainSheet.getRange(itemStart, 12, itemRows, 2).clearContent();  // L~M
+  // 기존 수식 클리어 (전환 시 충돌 방지)
+  mainSheet.getRange(headerRow, 6, itemRows + 1, 2).clearContent();   // F~G (헤더+데이터)
+  mainSheet.getRange(headerRow, 12, itemRows + 1, 2).clearContent();  // L~M
 
-  // F열 단가: B열 품목명 → 마스터 VLOOKUP
-  mainSheet.getRange(itemStart, 6).setFormula(
-    '=ARRAYFORMULA(IFERROR(VLOOKUP(B' + itemStart + ':B' + itemEnd + ',' + sheetName + '!A:B,2,FALSE),""))'
+  // F열: 헤더 "단가" + VLOOKUP
+  mainSheet.getRange(headerRow, 6).setFormula(
+    '={"단가";ARRAYFORMULA(IFERROR(VLOOKUP(B' + itemStart + ':B' + itemEnd + ',' + sheetName + '!A:B,2,FALSE),""))}'
   );
 
-  // G열 금액: 수량(D) * 일수(E) * 단가(F)
-  mainSheet.getRange(itemStart, 7).setFormula(
-    '=ARRAYFORMULA(IFERROR(IF(D' + itemStart + ':D' + itemEnd + '="","",D' + itemStart + ':D' + itemEnd + '*E' + itemStart + ':E' + itemEnd + '*F' + itemStart + ':F' + itemEnd + '),""))'
+  // G열: 헤더 "금액" + 수량*일수*단가
+  mainSheet.getRange(headerRow, 7).setFormula(
+    '={"금액";ARRAYFORMULA(IFERROR(IF(D' + itemStart + ':D' + itemEnd + '="","",D' + itemStart + ':D' + itemEnd + '*E' + itemStart + ':E' + itemEnd + '*F' + itemStart + ':F' + itemEnd + '),""))}'
   );
 
-  // L열 단가: H열 품목명 → 마스터 VLOOKUP
-  mainSheet.getRange(itemStart, 12).setFormula(
-    '=ARRAYFORMULA(IFERROR(VLOOKUP(H' + itemStart + ':H' + itemEnd + ',' + sheetName + '!A:B,2,FALSE),""))'
+  // L열: 헤더 "단가" + VLOOKUP
+  mainSheet.getRange(headerRow, 12).setFormula(
+    '={"단가";ARRAYFORMULA(IFERROR(VLOOKUP(H' + itemStart + ':H' + itemEnd + ',' + sheetName + '!A:B,2,FALSE),""))}'
   );
 
-  // M열 금액: 수량(J) * 일수(K) * 단가(L)
-  mainSheet.getRange(itemStart, 13).setFormula(
-    '=ARRAYFORMULA(IFERROR(IF(J' + itemStart + ':J' + itemEnd + '="","",J' + itemStart + ':J' + itemEnd + '*K' + itemStart + ':K' + itemEnd + '*L' + itemStart + ':L' + itemEnd + '),""))'
+  // M열: 헤더 "금액" + 수량*일수*단가
+  mainSheet.getRange(headerRow, 13).setFormula(
+    '={"금액";ARRAYFORMULA(IFERROR(IF(J' + itemStart + ':J' + itemEnd + '="","",J' + itemStart + ':J' + itemEnd + '*K' + itemStart + ':K' + itemEnd + '*L' + itemStart + ':L' + itemEnd + '),""))}'
   );
 
-  Logger.log("ARRAYFORMULA 세팅: F" + itemStart + "(단가), G" + itemStart + "(금액), L" + itemStart + "(단가), M" + itemStart + "(금액)");
+  Logger.log("ARRAYFORMULA(헤더 행 " + headerRow + "): F(단가), G(금액), L(단가), M(금액) → 데이터 " + itemStart + "~" + itemEnd + "행");
 
   // ── 템플릿도 링크 열람 가능하게 ──
   try {
