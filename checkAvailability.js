@@ -922,6 +922,7 @@ function updateTradePaymentMethod(tid, method) {
         for (var i = 0; i < ids.length; i++) {
           if (String(ids[i][0] || '').trim() === tid) {
             거래시트.getRange(i + 2, paymentCol).setValue(method);
+            var sideEffects = applyTradePaymentSideEffects_(거래시트, i + 2, method);
             wroteSheet = true;
             break;
           }
@@ -938,9 +939,49 @@ function updateTradePaymentMethod(tid, method) {
     tid: tid,
     method: method,
     wroteSheet: wroteSheet,
+    sideEffects: sideEffects || { applied: false },
     warning: warning,
     onEditTriggered: false,
-    note: "스크립트 setValue/API 변경은 대상 거래내역 시트의 onEdit 트리거를 실행하지 않습니다."
+    note: "스크립트 setValue/API 변경은 대상 거래내역 시트의 onEdit 트리거를 실행하지 않으므로, 확인된 카드결제 후속값은 API에서 직접 반영합니다."
+  };
+}
+
+function applyTradePaymentSideEffects_(sheet, row, method) {
+  var preset = null;
+  if (method === "카드결제") {
+    preset = {
+      proofType: "미발행",      // K: 증빙 유형
+      issueStatus: "발행완료", // L: 발행요청
+      depositStatus: "입금완료" // M: 입금 상태
+    };
+  }
+  if (!preset) return { applied: false };
+
+  var values = [preset.proofType, preset.issueStatus, preset.depositStatus];
+  var columns = [11, 12, 13]; // K, L, M
+  var labels = ["K", "L", "M"];
+  var skipped = [];
+  for (var i = 0; i < columns.length; i++) {
+    var opts = paymentOptionsFromRule_(sheet.getRange(row, columns[i]).getDataValidation());
+    if (opts.length > 0 && opts.indexOf(values[i]) < 0) {
+      skipped.push(labels[i] + ":" + values[i]);
+    }
+  }
+  if (skipped.length > 0) {
+    return {
+      applied: false,
+      warning: "거래내역 드롭다운에 없는 후속값: " + skipped.join(", ")
+    };
+  }
+
+  sheet.getRange(row, 11, 1, 3).setValues([values]);
+  return {
+    applied: true,
+    columns: {
+      K: preset.proofType,
+      L: preset.issueStatus,
+      M: preset.depositStatus
+    }
   };
 }
 
