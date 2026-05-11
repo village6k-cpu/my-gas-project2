@@ -882,6 +882,7 @@ var DEFAULT_DASHBOARD_NOTES = [
   '세부 구성품 및 추가 요청 사항은 카톡 대화 내용을 한번 더 확인 후 세팅',
   '매직암, 라인, 배터리 등 기타 악세사리류 갯수 철저하게 체크'
 ];
+var DASHBOARD_NOTES_LOCAL_KEY = 'dashboardPostItNotes_fallback_v1';
 var dashboardNotes = DEFAULT_DASHBOARD_NOTES.slice();
 var noteSaveTimer = null;
 
@@ -1046,9 +1047,15 @@ function loadDashboardNotes() {
   fetch(API_URL + '?key=village2026&action=dashboardNotes&ts=' + Date.now())
     .then(function(r) { return r.json(); })
     .then(function(res) {
+      if (res && res.error) throw new Error(res.error);
       if (res && Array.isArray(res.notes)) renderDashboardNotes(res.notes);
     })
-    .catch(function() {});
+    .catch(function() {
+      try {
+        var localNotes = JSON.parse(localStorage.getItem(DASHBOARD_NOTES_LOCAL_KEY) || 'null');
+        if (Array.isArray(localNotes)) renderDashboardNotes(localNotes);
+      } catch (e) {}
+    });
 }
 
 function queueDashboardNotesSave() {
@@ -1071,7 +1078,9 @@ function saveDashboardNotesNow() {
       setTimeout(function() { setNoticeSaveState(''); }, 1200);
     })
     .catch(function() {
-      setNoticeSaveState('저장 실패');
+      try { localStorage.setItem(DASHBOARD_NOTES_LOCAL_KEY, JSON.stringify(notes)); } catch (e) {}
+      setNoticeSaveState('로컬 저장');
+      setTimeout(function() { setNoticeSaveState(''); }, 1200);
     });
 }
 
