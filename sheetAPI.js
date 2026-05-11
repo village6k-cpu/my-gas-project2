@@ -267,6 +267,23 @@ function handleRequest(e) {
           params.method || postBody.method || ""
         ));
 
+      case "updateTradeProof":
+        return jsonResponse(updateTradeProofField(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.field || postBody.field,
+          params.value !== undefined ? params.value : postBody.value
+        ));
+
+      case "sendEstimate":
+        return jsonResponse(requestTradeEstimate(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId
+        ));
+
+      case "issueProof":
+        return jsonResponse(requestTradeProofIssue(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId
+        ));
+
       case "paymentMeta":
         return jsonResponse(inspectTradePaymentColumn());
 

@@ -357,7 +357,15 @@ function getDashboardData(targetDate, skipCache) {
   }
 
   if (!schedSheet || schedSheet.getLastRow() < 2) {
-    return { date: today, checkout: [], checkin: [], activeCount: 0, paymentOptions: getTradePaymentOptions_() };
+    return {
+      date: today,
+      checkout: [],
+      checkin: [],
+      activeCount: 0,
+      paymentOptions: getTradePaymentOptions_(),
+      proofTypeOptions: getTradeProofTypeOptions_(),
+      issueStatusOptions: getTradeIssueStatusOptions_()
+    };
   }
 
   // ⚡ 최적화: getDisplayValues 사용 — Sheets가 이미 표시값 문자열로 반환하므로
@@ -465,6 +473,9 @@ function getDashboardData(targetDate, skipCache) {
       paymentMethod: extra.paymentMethod || '',
       paymentSource: extra.paymentSource || '',
       paymentWarning: extra.paymentWarning || '',
+      proofType: extra.proofType || '',
+      issueStatus: extra.issueStatus || '',
+      issueNote: extra.issueNote || '',
       returnStatus: checkInfo.returnStatus || '',
       returnMemo: checkInfo.returnMemo || '',
       equipmentCheckRow: checkInfo.row || 0,
@@ -505,7 +516,9 @@ function getDashboardData(targetDate, skipCache) {
     checkout: checkoutList,
     checkin: checkinList,
     activeCount: activeCount,
-    paymentOptions: getTradePaymentOptions_()
+    paymentOptions: getTradePaymentOptions_(),
+    proofTypeOptions: getTradeProofTypeOptions_(),
+    issueStatusOptions: getTradeIssueStatusOptions_()
   };
   // 캐시 5분으로 확장 (등록/취소/일정변경 시 invalidateDashboardCache로 무효화)
   try { cache.put(cacheKey, JSON.stringify(result), 300); } catch (e) { /* 캐시 오버플로 무시 */ }
@@ -1042,7 +1055,10 @@ function getTradeExtrasForIds_(tradeIds, props) {
       contractUrl: '',
       paymentMethod: '',
       paymentSource: '',
-      paymentWarning: ''
+      paymentWarning: '',
+      proofType: '',
+      issueStatus: '',
+      issueNote: ''
     };
   });
   if (!tradeIds || tradeIds.length === 0) return result;
@@ -1053,12 +1069,15 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
     if (!거래시트 || 거래시트.getLastRow() < 2) return result;
 
-    var lastCol = Math.max(거래시트.getLastColumn(), 6);
+    var lastCol = Math.max(거래시트.getLastColumn(), 14);
     var headers = 거래시트.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
     var idCol = _findHeaderCol_(headers, ["거래ID", "거래 Id", "거래id"]) || 5;
     var contractCol = _findHeaderCol_(headers, ["계약서링크", "계약서 링크", "계약서", "계약서URL", "계약서 URL"]) || 3;
     var paymentCol = 10; // J열: 결제수단
-    var values = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, Math.max(lastCol, paymentCol)).getDisplayValues();
+    var proofCol = 11;   // K열: 증빙유형
+    var issueCol = 12;   // L열: 발행상태
+    var noteCol = 14;    // N열: 비고
+    var values = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, Math.max(lastCol, paymentCol, proofCol, issueCol, noteCol)).getDisplayValues();
     var wanted = {};
     tradeIds.forEach(function(tid) { wanted[String(tid)] = true; });
 
@@ -1069,6 +1088,9 @@ function getTradeExtrasForIds_(tradeIds, props) {
       result[tid].contractUrl = String(row[contractCol - 1] || '').trim();
       result[tid].paymentMethod = String(row[paymentCol - 1] || '').trim();
       result[tid].paymentSource = result[tid].paymentMethod ? 'sheet:J' : '';
+      result[tid].proofType = String(row[proofCol - 1] || '').trim();
+      result[tid].issueStatus = String(row[issueCol - 1] || '').trim();
+      result[tid].issueNote = String(row[noteCol - 1] || '').trim();
     });
   } catch (err) {
     Object.keys(result).forEach(function(tid) {
@@ -1094,6 +1116,31 @@ function getTradePaymentOptions_() {
     }
   } catch (err) {}
   return defaultPaymentOptions_();
+}
+
+function getTradeProofTypeOptions_() {
+  return getTradeColumnOptions_(11, ["미발행", "세금계산서", "현금영수증(전화번호)", "현금영수증(사업자번호)"]);
+}
+
+function getTradeIssueStatusOptions_() {
+  return getTradeColumnOptions_(12, ["미발행", "발행요청", "발행완료", "전송실패"]);
+}
+
+function getTradeColumnOptions_(column, fallbackOptions) {
+  try {
+    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    if (!개고생URL) return fallbackOptions.slice();
+    var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
+    if (!거래시트) return fallbackOptions.slice();
+
+    var maxRows = Math.max(거래시트.getMaxRows(), 2);
+    var scanRows = Math.min(Math.max(maxRows - 1, 1), 80);
+    for (var r = 2; r < 2 + scanRows; r++) {
+      var opts = paymentOptionsFromRule_(거래시트.getRange(r, column).getDataValidation());
+      if (opts.length > 0) return opts;
+    }
+  } catch (err) {}
+  return fallbackOptions.slice();
 }
 
 function defaultPaymentOptions_() {
@@ -1321,6 +1368,129 @@ function applyTradePaymentSideEffects_(sheet, row, method) {
       M: preset.depositStatus
     }
   };
+}
+
+function updateTradeProofField(tid, field, value) {
+  tid = String(tid || '').trim();
+  field = String(field || '').trim();
+  value = String(value || '').trim();
+
+  if (!tid) return { error: "tid 필요" };
+  if (field !== "proofType" && field !== "issueStatus") return { error: "field는 proofType/issueStatus만 허용" };
+
+  if (field === "issueStatus" && value === "발행요청") {
+    return requestTradeProofIssue(tid);
+  }
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(5000); } catch (lockErr) {}
+
+  try {
+    var 거래시트 = getVillageTradeSheet_();
+    var row = findVillageTradeRow_(거래시트, tid);
+    if (!row) return { error: "거래내역에서 거래ID를 찾지 못했습니다: " + tid };
+
+    var column = field === "proofType" ? 11 : 12; // K/L
+    var label = field === "proofType" ? "증빙유형" : "발행상태";
+    var opts = paymentOptionsFromRule_(거래시트.getRange(row, column).getDataValidation());
+    if (value && opts.length > 0 && opts.indexOf(value) < 0) {
+      return { error: label + " 드롭다운에 없는 값입니다: " + value };
+    }
+
+    거래시트.getRange(row, column).setValue(value);
+    invalidateDashboardCache();
+    return {
+      success: true,
+      tid: tid,
+      field: field,
+      value: value,
+      row: row
+    };
+  } catch (err) {
+    return { error: err.message };
+  } finally {
+    try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+function requestTradeEstimate(tid) {
+  return callVillageOpsApi_("sendEstimate", tid);
+}
+
+function requestTradeProofIssue(tid) {
+  return callVillageOpsApi_("issueProof", tid);
+}
+
+function callVillageOpsApi_(action, tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { error: "tid 필요" };
+
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var url = getVillageOpsApiUrl_(props);
+    var payload = {
+      action: action,
+      id: tid,
+      key: getVillageOpsApiKey_(props)
+    };
+    var res = UrlFetchApp.fetch(url, {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    var text = res.getContentText();
+    var data;
+    try {
+      data = JSON.parse(text);
+    } catch (parseErr) {
+      return { error: "빌리지2.0 응답 파싱 실패: " + text.slice(0, 200) };
+    }
+    if (res.getResponseCode() < 200 || res.getResponseCode() >= 300) {
+      return { error: "빌리지2.0 HTTP " + res.getResponseCode() + ": " + (data.error || text) };
+    }
+    if (data.error) return data;
+    invalidateDashboardCache();
+    return data;
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+function getVillageOpsApiUrl_(props) {
+  var url = props.getProperty("개고생2_API_URL") ||
+    props.getProperty("VILLAGE2_API_URL") ||
+    props.getProperty("VILLAGE_OPS_API_URL") ||
+    "https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec";
+  return String(url || "").trim();
+}
+
+function getVillageOpsApiKey_(props) {
+  return String(
+    props.getProperty("개고생2_API_KEY") ||
+    props.getProperty("VILLAGE_OPS_KEY") ||
+    "village2026"
+  ).trim();
+}
+
+function getVillageTradeSheet_() {
+  var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  if (!개고생URL) throw new Error("개고생2_URL 미설정");
+  var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
+  if (!거래시트) throw new Error("거래내역 시트 없음");
+  return 거래시트;
+}
+
+function findVillageTradeRow_(sheet, tid) {
+  if (!sheet || sheet.getLastRow() < 2) return 0;
+  var lastCol = Math.max(sheet.getLastColumn(), 5);
+  var headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
+  var idCol = _findHeaderCol_(headers, ["거래ID", "거래 Id", "거래id"]) || 5;
+  var ids = sheet.getRange(2, idCol, sheet.getLastRow() - 1, 1).getDisplayValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0] || '').trim() === tid) return i + 2;
+  }
+  return 0;
 }
 
 /**
