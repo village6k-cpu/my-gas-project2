@@ -214,6 +214,15 @@ function handleRequest(e) {
           (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
         ));
 
+      case "updateEquipmentCheck":
+        return jsonResponse(updateEquipmentCheck(
+          params.scheduleId || postBody.scheduleId,
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.equipName || postBody.equipName,
+          params.field || postBody.field,
+          params.value !== undefined ? params.value : postBody.value
+        ));
+
       case "addEquip":
         return jsonResponse(dashboardAddEquipment(
           params.tid || postBody.tid,
