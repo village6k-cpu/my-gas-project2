@@ -815,6 +815,116 @@
   .card-actions .payment-select,
   .card-actions .proof-select { min-height: 32px; }
 
+  .photo-panel {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-light);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .photo-row {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+  }
+  .photo-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-secondary);
+  }
+  .photo-thumbs {
+    min-height: 36px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .photo-thumb,
+  .photo-more {
+    width: 38px;
+    height: 38px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .photo-thumb {
+    object-fit: cover;
+    cursor: pointer;
+  }
+  .photo-more {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .photo-empty {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .photo-add-btn {
+    min-height: 30px;
+    padding: 5px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .photo-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .photo-upload-state {
+    min-height: 13px;
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+  .photo-upload-state.is-error { color: var(--red); }
+  .photo-modal-box { max-width: 760px; }
+  .photo-modal-grid {
+    max-height: min(68vh, 620px);
+    overflow: auto;
+  }
+  .photo-modal-section {
+    margin-top: 14px;
+  }
+  .photo-modal-section:first-child { margin-top: 0; }
+  .photo-modal-section-title {
+    font-size: 13px;
+    font-weight: 800;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+  }
+  .photo-modal-thumbs {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    gap: 8px;
+  }
+  .photo-modal-thumb {
+    aspect-ratio: 1;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    object-fit: cover;
+    background: var(--bg);
+    width: 100%;
+  }
+  @media (max-width: 560px) {
+    .photo-row {
+      grid-template-columns: 36px minmax(0, 1fr);
+    }
+    .photo-add-btn {
+      grid-column: 2;
+      justify-self: flex-start;
+    }
+    .photo-modal-thumbs {
+      grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
+    }
+  }
+
   .modal-overlay {
     display: none;
     position: fixed;
@@ -1465,6 +1575,7 @@ function renderList(containerId, items, type, isSearching) {
       });
       html += '<button class="equip-add-btn" onclick="event.stopPropagation();addEquip(\'' + escHtml(item.tradeId) + '\')">+ 장비추가</button>';
       html += '</div>';
+      html += photoGalleryHtml(item);
       html += cardActionHtml(item);
 
       html += '<div class="card-detail" id="' + cardId + '">';
@@ -1502,6 +1613,230 @@ function switchTab(tab) {
 function toggleDetail(id) {
   var el = document.getElementById(id);
   if (el) el.classList.toggle('open');
+}
+
+function photoGalleryHtml(item) {
+  var photos = normalizeDashboardPhotos(item.photos);
+  var html = '<div class="photo-panel" onclick="event.stopPropagation()">';
+  html += photoPhaseRowHtml(item.tradeId, 'checkout', '반출', photos.checkout);
+  html += photoPhaseRowHtml(item.tradeId, 'checkin', '반납', photos.checkin);
+  if (photos.other && photos.other.length) {
+    html += photoPhaseRowHtml(item.tradeId, 'other', '기타', photos.other, true);
+  }
+  html += '<div class="photo-upload-state" data-photo-state="' + escAttr(item.tradeId) + '"></div>';
+  html += '</div>';
+  return html;
+}
+
+function normalizeDashboardPhotos(photos) {
+  photos = photos || {};
+  return {
+    checkout: photos.checkout || [],
+    checkin: photos.checkin || [],
+    other: photos.other || []
+  };
+}
+
+function photoPhaseRowHtml(tid, phase, label, list, readOnly) {
+  list = list || [];
+  var html = '<div class="photo-row">';
+  html += '<div class="photo-label">' + escHtml(label) + '</div>';
+  html += '<div class="photo-thumbs">';
+  if (!list.length) {
+    html += '<span class="photo-empty">사진 없음</span>';
+  } else {
+    list.slice(0, 4).forEach(function(photo) {
+      var src = photo.thumbnailUrl || photo.url || '';
+      if (!src) return;
+      html += '<img class="photo-thumb" src="' + escAttr(src) + '" alt="' + escAttr(label + ' 사진') + '" loading="lazy" onclick="event.stopPropagation();openPhotoGallery(\'' + escJs(tid) + '\')">';
+    });
+    if (list.length > 4) {
+      html += '<button class="photo-more" onclick="event.stopPropagation();openPhotoGallery(\'' + escJs(tid) + '\')">+' + (list.length - 4) + '</button>';
+    }
+  }
+  html += '</div>';
+  if (!readOnly) {
+    html += '<button class="photo-add-btn" onclick="event.stopPropagation();openPhotoPicker(\'' + escJs(tid) + '\',\'' + phase + '\')">사진 추가</button>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function openPhotoPicker(tid, phase) {
+  var input = document.getElementById('dashboardPhotoInput');
+  if (!input) {
+    input = document.createElement('input');
+    input.id = 'dashboardPhotoInput';
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.multiple = true;
+    input.style.display = 'none';
+    document.body.appendChild(input);
+  }
+  input.onchange = function() {
+    var files = Array.prototype.slice.call(input.files || []);
+    input.value = '';
+    uploadDashboardPhotoFiles(tid, phase, files);
+  };
+  input.click();
+}
+
+function uploadDashboardPhotoFiles(tid, phase, files) {
+  if (!files || !files.length) return;
+  var label = phase === 'checkin' ? '반납' : '반출';
+  setPhotoUploadState(tid, label + ' 사진 ' + files.length + '장 업로드 중', false);
+
+  var successes = 0;
+  var failures = [];
+  files.reduce(function(chain, file) {
+    return chain.then(function() {
+      return compressDashboardPhoto(file)
+        .then(function(payload) {
+          return postDashboardPhoto(tid, phase, payload);
+        })
+        .then(function() { successes++; })
+        .catch(function(err) {
+          failures.push(file.name + ': ' + err.message);
+        });
+    });
+  }, Promise.resolve()).then(function() {
+    if (successes > 0) {
+      if (typeof clearDashboardCacheForDate === 'function') clearDashboardCacheForDate(formatDate(currentDate));
+      loadData(true);
+    }
+    if (failures.length) {
+      setPhotoUploadState(tid, '업로드 실패 ' + failures.length + '건', true);
+      alert('사진 업로드 실패\n' + failures.join('\n'));
+      return;
+    }
+    setPhotoUploadState(tid, '업로드 완료', false);
+    setTimeout(function() { setPhotoUploadState(tid, '', false); }, 1400);
+  });
+}
+
+function compressDashboardPhoto(file) {
+  return new Promise(function(resolve, reject) {
+    if (!file || !/^image\//.test(file.type || '')) {
+      reject(new Error('이미지 파일만 업로드할 수 있습니다'));
+      return;
+    }
+
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var img = new Image();
+      img.onload = function() {
+        var maxSide = 1600;
+        var scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        var width = Math.max(1, Math.round(img.width * scale));
+        var height = Math.max(1, Math.round(img.height * scale));
+        var canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        var ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        var baseName = (file.name || 'photo').replace(/\.[^.]+$/, '') + '.jpg';
+        resolve({
+          fileName: baseName,
+          mimeType: 'image/jpeg',
+          data: canvas.toDataURL('image/jpeg', 0.82)
+        });
+      };
+      img.onerror = function() { reject(new Error('이미지를 읽지 못했습니다')); };
+      img.src = e.target.result;
+    };
+    reader.onerror = function() { reject(new Error('파일을 읽지 못했습니다')); };
+    reader.readAsDataURL(file);
+  });
+}
+
+function postDashboardPhoto(tid, phase, payload) {
+  return fetch(API_URL || '', {
+    method: 'POST',
+    body: JSON.stringify({
+      key: 'village2026',
+      action: 'uploadDashboardPhoto',
+      tid: tid,
+      phase: phase,
+      fileName: payload.fileName,
+      mimeType: payload.mimeType,
+      data: payload.data
+    })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) throw new Error(res.error);
+      return res;
+    });
+}
+
+function setPhotoUploadState(tid, text, isError) {
+  document.querySelectorAll('[data-photo-state]').forEach(function(el) {
+    if ((el.getAttribute('data-photo-state') || '') !== tid) return;
+    el.textContent = text || '';
+    el.classList.toggle('is-error', !!isError);
+  });
+}
+
+function openPhotoGallery(tid) {
+  var photos = getDashboardPhotosByTrade(tid);
+  var modal = document.getElementById('photoModal');
+  var grid = document.getElementById('photoModalGrid');
+  document.getElementById('photoModalTitle').textContent = tid + ' 사진';
+  grid.innerHTML =
+    renderPhotoModalSection('반출 사진', photos.checkout)
+    + renderPhotoModalSection('반납 사진', photos.checkin)
+    + renderPhotoModalSection('기타 사진', photos.other);
+  if (!grid.innerHTML) grid.innerHTML = '<div class="empty-state"><div class="text">등록된 사진이 없습니다</div></div>';
+  modal.classList.add('open');
+}
+
+function closePhotoModal() {
+  document.getElementById('photoModal').classList.remove('open');
+}
+
+function renderPhotoModalSection(title, list) {
+  list = list || [];
+  if (!list.length) return '';
+  var html = '<div class="photo-modal-section">';
+  html += '<div class="photo-modal-section-title">' + escHtml(title) + '</div>';
+  html += '<div class="photo-modal-thumbs">';
+  list.forEach(function(photo) {
+    var src = photo.thumbnailUrl || photo.url || '';
+    var href = photo.url || photo.thumbnailUrl || '';
+    if (!src) return;
+    html += '<a href="' + escAttr(href) + '" target="_blank" onclick="event.stopPropagation()">';
+    html += '<img class="photo-modal-thumb" src="' + escAttr(src) + '" alt="' + escAttr(title) + '" loading="lazy">';
+    html += '</a>';
+  });
+  html += '</div></div>';
+  return html;
+}
+
+function getDashboardPhotosByTrade(tid) {
+  var merged = normalizeDashboardPhotos();
+  if (!dashboardData) return merged;
+  ['checkout', 'checkin'].forEach(function(listName) {
+    (dashboardData[listName] || []).forEach(function(item) {
+      if (item.tradeId !== tid) return;
+      var photos = normalizeDashboardPhotos(item.photos);
+      mergePhotoList_(merged.checkout, photos.checkout);
+      mergePhotoList_(merged.checkin, photos.checkin);
+      mergePhotoList_(merged.other, photos.other);
+    });
+  });
+  return merged;
+}
+
+function mergePhotoList_(target, source) {
+  (source || []).forEach(function(photo) {
+    var key = photo.fileId || photo.url || photo.thumbnailUrl;
+    for (var i = 0; i < target.length; i++) {
+      if ((target[i].fileId || target[i].url || target[i].thumbnailUrl) === key) return;
+    }
+    target.push(photo);
+  });
 }
 
 function cardActionHtml(item) {
@@ -2093,6 +2428,16 @@ window.addEventListener('load', function() { loadEquipList(); });
     <div class="modal-actions">
       <button class="modal-btn" onclick="closeAddEquipModal()">취소</button>
       <button id="addEquipConfirmBtn" class="modal-btn modal-btn-confirm" onclick="confirmAddEquip()">가용 확인 후 추가</button>
+    </div>
+  </div>
+</div>
+
+<div id="photoModal" class="modal-overlay" onclick="if(event.target===this)closePhotoModal()">
+  <div class="modal-box photo-modal-box">
+    <div class="modal-title" id="photoModalTitle">사진</div>
+    <div id="photoModalGrid" class="photo-modal-grid"></div>
+    <div class="modal-actions">
+      <button class="modal-btn" onclick="closePhotoModal()">닫기</button>
     </div>
   </div>
 </div>

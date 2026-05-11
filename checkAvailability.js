@@ -426,10 +426,12 @@ function getDashboardData(targetDate, skipCache) {
 
   // 반출세팅 완료 플래그 일괄 조회 (ScriptProperties 1회 호출)
   var props = PropertiesService.getScriptProperties().getProperties();
-  var tradeExtras = getTradeExtrasForIds_(Object.keys(tradeGroups), props);
+  var dashboardTradeIds = Object.keys(tradeGroups);
+  var tradeExtras = getTradeExtrasForIds_(dashboardTradeIds, props);
+  var tradePhotos = getDashboardPhotoMap_(dashboardTradeIds);
   var equipmentChecks = getEquipmentCheckMap_();
 
-  Object.keys(tradeGroups).forEach(function(tid) {
+  dashboardTradeIds.forEach(function(tid) {
     var g = tradeGroups[tid];
     var cust = contractMap[tid] || {};
     var extra = tradeExtras[tid] || {};
@@ -479,6 +481,7 @@ function getDashboardData(targetDate, skipCache) {
       returnStatus: checkInfo.returnStatus || '',
       returnMemo: checkInfo.returnMemo || '',
       equipmentCheckRow: checkInfo.row || 0,
+      photos: tradePhotos[tid] || emptyDashboardPhotos_(),
       equipments: displayEquip
     };
 
@@ -1098,6 +1101,450 @@ function getTradeExtrasForIds_(tradeIds, props) {
     });
   }
   return result;
+}
+
+var DASHBOARD_PHOTO_SHEET_NAME_ = "반출반납 사진";
+var DASHBOARD_PHOTO_FOLDER_NAME_ = "빌리지_반출반납_사진";
+var DASHBOARD_PHOTO_APPSHEET_FOLDER_NAME_ = "반출반납 사진_Images";
+
+function emptyDashboardPhotos_() {
+  return { checkout: [], checkin: [], other: [] };
+}
+
+function getDashboardPhotosForTrade(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { error: "tid 필요" };
+  var map = getDashboardPhotoMap_([tid]);
+  return {
+    success: true,
+    tid: tid,
+    photos: map[tid] || emptyDashboardPhotos_()
+  };
+}
+
+function getDashboardPhotoMap_(tradeIds) {
+  var wanted = {};
+  var result = {};
+  (tradeIds || []).forEach(function(tid) {
+    tid = String(tid || '').trim();
+    if (!tid) return;
+    wanted[tid] = true;
+    result[tid] = emptyDashboardPhotos_();
+  });
+  if (!tradeIds || tradeIds.length === 0) return result;
+
+  try {
+    var sheet = getDashboardPhotoSheet_(false);
+    if (!sheet || sheet.getLastRow() < 2) return result;
+
+    var schema = getDashboardPhotoSchema_(sheet);
+    if (!schema.tradeIdCol) return result;
+
+    var lastCol = Math.max(sheet.getLastColumn(), schema.maxCol || 1);
+    var rowCount = sheet.getLastRow() - 1;
+    var range = sheet.getRange(2, 1, rowCount, lastCol);
+    var display = range.getDisplayValues();
+    var rich = [];
+    try { rich = range.getRichTextValues(); } catch (richErr) {}
+
+    display.forEach(function(row, i) {
+      var tid = String(row[schema.tradeIdCol - 1] || '').trim();
+      tid = normalizeEquipmentCheckTradeId_(tid);
+      if (!wanted[tid]) return;
+
+      var phase = schema.phaseCol ? normalizeDashboardPhotoPhase_(row[schema.phaseCol - 1]) : '';
+      var uploadedAt = schema.uploadedAtCol ? String(row[schema.uploadedAtCol - 1] || '').trim() : '';
+      var memo = schema.memoCol ? String(row[schema.memoCol - 1] || '').trim() : '';
+      var fileId = schema.fileIdCol ? String(row[schema.fileIdCol - 1] || '').trim() : '';
+      var thumb = schema.thumbCol ? getRichCellText_(row, rich, i, schema.thumbCol) : '';
+
+      if (schema.checkoutPhotoCol) {
+        addDashboardPhotoCell_(result[tid], 'checkout', getRichCellText_(row, rich, i, schema.checkoutPhotoCol), {
+          tid: tid,
+          row: i + 2,
+          fileId: fileId,
+          thumbnailUrl: thumb,
+          uploadedAt: uploadedAt,
+          memo: memo
+        });
+      }
+      if (schema.checkinPhotoCol) {
+        addDashboardPhotoCell_(result[tid], 'checkin', getRichCellText_(row, rich, i, schema.checkinPhotoCol), {
+          tid: tid,
+          row: i + 2,
+          fileId: fileId,
+          thumbnailUrl: thumb,
+          uploadedAt: uploadedAt,
+          memo: memo
+        });
+      }
+      if (schema.photoCol) {
+        addDashboardPhotoCell_(result[tid], phase || 'other', getRichCellText_(row, rich, i, schema.photoCol), {
+          tid: tid,
+          row: i + 2,
+          fileId: fileId,
+          thumbnailUrl: thumb,
+          uploadedAt: uploadedAt,
+          memo: memo
+        });
+      }
+    });
+  } catch (err) {
+    Object.keys(result).forEach(function(tid) {
+      result[tid].warning = "반출반납 사진 조회 실패: " + err.message;
+    });
+  }
+
+  return result;
+}
+
+function addDashboardPhotoCell_(bucket, phase, value, context) {
+  var values = splitDashboardPhotoValues_(value);
+  if (values.length === 0 && context.fileId) values = [context.fileId];
+  if (values.length === 0) return;
+
+  phase = normalizeDashboardPhotoPhase_(phase) || 'other';
+  if (!bucket[phase]) bucket[phase] = [];
+
+  values.forEach(function(raw) {
+    var photo = buildDashboardPhotoEntry_(raw, phase, context);
+    if (!photo.url && !photo.thumbnailUrl) return;
+    if (dashboardPhotoExists_(bucket[phase], photo)) return;
+    bucket[phase].push(photo);
+  });
+}
+
+function dashboardPhotoExists_(list, photo) {
+  var key = photo.fileId || photo.url || photo.thumbnailUrl;
+  if (!key) return false;
+  for (var i = 0; i < list.length; i++) {
+    if ((list[i].fileId || list[i].url || list[i].thumbnailUrl) === key) return true;
+  }
+  return false;
+}
+
+function splitDashboardPhotoValues_(value) {
+  var raw = String(value || '').trim();
+  if (!raw) return [];
+  return raw.split(/\n|,\s*(?=https?:\/\/|[-_A-Za-z0-9]{20,}|[가-힣A-Za-z0-9_.-]+\/)/)
+    .map(function(v) { return String(v || '').trim(); })
+    .filter(Boolean);
+}
+
+function buildDashboardPhotoEntry_(raw, phase, context) {
+  var fileId = context.fileId || extractDriveFileId_(raw);
+  if (!fileId) fileId = resolveDashboardPhotoFileId_(raw);
+  var url = normalizeDashboardPhotoUrl_(raw, fileId);
+  var thumbnailUrl = context.thumbnailUrl || (fileId ? "https://drive.google.com/thumbnail?id=" + encodeURIComponent(fileId) + "&sz=w640" : url);
+  return {
+    phase: phase,
+    url: url,
+    thumbnailUrl: thumbnailUrl,
+    fileId: fileId,
+    uploadedAt: context.uploadedAt || '',
+    memo: context.memo || '',
+    row: context.row || 0
+  };
+}
+
+function normalizeDashboardPhotoUrl_(raw, fileId) {
+  raw = String(raw || '').trim();
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (fileId) return "https://drive.google.com/file/d/" + encodeURIComponent(fileId) + "/view";
+  return raw;
+}
+
+function extractDriveFileId_(value) {
+  var raw = String(value || '').trim();
+  if (!raw) return '';
+  var m = raw.match(/\/d\/([A-Za-z0-9_-]{20,})/);
+  if (m) return m[1];
+  m = raw.match(/[?&]id=([A-Za-z0-9_-]{20,})/);
+  if (m) return m[1];
+  m = raw.match(/\b([A-Za-z0-9_-]{25,})\b/);
+  return m ? m[1] : '';
+}
+
+function resolveDashboardPhotoFileId_(value) {
+  var raw = String(value || '').trim();
+  if (!raw || /^https?:\/\//i.test(raw)) return '';
+  var fileName = raw.split('/').pop();
+  if (!/\.(jpe?g|png|webp|gif|heic)$/i.test(fileName)) return '';
+
+  var cacheKey = 'dashboard_photo_file_' + Utilities.base64EncodeWebSafe(fileName).slice(0, 80);
+  try {
+    var cache = CacheService.getScriptCache();
+    var cached = cache.get(cacheKey);
+    if (cached) return cached === '-' ? '' : cached;
+  } catch (cacheErr) {}
+
+  var fileId = '';
+  try {
+    var files = DriveApp.getFilesByName(fileName);
+    if (files.hasNext()) fileId = files.next().getId();
+  } catch (driveErr) {}
+
+  try {
+    CacheService.getScriptCache().put(cacheKey, fileId || '-', 21600);
+  } catch (cachePutErr) {}
+  return fileId;
+}
+
+function getRichCellText_(displayRow, richRows, rowIndex, col) {
+  var displayValue = String(displayRow[col - 1] || '').trim();
+  try {
+    var rich = richRows && richRows[rowIndex] && richRows[rowIndex][col - 1];
+    if (rich) {
+      var link = rich.getLinkUrl();
+      if (link) return link;
+      var runs = rich.getRuns ? rich.getRuns() : [];
+      for (var i = 0; i < runs.length; i++) {
+        link = runs[i].getLinkUrl();
+        if (link) return link;
+      }
+    }
+  } catch (err) {}
+  return displayValue;
+}
+
+function normalizeDashboardPhotoPhase_(value) {
+  var raw = String(value || '').replace(/\s+/g, '').toLowerCase();
+  if (!raw) return '';
+  if (raw.indexOf('반납') >= 0 || raw.indexOf('입고') >= 0 || raw.indexOf('회수') >= 0 ||
+      raw.indexOf('checkin') >= 0 || raw.indexOf('return') >= 0 || raw === 'in') {
+    return 'checkin';
+  }
+  if (raw.indexOf('반출') >= 0 || raw.indexOf('출고') >= 0 || raw.indexOf('대여') >= 0 ||
+      raw.indexOf('checkout') >= 0 || raw.indexOf('out') >= 0) {
+    return 'checkout';
+  }
+  return '';
+}
+
+function getDashboardPhotoSchema_(sheet) {
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  var headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
+  var schema = {
+    headers: headers,
+    maxCol: lastCol,
+    keyCol: _findHeaderCol_(headers, ["사진ID", "사진 ID", "ID", "PhotoID", "photoId"]),
+    tradeIdCol: _findHeaderCol_(headers, ["거래ID", "거래 ID", "거래Id", "거래id", "계약ID", "예약ID", "예약번호", "tradeId"]),
+    phaseCol: _findHeaderCol_(headers, ["구분", "사진구분", "사진 구분", "반출반납", "반출/반납", "단계", "타입", "유형", "업무", "phase", "type"]),
+    photoCol: _findHeaderCol_(headers, ["사진", "사진URL", "사진 URL", "사진링크", "사진 링크", "이미지", "이미지URL", "이미지 URL", "파일", "파일URL", "파일 URL", "링크", "드라이브링크", "photo", "image", "url"]),
+    checkoutPhotoCol: _findHeaderCol_(headers, ["반출사진", "반출 사진", "출고사진", "출고 사진", "대여사진", "대여 사진", "반출이미지", "checkoutPhoto"]),
+    checkinPhotoCol: _findHeaderCol_(headers, ["반납사진", "반납 사진", "입고사진", "입고 사진", "회수사진", "회수 사진", "반납이미지", "checkinPhoto"]),
+    fileIdCol: _findHeaderCol_(headers, ["파일ID", "파일 ID", "드라이브ID", "드라이브 ID", "DriveFileId", "fileId"]),
+    thumbCol: _findHeaderCol_(headers, ["썸네일", "썸네일URL", "썸네일 URL", "thumbnail", "thumbnailUrl"]),
+    uploadedAtCol: _findHeaderCol_(headers, ["업로드일시", "업로드 일시", "촬영일시", "촬영 일시", "등록일시", "등록 일시", "일시", "타임스탬프", "Timestamp"]),
+    memoCol: _findHeaderCol_(headers, ["메모", "비고", "특이사항", "특이 사항", "memo", "note"])
+  };
+  if (!schema.tradeIdCol) schema.tradeIdCol = detectTradeIdColumn_(sheet, lastCol);
+  return schema;
+}
+
+function detectTradeIdColumn_(sheet, lastCol) {
+  if (!sheet || sheet.getLastRow() < 2) return 0;
+  var scanRows = Math.min(sheet.getLastRow() - 1, 30);
+  var values = sheet.getRange(2, 1, scanRows, lastCol).getDisplayValues();
+  var scores = [];
+  for (var c = 0; c < lastCol; c++) scores[c] = 0;
+  values.forEach(function(row) {
+    row.forEach(function(cell, c) {
+      if (/^\d{6}-\d{3}(?:-\d+)?$/.test(String(cell || '').trim())) scores[c]++;
+    });
+  });
+  var bestCol = 0;
+  var bestScore = 0;
+  scores.forEach(function(score, c) {
+    if (score > bestScore) {
+      bestScore = score;
+      bestCol = c + 1;
+    }
+  });
+  return bestScore > 0 ? bestCol : 0;
+}
+
+function getDashboardPhotoSheet_(required) {
+  var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  if (!개고생URL) {
+    if (required) throw new Error("개고생2_URL 미설정");
+    return null;
+  }
+  var sheet = SpreadsheetApp.openByUrl(개고생URL).getSheetByName(DASHBOARD_PHOTO_SHEET_NAME_);
+  if (!sheet && required) throw new Error("빌리지2.0 '" + DASHBOARD_PHOTO_SHEET_NAME_ + "' 시트 없음");
+  return sheet;
+}
+
+function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo) {
+  tid = normalizeEquipmentCheckTradeId_(String(tid || '').trim());
+  phase = normalizeDashboardPhotoPhase_(phase);
+  if (!tid) return { error: "tid 필요" };
+  if (phase !== 'checkout' && phase !== 'checkin') return { error: "phase는 checkout/checkin만 허용" };
+  if (!data) return { error: "사진 데이터 필요" };
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (lockErr) {}
+
+  try {
+    var sheet = getDashboardPhotoSheet_(true);
+    var schema = getDashboardPhotoSchema_(sheet);
+    var targetPhotoCol = getDashboardPhotoWriteCol_(schema, phase);
+    if (!schema.tradeIdCol) return { error: "반출반납 사진 시트에서 거래ID 열을 찾지 못했습니다" };
+    if (!targetPhotoCol) return { error: "반출반납 사진 시트에서 사진 URL 열을 찾지 못했습니다" };
+    if (!schema.phaseCol && targetPhotoCol === schema.photoCol) {
+      return { error: "공통 사진 열을 쓰려면 구분/사진구분 열이 필요합니다" };
+    }
+
+    var upload = normalizeDashboardUploadData_(data, mimeType);
+    var photoId = makeDashboardPhotoId_();
+    var safeName = makeDashboardPhotoFileName_(photoId, fileName, upload.mimeType);
+    var relativePath = DASHBOARD_PHOTO_APPSHEET_FOLDER_NAME_ + "/" + safeName;
+    var blob = Utilities.newBlob(Utilities.base64Decode(upload.base64), upload.mimeType, safeName);
+    var folder = getDashboardPhotoStorageFolder_();
+    var file = folder.createFile(blob);
+    try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (shareErr) {}
+
+    var fileId = file.getId();
+    var url = file.getUrl();
+    var thumb = "https://drive.google.com/thumbnail?id=" + encodeURIComponent(fileId) + "&sz=w640";
+    var now = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss');
+    var width = Math.max(sheet.getLastColumn(), schema.maxCol || 1);
+    var row = [];
+    for (var i = 0; i < width; i++) row.push('');
+
+    if (schema.keyCol) row[schema.keyCol - 1] = photoId;
+    row[schema.tradeIdCol - 1] = tid;
+    if (schema.phaseCol) row[schema.phaseCol - 1] = phase === 'checkout' ? '반출' : '반납';
+    row[targetPhotoCol - 1] = relativePath;
+    if (schema.fileIdCol) row[schema.fileIdCol - 1] = fileId;
+    if (schema.thumbCol) row[schema.thumbCol - 1] = thumb;
+    if (schema.uploadedAtCol) row[schema.uploadedAtCol - 1] = now;
+    if (schema.memoCol) row[schema.memoCol - 1] = String(memo || '').trim();
+
+    sheet.appendRow(row);
+    invalidateDashboardCache();
+
+    return {
+      success: true,
+      tid: tid,
+      phase: phase,
+      photo: {
+        phase: phase,
+        url: url,
+        thumbnailUrl: thumb,
+        fileId: fileId,
+        sheetValue: relativePath,
+        uploadedAt: now,
+        memo: String(memo || '').trim()
+      }
+    };
+  } catch (err) {
+    return { error: err.message };
+  } finally {
+    try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+function getDashboardPhotoWriteCol_(schema, phase) {
+  if (phase === 'checkout' && schema.checkoutPhotoCol) return schema.checkoutPhotoCol;
+  if (phase === 'checkin' && schema.checkinPhotoCol) return schema.checkinPhotoCol;
+  return schema.photoCol || 0;
+}
+
+function normalizeDashboardUploadData_(data, mimeType) {
+  var raw = String(data || '').trim();
+  var match = raw.match(/^data:([^;]+);base64,(.*)$/);
+  if (match) {
+    return {
+      mimeType: String(match[1] || mimeType || 'image/jpeg').trim(),
+      base64: String(match[2] || '').replace(/\s+/g, '')
+    };
+  }
+  return {
+    mimeType: String(mimeType || 'image/jpeg').trim(),
+    base64: raw.replace(/\s+/g, '')
+  };
+}
+
+function makeDashboardPhotoId_() {
+  return Utilities.getUuid().replace(/-/g, '').slice(0, 8);
+}
+
+function makeDashboardPhotoFileName_(photoId, fileName, mimeType) {
+  var ext = '.jpg';
+  var original = String(fileName || '').trim();
+  var m = original.match(/(\.[A-Za-z0-9]{2,5})$/);
+  if (m) ext = m[1].toLowerCase();
+  else if (String(mimeType || '').indexOf('png') >= 0) ext = '.png';
+  else if (String(mimeType || '').indexOf('webp') >= 0) ext = '.webp';
+  var stamp = Utilities.formatDate(new Date(), 'Asia/Seoul', 'HHmmss');
+  return photoId + ".사진." + stamp + ext;
+}
+
+function getDashboardPhotoStorageFolder_() {
+  var props = PropertiesService.getScriptProperties();
+  var folderId = props.getProperty("DASHBOARD_PHOTO_APPSHEET_FOLDER_ID") ||
+    props.getProperty("반출반납사진_이미지_FOLDER_ID");
+  if (folderId) {
+    try { return DriveApp.getFolderById(folderId); } catch (err) {}
+  }
+  var folders = DriveApp.getFoldersByName(DASHBOARD_PHOTO_APPSHEET_FOLDER_NAME_);
+  return folders.hasNext() ? folders.next() : getDashboardPhotoRootFolder_().createFolder(DASHBOARD_PHOTO_APPSHEET_FOLDER_NAME_);
+}
+
+function getDashboardPhotoRootFolder_() {
+  var props = PropertiesService.getScriptProperties();
+  var folderId = props.getProperty("DASHBOARD_PHOTO_FOLDER_ID") ||
+    props.getProperty("반출반납사진_FOLDER_ID") ||
+    props.getProperty("PHOTO_FOLDER_ID");
+  if (folderId) {
+    try { return DriveApp.getFolderById(folderId); } catch (err) {}
+  }
+  var folders = DriveApp.getFoldersByName(DASHBOARD_PHOTO_FOLDER_NAME_);
+  return folders.hasNext() ? folders.next() : DriveApp.createFolder(DASHBOARD_PHOTO_FOLDER_NAME_);
+}
+
+function inspectDashboardPhotoSheet() {
+  var info = {
+    sheet: DASHBOARD_PHOTO_SHEET_NAME_,
+    exists: false,
+    hidden: false,
+    headers: [],
+    schema: {},
+    lastRow: 0,
+    lastColumn: 0,
+    writable: false,
+    sampleRows: []
+  };
+  try {
+    var sheet = getDashboardPhotoSheet_(false);
+    if (!sheet) return info;
+    var schema = getDashboardPhotoSchema_(sheet);
+    info.exists = true;
+    info.hidden = sheet.isSheetHidden();
+    info.headers = schema.headers;
+    info.schema = {
+      tradeIdCol: schema.tradeIdCol ? columnToLetter_(schema.tradeIdCol) : "",
+      phaseCol: schema.phaseCol ? columnToLetter_(schema.phaseCol) : "",
+      photoCol: schema.photoCol ? columnToLetter_(schema.photoCol) : "",
+      checkoutPhotoCol: schema.checkoutPhotoCol ? columnToLetter_(schema.checkoutPhotoCol) : "",
+      checkinPhotoCol: schema.checkinPhotoCol ? columnToLetter_(schema.checkinPhotoCol) : "",
+      fileIdCol: schema.fileIdCol ? columnToLetter_(schema.fileIdCol) : "",
+      thumbCol: schema.thumbCol ? columnToLetter_(schema.thumbCol) : "",
+      uploadedAtCol: schema.uploadedAtCol ? columnToLetter_(schema.uploadedAtCol) : "",
+      memoCol: schema.memoCol ? columnToLetter_(schema.memoCol) : ""
+    };
+    info.lastRow = sheet.getLastRow();
+    info.lastColumn = sheet.getLastColumn();
+    info.writable = !!(schema.tradeIdCol && (schema.checkoutPhotoCol || schema.checkinPhotoCol || (schema.photoCol && schema.phaseCol)));
+    if (sheet.getLastRow() >= 2) {
+      var rows = Math.min(sheet.getLastRow() - 1, 5);
+      info.sampleRows = sheet.getRange(2, 1, rows, Math.min(sheet.getLastColumn(), 12)).getDisplayValues();
+    }
+  } catch (err) {
+    info.error = err.message;
+  }
+  return info;
 }
 
 function getTradePaymentOptions_() {

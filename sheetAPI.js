@@ -284,6 +284,24 @@ function handleRequest(e) {
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
+      case "dashboardPhotoMeta":
+        return jsonResponse(inspectDashboardPhotoSheet());
+
+      case "dashboardPhotos":
+        return jsonResponse(getDashboardPhotosForTrade(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId
+        ));
+
+      case "uploadDashboardPhoto":
+        return jsonResponse(uploadDashboardPhoto(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.phase || postBody.phase,
+          params.fileName || postBody.fileName,
+          params.mimeType || postBody.mimeType,
+          params.data || postBody.data || params.base64 || postBody.base64,
+          params.memo || postBody.memo
+        ));
+
       case "paymentMeta":
         return jsonResponse(inspectTradePaymentColumn());
 
