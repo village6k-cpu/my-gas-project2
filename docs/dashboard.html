@@ -101,6 +101,7 @@
     min-height: 32px;
     display: inline-flex;
     align-items: center;
+    gap: 6px;
     padding: 6px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -113,6 +114,35 @@
     transition: all 0.15s;
   }
   .nav-link:hover { border-color: var(--accent); color: var(--accent); }
+  .nav-link.request-link {
+    min-height: 36px;
+    padding: 7px 12px 7px 9px;
+    border-color: rgba(35,131,226,0.34);
+    background: #EAF4FF;
+    color: #0F5EA8;
+    font-weight: 800;
+    box-shadow: 0 1px 0 rgba(35,131,226,0.08);
+  }
+  .nav-link.request-link:hover {
+    background: #DDEEFF;
+    border-color: var(--accent);
+    color: #0B5CAD;
+  }
+  .request-ai-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    min-width: 24px;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 850;
+    line-height: 1;
+  }
+  .request-main { white-space: nowrap; }
 
   .icon-btn {
     width: 32px; height: 32px;
@@ -831,6 +861,7 @@
   /* ── 반응형 ── */
   @media (max-width: 600px) {
     .header-actions { width: 100%; justify-content: flex-start; }
+    .header-actions .request-link { flex: 1; justify-content: center; }
     .app-switcher { flex: 1; }
     .app-tab { flex: 1; justify-content: center; }
     .date-context { width: 100%; margin-left: 0; }
@@ -855,7 +886,10 @@
       <a href="timeline.html" class="app-tab">빌리지 스케줄</a>
     </div>
     <div class="header-actions">
-      <a href="request.html" class="nav-link" title="예약 입력">예약 입력</a>
+      <a href="request.html" class="nav-link request-link" title="AI 카톡 예약입력">
+        <span class="request-ai-badge">AI</span>
+        <span class="request-main">카톡 예약입력</span>
+      </a>
       <button class="icon-btn" onclick="refreshData()" id="refreshBtn" title="새로고침">↻</button>
     </div>
   </div>

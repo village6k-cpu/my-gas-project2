@@ -144,6 +144,7 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   min-height: 32px;
   padding: 6px 12px;
   border: 1px solid var(--border);
@@ -165,9 +166,34 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
 }
 .hdr-btn.primary:hover { opacity: 0.9; }
 .hdr-btn.request-btn {
-  background: var(--bg);
-  color: var(--text-primary);
+  min-height: 36px;
+  padding: 7px 12px 7px 9px;
+  background: #EAF4FF;
+  border-color: rgba(35,131,226,0.34);
+  color: #0F5EA8;
+  font-weight: 800;
+  box-shadow: 0 1px 0 rgba(35,131,226,0.08);
 }
+.hdr-btn.request-btn:hover {
+  background: #DDEEFF;
+  border-color: var(--accent);
+  color: #0B5CAD;
+}
+.request-ai-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  min-width: 24px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 850;
+  line-height: 1;
+}
+.request-main { white-space: nowrap; }
 .icon-btn {
   width: 32px;
   height: 32px;
@@ -857,6 +883,7 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
   .app-switcher { width: 100%; }
   .app-tab { flex: 1; justify-content: center; }
   .header-actions { width: 100%; justify-content: flex-start; }
+  .header-actions .request-link { flex: 1; justify-content: center; }
   .search-box { min-width: 100%; max-width: none; }
   .date-input { flex: 1; min-width: 0; }
   .detail-overlay.open { align-items: flex-end; }
@@ -895,7 +922,10 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
       <a href="dashboard.html" class="app-tab">오늘 일정</a>
     </div>
     <div class="header-actions">
-      <a href="request.html" class="hdr-btn request-btn request-link">예약 입력</a>
+      <a href="request.html" class="hdr-btn request-btn request-link" title="AI 카톡 예약입력">
+        <span class="request-ai-badge">AI</span>
+        <span class="request-main">카톡 예약입력</span>
+      </a>
       <button class="icon-btn" onclick="loadData()" title="새로고침" aria-label="새로고침">↻</button>
     </div>
   </div>
