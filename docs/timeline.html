@@ -909,7 +909,7 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
       <span class="search-icon">&#x1F50D;</span>
       <input type="text" id="searchInput" placeholder="검색..." autocomplete="off">
     </div>
-    <button class="hdr-btn" onclick="scrollToToday()">오늘</button>
+    <button class="hdr-btn" onclick="moveToday()">오늘</button>
     <input type="date" class="date-input" id="dateFrom" title="시작일">
     <span class="date-range-separator">~</span>
     <input type="date" class="date-input" id="dateTo" title="종료일">
@@ -2160,6 +2160,7 @@ window.addScheduleEquipRow = addScheduleEquipRow;
 // ── Scroll to Today ──
 function scrollToToday() {
   var today = dateOnly(new Date());
+  if (!dateRange.start || !dateRange.end || today < dateRange.start || today > dateRange.end) return;
   var off = daysBetween(dateRange.start, today);
   var colW = getColW();
   var gridScroll = document.getElementById("gridScroll");
@@ -2167,6 +2168,21 @@ function scrollToToday() {
   gridScroll.scrollTo({ left: Math.max(0, target), behavior: "smooth" });
 }
 window.scrollToToday = scrollToToday;
+
+function moveToday() {
+  var today = dateOnly(new Date());
+  filterStart = addDays(today, -1);
+  filterEnd = addDays(today, 14);
+  document.getElementById("dateFrom").value = toDateStr(filterStart);
+  document.getElementById("dateTo").value = toDateStr(filterEnd);
+  computeDateRange();
+  render();
+  setTimeout(function() {
+    scrollToToday();
+    showToast("오늘 기준으로 이동했습니다");
+  }, 60);
+}
+window.moveToday = moveToday;
 
 // ── Group Collapse ──
 function toggleGroup(name) {
