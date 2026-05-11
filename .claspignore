@@ -1,11 +1,20 @@
 # Git worktrees (clasp가 중복 파일 감지하는 것 방지)
 .claude/worktrees/**
 
+# Agent/tool scratch files (GAS 업로드 금지)
+.superpowers/**
+.gstack/**
+
 # GitHub Pages (GAS에 올릴 필요 없음)
 docs/**
 
-# Superpowers (gstack 스킬 잔여 파일, GAS에 불필요)
-.superpowers/**
+# 로컬 보조/실험 파일. GAS가 최종본이므로 원격에 없는 파일은 자동 업로드 금지.
+companionServer.js
+companionSidebar.html
+companionValidator.js
+createManual.js
+setupSchedule.js
+villageAiClient.js
 
 # 기타
 node_modules/**

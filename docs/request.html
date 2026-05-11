@@ -1261,51 +1261,17 @@ async function doParse() {
   parseBtn.innerHTML = '<span class="spinner"></span> AI 파싱 중...';
 
   try {
-    // Claude API 직접 호출 (GAS POST 리다이렉트 문제 우회)
-    // API 키는 GAS에서 가져옴
-    if (!window._claudeApiKey) {
-      var keyResp = await fetch(API_URL + '?key=' + API_KEY + '&action=run&func=getClaudeApiKey');
-      var keyData = await keyResp.json();
-      var r = keyData.result || keyData;
-      window._claudeApiKey = (r && r.key) || keyData.key || '';
-    }
-    if (!window._claudeApiKey) throw new Error('Claude API 키를 가져올 수 없습니다');
-
-    var todayStr = new Date().toISOString().slice(0, 10);
-    var systemPrompt = '너는 카메라 렌탈샵 "빌리지"의 예약 문의 파서야. 카카오톡 메시지나 채팅 캡쳐 이미지를 받아서 예약 정보를 JSON으로 추출해.\n\n반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없이):\n{"예약자명":"","연락처":"010-XXXX-XXXX","반출일":"YYYY-MM-DD","반출시간":"HH:MM","반납일":"YYYY-MM-DD","반납시간":"HH:MM","할인유형":"일반|학생|개인사업자/프리랜서","장비":[{"이름":"장비명","수량":1}],"비고":""}\n\n장비명 변환: FX3→소니 FX3, A7S3→소니 A7S3, 코모도→레드 코모도, 부라노→부라노, A7M4→소니 A7M4, 70-200 GM2→소니 GM 70-200mm II, 24-70 GM2→소니 GM 24-70mm II, 600X→어퓨쳐 600X, V마운트→V마운트 배터리, C대/시대→C스탠드. 풀세트/바디세트/바디 구분은 원문 그대로.\n할인: 학생/대학/졸작→학생, 프리랜서/사업자→개인사업자/프리랜서, 그외→일반.\n날짜: 상대날짜는 오늘(' + todayStr + ') 기준. 시간 미언급시 반출10:00 반납18:00.\n이미지면 채팅 내용 읽어서 파싱.';
-
-    var msgContent = [];
+    var parseUrl = API_URL + '?key=' + API_KEY + '&action=aiParse&text=' + encodeURIComponent(text);
     if (attachedImage) {
-      msgContent.push({ type: 'image', source: { type: 'base64', media_type: attachedImage.mediaType, data: attachedImage.base64 } });
+      parseUrl += '&image=' + encodeURIComponent(attachedImage.base64)
+        + '&imageType=' + encodeURIComponent(attachedImage.mediaType);
     }
-    if (text) {
-      msgContent.push({ type: 'text', text: text });
+    if (parseUrl.length > 18000) {
+      throw new Error('이미지가 커서 보안 프록시로 전송할 수 없습니다. 채팅 텍스트를 함께 붙여넣어 주세요.');
     }
 
-    var claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': window._claudeApiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: msgContent }]
-      })
-    });
-    var claudeData = await claudeResp.json();
-
-    if (claudeData.error) throw new Error(claudeData.error.message || JSON.stringify(claudeData.error));
-
-    var aiText = (claudeData.content && claudeData.content[0] && claudeData.content[0].text) || '';
-    var jsonMatch = aiText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('AI 응답에서 JSON을 찾을 수 없습니다');
-
-    var data = { success: true, parsed: JSON.parse(jsonMatch[0]) };
+    var parseResp = await fetch(parseUrl);
+    var data = await parseResp.json();
 
     if (data.success && data.parsed) {
       var p = data.parsed;

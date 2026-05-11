@@ -56,33 +56,31 @@ body {
   flex-wrap: wrap;
   z-index: 100;
 }
-.header-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text-primary);
-  white-space: nowrap;
-}
-.view-tabs {
+.app-switcher {
   display: flex;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
+  flex-shrink: 0;
 }
-.view-tab {
-  padding: 5px 12px;
+.app-tab {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 13px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 650;
   color: var(--text-secondary);
-  cursor: pointer;
   border: none;
   background: transparent;
+  text-decoration: none;
   transition: all 0.15s;
   white-space: nowrap;
 }
-.view-tab:not(:last-child) { border-right: 1px solid var(--border); }
-.view-tab:hover { background: rgba(0,0,0,0.03); }
-.view-tab.active { background: var(--accent); color: #fff; }
+.app-tab:not(:last-child) { border-right: 1px solid var(--border); }
+a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
+.app-tab.active { background: var(--accent); color: #fff; }
 
 .group-select {
   padding: 5px 8px;
@@ -131,6 +129,10 @@ body {
   margin-left: auto;
 }
 .hdr-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
   padding: 5px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -141,6 +143,7 @@ body {
   cursor: pointer;
   transition: all 0.15s;
   white-space: nowrap;
+  text-decoration: none;
 }
 .hdr-btn:hover { border-color: var(--accent); color: var(--accent); }
 .hdr-btn.primary {
@@ -149,6 +152,16 @@ body {
   border-color: var(--accent);
 }
 .hdr-btn.primary:hover { opacity: 0.9; }
+.hdr-btn.request-btn {
+  background: var(--bg);
+  color: var(--text-primary);
+}
+.header-separator {
+  width: 1px;
+  height: 24px;
+  background: var(--border);
+  margin: 0 2px 0 4px;
+}
 .date-input {
   padding: 4px 8px;
   border: 1px solid var(--border);
@@ -167,42 +180,6 @@ body {
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
-}
-
-/* ── Filter Bar ── */
-.filter-bar {
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  padding: 6px 16px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  font-size: 12px;
-  flex-wrap: wrap;
-}
-.status-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  border-radius: 12px;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: opacity 0.15s;
-  user-select: none;
-}
-.status-chip.dimmed { opacity: 0.3; }
-.status-chip[data-status="대기"] { background: var(--blue-bg); color: var(--blue-text); }
-.status-chip[data-status="반출중"] { background: var(--amber-bg); color: var(--amber-text); }
-.status-chip[data-status="반납완료"] { background: var(--green-bg); color: var(--green-text); }
-.status-chip[data-status="취소"] { background: var(--gray-bg); color: var(--gray-text); }
-.status-chip[data-status="기타"] { background: var(--purple-bg); color: var(--purple-text); }
-.filter-stats {
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 12px;
 }
 
 /* ── Main Layout ── */
@@ -722,15 +699,7 @@ body {
 }
 .ac-item:hover, .ac-item.active { background: var(--bg); }
 .ac-item .ac-match { font-weight: 700; color: var(--accent); }
-.mode-tabs { display: flex; gap: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-.mode-tab {
-  flex: 1; padding: 8px; font-size: 13px; font-weight: 500;
-  border: none; background: var(--bg); color: var(--text-secondary);
-  cursor: pointer; transition: all 0.15s; text-align: center;
-}
-.mode-tab:not(:last-child) { border-right: 1px solid var(--border); }
-.mode-tab.active { background: var(--accent); color: #fff; }
-.booking-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; }
+.booking-list { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
 .booking-card {
   padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--bg); cursor: pointer; transition: all 0.15s; font-size: 12px;
@@ -739,6 +708,8 @@ body {
 .booking-card.selected { border-color: var(--accent); background: var(--today-bg); box-shadow: 0 0 0 2px rgba(35,131,226,0.2); }
 .booking-card .bc-title { font-weight: 600; font-size: 13px; color: var(--text-primary); }
 .booking-card .bc-detail { color: var(--text-secondary); margin-top: 3px; }
+.booking-card .bc-equips { color: var(--text-muted); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.booking-empty { padding: 8px 10px; color: var(--text-muted); font-size: 12px; border: 1px dashed var(--border); border-radius: var(--radius); }
 .booking-info {
   padding: 10px 12px; border-radius: var(--radius);
   background: var(--today-bg); border: 1px solid rgba(35,131,226,0.2);
@@ -783,19 +754,6 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-text { font-size: 13px; color: var(--text-secondary); }
 
-/* ── Nav Link ── */
-.nav-link {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--accent);
-  text-decoration: none;
-  padding: 5px 10px;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius);
-  transition: all 0.15s;
-  white-space: nowrap;
-}
-.nav-link:hover { background: var(--accent); color: #fff; }
 .detail-link {
   display: block;
   margin-top: 12px;
@@ -815,11 +773,14 @@ body {
 @media (max-width: 768px) {
   .header { padding: 8px 10px; gap: 6px; }
   .search-box { max-width: 160px; min-width: 80px; }
+  .header-controls { width: 100%; margin-left: 0; }
+  .refresh-info { margin-left: auto; }
 }
 @media (max-width: 600px) {
   .revenue-bar-area { display: none; }
-  .view-tabs { display: none; }
   .group-select { display: none; }
+  .app-switcher { width: 100%; }
+  .app-tab { flex: 1; justify-content: center; }
   .detail-overlay.open { align-items: flex-end; }
   .detail-panel {
     width: 100%;
@@ -850,13 +811,9 @@ body {
 
 <!-- Header -->
 <div class="header">
-  <span class="header-title">빌리지 스케줄</span>
-  <a href="dashboard.html" class="nav-link">오늘 일정</a>
-  <a href="request.html" class="nav-link">예약 입력</a>
-  <div class="view-tabs">
-    <button class="view-tab active">타임라인</button>
-    <button class="view-tab" onclick="showToast('캘린더 뷰는 준비 중입니다')">캘린더</button>
-    <button class="view-tab" onclick="showToast('리스트 뷰는 준비 중입니다')">리스트</button>
+  <div class="app-switcher" aria-label="운영 화면 전환">
+    <span class="app-tab active">빌리지 스케줄</span>
+    <a href="dashboard.html" class="app-tab">오늘 일정</a>
   </div>
   <select class="group-select" id="groupMode" onchange="changeGroupMode(this.value)">
     <option value="세트별">세트별</option>
@@ -868,23 +825,15 @@ body {
     <input type="text" id="searchInput" placeholder="검색..." autocomplete="off">
   </div>
   <div class="header-controls">
-    <button class="hdr-btn" id="filterBtn" onclick="toggleActiveFilter()">필터</button>
     <button class="hdr-btn" onclick="scrollToToday()">오늘</button>
     <input type="date" class="date-input" id="dateFrom" title="시작일">
     <span style="color:var(--text-muted);font-size:12px">~</span>
     <input type="date" class="date-input" id="dateTo" title="종료일">
-    <button class="hdr-btn primary" onclick="openAddModal()">+ 예약</button>
+    <button class="hdr-btn primary" onclick="openAddModal()">+ 장비 추가</button>
     <span class="refresh-info" id="refreshInfo"></span>
+    <span class="header-separator" aria-hidden="true"></span>
+    <a href="request.html" class="hdr-btn request-btn">예약 입력</a>
   </div>
-</div>
-
-<!-- Filter Bar -->
-<div class="filter-bar" id="filterBar">
-  <span class="status-chip" data-status="대기" onclick="toggleStatusChip(this)">대기 <span class="chip-count">0</span></span>
-  <span class="status-chip" data-status="반출중" onclick="toggleStatusChip(this)">반출중 <span class="chip-count">0</span></span>
-  <span class="status-chip" data-status="반납완료" onclick="toggleStatusChip(this)">반납완료 <span class="chip-count">0</span></span>
-  <span class="status-chip" data-status="취소" onclick="toggleStatusChip(this)">취소 <span class="chip-count">0</span></span>
-  <span class="filter-stats" id="filterStats">불러오는 중...</span>
 </div>
 
 <!-- Main Area -->
@@ -928,8 +877,10 @@ body {
   <div class="ctx-sep"></div>
   <div class="ctx-item" onclick="ctxAction('detail')">&#x1F4CB; 상세 보기</div>
   <div class="ctx-item" onclick="ctxAction('contract')">&#x1F4C4; 계약서 열기</div>
+  <div class="ctx-item" onclick="ctxAction('addEquip')">&#x2795; 이 예약에 장비 추가</div>
   <div class="ctx-item" onclick="ctxAction('alimtalk')">&#x1F4AC; 알림톡 발송</div>
   <div class="ctx-sep"></div>
+  <div class="ctx-item danger" onclick="ctxAction('deleteEquip')">&#x1F5D1; 이 장비 삭제</div>
   <div class="ctx-item danger" onclick="ctxAction('취소')">&#x274C; 취소</div>
 </div>
 
@@ -953,61 +904,25 @@ body {
       <button class="modal-close" onclick="closeAddModal()">&#10005;</button>
     </div>
     <div class="modal-body">
-      <!-- 모드 선택 -->
-      <div class="form-group">
-        <div class="mode-tabs">
-          <button class="mode-tab active" id="modeExisting" onclick="setAddMode('existing')">기존 예약건에 추가</button>
-          <button class="mode-tab" id="modeNew" onclick="setAddMode('new')">신규 예약</button>
-        </div>
-      </div>
-
       <!-- 기존 예약건 모드 -->
       <div id="existingSection">
         <div class="form-group" style="position:relative">
           <label class="form-label">고객명 *</label>
-          <input type="text" id="addCustName" class="form-input" placeholder="고객명 입력..." autocomplete="off" spellcheck="false">
+          <input type="text" id="addCustName" class="form-input" placeholder="고객명 또는 거래ID 입력..." autocomplete="off" spellcheck="false">
           <div class="ac-dropdown" id="acCustDropdown"></div>
         </div>
         <div class="form-group" id="bookingSelectGroup" style="display:none">
-          <label class="form-label">예약건 선택 *</label>
+          <label class="form-label">일정 선택 *</label>
           <div id="bookingList" class="booking-list"></div>
         </div>
       </div>
 
-      <!-- 신규 예약 모드 (기존건 선택 시 숨김) -->
-      <div id="newSection" style="display:none">
-        <div class="form-group">
-          <label class="form-label">고객명 *</label>
-          <input type="text" id="addNewCustName" class="form-input" placeholder="예약자 이름">
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">반출일 *</label>
-            <input type="date" id="addFromDate" class="form-input">
-          </div>
-          <div class="form-group">
-            <label class="form-label">반출시간</label>
-            <input type="time" id="addFromTime" class="form-input" value="10:00">
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">반납일 *</label>
-            <input type="date" id="addToDate" class="form-input">
-          </div>
-          <div class="form-group">
-            <label class="form-label">반납시간</label>
-            <input type="time" id="addToTime" class="form-input" value="18:00">
-          </div>
-        </div>
-      </div>
-
-      <!-- 공통: 세트명 -->
+      <!-- 공통: 장비명 -->
       <div class="form-group" style="position:relative">
-        <label class="form-label">세트명 *</label>
-        <input type="text" id="addSetName" class="form-input" placeholder="세트명 입력 또는 선택..." autocomplete="off" spellcheck="false">
+        <label class="form-label">장비명 *</label>
+        <input type="text" id="addSetName" class="form-input" placeholder="추가할 장비명 입력..." autocomplete="off" spellcheck="false">
         <div class="ac-dropdown" id="acDropdown"></div>
-        <div id="addSetNameError" style="font-size:11px;color:var(--red);margin-top:3px;display:none">세트마스터에 등록된 세트만 선택 가능합니다</div>
+        <div id="addSetNameError" style="font-size:11px;color:var(--red);margin-top:3px;display:none">목록에 등록된 장비명만 선택 가능합니다</div>
       </div>
 
       <!-- 선택된 예약건 정보 요약 -->
@@ -1034,8 +949,6 @@ var REFRESH_INTERVAL = 60000;
 var rawGroups = [];
 var rawItems = [];
 var groupMode = "세트별";
-var hiddenStatuses = {};
-var activeFilterOn = false;
 var searchQuery = "";
 var collapsedGroups = {};
 var zoomLevels = [
@@ -1152,9 +1065,6 @@ function buildGroups() {
   var itemsByGroup = {};
 
   var filtered = rawItems.filter(function(it) {
-    if (activeFilterOn && it.status !== "대기" && it.status !== "반출중") return false;
-    var sk = statusKey(it.status);
-    if (hiddenStatuses[sk]) return false;
     if (searchQuery) {
       var q = searchQuery.toLowerCase();
       var match = (it.custName || "").toLowerCase().indexOf(q) >= 0 ||
@@ -1229,25 +1139,6 @@ function computeConflicts() {
   return conflictIds;
 }
 
-// ── Today counts ──
-function todayCounts() {
-  var today = dateOnly(new Date());
-  var out = 0, inn = 0;
-  rawItems.forEach(function(it) {
-    if (it.status === "취소") return;
-    if (isSameDay(it._startDay, today)) out++;
-    if (isSameDay(it._endDay, today)) inn++;
-  });
-  return { out: out, inn: inn };
-}
-
-// ── Status counts ──
-function statusCounts() {
-  var counts = { "대기": 0, "반출중": 0, "반납완료": 0, "취소": 0, "기타": 0 };
-  rawItems.forEach(function(it) { counts[statusKey(it.status)]++; });
-  return counts;
-}
-
 // ── Revenue Data ──
 function revenueByDay() {
   var rev = {};
@@ -1273,20 +1164,6 @@ function render() {
   var today = dateOnly(new Date());
   var colW = getColW();
   var totalW = dateRange.days * colW;
-
-  // Update status chips
-  var sc = statusCounts();
-  document.querySelectorAll(".status-chip").forEach(function(el) {
-    var s = el.getAttribute("data-status");
-    var cnt = el.querySelector(".chip-count");
-    if (cnt) cnt.textContent = sc[s] || 0;
-  });
-
-  // Stats
-  var tc = todayCounts();
-  var statsEl = document.getElementById("filterStats");
-  statsEl.textContent = gd.filteredCount + "건" +
-    (tc.out > 0 || tc.inn > 0 ? " \u00B7 오늘 반출 " + tc.out + " 반납 " + tc.inn : "");
 
   // Build date header
   var dhInner = document.getElementById("dateHeaderInner");
@@ -1651,8 +1528,30 @@ function ctxAction(action) {
     showToast("계약서 열기: " + (item["거래ID"] || ""));
     return;
   }
+  if (action === "addEquip") {
+    openAddModalForBooking(item);
+    return;
+  }
   if (action === "alimtalk") {
     showToast("알림톡 발송: " + (item.custName || ""));
+    return;
+  }
+  if (action === "deleteEquip") {
+    var equipName = item["세트명"] || item["장비명"];
+    if (!item["거래ID"] || !equipName) {
+      showToast("삭제할 거래/장비 정보를 찾지 못했습니다");
+      return;
+    }
+    if (!confirm(equipName + " 을(를) 이 거래에서 삭제할까요?")) return;
+    fetch(API_URL + "?key=village2026&action=scheduleRemoveEquip&tid=" + encodeURIComponent(item["거래ID"]) +
+      "&equipName=" + encodeURIComponent(equipName))
+      .then(function(r) { return r.json(); })
+      .then(function(res) {
+        if (res.error) { showToast("삭제 실패: " + res.error); return; }
+        showToast("삭제 완료");
+        loadData();
+      })
+      .catch(function() { showToast("네트워크 오류"); });
     return;
   }
 
@@ -1685,12 +1584,15 @@ document.addEventListener("click", function(e) {
 function showDetail(item) {
   document.getElementById("detailTitle").textContent = item.custName || item.content || "";
   var sk = statusKey(item.status);
+  var bookingEquipName = item["세트명"] || item["장비명"] || "-";
+  var detailRows =
+    dRow("장비명", escHtml(bookingEquipName)) +
+    (item["장비명"] && item["장비명"] !== bookingEquipName ? dRow("구성 장비", escHtml(item["장비명"])) : "");
   var html =
     dRow("거래ID", escHtml(item["거래ID"] || "-")) +
     dRow("고객명", escHtml(item.custName || "-")) +
     dRow("연락처", escHtml(item.tel || "-")) +
-    dRow("세트명", escHtml(item["세트명"] || "-")) +
-    dRow("장비명", escHtml(item["장비명"] || "-")) +
+    detailRows +
     dRow("수량", escHtml(item["수량"] || "-")) +
     dRow("반출", escHtml(item["반출"] || "-")) +
     dRow("반납", escHtml(item["반납"] || "-")) +
@@ -1711,17 +1613,17 @@ function closeDetail() {
 window.closeDetail = closeDetail;
 
 // ── Add Modal ──
-var equipNames = {}; // 세트명 → true (유효 목록)
+var equipNames = {}; // 장비/세트명 → true (유효 목록)
 
 function loadEquipNames() {
-  fetch(API_URL + "?key=village2026&action=read&sheet=" + encodeURIComponent("세트마스터") + "&range=A:A")
+  fetch(API_URL + "?key=village2026&action=read&sheet=" + encodeURIComponent("목록") + "&range=A:A")
     .then(function(r) { return r.json(); })
     .then(function(res) {
       var unique = {};
       var rows = res.data || res.values || [];
       rows.forEach(function(row) {
         var name = String(row[0] || "").trim();
-        if (name && name !== "세트명") unique[name] = true;
+        if (name && name !== "장비/세트명" && name !== "세트명") unique[name] = true;
       });
       equipNames = unique;
     })
@@ -1835,20 +1737,11 @@ function loadEquipNames() {
   }
 })();
 
-var addMode = "existing"; // "existing" | "new"
 var selectedBooking = null; // 선택된 기존 예약건 { 거래ID, custName, 반출, 반납, ... }
 
-function setAddMode(mode) {
-  addMode = mode;
-  document.getElementById("modeExisting").classList.toggle("active", mode === "existing");
-  document.getElementById("modeNew").classList.toggle("active", mode === "new");
-  document.getElementById("existingSection").style.display = mode === "existing" ? "block" : "none";
-  document.getElementById("newSection").style.display = mode === "new" ? "block" : "none";
-  selectedBooking = null;
-  document.getElementById("selectedBookingInfo").style.display = "none";
-  document.getElementById("bookingSelectGroup").style.display = "none";
+function addSubmitLabel() {
+  return "가용 확인 후 추가";
 }
-window.setAddMode = setAddMode;
 
 // 고객명 자동완성: 현재 로드된 타임라인 데이터에서 고객명 목록 추출
 function getCustNames() {
@@ -1859,60 +1752,75 @@ function getCustNames() {
   return Object.keys(unique).sort();
 }
 
-// 고객명으로 예약건 목록 가져오기
-function getBookingsForCust(custName) {
-  var seen = {};
-  var bookings = [];
+// 고객명/거래ID로 예약 일정 목록 가져오기
+function getBookingsForCust(query) {
+  var q = String(query || "").trim().toLowerCase();
+  var byTrade = {};
   (rawItems || []).forEach(function(item) {
-    if (item.custName !== custName) return;
     var txId = item["거래ID"];
-    if (!txId || seen[txId]) return;
-    seen[txId] = true;
-    bookings.push({
-      거래ID: txId,
-      custName: item.custName,
-      세트명: item.세트명 || item["세트명원본"] || "",
-      반출: item.반출 || "",
-      반납: item.반납 || "",
-      반출시간: item.반출시간 || "",
-      반납시간: item.반납시간 || "",
-      start: item.start,
-      end: item.end,
-      status: item.status
-    });
+    if (!txId) return;
+    var name = item.custName || "";
+    var hay = (name + " " + txId).toLowerCase();
+    if (q && hay.indexOf(q) < 0) return;
+
+    if (!byTrade[txId]) {
+      byTrade[txId] = {
+        거래ID: txId,
+        custName: name,
+        반출: item.반출 || "",
+        반납: item.반납 || "",
+        반출시간: item.반출시간 || "",
+        반납시간: item.반납시간 || "",
+        start: item.start,
+        end: item.end,
+        status: item.status,
+        equipMap: {},
+        equipList: []
+      };
+    }
+
+    var equipName = item["세트명원본"] || item.세트명 || item["장비명"] || "";
+    if (equipName && !byTrade[txId].equipMap[equipName]) {
+      byTrade[txId].equipMap[equipName] = true;
+      byTrade[txId].equipList.push(equipName);
+    }
   });
-  // 최신순 정렬
+  var bookings = Object.keys(byTrade).map(function(id) { return byTrade[id]; });
   bookings.sort(function(a, b) { return (b.start || "").localeCompare(a.start || ""); });
   return bookings;
 }
 
-function showBookingList(custName) {
-  var bookings = getBookingsForCust(custName);
+function showBookingList(query) {
+  var bookings = getBookingsForCust(query);
   var container = document.getElementById("bookingList");
   var group = document.getElementById("bookingSelectGroup");
 
+  container.innerHTML = "";
   if (bookings.length === 0) {
-    group.style.display = "none";
+    group.style.display = query ? "block" : "none";
+    if (query) container.innerHTML = '<div class="booking-empty">일치하는 일정이 없습니다</div>';
     return;
   }
 
   group.style.display = "block";
-  container.innerHTML = "";
   bookings.forEach(function(b) {
     var card = document.createElement("div");
     card.className = "booking-card";
-    card.innerHTML = '<div class="bc-title">' + escHtml(b.세트명) + '</div>'
-      + '<div class="bc-detail">' + escHtml(b.반출 + " ~ " + b.반납) + ' · ' + escHtml(b.거래ID) + '</div>';
+    var equipSummary = b.equipList.length
+      ? b.equipList.slice(0, 4).join(", ") + (b.equipList.length > 4 ? " 외 " + (b.equipList.length - 4) + "개" : "")
+      : "장비 정보 없음";
+    card.innerHTML = '<div class="bc-title">' + escHtml(b.custName || "-") + ' · ' + escHtml(b.반출 + " ~ " + b.반납) + '</div>'
+      + '<div class="bc-detail">' + escHtml(b.거래ID) + ' · ' + escHtml(b.status || "대기") + ' · 장비 ' + b.equipList.length + '개</div>'
+      + '<div class="bc-equips">' + escHtml(equipSummary) + '</div>';
     card.addEventListener("click", function() {
       container.querySelectorAll(".booking-card").forEach(function(c) { c.classList.remove("selected"); });
       card.classList.add("selected");
       selectedBooking = b;
-      // 요약 표시
       var info = document.getElementById("selectedBookingInfo");
       info.style.display = "block";
       info.innerHTML = '<strong>' + escHtml(b.custName) + '</strong> · '
         + escHtml(b.반출 + " ~ " + b.반납)
-        + '<br>거래ID: ' + escHtml(b.거래ID) + ' · 여기에 세트를 추가합니다';
+        + '<br>거래ID: ' + escHtml(b.거래ID) + ' · 이 일정에 장비를 추가합니다';
     });
     container.appendChild(card);
   });
@@ -1974,23 +1882,43 @@ function showBookingList(custName) {
 })();
 
 function openAddModal(fromDate, toDate) {
-  var today = new Date();
-  var fromStr = fromDate ? toDateStr(fromDate) : toDateStr(today);
-  var toStr = toDate ? toDateStr(toDate) : toDateStr(addDays(today, 1));
-  document.getElementById("addFromDate").value = fromStr;
-  document.getElementById("addToDate").value = toStr;
-  document.getElementById("addFromTime").value = "10:00";
-  document.getElementById("addToTime").value = "18:00";
   document.getElementById("addCustName").value = "";
-  document.getElementById("addNewCustName").value = "";
   document.getElementById("addSetName").value = "";
   document.getElementById("addSetNameError").style.display = "none";
   document.getElementById("addSetName").style.borderColor = "";
   selectedBooking = null;
   document.getElementById("selectedBookingInfo").style.display = "none";
   document.getElementById("bookingSelectGroup").style.display = "none";
-  setAddMode("existing");
+  document.getElementById("bookingList").innerHTML = "";
+  document.getElementById("addSubmitBtn").textContent = addSubmitLabel();
   document.getElementById("addModal").style.display = "flex";
+}
+
+function openAddModalForBooking(item) {
+  if (!item || !item["거래ID"]) {
+    showToast("추가할 예약건 정보를 찾지 못했습니다");
+    return;
+  }
+  openAddModal(item.start ? new Date(item.start) : null, item.end ? new Date(item.end) : null);
+  document.getElementById("addCustName").value = item.custName || "";
+  selectedBooking = {
+    거래ID: item["거래ID"],
+    custName: item.custName || "",
+    반출: item.반출 || "",
+    반납: item.반납 || "",
+    반출시간: item.반출시간 || "",
+    반납시간: item.반납시간 || "",
+    start: item.start,
+    end: item.end,
+    status: item.status
+  };
+  var info = document.getElementById("selectedBookingInfo");
+  info.style.display = "block";
+  info.innerHTML = '<strong>' + escHtml(selectedBooking.custName || '-') + '</strong> · '
+    + escHtml((selectedBooking.반출 || '-') + ' ~ ' + (selectedBooking.반납 || '-'))
+    + '<br>거래ID: ' + escHtml(selectedBooking.거래ID) + ' · 이 일정에 장비를 추가합니다';
+  document.getElementById("bookingSelectGroup").style.display = "none";
+  setTimeout(function() { document.getElementById("addSetName").focus(); }, 50);
 }
 
 function closeAddModal() {
@@ -1999,73 +1927,40 @@ function closeAddModal() {
 
 function submitAddBooking() {
   var setName = document.getElementById("addSetName").value.trim();
-  if (!setName) { showToast("세트명을 입력해주세요"); return; }
-  if (!equipNames[setName]) { showToast("세트마스터에 없는 세트명입니다"); return; }
+  if (!setName) { showToast("장비명을 입력해주세요"); return; }
+  if (!equipNames[setName]) { showToast("목록에 없는 장비명입니다"); return; }
+  if (!selectedBooking) { showToast("일정을 선택해주세요"); return; }
 
-  var txID, custName, fromDate, fromTime, toDate, toTime;
-
-  if (addMode === "existing") {
-    if (!selectedBooking) { showToast("예약건을 선택해주세요"); return; }
-    txID = selectedBooking["거래ID"];
-    custName = selectedBooking.custName;
-    // 기존 예약건의 날짜/시간 사용
-    var startDT = new Date(selectedBooking.start);
-    var endDT = new Date(selectedBooking.end);
-    fromDate = toDateStr(startDT);
-    toDate = toDateStr(endDT);
-    fromTime = selectedBooking.반출시간 || pad2(startDT.getHours()) + ":" + pad2(startDT.getMinutes());
-    toTime = selectedBooking.반납시간 || pad2(endDT.getHours()) + ":" + pad2(endDT.getMinutes());
-  } else {
-    custName = document.getElementById("addNewCustName").value.trim();
-    if (!custName) { showToast("고객명을 입력해주세요"); return; }
-    fromDate = document.getElementById("addFromDate").value;
-    fromTime = document.getElementById("addFromTime").value || "10:00";
-    toDate = document.getElementById("addToDate").value;
-    toTime = document.getElementById("addToTime").value || "18:00";
-    if (!fromDate || !toDate) { showToast("반출일/반납일을 입력해주세요"); return; }
-    if (fromDate > toDate) { showToast("반납일이 반출일보다 빠릅니다"); return; }
-    // 신규 거래ID 생성
-    var now = new Date();
-    txID = String(now.getFullYear()).slice(-2) + pad2(now.getMonth() + 1) + pad2(now.getDate()) + "-" + pad2(now.getHours()) + pad2(now.getMinutes()).slice(0, 1);
-  }
+  var txID = selectedBooking["거래ID"];
+  var custName = selectedBooking.custName;
 
   var submitBtn = document.getElementById("addSubmitBtn");
   submitBtn.disabled = true;
   submitBtn.textContent = "등록 중...";
 
-  // Row: [스케줄ID, 거래ID, 세트명, 장비명, 수량, 반출일, 반출시간, 반납일, 반납시간, 상태, "", 단가]
-  var rowData = ["", txID, setName, setName, 1, fromDate, fromTime, toDate, toTime, "대기", "", 0];
-
-  fetch(API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      key: "village2026",
-      action: "append",
-      sheet: "스케줄상세",
-      values: [rowData]
-    })
-  })
+  fetch(API_URL + "?key=village2026&action=scheduleAddEquip&tid=" + encodeURIComponent(txID)
+    + "&equipName=" + encodeURIComponent(setName) + "&qty=1")
     .then(function(r) { return r.json(); })
     .then(function(res) {
       submitBtn.disabled = false;
-      submitBtn.textContent = "등록";
+      submitBtn.textContent = addSubmitLabel();
       if (res.error) {
-        showToast("등록 실패: " + res.error);
+        showToast("추가 실패: " + res.error);
       } else {
-        showToast(custName + " / " + setName + " 예약이 등록되었습니다");
+        showToast(custName + " / " + setName + " 추가 완료");
         closeAddModal();
         loadData();
       }
     })
     .catch(function() {
       submitBtn.disabled = false;
-      submitBtn.textContent = "등록";
+      submitBtn.textContent = addSubmitLabel();
       showToast("네트워크 오류");
     });
 }
 
 window.openAddModal = openAddModal;
+window.openAddModalForBooking = openAddModalForBooking;
 window.closeAddModal = closeAddModal;
 window.submitAddBooking = submitAddBooking;
 
@@ -2079,26 +1974,6 @@ function scrollToToday() {
   gridScroll.scrollTo({ left: Math.max(0, target), behavior: "smooth" });
 }
 window.scrollToToday = scrollToToday;
-
-// ── Status Chips ──
-function toggleStatusChip(el) {
-  var s = el.getAttribute("data-status");
-  hiddenStatuses[s] = !hiddenStatuses[s];
-  el.classList.toggle("dimmed", !!hiddenStatuses[s]);
-  render();
-}
-window.toggleStatusChip = toggleStatusChip;
-
-// ── Active Filter ──
-function toggleActiveFilter() {
-  activeFilterOn = !activeFilterOn;
-  var btn = document.getElementById("filterBtn");
-  btn.style.background = activeFilterOn ? "var(--accent)" : "";
-  btn.style.color = activeFilterOn ? "#fff" : "";
-  btn.style.borderColor = activeFilterOn ? "var(--accent)" : "";
-  render();
-}
-window.toggleActiveFilter = toggleActiveFilter;
 
 // ── Group Collapse ──
 function toggleGroup(name) {
