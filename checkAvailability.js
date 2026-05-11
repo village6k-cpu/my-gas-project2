@@ -1406,7 +1406,7 @@ function handleScheduleEdit(e) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * "목록" 시트를 생성/갱신하여 장비마스터 장비명 + 세트마스터 세트명을
+ * "목록" 시트를 생성/갱신하여 세트마스터 세트명을
  * 중복 제거 후 정렬하여 A열에 나열합니다.
  * 그리고 확인요청 F열의 데이터 유효성을 목록!A:A 참조로 설정합니다.
  *
@@ -1416,15 +1416,10 @@ function handleScheduleEdit(e) {
 function refreshEquipmentList() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  const equipSheet = ss.getSheetByName("장비마스터");
   const setSheet = ss.getSheetByName("세트마스터");
 
-  // ── 목록 생성: 장비마스터 D열 + 세트마스터 A열 (중복 제거 + 정렬) ──
+  // ── 목록 생성: 세트마스터 A열 (중복 제거 + 정렬) ──
   const names = new Set();
-  if (equipSheet && equipSheet.getLastRow() >= 2) {
-    equipSheet.getRange(2, 4, equipSheet.getLastRow() - 1, 1)
-      .getValues().flat().forEach(n => { if (n) names.add(n.toString().trim()); });
-  }
   if (setSheet && setSheet.getLastRow() >= 2) {
     setSheet.getRange(2, 1, setSheet.getLastRow() - 1, 1)
       .getValues().flat().forEach(n => { if (n) names.add(n.toString().trim()); });
