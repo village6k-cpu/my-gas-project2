@@ -46,6 +46,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
     margin-bottom: 14px;
   }
   .header h1 {
@@ -58,6 +60,49 @@
     color: var(--text-muted);
     margin-top: 2px;
   }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .app-switcher {
+    display: flex;
+    overflow: hidden;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .app-tab {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .app-tab:not(:last-child) { border-right: 1px solid var(--border); }
+  .app-tab.active { background: var(--accent); color: #fff; }
+  a.app-tab:active { background: var(--bg); }
+  .nav-link {
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    background: var(--surface);
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .nav-link:active { background: var(--bg); }
 
   .icon-btn {
     width: 34px; height: 34px;
@@ -290,6 +335,21 @@
     color: var(--green-text);
     border-color: #A7F3D0;
   }
+  .equip-add-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 3px 9px;
+    border: 1px dashed var(--text-muted);
+    border-radius: 5px;
+    color: var(--text-secondary);
+    background: transparent;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .equip-add-btn:active { background: var(--bg); }
 
   /* ── 상태 배지 ── */
   .status-badge {
@@ -344,8 +404,113 @@
     color: var(--text-secondary);
   }
   .detail-row .dl { font-weight: 700; color: var(--text-primary); }
+  .detail-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+  }
+  .action-link, .action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 34px;
+    padding: 7px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    text-decoration: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .action-link.primary, .action-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .payment-select {
+    width: 140px;
+    min-height: 34px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    padding: 6px 8px;
+    outline: none;
+  }
+  .payment-select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+  }
+  .detail-note {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 8px;
+    line-height: 1.4;
+  }
+
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(0,0,0,0.45);
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    width: 100%;
+    max-width: 400px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 22px 22px 18px;
+    box-shadow: 0 8px 30px rgba(27,35,50,0.16);
+  }
+  .modal-title { font-size: 16px; font-weight: 800; margin-bottom: 14px; color: var(--text-primary); }
+  .modal-label { display: block; font-size: 12px; font-weight: 700; color: var(--text-secondary); margin-bottom: 6px; }
+  .modal-input {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: inherit;
+    padding: 8px 10px;
+    margin-bottom: 12px;
+    outline: none;
+  }
+  .modal-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+  .modal-btn {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 700;
+    font-family: inherit;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+  .modal-btn-confirm { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .modal-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* ── 반응형 ── */
+  @media (max-width: 600px) {
+    .header-actions { width: 100%; justify-content: flex-start; }
+    .app-switcher { flex: 1; }
+    .app-tab { flex: 1; justify-content: center; }
+  }
   @media (min-width: 768px) {
     .header { padding: 16px 32px 14px; }
     .summary-row { padding: 14px 32px; }
@@ -364,7 +529,14 @@
       <h1 id="headerTitle">오늘 일정</h1>
       <div class="date-label" id="dateLabel"></div>
     </div>
-    <button class="icon-btn" onclick="refreshData()" id="refreshBtn" title="새로고침">↻</button>
+    <div class="header-actions">
+      <div class="app-switcher" aria-label="운영 화면 전환">
+        <span class="app-tab active">오늘 일정</span>
+        <a href="?page=timeline" class="app-tab">빌리지 스케줄</a>
+      </div>
+      <a href="https://village6k-cpu.github.io/my-gas-project2/request.html" class="nav-link">예약 입력</a>
+      <button class="icon-btn" onclick="refreshData()" id="refreshBtn" title="새로고침">↻</button>
+    </div>
   </div>
   <div class="date-nav">
     <button class="date-nav-btn" onclick="changeDate(-1)">◀</button>
@@ -562,6 +734,7 @@ function renderList(containerId, items, type) {
         var cls = eq.isSet ? 'equip-tag set-tag' : 'equip-tag';
         html += '<span class="' + cls + '">' + escHtml(eq.name + (eq.qty > 1 ? ' ×' + eq.qty : '')) + '</span>';
       });
+      html += '<button class="equip-add-btn" onclick="event.stopPropagation();addEquip(\'' + escHtml(item.tradeId) + '\')">+ 장비추가</button>';
       html += '</div>';
 
       html += '<div class="card-detail" id="' + cardId + '">';
@@ -574,6 +747,15 @@ function renderList(containerId, items, type) {
         var total = item.equipments.reduce(function(s, eq) { return s + (eq.qty || 1); }, 0);
         html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + total + '건</span></div>';
       }
+      html += '<div class="detail-actions">';
+      if (item.contractUrl) {
+        html += '<a class="action-link primary" href="' + escAttr(item.contractUrl) + '" target="_blank" onclick="event.stopPropagation()">계약서 열기</a>';
+      } else {
+        html += '<button class="action-btn" onclick="event.stopPropagation()" disabled>계약서 링크 없음</button>';
+      }
+      html += paymentSelectHtml(item);
+      html += '</div>';
+      if (item.paymentWarning) html += '<div class="detail-note">' + escHtml(item.paymentWarning) + '</div>';
       html += '</div></div>';
     });
     html += '</div>';
@@ -595,10 +777,144 @@ function toggleDetail(id) {
   if (el) el.classList.toggle('open');
 }
 
+function paymentSelectHtml(item) {
+  var options = [''].concat((dashboardData && dashboardData.paymentOptions) || ['미정', '계좌', '카드', '현금', '기타']);
+  var current = item.paymentMethod || '';
+  var html = '<select class="payment-select" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updatePaymentMethod(event,this,\'' + escJs(item.tradeId) + '\')">';
+  options.forEach(function(opt) {
+    var label = opt || '선택';
+    html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(label) + '</option>';
+  });
+  html += '</select>';
+  return html;
+}
+
+function updatePaymentMethod(event, select, tradeId) {
+  event.stopPropagation();
+  var prev = select.getAttribute('data-prev') || '';
+  var method = select.value;
+  select.disabled = true;
+  fetch(API_URL + '?key=village2026&action=updatePayment&tid=' + encodeURIComponent(tradeId) + '&method=' + encodeURIComponent(method))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      select.disabled = false;
+      if (res.error) {
+        alert('결제수단 저장 실패: ' + res.error);
+        select.value = prev;
+        return;
+      }
+      select.setAttribute('data-prev', method);
+      if (res.warning) alert(res.warning);
+      loadData(true);
+    })
+    .catch(function(err) {
+      select.disabled = false;
+      select.value = prev;
+      alert('결제수단 저장 실패: ' + err.message);
+    });
+}
+
 function escHtml(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+function escAttr(s) { return escHtml(s).replace(/'/g,'&#39;'); }
+function escJs(s) { return String(s || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,' '); }
+
+var equipListCache = null;
+var pendingAddTid = null;
+
+function loadEquipList() {
+  if (equipListCache) return Promise.resolve(equipListCache);
+  return fetch(API_URL + '?key=village2026&action=read&sheet=' + encodeURIComponent('목록') + '&range=A2:A1000')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var arr = d && d.data ? d.data : [];
+      equipListCache = arr.map(function(row) { return Array.isArray(row) ? row[0] : row; })
+        .filter(function(v) { return !!v; })
+        .map(String);
+      var dl = document.getElementById('equipDatalist');
+      if (dl) {
+        dl.innerHTML = equipListCache.map(function(n) {
+          return '<option value="' + escAttr(n) + '"></option>';
+        }).join('');
+      }
+      return equipListCache;
+    })
+    .catch(function() {
+      equipListCache = [];
+      return [];
+    });
+}
+
+function addEquip(tid) {
+  pendingAddTid = tid;
+  document.getElementById('equipInput').value = '';
+  document.getElementById('qtyInput').value = '1';
+  document.getElementById('addEquipConfirmBtn').disabled = false;
+  document.getElementById('addEquipConfirmBtn').textContent = '가용 확인 후 추가';
+  document.getElementById('addEquipModal').classList.add('open');
+  loadEquipList().then(function() {
+    setTimeout(function() {
+      var input = document.getElementById('equipInput');
+      if (input) input.focus();
+    }, 50);
+  });
+}
+
+function closeAddEquipModal() {
+  document.getElementById('addEquipModal').classList.remove('open');
+  pendingAddTid = null;
+}
+
+function confirmAddEquip() {
+  if (!pendingAddTid) { closeAddEquipModal(); return; }
+  var name = (document.getElementById('equipInput').value || '').trim();
+  if (!name) { alert('장비명을 입력하거나 선택하세요.'); return; }
+  var qty = parseInt(document.getElementById('qtyInput').value, 10);
+  if (!qty || qty < 1) qty = 1;
+
+  var btn = document.getElementById('addEquipConfirmBtn');
+  btn.disabled = true;
+  btn.textContent = '가용 확인 중...';
+
+  var tid = pendingAddTid;
+  fetch(API_URL + '?key=village2026&action=addEquip&tid=' + encodeURIComponent(tid)
+    + '&equipName=' + encodeURIComponent(name) + '&qty=' + qty)
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      btn.disabled = false;
+      btn.textContent = '가용 확인 후 추가';
+      if (res.error) {
+        alert(res.error.indexOf('가용 불가') === 0 ? res.error : '추가 실패: ' + res.error);
+        return;
+      }
+      closeAddEquipModal();
+      loadData(true);
+      alert('가용 확인 완료. 장비를 추가했습니다.');
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = '가용 확인 후 추가';
+      alert('네트워크 오류: ' + err.message);
+    });
+}
+
+window.addEventListener('load', function() { loadEquipList(); });
 </script>
+<div id="addEquipModal" class="modal-overlay" onclick="if(event.target===this)closeAddEquipModal()">
+  <div class="modal-box">
+    <div class="modal-title">장비 추가</div>
+    <label class="modal-label">장비명</label>
+    <input id="equipInput" class="modal-input" list="equipDatalist" placeholder="입력하거나 목록에서 선택" autocomplete="off">
+    <datalist id="equipDatalist"></datalist>
+    <label class="modal-label">수량</label>
+    <input id="qtyInput" class="modal-input" type="number" min="1" value="1">
+    <div class="modal-actions">
+      <button class="modal-btn" onclick="closeAddEquipModal()">취소</button>
+      <button id="addEquipConfirmBtn" class="modal-btn modal-btn-confirm" onclick="confirmAddEquip()">가용 확인 후 추가</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

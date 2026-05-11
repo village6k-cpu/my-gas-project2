@@ -219,6 +219,34 @@ function handleRequest(e) {
           params.equipName || postBody.equipName
         ));
 
+      case "tradeCandidates":
+        return jsonResponse(findTradeCandidatesForSchedule(
+          params.name || postBody.name || "",
+          params.date || postBody.date || ""
+        ));
+
+      case "scheduleAddEquip":
+        return jsonResponse(dashboardAddEquipment(
+          params.tid || postBody.tid,
+          params.equipName || postBody.equipName,
+          params.qty || postBody.qty || 1
+        ));
+
+      case "scheduleRemoveEquip":
+        return jsonResponse(dashboardRemoveEquipment(
+          params.tid || postBody.tid,
+          params.equipName || postBody.equipName
+        ));
+
+      case "updatePayment":
+        return jsonResponse(updateTradePaymentMethod(
+          params.tid || postBody.tid,
+          params.method || postBody.method || ""
+        ));
+
+      case "paymentMeta":
+        return jsonResponse(inspectTradePaymentColumn());
+
       // ━━━ 스케줄 관리 API ━━━
 
       case "list":
@@ -664,8 +692,7 @@ function runFunction(funcName, params) {
     "warmDashboardCache",
     "getInventoryConflicts",
     "getInventoryConflictsSlackMessage",
-    "listAllTriggers",
-    "getClaudeApiKey"
+    "listAllTriggers"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -716,8 +743,7 @@ function runFunction(funcName, params) {
       warmDashboardCache: typeof warmDashboardCache !== "undefined" ? warmDashboardCache : null,
       getInventoryConflicts: typeof getInventoryConflicts !== "undefined" ? getInventoryConflicts : null,
       getInventoryConflictsSlackMessage: typeof getInventoryConflictsSlackMessage !== "undefined" ? getInventoryConflictsSlackMessage : null,
-      listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null,
-      getClaudeApiKey: typeof getClaudeApiKey !== "undefined" ? getClaudeApiKey : null
+      listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
     };
     if (globalFuncs[funcName]) {
       var fnResult = globalFuncs[funcName]();

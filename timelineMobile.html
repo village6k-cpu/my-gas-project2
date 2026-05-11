@@ -28,7 +28,20 @@
     display:flex; align-items:center; gap:10px;
     flex-shrink:0; flex-wrap:wrap;
   }
-  .topbar-title { font-size:19px; font-weight:700; white-space:nowrap; }
+  .app-switcher {
+    display:flex; overflow:hidden; flex-shrink:0;
+    border:1px solid rgba(255,255,255,.18);
+    border-radius:10px; background:rgba(255,255,255,.08);
+  }
+  .app-tab {
+    display:inline-flex; align-items:center; justify-content:center;
+    min-height:38px; padding:9px 14px;
+    color:#CBD5E1; text-decoration:none; font-size:15px; font-weight:800;
+    white-space:nowrap;
+  }
+  .app-tab:not(:last-child) { border-right:1px solid rgba(255,255,255,.16); }
+  .app-tab.active { background:#3B82F6; color:#fff; }
+  a.app-tab:active { background:rgba(255,255,255,.18); }
   .search-wrap {
     position:relative; flex:1; min-width:140px;
   }
@@ -42,16 +55,26 @@
   .search-wrap input:focus { background:rgba(255,255,255,.2); }
   .search-icon { position:absolute; left:10px; top:50%; transform:translateY(-50%); font-size:16px; opacity:.6; }
 
-  .btn-row { display:flex; gap:6px; flex-wrap:wrap; }
+  .btn-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-left:auto; }
   .btn {
+    display:inline-flex; align-items:center; justify-content:center;
     padding:10px 16px; border-radius:8px;
     border:1px solid rgba(255,255,255,.2);
     background:rgba(255,255,255,.08);
     color:#E2E8F0; font-size:15px;
     cursor:pointer; white-space:nowrap;
+    text-decoration:none;
   }
   .btn:active { background:rgba(255,255,255,.25); }
   .btn.on { background:#3B82F6; border-color:#3B82F6; }
+  .request-link {
+    background:#fff; color:#1A1A2E; border-color:#fff;
+    font-weight:800;
+  }
+  .topbar-divider {
+    width:1px; height:30px; background:rgba(255,255,255,.22);
+    margin:0 2px;
+  }
 
   /* ── 범례 ── */
   .legend {
@@ -151,29 +174,80 @@
     background:#f0f2f5; border:none; border-radius:10px;
     font-size:17px; font-weight:600; cursor:pointer;
   }
+  .detail-actions { display:flex; gap:8px; margin-top:14px; }
+  .detail-action {
+    flex:1; border:none; border-radius:10px; padding:13px 10px;
+    font-size:15px; font-weight:700; cursor:pointer;
+    background:#EEF2FF; color:#1D4ED8;
+  }
+  .detail-action.danger { background:#FEE2E2; color:#B91C1C; }
 
   /* 자동갱신 표시 */
   .auto-refresh {
     font-size:13px; color:rgba(255,255,255,.5);
     white-space:nowrap;
   }
+  .modal-overlay {
+    display:none; position:fixed; inset:0; z-index:260;
+    background:rgba(0,0,0,.45); align-items:flex-end; justify-content:center;
+  }
+  .modal-overlay.show { display:flex; }
+  .modal-box {
+    width:100%; max-width:560px; max-height:86vh; overflow-y:auto;
+    background:#fff; border-radius:18px 18px 0 0; padding:22px;
+  }
+  .modal-title { font-size:19px; font-weight:800; margin-bottom:14px; color:#1A1A2E; }
+  .modal-label { display:block; font-size:13px; font-weight:700; color:#4A5568; margin:12px 0 6px; }
+  .modal-input, .modal-select {
+    width:100%; padding:13px 12px; border:1px solid #CBD5E1; border-radius:10px;
+    font-size:16px; outline:none; background:#fff;
+  }
+  .modal-input:focus, .modal-select:focus { border-color:#3B82F6; box-shadow:0 0 0 3px rgba(59,130,246,.12); }
+  .modal-row { display:grid; grid-template-columns:1fr 96px; gap:10px; }
+  .modal-actions { display:flex; gap:8px; margin-top:16px; }
+  .modal-btn {
+    flex:1; border:none; border-radius:10px; padding:14px 10px;
+    font-size:16px; font-weight:800; cursor:pointer;
+    background:#E5E7EB; color:#374151;
+  }
+  .modal-btn.primary { background:#2563EB; color:#fff; }
+  .modal-btn:disabled { opacity:.5; cursor:not-allowed; }
+  .candidate-list { display:flex; flex-direction:column; gap:8px; margin-top:6px; max-height:220px; overflow-y:auto; }
+  .candidate-card {
+    border:1px solid #CBD5E1; border-radius:10px; padding:11px 12px;
+    background:#fff; cursor:pointer;
+  }
+  .candidate-card.selected { border-color:#2563EB; background:#EFF6FF; box-shadow:0 0 0 2px rgba(37,99,235,.16); }
+  .candidate-title { font-size:15px; font-weight:800; color:#1A1A2E; line-height:1.35; }
+  .candidate-meta { font-size:13px; color:#64748B; margin-top:4px; line-height:1.35; }
+  .candidate-empty { border:1px dashed #CBD5E1; border-radius:10px; padding:12px; color:#64748B; font-size:14px; }
+  @media (max-width:560px) {
+    .app-switcher { width:100%; }
+    .app-tab { flex:1; }
+    .btn-row { width:100%; margin-left:0; }
+    .search-wrap { min-width:100%; }
+  }
 </style>
 </head>
 <body>
 
 <div class="topbar">
-  <span class="topbar-title">📅 스케줄</span>
+  <div class="app-switcher" aria-label="운영 화면 전환">
+    <span class="app-tab active">빌리지 스케줄</span>
+    <a class="app-tab" href="?page=dashboard">오늘 일정</a>
+  </div>
   <div class="search-wrap">
     <span class="search-icon">🔍</span>
     <input type="text" id="searchInput" placeholder="장비명 검색..." autocomplete="off">
   </div>
   <div class="btn-row">
     <button class="btn" onclick="moveToday()">오늘</button>
-    <button class="btn" id="btnAll" onclick="filterStatus('all')">전체</button>
-    <button class="btn" id="btnActive" onclick="filterStatus('active')">진행중</button>
+    <button class="btn" onclick="openAddModal()">장비 추가</button>
     <button class="btn" onclick="reload()">↺</button>
+    <span class="auto-refresh" id="refreshInfo"></span>
+    <span class="topbar-divider" aria-hidden="true"></span>
+    <a class="btn request-link" href="https://village6k-cpu.github.io/my-gas-project2/request.html">예약 입력</a>
   </div>
-  <span class="auto-refresh" id="refreshInfo"></span>
 </div>
 
 <div class="legend">
@@ -201,15 +275,44 @@
   <div class="detail-card" id="detailCard"></div>
 </div>
 
+<!-- 장비 추가 모달 -->
+<div class="modal-overlay" id="addModal" onclick="if(event.target===this)closeAddModal()">
+  <div class="modal-box">
+    <div class="modal-title">기존 예약에 장비 추가</div>
+    <label class="modal-label">추가할 장비명</label>
+    <div class="modal-row">
+      <input id="addEquipInput" class="modal-input" list="equipDatalist" placeholder="예: FX3, 70-200" autocomplete="off">
+      <input id="addQtyInput" class="modal-input" type="number" min="1" value="1">
+    </div>
+    <datalist id="equipDatalist"></datalist>
+
+    <label class="modal-label">예약 반출일(선택)</label>
+    <input id="candidateDateInput" class="modal-input" type="date">
+
+    <label class="modal-label">감독/거래ID 검색</label>
+    <input id="candidateNameInput" class="modal-input" placeholder="예약자명, 업체명, 거래ID">
+
+    <label class="modal-label">일정 선택</label>
+    <input type="hidden" id="candidateSelect">
+    <div id="candidateList" class="candidate-list"></div>
+
+    <div class="modal-actions">
+      <button class="modal-btn" onclick="closeAddModal()">취소</button>
+      <button class="modal-btn primary" id="confirmAddBtn" onclick="confirmScheduleAdd()">가용 확인 후 추가</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
 <script>
 var API_URL = "";
 var timeline, allGroups = [], allItems = [];
 var groups = new vis.DataSet();
 var items = new vis.DataSet();
-var currentFilter = "all";
 var refreshTimer = null;
 var REFRESH_INTERVAL = 60000; // 1분
+var equipListCache = null;
+var candidateSearchTimer = null;
 
 // ━━━ 초기화 ━━━
 function init() {
@@ -270,7 +373,6 @@ function applyFilters() {
 
   var visibleItems = allItems.filter(function(item) {
     if (!gids[item.group]) return false;
-    if (currentFilter === "active") return item.status === "대기" || item.status === "반출중";
     return true;
   });
 
@@ -293,21 +395,30 @@ function updateStat() {
 // ━━━ 상세 팝업 ━━━
 function showDetail(itemId) {
   var item = allItems.find(function(i) { return i.id === itemId; });
-  if (!item || !item.title) return;
+  if (!item) return;
 
-  var lines = item.title.split("\n");
-  var html = '<h4>' + (item.content || "") + '</h4>';
-  lines.forEach(function(line) {
-    var parts = line.split(": ");
-    if (parts.length >= 2) {
-      html += '<div class="detail-row"><span class="label">' + parts[0] +
-        '</span><span class="value">' + parts.slice(1).join(": ") + '</span></div>';
-    }
-  });
+  var html = '<h4>' + escHtml(item.content || item.custName || "") + '</h4>';
+  html += detailRow('거래ID', item['거래ID'] || '-');
+  html += detailRow('고객명', item.custName || '-');
+  html += detailRow('연락처', item.tel || '-');
+  html += detailRow('장비명', item['세트명'] || item['장비명'] || '-');
+  html += detailRow('수량', item['수량'] || '-');
+  html += detailRow('반출', item['반출'] || '-');
+  html += detailRow('반납', item['반납'] || '-');
+  html += detailRow('상태', item.status || '-');
+  html += '<div class="detail-actions">';
+  html += '<button class="detail-action" onclick="event.stopPropagation();openAddModal(\'' + escJs(item['거래ID']) + '\',\'' + escJs(candidateDateForItem(item)) + '\')">장비 추가</button>';
+  html += '<button class="detail-action danger" onclick="event.stopPropagation();deleteTimelineEquip(\'' + escJs(item['거래ID']) + '\',\'' + escJs(item['세트명'] || item['장비명']) + '\')">삭제</button>';
+  html += '</div>';
   html += '<button class="detail-close" onclick="closeDetail()">닫기</button>';
 
   document.getElementById("detailCard").innerHTML = html;
   document.getElementById("detailOverlay").classList.add("show");
+}
+
+function detailRow(label, value) {
+  return '<div class="detail-row"><span class="label">' + escHtml(label) +
+    '</span><span class="value">' + escHtml(value) + '</span></div>';
 }
 
 function closeDetail(e) {
@@ -325,18 +436,8 @@ function moveToday() {
   );
 }
 
-function filterStatus(type) {
-  currentFilter = type;
-  document.getElementById("btnAll").classList.toggle("on", type === "all");
-  document.getElementById("btnActive").classList.toggle("on", type === "active");
-  applyFilters();
-}
-
 function reload() {
   document.getElementById("searchInput").value = "";
-  currentFilter = "all";
-  document.getElementById("btnAll").classList.add("on");
-  document.getElementById("btnActive").classList.remove("on");
   loadData();
 }
 
@@ -360,12 +461,153 @@ function updateRefreshInfo() {
 
 // ━━━ 검색 ━━━
 document.getElementById("searchInput").addEventListener("input", applyFilters);
+document.getElementById("candidateNameInput").addEventListener("input", scheduleCandidateSearch);
+document.getElementById("candidateDateInput").addEventListener("change", scheduleCandidateSearch);
+
+function todayStr() {
+  var d = new Date();
+  return d.getFullYear() + '-' + ('0'+(d.getMonth()+1)).slice(-2) + '-' + ('0'+d.getDate()).slice(-2);
+}
+
+function candidateDateForItem(item) {
+  var checkout = String((item && item['반출']) || '').slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(checkout)) return checkout;
+  return '';
+}
+
+function loadEquipList() {
+  if (equipListCache) return Promise.resolve(equipListCache);
+  return fetch(API_URL + '?key=village2026&action=read&sheet=' + encodeURIComponent('목록') + '&range=A2:A1000')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var rows = data.data || [];
+      equipListCache = rows.map(function(r) { return Array.isArray(r) ? r[0] : r; })
+        .filter(function(v) { return !!v; })
+        .map(String);
+      document.getElementById('equipDatalist').innerHTML = equipListCache.map(function(n) {
+        return '<option value="' + escAttr(n) + '"></option>';
+      }).join('');
+      return equipListCache;
+    })
+    .catch(function() { equipListCache = []; return []; });
+}
+
+function openAddModal(prefillTid, prefillDate) {
+  var search = document.getElementById('searchInput').value.trim();
+  document.getElementById('addEquipInput').value = search;
+  document.getElementById('addQtyInput').value = '1';
+  document.getElementById('candidateDateInput').value = prefillDate || '';
+  document.getElementById('candidateNameInput').value = prefillTid || '';
+  document.getElementById('candidateSelect').value = '';
+  document.getElementById('candidateList').innerHTML = '<div class="candidate-empty">감독 이름이나 거래ID를 입력하면 일정이 표시됩니다</div>';
+  document.getElementById('addModal').classList.add('show');
+  loadEquipList().then(function() {
+    setTimeout(function() { document.getElementById('addEquipInput').focus(); }, 50);
+    if (prefillTid) findCandidates();
+  });
+}
+
+function closeAddModal() {
+  document.getElementById('addModal').classList.remove('show');
+}
+
+function findCandidates() {
+  var name = document.getElementById('candidateNameInput').value.trim();
+  var date = document.getElementById('candidateDateInput').value;
+  var selected = document.getElementById('candidateSelect');
+  var list = document.getElementById('candidateList');
+  selected.value = '';
+  if (!name && !date) {
+    list.innerHTML = '<div class="candidate-empty">감독 이름이나 거래ID를 입력하면 일정이 표시됩니다</div>';
+    return;
+  }
+  list.innerHTML = '<div class="candidate-empty">일정 검색 중...</div>';
+  fetch(API_URL + '?key=village2026&action=tradeCandidates&name=' + encodeURIComponent(name) + '&date=' + encodeURIComponent(date))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      var arr = res.candidates || [];
+      if (arr.length === 0) {
+        list.innerHTML = '<div class="candidate-empty">일치하는 일정이 없습니다</div>';
+        return;
+      }
+      list.innerHTML = '';
+      arr.forEach(function(c) {
+        var card = document.createElement('div');
+        card.className = 'candidate-card';
+        card.innerHTML = '<div class="candidate-title">' + escHtml(c.name || '-') + ' · ' + escHtml(c.checkout) + ' → ' + escHtml(c.checkin) + '</div>'
+          + '<div class="candidate-meta">' + escHtml(c.tradeId) + (c.company ? ' · ' + escHtml(c.company) : '') + ' · ' + escHtml(c.status || '대기') + '</div>';
+        card.addEventListener('click', function() {
+          list.querySelectorAll('.candidate-card').forEach(function(el) { el.classList.remove('selected'); });
+          card.classList.add('selected');
+          selected.value = c.tradeId;
+        });
+        list.appendChild(card);
+      });
+    })
+    .catch(function(err) {
+      list.innerHTML = '<div class="candidate-empty">검색 실패</div>';
+      alert('후보 검색 실패: ' + err.message);
+    });
+}
+
+function scheduleCandidateSearch() {
+  clearTimeout(candidateSearchTimer);
+  candidateSearchTimer = setTimeout(findCandidates, 250);
+}
+
+function confirmScheduleAdd() {
+  var tid = document.getElementById('candidateSelect').value;
+  var equip = document.getElementById('addEquipInput').value.trim();
+  var qty = parseInt(document.getElementById('addQtyInput').value, 10) || 1;
+  if (!tid) { alert('일정을 선택하세요.'); return; }
+  if (!equip) { alert('장비명을 입력하세요.'); return; }
+  var btn = document.getElementById('confirmAddBtn');
+  btn.disabled = true;
+  btn.textContent = '확인 중...';
+  fetch(API_URL + '?key=village2026&action=scheduleAddEquip&tid=' + encodeURIComponent(tid) +
+    '&equipName=' + encodeURIComponent(equip) + '&qty=' + encodeURIComponent(qty))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      btn.disabled = false;
+      btn.textContent = '가용 확인 후 추가';
+      if (res.error) { alert(res.error); return; }
+      closeAddModal();
+      closeDetail();
+      loadData();
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = '가용 확인 후 추가';
+      alert('추가 실패: ' + err.message);
+    });
+}
+
+function deleteTimelineEquip(tid, equipName) {
+  if (!tid || !equipName) return;
+  if (!confirm(equipName + ' 을(를) 이 거래에서 삭제할까요?')) return;
+  fetch(API_URL + '?key=village2026&action=scheduleRemoveEquip&tid=' + encodeURIComponent(tid) +
+    '&equipName=' + encodeURIComponent(equipName))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) { alert('삭제 실패: ' + res.error); return; }
+      closeDetail();
+      loadData();
+    })
+    .catch(function(err) { alert('삭제 실패: ' + err.message); });
+}
+
+function escHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) { return escHtml(s).replace(/'/g,'&#39;'); }
+function escJs(s) { return String(s || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,' '); }
 
 // ━━━ 시작 ━━━
 init();
 loadData();
 startAutoRefresh();
-document.getElementById("btnAll").classList.add("on");
+loadEquipList();
 </script>
 </body>
 </html>
