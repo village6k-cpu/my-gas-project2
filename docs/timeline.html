@@ -915,16 +915,9 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
 
 <!-- Context Menu -->
 <div class="ctx-menu" id="ctxMenu">
-  <div class="ctx-item" onclick="ctxAction('반출중')">&#x1F4E6; 반출 처리</div>
-  <div class="ctx-item" onclick="ctxAction('반납완료')">&#x2705; 반납 완료</div>
-  <div class="ctx-sep"></div>
-  <div class="ctx-item" onclick="ctxAction('detail')">&#x1F4CB; 상세 보기</div>
-  <div class="ctx-item" onclick="ctxAction('contract')">&#x1F4C4; 계약서 열기</div>
   <div class="ctx-item" onclick="ctxAction('addEquip')">&#x2795; 이 예약에 장비 추가</div>
-  <div class="ctx-item" onclick="ctxAction('alimtalk')">&#x1F4AC; 알림톡 발송</div>
-  <div class="ctx-sep"></div>
   <div class="ctx-item danger" onclick="ctxAction('deleteEquip')">&#x1F5D1; 이 장비 삭제</div>
-  <div class="ctx-item danger" onclick="ctxAction('취소')">&#x274C; 취소</div>
+  <div class="ctx-item" onclick="ctxAction('contract')">&#x1F4C4; 계약서 열기</div>
 </div>
 
 <!-- Detail Panel -->
@@ -1559,24 +1552,21 @@ function hideContextMenu() {
 }
 
 function ctxAction(action) {
-  hideContextMenu();
-  if (!ctxTarget) return;
   var item = ctxTarget;
+  hideContextMenu();
+  if (!item) return;
 
-  if (action === "detail") {
-    showDetail(item);
-    return;
-  }
   if (action === "contract") {
-    showToast("계약서 열기: " + (item["거래ID"] || ""));
+    var contractUrl = String(item.contractUrl || "").trim();
+    if (!contractUrl) {
+      showToast("계약서 링크가 없습니다");
+      return;
+    }
+    window.open(contractUrl, "_blank", "noopener");
     return;
   }
   if (action === "addEquip") {
     openAddModalForBooking(item);
-    return;
-  }
-  if (action === "alimtalk") {
-    showToast("알림톡 발송: " + (item.custName || ""));
     return;
   }
   if (action === "deleteEquip") {
@@ -1596,24 +1586,6 @@ function ctxAction(action) {
       })
       .catch(function() { showToast("네트워크 오류"); });
     return;
-  }
-
-  // Status change
-  if (action === "반출중" || action === "반납완료" || action === "취소") {
-    var riParam = item.rowIndices ? "&rowIndices=" + encodeURIComponent(JSON.stringify(item.rowIndices)) : "";
-    fetch(API_URL + "?key=village2026&action=updateStatus&row=" + item.rowIndex +
-      "&status=" + encodeURIComponent(action) + riParam)
-      .then(function(r) { return r.json(); })
-      .then(function(res) {
-        if (res.success) {
-          showToast("상태 변경: " + action);
-          item.status = action;
-          render();
-        } else {
-          showToast("상태 변경 실패");
-        }
-      })
-      .catch(function() { showToast("네트워크 오류"); });
   }
 }
 

@@ -121,6 +121,17 @@ function getTimelineData() {
   }
 
   const data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getValues();
+  var timelineTradeIds = {};
+  data.forEach(function(row) {
+    var tid = String(row[1] || '').trim();
+    if (tid) timelineTradeIds[tid] = true;
+  });
+  var tradeExtras = {};
+  try {
+    tradeExtras = getTradeExtrasForIds_(Object.keys(timelineTradeIds));
+  } catch (e) {
+    tradeExtras = {};
+  }
 
   const seen = {};   // "거래ID|그룹명" → true
   const entries = [];
@@ -162,6 +173,7 @@ function getTimelineData() {
     if (!startDT || !endDT) return;
 
     const cust = contractMap[거래ID] || {};
+    var extra = tradeExtras[String(거래ID || '').trim()] || {};
 
     // 같은 거래ID+세트명의 모든 행 인덱스 수집
     var rowIndices = [];
@@ -197,7 +209,8 @@ function getTimelineData() {
       반출시간:  반출시간Str,
       반납시간:  반납시간Str,
       장비명:    장비명,
-      세트명원본: 세트명
+      세트명원본: 세트명,
+      contractUrl: extra.contractUrl || ''
     });
   }
 
@@ -259,7 +272,8 @@ function getTimelineData() {
         반납시간:  e.반납시간 || '',
         회차:      e.회차 || 1,
         재고:      stockMap[e.isSingleItem ? e.groupName : e.장비명] || 1,
-        세트명원본: e.세트명원본 || e.groupName
+        세트명원본: e.세트명원본 || e.groupName,
+        contractUrl: e.contractUrl || ''
       });
     }
   });
