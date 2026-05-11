@@ -1507,7 +1507,7 @@ function paymentSelectHtml(item) {
   var current = item.paymentMethod || '';
   var html = '<select class="payment-select" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updatePaymentMethod(event,this,\'' + escJs(item.tradeId) + '\')">';
   options.forEach(function(opt) {
-    var label = opt || '선택';
+    var label = opt || '결제수단';
     html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(label) + '</option>';
   });
   html += '</select>';

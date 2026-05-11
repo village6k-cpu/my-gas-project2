@@ -1775,7 +1775,7 @@ function paymentSelectHtml(item) {
   var current = item.paymentMethod || '';
   var html = '<select class="payment-select" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updatePaymentMethod(event,this,\'' + escJs(item.tradeId) + '\')">';
   options.forEach(function(opt) {
-    html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(opt || '선택') + '</option>';
+    html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(opt || '결제수단') + '</option>';
   });
   html += '</select>';
   return html;
