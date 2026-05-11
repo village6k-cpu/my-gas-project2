@@ -223,6 +223,12 @@ function handleRequest(e) {
           params.value !== undefined ? params.value : postBody.value
         ));
 
+      case "updateContractStatus":
+        return jsonResponse(updateDashboardContractStatus(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.status || postBody.status
+        ));
+
       case "addEquip":
         return jsonResponse(dashboardAddEquipment(
           params.tid || postBody.tid,

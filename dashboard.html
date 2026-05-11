@@ -703,8 +703,11 @@
     font-weight: 600;
   }
   .status-대기     { background: var(--blue-bg); color: var(--blue-text); }
+  .status-예약     { background: var(--blue-bg); color: var(--blue-text); }
+  .status-반출     { background: var(--amber-bg); color: var(--amber-text); }
   .status-반출중   { background: var(--amber-bg); color: var(--amber-text); }
   .status-반납완료 { background: var(--green-bg); color: var(--green-text); }
+  .status-취소     { background: #E8E8E5; color: #787774; }
 
   /* ── 빈 상태 ── */
   .empty-state {
@@ -999,6 +1002,7 @@ var activeDashboardTab = 'checkout';
 var dashboardSearchQuery = '';
 var dashboardRequestSeq = 0;
 var dashboardAbortController = null;
+var CONTRACT_STATUS_OPTIONS = ['', '예약', '반출', '취소'];
 var RETURN_STATUS_OPTIONS = ['', '정상', '확인필요', '파손', '분실', '미반납', '반납완료'];
 var equipmentMemoSaveTimers = {};
 var DEFAULT_DASHBOARD_NOTES = [
@@ -1333,6 +1337,7 @@ function dashboardItemMatchesSearch(item, type) {
     item.company,
     item.tel,
     item.status,
+    item.contractStatus,
     item.time,
     item.sortTime,
     item.checkoutDate,
@@ -1422,7 +1427,7 @@ function renderList(containerId, items, type, isSearching) {
         html += '<div class="card-meta"><span class="icon">📞</span>';
         html += '<a href="tel:' + item.tel + '" class="tel-link" onclick="event.stopPropagation()">' + escHtml(item.tel) + '</a></div>';
       }
-      html += tradeReturnFieldsHtml(item);
+      html += tradeReturnFieldsHtml(item, cardType);
 
       html += '<div class="equip-checklist">';
       (item.equipments || []).forEach(function(eq) {
@@ -1461,7 +1466,11 @@ function renderList(containerId, items, type, isSearching) {
       var pLabel = cardType === 'checkout' ? '반납 예정' : '반출일';
       var pValue = cardType === 'checkout' ? item.returnDate : item.checkoutDate;
       if (pValue) html += '<div class="detail-row"><span>' + pLabel + '</span><span class="dl">' + escHtml(pValue) + '</span></div>';
-      html += '<div class="detail-row"><span>상태</span><span class="status-badge status-' + (item.status || '대기') + '">' + (item.status || '대기') + '</span></div>';
+      var detailStatusLabel = cardType === 'checkout' ? '계약상태' : '상태';
+      var detailStatus = cardType === 'checkout'
+        ? (normalizeContractStatus(item.contractStatus || item.status) || item.contractStatus || item.status || '예약')
+        : (item.status || '대기');
+      html += '<div class="detail-row"><span>' + detailStatusLabel + '</span><span class="status-badge status-' + detailStatus + '">' + detailStatus + '</span></div>';
       if (item.equipments && item.equipments.length > 0) {
         var total = item.equipments.reduce(function(s, eq) { return s + (eq.qty || 1); }, 0);
         html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + total + '건</span></div>';
@@ -1552,19 +1561,40 @@ function removeEquip(tid, equipName) {
     .catch(function(err) { alert("네트워크 오류: " + err.message); });
 }
 
-function tradeReturnFieldsHtml(item) {
-  var status = item.returnStatus || '';
+function tradeReturnFieldsHtml(item, cardType) {
+  var isCheckout = cardType === 'checkout';
+  var status = isCheckout ? normalizeContractStatus(item.contractStatus || item.status || '') : (item.returnStatus || '');
   var memo = item.returnMemo || '';
   var attrs = ' data-trade-id="' + escAttr(item.tradeId) + '"' +
     ' data-label="' + escAttr(item.name) + '"';
   var html = '<div class="trade-return-meta" onclick="event.stopPropagation()">';
-  html += '<select class="return-status-select" data-field="returnStatus" data-prev="' + escAttr(status) + '"' + attrs + ' onchange="updateEquipmentCheck(this)" onclick="event.stopPropagation()">';
-  html += returnStatusOptionsHtml(status);
+  if (isCheckout) {
+    html += '<select class="return-status-select" data-field="contractStatus" data-prev="' + escAttr(status) + '"' + attrs + ' onchange="updateContractStatus(this)" onclick="event.stopPropagation()">';
+    html += contractStatusOptionsHtml(status);
+  } else {
+    html += '<select class="return-status-select" data-field="returnStatus" data-prev="' + escAttr(status) + '"' + attrs + ' onchange="updateEquipmentCheck(this)" onclick="event.stopPropagation()">';
+    html += returnStatusOptionsHtml(status);
+  }
   html += '</select>';
   html += '<input class="return-memo-input" type="text" maxlength="500" placeholder="특이사항 메모" value="' + escAttr(memo) + '" data-field="memo" data-prev="' + escAttr(memo) + '"' + attrs + ' oninput="queueEquipmentMemoSave(this)" onblur="flushEquipmentMemoSave(this)" onclick="event.stopPropagation()">';
   html += '<span class="equip-save-state"></span>';
   html += '</div>';
   return html;
+}
+
+function normalizeContractStatus(current) {
+  current = String(current || '').trim();
+  if (current === '확정') return '예약';
+  if (current === '반납완료') return '반출';
+  return CONTRACT_STATUS_OPTIONS.indexOf(current) >= 0 ? current : '';
+}
+
+function contractStatusOptionsHtml(current) {
+  current = normalizeContractStatus(current);
+  return CONTRACT_STATUS_OPTIONS.map(function(opt) {
+    var label = opt || '계약상태';
+    return '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(label) + '</option>';
+  }).join('');
 }
 
 function returnStatusOptionsHtml(current) {
@@ -1637,6 +1667,7 @@ function updateEquipmentCheck(el) {
       if (res.error) throw new Error(res.error);
       el.setAttribute('data-prev', value);
       syncEquipmentCheckInMemory(payload, res);
+      syncTradeFieldControls(payload.field, payload.tid, value);
       setEquipmentCheckState(el, '저장됨', false);
       setTimeout(function() { setEquipmentCheckState(el, '', false); }, 1200);
     })
@@ -1651,12 +1682,72 @@ function updateEquipmentCheck(el) {
     });
 }
 
+function updateContractStatus(el) {
+  var prev = el.getAttribute('data-prev') || '';
+  var status = el.value || '';
+  var tid = el.getAttribute('data-trade-id') || '';
+  if (prev === status) {
+    setEquipmentCheckState(el, '', false);
+    return;
+  }
+
+  el.classList.remove('is-error');
+  el.classList.add('is-saving');
+  el.disabled = true;
+  setEquipmentCheckState(el, '저장 중', false);
+
+  fetch(API_URL || '', {
+    method: 'POST',
+    body: JSON.stringify({
+      key: 'village2026',
+      action: 'updateContractStatus',
+      tid: tid,
+      status: status
+    })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      el.classList.remove('is-saving');
+      el.disabled = false;
+      if (res.error) throw new Error(res.error);
+      el.setAttribute('data-prev', status);
+      syncContractStatusInMemory(tid, status);
+      syncTradeFieldControls('contractStatus', tid, status);
+      setEquipmentCheckState(el, '저장됨', false);
+      setTimeout(function() { setEquipmentCheckState(el, '', false); }, 1200);
+    })
+    .catch(function(err) {
+      el.classList.remove('is-saving');
+      el.classList.add('is-error');
+      el.disabled = false;
+      el.value = prev;
+      setEquipmentCheckState(el, '저장 실패: ' + err.message, true);
+    });
+}
+
 function setEquipmentCheckState(el, text, isError) {
   var box = el.closest('.trade-return-meta, .equip-return-meta');
   var state = box ? box.querySelector('.equip-save-state') : null;
   if (!state) return;
   state.textContent = text || '';
   state.classList.toggle('is-error', !!isError);
+}
+
+function syncContractStatusInMemory(tid, status) {
+  if (!dashboardData) return;
+  ['checkout', 'checkin'].forEach(function(listName) {
+    (dashboardData[listName] || []).forEach(function(item) {
+      if (item.tradeId === tid) item.contractStatus = status;
+    });
+  });
+}
+
+function syncTradeFieldControls(field, tid, value) {
+  document.querySelectorAll('[data-field="' + field + '"][data-trade-id]').forEach(function(ctrl) {
+    if ((ctrl.getAttribute('data-trade-id') || '') !== tid) return;
+    ctrl.value = value;
+    ctrl.setAttribute('data-prev', value);
+  });
 }
 
 function syncEquipmentCheckInMemory(payload, res) {

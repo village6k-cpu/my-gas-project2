@@ -342,12 +342,17 @@ function getDashboardData(targetDate, skipCache) {
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
 
-  // 계약마스터: 거래ID → { 예약자명, 연락처, 업체명 }
+  // 계약마스터: 거래ID → { 예약자명, 연락처, 업체명, 계약상태(J열) }
   var contractMap = {};
   if (contractSheet && contractSheet.getLastRow() >= 2) {
-    var cData = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 4).getValues();
+    var cData = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getValues();
     cData.forEach(function(r) {
-      if (r[0]) contractMap[r[0]] = { name: r[1] || '', tel: r[2] || '', company: r[3] || '' };
+      if (r[0]) contractMap[r[0]] = {
+        name: r[1] || '',
+        tel: r[2] || '',
+        company: r[3] || '',
+        contractStatus: r[9] || ''
+      };
     });
   }
 
@@ -453,6 +458,7 @@ function getDashboardData(targetDate, skipCache) {
       tel: cust.tel || '',
       company: cust.company || '',
       status: g.상태,
+      contractStatus: cust.contractStatus || '',
       setupDone: setupDone,
       returnDone: returnDone,
       contractUrl: extra.contractUrl || '',
@@ -891,6 +897,39 @@ function updateEquipmentCheck(scheduleId, tradeId, label, field, value) {
       field: field,
       value: value
     };
+  } catch (err) {
+    return { error: err.message };
+  } finally {
+    try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+function updateDashboardContractStatus(tradeId, status) {
+  tradeId = String(tradeId || '').trim();
+  status = String(status || '').trim();
+  var allowed = { "예약": true, "반출": true, "취소": true };
+
+  if (!tradeId) return { error: "거래ID 필수" };
+  if (!allowed[status]) return { error: "계약상태는 예약/반출/취소만 허용" };
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(5000); } catch (lockErr) {}
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName('계약마스터');
+    if (!sheet || sheet.getLastRow() < 2) return { error: "계약마스터 시트 없음" };
+
+    var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues();
+    for (var i = 0; i < ids.length; i++) {
+      if (String(ids[i][0] || '').trim() === tradeId) {
+        var row = i + 2;
+        sheet.getRange(row, 10).setValue(status); // J열: 계약상태
+        invalidateDashboardCache();
+        return { success: true, tradeId: tradeId, status: status, row: row };
+      }
+    }
+    return { error: "계약마스터에서 거래ID를 찾지 못했습니다" };
   } catch (err) {
     return { error: err.message };
   } finally {
