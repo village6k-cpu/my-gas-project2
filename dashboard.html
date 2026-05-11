@@ -210,6 +210,40 @@
   .today-btn:hover { opacity: 0.9; }
   .today-btn:active { opacity: 0.85; }
 
+  .dashboard-search {
+    position: relative;
+    flex: 1 1 240px;
+    max-width: 360px;
+    min-width: 190px;
+  }
+  .dashboard-search-icon {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-muted);
+    font-size: 13px;
+    pointer-events: none;
+  }
+  .dashboard-search input {
+    width: 100%;
+    min-height: 32px;
+    padding: 6px 10px 6px 30px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .dashboard-search input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(35,131,226,0.15);
+  }
+  .dashboard-search input::placeholder { color: var(--text-muted); }
+
   /* ── 인수인계 메모 ── */
   .notice-board {
     --notice-note-font-size: 15px;
@@ -726,6 +760,7 @@
     .app-switcher { flex: 1; }
     .app-tab { flex: 1; justify-content: center; }
     .date-context { width: 100%; margin-left: 0; }
+    .dashboard-search { min-width: 100%; max-width: none; }
     .notice-board { grid-template-columns: 1fr; }
     .notice-list { grid-template-columns: 1fr; }
   }
@@ -759,6 +794,10 @@
     <input type="date" class="date-input" id="dateInput" onchange="onDateChange()">
     <button class="date-nav-btn" onclick="changeDate(1)">▶</button>
     <button class="today-btn" onclick="goToday()">오늘</button>
+    <div class="dashboard-search">
+      <span class="dashboard-search-icon">&#x1F50D;</span>
+      <input id="dashboardSearchInput" type="search" placeholder="고객/장비/거래ID 검색" autocomplete="off" oninput="onDashboardSearchInput(this.value)">
+    </div>
     <div class="date-context">
       <strong id="headerTitle">오늘 일정</strong>
       <span id="dateLabel"></span>
@@ -812,6 +851,7 @@
 var dashboardData = null;
 var currentDate = new Date();
 var activeDashboardTab = 'checkout';
+var dashboardSearchQuery = '';
 var dashboardRequestSeq = 0;
 var dashboardAbortController = null;
 var DEFAULT_DASHBOARD_NOTES = [
@@ -881,6 +921,12 @@ function goToday() {
   currentDate = new Date();
   updateDateDisplay();
   loadData();
+}
+
+function onDashboardSearchInput(value) {
+  dashboardSearchQuery = String(value || '').trim();
+  if (dashboardSearchQuery) activeDashboardTab = 'all';
+  if (dashboardData) renderDashboard(dashboardData, formatDate(currentDate));
 }
 
 function loadData(forceFresh) {
@@ -1125,39 +1171,78 @@ function compareTimeLabels(a, b) {
   return String(a || '').localeCompare(String(b || ''));
 }
 
+function normalizeDashboardSearchText(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function dashboardItemMatchesSearch(item, type) {
+  var terms = normalizeDashboardSearchText(dashboardSearchQuery).split(' ').filter(Boolean);
+  if (!terms.length) return true;
+
+  var parts = [
+    type === 'checkout' ? '반출' : '반납',
+    item.tradeId,
+    item.name,
+    item.company,
+    item.tel,
+    item.status,
+    item.time,
+    item.sortTime,
+    item.checkoutDate,
+    item.returnDate,
+    item.paymentMethod,
+    item.paymentSource,
+    item.paymentWarning
+  ];
+  (item.equipments || []).forEach(function(eq) {
+    parts.push(eq.name, eq.setName, eq.qty, eq.isSet ? '세트 set' : '', eq.isComponent ? '구성품' : '');
+  });
+
+  var haystack = normalizeDashboardSearchText(parts.join(' '));
+  return terms.every(function(term) { return haystack.indexOf(term) >= 0; });
+}
+
+function filterDashboardItems(items, type) {
+  if (!dashboardSearchQuery) return items.slice();
+  return items.filter(function(item) { return dashboardItemMatchesSearch(item, type); });
+}
+
 function renderDashboard(data, expectedDate) {
   if (!isDashboardDateMatch(data, expectedDate)) return false;
   data = data || {};
   var checkout = Array.isArray(data.checkout) ? data.checkout : [];
   var checkin = Array.isArray(data.checkin) ? data.checkin : [];
+  var filteredCheckout = filterDashboardItems(checkout, 'checkout');
+  var filteredCheckin = filterDashboardItems(checkin, 'checkin');
+  var isSearching = !!dashboardSearchQuery;
   document.getElementById('loadingArea').style.display = 'none';
 
-  document.getElementById('tabCheckout').textContent = checkout.length;
-  document.getElementById('tabCheckin').textContent = checkin.length;
-  document.getElementById('tabAll').textContent = checkout.length + checkin.length;
+  document.getElementById('tabCheckout').textContent = filteredCheckout.length;
+  document.getElementById('tabCheckin').textContent = filteredCheckin.length;
+  document.getElementById('tabAll').textContent = filteredCheckout.length + filteredCheckin.length;
 
-  renderList('checkoutSection', checkout, 'checkout');
-  renderList('checkinSection', checkin, 'checkin');
+  renderList('checkoutSection', filteredCheckout, 'checkout', isSearching);
+  renderList('checkinSection', filteredCheckin, 'checkin', isSearching);
 
-  var all = checkout.map(function(c) { c._type = 'checkout'; return c; })
-    .concat(checkin.map(function(c) { c._type = 'checkin'; return c; }));
+  var all = filteredCheckout.map(function(c) { c._type = 'checkout'; return c; })
+    .concat(filteredCheckin.map(function(c) { c._type = 'checkin'; return c; }));
   all.sort(compareScheduleItemsByTime);
-  renderList('allSection', all, 'all');
+  renderList('allSection', all, 'all', isSearching);
 
   switchTab(activeDashboardTab || 'checkout');
   return true;
 }
 
-function renderList(containerId, items, type) {
+function renderList(containerId, items, type, isSearching) {
   var container = document.getElementById(containerId);
 
   if (!items || items.length === 0) {
+    var emptyText = isSearching ? '검색 결과가 없습니다' :
+      ((type === 'checkout' ? '반출' : type === 'checkin' ? '반납' : '') + ' 일정이 없습니다');
     container.innerHTML =
       '<div class="empty-state"><div class="icon">' +
       (type === 'checkout' ? '📦' : type === 'checkin' ? '📥' : '📋') +
-      '</div><div class="text">' +
-      (type === 'checkout' ? '반출' : type === 'checkin' ? '반납' : '') +
-      ' 일정이 없습니다</div></div>';
+      '</div><div class="text">' + emptyText + '</div></div>';
     return;
   }
 
