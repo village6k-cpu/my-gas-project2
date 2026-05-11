@@ -4,84 +4,125 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="스케줄">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#1A1A2E">
+<meta name="theme-color" content="#F7F7F5">
 <title>빌리지 스케줄</title>
 <link href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css" rel="stylesheet">
 <style>
   * { box-sizing:border-box; margin:0; padding:0; }
+  :root {
+    --bg:#F7F7F5;
+    --surface:#FFFFFF;
+    --border:#E9E9E7;
+    --border-light:#F0F0EE;
+    --text-primary:#37352F;
+    --text-secondary:#787774;
+    --text-muted:#B4B4B0;
+    --accent:#2383E2;
+    --radius:6px;
+  }
   body {
-    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-    background:#F0F2F5; color:#1A1A2E;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',sans-serif;
+    background:var(--bg); color:var(--text-primary);
     height:100vh; height:100dvh;
     display:flex; flex-direction:column;
     overflow:hidden;
     -webkit-user-select:none; user-select:none;
   }
 
-  /* ── 상단 바 ── */
-  .topbar {
-    background:#1A1A2E; color:#fff;
-    padding:14px 16px;
-    display:flex; align-items:center; gap:10px;
-    flex-shrink:0; flex-wrap:wrap;
+  /* ── Header ── */
+  .header {
+    background:var(--surface);
+    border-bottom:1px solid var(--border);
+    padding:12px 20px 10px;
+    flex-shrink:0;
+    z-index:100;
+  }
+  .header-top,
+  .header-workbar {
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  }
+  .header-top {
+    justify-content:space-between;
+    margin-bottom:10px;
+  }
+  .header-actions {
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+    justify-content:flex-end;
   }
   .app-switcher {
     display:flex; overflow:hidden; flex-shrink:0;
-    border:1px solid rgba(255,255,255,.18);
-    border-radius:10px; background:rgba(255,255,255,.08);
+    border:1px solid var(--border);
+    border-radius:var(--radius); background:var(--bg);
   }
   .app-tab {
     display:inline-flex; align-items:center; justify-content:center;
-    min-height:38px; padding:9px 14px;
-    color:#CBD5E1; text-decoration:none; font-size:15px; font-weight:800;
+    min-height:32px; padding:6px 12px;
+    color:var(--text-secondary); text-decoration:none; font-size:12px; font-weight:650;
     white-space:nowrap;
   }
-  .app-tab:not(:last-child) { border-right:1px solid rgba(255,255,255,.16); }
-  .app-tab.active { background:#3B82F6; color:#fff; }
-  a.app-tab:active { background:rgba(255,255,255,.18); }
+  .app-tab:not(:last-child) { border-right:1px solid var(--border); }
+  .app-tab.active { background:var(--accent); color:#fff; }
+  a.app-tab:hover { background:rgba(0,0,0,.03); color:var(--accent); }
   .search-wrap {
-    position:relative; flex:1; min-width:140px;
+    position:relative; flex:1; min-width:180px; max-width:280px;
   }
   .search-wrap input {
-    width:100%; padding:12px 14px 12px 36px;
-    border-radius:10px; border:none;
-    background:rgba(255,255,255,.12);
-    color:#fff; font-size:16px; outline:none;
+    width:100%; min-height:32px; padding:6px 10px 6px 32px;
+    border-radius:var(--radius); border:1px solid var(--border);
+    background:var(--bg);
+    color:var(--text-primary); font-size:13px; outline:none;
   }
-  .search-wrap input::placeholder { color:rgba(255,255,255,.45); }
-  .search-wrap input:focus { background:rgba(255,255,255,.2); }
-  .search-icon { position:absolute; left:10px; top:50%; transform:translateY(-50%); font-size:16px; opacity:.6; }
-
-  .btn-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-left:auto; }
+  .search-wrap input::placeholder { color:var(--text-muted); }
+  .search-wrap input:focus { border-color:var(--accent); box-shadow:0 0 0 2px rgba(35,131,226,.15); }
+  .search-icon { position:absolute; left:10px; top:50%; transform:translateY(-50%); font-size:14px; color:var(--text-muted); pointer-events:none; }
   .btn {
     display:inline-flex; align-items:center; justify-content:center;
-    padding:10px 16px; border-radius:8px;
-    border:1px solid rgba(255,255,255,.2);
-    background:rgba(255,255,255,.08);
-    color:#E2E8F0; font-size:15px;
+    min-height:32px; padding:6px 12px; border-radius:var(--radius);
+    border:1px solid var(--border);
+    background:var(--surface);
+    color:var(--text-secondary); font-size:12px; font-weight:650;
     cursor:pointer; white-space:nowrap;
     text-decoration:none;
+    transition:all .15s;
   }
-  .btn:active { background:rgba(255,255,255,.25); }
-  .btn.on { background:#3B82F6; border-color:#3B82F6; }
+  .btn:hover { border-color:var(--accent); color:var(--accent); }
+  .btn:active { background:var(--bg); }
+  .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn.primary:hover { opacity:.9; color:#fff; }
+  .icon-btn {
+    width:32px; height:32px; padding:0; font-size:16px;
+  }
   .request-link {
-    background:#fff; color:#1A1A2E; border-color:#fff;
-    font-weight:800;
+    background:var(--bg); color:var(--text-primary);
   }
-  .topbar-divider {
-    width:1px; height:30px; background:rgba(255,255,255,.22);
-    margin:0 2px;
+  .date-input {
+    min-height:32px;
+    padding:6px 10px;
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    background:var(--surface);
+    color:var(--text-primary);
+    font-size:12px;
+    outline:none;
+  }
+  .date-input:focus {
+    border-color:var(--accent);
+    box-shadow:0 0 0 2px rgba(35,131,226,.15);
+  }
+  .date-range-separator {
+    color:var(--text-muted);
+    font-size:12px;
   }
 
   /* ── 범례 ── */
   .legend {
-    background:#fff; padding:10px 16px;
+    background:var(--surface); padding:10px 16px;
     display:flex; align-items:center; gap:14px;
-    flex-shrink:0; border-bottom:1px solid #E2E8F0;
-    flex-wrap:wrap; font-size:14px; color:#4A5568;
+    flex-shrink:0; border-bottom:1px solid var(--border);
+    flex-wrap:wrap; font-size:14px; color:var(--text-secondary);
   }
   .legend-item { display:flex; align-items:center; gap:5px; }
   .legend-dot { width:12px; height:12px; border-radius:3px; flex-shrink:0; }
@@ -184,7 +225,7 @@
 
   /* 자동갱신 표시 */
   .auto-refresh {
-    font-size:13px; color:rgba(255,255,255,.5);
+    font-size:12px; color:var(--text-muted);
     white-space:nowrap;
   }
   .modal-overlay {
@@ -222,31 +263,43 @@
   .candidate-meta { font-size:13px; color:#64748B; margin-top:4px; line-height:1.35; }
   .candidate-empty { border:1px dashed #CBD5E1; border-radius:10px; padding:12px; color:#64748B; font-size:14px; }
   @media (max-width:560px) {
+    .header { padding:8px 10px; }
     .app-switcher { width:100%; }
     .app-tab { flex:1; }
-    .btn-row { width:100%; margin-left:0; }
+    .header-actions { width:100%; justify-content:flex-start; }
+    .header-workbar { width:100%; }
     .search-wrap { min-width:100%; }
+    .date-input { flex:1; min-width:0; }
+  }
+  @media (min-width:768px) {
+    .header { padding:12px 32px 10px; }
   }
 </style>
 </head>
 <body>
 
-<div class="topbar">
-  <div class="app-switcher" aria-label="운영 화면 전환">
-    <span class="app-tab active">빌리지 스케줄</span>
-    <a class="app-tab" href="?page=dashboard">오늘 일정</a>
+<div class="header">
+  <div class="header-top">
+    <div class="app-switcher" aria-label="운영 화면 전환">
+      <span class="app-tab active">빌리지 스케줄</span>
+      <a class="app-tab" href="?page=dashboard">오늘 일정</a>
+    </div>
+    <div class="header-actions">
+      <a class="btn request-link" href="https://village6k-cpu.github.io/my-gas-project2/request.html">예약 입력</a>
+      <button class="btn icon-btn" onclick="reload()" title="새로고침" aria-label="새로고침">↻</button>
+    </div>
   </div>
-  <div class="search-wrap">
-    <span class="search-icon">🔍</span>
-    <input type="text" id="searchInput" placeholder="장비명 검색..." autocomplete="off">
-  </div>
-  <div class="btn-row">
+  <div class="header-workbar">
+    <div class="search-wrap">
+      <span class="search-icon">🔍</span>
+      <input type="text" id="searchInput" placeholder="장비명 검색..." autocomplete="off">
+    </div>
+    <input type="date" class="date-input" id="dateFrom" title="시작일">
+    <span class="date-range-separator">~</span>
+    <input type="date" class="date-input" id="dateTo" title="종료일">
     <button class="btn" onclick="moveToday()">오늘</button>
-    <button class="btn" onclick="openAddModal()">장비 추가</button>
-    <button class="btn" onclick="reload()">↺</button>
+    <button class="btn primary" onclick="openAddModal()">+ 장비 추가</button>
     <span class="auto-refresh" id="refreshInfo"></span>
-    <span class="topbar-divider" aria-hidden="true"></span>
-    <a class="btn request-link" href="https://village6k-cpu.github.io/my-gas-project2/request.html">예약 입력</a>
   </div>
 </div>
 
@@ -317,14 +370,16 @@ var candidateSearchTimer = null;
 // ━━━ 초기화 ━━━
 function init() {
   var container = document.getElementById("timeline");
+  var initialStart = new Date(Date.now() - 1000*60*60*24*1);
+  var initialEnd = new Date(Date.now() + 1000*60*60*24*7);
   var options = {
     stack: false,
     groupOrder: "content",
     orientation: { axis: "top" },
     zoomMin: 1000*60*60*6,
     zoomMax: 1000*60*60*24*90,
-    start: new Date(Date.now() - 1000*60*60*24*1),
-    end:   new Date(Date.now() + 1000*60*60*24*7),
+    start: initialStart,
+    end:   initialEnd,
     tooltip: { followMouse: false, overflowMethod: "cap" },
     groupHeightMode: "fixed",
     height: "100%",
@@ -337,6 +392,7 @@ function init() {
     snap: null
   };
   timeline = new vis.Timeline(container, items, groups, options);
+  setDateRangeInputs(initialStart, initialEnd);
 
   // 아이템 클릭 → 상세 팝업
   timeline.on("select", function(props) {
@@ -430,15 +486,42 @@ function closeDetail(e) {
 // ━━━ 컨트롤 ━━━
 function moveToday() {
   var now = new Date();
+  var start = new Date(now - 1000*60*60*24*1);
+  var end = new Date(now.getTime() + 1000*60*60*24*7);
   timeline.setWindow(
-    new Date(now - 1000*60*60*24*1),
-    new Date(now.getTime() + 1000*60*60*24*7)
+    start,
+    end
   );
+  setDateRangeInputs(start, end);
 }
 
 function reload() {
   document.getElementById("searchInput").value = "";
   loadData();
+}
+
+function dateInputStr(d) {
+  return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+}
+
+function setDateRangeInputs(start, end) {
+  document.getElementById("dateFrom").value = dateInputStr(start);
+  document.getElementById("dateTo").value = dateInputStr(end);
+}
+
+function applyDateRangeWindow() {
+  var from = document.getElementById("dateFrom").value;
+  var to = document.getElementById("dateTo").value;
+  if (!from && !to) return;
+  var start = from ? new Date(from + "T00:00:00") : new Date(new Date(to + "T00:00:00").getTime() - 1000*60*60*24*7);
+  var end = to ? new Date(to + "T23:59:59") : new Date(start.getTime() + 1000*60*60*24*7);
+  if (end < start) {
+    var tmp = start;
+    start = end;
+    end = tmp;
+  }
+  timeline.setWindow(start, end);
+  setDateRangeInputs(start, end);
 }
 
 function showLoading(show) {
@@ -461,6 +544,8 @@ function updateRefreshInfo() {
 
 // ━━━ 검색 ━━━
 document.getElementById("searchInput").addEventListener("input", applyFilters);
+document.getElementById("dateFrom").addEventListener("change", applyDateRangeWindow);
+document.getElementById("dateTo").addEventListener("change", applyDateRangeWindow);
 document.getElementById("candidateNameInput").addEventListener("input", scheduleCandidateSearch);
 document.getElementById("candidateDateInput").addEventListener("change", scheduleCandidateSearch);
 

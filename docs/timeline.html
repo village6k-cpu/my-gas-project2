@@ -48,13 +48,30 @@ body {
 .header {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  padding: 10px 16px;
+  padding: 12px 20px 10px;
+  flex-shrink: 0;
+  z-index: 100;
+}
+.header-top,
+.header-workbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
+  gap: 8px;
   flex-wrap: wrap;
-  z-index: 100;
+}
+.header-top {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.header-workbar {
+  min-width: 0;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .app-switcher {
   display: flex;
@@ -67,8 +84,8 @@ body {
 .app-tab {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 5px 13px;
+  min-height: 32px;
+  padding: 6px 12px;
   font-size: 12px;
   font-weight: 650;
   color: var(--text-secondary);
@@ -83,7 +100,8 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
 .app-tab.active { background: var(--accent); color: #fff; }
 
 .group-select {
-  padding: 5px 8px;
+  min-height: 32px;
+  padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -97,11 +115,12 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
 .search-box {
   position: relative;
   flex: 1;
-  min-width: 120px;
-  max-width: 240px;
+  min-width: 180px;
+  max-width: 280px;
 }
 .search-box input {
   width: 100%;
+  min-height: 32px;
   padding: 6px 10px 6px 32px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -121,24 +140,17 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
   font-size: 14px;
   pointer-events: none;
 }
-
-.header-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-}
 .hdr-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 28px;
-  padding: 5px 10px;
+  min-height: 32px;
+  padding: 6px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 650;
   color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.15s;
@@ -156,14 +168,35 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
   background: var(--bg);
   color: var(--text-primary);
 }
-.header-separator {
-  width: 1px;
-  height: 24px;
-  background: var(--border);
-  margin: 0 2px 0 4px;
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 16px;
+  transition: all 0.15s;
+}
+.icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.icon-btn:active,
+.hdr-btn:active {
+  background: var(--bg);
+}
+.date-range-separator {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 .date-input {
-  padding: 4px 8px;
+  min-height: 32px;
+  padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -773,14 +806,20 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
 @media (max-width: 768px) {
   .header { padding: 8px 10px; gap: 6px; }
   .search-box { max-width: 160px; min-width: 80px; }
-  .header-controls { width: 100%; margin-left: 0; }
+  .header-workbar { width: 100%; }
   .refresh-info { margin-left: auto; }
+}
+@media (min-width: 768px) {
+  .header { padding: 12px 32px 10px; }
 }
 @media (max-width: 600px) {
   .revenue-bar-area { display: none; }
   .group-select { display: none; }
   .app-switcher { width: 100%; }
   .app-tab { flex: 1; justify-content: center; }
+  .header-actions { width: 100%; justify-content: flex-start; }
+  .search-box { min-width: 100%; max-width: none; }
+  .date-input { flex: 1; min-width: 0; }
   .detail-overlay.open { align-items: flex-end; }
   .detail-panel {
     width: 100%;
@@ -811,28 +850,32 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
 
 <!-- Header -->
 <div class="header">
-  <div class="app-switcher" aria-label="운영 화면 전환">
-    <span class="app-tab active">빌리지 스케줄</span>
-    <a href="dashboard.html" class="app-tab">오늘 일정</a>
+  <div class="header-top">
+    <div class="app-switcher" aria-label="운영 화면 전환">
+      <span class="app-tab active">빌리지 스케줄</span>
+      <a href="dashboard.html" class="app-tab">오늘 일정</a>
+    </div>
+    <div class="header-actions">
+      <a href="request.html" class="hdr-btn request-btn request-link">예약 입력</a>
+      <button class="icon-btn" onclick="loadData()" title="새로고침" aria-label="새로고침">↻</button>
+    </div>
   </div>
-  <select class="group-select" id="groupMode" onchange="changeGroupMode(this.value)">
-    <option value="세트별">세트별</option>
-    <option value="고객별">고객별</option>
-    <option value="상태별">상태별</option>
-  </select>
-  <div class="search-box">
-    <span class="search-icon">&#x1F50D;</span>
-    <input type="text" id="searchInput" placeholder="검색..." autocomplete="off">
-  </div>
-  <div class="header-controls">
+  <div class="header-workbar">
+    <select class="group-select" id="groupMode" onchange="changeGroupMode(this.value)">
+      <option value="세트별">세트별</option>
+      <option value="고객별">고객별</option>
+      <option value="상태별">상태별</option>
+    </select>
+    <div class="search-box">
+      <span class="search-icon">&#x1F50D;</span>
+      <input type="text" id="searchInput" placeholder="검색..." autocomplete="off">
+    </div>
     <button class="hdr-btn" onclick="scrollToToday()">오늘</button>
     <input type="date" class="date-input" id="dateFrom" title="시작일">
-    <span style="color:var(--text-muted);font-size:12px">~</span>
+    <span class="date-range-separator">~</span>
     <input type="date" class="date-input" id="dateTo" title="종료일">
     <button class="hdr-btn primary" onclick="openAddModal()">+ 장비 추가</button>
     <span class="refresh-info" id="refreshInfo"></span>
-    <span class="header-separator" aria-hidden="true"></span>
-    <a href="request.html" class="hdr-btn request-btn">예약 입력</a>
   </div>
 </div>
 

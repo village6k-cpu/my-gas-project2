@@ -39,7 +39,7 @@
   .header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    padding: 16px 20px 14px;
+    padding: 12px 20px 10px;
     position: sticky;
     top: 0;
     z-index: 100;
@@ -50,17 +50,21 @@
     justify-content: space-between;
     gap: 10px;
     flex-wrap: wrap;
-    margin-bottom: 14px;
+    margin-bottom: 10px;
   }
-  .header h1 {
-    font-size: 20px;
-    font-weight: 800;
-    color: var(--text-primary);
-  }
-  .header .date-label {
-    font-size: 13px;
+  .date-context {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
     color: var(--text-muted);
-    margin-top: 2px;
+    font-size: 12px;
+    margin-left: auto;
+    white-space: nowrap;
+  }
+  .date-context strong {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 750;
   }
   .header-actions {
     display: flex;
@@ -79,7 +83,7 @@
   .app-tab {
     display: inline-flex;
     align-items: center;
-    min-height: 30px;
+    min-height: 32px;
     padding: 6px 12px;
     font-size: 12px;
     font-weight: 650;
@@ -91,8 +95,25 @@
   .app-tab.active { background: var(--accent); color: #fff; }
   a.app-tab:hover { color: var(--accent); background: rgba(0,0,0,0.03); }
 
+  .nav-link {
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    background: var(--bg);
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 650;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .nav-link:hover { border-color: var(--accent); color: var(--accent); }
+
   .icon-btn {
-    width: 34px; height: 34px;
+    width: 32px; height: 32px;
     display: flex; align-items: center; justify-content: center;
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -112,9 +133,10 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
   }
   .date-nav-btn {
-    width: 34px; height: 34px;
+    width: 32px; height: 32px;
     display: flex; align-items: center; justify-content: center;
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -130,8 +152,9 @@
   .date-input {
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 7px 12px;
-    font-size: 14px;
+    min-height: 32px;
+    padding: 6px 10px;
+    font-size: 13px;
     font-family: inherit;
     color: var(--text-primary);
     background: var(--surface);
@@ -145,7 +168,8 @@
     border: 1px solid var(--accent);
     background: var(--accent);
     color: #fff;
-    padding: 7px 14px;
+    min-height: 32px;
+    padding: 6px 12px;
     border-radius: var(--radius);
     font-size: 13px;
     font-weight: 600;
@@ -625,29 +649,15 @@
   }
   .detail-row .dl { font-weight: 700; color: var(--text-primary); }
 
-  /* ── Nav Link ── */
-  .nav-link {
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    text-decoration: none;
-    padding: 5px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    transition: all 0.15s;
-    white-space: nowrap;
-    background: var(--surface);
-  }
-  .nav-link:hover { border-color: var(--accent); color: var(--accent); }
-
   /* ── 반응형 ── */
   @media (max-width: 600px) {
     .header-actions { width: 100%; justify-content: flex-start; }
     .app-switcher { flex: 1; }
     .app-tab { flex: 1; justify-content: center; }
+    .date-context { width: 100%; margin-left: 0; }
   }
   @media (min-width: 768px) {
-    .header { padding: 16px 32px 14px; }
+    .header { padding: 12px 32px 10px; }
     .summary-row { padding: 14px 32px; }
     .notice-bar { padding: 10px 32px; }
     .tabs { padding: 10px 32px; }
@@ -660,15 +670,11 @@
 
 <div class="header">
   <div class="header-top">
-    <div>
-      <h1 id="headerTitle">오늘 일정</h1>
-      <div class="date-label" id="dateLabel"></div>
+    <div class="app-switcher" aria-label="운영 화면 전환">
+      <span class="app-tab active">오늘 일정</span>
+      <a href="timeline.html" class="app-tab">빌리지 스케줄</a>
     </div>
     <div class="header-actions">
-      <div class="app-switcher" aria-label="운영 화면 전환">
-        <span class="app-tab active">오늘 일정</span>
-        <a href="timeline.html" class="app-tab">빌리지 스케줄</a>
-      </div>
       <a href="request.html" class="nav-link" title="예약 입력">예약 입력</a>
       <button class="icon-btn" onclick="refreshData()" id="refreshBtn" title="새로고침">↻</button>
     </div>
@@ -678,6 +684,10 @@
     <input type="date" class="date-input" id="dateInput" onchange="onDateChange()">
     <button class="date-nav-btn" onclick="changeDate(1)">▶</button>
     <button class="today-btn" onclick="goToday()">오늘</button>
+    <div class="date-context">
+      <strong id="headerTitle">오늘 일정</strong>
+      <span id="dateLabel"></span>
+    </div>
   </div>
 </div>
 
