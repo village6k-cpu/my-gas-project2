@@ -187,6 +187,14 @@ function handleRequest(e) {
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
         return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache));
 
+      case "dashboardNotes":
+        return jsonResponse(getDashboardNotes_());
+
+      case "saveDashboardNotes":
+        return jsonResponse(saveDashboardNotes_(
+          params.notes !== undefined ? params.notes : postBody.notes
+        ));
+
       case "toggleSetup":
         return jsonResponse(toggleSetupDone(
           params.tid || postBody.tid,

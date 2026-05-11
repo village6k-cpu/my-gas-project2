@@ -527,6 +527,53 @@ function compareDashboardItemsByTime_(a, b) {
   return an.localeCompare(bn);
 }
 
+var DASHBOARD_NOTES_PROP_KEY = 'dashboardPostItNotes_v1';
+var DASHBOARD_DEFAULT_NOTES = [
+  '세부 구성품 및 추가 요청 사항은 카톡 대화 내용을 한번 더 확인 후 세팅',
+  '매직암, 라인, 배터리 등 기타 악세사리류 갯수 철저하게 체크'
+];
+
+function getDashboardNotes_() {
+  var props = PropertiesService.getScriptProperties();
+  var raw = props.getProperty(DASHBOARD_NOTES_PROP_KEY);
+  if (!raw) return { notes: DASHBOARD_DEFAULT_NOTES.slice(), isDefault: true };
+
+  try {
+    var parsed = JSON.parse(raw);
+    return { notes: sanitizeDashboardNotes_(parsed), isDefault: false };
+  } catch (e) {
+    return { notes: DASHBOARD_DEFAULT_NOTES.slice(), isDefault: true, warning: '저장된 메모 형식 오류' };
+  }
+}
+
+function saveDashboardNotes_(notesInput) {
+  var notes = notesInput;
+  if (typeof notesInput === 'string') {
+    try {
+      notes = JSON.parse(notesInput || '[]');
+    } catch (e) {
+      return { error: '메모 데이터 형식 오류' };
+    }
+  }
+
+  notes = sanitizeDashboardNotes_(notes);
+  PropertiesService.getScriptProperties().setProperty(DASHBOARD_NOTES_PROP_KEY, JSON.stringify(notes));
+  return {
+    success: true,
+    notes: notes,
+    savedAt: Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss')
+  };
+}
+
+function sanitizeDashboardNotes_(notes) {
+  if (!Array.isArray(notes)) return [];
+  return notes.map(function(note) {
+    return String(note || '').replace(/\r\n/g, '\n').trim().slice(0, 180);
+  }).filter(function(note) {
+    return note !== '';
+  }).slice(0, 8);
+}
+
 /**
  * 향후 N시간 내 재고 충돌(동시 사용량 > 보유) 진단.
  * 매일 아침 슬랙 보고서에 첨부하는 핵심 알림.

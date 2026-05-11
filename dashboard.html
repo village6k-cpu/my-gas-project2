@@ -213,13 +213,38 @@
     font-weight: 850;
     line-height: 1.25;
   }
+  .notice-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .notice-add-btn {
+    width: 30px;
+    height: 30px;
+    border: 1px solid #D0B95D;
+    border-radius: var(--radius);
+    background: rgba(255,255,255,0.45);
+    color: #93640D;
+    font-size: 18px;
+    font-weight: 800;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .notice-add-btn:hover { background: rgba(255,255,255,0.7); }
+  .notice-save-state {
+    color: #93640D;
+    font-size: 11px;
+    font-weight: 700;
+    min-width: 42px;
+  }
   .notice-list {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
   }
   .notice-note {
-    padding: 13px 15px 13px 16px;
+    padding: 13px 34px 13px 16px;
     background: #FFFDF2;
     border: 1px solid #E8D99F;
     border-left: 4px solid #D99A00;
@@ -237,12 +262,41 @@
     content: '';
     position: absolute;
     top: 9px;
-    right: 10px;
+    right: 32px;
     width: 7px;
     height: 7px;
     border-radius: 50%;
     background: rgba(55,53,47,0.22);
   }
+  .notice-textarea {
+    width: 100%;
+    min-height: 44px;
+    border: none;
+    outline: none;
+    resize: none;
+    overflow: hidden;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: inherit;
+    letter-spacing: 0;
+  }
+  .notice-textarea:focus { box-shadow: inset 0 -1px 0 rgba(35,131,226,0.35); }
+  .notice-delete-btn {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 24px;
+    height: 24px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .notice-delete-btn:hover { border-color: rgba(235,87,87,0.35); color: var(--red); background: rgba(235,87,87,0.06); }
 
   /* ── 탭 ── */
   .tabs {
@@ -503,6 +557,16 @@
     margin-top: 8px;
     line-height: 1.4;
   }
+  .card-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-light);
+  }
+  .card-actions .payment-select { min-height: 32px; }
 
   .modal-overlay {
     display: none;
@@ -640,11 +704,12 @@
   <div class="notice-lead">
     <div class="notice-kicker">사장님 메모</div>
     <div class="notice-title">오늘 세팅 전<br>반드시 확인</div>
+    <div class="notice-controls">
+      <button class="notice-add-btn" onclick="addDashboardNote()" title="메모 추가" aria-label="메모 추가">+</button>
+      <span class="notice-save-state" id="noticeSaveState"></span>
+    </div>
   </div>
-  <div class="notice-list">
-    <div class="notice-note">세부 구성품 및 추가 요청 사항은 카톡 대화 내용을 한번 더 확인 후 세팅</div>
-    <div class="notice-note secondary">매직암, 라인, 배터리 등 기타 악세사리류 갯수 철저하게 체크</div>
-  </div>
+  <div class="notice-list" id="noticeList"></div>
 </div>
 
 <div class="tabs">
@@ -674,9 +739,17 @@
 <script>
 var dashboardData = null;
 var currentDate = new Date();
+var DEFAULT_DASHBOARD_NOTES = [
+  '세부 구성품 및 추가 요청 사항은 카톡 대화 내용을 한번 더 확인 후 세팅',
+  '매직암, 라인, 배터리 등 기타 악세사리류 갯수 철저하게 체크'
+];
+var dashboardNotes = DEFAULT_DASHBOARD_NOTES.slice();
+var noteSaveTimer = null;
 
 document.addEventListener('DOMContentLoaded', function() {
   updateDateDisplay();
+  renderDashboardNotes(dashboardNotes);
+  loadDashboardNotes();
   // 서버가 INITIAL_DATA 박아 보냈으면 즉시 렌더 (fetch 왕복 1회 절약)
   if (INITIAL_DATA) {
     dashboardData = INITIAL_DATA;
@@ -747,6 +820,110 @@ function refreshData() {
   btn.classList.add('spinning');
   setTimeout(function() { btn.classList.remove('spinning'); }, 800);
   loadData(true);  // 캐시 우회 — 시트의 최신 데이터 강제 조회
+}
+
+function normalizeDashboardNotes(notes) {
+  if (!Array.isArray(notes)) return [];
+  return notes.map(function(note) {
+    return String(note || '').trim().slice(0, 180);
+  }).filter(function(note) { return note !== ''; }).slice(0, 8);
+}
+
+function setNoticeSaveState(text) {
+  var el = document.getElementById('noticeSaveState');
+  if (el) el.textContent = text || '';
+}
+
+function autoSizeNoteTextarea(textarea) {
+  if (!textarea) return;
+  textarea.style.height = 'auto';
+  textarea.style.height = Math.max(44, textarea.scrollHeight) + 'px';
+}
+
+function renderDashboardNotes(notes) {
+  dashboardNotes = Array.isArray(notes) ? notes.slice(0, 8) : [];
+  var list = document.getElementById('noticeList');
+  if (!list) return;
+  list.innerHTML = '';
+
+  dashboardNotes.forEach(function(note, index) {
+    var card = document.createElement('div');
+    card.className = 'notice-note' + (index % 2 === 1 ? ' secondary' : '');
+
+    var textarea = document.createElement('textarea');
+    textarea.className = 'notice-textarea';
+    textarea.maxLength = 180;
+    textarea.value = note;
+    textarea.setAttribute('aria-label', '사장님 메모 ' + (index + 1));
+    textarea.addEventListener('input', function() {
+      dashboardNotes[index] = textarea.value;
+      autoSizeNoteTextarea(textarea);
+      queueDashboardNotesSave();
+    });
+
+    var deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'notice-delete-btn';
+    deleteBtn.title = '메모 삭제';
+    deleteBtn.setAttribute('aria-label', '메모 삭제');
+    deleteBtn.textContent = '×';
+    deleteBtn.addEventListener('click', function() {
+      dashboardNotes.splice(index, 1);
+      renderDashboardNotes(dashboardNotes);
+      saveDashboardNotesNow();
+    });
+
+    card.appendChild(textarea);
+    card.appendChild(deleteBtn);
+    list.appendChild(card);
+    autoSizeNoteTextarea(textarea);
+  });
+}
+
+function loadDashboardNotes() {
+  fetch(API_URL + '?key=village2026&action=dashboardNotes&ts=' + Date.now())
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res && Array.isArray(res.notes)) renderDashboardNotes(res.notes);
+    })
+    .catch(function() {});
+}
+
+function queueDashboardNotesSave() {
+  clearTimeout(noteSaveTimer);
+  setNoticeSaveState('저장 중');
+  noteSaveTimer = setTimeout(saveDashboardNotesNow, 600);
+}
+
+function saveDashboardNotesNow() {
+  clearTimeout(noteSaveTimer);
+  var notes = normalizeDashboardNotes(dashboardNotes);
+  setNoticeSaveState('저장 중');
+  fetch(API_URL + '?key=village2026&action=saveDashboardNotes&notes='
+    + encodeURIComponent(JSON.stringify(notes)) + '&ts=' + Date.now())
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res && res.error) throw new Error(res.error);
+      if (res && Array.isArray(res.notes)) dashboardNotes = res.notes.slice();
+      setNoticeSaveState('저장됨');
+      setTimeout(function() { setNoticeSaveState(''); }, 1200);
+    })
+    .catch(function() {
+      setNoticeSaveState('저장 실패');
+    });
+}
+
+function addDashboardNote() {
+  if (dashboardNotes.length >= 8) {
+    alert('메모는 최대 8개까지 추가할 수 있습니다.');
+    return;
+  }
+  dashboardNotes.push('');
+  renderDashboardNotes(dashboardNotes);
+  setTimeout(function() {
+    var inputs = document.querySelectorAll('.notice-textarea');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  }, 0);
 }
 
 function timeSortKey(timeValue) {
@@ -853,6 +1030,7 @@ function renderList(containerId, items, type) {
       });
       html += '<button class="equip-add-btn" onclick="event.stopPropagation();addEquip(\'' + escHtml(item.tradeId) + '\')">+ 장비추가</button>';
       html += '</div>';
+      html += cardActionHtml(item);
 
       html += '<div class="card-detail" id="' + cardId + '">';
       html += '<div class="detail-row"><span>거래ID</span><span class="dl">' + escHtml(item.tradeId) + '</span></div>';
@@ -864,15 +1042,6 @@ function renderList(containerId, items, type) {
         var total = item.equipments.reduce(function(s, eq) { return s + (eq.qty || 1); }, 0);
         html += '<div class="detail-row"><span>총 장비 수</span><span class="dl">' + total + '건</span></div>';
       }
-      html += '<div class="detail-actions">';
-      if (item.contractUrl) {
-        html += '<a class="action-link primary" href="' + escAttr(item.contractUrl) + '" target="_blank" onclick="event.stopPropagation()">계약서 열기</a>';
-      } else {
-        html += '<button class="action-btn" onclick="event.stopPropagation()" disabled>계약서 링크 없음</button>';
-      }
-      html += paymentSelectHtml(item);
-      html += '</div>';
-      if (item.paymentWarning) html += '<div class="detail-note">' + escHtml(item.paymentWarning) + '</div>';
       html += '</div></div>';
     });
     html += '</div>';
@@ -892,6 +1061,19 @@ function switchTab(tab) {
 function toggleDetail(id) {
   var el = document.getElementById(id);
   if (el) el.classList.toggle('open');
+}
+
+function cardActionHtml(item) {
+  var html = '<div class="card-actions" onclick="event.stopPropagation()">';
+  if (item.contractUrl) {
+    html += '<a class="action-link primary" href="' + escAttr(item.contractUrl) + '" target="_blank" onclick="event.stopPropagation()">계약서 열기</a>';
+  } else {
+    html += '<button class="action-btn" onclick="event.stopPropagation()" disabled>계약서 없음</button>';
+  }
+  html += paymentSelectHtml(item);
+  html += '</div>';
+  if (item.paymentWarning) html += '<div class="detail-note">' + escHtml(item.paymentWarning) + '</div>';
+  return html;
 }
 
 function paymentSelectHtml(item) {
