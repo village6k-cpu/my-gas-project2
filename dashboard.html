@@ -1419,7 +1419,7 @@ function renderList(containerId, items, type, isSearching) {
         if (eq.isSet) rowCls += ' is-set';
         else if (eq.isComponent) rowCls += ' is-component';
         else rowCls += ' is-single';
-        if (cardType === 'checkin') rowCls += ' has-return-meta';
+        rowCls += ' has-return-meta';
         var checked = (cardType === 'checkout' ? eq.checkedCheckout : eq.checkedCheckin);
         if (checked) rowCls += ' checked';
 
@@ -1440,7 +1440,7 @@ function renderList(containerId, items, type, isSearching) {
           html += '<span class="equip-row-remove" onclick="event.stopPropagation();removeEquip(\'' + escJs(item.tradeId) + '\',\'' + nameEsc + '\')" title="삭제">×</span>';
         }
         html += '</div>';
-        if (cardType === 'checkin') html += equipmentReturnFieldsHtml(item, eq);
+        html += equipmentReturnFieldsHtml(item, eq);
         html += '</div>';
       });
       html += '<button class="equip-add-btn" onclick="event.stopPropagation();addEquip(\'' + escHtml(item.tradeId) + '\')">+ 장비추가</button>';
