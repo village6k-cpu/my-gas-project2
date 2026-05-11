@@ -891,6 +891,44 @@ function refreshData() {
   loadData(true);  // 캐시 우회
 }
 
+function timeSortKey(timeValue) {
+  var raw = String(timeValue || '').trim();
+  if (!raw || raw === '시간 미정') return '99:99';
+
+  var isPm = raw.indexOf('오후') >= 0 || /\bPM\b/i.test(raw);
+  var isAm = raw.indexOf('오전') >= 0 || /\bAM\b/i.test(raw);
+  var match = raw.match(/(\d{1,2})\s*(?::|시)\s*(\d{1,2})?/);
+  if (!match) return '99:99';
+
+  var hour = Number(match[1]);
+  var minute = match[2] !== undefined ? Number(match[2]) : 0;
+  if (isNaN(hour) || isNaN(minute) || hour < 0 || hour > 24 || minute < 0 || minute > 59) {
+    return '99:99';
+  }
+  if (isPm && hour < 12) hour += 12;
+  if (isAm && hour === 12) hour = 0;
+  if (hour === 24 && minute > 0) return '99:99';
+
+  return ('0' + hour).slice(-2) + ':' + ('0' + minute).slice(-2);
+}
+
+function compareScheduleItemsByTime(a, b) {
+  var at = timeSortKey(a && (a.sortTime || a.time));
+  var bt = timeSortKey(b && (b.sortTime || b.time));
+  var timeCmp = at.localeCompare(bt);
+  if (timeCmp) return timeCmp;
+
+  var an = String((a && (a.name || a.tradeId)) || '');
+  var bn = String((b && (b.name || b.tradeId)) || '');
+  return an.localeCompare(bn);
+}
+
+function compareTimeLabels(a, b) {
+  var timeCmp = timeSortKey(a).localeCompare(timeSortKey(b));
+  if (timeCmp) return timeCmp;
+  return String(a || '').localeCompare(String(b || ''));
+}
+
 function renderDashboard(data) {
   document.getElementById('loadingArea').style.display = 'none';
 
@@ -903,7 +941,7 @@ function renderDashboard(data) {
 
   var all = data.checkout.map(function(c) { c._type = 'checkout'; return c; })
     .concat(data.checkin.map(function(c) { c._type = 'checkin'; return c; }));
-  all.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
+  all.sort(compareScheduleItemsByTime);
   renderList('allSection', all, 'all');
 
   switchTab('checkout');
@@ -923,14 +961,14 @@ function renderList(containerId, items, type) {
   }
 
   var groups = {};
-  items.forEach(function(item) {
+  items.slice().sort(compareScheduleItemsByTime).forEach(function(item) {
     var timeKey = item.time || '시간 미정';
     if (!groups[timeKey]) groups[timeKey] = [];
     groups[timeKey].push(item);
   });
 
   var html = '';
-  Object.keys(groups).sort().forEach(function(timeKey) {
+  Object.keys(groups).sort(compareTimeLabels).forEach(function(timeKey) {
     html += '<div class="time-group">';
     html += '<div class="time-group-header">' + timeKey + '</div>';
 

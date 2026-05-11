@@ -458,7 +458,7 @@ function getDashboardData(targetDate, skipCache) {
     // 오늘 반출
     if (g.반출일 === today) {
       item.time = g.반출시간 || '시간 미정';
-      item.sortTime = g.반출시간 || '99:99';
+      item.sortTime = normalizeDashboardTimeKey_(g.반출시간);
       item.returnDate = g.반납일 + (g.반납시간 ? ' ' + g.반납시간 : '');
       item._type = 'checkout';
       checkoutList.push(item);
@@ -468,7 +468,7 @@ function getDashboardData(targetDate, skipCache) {
     if (g.반납일 === today) {
       var checkinItem = JSON.parse(JSON.stringify(item));
       checkinItem.time = g.반납시간 || '시간 미정';
-      checkinItem.sortTime = g.반납시간 || '99:99';
+      checkinItem.sortTime = normalizeDashboardTimeKey_(g.반납시간);
       checkinItem.checkoutDate = g.반출일 + (g.반출시간 ? ' ' + g.반출시간 : '');
       checkinItem._type = 'checkin';
       checkinList.push(checkinItem);
@@ -481,8 +481,8 @@ function getDashboardData(targetDate, skipCache) {
   });
 
   // 시간순 정렬
-  checkoutList.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
-  checkinList.sort(function(a, b) { return (a.sortTime || '').localeCompare(b.sortTime || ''); });
+  checkoutList.sort(compareDashboardItemsByTime_);
+  checkinList.sort(compareDashboardItemsByTime_);
 
   var result = {
     checkout: checkoutList,
@@ -493,6 +493,38 @@ function getDashboardData(targetDate, skipCache) {
   // 캐시 5분으로 확장 (등록/취소/일정변경 시 invalidateDashboardCache로 무효화)
   try { cache.put(cacheKey, JSON.stringify(result), 300); } catch (e) { /* 캐시 오버플로 무시 */ }
   return result;
+}
+
+function normalizeDashboardTimeKey_(timeValue) {
+  var raw = String(timeValue || '').trim();
+  if (!raw || raw === '시간 미정') return '99:99';
+
+  var isPm = raw.indexOf('오후') >= 0 || /\bPM\b/i.test(raw);
+  var isAm = raw.indexOf('오전') >= 0 || /\bAM\b/i.test(raw);
+  var match = raw.match(/(\d{1,2})\s*(?::|시)\s*(\d{1,2})?/);
+  if (!match) return '99:99';
+
+  var hour = Number(match[1]);
+  var minute = match[2] !== undefined ? Number(match[2]) : 0;
+  if (isNaN(hour) || isNaN(minute) || hour < 0 || hour > 24 || minute < 0 || minute > 59) {
+    return '99:99';
+  }
+  if (isPm && hour < 12) hour += 12;
+  if (isAm && hour === 12) hour = 0;
+  if (hour === 24 && minute > 0) return '99:99';
+
+  return ('0' + hour).slice(-2) + ':' + ('0' + minute).slice(-2);
+}
+
+function compareDashboardItemsByTime_(a, b) {
+  var at = normalizeDashboardTimeKey_(a && (a.sortTime || a.time));
+  var bt = normalizeDashboardTimeKey_(b && (b.sortTime || b.time));
+  var timeCmp = at.localeCompare(bt);
+  if (timeCmp) return timeCmp;
+
+  var an = String((a && (a.name || a.tradeId)) || '');
+  var bn = String((b && (b.name || b.tradeId)) || '');
+  return an.localeCompare(bn);
 }
 
 /**
