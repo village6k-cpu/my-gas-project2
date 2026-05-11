@@ -427,9 +427,10 @@ function getDashboardData(targetDate, skipCache) {
       if (!eq.isHeader && eq.setName) setsWithComponents[eq.setName] = true;
     });
 
+    var checkInfo = getEquipmentCheckForTrade_(equipmentChecks, tid);
+
     // 모든 행 표시 (세트 대표 + 구성품 + 단품). 각 행에 체크 상태 + isSet 라벨 부여.
     var displayEquip = g.equipments.map(function(eq) {
-      var checkInfo = getEquipmentCheckForRow_(equipmentChecks, tid, eq.scheduleId, eq.name);
       return {
         scheduleId: eq.scheduleId,
         name: eq.name,
@@ -439,10 +440,7 @@ function getDashboardData(targetDate, skipCache) {
         isSet: eq.isHeader && !!setsWithComponents[eq.name],          // 세트 대표(구성품 있음)
         isComponent: !eq.isHeader,                                    // 구성품
         checkedCheckout: props['itemCheck_' + eq.scheduleId + '_checkout'] === '1',
-        checkedCheckin:  props['itemCheck_' + eq.scheduleId + '_checkin']  === '1',
-        returnStatus: checkInfo.returnStatus || '',
-        returnMemo: checkInfo.returnMemo || '',
-        equipmentCheckRow: checkInfo.row || 0
+        checkedCheckin:  props['itemCheck_' + eq.scheduleId + '_checkin']  === '1'
       };
     });
 
@@ -461,6 +459,9 @@ function getDashboardData(targetDate, skipCache) {
       paymentMethod: extra.paymentMethod || '',
       paymentSource: extra.paymentSource || '',
       paymentWarning: extra.paymentWarning || '',
+      returnStatus: checkInfo.returnStatus || '',
+      returnMemo: checkInfo.returnMemo || '',
+      equipmentCheckRow: checkInfo.row || 0,
       equipments: displayEquip
     };
 
@@ -799,15 +800,13 @@ function toggleItemCheck(scheduleId, phase, done) {
 }
 
 /**
- * 오늘 일정 반납 카드의 장비별 반납 상태/특이사항.
+ * 오늘 일정 거래건별 반납 상태/특이사항.
  * 빌리지2.0(개고생2_URL) > 장비체크 시트 C/D열을 읽고 쓴다.
- * A/B열은 신규 생성 시 스케줄ID/장비명으로 만든다. 기존 시트는 헤더를 보고 거래ID/장비명 구조도 지원한다.
+ * A/B열은 신규 생성 시 거래ID/예약자명으로 만든다.
  */
 function getEquipmentCheckMap_() {
   var result = {
-    byScheduleId: {},
-    byTradeEquip: {},
-    byEquip: {}
+    byTradeId: {}
   };
 
   try {
@@ -815,25 +814,23 @@ function getEquipmentCheckMap_() {
     if (!sheet || sheet.getLastRow() < 2) return result;
 
     var schema = getEquipmentCheckSchema_(sheet, false);
-    var lastCol = Math.max(sheet.getLastColumn(), 4, schema.statusCol, schema.memoCol, schema.scheduleCol || 0, schema.tradeCol || 0, schema.equipCol || 0);
+    var lastCol = Math.max(sheet.getLastColumn(), 4, schema.statusCol, schema.memoCol, schema.keyCol || 0, schema.labelCol || 0);
     var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, lastCol).getDisplayValues();
 
     values.forEach(function(row, idx) {
-      var scheduleId = schema.scheduleCol ? String(row[schema.scheduleCol - 1] || '').trim() : '';
-      var tradeId = schema.tradeCol ? String(row[schema.tradeCol - 1] || '').trim() : '';
-      var equipName = schema.equipCol ? String(row[schema.equipCol - 1] || '').trim() : '';
+      var rawKey = schema.keyCol ? String(row[schema.keyCol - 1] || '').trim() : '';
+      var tradeId = normalizeEquipmentCheckTradeId_(rawKey);
+      var label = schema.labelCol ? String(row[schema.labelCol - 1] || '').trim() : '';
       var info = {
         row: idx + 2,
-        scheduleId: scheduleId,
         tradeId: tradeId,
-        equipName: equipName,
+        label: label,
         returnStatus: String(row[schema.statusCol - 1] || '').trim(),
-        returnMemo: String(row[schema.memoCol - 1] || '').trim()
+        returnMemo: String(row[schema.memoCol - 1] || '').trim(),
+        exactTradeId: /^\d{6}-\d{3}$/.test(rawKey)
       };
 
-      if (scheduleId) result.byScheduleId[scheduleId] = info;
-      if (tradeId && equipName) result.byTradeEquip[tradeId + '|' + normalizeEquipmentCheckKey_(equipName)] = info;
-      if (equipName) result.byEquip[normalizeEquipmentCheckKey_(equipName)] = info;
+      if (tradeId && (!result.byTradeId[tradeId] || info.exactTradeId)) result.byTradeId[tradeId] = info;
     });
   } catch (err) {
     result.error = err.message;
@@ -842,24 +839,22 @@ function getEquipmentCheckMap_() {
   return result;
 }
 
-function getEquipmentCheckForRow_(map, tradeId, scheduleId, equipName) {
+function getEquipmentCheckForTrade_(map, tradeId) {
   map = map || {};
-  var sid = String(scheduleId || '').trim();
   var tid = String(tradeId || '').trim();
-  var eqKey = normalizeEquipmentCheckKey_(equipName);
-  if (sid && map.byScheduleId && map.byScheduleId[sid]) return map.byScheduleId[sid];
-  if (tid && eqKey && map.byTradeEquip && map.byTradeEquip[tid + '|' + eqKey]) return map.byTradeEquip[tid + '|' + eqKey];
+  if (tid && map.byTradeId && map.byTradeId[tid]) return map.byTradeId[tid];
   return {};
 }
 
-function updateEquipmentCheck(scheduleId, tradeId, equipName, field, value) {
+function updateEquipmentCheck(scheduleId, tradeId, label, field, value) {
   scheduleId = String(scheduleId || '').trim();
   tradeId = String(tradeId || '').trim();
-  equipName = String(equipName || '').trim();
+  label = String(label || '').trim();
   field = String(field || '').trim();
   value = String(value || '').trim();
 
-  if (!scheduleId && (!tradeId || !equipName)) return { error: "스케줄ID 또는 거래ID/장비명 필수" };
+  if (!tradeId && scheduleId) tradeId = normalizeEquipmentCheckTradeId_(scheduleId);
+  if (!tradeId) return { error: "거래ID 필수" };
   if (field !== 'returnStatus' && field !== 'memo') return { error: "field는 returnStatus/memo만 허용" };
   if (value.length > 500) value = value.slice(0, 500);
 
@@ -869,17 +864,19 @@ function updateEquipmentCheck(scheduleId, tradeId, equipName, field, value) {
   try {
     var sheet = getEquipmentCheckSheet_(true);
     var schema = getEquipmentCheckSchema_(sheet, true);
-    var rowNum = findEquipmentCheckRow_(sheet, schema, scheduleId, tradeId, equipName);
+    var rowNum = findEquipmentCheckRow_(sheet, schema, tradeId);
 
     if (!rowNum) {
       rowNum = sheet.getLastRow() + 1;
       var seed = [];
-      var width = Math.max(sheet.getLastColumn(), 4, schema.statusCol, schema.memoCol, schema.scheduleCol || 0, schema.tradeCol || 0, schema.equipCol || 0);
+      var width = Math.max(sheet.getLastColumn(), 4, schema.statusCol, schema.memoCol, schema.keyCol || 0, schema.labelCol || 0);
       for (var i = 0; i < width; i++) seed.push('');
-      if (schema.scheduleCol) seed[schema.scheduleCol - 1] = scheduleId || tradeId;
-      if (schema.tradeCol) seed[schema.tradeCol - 1] = tradeId;
-      if (schema.equipCol) seed[schema.equipCol - 1] = equipName;
+      if (schema.keyCol) seed[schema.keyCol - 1] = tradeId;
+      if (schema.labelCol) seed[schema.labelCol - 1] = label;
       sheet.getRange(rowNum, 1, 1, seed.length).setValues([seed]);
+    } else {
+      if (schema.keyCol) sheet.getRange(rowNum, schema.keyCol).setValue(tradeId);
+      if (schema.labelCol && label) sheet.getRange(rowNum, schema.labelCol).setValue(label);
     }
 
     var targetCol = field === 'returnStatus' ? schema.statusCol : schema.memoCol;
@@ -889,9 +886,8 @@ function updateEquipmentCheck(scheduleId, tradeId, equipName, field, value) {
     return {
       success: true,
       row: rowNum,
-      scheduleId: scheduleId,
       tradeId: tradeId,
-      equipName: equipName,
+      label: label,
       field: field,
       value: value
     };
@@ -920,7 +916,7 @@ function getEquipmentCheckSheet_(createIfMissing) {
   var sheet = ss.getSheetByName('장비체크') || ss.getSheetByName('장비 체크');
   if (!sheet && createIfMissing) {
     sheet = ss.insertSheet('장비체크');
-    sheet.getRange(1, 1, 1, 4).setValues([['스케줄ID', '장비명', '반납 상태', '특이사항']]);
+    sheet.getRange(1, 1, 1, 4).setValues([['거래ID', '예약자명', '반납 상태', '특이사항']]);
     sheet.setFrozenRows(1);
   }
   return sheet;
@@ -929,16 +925,26 @@ function getEquipmentCheckSheet_(createIfMissing) {
 function getEquipmentCheckSchema_(sheet, ensureHeaders) {
   var lastCol = Math.max(sheet.getLastColumn(), 4);
   if (sheet.getLastRow() < 1 && ensureHeaders) {
-    sheet.getRange(1, 1, 1, 4).setValues([['스케줄ID', '장비명', '반납 상태', '특이사항']]);
+    sheet.getRange(1, 1, 1, 4).setValues([['거래ID', '예약자명', '반납 상태', '특이사항']]);
   }
 
   var headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
   var hasHeader = headers.some(function(h) { return String(h || '').trim() !== ''; });
   if (!hasHeader && ensureHeaders) {
-    headers = ['스케줄ID', '장비명', '반납 상태', '특이사항'];
+    headers = ['거래ID', '예약자명', '반납 상태', '특이사항'];
     sheet.getRange(1, 1, 1, 4).setValues([headers]);
   }
   if (ensureHeaders) {
+    var firstHeader = String(headers[0] || '').replace(/\s+/g, '');
+    var secondHeader = String(headers[1] || '').replace(/\s+/g, '');
+    if (!firstHeader || firstHeader === '스케줄ID' || firstHeader === 'ScheduleID') {
+      sheet.getRange(1, 1).setValue('거래ID');
+      headers[0] = '거래ID';
+    }
+    if (!secondHeader || secondHeader === '장비명' || secondHeader === '품목명') {
+      sheet.getRange(1, 2).setValue('예약자명');
+      headers[1] = '예약자명';
+    }
     if (!String(headers[2] || '').trim()) {
       sheet.getRange(1, 3).setValue('반납 상태');
       headers[2] = '반납 상태';
@@ -949,58 +955,41 @@ function getEquipmentCheckSchema_(sheet, ensureHeaders) {
     }
   }
 
-  var scheduleCol = _findHeaderCol_(headers, ['스케줄ID', '스케줄 Id', 'Schedule ID', 'ScheduleId']);
-  var tradeCol = _findHeaderCol_(headers, ['거래ID', '거래 Id', '거래id']);
-  var equipCol = _findHeaderCol_(headers, ['장비명', '장비 이름', '품목명', '품목', '장비']);
-
-  if (!scheduleCol && !tradeCol) {
-    var firstHeader = String(headers[0] || '').replace(/\s+/g, '');
-    var sampleKey = '';
-    if (sheet.getLastRow() >= 2) {
-      var sampleValues = sheet.getRange(2, 1, Math.min(sheet.getLastRow() - 1, 20), 1).getDisplayValues();
-      for (var s = 0; s < sampleValues.length; s++) {
-        sampleKey = String(sampleValues[s][0] || '').trim();
-        if (sampleKey) break;
-      }
-    }
-    if (firstHeader.indexOf('거래') >= 0 || /^\d{6}-\d{3}$/.test(sampleKey)) tradeCol = 1;
-    else scheduleCol = 1;
-  }
-  if (!equipCol) equipCol = 2;
+  var keyCol = _findHeaderCol_(headers, ['거래ID', '거래 Id', '거래id', '스케줄ID', '스케줄 Id', 'Schedule ID', 'ScheduleId']) || 1;
+  var labelCol = _findHeaderCol_(headers, ['예약자명', '예약자', '고객명', '장비명', '장비 이름', '품목명', '품목', '장비']) || 2;
 
   return {
-    scheduleCol: scheduleCol,
-    tradeCol: tradeCol,
-    equipCol: equipCol,
+    keyCol: keyCol,
+    labelCol: labelCol,
     statusCol: 3,
     memoCol: 4
   };
 }
 
-function findEquipmentCheckRow_(sheet, schema, scheduleId, tradeId, equipName) {
+function findEquipmentCheckRow_(sheet, schema, tradeId) {
   if (!sheet || sheet.getLastRow() < 2) return 0;
 
-  var lastCol = Math.max(sheet.getLastColumn(), 4, schema.scheduleCol || 0, schema.tradeCol || 0, schema.equipCol || 0);
+  var lastCol = Math.max(sheet.getLastColumn(), 4, schema.keyCol || 0);
   var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, lastCol).getDisplayValues();
-  var wantedEquip = normalizeEquipmentCheckKey_(equipName);
   var fallbackRow = 0;
 
   for (var i = 0; i < values.length; i++) {
     var row = values[i];
-    var rowScheduleId = schema.scheduleCol ? String(row[schema.scheduleCol - 1] || '').trim() : '';
-    var rowTradeId = schema.tradeCol ? String(row[schema.tradeCol - 1] || '').trim() : '';
-    var rowEquip = schema.equipCol ? normalizeEquipmentCheckKey_(row[schema.equipCol - 1]) : '';
-
-    if (scheduleId && rowScheduleId === scheduleId) return i + 2;
-    if (tradeId && wantedEquip && rowTradeId === tradeId && rowEquip === wantedEquip) return i + 2;
-    if (!fallbackRow && wantedEquip && rowEquip === wantedEquip && (!tradeId || !rowTradeId)) fallbackRow = i + 2;
+    var rawKey = schema.keyCol ? String(row[schema.keyCol - 1] || '').trim() : '';
+    if (rawKey === tradeId) return i + 2;
+    if (!fallbackRow && normalizeEquipmentCheckTradeId_(rawKey) === tradeId) fallbackRow = i + 2;
   }
 
   return fallbackRow;
 }
 
-function normalizeEquipmentCheckKey_(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+function normalizeEquipmentCheckTradeId_(value) {
+  var raw = String(value || '').trim();
+  var exact = raw.match(/^(\d{6}-\d{3})$/);
+  if (exact) return exact[1];
+  var fromSchedule = raw.match(/^(\d{6}-\d{3})-\d+$/);
+  if (fromSchedule) return fromSchedule[1];
+  return raw;
 }
 
 /**

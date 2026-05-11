@@ -218,7 +218,7 @@ function handleRequest(e) {
         return jsonResponse(updateEquipmentCheck(
           params.scheduleId || postBody.scheduleId,
           params.tid || postBody.tid || params.tradeId || postBody.tradeId,
-          params.equipName || postBody.equipName,
+          params.label || postBody.label || params.equipName || postBody.equipName,
           params.field || postBody.field,
           params.value !== undefined ? params.value : postBody.value
         ));

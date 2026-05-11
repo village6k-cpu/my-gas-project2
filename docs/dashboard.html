@@ -551,11 +551,6 @@
   .equip-row.is-single { background: var(--surface); }
   .equip-row.checked { opacity: 0.55; }
   .equip-row.checked .equip-name { text-decoration: line-through; }
-  .equip-row.has-return-meta {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 6px;
-  }
   .equip-row-main {
     display: flex;
     align-items: center;
@@ -616,13 +611,23 @@
     flex-shrink: 0;
   }
   .equip-row-remove:hover { background: #FAE0E0; color: var(--red); }
-  .equip-return-meta {
+  .equip-return-meta,
+  .trade-return-meta {
     display: grid;
     grid-template-columns: 116px minmax(0, 1fr);
     gap: 6px;
     width: 100%;
-    padding-left: 26px;
     box-sizing: border-box;
+  }
+  .equip-return-meta {
+    padding-left: 26px;
+  }
+  .trade-return-meta {
+    margin-top: 10px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
   }
   .return-status-select,
   .return-memo-input {
@@ -654,8 +659,11 @@
   }
   .equip-save-state.is-error { color: var(--red); }
   @media (max-width: 560px) {
-    .equip-return-meta {
+    .equip-return-meta,
+    .trade-return-meta {
       grid-template-columns: 1fr;
+    }
+    .equip-return-meta {
       padding-left: 0;
     }
   }
@@ -1414,10 +1422,12 @@ function dashboardItemMatchesSearch(item, type) {
     item.returnDate,
     item.paymentMethod,
     item.paymentSource,
-    item.paymentWarning
+    item.paymentWarning,
+    item.returnStatus,
+    item.returnMemo
   ];
   (item.equipments || []).forEach(function(eq) {
-    parts.push(eq.name, eq.setName, eq.qty, eq.returnStatus, eq.returnMemo, eq.isSet ? '세트 set' : '', eq.isComponent ? '구성품' : '');
+    parts.push(eq.name, eq.setName, eq.qty, eq.isSet ? '세트 set' : '', eq.isComponent ? '구성품' : '');
   });
 
   var haystack = normalizeDashboardSearchText(parts.join(' '));
@@ -1507,6 +1517,7 @@ function renderList(containerId, items, type, isSearching) {
         html += '<div class="card-meta"><span class="icon">📞</span>';
         html += '<a href="tel:' + item.tel + '" class="tel-link" onclick="event.stopPropagation()">' + escHtml(item.tel) + '</a></div>';
       }
+      html += tradeReturnFieldsHtml(item);
 
       // ── 체크리스트 형태 (반출/반납 phase별 독립 체크) ──
       html += '<div class="equip-checklist">';
@@ -1515,7 +1526,6 @@ function renderList(containerId, items, type, isSearching) {
         if (eq.isSet) rowCls += ' is-set';
         else if (eq.isComponent) rowCls += ' is-component';
         else rowCls += ' is-single';
-        rowCls += ' has-return-meta';
         var checked = (cardType === 'checkout' ? eq.checkedCheckout : eq.checkedCheckin);
         if (checked) rowCls += ' checked';
 
@@ -1537,7 +1547,6 @@ function renderList(containerId, items, type, isSearching) {
           html += '<span class="equip-row-remove" onclick="event.stopPropagation();removeEquip(\'' + escJs(item.tradeId) + '\',\'' + nameEsc + '\')" title="삭제">×</span>';
         }
         html += '</div>';
-        html += equipmentReturnFieldsHtml(item, eq);
         html += '</div>';
       });
       html += '<button class="equip-add-btn" onclick="event.stopPropagation();addEquip(\'' + escHtml(item.tradeId) + '\')">+ 장비추가</button>';
@@ -1591,13 +1600,12 @@ function removeEquip(tid, equipName) {
     .catch(function(err) { alert("네트워크 오류: " + err.message); });
 }
 
-function equipmentReturnFieldsHtml(item, eq) {
-  var status = eq.returnStatus || '';
-  var memo = eq.returnMemo || '';
-  var attrs = ' data-schedule-id="' + escAttr(eq.scheduleId) + '"' +
-    ' data-trade-id="' + escAttr(item.tradeId) + '"' +
-    ' data-equip-name="' + escAttr(eq.name) + '"';
-  var html = '<div class="equip-return-meta">';
+function tradeReturnFieldsHtml(item) {
+  var status = item.returnStatus || '';
+  var memo = item.returnMemo || '';
+  var attrs = ' data-trade-id="' + escAttr(item.tradeId) + '"' +
+    ' data-label="' + escAttr(item.name) + '"';
+  var html = '<div class="trade-return-meta" onclick="event.stopPropagation()">';
   html += '<select class="return-status-select" data-field="returnStatus" data-prev="' + escAttr(status) + '"' + attrs + ' onchange="updateEquipmentCheck(this)" onclick="event.stopPropagation()">';
   html += returnStatusOptionsHtml(status);
   html += '</select>';
@@ -1619,9 +1627,7 @@ function returnStatusOptionsHtml(current) {
 
 function equipmentCheckTimerKey(el) {
   return [
-    el.getAttribute('data-schedule-id') || '',
     el.getAttribute('data-trade-id') || '',
-    el.getAttribute('data-equip-name') || '',
     el.getAttribute('data-field') || ''
   ].join('|');
 }
@@ -1651,9 +1657,8 @@ function updateEquipmentCheck(el) {
   var payload = {
     key: 'village2026',
     action: 'updateEquipmentCheck',
-    scheduleId: el.getAttribute('data-schedule-id') || '',
     tid: el.getAttribute('data-trade-id') || '',
-    equipName: el.getAttribute('data-equip-name') || '',
+    label: el.getAttribute('data-label') || '',
     field: field,
     value: value
   };
@@ -1696,7 +1701,7 @@ function updateEquipmentCheck(el) {
 }
 
 function setEquipmentCheckState(el, text, isError) {
-  var box = el.closest('.equip-return-meta');
+  var box = el.closest('.trade-return-meta, .equip-return-meta');
   var state = box ? box.querySelector('.equip-save-state') : null;
   if (!state) return;
   state.textContent = text || '';
@@ -1707,14 +1712,10 @@ function syncEquipmentCheckInMemory(payload, res) {
   if (!dashboardData) return;
   ['checkout', 'checkin'].forEach(function(listName) {
     (dashboardData[listName] || []).forEach(function(item) {
-      (item.equipments || []).forEach(function(eq) {
-        var sameSchedule = payload.scheduleId && eq.scheduleId === payload.scheduleId;
-        var sameTradeEquip = item.tradeId === payload.tid && eq.name === payload.equipName;
-        if (!sameSchedule && !sameTradeEquip) return;
-        if (payload.field === 'returnStatus') eq.returnStatus = payload.value;
-        if (payload.field === 'memo') eq.returnMemo = payload.value;
-        if (res && res.row) eq.equipmentCheckRow = res.row;
-      });
+      if (item.tradeId !== payload.tid) return;
+      if (payload.field === 'returnStatus') item.returnStatus = payload.value;
+      if (payload.field === 'memo') item.returnMemo = payload.value;
+      if (res && res.row) item.equipmentCheckRow = res.row;
     });
   });
 }
