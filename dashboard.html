@@ -244,14 +244,14 @@
     gap: 10px;
   }
   .notice-note {
-    padding: 13px 34px 13px 16px;
+    padding: 14px 36px 14px 17px;
     background: #FFFDF2;
     border: 1px solid #E8D99F;
     border-left: 4px solid #D99A00;
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: 15px;
     font-weight: 750;
-    line-height: 1.55;
+    line-height: 1.5;
   }
   .notice-note.secondary {
     background: #F2F7FB;
@@ -270,7 +270,7 @@
   }
   .notice-textarea {
     width: 100%;
-    min-height: 44px;
+    min-height: 54px;
     border: none;
     outline: none;
     resize: none;
@@ -874,7 +874,7 @@ function setNoticeSaveState(text) {
 function autoSizeNoteTextarea(textarea) {
   if (!textarea) return;
   textarea.style.height = 'auto';
-  textarea.style.height = Math.max(44, textarea.scrollHeight) + 'px';
+  textarea.style.height = Math.max(54, textarea.scrollHeight) + 'px';
 }
 
 function renderDashboardNotes(notes) {
