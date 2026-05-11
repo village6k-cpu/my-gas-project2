@@ -330,7 +330,11 @@ function getDashboardData(targetDate, skipCache) {
   if (!skipCache) {
     var cached = cache.get(cacheKey);
     if (cached) {
-      try { return JSON.parse(cached); } catch (e) { /* fallthrough */ }
+      try {
+        var cachedResult = JSON.parse(cached);
+        if (cachedResult && !cachedResult.date) cachedResult.date = today;
+        return cachedResult;
+      } catch (e) { /* fallthrough */ }
     }
   }
 
@@ -348,7 +352,7 @@ function getDashboardData(targetDate, skipCache) {
   }
 
   if (!schedSheet || schedSheet.getLastRow() < 2) {
-    return { checkout: [], checkin: [], activeCount: 0 };
+    return { date: today, checkout: [], checkin: [], activeCount: 0, paymentOptions: getTradePaymentOptions_() };
   }
 
   // ⚡ 최적화: getDisplayValues 사용 — Sheets가 이미 표시값 문자열로 반환하므로
@@ -485,6 +489,7 @@ function getDashboardData(targetDate, skipCache) {
   checkinList.sort(compareDashboardItemsByTime_);
 
   var result = {
+    date: today,
     checkout: checkoutList,
     checkin: checkinList,
     activeCount: activeCount,

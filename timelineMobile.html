@@ -396,6 +396,8 @@ var refreshTimer = null;
 var REFRESH_INTERVAL = 60000; // 1분
 var equipListCache = null;
 var candidateSearchTimer = null;
+var timelineRequestSeq = 0;
+var timelineAbortController = null;
 
 // ━━━ 초기화 ━━━
 function init() {
@@ -432,10 +434,18 @@ function init() {
 
 // ━━━ 데이터 로드 (API fetch) ━━━
 function loadData() {
+  var requestId = ++timelineRequestSeq;
+  if (timelineAbortController && timelineAbortController.abort) {
+    try { timelineAbortController.abort(); } catch (e) {}
+  }
+  timelineAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  var fetchOptions = timelineAbortController ? { signal: timelineAbortController.signal } : {};
+
   showLoading(true);
-  fetch(API_URL + "?key=village2026&action=timeline")
+  fetch(API_URL + "?key=village2026&action=timeline", fetchOptions)
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (requestId !== timelineRequestSeq) return;
       allGroups = data.groups || [];
       allItems = data.items || [];
       applyFilters();
@@ -443,6 +453,8 @@ function loadData() {
       updateRefreshInfo();
     })
     .catch(function(err) {
+      if (err && err.name === "AbortError") return;
+      if (requestId !== timelineRequestSeq) return;
       showLoading(false);
       document.getElementById("statInfo").textContent = "오류: " + err.message;
     });

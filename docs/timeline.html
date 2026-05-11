@@ -1046,6 +1046,8 @@ var ctxTarget = null; // item for context menu
 var searchDebounce = null;
 var scrollSyncFlag = false;
 var longPressTimer = null;
+var timelineRequestSeq = 0;
+var timelineAbortController = null;
 
 // ── Utils ──
 function escHtml(s) {
@@ -1092,10 +1094,18 @@ var STATUS_BADGE = { "대기":"badge-대기","반출중":"badge-반출중","반�
 
 // ── Data Loading ──
 function loadData() {
+  var requestId = ++timelineRequestSeq;
+  if (timelineAbortController && timelineAbortController.abort) {
+    try { timelineAbortController.abort(); } catch (e) {}
+  }
+  timelineAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  var fetchOptions = timelineAbortController ? { signal: timelineAbortController.signal } : {};
+
   showLoading(true);
-  fetch(API_URL + "?key=village2026&action=timeline")
+  fetch(API_URL + "?key=village2026&action=timeline", fetchOptions)
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (requestId !== timelineRequestSeq) return;
       rawGroups = data.groups || [];
       rawItems = (data.items || []).map(function(it) {
         it._start = parseDate(it.start);
@@ -1109,11 +1119,14 @@ function loadData() {
       showLoading(false);
       updateRefreshInfo();
     })
-    .catch(function() {
+    .catch(function(err) {
+      if (err && err.name === "AbortError") return;
+      if (requestId !== timelineRequestSeq) return;
       showLoading(false);
       showToast("데이터 로드 실패");
     });
 }
+window.loadData = loadData;
 
 function computeDateRange() {
   var today = dateOnly(new Date());
