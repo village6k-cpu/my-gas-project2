@@ -1515,7 +1515,6 @@ function cardActionHtml(item) {
   html += paymentSelectHtml(item);
   html += proofTypeSelectHtml(item);
   html += issueStatusSelectHtml(item);
-  html += '<button class="action-btn primary" onclick="event.stopPropagation();runTradeOpsAction(this,\'' + escJs(item.tradeId) + '\',\'issueProof\')">계산서 발행</button>';
   html += '</div>';
   if (item.paymentWarning) html += '<div class="detail-note">' + escHtml(item.paymentWarning) + '</div>';
   if (item.issueNote && /실패|오류|증빙|발행/.test(item.issueNote)) html += '<div class="detail-note">' + escHtml(item.issueNote) + '</div>';
