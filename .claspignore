@@ -4,6 +4,9 @@
 # GitHub Pages (GAS에 올릴 필요 없음)
 docs/**
 
+# Superpowers (gstack 스킬 잔여 파일, GAS에 불필요)
+.superpowers/**
+
 # 기타
 node_modules/**
 wiki/**
