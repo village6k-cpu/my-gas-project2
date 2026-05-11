@@ -182,15 +182,68 @@
   .today-btn:hover { opacity: 0.9; }
   .today-btn:active { opacity: 0.85; }
 
-  /* ── 경고 문구 ── */
-  .notice-bar {
+  /* ── 사장님 메모 ── */
+  .notice-board {
+    display: grid;
+    grid-template-columns: minmax(150px, 210px) minmax(0, 1fr);
+    gap: 12px;
+    padding: 14px 20px;
     background: var(--surface);
-    color: var(--text-secondary);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 10px 20px;
-    line-height: 1.6;
     border-bottom: 1px solid var(--border);
+  }
+  .notice-lead,
+  .notice-note {
+    position: relative;
+    border-radius: var(--radius);
+    box-shadow: 0 4px 12px rgba(55,53,47,0.08);
+  }
+  .notice-lead {
+    padding: 13px 15px;
+    background: #FFF4BC;
+    border: 1px solid #EED47A;
+    transform: rotate(-0.5deg);
+  }
+  .notice-kicker {
+    color: #93640D;
+    font-size: 11px;
+    font-weight: 800;
+    margin-bottom: 4px;
+  }
+  .notice-title {
+    color: var(--text-primary);
+    font-size: 16px;
+    font-weight: 850;
+    line-height: 1.25;
+  }
+  .notice-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .notice-note {
+    padding: 13px 15px 13px 16px;
+    background: #FFFDF2;
+    border: 1px solid #E8D99F;
+    border-left: 4px solid #D99A00;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 750;
+    line-height: 1.55;
+  }
+  .notice-note.secondary {
+    background: #F2F7FB;
+    border-color: #D8E5EF;
+    border-left-color: var(--accent);
+  }
+  .notice-note::before {
+    content: '';
+    position: absolute;
+    top: 9px;
+    right: 10px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: rgba(55,53,47,0.22);
   }
 
   /* ── 탭 ── */
@@ -665,10 +718,12 @@
     .app-switcher { flex: 1; }
     .app-tab { flex: 1; justify-content: center; }
     .date-context { width: 100%; margin-left: 0; }
+    .notice-board { grid-template-columns: 1fr; }
+    .notice-list { grid-template-columns: 1fr; }
   }
   @media (min-width: 768px) {
     .header { padding: 12px 32px 10px; }
-    .notice-bar { padding: 10px 32px; }
+    .notice-board { padding: 14px 32px; }
     .tabs { padding: 10px 32px; }
     .content { padding: 0 32px 30px; }
   }
@@ -700,9 +755,15 @@
   </div>
 </div>
 
-<div class="notice-bar">
-  ⚠️ 세부 구성품 및 추가 요청 사항 등은 반드시 카톡 대화 내용을 한번 더 확인 후 완벽하게 세팅 바랍니다.<br>
-  ⚠️ 매직암, 라인, 배터리 등 기타 악세사리류 갯수 철저하게 체크 바랍니다.
+<div class="notice-board" aria-label="오늘 세팅 메모">
+  <div class="notice-lead">
+    <div class="notice-kicker">사장님 메모</div>
+    <div class="notice-title">오늘 세팅 전<br>반드시 확인</div>
+  </div>
+  <div class="notice-list">
+    <div class="notice-note">세부 구성품 및 추가 요청 사항은 카톡 대화 내용을 한번 더 확인 후 세팅</div>
+    <div class="notice-note secondary">매직암, 라인, 배터리 등 기타 악세사리류 갯수 철저하게 체크</div>
+  </div>
 </div>
 
 <div class="tabs">
