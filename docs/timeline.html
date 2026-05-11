@@ -710,6 +710,45 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
 }
 .form-input:focus { border-color: var(--accent); }
 .form-row { display: flex; gap: 12px; }
+.multi-equip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.multi-equip-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px 30px;
+  gap: 8px;
+  align-items: start;
+}
+.multi-equip-row .form-input { margin-bottom: 0; }
+.multi-row-remove {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 1;
+}
+.multi-row-remove:hover { border-color: var(--red); color: var(--red); }
+.multi-add-row-btn {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px dashed var(--text-muted);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+.multi-add-row-btn:hover { border-color: var(--accent); color: var(--accent); }
+.multi-add-row-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .ac-dropdown {
   display: none;
   position: absolute;
@@ -954,11 +993,12 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
       </div>
 
       <!-- 공통: 장비명 -->
-      <div class="form-group" style="position:relative">
-        <label class="form-label">장비명 *</label>
-        <input type="text" id="addSetName" class="form-input" placeholder="추가할 장비명 입력..." autocomplete="off" spellcheck="false">
-        <div class="ac-dropdown" id="acDropdown"></div>
-        <div id="addSetNameError" style="font-size:11px;color:var(--red);margin-top:3px;display:none">목록에 등록된 장비명만 선택 가능합니다</div>
+      <div class="form-group">
+        <label class="form-label">장비명 / 수량 *</label>
+        <div id="addEquipRows" class="multi-equip-list"></div>
+        <button type="button" id="addEquipRowBtn" class="multi-add-row-btn" onclick="addScheduleEquipRow()">+ 장비 행 추가</button>
+        <datalist id="addEquipDatalist"></datalist>
+        <div id="addSetNameError" style="font-size:11px;color:var(--red);margin-top:5px;display:none">목록에 등록된 장비명만 선택 가능합니다</div>
       </div>
 
       <!-- 선택된 예약건 정보 요약 -->
@@ -1641,6 +1681,12 @@ function loadEquipNames() {
         if (name && name !== "장비/세트명" && name !== "세트명") unique[name] = true;
       });
       equipNames = unique;
+      var dl = document.getElementById("addEquipDatalist");
+      if (dl) {
+        dl.innerHTML = Object.keys(equipNames).sort().map(function(name) {
+          return '<option value="' + escHtml(name) + '"></option>';
+        }).join("");
+      }
     })
     .catch(function() {});
 }
@@ -1651,6 +1697,7 @@ function loadEquipNames() {
   var dropdown = document.getElementById("acDropdown");
   var errEl = document.getElementById("addSetNameError");
   var activeIdx = -1;
+  if (!input || !dropdown || !errEl) return;
 
   function getList() { return Object.keys(equipNames).sort(); }
 
@@ -1756,6 +1803,117 @@ var selectedBooking = null; // 선택된 기존 예약건 { 거래ID, custName, 
 
 function addSubmitLabel() {
   return "가용 확인 후 추가";
+}
+
+function addScheduleEquipRow(name, qty) {
+  var container = document.getElementById("addEquipRows");
+  if (!container) return null;
+
+  var row = document.createElement("div");
+  row.className = "multi-equip-row";
+
+  var input = document.createElement("input");
+  input.type = "text";
+  input.className = "form-input schedule-equip-name";
+  input.setAttribute("list", "addEquipDatalist");
+  input.placeholder = "추가할 장비명";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.value = name || "";
+
+  var qtyInput = document.createElement("input");
+  qtyInput.type = "number";
+  qtyInput.className = "form-input schedule-equip-qty";
+  qtyInput.min = "1";
+  qtyInput.value = qty || "1";
+
+  var removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.className = "multi-row-remove";
+  removeBtn.title = "행 삭제";
+  removeBtn.textContent = "×";
+  removeBtn.onclick = function() {
+    if (container.querySelectorAll(".multi-equip-row").length <= 1) {
+      input.value = "";
+      qtyInput.value = "1";
+      input.focus();
+      return;
+    }
+    row.remove();
+  };
+
+  row.appendChild(input);
+  row.appendChild(qtyInput);
+  row.appendChild(removeBtn);
+  container.appendChild(row);
+  return row;
+}
+
+function resetScheduleEquipRows(entries) {
+  var container = document.getElementById("addEquipRows");
+  if (!container) return;
+  container.innerHTML = "";
+  if (entries && entries.length) {
+    entries.forEach(function(entry) { addScheduleEquipRow(entry.name, entry.qty); });
+  } else {
+    addScheduleEquipRow("", 1);
+  }
+  document.getElementById("addSetNameError").style.display = "none";
+}
+
+function collectScheduleEquipEntries() {
+  var rows = document.querySelectorAll("#addEquipRows .multi-equip-row");
+  var merged = {};
+  var order = [];
+  var invalid = [];
+  var hasCatalog = Object.keys(equipNames).length > 0;
+  rows.forEach(function(row) {
+    var nameInput = row.querySelector(".schedule-equip-name");
+    var qtyInput = row.querySelector(".schedule-equip-qty");
+    var name = nameInput ? nameInput.value.trim() : "";
+    if (!name) return;
+    if (hasCatalog && !equipNames[name]) {
+      invalid.push(name);
+      nameInput.style.borderColor = "var(--red)";
+      return;
+    }
+    if (nameInput) nameInput.style.borderColor = "";
+    var qty = parseInt(qtyInput ? qtyInput.value : "1", 10);
+    if (!qty || qty < 1) qty = 1;
+    if (!merged[name]) {
+      merged[name] = { name: name, qty: qty };
+      order.push(name);
+    } else {
+      merged[name].qty += qty;
+    }
+  });
+
+  var errEl = document.getElementById("addSetNameError");
+  if (invalid.length) {
+    errEl.textContent = "목록에 없는 장비명: " + invalid.join(", ");
+    errEl.style.display = "block";
+    return null;
+  }
+  errEl.style.display = "none";
+  return order.map(function(name) { return merged[name]; });
+}
+
+function setScheduleAddBusy(isBusy, label) {
+  var submitBtn = document.getElementById("addSubmitBtn");
+  var addBtn = document.getElementById("addEquipRowBtn");
+  submitBtn.disabled = isBusy;
+  submitBtn.textContent = label || addSubmitLabel();
+  if (addBtn) addBtn.disabled = isBusy;
+}
+
+function postScheduleEquip(txID, entry) {
+  return fetch(API_URL + "?key=village2026&action=scheduleAddEquip&tid=" + encodeURIComponent(txID)
+    + "&equipName=" + encodeURIComponent(entry.name) + "&qty=" + encodeURIComponent(entry.qty))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) throw new Error(res.error);
+      return res;
+    });
 }
 
 // 고객명 자동완성: 현재 로드된 타임라인 데이터에서 고객명 목록 추출
@@ -1898,14 +2056,12 @@ function showBookingList(query) {
 
 function openAddModal(fromDate, toDate) {
   document.getElementById("addCustName").value = "";
-  document.getElementById("addSetName").value = "";
-  document.getElementById("addSetNameError").style.display = "none";
-  document.getElementById("addSetName").style.borderColor = "";
+  resetScheduleEquipRows();
   selectedBooking = null;
   document.getElementById("selectedBookingInfo").style.display = "none";
   document.getElementById("bookingSelectGroup").style.display = "none";
   document.getElementById("bookingList").innerHTML = "";
-  document.getElementById("addSubmitBtn").textContent = addSubmitLabel();
+  setScheduleAddBusy(false);
   document.getElementById("addModal").style.display = "flex";
 }
 
@@ -1933,7 +2089,10 @@ function openAddModalForBooking(item) {
     + escHtml((selectedBooking.반출 || '-') + ' ~ ' + (selectedBooking.반납 || '-'))
     + '<br>거래ID: ' + escHtml(selectedBooking.거래ID) + ' · 이 일정에 장비를 추가합니다';
   document.getElementById("bookingSelectGroup").style.display = "none";
-  setTimeout(function() { document.getElementById("addSetName").focus(); }, 50);
+  setTimeout(function() {
+    var input = document.querySelector("#addEquipRows .schedule-equip-name");
+    if (input) input.focus();
+  }, 50);
 }
 
 function closeAddModal() {
@@ -1941,43 +2100,49 @@ function closeAddModal() {
 }
 
 function submitAddBooking() {
-  var setName = document.getElementById("addSetName").value.trim();
-  if (!setName) { showToast("장비명을 입력해주세요"); return; }
-  if (!equipNames[setName]) { showToast("목록에 없는 장비명입니다"); return; }
+  var entries = collectScheduleEquipEntries();
+  if (!entries) return;
+  if (!entries.length) { showToast("장비명을 하나 이상 입력해주세요"); return; }
   if (!selectedBooking) { showToast("일정을 선택해주세요"); return; }
 
   var txID = selectedBooking["거래ID"];
   var custName = selectedBooking.custName;
 
-  var submitBtn = document.getElementById("addSubmitBtn");
-  submitBtn.disabled = true;
-  submitBtn.textContent = "등록 중...";
+  setScheduleAddBusy(true, "등록 중...");
 
-  fetch(API_URL + "?key=village2026&action=scheduleAddEquip&tid=" + encodeURIComponent(txID)
-    + "&equipName=" + encodeURIComponent(setName) + "&qty=1")
-    .then(function(r) { return r.json(); })
-    .then(function(res) {
-      submitBtn.disabled = false;
-      submitBtn.textContent = addSubmitLabel();
-      if (res.error) {
-        showToast("추가 실패: " + res.error);
-      } else {
-        showToast(custName + " / " + setName + " 추가 완료");
-        closeAddModal();
-        loadData();
-      }
-    })
-    .catch(function() {
-      submitBtn.disabled = false;
-      submitBtn.textContent = addSubmitLabel();
-      showToast("네트워크 오류");
+  var successes = [];
+  var failures = [];
+  entries.reduce(function(promise, entry) {
+    return promise.then(function() {
+      return postScheduleEquip(txID, entry)
+        .then(function() { successes.push(entry); })
+        .catch(function(err) { failures.push({ entry: entry, message: err.message }); });
     });
+  }, Promise.resolve()).then(function() {
+    setScheduleAddBusy(false);
+    if (failures.length) {
+      if (successes.length) loadData();
+      resetScheduleEquipRows(failures.map(function(f) { return f.entry; }));
+      showToast((successes.length ? successes.length + "개 추가 완료, " : "") + failures.length + "개 실패");
+      alert("추가 실패 목록\n" + failures.map(function(f) {
+        return "- " + f.entry.name + ": " + f.message;
+      }).join("\n"));
+      return;
+    }
+    showToast(custName + " / 장비 " + successes.length + "개 추가 완료");
+    closeAddModal();
+    loadData();
+  }).catch(function() {
+    setScheduleAddBusy(false);
+    showToast("네트워크 오류");
+  });
 }
 
 window.openAddModal = openAddModal;
 window.openAddModalForBooking = openAddModalForBooking;
 window.closeAddModal = closeAddModal;
 window.submitAddBooking = submitAddBooking;
+window.addScheduleEquipRow = addScheduleEquipRow;
 
 // ── Scroll to Today ──
 function scrollToToday() {

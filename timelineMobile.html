@@ -245,6 +245,38 @@
   }
   .modal-input:focus, .modal-select:focus { border-color:#3B82F6; box-shadow:0 0 0 3px rgba(59,130,246,.12); }
   .modal-row { display:grid; grid-template-columns:1fr 96px; gap:10px; }
+  .multi-equip-list { display:flex; flex-direction:column; gap:8px; margin-top:6px; }
+  .multi-equip-row {
+    display:grid;
+    grid-template-columns:minmax(0,1fr) 78px 34px;
+    gap:8px;
+    align-items:start;
+  }
+  .multi-equip-row .modal-input { margin:0; }
+  .multi-row-remove {
+    width:34px; height:34px;
+    border:1px solid #CBD5E1;
+    border-radius:8px;
+    background:#fff;
+    color:#94A3B8;
+    font-size:18px;
+    cursor:pointer;
+  }
+  .multi-row-remove:hover { border-color:#EF4444; color:#EF4444; }
+  .multi-add-row-btn {
+    margin-top:8px;
+    min-height:34px;
+    padding:7px 10px;
+    border:1px dashed #94A3B8;
+    border-radius:8px;
+    background:transparent;
+    color:#64748B;
+    font-size:13px;
+    font-weight:800;
+    font-family:inherit;
+    cursor:pointer;
+  }
+  .multi-add-row-btn:disabled { opacity:.5; cursor:not-allowed; }
   .modal-actions { display:flex; gap:8px; margin-top:16px; }
   .modal-btn {
     flex:1; border:none; border-radius:10px; padding:14px 10px;
@@ -332,11 +364,9 @@
 <div class="modal-overlay" id="addModal" onclick="if(event.target===this)closeAddModal()">
   <div class="modal-box">
     <div class="modal-title">기존 예약에 장비 추가</div>
-    <label class="modal-label">추가할 장비명</label>
-    <div class="modal-row">
-      <input id="addEquipInput" class="modal-input" list="equipDatalist" placeholder="예: FX3, 70-200" autocomplete="off">
-      <input id="addQtyInput" class="modal-input" type="number" min="1" value="1">
-    </div>
+    <label class="modal-label">추가할 장비명 / 수량</label>
+    <div id="addEquipRows" class="multi-equip-list"></div>
+    <button type="button" id="addEquipRowBtn" class="multi-add-row-btn" onclick="addScheduleEquipRow()">+ 장비 행 추가</button>
     <datalist id="equipDatalist"></datalist>
 
     <label class="modal-label">예약 반출일(선택)</label>
@@ -577,17 +607,112 @@ function loadEquipList() {
     .catch(function() { equipListCache = []; return []; });
 }
 
+function addScheduleEquipRow(name, qty) {
+  var container = document.getElementById('addEquipRows');
+  if (!container) return null;
+
+  var row = document.createElement('div');
+  row.className = 'multi-equip-row';
+
+  var input = document.createElement('input');
+  input.className = 'modal-input schedule-equip-name';
+  input.setAttribute('list', 'equipDatalist');
+  input.placeholder = '예: FX3, 70-200';
+  input.autocomplete = 'off';
+  input.value = name || '';
+
+  var qtyInput = document.createElement('input');
+  qtyInput.className = 'modal-input schedule-equip-qty';
+  qtyInput.type = 'number';
+  qtyInput.min = '1';
+  qtyInput.value = qty || '1';
+
+  var removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'multi-row-remove';
+  removeBtn.title = '행 삭제';
+  removeBtn.textContent = '×';
+  removeBtn.onclick = function() {
+    if (container.querySelectorAll('.multi-equip-row').length <= 1) {
+      input.value = '';
+      qtyInput.value = '1';
+      input.focus();
+      return;
+    }
+    row.remove();
+  };
+
+  row.appendChild(input);
+  row.appendChild(qtyInput);
+  row.appendChild(removeBtn);
+  container.appendChild(row);
+  return row;
+}
+
+function resetScheduleEquipRows(entries) {
+  var container = document.getElementById('addEquipRows');
+  if (!container) return;
+  container.innerHTML = '';
+  if (entries && entries.length) {
+    entries.forEach(function(entry) { addScheduleEquipRow(entry.name, entry.qty); });
+  } else {
+    addScheduleEquipRow('', 1);
+  }
+}
+
+function collectScheduleEquipEntries() {
+  var rows = document.querySelectorAll('#addEquipRows .multi-equip-row');
+  var merged = {};
+  var order = [];
+  rows.forEach(function(row) {
+    var nameInput = row.querySelector('.schedule-equip-name');
+    var qtyInput = row.querySelector('.schedule-equip-qty');
+    var name = nameInput ? nameInput.value.trim() : '';
+    if (!name) return;
+    var qty = parseInt(qtyInput ? qtyInput.value : '1', 10);
+    if (!qty || qty < 1) qty = 1;
+    if (!merged[name]) {
+      merged[name] = { name: name, qty: qty };
+      order.push(name);
+    } else {
+      merged[name].qty += qty;
+    }
+  });
+  return order.map(function(name) { return merged[name]; });
+}
+
+function setScheduleAddBusy(isBusy, label) {
+  var btn = document.getElementById('confirmAddBtn');
+  var addBtn = document.getElementById('addEquipRowBtn');
+  btn.disabled = isBusy;
+  btn.textContent = label || '가용 확인 후 추가';
+  if (addBtn) addBtn.disabled = isBusy;
+}
+
+function postScheduleEquip(tid, entry) {
+  return fetch(API_URL + '?key=village2026&action=scheduleAddEquip&tid=' + encodeURIComponent(tid) +
+    '&equipName=' + encodeURIComponent(entry.name) + '&qty=' + encodeURIComponent(entry.qty))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) throw new Error(res.error);
+      return res;
+    });
+}
+
 function openAddModal(prefillTid, prefillDate) {
   var search = document.getElementById('searchInput').value.trim();
-  document.getElementById('addEquipInput').value = search;
-  document.getElementById('addQtyInput').value = '1';
+  resetScheduleEquipRows(search ? [{ name: search, qty: 1 }] : null);
   document.getElementById('candidateDateInput').value = prefillDate || '';
   document.getElementById('candidateNameInput').value = prefillTid || '';
   document.getElementById('candidateSelect').value = '';
   document.getElementById('candidateList').innerHTML = '<div class="candidate-empty">감독 이름이나 거래ID를 입력하면 일정이 표시됩니다</div>';
+  setScheduleAddBusy(false);
   document.getElementById('addModal').classList.add('show');
   loadEquipList().then(function() {
-    setTimeout(function() { document.getElementById('addEquipInput').focus(); }, 50);
+    setTimeout(function() {
+      var input = document.querySelector('#addEquipRows .schedule-equip-name');
+      if (input) input.focus();
+    }, 50);
     if (prefillTid) findCandidates();
   });
 }
@@ -642,27 +767,35 @@ function scheduleCandidateSearch() {
 
 function confirmScheduleAdd() {
   var tid = document.getElementById('candidateSelect').value;
-  var equip = document.getElementById('addEquipInput').value.trim();
-  var qty = parseInt(document.getElementById('addQtyInput').value, 10) || 1;
+  var entries = collectScheduleEquipEntries();
   if (!tid) { alert('일정을 선택하세요.'); return; }
-  if (!equip) { alert('장비명을 입력하세요.'); return; }
-  var btn = document.getElementById('confirmAddBtn');
-  btn.disabled = true;
-  btn.textContent = '확인 중...';
-  fetch(API_URL + '?key=village2026&action=scheduleAddEquip&tid=' + encodeURIComponent(tid) +
-    '&equipName=' + encodeURIComponent(equip) + '&qty=' + encodeURIComponent(qty))
-    .then(function(r) { return r.json(); })
-    .then(function(res) {
-      btn.disabled = false;
-      btn.textContent = '가용 확인 후 추가';
-      if (res.error) { alert(res.error); return; }
+  if (!entries.length) { alert('장비명을 하나 이상 입력하세요.'); return; }
+
+  setScheduleAddBusy(true, '확인 중...');
+  var successes = [];
+  var failures = [];
+  entries.reduce(function(promise, entry) {
+    return promise.then(function() {
+      return postScheduleEquip(tid, entry)
+        .then(function() { successes.push(entry); })
+        .catch(function(err) { failures.push({ entry: entry, message: err.message }); });
+    });
+  }, Promise.resolve()).then(function() {
+      setScheduleAddBusy(false);
+      if (failures.length) {
+        if (successes.length) loadData();
+        resetScheduleEquipRows(failures.map(function(f) { return f.entry; }));
+        alert((successes.length ? successes.length + '개 추가 완료, ' : '')
+          + failures.length + '개 추가 실패\n'
+          + failures.map(function(f) { return '- ' + f.entry.name + ': ' + f.message; }).join('\n'));
+        return;
+      }
       closeAddModal();
       closeDetail();
       loadData();
     })
     .catch(function(err) {
-      btn.disabled = false;
-      btn.textContent = '가용 확인 후 추가';
+      setScheduleAddBusy(false);
       alert('추가 실패: ' + err.message);
     });
 }

@@ -21,6 +21,8 @@
     --amber-text: #93640D;
     --green-bg: #DBEDDB;
     --green-text: #2B6B2B;
+    --gray-bg: #E8E8E5;
+    --gray-text: #787774;
     --red: #EB5757;
     --radius: 6px;
   }
@@ -180,46 +182,15 @@
   .today-btn:hover { opacity: 0.9; }
   .today-btn:active { opacity: 0.85; }
 
-  /* ── 요약 카드 ── */
-  .summary-row {
-    display: flex;
-    gap: 10px;
-    padding: 14px 20px;
-  }
-  .summary-card {
-    flex: 1;
-    border-radius: var(--radius);
-    padding: 14px 16px;
-    text-align: center;
-    border: 1px solid var(--border);
-  }
-  .summary-card .num {
-    font-size: 28px;
-    font-weight: 800;
-    line-height: 1.1;
-  }
-  .summary-card .label {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-top: 4px;
-    font-weight: 600;
-  }
-  .summary-card.checkout { background: var(--amber-bg); border-color: #F0D5A0; }
-  .summary-card.checkout .num { color: var(--amber-text); }
-  .summary-card.checkin { background: var(--green-bg); border-color: #B8D8B8; }
-  .summary-card.checkin .num { color: var(--green-text); }
-  .summary-card.active { background: var(--green-bg); border-color: #B8D8B8; }
-  .summary-card.active .num { color: var(--green-text); }
-
   /* ── 경고 문구 ── */
   .notice-bar {
-    background: var(--amber-bg);
-    color: var(--amber-text);
+    background: var(--surface);
+    color: var(--text-secondary);
     font-size: 12px;
     font-weight: 600;
     padding: 10px 20px;
     line-height: 1.6;
-    border-bottom: 1px solid #F0D5A0;
+    border-bottom: 1px solid var(--border);
   }
 
   /* ── 탭 ── */
@@ -308,8 +279,8 @@
   .schedule-card:hover { box-shadow: 0 1px 4px rgba(55,53,47,0.08); border-color: #D4D4D0; }
   .schedule-card:active { box-shadow: 0 2px 8px rgba(55,53,47,0.1); }
 
-  .schedule-card.type-checkout { border-left: 3px solid var(--amber-text); }
-  .schedule-card.type-checkin  { border-left: 3px solid var(--green-text); }
+  .schedule-card.type-checkout { border-left: 3px solid var(--accent); }
+  .schedule-card.type-checkin  { border-left: 3px solid var(--gray-text); }
 
   /* 처리 완료 — 카드 흐릿 + 체크 아이콘 (반출세팅완료 / 반납검수완료 공통) */
   .schedule-card.task-done {
@@ -487,6 +458,45 @@
     transition: border-color 0.2s;
   }
   .modal-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(35,131,226,0.15); }
+  .multi-equip-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .multi-equip-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 76px 32px;
+    gap: 8px;
+    align-items: start;
+  }
+  .multi-equip-row .modal-input { margin-bottom: 0; }
+  .multi-row-remove {
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+  }
+  .multi-row-remove:hover { border-color: var(--red); color: var(--red); }
+  .multi-add-row-btn {
+    min-height: 30px;
+    padding: 6px 10px;
+    border: 1px dashed var(--text-muted);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .multi-add-row-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .multi-add-row-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
   .modal-btn {
     padding: 7px 14px;
@@ -565,8 +575,8 @@
     white-space: nowrap;
     flex-shrink: 0;
   }
-  .type-checkout .time-badge { background: var(--amber-bg); color: var(--amber-text); }
-  .type-checkin  .time-badge { background: var(--green-bg); color: var(--green-text); }
+  .type-checkout .time-badge { background: var(--blue-bg); color: var(--blue-text); }
+  .type-checkin  .time-badge { background: var(--gray-bg); color: var(--gray-text); }
 
   .card-meta {
     display: flex;
@@ -658,7 +668,6 @@
   }
   @media (min-width: 768px) {
     .header { padding: 12px 32px 10px; }
-    .summary-row { padding: 14px 32px; }
     .notice-bar { padding: 10px 32px; }
     .tabs { padding: 10px 32px; }
     .content { padding: 0 32px 30px; }
@@ -688,21 +697,6 @@
       <strong id="headerTitle">오늘 일정</strong>
       <span id="dateLabel"></span>
     </div>
-  </div>
-</div>
-
-<div class="summary-row">
-  <div class="summary-card checkout">
-    <div class="num" id="sumCheckout">-</div>
-    <div class="label">반출</div>
-  </div>
-  <div class="summary-card checkin">
-    <div class="num" id="sumCheckin">-</div>
-    <div class="label">반납</div>
-  </div>
-  <div class="summary-card active">
-    <div class="num" id="sumActive">-</div>
-    <div class="label">현재 대여중</div>
   </div>
 </div>
 
@@ -838,10 +832,6 @@ function refreshData() {
 
 function renderDashboard(data) {
   document.getElementById('loadingArea').style.display = 'none';
-
-  document.getElementById('sumCheckout').textContent = data.checkout.length;
-  document.getElementById('sumCheckin').textContent = data.checkin.length;
-  document.getElementById('sumActive').textContent = data.activeCount || 0;
 
   document.getElementById('tabCheckout').textContent = data.checkout.length;
   document.getElementById('tabCheckin').textContent = data.checkin.length;
@@ -1100,16 +1090,106 @@ function loadEquipList() {
 
 var pendingAddTid = null;
 
+function addEquipRow(name, qty) {
+  var container = document.getElementById('equipRows');
+  if (!container) return null;
+
+  var row = document.createElement('div');
+  row.className = 'multi-equip-row';
+
+  var input = document.createElement('input');
+  input.className = 'modal-input equip-name-input';
+  input.setAttribute('list', 'equipDatalist');
+  input.placeholder = '장비명';
+  input.autocomplete = 'off';
+  input.value = name || '';
+
+  var qtyInput = document.createElement('input');
+  qtyInput.className = 'modal-input equip-qty-input';
+  qtyInput.type = 'number';
+  qtyInput.min = '1';
+  qtyInput.value = qty || '1';
+
+  var removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'multi-row-remove';
+  removeBtn.title = '행 삭제';
+  removeBtn.textContent = '×';
+  removeBtn.onclick = function() {
+    if (container.querySelectorAll('.multi-equip-row').length <= 1) {
+      input.value = '';
+      qtyInput.value = '1';
+      input.focus();
+      return;
+    }
+    row.remove();
+  };
+
+  row.appendChild(input);
+  row.appendChild(qtyInput);
+  row.appendChild(removeBtn);
+  container.appendChild(row);
+  return row;
+}
+
+function resetEquipRows(entries) {
+  var container = document.getElementById('equipRows');
+  if (!container) return;
+  container.innerHTML = '';
+  if (entries && entries.length) {
+    entries.forEach(function(entry) { addEquipRow(entry.name, entry.qty); });
+  } else {
+    addEquipRow('', 1);
+  }
+}
+
+function collectEquipEntries() {
+  var rows = document.querySelectorAll('#equipRows .multi-equip-row');
+  var merged = {};
+  var order = [];
+  rows.forEach(function(row) {
+    var nameInput = row.querySelector('.equip-name-input');
+    var qtyInput = row.querySelector('.equip-qty-input');
+    var name = nameInput ? nameInput.value.trim() : '';
+    if (!name) return;
+    var qty = parseInt(qtyInput ? qtyInput.value : '1', 10);
+    if (!qty || qty < 1) qty = 1;
+    if (!merged[name]) {
+      merged[name] = { name: name, qty: qty };
+      order.push(name);
+    } else {
+      merged[name].qty += qty;
+    }
+  });
+  return order.map(function(name) { return merged[name]; });
+}
+
+function setAddEquipBusy(isBusy, label) {
+  var btn = document.getElementById('addEquipConfirmBtn');
+  var addBtn = document.getElementById('addEquipRowBtn');
+  btn.disabled = isBusy;
+  btn.textContent = label || '가용 확인 후 추가';
+  if (addBtn) addBtn.disabled = isBusy;
+}
+
+function postAddEquip(tid, entry) {
+  return fetch(API_URL + '?key=village2026&action=addEquip&tid=' + encodeURIComponent(tid)
+    + '&equipName=' + encodeURIComponent(entry.name) + '&qty=' + encodeURIComponent(entry.qty))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) throw new Error(res.error);
+      return res;
+    });
+}
+
 function addEquip(tid) {
   pendingAddTid = tid;
-  document.getElementById('equipInput').value = '';
-  document.getElementById('qtyInput').value = '1';
-  document.getElementById('addEquipConfirmBtn').disabled = false;
-  document.getElementById('addEquipConfirmBtn').textContent = '가용 확인 후 추가';
+  resetEquipRows();
+  setAddEquipBusy(false);
   document.getElementById('addEquipModal').classList.add('open');
   loadEquipList().then(function() {
     setTimeout(function() {
-      var inp = document.getElementById('equipInput');
+      var inp = document.querySelector('#equipRows .equip-name-input');
       if (inp) inp.focus();
     }, 50);
   });
@@ -1122,36 +1202,41 @@ function closeAddEquipModal() {
 
 function confirmAddEquip() {
   if (!pendingAddTid) { closeAddEquipModal(); return; }
-  var name = (document.getElementById('equipInput').value || '').trim();
-  if (!name) { alert('장비명을 입력하거나 선택하세요.'); return; }
-  var qty = parseInt(document.getElementById('qtyInput').value, 10);
-  if (!qty || qty < 1) qty = 1;
+  var entries = collectEquipEntries();
+  if (!entries.length) { alert('장비명을 하나 이상 입력하거나 선택하세요.'); return; }
 
-  var btn = document.getElementById('addEquipConfirmBtn');
-  btn.disabled = true;
-  btn.textContent = '가용 확인 중...';
+  setAddEquipBusy(true, '가용 확인 중...');
 
   var tid = pendingAddTid;
-  fetch(API_URL + '?key=village2026&action=addEquip&tid=' + encodeURIComponent(tid)
-    + '&equipName=' + encodeURIComponent(name) + '&qty=' + qty)
-    .then(function(r) { return r.json(); })
-    .then(function(res) {
-      btn.disabled = false;
-      btn.textContent = '가용 확인 후 추가';
-      if (res.error) {
-        alert(res.error.indexOf('가용 불가') === 0 ? res.error : '추가 실패: ' + res.error);
-        return;
-      }
-      closeAddEquipModal();
-      try { localStorage.removeItem('dashCache_v2_' + formatDate(currentDate)); } catch (e) {}
-      loadData(true);
-      alert('가용 확인 완료. 장비를 추가했습니다.');
-    })
-    .catch(function(err) {
-      btn.disabled = false;
-      btn.textContent = '가용 확인 후 추가';
-      alert('네트워크 오류: ' + err.message);
+  var successes = [];
+  var failures = [];
+  entries.reduce(function(promise, entry) {
+    return promise.then(function() {
+      return postAddEquip(tid, entry)
+        .then(function() { successes.push(entry); })
+        .catch(function(err) { failures.push({ entry: entry, message: err.message }); });
     });
+  }, Promise.resolve()).then(function() {
+    setAddEquipBusy(false);
+    if (failures.length) {
+      if (successes.length) {
+        try { localStorage.removeItem('dashCache_v2_' + formatDate(currentDate)); } catch (e) {}
+        loadData(true);
+      }
+      resetEquipRows(failures.map(function(f) { return f.entry; }));
+      alert((successes.length ? successes.length + '개 추가 완료, ' : '')
+        + failures.length + '개 추가 실패\n'
+        + failures.map(function(f) { return '- ' + f.entry.name + ': ' + f.message; }).join('\n'));
+      return;
+    }
+    closeAddEquipModal();
+    try { localStorage.removeItem('dashCache_v2_' + formatDate(currentDate)); } catch (e) {}
+    loadData(true);
+    alert('가용 확인 완료. 장비 ' + successes.length + '개를 추가했습니다.');
+  }).catch(function(err) {
+    setAddEquipBusy(false);
+    alert('네트워크 오류: ' + err.message);
+  });
 }
 
 // 페이지 로드 직후 장비 목록 미리 fetch (모달 열 때 즉시 표시)
@@ -1162,11 +1247,10 @@ window.addEventListener('load', function() { loadEquipList(); });
 <div id="addEquipModal" class="modal-overlay" onclick="if(event.target===this)closeAddEquipModal()">
   <div class="modal-box">
     <div class="modal-title">장비 추가</div>
-    <label class="modal-label">장비명</label>
-    <input id="equipInput" class="modal-input" list="equipDatalist" placeholder="입력하거나 목록에서 선택" autocomplete="off" />
+    <label class="modal-label">장비명 / 수량</label>
+    <div id="equipRows" class="multi-equip-list"></div>
+    <button type="button" id="addEquipRowBtn" class="multi-add-row-btn" onclick="addEquipRow()">+ 장비 행 추가</button>
     <datalist id="equipDatalist"></datalist>
-    <label class="modal-label">수량</label>
-    <input id="qtyInput" class="modal-input" type="number" min="1" value="1" />
     <div class="modal-actions">
       <button class="modal-btn modal-btn-cancel" onclick="closeAddEquipModal()">취소</button>
       <button id="addEquipConfirmBtn" class="modal-btn modal-btn-confirm" onclick="confirmAddEquip()">가용 확인 후 추가</button>
