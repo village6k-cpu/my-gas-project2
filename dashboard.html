@@ -180,8 +180,10 @@
   .today-btn:hover { opacity: 0.9; }
   .today-btn:active { opacity: 0.85; }
 
-  /* ── 사장님 메모 ── */
+  /* ── 인수인계 메모 ── */
   .notice-board {
+    --notice-note-font-size: 15px;
+    --notice-note-min-height: 54px;
     display: grid;
     grid-template-columns: minmax(150px, 210px) minmax(0, 1fr);
     gap: 12px;
@@ -209,13 +211,14 @@
   }
   .notice-title {
     color: var(--text-primary);
-    font-size: 16px;
+    font-size: 24px;
     font-weight: 850;
-    line-height: 1.25;
+    line-height: 1.05;
   }
   .notice-controls {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     margin-top: 12px;
   }
@@ -232,6 +235,35 @@
     cursor: pointer;
   }
   .notice-add-btn:hover { background: rgba(255,255,255,0.7); }
+  .notice-font-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px;
+    border: 1px solid rgba(147,100,13,0.28);
+    border-radius: var(--radius);
+    background: rgba(255,255,255,0.36);
+  }
+  .notice-font-btn {
+    min-width: 28px;
+    height: 24px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: #93640D;
+    font-size: 12px;
+    font-weight: 850;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .notice-font-btn:hover { background: rgba(255,255,255,0.68); }
+  .notice-font-size {
+    min-width: 34px;
+    text-align: center;
+    color: #93640D;
+    font-size: 11px;
+    font-weight: 800;
+  }
   .notice-save-state {
     color: #93640D;
     font-size: 11px;
@@ -249,7 +281,7 @@
     border: 1px solid #E8D99F;
     border-left: 4px solid #D99A00;
     color: var(--text-primary);
-    font-size: 15px;
+    font-size: var(--notice-note-font-size);
     font-weight: 750;
     line-height: 1.5;
   }
@@ -270,7 +302,7 @@
   }
   .notice-textarea {
     width: 100%;
-    min-height: 54px;
+    min-height: var(--notice-note-min-height);
     border: none;
     outline: none;
     resize: none;
@@ -700,12 +732,18 @@
   </div>
 </div>
 
-<div class="notice-board" aria-label="오늘 세팅 메모">
+<div class="notice-board" id="noticeBoard" aria-label="인수인계 메모">
   <div class="notice-lead">
-    <div class="notice-kicker">사장님 메모</div>
-    <div class="notice-title">오늘 세팅 전<br>반드시 확인</div>
+    <div class="notice-title">인수인계</div>
     <div class="notice-controls">
       <button class="notice-add-btn" onclick="addDashboardNote()" title="메모 추가" aria-label="메모 추가">+</button>
+      <div class="notice-font-controls" aria-label="메모 글자 크기">
+        <button class="notice-font-btn" onclick="adjustDashboardNoteFont(-1)" title="글자 작게" aria-label="글자 작게">A-</button>
+        <button class="notice-font-btn" onclick="resetDashboardNoteFont()" title="기본 크기" aria-label="기본 크기">
+          <span class="notice-font-size" id="noticeFontSize">15px</span>
+        </button>
+        <button class="notice-font-btn" onclick="adjustDashboardNoteFont(1)" title="글자 크게" aria-label="글자 크게">A+</button>
+      </div>
       <span class="notice-save-state" id="noticeSaveState"></span>
     </div>
   </div>
@@ -747,6 +785,11 @@ var DEFAULT_DASHBOARD_NOTES = [
   '매직암, 라인, 배터리 등 기타 악세사리류 갯수 철저하게 체크'
 ];
 var DASHBOARD_NOTES_LOCAL_KEY = 'dashboardPostItNotes_fallback_v1';
+var DASHBOARD_NOTE_FONT_KEY = 'dashboardPostItFontSize_v1';
+var DASHBOARD_NOTE_FONT_DEFAULT = 15;
+var DASHBOARD_NOTE_FONT_MIN = 12;
+var DASHBOARD_NOTE_FONT_MAX = 24;
+var dashboardNoteFontSize = DASHBOARD_NOTE_FONT_DEFAULT;
 var dashboardNotes = DEFAULT_DASHBOARD_NOTES.slice();
 var noteSaveTimer = null;
 
@@ -757,6 +800,7 @@ document.addEventListener('DOMContentLoaded', function() {
     currentDate = new Date(dateParam + 'T00:00:00');
   }
   updateDateDisplay();
+  loadDashboardNoteFontSize();
   renderDashboardNotes(dashboardNotes);
   loadDashboardNotes();
   // 서버가 INITIAL_DATA 박아 보냈으면 즉시 렌더 (fetch 왕복 1회 절약)
@@ -871,10 +915,48 @@ function setNoticeSaveState(text) {
   if (el) el.textContent = text || '';
 }
 
+function clampDashboardNoteFont(size) {
+  size = Number(size) || DASHBOARD_NOTE_FONT_DEFAULT;
+  return Math.max(DASHBOARD_NOTE_FONT_MIN, Math.min(DASHBOARD_NOTE_FONT_MAX, Math.round(size)));
+}
+
+function getDashboardNoteMinHeight() {
+  return Math.max(44, Math.round(dashboardNoteFontSize * 3.6));
+}
+
+function applyDashboardNoteFontSize(size, shouldSave) {
+  dashboardNoteFontSize = clampDashboardNoteFont(size);
+  var board = document.getElementById('noticeBoard');
+  if (board) {
+    board.style.setProperty('--notice-note-font-size', dashboardNoteFontSize + 'px');
+    board.style.setProperty('--notice-note-min-height', getDashboardNoteMinHeight() + 'px');
+  }
+  var label = document.getElementById('noticeFontSize');
+  if (label) label.textContent = dashboardNoteFontSize + 'px';
+  document.querySelectorAll('.notice-textarea').forEach(autoSizeNoteTextarea);
+  if (shouldSave) {
+    try { localStorage.setItem(DASHBOARD_NOTE_FONT_KEY, String(dashboardNoteFontSize)); } catch (e) {}
+  }
+}
+
+function loadDashboardNoteFontSize() {
+  var saved = null;
+  try { saved = localStorage.getItem(DASHBOARD_NOTE_FONT_KEY); } catch (e) {}
+  applyDashboardNoteFontSize(saved || DASHBOARD_NOTE_FONT_DEFAULT, false);
+}
+
+function adjustDashboardNoteFont(delta) {
+  applyDashboardNoteFontSize(dashboardNoteFontSize + delta, true);
+}
+
+function resetDashboardNoteFont() {
+  applyDashboardNoteFontSize(DASHBOARD_NOTE_FONT_DEFAULT, true);
+}
+
 function autoSizeNoteTextarea(textarea) {
   if (!textarea) return;
   textarea.style.height = 'auto';
-  textarea.style.height = Math.max(54, textarea.scrollHeight) + 'px';
+  textarea.style.height = Math.max(getDashboardNoteMinHeight(), textarea.scrollHeight) + 'px';
 }
 
 function renderDashboardNotes(notes) {
@@ -891,7 +973,7 @@ function renderDashboardNotes(notes) {
     textarea.className = 'notice-textarea';
     textarea.maxLength = 180;
     textarea.value = note;
-    textarea.setAttribute('aria-label', '사장님 메모 ' + (index + 1));
+    textarea.setAttribute('aria-label', '인수인계 메모 ' + (index + 1));
     textarea.addEventListener('input', function() {
       dashboardNotes[index] = textarea.value;
       autoSizeNoteTextarea(textarea);
