@@ -342,20 +342,6 @@ function getDashboardData(targetDate, skipCache) {
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
 
-  // 계약마스터: 거래ID → { 예약자명, 연락처, 업체명, 계약상태(J열) }
-  var contractMap = {};
-  if (contractSheet && contractSheet.getLastRow() >= 2) {
-    var cData = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getValues();
-    cData.forEach(function(r) {
-      if (r[0]) contractMap[r[0]] = {
-        name: r[1] || '',
-        tel: r[2] || '',
-        company: r[3] || '',
-        contractStatus: r[9] || ''
-      };
-    });
-  }
-
   if (!schedSheet || schedSheet.getLastRow() < 2) {
     return {
       date: today,
@@ -427,9 +413,9 @@ function getDashboardData(targetDate, skipCache) {
   // 반출세팅 완료 플래그 일괄 조회 (ScriptProperties 1회 호출)
   var props = PropertiesService.getScriptProperties().getProperties();
   var dashboardTradeIds = Object.keys(tradeGroups);
+  var contractMap = getDashboardContractMapForIds_(contractSheet, dashboardTradeIds);
   var tradeExtras = getTradeExtrasForIds_(dashboardTradeIds, props);
-  var tradePhotos = getDashboardPhotoMap_(dashboardTradeIds);
-  var equipmentChecks = getEquipmentCheckMap_();
+  var equipmentChecks = getEquipmentCheckMapForIds_(dashboardTradeIds);
 
   dashboardTradeIds.forEach(function(tid) {
     var g = tradeGroups[tid];
@@ -481,7 +467,6 @@ function getDashboardData(targetDate, skipCache) {
       returnStatus: checkInfo.returnStatus || '',
       returnMemo: checkInfo.returnMemo || '',
       equipmentCheckRow: checkInfo.row || 0,
-      photos: tradePhotos[tid] || emptyDashboardPhotos_(),
       equipments: displayEquip
     };
 
@@ -523,8 +508,8 @@ function getDashboardData(targetDate, skipCache) {
     proofTypeOptions: getTradeProofTypeOptions_(),
     issueStatusOptions: getTradeIssueStatusOptions_()
   };
-  // 캐시 5분으로 확장 (등록/취소/일정변경 시 invalidateDashboardCache로 무효화)
-  try { cache.put(cacheKey, JSON.stringify(result), 300); } catch (e) { /* 캐시 오버플로 무시 */ }
+  // 등록/취소/일정변경 시 invalidateDashboardCache로 무효화되므로, 날짜 이동 체감을 위해 15분 유지.
+  try { cache.put(cacheKey, JSON.stringify(result), 900); } catch (e) { /* 캐시 오버플로 무시 */ }
   return result;
 }
 
@@ -558,6 +543,32 @@ function compareDashboardItemsByTime_(a, b) {
   var an = String((a && (a.name || a.tradeId)) || '');
   var bn = String((b && (b.name || b.tradeId)) || '');
   return an.localeCompare(bn);
+}
+
+function getDashboardContractMapForIds_(contractSheet, tradeIds) {
+  var result = {};
+  var wanted = {};
+  (tradeIds || []).forEach(function(tid) {
+    tid = String(tid || '').trim();
+    if (tid) wanted[tid] = true;
+  });
+  if (!contractSheet || contractSheet.getLastRow() < 2 || Object.keys(wanted).length === 0) return result;
+
+  try {
+    var ids = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 1).getDisplayValues();
+    ids.forEach(function(r, idx) {
+      var tid = String(r[0] || '').trim();
+      if (!wanted[tid]) return;
+      var row = contractSheet.getRange(idx + 2, 1, 1, 10).getDisplayValues()[0];
+      result[tid] = {
+        name: row[1] || '',
+        tel: row[2] || '',
+        company: row[3] || '',
+        contractStatus: row[9] || ''
+      };
+    });
+  } catch (err) {}
+  return result;
 }
 
 var DASHBOARD_NOTES_PROP_KEY = 'dashboardPostItNotes_v1';
@@ -861,6 +872,46 @@ function getEquipmentCheckMap_() {
   return result;
 }
 
+function getEquipmentCheckMapForIds_(tradeIds) {
+  var result = { byTradeId: {} };
+  var wanted = {};
+  (tradeIds || []).forEach(function(tid) {
+    tid = String(tid || '').trim();
+    if (tid) wanted[tid] = true;
+  });
+  if (Object.keys(wanted).length === 0) return result;
+
+  try {
+    var sheet = getEquipmentCheckSheet_(false);
+    if (!sheet || sheet.getLastRow() < 2) return result;
+
+    var schema = getEquipmentCheckSchema_(sheet, false);
+    var lastCol = Math.max(sheet.getLastColumn(), 4, schema.statusCol, schema.memoCol, schema.keyCol || 0, schema.labelCol || 0);
+    var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, lastCol).getDisplayValues();
+
+    values.forEach(function(row, idx) {
+      var rawKey = schema.keyCol ? String(row[schema.keyCol - 1] || '').trim() : '';
+      var tradeId = normalizeEquipmentCheckTradeId_(rawKey);
+      if (!wanted[tradeId]) return;
+
+      var info = {
+        row: idx + 2,
+        tradeId: tradeId,
+        label: schema.labelCol ? String(row[schema.labelCol - 1] || '').trim() : '',
+        returnStatus: String(row[schema.statusCol - 1] || '').trim(),
+        returnMemo: String(row[schema.memoCol - 1] || '').trim(),
+        exactTradeId: /^\d{6}-\d{3}$/.test(rawKey)
+      };
+
+      if (tradeId && (!result.byTradeId[tradeId] || info.exactTradeId)) result.byTradeId[tradeId] = info;
+    });
+  } catch (err) {
+    result.error = err.message;
+  }
+
+  return result;
+}
+
 function getEquipmentCheckForTrade_(map, tradeId) {
   map = map || {};
   var tid = String(tradeId || '').trim();
@@ -1080,13 +1131,15 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var proofCol = 11;   // K열: 증빙유형
     var issueCol = 12;   // L열: 발행상태
     var noteCol = 14;    // N열: 비고
-    var values = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, Math.max(lastCol, paymentCol, proofCol, issueCol, noteCol)).getDisplayValues();
     var wanted = {};
     tradeIds.forEach(function(tid) { wanted[String(tid)] = true; });
+    var readCols = Math.max(lastCol, paymentCol, proofCol, issueCol, noteCol);
+    var ids = 거래시트.getRange(2, idCol, 거래시트.getLastRow() - 1, 1).getDisplayValues();
 
-    values.forEach(function(row) {
-      var tid = String(row[idCol - 1] || '').trim();
+    ids.forEach(function(idRow, idx) {
+      var tid = String(idRow[0] || '').trim();
       if (!wanted[tid]) return;
+      var row = 거래시트.getRange(idx + 2, 1, 1, readCols).getDisplayValues()[0];
       if (!result[tid]) result[tid] = {};
       result[tid].contractUrl = String(row[contractCol - 1] || '').trim();
       result[tid].paymentMethod = String(row[paymentCol - 1] || '').trim();
@@ -1106,6 +1159,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
 var DASHBOARD_PHOTO_SHEET_NAME_ = "반출반납 사진";
 var DASHBOARD_PHOTO_FOLDER_NAME_ = "빌리지_반출반납_사진";
 var DASHBOARD_PHOTO_APPSHEET_FOLDER_NAME_ = "반출반납 사진_Images";
+var DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_ = "dashboard_photo_file_index_v1";
 
 function emptyDashboardPhotos_() {
   return { checkout: [], checkin: [], other: [] };
@@ -1119,6 +1173,32 @@ function getDashboardPhotosForTrade(tid) {
     success: true,
     tid: tid,
     photos: map[tid] || emptyDashboardPhotos_()
+  };
+}
+
+function getDashboardPhotosForTrades(tids) {
+  if (typeof tids === 'string') {
+    try {
+      tids = JSON.parse(tids);
+    } catch (parseErr) {
+      tids = tids.split(',');
+    }
+  }
+  tids = Array.isArray(tids) ? tids.map(function(tid) {
+    return String(tid || '').trim();
+  }).filter(Boolean) : [];
+
+  var seen = {};
+  tids = tids.filter(function(tid) {
+    if (seen[tid]) return false;
+    seen[tid] = true;
+    return true;
+  }).slice(0, 80);
+
+  var map = getDashboardPhotoMap_(tids);
+  return {
+    success: true,
+    photosByTrade: map
   };
 }
 
@@ -1142,10 +1222,8 @@ function getDashboardPhotoMap_(tradeIds) {
 
     var lastCol = Math.max(sheet.getLastColumn(), schema.maxCol || 1);
     var rowCount = sheet.getLastRow() - 1;
-    var range = sheet.getRange(2, 1, rowCount, lastCol);
-    var display = range.getDisplayValues();
-    var rich = [];
-    try { rich = range.getRichTextValues(); } catch (richErr) {}
+    var display = sheet.getRange(2, 1, rowCount, lastCol).getDisplayValues();
+    var fileIndex = getDashboardPhotoFileIndex_();
 
     display.forEach(function(row, i) {
       var tid = String(row[schema.tradeIdCol - 1] || '').trim();
@@ -1156,36 +1234,39 @@ function getDashboardPhotoMap_(tradeIds) {
       var uploadedAt = schema.uploadedAtCol ? String(row[schema.uploadedAtCol - 1] || '').trim() : '';
       var memo = schema.memoCol ? String(row[schema.memoCol - 1] || '').trim() : '';
       var fileId = schema.fileIdCol ? String(row[schema.fileIdCol - 1] || '').trim() : '';
-      var thumb = schema.thumbCol ? getRichCellText_(row, rich, i, schema.thumbCol) : '';
+      var thumb = schema.thumbCol ? String(row[schema.thumbCol - 1] || '').trim() : '';
 
       if (schema.checkoutPhotoCol) {
-        addDashboardPhotoCell_(result[tid], 'checkout', getRichCellText_(row, rich, i, schema.checkoutPhotoCol), {
+        addDashboardPhotoCell_(result[tid], 'checkout', String(row[schema.checkoutPhotoCol - 1] || '').trim(), {
           tid: tid,
           row: i + 2,
           fileId: fileId,
           thumbnailUrl: thumb,
           uploadedAt: uploadedAt,
-          memo: memo
+          memo: memo,
+          fileIndex: fileIndex
         });
       }
       if (schema.checkinPhotoCol) {
-        addDashboardPhotoCell_(result[tid], 'checkin', getRichCellText_(row, rich, i, schema.checkinPhotoCol), {
+        addDashboardPhotoCell_(result[tid], 'checkin', String(row[schema.checkinPhotoCol - 1] || '').trim(), {
           tid: tid,
           row: i + 2,
           fileId: fileId,
           thumbnailUrl: thumb,
           uploadedAt: uploadedAt,
-          memo: memo
+          memo: memo,
+          fileIndex: fileIndex
         });
       }
       if (schema.photoCol) {
-        addDashboardPhotoCell_(result[tid], phase || 'other', getRichCellText_(row, rich, i, schema.photoCol), {
+        addDashboardPhotoCell_(result[tid], phase || 'other', String(row[schema.photoCol - 1] || '').trim(), {
           tid: tid,
           row: i + 2,
           fileId: fileId,
           thumbnailUrl: thumb,
           uploadedAt: uploadedAt,
-          memo: memo
+          memo: memo,
+          fileIndex: fileIndex
         });
       }
     });
@@ -1233,7 +1314,7 @@ function splitDashboardPhotoValues_(value) {
 
 function buildDashboardPhotoEntry_(raw, phase, context) {
   var fileId = context.fileId || extractDriveFileId_(raw);
-  if (!fileId) fileId = resolveDashboardPhotoFileId_(raw);
+  if (!fileId) fileId = resolveDashboardPhotoFileId_(raw, context.fileIndex);
   var url = normalizeDashboardPhotoUrl_(raw, fileId);
   var thumbnailUrl = context.thumbnailUrl || (fileId ? "https://drive.google.com/thumbnail?id=" + encodeURIComponent(fileId) + "&sz=w640" : url);
   return {
@@ -1265,11 +1346,12 @@ function extractDriveFileId_(value) {
   return m ? m[1] : '';
 }
 
-function resolveDashboardPhotoFileId_(value) {
+function resolveDashboardPhotoFileId_(value, fileIndex) {
   var raw = String(value || '').trim();
   if (!raw || /^https?:\/\//i.test(raw)) return '';
   var fileName = raw.split('/').pop();
   if (!/\.(jpe?g|png|webp|gif|heic)$/i.test(fileName)) return '';
+  if (fileIndex && fileIndex[fileName]) return fileIndex[fileName];
 
   var cacheKey = 'dashboard_photo_file_' + Utilities.base64EncodeWebSafe(fileName).slice(0, 80);
   try {
@@ -1290,21 +1372,28 @@ function resolveDashboardPhotoFileId_(value) {
   return fileId;
 }
 
-function getRichCellText_(displayRow, richRows, rowIndex, col) {
-  var displayValue = String(displayRow[col - 1] || '').trim();
+function getDashboardPhotoFileIndex_() {
+  var cache = null;
   try {
-    var rich = richRows && richRows[rowIndex] && richRows[rowIndex][col - 1];
-    if (rich) {
-      var link = rich.getLinkUrl();
-      if (link) return link;
-      var runs = rich.getRuns ? rich.getRuns() : [];
-      for (var i = 0; i < runs.length; i++) {
-        link = runs[i].getLinkUrl();
-        if (link) return link;
-      }
+    cache = CacheService.getScriptCache();
+    var cached = cache.get(DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_);
+    if (cached) return JSON.parse(cached);
+  } catch (cacheErr) {}
+
+  var index = {};
+  try {
+    var folder = getDashboardPhotoStorageFolder_();
+    var files = folder.getFiles();
+    while (files.hasNext()) {
+      var file = files.next();
+      index[file.getName()] = file.getId();
     }
   } catch (err) {}
-  return displayValue;
+
+  try {
+    if (cache) cache.put(DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_, JSON.stringify(index), 21600);
+  } catch (cachePutErr) {}
+  return index;
 }
 
 function normalizeDashboardPhotoPhase_(value) {
@@ -1422,6 +1511,7 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo) {
     if (schema.memoCol) row[schema.memoCol - 1] = String(memo || '').trim();
 
     sheet.appendRow(row);
+    invalidateDashboardPhotoCache_();
     invalidateDashboardCache();
 
     return {
@@ -1443,6 +1533,12 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo) {
   } finally {
     try { lock.releaseLock(); } catch (releaseErr) {}
   }
+}
+
+function invalidateDashboardPhotoCache_() {
+  try {
+    CacheService.getScriptCache().remove(DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_);
+  } catch (err) {}
 }
 
 function getDashboardPhotoWriteCol_(schema, phase) {
@@ -1548,6 +1644,12 @@ function inspectDashboardPhotoSheet() {
 }
 
 function getTradePaymentOptions_() {
+  return getCachedDashboardTradeOptions_('dashboard_trade_payment_options_v1', function() {
+    return getTradePaymentOptionsFromSheet_();
+  }, defaultPaymentOptions_());
+}
+
+function getTradePaymentOptionsFromSheet_() {
   try {
     var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
     if (!개고생URL) return defaultPaymentOptions_();
@@ -1574,6 +1676,12 @@ function getTradeIssueStatusOptions_() {
 }
 
 function getTradeColumnOptions_(column, fallbackOptions) {
+  return getCachedDashboardTradeOptions_('dashboard_trade_col_options_v1_' + column, function() {
+    return getTradeColumnOptionsFromSheet_(column, fallbackOptions);
+  }, fallbackOptions);
+}
+
+function getTradeColumnOptionsFromSheet_(column, fallbackOptions) {
   try {
     var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
     if (!개고생URL) return fallbackOptions.slice();
@@ -1588,6 +1696,28 @@ function getTradeColumnOptions_(column, fallbackOptions) {
     }
   } catch (err) {}
   return fallbackOptions.slice();
+}
+
+function getCachedDashboardTradeOptions_(key, loader, fallbackOptions) {
+  var cache = CacheService.getScriptCache();
+  try {
+    var cached = cache.get(key);
+    if (cached) {
+      var parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (err) {}
+
+  var options = [];
+  try {
+    options = loader() || [];
+  } catch (loadErr) {
+    options = [];
+  }
+  if (!Array.isArray(options) || options.length === 0) options = (fallbackOptions || []).slice();
+
+  try { cache.put(key, JSON.stringify(options), 21600); } catch (putErr) {}
+  return options;
 }
 
 function defaultPaymentOptions_() {

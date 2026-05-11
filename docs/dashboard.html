@@ -1192,8 +1192,8 @@ var activeDashboardTab = 'checkout';
 var dashboardSearchQuery = '';
 var dashboardRequestSeq = 0;
 var dashboardAbortController = null;
-var DASHBOARD_CACHE_PREFIX = 'dashCache_v3_';
-var DASHBOARD_OLD_CACHE_PREFIX = 'dashCache_v2_';
+var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
+var DASHBOARD_OLD_CACHE_PREFIX = 'dashCache_v3_';
 var CONTRACT_STATUS_OPTIONS = ['', '예약', '반출', '취소'];
 var RETURN_STATUS_OPTIONS = ['', '정상', '확인필요', '파손', '분실', '미반납', '반납완료'];
 var equipmentMemoSaveTimers = {};
@@ -1209,6 +1209,10 @@ var DASHBOARD_NOTE_FONT_MAX = 24;
 var dashboardNoteFontSize = DASHBOARD_NOTE_FONT_DEFAULT;
 var dashboardNotes = DEFAULT_DASHBOARD_NOTES.slice();
 var noteSaveTimer = null;
+var dashboardPhotoStore = {};
+var dashboardPhotoLoading = {};
+var dashboardPhotoBatchTimer = null;
+var dashboardDatePrefetching = {};
 
 document.addEventListener('DOMContentLoaded', function() {
   // URL 파라미터로 날짜 전달 받기
@@ -1349,6 +1353,37 @@ function clearDashboardCacheForDate(dateStr) {
     localStorage.removeItem(DASHBOARD_CACHE_PREFIX + dateStr);
     localStorage.removeItem(DASHBOARD_OLD_CACHE_PREFIX + dateStr);
   } catch (e) {}
+}
+
+function prefetchAdjacentDashboardDates(dateStr) {
+  if (dashboardSearchQuery) return;
+  [-1, 1].forEach(function(offset) {
+    prefetchDashboardDate(addDaysToDateStr(dateStr, offset));
+  });
+}
+
+function addDaysToDateStr(dateStr, offset) {
+  var d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + offset);
+  return formatDate(d);
+}
+
+function prefetchDashboardDate(dateStr) {
+  if (!dateStr || dashboardDatePrefetching[dateStr]) return;
+  try {
+    if (localStorage.getItem(DASHBOARD_CACHE_PREFIX + dateStr)) return;
+  } catch (e) {}
+
+  dashboardDatePrefetching[dateStr] = true;
+  fetch(API_URL + '?key=village2026&action=dashboard&date=' + encodeURIComponent(dateStr))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data && data.error) return;
+      if (!isDashboardDateMatch(data, dateStr)) return;
+      try { localStorage.setItem(DASHBOARD_CACHE_PREFIX + dateStr, JSON.stringify(data)); } catch (e) {}
+    })
+    .catch(function() {})
+    .then(function() { delete dashboardDatePrefetching[dateStr]; });
 }
 
 function normalizeDashboardNotes(notes) {
@@ -1604,6 +1639,8 @@ function renderDashboard(data, expectedDate) {
   renderList('allSection', all, 'all', isSearching);
 
   switchTab(activeDashboardTab || 'checkout');
+  prefetchAdjacentDashboardDates(data.date || expectedDate || formatDate(currentDate));
+  scheduleDashboardPhotoLoad(checkout.concat(checkin));
   return true;
 }
 
@@ -1988,12 +2025,15 @@ function toggleTask(btn, tid, action) {
 }
 
 function photoGalleryHtml(item) {
-  var photos = normalizeDashboardPhotos(item.photos);
-  var html = '<div class="photo-panel" onclick="event.stopPropagation()">';
-  html += photoPhaseRowHtml(item.tradeId, 'checkout', '반출', photos.checkout);
-  html += photoPhaseRowHtml(item.tradeId, 'checkin', '반납', photos.checkin);
+  var cached = dashboardPhotoStore[item.tradeId];
+  var isLoading = !cached && !!dashboardPhotoLoading[item.tradeId];
+  var photos = normalizeDashboardPhotos(cached || item.photos);
+  var emptyLabel = isLoading ? '불러오는 중' : '사진 없음';
+  var html = '<div class="photo-panel" data-photo-tid="' + escAttr(item.tradeId) + '" onclick="event.stopPropagation()">';
+  html += photoPhaseRowHtml(item.tradeId, 'checkout', '반출', photos.checkout, false, emptyLabel);
+  html += photoPhaseRowHtml(item.tradeId, 'checkin', '반납', photos.checkin, false, emptyLabel);
   if (photos.other && photos.other.length) {
-    html += photoPhaseRowHtml(item.tradeId, 'other', '기타', photos.other, true);
+    html += photoPhaseRowHtml(item.tradeId, 'other', '기타', photos.other, true, emptyLabel);
   }
   html += '<div class="photo-upload-state" data-photo-state="' + escAttr(item.tradeId) + '"></div>';
   html += '</div>';
@@ -2009,13 +2049,13 @@ function normalizeDashboardPhotos(photos) {
   };
 }
 
-function photoPhaseRowHtml(tid, phase, label, list, readOnly) {
+function photoPhaseRowHtml(tid, phase, label, list, readOnly, emptyLabel) {
   list = list || [];
   var html = '<div class="photo-row">';
   html += '<div class="photo-label">' + escHtml(label) + '</div>';
   html += '<div class="photo-thumbs">';
   if (!list.length) {
-    html += '<span class="photo-empty">사진 없음</span>';
+    html += '<span class="photo-empty">' + escHtml(emptyLabel || '사진 없음') + '</span>';
   } else {
     list.slice(0, 4).forEach(function(photo) {
       var src = photo.thumbnailUrl || photo.url || '';
@@ -2032,6 +2072,63 @@ function photoPhaseRowHtml(tid, phase, label, list, readOnly) {
   }
   html += '</div>';
   return html;
+}
+
+function scheduleDashboardPhotoLoad(items) {
+  clearTimeout(dashboardPhotoBatchTimer);
+  dashboardPhotoBatchTimer = setTimeout(function() {
+    var tids = uniquePhotoTradeIds(items);
+    if (!tids.length) return;
+    tids.forEach(function(tid) { dashboardPhotoLoading[tid] = true; });
+    updatePhotoPanels();
+    fetchDashboardPhotosBatch(tids)
+      .then(function(map) {
+        Object.keys(map || {}).forEach(function(tid) {
+          dashboardPhotoStore[tid] = normalizeDashboardPhotos(map[tid]);
+          delete dashboardPhotoLoading[tid];
+        });
+        updatePhotoPanels();
+      })
+      .catch(function() {
+        tids.forEach(function(tid) { delete dashboardPhotoLoading[tid]; });
+        updatePhotoPanels();
+      });
+  }, 80);
+}
+
+function uniquePhotoTradeIds(items) {
+  var seen = {};
+  var tids = [];
+  (items || []).forEach(function(item) {
+    var tid = item && item.tradeId ? String(item.tradeId) : '';
+    if (!tid || seen[tid] || dashboardPhotoStore[tid] || dashboardPhotoLoading[tid]) return;
+    seen[tid] = true;
+    tids.push(tid);
+  });
+  return tids;
+}
+
+function fetchDashboardPhotosBatch(tids) {
+  return fetch(API_URL || '', {
+    method: 'POST',
+    body: JSON.stringify({
+      key: 'village2026',
+      action: 'dashboardPhotosBatch',
+      tids: tids
+    })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) throw new Error(res.error);
+      return res.photosByTrade || {};
+    });
+}
+
+function updatePhotoPanels() {
+  document.querySelectorAll('.photo-panel[data-photo-tid]').forEach(function(panel) {
+    var tid = panel.getAttribute('data-photo-tid') || '';
+    panel.outerHTML = photoGalleryHtml({ tradeId: tid, photos: dashboardPhotoStore[tid] });
+  });
 }
 
 function openPhotoPicker(tid, phase) {
@@ -2073,6 +2170,8 @@ function uploadDashboardPhotoFiles(tid, phase, files) {
     });
   }, Promise.resolve()).then(function() {
     if (successes > 0) {
+      delete dashboardPhotoStore[tid];
+      delete dashboardPhotoLoading[tid];
       if (typeof clearDashboardCacheForDate === 'function') clearDashboardCacheForDate(formatDate(currentDate));
       loadData(true);
     }
@@ -2152,6 +2251,21 @@ function setPhotoUploadState(tid, text, isError) {
 }
 
 function openPhotoGallery(tid) {
+  if (!dashboardPhotoStore[tid]) {
+    dashboardPhotoLoading[tid] = true;
+    updatePhotoPanels();
+    fetchDashboardPhotosBatch([tid]).then(function(map) {
+      dashboardPhotoStore[tid] = normalizeDashboardPhotos(map[tid]);
+      delete dashboardPhotoLoading[tid];
+      updatePhotoPanels();
+      openPhotoGallery(tid);
+    }).catch(function(err) {
+      delete dashboardPhotoLoading[tid];
+      updatePhotoPanels();
+      alert('사진 불러오기 실패: ' + err.message);
+    });
+    return;
+  }
   var photos = getDashboardPhotosByTrade(tid);
   var modal = document.getElementById('photoModal');
   var grid = document.getElementById('photoModalGrid');

@@ -292,6 +292,11 @@ function handleRequest(e) {
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
+      case "dashboardPhotosBatch":
+        return jsonResponse(getDashboardPhotosForTrades(
+          params.tids || postBody.tids || []
+        ));
+
       case "uploadDashboardPhoto":
         return jsonResponse(uploadDashboardPhoto(
           params.tid || postBody.tid || params.tradeId || postBody.tradeId,
