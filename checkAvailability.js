@@ -2285,6 +2285,55 @@ function buildDashboardEquipmentMap_(equipSheet) {
   return map;
 }
 
+function findDashboardRowsByValue_(sheet, column, lastRow, value) {
+  value = String(value || "").trim();
+  if (!sheet || lastRow < 2 || !value) return [];
+  var matches = sheet.getRange(2, column, lastRow - 1, 1)
+    .createTextFinder(value)
+    .matchEntireCell(true)
+    .findAll();
+  var rows = matches.map(function(range) { return range.getRow(); });
+  rows.sort(function(a, b) { return a - b; });
+  return rows;
+}
+
+function readDashboardScheduleRows_(sheet, rowNums, colCount) {
+  if (!rowNums || rowNums.length === 0) return [];
+  colCount = colCount || 10;
+  var rows = [];
+  var start = rowNums[0];
+  var prev = rowNums[0];
+
+  function flushRange_(from, to) {
+    var values = sheet.getRange(from, 1, to - from + 1, colCount).getValues();
+    values.forEach(function(row) { rows.push(row); });
+  }
+
+  for (var i = 1; i < rowNums.length; i++) {
+    if (rowNums[i] === prev + 1) {
+      prev = rowNums[i];
+      continue;
+    }
+    flushRange_(start, prev);
+    start = rowNums[i];
+    prev = rowNums[i];
+  }
+  flushRange_(start, prev);
+  return rows;
+}
+
+function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames) {
+  var rowSet = {};
+  (equipmentNames || []).forEach(function(name) {
+    findDashboardRowsByValue_(sheet, 4, lastRow, name).forEach(function(row) {
+      rowSet[row] = true;
+    });
+  });
+  var rows = Object.keys(rowSet).map(function(row) { return Number(row); });
+  rows.sort(function(a, b) { return a - b; });
+  return readDashboardScheduleRows_(sheet, rows, 10);
+}
+
 function buildDashboardScheduleData_(scheduleRows, equipmentNames) {
   var target = null;
   if (equipmentNames && equipmentNames.length) {
@@ -2456,25 +2505,22 @@ function dashboardAddEquipments(tid, entries, options) {
     if (addEntries.length === 0) return { error: "추가할 장비명이 없습니다" };
 
     var lastRow = sched.getLastRow();
-    var data = sched.getRange(2, 1, lastRow - 1, 10).getValues();
-    var srcIdx = -1;
-    var lastTidIdx = -1;
+    var tidRows = findDashboardRowsByValue_(sched, 2, lastRow, tid);
+    if (tidRows.length === 0) return { error: "거래ID '" + tid + "' 못 찾음" };
+    var sourceRow = tidRows[0];
+    var lastTidRow = tidRows[tidRows.length - 1];
     var maxN = 0;
     var idRe = new RegExp("^" + tid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "-(\\d+)$");
-    for (var i = 0; i < data.length; i++) {
-      if (String(data[i][1]).trim() === tid) {
-        if (srcIdx === -1) srcIdx = i;
-        lastTidIdx = i;
-      }
-      var match = String(data[i][0]).match(idRe);
+    var tidIdRows = readDashboardScheduleRows_(sched, tidRows, 1);
+    for (var i = 0; i < tidIdRows.length; i++) {
+      var match = String(tidIdRows[i][0]).match(idRe);
       if (match) {
         var n = parseInt(match[1], 10);
         if (n > maxN) maxN = n;
       }
     }
-    if (srcIdx === -1) return { error: "거래ID '" + tid + "' 못 찾음" };
 
-    var sourceDisplay = sched.getRange(srcIdx + 2, 6, 1, 8).getDisplayValues()[0];
+    var sourceDisplay = sched.getRange(sourceRow, 6, 1, 8).getDisplayValues()[0];
     var 반출일 = sourceDisplay[0];
     var 반출시간 = sourceDisplay[1];
     var 반납일 = sourceDisplay[2];
@@ -2503,9 +2549,10 @@ function dashboardAddEquipments(tid, entries, options) {
 
     var equipMap = buildDashboardEquipmentMap_(equipSheet);
     var mergedAvailabilityItems = mergeAvailabilityItems_(availabilityItems);
+    var targetEquipmentNames = mergedAvailabilityItems.map(function(item) { return item.name; });
     var scheduleData = buildDashboardScheduleData_(
-      data,
-      mergedAvailabilityItems.map(function(item) { return item.name; })
+      findDashboardScheduleRowsForEquipments_(sched, lastRow, targetEquipmentNames),
+      targetEquipmentNames
     );
     var availability = checkAvailabilityForAddCached_(
       mergedAvailabilityItems,
@@ -2560,13 +2607,13 @@ function dashboardAddEquipments(tid, entries, options) {
       };
     }
 
-    var insertRow = (lastTidIdx >= 0) ? (lastTidIdx + 2 + 1) : (lastRow + 1);
+    var insertRow = lastTidRow + 1;
     var hadFollowingRow = insertRow <= lastRow;
     if (insertRow <= lastRow) {
       sched.insertRowsAfter(insertRow - 1, newRows.length);
     }
     sched.getRange(insertRow, 1, newRows.length, 13).setValues(newRows);
-    applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidIdx + 2, hadFollowingRow);
+    applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidRow, hadFollowingRow);
     scheduleContractRegen(tid);
 
     return {
