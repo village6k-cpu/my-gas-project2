@@ -2669,6 +2669,131 @@ function dashboardAddEquipments(tid, entries, options) {
   }
 }
 
+function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
+  tid = String(tid || "").trim();
+  scheduleId = String(scheduleId || "").trim();
+  var newQty = parseInt(qty, 10);
+  if (!tid || !scheduleId) return { error: "tid와 scheduleId 필수" };
+  if (!newQty || newQty < 1) return { error: "수량은 1 이상이어야 합니다" };
+
+  options = options || {};
+  var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sched = ss.getSheetByName("스케줄상세");
+    var equipSheet = ss.getSheetByName("장비마스터");
+    var setSheet = ss.getSheetByName("세트마스터");
+    if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
+    if (!equipSheet) return { error: "장비마스터 없음" };
+
+    var lastRow = sched.getLastRow();
+    var targetRows = findDashboardRowsByValue_(sched, 1, lastRow, scheduleId);
+    if (targetRows.length === 0) return { error: "스케줄ID '" + scheduleId + "' 못 찾음" };
+
+    var targetRow = targetRows[0];
+    var row = sched.getRange(targetRow, 1, 1, 13).getValues()[0];
+    if (String(row[1] || "").trim() !== tid) return { error: "거래ID와 스케줄ID가 일치하지 않습니다" };
+
+    var display = sched.getRange(targetRow, 1, 1, 13).getDisplayValues()[0];
+    var setName = String(row[2] || "").trim();
+    var equipName = String(row[3] || "").trim();
+    var oldQty = Number(row[4]) || 1;
+    if (!equipName) return { error: "장비명이 비어있습니다" };
+    if (oldQty === newQty) return { success: true, unchanged: true, qty: newQty, message: "변경 없음" };
+
+    var startDT = parseDT(display[5], display[6]);
+    var endDT = parseDT(display[7], display[8]);
+    if (!startDT || !endDT) return { error: "반출/반납 일시를 읽지 못했습니다" };
+
+    var setLookup = buildDashboardSetLookup_(setSheet);
+    var components = (setLookup.components[equipName] || []).filter(function(c) {
+      var name = String(c.name || "").trim();
+      return name !== "" && name !== equipName;
+    });
+    var isSetHeader = !!setName && setName === equipName && components.length > 0;
+    var updates = [{ row: targetRow, equipment: equipName, oldQty: oldQty, newQty: newQty }];
+    var availabilityItems = [];
+
+    if (isSetHeader) {
+      var componentBaseQty = {};
+      components.forEach(function(component) {
+        componentBaseQty[String(component.name || "").trim()] = Number(component.qty) || 1;
+      });
+
+      var tidRows = findDashboardRowsByValue_(sched, 2, lastRow, tid);
+      tidRows.forEach(function(rowNum) {
+        if (rowNum === targetRow) return;
+        var r = sched.getRange(rowNum, 1, 1, 5).getValues()[0];
+        var rowSetName = String(r[2] || "").trim();
+        var rowEquipName = String(r[3] || "").trim();
+        if (rowSetName !== equipName || rowEquipName === equipName || !rowEquipName) return;
+
+        var currentQty = Number(r[4]) || 1;
+        var baseQty = componentBaseQty[rowEquipName];
+        var targetQty = baseQty ? baseQty * newQty : Math.max(1, Math.round(currentQty * newQty / oldQty));
+        updates.push({ row: rowNum, equipment: rowEquipName, oldQty: currentQty, newQty: targetQty });
+        if (targetQty > currentQty) {
+          availabilityItems.push({ name: rowEquipName, qty: targetQty - currentQty });
+        }
+      });
+    } else if (newQty > oldQty) {
+      availabilityItems.push({ name: equipName, qty: newQty - oldQty });
+    }
+
+    var availability = { ok: true, conflicts: [], warnings: [] };
+    var mergedAvailabilityItems = mergeAvailabilityItems_(availabilityItems);
+    if (mergedAvailabilityItems.length > 0) {
+      var targetEquipmentNames = mergedAvailabilityItems.map(function(item) { return item.name; });
+      availability = checkAvailabilityForAddCached_(
+        mergedAvailabilityItems,
+        startDT,
+        endDT,
+        buildDashboardEquipmentMeta_(equipSheet),
+        buildDashboardScheduleData_(
+          findDashboardScheduleRowsForEquipments_(sched, lastRow, targetEquipmentNames),
+          targetEquipmentNames
+        )
+      );
+      if (!availability.ok) {
+        return {
+          error: "가용 불가: " + availability.conflicts.map(function(c) { return c.message; }).join(", "),
+          conflicts: availability.conflicts
+        };
+      }
+    }
+
+    if (!dryRun) {
+      updates.forEach(function(update) {
+        sched.getRange(update.row, 5).setValue(update.newQty).setNumberFormat("#,##0");
+      });
+      scheduleContractRegen(tid);
+    }
+
+    return {
+      success: true,
+      dryRun: dryRun,
+      scheduleId: scheduleId,
+      qty: newQty,
+      updatedRows: updates.length,
+      updatedItems: updates.map(function(update) {
+        return {
+          equipment: update.equipment,
+          oldQty: update.oldQty,
+          newQty: update.newQty
+        };
+      }),
+      warnings: availability.warnings || [],
+      message: dryRun ? "수량 수정 가능" : "수량 수정 완료"
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
 /**
  * Dashboard에서 장비 추가 — 같은 거래ID의 기존 행에서 일자/시간/예약자명 가져와 새 행 생성.
  * 세트인 경우 구성품도 자동 펼침. scheduleContractRegen으로 계약서 재생성 예약.

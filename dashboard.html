@@ -625,6 +625,21 @@
     flex-shrink: 0;
     margin-right: 4px;
   }
+  .equip-qty-edit {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: 4px;
+    min-width: 30px;
+    height: 22px;
+    padding: 0 6px;
+    cursor: pointer;
+    line-height: 20px;
+  }
+  .equip-qty-edit:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: #F5FAFF;
+  }
   .equip-row-remove {
     width: 18px;
     height: 18px;
@@ -1663,6 +1678,7 @@ function renderList(containerId, items, type, isSearching) {
         var phaseStr = (cardType === 'checkout' ? 'checkout' : 'checkin');
         var sidEsc = escJs(eq.scheduleId);
         var nameEsc = escJs(eq.name);
+        var qtyValue = eq.qty || 1;
 
         html += '<div class="' + rowCls + '" onclick="event.stopPropagation()">';
         html += '<div class="equip-row-main">';
@@ -1671,7 +1687,7 @@ function renderList(containerId, items, type, isSearching) {
         if (eq.isSet) html += '<span class="equip-set-tag">SET</span>';
         html += escHtml(eq.name);
         html += '</span>';
-        if (eq.qty && eq.qty != 1) html += '<span class="equip-qty">×' + escHtml(eq.qty) + '</span>';
+        html += '<button type="button" class="equip-qty equip-qty-edit" onclick="event.stopPropagation();editEquipQty(\'' + escJs(item.tradeId) + '\',\'' + sidEsc + '\',\'' + nameEsc + '\',\'' + escJs(String(qtyValue)) + '\')" title="수량 수정">×' + escHtml(qtyValue) + '</button>';
         if (!eq.isComponent) {
           html += '<span class="equip-row-remove" onclick="event.stopPropagation();removeEquip(\'' + escJs(item.tradeId) + '\',\'' + nameEsc + '\')" title="삭제">×</span>';
         }
@@ -2226,6 +2242,26 @@ function removeEquip(tid, equipName) {
       loadData(true);
     })
     .catch(function(err) { alert("네트워크 오류: " + err.message); });
+}
+
+function editEquipQty(tid, scheduleId, equipName, currentQty) {
+  var raw = prompt('수량 수정: ' + equipName, currentQty || '1');
+  if (raw === null) return;
+  var qty = parseInt(String(raw).trim(), 10);
+  if (!qty || qty < 1) {
+    alert('수량은 1 이상 숫자로 입력하세요.');
+    return;
+  }
+
+  fetch(API_URL + '?key=village2026&action=updateEquipQty&tid=' + encodeURIComponent(tid)
+    + '&scheduleId=' + encodeURIComponent(scheduleId)
+    + '&qty=' + encodeURIComponent(qty))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) { alert('수량 수정 실패: ' + res.error); return; }
+      loadData(true);
+    })
+    .catch(function(err) { alert('네트워크 오류: ' + err.message); });
 }
 
 function tradeReturnFieldsHtml(item, cardType) {

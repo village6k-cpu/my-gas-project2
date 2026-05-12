@@ -253,6 +253,14 @@ function handleRequest(e) {
           params.equipName || postBody.equipName
         ));
 
+      case "updateEquipQty":
+        return jsonResponse(dashboardUpdateEquipmentQty(
+          params.tid || postBody.tid,
+          params.scheduleId || postBody.scheduleId,
+          params.qty || postBody.qty,
+          { dryRun: params.dryRun || postBody.dryRun }
+        ));
+
       case "tradeCandidates":
         return jsonResponse(findTradeCandidatesForSchedule(
           params.name || postBody.name || "",
@@ -280,6 +288,14 @@ function handleRequest(e) {
         return jsonResponse(dashboardRemoveEquipment(
           params.tid || postBody.tid,
           params.equipName || postBody.equipName
+        ));
+
+      case "scheduleUpdateEquipQty":
+        return jsonResponse(dashboardUpdateEquipmentQty(
+          params.tid || postBody.tid,
+          params.scheduleId || postBody.scheduleId,
+          params.qty || postBody.qty,
+          { dryRun: params.dryRun || postBody.dryRun }
         ));
 
       case "updatePayment":
