@@ -1286,8 +1286,7 @@ function loadData(forceFresh) {
   try { cachedJson = localStorage.getItem(lsKey); } catch (e) {}
   if (cachedJson && !forceFresh) {
     try {
-      var cachedData = JSON.parse(cachedJson);
-      if (cachedData && !cachedData.date) cachedData.date = dateStr;
+      var cachedData = readDashboardLocalCache(dateStr, cachedJson);
       dashboardData = cachedData;
       renderedCached = renderDashboard(cachedData, dateStr);
     } catch (e) {
@@ -1310,7 +1309,7 @@ function loadData(forceFresh) {
       if (!isCurrentDashboardRequest(requestId, dateStr) || !isDashboardDateMatch(data, dateStr)) return;
       dashboardData = data;
       renderDashboard(data, dateStr);
-      try { localStorage.setItem(lsKey, JSON.stringify(data)); } catch (e) {}
+      writeDashboardLocalCache(dateStr, data);
     })
     .catch(function(err) {
       if (err && err.name === 'AbortError') return;
@@ -1355,6 +1354,28 @@ function clearDashboardCacheForDate(dateStr) {
   } catch (e) {}
 }
 
+function readDashboardLocalCache(dateStr, raw) {
+  var parsed = JSON.parse(raw);
+  var data = parsed && parsed.data ? parsed.data : parsed;
+  if (data && !data.date) data.date = dateStr;
+  return data;
+}
+
+function writeDashboardLocalCache(dateStr, data) {
+  if (!dateStr || !data || data.error) return;
+  try {
+    localStorage.setItem(DASHBOARD_CACHE_PREFIX + dateStr, JSON.stringify({
+      cachedAt: Date.now(),
+      data: data
+    }));
+  } catch (e) {}
+}
+
+function persistCurrentDashboardCache() {
+  if (!dashboardData) return;
+  writeDashboardLocalCache(dashboardData.date || formatDate(currentDate), dashboardData);
+}
+
 function prefetchAdjacentDashboardDates(dateStr) {
   if (dashboardSearchQuery) return;
   [-1, 1].forEach(function(offset) {
@@ -1380,7 +1401,7 @@ function prefetchDashboardDate(dateStr) {
     .then(function(data) {
       if (data && data.error) return;
       if (!isDashboardDateMatch(data, dateStr)) return;
-      try { localStorage.setItem(DASHBOARD_CACHE_PREFIX + dateStr, JSON.stringify(data)); } catch (e) {}
+      writeDashboardLocalCache(dateStr, data);
     })
     .catch(function() {})
     .then(function() { delete dashboardDatePrefetching[dateStr]; });
@@ -1960,11 +1981,10 @@ function setEquipmentCheckState(el, text, isError) {
 
 function syncContractStatusInMemory(tid, status) {
   if (!dashboardData) return;
-  ['checkout', 'checkin'].forEach(function(listName) {
-    (dashboardData[listName] || []).forEach(function(item) {
-      if (item.tradeId === tid) item.contractStatus = status;
-    });
+  dashboardItemsForTrade(tid).forEach(function(item) {
+    item.contractStatus = status;
   });
+  persistCurrentDashboardCache();
 }
 
 function syncTradeFieldControls(field, tid, value) {
@@ -1977,14 +1997,12 @@ function syncTradeFieldControls(field, tid, value) {
 
 function syncEquipmentCheckInMemory(payload, res) {
   if (!dashboardData) return;
-  ['checkout', 'checkin'].forEach(function(listName) {
-    (dashboardData[listName] || []).forEach(function(item) {
-      if (item.tradeId !== payload.tid) return;
-      if (payload.field === 'returnStatus') item.returnStatus = payload.value;
-      if (payload.field === 'memo') item.returnMemo = payload.value;
-      if (res && res.row) item.equipmentCheckRow = res.row;
-    });
+  dashboardItemsForTrade(payload.tid).forEach(function(item) {
+    if (payload.field === 'returnStatus') item.returnStatus = payload.value;
+    if (payload.field === 'memo') item.returnMemo = payload.value;
+    if (res && res.row) item.equipmentCheckRow = res.row;
   });
+  persistCurrentDashboardCache();
 }
 
 function toggleItem(cb, scheduleId, phase) {
@@ -1993,6 +2011,7 @@ function toggleItem(cb, scheduleId, phase) {
   cb.textContent = nowDone ? '✓' : '';
   var row = cb.closest('.equip-row');
   if (row) row.classList.toggle('checked', nowDone);
+  syncItemCheckInMemory(scheduleId, phase, nowDone);
 
   fetch(API_URL + '?key=village2026&action=toggleItem'
     + '&scheduleId=' + encodeURIComponent(scheduleId)
@@ -2003,6 +2022,7 @@ function toggleItem(cb, scheduleId, phase) {
       cb.classList.toggle('checked', !nowDone);
       cb.textContent = !nowDone ? '✓' : '';
       if (row) row.classList.toggle('checked', !nowDone);
+      syncItemCheckInMemory(scheduleId, phase, !nowDone);
     });
 }
 
@@ -2014,6 +2034,7 @@ function toggleTask(btn, tid, action) {
   btn.textContent = nowDone ? '✓' : '';
   var card = btn.closest('.schedule-card');
   if (card) card.classList.toggle('task-done', nowDone);
+  syncTaskDoneInMemory(tid, action, nowDone);
 
   fetch(API_URL + '?key=village2026&action=' + action + '&tid=' + encodeURIComponent(tid) + '&done=' + (nowDone ? '1' : '0'))
     .then(function(r) { return r.json(); })
@@ -2021,7 +2042,30 @@ function toggleTask(btn, tid, action) {
       btn.classList.toggle('checked', !nowDone);
       btn.textContent = !nowDone ? '✓' : '';
       if (card) card.classList.toggle('task-done', !nowDone);
+      syncTaskDoneInMemory(tid, action, !nowDone);
     });
+}
+
+function syncTaskDoneInMemory(tid, action, done) {
+  dashboardItemsForTrade(tid).forEach(function(item) {
+    if (action === 'toggleSetup') item.setupDone = done;
+    if (action === 'toggleReturn') item.returnDone = done;
+  });
+  persistCurrentDashboardCache();
+}
+
+function syncItemCheckInMemory(scheduleId, phase, done) {
+  if (!dashboardData) return;
+  ['checkout', 'checkin'].forEach(function(listName) {
+    (dashboardData[listName] || []).forEach(function(item) {
+      (item.equipments || []).forEach(function(eq) {
+        if (eq.scheduleId !== scheduleId) return;
+        if (phase === 'checkout') eq.checkedCheckout = done;
+        if (phase === 'checkin') eq.checkedCheckin = done;
+      });
+    });
+  });
+  persistCurrentDashboardCache();
 }
 
 function photoGalleryHtml(item) {
@@ -2171,9 +2215,16 @@ function uploadDashboardPhotoFiles(tid, phase, files) {
   }, Promise.resolve()).then(function() {
     if (successes > 0) {
       delete dashboardPhotoStore[tid];
-      delete dashboardPhotoLoading[tid];
-      if (typeof clearDashboardCacheForDate === 'function') clearDashboardCacheForDate(formatDate(currentDate));
-      loadData(true);
+      dashboardPhotoLoading[tid] = true;
+      updatePhotoPanels();
+      fetchDashboardPhotosBatch([tid]).then(function(map) {
+        dashboardPhotoStore[tid] = normalizeDashboardPhotos(map[tid]);
+        delete dashboardPhotoLoading[tid];
+        updatePhotoPanels();
+      }).catch(function() {
+        delete dashboardPhotoLoading[tid];
+        updatePhotoPanels();
+      });
     }
     if (failures.length) {
       setPhotoUploadState(tid, '업로드 실패 ' + failures.length + '건', true);
@@ -2368,9 +2419,8 @@ function updatePaymentMethod(event, select, tradeId) {
         return;
       }
       select.setAttribute('data-prev', method);
+      syncPaymentInMemory(tradeId, method, res);
       if (res.warning) alert(res.warning);
-      clearDashboardCacheForDate(formatDate(currentDate));
-      loadData(true);
     })
     .catch(function(err) {
       select.disabled = false;
@@ -2433,9 +2483,7 @@ function updateTradeProofField(event, select, tradeId, field) {
       select.value = nextValue;
       select.setAttribute('data-prev', nextValue);
       syncTradeProofInMemory(tradeId, field, nextValue, res);
-      clearDashboardCacheForDate(formatDate(currentDate));
       if (res.message) alert(res.message);
-      loadData(true);
     })
     .catch(function(err) {
       select.disabled = false;
@@ -2466,13 +2514,10 @@ function runTradeOpsAction(button, tradeId, action) {
       button.textContent = label;
       if (res.error) {
         alert((isIssue ? '계산서 발행 실패: ' : '견적서 발송 실패: ') + res.error);
-        clearDashboardCacheForDate(formatDate(currentDate));
-        loadData(true);
         return;
       }
+      if (isIssue) syncTradeProofInMemory(tradeId, 'issueStatus', res.issueStatus || '발행요청', res);
       alert(res.message || (isIssue ? '계산서 발행 요청 완료' : '견적서 발송 요청 완료'));
-      clearDashboardCacheForDate(formatDate(currentDate));
-      loadData(true);
     })
     .catch(function(err) {
       button.disabled = false;
@@ -2483,15 +2528,38 @@ function runTradeOpsAction(button, tradeId, action) {
 
 function syncTradeProofInMemory(tid, field, value, res) {
   if (!dashboardData) return;
+  dashboardItemsForTrade(tid).forEach(function(item) {
+    if (field === 'proofType') item.proofType = value;
+    if (field === 'issueStatus') item.issueStatus = res && res.issueStatus ? res.issueStatus : value;
+    if (res && res.error) item.issueNote = res.error;
+    if (res && res.message) item.issueNote = res.message;
+  });
+  persistCurrentDashboardCache();
+}
+
+function syncPaymentInMemory(tid, method, res) {
+  if (!dashboardData) return;
+  dashboardItemsForTrade(tid).forEach(function(item) {
+    item.paymentMethod = method;
+    item.paymentSource = method ? 'sheet:J' : '';
+    if (res && res.warning) item.paymentWarning = res.warning;
+    if (res && res.sideEffects && res.sideEffects.applied) {
+      if (res.sideEffects.columns && res.sideEffects.columns.K) item.proofType = res.sideEffects.columns.K;
+      if (res.sideEffects.columns && res.sideEffects.columns.L) item.issueStatus = res.sideEffects.columns.L;
+    }
+  });
+  persistCurrentDashboardCache();
+}
+
+function dashboardItemsForTrade(tid) {
+  var items = [];
+  if (!dashboardData) return items;
   ['checkout', 'checkin'].forEach(function(listName) {
     (dashboardData[listName] || []).forEach(function(item) {
-      if (item.tradeId !== tid) return;
-      if (field === 'proofType') item.proofType = value;
-      if (field === 'issueStatus') item.issueStatus = res && res.issueStatus ? res.issueStatus : value;
-      if (res && res.error) item.issueNote = res.error;
-      if (res && res.message) item.issueNote = res.message;
+      if (item.tradeId === tid) items.push(item);
     });
   });
+  return items;
 }
 
 function escHtml(s) {
