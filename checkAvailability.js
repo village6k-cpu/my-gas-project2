@@ -2202,6 +2202,369 @@ function checkAvailabilityForAdd_(itemsToAdd, startDT, endDT, equipSheet, schedS
   return { ok: conflicts.length === 0, conflicts: conflicts };
 }
 
+function normalizeDashboardAddEntries_(entries, fallbackName, fallbackQty) {
+  if (typeof entries === "string") {
+    try {
+      entries = JSON.parse(entries);
+    } catch (e) {
+      entries = entries.split(/\n|,/).map(function(name) { return { name: name, qty: 1 }; });
+    }
+  }
+  if (!Array.isArray(entries)) {
+    if (entries && typeof entries === "object") {
+      entries = entries.entries || entries.items || [entries];
+    } else {
+      entries = [];
+    }
+  }
+  if (entries.length === 0 && fallbackName) {
+    entries = [{ name: fallbackName, equipName: fallbackName, qty: fallbackQty || 1 }];
+  }
+
+  var merged = {};
+  var order = [];
+  entries.forEach(function(entry) {
+    var name = String((entry && (entry.name || entry.equipName || entry.equipment)) || "").trim();
+    if (!name) return;
+    var qty = parseInt(entry.qty, 10);
+    if (!qty || qty < 1) qty = 1;
+    if (!merged[name]) {
+      merged[name] = { name: name, qty: qty };
+      order.push(name);
+    } else {
+      merged[name].qty += qty;
+    }
+  });
+  return order.map(function(name) { return merged[name]; });
+}
+
+function getDashboardEquipNameList_(ss) {
+  var listSheet = ss.getSheetByName("목록");
+  if (!listSheet || listSheet.getLastRow() < 2) return [];
+  return listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues()
+    .map(function(row) { return String(row[0] || "").trim(); })
+    .filter(function(name) { return !!name; });
+}
+
+function buildDashboardSetLookup_(setSheet) {
+  var lookup = { components: {}, prices: {} };
+  if (!setSheet || setSheet.getLastRow() < 2) return lookup;
+
+  var lastCol = Math.max(setSheet.getLastColumn(), 7);
+  var data = setSheet.getRange(2, 1, setSheet.getLastRow() - 1, lastCol).getValues();
+  data.forEach(function(row) {
+    var setName = String(row[0] || "").trim();
+    if (!setName) return;
+    if (row[6] !== "" && row[6] !== null && lookup.prices[setName] === undefined) {
+      lookup.prices[setName] = row[6];
+    }
+
+    var componentName = String(row[1] || "").trim();
+    var flag = row.length > 5 ? String(row[5] || "").trim() : "";
+    if (!componentName || (flag !== "Y" && flag !== "")) return;
+    if (!lookup.components[setName]) lookup.components[setName] = [];
+    lookup.components[setName].push({
+      name: componentName,
+      qty: row[2] || 1,
+      alt: row[4] || ""
+    });
+  });
+  return lookup;
+}
+
+function buildDashboardEquipmentMap_(equipSheet) {
+  var map = {};
+  if (!equipSheet || equipSheet.getLastRow() < 2) return map;
+
+  var data = equipSheet.getRange(2, 1, equipSheet.getLastRow() - 1, 12).getValues();
+  data.forEach(function(row) {
+    var name = String(row[3] || "").trim();
+    if (!name) return;
+    map[name] = { total: Number(row[4]) || 0, 단가: row[11] || 0 };
+  });
+  return map;
+}
+
+function buildDashboardScheduleData_(scheduleRows) {
+  return (scheduleRows || []).map(function(row) {
+    return {
+      equipment: String(row[3] || "").trim(),
+      qty: row[4] || 1,
+      startDT: parseDT(row[5], row[6]),
+      endDT: parseDT(row[7], row[8]),
+      status: String(row[9] || "").trim()
+    };
+  }).filter(function(row) {
+    return row.equipment && row.startDT && row.endDT;
+  });
+}
+
+function mergeAvailabilityItems_(items) {
+  var merged = {};
+  var order = [];
+  (items || []).forEach(function(item) {
+    var name = String(item.name || "").trim();
+    if (!name) return;
+    var qty = Number(item.qty) || 1;
+    if (!merged[name]) {
+      merged[name] = { name: name, qty: qty };
+      order.push(name);
+    } else {
+      merged[name].qty += qty;
+    }
+  });
+  return order.map(function(name) { return merged[name]; });
+}
+
+function checkAvailabilityForAddCached_(itemsToAdd, startDT, endDT, equipMap, scheduleData) {
+  var conflicts = [];
+  (itemsToAdd || []).forEach(function(item) {
+    var equipName = String(item.name || "").trim();
+    var reqQty = Number(item.qty) || 1;
+    var equipInfo = equipMap[equipName];
+    if (!equipInfo) {
+      conflicts.push({ equipment: equipName, message: equipName + " 미등록" });
+      return;
+    }
+
+    var overlaps = scheduleData.filter(function(s) {
+      return s.equipment === equipName &&
+        s.status !== "반납완료" &&
+        s.status !== "취소" &&
+        s.startDT < endDT &&
+        s.endDT > startDT;
+    });
+    var points = [startDT.getTime()];
+    overlaps.forEach(function(s) {
+      if (s.startDT >= startDT && s.startDT < endDT) points.push(s.startDT.getTime());
+      if (s.endDT > startDT && s.endDT < endDT) points.push(s.endDT.getTime());
+    });
+
+    var seen = {};
+    points = points.filter(function(point) {
+      if (seen[point]) return false;
+      seen[point] = true;
+      return true;
+    });
+
+    var maxConcurrent = 0;
+    points.forEach(function(point) {
+      var concurrent = 0;
+      overlaps.forEach(function(s) {
+        if (s.startDT.getTime() <= point && s.endDT.getTime() > point) {
+          concurrent += Number(s.qty) || 1;
+        }
+      });
+      if (concurrent > maxConcurrent) maxConcurrent = concurrent;
+    });
+
+    var available = (Number(equipInfo.total) || 0) - maxConcurrent;
+    if (available < reqQty) {
+      conflicts.push({
+        equipment: equipName,
+        total: Number(equipInfo.total) || 0,
+        available: available,
+        requested: reqQty,
+        message: equipName + " 가용 " + available + "/" + reqQty
+      });
+    }
+  });
+  return { ok: conflicts.length === 0, conflicts: conflicts };
+}
+
+function applyDashboardAddRowFormats_(sched, tid, insertRow, rowCount, sourceRow, hadFollowingRow) {
+  sched.getRange(insertRow, 6, rowCount, 1).setNumberFormat("yyyy-MM-dd");
+  sched.getRange(insertRow, 7, rowCount, 1).setNumberFormat("@");
+  sched.getRange(insertRow, 8, rowCount, 1).setNumberFormat("yyyy-MM-dd");
+  sched.getRange(insertRow, 9, rowCount, 1).setNumberFormat("@");
+
+  var lastCol = sched.getLastColumn() || 13;
+  if (sourceRow) {
+    try {
+      var sourceBgs = sched.getRange(sourceRow, 1, 1, lastCol).getBackgrounds()[0];
+      var bgs = [];
+      for (var i = 0; i < rowCount; i++) bgs.push(sourceBgs.slice());
+      sched.getRange(insertRow, 1, rowCount, lastCol).setBackgrounds(bgs);
+    } catch (e) {}
+  } else if (typeof _inheritGroupBackground !== "undefined") {
+    try {
+      var inheritRows = [];
+      for (var ri = 0; ri < rowCount; ri++) inheritRows.push(insertRow + ri);
+      _inheritGroupBackground(sched, tid, inheritRows);
+    } catch (e2) {}
+  }
+
+  if (hadFollowingRow) {
+    try {
+      sched.getRange(insertRow, 1, rowCount, lastCol)
+        .setBorder(null, null, false, null, null, false);
+      sched.getRange(insertRow - 1, 1, 1, lastCol)
+        .setBorder(null, null, false, null, null, null);
+      sched.getRange(insertRow + rowCount - 1, 1, 1, lastCol)
+        .setBorder(null, null, true, null, null, null, "#999999", SpreadsheetApp.BorderStyle.SOLID);
+    } catch (e3) {}
+  }
+}
+
+function dashboardAddEquipments(tid, entries, options) {
+  tid = String(tid || "").trim();
+  var addEntries = normalizeDashboardAddEntries_(entries);
+  if (!tid || addEntries.length === 0) return { error: "tid와 장비명 필수" };
+
+  options = options || {};
+  var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sched = ss.getSheetByName("스케줄상세");
+    var equipSheet = ss.getSheetByName("장비마스터");
+    if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
+    if (!equipSheet) return { error: "장비마스터 없음" };
+
+    var nameList = getDashboardEquipNameList_(ss);
+    var resolvedMap = {};
+    var resolvedOrder = [];
+    addEntries.forEach(function(entry) {
+      var resolved = nameList.length ? fuzzyMatchEquipName(entry.name, nameList) : entry.name;
+      resolved = String(resolved || "").trim();
+      if (!resolved) return;
+      if (!resolvedMap[resolved]) {
+        resolvedMap[resolved] = { name: resolved, qty: entry.qty, inputNames: [entry.name] };
+        resolvedOrder.push(resolved);
+      } else {
+        resolvedMap[resolved].qty += entry.qty;
+        resolvedMap[resolved].inputNames.push(entry.name);
+      }
+    });
+    addEntries = resolvedOrder.map(function(name) { return resolvedMap[name]; });
+    if (addEntries.length === 0) return { error: "추가할 장비명이 없습니다" };
+
+    var lastRow = sched.getLastRow();
+    var data = sched.getRange(2, 1, lastRow - 1, 13).getValues();
+    var displayData = sched.getRange(2, 1, lastRow - 1, 13).getDisplayValues();
+    var srcIdx = -1;
+    var lastTidIdx = -1;
+    var maxN = 0;
+    var idRe = new RegExp("^" + tid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "-(\\d+)$");
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][1]).trim() === tid) {
+        if (srcIdx === -1) srcIdx = i;
+        lastTidIdx = i;
+      }
+      var match = String(data[i][0]).match(idRe);
+      if (match) {
+        var n = parseInt(match[1], 10);
+        if (n > maxN) maxN = n;
+      }
+    }
+    if (srcIdx === -1) return { error: "거래ID '" + tid + "' 못 찾음" };
+
+    var 반출일 = displayData[srcIdx][5];
+    var 반출시간 = displayData[srcIdx][6];
+    var 반납일 = displayData[srcIdx][7];
+    var 반납시간 = displayData[srcIdx][8];
+    var 예약자명 = displayData[srcIdx][12];
+    var startDT = parseDT(반출일, 반출시간);
+    var endDT = parseDT(반납일, 반납시간);
+    if (!startDT || !endDT) return { error: "거래ID의 반출/반납 일시를 읽지 못했습니다" };
+
+    var setLookup = buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
+    var rowSpecs = [];
+    var availabilityItems = [];
+    addEntries.forEach(function(entry) {
+      var components = (setLookup.components[entry.name] || []).filter(function(c) {
+        var name = String(c.name || "").trim();
+        return name !== "" && name !== entry.name;
+      });
+      rowSpecs.push({
+        name: entry.name,
+        qty: entry.qty,
+        components: components,
+        price: setLookup.prices[entry.name] || 0
+      });
+      availabilityItems = availabilityItems.concat(buildAvailabilityItems_(entry.name, entry.qty, components));
+    });
+
+    var equipMap = buildDashboardEquipmentMap_(equipSheet);
+    var scheduleData = buildDashboardScheduleData_(data);
+    var availability = checkAvailabilityForAddCached_(
+      mergeAvailabilityItems_(availabilityItems),
+      startDT,
+      endDT,
+      equipMap,
+      scheduleData
+    );
+    if (!availability.ok) {
+      return {
+        error: "가용 불가: " + availability.conflicts.map(function(c) { return c.message; }).join(", "),
+        conflicts: availability.conflicts
+      };
+    }
+
+    var newRows = [];
+    rowSpecs.forEach(function(spec) {
+      if (spec.components.length > 0) {
+        maxN++;
+        newRows.push([
+          tid + "-" + ("0" + maxN).slice(-2),
+          tid, spec.name, spec.name, spec.qty, 반출일, 반출시간, 반납일, 반납시간,
+          "대기", "", spec.price, 예약자명
+        ]);
+        spec.components.forEach(function(component) {
+          maxN++;
+          newRows.push([
+            tid + "-" + ("0" + maxN).slice(-2),
+            tid, spec.name, component.name, (component.qty || 1) * spec.qty, 반출일, 반출시간, 반납일, 반납시간,
+            "대기", "", 0, 예약자명
+          ]);
+        });
+      } else {
+        maxN++;
+        newRows.push([
+          tid + "-" + ("0" + maxN).slice(-2),
+          tid, "", spec.name, spec.qty, 반출일, 반출시간, 반납일, 반납시간,
+          "대기", "", spec.price, 예약자명
+        ]);
+      }
+    });
+
+    if (dryRun) {
+      return {
+        success: true,
+        dryRun: true,
+        availabilityChecked: true,
+        addedEquipments: addEntries.length,
+        addedRows: newRows.length,
+        equipmentNames: addEntries.map(function(entry) { return entry.name; }),
+        message: "가용 확인 완료"
+      };
+    }
+
+    var insertRow = (lastTidIdx >= 0) ? (lastTidIdx + 2 + 1) : (lastRow + 1);
+    var hadFollowingRow = insertRow <= lastRow;
+    if (insertRow <= lastRow) {
+      sched.insertRowsAfter(insertRow - 1, newRows.length);
+    }
+    sched.getRange(insertRow, 1, newRows.length, 13).setValues(newRows);
+    applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidIdx + 2, hadFollowingRow);
+    scheduleContractRegen(tid);
+
+    return {
+      success: true,
+      availabilityChecked: true,
+      addedEquipments: addEntries.length,
+      addedRows: newRows.length,
+      equipmentNames: addEntries.map(function(entry) { return entry.name; }),
+      message: "가용 확인 완료 후 추가"
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
 /**
  * Dashboard에서 장비 추가 — 같은 거래ID의 기존 행에서 일자/시간/예약자명 가져와 새 행 생성.
  * 세트인 경우 구성품도 자동 펼침. scheduleContractRegen으로 계약서 재생성 예약.

@@ -2607,9 +2607,16 @@ function setAddEquipBusy(isBusy, label) {
   if (addBtn) addBtn.disabled = isBusy;
 }
 
-function postAddEquip(tid, entry) {
-  return fetch(API_URL + '?key=village2026&action=addEquip&tid=' + encodeURIComponent(tid)
-    + '&equipName=' + encodeURIComponent(entry.name) + '&qty=' + encodeURIComponent(entry.qty))
+function postAddEquipBatch(tid, entries) {
+  return fetch(API_URL + '?key=village2026', {
+    method: 'POST',
+    body: JSON.stringify({
+      key: 'village2026',
+      action: 'addEquips',
+      tid: tid,
+      entries: entries
+    })
+  })
     .then(function(r) { return r.json(); })
     .then(function(res) {
       if (res.error) throw new Error(res.error);
@@ -2643,30 +2650,14 @@ function confirmAddEquip() {
   setAddEquipBusy(true, '가용 확인 중...');
 
   var tid = pendingAddTid;
-  var successes = [];
-  var failures = [];
-  entries.reduce(function(promise, entry) {
-    return promise.then(function() {
-      return postAddEquip(tid, entry)
-        .then(function() { successes.push(entry); })
-        .catch(function(err) { failures.push({ entry: entry, message: err.message }); });
-    });
-  }, Promise.resolve()).then(function() {
+  postAddEquipBatch(tid, entries).then(function(res) {
     setAddEquipBusy(false);
-    if (failures.length) {
-      if (successes.length) loadData(true);
-      resetEquipRows(failures.map(function(f) { return f.entry; }));
-      alert((successes.length ? successes.length + '개 추가 완료, ' : '')
-        + failures.length + '개 추가 실패\n'
-        + failures.map(function(f) { return '- ' + f.entry.name + ': ' + f.message; }).join('\n'));
-      return;
-    }
     closeAddEquipModal();
     loadData(true);
-    alert('가용 확인 완료. 장비 ' + successes.length + '개를 추가했습니다.');
+    alert('가용 확인 완료. 장비 ' + (res.addedEquipments || entries.length) + '개를 추가했습니다.');
   }).catch(function(err) {
     setAddEquipBusy(false);
-    alert('네트워크 오류: ' + err.message);
+    alert('가용 확인 실패: ' + err.message);
   });
 }
 

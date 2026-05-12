@@ -230,10 +230,21 @@ function handleRequest(e) {
         ));
 
       case "addEquip":
-        return jsonResponse(dashboardAddEquipment(
+        return jsonResponse(dashboardAddEquipments(
           params.tid || postBody.tid,
-          params.equipName || postBody.equipName,
-          params.qty || postBody.qty || 1
+          [{
+            name: params.equipName || postBody.equipName,
+            qty: params.qty || postBody.qty || 1
+          }],
+          { dryRun: params.dryRun || postBody.dryRun }
+        ));
+
+      case "addEquips":
+      case "addEquipBatch":
+        return jsonResponse(dashboardAddEquipments(
+          params.tid || postBody.tid,
+          params.entries || postBody.entries || params.items || postBody.items,
+          { dryRun: params.dryRun || postBody.dryRun }
         ));
 
       case "removeEquip":
@@ -249,10 +260,20 @@ function handleRequest(e) {
         ));
 
       case "scheduleAddEquip":
-        return jsonResponse(dashboardAddEquipment(
+        return jsonResponse(dashboardAddEquipments(
           params.tid || postBody.tid,
-          params.equipName || postBody.equipName,
-          params.qty || postBody.qty || 1
+          [{
+            name: params.equipName || postBody.equipName,
+            qty: params.qty || postBody.qty || 1
+          }],
+          { dryRun: params.dryRun || postBody.dryRun }
+        ));
+
+      case "scheduleAddEquips":
+        return jsonResponse(dashboardAddEquipments(
+          params.tid || postBody.tid,
+          params.entries || postBody.entries || params.items || postBody.items,
+          { dryRun: params.dryRun || postBody.dryRun }
         ));
 
       case "scheduleRemoveEquip":
