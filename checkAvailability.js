@@ -2285,17 +2285,30 @@ function buildDashboardEquipmentMap_(equipSheet) {
   return map;
 }
 
-function buildDashboardScheduleData_(scheduleRows) {
+function buildDashboardScheduleData_(scheduleRows, equipmentNames) {
+  var target = null;
+  if (equipmentNames && equipmentNames.length) {
+    target = {};
+    equipmentNames.forEach(function(name) {
+      target[String(name || "").trim()] = true;
+    });
+  }
+
   return (scheduleRows || []).map(function(row) {
+    var equipment = String(row[3] || "").trim();
+    var status = String(row[9] || "").trim();
+    if (!equipment) return null;
+    if (target && !target[equipment]) return null;
+    if (status === "반납완료" || status === "취소") return null;
     return {
-      equipment: String(row[3] || "").trim(),
+      equipment: equipment,
       qty: row[4] || 1,
       startDT: parseDT(row[5], row[6]),
       endDT: parseDT(row[7], row[8]),
-      status: String(row[9] || "").trim()
+      status: status
     };
   }).filter(function(row) {
-    return row.equipment && row.startDT && row.endDT;
+    return row && row.startDT && row.endDT;
   });
 }
 
@@ -2443,8 +2456,7 @@ function dashboardAddEquipments(tid, entries, options) {
     if (addEntries.length === 0) return { error: "추가할 장비명이 없습니다" };
 
     var lastRow = sched.getLastRow();
-    var data = sched.getRange(2, 1, lastRow - 1, 13).getValues();
-    var displayData = sched.getRange(2, 1, lastRow - 1, 13).getDisplayValues();
+    var data = sched.getRange(2, 1, lastRow - 1, 10).getValues();
     var srcIdx = -1;
     var lastTidIdx = -1;
     var maxN = 0;
@@ -2462,11 +2474,12 @@ function dashboardAddEquipments(tid, entries, options) {
     }
     if (srcIdx === -1) return { error: "거래ID '" + tid + "' 못 찾음" };
 
-    var 반출일 = displayData[srcIdx][5];
-    var 반출시간 = displayData[srcIdx][6];
-    var 반납일 = displayData[srcIdx][7];
-    var 반납시간 = displayData[srcIdx][8];
-    var 예약자명 = displayData[srcIdx][12];
+    var sourceDisplay = sched.getRange(srcIdx + 2, 6, 1, 8).getDisplayValues()[0];
+    var 반출일 = sourceDisplay[0];
+    var 반출시간 = sourceDisplay[1];
+    var 반납일 = sourceDisplay[2];
+    var 반납시간 = sourceDisplay[3];
+    var 예약자명 = sourceDisplay[7];
     var startDT = parseDT(반출일, 반출시간);
     var endDT = parseDT(반납일, 반납시간);
     if (!startDT || !endDT) return { error: "거래ID의 반출/반납 일시를 읽지 못했습니다" };
@@ -2489,9 +2502,13 @@ function dashboardAddEquipments(tid, entries, options) {
     });
 
     var equipMap = buildDashboardEquipmentMap_(equipSheet);
-    var scheduleData = buildDashboardScheduleData_(data);
+    var mergedAvailabilityItems = mergeAvailabilityItems_(availabilityItems);
+    var scheduleData = buildDashboardScheduleData_(
+      data,
+      mergedAvailabilityItems.map(function(item) { return item.name; })
+    );
     var availability = checkAvailabilityForAddCached_(
-      mergeAvailabilityItems_(availabilityItems),
+      mergedAvailabilityItems,
       startDT,
       endDT,
       equipMap,
