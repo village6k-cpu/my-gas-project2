@@ -614,7 +614,7 @@
   .equip-return-meta,
   .trade-return-meta {
     display: grid;
-    grid-template-columns: 116px minmax(0, 1fr);
+    grid-template-columns: 116px minmax(0, 1fr) 58px;
     gap: 6px;
     width: 100%;
     box-sizing: border-box;
@@ -642,6 +642,24 @@
     outline: none;
   }
   .return-memo-input { width: 100%; box-sizing: border-box; }
+  .memo-save-btn {
+    min-height: 30px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .memo-save-btn.is-dirty {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .memo-save-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
   .return-status-select:focus,
   .return-memo-input:focus {
     border-color: var(--accent);
@@ -1197,6 +1215,7 @@ var DASHBOARD_OLD_CACHE_PREFIX = 'dashCache_v3_';
 var CONTRACT_STATUS_OPTIONS = ['', '예약', '반출', '취소'];
 var RETURN_STATUS_OPTIONS = ['', '정상', '확인필요', '파손', '분실', '미반납', '반납완료'];
 var equipmentMemoSaveTimers = {};
+var dashboardMemoDrafts = {};
 var DEFAULT_DASHBOARD_NOTES = [
   '세부 구성품 및 추가 요청 사항은 카톡 대화 내용을 한번 더 확인 후 세팅',
   '매직암, 라인, 배터리 등 기타 악세사리류 갯수 철저하게 체크'
@@ -1809,6 +1828,10 @@ function tradeReturnFieldsHtml(item, cardType) {
   var isCheckout = cardType === 'checkout';
   var status = isCheckout ? normalizeContractStatus(item.contractStatus || item.status || '') : (item.returnStatus || '');
   var memo = item.returnMemo || '';
+  var memoKey = memoDraftKeyForTrade(item.tradeId);
+  var hasMemoDraft = Object.prototype.hasOwnProperty.call(dashboardMemoDrafts, memoKey);
+  var memoValue = hasMemoDraft ? dashboardMemoDrafts[memoKey] : memo;
+  var memoDirty = memoValue !== memo;
   var attrs = ' data-trade-id="' + escAttr(item.tradeId) + '"' +
     ' data-label="' + escAttr(item.name) + '"';
   var html = '<div class="trade-return-meta" onclick="event.stopPropagation()">';
@@ -1820,7 +1843,8 @@ function tradeReturnFieldsHtml(item, cardType) {
     html += returnStatusOptionsHtml(status);
   }
   html += '</select>';
-  html += '<input class="return-memo-input" type="text" maxlength="500" placeholder="특이사항 메모" value="' + escAttr(memo) + '" data-field="memo" data-prev="' + escAttr(memo) + '"' + attrs + ' oninput="queueEquipmentMemoSave(this)" onblur="flushEquipmentMemoSave(this)" onclick="event.stopPropagation()">';
+  html += '<input class="return-memo-input" type="text" maxlength="500" placeholder="특이사항 메모" value="' + escAttr(memoValue) + '" data-field="memo" data-prev="' + escAttr(memo) + '"' + attrs + ' oninput="markEquipmentMemoDirty(this)" onclick="event.stopPropagation()">';
+  html += '<button type="button" class="memo-save-btn' + (memoDirty ? ' is-dirty' : '') + '" onclick="event.stopPropagation();saveEquipmentMemo(this)"' + (memoDirty ? '' : ' disabled') + '>저장</button>';
   html += '<span class="equip-save-state"></span>';
   html += '</div>';
   return html;
@@ -1858,25 +1882,38 @@ function equipmentCheckTimerKey(el) {
   ].join('|');
 }
 
-function queueEquipmentMemoSave(input) {
-  var key = equipmentCheckTimerKey(input);
-  if (equipmentMemoSaveTimers[key]) clearTimeout(equipmentMemoSaveTimers[key]);
-  setEquipmentCheckState(input, '저장 대기', false);
-  equipmentMemoSaveTimers[key] = setTimeout(function() {
-    updateEquipmentCheck(input);
-  }, 650);
+function memoDraftKeyForTrade(tid) {
+  return String(tid || '') + '|memo';
 }
 
-function flushEquipmentMemoSave(input) {
-  var key = equipmentCheckTimerKey(input);
-  if (equipmentMemoSaveTimers[key]) {
-    clearTimeout(equipmentMemoSaveTimers[key]);
-    delete equipmentMemoSaveTimers[key];
-  }
-  if ((input.getAttribute('data-prev') || '') !== input.value) updateEquipmentCheck(input);
+function memoDraftKey(input) {
+  return memoDraftKeyForTrade(input.getAttribute('data-trade-id') || '');
 }
 
-function updateEquipmentCheck(el) {
+function markEquipmentMemoDirty(input) {
+  dashboardMemoDrafts[memoDraftKey(input)] = input.value || '';
+  syncMemoSaveButton(input);
+  var dirty = (input.getAttribute('data-prev') || '') !== input.value;
+  setEquipmentCheckState(input, dirty ? '저장 전' : '', false);
+}
+
+function syncMemoSaveButton(input) {
+  var box = input.closest('.trade-return-meta');
+  var btn = box ? box.querySelector('.memo-save-btn') : null;
+  if (!btn) return;
+  var dirty = (input.getAttribute('data-prev') || '') !== input.value;
+  btn.disabled = !dirty;
+  btn.classList.toggle('is-dirty', dirty);
+}
+
+function saveEquipmentMemo(btn) {
+  var box = btn.closest('.trade-return-meta');
+  var input = box ? box.querySelector('.return-memo-input[data-field="memo"]') : null;
+  if (!input) return;
+  updateEquipmentCheck(input, btn);
+}
+
+function updateEquipmentCheck(el, triggerBtn) {
   var field = el.getAttribute('data-field') || '';
   var prev = el.getAttribute('data-prev') || '';
   var value = el.value || '';
@@ -1901,6 +1938,7 @@ function updateEquipmentCheck(el) {
   el.classList.remove('is-error');
   el.classList.add('is-saving');
   if (el.tagName === 'SELECT') el.disabled = true;
+  if (triggerBtn) triggerBtn.disabled = true;
   setEquipmentCheckState(el, '저장 중', false);
 
   fetch(API_URL || '', { method: 'POST', body: JSON.stringify(payload) })
@@ -1908,21 +1946,24 @@ function updateEquipmentCheck(el) {
     .then(function(res) {
       el.classList.remove('is-saving');
       if (el.tagName === 'SELECT') el.disabled = false;
+      if (triggerBtn) triggerBtn.disabled = false;
       if (res.error) throw new Error(res.error);
       el.setAttribute('data-prev', value);
       syncEquipmentCheckInMemory(payload, res);
       syncTradeFieldControls(payload.field, payload.tid, value);
-      clearDashboardCacheForDate(formatDate(currentDate));
+      if (field === 'memo') syncMemoSaveButton(el);
       setEquipmentCheckState(el, '저장됨', false);
       setTimeout(function() { setEquipmentCheckState(el, '', false); }, 1200);
     })
     .catch(function(err) {
       el.classList.remove('is-saving');
       el.classList.add('is-error');
+      if (triggerBtn) triggerBtn.disabled = false;
       if (el.tagName === 'SELECT') {
         el.disabled = false;
         el.value = prev;
       }
+      if (field === 'memo') syncMemoSaveButton(el);
       setEquipmentCheckState(el, '저장 실패: ' + err.message, true);
     });
 }
@@ -1992,6 +2033,7 @@ function syncTradeFieldControls(field, tid, value) {
     if ((ctrl.getAttribute('data-trade-id') || '') !== tid) return;
     ctrl.value = value;
     ctrl.setAttribute('data-prev', value);
+    if (field === 'memo') syncMemoSaveButton(ctrl);
   });
 }
 
@@ -2002,6 +2044,13 @@ function syncEquipmentCheckInMemory(payload, res) {
     if (payload.field === 'memo') item.returnMemo = payload.value;
     if (res && res.row) item.equipmentCheckRow = res.row;
   });
+  if (payload.field === 'memo') {
+    var key = memoDraftKeyForTrade(payload.tid);
+    dashboardMemoDrafts[key] = payload.value;
+    setTimeout(function() {
+      if (dashboardMemoDrafts[key] === payload.value) delete dashboardMemoDrafts[key];
+    }, 15000);
+  }
   persistCurrentDashboardCache();
 }
 
