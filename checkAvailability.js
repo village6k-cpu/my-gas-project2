@@ -2238,51 +2238,75 @@ function normalizeDashboardAddEntries_(entries, fallbackName, fallbackQty) {
   return order.map(function(name) { return merged[name]; });
 }
 
+function getDashboardCachedJson_(key, seconds, builder) {
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    var cached = cache.get(key);
+    if (cached) return JSON.parse(cached);
+  } catch (e) {}
+
+  var value = builder();
+  try {
+    if (cache) {
+      var text = JSON.stringify(value);
+      if (text.length < 90000) cache.put(key, text, seconds);
+    }
+  } catch (e2) {}
+  return value;
+}
+
 function getDashboardEquipNameList_(ss) {
-  var listSheet = ss.getSheetByName("목록");
-  if (!listSheet || listSheet.getLastRow() < 2) return [];
-  return listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues()
-    .map(function(row) { return String(row[0] || "").trim(); })
-    .filter(function(name) { return !!name; });
+  return getDashboardCachedJson_("dashboardEquipNameList_v1", 300, function() {
+    var listSheet = ss.getSheetByName("목록");
+    if (!listSheet || listSheet.getLastRow() < 2) return [];
+    return listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1).getDisplayValues()
+      .map(function(row) { return String(row[0] || "").trim(); })
+      .filter(function(name) { return !!name; });
+  });
 }
 
 function buildDashboardSetLookup_(setSheet) {
-  var lookup = { components: {}, prices: {} };
-  if (!setSheet || setSheet.getLastRow() < 2) return lookup;
+  return getDashboardCachedJson_("dashboardSetLookup_v1", 300, function() {
+    var lookup = { components: {}, prices: {} };
+    if (!setSheet || setSheet.getLastRow() < 2) return lookup;
 
-  var lastCol = Math.max(setSheet.getLastColumn(), 7);
-  var data = setSheet.getRange(2, 1, setSheet.getLastRow() - 1, lastCol).getValues();
-  data.forEach(function(row) {
-    var setName = String(row[0] || "").trim();
-    if (!setName) return;
-    if (row[6] !== "" && row[6] !== null && lookup.prices[setName] === undefined) {
-      lookup.prices[setName] = row[6];
-    }
+    var lastCol = Math.max(setSheet.getLastColumn(), 7);
+    var data = setSheet.getRange(2, 1, setSheet.getLastRow() - 1, lastCol).getValues();
+    data.forEach(function(row) {
+      var setName = String(row[0] || "").trim();
+      if (!setName) return;
+      if (row[6] !== "" && row[6] !== null && lookup.prices[setName] === undefined) {
+        lookup.prices[setName] = row[6];
+      }
 
-    var componentName = String(row[1] || "").trim();
-    var flag = row.length > 5 ? String(row[5] || "").trim() : "";
-    if (!componentName || (flag !== "Y" && flag !== "")) return;
-    if (!lookup.components[setName]) lookup.components[setName] = [];
-    lookup.components[setName].push({
-      name: componentName,
-      qty: row[2] || 1,
-      alt: row[4] || ""
+      var componentName = String(row[1] || "").trim();
+      var flag = row.length > 5 ? String(row[5] || "").trim() : "";
+      if (!componentName || (flag !== "Y" && flag !== "")) return;
+      if (!lookup.components[setName]) lookup.components[setName] = [];
+      lookup.components[setName].push({
+        name: componentName,
+        qty: row[2] || 1,
+        alt: row[4] || ""
+      });
     });
+    return lookup;
   });
-  return lookup;
 }
 
 function buildDashboardEquipmentMap_(equipSheet) {
-  var map = {};
-  if (!equipSheet || equipSheet.getLastRow() < 2) return map;
+  return getDashboardCachedJson_("dashboardEquipmentMap_v1", 120, function() {
+    var map = {};
+    if (!equipSheet || equipSheet.getLastRow() < 2) return map;
 
-  var data = equipSheet.getRange(2, 1, equipSheet.getLastRow() - 1, 12).getValues();
-  data.forEach(function(row) {
-    var name = String(row[3] || "").trim();
-    if (!name) return;
-    map[name] = { total: Number(row[4]) || 0, 단가: row[11] || 0 };
+    var data = equipSheet.getRange(2, 1, equipSheet.getLastRow() - 1, 12).getValues();
+    data.forEach(function(row) {
+      var name = String(row[3] || "").trim();
+      if (!name) return;
+      map[name] = { total: Number(row[4]) || 0, 단가: row[11] || 0 };
+    });
+    return map;
   });
-  return map;
 }
 
 function findDashboardRowsByValue_(sheet, column, lastRow, value) {
