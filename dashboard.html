@@ -2608,15 +2608,8 @@ function setAddEquipBusy(isBusy, label) {
 }
 
 function postAddEquipBatch(tid, entries) {
-  return fetch(API_URL + '?key=village2026', {
-    method: 'POST',
-    body: JSON.stringify({
-      key: 'village2026',
-      action: 'addEquips',
-      tid: tid,
-      entries: entries
-    })
-  })
+  return fetch(API_URL + '?key=village2026&action=addEquips&tid=' + encodeURIComponent(tid)
+    + '&entries=' + encodeURIComponent(JSON.stringify(entries)))
     .then(function(r) { return r.json(); })
     .then(function(res) {
       if (res.error) throw new Error(res.error);
