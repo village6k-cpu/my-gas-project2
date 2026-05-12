@@ -2148,6 +2148,7 @@ function buildAvailabilityItems_(equipName, qty, components) {
 
 function checkAvailabilityForAdd_(itemsToAdd, startDT, endDT, equipSheet, schedSheet) {
   var conflicts = [];
+  var warnings = [];
   if (!equipSheet) return { ok: false, conflicts: [{ message: "장비마스터 없음" }] };
   var schedData = getScheduleData(schedSheet);
 
@@ -2156,7 +2157,12 @@ function checkAvailabilityForAdd_(itemsToAdd, startDT, endDT, equipSheet, schedS
     var reqQty = Number(item.qty) || 1;
     var equipInfo = findEquipment(equipName, equipSheet);
     if (!equipInfo) {
-      conflicts.push({ equipment: equipName, message: equipName + " 미등록" });
+      var categoryItems = findEquipmentByCategory(equipName, equipSheet);
+      if (categoryItems.length > 0) {
+        conflicts.push({ equipment: equipName, message: equipName + " 모델 선택 필요" });
+      } else {
+        warnings.push({ equipment: equipName, message: equipName + " 미등록, 가용확인 제외" });
+      }
       return;
     }
 
@@ -2199,7 +2205,7 @@ function checkAvailabilityForAdd_(itemsToAdd, startDT, endDT, equipSheet, schedS
       });
     }
   });
-  return { ok: conflicts.length === 0, conflicts: conflicts };
+  return { ok: conflicts.length === 0, conflicts: conflicts, warnings: warnings };
 }
 
 function normalizeDashboardAddEntries_(entries, fallbackName, fallbackQty) {
@@ -2294,18 +2300,19 @@ function buildDashboardSetLookup_(setSheet) {
   });
 }
 
-function buildDashboardEquipmentMap_(equipSheet) {
-  return getDashboardCachedJson_("dashboardEquipmentMap_v1", 120, function() {
-    var map = {};
-    if (!equipSheet || equipSheet.getLastRow() < 2) return map;
+function buildDashboardEquipmentMeta_(equipSheet) {
+  return getDashboardCachedJson_("dashboardEquipmentMeta_v1", 120, function() {
+    var meta = { equipment: {}, categories: {} };
+    if (!equipSheet || equipSheet.getLastRow() < 2) return meta;
 
     var data = equipSheet.getRange(2, 1, equipSheet.getLastRow() - 1, 12).getValues();
     data.forEach(function(row) {
+      var category = String(row[2] || "").trim();
       var name = String(row[3] || "").trim();
-      if (!name) return;
-      map[name] = { total: Number(row[4]) || 0, 단가: row[11] || 0 };
+      if (category) meta.categories[category] = true;
+      if (name) meta.equipment[name] = { total: Number(row[4]) || 0, 단가: row[11] || 0 };
     });
-    return map;
+    return meta;
   });
 }
 
@@ -2402,14 +2409,21 @@ function mergeAvailabilityItems_(items) {
   return order.map(function(name) { return merged[name]; });
 }
 
-function checkAvailabilityForAddCached_(itemsToAdd, startDT, endDT, equipMap, scheduleData) {
+function checkAvailabilityForAddCached_(itemsToAdd, startDT, endDT, equipMeta, scheduleData) {
   var conflicts = [];
+  var warnings = [];
+  var equipMap = (equipMeta && equipMeta.equipment) || {};
+  var categoryMap = (equipMeta && equipMeta.categories) || {};
   (itemsToAdd || []).forEach(function(item) {
     var equipName = String(item.name || "").trim();
     var reqQty = Number(item.qty) || 1;
     var equipInfo = equipMap[equipName];
     if (!equipInfo) {
-      conflicts.push({ equipment: equipName, message: equipName + " 미등록" });
+      if (categoryMap[equipName]) {
+        conflicts.push({ equipment: equipName, message: equipName + " 모델 선택 필요" });
+      } else {
+        warnings.push({ equipment: equipName, message: equipName + " 미등록, 가용확인 제외" });
+      }
       return;
     }
 
@@ -2455,7 +2469,7 @@ function checkAvailabilityForAddCached_(itemsToAdd, startDT, endDT, equipMap, sc
       });
     }
   });
-  return { ok: conflicts.length === 0, conflicts: conflicts };
+  return { ok: conflicts.length === 0, conflicts: conflicts, warnings: warnings };
 }
 
 function applyDashboardAddRowFormats_(sched, tid, insertRow, rowCount, sourceRow, hadFollowingRow) {
@@ -2571,7 +2585,7 @@ function dashboardAddEquipments(tid, entries, options) {
       availabilityItems = availabilityItems.concat(buildAvailabilityItems_(entry.name, entry.qty, components));
     });
 
-    var equipMap = buildDashboardEquipmentMap_(equipSheet);
+    var equipMeta = buildDashboardEquipmentMeta_(equipSheet);
     var mergedAvailabilityItems = mergeAvailabilityItems_(availabilityItems);
     var targetEquipmentNames = mergedAvailabilityItems.map(function(item) { return item.name; });
     var scheduleData = buildDashboardScheduleData_(
@@ -2582,7 +2596,7 @@ function dashboardAddEquipments(tid, entries, options) {
       mergedAvailabilityItems,
       startDT,
       endDT,
-      equipMap,
+      equipMeta,
       scheduleData
     );
     if (!availability.ok) {
@@ -2627,6 +2641,7 @@ function dashboardAddEquipments(tid, entries, options) {
         addedEquipments: addEntries.length,
         addedRows: newRows.length,
         equipmentNames: addEntries.map(function(entry) { return entry.name; }),
+        warnings: availability.warnings || [],
         message: "가용 확인 완료"
       };
     }
@@ -2646,6 +2661,7 @@ function dashboardAddEquipments(tid, entries, options) {
       addedEquipments: addEntries.length,
       addedRows: newRows.length,
       equipmentNames: addEntries.map(function(entry) { return entry.name; }),
+      warnings: availability.warnings || [],
       message: "가용 확인 완료 후 추가"
     };
   } finally {
