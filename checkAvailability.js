@@ -1252,12 +1252,11 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var wanted = {};
     tradeIds.forEach(function(tid) { wanted[String(tid)] = true; });
     var readCols = Math.max(lastCol, paymentCol, proofCol, issueCol, noteCol);
-    var ids = 거래시트.getRange(2, idCol, 거래시트.getLastRow() - 1, 1).getDisplayValues();
+    var rows = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, readCols).getDisplayValues();
 
-    ids.forEach(function(idRow, idx) {
-      var tid = String(idRow[0] || '').trim();
+    rows.forEach(function(row) {
+      var tid = String(row[idCol - 1] || '').trim();
       if (!wanted[tid]) return;
-      var row = 거래시트.getRange(idx + 2, 1, 1, readCols).getDisplayValues()[0];
       if (!result[tid]) result[tid] = {};
       result[tid].contractUrl = String(row[contractCol - 1] || '').trim();
       result[tid].paymentMethod = String(row[paymentCol - 1] || '').trim();
