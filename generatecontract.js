@@ -172,6 +172,7 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   // 이 값들은 템플릿 구조에 맞게 조정해야 합니다
   // findRow() 로 자동 탐색
   const rows = findTemplateRows(ws);
+  repairContractItemHeaders_(ws, rows);
 
   // ── 전체 시트 데이터 유효성 검사 해제 (드롭다운 등으로 인한 입력 오류 방지) ──
   var lastRowAll = ws.getLastRow();
@@ -366,6 +367,18 @@ function _colLetter(n) {
   return s;
 }
 
+function repairContractItemHeaders_(ws, rows) {
+  if (!ws || !rows || !rows.itemStart) return;
+  var headerRow = rows.itemStart - 1;
+  if (headerRow < 1) return;
+
+  // Old templates may still have ARRAYFORMULA sources in these header cells.
+  // The generator now writes item prices/amounts directly, so stale formulas
+  // can spill into populated rows and display #REF! in F/G or L/M.
+  ws.getRange(headerRow, 6, 1, 2).setValues([["단가", "금액"]]);
+  ws.getRange(headerRow, 12, 1, 2).setValues([["단가", "금액"]]);
+}
+
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 템플릿 행 위치 자동 탐색
@@ -518,6 +531,9 @@ function setupContractTemplate() {
   var ss = SpreadsheetApp.openById(templateId);
   var ws = ss.getSheets()[0];
   var out = [];
+
+  repairContractItemHeaders_(ws, findTemplateRows(ws));
+  out.push("품목 헤더 F/G/L/M 낡은 수식 제거");
 
   // 1) 4개 할인 셀 모두 텍스트 포맷
   ws.getRange("C44:C45").setNumberFormat("@");
@@ -1052,4 +1068,3 @@ function shareAllContractsAsViewable() {
   Logger.log(summary);
   return summary;
 }
-
