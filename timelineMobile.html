@@ -491,9 +491,9 @@ function getTimelineFetchRange() {
     end = tmp;
   }
   var bufferedStart = new Date(start);
-  bufferedStart.setDate(bufferedStart.getDate() - 7);
+  bufferedStart.setDate(bufferedStart.getDate() - 3);
   var bufferedEnd = new Date(end);
-  bufferedEnd.setDate(bufferedEnd.getDate() + 14);
+  bufferedEnd.setDate(bufferedEnd.getDate() + 7);
   return { from: dateInputStr(bufferedStart), to: dateInputStr(bufferedEnd) };
 }
 
