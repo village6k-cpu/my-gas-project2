@@ -167,7 +167,6 @@ function buildTimelineData_(fromKey, toKey) {
 
   const seen = {};   // "거래ID|그룹명" → true
   const entries = [];
-  var 회차Map = {};
 
   // 행 처리 함수
   function processRow(row, idx, isSetPhase) {
@@ -201,15 +200,16 @@ function buildTimelineData_(fromKey, toKey) {
     if (seen[key]) return;  // 중복 방지
     seen[key] = true;
 
+    var checkoutKey = normalizeTimelineDateKey_(반출일);
+    var checkinKey = normalizeTimelineDateKey_(반납일);
+    if (fromKey && checkinKey && checkinKey < fromKey) return;
+    if (toKey && checkoutKey && checkoutKey > toKey) return;
+
     const startDT = parseDT(반출일, 반출시간);
     const endDT   = parseDT(반납일, 반납시간);
     if (!startDT || !endDT) return;
 
     const cust = contractMap[거래ID] || {};
-    var hkey = (cust.name || 거래ID || '') + '|' + groupName;
-    if (!회차Map[hkey]) 회차Map[hkey] = 0;
-    회차Map[hkey]++;
-    var 회차 = 회차Map[hkey];
 
     if (rangeStart && endDT < rangeStart) return;
     if (rangeEnd && startDT > rangeEnd) return;
@@ -244,8 +244,7 @@ function buildTimelineData_(fromKey, toKey) {
       반출시간:  반출시간Str,
       반납시간:  반납시간Str,
       장비명:    장비명,
-      세트명원본: 세트명,
-      회차:      회차
+      세트명원본: 세트명
     });
   }
 
@@ -253,6 +252,15 @@ function buildTimelineData_(fromKey, toKey) {
   data.forEach(function(row, idx) { processRow(row, idx, true); });
   // Phase 2: 개별 장비 행 (세트명 없고 구성품 아닌 것만)
   data.forEach(function(row, idx) { processRow(row, idx, false); });
+
+  // 회차 계산: 현재 표시 범위 안에서 같은 예약자+그룹의 몇 번째 예약인지
+  var 회차Map = {};
+  entries.forEach(function(e) {
+    var hkey = (e.custName || '') + '|' + e.groupName;
+    if (!회차Map[hkey]) 회차Map[hkey] = 0;
+    회차Map[hkey]++;
+    e.회차 = 회차Map[hkey];
+  });
 
   // 그룹 및 아이템 생성
   const groupMap  = {};
@@ -322,7 +330,7 @@ function buildTimelineData_(fromKey, toKey) {
 function normalizeTimelineDateKey_(value) {
   if (!value) return '';
   if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
-    return Utilities.formatDate(value, 'Asia/Seoul', 'yyyy-MM-dd');
+    return value.getFullYear() + '-' + ('0' + (value.getMonth() + 1)).slice(-2) + '-' + ('0' + value.getDate()).slice(-2);
   }
   var s = String(value).trim();
   var m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
