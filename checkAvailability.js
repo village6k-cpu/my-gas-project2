@@ -83,11 +83,43 @@ function openDashboard() {
   SpreadsheetApp.getUi().showModalDialog(html, '오늘 일정 열기');
 }
 
+var TIMELINE_CACHE_VERSION_PROP_ = 'timelineCacheVersion_v1';
+var TIMELINE_CACHE_PREFIX_ = 'timeline_v3_';
+var TIMELINE_CACHE_CHUNK_SIZE_ = 85000;
+var TIMELINE_CACHE_MAX_CHUNKS_ = 30;
+
 /**
- * 타임라인 HTML에서 google.script.run으로 호출
- * vis.js 형식으로 groups / items 반환
+ * 타임라인 HTML/API에서 호출.
+ * vis.js 형식으로 groups / items 반환. from/to(yyyy-MM-dd)가 있으면 해당 기간과 겹치는 예약만 반환한다.
  */
-function getTimelineData() {
+function getTimelineData(options) {
+  options = options || {};
+  var fromKey = normalizeTimelineDateKey_(options.from || options.start || '');
+  var toKey = normalizeTimelineDateKey_(options.to || options.end || '');
+  if (fromKey && toKey && fromKey > toKey) {
+    var tmpKey = fromKey;
+    fromKey = toKey;
+    toKey = tmpKey;
+  }
+
+  var skipCache = options.skipCache === true || options.skipCache === 1 ||
+    options.skipCache === '1' || options.skipCache === 'true';
+  var cacheKey = TIMELINE_CACHE_PREFIX_ + getTimelineCacheVersion_() + '_' +
+    (fromKey || 'all') + '_' + (toKey || 'all');
+
+  if (!skipCache) {
+    var cached = getTimelineCacheText_(cacheKey);
+    if (cached) {
+      try { return JSON.parse(cached); } catch (e) {}
+    }
+  }
+
+  var result = buildTimelineData_(fromKey, toKey);
+  try { putTimelineCacheText_(cacheKey, JSON.stringify(result), 300); } catch (e2) {}
+  return result;
+}
+
+function buildTimelineData_(fromKey, toKey) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
@@ -121,20 +153,21 @@ function getTimelineData() {
   }
 
   const data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getValues();
-  var timelineTradeIds = {};
-  data.forEach(function(row) {
+  var rangeStart = parseTimelineDateBoundary_(fromKey, false);
+  var rangeEnd = parseTimelineDateBoundary_(toKey, true);
+  var rowIndicesBySet = {};
+  data.forEach(function(row, idx) {
     var tid = String(row[1] || '').trim();
-    if (tid) timelineTradeIds[tid] = true;
+    var setName = String(row[2] || '').trim();
+    if (!tid || !setName) return;
+    var key = tid + '|' + setName;
+    if (!rowIndicesBySet[key]) rowIndicesBySet[key] = [];
+    rowIndicesBySet[key].push(idx + 2);
   });
-  var tradeExtras = {};
-  try {
-    tradeExtras = getTradeExtrasForIds_(Object.keys(timelineTradeIds));
-  } catch (e) {
-    tradeExtras = {};
-  }
 
   const seen = {};   // "거래ID|그룹명" → true
   const entries = [];
+  var 회차Map = {};
 
   // 행 처리 함수
   function processRow(row, idx, isSetPhase) {
@@ -173,16 +206,18 @@ function getTimelineData() {
     if (!startDT || !endDT) return;
 
     const cust = contractMap[거래ID] || {};
-    var extra = tradeExtras[String(거래ID || '').trim()] || {};
+    var hkey = (cust.name || 거래ID || '') + '|' + groupName;
+    if (!회차Map[hkey]) 회차Map[hkey] = 0;
+    회차Map[hkey]++;
+    var 회차 = 회차Map[hkey];
+
+    if (rangeStart && endDT < rangeStart) return;
+    if (rangeEnd && startDT > rangeEnd) return;
 
     // 같은 거래ID+세트명의 모든 행 인덱스 수집
     var rowIndices = [];
     if (!isSingleItem) {
-      data.forEach(function(r, i) {
-        if (r[1] === 거래ID && String(r[2] || '').trim() === 세트명) {
-          rowIndices.push(i + 2);
-        }
-      });
+      rowIndices = rowIndicesBySet[key] || [idx + 2];
     } else {
       rowIndices = [idx + 2];
     }
@@ -210,7 +245,7 @@ function getTimelineData() {
       반납시간:  반납시간Str,
       장비명:    장비명,
       세트명원본: 세트명,
-      contractUrl: extra.contractUrl || ''
+      회차:      회차
     });
   }
 
@@ -219,20 +254,22 @@ function getTimelineData() {
   // Phase 2: 개별 장비 행 (세트명 없고 구성품 아닌 것만)
   data.forEach(function(row, idx) { processRow(row, idx, false); });
 
-  // 회차 계산: 같은 예약자+그룹의 몇 번째 예약인지
-  var 회차Map = {};
-  entries.forEach(function(e) {
-    var hkey = (e.custName || '') + '|' + e.groupName;
-    if (!회차Map[hkey]) 회차Map[hkey] = 0;
-    회차Map[hkey]++;
-    e.회차 = 회차Map[hkey];
-  });
-
   // 그룹 및 아이템 생성
   const groupMap  = {};
   const groupList = [];
   const itemList  = [];
   var itemIdx = 0;
+  var timelineTradeIds = {};
+  entries.forEach(function(e) {
+    var tid = String(e.거래ID || '').trim();
+    if (tid) timelineTradeIds[tid] = true;
+  });
+  var tradeExtras = {};
+  try {
+    tradeExtras = getTradeExtrasForIds_(Object.keys(timelineTradeIds));
+  } catch (e) {
+    tradeExtras = {};
+  }
 
   entries.forEach(function(e) {
     // 그룹 등록
@@ -243,6 +280,7 @@ function getTimelineData() {
 
     var statusClass = ['대기','반출중','반납완료','취소'].indexOf(e.상태) >= 0
       ? 'status-' + e.상태 : 'status-기타';
+    var extra = tradeExtras[String(e.거래ID || '').trim()] || {};
 
     // 세트: 수량만큼 바 생성, 개별장비: 1개 바
     var barCount = e.isSingleItem ? 1 : (e.수량 || 1);
@@ -273,12 +311,91 @@ function getTimelineData() {
         회차:      e.회차 || 1,
         재고:      stockMap[e.isSingleItem ? e.groupName : e.장비명] || 1,
         세트명원본: e.세트명원본 || e.groupName,
-        contractUrl: e.contractUrl || ''
+        contractUrl: extra.contractUrl || ''
       });
     }
   });
 
   return { groups: groupList, items: itemList };
+}
+
+function normalizeTimelineDateKey_(value) {
+  if (!value) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
+    return Utilities.formatDate(value, 'Asia/Seoul', 'yyyy-MM-dd');
+  }
+  var s = String(value).trim();
+  var m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!m) return '';
+  return m[1] + '-' + ('0' + Number(m[2])).slice(-2) + '-' + ('0' + Number(m[3])).slice(-2);
+}
+
+function parseTimelineDateBoundary_(dateKey, isEnd) {
+  if (!dateKey) return null;
+  var m = String(dateKey).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  return new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    isEnd ? 23 : 0,
+    isEnd ? 59 : 0,
+    isEnd ? 59 : 0,
+    isEnd ? 999 : 0
+  );
+}
+
+function getTimelineCacheVersion_() {
+  try {
+    return PropertiesService.getScriptProperties().getProperty(TIMELINE_CACHE_VERSION_PROP_) || '0';
+  } catch (e) {
+    return '0';
+  }
+}
+
+function getTimelineCacheText_(cacheKey) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var metaKey = cacheKey + '__count';
+    var count = Number(cache.get(metaKey));
+    if (!count || count < 1 || count > TIMELINE_CACHE_MAX_CHUNKS_) return null;
+    var keys = [];
+    for (var i = 0; i < count; i++) keys.push(cacheKey + '__' + i);
+    var chunks = cache.getAll(keys);
+    var parts = [];
+    for (var j = 0; j < keys.length; j++) {
+      var part = chunks[keys[j]];
+      if (part === undefined || part === null) return null;
+      parts.push(part);
+    }
+    return parts.join('');
+  } catch (e) {
+    return null;
+  }
+}
+
+function putTimelineCacheText_(cacheKey, text, seconds) {
+  if (!text) return;
+  var count = Math.ceil(text.length / TIMELINE_CACHE_CHUNK_SIZE_);
+  if (count < 1 || count > TIMELINE_CACHE_MAX_CHUNKS_) return;
+  try {
+    var cache = CacheService.getScriptCache();
+    var payload = {};
+    payload[cacheKey + '__count'] = String(count);
+    for (var i = 0; i < count; i++) {
+      payload[cacheKey + '__' + i] = text.slice(
+        i * TIMELINE_CACHE_CHUNK_SIZE_,
+        (i + 1) * TIMELINE_CACHE_CHUNK_SIZE_
+      );
+    }
+    cache.putAll(payload, seconds || 300);
+  } catch (e) {}
+}
+
+function invalidateTimelineCache() {
+  try {
+    PropertiesService.getScriptProperties().setProperty(TIMELINE_CACHE_VERSION_PROP_, String(Date.now()));
+  } catch (e) {}
 }
 
 /**
@@ -312,6 +429,7 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
 
   // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh
   try { invalidateDashboardCache(); } catch (e) {}
+  try { invalidateTimelineCache(); } catch (e2) {}
 
   return { success: true };
 }
@@ -5083,8 +5201,9 @@ function registerByReqID(sheet, triggerRow) {
   // ── 등록완료 알림톡 — 비활성화 (코워크 에이전트가 카톡으로 직접 발송) ──
   // 반출/반납 안내톡(checkGuideAlimtalk)은 유지됨
 
-  // dashboard 캐시 즉시 무효화 → 새로고침 안 해도 다음 fetch는 fresh
+  // dashboard/timeline 캐시 즉시 무효화 → 새로고침 안 해도 다음 fetch는 fresh
   try { invalidateDashboardCache(); } catch (e) {}
+  try { invalidateTimelineCache(); } catch (e2) {}
 
   } finally {
     regLock.releaseLock();
@@ -6601,6 +6720,9 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
       sheet.getRange(ri, 10).setValue(newStatus);  // J열 = 10번째 = 상태
     }
   });
+
+  try { invalidateDashboardCache(); } catch (e) {}
+  try { invalidateTimelineCache(); } catch (e2) {}
 
   return { success: true, message: rows.length + '행 상태 변경 완료', newStatus: newStatus };
 }

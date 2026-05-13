@@ -149,8 +149,15 @@ function handleRequest(e) {
         if (postBody.args) runParams.args = postBody.args;
         return jsonResponse(runFunction(params.func || postBody.func, runParams));
 
-      case "timeline":
-        return jsonResponse(getTimelineData());
+      case "timeline": {
+        var skipTimelineCache = (params.nocache === '1' || params.nocache === 'true' ||
+          postBody.nocache === 1 || postBody.nocache === '1' || postBody.nocache === true);
+        return jsonResponse(getTimelineData({
+          from: params.from || postBody.from || params.start || postBody.start || "",
+          to: params.to || postBody.to || params.end || postBody.end || "",
+          skipCache: skipTimelineCache
+        }));
+      }
 
       case "updateTime": {
         var row = Number(params.row || postBody.row);

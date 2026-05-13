@@ -926,7 +926,7 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
         <span class="request-ai-badge">AI</span>
         <span class="request-main">카톡 예약입력</span>
       </a>
-      <button class="icon-btn" onclick="loadData()" title="새로고침" aria-label="새로고침">↻</button>
+      <button class="icon-btn" onclick="loadData(true)" title="새로고침" aria-label="새로고침">↻</button>
     </div>
   </div>
   <div class="header-workbar">
@@ -1078,6 +1078,7 @@ var scrollSyncFlag = false;
 var longPressTimer = null;
 var timelineRequestSeq = 0;
 var timelineAbortController = null;
+var timelineLastResponseKey = "";
 
 // ── Utils ──
 function escHtml(s) {
@@ -1123,19 +1124,53 @@ function statusKey(s) {
 var STATUS_BADGE = { "대기":"badge-대기","반출중":"badge-반출중","반납완료":"badge-반납완료","취소":"badge-취소","기타":"badge-기타" };
 
 // ── Data Loading ──
-function loadData() {
+function getTimelineFetchRange() {
+  var today = dateOnly(new Date());
+  var start, end;
+  if (filterStart && filterEnd) {
+    start = dateOnly(filterStart);
+    end = dateOnly(filterEnd);
+  } else if (filterStart) {
+    start = dateOnly(filterStart);
+    end = addDays(start, 21);
+  } else if (filterEnd) {
+    end = dateOnly(filterEnd);
+    start = addDays(end, -21);
+  } else {
+    start = addDays(today, -7);
+    end = addDays(today, 14);
+  }
+  return { from: toDateStr(start), to: toDateStr(end) };
+}
+
+function loadData(forceFresh, opts) {
+  opts = opts || {};
   var requestId = ++timelineRequestSeq;
   if (timelineAbortController && timelineAbortController.abort) {
     try { timelineAbortController.abort(); } catch (e) {}
   }
   timelineAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
   var fetchOptions = timelineAbortController ? { signal: timelineAbortController.signal } : {};
+  var range = getTimelineFetchRange();
+  var requestKey = range.from + "_" + range.to;
+  var url = API_URL + "?key=village2026&action=timeline"
+    + "&from=" + encodeURIComponent(range.from)
+    + "&to=" + encodeURIComponent(range.to)
+    + (forceFresh ? "&nocache=1" : "");
 
-  showLoading(true);
-  fetch(API_URL + "?key=village2026&action=timeline", fetchOptions)
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
+  if (!opts.silent) showLoading(true);
+  return fetch(url, fetchOptions)
+    .then(function(r) { return r.text(); })
+    .then(function(text) {
       if (requestId !== timelineRequestSeq) return;
+      var responseKey = requestKey + "\n" + text;
+      if (!forceFresh && responseKey === timelineLastResponseKey) {
+        if (!opts.silent) showLoading(false);
+        updateRefreshInfo();
+        return;
+      }
+      var data = JSON.parse(text);
+      timelineLastResponseKey = responseKey;
       rawGroups = data.groups || [];
       rawItems = (data.items || []).map(function(it) {
         it._start = parseDate(it.start);
@@ -1146,13 +1181,13 @@ function loadData() {
       });
       computeDateRange();
       render();
-      showLoading(false);
+      if (!opts.silent) showLoading(false);
       updateRefreshInfo();
     })
     .catch(function(err) {
       if (err && err.name === "AbortError") return;
       if (requestId !== timelineRequestSeq) return;
-      showLoading(false);
+      if (!opts.silent) showLoading(false);
       showToast("데이터 로드 실패");
     });
 }
@@ -1665,7 +1700,7 @@ function ctxAction(action) {
       .then(function(res) {
         if (res.error) { showToast("삭제 실패: " + res.error); return; }
         showToast("삭제 완료");
-        loadData();
+        loadData(true);
       })
       .catch(function() { showToast("네트워크 오류"); });
     return;
@@ -2164,7 +2199,7 @@ function submitAddBooking() {
   }, Promise.resolve()).then(function() {
     setScheduleAddBusy(false);
     if (failures.length) {
-      if (successes.length) loadData();
+      if (successes.length) loadData(true);
       resetScheduleEquipRows(failures.map(function(f) { return f.entry; }));
       showToast((successes.length ? successes.length + "개 추가 완료, " : "") + failures.length + "개 실패");
       alert("추가 실패 목록\n" + failures.map(function(f) {
@@ -2174,7 +2209,7 @@ function submitAddBooking() {
     }
     showToast(custName + " / 장비 " + successes.length + "개 추가 완료");
     closeAddModal();
-    loadData();
+    loadData(true);
   }).catch(function() {
     setScheduleAddBusy(false);
     showToast("네트워크 오류");
@@ -2205,12 +2240,12 @@ function moveToday() {
   filterEnd = addDays(today, 14);
   document.getElementById("dateFrom").value = toDateStr(filterStart);
   document.getElementById("dateTo").value = toDateStr(filterEnd);
-  computeDateRange();
-  render();
-  setTimeout(function() {
-    scrollToToday();
-    showToast("오늘 기준으로 이동했습니다");
-  }, 60);
+  loadData().then(function() {
+    setTimeout(function() {
+      scrollToToday();
+      showToast("오늘 기준으로 이동했습니다");
+    }, 60);
+  });
 }
 window.moveToday = moveToday;
 
@@ -2345,7 +2380,7 @@ function updateRefreshInfo() {
 }
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(function() { loadData(); }, REFRESH_INTERVAL);
+  refreshTimer = setInterval(function() { loadData(false, { silent: true }); }, REFRESH_INTERVAL);
 }
 
 // ── Escape ──
@@ -2361,14 +2396,12 @@ document.addEventListener("keydown", function(e) {
 document.getElementById("dateFrom").addEventListener("change", function() {
   var v = this.value;
   filterStart = v ? new Date(v + "T00:00:00") : null;
-  computeDateRange();
-  render();
+  loadData();
 });
 document.getElementById("dateTo").addEventListener("change", function() {
   var v = this.value;
   filterEnd = v ? new Date(v + "T00:00:00") : null;
-  computeDateRange();
-  render();
+  loadData();
 });
 
 // ── URL 파라미터 처리 ──

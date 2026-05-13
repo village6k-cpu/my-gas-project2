@@ -934,8 +934,9 @@ function scheduleContractRegen(거래ID) {
     ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
   }
 
-  // 거래 변경이 있었으니 dashboard 캐시도 즉시 무효화 → 다음 fetch는 fresh
+  // 거래 변경이 있었으니 dashboard/timeline 캐시도 즉시 무효화 → 다음 fetch는 fresh
   try { invalidateDashboardCache(); } catch (e) {}
+  try { invalidateTimelineCache(); } catch (e2) {}
 }
 
 /**
@@ -1038,8 +1039,9 @@ function cancelContract(ss, 거래ID, contractRow) {
   rowRange.setFontColor("#9C0006");
   rowRange.setFontLine("line-through");
 
-  // 4. dashboard 캐시 무효화
+  // 4. dashboard/timeline 캐시 무효화
   try { invalidateDashboardCache(); } catch (e) {}
+  try { invalidateTimelineCache(); } catch (e2) {}
 
   Logger.log("계약 취소 완료: " + 거래ID);
 }
@@ -1274,6 +1276,5 @@ function syncAuditFromMaster() {
   Logger.log(msg);
   try { SpreadsheetApp.getUi().alert(msg); } catch(e) {}
 }
-
 
 

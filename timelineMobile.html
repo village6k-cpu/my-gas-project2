@@ -429,6 +429,8 @@ var equipListCache = null;
 var candidateSearchTimer = null;
 var timelineRequestSeq = 0;
 var timelineAbortController = null;
+var timelineLastResponseKey = "";
+var timelineRangeReloadTimer = null;
 
 // ━━━ 초기화 ━━━
 function init() {
@@ -461,32 +463,78 @@ function init() {
   timeline.on("select", function(props) {
     if (props.items.length > 0) showDetail(props.items[0]);
   });
+  timeline.on("rangechanged", function(props) {
+    setDateRangeInputs(props.start, props.end);
+    clearTimeout(timelineRangeReloadTimer);
+    timelineRangeReloadTimer = setTimeout(function() {
+      loadData(false, { silent: true });
+    }, 450);
+  });
 }
 
 // ━━━ 데이터 로드 (API fetch) ━━━
-function loadData() {
+function getTimelineFetchRange() {
+  var fromVal = document.getElementById("dateFrom").value;
+  var toVal = document.getElementById("dateTo").value;
+  var start = fromVal ? new Date(fromVal + "T00:00:00") : null;
+  var end = toVal ? new Date(toVal + "T23:59:59") : null;
+  if ((!start || !end) && timeline) {
+    var win = timeline.getWindow();
+    if (!start) start = win.start;
+    if (!end) end = win.end;
+  }
+  if (!start) start = new Date(Date.now() - 1000*60*60*24);
+  if (!end) end = new Date(Date.now() + 1000*60*60*24*7);
+  if (end < start) {
+    var tmp = start;
+    start = end;
+    end = tmp;
+  }
+  var bufferedStart = new Date(start);
+  bufferedStart.setDate(bufferedStart.getDate() - 7);
+  var bufferedEnd = new Date(end);
+  bufferedEnd.setDate(bufferedEnd.getDate() + 14);
+  return { from: dateInputStr(bufferedStart), to: dateInputStr(bufferedEnd) };
+}
+
+function loadData(forceFresh, opts) {
+  opts = opts || {};
   var requestId = ++timelineRequestSeq;
   if (timelineAbortController && timelineAbortController.abort) {
     try { timelineAbortController.abort(); } catch (e) {}
   }
   timelineAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
   var fetchOptions = timelineAbortController ? { signal: timelineAbortController.signal } : {};
+  var range = getTimelineFetchRange();
+  var requestKey = range.from + "_" + range.to;
+  var url = API_URL + "?key=village2026&action=timeline"
+    + "&from=" + encodeURIComponent(range.from)
+    + "&to=" + encodeURIComponent(range.to)
+    + (forceFresh ? "&nocache=1" : "");
 
-  showLoading(true);
-  fetch(API_URL + "?key=village2026&action=timeline", fetchOptions)
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
+  if (!opts.silent) showLoading(true);
+  return fetch(url, fetchOptions)
+    .then(function(r) { return r.text(); })
+    .then(function(text) {
       if (requestId !== timelineRequestSeq) return;
+      var responseKey = requestKey + "\n" + text;
+      if (!forceFresh && responseKey === timelineLastResponseKey) {
+        if (!opts.silent) showLoading(false);
+        updateRefreshInfo();
+        return;
+      }
+      var data = JSON.parse(text);
+      timelineLastResponseKey = responseKey;
       allGroups = data.groups || [];
       allItems = data.items || [];
       applyFilters();
-      showLoading(false);
+      if (!opts.silent) showLoading(false);
       updateRefreshInfo();
     })
     .catch(function(err) {
       if (err && err.name === "AbortError") return;
       if (requestId !== timelineRequestSeq) return;
-      showLoading(false);
+      if (!opts.silent) showLoading(false);
       document.getElementById("statInfo").textContent = "오류: " + err.message;
     });
 }
@@ -566,11 +614,12 @@ function moveToday() {
     animation: { duration: 350, easingFunction: "easeInOutQuad" }
   });
   setDateRangeInputs(start, end);
+  loadData();
 }
 
 function reload() {
   document.getElementById("searchInput").value = "";
-  loadData();
+  loadData(true);
 }
 
 function dateInputStr(d) {
@@ -595,6 +644,7 @@ function applyDateRangeWindow() {
   }
   timeline.setWindow(start, end);
   setDateRangeInputs(start, end);
+  loadData();
 }
 
 function showLoading(show) {
@@ -605,7 +655,7 @@ function showLoading(show) {
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(function() {
-    loadData();
+    loadData(false, { silent: true });
   }, REFRESH_INTERVAL);
 }
 
@@ -826,7 +876,7 @@ function confirmScheduleAdd() {
   }, Promise.resolve()).then(function() {
       setScheduleAddBusy(false);
       if (failures.length) {
-        if (successes.length) loadData();
+        if (successes.length) loadData(true);
         resetScheduleEquipRows(failures.map(function(f) { return f.entry; }));
         alert((successes.length ? successes.length + '개 추가 완료, ' : '')
           + failures.length + '개 추가 실패\n'
@@ -835,7 +885,7 @@ function confirmScheduleAdd() {
       }
       closeAddModal();
       closeDetail();
-      loadData();
+      loadData(true);
     })
     .catch(function(err) {
       setScheduleAddBusy(false);
@@ -852,7 +902,7 @@ function deleteTimelineEquip(tid, equipName) {
     .then(function(res) {
       if (res.error) { alert('삭제 실패: ' + res.error); return; }
       closeDetail();
-      loadData();
+      loadData(true);
     })
     .catch(function(err) { alert('삭제 실패: ' + err.message); });
 }
