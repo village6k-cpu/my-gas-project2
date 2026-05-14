@@ -1028,6 +1028,128 @@ function applyContractMasterStatusRowStyle_(sheet, row, status) {
 }
 
 /**
+ * 계약마스터에서 반납일이 기준일보다 지난 건을 반납완료 처리한다.
+ * 기준: 반납일 < asOfDate, 취소/반납완료는 제외.
+ */
+function markOverdueReturnContracts(asOfDate, dryRun) {
+  var asOfSerial = parseContractDateSerial_(asOfDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd'), '');
+  if (!asOfSerial) return { error: "기준일 파싱 실패: " + asOfDate };
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('계약마스터');
+  if (!sheet || sheet.getLastRow() < 2) {
+    return { success: true, asOfDate: formatContractDateSerial_(asOfSerial), updated: 0, targets: [] };
+  }
+
+  var rowCount = sheet.getLastRow() - 1;
+  var values = sheet.getRange(2, 1, rowCount, 10).getValues();
+  var display = sheet.getRange(2, 1, rowCount, 10).getDisplayValues();
+  var targets = [];
+  var skipped = {
+    alreadyReturned: 0,
+    cancelled: 0,
+    notPast: 0,
+    missingReturnDate: 0
+  };
+
+  for (var i = 0; i < values.length; i++) {
+    var row = i + 2;
+    var tradeId = String(display[i][0] || values[i][0] || '').trim();
+    var status = String(display[i][9] || values[i][9] || '').trim();
+    var returnSerial = parseContractDateSerial_(values[i][6], display[i][6]); // G열: 반납일자
+
+    if (!tradeId) continue;
+    if (!returnSerial) {
+      skipped.missingReturnDate++;
+      continue;
+    }
+    if (returnSerial >= asOfSerial) {
+      skipped.notPast++;
+      continue;
+    }
+    if (status === '취소') {
+      skipped.cancelled++;
+      continue;
+    }
+    if (status === '반납완료') {
+      skipped.alreadyReturned++;
+      continue;
+    }
+
+    targets.push({
+      row: row,
+      tradeId: tradeId,
+      name: String(display[i][1] || '').trim(),
+      returnDate: formatContractDateSerial_(returnSerial),
+      previousStatus: status
+    });
+  }
+
+  if (dryRun === true || dryRun === 'true' || dryRun === '1') {
+    return {
+      success: true,
+      dryRun: true,
+      asOfDate: formatContractDateSerial_(asOfSerial),
+      cutoffExclusive: formatContractDateSerial_(asOfSerial),
+      targetCount: targets.length,
+      skipped: skipped,
+      targetsPreview: targets.slice(0, 50)
+    };
+  }
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (lockErr) {}
+
+  try {
+    targets.forEach(function(target) {
+      sheet.getRange(target.row, 10).setValue('반납완료'); // J열: 계약상태
+      applyContractMasterStatusRowStyle_(sheet, target.row, '반납완료');
+    });
+    invalidateDashboardCache();
+    return {
+      success: true,
+      dryRun: false,
+      asOfDate: formatContractDateSerial_(asOfSerial),
+      cutoffExclusive: formatContractDateSerial_(asOfSerial),
+      updated: targets.length,
+      skipped: skipped,
+      updatedPreview: targets.slice(0, 50)
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+function parseContractDateSerial_(raw, display) {
+  if (raw instanceof Date) {
+    return Number(Utilities.formatDate(raw, 'Asia/Seoul', 'yyyyMMdd'));
+  }
+
+  var text = String(display || raw || '').trim();
+  if (!text) return 0;
+
+  var nums = text.match(/\d+/g);
+  if (!nums || nums.length < 3) return 0;
+
+  var y = Number(nums[0]);
+  var m = Number(nums[1]);
+  var d = Number(nums[2]);
+  if (y < 100) y += 2000;
+  if (!y || !m || !d || m < 1 || m > 12 || d < 1 || d > 31) return 0;
+
+  return y * 10000 + m * 100 + d;
+}
+
+function formatContractDateSerial_(serial) {
+  serial = Number(serial) || 0;
+  if (!serial) return '';
+  var y = Math.floor(serial / 10000);
+  var m = Math.floor((serial % 10000) / 100);
+  var d = serial % 100;
+  return y + '-' + ('0' + m).slice(-2) + '-' + ('0' + d).slice(-2);
+}
+
+/**
  * 개별 장비 행 체크 토글 (Dashboard 체크리스트).
  * @param {string} scheduleId — 스케줄상세 A열 ID (e.g., "260423-001-01")
  * @param {string} phase — "checkout" or "checkin"
