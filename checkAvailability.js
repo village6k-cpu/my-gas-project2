@@ -2398,8 +2398,8 @@ function getDashboardEquipNameList_(ss) {
 }
 
 function buildDashboardSetLookup_(setSheet) {
-  return getDashboardCachedJson_("dashboardSetLookup_v1", 300, function() {
-    var lookup = { components: {}, prices: {} };
+  return getDashboardCachedJson_("dashboardSetLookup_v2", 300, function() {
+    var lookup = { components: {}, prices: {}, items: {} };
     if (!setSheet || setSheet.getLastRow() < 2) return lookup;
 
     var lastCol = Math.max(setSheet.getLastColumn(), 7);
@@ -2407,6 +2407,7 @@ function buildDashboardSetLookup_(setSheet) {
     data.forEach(function(row) {
       var setName = String(row[0] || "").trim();
       if (!setName) return;
+      lookup.items[setName] = true;
       if (row[6] !== "" && row[6] !== null && lookup.prices[setName] === undefined) {
         lookup.prices[setName] = row[6];
       }
@@ -2705,7 +2706,8 @@ function dashboardAddEquipments(tid, entries, options) {
         name: entry.name,
         qty: entry.qty,
         components: components,
-        price: setLookup.prices[entry.name] || 0
+        price: setLookup.prices[entry.name] || 0,
+        isSetMasterItem: !!(setLookup.items && setLookup.items[entry.name])
       });
       availabilityItems = availabilityItems.concat(buildAvailabilityItems_(entry.name, entry.qty, components));
     });
@@ -2750,9 +2752,10 @@ function dashboardAddEquipments(tid, entries, options) {
         });
       } else {
         maxN++;
+        var setMasterName = spec.isSetMasterItem ? spec.name : "";
         newRows.push([
           tid + "-" + ("0" + maxN).slice(-2),
-          tid, "", spec.name, spec.qty, 반출일, 반출시간, 반납일, 반납시간,
+          tid, setMasterName, spec.name, spec.qty, 반출일, 반출시간, 반납일, 반납시간,
           "대기", "", spec.price, 예약자명
         ]);
       }
@@ -2998,9 +3001,10 @@ function dashboardAddEquipment(tid, equipName, qty) {
       });
     } else {
       maxN++;
+      var setNameForSingle = isSetMasterName(equipName, setSheet) ? equipName : "";
       newRows.push([
         tid + "-" + ("0" + maxN).slice(-2),
-        tid, "", equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
+        tid, setNameForSingle, equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
         "대기", "", 0, 예약자명
       ]);
       newRows[0][11] = price;
@@ -5129,13 +5133,14 @@ function registerByReqID(sheet, triggerRow) {
         schedSheet.getRange(compRow, 6, 1, 4).setNumberFormat("@");
 
       } else {
-        // ── 개별 장비: C=빈칸, D=장비명, L=단가 (세트마스터 G열 기준) ──
+        // ── 세트마스터 품목: C=품목명, D=품목명, L=단가. 순수 장비마스터 장비만 C를 비운다. ──
         const 단가 = findSetPrice(장비명, setSheet);
+        const 세트마스터품목명 = isSetMasterName(장비명, setSheet) ? 장비명 : "";
         schedCount++;
         const schedID = `${거래ID}-${String(schedCount).padStart(2, "0")}`;
         const newRow = writeBaseRow + schedCount;
         schedSheet.getRange(newRow, 1, 1, 13).setValues([[
-          schedID, 거래ID, "", 장비명, 수량,
+          schedID, 거래ID, 세트마스터품목명, 장비명, 수량,
           반출일str, 반출시간str, 반납일str, 반납시간str,
           "대기", "", 단가, 예약자명
         ]]);
@@ -5400,10 +5405,11 @@ function addEquipmentToContract(sheet, row) {
 
   const setSheet = ss.getSheetByName("세트마스터");
   const 단가 = findSetPrice(장비명, setSheet);
+  const 세트마스터품목명 = isSetMasterName(장비명, setSheet) ? 장비명 : "";
 
   const newRow = schedLastRow + 1;
   schedSheet.getRange(newRow, 1, 1, 13).setValues([[
-    schedID, 거래ID, "", 장비명, 수량,
+    schedID, 거래ID, 세트마스터품목명, 장비명, 수량,
     반출일str, 반출시간str, 반납일str, 반납시간str,
     "대기", "", 단가, 예약자명_add
   ]]);
@@ -5805,6 +5811,19 @@ function findSetPrice(name, setSheet) {
     }
   }
   return 0;
+}
+
+function isSetMasterName(name, setSheet) {
+  if (!name || !setSheet) return false;
+  const lastRow = setSheet.getLastRow();
+  if (lastRow < 2) return false;
+
+  const target = String(name).trim();
+  const names = setSheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (let i = 0; i < names.length; i++) {
+    if (String(names[i][0] || "").trim() === target) return true;
+  }
+  return false;
 }
 
 /**
