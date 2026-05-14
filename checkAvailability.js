@@ -571,8 +571,9 @@ function getDashboardData(targetDate, skipCache) {
       };
     });
 
+    var isContractReturned = String(cust.contractStatus || '').trim() === '반납완료';
     var setupDone = props['setupDone_' + tid] === '1';
-    var returnDone = props['returnDone_' + tid] === '1';
+    var returnDone = props['returnDone_' + tid] === '1' || isContractReturned;
 
     var item = {
       tradeId: tid,
@@ -616,7 +617,7 @@ function getDashboardData(targetDate, skipCache) {
     }
 
     // 현재 대여중 (반출일 <= 오늘 <= 반납일, 취소 아님)
-    if (g.반출일 <= today && g.반납일 >= today && g.상태 !== '반납완료') {
+    if (g.반출일 <= today && g.반납일 >= today && g.상태 !== '반납완료' && !isContractReturned) {
       activeCount++;
     }
   });
@@ -931,13 +932,99 @@ function toggleSetupDone(tid, done) {
  */
 function toggleReturnDone(tid, done) {
   if (!tid) return { error: "tid 필요" };
-  var key = 'returnDone_' + String(tid).trim();
+  tid = String(tid).trim();
+  var key = 'returnDone_' + tid;
   var props = PropertiesService.getScriptProperties();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
-  if (isDone) props.setProperty(key, '1');
-  else props.deleteProperty(key);
-  invalidateDashboardCache();
-  return { tid: tid, returnDone: isDone };
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(5000); } catch (lockErr) {}
+
+  try {
+    var contractResult = setDashboardReturnContractStatus_(tid, isDone, props);
+    if (contractResult && contractResult.error) return contractResult;
+
+    if (isDone) props.setProperty(key, '1');
+    else props.deleteProperty(key);
+    invalidateDashboardCache();
+    return {
+      tid: tid,
+      returnDone: isDone,
+      contractStatus: contractResult.status,
+      previousContractStatus: contractResult.previousStatus || '',
+      row: contractResult.row
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+function setDashboardReturnContractStatus_(tid, isDone, props) {
+  props = props || PropertiesService.getScriptProperties();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('계약마스터');
+  if (!sheet || sheet.getLastRow() < 2) return { error: "계약마스터 시트 없음" };
+
+  var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0] || '').trim() !== tid) continue;
+
+    var row = i + 2;
+    var prevKey = 'returnPrevContractStatus_' + tid;
+    var currentStatus = String(sheet.getRange(row, 10).getDisplayValue() || '').trim();
+    var nextStatus;
+
+    if (isDone) {
+      if (currentStatus && currentStatus !== '반납완료') {
+        props.setProperty(prevKey, currentStatus);
+      }
+      nextStatus = '반납완료';
+    } else {
+      nextStatus = props.getProperty(prevKey) || '반출';
+      props.deleteProperty(prevKey);
+    }
+
+    sheet.getRange(row, 10).setValue(nextStatus); // J열: 계약상태
+    applyContractMasterStatusRowStyle_(sheet, row, nextStatus);
+    return {
+      success: true,
+      tradeId: tid,
+      row: row,
+      previousStatus: currentStatus,
+      status: nextStatus
+    };
+  }
+
+  return { error: "계약마스터에서 거래ID를 찾지 못했습니다: " + tid };
+}
+
+function applyContractMasterStatusRowStyle_(sheet, row, status) {
+  if (!sheet || row < 2) return;
+
+  var lastCol = Math.max(11, Math.min(sheet.getLastColumn(), 11));
+  var rowRange = sheet.getRange(row, 1, 1, lastCol);
+  status = String(status || '').trim();
+
+  if (status === '반납완료' || status === '완료') {
+    rowRange
+      .setBackground("#E7E6E6")
+      .setFontColor("#7F7F7F")
+      .setFontLine("line-through");
+    return;
+  }
+
+  rowRange
+    .setBackground(null)
+    .setFontColor(null)
+    .setFontLine("none")
+    .setFontWeight(null)
+    .setFontStyle(null);
+
+  sheet.getRange(row, 5, 1, 2).setBackground("#DAE8FC");      // E,F 반출
+  sheet.getRange(row, 7, 1, 2).setBackground("#D5E8D4");      // G,H 반납
+  sheet.getRange(row, 9, 1, 1).setBackground("#FFF2CC");      // I 회차
+  sheet.getRange(row, 10, 1, 1).setBackground("#BDD7EE");     // J 계약상태
+  sheet.getRange(row, 5, 1, 6).setFontWeight("bold");
 }
 
 /**
@@ -1100,10 +1187,10 @@ function updateEquipmentCheck(scheduleId, tradeId, label, field, value) {
 function updateDashboardContractStatus(tradeId, status) {
   tradeId = String(tradeId || '').trim();
   status = String(status || '').trim();
-  var allowed = { "예약": true, "반출": true, "취소": true };
+  var allowed = { "예약": true, "반출": true, "취소": true, "반납완료": true };
 
   if (!tradeId) return { error: "거래ID 필수" };
-  if (!allowed[status]) return { error: "계약상태는 예약/반출/취소만 허용" };
+  if (!allowed[status]) return { error: "계약상태는 예약/반출/취소/반납완료만 허용" };
 
   var lock = LockService.getScriptLock();
   try { lock.waitLock(5000); } catch (lockErr) {}
@@ -1118,6 +1205,7 @@ function updateDashboardContractStatus(tradeId, status) {
       if (String(ids[i][0] || '').trim() === tradeId) {
         var row = i + 2;
         sheet.getRange(row, 10).setValue(status); // J열: 계약상태
+        applyContractMasterStatusRowStyle_(sheet, row, status);
         invalidateDashboardCache();
         return { success: true, tradeId: tradeId, status: status, row: row };
       }
@@ -6417,7 +6505,7 @@ function clearValidation() {
  * - E,F 반출일/시간: 연파랑
  * - G,H 반납일/시간: 연녹색
  * - I 회차: 연노랑
- * - J 계약상태: 기본 파랑, 조건부서식으로 "취소"→빨강+취소선, "완료"→회색
+ * - J 계약상태: 기본 파랑, 조건부서식으로 "취소"→빨강+취소선, "완료/반납완료"→회색+취소선
  * - A,B,C,D,K 기타 정보: 흐린 회색 톤 (글자도 흐리게)
  * - E~J 굵게
  */
@@ -6474,9 +6562,10 @@ function formatContractSheet() {
   );
   existing.push(
     SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied('=$J2="완료"')
+      .whenFormulaSatisfied('=OR($J2="완료",$J2="반납완료")')
       .setBackground("#E7E6E6")
       .setFontColor("#7F7F7F")
+      .setStrikethrough(true)
       .setRanges([ruleRange])
       .build()
   );

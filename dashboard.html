@@ -487,6 +487,43 @@
 
   .schedule-card.type-checkout { border-left: 3px solid var(--accent); }
   .schedule-card.type-checkin  { border-left: 3px solid var(--gray-text); }
+  .schedule-card.task-done {
+    opacity: 0.55;
+    background: var(--green-bg);
+    border-left-color: var(--green-text) !important;
+  }
+  .schedule-card.type-checkin.task-done {
+    opacity: 0.68;
+    background: #E8E8E5;
+    border-left-color: #787774 !important;
+  }
+  .schedule-card.task-done .customer-name {
+    text-decoration: line-through;
+    color: var(--text-muted);
+  }
+  .task-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius);
+    border: 1.5px solid var(--border);
+    background: var(--surface);
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .task-toggle:hover { border-color: var(--green-text); color: var(--green-text); }
+  .task-toggle.checked {
+    background: var(--green-text);
+    border-color: var(--green-text);
+    color: #fff;
+  }
 
   .card-header {
     display: flex;
@@ -745,7 +782,7 @@
   .status-예약     { background: var(--blue-bg); color: var(--blue-text); }
   .status-반출     { background: var(--amber-bg); color: var(--amber-text); }
   .status-반출중   { background: var(--amber-bg); color: var(--amber-text); }
-  .status-반납완료 { background: var(--green-bg); color: var(--green-text); }
+  .status-반납완료 { background: #E8E8E5; color: #787774; }
   .status-취소     { background: #E8E8E5; color: #787774; }
 
   /* ── 빈 상태 ── */
@@ -1658,11 +1695,22 @@ function renderList(containerId, items, type, isSearching) {
       var cardType = item._type || type;
       var cardId = cardType + '_' + timeKey.replace(/[: ]/g,'') + '_' + idx;
 
-      html += '<div class="schedule-card type-' + cardType + '" onclick="toggleDetail(\'' + cardId + '\')">';
-      html += '<div class="card-header"><div>';
+      var taskDone = (cardType === 'checkout' ? item.setupDone : (cardType === 'checkin' ? item.returnDone : false));
+      var taskAction = (cardType === 'checkout' ? 'toggleSetup' : 'toggleReturn');
+      var doneCls = taskDone ? ' task-done' : '';
+      var toggleCls = taskDone ? 'task-toggle checked' : 'task-toggle';
+      var toggleIcon = taskDone ? '✓' : '';
+
+      html += '<div class="schedule-card type-' + cardType + doneCls + '" data-tid="' + escHtml(item.tradeId) + '" data-cardtype="' + cardType + '" onclick="toggleDetail(\'' + cardId + '\')">';
+      html += '<div class="card-header">';
+      html += '<div style="display:flex;align-items:flex-start;gap:0;">';
+      if (cardType === 'checkout' || cardType === 'checkin') {
+        html += '<button class="' + toggleCls + '" onclick="event.stopPropagation();toggleTask(this,\'' + escHtml(item.tradeId) + '\',\'' + taskAction + '\')">' + toggleIcon + '</button>';
+      }
+      html += '<div>';
       html += '<div class="customer-name">' + escHtml(item.name) + '</div>';
       if (item.company) html += '<div class="customer-company">' + escHtml(item.company) + '</div>';
-      html += '</div>';
+      html += '</div></div>';
       html += '<div class="time-badge">' + timeKey + '</div></div>';
 
       if (item.tel) {
@@ -1713,7 +1761,7 @@ function renderList(containerId, items, type, isSearching) {
       var detailStatusLabel = cardType === 'checkout' ? '계약상태' : '상태';
       var detailStatus = cardType === 'checkout'
         ? (normalizeContractStatus(item.contractStatus || item.status) || item.contractStatus || item.status || '예약')
-        : (item.status || '대기');
+        : (item.contractStatus === '반납완료' ? '반납완료' : (item.status || '대기'));
       html += '<div class="detail-row"><span>' + detailStatusLabel + '</span><span class="status-badge status-' + detailStatus + '">' + detailStatus + '</span></div>';
       if (item.equipments && item.equipments.length > 0) {
         var total = item.equipments.reduce(function(s, eq) { return s + (eq.qty || 1); }, 0);
@@ -2518,6 +2566,41 @@ function toggleItem(cb, scheduleId, phase) {
       if (row) row.classList.toggle('checked', !nowDone);
       syncItemCheckInMemory(scheduleId, phase, !nowDone);
     });
+}
+
+function toggleTask(btn, tid, action) {
+  var nowDone = !btn.classList.contains('checked');
+  btn.classList.toggle('checked', nowDone);
+  btn.textContent = nowDone ? '✓' : '';
+  var card = btn.closest('.schedule-card');
+  if (card) card.classList.toggle('task-done', nowDone);
+  syncTaskDoneInMemory(tid, action, nowDone);
+
+  fetch(API_URL + '?key=village2026&action=' + action + '&tid=' + encodeURIComponent(tid) + '&done=' + (nowDone ? '1' : '0'))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res && res.error) throw new Error(res.error);
+      if (action === 'toggleReturn' && res && res.contractStatus) {
+        syncContractStatusInMemory(tid, res.contractStatus);
+      }
+    })
+    .catch(function() {
+      btn.classList.toggle('checked', !nowDone);
+      btn.textContent = !nowDone ? '✓' : '';
+      if (card) card.classList.toggle('task-done', !nowDone);
+      syncTaskDoneInMemory(tid, action, !nowDone);
+    });
+}
+
+function syncTaskDoneInMemory(tid, action, done) {
+  dashboardItemsForTrade(tid).forEach(function(item) {
+    if (action === 'toggleSetup') item.setupDone = done;
+    if (action === 'toggleReturn') {
+      item.returnDone = done;
+      item.contractStatus = done ? '반납완료' : '반출';
+    }
+  });
+  persistCurrentDashboardCache();
 }
 
 function syncItemCheckInMemory(scheduleId, phase, done) {

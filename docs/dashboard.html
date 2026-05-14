@@ -497,6 +497,11 @@
     background: var(--green-bg);
     border-left-color: var(--green-text) !important;
   }
+  .schedule-card.type-checkin.task-done {
+    opacity: 0.68;
+    background: #E8E8E5;
+    border-left-color: #787774 !important;
+  }
   .schedule-card.task-done .customer-name {
     text-decoration: line-through;
     color: var(--text-muted);
@@ -1084,7 +1089,7 @@
   .status-예약     { background: var(--blue-bg); color: var(--blue-text); }
   .status-반출     { background: var(--amber-bg); color: var(--amber-text); }
   .status-반출중   { background: var(--amber-bg); color: var(--amber-text); }
-  .status-반납완료 { background: var(--green-bg); color: var(--green-text); }
+  .status-반납완료 { background: #E8E8E5; color: #787774; }
   .status-취소     { background: #E8E8E5; color: #787774; }
 
   /* ── 빈 상태 ── */
@@ -1803,7 +1808,7 @@ function renderList(containerId, items, type, isSearching) {
       var detailStatusLabel = cardType === 'checkout' ? '계약상태' : '상태';
       var detailStatus = cardType === 'checkout'
         ? (normalizeContractStatus(item.contractStatus || item.status) || item.contractStatus || item.status || '예약')
-        : (item.status || '대기');
+        : (item.contractStatus === '반납완료' ? '반납완료' : (item.status || '대기'));
       html += '<div class="detail-row"><span>' + detailStatusLabel + '</span><span class="status-badge status-' + detailStatus + '">' + detailStatus + '</span></div>';
       if (item.equipments && item.equipments.length > 0) {
         var total = item.equipments.reduce(function(s, eq) { return s + (eq.qty || 1); }, 0);
@@ -2130,6 +2135,12 @@ function toggleTask(btn, tid, action) {
 
   fetch(API_URL + '?key=village2026&action=' + action + '&tid=' + encodeURIComponent(tid) + '&done=' + (nowDone ? '1' : '0'))
     .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res && res.error) throw new Error(res.error);
+      if (action === 'toggleReturn' && res && res.contractStatus) {
+        syncContractStatusInMemory(tid, res.contractStatus);
+      }
+    })
     .catch(function() {
       btn.classList.toggle('checked', !nowDone);
       btn.textContent = !nowDone ? '✓' : '';
@@ -2141,7 +2152,10 @@ function toggleTask(btn, tid, action) {
 function syncTaskDoneInMemory(tid, action, done) {
   dashboardItemsForTrade(tid).forEach(function(item) {
     if (action === 'toggleSetup') item.setupDone = done;
-    if (action === 'toggleReturn') item.returnDone = done;
+    if (action === 'toggleReturn') {
+      item.returnDone = done;
+      item.contractStatus = done ? '반납완료' : '반출';
+    }
   });
   persistCurrentDashboardCache();
 }
