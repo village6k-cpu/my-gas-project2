@@ -147,12 +147,12 @@ function onEditInstallable(e) {
     handleScheduleEdit(e);
   }
 
-  // 계약마스터 J열(10) "취소" → 스케줄상세 삭제 + 개고생2.0 삭제
+  // 계약마스터 J열(10) 계약상태 변경 → 상태별 후속 처리 + 대시보드 캐시 갱신
   if (sheet.getName() === "계약마스터" && col === 10 && row >= 2) {
-    var val = e.range.getValue();
-    if (String(val).trim() === "취소") {
-      var 거래ID = String(sheet.getRange(row, 1).getValue()).trim();
-      if (거래ID) cancelContract(e.source, 거래ID, row);
+    try {
+      handleContractMasterStatusEdit_(e.source, sheet, row, e.range.getValue());
+    } catch (err) {
+      Logger.log("계약마스터 계약상태 변경 처리 실패: " + err.message);
     }
   }
 
@@ -213,6 +213,32 @@ function onEditInstallable(e) {
       Logger.log("계약마스터 일정 변경 처리 실패: " + err.message);
     }
   }
+}
+
+function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus) {
+  var status = String(rawStatus || '').trim();
+  var tradeId = String(sheet.getRange(row, 1).getValue()).trim();
+
+  if (status === "취소") {
+    if (tradeId) cancelContract(ss, tradeId, row);
+    return;
+  }
+
+  if (typeof applyContractMasterStatusRowStyle_ === "function") {
+    applyContractMasterStatusRowStyle_(sheet, row, status);
+  }
+
+  if (tradeId) {
+    var props = PropertiesService.getScriptProperties();
+    if (status === "반납완료") {
+      props.setProperty('returnDone_' + tradeId, '1');
+    } else {
+      props.deleteProperty('returnDone_' + tradeId);
+      props.deleteProperty('returnPrevContractStatus_' + tradeId);
+    }
+  }
+
+  try { invalidateDashboardCache(); } catch (cacheErr) {}
 }
 
 /**
@@ -1276,5 +1302,3 @@ function syncAuditFromMaster() {
   Logger.log(msg);
   try { SpreadsheetApp.getUi().alert(msg); } catch(e) {}
 }
-
-
