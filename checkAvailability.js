@@ -522,7 +522,7 @@ function getDashboardData(targetDate, skipCache) {
     var 스케줄ID = String(row[0] || '').trim();
     var setNameStr = String(세트명 || '').trim();
     var equipNameStr = String(장비명 || '').trim();
-    var isHeader = setNameStr !== '' && setNameStr === equipNameStr;  // 대표행 또는 단품(C===D)
+    var isHeader = setNameStr === '' || setNameStr === equipNameStr;  // 단품 또는 세트 대표행
     tradeGroups[거래ID].equipments.push({
       scheduleId: 스케줄ID,
       name: equipNameStr,
@@ -563,9 +563,9 @@ function getDashboardData(targetDate, skipCache) {
         name: eq.name,
         qty: eq.qty,
         setName: eq.setName,
-        isHeader: eq.isHeader,                                       // 대표행 또는 단품
+        isHeader: eq.isHeader,                                       // 단품 또는 세트 대표행
         isSet: eq.isHeader && !!setsWithComponents[eq.name],          // 세트 대표(구성품 있음)
-        isComponent: !eq.isHeader,                                    // 구성품
+        isComponent: !!eq.setName && !eq.isHeader,                    // 세트 구성품
         checkedCheckout: props['itemCheck_' + eq.scheduleId + '_checkout'] === '1',
         checkedCheckin:  props['itemCheck_' + eq.scheduleId + '_checkin']  === '1'
       };
@@ -3506,6 +3506,21 @@ function _normalizeDiscountType(v) {
  * 구버전 호환: req.업체명 이 오면 req.할인유형으로 간주 (코워크 파서 마이그레이션 전 임시 fallback)
  */
 function insertAndCheckRequest(req) {
+  var insertLock = LockService.getScriptLock();
+  try {
+    insertLock.waitLock(30000);
+  } catch (e) {
+    throw new Error("다른 예약 입력을 처리 중입니다. 잠시 후 다시 시도하세요.");
+  }
+
+  try {
+    return _insertAndCheckRequest(req);
+  } finally {
+    insertLock.releaseLock();
+  }
+}
+
+function _insertAndCheckRequest(req) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("확인요청");
   if (!sheet) throw new Error("확인요청 시트 없음");
@@ -3645,7 +3660,7 @@ function insertAndCheckRequest(req) {
   // 가용확인 실행
   sheet.getRange(startRow, 8).setValue("확인");
   SpreadsheetApp.flush();
-  processByReqID(sheet, startRow);
+  _processByReqID(sheet, startRow);
 
   // 가용확인 결과 읽기 — 세트 전개로 행이 늘어날 수 있으므로 reqID 기준으로 전체 읽기
   SpreadsheetApp.flush();
@@ -3846,8 +3861,10 @@ function deleteRequest(reqID) {
 function processByReqID(sheet, triggerRow) {
   // ── 중복 실행 방지 락 ──
   var lock = LockService.getScriptLock();
-  if (!lock.tryLock(3000)) {
-    Logger.log("processByReqID: 다른 인스턴스 실행 중 — 스킵");
+  try {
+    lock.waitLock(30000);
+  } catch (e) {
+    sheet.getRange(triggerRow, 9).setValue("⏳ 확인대기");
     return;
   }
 
@@ -4751,10 +4768,10 @@ function registerByReqID(sheet, triggerRow) {
   const setSheet = ss.getSheetByName("세트마스터");
   const equipSheet = ss.getSheetByName("장비마스터");
 
-  const lastRow = sheet.getLastRow();
-  const allData = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
+  let lastRow = sheet.getLastRow();
+  let allData = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
   // 시간 컬럼은 displayValue로 대체 (1899 timezone 이슈 방지)
-  var regDisplayData = sheet.getRange(2, 1, lastRow - 1, 18).getDisplayValues();
+  let regDisplayData = sheet.getRange(2, 1, lastRow - 1, 18).getDisplayValues();
   for (var di = 0; di < allData.length; di++) { allData[di][2] = regDisplayData[di][2]; allData[di][4] = regDisplayData[di][4]; allData[di][11] = regDisplayData[di][11]; }
   const triggerIdx = triggerRow - 2;
   const reqID = allData[triggerIdx][0];
@@ -4762,6 +4779,19 @@ function registerByReqID(sheet, triggerRow) {
   if (!reqID) {
     sheet.getRange(triggerRow, 15).setValue("❌ 요청ID 없음");
     return;
+  }
+
+  // 등록 직전 세트 펼침/가용확인을 한 번 더 보장한다.
+  // 배치 입력 중 확인 락이 밀리면 I열이 비어 세트가 단품으로 등록될 수 있다.
+  _processByReqID(sheet, triggerRow);
+  SpreadsheetApp.flush();
+  lastRow = sheet.getLastRow();
+  allData = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
+  regDisplayData = sheet.getRange(2, 1, lastRow - 1, 18).getDisplayValues();
+  for (var rdi = 0; rdi < allData.length; rdi++) {
+    allData[rdi][2] = regDisplayData[rdi][2];
+    allData[rdi][4] = regDisplayData[rdi][4];
+    allData[rdi][11] = regDisplayData[rdi][11];
   }
 
   // ── 예약자명 확인 ──
