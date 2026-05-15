@@ -94,6 +94,18 @@ assert.match(
     /dashboardSearchCollapsedGroups/,
     `${file} must remember collapsed search groups while rendering`
   );
+
+  assert.match(
+    html,
+    /function resetDashboardSearchCollapsedGroups\(data\)/,
+    `${file} must initialize global search groups as collapsed`
+  );
+
+  assert.match(
+    html,
+    /dashboardSearchCollapsedGroups\[groupId\]\s*=\s*true/,
+    `${file} must collapse global search groups by default`
+  );
 });
 
 console.log('dashboard global search static checks passed');

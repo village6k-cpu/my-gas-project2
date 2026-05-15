@@ -1376,6 +1376,7 @@ function loadDashboardGlobalSearch(query) {
     .then(function(data) {
       if (requestId !== dashboardSearchRequestSeq || query !== dashboardSearchQuery) return;
       dashboardGlobalSearchData = data || {};
+      resetDashboardSearchCollapsedGroups(dashboardGlobalSearchData);
       renderDashboardGlobalSearch(dashboardGlobalSearchData);
     })
     .catch(function(err) {
@@ -1827,6 +1828,17 @@ function toggleDashboardSearchGroup(groupId) {
   if (!groupId) return;
   dashboardSearchCollapsedGroups[groupId] = !dashboardSearchCollapsedGroups[groupId];
   if (dashboardGlobalSearchData) renderDashboardGlobalSearch(dashboardGlobalSearchData);
+}
+
+function resetDashboardSearchCollapsedGroups(data) {
+  dashboardSearchCollapsedGroups = {};
+  var items = []
+    .concat((data && data.checkout) || [])
+    .concat((data && data.checkin) || []);
+  items.forEach(function(item) {
+    var groupId = dashboardSearchGroupId(item.searchGroupLabel || item.searchDate || '날짜 미정');
+    dashboardSearchCollapsedGroups[groupId] = true;
+  });
 }
 
 function dashboardSearchGroupId(label) {
