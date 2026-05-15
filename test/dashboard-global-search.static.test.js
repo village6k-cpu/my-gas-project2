@@ -70,6 +70,30 @@ assert.match(
     /search-date-badge/,
     `${file} must render a visible date badge on search result cards`
   );
+
+  assert.match(
+    html,
+    /function toggleDashboardSearchGroup\(groupId\)/,
+    `${file} must implement toggling for global search date groups`
+  );
+
+  assert.match(
+    html,
+    /search-group-toggle/,
+    `${file} must render search group headers as toggle buttons`
+  );
+
+  assert.match(
+    html,
+    /time-group\.collapsed\s+\.time-group-body/,
+    `${file} must hide collapsed search group bodies`
+  );
+
+  assert.match(
+    html,
+    /dashboardSearchCollapsedGroups/,
+    `${file} must remember collapsed search groups while rendering`
+  );
 });
 
 console.log('dashboard global search static checks passed');

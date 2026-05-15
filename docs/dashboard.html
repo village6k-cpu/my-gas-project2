@@ -486,6 +486,35 @@
     height: 1px;
     background: var(--border);
   }
+  .search-group-toggle {
+    width: 100%;
+    min-height: 38px;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text-primary);
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .search-group-toggle::after { display: none; }
+  .search-group-toggle:hover { border-color: var(--accent); }
+  .search-group-title { font-size: 13px; font-weight: 850; }
+  .search-group-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 750;
+  }
+  .search-group-chevron {
+    display: inline-block;
+    transition: transform 0.15s;
+  }
+  .time-group.collapsed .search-group-chevron { transform: rotate(-90deg); }
+  .time-group.collapsed .time-group-body { display: none; }
 
   /* ── 일정 카드 ── */
   .schedule-card {
@@ -1276,6 +1305,7 @@ var dashboardAbortController = null;
 var dashboardSearchTimer = null;
 var dashboardSearchRequestSeq = 0;
 var dashboardSearchAbortController = null;
+var dashboardSearchCollapsedGroups = {};
 var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
 var DASHBOARD_OLD_CACHE_PREFIX = 'dashCache_v3_';
 var CONTRACT_STATUS_OPTIONS = ['', '예약', '반출', '취소'];
@@ -1837,6 +1867,16 @@ function renderDashboardGlobalSearch(data) {
   scheduleDashboardPhotoLoad(all);
 }
 
+function toggleDashboardSearchGroup(groupId) {
+  if (!groupId) return;
+  dashboardSearchCollapsedGroups[groupId] = !dashboardSearchCollapsedGroups[groupId];
+  if (dashboardGlobalSearchData) renderDashboardGlobalSearch(dashboardGlobalSearchData);
+}
+
+function dashboardSearchGroupId(label) {
+  return 'search_' + String(label || 'unknown').replace(/[^A-Za-z0-9가-힣_-]+/g, '_');
+}
+
 function renderList(containerId, items, type, isSearching, options) {
   options = options || {};
   var container = document.getElementById(containerId);
@@ -1860,8 +1900,18 @@ function renderList(containerId, items, type, isSearching, options) {
 
   var html = '';
   Object.keys(groups).sort(options.globalSearch ? compareDashboardSearchGroupLabels : compareTimeLabels).forEach(function(timeKey) {
-    html += '<div class="time-group">';
-    html += '<div class="time-group-header">' + timeKey + '</div>';
+    var groupId = options.globalSearch ? dashboardSearchGroupId(timeKey) : '';
+    var isCollapsed = options.globalSearch && dashboardSearchCollapsedGroups[groupId];
+    html += '<div class="time-group' + (isCollapsed ? ' collapsed' : '') + '"' + (groupId ? ' data-search-group="' + escAttr(groupId) + '"' : '') + '>';
+    if (options.globalSearch) {
+      html += '<button type="button" class="time-group-header search-group-toggle" onclick="toggleDashboardSearchGroup(\'' + escJs(groupId) + '\')">';
+      html += '<span class="search-group-title">' + escHtml(timeKey) + '</span>';
+      html += '<span class="search-group-meta"><span>' + groups[timeKey].length + '건</span><span class="search-group-chevron">▾</span></span>';
+      html += '</button>';
+      html += '<div class="time-group-body">';
+    } else {
+      html += '<div class="time-group-header">' + escHtml(timeKey) + '</div>';
+    }
 
     groups[timeKey].forEach(function(item, idx) {
       var cardType = item._type || type;
@@ -1948,6 +1998,7 @@ function renderList(containerId, items, type, isSearching, options) {
       }
       html += '</div></div>';
     });
+    if (options.globalSearch) html += '</div>';
     html += '</div>';
   });
 
