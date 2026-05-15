@@ -249,6 +249,18 @@
     box-shadow: 0 0 0 2px rgba(35,131,226,0.15);
   }
   .dashboard-search input::placeholder { color: var(--text-muted); }
+  .dashboard-search-status {
+    display: none;
+    margin: 10px 20px 0;
+    padding: 9px 12px;
+    border: 1px solid rgba(35,131,226,0.18);
+    border-radius: var(--radius);
+    background: #EAF4FF;
+    color: #0F5EA8;
+    font-size: 12px;
+    font-weight: 750;
+  }
+  .dashboard-search-status.visible { display: block; }
 
   /* ── 인수인계 메모 ── */
   .notice-board {
@@ -551,6 +563,23 @@
   }
   .type-checkout .time-badge { background: var(--blue-bg); color: var(--blue-text); }
   .type-checkin  .time-badge { background: var(--gray-bg); color: var(--gray-text); }
+  .search-card-badges {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .search-date-badge {
+    font-size: 12px;
+    font-weight: 800;
+    padding: 3px 9px;
+    border: 1px solid rgba(35,131,226,0.22);
+    border-radius: 6px;
+    background: #EAF4FF;
+    color: #0F5EA8;
+    white-space: nowrap;
+  }
 
   .card-meta {
     display: flex;
@@ -1139,7 +1168,7 @@
     <button class="today-btn" onclick="goToday()">오늘</button>
     <div class="dashboard-search">
       <span class="dashboard-search-icon">&#x1F50D;</span>
-      <input id="dashboardSearchInput" type="search" placeholder="고객/장비/거래ID 검색" autocomplete="off" oninput="onDashboardSearchInput(this.value)">
+      <input id="dashboardSearchInput" type="search" placeholder="이름, 연락처, 장비, 거래ID 전체 검색" autocomplete="off" oninput="onDashboardSearchInput(this.value)">
     </div>
     <div class="date-context">
       <strong id="headerTitle">오늘 일정</strong>
@@ -1179,6 +1208,7 @@
     </button>
   </div>
 </div>
+<div id="dashboardSearchStatus" class="dashboard-search-status"></div>
 
 <div class="content">
   <div id="loadingArea" class="loading">
@@ -1192,11 +1222,15 @@
 
 <script>
 var dashboardData = null;
+var dashboardGlobalSearchData = null;
 var currentDate = new Date();
 var activeDashboardTab = 'checkout';
 var dashboardSearchQuery = '';
 var dashboardRequestSeq = 0;
 var dashboardAbortController = null;
+var dashboardSearchTimer = null;
+var dashboardSearchRequestSeq = 0;
+var dashboardSearchAbortController = null;
 var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
 var CONTRACT_STATUS_OPTIONS = ['', '예약', '반출', '취소'];
 var RETURN_STATUS_OPTIONS = ['', '정상', '확인필요', '파손', '분실', '미반납', '반납완료'];
@@ -1277,8 +1311,56 @@ function goToday() {
 
 function onDashboardSearchInput(value) {
   dashboardSearchQuery = String(value || '').trim();
-  if (dashboardSearchQuery) activeDashboardTab = 'all';
-  if (dashboardData) renderDashboard(dashboardData, formatDate(currentDate));
+  if (dashboardSearchTimer) clearTimeout(dashboardSearchTimer);
+  if (!dashboardSearchQuery) {
+    dashboardGlobalSearchData = null;
+    setDashboardSearchStatus('');
+    if (dashboardSearchAbortController && dashboardSearchAbortController.abort) {
+      try { dashboardSearchAbortController.abort(); } catch (e) {}
+    }
+    if (dashboardData) renderDashboard(dashboardData, formatDate(currentDate));
+    return;
+  }
+
+  activeDashboardTab = 'all';
+  setDashboardSearchStatus('전체 예약에서 검색 중...');
+  dashboardSearchTimer = setTimeout(function() {
+    loadDashboardGlobalSearch(dashboardSearchQuery);
+  }, 180);
+}
+
+function loadDashboardGlobalSearch(query) {
+  query = String(query || '').trim();
+  if (!query) return;
+
+  var requestId = ++dashboardSearchRequestSeq;
+  if (dashboardSearchAbortController && dashboardSearchAbortController.abort) {
+    try { dashboardSearchAbortController.abort(); } catch (e) {}
+  }
+  dashboardSearchAbortController = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+
+  var url = API_URL + '?key=village2026&action=dashboardSearch&q=' + encodeURIComponent(query);
+  var fetchOptions = dashboardSearchAbortController ? { signal: dashboardSearchAbortController.signal } : {};
+  fetch(url, fetchOptions)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (requestId !== dashboardSearchRequestSeq || query !== dashboardSearchQuery) return;
+      dashboardGlobalSearchData = data || {};
+      renderDashboardGlobalSearch(dashboardGlobalSearchData);
+    })
+    .catch(function(err) {
+      if (err && err.name === 'AbortError') return;
+      if (requestId !== dashboardSearchRequestSeq) return;
+      setDashboardSearchStatus('전체 예약 검색 실패');
+      renderDashboardGlobalSearch({ checkout: [], checkin: [], query: query, error: err.message });
+    });
+}
+
+function setDashboardSearchStatus(text) {
+  var el = document.getElementById('dashboardSearchStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.toggle('visible', !!text);
 }
 
 function loadData(forceFresh) {
@@ -1602,6 +1684,18 @@ function compareTimeLabels(a, b) {
   return String(a || '').localeCompare(String(b || ''));
 }
 
+function compareDashboardGlobalSearchItems(a, b) {
+  var ad = String((a && a.sortDate) || (a && a.searchDate) || '');
+  var bd = String((b && b.sortDate) || (b && b.searchDate) || '');
+  var dateCmp = ad.localeCompare(bd);
+  if (dateCmp) return dateCmp;
+  return compareScheduleItemsByTime(a, b);
+}
+
+function compareDashboardSearchGroupLabels(a, b) {
+  return String(a || '').localeCompare(String(b || ''), 'ko', { numeric: true });
+}
+
 function normalizeDashboardSearchText(value) {
   return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
@@ -1645,6 +1739,10 @@ function filterDashboardItems(items, type) {
 }
 
 function renderDashboard(data, expectedDate) {
+  if (dashboardSearchQuery && dashboardGlobalSearchData) {
+    renderDashboardGlobalSearch(dashboardGlobalSearchData);
+    return true;
+  }
   if (!isDashboardDateMatch(data, expectedDate)) return false;
   data = data || {};
   var checkout = Array.isArray(data.checkout) ? data.checkout : [];
@@ -1663,7 +1761,7 @@ function renderDashboard(data, expectedDate) {
 
   var all = filteredCheckout.map(function(c) { c._type = 'checkout'; return c; })
     .concat(filteredCheckin.map(function(c) { c._type = 'checkin'; return c; }));
-  all.sort(compareScheduleItemsByTime);
+  all.sort(compareDashboardGlobalSearchItems);
   renderList('allSection', all, 'all', isSearching);
 
   switchTab(activeDashboardTab || 'checkout');
@@ -1672,7 +1770,31 @@ function renderDashboard(data, expectedDate) {
   return true;
 }
 
-function renderList(containerId, items, type, isSearching) {
+function renderDashboardGlobalSearch(data) {
+  data = data || {};
+  var checkout = Array.isArray(data.checkout) ? data.checkout : [];
+  var checkin = Array.isArray(data.checkin) ? data.checkin : [];
+  var all = checkout.map(function(c) { c._type = 'checkout'; return c; })
+    .concat(checkin.map(function(c) { c._type = 'checkin'; return c; }));
+  all.sort(compareScheduleItemsByTime);
+
+  document.getElementById('loadingArea').style.display = 'none';
+  document.getElementById('tabCheckout').textContent = checkout.length;
+  document.getElementById('tabCheckin').textContent = checkin.length;
+  document.getElementById('tabAll').textContent = all.length;
+  renderList('checkoutSection', [], 'checkout', true, { globalSearch: true });
+  renderList('checkinSection', [], 'checkin', true, { globalSearch: true });
+  renderList('allSection', all, 'all', true, { globalSearch: true });
+
+  var total = Number(data.total || all.length);
+  var suffix = total > all.length ? ' · 상위 ' + all.length + '건 표시' : ' · ' + all.length + '건';
+  setDashboardSearchStatus('전체 예약에서 검색 중: "' + dashboardSearchQuery + '"' + suffix);
+  switchTab('all');
+  scheduleDashboardPhotoLoad(all);
+}
+
+function renderList(containerId, items, type, isSearching, options) {
+  options = options || {};
   var container = document.getElementById(containerId);
 
   if (!items || items.length === 0) {
@@ -1686,20 +1808,20 @@ function renderList(containerId, items, type, isSearching) {
   }
 
   var groups = {};
-  items.slice().sort(compareScheduleItemsByTime).forEach(function(item) {
-    var timeKey = item.time || '시간 미정';
+  items.slice().sort(options.globalSearch ? compareDashboardGlobalSearchItems : compareScheduleItemsByTime).forEach(function(item) {
+    var timeKey = options.globalSearch ? (item.searchGroupLabel || item.searchDate || '날짜 미정') : (item.time || '시간 미정');
     if (!groups[timeKey]) groups[timeKey] = [];
     groups[timeKey].push(item);
   });
 
   var html = '';
-  Object.keys(groups).sort(compareTimeLabels).forEach(function(timeKey) {
+  Object.keys(groups).sort(options.globalSearch ? compareDashboardSearchGroupLabels : compareTimeLabels).forEach(function(timeKey) {
     html += '<div class="time-group">';
     html += '<div class="time-group-header">' + timeKey + '</div>';
 
     groups[timeKey].forEach(function(item, idx) {
       var cardType = item._type || type;
-      var cardId = cardType + '_' + timeKey.replace(/[: ]/g,'') + '_' + idx;
+      var cardId = cardType + '_' + timeKey.replace(/[: /\-.]/g,'') + '_' + idx;
 
       var taskDone = (cardType === 'checkout' ? item.setupDone : (cardType === 'checkin' ? item.returnDone : false));
       var taskAction = (cardType === 'checkout' ? 'toggleSetup' : 'toggleReturn');
@@ -1717,7 +1839,11 @@ function renderList(containerId, items, type, isSearching) {
       html += '<div class="customer-name">' + escHtml(item.name) + '</div>';
       if (item.company) html += '<div class="customer-company">' + escHtml(item.company) + '</div>';
       html += '</div></div>';
-      html += '<div class="time-badge">' + timeKey + '</div></div>';
+      html += '<div class="' + (options.globalSearch ? 'search-card-badges' : '') + '">';
+      if (options.globalSearch) {
+        html += '<div class="search-date-badge">' + escHtml(item.searchDate || '') + ' ' + escHtml(item.searchPhaseLabel || '') + '</div>';
+      }
+      html += '<div class="time-badge">' + escHtml(item.time || '시간 미정') + '</div></div></div>';
 
       if (item.tel) {
         html += '<div class="card-meta"><span class="icon">📞</span>';

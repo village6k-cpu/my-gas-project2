@@ -194,6 +194,12 @@ function handleRequest(e) {
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
         return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache));
 
+      case "dashboardSearch":
+        return jsonResponse(getDashboardSearchData(
+          params.q || params.query || postBody.q || postBody.query || "",
+          { limit: Number(params.limit || postBody.limit) || 80 }
+        ));
+
       case "dashboardNotes":
         return jsonResponse(getDashboardNotes_());
 

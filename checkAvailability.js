@@ -640,6 +640,222 @@ function getDashboardData(targetDate, skipCache) {
   return result;
 }
 
+function getDashboardSearchData(query, options) {
+  query = String(query || '').trim();
+  options = options || {};
+  var limit = Number(options.limit) || 80;
+  if (limit < 1) limit = 80;
+  if (limit > 150) limit = 150;
+
+  var terms = normalizeDashboardSearchText_(query).split(' ').filter(Boolean);
+  if (!terms.length) {
+    return {
+      query: query,
+      checkout: [],
+      checkin: [],
+      total: 0,
+      limit: limit,
+      paymentOptions: getTradePaymentOptions_(),
+      proofTypeOptions: getTradeProofTypeOptions_(),
+      issueStatusOptions: getTradeIssueStatusOptions_()
+    };
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  var contractSheet = ss.getSheetByName('계약마스터');
+  if (!schedSheet || schedSheet.getLastRow() < 2) {
+    return { query: query, checkout: [], checkin: [], total: 0, limit: limit };
+  }
+
+  var data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getDisplayValues();
+  var tradeGroups = {};
+  data.forEach(function(row) {
+    var tradeId = String(row[1] || '').trim();
+    var setName = String(row[2] || '').trim();
+    var equipName = String(row[3] || '').trim();
+    var status = String(row[9] || '대기').trim();
+    if (!tradeId || !equipName || status === '취소') return;
+
+    if (!tradeGroups[tradeId]) {
+      tradeGroups[tradeId] = {
+        거래ID: tradeId,
+        반출일: String(row[5] || '').trim(),
+        반출시간: String(row[6] || '').trim(),
+        반납일: String(row[7] || '').trim(),
+        반납시간: String(row[8] || '').trim(),
+        상태: status,
+        equipments: []
+      };
+    }
+
+    var isHeader = setName === '' || setName === equipName;
+    tradeGroups[tradeId].equipments.push({
+      scheduleId: String(row[0] || '').trim(),
+      name: equipName,
+      qty: row[4] || 1,
+      setName: setName,
+      isHeader: isHeader
+    });
+  });
+
+  var tradeIds = Object.keys(tradeGroups);
+  var contractMap = getDashboardContractMapForIds_(contractSheet, tradeIds);
+  var props = PropertiesService.getScriptProperties().getProperties();
+  var tradeExtras = getTradeExtrasForIds_(tradeIds, props);
+  var equipmentChecks = getEquipmentCheckMapForIds_(tradeIds);
+  var checkoutList = [];
+  var checkinList = [];
+
+  tradeIds.forEach(function(tid) {
+    var g = tradeGroups[tid];
+    var cust = contractMap[tid] || {};
+    var extra = tradeExtras[tid] || {};
+    var checkInfo = getEquipmentCheckForTrade_(equipmentChecks, tid);
+    if (!dashboardSearchTradeMatches_(terms, g, cust, extra, checkInfo)) return;
+
+    var item = buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props);
+    var checkoutItem = cloneDashboardItem_(item);
+    checkoutItem.time = g.반출시간 || '시간 미정';
+    checkoutItem.sortTime = normalizeDashboardTimeKey_(g.반출시간);
+    checkoutItem.sortDate = normalizeDashboardSearchDateKey_(g.반출일);
+    checkoutItem.returnDate = g.반납일 + (g.반납시간 ? ' ' + g.반납시간 : '');
+    checkoutItem.searchDate = g.반출일;
+    checkoutItem.searchPhaseLabel = '반출';
+    checkoutItem.searchGroupLabel = formatDashboardSearchGroupLabel_(g.반출일, '반출');
+    checkoutItem._type = 'checkout';
+    checkoutList.push(checkoutItem);
+
+    var checkinItem = cloneDashboardItem_(item);
+    checkinItem.time = g.반납시간 || '시간 미정';
+    checkinItem.sortTime = normalizeDashboardTimeKey_(g.반납시간);
+    checkinItem.sortDate = normalizeDashboardSearchDateKey_(g.반납일);
+    checkinItem.checkoutDate = g.반출일 + (g.반출시간 ? ' ' + g.반출시간 : '');
+    checkinItem.searchDate = g.반납일;
+    checkinItem.searchPhaseLabel = '반납';
+    checkinItem.searchGroupLabel = formatDashboardSearchGroupLabel_(g.반납일, '반납');
+    checkinItem._type = 'checkin';
+    checkinList.push(checkinItem);
+  });
+
+  checkoutList.sort(compareDashboardSearchItems_);
+  checkinList.sort(compareDashboardSearchItems_);
+  var all = checkoutList.concat(checkinList).sort(compareDashboardSearchItems_);
+  if (all.length > limit) all = all.slice(0, limit);
+
+  return {
+    query: query,
+    checkout: all.filter(function(item) { return item._type === 'checkout'; }),
+    checkin: all.filter(function(item) { return item._type === 'checkin'; }),
+    total: checkoutList.length + checkinList.length,
+    returned: all.length,
+    limit: limit,
+    paymentOptions: getTradePaymentOptions_(),
+    proofTypeOptions: getTradeProofTypeOptions_(),
+    issueStatusOptions: getTradeIssueStatusOptions_()
+  };
+}
+
+function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props) {
+  var setsWithComponents = {};
+  g.equipments.forEach(function(eq) {
+    if (!eq.isHeader && eq.setName) setsWithComponents[eq.setName] = true;
+  });
+
+  var displayEquip = g.equipments.map(function(eq) {
+    return {
+      scheduleId: eq.scheduleId,
+      name: eq.name,
+      qty: eq.qty,
+      setName: eq.setName,
+      isHeader: eq.isHeader,
+      isSet: eq.isHeader && !!setsWithComponents[eq.name],
+      isComponent: !!eq.setName && !eq.isHeader,
+      checkedCheckout: props['itemCheck_' + eq.scheduleId + '_checkout'] === '1',
+      checkedCheckin: props['itemCheck_' + eq.scheduleId + '_checkin'] === '1'
+    };
+  });
+
+  var isContractReturned = String(cust.contractStatus || '').trim() === '반납완료';
+  return {
+    tradeId: tid,
+    name: cust.name || tid,
+    tel: cust.tel || '',
+    company: cust.company || '',
+    status: g.상태,
+    contractStatus: cust.contractStatus || '',
+    setupDone: props['setupDone_' + tid] === '1',
+    returnDone: props['returnDone_' + tid] === '1' || isContractReturned,
+    contractUrl: extra.contractUrl || '',
+    paymentMethod: extra.paymentMethod || '',
+    paymentSource: extra.paymentSource || '',
+    paymentWarning: extra.paymentWarning || '',
+    proofType: extra.proofType || '',
+    issueStatus: extra.issueStatus || '',
+    issueNote: extra.issueNote || '',
+    returnStatus: checkInfo.returnStatus || '',
+    returnMemo: checkInfo.returnMemo || '',
+    equipmentCheckRow: checkInfo.row || 0,
+    equipments: displayEquip
+  };
+}
+
+function dashboardSearchTradeMatches_(terms, group, cust, extra, checkInfo) {
+  var parts = [
+    group.거래ID,
+    cust.name,
+    cust.tel,
+    cust.company,
+    cust.contractStatus,
+    group.상태,
+    group.반출일,
+    group.반출시간,
+    group.반납일,
+    group.반납시간,
+    extra.paymentMethod,
+    extra.proofType,
+    extra.issueStatus,
+    checkInfo.returnStatus,
+    checkInfo.returnMemo
+  ];
+  (group.equipments || []).forEach(function(eq) {
+    parts.push(eq.name, eq.setName, eq.qty);
+  });
+
+  var haystack = normalizeDashboardSearchText_(parts.join(' '));
+  return terms.every(function(term) { return haystack.indexOf(term) >= 0; });
+}
+
+function normalizeDashboardSearchText_(value) {
+  return String(value || '').toLowerCase().replace(/[-.\s]+/g, ' ').trim();
+}
+
+function normalizeDashboardSearchDateKey_(value) {
+  var raw = String(value || '').trim();
+  var m = raw.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+  if (!m) return raw;
+  return m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+}
+
+function formatDashboardSearchGroupLabel_(dateValue, phaseLabel) {
+  var key = normalizeDashboardSearchDateKey_(dateValue);
+  var m = key.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  var label = m ? (Number(m[2]) + '/' + Number(m[3])) : String(dateValue || '');
+  return label + ' ' + phaseLabel;
+}
+
+function cloneDashboardItem_(item) {
+  return JSON.parse(JSON.stringify(item || {}));
+}
+
+function compareDashboardSearchItems_(a, b) {
+  var ad = String((a && a.sortDate) || '');
+  var bd = String((b && b.sortDate) || '');
+  var dateCmp = ad.localeCompare(bd);
+  if (dateCmp) return dateCmp;
+  return compareDashboardItemsByTime_(a, b);
+}
+
 function normalizeDashboardTimeKey_(timeValue) {
   var raw = String(timeValue || '').trim();
   if (!raw || raw === '시간 미정') return '99:99';
