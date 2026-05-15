@@ -3943,21 +3943,32 @@ function _normalizeDiscountType(v) {
   return "일반";
 }
 
-function _confirmRequestDateKey_(v) {
-  if (!v) return "";
-  if (v instanceof Date) return Utilities.formatDate(v, "Asia/Seoul", "yyyy-MM-dd");
-  var s = String(v || "").trim();
+function _confirmRequestDateKey_(v, displayValue) {
+  var display = String(displayValue || "").trim();
+  var s = display || String(v || "").trim();
+  if (!s && !v) return "";
   var m = s.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
   if (m) return m[1] + "-" + String(m[2]).padStart(2, "0") + "-" + String(m[3]).padStart(2, "0");
+  if (v instanceof Date) return Utilities.formatDate(v, "Asia/Seoul", "yyyy-MM-dd");
   return s;
 }
 
-function _confirmRequestTimeKey_(v) {
-  if (!v) return "";
-  if (v instanceof Date) return Utilities.formatDate(v, "Asia/Seoul", "HH:mm");
-  var s = String(v || "").trim();
+function _confirmRequestTimeKey_(v, displayValue) {
+  var s = String(displayValue || "").trim() || String(v || "").trim();
+  if (!s && !v) return "";
+  var isPm = /오후|\bPM\b/i.test(s);
+  var isAm = /오전|\bAM\b/i.test(s);
   var m = s.match(/(\d{1,2})(?::(\d{2}))?/);
-  if (m) return String(m[1]).padStart(2, "0") + ":" + String(m[2] || "00").padStart(2, "0");
+  if (m) {
+    var hour = parseInt(m[1], 10);
+    var minute = parseInt(m[2] || "0", 10);
+    if (isPm && hour < 12) hour += 12;
+    if (isAm && hour === 12) hour = 0;
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      return String(hour).padStart(2, "0") + ":" + String(minute).padStart(2, "0");
+    }
+  }
+  if (v instanceof Date) return Utilities.formatDate(v, "Asia/Seoul", "HH:mm");
   return s;
 }
 
@@ -3997,10 +4008,14 @@ function _findDuplicateConfirmRequest_(sheet, req, requestedEquipNames) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return null;
 
-  var allData = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
+  var dataRange = sheet.getRange(2, 1, lastRow - 1, 18);
+  var allData = dataRange.getValues();
+  var allDisplayData = dataRange.getDisplayValues();
   var reqGroups = {};
   for (var di = 0; di < allData.length; di++) {
-    var rid = allData[di][0];
+    var rowData = allData[di];
+    var rowDisplay = allDisplayData[di] || [];
+    var rid = rowDisplay[0] || rowData[0];
     if (!rid) continue;
     if (!reqGroups[rid]) {
       reqGroups[rid] = {
@@ -4015,13 +4030,13 @@ function _findDuplicateConfirmRequest_(sheet, req, requestedEquipNames) {
       };
     }
     var g = reqGroups[rid];
-    if (allData[di][10] && !g.name) g.name = String(allData[di][10]).trim();      // K: 예약자명
-    if (allData[di][11] && !g.phone) g.phone = _confirmRequestPhoneKey_(allData[di][11]); // L: 연락처
-    if (allData[di][1] && !g.startDate) g.startDate = _confirmRequestDateKey_(allData[di][1]); // B: 반출일
-    if (allData[di][2] && !g.startTime) g.startTime = _confirmRequestTimeKey_(allData[di][2]); // C: 반출시간
-    if (allData[di][3] && !g.endDate) g.endDate = _confirmRequestDateKey_(allData[di][3]);     // D: 반납일
-    if (allData[di][4] && !g.endTime) g.endTime = _confirmRequestTimeKey_(allData[di][4]);     // E: 반납시간
-    if (allData[di][5]) g.equips.push(String(allData[di][5]).trim());             // F: 장비명
+    if ((rowData[10] || rowDisplay[10]) && !g.name) g.name = String(rowDisplay[10] || rowData[10]).trim();      // K: 예약자명
+    if ((rowData[11] || rowDisplay[11]) && !g.phone) g.phone = _confirmRequestPhoneKey_(rowDisplay[11] || rowData[11]); // L: 연락처
+    if ((rowData[1] || rowDisplay[1]) && !g.startDate) g.startDate = _confirmRequestDateKey_(rowData[1], rowDisplay[1]); // B: 반출일
+    if ((rowData[2] || rowDisplay[2]) && !g.startTime) g.startTime = _confirmRequestTimeKey_(rowData[2], rowDisplay[2]); // C: 반출시간
+    if ((rowData[3] || rowDisplay[3]) && !g.endDate) g.endDate = _confirmRequestDateKey_(rowData[3], rowDisplay[3]);     // D: 반납일
+    if ((rowData[4] || rowDisplay[4]) && !g.endTime) g.endTime = _confirmRequestTimeKey_(rowData[4], rowDisplay[4]);     // E: 반납시간
+    if (rowData[5] || rowDisplay[5]) g.equips.push(String(rowDisplay[5] || rowData[5]).trim());             // F: 장비명
   }
 
   for (var rid in reqGroups) {

@@ -821,7 +821,16 @@ function runFunction(funcName, params) {
     if (funcName === "insertAndCheckRequest" && params.args) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
       var result = insertAndCheckRequest(args);
-      return { success: true, function: funcName, reqID: result.reqID, results: result.results, executionTime: (new Date() - startTime) + "ms" };
+      var response = {
+        success: true,
+        function: funcName,
+        reqID: result.reqID,
+        results: result.results,
+        executionTime: (new Date() - startTime) + "ms"
+      };
+      if (result.duplicate) response.duplicate = true;
+      if (result.message) response.message = result.message;
+      return response;
     }
     if (funcName === "updateRequest" && params.args) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
