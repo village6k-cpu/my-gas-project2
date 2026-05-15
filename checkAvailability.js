@@ -3943,6 +3943,119 @@ function _normalizeDiscountType(v) {
   return "일반";
 }
 
+function _confirmRequestDateKey_(v) {
+  if (!v) return "";
+  if (v instanceof Date) return Utilities.formatDate(v, "Asia/Seoul", "yyyy-MM-dd");
+  var s = String(v || "").trim();
+  var m = s.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+  if (m) return m[1] + "-" + String(m[2]).padStart(2, "0") + "-" + String(m[3]).padStart(2, "0");
+  return s;
+}
+
+function _confirmRequestTimeKey_(v) {
+  if (!v) return "";
+  if (v instanceof Date) return Utilities.formatDate(v, "Asia/Seoul", "HH:mm");
+  var s = String(v || "").trim();
+  var m = s.match(/(\d{1,2})(?::(\d{2}))?/);
+  if (m) return String(m[1]).padStart(2, "0") + ":" + String(m[2] || "00").padStart(2, "0");
+  return s;
+}
+
+function _confirmRequestPhoneKey_(v) {
+  return String(v || "").replace(/\D/g, "");
+}
+
+function _confirmRequestEquipKey_(v) {
+  return String(v || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[(){}\[\]_\-./·,]/g, "");
+}
+
+function _confirmRequestContainsAllEquip_(existingEquips, requestedEquips) {
+  if (!requestedEquips || requestedEquips.length === 0) return false;
+  var existingKeys = existingEquips.map(_confirmRequestEquipKey_).filter(Boolean);
+  return requestedEquips.every(function(reqName) {
+    var reqKey = _confirmRequestEquipKey_(reqName);
+    if (!reqKey) return false;
+    return existingKeys.some(function(exKey) {
+      return exKey === reqKey || exKey.indexOf(reqKey) >= 0 || reqKey.indexOf(exKey) >= 0;
+    });
+  });
+}
+
+function _findDuplicateConfirmRequest_(sheet, req, requestedEquipNames) {
+  var reqName = String(req.예약자명 || "").trim();
+  var reqDate = _confirmRequestDateKey_(req.반출일);
+  var reqStartTime = _confirmRequestTimeKey_(req.반출시간);
+  var reqEndDate = _confirmRequestDateKey_(req.반납일);
+  var reqEndTime = _confirmRequestTimeKey_(req.반납시간);
+  var reqPhone = _confirmRequestPhoneKey_(req.연락처);
+  if (!reqName || !reqDate || !requestedEquipNames || requestedEquipNames.length === 0) return null;
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+
+  var allData = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
+  var reqGroups = {};
+  for (var di = 0; di < allData.length; di++) {
+    var rid = allData[di][0];
+    if (!rid) continue;
+    if (!reqGroups[rid]) {
+      reqGroups[rid] = {
+        reqID: String(rid).trim(),
+        name: "",
+        phone: "",
+        startDate: "",
+        startTime: "",
+        endDate: "",
+        endTime: "",
+        equips: []
+      };
+    }
+    var g = reqGroups[rid];
+    if (allData[di][10] && !g.name) g.name = String(allData[di][10]).trim();      // K: 예약자명
+    if (allData[di][11] && !g.phone) g.phone = _confirmRequestPhoneKey_(allData[di][11]); // L: 연락처
+    if (allData[di][1] && !g.startDate) g.startDate = _confirmRequestDateKey_(allData[di][1]); // B: 반출일
+    if (allData[di][2] && !g.startTime) g.startTime = _confirmRequestTimeKey_(allData[di][2]); // C: 반출시간
+    if (allData[di][3] && !g.endDate) g.endDate = _confirmRequestDateKey_(allData[di][3]);     // D: 반납일
+    if (allData[di][4] && !g.endTime) g.endTime = _confirmRequestTimeKey_(allData[di][4]);     // E: 반납시간
+    if (allData[di][5]) g.equips.push(String(allData[di][5]).trim());             // F: 장비명
+  }
+
+  for (var rid in reqGroups) {
+    var group = reqGroups[rid];
+    if (group.name !== reqName) continue;
+    if (reqPhone && group.phone && reqPhone !== group.phone) continue;
+    if (group.startDate !== reqDate) continue;
+    if (reqStartTime && group.startTime && reqStartTime !== group.startTime) continue;
+    if (reqEndDate && group.endDate && group.endDate !== reqEndDate) continue;
+    if (reqEndTime && group.endTime && reqEndTime !== group.endTime) continue;
+    if (!_confirmRequestContainsAllEquip_(group.equips, requestedEquipNames)) continue;
+    return group;
+  }
+  return null;
+}
+
+function _collectConfirmRequestResultsByReqID_(sheet, reqID) {
+  var results = [];
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return results;
+  var rows = sheet.getRange(2, 1, lastRow - 1, 17).getDisplayValues();
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i][0] !== reqID) continue;
+    if (!rows[i][5]) continue;
+    results.push({
+      장비명: rows[i][5],
+      수량: rows[i][6],
+      결과: rows[i][8],
+      상세: rows[i][9]
+    });
+  }
+  return results;
+}
+
 /**
  * 확인요청 시트에 데이터 입력 후 가용확인까지 자동 실행
  * @param {Object} req - {
@@ -3974,40 +4087,35 @@ function _insertAndCheckRequest(req) {
   const sheet = ss.getSheetByName("확인요청");
   if (!sheet) throw new Error("확인요청 시트 없음");
 
-  // ── 중복 체크: 같은 예약자명 + 반출일 + 장비목록 ──
-  var reqEquipSet = (req.장비 || []).map(function(e) { return String(e.이름 || "").trim(); }).sort().join("|");
-  var reqName = String(req.예약자명 || "").trim();
-  var reqDate = String(req.반출일 || "").trim();
-
-  if (reqName && reqDate && reqEquipSet) {
-    var dupCheckLastRow = sheet.getLastRow();
-    if (dupCheckLastRow >= 2) {
-      var allData = sheet.getRange(2, 1, dupCheckLastRow - 1, 18).getValues();
-      // reqID별로 그룹핑해서 비교
-      var reqGroups = {};
-      for (var di = 0; di < allData.length; di++) {
-        var rid = allData[di][0];
-        if (!rid) continue;
-        if (!reqGroups[rid]) reqGroups[rid] = { name: "", date: "", equips: [] };
-        if (allData[di][10]) reqGroups[rid].name = String(allData[di][10]).trim();  // K열: 예약자명
-        if (allData[di][1]) {  // B열: 반출일
-          var dv = allData[di][1];
-          reqGroups[rid].date = dv instanceof Date ? Utilities.formatDate(dv, "Asia/Seoul", "yyyy-MM-dd") : String(dv).trim();
-        }
-        if (allData[di][5]) reqGroups[rid].equips.push(String(allData[di][5]).trim());  // F열: 장비명
-      }
-      for (var rid in reqGroups) {
-        var g = reqGroups[rid];
-        var existEquipSet = g.equips.sort().join("|");
-        if (g.name === reqName && g.date === reqDate && existEquipSet === reqEquipSet) {
-          throw new Error("중복 요청: 동일한 예약자/반출일/장비 조합이 이미 존재합니다 (" + rid + ")");
-        }
-      }
+  // 장비명 매칭: 목록에서 가장 유사한 이름 찾기
+  var equipNames = [];
+  try {
+    var listSheet = ss.getSheetByName("목록");
+    if (listSheet && listSheet.getLastRow() >= 2) {
+      equipNames = listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1)
+        .getValues().flat().filter(function(v) { return v; }).map(String);
     }
+  } catch(e) {}
 
+  // ── 중복 체크: 같은 예약자명 + 반출일 + 장비목록 ──
+  var requestedEquipNames = (req.장비 || []).map(function(e) {
+    return fuzzyMatchEquipName(String(e.이름 || "").trim(), equipNames);
+  }).filter(function(name) { return name; });
+  var duplicateRequest = _findDuplicateConfirmRequest_(sheet, req, requestedEquipNames);
+  if (duplicateRequest) {
+    return {
+      reqID: duplicateRequest.reqID,
+      duplicate: true,
+      message: "중복 요청: 동일한 예약자/반출일시/장비 조합이 이미 존재합니다 (" + duplicateRequest.reqID + ")",
+      results: _collectConfirmRequestResultsByReqID_(sheet, duplicateRequest.reqID)
+    };
+  }
+
+  var reqName = String(req.예약자명 || "").trim();
+  var reqDate = _confirmRequestDateKey_(req.반출일);
+  if (reqName && reqDate && requestedEquipNames.length > 0) {
     // 스케줄상세(등록 완료된 건)에서도 중복 체크
-    var dupEquipArr = (req.장비 || []).map(function(e) { return String(e.이름 || "").trim(); });
-    var dupTid = checkDuplicateRequest(ss, reqName, reqDate, dupEquipArr);
+    var dupTid = checkDuplicateRequest(ss, reqName, reqDate, requestedEquipNames);
     if (dupTid) {
       throw new Error("중복 요청: 동일 건이 이미 예약 등록되어 있습니다 (거래ID: " + dupTid + ")");
     }
@@ -4041,16 +4149,6 @@ function _insertAndCheckRequest(req) {
       startRow = r + 3; // 마지막 데이터 다음 행
     }
   }
-  // 장비명 매칭: 목록에서 가장 유사한 이름 찾기
-  var equipNames = [];
-  try {
-    var listSheet = ss.getSheetByName("목록");
-    if (listSheet && listSheet.getLastRow() >= 2) {
-      equipNames = listSheet.getRange(2, 1, listSheet.getLastRow() - 1, 1)
-        .getValues().flat().filter(function(v) { return v; }).map(String);
-    }
-  } catch(e) {}
-
   // 연락처 미입력 시 고객DB에서 조회 (동명이인 시 자동입력 안 함)
   var resolvedPhone = req.연락처 || "";
   if (!resolvedPhone && req.예약자명) {
@@ -6146,8 +6244,8 @@ function checkDuplicateRequest(ss, 예약자명, 반출일, 장비목록) {
   if (!schedSheet || schedSheet.getLastRow() < 2) return null;
   if (!contractSheet || contractSheet.getLastRow() < 2) return null;
 
-  var dupDate = 반출일 instanceof Date ? Utilities.formatDate(반출일, "Asia/Seoul", "yyyy-MM-dd") : String(반출일).trim();
-  var dupEquipSet = 장비목록.map(function(e) { return String(e).trim(); }).sort().join("|");
+  var dupDate = _confirmRequestDateKey_(반출일);
+  var dupEquipArr = 장비목록.map(function(e) { return String(e).trim(); }).filter(function(e) { return e; });
 
   // 계약마스터에서 거래ID → 예약자명 매핑
   var cMap = {};
@@ -6164,15 +6262,14 @@ function checkDuplicateRequest(ss, 예약자명, 반출일, 장비목록) {
     if (!schedGroups[tid]) schedGroups[tid] = { date: "", equips: [] };
     if (schedData[si][5]) {  // F: 반출일
       var sv = schedData[si][5];
-      schedGroups[tid].date = sv instanceof Date ? Utilities.formatDate(sv, "Asia/Seoul", "yyyy-MM-dd") : String(sv).trim();
+      schedGroups[tid].date = _confirmRequestDateKey_(sv);
     }
     if (schedData[si][3]) schedGroups[tid].equips.push(String(schedData[si][3]).trim());  // D: 장비명
   }
   for (var tid in schedGroups) {
     var sg = schedGroups[tid];
     var schedName = cMap[tid] || "";
-    var schedEquipSet = sg.equips.sort().join("|");
-    if (schedName === 예약자명 && sg.date === dupDate && schedEquipSet === dupEquipSet) {
+    if (schedName === 예약자명 && sg.date === dupDate && _confirmRequestContainsAllEquip_(sg.equips, dupEquipArr)) {
       return tid;
     }
   }
