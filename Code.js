@@ -220,7 +220,12 @@ function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus) {
   var tradeId = String(sheet.getRange(row, 1).getValue()).trim();
 
   if (status === "취소") {
-    if (tradeId) cancelContract(ss, tradeId, row);
+    if (tradeId) {
+      var cancelProps = PropertiesService.getScriptProperties();
+      cancelProps.deleteProperty('returnDone_' + tradeId);
+      cancelProps.deleteProperty('returnPrevContractStatus_' + tradeId);
+      cancelContract(ss, tradeId, row);
+    }
     return;
   }
 

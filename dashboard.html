@@ -855,6 +855,12 @@
     border-color: var(--accent);
     color: #fff;
   }
+  .action-btn.danger {
+    border-color: #E5484D;
+    color: #B42318;
+    background: #FFF7F7;
+  }
+  .action-btn.danger:hover { background: #FEECEC; }
   .payment-select,
   .proof-select {
     width: 140px;
@@ -1751,7 +1757,7 @@ function renderList(containerId, items, type, isSearching) {
       html += '<button class="equip-add-btn" onclick="event.stopPropagation();addEquip(\'' + escHtml(item.tradeId) + '\')">+ 장비추가</button>';
       html += '</div>';
       html += photoGalleryHtml(item);
-      html += cardActionHtml(item);
+      html += cardActionHtml(item, cardType);
 
       html += '<div class="card-detail" id="' + cardId + '">';
       html += '<div class="detail-row"><span>거래ID</span><span class="dl">' + escHtml(item.tradeId) + '</span></div>';
@@ -2098,7 +2104,7 @@ function mergePhotoList_(target, source) {
   });
 }
 
-function cardActionHtml(item) {
+function cardActionHtml(item, cardType) {
   var html = '<div class="card-actions" onclick="event.stopPropagation()">';
   if (item.contractUrl) {
     html += '<a class="action-link primary" href="' + escAttr(item.contractUrl) + '" target="_blank" onclick="event.stopPropagation()">계약서 열기</a>';
@@ -2106,6 +2112,9 @@ function cardActionHtml(item) {
     html += '<button class="action-btn" onclick="event.stopPropagation()" disabled>계약서 없음</button>';
   }
   html += '<button class="action-btn" onclick="event.stopPropagation();runTradeOpsAction(this,\'' + escJs(item.tradeId) + '\',\'sendEstimate\')">견적서 발송</button>';
+  if (cardType === 'checkin' && item.tradeId) {
+    html += '<button class="action-btn danger" onclick="event.stopPropagation();cancelDashboardTrade(this,\'' + escJs(item.tradeId) + '\',\'' + escJs(item.name || item.tradeId) + '\')">취소처리</button>';
+  }
   html += paymentSelectHtml(item);
   html += proofTypeSelectHtml(item);
   html += issueStatusSelectHtml(item);
@@ -2471,6 +2480,12 @@ function updateContractStatus(el) {
     return;
   }
 
+  if (status === '취소' && !confirm('이 계약을 취소처리할까요?\n스케줄상세와 거래내역에서도 제거됩니다.')) {
+    el.value = prev;
+    setEquipmentCheckState(el, '', false);
+    return;
+  }
+
   el.classList.remove('is-error');
   el.classList.add('is-saving');
   el.disabled = true;
@@ -2493,6 +2508,12 @@ function updateContractStatus(el) {
       el.setAttribute('data-prev', status);
       syncContractStatusInMemory(tid, status);
       syncTradeFieldControls('contractStatus', tid, status);
+      clearDashboardCacheForDate(formatDate(currentDate));
+      if (status === '취소') {
+        setEquipmentCheckState(el, '취소 처리됨', false);
+        loadData(true);
+        return;
+      }
       setEquipmentCheckState(el, '저장됨', false);
       setTimeout(function() { setEquipmentCheckState(el, '', false); }, 1200);
     })
@@ -2502,6 +2523,39 @@ function updateContractStatus(el) {
       el.disabled = false;
       el.value = prev;
       setEquipmentCheckState(el, '저장 실패: ' + err.message, true);
+    });
+}
+
+function cancelDashboardTrade(btn, tid, name) {
+  tid = String(tid || '').trim();
+  if (!tid) return;
+
+  var label = name || tid;
+  if (!confirm(label + ' 건을 취소처리할까요?\n스케줄상세와 거래내역에서도 제거됩니다.')) return;
+
+  var originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '처리 중';
+
+  fetch(API_URL || '', {
+    method: 'POST',
+    body: JSON.stringify({
+      key: 'village2026',
+      action: 'updateContractStatus',
+      tid: tid,
+      status: '취소'
+    })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) throw new Error(res.error);
+      clearDashboardCacheForDate(formatDate(currentDate));
+      loadData(true);
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+      alert('취소 처리 실패: ' + err.message);
     });
 }
 

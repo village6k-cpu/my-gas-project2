@@ -1327,6 +1327,25 @@ function updateDashboardContractStatus(tradeId, status) {
       if (String(ids[i][0] || '').trim() === tradeId) {
         var row = i + 2;
         sheet.getRange(row, 10).setValue(status); // J열: 계약상태
+
+        if (status === "취소") {
+          var cancelProps = PropertiesService.getScriptProperties();
+          cancelProps.deleteProperty('returnDone_' + tradeId);
+          cancelProps.deleteProperty('returnPrevContractStatus_' + tradeId);
+          cancelContract(ss, tradeId, row);
+          invalidateDashboardCache();
+          return { success: true, tradeId: tradeId, status: status, row: row, cancelled: true };
+        }
+
+        var props = PropertiesService.getScriptProperties();
+        if (status === "반납완료") {
+          props.setProperty('returnDone_' + tradeId, '1');
+          props.setProperty('returnPrevContractStatus_' + tradeId, '반출');
+        } else {
+          props.deleteProperty('returnDone_' + tradeId);
+          props.deleteProperty('returnPrevContractStatus_' + tradeId);
+        }
+
         applyContractMasterStatusRowStyle_(sheet, row, status);
         invalidateDashboardCache();
         return { success: true, tradeId: tradeId, status: status, row: row };
