@@ -4,6 +4,7 @@
 # Agent/tool scratch files (GAS 업로드 금지)
 .superpowers/**
 .gstack/**
+test/**
 
 # GitHub Pages (GAS에 올릴 필요 없음)
 docs/**
