@@ -24,14 +24,20 @@ assert.match(
 
 assert.match(
   source,
-  /if \(confirmRanges\.length\) sheet\.getRangeList\(confirmRanges\)\.setValue\("확인"\)/,
+  /confirmRows\.forEach\(function\(row\) \{[\s\S]{0,80}sheet\.getRange\(row,\s*8\)\.setValue\("확인"\);[\s\S]{0,20}\}\);/,
   'manual recheck should mark H-blank pending rows as confirmed before processing'
 );
 
 assert.match(
   source,
-  /if \(aVal && hasProcessedRows_\(sheet,\s*row,\s*aVal\)\) \{[\s\S]{0,120}preparePendingConfirmRows_\(sheet,\s*row,\s*aVal\);[\s\S]{0,120}processByReqID\(sheet,\s*row\)/,
-  'processed request groups should run the normal set-expansion path after preparing only pending rows'
+  /if \(aVal\) \{[\s\S]{0,80}preparePendingConfirmRows_\(sheet,\s*row,\s*aVal\);[\s\S]{0,80}processByReqID\(sheet,\s*row\)/,
+  'all request groups should prepare the trigger row and H-blank rows before running the normal set-expansion path'
+);
+
+assert.doesNotMatch(
+  source,
+  /if \(aVal && hasProcessedRows_\(sheet,\s*row,\s*aVal\)\)/,
+  'manual recheck must not depend on other rows already having results'
 );
 
 assert.doesNotMatch(

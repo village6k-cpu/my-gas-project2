@@ -3616,7 +3616,7 @@ function handleScheduleEdit(e) {
       } else {
         // 기존 처리된 reqID에서는 H열 확인을 비워둔 행만 다시 가용확인 대상으로 만든다.
         // 이미 처리된 다른 행의 I/J 결과는 보존해서 장비 추가/수정 작업에 맞춘다.
-        if (aVal && hasProcessedRows_(sheet, row, aVal)) {
+        if (aVal) {
           preparePendingConfirmRows_(sheet, row, aVal);
         }
         processByReqID(sheet, row);  // 같은 reqID 묶음 안에서 결과가 빈 행만 처리
@@ -4726,7 +4726,7 @@ function preparePendingConfirmRows_(sheet, triggerRow, reqID) {
   var targetReqID = String(reqID).trim();
   var data = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
   var resultRanges = [];
-  var confirmRanges = [];
+  var confirmRows = [];
   for (var i = 0; i < data.length; i++) {
     var row = i + 2;
     if (String(data[i][0]).trim() !== targetReqID) continue;
@@ -4735,11 +4735,13 @@ function preparePendingConfirmRows_(sheet, triggerRow, reqID) {
     if (row !== triggerRow && confirmVal) continue;
 
     resultRanges.push("I" + row + ":J" + row);
-    if (confirmVal !== "확인") confirmRanges.push("H" + row);
+    if (confirmVal !== "확인") confirmRows.push(row);
   }
   if (resultRanges.length) {
     sheet.getRangeList(resultRanges).clearContent();
-    if (confirmRanges.length) sheet.getRangeList(confirmRanges).setValue("확인");
+    confirmRows.forEach(function(row) {
+      sheet.getRange(row, 8).setValue("확인");
+    });
     SpreadsheetApp.flush();
   }
 }
