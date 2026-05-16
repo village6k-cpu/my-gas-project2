@@ -3614,10 +3614,12 @@ function handleScheduleEdit(e) {
       if (isTradeID(aVal)) {
         checkModificationItem(sheet, row);  // 수정 행: 계약마스터에서 날짜 조회
       } else {
-        // 기존 reqID 그룹에 이미 결과가 있으면 추가 행만 처리
-        if (aVal && hasProcessedRows_(sheet, row, aVal)) {
+        // 기존 처리된 reqID에 새 행을 붙인 경우만 부분 처리한다.
+        // 이미 결과가 있는 행에서 다시 "확인"을 고른 경우는 사용자가 수정 후 전체 재확인을 의도한 것이다.
+        if (aVal && shouldProcessAdditionalRow_(sheet, row, aVal)) {
           processAdditionalRow_(sheet, row, aVal);
         } else {
+          if (aVal) clearRequestAvailabilityResults_(sheet, aVal);
           processByReqID(sheet, row);  // 신규 행: 기존 흐름
         }
       }
@@ -4717,6 +4719,34 @@ function hasProcessedRows_(sheet, triggerRow, reqID) {
     }
   }
   return false;
+}
+
+function shouldProcessAdditionalRow_(sheet, triggerRow, reqID) {
+  if (!hasProcessedRows_(sheet, triggerRow, reqID)) return false;
+
+  var rowData = sheet.getRange(triggerRow, 1, 1, 17).getValues()[0];
+  var resultVal = String(rowData[8] || "").trim();
+  var detailVal = String(rowData[9] || "").trim();
+  var qTag = String(rowData[16] || "").trim();
+
+  return !resultVal && !detailVal && qTag.indexOf("[세트]") !== 0;
+}
+
+function clearRequestAvailabilityResults_(sheet, reqID) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2 || !reqID) return;
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  var ranges = [];
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim() === String(reqID).trim()) {
+      ranges.push("I" + (i + 2) + ":J" + (i + 2));
+    }
+  }
+  if (ranges.length) {
+    sheet.getRangeList(ranges).clearContent();
+    SpreadsheetApp.flush();
+  }
 }
 
 /**
