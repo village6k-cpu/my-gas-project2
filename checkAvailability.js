@@ -3446,10 +3446,9 @@ function dashboardAddEquipment(tid, equipName, qty) {
       });
     } else {
       maxN++;
-      var setNameForSingle = isSetMasterName(equipName, setSheet) ? equipName : "";
       newRows.push([
         tid + "-" + ("0" + maxN).slice(-2),
-        tid, setNameForSingle, equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
+        tid, equipName, equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
         "대기", "", 0, 예약자명
       ]);
       newRows[0][11] = price;
@@ -5718,14 +5717,13 @@ function registerByReqID(sheet, triggerRow) {
         schedSheet.getRange(compRow, 6, 1, 4).setNumberFormat("@");
 
       } else {
-        // ── 세트마스터 품목: C=품목명, D=품목명, L=단가. 순수 장비마스터 장비만 C를 비운다. ──
+        // ── 단독 품목: 우리 시스템에서는 세트명이 사용자-facing 장비명이다. C=장비명, D=장비명. ──
         const 단가 = findSetPrice(장비명, setSheet);
-        const 세트마스터품목명 = isSetMasterName(장비명, setSheet) ? 장비명 : "";
         schedCount++;
         const schedID = `${거래ID}-${String(schedCount).padStart(2, "0")}`;
         const newRow = writeBaseRow + schedCount;
         schedSheet.getRange(newRow, 1, 1, 13).setValues([[
-          schedID, 거래ID, 세트마스터품목명, 장비명, 수량,
+          schedID, 거래ID, 장비명, 장비명, 수량,
           반출일str, 반출시간str, 반납일str, 반납시간str,
           "대기", "", 단가, 예약자명
         ]]);
@@ -5990,11 +5988,10 @@ function addEquipmentToContract(sheet, row) {
 
   const setSheet = ss.getSheetByName("세트마스터");
   const 단가 = findSetPrice(장비명, setSheet);
-  const 세트마스터품목명 = isSetMasterName(장비명, setSheet) ? 장비명 : "";
 
   const newRow = schedLastRow + 1;
   schedSheet.getRange(newRow, 1, 1, 13).setValues([[
-    schedID, 거래ID, 세트마스터품목명, 장비명, 수량,
+    schedID, 거래ID, 장비명, 장비명, 수량,
     반출일str, 반출시간str, 반납일str, 반납시간str,
     "대기", "", 단가, 예약자명_add
   ]]);

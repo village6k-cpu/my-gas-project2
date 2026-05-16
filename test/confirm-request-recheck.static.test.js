@@ -34,6 +34,18 @@ assert.match(
   'all request groups should prepare the trigger row and H-blank rows before running the normal set-expansion path'
 );
 
+assert.match(
+  source,
+  /const setComponents = getSetComponents\(ri\.장비명,\s*setSheet\);[\s\S]{0,220}if \(!hasExisting\) \{[\s\S]{0,120}expandSetRows\(sheet,\s*ri\.row,\s*triggerReqID,\s*setComponents,\s*ri\.수량\);[\s\S]{0,80}expandedRows = true;/,
+  'manual recheck must still use the normal set expansion path when a pending set row has no existing components'
+);
+
+assert.match(
+  source,
+  /if \(fResult === "세트" \|\| \(setMasterNames\.has\(fEquip\) && fQTag\.indexOf\("\[세트\]"\) !== 0\)\) \{[\s\S]{0,100}sheet\.getRange\(fRow,\s*6\)\.setBackground\("#D9EAD3"\)\.setFontWeight\("bold"\);/,
+  'manual recheck must keep set header and set-master rows green in column F'
+);
+
 assert.doesNotMatch(
   source,
   /if \(aVal && hasProcessedRows_\(sheet,\s*row,\s*aVal\)\)/,
