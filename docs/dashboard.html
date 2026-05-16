@@ -2546,30 +2546,28 @@ function uploadDashboardPhotoFiles(tid, phase, files) {
 
   var successes = 0;
   var failures = [];
+  var uploadedPhotos = [];
   files.reduce(function(chain, file) {
     return chain.then(function() {
       return compressDashboardPhoto(file)
         .then(function(payload) {
           return postDashboardPhoto(tid, phase, payload);
         })
-        .then(function() { successes++; })
+        .then(function(res) {
+          successes++;
+          if (res && res.photo) uploadedPhotos.push({ phase: phase, photo: res.photo });
+        })
         .catch(function(err) {
           failures.push(file.name + ': ' + err.message);
         });
     });
   }, Promise.resolve()).then(function() {
     if (successes > 0) {
-      delete dashboardPhotoStore[tid];
-      dashboardPhotoLoading[tid] = true;
-      updatePhotoPanels();
-      fetchDashboardPhotosBatch([tid]).then(function(map) {
-        dashboardPhotoStore[tid] = normalizeDashboardPhotos(map[tid]);
-        delete dashboardPhotoLoading[tid];
-        updatePhotoPanels();
-      }).catch(function() {
-        delete dashboardPhotoLoading[tid];
-        updatePhotoPanels();
+      uploadedPhotos.forEach(function(entry) {
+        appendDashboardPhotoToStore(tid, entry.phase, entry.photo);
       });
+      delete dashboardPhotoLoading[tid];
+      updatePhotoPanels();
     }
     if (failures.length) {
       setPhotoUploadState(tid, '업로드 실패 ' + failures.length + '건', true);
@@ -2638,6 +2636,14 @@ function postDashboardPhoto(tid, phase, payload) {
     });
 }
 
+function appendDashboardPhotoToStore(tid, phase, photo) {
+  if (!tid || !photo) return;
+  var storePhotos = normalizeDashboardPhotos(dashboardPhotoStore[tid]);
+  var targetPhase = phase === 'checkin' ? 'checkin' : 'checkout';
+  mergePhotoList_(storePhotos[targetPhase], [photo]);
+  dashboardPhotoStore[tid] = storePhotos;
+}
+
 function setPhotoUploadState(tid, text, isError) {
   document.querySelectorAll('[data-photo-state]').forEach(function(el) {
     if ((el.getAttribute('data-photo-state') || '') !== tid) return;
@@ -2698,6 +2704,10 @@ function renderPhotoModalSection(title, list) {
 
 function getDashboardPhotosByTrade(tid) {
   var merged = normalizeDashboardPhotos();
+  var storePhotos = normalizeDashboardPhotos(dashboardPhotoStore[tid]);
+  mergePhotoList_(merged.checkout, storePhotos.checkout);
+  mergePhotoList_(merged.checkin, storePhotos.checkin);
+  mergePhotoList_(merged.other, storePhotos.other);
   if (!dashboardData) return merged;
   ['checkout', 'checkin'].forEach(function(listName) {
     (dashboardData[listName] || []).forEach(function(item) {
