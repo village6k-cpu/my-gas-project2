@@ -42,14 +42,32 @@ assert.match(
 
 assert.match(
   source,
-  /if \(fResult === "세트" \|\| \(setMasterNames\.has\(fEquip\) && fQTag\.indexOf\("\[세트\]"\) !== 0\)\) \{[\s\S]{0,100}sheet\.getRange\(fRow,\s*6\)\.setBackground\("#D9EAD3"\)\.setFontWeight\("bold"\);/,
+  /if \(isMainSetRow\) \{[\s\S]{0,100}sheet\.getRange\(fRow,\s*6\)\.setBackground\("#D9EAD3"\)\.setFontWeight\("bold"\);/,
   'manual recheck must keep set header and set-master rows green in column F'
 );
 
 assert.match(
   source,
-  /if \(isFirstRow\) \{[\s\S]{0,220}if \(fResult === "세트" \|\| \(setMasterNames\.has\(fEquip\) && fQTag\.indexOf\("\[세트\]"\) !== 0\)\) \{[\s\S]{0,100}sheet\.getRange\(fRow,\s*6\)\.setBackground\("#D9EAD3"\)\.setFontWeight\("bold"\);/,
+  /if \(isFirstRow\) \{[\s\S]{0,220}if \(isMainSetRow\) \{[\s\S]{0,100}sheet\.getRange\(fRow,\s*6\)\.setBackground\("#D9EAD3"\)\.setFontWeight\("bold"\);/,
   'manual recheck must keep the top/main set row green in column F even when the row itself uses the blue request-group background'
+);
+
+assert.doesNotMatch(
+  source,
+  /첫 행 서식[\s\S]{0,260}for \(let r = 1; r < reqRows\.length; r\+\+\) \{[\s\S]{0,160}\.setBackground\(null\);[\s\S]{0,40}\}/,
+  'manual recheck must not clear the entire request group background before processing only pending rows'
+);
+
+assert.match(
+  source,
+  /function isMainSetRowForFormatting_\(result,\s*equipName,\s*qTag\)[\s\S]{0,260}if \(setMasterNames\.has\(cleanEquip\)\) return true;[\s\S]{0,120}getSetComponents\(cleanEquip,\s*setSheet\)\.length > 0;/,
+  'manual recheck should re-detect main set rows by current equipment name, not only by the existing I-column result'
+);
+
+assert.match(
+  source,
+  /sheet\.getRange\(setRow,\s*1,\s*1,\s*18\)\.setFontWeight\("bold"\)\.setBackground\("#E8F0FE"\);[\s\S]{0,80}sheet\.getRange\(setRow,\s*6\)\.setBackground\("#D9EAD3"\)\.setFontWeight\("bold"\);/,
+  'newly expanded first-row set headers should also keep column F green'
 );
 
 assert.doesNotMatch(

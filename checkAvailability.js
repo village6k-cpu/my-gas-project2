@@ -4477,19 +4477,25 @@ function _processByReqID(sheet, triggerRow) {
     reqRows.push({ idx: i, row: i + 2, 장비명: allData[i][5], 수량: allData[i][6] || 1, result: allData[i][8] });
   }
 
-  // 첫 행 서식 (예약 건 구분)
-  if (reqRows.length > 0) {
-    sheet.getRange(reqRows[0].row, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
-    for (let r = 1; r < reqRows.length; r++) {
-      sheet.getRange(reqRows[r].row, 1, 1, 18).setFontWeight("normal").setBackground(null);
-    }
-  }
-
   // 세트마스터 A열 이름 목록 (한번만 읽기)
   var setMasterNames = new Set();
   if (setSheet.getLastRow() >= 2) {
     setSheet.getRange(2, 1, setSheet.getLastRow() - 1, 1).getValues().flat()
       .forEach(function(n) { if (n) setMasterNames.add(n.toString().trim()); });
+  }
+
+  function isMainSetRowForFormatting_(result, equipName, qTag) {
+    var cleanEquip = String(equipName || "").trim();
+    var cleanQ = String(qTag || "").trim();
+    if (!cleanEquip || cleanQ.indexOf("[세트]") === 0) return false;
+    if (String(result || "").trim() === "세트") return true;
+    if (setMasterNames.has(cleanEquip)) return true;
+    return getSetComponents(cleanEquip, setSheet).length > 0;
+  }
+
+  // 첫 행 서식 (예약 건 구분). 기존 세트 초록 서식은 여기서 지우지 않는다.
+  if (reqRows.length > 0) {
+    sheet.getRange(reqRows[0].row, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
   }
 
   // ── 변경된 세트의 구성품만 삭제 (다른 세트/장비는 보존) ──
@@ -4668,10 +4674,12 @@ function _processByReqID(sheet, triggerRow) {
       var fEquip = String(finalData2[i][5] || "").trim();
       var fQTag = String(finalData2[i][16] || "").trim();
 
+      var isMainSetRow = isMainSetRowForFormatting_(fResult, fEquip, fQTag);
+
       if (isFirstRow) {
         // 첫 행: 볼드 + 파란배경
         sheet.getRange(fRow, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
-        if (fResult === "세트" || (setMasterNames.has(fEquip) && fQTag.indexOf("[세트]") !== 0)) {
+        if (isMainSetRow) {
           sheet.getRange(fRow, 6).setBackground("#D9EAD3").setFontWeight("bold");
         }
         isFirstRow = false;
@@ -4679,7 +4687,7 @@ function _processByReqID(sheet, triggerRow) {
         // 나머지 행: 일반 텍스트 + 배경 제거
         sheet.getRange(fRow, 1, 1, 18).setFontWeight("normal").setBackground(null);
         // 세트 헤더 또는 세트마스터 존재 품목이면 F열만 초록
-        if (fResult === "세트" || (setMasterNames.has(fEquip) && fQTag.indexOf("[세트]") !== 0)) {
+        if (isMainSetRow) {
           sheet.getRange(fRow, 6).setBackground("#D9EAD3").setFontWeight("bold");
         }
       }
@@ -5175,8 +5183,8 @@ function expandSetRows(sheet, setRow, reqID, components, qty) {
   if (!isFirstRow) {
     sheet.getRange(setRow, 6).setBackground("#D9EAD3").setFontWeight("bold");
   } else {
-    sheet.getRange(setRow, 6).setFontWeight("bold");
     sheet.getRange(setRow, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
+    sheet.getRange(setRow, 6).setBackground("#D9EAD3").setFontWeight("bold");
   }
 
   // 모든 구성품을 아래에 행 삽입
