@@ -46,6 +46,12 @@ assert.match(
   'manual recheck must keep set header and set-master rows green in column F'
 );
 
+assert.match(
+  source,
+  /if \(isFirstRow\) \{[\s\S]{0,220}if \(fResult === "세트" \|\| \(setMasterNames\.has\(fEquip\) && fQTag\.indexOf\("\[세트\]"\) !== 0\)\) \{[\s\S]{0,100}sheet\.getRange\(fRow,\s*6\)\.setBackground\("#D9EAD3"\)\.setFontWeight\("bold"\);/,
+  'manual recheck must keep the top/main set row green in column F even when the row itself uses the blue request-group background'
+);
+
 assert.doesNotMatch(
   source,
   /if \(aVal && hasProcessedRows_\(sheet,\s*row,\s*aVal\)\)/,

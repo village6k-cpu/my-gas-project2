@@ -4585,12 +4585,7 @@ function _processByReqID(sheet, triggerRow) {
       }
     } else if (setMasterNames.has(ri.장비명.toString().trim())) {
       // 단일 품목: 세트마스터에 존재 → F열 초록 표시
-      if (ri.row === firstRowNum) {
-        // 첫 행: 파란배경 유지, F열 볼드만
-        sheet.getRange(ri.row, 6).setFontWeight("bold");
-      } else {
-        sheet.getRange(ri.row, 6).setBackground("#D9EAD3").setFontWeight("bold");
-      }
+      sheet.getRange(ri.row, 6).setBackground("#D9EAD3").setFontWeight("bold");
     }
   }
 
@@ -4610,9 +4605,9 @@ function _processByReqID(sheet, triggerRow) {
       if (firstRowOfReq === null) firstRowOfReq = i + 2;
       if (newAllData[i][8] === "세트") {
         if (i + 2 === firstRowOfReq) {
-          // 첫 행: F열만 초록, 행 전체는 파란배경 유지
-          sheet.getRange(i + 2, 6).setFontWeight("bold");
+          // 첫 행도 세트명 셀(F열)은 초록으로 표시
           sheet.getRange(i + 2, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
+          sheet.getRange(i + 2, 6).setBackground("#D9EAD3").setFontWeight("bold");
         } else {
           sheet.getRange(i + 2, 6).setBackground("#D9EAD3").setFontWeight("bold");
         }
@@ -4676,6 +4671,9 @@ function _processByReqID(sheet, triggerRow) {
       if (isFirstRow) {
         // 첫 행: 볼드 + 파란배경
         sheet.getRange(fRow, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
+        if (fResult === "세트" || (setMasterNames.has(fEquip) && fQTag.indexOf("[세트]") !== 0)) {
+          sheet.getRange(fRow, 6).setBackground("#D9EAD3").setFontWeight("bold");
+        }
         isFirstRow = false;
       } else {
         // 나머지 행: 일반 텍스트 + 배경 제거
