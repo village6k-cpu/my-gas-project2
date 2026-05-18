@@ -720,26 +720,44 @@
     vertical-align: middle;
   }
   .equip-qty {
-    color: var(--text-secondary);
-    font-size: 11px;
-    font-weight: 600;
+    color: #0F5EA8;
+    background: #EAF4FF;
+    border: 1px solid #9FC8EE;
+    font-size: 14px;
+    font-weight: 850;
+    min-width: 44px;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
     margin-right: 4px;
+    line-height: 1;
+    letter-spacing: 0.1px;
+    box-shadow: 0 1px 0 rgba(15, 94, 168, 0.12);
+  }
+  .equip-qty.equip-qty-memory {
+    color: #174B9A;
+    background: #DCEBFF;
+    border-color: #7EA9E8;
+    box-shadow: 0 1px 0 rgba(23, 75, 154, 0.18);
+  }
+  .equip-qty.equip-qty-battery {
+    color: #9F3D09;
+    background: #FFE6D6;
+    border-color: #F4AE7D;
+    box-shadow: 0 1px 0 rgba(159, 61, 9, 0.18);
   }
   .equip-qty-edit {
-    border: 1px solid var(--border);
-    background: var(--surface);
-    border-radius: 4px;
-    min-width: 30px;
-    height: 22px;
-    padding: 0 6px;
+    border-radius: 999px;
     cursor: pointer;
-    line-height: 20px;
+    line-height: 1;
   }
   .equip-qty-edit:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: #F5FAFF;
+    transform: translateY(-1px);
+    filter: saturate(1.08);
   }
   .equip-row-remove {
     width: 18px;
@@ -1927,6 +1945,13 @@ function renderList(containerId, items, type, isSearching, options) {
         var sidEsc = escJs(eq.scheduleId);
         var nameEsc = escJs(eq.name);
         var qtyValue = eq.qty || 1;
+        var eqNameLower = String(eq.name || '').toLowerCase();
+        var qtyClass = 'equip-qty-default';
+        if (eqNameLower.indexOf('메모리') > -1 || eqNameLower.indexOf('memory') > -1 || eqNameLower.indexOf('sd') > -1 || eqNameLower.indexOf('cf') > -1 || eqNameLower.indexOf('cfast') > -1) {
+          qtyClass = 'equip-qty-memory';
+        } else if (eqNameLower.indexOf('배터리') > -1 || eqNameLower.indexOf('battery') > -1 || eqNameLower.indexOf('밧데리') > -1) {
+          qtyClass = 'equip-qty-battery';
+        }
 
         html += '<div class="' + rowCls + '" onclick="event.stopPropagation()">';
         html += '<div class="equip-row-main">';
@@ -1935,7 +1960,7 @@ function renderList(containerId, items, type, isSearching, options) {
         if (eq.isSet) html += '<span class="equip-set-tag">SET</span>';
         html += escHtml(eq.name);
         html += '</span>';
-        html += '<button type="button" class="equip-qty equip-qty-edit" onclick="event.stopPropagation();editEquipQty(\'' + escJs(item.tradeId) + '\',\'' + sidEsc + '\',\'' + nameEsc + '\',\'' + escJs(String(qtyValue)) + '\')" title="수량 수정">×' + escHtml(qtyValue) + '</button>';
+        html += '<button type="button" class="equip-qty equip-qty-edit ' + qtyClass + '" onclick="event.stopPropagation();editEquipQty(\'' + escJs(item.tradeId) + '\',\'' + sidEsc + '\',\'' + nameEsc + '\',\'' + escJs(String(qtyValue)) + '\')" title="수량 수정">×' + escHtml(qtyValue) + '</button>';
         if (!eq.isComponent) {
           html += '<span class="equip-row-remove" onclick="event.stopPropagation();removeEquip(\'' + escJs(item.tradeId) + '\',\'' + nameEsc + '\')" title="삭제">×</span>';
         }
