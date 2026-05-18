@@ -588,6 +588,7 @@ function getDashboardData(targetDate, skipCache) {
       paymentMethod: extra.paymentMethod || '',
       paymentSource: extra.paymentSource || '',
       paymentWarning: extra.paymentWarning || '',
+      depositStatus: extra.depositStatus || '',
       proofType: extra.proofType || '',
       issueStatus: extra.issueStatus || '',
       issueNote: extra.issueNote || '',
@@ -790,6 +791,7 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props) {
     paymentMethod: extra.paymentMethod || '',
     paymentSource: extra.paymentSource || '',
     paymentWarning: extra.paymentWarning || '',
+    depositStatus: extra.depositStatus || '',
     proofType: extra.proofType || '',
     issueStatus: extra.issueStatus || '',
     issueNote: extra.issueNote || '',
@@ -813,6 +815,7 @@ function dashboardSearchTradeMatches_(terms, group, cust, extra, checkInfo) {
     group.반납일,
     group.반납시간,
     extra.paymentMethod,
+    extra.depositStatus,
     extra.proofType,
     extra.issueStatus,
     checkInfo.returnStatus,
@@ -1681,6 +1684,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
       paymentMethod: '',
       paymentSource: '',
       paymentWarning: '',
+      depositStatus: '',
       proofType: '',
       issueStatus: '',
       issueNote: ''
@@ -1701,10 +1705,11 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var paymentCol = 10; // J열: 결제수단
     var proofCol = 11;   // K열: 증빙유형
     var issueCol = 12;   // L열: 발행상태
+    var depositCol = 13; // M열: 입금 상태
     var noteCol = 14;    // N열: 비고
     var wanted = {};
     tradeIds.forEach(function(tid) { wanted[String(tid)] = true; });
-    var readCols = Math.max(lastCol, paymentCol, proofCol, issueCol, noteCol);
+    var readCols = Math.max(lastCol, paymentCol, proofCol, issueCol, depositCol, noteCol);
     var rows = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, readCols).getDisplayValues();
 
     rows.forEach(function(row) {
@@ -1716,6 +1721,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
       result[tid].paymentSource = result[tid].paymentMethod ? 'sheet:J' : '';
       result[tid].proofType = String(row[proofCol - 1] || '').trim();
       result[tid].issueStatus = String(row[issueCol - 1] || '').trim();
+      result[tid].depositStatus = String(row[depositCol - 1] || '').trim();
       result[tid].issueNote = String(row[noteCol - 1] || '').trim();
     });
   } catch (err) {

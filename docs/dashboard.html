@@ -453,6 +453,9 @@
     color: #fff;
     border-color: var(--accent);
   }
+  .tab.attention-tab .badge { background: rgba(235,87,87,0.12); color: #B42318; }
+  .tab.attention-tab.active { background: #B42318; border-color: #B42318; }
+  .tab.attention-tab.active .badge { background: rgba(255,255,255,0.26); color: #fff; }
   .tab .badge {
     display: inline-block;
     background: rgba(0,0,0,0.08);
@@ -1116,6 +1119,7 @@
   }
   .type-checkout .time-badge { background: var(--blue-bg); color: var(--blue-text); }
   .type-checkin  .time-badge { background: var(--gray-bg); color: var(--gray-text); }
+  .card-badges,
   .search-card-badges {
     display: flex;
     align-items: center;
@@ -1132,6 +1136,19 @@
     background: #EAF4FF;
     color: #0F5EA8;
     white-space: nowrap;
+  }
+  .attention-reason-badge {
+    font-size: 11px;
+    font-weight: 850;
+    padding: 3px 8px;
+    border: 1px solid rgba(180,35,24,0.22);
+    border-radius: 6px;
+    background: #FFF1F0;
+    color: #B42318;
+    white-space: nowrap;
+  }
+  .schedule-card.has-attention {
+    border-color: rgba(180,35,24,0.25);
   }
 
   .card-meta {
@@ -1298,6 +1315,9 @@
     <button class="tab" data-tab="all" onclick="switchTab('all')">
       전체 <span class="badge" id="tabAll">0</span>
     </button>
+    <button class="tab attention-tab" data-tab="attention" onclick="switchTab('attention')">
+      확인필요 <span class="badge" id="tabAttention">0</span>
+    </button>
   </div>
 </div>
 <div id="dashboardSearchStatus" class="dashboard-search-status"></div>
@@ -1310,6 +1330,7 @@
   <div id="checkoutSection" class="section"></div>
   <div id="checkinSection" class="section"></div>
   <div id="allSection" class="section"></div>
+  <div id="attentionSection" class="section"></div>
 </div>
 
 <script>
@@ -1812,6 +1833,7 @@ function dashboardItemMatchesSearch(item, type) {
     item.paymentMethod,
     item.paymentSource,
     item.paymentWarning,
+    item.depositStatus,
     item.proofType,
     item.issueStatus,
     item.issueNote,
@@ -1831,6 +1853,65 @@ function filterDashboardItems(items, type) {
   return items.filter(function(item) { return dashboardItemMatchesSearch(item, type); });
 }
 
+function normalizeAttentionStatus(value) {
+  return String(value || '').replace(/\s+/g, '').trim();
+}
+
+function isReturnStatusAbnormal(item) {
+  var status = normalizeAttentionStatus(item && item.returnStatus);
+  return !!status && status !== '정상' && status !== '반납완료';
+}
+
+function isPaymentComplete(item) {
+  var status = normalizeAttentionStatus(item && item.depositStatus);
+  return status === '입금완료' || status === '결제완료' || status === '완납';
+}
+
+function isPaymentPending(item) {
+  if (item && Object.prototype.hasOwnProperty.call(item, 'depositStatus')) {
+    return !isPaymentComplete(item);
+  }
+
+  var method = normalizeAttentionStatus(item && item.paymentMethod);
+  return !method || method === '미정' || method === '미입금' || method === '미결제';
+}
+
+function getDashboardAttentionReasons(item) {
+  var reasons = [];
+  if (isReturnStatusAbnormal(item)) {
+    reasons.push('반납 ' + String(item.returnStatus || '').trim());
+  }
+  if (isPaymentPending(item)) {
+    var status = String((item && item.depositStatus) || '').trim();
+    reasons.push(status ? status : '미결제');
+  }
+  return reasons;
+}
+
+function buildDashboardAttentionItems(checkout, checkin) {
+  var items = [];
+  (checkout || []).forEach(function(item) {
+    if (!getDashboardAttentionReasons(item).length) return;
+    var copy = cloneDashboardListItem(item);
+    copy._type = 'checkout';
+    items.push(copy);
+  });
+  (checkin || []).forEach(function(item) {
+    if (!getDashboardAttentionReasons(item).length) return;
+    var copy = cloneDashboardListItem(item);
+    copy._type = 'checkin';
+    items.push(copy);
+  });
+  items.sort(compareDashboardGlobalSearchItems);
+  return items;
+}
+
+function cloneDashboardListItem(item) {
+  var copy = {};
+  Object.keys(item || {}).forEach(function(key) { copy[key] = item[key]; });
+  return copy;
+}
+
 function renderDashboard(data, expectedDate) {
   if (dashboardSearchQuery && dashboardGlobalSearchData) {
     renderDashboardGlobalSearch(dashboardGlobalSearchData);
@@ -1842,12 +1923,14 @@ function renderDashboard(data, expectedDate) {
   var checkin = Array.isArray(data.checkin) ? data.checkin : [];
   var filteredCheckout = filterDashboardItems(checkout, 'checkout');
   var filteredCheckin = filterDashboardItems(checkin, 'checkin');
+  var attention = buildDashboardAttentionItems(filteredCheckout, filteredCheckin);
   var isSearching = !!dashboardSearchQuery;
   document.getElementById('loadingArea').style.display = 'none';
 
   document.getElementById('tabCheckout').textContent = filteredCheckout.length;
   document.getElementById('tabCheckin').textContent = filteredCheckin.length;
   document.getElementById('tabAll').textContent = filteredCheckout.length + filteredCheckin.length;
+  document.getElementById('tabAttention').textContent = attention.length;
 
   renderList('checkoutSection', filteredCheckout, 'checkout', isSearching);
   renderList('checkinSection', filteredCheckin, 'checkin', isSearching);
@@ -1856,6 +1939,7 @@ function renderDashboard(data, expectedDate) {
     .concat(filteredCheckin.map(function(c) { c._type = 'checkin'; return c; }));
   all.sort(compareDashboardGlobalSearchItems);
   renderList('allSection', all, 'all', isSearching);
+  renderList('attentionSection', attention, 'attention', isSearching, { emptyText: isSearching ? '검색된 확인필요 일정이 없습니다' : '확인필요 일정이 없습니다' });
 
   switchTab(activeDashboardTab || 'checkout');
   prefetchAdjacentDashboardDates(data.date || expectedDate || formatDate(currentDate));
@@ -1875,9 +1959,12 @@ function renderDashboardGlobalSearch(data) {
   document.getElementById('tabCheckout').textContent = checkout.length;
   document.getElementById('tabCheckin').textContent = checkin.length;
   document.getElementById('tabAll').textContent = all.length;
+  var attention = buildDashboardAttentionItems(checkout, checkin);
+  document.getElementById('tabAttention').textContent = attention.length;
   renderList('checkoutSection', [], 'checkout', true, { globalSearch: true });
   renderList('checkinSection', [], 'checkin', true, { globalSearch: true });
   renderList('allSection', all, 'all', true, { globalSearch: true });
+  renderList('attentionSection', attention, 'attention', true, { globalSearch: true, emptyText: '검색된 확인필요 일정이 없습니다' });
 
   var total = Number(data.total || all.length);
   var suffix = total > all.length ? ' · 상위 ' + all.length + '건 표시' : ' · ' + all.length + '건';
@@ -1912,11 +1999,12 @@ function renderList(containerId, items, type, isSearching, options) {
   var container = document.getElementById(containerId);
 
   if (!items || items.length === 0) {
-    var emptyText = isSearching ? '검색 결과가 없습니다' :
-      ((type === 'checkout' ? '반출' : type === 'checkin' ? '반납' : '') + ' 일정이 없습니다');
+    var emptyText = options.emptyText || (isSearching ? '검색 결과가 없습니다' :
+      ((type === 'checkout' ? '반출' : type === 'checkin' ? '반납' : '') + ' 일정이 없습니다'));
+    var emptyIcon = type === 'checkout' ? '📦' : type === 'checkin' ? '📥' : (type === 'attention' ? '!' : '📋');
     container.innerHTML =
       '<div class="empty-state"><div class="icon">' +
-      (type === 'checkout' ? '📦' : type === 'checkin' ? '📥' : '📋') +
+      emptyIcon +
       '</div><div class="text">' + emptyText + '</div></div>';
     return;
   }
@@ -1953,7 +2041,8 @@ function renderList(containerId, items, type, isSearching, options) {
       var doneCls = taskDone ? ' task-done' : '';
       var toggleCls = taskDone ? 'task-toggle checked' : 'task-toggle';
       var toggleIcon = taskDone ? '✓' : '';
-      html += '<div class="schedule-card type-' + cardType + doneCls + '" data-tid="' + escHtml(item.tradeId) + '" data-cardtype="' + cardType + '" onclick="toggleDetail(\'' + cardId + '\')">';
+      var attentionReasons = getDashboardAttentionReasons(item);
+      html += '<div class="schedule-card type-' + cardType + (attentionReasons.length ? ' has-attention' : '') + doneCls + '" data-tid="' + escHtml(item.tradeId) + '" data-cardtype="' + cardType + '" onclick="toggleDetail(\'' + cardId + '\')">';
       html += '<div class="card-header">';
       html += '<div style="display:flex;align-items:flex-start;gap:0;">';
       // 반출/반납 모두 토글 노출
@@ -1964,10 +2053,13 @@ function renderList(containerId, items, type, isSearching, options) {
       html += '<div class="customer-name">' + escHtml(item.name) + '</div>';
       if (item.company) html += '<div class="customer-company">' + escHtml(item.company) + '</div>';
       html += '</div></div>';
-      html += '<div class="' + (options.globalSearch ? 'search-card-badges' : '') + '">';
+      html += '<div class="card-badges' + (options.globalSearch ? ' search-card-badges' : '') + '">';
       if (options.globalSearch) {
         html += '<div class="search-date-badge">' + escHtml(item.searchDate || '') + ' ' + escHtml(item.searchPhaseLabel || '') + '</div>';
       }
+      attentionReasons.forEach(function(reason) {
+        html += '<div class="attention-reason-badge">' + escHtml(reason) + '</div>';
+      });
       html += '<div class="time-badge">' + escHtml(item.time || '시간 미정') + '</div></div></div>';
 
       if (item.tel) {
@@ -2929,9 +3021,13 @@ function syncPaymentInMemory(tid, method, res) {
     if (res && res.sideEffects && res.sideEffects.applied) {
       if (res.sideEffects.columns && res.sideEffects.columns.K) item.proofType = res.sideEffects.columns.K;
       if (res.sideEffects.columns && res.sideEffects.columns.L) item.issueStatus = res.sideEffects.columns.L;
+      if (res.sideEffects.columns && res.sideEffects.columns.M) item.depositStatus = res.sideEffects.columns.M;
     }
   });
   persistCurrentDashboardCache();
+  if (!dashboardSearchQuery && activeDashboardTab === 'attention') {
+    renderDashboard(dashboardData, dashboardData.date || formatDate(currentDate));
+  }
 }
 
 function dashboardItemsForTrade(tid) {
