@@ -14,6 +14,13 @@ BACKUP_DIR="$HOME/gas-project-backups"
 echo "▶ 현재 브랜치: $BRANCH"
 echo ""
 
+if [[ "$BRANCH" != "main" ]]; then
+  echo "❌ endwork.sh는 main 통합/배포 전용입니다."
+  echo "→ feature 브랜치에서는 GAS 배포 없이 ./scripts/finishbranch.sh \"커밋 메시지\" 를 사용하세요."
+  echo "→ 통합/배포는 main에서 ./scripts/integrate.sh \"$BRANCH\" \"통합 메시지\" 로 진행하세요."
+  exit 4
+fi
+
 # 1. GitHub 원격이 앞서 있으면 중단
 echo "▶ git fetch origin $BRANCH..."
 git fetch origin "$BRANCH"
@@ -39,19 +46,26 @@ trap cleanup EXIT
 
 echo "▶ GAS 원격 변경 확인..."
 (
+  cp .clasp.json "$TMP_GAS/.clasp.json"
   cd "$TMP_GAS"
-  clasp clone "$SCRIPT_ID" --rootDir "$TMP_GAS" >/dev/null
+  clasp pull >/dev/null
 )
 git archive HEAD | tar -x -C "$TMP_HEAD"
 
 REMOTE_CHANGED=0
+GAS_FILE_LIST="$(find "$TMP_GAS" -maxdepth 1 -type f ! -name '.clasp.json' -exec basename {} \; | sort)"
+if [[ -z "$GAS_FILE_LIST" ]]; then
+  echo "❌ GAS 파일을 가져오지 못했습니다. push를 중단합니다."
+  exit 2
+fi
+
 while IFS= read -r f; do
   [[ "$f" == ".clasp.json" ]] && continue
   if [[ ! -f "$TMP_HEAD/$f" ]] || ! diff -q "$TMP_GAS/$f" "$TMP_HEAD/$f" >/dev/null; then
     echo "  ⚠️  HEAD 이후 GAS에서 바뀐 파일: $f"
     REMOTE_CHANGED=1
   fi
-done < <(find "$TMP_GAS" -maxdepth 1 -type f -exec basename {} \; | sort)
+done <<< "$GAS_FILE_LIST"
 
 if [[ "$REMOTE_CHANGED" -ne 0 ]]; then
   echo ""

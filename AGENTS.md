@@ -148,12 +148,39 @@
 → git fetch+pull, clasp pull, 동기화 상태 점검까지 자동.
 GAS에 git 미반영분이 있으면 멈추고 안내함.
 
-**작업 종료 시:**
+**작업 종료 시 (main 통합/배포 전용):**
 ```
 ./scripts/endwork.sh "커밋 메시지"
 ```
 → clasp push, clasp deploy, git commit+push까지 자동.
 메시지 생략하면 프롬프트로 물음.
+
+### 멀티 세션 작업 원칙
+여러 Codex/Claude 세션이 동시에 같은 repo를 만질 때는 `main`과 GAS 배포를 공유하지 않는다.
+
+- `main`은 통합/배포 전용이다.
+- feature 브랜치에서는 GAS 배포 금지. `clasp push`, `clasp deploy`, `scripts/endwork.sh`를 직접 실행하지 않는다.
+- 각 세션은 `codex/<작업명>` 브랜치와 별도 worktree에서 자기 파일만 작업한다.
+- feature 브랜치 종료는 `./scripts/finishbranch.sh "커밋 메시지"`로 한다. 이 스크립트는 git commit/push만 하고 GAS는 건드리지 않는다.
+- 통합 세션만 `main`에서 `./scripts/integrate.sh codex/<작업명> "통합 메시지"`를 실행한다. 이때만 GAS push/deploy와 main push가 함께 일어난다.
+- 같은 파일을 동시에 고치는 작업은 시작 전에 파일 소유자를 정한다. 특히 `checkAvailability.js`, `sheetAPI.js`, `dashboard.html`, `docs/dashboard.html`은 충돌 핫스팟이다.
+
+**새 작업 시작 (멀티 세션 권장):**
+```
+./scripts/newtask.sh 작업명
+cd ../my-gas-project2-worktrees/작업명
+./scripts/startwork.sh
+```
+
+**feature 브랜치 작업 종료:**
+```
+./scripts/finishbranch.sh "커밋 메시지"
+```
+
+**main 통합/배포:**
+```
+./scripts/integrate.sh codex/작업명 "통합 메시지"
+```
 
 **상태 진단 (읽기 전용):**
 ```

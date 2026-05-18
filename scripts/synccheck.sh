@@ -44,8 +44,9 @@ echo ""
 # 3. GAS와의 차이 (읽기 전용)
 echo "[3] GAS 동기화 (읽기 전용)"
 (
+  cp .clasp.json "$TMPDIR/.clasp.json"
   cd "$TMPDIR" || exit 1
-  clasp clone "$SCRIPT_ID" --rootDir "$TMPDIR" >/dev/null 2>&1
+  clasp pull >/dev/null 2>&1
 )
 GAS_FILE_LIST="$(find "$TMPDIR" -maxdepth 1 -type f ! -name '.clasp.json' -exec basename {} \; | sort)"
 

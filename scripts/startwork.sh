@@ -22,29 +22,47 @@ fi
 
 # 2. git fetch + pull
 echo "▶ git fetch + pull origin $BRANCH..."
-git fetch origin "$BRANCH"
-git pull --no-rebase origin "$BRANCH"
+if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+  git fetch origin "$BRANCH"
+  git pull --no-rebase origin "$BRANCH"
+else
+  echo "  origin/$BRANCH 없음. 로컬 feature 브랜치로 계속합니다."
+fi
 echo ""
+
+if [[ "$BRANCH" != "main" ]]; then
+  echo "ℹ️  feature 브랜치에서는 GAS pull을 건너뜁니다."
+  echo "→ GAS 최종 동기화와 배포는 main 통합 단계에서 ./scripts/integrate.sh 로 처리하세요."
+  echo "✅ feature 브랜치 작업 시작 OK."
+  exit 0
+fi
 
 # 3. GAS 읽기 전용 비교
 TMPDIR="$(mktemp -d /tmp/gas-startwork.XXXXXX)"
 cleanup() { rm -rf "$TMPDIR"; }
 trap cleanup EXIT
 
-echo "▶ GAS 원격 확인 (읽기 전용 clone)..."
+echo "▶ GAS 원격 확인 (읽기 전용 pull)..."
 (
+  cp .clasp.json "$TMPDIR/.clasp.json"
   cd "$TMPDIR"
-  clasp clone "$SCRIPT_ID" --rootDir "$TMPDIR" >/dev/null
+  clasp pull >/dev/null
 )
 
 DIFF_COUNT=0
+GAS_FILE_LIST="$(find "$TMPDIR" -maxdepth 1 -type f ! -name '.clasp.json' -exec basename {} \; | sort)"
+if [[ -z "$GAS_FILE_LIST" ]]; then
+  echo "❌ GAS 파일을 가져오지 못했습니다."
+  exit 4
+fi
+
 while IFS= read -r f; do
   [[ "$f" == ".clasp.json" ]] && continue
   if [[ ! -f "$f" ]] || ! diff -q "$TMPDIR/$f" "$f" >/dev/null; then
     echo "  ⚠️  GAS와 다름: $f"
     DIFF_COUNT=$((DIFF_COUNT + 1))
   fi
-done < <(find "$TMPDIR" -maxdepth 1 -type f -exec basename {} \; | sort)
+done <<< "$GAS_FILE_LIST"
 echo ""
 
 # 4. GAS가 최종본이므로 차이가 있으면 백업 후 pull
