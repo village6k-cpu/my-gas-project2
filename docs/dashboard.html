@@ -1348,7 +1348,7 @@ var dashboardSearchCollapsedGroups = {};
 var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
 var DASHBOARD_OLD_CACHE_PREFIX = 'dashCache_v3_';
 var CONTRACT_STATUS_OPTIONS = ['', '예약', '반출', '취소'];
-var RETURN_STATUS_OPTIONS = ['', '정상', '확인필요', '파손', '분실', '미반납', '반납완료'];
+var RETURN_STATUS_OPTIONS = ['', '확인필요', '파손', '분실', '미반납', '반납완료'];
 var equipmentMemoSaveTimers = {};
 var dashboardMemoDrafts = {};
 var DEFAULT_DASHBOARD_NOTES = [
@@ -2226,13 +2226,19 @@ function contractStatusOptionsHtml(current) {
 }
 
 function returnStatusOptionsHtml(current) {
-  current = String(current || '').trim();
+  current = normalizeReturnStatusForSelect(current);
   var options = RETURN_STATUS_OPTIONS.slice();
   if (current && options.indexOf(current) < 0) options.splice(1, 0, current);
   return options.map(function(opt) {
     var label = opt || '반납상태';
     return '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(label) + '</option>';
   }).join('');
+}
+
+function normalizeReturnStatusForSelect(current) {
+  current = String(current || '').trim();
+  if (current === '정상') return '반납완료';
+  return current;
 }
 
 function equipmentCheckTimerKey(el) {
