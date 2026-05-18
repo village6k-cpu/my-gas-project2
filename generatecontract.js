@@ -340,10 +340,9 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   ws.getRange("C45").setDataValidation(ltRule).setValue(ltText);
 
   // ── 결제금액 수식 보정 ──
-  // 계약서 템플릿 기본 수식은 할인들을 곱해서 적용하면 학생30%+장기20%가 44%로 계산된다.
-  // 빌리지 견적 기준은 할인율 합산(= 50% off)이므로 생성 시 수식을 명시적으로 보정한다.
-  var manualFinalAmount = parseManualFinalPaymentAmount_(추가요청);
-  applyContractPaymentFormula_(ws, manualFinalAmount);
+  // 빌리지 견적 기준은 할인 곱셈이다. 예: 학생30% + 장기20% => 0.7 * 0.8 = 56% 결제.
+  // 계약서 템플릿도 같은 정책을 쓰도록 생성 시 수식을 명시적으로 보정한다.
+  applyContractPaymentFormula_(ws);
 
   // ── 계약일자 ──
   const today = new Date();
@@ -422,43 +421,19 @@ function isQuoteMemoLine_(line) {
   return /견적|정가|최종\s*결제\s*금액|최종가|결제\s*금액|할인|off|OFF|기준/.test(String(line || ""));
 }
 
-function parseManualFinalPaymentAmount_(text) {
-  var s = String(text || "");
-  if (!s) return null;
-
-  var man = s.match(/(?:최종\s*결제\s*금액|최종가|결제\s*금액)[^\d]*(\d+(?:\.\d+)?)\s*만\s*원/);
-  if (man) {
-    var manAmount = Math.round(Number(man[1]) * 10000);
-    return manAmount >= 10000 ? manAmount : null;
-  }
-
-  var won = s.match(/(?:최종\s*결제\s*금액|최종가|결제\s*금액)[^\d]*(\d[\d,]*)\s*원/);
-  if (won) {
-    var amount = Number(won[1].replace(/,/g, ""));
-    return amount >= 10000 ? amount : null;
-  }
-
-  return null;
-}
-
-function getDiscountSumFormula_() {
+function getDiscountMultiplierFormula_() {
   return [
-    'IFERROR(VALUE(REGEXEXTRACT(C44,"\\d+"))/100,0)',
-    'IFERROR(VALUE(REGEXEXTRACT(I44,"\\d+"))/100,0)',
-    'IFERROR(VALUE(REGEXEXTRACT(C45,"\\d+"))/100,0)',
-    'IFERROR(VALUE(REGEXEXTRACT(I45,"\\d+"))/100,0)'
-  ].join("+");
+    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(C44,"\\d+"))/100,0))',
+    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(I44,"\\d+"))/100,0))',
+    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(C45,"\\d+"))/100,0))',
+    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(I45,"\\d+"))/100,0))'
+  ].join("*");
 }
 
-function applyContractPaymentFormula_(ws, manualFinalAmount) {
-  var discountSum = getDiscountSumFormula_();
-  ws.getRange("H46").setFormula("=J42*(1-MIN(1," + discountSum + "))");
+function applyContractPaymentFormula_(ws) {
+  var discountMultiplier = getDiscountMultiplierFormula_();
+  ws.getRange("H46").setFormula("=J42*(" + discountMultiplier + ")");
   ws.getRange("H47").setFormula('=IFERROR(CEILING($H$46*1.1,10),"")');
-
-  if (manualFinalAmount) {
-    ws.getRange("H46").setValue(manualFinalAmount);
-    ws.getRange("H47").setValue(manualFinalAmount);
-  }
 }
 
 function getAdditionalRequestTextByTradeId_(ss, 거래ID) {
@@ -621,7 +596,7 @@ function updateContractLink(거래ID, contractUrl) {
  *      IF(E14>=6,"35%",IF(E14>=3,"20%",IF(E14>=2,"10%","해당없음"))))))
  *   → 템플릿 단독으로 열어 일수 입력해도 자동 계산됨
  *   → 계약서 생성 코드도 setValue로 덮어쓰지만, 코드가 실패하더라도 템플릿이 안전망
- * - H46 수식: 할인율 합산 적용
+ * - H46 수식: 할인 곱셈 적용
  */
 function setupContractTemplate() {
   var props = PropertiesService.getScriptProperties();
@@ -655,9 +630,9 @@ function setupContractTemplate() {
   );
   out.push("C45 수식 적용 (E14 일수 기반)");
 
-  // 4) 총 할인율은 곱연산이 아니라 합산 적용
-  applyContractPaymentFormula_(ws, null);
-  out.push("H46/H47 할인 합산 수식 적용");
+  // 4) 할인은 곱셈 적용
+  applyContractPaymentFormula_(ws);
+  out.push("H46/H47 할인 곱셈 수식 적용");
 
   // 5) 다른 할인 셀은 초기값을 '해당없음'으로 (드롭다운 옵션 일치)
   ws.getRange("C44").setValue("해당없음");
@@ -776,7 +751,6 @@ function regenerateContractById(거래ID, 추가요청) {
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const extraText = 추가요청 !== undefined ? String(추가요청 || "") : getAdditionalRequestTextByTradeId_(ss, 거래ID);
-  const manualFinalAmount = parseManualFinalPaymentAmount_(extraText);
   const result = deleteAndRegenerateContract(ss, 거래ID, extraText);
   const summary = result && result.fileId ? getGeneratedContractSummary_(result.fileId) : {};
   return {
@@ -784,7 +758,6 @@ function regenerateContractById(거래ID, 추가요청) {
     tradeId: 거래ID,
     url: result && result.url ? result.url : "",
     fileId: result && result.fileId ? result.fileId : "",
-    manualFinalAmount: manualFinalAmount || "",
     extraRequestFound: !!extraText,
     summary: summary
   };
