@@ -193,22 +193,25 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   // ── 임차인 정보 (기존 템플릿 구조) ──
   // Row 8: 임차인 | 예약자(상호) → C열 | 연락처 → I열 부근
   // Row 9: 계약자(상호) → C열
-  ws.getRange(rows.lessee1, 3).setValue(contract.예약자명);       // C: 예약자(상호)
-  if (rows.contactCol) {
-    ws.getRange(rows.lessee1, rows.contactCol).setValue(contract.연락처);  // 연락처
-  }
-  ws.getRange(rows.lessee2, 3).setValue(contract.업체명 || contract.예약자명);  // C: 계약자(상호)
+  const lesseeCol = findValueColAfterLabel_(ws, rows.lessee1, "예약자", 3);
+  const contactCol = findValueColAfterLabel_(ws, rows.lessee1, "연락처", rows.contactCol || 9);
+  const lessee2Col = findValueColAfterLabel_(ws, rows.lessee2, "계약자", 3);
+  ws.getRange(rows.lessee1, lesseeCol).setValue(contract.예약자명);
+  ws.getRange(rows.lessee1, contactCol).setValue(contract.연락처);
+  ws.getRange(rows.lessee2, lessee2Col).setValue(contract.업체명 || contract.예약자명);
 
   // ── 대여기간 ──
   const 반출일시 = formatContractDT(contract.반출일, contract.반출시간);
   const 반납일시 = formatContractDT(contract.반납일, contract.반납시간);
-  ws.getRange(rows.rentalStart, 3).setValue(반출일시);            // C: 대여일자
+  const rentalStartCol = findValueColAfterLabel_(ws, rows.rentalStart, "대여일자", 3);
+  const rentalEndCol = findValueColAfterLabel_(ws, rows.rentalStart + 1, "반납일자", 3);
+  ws.getRange(rows.rentalStart, rentalStartCol).setValue(반출일시);
 
   // 대여일수 계산 (24시간=1일, 6시간 이내 초과는 같은 일수, 초과 시 +1일)
   const 일수 = calcRentalDays(contract.반출일, contract.반출시간, contract.반납일, contract.반납시간);
 
   // 반납일자(예정) — rentalStart+1
-  ws.getRange(rows.rentalStart + 1, 3).setValue(반납일시);        // C: 반납일자(예정)
+  ws.getRange(rows.rentalStart + 1, rentalEndCol).setValue(반납일시);
 
   // ── 품목 채우기 (좌우 분할 테이블) — 배치 IO로 최적화 ──
   // 템플릿에서 B+C, H+I 이미 병합됨. 좌측: B(품목), D,E,F(수량,일수,단가), G(금액수식).
@@ -218,9 +221,13 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   const itemStart = rows.itemStart;
 
   // 추가요청을 items 뒤에 이어붙이기 (같은 배열로 통합 처리)
+  // 견적/최종금액 메모는 계약서 품목으로 넣지 않고, 아래 결제금액 보정에만 사용한다.
   const combinedItems = items.slice();
   if (추가요청) {
-    const 추가items = 추가요청.split("\n").filter(function(s) { return s.trim(); });
+    const 추가items = 추가요청.split("\n").filter(function(s) {
+      var line = String(s || "").trim();
+      return line && !isQuoteMemoLine_(line);
+    });
     for (let ai = 0; ai < 추가items.length && combinedItems.length < ITEMS_PER_SIDE * 2; ai++) {
       combinedItems.push({ 세트명: "", 장비명: 추가items[ai].trim(), 수량: 1, 단가: 0 });
     }
@@ -332,16 +339,24 @@ function generateContractFile(ss, 거래ID, 추가요청) {
     .build();
   ws.getRange("C45").setDataValidation(ltRule).setValue(ltText);
 
+  // ── 결제금액 수식 보정 ──
+  // 계약서 템플릿 기본 수식은 할인들을 곱해서 적용하면 학생30%+장기20%가 44%로 계산된다.
+  // 빌리지 견적 기준은 할인율 합산(= 50% off)이므로 생성 시 수식을 명시적으로 보정한다.
+  var manualFinalAmount = parseManualFinalPaymentAmount_(추가요청);
+  applyContractPaymentFormula_(ws, manualFinalAmount);
+
   // ── 계약일자 ──
   const today = new Date();
   const dateStr = `${today.getFullYear()}년 ${today.getMonth() + 1}월 ${today.getDate()}일`;
   if (rows.signDate) {
-    ws.getRange(rows.signDate, 5).setValue(dateStr);
+    ws.getRange(rows.signDate, findTextCol_(ws, rows.signDate, "계약일자", 3))
+      .setValue("계약일자:       " + dateStr);
   }
 
   // ── 임차인 서명란 ──
   if (rows.signLessee) {
-    ws.getRange(rows.signLessee, 5).setValue(contract.예약자명 + "  (서명 또는 인)");
+    ws.getRange(rows.signLessee, findTextCol_(ws, rows.signLessee, "임차인", 3))
+      .setValue("임차인:       " + contract.예약자명 + "  (서명 또는 인)");
   }
 
   // 저장
@@ -377,6 +392,90 @@ function repairContractItemHeaders_(ws, rows) {
   // can spill into populated rows and display #REF! in F/G or L/M.
   ws.getRange(headerRow, 6, 1, 2).setValues([["단가", "금액"]]);
   ws.getRange(headerRow, 12, 1, 2).setValues([["단가", "금액"]]);
+}
+
+function findTextCol_(ws, row, labelText, fallbackCol) {
+  var values = ws.getRange(row, 1, 1, 14).getDisplayValues()[0];
+  for (var c = 0; c < values.length; c++) {
+    if (String(values[c] || "").indexOf(labelText) !== -1) return c + 1;
+  }
+  return fallbackCol;
+}
+
+function findValueColAfterLabel_(ws, row, labelText, fallbackCol) {
+  var values = ws.getRange(row, 1, 1, 14).getDisplayValues()[0];
+  for (var c = 0; c < values.length; c++) {
+    if (String(values[c] || "").indexOf(labelText) === -1) continue;
+
+    var labelCell = ws.getRange(row, c + 1);
+    var lastLabelCol = c + 1;
+    var mergedRanges = labelCell.getMergedRanges();
+    for (var i = 0; i < mergedRanges.length; i++) {
+      lastLabelCol = Math.max(lastLabelCol, mergedRanges[i].getLastColumn());
+    }
+    return Math.min(lastLabelCol + 1, 14);
+  }
+  return fallbackCol;
+}
+
+function isQuoteMemoLine_(line) {
+  return /견적|정가|최종\s*결제\s*금액|최종가|결제\s*금액|할인|off|OFF|기준/.test(String(line || ""));
+}
+
+function parseManualFinalPaymentAmount_(text) {
+  var s = String(text || "");
+  if (!s) return null;
+
+  var man = s.match(/(?:최종\s*결제\s*금액|최종가|결제\s*금액)[^\d]*(\d+(?:\.\d+)?)\s*만\s*원/);
+  if (man) {
+    var manAmount = Math.round(Number(man[1]) * 10000);
+    return manAmount >= 10000 ? manAmount : null;
+  }
+
+  var won = s.match(/(?:최종\s*결제\s*금액|최종가|결제\s*금액)[^\d]*(\d[\d,]*)\s*원/);
+  if (won) {
+    var amount = Number(won[1].replace(/,/g, ""));
+    return amount >= 10000 ? amount : null;
+  }
+
+  return null;
+}
+
+function getDiscountSumFormula_() {
+  return [
+    'IFERROR(VALUE(REGEXEXTRACT(C44,"\\d+"))/100,0)',
+    'IFERROR(VALUE(REGEXEXTRACT(I44,"\\d+"))/100,0)',
+    'IFERROR(VALUE(REGEXEXTRACT(C45,"\\d+"))/100,0)',
+    'IFERROR(VALUE(REGEXEXTRACT(I45,"\\d+"))/100,0)'
+  ].join("+");
+}
+
+function applyContractPaymentFormula_(ws, manualFinalAmount) {
+  var discountSum = getDiscountSumFormula_();
+  ws.getRange("H46").setFormula("=J42*(1-MIN(1," + discountSum + "))");
+  ws.getRange("H47").setFormula('=IFERROR(CEILING($H$46*1.1,10),"")');
+
+  if (manualFinalAmount) {
+    ws.getRange("H46").setValue(manualFinalAmount);
+    ws.getRange("H47").setValue(manualFinalAmount);
+  }
+}
+
+function getAdditionalRequestTextByTradeId_(ss, 거래ID) {
+  var sheet = ss.getSheetByName("확인요청");
+  if (!sheet || sheet.getLastRow() < 2) return "";
+
+  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 18).getValues();
+  var seen = {};
+  var lines = [];
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][15] || "").trim() !== String(거래ID || "").trim()) continue;
+    var text = String(data[i][17] || "").trim();
+    if (!text || seen[text]) continue;
+    seen[text] = true;
+    lines.push(text);
+  }
+  return lines.join("\n");
 }
 
 
@@ -522,6 +621,7 @@ function updateContractLink(거래ID, contractUrl) {
  *      IF(E14>=6,"35%",IF(E14>=3,"20%",IF(E14>=2,"10%","해당없음"))))))
  *   → 템플릿 단독으로 열어 일수 입력해도 자동 계산됨
  *   → 계약서 생성 코드도 setValue로 덮어쓰지만, 코드가 실패하더라도 템플릿이 안전망
+ * - H46 수식: 할인율 합산 적용
  */
 function setupContractTemplate() {
   var props = PropertiesService.getScriptProperties();
@@ -555,7 +655,11 @@ function setupContractTemplate() {
   );
   out.push("C45 수식 적용 (E14 일수 기반)");
 
-  // 4) 다른 할인 셀은 초기값을 '해당없음'으로 (드롭다운 옵션 일치)
+  // 4) 총 할인율은 곱연산이 아니라 합산 적용
+  applyContractPaymentFormula_(ws, null);
+  out.push("H46/H47 할인 합산 수식 적용");
+
+  // 5) 다른 할인 셀은 초기값을 '해당없음'으로 (드롭다운 옵션 일치)
   ws.getRange("C44").setValue("해당없음");
   ws.getRange("I44").setValue("해당없음");
   ws.getRange("I45").setValue("해당없음");
@@ -609,7 +713,7 @@ function inspectContractTemplateDiscounts() {
   return out;
 }
 
-function deleteAndRegenerateContract(ss, 거래ID) {
+function deleteAndRegenerateContract(ss, 거래ID, 추가요청) {
   const props = PropertiesService.getScriptProperties();
   const folderId = props.getProperty("CONTRACT_FOLDER_ID");
   const fileName = `계약서_${거래ID}_`;
@@ -662,7 +766,51 @@ function deleteAndRegenerateContract(ss, 거래ID) {
     }
   } catch (err) { Logger.log("M열 초기화 실패: " + err.message); }
 
-  return generateContractFile(ss, 거래ID);
+  var extraText = 추가요청 !== undefined ? 추가요청 : getAdditionalRequestTextByTradeId_(ss, 거래ID);
+  return generateContractFile(ss, 거래ID, extraText);
+}
+
+function regenerateContractById(거래ID, 추가요청) {
+  거래ID = String(거래ID || "").trim();
+  if (!거래ID) return { error: "거래ID 필수" };
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const extraText = 추가요청 !== undefined ? String(추가요청 || "") : getAdditionalRequestTextByTradeId_(ss, 거래ID);
+  const manualFinalAmount = parseManualFinalPaymentAmount_(extraText);
+  const result = deleteAndRegenerateContract(ss, 거래ID, extraText);
+  const summary = result && result.fileId ? getGeneratedContractSummary_(result.fileId) : {};
+  return {
+    success: true,
+    tradeId: 거래ID,
+    url: result && result.url ? result.url : "",
+    fileId: result && result.fileId ? result.fileId : "",
+    manualFinalAmount: manualFinalAmount || "",
+    extraRequestFound: !!extraText,
+    summary: summary
+  };
+}
+
+function getGeneratedContractSummary_(fileId) {
+  try {
+    var ss = SpreadsheetApp.openById(fileId);
+    var ws = ss.getSheets()[0];
+    var rows = findTemplateRows(ws);
+    var lesseeCol = findValueColAfterLabel_(ws, rows.lessee1, "예약자", 3);
+    var contactCol = findValueColAfterLabel_(ws, rows.lessee1, "연락처", rows.contactCol || 9);
+    var rentalStartCol = findValueColAfterLabel_(ws, rows.rentalStart, "대여일자", 3);
+    var rentalEndCol = findValueColAfterLabel_(ws, rows.rentalStart + 1, "반납일자", 3);
+    return {
+      lessee: ws.getRange(rows.lessee1, lesseeCol).getDisplayValue(),
+      contact: ws.getRange(rows.lessee1, contactCol).getDisplayValue(),
+      rentalStart: ws.getRange(rows.rentalStart, rentalStartCol).getDisplayValue(),
+      rentalEnd: ws.getRange(rows.rentalStart + 1, rentalEndCol).getDisplayValue(),
+      totalBeforeDiscount: ws.getRange("J42").getDisplayValue(),
+      discountedAmount: ws.getRange("H46").getDisplayValue(),
+      finalAmount: ws.getRange("H47").getDisplayValue()
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
 }
 
 

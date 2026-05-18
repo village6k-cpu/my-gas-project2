@@ -797,6 +797,7 @@ function runFunction(funcName, params) {
     "scanCorruptedContractTimes",
     "listPendingContractRegens",
     "regenPendingContracts",
+    "regenerateContractById",
     "markOverdueReturnContracts",
     "inspectContractCancelRecovery",
     "restoreCancelledContractsByIds",
@@ -850,6 +851,13 @@ function runFunction(funcName, params) {
       var result = deleteRequest(reqID);
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
+    if (funcName === "regenerateContractById") {
+      var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
+      var tradeId = typeof args === "string" ? args : (args.tradeId || args.거래ID || args.id);
+      var extraText = (args && typeof args === "object") ? (args.extraText || args.추가요청 || args.note || args.memo) : undefined;
+      var result = regenerateContractById(tradeId, extraText);
+      return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
     if (funcName === "markOverdueReturnContracts") {
       var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
       if (typeof args === "string") args = { asOfDate: args };
@@ -878,6 +886,7 @@ function runFunction(funcName, params) {
       scanCorruptedContractTimes: typeof scanCorruptedContractTimes !== "undefined" ? scanCorruptedContractTimes : null,
       listPendingContractRegens: typeof listPendingContractRegens !== "undefined" ? listPendingContractRegens : null,
       regenPendingContracts: typeof regenPendingContracts !== "undefined" ? regenPendingContracts : null,
+      regenerateContractById: typeof regenerateContractById !== "undefined" ? regenerateContractById : null,
       markOverdueReturnContracts: typeof markOverdueReturnContracts !== "undefined" ? markOverdueReturnContracts : null,
       inspectContractCancelRecovery: typeof inspectContractCancelRecovery !== "undefined" ? inspectContractCancelRecovery : null,
       restoreCancelledContractsByIds: typeof restoreCancelledContractsByIds !== "undefined" ? restoreCancelledContractsByIds : null,
