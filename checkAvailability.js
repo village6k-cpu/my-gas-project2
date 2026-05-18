@@ -1194,6 +1194,9 @@ function setDashboardReturnContractStatus_(tid, isDone, props) {
     var nextStatus;
 
     if (isDone) {
+      if (currentStatus === '취소') {
+        return { error: '취소 처리된 계약은 반납완료로 바꿀 수 없습니다: ' + tid };
+      }
       if (currentStatus && currentStatus !== '반납완료') {
         props.setProperty(prevKey, currentStatus);
       }
@@ -1244,6 +1247,52 @@ function applyContractMasterStatusRowStyle_(sheet, row, status) {
   sheet.getRange(row, 9, 1, 1).setBackground("#FFF2CC");      // I 회차
   sheet.getRange(row, 10, 1, 1).setBackground("#BDD7EE");     // J 계약상태
   sheet.getRange(row, 5, 1, 6).setFontWeight("bold");
+}
+
+function hasScheduleRowsForTrade_(ss, tradeId) {
+  tradeId = String(tradeId || '').trim();
+  if (!tradeId) return false;
+
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  if (!schedSheet || schedSheet.getLastRow() < 2) return false;
+
+  var ids = schedSheet.getRange(2, 2, schedSheet.getLastRow() - 1, 1).getDisplayValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0] || '').trim() === tradeId) return true;
+  }
+  return false;
+}
+
+function buildScheduleCountByTradeId_(ss) {
+  var counts = {};
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  if (!schedSheet || schedSheet.getLastRow() < 2) return counts;
+
+  var ids = schedSheet.getRange(2, 2, schedSheet.getLastRow() - 1, 1).getDisplayValues();
+  ids.forEach(function(row) {
+    var tradeId = String(row[0] || '').trim();
+    if (!tradeId) return;
+    counts[tradeId] = (counts[tradeId] || 0) + 1;
+  });
+  return counts;
+}
+
+function isContractMasterCancelStyle_(sheet, row) {
+  if (!sheet || row < 2) return false;
+
+  var range = sheet.getRange(row, 1, 1, Math.min(sheet.getLastColumn(), 11));
+  return isCancelStyleFromFormats_(range.getBackgrounds()[0], range.getFontColors()[0]);
+}
+
+function isCancelStyleFromFormats_(backgrounds, fontColors) {
+  var redBg = 0;
+  var redFont = 0;
+
+  for (var i = 0; i < backgrounds.length; i++) {
+    if (String(backgrounds[i] || '').toLowerCase() === '#ffc7ce') redBg++;
+    if (String(fontColors[i] || '').toLowerCase() === '#9c0006') redFont++;
+  }
+  return redBg >= 6 || redFont >= 6;
 }
 
 /**
@@ -1337,6 +1386,164 @@ function markOverdueReturnContracts(asOfDate, dryRun) {
   } finally {
     try { lock.releaseLock(); } catch (releaseErr) {}
   }
+}
+
+function inspectContractCancelRecovery(asOfDate) {
+  var asOfSerial = parseContractDateSerial_(asOfDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd'), '');
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('계약마스터');
+  if (!sheet || sheet.getLastRow() < 2) {
+    return { success: true, candidateCount: 0, candidates: [] };
+  }
+
+  var rowCount = sheet.getLastRow() - 1;
+  var values = sheet.getRange(2, 1, rowCount, 12).getValues();
+  var display = sheet.getRange(2, 1, rowCount, 12).getDisplayValues();
+  var formatsRange = sheet.getRange(2, 1, rowCount, Math.min(sheet.getLastColumn(), 11));
+  var backgrounds = formatsRange.getBackgrounds();
+  var fontColors = formatsRange.getFontColors();
+  var scheduleCounts = buildScheduleCountByTradeId_(ss);
+  var props = PropertiesService.getScriptProperties().getProperties();
+  var candidates = [];
+  var summary = {
+    returned: 0,
+    cancelled: 0,
+    returnedWithCancelStyle: 0,
+    returnedWithNoScheduleRows: 0,
+    returnedWithPreviousCancelProperty: 0,
+    currentCancelledPastCutoff: 0
+  };
+  var currentCancelledPastCutoff = [];
+
+  for (var i = 0; i < values.length; i++) {
+    var row = i + 2;
+    var tradeId = String(display[i][0] || values[i][0] || '').trim();
+    if (!tradeId) continue;
+
+    var status = String(display[i][9] || values[i][9] || '').trim();
+    var returnSerial = parseContractDateSerial_(values[i][6], display[i][6]);
+    var scheduleRowCount = scheduleCounts[tradeId] || 0;
+    var hasCancelStyle = isCancelStyleFromFormats_(backgrounds[i], fontColors[i]);
+    var prevStatusProp = String(props['returnPrevContractStatus_' + tradeId] || '').trim();
+
+    if (status === '반납완료') summary.returned++;
+    if (status === '취소') {
+      summary.cancelled++;
+      if (asOfSerial && returnSerial && returnSerial < asOfSerial) {
+        summary.currentCancelledPastCutoff++;
+        currentCancelledPastCutoff.push({
+          row: row,
+          tradeId: tradeId,
+          name: String(display[i][1] || '').trim(),
+          returnDate: formatContractDateSerial_(returnSerial)
+        });
+      }
+      continue;
+    }
+
+    if (status !== '반납완료') continue;
+
+    var reasons = [];
+    if (hasCancelStyle) {
+      summary.returnedWithCancelStyle++;
+      reasons.push('취소 행 서식');
+    }
+    if (scheduleRowCount === 0) {
+      summary.returnedWithNoScheduleRows++;
+      reasons.push('스케줄상세 행 없음');
+    }
+    if (prevStatusProp === '취소') {
+      summary.returnedWithPreviousCancelProperty++;
+      reasons.push('이전 상태 기록=취소');
+    }
+
+    if (reasons.length > 0) {
+      candidates.push({
+        row: row,
+        tradeId: tradeId,
+        name: String(display[i][1] || '').trim(),
+        returnDate: formatContractDateSerial_(returnSerial),
+        status: status,
+        scheduleRowCount: scheduleRowCount,
+        previousStatusProperty: prevStatusProp,
+        reasons: reasons
+      });
+    }
+  }
+
+  return {
+    success: true,
+    asOfDate: asOfSerial ? formatContractDateSerial_(asOfSerial) : '',
+    candidateCount: candidates.length,
+    summary: summary,
+    candidates: candidates,
+    currentCancelledPastCutoff: currentCancelledPastCutoff
+  };
+}
+
+function restoreCancelledContractsByIds(ids, dryRun) {
+  if (typeof ids === 'string') {
+    ids = ids.split(',').map(function(id) { return id.trim(); }).filter(Boolean);
+  }
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { error: '복구할 거래ID 목록이 필요합니다' };
+  }
+
+  var idSet = {};
+  ids.forEach(function(id) {
+    var tradeId = String(id || '').trim();
+    if (tradeId) idSet[tradeId] = true;
+  });
+  var targetIds = Object.keys(idSet);
+  if (targetIds.length === 0) return { error: '복구할 거래ID 목록이 비어 있습니다' };
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('계약마스터');
+  if (!sheet || sheet.getLastRow() < 2) return { error: '계약마스터 시트 없음' };
+
+  var rowCount = sheet.getLastRow() - 1;
+  var display = sheet.getRange(2, 1, rowCount, 12).getDisplayValues();
+  var scheduleCounts = buildScheduleCountByTradeId_(ss);
+  var targets = [];
+  var missing = targetIds.slice();
+
+  for (var i = 0; i < display.length; i++) {
+    var row = i + 2;
+    var tradeId = String(display[i][0] || '').trim();
+    if (!idSet[tradeId]) continue;
+
+    missing = missing.filter(function(id) { return id !== tradeId; });
+    targets.push({
+      row: row,
+      tradeId: tradeId,
+      name: String(display[i][1] || '').trim(),
+      currentStatus: String(display[i][9] || '').trim(),
+      scheduleRowCount: scheduleCounts[tradeId] || 0
+    });
+  }
+
+  var isDryRun = !(dryRun === false || dryRun === 'false' || dryRun === 0 || dryRun === '0');
+  if (isDryRun) {
+    return { success: true, dryRun: true, targetCount: targets.length, targets: targets, missing: missing };
+  }
+
+  var props = PropertiesService.getScriptProperties();
+  targets.forEach(function(target) {
+    props.deleteProperty('returnDone_' + target.tradeId);
+    props.deleteProperty('returnPrevContractStatus_' + target.tradeId);
+    sheet.getRange(target.row, 10).setValue('취소');
+    cancelContract(ss, target.tradeId, target.row);
+  });
+  invalidateDashboardCache();
+  try { invalidateTimelineCache(); } catch (e) {}
+
+  return {
+    success: true,
+    dryRun: false,
+    restored: targets.length,
+    targets: targets,
+    missing: missing
+  };
 }
 
 function parseContractDateSerial_(raw, display) {
@@ -1545,6 +1752,12 @@ function updateDashboardContractStatus(tradeId, status) {
     for (var i = 0; i < ids.length; i++) {
       if (String(ids[i][0] || '').trim() === tradeId) {
         var row = i + 2;
+        var currentStatus = String(sheet.getRange(row, 10).getDisplayValue() || '').trim();
+
+        if (status === "반납완료" && currentStatus === "취소") {
+          return { error: "취소 처리된 계약은 반납완료로 바꿀 수 없습니다: " + tradeId };
+        }
+
         sheet.getRange(row, 10).setValue(status); // J열: 계약상태
 
         if (status === "취소") {
@@ -1559,7 +1772,7 @@ function updateDashboardContractStatus(tradeId, status) {
         var props = PropertiesService.getScriptProperties();
         if (status === "반납완료") {
           props.setProperty('returnDone_' + tradeId, '1');
-          props.setProperty('returnPrevContractStatus_' + tradeId, '반출');
+          props.setProperty('returnPrevContractStatus_' + tradeId, currentStatus || '반출');
         } else {
           props.deleteProperty('returnDone_' + tradeId);
           props.deleteProperty('returnPrevContractStatus_' + tradeId);

@@ -798,6 +798,8 @@ function runFunction(funcName, params) {
     "listPendingContractRegens",
     "regenPendingContracts",
     "markOverdueReturnContracts",
+    "inspectContractCancelRecovery",
+    "restoreCancelledContractsByIds",
     "setupDiscountColumns",
     "inspectContractTemplateDiscounts",
     "setupContractTemplate",
@@ -854,6 +856,18 @@ function runFunction(funcName, params) {
       var result = markOverdueReturnContracts(args.asOfDate || args.date, args.dryRun);
       return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
+    if (funcName === "inspectContractCancelRecovery") {
+      var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
+      if (typeof args === "string") args = { asOfDate: args };
+      var result = inspectContractCancelRecovery(args.asOfDate || args.date);
+      return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "restoreCancelledContractsByIds") {
+      var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
+      var ids = args.ids || args.tradeIds || args;
+      var result = restoreCancelledContractsByIds(ids, args.dryRun);
+      return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
     // 일반 함수 호출 (인자 없는 함수)
     var globalFuncs = {
       refreshEquipmentList: typeof refreshEquipmentList !== "undefined" ? refreshEquipmentList : null,
@@ -865,6 +879,8 @@ function runFunction(funcName, params) {
       listPendingContractRegens: typeof listPendingContractRegens !== "undefined" ? listPendingContractRegens : null,
       regenPendingContracts: typeof regenPendingContracts !== "undefined" ? regenPendingContracts : null,
       markOverdueReturnContracts: typeof markOverdueReturnContracts !== "undefined" ? markOverdueReturnContracts : null,
+      inspectContractCancelRecovery: typeof inspectContractCancelRecovery !== "undefined" ? inspectContractCancelRecovery : null,
+      restoreCancelledContractsByIds: typeof restoreCancelledContractsByIds !== "undefined" ? restoreCancelledContractsByIds : null,
       setupDiscountColumns: typeof setupDiscountColumns !== "undefined" ? setupDiscountColumns : null,
       inspectContractTemplateDiscounts: typeof inspectContractTemplateDiscounts !== "undefined" ? inspectContractTemplateDiscounts : null,
       setupContractTemplate: typeof setupContractTemplate !== "undefined" ? setupContractTemplate : null,

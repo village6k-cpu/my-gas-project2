@@ -150,7 +150,20 @@ function onEditInstallable(e) {
   // 계약마스터 J열(10) 계약상태 변경 → 상태별 후속 처리 + 대시보드 캐시 갱신
   if (sheet.getName() === "계약마스터" && col === 10 && row >= 2) {
     try {
-      handleContractMasterStatusEdit_(e.source, sheet, row, e.range.getValue());
+      var statusRowCount = e.range.getNumRows ? e.range.getNumRows() : 1;
+      var statusValues = statusRowCount > 1
+        ? e.range.getDisplayValues()
+        : [[e.range.getValue()]];
+
+      for (var statusIdx = 0; statusIdx < statusRowCount; statusIdx++) {
+        handleContractMasterStatusEdit_(
+          e.source,
+          sheet,
+          row + statusIdx,
+          statusValues[statusIdx][0],
+          statusRowCount === 1 ? e.oldValue : ""
+        );
+      }
     } catch (err) {
       Logger.log("계약마스터 계약상태 변경 처리 실패: " + err.message);
     }
@@ -215,8 +228,9 @@ function onEditInstallable(e) {
   }
 }
 
-function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus) {
+function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
   var status = String(rawStatus || '').trim();
+  var previousStatus = String(oldStatus || '').trim();
   var tradeId = String(sheet.getRange(row, 1).getValue()).trim();
 
   if (status === "취소") {
@@ -227,6 +241,24 @@ function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus) {
       cancelContract(ss, tradeId, row);
     }
     return;
+  }
+
+  if (status === "반납완료" && tradeId) {
+    var hadCancelStyle = typeof isContractMasterCancelStyle_ === "function"
+      ? isContractMasterCancelStyle_(sheet, row)
+      : false;
+    var hasScheduleRows = typeof hasScheduleRowsForTrade_ === "function"
+      ? hasScheduleRowsForTrade_(ss, tradeId)
+      : true;
+
+    if (previousStatus === "취소" || hadCancelStyle || !hasScheduleRows) {
+      var restoreProps = PropertiesService.getScriptProperties();
+      restoreProps.deleteProperty('returnDone_' + tradeId);
+      restoreProps.deleteProperty('returnPrevContractStatus_' + tradeId);
+      sheet.getRange(row, 10).setValue("취소");
+      cancelContract(ss, tradeId, row);
+      return;
+    }
   }
 
   if (typeof applyContractMasterStatusRowStyle_ === "function") {
