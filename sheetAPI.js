@@ -208,6 +208,12 @@ function handleRequest(e) {
           params.notes !== undefined ? params.notes : postBody.notes
         ));
 
+      case "equipmentRiskSend":
+        return jsonResponse(sendEquipmentRiskGuidance_(postBody.payload || postBody));
+
+      case "equipmentRiskEvent":
+        return jsonResponse(recordEquipmentRiskEvent_(postBody.payload || postBody));
+
       case "toggleSetup":
         return jsonResponse(toggleSetupDone(
           params.tid || postBody.tid,

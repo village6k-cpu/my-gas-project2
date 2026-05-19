@@ -623,6 +623,84 @@
     color: #B42318;
     white-space: nowrap;
   }
+  .risk-warning-badge {
+    font-size: 11px;
+    font-weight: 850;
+    padding: 3px 8px;
+    border: 1px solid rgba(180,83,9,0.24);
+    border-radius: 6px;
+    background: #FFF7ED;
+    color: #B45309;
+    white-space: nowrap;
+  }
+  .equipment-risk-panel {
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid rgba(180,83,9,0.22);
+    border-radius: var(--radius);
+    background: #FFFBF5;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .equipment-risk-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+  }
+  .equipment-risk-title {
+    font-size: 12px;
+    font-weight: 850;
+    color: #92400E;
+    word-break: break-word;
+  }
+  .equipment-risk-text {
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
+  .equipment-risk-state {
+    display: inline-flex;
+    margin-left: 4px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .equipment-risk-actions {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .equipment-risk-btn {
+    min-height: 28px;
+    padding: 4px 8px;
+    border: 1px solid rgba(180,83,9,0.24);
+    border-radius: 6px;
+    background: var(--surface);
+    color: #92400E;
+    font-size: 12px;
+    font-weight: 800;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .equipment-risk-btn.primary {
+    background: #B45309;
+    color: #fff;
+    border-color: #B45309;
+  }
+  .equipment-risk-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+  @media (max-width: 560px) {
+    .equipment-risk-row { grid-template-columns: 1fr; }
+    .equipment-risk-actions { justify-content: flex-start; }
+  }
   .schedule-card.has-attention {
     border-color: rgba(180,35,24,0.25);
   }
@@ -1950,6 +2028,151 @@ function dashboardSearchGroupId(label) {
   return 'search_' + String(label || 'unknown').replace(/[^A-Za-z0-9가-힣_-]+/g, '_');
 }
 
+function riskGuidanceLabel(state, reason) {
+  state = String(state || '').trim();
+  reason = String(reason || '').trim();
+  if (state === 'sendable') return '발송 가능';
+  if (state === 'sent_recently') return '최근 발송';
+  if (state === 'approval_required') return '승인 필요';
+  if (state === 'history_unknown') {
+    if (reason === 'backend_config_missing') return '연동 미설정';
+    if (reason === 'backend_evaluation_failed') return '이력 확인 실패';
+    return '이력 미확인';
+  }
+  return state || '상태 미확인';
+}
+
+function riskWarningSummaryHtml(item, cardType) {
+  var warnings = (item && item.riskWarnings) || [];
+  if (!warnings.length) return '';
+  return '<div class="risk-warning-badge">주의 ' + warnings.length + '</div>';
+}
+
+function riskButtonPayload(item, warning, cardType, extra) {
+  var payload = {
+    tradeId: item.tradeId || '',
+    cardType: cardType || item._type || '',
+    customerName: item.name || '',
+    customerTel: item.tel || '',
+    company: item.company || '',
+    ruleId: warning.ruleId || '',
+    ruleVersion: warning.ruleVersion || 1,
+    equipmentName: warning.equipmentName || '',
+    riskLevel: warning.riskLevel || '',
+    customerMessage: warning.customerMessage || '',
+    pickupStaffText: warning.pickupStaffText || '',
+    returnCheckText: warning.returnCheckText || '',
+    sensitive: !!warning.sensitive,
+    cooldownDays: warning.cooldownDays || 90
+  };
+  Object.keys(extra || {}).forEach(function(key) { payload[key] = extra[key]; });
+  return escAttr(JSON.stringify(payload));
+}
+
+function equipmentRiskPanelHtml(item, cardType) {
+  var warnings = (item && item.riskWarnings) || [];
+  if (!warnings.length || (cardType !== 'checkout' && cardType !== 'checkin')) return '';
+
+  var html = '<div class="equipment-risk-panel" onclick="event.stopPropagation()">';
+  warnings.forEach(function(warning) {
+    var title = (warning.riskLevel || '주의') + ' · ' + (warning.equipmentName || warning.matchedAlias || '장비');
+    var stateLabel = riskGuidanceLabel(warning.guidanceState, warning.guidanceReason);
+    var text = cardType === 'checkout'
+      ? (warning.pickupStaffText || warning.customerMessage || '반출 전 주의사항을 확인하세요.')
+      : (warning.returnCheckText || '반납 시 상태를 확인하세요.');
+    html += '<div class="equipment-risk-row">';
+    html += '<div><div class="equipment-risk-title">' + escHtml(title) + '<span class="equipment-risk-state">' + escHtml(stateLabel) + '</span></div>';
+    html += '<div class="equipment-risk-text">' + escHtml(text) + '</div></div>';
+    html += '<div class="equipment-risk-actions">';
+    if (cardType === 'checkout') {
+      var sendMode = warning.canDirectSend ? 'direct' : 'approval_request';
+      var sendLabel = warning.canDirectSend
+        ? (warning.guidanceState === 'sent_recently' || warning.lastSentAt ? '다시 보내기' : '카톡 보내기')
+        : '처리판 승인 요청';
+      html += '<button type="button" class="equipment-risk-btn primary" data-risk-payload="' +
+        riskButtonPayload(item, warning, cardType, { sendMode: sendMode }) +
+        '" onclick="sendEquipmentRiskGuidance(this)">' + escHtml(sendLabel) + '</button>';
+      html += '<button type="button" class="equipment-risk-btn" data-risk-payload="' +
+        riskButtonPayload(item, warning, cardType, {}) +
+        '" onclick="recordEquipmentRiskEvent(this, \'pickup_acknowledged\')">확인함</button>';
+    } else {
+      html += '<button type="button" class="equipment-risk-btn" data-risk-payload="' +
+        riskButtonPayload(item, warning, cardType, {}) +
+        '" onclick="recordEquipmentRiskEvent(this, \'return_ok\')">이상 없음</button>';
+      html += '<button type="button" class="equipment-risk-btn primary" data-risk-payload="' +
+        riskButtonPayload(item, warning, cardType, {}) +
+        '" onclick="recordEquipmentRiskEvent(this, \'return_issue\')">이상 있음</button>';
+      html += '<button type="button" class="equipment-risk-btn" data-risk-payload="' +
+        riskButtonPayload(item, warning, cardType, {}) +
+        '" onclick="recordEquipmentRiskEvent(this, \'return_unknown\')">확인 못함</button>';
+    }
+    html += '</div></div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function parseRiskButtonPayload(btn) {
+  try {
+    return JSON.parse(btn.getAttribute('data-risk-payload') || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+
+function sendEquipmentRiskGuidance(btn) {
+  if (typeof event !== 'undefined' && event.stopPropagation) event.stopPropagation();
+  var payload = parseRiskButtonPayload(btn);
+  var originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '처리 중';
+  fetch(API_URL || '', {
+    method: 'POST',
+    body: JSON.stringify({ key: 'village2026', action: 'equipmentRiskSend', payload: payload })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) throw new Error(res.error);
+      clearDashboardCacheForDate(formatDate(currentDate));
+      loadData(true);
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+      alert('주의사항 처리 실패: ' + err.message);
+    });
+}
+
+function recordEquipmentRiskEvent(btn, eventType) {
+  if (typeof event !== 'undefined' && event.stopPropagation) event.stopPropagation();
+  var payload = parseRiskButtonPayload(btn);
+  payload.eventType = eventType;
+  if (eventType === 'return_issue') {
+    var note = prompt('이상 내용을 짧게 남겨주세요.');
+    if (note === null) return;
+    payload.note = note;
+  }
+
+  var originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '저장 중';
+  fetch(API_URL || '', {
+    method: 'POST',
+    body: JSON.stringify({ key: 'village2026', action: 'equipmentRiskEvent', payload: payload })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) throw new Error(res.error);
+      clearDashboardCacheForDate(formatDate(currentDate));
+      loadData(true);
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+      alert('주의사항 기록 실패: ' + err.message);
+    });
+}
+
 function renderList(containerId, items, type, isSearching, options) {
   options = options || {};
   var container = document.getElementById(containerId);
@@ -2015,6 +2238,7 @@ function renderList(containerId, items, type, isSearching, options) {
       attentionReasons.forEach(function(reason) {
         html += '<div class="attention-reason-badge">' + escHtml(reason) + '</div>';
       });
+      html += riskWarningSummaryHtml(item, cardType);
       html += '<div class="time-badge">' + escHtml(item.time || '시간 미정') + '</div></div></div>';
 
       if (item.tel) {
@@ -2022,6 +2246,7 @@ function renderList(containerId, items, type, isSearching, options) {
         html += '<a href="tel:' + item.tel + '" class="tel-link" onclick="event.stopPropagation()">' + escHtml(item.tel) + '</a></div>';
       }
       html += tradeReturnFieldsHtml(item, cardType);
+      html += equipmentRiskPanelHtml(item, cardType);
 
       html += '<div class="equip-checklist">';
       (item.equipments || []).forEach(function(eq) {
