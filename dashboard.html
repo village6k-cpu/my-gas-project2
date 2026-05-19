@@ -2112,7 +2112,7 @@ function equipmentRiskPanelHtml(item, cardType) {
     html += '<div class="equipment-risk-text">' + escHtml(text) + '</div></div>';
     html += '<div class="equipment-risk-actions">';
     if (cardType === 'checkout') {
-      var canDirectSend = !!warning.canDirectSend && hasKakaoTarget;
+      var canDirectSend = !warning.sensitive && !!warning.canDirectSend && hasKakaoTarget;
       var sendMode = canDirectSend ? 'direct' : 'approval_request';
       var sendLabel = canDirectSend
         ? (warning.guidanceState === 'sent_recently' || warning.lastSentAt ? '다시 보내기' : '카톡 보내기')

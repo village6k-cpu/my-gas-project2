@@ -760,7 +760,7 @@ function getDashboardSearchData(query, options) {
     proofTypeOptions: getTradeProofTypeOptions_(),
     issueStatusOptions: getTradeIssueStatusOptions_()
   };
-  evaluateEquipmentRiskGuidanceStates_(result);
+  markEquipmentRiskSearchEvaluationSkipped_(result);
   return result;
 }
 
@@ -1017,6 +1017,17 @@ function attachEquipmentRiskWarnings_(displayEquip, riskRules) {
       guidanceReason: ''
     };
   });
+}
+
+function markEquipmentRiskSearchEvaluationSkipped_(result) {
+  collectEquipmentRiskDashboardItems_(result).forEach(function(item) {
+    (item.riskWarnings || []).forEach(function(warning) {
+      warning.guidanceState = 'history_unknown';
+      warning.canDirectSend = false;
+      warning.guidanceReason = 'search_evaluation_skipped';
+    });
+  });
+  return result;
 }
 
 function getEquipmentRiskBackendConfig_() {

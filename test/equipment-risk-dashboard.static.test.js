@@ -29,6 +29,8 @@ const api = read('sheetAPI.js');
   'riskItems: (item.riskWarnings || []).map(equipmentRiskBackendItem_)',
   'var evaluatedWarnings = evaluated.riskItems || evaluated.warnings || evaluated.riskWarnings || [];',
   'evaluateEquipmentRiskGuidanceStates_(result);',
+  'markEquipmentRiskSearchEvaluationSkipped_(result);',
+  "warning.guidanceReason = 'search_evaluation_skipped';",
   "if (payload.riskAction === 'approval' || payload.sendMode === 'approval_request') payload.action = 'approval';",
   "postEquipmentRiskBackend_('/admin/equipment-risk/customer-guidance'",
   "postEquipmentRiskBackend_('/admin/equipment-risk/events'"
@@ -52,8 +54,14 @@ assert.doesNotMatch(
 );
 
 assert.ok(
-  (backend.match(/evaluateEquipmentRiskGuidanceStates_\(result\);/g) || []).length >= 2,
-  'dashboard and dashboardSearch results must both evaluate equipment risk guidance states'
+  (backend.match(/evaluateEquipmentRiskGuidanceStates_\(result\);/g) || []).length === 1,
+  'only the date dashboard should live-evaluate equipment risk guidance states'
+);
+
+assert.match(
+  backend,
+ /function getDashboardSearchData[\s\S]*markEquipmentRiskSearchEvaluationSkipped_\(result\);[\s\S]*return result;/,
+  'dashboard search must mark risk evaluation skipped instead of calling the live backend'
 );
 
 [
@@ -89,6 +97,7 @@ assert.ok(
     'return_ok',
     'return_issue',
     'return_not_checked',
+    'var canDirectSend = !warning.sensitive && !!warning.canDirectSend && hasKakaoTarget;',
     "if (payload.sendMode === 'approval_request') {",
     "payload.action = 'approval';",
     "payload.riskAction = 'approval';",
