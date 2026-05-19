@@ -33,7 +33,10 @@ const api = read('sheetAPI.js');
   "warning.guidanceReason = 'search_evaluation_skipped';",
   "if (payload.riskAction === 'approval' || payload.sendMode === 'approval_request') payload.action = 'approval';",
   "postEquipmentRiskBackend_('/admin/equipment-risk/customer-guidance'",
-  "postEquipmentRiskBackend_('/admin/equipment-risk/events'"
+  "postEquipmentRiskBackend_('/admin/equipment-risk/events'",
+  'function diagEquipmentRiskBackendConfig()',
+  'function setupEquipmentRiskBackendConfig(adminUrl, adminToken)',
+  "VILLAGE_KAKAO_AI_ADMIN_TOKEN: token"
 ].forEach((contract) => {
   assert.ok(
     backend.indexOf(contract) !== -1,

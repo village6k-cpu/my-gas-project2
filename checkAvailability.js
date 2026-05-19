@@ -1040,6 +1040,31 @@ function getEquipmentRiskBackendConfig_() {
   return { baseUrl: baseUrl, token: token };
 }
 
+function diagEquipmentRiskBackendConfig() {
+  var props = PropertiesService.getScriptProperties();
+  var baseUrl = String(props.getProperty('VILLAGE_KAKAO_AI_ADMIN_URL') || '').replace(/\/+$/, '').trim();
+  var token = String(props.getProperty('VILLAGE_KAKAO_AI_ADMIN_TOKEN') || '').trim();
+  return {
+    ok: !!baseUrl && !!token,
+    baseUrl: baseUrl,
+    hasToken: !!token,
+    tokenLength: token.length
+  };
+}
+
+function setupEquipmentRiskBackendConfig(adminUrl, adminToken) {
+  var baseUrl = String(adminUrl || '').replace(/\/+$/, '').trim();
+  var token = String(adminToken || '').trim();
+  if (!baseUrl || !token) {
+    throw new Error('adminUrl and adminToken are required');
+  }
+  PropertiesService.getScriptProperties().setProperties({
+    VILLAGE_KAKAO_AI_ADMIN_URL: baseUrl,
+    VILLAGE_KAKAO_AI_ADMIN_TOKEN: token
+  }, false);
+  return diagEquipmentRiskBackendConfig();
+}
+
 function equipmentRiskReservationPayload_(item) {
   item = item || {};
   return {
