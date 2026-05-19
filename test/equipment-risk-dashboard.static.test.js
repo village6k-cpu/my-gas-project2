@@ -112,10 +112,10 @@ assert.match(
     'return_ok',
     'return_issue',
     'return_not_checked',
-    'var canDirectSend = !warning.sensitive && !!warning.canDirectSend && hasKakaoTarget;',
-    "if (payload.sendMode === 'approval_request') {",
-    "payload.action = 'approval';",
-    "payload.riskAction = 'approval';",
+    "var hasRecentSend = warning.guidanceState === 'recent_sent'",
+    'var canDirectSend = !warning.sensitive && hasKakaoTarget && !hasRecentSend;',
+    "riskButtonPayload(item, warning, cardType, { sendMode: 'direct' })",
+    "if (hasRecentSend) sendLabel = '최근 발송됨';",
     'payload.notes = note;',
     "if (state === 'recommend') return '발송 권장';",
     "if (state === 'recent_sent') return '최근 발송';",
@@ -140,7 +140,11 @@ assert.match(
   [
     'pickup_acknowledged',
     'return_unknown',
-    'payload.note = note'
+    'payload.note = note',
+    'approval_request',
+    '처리판 승인 요청',
+    "payload.action = 'approval';",
+    "payload.riskAction = 'approval';"
   ].forEach((unsupported) => {
     assert.ok(
       html.indexOf(unsupported) === -1,

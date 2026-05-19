@@ -2156,14 +2156,14 @@ function equipmentRiskPanelHtml(item, cardType) {
     html += '<div class="equipment-risk-text">' + escHtml(text) + '</div></div>';
     html += '<div class="equipment-risk-actions">';
     if (cardType === 'checkout') {
-      var canDirectSend = !warning.sensitive && !!warning.canDirectSend && hasKakaoTarget;
-      var sendMode = canDirectSend ? 'direct' : 'approval_request';
-      var sendLabel = canDirectSend
-        ? (warning.guidanceState === 'sent_recently' || warning.lastSentAt ? '다시 보내기' : '카톡 보내기')
-        : '처리판 승인 요청';
+      var hasRecentSend = warning.guidanceState === 'recent_sent' || warning.guidanceState === 'sent_recently' || !!warning.lastSentAt;
+      var canDirectSend = !warning.sensitive && hasKakaoTarget && !hasRecentSend;
+      var sendLabel = hasKakaoTarget ? '카톡 보내기' : '카톡 대상 없음';
+      if (warning.sensitive && hasKakaoTarget) sendLabel = '발송 보류';
+      if (hasRecentSend) sendLabel = '최근 발송됨';
       html += '<button type="button" class="equipment-risk-btn primary" data-risk-payload="' +
-        riskButtonPayload(item, warning, cardType, { sendMode: sendMode }) +
-        '" onclick="sendEquipmentRiskGuidance(this)">' + escHtml(sendLabel) + '</button>';
+        riskButtonPayload(item, warning, cardType, { sendMode: 'direct' }) +
+        '"' + (canDirectSend ? '' : ' disabled') + ' onclick="sendEquipmentRiskGuidance(this)">' + escHtml(sendLabel) + '</button>';
       html += '<button type="button" class="equipment-risk-btn" data-risk-payload="' +
         riskButtonPayload(item, warning, cardType, {}) +
         '" onclick="recordEquipmentRiskEvent(this, \'pickup_ack\')">확인함</button>';
@@ -2203,12 +2203,8 @@ function dashboardApiPayload(action, payload) {
 function sendEquipmentRiskGuidance(btn) {
   if (typeof event !== 'undefined' && event.stopPropagation) event.stopPropagation();
   var payload = parseRiskButtonPayload(btn);
-  if (payload.sendMode === 'approval_request') {
-    payload.action = 'approval';
-    payload.riskAction = 'approval';
-  }
   var message = payload.customerMessage || '';
-  var confirmText = (payload.sendMode === 'direct' ? '고객에게 카톡으로 보낼까요?' : '처리판 승인 요청을 만들까요?') +
+  var confirmText = '고객에게 카톡으로 보낼까요?' +
     (message ? '\n\n고객 문구:\n' + message : '');
   if (!confirm(confirmText)) return;
   var originalText = btn.textContent;
