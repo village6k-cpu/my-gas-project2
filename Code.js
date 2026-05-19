@@ -108,16 +108,65 @@ function onEdit(e) {
         }
       }
     }
-    // F열(6) 장비명 입력 시 위 행에서 요청ID만 자동 상속 (날짜는 첫 행만 유지)
+    // F열(6) 장비명 입력 시 위 계약/요청 행의 문맥 자동 상속
     if (col === 6 && row >= 3 && e.range.getValue()) {
-      var currentReqID = sheet.getRange(row, 1).getValue();
-      if (!currentReqID) {
-        var prevReqID = sheet.getRange(row - 1, 1).getValue();
-        if (prevReqID && String(prevReqID).startsWith("RQ-")) {
-          sheet.getRange(row, 1).setValue(prevReqID);
-        }
-      }
+      inheritConfirmRequestContextOnEquipmentEdit_(sheet, row);
     }
+  }
+}
+
+/**
+ * 확인요청 시트에서 기존 계약/요청의 마지막 장비 아래에 장비명만 추가했을 때
+ * 위쪽 행의 요청ID/거래ID와 예약 문맥을 빈 칸에만 채운다.
+ */
+function inheritConfirmRequestContextOnEquipmentEdit_(sheet, row) {
+  if (!sheet || row < 3) return;
+
+  var equipmentName = String(sheet.getRange(row, 6).getValue() || "").trim();
+  if (!equipmentName) return;
+
+  var sourceRow = findPreviousConfirmRequestContextRow_(sheet, row);
+  if (!sourceRow) return;
+
+  copyBlankCellsFromRow_(sheet, sourceRow, row, 1, 5);   // A:E 요청ID/일시
+  copyBlankCellsFromRow_(sheet, sourceRow, row, 11, 3);  // K:M 예약자명/연락처/할인유형
+  copyBlankCellsFromRow_(sheet, sourceRow, row, 16, 1);  // P 거래ID
+}
+
+function findPreviousConfirmRequestContextRow_(sheet, row) {
+  var startRow = Math.max(2, row - 50);
+  var rowCount = row - startRow;
+  if (rowCount <= 0) return null;
+
+  var values = sheet.getRange(startRow, 1, rowCount, 16).getValues();
+  for (var i = values.length - 1; i >= 0; i--) {
+    var source = values[i];
+    var hasRequestOrTradeId = String(source[0] || source[15] || "").trim();
+    var hasReservationContext = source[1] || source[3] || source[10] || source[11] || source[12];
+    if (hasRequestOrTradeId && hasReservationContext) {
+      return startRow + i;
+    }
+  }
+  return null;
+}
+
+function copyBlankCellsFromRow_(sheet, sourceRow, targetRow, col, width) {
+  var sourceRange = sheet.getRange(sourceRow, col, 1, width);
+  var targetRange = sheet.getRange(targetRow, col, 1, width);
+  var sourceValues = sourceRange.getValues()[0];
+  var targetValues = targetRange.getValues()[0];
+  var changed = false;
+
+  for (var i = 0; i < width; i++) {
+    if ((targetValues[i] === "" || targetValues[i] === null) && sourceValues[i] !== "" && sourceValues[i] !== null) {
+      targetValues[i] = sourceValues[i];
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    targetRange.setValues([targetValues]);
+    targetRange.setNumberFormats(sourceRange.getNumberFormats());
   }
 }
 
