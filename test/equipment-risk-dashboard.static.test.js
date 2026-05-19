@@ -1,6 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
@@ -12,7 +13,8 @@ const api = read('sheetAPI.js');
   "var EQUIPMENT_RISK_RULE_SHEET_NAME = '장비주의사항';",
   'function getEquipmentRiskRules_()',
   'function matchEquipmentRiskRulesForEquipments_(equipments, rules)',
-  'riskWarnings: attachEquipmentRiskWarnings_(displayEquip, riskRules)',
+  'function buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet)',
+  'riskWarnings: attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet), riskRules)',
   'evaluateEquipmentRiskGuidanceStates_(result);'
 ].forEach((contract) => {
   assert.ok(
@@ -20,6 +22,60 @@ const api = read('sheetAPI.js');
     `checkAvailability.js must include contract: ${contract}`
   );
 });
+
+const gasContext = { console, Logger: { log() {} } };
+vm.createContext(gasContext);
+vm.runInContext(backend, gasContext);
+
+assert.strictEqual(
+  typeof gasContext.buildDashboardEquipmentRiskCandidates_,
+  'function',
+  'checkAvailability.js must expose buildDashboardEquipmentRiskCandidates_'
+);
+
+const fakeSetSheet = {
+  getLastRow: () => 3,
+  getLastColumn: () => 6,
+  getRange: () => ({
+    getValues: () => [
+      ['FX3 풀세트', '미라지 매트박스', 1, '', '', 'Y'],
+      ['FX3 풀세트', 'FX3 바디', 1, '', '', 'Y']
+    ]
+  })
+};
+
+const riskCandidates = gasContext.buildDashboardEquipmentRiskCandidates_([
+  {
+    scheduleId: 'SCH-001',
+    name: 'FX3 풀세트',
+    qty: 1,
+    setName: '',
+    isHeader: true,
+    isSet: true,
+    isComponent: false
+  }
+], fakeSetSheet);
+
+assert.ok(
+  riskCandidates.some((eq) => eq.name === '미라지 매트박스' && eq.setName === 'FX3 풀세트'),
+  'set header risk candidates must include set master components'
+);
+
+const setRiskWarnings = gasContext.attachEquipmentRiskWarnings_(riskCandidates, [{
+  ruleId: 'mirage-mattebox-v1',
+  ruleVersion: 1,
+  equipmentName: '미라지 매트박스',
+  aliases: ['미라지 매트박스'],
+  pickupStaffText: '조임쇠를 너무 세게 조이지 않도록 안내',
+  customerMessage: '조임쇠를 너무 세게 조이지 말아주세요.',
+  returnCheckText: '조임쇠 파손 여부 확인',
+  cooldownDays: 90
+}]);
+
+assert.ok(
+  setRiskWarnings.some((warning) => warning.equipmentName === '미라지 매트박스'),
+  'risk warnings must trigger for risky set master components'
+);
 
 [
   '고객카톡문구',

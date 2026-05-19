@@ -468,6 +468,7 @@ function getDashboardData(targetDate, skipCache) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
+  const setSheet = ss.getSheetByName('세트마스터');
 
   if (!schedSheet || schedSheet.getLastRow() < 2) {
     return {
@@ -597,7 +598,7 @@ function getDashboardData(targetDate, skipCache) {
       returnStatus: checkInfo.returnStatus || '',
       returnMemo: checkInfo.returnMemo || '',
       equipmentCheckRow: checkInfo.row || 0,
-      riskWarnings: attachEquipmentRiskWarnings_(displayEquip, riskRules),
+      riskWarnings: attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet), riskRules),
       equipments: displayEquip
     };
 
@@ -669,6 +670,7 @@ function getDashboardSearchData(query, options) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var schedSheet = ss.getSheetByName('스케줄상세');
   var contractSheet = ss.getSheetByName('계약마스터');
+  var setSheet = ss.getSheetByName('세트마스터');
   if (!schedSheet || schedSheet.getLastRow() < 2) {
     return { query: query, checkout: [], checkin: [], total: 0, limit: limit };
   }
@@ -720,7 +722,7 @@ function getDashboardSearchData(query, options) {
     var checkInfo = getEquipmentCheckForTrade_(equipmentChecks, tid);
     if (!dashboardSearchTradeMatches_(terms, g, cust, extra, checkInfo)) return;
 
-    var item = buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules);
+    var item = buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet);
     var checkoutItem = cloneDashboardItem_(item);
     checkoutItem.time = g.반출시간 || '시간 미정';
     checkoutItem.sortTime = normalizeDashboardTimeKey_(g.반출시간);
@@ -764,7 +766,7 @@ function getDashboardSearchData(query, options) {
   return result;
 }
 
-function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules) {
+function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet) {
   riskRules = riskRules || getEquipmentRiskRules_();
   var setsWithComponents = {};
   g.equipments.forEach(function(eq) {
@@ -806,7 +808,7 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRu
     returnStatus: checkInfo.returnStatus || '',
     returnMemo: checkInfo.returnMemo || '',
     equipmentCheckRow: checkInfo.row || 0,
-    riskWarnings: attachEquipmentRiskWarnings_(displayEquip, riskRules),
+    riskWarnings: attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet), riskRules),
     equipments: displayEquip
   };
 }
@@ -960,6 +962,61 @@ function uniqueEquipmentRiskAliases_(aliases) {
 
 function normalizeEquipmentRiskName_(value) {
   return String(value || '').toLowerCase().replace(/[\s\[\]\(\){}·•_,.]/g, '').trim();
+}
+
+function buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet) {
+  var candidates = [];
+  var seen = {};
+  var setComponentCache = {};
+
+  function pushCandidate(eq) {
+    var name = String((eq && eq.name) || '').trim();
+    if (!name) return;
+
+    var setName = String((eq && (eq.setName || eq.sourceSetName)) || '').trim();
+    var key = normalizeEquipmentRiskName_(name) + '|' + normalizeEquipmentRiskName_(setName);
+    if (seen[key]) return;
+    seen[key] = true;
+    candidates.push(eq);
+  }
+
+  (displayEquip || []).forEach(function(eq) {
+    pushCandidate(eq);
+
+    if (!eq || !eq.isHeader || eq.isComponent) return;
+
+    var setName = String(eq.name || '').trim();
+    if (!setName) return;
+
+    if (setComponentCache[setName] === undefined) {
+      try {
+        setComponentCache[setName] = getSetComponents(setName, setSheet) || [];
+      } catch (err) {
+        setComponentCache[setName] = [];
+      }
+    }
+
+    (setComponentCache[setName] || []).forEach(function(component) {
+      var componentName = String((component && component.name) || '').trim();
+      if (!componentName) return;
+
+      pushCandidate({
+        scheduleId: eq.scheduleId,
+        name: componentName,
+        qty: component.qty || 1,
+        setName: setName,
+        isHeader: false,
+        isSet: false,
+        isComponent: true,
+        sourceSetName: setName,
+        riskSource: 'set_component',
+        checkedCheckout: eq.checkedCheckout,
+        checkedCheckin: eq.checkedCheckin
+      });
+    });
+  });
+
+  return candidates;
 }
 
 function matchEquipmentRiskRulesForEquipments_(equipments, rules) {
