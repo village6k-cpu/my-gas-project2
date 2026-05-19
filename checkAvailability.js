@@ -897,10 +897,10 @@ function buildEquipmentRiskHeaderMap_(headers) {
     aliases: findEquipmentRiskHeader_(headers, ['별칭', '키워드', 'aliases', 'alias', 'keywords']),
     riskLevel: findEquipmentRiskHeader_(headers, ['위험도', '주의도', '리스크레벨', 'riskLevel', 'risk_level', 'level']),
     pickupStaffText: findEquipmentRiskHeader_(headers, ['반출직원문구', '반출직원안내', '직원안내', 'pickupStaffText', 'pickup_staff_text']),
-    customerMessage: findEquipmentRiskHeader_(headers, ['고객문구', '고객안내', '고객메시지', 'customerMessage', 'customer_message']),
+    customerMessage: findEquipmentRiskHeader_(headers, ['고객카톡문구', '고객문구', '고객안내', '고객메시지', 'customerMessage', 'customer_message']),
     returnCheckText: findEquipmentRiskHeader_(headers, ['반납체크문구', '반납확인', '반납검수', 'returnCheckText', 'return_check_text']),
-    sensitive: findEquipmentRiskHeader_(headers, ['민감', '민감여부', 'sensitive', 'isSensitive']),
-    cooldownDays: findEquipmentRiskHeader_(headers, ['쿨다운일', '쿨다운', 'cooldownDays', 'cooldown_days']),
+    sensitive: findEquipmentRiskHeader_(headers, ['민감발송', '민감', '민감여부', 'sensitive', 'isSensitive']),
+    cooldownDays: findEquipmentRiskHeader_(headers, ['재추천차단일', '쿨다운일', '쿨다운', 'cooldownDays', 'cooldown_days']),
     ruleVersion: findEquipmentRiskHeader_(headers, ['버전', '규칙버전', 'ruleVersion', 'rule_version', 'version'])
   };
 }
@@ -1033,7 +1033,11 @@ function equipmentRiskReservationPayload_(item) {
     tradeId: item.tradeId || '',
     cardType: item._type || '',
     customerName: item.name || '',
-    customerTel: item.tel || '',
+    customerPhone: item.customerPhone || item.tel || item.customerTel || '',
+    customerTel: item.customerTel || item.tel || '',
+    userType: item.userType || '',
+    userId: item.userId || '',
+    kakaoUser: item.kakaoUser || null,
     company: item.company || '',
     checkoutDate: item.checkoutDate || '',
     returnDate: item.returnDate || '',
@@ -1048,7 +1052,23 @@ function equipmentRiskReservationPayload_(item) {
         isComponent: !!eq.isComponent
       };
     }),
-    riskWarnings: item.riskWarnings || []
+    riskItems: (item.riskWarnings || []).map(equipmentRiskBackendItem_)
+  };
+}
+
+function equipmentRiskBackendItem_(warning) {
+  warning = warning || {};
+  return {
+    ruleId: warning.ruleId || '',
+    ruleVersion: warning.ruleVersion || 1,
+    riskLevel: warning.riskLevel || '',
+    equipmentName: warning.equipmentName || '',
+    matchedAlias: warning.matchedAlias || '',
+    pickupStaffText: warning.pickupStaffText || '',
+    customerMessage: warning.customerMessage || '',
+    returnCheckText: warning.returnCheckText || '',
+    sensitive: !!warning.sensitive,
+    cooldownDays: warning.cooldownDays || 90
   };
 }
 
@@ -1104,7 +1124,10 @@ function applyEquipmentRiskEvaluation_(items, data) {
 
   (items || []).forEach(function(item) {
     var evaluated = byTradeId[String(item.tradeId || '')] || {};
-    var evaluatedWarnings = evaluated.riskWarnings || evaluated.warnings || [];
+    var evaluatedWarnings = evaluated.riskItems || evaluated.warnings || evaluated.riskWarnings || [];
+    if (!evaluatedWarnings.length && data.riskItems && items.length === 1) {
+      evaluatedWarnings = data.riskItems;
+    }
     if (!evaluatedWarnings.length && (evaluated.guidanceState || evaluated.canDirectSend !== undefined)) {
       evaluatedWarnings = [evaluated];
     }
@@ -1174,7 +1197,7 @@ function postEquipmentRiskBackend_(path, payload) {
 }
 
 function sendEquipmentRiskGuidance_(payload) {
-  var response = postEquipmentRiskBackend_('/admin/equipment-risk/send', payload || {});
+  var response = postEquipmentRiskBackend_('/admin/equipment-risk/customer-guidance', payload || {});
   if (response.success) {
     try { invalidateDashboardCache(); } catch (e) {}
     return response.data || { success: true };
@@ -1183,7 +1206,7 @@ function sendEquipmentRiskGuidance_(payload) {
 }
 
 function recordEquipmentRiskEvent_(payload) {
-  var response = postEquipmentRiskBackend_('/admin/equipment-risk/event', payload || {});
+  var response = postEquipmentRiskBackend_('/admin/equipment-risk/events', payload || {});
   if (response.success) {
     try { invalidateDashboardCache(); } catch (e) {}
     return response.data || { success: true };

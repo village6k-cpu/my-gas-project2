@@ -22,6 +22,34 @@ const api = read('sheetAPI.js');
 });
 
 [
+  '고객카톡문구',
+  '민감발송',
+  '재추천차단일',
+  'customerPhone: item.customerPhone || item.tel || item.customerTel ||',
+  'riskItems: (item.riskWarnings || []).map(equipmentRiskBackendItem_)',
+  'var evaluatedWarnings = evaluated.riskItems || evaluated.warnings || evaluated.riskWarnings || [];',
+  "postEquipmentRiskBackend_('/admin/equipment-risk/customer-guidance'",
+  "postEquipmentRiskBackend_('/admin/equipment-risk/events'"
+].forEach((contract) => {
+  assert.ok(
+    backend.indexOf(contract) !== -1,
+    `checkAvailability.js must include backend contract: ${contract}`
+  );
+});
+
+assert.doesNotMatch(
+  backend,
+  /postEquipmentRiskBackend_\('\/admin\/equipment-risk\/send'/,
+  'send proxy must not use the old /send path'
+);
+
+assert.doesNotMatch(
+  backend,
+  /postEquipmentRiskBackend_\('\/admin\/equipment-risk\/event'/,
+  'event proxy must not use the old singular /event path'
+);
+
+[
   "case \"equipmentRiskSend\":",
   'jsonResponse(sendEquipmentRiskGuidance_(postBody.payload || postBody))',
   "case \"equipmentRiskEvent\":",
@@ -45,6 +73,39 @@ const api = read('sheetAPI.js');
     assert.ok(
       html.indexOf(contract) !== -1,
       `${file} must include contract: ${contract}`
+    );
+  });
+
+  [
+    'customerPhone: item.customerPhone || item.tel || item.customerTel ||',
+    'pickup_ack',
+    'return_ok',
+    'return_issue',
+    'return_not_checked',
+    "confirm(confirmText)",
+    "dashboardApiPayload('equipmentRiskSend'",
+    'dashboardApiPayload('
+  ].forEach((contract) => {
+    assert.ok(
+      html.indexOf(contract) !== -1,
+      `${file} must include dashboard contract: ${contract}`
+    );
+  });
+
+  const confirmIndex = html.indexOf('confirm(confirmText)');
+  const sendIndex = html.indexOf("dashboardApiPayload('equipmentRiskSend'");
+  assert.ok(
+    confirmIndex !== -1 && sendIndex !== -1 && confirmIndex < sendIndex,
+    `${file} must confirm before posting equipmentRiskSend`
+  );
+
+  [
+    'pickup_acknowledged',
+    'return_unknown'
+  ].forEach((unsupported) => {
+    assert.ok(
+      html.indexOf(unsupported) === -1,
+      `${file} must not use unsupported event name: ${unsupported}`
     );
   });
 });

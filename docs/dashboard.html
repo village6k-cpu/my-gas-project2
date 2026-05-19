@@ -1332,7 +1332,7 @@
 </style>
 </head>
 <body>
-<script>var API_URL = "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";</script>
+<script>var API_URL = "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec"; var DASHBOARD_API_KEY = "village2026";</script>
 
 <div class="header">
   <div class="header-top">
@@ -2075,6 +2075,7 @@ function dashboardSearchGroupId(label) {
 function riskGuidanceLabel(state, reason) {
   state = String(state || '').trim();
   reason = String(reason || '').trim();
+  if (reason === 'target_missing' || state === 'target_missing') return '대상 없음';
   if (state === 'sendable') return '발송 가능';
   if (state === 'sent_recently') return '최근 발송';
   if (state === 'approval_required') return '승인 필요';
@@ -2097,7 +2098,11 @@ function riskButtonPayload(item, warning, cardType, extra) {
     tradeId: item.tradeId || '',
     cardType: cardType || item._type || '',
     customerName: item.name || '',
-    customerTel: item.tel || '',
+    customerPhone: item.customerPhone || item.tel || item.customerTel || '',
+    customerTel: item.customerTel || item.tel || '',
+    userType: item.userType || '',
+    userId: item.userId || '',
+    kakaoUser: item.kakaoUser || null,
     company: item.company || '',
     ruleId: warning.ruleId || '',
     ruleVersion: warning.ruleVersion || 1,
@@ -2107,10 +2112,28 @@ function riskButtonPayload(item, warning, cardType, extra) {
     pickupStaffText: warning.pickupStaffText || '',
     returnCheckText: warning.returnCheckText || '',
     sensitive: !!warning.sensitive,
-    cooldownDays: warning.cooldownDays || 90
+    cooldownDays: warning.cooldownDays || 90,
+    riskItem: {
+      ruleId: warning.ruleId || '',
+      ruleVersion: warning.ruleVersion || 1,
+      riskLevel: warning.riskLevel || '',
+      equipmentName: warning.equipmentName || '',
+      customerMessage: warning.customerMessage || '',
+      sensitive: !!warning.sensitive,
+      cooldownDays: warning.cooldownDays || 90
+    }
   };
   Object.keys(extra || {}).forEach(function(key) { payload[key] = extra[key]; });
   return escAttr(JSON.stringify(payload));
+}
+
+function riskHasKakaoTarget(item, warning) {
+  return !!(
+    (item && item.kakaoUser) ||
+    (item && item.userType && item.userId) ||
+    (warning && warning.kakaoUser) ||
+    (warning && warning.userType && warning.userId)
+  );
 }
 
 function equipmentRiskPanelHtml(item, cardType) {
@@ -2120,7 +2143,8 @@ function equipmentRiskPanelHtml(item, cardType) {
   var html = '<div class="equipment-risk-panel" onclick="event.stopPropagation()">';
   warnings.forEach(function(warning) {
     var title = (warning.riskLevel || '주의') + ' · ' + (warning.equipmentName || warning.matchedAlias || '장비');
-    var stateLabel = riskGuidanceLabel(warning.guidanceState, warning.guidanceReason);
+    var hasKakaoTarget = riskHasKakaoTarget(item, warning);
+    var stateLabel = riskGuidanceLabel(warning.guidanceState, hasKakaoTarget ? warning.guidanceReason : 'target_missing');
     var text = cardType === 'checkout'
       ? (warning.pickupStaffText || warning.customerMessage || '반출 전 주의사항을 확인하세요.')
       : (warning.returnCheckText || '반납 시 상태를 확인하세요.');
@@ -2129,8 +2153,9 @@ function equipmentRiskPanelHtml(item, cardType) {
     html += '<div class="equipment-risk-text">' + escHtml(text) + '</div></div>';
     html += '<div class="equipment-risk-actions">';
     if (cardType === 'checkout') {
-      var sendMode = warning.canDirectSend ? 'direct' : 'approval_request';
-      var sendLabel = warning.canDirectSend
+      var canDirectSend = !!warning.canDirectSend && hasKakaoTarget;
+      var sendMode = canDirectSend ? 'direct' : 'approval_request';
+      var sendLabel = canDirectSend
         ? (warning.guidanceState === 'sent_recently' || warning.lastSentAt ? '다시 보내기' : '카톡 보내기')
         : '처리판 승인 요청';
       html += '<button type="button" class="equipment-risk-btn primary" data-risk-payload="' +
@@ -2138,7 +2163,7 @@ function equipmentRiskPanelHtml(item, cardType) {
         '" onclick="sendEquipmentRiskGuidance(this)">' + escHtml(sendLabel) + '</button>';
       html += '<button type="button" class="equipment-risk-btn" data-risk-payload="' +
         riskButtonPayload(item, warning, cardType, {}) +
-        '" onclick="recordEquipmentRiskEvent(this, \'pickup_acknowledged\')">확인함</button>';
+        '" onclick="recordEquipmentRiskEvent(this, \'pickup_ack\')">확인함</button>';
     } else {
       html += '<button type="button" class="equipment-risk-btn" data-risk-payload="' +
         riskButtonPayload(item, warning, cardType, {}) +
@@ -2148,7 +2173,7 @@ function equipmentRiskPanelHtml(item, cardType) {
         '" onclick="recordEquipmentRiskEvent(this, \'return_issue\')">이상 있음</button>';
       html += '<button type="button" class="equipment-risk-btn" data-risk-payload="' +
         riskButtonPayload(item, warning, cardType, {}) +
-        '" onclick="recordEquipmentRiskEvent(this, \'return_unknown\')">확인 못함</button>';
+        '" onclick="recordEquipmentRiskEvent(this, \'return_not_checked\')">확인 못함</button>';
     }
     html += '</div></div>';
   });
@@ -2164,15 +2189,27 @@ function parseRiskButtonPayload(btn) {
   }
 }
 
+function dashboardApiPayload(action, payload) {
+  return {
+    key: window.DASHBOARD_API_KEY || 'village2026',
+    action: action,
+    payload: payload || {}
+  };
+}
+
 function sendEquipmentRiskGuidance(btn) {
   if (typeof event !== 'undefined' && event.stopPropagation) event.stopPropagation();
   var payload = parseRiskButtonPayload(btn);
+  var message = payload.customerMessage || '';
+  var confirmText = (payload.sendMode === 'direct' ? '고객에게 카톡으로 보낼까요?' : '처리판 승인 요청을 만들까요?') +
+    (message ? '\n\n고객 문구:\n' + message : '');
+  if (!confirm(confirmText)) return;
   var originalText = btn.textContent;
   btn.disabled = true;
   btn.textContent = '처리 중';
   fetch(API_URL || '', {
     method: 'POST',
-    body: JSON.stringify({ key: 'village2026', action: 'equipmentRiskSend', payload: payload })
+    body: JSON.stringify(dashboardApiPayload('equipmentRiskSend', payload))
   })
     .then(function(r) { return r.json(); })
     .then(function(res) {
@@ -2202,7 +2239,7 @@ function recordEquipmentRiskEvent(btn, eventType) {
   btn.textContent = '저장 중';
   fetch(API_URL || '', {
     method: 'POST',
-    body: JSON.stringify({ key: 'village2026', action: 'equipmentRiskEvent', payload: payload })
+    body: JSON.stringify(dashboardApiPayload('equipmentRiskEvent', payload))
   })
     .then(function(r) { return r.json(); })
     .then(function(res) {
