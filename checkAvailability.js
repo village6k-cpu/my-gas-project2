@@ -1058,11 +1058,34 @@ function setupEquipmentRiskBackendConfig(adminUrl, adminToken) {
   if (!baseUrl || !token) {
     throw new Error('adminUrl and adminToken are required');
   }
+  var verify = verifyEquipmentRiskBackendConfig_(baseUrl, token);
+  if (!verify.ok) {
+    throw new Error('equipment risk backend verification failed: ' + verify.status);
+  }
   PropertiesService.getScriptProperties().setProperties({
     VILLAGE_KAKAO_AI_ADMIN_URL: baseUrl,
     VILLAGE_KAKAO_AI_ADMIN_TOKEN: token
   }, false);
-  return diagEquipmentRiskBackendConfig();
+  var result = diagEquipmentRiskBackendConfig();
+  result.verified = true;
+  result.verifyStatus = verify.status;
+  return result;
+}
+
+function verifyEquipmentRiskBackendConfig_(baseUrl, token) {
+  try {
+    var response = UrlFetchApp.fetch(baseUrl + '/admin/equipment-risk/evaluate', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-admin-token': token },
+      payload: JSON.stringify({ reservations: [] }),
+      muteHttpExceptions: true
+    });
+    var status = response.getResponseCode();
+    return { ok: status >= 200 && status < 300, status: status };
+  } catch (err) {
+    return { ok: false, status: err && err.message ? err.message : 'request_failed' };
+  }
 }
 
 function equipmentRiskReservationPayload_(item) {

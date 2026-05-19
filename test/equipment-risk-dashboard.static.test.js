@@ -36,6 +36,7 @@ const api = read('sheetAPI.js');
   "postEquipmentRiskBackend_('/admin/equipment-risk/events'",
   'function diagEquipmentRiskBackendConfig()',
   'function setupEquipmentRiskBackendConfig(adminUrl, adminToken)',
+  'function verifyEquipmentRiskBackendConfig_(baseUrl, token)',
   "VILLAGE_KAKAO_AI_ADMIN_TOKEN: token"
 ].forEach((contract) => {
   assert.ok(
@@ -76,6 +77,17 @@ assert.match(
   assert.ok(
     api.indexOf(contract) !== -1,
     `sheetAPI.js must include contract: ${contract}`
+  );
+});
+
+[
+  '"diagEquipmentRiskBackendConfig"',
+  '"setupEquipmentRiskBackendConfig"',
+  'setupEquipmentRiskBackendConfig('
+].forEach((contract) => {
+  assert.ok(
+    api.indexOf(contract) !== -1,
+    `sheetAPI.js must expose guarded config helper: ${contract}`
   );
 });
 

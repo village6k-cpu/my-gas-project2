@@ -815,7 +815,9 @@ function runFunction(funcName, params) {
     "warmDashboardCache",
     "getInventoryConflicts",
     "getInventoryConflictsSlackMessage",
-    "listAllTriggers"
+    "listAllTriggers",
+    "diagEquipmentRiskBackendConfig",
+    "setupEquipmentRiskBackendConfig"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -881,6 +883,18 @@ function runFunction(funcName, params) {
       var ids = args.ids || args.tradeIds || args;
       var result = restoreCancelledContractsByIds(ids, args.dryRun);
       return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "diagEquipmentRiskBackendConfig") {
+      var result = diagEquipmentRiskBackendConfig();
+      return { success: !!result.ok, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "setupEquipmentRiskBackendConfig") {
+      var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
+      var result = setupEquipmentRiskBackendConfig(
+        args.adminUrl || args.baseUrl || args.url,
+        args.adminToken || args.token
+      );
+      return { success: !!result.ok, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     // 일반 함수 호출 (인자 없는 함수)
     var globalFuncs = {
