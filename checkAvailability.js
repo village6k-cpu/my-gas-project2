@@ -749,7 +749,7 @@ function getDashboardSearchData(query, options) {
   var all = checkoutList.concat(checkinList).sort(compareDashboardSearchItems_);
   if (all.length > limit) all = all.slice(0, limit);
 
-  return {
+  var result = {
     query: query,
     checkout: all.filter(function(item) { return item._type === 'checkout'; }),
     checkin: all.filter(function(item) { return item._type === 'checkin'; }),
@@ -760,6 +760,8 @@ function getDashboardSearchData(query, options) {
     proofTypeOptions: getTradeProofTypeOptions_(),
     issueStatusOptions: getTradeIssueStatusOptions_()
   };
+  evaluateEquipmentRiskGuidanceStates_(result);
+  return result;
 }
 
 function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules) {
@@ -1197,6 +1199,8 @@ function postEquipmentRiskBackend_(path, payload) {
 }
 
 function sendEquipmentRiskGuidance_(payload) {
+  payload = payload || {};
+  if (payload.riskAction === 'approval' || payload.sendMode === 'approval_request') payload.action = 'approval';
   var response = postEquipmentRiskBackend_('/admin/equipment-risk/customer-guidance', payload || {});
   if (response.success) {
     try { invalidateDashboardCache(); } catch (e) {}

@@ -28,6 +28,8 @@ const api = read('sheetAPI.js');
   'customerPhone: item.customerPhone || item.tel || item.customerTel ||',
   'riskItems: (item.riskWarnings || []).map(equipmentRiskBackendItem_)',
   'var evaluatedWarnings = evaluated.riskItems || evaluated.warnings || evaluated.riskWarnings || [];',
+  'evaluateEquipmentRiskGuidanceStates_(result);',
+  "if (payload.riskAction === 'approval' || payload.sendMode === 'approval_request') payload.action = 'approval';",
   "postEquipmentRiskBackend_('/admin/equipment-risk/customer-guidance'",
   "postEquipmentRiskBackend_('/admin/equipment-risk/events'"
 ].forEach((contract) => {
@@ -47,6 +49,11 @@ assert.doesNotMatch(
   backend,
   /postEquipmentRiskBackend_\('\/admin\/equipment-risk\/event'/,
   'event proxy must not use the old singular /event path'
+);
+
+assert.ok(
+  (backend.match(/evaluateEquipmentRiskGuidanceStates_\(result\);/g) || []).length >= 2,
+  'dashboard and dashboardSearch results must both evaluate equipment risk guidance states'
 );
 
 [
@@ -82,6 +89,13 @@ assert.doesNotMatch(
     'return_ok',
     'return_issue',
     'return_not_checked',
+    "if (payload.sendMode === 'approval_request') {",
+    "payload.action = 'approval';",
+    "payload.riskAction = 'approval';",
+    'payload.notes = note;',
+    "if (state === 'recommend') return '발송 권장';",
+    "if (state === 'recent_sent') return '최근 발송';",
+    "if (state === 'recipient_missing') return '대상 없음';",
     "confirm(confirmText)",
     "dashboardApiPayload('equipmentRiskSend'",
     'dashboardApiPayload('
@@ -101,7 +115,8 @@ assert.doesNotMatch(
 
   [
     'pickup_acknowledged',
-    'return_unknown'
+    'return_unknown',
+    'payload.note = note'
   ].forEach((unsupported) => {
     assert.ok(
       html.indexOf(unsupported) === -1,

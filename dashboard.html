@@ -2032,6 +2032,9 @@ function riskGuidanceLabel(state, reason) {
   state = String(state || '').trim();
   reason = String(reason || '').trim();
   if (reason === 'target_missing' || state === 'target_missing') return '대상 없음';
+  if (state === 'recommend') return '발송 권장';
+  if (state === 'recent_sent') return '최근 발송';
+  if (state === 'recipient_missing') return '대상 없음';
   if (state === 'sendable') return '발송 가능';
   if (state === 'sent_recently') return '최근 발송';
   if (state === 'approval_required') return '승인 필요';
@@ -2156,6 +2159,10 @@ function dashboardApiPayload(action, payload) {
 function sendEquipmentRiskGuidance(btn) {
   if (typeof event !== 'undefined' && event.stopPropagation) event.stopPropagation();
   var payload = parseRiskButtonPayload(btn);
+  if (payload.sendMode === 'approval_request') {
+    payload.action = 'approval';
+    payload.riskAction = 'approval';
+  }
   var message = payload.customerMessage || '';
   var confirmText = (payload.sendMode === 'direct' ? '고객에게 카톡으로 보낼까요?' : '처리판 승인 요청을 만들까요?') +
     (message ? '\n\n고객 문구:\n' + message : '');
@@ -2187,7 +2194,7 @@ function recordEquipmentRiskEvent(btn, eventType) {
   if (eventType === 'return_issue') {
     var note = prompt('이상 내용을 짧게 남겨주세요.');
     if (note === null) return;
-    payload.note = note;
+    payload.notes = note;
   }
 
   var originalText = btn.textContent;
