@@ -4407,13 +4407,17 @@ function dashboardAddEquipment(tid, equipName, qty) {
 }
 
 /**
- * Dashboard에서 장비 삭제 — 같은 거래ID + 장비명/세트명 일치 행 모두 삭제.
- * 세트면 대표행 + 구성품 행 전부 일괄 삭제.
+ * Dashboard에서 장비 삭제.
+ * - scheduleId가 있으면 클릭한 행 기준으로 삭제한다.
+ * - 세트 대표행이면 같은 세트 구성품을 함께 삭제한다.
+ * - 세트 구성품이면 해당 구성품 행만 삭제한다.
+ * - scheduleId가 없으면 기존 호환 경로로 장비명/세트명 일치 행을 삭제한다.
  */
-function dashboardRemoveEquipment(tid, equipName) {
-  if (!tid || !equipName) return { error: "tid와 장비명 필수" };
+function dashboardRemoveEquipment(tid, equipName, scheduleId) {
+  if (!tid || (!equipName && !scheduleId)) return { error: "tid와 장비명 또는 스케줄ID 필수" };
   tid = String(tid).trim();
-  equipName = String(equipName).trim();
+  equipName = String(equipName || "").trim();
+  scheduleId = String(scheduleId || "").trim();
 
   var lock = LockService.getScriptLock();
   try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
@@ -4426,20 +4430,69 @@ function dashboardRemoveEquipment(tid, equipName) {
     var lastRow = sched.getLastRow();
     var data = sched.getRange(2, 1, lastRow - 1, 4).getValues();
     var rowsToDelete = [];
-    for (var i = data.length - 1; i >= 0; i--) {
-      if (String(data[i][1]).trim() !== tid) continue;
-      var c = String(data[i][2] || "").trim();
-      var d = String(data[i][3] || "").trim();
-      if (c === equipName || d === equipName) {
-        rowsToDelete.push(i + 2);
+
+    if (scheduleId) {
+      var targetIdx = -1;
+      for (var t = 0; t < data.length; t++) {
+        if (String(data[t][0] || "").trim() === scheduleId && String(data[t][1] || "").trim() === tid) {
+          targetIdx = t;
+          break;
+        }
+      }
+      if (targetIdx < 0) return { error: "해당 스케줄 행 없음" };
+
+      var targetRow = targetIdx + 2;
+      var targetSetName = String(data[targetIdx][2] || "").trim();
+      var targetEquipName = String(data[targetIdx][3] || "").trim();
+      var isComponent = !!targetSetName && targetSetName !== targetEquipName;
+
+      if (isComponent) {
+        rowsToDelete.push(targetRow);
+      } else {
+        var setKey = targetSetName || targetEquipName;
+        var hasComponents = false;
+        for (var cidx = 0; cidx < data.length; cidx++) {
+          if (String(data[cidx][1] || "").trim() !== tid) continue;
+          var cSet = String(data[cidx][2] || "").trim();
+          var cEquip = String(data[cidx][3] || "").trim();
+          if (cSet === setKey && cEquip && cEquip !== setKey) {
+            hasComponents = true;
+            break;
+          }
+        }
+
+        for (var i = data.length - 1; i >= 0; i--) {
+          if (String(data[i][1] || "").trim() !== tid) continue;
+          var rowNum = i + 2;
+          var rowSetName = String(data[i][2] || "").trim();
+          if (rowNum === targetRow || (hasComponents && rowSetName === setKey)) {
+            rowsToDelete.push(rowNum);
+          }
+        }
+      }
+    } else {
+      for (var i = data.length - 1; i >= 0; i--) {
+        if (String(data[i][1]).trim() !== tid) continue;
+        var c = String(data[i][2] || "").trim();
+        var d = String(data[i][3] || "").trim();
+        if (c === equipName || d === equipName) {
+          rowsToDelete.push(i + 2);
+        }
       }
     }
     if (rowsToDelete.length === 0) return { error: "해당 장비 행 없음" };
 
+    var seenRows = {};
+    rowsToDelete = rowsToDelete.filter(function(r) {
+      if (seenRows[r]) return false;
+      seenRows[r] = true;
+      return true;
+    }).sort(function(a, b) { return b - a; });
+
     rowsToDelete.forEach(function(r) { sched.deleteRow(r); });
     try { formatScheduleSheet(sched); } catch (e) {}
     scheduleContractRegen(tid);
-    return { success: true, removedRows: rowsToDelete.length, equipName: equipName };
+    return { success: true, removedRows: rowsToDelete.length, equipName: equipName, scheduleId: scheduleId };
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }

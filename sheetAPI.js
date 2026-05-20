@@ -281,7 +281,8 @@ function handleRequest(e) {
       case "removeEquip":
         return jsonResponse(dashboardRemoveEquipment(
           params.tid || postBody.tid,
-          params.equipName || postBody.equipName
+          params.equipName || postBody.equipName,
+          params.scheduleId || postBody.scheduleId
         ));
 
       case "updateEquipQty":

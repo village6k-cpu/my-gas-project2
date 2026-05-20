@@ -2417,10 +2417,7 @@ function renderList(containerId, items, type, isSearching, options) {
         html += escHtml(eq.name);
         html += '</span>';
         html += '<button type="button" class="equip-qty equip-qty-edit ' + qtyClass + '" onclick="event.stopPropagation();editEquipQty(\'' + escJs(item.tradeId) + '\',\'' + sidEsc + '\',\'' + nameEsc + '\',\'' + escJs(String(qtyValue)) + '\')" title="수량 수정">×' + escHtml(qtyValue) + '</button>';
-        // 구성품에는 삭제 버튼 안 보임 (대표행 삭제하면 같이 삭제됨)
-        if (!eq.isComponent) {
-          html += '<span class="equip-row-remove" onclick="event.stopPropagation();removeEquip(\'' + escJs(item.tradeId) + '\',\'' + nameEsc + '\')" title="삭제">×</span>';
-        }
+        html += '<span class="equip-row-remove" onclick="event.stopPropagation();removeEquip(\'' + escJs(item.tradeId) + '\',\'' + nameEsc + '\',\'' + sidEsc + '\',' + (eq.isSet ? 'true' : 'false') + ',' + (eq.isComponent ? 'true' : 'false') + ')" title="삭제">×</span>';
         html += '</div>';
         html += '</div>';
       });
@@ -2473,11 +2470,15 @@ function toggleDetail(id) {
   if (el) el.classList.toggle('open');
 }
 
-function removeEquip(tid, equipName) {
-  if (!confirm('"' + equipName + '" 을(를) 삭제하시겠습니까?\n(같은 세트 구성품도 함께 삭제됩니다)')) return;
+function removeEquip(tid, equipName, scheduleId, isSet, isComponent) {
+  var message = '"' + equipName + '" 을(를) 삭제하시겠습니까?';
+  if (isSet) message += '\n(세트 대표행 삭제 시 같은 세트 구성품도 함께 삭제됩니다)';
+  else if (isComponent) message += '\n(선택한 구성품 행만 삭제됩니다)';
+  if (!confirm(message)) return;
 
   fetch(API_URL + '?key=village2026&action=removeEquip&tid=' + encodeURIComponent(tid)
-    + '&equipName=' + encodeURIComponent(equipName))
+    + '&equipName=' + encodeURIComponent(equipName)
+    + '&scheduleId=' + encodeURIComponent(scheduleId || ''))
     .then(function(r) { return r.json(); })
     .then(function(res) {
       if (res.error) { alert("삭제 실패: " + res.error); return; }
