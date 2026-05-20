@@ -453,7 +453,7 @@ function getDashboardData(targetDate, skipCache) {
 
   // 캐시 5분으로 확장. 등록/취소/일정변경 시 invalidateDashboardCache() 호출로 무효화.
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_v2_' + today;
+  var cacheKey = 'dashboard_v3_' + today;
   if (!skipCache) {
     var cached = cache.get(cacheKey);
     if (cached) {
@@ -478,7 +478,8 @@ function getDashboardData(targetDate, skipCache) {
       activeCount: 0,
       paymentOptions: getTradePaymentOptions_(),
       proofTypeOptions: getTradeProofTypeOptions_(),
-      issueStatusOptions: getTradeIssueStatusOptions_()
+      issueStatusOptions: getTradeIssueStatusOptions_(),
+      billingCompanyOptions: getTradeBillingCompanyOptions_()
     };
   }
 
@@ -594,6 +595,7 @@ function getDashboardData(targetDate, skipCache) {
       depositStatus: extra.depositStatus || '',
       proofType: extra.proofType || '',
       issueStatus: extra.issueStatus || '',
+      billingCompany: extra.billingCompany || '',
       issueNote: extra.issueNote || '',
       returnStatus: checkInfo.returnStatus || '',
       returnMemo: checkInfo.returnMemo || '',
@@ -638,7 +640,8 @@ function getDashboardData(targetDate, skipCache) {
     activeCount: activeCount,
     paymentOptions: getTradePaymentOptions_(),
     proofTypeOptions: getTradeProofTypeOptions_(),
-    issueStatusOptions: getTradeIssueStatusOptions_()
+    issueStatusOptions: getTradeIssueStatusOptions_(),
+    billingCompanyOptions: getTradeBillingCompanyOptions_()
   };
   evaluateEquipmentRiskGuidanceStates_(result);
   // 등록/취소/일정변경 시 invalidateDashboardCache로 무효화되므로, 날짜 이동 체감을 위해 15분 유지.
@@ -663,7 +666,8 @@ function getDashboardSearchData(query, options) {
       limit: limit,
       paymentOptions: getTradePaymentOptions_(),
       proofTypeOptions: getTradeProofTypeOptions_(),
-      issueStatusOptions: getTradeIssueStatusOptions_()
+      issueStatusOptions: getTradeIssueStatusOptions_(),
+      billingCompanyOptions: getTradeBillingCompanyOptions_()
     };
   }
 
@@ -760,7 +764,8 @@ function getDashboardSearchData(query, options) {
     limit: limit,
     paymentOptions: getTradePaymentOptions_(),
     proofTypeOptions: getTradeProofTypeOptions_(),
-    issueStatusOptions: getTradeIssueStatusOptions_()
+    issueStatusOptions: getTradeIssueStatusOptions_(),
+    billingCompanyOptions: getTradeBillingCompanyOptions_()
   };
   markEquipmentRiskSearchEvaluationSkipped_(result);
   return result;
@@ -804,6 +809,7 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRu
     depositStatus: extra.depositStatus || '',
     proofType: extra.proofType || '',
     issueStatus: extra.issueStatus || '',
+    billingCompany: extra.billingCompany || '',
     issueNote: extra.issueNote || '',
     returnStatus: checkInfo.returnStatus || '',
     returnMemo: checkInfo.returnMemo || '',
@@ -829,6 +835,7 @@ function dashboardSearchTradeMatches_(terms, group, cust, extra, checkInfo) {
     extra.depositStatus,
     extra.proofType,
     extra.issueStatus,
+    extra.billingCompany,
     checkInfo.returnStatus,
     checkInfo.returnMemo
   ];
@@ -1629,6 +1636,7 @@ function invalidateDashboardCache() {
     var yesterday = Utilities.formatDate(new Date(Date.now() - 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
     var tomorrow = Utilities.formatDate(new Date(Date.now() + 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
     [today, yesterday, tomorrow].forEach(function(d) {
+      cache.remove('dashboard_v3_' + d);
       cache.remove('dashboard_v2_' + d);
     });
   } catch (e) { /* ignore */ }
@@ -2391,7 +2399,7 @@ function normalizeEquipmentCheckTradeId_(value) {
 }
 
 /**
- * 개고생2.0/빌리지2.0 거래내역에서 계약서 링크와 J열 결제수단을 읽어 대시보드에 붙인다.
+ * 개고생2.0/빌리지2.0 거래내역에서 계약서 링크, G열 발행처 상호, J열 결제수단을 읽어 대시보드에 붙인다.
  */
 function getTradeExtrasForIds_(tradeIds, props) {
   var result = {};
@@ -2405,6 +2413,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
       depositStatus: '',
       proofType: '',
       issueStatus: '',
+      billingCompany: '',
       issueNote: ''
     };
   });
@@ -2420,6 +2429,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var headers = 거래시트.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
     var idCol = _findHeaderCol_(headers, ["거래ID", "거래 Id", "거래id"]) || 5;
     var contractCol = _findHeaderCol_(headers, ["계약서링크", "계약서 링크", "계약서", "계약서URL", "계약서 URL"]) || 3;
+    var billingCompanyCol = 7; // G열: 발행처 상호
     var paymentCol = 10; // J열: 결제수단
     var proofCol = 11;   // K열: 증빙유형
     var issueCol = 12;   // L열: 발행상태
@@ -2427,7 +2437,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var noteCol = 14;    // N열: 비고
     var wanted = {};
     tradeIds.forEach(function(tid) { wanted[String(tid)] = true; });
-    var readCols = Math.max(lastCol, paymentCol, proofCol, issueCol, depositCol, noteCol);
+    var readCols = Math.max(lastCol, billingCompanyCol, paymentCol, proofCol, issueCol, depositCol, noteCol);
     var rows = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, readCols).getDisplayValues();
 
     rows.forEach(function(row) {
@@ -2435,6 +2445,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
       if (!wanted[tid]) return;
       if (!result[tid]) result[tid] = {};
       result[tid].contractUrl = String(row[contractCol - 1] || '').trim();
+      result[tid].billingCompany = String(row[billingCompanyCol - 1] || '').trim();
       result[tid].paymentMethod = String(row[paymentCol - 1] || '').trim();
       result[tid].paymentSource = result[tid].paymentMethod ? 'sheet:J' : '';
       result[tid].proofType = String(row[proofCol - 1] || '').trim();
@@ -2969,6 +2980,39 @@ function getTradeIssueStatusOptions_() {
   return getTradeColumnOptions_(12, ["미발행", "발행요청", "발행완료", "전송실패"]);
 }
 
+function getTradeBillingCompanyOptions_() {
+  return getCachedDashboardTradeOptions_('dashboard_trade_billing_company_options_v1', function() {
+    var options = getTradeColumnOptionsFromSheet_(7, []);
+    if (options.length > 0) return options;
+    return getTradeBillingCompanyOptionsFromIssuerDb_();
+  }, []);
+}
+
+function getTradeBillingCompanyOptionsFromIssuerDb_() {
+  try {
+    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    if (!개고생URL) return [];
+    var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
+    var 발행처시트 = 개고생SS.getSheetByName("발행처DB");
+    if (!발행처시트 || 발행처시트.getLastRow() < 2) return [];
+
+    var lastCol = Math.max(발행처시트.getLastColumn(), 1);
+    var headers = 발행처시트.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
+    var companyCol = _findHeaderCol_(headers, [
+      "발행처상호",
+      "발행처 상호",
+      "상호",
+      "업체명",
+      "회사명"
+    ]) || 1;
+    var values = 발행처시트.getRange(2, companyCol, 발행처시트.getLastRow() - 1, 1)
+      .getDisplayValues()
+      .map(function(row) { return row[0]; });
+    return uniqueDashboardStringOptions_(values);
+  } catch (err) {}
+  return [];
+}
+
 function getTradeColumnOptions_(column, fallbackOptions) {
   return getCachedDashboardTradeOptions_('dashboard_trade_col_options_v1_' + column, function() {
     return getTradeColumnOptionsFromSheet_(column, fallbackOptions);
@@ -2990,6 +3034,18 @@ function getTradeColumnOptionsFromSheet_(column, fallbackOptions) {
     }
   } catch (err) {}
   return fallbackOptions.slice();
+}
+
+function uniqueDashboardStringOptions_(values) {
+  var seen = {};
+  var result = [];
+  (values || []).forEach(function(value) {
+    var text = String(value || '').trim();
+    if (!text || seen[text]) return;
+    seen[text] = true;
+    result.push(text);
+  });
+  return result;
 }
 
 function getCachedDashboardTradeOptions_(key, loader, fallbackOptions) {
@@ -3241,6 +3297,45 @@ function applyTradePaymentSideEffects_(sheet, row, method) {
   };
 }
 
+/**
+ * 오늘일정 웹앱에서 발행처 상호를 빌리지2.0 거래내역 G열에 저장한다.
+ */
+function updateTradeBillingCompany(tid, billingCompany) {
+  tid = String(tid || '').trim();
+  billingCompany = String(billingCompany || '').trim();
+
+  if (!tid) return { error: "tid 필요" };
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(5000); } catch (lockErr) {}
+
+  try {
+    var 거래시트 = getVillageTradeSheet_();
+    var row = findVillageTradeRow_(거래시트, tid);
+    if (!row) return { error: "거래내역에서 거래ID를 찾지 못했습니다: " + tid };
+
+    var billingCompanyCol = 7; // G: 발행처 상호
+    var opts = paymentOptionsFromRule_(거래시트.getRange(row, billingCompanyCol).getDataValidation());
+    if (billingCompany && opts.length > 0 && opts.indexOf(billingCompany) < 0) {
+      return { error: "발행처 상호 드롭다운에 없는 값입니다: " + billingCompany };
+    }
+
+    거래시트.getRange(row, billingCompanyCol).setValue(billingCompany);
+    invalidateDashboardCache();
+    return {
+      success: true,
+      tid: tid,
+      billingCompany: billingCompany,
+      row: row,
+      column: "G"
+    };
+  } catch (err) {
+    return { error: err.message };
+  } finally {
+    try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
 function updateTradeProofField(tid, field, value) {
   tid = String(tid || '').trim();
   field = String(field || '').trim();
@@ -3289,7 +3384,42 @@ function requestTradeEstimate(tid) {
 }
 
 function requestTradeProofIssue(tid) {
-  return callVillageOpsApi_("issueProof", tid);
+  var ready = validateTradeProofIssueReady_(tid);
+  if (ready && ready.error) return ready;
+  var result = callVillageOpsApi_("issueProof", tid);
+  if (result && typeof result === "object" && !result.error) {
+    result.billingCompany = ready.billingCompany;
+    result.proofType = ready.proofType;
+  }
+  return result;
+}
+
+function validateTradeProofIssueReady_(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { error: "tid 필요" };
+
+  var 거래시트 = getVillageTradeSheet_();
+  var row = findVillageTradeRow_(거래시트, tid);
+  if (!row) return { error: "거래내역에서 거래ID를 찾지 못했습니다: " + tid };
+
+  var values = 거래시트.getRange(row, 7, 1, 6).getDisplayValues()[0]; // G:L
+  var billingCompany = String(values[0] || '').trim(); // G: 발행처 상호
+  var proofType = String(values[4] || '').trim();      // K: 증빙유형
+  if (proofType === "세금계산서" && !billingCompany) {
+    return {
+      error: "세금계산서 발행 전 발행처 상호를 선택하세요.",
+      tid: tid,
+      proofType: proofType,
+      billingCompany: billingCompany
+    };
+  }
+  return {
+    success: true,
+    tid: tid,
+    proofType: proofType,
+    billingCompany: billingCompany,
+    row: row
+  };
 }
 
 function callVillageOpsApi_(action, tid) {
