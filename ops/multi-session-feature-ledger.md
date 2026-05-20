@@ -1,7 +1,7 @@
 # Multi-Session Feature Ledger
 
 Last audited: 2026-05-20 KST
-Truth snapshot: `main` / `origin/main` / GAS are aligned at `688ec58` (`worktree 정리 상태 장부 반영`).
+Truth snapshot: `main` / `origin/main` / GAS are aligned at `2b92ed1` (`멀티세션 worktree 정리 상태 반영`).
 
 ## Purpose
 
@@ -44,7 +44,7 @@ The pass condition is not "no git conflict." The pass condition is:
 | `main` at `/Users/choijaehyeong/my-gas-project2` | Clean and GAS-synced | Canonical working tree and integration/deploy lane. |
 | Removed local worktrees | `confirm-request-row-inherit`, `confirm-set-recheck-format`, `contract-discount-regen`, `dashboard-deposit-status`, `feature-ledger-audit`, `invoice-recipient-company`, `billing-company-autocomplete`, `main-confirm-request-row-inherit`, `.claude/worktrees/hopeful-cohen-67f82e` | All were clean and already included in `main` before removal. |
 | Removed local branches | `codex/equipment-risk-checklist`, `codex/confirm-request-row-inherit`, `codex/confirm-set-recheck-format`, `codex/contract-discount-regen`, `codex/dashboard-deposit-status`, `codex/feature-ledger-audit`, `codex/invoice-recipient-company`, `codex/billing-company-autocomplete`, `claude/hopeful-cohen-67f82e` | Stale duplicate onsite add-on changes remain preserved in stash `archive stale onsite addon duplicate after main 3964ede`; stale Claude `AGENTS.md` copy remains preserved in stash `archive stale claude worktree AGENTS copy`. |
-| Removed remote branches | `origin/claude/add-confirmation-response-pfu90`, `origin/codex/confirm-request-row-inherit`, `origin/codex/confirm-set-recheck-format`, `origin/codex/contract-discount-regen`, `origin/codex/dashboard-deposit-status`, `origin/codex/feature-ledger-audit`, `origin/codex/invoice-recipient-company`, `origin/codex/billing-company-autocomplete` | Deleted only after confirming each branch was either fully included in `main` or intentionally archived. |
+| Removed remote branches | `origin/claude/add-confirmation-response-pfu90`, `origin/claude/multi-machine-workflow-setup-FTbio`, `origin/codex/confirm-request-row-inherit`, `origin/codex/confirm-set-recheck-format`, `origin/codex/contract-discount-regen`, `origin/codex/dashboard-deposit-status`, `origin/codex/feature-ledger-audit`, `origin/codex/invoice-recipient-company`, `origin/codex/billing-company-autocomplete` | Deleted only after confirming each branch was either fully included in `main` or intentionally archived. Backup branches were left intact. |
 
 ## Pre-Deploy Feature Preservation Checklist
 
