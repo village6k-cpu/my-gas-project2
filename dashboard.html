@@ -2380,8 +2380,9 @@ function renderList(containerId, items, type, isSearching, options) {
       html += '<div class="equip-add-actions">';
       if (cardType === 'checkout') {
         html += '<button class="equip-add-btn onsite" onclick="event.stopPropagation();addOnsiteAddon(\'' + escHtml(item.tradeId) + '\')">+ 현장추가</button>';
+      } else {
+        html += '<button class="equip-add-btn" onclick="event.stopPropagation();addEquip(\'' + escHtml(item.tradeId) + '\')">+ 장비추가</button>';
       }
-      html += '<button class="equip-add-btn" onclick="event.stopPropagation();addEquip(\'' + escHtml(item.tradeId) + '\')">+ 장비추가</button>';
       html += '</div>';
       html += '</div>';
       html += photoGalleryHtml(item);

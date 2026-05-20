@@ -44,6 +44,11 @@ const logic = read('checkAvailability.js');
       `${file} must expose today-checkout onsite addon UI contract: ${contract}`
     );
   });
+
+  assert(
+    /if \(cardType === 'checkout'\) \{\s*html \+= '<button class="equip-add-btn onsite"[\s\S]*?\} else \{\s*html \+= '<button class="equip-add-btn"[\s\S]*?\+ 장비추가/.test(html),
+    `${file} must show +현장추가 on checkout cards and keep +장비추가 only in the non-checkout branch`
+  );
 });
 
 console.log('onsite addon dashboard static checks passed');
