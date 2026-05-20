@@ -1,7 +1,7 @@
 # Multi-Session Feature Ledger
 
 Last audited: 2026-05-20 KST
-Truth snapshot: `main` / `origin/main` / GAS are aligned at `3964ede` (`정리 완료 상태 장부 반영`).
+Truth snapshot: `main` / `origin/main` / GAS are aligned at `688ec58` (`worktree 정리 상태 장부 반영`).
 
 ## Purpose
 
@@ -41,16 +41,10 @@ The pass condition is not "no git conflict." The pass condition is:
 
 | Branch / worktree | Status | Decision |
 |---|---|---|
-| `main` at `/Users/choijaehyeong/my-gas-project2-worktrees/main-confirm-request-row-inherit` | Clean and GAS-synced | Keep as integration/deploy lane. |
-| `codex/equipment-risk-checklist` at `/Users/choijaehyeong/my-gas-project2` | Clean; behind `origin/main`; stale duplicate onsite add-on edits were stashed | Do not deploy from here. The stale duplicate changes are preserved in stash `archive stale onsite addon duplicate after main 3964ede`. |
-| `codex/confirm-request-row-inherit` | Fully included in main | Archive after no active session depends on it. |
-| `codex/confirm-set-recheck-format` | Fully included in main | Archive after no active session depends on it. |
-| `codex/contract-discount-regen` | Fully included in main | Archive after no active session depends on it. |
-| `codex/dashboard-deposit-status` | Fully included in main | Archive after no active session depends on it. |
-| `codex/hide-checkout-add-equipment` | Follow-up cleanup applied to main | Local branch deleted after merge-equivalent cleanup landed in `0697ee4`. |
-| `codex/invoice-recipient-company` | Fully included in main | Archive after no active session depends on it. |
-| `codex/billing-company-autocomplete` | Fully included in main | Archive after no active session depends on it. |
-| `claude/hopeful-cohen-67f82e` | Very stale; clean after stashing untracked `AGENTS.md` copy | Do not use for deploy. Inspect only if someone remembers an unfinished intent. |
+| `main` at `/Users/choijaehyeong/my-gas-project2` | Clean and GAS-synced | Canonical working tree and integration/deploy lane. |
+| Removed local worktrees | `confirm-request-row-inherit`, `confirm-set-recheck-format`, `contract-discount-regen`, `dashboard-deposit-status`, `feature-ledger-audit`, `invoice-recipient-company`, `billing-company-autocomplete`, `main-confirm-request-row-inherit`, `.claude/worktrees/hopeful-cohen-67f82e` | All were clean and already included in `main` before removal. |
+| Removed local branches | `codex/equipment-risk-checklist`, `codex/confirm-request-row-inherit`, `codex/confirm-set-recheck-format`, `codex/contract-discount-regen`, `codex/dashboard-deposit-status`, `codex/feature-ledger-audit`, `codex/invoice-recipient-company`, `codex/billing-company-autocomplete`, `claude/hopeful-cohen-67f82e` | Stale duplicate onsite add-on changes remain preserved in stash `archive stale onsite addon duplicate after main 3964ede`; stale Claude `AGENTS.md` copy remains preserved in stash `archive stale claude worktree AGENTS copy`. |
+| Removed remote branches | `origin/claude/add-confirmation-response-pfu90`, `origin/codex/confirm-request-row-inherit`, `origin/codex/confirm-set-recheck-format`, `origin/codex/contract-discount-regen`, `origin/codex/dashboard-deposit-status`, `origin/codex/feature-ledger-audit`, `origin/codex/invoice-recipient-company`, `origin/codex/billing-company-autocomplete` | Deleted only after confirming each branch was either fully included in `main` or intentionally archived. |
 
 ## Pre-Deploy Feature Preservation Checklist
 
@@ -69,5 +63,5 @@ Run this before any `scripts/integrate.sh` or `scripts/endwork.sh`:
 
 ## Current Action Queue
 
-1. Remove or archive feature worktrees that are already fully included in main.
-2. Keep this ledger updated whenever a session starts or finishes a feature branch.
+1. Keep this ledger updated whenever a session starts or finishes a feature branch.
+2. Before new concurrent work, start from `./scripts/newtask.sh <slug>` and leave `/Users/choijaehyeong/my-gas-project2` as the clean `main` integration lane.
