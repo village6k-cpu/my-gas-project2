@@ -2716,6 +2716,7 @@ function cardActionHtml(item, cardType) {
     html += '<button class="action-btn danger" onclick="event.stopPropagation();cancelDashboardTrade(this,\'' + escJs(item.tradeId) + '\',\'' + escJs(item.name || item.tradeId) + '\')">취소처리</button>';
   }
   html += paymentSelectHtml(item);
+  html += depositStatusSelectHtml(item);
   html += billingCompanyInputHtml(item);
   html += proofTypeSelectHtml(item);
   html += issueStatusSelectHtml(item);
@@ -2810,11 +2811,19 @@ function issueStatusSelectHtml(item) {
   return tradeProofSelectHtml(item, 'issueStatus', (dashboardData && dashboardData.issueStatusOptions) || ['미발행', '발행요청', '발행완료', '전송실패'], '발행상태');
 }
 
+function depositStatusSelectHtml(item) {
+  return tradeProofSelectHtml(item, 'depositStatus', (dashboardData && dashboardData.depositStatusOptions) || ['미입금', '입금완료', '부분입금', '환불'], '입금상태');
+}
+
 function tradeProofSelectHtml(item, field, baseOptions, placeholder) {
-  var current = field === 'proofType' ? (item.proofType || '') : (item.issueStatus || '');
+  var current = '';
+  if (field === 'proofType') current = item.proofType || '';
+  if (field === 'issueStatus') current = item.issueStatus || '';
+  if (field === 'depositStatus') current = item.depositStatus || '';
   var options = [''].concat((baseOptions || []).filter(Boolean));
   if (current && options.indexOf(current) < 0) options.splice(1, 0, current);
-  var html = '<select class="proof-select" data-field="' + field + '" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updateTradeProofField(event,this,\'' + escJs(item.tradeId) + '\',\'' + field + '\')">';
+  var className = field === 'depositStatus' ? 'payment-select deposit-status-select' : 'proof-select';
+  var html = '<select class="' + className + '" data-field="' + field + '" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updateTradeProofField(event,this,\'' + escJs(item.tradeId) + '\',\'' + field + '\')">';
   options.forEach(function(opt) {
     html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(opt || placeholder) + '</option>';
   });
@@ -2826,6 +2835,7 @@ function updateTradeProofField(event, select, tradeId, field) {
   event.stopPropagation();
   var prev = select.getAttribute('data-prev') || '';
   var value = select.value || '';
+  var errorLabel = field === 'depositStatus' ? '입금상태 저장 실패' : '증빙 저장 실패';
   if (field === 'issueStatus' && value === '발행요청') {
     var issueItems = dashboardItemsForTrade(tradeId);
     var issueItem = issueItems.length ? issueItems[0] : {};
@@ -2855,7 +2865,7 @@ function updateTradeProofField(event, select, tradeId, field) {
     .then(function(res) {
       select.disabled = false;
       if (res.error) {
-        alert('증빙 저장 실패: ' + res.error);
+        alert(errorLabel + ': ' + res.error);
         select.value = prev;
         return;
       }
@@ -2868,7 +2878,7 @@ function updateTradeProofField(event, select, tradeId, field) {
     .catch(function(err) {
       select.disabled = false;
       select.value = prev;
-      alert('증빙 저장 실패: ' + err.message);
+      alert(errorLabel + ': ' + err.message);
     });
 }
 
@@ -2911,11 +2921,15 @@ function syncTradeProofInMemory(tid, field, value, res) {
   dashboardItemsForTrade(tid).forEach(function(item) {
     if (field === 'proofType') item.proofType = value;
     if (field === 'issueStatus') item.issueStatus = res && res.issueStatus ? res.issueStatus : value;
+    if (field === 'depositStatus') item.depositStatus = value;
     if (res && Object.prototype.hasOwnProperty.call(res, 'billingCompany')) item.billingCompany = res.billingCompany;
     if (res && res.error) item.issueNote = res.error;
     if (res && res.message) item.issueNote = res.message;
   });
   persistCurrentDashboardCache();
+  if (field === 'depositStatus' && !dashboardSearchQuery && activeDashboardTab === 'attention') {
+    renderDashboard(dashboardData, dashboardData.date || formatDate(currentDate));
+  }
 }
 
 function syncBillingCompanyInMemory(tid, billingCompany) {
@@ -2928,6 +2942,7 @@ function syncBillingCompanyInMemory(tid, billingCompany) {
 
 function syncPaymentInMemory(tid, method, res) {
   if (!dashboardData) return;
+  var depositChangedByPayment = !!(res && res.sideEffects && res.sideEffects.applied && res.sideEffects.columns && res.sideEffects.columns.M);
   dashboardItemsForTrade(tid).forEach(function(item) {
     item.paymentMethod = method;
     item.paymentSource = method ? 'sheet:J' : '';
@@ -2939,7 +2954,7 @@ function syncPaymentInMemory(tid, method, res) {
     }
   });
   persistCurrentDashboardCache();
-  if (!dashboardSearchQuery && activeDashboardTab === 'attention') {
+  if (!dashboardSearchQuery && (activeDashboardTab === 'attention' || depositChangedByPayment)) {
     renderDashboard(dashboardData, dashboardData.date || formatDate(currentDate));
   }
 }
