@@ -1019,6 +1019,7 @@
   .gosu-link-btn:active { transform: scale(0.97); }
   .gosu-link-btn.primary { background: var(--accent); }
   .payment-select,
+  .billing-company-select,
   .proof-select {
     min-height: 30px;
     border: 1px solid var(--border);
@@ -1030,7 +1031,9 @@
     padding: 5px 8px;
     outline: none;
   }
+  .billing-company-select { width: 172px; }
   .payment-select:focus,
+  .billing-company-select:focus,
   .proof-select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(35,131,226,0.15); }
   .detail-note { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
   .card-actions {
@@ -1091,6 +1094,7 @@
   .trade-action-btn.danger:hover { background: #FEECEC; }
   .trade-action-btn:disabled { opacity: 0.55; cursor: wait; }
   .card-actions .payment-select,
+  .card-actions .billing-company-select,
   .card-actions .proof-select { min-height: 30px; }
 
   .card-header {
@@ -1914,6 +1918,7 @@ function dashboardItemMatchesSearch(item, type) {
     item.depositStatus,
     item.proofType,
     item.issueStatus,
+    item.billingCompany,
     item.issueNote,
     item.returnStatus,
     item.returnMemo
@@ -3131,6 +3136,7 @@ function cardActionHtml(item, cardType) {
     html += '<button class="trade-action-btn danger" onclick="event.stopPropagation();cancelDashboardTrade(this,\'' + escJs(item.tradeId) + '\',\'' + escJs(item.name || item.tradeId) + '\')">취소처리</button>';
   }
   html += paymentSelectHtml(item);
+  html += billingCompanySelectHtml(item);
   html += proofTypeSelectHtml(item);
   html += issueStatusSelectHtml(item);
   html += '</div>';
@@ -3145,6 +3151,18 @@ function paymentSelectHtml(item) {
   var html = '<select class="payment-select" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updatePaymentMethod(event,this,\'' + escJs(item.tradeId) + '\')">';
   options.forEach(function(opt) {
     html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(opt || '결제수단') + '</option>';
+  });
+  html += '</select>';
+  return html;
+}
+
+function billingCompanySelectHtml(item) {
+  var options = [''].concat((dashboardData && dashboardData.billingCompanyOptions) || []);
+  var current = item.billingCompany || '';
+  if (current && options.indexOf(current) < 0) options.splice(1, 0, current);
+  var html = '<select class="billing-company-select" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updateBillingCompany(event,this,\'' + escJs(item.tradeId) + '\')">';
+  options.forEach(function(opt) {
+    html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(opt || '발행처 상호') + '</option>';
   });
   html += '</select>';
   return html;
@@ -3175,6 +3193,40 @@ function updatePaymentMethod(event, select, tradeId) {
     });
 }
 
+function updateBillingCompany(event, select, tradeId) {
+  event.stopPropagation();
+  var prev = select.getAttribute('data-prev') || '';
+  var billingCompany = select.value || '';
+  select.disabled = true;
+  fetch(API_URL || '', {
+    method: 'POST',
+    body: JSON.stringify({
+      key: 'village2026',
+      action: 'updateBillingCompany',
+      tid: tradeId,
+      billingCompany: billingCompany
+    })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      select.disabled = false;
+      if (res.error) {
+        alert('발행처 상호 저장 실패: ' + res.error);
+        select.value = prev;
+        return;
+      }
+      var nextValue = res.billingCompany || billingCompany;
+      select.value = nextValue;
+      select.setAttribute('data-prev', nextValue);
+      syncBillingCompanyInMemory(tradeId, nextValue);
+    })
+    .catch(function(err) {
+      select.disabled = false;
+      select.value = prev;
+      alert('발행처 상호 저장 실패: ' + err.message);
+    });
+}
+
 function proofTypeSelectHtml(item) {
   return tradeProofSelectHtml(item, 'proofType', (dashboardData && dashboardData.proofTypeOptions) || ['미발행', '세금계산서', '현금영수증(전화번호)', '현금영수증(사업자번호)'], '증빙유형');
 }
@@ -3200,6 +3252,13 @@ function updateTradeProofField(event, select, tradeId, field) {
   var prev = select.getAttribute('data-prev') || '';
   var value = select.value || '';
   if (field === 'issueStatus' && value === '발행요청') {
+    var issueItems = dashboardItemsForTrade(tradeId);
+    var issueItem = issueItems.length ? issueItems[0] : {};
+    if ((issueItem.proofType || '') === '세금계산서' && !(issueItem.billingCompany || '')) {
+      alert('세금계산서 발행 전 발행처 상호를 선택하세요.');
+      select.value = prev;
+      return;
+    }
     if (!confirm('이 거래건의 계산서/현금영수증을 실제 발행할까요?')) {
       select.value = prev;
       return;
@@ -3277,8 +3336,17 @@ function syncTradeProofInMemory(tid, field, value, res) {
   dashboardItemsForTrade(tid).forEach(function(item) {
     if (field === 'proofType') item.proofType = value;
     if (field === 'issueStatus') item.issueStatus = res && res.issueStatus ? res.issueStatus : value;
+    if (res && Object.prototype.hasOwnProperty.call(res, 'billingCompany')) item.billingCompany = res.billingCompany;
     if (res && res.error) item.issueNote = res.error;
     if (res && res.message) item.issueNote = res.message;
+  });
+  persistCurrentDashboardCache();
+}
+
+function syncBillingCompanyInMemory(tid, billingCompany) {
+  if (!dashboardData) return;
+  dashboardItemsForTrade(tid).forEach(function(item) {
+    item.billingCompany = billingCompany;
   });
   persistCurrentDashboardCache();
 }

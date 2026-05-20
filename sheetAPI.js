@@ -323,6 +323,12 @@ function handleRequest(e) {
           params.method || postBody.method || ""
         ));
 
+      case "updateBillingCompany":
+        return jsonResponse(updateTradeBillingCompany(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.billingCompany !== undefined ? params.billingCompany : postBody.billingCompany
+        ));
+
       case "updateTradeProof":
         return jsonResponse(updateTradeProofField(
           params.tid || postBody.tid || params.tradeId || postBody.tradeId,
