@@ -1,7 +1,7 @@
 # Multi-Session Feature Ledger
 
 Last audited: 2026-05-20 KST
-Truth snapshot: `main` / `origin/main` / GAS are aligned at `2bfb095` (`확인요청 세트 재확인 빈 구성품 방지`).
+Truth snapshot: `main` / `origin/main` / GAS are aligned at `0697ee4` (`멀티세션 누락 후보 정리`).
 
 ## Purpose
 
@@ -27,24 +27,27 @@ The pass condition is not "no git conflict." The pass condition is:
 | LIVE | Equipment-risk caution in schedule cards | `checkAvailability.js`, `dashboard.html`, `docs/dashboard.html`, `test/equipment-risk-dashboard.static.test.js`; commits `c01920e`, `96881fc`, `047b618`, `ab286f2`, `f8e7cd8`, `780b98a` | GAS schedule cards expand visible set headers through `세트마스터` and surface component risk warnings. |
 | LIVE | Invoice recipient / billing company fields | `dashboard.html`, `docs/dashboard.html`, `test/dashboard-billing-company.static.test.js`; commits `5ff8fcd`, `d7a6559` | Includes recipient company selection/autocomplete in today's schedule flow. |
 | LIVE | Deposit status management | `dashboard.html`, `docs/dashboard.html`, `test/dashboard-deposit-status.static.test.js`; commit `0b7d563` | Today's schedule can manage deposit/payment status. |
+| LIVE | Onsite add-on / `+ 현장추가` capture from today's checkout cards | `checkAvailability.js`, `sheetAPI.js`, `dashboard.html`, `docs/dashboard.html`, `test/onsite-addon-dashboard.static.test.js`; commits `1b30246`, `0697ee4` | Today's checkout cards can add onsite equipment with settlement status and durable event logging; checkout cards show `+ 현장추가` instead of the generic `+ 장비추가`. |
+| LIVE | Confirmation request time dropdown and reject/hold re-registration | `checkAvailability.js`; commits `009b89b`, `2dc7c67`, `9e94330` | C/E time dropdown is hourly `00:00`-`23:00`; reject/hold rows can be re-registered after clearing stale row state. |
+| LIVE | Contract cancellation sync by explicit status change | `Code.js`, `checkAvailability.js`; `cancelContract()` | `취소` status removes related schedule rows and external 거래내역 rows; avoids broad row-deletion scans. |
 
 ## Not Yet Integrated / Do Not Lose
 
 | Status | Feature / intent | Current location | Evidence | Required next action |
 |---|---|---|---|---|
-| CANDIDATE | Onsite add-on / `+ 현장추가` capture from today's checkout cards | Dirty worktree: `/Users/choijaehyeong/my-gas-project2` on `codex/equipment-risk-checklist` | Dirty files: `checkAvailability.js`, `sheetAPI.js`, `dashboard.html`, `docs/dashboard.html`, `AGENT_GUIDE.md`; untracked `test/onsite-addon-dashboard.static.test.js` | Move to a clean feature branch from `origin/main`, fix trailing whitespace in `AGENT_GUIDE.md`, run the full test gate, then integrate through `scripts/integrate.sh`. |
-| NEEDS_REVIEW | Confirmation response / time dropdown / reject-hold re-registration / contract deletion sync | Remote branch: `origin/claude/add-confirmation-response-pfu90` | Ahead of `origin/main` by 4 commits and behind by 300; merge conflicts in `Code.js` and `checkAvailability.js` | Do not merge wholesale. Extract only desired behavior. Treat `syncDeletedContracts()` as high risk because it deletes rows from `스케줄상세` and external `개고생2.0`. |
+| ARCHIVED | Confirmation response / time dropdown / reject-hold re-registration / contract deletion sync | Remote branch: `origin/claude/add-confirmation-response-pfu90` | Time dropdown and reject/hold re-registration are already covered in `main`; explicit cancellation sync exists through `cancelContract()` | Do not merge wholesale. The old `syncDeletedContracts()` row-deletion scan is intentionally not adopted because it can delete rows from `스케줄상세` and external `개고생2.0` after ordinary row changes. |
 
 ## Branch / Worktree Classification
 
 | Branch / worktree | Status | Decision |
 |---|---|---|
 | `main` at `/Users/choijaehyeong/my-gas-project2-worktrees/main-confirm-request-row-inherit` | Clean and GAS-synced | Keep as integration/deploy lane. |
-| `codex/equipment-risk-checklist` at `/Users/choijaehyeong/my-gas-project2` | Dirty; 19 commits behind `origin/main`; contains onsite add-on candidate | Do not deploy from here. Preserve and migrate the candidate work. |
+| `codex/equipment-risk-checklist` at `/Users/choijaehyeong/my-gas-project2` | Dirty; behind `origin/main`; contains stale duplicate onsite add-on edits | Do not deploy from here. Since onsite add-on is live in `main`, this worktree should be reset or removed only after confirming no active session still owns it. |
 | `codex/confirm-request-row-inherit` | Fully included in main | Archive after no active session depends on it. |
 | `codex/confirm-set-recheck-format` | Fully included in main | Archive after no active session depends on it. |
 | `codex/contract-discount-regen` | Fully included in main | Archive after no active session depends on it. |
 | `codex/dashboard-deposit-status` | Fully included in main | Archive after no active session depends on it. |
+| `codex/hide-checkout-add-equipment` | Follow-up cleanup applied to main | Archive after this ledger update is pushed. |
 | `codex/invoice-recipient-company` | Fully included in main | Archive after no active session depends on it. |
 | `codex/billing-company-autocomplete` | Fully included in main | Archive after no active session depends on it. |
 | `claude/hopeful-cohen-67f82e` | Very stale; untracked `AGENTS.md` only | Do not use for deploy. Inspect only if someone remembers an unfinished intent. |
@@ -66,7 +69,6 @@ Run this before any `scripts/integrate.sh` or `scripts/endwork.sh`:
 
 ## Current Action Queue
 
-1. Preserve and integrate the onsite add-on candidate.
-2. Manually triage `origin/claude/add-confirmation-response-pfu90`; do not merge it whole.
-3. Remove or archive feature worktrees that are already fully included in main.
-4. Keep this ledger updated whenever a session starts or finishes a feature branch.
+1. Remove or archive feature worktrees that are already fully included in main.
+2. Delete or archive the stale remote branch `origin/claude/add-confirmation-response-pfu90` after no active session depends on it.
+3. Keep this ledger updated whenever a session starts or finishes a feature branch.
