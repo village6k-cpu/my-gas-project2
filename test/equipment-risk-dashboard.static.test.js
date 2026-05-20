@@ -84,6 +84,9 @@ assert.ok(
   'customerPhone: item.customerPhone || item.tel || item.customerTel ||',
   'riskItems: (item.riskWarnings || []).map(equipmentRiskBackendItem_)',
   'var evaluatedWarnings = evaluated.riskItems || evaluated.warnings || evaluated.riskWarnings || [];',
+  'if (matched.userType) warning.userType = matched.userType;',
+  'if (matched.userId) warning.userId = matched.userId;',
+  'if (matched.kakaoUser) warning.kakaoUser = matched.kakaoUser;',
   'evaluateEquipmentRiskGuidanceStates_(result);',
   'markEquipmentRiskSearchEvaluationSkipped_(result);',
   "warning.guidanceReason = 'search_evaluation_skipped';",
@@ -164,6 +167,9 @@ assert.match(
 
   [
     'customerPhone: item.customerPhone || item.tel || item.customerTel ||',
+    "userType: item.userType || warning.userType || '',",
+    "userId: item.userId || warning.userId || '',",
+    'kakaoUser: item.kakaoUser || warning.kakaoUser || null,',
     'pickup_ack',
     'return_ok',
     'return_issue',

@@ -1266,6 +1266,11 @@ function applyEquipmentRiskEvaluation_(items, data) {
       if (matched.lastSentAt) warning.lastSentAt = matched.lastSentAt;
       if (matched.lastEventAt) warning.lastEventAt = matched.lastEventAt;
       if (matched.requiresApproval !== undefined) warning.requiresApproval = !!matched.requiresApproval;
+      if (matched.userType) warning.userType = matched.userType;
+      if (matched.userId) warning.userId = matched.userId;
+      if (matched.kakaoUser) warning.kakaoUser = matched.kakaoUser;
+      if (matched.customerKey) warning.customerKey = matched.customerKey;
+      if (matched.recipientSource) warning.recipientSource = matched.recipientSource;
     });
   });
 }
