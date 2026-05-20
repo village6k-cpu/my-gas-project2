@@ -275,6 +275,19 @@ function onEditInstallable(e) {
       Logger.log("계약마스터 일정 변경 처리 실패: " + err.message);
     }
   }
+
+  // 계약마스터 K열(11) 할인유형 수정 → 계약서 재생성 예약
+  if (sheet.getName() === "계약마스터" && col === 11 && row >= 2) {
+    try {
+      var discountRowCount = e.range.getNumRows ? e.range.getNumRows() : 1;
+      for (var discountIdx = 0; discountIdx < discountRowCount; discountIdx++) {
+        var discountTradeId = String(sheet.getRange(row + discountIdx, 1).getValue()).trim();
+        if (discountTradeId) scheduleContractRegen(discountTradeId);
+      }
+    } catch (err) {
+      Logger.log("계약마스터 할인유형 변경 처리 실패: " + err.message);
+    }
+  }
 }
 
 function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
