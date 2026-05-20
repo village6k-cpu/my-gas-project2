@@ -1350,6 +1350,15 @@ function recordEquipmentRiskEvent_(payload) {
   return { success: false, error: response.error || response.reason, reason: response.reason };
 }
 
+function recordOnsiteAddonBackend_(payload) {
+  var response = postEquipmentRiskBackend_('/admin/onsite-addons', payload || {});
+  if (response.success) {
+    try { invalidateDashboardCache(); } catch (e) {}
+    return response.data || { success: true };
+  }
+  return { success: false, error: response.error || response.reason, reason: response.reason };
+}
+
 function normalizeDashboardSearchText_(value) {
   return String(value || '').toLowerCase().replace(/[-.\s]+/g, ' ').trim();
 }
@@ -4087,7 +4096,9 @@ function dashboardAddEquipments(tid, entries, options) {
         availabilityChecked: true,
         addedEquipments: addEntries.length,
         addedRows: newRows.length,
+        addedItems: addEntries.map(function(entry) { return { name: entry.name, quantity: entry.qty }; }),
         equipmentNames: addEntries.map(function(entry) { return entry.name; }),
+        customerName: 예약자명,
         warnings: availability.warnings || [],
         message: "가용 확인 완료"
       };
@@ -4107,13 +4118,41 @@ function dashboardAddEquipments(tid, entries, options) {
       availabilityChecked: true,
       addedEquipments: addEntries.length,
       addedRows: newRows.length,
+      addedItems: addEntries.map(function(entry) { return { name: entry.name, quantity: entry.qty }; }),
       equipmentNames: addEntries.map(function(entry) { return entry.name; }),
+      customerName: 예약자명,
       warnings: availability.warnings || [],
       message: "가용 확인 완료 후 추가"
     };
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
+}
+
+function dashboardRecordOnsiteAddon(tid, entries, options) {
+  options = options || {};
+  var addResult = dashboardAddEquipments(tid, entries, { dryRun: options.dryRun });
+  if (!addResult || addResult.error) return addResult;
+  if (addResult.dryRun) return addResult;
+
+  var payload = {
+    transactionId: String(tid || '').trim(),
+    customerName: addResult.customerName || '',
+    items: addResult.addedItems || [],
+    settlementStatus: options.settlementStatus || 'pending',
+    source: 'schedule_button',
+    actorName: options.actorName || '오늘 일정 웹앱'
+  };
+  var logResult = recordOnsiteAddonBackend_(payload);
+  addResult.onsiteAddonLogged = !!(logResult && (logResult.ok || logResult.success));
+  addResult.onsiteAddonEvent = logResult && (logResult.event || logResult.data || null);
+  if (!addResult.onsiteAddonLogged) {
+    addResult.onsiteAddonWarning = (logResult && (logResult.error || logResult.reason)) || 'onsite_addon_log_failed';
+  }
+  addResult.message = addResult.onsiteAddonLogged
+    ? '현장 추가 반출 기록 완료'
+    : '장비는 추가됐지만 현장 추가 반출 기록 저장은 확인 필요';
+  return addResult;
 }
 
 function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {

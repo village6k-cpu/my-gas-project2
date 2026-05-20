@@ -266,6 +266,18 @@ function handleRequest(e) {
           { dryRun: params.dryRun || postBody.dryRun }
         ));
 
+      case "onsiteAddon":
+      case "recordOnsiteAddon":
+        return jsonResponse(dashboardRecordOnsiteAddon(
+          params.tid || postBody.tid,
+          params.entries || postBody.entries || params.items || postBody.items,
+          {
+            dryRun: params.dryRun || postBody.dryRun,
+            settlementStatus: params.settlementStatus || postBody.settlementStatus || params.settlement_status || postBody.settlement_status,
+            actorName: params.actorName || postBody.actorName || params.actor_name || postBody.actor_name
+          }
+        ));
+
       case "removeEquip":
         return jsonResponse(dashboardRemoveEquipment(
           params.tid || postBody.tid,
