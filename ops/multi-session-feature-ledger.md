@@ -1,7 +1,7 @@
 # Multi-Session Feature Ledger
 
 Last audited: 2026-05-20 KST
-Truth snapshot: `main` / `origin/main` / GAS are aligned at `846a8c7` (`누락 후보 장부 최신화`).
+Truth snapshot: `main` / `origin/main` / GAS are aligned at `3964ede` (`정리 완료 상태 장부 반영`).
 
 ## Purpose
 
@@ -42,7 +42,7 @@ The pass condition is not "no git conflict." The pass condition is:
 | Branch / worktree | Status | Decision |
 |---|---|---|
 | `main` at `/Users/choijaehyeong/my-gas-project2-worktrees/main-confirm-request-row-inherit` | Clean and GAS-synced | Keep as integration/deploy lane. |
-| `codex/equipment-risk-checklist` at `/Users/choijaehyeong/my-gas-project2` | Dirty; behind `origin/main`; contains stale duplicate onsite add-on edits | Do not deploy from here. Since onsite add-on is live in `main`, this worktree should be reset or removed only after confirming no active session still owns it. |
+| `codex/equipment-risk-checklist` at `/Users/choijaehyeong/my-gas-project2` | Clean; behind `origin/main`; stale duplicate onsite add-on edits were stashed | Do not deploy from here. The stale duplicate changes are preserved in stash `archive stale onsite addon duplicate after main 3964ede`. |
 | `codex/confirm-request-row-inherit` | Fully included in main | Archive after no active session depends on it. |
 | `codex/confirm-set-recheck-format` | Fully included in main | Archive after no active session depends on it. |
 | `codex/contract-discount-regen` | Fully included in main | Archive after no active session depends on it. |
@@ -50,7 +50,7 @@ The pass condition is not "no git conflict." The pass condition is:
 | `codex/hide-checkout-add-equipment` | Follow-up cleanup applied to main | Local branch deleted after merge-equivalent cleanup landed in `0697ee4`. |
 | `codex/invoice-recipient-company` | Fully included in main | Archive after no active session depends on it. |
 | `codex/billing-company-autocomplete` | Fully included in main | Archive after no active session depends on it. |
-| `claude/hopeful-cohen-67f82e` | Very stale; untracked `AGENTS.md` only | Do not use for deploy. Inspect only if someone remembers an unfinished intent. |
+| `claude/hopeful-cohen-67f82e` | Very stale; clean after stashing untracked `AGENTS.md` copy | Do not use for deploy. Inspect only if someone remembers an unfinished intent. |
 
 ## Pre-Deploy Feature Preservation Checklist
 
