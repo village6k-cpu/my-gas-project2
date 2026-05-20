@@ -479,6 +479,7 @@ function getDashboardData(targetDate, skipCache) {
       paymentOptions: getTradePaymentOptions_(),
       proofTypeOptions: getTradeProofTypeOptions_(),
       issueStatusOptions: getTradeIssueStatusOptions_(),
+      depositStatusOptions: getTradeDepositStatusOptions_(),
       billingCompanyOptions: getTradeBillingCompanyOptions_()
     };
   }
@@ -641,6 +642,7 @@ function getDashboardData(targetDate, skipCache) {
     paymentOptions: getTradePaymentOptions_(),
     proofTypeOptions: getTradeProofTypeOptions_(),
     issueStatusOptions: getTradeIssueStatusOptions_(),
+    depositStatusOptions: getTradeDepositStatusOptions_(),
     billingCompanyOptions: getTradeBillingCompanyOptions_()
   };
   evaluateEquipmentRiskGuidanceStates_(result);
@@ -667,6 +669,7 @@ function getDashboardSearchData(query, options) {
       paymentOptions: getTradePaymentOptions_(),
       proofTypeOptions: getTradeProofTypeOptions_(),
       issueStatusOptions: getTradeIssueStatusOptions_(),
+      depositStatusOptions: getTradeDepositStatusOptions_(),
       billingCompanyOptions: getTradeBillingCompanyOptions_()
     };
   }
@@ -765,6 +768,7 @@ function getDashboardSearchData(query, options) {
     paymentOptions: getTradePaymentOptions_(),
     proofTypeOptions: getTradeProofTypeOptions_(),
     issueStatusOptions: getTradeIssueStatusOptions_(),
+    depositStatusOptions: getTradeDepositStatusOptions_(),
     billingCompanyOptions: getTradeBillingCompanyOptions_()
   };
   markEquipmentRiskSearchEvaluationSkipped_(result);
@@ -2985,6 +2989,10 @@ function getTradeIssueStatusOptions_() {
   return getTradeColumnOptions_(12, ["미발행", "발행요청", "발행완료", "전송실패"]);
 }
 
+function getTradeDepositStatusOptions_() {
+  return getTradeColumnOptions_(13, ["미입금", "입금완료", "부분입금", "환불"]);
+}
+
 function getTradeBillingCompanyOptions_() {
   return getCachedDashboardTradeOptions_('dashboard_trade_billing_company_options_v1', function() {
     var options = getTradeColumnOptionsFromSheet_(7, []);
@@ -3347,7 +3355,9 @@ function updateTradeProofField(tid, field, value) {
   value = String(value || '').trim();
 
   if (!tid) return { error: "tid 필요" };
-  if (field !== "proofType" && field !== "issueStatus") return { error: "field는 proofType/issueStatus만 허용" };
+  if (field !== "proofType" && field !== "issueStatus" && field !== "depositStatus") {
+    return { error: "field는 proofType/issueStatus/depositStatus만 허용" };
+  }
 
   if (field === "issueStatus" && value === "발행요청") {
     return requestTradeProofIssue(tid);
@@ -3361,8 +3371,13 @@ function updateTradeProofField(tid, field, value) {
     var row = findVillageTradeRow_(거래시트, tid);
     if (!row) return { error: "거래내역에서 거래ID를 찾지 못했습니다: " + tid };
 
-    var column = field === "proofType" ? 11 : 12; // K/L
-    var label = field === "proofType" ? "증빙유형" : "발행상태";
+    var fieldMeta = {
+      proofType: { column: 11, label: "증빙유형" },
+      issueStatus: { column: 12, label: "발행상태" },
+      depositStatus: { column: 13, label: "입금상태" }
+    };
+    var column = fieldMeta[field].column; // K/L/M
+    var label = fieldMeta[field].label;
     var opts = paymentOptionsFromRule_(거래시트.getRange(row, column).getDataValidation());
     if (value && opts.length > 0 && opts.indexOf(value) < 0) {
       return { error: label + " 드롭다운에 없는 값입니다: " + value };
