@@ -1,7 +1,7 @@
 # Multi-Session Feature Ledger
 
 Last audited: 2026-05-20 KST
-Truth snapshot: `main` / `origin/main` / GAS are aligned at `0697ee4` (`멀티세션 누락 후보 정리`).
+Truth snapshot: `main` / `origin/main` / GAS are aligned at `846a8c7` (`누락 후보 장부 최신화`).
 
 ## Purpose
 
@@ -35,7 +35,7 @@ The pass condition is not "no git conflict." The pass condition is:
 
 | Status | Feature / intent | Current location | Evidence | Required next action |
 |---|---|---|---|---|
-| ARCHIVED | Confirmation response / time dropdown / reject-hold re-registration / contract deletion sync | Remote branch: `origin/claude/add-confirmation-response-pfu90` | Time dropdown and reject/hold re-registration are already covered in `main`; explicit cancellation sync exists through `cancelContract()` | Do not merge wholesale. The old `syncDeletedContracts()` row-deletion scan is intentionally not adopted because it can delete rows from `스케줄상세` and external `개고생2.0` after ordinary row changes. |
+| ARCHIVED | Confirmation response / time dropdown / reject-hold re-registration / contract deletion sync | Deleted remote branch: `origin/claude/add-confirmation-response-pfu90` | Time dropdown and reject/hold re-registration are already covered in `main`; explicit cancellation sync exists through `cancelContract()` | The old `syncDeletedContracts()` row-deletion scan was intentionally not adopted because it can delete rows from `스케줄상세` and external `개고생2.0` after ordinary row changes. |
 
 ## Branch / Worktree Classification
 
@@ -47,7 +47,7 @@ The pass condition is not "no git conflict." The pass condition is:
 | `codex/confirm-set-recheck-format` | Fully included in main | Archive after no active session depends on it. |
 | `codex/contract-discount-regen` | Fully included in main | Archive after no active session depends on it. |
 | `codex/dashboard-deposit-status` | Fully included in main | Archive after no active session depends on it. |
-| `codex/hide-checkout-add-equipment` | Follow-up cleanup applied to main | Archive after this ledger update is pushed. |
+| `codex/hide-checkout-add-equipment` | Follow-up cleanup applied to main | Local branch deleted after merge-equivalent cleanup landed in `0697ee4`. |
 | `codex/invoice-recipient-company` | Fully included in main | Archive after no active session depends on it. |
 | `codex/billing-company-autocomplete` | Fully included in main | Archive after no active session depends on it. |
 | `claude/hopeful-cohen-67f82e` | Very stale; untracked `AGENTS.md` only | Do not use for deploy. Inspect only if someone remembers an unfinished intent. |
@@ -70,5 +70,4 @@ Run this before any `scripts/integrate.sh` or `scripts/endwork.sh`:
 ## Current Action Queue
 
 1. Remove or archive feature worktrees that are already fully included in main.
-2. Delete or archive the stale remote branch `origin/claude/add-confirmation-response-pfu90` after no active session depends on it.
-3. Keep this ledger updated whenever a session starts or finishes a feature branch.
+2. Keep this ledger updated whenever a session starts or finishes a feature branch.
