@@ -5388,13 +5388,15 @@ function _processByReqID(sheet, triggerRow) {
   if (lastRowBeforeClean >= 2) {
     var qCol = sheet.getRange(2, 17, lastRowBeforeClean - 1, 1).getValues();
     var aCol = sheet.getRange(2, 1, lastRowBeforeClean - 1, 1).getValues();
+    var fCol = sheet.getRange(2, 6, lastRowBeforeClean - 1, 1).getValues();
     for (let ci = qCol.length - 1; ci >= 0; ci--) {
       var qVal = String(qCol[ci][0]);
       if (String(aCol[ci][0]).trim() !== triggerReqID) continue;
       if (qVal.indexOf("[세트]") !== 0) continue;
       var belongsTo = qVal.substring(4); // "[세트]" 이후 = 소속 세트명
-      if (!currentSetNames.has(belongsTo)) {
-        // 이 구성품의 소속 세트가 현재 없음 → 삭제 대상
+      var componentName = String(fCol[ci][0] || "").trim();
+      if (!componentName || !currentSetNames.has(belongsTo)) {
+        // 빈 구성품이거나 이 구성품의 소속 세트가 현재 없음 → 삭제 대상
         sheet.deleteRow(ci + 2);
         deletedAny = true;
       }
@@ -6138,12 +6140,14 @@ function getSetComponents(name, setSheet) {
   // A: 세트명, B: 구성장비명, C: 수량, D: 비고, E: 대체가능장비, F: 가용체크(없으면 전부 포함)
   const items = data.filter(row => {
     if (row[0].toString().trim() !== name.toString().trim()) return false;
+    var componentName = String(row[1] || "").trim();
+    if (!componentName) return false;
     var flag = (row.length > 5) ? row[5].toString().trim() : "";
     return flag === "Y" || flag === "";  // F열 없거나 비어있으면 포함
   });
 
   return items.map(row => ({
-    name: row[1],
+    name: String(row[1] || "").trim(),
     qty: row[2] || 1,
     alt: row[4] || ""
   }));
