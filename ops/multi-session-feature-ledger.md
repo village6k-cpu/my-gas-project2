@@ -1,7 +1,7 @@
 # Multi-Session Feature Ledger
 
 Last audited: 2026-05-20 KST
-Truth snapshot: `main` / `origin/main` / GAS are aligned at `2b92ed1` (`멀티세션 worktree 정리 상태 반영`).
+Truth snapshot: `main` / `origin/main` / GAS are aligned at the latest audited `main` HEAD.
 
 ## Purpose
 
