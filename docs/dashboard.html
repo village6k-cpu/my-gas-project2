@@ -1019,7 +1019,7 @@
   .gosu-link-btn:active { transform: scale(0.97); }
   .gosu-link-btn.primary { background: var(--accent); }
   .payment-select,
-  .billing-company-select,
+  .billing-company-input,
   .proof-select {
     min-height: 30px;
     border: 1px solid var(--border);
@@ -1031,9 +1031,10 @@
     padding: 5px 8px;
     outline: none;
   }
-  .billing-company-select { width: 172px; }
+  .billing-company-input { width: 190px; }
+  .billing-company-input::placeholder { color: var(--text-muted); }
   .payment-select:focus,
-  .billing-company-select:focus,
+  .billing-company-input:focus,
   .proof-select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(35,131,226,0.15); }
   .detail-note { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
   .card-actions {
@@ -1094,7 +1095,7 @@
   .trade-action-btn.danger:hover { background: #FEECEC; }
   .trade-action-btn:disabled { opacity: 0.55; cursor: wait; }
   .card-actions .payment-select,
-  .card-actions .billing-company-select,
+  .card-actions .billing-company-input,
   .card-actions .proof-select { min-height: 30px; }
 
   .card-header {
@@ -1403,6 +1404,7 @@
   </div>
 </div>
 <div id="dashboardSearchStatus" class="dashboard-search-status"></div>
+<datalist id="billingCompanyOptionsList"></datalist>
 
 <div class="content">
   <div id="loadingArea" class="loading">
@@ -2008,6 +2010,7 @@ function renderDashboard(data, expectedDate) {
   var filteredCheckin = filterDashboardItems(checkin, 'checkin');
   var attention = buildDashboardAttentionItems(filteredCheckout, filteredCheckin);
   var isSearching = !!dashboardSearchQuery;
+  renderBillingCompanyDatalist(data);
   document.getElementById('loadingArea').style.display = 'none';
 
   document.getElementById('tabCheckout').textContent = filteredCheckout.length;
@@ -2044,6 +2047,7 @@ function renderDashboardGlobalSearch(data) {
   document.getElementById('tabAll').textContent = all.length;
   var attention = buildDashboardAttentionItems(checkout, checkin);
   document.getElementById('tabAttention').textContent = attention.length;
+  renderBillingCompanyDatalist(data);
   renderList('checkoutSection', [], 'checkout', true, { globalSearch: true });
   renderList('checkinSection', [], 'checkin', true, { globalSearch: true });
   renderList('allSection', all, 'all', true, { globalSearch: true });
@@ -2075,6 +2079,16 @@ function resetDashboardSearchCollapsedGroups(data) {
 
 function dashboardSearchGroupId(label) {
   return 'search_' + String(label || 'unknown').replace(/[^A-Za-z0-9가-힣_-]+/g, '_');
+}
+
+function renderBillingCompanyDatalist(data) {
+  var list = document.getElementById('billingCompanyOptionsList');
+  if (!list) return;
+  var options = (data && data.billingCompanyOptions) ||
+    (dashboardData && dashboardData.billingCompanyOptions) || [];
+  list.innerHTML = (options || []).filter(Boolean).map(function(opt) {
+    return '<option value="' + escAttr(opt) + '"></option>';
+  }).join('');
 }
 
 function riskGuidanceLabel(state, reason) {
@@ -3136,7 +3150,7 @@ function cardActionHtml(item, cardType) {
     html += '<button class="trade-action-btn danger" onclick="event.stopPropagation();cancelDashboardTrade(this,\'' + escJs(item.tradeId) + '\',\'' + escJs(item.name || item.tradeId) + '\')">취소처리</button>';
   }
   html += paymentSelectHtml(item);
-  html += billingCompanySelectHtml(item);
+  html += billingCompanyInputHtml(item);
   html += proofTypeSelectHtml(item);
   html += issueStatusSelectHtml(item);
   html += '</div>';
@@ -3156,16 +3170,9 @@ function paymentSelectHtml(item) {
   return html;
 }
 
-function billingCompanySelectHtml(item) {
-  var options = [''].concat((dashboardData && dashboardData.billingCompanyOptions) || []);
+function billingCompanyInputHtml(item) {
   var current = item.billingCompany || '';
-  if (current && options.indexOf(current) < 0) options.splice(1, 0, current);
-  var html = '<select class="billing-company-select" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updateBillingCompany(event,this,\'' + escJs(item.tradeId) + '\')">';
-  options.forEach(function(opt) {
-    html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(opt || '발행처 상호') + '</option>';
-  });
-  html += '</select>';
-  return html;
+  return '<input class="billing-company-input" type="text" list="billingCompanyOptionsList" autocomplete="off" placeholder="발행처 상호" value="' + escAttr(current) + '" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updateBillingCompany(event,this,\'' + escJs(item.tradeId) + '\')" onblur="updateBillingCompany(event,this,\'' + escJs(item.tradeId) + '\')" onkeydown="if(event.key===\'Enter\'){event.preventDefault();this.blur();}">';
 }
 
 function updatePaymentMethod(event, select, tradeId) {
@@ -3193,11 +3200,12 @@ function updatePaymentMethod(event, select, tradeId) {
     });
 }
 
-function updateBillingCompany(event, select, tradeId) {
+function updateBillingCompany(event, input, tradeId) {
   event.stopPropagation();
-  var prev = select.getAttribute('data-prev') || '';
-  var billingCompany = select.value || '';
-  select.disabled = true;
+  var prev = input.getAttribute('data-prev') || '';
+  var billingCompany = (input.value || '').trim();
+  if (billingCompany === prev) return;
+  input.disabled = true;
   fetch(API_URL || '', {
     method: 'POST',
     body: JSON.stringify({
@@ -3209,20 +3217,20 @@ function updateBillingCompany(event, select, tradeId) {
   })
     .then(function(r) { return r.json(); })
     .then(function(res) {
-      select.disabled = false;
+      input.disabled = false;
       if (res.error) {
         alert('발행처 상호 저장 실패: ' + res.error);
-        select.value = prev;
+        input.value = prev;
         return;
       }
       var nextValue = res.billingCompany || billingCompany;
-      select.value = nextValue;
-      select.setAttribute('data-prev', nextValue);
+      input.value = nextValue;
+      input.setAttribute('data-prev', nextValue);
       syncBillingCompanyInMemory(tradeId, nextValue);
     })
     .catch(function(err) {
-      select.disabled = false;
-      select.value = prev;
+      input.disabled = false;
+      input.value = prev;
       alert('발행처 상호 저장 실패: ' + err.message);
     });
 }

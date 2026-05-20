@@ -73,14 +73,38 @@ assert.match(
 
   assert.match(
     html,
-    /\.billing-company-select/,
-    `${file} must style the 발행처 상호 select`
+    /\.billing-company-input/,
+    `${file} must style the 발행처 상호 autocomplete input`
   );
 
   assert.match(
     html,
-    /function\s+billingCompanySelectHtml\(item\)/,
-    `${file} must render a 발행처 상호 select`
+    /function\s+billingCompanyInputHtml\(item\)/,
+    `${file} must render a 발행처 상호 autocomplete input`
+  );
+
+  assert.doesNotMatch(
+    html,
+    /<select class=["']billing-company-select/,
+    `${file} must not render 발행처 상호 as a long select dropdown`
+  );
+
+  assert.match(
+    html,
+    /<datalist id=["']billingCompanyOptionsList["']/,
+    `${file} must provide a shared 발행처 상호 datalist`
+  );
+
+  assert.match(
+    html,
+    /list=["']billingCompanyOptionsList["']/,
+    `${file} 발행처 input must use the shared datalist`
+  );
+
+  assert.match(
+    html,
+    /function\s+renderBillingCompanyDatalist\(data\)/,
+    `${file} must refresh 발행처 autocomplete options from dashboard data`
   );
 
   assert.match(
@@ -97,7 +121,7 @@ assert.match(
 
   assert.match(
     html,
-    /function\s+updateBillingCompany\(event,\s*select,\s*tradeId\)/,
+    /function\s+updateBillingCompany\(event,\s*input,\s*tradeId\)/,
     `${file} must save 발행처 상호 changes`
   );
 
