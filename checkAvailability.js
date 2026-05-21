@@ -4244,7 +4244,13 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
       return name !== "" && name !== equipName;
     });
     var isSetHeader = !!setName && setName === equipName && components.length > 0;
-    var updates = [{ row: targetRow, equipment: equipName, oldQty: oldQty, newQty: newQty }];
+    var updates = [{
+      row: targetRow,
+      scheduleId: String(row[0] || "").trim(),
+      equipment: equipName,
+      oldQty: oldQty,
+      newQty: newQty
+    }];
     var availabilityItems = [];
 
     if (isSetHeader) {
@@ -4264,7 +4270,13 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
         var currentQty = Number(r[4]) || 1;
         var baseQty = componentBaseQty[rowEquipName];
         var targetQty = baseQty ? baseQty * newQty : Math.max(1, Math.round(currentQty * newQty / oldQty));
-        updates.push({ row: rowNum, equipment: rowEquipName, oldQty: currentQty, newQty: targetQty });
+        updates.push({
+          row: rowNum,
+          scheduleId: String(r[0] || "").trim(),
+          equipment: rowEquipName,
+          oldQty: currentQty,
+          newQty: targetQty
+        });
         if (targetQty > currentQty) {
           availabilityItems.push({ name: rowEquipName, qty: targetQty - currentQty });
         }
@@ -4311,6 +4323,7 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
       updatedItems: updates.map(function(update) {
         return {
           equipment: update.equipment,
+          scheduleId: update.scheduleId,
           oldQty: update.oldQty,
           newQty: update.newQty
         };
@@ -4437,12 +4450,28 @@ function dashboardAddEquipment(tid, equipName, qty) {
     try { formatScheduleSheet(sched); } catch (e) {}
     scheduleContractRegen(tid);
     return {
-      success: true,
-      availabilityChecked: true,
-      addedRows: newRows.length,
-      isSet: components.length > 0,
-      equipName: equipName,
-      message: "가용 확인 완료 후 추가"
+	      success: true,
+	      availabilityChecked: true,
+	      addedRows: newRows.length,
+	      addedItems: newRows.map(function(row) {
+	        var setName = String(row[2] || "").trim();
+	        var name = String(row[3] || "").trim();
+	        var isHeader = !setName || setName === name;
+	        return {
+	          scheduleId: String(row[0] || "").trim(),
+	          name: name,
+	          qty: Number(row[4]) || 1,
+	          setName: setName,
+	          isHeader: isHeader,
+	          isSet: isHeader && components.length > 0,
+	          isComponent: !!setName && !isHeader,
+	          checkedCheckout: false,
+	          checkedCheckin: false
+	        };
+	      }),
+	      isSet: components.length > 0,
+	      equipName: equipName,
+	      message: "가용 확인 완료 후 추가"
     };
   } finally {
     try { lock.releaseLock(); } catch (e) {}
@@ -4532,10 +4561,29 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId) {
       return true;
     }).sort(function(a, b) { return b - a; });
 
+    var removedScheduleIds = rowsToDelete.map(function(r) {
+      return String((data[r - 2] && data[r - 2][0]) || "").trim();
+    }).filter(Boolean);
+    var removedEquipments = rowsToDelete.map(function(r) {
+      var source = data[r - 2] || [];
+      return {
+        scheduleId: String(source[0] || "").trim(),
+        setName: String(source[2] || "").trim(),
+        name: String(source[3] || "").trim()
+      };
+    });
+
     rowsToDelete.forEach(function(r) { sched.deleteRow(r); });
     try { formatScheduleSheet(sched); } catch (e) {}
     scheduleContractRegen(tid);
-    return { success: true, removedRows: rowsToDelete.length, equipName: equipName, scheduleId: scheduleId };
+    return {
+      success: true,
+      removedRows: rowsToDelete.length,
+      removedScheduleIds: removedScheduleIds,
+      removedEquipments: removedEquipments,
+      equipName: equipName,
+      scheduleId: scheduleId
+    };
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
