@@ -1445,6 +1445,7 @@ var noteSaveTimer = null;
 var dashboardPhotoStore = {};
 var dashboardPhotoLoading = {};
 var dashboardPhotoBatchTimer = null;
+var dashboardSilentRefreshTimer = null;
 var dashboardDatePrefetching = {};
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -3102,6 +3103,163 @@ function dashboardItemsForTrade(tid) {
   return items;
 }
 
+function dashboardEquipmentMutationTargets(tid) {
+  var items = [];
+  function collect(source) {
+    if (!source) return;
+    ['checkout', 'checkin'].forEach(function(listName) {
+      (source[listName] || []).forEach(function(item) {
+        if (item.tradeId === tid) items.push(item);
+      });
+    });
+  }
+  collect(dashboardData);
+  collect(dashboardGlobalSearchData);
+  return items;
+}
+
+function normalizeDashboardEquipmentItem(eq) {
+  eq = eq || {};
+  var setName = String(eq.setName || '').trim();
+  var name = String(eq.name || '').trim();
+  var isHeader = eq.isHeader !== undefined ? !!eq.isHeader : (!setName || setName === name);
+  return {
+    scheduleId: String(eq.scheduleId || '').trim(),
+    name: name,
+    qty: Number(eq.qty) || 1,
+    setName: setName,
+    isHeader: isHeader,
+    isSet: !!eq.isSet,
+    isComponent: eq.isComponent !== undefined ? !!eq.isComponent : (!!setName && !isHeader),
+    checkedCheckout: !!eq.checkedCheckout,
+    checkedCheckin: !!eq.checkedCheckin
+  };
+}
+
+function syncDashboardEquipmentAdditions(tid, res, context) {
+  var added = (res && res.addedItems) || [];
+  if (!added.length && context && context.entries) {
+    added = context.entries.map(function(entry) {
+      return { name: entry.name, qty: entry.qty, setName: entry.name, isHeader: true };
+    });
+  }
+  if (!added.length) return false;
+
+  dashboardEquipmentMutationTargets(tid).forEach(function(item) {
+    item.equipments = item.equipments || [];
+    var existing = {};
+    item.equipments.forEach(function(eq) {
+      if (eq.scheduleId) existing[eq.scheduleId] = true;
+    });
+    added.forEach(function(eq) {
+      var normalized = normalizeDashboardEquipmentItem(eq);
+      if (normalized.scheduleId && existing[normalized.scheduleId]) return;
+      item.equipments.push(normalized);
+      if (normalized.scheduleId) existing[normalized.scheduleId] = true;
+    });
+  });
+  return true;
+}
+
+function syncDashboardEquipmentRemoval(tid, res, context) {
+  context = context || {};
+  var ids = (res && res.removedScheduleIds) || [];
+  if (!ids.length && context.scheduleId) ids = [context.scheduleId];
+  var idMap = {};
+  ids.forEach(function(id) { if (id) idMap[String(id)] = true; });
+  var removed = false;
+
+  dashboardEquipmentMutationTargets(tid).forEach(function(item) {
+    var before = (item.equipments || []).length;
+    item.equipments = (item.equipments || []).filter(function(eq) {
+      if (idMap[eq.scheduleId]) return false;
+      if (!ids.length && context.isSet && (eq.scheduleId === context.scheduleId || eq.setName === context.equipName)) return false;
+      if (!ids.length && context.equipName && eq.name === context.equipName) return false;
+      return true;
+    });
+    if (item.equipments.length !== before) removed = true;
+  });
+  return removed;
+}
+
+function syncDashboardEquipmentQtyUpdate(tid, res, context) {
+  context = context || {};
+  var updates = (res && res.updatedItems) || [];
+  if (!updates.length && context.scheduleId) {
+    updates = [{ scheduleId: context.scheduleId, equipment: context.equipName, newQty: context.qty }];
+  }
+  if (!updates.length) return false;
+  var changed = false;
+
+  dashboardEquipmentMutationTargets(tid).forEach(function(item) {
+    (item.equipments || []).forEach(function(eq) {
+      updates.forEach(function(update) {
+        var matchesId = update.scheduleId && eq.scheduleId === update.scheduleId;
+        var matchesName = !update.scheduleId && update.equipment && eq.name === update.equipment;
+        if (!matchesId && !matchesName) return;
+        eq.qty = Number(update.newQty || update.qty) || eq.qty || 1;
+        changed = true;
+      });
+    });
+  });
+  return changed;
+}
+
+function renderDashboardEquipmentMutation() {
+  if (!dashboardData && !dashboardGlobalSearchData) return false;
+  clearDashboardCacheForDate(formatDate(currentDate));
+  persistCurrentDashboardCache();
+  if (dashboardSearchQuery && dashboardGlobalSearchData) {
+    renderDashboardGlobalSearch(dashboardGlobalSearchData);
+  } else {
+    resetDashboardRenderedSections();
+    renderActiveDashboardSection();
+    scheduleDashboardSectionWarmup();
+  }
+  return true;
+}
+
+function queueDashboardSilentRefresh(delayMs) {
+  clearTimeout(dashboardSilentRefreshTimer);
+  dashboardSilentRefreshTimer = setTimeout(function() {
+    var dateStr = formatDate(currentDate);
+    fetch(API_URL + '?key=village2026&action=dashboard&date=' + dateStr + '&nocache=1')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!isDashboardDateMatch(data, dateStr)) return;
+        dashboardData = data;
+        renderDashboard(data, dateStr);
+        writeDashboardLocalCache(dateStr, data);
+      })
+      .catch(function() {});
+  }, delayMs || 900);
+}
+
+function applyDashboardEquipmentMutation(tid, res, context) {
+  context = context || {};
+  var changed = false;
+  if (context.operation === 'add') changed = syncDashboardEquipmentAdditions(tid, res, context);
+  if (context.operation === 'remove') changed = syncDashboardEquipmentRemoval(tid, res, context);
+  if (context.operation === 'qty') changed = syncDashboardEquipmentQtyUpdate(tid, res, context);
+  if (changed) renderDashboardEquipmentMutation();
+  queueDashboardSilentRefresh(changed ? 1200 : 0);
+  return changed;
+}
+
+function showDashboardToast(message) {
+  var el = document.getElementById('dashboardToast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'dashboardToast';
+    el.style.cssText = 'position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:9999;background:#222;color:#fff;padding:10px 14px;border-radius:6px;font-size:13px;font-weight:700;box-shadow:0 6px 18px rgba(0,0,0,.18);opacity:0;transition:opacity .18s;';
+    document.body.appendChild(el);
+  }
+  el.textContent = message || '';
+  el.style.opacity = '1';
+  clearTimeout(el._hideTimer);
+  el._hideTimer = setTimeout(function() { el.style.opacity = '0'; }, 1800);
+}
+
 function removeEquip(tid, equipName, scheduleId, isSet, isComponent) {
   var message = '"' + equipName + '" 을(를) 삭제하시겠습니까?';
   if (isSet) message += '\n(세트 대표행 삭제 시 같은 세트 구성품도 함께 삭제됩니다)';
@@ -3114,7 +3272,13 @@ function removeEquip(tid, equipName, scheduleId, isSet, isComponent) {
     .then(function(r) { return r.json(); })
     .then(function(res) {
       if (res.error) { alert("삭제 실패: " + res.error); return; }
-      loadData(true);
+      applyDashboardEquipmentMutation(tid, res, {
+        operation: 'remove',
+        equipName: equipName,
+        scheduleId: scheduleId,
+        isSet: isSet,
+        isComponent: isComponent
+      });
     })
     .catch(function(err) { alert("네트워크 오류: " + err.message); });
 }
@@ -3134,7 +3298,12 @@ function editEquipQty(tid, scheduleId, equipName, currentQty) {
     .then(function(r) { return r.json(); })
     .then(function(res) {
       if (res.error) { alert('수량 수정 실패: ' + res.error); return; }
-      loadData(true);
+      applyDashboardEquipmentMutation(tid, res, {
+        operation: 'qty',
+        equipName: equipName,
+        scheduleId: scheduleId,
+        qty: qty
+      });
     })
     .catch(function(err) { alert('네트워크 오류: ' + err.message); });
 }
@@ -3726,12 +3895,16 @@ function confirmAddEquip() {
   request.then(function(res) {
     setAddEquipBusy(false);
     closeAddEquipModal();
-    loadData(true);
+    applyDashboardEquipmentMutation(tid, res, {
+      operation: 'add',
+      entries: entries,
+      mode: mode
+    });
     if (res.onsiteAddonWarning) {
       alert('장비는 추가됐지만 현장 추가 기록은 확인 필요: ' + res.onsiteAddonWarning);
       return;
     }
-    alert(mode === 'onsite'
+    showDashboardToast(mode === 'onsite'
       ? '현장 추가 반출 기록 완료. 장비 ' + (res.addedEquipments || entries.length) + '개를 추가했습니다.'
       : '가용 확인 완료. 장비 ' + (res.addedEquipments || entries.length) + '개를 추가했습니다.');
   }).catch(function(err) {
