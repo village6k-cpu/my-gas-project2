@@ -2437,7 +2437,7 @@ function renderList(containerId, items, type, isSearching, options) {
       html += '<div class="equip-checklist">';
       (item.equipments || []).forEach(function(eq) {
         var rowCls = 'equip-row';
-        if (eq.isSet) rowCls += ' is-set';
+        if (eq.isSet || (eq.isHeader && !eq.isComponent)) rowCls += ' is-set';
         else if (eq.isComponent) rowCls += ' is-component';
         else rowCls += ' is-single';
         var checked = (cardType === 'checkout' ? eq.checkedCheckout : eq.checkedCheckin);
