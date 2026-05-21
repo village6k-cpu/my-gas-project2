@@ -547,6 +547,7 @@ function getDashboardData(targetDate, skipCache) {
   var tradeExtras = getTradeExtrasForIds_(dashboardTradeIds, props);
   var equipmentChecks = getEquipmentCheckMapForIds_(dashboardTradeIds);
   var riskRules = getEquipmentRiskRules_();
+  var riskCandidateLookup = buildDashboardSetComponentLookup_(setSheet);
 
   dashboardTradeIds.forEach(function(tid) {
     var g = tradeGroups[tid];
@@ -605,7 +606,7 @@ function getDashboardData(targetDate, skipCache) {
       returnStatus: checkInfo.returnStatus || '',
       returnMemo: checkInfo.returnMemo || '',
       equipmentCheckRow: checkInfo.row || 0,
-      riskWarnings: attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet), riskRules),
+      riskWarnings: attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet, riskCandidateLookup), riskRules),
       equipments: displayEquip
     };
 
@@ -723,6 +724,7 @@ function getDashboardSearchData(query, options) {
   var tradeExtras = getTradeExtrasForIds_(tradeIds, props);
   var equipmentChecks = getEquipmentCheckMapForIds_(tradeIds);
   var riskRules = getEquipmentRiskRules_();
+  var riskCandidateLookup = buildDashboardSetComponentLookup_(setSheet);
   var checkoutList = [];
   var checkinList = [];
 
@@ -733,7 +735,7 @@ function getDashboardSearchData(query, options) {
     var checkInfo = getEquipmentCheckForTrade_(equipmentChecks, tid);
     if (!dashboardSearchTradeMatches_(terms, g, cust, extra, checkInfo)) return;
 
-    var item = buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet);
+    var item = buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup);
     var checkoutItem = cloneDashboardItem_(item);
     checkoutItem.time = g.반출시간 || '시간 미정';
     checkoutItem.sortTime = normalizeDashboardTimeKey_(g.반출시간);
@@ -779,7 +781,7 @@ function getDashboardSearchData(query, options) {
   return result;
 }
 
-function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet) {
+function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup) {
   riskRules = riskRules || getEquipmentRiskRules_();
   var setsWithComponents = {};
   g.equipments.forEach(function(eq) {
@@ -824,7 +826,7 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRu
     returnStatus: checkInfo.returnStatus || '',
     returnMemo: checkInfo.returnMemo || '',
     equipmentCheckRow: checkInfo.row || 0,
-    riskWarnings: attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet), riskRules),
+    riskWarnings: attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet, riskCandidateLookup), riskRules),
     equipments: displayEquip
   };
 }
@@ -981,10 +983,19 @@ function normalizeEquipmentRiskName_(value) {
   return String(value || '').toLowerCase().replace(/[\s\[\]\(\){}·•_,.]/g, '').trim();
 }
 
-function buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet) {
+function buildDashboardSetComponentLookup_(setSheet) {
+  try {
+    return (buildDashboardSetLookup_(setSheet).components || {});
+  } catch (err) {
+    return {};
+  }
+}
+
+function buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet, setComponentLookup) {
   var candidates = [];
   var seen = {};
   var setComponentCache = {};
+  setComponentLookup = setComponentLookup || {};
 
   function pushCandidate(eq) {
     var name = String((eq && eq.name) || '').trim();
@@ -1006,10 +1017,14 @@ function buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet) {
     if (!setName) return;
 
     if (setComponentCache[setName] === undefined) {
-      try {
-        setComponentCache[setName] = getSetComponents(setName, setSheet) || [];
-      } catch (err) {
-        setComponentCache[setName] = [];
+      if (Object.prototype.hasOwnProperty.call(setComponentLookup, setName)) {
+        setComponentCache[setName] = setComponentLookup[setName] || [];
+      } else {
+        try {
+          setComponentCache[setName] = getSetComponents(setName, setSheet) || [];
+        } catch (err) {
+          setComponentCache[setName] = [];
+        }
       }
     }
 
@@ -1437,11 +1452,10 @@ function getDashboardContractMapForIds_(contractSheet, tradeIds) {
   if (!contractSheet || contractSheet.getLastRow() < 2 || Object.keys(wanted).length === 0) return result;
 
   try {
-    var ids = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 1).getDisplayValues();
-    ids.forEach(function(r, idx) {
-      var tid = String(r[0] || '').trim();
+    var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getDisplayValues();
+    rows.forEach(function(row) {
+      var tid = String(row[0] || '').trim();
       if (!wanted[tid]) return;
-      var row = contractSheet.getRange(idx + 2, 1, 1, 10).getDisplayValues()[0];
       result[tid] = {
         name: row[1] || '',
         tel: row[2] || '',

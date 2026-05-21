@@ -78,8 +78,14 @@ assert.match(
 
   assert.match(
     html,
-    /renderList\(['"]attentionSection['"],\s*attention/,
-    `${file} must render the attention collection`
+    /function getDashboardSectionConfig\(tab\)[\s\S]*tab === ['"]attention['"][\s\S]*items = view\.attention/,
+    `${file} must keep the attention collection in the prepared dashboard view`
+  );
+
+  assert.match(
+    html,
+    /renderList\(tab \+ ['"]Section['"],\s*config\.items/,
+    `${file} must render the active attention tab from the prepared collection`
   );
 
   assert.match(
