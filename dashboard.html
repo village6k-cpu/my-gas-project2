@@ -1421,6 +1421,11 @@ var dashboardSearchRequestSeq = 0;
 var dashboardSearchAbortController = null;
 var dashboardSearchCollapsedGroups = {};
 var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
+var DASHBOARD_OLD_CACHE_PREFIX = 'dashCache_v3_';
+var DASHBOARD_PREFETCH_ADJACENT_DATES = false;
+var dashboardCurrentView = null;
+var dashboardRenderedSections = {};
+var dashboardViewSeq = 0;
 var CONTRACT_STATUS_OPTIONS = ['', '예약', '반출', '취소'];
 var RETURN_STATUS_OPTIONS = ['', '확인필요', '파손', '분실', '미반납', '반납완료'];
 var equipmentMemoSaveTimers = {};
@@ -1630,7 +1635,10 @@ function isDashboardDateMatch(data, dateStr) {
 }
 
 function clearDashboardCacheForDate(dateStr) {
-  try { localStorage.removeItem(DASHBOARD_CACHE_PREFIX + dateStr); } catch (e) {}
+  try {
+    localStorage.removeItem(DASHBOARD_CACHE_PREFIX + dateStr);
+    localStorage.removeItem(DASHBOARD_OLD_CACHE_PREFIX + dateStr);
+  } catch (e) {}
 }
 
 function readDashboardLocalCache(dateStr, raw) {
@@ -1656,6 +1664,7 @@ function persistCurrentDashboardCache() {
 }
 
 function prefetchAdjacentDashboardDates(dateStr) {
+  if (!DASHBOARD_PREFETCH_ADJACENT_DATES) return;
   if (dashboardSearchQuery) return;
   [-1, 1].forEach(function(offset) {
     prefetchDashboardDate(addDaysToDateStr(dateStr, offset));
@@ -1989,6 +1998,75 @@ function cloneDashboardListItem(item) {
   return copy;
 }
 
+function resetDashboardRenderedSections() {
+  dashboardRenderedSections = {};
+  dashboardViewSeq++;
+}
+
+function getDashboardSectionConfig(tab) {
+  var view = dashboardCurrentView || {};
+  var options = {};
+  var type = tab;
+  var items = [];
+  if (view.globalSearch) options.globalSearch = true;
+
+  if (tab === 'checkout') {
+    items = view.checkout || [];
+    type = 'checkout';
+  } else if (tab === 'checkin') {
+    items = view.checkin || [];
+    type = 'checkin';
+  } else if (tab === 'all') {
+    items = view.all || [];
+    type = 'all';
+  } else if (tab === 'attention') {
+    items = view.attention || [];
+    type = 'attention';
+    options.emptyText = view.isSearching ? '검색된 확인필요 일정이 없습니다' : '확인필요 일정이 없습니다';
+  } else {
+    return null;
+  }
+  return { items: items, type: type, options: options };
+}
+
+function renderDashboardSection(tab, loadPhotos) {
+  var section = document.getElementById(tab + 'Section');
+  var config = getDashboardSectionConfig(tab);
+  if (!section || !config) return false;
+  if (dashboardRenderedSections[tab]) {
+    if (loadPhotos) scheduleDashboardPhotoLoad(config.items);
+    return true;
+  }
+  renderList(tab + 'Section', config.items, config.type, !!(dashboardCurrentView && dashboardCurrentView.isSearching), config.options);
+  dashboardRenderedSections[tab] = true;
+  if (loadPhotos) scheduleDashboardPhotoLoad(config.items);
+  return true;
+}
+
+function renderActiveDashboardSection() {
+  renderDashboardSection(activeDashboardTab || 'checkout', true);
+}
+
+function getDashboardActiveSectionItems(tab) {
+  var config = getDashboardSectionConfig(tab || activeDashboardTab || 'checkout');
+  return config ? config.items : [];
+}
+
+function scheduleDashboardSectionWarmup() {
+  var seq = dashboardViewSeq;
+  var run = function() {
+    if (seq !== dashboardViewSeq) return;
+    ['checkout', 'checkin', 'all', 'attention'].forEach(function(tab) {
+      if (tab !== activeDashboardTab) renderDashboardSection(tab, false);
+    });
+  };
+  if (window.requestIdleCallback) {
+    window.requestIdleCallback(run, { timeout: 1500 });
+  } else {
+    setTimeout(run, 350);
+  }
+}
+
 function renderDashboard(data, expectedDate) {
   if (dashboardSearchQuery && dashboardGlobalSearchData) {
     renderDashboardGlobalSearch(dashboardGlobalSearchData);
@@ -2010,18 +2088,24 @@ function renderDashboard(data, expectedDate) {
   document.getElementById('tabAll').textContent = filteredCheckout.length + filteredCheckin.length;
   document.getElementById('tabAttention').textContent = attention.length;
 
-  renderList('checkoutSection', filteredCheckout, 'checkout', isSearching);
-  renderList('checkinSection', filteredCheckin, 'checkin', isSearching);
-
   var all = filteredCheckout.map(function(c) { c._type = 'checkout'; return c; })
     .concat(filteredCheckin.map(function(c) { c._type = 'checkin'; return c; }));
   all.sort(compareDashboardGlobalSearchItems);
-  renderList('allSection', all, 'all', isSearching);
-  renderList('attentionSection', attention, 'attention', isSearching, { emptyText: isSearching ? '검색된 확인필요 일정이 없습니다' : '확인필요 일정이 없습니다' });
+
+  dashboardCurrentView = {
+    mode: 'date',
+    isSearching: isSearching,
+    globalSearch: false,
+    checkout: filteredCheckout,
+    checkin: filteredCheckin,
+    all: all,
+    attention: attention
+  };
+  resetDashboardRenderedSections();
 
   switchTab(activeDashboardTab || 'checkout');
   prefetchAdjacentDashboardDates(data.date || expectedDate || formatDate(currentDate));
-  scheduleDashboardPhotoLoad(checkout.concat(checkin));
+  scheduleDashboardSectionWarmup();
   return true;
 }
 
@@ -2040,16 +2124,23 @@ function renderDashboardGlobalSearch(data) {
   var attention = buildDashboardAttentionItems(checkout, checkin);
   document.getElementById('tabAttention').textContent = attention.length;
   renderBillingCompanyDatalist(data);
-  renderList('checkoutSection', [], 'checkout', true, { globalSearch: true });
-  renderList('checkinSection', [], 'checkin', true, { globalSearch: true });
-  renderList('allSection', all, 'all', true, { globalSearch: true });
-  renderList('attentionSection', attention, 'attention', true, { globalSearch: true, emptyText: '검색된 확인필요 일정이 없습니다' });
+
+  dashboardCurrentView = {
+    mode: 'search',
+    isSearching: true,
+    globalSearch: true,
+    checkout: checkout,
+    checkin: checkin,
+    all: all,
+    attention: attention
+  };
+  resetDashboardRenderedSections();
 
   var total = Number(data.total || all.length);
   var suffix = total > all.length ? ' · 상위 ' + all.length + '건 표시' : ' · ' + all.length + '건';
   setDashboardSearchStatus('전체 예약에서 검색 중: "' + dashboardSearchQuery + '"' + suffix);
   switchTab('all');
-  scheduleDashboardPhotoLoad(all);
+  scheduleDashboardSectionWarmup();
 }
 
 function toggleDashboardSearchGroup(groupId) {
@@ -2419,6 +2510,7 @@ function switchTab(tab) {
   });
   document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('visible'); });
   document.getElementById(tab + 'Section').classList.add('visible');
+  renderActiveDashboardSection();
 }
 
 function toggleDetail(id) {
@@ -2495,7 +2587,7 @@ function scheduleDashboardPhotoLoad(items) {
         tids.forEach(function(tid) { delete dashboardPhotoLoading[tid]; });
         updatePhotoPanels();
       });
-  }, 80);
+  }, 450);
 }
 
 function uniquePhotoTradeIds(items) {
@@ -3648,7 +3740,6 @@ function confirmAddEquip() {
   });
 }
 
-window.addEventListener('load', function() { loadEquipList(); });
 </script>
 <div id="addEquipModal" class="modal-overlay" onclick="if(event.target===this)closeAddEquipModal()">
   <div class="modal-box">

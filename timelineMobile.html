@@ -433,6 +433,8 @@ var timelineRequestSeq = 0;
 var timelineAbortController = null;
 var timelineLastResponseKey = "";
 var timelineRangeReloadTimer = null;
+var TIMELINE_CACHE_PREFIX = "timelineCache_v2_";
+var TIMELINE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 // ━━━ 초기화 ━━━
 function init() {
@@ -499,6 +501,49 @@ function getTimelineFetchRange() {
   return { from: dateInputStr(bufferedStart), to: dateInputStr(bufferedEnd) };
 }
 
+function readTimelineLocalCache(requestKey) {
+  try {
+    var raw = localStorage.getItem(TIMELINE_CACHE_PREFIX + requestKey);
+    if (!raw) return null;
+    var entry = JSON.parse(raw);
+    if (!entry || !entry.data) return null;
+    if (Date.now() - Number(entry.savedAt || 0) > TIMELINE_CACHE_TTL_MS) {
+      localStorage.removeItem(TIMELINE_CACHE_PREFIX + requestKey);
+      return null;
+    }
+    return entry.data;
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeTimelineLocalCache(requestKey, data) {
+  try {
+    if (!requestKey || !data) return;
+    localStorage.setItem(TIMELINE_CACHE_PREFIX + requestKey, JSON.stringify({
+      savedAt: Date.now(),
+      data: data
+    }));
+    pruneTimelineLocalCache(requestKey);
+  } catch (e) {}
+}
+
+function pruneTimelineLocalCache(keepKey) {
+  try {
+    Object.keys(localStorage).forEach(function(key) {
+      if (key.indexOf(TIMELINE_CACHE_PREFIX) !== 0) return;
+      if (key !== TIMELINE_CACHE_PREFIX + keepKey) localStorage.removeItem(key);
+    });
+  } catch (e) {}
+}
+
+function renderTimelineData(data) {
+  data = data || {};
+  allGroups = data.groups || [];
+  allItems = data.items || [];
+  applyFilters();
+}
+
 function loadData(forceFresh, opts) {
   opts = opts || {};
   var requestId = ++timelineRequestSeq;
@@ -514,6 +559,12 @@ function loadData(forceFresh, opts) {
     + "&to=" + encodeURIComponent(range.to)
     + (forceFresh ? "&nocache=1" : "");
 
+  var cachedData = readTimelineLocalCache(requestKey);
+  if (cachedData && !forceFresh) {
+    renderTimelineData(cachedData);
+    updateRefreshInfo();
+    opts.silent = true;
+  }
   if (!opts.silent) showLoading(true);
   return fetch(url, fetchOptions)
     .then(function(r) { return r.text(); })
@@ -527,9 +578,8 @@ function loadData(forceFresh, opts) {
       }
       var data = JSON.parse(text);
       timelineLastResponseKey = responseKey;
-      allGroups = data.groups || [];
-      allItems = data.items || [];
-      applyFilters();
+      writeTimelineLocalCache(requestKey, data);
+      renderTimelineData(data);
       if (!opts.silent) showLoading(false);
       updateRefreshInfo();
     })

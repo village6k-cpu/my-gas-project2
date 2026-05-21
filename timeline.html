@@ -481,6 +481,8 @@
   var timeline, allGroups = [], allItems = [];
   var currentFilter = 'all';
   var hiddenStatuses = {};
+  var TIMELINE_CACHE_PREFIX = 'timelineCache_v2_';
+  var TIMELINE_CACHE_TTL_MS = 5 * 60 * 1000;
 
   var STATUS_COLORS = {
     '대기':     '#3B82F6',
@@ -685,21 +687,94 @@
     window.addEventListener('pointercancel', onUp, true);
   }
 
+  function timelineDateStr(d) {
+    return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+  }
+
+  function getTimelineFetchRange() {
+    var fromVal = document.getElementById('dateFrom').value;
+    var toVal = document.getElementById('dateTo').value;
+    var start = fromVal ? new Date(fromVal + 'T00:00:00') : null;
+    var end = toVal ? new Date(toVal + 'T23:59:59') : null;
+    if ((!start || !end) && timeline) {
+      var win = timeline.getWindow();
+      if (!start) start = win.start;
+      if (!end) end = win.end;
+    }
+    if (!start) start = new Date(Date.now() - 1000*60*60*24*1);
+    if (!end) end = new Date(Date.now() + 1000*60*60*24*14);
+    if (end < start) {
+      var tmp = start;
+      start = end;
+      end = tmp;
+    }
+    var bufferedStart = new Date(start);
+    bufferedStart.setDate(bufferedStart.getDate() - 3);
+    var bufferedEnd = new Date(end);
+    bufferedEnd.setDate(bufferedEnd.getDate() + 7);
+    return { from: timelineDateStr(bufferedStart), to: timelineDateStr(bufferedEnd) };
+  }
+
+  function readTimelineLocalCache(requestKey) {
+    try {
+      var raw = localStorage.getItem(TIMELINE_CACHE_PREFIX + requestKey);
+      if (!raw) return null;
+      var entry = JSON.parse(raw);
+      if (!entry || !entry.data) return null;
+      if (Date.now() - Number(entry.savedAt || 0) > TIMELINE_CACHE_TTL_MS) {
+        localStorage.removeItem(TIMELINE_CACHE_PREFIX + requestKey);
+        return null;
+      }
+      return entry.data;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeTimelineLocalCache(requestKey, data) {
+    try {
+      if (!requestKey || !data) return;
+      localStorage.setItem(TIMELINE_CACHE_PREFIX + requestKey, JSON.stringify({
+        savedAt: Date.now(),
+        data: data
+      }));
+    } catch (e) {}
+  }
+
+  function renderTimelineData(data) {
+    data = data || {};
+    allGroups = data.groups || [];
+    allItems  = data.items  || [];
+    applyFilters();
+  }
+
+  function handleTimelineLoadSuccess(requestKey) {
+    return function(data) {
+      writeTimelineLocalCache(requestKey, data);
+      renderTimelineData(data);
+      showLoading(false);
+    };
+  }
+
+  function handleTimelineLoadFailure(err) {
+    showLoading(false);
+    showToast('데이터 로드 실패');
+  }
+
   // ── 데이터 로드 ──
-  function loadData() {
-    showLoading(true);
+  function loadData(forceFresh) {
+    var range = getTimelineFetchRange();
+    var requestKey = range.from + '_' + range.to;
+    var cachedData = readTimelineLocalCache(requestKey);
+    if (cachedData && !forceFresh) {
+      renderTimelineData(cachedData);
+    } else {
+      showLoading(true);
+    }
     google.script.run
-      .withSuccessHandler(function(data) {
-        allGroups = data.groups || [];
-        allItems  = data.items  || [];
-        applyFilters();
-        showLoading(false);
-      })
-      .withFailureHandler(function(err) {
-        showLoading(false);
-        showToast('데이터 로드 실패');
-      })
-      .getTimelineData();
+      .withSuccessHandler(handleTimelineLoadSuccess(requestKey))
+      .withFailureHandler(handleTimelineLoadFailure)
+      .getTimelineData({ from: range.from, to: range.to, skipCache: !!forceFresh });
   }
 
   // ── 필터 적용 ──

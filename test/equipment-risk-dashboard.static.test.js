@@ -13,8 +13,6 @@ const api = read('sheetAPI.js');
   "var EQUIPMENT_RISK_RULE_SHEET_NAME = '장비주의사항';",
   'function getEquipmentRiskRules_()',
   'function matchEquipmentRiskRulesForEquipments_(equipments, rules)',
-  'function buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet)',
-  'riskWarnings: attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet), riskRules)',
   'evaluateEquipmentRiskGuidanceStates_(result);'
 ].forEach((contract) => {
   assert.ok(
@@ -22,6 +20,18 @@ const api = read('sheetAPI.js');
     `checkAvailability.js must include contract: ${contract}`
   );
 });
+
+assert.match(
+  backend,
+  /function buildDashboardEquipmentRiskCandidates_\(displayEquip,\s*setSheet,\s*setComponentLookup\)/,
+  'risk candidate builder must accept the optional dashboard set component lookup'
+);
+
+assert.match(
+  backend,
+  /riskWarnings:\s*attachEquipmentRiskWarnings_\(buildDashboardEquipmentRiskCandidates_\(displayEquip,\s*setSheet,\s*riskCandidateLookup\),\s*riskRules\)/,
+  'dashboard risk warnings must use the prebuilt set component lookup'
+);
 
 const gasContext = { console, Logger: { log() {} } };
 vm.createContext(gasContext);
