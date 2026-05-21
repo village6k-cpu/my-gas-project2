@@ -4003,6 +4003,35 @@ function applyDashboardAddRowFormats_(sched, tid, insertRow, rowCount, sourceRow
   }
 }
 
+function dashboardAddedItemsFromRows_(rows) {
+  rows = rows || [];
+  var setNamesWithComponents = {};
+  rows.forEach(function(row) {
+    var setName = String((row && row[2]) || "").trim();
+    var name = String((row && row[3]) || "").trim();
+    if (setName && name && setName !== name) setNamesWithComponents[setName] = true;
+  });
+
+  return rows.map(function(row) {
+    var setName = String((row && row[2]) || "").trim();
+    var name = String((row && row[3]) || "").trim();
+    var isHeader = !setName || setName === name;
+    var qty = Number((row && row[4]) || 1) || 1;
+    return {
+      scheduleId: String((row && row[0]) || "").trim(),
+      name: name,
+      qty: qty,
+      quantity: qty,
+      setName: setName,
+      isHeader: isHeader,
+      isSet: isHeader && !!setNamesWithComponents[name || setName],
+      isComponent: !!setName && !isHeader,
+      checkedCheckout: false,
+      checkedCheckin: false
+    };
+  });
+}
+
 function dashboardAddEquipments(tid, entries, options) {
   tid = String(tid || "").trim();
   var addEntries = normalizeDashboardAddEntries_(entries);
@@ -4139,7 +4168,8 @@ function dashboardAddEquipments(tid, entries, options) {
         availabilityChecked: true,
         addedEquipments: addEntries.length,
         addedRows: newRows.length,
-        addedItems: addEntries.map(function(entry) { return { name: entry.name, quantity: entry.qty }; }),
+        addedItems: addEntries.map(function(entry) { return { name: entry.name, qty: entry.qty, quantity: entry.qty }; }),
+        requestedItems: addEntries.map(function(entry) { return { name: entry.name, qty: entry.qty, quantity: entry.qty }; }),
         equipmentNames: addEntries.map(function(entry) { return entry.name; }),
         customerName: 예약자명,
         warnings: availability.warnings || [],
@@ -4161,7 +4191,8 @@ function dashboardAddEquipments(tid, entries, options) {
       availabilityChecked: true,
       addedEquipments: addEntries.length,
       addedRows: newRows.length,
-      addedItems: addEntries.map(function(entry) { return { name: entry.name, quantity: entry.qty }; }),
+      addedItems: dashboardAddedItemsFromRows_(newRows),
+      requestedItems: addEntries.map(function(entry) { return { name: entry.name, qty: entry.qty, quantity: entry.qty }; }),
       equipmentNames: addEntries.map(function(entry) { return entry.name; }),
       customerName: 예약자명,
       warnings: availability.warnings || [],
@@ -4181,7 +4212,7 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
   var payload = {
     transactionId: String(tid || '').trim(),
     customerName: addResult.customerName || '',
-    items: addResult.addedItems || [],
+    items: addResult.requestedItems || addResult.addedItems || [],
     settlementStatus: options.settlementStatus || 'pending',
     source: 'schedule_button',
     actorName: options.actorName || '오늘 일정 웹앱'
@@ -4453,22 +4484,7 @@ function dashboardAddEquipment(tid, equipName, qty) {
 	      success: true,
 	      availabilityChecked: true,
 	      addedRows: newRows.length,
-	      addedItems: newRows.map(function(row) {
-	        var setName = String(row[2] || "").trim();
-	        var name = String(row[3] || "").trim();
-	        var isHeader = !setName || setName === name;
-	        return {
-	          scheduleId: String(row[0] || "").trim(),
-	          name: name,
-	          qty: Number(row[4]) || 1,
-	          setName: setName,
-	          isHeader: isHeader,
-	          isSet: isHeader && components.length > 0,
-	          isComponent: !!setName && !isHeader,
-	          checkedCheckout: false,
-	          checkedCheckin: false
-	        };
-	      }),
+	      addedItems: dashboardAddedItemsFromRows_(newRows),
 	      isSet: components.length > 0,
 	      equipName: equipName,
 	      message: "가용 확인 완료 후 추가"

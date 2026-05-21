@@ -9,8 +9,26 @@ const backend = read('checkAvailability.js');
 
 assert.match(
   backend,
-  /addedItems:\s*newRows\.map/,
-  'dashboardAddEquipment(s) must return addedItems so the UI can update without a full dashboard reload'
+  /function dashboardAddedItemsFromRows_\([\s\S]*scheduleId:[\s\S]*quantity:/,
+  'dashboard add responses must include scheduleId and quantity-compatible fields'
+);
+
+const batchAddBody = backend.match(/function dashboardAddEquipments\([\s\S]*?\n}\n\nfunction dashboardRecordOnsiteAddon/);
+assert.ok(batchAddBody, 'dashboardAddEquipments must exist before dashboardRecordOnsiteAddon');
+assert.match(
+  batchAddBody[0],
+  /addedItems:\s*dashboardAddedItemsFromRows_\(newRows\)/,
+  'dashboardAddEquipments must return actual added row details so the UI does not need a slow full dashboard refresh'
+);
+assert.match(
+  batchAddBody[0],
+  /requestedItems:\s*addEntries\.map/,
+  'dashboardAddEquipments must keep requestedItems separate for onsite-addon logging'
+);
+assert.match(
+  backend,
+  /items:\s*addResult\.requestedItems\s*\|\|\s*addResult\.addedItems/,
+  'dashboardRecordOnsiteAddon must not use expanded component rows as the onsite-addon request payload'
 );
 
 assert.match(
@@ -76,6 +94,30 @@ assert.match(
     addBody[0],
     /applyDashboardEquipmentMutation\(tid,\s*res,\s*\{[\s\S]*operation:\s*'add'/,
     `${file} confirmAddEquip must apply a realtime add mutation`
+  );
+
+  const applyBody = html.match(/function applyDashboardEquipmentMutation\([\s\S]*?\n}\n\nfunction showDashboardToast/);
+  assert.ok(applyBody, `${file} must expose applyDashboardEquipmentMutation before showDashboardToast`);
+  assert.doesNotMatch(
+    applyBody[0],
+    /queueDashboardSilentRefresh/,
+    `${file} equipment mutation must not enqueue the slow full dashboard refresh after every edit`
+  );
+
+  const renderMutationBody = html.match(/function renderDashboardEquipmentMutation\([\s\S]*?\n}\n\nfunction queueDashboardSilentRefresh/);
+  assert.ok(renderMutationBody, `${file} must expose renderDashboardEquipmentMutation before queueDashboardSilentRefresh`);
+  assert.doesNotMatch(
+    renderMutationBody[0],
+    /scheduleDashboardSectionWarmup|clearDashboardCacheForDate/,
+    `${file} mutation render must only update the active view without cache churn or hidden-section warmup`
+  );
+
+  const silentRefreshBody = html.match(/function queueDashboardSilentRefresh\([\s\S]*?\n}\n\nfunction applyDashboardEquipmentMutation/);
+  assert.ok(silentRefreshBody, `${file} must expose queueDashboardSilentRefresh before applyDashboardEquipmentMutation`);
+  assert.doesNotMatch(
+    silentRefreshBody[0],
+    /renderDashboard\(/,
+    `${file} silent refresh must not force a second full dashboard render`
   );
 });
 

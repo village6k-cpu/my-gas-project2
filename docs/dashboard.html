@@ -3605,7 +3605,7 @@ function normalizeDashboardEquipmentItem(eq) {
   return {
     scheduleId: String(eq.scheduleId || '').trim(),
     name: name,
-    qty: Number(eq.qty) || 1,
+    qty: Number(eq.qty || eq.quantity) || 1,
     setName: setName,
     isHeader: isHeader,
     isSet: !!eq.isSet,
@@ -3686,14 +3686,12 @@ function syncDashboardEquipmentQtyUpdate(tid, res, context) {
 
 function renderDashboardEquipmentMutation() {
   if (!dashboardData && !dashboardGlobalSearchData) return false;
-  clearDashboardCacheForDate(formatDate(currentDate));
   persistCurrentDashboardCache();
   if (dashboardSearchQuery && dashboardGlobalSearchData) {
     renderDashboardGlobalSearch(dashboardGlobalSearchData);
   } else {
     resetDashboardRenderedSections();
     renderActiveDashboardSection();
-    scheduleDashboardSectionWarmup();
   }
   return true;
 }
@@ -3707,11 +3705,10 @@ function queueDashboardSilentRefresh(delayMs) {
       .then(function(data) {
         if (!isDashboardDateMatch(data, dateStr)) return;
         dashboardData = data;
-        renderDashboard(data, dateStr);
         writeDashboardLocalCache(dateStr, data);
       })
       .catch(function() {});
-  }, delayMs || 900);
+  }, delayMs || 30000);
 }
 
 function applyDashboardEquipmentMutation(tid, res, context) {
@@ -3721,7 +3718,6 @@ function applyDashboardEquipmentMutation(tid, res, context) {
   if (context.operation === 'remove') changed = syncDashboardEquipmentRemoval(tid, res, context);
   if (context.operation === 'qty') changed = syncDashboardEquipmentQtyUpdate(tid, res, context);
   if (changed) renderDashboardEquipmentMutation();
-  queueDashboardSilentRefresh(changed ? 1200 : 0);
   return changed;
 }
 
