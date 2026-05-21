@@ -37,7 +37,35 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
     /function renderTimelineData\(data/,
     `${file} must centralize timeline response parsing so cache and network paths match`
   );
+
+  assert.doesNotMatch(
+    html,
+    /(\/\/ ── Init ──|\/\/ ━━━ 시작 ━━━)[\s\S]{0,180}loadEquip(?:Names|List)\(\);/,
+    `${file} must not load the full equipment list during timeline startup`
+  );
+
+  assert.match(
+    html,
+    /function openAddModal\([\s\S]{0,900}loadEquip(?:Names|List)\(\)\.then/,
+    `${file} must load the equipment list lazily when the add-equipment modal opens`
+  );
 });
+
+{
+  const html = read('docs/timeline.html');
+
+  assert.match(
+    html,
+    /function loadEquipNames\(\)[\s\S]{0,220}return Promise\.resolve\(equipNames\)/,
+    'docs/timeline.html loadEquipNames must return a resolved promise when the equipment list is already cached'
+  );
+
+  assert.match(
+    html,
+    /return fetch\(API_URL \+ "\?key=village2026&action=read&sheet="[\s\S]{0,900}return equipNames;/,
+    'docs/timeline.html loadEquipNames must return the fetch promise for lazy modal setup'
+  );
+}
 
 ['timeline.html'].forEach((file) => {
   const html = read(file);
