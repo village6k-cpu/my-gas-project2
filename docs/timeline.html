@@ -1801,7 +1801,8 @@ window.closeDetail = closeDetail;
 var equipNames = {}; // 장비/세트명 → true (유효 목록)
 
 function loadEquipNames() {
-  fetch(API_URL + "?key=village2026&action=read&sheet=" + encodeURIComponent("목록") + "&range=A:A")
+  if (Object.keys(equipNames).length) return Promise.resolve(equipNames);
+  return fetch(API_URL + "?key=village2026&action=read&sheet=" + encodeURIComponent("목록") + "&range=A:A")
     .then(function(r) { return r.json(); })
     .then(function(res) {
       var unique = {};
@@ -1817,8 +1818,9 @@ function loadEquipNames() {
           return '<option value="' + escHtml(name) + '"></option>';
         }).join("");
       }
+      return equipNames;
     })
-    .catch(function() {});
+    .catch(function() { return equipNames; });
 }
 
 // ── 커스텀 자동완성 드롭다운 ──
@@ -2193,6 +2195,12 @@ function openAddModal(fromDate, toDate) {
   document.getElementById("bookingList").innerHTML = "";
   setScheduleAddBusy(false);
   document.getElementById("addModal").style.display = "flex";
+  loadEquipNames().then(function() {
+    setTimeout(function() {
+      var input = document.querySelector("#addEquipRows .schedule-equip-name");
+      if (input) input.focus();
+    }, 50);
+  });
 }
 
 function openAddModalForBooking(item) {
@@ -2469,7 +2477,6 @@ document.getElementById("dateTo").addEventListener("change", function() {
 // ── Init ──
 setupScrollSync();
 loadData();
-loadEquipNames();
 startAutoRefresh();
 
 // After first render, scroll to today
