@@ -579,6 +579,8 @@ function getDashboardData(targetDate, skipCache) {
     var isContractReturned = String(cust.contractStatus || '').trim() === '반납완료';
     var setupDone = props['setupDone_' + tid] === '1';
     var returnDone = props['returnDone_' + tid] === '1' || isContractReturned;
+    var setupDoneAt = props['setupDoneAt_' + tid] || '';
+    var returnDoneAt = props['returnDoneAt_' + tid] || '';
 
     var item = {
       tradeId: tid,
@@ -589,6 +591,8 @@ function getDashboardData(targetDate, skipCache) {
       contractStatus: cust.contractStatus || '',
       setupDone: setupDone,
       returnDone: returnDone,
+      setupDoneAt: setupDoneAt,
+      returnDoneAt: returnDoneAt,
       contractUrl: extra.contractUrl || '',
       paymentMethod: extra.paymentMethod || '',
       paymentSource: extra.paymentSource || '',
@@ -806,6 +810,8 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRu
     contractStatus: cust.contractStatus || '',
     setupDone: props['setupDone_' + tid] === '1',
     returnDone: props['returnDone_' + tid] === '1' || isContractReturned,
+    setupDoneAt: props['setupDoneAt_' + tid] || '',
+    returnDoneAt: props['returnDoneAt_' + tid] || '',
     contractUrl: extra.contractUrl || '',
     paymentMethod: extra.paymentMethod || '',
     paymentSource: extra.paymentSource || '',
@@ -1668,13 +1674,22 @@ function invalidateDashboardCache() {
  */
 function toggleSetupDone(tid, done) {
   if (!tid) return { error: "tid 필요" };
-  var key = 'setupDone_' + String(tid).trim();
+  tid = String(tid).trim();
+  var key = 'setupDone_' + tid;
+  var atKey = 'setupDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
-  if (isDone) props.setProperty(key, '1');
-  else props.deleteProperty(key);
+  var doneAt = "";
+  if (isDone) {
+    doneAt = formatDashboardDoneAt_(new Date());
+    props.setProperty(key, '1');
+    props.setProperty(atKey, doneAt);
+  } else {
+    props.deleteProperty(key);
+    props.deleteProperty(atKey);
+  }
   invalidateDashboardCache();
-  return { tid: tid, setupDone: isDone };
+  return { tid: tid, setupDone: isDone, setupDoneAt: doneAt, doneAt: doneAt };
 }
 
 /**
@@ -1684,6 +1699,7 @@ function toggleReturnDone(tid, done) {
   if (!tid) return { error: "tid 필요" };
   tid = String(tid).trim();
   var key = 'returnDone_' + tid;
+  var atKey = 'returnDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
 
@@ -1694,12 +1710,21 @@ function toggleReturnDone(tid, done) {
     var contractResult = setDashboardReturnContractStatus_(tid, isDone, props);
     if (contractResult && contractResult.error) return contractResult;
 
-    if (isDone) props.setProperty(key, '1');
-    else props.deleteProperty(key);
+    var doneAt = "";
+    if (isDone) {
+      doneAt = formatDashboardDoneAt_(new Date());
+      props.setProperty(key, '1');
+      props.setProperty(atKey, doneAt);
+    } else {
+      props.deleteProperty(key);
+      props.deleteProperty(atKey);
+    }
     invalidateDashboardCache();
     return {
       tid: tid,
       returnDone: isDone,
+      returnDoneAt: doneAt,
+      doneAt: doneAt,
       contractStatus: contractResult.status,
       previousContractStatus: contractResult.previousStatus || '',
       row: contractResult.row
@@ -1707,6 +1732,10 @@ function toggleReturnDone(tid, done) {
   } finally {
     try { lock.releaseLock(); } catch (releaseErr) {}
   }
+}
+
+function formatDashboardDoneAt_(date) {
+  return Utilities.formatDate(date || new Date(), "Asia/Seoul", "yyyy-MM-dd HH:mm:ss");
 }
 
 function setDashboardReturnContractStatus_(tid, isDone, props) {

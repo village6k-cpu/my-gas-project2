@@ -556,18 +556,20 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
+    min-width: 64px;
     height: 28px;
+    padding: 0 8px;
     border-radius: var(--radius);
     border: 1.5px solid var(--border);
     background: var(--surface);
     cursor: pointer;
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 700;
     color: var(--text-muted);
     margin-right: 8px;
     transition: all 0.15s;
     flex-shrink: 0;
+    white-space: nowrap;
   }
   .task-toggle:hover { border-color: var(--green-text); color: var(--green-text); }
   .task-toggle.checked {
@@ -2356,14 +2358,14 @@ function renderList(containerId, items, type, isSearching, options) {
       var taskAction = (cardType === 'checkout' ? 'toggleSetup' : 'toggleReturn');
       var doneCls = taskDone ? ' task-done' : '';
       var toggleCls = taskDone ? 'task-toggle checked' : 'task-toggle';
-      var toggleIcon = taskDone ? '✓' : '';
+      var toggleLabel = taskToggleLabel(cardType, taskDone, item);
       var attentionReasons = getDashboardAttentionReasons(item);
       html += '<div class="schedule-card type-' + cardType + (attentionReasons.length ? ' has-attention' : '') + doneCls + '" data-tid="' + escHtml(item.tradeId) + '" data-cardtype="' + cardType + '" onclick="toggleDetail(\'' + cardId + '\')">';
       html += '<div class="card-header">';
       html += '<div style="display:flex;align-items:flex-start;gap:0;">';
       // 반출/반납 모두 토글 노출
       if (cardType === 'checkout' || cardType === 'checkin') {
-        html += '<button class="' + toggleCls + '" onclick="event.stopPropagation();toggleTask(this,\'' + escHtml(item.tradeId) + '\',\'' + taskAction + '\')">' + toggleIcon + '</button>';
+        html += '<button class="' + toggleCls + '" data-task-action="' + taskAction + '" onclick="event.stopPropagation();toggleTask(this,\'' + escHtml(item.tradeId) + '\',\'' + taskAction + '\')">' + escHtml(toggleLabel) + '</button>';
       }
       html += '<div>';
       html += '<div class="customer-name">' + escHtml(item.name) + '</div>';
@@ -2815,36 +2817,70 @@ function toggleTask(btn, tid, action) {
   var nowDone = !btn.classList.contains('checked');
   // Optimistic UI — 토글 버튼이 속한 카드만 업데이트 (반출과 반납 따로 관리)
   btn.classList.toggle('checked', nowDone);
-  btn.textContent = nowDone ? '✓' : '';
+  setTaskToggleLabel(btn, action, nowDone, nowDone ? '' : '');
   var card = btn.closest('.schedule-card');
   if (card) card.classList.toggle('task-done', nowDone);
-  syncTaskDoneInMemory(tid, action, nowDone);
+  syncTaskDoneInMemory(tid, action, nowDone, '');
 
   fetch(API_URL + '?key=village2026&action=' + action + '&tid=' + encodeURIComponent(tid) + '&done=' + (nowDone ? '1' : '0'))
     .then(function(r) { return r.json(); })
     .then(function(res) {
       if (res && res.error) throw new Error(res.error);
+      var doneAt = res && (res.doneAt || res.setupDoneAt || res.returnDoneAt || '');
+      setTaskToggleLabel(btn, action, nowDone, doneAt);
+      syncTaskDoneInMemory(tid, action, nowDone, doneAt);
       if (action === 'toggleReturn' && res && res.contractStatus) {
         syncContractStatusInMemory(tid, res.contractStatus);
       }
     })
     .catch(function() {
       btn.classList.toggle('checked', !nowDone);
-      btn.textContent = !nowDone ? '✓' : '';
+      setTaskToggleLabel(btn, action, !nowDone, '');
       if (card) card.classList.toggle('task-done', !nowDone);
-      syncTaskDoneInMemory(tid, action, !nowDone);
+      syncTaskDoneInMemory(tid, action, !nowDone, '');
     });
 }
 
-function syncTaskDoneInMemory(tid, action, done) {
+function syncTaskDoneInMemory(tid, action, done, doneAt) {
   dashboardItemsForTrade(tid).forEach(function(item) {
-    if (action === 'toggleSetup') item.setupDone = done;
+    if (action === 'toggleSetup') {
+      item.setupDone = done;
+      item.setupDoneAt = done ? (doneAt || item.setupDoneAt || '') : '';
+    }
     if (action === 'toggleReturn') {
       item.returnDone = done;
+      item.returnDoneAt = done ? (doneAt || item.returnDoneAt || '') : '';
       item.contractStatus = done ? '반납완료' : '반출';
     }
   });
   persistCurrentDashboardCache();
+}
+
+function taskToggleLabel(cardType, done, item) {
+  var isCheckin = cardType === 'checkin';
+  var prefix = isCheckin ? '반납' : '반출';
+  if (!done) return prefix + '완료';
+  var doneAt = isCheckin ? (item && item.returnDoneAt) : (item && item.setupDoneAt);
+  var time = dashboardDoneTime(doneAt);
+  return time ? prefix + ' ' + time : prefix + '완료';
+}
+
+function setTaskToggleLabel(btn, action, done, doneAt) {
+  var prefix = action === 'toggleReturn' ? '반납' : '반출';
+  if (!done) {
+    btn.textContent = prefix + '완료';
+    return;
+  }
+  var time = dashboardDoneTime(doneAt);
+  btn.textContent = time ? prefix + ' ' + time : prefix + ' 저장중';
+}
+
+function dashboardDoneTime(value) {
+  var text = String(value || '').trim();
+  if (!text) return '';
+  var match = text.match(/(\d{1,2}):(\d{2})(?::\d{2})?/);
+  if (!match) return '';
+  return match[1].padStart(2, '0') + ':' + match[2];
 }
 
 function syncItemCheckInMemory(scheduleId, phase, done) {
