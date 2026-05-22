@@ -1463,8 +1463,9 @@ var dashboardSearchIndexPromise = null;
 var dashboardSearchIndexPrefetchQueued = false;
 var DASHBOARD_SEARCH_DEBOUNCE_MS = 220;
 var DASHBOARD_SEARCH_LIMIT = 40;
-var DASHBOARD_SEARCH_INDEX_LOCAL_KEY = 'dashboardSearchIndex_v4';
+var DASHBOARD_SEARCH_INDEX_LOCAL_KEY = 'dashboardSearchIndex_v5';
 var DASHBOARD_SEARCH_INDEX_LOCAL_TTL_MS = 30 * 60 * 1000;
+var DASHBOARD_SEARCH_INDEX_PACKED_COLUMNS = ['tid', 'n', 'tel', 'co', 'cs', 'st', 'od', 'ot', 'rd', 'rt', 'x'];
 var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
 var DASHBOARD_OLD_CACHE_PREFIX = 'dashCache_v3_';
 var DASHBOARD_PREFETCH_ADJACENT_DATES = false;
@@ -1998,19 +1999,44 @@ function hydrateDashboardSearchIndex() {
   } catch (e) {}
 }
 
+function expandPackedDashboardSearchIndexEntries(data) {
+  if (!data || !Array.isArray(data.entries)) return [];
+  if (!data.packed) return data.entries;
+  var columns = Array.isArray(data.columns) && data.columns.length ? data.columns : DASHBOARD_SEARCH_INDEX_PACKED_COLUMNS;
+  return data.entries.map(function(row) {
+    if (!Array.isArray(row)) return row || {};
+    var entry = {};
+    columns.forEach(function(key, index) {
+      entry[key] = row[index] || '';
+    });
+    return entry;
+  });
+}
+
+function persistedDashboardSearchIndexPayload(data) {
+  if (!data || !Array.isArray(data.entries)) return data;
+  if (data.packed) return data;
+  return {
+    builtAt: data.builtAt || '',
+    cacheVersion: data.cacheVersion || '',
+    lastRow: data.lastRow || 0,
+    entries: data.entries
+  };
+}
+
 function setDashboardSearchIndexCache(data, persist) {
   if (!data || !Array.isArray(data.entries)) return null;
   dashboardSearchIndexCache = {
     builtAt: data.builtAt || '',
     cacheVersion: data.cacheVersion || '',
     lastRow: data.lastRow || 0,
-    entries: data.entries
+    entries: expandPackedDashboardSearchIndexEntries(data)
   };
   if (persist) {
     try {
       localStorage.setItem(DASHBOARD_SEARCH_INDEX_LOCAL_KEY, JSON.stringify({
         ts: Date.now(),
-        data: dashboardSearchIndexCache
+        data: persistedDashboardSearchIndexPayload(data)
       }));
     } catch (e) {}
   }

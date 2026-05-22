@@ -1354,12 +1354,21 @@ function expandDashboardSearchSummaryEquipments_(items) {
   });
 }
 
+var DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_ = ['tid', 'n', 'tel', 'co', 'cs', 'st', 'od', 'ot', 'rd', 'rt', 'x'];
+
+function packDashboardSearchClientEntry_(entry) {
+  entry = entry || {};
+  return DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_.map(function(key) {
+    return entry[key] || '';
+  });
+}
+
 function getDashboardSearchClientIndex_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var schedSheet = ss.getSheetByName('스케줄상세');
   var contractSheet = ss.getSheetByName('계약마스터');
   if (!schedSheet || schedSheet.getLastRow() < 2) {
-    return { success: true, builtAt: '', entries: [] };
+    return { success: true, builtAt: '', packed: true, columns: DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_, entries: [] };
   }
   var index = getDashboardSearchIndex_(ss, schedSheet, contractSheet);
   return {
@@ -1367,7 +1376,9 @@ function getDashboardSearchClientIndex_() {
     builtAt: index.builtAt || '',
     cacheVersion: getDashboardSearchCacheVersion_(),
     lastRow: schedSheet.getLastRow(),
-    entries: index.entries || []
+    packed: true,
+    columns: DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_,
+    entries: (index.entries || []).map(packDashboardSearchClientEntry_)
   };
 }
 
