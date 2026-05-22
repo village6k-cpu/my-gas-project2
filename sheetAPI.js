@@ -834,6 +834,7 @@ function runFunction(funcName, params) {
     "fixSchedQuantityTextOne",
     "setupDashboardWarmerTrigger",
     "warmDashboardCache",
+    "profileDashboardData",
     "getInventoryConflicts",
     "getInventoryConflictsSlackMessage",
     "listAllTriggers",
@@ -916,6 +917,11 @@ function runFunction(funcName, params) {
         args.adminToken || args.token
       );
       return { success: !!result.ok, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "profileDashboardData") {
+      var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
+      var result = profileDashboardData(args.date || args.targetDate);
+      return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     // 일반 함수 호출 (인자 없는 함수)
     var globalFuncs = {
