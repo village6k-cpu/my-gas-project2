@@ -22,7 +22,7 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v7_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v8_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
   'global search must cache the expensive all-reservation search index'
 );
 
@@ -44,16 +44,10 @@ assert.match(
   'global search must expose the compact search index for instant browser-side results'
 );
 
-assert.match(
+assert.doesNotMatch(
   backend,
-  /eq:\s*buildDashboardSearchSummaryEquipments_\(group\.equipments\)/,
-  'global search index must include lightweight equipment summaries for instant expanded cards'
-);
-
-assert.match(
-  backend,
-  /function buildDashboardSearchSummaryEquipments_\(equipments\)[\s\S]*return\s+\[[\s\S]*eq\.scheduleId[\s\S]*eq\.name[\s\S]*eq\.qty[\s\S]*eq\.setName/,
-  'global search index equipment summaries must use compact arrays, not repeated object keys'
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*eq:\s*buildDashboardSearchSummaryEquipments_/,
+  'global search index must not ship equipment summaries while typing; opened groups load equipment details lazily'
 );
 
 assert.match(
@@ -211,8 +205,8 @@ assert.match(
 
   assert.match(
     html,
-    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v3['"]/,
-    `${file} must invalidate old verbose local dashboard search index caches`
+    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v4['"]/,
+    `${file} must invalidate old equipment-heavy local dashboard search index caches`
   );
 
   assert.match(
