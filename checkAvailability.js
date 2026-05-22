@@ -84,7 +84,7 @@ function openDashboard() {
 }
 
 var TIMELINE_CACHE_VERSION_PROP_ = 'timelineCacheVersion_v1';
-var TIMELINE_CACHE_PREFIX_ = 'timeline_v3_';
+var TIMELINE_CACHE_PREFIX_ = 'timeline_v4_';
 var TIMELINE_CACHE_CHUNK_SIZE_ = 85000;
 var TIMELINE_CACHE_MAX_CHUNKS_ = 30;
 var DASHBOARD_CACHE_CHUNK_SIZE_ = 85000;
@@ -107,8 +107,18 @@ function getTimelineData(options) {
 
   var skipCache = options.skipCache === true || options.skipCache === 1 ||
     options.skipCache === '1' || options.skipCache === 'true';
+  var compact = options.compact === true || options.compact === 1 ||
+    options.compact === '1' || options.compact === 'true' ||
+    options.slim === true || options.slim === 1 ||
+    options.slim === '1' || options.slim === 'true';
+  var includeContractUrl = options.includeContractUrl === true || options.includeContractUrl === 1 ||
+    options.includeContractUrl === '1' || options.includeContractUrl === 'true';
+  if (options.includeContractUrl === undefined || options.includeContractUrl === null || options.includeContractUrl === '') {
+    includeContractUrl = !compact;
+  }
   var cacheKey = TIMELINE_CACHE_PREFIX_ + getTimelineCacheVersion_() + '_' +
-    (fromKey || 'all') + '_' + (toKey || 'all');
+    (fromKey || 'all') + '_' + (toKey || 'all') + '_' +
+    (compact ? 'compact' : 'full') + '_' + (includeContractUrl ? 'contract' : 'nocontract');
 
   if (!skipCache) {
     var cached = getTimelineCacheText_(cacheKey);
@@ -117,12 +127,16 @@ function getTimelineData(options) {
     }
   }
 
-  var result = buildTimelineData_(fromKey, toKey);
+  var result = buildTimelineData_(fromKey, toKey, {
+    compact: compact,
+    includeContractUrl: includeContractUrl
+  });
   try { putTimelineCacheText_(cacheKey, JSON.stringify(result), 300); } catch (e2) {}
   return result;
 }
 
-function buildTimelineData_(fromKey, toKey) {
+function buildTimelineData_(fromKey, toKey, options) {
+  options = options || {};
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
@@ -265,10 +279,12 @@ function buildTimelineData_(fromKey, toKey) {
   const itemList  = [];
   var itemIdx = 0;
   var tradeExtras = {};
-  try {
-    tradeExtras = getTradeExtrasForIds_(timelineTradeIdList);
-  } catch (e) {
-    tradeExtras = {};
+  if (options.includeContractUrl !== false) {
+    try {
+      tradeExtras = getTradeExtrasForIds_(timelineTradeIdList);
+    } catch (e) {
+      tradeExtras = {};
+    }
   }
 
   entries.forEach(function(e) {
@@ -280,7 +296,7 @@ function buildTimelineData_(fromKey, toKey) {
 
     var statusClass = ['대기','반출중','반납완료','취소'].indexOf(e.상태) >= 0
       ? 'status-' + e.상태 : 'status-기타';
-    var extra = tradeExtras[String(e.거래ID || '').trim()] || {};
+    var extra = options.includeContractUrl === false ? {} : (tradeExtras[String(e.거래ID || '').trim()] || {});
 
     // 세트: 수량만큼 바 생성, 개별장비: 1개 바
     var barCount = e.isSingleItem ? 1 : (e.수량 || 1);
@@ -316,7 +332,66 @@ function buildTimelineData_(fromKey, toKey) {
     }
   });
 
+  if (options.compact) {
+    return {
+      compact: true,
+      groups: groupList.map(compactTimelineGroup_),
+      items: itemList.map(compactTimelineItem_)
+    };
+  }
+
   return { groups: groupList, items: itemList };
+}
+
+function compactTimelineGroup_(group) {
+  return {
+    i: group.id,
+    c: group.content
+  };
+}
+
+function compactTimelineItem_(item) {
+  var compact = {
+    i: item.id,
+    r: item.rowIndex,
+    g: item.group,
+    s: Date.parse(item.start),
+    e: Date.parse(item.end),
+    st: item.status,
+    cn: item.custName,
+    tid: item.거래ID,
+    set: item.세트명,
+    eq: item.장비명,
+    q: item.수량,
+    out: item.반출,
+    ret: item.반납
+  };
+
+  if (item.rowIndices && item.rowIndices.length > 1) compact.rs = item.rowIndices;
+  if (!compact.s) compact.s = item.start;
+  if (!compact.e) compact.e = item.end;
+  if (item.tel) compact.t = item.tel;
+  if (item.단가) compact.p = item.단가;
+  if (item.반출시간) compact.ot = item.반출시간;
+  if (item.반납시간) compact.rt = item.반납시간;
+  if (item.회차 && item.회차 !== 1) compact.n = item.회차;
+  if (item.재고 && item.재고 !== 1) compact.stock = item.재고;
+  if (item.세트명원본 && item.세트명원본 !== item.세트명) compact.orig = item.세트명원본;
+  if (item.contractUrl) compact.u = item.contractUrl;
+
+  return compact;
+}
+
+function getTimelineContractLink(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { success: false, error: '거래ID 필수' };
+  var extras = getTradeExtrasForIds_([tid]);
+  var extra = extras[tid] || {};
+  return {
+    success: true,
+    tradeId: tid,
+    contractUrl: extra.contractUrl || ''
+  };
 }
 
 function getTimelineStockMap_(ss) {
