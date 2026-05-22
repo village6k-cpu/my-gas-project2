@@ -46,7 +46,13 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchClientIndex_\(\)[\s\S]*packed:\s*true[\s\S]*columns:\s*DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_[\s\S]*entries:\s*\(index\.entries\s*\|\|\s*\[\]\)\.map\(packDashboardSearchClientEntry_\)/,
+  /function packDashboardSearchClientText_\(text,\s*tokenState\)[\s\S]*hasOwnProperty\.call\(tokenState\.lookup,\s*token\)[\s\S]*tokenState\.tokens\.push\(token\)/,
+  'global search client index must dedupe repeated search text tokens into a shared dictionary'
+);
+
+assert.match(
+  backend,
+  /function getDashboardSearchClientIndex_\(\)[\s\S]*packed:\s*true[\s\S]*tokenized:\s*true[\s\S]*textColumn:\s*DASHBOARD_SEARCH_CLIENT_INDEX_TEXT_COLUMN_[\s\S]*tokens:\s*tokenState\.tokens[\s\S]*packDashboardSearchClientEntry_\(entry,\s*tokenState\)/,
   'global search must expose a packed browser-side index for instant results'
 );
 
@@ -211,8 +217,8 @@ assert.match(
 
   assert.match(
     html,
-    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v5['"]/,
-    `${file} must invalidate old unpacked local dashboard search index caches`
+    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v6['"]/,
+    `${file} must invalidate old untokenized local dashboard search index caches`
   );
 
   assert.match(
@@ -223,8 +229,8 @@ assert.match(
 
   assert.match(
     html,
-    /function expandPackedDashboardSearchIndexEntries\(data\)[\s\S]*data\.packed[\s\S]*columns\.forEach[\s\S]*entry\[key\]\s*=\s*row\[index\]/,
-    `${file} must expand packed search rows before local filtering`
+    /function expandPackedDashboardSearchIndexEntries\(data\)[\s\S]*var tokens\s*=\s*Array\.isArray\(data\.tokens\)[\s\S]*data\.tokenized[\s\S]*tokens\[tokenIndex\][\s\S]*join\(' '\)/,
+    `${file} must expand tokenized packed search rows before local filtering`
   );
 
   assert.match(

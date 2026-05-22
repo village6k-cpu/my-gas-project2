@@ -1463,7 +1463,7 @@ var dashboardSearchIndexPromise = null;
 var dashboardSearchIndexPrefetchQueued = false;
 var DASHBOARD_SEARCH_DEBOUNCE_MS = 220;
 var DASHBOARD_SEARCH_LIMIT = 40;
-var DASHBOARD_SEARCH_INDEX_LOCAL_KEY = 'dashboardSearchIndex_v5';
+var DASHBOARD_SEARCH_INDEX_LOCAL_KEY = 'dashboardSearchIndex_v6';
 var DASHBOARD_SEARCH_INDEX_LOCAL_TTL_MS = 30 * 60 * 1000;
 var DASHBOARD_SEARCH_INDEX_PACKED_COLUMNS = ['tid', 'n', 'tel', 'co', 'cs', 'st', 'od', 'ot', 'rd', 'rt', 'x'];
 var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
@@ -2003,11 +2003,20 @@ function expandPackedDashboardSearchIndexEntries(data) {
   if (!data || !Array.isArray(data.entries)) return [];
   if (!data.packed) return data.entries;
   var columns = Array.isArray(data.columns) && data.columns.length ? data.columns : DASHBOARD_SEARCH_INDEX_PACKED_COLUMNS;
+  var tokens = Array.isArray(data.tokens) ? data.tokens : [];
+  var textColumn = data.textColumn || 'x';
   return data.entries.map(function(row) {
     if (!Array.isArray(row)) return row || {};
     var entry = {};
     columns.forEach(function(key, index) {
-      entry[key] = row[index] || '';
+      var value = row[index];
+      if (data.tokenized && key === textColumn && Array.isArray(value)) {
+        entry[key] = value.map(function(tokenIndex) {
+          return tokens[tokenIndex] || '';
+        }).filter(Boolean).join(' ');
+      } else {
+        entry[key] = value || '';
+      }
     });
     return entry;
   });
