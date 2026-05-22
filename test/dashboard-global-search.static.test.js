@@ -17,7 +17,25 @@ assert.match(
 assert.match(
   backend,
   /getRange\(2,\s*1,\s*schedSheet\.getLastRow\(\)\s*-\s*1,\s*12\)\.getDisplayValues\(\)/,
-  'global search must scan schedule detail rows, not selected-date dashboard data'
+  'global search index must scan schedule detail rows, not selected-date dashboard data'
+);
+
+assert.match(
+  backend,
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
+  'global search must cache the expensive all-reservation search index'
+);
+
+assert.match(
+  backend,
+  /function getDashboardSearchResultCacheKey_\(query,\s*limit\)[\s\S]*dashboard_search_result_v2_/,
+  'global search must cache repeated query results by normalized query and limit'
+);
+
+assert.match(
+  backend,
+  /function warmDashboardSearchIndex_\(\)[\s\S]*getDashboardSearchIndex_\(/,
+  'dashboard warmer must prebuild the global search index'
 );
 
 assert.match(
@@ -51,6 +69,24 @@ assert.match(
     html,
     /action=dashboardSearch/,
     `${file} must call the dashboardSearch API while searching`
+  );
+
+  assert.match(
+    html,
+    /var DASHBOARD_SEARCH_DEBOUNCE_MS\s*=\s*360;/,
+    `${file} must debounce global search enough to avoid stacked GAS calls while typing`
+  );
+
+  assert.match(
+    html,
+    /var DASHBOARD_SEARCH_LIMIT\s*=\s*40;/,
+    `${file} must cap global search payload size for fast rendering`
+  );
+
+  assert.match(
+    html,
+    /action=dashboardSearch&limit=[\s\S]{0,120}DASHBOARD_SEARCH_LIMIT/,
+    `${file} must pass the smaller search result limit to the API`
   );
 
   assert.match(
@@ -105,6 +141,12 @@ assert.match(
     html,
     /dashboardSearchCollapsedGroups\[groupId\]\s*=\s*true/,
     `${file} must collapse global search groups by default`
+  );
+
+  assert.match(
+    html,
+    /if \(options\.globalSearch && isCollapsed\) \{[\s\S]{0,180}return;/,
+    `${file} must skip rendering collapsed search cards until the group is opened`
   );
 });
 

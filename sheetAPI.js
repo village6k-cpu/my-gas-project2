@@ -205,7 +205,10 @@ function handleRequest(e) {
       case "dashboardSearch":
         return jsonResponse(getDashboardSearchData(
           params.q || params.query || postBody.q || postBody.query || "",
-          { limit: Number(params.limit || postBody.limit) || 80 }
+          {
+            limit: Number(params.limit || postBody.limit) || 80,
+            profile: params.profile || postBody.profile
+          }
         ));
 
       case "dashboardNotes":

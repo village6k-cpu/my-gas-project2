@@ -1466,6 +1466,8 @@ var dashboardSearchTimer = null;
 var dashboardSearchRequestSeq = 0;
 var dashboardSearchAbortController = null;
 var dashboardSearchCollapsedGroups = {};
+var DASHBOARD_SEARCH_DEBOUNCE_MS = 360;
+var DASHBOARD_SEARCH_LIMIT = 40;
 var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
 var DASHBOARD_OLD_CACHE_PREFIX = 'dashCache_v3_';
 var DASHBOARD_PREFETCH_ADJACENT_DATES = false;
@@ -1569,7 +1571,7 @@ function onDashboardSearchInput(value) {
   setDashboardSearchStatus('전체 예약에서 검색 중...');
   dashboardSearchTimer = setTimeout(function() {
     loadDashboardGlobalSearch(dashboardSearchQuery);
-  }, 180);
+  }, DASHBOARD_SEARCH_DEBOUNCE_MS);
 }
 
 function loadDashboardGlobalSearch(query) {
@@ -1582,7 +1584,8 @@ function loadDashboardGlobalSearch(query) {
   }
   dashboardSearchAbortController = (typeof AbortController !== 'undefined') ? new AbortController() : null;
 
-  var url = API_URL + '?key=village2026&action=dashboardSearch&q=' + encodeURIComponent(query);
+  var url = API_URL + '?key=village2026&action=dashboardSearch&limit=' + encodeURIComponent(DASHBOARD_SEARCH_LIMIT)
+    + '&q=' + encodeURIComponent(query);
   var fetchOptions = dashboardSearchAbortController ? { signal: dashboardSearchAbortController.signal } : {};
   fetch(url, fetchOptions)
     .then(function(r) { return r.json(); })
@@ -2468,6 +2471,12 @@ function renderList(containerId, items, type, isSearching, options) {
       html += '<div class="time-group-body">';
     } else {
       html += '<div class="time-group-header">' + escHtml(timeKey) + '</div>';
+    }
+
+    if (options.globalSearch && isCollapsed) {
+      if (options.globalSearch) html += '</div>';
+      html += '</div>';
+      return;
     }
 
     groups[timeKey].forEach(function(item, idx) {

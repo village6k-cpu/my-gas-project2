@@ -89,6 +89,7 @@ var TIMELINE_CACHE_CHUNK_SIZE_ = 85000;
 var TIMELINE_CACHE_MAX_CHUNKS_ = 30;
 var TIMELINE_DEFAULT_LOOKBACK_DAYS_ = 1;
 var TIMELINE_DEFAULT_LOOKAHEAD_DAYS_ = 14;
+var DASHBOARD_SEARCH_CACHE_VERSION_PROP_ = 'dashboardSearchCacheVersion_v1';
 var DASHBOARD_CACHE_CHUNK_SIZE_ = 85000;
 var DASHBOARD_CACHE_MAX_CHUNKS_ = 30;
 var EQUIPMENT_RISK_RULE_SHEET_NAME = '장비주의사항';
@@ -903,10 +904,23 @@ function getDashboardSearchData(query, options) {
   var limit = Number(options.limit) || 80;
   if (limit < 1) limit = 80;
   if (limit > 150) limit = 150;
+  var profile = options.profile === true || options.profile === 1 || options.profile === '1' || options.profile === 'true';
+  var profileStart = Date.now();
+  var profileMarks = [];
+  function markProfile_(step) {
+    if (profile) profileMarks.push({ step: step, ms: Date.now() - profileStart });
+  }
+  function attachProfile_(result) {
+    if (profile) {
+      markProfile_('return');
+      result.profile = profileMarks;
+    }
+    return result;
+  }
 
   var terms = normalizeDashboardSearchText_(query).split(' ').filter(Boolean);
   if (!terms.length) {
-    return {
+    return attachProfile_({
       query: query,
       checkout: [],
       checkin: [],
@@ -917,7 +931,15 @@ function getDashboardSearchData(query, options) {
       issueStatusOptions: getTradeIssueStatusOptions_(),
       depositStatusOptions: getTradeDepositStatusOptions_(),
       billingCompanyOptions: getTradeBillingCompanyOptions_()
-    };
+    });
+  }
+  markProfile_('terms');
+
+  var cache = CacheService.getScriptCache();
+  var resultCacheKey = getDashboardSearchResultCacheKey_(query, limit);
+  if (!profile) {
+    var cachedResult = getDashboardCacheJson_(cache, resultCacheKey);
+    if (cachedResult) return cachedResult;
   }
 
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -925,8 +947,116 @@ function getDashboardSearchData(query, options) {
   var contractSheet = ss.getSheetByName('계약마스터');
   var setSheet = ss.getSheetByName('세트마스터');
   if (!schedSheet || schedSheet.getLastRow() < 2) {
-    return { query: query, checkout: [], checkin: [], total: 0, limit: limit };
+    return attachProfile_({ query: query, checkout: [], checkin: [], total: 0, limit: limit });
   }
+  markProfile_('sheets');
+
+  var searchIndex = getDashboardSearchIndex_(ss, schedSheet, contractSheet);
+  var entries = (searchIndex && searchIndex.entries) || [];
+  markProfile_('search_index');
+
+  var props = PropertiesService.getScriptProperties().getProperties();
+  var riskRules = getEquipmentRiskRules_();
+  var riskCandidateLookup = buildDashboardSetComponentLookup_(setSheet);
+  markProfile_('options');
+
+  var candidates = [];
+  entries.forEach(function(entry) {
+    var haystack = String(entry.searchText || '');
+    if (!terms.every(function(term) { return haystack.indexOf(term) >= 0; })) return;
+    var g = entry.group || {};
+    candidates.push({
+      type: 'checkout',
+      entry: entry,
+      sortDate: normalizeDashboardSearchDateKey_(g.반출일),
+      sortTime: normalizeDashboardTimeKey_(g.반출시간)
+    });
+    candidates.push({
+      type: 'checkin',
+      entry: entry,
+      sortDate: normalizeDashboardSearchDateKey_(g.반납일),
+      sortTime: normalizeDashboardTimeKey_(g.반납시간)
+    });
+  });
+  candidates.sort(compareDashboardSearchCandidates_);
+  markProfile_('match');
+
+  var visible = candidates.length > limit ? candidates.slice(0, limit) : candidates;
+  var builtByTid = {};
+  var checkoutList = [];
+  var checkinList = [];
+
+  visible.forEach(function(candidate) {
+    var entry = candidate.entry || {};
+    var tid = entry.tid || '';
+    var g = entry.group || {};
+    if (!builtByTid[tid]) {
+      builtByTid[tid] = buildDashboardSearchItem_(
+        tid,
+        g,
+        entry.cust || {},
+        entry.extra || {},
+        entry.checkInfo || {},
+        props,
+        riskRules,
+        setSheet,
+        riskCandidateLookup
+      );
+    }
+
+    var item = cloneDashboardItem_(builtByTid[tid]);
+    if (candidate.type === 'checkout') {
+      item.time = g.반출시간 || '시간 미정';
+      item.sortTime = normalizeDashboardTimeKey_(g.반출시간);
+      item.sortDate = normalizeDashboardSearchDateKey_(g.반출일);
+      item.returnDate = g.반납일 + (g.반납시간 ? ' ' + g.반납시간 : '');
+      item.searchDate = g.반출일;
+      item.searchPhaseLabel = '반출';
+      item.searchGroupLabel = formatDashboardSearchGroupLabel_(g.반출일, '반출');
+      item._type = 'checkout';
+      checkoutList.push(item);
+    } else {
+      item.time = g.반납시간 || '시간 미정';
+      item.sortTime = normalizeDashboardTimeKey_(g.반납시간);
+      item.sortDate = normalizeDashboardSearchDateKey_(g.반납일);
+      item.checkoutDate = g.반출일 + (g.반출시간 ? ' ' + g.반출시간 : '');
+      item.searchDate = g.반납일;
+      item.searchPhaseLabel = '반납';
+      item.searchGroupLabel = formatDashboardSearchGroupLabel_(g.반납일, '반납');
+      item._type = 'checkin';
+      checkinList.push(item);
+    }
+  });
+  markProfile_('build_items');
+
+  checkoutList.sort(compareDashboardSearchItems_);
+  checkinList.sort(compareDashboardSearchItems_);
+  var all = checkoutList.concat(checkinList).sort(compareDashboardSearchItems_);
+
+  var result = {
+    query: query,
+    checkout: all.filter(function(item) { return item._type === 'checkout'; }),
+    checkin: all.filter(function(item) { return item._type === 'checkin'; }),
+    total: candidates.length,
+    returned: all.length,
+    limit: limit,
+    paymentOptions: getTradePaymentOptions_(),
+    proofTypeOptions: getTradeProofTypeOptions_(),
+    issueStatusOptions: getTradeIssueStatusOptions_(),
+    depositStatusOptions: getTradeDepositStatusOptions_(),
+    billingCompanyOptions: getTradeBillingCompanyOptions_()
+  };
+  markEquipmentRiskSearchEvaluationSkipped_(result);
+  if (!profile) putDashboardCacheJson_(cache, resultCacheKey, result, 300);
+  return attachProfile_(result);
+}
+
+function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
+  var cache = CacheService.getScriptCache();
+  var cacheKey = 'dashboard_search_index_v2_' + getTimelineCacheVersion_() + '_' +
+    getDashboardSearchCacheVersion_() + '_' + schedSheet.getLastRow();
+  var cached = getDashboardCacheJson_(cache, cacheKey);
+  if (cached && Array.isArray(cached.entries)) return cached;
 
   var data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getDisplayValues();
   var tradeGroups = {};
@@ -964,62 +1094,61 @@ function getDashboardSearchData(query, options) {
   var props = PropertiesService.getScriptProperties().getProperties();
   var tradeExtras = getTradeExtrasForIds_(tradeIds, props);
   var equipmentChecks = getEquipmentCheckMapForIds_(tradeIds);
-  var riskRules = getEquipmentRiskRules_();
-  var riskCandidateLookup = buildDashboardSetComponentLookup_(setSheet);
-  var checkoutList = [];
-  var checkinList = [];
-
-  tradeIds.forEach(function(tid) {
-    var g = tradeGroups[tid];
+  var entries = tradeIds.map(function(tid) {
+    var group = tradeGroups[tid];
     var cust = contractMap[tid] || {};
     var extra = tradeExtras[tid] || {};
     var checkInfo = getEquipmentCheckForTrade_(equipmentChecks, tid);
-    if (!dashboardSearchTradeMatches_(terms, g, cust, extra, checkInfo)) return;
-
-    var item = buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup);
-    var checkoutItem = cloneDashboardItem_(item);
-    checkoutItem.time = g.반출시간 || '시간 미정';
-    checkoutItem.sortTime = normalizeDashboardTimeKey_(g.반출시간);
-    checkoutItem.sortDate = normalizeDashboardSearchDateKey_(g.반출일);
-    checkoutItem.returnDate = g.반납일 + (g.반납시간 ? ' ' + g.반납시간 : '');
-    checkoutItem.searchDate = g.반출일;
-    checkoutItem.searchPhaseLabel = '반출';
-    checkoutItem.searchGroupLabel = formatDashboardSearchGroupLabel_(g.반출일, '반출');
-    checkoutItem._type = 'checkout';
-    checkoutList.push(checkoutItem);
-
-    var checkinItem = cloneDashboardItem_(item);
-    checkinItem.time = g.반납시간 || '시간 미정';
-    checkinItem.sortTime = normalizeDashboardTimeKey_(g.반납시간);
-    checkinItem.sortDate = normalizeDashboardSearchDateKey_(g.반납일);
-    checkinItem.checkoutDate = g.반출일 + (g.반출시간 ? ' ' + g.반출시간 : '');
-    checkinItem.searchDate = g.반납일;
-    checkinItem.searchPhaseLabel = '반납';
-    checkinItem.searchGroupLabel = formatDashboardSearchGroupLabel_(g.반납일, '반납');
-    checkinItem._type = 'checkin';
-    checkinList.push(checkinItem);
+    return {
+      tid: tid,
+      group: group,
+      cust: cust,
+      extra: extra,
+      checkInfo: checkInfo,
+      searchText: buildDashboardSearchText_(group, cust, extra, checkInfo)
+    };
   });
 
-  checkoutList.sort(compareDashboardSearchItems_);
-  checkinList.sort(compareDashboardSearchItems_);
-  var all = checkoutList.concat(checkinList).sort(compareDashboardSearchItems_);
-  if (all.length > limit) all = all.slice(0, limit);
-
-  var result = {
-    query: query,
-    checkout: all.filter(function(item) { return item._type === 'checkout'; }),
-    checkin: all.filter(function(item) { return item._type === 'checkin'; }),
-    total: checkoutList.length + checkinList.length,
-    returned: all.length,
-    limit: limit,
-    paymentOptions: getTradePaymentOptions_(),
-    proofTypeOptions: getTradeProofTypeOptions_(),
-    issueStatusOptions: getTradeIssueStatusOptions_(),
-    depositStatusOptions: getTradeDepositStatusOptions_(),
-    billingCompanyOptions: getTradeBillingCompanyOptions_()
+  var index = {
+    builtAt: Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss'),
+    entries: entries
   };
-  markEquipmentRiskSearchEvaluationSkipped_(result);
-  return result;
+  putDashboardCacheJson_(cache, cacheKey, index, 300);
+  return index;
+}
+
+function compareDashboardSearchCandidates_(a, b) {
+  var dateCmp = String(a.sortDate || '').localeCompare(String(b.sortDate || ''));
+  if (dateCmp) return dateCmp;
+  var timeCmp = String(a.sortTime || '').localeCompare(String(b.sortTime || ''));
+  if (timeCmp) return timeCmp;
+  var at = String((a.entry && (a.entry.cust && a.entry.cust.name || a.entry.tid)) || '');
+  var bt = String((b.entry && (b.entry.cust && b.entry.cust.name || b.entry.tid)) || '');
+  var nameCmp = at.localeCompare(bt);
+  if (nameCmp) return nameCmp;
+  return String(a.type || '').localeCompare(String(b.type || ''));
+}
+
+function getDashboardSearchCacheVersion_() {
+  try {
+    return PropertiesService.getScriptProperties().getProperty(DASHBOARD_SEARCH_CACHE_VERSION_PROP_) || '0';
+  } catch (e) {
+    return '0';
+  }
+}
+
+function touchDashboardSearchCacheVersion_() {
+  try {
+    PropertiesService.getScriptProperties().setProperty(DASHBOARD_SEARCH_CACHE_VERSION_PROP_, String(Date.now()));
+  } catch (e) {}
+}
+
+function getDashboardSearchResultCacheKey_(query, limit) {
+  var raw = getTimelineCacheVersion_() + '|' + getDashboardSearchCacheVersion_() + '|' + limit + '|' +
+    normalizeDashboardSearchText_(query);
+  var digest = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw))
+    .replace(/=+$/g, '');
+  return 'dashboard_search_result_v2_' + digest;
 }
 
 function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup) {
@@ -1073,6 +1202,15 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRu
 }
 
 function dashboardSearchTradeMatches_(terms, group, cust, extra, checkInfo) {
+  var haystack = buildDashboardSearchText_(group, cust, extra, checkInfo);
+  return terms.every(function(term) { return haystack.indexOf(term) >= 0; });
+}
+
+function buildDashboardSearchText_(group, cust, extra, checkInfo) {
+  group = group || {};
+  cust = cust || {};
+  extra = extra || {};
+  checkInfo = checkInfo || {};
   var parts = [
     group.거래ID,
     cust.name,
@@ -1096,8 +1234,7 @@ function dashboardSearchTradeMatches_(terms, group, cust, extra, checkInfo) {
     parts.push(eq.name, eq.setName, eq.qty);
   });
 
-  var haystack = normalizeDashboardSearchText_(parts.join(' '));
-  return terms.every(function(term) { return haystack.indexOf(term) >= 0; });
+  return normalizeDashboardSearchText_(parts.join(' '));
 }
 
 function getEquipmentRiskRules_() {
@@ -1901,6 +2038,7 @@ function warmDashboardCache() {
     });
     try { warmTimelineCache_(); } catch (eTimeline) { /* 개별 실패 무시 */ }
     try { warmDashboardMutationCaches_(); } catch (eMutation) { /* 개별 실패 무시 */ }
+    try { warmDashboardSearchIndex_(); } catch (eSearch) { /* 개별 실패 무시 */ }
     try { warmDashboardAvailabilityRowIndex_(); } catch (e2) { /* 개별 실패 무시 */ }
   } catch (e) { /* ignore */ }
 }
@@ -1916,6 +2054,13 @@ function warmDashboardMutationCaches_() {
   buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
   var equipSheet = ss.getSheetByName("장비마스터");
   if (equipSheet) buildDashboardEquipmentMeta_(equipSheet);
+}
+
+function warmDashboardSearchIndex_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sched = ss.getSheetByName("스케줄상세");
+  if (!sched || sched.getLastRow() < 2) return;
+  getDashboardSearchIndex_(ss, sched, ss.getSheetByName("계약마스터"));
 }
 
 function warmDashboardAvailabilityRowIndex_() {
@@ -1949,6 +2094,7 @@ function setupDashboardWarmerTrigger() {
  */
 function invalidateDashboardCache() {
   try {
+    touchDashboardSearchCacheVersion_();
     var cache = CacheService.getScriptCache();
     var today = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
     var yesterday = Utilities.formatDate(new Date(Date.now() - 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
