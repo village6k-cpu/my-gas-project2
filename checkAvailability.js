@@ -362,7 +362,11 @@ function buildTimelineData_(fromKey, toKey, options) {
   });
   var timelineTradeIdList = Object.keys(timelineTradeIds);
   var contractMap = getTimelineContractMapForIds_(contractSheet, timelineTradeIdList);
-  markTimelineBuildStep_('contract_map', { tradeCount: timelineTradeIdList.length });
+  markTimelineBuildStep_('contract_map', {
+    tradeCount: timelineTradeIdList.length,
+    totalContractRows: contractMap._totalContractRows || 0,
+    cacheHit: contractMap._cacheHit === true
+  });
   entries.forEach(function(e) {
     var tid = String(e.거래ID || '').trim();
     var cust = contractMap[tid] || {};
@@ -536,33 +540,63 @@ function getTimelineStockMap_(ss) {
 
 function getTimelineContractMapForIds_(contractSheet, tradeIds) {
   var result = {};
-  if (!contractSheet || !tradeIds || tradeIds.length === 0 || contractSheet.getLastRow() < 2) return result;
 
   var wanted = {};
   (tradeIds || []).forEach(function(tid) {
     tid = String(tid || '').trim();
     if (tid) wanted[tid] = true;
   });
-  if (Object.keys(wanted).length === 0) return result;
+  if (!contractSheet || !tradeIds || tradeIds.length === 0 || Object.keys(wanted).length === 0) return result;
 
-  var rowCount = contractSheet.getLastRow() - 1;
-  var ids = contractSheet.getRange(2, 1, rowCount, 1).getDisplayValues();
-  var rowsToRead = [];
-  ids.forEach(function(row, idx) {
-    var tid = String(row[0] || '').trim();
-    if (wanted[tid]) rowsToRead.push(idx + 2);
+  var contacts = getTimelineContractContactsForCache_(contractSheet);
+  var contactMap = contacts.map || {};
+  Object.keys(wanted).forEach(function(tid) {
+    var row = contactMap[tid];
+    if (!row) return;
+    result[tid] = {
+      name: row.name || '',
+      tel: row.tel || ''
+    };
   });
 
-  var rows = readDashboardScheduleRowsDisplay_(contractSheet, rowsToRead, 3);
+  result._cacheHit = contacts._cacheHit === true;
+  result._totalContractRows = contacts.totalRows || 0;
+  return result;
+}
+
+function getTimelineContractContactsForCache_(contractSheet) {
+  var empty = { map: {}, totalRows: 0, _cacheHit: false };
+  if (!contractSheet || contractSheet.getLastRow() < 2) return empty;
+
+  var rowCount = contractSheet.getLastRow() - 1;
+  var cacheKey = TIMELINE_CACHE_PREFIX_ + 'contractContacts_v1_' +
+    getTimelineCacheVersion_() + '_' + rowCount;
+  var cached = getTimelineCacheText_(cacheKey);
+  if (cached) {
+    try {
+      var cachedContacts = JSON.parse(cached);
+      if (cachedContacts && cachedContacts.map) {
+        cachedContacts._cacheHit = true;
+        return cachedContacts;
+      }
+    } catch (e) {}
+  }
+
+  var rows = contractSheet.getRange(2, 1, rowCount, 3).getDisplayValues();
+  var map = {};
   rows.forEach(function(row) {
     var tid = String(row[0] || '').trim();
-    if (!wanted[tid]) return;
-    result[tid] = {
+    if (!tid) return;
+    map[tid] = {
       name: String(row[1] || '').trim(),
       tel: String(row[2] || '').trim()
     };
   });
-  return result;
+
+  var payload = { map: map, totalRows: rowCount };
+  try { putTimelineCacheText_(cacheKey, JSON.stringify(payload), 300); } catch (e2) {}
+  payload._cacheHit = false;
+  return payload;
 }
 
 function readTimelineScheduleRows_(schedSheet, fromKey, toKey) {

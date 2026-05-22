@@ -349,14 +349,26 @@ assert.match(
 
 assert.match(
   backend,
-  /function getTimelineContractMapForIds_\(contractSheet,\s*tradeIds\)[\s\S]*getRange\(2,\s*1,\s*rowCount,\s*1\)\.getDisplayValues\(\)[\s\S]*readDashboardScheduleRowsDisplay_\(contractSheet,\s*rowsToRead,\s*3\)/,
-  'timeline contract lookup must scan IDs first and read only matched 계약마스터 rows'
+  /function getTimelineContractMapForIds_\(contractSheet,\s*tradeIds\)[\s\S]*getTimelineContractContactsForCache_\(contractSheet\)[\s\S]*contactMap\[tid\]/,
+  'timeline contract lookup must reuse the cached 계약마스터 contact map'
+);
+
+assert.match(
+  backend,
+  /function getTimelineContractContactsForCache_\(contractSheet\)[\s\S]*contractContacts_v1_[\s\S]*getTimelineCacheText_\(cacheKey\)[\s\S]*getRange\(2,\s*1,\s*rowCount,\s*3\)\.getDisplayValues\(\)[\s\S]*putTimelineCacheText_\(cacheKey,\s*JSON\.stringify\(payload\),\s*300\)/,
+  'timeline contract contacts must cache compact A:C data instead of scanning 계약마스터 every build'
 );
 
 assert.match(
   backend,
   /getTimelineContractMapForIds_\(contractSheet,\s*timelineTradeIdList\)/,
   'buildTimelineData_ must defer 계약마스터 reads until visible timeline trade IDs are known'
+);
+
+assert.match(
+  backend,
+  /markTimelineBuildStep_\(['"]contract_map['"],\s*\{[\s\S]{0,220}tradeCount:\s*timelineTradeIdList\.length[\s\S]{0,220}cacheHit:\s*contractMap\._cacheHit === true/,
+  'timeline profile must report contract map cache hits'
 );
 
 const timelineBuildBody = backend.match(/function buildTimelineData_\([\s\S]*?\n}\n\nfunction getTimelineStockMap_/);
