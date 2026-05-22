@@ -1355,11 +1355,37 @@ function expandDashboardSearchSummaryEquipments_(items) {
 }
 
 var DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_ = ['tid', 'n', 'tel', 'co', 'cs', 'st', 'od', 'ot', 'rd', 'rt', 'x'];
+var DASHBOARD_SEARCH_CLIENT_INDEX_TEXT_COLUMN_ = 'x';
 
-function packDashboardSearchClientEntry_(entry) {
+function getDashboardSearchClientIndexTextColumnIndex_() {
+  for (var i = 0; i < DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_.length; i++) {
+    if (DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_[i] === DASHBOARD_SEARCH_CLIENT_INDEX_TEXT_COLUMN_) return i;
+  }
+  return -1;
+}
+
+function packDashboardSearchClientEntry_(entry, tokenState) {
   entry = entry || {};
-  return DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_.map(function(key) {
+  var textIndex = getDashboardSearchClientIndexTextColumnIndex_();
+  var row = DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_.map(function(key) {
     return entry[key] || '';
+  });
+  if (tokenState && textIndex >= 0) {
+    row[textIndex] = packDashboardSearchClientText_(row[textIndex], tokenState);
+  }
+  return row;
+}
+
+function packDashboardSearchClientText_(text, tokenState) {
+  tokenState = tokenState || {};
+  tokenState.lookup = tokenState.lookup || {};
+  tokenState.tokens = tokenState.tokens || [];
+  return String(text || '').split(' ').filter(Boolean).map(function(token) {
+    if (!Object.prototype.hasOwnProperty.call(tokenState.lookup, token)) {
+      tokenState.lookup[token] = tokenState.tokens.length;
+      tokenState.tokens.push(token);
+    }
+    return tokenState.lookup[token];
   });
 }
 
@@ -1371,14 +1397,20 @@ function getDashboardSearchClientIndex_() {
     return { success: true, builtAt: '', packed: true, columns: DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_, entries: [] };
   }
   var index = getDashboardSearchIndex_(ss, schedSheet, contractSheet);
+  var tokenState = { lookup: {}, tokens: [] };
   return {
     success: true,
     builtAt: index.builtAt || '',
     cacheVersion: getDashboardSearchCacheVersion_(),
     lastRow: schedSheet.getLastRow(),
     packed: true,
+    tokenized: true,
     columns: DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_,
-    entries: (index.entries || []).map(packDashboardSearchClientEntry_)
+    textColumn: DASHBOARD_SEARCH_CLIENT_INDEX_TEXT_COLUMN_,
+    tokens: tokenState.tokens,
+    entries: (index.entries || []).map(function(entry) {
+      return packDashboardSearchClientEntry_(entry, tokenState);
+    })
   };
 }
 
