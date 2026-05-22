@@ -4195,16 +4195,32 @@ function readDashboardScheduleRowsDisplay_(sheet, rowNums, colCount) {
 function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames) {
   if (!sheet || lastRow < 2 || !equipmentNames || equipmentNames.length === 0) return [];
   var target = {};
+  var patternParts = [];
   (equipmentNames || []).forEach(function(name) {
     var key = String(name || "").trim();
-    if (key) target[key] = true;
+    if (key && !target[key]) {
+      target[key] = true;
+      patternParts.push(escapeDashboardTextFinderRegex_(key));
+    }
   });
-  var names = sheet.getRange(2, 4, lastRow - 1, 1).getValues();
+  if (patternParts.length === 0) return [];
+
   var rowsToRead = [];
-  names.forEach(function(row, idx) {
-    if (target[String(row[0] || "").trim()]) rowsToRead.push(idx + 2);
+  var finder = sheet.getRange(2, 4, lastRow - 1, 1)
+    .createTextFinder("^(?:" + patternParts.join("|") + ")$")
+    .useRegularExpression(true)
+    .matchEntireCell(true);
+  finder.findAll().forEach(function(range) {
+    rowsToRead.push(range.getRow());
   });
-  return readDashboardScheduleRows_(sheet, rowsToRead, 10);
+  rowsToRead.sort(function(a, b) { return a - b; });
+  return readDashboardScheduleRows_(sheet, rowsToRead, 10).filter(function(row) {
+    return !!target[String(row[3] || "").trim()];
+  });
+}
+
+function escapeDashboardTextFinderRegex_(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function buildDashboardScheduleData_(scheduleRows, equipmentNames) {

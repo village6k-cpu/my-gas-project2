@@ -54,13 +54,13 @@ const availabilityRowsBody = backend.match(/function findDashboardScheduleRowsFo
 assert.ok(availabilityRowsBody, 'findDashboardScheduleRowsForEquipments_ must exist before buildDashboardScheduleData_');
 assert.doesNotMatch(
   availabilityRowsBody[0],
-  /createTextFinder|findDashboardRowsByValue_/,
-  'availability checks must not run one TextFinder scan per equipment name'
+  /getRange\(2,\s*4,\s*lastRow - 1,\s*1\)\.getValues\(\)/,
+  'availability checks must not read the whole equipment-name column into Apps Script'
 );
 assert.match(
   availabilityRowsBody[0],
-  /getRange\(2,\s*4,\s*lastRow - 1,\s*1\)\.getValues\(\)/,
-  'availability checks should scan only the equipment-name column before reading matched schedule rows'
+  /createTextFinder\("\^\(\?:\"\s*\+\s*patternParts\.join\("\|"\)\s*\+\s*"\)\$"\)[\s\S]{0,180}useRegularExpression\(true\)[\s\S]{0,120}findAll\(\)/,
+  'availability checks should find matching equipment rows with one server-side TextFinder regex'
 );
 assert.match(
   availabilityRowsBody[0],
