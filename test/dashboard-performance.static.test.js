@@ -209,6 +209,18 @@ assert.match(
 );
 
 assert.match(
+  backend,
+  /function getEquipmentCheckRowIndexForTradeIds_\(sheet,\s*schema,\s*rowCount,\s*keyCol\)[\s\S]*getDashboardCacheJson_\(cache,\s*cacheKey\)[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
+  'equipment check row index must be cached so repeated search/detail loads avoid rescanning 장비체크 keys'
+);
+
+assert.match(
+  backend,
+  /var rowIndex\s*=\s*getEquipmentCheckRowIndexForTradeIds_\(sheet,\s*schema,\s*rowCount,\s*keyCol\)/,
+  'equipment check map must use the cached row index before reading matched rows'
+);
+
+assert.match(
   read('sheetAPI.js'),
   /evaluateRisk:\s*params\.riskEval\s*\|\|\s*postBody\.riskEval/,
   'sheetAPI dashboard action must expose explicit riskEval opt-in without slowing the default path'
