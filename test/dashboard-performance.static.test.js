@@ -127,6 +127,24 @@ assert.match(
   'date dashboard payload must pass the shared set component lookup into risk candidate building'
 );
 
+assert.match(
+  backend,
+  /var evaluateRisk\s*=[\s\S]*options\.evaluateRisk/,
+  'getDashboardData must keep external equipment-risk evaluation behind an explicit option'
+);
+
+assert.match(
+  backend,
+  /if \(evaluateRisk\) \{[\s\S]*evaluateEquipmentRiskGuidanceStates_\(result\);[\s\S]*\} else \{[\s\S]*markEquipmentRiskSearchEvaluationSkipped_\(result\);/,
+  'default dashboard payload must not wait for external equipment-risk evaluation'
+);
+
+assert.match(
+  read('sheetAPI.js'),
+  /evaluateRisk:\s*params\.riskEval\s*\|\|\s*postBody\.riskEval/,
+  'sheetAPI dashboard action must expose explicit riskEval opt-in without slowing the default path'
+);
+
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
   const html = read(file);
 

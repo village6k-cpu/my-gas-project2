@@ -192,7 +192,9 @@ function handleRequest(e) {
       case "dashboard":
         // nocache=1 이면 캐시 우회 (새로고침 버튼용)
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
-        return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache));
+        return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache, {
+          evaluateRisk: params.riskEval || postBody.riskEval
+        }));
 
       case "dashboardSearch":
         return jsonResponse(getDashboardSearchData(

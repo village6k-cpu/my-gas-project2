@@ -448,12 +448,14 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
 // 오늘 반출/반납 대시보드 데이터
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function getDashboardData(targetDate, skipCache) {
+function getDashboardData(targetDate, skipCache, options) {
   var today = targetDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
+  options = options || {};
+  var evaluateRisk = options.evaluateRisk === true || options.evaluateRisk === '1' || options.evaluateRisk === 'true';
 
   // 캐시 5분으로 확장. 등록/취소/일정변경 시 invalidateDashboardCache() 호출로 무효화.
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_v3_' + today;
+  var cacheKey = 'dashboard_v4_' + today + (evaluateRisk ? '_risk' : '');
   if (!skipCache) {
     var cached = cache.get(cacheKey);
     if (cached) {
@@ -650,7 +652,11 @@ function getDashboardData(targetDate, skipCache) {
     depositStatusOptions: getTradeDepositStatusOptions_(),
     billingCompanyOptions: getTradeBillingCompanyOptions_()
   };
-  evaluateEquipmentRiskGuidanceStates_(result);
+  if (evaluateRisk) {
+    evaluateEquipmentRiskGuidanceStates_(result);
+  } else {
+    markEquipmentRiskSearchEvaluationSkipped_(result);
+  }
   // 등록/취소/일정변경 시 invalidateDashboardCache로 무효화되므로, 날짜 이동 체감을 위해 15분 유지.
   try { cache.put(cacheKey, JSON.stringify(result), 900); } catch (e) { /* 캐시 오버플로 무시 */ }
   return result;
