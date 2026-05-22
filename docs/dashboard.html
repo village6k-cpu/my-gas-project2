@@ -964,8 +964,42 @@
     grid-template-columns: minmax(0, 1fr) 76px 32px;
     gap: 8px;
     align-items: start;
+    position: relative;
   }
+  .equip-name-input { padding-right: 28px; }
   .multi-equip-row .modal-input { margin-bottom: 0; }
+  .equip-suggest-list {
+    display: none;
+    position: absolute;
+    top: 38px;
+    left: 0;
+    right: 124px;
+    z-index: 1010;
+    max-height: 220px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: 0 8px 22px rgba(55,53,47,0.16);
+  }
+  .equip-suggest-list.open { display: block; }
+  .equip-suggest-option,
+  .equip-suggest-empty {
+    width: 100%;
+    padding: 8px 10px;
+    border: 0;
+    border-bottom: 1px solid var(--border-light);
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: inherit;
+    text-align: left;
+  }
+  .equip-suggest-option { cursor: pointer; }
+  .equip-suggest-option:hover { background: var(--blue-bg); color: var(--accent); }
+  .equip-suggest-option:last-child,
+  .equip-suggest-empty:last-child { border-bottom: 0; }
+  .equip-suggest-empty { color: var(--text-muted); }
   .multi-row-remove {
     width: 32px;
     height: 32px;
@@ -1374,7 +1408,7 @@
 </style>
 </head>
 <body>
-<script>var API_URL = "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec"; var DASHBOARD_API_KEY = "village2026"; var INITIAL_DATA = null;</script>
+<script>var API_URL = "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec"; var DASHBOARD_API_KEY = "village2026"; var INITIAL_DATA = null; var INITIAL_EQUIP_NAMES = null;</script>
 
 <div class="header">
   <div class="header-top">
@@ -1510,6 +1544,7 @@ document.addEventListener('DOMContentLoaded', function() {
   loadDashboardNoteFontSize();
   renderDashboardNotes(dashboardNotes);
   loadDashboardNotes();
+  hydrateInitialEquipList();
   if (INITIAL_DATA && isDashboardDateMatch(INITIAL_DATA, formatDate(currentDate))) {
     dashboardData = INITIAL_DATA;
     renderDashboard(INITIAL_DATA, formatDate(currentDate));
@@ -2183,6 +2218,7 @@ function renderDashboard(data, expectedDate) {
 
   switchTab(activeDashboardTab || 'checkout');
   prefetchAdjacentDashboardDates(data.date || expectedDate || formatDate(currentDate));
+  queueEquipListPrefetch();
   scheduleDashboardSectionWarmup();
   return true;
 }
@@ -2219,6 +2255,7 @@ function renderDashboardGlobalSearch(data) {
   if (data.summaryMode) suffix += ' · 날짜별 요약';
   setDashboardSearchStatus('전체 예약에서 검색 중: "' + dashboardSearchQuery + '"' + suffix);
   switchTab('all');
+  queueEquipListPrefetch();
   scheduleDashboardSectionWarmup();
 }
 
@@ -3954,25 +3991,173 @@ function escJs(s) { return String(s || '').replace(/\\/g,'\\\\').replace(/'/g,"\
 
 // ── 장비 목록 캐시 + 모달 ─────────────────────
 var equipListCache = null;
-function loadEquipList() {
-  if (equipListCache) return Promise.resolve(equipListCache);
-  return fetch(API_URL + '?key=village2026&action=read&sheet=' + encodeURIComponent('목록') + '&range=A2:A1000')
+var equipListPromise = null;
+var equipListPrefetchQueued = false;
+var EQUIP_LIST_LOCAL_KEY = 'dashboardEquipNames_v1';
+var EQUIP_LIST_LOCAL_TTL_MS = 6 * 60 * 60 * 1000;
+
+function normalizeEquipList(list) {
+  var seen = {};
+  return (Array.isArray(list) ? list : []).map(function(name) {
+    return String(name || '').trim();
+  }).filter(function(name) {
+    if (!name || seen[name]) return false;
+    seen[name] = true;
+    return true;
+  });
+}
+
+function hydrateEquipDatalist(list) {
+  var dl = document.getElementById('equipDatalist');
+  if (!dl) return;
+  dl.innerHTML = normalizeEquipList(list).map(function(n) {
+    return '<option value="' + escAttr(n) + '"></option>';
+  }).join('');
+}
+
+function setEquipListCache(list, persist) {
+  equipListCache = normalizeEquipList(list);
+  hydrateEquipDatalist(equipListCache);
+  if (persist && equipListCache.length) {
+    try {
+      localStorage.setItem(EQUIP_LIST_LOCAL_KEY, JSON.stringify({
+        ts: Date.now(),
+        names: equipListCache
+      }));
+    } catch (e) {}
+  }
+  return equipListCache;
+}
+
+function hydrateInitialEquipList() {
+  if (Array.isArray(INITIAL_EQUIP_NAMES) && INITIAL_EQUIP_NAMES.length) {
+    setEquipListCache(INITIAL_EQUIP_NAMES, true);
+    return;
+  }
+  try {
+    var raw = localStorage.getItem(EQUIP_LIST_LOCAL_KEY);
+    if (!raw) return;
+    var cached = JSON.parse(raw);
+    if (!cached || !cached.ts || Date.now() - cached.ts > EQUIP_LIST_LOCAL_TTL_MS) return;
+    setEquipListCache(cached.names || [], false);
+  } catch (e) {}
+}
+
+function queueEquipListPrefetch() {
+  if ((equipListCache && equipListCache.length) || equipListPrefetchQueued) return;
+  equipListPrefetchQueued = true;
+  var run = function() { loadEquipList(); };
+  if (window.requestIdleCallback) {
+    window.requestIdleCallback(run, { timeout: 1200 });
+  } else {
+    setTimeout(run, 300);
+  }
+}
+
+function loadEquipList(forceFresh) {
+  if (equipListCache && equipListCache.length && !forceFresh) return Promise.resolve(equipListCache);
+  if (equipListPromise) return equipListPromise;
+  var key = encodeURIComponent(DASHBOARD_API_KEY || 'village2026');
+  equipListPromise = fetch(API_URL + '?key=' + key + '&action=dashboardEquipNames')
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      var arr = (d && d.data) ? d.data : [];
-      equipListCache = arr.map(function(row) { return Array.isArray(row) ? row[0] : row; })
-                          .filter(function(x) { return x; })
-                          .map(String);
-      // datalist에 옵션 채우기
-      var dl = document.getElementById('equipDatalist');
-      if (dl) {
-        dl.innerHTML = equipListCache.map(function(n) {
-          return '<option value="' + escHtml(n) + '"></option>';
-        }).join('');
-      }
-      return equipListCache;
+      equipListPromise = null;
+      var arr = d && (d.names || d.data) ? (d.names || d.data) : [];
+      return setEquipListCache(arr, true);
     })
-    .catch(function() { equipListCache = []; return []; });
+    .catch(function() {
+      equipListPromise = null;
+      return equipListCache || [];
+    });
+  return equipListPromise;
+}
+
+function hideEquipSuggestions(input) {
+  var row = input && input.parentNode;
+  if (!row) return;
+  var box = row.querySelector('.equip-suggest-list');
+  if (box) box.classList.remove('open');
+}
+
+function hideAllEquipSuggestions() {
+  document.querySelectorAll('.equip-suggest-list.open').forEach(function(box) {
+    box.classList.remove('open');
+  });
+}
+
+function getEquipSuggestionBox(input) {
+  var row = input && input.parentNode;
+  if (!row) return null;
+  var box = row.querySelector('.equip-suggest-list');
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'equip-suggest-list';
+    row.appendChild(box);
+  }
+  return box;
+}
+
+function renderEquipSuggestions(input, list, emptyText) {
+  var box = getEquipSuggestionBox(input);
+  if (!box) return;
+  var query = String(input.value || '').trim().toLowerCase();
+  var names = normalizeEquipList(list);
+  var matches = names.filter(function(name) {
+    return !query || name.toLowerCase().indexOf(query) !== -1;
+  }).slice(0, 30);
+  box.innerHTML = '';
+  if (!matches.length) {
+    var empty = document.createElement('div');
+    empty.className = 'equip-suggest-empty';
+    empty.textContent = emptyText || (query ? '일치하는 장비 없음' : '장비 목록 없음');
+    box.appendChild(empty);
+  } else {
+    matches.forEach(function(name) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'equip-suggest-option';
+      btn.textContent = name;
+      btn.onmousedown = function(ev) {
+        ev.preventDefault();
+        input.value = name;
+        hideAllEquipSuggestions();
+        input.focus();
+      };
+      box.appendChild(btn);
+    });
+  }
+  box.classList.add('open');
+}
+
+function openEquipSuggestions(input) {
+  if (!input) return;
+  if (equipListCache && equipListCache.length) {
+    renderEquipSuggestions(input, equipListCache);
+    return;
+  }
+  renderEquipSuggestions(input, [], '장비 목록 불러오는 중...');
+  loadEquipList().then(function(list) {
+    if (document.activeElement === input) renderEquipSuggestions(input, list);
+  });
+}
+
+function attachEquipDropdown(input) {
+  if (!input || input._equipDropdownAttached) return;
+  input._equipDropdownAttached = true;
+  input.addEventListener('focus', function() { openEquipSuggestions(input); });
+  input.addEventListener('input', function() { openEquipSuggestions(input); });
+  input.addEventListener('blur', function() {
+    setTimeout(function() { hideEquipSuggestions(input); }, 120);
+  });
+}
+
+function focusFirstEquipInputWithDropdown() {
+  setTimeout(function() {
+    var input = document.querySelector('#equipRows .equip-name-input');
+    if (!input) return;
+    input.focus();
+    openEquipSuggestions(input);
+  }, 50);
 }
 
 var pendingAddTid = null;
@@ -4017,6 +4202,13 @@ function addEquipRow(name, qty) {
   row.appendChild(qtyInput);
   row.appendChild(removeBtn);
   container.appendChild(row);
+  attachEquipDropdown(input);
+  if (!name && document.getElementById('addEquipModal') && document.getElementById('addEquipModal').classList.contains('open')) {
+    setTimeout(function() {
+      input.focus();
+      openEquipSuggestions(input);
+    }, 0);
+  }
   return row;
 }
 
@@ -4105,12 +4297,7 @@ function addEquip(tid) {
   resetEquipRows();
   setAddEquipBusy(false);
   document.getElementById('addEquipModal').classList.add('open');
-  loadEquipList().then(function() {
-    setTimeout(function() {
-      var inp = document.querySelector('#equipRows .equip-name-input');
-      if (inp) inp.focus();
-    }, 50);
-  });
+  focusFirstEquipInputWithDropdown();
 }
 
 function addOnsiteAddon(tid) {
@@ -4120,16 +4307,12 @@ function addOnsiteAddon(tid) {
   var settlement = document.getElementById('addEquipSettlement');
   if (settlement) settlement.value = 'pending';
   document.getElementById('addEquipModal').classList.add('open');
-  loadEquipList().then(function() {
-    setTimeout(function() {
-      var inp = document.querySelector('#equipRows .equip-name-input');
-      if (inp) inp.focus();
-    }, 50);
-  });
+  focusFirstEquipInputWithDropdown();
 }
 
 function closeAddEquipModal() {
   document.getElementById('addEquipModal').classList.remove('open');
+  hideAllEquipSuggestions();
   pendingAddTid = null;
   pendingAddMode = 'schedule';
 }

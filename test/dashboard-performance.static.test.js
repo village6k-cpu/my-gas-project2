@@ -252,6 +252,11 @@ assert.match(
     /var API_URL[\s\S]{0,180}var INITIAL_DATA\s*=\s*null;/,
     `${file} must declare INITIAL_DATA so GAS and Pages share the same startup path`
   );
+  assert.match(
+    html,
+    /var INITIAL_EQUIP_NAMES\s*=\s*null;/,
+    `${file} must declare INITIAL_EQUIP_NAMES so the add-equipment dropdown can hydrate without blocking first render`
+  );
 
   assert.match(
     html,
@@ -274,7 +279,12 @@ assert.match(
   assert.doesNotMatch(
     html,
     /window\.addEventListener\('load',\s*function\(\)\s*\{\s*loadEquipList\(\);\s*\}\);/,
-    `${file} must not load the full equipment list until an add-equipment modal is opened`
+    `${file} must not block page load with a full equipment-list fetch`
+  );
+  assert.match(
+    html,
+    /function queueEquipListPrefetch\([\s\S]*loadEquipList\(\)[\s\S]*requestIdleCallback/,
+    `${file} must prefetch equipment names only after dashboard render is underway`
   );
 
   assert.match(

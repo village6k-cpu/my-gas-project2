@@ -63,6 +63,15 @@ function doGet(e) {
           // 데이터 조회 실패해도 페이지는 로드 — 클라이언트가 fetch로 재시도
           Logger.log("dashboard 초기 데이터 로드 실패: " + err.message);
         }
+        try {
+          var initialEquipNames = getDashboardEquipNameList_(SpreadsheetApp.getActiveSpreadsheet());
+          content = content.replace(
+            'var INITIAL_EQUIP_NAMES = null;',
+            'var INITIAL_EQUIP_NAMES = ' + JSON.stringify(initialEquipNames) + ';'
+          );
+        } catch (errEquipNames) {
+          // 장비명 목록 실패는 모달 오픈 시 전용 API로 재시도
+        }
       }
 
       // ── timeline은 초기 데이터를 HTML에 직접 박아서 첫 API 왕복 1회 절약 ──
@@ -225,6 +234,12 @@ function handleRequest(e) {
         return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache, {
           evaluateRisk: params.riskEval || postBody.riskEval
         }));
+
+      case "dashboardEquipNames":
+        return jsonResponse({
+          success: true,
+          names: getDashboardEquipNameList_(SpreadsheetApp.getActiveSpreadsheet())
+        });
 
       case "dashboardSearch":
         return jsonResponse(getDashboardSearchData(
