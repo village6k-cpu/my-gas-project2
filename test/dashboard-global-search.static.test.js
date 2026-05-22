@@ -26,9 +26,9 @@ assert.match(
   'global search must cache the expensive all-reservation search index'
 );
 
-assert.match(
-  backend,
-  /function getDashboardSearchResultCacheKey_\(query,\s*limit\)[\s\S]*dashboard_search_result_v2_/,
+  assert.match(
+    backend,
+  /function getDashboardSearchResultCacheKey_\(query,\s*limit\)[\s\S]*dashboard_search_result_v3_/,
   'global search must cache repeated query results by normalized query and limit'
 );
 

@@ -982,6 +982,19 @@ function getDashboardSearchData(query, options) {
   markProfile_('match');
 
   var visible = candidates.length > limit ? candidates.slice(0, limit) : candidates;
+  var visibleTradeIds = [];
+  var visibleSeen = {};
+  visible.forEach(function(candidate) {
+    var tid = String((candidate.entry && candidate.entry.tid) || '').trim();
+    if (tid && !visibleSeen[tid]) {
+      visibleSeen[tid] = true;
+      visibleTradeIds.push(tid);
+    }
+  });
+  var visibleExtras = getTradeExtrasForIds_(visibleTradeIds, props);
+  var visibleEquipmentChecks = getEquipmentCheckMapForIds_(visibleTradeIds);
+  markProfile_('visible_details');
+
   var builtByTid = {};
   var checkoutList = [];
   var checkinList = [];
@@ -995,8 +1008,8 @@ function getDashboardSearchData(query, options) {
         tid,
         g,
         entry.cust || {},
-        entry.extra || {},
-        entry.checkInfo || {},
+        visibleExtras[tid] || {},
+        getEquipmentCheckForTrade_(visibleEquipmentChecks, tid),
         props,
         riskRules,
         setSheet,
@@ -1053,7 +1066,7 @@ function getDashboardSearchData(query, options) {
 
 function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_search_index_v2_' + getTimelineCacheVersion_() + '_' +
+  var cacheKey = 'dashboard_search_index_v3_' + getTimelineCacheVersion_() + '_' +
     getDashboardSearchCacheVersion_() + '_' + schedSheet.getLastRow();
   var cached = getDashboardCacheJson_(cache, cacheKey);
   if (cached && Array.isArray(cached.entries)) return cached;
@@ -1103,8 +1116,6 @@ function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
       tid: tid,
       group: group,
       cust: cust,
-      extra: extra,
-      checkInfo: checkInfo,
       searchText: buildDashboardSearchText_(group, cust, extra, checkInfo)
     };
   });
@@ -1148,7 +1159,7 @@ function getDashboardSearchResultCacheKey_(query, limit) {
     normalizeDashboardSearchText_(query);
   var digest = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw))
     .replace(/=+$/g, '');
-  return 'dashboard_search_result_v2_' + digest;
+  return 'dashboard_search_result_v3_' + digest;
 }
 
 function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup) {
