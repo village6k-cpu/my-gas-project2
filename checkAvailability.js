@@ -3851,15 +3851,16 @@ function readDashboardScheduleRows_(sheet, rowNums, colCount) {
 }
 
 function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames) {
-  var rowSet = {};
+  if (!sheet || lastRow < 2 || !equipmentNames || equipmentNames.length === 0) return [];
+  var target = {};
   (equipmentNames || []).forEach(function(name) {
-    findDashboardRowsByValue_(sheet, 4, lastRow, name).forEach(function(row) {
-      rowSet[row] = true;
-    });
+    var key = String(name || "").trim();
+    if (key) target[key] = true;
   });
-  var rows = Object.keys(rowSet).map(function(row) { return Number(row); });
-  rows.sort(function(a, b) { return a - b; });
-  return readDashboardScheduleRows_(sheet, rows, 10);
+  var data = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
+  return data.filter(function(row) {
+    return !!target[String(row[3] || "").trim()];
+  });
 }
 
 function buildDashboardScheduleData_(scheduleRows, equipmentNames) {
@@ -4030,6 +4031,29 @@ function dashboardAddedItemsFromRows_(rows) {
       checkedCheckin: false
     };
   });
+}
+
+function deleteDashboardRowsDescending_(sheet, rows) {
+  if (!sheet || !rows || rows.length === 0) return;
+  rows = rows.slice().sort(function(a, b) { return b - a; });
+  var top = rows[0];
+  var bottom = rows[0];
+
+  function flush_() {
+    sheet.deleteRows(bottom, top - bottom + 1);
+  }
+
+  for (var i = 1; i < rows.length; i++) {
+    var row = rows[i];
+    if (row === bottom - 1) {
+      bottom = row;
+      continue;
+    }
+    flush_();
+    top = row;
+    bottom = row;
+  }
+  flush_();
 }
 
 function dashboardAddEquipments(tid, entries, options) {
@@ -4589,8 +4613,7 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId) {
       };
     });
 
-    rowsToDelete.forEach(function(r) { sched.deleteRow(r); });
-    try { formatScheduleSheet(sched); } catch (e) {}
+    deleteDashboardRowsDescending_(sched, rowsToDelete);
     scheduleContractRegen(tid);
     return {
       success: true,

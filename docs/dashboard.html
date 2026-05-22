@@ -606,6 +606,7 @@
     color: var(--text-muted);
   }
   .equip-row.is-single { background: var(--surface); }
+  .equip-row.is-pending { opacity: 0.72; border-style: dashed; }
   .equip-row.checked { opacity: 0.55; }
   .equip-row.checked .equip-name { text-decoration: line-through; }
   .equip-row-main {
@@ -2487,6 +2488,7 @@ function renderList(containerId, items, type, isSearching, options) {
         if (eq.isSet || (eq.isHeader && !eq.isComponent)) rowCls += ' is-set';
         else if (eq.isComponent) rowCls += ' is-component';
         else rowCls += ' is-single';
+        if (eq.pending) rowCls += ' is-pending';
         var checked = (cardType === 'checkout' ? eq.checkedCheckout : eq.checkedCheckin);
         if (checked) rowCls += ' checked';
 
@@ -2505,13 +2507,21 @@ function renderList(containerId, items, type, isSearching, options) {
 
         html += '<div class="' + rowCls + '" onclick="event.stopPropagation()">';
         html += '<div class="equip-row-main">';
-        html += '<span class="' + cbCls + '" onclick="toggleItem(this,\'' + sidEsc + '\',\'' + phaseStr + '\')">' + (checked ? '✓' : '') + '</span>';
+        if (eq.pending) {
+          html += '<span class="' + cbCls + '"></span>';
+        } else {
+          html += '<span class="' + cbCls + '" onclick="toggleItem(this,\'' + sidEsc + '\',\'' + phaseStr + '\')">' + (checked ? '✓' : '') + '</span>';
+        }
         html += '<span class="equip-name">';
         if (eq.isSet) html += '<span class="equip-set-tag">SET</span>';
         html += escHtml(eq.name);
         html += '</span>';
-        html += '<button type="button" class="equip-qty equip-qty-edit ' + qtyClass + '" onclick="event.stopPropagation();editEquipQty(\'' + escJs(item.tradeId) + '\',\'' + sidEsc + '\',\'' + nameEsc + '\',\'' + escJs(String(qtyValue)) + '\')" title="수량 수정">×' + escHtml(qtyValue) + '</button>';
-        html += '<span class="equip-row-remove" onclick="event.stopPropagation();removeEquip(\'' + escJs(item.tradeId) + '\',\'' + nameEsc + '\',\'' + sidEsc + '\',' + (eq.isSet ? 'true' : 'false') + ',' + (eq.isComponent ? 'true' : 'false') + ')" title="삭제">×</span>';
+        if (eq.pending) {
+          html += '<span class="equip-save-state">저장중</span>';
+        } else {
+          html += '<button type="button" class="equip-qty equip-qty-edit ' + qtyClass + '" onclick="event.stopPropagation();editEquipQty(\'' + escJs(item.tradeId) + '\',\'' + sidEsc + '\',\'' + nameEsc + '\',\'' + escJs(String(qtyValue)) + '\')" title="수량 수정">×' + escHtml(qtyValue) + '</button>';
+          html += '<span class="equip-row-remove" onclick="event.stopPropagation();removeEquip(\'' + escJs(item.tradeId) + '\',\'' + nameEsc + '\',\'' + sidEsc + '\',' + (eq.isSet ? 'true' : 'false') + ',' + (eq.isComponent ? 'true' : 'false') + ')" title="삭제">×</span>';
+        }
         html += '</div>';
         html += '</div>';
       });
@@ -2571,12 +2581,26 @@ function removeEquip(tid, equipName, scheduleId, isSet, isComponent) {
   else if (isComponent) message += '\n(선택한 구성품 행만 삭제됩니다)';
   if (!confirm(message)) return;
 
+  var snapshot = captureDashboardEquipmentSnapshot(tid);
+  applyDashboardEquipmentMutation(tid, {}, {
+    operation: 'remove',
+    equipName: equipName,
+    scheduleId: scheduleId,
+    isSet: isSet,
+    isComponent: isComponent
+  });
+  showDashboardToast('삭제 저장 중...');
+
   fetch(API_URL + '?key=village2026&action=removeEquip&tid=' + encodeURIComponent(tid)
     + '&equipName=' + encodeURIComponent(equipName)
     + '&scheduleId=' + encodeURIComponent(scheduleId || ''))
     .then(function(r) { return r.json(); })
     .then(function(res) {
-      if (res.error) { alert("삭제 실패: " + res.error); return; }
+      if (res.error) {
+        restoreDashboardEquipmentSnapshot(snapshot);
+        alert("삭제 실패: " + res.error);
+        return;
+      }
       applyDashboardEquipmentMutation(tid, res, {
         operation: 'remove',
         equipName: equipName,
@@ -2585,7 +2609,10 @@ function removeEquip(tid, equipName, scheduleId, isSet, isComponent) {
         isComponent: isComponent
       });
     })
-    .catch(function(err) { alert("네트워크 오류: " + err.message); });
+    .catch(function(err) {
+      restoreDashboardEquipmentSnapshot(snapshot);
+      alert("네트워크 오류: " + err.message);
+    });
 }
 
 function editEquipQty(tid, scheduleId, equipName, currentQty) {
@@ -2597,12 +2624,25 @@ function editEquipQty(tid, scheduleId, equipName, currentQty) {
     return;
   }
 
+  var snapshot = captureDashboardEquipmentSnapshot(tid);
+  applyDashboardEquipmentMutation(tid, {}, {
+    operation: 'qty',
+    equipName: equipName,
+    scheduleId: scheduleId,
+    qty: qty
+  });
+  showDashboardToast('수량 저장 중...');
+
   fetch(API_URL + '?key=village2026&action=updateEquipQty&tid=' + encodeURIComponent(tid)
     + '&scheduleId=' + encodeURIComponent(scheduleId)
     + '&qty=' + encodeURIComponent(qty))
     .then(function(r) { return r.json(); })
     .then(function(res) {
-      if (res.error) { alert('수량 수정 실패: ' + res.error); return; }
+      if (res.error) {
+        restoreDashboardEquipmentSnapshot(snapshot);
+        alert('수량 수정 실패: ' + res.error);
+        return;
+      }
       applyDashboardEquipmentMutation(tid, res, {
         operation: 'qty',
         equipName: equipName,
@@ -2610,7 +2650,10 @@ function editEquipQty(tid, scheduleId, equipName, currentQty) {
         qty: qty
       });
     })
-    .catch(function(err) { alert('네트워크 오류: ' + err.message); });
+    .catch(function(err) {
+      restoreDashboardEquipmentSnapshot(snapshot);
+      alert('네트워크 오류: ' + err.message);
+    });
 }
 
 function tradeReturnFieldsHtml(item, cardType) {
@@ -3611,7 +3654,8 @@ function normalizeDashboardEquipmentItem(eq) {
     isSet: !!eq.isSet,
     isComponent: eq.isComponent !== undefined ? !!eq.isComponent : (!!setName && !isHeader),
     checkedCheckout: !!eq.checkedCheckout,
-    checkedCheckin: !!eq.checkedCheckin
+    checkedCheckin: !!eq.checkedCheckin,
+    pending: !!eq.pending
   };
 }
 
@@ -3619,13 +3663,32 @@ function syncDashboardEquipmentAdditions(tid, res, context) {
   var added = (res && res.addedItems) || [];
   if (!added.length && context && context.entries) {
     added = context.entries.map(function(entry) {
-      return { name: entry.name, qty: entry.qty, setName: entry.name, isHeader: true };
+      return {
+        scheduleId: 'pending:' + tid + ':' + entry.name,
+        name: entry.name,
+        qty: entry.qty,
+        setName: entry.name,
+        isHeader: true,
+        pending: true
+      };
     });
   }
   if (!added.length) return false;
+  var replacePending = !!(res && res.addedItems && res.addedItems.length && context && context.entries);
+  var pendingNames = {};
+  if (replacePending) {
+    context.entries.forEach(function(entry) {
+      pendingNames[String(entry.name || '').trim()] = true;
+    });
+  }
 
   dashboardEquipmentMutationTargets(tid).forEach(function(item) {
     item.equipments = item.equipments || [];
+    if (replacePending) {
+      item.equipments = item.equipments.filter(function(eq) {
+        return !(eq.pending && pendingNames[String(eq.name || '').trim()]);
+      });
+    }
     var existing = {};
     item.equipments.forEach(function(eq) {
       if (eq.scheduleId) existing[eq.scheduleId] = true;
@@ -3638,6 +3701,30 @@ function syncDashboardEquipmentAdditions(tid, res, context) {
     });
   });
   return true;
+}
+
+function captureDashboardEquipmentSnapshot(tid) {
+  return dashboardEquipmentMutationTargets(tid).map(function(item) {
+    return {
+      item: item,
+      equipments: (item.equipments || []).map(function(eq) {
+        var copy = {};
+        Object.keys(eq || {}).forEach(function(key) { copy[key] = eq[key]; });
+        return copy;
+      })
+    };
+  });
+}
+
+function restoreDashboardEquipmentSnapshot(snapshot) {
+  (snapshot || []).forEach(function(entry) {
+    entry.item.equipments = (entry.equipments || []).map(function(eq) {
+      var copy = {};
+      Object.keys(eq || {}).forEach(function(key) { copy[key] = eq[key]; });
+      return copy;
+    });
+  });
+  renderDashboardEquipmentMutation();
 }
 
 function syncDashboardEquipmentRemoval(tid, res, context) {
@@ -3933,10 +4020,17 @@ function confirmAddEquip() {
 
   var tid = pendingAddTid;
   var mode = pendingAddMode;
+  var snapshot = captureDashboardEquipmentSnapshot(tid);
   var request = mode === 'onsite' ? postOnsiteAddonBatch(tid, entries) : postAddEquipBatch(tid, entries);
+  setAddEquipBusy(false);
+  closeAddEquipModal();
+  applyDashboardEquipmentMutation(tid, {}, {
+    operation: 'add',
+    entries: entries,
+    mode: mode
+  });
+  showDashboardToast(mode === 'onsite' ? '현장추가 저장 중...' : '장비 추가 저장 중...');
   request.then(function(res) {
-    setAddEquipBusy(false);
-    closeAddEquipModal();
     applyDashboardEquipmentMutation(tid, res, {
       operation: 'add',
       entries: entries,
@@ -3950,7 +4044,7 @@ function confirmAddEquip() {
       ? '현장 추가 반출 기록 완료. 장비 ' + (res.addedEquipments || entries.length) + '개를 추가했습니다.'
       : '가용 확인 완료. 장비 ' + (res.addedEquipments || entries.length) + '개를 추가했습니다.');
   }).catch(function(err) {
-    setAddEquipBusy(false);
+    restoreDashboardEquipmentSnapshot(snapshot);
     alert((mode === 'onsite' ? '현장 추가 실패: ' : '가용 확인 실패: ') + err.message);
   });
 }

@@ -43,6 +43,32 @@ assert.match(
   'dashboardUpdateEquipmentQty must include scheduleId in updatedItems'
 );
 
+const availabilityRowsBody = backend.match(/function findDashboardScheduleRowsForEquipments_\([\s\S]*?\n}\n\nfunction buildDashboardScheduleData_/);
+assert.ok(availabilityRowsBody, 'findDashboardScheduleRowsForEquipments_ must exist before buildDashboardScheduleData_');
+assert.doesNotMatch(
+  availabilityRowsBody[0],
+  /createTextFinder|findDashboardRowsByValue_/,
+  'availability checks must not run one TextFinder scan per equipment name'
+);
+assert.match(
+  availabilityRowsBody[0],
+  /getRange\(2,\s*1,\s*lastRow - 1,\s*10\)\.getValues\(\)/,
+  'availability checks should read the schedule rows once and filter in memory'
+);
+
+const removeBackendBody = backend.match(/function dashboardRemoveEquipment\([\s\S]*?\n}\n\n\n\/\*\* "yyyy-MM-dd"/);
+assert.ok(removeBackendBody, 'dashboardRemoveEquipment must exist before parseDT');
+assert.match(
+  removeBackendBody[0],
+  /deleteDashboardRowsDescending_\(sched,\s*rowsToDelete\)/,
+  'dashboardRemoveEquipment must batch contiguous row deletion'
+);
+assert.doesNotMatch(
+  removeBackendBody[0],
+  /formatScheduleSheet\(sched\)/,
+  'dashboardRemoveEquipment must not reformat the full schedule sheet after deletion'
+);
+
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
   const html = read(file);
 
@@ -69,6 +95,16 @@ assert.match(
     /applyDashboardEquipmentMutation\(tid,\s*res,\s*\{[\s\S]*operation:\s*'remove'/,
     `${file} removeEquip must apply a realtime remove mutation`
   );
+  assert.match(
+    removeBody[0],
+    /var snapshot\s*=\s*captureDashboardEquipmentSnapshot\(tid\)[\s\S]*applyDashboardEquipmentMutation\(tid,\s*\{\},\s*\{[\s\S]*fetch\(/,
+    `${file} removeEquip must update the card before waiting for the slow GAS request`
+  );
+  assert.match(
+    removeBody[0],
+    /restoreDashboardEquipmentSnapshot\(snapshot\)/,
+    `${file} removeEquip must restore the card if the save fails`
+  );
 
   const qtyBody = html.match(/function editEquipQty\([\s\S]*?\n}\n\nfunction tradeReturnFieldsHtml/);
   assert.ok(qtyBody, `${file} must expose editEquipQty before tradeReturnFieldsHtml`);
@@ -82,6 +118,11 @@ assert.match(
     /applyDashboardEquipmentMutation\(tid,\s*res,\s*\{[\s\S]*operation:\s*'qty'/,
     `${file} editEquipQty must apply a realtime qty mutation`
   );
+  assert.match(
+    qtyBody[0],
+    /var snapshot\s*=\s*captureDashboardEquipmentSnapshot\(tid\)[\s\S]*applyDashboardEquipmentMutation\(tid,\s*\{\},\s*\{[\s\S]*fetch\(/,
+    `${file} editEquipQty must update the card before waiting for the slow GAS request`
+  );
 
   const addBody = html.match(/function confirmAddEquip\([\s\S]*?<\/script>/);
   assert.ok(addBody, `${file} must expose confirmAddEquip near the modal script end`);
@@ -94,6 +135,16 @@ assert.match(
     addBody[0],
     /applyDashboardEquipmentMutation\(tid,\s*res,\s*\{[\s\S]*operation:\s*'add'/,
     `${file} confirmAddEquip must apply a realtime add mutation`
+  );
+  assert.match(
+    addBody[0],
+    /var snapshot\s*=\s*captureDashboardEquipmentSnapshot\(tid\)[\s\S]*closeAddEquipModal\(\)[\s\S]*applyDashboardEquipmentMutation\(tid,\s*\{\},\s*\{[\s\S]*request\.then/,
+    `${file} confirmAddEquip must close the modal and show a pending row before the slow GAS request returns`
+  );
+  assert.match(
+    html,
+    /function captureDashboardEquipmentSnapshot\(|function restoreDashboardEquipmentSnapshot\(|is-pending|pending:\s*true|저장중/,
+    `${file} must include optimistic equipment mutation state and rollback helpers`
   );
 
   const applyBody = html.match(/function applyDashboardEquipmentMutation\([\s\S]*?\n}\n\nfunction showDashboardToast/);
