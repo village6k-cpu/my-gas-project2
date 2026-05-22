@@ -247,7 +247,8 @@ function handleRequest(e) {
           {
             limit: Number(params.limit || postBody.limit) || 80,
             profile: params.profile || postBody.profile,
-            summary: params.summary || postBody.summary
+            summary: params.summary || postBody.summary,
+            detailGroup: params.detailGroup || postBody.detailGroup
           }
         ));
 
