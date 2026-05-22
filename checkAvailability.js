@@ -249,7 +249,11 @@ function buildTimelineData_(fromKey, toKey, options) {
   var rangeStart = parseTimelineDateBoundary_(fromKey, false);
   var rangeEnd = parseTimelineDateBoundary_(toKey, true);
   var scheduleRows = readTimelineScheduleRows_(schedSheet, fromKey, toKey);
-  markTimelineBuildStep_('schedule_rows', { rowCount: scheduleRows.length });
+  markTimelineBuildStep_('schedule_rows', {
+    rowCount: scheduleRows.length,
+    totalRowCount: scheduleRows._totalRowCount || scheduleRows.length,
+    cacheHit: scheduleRows._cacheHit === true
+  });
   var rowIndicesBySet = {};
   scheduleRows.forEach(function(entry) {
     var row = entry.values;
@@ -565,18 +569,71 @@ function readTimelineScheduleRows_(schedSheet, fromKey, toKey) {
   var lastRow = schedSheet.getLastRow();
   if (lastRow < 2) return [];
 
-  var rows = schedSheet.getRange(2, 1, lastRow - 1, 12).getValues();
-  return rows.map(function(row, idx) {
-      return { rowNum: 2 + idx, values: row };
-  }).filter(function(entry) {
+  var rows = getTimelineScheduleRowsForCache_(schedSheet, lastRow);
+  var filtered = rows.filter(function(entry) {
     if (!fromKey && !toKey) return true;
     var row = entry.values;
-    var checkoutKey = normalizeTimelineDateKey_(row[5]);
-    var checkinKey = normalizeTimelineDateKey_(row[7]);
+    var checkoutKey = row[5] || normalizeTimelineDateKey_(row[5]);
+    var checkinKey = row[7] || normalizeTimelineDateKey_(row[7]);
     if (fromKey && checkinKey && checkinKey < fromKey) return;
     if (toKey && checkoutKey && checkoutKey > toKey) return;
     return true;
   });
+  filtered._cacheHit = rows._cacheHit === true;
+  filtered._totalRowCount = rows.length;
+  return filtered;
+}
+
+function getTimelineScheduleRowsForCache_(schedSheet, lastRow) {
+  var cacheKey = TIMELINE_CACHE_PREFIX_ + 'scheduleRows_v2_' +
+    getTimelineCacheVersion_() + '_' + lastRow;
+  var cached = getTimelineCacheText_(cacheKey);
+  if (cached) {
+    try {
+      var cachedRows = JSON.parse(cached);
+      if (Array.isArray(cachedRows)) {
+        cachedRows._cacheHit = true;
+        return cachedRows;
+      }
+    } catch (e) {}
+  }
+
+  var values = schedSheet.getRange(2, 1, lastRow - 1, 12).getValues();
+  var normalized = values.map(function(row, idx) {
+    return {
+      rowNum: 2 + idx,
+      values: normalizeTimelineScheduleRow_(row)
+    };
+  });
+  normalized._cacheHit = false;
+  try { putTimelineCacheText_(cacheKey, JSON.stringify(normalized), 300); } catch (e2) {}
+  return normalized;
+}
+
+function normalizeTimelineScheduleRow_(row) {
+  var out = new Array(12);
+  for (var i = 0; i < 12; i++) out[i] = row[i];
+  out[0] = String(row[0] || '').trim();
+  out[1] = String(row[1] || '').trim();
+  out[2] = String(row[2] || '').trim();
+  out[3] = String(row[3] || '').trim();
+  out[4] = Number(row[4]) || 1;
+  out[5] = normalizeTimelineDateKey_(row[5]);
+  out[6] = normalizeTimelineTimeValue_(row[6]);
+  out[7] = normalizeTimelineDateKey_(row[7]);
+  out[8] = normalizeTimelineTimeValue_(row[8]);
+  out[9] = String(row[9] || '대기').trim();
+  out[10] = row[10] || '';
+  out[11] = Number(row[11]) || 0;
+  return out;
+}
+
+function normalizeTimelineTimeValue_(value) {
+  if (!value) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
+    return Utilities.formatDate(value, 'Asia/Seoul', 'HH:mm');
+  }
+  return String(value || '').trim();
 }
 
 function normalizeTimelineDateKey_(value) {
@@ -5118,6 +5175,8 @@ function dashboardAddEquipments(tid, entries, options) {
     applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidRow, hadFollowingRow);
     markProfile_('format_new_rows');
     scheduleContractRegen(tid);
+    try { invalidateDashboardCache(); } catch (eCache) {}
+    try { invalidateTimelineCache(); } catch (eTimeline) {}
     markProfile_('schedule_contract_regen');
 
     return attachProfile_({
@@ -5279,6 +5338,8 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
         sched.getRange(update.row, 5).setValue(update.newQty).setNumberFormat("#,##0");
       });
       scheduleContractRegen(tid);
+      try { invalidateDashboardCache(); } catch (eCache) {}
+      try { invalidateTimelineCache(); } catch (eTimeline) {}
     }
 
     return {
@@ -5529,6 +5590,8 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId) {
 
     deleteDashboardRowsDescending_(sched, rowsToDelete);
     scheduleContractRegen(tid);
+    try { invalidateDashboardCache(); } catch (eCache) {}
+    try { invalidateTimelineCache(); } catch (eTimeline) {}
     return {
       success: true,
       removedRows: rowsToDelete.length,

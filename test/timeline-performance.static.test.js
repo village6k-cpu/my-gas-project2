@@ -193,8 +193,32 @@ const sheetApi = read('sheetAPI.js');
 
 assert.match(
   backend,
-  /function readTimelineScheduleRows_\([\s\S]*getRange\(2,\s*1,\s*lastRow - 1,\s*12\)\.getValues\(\)[\s\S]*checkoutKey[\s\S]*checkinKey/,
-  'getTimelineData must keep range filtering inside a bounded row reader'
+  /function readTimelineScheduleRows_\([\s\S]*getTimelineScheduleRowsForCache_\(schedSheet,\s*lastRow\)[\s\S]*checkoutKey[\s\S]*checkinKey/,
+  'getTimelineData must keep range filtering inside the cached bounded row reader'
+);
+
+assert.match(
+  backend,
+  /function getTimelineScheduleRowsForCache_\(schedSheet,\s*lastRow\)[\s\S]*scheduleRows_v2_[\s\S]*getTimelineCacheText_\(cacheKey\)[\s\S]*putTimelineCacheText_\(cacheKey,\s*JSON\.stringify\(normalized\),\s*300\)/,
+  'timeline schedule rows must be normalized once and reused through script cache'
+);
+
+assert.match(
+  backend,
+  /function normalizeTimelineScheduleRow_\(row\)[\s\S]*normalizeTimelineDateKey_\(row\[5\]\)[\s\S]*normalizeTimelineTimeValue_\(row\[6\]\)[\s\S]*normalizeTimelineDateKey_\(row\[7\]\)/,
+  'timeline schedule row cache must normalize date/time values before JSON caching'
+);
+
+assert.match(
+  backend,
+  /function dashboardAddEquipments\([\s\S]*scheduleContractRegen\(tid\)[\s\S]{0,180}invalidateTimelineCache\(\)/,
+  'timeline schedule row cache must be invalidated after dashboard equipment additions'
+);
+
+assert.match(
+  backend,
+  /function dashboardRemoveEquipment\([\s\S]*scheduleContractRegen\(tid\)[\s\S]{0,180}invalidateTimelineCache\(\)/,
+  'timeline schedule row cache must be invalidated after dashboard equipment removals'
 );
 
 assert.match(
@@ -265,8 +289,8 @@ assert.match(
 
 assert.match(
   backend,
-  /markTimelineBuildStep_\(['"]schedule_rows['"],\s*\{\s*rowCount:\s*scheduleRows\.length\s*\}\)/,
-  'buildTimelineData_ must report timeline schedule row count in profile mode'
+  /markTimelineBuildStep_\(['"]schedule_rows['"],\s*\{[\s\S]{0,220}rowCount:\s*scheduleRows\.length[\s\S]{0,220}cacheHit:\s*scheduleRows\._cacheHit === true/,
+  'buildTimelineData_ must report timeline schedule row count and cache hit in profile mode'
 );
 
 assert.match(
