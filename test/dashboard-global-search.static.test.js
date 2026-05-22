@@ -22,7 +22,7 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v5_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v6_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
   'global search must cache the expensive all-reservation search index'
 );
 
@@ -36,6 +36,18 @@ assert.match(
   backend,
   /rs:\s*group\.rowNums\s*\|\|\s*\[\]/,
   'global search index must retain schedule row numbers so visible result cards avoid full sheet scans'
+);
+
+assert.match(
+  backend,
+  /function getDashboardSearchClientIndex_\(\)[\s\S]*entries:\s*index\.entries\s*\|\|\s*\[\]/,
+  'global search must expose the compact search index for instant browser-side results'
+);
+
+assert.match(
+  backend,
+  /eq:\s*buildDashboardSearchSummaryEquipments_\(group\.equipments\)/,
+  'global search index must include lightweight equipment summaries for instant expanded cards'
 );
 
 assert.doesNotMatch(
@@ -128,6 +140,12 @@ assert.match(
   'sheetAPI must pass dashboardSearch detailGroup through to the backend'
 );
 
+assert.match(
+  api,
+  /case\s+["']dashboardSearchIndex["'][\s\S]{0,120}getDashboardSearchClientIndex_\(\)/,
+  'sheetAPI must expose action=dashboardSearchIndex for browser-side instant search'
+);
+
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
   const html = read(file);
 
@@ -151,8 +169,8 @@ assert.match(
 
   assert.match(
     html,
-    /var DASHBOARD_SEARCH_DEBOUNCE_MS\s*=\s*360;/,
-    `${file} must debounce global search enough to avoid stacked GAS calls while typing`
+    /var DASHBOARD_SEARCH_DEBOUNCE_MS\s*=\s*220;/,
+    `${file} must keep server search debounce short while local index handles instant results`
   );
 
   assert.match(
@@ -165,6 +183,24 @@ assert.match(
     html,
     /action=dashboardSearch&summary=1&limit=[\s\S]{0,120}DASHBOARD_SEARCH_LIMIT/,
     `${file} must request lightweight global search summaries while typing`
+  );
+
+  assert.match(
+    html,
+    /action=dashboardSearchIndex/,
+    `${file} must prefetch a compact global search index for instant search results`
+  );
+
+  assert.match(
+    html,
+    /function renderDashboardSearchFromLocalIndex\(query\)/,
+    `${file} must render search results from the local index before GAS responds`
+  );
+
+  assert.match(
+    html,
+    /renderDashboardSearchFromLocalIndex\(dashboardSearchQuery\)/,
+    `${file} must try local instant search on every search input`
   );
 
   assert.match(
@@ -193,8 +229,8 @@ assert.match(
 
   assert.match(
     html,
-    /summaryMode && !dashboardSearchDetailedGroups\[groupId\]/,
-    `${file} must avoid refetching details for search groups that were already opened`
+    /dashboardSearchCollapsedGroups\[groupId\]\s*=\s*false;[\s\S]{0,120}renderDashboardGlobalSearch\(dashboardGlobalSearchData\)[\s\S]{0,120}loadDashboardSearchDetails\(groupId\)/,
+    `${file} must open summary search groups immediately while details load in the background`
   );
 
   assert.match(
@@ -241,13 +277,13 @@ assert.match(
 
   assert.match(
     html,
-    /function resetDashboardSearchCollapsedGroups\(data\)/,
+    /function resetDashboardSearchCollapsedGroups\(data,\s*previousGroups\)/,
     `${file} must initialize global search groups as collapsed`
   );
 
   assert.match(
     html,
-    /dashboardSearchCollapsedGroups\[groupId\]\s*=\s*true/,
+    /dashboardSearchCollapsedGroups\[groupId\]\s*=\s*previousGroups && previousGroups\[groupId\] === false \? false : true/,
     `${file} must collapse global search groups by default`
   );
 

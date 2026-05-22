@@ -1318,7 +1318,11 @@ function buildDashboardSearchSummaryItem_(candidate) {
   var otherTime = isCheckout ? entry.rt : entry.ot;
   var item = {
     tradeId: entry.tid || '',
-    name: entry.tid || '',
+    name: entry.n || entry.tid || '',
+    tel: entry.tel || '',
+    company: entry.co || '',
+    status: entry.st || '',
+    contractStatus: entry.cs || '',
     time: timeValue || '시간 미정',
     sortTime: normalizeDashboardTimeKey_(timeValue),
     sortDate: normalizeDashboardSearchDateKey_(dateValue),
@@ -1326,16 +1330,53 @@ function buildDashboardSearchSummaryItem_(candidate) {
     searchPhaseLabel: isCheckout ? '반출' : '반납',
     searchGroupLabel: formatDashboardSearchGroupLabel_(dateValue, isCheckout ? '반출' : '반납'),
     _type: isCheckout ? 'checkout' : 'checkin',
-    equipments: []
+    equipments: entry.eq || []
   };
   if (isCheckout) item.returnDate = otherDate + (otherTime ? ' ' + otherTime : '');
   else item.checkoutDate = otherDate + (otherTime ? ' ' + otherTime : '');
   return item;
 }
 
+function buildDashboardSearchSummaryEquipments_(equipments) {
+  var setsWithComponents = {};
+  (equipments || []).forEach(function(eq) {
+    if (eq && !eq.isHeader && eq.setName) setsWithComponents[eq.setName] = true;
+  });
+  return (equipments || []).filter(function(eq) {
+    return eq && eq.isHeader;
+  }).slice(0, 30).map(function(eq) {
+    return {
+      scheduleId: eq.scheduleId || '',
+      name: eq.name || '',
+      qty: eq.qty || 1,
+      setName: eq.setName || '',
+      isHeader: true,
+      isSet: !!setsWithComponents[eq.name],
+      isComponent: false
+    };
+  });
+}
+
+function getDashboardSearchClientIndex_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  var contractSheet = ss.getSheetByName('계약마스터');
+  if (!schedSheet || schedSheet.getLastRow() < 2) {
+    return { success: true, builtAt: '', entries: [] };
+  }
+  var index = getDashboardSearchIndex_(ss, schedSheet, contractSheet);
+  return {
+    success: true,
+    builtAt: index.builtAt || '',
+    cacheVersion: getDashboardSearchCacheVersion_(),
+    lastRow: schedSheet.getLastRow(),
+    entries: index.entries || []
+  };
+}
+
 function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_search_index_v5_' + getTimelineCacheVersion_() + '_' +
+  var cacheKey = 'dashboard_search_index_v6_' + getTimelineCacheVersion_() + '_' +
     getDashboardSearchCacheVersion_() + '_' + schedSheet.getLastRow();
   var cached = getDashboardCacheJson_(cache, cacheKey);
   if (cached && Array.isArray(cached.entries)) return cached;
@@ -1385,11 +1426,17 @@ function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
     var checkInfo = getEquipmentCheckForTrade_(equipmentChecks, tid);
     return {
       tid: tid,
+      n: cust.name || '',
+      tel: cust.tel || '',
+      co: cust.company || '',
+      cs: cust.contractStatus || '',
+      st: group.상태 || '',
       od: group.반출일 || '',
       ot: group.반출시간 || '',
       rd: group.반납일 || '',
       rt: group.반납시간 || '',
       rs: group.rowNums || [],
+      eq: buildDashboardSearchSummaryEquipments_(group.equipments),
       x: buildDashboardSearchText_(group, cust, extra, checkInfo)
     };
   });

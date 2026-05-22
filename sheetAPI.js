@@ -252,6 +252,9 @@ function handleRequest(e) {
           }
         ));
 
+      case "dashboardSearchIndex":
+        return jsonResponse(getDashboardSearchClientIndex_());
+
       case "dashboardNotes":
         return jsonResponse(getDashboardNotes_());
 
