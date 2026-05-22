@@ -40,8 +40,14 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchClientIndex_\(\)[\s\S]*entries:\s*index\.entries\s*\|\|\s*\[\]/,
-  'global search must expose the compact search index for instant browser-side results'
+  /var DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_[\s\S]*\['tid',\s*'n',\s*'tel',\s*'co',\s*'cs',\s*'st',\s*'od',\s*'ot',\s*'rd',\s*'rt',\s*'x'\]/,
+  'global search client index must define packed columns for a smaller browser payload'
+);
+
+assert.match(
+  backend,
+  /function getDashboardSearchClientIndex_\(\)[\s\S]*packed:\s*true[\s\S]*columns:\s*DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_[\s\S]*entries:\s*\(index\.entries\s*\|\|\s*\[\]\)\.map\(packDashboardSearchClientEntry_\)/,
+  'global search must expose a packed browser-side index for instant results'
 );
 
 assert.doesNotMatch(
@@ -205,8 +211,32 @@ assert.match(
 
   assert.match(
     html,
-    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v4['"]/,
-    `${file} must invalidate old equipment-heavy local dashboard search index caches`
+    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v5['"]/,
+    `${file} must invalidate old unpacked local dashboard search index caches`
+  );
+
+  assert.match(
+    html,
+    /var DASHBOARD_SEARCH_INDEX_PACKED_COLUMNS\s*=\s*\['tid',\s*'n',\s*'tel',\s*'co',\s*'cs',\s*'st',\s*'od',\s*'ot',\s*'rd',\s*'rt',\s*'x'\]/,
+    `${file} must know how to decode packed dashboard search index rows`
+  );
+
+  assert.match(
+    html,
+    /function expandPackedDashboardSearchIndexEntries\(data\)[\s\S]*data\.packed[\s\S]*columns\.forEach[\s\S]*entry\[key\]\s*=\s*row\[index\]/,
+    `${file} must expand packed search rows before local filtering`
+  );
+
+  assert.match(
+    html,
+    /entries:\s*expandPackedDashboardSearchIndexEntries\(data\)/,
+    `${file} must keep the in-memory search index as decoded objects`
+  );
+
+  assert.match(
+    html,
+    /data:\s*persistedDashboardSearchIndexPayload\(data\)/,
+    `${file} must persist the compact packed index payload instead of re-expanding it into localStorage`
   );
 
   assert.match(
