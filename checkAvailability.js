@@ -962,20 +962,19 @@ function getDashboardSearchData(query, options) {
 
   var candidates = [];
   entries.forEach(function(entry) {
-    var haystack = String(entry.searchText || '');
+    var haystack = String(entry.x || entry.searchText || '');
     if (!terms.every(function(term) { return haystack.indexOf(term) >= 0; })) return;
-    var g = entry.group || {};
     candidates.push({
       type: 'checkout',
       entry: entry,
-      sortDate: normalizeDashboardSearchDateKey_(g.반출일),
-      sortTime: normalizeDashboardTimeKey_(g.반출시간)
+      sortDate: normalizeDashboardSearchDateKey_(entry.od),
+      sortTime: normalizeDashboardTimeKey_(entry.ot)
     });
     candidates.push({
       type: 'checkin',
       entry: entry,
-      sortDate: normalizeDashboardSearchDateKey_(g.반납일),
-      sortTime: normalizeDashboardTimeKey_(g.반납시간)
+      sortDate: normalizeDashboardSearchDateKey_(entry.rd),
+      sortTime: normalizeDashboardTimeKey_(entry.rt)
     });
   });
   candidates.sort(compareDashboardSearchCandidates_);
@@ -991,6 +990,8 @@ function getDashboardSearchData(query, options) {
       visibleTradeIds.push(tid);
     }
   });
+  var visibleGroups = getDashboardSearchGroupsForIds_(schedSheet, visibleTradeIds);
+  var visibleContracts = getDashboardContractMapForIds_(contractSheet, visibleTradeIds);
   var visibleExtras = getTradeExtrasForIds_(visibleTradeIds, props);
   var visibleEquipmentChecks = getEquipmentCheckMapForIds_(visibleTradeIds);
   markProfile_('visible_details');
@@ -1002,12 +1003,20 @@ function getDashboardSearchData(query, options) {
   visible.forEach(function(candidate) {
     var entry = candidate.entry || {};
     var tid = entry.tid || '';
-    var g = entry.group || {};
+    var g = visibleGroups[tid] || {
+      거래ID: tid,
+      반출일: entry.od || '',
+      반출시간: entry.ot || '',
+      반납일: entry.rd || '',
+      반납시간: entry.rt || '',
+      상태: '',
+      equipments: []
+    };
     if (!builtByTid[tid]) {
       builtByTid[tid] = buildDashboardSearchItem_(
         tid,
         g,
-        entry.cust || {},
+        visibleContracts[tid] || {},
         visibleExtras[tid] || {},
         getEquipmentCheckForTrade_(visibleEquipmentChecks, tid),
         props,
@@ -1066,7 +1075,7 @@ function getDashboardSearchData(query, options) {
 
 function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_search_index_v3_' + getTimelineCacheVersion_() + '_' +
+  var cacheKey = 'dashboard_search_index_v4_' + getTimelineCacheVersion_() + '_' +
     getDashboardSearchCacheVersion_() + '_' + schedSheet.getLastRow();
   var cached = getDashboardCacheJson_(cache, cacheKey);
   if (cached && Array.isArray(cached.entries)) return cached;
@@ -1114,9 +1123,11 @@ function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
     var checkInfo = getEquipmentCheckForTrade_(equipmentChecks, tid);
     return {
       tid: tid,
-      group: group,
-      cust: cust,
-      searchText: buildDashboardSearchText_(group, cust, extra, checkInfo)
+      od: group.반출일 || '',
+      ot: group.반출시간 || '',
+      rd: group.반납일 || '',
+      rt: group.반납시간 || '',
+      x: buildDashboardSearchText_(group, cust, extra, checkInfo)
     };
   });
 
@@ -1128,13 +1139,57 @@ function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
   return index;
 }
 
+function getDashboardSearchGroupsForIds_(schedSheet, tradeIds) {
+  var result = {};
+  var wanted = {};
+  (tradeIds || []).forEach(function(tid) {
+    tid = String(tid || '').trim();
+    if (tid) wanted[tid] = true;
+  });
+  if (!schedSheet || schedSheet.getLastRow() < 2 || Object.keys(wanted).length === 0) return result;
+
+  var data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getDisplayValues();
+  data.forEach(function(row) {
+    var tradeId = String(row[1] || '').trim();
+    if (!wanted[tradeId]) return;
+
+    var setName = String(row[2] || '').trim();
+    var equipName = String(row[3] || '').trim();
+    var status = String(row[9] || '대기').trim();
+    if (!tradeId || !equipName || status === '취소') return;
+
+    if (!result[tradeId]) {
+      result[tradeId] = {
+        거래ID: tradeId,
+        반출일: String(row[5] || '').trim(),
+        반출시간: String(row[6] || '').trim(),
+        반납일: String(row[7] || '').trim(),
+        반납시간: String(row[8] || '').trim(),
+        상태: status,
+        equipments: []
+      };
+    }
+
+    var isHeader = setName === '' || setName === equipName;
+    result[tradeId].equipments.push({
+      scheduleId: String(row[0] || '').trim(),
+      name: equipName,
+      qty: row[4] || 1,
+      setName: setName,
+      isHeader: isHeader
+    });
+  });
+
+  return result;
+}
+
 function compareDashboardSearchCandidates_(a, b) {
   var dateCmp = String(a.sortDate || '').localeCompare(String(b.sortDate || ''));
   if (dateCmp) return dateCmp;
   var timeCmp = String(a.sortTime || '').localeCompare(String(b.sortTime || ''));
   if (timeCmp) return timeCmp;
-  var at = String((a.entry && (a.entry.cust && a.entry.cust.name || a.entry.tid)) || '');
-  var bt = String((b.entry && (b.entry.cust && b.entry.cust.name || b.entry.tid)) || '');
+  var at = String((a.entry && a.entry.tid) || '');
+  var bt = String((b.entry && b.entry.tid) || '');
   var nameCmp = at.localeCompare(bt);
   if (nameCmp) return nameCmp;
   return String(a.type || '').localeCompare(String(b.type || ''));
@@ -1159,7 +1214,7 @@ function getDashboardSearchResultCacheKey_(query, limit) {
     normalizeDashboardSearchText_(query);
   var digest = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw))
     .replace(/=+$/g, '');
-  return 'dashboard_search_result_v3_' + digest;
+  return 'dashboard_search_result_v4_' + digest;
 }
 
 function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup) {
