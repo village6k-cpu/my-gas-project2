@@ -87,6 +87,8 @@ var TIMELINE_CACHE_VERSION_PROP_ = 'timelineCacheVersion_v1';
 var TIMELINE_CACHE_PREFIX_ = 'timeline_v3_';
 var TIMELINE_CACHE_CHUNK_SIZE_ = 85000;
 var TIMELINE_CACHE_MAX_CHUNKS_ = 30;
+var DASHBOARD_CACHE_CHUNK_SIZE_ = 85000;
+var DASHBOARD_CACHE_MAX_CHUNKS_ = 10;
 var EQUIPMENT_RISK_RULE_SHEET_NAME = '장비주의사항';
 
 /**
@@ -517,13 +519,10 @@ function getDashboardData(targetDate, skipCache, options) {
   var cache = CacheService.getScriptCache();
   var cacheKey = 'dashboard_v4_' + today + (evaluateRisk ? '_risk' : '');
   if (!skipCache) {
-    var cached = cache.get(cacheKey);
-    if (cached) {
-      try {
-        var cachedResult = JSON.parse(cached);
-        if (cachedResult && !cachedResult.date) cachedResult.date = today;
-        return cachedResult;
-      } catch (e) { /* fallthrough */ }
+    var cachedResult = getDashboardCacheJson_(cache, cacheKey);
+    if (cachedResult) {
+      if (!cachedResult.date) cachedResult.date = today;
+      return cachedResult;
     }
   }
 
@@ -722,8 +721,64 @@ function getDashboardData(targetDate, skipCache, options) {
     markEquipmentRiskSearchEvaluationSkipped_(result);
   }
   // 등록/취소/일정변경 시 invalidateDashboardCache로 무효화되므로, 날짜 이동 체감을 위해 15분 유지.
-  try { cache.put(cacheKey, JSON.stringify(result), 900); } catch (e) { /* 캐시 오버플로 무시 */ }
+  putDashboardCacheJson_(cache, cacheKey, result, 900);
   return result;
+}
+
+function getDashboardCacheJson_(cache, cacheKey) {
+  try {
+    var metaKey = cacheKey + '__count';
+    var count = Number(cache.get(metaKey));
+    if (count && count > 0 && count <= DASHBOARD_CACHE_MAX_CHUNKS_) {
+      var keys = [];
+      for (var i = 0; i < count; i++) keys.push(cacheKey + '__' + i);
+      var chunks = cache.getAll(keys);
+      var parts = [];
+      for (var j = 0; j < keys.length; j++) {
+        var part = chunks[keys[j]];
+        if (part === undefined || part === null) return null;
+        parts.push(part);
+      }
+      return JSON.parse(parts.join(''));
+    }
+
+    var cached = cache.get(cacheKey);
+    return cached ? JSON.parse(cached) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function putDashboardCacheJson_(cache, cacheKey, value, seconds) {
+  try {
+    var text = JSON.stringify(value);
+    if (text.length < DASHBOARD_CACHE_CHUNK_SIZE_) {
+      cache.put(cacheKey, text, seconds || 900);
+      return;
+    }
+
+    var count = Math.ceil(text.length / DASHBOARD_CACHE_CHUNK_SIZE_);
+    if (count < 1 || count > DASHBOARD_CACHE_MAX_CHUNKS_) return;
+    var payload = {};
+    payload[cacheKey + '__count'] = String(count);
+    for (var i = 0; i < count; i++) {
+      payload[cacheKey + '__' + i] = text.slice(
+        i * DASHBOARD_CACHE_CHUNK_SIZE_,
+        (i + 1) * DASHBOARD_CACHE_CHUNK_SIZE_
+      );
+    }
+    cache.putAll(payload, seconds || 900);
+  } catch (e) {}
+}
+
+function removeDashboardCacheJson_(cache, cacheKey) {
+  try {
+    var keys = [cacheKey, cacheKey + '__count'];
+    for (var i = 0; i < DASHBOARD_CACHE_MAX_CHUNKS_; i++) keys.push(cacheKey + '__' + i);
+    cache.removeAll(keys);
+  } catch (e) {
+    try { cache.remove(cacheKey); } catch (e2) {}
+  }
 }
 
 function profileDashboardData(targetDate) {
@@ -1829,8 +1884,8 @@ function invalidateDashboardCache() {
     var yesterday = Utilities.formatDate(new Date(Date.now() - 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
     var tomorrow = Utilities.formatDate(new Date(Date.now() + 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
     [today, yesterday, tomorrow].forEach(function(d) {
-      cache.remove('dashboard_v4_' + d);
-      cache.remove('dashboard_v4_' + d + '_risk');
+      removeDashboardCacheJson_(cache, 'dashboard_v4_' + d);
+      removeDashboardCacheJson_(cache, 'dashboard_v4_' + d + '_risk');
       cache.remove('dashboard_v3_' + d);
       cache.remove('dashboard_v2_' + d);
     });
