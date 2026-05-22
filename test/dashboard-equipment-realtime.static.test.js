@@ -6,6 +6,7 @@ const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 const backend = read('checkAvailability.js');
+const code = read('Code.js');
 
 assert.match(
   backend,
@@ -39,6 +40,12 @@ assert.match(
 
 assert.match(
   backend,
+  /if \(!dryRun\)\s*\{[\s\S]{0,120}LockService\.getScriptLock\(\)/,
+  'dashboard add/quantity dry-run checks must not wait on the write lock'
+);
+
+assert.match(
+  backend,
   /scheduleId:\s*update\.scheduleId/,
   'dashboardUpdateEquipmentQty must include scheduleId in updatedItems'
 );
@@ -59,6 +66,18 @@ assert.match(
   availabilityRowsBody[0],
   /readDashboardScheduleRows_\(sheet,\s*rowsToRead,\s*10\)/,
   'availability checks should read full schedule columns only for matched equipment rows'
+);
+
+assert.match(
+  code,
+  /CONTRACT_REGEN_TRIGGER_PROP_[\s\S]{0,900}hasRecentScheduledTrigger[\s\S]{0,260}ScriptApp\.getProjectTriggers\(\)/,
+  'contract regen scheduling must skip trigger-list scans when a recent regen trigger is already scheduled'
+);
+
+assert.match(
+  code,
+  /function regenPendingContracts\([\s\S]*props\.deleteProperty\(CONTRACT_REGEN_TRIGGER_PROP_\)[\s\S]*props\.setProperty\(CONTRACT_REGEN_TRIGGER_PROP_/,
+  'contract regen worker must clear and refresh the scheduled-trigger marker'
 );
 
 const removeBackendBody = backend.match(/function dashboardRemoveEquipment\([\s\S]*?\n}\n\n\n\/\*\* "yyyy-MM-dd"/);
@@ -221,6 +240,16 @@ assert.doesNotMatch(
 
   const silentRefreshBody = html.match(/function queueDashboardSilentRefresh\([\s\S]*?\n}\n\nfunction applyDashboardEquipmentMutation/);
   assert.ok(silentRefreshBody, `${file} must expose queueDashboardSilentRefresh before applyDashboardEquipmentMutation`);
+  assert.match(
+    html,
+    /var DASHBOARD_MUTATION_REFRESH_MIN_DELAY_MS\s*=\s*5000;/,
+    `${file} must keep post-mutation refresh delayed enough to avoid overwriting optimistic edits`
+  );
+  assert.match(
+    silentRefreshBody[0],
+    /Math\.max\(Number\(delayMs\) \|\| 0,\s*DASHBOARD_MUTATION_REFRESH_MIN_DELAY_MS\)/,
+    `${file} must enforce the minimum post-mutation silent refresh delay`
+  );
   assert.doesNotMatch(
     silentRefreshBody[0],
     /renderDashboard\(/,

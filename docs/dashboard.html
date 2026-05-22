@@ -1495,6 +1495,7 @@ var dashboardSilentRefreshTimer = null;
 var dashboardDatePrefetching = {};
 var dashboardPendingMutationCount = 0;
 var dashboardLocalMutationSeq = 0;
+var DASHBOARD_MUTATION_REFRESH_MIN_DELAY_MS = 5000;
 
 document.addEventListener('DOMContentLoaded', function() {
   var urlParams = new URLSearchParams(window.location.search);
@@ -3858,6 +3859,7 @@ function renderDashboardEquipmentMutation() {
 
 function queueDashboardSilentRefresh(delayMs) {
   clearTimeout(dashboardSilentRefreshTimer);
+  delayMs = Math.max(Number(delayMs) || 0, DASHBOARD_MUTATION_REFRESH_MIN_DELAY_MS);
   dashboardSilentRefreshTimer = setTimeout(function() {
     if (dashboardPendingMutationCount > 0) {
       queueDashboardSilentRefresh(1200);
@@ -3874,7 +3876,7 @@ function queueDashboardSilentRefresh(delayMs) {
         writeDashboardLocalCache(dateStr, data);
       })
       .catch(function() {});
-  }, delayMs || 30000);
+  }, delayMs);
 }
 
 function applyDashboardEquipmentMutation(tid, res, context) {

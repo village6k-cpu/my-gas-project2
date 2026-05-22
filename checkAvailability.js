@@ -4408,8 +4408,11 @@ function dashboardAddEquipments(tid, entries, options) {
   options = options || {};
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
 
-  var lock = LockService.getScriptLock();
-  try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+  var lock = null;
+  if (!dryRun) {
+    lock = LockService.getScriptLock();
+    try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+  }
 
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -4567,7 +4570,9 @@ function dashboardAddEquipments(tid, entries, options) {
       message: "가용 확인 완료 후 추가"
     };
   } finally {
-    try { lock.releaseLock(); } catch (e) {}
+    if (lock) {
+      try { lock.releaseLock(); } catch (e) {}
+    }
   }
 }
 
@@ -4607,8 +4612,11 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
   options = options || {};
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
 
-  var lock = LockService.getScriptLock();
-  try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+  var lock = null;
+  if (!dryRun) {
+    lock = LockService.getScriptLock();
+    try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+  }
 
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -4731,7 +4739,9 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
       message: dryRun ? "수량 수정 가능" : "수량 수정 완료"
     };
   } finally {
-    try { lock.releaseLock(); } catch (e) {}
+    if (lock) {
+      try { lock.releaseLock(); } catch (e) {}
+    }
   }
 }
 

@@ -1048,15 +1048,24 @@ function resyncAllContractDates() {
  * - 이미 예약된 트리거가 있으면 그대로 두고 타임스탬프만 갱신
  * - 트리거가 fire되면 타임스탬프를 다시 읽어 안정 기간(2.8초) 지난 것만 처리
  */
+var CONTRACT_REGEN_TRIGGER_PROP_ = 'contractRegenTriggerScheduledAt_v1';
+var CONTRACT_REGEN_TRIGGER_STALE_MS_ = 10 * 60 * 1000;
+
 function scheduleContractRegen(거래ID) {
   var props = PropertiesService.getScriptProperties();
-  props.setProperty('contractEditTS_' + 거래ID, String(Date.now()));
+  var now = Date.now();
+  props.setProperty('contractEditTS_' + 거래ID, String(now));
 
-  var exists = ScriptApp.getProjectTriggers().some(function(t) {
-    return t.getHandlerFunction() === 'regenPendingContracts';
-  });
-  if (!exists) {
-    ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
+  var scheduledAt = Number(props.getProperty(CONTRACT_REGEN_TRIGGER_PROP_) || 0);
+  var hasRecentScheduledTrigger = scheduledAt && (now - scheduledAt < CONTRACT_REGEN_TRIGGER_STALE_MS_);
+  if (!hasRecentScheduledTrigger) {
+    var exists = ScriptApp.getProjectTriggers().some(function(t) {
+      return t.getHandlerFunction() === 'regenPendingContracts';
+    });
+    if (!exists) {
+      ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
+    }
+    props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(now));
   }
 
   // 거래 변경이 있었으니 dashboard/timeline 캐시도 즉시 무효화 → 다음 fetch는 fresh
@@ -1074,14 +1083,15 @@ function regenPendingContracts() {
   try { lock.waitLock(10000); } catch (e) { return; }
 
   try {
+    var props = PropertiesService.getScriptProperties();
     // 자기 자신(트리거) 먼저 삭제 — 재예약은 마지막에 결정
     ScriptApp.getProjectTriggers().forEach(function(t) {
       if (t.getHandlerFunction() === 'regenPendingContracts') {
         ScriptApp.deleteTrigger(t);
       }
     });
+    props.deleteProperty(CONTRACT_REGEN_TRIGGER_PROP_);
 
-    var props = PropertiesService.getScriptProperties();
     var all = props.getProperties();
     var now = Date.now();
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -1111,6 +1121,7 @@ function regenPendingContracts() {
 
     if (stillPending) {
       ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
+      props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
     }
   } finally {
     lock.releaseLock();
