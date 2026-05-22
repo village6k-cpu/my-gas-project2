@@ -22,7 +22,7 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v4_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v5_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
   'global search must cache the expensive all-reservation search index'
 );
 
@@ -30,6 +30,12 @@ assert.match(
   backend,
   /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*x:\s*buildDashboardSearchText_\(group,\s*cust,\s*extra,\s*checkInfo\)/,
   'global search index must keep a compact normalized text field'
+);
+
+assert.match(
+  backend,
+  /rs:\s*group\.rowNums\s*\|\|\s*\[\]/,
+  'global search index must retain schedule row numbers so visible result cards avoid full sheet scans'
 );
 
 assert.doesNotMatch(
@@ -40,13 +46,13 @@ assert.doesNotMatch(
 
 assert.match(
   backend,
-  /function getDashboardSearchGroupsForIds_\(schedSheet,\s*tradeIds\)/,
-  'global search must rebuild full schedule groups only for visible result trades'
+  /function getDashboardSearchGroupsForIds_\(schedSheet,\s*tradeIds,\s*rowsByTid\)[\s\S]*readDashboardScheduleRowsDisplay_\(schedSheet,\s*rowNums,\s*12\)/,
+  'global search must rebuild full schedule groups from visible trade rows only'
 );
 
 assert.match(
   backend,
-  /function getDashboardSearchResultCacheKey_\(query,\s*limit\)[\s\S]*dashboard_search_result_v4_/,
+  /function getDashboardSearchResultCacheKey_\(query,\s*limit\)[\s\S]*dashboard_search_result_v5_/,
   'global search must cache repeated query results by normalized query and limit'
 );
 

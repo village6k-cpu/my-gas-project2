@@ -990,10 +990,23 @@ function getDashboardSearchData(query, options) {
       visibleTradeIds.push(tid);
     }
   });
-  var visibleExtras = getTradeExtrasForIds_(visibleTradeIds, props);
-  var visibleEquipmentChecks = getEquipmentCheckMapForIds_(visibleTradeIds);
-  var visibleGroups = getDashboardSearchGroupsForIds_(schedSheet, visibleTradeIds);
+  var visibleRowsByTid = {};
+  visible.forEach(function(candidate) {
+    var entry = candidate.entry || {};
+    var tid = String(entry.tid || '').trim();
+    var rows = Array.isArray(entry.rs) ? entry.rs : [];
+    if (tid && rows.length) {
+      if (!visibleRowsByTid[tid]) visibleRowsByTid[tid] = [];
+      visibleRowsByTid[tid] = visibleRowsByTid[tid].concat(rows);
+    }
+  });
+  var visibleGroups = getDashboardSearchGroupsForIds_(schedSheet, visibleTradeIds, visibleRowsByTid);
+  markProfile_('visible_groups');
   var visibleContracts = getDashboardContractMapForIds_(contractSheet, visibleTradeIds);
+  markProfile_('visible_contracts');
+  var visibleExtras = getTradeExtrasForIds_(visibleTradeIds, props);
+  markProfile_('visible_extras');
+  var visibleEquipmentChecks = getEquipmentCheckMapForIds_(visibleTradeIds);
   markProfile_('visible_details');
 
   var builtByTid = {};
@@ -1075,14 +1088,14 @@ function getDashboardSearchData(query, options) {
 
 function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_search_index_v4_' + getTimelineCacheVersion_() + '_' +
+  var cacheKey = 'dashboard_search_index_v5_' + getTimelineCacheVersion_() + '_' +
     getDashboardSearchCacheVersion_() + '_' + schedSheet.getLastRow();
   var cached = getDashboardCacheJson_(cache, cacheKey);
   if (cached && Array.isArray(cached.entries)) return cached;
 
   var data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getDisplayValues();
   var tradeGroups = {};
-  data.forEach(function(row) {
+  data.forEach(function(row, idx) {
     var tradeId = String(row[1] || '').trim();
     var setName = String(row[2] || '').trim();
     var equipName = String(row[3] || '').trim();
@@ -1097,10 +1110,12 @@ function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
         반납일: String(row[7] || '').trim(),
         반납시간: String(row[8] || '').trim(),
         상태: status,
+        rowNums: [],
         equipments: []
       };
     }
 
+    tradeGroups[tradeId].rowNums.push(idx + 2);
     var isHeader = setName === '' || setName === equipName;
     tradeGroups[tradeId].equipments.push({
       scheduleId: String(row[0] || '').trim(),
@@ -1127,6 +1142,7 @@ function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
       ot: group.반출시간 || '',
       rd: group.반납일 || '',
       rt: group.반납시간 || '',
+      rs: group.rowNums || [],
       x: buildDashboardSearchText_(group, cust, extra, checkInfo)
     };
   });
@@ -1139,7 +1155,7 @@ function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
   return index;
 }
 
-function getDashboardSearchGroupsForIds_(schedSheet, tradeIds) {
+function getDashboardSearchGroupsForIds_(schedSheet, tradeIds, rowsByTid) {
   var groups = {};
   var wanted = {};
   (tradeIds || []).forEach(function(tid) {
@@ -1148,7 +1164,28 @@ function getDashboardSearchGroupsForIds_(schedSheet, tradeIds) {
   });
   if (!schedSheet || schedSheet.getLastRow() < 2 || Object.keys(wanted).length === 0) return groups;
 
-  var data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getDisplayValues();
+  var rowNums = [];
+  var seenRows = {};
+  var hasRowsForAll = !!rowsByTid;
+  Object.keys(wanted).forEach(function(tid) {
+    var rows = rowsByTid && rowsByTid[tid];
+    if (!rows || !rows.length) {
+      hasRowsForAll = false;
+      return;
+    }
+    rows.forEach(function(rowNum) {
+      rowNum = Number(rowNum);
+      if (rowNum >= 2 && !seenRows[rowNum]) {
+        seenRows[rowNum] = true;
+        rowNums.push(rowNum);
+      }
+    });
+  });
+  rowNums.sort(function(a, b) { return a - b; });
+
+  var data = hasRowsForAll && rowNums.length
+    ? readDashboardScheduleRowsDisplay_(schedSheet, rowNums, 12)
+    : schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getDisplayValues();
   data.forEach(function(row) {
     var tradeId = String(row[1] || '').trim();
     if (!wanted[tradeId]) return;
@@ -1212,7 +1249,7 @@ function getDashboardSearchResultCacheKey_(query, limit) {
     normalizeDashboardSearchText_(query);
   var digest = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw))
     .replace(/=+$/g, '');
-  return 'dashboard_search_result_v4_' + digest;
+  return 'dashboard_search_result_v5_' + digest;
 }
 
 function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup) {
