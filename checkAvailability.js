@@ -1866,7 +1866,9 @@ function warmDashboardAvailabilityRowIndex_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sched = ss.getSheetByName("스케줄상세");
   if (!sched || sched.getLastRow() < 2) return;
-  getDashboardAvailabilityRowIndex_(sched, sched.getLastRow());
+  var lastRow = sched.getLastRow();
+  getDashboardAvailabilityRowIndex_(sched, lastRow);
+  getDashboardAvailabilityScheduleMap_(sched, lastRow);
 }
 
 /**
@@ -4200,6 +4202,59 @@ function readDashboardScheduleRowsDisplay_(sheet, rowNums, colCount) {
   return rows;
 }
 
+function getDashboardAvailabilityScheduleData_(sheet, lastRow, equipmentNames) {
+  if (!sheet || lastRow < 2 || !equipmentNames || equipmentNames.length === 0) return [];
+  var target = {};
+  (equipmentNames || []).forEach(function(name) {
+    var key = String(name || "").trim();
+    if (key) target[key] = true;
+  });
+  var names = Object.keys(target);
+  if (names.length === 0) return [];
+
+  var scheduleMap = getDashboardAvailabilityScheduleMap_(sheet, lastRow);
+  var data = [];
+  names.forEach(function(name) {
+    (scheduleMap[name] || []).forEach(function(row) {
+      data.push({
+        equipment: name,
+        qty: row[0] || 1,
+        startDT: new Date(row[1]),
+        endDT: new Date(row[2]),
+        status: row[3] || ''
+      });
+    });
+  });
+  return data;
+}
+
+function getDashboardAvailabilityScheduleMap_(sheet, lastRow) {
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "dashboard_availability_schedule_map_v1_" + getTimelineCacheVersion_() + "_" + lastRow;
+  var cached = getDashboardCacheJson_(cache, cacheKey);
+  if (cached) return cached;
+
+  var map = {};
+  var rows = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
+  rows.forEach(function(row) {
+    var equipment = String(row[3] || "").trim();
+    var status = String(row[9] || "").trim();
+    if (!equipment || status === "반납완료" || status === "취소") return;
+    var startDT = parseDT(row[5], row[6]);
+    var endDT = parseDT(row[7], row[8]);
+    if (!startDT || !endDT) return;
+    if (!map[equipment]) map[equipment] = [];
+    map[equipment].push([
+      Number(row[4]) || 1,
+      startDT.getTime(),
+      endDT.getTime(),
+      status
+    ]);
+  });
+  putDashboardCacheJson_(cache, cacheKey, map, 300);
+  return map;
+}
+
 function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames) {
   if (!sheet || lastRow < 2 || !equipmentNames || equipmentNames.length === 0) return [];
   var target = {};
@@ -4563,12 +4618,8 @@ function dashboardAddEquipments(tid, entries, options) {
     markProfile_('equipment_meta');
     var mergedAvailabilityItems = mergeAvailabilityItems_(availabilityItems);
     var targetEquipmentNames = mergedAvailabilityItems.map(function(item) { return item.name; });
-    var availabilityScheduleRows = findDashboardScheduleRowsForEquipments_(sched, lastRow, targetEquipmentNames);
+    var scheduleData = getDashboardAvailabilityScheduleData_(sched, lastRow, targetEquipmentNames);
     markProfile_('availability_schedule_rows');
-    var scheduleData = buildDashboardScheduleData_(
-      availabilityScheduleRows,
-      targetEquipmentNames
-    );
     markProfile_('availability_schedule_data');
     var availability = checkAvailabilityForAddCached_(
       mergedAvailabilityItems,
@@ -4786,10 +4837,7 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
         startDT,
         endDT,
         buildDashboardEquipmentMeta_(equipSheet),
-        buildDashboardScheduleData_(
-          findDashboardScheduleRowsForEquipments_(sched, lastRow, targetEquipmentNames),
-          targetEquipmentNames
-        )
+        getDashboardAvailabilityScheduleData_(sched, lastRow, targetEquipmentNames)
       );
       if (!availability.ok) {
         return {

@@ -27,6 +27,11 @@ assert.match(
   'dashboardAddEquipments must keep requestedItems separate for onsite-addon logging'
 );
 assert.match(
+  batchAddBody[0],
+  /var scheduleData\s*=\s*getDashboardAvailabilityScheduleData_\(sched,\s*lastRow,\s*targetEquipmentNames\)/,
+  'dashboardAddEquipments must use cached availability schedule data instead of reading matched rows live'
+);
+assert.match(
   backend,
   /items:\s*addResult\.requestedItems\s*\|\|\s*addResult\.addedItems/,
   'dashboardRecordOnsiteAddon must not use expanded component rows as the onsite-addon request payload'
@@ -82,8 +87,14 @@ assert.match(
 
 assert.match(
   backend,
-  /function warmDashboardCache\(\)[\s\S]*warmDashboardAvailabilityRowIndex_\(\)/,
-  'dashboard warmer must prebuild the availability row index in the background'
+  /function getDashboardAvailabilityScheduleMap_\(sheet,\s*lastRow\)[\s\S]*getDashboardCacheJson_\(cache,\s*cacheKey\)[\s\S]*sheet\.getRange\(2,\s*1,\s*lastRow - 1,\s*10\)\.getValues\(\)[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*map,\s*300\)/,
+  'dashboard availability schedule map must be cached so add-equipment checks avoid live schedule scans'
+);
+
+assert.match(
+  backend,
+  /function warmDashboardAvailabilityRowIndex_\(\)[\s\S]*getDashboardAvailabilityRowIndex_\(sched,\s*lastRow\)[\s\S]*getDashboardAvailabilityScheduleMap_\(sched,\s*lastRow\)/,
+  'dashboard warmer must prebuild availability row and schedule caches in the background'
 );
 
 assert.match(
