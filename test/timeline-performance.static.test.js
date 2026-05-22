@@ -110,8 +110,8 @@ const backend = read('checkAvailability.js');
 
 assert.match(
   backend,
-  /function readTimelineScheduleRows_\([\s\S]*getRange\(2,\s*6,\s*lastRow - 1,\s*3\)\.getValues\(\)/,
-  'getTimelineData must scan only date columns before reading matched rows'
+  /function readTimelineScheduleRows_\([\s\S]*getRange\(2,\s*1,\s*lastRow - 1,\s*12\)\.getValues\(\)[\s\S]*checkoutKey[\s\S]*checkinKey/,
+  'getTimelineData must keep range filtering inside a bounded row reader'
 );
 
 assert.match(
@@ -123,7 +123,7 @@ assert.match(
 assert.doesNotMatch(
   backend,
   /const data\s*=\s*schedSheet\.getRange\(2,\s*1,\s*schedSheet\.getLastRow\(\) - 1,\s*12\)\.getValues\(\)/,
-  'timeline range loads must not read the full schedule A:L payload upfront'
+  'buildTimelineData_ must not bypass the bounded timeline row reader'
 );
 
 console.log('timeline performance static checks passed');
