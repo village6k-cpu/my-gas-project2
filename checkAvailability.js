@@ -4199,10 +4199,12 @@ function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames)
     var key = String(name || "").trim();
     if (key) target[key] = true;
   });
-  var data = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
-  return data.filter(function(row) {
-    return !!target[String(row[3] || "").trim()];
+  var names = sheet.getRange(2, 4, lastRow - 1, 1).getValues();
+  var rowsToRead = [];
+  names.forEach(function(row, idx) {
+    if (target[String(row[0] || "").trim()]) rowsToRead.push(idx + 2);
   });
+  return readDashboardScheduleRows_(sheet, rowsToRead, 10);
 }
 
 function buildDashboardScheduleData_(scheduleRows, equipmentNames) {

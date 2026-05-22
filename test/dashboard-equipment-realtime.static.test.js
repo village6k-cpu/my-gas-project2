@@ -52,8 +52,13 @@ assert.doesNotMatch(
 );
 assert.match(
   availabilityRowsBody[0],
-  /getRange\(2,\s*1,\s*lastRow - 1,\s*10\)\.getValues\(\)/,
-  'availability checks should read the schedule rows once and filter in memory'
+  /getRange\(2,\s*4,\s*lastRow - 1,\s*1\)\.getValues\(\)/,
+  'availability checks should scan only the equipment-name column before reading matched schedule rows'
+);
+assert.match(
+  availabilityRowsBody[0],
+  /readDashboardScheduleRows_\(sheet,\s*rowsToRead,\s*10\)/,
+  'availability checks should read full schedule columns only for matched equipment rows'
 );
 
 const removeBackendBody = backend.match(/function dashboardRemoveEquipment\([\s\S]*?\n}\n\n\n\/\*\* "yyyy-MM-dd"/);
