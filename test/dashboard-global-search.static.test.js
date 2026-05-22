@@ -82,6 +82,24 @@ assert.match(
 
 assert.match(
   backend,
+  /var includeSearchRiskWarnings\s*=\s*options\.includeRiskWarnings === true/,
+  'global search must keep equipment-risk warning expansion opt-in for fast search details'
+);
+
+assert.match(
+  backend,
+  /includeSearchRiskWarnings \? setSheet : null/,
+  'global search must skip set-component risk expansion unless risk warnings are explicitly requested'
+);
+
+assert.match(
+  backend,
+  /function buildDashboardSearchItem_\([^\)]*options\)[\s\S]*includeRiskWarnings[\s\S]*riskWarnings:\s*includeRiskWarnings/,
+  'search card building must be able to omit expensive risk warning decoration'
+);
+
+assert.match(
+  backend,
   /function warmDashboardSearchIndex_\(\)[\s\S]*getDashboardSearchIndex_\(/,
   'dashboard warmer must prebuild the global search index'
 );

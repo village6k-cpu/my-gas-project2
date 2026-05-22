@@ -1178,8 +1178,16 @@ function getDashboardSearchData(query, options) {
   }
 
   var props = PropertiesService.getScriptProperties().getProperties();
-  var riskRules = getEquipmentRiskRules_();
-  var riskCandidateLookup = buildDashboardSetComponentLookup_(setSheet);
+  var includeSearchRiskWarnings = options.includeRiskWarnings === true ||
+    options.includeRiskWarnings === 1 ||
+    options.includeRiskWarnings === '1' ||
+    options.includeRiskWarnings === 'true';
+  var riskRules = [];
+  var riskCandidateLookup = {};
+  if (includeSearchRiskWarnings) {
+    riskRules = getEquipmentRiskRules_();
+    riskCandidateLookup = buildDashboardSetComponentLookup_(setSheet);
+  }
   markProfile_('options');
 
   var visibleTradeIds = [];
@@ -1235,8 +1243,9 @@ function getDashboardSearchData(query, options) {
         getEquipmentCheckForTrade_(visibleEquipmentChecks, tid),
         props,
         riskRules,
-        setSheet,
-        riskCandidateLookup
+        includeSearchRiskWarnings ? setSheet : null,
+        riskCandidateLookup,
+        { includeRiskWarnings: includeSearchRiskWarnings }
       );
     }
 
@@ -1492,8 +1501,10 @@ function getDashboardSearchResultCacheKey_(query, limit, summaryOnly, detailGrou
   return 'dashboard_search_result_v6_' + digest;
 }
 
-function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup) {
-  riskRules = riskRules || getEquipmentRiskRules_();
+function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup, options) {
+  options = options || {};
+  var includeRiskWarnings = options.includeRiskWarnings !== false;
+  if (includeRiskWarnings && !riskRules) riskRules = getEquipmentRiskRules_();
   var setsWithComponents = {};
   g.equipments.forEach(function(eq) {
     if (!eq.isHeader && eq.setName) setsWithComponents[eq.setName] = true;
@@ -1537,7 +1548,9 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRu
     returnStatus: checkInfo.returnStatus || '',
     returnMemo: checkInfo.returnMemo || '',
     equipmentCheckRow: checkInfo.row || 0,
-    riskWarnings: attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet, riskCandidateLookup), riskRules),
+    riskWarnings: includeRiskWarnings
+      ? attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet, riskCandidateLookup), riskRules)
+      : [],
     equipments: displayEquip
   };
 }
@@ -2997,12 +3010,14 @@ function getEquipmentCheckMapForIds_(tradeIds) {
     var lastCol = Math.max(sheet.getLastColumn(), 4, schema.statusCol, schema.memoCol, schema.keyCol || 0, schema.labelCol || 0);
     var rowCount = sheet.getLastRow() - 1;
     var keyCol = schema.keyCol || 1;
-    var ids = sheet.getRange(2, keyCol, rowCount, 1).getDisplayValues();
+    var rowIndex = getEquipmentCheckRowIndexForTradeIds_(sheet, schema, rowCount, keyCol);
     var rowsToRead = [];
-    ids.forEach(function(row, idx) {
-      var tradeId = normalizeEquipmentCheckTradeId_(String(row[0] || '').trim());
-      if (wanted[tradeId]) rowsToRead.push(idx + 2);
+    Object.keys(wanted).forEach(function(tradeId) {
+      (rowIndex[tradeId] || []).forEach(function(rowNum) {
+        rowsToRead.push(rowNum);
+      });
     });
+    rowsToRead.sort(function(a, b) { return a - b; });
     var values = readDashboardScheduleRowsDisplay_(sheet, rowsToRead, lastCol);
 
     values.forEach(function(row, idx) {
@@ -3026,6 +3041,28 @@ function getEquipmentCheckMapForIds_(tradeIds) {
   }
 
   return result;
+}
+
+function getEquipmentCheckRowIndexForTradeIds_(sheet, schema, rowCount, keyCol) {
+  var cache = null;
+  var cacheKey = 'equipmentCheckRowIndex_v1_' + rowCount + '_' + keyCol + '_' +
+    (schema.statusCol || 0) + '_' + (schema.memoCol || 0);
+  try {
+    cache = CacheService.getScriptCache();
+    var cached = getDashboardCacheJson_(cache, cacheKey);
+    if (cached) return cached;
+  } catch (e) {}
+
+  var index = {};
+  var ids = sheet.getRange(2, keyCol, rowCount, 1).getDisplayValues();
+  ids.forEach(function(row, idx) {
+    var tradeId = normalizeEquipmentCheckTradeId_(String(row[0] || '').trim());
+    if (!tradeId) return;
+    if (!index[tradeId]) index[tradeId] = [];
+    index[tradeId].push(idx + 2);
+  });
+  if (cache) putDashboardCacheJson_(cache, cacheKey, index, 300);
+  return index;
 }
 
 function getEquipmentCheckForTrade_(map, tradeId) {
