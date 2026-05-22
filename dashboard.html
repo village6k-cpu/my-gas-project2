@@ -1463,7 +1463,7 @@ var dashboardSearchIndexPromise = null;
 var dashboardSearchIndexPrefetchQueued = false;
 var DASHBOARD_SEARCH_DEBOUNCE_MS = 220;
 var DASHBOARD_SEARCH_LIMIT = 40;
-var DASHBOARD_SEARCH_INDEX_LOCAL_KEY = 'dashboardSearchIndex_v2';
+var DASHBOARD_SEARCH_INDEX_LOCAL_KEY = 'dashboardSearchIndex_v3';
 var DASHBOARD_SEARCH_INDEX_LOCAL_TTL_MS = 30 * 60 * 1000;
 var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
 var DASHBOARD_OLD_CACHE_PREFIX = 'dashCache_v3_';
@@ -2058,6 +2058,23 @@ function dashboardSearchGroupLabel(dateValue, phaseLabel) {
   return label + ' ' + phaseLabel;
 }
 
+function expandLocalDashboardSearchEquipments(items) {
+  return (items || []).map(function(item) {
+    if (Array.isArray(item)) {
+      return {
+        scheduleId: item[0] || '',
+        name: item[1] || '',
+        qty: item[2] || 1,
+        setName: item[3] || '',
+        isHeader: true,
+        isSet: item[4] === 1 || item[4] === true,
+        isComponent: false
+      };
+    }
+    return item || {};
+  });
+}
+
 function buildLocalDashboardSearchItem(entry, type) {
   entry = entry || {};
   var isCheckout = type === 'checkout';
@@ -2079,7 +2096,7 @@ function buildLocalDashboardSearchItem(entry, type) {
     searchPhaseLabel: isCheckout ? '반출' : '반납',
     searchGroupLabel: dashboardSearchGroupLabel(dateValue, isCheckout ? '반출' : '반납'),
     _type: type,
-    equipments: Array.isArray(entry.eq) ? entry.eq : [],
+    equipments: expandLocalDashboardSearchEquipments(entry.eq),
     summaryOnly: true
   };
   if (isCheckout) item.returnDate = otherDate + (otherTime ? ' ' + otherTime : '');

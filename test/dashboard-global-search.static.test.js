@@ -22,7 +22,7 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v6_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v7_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
   'global search must cache the expensive all-reservation search index'
 );
 
@@ -48,6 +48,24 @@ assert.match(
   backend,
   /eq:\s*buildDashboardSearchSummaryEquipments_\(group\.equipments\)/,
   'global search index must include lightweight equipment summaries for instant expanded cards'
+);
+
+assert.match(
+  backend,
+  /function buildDashboardSearchSummaryEquipments_\(equipments\)[\s\S]*return\s+\[[\s\S]*eq\.scheduleId[\s\S]*eq\.name[\s\S]*eq\.qty[\s\S]*eq\.setName/,
+  'global search index equipment summaries must use compact arrays, not repeated object keys'
+);
+
+assert.match(
+  backend,
+  /function expandDashboardSearchSummaryEquipments_\(items\)[\s\S]*Array\.isArray\(item\)[\s\S]*scheduleId:\s*item\[0\][\s\S]*name:\s*item\[1\]/,
+  'server summary results must expand compact equipment arrays before rendering'
+);
+
+assert.match(
+  backend,
+  /function compactDashboardSearchTextParts_\(parts\)[\s\S]*seen\[token\][\s\S]*out\.push\(token\)/,
+  'global search index text must dedupe repeated normalized tokens'
 );
 
 assert.doesNotMatch(
@@ -189,6 +207,24 @@ assert.match(
     html,
     /action=dashboardSearchIndex/,
     `${file} must prefetch a compact global search index for instant search results`
+  );
+
+  assert.match(
+    html,
+    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v3['"]/,
+    `${file} must invalidate old verbose local dashboard search index caches`
+  );
+
+  assert.match(
+    html,
+    /function expandLocalDashboardSearchEquipments\(items\)[\s\S]*Array\.isArray\(item\)[\s\S]*scheduleId:\s*item\[0\][\s\S]*name:\s*item\[1\]/,
+    `${file} must expand compact equipment arrays from the local search index`
+  );
+
+  assert.match(
+    html,
+    /equipments:\s*expandLocalDashboardSearchEquipments\(entry\.eq\)/,
+    `${file} must render local search equipment summaries after compact payload decoding`
   );
 
   assert.match(
