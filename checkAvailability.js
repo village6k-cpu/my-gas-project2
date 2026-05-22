@@ -1858,7 +1858,15 @@ function warmDashboardCache() {
     [today, yest, tom].forEach(function(d) {
       try { getDashboardData(d, true); } catch (e) { /* 개별 실패 무시 */ }
     });
+    try { warmDashboardAvailabilityRowIndex_(); } catch (e2) { /* 개별 실패 무시 */ }
   } catch (e) { /* ignore */ }
+}
+
+function warmDashboardAvailabilityRowIndex_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sched = ss.getSheetByName("스케줄상세");
+  if (!sched || sched.getLastRow() < 2) return;
+  getDashboardAvailabilityRowIndex_(sched, sched.getLastRow());
 }
 
 /**
@@ -4195,32 +4203,44 @@ function readDashboardScheduleRowsDisplay_(sheet, rowNums, colCount) {
 function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames) {
   if (!sheet || lastRow < 2 || !equipmentNames || equipmentNames.length === 0) return [];
   var target = {};
-  var patternParts = [];
+  var rowsToRead = [];
+  var rowIndex = getDashboardAvailabilityRowIndex_(sheet, lastRow);
   (equipmentNames || []).forEach(function(name) {
     var key = String(name || "").trim();
     if (key && !target[key]) {
       target[key] = true;
-      patternParts.push(escapeDashboardTextFinderRegex_(key));
+      rowsToRead = rowsToRead.concat(rowIndex[key] || []);
     }
   });
-  if (patternParts.length === 0) return [];
-
-  var rowsToRead = [];
-  var finder = sheet.getRange(2, 4, lastRow - 1, 1)
-    .createTextFinder("^(?:" + patternParts.join("|") + ")$")
-    .useRegularExpression(true)
-    .matchEntireCell(true);
-  finder.findAll().forEach(function(range) {
-    rowsToRead.push(range.getRow());
-  });
+  if (rowsToRead.length === 0) return [];
   rowsToRead.sort(function(a, b) { return a - b; });
+  var seenRows = {};
+  rowsToRead = rowsToRead.filter(function(rowNum) {
+    if (seenRows[rowNum]) return false;
+    seenRows[rowNum] = true;
+    return true;
+  });
   return readDashboardScheduleRows_(sheet, rowsToRead, 10).filter(function(row) {
     return !!target[String(row[3] || "").trim()];
   });
 }
 
-function escapeDashboardTextFinderRegex_(value) {
-  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function getDashboardAvailabilityRowIndex_(sheet, lastRow) {
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "dashboard_availability_row_index_v1_" + getTimelineCacheVersion_() + "_" + lastRow;
+  var cached = getDashboardCacheJson_(cache, cacheKey);
+  if (cached) return cached;
+
+  var index = {};
+  var names = sheet.getRange(2, 4, lastRow - 1, 1).getValues();
+  names.forEach(function(row, idx) {
+    var name = String(row[0] || "").trim();
+    if (!name) return;
+    if (!index[name]) index[name] = [];
+    index[name].push(idx + 2);
+  });
+  putDashboardCacheJson_(cache, cacheKey, index, 300);
+  return index;
 }
 
 function buildDashboardScheduleData_(scheduleRows, equipmentNames) {

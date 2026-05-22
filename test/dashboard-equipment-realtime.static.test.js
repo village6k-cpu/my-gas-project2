@@ -54,18 +54,30 @@ const availabilityRowsBody = backend.match(/function findDashboardScheduleRowsFo
 assert.ok(availabilityRowsBody, 'findDashboardScheduleRowsForEquipments_ must exist before buildDashboardScheduleData_');
 assert.doesNotMatch(
   availabilityRowsBody[0],
-  /getRange\(2,\s*4,\s*lastRow - 1,\s*1\)\.getValues\(\)/,
-  'availability checks must not read the whole equipment-name column into Apps Script'
+  /createTextFinder/,
+  'availability checks must not do a slow live sheet search for every add request'
 );
 assert.match(
   availabilityRowsBody[0],
-  /createTextFinder\("\^\(\?:\"\s*\+\s*patternParts\.join\("\|"\)\s*\+\s*"\)\$"\)[\s\S]{0,180}useRegularExpression\(true\)[\s\S]{0,120}findAll\(\)/,
-  'availability checks should find matching equipment rows with one server-side TextFinder regex'
+  /var rowIndex\s*=\s*getDashboardAvailabilityRowIndex_\(sheet,\s*lastRow\)/,
+  'availability checks should use the cached equipment row index'
 );
 assert.match(
   availabilityRowsBody[0],
   /readDashboardScheduleRows_\(sheet,\s*rowsToRead,\s*10\)/,
   'availability checks should read full schedule columns only for matched equipment rows'
+);
+
+assert.match(
+  backend,
+  /function getDashboardAvailabilityRowIndex_\(sheet,\s*lastRow\)[\s\S]*getDashboardCacheJson_\(cache,\s*cacheKey\)[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
+  'dashboard availability row index must be cached between add-equipment checks'
+);
+
+assert.match(
+  backend,
+  /function warmDashboardCache\(\)[\s\S]*warmDashboardAvailabilityRowIndex_\(\)/,
+  'dashboard warmer must prebuild the availability row index in the background'
 );
 
 assert.match(
