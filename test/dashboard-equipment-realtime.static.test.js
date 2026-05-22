@@ -7,6 +7,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 const backend = read('checkAvailability.js');
 const code = read('Code.js');
+const sheetApi = read('sheetAPI.js');
 
 assert.match(
   backend,
@@ -101,6 +102,18 @@ assert.match(
   backend,
   /function warmDashboardMutationCaches_\(\)[\s\S]*getDashboardEquipNameList_\(ss\)[\s\S]*buildDashboardSetLookup_\(ss\.getSheetByName\("세트마스터"\)\)[\s\S]*buildDashboardEquipmentMeta_\(equipSheet\)/,
   'dashboard warmer must prebuild add-equipment mutation caches in the background'
+);
+
+assert.match(
+  sheetApi,
+  /case "dashboardEquipNames":[\s\S]*names:\s*getDashboardEquipNameList_\(SpreadsheetApp\.getActiveSpreadsheet\(\)\)/,
+  'sheetAPI must expose a cached dedicated dashboardEquipNames endpoint instead of forcing the UI through generic sheet reads'
+);
+
+assert.match(
+  sheetApi,
+  /var INITIAL_EQUIP_NAMES = null;[\s\S]*var INITIAL_EQUIP_NAMES = ' \+ JSON\.stringify\(initialEquipNames\) \+ ';'/,
+  'GAS dashboard page must inline cached equipment names when available'
 );
 
 assert.match(
@@ -255,6 +268,39 @@ assert.doesNotMatch(
     html,
     /function captureDashboardEquipmentSnapshot\(|function restoreDashboardEquipmentSnapshot\(|is-pending|pending:\s*true|저장중/,
     `${file} must include optimistic equipment mutation state and rollback helpers`
+  );
+
+  const equipListBody = html.match(/function loadEquipList\([\s\S]*?\n}\n\nfunction hideEquipSuggestions/);
+  assert.ok(equipListBody, `${file} must expose loadEquipList before suggestion helpers`);
+  assert.match(
+    equipListBody[0],
+    /action=dashboardEquipNames/,
+    `${file} add-equipment dropdown must use the cached dedicated equipment-name API`
+  );
+  assert.doesNotMatch(
+    equipListBody[0],
+    /action=read[\s\S]*sheet=/,
+    `${file} add-equipment dropdown must not use the slow generic 목록 sheet read`
+  );
+  assert.match(
+    html,
+    /function attachEquipDropdown\([\s\S]*openEquipSuggestions/,
+    `${file} add-equipment rows must attach a visible suggestion dropdown`
+  );
+  assert.match(
+    html,
+    /attachEquipDropdown\(input\)/,
+    `${file} addEquipRow must attach the equipment suggestion dropdown to every row`
+  );
+  assert.match(
+    html,
+    /var EQUIP_LIST_LOCAL_KEY\s*=\s*'dashboardEquipNames_v1';/,
+    `${file} equipment names must keep a local cache for repeated add-equipment opens`
+  );
+  assert.match(
+    html,
+    /function hydrateInitialEquipList\([\s\S]*INITIAL_EQUIP_NAMES/,
+    `${file} equipment names must hydrate from embedded data or local cache before the modal is used`
   );
 
   const applyBody = html.match(/function applyDashboardEquipmentMutation\([\s\S]*?\n}\n\nfunction showDashboardToast/);
