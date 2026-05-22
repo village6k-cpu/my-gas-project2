@@ -22,13 +22,31 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v4_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
   'global search must cache the expensive all-reservation search index'
 );
 
-  assert.match(
-    backend,
-  /function getDashboardSearchResultCacheKey_\(query,\s*limit\)[\s\S]*dashboard_search_result_v3_/,
+assert.match(
+  backend,
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*x:\s*buildDashboardSearchText_\(group,\s*cust,\s*extra,\s*checkInfo\)/,
+  'global search index must keep a compact normalized text field'
+);
+
+assert.doesNotMatch(
+  backend,
+  /group:\s*group,\s*\n\s*cust:\s*cust,\s*\n\s*searchText:/,
+  'global search index must not cache full group/customer payloads for every reservation'
+);
+
+assert.match(
+  backend,
+  /function getDashboardSearchGroupsForIds_\(schedSheet,\s*tradeIds\)/,
+  'global search must rebuild full schedule groups only for visible result trades'
+);
+
+assert.match(
+  backend,
+  /function getDashboardSearchResultCacheKey_\(query,\s*limit\)[\s\S]*dashboard_search_result_v4_/,
   'global search must cache repeated query results by normalized query and limit'
 );
 
