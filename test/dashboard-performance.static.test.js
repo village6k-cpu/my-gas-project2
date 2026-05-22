@@ -234,6 +234,12 @@ assert.match(
 
 assert.match(
   backend,
+  /var DASHBOARD_CACHE_MAX_CHUNKS_\s*=\s*30;/,
+  'dashboard chunked cache must allow large availability maps to fit after warmup'
+);
+
+assert.match(
+  backend,
   /putDashboardCacheJson_\(cache,\s*cacheKey,\s*result,\s*900\)/,
   'getDashboardData must write dashboard payloads through the chunked cache helper'
 );
