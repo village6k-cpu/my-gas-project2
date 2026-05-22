@@ -422,6 +422,8 @@
 <script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
 <script>
 var API_URL = "";
+var INITIAL_TIMELINE_DATA = null;
+var INITIAL_TIMELINE_KEY = "";
 var timeline, allGroups = [], allItems = [];
 var groups = new vis.DataSet();
 var items = new vis.DataSet();
@@ -665,11 +667,24 @@ function loadData(forceFresh, opts) {
     + (forceFresh ? "&nocache=1" : "");
 
   var cachedData = readTimelineLocalCache(requestKey);
+  var usedInitialData = false;
+  if (!cachedData && INITIAL_TIMELINE_DATA && INITIAL_TIMELINE_KEY === requestKey) {
+    cachedData = INITIAL_TIMELINE_DATA;
+    usedInitialData = true;
+    writeTimelineLocalCache(requestKey, cachedData);
+    INITIAL_TIMELINE_DATA = null;
+    INITIAL_TIMELINE_KEY = "";
+  }
   if (cachedData) {
     renderTimelineData(cachedData);
+    showLoading(false);
     updateRefreshInfo();
     opts.silent = true;
     showLoading(false);
+  }
+  if (usedInitialData && !forceFresh) {
+    clearTimeout(timeoutId);
+    return Promise.resolve(cachedData);
   }
   if (!opts.silent) showLoading(true);
   return fetch(url, fetchOptions)

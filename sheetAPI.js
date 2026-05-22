@@ -65,6 +65,28 @@ function doGet(e) {
         }
       }
 
+      // ── timeline은 초기 데이터를 HTML에 직접 박아서 첫 API 왕복 1회 절약 ──
+      if (params.page === "timeline") {
+        try {
+          var initialTimelineRange = getInitialTimelineMobileRange_();
+          var initialTimelineData = getTimelineData({
+            from: initialTimelineRange.from,
+            to: initialTimelineRange.to,
+            compact: 2
+          });
+          content = content.replace(
+            'var INITIAL_TIMELINE_DATA = null;',
+            'var INITIAL_TIMELINE_DATA = ' + JSON.stringify(initialTimelineData) + ';'
+          );
+          content = content.replace(
+            'var INITIAL_TIMELINE_KEY = "";',
+            'var INITIAL_TIMELINE_KEY = "' + initialTimelineRange.from + '_' + initialTimelineRange.to + '";'
+          );
+        } catch (errTimeline) {
+          // 데이터 조회 실패해도 페이지는 로드, 클라이언트가 fetch로 재시도
+        }
+      }
+
       html.setContent(content);
       html.setTitle(pg.title);
       html.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
@@ -158,7 +180,8 @@ function handleRequest(e) {
           skipCache: skipTimelineCache,
           compact: params.compact || postBody.compact || params.slim || postBody.slim || "",
           all: params.all || postBody.all || params.fullRange || postBody.fullRange || "",
-          includeContractUrl: params.includeContractUrl || postBody.includeContractUrl || ""
+          includeContractUrl: params.includeContractUrl || postBody.includeContractUrl || "",
+          profile: params.profile || postBody.profile || ""
         }));
       }
 

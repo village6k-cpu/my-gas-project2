@@ -42,6 +42,18 @@ const sheetApi = read('sheetAPI.js');
 
   assert.match(
     html,
+    /if \(cachedData\)[\s\S]{0,260}renderTimelineData\(cachedData\)[\s\S]{0,120}showLoading\(false\)/,
+    `${file} must clear the loading overlay as soon as cached timeline data renders`
+  );
+
+  assert.doesNotMatch(
+    html,
+    /if \(!opts\.silent\) showLoading\(false\)/,
+    `${file} must always clear the loading overlay after timeline fetch settles`
+  );
+
+  assert.match(
+    html,
     /function renderTimelineData\(data/,
     `${file} must centralize timeline response parsing so cache and network paths match`
   );
@@ -94,6 +106,28 @@ const sheetApi = read('sheetAPI.js');
     `${file} must load the equipment list lazily when the add-equipment modal opens`
   );
 });
+
+{
+  const html = read('timelineMobile.html');
+
+  assert.match(
+    html,
+    /var INITIAL_TIMELINE_DATA = null;/,
+    'timelineMobile.html must accept GAS-inlined initial timeline data'
+  );
+
+  assert.match(
+    html,
+    /INITIAL_TIMELINE_DATA && INITIAL_TIMELINE_KEY === requestKey[\s\S]{0,260}writeTimelineLocalCache\(requestKey,\s*cachedData\)/,
+    'timelineMobile.html must render and cache GAS-inlined initial data before fetching'
+  );
+
+  assert.match(
+    html,
+    /if \(usedInitialData && !forceFresh\)[\s\S]{0,160}return Promise\.resolve\(cachedData\)/,
+    'timelineMobile.html must skip the duplicate first fetch when GAS already inlined timeline data'
+  );
+}
 
 {
   const html = read('docs/timeline.html');
@@ -153,7 +187,7 @@ const sheetApi = read('sheetAPI.js');
   assert.match(
     html,
     /if \(cachedData\)[\s\S]{0,220}renderTimelineData\(cachedData\)[\s\S]{0,120}showLoading\(false\)/,
-    `${file} must clear the GAS-served loading overlay when cached timeline data renders`
+    `${file} must clear the GAS-served loading overlay as soon as cached timeline data renders`
   );
 });
 
@@ -189,7 +223,7 @@ assert.match(
 
 assert.match(
   backend,
-  /return \{\s*compact:\s*true,[\s\S]{0,260}compactLevel:\s*compactOptions\.compactLevel[\s\S]{0,260}items:\s*itemList\.map\(function\(item\)/,
+  /return finishTimelineBuild_\(\{\s*compact:\s*true,[\s\S]{0,260}compactLevel:\s*compactOptions\.compactLevel[\s\S]{0,260}items:\s*itemList\.map\(function\(item\)/,
   'getTimelineData must return compact timeline payloads at the requested compact level'
 );
 
@@ -206,6 +240,36 @@ assert.match(
 );
 
 assert.match(
+  sheetApi,
+  /case "timeline"[\s\S]{0,760}profile:\s*params\.profile/,
+  'sheetAPI timeline action must forward opt-in profile requests'
+);
+
+assert.match(
+  backend,
+  /function getTimelineData\(options\)[\s\S]{0,420}var profile = options\.profile/,
+  'getTimelineData must support opt-in profiling for timeline bottleneck checks'
+);
+
+assert.match(
+  backend,
+  /if \(!profile\) \{[\s\S]{0,120}putTimelineCacheText_\(cacheKey,\s*JSON\.stringify\(result\),\s*300\)/,
+  'timeline profile responses must not be written into the shared cache'
+);
+
+assert.match(
+  backend,
+  /function buildTimelineData_\(fromKey,\s*toKey,\s*options\)[\s\S]{0,1500}markTimelineBuildStep_\(['"]sheets_opened['"]\)/,
+  'buildTimelineData_ must mark sheet-open timing when profile is enabled'
+);
+
+assert.match(
+  backend,
+  /markTimelineBuildStep_\(['"]schedule_rows['"],\s*\{\s*rowCount:\s*scheduleRows\.length\s*\}\)/,
+  'buildTimelineData_ must report timeline schedule row count in profile mode'
+);
+
+assert.match(
   backend,
   /if \(!fromKey && !toKey && !allowAllRange\)[\s\S]{0,180}getDefaultTimelineRange_\(\)/,
   'timeline API must avoid accidental all-range loads unless explicitly requested'
@@ -215,6 +279,24 @@ assert.match(
   backend,
   /function warmTimelineCache_\(\)[\s\S]*getDefaultTimelineRange_\(\)[\s\S]*getTimelineData\(\{ from:\s*range\.from,\s*to:\s*range\.to,\s*compact:\s*2 \}\)/,
   'dashboard warmer must keep the default compact v2 timeline range warm'
+);
+
+assert.match(
+  backend,
+  /function getInitialTimelineMobileRange_\(\)[\s\S]*- 2 \* 86400000[\s\S]*\+ 10 \* 86400000/,
+  'timeline backend must know the GAS-served mobile initial fetch range'
+);
+
+assert.match(
+  backend,
+  /function warmTimelineCache_\(\)[\s\S]*getInitialTimelineMobileRange_\(\)[\s\S]*getTimelineData\(\{ from:\s*mobileRange\.from,\s*to:\s*mobileRange\.to,\s*compact:\s*2 \}\)/,
+  'dashboard warmer must also warm the GAS-served mobile initial timeline range'
+);
+
+assert.match(
+  sheetApi,
+  /params\.page === "timeline"[\s\S]{0,620}getInitialTimelineMobileRange_\(\)[\s\S]{0,620}INITIAL_TIMELINE_DATA/,
+  'GAS-served timeline page must inline initial timeline data'
 );
 
 assert.match(
