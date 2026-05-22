@@ -1081,7 +1081,7 @@ var longPressTimer = null;
 var timelineRequestSeq = 0;
 var timelineAbortController = null;
 var timelineLastResponseKey = "";
-var TIMELINE_CACHE_PREFIX = "timelineCache_v2_";
+var TIMELINE_CACHE_PREFIX = "timelineCache_v3_";
 var TIMELINE_CACHE_TTL_MS = 5 * 60 * 1000;
 var TIMELINE_FETCH_TIMEOUT_MS = 15000;
 
@@ -1184,7 +1184,60 @@ function pruneTimelineLocalCache(keepKey) {
   } catch (e) {}
 }
 
+function expandTimelineResponse(data) {
+  data = data || {};
+  if (!data.compact) return data;
+  return {
+    groups: (data.groups || []).map(function(g) {
+      if (!g || g.id) return g;
+      return { id: g.i, content: g.c || g.i };
+    }),
+    items: (data.items || []).map(expandTimelineItem)
+  };
+}
+
+function expandTimelineDate(value) {
+  return typeof value === "number" ? new Date(value).toISOString() : value;
+}
+
+function timelineClassNameForStatus(status) {
+  return ["대기", "반출중", "반납완료", "취소"].indexOf(status) >= 0 ? "status-" + status : "status-기타";
+}
+
+function expandTimelineItem(it) {
+  if (!it || it.id) return it;
+  var status = it.st || "대기";
+  return {
+    id: it.i,
+    rowIndex: it.r,
+    rowIndices: it.rs || (it.r ? [it.r] : []),
+    group: it.g,
+    content: it.cn || "",
+    start: expandTimelineDate(it.s),
+    end: expandTimelineDate(it.e),
+    className: it.cl || timelineClassNameForStatus(status),
+    status: status,
+    editable: { updateTime: true, remove: false },
+    custName: it.cn || "",
+    tel: it.t || "",
+    거래ID: it.tid || "",
+    세트명: it.set || "",
+    장비명: it.eq || "",
+    수량: it.q || "",
+    반출: it.out || "",
+    반납: it.ret || "",
+    단가: it.p || 0,
+    반출시간: it.ot || "",
+    반납시간: it.rt || "",
+    회차: it.n || 1,
+    재고: it.stock || 1,
+    세트명원본: it.orig || it.set || "",
+    contractUrl: it.u || ""
+  };
+}
+
 function renderTimelineData(data) {
+  data = expandTimelineResponse(data);
   data = data || {};
   rawGroups = data.groups || [];
   rawItems = (data.items || []).map(function(it) {
@@ -1218,6 +1271,7 @@ function loadData(forceFresh, opts) {
   var url = API_URL + "?key=village2026&action=timeline"
     + "&from=" + encodeURIComponent(range.from)
     + "&to=" + encodeURIComponent(range.to)
+    + "&compact=1"
     + (forceFresh ? "&nocache=1" : "");
 
   var cachedData = readTimelineLocalCache(requestKey);
@@ -1737,12 +1791,7 @@ function ctxAction(action) {
   if (!item) return;
 
   if (action === "contract") {
-    var contractUrl = String(item.contractUrl || "").trim();
-    if (!contractUrl) {
-      showToast("계약서 링크가 없습니다");
-      return;
-    }
-    window.open(contractUrl, "_blank", "noopener");
+    openTimelineContract(item);
     return;
   }
   if (action === "addEquip") {
@@ -1770,6 +1819,34 @@ function ctxAction(action) {
 }
 
 window.ctxAction = ctxAction;
+
+function openTimelineContract(item) {
+  var contractUrl = String(item.contractUrl || "").trim();
+  if (contractUrl) {
+    window.open(contractUrl, "_blank", "noopener");
+    return;
+  }
+  var tid = String(item["거래ID"] || "").trim();
+  if (!tid) {
+    showToast("계약서 링크가 없습니다");
+    return;
+  }
+  showToast("계약서 링크 확인 중...");
+  fetch(API_URL + "?key=village2026&action=timelineContract&tid=" + encodeURIComponent(tid))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      var url = String((res && res.contractUrl) || "").trim();
+      if (!url) {
+        showToast("계약서 링크가 없습니다");
+        return;
+      }
+      item.contractUrl = url;
+      window.open(url, "_blank", "noopener");
+    })
+    .catch(function() {
+      showToast("계약서 링크 조회 실패");
+    });
+}
 
 document.addEventListener("click", function(e) {
   if (!e.target.closest(".ctx-menu")) hideContextMenu();

@@ -5,6 +5,7 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const backend = read('checkAvailability.js');
+const sheetApi = read('sheetAPI.js');
 
 ['docs/timeline.html', 'timelineMobile.html'].forEach((file) => {
   const html = read(file);
@@ -37,6 +38,18 @@ const backend = read('checkAvailability.js');
     html,
     /function renderTimelineData\(data/,
     `${file} must centralize timeline response parsing so cache and network paths match`
+  );
+
+  assert.match(
+    html,
+    /function expandTimelineResponse\(data\)[\s\S]{0,260}data\.compact/,
+    `${file} must expand compact timeline payloads before rendering`
+  );
+
+  assert.match(
+    html,
+    /action=timeline[\s\S]{0,220}&compact=1/,
+    `${file} must request compact timeline payloads from the API`
   );
 
   assert.match(
@@ -90,6 +103,12 @@ const backend = read('checkAvailability.js');
     /return fetch\(API_URL \+ "\?key=village2026&action=read&sheet="[\s\S]{0,900}return equipNames;/,
     'docs/timeline.html loadEquipNames must return the fetch promise for lazy modal setup'
   );
+
+  assert.match(
+    html,
+    /function openTimelineContract\(item\)[\s\S]{0,900}action=timelineContract/,
+    'docs/timeline.html must fetch contract links lazily instead of loading every link in the timeline payload'
+  );
 }
 
 ['timeline.html'].forEach((file) => {
@@ -109,6 +128,18 @@ const backend = read('checkAvailability.js');
 
   assert.match(
     html,
+    /function expandTimelineResponse\(data\)[\s\S]{0,260}data\.compact/,
+    `${file} must expand compact timeline payloads before rendering`
+  );
+
+  assert.match(
+    html,
+    /\.getTimelineData\(\{[\s\S]{0,220}compact:\s*true/,
+    `${file} must request compact timeline payloads through google.script.run`
+  );
+
+  assert.match(
+    html,
     /var TIMELINE_FETCH_TIMEOUT_MS\s*=\s*15000;/,
     `${file} must cap GAS-served timeline loading so the spinner cannot stay forever`
   );
@@ -124,6 +155,42 @@ assert.match(
   backend,
   /var scheduleRows\s*=\s*readTimelineScheduleRows_\(schedSheet,\s*fromKey,\s*toKey\)/,
   'buildTimelineData_ must use the bounded timeline row reader'
+);
+
+assert.match(
+  backend,
+  /function compactTimelineItem_\(item\)[\s\S]*tid:\s*item\.거래ID[\s\S]*ret:\s*item\.반납/,
+  'timeline compact payload must keep the fields the frontends need with shorter wire keys'
+);
+
+assert.match(
+  backend,
+  /if \(options\.includeContractUrl !== false\)[\s\S]{0,180}getTradeExtrasForIds_\(timelineTradeIdList\)/,
+  'timeline builds must skip contract-link reads when compact payloads do not include contract URLs'
+);
+
+assert.match(
+  backend,
+  /return \{\s*compact:\s*true,[\s\S]{0,220}items:\s*itemList\.map\(compactTimelineItem_\)/,
+  'getTimelineData must return compact timeline payloads when requested'
+);
+
+assert.match(
+  backend,
+  /function getTimelineContractLink\(tid\)[\s\S]{0,260}getTradeExtrasForIds_\(\[tid\]\)/,
+  'timeline contract links must be available through a lazy single-trade lookup'
+);
+
+assert.match(
+  sheetApi,
+  /case "timeline"[\s\S]{0,520}compact:\s*params\.compact/,
+  'sheetAPI timeline action must forward compact payload requests'
+);
+
+assert.match(
+  sheetApi,
+  /case "timelineContract"[\s\S]{0,160}getTimelineContractLink/,
+  'sheetAPI must expose the lazy timeline contract-link endpoint'
 );
 
 assert.match(

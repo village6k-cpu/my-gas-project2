@@ -155,9 +155,14 @@ function handleRequest(e) {
         return jsonResponse(getTimelineData({
           from: params.from || postBody.from || params.start || postBody.start || "",
           to: params.to || postBody.to || params.end || postBody.end || "",
-          skipCache: skipTimelineCache
+          skipCache: skipTimelineCache,
+          compact: params.compact || postBody.compact || params.slim || postBody.slim || "",
+          includeContractUrl: params.includeContractUrl || postBody.includeContractUrl || ""
         }));
       }
+
+      case "timelineContract":
+        return jsonResponse(getTimelineContractLink(params.tid || postBody.tid || params.tradeId || postBody.tradeId || ""));
 
       case "updateTime": {
         var row = Number(params.row || postBody.row);
