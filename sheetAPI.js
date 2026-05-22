@@ -971,7 +971,7 @@ function runFunction(funcName, params) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function jsonResponse(data, statusCode) {
-  const output = ContentService.createTextOutput(JSON.stringify(data, null, 2))
+  const output = ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
   return output;
 }

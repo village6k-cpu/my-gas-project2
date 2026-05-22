@@ -194,6 +194,12 @@ assert.match(
 );
 
 assert.match(
+  sheetApi,
+  /createTextOutput\(JSON\.stringify\(data\)\)/,
+  'sheetAPI JSON responses must be minified to avoid wasting payload bytes'
+);
+
+assert.match(
   backend,
   /var stockMap\s*=\s*getTimelineStockMap_\(ss\)/,
   'buildTimelineData_ must use the cached timeline equipment stock map'
