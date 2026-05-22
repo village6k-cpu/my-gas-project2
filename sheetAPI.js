@@ -181,6 +181,7 @@ function handleRequest(e) {
           compact: params.compact || postBody.compact || params.slim || postBody.slim || "",
           all: params.all || postBody.all || params.fullRange || postBody.fullRange || "",
           includeContractUrl: params.includeContractUrl || postBody.includeContractUrl || "",
+          includeStock: params.includeStock || postBody.includeStock || "",
           profile: params.profile || postBody.profile || ""
         }));
       }

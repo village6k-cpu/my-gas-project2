@@ -239,8 +239,16 @@ function buildTimelineData_(fromKey, toKey, options) {
   markTimelineBuildStep_('sheets_opened');
 
   // 장비마스터: 장비명 → 재고수량
-  var stockMap = getTimelineStockMap_(ss);
-  markTimelineBuildStep_('stock_map', { stockCount: Object.keys(stockMap || {}).length });
+  var includeStock = options.includeStock === true || options.includeStock === 1 ||
+    options.includeStock === '1' || options.includeStock === 'true';
+  if (options.includeStock === undefined || options.includeStock === null || options.includeStock === '') {
+    includeStock = !options.compact;
+  }
+  var stockMap = includeStock ? getTimelineStockMap_(ss) : {};
+  markTimelineBuildStep_('stock_map', {
+    enabled: includeStock,
+    stockCount: Object.keys(stockMap || {}).length
+  });
 
   if (!schedSheet || schedSheet.getLastRow() < 2) {
     return finishTimelineBuild_({ groups: [], items: [] });
@@ -437,7 +445,7 @@ function buildTimelineData_(fromKey, toKey, options) {
         반출시간:  e.반출시간 || '',
         반납시간:  e.반납시간 || '',
         회차:      e.회차 || 1,
-        재고:      stockMap[e.isSingleItem ? e.groupName : e.장비명] || 1,
+        재고:      includeStock ? (stockMap[e.isSingleItem ? e.groupName : e.장비명] || 1) : 0,
         세트명원본: e.세트명원본 || e.groupName,
         contractUrl: extra.contractUrl || ''
       });

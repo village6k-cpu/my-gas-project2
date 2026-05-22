@@ -265,8 +265,14 @@ assert.match(
 
 assert.match(
   sheetApi,
-  /case "timeline"[\s\S]{0,760}profile:\s*params\.profile/,
+  /case "timeline"[\s\S]{0,900}profile:\s*params\.profile/,
   'sheetAPI timeline action must forward opt-in profile requests'
+);
+
+assert.match(
+  sheetApi,
+  /case "timeline"[\s\S]{0,900}includeStock:\s*params\.includeStock/,
+  'sheetAPI timeline action must forward opt-in stock payload requests'
 );
 
 assert.match(
@@ -337,8 +343,8 @@ assert.match(
 
 assert.match(
   backend,
-  /var stockMap\s*=\s*getTimelineStockMap_\(ss\)/,
-  'buildTimelineData_ must use the cached timeline equipment stock map'
+  /var includeStock[\s\S]{0,360}includeStock = !options\.compact[\s\S]{0,180}var stockMap\s*=\s*includeStock \? getTimelineStockMap_\(ss\) : \{\}/,
+  'buildTimelineData_ must skip the equipment stock map on compact startup payloads'
 );
 
 assert.match(
@@ -346,6 +352,21 @@ assert.match(
   /function getTimelineStockMap_\(ss\)[\s\S]*getDashboardCachedJson_\("timeline_stock_map_v1",\s*300/,
   'timeline equipment stock lookup must use script cache'
 );
+
+assert.match(
+  backend,
+  /재고:\s*includeStock \? \(stockMap\[e\.isSingleItem \? e\.groupName : e\.장비명\] \|\| 1\) : 0/,
+  'compact timeline payloads must avoid stock values when stock lookup is skipped'
+);
+
+['docs/timeline.html', 'timelineMobile.html', 'timeline.html'].forEach((file) => {
+  const html = read(file);
+  assert.match(
+    html,
+    /재고:\s*it\.stock \|\| 999/,
+    `${file} must not assume missing compact stock means inventory is one`
+  );
+});
 
 assert.match(
   backend,

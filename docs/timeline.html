@@ -1273,7 +1273,7 @@ function expandTimelineItem(it, groupContentById, idx) {
     반출시간: it.ot || formatTimelineTime(it.s),
     반납시간: it.rt || formatTimelineTime(it.e),
     회차: it.n || 1,
-    재고: it.stock || 1,
+    재고: it.stock || 999,
     세트명원본: it.orig || setName,
     contractUrl: it.u || ""
   };
