@@ -422,6 +422,8 @@
 <script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
 <script>
 var API_URL = "";
+var INITIAL_TIMELINE_DATA = null;
+var INITIAL_TIMELINE_KEY = "";
 var timeline, allGroups = [], allItems = [];
 var groups = new vis.DataSet();
 var items = new vis.DataSet();
@@ -665,10 +667,23 @@ function loadData(forceFresh, opts) {
     + (forceFresh ? "&nocache=1" : "");
 
   var cachedData = readTimelineLocalCache(requestKey);
+  var usedInitialData = false;
+  if (!cachedData && INITIAL_TIMELINE_DATA && INITIAL_TIMELINE_KEY === requestKey) {
+    cachedData = INITIAL_TIMELINE_DATA;
+    usedInitialData = true;
+    writeTimelineLocalCache(requestKey, cachedData);
+    INITIAL_TIMELINE_DATA = null;
+    INITIAL_TIMELINE_KEY = "";
+  }
   if (cachedData) {
     renderTimelineData(cachedData);
+    showLoading(false);
     updateRefreshInfo();
     opts.silent = true;
+  }
+  if (usedInitialData && !forceFresh) {
+    clearTimeout(timeoutId);
+    return Promise.resolve(cachedData);
   }
   if (!opts.silent) showLoading(true);
   return fetch(url, fetchOptions)
@@ -678,7 +693,7 @@ function loadData(forceFresh, opts) {
       if (requestId !== timelineRequestSeq) return;
       var responseKey = requestKey + "\n" + text;
       if (!forceFresh && responseKey === timelineLastResponseKey) {
-        if (!opts.silent) showLoading(false);
+        showLoading(false);
         updateRefreshInfo();
         return;
       }
@@ -686,14 +701,14 @@ function loadData(forceFresh, opts) {
       timelineLastResponseKey = responseKey;
       writeTimelineLocalCache(requestKey, data);
       renderTimelineData(data);
-      if (!opts.silent) showLoading(false);
+      showLoading(false);
       updateRefreshInfo();
     })
     .catch(function(err) {
       clearTimeout(timeoutId);
       if (err && err.name === "AbortError" && !timedOut) return;
       if (requestId !== timelineRequestSeq) return;
-      if (!opts.silent) showLoading(false);
+      showLoading(false);
       document.getElementById("statInfo").textContent = timedOut ? "오류: 데이터 로드 시간 초과" : "오류: " + err.message;
     });
 }

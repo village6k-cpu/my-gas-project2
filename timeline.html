@@ -881,6 +881,7 @@
     var cachedData = readTimelineLocalCache(requestKey);
     if (cachedData) {
       renderTimelineData(cachedData);
+      showLoading(false);
     }
     if (!cachedData) {
       showLoading(true);

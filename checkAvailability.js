@@ -100,6 +100,19 @@ var EQUIPMENT_RISK_RULE_SHEET_NAME = '장비주의사항';
  */
 function getTimelineData(options) {
   options = options || {};
+  var profile = options.profile === true || options.profile === 1 ||
+    options.profile === '1' || options.profile === 'true';
+  var profileStart = Date.now();
+  var profileMarks = [];
+  function markTimelineStep_(step, details) {
+    if (!profile) return;
+    var item = { step: step, ms: Date.now() - profileStart };
+    if (details) {
+      Object.keys(details).forEach(function(key) { item[key] = details[key]; });
+    }
+    profileMarks.push(item);
+  }
+
   var fromKey = normalizeTimelineDateKey_(options.from || options.start || '');
   var toKey = normalizeTimelineDateKey_(options.to || options.end || '');
   var allowAllRange = isTimelineOptionEnabled_(options.all) || isTimelineOptionEnabled_(options.fullRange);
@@ -131,20 +144,37 @@ function getTimelineData(options) {
   var cacheKey = TIMELINE_CACHE_PREFIX_ + getTimelineCacheVersion_() + '_' +
     (fromKey || 'all') + '_' + (toKey || 'all') + '_' +
     (compact ? 'compact' + compactLevel : 'full') + '_' + (includeContractUrl ? 'contract' : 'nocontract');
+  markTimelineStep_('prepared', { from: fromKey || '', to: toKey || '', compactLevel: compactLevel });
 
   if (!skipCache) {
     var cached = getTimelineCacheText_(cacheKey);
+    markTimelineStep_('cache_read', { hit: !!cached });
     if (cached) {
-      try { return JSON.parse(cached); } catch (e) {}
+      try {
+        var cachedResult = JSON.parse(cached);
+        if (profile && cachedResult) {
+          cachedResult.cacheHit = true;
+          cachedResult.profile = profileMarks;
+        }
+        return cachedResult;
+      } catch (e) {}
     }
   }
 
   var result = buildTimelineData_(fromKey, toKey, {
     compact: compact,
     compactLevel: compactLevel,
-    includeContractUrl: includeContractUrl
+    includeContractUrl: includeContractUrl,
+    profile: profile
   });
-  try { putTimelineCacheText_(cacheKey, JSON.stringify(result), 300); } catch (e2) {}
+  markTimelineStep_('build_complete');
+  if (profile && result) {
+    result.cacheHit = false;
+    result.profile = profileMarks.concat(result.profile || []);
+  }
+  if (!profile) {
+    try { putTimelineCacheText_(cacheKey, JSON.stringify(result), 300); } catch (e2) {}
+  }
   return result;
 }
 
@@ -168,22 +198,58 @@ function getDefaultTimelineRange_() {
   };
 }
 
+function getInitialTimelineMobileRange_() {
+  var now = new Date();
+  return {
+    from: Utilities.formatDate(
+      new Date(now.getTime() - 2 * 86400000),
+      'Asia/Seoul',
+      'yyyy-MM-dd'
+    ),
+    to: Utilities.formatDate(
+      new Date(now.getTime() + 10 * 86400000),
+      'Asia/Seoul',
+      'yyyy-MM-dd'
+    )
+  };
+}
+
 function buildTimelineData_(fromKey, toKey, options) {
   options = options || {};
+  var profile = options.profile === true || options.profile === 1 ||
+    options.profile === '1' || options.profile === 'true';
+  var profileStart = Date.now();
+  var profileMarks = [];
+  function markTimelineBuildStep_(step, details) {
+    if (!profile) return;
+    var item = { step: step, ms: Date.now() - profileStart };
+    if (details) {
+      Object.keys(details).forEach(function(key) { item[key] = details[key]; });
+    }
+    profileMarks.push(item);
+  }
+  function finishTimelineBuild_(result) {
+    if (profile && result) result.profile = profileMarks;
+    return result;
+  }
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
+  markTimelineBuildStep_('sheets_opened');
 
   // 장비마스터: 장비명 → 재고수량
   var stockMap = getTimelineStockMap_(ss);
+  markTimelineBuildStep_('stock_map', { stockCount: Object.keys(stockMap || {}).length });
 
   if (!schedSheet || schedSheet.getLastRow() < 2) {
-    return { groups: [], items: [] };
+    return finishTimelineBuild_({ groups: [], items: [] });
   }
 
   var rangeStart = parseTimelineDateBoundary_(fromKey, false);
   var rangeEnd = parseTimelineDateBoundary_(toKey, true);
   var scheduleRows = readTimelineScheduleRows_(schedSheet, fromKey, toKey);
+  markTimelineBuildStep_('schedule_rows', { rowCount: scheduleRows.length });
   var rowIndicesBySet = {};
   scheduleRows.forEach(function(entry) {
     var row = entry.values;
@@ -194,6 +260,7 @@ function buildTimelineData_(fromKey, toKey, options) {
     if (!rowIndicesBySet[key]) rowIndicesBySet[key] = [];
     rowIndicesBySet[key].push(entry.rowNum);
   });
+  markTimelineBuildStep_('row_indexed', { setCount: Object.keys(rowIndicesBySet).length });
 
   const seen = {};   // "거래ID|그룹명" → true
   const entries = [];
@@ -282,6 +349,7 @@ function buildTimelineData_(fromKey, toKey, options) {
   scheduleRows.forEach(function(entry) { processRow(entry, true); });
   // Phase 2: 개별 장비 행 (세트명 없고 구성품 아닌 것만)
   scheduleRows.forEach(function(entry) { processRow(entry, false); });
+  markTimelineBuildStep_('entries_built', { entryCount: entries.length });
 
   var timelineTradeIds = {};
   entries.forEach(function(e) {
@@ -290,6 +358,7 @@ function buildTimelineData_(fromKey, toKey, options) {
   });
   var timelineTradeIdList = Object.keys(timelineTradeIds);
   var contractMap = getTimelineContractMapForIds_(contractSheet, timelineTradeIdList);
+  markTimelineBuildStep_('contract_map', { tradeCount: timelineTradeIdList.length });
   entries.forEach(function(e) {
     var tid = String(e.거래ID || '').trim();
     var cust = contractMap[tid] || {};
@@ -305,6 +374,7 @@ function buildTimelineData_(fromKey, toKey, options) {
     회차Map[hkey]++;
     e.회차 = 회차Map[hkey];
   });
+  markTimelineBuildStep_('sequence_marked');
 
   // 그룹 및 아이템 생성
   const groupMap  = {};
@@ -319,6 +389,7 @@ function buildTimelineData_(fromKey, toKey, options) {
       tradeExtras = {};
     }
   }
+  markTimelineBuildStep_('trade_extras', { enabled: options.includeContractUrl !== false });
 
   entries.forEach(function(e) {
     // 그룹 등록
@@ -364,18 +435,19 @@ function buildTimelineData_(fromKey, toKey, options) {
       });
     }
   });
+  markTimelineBuildStep_('items_built', { groupCount: groupList.length, itemCount: itemList.length });
 
   if (options.compact) {
     var compactOptions = { compactLevel: Number(options.compactLevel) || 1 };
-    return {
+    return finishTimelineBuild_({
       compact: true,
       compactLevel: compactOptions.compactLevel,
       groups: groupList.map(compactTimelineGroup_),
       items: itemList.map(function(item) { return compactTimelineItem_(item, compactOptions); })
-    };
+    });
   }
 
-  return { groups: groupList, items: itemList };
+  return finishTimelineBuild_({ groups: groupList, items: itemList });
 }
 
 function compactTimelineGroup_(group) {
@@ -2112,6 +2184,10 @@ function warmDashboardCache() {
 function warmTimelineCache_() {
   var range = getDefaultTimelineRange_();
   getTimelineData({ from: range.from, to: range.to, compact: 2 });
+  var mobileRange = getInitialTimelineMobileRange_();
+  if (mobileRange.from !== range.from || mobileRange.to !== range.to) {
+    getTimelineData({ from: mobileRange.from, to: mobileRange.to, compact: 2 });
+  }
 }
 
 function warmDashboardMutationCaches_() {
