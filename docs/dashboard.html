@@ -1500,6 +1500,8 @@ var dashboardSearchTimer = null;
 var dashboardSearchRequestSeq = 0;
 var dashboardSearchAbortController = null;
 var dashboardSearchCollapsedGroups = {};
+var dashboardSearchDetailedGroups = {};
+var dashboardSearchGroupLabels = {};
 var dashboardSearchDetailLoading = false;
 var DASHBOARD_SEARCH_DEBOUNCE_MS = 360;
 var DASHBOARD_SEARCH_LIMIT = 40;
@@ -1628,6 +1630,7 @@ function loadDashboardGlobalSearch(query) {
     .then(function(data) {
       if (requestId !== dashboardSearchRequestSeq || query !== dashboardSearchQuery) return;
       dashboardGlobalSearchData = data || {};
+      dashboardSearchDetailedGroups = {};
       resetDashboardSearchCollapsedGroups(dashboardGlobalSearchData);
       renderDashboardGlobalSearch(dashboardGlobalSearchData);
     })
@@ -2225,6 +2228,7 @@ function renderDashboard(data, expectedDate) {
 
 function renderDashboardGlobalSearch(data) {
   data = data || {};
+  dashboardSearchGroupLabels = {};
   var checkout = Array.isArray(data.checkout) ? data.checkout : [];
   var checkin = Array.isArray(data.checkin) ? data.checkin : [];
   var all = checkout.map(function(c) { c._type = 'checkout'; return c; })
@@ -2262,7 +2266,7 @@ function renderDashboardGlobalSearch(data) {
 function toggleDashboardSearchGroup(groupId) {
   if (!groupId) return;
   var isOpening = !!dashboardSearchCollapsedGroups[groupId];
-  if (isOpening && dashboardGlobalSearchData && dashboardGlobalSearchData.summaryMode) {
+  if (isOpening && dashboardGlobalSearchData && dashboardGlobalSearchData.summaryMode && !dashboardSearchDetailedGroups[groupId]) {
     loadDashboardSearchDetails(groupId);
     return;
   }
@@ -2275,17 +2279,19 @@ function loadDashboardSearchDetails(openGroupId) {
   if (!query || dashboardSearchDetailLoading) return;
   dashboardSearchDetailLoading = true;
   var requestId = dashboardSearchRequestSeq;
-  setDashboardSearchStatus('검색 상세 불러오는 중: "' + query + '"');
+  var groupLabel = dashboardSearchGroupLabels[openGroupId] || '';
+  setDashboardSearchStatus('검색 상세 불러오는 중: "' + query + '"' + (groupLabel ? ' · ' + groupLabel : ''));
 
   var url = API_URL + '?key=village2026&action=dashboardSearch&limit=' + encodeURIComponent(DASHBOARD_SEARCH_LIMIT)
-    + '&q=' + encodeURIComponent(query);
+    + '&q=' + encodeURIComponent(query)
+    + (groupLabel ? '&detailGroup=' + encodeURIComponent(groupLabel) : '');
   fetch(url)
     .then(function(r) { return r.json(); })
     .then(function(data) {
       dashboardSearchDetailLoading = false;
       if (requestId !== dashboardSearchRequestSeq || query !== dashboardSearchQuery) return;
-      dashboardGlobalSearchData = data || {};
-      resetDashboardSearchCollapsedGroups(dashboardGlobalSearchData);
+      mergeDashboardSearchDetails(openGroupId, data || {});
+      dashboardSearchDetailedGroups[openGroupId] = true;
       if (openGroupId) dashboardSearchCollapsedGroups[openGroupId] = false;
       renderDashboardGlobalSearch(dashboardGlobalSearchData);
     })
@@ -2294,6 +2300,30 @@ function loadDashboardSearchDetails(openGroupId) {
       if (requestId !== dashboardSearchRequestSeq) return;
       setDashboardSearchStatus('검색 상세 불러오기 실패: ' + err.message);
     });
+}
+
+function mergeDashboardSearchDetails(groupId, detailData) {
+  if (!dashboardGlobalSearchData || !dashboardGlobalSearchData.summaryMode) {
+    dashboardGlobalSearchData = detailData || {};
+    return;
+  }
+  function itemGroupId(item) {
+    return dashboardSearchGroupId((item && (item.searchGroupLabel || item.searchDate)) || '날짜 미정');
+  }
+  function mergeList(summaryList, detailList) {
+    var kept = (summaryList || []).filter(function(item) {
+      return itemGroupId(item) !== groupId;
+    });
+    return kept.concat(detailList || []);
+  }
+  dashboardGlobalSearchData.checkout = mergeList(dashboardGlobalSearchData.checkout, detailData.checkout);
+  dashboardGlobalSearchData.checkin = mergeList(dashboardGlobalSearchData.checkin, detailData.checkin);
+  dashboardGlobalSearchData.paymentOptions = detailData.paymentOptions || dashboardGlobalSearchData.paymentOptions;
+  dashboardGlobalSearchData.proofTypeOptions = detailData.proofTypeOptions || dashboardGlobalSearchData.proofTypeOptions;
+  dashboardGlobalSearchData.issueStatusOptions = detailData.issueStatusOptions || dashboardGlobalSearchData.issueStatusOptions;
+  dashboardGlobalSearchData.depositStatusOptions = detailData.depositStatusOptions || dashboardGlobalSearchData.depositStatusOptions;
+  dashboardGlobalSearchData.billingCompanyOptions = detailData.billingCompanyOptions || dashboardGlobalSearchData.billingCompanyOptions;
+  dashboardGlobalSearchData.partialDetailMode = true;
 }
 
 function resetDashboardSearchCollapsedGroups(data) {
@@ -2531,6 +2561,7 @@ function renderList(containerId, items, type, isSearching, options) {
   var html = '';
   Object.keys(groups).sort(options.globalSearch ? compareDashboardSearchGroupLabels : compareTimeLabels).forEach(function(timeKey) {
     var groupId = options.globalSearch ? dashboardSearchGroupId(timeKey) : '';
+    if (options.globalSearch && groupId) dashboardSearchGroupLabels[groupId] = timeKey;
     var isCollapsed = options.globalSearch && dashboardSearchCollapsedGroups[groupId];
     html += '<div class="time-group' + (isCollapsed ? ' collapsed' : '') + '"' + (groupId ? ' data-search-group="' + escAttr(groupId) + '"' : '') + '>';
     if (options.globalSearch) {

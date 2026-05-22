@@ -52,14 +52,32 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchResultCacheKey_\(query,\s*limit,\s*summaryOnly\)[\s\S]*dashboard_search_result_v5_/,
-  'global search must cache repeated query results by normalized query and limit'
+  /function getDashboardSearchResultCacheKey_\(query,\s*limit,\s*summaryOnly,\s*detailGroup\)[\s\S]*dashboard_search_result_v6_/,
+  'global search must cache repeated query results by normalized query, limit, mode, and detail group'
 );
 
 assert.match(
   backend,
   /summaryMode:\s*true/,
   'global search must support a lightweight summary response for initial typing'
+);
+
+assert.match(
+  backend,
+  /var detailGroup\s*=\s*String\(options\.detailGroup/,
+  'global search must accept a specific group for lazy detail loading'
+);
+
+assert.match(
+  backend,
+  /detailVisible\s*=\s*visible\.filter\([\s\S]*getDashboardSearchCandidateGroupLabel_\(candidate\)\s*===\s*detailGroup/,
+  'global search detail loading must build full cards only for the opened search group'
+);
+
+assert.match(
+  backend,
+  /partialDetailMode:\s*!!detailGroup/,
+  'global search detail responses must identify partial group-detail payloads'
 );
 
 assert.match(
@@ -84,6 +102,12 @@ assert.match(
   api,
   /summary:\s*params\.summary\s*\|\|\s*postBody\.summary/,
   'sheetAPI must pass dashboardSearch summary mode through to the backend'
+);
+
+assert.match(
+  api,
+  /detailGroup:\s*params\.detailGroup\s*\|\|\s*postBody\.detailGroup/,
+  'sheetAPI must pass dashboardSearch detailGroup through to the backend'
 );
 
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
@@ -129,6 +153,30 @@ assert.match(
     html,
     /function loadDashboardSearchDetails\(openGroupId\)/,
     `${file} must lazy-load full global search cards when a result group is opened`
+  );
+
+  assert.match(
+    html,
+    /var dashboardSearchDetailedGroups\s*=\s*\{\};/,
+    `${file} must track which summary search groups already have full details`
+  );
+
+  assert.match(
+    html,
+    /detailGroup=' \+ encodeURIComponent\(groupLabel\)/,
+    `${file} must request details only for the opened search group`
+  );
+
+  assert.match(
+    html,
+    /function mergeDashboardSearchDetails\(groupId,\s*detailData\)/,
+    `${file} must merge partial search detail payloads into the existing summary results`
+  );
+
+  assert.match(
+    html,
+    /summaryMode && !dashboardSearchDetailedGroups\[groupId\]/,
+    `${file} must avoid refetching details for search groups that were already opened`
   );
 
   assert.match(

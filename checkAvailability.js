@@ -1077,6 +1077,7 @@ function getDashboardSearchData(query, options) {
   if (limit > 150) limit = 150;
   var profile = options.profile === true || options.profile === 1 || options.profile === '1' || options.profile === 'true';
   var summaryOnly = options.summary === true || options.summary === 1 || options.summary === '1' || options.summary === 'true';
+  var detailGroup = String(options.detailGroup || '').trim();
   var profileStart = Date.now();
   var profileMarks = [];
   function markProfile_(step) {
@@ -1108,7 +1109,7 @@ function getDashboardSearchData(query, options) {
   markProfile_('terms');
 
   var cache = CacheService.getScriptCache();
-  var resultCacheKey = getDashboardSearchResultCacheKey_(query, limit, summaryOnly);
+  var resultCacheKey = getDashboardSearchResultCacheKey_(query, limit, summaryOnly, detailGroup);
   if (!profile) {
     var cachedResult = getDashboardCacheJson_(cache, resultCacheKey);
     if (cachedResult) return cachedResult;
@@ -1148,6 +1149,13 @@ function getDashboardSearchData(query, options) {
   markProfile_('match');
 
   var visible = candidates.length > limit ? candidates.slice(0, limit) : candidates;
+  var detailVisible = visible;
+  if (!summaryOnly && detailGroup) {
+    detailVisible = visible.filter(function(candidate) {
+      return getDashboardSearchCandidateGroupLabel_(candidate) === detailGroup;
+    });
+    markProfile_('detail_group_filter');
+  }
   if (summaryOnly) {
     var summaryCheckout = [];
     var summaryCheckin = [];
@@ -1176,7 +1184,7 @@ function getDashboardSearchData(query, options) {
 
   var visibleTradeIds = [];
   var visibleSeen = {};
-  visible.forEach(function(candidate) {
+  detailVisible.forEach(function(candidate) {
     var tid = String((candidate.entry && candidate.entry.tid) || '').trim();
     if (tid && !visibleSeen[tid]) {
       visibleSeen[tid] = true;
@@ -1184,7 +1192,7 @@ function getDashboardSearchData(query, options) {
     }
   });
   var visibleRowsByTid = {};
-  visible.forEach(function(candidate) {
+  detailVisible.forEach(function(candidate) {
     var entry = candidate.entry || {};
     var tid = String(entry.tid || '').trim();
     var rows = Array.isArray(entry.rs) ? entry.rs : [];
@@ -1206,7 +1214,7 @@ function getDashboardSearchData(query, options) {
   var checkoutList = [];
   var checkinList = [];
 
-  visible.forEach(function(candidate) {
+  detailVisible.forEach(function(candidate) {
     var entry = candidate.entry || {};
     var tid = entry.tid || '';
     var g = visibleGroups[tid] || {
@@ -1266,8 +1274,10 @@ function getDashboardSearchData(query, options) {
     checkout: all.filter(function(item) { return item._type === 'checkout'; }),
     checkin: all.filter(function(item) { return item._type === 'checkin'; }),
     total: candidates.length,
-    returned: all.length,
+    returned: detailGroup ? visible.length : all.length,
     limit: limit,
+    detailGroup: detailGroup,
+    partialDetailMode: !!detailGroup,
     paymentOptions: getTradePaymentOptions_(),
     proofTypeOptions: getTradeProofTypeOptions_(),
     issueStatusOptions: getTradeIssueStatusOptions_(),
@@ -1277,6 +1287,16 @@ function getDashboardSearchData(query, options) {
   markEquipmentRiskSearchEvaluationSkipped_(result);
   if (!profile) putDashboardCacheJson_(cache, resultCacheKey, result, 300);
   return attachProfile_(result);
+}
+
+function getDashboardSearchCandidateGroupLabel_(candidate) {
+  candidate = candidate || {};
+  var entry = candidate.entry || {};
+  var isCheckout = candidate.type === 'checkout';
+  return formatDashboardSearchGroupLabel_(
+    isCheckout ? entry.od : entry.rd,
+    isCheckout ? '반출' : '반납'
+  );
 }
 
 function buildDashboardSearchSummaryItem_(candidate) {
@@ -1462,13 +1482,14 @@ function touchDashboardSearchCacheVersion_() {
   } catch (e) {}
 }
 
-function getDashboardSearchResultCacheKey_(query, limit, summaryOnly) {
+function getDashboardSearchResultCacheKey_(query, limit, summaryOnly, detailGroup) {
   var raw = getTimelineCacheVersion_() + '|' + getDashboardSearchCacheVersion_() + '|' + limit + '|' +
     (summaryOnly ? 'summary' : 'detail') + '|' +
+    normalizeDashboardSearchText_(detailGroup || '') + '|' +
     normalizeDashboardSearchText_(query);
   var digest = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw))
     .replace(/=+$/g, '');
-  return 'dashboard_search_result_v5_' + digest;
+  return 'dashboard_search_result_v6_' + digest;
 }
 
 function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup) {
