@@ -905,6 +905,7 @@ function getDashboardSearchData(query, options) {
   if (limit < 1) limit = 80;
   if (limit > 150) limit = 150;
   var profile = options.profile === true || options.profile === 1 || options.profile === '1' || options.profile === 'true';
+  var summaryOnly = options.summary === true || options.summary === 1 || options.summary === '1' || options.summary === 'true';
   var profileStart = Date.now();
   var profileMarks = [];
   function markProfile_(step) {
@@ -936,7 +937,7 @@ function getDashboardSearchData(query, options) {
   markProfile_('terms');
 
   var cache = CacheService.getScriptCache();
-  var resultCacheKey = getDashboardSearchResultCacheKey_(query, limit);
+  var resultCacheKey = getDashboardSearchResultCacheKey_(query, limit, summaryOnly);
   if (!profile) {
     var cachedResult = getDashboardCacheJson_(cache, resultCacheKey);
     if (cachedResult) return cachedResult;
@@ -954,11 +955,6 @@ function getDashboardSearchData(query, options) {
   var searchIndex = getDashboardSearchIndex_(ss, schedSheet, contractSheet);
   var entries = (searchIndex && searchIndex.entries) || [];
   markProfile_('search_index');
-
-  var props = PropertiesService.getScriptProperties().getProperties();
-  var riskRules = getEquipmentRiskRules_();
-  var riskCandidateLookup = buildDashboardSetComponentLookup_(setSheet);
-  markProfile_('options');
 
   var candidates = [];
   entries.forEach(function(entry) {
@@ -981,6 +977,32 @@ function getDashboardSearchData(query, options) {
   markProfile_('match');
 
   var visible = candidates.length > limit ? candidates.slice(0, limit) : candidates;
+  if (summaryOnly) {
+    var summaryCheckout = [];
+    var summaryCheckin = [];
+    visible.forEach(function(candidate) {
+      var summaryItem = buildDashboardSearchSummaryItem_(candidate);
+      if (candidate.type === 'checkout') summaryCheckout.push(summaryItem);
+      else summaryCheckin.push(summaryItem);
+    });
+    var summaryResult = {
+      query: query,
+      checkout: summaryCheckout,
+      checkin: summaryCheckin,
+      total: candidates.length,
+      returned: visible.length,
+      limit: limit,
+      summaryMode: true
+    };
+    if (!profile) putDashboardCacheJson_(cache, resultCacheKey, summaryResult, 300);
+    return attachProfile_(summaryResult);
+  }
+
+  var props = PropertiesService.getScriptProperties().getProperties();
+  var riskRules = getEquipmentRiskRules_();
+  var riskCandidateLookup = buildDashboardSetComponentLookup_(setSheet);
+  markProfile_('options');
+
   var visibleTradeIds = [];
   var visibleSeen = {};
   visible.forEach(function(candidate) {
@@ -1084,6 +1106,31 @@ function getDashboardSearchData(query, options) {
   markEquipmentRiskSearchEvaluationSkipped_(result);
   if (!profile) putDashboardCacheJson_(cache, resultCacheKey, result, 300);
   return attachProfile_(result);
+}
+
+function buildDashboardSearchSummaryItem_(candidate) {
+  candidate = candidate || {};
+  var entry = candidate.entry || {};
+  var isCheckout = candidate.type === 'checkout';
+  var dateValue = isCheckout ? entry.od : entry.rd;
+  var timeValue = isCheckout ? entry.ot : entry.rt;
+  var otherDate = isCheckout ? entry.rd : entry.od;
+  var otherTime = isCheckout ? entry.rt : entry.ot;
+  var item = {
+    tradeId: entry.tid || '',
+    name: entry.tid || '',
+    time: timeValue || '시간 미정',
+    sortTime: normalizeDashboardTimeKey_(timeValue),
+    sortDate: normalizeDashboardSearchDateKey_(dateValue),
+    searchDate: dateValue || '',
+    searchPhaseLabel: isCheckout ? '반출' : '반납',
+    searchGroupLabel: formatDashboardSearchGroupLabel_(dateValue, isCheckout ? '반출' : '반납'),
+    _type: isCheckout ? 'checkout' : 'checkin',
+    equipments: []
+  };
+  if (isCheckout) item.returnDate = otherDate + (otherTime ? ' ' + otherTime : '');
+  else item.checkoutDate = otherDate + (otherTime ? ' ' + otherTime : '');
+  return item;
 }
 
 function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
@@ -1244,8 +1291,9 @@ function touchDashboardSearchCacheVersion_() {
   } catch (e) {}
 }
 
-function getDashboardSearchResultCacheKey_(query, limit) {
+function getDashboardSearchResultCacheKey_(query, limit, summaryOnly) {
   var raw = getTimelineCacheVersion_() + '|' + getDashboardSearchCacheVersion_() + '|' + limit + '|' +
+    (summaryOnly ? 'summary' : 'detail') + '|' +
     normalizeDashboardSearchText_(query);
   var digest = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw))
     .replace(/=+$/g, '');

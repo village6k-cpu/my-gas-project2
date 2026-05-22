@@ -207,7 +207,8 @@ function handleRequest(e) {
           params.q || params.query || postBody.q || postBody.query || "",
           {
             limit: Number(params.limit || postBody.limit) || 80,
-            profile: params.profile || postBody.profile
+            profile: params.profile || postBody.profile,
+            summary: params.summary || postBody.summary
           }
         ));
 

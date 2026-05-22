@@ -52,8 +52,14 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchResultCacheKey_\(query,\s*limit\)[\s\S]*dashboard_search_result_v5_/,
+  /function getDashboardSearchResultCacheKey_\(query,\s*limit,\s*summaryOnly\)[\s\S]*dashboard_search_result_v5_/,
   'global search must cache repeated query results by normalized query and limit'
+);
+
+assert.match(
+  backend,
+  /summaryMode:\s*true/,
+  'global search must support a lightweight summary response for initial typing'
 );
 
 assert.match(
@@ -72,6 +78,12 @@ assert.match(
   api,
   /case\s+["']dashboardSearch["'][\s\S]{0,260}getDashboardSearchData\(/,
   'sheetAPI must route action=dashboardSearch to getDashboardSearchData'
+);
+
+assert.match(
+  api,
+  /summary:\s*params\.summary\s*\|\|\s*postBody\.summary/,
+  'sheetAPI must pass dashboardSearch summary mode through to the backend'
 );
 
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
@@ -109,8 +121,14 @@ assert.match(
 
   assert.match(
     html,
-    /action=dashboardSearch&limit=[\s\S]{0,120}DASHBOARD_SEARCH_LIMIT/,
-    `${file} must pass the smaller search result limit to the API`
+    /action=dashboardSearch&summary=1&limit=[\s\S]{0,120}DASHBOARD_SEARCH_LIMIT/,
+    `${file} must request lightweight global search summaries while typing`
+  );
+
+  assert.match(
+    html,
+    /function loadDashboardSearchDetails\(openGroupId\)/,
+    `${file} must lazy-load full global search cards when a result group is opened`
   );
 
   assert.match(

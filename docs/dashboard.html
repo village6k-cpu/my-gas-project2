@@ -1466,6 +1466,7 @@ var dashboardSearchTimer = null;
 var dashboardSearchRequestSeq = 0;
 var dashboardSearchAbortController = null;
 var dashboardSearchCollapsedGroups = {};
+var dashboardSearchDetailLoading = false;
 var DASHBOARD_SEARCH_DEBOUNCE_MS = 360;
 var DASHBOARD_SEARCH_LIMIT = 40;
 var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
@@ -1584,7 +1585,7 @@ function loadDashboardGlobalSearch(query) {
   }
   dashboardSearchAbortController = (typeof AbortController !== 'undefined') ? new AbortController() : null;
 
-  var url = API_URL + '?key=village2026&action=dashboardSearch&limit=' + encodeURIComponent(DASHBOARD_SEARCH_LIMIT)
+  var url = API_URL + '?key=village2026&action=dashboardSearch&summary=1&limit=' + encodeURIComponent(DASHBOARD_SEARCH_LIMIT)
     + '&q=' + encodeURIComponent(query);
   var fetchOptions = dashboardSearchAbortController ? { signal: dashboardSearchAbortController.signal } : {};
   fetch(url, fetchOptions)
@@ -2215,6 +2216,7 @@ function renderDashboardGlobalSearch(data) {
 
   var total = Number(data.total || all.length);
   var suffix = total > all.length ? ' · 상위 ' + all.length + '건 표시' : ' · ' + all.length + '건';
+  if (data.summaryMode) suffix += ' · 날짜별 요약';
   setDashboardSearchStatus('전체 예약에서 검색 중: "' + dashboardSearchQuery + '"' + suffix);
   switchTab('all');
   scheduleDashboardSectionWarmup();
@@ -2222,8 +2224,39 @@ function renderDashboardGlobalSearch(data) {
 
 function toggleDashboardSearchGroup(groupId) {
   if (!groupId) return;
+  var isOpening = !!dashboardSearchCollapsedGroups[groupId];
+  if (isOpening && dashboardGlobalSearchData && dashboardGlobalSearchData.summaryMode) {
+    loadDashboardSearchDetails(groupId);
+    return;
+  }
   dashboardSearchCollapsedGroups[groupId] = !dashboardSearchCollapsedGroups[groupId];
   if (dashboardGlobalSearchData) renderDashboardGlobalSearch(dashboardGlobalSearchData);
+}
+
+function loadDashboardSearchDetails(openGroupId) {
+  var query = String(dashboardSearchQuery || '').trim();
+  if (!query || dashboardSearchDetailLoading) return;
+  dashboardSearchDetailLoading = true;
+  var requestId = dashboardSearchRequestSeq;
+  setDashboardSearchStatus('검색 상세 불러오는 중: "' + query + '"');
+
+  var url = API_URL + '?key=village2026&action=dashboardSearch&limit=' + encodeURIComponent(DASHBOARD_SEARCH_LIMIT)
+    + '&q=' + encodeURIComponent(query);
+  fetch(url)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      dashboardSearchDetailLoading = false;
+      if (requestId !== dashboardSearchRequestSeq || query !== dashboardSearchQuery) return;
+      dashboardGlobalSearchData = data || {};
+      resetDashboardSearchCollapsedGroups(dashboardGlobalSearchData);
+      if (openGroupId) dashboardSearchCollapsedGroups[openGroupId] = false;
+      renderDashboardGlobalSearch(dashboardGlobalSearchData);
+    })
+    .catch(function(err) {
+      dashboardSearchDetailLoading = false;
+      if (requestId !== dashboardSearchRequestSeq) return;
+      setDashboardSearchStatus('검색 상세 불러오기 실패: ' + err.message);
+    });
 }
 
 function resetDashboardSearchCollapsedGroups(data) {
