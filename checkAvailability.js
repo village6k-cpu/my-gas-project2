@@ -4407,6 +4407,19 @@ function dashboardAddEquipments(tid, entries, options) {
 
   options = options || {};
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
+  var profile = options.profile === true || options.profile === 1 || options.profile === "1" || options.profile === "true";
+  var profileStart = Date.now();
+  var profileMarks = [];
+  function markProfile_(step) {
+    if (profile) profileMarks.push({ step: step, ms: Date.now() - profileStart });
+  }
+  function attachProfile_(result) {
+    if (profile) {
+      markProfile_('return');
+      result.profile = profileMarks;
+    }
+    return result;
+  }
 
   var lock = null;
   if (!dryRun) {
@@ -4420,8 +4433,10 @@ function dashboardAddEquipments(tid, entries, options) {
     var equipSheet = ss.getSheetByName("장비마스터");
     if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
     if (!equipSheet) return { error: "장비마스터 없음" };
+    markProfile_('sheets');
 
     var nameList = getDashboardEquipNameList_(ss);
+    markProfile_('equipment_name_list');
     var resolvedMap = {};
     var resolvedOrder = [];
     addEntries.forEach(function(entry) {
@@ -4438,10 +4453,12 @@ function dashboardAddEquipments(tid, entries, options) {
     });
     addEntries = resolvedOrder.map(function(name) { return resolvedMap[name]; });
     if (addEntries.length === 0) return { error: "추가할 장비명이 없습니다" };
+    markProfile_('resolve_names');
 
     var lastRow = sched.getLastRow();
     var tidRows = findDashboardRowsByValue_(sched, 2, lastRow, tid);
     if (tidRows.length === 0) return { error: "거래ID '" + tid + "' 못 찾음" };
+    markProfile_('find_trade_rows');
     var sourceRow = tidRows[0];
     var lastTidRow = tidRows[tidRows.length - 1];
     var maxN = 0;
@@ -4454,6 +4471,7 @@ function dashboardAddEquipments(tid, entries, options) {
         if (n > maxN) maxN = n;
       }
     }
+    markProfile_('read_trade_ids');
 
     var sourceDisplay = sched.getRange(sourceRow, 6, 1, 8).getDisplayValues()[0];
     var 반출일 = sourceDisplay[0];
@@ -4464,8 +4482,10 @@ function dashboardAddEquipments(tid, entries, options) {
     var startDT = parseDT(반출일, 반출시간);
     var endDT = parseDT(반납일, 반납시간);
     if (!startDT || !endDT) return { error: "거래ID의 반출/반납 일시를 읽지 못했습니다" };
+    markProfile_('read_trade_dates');
 
     var setLookup = buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
+    markProfile_('set_lookup');
     var rowSpecs = [];
     var availabilityItems = [];
     addEntries.forEach(function(entry) {
@@ -4484,12 +4504,16 @@ function dashboardAddEquipments(tid, entries, options) {
     });
 
     var equipMeta = buildDashboardEquipmentMeta_(equipSheet);
+    markProfile_('equipment_meta');
     var mergedAvailabilityItems = mergeAvailabilityItems_(availabilityItems);
     var targetEquipmentNames = mergedAvailabilityItems.map(function(item) { return item.name; });
+    var availabilityScheduleRows = findDashboardScheduleRowsForEquipments_(sched, lastRow, targetEquipmentNames);
+    markProfile_('availability_schedule_rows');
     var scheduleData = buildDashboardScheduleData_(
-      findDashboardScheduleRowsForEquipments_(sched, lastRow, targetEquipmentNames),
+      availabilityScheduleRows,
       targetEquipmentNames
     );
+    markProfile_('availability_schedule_data');
     var availability = checkAvailabilityForAddCached_(
       mergedAvailabilityItems,
       startDT,
@@ -4497,11 +4521,12 @@ function dashboardAddEquipments(tid, entries, options) {
       equipMeta,
       scheduleData
     );
+    markProfile_('availability_check');
     if (!availability.ok) {
-      return {
+      return attachProfile_({
         error: "가용 불가: " + availability.conflicts.map(function(c) { return c.message; }).join(", "),
         conflicts: availability.conflicts
-      };
+      });
     }
 
     var newRows = [];
@@ -4531,9 +4556,10 @@ function dashboardAddEquipments(tid, entries, options) {
         ]);
       }
     });
+    markProfile_('build_new_rows');
 
     if (dryRun) {
-      return {
+      return attachProfile_({
         success: true,
         dryRun: true,
         availabilityChecked: true,
@@ -4545,7 +4571,7 @@ function dashboardAddEquipments(tid, entries, options) {
         customerName: 예약자명,
         warnings: availability.warnings || [],
         message: "가용 확인 완료"
-      };
+      });
     }
 
     var insertRow = lastTidRow + 1;
@@ -4554,10 +4580,13 @@ function dashboardAddEquipments(tid, entries, options) {
       sched.insertRowsAfter(insertRow - 1, newRows.length);
     }
     sched.getRange(insertRow, 1, newRows.length, 13).setValues(newRows);
+    markProfile_('write_new_rows');
     applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidRow, hadFollowingRow);
+    markProfile_('format_new_rows');
     scheduleContractRegen(tid);
+    markProfile_('schedule_contract_regen');
 
-    return {
+    return attachProfile_({
       success: true,
       availabilityChecked: true,
       addedEquipments: addEntries.length,
@@ -4568,7 +4597,7 @@ function dashboardAddEquipments(tid, entries, options) {
       customerName: 예약자명,
       warnings: availability.warnings || [],
       message: "가용 확인 완료 후 추가"
-    };
+    });
   } finally {
     if (lock) {
       try { lock.releaseLock(); } catch (e) {}

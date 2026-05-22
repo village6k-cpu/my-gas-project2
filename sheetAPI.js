@@ -262,7 +262,7 @@ function handleRequest(e) {
             name: params.equipName || postBody.equipName,
             qty: params.qty || postBody.qty || 1
           }],
-          { dryRun: params.dryRun || postBody.dryRun }
+          { dryRun: params.dryRun || postBody.dryRun, profile: params.profile || postBody.profile }
         ));
 
       case "addEquips":
@@ -270,7 +270,7 @@ function handleRequest(e) {
         return jsonResponse(dashboardAddEquipments(
           params.tid || postBody.tid,
           params.entries || postBody.entries || params.items || postBody.items,
-          { dryRun: params.dryRun || postBody.dryRun }
+          { dryRun: params.dryRun || postBody.dryRun, profile: params.profile || postBody.profile }
         ));
 
       case "onsiteAddon":
@@ -313,14 +313,14 @@ function handleRequest(e) {
             name: params.equipName || postBody.equipName,
             qty: params.qty || postBody.qty || 1
           }],
-          { dryRun: params.dryRun || postBody.dryRun }
+          { dryRun: params.dryRun || postBody.dryRun, profile: params.profile || postBody.profile }
         ));
 
       case "scheduleAddEquips":
         return jsonResponse(dashboardAddEquipments(
           params.tid || postBody.tid,
           params.entries || postBody.entries || params.items || postBody.items,
-          { dryRun: params.dryRun || postBody.dryRun }
+          { dryRun: params.dryRun || postBody.dryRun, profile: params.profile || postBody.profile }
         ));
 
       case "scheduleRemoveEquip":
