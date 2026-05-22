@@ -59,8 +59,8 @@ assert.doesNotMatch(
 );
 assert.match(
   availabilityRowsBody[0],
-  /var rowIndex\s*=\s*getDashboardAvailabilityRowIndex_\(sheet,\s*lastRow\)/,
-  'availability checks should use the cached equipment row index'
+  /var rowsCacheKey\s*=\s*getDashboardAvailabilityRowsCacheKey_\(lastRow,\s*targetNames\)[\s\S]*getDashboardCacheJson_\(cache,\s*rowsCacheKey\)[\s\S]*getDashboardAvailabilityRowIndex_\(sheet,\s*lastRow\)[\s\S]*putDashboardCacheJson_\(cache,\s*rowsCacheKey,\s*rowsToRead,\s*300\)/,
+  'availability checks should cache matched row numbers for repeated add-equipment checks'
 );
 assert.match(
   availabilityRowsBody[0],
@@ -72,6 +72,12 @@ assert.match(
   backend,
   /function getDashboardAvailabilityRowIndex_\(sheet,\s*lastRow\)[\s\S]*getDashboardCacheJson_\(cache,\s*cacheKey\)[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
   'dashboard availability row index must be cached between add-equipment checks'
+);
+
+assert.match(
+  backend,
+  /function getDashboardAvailabilityRowsCacheKey_\(lastRow,\s*targetNames\)[\s\S]*Utilities\.computeDigest/,
+  'dashboard availability matched-row cache key must be stable and compact'
 );
 
 assert.match(

@@ -4203,15 +4203,28 @@ function readDashboardScheduleRowsDisplay_(sheet, rowNums, colCount) {
 function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames) {
   if (!sheet || lastRow < 2 || !equipmentNames || equipmentNames.length === 0) return [];
   var target = {};
-  var rowsToRead = [];
-  var rowIndex = getDashboardAvailabilityRowIndex_(sheet, lastRow);
+  var targetNames = [];
   (equipmentNames || []).forEach(function(name) {
     var key = String(name || "").trim();
     if (key && !target[key]) {
       target[key] = true;
-      rowsToRead = rowsToRead.concat(rowIndex[key] || []);
+      targetNames.push(key);
     }
   });
+  if (targetNames.length === 0) return [];
+
+  targetNames.sort();
+  var cache = CacheService.getScriptCache();
+  var rowsCacheKey = getDashboardAvailabilityRowsCacheKey_(lastRow, targetNames);
+  var rowsToRead = getDashboardCacheJson_(cache, rowsCacheKey);
+  if (!rowsToRead) {
+    rowsToRead = [];
+    var rowIndex = getDashboardAvailabilityRowIndex_(sheet, lastRow);
+    targetNames.forEach(function(key) {
+      rowsToRead = rowsToRead.concat(rowIndex[key] || []);
+    });
+    putDashboardCacheJson_(cache, rowsCacheKey, rowsToRead, 300);
+  }
   if (rowsToRead.length === 0) return [];
   rowsToRead.sort(function(a, b) { return a - b; });
   var seenRows = {};
@@ -4223,6 +4236,13 @@ function findDashboardScheduleRowsForEquipments_(sheet, lastRow, equipmentNames)
   return readDashboardScheduleRows_(sheet, rowsToRead, 10).filter(function(row) {
     return !!target[String(row[3] || "").trim()];
   });
+}
+
+function getDashboardAvailabilityRowsCacheKey_(lastRow, targetNames) {
+  var raw = getTimelineCacheVersion_() + "|" + lastRow + "|" + (targetNames || []).join("|");
+  var digest = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw))
+    .replace(/=+$/g, "");
+  return "dashboard_availability_rows_v1_" + digest;
 }
 
 function getDashboardAvailabilityRowIndex_(sheet, lastRow) {
