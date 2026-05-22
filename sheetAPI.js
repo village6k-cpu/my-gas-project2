@@ -157,6 +157,7 @@ function handleRequest(e) {
           to: params.to || postBody.to || params.end || postBody.end || "",
           skipCache: skipTimelineCache,
           compact: params.compact || postBody.compact || params.slim || postBody.slim || "",
+          all: params.all || postBody.all || params.fullRange || postBody.fullRange || "",
           includeContractUrl: params.includeContractUrl || postBody.includeContractUrl || ""
         }));
       }

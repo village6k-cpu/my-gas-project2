@@ -87,6 +87,8 @@ var TIMELINE_CACHE_VERSION_PROP_ = 'timelineCacheVersion_v1';
 var TIMELINE_CACHE_PREFIX_ = 'timeline_v4_';
 var TIMELINE_CACHE_CHUNK_SIZE_ = 85000;
 var TIMELINE_CACHE_MAX_CHUNKS_ = 30;
+var TIMELINE_DEFAULT_LOOKBACK_DAYS_ = 1;
+var TIMELINE_DEFAULT_LOOKAHEAD_DAYS_ = 14;
 var DASHBOARD_CACHE_CHUNK_SIZE_ = 85000;
 var DASHBOARD_CACHE_MAX_CHUNKS_ = 10;
 var EQUIPMENT_RISK_RULE_SHEET_NAME = '장비주의사항';
@@ -99,6 +101,12 @@ function getTimelineData(options) {
   options = options || {};
   var fromKey = normalizeTimelineDateKey_(options.from || options.start || '');
   var toKey = normalizeTimelineDateKey_(options.to || options.end || '');
+  var allowAllRange = isTimelineOptionEnabled_(options.all) || isTimelineOptionEnabled_(options.fullRange);
+  if (!fromKey && !toKey && !allowAllRange) {
+    var defaultRange = getDefaultTimelineRange_();
+    fromKey = defaultRange.from;
+    toKey = defaultRange.to;
+  }
   if (fromKey && toKey && fromKey > toKey) {
     var tmpKey = fromKey;
     fromKey = toKey;
@@ -107,10 +115,13 @@ function getTimelineData(options) {
 
   var skipCache = options.skipCache === true || options.skipCache === 1 ||
     options.skipCache === '1' || options.skipCache === 'true';
-  var compact = options.compact === true || options.compact === 1 ||
-    options.compact === '1' || options.compact === 'true' ||
-    options.slim === true || options.slim === 1 ||
-    options.slim === '1' || options.slim === 'true';
+  var compactValue = (options.compact !== undefined && options.compact !== null && options.compact !== '')
+    ? options.compact
+    : options.slim;
+  var compactLevel = Number(compactValue);
+  if (isNaN(compactLevel)) compactLevel = isTimelineOptionEnabled_(compactValue) ? 1 : 0;
+  var compact = compactLevel > 0;
+  if (compact) compactLevel = Math.max(1, Math.floor(compactLevel || 1));
   var includeContractUrl = options.includeContractUrl === true || options.includeContractUrl === 1 ||
     options.includeContractUrl === '1' || options.includeContractUrl === 'true';
   if (options.includeContractUrl === undefined || options.includeContractUrl === null || options.includeContractUrl === '') {
@@ -118,7 +129,7 @@ function getTimelineData(options) {
   }
   var cacheKey = TIMELINE_CACHE_PREFIX_ + getTimelineCacheVersion_() + '_' +
     (fromKey || 'all') + '_' + (toKey || 'all') + '_' +
-    (compact ? 'compact' : 'full') + '_' + (includeContractUrl ? 'contract' : 'nocontract');
+    (compact ? 'compact' + compactLevel : 'full') + '_' + (includeContractUrl ? 'contract' : 'nocontract');
 
   if (!skipCache) {
     var cached = getTimelineCacheText_(cacheKey);
@@ -129,10 +140,31 @@ function getTimelineData(options) {
 
   var result = buildTimelineData_(fromKey, toKey, {
     compact: compact,
+    compactLevel: compactLevel,
     includeContractUrl: includeContractUrl
   });
   try { putTimelineCacheText_(cacheKey, JSON.stringify(result), 300); } catch (e2) {}
   return result;
+}
+
+function isTimelineOptionEnabled_(value) {
+  return value === true || value === 1 || value === '1' || value === 'true' || value === 'yes';
+}
+
+function getDefaultTimelineRange_() {
+  var now = new Date();
+  return {
+    from: Utilities.formatDate(
+      new Date(now.getTime() - TIMELINE_DEFAULT_LOOKBACK_DAYS_ * 86400000),
+      'Asia/Seoul',
+      'yyyy-MM-dd'
+    ),
+    to: Utilities.formatDate(
+      new Date(now.getTime() + TIMELINE_DEFAULT_LOOKAHEAD_DAYS_ * 86400000),
+      'Asia/Seoul',
+      'yyyy-MM-dd'
+    )
+  };
 }
 
 function buildTimelineData_(fromKey, toKey, options) {
@@ -333,10 +365,12 @@ function buildTimelineData_(fromKey, toKey, options) {
   });
 
   if (options.compact) {
+    var compactOptions = { compactLevel: Number(options.compactLevel) || 1 };
     return {
       compact: true,
+      compactLevel: compactOptions.compactLevel,
       groups: groupList.map(compactTimelineGroup_),
-      items: itemList.map(compactTimelineItem_)
+      items: itemList.map(function(item) { return compactTimelineItem_(item, compactOptions); })
     };
   }
 
@@ -350,9 +384,10 @@ function compactTimelineGroup_(group) {
   };
 }
 
-function compactTimelineItem_(item) {
+function compactTimelineItem_(item, options) {
+  options = options || {};
+  var compactLevel = Number(options.compactLevel) || 1;
   var compact = {
-    i: item.id,
     r: item.rowIndex,
     g: item.group,
     s: Date.parse(item.start),
@@ -360,12 +395,18 @@ function compactTimelineItem_(item) {
     st: item.status,
     cn: item.custName,
     tid: item.거래ID,
-    set: item.세트명,
-    eq: item.장비명,
-    q: item.수량,
-    out: item.반출,
-    ret: item.반납
+    q: item.수량
   };
+
+  if (compactLevel < 2) {
+    compact.i = item.id;
+    compact.set = item.세트명;
+    compact.eq = item.장비명;
+    compact.out = item.반출;
+    compact.ret = item.반납;
+  } else if (item.장비명 && item.장비명 !== item.세트명) {
+    compact.eq = item.장비명;
+  }
 
   if (item.rowIndices && item.rowIndices.length > 1) compact.rs = item.rowIndices;
   if (!compact.s) compact.s = item.start;
@@ -1858,8 +1899,14 @@ function warmDashboardCache() {
     [today, yest, tom].forEach(function(d) {
       try { getDashboardData(d, true); } catch (e) { /* 개별 실패 무시 */ }
     });
+    try { warmTimelineCache_(); } catch (eTimeline) { /* 개별 실패 무시 */ }
     try { warmDashboardAvailabilityRowIndex_(); } catch (e2) { /* 개별 실패 무시 */ }
   } catch (e) { /* ignore */ }
+}
+
+function warmTimelineCache_() {
+  var range = getDefaultTimelineRange_();
+  getTimelineData({ from: range.from, to: range.to, compact: 2 });
 }
 
 function warmDashboardAvailabilityRowIndex_() {

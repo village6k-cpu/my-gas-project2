@@ -48,8 +48,8 @@ const sheetApi = read('sheetAPI.js');
 
   assert.match(
     html,
-    /action=timeline[\s\S]{0,220}&compact=1/,
-    `${file} must request compact timeline payloads from the API`
+    /action=timeline[\s\S]{0,220}&compact=2/,
+    `${file} must request compact v2 timeline payloads from the API`
   );
 
   assert.match(
@@ -134,8 +134,8 @@ const sheetApi = read('sheetAPI.js');
 
   assert.match(
     html,
-    /\.getTimelineData\(\{[\s\S]{0,220}compact:\s*true/,
-    `${file} must request compact timeline payloads through google.script.run`
+    /\.getTimelineData\(\{[\s\S]{0,220}compact:\s*2/,
+    `${file} must request compact v2 timeline payloads through google.script.run`
   );
 
   assert.match(
@@ -159,8 +159,14 @@ assert.match(
 
 assert.match(
   backend,
-  /function compactTimelineItem_\(item\)[\s\S]*tid:\s*item\.거래ID[\s\S]*ret:\s*item\.반납/,
-  'timeline compact payload must keep the fields the frontends need with shorter wire keys'
+  /function compactTimelineItem_\(item,\s*options\)[\s\S]*var compactLevel[\s\S]*tid:\s*item\.거래ID[\s\S]*if \(compactLevel < 2\)[\s\S]*compact\.ret = item\.반납/,
+  'timeline compact payload must keep v1 compatible fields while allowing slimmer v2 payloads'
+);
+
+assert.match(
+  backend,
+  /function compactTimelineItem_\(item,\s*options\)[\s\S]*else if \(item\.장비명 && item\.장비명 !== item\.세트명\)[\s\S]*compact\.eq = item\.장비명/,
+  'timeline compact v2 must omit group-derived set/equipment names when the frontend can restore them'
 );
 
 assert.match(
@@ -171,8 +177,8 @@ assert.match(
 
 assert.match(
   backend,
-  /return \{\s*compact:\s*true,[\s\S]{0,220}items:\s*itemList\.map\(compactTimelineItem_\)/,
-  'getTimelineData must return compact timeline payloads when requested'
+  /return \{\s*compact:\s*true,[\s\S]{0,260}compactLevel:\s*compactOptions\.compactLevel[\s\S]{0,260}items:\s*itemList\.map\(function\(item\)/,
+  'getTimelineData must return compact timeline payloads at the requested compact level'
 );
 
 assert.match(
@@ -183,8 +189,20 @@ assert.match(
 
 assert.match(
   sheetApi,
-  /case "timeline"[\s\S]{0,520}compact:\s*params\.compact/,
+  /case "timeline"[\s\S]{0,520}compact:\s*params\.compact[\s\S]{0,160}all:\s*params\.all/,
   'sheetAPI timeline action must forward compact payload requests'
+);
+
+assert.match(
+  backend,
+  /if \(!fromKey && !toKey && !allowAllRange\)[\s\S]{0,180}getDefaultTimelineRange_\(\)/,
+  'timeline API must avoid accidental all-range loads unless explicitly requested'
+);
+
+assert.match(
+  backend,
+  /function warmTimelineCache_\(\)[\s\S]*getDefaultTimelineRange_\(\)[\s\S]*getTimelineData\(\{ from:\s*range\.from,\s*to:\s*range\.to,\s*compact:\s*2 \}\)/,
+  'dashboard warmer must keep the default compact v2 timeline range warm'
 );
 
 assert.match(

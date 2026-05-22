@@ -1081,7 +1081,7 @@ var longPressTimer = null;
 var timelineRequestSeq = 0;
 var timelineAbortController = null;
 var timelineLastResponseKey = "";
-var TIMELINE_CACHE_PREFIX = "timelineCache_v3_";
+var TIMELINE_CACHE_PREFIX = "timelineCache_v4_";
 var TIMELINE_CACHE_TTL_MS = 5 * 60 * 1000;
 var TIMELINE_FETCH_TIMEOUT_MS = 15000;
 
@@ -1187,12 +1187,19 @@ function pruneTimelineLocalCache(keepKey) {
 function expandTimelineResponse(data) {
   data = data || {};
   if (!data.compact) return data;
+  var groupContentById = {};
+  var expandedGroups = (data.groups || []).map(function(g) {
+    if (!g) return g;
+    var id = g.id || g.i;
+    var content = g.content || g.c || id;
+    if (id) groupContentById[id] = content;
+    return g.id ? g : { id: id, content: content };
+  });
   return {
-    groups: (data.groups || []).map(function(g) {
-      if (!g || g.id) return g;
-      return { id: g.i, content: g.c || g.i };
-    }),
-    items: (data.items || []).map(expandTimelineItem)
+    groups: expandedGroups,
+    items: (data.items || []).map(function(it, idx) {
+      return expandTimelineItem(it, groupContentById, idx);
+    })
   };
 }
 
@@ -1200,15 +1207,51 @@ function expandTimelineDate(value) {
   return typeof value === "number" ? new Date(value).toISOString() : value;
 }
 
+function timelineDateFromCompactValue(value) {
+  if (value === undefined || value === null || value === "") return null;
+  var d = typeof value === "number" ? new Date(value) : new Date(value);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function formatTimelineDateTime(value) {
+  var d = timelineDateFromCompactValue(value);
+  if (!d) return "";
+  try {
+    var parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Seoul",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).formatToParts(d);
+    var map = {};
+    parts.forEach(function(part) { map[part.type] = part.value; });
+    var hour = map.hour === "24" ? "00" : map.hour;
+    return map.year + "-" + map.month + "-" + map.day + " " + hour + ":" + map.minute;
+  } catch (e) {
+    return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2) +
+      " " + ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+  }
+}
+
+function formatTimelineTime(value) {
+  var text = formatTimelineDateTime(value);
+  return text ? text.slice(11, 16) : "";
+}
+
 function timelineClassNameForStatus(status) {
   return ["대기", "반출중", "반납완료", "취소"].indexOf(status) >= 0 ? "status-" + status : "status-기타";
 }
 
-function expandTimelineItem(it) {
+function expandTimelineItem(it, groupContentById, idx) {
   if (!it || it.id) return it;
   var status = it.st || "대기";
+  var setName = it.set || (groupContentById && groupContentById[it.g]) || "";
+  var equipName = it.eq || setName;
   return {
-    id: it.i,
+    id: it.i || ("item_" + idx),
     rowIndex: it.r,
     rowIndices: it.rs || (it.r ? [it.r] : []),
     group: it.g,
@@ -1221,17 +1264,17 @@ function expandTimelineItem(it) {
     custName: it.cn || "",
     tel: it.t || "",
     거래ID: it.tid || "",
-    세트명: it.set || "",
-    장비명: it.eq || "",
+    세트명: setName,
+    장비명: equipName,
     수량: it.q || "",
-    반출: it.out || "",
-    반납: it.ret || "",
+    반출: it.out || formatTimelineDateTime(it.s),
+    반납: it.ret || formatTimelineDateTime(it.e),
     단가: it.p || 0,
-    반출시간: it.ot || "",
-    반납시간: it.rt || "",
+    반출시간: it.ot || formatTimelineTime(it.s),
+    반납시간: it.rt || formatTimelineTime(it.e),
     회차: it.n || 1,
     재고: it.stock || 1,
-    세트명원본: it.orig || it.set || "",
+    세트명원본: it.orig || setName,
     contractUrl: it.u || ""
   };
 }
@@ -1271,7 +1314,7 @@ function loadData(forceFresh, opts) {
   var url = API_URL + "?key=village2026&action=timeline"
     + "&from=" + encodeURIComponent(range.from)
     + "&to=" + encodeURIComponent(range.to)
-    + "&compact=1"
+    + "&compact=2"
     + (forceFresh ? "&nocache=1" : "");
 
   var cachedData = readTimelineLocalCache(requestKey);
