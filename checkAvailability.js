@@ -1330,7 +1330,7 @@ function buildDashboardSearchSummaryItem_(candidate) {
     searchPhaseLabel: isCheckout ? '반출' : '반납',
     searchGroupLabel: formatDashboardSearchGroupLabel_(dateValue, isCheckout ? '반출' : '반납'),
     _type: isCheckout ? 'checkout' : 'checkin',
-    equipments: entry.eq || []
+    equipments: expandDashboardSearchSummaryEquipments_(entry.eq)
   };
   if (isCheckout) item.returnDate = otherDate + (otherTime ? ' ' + otherTime : '');
   else item.checkoutDate = otherDate + (otherTime ? ' ' + otherTime : '');
@@ -1345,15 +1345,30 @@ function buildDashboardSearchSummaryEquipments_(equipments) {
   return (equipments || []).filter(function(eq) {
     return eq && eq.isHeader;
   }).slice(0, 30).map(function(eq) {
-    return {
-      scheduleId: eq.scheduleId || '',
-      name: eq.name || '',
-      qty: eq.qty || 1,
-      setName: eq.setName || '',
-      isHeader: true,
-      isSet: !!setsWithComponents[eq.name],
-      isComponent: false
-    };
+    return [
+      eq.scheduleId || '',
+      eq.name || '',
+      eq.qty || 1,
+      eq.setName || '',
+      setsWithComponents[eq.name] ? 1 : 0
+    ];
+  });
+}
+
+function expandDashboardSearchSummaryEquipments_(items) {
+  return (items || []).map(function(item) {
+    if (Array.isArray(item)) {
+      return {
+        scheduleId: item[0] || '',
+        name: item[1] || '',
+        qty: item[2] || 1,
+        setName: item[3] || '',
+        isHeader: true,
+        isSet: item[4] === 1 || item[4] === true,
+        isComponent: false
+      };
+    }
+    return item || {};
   });
 }
 
@@ -1376,7 +1391,7 @@ function getDashboardSearchClientIndex_() {
 
 function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_search_index_v6_' + getTimelineCacheVersion_() + '_' +
+  var cacheKey = 'dashboard_search_index_v7_' + getTimelineCacheVersion_() + '_' +
     getDashboardSearchCacheVersion_() + '_' + schedSheet.getLastRow();
   var cached = getDashboardCacheJson_(cache, cacheKey);
   if (cached && Array.isArray(cached.entries)) return cached;
@@ -1632,10 +1647,23 @@ function buildDashboardSearchText_(group, cust, extra, checkInfo) {
     checkInfo.returnMemo
   ];
   (group.equipments || []).forEach(function(eq) {
-    parts.push(eq.name, eq.setName, eq.qty);
+    parts.push(eq.name, eq.setName);
   });
 
-  return normalizeDashboardSearchText_(parts.join(' '));
+  return compactDashboardSearchTextParts_(parts);
+}
+
+function compactDashboardSearchTextParts_(parts) {
+  var seen = {};
+  var out = [];
+  (parts || []).forEach(function(part) {
+    normalizeDashboardSearchText_(part).split(' ').forEach(function(token) {
+      if (!token || seen[token]) return;
+      seen[token] = true;
+      out.push(token);
+    });
+  });
+  return out.join(' ');
 }
 
 function getEquipmentRiskRules_() {
