@@ -1322,6 +1322,7 @@ function loadData(forceFresh, opts) {
     renderTimelineData(cachedData);
     updateRefreshInfo();
     opts.silent = true;
+    showLoading(false);
   }
   if (!opts.silent) showLoading(true);
   return fetch(url, fetchOptions)
@@ -1331,7 +1332,7 @@ function loadData(forceFresh, opts) {
       if (requestId !== timelineRequestSeq) return;
       var responseKey = requestKey + "\n" + text;
       if (!forceFresh && responseKey === timelineLastResponseKey) {
-        if (!opts.silent) showLoading(false);
+        showLoading(false);
         updateRefreshInfo();
         return;
       }
@@ -1339,14 +1340,14 @@ function loadData(forceFresh, opts) {
       timelineLastResponseKey = responseKey;
       writeTimelineLocalCache(requestKey, data);
       renderTimelineData(data);
-      if (!opts.silent) showLoading(false);
+      showLoading(false);
       updateRefreshInfo();
     })
     .catch(function(err) {
       clearTimeout(timeoutId);
       if (err && err.name === "AbortError" && !timedOut) return;
       if (requestId !== timelineRequestSeq) return;
-      if (!opts.silent) showLoading(false);
+      showLoading(false);
       showToast(timedOut ? "데이터 로드 시간 초과" : "데이터 로드 실패");
     });
 }

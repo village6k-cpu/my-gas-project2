@@ -30,8 +30,14 @@ const sheetApi = read('sheetAPI.js');
 
   assert.match(
     html,
-    /if \(cachedData\)[\s\S]{0,260}renderTimelineData\(cachedData/,
-    `${file} must render cached timeline data immediately, even while a forced refresh runs in the background`
+    /if \(cachedData\)[\s\S]{0,260}renderTimelineData\(cachedData[\s\S]{0,260}showLoading\(false\)/,
+    `${file} must render cached timeline data and clear the startup loading overlay immediately`
+  );
+
+  assert.doesNotMatch(
+    html,
+    /if \(!opts\.silent\) showLoading\(false\)/,
+    `${file} must clear a visible loading overlay even when a silent refresh wins the latest request`
   );
 
   assert.match(
@@ -142,6 +148,12 @@ const sheetApi = read('sheetAPI.js');
     html,
     /var TIMELINE_FETCH_TIMEOUT_MS\s*=\s*15000;/,
     `${file} must cap GAS-served timeline loading so the spinner cannot stay forever`
+  );
+
+  assert.match(
+    html,
+    /if \(cachedData\)[\s\S]{0,220}renderTimelineData\(cachedData\)[\s\S]{0,120}showLoading\(false\)/,
+    `${file} must clear the GAS-served loading overlay when cached timeline data renders`
   );
 });
 
