@@ -72,13 +72,21 @@ assert.deepStrictEqual(
 
 assert.strictEqual(
   contractSheet.calls.length,
-  1,
-  'getDashboardContractMapForIds_ must read 계약마스터 A:J once instead of one getRange per matching trade'
+  3,
+  'getDashboardContractMapForIds_ must scan IDs once and read only matched 계약마스터 rows'
 );
 assert.deepStrictEqual(
   contractSheet.calls[0],
-  { row: 2, col: 1, numRows: 3, numCols: 10 },
-  'contract map should read the exact dashboard contract columns in one batch'
+  { row: 2, col: 1, numRows: 3, numCols: 1 },
+  'contract map should scan only the 거래ID column first'
+);
+assert.deepStrictEqual(
+  contractSheet.calls.slice(1),
+  [
+    { row: 2, col: 1, numRows: 1, numCols: 10 },
+    { row: 4, col: 1, numRows: 1, numCols: 10 }
+  ],
+  'contract map should read only the matched dashboard contract rows'
 );
 
 assert.strictEqual(
@@ -160,6 +168,12 @@ assert.match(
   backend,
   /function readDashboardScheduleRowsDisplay_\([\s\S]*getDisplayValues\(\)/,
   'dashboard fast path must have a batched display-row reader for matched rows'
+);
+
+assert.match(
+  backend,
+  /function getEquipmentCheckMapForIds_\(tradeIds\)[\s\S]*getRange\(2,\s*keyCol,\s*rowCount,\s*1\)\.getDisplayValues\(\)[\s\S]*readDashboardScheduleRowsDisplay_\(sheet,\s*rowsToRead,\s*lastCol\)/,
+  'equipment check map must scan only 거래ID keys before reading matched 장비체크 rows'
 );
 
 assert.match(

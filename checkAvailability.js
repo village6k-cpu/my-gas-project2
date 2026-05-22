@@ -1528,7 +1528,14 @@ function getDashboardContractMapForIds_(contractSheet, tradeIds) {
   if (!contractSheet || contractSheet.getLastRow() < 2 || Object.keys(wanted).length === 0) return result;
 
   try {
-    var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getDisplayValues();
+    var rowCount = contractSheet.getLastRow() - 1;
+    var ids = contractSheet.getRange(2, 1, rowCount, 1).getDisplayValues();
+    var rowsToRead = [];
+    ids.forEach(function(row, idx) {
+      var tid = String(row[0] || '').trim();
+      if (wanted[tid]) rowsToRead.push(idx + 2);
+    });
+    var rows = readDashboardScheduleRowsDisplay_(contractSheet, rowsToRead, 10);
     rows.forEach(function(row) {
       var tid = String(row[0] || '').trim();
       if (!wanted[tid]) return;
@@ -2300,7 +2307,15 @@ function getEquipmentCheckMapForIds_(tradeIds) {
 
     var schema = getEquipmentCheckSchema_(sheet, false);
     var lastCol = Math.max(sheet.getLastColumn(), 4, schema.statusCol, schema.memoCol, schema.keyCol || 0, schema.labelCol || 0);
-    var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, lastCol).getDisplayValues();
+    var rowCount = sheet.getLastRow() - 1;
+    var keyCol = schema.keyCol || 1;
+    var ids = sheet.getRange(2, keyCol, rowCount, 1).getDisplayValues();
+    var rowsToRead = [];
+    ids.forEach(function(row, idx) {
+      var tradeId = normalizeEquipmentCheckTradeId_(String(row[0] || '').trim());
+      if (wanted[tradeId]) rowsToRead.push(idx + 2);
+    });
+    var values = readDashboardScheduleRowsDisplay_(sheet, rowsToRead, lastCol);
 
     values.forEach(function(row, idx) {
       var rawKey = schema.keyCol ? String(row[schema.keyCol - 1] || '').trim() : '';
@@ -2308,7 +2323,7 @@ function getEquipmentCheckMapForIds_(tradeIds) {
       if (!wanted[tradeId]) return;
 
       var info = {
-        row: idx + 2,
+        row: rowsToRead[idx],
         tradeId: tradeId,
         label: schema.labelCol ? String(row[schema.labelCol - 1] || '').trim() : '',
         returnStatus: String(row[schema.statusCol - 1] || '').trim(),
