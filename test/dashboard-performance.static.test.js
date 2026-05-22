@@ -184,8 +184,26 @@ assert.match(
 
 assert.match(
   backend,
-  /cache\.remove\('dashboard_v4_' \+ d\)[\s\S]*cache\.remove\('dashboard_v4_' \+ d \+ '_risk'\)/,
+  /removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d \+ '_risk'\)/,
   'invalidateDashboardCache must clear the current dashboard v4 cache keys'
+);
+
+assert.match(
+  backend,
+  /function getDashboardCacheJson_\(cache,\s*cacheKey\)[\s\S]*cache\.getAll\(keys\)[\s\S]*JSON\.parse\(parts\.join\(''\)\)/,
+  'dashboard cache reads must support chunked payloads over the single CacheService item limit'
+);
+
+assert.match(
+  backend,
+  /function putDashboardCacheJson_\(cache,\s*cacheKey,\s*value,\s*seconds\)[\s\S]*cache\.putAll\(payload,\s*seconds \|\| 900\)/,
+  'dashboard cache writes must chunk large payloads instead of slow single-item cache.put attempts'
+);
+
+assert.match(
+  backend,
+  /putDashboardCacheJson_\(cache,\s*cacheKey,\s*result,\s*900\)/,
+  'getDashboardData must write dashboard payloads through the chunked cache helper'
 );
 
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
