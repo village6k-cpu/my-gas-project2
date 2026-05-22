@@ -1218,6 +1218,7 @@ function buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet, setCompo
 
     var setName = String(eq.name || '').trim();
     if (!setName) return;
+    if (eq.isSet !== true && !Object.prototype.hasOwnProperty.call(setComponentLookup, setName)) return;
 
     if (setComponentCache[setName] === undefined) {
       if (Object.prototype.hasOwnProperty.call(setComponentLookup, setName)) {
