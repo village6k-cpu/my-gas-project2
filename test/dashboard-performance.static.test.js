@@ -123,6 +123,38 @@ assert.ok(
   'risk candidate building must reuse the prebuilt set component lookup'
 );
 
+const singleCandidates = gasContext.buildDashboardEquipmentRiskCandidates_(
+  [{
+    scheduleId: 'SCH-002',
+    name: 'FX3 바디',
+    qty: 1,
+    setName: '',
+    isHeader: true,
+    isSet: false,
+    isComponent: false
+  }],
+  {
+    getLastRow() {
+      throw new Error('single equipment must not trigger setSheet fallback reads');
+    }
+  },
+  {}
+);
+
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(singleCandidates)),
+  [{
+    scheduleId: 'SCH-002',
+    name: 'FX3 바디',
+    qty: 1,
+    setName: '',
+    isHeader: true,
+    isSet: false,
+    isComponent: false
+  }],
+  'single equipment risk candidates must not scan 세트마스터 as a fallback'
+);
+
 assert.match(
   backend,
   /var riskCandidateLookup\s*=\s*buildDashboardSetComponentLookup_\(setSheet\)/,
