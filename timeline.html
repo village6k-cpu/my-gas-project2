@@ -483,6 +483,9 @@
   var hiddenStatuses = {};
   var TIMELINE_CACHE_PREFIX = 'timelineCache_v2_';
   var TIMELINE_CACHE_TTL_MS = 5 * 60 * 1000;
+  var TIMELINE_FETCH_TIMEOUT_MS = 15000;
+  var timelineRequestSeq = 0;
+  var timelineLoadTimeoutTimer = null;
 
   var STATUS_COLORS = {
     '대기':     '#3B82F6',
@@ -748,21 +751,35 @@
     applyFilters();
   }
 
-  function handleTimelineLoadSuccess(requestKey) {
+  function handleTimelineLoadSuccess(requestKey, requestId) {
     return function(data) {
+      clearTimeout(timelineLoadTimeoutTimer);
+      if (requestId !== timelineRequestSeq) return;
       writeTimelineLocalCache(requestKey, data);
       renderTimelineData(data);
       showLoading(false);
     };
   }
 
-  function handleTimelineLoadFailure(err) {
+  function handleTimelineLoadFailure(requestId) {
+    return function(err) {
+      clearTimeout(timelineLoadTimeoutTimer);
+      if (requestId !== timelineRequestSeq) return;
+      showLoading(false);
+      showToast('데이터 로드 실패');
+    };
+  }
+
+  function handleTimelineLoadTimeout(requestId) {
+    if (requestId !== timelineRequestSeq) return;
     showLoading(false);
-    showToast('데이터 로드 실패');
+    showToast('데이터 로드 시간 초과');
   }
 
   // ── 데이터 로드 ──
   function loadData(forceFresh) {
+    var requestId = ++timelineRequestSeq;
+    clearTimeout(timelineLoadTimeoutTimer);
     var range = getTimelineFetchRange();
     var requestKey = range.from + '_' + range.to;
     var cachedData = readTimelineLocalCache(requestKey);
@@ -771,9 +788,12 @@
     } else {
       showLoading(true);
     }
+    timelineLoadTimeoutTimer = setTimeout(function() {
+      handleTimelineLoadTimeout(requestId);
+    }, TIMELINE_FETCH_TIMEOUT_MS);
     google.script.run
-      .withSuccessHandler(handleTimelineLoadSuccess(requestKey))
-      .withFailureHandler(handleTimelineLoadFailure)
+      .withSuccessHandler(handleTimelineLoadSuccess(requestKey, requestId))
+      .withFailureHandler(handleTimelineLoadFailure(requestId))
       .getTimelineData({ from: range.from, to: range.to, skipCache: !!forceFresh });
   }
 

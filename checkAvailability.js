@@ -153,24 +153,27 @@ function buildTimelineData_(fromKey, toKey) {
     return { groups: [], items: [] };
   }
 
-  const data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getValues();
   var rangeStart = parseTimelineDateBoundary_(fromKey, false);
   var rangeEnd = parseTimelineDateBoundary_(toKey, true);
+  var scheduleRows = readTimelineScheduleRows_(schedSheet, fromKey, toKey);
   var rowIndicesBySet = {};
-  data.forEach(function(row, idx) {
+  scheduleRows.forEach(function(entry) {
+    var row = entry.values;
     var tid = String(row[1] || '').trim();
     var setName = String(row[2] || '').trim();
     if (!tid || !setName) return;
     var key = tid + '|' + setName;
     if (!rowIndicesBySet[key]) rowIndicesBySet[key] = [];
-    rowIndicesBySet[key].push(idx + 2);
+    rowIndicesBySet[key].push(entry.rowNum);
   });
 
   const seen = {};   // "거래ID|그룹명" → true
   const entries = [];
 
   // 행 처리 함수
-  function processRow(row, idx, isSetPhase) {
+  function processRow(entry, isSetPhase) {
+    var row = entry.values;
+    var rowNum = entry.rowNum;
     const 거래ID   = row[1];  // B
     const 세트명   = String(row[2] || '').trim();  // C
     const 장비명   = String(row[3] || '').trim();  // D
@@ -218,9 +221,9 @@ function buildTimelineData_(fromKey, toKey) {
     // 같은 거래ID+세트명의 모든 행 인덱스 수집
     var rowIndices = [];
     if (!isSingleItem) {
-      rowIndices = rowIndicesBySet[key] || [idx + 2];
+      rowIndices = rowIndicesBySet[key] || [rowNum];
     } else {
-      rowIndices = [idx + 2];
+      rowIndices = [rowNum];
     }
 
     var 반출시간Str = 반출시간 ? String(반출시간).trim() : '';
@@ -250,9 +253,9 @@ function buildTimelineData_(fromKey, toKey) {
   }
 
   // Phase 1: 세트 행 먼저 (세트명 있는 행)
-  data.forEach(function(row, idx) { processRow(row, idx, true); });
+  scheduleRows.forEach(function(entry) { processRow(entry, true); });
   // Phase 2: 개별 장비 행 (세트명 없고 구성품 아닌 것만)
-  data.forEach(function(row, idx) { processRow(row, idx, false); });
+  scheduleRows.forEach(function(entry) { processRow(entry, false); });
 
   // 회차 계산: 현재 표시 범위 안에서 같은 예약자+그룹의 몇 번째 예약인지
   var 회차Map = {};
@@ -326,6 +329,60 @@ function buildTimelineData_(fromKey, toKey) {
   });
 
   return { groups: groupList, items: itemList };
+}
+
+function readTimelineScheduleRows_(schedSheet, fromKey, toKey) {
+  var lastRow = schedSheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  function wrapRows_(rows, startRow) {
+    return rows.map(function(row, idx) {
+      return { rowNum: startRow + idx, values: row };
+    });
+  }
+
+  if (!fromKey && !toKey) {
+    return wrapRows_(schedSheet.getRange(2, 1, lastRow - 1, 12).getValues(), 2);
+  }
+
+  var dateRows = schedSheet.getRange(2, 6, lastRow - 1, 3).getValues(); // F:반출일, H:반납일
+  var matched = [];
+  dateRows.forEach(function(row, idx) {
+    var checkoutKey = normalizeTimelineDateKey_(row[0]);
+    var checkinKey = normalizeTimelineDateKey_(row[2]);
+    if (fromKey && checkinKey && checkinKey < fromKey) return;
+    if (toKey && checkoutKey && checkoutKey > toKey) return;
+    matched.push(idx + 2);
+  });
+  return readTimelineRowsByRowNums_(schedSheet, matched, 12);
+}
+
+function readTimelineRowsByRowNums_(sheet, rowNums, colCount) {
+  if (!rowNums || rowNums.length === 0) return [];
+  colCount = colCount || 12;
+  rowNums = rowNums.slice().sort(function(a, b) { return a - b; });
+  var rows = [];
+  var start = rowNums[0];
+  var prev = rowNums[0];
+
+  function flushRange_(from, to) {
+    var values = sheet.getRange(from, 1, to - from + 1, colCount).getValues();
+    values.forEach(function(row, idx) {
+      rows.push({ rowNum: from + idx, values: row });
+    });
+  }
+
+  for (var i = 1; i < rowNums.length; i++) {
+    if (rowNums[i] === prev + 1) {
+      prev = rowNums[i];
+      continue;
+    }
+    flushRange_(start, prev);
+    start = rowNums[i];
+    prev = rowNums[i];
+  }
+  flushRange_(start, prev);
+  return rows;
 }
 
 function normalizeTimelineDateKey_(value) {

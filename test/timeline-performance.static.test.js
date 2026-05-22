@@ -4,6 +4,7 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
+const backend = read('checkAvailability.js');
 
 ['docs/timeline.html', 'timelineMobile.html'].forEach((file) => {
   const html = read(file);
@@ -36,6 +37,24 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
     html,
     /function renderTimelineData\(data/,
     `${file} must centralize timeline response parsing so cache and network paths match`
+  );
+
+  assert.match(
+    html,
+    /var TIMELINE_FETCH_TIMEOUT_MS\s*=\s*15000;/,
+    `${file} must cap timeline loading so the spinner cannot stay forever`
+  );
+
+  assert.match(
+    html,
+    /setTimeout\(function\(\)[\s\S]{0,220}timelineAbortController\.abort\(\)/,
+    `${file} must abort a stuck timeline fetch`
+  );
+
+  assert.match(
+    html,
+    /데이터 로드 시간 초과/,
+    `${file} must tell the operator when timeline loading times out`
   );
 
   assert.doesNotMatch(
@@ -81,6 +100,30 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
     /google\.script\.run[\s\S]{0,220}\.getTimelineData\(\{[\s\S]{0,160}from:/,
     `${file} must request a bounded timeline range instead of loading all schedule rows`
   );
+
+  assert.match(
+    html,
+    /var TIMELINE_FETCH_TIMEOUT_MS\s*=\s*15000;/,
+    `${file} must cap GAS-served timeline loading so the spinner cannot stay forever`
+  );
 });
+
+assert.match(
+  backend,
+  /function readTimelineScheduleRows_\([\s\S]*getRange\(2,\s*6,\s*lastRow - 1,\s*3\)\.getValues\(\)/,
+  'getTimelineData must scan only date columns before reading matched rows'
+);
+
+assert.match(
+  backend,
+  /var scheduleRows\s*=\s*readTimelineScheduleRows_\(schedSheet,\s*fromKey,\s*toKey\)/,
+  'buildTimelineData_ must use the bounded timeline row reader'
+);
+
+assert.doesNotMatch(
+  backend,
+  /const data\s*=\s*schedSheet\.getRange\(2,\s*1,\s*schedSheet\.getLastRow\(\) - 1,\s*12\)\.getValues\(\)/,
+  'timeline range loads must not read the full schedule A:L payload upfront'
+);
 
 console.log('timeline performance static checks passed');

@@ -435,6 +435,7 @@ var timelineLastResponseKey = "";
 var timelineRangeReloadTimer = null;
 var TIMELINE_CACHE_PREFIX = "timelineCache_v2_";
 var TIMELINE_CACHE_TTL_MS = 5 * 60 * 1000;
+var TIMELINE_FETCH_TIMEOUT_MS = 15000;
 
 // ━━━ 초기화 ━━━
 function init() {
@@ -552,6 +553,13 @@ function loadData(forceFresh, opts) {
   }
   timelineAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
   var fetchOptions = timelineAbortController ? { signal: timelineAbortController.signal } : {};
+  var timedOut = false;
+  var timeoutId = setTimeout(function() {
+    timedOut = true;
+    if (timelineAbortController && timelineAbortController.abort) {
+      try { timelineAbortController.abort(); } catch (e) {}
+    }
+  }, TIMELINE_FETCH_TIMEOUT_MS);
   var range = getTimelineFetchRange();
   var requestKey = range.from + "_" + range.to;
   var url = API_URL + "?key=village2026&action=timeline"
@@ -569,6 +577,7 @@ function loadData(forceFresh, opts) {
   return fetch(url, fetchOptions)
     .then(function(r) { return r.text(); })
     .then(function(text) {
+      clearTimeout(timeoutId);
       if (requestId !== timelineRequestSeq) return;
       var responseKey = requestKey + "\n" + text;
       if (!forceFresh && responseKey === timelineLastResponseKey) {
@@ -584,10 +593,11 @@ function loadData(forceFresh, opts) {
       updateRefreshInfo();
     })
     .catch(function(err) {
-      if (err && err.name === "AbortError") return;
+      clearTimeout(timeoutId);
+      if (err && err.name === "AbortError" && !timedOut) return;
       if (requestId !== timelineRequestSeq) return;
       if (!opts.silent) showLoading(false);
-      document.getElementById("statInfo").textContent = "오류: " + err.message;
+      document.getElementById("statInfo").textContent = timedOut ? "오류: 데이터 로드 시간 초과" : "오류: " + err.message;
     });
 }
 

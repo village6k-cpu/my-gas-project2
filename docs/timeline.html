@@ -1083,6 +1083,7 @@ var timelineAbortController = null;
 var timelineLastResponseKey = "";
 var TIMELINE_CACHE_PREFIX = "timelineCache_v2_";
 var TIMELINE_CACHE_TTL_MS = 5 * 60 * 1000;
+var TIMELINE_FETCH_TIMEOUT_MS = 15000;
 
 // ── Utils ──
 function escHtml(s) {
@@ -1205,6 +1206,13 @@ function loadData(forceFresh, opts) {
   }
   timelineAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
   var fetchOptions = timelineAbortController ? { signal: timelineAbortController.signal } : {};
+  var timedOut = false;
+  var timeoutId = setTimeout(function() {
+    timedOut = true;
+    if (timelineAbortController && timelineAbortController.abort) {
+      try { timelineAbortController.abort(); } catch (e) {}
+    }
+  }, TIMELINE_FETCH_TIMEOUT_MS);
   var range = getTimelineFetchRange();
   var requestKey = range.from + "_" + range.to;
   var url = API_URL + "?key=village2026&action=timeline"
@@ -1222,6 +1230,7 @@ function loadData(forceFresh, opts) {
   return fetch(url, fetchOptions)
     .then(function(r) { return r.text(); })
     .then(function(text) {
+      clearTimeout(timeoutId);
       if (requestId !== timelineRequestSeq) return;
       var responseKey = requestKey + "\n" + text;
       if (!forceFresh && responseKey === timelineLastResponseKey) {
@@ -1237,10 +1246,11 @@ function loadData(forceFresh, opts) {
       updateRefreshInfo();
     })
     .catch(function(err) {
-      if (err && err.name === "AbortError") return;
+      clearTimeout(timeoutId);
+      if (err && err.name === "AbortError" && !timedOut) return;
       if (requestId !== timelineRequestSeq) return;
       if (!opts.silent) showLoading(false);
-      showToast("데이터 로드 실패");
+      showToast(timedOut ? "데이터 로드 시간 초과" : "데이터 로드 실패");
     });
 }
 window.loadData = loadData;
