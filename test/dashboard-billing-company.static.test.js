@@ -22,7 +22,7 @@ assert.match(
 
 assert.match(
   backend,
-  /result\[tid\]\.billingCompany\s*=\s*String\(row\[billingCompanyCol\s*-\s*1\]/,
+  /extra\.billingCompany\s*=\s*String\(row\[columns\.billingCompanyCol\s*-\s*1\]/,
   'dashboard trade extras must expose billingCompany from 거래내역'
 );
 
