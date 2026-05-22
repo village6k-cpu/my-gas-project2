@@ -1337,24 +1337,6 @@ function buildDashboardSearchSummaryItem_(candidate) {
   return item;
 }
 
-function buildDashboardSearchSummaryEquipments_(equipments) {
-  var setsWithComponents = {};
-  (equipments || []).forEach(function(eq) {
-    if (eq && !eq.isHeader && eq.setName) setsWithComponents[eq.setName] = true;
-  });
-  return (equipments || []).filter(function(eq) {
-    return eq && eq.isHeader;
-  }).slice(0, 30).map(function(eq) {
-    return [
-      eq.scheduleId || '',
-      eq.name || '',
-      eq.qty || 1,
-      eq.setName || '',
-      setsWithComponents[eq.name] ? 1 : 0
-    ];
-  });
-}
-
 function expandDashboardSearchSummaryEquipments_(items) {
   return (items || []).map(function(item) {
     if (Array.isArray(item)) {
@@ -1391,7 +1373,7 @@ function getDashboardSearchClientIndex_() {
 
 function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_search_index_v7_' + getTimelineCacheVersion_() + '_' +
+  var cacheKey = 'dashboard_search_index_v8_' + getTimelineCacheVersion_() + '_' +
     getDashboardSearchCacheVersion_() + '_' + schedSheet.getLastRow();
   var cached = getDashboardCacheJson_(cache, cacheKey);
   if (cached && Array.isArray(cached.entries)) return cached;
@@ -1451,7 +1433,6 @@ function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
       rd: group.반납일 || '',
       rt: group.반납시간 || '',
       rs: group.rowNums || [],
-      eq: buildDashboardSearchSummaryEquipments_(group.equipments),
       x: buildDashboardSearchText_(group, cust, extra, checkInfo)
     };
   });
