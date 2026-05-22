@@ -1900,6 +1900,7 @@ function warmDashboardCache() {
       try { getDashboardData(d, true); } catch (e) { /* 개별 실패 무시 */ }
     });
     try { warmTimelineCache_(); } catch (eTimeline) { /* 개별 실패 무시 */ }
+    try { warmDashboardMutationCaches_(); } catch (eMutation) { /* 개별 실패 무시 */ }
     try { warmDashboardAvailabilityRowIndex_(); } catch (e2) { /* 개별 실패 무시 */ }
   } catch (e) { /* ignore */ }
 }
@@ -1907,6 +1908,14 @@ function warmDashboardCache() {
 function warmTimelineCache_() {
   var range = getDefaultTimelineRange_();
   getTimelineData({ from: range.from, to: range.to, compact: 2 });
+}
+
+function warmDashboardMutationCaches_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  getDashboardEquipNameList_(ss);
+  buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
+  var equipSheet = ss.getSheetByName("장비마스터");
+  if (equipSheet) buildDashboardEquipmentMeta_(equipSheet);
 }
 
 function warmDashboardAvailabilityRowIndex_() {

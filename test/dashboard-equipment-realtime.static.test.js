@@ -98,6 +98,12 @@ assert.match(
 );
 
 assert.match(
+  backend,
+  /function warmDashboardMutationCaches_\(\)[\s\S]*getDashboardEquipNameList_\(ss\)[\s\S]*buildDashboardSetLookup_\(ss\.getSheetByName\("세트마스터"\)\)[\s\S]*buildDashboardEquipmentMeta_\(equipSheet\)/,
+  'dashboard warmer must prebuild add-equipment mutation caches in the background'
+);
+
+assert.match(
   code,
   /CONTRACT_REGEN_TRIGGER_PROP_[\s\S]{0,900}hasRecentScheduledTrigger[\s\S]{0,260}ScriptApp\.getProjectTriggers\(\)/,
   'contract regen scheduling must skip trigger-list scans when a recent regen trigger is already scheduled'
