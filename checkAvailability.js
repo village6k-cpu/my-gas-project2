@@ -486,9 +486,14 @@ function getDashboardData(targetDate, skipCache, options) {
     };
   }
 
-  // ⚡ 최적화: getDisplayValues 사용 — Sheets가 이미 표시값 문자열로 반환하므로
-  //   행마다 Utilities.formatDate 6000회 호출 회피 (병목 제거)
-  var data = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 12).getDisplayValues();
+  var schedLastRow = schedSheet.getLastRow();
+  var todayRowSet = {};
+  findDashboardRowsByValue_(schedSheet, 6, schedLastRow, today).forEach(function(row) { todayRowSet[row] = true; });
+  findDashboardRowsByValue_(schedSheet, 8, schedLastRow, today).forEach(function(row) { todayRowSet[row] = true; });
+  var todayRows = Object.keys(todayRowSet).map(function(row) { return Number(row); });
+  todayRows.sort(function(a, b) { return a - b; });
+
+  var data = readDashboardScheduleRowsDisplay_(schedSheet, todayRows, 12);
 
   // 거래ID별 그룹핑
   var tradeGroups = {};
@@ -507,11 +512,10 @@ function getDashboardData(targetDate, skipCache, options) {
     if (!장비명 || !반출일str || !반납일str || !거래ID) return;
     if (상태 === '취소') return;
 
-    // 빠른 사전 필터: 오늘 반출/반납이 아닌 행은 그룹핑 자체 스킵 (활성건 카운트 위해 today 사이 제외)
+    // 빠른 사전 필터: 오늘 반출/반납 행만 읽었으므로 여기서는 안전망으로만 한 번 더 확인
     var isCheckoutToday = (반출일str === today);
     var isCheckinToday = (반납일str === today);
-    var isActiveToday = (반출일str <= today && 반납일str >= today && 상태 !== '반납완료');
-    if (!isCheckoutToday && !isCheckinToday && !isActiveToday) return;
+    if (!isCheckoutToday && !isCheckinToday) return;
 
     if (!tradeGroups[거래ID]) {
       tradeGroups[거래ID] = {
@@ -1680,6 +1684,8 @@ function invalidateDashboardCache() {
     var yesterday = Utilities.formatDate(new Date(Date.now() - 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
     var tomorrow = Utilities.formatDate(new Date(Date.now() + 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
     [today, yesterday, tomorrow].forEach(function(d) {
+      cache.remove('dashboard_v4_' + d);
+      cache.remove('dashboard_v4_' + d + '_risk');
       cache.remove('dashboard_v3_' + d);
       cache.remove('dashboard_v2_' + d);
     });
@@ -3840,6 +3846,31 @@ function readDashboardScheduleRows_(sheet, rowNums, colCount) {
 
   function flushRange_(from, to) {
     var values = sheet.getRange(from, 1, to - from + 1, colCount).getValues();
+    values.forEach(function(row) { rows.push(row); });
+  }
+
+  for (var i = 1; i < rowNums.length; i++) {
+    if (rowNums[i] === prev + 1) {
+      prev = rowNums[i];
+      continue;
+    }
+    flushRange_(start, prev);
+    start = rowNums[i];
+    prev = rowNums[i];
+  }
+  flushRange_(start, prev);
+  return rows;
+}
+
+function readDashboardScheduleRowsDisplay_(sheet, rowNums, colCount) {
+  if (!rowNums || rowNums.length === 0) return [];
+  colCount = colCount || 12;
+  var rows = [];
+  var start = rowNums[0];
+  var prev = rowNums[0];
+
+  function flushRange_(from, to) {
+    var values = sheet.getRange(from, 1, to - from + 1, colCount).getDisplayValues();
     values.forEach(function(row) { rows.push(row); });
   }
 

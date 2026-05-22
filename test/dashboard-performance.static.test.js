@@ -139,10 +139,39 @@ assert.match(
   'default dashboard payload must not wait for external equipment-risk evaluation'
 );
 
+const dashboardDataBody = backend.match(/function getDashboardData\([\s\S]*?\n}\n\nfunction getDashboardSearchData/);
+assert.ok(dashboardDataBody, 'getDashboardData must exist before getDashboardSearchData');
+assert.match(
+  dashboardDataBody[0],
+  /findDashboardRowsByValue_\(schedSheet,\s*6,\s*schedLastRow,\s*today\)[\s\S]*findDashboardRowsByValue_\(schedSheet,\s*8,\s*schedLastRow,\s*today\)/,
+  'getDashboardData must find today checkout/checkin rows by date columns instead of reading the whole schedule payload'
+);
+assert.match(
+  dashboardDataBody[0],
+  /readDashboardScheduleRowsDisplay_\(schedSheet,\s*todayRows,\s*12\)/,
+  'getDashboardData must read only matched today rows'
+);
+assert.doesNotMatch(
+  dashboardDataBody[0],
+  /getRange\(2,\s*1,\s*schedSheet\.getLastRow\(\) - 1,\s*12\)\.getDisplayValues\(\)/,
+  'getDashboardData must not read all schedule rows A:L for every first load'
+);
+assert.match(
+  backend,
+  /function readDashboardScheduleRowsDisplay_\([\s\S]*getDisplayValues\(\)/,
+  'dashboard fast path must have a batched display-row reader for matched rows'
+);
+
 assert.match(
   read('sheetAPI.js'),
   /evaluateRisk:\s*params\.riskEval\s*\|\|\s*postBody\.riskEval/,
   'sheetAPI dashboard action must expose explicit riskEval opt-in without slowing the default path'
+);
+
+assert.match(
+  backend,
+  /cache\.remove\('dashboard_v4_' \+ d\)[\s\S]*cache\.remove\('dashboard_v4_' \+ d \+ '_risk'\)/,
+  'invalidateDashboardCache must clear the current dashboard v4 cache keys'
 );
 
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
