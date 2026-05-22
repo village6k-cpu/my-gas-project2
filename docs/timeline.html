@@ -928,7 +928,7 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
         <span class="request-ai-badge">AI</span>
         <span class="request-main">카톡 예약입력</span>
       </a>
-      <button class="icon-btn" onclick="loadData(true)" title="새로고침" aria-label="새로고침">↻</button>
+      <button class="icon-btn" onclick="loadData(false)" title="새로고침" aria-label="새로고침">↻</button>
     </div>
   </div>
   <div class="header-workbar">
@@ -1142,7 +1142,7 @@ function getTimelineFetchRange() {
     end = dateOnly(filterEnd);
     start = addDays(end, -21);
   } else {
-    start = addDays(today, -7);
+    start = addDays(today, -1);
     end = addDays(today, 14);
   }
   return { from: toDateStr(start), to: toDateStr(end) };
@@ -1221,7 +1221,7 @@ function loadData(forceFresh, opts) {
     + (forceFresh ? "&nocache=1" : "");
 
   var cachedData = readTimelineLocalCache(requestKey);
-  if (cachedData && !forceFresh) {
+  if (cachedData) {
     renderTimelineData(cachedData);
     updateRefreshInfo();
     opts.silent = true;
@@ -1762,7 +1762,7 @@ function ctxAction(action) {
       .then(function(res) {
         if (res.error) { showToast("삭제 실패: " + res.error); return; }
         showToast("삭제 완료");
-        loadData(true);
+        loadData(false, { silent: true });
       })
       .catch(function() { showToast("네트워크 오류"); });
     return;
@@ -2269,7 +2269,7 @@ function submitAddBooking() {
   }, Promise.resolve()).then(function() {
     setScheduleAddBusy(false);
     if (failures.length) {
-      if (successes.length) loadData(true);
+      if (successes.length) loadData(false, { silent: true });
       resetScheduleEquipRows(failures.map(function(f) { return f.entry; }));
       showToast((successes.length ? successes.length + "개 추가 완료, " : "") + failures.length + "개 실패");
       alert("추가 실패 목록\n" + failures.map(function(f) {
@@ -2279,7 +2279,7 @@ function submitAddBooking() {
     }
     showToast(custName + " / 장비 " + successes.length + "개 추가 완료");
     closeAddModal();
-    loadData(true);
+    loadData(false, { silent: true });
   }).catch(function() {
     setScheduleAddBusy(false);
     showToast("네트워크 오류");

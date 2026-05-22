@@ -1493,6 +1493,8 @@ var dashboardPhotoLoading = {};
 var dashboardPhotoBatchTimer = null;
 var dashboardSilentRefreshTimer = null;
 var dashboardDatePrefetching = {};
+var dashboardPendingMutationCount = 0;
+var dashboardLocalMutationSeq = 0;
 
 document.addEventListener('DOMContentLoaded', function() {
   var urlParams = new URLSearchParams(window.location.search);
@@ -1608,6 +1610,7 @@ function loadData(forceFresh) {
   var dateStr = formatDate(currentDate);
   var lsKey = DASHBOARD_CACHE_PREFIX + dateStr;
   var requestId = ++dashboardRequestSeq;
+  var mutationSeqAtRequest = dashboardLocalMutationSeq;
   var renderedCached = false;
   var cachedJson = null;
 
@@ -1627,8 +1630,9 @@ function loadData(forceFresh) {
     }
   }
 
-  showDashboardLoading(dateStr, renderedCached);
-  if (!renderedCached) {
+  var hasVisibleData = hasDashboardVisibleDataForDate(dateStr);
+  showDashboardLoading(dateStr, renderedCached || hasVisibleData);
+  if (!renderedCached && !hasVisibleData) {
     document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('visible'); });
   }
 
@@ -1640,6 +1644,7 @@ function loadData(forceFresh) {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (!isCurrentDashboardRequest(requestId, dateStr) || !isDashboardDateMatch(data, dateStr)) return;
+      if (!canApplyDashboardResponse(mutationSeqAtRequest)) return;
       dashboardData = data;
       renderDashboard(data, dateStr);
       writeDashboardLocalCache(dateStr, data);
@@ -1707,6 +1712,28 @@ function writeDashboardLocalCache(dateStr, data) {
 function persistCurrentDashboardCache() {
   if (!dashboardData) return;
   writeDashboardLocalCache(dashboardData.date || formatDate(currentDate), dashboardData);
+}
+
+function hasDashboardVisibleDataForDate(dateStr) {
+  return !!(dashboardData && isDashboardDateMatch(dashboardData, dateStr));
+}
+
+function beginDashboardMutation() {
+  dashboardPendingMutationCount++;
+  dashboardLocalMutationSeq++;
+  return { done: false };
+}
+
+function finishDashboardMutation(token) {
+  if (!token || token.done) return;
+  token.done = true;
+  dashboardPendingMutationCount = Math.max(0, dashboardPendingMutationCount - 1);
+  dashboardLocalMutationSeq++;
+  persistCurrentDashboardCache();
+}
+
+function canApplyDashboardResponse(mutationSeqAtRequest) {
+  return dashboardPendingMutationCount === 0 && mutationSeqAtRequest === dashboardLocalMutationSeq;
 }
 
 function prefetchAdjacentDashboardDates(dateStr) {
@@ -2581,6 +2608,7 @@ function removeEquip(tid, equipName, scheduleId, isSet, isComponent) {
   else if (isComponent) message += '\n(선택한 구성품 행만 삭제됩니다)';
   if (!confirm(message)) return;
 
+  var mutationToken = beginDashboardMutation();
   var snapshot = captureDashboardEquipmentSnapshot(tid);
   applyDashboardEquipmentMutation(tid, {}, {
     operation: 'remove',
@@ -2598,6 +2626,7 @@ function removeEquip(tid, equipName, scheduleId, isSet, isComponent) {
     .then(function(res) {
       if (res.error) {
         restoreDashboardEquipmentSnapshot(snapshot);
+        finishDashboardMutation(mutationToken);
         alert("삭제 실패: " + res.error);
         return;
       }
@@ -2608,9 +2637,12 @@ function removeEquip(tid, equipName, scheduleId, isSet, isComponent) {
         isSet: isSet,
         isComponent: isComponent
       });
+      finishDashboardMutation(mutationToken);
+      queueDashboardSilentRefresh(1500);
     })
     .catch(function(err) {
       restoreDashboardEquipmentSnapshot(snapshot);
+      finishDashboardMutation(mutationToken);
       alert("네트워크 오류: " + err.message);
     });
 }
@@ -2624,6 +2656,7 @@ function editEquipQty(tid, scheduleId, equipName, currentQty) {
     return;
   }
 
+  var mutationToken = beginDashboardMutation();
   var snapshot = captureDashboardEquipmentSnapshot(tid);
   applyDashboardEquipmentMutation(tid, {}, {
     operation: 'qty',
@@ -2640,6 +2673,7 @@ function editEquipQty(tid, scheduleId, equipName, currentQty) {
     .then(function(res) {
       if (res.error) {
         restoreDashboardEquipmentSnapshot(snapshot);
+        finishDashboardMutation(mutationToken);
         alert('수량 수정 실패: ' + res.error);
         return;
       }
@@ -2649,9 +2683,12 @@ function editEquipQty(tid, scheduleId, equipName, currentQty) {
         scheduleId: scheduleId,
         qty: qty
       });
+      finishDashboardMutation(mutationToken);
+      queueDashboardSilentRefresh(1500);
     })
     .catch(function(err) {
       restoreDashboardEquipmentSnapshot(snapshot);
+      finishDashboardMutation(mutationToken);
       alert('네트워크 오류: ' + err.message);
     });
 }
@@ -2773,6 +2810,9 @@ function updateEquipmentCheck(el, triggerBtn) {
     return;
   }
 
+  var mutationToken = beginDashboardMutation();
+  var snapshot = captureDashboardTradeFieldsSnapshot(payload.tid);
+  syncEquipmentCheckInMemory(payload, null);
   el.classList.remove('is-error');
   el.classList.add('is-saving');
   if (el.tagName === 'SELECT') el.disabled = true;
@@ -2791,6 +2831,8 @@ function updateEquipmentCheck(el, triggerBtn) {
       syncTradeFieldControls(payload.field, payload.tid, value);
       if (field === 'memo') syncMemoSaveButton(el);
       setEquipmentCheckState(el, '저장됨', false);
+      finishDashboardMutation(mutationToken);
+      queueDashboardSilentRefresh(1500);
       setTimeout(function() { setEquipmentCheckState(el, '', false); }, 1200);
     })
     .catch(function(err) {
@@ -2802,6 +2844,8 @@ function updateEquipmentCheck(el, triggerBtn) {
         el.value = prev;
       }
       if (field === 'memo') syncMemoSaveButton(el);
+      restoreDashboardTradeFieldsSnapshot(snapshot);
+      finishDashboardMutation(mutationToken);
       setEquipmentCheckState(el, '저장 실패: ' + err.message, true);
     });
 }
@@ -2821,6 +2865,7 @@ function updateContractStatus(el) {
     return;
   }
 
+  var mutationToken = beginDashboardMutation();
   el.classList.remove('is-error');
   el.classList.add('is-saving');
   el.disabled = true;
@@ -2846,10 +2891,13 @@ function updateContractStatus(el) {
       clearDashboardCacheForDate(formatDate(currentDate));
       if (status === '취소') {
         setEquipmentCheckState(el, '취소 처리됨', false);
+        finishDashboardMutation(mutationToken);
         loadData(true);
         return;
       }
       setEquipmentCheckState(el, '저장됨', false);
+      finishDashboardMutation(mutationToken);
+      queueDashboardSilentRefresh(1500);
       setTimeout(function() { setEquipmentCheckState(el, '', false); }, 1200);
     })
     .catch(function(err) {
@@ -2857,6 +2905,7 @@ function updateContractStatus(el) {
       el.classList.add('is-error');
       el.disabled = false;
       el.value = prev;
+      finishDashboardMutation(mutationToken);
       setEquipmentCheckState(el, '저장 실패: ' + err.message, true);
     });
 }
@@ -2871,6 +2920,7 @@ function cancelDashboardTrade(btn, tid, name) {
   var originalText = btn.textContent;
   btn.disabled = true;
   btn.textContent = '처리 중';
+  var mutationToken = beginDashboardMutation();
 
   fetch(API_URL || '', {
     method: 'POST',
@@ -2885,11 +2935,13 @@ function cancelDashboardTrade(btn, tid, name) {
     .then(function(res) {
       if (res.error) throw new Error(res.error);
       clearDashboardCacheForDate(formatDate(currentDate));
+      finishDashboardMutation(mutationToken);
       loadData(true);
     })
     .catch(function(err) {
       btn.disabled = false;
       btn.textContent = originalText;
+      finishDashboardMutation(mutationToken);
       alert('취소 처리 실패: ' + err.message);
     });
 }
@@ -3640,6 +3692,27 @@ function dashboardEquipmentMutationTargets(tid) {
   return items;
 }
 
+function captureDashboardTradeFieldsSnapshot(tid) {
+  return dashboardEquipmentMutationTargets(tid).map(function(item) {
+    return {
+      item: item,
+      returnStatus: item.returnStatus || '',
+      returnMemo: item.returnMemo || '',
+      equipmentCheckRow: item.equipmentCheckRow
+    };
+  });
+}
+
+function restoreDashboardTradeFieldsSnapshot(snapshot) {
+  (snapshot || []).forEach(function(entry) {
+    entry.item.returnStatus = entry.returnStatus || '';
+    entry.item.returnMemo = entry.returnMemo || '';
+    if (entry.equipmentCheckRow === undefined) delete entry.item.equipmentCheckRow;
+    else entry.item.equipmentCheckRow = entry.equipmentCheckRow;
+  });
+  persistCurrentDashboardCache();
+}
+
 function normalizeDashboardEquipmentItem(eq) {
   eq = eq || {};
   var setName = String(eq.setName || '').trim();
@@ -3786,11 +3859,17 @@ function renderDashboardEquipmentMutation() {
 function queueDashboardSilentRefresh(delayMs) {
   clearTimeout(dashboardSilentRefreshTimer);
   dashboardSilentRefreshTimer = setTimeout(function() {
+    if (dashboardPendingMutationCount > 0) {
+      queueDashboardSilentRefresh(1200);
+      return;
+    }
     var dateStr = formatDate(currentDate);
+    var mutationSeqAtRequest = dashboardLocalMutationSeq;
     fetch(API_URL + '?key=village2026&action=dashboard&date=' + dateStr + '&nocache=1')
       .then(function(r) { return r.json(); })
       .then(function(data) {
         if (!isDashboardDateMatch(data, dateStr)) return;
+        if (!canApplyDashboardResponse(mutationSeqAtRequest)) return;
         dashboardData = data;
         writeDashboardLocalCache(dateStr, data);
       })
@@ -4020,6 +4099,7 @@ function confirmAddEquip() {
 
   var tid = pendingAddTid;
   var mode = pendingAddMode;
+  var mutationToken = beginDashboardMutation();
   var snapshot = captureDashboardEquipmentSnapshot(tid);
   var request = mode === 'onsite' ? postOnsiteAddonBatch(tid, entries) : postAddEquipBatch(tid, entries);
   setAddEquipBusy(false);
@@ -4037,14 +4117,19 @@ function confirmAddEquip() {
       mode: mode
     });
     if (res.onsiteAddonWarning) {
+      finishDashboardMutation(mutationToken);
+      queueDashboardSilentRefresh(1500);
       alert('장비는 추가됐지만 현장 추가 기록은 확인 필요: ' + res.onsiteAddonWarning);
       return;
     }
     showDashboardToast(mode === 'onsite'
       ? '현장 추가 반출 기록 완료. 장비 ' + (res.addedEquipments || entries.length) + '개를 추가했습니다.'
       : '가용 확인 완료. 장비 ' + (res.addedEquipments || entries.length) + '개를 추가했습니다.');
+    finishDashboardMutation(mutationToken);
+    queueDashboardSilentRefresh(1500);
   }).catch(function(err) {
     restoreDashboardEquipmentSnapshot(snapshot);
+    finishDashboardMutation(mutationToken);
     alert((mode === 'onsite' ? '현장 추가 실패: ' : '가용 확인 실패: ') + err.message);
   });
 }

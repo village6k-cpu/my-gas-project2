@@ -561,7 +561,7 @@
     } else {
       var now = new Date();
       startDate = new Date(now.getTime() - 1000*60*60*24*1);
-      endDate = new Date(now.getTime() + 1000*60*60*24*14);
+      endDate = new Date(now.getTime() + 1000*60*60*24*10);
     }
 
     var groups = new vis.DataSet(visibleGroups);
@@ -705,16 +705,16 @@
       if (!end) end = win.end;
     }
     if (!start) start = new Date(Date.now() - 1000*60*60*24*1);
-    if (!end) end = new Date(Date.now() + 1000*60*60*24*14);
+    if (!end) end = new Date(Date.now() + 1000*60*60*24*10);
     if (end < start) {
       var tmp = start;
       start = end;
       end = tmp;
     }
     var bufferedStart = new Date(start);
-    bufferedStart.setDate(bufferedStart.getDate() - 3);
+    bufferedStart.setDate(bufferedStart.getDate() - 1);
     var bufferedEnd = new Date(end);
-    bufferedEnd.setDate(bufferedEnd.getDate() + 7);
+    bufferedEnd.setDate(bufferedEnd.getDate() + 3);
     return { from: timelineDateStr(bufferedStart), to: timelineDateStr(bufferedEnd) };
   }
 
@@ -783,9 +783,10 @@
     var range = getTimelineFetchRange();
     var requestKey = range.from + '_' + range.to;
     var cachedData = readTimelineLocalCache(requestKey);
-    if (cachedData && !forceFresh) {
+    if (cachedData) {
       renderTimelineData(cachedData);
-    } else {
+    }
+    if (!cachedData) {
       showLoading(true);
     }
     timelineLoadTimeoutTimer = setTimeout(function() {
