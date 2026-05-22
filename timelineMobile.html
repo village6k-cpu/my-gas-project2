@@ -496,9 +496,9 @@ function getTimelineFetchRange() {
     end = tmp;
   }
   var bufferedStart = new Date(start);
-  bufferedStart.setDate(bufferedStart.getDate() - 3);
+  bufferedStart.setDate(bufferedStart.getDate() - 1);
   var bufferedEnd = new Date(end);
-  bufferedEnd.setDate(bufferedEnd.getDate() + 7);
+  bufferedEnd.setDate(bufferedEnd.getDate() + 3);
   return { from: dateInputStr(bufferedStart), to: dateInputStr(bufferedEnd) };
 }
 
@@ -568,7 +568,7 @@ function loadData(forceFresh, opts) {
     + (forceFresh ? "&nocache=1" : "");
 
   var cachedData = readTimelineLocalCache(requestKey);
-  if (cachedData && !forceFresh) {
+  if (cachedData) {
     renderTimelineData(cachedData);
     updateRefreshInfo();
     opts.silent = true;
@@ -681,7 +681,7 @@ function moveToday() {
 
 function reload() {
   document.getElementById("searchInput").value = "";
-  loadData(true);
+  loadData(false);
 }
 
 function dateInputStr(d) {
@@ -938,7 +938,7 @@ function confirmScheduleAdd() {
   }, Promise.resolve()).then(function() {
       setScheduleAddBusy(false);
       if (failures.length) {
-        if (successes.length) loadData(true);
+        if (successes.length) loadData(false, { silent: true });
         resetScheduleEquipRows(failures.map(function(f) { return f.entry; }));
         alert((successes.length ? successes.length + '개 추가 완료, ' : '')
           + failures.length + '개 추가 실패\n'
@@ -947,7 +947,7 @@ function confirmScheduleAdd() {
       }
       closeAddModal();
       closeDetail();
-      loadData(true);
+      loadData(false, { silent: true });
     })
     .catch(function(err) {
       setScheduleAddBusy(false);
@@ -964,7 +964,7 @@ function deleteTimelineEquip(tid, equipName) {
     .then(function(res) {
       if (res.error) { alert('삭제 실패: ' + res.error); return; }
       closeDetail();
-      loadData(true);
+      loadData(false, { silent: true });
     })
     .catch(function(err) { alert('삭제 실패: ' + err.message); });
 }

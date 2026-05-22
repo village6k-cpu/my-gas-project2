@@ -78,10 +78,28 @@ assert.doesNotMatch(
     'function syncDashboardEquipmentRemoval(',
     'function syncDashboardEquipmentQtyUpdate(',
     'function renderDashboardEquipmentMutation(',
-    'function queueDashboardSilentRefresh('
+    'function queueDashboardSilentRefresh(',
+    'function beginDashboardMutation(',
+    'function finishDashboardMutation(',
+    'function canApplyDashboardResponse(',
+    'function hasDashboardVisibleDataForDate(',
+    'function captureDashboardTradeFieldsSnapshot('
   ].forEach((contract) => {
     assert.ok(html.includes(contract), `${file} must include realtime equipment helper: ${contract}`);
   });
+
+  const loadDataBody = html.match(/function loadData\(forceFresh\)[\s\S]*?\n}\n\nfunction refreshData/);
+  assert.ok(loadDataBody, `${file} must expose loadData before refreshData`);
+  assert.match(
+    loadDataBody[0],
+    /hasDashboardVisibleDataForDate\(dateStr\)[\s\S]*showDashboardLoading\(dateStr,\s*renderedCached \|\| hasVisibleData\)/,
+    `${file} force-fresh dashboard reloads must keep the current card UI visible`
+  );
+  assert.match(
+    loadDataBody[0],
+    /canApplyDashboardResponse\(mutationSeqAtRequest\)/,
+    `${file} stale dashboard responses must not overwrite local in-flight edits`
+  );
 
   const removeBody = html.match(/function removeEquip\([\s\S]*?\n}\n\nfunction editEquipQty/);
   assert.ok(removeBody, `${file} must expose removeEquip before editEquipQty`);
@@ -99,6 +117,11 @@ assert.doesNotMatch(
     removeBody[0],
     /var snapshot\s*=\s*captureDashboardEquipmentSnapshot\(tid\)[\s\S]*applyDashboardEquipmentMutation\(tid,\s*\{\},\s*\{[\s\S]*fetch\(/,
     `${file} removeEquip must update the card before waiting for the slow GAS request`
+  );
+  assert.match(
+    removeBody[0],
+    /beginDashboardMutation\(\)[\s\S]*finishDashboardMutation\(mutationToken\)/,
+    `${file} removeEquip must protect optimistic deletion from stale dashboard reloads`
   );
   assert.match(
     removeBody[0],
@@ -123,6 +146,29 @@ assert.doesNotMatch(
     /var snapshot\s*=\s*captureDashboardEquipmentSnapshot\(tid\)[\s\S]*applyDashboardEquipmentMutation\(tid,\s*\{\},\s*\{[\s\S]*fetch\(/,
     `${file} editEquipQty must update the card before waiting for the slow GAS request`
   );
+  assert.match(
+    qtyBody[0],
+    /beginDashboardMutation\(\)[\s\S]*finishDashboardMutation\(mutationToken\)/,
+    `${file} editEquipQty must protect optimistic quantity edits from stale dashboard reloads`
+  );
+
+  const memoBody = html.match(/function updateEquipmentCheck\([\s\S]*?\n}\n\nfunction updateContractStatus/);
+  assert.ok(memoBody, `${file} must expose updateEquipmentCheck before updateContractStatus`);
+  assert.doesNotMatch(
+    memoBody[0],
+    /loadData\(true\)/,
+    `${file} memo/status saves must not trigger a full loading dashboard reload`
+  );
+  assert.match(
+    memoBody[0],
+    /beginDashboardMutation\(\)[\s\S]*captureDashboardTradeFieldsSnapshot\(payload\.tid\)[\s\S]*syncEquipmentCheckInMemory\(payload,\s*null\)[\s\S]*fetch\(/,
+    `${file} memo/status saves must update dashboard memory before waiting for GAS`
+  );
+  assert.match(
+    memoBody[0],
+    /restoreDashboardTradeFieldsSnapshot\(snapshot\)[\s\S]*finishDashboardMutation\(mutationToken\)/,
+    `${file} memo/status saves must rollback local memory on failure`
+  );
 
   const addBody = html.match(/function confirmAddEquip\([\s\S]*?<\/script>/);
   assert.ok(addBody, `${file} must expose confirmAddEquip near the modal script end`);
@@ -140,6 +186,11 @@ assert.doesNotMatch(
     addBody[0],
     /var snapshot\s*=\s*captureDashboardEquipmentSnapshot\(tid\)[\s\S]*closeAddEquipModal\(\)[\s\S]*applyDashboardEquipmentMutation\(tid,\s*\{\},\s*\{[\s\S]*request\.then/,
     `${file} confirmAddEquip must close the modal and show a pending row before the slow GAS request returns`
+  );
+  assert.match(
+    addBody[0],
+    /beginDashboardMutation\(\)[\s\S]*finishDashboardMutation\(mutationToken\)/,
+    `${file} confirmAddEquip must protect pending add rows from stale dashboard reloads`
   );
   assert.match(
     html,

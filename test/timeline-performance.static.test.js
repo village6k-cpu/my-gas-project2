@@ -29,8 +29,8 @@ const backend = read('checkAvailability.js');
 
   assert.match(
     html,
-    /if \(cachedData && !forceFresh\)[\s\S]{0,260}renderTimelineData\(cachedData/,
-    `${file} must render cached timeline data immediately on repeat visits`
+    /if \(cachedData\)[\s\S]{0,260}renderTimelineData\(cachedData/,
+    `${file} must render cached timeline data immediately, even while a forced refresh runs in the background`
   );
 
   assert.match(
@@ -61,6 +61,12 @@ const backend = read('checkAvailability.js');
     html,
     /(\/\/ ── Init ──|\/\/ ━━━ 시작 ━━━)[\s\S]{0,180}loadEquip(?:Names|List)\(\);/,
     `${file} must not load the full equipment list during timeline startup`
+  );
+
+  assert.doesNotMatch(
+    html,
+    /loadData\(true\)/,
+    `${file} must not show a blocking forced timeline reload during normal add/delete/refresh flows`
   );
 
   assert.match(
