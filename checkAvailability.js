@@ -125,29 +125,8 @@ function buildTimelineData_(fromKey, toKey) {
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
 
-  // 계약마스터: 거래ID → { 예약자명, 연락처 }
-  const contractMap = {};
-  if (contractSheet && contractSheet.getLastRow() >= 2) {
-    contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 3).getValues()
-      .forEach(function(r) {
-        if (r[0]) contractMap[r[0]] = { name: r[1] || '', tel: r[2] || '' };
-      });
-  }
-
   // 장비마스터: 장비명 → 재고수량
-  var stockMap = {};
-  var equipSheet = ss.getSheetByName('장비마스터');
-  if (equipSheet && equipSheet.getLastRow() >= 2) {
-    var equipData = equipSheet.getRange(2, 1, equipSheet.getLastRow() - 1, equipSheet.getLastColumn()).getValues();
-    var headers = equipSheet.getRange(1, 1, 1, equipSheet.getLastColumn()).getValues()[0];
-    var nameCol = headers.indexOf('장비명');
-    var stockCol = headers.indexOf('재고수량');
-    if (nameCol >= 0 && stockCol >= 0) {
-      equipData.forEach(function(r) {
-        if (r[nameCol]) stockMap[String(r[nameCol]).trim()] = Number(r[stockCol]) || 1;
-      });
-    }
-  }
+  var stockMap = getTimelineStockMap_(ss);
 
   if (!schedSheet || schedSheet.getLastRow() < 2) {
     return { groups: [], items: [] };
@@ -213,8 +192,6 @@ function buildTimelineData_(fromKey, toKey) {
     const endDT   = parseDT(반납일, 반납시간);
     if (!startDT || !endDT) return;
 
-    const cust = contractMap[거래ID] || {};
-
     if (rangeStart && endDT < rangeStart) return;
     if (rangeEnd && startDT > rangeEnd) return;
 
@@ -234,8 +211,8 @@ function buildTimelineData_(fromKey, toKey) {
     entries.push({
       거래ID:    거래ID,
       groupName: groupName,
-      custName:  cust.name || 거래ID || '',
-      tel:       cust.tel || '',
+      custName:  거래ID || '',
+      tel:       '',
       startDT:   startDT,
       endDT:     endDT,
       상태:      상태,
@@ -257,6 +234,20 @@ function buildTimelineData_(fromKey, toKey) {
   // Phase 2: 개별 장비 행 (세트명 없고 구성품 아닌 것만)
   scheduleRows.forEach(function(entry) { processRow(entry, false); });
 
+  var timelineTradeIds = {};
+  entries.forEach(function(e) {
+    var tid = String(e.거래ID || '').trim();
+    if (tid) timelineTradeIds[tid] = true;
+  });
+  var timelineTradeIdList = Object.keys(timelineTradeIds);
+  var contractMap = getTimelineContractMapForIds_(contractSheet, timelineTradeIdList);
+  entries.forEach(function(e) {
+    var tid = String(e.거래ID || '').trim();
+    var cust = contractMap[tid] || {};
+    e.custName = cust.name || e.거래ID || '';
+    e.tel = cust.tel || '';
+  });
+
   // 회차 계산: 현재 표시 범위 안에서 같은 예약자+그룹의 몇 번째 예약인지
   var 회차Map = {};
   entries.forEach(function(e) {
@@ -271,14 +262,9 @@ function buildTimelineData_(fromKey, toKey) {
   const groupList = [];
   const itemList  = [];
   var itemIdx = 0;
-  var timelineTradeIds = {};
-  entries.forEach(function(e) {
-    var tid = String(e.거래ID || '').trim();
-    if (tid) timelineTradeIds[tid] = true;
-  });
   var tradeExtras = {};
   try {
-    tradeExtras = getTradeExtrasForIds_(Object.keys(timelineTradeIds));
+    tradeExtras = getTradeExtrasForIds_(timelineTradeIdList);
   } catch (e) {
     tradeExtras = {};
   }
@@ -329,6 +315,59 @@ function buildTimelineData_(fromKey, toKey) {
   });
 
   return { groups: groupList, items: itemList };
+}
+
+function getTimelineStockMap_(ss) {
+  return getDashboardCachedJson_("timeline_stock_map_v1", 300, function() {
+    var stockMap = {};
+    var equipSheet = ss.getSheetByName('장비마스터');
+    if (!equipSheet || equipSheet.getLastRow() < 2) return stockMap;
+
+    var lastCol = equipSheet.getLastColumn();
+    var headers = equipSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    var nameCol = headers.indexOf('장비명') + 1;
+    var stockCol = headers.indexOf('재고수량') + 1;
+    if (!nameCol || !stockCol) return stockMap;
+
+    var readCols = Math.max(nameCol, stockCol);
+    var rows = equipSheet.getRange(2, 1, equipSheet.getLastRow() - 1, readCols).getValues();
+    rows.forEach(function(row) {
+      var name = String(row[nameCol - 1] || '').trim();
+      if (name) stockMap[name] = Number(row[stockCol - 1]) || 1;
+    });
+    return stockMap;
+  });
+}
+
+function getTimelineContractMapForIds_(contractSheet, tradeIds) {
+  var result = {};
+  if (!contractSheet || !tradeIds || tradeIds.length === 0 || contractSheet.getLastRow() < 2) return result;
+
+  var wanted = {};
+  (tradeIds || []).forEach(function(tid) {
+    tid = String(tid || '').trim();
+    if (tid) wanted[tid] = true;
+  });
+  if (Object.keys(wanted).length === 0) return result;
+
+  var rowCount = contractSheet.getLastRow() - 1;
+  var ids = contractSheet.getRange(2, 1, rowCount, 1).getDisplayValues();
+  var rowsToRead = [];
+  ids.forEach(function(row, idx) {
+    var tid = String(row[0] || '').trim();
+    if (wanted[tid]) rowsToRead.push(idx + 2);
+  });
+
+  var rows = readDashboardScheduleRowsDisplay_(contractSheet, rowsToRead, 3);
+  rows.forEach(function(row) {
+    var tid = String(row[0] || '').trim();
+    if (!wanted[tid]) return;
+    result[tid] = {
+      name: String(row[1] || '').trim(),
+      tel: String(row[2] || '').trim()
+    };
+  });
+  return result;
 }
 
 function readTimelineScheduleRows_(schedSheet, fromKey, toKey) {
@@ -891,6 +930,12 @@ function dashboardSearchTradeMatches_(terms, group, cust, extra, checkInfo) {
 }
 
 function getEquipmentRiskRules_() {
+  return getDashboardCachedJson_("dashboard_equipment_risk_rules_v1", 300, function() {
+    return readEquipmentRiskRules_();
+  });
+}
+
+function readEquipmentRiskRules_() {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = ss.getSheetByName(EQUIPMENT_RISK_RULE_SHEET_NAME);
@@ -2495,23 +2540,94 @@ function normalizeEquipmentCheckTradeId_(value) {
 /**
  * 개고생2.0/빌리지2.0 거래내역에서 계약서 링크, G열 발행처 상호, J열 결제수단을 읽어 대시보드에 붙인다.
  */
+var DASHBOARD_TRADE_EXTRA_CACHE_PREFIX_ = 'dashboard_trade_extra_v2_';
+var DASHBOARD_TRADE_EXTRA_CACHE_SECONDS_ = 300;
+
+function emptyDashboardTradeExtra_() {
+  return {
+    contractUrl: '',
+    paymentMethod: '',
+    paymentSource: '',
+    paymentWarning: '',
+    depositStatus: '',
+    proofType: '',
+    issueStatus: '',
+    billingCompany: '',
+    issueNote: ''
+  };
+}
+
+function getDashboardTradeExtraCacheKey_(tid) {
+  return DASHBOARD_TRADE_EXTRA_CACHE_PREFIX_ +
+    String(tid || '').trim().replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 120);
+}
+
+function buildDashboardTradeExtraFromRow_(row, columns) {
+  var extra = emptyDashboardTradeExtra_();
+  extra.contractUrl = String(row[columns.contractCol - 1] || '').trim();
+  extra.billingCompany = String(row[columns.billingCompanyCol - 1] || '').trim();
+  extra.paymentMethod = String(row[columns.paymentCol - 1] || '').trim();
+  extra.paymentSource = extra.paymentMethod ? 'sheet:J' : '';
+  extra.proofType = String(row[columns.proofCol - 1] || '').trim();
+  extra.issueStatus = String(row[columns.issueCol - 1] || '').trim();
+  extra.depositStatus = String(row[columns.depositCol - 1] || '').trim();
+  extra.issueNote = String(row[columns.noteCol - 1] || '').trim();
+  return extra;
+}
+
+function invalidateDashboardTradeExtraCache_(tradeIds) {
+  if (!tradeIds || tradeIds.length === 0) return;
+  try {
+    var cache = CacheService.getScriptCache();
+    var keys = [];
+    var seen = {};
+    tradeIds.forEach(function(tid) {
+      tid = String(tid || '').trim();
+      if (!tid || seen[tid]) return;
+      seen[tid] = true;
+      keys.push(getDashboardTradeExtraCacheKey_(tid));
+    });
+    if (keys.length > 0) cache.removeAll(keys);
+  } catch (err) {}
+}
+
 function getTradeExtrasForIds_(tradeIds, props) {
   var result = {};
   props = props || PropertiesService.getScriptProperties().getProperties();
+  var ids = [];
+  var seenIds = {};
   (tradeIds || []).forEach(function(tid) {
-    result[tid] = {
-      contractUrl: '',
-      paymentMethod: '',
-      paymentSource: '',
-      paymentWarning: '',
-      depositStatus: '',
-      proofType: '',
-      issueStatus: '',
-      billingCompany: '',
-      issueNote: ''
-    };
+    tid = String(tid || '').trim();
+    if (!tid || seenIds[tid]) return;
+    seenIds[tid] = true;
+    ids.push(tid);
+    result[tid] = emptyDashboardTradeExtra_();
   });
-  if (!tradeIds || tradeIds.length === 0) return result;
+  if (ids.length === 0) return result;
+
+  var cache = null;
+  var missingIds = ids.slice();
+  try {
+    cache = CacheService.getScriptCache();
+    var keys = ids.map(function(tid) {
+      return getDashboardTradeExtraCacheKey_(tid);
+    });
+    var cached = cache.getAll(keys);
+    missingIds = [];
+    ids.forEach(function(tid) {
+      var key = getDashboardTradeExtraCacheKey_(tid);
+      if (cached[key]) {
+        try {
+          result[tid] = JSON.parse(cached[key]);
+          return;
+        } catch (parseErr) {}
+      }
+      missingIds.push(tid);
+    });
+  } catch (cacheErr) {
+    cache = null;
+  }
+  if (missingIds.length === 0) return result;
 
   try {
     var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
@@ -2530,25 +2646,37 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var depositCol = 13; // M열: 입금 상태
     var noteCol = 14;    // N열: 비고
     var wanted = {};
-    tradeIds.forEach(function(tid) { wanted[String(tid)] = true; });
-    var readCols = Math.max(lastCol, billingCompanyCol, paymentCol, proofCol, issueCol, depositCol, noteCol);
-    var rows = 거래시트.getRange(2, 1, 거래시트.getLastRow() - 1, readCols).getDisplayValues();
+    missingIds.forEach(function(tid) { wanted[String(tid)] = true; });
+    var readCols = Math.max(idCol, contractCol, billingCompanyCol, paymentCol, proofCol, issueCol, depositCol, noteCol);
+    var idValues = 거래시트.getRange(2, idCol, 거래시트.getLastRow() - 1, 1).getDisplayValues();
+    var rowsToRead = [];
+    idValues.forEach(function(row, idx) {
+      var tid = String(row[0] || '').trim();
+      if (wanted[tid]) rowsToRead.push(idx + 2);
+    });
+    var rows = readDashboardScheduleRowsDisplay_(거래시트, rowsToRead, readCols);
+    var cachePayload = {};
+    var columns = {
+      contractCol: contractCol,
+      billingCompanyCol: billingCompanyCol,
+      paymentCol: paymentCol,
+      proofCol: proofCol,
+      issueCol: issueCol,
+      depositCol: depositCol,
+      noteCol: noteCol
+    };
 
     rows.forEach(function(row) {
       var tid = String(row[idCol - 1] || '').trim();
       if (!wanted[tid]) return;
-      if (!result[tid]) result[tid] = {};
-      result[tid].contractUrl = String(row[contractCol - 1] || '').trim();
-      result[tid].billingCompany = String(row[billingCompanyCol - 1] || '').trim();
-      result[tid].paymentMethod = String(row[paymentCol - 1] || '').trim();
-      result[tid].paymentSource = result[tid].paymentMethod ? 'sheet:J' : '';
-      result[tid].proofType = String(row[proofCol - 1] || '').trim();
-      result[tid].issueStatus = String(row[issueCol - 1] || '').trim();
-      result[tid].depositStatus = String(row[depositCol - 1] || '').trim();
-      result[tid].issueNote = String(row[noteCol - 1] || '').trim();
+      result[tid] = buildDashboardTradeExtraFromRow_(row, columns);
+      if (cache) cachePayload[getDashboardTradeExtraCacheKey_(tid)] = JSON.stringify(result[tid]);
     });
+    if (cache && Object.keys(cachePayload).length > 0) {
+      cache.putAll(cachePayload, DASHBOARD_TRADE_EXTRA_CACHE_SECONDS_);
+    }
   } catch (err) {
-    Object.keys(result).forEach(function(tid) {
+    missingIds.forEach(function(tid) {
       result[tid].paymentWarning = "거래내역 조회 실패: " + err.message;
     });
   }
@@ -2621,7 +2749,13 @@ function getDashboardPhotoMap_(tradeIds) {
 
     var lastCol = Math.max(sheet.getLastColumn(), schema.maxCol || 1);
     var rowCount = sheet.getLastRow() - 1;
-    var display = sheet.getRange(2, 1, rowCount, lastCol).getDisplayValues();
+    var ids = sheet.getRange(2, schema.tradeIdCol, rowCount, 1).getDisplayValues();
+    var rowsToRead = [];
+    ids.forEach(function(row, idx) {
+      var tid = normalizeEquipmentCheckTradeId_(String(row[0] || '').trim());
+      if (wanted[tid]) rowsToRead.push(idx + 2);
+    });
+    var display = readDashboardScheduleRowsDisplay_(sheet, rowsToRead, lastCol);
     var fileIndex = getDashboardPhotoFileIndex_();
 
     display.forEach(function(row, i) {
@@ -2638,7 +2772,7 @@ function getDashboardPhotoMap_(tradeIds) {
       if (schema.checkoutPhotoCol) {
         addDashboardPhotoCell_(result[tid], 'checkout', String(row[schema.checkoutPhotoCol - 1] || '').trim(), {
           tid: tid,
-          row: i + 2,
+          row: rowsToRead[i],
           fileId: fileId,
           thumbnailUrl: thumb,
           uploadedAt: uploadedAt,
@@ -2649,7 +2783,7 @@ function getDashboardPhotoMap_(tradeIds) {
       if (schema.checkinPhotoCol) {
         addDashboardPhotoCell_(result[tid], 'checkin', String(row[schema.checkinPhotoCol - 1] || '').trim(), {
           tid: tid,
-          row: i + 2,
+          row: rowsToRead[i],
           fileId: fileId,
           thumbnailUrl: thumb,
           uploadedAt: uploadedAt,
@@ -2660,7 +2794,7 @@ function getDashboardPhotoMap_(tradeIds) {
       if (schema.photoCol) {
         addDashboardPhotoCell_(result[tid], phase || 'other', String(row[schema.photoCol - 1] || '').trim(), {
           tid: tid,
-          row: i + 2,
+          row: rowsToRead[i],
           fileId: fileId,
           thumbnailUrl: thumb,
           uploadedAt: uploadedAt,
@@ -3343,6 +3477,7 @@ function updateTradePaymentMethod(tid, method) {
   } catch (err) {
     warning = "거래내역 결제수단 반영 실패: " + err.message;
   }
+  invalidateDashboardTradeExtraCache_([tid]);
   invalidateDashboardCache();
   return {
     success: wroteSheet,
@@ -3419,6 +3554,7 @@ function updateTradeBillingCompany(tid, billingCompany) {
     }
 
     거래시트.getRange(row, billingCompanyCol).setValue(billingCompany);
+    invalidateDashboardTradeExtraCache_([tid]);
     invalidateDashboardCache();
     return {
       success: true,
@@ -3469,6 +3605,7 @@ function updateTradeProofField(tid, field, value) {
     }
 
     거래시트.getRange(row, column).setValue(value);
+    invalidateDashboardTradeExtraCache_([tid]);
     invalidateDashboardCache();
     return {
       success: true,
@@ -3556,6 +3693,7 @@ function callVillageOpsApi_(action, tid) {
       return { error: "빌리지2.0 HTTP " + res.getResponseCode() + ": " + (data.error || text) };
     }
     if (data.error) return data;
+    invalidateDashboardTradeExtraCache_([tid]);
     invalidateDashboardCache();
     return data;
   } catch (err) {

@@ -126,6 +126,38 @@ assert.match(
   'buildTimelineData_ must use the bounded timeline row reader'
 );
 
+assert.match(
+  backend,
+  /var stockMap\s*=\s*getTimelineStockMap_\(ss\)/,
+  'buildTimelineData_ must use the cached timeline equipment stock map'
+);
+
+assert.match(
+  backend,
+  /function getTimelineStockMap_\(ss\)[\s\S]*getDashboardCachedJson_\("timeline_stock_map_v1",\s*300/,
+  'timeline equipment stock lookup must use script cache'
+);
+
+assert.match(
+  backend,
+  /function getTimelineContractMapForIds_\(contractSheet,\s*tradeIds\)[\s\S]*getRange\(2,\s*1,\s*rowCount,\s*1\)\.getDisplayValues\(\)[\s\S]*readDashboardScheduleRowsDisplay_\(contractSheet,\s*rowsToRead,\s*3\)/,
+  'timeline contract lookup must scan IDs first and read only matched 계약마스터 rows'
+);
+
+assert.match(
+  backend,
+  /getTimelineContractMapForIds_\(contractSheet,\s*timelineTradeIdList\)/,
+  'buildTimelineData_ must defer 계약마스터 reads until visible timeline trade IDs are known'
+);
+
+const timelineBuildBody = backend.match(/function buildTimelineData_\([\s\S]*?\n}\n\nfunction getTimelineStockMap_/);
+assert.ok(timelineBuildBody, 'buildTimelineData_ must exist before getTimelineStockMap_');
+assert.doesNotMatch(
+  timelineBuildBody[0],
+  /equipSheet\.getRange\(2,\s*1,\s*equipSheet\.getLastRow\(\) - 1,\s*equipSheet\.getLastColumn\(\)\)\.getValues\(\)/,
+  'buildTimelineData_ must not read all 장비마스터 columns on every timeline build'
+);
+
 assert.doesNotMatch(
   backend,
   /const data\s*=\s*schedSheet\.getRange\(2,\s*1,\s*schedSheet\.getLastRow\(\) - 1,\s*12\)\.getValues\(\)/,

@@ -21,7 +21,7 @@ assert.match(
 
 assert.match(
   backend,
-  /result\[tid\]\.depositStatus\s*=\s*String\(row\[depositCol\s*-\s*1\]/,
+  /extra\.depositStatus\s*=\s*String\(row\[columns\.depositCol\s*-\s*1\]/,
   'dashboard trade extras must expose depositStatus from 거래내역'
 );
 
