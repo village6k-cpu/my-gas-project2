@@ -3557,6 +3557,35 @@ function getTradeExtrasForIds_(tradeIds, props) {
   return result;
 }
 
+function getDashboardContractExtrasByIds_(ids) {
+  var rawIds = ids;
+  if (typeof rawIds === 'string') {
+    try {
+      rawIds = JSON.parse(rawIds);
+    } catch (e) {
+      rawIds = rawIds.split(',');
+    }
+  }
+  if (!Array.isArray(rawIds)) rawIds = [rawIds];
+
+  var seen = {};
+  var tradeIds = [];
+  rawIds.forEach(function(id) {
+    id = String(id || '').trim();
+    if (!id || seen[id]) return;
+    seen[id] = true;
+    tradeIds.push(id);
+  });
+  if (!tradeIds.length) return { success: true, items: {}, tradeIds: [] };
+
+  var props = PropertiesService.getScriptProperties().getProperties();
+  return {
+    success: true,
+    tradeIds: tradeIds,
+    items: getTradeExtrasForIds_(tradeIds, props)
+  };
+}
+
 var DASHBOARD_PHOTO_SHEET_NAME_ = "반출반납 사진";
 var DASHBOARD_PHOTO_FOLDER_NAME_ = "빌리지_반출반납_사진";
 var DASHBOARD_PHOTO_APPSHEET_FOLDER_NAME_ = "반출반납 사진_Images";

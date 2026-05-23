@@ -158,6 +158,16 @@ assert.match(
   /function regenerateContractById\(거래ID,\s*추가요청\)[\s\S]*deleteAndRegenerateContract\(ss,\s*거래ID,\s*extraText\)[\s\S]*clearDirectContractRegenPending_\(거래ID\)/,
   'regenerateContractById must prevent the fallback trigger from regenerating the same contract again after immediate regeneration succeeds'
 );
+assert.match(
+  backend,
+  /function getDashboardContractExtrasByIds_\(ids\)[\s\S]*getTradeExtrasForIds_\(tradeIds,\s*props\)/,
+  'dashboard must expose a lightweight contract-extra lookup so stale pending buttons can self-heal without reloading a whole date'
+);
+assert.match(
+  sheetApi,
+  /case ["']dashboardContractExtras["'][\s\S]{0,260}getDashboardContractExtrasByIds_\(/,
+  'sheetAPI must expose dashboardContractExtras for contract pending reconciliation'
+);
 
 const removeBackendBody = backend.match(/function dashboardRemoveEquipment\([\s\S]*?\n}\n\n\n\/\*\* "yyyy-MM-dd"/);
 assert.ok(removeBackendBody, 'dashboardRemoveEquipment must exist before parseDT');
@@ -195,6 +205,10 @@ assert.doesNotMatch(
     'function markDashboardContractRegenPending(',
     'function syncDashboardContractFieldsFromData(',
     'function dashboardHasPendingContractRegen(',
+    'function collectDashboardPendingContractTids(',
+    'function syncDashboardContractFieldsFromExtras(',
+    'function queueDashboardPendingContractStatusRefresh(',
+    'function refreshDashboardPendingContractStatus(',
     'function queueDashboardContractRegeneration(',
     'function startDashboardContractRegeneration('
   ].forEach((contract) => {
@@ -417,6 +431,16 @@ assert.doesNotMatch(
     silentRefreshBody[0],
     /renderDashboard\(/,
     `${file} silent refresh must not force a second full dashboard render`
+  );
+  assert.match(
+    silentRefreshBody[0],
+    /dashboardHasPendingContractRegen\(dashboardGlobalSearchData\)[\s\S]*queueDashboardPendingContractStatusRefresh\(1000\)/,
+    `${file} silent refresh must reconcile stale pending contract buttons in search results, not only the current date`
+  );
+  assert.match(
+    html,
+    /function refreshDashboardPendingContractStatus\(\)[\s\S]*action=dashboardContractExtras[\s\S]*syncDashboardContractFieldsFromExtras\(/,
+    `${file} must poll lightweight contract extras to clear stale regeneration buttons after background regen finishes`
   );
 });
 
