@@ -206,6 +206,8 @@ assert.doesNotMatch(
     'function syncDashboardContractFieldsFromData(',
     'function dashboardHasPendingContractRegen(',
     'function collectDashboardPendingContractTids(',
+    'function collectDashboardContractStatusRefreshTids(',
+    'function dashboardContractNeedsLookup(',
     'function syncDashboardContractFieldsFromExtras(',
     'function queueDashboardPendingContractStatusRefresh(',
     'function refreshDashboardPendingContractStatus(',
@@ -219,6 +221,11 @@ assert.doesNotMatch(
     html,
     /contractRegenPending[\s\S]{0,140}계약서 갱신 중/,
     `${file} must not open stale contract links while regeneration is pending`
+  );
+  assert.match(
+    html,
+    /dashboardContractNeedsLookup\(item\)[\s\S]{0,180}계약서 확인 중/,
+    `${file} must not render fast-search or stale cached cards as 계약서 없음 before checking live contract links`
   );
 
   const loadDataBody = html.match(/function loadData\(forceFresh\)[\s\S]*?\n}\n\nfunction refreshData/);
@@ -434,13 +441,18 @@ assert.doesNotMatch(
   );
   assert.match(
     silentRefreshBody[0],
-    /dashboardHasPendingContractRegen\(dashboardGlobalSearchData\)[\s\S]*queueDashboardPendingContractStatusRefresh\(1000\)/,
-    `${file} silent refresh must reconcile stale pending contract buttons in search results, not only the current date`
+    /collectDashboardContractStatusRefreshTids\(\)\.length[\s\S]*queueDashboardPendingContractStatusRefresh\(1000\)/,
+    `${file} silent refresh must reconcile stale pending and missing contract buttons in search results, not only the current date`
   );
   assert.match(
     html,
     /function refreshDashboardPendingContractStatus\(\)[\s\S]*action=dashboardContractExtras[\s\S]*syncDashboardContractFieldsFromExtras\(/,
     `${file} must poll lightweight contract extras to clear stale regeneration buttons after background regen finishes`
+  );
+  assert.match(
+    html,
+    /function renderDashboardGlobalSearch\(data\)[\s\S]*queueDashboardPendingContractStatusRefresh\(1000\)/,
+    `${file} fast global search summaries must immediately reconcile missing contract links instead of leaving 계약서 없음 buttons`
   );
 });
 
