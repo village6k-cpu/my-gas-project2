@@ -752,6 +752,7 @@ function regenerateContractById(거래ID, 추가요청) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const extraText = 추가요청 !== undefined ? String(추가요청 || "") : getAdditionalRequestTextByTradeId_(ss, 거래ID);
   const result = deleteAndRegenerateContract(ss, 거래ID, extraText);
+  clearDirectContractRegenPending_(거래ID);
   const summary = result && result.fileId ? getGeneratedContractSummary_(result.fileId) : {};
   return {
     success: true,
@@ -761,6 +762,21 @@ function regenerateContractById(거래ID, 추가요청) {
     extraRequestFound: !!extraText,
     summary: summary
   };
+}
+
+function clearDirectContractRegenPending_(거래ID) {
+  try {
+    PropertiesService.getScriptProperties().deleteProperty('contractEditTS_' + 거래ID);
+  } catch (e) {}
+  try {
+    if (typeof invalidateDashboardTradeExtraCache_ !== 'undefined') invalidateDashboardTradeExtraCache_([거래ID]);
+  } catch (e1) {}
+  try {
+    if (typeof invalidateDashboardCache !== 'undefined') invalidateDashboardCache();
+  } catch (e2) {}
+  try {
+    if (typeof invalidateTimelineCache !== 'undefined') invalidateTimelineCache();
+  } catch (e3) {}
 }
 
 function getGeneratedContractSummary_(fileId) {

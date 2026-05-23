@@ -1495,6 +1495,9 @@ var dashboardSilentRefreshTimer = null;
 var dashboardDatePrefetching = {};
 var dashboardPendingMutationCount = 0;
 var dashboardLocalMutationSeq = 0;
+var dashboardContractRegenTimers = {};
+var dashboardContractRegenInFlight = {};
+var dashboardContractRegenQueued = {};
 var DASHBOARD_MUTATION_REFRESH_MIN_DELAY_MS = 5000;
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -3680,6 +3683,68 @@ function queueDashboardSilentRefresh(delayMs) {
   }, delayMs);
 }
 
+function queueDashboardContractRegeneration(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return;
+  markDashboardContractRegenPending(tid, true);
+  renderDashboardEquipmentMutation();
+  clearTimeout(dashboardContractRegenTimers[tid]);
+  dashboardContractRegenTimers[tid] = setTimeout(function() {
+    startDashboardContractRegeneration(tid);
+  }, 250);
+}
+
+function startDashboardContractRegeneration(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return Promise.resolve(null);
+  if (dashboardContractRegenInFlight[tid]) {
+    dashboardContractRegenQueued[tid] = true;
+    return Promise.resolve(null);
+  }
+
+  dashboardContractRegenInFlight[tid] = true;
+  showDashboardToast('계약서 갱신 중...');
+  return fetch(API_URL || '', {
+    method: 'POST',
+    body: JSON.stringify({
+      key: 'village2026',
+      action: 'run',
+      func: 'regenerateContractById',
+      args: { tradeId: tid }
+    })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (!res || res.error || res.success === false) {
+        throw new Error((res && res.error) || '계약서 재생성 실패');
+      }
+      var result = res.result || {};
+      if (result.error) throw new Error(result.error);
+      var url = result.url || res.url || '';
+      dashboardEquipmentMutationTargets(tid).forEach(function(item) {
+        if (url) item.contractUrl = url;
+        item.contractRegenPending = false;
+      });
+      renderDashboardEquipmentMutation();
+      showDashboardToast('계약서 갱신 완료');
+      queueDashboardSilentRefresh(800);
+      return res;
+    })
+    .catch(function() {
+      showDashboardToast('계약서 갱신 재시도 대기');
+      queueDashboardSilentRefresh(6500);
+      return null;
+    })
+    .then(function(res) {
+      dashboardContractRegenInFlight[tid] = false;
+      if (dashboardContractRegenQueued[tid]) {
+        dashboardContractRegenQueued[tid] = false;
+        queueDashboardContractRegeneration(tid);
+      }
+      return res;
+    });
+}
+
 function applyDashboardEquipmentMutation(tid, res, context) {
   context = context || {};
   var changed = false;
@@ -3778,6 +3843,7 @@ function removeEquip(tid, equipName, scheduleId, isSet, isComponent) {
         isSet: isSet,
         isComponent: isComponent
       });
+      queueDashboardContractRegeneration(tid);
       finishDashboardMutation(mutationToken);
       queueDashboardSilentRefresh(6500);
     })
@@ -3824,6 +3890,7 @@ function editEquipQty(tid, scheduleId, equipName, currentQty) {
         scheduleId: scheduleId,
         qty: qty
       });
+      queueDashboardContractRegeneration(tid);
       finishDashboardMutation(mutationToken);
       queueDashboardSilentRefresh(6500);
     })
@@ -4592,6 +4659,7 @@ function confirmAddEquip() {
       entries: entries,
       mode: mode
     });
+    queueDashboardContractRegeneration(tid);
     if (res.onsiteAddonWarning) {
       finishDashboardMutation(mutationToken);
       queueDashboardSilentRefresh(6500);

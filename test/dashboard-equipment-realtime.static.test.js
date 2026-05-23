@@ -8,6 +8,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const backend = read('checkAvailability.js');
 const code = read('Code.js');
 const sheetApi = read('sheetAPI.js');
+const generateContract = read('generatecontract.js');
 
 assert.match(
   backend,
@@ -147,6 +148,16 @@ assert.match(
   /deleteAndRegenerateContract\(ss,\s*거래ID\)[\s\S]*invalidateDashboardTradeExtraCache_\(\[거래ID\]\)/,
   'contract regen worker must invalidate cached contract links after regeneration'
 );
+assert.match(
+  generateContract,
+  /function clearDirectContractRegenPending_\(거래ID\)[\s\S]*deleteProperty\('contractEditTS_' \+ 거래ID\)[\s\S]*invalidateDashboardTradeExtraCache_\(\[거래ID\]\)/,
+  'direct contract regeneration must clear pending state and stale contract-link caches'
+);
+assert.match(
+  generateContract,
+  /function regenerateContractById\(거래ID,\s*추가요청\)[\s\S]*deleteAndRegenerateContract\(ss,\s*거래ID,\s*extraText\)[\s\S]*clearDirectContractRegenPending_\(거래ID\)/,
+  'regenerateContractById must prevent the fallback trigger from regenerating the same contract again after immediate regeneration succeeds'
+);
 
 const removeBackendBody = backend.match(/function dashboardRemoveEquipment\([\s\S]*?\n}\n\n\n\/\*\* "yyyy-MM-dd"/);
 assert.ok(removeBackendBody, 'dashboardRemoveEquipment must exist before parseDT');
@@ -183,7 +194,9 @@ assert.doesNotMatch(
     'function captureDashboardTradeFieldsSnapshot(',
     'function markDashboardContractRegenPending(',
     'function syncDashboardContractFieldsFromData(',
-    'function dashboardHasPendingContractRegen('
+    'function dashboardHasPendingContractRegen(',
+    'function queueDashboardContractRegeneration(',
+    'function startDashboardContractRegeneration('
   ].forEach((contract) => {
     assert.ok(html.includes(contract), `${file} must include realtime equipment helper: ${contract}`);
   });
@@ -226,6 +239,11 @@ assert.doesNotMatch(
   );
   assert.match(
     removeBody[0],
+    /queueDashboardContractRegeneration\(tid\)/,
+    `${file} removeEquip must start contract regeneration immediately after the schedule edit succeeds`
+  );
+  assert.match(
+    removeBody[0],
     /var snapshot\s*=\s*captureDashboardEquipmentSnapshot\(tid\)[\s\S]*applyDashboardEquipmentMutation\(tid,\s*\{\},\s*\{[\s\S]*fetch\(/,
     `${file} removeEquip must update the card before waiting for the slow GAS request`
   );
@@ -256,6 +274,11 @@ assert.doesNotMatch(
     qtyBody[0],
     /queueDashboardSilentRefresh\(6500\)/,
     `${file} editEquipQty must refresh after the contract regen debounce window, not before it`
+  );
+  assert.match(
+    qtyBody[0],
+    /queueDashboardContractRegeneration\(tid\)/,
+    `${file} editEquipQty must start contract regeneration immediately after the schedule edit succeeds`
   );
   assert.match(
     qtyBody[0],
@@ -302,6 +325,16 @@ assert.doesNotMatch(
     addBody[0],
     /queueDashboardSilentRefresh\(6500\)/,
     `${file} confirmAddEquip must refresh after the contract regen debounce window, not before it`
+  );
+  assert.match(
+    addBody[0],
+    /queueDashboardContractRegeneration\(tid\)/,
+    `${file} confirmAddEquip must start contract regeneration immediately after the schedule edit succeeds`
+  );
+  assert.match(
+    html,
+    /function startDashboardContractRegeneration\(tid\)[\s\S]*action:\s*'run'[\s\S]*func:\s*'regenerateContractById'[\s\S]*tradeId:\s*tid[\s\S]*contractRegenPending\s*=\s*false/,
+    `${file} must regenerate the contract in the background and clear the pending button state when the new link is ready`
   );
   assert.match(
     addBody[0],
