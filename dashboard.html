@@ -1498,6 +1498,9 @@ var dashboardLocalMutationSeq = 0;
 var dashboardContractRegenTimers = {};
 var dashboardContractRegenInFlight = {};
 var dashboardContractRegenQueued = {};
+var dashboardContractStatusRefreshTimer = null;
+var dashboardContractStatusRefreshInFlight = false;
+var dashboardContractStatusRefreshQueued = false;
 var DASHBOARD_MUTATION_REFRESH_MIN_DELAY_MS = 5000;
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -1641,6 +1644,7 @@ function loadData(forceFresh) {
       var cachedData = readDashboardLocalCache(dateStr, cachedJson);
       dashboardData = cachedData;
       renderedCached = renderDashboard(cachedData, dateStr);
+      if (dashboardHasPendingContractRegen(cachedData)) queueDashboardPendingContractStatusRefresh(1000);
     } catch (e) {
       renderedCached = false;
     }
@@ -3677,7 +3681,10 @@ function queueDashboardSilentRefresh(delayMs) {
         syncDashboardContractFieldsFromData(data);
         writeDashboardLocalCache(dateStr, data);
         renderDashboardEquipmentMutation();
-        if (dashboardHasPendingContractRegen(data)) queueDashboardSilentRefresh(7000);
+        if (dashboardHasPendingContractRegen(data) || dashboardHasPendingContractRegen(dashboardGlobalSearchData)) {
+          queueDashboardPendingContractStatusRefresh(1000);
+          queueDashboardSilentRefresh(7000);
+        }
       })
       .catch(function() {});
   }, delayMs);
@@ -3688,10 +3695,94 @@ function queueDashboardContractRegeneration(tid) {
   if (!tid) return;
   markDashboardContractRegenPending(tid, true);
   renderDashboardEquipmentMutation();
+  queueDashboardPendingContractStatusRefresh(7000);
   clearTimeout(dashboardContractRegenTimers[tid]);
   dashboardContractRegenTimers[tid] = setTimeout(function() {
     startDashboardContractRegeneration(tid);
   }, 250);
+}
+
+function collectDashboardPendingContractTids() {
+  var seen = {};
+  var tids = [];
+  function collect(source) {
+    if (!source) return;
+    ['checkout', 'checkin'].forEach(function(listName) {
+      (source[listName] || []).forEach(function(item) {
+        var tid = String((item && item.tradeId) || '').trim();
+        if (!tid || !item.contractRegenPending || seen[tid]) return;
+        seen[tid] = true;
+        tids.push(tid);
+      });
+    });
+  }
+  collect(dashboardData);
+  collect(dashboardGlobalSearchData);
+  return tids;
+}
+
+function syncDashboardContractFieldsFromExtras(extras) {
+  extras = extras || {};
+  var changed = false;
+  Object.keys(extras).forEach(function(tid) {
+    var extra = extras[tid] || {};
+    dashboardEquipmentMutationTargets(tid).forEach(function(item) {
+      var pending = !!extra.contractRegenPending;
+      var url = Object.prototype.hasOwnProperty.call(extra, 'contractUrl') ? (extra.contractUrl || '') : item.contractUrl;
+      if (item.contractUrl !== url) {
+        item.contractUrl = url;
+        changed = true;
+      }
+      if (!!item.contractRegenPending !== pending) {
+        item.contractRegenPending = pending;
+        changed = true;
+      }
+    });
+  });
+  if (changed) {
+    renderDashboardEquipmentMutation();
+    persistCurrentDashboardCache();
+  }
+  return changed;
+}
+
+function queueDashboardPendingContractStatusRefresh(delayMs) {
+  clearTimeout(dashboardContractStatusRefreshTimer);
+  if (!collectDashboardPendingContractTids().length) return;
+  dashboardContractStatusRefreshTimer = setTimeout(function() {
+    refreshDashboardPendingContractStatus();
+  }, Math.max(Number(delayMs) || 0, 1000));
+}
+
+function refreshDashboardPendingContractStatus() {
+  var tids = collectDashboardPendingContractTids();
+  if (!tids.length) return Promise.resolve(null);
+  if (dashboardContractStatusRefreshInFlight) {
+    dashboardContractStatusRefreshQueued = true;
+    return Promise.resolve(null);
+  }
+
+  dashboardContractStatusRefreshInFlight = true;
+  return fetch(API_URL + '?key=village2026&action=dashboardContractExtras&tids=' + encodeURIComponent(JSON.stringify(tids)))
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (!res || res.error) throw new Error((res && res.error) || '계약서 상태 조회 실패');
+      syncDashboardContractFieldsFromExtras(res.items || {});
+      if (collectDashboardPendingContractTids().length) queueDashboardPendingContractStatusRefresh(7000);
+      return res;
+    })
+    .catch(function() {
+      if (collectDashboardPendingContractTids().length) queueDashboardPendingContractStatusRefresh(7000);
+      return null;
+    })
+    .then(function(res) {
+      dashboardContractStatusRefreshInFlight = false;
+      if (dashboardContractStatusRefreshQueued) {
+        dashboardContractStatusRefreshQueued = false;
+        queueDashboardPendingContractStatusRefresh(1000);
+      }
+      return res;
+    });
 }
 
 function startDashboardContractRegeneration(tid) {
@@ -3732,6 +3823,7 @@ function startDashboardContractRegeneration(tid) {
     })
     .catch(function() {
       showDashboardToast('계약서 갱신 재시도 대기');
+      queueDashboardPendingContractStatusRefresh(7000);
       queueDashboardSilentRefresh(6500);
       return null;
     })

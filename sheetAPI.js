@@ -255,6 +255,11 @@ function handleRequest(e) {
       case "dashboardSearchIndex":
         return jsonResponse(getDashboardSearchClientIndex_());
 
+      case "dashboardContractExtras":
+        return jsonResponse(getDashboardContractExtrasByIds_(
+          params.tids || postBody.tids || params.tradeIds || postBody.tradeIds || params.ids || postBody.ids || []
+        ));
+
       case "dashboardNotes":
         return jsonResponse(getDashboardNotes_());
 
