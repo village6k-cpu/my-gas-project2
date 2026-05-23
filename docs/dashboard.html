@@ -1546,6 +1546,7 @@ var dashboardContractRegenQueued = {};
 var dashboardContractStatusRefreshTimer = null;
 var dashboardContractStatusRefreshInFlight = false;
 var dashboardContractStatusRefreshQueued = false;
+var dashboardContractStatusCheckedTids = {};
 var DASHBOARD_MUTATION_REFRESH_MIN_DELAY_MS = 5000;
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -1688,7 +1689,7 @@ function loadData(forceFresh) {
       var cachedData = readDashboardLocalCache(dateStr, cachedJson);
       dashboardData = cachedData;
       renderedCached = renderDashboard(cachedData, dateStr);
-      if (dashboardHasPendingContractRegen(cachedData)) queueDashboardPendingContractStatusRefresh(1000);
+      if (collectDashboardContractStatusRefreshTids().length) queueDashboardPendingContractStatusRefresh(1000);
     } catch (e) {
       renderedCached = false;
     }
@@ -2451,6 +2452,7 @@ function renderDashboard(data, expectedDate) {
   queueEquipListPrefetch();
   queueDashboardSearchIndexPrefetch();
   scheduleDashboardSectionWarmup();
+  queueDashboardPendingContractStatusRefresh(1000);
   return true;
 }
 
@@ -2489,6 +2491,7 @@ function renderDashboardGlobalSearch(data) {
   switchTab('all');
   queueEquipListPrefetch();
   scheduleDashboardSectionWarmup();
+  queueDashboardPendingContractStatusRefresh(1000);
 }
 
 function toggleDashboardSearchGroup(groupId) {
@@ -3761,6 +3764,8 @@ function cardActionHtml(item, cardType) {
     html += '<span class="card-contract-btn disabled">계약서 갱신 중</span>';
   } else if (item.contractUrl) {
     html += '<a class="card-contract-btn" href="' + escAttr(item.contractUrl) + '" target="_blank" onclick="event.stopPropagation()">계약서 열기</a>';
+  } else if (dashboardContractNeedsLookup(item)) {
+    html += '<span class="card-contract-btn disabled">계약서 확인 중</span>';
   } else {
     html += '<span class="card-contract-btn disabled">계약서 없음</span>';
   }
@@ -4220,7 +4225,7 @@ function queueDashboardSilentRefresh(delayMs) {
         syncDashboardContractFieldsFromData(data);
         writeDashboardLocalCache(dateStr, data);
         renderDashboardEquipmentMutation();
-        if (dashboardHasPendingContractRegen(data) || dashboardHasPendingContractRegen(dashboardGlobalSearchData)) {
+        if (collectDashboardContractStatusRefreshTids().length) {
           queueDashboardPendingContractStatusRefresh(1000);
           queueDashboardSilentRefresh(7000);
         }
@@ -4260,14 +4265,44 @@ function collectDashboardPendingContractTids() {
   return tids;
 }
 
+function dashboardContractNeedsLookup(item) {
+  var tid = String((item && item.tradeId) || '').trim();
+  if (!tid) return false;
+  if (item.contractRegenPending) return true;
+  if (item.contractUrl) return false;
+  if (item.contractExtraChecked || dashboardContractStatusCheckedTids[tid]) return false;
+  return true;
+}
+
+function collectDashboardContractStatusRefreshTids() {
+  var seen = {};
+  var tids = [];
+  function collect(source) {
+    if (!source) return;
+    ['checkout', 'checkin'].forEach(function(listName) {
+      (source[listName] || []).forEach(function(item) {
+        var tid = String((item && item.tradeId) || '').trim();
+        if (!tid || !dashboardContractNeedsLookup(item) || seen[tid]) return;
+        seen[tid] = true;
+        tids.push(tid);
+      });
+    });
+  }
+  collect(dashboardData);
+  collect(dashboardGlobalSearchData);
+  return tids;
+}
+
 function syncDashboardContractFieldsFromExtras(extras) {
   extras = extras || {};
   var changed = false;
   Object.keys(extras).forEach(function(tid) {
     var extra = extras[tid] || {};
+    dashboardContractStatusCheckedTids[tid] = Date.now();
     dashboardEquipmentMutationTargets(tid).forEach(function(item) {
       var pending = !!extra.contractRegenPending;
       var url = Object.prototype.hasOwnProperty.call(extra, 'contractUrl') ? (extra.contractUrl || '') : item.contractUrl;
+      item.contractExtraChecked = true;
       if (item.contractUrl !== url) {
         item.contractUrl = url;
         changed = true;
@@ -4287,14 +4322,14 @@ function syncDashboardContractFieldsFromExtras(extras) {
 
 function queueDashboardPendingContractStatusRefresh(delayMs) {
   clearTimeout(dashboardContractStatusRefreshTimer);
-  if (!collectDashboardPendingContractTids().length) return;
+  if (!collectDashboardContractStatusRefreshTids().length) return;
   dashboardContractStatusRefreshTimer = setTimeout(function() {
     refreshDashboardPendingContractStatus();
   }, Math.max(Number(delayMs) || 0, 1000));
 }
 
 function refreshDashboardPendingContractStatus() {
-  var tids = collectDashboardPendingContractTids();
+  var tids = collectDashboardContractStatusRefreshTids();
   if (!tids.length) return Promise.resolve(null);
   if (dashboardContractStatusRefreshInFlight) {
     dashboardContractStatusRefreshQueued = true;
@@ -4307,11 +4342,11 @@ function refreshDashboardPendingContractStatus() {
     .then(function(res) {
       if (!res || res.error) throw new Error((res && res.error) || '계약서 상태 조회 실패');
       syncDashboardContractFieldsFromExtras(res.items || {});
-      if (collectDashboardPendingContractTids().length) queueDashboardPendingContractStatusRefresh(7000);
+      if (collectDashboardContractStatusRefreshTids().length) queueDashboardPendingContractStatusRefresh(7000);
       return res;
     })
     .catch(function() {
-      if (collectDashboardPendingContractTids().length) queueDashboardPendingContractStatusRefresh(7000);
+      if (collectDashboardContractStatusRefreshTids().length) queueDashboardPendingContractStatusRefresh(7000);
       return null;
     })
     .then(function(res) {
