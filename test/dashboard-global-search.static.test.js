@@ -22,7 +22,7 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v8_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v9_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
   'global search must cache the expensive all-reservation search index'
 );
 
@@ -40,7 +40,7 @@ assert.match(
 
 assert.match(
   backend,
-  /var DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_[\s\S]*\['tid',\s*'n',\s*'tel',\s*'co',\s*'cs',\s*'st',\s*'od',\s*'ot',\s*'rd',\s*'rt',\s*'x'\]/,
+  /var DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_[\s\S]*\['tid',\s*'n',\s*'tel',\s*'co',\s*'cs',\s*'st',\s*'od',\s*'ot',\s*'rd',\s*'rt',\s*'eq',\s*'x'\]/,
   'global search client index must define packed columns for a smaller browser payload'
 );
 
@@ -56,10 +56,16 @@ assert.match(
   'global search must expose a packed browser-side index for instant results'
 );
 
-assert.doesNotMatch(
+assert.match(
   backend,
-  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*eq:\s*buildDashboardSearchSummaryEquipments_/,
-  'global search index must not ship equipment summaries while typing; opened groups load equipment details lazily'
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*eq:\s*buildDashboardSearchSummaryEquipments_\(group\.equipments\)/,
+  'global search index must ship compact equipment summaries so opened date groups show equipment immediately'
+);
+
+assert.match(
+  backend,
+  /function buildDashboardSearchSummaryEquipments_\(equipments\)[\s\S]*return\s+\[[\s\S]*eq\.scheduleId[\s\S]*eq\.name[\s\S]*eq\.qty[\s\S]*eq\.setName/,
+  'global search index equipment summaries must stay compact arrays'
 );
 
 assert.match(
@@ -217,13 +223,13 @@ assert.match(
 
   assert.match(
     html,
-    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v6['"]/,
-    `${file} must invalidate old untokenized local dashboard search index caches`
+    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v7['"]/,
+    `${file} must invalidate search-index caches that omitted equipment summaries`
   );
 
   assert.match(
     html,
-    /var DASHBOARD_SEARCH_INDEX_PACKED_COLUMNS\s*=\s*\['tid',\s*'n',\s*'tel',\s*'co',\s*'cs',\s*'st',\s*'od',\s*'ot',\s*'rd',\s*'rt',\s*'x'\]/,
+    /var DASHBOARD_SEARCH_INDEX_PACKED_COLUMNS\s*=\s*\['tid',\s*'n',\s*'tel',\s*'co',\s*'cs',\s*'st',\s*'od',\s*'ot',\s*'rd',\s*'rt',\s*'eq',\s*'x'\]/,
     `${file} must know how to decode packed dashboard search index rows`
   );
 

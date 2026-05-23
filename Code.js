@@ -1055,6 +1055,7 @@ function scheduleContractRegen(거래ID) {
   var props = PropertiesService.getScriptProperties();
   var now = Date.now();
   props.setProperty('contractEditTS_' + 거래ID, String(now));
+  try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
 
   var scheduledAt = Number(props.getProperty(CONTRACT_REGEN_TRIGGER_PROP_) || 0);
   var hasRecentScheduledTrigger = scheduledAt && (now - scheduledAt < CONTRACT_REGEN_TRIGGER_STALE_MS_);
@@ -1109,8 +1110,12 @@ function regenPendingContracts() {
       if (age >= STABLE_MS) {
         try {
           deleteAndRegenerateContract(ss, 거래ID);
+          try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
+          try { invalidateDashboardCache(); } catch (e1) {}
+          try { invalidateTimelineCache(); } catch (e2) {}
           Logger.log("계약서 재생성 완료(디바운스): " + 거래ID);
         } catch (err) {
+          try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e3) {}
           Logger.log("계약서 재생성 실패: " + 거래ID + " - " + err.message);
         }
         props.deleteProperty(key);

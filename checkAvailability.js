@@ -948,6 +948,7 @@ function getDashboardData(targetDate, skipCache, options) {
       setupDoneAt: setupDoneAt,
       returnDoneAt: returnDoneAt,
       contractUrl: extra.contractUrl || '',
+      contractRegenPending: !!extra.contractRegenPending,
       paymentMethod: extra.paymentMethod || '',
       paymentSource: extra.paymentSource || '',
       paymentWarning: extra.paymentWarning || '',
@@ -1337,6 +1338,24 @@ function buildDashboardSearchSummaryItem_(candidate) {
   return item;
 }
 
+function buildDashboardSearchSummaryEquipments_(equipments) {
+  var setsWithComponents = {};
+  (equipments || []).forEach(function(eq) {
+    if (eq && !eq.isHeader && eq.setName) setsWithComponents[eq.setName] = true;
+  });
+  return (equipments || []).filter(function(eq) {
+    return eq && eq.isHeader;
+  }).slice(0, 30).map(function(eq) {
+    return [
+      eq.scheduleId || '',
+      eq.name || '',
+      eq.qty || 1,
+      eq.setName || '',
+      setsWithComponents[eq.name] ? 1 : 0
+    ];
+  });
+}
+
 function expandDashboardSearchSummaryEquipments_(items) {
   return (items || []).map(function(item) {
     if (Array.isArray(item)) {
@@ -1354,7 +1373,7 @@ function expandDashboardSearchSummaryEquipments_(items) {
   });
 }
 
-var DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_ = ['tid', 'n', 'tel', 'co', 'cs', 'st', 'od', 'ot', 'rd', 'rt', 'x'];
+var DASHBOARD_SEARCH_CLIENT_INDEX_COLUMNS_ = ['tid', 'n', 'tel', 'co', 'cs', 'st', 'od', 'ot', 'rd', 'rt', 'eq', 'x'];
 var DASHBOARD_SEARCH_CLIENT_INDEX_TEXT_COLUMN_ = 'x';
 
 function getDashboardSearchClientIndexTextColumnIndex_() {
@@ -1416,7 +1435,7 @@ function getDashboardSearchClientIndex_() {
 
 function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_search_index_v8_' + getTimelineCacheVersion_() + '_' +
+  var cacheKey = 'dashboard_search_index_v9_' + getTimelineCacheVersion_() + '_' +
     getDashboardSearchCacheVersion_() + '_' + schedSheet.getLastRow();
   var cached = getDashboardCacheJson_(cache, cacheKey);
   if (cached && Array.isArray(cached.entries)) return cached;
@@ -1475,6 +1494,7 @@ function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
       ot: group.반출시간 || '',
       rd: group.반납일 || '',
       rt: group.반납시간 || '',
+      eq: buildDashboardSearchSummaryEquipments_(group.equipments),
       rs: group.rowNums || [],
       x: buildDashboardSearchText_(group, cust, extra, checkInfo)
     };
@@ -1623,6 +1643,7 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRu
     setupDoneAt: props['setupDoneAt_' + tid] || '',
     returnDoneAt: props['returnDoneAt_' + tid] || '',
     contractUrl: extra.contractUrl || '',
+    contractRegenPending: !!extra.contractRegenPending,
     paymentMethod: extra.paymentMethod || '',
     paymentSource: extra.paymentSource || '',
     paymentWarning: extra.paymentWarning || '',
@@ -3385,6 +3406,7 @@ var DASHBOARD_TRADE_EXTRA_CACHE_SECONDS_ = 300;
 function emptyDashboardTradeExtra_() {
   return {
     contractUrl: '',
+    contractRegenPending: false,
     paymentMethod: '',
     paymentSource: '',
     paymentWarning: '',
@@ -3435,12 +3457,17 @@ function getTradeExtrasForIds_(tradeIds, props) {
   props = props || PropertiesService.getScriptProperties().getProperties();
   var ids = [];
   var seenIds = {};
+  var pendingRegenIds = {};
   (tradeIds || []).forEach(function(tid) {
     tid = String(tid || '').trim();
     if (!tid || seenIds[tid]) return;
     seenIds[tid] = true;
     ids.push(tid);
     result[tid] = emptyDashboardTradeExtra_();
+    if (props['contractEditTS_' + tid]) {
+      pendingRegenIds[tid] = true;
+      result[tid].contractRegenPending = true;
+    }
   });
   if (ids.length === 0) return result;
 
@@ -3455,6 +3482,10 @@ function getTradeExtrasForIds_(tradeIds, props) {
     missingIds = [];
     ids.forEach(function(tid) {
       var key = getDashboardTradeExtraCacheKey_(tid);
+      if (pendingRegenIds[tid]) {
+        missingIds.push(tid);
+        return;
+      }
       if (cached[key]) {
         try {
           result[tid] = JSON.parse(cached[key]);
@@ -3509,7 +3540,11 @@ function getTradeExtrasForIds_(tradeIds, props) {
       var tid = String(row[idCol - 1] || '').trim();
       if (!wanted[tid]) return;
       result[tid] = buildDashboardTradeExtraFromRow_(row, columns);
-      if (cache) cachePayload[getDashboardTradeExtraCacheKey_(tid)] = JSON.stringify(result[tid]);
+      if (pendingRegenIds[tid]) {
+        result[tid].contractRegenPending = true;
+      } else if (cache) {
+        cachePayload[getDashboardTradeExtraCacheKey_(tid)] = JSON.stringify(result[tid]);
+      }
     });
     if (cache && Object.keys(cachePayload).length > 0) {
       cache.putAll(cachePayload, DASHBOARD_TRADE_EXTRA_CACHE_SECONDS_);
@@ -5381,6 +5416,7 @@ function dashboardAddEquipments(tid, entries, options) {
     return attachProfile_({
       success: true,
       availabilityChecked: true,
+      contractRegenPending: true,
       addedEquipments: addEntries.length,
       addedRows: newRows.length,
       addedItems: dashboardAddedItemsFromRows_(newRows),
@@ -5544,6 +5580,7 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
     return {
       success: true,
       dryRun: dryRun,
+      contractRegenPending: !dryRun,
       scheduleId: scheduleId,
       qty: newQty,
       updatedRows: updates.length,
@@ -5681,6 +5718,7 @@ function dashboardAddEquipment(tid, equipName, qty) {
     return {
 	      success: true,
 	      availabilityChecked: true,
+	      contractRegenPending: true,
 	      addedRows: newRows.length,
 	      addedItems: dashboardAddedItemsFromRows_(newRows),
 	      isSet: components.length > 0,
@@ -5793,6 +5831,7 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId) {
     try { invalidateTimelineCache(); } catch (eTimeline) {}
     return {
       success: true,
+      contractRegenPending: true,
       removedRows: rowsToDelete.length,
       removedScheduleIds: removedScheduleIds,
       removedEquipments: removedEquipments,
