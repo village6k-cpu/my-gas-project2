@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Village Kakao DOM Watcher",
+  "version": "0.1.0",
+  "description": "Detects new Kakao Channel Manager messages and wakes the AI-first browser coworker. It does not classify or reply.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://center-pf.kakao.com/*",
+        "https://center-pf.kakao.com/_chats*",
+        "https://center-pf.kakao.com/_*/chats*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Village Kakao Watcher",
+    "default_popup": "popup.html"
+  }
+}

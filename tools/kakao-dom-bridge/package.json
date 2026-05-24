@@ -1,0 +1,14 @@
+{
+  "name": "village-kakao-dom-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local bridge for the Village Kakao DOM watcher. Receives browser events, debounces, and wakes the AI-first browser coworker.",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

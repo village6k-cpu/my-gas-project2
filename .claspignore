@@ -5,6 +5,7 @@
 .superpowers/**
 .gstack/**
 test/**
+tools/**
 
 # GitHub Pages (GAS에 올릴 필요 없음)
 docs/**

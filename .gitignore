@@ -3,3 +3,5 @@ node_modules/
 .DS_Store
 .gstack/
 .superpowers/
+tools/kakao-dom-bridge/queue/
+tools/kakao-dom-bridge/.env
