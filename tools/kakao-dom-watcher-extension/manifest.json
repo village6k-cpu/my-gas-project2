@@ -13,7 +13,9 @@
       "matches": [
         "https://center-pf.kakao.com/*",
         "https://center-pf.kakao.com/_chats*",
-        "https://center-pf.kakao.com/_*/chats*"
+        "https://center-pf.kakao.com/_*/chats*",
+        "https://business.kakao.com/*",
+        "https://business.kakao.com/_*/chats*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"

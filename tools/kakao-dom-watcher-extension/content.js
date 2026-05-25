@@ -13,7 +13,9 @@
     config: { ...DEFAULT_CONFIG },
     lastSignatureAt: new Map(),
     observer: null,
-    heartbeatTimer: null
+    heartbeatTimer: null,
+    topRowPollTimer: null,
+    lastTopRowSignature: null
   };
 
   function log(...args) {
@@ -64,6 +66,29 @@
       '[class*="room"]',
       '[class*="Room"]'
     ].join(','));
+  }
+
+  function isPageContainerLike(row, rowText) {
+    const id = row?.id || '';
+    if (/^(kakaoWrap|kakaoContent)$/i.test(id)) return true;
+    if (row === document.documentElement || row === document.body) return true;
+
+    const text = String(rowText || '');
+    if (/^(전체 채팅목록|중요채팅 목록|차단친구 목록)$/.test(text)) return true;
+    const pageChromeSignals = [
+      '채팅 목록 채팅 목록',
+      '1:1 채팅사용 여부',
+      '상담 완료하기',
+      '채팅방 나가기',
+      '친구차단'
+    ];
+    const isSettingsBlock = text.includes('1:1 채팅사용 여부') && text.includes('채팅설정');
+    const importanceMarkers = (text.match(/중요\s/g) || []).length;
+    const looksLikeChatListContainer = text.length > 120 && importanceMarkers >= 2;
+
+    return pageChromeSignals.filter((needle) => text.includes(needle)).length >= 2
+      || isSettingsBlock
+      || looksLikeChatListContainer;
   }
 
   function extractUnreadCount(rowText) {
@@ -157,6 +182,7 @@
     const row = nearestChatRow(el) || el;
     const rowText = normalizeText(row.innerText || row.textContent || text);
     if (!rowText) return;
+    if (isPageContainerLike(row, rowText)) return;
 
     if (reason === 'mutation' && !hasUnreadSignal(el, text) && !hasUnreadSignal(row, rowText)) {
       // 새 메시지 DOM은 class 이름이 불안정하다. 다만 모든 mutation을 보내면 너무 시끄러워지므로
@@ -186,6 +212,87 @@
     }
   }
 
+  function chatRowCandidates() {
+    return Array.from(document.querySelectorAll([
+      '[role="listitem"]',
+      '[role="row"]',
+      'li',
+      '[class*="chat"]',
+      '[class*="Chat"]',
+      '[class*="room"]',
+      '[class*="Room"]'
+    ].join(',')))
+      .filter(isVisible)
+      .map((el) => {
+        const row = nearestChatRow(el) || el;
+        const text = normalizeText(row.innerText || row.textContent || el.innerText || el.textContent || '');
+        const rect = row.getBoundingClientRect?.();
+        return { row, text, top: rect ? rect.top : Number.POSITIVE_INFINITY, left: rect ? rect.left : Number.POSITIVE_INFINITY };
+      })
+      .filter(({ row, text, top }) => text && text.length >= 4 && text.length <= 220 && top > 0 && !isPageContainerLike(row, text));
+  }
+
+  function firstVisibleChatRow() {
+    const rows = chatRowCandidates().sort((a, b) => (a.top - b.top) || (a.left - b.left));
+    return rows[0] || null;
+  }
+
+  function topRowsSnapshot(limit = 8) {
+    const seen = new Set();
+    const rows = [];
+    for (const item of chatRowCandidates().sort((a, b) => (a.top - b.top) || (a.left - b.left))) {
+      const key = `${Math.round(item.top)}:${item.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({
+        top: Math.round(item.top),
+        left: Math.round(item.left),
+        text: item.text
+      });
+      if (rows.length >= limit) break;
+    }
+    return rows;
+  }
+
+  function postTopRowsSnapshot(reason = 'top_rows_snapshot') {
+    const rows = topRowsSnapshot();
+    postEvent({
+      source: 'kakao_channel_manager_dom',
+      status: 'dom_diagnostic',
+      reason,
+      detectedAt: new Date().toISOString(),
+      url: location.href,
+      title: document.title,
+      roomKey: 'top-rows-snapshot',
+      eventHash: hashText(`${reason}:${location.href}:${JSON.stringify(rows)}:${Math.floor(Date.now() / 5000)}`),
+      previewText: rows.map((row) => row.text).join(' || '),
+      unreadCount: null,
+      pageVisibility: document.visibilityState,
+      rows
+    });
+  }
+
+  function startTopRowPolling() {
+    if (STATE.topRowPollTimer) window.clearInterval(STATE.topRowPollTimer);
+
+    const seed = firstVisibleChatRow();
+    STATE.lastTopRowSignature = seed ? hashText(seed.text) : null;
+
+    STATE.topRowPollTimer = window.setInterval(() => {
+      if (!STATE.config.enabled) return;
+      const current = firstVisibleChatRow();
+      if (!current) return;
+      const signature = hashText(current.text);
+      if (!STATE.lastTopRowSignature) {
+        STATE.lastTopRowSignature = signature;
+        return;
+      }
+      if (signature === STATE.lastTopRowSignature) return;
+      STATE.lastTopRowSignature = signature;
+      postEvent(createEvent(current.row, 'top_row_changed', current.text));
+    }, 2000);
+  }
+
   function startObserver() {
     if (STATE.observer) STATE.observer.disconnect();
 
@@ -211,7 +318,6 @@
       attributeFilter: ['class', 'aria-label', 'title']
     });
 
-    window.setTimeout(scanInitialUnread, 1200);
     log('observer started');
   }
 
@@ -242,7 +348,23 @@
       return;
     }
     startObserver();
+    startTopRowPolling();
     startHeartbeat();
+    window.setTimeout(() => postTopRowsSnapshot('top_rows_snapshot'), 1500);
+    postEvent({
+      source: 'kakao_channel_manager_dom',
+      status: 'watcher_heartbeat',
+      reason: 'content_script_started',
+      detectedAt: new Date().toISOString(),
+      url: location.href,
+      title: document.title,
+      roomKey: 'watcher-heartbeat',
+      eventHash: hashText(`content_script_started:${location.href}:${Date.now()}`),
+      previewText: '',
+      unreadCount: null,
+      pageVisibility: document.visibilityState
+    });
+    window.setTimeout(scanInitialUnread, 3000);
   }
 
   chrome?.storage?.onChanged?.addListener((changes) => {

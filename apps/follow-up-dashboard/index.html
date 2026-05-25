@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Village Follow-up Dashboard</title>
+  <style>
+    :root { color-scheme: light; --bg:#f5f7fb; --card:#fff; --ink:#172033; --muted:#667085; --line:#e6eaf2; --blue:#16a3e8; --green:#16b981; --orange:#f59e0b; --red:#ef4444; --purple:#7c3aed; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
+    header { position:sticky; top:0; z-index:2; background:rgba(245,247,251,.92); backdrop-filter: blur(10px); border-bottom:1px solid var(--line); }
+    .wrap { max-width:1180px; margin:0 auto; padding:20px; }
+    h1 { margin:0 0 6px; font-size:28px; letter-spacing:0; }
+    .sub { color:var(--muted); font-size:14px; }
+    .topbar { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .controls { display:flex; gap:8px; flex-wrap:wrap; }
+    input, select, button { border:1px solid var(--line); border-radius:8px; background:#fff; padding:10px 12px; font-size:14px; }
+    button { cursor:pointer; font-weight:650; }
+    button.primary { background:var(--ink); color:#fff; border-color:var(--ink); }
+    .cards { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin:18px 0; }
+    .metric { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; box-shadow:0 8px 22px rgba(15,23,42,.04); }
+    .metric .label { color:var(--muted); font-size:13px; }
+    .metric .value { font-size:30px; font-weight:800; margin-top:8px; }
+    .metric.blue { border-top:4px solid var(--blue); } .metric.red { border-top:4px solid var(--red); } .metric.orange { border-top:4px solid var(--orange); } .metric.green { border-top:4px solid var(--green); } .metric.purple { border-top:4px solid var(--purple); }
+    .section-title { margin:26px 0 12px; display:flex; align-items:center; justify-content:space-between; }
+    .section-title h2 { margin:0; font-size:19px; }
+    .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    .item { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; box-shadow:0 8px 22px rgba(15,23,42,.04); }
+    .item.urgent { border-left:5px solid var(--red); } .item.high { border-left:5px solid var(--orange); } .item.normal { border-left:5px solid var(--blue); } .item.low { border-left:5px solid var(--green); }
+    .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+    .chip { font-size:12px; padding:4px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; font-weight:700; }
+    .chip.priority-urgent { background:#fee2e2; color:#991b1b; } .chip.priority-high { background:#ffedd5; color:#9a3412; } .chip.priority-normal { background:#e0f2fe; color:#075985; } .chip.priority-low { background:#dcfce7; color:#166534; }
+    .item h3 { margin:0 0 8px; font-size:17px; line-height:1.35; }
+    .meta { color:var(--muted); font-size:13px; margin-bottom:10px; }
+    .summary { white-space:pre-wrap; line-height:1.48; font-size:14px; }
+    .action { margin-top:12px; padding:12px; background:#f8fafc; border-radius:8px; font-size:14px; line-height:1.45; }
+    details { margin-top:10px; }
+    summary { cursor:pointer; color:var(--muted); font-size:13px; }
+    .evidence { color:#475467; font-size:13px; line-height:1.45; }
+    .item-footer { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+    .empty { padding:40px; text-align:center; color:var(--muted); background:#fff; border:1px dashed var(--line); border-radius:8px; }
+    .error { background:#fef2f2; color:#991b1b; border:1px solid #fecaca; padding:12px; border-radius:8px; margin-top:12px; }
+    @media (max-width: 900px) { .cards { grid-template-columns:repeat(2,1fr); } .grid { grid-template-columns:1fr; } .wrap { padding:14px; } }
+  </style>
+</head>
+<body>
+  <header><div class="wrap topbar"><div><h1>Village Follow-up Dashboard</h1><div class="sub" id="updated">AI 후속조치 업무판</div></div><div class="controls"><input id="token" placeholder="Dashboard token" type="password" /><select id="status"><option value="active">열린 업무</option><option value="all">전체</option><option value="done">완료</option><option value="dismissed">무시</option></select><button id="save">토큰 저장</button><button class="primary" id="refresh">새로고침</button></div></div></header>
+  <main class="wrap">
+    <div id="error"></div>
+    <section class="cards" id="metrics"></section>
+    <section><div class="section-title"><h2>긴급/높은 우선순위</h2></div><div class="grid" id="urgent"></div></section>
+    <section><div class="section-title"><h2>카테고리별 후속조치</h2></div><div id="groups"></div></section>
+  </main>
+<script>
+const labels = { reply_needed:'답변 필요', quote_send:'견적서 발송', tax_invoice:'세금계산서/증빙', schedule_check:'스케줄 확인', reservation_review:'예약 후보 확인', price_review:'가격/할인 확인', payment_check:'입금/결제 확인', contract_document:'계약/서류', return_extension:'반납/연장/변경', damage_repair:'파손/수리', sheet_duplicate_check:'시트 중복 확인', completed_log:'처리 완료 기록' };
+const priorityLabel = { urgent:'긴급', high:'높음', normal:'보통', low:'낮음' };
+const tokenEl = document.querySelector('#token'); tokenEl.value = localStorage.dashboardToken || '';
+document.querySelector('#save').onclick = () => { localStorage.dashboardToken = tokenEl.value; load(); };
+document.querySelector('#refresh').onclick = load; document.querySelector('#status').onchange = load;
+function esc(s='') { return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+async function patchStatus(id, status) { const res = await fetch('/api/follow-ups', { method:'PATCH', headers:{'content-type':'application/json','authorization':'Bearer '+(tokenEl.value||'')}, body:JSON.stringify({id,status}) }); const data = await res.json().catch(() => ({})); if (!res.ok) { document.querySelector('#error').innerHTML = `<div class="error">${esc(data.error || '상태 변경 실패')}</div>`; return; } await load(); }
+function metric(label, value, cls) { return `<div class="metric ${cls}"><div class="label">${label}</div><div class="value">${value}</div></div>`; }
+function itemCard(x) { const ev = Array.isArray(x.evidence) ? x.evidence : []; return `<article class="item ${esc(x.priority)}"><div class="chips"><span class="chip">${esc(labels[x.type]||x.type)}</span><span class="chip priority-${esc(x.priority)}">${esc(priorityLabel[x.priority]||x.priority)}</span><span class="chip">${esc(x.status)}</span></div><h3>${esc(x.title)}</h3><div class="meta">${esc(x.customer_name||'고객명 미상')} · ${new Date(x.created_at).toLocaleString('ko-KR')}</div><div class="summary">${esc(x.summary||'')}</div>${x.recommended_action ? `<div class="action"><b>추천 조치</b><br>${esc(x.recommended_action)}</div>`:''}${x.suggested_reply_draft ? `<div class="action"><b>답변 초안</b><br>${esc(x.suggested_reply_draft)}</div>`:''}<details><summary>근거/메타 보기</summary><div class="evidence">${ev.map(e=>`• ${esc(e)}`).join('<br>') || '근거 없음'}<br>${x.blocking_reason ? '<br><b>보류 사유</b>: '+esc(x.blocking_reason):''}</div></details><div class="item-footer"><button onclick="patchStatus('${x.id}','done')">완료</button><button onclick="patchStatus('${x.id}','dismissed')">무시</button><button onclick="patchStatus('${x.id}','in_progress')">진행중</button></div></article>`; }
+async function load() { document.querySelector('#error').innerHTML=''; try { const status = document.querySelector('#status').value; const res = await fetch('/api/follow-ups?status='+encodeURIComponent(status), { headers:{ authorization:'Bearer '+(tokenEl.value||'') } }); const data = await res.json(); if (!res.ok) throw new Error(data.error || 'load failed'); const s=data.summary; document.querySelector('#updated').textContent = '마지막 업데이트: '+new Date(data.updatedAt).toLocaleString('ko-KR'); document.querySelector('#metrics').innerHTML = metric('열린 업무',s.open,'blue')+metric('긴급',s.urgent,'red')+metric('높음',s.high,'orange')+metric('전체 표시',s.total,'green')+metric('카테고리',s.byType.length,'purple'); const urgent=data.items.filter(x=>['urgent','high'].includes(x.priority) && !['done','dismissed'].includes(x.status)).slice(0,6); document.querySelector('#urgent').innerHTML = urgent.length ? urgent.map(itemCard).join('') : '<div class="empty">긴급 업무가 없습니다.</div>'; const groups={}; for (const x of data.items) (groups[x.type] ||= []).push(x); document.querySelector('#groups').innerHTML = Object.entries(groups).map(([type,items])=>`<div class="section-title"><h2>${esc(labels[type]||type)} <span class="sub">${items.length}건</span></h2></div><div class="grid">${items.map(itemCard).join('')}</div>`).join('') || '<div class="empty">표시할 후속조치가 없습니다.</div>'; } catch(e) { document.querySelector('#error').innerHTML = `<div class="error">${esc(e.message)}</div>`; } }
+load(); setInterval(load, 30000);
+</script>
+</body>
+</html>

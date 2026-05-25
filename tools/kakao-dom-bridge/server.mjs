@@ -8,10 +8,12 @@ const CONFIG = {
   port: Number(process.env.PORT || 8787),
   debounceMs: Number(process.env.DEBOUNCE_MS || 90_000),
   maxWaitMs: Number(process.env.MAX_WAIT_MS || 300_000),
+  startupMutationIgnoreMs: Number(process.env.STARTUP_MUTATION_IGNORE_MS || 4000),
   queueDir: path.resolve(process.env.QUEUE_DIR || './queue'),
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   supabaseTable: process.env.SUPABASE_TABLE || '',
+  processInitialScan: process.env.PROCESS_INITIAL_SCAN === 'true',
   workerCommand: process.env.VILLAGE_AI_WORKER_CMD || ''
 };
 
@@ -21,7 +23,9 @@ const state = {
   debouncedJobs: 0,
   failedSupabaseWrites: 0,
   failedWorkerRuns: 0,
-  rooms: new Map()
+  rooms: new Map(),
+  seenGroupingTexts: new Set(),
+  lastContentScriptStartedAtMs: 0
 };
 
 function ensureQueueDir() {
@@ -85,6 +89,65 @@ function normalizeEvent(raw) {
     pageVisibility: raw.pageVisibility || raw.page_visibility || null,
     raw
   };
+}
+
+function isPageContainerPreview(text, roomKey) {
+  const preview = String(text || '');
+  if (/^attr:kakao(Wrap|Content)$/i.test(String(roomKey || ''))) return true;
+  if (/^(전체 채팅목록|중요채팅 목록|차단친구 목록)$/.test(preview)) return true;
+  const pageChromeSignals = [
+    '채팅 목록 채팅 목록',
+    '1:1 채팅사용 여부',
+    '상담 완료하기',
+    '채팅방 나가기',
+    '친구차단'
+  ];
+  const isSettingsBlock = preview.includes('1:1 채팅사용 여부') && preview.includes('채팅설정');
+  const importanceMarkers = (preview.match(/중요\s/g) || []).length;
+  const looksLikeChatListContainer = preview.length > 120 && importanceMarkers >= 2;
+
+  return pageChromeSignals.filter((needle) => preview.includes(needle)).length >= 2
+    || isSettingsBlock
+    || looksLikeChatListContainer;
+}
+
+function normalizePreviewForGrouping(text) {
+  const cleaned = String(text || '')
+    .replace(/^중요\s+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+
+  // Group split Kakao bubbles by the visible room/customer label, not by the full
+  // latest-message preview. This is plumbing for debounce only; AI still reads
+  // the opened conversation and decides sender/intent.
+  const tokens = cleaned.split(' ').filter(Boolean);
+  const labelParts = [];
+  for (const token of tokens) {
+    if (/^\d+$/.test(token)) break; // unread count often follows the room label
+    if (/^(오전|오후)$/.test(token)) break;
+    if (/^\d{1,2}:\d{2}$/.test(token)) break;
+    labelParts.push(token);
+    if (labelParts.length >= 2) break; // allow short company/team labels without eating the message
+  }
+  const label = labelParts[0] || tokens[0] || cleaned.slice(0, 40);
+  return `room-label:${label.slice(0, 80)}`;
+}
+
+function getSpatialTop(roomKey) {
+  const match = /^dom:(\d+):/.exec(String(roomKey || ''));
+  return match ? Number(match[1]) : null;
+}
+
+function isLikelyShiftedExistingRow(event) {
+  if (event.reason !== 'mutation') return false;
+  const top = getSpatialTop(event.roomKey);
+  if (top === null) return false;
+
+  // In Kakao's chat-list layout, a genuinely new incoming room is promoted to the
+  // first visible row. The rows below it also mutate because the list shifts, but
+  // those are old conversations and should not create AI jobs.
+  return top >= Number(process.env.CHAT_LIST_FIRST_ROW_MAX_TOP || 44);
 }
 
 function appendNdjson(filename, object) {
@@ -206,7 +269,14 @@ async function flushRoom(roomKey) {
 }
 
 function scheduleDebouncedJob(event) {
-  const roomKey = event.roomKey || 'unknown-room';
+  const groupingText = normalizePreviewForGrouping(event.previewText);
+  const roomKey = groupingText ? `preview:${sha256(groupingText).slice(0, 16)}` : (event.roomKey || 'unknown-room');
+  const groupedEvent = {
+    ...event,
+    originalRoomKey: event.roomKey,
+    roomKey,
+    groupingText
+  };
   let roomState = state.rooms.get(roomKey);
   if (!roomState) {
     roomState = {
@@ -222,9 +292,11 @@ function scheduleDebouncedJob(event) {
   }
 
   roomState.lastAt = nowIso();
-  if (!roomState.hashes.has(event.eventHash)) {
-    roomState.events.push(event);
-    roomState.hashes.add(event.eventHash);
+  const eventIdentity = groupedEvent.eventHash || sha256(JSON.stringify(groupedEvent));
+
+  if (!roomState.hashes.has(eventIdentity)) {
+    roomState.events.push(groupedEvent);
+    roomState.hashes.add(eventIdentity);
   }
 
   if (roomState.timer) clearTimeout(roomState.timer);
@@ -239,9 +311,46 @@ async function handleEvent(req, res) {
   state.received += 1;
   appendNdjson('events.ndjson', event);
 
-  if (event.status === 'watcher_heartbeat' || event.reason === 'heartbeat') {
+  if (event.status === 'watcher_heartbeat' || event.reason === 'heartbeat' || event.reason === 'content_script_started') {
+    if (event.reason === 'content_script_started') {
+      state.lastContentScriptStartedAtMs = Date.now();
+    }
     appendNdjson('heartbeats.ndjson', event);
     return json(res, 202, { ok: true, heartbeat: true });
+  }
+
+  if (event.status === 'popup_bridge_test' || event.reason === 'popup_bridge_test') {
+    appendNdjson('diagnostics.ndjson', event);
+    return json(res, 202, { ok: true, diagnostic: true });
+  }
+
+  if (event.status === 'dom_diagnostic' || event.reason === 'top_rows_snapshot') {
+    appendNdjson('diagnostics.ndjson', event);
+    return json(res, 202, { ok: true, diagnostic: true, queuedForAi: false });
+  }
+
+  if (
+    event.reason === 'mutation'
+    && state.lastContentScriptStartedAtMs
+    && Date.now() - state.lastContentScriptStartedAtMs < CONFIG.startupMutationIgnoreMs
+  ) {
+    appendNdjson('ignored-startup-mutation-events.ndjson', event);
+    return json(res, 202, { ok: true, ignored: 'startup_mutation', queuedForAi: false });
+  }
+
+  if (event.reason === 'initial_scan' && !CONFIG.processInitialScan) {
+    appendNdjson('initial-scans.ndjson', event);
+    return json(res, 202, { ok: true, initialScan: true, queuedForAi: false });
+  }
+
+  if (isPageContainerPreview(event.previewText, event.roomKey)) {
+    appendNdjson('ignored-container-events.ndjson', event);
+    return json(res, 202, { ok: true, ignored: 'page_container', queuedForAi: false });
+  }
+
+  if (isLikelyShiftedExistingRow(event)) {
+    appendNdjson('ignored-shifted-row-events.ndjson', event);
+    return json(res, 202, { ok: true, ignored: 'shifted_existing_row', queuedForAi: false });
   }
 
   console.info('[dom-bridge] event received', event.roomKey, event.reason, event.previewText.slice(0, 80));

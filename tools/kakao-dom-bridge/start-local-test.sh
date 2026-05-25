@@ -9,8 +9,8 @@ cd "$BRIDGE_DIR"
 mkdir -p queue
 
 export PORT="${PORT:-8787}"
-export DEBOUNCE_MS="${DEBOUNCE_MS:-5000}"
-export MAX_WAIT_MS="${MAX_WAIT_MS:-30000}"
+export DEBOUNCE_MS="${DEBOUNCE_MS:-60000}"
+export MAX_WAIT_MS="${MAX_WAIT_MS:-180000}"
 export QUEUE_DIR="${QUEUE_DIR:-./queue}"
 export VILLAGE_AI_WORKER_CMD="${VILLAGE_AI_WORKER_CMD:-$WORKER_CMD}"
 
