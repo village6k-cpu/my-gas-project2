@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0f172a" />
-  <title>Village 후속조치</title>
+  <title>VILLAGE. 후속조치</title>
   <style>
     :root {
       color-scheme: light;
@@ -80,14 +80,36 @@
     .brand { display: flex; flex-direction: column; min-width: 0; }
     .brand h1 {
       margin: 0;
-      font-size: 18px;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      font-family: "Helvetica Neue", "Arial Black", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif;
+      font-weight: 900;
+      font-size: 20px;
+      letter-spacing: -0.04em;
+      line-height: 1;
+    }
+    .brand .logo {
+      display: inline-flex;
+      align-items: baseline;
+      color: var(--ink);
+      text-transform: uppercase;
+      transform: scaleY(1.08);
+      transform-origin: left baseline;
+    }
+    .brand .logo .v,
+    .brand .logo .dot { color: #EA5B36; }
+    .brand .page-name {
+      font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Segoe UI", sans-serif;
       font-weight: 700;
+      font-size: 14px;
       letter-spacing: -0.01em;
+      color: var(--ink-soft);
     }
     .brand .updated {
       font-size: 12px;
       color: var(--muted);
-      margin-top: 2px;
+      margin-top: 5px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -515,7 +537,7 @@
   <header class="app">
     <div class="app-top">
       <div class="brand">
-        <h1>Village 후속조치</h1>
+        <h1><span class="logo"><span class="v">V</span>illage<span class="dot">.</span></span><span class="page-name">후속조치</span></h1>
         <div class="updated" id="updated">불러오는 중…</div>
       </div>
       <div class="controls">

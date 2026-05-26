@@ -1030,6 +1030,45 @@ function runFunction(funcName, params) {
 // 출처: 스케줄상세, 확인요청, 계약마스터, 장비마스터 + ScriptProperties contractUrl
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+// 시트 셀은 행마다 Date 객체 또는 "yyyy-MM-dd" 문자열로 섞여 저장돼있을 수 있어
+// 두 케이스를 모두 yyyy-MM-dd로 정규화한다.
+function operationsDateStr_(cell, tz) {
+  if (cell instanceof Date && !isNaN(cell.getTime())) {
+    return Utilities.formatDate(cell, tz, "yyyy-MM-dd");
+  }
+  if (cell == null) return "";
+  var s = String(cell).trim();
+  if (!s) return "";
+  var m = s.match(/^(\d{4})[-./\s]?(\d{1,2})[-./\s]?(\d{1,2})/);
+  if (m) {
+    return m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+  }
+  return "";
+}
+
+function operationsTimeStr_(cell, tz) {
+  if (cell instanceof Date && !isNaN(cell.getTime())) {
+    return Utilities.formatDate(cell, tz, "HH:mm");
+  }
+  if (cell == null) return "";
+  var s = String(cell).trim();
+  if (!s) return "";
+  var m = s.match(/^(\d{1,2})[:.](\d{1,2})/);
+  if (m) {
+    return ('0' + m[1]).slice(-2) + ':' + ('0' + m[2]).slice(-2);
+  }
+  return "";
+}
+
+function operationsToDate_(cell, dateStr) {
+  if (cell instanceof Date && !isNaN(cell.getTime())) return cell;
+  if (dateStr) {
+    var d = new Date(dateStr + "T00:00:00");
+    if (!isNaN(d.getTime())) return d;
+  }
+  return null;
+}
+
 function getOperationsData_(targetDate, skipCache) {
   var tz = "Asia/Seoul";
   var today = targetDate ? new Date(targetDate) : new Date();
@@ -1065,10 +1104,10 @@ function getOperationsData_(targetDate, skipCache) {
 
     var coCell = row[5];
     var ciCell = row[7];
-    var coDate = coCell instanceof Date ? Utilities.formatDate(coCell, tz, "yyyy-MM-dd") : "";
-    var ciDate = ciCell instanceof Date ? Utilities.formatDate(ciCell, tz, "yyyy-MM-dd") : "";
-    var coTime = row[6] instanceof Date ? Utilities.formatDate(row[6], tz, "HH:mm") : String(row[6] || "");
-    var ciTime = row[8] instanceof Date ? Utilities.formatDate(row[8], tz, "HH:mm") : String(row[8] || "");
+    var coDate = operationsDateStr_(coCell, tz);
+    var ciDate = operationsDateStr_(ciCell, tz);
+    var coTime = operationsTimeStr_(row[6], tz);
+    var ciTime = operationsTimeStr_(row[8], tz);
     var customer = String(row[12] || "");
     var itemName = String(row[3] || row[2] || "");
     var qty = row[4] || 1;
@@ -1087,7 +1126,8 @@ function getOperationsData_(targetDate, skipCache) {
     }
 
     if (coDate && coDate > todayStr) {
-      var diff = diffDays_(today, coCell);
+      var coDateObj = operationsToDate_(coCell, coDate);
+      var diff = coDateObj ? diffDays_(today, coDateObj) : -1;
       if (diff >= 1 && diff <= 3) {
         if (!imminentMap[tid]) {
           imminentMap[tid] = {
@@ -1130,8 +1170,8 @@ function getOperationsData_(targetDate, skipCache) {
     if (hConfirm === "확인") continue;
 
     if (!unconfirmedMap[reqID]) {
-      var rDate = r[1] instanceof Date ? Utilities.formatDate(r[1], tz, "yyyy-MM-dd") : String(r[1] || "");
-      var rTime = r[2] instanceof Date ? Utilities.formatDate(r[2], tz, "HH:mm") : String(r[2] || "");
+      var rDate = operationsDateStr_(r[1], tz);
+      var rTime = operationsTimeStr_(r[2], tz);
       unconfirmedMap[reqID] = {
         reqID: String(reqID),
         customer: String(r[10] || ""),
@@ -1171,8 +1211,8 @@ function getOperationsData_(targetDate, skipCache) {
     allTids.push(sTid);
     tidCustomerMap[sTid] = String(c[1] || "");
 
-    var coDate = c[4] instanceof Date ? Utilities.formatDate(c[4], tz, "yyyy-MM-dd") : "";
-    if (coDate >= weekRange.start && coDate <= weekRange.end) {
+    var ccoDate = operationsDateStr_(c[4], tz);
+    if (ccoDate && ccoDate >= weekRange.start && ccoDate <= weekRange.end) {
       weeklyTids[sTid] = true;
     }
   }
