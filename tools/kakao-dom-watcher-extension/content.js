@@ -15,7 +15,7 @@
     observer: null,
     heartbeatTimer: null,
     topRowPollTimer: null,
-    lastTopRowSignature: null
+    lastTopRowsSignature: null
   };
 
   function log(...args) {
@@ -237,7 +237,7 @@
     return rows[0] || null;
   }
 
-  function topRowsSnapshot(limit = 8) {
+  function topRowsSnapshot(limit = 12) {
     const seen = new Set();
     const rows = [];
     for (const item of chatRowCandidates().sort((a, b) => (a.top - b.top) || (a.left - b.left))) {
@@ -245,13 +245,32 @@
       if (seen.has(key)) continue;
       seen.add(key);
       rows.push({
+        row: item.row,
         top: Math.round(item.top),
         left: Math.round(item.left),
-        text: item.text
+        text: item.text,
+        signature: hashText(item.text)
       });
       if (rows.length >= limit) break;
     }
     return rows;
+  }
+
+  function diagnosticRows(rows) {
+    return rows.map(({ top, left, text, signature }) => ({ top, left, text, signature }));
+  }
+
+  function rowsSignature(rows) {
+    return rows.map((row) => `${row.top}:${row.left}:${row.signature}`).join('|');
+  }
+
+  function firstChangedRow(previousRows, currentRows) {
+    const previousBySlot = new Map(previousRows.map((row, index) => [`${index}:${row.top}:${row.left}`, row.signature]));
+    for (let index = 0; index < currentRows.length; index += 1) {
+      const row = currentRows[index];
+      if (previousBySlot.get(`${index}:${row.top}:${row.left}`) !== row.signature) return row;
+    }
+    return currentRows[0] || null;
   }
 
   function postTopRowsSnapshot(reason = 'top_rows_snapshot') {
@@ -264,32 +283,36 @@
       url: location.href,
       title: document.title,
       roomKey: 'top-rows-snapshot',
-      eventHash: hashText(`${reason}:${location.href}:${JSON.stringify(rows)}:${Math.floor(Date.now() / 5000)}`),
+      eventHash: hashText(`${reason}:${location.href}:${JSON.stringify(diagnosticRows(rows))}:${Math.floor(Date.now() / 5000)}`),
       previewText: rows.map((row) => row.text).join(' || '),
       unreadCount: null,
       pageVisibility: document.visibilityState,
-      rows
+      rows: diagnosticRows(rows)
     });
   }
 
   function startTopRowPolling() {
     if (STATE.topRowPollTimer) window.clearInterval(STATE.topRowPollTimer);
 
-    const seed = firstVisibleChatRow();
-    STATE.lastTopRowSignature = seed ? hashText(seed.text) : null;
+    const seedRows = topRowsSnapshot();
+    STATE.lastTopRowsSignature = rowsSignature(seedRows);
+    let previousRows = seedRows;
 
     STATE.topRowPollTimer = window.setInterval(() => {
       if (!STATE.config.enabled) return;
-      const current = firstVisibleChatRow();
-      if (!current) return;
-      const signature = hashText(current.text);
-      if (!STATE.lastTopRowSignature) {
-        STATE.lastTopRowSignature = signature;
+      const currentRows = topRowsSnapshot();
+      if (!currentRows.length) return;
+      const signature = rowsSignature(currentRows);
+      if (!STATE.lastTopRowsSignature) {
+        STATE.lastTopRowsSignature = signature;
+        previousRows = currentRows;
         return;
       }
-      if (signature === STATE.lastTopRowSignature) return;
-      STATE.lastTopRowSignature = signature;
-      postEvent(createEvent(current.row, 'top_row_changed', current.text));
+      if (signature === STATE.lastTopRowsSignature) return;
+      const changed = firstChangedRow(previousRows, currentRows);
+      STATE.lastTopRowsSignature = signature;
+      previousRows = currentRows;
+      if (changed) postEvent(createEvent(changed.row, 'top_rows_changed', changed.text));
     }, 2000);
   }
 
