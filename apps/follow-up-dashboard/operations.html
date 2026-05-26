@@ -213,140 +213,153 @@
     .tab.active .badge { background: rgba(255,255,255,0.22); }
     .tab .badge:empty { display: none; }
 
-    /* Inventory alert — 최상단 강조 */
-    .alert-strip {
-      margin-bottom: 16px;
+    /* Inventory alert — 접힘 토글, 펼치면 자연어 카드 */
+    .alert-strip { margin-bottom: 16px; }
+
+    /* 충돌 없을 때 슬림 메시지 */
+    .alert-ok {
+      background: var(--low-bg);
+      border: 1px solid #86efac;
+      border-left: 4px solid var(--low);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--low-ink);
     }
-    .alert-box {
+
+    /* details 토글 */
+    details.alert-box {
       background: var(--urgent-bg);
       border: 1px solid #fca5a5;
       border-left: 4px solid var(--urgent);
       border-radius: var(--radius);
-      padding: 14px 16px;
       box-shadow: var(--shadow-card);
+      overflow: hidden;
     }
-    .alert-box.tight-only {
+    details.alert-box.tight-only {
       background: var(--high-bg);
       border-color: #fdba74;
       border-left-color: var(--high);
     }
-    .alert-box.ok {
-      background: var(--low-bg);
-      border-color: #86efac;
-      border-left-color: var(--low);
-      padding: 12px 16px;
-    }
-    .alert-head {
+    details.alert-box > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 13px 16px;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 8px;
-      margin-bottom: 10px;
-    }
-    .alert-head .title {
       font-size: 14px;
       font-weight: 800;
-      letter-spacing: -0.01em;
       color: var(--urgent-ink);
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
+      user-select: none;
     }
-    .alert-box.tight-only .alert-head .title { color: var(--high-ink); }
-    .alert-box.ok .alert-head { margin-bottom: 0; }
-    .alert-box.ok .alert-head .title { color: var(--low-ink); }
-    .alert-head .summary-pills {
-      display: flex;
-      gap: 6px;
+    details.alert-box.tight-only > summary { color: var(--high-ink); }
+    details.alert-box > summary::-webkit-details-marker { display: none; }
+    details.alert-box .alert-caret {
+      font-size: 12px;
+      transition: transform 0.15s ease;
+      opacity: 0.7;
     }
-    .alert-pill {
-      font-size: 11px;
-      font-weight: 800;
-      padding: 3px 9px;
-      border-radius: 999px;
-      background: white;
-      color: var(--urgent-ink);
-      border: 1px solid #fca5a5;
-    }
-    .alert-pill.tight {
-      color: var(--high-ink);
-      border-color: #fdba74;
-    }
-    .alert-list {
+    details.alert-box[open] .alert-caret { transform: rotate(180deg); }
+
+    .conflict-list {
+      padding: 4px 12px 12px;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 8px;
     }
-    .alert-item {
+    .conflict-card {
       background: white;
       border-radius: var(--radius-sm);
-      padding: 10px 12px;
-      display: grid;
-      grid-template-columns: 72px 1fr auto;
-      gap: 10px;
-      align-items: center;
-      border: 1px solid rgba(0,0,0,0.04);
+      padding: 12px 14px 10px;
+      border: 1px solid rgba(0,0,0,0.05);
+      box-shadow: 0 1px 2px rgba(15,23,42,0.03);
     }
-    .alert-item.severity-conflict { border-left: 3px solid var(--urgent); }
-    .alert-item.severity-tight { border-left: 3px solid var(--high); }
-    .alert-date {
+    .conflict-card.severity-conflict { border-left: 3px solid var(--urgent); }
+    .conflict-card.severity-tight { border-left: 3px solid var(--high); }
+
+    .conflict-head {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: baseline;
+      margin-bottom: 6px;
+    }
+    .conflict-date {
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--ink);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .conflict-date .cd-wd {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 700;
+      margin-left: 4px;
+    }
+    .conflict-equip {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--ink);
+      word-break: keep-all;
+      line-height: 1.3;
+    }
+    .conflict-status {
       font-size: 12px;
       font-weight: 800;
-      color: var(--ink);
-      font-variant-numeric: tabular-nums;
-      line-height: 1.15;
-    }
-    .alert-date small {
-      display: block;
-      font-size: 10px;
-      color: var(--muted);
-      font-weight: 600;
-    }
-    .alert-main {
-      min-width: 0;
-    }
-    .alert-equip {
-      font-size: 14px;
-      font-weight: 700;
-      color: var(--ink);
-      margin-bottom: 2px;
-      word-break: keep-all;
-    }
-    .alert-bookings {
-      font-size: 11.5px;
-      color: var(--muted);
-      line-height: 1.4;
-      word-break: break-word;
-    }
-    .alert-bookings .booking-tag {
-      display: inline-block;
-      margin-right: 6px;
-    }
-    .alert-bookings b { color: var(--ink-soft); font-weight: 700; }
-    .alert-ratio {
-      text-align: right;
-      font-weight: 800;
-      font-size: 14px;
-      font-variant-numeric: tabular-nums;
-      letter-spacing: -0.01em;
-    }
-    .alert-ratio .qty {
       color: var(--urgent-ink);
-      font-size: 15px;
+      white-space: nowrap;
     }
-    .severity-tight .alert-ratio .qty { color: var(--high-ink); }
-    .alert-ratio .stock {
+    .severity-tight .conflict-status { color: var(--high-ink); }
+
+    .conflict-totals {
+      font-size: 12.5px;
       color: var(--muted);
-      font-size: 11px;
-      font-weight: 700;
-      display: block;
-      margin-top: 1px;
+      padding: 6px 0;
+      border-top: 1px dashed var(--line);
+      border-bottom: 1px dashed var(--line);
+      margin: 8px 0;
     }
-    .alert-more {
+    .conflict-totals b { color: var(--ink-soft); font-weight: 700; }
+    .conflict-totals b.over { color: var(--urgent); }
+
+    .conflict-bookings {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .conflict-booking {
+      display: grid;
+      grid-template-columns: minmax(70px, auto) 1fr auto;
+      gap: 10px;
+      align-items: center;
+      font-size: 12.5px;
+      color: var(--ink-soft);
+      padding: 2px 0;
+    }
+    .conflict-booking .booking-customer {
+      font-weight: 700;
+      color: var(--ink);
+    }
+    .conflict-booking .booking-range {
+      font-size: 12px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .conflict-booking .booking-qty {
+      font-weight: 700;
+      color: var(--ink-soft);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .conflict-more {
       text-align: center;
       font-size: 12px;
       color: var(--muted);
-      padding: 8px 0 2px;
+      padding: 6px 0 2px;
       font-weight: 600;
     }
 
@@ -703,7 +716,7 @@
     }
     @media (min-width: 720px) {
       .wrap { padding: 20px; }
-      .kpis { grid-template-columns: repeat(5, 1fr); gap: 12px; }
+      .kpis { grid-template-columns: repeat(4, 1fr); gap: 12px; }
       .kpi { padding: 16px; }
       .kpi .value { font-size: 28px; }
       .section-head h2 { font-size: 15px; }
@@ -806,14 +819,6 @@
           <span class="count" id="unconfirmed-count"></span>
         </div>
         <div id="unconfirmed-panel"></div>
-      </section>
-
-      <section class="section">
-        <div class="section-head">
-          <h2>계약서 미발송</h2>
-          <span class="count" id="missing-count"></span>
-        </div>
-        <div id="missing-panel"></div>
       </section>
 
       <section class="section">
@@ -999,53 +1004,69 @@
   function renderInventoryAlerts(alerts, horizonDays) {
     const el = document.getElementById('alert-strip');
     const list = Array.isArray(alerts) ? alerts : [];
+
     if (!list.length) {
-      el.innerHTML = `<div class="alert-box ok"><div class="alert-head"><div class="title">✅ 향후 ${horizonDays || 90}일 재고 충돌 없음</div></div></div>`;
+      el.innerHTML = `<div class="alert-ok">✅ 향후 ${horizonDays || 90}일 재고 충돌 없음</div>`;
       return;
     }
+
     const conflictCount = list.filter((a) => a.severity === 'conflict').length;
     const tightCount = list.filter((a) => a.severity === 'tight').length;
     const onlyTight = conflictCount === 0;
-    const title = conflictCount > 0
-      ? `🔴 재고 충돌 ${conflictCount}건 — 즉시 확인 필요`
-      : `🟠 재고 부족 우려 ${tightCount}건`;
-    const pills = [];
-    if (conflictCount > 0) pills.push(`<span class="alert-pill">충돌 ${conflictCount}</span>`);
-    if (tightCount > 0) pills.push(`<span class="alert-pill tight">부족 우려 ${tightCount}</span>`);
 
-    const MAX_SHOW = 12;
+    const summaryParts = [];
+    if (conflictCount > 0) summaryParts.push(`🔴 재고 충돌 <b>${conflictCount}건</b>`);
+    if (tightCount > 0) summaryParts.push(`🟠 부족 우려 <b>${tightCount}건</b>`);
+    const summaryText = summaryParts.join(' · ') + ' — 펼쳐서 확인';
+
+    const MAX_SHOW = 30;
     const shown = list.slice(0, MAX_SHOW);
-    const rows = shown.map((a) => {
-      const dateShort = (a.date || '').slice(5);
-      const day = (() => {
-        try {
-          const d = new Date(a.date + 'T00:00:00');
-          return ['일','월','화','수','목','금','토'][d.getDay()];
-        } catch { return ''; }
-      })();
-      const bookingsHtml = (a.bookings || []).slice(0, 4).map((b) =>
-        `<span class="booking-tag"><b>${esc(b.customer || '미상')}</b> ${esc(String(b.qty))}개 <span style="opacity:0.7">(${esc(b.tid)})</span></span>`
-      ).join('');
-      const moreBookings = (a.bookings || []).length > 4 ? ` <span style="opacity:0.6">외 ${a.bookings.length - 4}건</span>` : '';
-      return `<div class="alert-item severity-${esc(a.severity)}">
-        <div class="alert-date">${esc(dateShort)}<small>${esc(day)}</small></div>
-        <div class="alert-main">
-          <div class="alert-equip">${esc(a.equipment)}</div>
-          <div class="alert-bookings">${bookingsHtml}${moreBookings}</div>
+    const cards = shown.map((a) => {
+      let monthDay = '', wd = '';
+      try {
+        const d = new Date(a.date + 'T00:00:00');
+        if (!isNaN(d.getTime())) {
+          monthDay = `${d.getMonth() + 1}월 ${d.getDate()}일`;
+          wd = ['일','월','화','수','목','금','토'][d.getDay()];
+        }
+      } catch (e) {}
+      const sevText = a.severity === 'conflict'
+        ? `🔴 ${a.overBy}개 부족`
+        : `🟠 빠듯 (여유 0)`;
+      const bookings = (a.bookings || []).map((b) => {
+        const fromMD = b.from ? b.from.slice(5).replace('-', '/') : '';
+        const toMD = b.to ? b.to.slice(5).replace('-', '/') : '';
+        const range = fromMD && toMD
+          ? (fromMD === toMD ? fromMD : `${fromMD} → ${toMD}`)
+          : (fromMD || toMD || '');
+        return `<div class="conflict-booking">
+          <span class="booking-customer">${esc(b.customer || '미상')}</span>
+          <span class="booking-range">${esc(range)}</span>
+          <span class="booking-qty">${esc(String(b.qty))}개</span>
+        </div>`;
+      }).join('');
+
+      return `<div class="conflict-card severity-${esc(a.severity)}">
+        <div class="conflict-head">
+          <div class="conflict-date">${esc(monthDay || a.date)}<span class="cd-wd">${esc(wd)}</span></div>
+          <div class="conflict-equip">${esc(a.equipment)}</div>
+          <div class="conflict-status">${sevText}</div>
         </div>
-        <div class="alert-ratio"><span class="qty">${esc(String(a.booked))}</span><span class="stock">/ ${esc(String(a.stock))}개</span></div>
+        <div class="conflict-totals">
+          보유 <b>${esc(String(a.stock))}개</b> · 예약 합계 <b class="${a.severity === 'conflict' ? 'over' : ''}">${esc(String(a.booked))}개</b>
+        </div>
+        <div class="conflict-bookings">${bookings}</div>
       </div>`;
     }).join('');
-    const tail = list.length > MAX_SHOW ? `<div class="alert-more">… 외 ${list.length - MAX_SHOW}건</div>` : '';
+    const tail = list.length > MAX_SHOW ? `<div class="conflict-more">… 외 ${list.length - MAX_SHOW}건</div>` : '';
 
-    el.innerHTML = `<div class="alert-box ${onlyTight ? 'tight-only' : ''}">
-      <div class="alert-head">
-        <div class="title">${title}</div>
-        <div class="summary-pills">${pills.join('')}</div>
-      </div>
-      <div class="alert-list">${rows}</div>
-      ${tail}
-    </div>`;
+    el.innerHTML = `<details class="alert-box ${onlyTight ? 'tight-only' : ''}">
+      <summary>
+        <span>${summaryText}</span>
+        <span class="alert-caret">▾</span>
+      </summary>
+      <div class="conflict-list">${cards}${tail}</div>
+    </details>`;
   }
 
   function renderHealth(health) {
@@ -1090,7 +1111,6 @@
       kpi('오늘 반출', s.todayCheckout ?? 0, 'checkout', '건'),
       kpi('오늘 반납', s.todayCheckin ?? 0, 'checkin', '건'),
       kpi('미확정 예약', s.unconfirmed ?? 0, (s.unconfirmed > 0 ? 'unconfirmed attention' : 'unconfirmed'), '건'),
-      kpi('계약서 미발송', s.missingContract ?? 0, (s.missingContract > 0 ? 'missing attention' : 'missing'), '건'),
       kpi('임박 반출', s.imminent ?? 0, 'imminent', '건')
     ].join('');
 
@@ -1108,9 +1128,6 @@
 
     $('#unconfirmed-count').textContent = `${(data.unconfirmed || []).length}건`;
     $('#unconfirmed-panel').innerHTML = rowsUnconfirmed(data.unconfirmed || []);
-
-    $('#missing-count').textContent = `${(data.missingContract || []).length}건`;
-    $('#missing-panel').innerHTML = rowsMissing(data.missingContract || []);
 
     $('#maint-count').textContent = `${(data.maintenance || []).length}건`;
     $('#maint-panel').innerHTML = rowsMaintenance(data.maintenance || []);
