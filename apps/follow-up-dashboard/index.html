@@ -2,65 +2,784 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Village Follow-up Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>Village 후속조치</title>
   <style>
-    :root { color-scheme: light; --bg:#f5f7fb; --card:#fff; --ink:#172033; --muted:#667085; --line:#e6eaf2; --blue:#16a3e8; --green:#16b981; --orange:#f59e0b; --red:#ef4444; --purple:#7c3aed; }
+    :root {
+      color-scheme: light;
+      --bg: #f1f4f9;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --ink: #0f172a;
+      --ink-soft: #334155;
+      --muted: #64748b;
+      --line: #e2e8f0;
+      --line-soft: #eef2f7;
+
+      --urgent: #dc2626;
+      --urgent-bg: #fef2f2;
+      --urgent-ink: #991b1b;
+
+      --high: #ea580c;
+      --high-bg: #fff7ed;
+      --high-ink: #9a3412;
+
+      --normal: #0284c7;
+      --normal-bg: #f0f9ff;
+      --normal-ink: #0c4a6e;
+
+      --low: #16a34a;
+      --low-bg: #f0fdf4;
+      --low-ink: #14532d;
+
+      --primary: #0f172a;
+      --primary-ink: #ffffff;
+
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.04);
+    }
+
     * { box-sizing: border-box; }
-    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
-    header { position:sticky; top:0; z-index:2; background:rgba(245,247,251,.92); backdrop-filter: blur(10px); border-bottom:1px solid var(--line); }
-    .wrap { max-width:1180px; margin:0 auto; padding:20px; }
-    h1 { margin:0 0 6px; font-size:28px; letter-spacing:0; }
-    .sub { color:var(--muted); font-size:14px; }
-    .topbar { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
-    .controls { display:flex; gap:8px; flex-wrap:wrap; }
-    input, select, button { border:1px solid var(--line); border-radius:8px; background:#fff; padding:10px 12px; font-size:14px; }
-    button { cursor:pointer; font-weight:650; }
-    button.primary { background:var(--ink); color:#fff; border-color:var(--ink); }
-    .cards { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin:18px 0; }
-    .metric { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; box-shadow:0 8px 22px rgba(15,23,42,.04); }
-    .metric .label { color:var(--muted); font-size:13px; }
-    .metric .value { font-size:30px; font-weight:800; margin-top:8px; }
-    .metric.blue { border-top:4px solid var(--blue); } .metric.red { border-top:4px solid var(--red); } .metric.orange { border-top:4px solid var(--orange); } .metric.green { border-top:4px solid var(--green); } .metric.purple { border-top:4px solid var(--purple); }
-    .section-title { margin:26px 0 12px; display:flex; align-items:center; justify-content:space-between; }
-    .section-title h2 { margin:0; font-size:19px; }
-    .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
-    .item { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; box-shadow:0 8px 22px rgba(15,23,42,.04); }
-    .item.urgent { border-left:5px solid var(--red); } .item.high { border-left:5px solid var(--orange); } .item.normal { border-left:5px solid var(--blue); } .item.low { border-left:5px solid var(--green); }
-    .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
-    .chip { font-size:12px; padding:4px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; font-weight:700; }
-    .chip.priority-urgent { background:#fee2e2; color:#991b1b; } .chip.priority-high { background:#ffedd5; color:#9a3412; } .chip.priority-normal { background:#e0f2fe; color:#075985; } .chip.priority-low { background:#dcfce7; color:#166534; }
-    .item h3 { margin:0 0 8px; font-size:17px; line-height:1.35; }
-    .meta { color:var(--muted); font-size:13px; margin-bottom:10px; }
-    .summary { white-space:pre-wrap; line-height:1.48; font-size:14px; }
-    .action { margin-top:12px; padding:12px; background:#f8fafc; border-radius:8px; font-size:14px; line-height:1.45; }
-    details { margin-top:10px; }
-    summary { cursor:pointer; color:var(--muted); font-size:13px; }
-    .evidence { color:#475467; font-size:13px; line-height:1.45; }
-    .item-footer { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
-    .empty { padding:40px; text-align:center; color:var(--muted); background:#fff; border:1px dashed var(--line); border-radius:8px; }
-    .error { background:#fef2f2; color:#991b1b; border:1px solid #fecaca; padding:12px; border-radius:8px; margin-top:12px; }
-    @media (max-width: 900px) { .cards { grid-template-columns:repeat(2,1fr); } .grid { grid-template-columns:1fr; } .wrap { padding:14px; } }
+    html, body { margin: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    /* ---------- Header ---------- */
+    header.app {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(241, 244, 249, 0.92);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid var(--line);
+    }
+    .app-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 16px;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    .brand { display: flex; flex-direction: column; min-width: 0; }
+    .brand h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .brand .updated {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .controls { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+    .select-wrap { position: relative; }
+    .select-wrap select {
+      appearance: none;
+      -webkit-appearance: none;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--ink);
+      padding: 9px 30px 9px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      min-height: 38px;
+    }
+    .select-wrap::after {
+      content: '';
+      position: absolute;
+      right: 12px;
+      top: 50%;
+      width: 7px; height: 7px;
+      border-right: 2px solid var(--muted);
+      border-bottom: 2px solid var(--muted);
+      transform: translateY(-65%) rotate(45deg);
+      pointer-events: none;
+    }
+    .btn-refresh {
+      width: 38px; height: 38px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      color: var(--ink-soft);
+    }
+    .btn-refresh:hover { background: var(--surface-soft); }
+    .btn-refresh.loading svg { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ---------- Stats ---------- */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .stat {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .stat .label {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .stat .value {
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+    .stat.urgent .value { color: var(--urgent); }
+    .stat.high .value { color: var(--high); }
+
+    /* ---------- Sections ---------- */
+    .section { margin-bottom: 20px; }
+    .section-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 2px 10px;
+    }
+    .section-head h2 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--ink-soft);
+      letter-spacing: -0.01em;
+    }
+    .section-head .count {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .card-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* ---------- Card ---------- */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px 14px 12px;
+      box-shadow: var(--shadow-card);
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 4px;
+      background: var(--normal);
+    }
+    .card.priority-urgent::before { background: var(--urgent); }
+    .card.priority-high::before   { background: var(--high); }
+    .card.priority-normal::before { background: var(--normal); }
+    .card.priority-low::before    { background: var(--low); }
+
+    .card-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--surface-soft);
+      color: var(--ink-soft);
+      border: 1px solid var(--line-soft);
+      letter-spacing: 0.02em;
+    }
+    .chip.priority-urgent { background: var(--urgent-bg); color: var(--urgent-ink); border-color: transparent; }
+    .chip.priority-high   { background: var(--high-bg);   color: var(--high-ink);   border-color: transparent; }
+    .chip.priority-normal { background: var(--normal-bg); color: var(--normal-ink); border-color: transparent; }
+    .chip.priority-low    { background: var(--low-bg);    color: var(--low-ink);    border-color: transparent; }
+    .chip.status-done       { background: #f1f5f9; color: var(--muted); }
+    .chip.status-dismissed  { background: #f1f5f9; color: var(--muted); }
+    .chip.status-in_progress { background: #ecfeff; color: #155e75; }
+    .chip.status-waiting_customer,
+    .chip.status-waiting_internal { background: #fefce8; color: #854d0e; }
+
+    .card h3 {
+      margin: 0 0 6px;
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1.35;
+      letter-spacing: -0.01em;
+      color: var(--ink);
+      word-break: keep-all;
+    }
+    .card .meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .card .meta b { color: var(--ink-soft); font-weight: 600; }
+    .card .summary {
+      font-size: 14px;
+      color: var(--ink-soft);
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .action-box {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: var(--surface-soft);
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-sm);
+      font-size: 13.5px;
+      line-height: 1.5;
+      color: var(--ink-soft);
+    }
+    .action-box.recommended {
+      background: #fffbeb;
+      border-color: #fde68a;
+      color: #713f12;
+    }
+    .action-box .lbl {
+      display: block;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      opacity: 0.75;
+      margin-bottom: 4px;
+    }
+    .action-box .body {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    details.foldable { margin-top: 10px; }
+    details.foldable > summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 6px 0;
+      list-style: none;
+      user-select: none;
+    }
+    details.foldable > summary::-webkit-details-marker { display: none; }
+    details.foldable > summary::before {
+      content: '▸';
+      display: inline-block;
+      margin-right: 4px;
+      transition: transform 0.1s ease;
+    }
+    details.foldable[open] > summary::before { transform: rotate(90deg); }
+    details.foldable .fold-body {
+      font-size: 12.5px;
+      color: var(--muted);
+      line-height: 1.55;
+      padding: 4px 0 0 14px;
+    }
+    details.foldable .fold-body p { margin: 0 0 4px; }
+    details.foldable .fold-body .blocking {
+      margin-top: 6px;
+      color: var(--urgent-ink);
+    }
+
+    .card-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      flex: 1 1 auto;
+      min-height: 40px;
+      padding: 0 14px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--ink-soft);
+      font-size: 13.5px;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: inherit;
+      transition: transform 0.05s ease, background 0.1s ease;
+    }
+    .btn:hover { background: var(--surface-soft); }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.5; cursor: progress; }
+    .btn.primary {
+      background: var(--primary);
+      color: var(--primary-ink);
+      border-color: var(--primary);
+    }
+    .btn.primary:hover { background: #1e293b; }
+    .btn.ghost {
+      background: transparent;
+      color: var(--muted);
+    }
+
+    /* ---------- Collapsible category group ---------- */
+    details.group {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      margin-bottom: 10px;
+      overflow: hidden;
+    }
+    details.group > summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--ink-soft);
+      user-select: none;
+    }
+    details.group > summary::-webkit-details-marker { display: none; }
+    details.group > summary .left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    details.group > summary .caret {
+      width: 8px; height: 8px;
+      border-right: 2px solid var(--muted);
+      border-bottom: 2px solid var(--muted);
+      transform: rotate(-45deg);
+      transition: transform 0.15s ease;
+    }
+    details.group[open] > summary .caret {
+      transform: rotate(45deg);
+    }
+    details.group > summary .count-pill {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      background: var(--surface-soft);
+      padding: 2px 9px;
+      border-radius: 999px;
+    }
+    details.group > .group-body {
+      padding: 0 12px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* ---------- Empty / Error / Skeleton ---------- */
+    .empty {
+      padding: 40px 20px;
+      text-align: center;
+      color: var(--muted);
+      background: var(--surface);
+      border: 1px dashed var(--line);
+      border-radius: var(--radius);
+    }
+    .empty .emoji { font-size: 32px; display: block; margin-bottom: 8px; }
+    .empty b { color: var(--ink-soft); font-size: 15px; }
+
+    .error {
+      background: var(--urgent-bg);
+      color: var(--urgent-ink);
+      border: 1px solid #fecaca;
+      padding: 12px 14px;
+      border-radius: var(--radius-sm);
+      margin-bottom: 14px;
+      font-size: 13.5px;
+    }
+
+    .skeleton {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      height: 78px;
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100% { opacity: 0.55; } 50% { opacity: 1; } }
+
+    /* ---------- Tablet+ tweaks ---------- */
+    @media (min-width: 720px) {
+      .wrap { padding: 20px; }
+      .stats { gap: 12px; }
+      .stat { padding: 16px; }
+      .stat .value { font-size: 30px; }
+      .card { padding: 16px; }
+      .card h3 { font-size: 17px; }
+      .section-head h2 { font-size: 15px; }
+    }
+    @media (min-width: 900px) {
+      .app-top { padding: 14px 20px; }
+      .brand h1 { font-size: 20px; }
+    }
   </style>
 </head>
 <body>
-  <header><div class="wrap topbar"><div><h1>Village Follow-up Dashboard</h1><div class="sub" id="updated">AI 후속조치 업무판</div></div><div class="controls"><select id="status"><option value="active">열린 업무</option><option value="all">전체</option><option value="done">완료</option><option value="dismissed">무시</option></select><button class="primary" id="refresh">새로고침</button></div></div></header>
+  <header class="app">
+    <div class="app-top">
+      <div class="brand">
+        <h1>Village 후속조치</h1>
+        <div class="updated" id="updated">불러오는 중…</div>
+      </div>
+      <div class="controls">
+        <div class="select-wrap">
+          <select id="status" aria-label="상태 필터">
+            <option value="active">열린 업무</option>
+            <option value="all">전체</option>
+            <option value="done">완료</option>
+            <option value="dismissed">무시</option>
+          </select>
+        </div>
+        <button class="btn-refresh" id="refresh" aria-label="새로고침" title="새로고침">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
   <main class="wrap">
-    <div id="error"></div>
-    <section class="cards" id="metrics"></section>
-    <section><div class="section-title"><h2>긴급/높은 우선순위</h2></div><div class="grid" id="urgent"></div></section>
-    <section><div class="section-title"><h2>카테고리별 후속조치</h2></div><div id="groups"></div></section>
+    <div id="error" aria-live="polite"></div>
+    <section class="stats" id="stats" aria-label="요약"></section>
+    <section class="section" id="critical-section" hidden>
+      <div class="section-head">
+        <h2>지금 처리 — 긴급·높음</h2>
+        <span class="count" id="critical-count"></span>
+      </div>
+      <div class="card-list" id="critical-list"></div>
+    </section>
+    <section class="section" id="other-section" hidden>
+      <div class="section-head">
+        <h2>그 외 — 보통·낮음</h2>
+        <span class="count" id="other-count"></span>
+      </div>
+      <div id="other-list"></div>
+    </section>
+    <section class="section" id="closed-section" hidden>
+      <div class="section-head">
+        <h2 id="closed-title">완료/무시</h2>
+        <span class="count" id="closed-count"></span>
+      </div>
+      <div class="card-list" id="closed-list"></div>
+    </section>
+    <div id="empty" hidden></div>
   </main>
 <script>
-const labels = { reply_needed:'답변 필요', quote_send:'견적서 발송', tax_invoice:'세금계산서/증빙', schedule_check:'스케줄 확인', reservation_review:'예약 후보 확인', price_review:'가격/할인 확인', payment_check:'입금/결제 확인', contract_document:'계약/서류', return_extension:'반납/연장/변경', damage_repair:'파손/수리', sheet_duplicate_check:'시트 중복 확인', completed_log:'처리 완료 기록' };
-const priorityLabel = { urgent:'긴급', high:'높음', normal:'보통', low:'낮음' };
-document.querySelector('#refresh').onclick = load; document.querySelector('#status').onchange = load;
-function esc(s='') { return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-async function patchStatus(id, status) { const res = await fetch('/api/follow-ups', { method:'PATCH', headers:{'content-type':'application/json'}, body:JSON.stringify({id,status}) }); const data = await res.json().catch(() => ({})); if (!res.ok) { document.querySelector('#error').innerHTML = `<div class="error">${esc(data.error || '상태 변경 실패')}</div>`; return; } await load(); }
-function metric(label, value, cls) { return `<div class="metric ${cls}"><div class="label">${label}</div><div class="value">${value}</div></div>`; }
-function itemCard(x) { const ev = Array.isArray(x.evidence) ? x.evidence : []; return `<article class="item ${esc(x.priority)}"><div class="chips"><span class="chip">${esc(labels[x.type]||x.type)}</span><span class="chip priority-${esc(x.priority)}">${esc(priorityLabel[x.priority]||x.priority)}</span><span class="chip">${esc(x.status)}</span></div><h3>${esc(x.title)}</h3><div class="meta">${esc(x.customer_name||'고객명 미상')} · ${new Date(x.created_at).toLocaleString('ko-KR')}</div><div class="summary">${esc(x.summary||'')}</div>${x.recommended_action ? `<div class="action"><b>추천 조치</b><br>${esc(x.recommended_action)}</div>`:''}${x.suggested_reply_draft ? `<div class="action"><b>답변 초안</b><br>${esc(x.suggested_reply_draft)}</div>`:''}<details><summary>근거/메타 보기</summary><div class="evidence">${ev.map(e=>`• ${esc(e)}`).join('<br>') || '근거 없음'}<br>${x.blocking_reason ? '<br><b>보류 사유</b>: '+esc(x.blocking_reason):''}</div></details><div class="item-footer"><button onclick="patchStatus('${x.id}','done')">완료</button><button onclick="patchStatus('${x.id}','dismissed')">무시</button><button onclick="patchStatus('${x.id}','in_progress')">진행중</button></div></article>`; }
-async function load() { document.querySelector('#error').innerHTML=''; try { const status = document.querySelector('#status').value; const res = await fetch('/api/follow-ups?status='+encodeURIComponent(status)); const data = await res.json(); if (!res.ok) throw new Error(data.error || 'load failed'); const s=data.summary; document.querySelector('#updated').textContent = '마지막 업데이트: '+new Date(data.updatedAt).toLocaleString('ko-KR'); document.querySelector('#metrics').innerHTML = metric('열린 업무',s.open,'blue')+metric('긴급',s.urgent,'red')+metric('높음',s.high,'orange')+metric('전체 표시',s.total,'green')+metric('카테고리',s.byType.length,'purple'); const urgent=data.items.filter(x=>['urgent','high'].includes(x.priority) && !['done','dismissed'].includes(x.status)).slice(0,6); document.querySelector('#urgent').innerHTML = urgent.length ? urgent.map(itemCard).join('') : '<div class="empty">긴급 업무가 없습니다.</div>'; const groups={}; for (const x of data.items) (groups[x.type] ||= []).push(x); document.querySelector('#groups').innerHTML = Object.entries(groups).map(([type,items])=>`<div class="section-title"><h2>${esc(labels[type]||type)} <span class="sub">${items.length}건</span></h2></div><div class="grid">${items.map(itemCard).join('')}</div>`).join('') || '<div class="empty">표시할 후속조치가 없습니다.</div>'; } catch(e) { document.querySelector('#error').innerHTML = `<div class="error">${esc(e.message)}</div>`; } }
-load(); setInterval(load, 30000);
+(() => {
+  const TYPE_LABELS = {
+    reply_needed: '답변 필요',
+    quote_send: '견적서 발송',
+    tax_invoice: '세금계산서',
+    schedule_check: '스케줄 확인',
+    reservation_review: '예약 확인',
+    price_review: '가격/할인',
+    payment_check: '입금/결제',
+    contract_document: '계약/서류',
+    return_extension: '반납/연장',
+    damage_repair: '파손/수리',
+    sheet_duplicate_check: '시트 중복',
+    completed_log: '처리 기록'
+  };
+  const PRIORITY_LABELS = { urgent: '긴급', high: '높음', normal: '보통', low: '낮음' };
+  const STATUS_LABELS = {
+    open: '대기',
+    in_progress: '진행중',
+    waiting_customer: '고객 대기',
+    waiting_internal: '내부 대기',
+    done: '완료',
+    dismissed: '무시'
+  };
+  const PRIORITY_ORDER = { urgent: 0, high: 1, normal: 2, low: 3 };
+  const CLOSED = new Set(['done', 'dismissed']);
+
+  const $ = (sel) => document.querySelector(sel);
+
+  const esc = (s = '') => String(s).replace(/[&<>"']/g, (m) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[m]));
+
+  function fmtRelative(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const diff = Date.now() - d.getTime();
+    const min = Math.floor(diff / 60000);
+    if (min < 1) return '방금';
+    if (min < 60) return `${min}분 전`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}시간 전`;
+    const day = Math.floor(hr / 24);
+    if (day < 7) return `${day}일 전`;
+    return d.toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' });
+  }
+
+  function fmtClock(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function sortByPriorityThenNew(a, b) {
+    const pa = PRIORITY_ORDER[a.priority] ?? 9;
+    const pb = PRIORITY_ORDER[b.priority] ?? 9;
+    if (pa !== pb) return pa - pb;
+    return (b.created_at || '').localeCompare(a.created_at || '');
+  }
+
+  function renderStat(label, value, cls) {
+    return `<div class="stat ${cls || ''}"><div class="label">${esc(label)}</div><div class="value">${value}</div></div>`;
+  }
+
+  function renderCard(x) {
+    const evidence = Array.isArray(x.evidence) ? x.evidence : [];
+    const typeLabel = TYPE_LABELS[x.type] || x.type || '';
+    const prLabel = PRIORITY_LABELS[x.priority] || x.priority || '';
+    const stLabel = STATUS_LABELS[x.status] || x.status || '';
+    const closed = CLOSED.has(x.status);
+
+    const chips = [
+      typeLabel ? `<span class="chip">${esc(typeLabel)}</span>` : '',
+      `<span class="chip priority-${esc(x.priority || 'normal')}">${esc(prLabel)}</span>`,
+      `<span class="chip status-${esc(x.status || 'open')}">${esc(stLabel)}</span>`
+    ].filter(Boolean).join('');
+
+    const customer = x.customer_name ? `<b>${esc(x.customer_name)}</b>` : '<span>고객명 미상</span>';
+    const when = x.created_at ? ` · ${esc(fmtRelative(x.created_at))}` : '';
+
+    const recAction = x.recommended_action
+      ? `<div class="action-box recommended"><span class="lbl">추천 조치</span><div class="body">${esc(x.recommended_action)}</div></div>`
+      : '';
+
+    const draft = x.suggested_reply_draft
+      ? `<details class="foldable"><summary>답변 초안 보기</summary><div class="fold-body"><div class="action-box"><span class="lbl">답변 초안</span><div class="body">${esc(x.suggested_reply_draft)}</div></div></div></details>`
+      : '';
+
+    const hasEvidence = evidence.length > 0 || x.blocking_reason;
+    const evidenceBlock = hasEvidence
+      ? `<details class="foldable"><summary>근거${evidence.length ? ` (${evidence.length})` : ''}</summary><div class="fold-body">${
+          evidence.map((e) => `<p>• ${esc(e)}</p>`).join('') || '<p>근거 없음</p>'
+        }${x.blocking_reason ? `<p class="blocking"><b>보류 사유:</b> ${esc(x.blocking_reason)}</p>` : ''}</div></details>`
+      : '';
+
+    const actions = closed
+      ? `<div class="card-actions"><button class="btn" data-action="open" data-id="${esc(x.id)}">되살리기</button></div>`
+      : `<div class="card-actions">
+          <button class="btn primary" data-action="done" data-id="${esc(x.id)}">완료</button>
+          <button class="btn" data-action="in_progress" data-id="${esc(x.id)}">진행중</button>
+          <button class="btn ghost" data-action="dismissed" data-id="${esc(x.id)}">무시</button>
+        </div>`;
+
+    return `<article class="card priority-${esc(x.priority || 'normal')}">
+      <div class="card-chips">${chips}</div>
+      <h3>${esc(x.title || '제목 없음')}</h3>
+      <div class="meta">${customer}${when}</div>
+      ${x.summary ? `<div class="summary">${esc(x.summary)}</div>` : ''}
+      ${recAction}
+      ${draft}
+      ${evidenceBlock}
+      ${actions}
+    </article>`;
+  }
+
+  function renderGroup(typeKey, items) {
+    const label = TYPE_LABELS[typeKey] || typeKey;
+    const sorted = items.slice().sort(sortByPriorityThenNew);
+    return `<details class="group">
+      <summary>
+        <span class="left"><span class="caret"></span><span>${esc(label)}</span></span>
+        <span class="count-pill">${sorted.length}건</span>
+      </summary>
+      <div class="group-body">${sorted.map(renderCard).join('')}</div>
+    </details>`;
+  }
+
+  function setError(msg) {
+    $('#error').innerHTML = msg ? `<div class="error">${esc(msg)}</div>` : '';
+  }
+
+  async function patchStatus(id, status) {
+    try {
+      const res = await fetch('/api/follow-ups', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id, status })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '상태 변경 실패');
+      await load();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  let loading = false;
+  async function load() {
+    if (loading) return;
+    loading = true;
+    const btn = $('#refresh');
+    btn.classList.add('loading');
+    setError('');
+    try {
+      const status = $('#status').value;
+      const res = await fetch('/api/follow-ups?status=' + encodeURIComponent(status));
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '불러오기 실패');
+      render(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      btn.classList.remove('loading');
+      loading = false;
+    }
+  }
+
+  function render(data) {
+    const items = Array.isArray(data.items) ? data.items : [];
+    const summary = data.summary || {};
+    const statusFilter = $('#status').value;
+
+    $('#updated').textContent = data.updatedAt
+      ? `마지막 업데이트 ${fmtClock(data.updatedAt)}`
+      : '';
+
+    const urgentCount = summary.urgent ?? 0;
+    const highCount = summary.high ?? 0;
+    $('#stats').innerHTML = [
+      renderStat('할 일', summary.open ?? 0),
+      renderStat('긴급', urgentCount, urgentCount > 0 ? 'urgent' : ''),
+      renderStat('높음', highCount, highCount > 0 ? 'high' : '')
+    ].join('');
+
+    const active = items.filter((x) => !CLOSED.has(x.status));
+    const closedItems = items.filter((x) => CLOSED.has(x.status));
+
+    const critical = active
+      .filter((x) => x.priority === 'urgent' || x.priority === 'high')
+      .sort(sortByPriorityThenNew);
+    const others = active.filter((x) => x.priority !== 'urgent' && x.priority !== 'high');
+
+    const otherGroups = {};
+    for (const x of others) (otherGroups[x.type] ||= []).push(x);
+    const groupKeys = Object.keys(otherGroups).sort(
+      (a, b) => otherGroups[b].length - otherGroups[a].length
+    );
+
+    const critSec = $('#critical-section');
+    if (critical.length) {
+      critSec.hidden = false;
+      $('#critical-count').textContent = `${critical.length}건`;
+      $('#critical-list').innerHTML = critical.map(renderCard).join('');
+    } else {
+      critSec.hidden = true;
+      $('#critical-list').innerHTML = '';
+    }
+
+    const otherSec = $('#other-section');
+    if (others.length) {
+      otherSec.hidden = false;
+      $('#other-count').textContent = `${others.length}건`;
+      $('#other-list').innerHTML = groupKeys.map((k) => renderGroup(k, otherGroups[k])).join('');
+    } else {
+      otherSec.hidden = true;
+      $('#other-list').innerHTML = '';
+    }
+
+    const closedSec = $('#closed-section');
+    const showClosed =
+      (statusFilter === 'done' || statusFilter === 'dismissed' || statusFilter === 'all') &&
+      closedItems.length > 0;
+    if (showClosed) {
+      closedSec.hidden = false;
+      $('#closed-title').textContent =
+        statusFilter === 'done' ? '완료' :
+        statusFilter === 'dismissed' ? '무시' : '완료·무시';
+      $('#closed-count').textContent = `${closedItems.length}건`;
+      $('#closed-list').innerHTML = closedItems
+        .slice()
+        .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+        .map(renderCard)
+        .join('');
+    } else {
+      closedSec.hidden = true;
+      $('#closed-list').innerHTML = '';
+    }
+
+    const emptyEl = $('#empty');
+    const totalShown = critical.length + others.length + (showClosed ? closedItems.length : 0);
+    if (totalShown === 0) {
+      emptyEl.hidden = false;
+      const msg = statusFilter === 'active'
+        ? { emoji: '🎉', title: '지금 할 일이 없습니다', sub: '모든 후속조치가 정리되었어요.' }
+        : { emoji: '📭', title: '표시할 항목이 없습니다', sub: '필터를 바꿔보세요.' };
+      emptyEl.innerHTML = `<div class="empty"><span class="emoji">${msg.emoji}</span><b>${msg.title}</b><div style="margin-top:6px;font-size:13px;color:var(--muted)">${msg.sub}</div></div>`;
+    } else {
+      emptyEl.hidden = true;
+      emptyEl.innerHTML = '';
+    }
+  }
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action][data-id]');
+    if (!btn) return;
+    const action = btn.getAttribute('data-action');
+    const id = btn.getAttribute('data-id');
+    if (action === 'dismissed' && !confirm('이 업무를 무시 처리할까요?')) return;
+    btn.disabled = true;
+    patchStatus(id, action).finally(() => { btn.disabled = false; });
+  });
+
+  $('#refresh').addEventListener('click', load);
+  $('#status').addEventListener('change', load);
+
+  $('#stats').innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+  load();
+  setInterval(load, 30000);
+})();
 </script>
 </body>
 </html>
