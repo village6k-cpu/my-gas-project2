@@ -4,7 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0f172a" />
-  <title>Village 후속조치</title>
+  <title>VILLAGE. 후속조치</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@900&display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: light;
@@ -80,14 +83,51 @@
     .brand { display: flex; flex-direction: column; min-width: 0; }
     .brand h1 {
       margin: 0;
-      font-size: 18px;
-      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      line-height: 1;
+    }
+    .brand .logo {
+      font-family: "Big Shoulders Display", "Helvetica Neue", "Arial Black", sans-serif;
+      font-weight: 900;
+      font-size: 28px;
       letter-spacing: -0.01em;
+      line-height: 1;
+      color: var(--ink);
+      text-transform: uppercase;
+      display: inline-flex;
+      align-items: center;
+      gap: 0;
+    }
+    @media (min-width: 560px) {
+      .brand .logo { font-size: 32px; }
+    }
+    @media (min-width: 900px) {
+      .brand .logo { font-size: 38px; }
+    }
+    .brand .logo .v { color: #EA5B36; }
+    .brand .logo .dot {
+      display: inline-block;
+      width: 0.21em;
+      height: 0.21em;
+      background: #EA5B36;
+      margin-left: 0.04em;
+      align-self: flex-end;
+      margin-bottom: 0.05em;
+    }
+    .brand .page-name {
+      font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Segoe UI", sans-serif;
+      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: -0.01em;
+      color: var(--ink-soft);
+      padding-bottom: 2px;
     }
     .brand .updated {
       font-size: 12px;
       color: var(--muted);
-      margin-top: 2px;
+      margin-top: 5px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -515,7 +555,7 @@
   <header class="app">
     <div class="app-top">
       <div class="brand">
-        <h1>Village 후속조치</h1>
+        <h1><span class="logo"><span class="v">V</span><span>illage</span><span class="dot" aria-hidden="true"></span></span><span class="page-name">후속조치</span></h1>
         <div class="updated" id="updated">불러오는 중…</div>
       </div>
       <div class="controls">

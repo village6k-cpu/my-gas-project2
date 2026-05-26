@@ -1030,6 +1030,53 @@ function runFunction(funcName, params) {
 // 출처: 스케줄상세, 확인요청, 계약마스터, 장비마스터 + ScriptProperties contractUrl
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+// 시트 셀은 행마다 Date 객체 또는 "yyyy-MM-dd" 문자열로 섞여 저장돼있을 수 있어
+// 두 케이스를 모두 yyyy-MM-dd로 정규화한다.
+function operationsDateStr_(cell, tz) {
+  if (cell instanceof Date && !isNaN(cell.getTime())) {
+    return Utilities.formatDate(cell, tz, "yyyy-MM-dd");
+  }
+  if (cell == null) return "";
+  var s = String(cell).trim();
+  if (!s) return "";
+  var m = s.match(/^(\d{4})[-./\s]?(\d{1,2})[-./\s]?(\d{1,2})/);
+  if (m) {
+    return m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+  }
+  return "";
+}
+
+function operationsTimeStr_(cell, tz) {
+  if (cell instanceof Date && !isNaN(cell.getTime())) {
+    return Utilities.formatDate(cell, tz, "HH:mm");
+  }
+  if (cell == null) return "";
+  var s = String(cell).trim();
+  if (!s) return "";
+  var m = s.match(/^(\d{1,2})[:.](\d{1,2})/);
+  if (m) {
+    return ('0' + m[1]).slice(-2) + ':' + ('0' + m[2]).slice(-2);
+  }
+  return "";
+}
+
+function operationsToDate_(cell, dateStr) {
+  if (cell instanceof Date && !isNaN(cell.getTime())) return cell;
+  if (dateStr) {
+    var d = new Date(dateStr + "T00:00:00");
+    if (!isNaN(d.getTime())) return d;
+  }
+  return null;
+}
+
+function operationsScheduleItem_(row) {
+  var setName = String(row[2] || "").trim();
+  var itemName = String(row[3] || row[2] || "").trim();
+  if (!itemName) return null;
+  if (setName && setName !== itemName) return null;
+  return { name: itemName, qty: row[4] || 1 };
+}
+
 function getOperationsData_(targetDate, skipCache) {
   var tz = "Asia/Seoul";
   var today = targetDate ? new Date(targetDate) : new Date();
@@ -1037,7 +1084,7 @@ function getOperationsData_(targetDate, skipCache) {
   var todayStr = Utilities.formatDate(today, tz, "yyyy-MM-dd");
 
   var cache = CacheService.getScriptCache();
-  var cacheKey = "operations_v1_" + todayStr;
+  var cacheKey = "operations_v2_" + todayStr;
   if (!skipCache) {
     var cached = cache.get(cacheKey);
     if (cached) {
@@ -1052,9 +1099,27 @@ function getOperationsData_(targetDate, skipCache) {
   var schedLast = schedSh ? schedSh.getLastRow() : 0;
   var sched = schedLast >= 2 ? schedSh.getRange(2, 1, schedLast - 1, 13).getValues() : [];
 
+  var weekRange = getWeekRange_(today, tz);
+
   var todayCheckoutMap = {};
   var todayCheckinMap = {};
   var imminentMap = {};
+  var paceThisWeekTids = {};
+  var pacePrev4WeeksTids = {};
+  var activeQtySum = 0;  // 오늘 활성 스케줄(반출일 ≤ 오늘 ≤ 반납일) 수량 합 → 가동률 분자
+
+  // 재고 충돌 — 향후 90일까지의 일자×장비 예약 누적
+  // bookingMap[dateStr][equipName] = [{ tid, customer, qty }]
+  var bookingMap = {};
+  var conflictHorizonEnd = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 90);
+  var conflictHorizonEndStr = Utilities.formatDate(conflictHorizonEnd, tz, "yyyy-MM-dd");
+
+  // 출고 페이스 비교 구간: 이번주 시작 기준 직전 4주 (28일)
+  var weekStartDate = new Date(weekRange.start + "T00:00:00");
+  var pacePrevStart = new Date(weekStartDate.getFullYear(), weekStartDate.getMonth(), weekStartDate.getDate() - 28);
+  var pacePrevEnd = new Date(weekStartDate.getFullYear(), weekStartDate.getMonth(), weekStartDate.getDate() - 1);
+  var pacePrevStartStr = Utilities.formatDate(pacePrevStart, tz, "yyyy-MM-dd");
+  var pacePrevEndStr = Utilities.formatDate(pacePrevEnd, tz, "yyyy-MM-dd");
 
   for (var i = 0; i < sched.length; i++) {
     var row = sched[i];
@@ -1065,29 +1130,29 @@ function getOperationsData_(targetDate, skipCache) {
 
     var coCell = row[5];
     var ciCell = row[7];
-    var coDate = coCell instanceof Date ? Utilities.formatDate(coCell, tz, "yyyy-MM-dd") : "";
-    var ciDate = ciCell instanceof Date ? Utilities.formatDate(ciCell, tz, "yyyy-MM-dd") : "";
-    var coTime = row[6] instanceof Date ? Utilities.formatDate(row[6], tz, "HH:mm") : String(row[6] || "");
-    var ciTime = row[8] instanceof Date ? Utilities.formatDate(row[8], tz, "HH:mm") : String(row[8] || "");
+    var coDate = operationsDateStr_(coCell, tz);
+    var ciDate = operationsDateStr_(ciCell, tz);
+    var coTime = operationsTimeStr_(row[6], tz);
+    var ciTime = operationsTimeStr_(row[8], tz);
     var customer = String(row[12] || "");
-    var itemName = String(row[3] || row[2] || "");
-    var qty = row[4] || 1;
+    var opItem = operationsScheduleItem_(row);
 
     if (coDate === todayStr) {
       if (!todayCheckoutMap[tid]) {
         todayCheckoutMap[tid] = { tid: String(tid), customer: customer, time: coTime, items: [] };
       }
-      if (itemName) todayCheckoutMap[tid].items.push({ name: itemName, qty: qty });
+      if (opItem) todayCheckoutMap[tid].items.push(opItem);
     }
     if (ciDate === todayStr) {
       if (!todayCheckinMap[tid]) {
         todayCheckinMap[tid] = { tid: String(tid), customer: customer, time: ciTime, items: [] };
       }
-      if (itemName) todayCheckinMap[tid].items.push({ name: itemName, qty: qty });
+      if (opItem) todayCheckinMap[tid].items.push(opItem);
     }
 
     if (coDate && coDate > todayStr) {
-      var diff = diffDays_(today, coCell);
+      var coDateObj = operationsToDate_(coCell, coDate);
+      var diff = coDateObj ? diffDays_(today, coDateObj) : -1;
       if (diff >= 1 && diff <= 3) {
         if (!imminentMap[tid]) {
           imminentMap[tid] = {
@@ -1099,7 +1164,47 @@ function getOperationsData_(targetDate, skipCache) {
             items: []
           };
         }
-        if (itemName) imminentMap[tid].items.push({ name: itemName, qty: qty });
+        if (opItem) imminentMap[tid].items.push(opItem);
+      }
+    }
+
+    // 출고 페이스 (반출일 기준): 이번주 / 이전 4주
+    if (coDate) {
+      if (coDate >= weekRange.start && coDate <= weekRange.end) {
+        paceThisWeekTids[tid] = true;
+      } else if (coDate >= pacePrevStartStr && coDate <= pacePrevEndStr) {
+        pacePrev4WeeksTids[tid] = true;
+      }
+    }
+
+    // 가동률 분자: 오늘 활성 스케줄(반출일 ≤ 오늘 ≤ 반납일)의 수량 합
+    if (coDate && ciDate && coDate <= todayStr && todayStr <= ciDate) {
+      activeQtySum += (Number(row[4]) || 0);
+    }
+
+    // 재고 충돌 — 향후 90일 이내 활성 스케줄을 일자×장비별로 누적 (세트 헤더 행 제외)
+    if (coDate && ciDate && opItem && opItem.name) {
+      var winStart = coDate < todayStr ? todayStr : coDate;
+      var winEnd = ciDate > conflictHorizonEndStr ? conflictHorizonEndStr : ciDate;
+      if (winStart <= winEnd) {
+        var bookQty = Number(row[4]) || 0;
+        if (bookQty > 0) {
+          var iterStart = new Date(winStart + "T00:00:00");
+          var iterEnd = new Date(winEnd + "T00:00:00");
+          for (var dIter = new Date(iterStart); dIter <= iterEnd; dIter.setDate(dIter.getDate() + 1)) {
+            var dStr = Utilities.formatDate(dIter, tz, "yyyy-MM-dd");
+            if (!bookingMap[dStr]) bookingMap[dStr] = {};
+            if (!bookingMap[dStr][opItem.name]) bookingMap[dStr][opItem.name] = { totalQty: 0, bookings: [] };
+            bookingMap[dStr][opItem.name].totalQty += bookQty;
+            bookingMap[dStr][opItem.name].bookings.push({
+              tid: String(tid),
+              customer: customer,
+              qty: bookQty,
+              from: coDate,
+              to: ciDate
+            });
+          }
+        }
       }
     }
   }
@@ -1130,8 +1235,8 @@ function getOperationsData_(targetDate, skipCache) {
     if (hConfirm === "확인") continue;
 
     if (!unconfirmedMap[reqID]) {
-      var rDate = r[1] instanceof Date ? Utilities.formatDate(r[1], tz, "yyyy-MM-dd") : String(r[1] || "");
-      var rTime = r[2] instanceof Date ? Utilities.formatDate(r[2], tz, "HH:mm") : String(r[2] || "");
+      var rDate = operationsDateStr_(r[1], tz);
+      var rTime = operationsTimeStr_(r[2], tz);
       unconfirmedMap[reqID] = {
         reqID: String(reqID),
         customer: String(r[10] || ""),
@@ -1156,7 +1261,6 @@ function getOperationsData_(targetDate, skipCache) {
   var contractLast = contractSh ? contractSh.getLastRow() : 0;
   var contracts = contractLast >= 2 ? contractSh.getRange(2, 1, contractLast - 1, 12).getValues() : [];
 
-  var weekRange = getWeekRange_(today, tz);
   var allTids = [];
   var tidCustomerMap = {};
   var weeklyTids = {};
@@ -1171,8 +1275,8 @@ function getOperationsData_(targetDate, skipCache) {
     allTids.push(sTid);
     tidCustomerMap[sTid] = String(c[1] || "");
 
-    var coDate = c[4] instanceof Date ? Utilities.formatDate(c[4], tz, "yyyy-MM-dd") : "";
-    if (coDate >= weekRange.start && coDate <= weekRange.end) {
+    var ccoDate = operationsDateStr_(c[4], tz);
+    if (ccoDate && ccoDate >= weekRange.start && ccoDate <= weekRange.end) {
       weeklyTids[sTid] = true;
     }
   }
@@ -1199,17 +1303,88 @@ function getOperationsData_(targetDate, skipCache) {
   var equips = equipLast >= 2 ? equipSh.getRange(2, 1, equipLast - 1, 12).getValues() : [];
 
   var maintenance = [];
+  var totalStockSum = 0;
+  var stockByName = {};  // 장비명 → 총보유 수량
   for (var m = 0; m < equips.length; m++) {
     var st = String(equips[m][8] || "").trim();
+    var equipName = String(equips[m][3] || "").trim();
     if (st === "정비중" || st === "수리중") {
       maintenance.push({
-        name: String(equips[m][3] || ""),
+        name: equipName,
         category: String(equips[m][0] || ""),
         status: st,
         note: String(equips[m][9] || "")
       });
     }
+    var stockNum = Number(equips[m][4]) || 0;
+    totalStockSum += stockNum;
+    if (equipName && stockNum > 0) {
+      stockByName[equipName] = (stockByName[equipName] || 0) + stockNum;
+    }
   }
+
+  // ── 건강 지표: 장비 가동률 (스케줄상세 활성 수량 / 장비마스터 총보유) + 이번주 출고 페이스 ──
+  var utilizationPercent = totalStockSum > 0
+    ? Math.round((activeQtySum / totalStockSum) * 1000) / 10
+    : 0;
+
+  // ── 재고 충돌/부족 ──
+  // 각 (date, equipment)에서 sum vs 총보유 비교
+  var inventoryAlerts = [];
+  var inventoryUnknownNames = {};
+  var dateKeys = Object.keys(bookingMap).sort();
+  for (var di = 0; di < dateKeys.length; di++) {
+    var dStr = dateKeys[di];
+    var byEquip = bookingMap[dStr];
+    var equipNames = Object.keys(byEquip);
+    for (var ei = 0; ei < equipNames.length; ei++) {
+      var ename = equipNames[ei];
+      var entry = byEquip[ename];
+      var stock = stockByName[ename];
+      if (stock == null) {
+        // 장비마스터에 없는 이름은 충돌 판정 불가 — 한 번만 기록
+        if (!inventoryUnknownNames[ename]) inventoryUnknownNames[ename] = true;
+        continue;
+      }
+      var ratio = entry.totalQty / stock;
+      if (entry.totalQty > stock) {
+        inventoryAlerts.push({
+          date: dStr,
+          equipment: ename,
+          booked: entry.totalQty,
+          stock: stock,
+          overBy: entry.totalQty - stock,
+          ratio: Math.round(ratio * 1000) / 10,
+          severity: "conflict",
+          bookings: entry.bookings
+        });
+      } else if (ratio >= 0.9) {
+        inventoryAlerts.push({
+          date: dStr,
+          equipment: ename,
+          booked: entry.totalQty,
+          stock: stock,
+          overBy: 0,
+          ratio: Math.round(ratio * 1000) / 10,
+          severity: "tight",
+          bookings: entry.bookings
+        });
+      }
+    }
+  }
+  // 충돌 먼저 → 부족 우려 / 같은 severity 안에서는 날짜 빠른 순
+  inventoryAlerts.sort(function(a, b) {
+    if (a.severity !== b.severity) return a.severity === "conflict" ? -1 : 1;
+    if (a.date !== b.date) return a.date.localeCompare(b.date);
+    return b.ratio - a.ratio;
+  });
+
+  var paceThisWeekCount = countKeys_(paceThisWeekTids);
+  var pacePrevCount = countKeys_(pacePrev4WeeksTids);
+  var paceAvg4Week = pacePrevCount / 4;
+  var pacePercent = paceAvg4Week > 0
+    ? Math.round((paceThisWeekCount / paceAvg4Week) * 100)
+    : null;
 
   var result = {
     success: true,
@@ -1223,14 +1398,33 @@ function getOperationsData_(targetDate, skipCache) {
       missingContract: missingContract.length,
       imminent: imminent.length,
       maintenance: maintenance.length,
-      weeklyReservations: countKeys_(weeklyTids)
+      weeklyReservations: countKeys_(weeklyTids),
+      inventoryConflicts: inventoryAlerts.filter(function(a) { return a.severity === "conflict"; }).length,
+      inventoryTight: inventoryAlerts.filter(function(a) { return a.severity === "tight"; }).length
+    },
+    health: {
+      utilization: {
+        inUse: activeQtySum,
+        total: totalStockSum,
+        percent: utilizationPercent
+      },
+      checkoutPace: {
+        thisWeek: paceThisWeekCount,
+        avg4Week: Math.round(paceAvg4Week * 10) / 10,
+        prevTotal: pacePrevCount,
+        percent: pacePercent,
+        prevRange: { start: pacePrevStartStr, end: pacePrevEndStr }
+      }
     },
     todayCheckout: todayCheckout,
     todayCheckin: todayCheckin,
     unconfirmed: unconfirmed,
     missingContract: missingContract,
     imminent: imminent,
-    maintenance: maintenance
+    maintenance: maintenance,
+    inventoryAlerts: inventoryAlerts,
+    inventoryHorizonDays: 90,
+    inventoryUnknownCount: Object.keys(inventoryUnknownNames).length
   };
 
   try { cache.put(cacheKey, JSON.stringify(result), 300); } catch (cacheErr) {}
