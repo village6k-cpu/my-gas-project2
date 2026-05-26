@@ -33,6 +33,7 @@ load_env() {
   export SUPABASE_TIMEOUT_MS="${SUPABASE_TIMEOUT_MS:-7000}"
   export QUEUE_DIR="${QUEUE_DIR:-$BRIDGE_DIR/queue}"
   export VILLAGE_AI_WORKER_CMD="${VILLAGE_AI_WORKER_CMD:-$WORKER_CMD}"
+  export VILLAGE_KAKAO_CHROME_DIR="${VILLAGE_KAKAO_CHROME_DIR:-$HOME/.village-kakao-chrome}"
 }
 
 pid_alive() {
@@ -43,20 +44,10 @@ health() {
   curl -sS --max-time 3 "http://127.0.0.1:${PORT}/health"
 }
 
-chrome_has_kakao_tab() {
-  osascript <<'APPLESCRIPT' 2>/dev/null | grep -q '^yes$'
-tell application "Google Chrome"
-  if it is not running then return "no"
-  repeat with w from 1 to count of windows
-    repeat with t from 1 to count of tabs of window w
-      set u to URL of tab t of window w
-      set ttl to title of tab t of window w
-      if u contains "center-pf.kakao.com" or ttl contains "카카오비즈니스" then return "yes"
-    end repeat
-  end repeat
-end tell
-return "no"
-APPLESCRIPT
+chrome_automation_profile_running() {
+  local escaped_profile
+  escaped_profile="$(printf '%s' "$VILLAGE_KAKAO_CHROME_DIR" | sed 's/[][^$.*/]/\\&/g')"
+  ps -axo pid=,command= | grep -E "Google Chrome.*--user-data-dir=${escaped_profile}( |$)" | grep -v grep >/dev/null
 }
 
 cmd_start() {
@@ -69,11 +60,11 @@ cmd_start() {
     echo "started bridge pid $(cat "$PID_FILE")"
     echo "log: $LOG_FILE"
   fi
-  if chrome_has_kakao_tab; then
-    echo "Kakao Channel Manager tab already open; not opening another tab"
+  if chrome_automation_profile_running; then
+    echo "automation Chrome profile already running: $VILLAGE_KAKAO_CHROME_DIR"
   else
     "$CHROME_SCRIPT" "${KAKAO_MANAGER_URL:-https://center-pf.kakao.com/}" >/dev/null
-    echo "opened isolated Chrome profile for Kakao Channel Manager"
+    echo "opened isolated Chrome profile: $VILLAGE_KAKAO_CHROME_DIR"
   fi
   sleep 1
   cmd_status || true
@@ -124,7 +115,15 @@ cmd_status() {
   echo "health:"
   health || echo "  bridge health unavailable"
   echo
-  echo "Kakao Chrome tabs:"
+  echo "Automation Chrome profile:"
+  echo "  dir: $VILLAGE_KAKAO_CHROME_DIR"
+  if chrome_automation_profile_running; then
+    echo "  process: running"
+  else
+    echo "  process: not running"
+  fi
+  echo
+  echo "Kakao Chrome tabs visible to AppleScript:"
   osascript <<'APPLESCRIPT' 2>/dev/null || true
 tell application "Google Chrome"
   if it is not running then return "Chrome not running"
