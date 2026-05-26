@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0f172a" />
   <title>VILLAGE. 후속조치</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Anton&display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: light;
@@ -81,30 +84,39 @@
     .brand h1 {
       margin: 0;
       display: flex;
-      align-items: baseline;
-      gap: 8px;
-      font-family: "Helvetica Neue", "Arial Black", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif;
-      font-weight: 900;
-      font-size: 20px;
-      letter-spacing: -0.04em;
+      align-items: center;
+      gap: 9px;
       line-height: 1;
     }
     .brand .logo {
-      display: inline-flex;
-      align-items: baseline;
+      font-family: "Anton", "Helvetica Neue", "Arial Black", sans-serif;
+      font-weight: 400;
+      font-size: 26px;
+      letter-spacing: -0.01em;
+      line-height: 1;
       color: var(--ink);
       text-transform: uppercase;
-      transform: scaleY(1.08);
-      transform-origin: left baseline;
+      display: inline-flex;
+      align-items: center;
+      gap: 0;
     }
-    .brand .logo .v,
-    .brand .logo .dot { color: #EA5B36; }
+    .brand .logo .v { color: #EA5B36; }
+    .brand .logo .dot {
+      display: inline-block;
+      width: 0.21em;
+      height: 0.21em;
+      background: #EA5B36;
+      margin-left: 0.04em;
+      align-self: flex-end;
+      margin-bottom: 0.05em;
+    }
     .brand .page-name {
       font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Segoe UI", sans-serif;
       font-weight: 700;
       font-size: 14px;
       letter-spacing: -0.01em;
       color: var(--ink-soft);
+      padding-bottom: 2px;
     }
     .brand .updated {
       font-size: 12px;
@@ -537,7 +549,7 @@
   <header class="app">
     <div class="app-top">
       <div class="brand">
-        <h1><span class="logo"><span class="v">V</span>illage<span class="dot">.</span></span><span class="page-name">후속조치</span></h1>
+        <h1><span class="logo"><span class="v">V</span><span>illage</span><span class="dot" aria-hidden="true"></span></span><span class="page-name">후속조치</span></h1>
         <div class="updated" id="updated">불러오는 중…</div>
       </div>
       <div class="controls">
