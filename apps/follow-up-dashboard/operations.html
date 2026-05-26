@@ -963,10 +963,15 @@
     const rows = list.map((it) => {
       const pillCls = it.daysAway === 1 ? 'urgent' : 'high';
       const dayLabel = `D-${it.daysAway}`;
+      const customer = esc(it.customer || '고객명 미상');
+      const href = dashboardUrlForTrade(it.date, it.tid);
+      const who = it.tid
+        ? `<a class="who-link" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="오늘 일정에서 이 거래 열기">${customer}</a>`
+        : customer;
       return `<div class="row">
         <div class="time">${esc(it.date.slice(5))}<br><span style="font-size:11px;color:var(--muted);font-weight:600">${esc(it.time || '')}</span></div>
         <div class="main">
-          <div class="who">${esc(it.customer || '고객명 미상')}</div>
+          <div class="who">${who}</div>
         </div>
         <div class="right"><span class="pill ${pillCls}">${dayLabel}</span></div>
       </div>`;
