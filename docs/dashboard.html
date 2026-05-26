@@ -1494,6 +1494,7 @@ var dashboardGlobalSearchData = null;
 var currentDate = new Date();
 var activeDashboardTab = 'checkout';
 var dashboardSearchQuery = '';
+var dashboardInitialSearchQuery = '';
 var dashboardRequestSeq = 0;
 var dashboardAbortController = null;
 var dashboardSearchTimer = null;
@@ -1555,6 +1556,11 @@ document.addEventListener('DOMContentLoaded', function() {
   if (dateParam) {
     currentDate = new Date(dateParam + 'T00:00:00');
   }
+  dashboardInitialSearchQuery = String(urlParams.get('search') || urlParams.get('q') || urlParams.get('tid') || '').trim();
+  var tabParam = String(urlParams.get('tab') || '').trim();
+  if (['checkout', 'checkin', 'all', 'attention'].indexOf(tabParam) >= 0) {
+    activeDashboardTab = tabParam;
+  }
   updateDateDisplay();
   loadDashboardNoteFontSize();
   renderDashboardNotes(dashboardNotes);
@@ -1567,7 +1573,19 @@ document.addEventListener('DOMContentLoaded', function() {
   } else {
     loadData(!!INITIAL_DATA);
   }
+  applyDashboardInitialSearchQuery();
 });
+
+function applyDashboardInitialSearchQuery() {
+  if (!dashboardInitialSearchQuery) return;
+  var input = document.getElementById('dashboardSearchInput');
+  if (input) input.value = dashboardInitialSearchQuery;
+  setTimeout(function() {
+    if (!dashboardInitialSearchQuery) return;
+    onDashboardSearchInput(dashboardInitialSearchQuery);
+    dashboardInitialSearchQuery = '';
+  }, 0);
+}
 
 function updateDateDisplay() {
   var days = ['일','월','화','수','목','금','토'];
