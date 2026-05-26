@@ -594,6 +594,25 @@
       margin-bottom: 2px;
       word-break: keep-all;
     }
+    .row .main .who-link {
+      color: inherit;
+      text-decoration: none;
+      border-bottom: 1px dashed transparent;
+      transition: color 0.12s ease, border-color 0.12s ease;
+    }
+    .row .main .who-link:hover {
+      color: var(--normal);
+      border-bottom-color: var(--normal);
+    }
+    .row .main .who-link::after {
+      content: ' ↗';
+      font-size: 10px;
+      color: var(--muted);
+      font-weight: 600;
+      opacity: 0.55;
+      margin-left: 2px;
+    }
+    .row .main .who-link:hover::after { opacity: 1; color: var(--normal); }
     .row .main .what {
       font-size: 12.5px;
       color: var(--muted);
@@ -897,6 +916,15 @@
     return DASHBOARD_URL + (params.toString() ? '?' + params.toString() : '');
   }
 
+  function dashboardUrlForTrade(date, tid) {
+    const params = new URLSearchParams();
+    const d = String(date || currentOperationsDate || '').trim();
+    const t = String(tid || '').trim();
+    if (d) params.set('date', d);
+    if (t) params.set('tid', t);
+    return DASHBOARD_URL + (params.toString() ? '?' + params.toString() : '');
+  }
+
   function updateTodayDashboardLink(date) {
     const link = $('#today-dashboard-link');
     if (link) link.href = todayDashboardUrl(date);
@@ -913,13 +941,20 @@
 
   function rowsCheckoutCheckin(list) {
     if (!list.length) return emptyMini('해당 없음');
-    const rows = list.map((it) => `<div class="row">
-      <div class="time">${esc(it.time || '—')}</div>
-      <div class="main">
-        <div class="who">${esc(it.customer || '고객명 미상')}</div>
-      </div>
-      <div class="right"><span class="pill">${esc(it.tid)}</span></div>
-    </div>`).join('');
+    const rows = list.map((it) => {
+      const href = dashboardUrlForTrade(currentOperationsDate, it.tid);
+      const customer = esc(it.customer || '고객명 미상');
+      const who = it.tid
+        ? `<a class="who-link" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="오늘 일정에서 이 거래 열기">${customer}</a>`
+        : customer;
+      return `<div class="row">
+        <div class="time">${esc(it.time || '—')}</div>
+        <div class="main">
+          <div class="who">${who}</div>
+        </div>
+        <div class="right"><span class="pill">${esc(it.tid)}</span></div>
+      </div>`;
+    }).join('');
     return `<div class="panel">${rows}</div>`;
   }
 
