@@ -925,10 +925,13 @@ function logAutoReply(config, entry) {
 
 export function isAutoSendEligibleLiveJob(job = {}) {
   const preview = text(job.preview_text || job.previewText || job.payload?.previewText || '');
+  const events = Array.isArray(job.events) ? job.events : [];
+  const reasons = events.map((event) => String(event?.reason || '')).filter(Boolean);
+  if (!reasons.includes('top_row_changed')) return { eligible: false, reason: 'not_top_row_changed_live_event' };
   if (/\d{1,2}월\s*\d{1,2}일/.test(preview)) return { eligible: false, reason: 'preview_has_old_date' };
   if (/\d{4}\.\d{1,2}\.\d{1,2}/.test(preview)) return { eligible: false, reason: 'preview_has_absolute_date' };
   if (!/(오전|오후)\s*\d{1,2}:\d{2}/.test(preview)) return { eligible: false, reason: 'preview_not_live_time_format' };
-  return { eligible: true, reason: 'live_time_format' };
+  return { eligible: true, reason: 'top_row_changed_live_time_format' };
 }
 
 async function maybeAutoSendReply({ config, decision, job, navigationContext }) {

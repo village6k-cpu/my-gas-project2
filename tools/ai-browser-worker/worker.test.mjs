@@ -626,13 +626,17 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, suggested_reply_draft: '예약 확정됐습니다', reply_decision: { ...baseDecision.reply_decision, text: '예약 확정됐습니다' } }, { autoSendEnabled: true }).allowed, false);
 });
 
-test('isAutoSendEligibleLiveJob blocks dated backfill rows from auto-send', () => {
-  assert.deepEqual(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45' }), {
+test('isAutoSendEligibleLiveJob blocks dated/backfill rows from auto-send', () => {
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    preview_text: '중요 홍길동 네 감사합니다 오후 3:45',
+    events: [{ reason: 'top_row_changed' }]
+  }), {
     eligible: true,
-    reason: 'live_time_format'
+    reason: 'top_row_changed_live_time_format'
   });
-  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 한시우/60x 파손 video 5월 25일' }).eligible, false);
-  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 배성문 1월 15일 건은 4만원입니다. 오후 3:45' }).eligible, false);
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'mutation' }] }).eligible, false);
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 한시우/60x 파손 video 5월 25일', events: [{ reason: 'top_row_changed' }] }).eligible, false);
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 배성문 1월 15일 건은 4만원입니다. 오후 3:45', events: [{ reason: 'top_row_changed' }] }).eligible, false);
 });
 
 test('findKakaoMessageInputElementIndex finds the Kakao message input field', () => {
