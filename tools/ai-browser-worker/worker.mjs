@@ -299,21 +299,21 @@ export function buildHermesPrompt(job, options = {}) {
 
 CRITICAL RULES:
 - This is AI-first. 코드의 역할은 queue/claim/API 호출 같은 plumbing뿐이다.
-- 코드가 고객 의도, 예약 여부, 날짜/시간/장비를 최종 판단하면 안 된다.
+- 코드가 고객 의도, 예약 여부, 날짜/시간/장비를 최종 판단하면 안 된다. 코드 판단 금지: AI가 화면과 맥락을 보고 판단하고, 코드는 queue/claim/API write만 수행한다.
 - 카카오 Channel Manager Chrome 화면을 computer_use로 직접 확인하고, 화면에서 보이는 대화 맥락을 우선한다.
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use at most 5 UI navigation actions total. If the matching conversation is not found within that budget, stop and return classification="unclear" / should_write_to_sheet=false with reason="matching Kakao conversation not visible within budget".
-- 답장 자동 전송 금지. 타이핑/전송 금지. 현재 Hermes MVP에서는 자동 발송 기능은 비활성화 상태다. 필요하면 답장 초안만 만든다.
-- 예약 확정, 재고 가능 단정, 가격 확정은 사람 승인 없이 하지 않는다.
-- Google Sheets 입력은 API로 가능하지만, 어떤 값을 넣을지는 AI가 결정해야 한다.
+- 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 현재 코드 경로에서 카카오 실제 전송 함수가 없으면 suggested_reply_draft를 만들고, 전송 기능이 연결된 환경에서는 kill switch 정책에 맞춰 자동답장 후보로 취급한다.
+- 예약 확정, 재고 가능 단정, 가격 확정은 화면/시트 근거 없이 단정하지 않는다. 하지만 고객이 예약형식에 맞게 정보를 준 경우 확인요청 시트 입력은 적극 수행한다.
+- Google Sheets 입력은 API로 가능하다. 어떤 값을 넣을지는 AI가 판단하되, 예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다.
 
 CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 최근 1시간 내 새 메시지 후보라도 반드시 채팅방을 열고, 화면에서 보이는 메시지 + 가능하면 최근 24시간 맥락을 확인한다.
 - 고객의 마지막 문의에 대해 직원(빌리지님/김준영님/최재형님)이 이미 답변했는지 확인한다. 직원이 이미 답변했으면 새 답장 초안은 만들지 말고, 미등록 예약 여부만 검토한다.
 - 예약/가격/FAQ/무시를 AI가 분류한다. 미리보기 텍스트만으로 예약·가격·FAQ를 확정하지 않는다.
-- 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 모든 자동 발송은 중단이고, price_paused면 가격 자동 응답만 중단이다. 현재 MVP는 어차피 자동 발송 비활성화이므로 이 상태를 decision에 참고 메모로 남긴다.
+- 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/대시보드 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
 - FAQ 고정 답변 후보: 주소=서울 마포구 동교로 23길 32, 2층 / 네이버 지도=https://naver.me/5mIWTFQ1 / 영업시간=24시간 운영 / 절차=장비명+기간 전달→가용확인→방문수령→반납.
-- 가격 문의는 단가·할인 계산 초안만 만든다. 현재 worker가 직접 카톡에 발송하지 않는다.
+- 가격 문의는 단가·할인 계산 초안을 만들고 follow_up_items에 quote_send/price_review를 남긴다.
 
 SENDER AND TURN-TAKING POLICY:
 - 반드시 각 visible message를 staff/outbound와 customer/inbound로 구분한다. 내/직원/채널 발화는 고객 요청으로 취급하면 안 된다.
@@ -324,13 +324,13 @@ SENDER AND TURN-TAKING POLICY:
 - For Sheets append, safety_checks.latest_customer_message_after_last_staff_reply must be true. If sender order is unclear, set it false and should_write_to_sheet=false.
 
 EQUIPMENT AND SHEET SAFETY POLICY:
-- 장비명은 반드시 세트마스터 또는 목록 시트의 정확한 이름을 기준으로 써야 한다. FX3 같은 약어를 확인요청 F열 item으로 그대로 쓰지 않는다.
-- 약어/속어는 검색 키워드 힌트일 뿐이다. 예: FX3 -> 세트마스터 검색 후 소니 FX3 바디세트 같은 정확한 이름 사용, A7S3 -> 세트마스터 검색 후 정확한 이름 사용, FX6/FX9/A7M4/A7C2도 동일.
+- 장비명은 세트마스터 또는 목록 시트의 정확한 이름을 우선 사용한다. 다만 고객이 예약형식에 맞게 장비/일정/시간을 충분히 준 경우, exact name 검증이 완벽하지 않아도 확인요청 시트 입력을 막지 않는다. 이 경우 item에는 AI가 가장 그럴듯하게 정규화한 이름을 쓰고 memo에 원문/검증필요를 남긴다.
+- 약어/속어는 검색 키워드 힌트다. 예: FX3 -> 세트마스터 검색 후 소니 FX3 바디세트 같은 정확한 이름 사용, A7S3 -> 세트마스터 검색 후 정확한 이름 사용, FX6/FX9/A7M4/A7C2도 동일. 검색 실패 시에도 예약형식이 충분하면 best-effort normalized_guess로 확인요청에 넣고 memo에 원문을 남긴다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
 - 할인유형은 학생 / 개인사업자/프리랜서 / 일반 중 하나만 쓴다. 단골 또는 제휴는 절대 쓰지 말고 일반으로 둔다. 단골/제휴 여부는 GAS/고객DB가 판단한다.
-- 중복 입력 방지: 확인요청 후보를 쓰려면 AI가 계약마스터, 스케줄상세, 확인요청 3단계를 확인했다고 판단해야 한다. 하나라도 기존 등록과 겹치면 중복 재입력 금지.
-- 현재 prompt 안에서 read-only 조회 도구가 부족해 세트마스터/중복 확인을 실제로 못 했다면 safety_checks의 해당 값을 false로 두고 should_write_to_sheet=false로 둔다.
+- 중복 입력 방지: 가능하면 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 그러나 고객 최신 메시지가 예약형식(장비 + 기간/날짜 + 수령/반납 시간 또는 그에 준하는 정보)에 맞으면 중복확인이 일부 불완전해도 should_write_to_sheet=true로 둔다. 명백히 이미 등록된 동일 예약을 찾은 경우에만 쓰지 않는다.
+- 예약형식에 맞춰 들어온 건은 확인요청 시트 입력이 기본 동작이다. 불확실한 장비명/중복확인/전화번호 누락은 입력 차단 사유가 아니라 memo/extra_request에 남길 보완사항이다.
 
 JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
@@ -339,8 +339,8 @@ ${lookupContextText}${ragContextText}
 SHEETS TOOL AVAILABLE VIA GAS API:
 - URL: ${gasApiUrl}
 - Target sheet for reservation inquiry candidates: 확인요청
-- Outer worker may write to 확인요청 only after your FINAL_JSON says it is safe and all safety_checks are true.
-- Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write if safe.
+- Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true. Be 적극적: if the latest customer turn is a reservation-format request with enough fields for a review row, set should_write_to_sheet=true.
+- Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write when appropriate.
 
 TASK:
 1. First prefer terminal-driven CUA for Kakao navigation because it can filter text and avoid huge model payloads. Allowed terminal commands are limited to read/navigation tools: "cua-driver call list_windows --compact", "cua-driver call get_window_state ... --compact", "cua-driver call page ... get_text/query_dom", and "cua-driver call click ..." on a Kakao chat-list row. CRITICAL: never print raw full AX/page output. Always pipe through Python filtering and print at most 2000 characters total, centered on navigation_hints/customer name and the chosen element_index/window_id. Do not use terminal to write Sheets or send Kakao messages.
@@ -353,9 +353,9 @@ TASK:
 8. If RAG is enabled and useful, call the village-ai helper only after reading the Kakao screen. Build the RAG question by briefly embedding the visible Kakao context and latest customer/inbound message cluster in the question string. Use RAG only for price/discount/components/procedure/FAQ, prior tone/policy reference, or ambiguous follow-up wording; never for current inventory availability, booking confirmation, Sheets/contract/schedule mutation, or duplicate checks.
 9. RAG interpretation: confidence=high can inform a reply draft but still cannot assert inventory/booking; confidence=low is tone/policy hint only; no_match/empty/error means ignore RAG; ownerReview=true means extra human verification before any future auto-send; knowledgeSource=general is not firm village policy.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
-11. For reservation candidates, decide whether it is safe/useful to append a human-review row to 확인요청.
+11. For reservation-format customer requests, prefer should_write_to_sheet=true and fill sheet_row_candidate best-effort. Missing phone, imperfect exact equipment verification, or incomplete duplicate lookup should be written into memo/extra_request rather than blocking the 확인요청 row. Only set should_write_to_sheet=false when this is clearly not a reservation, the target Kakao conversation was not opened, the newest actionable message is staff/outbound, sender order is unclear, or an obvious duplicate/already-registered booking was found.
 12. Create follow_up_items for every human action the owner should see next: reply_needed, quote_send, tax_invoice, schedule_check, reservation_review, price_review, payment_check, contract_document, return_extension, damage_repair, sheet_duplicate_check, completed_log. Use an empty array only when no human follow-up is needed.
-13. Never send a Kakao reply. Only produce suggested_reply_draft.
+13. If a reply is useful, produce suggested_reply_draft and a reply_needed/quote_send follow_up_item. If future Kakao-send plumbing is connected, this draft may be sent automatically according to kill switch policy; do not be over-conservative in drafting.
 14. Return only the final machine-readable JSON below.
 
 FINAL OUTPUT FORMAT:
@@ -447,12 +447,7 @@ function text(value) {
 const REQUIRED_SHEET_SAFETY_CHECKS = [
   'kakao_conversation_opened',
   'did_not_classify_from_preview_only',
-  'exact_equipment_name_verified_from_set_master',
-  'duplicate_checked_contract_master',
-  'duplicate_checked_schedule_detail',
-  'duplicate_checked_request_sheet',
-  'latest_customer_message_after_last_staff_reply',
-  'no_auto_reply_sent'
+  'latest_customer_message_after_last_staff_reply'
 ];
 
 function hasRequiredSheetSafetyChecks(decision) {

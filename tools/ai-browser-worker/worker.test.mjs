@@ -171,7 +171,7 @@ test('askVillageAi posts to /api/ask and returns parsed SSE without exposing sec
   assert.equal(JSON.stringify(result).includes('secret-value'), false);
 });
 
-test('buildHermesPrompt imports Claude Coworker safety policy without enabling auto-send', () => {
+test('buildHermesPrompt imports Claude Coworker policy while allowing aggressive reply drafting', () => {
   const prompt = buildHermesPrompt({ id: 'job-2', preview_text: 'FX3 내일 가능할까요?' });
 
   assert.match(prompt, /미리보기만 보고 분류하지 마라/);
@@ -179,19 +179,20 @@ test('buildHermesPrompt imports Claude Coworker safety policy without enabling a
   assert.match(prompt, /직원.*이미 답변/s);
   assert.match(prompt, /킬 스위치/s);
   assert.match(prompt, /paused.*price_paused.*active/s);
-  assert.match(prompt, /자동 발송.*비활성화/s);
-  assert.match(prompt, /답장 초안만/s);
+  assert.match(prompt, /자동답장 후보/s);
+  assert.match(prompt, /suggested_reply_draft/s);
 });
 
-test('buildHermesPrompt requires exact equipment and duplicate safeguards from AI', () => {
+test('buildHermesPrompt prefers sheet writes for reservation-format requests', () => {
   const prompt = buildHermesPrompt({ id: 'job-3', preview_text: 'a7s3 2대 견적' });
 
-  assert.match(prompt, /장비명은 반드시.*세트마스터/s);
+  assert.match(prompt, /장비명은 세트마스터.*우선/s);
   assert.match(prompt, /FX3.*소니 FX3 바디세트/s);
   assert.match(prompt, /할인유형.*학생.*개인사업자\/프리랜서.*일반/s);
   assert.match(prompt, /단골.*일반/s);
   assert.match(prompt, /계약마스터.*스케줄상세.*확인요청/s);
-  assert.match(prompt, /중복.*재입력 금지/s);
+  assert.match(prompt, /예약형식.*should_write_to_sheet=true/s);
+  assert.match(prompt, /불확실한 장비명.*입력 차단 사유가 아니라/s);
 });
 
 test('buildGasReadUrl creates read-only GAS URLs with encoded parameters', () => {
@@ -519,23 +520,28 @@ test('buildSheetAppendPayload maps AI-decided fields into 확인요청 append sh
   ]);
 });
 
-test('buildSheetAppendPayload refuses sheet writes when AI safety checks are missing', () => {
+test('buildSheetAppendPayload allows reservation-format writes when non-blocking checks are incomplete', () => {
   const decision = {
     should_write_to_sheet: true,
     safety_checks: {
       kakao_conversation_opened: true,
       did_not_classify_from_preview_only: true,
       exact_equipment_name_verified_from_set_master: false,
-      duplicate_checked_contract_master: true,
-      duplicate_checked_schedule_detail: true,
-      duplicate_checked_request_sheet: true,
+      duplicate_checked_contract_master: false,
+      duplicate_checked_schedule_detail: false,
+      duplicate_checked_request_sheet: false,
       latest_customer_message_after_last_staff_reply: true,
-      no_auto_reply_sent: true
+      no_auto_reply_sent: false
     },
-    sheet_row_candidate: { item: 'FX6', customer_name: '홍길동' }
+    sheet_row_candidate: { item: 'FX6', customer_name: '홍길동', memo: '장비명/중복 검증 필요' }
   };
 
-  assert.equal(buildSheetAppendPayload(decision, { apiKey: 'secret' }), null);
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  assert.equal(payload.action, 'append');
+  assert.equal(payload.sheet, '확인요청');
+  assert.equal(payload.values[0][5], 'FX6');
+  assert.equal(payload.values[0][10], '홍길동');
+  assert.equal(payload.values[0][9], '장비명/중복 검증 필요');
 });
 
 test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', () => {
