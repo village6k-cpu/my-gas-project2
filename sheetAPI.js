@@ -1069,6 +1069,14 @@ function operationsToDate_(cell, dateStr) {
   return null;
 }
 
+function operationsScheduleItem_(row) {
+  var setName = String(row[2] || "").trim();
+  var itemName = String(row[3] || row[2] || "").trim();
+  if (!itemName) return null;
+  if (setName && setName !== itemName) return null;
+  return { name: itemName, qty: row[4] || 1 };
+}
+
 function getOperationsData_(targetDate, skipCache) {
   var tz = "Asia/Seoul";
   var today = targetDate ? new Date(targetDate) : new Date();
@@ -1076,7 +1084,7 @@ function getOperationsData_(targetDate, skipCache) {
   var todayStr = Utilities.formatDate(today, tz, "yyyy-MM-dd");
 
   var cache = CacheService.getScriptCache();
-  var cacheKey = "operations_v1_" + todayStr;
+  var cacheKey = "operations_v2_" + todayStr;
   if (!skipCache) {
     var cached = cache.get(cacheKey);
     if (cached) {
@@ -1109,20 +1117,19 @@ function getOperationsData_(targetDate, skipCache) {
     var coTime = operationsTimeStr_(row[6], tz);
     var ciTime = operationsTimeStr_(row[8], tz);
     var customer = String(row[12] || "");
-    var itemName = String(row[3] || row[2] || "");
-    var qty = row[4] || 1;
+    var opItem = operationsScheduleItem_(row);
 
     if (coDate === todayStr) {
       if (!todayCheckoutMap[tid]) {
         todayCheckoutMap[tid] = { tid: String(tid), customer: customer, time: coTime, items: [] };
       }
-      if (itemName) todayCheckoutMap[tid].items.push({ name: itemName, qty: qty });
+      if (opItem) todayCheckoutMap[tid].items.push(opItem);
     }
     if (ciDate === todayStr) {
       if (!todayCheckinMap[tid]) {
         todayCheckinMap[tid] = { tid: String(tid), customer: customer, time: ciTime, items: [] };
       }
-      if (itemName) todayCheckinMap[tid].items.push({ name: itemName, qty: qty });
+      if (opItem) todayCheckinMap[tid].items.push(opItem);
     }
 
     if (coDate && coDate > todayStr) {
@@ -1139,7 +1146,7 @@ function getOperationsData_(targetDate, skipCache) {
             items: []
           };
         }
-        if (itemName) imminentMap[tid].items.push({ name: itemName, qty: qty });
+        if (opItem) imminentMap[tid].items.push(opItem);
       }
     }
   }
