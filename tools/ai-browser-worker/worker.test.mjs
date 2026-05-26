@@ -186,8 +186,9 @@ test('buildHermesPrompt imports Claude Coworker policy while allowing aggressive
 test('buildHermesPrompt prefers sheet writes for reservation-format requests', () => {
   const prompt = buildHermesPrompt({ id: 'job-3', preview_text: 'a7s3 2대 견적' });
 
-  assert.match(prompt, /장비명은 세트마스터.*우선/s);
-  assert.match(prompt, /정확 매칭이 안 되면.*고객.*써준 장비명.*그대로.*F열 item/s);
+  assert.match(prompt, /장비명은 AI가 최대한 추론\/정규화해서.*F열 item/s);
+  assert.match(prompt, /정확 매칭이 불완전하면.*best normalized guess/s);
+  assert.match(prompt, /정규화가 애매하거나 실패했다고.*입력 자체를 막지 않는다/s);
   assert.match(prompt, /확인요청은 최종 등록이 아니라/s);
   assert.match(prompt, /FX3.*A7S3.*FX6/s);
   assert.match(prompt, /할인유형.*학생.*개인사업자\/프리랜서.*일반/s);
