@@ -24,6 +24,8 @@ const state = {
   debouncedJobs: 0,
   failedSupabaseWrites: 0,
   failedWorkerRuns: 0,
+  workerRunning: false,
+  workerQueueLength: 0,
   rooms: new Map(),
   seenGroupingTexts: new Set(),
   lastContentScriptStartedAtMs: 0
@@ -243,6 +245,27 @@ function runWorker(job) {
   });
 }
 
+let workerChain = Promise.resolve();
+
+function enqueueWorker(job) {
+  if (!CONFIG.workerCommand) return Promise.resolve({ skipped: true });
+  state.workerQueueLength += 1;
+  const run = async () => {
+    state.workerQueueLength = Math.max(0, state.workerQueueLength - 1);
+    state.workerRunning = true;
+    console.info('[dom-bridge] worker start', job.jobId, 'queued:', state.workerQueueLength);
+    try {
+      return await runWorker(job);
+    } finally {
+      state.workerRunning = false;
+      console.info('[dom-bridge] worker done', job.jobId, 'queued:', state.workerQueueLength);
+    }
+  };
+  const queued = workerChain.then(run, run);
+  workerChain = queued.catch(() => {});
+  return queued;
+}
+
 async function flushRoom(roomKey) {
   const roomState = state.rooms.get(roomKey);
   if (!roomState) return;
@@ -262,7 +285,7 @@ async function flushRoom(roomKey) {
   }
 
   try {
-    await runWorker(job);
+    await enqueueWorker(job);
   } catch (error) {
     state.failedWorkerRuns += 1;
     appendNdjson('errors.ndjson', { at: nowIso(), type: 'worker', message: error.message, job });
@@ -396,6 +419,8 @@ const server = http.createServer(async (req, res) => {
           debouncedJobs: state.debouncedJobs,
           failedSupabaseWrites: state.failedSupabaseWrites,
           failedWorkerRuns: state.failedWorkerRuns,
+          workerRunning: state.workerRunning,
+          workerQueueLength: state.workerQueueLength,
           openRooms: state.rooms.size
         }
       });
