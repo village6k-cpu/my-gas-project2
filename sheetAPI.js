@@ -1108,6 +1108,12 @@ function getOperationsData_(targetDate, skipCache) {
   var pacePrev4WeeksTids = {};
   var activeQtySum = 0;  // 오늘 활성 스케줄(반출일 ≤ 오늘 ≤ 반납일) 수량 합 → 가동률 분자
 
+  // 재고 충돌 — 향후 90일까지의 일자×장비 예약 누적
+  // bookingMap[dateStr][equipName] = [{ tid, customer, qty }]
+  var bookingMap = {};
+  var conflictHorizonEnd = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 90);
+  var conflictHorizonEndStr = Utilities.formatDate(conflictHorizonEnd, tz, "yyyy-MM-dd");
+
   // 출고 페이스 비교 구간: 이번주 시작 기준 직전 4주 (28일)
   var weekStartDate = new Date(weekRange.start + "T00:00:00");
   var pacePrevStart = new Date(weekStartDate.getFullYear(), weekStartDate.getMonth(), weekStartDate.getDate() - 28);
@@ -1174,6 +1180,34 @@ function getOperationsData_(targetDate, skipCache) {
     // 가동률 분자: 오늘 활성 스케줄(반출일 ≤ 오늘 ≤ 반납일)의 수량 합
     if (coDate && ciDate && coDate <= todayStr && todayStr <= ciDate) {
       activeQtySum += (Number(row[4]) || 0);
+    }
+
+    // 재고 충돌 — 향후 90일 이내 활성 스케줄을 일자×장비별로 누적
+    if (coDate && ciDate && itemName) {
+      // 충돌 윈도우: max(today, coDate) ~ min(conflictHorizonEnd, ciDate)
+      var winStart = coDate < todayStr ? todayStr : coDate;
+      var winEnd = ciDate > conflictHorizonEndStr ? conflictHorizonEndStr : ciDate;
+      if (winStart <= winEnd) {
+        var bookQty = Number(row[4]) || 0;
+        if (bookQty > 0) {
+          // 일자별 펼치기 (Date 객체로 안전하게 iterate)
+          var iterStart = new Date(winStart + "T00:00:00");
+          var iterEnd = new Date(winEnd + "T00:00:00");
+          for (var dIter = new Date(iterStart); dIter <= iterEnd; dIter.setDate(dIter.getDate() + 1)) {
+            var dStr = Utilities.formatDate(dIter, tz, "yyyy-MM-dd");
+            if (!bookingMap[dStr]) bookingMap[dStr] = {};
+            if (!bookingMap[dStr][itemName]) bookingMap[dStr][itemName] = { totalQty: 0, bookings: [] };
+            bookingMap[dStr][itemName].totalQty += bookQty;
+            bookingMap[dStr][itemName].bookings.push({
+              tid: String(tid),
+              customer: customer,
+              qty: bookQty,
+              from: coDate,
+              to: ciDate
+            });
+          }
+        }
+      }
     }
   }
 
@@ -1272,24 +1306,80 @@ function getOperationsData_(targetDate, skipCache) {
 
   var maintenance = [];
   var totalStockSum = 0;
+  var stockByName = {};  // 장비명 → 총보유 수량
   for (var m = 0; m < equips.length; m++) {
     var st = String(equips[m][8] || "").trim();
+    var equipName = String(equips[m][3] || "").trim();
     if (st === "정비중" || st === "수리중") {
       maintenance.push({
-        name: String(equips[m][3] || ""),
+        name: equipName,
         category: String(equips[m][0] || ""),
         status: st,
         note: String(equips[m][9] || "")
       });
     }
-    // 가동률 분모: E열 총보유 합
-    totalStockSum += (Number(equips[m][4]) || 0);
+    var stockNum = Number(equips[m][4]) || 0;
+    totalStockSum += stockNum;
+    if (equipName && stockNum > 0) {
+      stockByName[equipName] = (stockByName[equipName] || 0) + stockNum;
+    }
   }
 
   // ── 건강 지표: 장비 가동률 (스케줄상세 활성 수량 / 장비마스터 총보유) + 이번주 출고 페이스 ──
   var utilizationPercent = totalStockSum > 0
     ? Math.round((activeQtySum / totalStockSum) * 1000) / 10
     : 0;
+
+  // ── 재고 충돌/부족 ──
+  // 각 (date, equipment)에서 sum vs 총보유 비교
+  var inventoryAlerts = [];
+  var inventoryUnknownNames = {};
+  var dateKeys = Object.keys(bookingMap).sort();
+  for (var di = 0; di < dateKeys.length; di++) {
+    var dStr = dateKeys[di];
+    var byEquip = bookingMap[dStr];
+    var equipNames = Object.keys(byEquip);
+    for (var ei = 0; ei < equipNames.length; ei++) {
+      var ename = equipNames[ei];
+      var entry = byEquip[ename];
+      var stock = stockByName[ename];
+      if (stock == null) {
+        // 장비마스터에 없는 이름은 충돌 판정 불가 — 한 번만 기록
+        if (!inventoryUnknownNames[ename]) inventoryUnknownNames[ename] = true;
+        continue;
+      }
+      var ratio = entry.totalQty / stock;
+      if (entry.totalQty > stock) {
+        inventoryAlerts.push({
+          date: dStr,
+          equipment: ename,
+          booked: entry.totalQty,
+          stock: stock,
+          overBy: entry.totalQty - stock,
+          ratio: Math.round(ratio * 1000) / 10,
+          severity: "conflict",
+          bookings: entry.bookings
+        });
+      } else if (ratio >= 0.9) {
+        inventoryAlerts.push({
+          date: dStr,
+          equipment: ename,
+          booked: entry.totalQty,
+          stock: stock,
+          overBy: 0,
+          ratio: Math.round(ratio * 1000) / 10,
+          severity: "tight",
+          bookings: entry.bookings
+        });
+      }
+    }
+  }
+  // 충돌 먼저 → 부족 우려 / 같은 severity 안에서는 날짜 빠른 순
+  inventoryAlerts.sort(function(a, b) {
+    if (a.severity !== b.severity) return a.severity === "conflict" ? -1 : 1;
+    if (a.date !== b.date) return a.date.localeCompare(b.date);
+    return b.ratio - a.ratio;
+  });
 
   var paceThisWeekCount = countKeys_(paceThisWeekTids);
   var pacePrevCount = countKeys_(pacePrev4WeeksTids);
@@ -1310,7 +1400,9 @@ function getOperationsData_(targetDate, skipCache) {
       missingContract: missingContract.length,
       imminent: imminent.length,
       maintenance: maintenance.length,
-      weeklyReservations: countKeys_(weeklyTids)
+      weeklyReservations: countKeys_(weeklyTids),
+      inventoryConflicts: inventoryAlerts.filter(function(a) { return a.severity === "conflict"; }).length,
+      inventoryTight: inventoryAlerts.filter(function(a) { return a.severity === "tight"; }).length
     },
     health: {
       utilization: {
@@ -1331,7 +1423,10 @@ function getOperationsData_(targetDate, skipCache) {
     unconfirmed: unconfirmed,
     missingContract: missingContract,
     imminent: imminent,
-    maintenance: maintenance
+    maintenance: maintenance,
+    inventoryAlerts: inventoryAlerts,
+    inventoryHorizonDays: 90,
+    inventoryUnknownCount: Object.keys(inventoryUnknownNames).length
   };
 
   try { cache.put(cacheKey, JSON.stringify(result), 300); } catch (cacheErr) {}

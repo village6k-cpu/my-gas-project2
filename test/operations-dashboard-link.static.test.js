@@ -14,7 +14,6 @@ const operations = read('apps/follow-up-dashboard/operations.html');
   'id="today-dashboard-link"',
   'const EQUIPMENT_VISIBLE_LIMIT = 4',
   "params.set('date', date)",
-  'renderEquipmentList(it.items)',
   'class="equip-list"',
   'class="equip-chip"',
   'normalized.slice(0, EQUIPMENT_VISIBLE_LIMIT)',
@@ -23,9 +22,16 @@ const operations = read('apps/follow-up-dashboard/operations.html');
 ].forEach((contract) => {
   assert(
     operations.includes(contract),
-    `operations.html must expose one today-schedule entry point and render readable equipment chips: ${contract}`
+    `operations.html must expose one today-schedule entry point and keep the equip-chip helper available: ${contract}`
   );
 });
+
+// 사장님 정책 (2026-05-26): 운영판 카드에서 장비 chip 표시 안 함.
+// 헬퍼 함수(renderEquipmentList)는 보존하되, 카드 row에서 호출하지 않아야 함.
+assert(
+  !/\$\{\s*renderEquipmentList\(\s*it\.items\s*\)\s*\}/.test(operations),
+  'operations.html cards must not render equipment chips per current operator policy'
+);
 
 [
   'function dashboardUrl(item, phase, fallbackDate)',
