@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BRIDGE_DIR="$ROOT_DIR/tools/kakao-dom-bridge"
+WORKER_CMD="$ROOT_DIR/tools/ai-browser-worker/run.sh"
+CHROME_SCRIPT="$BRIDGE_DIR/open-automation-chrome.sh"
+RUNTIME_DIR="${VILLAGE_KAKAO_RUNTIME_DIR:-$HOME/.village-kakao-automation}"
+PID_FILE="$RUNTIME_DIR/bridge.pid"
+LOG_FILE="$RUNTIME_DIR/bridge.log"
+ENV_FILE="${VILLAGE_KAKAO_ENV_FILE:-$BRIDGE_DIR/.env}"
+LEGACY_ENV_FILE="$HOME/my-gas-project2-followup-integration/tools/kakao-dom-bridge/.env"
+PORT="${PORT:-8787}"
+
+mkdir -p "$RUNTIME_DIR"
+
+load_env() {
+  local file="$ENV_FILE"
+  if [[ ! -f "$file" && -f "$LEGACY_ENV_FILE" ]]; then
+    file="$LEGACY_ENV_FILE"
+  fi
+  if [[ -f "$file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$file"
+    set +a
+  fi
+  export PORT="${PORT:-8787}"
+  export DEBOUNCE_MS="${DEBOUNCE_MS:-60000}"
+  export MAX_WAIT_MS="${MAX_WAIT_MS:-180000}"
+  export WORKER_TIMEOUT_MS="${WORKER_TIMEOUT_MS:-240000}"
+  export SUPABASE_TIMEOUT_MS="${SUPABASE_TIMEOUT_MS:-7000}"
+  export QUEUE_DIR="${QUEUE_DIR:-$BRIDGE_DIR/queue}"
+  export VILLAGE_AI_WORKER_CMD="${VILLAGE_AI_WORKER_CMD:-$WORKER_CMD}"
+}
+
+pid_alive() {
+  [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
+
+health() {
+  curl -sS --max-time 3 "http://127.0.0.1:${PORT}/health"
+}
+
+chrome_has_kakao_tab() {
+  osascript <<'APPLESCRIPT' 2>/dev/null | grep -q '^yes$'
+tell application "Google Chrome"
+  if it is not running then return "no"
+  repeat with w from 1 to count of windows
+    repeat with t from 1 to count of tabs of window w
+      set u to URL of tab t of window w
+      set ttl to title of tab t of window w
+      if u contains "center-pf.kakao.com" or ttl contains "카카오비즈니스" then return "yes"
+    end repeat
+  end repeat
+end tell
+return "no"
+APPLESCRIPT
+}
+
+cmd_start() {
+  load_env
+  mkdir -p "$QUEUE_DIR"
+  if pid_alive; then
+    echo "already running: bridge pid $(cat "$PID_FILE")"
+  else
+    (cd "$BRIDGE_DIR" && nohup npm start >"$LOG_FILE" 2>&1 & echo $! >"$PID_FILE")
+    echo "started bridge pid $(cat "$PID_FILE")"
+    echo "log: $LOG_FILE"
+  fi
+  if chrome_has_kakao_tab; then
+    echo "Kakao Channel Manager tab already open; not opening another tab"
+  else
+    "$CHROME_SCRIPT" "${KAKAO_MANAGER_URL:-https://center-pf.kakao.com/}" >/dev/null
+    echo "opened isolated Chrome profile for Kakao Channel Manager"
+  fi
+  sleep 1
+  cmd_status || true
+}
+
+cmd_stop() {
+  if pid_alive; then
+    local pid
+    pid="$(cat "$PID_FILE")"
+    kill "$pid" 2>/dev/null || true
+    for _ in {1..20}; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+    echo "stopped bridge pid $pid"
+  else
+    rm -f "$PID_FILE"
+    echo "bridge not running"
+  fi
+}
+
+cmd_status() {
+  load_env
+  if pid_alive; then
+    echo "bridge process: running pid $(cat "$PID_FILE")"
+  else
+    echo "bridge process: not running"
+  fi
+  echo "health:"
+  health || echo "  bridge health unavailable"
+  echo
+  echo "Kakao Chrome tabs:"
+  osascript <<'APPLESCRIPT' 2>/dev/null || true
+tell application "Google Chrome"
+  if it is not running then return "Chrome not running"
+  set rows to {}
+  repeat with w from 1 to count of windows
+    repeat with t from 1 to count of tabs of window w
+      set u to URL of tab t of window w
+      set ttl to title of tab t of window w
+      if u contains "kakao" or ttl contains "카카오" or ttl contains "빌리지" then set end of rows to ((w as text) & ":" & (t as text) & " " & ttl)
+    end repeat
+  end repeat
+  if (count of rows) is 0 then return "No Kakao tabs"
+  return rows as text
+end tell
+APPLESCRIPT
+}
+
+cmd_restart() {
+  cmd_stop
+  cmd_start
+}
+
+cmd_logs() {
+  touch "$LOG_FILE"
+  tail -n "${1:-120}" "$LOG_FILE"
+}
+
+cmd_check() {
+  (cd "$ROOT_DIR/tools/ai-browser-worker" && npm test && node --check worker.mjs)
+  (cd "$ROOT_DIR/tools/kakao-dom-bridge" && npm run check)
+  (cd "$ROOT_DIR/apps/follow-up-dashboard" && npm run check)
+  (cd "$ROOT_DIR" && node --test test/*.js)
+}
+
+usage() {
+  cat <<EOF
+Kakao automation product launcher
+
+Usage:
+  scripts/kakao-automation start     Start bridge and open isolated Kakao Chrome
+  scripts/kakao-automation stop      Stop bridge
+  scripts/kakao-automation restart   Restart bridge
+  scripts/kakao-automation status    Show bridge health and Kakao tabs
+  scripts/kakao-automation logs [N]  Show bridge log tail
+  scripts/kakao-automation check     Run regression checks
+
+Env:
+  VILLAGE_KAKAO_ENV_FILE=/path/to/.env  Optional secret env file
+  PORT=8787
+EOF
+}
+
+case "${1:-status}" in
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_restart ;;
+  status) cmd_status ;;
+  logs) cmd_logs "${2:-120}" ;;
+  check) cmd_check ;;
+  *) usage; exit 2 ;;
+esac

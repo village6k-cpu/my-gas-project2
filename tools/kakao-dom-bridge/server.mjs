@@ -15,7 +15,9 @@ const CONFIG = {
   supabaseTable: process.env.SUPABASE_TABLE || '',
   processInitialScan: process.env.PROCESS_INITIAL_SCAN !== 'false',
   ignoreShiftedRows: process.env.IGNORE_SHIFTED_ROWS === 'true',
-  workerCommand: process.env.VILLAGE_AI_WORKER_CMD || ''
+  workerCommand: process.env.VILLAGE_AI_WORKER_CMD || '',
+  workerTimeoutMs: Number(process.env.WORKER_TIMEOUT_MS || process.env.HERMES_WORKER_TIMEOUT_MS || 240_000),
+  supabaseTimeoutMs: Number(process.env.SUPABASE_TIMEOUT_MS || 7000)
 };
 
 const state = {
@@ -26,6 +28,9 @@ const state = {
   failedWorkerRuns: 0,
   workerRunning: false,
   workerQueueLength: 0,
+  currentJobId: null,
+  workerStartedAt: null,
+  lastWorkerError: null,
   rooms: new Map(),
   seenGroupingTexts: new Set(),
   lastContentScriptStartedAtMs: 0
@@ -174,6 +179,8 @@ async function writeSupabaseEvent(eventOrJob, kind) {
     payload: eventOrJob
   };
 
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CONFIG.supabaseTimeoutMs);
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -182,8 +189,9 @@ async function writeSupabaseEvent(eventOrJob, kind) {
       'content-type': 'application/json',
       prefer: 'return=minimal'
     },
-    body: JSON.stringify(payload)
-  });
+    body: JSON.stringify(payload),
+    signal: controller.signal
+  }).finally(() => clearTimeout(timer));
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
@@ -219,6 +227,20 @@ function buildAiFirstJob(roomKey, roomState) {
   };
 }
 
+function killProcessTree(child, signal = 'SIGTERM') {
+  if (!child?.pid) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    try { child.kill(signal); } catch {}
+  }
+}
+
+function appendLimited(current, chunk, limit = 20_000) {
+  const next = current + chunk.toString();
+  return next.length > limit ? next.slice(-limit) : next;
+}
+
 function runWorker(job) {
   if (!CONFIG.workerCommand) return Promise.resolve({ skipped: true });
 
@@ -226,19 +248,37 @@ function runWorker(job) {
     const child = spawn(CONFIG.workerCommand, {
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env
+      env: process.env,
+      detached: true
     });
 
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      const result = { code, stdout: stdout.slice(-20_000), stderr: stderr.slice(-20_000) };
+    let settled = false;
+    let timedOut = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      const error = new Error(`worker timed out after ${CONFIG.workerTimeoutMs}ms`);
+      appendNdjson('errors.ndjson', { at: nowIso(), type: 'worker_timeout', message: error.message, jobId: job.jobId, job });
+      killProcessTree(child, 'SIGTERM');
+      setTimeout(() => killProcessTree(child, 'SIGKILL'), 3000).unref?.();
+      finish(reject, error);
+    }, CONFIG.workerTimeoutMs);
+
+    child.stdout.on('data', (chunk) => { stdout = appendLimited(stdout, chunk); });
+    child.stderr.on('data', (chunk) => { stderr = appendLimited(stderr, chunk); });
+    child.on('error', (error) => finish(reject, error));
+    child.on('close', (code, signal) => {
+      const result = { code, signal, timedOut, stdout, stderr };
       appendNdjson('worker-results.ndjson', { at: nowIso(), jobId: job.jobId, result });
-      if (code === 0) resolve(result);
-      else reject(new Error(`worker exited ${code}: ${stderr || stdout}`));
+      if (code === 0) finish(resolve, result);
+      else if (!settled) finish(reject, new Error(`worker exited ${code ?? signal}: ${stderr || stdout}`));
     });
 
     child.stdin.end(JSON.stringify(job));
@@ -253,11 +293,20 @@ function enqueueWorker(job) {
   const run = async () => {
     state.workerQueueLength = Math.max(0, state.workerQueueLength - 1);
     state.workerRunning = true;
+    state.currentJobId = job.jobId;
+    state.workerStartedAt = nowIso();
     console.info('[dom-bridge] worker start', job.jobId, 'queued:', state.workerQueueLength);
     try {
-      return await runWorker(job);
+      const result = await runWorker(job);
+      state.lastWorkerError = null;
+      return result;
+    } catch (error) {
+      state.lastWorkerError = { at: nowIso(), jobId: job.jobId, message: error.message.slice(0, 1000) };
+      throw error;
     } finally {
       state.workerRunning = false;
+      state.currentJobId = null;
+      state.workerStartedAt = null;
       console.info('[dom-bridge] worker done', job.jobId, 'queued:', state.workerQueueLength);
     }
   };
@@ -270,6 +319,8 @@ async function flushRoom(roomKey) {
   const roomState = state.rooms.get(roomKey);
   if (!roomState) return;
   state.rooms.delete(roomKey);
+  if (roomState.timer) clearTimeout(roomState.timer);
+  if (roomState.maxTimer) clearTimeout(roomState.maxTimer);
 
   const job = buildAiFirstJob(roomKey, roomState);
   state.debouncedJobs += 1;
@@ -410,6 +461,8 @@ const server = http.createServer(async (req, res) => {
           queueDir: CONFIG.queueDir,
           supabaseEnabled: Boolean(CONFIG.supabaseUrl && CONFIG.supabaseServiceRoleKey && CONFIG.supabaseTable),
           workerEnabled: Boolean(CONFIG.workerCommand),
+          workerTimeoutMs: CONFIG.workerTimeoutMs,
+          supabaseTimeoutMs: CONFIG.supabaseTimeoutMs,
           processInitialScan: CONFIG.processInitialScan,
           ignoreShiftedRows: CONFIG.ignoreShiftedRows
         },
@@ -421,6 +474,10 @@ const server = http.createServer(async (req, res) => {
           failedWorkerRuns: state.failedWorkerRuns,
           workerRunning: state.workerRunning,
           workerQueueLength: state.workerQueueLength,
+          currentJobId: state.currentJobId,
+          workerStartedAt: state.workerStartedAt,
+          workerRunMs: state.workerStartedAt ? Date.now() - Date.parse(state.workerStartedAt) : 0,
+          lastWorkerError: state.lastWorkerError,
           openRooms: state.rooms.size
         }
       });

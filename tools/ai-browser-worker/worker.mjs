@@ -789,10 +789,14 @@ export function buildCloseKakaoConversationWindowAppleScript() {
   return `
 on run argv
   set targetTitle to item 1 of argv
+  set customerHint to item 2 of argv
   tell application "Google Chrome"
     repeat with w from 1 to count of windows
       set windowTitle to title of window w
-      if (windowTitle is targetTitle) and (windowTitle contains " - 빌리지 - 카카오비즈니스") then
+      set isKakaoCustomerPopup to (windowTitle contains " - 빌리지 - 카카오비즈니스")
+      set exactMatch to (windowTitle is targetTitle)
+      set relaxedMatch to ((customerHint is not "") and (windowTitle contains customerHint))
+      if isKakaoCustomerPopup and (exactMatch or relaxedMatch) then
         close window w
         return "closed_conversation_window"
       end if
@@ -807,7 +811,8 @@ export async function closeKakaoConversationWindow(windowInfo = {}, { timeoutMs 
   if (process.platform !== 'darwin') return { status: 'skipped_non_macos' };
   const title = text(windowInfo.title).trim();
   if (!title || !title.includes(' - 빌리지 - 카카오비즈니스')) return { status: 'skipped_not_kakao_conversation_window' };
-  const child = spawnImpl('osascript', ['-e', buildCloseKakaoConversationWindowAppleScript(), title], {
+  const customerHint = title.split(' - 빌리지 - 카카오비즈니스')[0].replace(/^\(\d+\)\s*/, '').trim();
+  const child = spawnImpl('osascript', ['-e', buildCloseKakaoConversationWindowAppleScript(), title, customerHint], {
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let stdout = '';
@@ -972,7 +977,11 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   if (decision?.safety_checks?.kakao_conversation_opened !== true) return { allowed: false, reason: 'conversation_not_opened' };
   if (decision?.safety_checks?.did_not_classify_from_preview_only !== true) return { allowed: false, reason: 'preview_only' };
   if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) return { allowed: false, reason: 'latest_turn_not_customer' };
-  const blocked = ['refund', '환불', '분실', '파손', '손상', '결제 취소', '예약 확정', '재고 가능', '가능 확정'];
+  const classification = String(decision.classification || '').trim();
+  const blockedClassifications = new Set(['price', 'reservation', 'reservation_request', 'reservation_review', 'payment', 'payment_check', 'schedule_check', 'damage_repair']);
+  if (blockedClassifications.has(classification)) return { allowed: false, reason: `classification_${classification}_requires_review` };
+  if (decision.owner_review_required === true || decision.ownerReviewRequired === true) return { allowed: false, reason: 'owner_review_required' };
+  const blocked = ['refund', '환불', '분실', '파손', '손상', '결제 취소', '예약 확정', '재고 가능', '가능 확정', '가능합니다', '대여 가능', '예약 가능', '확정', '만원', ' 원', '입금', '계좌', '금액'];
   if (blocked.some((word) => textValue.includes(word))) return { allowed: false, reason: 'sensitive_commitment_text' };
   return { allowed: true, reason: 'allowed', text: textValue, replyMode: mode, confidence };
 }
@@ -1011,7 +1020,7 @@ function logAutoReply(config, entry) {
 
 export function isAutoSendEligibleLiveJob(job = {}) {
   const preview = text(job.preview_text || job.previewText || job.payload?.previewText || '');
-  const events = Array.isArray(job.events) ? job.events : [];
+  const events = Array.isArray(job.events) ? job.events : (Array.isArray(job.payload?.events) ? job.payload.events : []);
   const reasons = events.map((event) => String(event?.reason || '')).filter(Boolean);
   if (!reasons.includes('top_row_changed')) return { eligible: false, reason: 'not_top_row_changed_live_event' };
   if (/\d{1,2}월\s*\d{1,2}일/.test(preview)) return { eligible: false, reason: 'preview_has_old_date' };
@@ -1066,7 +1075,23 @@ export async function openKakaoTargetChatFromList(job, { timeoutMs = 20000, spaw
   try {
     const windowsAfterClickText = await spawnText('cua-driver', ['call', 'list_windows', '--compact'], { timeoutMs, spawnImpl });
     const windowsAfterClick = JSON.parse(windowsAfterClickText).windows || [];
-    conversationWindow = pickKakaoConversationWindow(windowsAfterClick, hints) || win;
+    conversationWindow = pickKakaoConversationWindow(windowsAfterClick, hints);
+    if (!conversationWindow) {
+      return {
+        status: 'conversation_window_not_found_after_click',
+        hints,
+        pid: win.pid,
+        window_id: win.window_id,
+        conversation_window: null,
+        element_index: elementIndex,
+        conversation_evidence: {
+          source: 'live_kakao_ax_after_navigation',
+          hint_matched: false,
+          evidence_status: 'insufficient',
+          note: 'Clicked the matching chat row, but no individual Kakao customer conversation popup was found. AI must not classify this job as verified from the conversation screen.'
+        }
+      };
+    }
     const openedStateText = await spawnText('cua-driver', [
       'call', 'get_window_state', JSON.stringify({ pid: conversationWindow.pid, window_id: conversationWindow.window_id, max_elements: 520 }), '--compact'
     ], { timeoutMs, spawnImpl, maxBuffer: 3_000_000 });
@@ -1133,7 +1158,7 @@ export function runHermes(prompt, config, options = {}) {
 
 async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
   let navigationContext = null;
-  let closeResult = null;
+  const result = {};
   try {
     if (!dryRun && config.ensureKakaoTab) {
       await ensureKakaoChannelManagerTab({ url: config.kakaoChannelManagerUrl });
@@ -1148,7 +1173,8 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     const ragContext = buildReadOnlyRagContext(config);
     const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext });
     if (dryRun) {
-      return { status: 'dry_run', job: summarizeJob(job), lookupContext, ragContext, prompt };
+      Object.assign(result, { status: 'dry_run', job: summarizeJob(job), lookupContext, ragContext, prompt });
+      return result;
     }
 
     let decision;
@@ -1170,15 +1196,17 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
       followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
     }
     const autoReplyResult = await maybeAutoSendReply({ config, decision, job, navigationContext });
-    return { status: 'ai_completed', decision, sheetResult, followUpResult, autoReplyResult, closeResult, hermesOutputTail: hermesOutput.slice(-4000) };
+    Object.assign(result, { status: 'ai_completed', decision, sheetResult, followUpResult, autoReplyResult, hermesOutputTail: hermesOutput.slice(-4000) });
+    return result;
   } finally {
     if (!dryRun && navigationContext?.conversation_window) {
       try {
-        closeResult = await closeKakaoConversationWindow(navigationContext.conversation_window);
-        if (closeResult?.status && closeResult.status !== 'closed_conversation_window') {
-          console.warn(`[ai-worker] Kakao conversation cleanup: ${closeResult.status}`);
+        result.closeResult = await closeKakaoConversationWindow(navigationContext.conversation_window);
+        if (result.closeResult?.status && result.closeResult.status !== 'closed_conversation_window') {
+          console.warn(`[ai-worker] Kakao conversation cleanup: ${result.closeResult.status}`);
         }
       } catch (error) {
+        result.closeResult = { status: 'cleanup_failed', error: error.message.slice(0, 500) };
         console.warn(`[ai-worker] Kakao conversation cleanup failed: ${error.message}`);
       }
     }

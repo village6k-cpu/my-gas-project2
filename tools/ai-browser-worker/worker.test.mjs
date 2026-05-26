@@ -361,8 +361,45 @@ test('extractKakaoConversationEvidence returns compact live AX text tail without
 
 test('openKakaoTargetChatFromList clicks matching AXLink row only for navigation', async () => {
   const calls = [];
+  let listCalls = 0;
   const spawnImpl = (cmd, args) => {
     calls.push({ cmd, args });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (args.includes('list_windows')) {
+        listCalls += 1;
+        const windows = listCalls === 1
+          ? [{ app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터', is_on_screen: true, bounds: { width: 1280, height: 1050 }, pid: 7, window_id: 70 }]
+          : [
+              { app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터', is_on_screen: true, bounds: { width: 1280, height: 1050 }, pid: 7, window_id: 70 },
+              { app_name: 'Google Chrome', title: '정진우 - 빌리지 - 카카오비즈니스 파트너센터', is_on_screen: true, pid: 8, window_id: 80 }
+            ];
+        child.stdout.write(JSON.stringify({ windows }));
+        child.emit('close', 0);
+      } else if (args.includes('get_window_state')) {
+        child.stdout.write(JSON.stringify({ tree_markdown: '- [171] AXLink (정진우 네, 장비 준비돼 있는 거 반출 하시면 됩니다 오후 8:20)\n- [22] AXStaticText = "정진우"' }));
+        child.emit('close', 0);
+      } else if (args.includes('click')) {
+        child.stdout.write(JSON.stringify({ ok: true }));
+        child.emit('close', 0);
+      } else {
+        child.stderr.write('unexpected');
+        child.emit('close', 1);
+      }
+    });
+    return child;
+  };
+  const result = await openKakaoTargetChatFromList({ preview_text: '중요 정진우 네, 장비 준비돼 있는 거 반출 하시면 됩니다 오후 8:20' }, { spawnImpl });
+  assert.equal(result.status, 'opened_target_chat');
+  assert.equal(result.element_index, 171);
+  assert.equal(result.conversation_window.window_id, 80);
+  assert.ok(calls.some((c) => c.args.includes('click')));
+});
+
+test('openKakaoTargetChatFromList does not claim verified chat when popup is missing', async () => {
+  const spawnImpl = (cmd, args) => {
     const child = new EventEmitter();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
@@ -383,10 +420,11 @@ test('openKakaoTargetChatFromList clicks matching AXLink row only for navigation
     });
     return child;
   };
+
   const result = await openKakaoTargetChatFromList({ preview_text: '중요 정진우 네, 장비 준비돼 있는 거 반출 하시면 됩니다 오후 8:20' }, { spawnImpl });
-  assert.equal(result.status, 'opened_target_chat');
-  assert.equal(result.element_index, 171);
-  assert.ok(calls.some((c) => c.args.includes('click')));
+  assert.equal(result.status, 'conversation_window_not_found_after_click');
+  assert.equal(result.conversation_window, null);
+  assert.equal(result.conversation_evidence.hint_matched, false);
 });
 
 test('runHermes rejects quickly and terminates child process tree on timeout', async () => {
@@ -654,6 +692,7 @@ test('closeKakaoConversationWindow targets only the opened Kakao customer popup'
   assert.equal(command, 'osascript');
   assert.equal(args[0], '-e');
   assert.equal(args[2], '정시온 - 빌리지 - 카카오비즈니스 파트너센터');
+  assert.equal(args[3], '정시온');
 });
 
 test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe replies', () => {
@@ -684,6 +723,10 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, reply_decision: { ...baseDecision.reply_decision, replyMode: 'draft_only' } }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, confidence: 'medium', reply_decision: { ...baseDecision.reply_decision, confidence: 'medium' } }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, suggested_reply_draft: '예약 확정됐습니다', reply_decision: { ...baseDecision.reply_decision, text: '예약 확정됐습니다' } }, { autoSendEnabled: true }).allowed, false);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price' }, { autoSendEnabled: true }).allowed, false);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'reservation_review' }, { autoSendEnabled: true }).allowed, false);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, owner_review_required: true }, { autoSendEnabled: true }).allowed, false);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, reply_decision: { ...baseDecision.reply_decision, text: '네 대여 가능합니다.' } }, { autoSendEnabled: true }).allowed, false);
 });
 
 test('isAutoSendEligibleLiveJob blocks dated/backfill rows from auto-send', () => {
@@ -695,6 +738,7 @@ test('isAutoSendEligibleLiveJob blocks dated/backfill rows from auto-send', () =
     reason: 'top_row_changed_live_time_format'
   });
   assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'mutation' }] }).eligible, false);
+  assert.equal(isAutoSendEligibleLiveJob({ payload: { previewText: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'top_row_changed' }] } }).eligible, true);
   assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 한시우/60x 파손 video 5월 25일', events: [{ reason: 'top_row_changed' }] }).eligible, false);
   assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 배성문 1월 15일 건은 4만원입니다. 오후 3:45', events: [{ reason: 'top_row_changed' }] }).eligible, false);
 });

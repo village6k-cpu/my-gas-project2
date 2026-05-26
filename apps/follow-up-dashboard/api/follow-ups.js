@@ -144,8 +144,14 @@ export default async function handler(req, res) {
     if (req.method === 'PATCH') {
       const body = await new Promise((resolve, reject) => {
         let text = '';
-        req.on('data', (chunk) => { text += chunk; });
-        req.on('end', () => resolve(text ? JSON.parse(text) : {}));
+        req.on('data', (chunk) => {
+          text += chunk;
+          if (text.length > 20_000) reject(new Error('request body too large'));
+        });
+        req.on('end', () => {
+          try { resolve(text ? JSON.parse(text) : {}); }
+          catch { reject(new Error('invalid json')); }
+        });
         req.on('error', reject);
       });
       const id = String(body.id || '');
@@ -153,12 +159,26 @@ export default async function handler(req, res) {
       if (!id || !['open', 'in_progress', 'waiting_customer', 'waiting_internal', 'done', 'dismissed'].includes(status)) {
         return json(res, 400, { error: 'invalid id/status' });
       }
-      const row = await supabaseFetch(`${table}?id=eq.${encodeURIComponent(id)}`, {
+      const selectFields = 'id,follow_up_key,job_id,room_key,customer_name,type,priority,status,title,summary,recommended_action,suggested_reply_draft,evidence,blocking_reason,due_hint,decision_classification,decision_confidence,created_at,updated_at,completed_at';
+      const currentRows = await supabaseFetch(`${table}?select=${selectFields}&id=eq.${encodeURIComponent(id)}`);
+      const current = Array.isArray(currentRows) ? currentRows[0] : null;
+      if (!current) return json(res, 404, { error: 'not found' });
+      const targetSemanticKey = buildDashboardSemanticKey(current);
+      const candidateRows = await supabaseFetch(`${table}?select=${selectFields}&status=not.in.(done,dismissed)&limit=500&order=created_at.desc`);
+      const duplicateIds = Array.from(new Set(
+        (Array.isArray(candidateRows) ? candidateRows : [])
+          .filter((item) => buildDashboardSemanticKey(item || {}) === targetSemanticKey)
+          .map((item) => item.id)
+          .filter(Boolean)
+      ));
+      if (!duplicateIds.includes(id)) duplicateIds.push(id);
+      const patchBody = status === 'open' ? { status, completed_at: null } : { status };
+      const row = await supabaseFetch(`${table}?id=in.(${duplicateIds.map(encodeURIComponent).join(',')})`, {
         method: 'PATCH',
         headers: { prefer: 'return=representation' },
-        body: JSON.stringify({ status })
+        body: JSON.stringify(patchBody)
       });
-      return json(res, 200, { ok: true, item: Array.isArray(row) ? row[0] : row });
+      return json(res, 200, { ok: true, item: Array.isArray(row) ? row[0] : row, updatedIds: duplicateIds, updatedCount: duplicateIds.length });
     }
 
     return json(res, 405, { error: 'method not allowed' });

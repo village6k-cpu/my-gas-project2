@@ -1,6 +1,9 @@
 (() => {
   'use strict';
 
+  const GLOBAL_KEY = '__villageKakaoWatcherInstance';
+  if (window[GLOBAL_KEY]?.cleanup) window[GLOBAL_KEY].cleanup('replaced_by_new_content_script');
+
   const DEFAULT_CONFIG = {
     enabled: true,
     bridgeUrl: 'http://127.0.0.1:8787/events',
@@ -15,6 +18,9 @@
     observer: null,
     heartbeatTimer: null,
     topRowPollTimer: null,
+    snapshotTimer: null,
+    initialScanTimer: null,
+    started: false,
     lastTopRowsSignature: null
   };
 
@@ -376,16 +382,30 @@
     }, 60000);
   }
 
-  async function init() {
-    STATE.config = { ...DEFAULT_CONFIG, ...(await loadConfig()) };
-    if (!STATE.config.enabled) {
-      log('disabled');
-      return;
+  function stopWatcher(reason = 'stopped') {
+    if (STATE.observer) {
+      STATE.observer.disconnect();
+      STATE.observer = null;
     }
+    if (STATE.heartbeatTimer) window.clearInterval(STATE.heartbeatTimer);
+    if (STATE.topRowPollTimer) window.clearInterval(STATE.topRowPollTimer);
+    if (STATE.snapshotTimer) window.clearTimeout(STATE.snapshotTimer);
+    if (STATE.initialScanTimer) window.clearTimeout(STATE.initialScanTimer);
+    STATE.heartbeatTimer = null;
+    STATE.topRowPollTimer = null;
+    STATE.snapshotTimer = null;
+    STATE.initialScanTimer = null;
+    STATE.started = false;
+    log('watcher stopped', reason);
+  }
+
+  function startWatcher() {
+    if (STATE.started || !STATE.config.enabled) return;
+    STATE.started = true;
     startObserver();
     startTopRowPolling();
     startHeartbeat();
-    window.setTimeout(() => postTopRowsSnapshot('top_rows_snapshot'), 1500);
+    STATE.snapshotTimer = window.setTimeout(() => postTopRowsSnapshot('top_rows_snapshot'), 1500);
     postEvent({
       source: 'kakao_channel_manager_dom',
       status: 'watcher_heartbeat',
@@ -399,14 +419,31 @@
       unreadCount: null,
       pageVisibility: document.visibilityState
     });
-    window.setTimeout(scanInitialUnread, 3000);
+    STATE.initialScanTimer = window.setTimeout(scanInitialUnread, 3000);
   }
 
+  async function init() {
+    STATE.config = { ...DEFAULT_CONFIG, ...(await loadConfig()) };
+    if (!STATE.config.enabled) {
+      log('disabled');
+      stopWatcher('disabled_on_init');
+      return;
+    }
+    startWatcher();
+  }
+
+  window[GLOBAL_KEY] = { cleanup: stopWatcher, state: STATE };
+  window.addEventListener('pagehide', () => stopWatcher('pagehide'));
+  window.addEventListener('beforeunload', () => stopWatcher('beforeunload'));
+
   chrome?.storage?.onChanged?.addListener((changes) => {
+    const wasEnabled = STATE.config.enabled;
     for (const [key, change] of Object.entries(changes)) {
       STATE.config[key] = change.newValue;
     }
     log('config changed', STATE.config);
+    if (wasEnabled && !STATE.config.enabled) stopWatcher('disabled_by_config');
+    if (!wasEnabled && STATE.config.enabled) startWatcher();
   });
 
   init();
