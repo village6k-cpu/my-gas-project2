@@ -1003,21 +1003,16 @@
 
   function renderInventoryAlerts(alerts, horizonDays) {
     const el = document.getElementById('alert-strip');
-    const list = Array.isArray(alerts) ? alerts : [];
+    const all = Array.isArray(alerts) ? alerts : [];
+    // 부족 우려(tight)는 노이즈가 많아 표시하지 않음 — 진짜 충돌만
+    const list = all.filter((a) => a.severity === 'conflict');
 
     if (!list.length) {
       el.innerHTML = `<div class="alert-ok">✅ 향후 ${horizonDays || 90}일 재고 충돌 없음</div>`;
       return;
     }
 
-    const conflictCount = list.filter((a) => a.severity === 'conflict').length;
-    const tightCount = list.filter((a) => a.severity === 'tight').length;
-    const onlyTight = conflictCount === 0;
-
-    const summaryParts = [];
-    if (conflictCount > 0) summaryParts.push(`🔴 재고 충돌 <b>${conflictCount}건</b>`);
-    if (tightCount > 0) summaryParts.push(`🟠 부족 우려 <b>${tightCount}건</b>`);
-    const summaryText = summaryParts.join(' · ') + ' — 펼쳐서 확인';
+    const summaryText = `🔴 재고 충돌 <b>${list.length}건</b> — 펼쳐서 확인`;
 
     const MAX_SHOW = 30;
     const shown = list.slice(0, MAX_SHOW);
@@ -1030,9 +1025,7 @@
           wd = ['일','월','화','수','목','금','토'][d.getDay()];
         }
       } catch (e) {}
-      const sevText = a.severity === 'conflict'
-        ? `🔴 ${a.overBy}개 부족`
-        : `🟠 빠듯 (여유 0)`;
+      const sevText = `🔴 ${a.overBy}개 부족`;
       const bookings = (a.bookings || []).map((b) => {
         const fromMD = b.from ? b.from.slice(5).replace('-', '/') : '';
         const toMD = b.to ? b.to.slice(5).replace('-', '/') : '';
@@ -1060,7 +1053,7 @@
     }).join('');
     const tail = list.length > MAX_SHOW ? `<div class="conflict-more">… 외 ${list.length - MAX_SHOW}건</div>` : '';
 
-    el.innerHTML = `<details class="alert-box ${onlyTight ? 'tight-only' : ''}">
+    el.innerHTML = `<details class="alert-box">
       <summary>
         <span>${summaryText}</span>
         <span class="alert-caret">▾</span>
