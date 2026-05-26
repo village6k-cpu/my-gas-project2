@@ -213,6 +213,127 @@
     .tab.active .badge { background: rgba(255,255,255,0.22); }
     .tab .badge:empty { display: none; }
 
+    /* Health (가동률 영웅 + 페이스 보조) */
+    .health {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    @media (min-width: 720px) {
+      .health { grid-template-columns: 1.7fr 1fr; gap: 12px; }
+    }
+    .hero-gauge, .pace-card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 16px 18px 14px;
+      box-shadow: var(--shadow-card);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .pace-card { padding-bottom: 22px; }
+    .hg-head, .pc-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .hg-label, .pc-label {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--ink-soft);
+      letter-spacing: -0.01em;
+    }
+    .hg-value {
+      font-size: 38px;
+      font-weight: 900;
+      letter-spacing: -0.03em;
+      color: var(--ink);
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .hg-value.good { color: var(--low-ink); }
+    .hg-value.mid { color: var(--high-ink); }
+    .hg-value.low { color: var(--urgent-ink); }
+    .hg-value .unit, .pc-value .unit {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--muted);
+      margin-left: 3px;
+    }
+    .hg-bar {
+      height: 14px;
+      border-radius: 999px;
+      background: var(--line-soft);
+      overflow: hidden;
+    }
+    .hg-fill {
+      height: 100%;
+      background: var(--normal);
+      border-radius: 999px;
+      transition: width 0.5s ease;
+    }
+    .hg-fill.good { background: var(--low); }
+    .hg-fill.mid { background: var(--high); }
+    .hg-fill.low { background: var(--urgent); }
+    .hg-foot, .pc-foot {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .hg-foot b, .pc-foot b { color: var(--ink-soft); font-weight: 700; }
+    .pc-value {
+      font-size: 28px;
+      font-weight: 900;
+      letter-spacing: -0.03em;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .pc-value.up { color: var(--low-ink); }
+    .pc-value.flat { color: var(--ink); }
+    .pc-value.down { color: var(--urgent-ink); }
+    .pc-value.na { color: var(--muted); font-size: 22px; font-weight: 700; }
+    .pc-bar {
+      position: relative;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--line-soft);
+      overflow: hidden;
+    }
+    .pc-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--normal);
+      transition: width 0.5s ease;
+    }
+    .pc-fill.up { background: var(--low); }
+    .pc-fill.flat { background: var(--normal); }
+    .pc-fill.down { background: var(--urgent); }
+    .pc-bar .baseline {
+      position: absolute;
+      left: 50%;
+      top: -3px; bottom: -3px;
+      width: 2px;
+      background: var(--muted);
+      opacity: 0.45;
+      border-radius: 1px;
+      pointer-events: none;
+    }
+    .pc-bar .baseline-label {
+      position: absolute;
+      left: 50%;
+      top: calc(100% + 4px);
+      transform: translateX(-50%);
+      font-size: 10px;
+      color: var(--muted);
+      font-weight: 700;
+      letter-spacing: 0.03em;
+    }
+
     /* KPI strip */
     .kpis {
       display: grid;
@@ -486,6 +607,35 @@
 
     <section class="kpis" id="kpis" aria-label="요약"></section>
 
+    <section class="health" id="health" aria-label="건강 지표">
+      <div class="hero-gauge">
+        <div class="hg-head">
+          <div class="hg-label">장비 가동률</div>
+          <div class="hg-value" id="hero-value">—<span class="unit">%</span></div>
+        </div>
+        <div class="hg-bar"><div class="hg-fill" id="hero-fill" style="width:0%"></div></div>
+        <div class="hg-foot">
+          <span id="hero-foot-left">대여 중 <b>—</b>개</span>
+          <span id="hero-foot-right">전체 보유 <b>—</b>개</span>
+        </div>
+      </div>
+      <div class="pace-card">
+        <div class="pc-head">
+          <div class="pc-label">이번주 출고 페이스</div>
+          <div class="pc-value" id="pace-value">—<span class="unit">%</span></div>
+        </div>
+        <div class="pc-bar">
+          <div class="pc-fill" id="pace-fill" style="width:0%"></div>
+          <div class="baseline" aria-hidden="true"></div>
+          <div class="baseline-label" aria-hidden="true">평균 100%</div>
+        </div>
+        <div class="pc-foot">
+          <span id="pace-foot-left">이번주 <b>—</b>건</span>
+          <span id="pace-foot-right">4주 평균 <b>—</b>건</span>
+        </div>
+      </div>
+    </section>
+
     <div class="columns">
       <section class="section">
         <div class="section-head">
@@ -710,6 +860,38 @@
     }
   }
 
+  function renderHealth(health) {
+    const u = health.utilization || {};
+    const upct = Number(u.percent) || 0;
+    const uCls = upct >= 50 ? 'good' : upct >= 30 ? 'mid' : 'low';
+    $('#hero-value').innerHTML = `${upct}<span class="unit">%</span>`;
+    $('#hero-value').className = 'hg-value ' + uCls;
+    $('#hero-fill').style.width = Math.min(100, upct) + '%';
+    $('#hero-fill').className = 'hg-fill ' + uCls;
+    $('#hero-foot-left').innerHTML = `대여 중 <b>${u.inUse ?? 0}</b>개`;
+    $('#hero-foot-right').innerHTML = `전체 보유 <b>${u.total ?? 0}</b>개`;
+
+    const p = health.checkoutPace || {};
+    const ppct = p.percent;
+    if (ppct == null) {
+      $('#pace-value').innerHTML = '데이터 부족';
+      $('#pace-value').className = 'pc-value na';
+      $('#pace-fill').style.width = '0%';
+      $('#pace-fill').className = 'pc-fill';
+      $('#pace-foot-left').innerHTML = `이번주 <b>${p.thisWeek ?? 0}</b>건`;
+      $('#pace-foot-right').innerHTML = `4주 평균 <b>—</b>`;
+    } else {
+      const dir = ppct >= 110 ? 'up' : ppct >= 80 ? 'flat' : 'down';
+      const arrow = dir === 'up' ? '▲ ' : dir === 'down' ? '▼ ' : '';
+      $('#pace-value').innerHTML = `${arrow}${ppct}<span class="unit">%</span>`;
+      $('#pace-value').className = 'pc-value ' + dir;
+      $('#pace-fill').style.width = (Math.min(200, Math.max(0, ppct)) / 2) + '%';
+      $('#pace-fill').className = 'pc-fill ' + dir;
+      $('#pace-foot-left').innerHTML = `이번주 <b>${p.thisWeek ?? 0}</b>건`;
+      $('#pace-foot-right').innerHTML = `4주 평균 <b>${p.avg4Week ?? 0}</b>건`;
+    }
+  }
+
   function render(data) {
     currentOperationsDate = data.date || currentOperationsDate || '';
     updateTodayDashboardLink(currentOperationsDate);
@@ -723,6 +905,8 @@
       kpi('계약서 미발송', s.missingContract ?? 0, (s.missingContract > 0 ? 'missing attention' : 'missing'), '건'),
       kpi('임박 반출', s.imminent ?? 0, 'imminent', '건')
     ].join('');
+
+    renderHealth(data.health || {});
 
     $('#checkout-count').textContent = `${(data.todayCheckout || []).length}건`;
     $('#checkout-panel').innerHTML = rowsCheckoutCheckin(data.todayCheckout || []);

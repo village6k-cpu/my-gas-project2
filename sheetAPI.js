@@ -1099,9 +1099,20 @@ function getOperationsData_(targetDate, skipCache) {
   var schedLast = schedSh ? schedSh.getLastRow() : 0;
   var sched = schedLast >= 2 ? schedSh.getRange(2, 1, schedLast - 1, 13).getValues() : [];
 
+  var weekRange = getWeekRange_(today, tz);
+
   var todayCheckoutMap = {};
   var todayCheckinMap = {};
   var imminentMap = {};
+  var paceThisWeekTids = {};
+  var pacePrev4WeeksTids = {};
+
+  // 출고 페이스 비교 구간: 이번주 시작 기준 직전 4주 (28일)
+  var weekStartDate = new Date(weekRange.start + "T00:00:00");
+  var pacePrevStart = new Date(weekStartDate.getFullYear(), weekStartDate.getMonth(), weekStartDate.getDate() - 28);
+  var pacePrevEnd = new Date(weekStartDate.getFullYear(), weekStartDate.getMonth(), weekStartDate.getDate() - 1);
+  var pacePrevStartStr = Utilities.formatDate(pacePrevStart, tz, "yyyy-MM-dd");
+  var pacePrevEndStr = Utilities.formatDate(pacePrevEnd, tz, "yyyy-MM-dd");
 
   for (var i = 0; i < sched.length; i++) {
     var row = sched[i];
@@ -1147,6 +1158,15 @@ function getOperationsData_(targetDate, skipCache) {
           };
         }
         if (opItem) imminentMap[tid].items.push(opItem);
+      }
+    }
+
+    // 출고 페이스 (반출일 기준): 이번주 / 이전 4주
+    if (coDate) {
+      if (coDate >= weekRange.start && coDate <= weekRange.end) {
+        paceThisWeekTids[tid] = true;
+      } else if (coDate >= pacePrevStartStr && coDate <= pacePrevEndStr) {
+        pacePrev4WeeksTids[tid] = true;
       }
     }
   }
@@ -1203,7 +1223,6 @@ function getOperationsData_(targetDate, skipCache) {
   var contractLast = contractSh ? contractSh.getLastRow() : 0;
   var contracts = contractLast >= 2 ? contractSh.getRange(2, 1, contractLast - 1, 12).getValues() : [];
 
-  var weekRange = getWeekRange_(today, tz);
   var allTids = [];
   var tidCustomerMap = {};
   var weeklyTids = {};
@@ -1246,6 +1265,9 @@ function getOperationsData_(targetDate, skipCache) {
   var equips = equipLast >= 2 ? equipSh.getRange(2, 1, equipLast - 1, 12).getValues() : [];
 
   var maintenance = [];
+  var totalStockSum = 0;
+  var totalInUseSum = 0;
+  var totalMaintQty = 0;
   for (var m = 0; m < equips.length; m++) {
     var st = String(equips[m][8] || "").trim();
     if (st === "정비중" || st === "수리중") {
@@ -1256,7 +1278,26 @@ function getOperationsData_(targetDate, skipCache) {
         note: String(equips[m][9] || "")
       });
     }
+    // 가동률 합산: E열 총보유, G열 대여중, H열 정비중수량
+    var stockNum = Number(equips[m][4]) || 0;
+    var inUseNum = Number(equips[m][6]) || 0;
+    var maintNum = Number(equips[m][7]) || 0;
+    totalStockSum += stockNum;
+    totalInUseSum += inUseNum;
+    totalMaintQty += maintNum;
   }
+
+  // ── 건강 지표: 장비 가동률 + 이번주 출고 페이스 ──
+  var utilizationPercent = totalStockSum > 0
+    ? Math.round((totalInUseSum / totalStockSum) * 1000) / 10
+    : 0;
+
+  var paceThisWeekCount = countKeys_(paceThisWeekTids);
+  var pacePrevCount = countKeys_(pacePrev4WeeksTids);
+  var paceAvg4Week = pacePrevCount / 4;
+  var pacePercent = paceAvg4Week > 0
+    ? Math.round((paceThisWeekCount / paceAvg4Week) * 100)
+    : null;
 
   var result = {
     success: true,
@@ -1271,6 +1312,21 @@ function getOperationsData_(targetDate, skipCache) {
       imminent: imminent.length,
       maintenance: maintenance.length,
       weeklyReservations: countKeys_(weeklyTids)
+    },
+    health: {
+      utilization: {
+        inUse: totalInUseSum,
+        total: totalStockSum,
+        maintenanceQty: totalMaintQty,
+        percent: utilizationPercent
+      },
+      checkoutPace: {
+        thisWeek: paceThisWeekCount,
+        avg4Week: Math.round(paceAvg4Week * 10) / 10,
+        prevTotal: pacePrevCount,
+        percent: pacePercent,
+        prevRange: { start: pacePrevStartStr, end: pacePrevEndStr }
+      }
     },
     todayCheckout: todayCheckout,
     todayCheckin: todayCheckin,
