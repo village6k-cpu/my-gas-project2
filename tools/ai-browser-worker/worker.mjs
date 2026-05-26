@@ -502,35 +502,72 @@ function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
 }
 
+function normalizeKeyPart(value, maxLength = 120) {
+  return text(value)
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[^0-9a-z가-힣_./:-]+/g, ' ')
+    .trim()
+    .slice(0, maxLength) || 'unknown';
+}
+
+function extractSemanticAnchors(value) {
+  const input = text(value).normalize('NFKC');
+  const anchors = [];
+  const amountMatches = input.match(/\d+(?:\.\d+)?\s*(?:만원|원)/g) || [];
+  anchors.push(...amountMatches.map((v) => v.replace(/\s+/g, '')));
+  const keywordGroups = [
+    ['payment_docs', /(결제|계약|견적|정산|서류|거래명세|세금계산|계산서)/],
+    ['reservation_review', /(예약|반출|반납|대여|촬영|일정)/],
+    ['damage_repair', /(분실|파손|손상|수리|고장)/],
+    ['payment_check', /(입금|결제|미수|환불)/]
+  ];
+  for (const [label, regex] of keywordGroups) {
+    if (regex.test(input)) anchors.push(label);
+  }
+  return [...new Set(anchors)].slice(0, 8);
+}
+
+function buildStableFollowUpKey({ roomKey, customerName, type, title, summary, recommendedAction, evidence }) {
+  const combined = [title, summary, recommendedAction, Array.isArray(evidence) ? evidence.join(' ') : ''].join(' ');
+  const anchors = extractSemanticAnchors(combined);
+  const base = [
+    normalizeKeyPart(roomKey, 120),
+    normalizeKeyPart(customerName, 80),
+    normalizeKeyPart(type, 60)
+  ];
+  if (anchors.length) {
+    base.push(normalizeKeyPart(anchors.join('-'), 120));
+  } else {
+    base.push(createHash('sha256').update(normalizeKeyPart(`${title} ${summary}`, 300)).digest('hex').slice(0, 16));
+  }
+  return base.join(':');
+}
+
 export function buildFollowUpRows(decision, job = {}) {
   const items = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
-  const rawJobId = job.id || job.jobId || null;
+  const rawJobId = text(job.id || job.jobId || '');
   const jobId = isUuid(rawJobId) ? rawJobId : null;
-  const jobKey = rawJobId || null;
-  const roomKey = job.room_key || job.roomKey || job.payload?.roomKey || '';
-  const fallbackCustomer = decision?.customer?.name || job.payload?.customerName || '';
-  const allowedTypes = new Set([
-    'reply_needed', 'quote_send', 'tax_invoice', 'schedule_check', 'reservation_review',
-    'price_review', 'payment_check', 'contract_document', 'return_extension', 'damage_repair',
-    'sheet_duplicate_check', 'completed_log'
-  ]);
+  const roomKey = text(job.room_key || job.roomKey || job.payload?.roomKey || '').slice(0, 240);
+  const fallbackCustomer = text(decision?.customer?.name || job.customer_name || '');
+  const allowedTypes = new Set(['reply_needed', 'quote_send', 'tax_invoice', 'schedule_check', 'reservation_review', 'price_review', 'payment_check', 'contract_document', 'return_extension', 'damage_repair', 'sheet_duplicate_check', 'completed_log']);
   const allowedPriorities = new Set(['urgent', 'high', 'normal', 'low']);
   const allowedStatuses = new Set(['open', 'done', 'dismissed']);
-
   return items
     .filter((item) => item && typeof item === 'object')
-    .map((item, index) => {
+    .map((item) => {
       const type = allowedTypes.has(String(item.type)) ? String(item.type) : 'reply_needed';
       const priority = allowedPriorities.has(String(item.priority)) ? String(item.priority) : 'normal';
       const status = allowedStatuses.has(String(item.status)) ? String(item.status) : 'open';
       const title = text(item.title).slice(0, 240) || `${type} follow-up`;
       const customerName = text(item.customer_name || item.customerName || fallbackCustomer).slice(0, 120);
-      const hash = createHash('sha256')
-        .update(JSON.stringify({ jobKey, jobId, roomKey, index, type, title, customerName }))
-        .digest('hex')
-        .slice(0, 24);
+      const summary = text(item.summary).slice(0, 3000);
+      const recommendedAction = text(item.recommended_action || item.recommendedAction).slice(0, 3000);
+      const suggestedReplyDraft = text(item.suggested_reply_draft || item.suggestedReplyDraft).slice(0, 3000);
+      const evidence = Array.isArray(item.evidence) ? item.evidence.map((v) => text(v)).filter(Boolean).slice(0, 12) : [];
       return {
-        follow_up_key: `${jobKey || roomKey || 'job'}:${index}:${hash}`,
+        follow_up_key: buildStableFollowUpKey({ roomKey, customerName, type, title, summary, recommendedAction, evidence }),
         source: 'kakao_ai_worker',
         job_id: jobId,
         room_key: roomKey,
@@ -539,10 +576,10 @@ export function buildFollowUpRows(decision, job = {}) {
         priority,
         status,
         title,
-        summary: text(item.summary).slice(0, 3000),
-        recommended_action: text(item.recommended_action || item.recommendedAction).slice(0, 3000),
-        suggested_reply_draft: text(item.suggested_reply_draft || item.suggestedReplyDraft).slice(0, 3000),
-        evidence: Array.isArray(item.evidence) ? item.evidence.map((v) => text(v)).filter(Boolean).slice(0, 12) : [],
+        summary,
+        recommended_action: recommendedAction,
+        suggested_reply_draft: suggestedReplyDraft,
+        evidence,
         blocking_reason: text(item.blocking_reason || item.blockingReason).slice(0, 1000) || null,
         due_hint: text(item.due_hint || item.dueHint).slice(0, 80) || null,
         decision_classification: text(decision?.classification).slice(0, 80),
@@ -744,6 +781,55 @@ export async function ensureKakaoChannelManagerTab({ url = DEFAULT_KAKAO_CHANNEL
     child.on('close', (code) => {
       if (code === 0) finish(resolve, { status: stdout.trim() || 'ok' });
       else finish(reject, new Error(`Kakao Channel Manager tab focus failed ${code}: ${stderr || stdout}`));
+    });
+  });
+}
+
+export function buildCloseKakaoConversationWindowAppleScript() {
+  return `
+on run argv
+  set targetTitle to item 1 of argv
+  tell application "Google Chrome"
+    repeat with w from 1 to count of windows
+      set windowTitle to title of window w
+      if (windowTitle is targetTitle) and (windowTitle contains " - 빌리지 - 카카오비즈니스") then
+        close window w
+        return "closed_conversation_window"
+      end if
+    end repeat
+  end tell
+  return "conversation_window_not_found"
+end run
+`.trim();
+}
+
+export async function closeKakaoConversationWindow(windowInfo = {}, { timeoutMs = 10000, spawnImpl = spawn } = {}) {
+  if (process.platform !== 'darwin') return { status: 'skipped_non_macos' };
+  const title = text(windowInfo.title).trim();
+  if (!title || !title.includes(' - 빌리지 - 카카오비즈니스')) return { status: 'skipped_not_kakao_conversation_window' };
+  const child = spawnImpl('osascript', ['-e', buildCloseKakaoConversationWindowAppleScript(), title], {
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let stdout = '';
+  let stderr = '';
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill?.('SIGTERM'); } catch {}
+      finish(reject, new Error(`Kakao conversation window close timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', (error) => finish(reject, error));
+    child.on('close', (code) => {
+      if (code === 0) finish(resolve, { status: stdout.trim() || 'ok' });
+      else finish(reject, new Error(`Kakao conversation window close failed ${code}: ${stderr || stdout}`));
     });
   });
 }
@@ -1047,42 +1133,56 @@ export function runHermes(prompt, config, options = {}) {
 
 async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
   let navigationContext = null;
-  if (!dryRun && config.ensureKakaoTab) {
-    await openKakaoChannelManagerUrl({ url: config.kakaoChannelManagerUrl });
-    if (config.openTargetChat) {
-      navigationContext = await openKakaoTargetChatFromList(job).catch((error) => ({
-        status: 'navigation_failed',
-        reason: error.message.slice(0, 500)
-      }));
+  let closeResult = null;
+  try {
+    if (!dryRun && config.ensureKakaoTab) {
+      await ensureKakaoChannelManagerTab({ url: config.kakaoChannelManagerUrl });
+      if (config.openTargetChat) {
+        navigationContext = await openKakaoTargetChatFromList(job).catch((error) => ({
+          status: 'navigation_failed',
+          reason: error.message.slice(0, 500)
+        }));
+      }
+    }
+    const lookupContext = await buildReadOnlyLookupContext(config, job);
+    const ragContext = buildReadOnlyRagContext(config);
+    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext });
+    if (dryRun) {
+      return { status: 'dry_run', job: summarizeJob(job), lookupContext, ragContext, prompt };
+    }
+
+    let decision;
+    let hermesOutput = '';
+    if (fakeDecisionPath) {
+      decision = JSON.parse(fs.readFileSync(fakeDecisionPath, 'utf8'));
+    } else {
+      hermesOutput = await runHermes(prompt, config);
+      decision = extractJsonObject(hermesOutput);
+    }
+
+    const sheetPayload = buildSheetAppendPayload(decision, { apiKey: config.sheetApiKey });
+    const sheetResult = await appendToSheet(config, sheetPayload);
+    const followUpRows = buildFollowUpRows(decision, job);
+    let followUpResult;
+    try {
+      followUpResult = await upsertFollowUpRows(config, followUpRows);
+    } catch (error) {
+      followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
+    }
+    const autoReplyResult = await maybeAutoSendReply({ config, decision, job, navigationContext });
+    return { status: 'ai_completed', decision, sheetResult, followUpResult, autoReplyResult, closeResult, hermesOutputTail: hermesOutput.slice(-4000) };
+  } finally {
+    if (!dryRun && navigationContext?.conversation_window) {
+      try {
+        closeResult = await closeKakaoConversationWindow(navigationContext.conversation_window);
+        if (closeResult?.status && closeResult.status !== 'closed_conversation_window') {
+          console.warn(`[ai-worker] Kakao conversation cleanup: ${closeResult.status}`);
+        }
+      } catch (error) {
+        console.warn(`[ai-worker] Kakao conversation cleanup failed: ${error.message}`);
+      }
     }
   }
-  const lookupContext = await buildReadOnlyLookupContext(config, job);
-  const ragContext = buildReadOnlyRagContext(config);
-  const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext });
-  if (dryRun) {
-    return { status: 'dry_run', job: summarizeJob(job), lookupContext, ragContext, prompt };
-  }
-
-  let decision;
-  let hermesOutput = '';
-  if (fakeDecisionPath) {
-    decision = JSON.parse(fs.readFileSync(fakeDecisionPath, 'utf8'));
-  } else {
-    hermesOutput = await runHermes(prompt, config);
-    decision = extractJsonObject(hermesOutput);
-  }
-
-  const sheetPayload = buildSheetAppendPayload(decision, { apiKey: config.sheetApiKey });
-  const sheetResult = await appendToSheet(config, sheetPayload);
-  const followUpRows = buildFollowUpRows(decision, job);
-  let followUpResult;
-  try {
-    followUpResult = await upsertFollowUpRows(config, followUpRows);
-  } catch (error) {
-    followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
-  }
-  const autoReplyResult = await maybeAutoSendReply({ config, decision, job, navigationContext });
-  return { status: 'ai_completed', decision, sheetResult, followUpResult, autoReplyResult, hermesOutputTail: hermesOutput.slice(-4000) };
 }
 
 function summarizeJob(job) {

@@ -28,7 +28,9 @@ import {
   isAutoSendEligibleLiveJob,
   findKakaoMessageInputElementIndex,
   sendKakaoMessageViaChrome,
-  runHermes
+  runHermes,
+  buildCloseKakaoConversationWindowAppleScript,
+  closeKakaoConversationWindow
 } from './worker.mjs';
 
 test('buildHermesPrompt keeps code as plumbing and requires AI-visible Kakao verification', () => {
@@ -576,7 +578,7 @@ test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', (
   assert.equal(rows[0].job_id, '11111111-1111-4111-8111-111111111111');
   assert.equal(rows[0].decision_classification, 'price');
   assert.deepEqual(rows[0].evidence, ['고객: 견적서 받을 수 있을까요?']);
-  assert.match(rows[0].follow_up_key, /^11111111-1111-4111-8111-111111111111:0:/);
+  assert.match(rows[0].follow_up_key, /^room-label:홍길동:홍길동:quote_send:/);
 });
 
 test('buildFollowUpRows keeps local DOM job ids out of UUID job_id column', () => {
@@ -593,7 +595,65 @@ test('buildFollowUpRows keeps local DOM job ids out of UUID job_id column', () =
 
   assert.equal(rows.length, 1);
   assert.equal(rows[0].job_id, null);
-  assert.match(rows[0].follow_up_key, /^dom-072d40c56a4cabdf:0:/);
+  assert.match(rows[0].follow_up_key, /^preview:21d6b164a492d90e:한이솔:contract_document:/);
+});
+
+test('buildFollowUpRows uses a stable semantic key for same customer task across repeated jobs', () => {
+  const first = buildFollowUpRows({
+    classification: 'faq',
+    confidence: 'high',
+    customer: { name: '정시온' },
+    follow_up_items: [{
+      type: 'contract_document',
+      priority: 'high',
+      title: '정시온 고객 37만원 결제 서류 준비',
+      summary: '고객이 오늘 37만원 결제 관련 서류 수령 가능 여부를 문의했습니다.',
+      recommended_action: '부가세 포함 37만원 기준으로 필요한 결제/계약/정산 서류를 준비해 전달하세요.',
+      evidence: ['37만원 결제 관련 서류 문의']
+    }]
+  }, { jobId: 'dom-first', roomKey: 'preview:jung-si-on' });
+  const second = buildFollowUpRows({
+    classification: 'faq',
+    confidence: 'high',
+    customer: { name: '정시온' },
+    follow_up_items: [{
+      type: 'contract_document',
+      priority: 'high',
+      title: '정시온 37만원 결제 서류 전달 요청',
+      summary: '고객이 전화로 안내받았던 37만원 결제 관련 서류를 요청했습니다. 이전 대화상 계약서 PDF 맥락이 있습니다.',
+      recommended_action: '기존 260502-004 정시온 계약/견적/결제 내역을 확인한 뒤 고객에게 필요한 결제 서류 또는 정산서를 전달하세요.',
+      evidence: ['37만원 결제 관련 서류 요청']
+    }]
+  }, { jobId: 'dom-second', roomKey: 'preview:jung-si-on' });
+
+  assert.equal(first[0].follow_up_key, second[0].follow_up_key);
+  assert.match(first[0].follow_up_key, /^preview:jung-si-on:정시온:contract_document:/);
+});
+
+test('closeKakaoConversationWindow targets only the opened Kakao customer popup', async () => {
+  const script = buildCloseKakaoConversationWindowAppleScript();
+  assert.match(script, /close window w/);
+  assert.match(script, / - 빌리지 - 카카오비즈니스/);
+
+  let command;
+  let args;
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  const spawnImpl = (cmd, nextArgs) => {
+    command = cmd;
+    args = nextArgs;
+    return child;
+  };
+
+  const resultPromise = closeKakaoConversationWindow({ title: '정시온 - 빌리지 - 카카오비즈니스 파트너센터' }, { spawnImpl, timeoutMs: 1000 });
+  child.stdout.write('closed_conversation_window\n');
+  child.emit('close', 0);
+
+  assert.deepEqual(await resultPromise, { status: 'closed_conversation_window' });
+  assert.equal(command, 'osascript');
+  assert.equal(args[0], '-e');
+  assert.equal(args[2], '정시온 - 빌리지 - 카카오비즈니스 파트너센터');
 });
 
 test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe replies', () => {

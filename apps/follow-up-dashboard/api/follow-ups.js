@@ -60,6 +60,54 @@ async function supabaseFetch(pathAndQuery, init = {}) {
   return data;
 }
 
+function normalizeKeyPart(value, maxLength = 120) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[^0-9a-z가-힣_./:-]+/g, ' ')
+    .trim()
+    .slice(0, maxLength) || 'unknown';
+}
+
+function text(value) {
+  return String(value ?? '').trim();
+}
+
+export function buildDashboardSemanticKey(item) {
+  const customer = normalizeKeyPart(item.customer_name, 80);
+  const type = normalizeKeyPart(item.type, 60);
+  const combined = [
+    item.title,
+    item.summary,
+    item.recommended_action,
+    Array.isArray(item.evidence) ? item.evidence.join(' ') : ''
+  ].map(text).join(' ').normalize('NFKC');
+  const specificAnchors = [
+    ...(combined.match(/\d+(?:\.\d+)?\s*(?:만원|원)/g) || []).map((v) => v.replace(/\s+/g, '')),
+    ...(combined.match(/\d{1,2}\s*월\s*\d{1,2}\s*일/g) || []).map((v) => v.replace(/\s+/g, '')),
+    ...(combined.match(/\d{4}[-./]\d{1,2}[-./]\d{1,2}/g) || []).map((v) => v.replace(/[./]/g, '-'))
+  ];
+  if (!specificAnchors.length) return `exact:${normalizeKeyPart(item.follow_up_key || item.id || item.title || '', 200)}`;
+  const buckets = [];
+  if (/(결제|계약|견적|정산|서류|거래명세|세금계산|계산서)/.test(combined)) buckets.push('payment_docs');
+  if (/(입금|결제|미수|환불)/.test(combined)) buckets.push('payment_check');
+  if (/(예약|반출|반납|대여|촬영|일정)/.test(combined)) buckets.push('reservation_review');
+  return ['semantic', customer, type, ...new Set(specificAnchors), ...new Set(buckets)].map((v) => normalizeKeyPart(v, 120)).join(':');
+}
+
+export function dedupeFollowUpItems(items) {
+  const seen = new Set();
+  const deduped = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    const key = buildDashboardSemanticKey(item || {});
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+  }
+  return deduped;
+}
+
 function summarize(items) {
   const openItems = items.filter((x) => !['done', 'dismissed'].includes(x.status));
   const byType = {};
@@ -88,7 +136,8 @@ export default async function handler(req, res) {
       ];
       if (status === 'active') filters.push('status=not.in.(done,dismissed)');
       else if (status && status !== 'all') filters.push(`status=eq.${encodeURIComponent(status)}`);
-      const items = await supabaseFetch(`${table}?${filters.join('&')}`);
+      const rawItems = await supabaseFetch(`${table}?${filters.join('&')}`);
+      const items = dedupeFollowUpItems(rawItems);
       return json(res, 200, { ok: true, updatedAt: new Date().toISOString(), summary: summarize(items), items });
     }
 
