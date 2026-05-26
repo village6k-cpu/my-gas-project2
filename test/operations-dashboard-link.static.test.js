@@ -10,13 +10,17 @@ const operations = read('apps/follow-up-dashboard/operations.html');
 [
   "const DASHBOARD_URL",
   'function dashboardUrl(item, phase, fallbackDate)',
+  'const EQUIPMENT_VISIBLE_LIMIT = 4',
   "params.set('date', date)",
   "params.set('search', item.tid)",
   "params.set('tab', phase)",
   'class="schedule-link"',
   'renderEquipmentList(it.items)',
   'class="equip-list"',
-  'class="equip-chip"'
+  'class="equip-chip"',
+  'normalized.slice(0, EQUIPMENT_VISIBLE_LIMIT)',
+  'class="equip-chip more"',
+  "'외 ' + hiddenCount + '개'"
 ].forEach((contract) => {
   assert(
     operations.includes(contract),

@@ -346,6 +346,11 @@
       font-weight: 800;
       white-space: nowrap;
     }
+    .equip-chip.more {
+      background: transparent;
+      color: var(--muted);
+      border-style: dashed;
+    }
     .row .right {
       font-size: 11px;
       color: var(--muted);
@@ -554,6 +559,7 @@
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[m]));
   let currentOperationsDate = '';
+  const EQUIPMENT_VISIBLE_LIMIT = 4;
 
   function fmtClock(iso) {
     if (!iso) return '';
@@ -582,10 +588,16 @@
   function renderEquipmentList(items) {
     const normalized = normalizeEquipmentItems(items);
     if (!normalized.length) return '';
-    return '<div class="equip-list">' + normalized.map((item) => {
+    const visible = normalized.slice(0, EQUIPMENT_VISIBLE_LIMIT);
+    const hiddenCount = normalized.length - visible.length;
+    const chips = visible.map((item) => {
       const qty = Number(item.qty) > 1 ? `<span class="equip-qty">×${esc(item.qty)}</span>` : '';
       return `<span class="equip-chip"><span class="equip-name">${esc(item.name)}</span>${qty}</span>`;
-    }).join('') + '</div>';
+    });
+    if (hiddenCount > 0) {
+      chips.push('<span class="equip-chip more">' + '외 ' + hiddenCount + '개' + '</span>');
+    }
+    return '<div class="equip-list">' + chips.join('') + '</div>';
   }
 
   function dashboardUrl(item, phase, fallbackDate) {
