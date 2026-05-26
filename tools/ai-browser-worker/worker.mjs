@@ -324,8 +324,8 @@ SENDER AND TURN-TAKING POLICY:
 - For Sheets append, safety_checks.latest_customer_message_after_last_staff_reply must be true. If sender order is unclear, set it false and should_write_to_sheet=false.
 
 EQUIPMENT AND SHEET SAFETY POLICY:
-- 장비명은 세트마스터 또는 목록 시트의 정확한 이름을 우선 사용한다. 다만 고객이 예약형식에 맞게 장비/일정/시간을 충분히 준 경우, exact name 검증이 완벽하지 않아도 확인요청 시트 입력을 막지 않는다. 이 경우 item에는 AI가 가장 그럴듯하게 정규화한 이름을 쓰고 memo에 원문/검증필요를 남긴다.
-- 약어/속어는 검색 키워드 힌트다. 예: FX3 -> 세트마스터 검색 후 소니 FX3 바디세트 같은 정확한 이름 사용, A7S3 -> 세트마스터 검색 후 정확한 이름 사용, FX6/FX9/A7M4/A7C2도 동일. 검색 실패 시에도 예약형식이 충분하면 best-effort normalized_guess로 확인요청에 넣고 memo에 원문을 남긴다.
+- 장비명은 세트마스터 또는 목록 시트의 정확한 이름을 우선 사용한다. 하지만 정확 매칭이 안 되면 절대 쫄지 말고 고객이 카카오에 써준 장비명을 그대로 확인요청 F열 item에 넣는다. 확인요청은 최종 등록이 아니라 사람이 보고 수정하는 대기열이다.
+- 약어/속어는 검색 키워드 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. 검색 성공 시 정확명을 쓰고, 검색 실패/불확실 시에는 고객 원문을 item에 그대로 쓴다. AI의 normalized_guess는 memo/extra_request 보조 메모에만 남긴다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
 - 할인유형은 학생 / 개인사업자/프리랜서 / 일반 중 하나만 쓴다. 단골 또는 제휴는 절대 쓰지 말고 일반으로 둔다. 단골/제휴 여부는 GAS/고객DB가 판단한다.

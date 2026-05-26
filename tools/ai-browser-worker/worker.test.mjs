@@ -187,7 +187,9 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   const prompt = buildHermesPrompt({ id: 'job-3', preview_text: 'a7s3 2대 견적' });
 
   assert.match(prompt, /장비명은 세트마스터.*우선/s);
-  assert.match(prompt, /FX3.*소니 FX3 바디세트/s);
+  assert.match(prompt, /정확 매칭이 안 되면.*고객.*써준 장비명.*그대로.*F열 item/s);
+  assert.match(prompt, /확인요청은 최종 등록이 아니라/s);
+  assert.match(prompt, /FX3.*A7S3.*FX6/s);
   assert.match(prompt, /할인유형.*학생.*개인사업자\/프리랜서.*일반/s);
   assert.match(prompt, /단골.*일반/s);
   assert.match(prompt, /계약마스터.*스케줄상세.*확인요청/s);
