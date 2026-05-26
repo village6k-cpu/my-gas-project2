@@ -264,13 +264,16 @@
     return rows.map((row) => `${row.top}:${row.left}:${row.signature}`).join('|');
   }
 
-  function firstChangedRow(previousRows, currentRows) {
+  function changedRows(previousRows, currentRows) {
     const previousBySlot = new Map(previousRows.map((row, index) => [`${index}:${row.top}:${row.left}`, row.signature]));
+    const previousSignatures = new Set(previousRows.map((row) => row.signature));
+    const changed = [];
     for (let index = 0; index < currentRows.length; index += 1) {
       const row = currentRows[index];
-      if (previousBySlot.get(`${index}:${row.top}:${row.left}`) !== row.signature) return row;
+      const sameSlotSignature = previousBySlot.get(`${index}:${row.top}:${row.left}`);
+      if (sameSlotSignature !== row.signature || !previousSignatures.has(row.signature)) changed.push(row);
     }
-    return currentRows[0] || null;
+    return changed.length ? changed : (currentRows[0] ? [currentRows[0]] : []);
   }
 
   function postTopRowsSnapshot(reason = 'top_rows_snapshot') {
@@ -309,10 +312,19 @@
         return;
       }
       if (signature === STATE.lastTopRowsSignature) return;
-      const changed = firstChangedRow(previousRows, currentRows);
+      const changed = changedRows(previousRows, currentRows);
+      const unreadBackstop = currentRows.filter((row) => hasUnreadSignal(row.row, row.text));
+      const toPost = [];
+      const seen = new Set();
+      for (const row of [...changed, ...unreadBackstop].slice(0, 12)) {
+        const key = `${row.top}:${row.left}:${row.signature}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        toPost.push(row);
+      }
       STATE.lastTopRowsSignature = signature;
       previousRows = currentRows;
-      if (changed) postEvent(createEvent(changed.row, 'top_rows_changed', changed.text));
+      for (const row of toPost) postEvent(createEvent(row.row, 'top_rows_backstop', row.text));
     }, 2000);
   }
 

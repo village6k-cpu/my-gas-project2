@@ -563,15 +563,33 @@ test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', (
       evidence: ['고객: 견적서 받을 수 있을까요?'],
       due_hint: 'today'
     }]
-  }, { id: '11111111-1111-1111-1111-111111111111', room_key: 'room-label:홍길동' });
+  }, { id: '11111111-1111-4111-8111-111111111111', room_key: 'room-label:홍길동' });
 
   assert.equal(rows.length, 1);
   assert.equal(rows[0].type, 'quote_send');
   assert.equal(rows[0].priority, 'high');
   assert.equal(rows[0].customer_name, '홍길동');
+  assert.equal(rows[0].job_id, '11111111-1111-4111-8111-111111111111');
   assert.equal(rows[0].decision_classification, 'price');
   assert.deepEqual(rows[0].evidence, ['고객: 견적서 받을 수 있을까요?']);
-  assert.match(rows[0].follow_up_key, /^11111111-1111-1111-1111-111111111111:0:/);
+  assert.match(rows[0].follow_up_key, /^11111111-1111-4111-8111-111111111111:0:/);
+});
+
+test('buildFollowUpRows keeps local DOM job ids out of UUID job_id column', () => {
+  const rows = buildFollowUpRows({
+    classification: 'faq',
+    confidence: 'high',
+    customer: { name: '한이솔' },
+    follow_up_items: [{
+      type: 'contract_document',
+      title: '거래명세서 발급 요청',
+      summary: '고객이 거래명세서 금액을 알려줌'
+    }]
+  }, { jobId: 'dom-072d40c56a4cabdf', roomKey: 'preview:21d6b164a492d90e' });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].job_id, null);
+  assert.match(rows[0].follow_up_key, /^dom-072d40c56a4cabdf:0:/);
 });
 
 test('mapDecisionToStatusPatch routes write and no-write decisions to review states', () => {

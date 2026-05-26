@@ -13,7 +13,8 @@ const CONFIG = {
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   supabaseTable: process.env.SUPABASE_TABLE || '',
-  processInitialScan: process.env.PROCESS_INITIAL_SCAN === 'true',
+  processInitialScan: process.env.PROCESS_INITIAL_SCAN !== 'false',
+  ignoreShiftedRows: process.env.IGNORE_SHIFTED_ROWS === 'true',
   workerCommand: process.env.VILLAGE_AI_WORKER_CMD || ''
 };
 
@@ -140,13 +141,14 @@ function getSpatialTop(roomKey) {
 }
 
 function isLikelyShiftedExistingRow(event) {
+  if (!CONFIG.ignoreShiftedRows) return false;
   if (event.reason !== 'mutation') return false;
   const top = getSpatialTop(event.roomKey);
   if (top === null) return false;
 
-  // In Kakao's chat-list layout, a genuinely new incoming room is promoted to the
-  // first visible row. The rows below it also mutate because the list shifts, but
-  // those are old conversations and should not create AI jobs.
+  // Legacy noise filter. Disabled by default because Kakao's row coordinates are
+  // too brittle: a real unread room can appear at top=46 and must not be dropped.
+  // Prefer extra AI-reviewed jobs over missed customer inquiries.
   return top >= Number(process.env.CHAT_LIST_FIRST_ROW_MAX_TOP || 44);
 }
 
@@ -209,8 +211,8 @@ function buildAiFirstJob(roomKey, roomState) {
       '카카오 채널 관리자 브라우저 화면을 직접 열어서 해당 상담을 확인한다.',
       '코드/queue/RAG의 추론을 믿지 말고 화면 맥락을 우선한다.',
       'RAG는 필요할 때만 장기기억 도구로 사용한다.',
-      '답변 자동 전송은 하지 말고 초안/처리판 기록 중심으로 처리한다.',
-      '예약 확정, 금액 확정, 재고 가능 단정은 사람 승인 없이 실행하지 않는다.'
+      '답장/시트 처리에 과도하게 보수적으로 굴지 말고, 현재 구현된 write 경로 안에서 적극적으로 처리한다.',
+      '예약 확정, 금액 확정, 재고 가능 단정은 승인된 조회/확정 흐름 없이 실행하지 않는다.'
     ]
   };
 }
@@ -384,7 +386,9 @@ const server = http.createServer(async (req, res) => {
           maxWaitMs: CONFIG.maxWaitMs,
           queueDir: CONFIG.queueDir,
           supabaseEnabled: Boolean(CONFIG.supabaseUrl && CONFIG.supabaseServiceRoleKey && CONFIG.supabaseTable),
-          workerEnabled: Boolean(CONFIG.workerCommand)
+          workerEnabled: Boolean(CONFIG.workerCommand),
+          processInitialScan: CONFIG.processInitialScan,
+          ignoreShiftedRows: CONFIG.ignoreShiftedRows
         },
         state: {
           startedAt: state.startedAt,

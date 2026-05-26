@@ -490,9 +490,15 @@ export function buildSheetAppendPayload(decision, options = {}) {
   };
 }
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
+}
+
 export function buildFollowUpRows(decision, job = {}) {
   const items = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
-  const jobId = job.id || job.jobId || null;
+  const rawJobId = job.id || job.jobId || null;
+  const jobId = isUuid(rawJobId) ? rawJobId : null;
+  const jobKey = rawJobId || null;
   const roomKey = job.room_key || job.roomKey || job.payload?.roomKey || '';
   const fallbackCustomer = decision?.customer?.name || job.payload?.customerName || '';
   const allowedTypes = new Set([
@@ -512,11 +518,11 @@ export function buildFollowUpRows(decision, job = {}) {
       const title = text(item.title).slice(0, 240) || `${type} follow-up`;
       const customerName = text(item.customer_name || item.customerName || fallbackCustomer).slice(0, 120);
       const hash = createHash('sha256')
-        .update(JSON.stringify({ jobId, roomKey, index, type, title, customerName }))
+        .update(JSON.stringify({ jobKey, jobId, roomKey, index, type, title, customerName }))
         .digest('hex')
         .slice(0, 24);
       return {
-        follow_up_key: `${jobId || roomKey || 'job'}:${index}:${hash}`,
+        follow_up_key: `${jobKey || roomKey || 'job'}:${index}:${hash}`,
         source: 'kakao_ai_worker',
         job_id: jobId,
         room_key: roomKey,
