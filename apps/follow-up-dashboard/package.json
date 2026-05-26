@@ -1,0 +1,16 @@
+{
+  "name": "village-follow-up-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "check": "node --check api/follow-ups.js && node --check api/operations.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "vercel": "latest"
+  }
+}

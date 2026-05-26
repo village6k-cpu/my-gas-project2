@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Village Kakao Watcher</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; width: 320px; margin: 14px; color: #111827; }
+    label { display: block; font-size: 12px; font-weight: 700; margin-top: 12px; }
+    input[type="text"], input[type="number"] { width: 100%; box-sizing: border-box; padding: 8px; margin-top: 4px; border: 1px solid #d1d5db; border-radius: 8px; }
+    .row { display: flex; align-items: center; gap: 8px; }
+    button { margin-top: 14px; width: 100%; padding: 9px; border: 0; border-radius: 8px; background: #111827; color: white; font-weight: 700; cursor: pointer; }
+    .hint { font-size: 12px; color: #6b7280; line-height: 1.45; margin-top: 8px; }
+    .status { font-size: 12px; margin-top: 10px; color: #047857; min-height: 18px; }
+  </style>
+</head>
+<body>
+  <h3>Village Kakao Watcher</h3>
+  <div class="row">
+    <input id="enabled" type="checkbox">
+    <label for="enabled" style="margin:0">감지 활성화</label>
+  </div>
+
+  <label for="bridgeUrl">Local bridge URL</label>
+  <input id="bridgeUrl" type="text" value="http://127.0.0.1:8787/events">
+
+  <label for="minSilenceMs">확장 프로그램 내부 중복 억제(ms)</label>
+  <input id="minSilenceMs" type="number" min="300" step="100" value="1500">
+
+  <div class="row" style="margin-top:12px">
+    <input id="debug" type="checkbox">
+    <label for="debug" style="margin:0">debug console log</label>
+  </div>
+
+  <button id="save">저장</button>
+  <button id="testBridge" style="background:#2563eb">Bridge 테스트 이벤트 보내기</button>
+  <div id="status" class="status"></div>
+  <div class="hint">
+    이 확장 프로그램은 판단하지 않습니다. 새 메시지/안읽음 DOM 변화만 local bridge로 보내고,
+    실제 판단은 AI 브라우저 직원이 직접 카카오 채널 관리자 화면을 보고 합니다.
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
