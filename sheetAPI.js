@@ -1182,23 +1182,21 @@ function getOperationsData_(targetDate, skipCache) {
       activeQtySum += (Number(row[4]) || 0);
     }
 
-    // 재고 충돌 — 향후 90일 이내 활성 스케줄을 일자×장비별로 누적
-    if (coDate && ciDate && itemName) {
-      // 충돌 윈도우: max(today, coDate) ~ min(conflictHorizonEnd, ciDate)
+    // 재고 충돌 — 향후 90일 이내 활성 스케줄을 일자×장비별로 누적 (세트 헤더 행 제외)
+    if (coDate && ciDate && opItem && opItem.name) {
       var winStart = coDate < todayStr ? todayStr : coDate;
       var winEnd = ciDate > conflictHorizonEndStr ? conflictHorizonEndStr : ciDate;
       if (winStart <= winEnd) {
         var bookQty = Number(row[4]) || 0;
         if (bookQty > 0) {
-          // 일자별 펼치기 (Date 객체로 안전하게 iterate)
           var iterStart = new Date(winStart + "T00:00:00");
           var iterEnd = new Date(winEnd + "T00:00:00");
           for (var dIter = new Date(iterStart); dIter <= iterEnd; dIter.setDate(dIter.getDate() + 1)) {
             var dStr = Utilities.formatDate(dIter, tz, "yyyy-MM-dd");
             if (!bookingMap[dStr]) bookingMap[dStr] = {};
-            if (!bookingMap[dStr][itemName]) bookingMap[dStr][itemName] = { totalQty: 0, bookings: [] };
-            bookingMap[dStr][itemName].totalQty += bookQty;
-            bookingMap[dStr][itemName].bookings.push({
+            if (!bookingMap[dStr][opItem.name]) bookingMap[dStr][opItem.name] = { totalQty: 0, bookings: [] };
+            bookingMap[dStr][opItem.name].totalQty += bookQty;
+            bookingMap[dStr][opItem.name].bookings.push({
               tid: String(tid),
               customer: customer,
               qty: bookQty,
