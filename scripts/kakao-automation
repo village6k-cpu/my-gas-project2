@@ -65,7 +65,7 @@ cmd_start() {
   if pid_alive; then
     echo "already running: bridge pid $(cat "$PID_FILE")"
   else
-    (cd "$BRIDGE_DIR" && nohup npm start >"$LOG_FILE" 2>&1 & echo $! >"$PID_FILE")
+    (cd "$BRIDGE_DIR" && nohup node server.mjs >"$LOG_FILE" 2>&1 & echo $! >"$PID_FILE")
     echo "started bridge pid $(cat "$PID_FILE")"
     echo "log: $LOG_FILE"
   fi
@@ -91,11 +91,26 @@ cmd_stop() {
     if kill -0 "$pid" 2>/dev/null; then
       kill -9 "$pid" 2>/dev/null || true
     fi
+    local port_pids
+    port_pids="$(lsof -tiTCP:${PORT} -sTCP:LISTEN 2>/dev/null || true)"
+    if [[ -n "$port_pids" ]]; then kill $port_pids 2>/dev/null || true; sleep 0.5; fi
+    port_pids="$(lsof -tiTCP:${PORT} -sTCP:LISTEN 2>/dev/null || true)"
+    if [[ -n "$port_pids" ]]; then kill -9 $port_pids 2>/dev/null || true; fi
     rm -f "$PID_FILE"
     echo "stopped bridge pid $pid"
   else
     rm -f "$PID_FILE"
-    echo "bridge not running"
+    local port_pids
+    port_pids="$(lsof -tiTCP:${PORT} -sTCP:LISTEN 2>/dev/null || true)"
+    if [[ -n "$port_pids" ]]; then
+      echo "stopping bridge processes on port ${PORT}: $port_pids"
+      kill $port_pids 2>/dev/null || true
+      sleep 0.5
+      port_pids="$(lsof -tiTCP:${PORT} -sTCP:LISTEN 2>/dev/null || true)"
+      if [[ -n "$port_pids" ]]; then kill -9 $port_pids 2>/dev/null || true; fi
+    else
+      echo "bridge not running"
+    fi
   fi
 }
 
