@@ -24,6 +24,10 @@ import {
   openKakaoTargetChatFromList,
   extractNavigationHints,
   buildCompactJobForPrompt,
+  canAutoSendCustomerAnswer,
+  isAutoSendEligibleLiveJob,
+  findKakaoMessageInputElementIndex,
+  sendKakaoMessageViaChrome,
   runHermes
 } from './worker.mjs';
 
@@ -91,7 +95,7 @@ test('buildHermesPrompt uses compact job evidence instead of embedding full raw 
   assert.match(prompt, /JOB EVIDENCE FROM SUPABASE/);
   assert.doesNotMatch(prompt, /JOB FROM SUPABASE/);
   assert.equal(prompt.includes('x'.repeat(1000)), false);
-  assert.ok(prompt.length < 12000, `prompt too large: ${prompt.length}`);
+  assert.ok(prompt.length < 13000, `prompt too large: ${prompt.length}`);
 });
 
 test('buildHermesPrompt uses navigation hints without letting code judge business meaning', () => {
@@ -179,7 +183,7 @@ test('buildHermesPrompt imports Claude Coworker policy while allowing aggressive
   assert.match(prompt, /직원.*이미 답변/s);
   assert.match(prompt, /킬 스위치/s);
   assert.match(prompt, /paused.*price_paused.*active/s);
-  assert.match(prompt, /자동답장 후보/s);
+  assert.match(prompt, /reply_decision\.replyMode="auto_send"/);
   assert.match(prompt, /suggested_reply_draft/s);
 });
 
@@ -590,6 +594,82 @@ test('buildFollowUpRows keeps local DOM job ids out of UUID job_id column', () =
   assert.equal(rows.length, 1);
   assert.equal(rows[0].job_id, null);
   assert.match(rows[0].follow_up_key, /^dom-072d40c56a4cabdf:0:/);
+});
+
+test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe replies', () => {
+  const baseDecision = {
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    suggested_reply_draft: '네, 확인 후 안내드리겠습니다.',
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '네, 확인 후 안내드리겠습니다.'
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    }
+  };
+
+  assert.equal(canAutoSendCustomerAnswer(baseDecision, { autoSendEnabled: false }).allowed, false);
+  assert.deepEqual(canAutoSendCustomerAnswer(baseDecision, { autoSendEnabled: true }), {
+    allowed: true,
+    reason: 'allowed',
+    text: '네, 확인 후 안내드리겠습니다.',
+    replyMode: 'auto_send',
+    confidence: 'high'
+  });
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, reply_decision: { ...baseDecision.reply_decision, replyMode: 'draft_only' } }, { autoSendEnabled: true }).allowed, false);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, confidence: 'medium', reply_decision: { ...baseDecision.reply_decision, confidence: 'medium' } }, { autoSendEnabled: true }).allowed, false);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, suggested_reply_draft: '예약 확정됐습니다', reply_decision: { ...baseDecision.reply_decision, text: '예약 확정됐습니다' } }, { autoSendEnabled: true }).allowed, false);
+});
+
+test('isAutoSendEligibleLiveJob blocks dated backfill rows from auto-send', () => {
+  assert.deepEqual(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45' }), {
+    eligible: true,
+    reason: 'live_time_format'
+  });
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 한시우/60x 파손 video 5월 25일' }).eligible, false);
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 배성문 1월 15일 건은 4만원입니다. 오후 3:45' }).eligible, false);
+});
+
+test('findKakaoMessageInputElementIndex finds the Kakao message input field', () => {
+  const tree = `
+- [10] AXStaticText = "한이솔"
+- [41] AXTextArea "채팅 메시지 입력 폼" value=""
+- [42] AXButton "전송"
+`;
+  assert.equal(findKakaoMessageInputElementIndex(tree), 41);
+});
+
+test('sendKakaoMessageViaChrome types into Kakao input and presses return', async () => {
+  const calls = [];
+  const spawnImpl = (cmd, args) => {
+    calls.push({ cmd, args });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (args[1] === 'get_window_state') {
+        child.stdout.end(JSON.stringify({ tree_markdown: '- [41] AXTextArea "채팅 메시지 입력 폼" value=""' }));
+      } else {
+        child.stdout.end('{}');
+      }
+      child.emit('close', 0);
+    });
+    return child;
+  };
+
+  const result = await sendKakaoMessageViaChrome('네 확인했습니다.', {
+    conversation_window: { pid: 123, window_id: 456, title: '고객 - 빌리지 - 카카오비즈니스 파트너센터' }
+  }, { spawnImpl });
+
+  assert.equal(result.sent, true);
+  assert.equal(calls[1].args[1], 'type_text');
+  assert.match(calls[1].args[2], /네 확인했습니다/);
+  assert.equal(calls[2].args[1], 'press_key');
 });
 
 test('mapDecisionToStatusPatch routes write and no-write decisions to review states', () => {

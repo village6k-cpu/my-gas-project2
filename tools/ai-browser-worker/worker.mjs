@@ -303,7 +303,8 @@ CRITICAL RULES:
 - 카카오 Channel Manager Chrome 화면을 computer_use로 직접 확인하고, 화면에서 보이는 대화 맥락을 우선한다.
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use at most 5 UI navigation actions total. If the matching conversation is not found within that budget, stop and return classification="unclear" / should_write_to_sheet=false with reason="matching Kakao conversation not visible within budget".
-- 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 현재 코드 경로에서 카카오 실제 전송 함수가 없으면 suggested_reply_draft를 만들고, 전송 기능이 연결된 환경에서는 kill switch 정책에 맞춰 자동답장 후보로 취급한다.
+- 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때만 간단한 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
+- 자동발송 후보는 간단/확실한 FAQ, 절차 안내, 수령/반납 안내, 이미 확인된 단순 후속 답변, 예약 접수 acknowledgement 정도로 제한한다. 재고 가능 단정, 예약 확정, 가격/할인 최종 확정, 결제/환불, 분실/파손, 법적/세금 민감 답변은 auto_send가 아니라 draft_only/task로 둔다.
 - 예약 확정, 재고 가능 단정, 가격 확정은 화면/시트 근거 없이 단정하지 않는다. 하지만 고객이 예약형식에 맞게 정보를 준 경우 확인요청 시트 입력은 적극 수행한다.
 - Google Sheets 입력은 API로 가능하다. 어떤 값을 넣을지는 AI가 판단하되, 예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다.
 
@@ -356,7 +357,7 @@ TASK:
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 11. For reservation-format customer requests, prefer should_write_to_sheet=true and fill sheet_row_candidate best-effort. Missing phone, imperfect exact equipment verification, or incomplete duplicate lookup should be written into memo/extra_request rather than blocking the 확인요청 row. Only set should_write_to_sheet=false when this is clearly not a reservation, the target Kakao conversation was not opened, the newest actionable message is staff/outbound, sender order is unclear, or an obvious duplicate/already-registered booking was found.
 12. Create follow_up_items for every human action the owner should see next: reply_needed, quote_send, tax_invoice, schedule_check, reservation_review, price_review, payment_check, contract_document, return_extension, damage_repair, sheet_duplicate_check, completed_log. Use an empty array only when no human follow-up is needed.
-13. If a reply is useful, produce suggested_reply_draft and a reply_needed/quote_send follow_up_item. If future Kakao-send plumbing is connected, this draft may be sent automatically according to kill switch policy; do not be over-conservative in drafting.
+13. If a reply is useful, produce suggested_reply_draft and a reply_needed/quote_send follow_up_item. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for simple, high-confidence replies that are safe to send now under the kill-switch policy. Otherwise use draft_only or no_reply.
 14. Return only the final machine-readable JSON below.
 
 FINAL OUTPUT FORMAT:
@@ -427,7 +428,14 @@ The JSON schema:
     "extra_request": string
   },
   "suggested_human_review_action": string,
-  "suggested_reply_draft": string
+  "suggested_reply_draft": string,
+  "reply_decision": {
+    "replyMode": "auto_send" | "draft_only" | "no_reply",
+    "text": string,
+    "confidence": "high" | "medium" | "low" | "no_match",
+    "reason": string,
+    "shouldCreateTask": boolean
+  }
 }`;
 }
 export function extractJsonObject(text) {
@@ -590,7 +598,10 @@ function requireConfig() {
     villageAiUrl: process.env.VILLAGE_AI_URL || '',
     villageAiKakaoSkillSecret: process.env.VILLAGE_AI_KAKAO_SKILL_SECRET || process.env.KAKAO_SKILL_SECRET || '',
     ragTimeoutMs: Number(process.env.VILLAGE_AI_RAG_TIMEOUT_MS || 30000) || 30000,
-    followUpTable: process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items'
+    followUpTable: process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items',
+    autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
+    autoSendLogPath: process.env.AI_WORKER_AUTO_SEND_LOG || path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson'),
+    autoSendTimeoutMs: Number(process.env.AI_WORKER_AUTO_SEND_TIMEOUT_MS || 20000) || 20000
   };
   if (!config.supabaseUrl || !config.serviceRoleKey) {
     throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Load tools/kakao-dom-bridge/.env first.');
@@ -860,6 +871,90 @@ export function extractKakaoConversationEvidence(treeMarkdown = '', { title = ''
   };
 }
 
+export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
+  if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
+  const reply = decision.reply_decision && typeof decision.reply_decision === 'object' ? decision.reply_decision : {};
+  const mode = String(reply.replyMode || reply.reply_mode || '').trim();
+  const confidence = String(reply.confidence || decision.confidence || '').trim();
+  const textValue = text(reply.text || decision.suggested_reply_draft).trim();
+  const killSwitch = String(decision.kill_switch_observed || '').trim();
+  if (killSwitch !== 'active') return { allowed: false, reason: `kill_switch_${killSwitch || 'unknown'}` };
+  if (mode !== 'auto_send') return { allowed: false, reason: `replyMode_${mode || 'missing'}` };
+  if (confidence !== 'high') return { allowed: false, reason: `confidence_${confidence || 'missing'}` };
+  if (!textValue || textValue.length < 5) return { allowed: false, reason: 'reply_text_too_short' };
+  if (textValue.length > 1000) return { allowed: false, reason: 'reply_text_too_long' };
+  if (decision?.safety_checks?.kakao_conversation_opened !== true) return { allowed: false, reason: 'conversation_not_opened' };
+  if (decision?.safety_checks?.did_not_classify_from_preview_only !== true) return { allowed: false, reason: 'preview_only' };
+  if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) return { allowed: false, reason: 'latest_turn_not_customer' };
+  const blocked = ['refund', '환불', '분실', '파손', '손상', '결제 취소', '예약 확정', '재고 가능', '가능 확정'];
+  if (blocked.some((word) => textValue.includes(word))) return { allowed: false, reason: 'sensitive_commitment_text' };
+  return { allowed: true, reason: 'allowed', text: textValue, replyMode: mode, confidence };
+}
+
+export function findKakaoMessageInputElementIndex(treeMarkdown = '') {
+  const lines = String(treeMarkdown).split('\n');
+  const preferred = lines.find((line) => /\[(\d+)\]/.test(line) && /AXTextArea|AXTextField/.test(line) && /채팅|메시지|입력|내용/.test(line));
+  const fallback = preferred || lines.find((line) => /\[(\d+)\]/.test(line) && /AXTextArea|AXTextField/.test(line));
+  const match = fallback?.match(/\[(\d+)\]/);
+  return match ? Number(match[1]) : null;
+}
+
+export async function sendKakaoMessageViaChrome(textToSend, navigationContext = {}, { timeoutMs = 20000, spawnImpl = spawn } = {}) {
+  const win = navigationContext?.conversation_window;
+  if (!win?.pid || !win?.window_id) return { sent: false, reason: 'conversation_window_missing' };
+  const stateText = await spawnText('cua-driver', [
+    'call', 'get_window_state', JSON.stringify({ pid: win.pid, window_id: win.window_id, max_elements: 700 }), '--compact'
+  ], { timeoutMs, spawnImpl, maxBuffer: 3_000_000 });
+  const state = JSON.parse(stateText);
+  const elementIndex = findKakaoMessageInputElementIndex(state.tree_markdown || '');
+  if (!elementIndex) return { sent: false, reason: 'message_input_not_found', window_title: win.title || state.title || '' };
+  await spawnText('cua-driver', [
+    'call', 'type_text', JSON.stringify({ pid: win.pid, window_id: win.window_id, element_index: elementIndex, text: textToSend, delay_ms: 5 }), '--compact'
+  ], { timeoutMs, spawnImpl });
+  await spawnText('cua-driver', [
+    'call', 'press_key', JSON.stringify({ pid: win.pid, window_id: win.window_id, element_index: elementIndex, key: 'return' }), '--compact'
+  ], { timeoutMs, spawnImpl });
+  return { sent: true, reason: 'sent_via_chrome', window_title: win.title || state.title || '', element_index: elementIndex };
+}
+
+function logAutoReply(config, entry) {
+  const line = JSON.stringify({ at: new Date().toISOString(), ...entry });
+  fs.mkdirSync(path.dirname(config.autoSendLogPath), { recursive: true });
+  fs.appendFileSync(config.autoSendLogPath, `${line}\n`);
+}
+
+export function isAutoSendEligibleLiveJob(job = {}) {
+  const preview = text(job.preview_text || job.previewText || job.payload?.previewText || '');
+  if (/\d{1,2}월\s*\d{1,2}일/.test(preview)) return { eligible: false, reason: 'preview_has_old_date' };
+  if (/\d{4}\.\d{1,2}\.\d{1,2}/.test(preview)) return { eligible: false, reason: 'preview_has_absolute_date' };
+  if (!/(오전|오후)\s*\d{1,2}:\d{2}/.test(preview)) return { eligible: false, reason: 'preview_not_live_time_format' };
+  return { eligible: true, reason: 'live_time_format' };
+}
+
+async function maybeAutoSendReply({ config, decision, job, navigationContext }) {
+  const liveGate = isAutoSendEligibleLiveJob(job);
+  if (!liveGate.eligible) {
+    const result = { attempted: false, sent: false, gate: { allowed: false, reason: liveGate.reason } };
+    logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', preview: job.preview_text || job.previewText || '' });
+    return result;
+  }
+  const gate = canAutoSendCustomerAnswer(decision, config);
+  if (!gate.allowed) {
+    const result = { attempted: false, sent: false, gate };
+    logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '' });
+    return result;
+  }
+  let sendResult;
+  try {
+    sendResult = await sendKakaoMessageViaChrome(gate.text, navigationContext, { timeoutMs: config.autoSendTimeoutMs });
+  } catch (error) {
+    sendResult = { sent: false, reason: 'send_error', error: error.message.slice(0, 500) };
+  }
+  const result = { attempted: true, sent: Boolean(sendResult.sent), gate, sendResult, text: gate.text };
+  logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [] });
+  return result;
+}
+
 export async function openKakaoTargetChatFromList(job, { timeoutMs = 20000, spawnImpl = spawn } = {}) {
   const hints = extractNavigationHints(job);
   if (!hints.length) return { status: 'no_navigation_hints' };
@@ -983,7 +1078,8 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
   } catch (error) {
     followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
   }
-  return { status: 'ai_completed', decision, sheetResult, followUpResult, hermesOutputTail: hermesOutput.slice(-4000) };
+  const autoReplyResult = await maybeAutoSendReply({ config, decision, job, navigationContext });
+  return { status: 'ai_completed', decision, sheetResult, followUpResult, autoReplyResult, hermesOutputTail: hermesOutput.slice(-4000) };
 }
 
 function summarizeJob(job) {
@@ -1043,11 +1139,12 @@ export async function processOneJob({ dryRun = false, claim = true, fakeDecision
           decision: aiResult.decision,
           sheet_result: aiResult.sheetResult,
           follow_up_result: aiResult.followUpResult,
+          auto_reply_result: aiResult.autoReplyResult,
           hermes_output_tail: aiResult.hermesOutputTail
         }
       }
     });
-    return { status: 'processed', jobId: workingJob.id, decision: aiResult.decision, sheetResult: aiResult.sheetResult, followUpResult: aiResult.followUpResult };
+    return { status: 'processed', jobId: workingJob.id, decision: aiResult.decision, sheetResult: aiResult.sheetResult, followUpResult: aiResult.followUpResult, autoReplyResult: aiResult.autoReplyResult };
   } catch (error) {
     if (!dryRun && workingJob.id) {
       await updateJob(config, workingJob.id, {
