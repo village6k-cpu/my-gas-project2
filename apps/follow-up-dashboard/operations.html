@@ -91,14 +91,20 @@
     .brand .logo {
       font-family: "Anton", "Helvetica Neue", "Arial Black", sans-serif;
       font-weight: 400;
-      font-size: 26px;
-      letter-spacing: -0.01em;
+      font-size: 30px;
+      letter-spacing: 0;
       line-height: 1;
       color: var(--ink);
       text-transform: uppercase;
       display: inline-flex;
       align-items: center;
       gap: 0;
+    }
+    @media (min-width: 560px) {
+      .brand .logo { font-size: 36px; }
+    }
+    @media (min-width: 900px) {
+      .brand .logo { font-size: 42px; }
     }
     .brand .logo .v { color: #EA5B36; }
     .brand .logo .dot {
