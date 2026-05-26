@@ -1106,6 +1106,7 @@ function getOperationsData_(targetDate, skipCache) {
   var imminentMap = {};
   var paceThisWeekTids = {};
   var pacePrev4WeeksTids = {};
+  var activeQtySum = 0;  // 오늘 활성 스케줄(반출일 ≤ 오늘 ≤ 반납일) 수량 합 → 가동률 분자
 
   // 출고 페이스 비교 구간: 이번주 시작 기준 직전 4주 (28일)
   var weekStartDate = new Date(weekRange.start + "T00:00:00");
@@ -1168,6 +1169,11 @@ function getOperationsData_(targetDate, skipCache) {
       } else if (coDate >= pacePrevStartStr && coDate <= pacePrevEndStr) {
         pacePrev4WeeksTids[tid] = true;
       }
+    }
+
+    // 가동률 분자: 오늘 활성 스케줄(반출일 ≤ 오늘 ≤ 반납일)의 수량 합
+    if (coDate && ciDate && coDate <= todayStr && todayStr <= ciDate) {
+      activeQtySum += (Number(row[4]) || 0);
     }
   }
 
@@ -1266,8 +1272,6 @@ function getOperationsData_(targetDate, skipCache) {
 
   var maintenance = [];
   var totalStockSum = 0;
-  var totalInUseSum = 0;
-  var totalMaintQty = 0;
   for (var m = 0; m < equips.length; m++) {
     var st = String(equips[m][8] || "").trim();
     if (st === "정비중" || st === "수리중") {
@@ -1278,18 +1282,13 @@ function getOperationsData_(targetDate, skipCache) {
         note: String(equips[m][9] || "")
       });
     }
-    // 가동률 합산: E열 총보유, G열 대여중, H열 정비중수량
-    var stockNum = Number(equips[m][4]) || 0;
-    var inUseNum = Number(equips[m][6]) || 0;
-    var maintNum = Number(equips[m][7]) || 0;
-    totalStockSum += stockNum;
-    totalInUseSum += inUseNum;
-    totalMaintQty += maintNum;
+    // 가동률 분모: E열 총보유 합
+    totalStockSum += (Number(equips[m][4]) || 0);
   }
 
-  // ── 건강 지표: 장비 가동률 + 이번주 출고 페이스 ──
+  // ── 건강 지표: 장비 가동률 (스케줄상세 활성 수량 / 장비마스터 총보유) + 이번주 출고 페이스 ──
   var utilizationPercent = totalStockSum > 0
-    ? Math.round((totalInUseSum / totalStockSum) * 1000) / 10
+    ? Math.round((activeQtySum / totalStockSum) * 1000) / 10
     : 0;
 
   var paceThisWeekCount = countKeys_(paceThisWeekTids);
@@ -1315,9 +1314,8 @@ function getOperationsData_(targetDate, skipCache) {
     },
     health: {
       utilization: {
-        inUse: totalInUseSum,
+        inUse: activeQtySum,
         total: totalStockSum,
-        maintenanceQty: totalMaintQty,
         percent: utilizationPercent
       },
       checkoutPace: {
