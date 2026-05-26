@@ -10,6 +10,9 @@ tools/**
 # GitHub Pages (GAS에 올릴 필요 없음)
 docs/**
 
+# Vercel 앱 (GAS와 무관)
+apps/**
+
 # 로컬 보조/실험 파일. GAS가 최종본이므로 원격에 없는 파일은 자동 업로드 금지.
 companionServer.js
 companionSidebar.html

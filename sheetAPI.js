@@ -268,6 +268,12 @@ function handleRequest(e) {
           params.notes !== undefined ? params.notes : postBody.notes
         ));
 
+      case "operations": {
+        var opSkip = (params.nocache === '1' || params.nocache === 'true' ||
+          postBody.nocache === 1 || postBody.nocache === '1' || postBody.nocache === true);
+        return jsonResponse(getOperationsData_(params.date || postBody.date || null, opSkip));
+      }
+
       case "equipmentRiskSend":
         return jsonResponse(sendEquipmentRiskGuidance_(postBody.payload || postBody));
 
@@ -1015,6 +1021,251 @@ function runFunction(funcName, params) {
     success: true,
     function: funcName,
     executionTime: (endTime - startTime) + "ms"
+  };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 운영판 (operations) — 사장님 한눈 보기
+// 출처: 스케줄상세, 확인요청, 계약마스터, 장비마스터 + ScriptProperties contractUrl
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function getOperationsData_(targetDate, skipCache) {
+  var tz = "Asia/Seoul";
+  var today = targetDate ? new Date(targetDate) : new Date();
+  if (isNaN(today.getTime())) today = new Date();
+  var todayStr = Utilities.formatDate(today, tz, "yyyy-MM-dd");
+
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "operations_v1_" + todayStr;
+  if (!skipCache) {
+    var cached = cache.get(cacheKey);
+    if (cached) {
+      try { return JSON.parse(cached); } catch (e) {}
+    }
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // ── 스케줄상세: 오늘 출고/회수 + 임박 반출 ──
+  var schedSh = ss.getSheetByName("스케줄상세");
+  var schedLast = schedSh ? schedSh.getLastRow() : 0;
+  var sched = schedLast >= 2 ? schedSh.getRange(2, 1, schedLast - 1, 13).getValues() : [];
+
+  var todayCheckoutMap = {};
+  var todayCheckinMap = {};
+  var imminentMap = {};
+
+  for (var i = 0; i < sched.length; i++) {
+    var row = sched[i];
+    var tid = row[1];
+    if (!tid) continue;
+    var status = String(row[9] || "").trim();
+    if (status === "취소") continue;
+
+    var coCell = row[5];
+    var ciCell = row[7];
+    var coDate = coCell instanceof Date ? Utilities.formatDate(coCell, tz, "yyyy-MM-dd") : "";
+    var ciDate = ciCell instanceof Date ? Utilities.formatDate(ciCell, tz, "yyyy-MM-dd") : "";
+    var coTime = row[6] instanceof Date ? Utilities.formatDate(row[6], tz, "HH:mm") : String(row[6] || "");
+    var ciTime = row[8] instanceof Date ? Utilities.formatDate(row[8], tz, "HH:mm") : String(row[8] || "");
+    var customer = String(row[12] || "");
+    var itemName = String(row[3] || row[2] || "");
+    var qty = row[4] || 1;
+
+    if (coDate === todayStr) {
+      if (!todayCheckoutMap[tid]) {
+        todayCheckoutMap[tid] = { tid: String(tid), customer: customer, time: coTime, items: [] };
+      }
+      if (itemName) todayCheckoutMap[tid].items.push({ name: itemName, qty: qty });
+    }
+    if (ciDate === todayStr) {
+      if (!todayCheckinMap[tid]) {
+        todayCheckinMap[tid] = { tid: String(tid), customer: customer, time: ciTime, items: [] };
+      }
+      if (itemName) todayCheckinMap[tid].items.push({ name: itemName, qty: qty });
+    }
+
+    if (coDate && coDate > todayStr) {
+      var diff = diffDays_(today, coCell);
+      if (diff >= 1 && diff <= 3) {
+        if (!imminentMap[tid]) {
+          imminentMap[tid] = {
+            tid: String(tid),
+            customer: customer,
+            date: coDate,
+            time: coTime,
+            daysAway: diff,
+            items: []
+          };
+        }
+        if (itemName) imminentMap[tid].items.push({ name: itemName, qty: qty });
+      }
+    }
+  }
+
+  var sortByTime = function(a, b) { return (a.time || "").localeCompare(b.time || ""); };
+  var todayCheckout = mapValues_(todayCheckoutMap).sort(sortByTime);
+  var todayCheckin = mapValues_(todayCheckinMap).sort(sortByTime);
+  var imminent = mapValues_(imminentMap).sort(function(a, b) {
+    if (a.date !== b.date) return a.date.localeCompare(b.date);
+    return (a.time || "").localeCompare(b.time || "");
+  });
+
+  // ── 확인요청: 미확정 (H열 ≠ "확인" 그리고 등록완료/거절 아님) ──
+  var reqSh = ss.getSheetByName("확인요청");
+  var reqLast = reqSh ? reqSh.getLastRow() : 0;
+  var req = reqLast >= 2 ? reqSh.getRange(2, 1, reqLast - 1, 18).getValues() : [];
+
+  var unconfirmedMap = {};
+  var unconfirmedOrder = [];
+
+  for (var j = 0; j < req.length; j++) {
+    var r = req[j];
+    var reqID = r[0];
+    if (!reqID) continue;
+    var oStatus = String(r[14] || "").trim();
+    if (oStatus === "등록완료" || oStatus === "거절") continue;
+    var hConfirm = String(r[7] || "").trim();
+    if (hConfirm === "확인") continue;
+
+    if (!unconfirmedMap[reqID]) {
+      var rDate = r[1] instanceof Date ? Utilities.formatDate(r[1], tz, "yyyy-MM-dd") : String(r[1] || "");
+      var rTime = r[2] instanceof Date ? Utilities.formatDate(r[2], tz, "HH:mm") : String(r[2] || "");
+      unconfirmedMap[reqID] = {
+        reqID: String(reqID),
+        customer: String(r[10] || ""),
+        company: String(r[12] || ""),
+        checkoutDate: rDate,
+        checkoutTime: rTime,
+        items: []
+      };
+      unconfirmedOrder.push(reqID);
+    }
+    var equipName = String(r[5] || "");
+    if (equipName) {
+      unconfirmedMap[reqID].items.push({ name: equipName, qty: r[6] || 1 });
+    }
+  }
+
+  var unconfirmed = unconfirmedOrder.map(function(k) { return unconfirmedMap[k]; })
+    .sort(function(a, b) { return (a.checkoutDate || "").localeCompare(b.checkoutDate || ""); });
+
+  // ── 계약마스터: 계약서 미발송 + 이번주 신규 예약 ──
+  var contractSh = ss.getSheetByName("계약마스터");
+  var contractLast = contractSh ? contractSh.getLastRow() : 0;
+  var contracts = contractLast >= 2 ? contractSh.getRange(2, 1, contractLast - 1, 12).getValues() : [];
+
+  var weekRange = getWeekRange_(today, tz);
+  var allTids = [];
+  var tidCustomerMap = {};
+  var weeklyTids = {};
+
+  for (var k = 0; k < contracts.length; k++) {
+    var c = contracts[k];
+    var tid = c[0];
+    if (!tid) continue;
+    var cStatus = String(c[9] || "").trim();
+    if (cStatus === "취소" || cStatus === "거절") continue;
+    var sTid = String(tid);
+    allTids.push(sTid);
+    tidCustomerMap[sTid] = String(c[1] || "");
+
+    var coDate = c[4] instanceof Date ? Utilities.formatDate(c[4], tz, "yyyy-MM-dd") : "";
+    if (coDate >= weekRange.start && coDate <= weekRange.end) {
+      weeklyTids[sTid] = true;
+    }
+  }
+
+  var missingContract = [];
+  try {
+    var extras = getDashboardContractExtrasByIds_(allTids);
+    var items = (extras && extras.items) || {};
+    for (var ti = 0; ti < allTids.length; ti++) {
+      var t = allTids[ti];
+      var entry = items[t] || {};
+      var hasUrl = !!(entry.contractUrl && String(entry.contractUrl).trim());
+      if (!hasUrl) {
+        missingContract.push({ tid: t, customer: tidCustomerMap[t] || "" });
+      }
+    }
+  } catch (extraErr) {
+    // helper 실패하면 미발송 목록 비움 (전체 차단 방지)
+  }
+
+  // ── 장비마스터: 정비 중 ──
+  var equipSh = ss.getSheetByName("장비마스터");
+  var equipLast = equipSh ? equipSh.getLastRow() : 0;
+  var equips = equipLast >= 2 ? equipSh.getRange(2, 1, equipLast - 1, 12).getValues() : [];
+
+  var maintenance = [];
+  for (var m = 0; m < equips.length; m++) {
+    var st = String(equips[m][8] || "").trim();
+    if (st === "정비중" || st === "수리중") {
+      maintenance.push({
+        name: String(equips[m][3] || ""),
+        category: String(equips[m][0] || ""),
+        status: st,
+        note: String(equips[m][9] || "")
+      });
+    }
+  }
+
+  var result = {
+    success: true,
+    date: todayStr,
+    generatedAt: Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm:ss"),
+    week: weekRange,
+    summary: {
+      todayCheckout: todayCheckout.length,
+      todayCheckin: todayCheckin.length,
+      unconfirmed: unconfirmed.length,
+      missingContract: missingContract.length,
+      imminent: imminent.length,
+      maintenance: maintenance.length,
+      weeklyReservations: countKeys_(weeklyTids)
+    },
+    todayCheckout: todayCheckout,
+    todayCheckin: todayCheckin,
+    unconfirmed: unconfirmed,
+    missingContract: missingContract,
+    imminent: imminent,
+    maintenance: maintenance
+  };
+
+  try { cache.put(cacheKey, JSON.stringify(result), 300); } catch (cacheErr) {}
+  return result;
+}
+
+function mapValues_(obj) {
+  var out = [];
+  for (var k in obj) if (Object.prototype.hasOwnProperty.call(obj, k)) out.push(obj[k]);
+  return out;
+}
+
+function countKeys_(obj) {
+  var n = 0;
+  for (var k in obj) if (Object.prototype.hasOwnProperty.call(obj, k)) n++;
+  return n;
+}
+
+function diffDays_(a, b) {
+  if (!(a instanceof Date) || !(b instanceof Date)) return -1;
+  var aD = new Date(a.getFullYear(), a.getMonth(), a.getDate());
+  var bD = new Date(b.getFullYear(), b.getMonth(), b.getDate());
+  return Math.round((bD - aD) / 86400000);
+}
+
+function getWeekRange_(refDate, tz) {
+  // 월요일~일요일 (한국 관행)
+  var d = new Date(refDate);
+  var day = d.getDay();
+  var mondayOffset = (day === 0) ? -6 : 1 - day;
+  var monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() + mondayOffset);
+  var sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
+  return {
+    start: Utilities.formatDate(monday, tz, "yyyy-MM-dd"),
+    end: Utilities.formatDate(sunday, tz, "yyyy-MM-dd")
   };
 }
 

@@ -136,6 +136,57 @@
     .btn-refresh.loading svg { animation: spin 0.8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* ---------- Tabs ---------- */
+    nav.tabs {
+      display: flex;
+      gap: 4px;
+      padding: 0 16px 10px;
+      max-width: 960px;
+      margin: 0 auto;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    nav.tabs::-webkit-scrollbar { display: none; }
+    .tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--muted);
+      text-decoration: none;
+      transition: background 0.1s ease, color 0.1s ease;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .tab.active {
+      background: var(--primary);
+      color: var(--primary-ink);
+    }
+    .tab:not(.active):hover {
+      background: var(--surface-soft);
+      color: var(--ink-soft);
+    }
+    .tab .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 5px;
+      border-radius: 999px;
+      background: var(--urgent);
+      color: white;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+    .tab.active .badge { background: rgba(255,255,255,0.22); }
+    .tab .badge:empty { display: none; }
+
     /* ---------- Stats ---------- */
     .stats {
       display: grid;
@@ -481,6 +532,10 @@
         </button>
       </div>
     </div>
+    <nav class="tabs" aria-label="페이지 전환">
+      <a href="/" class="tab active" aria-current="page">후속조치</a>
+      <a href="/operations" class="tab">운영판</a>
+    </nav>
   </header>
   <main class="wrap">
     <div id="error" aria-live="polite"></div>
