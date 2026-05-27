@@ -20,12 +20,21 @@
     topRowPollTimer: null,
     snapshotTimer: null,
     initialScanTimer: null,
+    urlWatchTimer: null,
+    lastUrl: location.href,
     started: false,
     lastTopRowsSignature: null
   };
 
   function log(...args) {
     if (STATE.config.debug) console.info('[Village Kakao Watcher]', ...args);
+  }
+
+  function isKakaoChatManagerPage() {
+    const host = location.hostname;
+    const path = location.pathname;
+    const isKakaoManagerHost = host === 'business.kakao.com' || host === 'center-pf.kakao.com';
+    return isKakaoManagerHost && (/^\/_[^/]+\/chats(?:\/|$)/.test(path) || /^\/_chats(?:\/|$)/.test(path));
   }
 
   function loadConfig() {
@@ -103,8 +112,7 @@
       /안읽음\s*(\d+)/,
       /읽지\s*않은\s*메시지\s*(\d+)/,
       /unread\s*(\d+)/i,
-      /새\s*메시지\s*(\d+)/,
-      /\b([1-9][0-9]?)\b/g
+      /새\s*메시지\s*(\d+)/
     ];
 
     for (const re of candidates) {
@@ -121,7 +129,7 @@
       el.getAttribute?.('class')
     ].filter(Boolean).join(' ');
     const haystack = `${text || ''} ${attrs}`;
-    return /안읽|읽지 않은|새 메시지|unread|badge|Badge/i.test(haystack) || extractUnreadCount(haystack) !== null;
+    return /안읽|읽지 않은|새 메시지|unread|badge|Badge/i.test(haystack);
   }
 
   function buildRoomKey(row, text) {
@@ -137,11 +145,25 @@
     return `dom:${spatialHint}:${hashText(textHint)}`;
   }
 
+  function canonicalTopRowText(text) {
+    return normalizeText(text)
+      .replace(/^중요\s+/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   function createEvent(row, reason, changedText) {
     const rowText = normalizeText(row?.innerText || row?.textContent || changedText || '');
-    const roomKey = buildRoomKey(row, rowText);
+    const isTopRowEvent = reason === 'top_row_changed' || reason === 'top_rows_backstop';
+    const topRowText = canonicalTopRowText(rowText);
+    const roomKey = isTopRowEvent
+      ? `toprow:${hashText(topRowText).slice(0, 16)}`
+      : buildRoomKey(row, rowText);
     const unreadCount = extractUnreadCount(rowText);
-    const signature = hashText(`${location.href}|${roomKey}|${rowText}|${reason}`);
+    const unreadSignal = hasUnreadSignal(row, rowText);
+    const signature = isTopRowEvent
+      ? hashText(`kakao-chat-toprow:${roomKey}:${topRowText}:${reason}`)
+      : hashText(`${location.href}|${roomKey}|${rowText}|${reason}`);
 
     return {
       source: 'kakao_channel_manager_dom',
@@ -154,6 +176,7 @@
       eventHash: signature,
       previewText: rowText,
       unreadCount,
+      unreadSignal,
       pageVisibility: document.visibilityState,
       userAgent: navigator.userAgent
     };
@@ -247,7 +270,8 @@
     const seen = new Set();
     const rows = [];
     for (const item of chatRowCandidates().sort((a, b) => (a.top - b.top) || (a.left - b.left))) {
-      const key = `${Math.round(item.top)}:${item.text}`;
+      const canonicalText = canonicalTopRowText(item.text);
+      const key = canonicalText;
       if (seen.has(key)) continue;
       seen.add(key);
       rows.push({
@@ -255,7 +279,7 @@
         top: Math.round(item.top),
         left: Math.round(item.left),
         text: item.text,
-        signature: hashText(item.text)
+        signature: hashText(canonicalText)
       });
       if (rows.length >= limit) break;
     }
@@ -267,19 +291,17 @@
   }
 
   function rowsSignature(rows) {
-    return rows.map((row) => `${row.top}:${row.left}:${row.signature}`).join('|');
+    return rows.map((row) => row.signature).join('|');
   }
 
   function changedRows(previousRows, currentRows) {
-    const previousBySlot = new Map(previousRows.map((row, index) => [`${index}:${row.top}:${row.left}`, row.signature]));
     const previousSignatures = new Set(previousRows.map((row) => row.signature));
     const changed = [];
     for (let index = 0; index < currentRows.length; index += 1) {
       const row = currentRows[index];
-      const sameSlotSignature = previousBySlot.get(`${index}:${row.top}:${row.left}`);
-      if (sameSlotSignature !== row.signature || !previousSignatures.has(row.signature)) changed.push(row);
+      if (!previousSignatures.has(row.signature)) changed.push(row);
     }
-    return changed.length ? changed : (currentRows[0] ? [currentRows[0]] : []);
+    return changed;
   }
 
   function postTopRowsSnapshot(reason = 'top_rows_snapshot') {
@@ -323,14 +345,18 @@
       const toPost = [];
       const seen = new Set();
       for (const row of [...changed, ...unreadBackstop].slice(0, 12)) {
-        const key = `${row.top}:${row.left}:${row.signature}`;
+        const key = row.signature;
         if (seen.has(key)) continue;
         seen.add(key);
         toPost.push(row);
       }
       STATE.lastTopRowsSignature = signature;
       previousRows = currentRows;
-      for (const row of toPost) postEvent(createEvent(row.row, 'top_rows_backstop', row.text));
+      const changedKeys = new Set(changed.map((row) => row.signature));
+      for (const row of toPost) {
+        const key = row.signature;
+        postEvent(createEvent(row.row, changedKeys.has(key) ? 'top_row_changed' : 'top_rows_backstop', row.text));
+      }
     }, 2000);
   }
 
@@ -396,11 +422,32 @@
     STATE.snapshotTimer = null;
     STATE.initialScanTimer = null;
     STATE.started = false;
+    if (['replaced_by_new_content_script', 'pagehide', 'beforeunload'].includes(reason) && STATE.urlWatchTimer) {
+      window.clearInterval(STATE.urlWatchTimer);
+      STATE.urlWatchTimer = null;
+    }
     log('watcher stopped', reason);
+  }
+
+  function startUrlWatcher() {
+    if (STATE.urlWatchTimer) return;
+    STATE.urlWatchTimer = window.setInterval(() => {
+      if (STATE.lastUrl === location.href) return;
+      STATE.lastUrl = location.href;
+      if (isKakaoChatManagerPage()) {
+        startWatcher();
+      } else if (STATE.started) {
+        stopWatcher('left_chat_manager_page');
+      }
+    }, 1000);
   }
 
   function startWatcher() {
     if (STATE.started || !STATE.config.enabled) return;
+    if (!isKakaoChatManagerPage()) {
+      log('not a Kakao chat manager page', location.href);
+      return;
+    }
     STATE.started = true;
     startObserver();
     startTopRowPolling();
@@ -424,6 +471,7 @@
 
   async function init() {
     STATE.config = { ...DEFAULT_CONFIG, ...(await loadConfig()) };
+    startUrlWatcher();
     if (!STATE.config.enabled) {
       log('disabled');
       stopWatcher('disabled_on_init');

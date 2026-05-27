@@ -70,12 +70,20 @@ function normalizeKeyPart(value, maxLength = 120) {
     .slice(0, maxLength) || 'unknown';
 }
 
+function normalizeCustomerForTask(value) {
+  const normalized = normalizeKeyPart(value, 80);
+  return normalized
+    .replace(/\/.*$/, '')
+    .replace(/\s+(?:파손|미반납|누락|분실|반납|확인).*$/, '')
+    .trim() || normalized;
+}
+
 function text(value) {
   return String(value ?? '').trim();
 }
 
 export function buildDashboardSemanticKey(item) {
-  const customer = normalizeKeyPart(item.customer_name, 80);
+  const customer = normalizeCustomerForTask(item.customer_name);
   const type = normalizeKeyPart(item.type, 60);
   const combined = [
     item.title,
@@ -88,11 +96,24 @@ export function buildDashboardSemanticKey(item) {
     ...(combined.match(/\d{1,2}\s*월\s*\d{1,2}\s*일/g) || []).map((v) => v.replace(/\s+/g, '')),
     ...(combined.match(/\d{4}[-./]\d{1,2}[-./]\d{1,2}/g) || []).map((v) => v.replace(/[./]/g, '-'))
   ];
-  if (!specificAnchors.length) return `exact:${normalizeKeyPart(item.follow_up_key || item.id || item.title || '', 200)}`;
   const buckets = [];
+  if (/(반납|다음\s*회차|메모리|배터리|픽업|라오와|장비\s*반납|확인\s*후\s*가져다|가져다\s*드리)/.test(combined)) buckets.push('operations_update');
   if (/(결제|계약|견적|정산|서류|거래명세|세금계산|계산서)/.test(combined)) buckets.push('payment_docs');
   if (/(입금|결제|미수|환불)/.test(combined)) buckets.push('payment_check');
+  if (/(학생\s*할인|학생할인|할인율|몇\s*프로|몇\s*퍼센트|할인)/.test(combined)) buckets.push('discount_policy');
+  if (!buckets.includes('discount_policy') && !buckets.includes('operations_update') && /(위치|주소|어디|찾아가|오시는\s*길)/.test(combined)) buckets.push('location_faq');
   if (/(예약|반출|반납|대여|촬영|일정)/.test(combined)) buckets.push('reservation_review');
+  if (/(미반납|누락|분실|파손|손상|수리|고장|회수|경고\s*메시지|배터리)/.test(combined)) buckets.push('damage_repair');
+  if (buckets.includes('operations_update')) {
+    return ['semantic', customer, 'operations_update'].map((v) => normalizeKeyPart(v, 120)).join(':');
+  }
+  if (buckets.includes('discount_policy')) {
+    return ['semantic', customer, type, ...new Set(specificAnchors), 'discount_policy'].map((v) => normalizeKeyPart(v, 120)).join(':');
+  }
+  if (buckets.includes('damage_repair')) {
+    return ['semantic', customer, type, ...new Set(specificAnchors), 'damage_repair'].map((v) => normalizeKeyPart(v, 120)).join(':');
+  }
+  if (!specificAnchors.length && !buckets.length) return `exact:${normalizeKeyPart(item.follow_up_key || item.id || item.title || '', 200)}`;
   return ['semantic', customer, type, ...new Set(specificAnchors), ...new Set(buckets)].map((v) => normalizeKeyPart(v, 120)).join(':');
 }
 
@@ -155,11 +176,23 @@ export default async function handler(req, res) {
         req.on('error', reject);
       });
       const id = String(body.id || '');
+      const ids = Array.isArray(body.ids)
+        ? Array.from(new Set(body.ids.map((value) => String(value || '').trim()).filter(Boolean))).slice(0, 100)
+        : [];
       const status = String(body.status || '');
-      if (!id || !['open', 'in_progress', 'waiting_customer', 'waiting_internal', 'done', 'dismissed'].includes(status)) {
+      if ((!id && !ids.length) || !['open', 'in_progress', 'waiting_customer', 'waiting_internal', 'done', 'dismissed'].includes(status)) {
         return json(res, 400, { error: 'invalid id/status' });
       }
       const selectFields = 'id,follow_up_key,job_id,room_key,customer_name,type,priority,status,title,summary,recommended_action,suggested_reply_draft,evidence,blocking_reason,due_hint,decision_classification,decision_confidence,created_at,updated_at,completed_at';
+      if (ids.length) {
+        const patchBody = status === 'open' ? { status, completed_at: null } : { status };
+        const rows = await supabaseFetch(`${table}?id=in.(${ids.map(encodeURIComponent).join(',')})`, {
+          method: 'PATCH',
+          headers: { prefer: 'return=representation' },
+          body: JSON.stringify(patchBody)
+        });
+        return json(res, 200, { ok: true, items: Array.isArray(rows) ? rows : [], updatedIds: ids, updatedCount: Array.isArray(rows) ? rows.length : 0 });
+      }
       const currentRows = await supabaseFetch(`${table}?select=${selectFields}&id=eq.${encodeURIComponent(id)}`);
       const current = Array.isArray(currentRows) ? currentRows[0] : null;
       if (!current) return json(res, 404, { error: 'not found' });

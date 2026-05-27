@@ -8,9 +8,13 @@ CHROME_SCRIPT="$BRIDGE_DIR/open-automation-chrome.sh"
 RUNTIME_DIR="${VILLAGE_KAKAO_RUNTIME_DIR:-$HOME/.village-kakao-automation}"
 PID_FILE="$RUNTIME_DIR/bridge.pid"
 LOG_FILE="$RUNTIME_DIR/bridge.log"
+RUNNER_FILE="$RUNTIME_DIR/bridge-runner.sh"
+PLIST_FILE="$RUNTIME_DIR/com.village.kakao.dom-bridge.plist"
+LAUNCH_LABEL="com.village.kakao.dom-bridge"
 ENV_FILE="${VILLAGE_KAKAO_ENV_FILE:-$BRIDGE_DIR/.env}"
 LEGACY_ENV_FILE="$HOME/my-gas-project2-followup-integration/tools/kakao-dom-bridge/.env"
 PORT="${PORT:-8787}"
+DEFAULT_KAKAO_MANAGER_URL="https://business.kakao.com/_xhPMls/chats?t_src=business_partnercenter&t_ch=lnb&t_obj=%EB%82%B4%EC%B1%84%ED%8C%85_%ED%81%B4%EB%A6%AD"
 
 mkdir -p "$RUNTIME_DIR"
 
@@ -34,10 +38,76 @@ load_env() {
   export QUEUE_DIR="${QUEUE_DIR:-$BRIDGE_DIR/queue}"
   export VILLAGE_AI_WORKER_CMD="${VILLAGE_AI_WORKER_CMD:-$WORKER_CMD}"
   export VILLAGE_KAKAO_CHROME_DIR="${VILLAGE_KAKAO_CHROME_DIR:-$HOME/.village-kakao-chrome}"
+  export KAKAO_MANAGER_URL="${KAKAO_MANAGER_URL:-${KAKAO_CHANNEL_MANAGER_URL:-$DEFAULT_KAKAO_MANAGER_URL}}"
+  export KAKAO_CHANNEL_MANAGER_URL="${KAKAO_CHANNEL_MANAGER_URL:-$KAKAO_MANAGER_URL}"
+  export KAKAO_REMOTE_DEBUGGING_PORT="${KAKAO_REMOTE_DEBUGGING_PORT:-9223}"
+  if [[ "${HERMES_WORKER_COMMAND:-}" == "" || "${HERMES_WORKER_COMMAND:-}" == "hermes" ]]; then
+    export HERMES_WORKER_COMMAND="$(resolve_hermes_command)"
+  else
+    export HERMES_WORKER_COMMAND
+  fi
+  if [[ "${CUA_DRIVER_COMMAND:-}" == "" || "${CUA_DRIVER_COMMAND:-}" == "cua-driver" ]]; then
+    export CUA_DRIVER_COMMAND="$(resolve_cua_driver_command)"
+  else
+    export CUA_DRIVER_COMMAND
+  fi
+  export AI_WORKER_LIVE="${AI_WORKER_LIVE:-1}"
+  export AI_WORKER_AUTO_SEND="${AI_WORKER_AUTO_SEND:-1}"
+}
+
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+xml_escape() {
+  printf '%s' "$1" \
+    | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+bridge_pid() {
+  lsof -tiTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | head -n 1
+}
+
+resolve_hermes_command() {
+  if command -v hermes >/dev/null 2>&1; then
+    command -v hermes
+    return
+  fi
+  for candidate in \
+    "$HOME/.local/bin/hermes" \
+    "$HOME/.hermes/hermes-agent/venv/bin/hermes" \
+    "$HOME/.hermes/hermes-agent/hermes"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf 'hermes\n'
+}
+
+resolve_cua_driver_command() {
+  if command -v cua-driver >/dev/null 2>&1; then
+    command -v cua-driver
+    return
+  fi
+  for candidate in \
+    "$HOME/.local/bin/cua-driver" \
+    "/opt/homebrew/bin/cua-driver" \
+    "/usr/local/bin/cua-driver"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf '\n'
 }
 
 pid_alive() {
-  [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+  local pid
+  pid="$(bridge_pid)"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
 health() {
@@ -50,20 +120,247 @@ chrome_automation_profile_running() {
   ps -axo pid=,command= | grep -E "Google Chrome.*--user-data-dir=${escaped_profile}( |$)" | grep -v grep >/dev/null
 }
 
+chrome_automation_profile_pids() {
+  ps -axo pid=,command= \
+    | awk -v profile="$VILLAGE_KAKAO_CHROME_DIR" '
+      index($0, "Google Chrome") && index($0, "--user-data-dir=" profile) { print $1 }
+    '
+}
+
+chrome_automation_profile_has_kakao_url() {
+  local escaped_profile
+  escaped_profile="$(printf '%s' "$VILLAGE_KAKAO_CHROME_DIR" | sed 's/[][^$.*/]/\\&/g')"
+  ps -axo pid=,command= \
+    | grep -E "Google Chrome.*--user-data-dir=${escaped_profile}( |$)" \
+    | grep -E "business\\.kakao\\.com|center-pf\\.kakao\\.com" \
+    | grep -v grep >/dev/null
+}
+
+chrome_devtools_url() {
+  printf 'http://127.0.0.1:%s' "$KAKAO_REMOTE_DEBUGGING_PORT"
+}
+
+chrome_devtools_ready() {
+  curl -sS --max-time 1 "$(chrome_devtools_url)/json/version" >/dev/null 2>&1
+}
+
+urlencode() {
+  node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$1"
+}
+
+chrome_devtools_open_url() {
+  local encoded_url
+  encoded_url="$(urlencode "$1")"
+  curl -sS --max-time 2 -X PUT "$(chrome_devtools_url)/json/new?${encoded_url}" >/dev/null \
+    || curl -sS --max-time 2 "$(chrome_devtools_url)/json/new?${encoded_url}" >/dev/null
+}
+
+chrome_devtools_has_chat_tab() {
+  chrome_devtools_ready || return 1
+  curl -sS --max-time 2 "$(chrome_devtools_url)/json/list" \
+    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); const ok = tabs.some(t => t.type === "page" && /https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats/.test(t.url || "")); process.exit(ok ? 0 : 1); });'
+}
+
+chrome_devtools_close_non_chat_kakao_tabs() {
+  chrome_devtools_ready || return 0
+  local ids
+  ids="$(curl -sS --max-time 2 "$(chrome_devtools_url)/json/list" \
+    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); for (const t of tabs) { const url = t.url || ""; const isKakao = /^https:\/\/(business|center-pf)\.kakao\.com\//.test(url); const isChat = /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats/.test(url); if (t.type === "page" && t.id && isKakao && !isChat) console.log(t.id); } });')"
+  for id in $ids; do
+    curl -sS --max-time 2 -X PUT "$(chrome_devtools_url)/json/close/${id}" >/dev/null \
+      || curl -sS --max-time 2 "$(chrome_devtools_url)/json/close/${id}" >/dev/null \
+      || true
+  done
+}
+
+stop_automation_chrome_profile() {
+  local pids
+  pids="$(chrome_automation_profile_pids | tr '\n' ' ')"
+  if [[ -z "$pids" ]]; then return 0; fi
+  kill $pids 2>/dev/null || true
+  for _ in {1..20}; do
+    chrome_automation_profile_running || return 0
+    sleep 0.2
+  done
+  pids="$(chrome_automation_profile_pids | tr '\n' ' ')"
+  if [[ -n "$pids" ]]; then kill -9 $pids 2>/dev/null || true; fi
+}
+
+automation_worker_pids() {
+  ps -axo pid=,command= \
+    | awk -v root="$ROOT_DIR" '
+      index($0, root "/tools/ai-browser-worker/run.sh") ||
+      index($0, root "/tools/ai-browser-worker/worker.mjs") ||
+      index($0, "hermes chat --yolo -Q -t terminal,computer_use,vision") { print $1 }
+    '
+}
+
+stop_automation_workers() {
+  local pids
+  pids="$(automation_worker_pids | tr '\n' ' ')"
+  if [[ -z "$pids" ]]; then return 0; fi
+  echo "stopping automation worker processes: $pids"
+  for pid in $pids; do
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+  done
+  sleep 0.5
+  pids="$(automation_worker_pids | tr '\n' ' ')"
+  if [[ -n "$pids" ]]; then
+    for pid in $pids; do
+      pkill -KILL -P "$pid" 2>/dev/null || true
+      kill -9 "$pid" 2>/dev/null || true
+    done
+  fi
+}
+
+write_launch_agent() {
+  local node_bin
+  node_bin="$(command -v node)"
+  if [[ -z "$node_bin" ]]; then
+    echo "node not found in PATH" >&2
+    exit 1
+  fi
+
+  cat >"$RUNNER_FILE" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+USER_HOME=$(shell_quote "$HOME")
+BRIDGE_DIR=$(shell_quote "$BRIDGE_DIR")
+WORKER_CMD=$(shell_quote "$WORKER_CMD")
+ENV_FILE=$(shell_quote "$ENV_FILE")
+LEGACY_ENV_FILE=$(shell_quote "$LEGACY_ENV_FILE")
+NODE_BIN=$(shell_quote "$node_bin")
+HERMES_BIN=$(shell_quote "${HERMES_WORKER_COMMAND:-$(resolve_hermes_command)}")
+CUA_DRIVER_BIN=$(shell_quote "${CUA_DRIVER_COMMAND:-$(resolve_cua_driver_command)}")
+KAKAO_MANAGER_URL_DEFAULT=$(shell_quote "$KAKAO_MANAGER_URL")
+
+export HOME="\${HOME:-\$USER_HOME}"
+export PATH="\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
+cd "\$BRIDGE_DIR"
+
+file="\$ENV_FILE"
+if [[ ! -f "\$file" && -f "\$LEGACY_ENV_FILE" ]]; then
+  file="\$LEGACY_ENV_FILE"
+fi
+if [[ -f "\$file" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "\$file"
+  set +a
+fi
+
+export PORT="\${PORT:-8787}"
+export DEBOUNCE_MS="\${DEBOUNCE_MS:-60000}"
+export MAX_WAIT_MS="\${MAX_WAIT_MS:-180000}"
+export PROCESS_INITIAL_SCAN="\${PROCESS_INITIAL_SCAN:-false}"
+export WORKER_TIMEOUT_MS="\${WORKER_TIMEOUT_MS:-240000}"
+export SUPABASE_TIMEOUT_MS="\${SUPABASE_TIMEOUT_MS:-7000}"
+export QUEUE_DIR="\${QUEUE_DIR:-\$BRIDGE_DIR/queue}"
+export VILLAGE_AI_WORKER_CMD="\${VILLAGE_AI_WORKER_CMD:-\$WORKER_CMD}"
+export VILLAGE_NODE_BIN="\${VILLAGE_NODE_BIN:-\$NODE_BIN}"
+export KAKAO_MANAGER_URL="\${KAKAO_MANAGER_URL:-\$KAKAO_MANAGER_URL_DEFAULT}"
+export KAKAO_CHANNEL_MANAGER_URL="\${KAKAO_CHANNEL_MANAGER_URL:-\$KAKAO_MANAGER_URL}"
+export KAKAO_REMOTE_DEBUGGING_PORT="\${KAKAO_REMOTE_DEBUGGING_PORT:-9223}"
+if [[ "\${HERMES_WORKER_COMMAND:-}" == "" || "\${HERMES_WORKER_COMMAND:-}" == "hermes" ]]; then
+  export HERMES_WORKER_COMMAND="\$HERMES_BIN"
+else
+  export HERMES_WORKER_COMMAND
+fi
+if [[ "\${CUA_DRIVER_COMMAND:-}" == "" || "\${CUA_DRIVER_COMMAND:-}" == "cua-driver" ]]; then
+  export CUA_DRIVER_COMMAND="\$CUA_DRIVER_BIN"
+else
+  export CUA_DRIVER_COMMAND
+fi
+export AI_WORKER_LIVE="\${AI_WORKER_LIVE:-1}"
+export AI_WORKER_AUTO_SEND="\${AI_WORKER_AUTO_SEND:-1}"
+
+mkdir -p "\$QUEUE_DIR"
+exec "\$NODE_BIN" server.mjs
+EOF
+  chmod +x "$RUNNER_FILE"
+
+  cat >"$PLIST_FILE" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(xml_escape "$LAUNCH_LABEL")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$(xml_escape "$RUNNER_FILE")</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$(xml_escape "$BRIDGE_DIR")</string>
+  <key>StandardOutPath</key>
+  <string>$(xml_escape "$LOG_FILE")</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml_escape "$LOG_FILE")</string>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+EOF
+}
+
+launch_bridge() {
+  write_launch_agent
+  launchctl bootout "gui/$(id -u)/$LAUNCH_LABEL" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$(id -u)" "$PLIST_FILE" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_FILE"
+  for _ in {1..20}; do
+    if health >/dev/null 2>&1; then
+      bridge_pid >"$PID_FILE"
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
 cmd_start() {
   load_env
   mkdir -p "$QUEUE_DIR"
   if pid_alive; then
+    bridge_pid >"$PID_FILE"
     echo "already running: bridge pid $(cat "$PID_FILE")"
   else
-    (cd "$BRIDGE_DIR" && nohup node server.mjs >"$LOG_FILE" 2>&1 & echo $! >"$PID_FILE")
-    echo "started bridge pid $(cat "$PID_FILE")"
+    if launch_bridge; then
+      echo "started bridge pid $(cat "$PID_FILE")"
+    else
+      echo "failed to start bridge via launchctl" >&2
+      echo "log: $LOG_FILE" >&2
+      exit 1
+    fi
     echo "log: $LOG_FILE"
   fi
   if chrome_automation_profile_running; then
     echo "automation Chrome profile already running: $VILLAGE_KAKAO_CHROME_DIR"
+    if ! chrome_devtools_ready; then
+      echo "automation Chrome profile is missing DevTools port ${KAKAO_REMOTE_DEBUGGING_PORT}; relaunching profile"
+      stop_automation_chrome_profile
+      "$CHROME_SCRIPT" "$KAKAO_MANAGER_URL" >/dev/null
+      echo "relaunched isolated Chrome profile with DevTools: $(chrome_devtools_url)"
+    fi
+    if chrome_devtools_ready && ! chrome_devtools_has_chat_tab; then
+      chrome_devtools_open_url "$KAKAO_MANAGER_URL" || true
+      echo "opened Kakao chat URL in automation Chrome profile"
+    elif ! chrome_automation_profile_has_kakao_url; then
+      if chrome_devtools_ready; then
+        chrome_devtools_open_url "$KAKAO_MANAGER_URL" || true
+      else
+        "$CHROME_SCRIPT" "$KAKAO_MANAGER_URL" >/dev/null
+      fi
+      echo "opened Kakao URL in automation Chrome profile"
+    fi
+    if chrome_devtools_has_chat_tab; then
+      chrome_devtools_close_non_chat_kakao_tabs || true
+    fi
   else
-    "$CHROME_SCRIPT" "${KAKAO_MANAGER_URL:-https://center-pf.kakao.com/}" >/dev/null
+    "$CHROME_SCRIPT" "$KAKAO_MANAGER_URL" >/dev/null
     echo "opened isolated Chrome profile: $VILLAGE_KAKAO_CHROME_DIR"
   fi
   sleep 1
@@ -71,9 +368,15 @@ cmd_start() {
 }
 
 cmd_stop() {
+  load_env
+  stop_automation_workers
+  launchctl bootout "gui/$(id -u)/$LAUNCH_LABEL" >/dev/null 2>&1 || true
+  if [[ -f "$PLIST_FILE" ]]; then
+    launchctl bootout "gui/$(id -u)" "$PLIST_FILE" >/dev/null 2>&1 || true
+  fi
   if pid_alive; then
     local pid
-    pid="$(cat "$PID_FILE")"
+    pid="$(bridge_pid)"
     kill "$pid" 2>/dev/null || true
     for _ in {1..20}; do
       kill -0 "$pid" 2>/dev/null || break
@@ -103,28 +406,13 @@ cmd_stop() {
       echo "bridge not running"
     fi
   fi
+  stop_automation_workers
 }
 
-cmd_status() {
-  load_env
-  if pid_alive; then
-    echo "bridge process: running pid $(cat "$PID_FILE")"
-  else
-    echo "bridge process: not running"
-  fi
-  echo "health:"
-  health || echo "  bridge health unavailable"
-  echo
-  echo "Automation Chrome profile:"
-  echo "  dir: $VILLAGE_KAKAO_CHROME_DIR"
-  if chrome_automation_profile_running; then
-    echo "  process: running"
-  else
-    echo "  process: not running"
-  fi
-  echo
-  echo "Kakao Chrome tabs visible to AppleScript:"
-  osascript <<'APPLESCRIPT' 2>/dev/null || true
+print_applescript_kakao_tabs() {
+  local output_file script_pid attempts
+  output_file="$RUNTIME_DIR/applescript-status.$$"
+  osascript >"$output_file" 2>/dev/null <<'APPLESCRIPT' &
 tell application "Google Chrome"
   if it is not running then return "Chrome not running"
   set rows to {}
@@ -139,6 +427,94 @@ tell application "Google Chrome"
   return rows as text
 end tell
 APPLESCRIPT
+  script_pid=$!
+  for attempts in {1..15}; do
+    if ! kill -0 "$script_pid" 2>/dev/null; then
+      wait "$script_pid" 2>/dev/null || true
+      cat "$output_file" 2>/dev/null || true
+      rm -f "$output_file"
+      return
+    fi
+    sleep 0.2
+  done
+  kill "$script_pid" 2>/dev/null || true
+  wait "$script_pid" 2>/dev/null || true
+  rm -f "$output_file"
+  echo "  AppleScript diagnostic timed out"
+}
+
+cmd_status() {
+  load_env
+  if pid_alive; then
+    bridge_pid >"$PID_FILE"
+    echo "bridge process: running pid $(cat "$PID_FILE")"
+  else
+    rm -f "$PID_FILE"
+    echo "bridge process: not running"
+  fi
+  echo "health:"
+  health || echo "  bridge health unavailable"
+  echo
+  echo "Automation Chrome profile:"
+  echo "  dir: $VILLAGE_KAKAO_CHROME_DIR"
+  if chrome_automation_profile_running; then
+    echo "  process: running"
+  else
+    echo "  process: not running"
+  fi
+  if chrome_automation_profile_has_kakao_url; then
+    echo "  kakao launch url: present"
+  else
+    echo "  kakao launch url: not detected"
+  fi
+  echo "  DevTools: $(chrome_devtools_url)"
+  if chrome_devtools_ready; then
+    echo "  DevTools status: reachable"
+  else
+    echo "  DevTools status: unavailable"
+  fi
+  echo
+  echo "Hermes worker:"
+  echo "  command: ${HERMES_WORKER_COMMAND:-hermes}"
+  if [[ -x "${HERMES_WORKER_COMMAND:-}" ]]; then
+    echo "  status: executable"
+  elif command -v "${HERMES_WORKER_COMMAND:-hermes}" >/dev/null 2>&1; then
+    echo "  status: executable"
+  else
+    echo "  status: unavailable"
+  fi
+  echo
+  echo "CUA driver:"
+  echo "  command: ${CUA_DRIVER_COMMAND:-not found}"
+  if [[ -x "${CUA_DRIVER_COMMAND:-}" ]]; then
+    echo "  status: executable"
+  else
+    echo "  status: unavailable"
+  fi
+  echo
+  echo "AI worker mode:"
+  if [[ "${AI_WORKER_LIVE:-0}" == "1" ]]; then
+    echo "  execution: live"
+  else
+    echo "  execution: dry-run"
+  fi
+  if [[ "${AI_WORKER_AUTO_SEND:-0}" == "1" ]]; then
+    echo "  auto-send: enabled"
+  else
+    echo "  auto-send: disabled"
+  fi
+  echo
+  echo "Automation Chrome DevTools Kakao tabs:"
+  if chrome_devtools_ready; then
+    curl -sS --max-time 2 "$(chrome_devtools_url)/json/list" \
+      | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]").filter(t => /kakao|빌리지|카카오/.test(`${t.url || ""} ${t.title || ""}`)); if (!tabs.length) { console.log("No Kakao tabs"); return; } for (const t of tabs) console.log(`${t.id || "?"} ${t.title || ""} ${t.url || ""}`.slice(0, 240)); });' \
+      || echo "  DevTools tab list unavailable"
+  else
+    echo "  DevTools unavailable"
+  fi
+  echo
+  echo "Kakao Chrome tabs visible to AppleScript (diagnostic only):"
+  print_applescript_kakao_tabs
 }
 
 cmd_restart() {
@@ -173,6 +549,10 @@ Usage:
 Env:
   VILLAGE_KAKAO_ENV_FILE=/path/to/.env  Optional secret env file
   PORT=8787
+  AI_WORKER_LIVE=0                    Run worker in dry-run mode
+  AI_WORKER_AUTO_SEND=0               Disable safe auto-send
+  KAKAO_REMOTE_DEBUGGING_PORT=9223    DevTools port for isolated automation Chrome
+  CUA_DRIVER_COMMAND=/path/cua-driver Override CUA desktop-control binary
 EOF
 }
 

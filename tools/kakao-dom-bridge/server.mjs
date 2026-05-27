@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { processManualSend } from '../ai-browser-worker/worker.mjs';
 
 const CONFIG = {
   port: Number(process.env.PORT || 8787),
@@ -16,6 +17,9 @@ const CONFIG = {
   processInitialScan: process.env.PROCESS_INITIAL_SCAN !== 'false',
   ignoreShiftedRows: process.env.IGNORE_SHIFTED_ROWS === 'true',
   workerCommand: process.env.VILLAGE_AI_WORKER_CMD || '',
+  workerLive: process.env.AI_WORKER_LIVE === '1',
+  autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
+  topRowLiveWindowMinutes: Number(process.env.TOP_ROW_LIVE_WINDOW_MINUTES || 20),
   workerTimeoutMs: Number(process.env.WORKER_TIMEOUT_MS || process.env.HERMES_WORKER_TIMEOUT_MS || 240_000),
   supabaseTimeoutMs: Number(process.env.SUPABASE_TIMEOUT_MS || 7000)
 };
@@ -73,6 +77,12 @@ function readRequestBody(req) {
     req.on('end', () => resolve(body));
     req.on('error', reject);
   });
+}
+
+async function readJsonBody(req) {
+  const body = await readRequestBody(req);
+  if (!body.trim()) return {};
+  return JSON.parse(body);
 }
 
 function normalizeEvent(raw) {
@@ -159,6 +169,78 @@ function isLikelyShiftedExistingRow(event) {
   return top >= Number(process.env.CHAT_LIST_FIRST_ROW_MAX_TOP || 44);
 }
 
+function parseKoreanPreviewTimeMinutes(text) {
+  const match = /(오전|오후)\s*(\d{1,2}):(\d{2})/.exec(String(text || ''));
+  if (!match) return null;
+  let hour = Number(match[2]);
+  const minute = Number(match[3]);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  if (match[1] === '오전') {
+    if (hour === 12) hour = 0;
+  } else if (hour !== 12) {
+    hour += 12;
+  }
+  return (hour * 60) + minute;
+}
+
+function minutesSincePreviewTime(text, now = new Date()) {
+  const previewMinutes = parseKoreanPreviewTimeMinutes(text);
+  if (previewMinutes === null) return null;
+  const nowMinutes = (now.getHours() * 60) + now.getMinutes();
+  let diff = nowMinutes - previewMinutes;
+  if (diff < -720) diff += 1440;
+  return diff;
+}
+
+function hasUnreadCount(event = {}) {
+  if (event.raw?.unreadSignal === true || event.unreadSignal === true) return true;
+  const preview = String(event.previewText || '');
+  const explicitlyUnread = /안읽|읽지\s*않은|새\s*메시지|unread/i.test(preview);
+  if (!explicitlyUnread) return false;
+  const count = Number(event.unreadCount ?? event.unread_count ?? 0);
+  return Number.isFinite(count) && count > 0;
+}
+
+function hasDatedPreview(text) {
+  const preview = String(text || '');
+  return /\d{1,2}월\s*\d{1,2}일/.test(preview)
+    || /\d{4}[./-]\d{1,2}[./-]\d{1,2}/.test(preview);
+}
+
+function isLiveTopRowPreview(text, now = new Date()) {
+  const preview = String(text || '');
+  if (hasDatedPreview(preview)) return false;
+  if (isActionChromePreview(preview)) return false;
+  if (/방금|몇\s*분\s*전/.test(preview)) return true;
+  const ageMinutes = minutesSincePreviewTime(preview, now);
+  return ageMinutes !== null
+    && ageMinutes >= -1
+    && ageMinutes <= CONFIG.topRowLiveWindowMinutes;
+}
+
+function shouldQueueTopRowEvent(event) {
+  if (hasUnreadCount(event)) return !hasDatedPreview(event.previewText) && !isActionChromePreview(event.previewText);
+  return event.reason === 'top_row_changed' && isLiveTopRowPreview(event.previewText);
+}
+
+function isActionChromePreview(text) {
+  const preview = String(text || '').trim();
+  if (!preview) return true;
+  const exactNoise = new Set([
+    '저장하기',
+    '보낸 메시지 가이드',
+    '메모 내용 미리보기',
+    '사이드 메뉴 열기',
+    '중요 채팅방 해제',
+    '채팅 메시지 입력 폼 전송',
+    '카카오비즈니스 이용약관'
+  ]);
+  if (exactNoise.has(preview)) return true;
+  if (/^(?:hellodesk\s+)?저장하기\s+(오전|오후)\s*\d{1,2}:?\d{2}$/.test(preview)) return true;
+  if (/채널추가 요청 메시지|친구추가 요청 메시지|메시지 꾸미기|쿠폰 첨부|기본 메시지로 설정/.test(preview)) return true;
+  return false;
+}
+
 function appendNdjson(filename, object) {
   ensureQueueDir();
   fs.appendFileSync(path.join(CONFIG.queueDir, filename), `${JSON.stringify(object)}\n`, 'utf8');
@@ -195,6 +277,9 @@ async function writeSupabaseEvent(eventOrJob, kind) {
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
+    if (response.status === 409 && text.includes('duplicate key value')) {
+      return { skipped: true, duplicate: true };
+    }
     throw new Error(`Supabase insert failed: ${response.status} ${text}`);
   }
   return { ok: true };
@@ -315,6 +400,34 @@ function enqueueWorker(job) {
   return queued;
 }
 
+function enqueueManualSend(payload) {
+  const jobId = `manual-send-${Date.now()}`;
+  const run = async () => {
+    state.workerRunning = true;
+    state.currentJobId = jobId;
+    state.workerStartedAt = nowIso();
+    console.info('[dom-bridge] manual send start', jobId, payload.customerName || payload.roomTitle || '');
+    try {
+      const result = await processManualSend(payload);
+      state.lastWorkerError = null;
+      appendNdjson('manual-sends.ndjson', { at: nowIso(), jobId, payload: { ...payload, text: '[redacted]' }, result });
+      return result;
+    } catch (error) {
+      state.lastWorkerError = { at: nowIso(), jobId, message: error.message.slice(0, 1000) };
+      appendNdjson('errors.ndjson', { at: nowIso(), type: 'manual_send', message: error.message, payload: { ...payload, text: '[redacted]' } });
+      throw error;
+    } finally {
+      state.workerRunning = false;
+      state.currentJobId = null;
+      state.workerStartedAt = null;
+      console.info('[dom-bridge] manual send done', jobId);
+    }
+  };
+  const queued = workerChain.then(run, run);
+  workerChain = queued.catch(() => {});
+  return queued;
+}
+
 async function flushRoom(roomKey) {
   const roomState = state.rooms.get(roomKey);
   if (!roomState) return;
@@ -405,6 +518,19 @@ async function handleEvent(req, res) {
     return json(res, 202, { ok: true, diagnostic: true, queuedForAi: false });
   }
 
+  if ((event.reason === 'top_rows_backstop' || event.reason === 'top_row_changed') && !shouldQueueTopRowEvent(event)) {
+    appendNdjson('backstop-events.ndjson', {
+      ...event,
+      backstopReason: event.reason === 'top_rows_backstop' ? 'read_backstop_row' : 'non_live_top_row_change'
+    });
+    return json(res, 202, {
+      ok: true,
+      backstop: true,
+      ignored: event.reason === 'top_rows_backstop' ? 'read_backstop_row' : 'non_live_top_row_change',
+      queuedForAi: false
+    });
+  }
+
   if (
     event.reason === 'mutation'
     && state.lastContentScriptStartedAtMs
@@ -422,6 +548,11 @@ async function handleEvent(req, res) {
   if (isPageContainerPreview(event.previewText, event.roomKey)) {
     appendNdjson('ignored-container-events.ndjson', event);
     return json(res, 202, { ok: true, ignored: 'page_container', queuedForAi: false });
+  }
+
+  if (isActionChromePreview(event.previewText)) {
+    appendNdjson('ignored-chrome-events.ndjson', event);
+    return json(res, 202, { ok: true, ignored: 'action_chrome', queuedForAi: false });
   }
 
   if (isLikelyShiftedExistingRow(event)) {
@@ -461,10 +592,13 @@ const server = http.createServer(async (req, res) => {
           queueDir: CONFIG.queueDir,
           supabaseEnabled: Boolean(CONFIG.supabaseUrl && CONFIG.supabaseServiceRoleKey && CONFIG.supabaseTable),
           workerEnabled: Boolean(CONFIG.workerCommand),
+          workerLive: CONFIG.workerLive,
+          autoSendEnabled: CONFIG.autoSendEnabled,
           workerTimeoutMs: CONFIG.workerTimeoutMs,
           supabaseTimeoutMs: CONFIG.supabaseTimeoutMs,
           processInitialScan: CONFIG.processInitialScan,
-          ignoreShiftedRows: CONFIG.ignoreShiftedRows
+          ignoreShiftedRows: CONFIG.ignoreShiftedRows,
+          topRowLiveWindowMinutes: CONFIG.topRowLiveWindowMinutes
         },
         state: {
           startedAt: state.startedAt,
@@ -485,6 +619,22 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/events') {
       return await handleEvent(req, res);
+    }
+
+    if (req.method === 'POST' && url.pathname === '/manual-send') {
+      const body = await readJsonBody(req);
+      const text = String(body.text || '').trim();
+      const customerName = String(body.customerName || body.customer_name || '').trim();
+      const roomTitle = String(body.roomTitle || body.room_title || '').trim();
+      if (!text || text.length < 2) return json(res, 400, { ok: false, error: 'text is required' });
+      if (!customerName && !roomTitle) return json(res, 400, { ok: false, error: 'customerName or roomTitle is required' });
+      const result = await enqueueManualSend({
+        text,
+        customerName,
+        roomTitle,
+        followUpId: body.followUpId || body.follow_up_id || ''
+      });
+      return json(res, result.sent ? 200 : 502, { ok: Boolean(result.sent), result });
     }
 
     return json(res, 404, { ok: false, error: 'not found' });

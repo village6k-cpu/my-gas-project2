@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 
@@ -15,8 +18,13 @@ import {
   askVillageAi,
   buildReadOnlyLookupContext,
   buildHermesArgs,
+  resolveHermesCommand,
+  resolveCuaDriverCommand,
   buildKakaoTabAppleScript,
+  ensureKakaoChannelManagerTabViaDevtools,
   ensureKakaoChannelManagerTab,
+  kakaoDevtoolsBaseUrlFromEnv,
+  pickKakaoMainListTarget,
   pickKakaoMainListWindow,
   pickKakaoConversationWindow,
   findChatRowElementIndex,
@@ -26,7 +34,14 @@ import {
   buildCompactJobForPrompt,
   canAutoSendCustomerAnswer,
   isAutoSendEligibleLiveJob,
+  buildAutoReplyDedupeKey,
+  hasRecentSentAutoReply,
+  filterFollowUpRowsAfterAutoReply,
+  filterFollowUpRowsAgainstClosedHistory,
+  mergeFollowUpRowsByTopic,
   findKakaoMessageInputElementIndex,
+  findKakaoSendButtonElementIndex,
+  kakaoConversationContainsMessage,
   sendKakaoMessageViaChrome,
   runHermes,
   buildCloseKakaoConversationWindowAppleScript,
@@ -277,19 +292,82 @@ test('buildHermesArgs preserves AI computer_use and bypasses approval with yolo'
   assert.ok(args.includes('--yolo'));
 });
 
+test('resolveHermesCommand finds hermes in launchctl-safe fallback dirs', () => {
+  const resolved = resolveHermesCommand('hermes', {
+    PATH: '/usr/bin:/bin',
+    HOME: '/Users/village6k'
+  });
+  assert.match(resolved, /(^hermes$|\/hermes$)/);
+});
+
+test('resolveCuaDriverCommand finds cua-driver in launchctl-safe fallback dirs or returns empty', () => {
+  const resolved = resolveCuaDriverCommand('cua-driver', {
+    PATH: '/usr/bin:/bin',
+    HOME: '/Users/village6k'
+  });
+  assert.match(resolved, /(^$|\/cua-driver$)/);
+});
+
 test('buildKakaoTabAppleScript focuses existing Kakao Channel Manager tabs or opens one', () => {
   const script = buildKakaoTabAppleScript();
   assert.match(script, /business\.kakao\.com/);
   assert.match(script, /center-pf\.kakao\.com/);
   assert.match(script, / - 빌리지 - 카카오비즈니스/);
   assert.match(script, /set URL of tab t of window w to targetUrl/);
-  assert.match(script, /make new window with properties/);
+  assert.match(script, /set URL of active tab of newWindow to targetUrl/);
+  assert.doesNotMatch(script, /make new window with properties/);
   assert.match(script, /active tab index/);
   assert.match(script, /activate/);
   assert.match(script, /targetUrl/);
 });
 
-test('ensureKakaoChannelManagerTab invokes osascript with target chat URL', async () => {
+test('kakaoDevtoolsBaseUrlFromEnv resolves explicit URL and port envs', () => {
+  assert.equal(kakaoDevtoolsBaseUrlFromEnv({ KAKAO_DEVTOOLS_URL: 'http://127.0.0.1:9444/' }), 'http://127.0.0.1:9444');
+  assert.equal(kakaoDevtoolsBaseUrlFromEnv({ KAKAO_REMOTE_DEBUGGING_PORT: '9223' }), 'http://127.0.0.1:9223');
+  assert.equal(kakaoDevtoolsBaseUrlFromEnv({}), '');
+});
+
+test('pickKakaoMainListTarget selects list tab and avoids customer popup', () => {
+  const target = pickKakaoMainListTarget([
+    { id: 'popup', type: 'page', url: 'https://business.kakao.com/_x/chats', title: '최재형 - 빌리지 - 카카오비즈니스 파트너센터' },
+    { id: 'main', type: 'page', url: 'https://center-pf.kakao.com/_x/chats', title: '카카오비즈니스 파트너센터' }
+  ]);
+  assert.equal(target.id, 'main');
+});
+
+test('ensureKakaoChannelManagerTabViaDevtools focuses automation profile tab', async () => {
+  const requests = [];
+  const fetchImpl = async (url, init = {}) => {
+    requests.push({ url, method: init.method || 'GET' });
+    if (url === 'http://127.0.0.1:9223/json/list') {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify([
+          { id: 'main-tab', type: 'page', url: 'https://center-pf.kakao.com/_x/chats', title: '카카오비즈니스 파트너센터' }
+        ])
+      };
+    }
+    if (url === 'http://127.0.0.1:9223/json/activate/main-tab') {
+      return { ok: true, status: 200, text: async () => 'Target activated' };
+    }
+    throw new Error(`unexpected request ${url}`);
+  };
+
+  const result = await ensureKakaoChannelManagerTabViaDevtools({
+    cdpBaseUrl: 'http://127.0.0.1:9223',
+    fetchImpl
+  });
+
+  assert.deepEqual(result, {
+    status: 'focused_list_via_devtools',
+    targetId: 'main-tab',
+    url: 'https://center-pf.kakao.com/_x/chats'
+  });
+  assert.deepEqual(requests.map((request) => request.method), ['GET', 'PUT']);
+});
+
+test('ensureKakaoChannelManagerTab invokes osascript with target chat URL when CDP is not configured', async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
@@ -305,7 +383,8 @@ test('ensureKakaoChannelManagerTab invokes osascript with target chat URL', asyn
   const resultPromise = ensureKakaoChannelManagerTab({
     url: 'https://business.kakao.com/test/chats',
     timeoutMs: 1000,
-    spawnImpl
+    spawnImpl,
+    cdpBaseUrl: ''
   });
   child.stdout.write('focused_list\n');
   child.emit('close', 0);
@@ -619,6 +698,18 @@ test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', (
   assert.match(rows[0].follow_up_key, /^room-label:홍길동:홍길동:quote_send:/);
 });
 
+test('filterFollowUpRowsAfterAutoReply suppresses reply card after successful auto-send', () => {
+  const rows = [
+    { type: 'reply_needed', title: '위치 문의 답변' },
+    { type: 'price_review', title: '가격 확인' }
+  ];
+
+  assert.deepEqual(filterFollowUpRowsAfterAutoReply(rows, { sent: true }), [
+    { type: 'price_review', title: '가격 확인' }
+  ]);
+  assert.equal(filterFollowUpRowsAfterAutoReply(rows, { sent: false }).length, 2);
+});
+
 test('buildFollowUpRows keeps local DOM job ids out of UUID job_id column', () => {
   const rows = buildFollowUpRows({
     classification: 'faq',
@@ -634,6 +725,28 @@ test('buildFollowUpRows keeps local DOM job ids out of UUID job_id column', () =
   assert.equal(rows.length, 1);
   assert.equal(rows[0].job_id, null);
   assert.match(rows[0].follow_up_key, /^preview:21d6b164a492d90e:한이솔:contract_document:/);
+});
+
+test('buildFollowUpRows suppresses no-match manual-confirmation noise cards', () => {
+  const rows = buildFollowUpRows({
+    classification: 'unclear',
+    confidence: 'high',
+    reason: 'matching Kakao conversation not visible within budget',
+    safety_checks: {
+      kakao_conversation_opened: false
+    },
+    customer: { name: 'hellodesk' },
+    follow_up_items: [{
+      type: 'reply_needed',
+      title: 'Kakao 대화방 수동 확인 필요',
+      customer_name: 'hellodesk',
+      summary: '작업 증거의 navigation hint는 hellodesk였으나 Kakao Channel Manager 현재 채팅 목록/검색에서 해당 대화방을 확인하지 못했습니다.',
+      recommended_action: '카카오 채널 관리자에서 hellodesk 대화방을 수동으로 찾으세요.',
+      blocking_reason: 'matching Kakao conversation not visible within budget'
+    }]
+  }, { jobId: 'dom-no-match', roomKey: 'preview:03e2dc74d0122490' });
+
+  assert.deepEqual(rows, []);
 });
 
 test('buildFollowUpRows uses a stable semantic key for same customer task across repeated jobs', () => {
@@ -666,6 +779,121 @@ test('buildFollowUpRows uses a stable semantic key for same customer task across
 
   assert.equal(first[0].follow_up_key, second[0].follow_up_key);
   assert.match(first[0].follow_up_key, /^preview:jung-si-on:정시온:contract_document:/);
+});
+
+test('buildFollowUpRows uses topic anchors for repeated FAQ follow-ups without amounts or dates', () => {
+  const first = buildFollowUpRows({
+    classification: 'price',
+    confidence: 'high',
+    customer: { name: '최재형' },
+    follow_up_items: [{
+      type: 'price_review',
+      title: '학생 할인율 문의 답변 검토',
+      summary: '고객이 학생 할인율이 몇 퍼센트인지 문의했습니다.'
+    }]
+  }, { jobId: 'dom-first', roomKey: 'preview:choi' });
+  const second = buildFollowUpRows({
+    classification: 'price',
+    confidence: 'high',
+    customer: { name: '최재형' },
+    follow_up_items: [{
+      type: 'price_review',
+      title: '최재형님 학생할인 비율 문의 확인',
+      summary: '고객이 학생할인이 몇 프로인지 문의했습니다.'
+    }]
+  }, { jobId: 'dom-second', roomKey: 'preview:choi' });
+
+  assert.equal(first[0].follow_up_key, second[0].follow_up_key);
+  assert.match(first[0].follow_up_key, /discount_policy/);
+});
+
+test('filterFollowUpRowsAgainstClosedHistory suppresses already dismissed topic tasks', () => {
+  const rows = buildFollowUpRows({
+    classification: 'price',
+    confidence: 'high',
+    customer: { name: '최재형' },
+    follow_up_items: [
+      {
+        type: 'price_review',
+        title: '최재형님 학생 할인율 문의 답변 확인',
+        summary: '고객이 위치 안내를 받은 뒤 학생 할인율이 몇 프로인지 문의했습니다.'
+      },
+      {
+        type: 'reply_needed',
+        title: '최재형 고객 할인 문의 답장 필요',
+        summary: '최신 고객 메시지가 직원 답변 이후 발생한 할인 문의입니다.'
+      }
+    ]
+  }, { jobId: 'dom-second', roomKey: 'preview:choi' });
+  const history = [{
+    customer_name: '최재형',
+    type: 'reply_needed',
+    status: 'dismissed',
+    title: '학생 할인 문의 답장 필요',
+    summary: '직원 답변 이후 고객이 새 할인 문의를 남겼습니다.'
+  }];
+
+  assert.equal(rows.length, 2);
+  assert.deepEqual(filterFollowUpRowsAgainstClosedHistory(rows, history), []);
+});
+
+test('mergeFollowUpRowsByTopic keeps one card for one operational customer update', () => {
+  const rows = buildFollowUpRows({
+    classification: 'reservation',
+    confidence: 'medium',
+    customer: { name: '박재인' },
+    follow_up_items: [
+      {
+        type: 'reply_needed',
+        title: '반납 및 다음 회차 메모 확인 답장',
+        summary: '고객의 반납 완료 및 다음 회차 일정 공유에 대해 짧은 확인 답장이 유용합니다.',
+        recommended_action: '확인 답장을 보내세요.',
+        suggested_reply_draft: '확인했습니다. 체크해두겠습니다.'
+      },
+      {
+        type: 'damage_repair',
+        title: '경고 메시지 뜬 소니 배터리 확인 필요',
+        summary: '고객이 애플박스 위에 둔 소니 배터리가 경고 메시지 발생 배터리라고 설명했습니다.',
+        recommended_action: '배터리 상태를 확인하세요.'
+      },
+      {
+        type: 'schedule_check',
+        title: '다음 회차 6/1-6/2 및 5/31 밤 픽업 메모 확인',
+        summary: '고객이 다음 회차 일정과 픽업 예정 시간을 전달했습니다.',
+        recommended_action: '다음 회차 일정을 확인하세요.'
+      }
+    ]
+  }, { jobId: 'dom-park', roomKey: 'preview:park' });
+
+  const merged = mergeFollowUpRowsByTopic(rows);
+  assert.equal(rows.length, 3);
+  assert.equal(merged.length, 1);
+  assert.match(merged[0].recommended_action, /배터리 상태/);
+  assert.match(merged[0].recommended_action, /다음 회차 일정/);
+  assert.equal(merged[0].suggested_reply_draft, '확인했습니다. 체크해두겠습니다.');
+});
+
+test('mergeFollowUpRowsByTopic normalizes customer aliases with issue suffixes', () => {
+  const rows = [
+    {
+      follow_up_key: 'a',
+      customer_name: '한시우',
+      type: 'damage_repair',
+      priority: 'normal',
+      title: '한시우 미반납/파손 관련 반납 예정 확인',
+      summary: '고객이 미반납 물품을 확인 후 가져다 드리겠다고 답변함.'
+    },
+    {
+      follow_up_key: 'b',
+      customer_name: '한시우/60x 파손',
+      type: 'damage_repair',
+      priority: 'normal',
+      title: '한시우 미반납/파손 관련 반납 확인 필요',
+      summary: '고객이 미반납/확인 대상 물품을 확인 후 가져다 드리겠다고 답변함.'
+    }
+  ];
+
+  assert.equal(mergeFollowUpRowsByTopic(rows).length, 1);
 });
 
 test('closeKakaoConversationWindow targets only the opened Kakao customer popup', async () => {
@@ -729,18 +957,64 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, reply_decision: { ...baseDecision.reply_decision, text: '네 대여 가능합니다.' } }, { autoSendEnabled: true }).allowed, false);
 });
 
-test('isAutoSendEligibleLiveJob blocks dated/backfill rows from auto-send', () => {
+test('isAutoSendEligibleLiveJob allows unread same-day rows and blocks dated/backfill rows from auto-send', () => {
   assert.deepEqual(isAutoSendEligibleLiveJob({
     preview_text: '중요 홍길동 네 감사합니다 오후 3:45',
     events: [{ reason: 'top_row_changed' }]
   }), {
     eligible: true,
-    reason: 'top_row_changed_live_time_format'
+    reason: 'top_row_live_time_format'
   });
   assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'mutation' }] }).eligible, false);
   assert.equal(isAutoSendEligibleLiveJob({ payload: { previewText: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'top_row_changed' }] } }).eligible, true);
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    preview_text: '중요 홍길동 3 네 감사합니다 오후 3:45',
+    unread_count: 3,
+    events: [{ reason: 'top_rows_backstop' }]
+  }), {
+    eligible: true,
+    reason: 'top_row_unread'
+  });
+  assert.equal(isAutoSendEligibleLiveJob({
+    preview_text: '중요 홍길동 3 네 감사합니다 5월 26일',
+    unread_count: 3,
+    events: [{ reason: 'top_rows_backstop' }]
+  }).eligible, false);
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'top_rows_backstop' }] }).eligible, false);
   assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 한시우/60x 파손 video 5월 25일', events: [{ reason: 'top_row_changed' }] }).eligible, false);
   assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 배성문 1월 15일 건은 4만원입니다. 오후 3:45', events: [{ reason: 'top_row_changed' }] }).eligible, false);
+});
+
+test('auto reply dedupe key uses customer message and outgoing text', () => {
+  const key = buildAutoReplyDedupeKey({
+    job: { preview_text: '최재형 1 빌리지 위치가 어떻게 되나요? 오전 2:29' },
+    decision: {
+      customer: { name: '최재형' },
+      visible_messages_used: [
+        { sender: '빌리지님', message: '이전 답변' },
+        { sender: '최재형', message: '빌리지 위치가 어떻게 되나요?' }
+      ],
+      reply_decision: { text: '빌리지는 서울 마포구 동교로 23길 32, 2층입니다.' }
+    }
+  });
+
+  assert.match(key, /최재형/);
+  assert.match(key, /빌리지 위치가 어떻게 되나요/);
+  assert.match(key, /동교로 23길 32/);
+});
+
+test('hasRecentSentAutoReply blocks duplicate sent replies only inside window', () => {
+  const logPath = path.join(os.tmpdir(), `tmp-auto-replies-${Date.now()}.ndjson`);
+  const now = new Date('2026-05-26T17:40:00.000Z');
+  const key = '최재형|빌리지 위치가 어떻게 되나요?|동교로 23길 32';
+  fs.writeFileSync(logPath, [
+    JSON.stringify({ at: '2026-05-26T17:20:00.000Z', dedupeKey: key, result: { sent: true } }),
+    JSON.stringify({ at: '2026-05-26T16:00:00.000Z', dedupeKey: 'other', result: { sent: true } })
+  ].join('\n'));
+
+  assert.equal(hasRecentSentAutoReply({ autoSendLogPath: logPath }, key, { now, windowMs: 30 * 60 * 1000 }), true);
+  assert.equal(hasRecentSentAutoReply({ autoSendLogPath: logPath }, key, { now, windowMs: 5 * 60 * 1000 }), false);
+  fs.unlinkSync(logPath);
 });
 
 test('findKakaoMessageInputElementIndex finds the Kakao message input field', () => {
@@ -750,18 +1024,46 @@ test('findKakaoMessageInputElementIndex finds the Kakao message input field', ()
 - [42] AXButton "전송"
 `;
   assert.equal(findKakaoMessageInputElementIndex(tree), 41);
+  assert.equal(findKakaoSendButtonElementIndex(tree), 42);
+  assert.equal(kakaoConversationContainsMessage('- [20] AXStaticText = "네 확인했습니다."', '네 확인했습니다.'), true);
 });
 
-test('sendKakaoMessageViaChrome types into Kakao input and presses return', async () => {
+test('findKakaoMessageInputElementIndex uses Kakao input form context instead of address bar', () => {
+  const tree = `
+- [4] AXGroup actions=[AXShowMenu]
+  - [6] AXTextField = "business.kakao.com/_xhPMls/chats/4925133758027996" (주소창 및 검색창)
+- [681] AXGroup
+  - [682] AXGroup (채팅 메시지 입력 폼)
+    - [684] AXStaticText = "채팅 메시지 입력 폼"
+    - [685] AXTextArea actions=[AXShowMenu, AXScrollToVisible]
+    - [693] AXGroup
+      - [694] AXButton actions=[AXShowMenu, AXScrollToVisible]
+  - [695] AXButton "전송" DISABLED actions=[AXShowMenu, AXScrollToVisible]
+`;
+  assert.equal(findKakaoMessageInputElementIndex(tree), 685);
+  assert.equal(findKakaoSendButtonElementIndex(tree), 695);
+});
+
+test('sendKakaoMessageViaChrome clicks send button and verifies sent bubble', async () => {
   const calls = [];
+  let stateCalls = 0;
   const spawnImpl = (cmd, args) => {
     calls.push({ cmd, args });
     const child = new EventEmitter();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
     process.nextTick(() => {
-      if (args[1] === 'get_window_state') {
-        child.stdout.end(JSON.stringify({ tree_markdown: '- [41] AXTextArea "채팅 메시지 입력 폼" value=""' }));
+      if (cmd === 'osascript') {
+        child.stdout.end('');
+      } else if (args[1] === 'get_window_state') {
+        stateCalls += 1;
+        child.stdout.end(JSON.stringify({
+          tree_markdown: stateCalls === 1
+            ? '- [41] AXTextArea "채팅 메시지 입력 폼" value=""\n- [42] AXButton "전송"'
+            : stateCalls === 2
+              ? '- [41] AXTextArea "채팅 메시지 입력 폼" value="네 확인했습니다."\n- [42] AXButton "전송"'
+              : '- [20] AXStaticText = "네 확인했습니다."\n- [41] AXTextArea "채팅 메시지 입력 폼" value=""'
+        }));
       } else {
         child.stdout.end('{}');
       }
@@ -775,9 +1077,123 @@ test('sendKakaoMessageViaChrome types into Kakao input and presses return', asyn
   }, { spawnImpl });
 
   assert.equal(result.sent, true);
-  assert.equal(calls[1].args[1], 'type_text');
-  assert.match(calls[1].args[2], /네 확인했습니다/);
-  assert.equal(calls[2].args[1], 'press_key');
+  assert.equal(result.reason, 'sent_via_chrome_verified');
+  assert.equal(calls[0].cmd, 'osascript');
+  assert.equal(calls[1].args[1], 'get_window_state');
+  assert.equal(calls[2].args[1], 'type_text');
+  assert.match(calls[2].args[2], /네 확인했습니다/);
+  assert.equal(calls[4].args[1], 'get_window_state');
+  assert.equal(calls[5].args[1], 'click');
+  assert.equal(calls[7].args[1], 'get_window_state');
+});
+
+test('sendKakaoMessageViaChrome reactivates target window and retries disabled send button', async () => {
+  const calls = [];
+  let stateCalls = 0;
+  let clickCalls = 0;
+  const spawnImpl = (cmd, args) => {
+    calls.push({ cmd, args });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (cmd === 'osascript') {
+        child.stdout.end('');
+        child.emit('close', 0);
+      } else if (args[1] === 'get_window_state') {
+        stateCalls += 1;
+        const tree = stateCalls >= 4
+          ? '- [20] AXStaticText = "네 확인했습니다."\n- [41] AXTextArea "채팅 메시지 입력 폼" value=""'
+          : '- [41] AXTextArea "채팅 메시지 입력 폼" value="네 확인했습니다."\n- [42] AXButton "전송"';
+        child.stdout.end(JSON.stringify({ tree_markdown: tree }));
+        child.emit('close', 0);
+      } else if (args[1] === 'click') {
+        clickCalls += 1;
+        if (clickCalls === 1) {
+          child.stderr.end('AXButton "전송" is disabled (AXEnabled = false)');
+          child.emit('close', 1);
+        } else {
+          child.stdout.end('{}');
+          child.emit('close', 0);
+        }
+      } else {
+        child.stdout.end('{}');
+        child.emit('close', 0);
+      }
+    });
+    return child;
+  };
+
+  const result = await sendKakaoMessageViaChrome('네 확인했습니다.', {
+    conversation_window: { pid: 123, window_id: 456, title: '고객 - 빌리지 - 카카오비즈니스 파트너센터' }
+  }, { spawnImpl });
+
+  assert.equal(result.sent, true);
+  assert.equal(result.retried_after_frontmost_activation, true);
+  assert.equal(clickCalls, 2);
+  assert.ok(calls.filter((call) => call.cmd === 'osascript').length >= 3);
+});
+
+test('sendKakaoMessageViaChrome treats Chrome activation failure as non-fatal and verifies send', async () => {
+  let stateCalls = 0;
+  const spawnImpl = (cmd, args) => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (cmd === 'osascript') {
+        child.stderr.end('not authorised to send Apple events');
+        child.emit('close', 1);
+      } else if (args[1] === 'get_window_state') {
+        stateCalls += 1;
+        child.stdout.end(JSON.stringify({
+          tree_markdown: stateCalls >= 3
+            ? '- [20] AXStaticText = "네 확인했습니다."\n- [41] AXTextArea "채팅 메시지 입력 폼" value=""'
+            : '- [41] AXTextArea "채팅 메시지 입력 폼" value="네 확인했습니다."\n- [42] AXButton "전송"'
+        }));
+        child.emit('close', 0);
+      } else {
+        child.stdout.end('{}');
+        child.emit('close', 0);
+      }
+    });
+    return child;
+  };
+
+  const result = await sendKakaoMessageViaChrome('네 확인했습니다.', {
+    conversation_window: { pid: 123, window_id: 456, title: '고객 - 빌리지 - 카카오비즈니스 파트너센터' }
+  }, { spawnImpl });
+
+  assert.equal(result.sent, true);
+  assert.equal(result.reason, 'sent_via_chrome_verified');
+});
+
+test('sendKakaoMessageViaChrome refuses sent=true when Kakao bubble is not verified', async () => {
+  const spawnImpl = (_cmd, args) => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (args[0] === '-e') {
+        child.stdout.end('');
+      } else if (args[1] === 'get_window_state') {
+        child.stdout.end(JSON.stringify({
+          tree_markdown: '- [41] AXTextArea "채팅 메시지 입력 폼" value=""\n- [42] AXButton "전송"'
+        }));
+      } else {
+        child.stdout.end('{}');
+      }
+      child.emit('close', 0);
+    });
+    return child;
+  };
+
+  const result = await sendKakaoMessageViaChrome('네 확인했습니다.', {
+    conversation_window: { pid: 123, window_id: 456, title: '고객 - 빌리지 - 카카오비즈니스 파트너센터' }
+  }, { spawnImpl });
+
+  assert.equal(result.sent, false);
+  assert.equal(result.reason, 'send_not_verified_in_conversation');
 });
 
 test('mapDecisionToStatusPatch routes write and no-write decisions to review states', () => {

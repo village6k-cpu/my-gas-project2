@@ -4,7 +4,7 @@
 
 이 자동화는 아직 하나의 설치형 앱이 아니라 여러 부품이 연결된 자동화 시스템이다.
 
-1. 네 맥의 Chrome에서 카카오톡 채널관리자 화면을 열어둔다.
+1. 네 맥의 자동화 전용 Chrome profile에서 카카오톡 채널관리자 화면을 열어둔다.
 2. Chrome 확장 프로그램 `tools/kakao-dom-watcher-extension`이 채팅 목록의 새 메시지를 감지한다.
 3. 로컬 bridge 서버 `tools/kakao-dom-bridge`가 `http://127.0.0.1:8787`에서 확장 프로그램 이벤트를 받는다.
 4. AI worker `tools/ai-browser-worker`가 Chrome의 카카오 채팅방을 열고 고객 메시지, 직원 메시지, 시트 입력 필요 여부, 후속조치 업무를 판단한다.
@@ -38,25 +38,29 @@ SUPABASE_TABLE=ai_processing_events
 SUPABASE_FOLLOW_UP_TABLE=ai_follow_up_items
 ```
 
-4. 카카오 채널관리자에 로그인된 Chrome을 열고 `tools/kakao-dom-watcher-extension` 확장 프로그램을 로드한다.
-5. bridge 서버를 실행한다.
+4. 제품 런처로 bridge, AI worker, 자동화 Chrome profile을 실행한다. 런처는 isolated profile을 DevTools 포트 `9223`으로 띄운다.
 
 ```bash
-cd tools/kakao-dom-bridge
-npm run start
+cd ~/my-gas-project2
+scripts/kakao-automation start
 ```
 
-6. AI worker를 별도 터미널에서 실행한다. 운영에서는 job 처리 주기를 별도 launchd/cron/터미널 루프로 감싼다.
+5. 자동화 Chrome profile에서 카카오 채널관리자에 로그인하고 `tools/kakao-dom-watcher-extension` 확장 프로그램을 로드한다.
+6. 상태를 확인한다.
 
 ```bash
-cd tools/ai-browser-worker
-node worker.mjs --once
+scripts/kakao-automation status
 ```
+
+운영 기본값은 `AI_WORKER_LIVE=1`, `AI_WORKER_AUTO_SEND=1`이다. 즉 AI worker가 실제 카카오 화면을 열어 읽고, 확인요청/후속조치/안전한 자동답장 후보를 처리한다. 임시 점검 때만 `AI_WORKER_LIVE=0` 또는 `AI_WORKER_AUTO_SEND=0`으로 낮춘다.
+
+`scripts/kakao-automation status`에서 `Automation Chrome profile > DevTools status: reachable`가 떠야 worker가 일반 Chrome이 아니라 자동화 profile의 탭을 제어한다. 기존에 포트 없이 떠 있던 자동화 Chrome은 `scripts/kakao-automation start` 또는 `restart` 때 자동으로 닫고 다시 연다.
+
+launchctl은 터미널보다 PATH가 짧다. 그래서 런처가 `node`, `hermes`, `cua-driver` 절대 경로를 찾아 runner에 주입한다. `status`에서 `Hermes worker > status: executable`과 `CUA driver > status: executable`이 떠야 live worker가 Hermes subprocess와 Mac 화면 제어까지 실행할 수 있다.
 
 ## 어떻게 끄는가?
 
-- bridge 서버 터미널에서 `Ctrl+C`를 누른다.
-- AI worker 터미널 또는 실행 루프를 종료한다.
+- `scripts/kakao-automation stop`을 실행한다.
 - Chrome 확장 프로그램 관리 화면에서 watcher 확장 프로그램을 끄거나 제거한다.
 - 긴급 정지는 `.env`의 Supabase 키를 제거하거나 bridge/worker 프로세스를 중지하는 방식이 가장 확실하다.
 
@@ -64,7 +68,7 @@ node worker.mjs --once
 
 - 맥에서 실행되는 Chrome 확장 프로그램, bridge 서버, AI worker는 모두 멈춘다.
 - Supabase와 Vercel 대시보드는 계속 살아 있지만 새 카카오 이벤트 수집과 AI 처리는 진행되지 않는다.
-- 맥을 다시 켠 뒤 Chrome 카카오 로그인 상태를 확인하고 bridge 서버와 AI worker를 다시 실행해야 한다.
+- 맥을 다시 켠 뒤 Chrome 카카오 로그인 상태를 확인하고 `scripts/kakao-automation start`를 다시 실행해야 한다.
 - 맥이 꺼져 있는 동안 이미 Supabase에 들어간 후속조치 카드는 대시보드에서 계속 볼 수 있다.
 
 ## Chrome/Kakao 로그인은 필요한가?
@@ -95,8 +99,8 @@ DASHBOARD_TOKEN=choose-a-private-dashboard-token
 ## 문제 생기면 어디를 확인하는가?
 
 - Chrome 확장 프로그램: `chrome://extensions`의 service worker/콘솔 로그, 확장 프로그램 권한, 카카오 채널관리자 탭 상태
-- bridge 서버: `tools/kakao-dom-bridge` 터미널 로그, `http://127.0.0.1:8787/health`
-- AI worker: `tools/ai-browser-worker` 터미널 로그, Hermes 실행 가능 여부, Chrome 접근 권한, Kakao 로그인 상태
+- bridge 서버: `scripts/kakao-automation status`, `scripts/kakao-automation logs 200`, `http://127.0.0.1:8787/health`
+- AI worker: `workerLive`, `autoSendEnabled`, `Hermes worker > status: executable`, `CUA driver > status: executable`, 자동화 Chrome DevTools reachable 여부, Kakao 로그인 상태
 - Supabase queue: `ai_processing_events.status`, `error_message`, `payload.ai_worker_result`
 - 후속조치 카드: `ai_follow_up_items.status`, `priority`, `type`, `follow_up_key`
 - Vercel 대시보드: Vercel Function logs, `/api/follow-ups` 응답, `DASHBOARD_TOKEN` 불일치 여부

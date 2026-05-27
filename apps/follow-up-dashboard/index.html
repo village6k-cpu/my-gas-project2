@@ -296,6 +296,10 @@
       position: relative;
       overflow: hidden;
     }
+    .card.selected {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.08), var(--shadow-card);
+    }
     .card::before {
       content: '';
       position: absolute;
@@ -307,6 +311,21 @@
     .card.priority-high::before   { background: var(--high); }
     .card.priority-normal::before { background: var(--normal); }
     .card.priority-low::before    { background: var(--low); }
+
+    .card-top {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .card-select {
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      margin-top: 1px;
+      accent-color: var(--primary);
+      cursor: pointer;
+    }
+    .card-main { min-width: 0; flex: 1 1 auto; }
 
     .card-chips {
       display: flex;
@@ -387,6 +406,34 @@
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .reply-editor {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: #f8fafc;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-sm);
+    }
+    .reply-editor label {
+      display: block;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .reply-editor textarea {
+      width: 100%;
+      min-height: 92px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 10px;
+      font: inherit;
+      font-size: 13.5px;
+      line-height: 1.5;
+      color: var(--ink);
+      background: var(--surface);
+    }
 
     details.foldable { margin-top: 10px; }
     details.foldable > summary {
@@ -450,6 +497,47 @@
     .btn.ghost {
       background: transparent;
       color: var(--muted);
+    }
+    .btn.send {
+      background: #0f766e;
+      color: #fff;
+      border-color: #0f766e;
+    }
+    .btn.send:hover { background: #115e59; }
+
+    .bulkbar {
+      position: sticky;
+      top: 112px;
+      z-index: 8;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: rgba(255,255,255,0.96);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 10px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow-card);
+    }
+    .bulkbar[hidden] { display: none; }
+    .bulk-count {
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--ink-soft);
+      white-space: nowrap;
+    }
+    .bulk-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .bulk-actions .btn {
+      flex: 0 0 auto;
+      min-height: 34px;
+      padding: 0 10px;
+      font-size: 12.5px;
     }
 
     /* ---------- Collapsible category group ---------- */
@@ -579,6 +667,15 @@
   </header>
   <main class="wrap">
     <div id="error" aria-live="polite"></div>
+    <div class="bulkbar" id="bulkbar" hidden>
+      <div class="bulk-count" id="bulk-count">0개 선택</div>
+      <div class="bulk-actions">
+        <button class="btn primary" data-bulk-action="done">완료</button>
+        <button class="btn" data-bulk-action="in_progress">진행중</button>
+        <button class="btn ghost" data-bulk-action="dismissed">무시</button>
+        <button class="btn ghost" data-bulk-action="clear">선택 해제</button>
+      </div>
+    </div>
     <section class="stats" id="stats" aria-label="요약"></section>
     <section class="section" id="critical-section" hidden>
       <div class="section-head">
@@ -630,6 +727,10 @@
   };
   const PRIORITY_ORDER = { urgent: 0, high: 1, normal: 2, low: 3 };
   const CLOSED = new Set(['done', 'dismissed']);
+  const LOCAL_BRIDGE_URL = 'http://127.0.0.1:8787';
+  const selectedIds = new Set();
+  const groupOpenTypes = new Set();
+  let currentItems = [];
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -676,6 +777,7 @@
     const prLabel = PRIORITY_LABELS[x.priority] || x.priority || '';
     const stLabel = STATUS_LABELS[x.status] || x.status || '';
     const closed = CLOSED.has(x.status);
+    const selected = selectedIds.has(x.id);
 
     const chips = [
       typeLabel ? `<span class="chip">${esc(typeLabel)}</span>` : '',
@@ -690,8 +792,20 @@
       ? `<div class="action-box recommended"><span class="lbl">추천 조치</span><div class="body">${esc(x.recommended_action)}</div></div>`
       : '';
 
-    const draft = x.suggested_reply_draft
-      ? `<details class="foldable"><summary>답변 초안 보기</summary><div class="fold-body"><div class="action-box"><span class="lbl">답변 초안</span><div class="body">${esc(x.suggested_reply_draft)}</div></div></div></details>`
+    const draft = x.suggested_reply_draft && !closed
+      ? `<div class="reply-editor">
+          <label for="draft-${esc(x.id)}">답변 초안</label>
+          <textarea id="draft-${esc(x.id)}" data-draft-id="${esc(x.id)}">${esc(x.suggested_reply_draft)}</textarea>
+          <div class="card-actions">
+            <button class="btn send" data-action="send_reply" data-id="${esc(x.id)}">전송</button>
+          </div>
+        </div>`
+      : x.suggested_reply_draft
+        ? `<details class="foldable"><summary>답변 초안 보기</summary><div class="fold-body"><div class="action-box"><span class="lbl">답변 초안</span><div class="body">${esc(x.suggested_reply_draft)}</div></div></div></details>`
+        : '';
+
+    const selectBox = !closed
+      ? `<input class="card-select" type="checkbox" aria-label="선택" data-select-id="${esc(x.id)}" ${selected ? 'checked' : ''}>`
       : '';
 
     const hasEvidence = evidence.length > 0 || x.blocking_reason;
@@ -709,22 +823,28 @@
           <button class="btn ghost" data-action="dismissed" data-id="${esc(x.id)}">무시</button>
         </div>`;
 
-    return `<article class="card priority-${esc(x.priority || 'normal')}">
-      <div class="card-chips">${chips}</div>
-      <h3>${esc(x.title || '제목 없음')}</h3>
-      <div class="meta">${customer}${when}</div>
-      ${x.summary ? `<div class="summary">${esc(x.summary)}</div>` : ''}
-      ${recAction}
-      ${draft}
-      ${evidenceBlock}
-      ${actions}
+    return `<article class="card priority-${esc(x.priority || 'normal')} ${selected ? 'selected' : ''}" data-card-id="${esc(x.id)}">
+      <div class="card-top">
+        ${selectBox}
+        <div class="card-main">
+          <div class="card-chips">${chips}</div>
+          <h3>${esc(x.title || '제목 없음')}</h3>
+          <div class="meta">${customer}${when}</div>
+          ${x.summary ? `<div class="summary">${esc(x.summary)}</div>` : ''}
+          ${recAction}
+          ${draft}
+          ${evidenceBlock}
+          ${actions}
+        </div>
+      </div>
     </article>`;
   }
 
   function renderGroup(typeKey, items) {
     const label = TYPE_LABELS[typeKey] || typeKey;
     const sorted = items.slice().sort(sortByPriorityThenNew);
-    return `<details class="group">
+    const open = groupOpenTypes.has(typeKey) || groupOpenTypes.size === 0;
+    return `<details class="group" data-group-type="${esc(typeKey)}" ${open ? 'open' : ''}>
       <summary>
         <span class="left"><span class="caret"></span><span>${esc(label)}</span></span>
         <span class="count-pill">${sorted.length}건</span>
@@ -737,19 +857,78 @@
     $('#error').innerHTML = msg ? `<div class="error">${esc(msg)}</div>` : '';
   }
 
+  function updateBulkbar() {
+    const count = selectedIds.size;
+    const bar = $('#bulkbar');
+    bar.hidden = count === 0;
+    $('#bulk-count').textContent = `${count}개 선택`;
+    document.querySelectorAll('[data-select-id]').forEach((input) => {
+      const id = input.getAttribute('data-select-id');
+      input.checked = selectedIds.has(id);
+      input.closest('.card')?.classList.toggle('selected', selectedIds.has(id));
+    });
+  }
+
+  function rememberGroupState() {
+    document.querySelectorAll('details.group[data-group-type]').forEach((el) => {
+      const type = el.getAttribute('data-group-type');
+      if (!type) return;
+      if (el.open) groupOpenTypes.add(type);
+      else groupOpenTypes.delete(type);
+    });
+  }
+
+  function pruneSelections(items) {
+    const liveIds = new Set(items.filter((item) => !CLOSED.has(item.status)).map((item) => item.id));
+    for (const id of Array.from(selectedIds)) {
+      if (!liveIds.has(id)) selectedIds.delete(id);
+    }
+  }
+
   async function patchStatus(id, status) {
+    return patchStatuses([id], status);
+  }
+
+  async function patchStatuses(ids, status) {
     try {
+      rememberGroupState();
       const res = await fetch('/api/follow-ups', {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id, status })
+        body: JSON.stringify(ids.length === 1 ? { id: ids[0], status } : { ids, status })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || '상태 변경 실패');
+      ids.forEach((id) => selectedIds.delete(id));
       await load();
     } catch (e) {
       setError(e.message);
     }
+  }
+
+  async function sendReply(id) {
+    const item = currentItems.find((x) => x.id === id);
+    if (!item) throw new Error('카드를 찾을 수 없습니다');
+    const textarea = document.querySelector(`[data-draft-id="${CSS.escape(id)}"]`);
+    const replyText = String(textarea?.value || '').trim();
+    if (!replyText) throw new Error('보낼 답변이 비어 있습니다');
+    if (!item.customer_name && !item.room_key) throw new Error('고객명 또는 방 정보를 찾을 수 없습니다');
+
+    const res = await fetch(`${LOCAL_BRIDGE_URL}/manual-send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        followUpId: id,
+        customerName: item.customer_name || '',
+        roomTitle: item.customer_name ? `${item.customer_name} - 빌리지 - 카카오비즈니스 파트너센터` : '',
+        text: replyText
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || data.result?.reason || '카카오 전송 실패');
+    }
+    await patchStatus(id, 'done');
   }
 
   let loading = false;
@@ -775,6 +954,8 @@
 
   function render(data) {
     const items = Array.isArray(data.items) ? data.items : [];
+    currentItems = items;
+    pruneSelections(items);
     const summary = data.summary || {};
     const statusFilter = $('#status').value;
 
@@ -856,6 +1037,7 @@
       emptyEl.hidden = true;
       emptyEl.innerHTML = '';
     }
+    updateBulkbar();
   }
 
   document.addEventListener('click', (e) => {
@@ -863,13 +1045,57 @@
     if (!btn) return;
     const action = btn.getAttribute('data-action');
     const id = btn.getAttribute('data-id');
+    if (action === 'send_reply') {
+      btn.disabled = true;
+      sendReply(id)
+        .catch((error) => setError(error.message))
+        .finally(() => { btn.disabled = false; });
+      return;
+    }
     if (action === 'dismissed' && !confirm('이 업무를 무시 처리할까요?')) return;
     btn.disabled = true;
     patchStatus(id, action).finally(() => { btn.disabled = false; });
   });
 
+  document.addEventListener('change', (e) => {
+    const input = e.target.closest('[data-select-id]');
+    if (input) {
+      const id = input.getAttribute('data-select-id');
+      if (input.checked) selectedIds.add(id);
+      else selectedIds.delete(id);
+      updateBulkbar();
+      return;
+    }
+    const group = e.target.closest?.('details.group[data-group-type]');
+    if (group) rememberGroupState();
+  });
+
+  document.addEventListener('toggle', (e) => {
+    if (e.target.matches?.('details.group[data-group-type]')) rememberGroupState();
+  }, true);
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-bulk-action]');
+    if (!btn) return;
+    const action = btn.getAttribute('data-bulk-action');
+    if (action === 'clear') {
+      selectedIds.clear();
+      updateBulkbar();
+      return;
+    }
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    if (action === 'dismissed' && !confirm(`${ids.length}개 업무를 무시 처리할까요?`)) return;
+    btn.disabled = true;
+    patchStatuses(ids, action).finally(() => { btn.disabled = false; });
+  });
+
   $('#refresh').addEventListener('click', load);
-  $('#status').addEventListener('change', load);
+  $('#status').addEventListener('change', () => {
+    selectedIds.clear();
+    groupOpenTypes.clear();
+    load();
+  });
 
   $('#stats').innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
   load();

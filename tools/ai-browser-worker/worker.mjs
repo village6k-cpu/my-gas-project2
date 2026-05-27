@@ -12,6 +12,7 @@ const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbyRff4-lLXm
 const DEFAULT_SHEET_API_KEY = 'village2026';
 const VILLAGE_SHEET_ID = '17cl0YlZYA6j9hlTqPFIe5J0UdjuLcfxZyQfKGF00Ksk';
 const DEFAULT_KAKAO_CHANNEL_MANAGER_URL = 'https://business.kakao.com/_xhPMls/chats?t_src=business_partnercenter&t_ch=lnb&t_obj=%EB%82%B4%EC%B1%84%ED%8C%85_%ED%81%B4%EB%A6%AD';
+const DEFAULT_KAKAO_REMOTE_DEBUGGING_PORT = '9223';
 
 export function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return false;
@@ -29,6 +30,56 @@ export function loadEnvFile(filePath) {
     if (!process.env[key]) process.env[key] = value;
   }
   return true;
+}
+
+export function kakaoDevtoolsBaseUrlFromEnv(env = process.env) {
+  const explicit = env.KAKAO_DEVTOOLS_URL || env.KAKAO_CDP_HTTP_URL || env.KAKAO_CDP_URL;
+  if (explicit) return String(explicit).replace(/\/+$/, '');
+  const port = env.KAKAO_REMOTE_DEBUGGING_PORT || env.VILLAGE_KAKAO_REMOTE_DEBUGGING_PORT;
+  if (!port) return '';
+  return `http://127.0.0.1:${port || DEFAULT_KAKAO_REMOTE_DEBUGGING_PORT}`;
+}
+
+function isExecutable(filePath) {
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function resolveHermesCommand(command = 'hermes', env = process.env) {
+  if (String(command).includes('/')) return command;
+  const home = env.HOME || process.env.HOME || '';
+  const dirs = [
+    ...(env.PATH || '').split(path.delimiter).filter(Boolean),
+    home ? path.join(home, '.local/bin') : '',
+    home ? path.join(home, '.hermes/hermes-agent/venv/bin') : '',
+    home ? path.join(home, '.hermes/hermes-agent') : ''
+  ].filter(Boolean);
+  for (const dir of dirs) {
+    const candidate = path.join(dir, command);
+    if (isExecutable(candidate)) return candidate;
+  }
+  return command;
+}
+
+export function resolveCuaDriverCommand(command = 'cua-driver', env = process.env) {
+  if (!command) return '';
+  if (String(command).includes('/')) return isExecutable(command) ? command : '';
+  const home = env.HOME || process.env.HOME || '';
+  const dirs = [
+    ...(env.PATH || '').split(path.delimiter).filter(Boolean),
+    home ? path.join(home, '.local/bin') : '',
+    '/opt/homebrew/bin',
+    '/usr/local/bin'
+  ].filter(Boolean);
+  for (const dir of dirs) {
+    const candidate = path.join(dir, command);
+    if (isExecutable(candidate)) return candidate;
+  }
+  return '';
 }
 
 export function buildGasReadUrl(gasApiUrl, apiKey, params = {}) {
@@ -356,8 +407,8 @@ TASK:
 9. RAG interpretation: confidence=high can inform a reply draft but still cannot assert inventory/booking; confidence=low is tone/policy hint only; no_match/empty/error means ignore RAG; ownerReview=true means extra human verification before any future auto-send; knowledgeSource=general is not firm village policy.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 11. For reservation-format customer requests, prefer should_write_to_sheet=true and fill sheet_row_candidate best-effort. Missing phone, imperfect exact equipment verification, or incomplete duplicate lookup should be written into memo/extra_request rather than blocking the 확인요청 row. Only set should_write_to_sheet=false when this is clearly not a reservation, the target Kakao conversation was not opened, the newest actionable message is staff/outbound, sender order is unclear, or an obvious duplicate/already-registered booking was found.
-12. Create follow_up_items for every human action the owner should see next: reply_needed, quote_send, tax_invoice, schedule_check, reservation_review, price_review, payment_check, contract_document, return_extension, damage_repair, sheet_duplicate_check, completed_log. Use an empty array only when no human follow-up is needed.
-13. If a reply is useful, produce suggested_reply_draft and a reply_needed/quote_send follow_up_item. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for simple, high-confidence replies that are safe to send now under the kill-switch policy. Otherwise use draft_only or no_reply.
+12. Create at most one follow_up_item per latest customer message cluster. Do not split one customer turn into separate reply_needed/schedule_check/damage_repair/completed_log cards. Choose the single primary type and put the rest as a concise checklist inside recommended_action/evidence.
+13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for simple, high-confidence replies that are safe to send now under the kill-switch policy. Otherwise use draft_only or no_reply.
 14. Return only the final machine-readable JSON below.
 
 FINAL OUTPUT FORMAT:
@@ -512,21 +563,127 @@ function normalizeKeyPart(value, maxLength = 120) {
     .slice(0, maxLength) || 'unknown';
 }
 
+function normalizeCustomerForTask(value) {
+  const normalized = normalizeKeyPart(value, 80);
+  return normalized
+    .replace(/\/.*$/, '')
+    .replace(/\s+(?:파손|미반납|누락|분실|반납|확인).*$/, '')
+    .trim() || normalized;
+}
+
 function extractSemanticAnchors(value) {
   const input = text(value).normalize('NFKC');
   const anchors = [];
   const amountMatches = input.match(/\d+(?:\.\d+)?\s*(?:만원|원)/g) || [];
   anchors.push(...amountMatches.map((v) => v.replace(/\s+/g, '')));
+  if (/(반납|다음\s*회차|메모리|배터리|픽업|라오와|장비\s*반납|확인\s*후\s*가져다|가져다\s*드리)/.test(input)) {
+    anchors.push('operations_update');
+  }
   const keywordGroups = [
     ['payment_docs', /(결제|계약|견적|정산|서류|거래명세|세금계산|계산서)/],
+    ['discount_policy', /(학생\s*할인|학생할인|할인율|몇\s*프로|몇\s*퍼센트|할인)/],
     ['reservation_review', /(예약|반출|반납|대여|촬영|일정)/],
-    ['damage_repair', /(분실|파손|손상|수리|고장)/],
+    ['damage_repair', /(미반납|누락|분실|파손|손상|수리|고장|회수|경고\s*메시지|배터리)/],
     ['payment_check', /(입금|결제|미수|환불)/]
   ];
   for (const [label, regex] of keywordGroups) {
     if (regex.test(input)) anchors.push(label);
   }
+  if (!anchors.includes('discount_policy') && !anchors.includes('operations_update') && /(위치|주소|어디|찾아가|오시는\s*길)/.test(input)) anchors.push('location_faq');
+  if (anchors.includes('operations_update')) {
+    return [...new Set(anchors.filter((anchor) => !['payment_docs', 'reservation_review', 'location_faq', 'damage_repair'].includes(anchor)))].slice(0, 8);
+  }
+  if (anchors.includes('discount_policy')) {
+    return [...new Set(anchors.filter((anchor) => !['payment_docs', 'reservation_review', 'location_faq'].includes(anchor)))].slice(0, 8);
+  }
+  if (anchors.includes('damage_repair')) {
+    return [...new Set(anchors.filter((anchor) => !['payment_docs', 'reservation_review'].includes(anchor)))].slice(0, 8);
+  }
   return [...new Set(anchors)].slice(0, 8);
+}
+
+function extractConcreteAnchors(value) {
+  const input = text(value).normalize('NFKC');
+  return [
+    ...(input.match(/\d+(?:\.\d+)?\s*(?:만원|원)/g) || []).map((v) => v.replace(/\s+/g, '')),
+    ...(input.match(/\d{1,2}\s*월\s*\d{1,2}\s*일/g) || []).map((v) => v.replace(/\s+/g, '')),
+    ...(input.match(/\d{4}[-./]\d{1,2}[-./]\d{1,2}/g) || []).map((v) => v.replace(/[./]/g, '-'))
+  ];
+}
+
+function followUpCombinedText(row = {}) {
+  return [
+    row.title,
+    row.summary,
+    row.recommended_action || row.recommendedAction,
+    Array.isArray(row.evidence) ? row.evidence.join(' ') : ''
+  ].map(text).join(' ').normalize('NFKC');
+}
+
+export function buildFollowUpSemanticKey(row = {}) {
+  const customer = normalizeCustomerForTask(row.customer_name || row.customerName);
+  const type = normalizeKeyPart(row.type, 60);
+  const combined = followUpCombinedText(row);
+  const concreteAnchors = extractConcreteAnchors(combined);
+  const topicAnchors = extractSemanticAnchors(combined);
+  if (!concreteAnchors.length && !topicAnchors.length) {
+    return `exact:${normalizeKeyPart(row.follow_up_key || row.id || row.title || '', 200)}`;
+  }
+  return ['semantic', customer, type, ...new Set(concreteAnchors), ...new Set(topicAnchors)]
+    .map((v) => normalizeKeyPart(v, 120))
+    .join(':');
+}
+
+export function buildFollowUpTopicKey(row = {}) {
+  const customer = normalizeCustomerForTask(row.customer_name || row.customerName);
+  const combined = followUpCombinedText(row);
+  const concreteAnchors = extractConcreteAnchors(combined);
+  const topicAnchors = extractSemanticAnchors(combined);
+  const topicPriority = ['operations_update', 'discount_policy', 'location_faq', 'damage_repair', 'payment_check', 'payment_docs', 'reservation_review'];
+  const topic = topicPriority.find((value) => topicAnchors.includes(value));
+  if (!topic) return buildFollowUpSemanticKey(row);
+  const parts = ['topic', customer, topic];
+  if (topic === 'reservation_review' || topic === 'payment_docs' || topic === 'payment_check') {
+    parts.push(...new Set(concreteAnchors));
+  }
+  return parts.map((v) => normalizeKeyPart(v, 120)).join(':');
+}
+
+export function mergeFollowUpRowsByTopic(rows = []) {
+  const groups = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const key = buildFollowUpTopicKey(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return [...groups.values()].map((items) => {
+    if (items.length === 1) return items[0];
+    const sorted = items.slice().sort((a, b) => {
+      const priority = { urgent: 0, high: 1, normal: 2, low: 3 };
+      return (priority[a.priority] ?? 2) - (priority[b.priority] ?? 2);
+    });
+    const primary = { ...sorted[0] };
+    const summaries = sorted.map((item) => text(item.summary)).filter(Boolean);
+    const actions = sorted.map((item) => text(item.recommended_action)).filter(Boolean);
+    const drafts = sorted.map((item) => text(item.suggested_reply_draft)).filter(Boolean);
+    const evidence = sorted.flatMap((item) => Array.isArray(item.evidence) ? item.evidence.map(text).filter(Boolean) : []);
+    primary.summary = summaries[0] || primary.summary;
+    primary.recommended_action = actions.length
+      ? actions.map((value) => `- ${value.replace(/^\s*-\s*/, '')}`).join('\n')
+      : primary.recommended_action;
+    primary.suggested_reply_draft = drafts[0] || primary.suggested_reply_draft;
+    primary.evidence = Array.from(new Set(evidence)).slice(0, 12);
+    primary.payload = {
+      ...(primary.payload && typeof primary.payload === 'object' ? primary.payload : {}),
+      merged_follow_up_items: sorted.map((item) => ({
+        type: item.type,
+        title: item.title,
+        summary: item.summary,
+        recommended_action: item.recommended_action
+      }))
+    };
+    return primary;
+  });
 }
 
 function buildStableFollowUpKey({ roomKey, customerName, type, title, summary, recommendedAction, evidence }) {
@@ -545,6 +702,19 @@ function buildStableFollowUpKey({ roomKey, customerName, type, title, summary, r
   return base.join(':');
 }
 
+function shouldSuppressFollowUpItem(decision, item) {
+  const reason = text(decision?.reason).toLowerCase();
+  const blockingReason = text(item?.blocking_reason || item?.blockingReason).toLowerCase();
+  const title = text(item?.title);
+  const opened = decision?.safety_checks?.kakao_conversation_opened === true;
+  const noVisibleConversation = !opened && (
+    /matching kakao conversation not visible|chat_row_not_found|대화방을.*확인하지 못|대화방을.*열어.*확인하지 못/.test(reason)
+    || /matching kakao conversation not visible|chat_row_not_found|대화방.*수동 확인/.test(blockingReason)
+    || /Kakao 대화방 수동 확인 필요/.test(title)
+  );
+  return noVisibleConversation;
+}
+
 export function buildFollowUpRows(decision, job = {}) {
   const items = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
   const rawJobId = text(job.id || job.jobId || '');
@@ -556,6 +726,7 @@ export function buildFollowUpRows(decision, job = {}) {
   const allowedStatuses = new Set(['open', 'done', 'dismissed']);
   return items
     .filter((item) => item && typeof item === 'object')
+    .filter((item) => !shouldSuppressFollowUpItem(decision, item))
     .map((item) => {
       const type = allowedTypes.has(String(item.type)) ? String(item.type) : 'reply_needed';
       const priority = allowedPriorities.has(String(item.priority)) ? String(item.priority) : 'normal';
@@ -592,12 +763,45 @@ export function buildFollowUpRows(decision, job = {}) {
 export async function upsertFollowUpRows(config, rows) {
   if (!rows.length) return { inserted: 0, rows: [] };
   const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
+  const mergedRows = mergeFollowUpRowsByTopic(rows);
+  const filteredRows = await filterFollowUpRowsWithClosedHistory(config, mergedRows);
+  if (!filteredRows.length) return { inserted: 0, rows: [], skippedClosed: rows.length };
   const inserted = await supabaseFetch(config, `${table}?on_conflict=follow_up_key`, {
     method: 'POST',
     headers: supabaseHeaders(config, 'resolution=merge-duplicates,return=representation'),
-    body: JSON.stringify(rows)
+    body: JSON.stringify(filteredRows)
   });
-  return { inserted: Array.isArray(inserted) ? inserted.length : rows.length, rows: inserted };
+  return { inserted: Array.isArray(inserted) ? inserted.length : filteredRows.length, rows: inserted, merged: rows.length - mergedRows.length, skippedClosed: mergedRows.length - filteredRows.length };
+}
+
+export function filterFollowUpRowsAgainstClosedHistory(rows = [], historyRows = []) {
+  const closed = (Array.isArray(historyRows) ? historyRows : [])
+    .filter((row) => ['done', 'dismissed'].includes(row?.status));
+  const closedSemantic = new Set(closed.map(buildFollowUpSemanticKey));
+  const closedTopics = new Set(closed.map(buildFollowUpTopicKey));
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    if (closedSemantic.has(buildFollowUpSemanticKey(row))) return false;
+    if (closedTopics.has(buildFollowUpTopicKey(row))) return false;
+    return true;
+  });
+}
+
+async function filterFollowUpRowsWithClosedHistory(config, rows) {
+  const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
+  const customerNames = Array.from(new Set(rows.map((row) => normalizeKeyPart(row.customer_name, 80)).filter((value) => value && value !== 'unknown')));
+  if (!customerNames.length) return rows;
+  const selectFields = 'id,follow_up_key,customer_name,type,status,title,summary,recommended_action,evidence,blocking_reason,created_at,updated_at,completed_at';
+  const history = await supabaseFetch(config, `${table}?select=${selectFields}&status=in.(done,dismissed)&order=updated_at.desc&limit=1000`, {
+    headers: supabaseHeaders(config)
+  });
+  const scopedHistory = (Array.isArray(history) ? history : [])
+    .filter((row) => customerNames.includes(normalizeKeyPart(row.customer_name, 80)));
+  return filterFollowUpRowsAgainstClosedHistory(rows, scopedHistory);
+}
+
+export function filterFollowUpRowsAfterAutoReply(rows = [], autoReplyResult = {}) {
+  if (!autoReplyResult?.sent) return rows;
+  return rows.filter((row) => row.type !== 'reply_needed');
 }
 
 export function mapDecisionToStatusPatch(decision, context = {}) {
@@ -627,11 +831,12 @@ function requireConfig() {
     table: process.env.SUPABASE_TABLE || 'ai_processing_events',
     gasApiUrl: process.env.GAS_API_URL || DEFAULT_GAS_API_URL,
     sheetApiKey: process.env.SHEET_API_KEY || DEFAULT_SHEET_API_KEY,
-    hermesCommand: process.env.HERMES_WORKER_COMMAND || 'hermes',
+    hermesCommand: resolveHermesCommand(process.env.HERMES_WORKER_COMMAND || 'hermes'),
     hermesTimeoutMs: Number(process.env.HERMES_WORKER_TIMEOUT_MS || '180000'),
     ensureKakaoTab: process.env.KAKAO_WORKER_ENSURE_TAB !== '0',
     kakaoChannelManagerUrl: process.env.KAKAO_CHANNEL_MANAGER_URL || DEFAULT_KAKAO_CHANNEL_MANAGER_URL,
     openTargetChat: process.env.KAKAO_WORKER_OPEN_TARGET_CHAT !== '0',
+    cuaDriverCommand: resolveCuaDriverCommand(process.env.CUA_DRIVER_COMMAND || 'cua-driver'),
     villageAiUrl: process.env.VILLAGE_AI_URL || '',
     villageAiKakaoSkillSecret: process.env.VILLAGE_AI_KAKAO_SKILL_SECRET || process.env.KAKAO_SKILL_SECRET || '',
     ragTimeoutMs: Number(process.env.VILLAGE_AI_RAG_TIMEOUT_MS || 30000) || 30000,
@@ -742,7 +947,8 @@ on run argv
       if foundTab then exit repeat
     end repeat
     if foundTab is false then
-      make new window with properties {URL:targetUrl}
+      set newWindow to make new window
+      set URL of active tab of newWindow to targetUrl
     end if
     activate
     delay 2
@@ -756,7 +962,72 @@ end run
 `.trim();
 }
 
-export async function ensureKakaoChannelManagerTab({ url = DEFAULT_KAKAO_CHANNEL_MANAGER_URL, timeoutMs = 10000, spawnImpl = spawn } = {}) {
+function isKakaoMainListTarget(target = {}) {
+  const targetUrl = String(target.url || '');
+  const targetTitle = String(target.title || '');
+  const isChatListUrl =
+    ((targetUrl.includes('business.kakao.com') || targetUrl.includes('center-pf.kakao.com')) && targetUrl.includes('/chats'));
+  const isMainTitle = targetTitle === '카카오비즈니스 파트너센터';
+  const isConversationPopup = targetTitle.includes(' - 빌리지 - 카카오비즈니스');
+  return target.type === 'page' && !isConversationPopup && (isChatListUrl || isMainTitle);
+}
+
+export function pickKakaoMainListTarget(targets = []) {
+  return targets.find(isKakaoMainListTarget) || null;
+}
+
+async function devtoolsFetchText(baseUrl, pathname, { method = 'GET', fetchImpl = fetch, timeoutMs = 10000 } = {}) {
+  const endpoint = `${String(baseUrl).replace(/\/+$/, '')}${pathname}`;
+  const response = await fetchImpl(endpoint, {
+    method,
+    signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined
+  });
+  const body = await response.text();
+  if (!response.ok) throw new Error(`Chrome DevTools HTTP ${response.status}: ${body.slice(0, 500)}`);
+  return body;
+}
+
+async function devtoolsFetchJson(baseUrl, pathname, options = {}) {
+  const body = await devtoolsFetchText(baseUrl, pathname, options);
+  return body ? JSON.parse(body) : null;
+}
+
+async function devtoolsFetchTextWithFallbackMethod(baseUrl, pathname, options = {}) {
+  try {
+    return await devtoolsFetchText(baseUrl, pathname, { ...options, method: 'PUT' });
+  } catch (error) {
+    return devtoolsFetchText(baseUrl, pathname, { ...options, method: 'GET' });
+  }
+}
+
+export async function ensureKakaoChannelManagerTabViaDevtools({
+  url = DEFAULT_KAKAO_CHANNEL_MANAGER_URL,
+  cdpBaseUrl,
+  timeoutMs = 10000,
+  fetchImpl = fetch
+} = {}) {
+  if (!cdpBaseUrl) throw new Error('KAKAO_REMOTE_DEBUGGING_PORT or KAKAO_DEVTOOLS_URL is required');
+  const targets = await devtoolsFetchJson(cdpBaseUrl, '/json/list', { fetchImpl, timeoutMs });
+  const existing = pickKakaoMainListTarget(Array.isArray(targets) ? targets : []);
+  if (existing?.id) {
+    await devtoolsFetchTextWithFallbackMethod(cdpBaseUrl, `/json/activate/${encodeURIComponent(existing.id)}`, { fetchImpl, timeoutMs });
+    return { status: 'focused_list_via_devtools', targetId: existing.id, url: existing.url || '' };
+  }
+
+  const newTargetBody = await devtoolsFetchTextWithFallbackMethod(
+    cdpBaseUrl,
+    `/json/new?${encodeURIComponent(url)}`,
+    { fetchImpl, timeoutMs }
+  );
+  let newTarget = null;
+  try { newTarget = newTargetBody ? JSON.parse(newTargetBody) : null; } catch {}
+  if (newTarget?.id) {
+    await devtoolsFetchTextWithFallbackMethod(cdpBaseUrl, `/json/activate/${encodeURIComponent(newTarget.id)}`, { fetchImpl, timeoutMs }).catch(() => '');
+  }
+  return { status: 'opened_list_via_devtools', targetId: newTarget?.id || null, url };
+}
+
+async function ensureKakaoChannelManagerTabViaAppleScript({ url, timeoutMs, spawnImpl }) {
   if (process.platform !== 'darwin') return { status: 'skipped_non_macos' };
   const child = spawnImpl('osascript', ['-e', buildKakaoTabAppleScript(), url], {
     stdio: ['ignore', 'pipe', 'pipe']
@@ -783,6 +1054,29 @@ export async function ensureKakaoChannelManagerTab({ url = DEFAULT_KAKAO_CHANNEL
       else finish(reject, new Error(`Kakao Channel Manager tab focus failed ${code}: ${stderr || stdout}`));
     });
   });
+}
+
+export async function ensureKakaoChannelManagerTab({
+  url = DEFAULT_KAKAO_CHANNEL_MANAGER_URL,
+  timeoutMs = 10000,
+  spawnImpl = spawn,
+  fetchImpl = fetch,
+  cdpBaseUrl = kakaoDevtoolsBaseUrlFromEnv(),
+  allowAppleScriptFallback = process.env.KAKAO_APPLESCRIPT_FALLBACK === '1'
+} = {}) {
+  if (cdpBaseUrl) {
+    try {
+      return await ensureKakaoChannelManagerTabViaDevtools({ url, cdpBaseUrl, timeoutMs, fetchImpl });
+    } catch (error) {
+      if (!allowAppleScriptFallback) {
+        throw new Error(
+          `Kakao Channel Manager tab focus via Chrome DevTools failed: ${error.message}. ` +
+          'Restart with scripts/kakao-automation start so the isolated automation Chrome exposes its DevTools port.'
+        );
+      }
+    }
+  }
+  return ensureKakaoChannelManagerTabViaAppleScript({ url, timeoutMs, spawnImpl });
 }
 
 export function buildCloseKakaoConversationWindowAppleScript() {
@@ -988,28 +1282,154 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
 
 export function findKakaoMessageInputElementIndex(treeMarkdown = '') {
   const lines = String(treeMarkdown).split('\n');
-  const preferred = lines.find((line) => /\[(\d+)\]/.test(line) && /AXTextArea|AXTextField/.test(line) && /채팅|메시지|입력|내용/.test(line));
-  const fallback = preferred || lines.find((line) => /\[(\d+)\]/.test(line) && /AXTextArea|AXTextField/.test(line));
+  const formLabelIndex = lines.findIndex((line) => /채팅 메시지 입력 폼|메시지 입력|채팅.*입력/.test(line));
+  if (formLabelIndex >= 0) {
+    const nearbyInput = lines
+      .slice(formLabelIndex, formLabelIndex + 30)
+      .find((line) => /\[(\d+)\]/.test(line) && /AXTextArea|AXTextField/.test(line) && !/주소창|검색창|address/i.test(line));
+    const nearbyMatch = nearbyInput?.match(/\[(\d+)\]/);
+    if (nearbyMatch) return Number(nearbyMatch[1]);
+  }
+  const preferred = lines.find((line) => /\[(\d+)\]/.test(line) && /AXTextArea|AXTextField/.test(line) && /채팅|메시지|입력|내용/.test(line) && !/주소창|검색창|address/i.test(line));
+  const fallback = preferred || lines.find((line) => /\[(\d+)\]/.test(line) && /AXTextArea|AXTextField/.test(line) && !/주소창|검색창|address/i.test(line));
   const match = fallback?.match(/\[(\d+)\]/);
   return match ? Number(match[1]) : null;
 }
 
-export async function sendKakaoMessageViaChrome(textToSend, navigationContext = {}, { timeoutMs = 20000, spawnImpl = spawn } = {}) {
+export function findKakaoSendButtonElementIndex(treeMarkdown = '') {
+  const line = String(treeMarkdown).split('\n')
+    .find((item) => /\[(\d+)\]\s+AXButton/.test(item) && /전송/.test(item));
+  const match = line?.match(/\[(\d+)\]/);
+  return match ? Number(match[1]) : null;
+}
+
+function normalizeVerificationText(value = '') {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+export function kakaoConversationContainsMessage(treeMarkdown = '', message = '') {
+  const expected = normalizeVerificationText(message);
+  if (!expected) return false;
+  const values = [];
+  const regex = /AXStaticText = "([^"]*)"/g;
+  let match;
+  while ((match = regex.exec(String(treeMarkdown)))) values.push(normalizeVerificationText(match[1].replace(/\\n/g, ' ')));
+  return values.some((value) => value === expected || value.includes(expected));
+}
+
+export function buildActivateGoogleChromeWindowAppleScript() {
+  return `
+on run argv
+  set targetTitle to ""
+  if (count of argv) > 0 then set targetTitle to item 1 of argv
+  tell application "Google Chrome"
+    activate
+    if targetTitle is not equal to "" then
+      repeat with w in windows
+        try
+          set tabTitle to title of active tab of w
+          if tabTitle contains targetTitle or targetTitle contains tabTitle then
+            set index of w to 1
+            exit repeat
+          end if
+        end try
+      end repeat
+    end if
+  end tell
+end run
+`.trim();
+}
+
+async function activateGoogleChromeForCua({ timeoutMs = 5000, spawnImpl = spawn, windowTitle = '' } = {}) {
+  if (process.platform !== 'darwin') return { status: 'skipped_non_macos' };
+  try {
+    await spawnText('osascript', ['-e', buildActivateGoogleChromeWindowAppleScript(), windowTitle || ''], { timeoutMs, spawnImpl });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return { status: 'activated_chrome', windowTitle: windowTitle || '' };
+  } catch (error) {
+    return { status: 'activation_failed_non_fatal', windowTitle: windowTitle || '', error: error.message.slice(0, 300) };
+  }
+}
+
+function isCuaFrontmostDisabledError(error) {
+  const message = String(error?.message || error || '');
+  return message.includes('AXEnabled = false') || message.includes('not frontmost') || message.includes('silent no-op');
+}
+
+async function getKakaoWindowState({ win, cuaDriverCommand, timeoutMs, spawnImpl, maxElements = 900 }) {
+  const stateText = await spawnText(cuaDriverCommand, [
+    'call', 'get_window_state', JSON.stringify({ pid: win.pid, window_id: win.window_id, max_elements: maxElements }), '--compact'
+  ], { timeoutMs, spawnImpl, maxBuffer: 3_000_000 });
+  return JSON.parse(stateText);
+}
+
+async function clickKakaoSendButton({ win, sendButtonIndex, cuaDriverCommand, timeoutMs, spawnImpl }) {
+  try {
+    await spawnText(cuaDriverCommand, [
+      'call', 'click', JSON.stringify({ pid: win.pid, window_id: win.window_id, element_index: sendButtonIndex }), '--compact'
+    ], { timeoutMs, spawnImpl });
+    return { clicked: true, sendButtonIndex };
+  } catch (error) {
+    if (!isCuaFrontmostDisabledError(error)) throw error;
+    await activateGoogleChromeForCua({ timeoutMs: Math.min(timeoutMs, 5000), spawnImpl, windowTitle: win.title || '' });
+    const retryState = await getKakaoWindowState({ win, cuaDriverCommand, timeoutMs, spawnImpl, maxElements: 900 });
+    const retrySendButtonIndex = findKakaoSendButtonElementIndex(retryState.tree_markdown || '') || sendButtonIndex;
+    try {
+      await spawnText(cuaDriverCommand, [
+        'call', 'click', JSON.stringify({ pid: win.pid, window_id: win.window_id, element_index: retrySendButtonIndex }), '--compact'
+      ], { timeoutMs, spawnImpl });
+      return { clicked: true, sendButtonIndex: retrySendButtonIndex, retriedAfterFrontmostActivation: true };
+    } catch (retryError) {
+      if (!isCuaFrontmostDisabledError(retryError)) throw retryError;
+      return { clicked: false, sendButtonIndex: retrySendButtonIndex, retriedAfterFrontmostActivation: true, disabledAfterRetry: true };
+    }
+  }
+}
+
+export async function sendKakaoMessageViaChrome(textToSend, navigationContext = {}, { timeoutMs = 20000, spawnImpl = spawn, cuaDriverCommand = 'cua-driver' } = {}) {
   const win = navigationContext?.conversation_window;
   if (!win?.pid || !win?.window_id) return { sent: false, reason: 'conversation_window_missing' };
-  const stateText = await spawnText('cua-driver', [
-    'call', 'get_window_state', JSON.stringify({ pid: win.pid, window_id: win.window_id, max_elements: 700 }), '--compact'
-  ], { timeoutMs, spawnImpl, maxBuffer: 3_000_000 });
-  const state = JSON.parse(stateText);
+  if (!cuaDriverCommand) return { sent: false, reason: 'cua_driver_unavailable' };
+  await activateGoogleChromeForCua({ timeoutMs: Math.min(timeoutMs, 5000), spawnImpl, windowTitle: win.title || '' });
+  const state = await getKakaoWindowState({ win, cuaDriverCommand, timeoutMs, spawnImpl, maxElements: 700 });
   const elementIndex = findKakaoMessageInputElementIndex(state.tree_markdown || '');
   if (!elementIndex) return { sent: false, reason: 'message_input_not_found', window_title: win.title || state.title || '' };
-  await spawnText('cua-driver', [
+  await spawnText(cuaDriverCommand, [
     'call', 'type_text', JSON.stringify({ pid: win.pid, window_id: win.window_id, element_index: elementIndex, text: textToSend, delay_ms: 5 }), '--compact'
   ], { timeoutMs, spawnImpl });
-  await spawnText('cua-driver', [
-    'call', 'press_key', JSON.stringify({ pid: win.pid, window_id: win.window_id, element_index: elementIndex, key: 'return' }), '--compact'
-  ], { timeoutMs, spawnImpl });
-  return { sent: true, reason: 'sent_via_chrome', window_title: win.title || state.title || '', element_index: elementIndex };
+  await activateGoogleChromeForCua({ timeoutMs: Math.min(timeoutMs, 5000), spawnImpl, windowTitle: win.title || state.title || '' });
+  const readyState = await getKakaoWindowState({ win, cuaDriverCommand, timeoutMs, spawnImpl, maxElements: 900 });
+  const sendButtonIndex = findKakaoSendButtonElementIndex(readyState.tree_markdown || '');
+  let clickResult = null;
+  if (sendButtonIndex) {
+    clickResult = await clickKakaoSendButton({ win, sendButtonIndex, cuaDriverCommand, timeoutMs, spawnImpl });
+  }
+  if (!sendButtonIndex || clickResult?.disabledAfterRetry) {
+    await spawnText(cuaDriverCommand, [
+      'call', 'press_key', JSON.stringify({ pid: win.pid, window_id: win.window_id, element_index: elementIndex, key: 'return' }), '--compact'
+    ], { timeoutMs, spawnImpl });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  await activateGoogleChromeForCua({ timeoutMs: Math.min(timeoutMs, 5000), spawnImpl, windowTitle: win.title || readyState.title || state.title || '' });
+  const verifyState = await getKakaoWindowState({ win, cuaDriverCommand, timeoutMs, spawnImpl, maxElements: 900 });
+  if (!kakaoConversationContainsMessage(verifyState.tree_markdown || '', textToSend)) {
+    return {
+      sent: false,
+      reason: 'send_not_verified_in_conversation',
+      window_title: win.title || verifyState.title || state.title || '',
+      element_index: elementIndex,
+      send_button_index: clickResult?.sendButtonIndex || sendButtonIndex || null,
+      retried_after_frontmost_activation: Boolean(clickResult?.retriedAfterFrontmostActivation)
+    };
+  }
+  return {
+    sent: true,
+    reason: 'sent_via_chrome_verified',
+    window_title: win.title || verifyState.title || state.title || '',
+    element_index: elementIndex,
+    send_button_index: clickResult?.sendButtonIndex || sendButtonIndex || null,
+    retried_after_frontmost_activation: Boolean(clickResult?.retriedAfterFrontmostActivation)
+  };
 }
 
 function logAutoReply(config, entry) {
@@ -1018,15 +1438,48 @@ function logAutoReply(config, entry) {
   fs.appendFileSync(config.autoSendLogPath, `${line}\n`);
 }
 
+function normalizeAutoReplyText(value = '') {
+  return text(value).replace(/\s+/g, ' ').trim();
+}
+
+export function buildAutoReplyDedupeKey({ decision = {}, job = {}, replyText = '' } = {}) {
+  const customer = normalizeAutoReplyText(decision?.customer?.name || decision?.customer_name || '');
+  const customerEvidence = Array.isArray(decision?.visible_messages_used)
+    ? [...decision.visible_messages_used].reverse().find((item) => String(item?.sender || '').includes(customer) || !String(item?.sender || '').includes('빌리지'))
+    : null;
+  const customerMessage = normalizeAutoReplyText(customerEvidence?.message || job.preview_text || job.previewText || job.payload?.previewText || '');
+  const reply = normalizeAutoReplyText(replyText || decision?.reply_decision?.text || decision?.suggested_reply_draft || '');
+  return [customer, customerMessage, reply].filter(Boolean).join('|').slice(0, 500);
+}
+
+export function hasRecentSentAutoReply(config, dedupeKey, { now = new Date(), windowMs = 30 * 60 * 1000 } = {}) {
+  if (!dedupeKey || !config?.autoSendLogPath || !fs.existsSync(config.autoSendLogPath)) return false;
+  const lines = fs.readFileSync(config.autoSendLogPath, 'utf8').trim().split('\n').filter(Boolean).slice(-300);
+  for (const line of lines) {
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (entry?.result?.sent !== true) continue;
+    if (entry?.dedupeKey !== dedupeKey) continue;
+    const sentAt = new Date(entry.at);
+    if (Number.isFinite(sentAt.getTime()) && now.getTime() - sentAt.getTime() <= windowMs) return true;
+  }
+  return false;
+}
+
 export function isAutoSendEligibleLiveJob(job = {}) {
   const preview = text(job.preview_text || job.previewText || job.payload?.previewText || '');
   const events = Array.isArray(job.events) ? job.events : (Array.isArray(job.payload?.events) ? job.payload.events : []);
   const reasons = events.map((event) => String(event?.reason || '')).filter(Boolean);
-  if (!reasons.includes('top_row_changed')) return { eligible: false, reason: 'not_top_row_changed_live_event' };
+  const unreadCount = Number(job.unread_count ?? job.unreadCount ?? job.payload?.unreadCount ?? 0);
+  const hasUnread = Number.isFinite(unreadCount) && unreadCount > 0;
+  const hasTopRowChanged = reasons.includes('top_row_changed');
+  const hasUnreadBackstop = reasons.includes('top_rows_backstop') && hasUnread;
+  if (!hasTopRowChanged && !hasUnreadBackstop) return { eligible: false, reason: 'not_top_row_live_event' };
   if (/\d{1,2}월\s*\d{1,2}일/.test(preview)) return { eligible: false, reason: 'preview_has_old_date' };
   if (/\d{4}\.\d{1,2}\.\d{1,2}/.test(preview)) return { eligible: false, reason: 'preview_has_absolute_date' };
+  if (hasUnread) return { eligible: true, reason: 'top_row_unread' };
   if (!/(오전|오후)\s*\d{1,2}:\d{2}/.test(preview)) return { eligible: false, reason: 'preview_not_live_time_format' };
-  return { eligible: true, reason: 'top_row_changed_live_time_format' };
+  return { eligible: true, reason: 'top_row_live_time_format' };
 }
 
 async function maybeAutoSendReply({ config, decision, job, navigationContext }) {
@@ -1042,38 +1495,45 @@ async function maybeAutoSendReply({ config, decision, job, navigationContext }) 
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '' });
     return result;
   }
+  const dedupeKey = buildAutoReplyDedupeKey({ decision, job, replyText: gate.text });
+  if (hasRecentSentAutoReply(config, dedupeKey)) {
+    const result = { attempted: false, sent: false, gate: { allowed: false, reason: 'duplicate_recent_auto_reply' } };
+    logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', dedupeKey });
+    return result;
+  }
   let sendResult;
   try {
-    sendResult = await sendKakaoMessageViaChrome(gate.text, navigationContext, { timeoutMs: config.autoSendTimeoutMs });
+    sendResult = await sendKakaoMessageViaChrome(gate.text, navigationContext, { timeoutMs: config.autoSendTimeoutMs, cuaDriverCommand: config.cuaDriverCommand });
   } catch (error) {
     sendResult = { sent: false, reason: 'send_error', error: error.message.slice(0, 500) };
   }
   const result = { attempted: true, sent: Boolean(sendResult.sent), gate, sendResult, text: gate.text };
-  logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [] });
+  logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [], dedupeKey });
   return result;
 }
 
-export async function openKakaoTargetChatFromList(job, { timeoutMs = 20000, spawnImpl = spawn } = {}) {
+export async function openKakaoTargetChatFromList(job, { timeoutMs = 20000, spawnImpl = spawn, cuaDriverCommand = 'cua-driver' } = {}) {
   const hints = extractNavigationHints(job);
   if (!hints.length) return { status: 'no_navigation_hints' };
-  const windowsText = await spawnText('cua-driver', ['call', 'list_windows', '--compact'], { timeoutMs, spawnImpl });
+  if (!cuaDriverCommand) return { status: 'cua_driver_unavailable', hints };
+  const windowsText = await spawnText(cuaDriverCommand, ['call', 'list_windows', '--compact'], { timeoutMs, spawnImpl });
   const windows = JSON.parse(windowsText).windows || [];
   const win = pickKakaoMainListWindow(windows);
   if (!win) return { status: 'main_list_window_not_found', hints };
-  const stateText = await spawnText('cua-driver', [
+  const stateText = await spawnText(cuaDriverCommand, [
     'call', 'get_window_state', JSON.stringify({ pid: win.pid, window_id: win.window_id, max_elements: 700 }), '--compact'
   ], { timeoutMs, spawnImpl });
   const state = JSON.parse(stateText);
   const elementIndex = findChatRowElementIndex(state.tree_markdown || '', hints);
   if (!elementIndex) return { status: 'chat_row_not_found', hints, window_id: win.window_id, pid: win.pid };
-  await spawnText('cua-driver', [
+  await spawnText(cuaDriverCommand, [
     'call', 'click', JSON.stringify({ pid: win.pid, window_id: win.window_id, element_index: elementIndex }), '--compact'
   ], { timeoutMs, spawnImpl });
   await new Promise((resolve) => setTimeout(resolve, 1200));
   let conversationEvidence = null;
   let conversationWindow = null;
   try {
-    const windowsAfterClickText = await spawnText('cua-driver', ['call', 'list_windows', '--compact'], { timeoutMs, spawnImpl });
+    const windowsAfterClickText = await spawnText(cuaDriverCommand, ['call', 'list_windows', '--compact'], { timeoutMs, spawnImpl });
     const windowsAfterClick = JSON.parse(windowsAfterClickText).windows || [];
     conversationWindow = pickKakaoConversationWindow(windowsAfterClick, hints);
     if (!conversationWindow) {
@@ -1092,7 +1552,7 @@ export async function openKakaoTargetChatFromList(job, { timeoutMs = 20000, spaw
         }
       };
     }
-    const openedStateText = await spawnText('cua-driver', [
+    const openedStateText = await spawnText(cuaDriverCommand, [
       'call', 'get_window_state', JSON.stringify({ pid: conversationWindow.pid, window_id: conversationWindow.window_id, max_elements: 520 }), '--compact'
     ], { timeoutMs, spawnImpl, maxBuffer: 3_000_000 });
     const openedState = JSON.parse(openedStateText);
@@ -1163,7 +1623,7 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     if (!dryRun && config.ensureKakaoTab) {
       await ensureKakaoChannelManagerTab({ url: config.kakaoChannelManagerUrl });
       if (config.openTargetChat) {
-        navigationContext = await openKakaoTargetChatFromList(job).catch((error) => ({
+        navigationContext = await openKakaoTargetChatFromList(job, { cuaDriverCommand: config.cuaDriverCommand }).catch((error) => ({
           status: 'navigation_failed',
           reason: error.message.slice(0, 500)
         }));
@@ -1188,14 +1648,14 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
 
     const sheetPayload = buildSheetAppendPayload(decision, { apiKey: config.sheetApiKey });
     const sheetResult = await appendToSheet(config, sheetPayload);
-    const followUpRows = buildFollowUpRows(decision, job);
+    const autoReplyResult = await maybeAutoSendReply({ config, decision, job, navigationContext });
+    const followUpRows = filterFollowUpRowsAfterAutoReply(buildFollowUpRows(decision, job), autoReplyResult);
     let followUpResult;
     try {
       followUpResult = await upsertFollowUpRows(config, followUpRows);
     } catch (error) {
       followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
     }
-    const autoReplyResult = await maybeAutoSendReply({ config, decision, job, navigationContext });
     Object.assign(result, { status: 'ai_completed', decision, sheetResult, followUpResult, autoReplyResult, hermesOutputTail: hermesOutput.slice(-4000) });
     return result;
   } finally {
@@ -1245,6 +1705,68 @@ export async function processProvidedJob(stdinJob, { dryRun = false, fakeDecisio
   loadEnvFile(path.resolve(__dirname, '.env'));
   const config = requireConfig();
   return runAiAndMaybeWrite({ config, job: stdinJob, dryRun, fakeDecisionPath });
+}
+
+export async function processManualSend({ customerName = '', roomTitle = '', text: replyText = '', followUpId = '' } = {}) {
+  loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
+  loadEnvFile(path.resolve(__dirname, '.env'));
+  const config = requireConfig();
+  const cleanText = text(replyText).trim();
+  const cleanCustomer = text(customerName).trim();
+  const cleanRoomTitle = text(roomTitle).trim();
+  if (!cleanText || cleanText.length < 2) throw new Error('manual send text is required');
+  if (!cleanCustomer && !cleanRoomTitle) throw new Error('manual send customerName or roomTitle is required');
+
+  const hints = [cleanCustomer, cleanRoomTitle].filter(Boolean);
+  let navigationContext = null;
+  const windowsText = await spawnText(config.cuaDriverCommand, ['call', 'list_windows', '--compact'], {
+    timeoutMs: config.autoSendTimeoutMs,
+    maxBuffer: 3_000_000
+  });
+  const windows = JSON.parse(windowsText).windows || [];
+  const conversationWindow = pickKakaoConversationWindow(windows, hints);
+  if (conversationWindow) {
+    navigationContext = {
+      status: 'existing_target_chat',
+      hints,
+      conversation_window: {
+        pid: conversationWindow.pid,
+        window_id: conversationWindow.window_id,
+        title: conversationWindow.title || ''
+      }
+    };
+  } else {
+    await ensureKakaoChannelManagerTab({ url: config.kakaoChannelManagerUrl });
+    navigationContext = await openKakaoTargetChatFromList({
+      customer_name: cleanCustomer,
+      room_title: cleanRoomTitle,
+      preview_text: [cleanCustomer || cleanRoomTitle, cleanText].filter(Boolean).join(' '),
+      payload: { customerName: cleanCustomer, roomTitle: cleanRoomTitle }
+    }, { timeoutMs: config.autoSendTimeoutMs, cuaDriverCommand: config.cuaDriverCommand });
+  }
+
+  const sendResult = await sendKakaoMessageViaChrome(cleanText, navigationContext, {
+    timeoutMs: config.autoSendTimeoutMs,
+    cuaDriverCommand: config.cuaDriverCommand
+  });
+  const result = {
+    attempted: true,
+    sent: Boolean(sendResult.sent),
+    reason: sendResult.reason,
+    sendResult,
+    customerName: cleanCustomer,
+    followUpId: text(followUpId).trim() || null
+  };
+  logAutoReply(config, {
+    jobId: `manual-${Date.now()}`,
+    result,
+    customer: cleanCustomer,
+    classification: 'manual_dashboard_reply',
+    text: cleanText,
+    manual: true,
+    followUpId: result.followUpId
+  });
+  return result;
 }
 
 export async function processOneJob({ dryRun = false, claim = true, fakeDecisionPath = '' } = {}) {
@@ -1297,6 +1819,7 @@ function parseArgs(argv) {
   return {
     dryRun: args.has('--dry-run') || process.env.AI_WORKER_DRY_RUN === '1',
     ragLookup: args.has('--rag-lookup'),
+    manualSend: args.has('--manual-send'),
     once: args.has('--once'),
     noClaim: args.has('--no-claim'),
     stdinJob: args.has('--stdin-job'),
@@ -1308,16 +1831,18 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const result = args.ragLookup
     ? await processRagLookup(await readStdinJson())
-    : args.stdinJob
-      ? await processProvidedJob(await readStdinJson(), {
-          dryRun: args.dryRun,
-          fakeDecisionPath: args.fakeDecisionPath
-        })
-      : await processOneJob({
-          dryRun: args.dryRun,
-          claim: !args.noClaim,
-          fakeDecisionPath: args.fakeDecisionPath
-        });
+    : args.manualSend
+      ? await processManualSend(await readStdinJson())
+      : args.stdinJob
+        ? await processProvidedJob(await readStdinJson(), {
+            dryRun: args.dryRun,
+            fakeDecisionPath: args.fakeDecisionPath
+          })
+        : await processOneJob({
+            dryRun: args.dryRun,
+            claim: !args.noClaim,
+            fakeDecisionPath: args.fakeDecisionPath
+          });
   console.log(JSON.stringify(result, null, 2));
 }
 
