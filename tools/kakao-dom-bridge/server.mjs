@@ -224,6 +224,17 @@ function shouldQueueTopRowEvent(event) {
   return event.reason === 'top_row_changed' && isLiveTopRowPreview(event.previewText);
 }
 
+function hasLivePreviewTime(text) {
+  const preview = String(text || '');
+  return /방금|몇\s*분\s*전/.test(preview) || parseKoreanPreviewTimeMinutes(preview) !== null;
+}
+
+function isStaleDatedMutation(event = {}) {
+  return event.reason === 'mutation'
+    && hasDatedPreview(event.previewText)
+    && !hasLivePreviewTime(event.previewText);
+}
+
 function isActionChromePreview(text) {
   const preview = String(text || '').trim();
   if (!preview) return true;
@@ -286,11 +297,25 @@ async function writeSupabaseEvent(eventOrJob, kind) {
   return { ok: true };
 }
 
+function buildStableJobId(roomKey, events = []) {
+  const identities = events
+    .map((event) => event.eventHash || sha256(JSON.stringify({
+      reason: event.reason || '',
+      previewText: event.previewText || '',
+      unreadCount: event.unreadCount ?? null
+    })))
+    .sort();
+  return `dom-${sha256(`${roomKey}:${identities.join('|')}`).slice(0, 16)}`;
+}
+
 function buildAiFirstJob(roomKey, roomState) {
   const events = roomState.events.slice();
   const latest = events[events.length - 1] || {};
+  const unreadCounts = events
+    .map((event) => Number(event.unreadCount ?? event.unread_count ?? event.raw?.unreadCount ?? event.raw?.unread_count ?? 0))
+    .filter((count) => Number.isFinite(count) && count > 0);
   return {
-    jobId: `dom-${sha256(`${roomKey}:${roomState.firstAt}:${roomState.lastAt}`).slice(0, 16)}`,
+    jobId: buildStableJobId(roomKey, events),
     source: 'kakao_channel_manager_dom',
     reason: 'kakao_channel_manager_dom_event_debounced',
     status: 'ready_for_ai_worker',
@@ -300,7 +325,7 @@ function buildAiFirstJob(roomKey, roomState) {
     lastEventAt: roomState.lastAt,
     eventCount: events.length,
     previewText: latest.previewText || '',
-    unreadCount: latest.unreadCount ?? null,
+    unreadCount: unreadCounts.length ? Math.max(...unreadCounts) : null,
     events,
     instructions: [
       '이 payload는 판단 결과가 아니라 새 상담 감지 알림이다.',
@@ -441,12 +466,19 @@ async function flushRoom(roomKey) {
   appendNdjson('jobs.ndjson', job);
   console.info('[dom-bridge] debounced job ready', job.jobId, roomKey, `${job.eventCount} events`);
 
+  let supabaseResult = null;
   try {
-    await writeSupabaseEvent(job, 'job');
+    supabaseResult = await writeSupabaseEvent(job, 'job');
   } catch (error) {
     state.failedSupabaseWrites += 1;
     appendNdjson('errors.ndjson', { at: nowIso(), type: 'supabase_job', message: error.message, job });
     console.warn('[dom-bridge] supabase job insert failed:', error.message);
+  }
+
+  if (supabaseResult?.duplicate) {
+    appendNdjson('worker-skipped.ndjson', { at: nowIso(), jobId: job.jobId, reason: 'duplicate_supabase_job', roomKey });
+    console.info('[dom-bridge] worker skipped duplicate job', job.jobId, roomKey);
+    return;
   }
 
   try {
@@ -530,6 +562,11 @@ async function handleEvent(req, res) {
       ignored: event.reason === 'top_rows_backstop' ? 'read_backstop_row' : 'non_live_top_row_change',
       queuedForAi: false
     });
+  }
+
+  if (isStaleDatedMutation(event)) {
+    appendNdjson('ignored-stale-dated-mutation-events.ndjson', event);
+    return json(res, 202, { ok: true, ignored: 'stale_dated_mutation', queuedForAi: false });
   }
 
   if (

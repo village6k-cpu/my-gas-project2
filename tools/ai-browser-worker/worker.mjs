@@ -1470,8 +1470,11 @@ export function isAutoSendEligibleLiveJob(job = {}) {
   const preview = text(job.preview_text || job.previewText || job.payload?.previewText || '');
   const events = Array.isArray(job.events) ? job.events : (Array.isArray(job.payload?.events) ? job.payload.events : []);
   const reasons = events.map((event) => String(event?.reason || '')).filter(Boolean);
-  const unreadCount = Number(job.unread_count ?? job.unreadCount ?? job.payload?.unreadCount ?? 0);
-  const hasUnread = Number.isFinite(unreadCount) && unreadCount > 0;
+  const unreadCounts = [
+    Number(job.unread_count ?? job.unreadCount ?? job.payload?.unreadCount ?? 0),
+    ...events.map((event) => Number(event?.unread_count ?? event?.unreadCount ?? event?.raw?.unreadCount ?? event?.raw?.unread_count ?? 0))
+  ];
+  const hasUnread = unreadCounts.some((count) => Number.isFinite(count) && count > 0);
   const hasTopRowChanged = reasons.includes('top_row_changed');
   const hasUnreadBackstop = reasons.includes('top_rows_backstop') && hasUnread;
   if (!hasTopRowChanged && !hasUnreadBackstop) return { eligible: false, reason: 'not_top_row_live_event' };

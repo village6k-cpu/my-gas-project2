@@ -94,6 +94,42 @@ assert.match(
 
 assert.match(
   bridge,
+  /function isStaleDatedMutation\(event = \{\}\)/,
+  'Bridge must detect dated mutation rows that are reload/backlog noise rather than live inquiries'
+);
+
+assert.match(
+  bridge,
+  /ignored: 'stale_dated_mutation'/,
+  'Bridge must keep day-old mutation rows out of the AI worker queue'
+);
+
+assert.match(
+  bridge,
+  /unreadCounts\.length \? Math\.max\(\.\.\.unreadCounts\) : null/,
+  'Bridge jobs must preserve structured unread counts even when the latest grouped event has null unreadCount'
+);
+
+assert.match(
+  bridge,
+  /function buildStableJobId\(roomKey, events = \[\]\)/,
+  'Bridge must use stable job ids for repeated identical Kakao event groups'
+);
+
+assert.doesNotMatch(
+  bridge,
+  /sha256\(`\$\{roomKey\}:\$\{roomState\.firstAt\}:\$\{roomState\.lastAt\}`\)/,
+  'Bridge job ids must not include debounce timestamps that turn duplicates into new jobs'
+);
+
+assert.match(
+  bridge,
+  /reason: 'duplicate_supabase_job'/,
+  'Bridge must skip worker execution for duplicate Supabase jobs'
+);
+
+assert.match(
+  bridge,
   /function isActionChromePreview\(text\)/,
   'Bridge must filter Kakao UI/action chrome rows before queueing AI jobs'
 );

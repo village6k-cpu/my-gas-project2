@@ -975,6 +975,14 @@ test('isAutoSendEligibleLiveJob allows unread same-day rows and blocks dated/bac
     eligible: true,
     reason: 'top_row_unread'
   });
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    preview_text: '중요 홍길동 네 감사합니다 오후 3:45',
+    unread_count: null,
+    events: [{ reason: 'top_rows_backstop', unreadCount: 3 }]
+  }), {
+    eligible: true,
+    reason: 'top_row_unread'
+  });
   assert.equal(isAutoSendEligibleLiveJob({
     preview_text: '중요 홍길동 3 네 감사합니다 5월 26일',
     unread_count: 3,
