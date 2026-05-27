@@ -515,6 +515,7 @@ cmd_status() {
   echo
   echo "Kakao Chrome tabs visible to AppleScript (diagnostic only):"
   print_applescript_kakao_tabs
+  echo "  note: only the DevTools tabs above are automation-controlled; AppleScript-visible Kakao tabs may be a normal Chrome profile."
 }
 
 cmd_restart() {

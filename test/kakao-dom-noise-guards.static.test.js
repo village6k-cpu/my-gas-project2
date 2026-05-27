@@ -116,4 +116,34 @@ assert.match(
   'Bridge must explain whether it ignored a read backstop row or a stale read change'
 );
 
+assert.match(
+  bridge,
+  /function classifyWorkerFailure\(message = ''\)/,
+  'Bridge must classify AI worker failures instead of treating all failures as normal queue progress'
+);
+
+assert.match(
+  bridge,
+  /NoneType\.\*not iterable/,
+  'Bridge must recognize the Hermes backend client error that can otherwise reopen Kakao windows repeatedly'
+);
+
+assert.match(
+  bridge,
+  /ai_worker_circuit_open/,
+  'Bridge must skip queued AI jobs while the worker circuit is open'
+);
+
+assert.match(
+  bridge,
+  /AI_WORKER_FAILURE_COOLDOWN_MS/,
+  'Bridge worker circuit cooldown must be configurable'
+);
+
+assert.match(
+  bridge,
+  /worker-circuit-state\.json/,
+  'Bridge worker circuit must survive bridge restarts'
+);
+
 console.log('kakao dom noise guard static checks passed');
