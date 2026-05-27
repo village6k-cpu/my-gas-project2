@@ -873,6 +873,61 @@ test('mergeFollowUpRowsByTopic keeps one card for one operational customer updat
   assert.equal(merged[0].suggested_reply_draft, '확인했습니다. 체크해두겠습니다.');
 });
 
+test('buildFollowUpRows keeps one stable key for one reservation split by secondary topics', () => {
+  const discount = buildFollowUpRows({
+    classification: 'reservation',
+    confidence: 'medium',
+    customer: { name: '홍지수' },
+    follow_up_items: [{
+      type: 'reservation_review',
+      priority: 'high',
+      title: '홍지수님 6/6-6/7 브라노 풀세트 및 모비 문의 확인',
+      summary: '고객이 6월 6-7일 브라노 풀세트 대여 가능 여부, 비학생 학생가 가능 여부, 모비 보유 여부를 문의함.',
+      recommended_action: '기존 확인요청 건을 기준으로 재고 확인 및 가격 검토를 진행하세요.'
+    }]
+  }, { jobId: 'dom-hong-a', roomKey: 'preview:hong' });
+  const operations = buildFollowUpRows({
+    classification: 'reservation',
+    confidence: 'medium',
+    customer: { name: '홍지수' },
+    follow_up_items: [{
+      type: 'reservation_review',
+      priority: 'high',
+      title: '홍지수님 6/6-6/7 브라노 풀세트 + 모비 대여 가능 여부 및 학생가 문의',
+      summary: '고객이 2026년 6월 6-7일 브라노 풀세트 대여 가능 여부와 비학생 학생가 적용 가능 여부를 문의했습니다.',
+      recommended_action: '반출/반납 시간과 연락처를 요청하고 모비 보유 여부를 직원 확인 후 안내하세요.'
+    }]
+  }, { jobId: 'dom-hong-b', roomKey: 'preview:hong' });
+
+  assert.equal(discount[0].follow_up_key, operations[0].follow_up_key);
+  assert.match(discount[0].follow_up_key, /reservation_review/);
+});
+
+test('buildFollowUpTopicKey collapses equipment availability split across schedule and reply cards', () => {
+  const rows = buildFollowUpRows({
+    classification: 'faq',
+    confidence: 'medium',
+    customer: { name: '이유찬' },
+    follow_up_items: [
+      {
+        type: 'schedule_check',
+        title: '인터컴 대여 가능 여부 배터리 상태 확인',
+        summary: '고객이 인터콤 대여 가능 여부를 문의했고, 직원이 복귀 후 배터리 상태 확인이 필요하다고 답변한 상태입니다.'
+      },
+      {
+        type: 'reply_needed',
+        title: '인터콤 대여 가능 여부 문의 답변',
+        summary: '고객이 인터콤도 대여 가능한지 문의했습니다.'
+      }
+    ]
+  }, { jobId: 'dom-lee', roomKey: 'preview:lee' });
+
+  const merged = mergeFollowUpRowsByTopic(rows);
+  assert.equal(rows[0].follow_up_key, rows[1].follow_up_key);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].type, 'schedule_check');
+});
+
 test('mergeFollowUpRowsByTopic normalizes customer aliases with issue suffixes', () => {
   const rows = [
     {

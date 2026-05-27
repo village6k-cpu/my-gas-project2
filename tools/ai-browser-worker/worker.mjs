@@ -611,6 +611,24 @@ function extractConcreteAnchors(value) {
   ];
 }
 
+function extractDateConcreteAnchors(value) {
+  const input = text(value).normalize('NFKC');
+  const currentYear = new Date().getFullYear();
+  const pad = (value) => String(value).padStart(2, '0');
+  const anchors = [];
+  for (const match of input.matchAll(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/g)) {
+    anchors.push(`${match[1]}-${pad(match[2])}-${pad(match[3])}`);
+  }
+  for (const match of input.matchAll(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/g)) {
+    anchors.push(`${currentYear}-${pad(match[1])}-${pad(match[2])}`);
+  }
+  for (const match of input.matchAll(/(\d{1,2})\/(\d{1,2})(?:\s*[-~]\s*(\d{1,2})\/(\d{1,2}))?/g)) {
+    anchors.push(`${currentYear}-${pad(match[1])}-${pad(match[2])}`);
+    if (match[3] && match[4]) anchors.push(`${currentYear}-${pad(match[3])}-${pad(match[4])}`);
+  }
+  return Array.from(new Set(anchors));
+}
+
 function followUpCombinedText(row = {}) {
   return [
     row.title,
@@ -618,6 +636,24 @@ function followUpCombinedText(row = {}) {
     row.recommended_action || row.recommendedAction,
     Array.isArray(row.evidence) ? row.evidence.join(' ') : ''
   ].map(text).join(' ').normalize('NFKC');
+}
+
+function isReservationFollowUpTopic(row = {}, combined = followUpCombinedText(row)) {
+  const type = String(row.type || row.follow_up_type || '');
+  if (type === 'reservation_review') return true;
+  if (!['reply_needed', 'schedule_check'].includes(type)) return false;
+  return /(예약\s*(?:가능|진행|요청|의사|접수)|대여\s*가능|렌탈\s*가능|대여\s*할\s*수|대여\s*할수|렌탈\s*할\s*수|장비\s*예약)/.test(combined);
+}
+
+function stableFollowUpType(row = {}, combined = followUpCombinedText(row)) {
+  return isReservationFollowUpTopic(row, combined) ? 'reservation_review' : normalizeKeyPart(row.type, 60);
+}
+
+function stableFollowUpAnchors(row = {}, combined = followUpCombinedText(row)) {
+  if (isReservationFollowUpTopic(row, combined)) {
+    return [...new Set([...extractDateConcreteAnchors(combined), 'reservation_review'])];
+  }
+  return extractSemanticAnchors(combined);
 }
 
 export function buildFollowUpSemanticKey(row = {}) {
@@ -639,6 +675,11 @@ export function buildFollowUpTopicKey(row = {}) {
   const combined = followUpCombinedText(row);
   const concreteAnchors = extractConcreteAnchors(combined);
   const topicAnchors = extractSemanticAnchors(combined);
+  if (isReservationFollowUpTopic(row, combined)) {
+    return ['topic', customer, 'reservation_review', ...new Set(extractDateConcreteAnchors(combined))]
+      .map((v) => normalizeKeyPart(v, 120))
+      .join(':');
+  }
   const topicPriority = ['operations_update', 'discount_policy', 'location_faq', 'damage_repair', 'payment_check', 'payment_docs', 'reservation_review'];
   const topic = topicPriority.find((value) => topicAnchors.includes(value));
   if (!topic) return buildFollowUpSemanticKey(row);
@@ -688,11 +729,12 @@ export function mergeFollowUpRowsByTopic(rows = []) {
 
 function buildStableFollowUpKey({ roomKey, customerName, type, title, summary, recommendedAction, evidence }) {
   const combined = [title, summary, recommendedAction, Array.isArray(evidence) ? evidence.join(' ') : ''].join(' ');
-  const anchors = extractSemanticAnchors(combined);
+  const rowForKey = { customer_name: customerName, type, title, summary, recommended_action: recommendedAction, evidence };
+  const anchors = stableFollowUpAnchors(rowForKey, combined);
   const base = [
     normalizeKeyPart(roomKey, 120),
     normalizeKeyPart(customerName, 80),
-    normalizeKeyPart(type, 60)
+    stableFollowUpType(rowForKey, combined)
   ];
   if (anchors.length) {
     base.push(normalizeKeyPart(anchors.join('-'), 120));

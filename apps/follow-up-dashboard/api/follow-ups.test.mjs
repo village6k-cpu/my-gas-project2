@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildDashboardSemanticKey, dedupeFollowUpItems } from './follow-ups.js';
+import { buildDashboardSemanticKey, dedupeFollowUpItems, shouldHideLowValueActiveItem } from './follow-ups.js';
 
 test('dedupeFollowUpItems collapses repeated legacy cards for the same customer task', () => {
   const items = [
@@ -72,4 +72,141 @@ test('dedupeFollowUpItems normalizes customer aliases with issue suffixes', () =
 
   assert.equal(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
   assert.deepEqual(dedupeFollowUpItems(items).map((item) => item.id), ['base']);
+});
+
+test('dedupeFollowUpItems collapses one reservation split by discount and operations anchors', () => {
+  const items = [
+    {
+      id: 'newer',
+      room_key: 'preview:hong',
+      customer_name: '홍지수',
+      type: 'reservation_review',
+      status: 'open',
+      priority: 'high',
+      title: '홍지수님 6/6-6/7 브라노 풀세트 및 모비 문의 확인',
+      summary: '고객이 6월 6-7일 브라노 풀세트 대여 가능 여부, 비학생 학생가 가능 여부, 모비 보유 여부를 문의함.',
+      recommended_action: '기존 확인요청 건을 기준으로 재고 확인 및 가격 검토를 진행하세요.',
+      evidence: ['학생가 문의', '모비 추가 문의']
+    },
+    {
+      id: 'older',
+      room_key: 'preview:hong',
+      customer_name: '홍지수',
+      type: 'reservation_review',
+      status: 'open',
+      priority: 'normal',
+      title: '홍지수님 6/6-6/7 브라노 풀세트 + 모비 대여 가능 여부 및 학생가 문의',
+      summary: '고객이 2026년 6월 6-7일 브라노 풀세트 대여 가능 여부와 비학생 학생가 적용 가능 여부를 문의했습니다.',
+      recommended_action: '반출/반납 시간과 연락처를 요청하고 모비 보유 여부를 직원 확인 후 안내하세요.'
+    }
+  ];
+
+  assert.equal(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
+  const deduped = dedupeFollowUpItems(items);
+  assert.deepEqual(deduped.map((item) => item.id), ['newer']);
+  assert.equal(deduped[0].priority, 'high');
+});
+
+test('dedupeFollowUpItems collapses one equipment availability topic across schedule and reply cards', () => {
+  const items = [
+    {
+      id: 'schedule',
+      room_key: 'preview:lee',
+      customer_name: '이유찬',
+      type: 'schedule_check',
+      status: 'open',
+      title: '인터컴 대여 가능 여부 배터리 상태 확인',
+      summary: '고객이 인터콤 대여 가능 여부를 문의했고, 직원이 복귀 후 배터리 상태 확인이 필요하다고 답변한 상태입니다.'
+    },
+    {
+      id: 'reply',
+      room_key: 'preview:lee',
+      customer_name: '이유찬',
+      type: 'reply_needed',
+      status: 'open',
+      title: '인터콤 대여 가능 여부 문의 답변',
+      summary: '고객이 인터콤도 대여 가능한지 문의했습니다.',
+      suggested_reply_draft: '감독님, 인터콤 대여 가능 여부 확인해드리겠습니다.'
+    }
+  ];
+
+  assert.equal(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
+  const deduped = dedupeFollowUpItems(items);
+  assert.deepEqual(deduped.map((item) => item.id), ['schedule']);
+  assert.equal(deduped[0].suggested_reply_draft, '감독님, 인터콤 대여 가능 여부 확인해드리겠습니다.');
+});
+
+test('dedupeFollowUpItems collapses one reservation split by payment document and operation wording', () => {
+  const items = [
+    {
+      id: 'docs',
+      room_key: 'preview:kim',
+      customer_name: '김성윤',
+      type: 'reservation_review',
+      status: 'open',
+      title: '김성윤 5/28 오전 7시 장비 예약 미등록 여부 확인',
+      summary: '고객이 5/28 오전 7시 수령으로 장비 예약 가능 여부와 105,000원 금액을 문의했고 직원이 답변했습니다.',
+      recommended_action: '확인요청/계약마스터에 이번 2026-05-28 건이 등록되어 있는지 검토하세요.'
+    },
+    {
+      id: 'ops',
+      room_key: 'preview:kim',
+      customer_name: '김성윤',
+      type: 'reservation_review',
+      status: 'open',
+      title: '김성윤 예약 가능 답변 완료 건 등록 여부 확인',
+      summary: '고객이 5/28 오전 7시 수령 예약 가능 및 계좌이체 금액을 문의했고, 직원이 가능 및 105,000원을 답변했습니다.',
+      recommended_action: '직원이 이미 답변했으므로 새 답장 초안은 만들지 않습니다.'
+    }
+  ];
+
+  assert.equal(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
+  assert.deepEqual(dedupeFollowUpItems(items).map((item) => item.id), ['docs']);
+});
+
+test('shouldHideLowValueActiveItem hides thanks-only completed logs from the active queue', () => {
+  assert.equal(shouldHideLowValueActiveItem({
+    type: 'completed_log',
+    priority: 'low',
+    status: 'open',
+    title: '김준기 고객 대여 완료 감사 메시지',
+    summary: "고객이 '대표님 감사히 잘 썼습니다~!'라고 보냈습니다. 새 예약 요청이나 질문은 아닙니다.",
+    recommended_action: '필요 시 감사 답장만 수동으로 보내면 됩니다.'
+  }), true);
+
+  assert.equal(shouldHideLowValueActiveItem({
+    type: 'completed_log',
+    priority: 'low',
+    status: 'open',
+    title: '입금 확인 필요',
+    summary: '고객이 감사 인사와 함께 입금 확인을 요청했습니다.'
+  }), false);
+});
+
+test('dedupeFollowUpItems collapses quote cards from the same Kakao room despite customer alias and secondary topic split', () => {
+  const items = [
+    {
+      id: 'newer',
+      room_key: 'preview:hyunha',
+      customer_name: '현하',
+      type: 'quote_send',
+      status: 'open',
+      title: '현하님 1200b 렌탈건 학교 제출용 견적서 요청',
+      summary: '고객이 기존 5/22~5/23 Nanlux 1200b 렌탈건에 대해 학교 제출용 견적서를 요청했습니다.',
+      recommended_action: '기존 예약/계약 내역에서 실제 대여 품목과 최종 금액을 확인한 뒤 학교 제출용 견적서를 발급해 전달하세요.'
+    },
+    {
+      id: 'older',
+      room_key: 'preview:hyunha',
+      customer_name: '신현하',
+      type: 'quote_send',
+      status: 'open',
+      title: '신현하님 1200B 렌탈 건 학교 제출용 견적서 요청',
+      summary: '고객이 이미 진행된/등록된 NANLUX Evoke 1200B 렌탈 건에 대해 학교 제출용 견적서를 요청했습니다.',
+      recommended_action: '계약마스터 거래ID 기준으로 견적서 발급 가능 여부와 금액을 확인한 뒤 견적서를 전달하세요. 가격/할인 최종 확정은 사람이 확인해야 합니다.'
+    }
+  ];
+
+  assert.equal(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
+  assert.deepEqual(dedupeFollowUpItems(items).map((item) => item.id), ['newer']);
 });

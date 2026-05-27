@@ -82,51 +82,141 @@ function text(value) {
   return String(value ?? '').trim();
 }
 
-export function buildDashboardSemanticKey(item) {
-  const customer = normalizeCustomerForTask(item.customer_name);
-  const type = normalizeKeyPart(item.type, 60);
-  const combined = [
+function combinedFollowUpText(item = {}) {
+  return [
     item.title,
     item.summary,
     item.recommended_action,
     Array.isArray(item.evidence) ? item.evidence.join(' ') : ''
   ].map(text).join(' ').normalize('NFKC');
-  const specificAnchors = [
-    ...(combined.match(/\d+(?:\.\d+)?\s*(?:만원|원)/g) || []).map((v) => v.replace(/\s+/g, '')),
-    ...(combined.match(/\d{1,2}\s*월\s*\d{1,2}\s*일/g) || []).map((v) => v.replace(/\s+/g, '')),
-    ...(combined.match(/\d{4}[-./]\d{1,2}[-./]\d{1,2}/g) || []).map((v) => v.replace(/[./]/g, '-'))
-  ];
+}
+
+function extractAmountAnchors(value) {
+  return (text(value).normalize('NFKC').match(/\d+(?:\.\d+)?\s*(?:만원|원)/g) || [])
+    .map((v) => v.replace(/\s+/g, ''));
+}
+
+function extractDateAnchors(value) {
+  const input = text(value).normalize('NFKC');
+  const currentYear = new Date().getFullYear();
+  const pad = (value) => String(value).padStart(2, '0');
+  const anchors = [];
+  for (const match of input.matchAll(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/g)) {
+    anchors.push(`${match[1]}-${pad(match[2])}-${pad(match[3])}`);
+  }
+  for (const match of input.matchAll(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/g)) {
+    anchors.push(`${currentYear}-${pad(match[1])}-${pad(match[2])}`);
+  }
+  for (const match of input.matchAll(/(\d{1,2})\/(\d{1,2})(?:\s*[-~]\s*(\d{1,2})\/(\d{1,2}))?/g)) {
+    anchors.push(`${currentYear}-${pad(match[1])}-${pad(match[2])}`);
+    if (match[3] && match[4]) anchors.push(`${currentYear}-${pad(match[3])}-${pad(match[4])}`);
+  }
+  return Array.from(new Set(anchors));
+}
+
+function extractTopicBuckets(combined) {
   const buckets = [];
   if (/(반납|다음\s*회차|메모리|배터리|픽업|라오와|장비\s*반납|확인\s*후\s*가져다|가져다\s*드리)/.test(combined)) buckets.push('operations_update');
   if (/(결제|계약|견적|정산|서류|거래명세|세금계산|계산서)/.test(combined)) buckets.push('payment_docs');
   if (/(입금|결제|미수|환불)/.test(combined)) buckets.push('payment_check');
   if (/(학생\s*할인|학생할인|할인율|몇\s*프로|몇\s*퍼센트|할인)/.test(combined)) buckets.push('discount_policy');
   if (!buckets.includes('discount_policy') && !buckets.includes('operations_update') && /(위치|주소|어디|찾아가|오시는\s*길)/.test(combined)) buckets.push('location_faq');
-  if (/(예약|반출|반납|대여|촬영|일정)/.test(combined)) buckets.push('reservation_review');
+  if (/(예약|반출|반납|대여|렌탈|촬영|일정)/.test(combined)) buckets.push('reservation_review');
   if (/(미반납|누락|분실|파손|손상|수리|고장|회수|경고\s*메시지|배터리)/.test(combined)) buckets.push('damage_repair');
+  return buckets;
+}
+
+function isReservationTask(item = {}, combined = '') {
+  const type = String(item.type || '');
+  if (type === 'reservation_review') return true;
+  if (!['reply_needed', 'schedule_check', 'quote_send'].includes(type)) return false;
+  return /(예약\s*(?:가능|진행|요청|의사|접수)|대여\s*가능|렌탈\s*가능|대여\s*할\s*수|대여\s*할수|렌탈\s*할\s*수|장비\s*예약)/.test(combined);
+}
+
+function reservationScopeAnchors(item = {}, combined = '') {
+  const roomKey = normalizeKeyPart(item.room_key || '', 120);
+  if (roomKey && roomKey !== 'unknown') return [`room:${roomKey}`];
+  const dates = extractDateAnchors(combined);
+  if (dates.length) return [...new Set(dates)];
+  return [];
+}
+
+function taskOwnerKey(item = {}, customer = normalizeCustomerForTask(item.customer_name)) {
+  const roomKey = normalizeKeyPart(item.room_key || '', 120);
+  return roomKey && roomKey !== 'unknown' ? `room:${roomKey}` : customer;
+}
+
+export function buildDashboardSemanticKey(item) {
+  const customer = normalizeCustomerForTask(item.customer_name);
+  const owner = taskOwnerKey(item, customer);
+  const type = normalizeKeyPart(item.type, 60);
+  const combined = combinedFollowUpText(item);
+  const specificAnchors = [
+    ...extractAmountAnchors(combined),
+    ...extractDateAnchors(combined)
+  ];
+  const buckets = extractTopicBuckets(combined);
+  if (type === 'quote_send') {
+    return ['semantic', owner, 'quote_send', ...reservationScopeAnchors(item, combined)]
+      .map((v) => normalizeKeyPart(v, 120))
+      .join(':');
+  }
+  if (isReservationTask(item, combined)) {
+    return ['semantic', owner, 'reservation_review', ...reservationScopeAnchors(item, combined)]
+      .map((v) => normalizeKeyPart(v, 120))
+      .join(':');
+  }
   if (buckets.includes('operations_update')) {
-    return ['semantic', customer, 'operations_update'].map((v) => normalizeKeyPart(v, 120)).join(':');
+    return ['semantic', owner, 'operations_update'].map((v) => normalizeKeyPart(v, 120)).join(':');
   }
   if (buckets.includes('discount_policy')) {
-    return ['semantic', customer, type, ...new Set(specificAnchors), 'discount_policy'].map((v) => normalizeKeyPart(v, 120)).join(':');
+    return ['semantic', owner, type, ...new Set(specificAnchors), 'discount_policy'].map((v) => normalizeKeyPart(v, 120)).join(':');
   }
   if (buckets.includes('damage_repair')) {
-    return ['semantic', customer, type, ...new Set(specificAnchors), 'damage_repair'].map((v) => normalizeKeyPart(v, 120)).join(':');
+    return ['semantic', owner, type, ...new Set(specificAnchors), 'damage_repair'].map((v) => normalizeKeyPart(v, 120)).join(':');
   }
   if (!specificAnchors.length && !buckets.length) return `exact:${normalizeKeyPart(item.follow_up_key || item.id || item.title || '', 200)}`;
-  return ['semantic', customer, type, ...new Set(specificAnchors), ...new Set(buckets)].map((v) => normalizeKeyPart(v, 120)).join(':');
+  return ['semantic', owner, type, ...new Set(specificAnchors), ...new Set(buckets)].map((v) => normalizeKeyPart(v, 120)).join(':');
+}
+
+function mergeDuplicateFollowUpItem(primary, duplicate) {
+  const priorityRank = { urgent: 0, high: 1, normal: 2, low: 3 };
+  const merged = { ...primary };
+  if ((priorityRank[duplicate.priority] ?? 2) < (priorityRank[merged.priority] ?? 2)) merged.priority = duplicate.priority;
+  if (!text(merged.suggested_reply_draft) && text(duplicate.suggested_reply_draft)) {
+    merged.suggested_reply_draft = duplicate.suggested_reply_draft;
+  }
+  const evidence = [
+    ...(Array.isArray(primary.evidence) ? primary.evidence : []),
+    ...(Array.isArray(duplicate.evidence) ? duplicate.evidence : [])
+  ].map(text).filter(Boolean);
+  merged.evidence = Array.from(new Set(evidence)).slice(0, 12);
+  return merged;
 }
 
 export function dedupeFollowUpItems(items) {
-  const seen = new Set();
+  const seen = new Map();
   const deduped = [];
   for (const item of Array.isArray(items) ? items : []) {
     const key = buildDashboardSemanticKey(item || {});
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(key)) {
+      const index = seen.get(key);
+      deduped[index] = mergeDuplicateFollowUpItem(deduped[index], item);
+      continue;
+    }
+    seen.set(key, deduped.length);
     deduped.push(item);
   }
   return deduped;
+}
+
+export function shouldHideLowValueActiveItem(item) {
+  if (item?.status && ['done', 'dismissed'].includes(item.status)) return false;
+  if (item?.type !== 'completed_log') return false;
+  if (item?.priority && item.priority !== 'low') return false;
+  const combined = combinedFollowUpText(item);
+  return /(감사|감사히|잘\s*썼|잘썼|고맙)/.test(combined)
+    && !/(미반납|파손|입금|결제|변경|추가|확인\s*필요|등록\s*필요)/.test(combined);
 }
 
 function summarize(items) {
@@ -158,7 +248,8 @@ export default async function handler(req, res) {
       if (status === 'active') filters.push('status=not.in.(done,dismissed)');
       else if (status && status !== 'all') filters.push(`status=eq.${encodeURIComponent(status)}`);
       const rawItems = await supabaseFetch(`${table}?${filters.join('&')}`);
-      const items = dedupeFollowUpItems(rawItems);
+      const items = dedupeFollowUpItems(rawItems)
+        .filter((item) => status !== 'active' || !shouldHideLowValueActiveItem(item));
       return json(res, 200, { ok: true, updatedAt: new Date().toISOString(), summary: summarize(items), items });
     }
 

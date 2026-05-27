@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vercel dev",
-    "check": "node --test api/follow-ups.test.mjs && node --check api/follow-ups.js && node --check api/operations.js"
+    "dev": "node dev-server.mjs",
+    "check": "node --test api/follow-ups.test.mjs && node --check api/follow-ups.js && node --check api/operations.js && node --check dev-server.mjs"
   },
   "engines": {
     "node": ">=20"
