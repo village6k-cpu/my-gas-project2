@@ -21,10 +21,8 @@ const CONFIG = {
   autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
   topRowLiveWindowMinutes: Number(process.env.TOP_ROW_LIVE_WINDOW_MINUTES || 20),
   workerTimeoutMs: Number(process.env.WORKER_TIMEOUT_MS || process.env.HERMES_WORKER_TIMEOUT_MS || 240_000),
-  supabaseTimeoutMs: Number(process.env.SUPABASE_TIMEOUT_MS || 7000),
-  aiFailureCooldownMs: Number(process.env.AI_WORKER_FAILURE_COOLDOWN_MS || 30 * 60_000)
+  supabaseTimeoutMs: Number(process.env.SUPABASE_TIMEOUT_MS || 7000)
 };
-const WORKER_CIRCUIT_STATE_FILE = path.join(CONFIG.queueDir, 'worker-circuit-state.json');
 
 const state = {
   startedAt: new Date().toISOString(),
@@ -37,9 +35,6 @@ const state = {
   currentJobId: null,
   workerStartedAt: null,
   lastWorkerError: null,
-  consecutiveWorkerFailures: 0,
-  aiWorkerPausedUntilMs: 0,
-  aiWorkerPausedReason: '',
   rooms: new Map(),
   seenGroupingTexts: new Set(),
   lastContentScriptStartedAtMs: 0
@@ -47,45 +42,6 @@ const state = {
 
 function ensureQueueDir() {
   fs.mkdirSync(CONFIG.queueDir, { recursive: true });
-}
-
-function persistWorkerCircuitState() {
-  try {
-    ensureQueueDir();
-    if (state.aiWorkerPausedUntilMs > Date.now()) {
-      fs.writeFileSync(WORKER_CIRCUIT_STATE_FILE, JSON.stringify({
-        pausedUntilMs: state.aiWorkerPausedUntilMs,
-        reason: state.aiWorkerPausedReason || 'worker_error',
-        updatedAt: nowIso()
-      }, null, 2));
-    } else if (fs.existsSync(WORKER_CIRCUIT_STATE_FILE)) {
-      fs.unlinkSync(WORKER_CIRCUIT_STATE_FILE);
-    }
-  } catch (error) {
-    appendNdjson('errors.ndjson', { at: nowIso(), type: 'worker_circuit_persist', message: error.message });
-  }
-}
-
-function loadWorkerCircuitState() {
-  try {
-    if (!fs.existsSync(WORKER_CIRCUIT_STATE_FILE)) return;
-    const saved = JSON.parse(fs.readFileSync(WORKER_CIRCUIT_STATE_FILE, 'utf8'));
-    const pausedUntilMs = Number(saved.pausedUntilMs || 0);
-    if (pausedUntilMs > Date.now()) {
-      state.aiWorkerPausedUntilMs = pausedUntilMs;
-      state.aiWorkerPausedReason = String(saved.reason || 'worker_error');
-      appendNdjson('worker-circuit.ndjson', {
-        at: nowIso(),
-        action: 'restored',
-        reason: state.aiWorkerPausedReason,
-        pausedUntil: new Date(pausedUntilMs).toISOString()
-      });
-    } else {
-      fs.unlinkSync(WORKER_CIRCUIT_STATE_FILE);
-    }
-  } catch (error) {
-    appendNdjson('errors.ndjson', { at: nowIso(), type: 'worker_circuit_load', message: error.message });
-  }
 }
 
 function sha256(value) {
@@ -238,11 +194,12 @@ function minutesSincePreviewTime(text, now = new Date()) {
 
 function hasUnreadCount(event = {}) {
   if (event.raw?.unreadSignal === true || event.unreadSignal === true) return true;
+  const count = Number(event.unreadCount ?? event.unread_count ?? event.raw?.unreadCount ?? event.raw?.unread_count ?? 0);
+  if (!Number.isFinite(count) || count <= 0) return false;
+  if (event.reason === 'top_rows_backstop' || event.reason === 'top_row_changed') return true;
   const preview = String(event.previewText || '');
   const explicitlyUnread = /안읽|읽지\s*않은|새\s*메시지|unread/i.test(preview);
-  if (!explicitlyUnread) return false;
-  const count = Number(event.unreadCount ?? event.unread_count ?? 0);
-  return Number.isFinite(count) && count > 0;
+  return explicitlyUnread;
 }
 
 function hasDatedPreview(text) {
@@ -370,56 +327,6 @@ function appendLimited(current, chunk, limit = 20_000) {
   return next.length > limit ? next.slice(-limit) : next;
 }
 
-function classifyWorkerFailure(message = '') {
-  const text = String(message || '');
-  if (!text) return 'unknown';
-  if (/Hermes exited/i.test(text) && /NoneType.*not iterable/i.test(text)) return 'hermes_backend_client_error';
-  if (/Codex stream produced no bytes|Backend accepted the connection but sent no stream events/i.test(text)) return 'hermes_backend_stream_timeout';
-  if (/APIConnectionError|Connection error/i.test(text)) return 'hermes_backend_connection_error';
-  if (/Hermes exited/i.test(text) && /Error code:\s*4\d\d/i.test(text)) return 'hermes_backend_request_error';
-  if (/worker timed out/i.test(text)) return 'worker_timeout';
-  return 'worker_error';
-}
-
-function openWorkerCircuit(reason, message = '') {
-  const cooldownMs = Math.max(0, CONFIG.aiFailureCooldownMs || 0);
-  if (!cooldownMs) return;
-  state.aiWorkerPausedUntilMs = Date.now() + cooldownMs;
-  state.aiWorkerPausedReason = reason || 'worker_error';
-  persistWorkerCircuitState();
-  appendNdjson('worker-circuit.ndjson', {
-    at: nowIso(),
-    action: 'opened',
-    reason: state.aiWorkerPausedReason,
-    cooldownMs,
-    message: String(message || '').slice(0, 1000)
-  });
-}
-
-function workerCircuitState() {
-  const now = Date.now();
-  const remainingMs = Math.max(0, state.aiWorkerPausedUntilMs - now);
-  if (remainingMs <= 0) {
-    if (state.aiWorkerPausedUntilMs) {
-      appendNdjson('worker-circuit.ndjson', {
-        at: nowIso(),
-        action: 'closed',
-        reason: state.aiWorkerPausedReason || 'cooldown_elapsed'
-      });
-    }
-    state.aiWorkerPausedUntilMs = 0;
-    state.aiWorkerPausedReason = '';
-    persistWorkerCircuitState();
-    return { open: false, remainingMs: 0, reason: '' };
-  }
-  return {
-    open: true,
-    remainingMs,
-    reason: state.aiWorkerPausedReason || 'worker_error',
-    until: new Date(state.aiWorkerPausedUntilMs).toISOString()
-  };
-}
-
 function runWorker(job) {
   if (!CONFIG.workerCommand) return Promise.resolve({ skipped: true });
 
@@ -471,35 +378,16 @@ function enqueueWorker(job) {
   state.workerQueueLength += 1;
   const run = async () => {
     state.workerQueueLength = Math.max(0, state.workerQueueLength - 1);
-    const circuit = workerCircuitState();
-    if (circuit.open) {
-      const skipped = {
-        skipped: true,
-        reason: 'ai_worker_circuit_open',
-        pausedReason: circuit.reason,
-        pausedUntil: circuit.until,
-        remainingMs: circuit.remainingMs
-      };
-      appendNdjson('worker-skipped.ndjson', { at: nowIso(), jobId: job.jobId, result: skipped });
-      console.warn('[dom-bridge] worker skipped', job.jobId, circuit.reason, `remainingMs=${circuit.remainingMs}`);
-      return skipped;
-    }
     state.workerRunning = true;
     state.currentJobId = job.jobId;
     state.workerStartedAt = nowIso();
     console.info('[dom-bridge] worker start', job.jobId, 'queued:', state.workerQueueLength);
     try {
       const result = await runWorker(job);
-      state.consecutiveWorkerFailures = 0;
       state.lastWorkerError = null;
       return result;
     } catch (error) {
-      state.consecutiveWorkerFailures += 1;
-      const failureKind = classifyWorkerFailure(error.message);
-      state.lastWorkerError = { at: nowIso(), jobId: job.jobId, kind: failureKind, message: error.message.slice(0, 1000) };
-      if (failureKind.startsWith('hermes_backend_') || failureKind === 'worker_timeout') {
-        openWorkerCircuit(failureKind, error.message);
-      }
+      state.lastWorkerError = { at: nowIso(), jobId: job.jobId, message: error.message.slice(0, 1000) };
       throw error;
     } finally {
       state.workerRunning = false;
@@ -711,8 +599,7 @@ const server = http.createServer(async (req, res) => {
           supabaseTimeoutMs: CONFIG.supabaseTimeoutMs,
           processInitialScan: CONFIG.processInitialScan,
           ignoreShiftedRows: CONFIG.ignoreShiftedRows,
-          topRowLiveWindowMinutes: CONFIG.topRowLiveWindowMinutes,
-          aiFailureCooldownMs: CONFIG.aiFailureCooldownMs
+          topRowLiveWindowMinutes: CONFIG.topRowLiveWindowMinutes
         },
         state: {
           startedAt: state.startedAt,
@@ -726,8 +613,6 @@ const server = http.createServer(async (req, res) => {
           workerStartedAt: state.workerStartedAt,
           workerRunMs: state.workerStartedAt ? Date.now() - Date.parse(state.workerStartedAt) : 0,
           lastWorkerError: state.lastWorkerError,
-          consecutiveWorkerFailures: state.consecutiveWorkerFailures,
-          aiWorkerCircuit: workerCircuitState(),
           openRooms: state.rooms.size
         }
       });
@@ -761,7 +646,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 ensureQueueDir();
-loadWorkerCircuitState();
 server.listen(CONFIG.port, '127.0.0.1', () => {
   console.info(`[dom-bridge] listening on http://127.0.0.1:${CONFIG.port}`);
   console.info(`[dom-bridge] queue dir: ${CONFIG.queueDir}`);

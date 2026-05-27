@@ -82,6 +82,18 @@ assert.match(
 
 assert.match(
   bridge,
+  /event\.unreadCount \?\? event\.unread_count \?\? event\.raw\?\.unreadCount \?\? event\.raw\?\.unread_count/,
+  'Bridge must trust structured unreadCount fields supplied by the watcher'
+);
+
+assert.match(
+  bridge,
+  /event\.reason === 'top_rows_backstop' \|\| event\.reason === 'top_row_changed'\) return true;/,
+  'Bridge must queue unread top-row/backstop events even when unreadSignal is absent'
+);
+
+assert.match(
+  bridge,
   /function isActionChromePreview\(text\)/,
   'Bridge must filter Kakao UI/action chrome rows before queueing AI jobs'
 );
@@ -114,36 +126,6 @@ assert.match(
   bridge,
   /'read_backstop_row' : 'non_live_top_row_change'/,
   'Bridge must explain whether it ignored a read backstop row or a stale read change'
-);
-
-assert.match(
-  bridge,
-  /function classifyWorkerFailure\(message = ''\)/,
-  'Bridge must classify AI worker failures instead of treating all failures as normal queue progress'
-);
-
-assert.match(
-  bridge,
-  /NoneType\.\*not iterable/,
-  'Bridge must recognize the Hermes backend client error that can otherwise reopen Kakao windows repeatedly'
-);
-
-assert.match(
-  bridge,
-  /ai_worker_circuit_open/,
-  'Bridge must skip queued AI jobs while the worker circuit is open'
-);
-
-assert.match(
-  bridge,
-  /AI_WORKER_FAILURE_COOLDOWN_MS/,
-  'Bridge worker circuit cooldown must be configurable'
-);
-
-assert.match(
-  bridge,
-  /worker-circuit-state\.json/,
-  'Bridge worker circuit must survive bridge restarts'
 );
 
 console.log('kakao dom noise guard static checks passed');
