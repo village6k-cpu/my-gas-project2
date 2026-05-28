@@ -365,15 +365,18 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 예약/가격/FAQ/무시를 AI가 분류한다. 미리보기 텍스트만으로 예약·가격·FAQ를 확정하지 않는다.
 - 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/대시보드 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
 - FAQ 고정 답변 후보: 주소=서울 마포구 동교로 23길 32, 2층 / 네이버 지도=https://naver.me/5mIWTFQ1 / 영업시간=24시간 운영 / 절차=장비명+기간 전달→가용확인→방문수령→반납.
-- 가격 문의는 단가·할인 계산 초안을 만들고 follow_up_items에 quote_send/price_review를 남긴다.
+- 가격 문의는 세트마스터 단가, 고객할인, 장기할인으로 초안/follow_up을 만든다. price_paused면 가격 자동발송 금지.
+- unread/미처리면 오래된 메시지도 검토한다. 날짜만 오래된 backfill/row movement는 자동발송하지 않는다.
+- 유입로그 단서는 evidence에만 보존한다. API 별도 worker 책임이다.
 
 SENDER AND TURN-TAKING POLICY:
 - 반드시 각 visible message를 staff/outbound와 customer/inbound로 구분한다. 내/직원/채널 발화는 고객 요청으로 취급하면 안 된다.
 - Staff/outbound labels include: 빌리지님, 김준영님, 최재형님, 운영자/상담원/매니저로 보이는 채널 측 발화, and any message visually on the business/outbound side.
 - Customer/inbound is the chat customer/nickname side, determined from the Kakao room title, bubble side/labels, and surrounding message order. A nickname like hellodesk may be a customer if it is the room/customer side; do not assume from text alone.
-- The actionable trigger is the latest customer/inbound message or a cluster of consecutive customer/inbound messages after the last staff/outbound reply. If the newest meaningful message is staff/outbound, classify already_answered or ignore and do not write a new reservation row.
+- The actionable trigger is normally the latest customer/inbound message or a cluster of consecutive customer/inbound messages after the last staff/outbound reply.
+- If newest meaningful message is staff/outbound, no new reply. Exception: staff-confirmed-unregistered case = customer reservation + staff confirmation + not found in contract/schedule/request; then set should_write_to_sheet=true, reservation_inquiry.confirmed=true, already_registered=false, replyMode=no_reply, no_auto_reply_sent=true.
 - Customers often split one thought across several bubbles. Merge consecutive customer/inbound messages within the same recent turn before classification, e.g. "안녕하세요" + "27일날" + "fx3 가능한가요?" = one reservation/availability question.
-- For Sheets append, safety_checks.latest_customer_message_after_last_staff_reply must be true. If sender order is unclear, set it false and should_write_to_sheet=false.
+- For Sheets append, safety_checks.latest_customer_message_after_last_staff_reply must be true except for the staff-confirmed-unregistered case above. If sender order is unclear, set it false and should_write_to_sheet=false.
 
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
@@ -382,7 +385,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
 - 할인유형은 학생 / 개인사업자/프리랜서 / 일반 중 하나만 쓴다. 단골 또는 제휴는 절대 쓰지 말고 일반으로 둔다. 단골/제휴 여부는 GAS/고객DB가 판단한다.
-- 중복 입력 방지: 가능하면 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 그러나 고객 최신 메시지가 예약형식(장비 + 기간/날짜 + 수령/반납 시간 또는 그에 준하는 정보)에 맞으면 중복확인이 일부 불완전해도 should_write_to_sheet=true로 둔다. 명백히 이미 등록된 동일 예약을 찾은 경우에만 쓰지 않는다.
+- 중복 입력 방지: 가능하면 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 예약형식이면 일부 확인이 불완전해도 쓰고 memo에 남긴다. 직원 확정 후 미등록 예약도 쓴다.
 - 예약형식에 맞춰 들어온 건은 확인요청 시트 입력이 기본 동작이다. 불확실한 장비명/중복확인/전화번호 누락은 입력 차단 사유가 아니라 memo/extra_request에 남길 보완사항이다.
 
 JOB EVIDENCE FROM SUPABASE:
@@ -406,7 +409,7 @@ TASK:
 8. If RAG is enabled and useful, call the village-ai helper only after reading the Kakao screen. Build the RAG question by briefly embedding the visible Kakao context and latest customer/inbound message cluster in the question string. Use RAG only for price/discount/components/procedure/FAQ, prior tone/policy reference, or ambiguous follow-up wording; never for current inventory availability, booking confirmation, Sheets/contract/schedule mutation, or duplicate checks.
 9. RAG interpretation: confidence=high can inform a reply draft but still cannot assert inventory/booking; confidence=low is tone/policy hint only; no_match/empty/error means ignore RAG; ownerReview=true means extra human verification before any future auto-send; knowledgeSource=general is not firm village policy.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
-11. For reservation-format customer requests, prefer should_write_to_sheet=true and fill sheet_row_candidate best-effort. Missing phone, imperfect exact equipment verification, or incomplete duplicate lookup should be written into memo/extra_request rather than blocking the 확인요청 row. Only set should_write_to_sheet=false when this is clearly not a reservation, the target Kakao conversation was not opened, the newest actionable message is staff/outbound, sender order is unclear, or an obvious duplicate/already-registered booking was found.
+11. For reservation-format requests, prefer should_write_to_sheet=true. Missing phone/equipment/duplicate lookup goes to memo/extra_request. Set false only for non-reservation, unopened/mismatched chat, unclear sender order, or obvious duplicate/already-registered booking. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; otherwise no write.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
 11-2. For multiple equipment items, put each item into sheet_row_candidate.equipment as a separate object. Do not concatenate multiple equipment names into one item string. One equipment object becomes one 확인요청 row under the same GAS-generated request ID.
 12. Create at most one follow_up_item per latest customer message cluster. Do not split one customer turn into separate reply_needed/schedule_check/damage_repair/completed_log cards. Choose the single primary type and put the rest as a concise checklist inside recommended_action/evidence.
@@ -510,8 +513,27 @@ const REQUIRED_SHEET_SAFETY_CHECKS = [
   'latest_customer_message_after_last_staff_reply'
 ];
 
+function isStaffConfirmedUnregisteredSheetCandidate(decision = {}) {
+  const checks = decision?.safety_checks || {};
+  const reservation = decision?.reservation_inquiry || {};
+  const equipment = Array.isArray(reservation.equipment_requested) ? reservation.equipment_requested : [];
+  const hasReservationEvidence = reservation.is_reservation_inquiry === true || equipment.length > 0;
+  const duplicateChecked = checks.duplicate_checked_contract_master === true
+    || checks.duplicate_checked_schedule_detail === true
+    || checks.duplicate_checked_request_sheet === true;
+  return checks.kakao_conversation_opened === true
+    && checks.did_not_classify_from_preview_only === true
+    && checks.latest_customer_message_after_last_staff_reply === false
+    && checks.no_auto_reply_sent === true
+    && hasReservationEvidence
+    && reservation.confirmed === true
+    && reservation.already_registered === false
+    && duplicateChecked;
+}
+
 function hasRequiredSheetSafetyChecks(decision) {
   const checks = decision?.safety_checks || {};
+  if (isStaffConfirmedUnregisteredSheetCandidate(decision)) return true;
   return REQUIRED_SHEET_SAFETY_CHECKS.every((key) => checks[key] === true);
 }
 
@@ -1338,7 +1360,11 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   const confidence = String(reply.confidence || decision.confidence || '').trim();
   const textValue = text(reply.text || decision.suggested_reply_draft).trim();
   const killSwitch = String(decision.kill_switch_observed || '').trim();
-  if (killSwitch !== 'active') return { allowed: false, reason: `kill_switch_${killSwitch || 'unknown'}` };
+  const classification = String(decision.classification || '').trim();
+  const priceLikeClassifications = new Set(['price', 'price_review', 'quote_send']);
+  if (killSwitch === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
+  if (killSwitch === 'price_paused' && priceLikeClassifications.has(classification)) return { allowed: false, reason: 'kill_switch_price_paused' };
+  if (killSwitch !== 'active' && killSwitch !== 'price_paused') return { allowed: false, reason: `kill_switch_${killSwitch || 'unknown'}` };
   if (mode !== 'auto_send') return { allowed: false, reason: `replyMode_${mode || 'missing'}` };
   if (confidence !== 'high') return { allowed: false, reason: `confidence_${confidence || 'missing'}` };
   if (!textValue || textValue.length < 5) return { allowed: false, reason: 'reply_text_too_short' };
@@ -1346,7 +1372,6 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   if (decision?.safety_checks?.kakao_conversation_opened !== true) return { allowed: false, reason: 'conversation_not_opened' };
   if (decision?.safety_checks?.did_not_classify_from_preview_only !== true) return { allowed: false, reason: 'preview_only' };
   if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) return { allowed: false, reason: 'latest_turn_not_customer' };
-  const classification = String(decision.classification || '').trim();
   const blockedClassifications = new Set(['price', 'reservation', 'reservation_request', 'reservation_review', 'payment', 'payment_check', 'schedule_check', 'damage_repair']);
   if (blockedClassifications.has(classification)) return { allowed: false, reason: `classification_${classification}_requires_review` };
   if (decision.owner_review_required === true || decision.ownerReviewRequired === true) return { allowed: false, reason: 'owner_review_required' };

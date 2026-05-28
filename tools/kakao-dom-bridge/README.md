@@ -160,7 +160,7 @@ worker는 Hermes를 호출하기 전에 읽기 전용 조회 컨텍스트를 생
 - 금지 액션: `write`, `append`, `run`, `insertAndCheckRequest`, `updateRequest`, `deleteRequest`, `발송승인`, `등록`, `send`.
 - AI가 lookup 결과를 근거로 safety_checks를 채우되, 최종 판단은 AI가 합니다. 코드는 safety_checks가 모두 true인지 gate만 봅니다.
 
-제품 런처 실행에서는 `AI_WORKER_AUTO_SEND=1`이 기본입니다. 단, 자동 발송은 AI가 `replyMode: auto_send`, high confidence, 최신 고객 턴, 활성 kill switch, 가격/예약/결제/파손/민감 확약 차단 조건을 모두 통과한 경우에만 수행합니다. Sheets에는 AI가 `should_write_to_sheet: true`로 판단한 경우에만 GAS `insertAndCheckRequest`를 호출합니다. 요청ID는 GAS가 `RQ-YYMMDD-NNN` 형식으로 생성하고, 장비가 여러 개면 같은 요청ID의 여러 행으로 펼쳐집니다.
+제품 런처 실행에서는 `AI_WORKER_AUTO_SEND=1`이 기본입니다. 단, 자동 발송은 AI가 `replyMode: auto_send`, high confidence, 최신 고객 턴, kill switch 정책, 가격/예약/결제/파손/민감 확약 차단 조건을 모두 통과한 경우에만 수행합니다. `paused`는 모든 자동발송을 막고, `price_paused`는 가격 자동응답만 막으며 FAQ 같은 단순 고정답변은 계속 허용합니다. Sheets에는 AI가 `should_write_to_sheet: true`로 판단한 경우에만 GAS `insertAndCheckRequest`를 GET으로 호출합니다. 요청ID는 GAS가 `RQ-YYMMDD-NNN` 형식으로 생성하고, 장비가 여러 개면 `장비: [{이름, 수량}, ...]` 배열로 보내 같은 요청ID의 여러 행으로 펼쳐집니다.
 
 ### Claude Coworker 프롬프트에서 가져온 운영 규칙
 
@@ -172,5 +172,7 @@ worker는 Hermes를 호출하기 전에 읽기 전용 조회 컨텍스트를 생
 - 장비명은 약어 그대로 쓰지 않고 세트마스터/목록의 정확한 이름이 확인된 경우에만 시트 후보로 씁니다.
 - 할인유형은 `학생`, `개인사업자/프리랜서`, `일반`만 허용합니다. `단골`, `제휴`는 AI가 쓰지 않습니다.
 - 중복 방지는 계약마스터, 스케줄상세, 확인요청 3단계 확인이 필요합니다.
-- 현재 Hermes MVP에서는 카톡 자동 발송, 알림톡 발송, 예약 등록은 비활성화입니다. 답장 초안과 사람검토 시트 후보까지만 생성합니다.
-- worker는 `safety_checks`가 모두 true일 때만 실제 Sheets append를 허용합니다. 하나라도 빠지면 `should_write_to_sheet: true`여도 append하지 않습니다.
+- 직원이 이미 카톡으로 가능/예약 응답을 했지만 계약마스터/스케줄상세/확인요청에 없는 건은 답장을 새로 보내지 않고 확인요청에만 입력합니다.
+- 카톡 자동 발송은 FAQ/절차/단순 안내 같은 안전한 답변으로 제한합니다. 알림톡 발송과 예약 등록은 여전히 재형님 승인 후 별도 흐름에서만 처리합니다.
+- worker는 기본적으로 `safety_checks`가 모두 true일 때만 실제 Sheets append를 허용합니다. 예외는 직원 확정 후 미등록 예약으로 확인된 경우이며, 이때도 채팅방 직접 확인, 미리보기만 분류 금지, 중복 확인, `no_auto_reply_sent=true`가 필요합니다.
+- 유입로그 프롬프트는 현재 worker에 직접 쓰기 API로 섞지 않습니다. 유입경로/고객유형/문의장비는 대화 증거와 후속조치 카드에 보존하고, 마케팅 로그 자동 기록은 별도 worker/API로 분리해야 합니다.
