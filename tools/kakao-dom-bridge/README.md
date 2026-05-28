@@ -160,7 +160,7 @@ worker는 Hermes를 호출하기 전에 읽기 전용 조회 컨텍스트를 생
 - 금지 액션: `write`, `append`, `run`, `insertAndCheckRequest`, `updateRequest`, `deleteRequest`, `발송승인`, `등록`, `send`.
 - AI가 lookup 결과를 근거로 safety_checks를 채우되, 최종 판단은 AI가 합니다. 코드는 safety_checks가 모두 true인지 gate만 봅니다.
 
-제품 런처 실행에서는 `AI_WORKER_AUTO_SEND=1`이 기본입니다. 단, 자동 발송은 AI가 `replyMode: auto_send`, high confidence, 최신 고객 턴, 활성 kill switch, 가격/예약/결제/파손/민감 확약 차단 조건을 모두 통과한 경우에만 수행합니다. Sheets에는 AI가 `should_write_to_sheet: true`로 판단한 경우에만 `확인요청`에 `AI_REVIEW`/`AI-대기` 상태의 사람검토 행을 append합니다.
+제품 런처 실행에서는 `AI_WORKER_AUTO_SEND=1`이 기본입니다. 단, 자동 발송은 AI가 `replyMode: auto_send`, high confidence, 최신 고객 턴, 활성 kill switch, 가격/예약/결제/파손/민감 확약 차단 조건을 모두 통과한 경우에만 수행합니다. Sheets에는 AI가 `should_write_to_sheet: true`로 판단한 경우에만 GAS `insertAndCheckRequest`를 호출합니다. 요청ID는 GAS가 `RQ-YYMMDD-NNN` 형식으로 생성하고, 장비가 여러 개면 같은 요청ID의 여러 행으로 펼쳐집니다.
 
 ### Claude Coworker 프롬프트에서 가져온 운영 규칙
 

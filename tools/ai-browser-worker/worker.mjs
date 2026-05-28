@@ -407,6 +407,8 @@ TASK:
 9. RAG interpretation: confidence=high can inform a reply draft but still cannot assert inventory/booking; confidence=low is tone/policy hint only; no_match/empty/error means ignore RAG; ownerReview=true means extra human verification before any future auto-send; knowledgeSource=general is not firm village policy.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 11. For reservation-format customer requests, prefer should_write_to_sheet=true and fill sheet_row_candidate best-effort. Missing phone, imperfect exact equipment verification, or incomplete duplicate lookup should be written into memo/extra_request rather than blocking the 확인요청 row. Only set should_write_to_sheet=false when this is clearly not a reservation, the target Kakao conversation was not opened, the newest actionable message is staff/outbound, sender order is unclear, or an obvious duplicate/already-registered booking was found.
+11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
+11-2. For multiple equipment items, put each item into sheet_row_candidate.equipment as a separate object. Do not concatenate multiple equipment names into one item string. One equipment object becomes one 확인요청 row under the same GAS-generated request ID.
 12. Create at most one follow_up_item per latest customer message cluster. Do not split one customer turn into separate reply_needed/schedule_check/damage_repair/completed_log cards. Choose the single primary type and put the rest as a concise checklist inside recommended_action/evidence.
 13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for simple, high-confidence replies that are safe to send now under the kill-switch policy. Otherwise use draft_only or no_reply.
 14. Return only the final machine-readable JSON below.
@@ -424,7 +426,7 @@ The JSON schema:
   "reservation_inquiry": {
     "is_reservation_inquiry": boolean,
     "is_test_message": boolean,
-    "equipment_requested": [{ "raw_text": string, "normalized_guess": string | null, "exact_name_from_set_master": string | null, "confidence": "low" | "medium" | "high" }],
+    "equipment_requested": [{ "raw_text": string, "normalized_guess": string | null, "exact_name_from_set_master": string | null, "quantity": number | string | null, "confidence": "low" | "medium" | "high" }],
     "rental_start": string | null,
     "rental_end": string | null,
     "pickup_time": string | null,
@@ -465,14 +467,12 @@ The JSON schema:
     }
   ],
   "sheet_row_candidate": {
-    "request_id": string,
     "customer_name": string,
-    "item": string,
+    "equipment": [{ "item": string, "quantity": number | string | "" }],
     "start_date": string,
     "end_date": string,
     "pickup_time": string,
     "return_time": string,
-    "quantity": number | string | "",
     "phone": string,
     "discount_type": "학생" | "개인사업자/프리랜서" | "일반" | "",
     "memo": string,
@@ -515,37 +515,59 @@ function hasRequiredSheetSafetyChecks(decision) {
   return REQUIRED_SHEET_SAFETY_CHECKS.every((key) => checks[key] === true);
 }
 
+function normalizeSheetEquipmentItems(decision = {}) {
+  const row = decision.sheet_row_candidate || {};
+  const rawItems = Array.isArray(row.equipment) ? row.equipment
+    : Array.isArray(row.items) ? row.items
+      : Array.isArray(row.장비) ? row.장비
+        : [];
+  const fromCandidate = rawItems.map((item) => ({
+    item: text(item.item || item.name || item.이름 || item.equipment || item.raw_text),
+    quantity: item.quantity ?? item.qty ?? item.수량 ?? ''
+  }));
+  const fromReservation = Array.isArray(decision.reservation_inquiry?.equipment_requested)
+    ? decision.reservation_inquiry.equipment_requested.map((item) => ({
+      item: text(item.exact_name_from_set_master || item.normalized_guess || item.raw_text),
+      quantity: item.quantity ?? item.qty ?? item.수량 ?? ''
+    }))
+    : [];
+  const items = (fromCandidate.length ? fromCandidate : fromReservation)
+    .map((item) => ({
+      item: text(item.item).trim(),
+      quantity: item.quantity === null || item.quantity === undefined || item.quantity === '' ? 1 : item.quantity
+    }))
+    .filter((item) => item.item);
+  if (items.length) return items;
+  const fallbackItem = text(row.item || row.장비명 || row.equipment_name).trim();
+  if (!fallbackItem) return [];
+  return [{ item: fallbackItem, quantity: row.quantity ?? row.qty ?? row.수량 ?? 1 }];
+}
+
 export function buildSheetAppendPayload(decision, options = {}) {
   if (!decision || decision.should_write_to_sheet !== true) return null;
   if (!hasRequiredSheetSafetyChecks(decision)) return null;
   const row = decision.sheet_row_candidate || {};
-  const requestId = text(row.request_id) || `AI-${new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)}`;
+  const equipment = normalizeSheetEquipmentItems(decision);
+  if (!equipment.length) return null;
   const memo = text(row.memo || decision.reason);
   const extra = text(row.extra_request || decision.suggested_human_review_action || '');
+  const args = {
+    반출일: text(row.start_date || decision.reservation_inquiry?.rental_start),
+    반출시간: text(row.pickup_time || decision.reservation_inquiry?.pickup_time),
+    반납일: text(row.end_date || decision.reservation_inquiry?.rental_end),
+    반납시간: text(row.return_time || decision.reservation_inquiry?.return_time),
+    예약자명: text(row.customer_name || decision.customer?.name),
+    연락처: text(row.phone || decision.customer?.phone),
+    할인유형: text(row.discount_type || decision.reservation_inquiry?.discount_type || '일반') || '일반',
+    비고: memo,
+    추가요청: extra,
+    장비: equipment.map((item) => ({ 이름: item.item, 수량: item.quantity || 1 }))
+  };
   return {
     key: options.apiKey || DEFAULT_SHEET_API_KEY,
-    action: 'append',
-    sheet: '확인요청',
-    values: [[
-      requestId,
-      text(row.start_date),
-      text(row.pickup_time),
-      text(row.end_date),
-      text(row.return_time),
-      text(row.item),
-      row.quantity ?? '',
-      '',
-      'AI_REVIEW',
-      memo,
-      text(row.customer_name || decision.customer?.name),
-      text(row.phone),
-      text(row.discount_type || decision.reservation_inquiry?.discount_type),
-      '',
-      'AI-대기',
-      '',
-      'AI가 카카오 화면을 읽고 생성한 후보 행. 사람 검토 후 확인/등록 실행.',
-      extra
-    ]]
+    action: 'run',
+    func: 'insertAndCheckRequest',
+    args
   };
 }
 

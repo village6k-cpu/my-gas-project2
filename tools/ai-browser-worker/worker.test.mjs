@@ -604,7 +604,7 @@ test('buildSheetAppendPayload returns null when AI says not to write', () => {
   assert.equal(buildSheetAppendPayload(decision, { apiKey: 'k' }), null);
 });
 
-test('buildSheetAppendPayload maps AI-decided fields into 확인요청 append shape', () => {
+test('buildSheetAppendPayload maps AI-decided fields into insertAndCheckRequest payload', () => {
   const decision = {
     should_write_to_sheet: true,
     safety_checks: {
@@ -618,13 +618,14 @@ test('buildSheetAppendPayload maps AI-decided fields into 확인요청 append sh
       no_auto_reply_sent: true
     },
     sheet_row_candidate: {
-      request_id: 'AI-1',
       start_date: '2026-06-01',
       pickup_time: '10:00',
       end_date: '2026-06-02',
       return_time: '18:00',
-      item: '소니 FX6 바디세트',
-      quantity: 1,
+      equipment: [
+        { item: '소니 FX6 바디세트', quantity: 1 },
+        { item: '소니 GM 24-70mm II', quantity: 2 }
+      ],
       customer_name: '홍길동',
       phone: '010-0000-0000',
       discount_type: '학생',
@@ -635,15 +636,25 @@ test('buildSheetAppendPayload maps AI-decided fields into 확인요청 append sh
 
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
 
-  assert.equal(payload.action, 'append');
   assert.equal(payload.key, 'secret');
-  assert.equal(payload.sheet, '확인요청');
-  assert.equal(payload.values.length, 1);
-  assert.deepEqual(payload.values[0], [
-    'AI-1', '2026-06-01', '10:00', '2026-06-02', '18:00', '소니 FX6 바디세트', 1,
-    '', 'AI_REVIEW', 'AI 검토 필요', '홍길동', '010-0000-0000', '학생', '',
-    'AI-대기', '', 'AI가 카카오 화면을 읽고 생성한 후보 행. 사람 검토 후 확인/등록 실행.', '렌즈 포함'
-  ]);
+  assert.equal(payload.action, 'run');
+  assert.equal(payload.func, 'insertAndCheckRequest');
+  assert.deepEqual(payload.args, {
+    반출일: '2026-06-01',
+    반출시간: '10:00',
+    반납일: '2026-06-02',
+    반납시간: '18:00',
+    예약자명: '홍길동',
+    연락처: '010-0000-0000',
+    할인유형: '학생',
+    비고: 'AI 검토 필요',
+    추가요청: '렌즈 포함',
+    장비: [
+      { 이름: '소니 FX6 바디세트', 수량: 1 },
+      { 이름: '소니 GM 24-70mm II', 수량: 2 }
+    ]
+  });
+  assert.equal(JSON.stringify(payload).includes('AI-'), false);
 });
 
 test('buildSheetAppendPayload allows reservation-format writes when non-blocking checks are incomplete', () => {
@@ -663,11 +674,47 @@ test('buildSheetAppendPayload allows reservation-format writes when non-blocking
   };
 
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
-  assert.equal(payload.action, 'append');
-  assert.equal(payload.sheet, '확인요청');
-  assert.equal(payload.values[0][5], 'FX6');
-  assert.equal(payload.values[0][10], '홍길동');
-  assert.equal(payload.values[0][9], '장비명/중복 검증 필요');
+  assert.equal(payload.action, 'run');
+  assert.equal(payload.func, 'insertAndCheckRequest');
+  assert.deepEqual(payload.args.장비, [{ 이름: 'FX6', 수량: 1 }]);
+  assert.equal(payload.args.예약자명, '홍길동');
+  assert.equal(payload.args.비고, '장비명/중복 검증 필요');
+});
+
+test('buildSheetAppendPayload falls back to reservation equipment array instead of joining items into one row', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    customer: { name: '김성윤' },
+    reservation_inquiry: {
+      rental_start: '2026-05-28',
+      rental_end: '2026-05-28',
+      pickup_time: '07:00',
+      return_time: '23:00',
+      discount_type: '개인사업자/프리랜서',
+      equipment_requested: [
+        { raw_text: '셔틀러에이스 2개', normalized_guess: '셔틀러 에이스', quantity: 2 },
+        { raw_text: 'a7s3 바디세트 2개', exact_name_from_set_master: '소니 A7S3 바디세트', quantity: 2 },
+        { raw_text: '2470gm2 2개', exact_name_from_set_master: '소니 GM 24-70mm II', quantity: 2 }
+      ]
+    },
+    sheet_row_candidate: {
+      customer_name: '김성윤',
+      item: '셔틀러 에이스 2개, 소니 A7S3 바디세트 2개, 소니 GM 24-70mm II 2개',
+      memo: 'fallback should prefer structured reservation equipment'
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  assert.deepEqual(payload.args.장비, [
+    { 이름: '셔틀러 에이스', 수량: 2 },
+    { 이름: '소니 A7S3 바디세트', 수량: 2 },
+    { 이름: '소니 GM 24-70mm II', 수량: 2 }
+  ]);
 });
 
 test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', () => {
