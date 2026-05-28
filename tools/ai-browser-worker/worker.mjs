@@ -966,15 +966,26 @@ export async function updateJob(config, jobId, patch) {
 
 export async function appendToSheet(config, payload) {
   if (!payload) return null;
-  const response = await fetch(`${config.gasApiUrl}?key=${encodeURIComponent(config.sheetApiKey)}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...payload, key: config.sheetApiKey })
-  });
+  const fetchImpl = config.fetchImpl || fetch;
+  let response;
+  if (payload.action === 'run' && payload.func === 'insertAndCheckRequest') {
+    const url = new URL(config.gasApiUrl);
+    url.searchParams.set('key', config.sheetApiKey);
+    url.searchParams.set('action', 'run');
+    url.searchParams.set('func', 'insertAndCheckRequest');
+    url.searchParams.set('args', JSON.stringify(payload.args || {}));
+    response = await fetchImpl(url);
+  } else {
+    response = await fetchImpl(`${config.gasApiUrl}?key=${encodeURIComponent(config.sheetApiKey)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...payload, key: config.sheetApiKey })
+    });
+  }
   const textBody = await response.text();
   let data;
   try { data = JSON.parse(textBody); } catch { data = { raw: textBody }; }
-  if (!response.ok || data?.error) throw new Error(`GAS Sheets append failed: ${response.status} ${JSON.stringify(data)}`);
+  if (!response.ok || data?.error) throw new Error(`GAS Sheets request failed: ${response.status} ${JSON.stringify(data)}`);
   return data;
 }
 

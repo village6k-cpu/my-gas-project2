@@ -44,6 +44,7 @@ import {
   kakaoConversationContainsMessage,
   sendKakaoMessageViaChrome,
   runHermes,
+  appendToSheet,
   buildCloseKakaoConversationWindowAppleScript,
   closeKakaoConversationWindow
 } from './worker.mjs';
@@ -715,6 +716,50 @@ test('buildSheetAppendPayload falls back to reservation equipment array instead 
     { 이름: '소니 A7S3 바디세트', 수량: 2 },
     { 이름: '소니 GM 24-70mm II', 수량: 2 }
   ]);
+});
+
+test('appendToSheet calls insertAndCheckRequest with the Claude coworker GET contract', async () => {
+  const payload = {
+    key: 'secret',
+    action: 'run',
+    func: 'insertAndCheckRequest',
+    args: {
+      반출일: '2026-06-01',
+      반출시간: '10:00',
+      반납일: '2026-06-02',
+      반납시간: '18:00',
+      예약자명: '홍길동',
+      장비: [
+        { 이름: '소니 FX6 바디세트', 수량: 1 },
+        { 이름: '소니 GM 24-70mm II', 수량: 2 }
+      ]
+    }
+  };
+  let calledUrl;
+  let calledInit;
+  const fetchImpl = async (url, init) => {
+    calledUrl = new URL(String(url));
+    calledInit = init;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ success: true, reqID: 'RQ-260601-001', results: [] })
+    };
+  };
+
+  const result = await appendToSheet({
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'secret',
+    fetchImpl
+  }, payload);
+
+  assert.equal(calledInit, undefined);
+  assert.equal(calledUrl.origin + calledUrl.pathname, 'https://gas.example/exec');
+  assert.equal(calledUrl.searchParams.get('key'), 'secret');
+  assert.equal(calledUrl.searchParams.get('action'), 'run');
+  assert.equal(calledUrl.searchParams.get('func'), 'insertAndCheckRequest');
+  assert.deepEqual(JSON.parse(calledUrl.searchParams.get('args')), payload.args);
+  assert.equal(result.reqID, 'RQ-260601-001');
 });
 
 test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', () => {
