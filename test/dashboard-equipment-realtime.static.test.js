@@ -330,6 +330,82 @@ assert.doesNotMatch(
     `${file} memo/status saves must rollback local memory on failure`
   );
 
+  const itemsForTradeBody = html.match(/function dashboardItemsForTrade\(tid\)[\s\S]*?\n}\n\nfunction dashboardEquipmentMutationTargets/);
+  assert.ok(itemsForTradeBody, `${file} must expose dashboardItemsForTrade before dashboardEquipmentMutationTargets`);
+  assert.match(
+    itemsForTradeBody[0],
+    /collect\(dashboardData\)[\s\S]*collect\(dashboardGlobalSearchData\)/,
+    `${file} trade-level edits must update active search results as well as selected-date data`
+  );
+
+  assert.match(
+    html,
+    /function dashboardItemsForScheduleId\(scheduleId\)[\s\S]*collect\(dashboardData\)[\s\S]*collect\(dashboardGlobalSearchData\)/,
+    `${file} equipment check edits must update search-result equipment rows as well as selected-date rows`
+  );
+
+  const syncItemBody = html.match(/function syncItemCheckInMemory\(scheduleId,\s*phase,\s*done\)[\s\S]*?persistCurrentDashboardCache\(\);\n}/);
+  assert.ok(syncItemBody, `${file} must expose syncItemCheckInMemory before escHtml`);
+  assert.match(
+    syncItemBody[0],
+    /dashboardItemsForScheduleId\(scheduleId\)\.forEach/,
+    `${file} equipment row checks must sync the global-search in-memory card immediately`
+  );
+  assert.doesNotMatch(
+    syncItemBody[0],
+    /if \(!dashboardData\) return/,
+    `${file} equipment row checks must still sync when the active card only lives in global search results`
+  );
+
+  [
+    'syncContractStatusInMemory',
+    'syncEquipmentCheckInMemory',
+    'syncTradeProofInMemory',
+    'syncBillingCompanyInMemory',
+    'syncPaymentInMemory',
+    'syncTaskDoneInMemory'
+  ].forEach((fn) => {
+    const body = html.match(new RegExp('function ' + fn + '\\([\\s\\S]*?\\n}\\n\\nfunction '));
+    assert.ok(body, `${file} must expose ${fn}`);
+    assert.doesNotMatch(
+      body[0],
+      /if \(!dashboardData\) return/,
+      `${file} ${fn} must not skip active global-search cards`
+    );
+  });
+
+  assert.match(
+    html,
+    /data-task-action="' \+ taskAction \+ '" data-trade-id="' \+ escAttr\(item\.tradeId\) \+ '"/,
+    `${file} task toggle buttons must carry trade ids for instant duplicate-card syncing`
+  );
+  assert.match(
+    html,
+    /function syncTaskToggleDom\(tid,\s*action,\s*done,\s*doneAt\)[\s\S]*data-task-action[\s\S]*data-trade-id[\s\S]*setTaskToggleLabel/,
+    `${file} task toggle DOM must update all visible cards immediately`
+  );
+  assert.match(
+    html,
+    /function toggleTask\(btn,\s*tid,\s*action\)[\s\S]*var optimisticDoneAt[\s\S]*syncTaskToggleDom\(tid,\s*action,\s*nowDone,\s*optimisticDoneAt\)[\s\S]*fetch\(/,
+    `${file} return/setup toggles must show the checked result before the slow GAS write returns`
+  );
+
+  assert.match(
+    html,
+    /data-schedule-id="' \+ escAttr\(eq\.scheduleId\)[\s\S]*data-phase="' \+ phaseStr/,
+    `${file} equipment checkboxes must carry schedule ids for instant duplicate-row syncing`
+  );
+  assert.match(
+    html,
+    /function syncEquipmentCheckDom\(scheduleId,\s*phase,\s*done\)[\s\S]*data-schedule-id[\s\S]*data-phase[\s\S]*row\.classList\.toggle\('checked',\s*done\)/,
+    `${file} equipment checkbox DOM must update all visible copies immediately`
+  );
+  assert.match(
+    html,
+    /function toggleItem\(cb,\s*scheduleId,\s*phase\)[\s\S]*syncEquipmentCheckDom\(scheduleId,\s*phase,\s*nowDone\)[\s\S]*fetch\(/,
+    `${file} equipment checkbox clicks must update visible search rows before GAS returns`
+  );
+
   const addBody = html.match(/function confirmAddEquip\([\s\S]*?<\/script>/);
   assert.ok(addBody, `${file} must expose confirmAddEquip near the modal script end`);
   assert.doesNotMatch(
