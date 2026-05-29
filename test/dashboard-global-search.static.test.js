@@ -237,8 +237,8 @@ assert.match(
 
   assert.match(
     html,
-    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v7['"]/,
-    `${file} must invalidate search-index caches that omitted equipment summaries`
+    /var DASHBOARD_SEARCH_INDEX_LOCAL_KEY\s*=\s*['"]dashboardSearchIndex_v8['"]/,
+    `${file} must invalidate stale browser-side search-index caches after search ranking and refresh fixes`
   );
 
   assert.match(
