@@ -1109,13 +1109,6 @@ function getDashboardSearchData(query, options) {
   }
   markProfile_('terms');
 
-  var cache = CacheService.getScriptCache();
-  var resultCacheKey = getDashboardSearchResultCacheKey_(query, limit, summaryOnly, detailGroup);
-  if (!profile) {
-    var cachedResult = getDashboardCacheJson_(cache, resultCacheKey);
-    if (cachedResult) return cachedResult;
-  }
-
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var schedSheet = ss.getSheetByName('스케줄상세');
   var contractSheet = ss.getSheetByName('계약마스터');
@@ -1133,20 +1126,27 @@ function getDashboardSearchData(query, options) {
   entries.forEach(function(entry) {
     var haystack = String(entry.x || entry.searchText || '');
     if (!terms.every(function(term) { return haystack.indexOf(term) >= 0; })) return;
+    var searchScore = getDashboardSearchCandidateScore_(entry, terms);
     candidates.push({
       type: 'checkout',
       entry: entry,
       sortDate: normalizeDashboardSearchDateKey_(entry.od),
-      sortTime: normalizeDashboardTimeKey_(entry.ot)
+      sortTime: normalizeDashboardTimeKey_(entry.ot),
+      searchScore: searchScore
     });
     candidates.push({
       type: 'checkin',
       entry: entry,
       sortDate: normalizeDashboardSearchDateKey_(entry.rd),
-      sortTime: normalizeDashboardTimeKey_(entry.rt)
+      sortTime: normalizeDashboardTimeKey_(entry.rt),
+      searchScore: searchScore
     });
   });
-  candidates.sort(compareDashboardSearchCandidates_);
+  candidates.sort(function(a, b) {
+    var scoreCmp = (a.searchScore || 0) - (b.searchScore || 0);
+    if (scoreCmp) return scoreCmp;
+    return compareDashboardSearchCandidates_(a, b);
+  });
   markProfile_('match');
 
   var visible = candidates.length > limit ? candidates.slice(0, limit) : candidates;
@@ -1174,7 +1174,6 @@ function getDashboardSearchData(query, options) {
       limit: limit,
       summaryMode: true
     };
-    if (!profile) putDashboardCacheJson_(cache, resultCacheKey, summaryResult, 300);
     return attachProfile_(summaryResult);
   }
 
@@ -1295,7 +1294,6 @@ function getDashboardSearchData(query, options) {
     billingCompanyOptions: getTradeBillingCompanyOptions_()
   };
   markEquipmentRiskSearchEvaluationSkipped_(result);
-  if (!profile) putDashboardCacheJson_(cache, resultCacheKey, result, 300);
   return attachProfile_(result);
 }
 
@@ -1354,6 +1352,18 @@ function buildDashboardSearchSummaryEquipments_(equipments) {
       setsWithComponents[eq.name] ? 1 : 0
     ];
   });
+}
+
+function getDashboardSearchEntryEquipmentText_(entry) {
+  var parts = [];
+  (entry && entry.eq || []).forEach(function(item) {
+    if (Array.isArray(item)) {
+      parts.push(item[1], item[3]);
+    } else if (item) {
+      parts.push(item.name, item.setName);
+    }
+  });
+  return compactDashboardSearchTextParts_(parts);
 }
 
 function expandDashboardSearchSummaryEquipments_(items) {
@@ -1583,6 +1593,29 @@ function compareDashboardSearchCandidates_(a, b) {
   return String(a.type || '').localeCompare(String(b.type || ''));
 }
 
+function getDashboardSearchCandidateScore_(entry, terms) {
+  entry = entry || {};
+  terms = terms || [];
+  var name = normalizeDashboardSearchText_(entry.n || '');
+  var tradeId = normalizeDashboardSearchText_(entry.tid || '');
+  var tel = normalizeDashboardSearchText_(entry.tel || '');
+  var company = normalizeDashboardSearchText_(entry.co || '');
+  var equipmentText = getDashboardSearchEntryEquipmentText_(entry);
+  var haystack = String(entry.x || entry.searchText || '');
+  var score = 0;
+  terms.forEach(function(term) {
+    if (!term) return;
+    if (name === term) score += 0;
+    else if (name.indexOf(term) === 0) score += 1;
+    else if (name.indexOf(term) >= 0) score += 2;
+    else if (tradeId.indexOf(term) >= 0 || tel.indexOf(term) >= 0 || company.indexOf(term) >= 0) score += 3;
+    else if (equipmentText.indexOf(term) >= 0) score += 5;
+    else if (haystack.indexOf(term) >= 0) score += 8;
+    else score += 20;
+  });
+  return score;
+}
+
 function getDashboardSearchCacheVersion_() {
   try {
     return PropertiesService.getScriptProperties().getProperty(DASHBOARD_SEARCH_CACHE_VERSION_PROP_) || '0';
@@ -1595,16 +1628,6 @@ function touchDashboardSearchCacheVersion_() {
   try {
     PropertiesService.getScriptProperties().setProperty(DASHBOARD_SEARCH_CACHE_VERSION_PROP_, String(Date.now()));
   } catch (e) {}
-}
-
-function getDashboardSearchResultCacheKey_(query, limit, summaryOnly, detailGroup) {
-  var raw = getTimelineCacheVersion_() + '|' + getDashboardSearchCacheVersion_() + '|' + limit + '|' +
-    (summaryOnly ? 'summary' : 'detail') + '|' +
-    normalizeDashboardSearchText_(detailGroup || '') + '|' +
-    normalizeDashboardSearchText_(query);
-  var digest = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw))
-    .replace(/=+$/g, '');
-  return 'dashboard_search_result_v6_' + digest;
 }
 
 function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup, options) {

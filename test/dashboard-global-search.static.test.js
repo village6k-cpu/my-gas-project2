@@ -92,10 +92,24 @@ assert.match(
   'global search must rebuild full schedule groups from visible trade rows only'
 );
 
+const searchDataBody = backend.match(/function getDashboardSearchData\(query,\s*options\)[\s\S]*?\n}\n\nfunction getDashboardSearchCandidateGroupLabel_/);
+assert.ok(searchDataBody, 'getDashboardSearchData body must be discoverable');
+assert.doesNotMatch(
+  searchDataBody[0],
+  /getDashboardSearchResultCacheKey_|resultCacheKey|getDashboardCacheJson_\(cache,\s*resultCacheKey\)|putDashboardCacheJson_\(cache,\s*resultCacheKey/,
+  'global search must not cache final query results because stale result-cache entries can show the wrong customer for a new query'
+);
+
 assert.match(
   backend,
-  /function getDashboardSearchResultCacheKey_\(query,\s*limit,\s*summaryOnly,\s*detailGroup\)[\s\S]*dashboard_search_result_v6_/,
-  'global search must cache repeated query results by normalized query, limit, mode, and detail group'
+  /function getDashboardSearchCandidateScore_\(entry,\s*terms\)[\s\S]*normalizeDashboardSearchText_\(entry\.n[\s\S]*getDashboardSearchEntryEquipmentText_\(entry\)[\s\S]*name\.indexOf\(term\) === 0[\s\S]*haystack\.indexOf\(term\) >= 0/,
+  'global search must rank customer-name matches ahead of broad equipment/status text matches'
+);
+
+assert.match(
+  searchDataBody[0],
+  /var searchScore\s*=\s*getDashboardSearchCandidateScore_\(entry,\s*terms\)[\s\S]*searchScore:\s*searchScore[\s\S]*candidates\.sort\(function\(a,\s*b\)[\s\S]*a\.searchScore[\s\S]*compareDashboardSearchCandidates_\(a,\s*b\)/,
+  'global search must apply relevance scoring before date/time sorting'
 );
 
 assert.match(
@@ -271,8 +285,38 @@ assert.match(
 
   assert.match(
     html,
+    /function getDashboardSearchEntryScore\(entry,\s*terms\)[\s\S]*normalizeDashboardSearchIndexText\(entry\.n[\s\S]*getDashboardSearchEntryEquipmentText\(entry\)[\s\S]*name\.indexOf\(term\) === 0[\s\S]*haystack\.indexOf\(term\) >= 0/,
+    `${file} must rank local customer-name matches ahead of broad equipment/status text matches`
+  );
+
+  assert.match(
+    html,
+    /var searchScore\s*=\s*getDashboardSearchEntryScore\(entry,\s*terms\)[\s\S]*searchScore:\s*searchScore[\s\S]*candidates\.sort\(function\(a,\s*b\)[\s\S]*a\.searchScore[\s\S]*return compareDashboardLocalSearchCandidates\(a,\s*b\)/,
+    `${file} must apply local relevance scoring before date/time sorting`
+  );
+
+  assert.match(
+    html,
     /renderDashboardSearchFromLocalIndex\(dashboardSearchQuery\)/,
     `${file} must try local instant search on every search input`
+  );
+
+  assert.match(
+    html,
+    /function clearDashboardSearchCaches\(\)[\s\S]*dashboardSearchIndexCache\s*=\s*null[\s\S]*localStorage\.removeItem\(DASHBOARD_SEARCH_INDEX_LOCAL_KEY\)/,
+    `${file} refresh must be able to drop stale local global-search index data`
+  );
+
+  assert.match(
+    html,
+    /function refreshDashboardSearchResults\(\)[\s\S]*clearDashboardSearchCaches\(\)[\s\S]*loadDashboardSearchIndex\(true\)[\s\S]*loadDashboardGlobalSearch\(query,\s*\{ forceFresh:\s*true \}\)/,
+    `${file} refresh while searching must fetch a fresh search index and fresh server summary`
+  );
+
+  assert.match(
+    html,
+    /function refreshData\(\)[\s\S]*if \(dashboardSearchQuery\) \{[\s\S]*refreshDashboardSearchResults\(\);[\s\S]*return;[\s\S]*\}[\s\S]*loadData\(true\)/,
+    `${file} refresh must reload active global-search results instead of re-rendering stale search data`
   );
 
   assert.match(
