@@ -1463,10 +1463,12 @@ var dashboardSearchIndexCache = null;
 var dashboardSearchIndexPromise = null;
 var dashboardSearchIndexPrefetchQueued = false;
 var dashboardSearchIndexRequestSeq = 0;
+var dashboardSearchIndexStale = false;
 var DASHBOARD_SEARCH_DEBOUNCE_MS = 220;
 var DASHBOARD_SEARCH_LIMIT = 40;
 var DASHBOARD_SEARCH_INDEX_LOCAL_KEY = 'dashboardSearchIndex_v8';
 var DASHBOARD_SEARCH_INDEX_LOCAL_TTL_MS = 30 * 60 * 1000;
+var DASHBOARD_SEARCH_INDEX_STALE_MAX_MS = 12 * 60 * 60 * 1000;
 var DASHBOARD_SEARCH_INDEX_PACKED_COLUMNS = ['tid', 'n', 'tel', 'co', 'cs', 'st', 'od', 'ot', 'rd', 'rt', 'eq', 'x'];
 var DASHBOARD_CACHE_PREFIX = 'dashCache_v4_';
 var DASHBOARD_OLD_CACHE_PREFIX = 'dashCache_v3_';
@@ -1523,6 +1525,7 @@ document.addEventListener('DOMContentLoaded', function() {
   loadDashboardNotes();
   hydrateInitialEquipList();
   hydrateDashboardSearchIndex();
+  queueDashboardSearchIndexPrefetch(0);
   // 서버가 INITIAL_DATA 박아 보냈으면 즉시 렌더 (fetch 왕복 1회 절약)
   if (INITIAL_DATA && isDashboardDateMatch(INITIAL_DATA, formatDate(currentDate))) {
     dashboardData = INITIAL_DATA;
@@ -1652,6 +1655,7 @@ function clearDashboardSearchCaches() {
   dashboardSearchIndexCache = null;
   dashboardSearchIndexPromise = null;
   dashboardSearchIndexPrefetchQueued = false;
+  dashboardSearchIndexStale = false;
   dashboardSearchDetailedGroups = {};
   dashboardSearchGroupLabels = {};
   try { localStorage.removeItem(DASHBOARD_SEARCH_INDEX_LOCAL_KEY); } catch (e) {}
@@ -2055,8 +2059,11 @@ function hydrateDashboardSearchIndex() {
     var raw = localStorage.getItem(DASHBOARD_SEARCH_INDEX_LOCAL_KEY);
     if (!raw) return;
     var cached = JSON.parse(raw);
-    if (!cached || !cached.ts || Date.now() - cached.ts > DASHBOARD_SEARCH_INDEX_LOCAL_TTL_MS) return;
+    if (!cached || !cached.ts) return;
+    var ageMs = Date.now() - cached.ts;
+    if (ageMs > DASHBOARD_SEARCH_INDEX_STALE_MAX_MS) return;
     setDashboardSearchIndexCache(cached.data || cached, false);
+    dashboardSearchIndexStale = ageMs > DASHBOARD_SEARCH_INDEX_LOCAL_TTL_MS;
   } catch (e) {}
 }
 
@@ -2102,6 +2109,7 @@ function setDashboardSearchIndexCache(data, persist) {
     lastRow: data.lastRow || 0,
     entries: expandPackedDashboardSearchIndexEntries(data)
   };
+  dashboardSearchIndexStale = false;
   if (persist) {
     try {
       localStorage.setItem(DASHBOARD_SEARCH_INDEX_LOCAL_KEY, JSON.stringify({
@@ -2133,10 +2141,14 @@ function loadDashboardSearchIndex(forceFresh) {
   return dashboardSearchIndexPromise;
 }
 
-function queueDashboardSearchIndexPrefetch() {
-  if (dashboardSearchIndexCache || dashboardSearchIndexPrefetchQueued) return;
+function queueDashboardSearchIndexPrefetch(delayMs) {
+  if ((dashboardSearchIndexCache && !dashboardSearchIndexStale) || dashboardSearchIndexPrefetchQueued) return;
   dashboardSearchIndexPrefetchQueued = true;
-  var run = function() { loadDashboardSearchIndex(); };
+  var run = function() { loadDashboardSearchIndex(dashboardSearchIndexStale); };
+  if (delayMs === 0) {
+    setTimeout(run, 0);
+    return;
+  }
   if (window.requestIdleCallback) {
     window.requestIdleCallback(run, { timeout: 1800 });
   } else {
