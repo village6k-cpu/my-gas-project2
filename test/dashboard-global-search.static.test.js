@@ -243,6 +243,18 @@ assert.match(
 
   assert.match(
     html,
+    /var DASHBOARD_SEARCH_INDEX_STALE_MAX_MS\s*=\s*12 \* 60 \* 60 \* 1000;/,
+    `${file} must keep a bounded stale search-index fallback for instant first search while refreshing in the background`
+  );
+
+  assert.match(
+    html,
+    /function hydrateDashboardSearchIndex\(\)[\s\S]*var ageMs\s*=\s*Date\.now\(\) - cached\.ts[\s\S]*ageMs > DASHBOARD_SEARCH_INDEX_STALE_MAX_MS[\s\S]*dashboardSearchIndexStale\s*=\s*ageMs > DASHBOARD_SEARCH_INDEX_LOCAL_TTL_MS/,
+    `${file} must hydrate usable stale local search-index data instead of showing blank results while GAS warms up`
+  );
+
+  assert.match(
+    html,
     /var DASHBOARD_SEARCH_INDEX_PACKED_COLUMNS\s*=\s*\['tid',\s*'n',\s*'tel',\s*'co',\s*'cs',\s*'st',\s*'od',\s*'ot',\s*'rd',\s*'rt',\s*'eq',\s*'x'\]/,
     `${file} must know how to decode packed dashboard search index rows`
   );
@@ -299,6 +311,18 @@ assert.match(
     html,
     /renderDashboardSearchFromLocalIndex\(dashboardSearchQuery\)/,
     `${file} must try local instant search on every search input`
+  );
+
+  assert.match(
+    html,
+    /hydrateDashboardSearchIndex\(\);\s*\n\s*queueDashboardSearchIndexPrefetch\(0\);[\s\S]*loadData\(/,
+    `${file} must start search-index prefetch immediately on startup instead of waiting for the dashboard API to finish`
+  );
+
+  assert.match(
+    html,
+    /function queueDashboardSearchIndexPrefetch\(delayMs\)[\s\S]*dashboardSearchIndexCache && !dashboardSearchIndexStale[\s\S]*loadDashboardSearchIndex\(dashboardSearchIndexStale\)[\s\S]*if \(delayMs === 0\)/,
+    `${file} must refresh stale search indexes in the background and support immediate startup prefetch`
   );
 
   assert.match(
