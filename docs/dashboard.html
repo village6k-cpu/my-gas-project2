@@ -2928,7 +2928,7 @@ function renderList(containerId, items, type, isSearching, options) {
       html += '<div style="display:flex;align-items:flex-start;gap:0;">';
       // 반출/반납 모두 토글 노출
       if (cardType === 'checkout' || cardType === 'checkin') {
-        html += '<button class="' + toggleCls + '" data-task-action="' + taskAction + '" onclick="event.stopPropagation();toggleTask(this,\'' + escHtml(item.tradeId) + '\',\'' + taskAction + '\')">' + escHtml(toggleLabel) + '</button>';
+        html += '<button class="' + toggleCls + '" data-task-action="' + taskAction + '" data-trade-id="' + escAttr(item.tradeId) + '" onclick="event.stopPropagation();toggleTask(this,\'' + escHtml(item.tradeId) + '\',\'' + taskAction + '\')">' + escHtml(toggleLabel) + '</button>';
       }
       html += '<div>';
       html += '<div class="customer-name">' + escHtml(item.name) + '</div>';
@@ -2980,7 +2980,7 @@ function renderList(containerId, items, type, isSearching, options) {
         if (eq.pending) {
           html += '<span class="' + cbCls + '"></span>';
         } else {
-          html += '<span class="' + cbCls + '" onclick="toggleItem(this,\'' + sidEsc + '\',\'' + phaseStr + '\')">' + (checked ? '✓' : '') + '</span>';
+          html += '<span class="' + cbCls + '" data-schedule-id="' + escAttr(eq.scheduleId) + '" data-phase="' + phaseStr + '" onclick="toggleItem(this,\'' + sidEsc + '\',\'' + phaseStr + '\')">' + (checked ? '✓' : '') + '</span>';
         }
         html += '<span class="equip-name">';
         if (eq.isSet) html += '<span class="equip-set-tag">SET</span>';
@@ -3400,7 +3400,6 @@ function setEquipmentCheckState(el, text, isError) {
 }
 
 function syncContractStatusInMemory(tid, status) {
-  if (!dashboardData) return;
   dashboardItemsForTrade(tid).forEach(function(item) {
     item.contractStatus = status;
   });
@@ -3417,7 +3416,6 @@ function syncTradeFieldControls(field, tid, value) {
 }
 
 function syncEquipmentCheckInMemory(payload, res) {
-  if (!dashboardData) return;
   dashboardItemsForTrade(payload.tid).forEach(function(item) {
     if (payload.field === 'returnStatus') item.returnStatus = payload.value;
     if (payload.field === 'memo') item.returnMemo = payload.value;
@@ -3435,10 +3433,7 @@ function syncEquipmentCheckInMemory(payload, res) {
 
 function toggleItem(cb, scheduleId, phase) {
   var nowDone = !cb.classList.contains('checked');
-  cb.classList.toggle('checked', nowDone);
-  cb.textContent = nowDone ? '✓' : '';
-  var row = cb.closest('.equip-row');
-  if (row) row.classList.toggle('checked', nowDone);
+  syncEquipmentCheckDom(scheduleId, phase, nowDone);
   syncItemCheckInMemory(scheduleId, phase, nowDone);
 
   fetch(API_URL + '?key=village2026&action=toggleItem'
@@ -3447,9 +3442,7 @@ function toggleItem(cb, scheduleId, phase) {
     + '&done=' + (nowDone ? '1' : '0'))
     .then(function(r) { return r.json(); })
     .catch(function() {
-      cb.classList.toggle('checked', !nowDone);
-      cb.textContent = !nowDone ? '✓' : '';
-      if (row) row.classList.toggle('checked', !nowDone);
+      syncEquipmentCheckDom(scheduleId, phase, !nowDone);
       syncItemCheckInMemory(scheduleId, phase, !nowDone);
     });
 }
@@ -3457,28 +3450,23 @@ function toggleItem(cb, scheduleId, phase) {
 function toggleTask(btn, tid, action) {
   // action = 'toggleSetup' (반출) 또는 'toggleReturn' (반납)
   var nowDone = !btn.classList.contains('checked');
-  // Optimistic UI — 토글 버튼이 속한 카드만 업데이트 (반출과 반납 따로 관리)
-  btn.classList.toggle('checked', nowDone);
-  setTaskToggleLabel(btn, action, nowDone, nowDone ? '' : '');
-  var card = btn.closest('.schedule-card');
-  if (card) card.classList.toggle('task-done', nowDone);
-  syncTaskDoneInMemory(tid, action, nowDone, '');
+  var optimisticDoneAt = nowDone ? formatDashboardClientDoneAt(new Date()) : '';
+  syncTaskToggleDom(tid, action, nowDone, optimisticDoneAt);
+  syncTaskDoneInMemory(tid, action, nowDone, optimisticDoneAt);
 
   fetch(API_URL + '?key=village2026&action=' + action + '&tid=' + encodeURIComponent(tid) + '&done=' + (nowDone ? '1' : '0'))
     .then(function(r) { return r.json(); })
     .then(function(res) {
       if (res && res.error) throw new Error(res.error);
       var doneAt = res && (res.doneAt || res.setupDoneAt || res.returnDoneAt || '');
-      setTaskToggleLabel(btn, action, nowDone, doneAt);
+      syncTaskToggleDom(tid, action, nowDone, doneAt || optimisticDoneAt);
       syncTaskDoneInMemory(tid, action, nowDone, doneAt);
       if (action === 'toggleReturn' && res && res.contractStatus) {
         syncContractStatusInMemory(tid, res.contractStatus);
       }
     })
     .catch(function() {
-      btn.classList.toggle('checked', !nowDone);
-      setTaskToggleLabel(btn, action, !nowDone, '');
-      if (card) card.classList.toggle('task-done', !nowDone);
+      syncTaskToggleDom(tid, action, !nowDone, '');
       syncTaskDoneInMemory(tid, action, !nowDone, '');
     });
 }
@@ -3517,6 +3505,17 @@ function setTaskToggleLabel(btn, action, done, doneAt) {
   btn.textContent = time ? prefix + ' ' + time : prefix + ' 저장중';
 }
 
+function syncTaskToggleDom(tid, action, done, doneAt) {
+  document.querySelectorAll('.task-toggle[data-task-action][data-trade-id]').forEach(function(button) {
+    if ((button.getAttribute('data-task-action') || '') !== action) return;
+    if ((button.getAttribute('data-trade-id') || '') !== tid) return;
+    button.classList.toggle('checked', done);
+    setTaskToggleLabel(button, action, done, doneAt);
+    var card = button.closest('.schedule-card');
+    if (card) card.classList.toggle('task-done', done);
+  });
+}
+
 function dashboardDoneTime(value) {
   var text = String(value || '').trim();
   if (!text) return '';
@@ -3525,15 +3524,33 @@ function dashboardDoneTime(value) {
   return match[1].padStart(2, '0') + ':' + match[2];
 }
 
+function formatDashboardClientDoneAt(date) {
+  date = date || new Date();
+  return date.getFullYear() + '-' +
+    ('0' + (date.getMonth() + 1)).slice(-2) + '-' +
+    ('0' + date.getDate()).slice(-2) + ' ' +
+    ('0' + date.getHours()).slice(-2) + ':' +
+    ('0' + date.getMinutes()).slice(-2) + ':' +
+    ('0' + date.getSeconds()).slice(-2);
+}
+
+function syncEquipmentCheckDom(scheduleId, phase, done) {
+  document.querySelectorAll('.equip-checkbox[data-schedule-id][data-phase]').forEach(function(box) {
+    if ((box.getAttribute('data-schedule-id') || '') !== scheduleId) return;
+    if ((box.getAttribute('data-phase') || '') !== phase) return;
+    box.classList.toggle('checked', done);
+    box.textContent = done ? '✓' : '';
+    var row = box.closest('.equip-row');
+    if (row) row.classList.toggle('checked', done);
+  });
+}
+
 function syncItemCheckInMemory(scheduleId, phase, done) {
-  if (!dashboardData) return;
-  ['checkout', 'checkin'].forEach(function(listName) {
-    (dashboardData[listName] || []).forEach(function(item) {
-      (item.equipments || []).forEach(function(eq) {
-        if (eq.scheduleId !== scheduleId) return;
-        if (phase === 'checkout') eq.checkedCheckout = done;
-        if (phase === 'checkin') eq.checkedCheckin = done;
-      });
+  dashboardItemsForScheduleId(scheduleId).forEach(function(item) {
+    (item.equipments || []).forEach(function(eq) {
+      if (eq.scheduleId !== scheduleId) return;
+      if (phase === 'checkout') eq.checkedCheckout = done;
+      if (phase === 'checkin') eq.checkedCheckin = done;
     });
   });
   persistCurrentDashboardCache();
@@ -4073,7 +4090,6 @@ function runTradeOpsAction(button, tradeId, action) {
 }
 
 function syncTradeProofInMemory(tid, field, value, res) {
-  if (!dashboardData) return;
   dashboardItemsForTrade(tid).forEach(function(item) {
     if (field === 'proofType') item.proofType = value;
     if (field === 'issueStatus') item.issueStatus = res && res.issueStatus ? res.issueStatus : value;
@@ -4083,13 +4099,12 @@ function syncTradeProofInMemory(tid, field, value, res) {
     if (res && res.message) item.issueNote = res.message;
   });
   persistCurrentDashboardCache();
-  if (field === 'depositStatus' && !dashboardSearchQuery && activeDashboardTab === 'attention') {
+  if (field === 'depositStatus' && dashboardData && !dashboardSearchQuery && activeDashboardTab === 'attention') {
     renderDashboard(dashboardData, dashboardData.date || formatDate(currentDate));
   }
 }
 
 function syncBillingCompanyInMemory(tid, billingCompany) {
-  if (!dashboardData) return;
   dashboardItemsForTrade(tid).forEach(function(item) {
     item.billingCompany = billingCompany;
   });
@@ -4097,7 +4112,6 @@ function syncBillingCompanyInMemory(tid, billingCompany) {
 }
 
 function syncPaymentInMemory(tid, method, res) {
-  if (!dashboardData) return;
   var depositChangedByPayment = !!(res && res.sideEffects && res.sideEffects.applied && res.sideEffects.columns && res.sideEffects.columns.M);
   dashboardItemsForTrade(tid).forEach(function(item) {
     item.paymentMethod = method;
@@ -4110,35 +4124,50 @@ function syncPaymentInMemory(tid, method, res) {
     }
   });
   persistCurrentDashboardCache();
-  if (!dashboardSearchQuery && (activeDashboardTab === 'attention' || depositChangedByPayment)) {
+  if (dashboardData && !dashboardSearchQuery && (activeDashboardTab === 'attention' || depositChangedByPayment)) {
     renderDashboard(dashboardData, dashboardData.date || formatDate(currentDate));
   }
 }
 
 function dashboardItemsForTrade(tid) {
   var items = [];
-  if (!dashboardData) return items;
-  ['checkout', 'checkin'].forEach(function(listName) {
-    (dashboardData[listName] || []).forEach(function(item) {
-      if (item.tradeId === tid) items.push(item);
-    });
-  });
-  return items;
-}
-
-function dashboardEquipmentMutationTargets(tid) {
-  var items = [];
+  tid = String(tid || '').trim();
+  if (!tid) return items;
   function collect(source) {
     if (!source) return;
     ['checkout', 'checkin'].forEach(function(listName) {
       (source[listName] || []).forEach(function(item) {
-        if (item.tradeId === tid) items.push(item);
+        if (item.tradeId === tid && items.indexOf(item) < 0) items.push(item);
       });
     });
   }
   collect(dashboardData);
   collect(dashboardGlobalSearchData);
   return items;
+}
+
+function dashboardItemsForScheduleId(scheduleId) {
+  var items = [];
+  scheduleId = String(scheduleId || '').trim();
+  if (!scheduleId) return items;
+  function collect(source) {
+    if (!source) return;
+    ['checkout', 'checkin'].forEach(function(listName) {
+      (source[listName] || []).forEach(function(item) {
+        var hasSchedule = (item.equipments || []).some(function(eq) {
+          return String(eq.scheduleId || '').trim() === scheduleId;
+        });
+        if (hasSchedule && items.indexOf(item) < 0) items.push(item);
+      });
+    });
+  }
+  collect(dashboardData);
+  collect(dashboardGlobalSearchData);
+  return items;
+}
+
+function dashboardEquipmentMutationTargets(tid) {
+  return dashboardItemsForTrade(tid);
 }
 
 function captureDashboardTradeFieldsSnapshot(tid) {
