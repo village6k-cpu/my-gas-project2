@@ -9260,8 +9260,20 @@ function setupGuideAlimtalkTrigger() {
 /**
  * 스케줄상세 시트 가독성 포맷팅
  * - 같은 거래ID(B열) 그룹끼리 교차 배경색 (흰색 ↔ 연한 회색)
+ * - 같은 거래 안에서 세트 헤더/구성품은 C:D열만 초록 계열로 표시
  * - 거래ID가 바뀌는 경계에 하단 테두리
  */
+const SCHEDULE_TRADE_COLOR_A = "#FFFFFF";
+const SCHEDULE_TRADE_COLOR_B = "#F3F3F3";
+const SCHEDULE_SET_HEADER_COLOR = "#D9EAD3";
+const SCHEDULE_SET_COMPONENT_COLOR = "#EAF4E4";
+const SCHEDULE_SET_FONT_COLOR = "#274E13";
+const SCHEDULE_DEFAULT_FONT_COLOR = "#000000";
+
+function makeScheduleSetKey_(tradeId, setName) {
+  return String(tradeId || "").trim() + "\u0001" + String(setName || "").trim();
+}
+
 function formatScheduleSheet(schedSheet) {
   if (!schedSheet) {
     schedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("스케줄상세");
@@ -9272,35 +9284,75 @@ function formatScheduleSheet(schedSheet) {
   if (lastRow < 2) return;
 
   const lastCol = schedSheet.getLastColumn() || 13;
-  const data = schedSheet.getRange(2, 2, lastRow - 1, 1).getValues(); // B열(거래ID)
+  const rowCount = lastRow - 1;
+  const data = schedSheet.getRange(2, 2, rowCount, 3).getValues(); // B:D = 거래ID, 세트명, 장비명
 
-  const COLOR_A = null;        // 흰색 (기본)
-  const COLOR_B = "#F3F3F3";   // 연한 회색
+  var setGroupKeys = {};
+  for (var s = 0; s < data.length; s++) {
+    var sTradeId = String(data[s][0] || "").trim();
+    var sSetName = String(data[s][1] || "").trim();
+    var sEquipName = String(data[s][2] || "").trim();
+    if (sTradeId && sSetName && sEquipName && sSetName !== sEquipName) {
+      setGroupKeys[makeScheduleSetKey_(sTradeId, sSetName)] = true;
+    }
+  }
+
+  var rowBackgrounds = [];
+  var itemBackgrounds = [];
+  var itemFontWeights = [];
+  var itemFontColors = [];
   var colorToggle = 0;
   var prevID = null;
 
   // 전체 배경 초기화 + 테두리 초기화
-  var fullRange = schedSheet.getRange(2, 1, lastRow - 1, lastCol);
-  fullRange.setBackground(null);
+  var fullRange = schedSheet.getRange(2, 1, rowCount, lastCol);
   fullRange.setBorder(null, null, null, null, null, null);
 
   for (var i = 0; i < data.length; i++) {
     var curID = String(data[i][0] || "").trim();
 
     if (curID !== prevID && prevID !== null) {
-      // 이전 그룹 마지막 행에 하단 테두리
-      schedSheet.getRange(i + 1, 1, 1, lastCol)
-        .setBorder(null, null, true, null, null, null, "#999999", SpreadsheetApp.BorderStyle.SOLID);
       colorToggle = 1 - colorToggle;
     }
 
-    // 배경색 적용
-    var color = colorToggle === 0 ? COLOR_A : COLOR_B;
-    if (color) {
-      schedSheet.getRange(i + 2, 1, 1, lastCol).setBackground(color);
+    var rowColor = colorToggle === 0 ? SCHEDULE_TRADE_COLOR_A : SCHEDULE_TRADE_COLOR_B;
+    rowBackgrounds.push(Array(lastCol).fill(rowColor));
+
+    var setName = String(data[i][1] || "").trim();
+    var equipName = String(data[i][2] || "").trim();
+    var isSetComponent = !!(curID && setName && equipName && setName !== equipName);
+    var isSetHeader = !!(curID && setName && equipName && setName === equipName &&
+      setGroupKeys[makeScheduleSetKey_(curID, setName)]);
+
+    if (isSetHeader) {
+      itemBackgrounds.push([SCHEDULE_SET_HEADER_COLOR, SCHEDULE_SET_HEADER_COLOR]);
+      itemFontWeights.push(["bold", "bold"]);
+      itemFontColors.push([SCHEDULE_SET_FONT_COLOR, SCHEDULE_SET_FONT_COLOR]);
+    } else if (isSetComponent) {
+      itemBackgrounds.push([SCHEDULE_SET_COMPONENT_COLOR, SCHEDULE_SET_COMPONENT_COLOR]);
+      itemFontWeights.push(["normal", "normal"]);
+      itemFontColors.push([SCHEDULE_SET_FONT_COLOR, SCHEDULE_DEFAULT_FONT_COLOR]);
+    } else {
+      itemBackgrounds.push([rowColor, rowColor]);
+      itemFontWeights.push(["normal", "normal"]);
+      itemFontColors.push([SCHEDULE_DEFAULT_FONT_COLOR, SCHEDULE_DEFAULT_FONT_COLOR]);
     }
 
     prevID = curID;
+  }
+
+  fullRange.setBackgrounds(rowBackgrounds);
+  schedSheet.getRange(2, 3, rowCount, 2).setBackgrounds(itemBackgrounds);
+  schedSheet.getRange(2, 3, rowCount, 2).setFontWeights(itemFontWeights);
+  schedSheet.getRange(2, 3, rowCount, 2).setFontColors(itemFontColors);
+
+  for (var b = 1; b < data.length; b++) {
+    var prevTrade = String(data[b - 1][0] || "").trim();
+    var nextTrade = String(data[b][0] || "").trim();
+    if (nextTrade !== prevTrade) {
+      schedSheet.getRange(b + 1, 1, 1, lastCol)
+        .setBorder(null, null, true, null, null, null, "#999999", SpreadsheetApp.BorderStyle.SOLID);
+    }
   }
 }
 
