@@ -9274,6 +9274,48 @@ function makeScheduleSetKey_(tradeId, setName) {
   return String(tradeId || "").trim() + "\u0001" + String(setName || "").trim();
 }
 
+/**
+ * 스케줄상세 C열 정규화.
+ * 신형 규칙은 C=표시그룹명(세트명/단품명), D=실제 장비명이다.
+ * 과거 데이터에는 C가 비어 있고 D만 채워진 행이 섞여 있어서 기존 행도 한 번 맞춘다.
+ */
+function normalizeScheduleDetailSetNames(schedSheet) {
+  if (!schedSheet) {
+    schedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("스케줄상세");
+  }
+  if (!schedSheet) return { updatedRows: 0, message: "스케줄상세 시트 없음" };
+
+  var lastRow = schedSheet.getLastRow();
+  if (lastRow < 2) return { updatedRows: 0, checkedRows: 0 };
+
+  var rowCount = lastRow - 1;
+  var data = schedSheet.getRange(2, 2, rowCount, 3).getValues(); // B:D
+  var setNameValues = [];
+  var updated = 0;
+
+  for (var i = 0; i < data.length; i++) {
+    var tradeId = String(data[i][0] || "").trim();
+    var setName = String(data[i][1] || "").trim();
+    var equipName = String(data[i][2] || "").trim();
+    var nextSetName = data[i][1];
+
+    if (tradeId && !setName && equipName) {
+      nextSetName = equipName;
+      updated++;
+    }
+    setNameValues.push([nextSetName]);
+  }
+
+  if (updated > 0) {
+    schedSheet.getRange(2, 3, rowCount, 1).setValues(setNameValues);
+    try { invalidateDashboardCache(); } catch (e) {}
+    try { invalidateTimelineCache(); } catch (e2) {}
+  }
+
+  formatScheduleSheet(schedSheet);
+  return { updatedRows: updated, checkedRows: rowCount };
+}
+
 function formatScheduleSheet(schedSheet) {
   if (!schedSheet) {
     schedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("스케줄상세");
