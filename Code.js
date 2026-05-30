@@ -721,6 +721,10 @@ function autoExpandSetInSchedule(ss, sheet, row, 세트명) {
     // 그룹 배경 상속
     _inheritGroupBackground(sheet, 거래ID, [row]);
   }
+
+  if (typeof formatScheduleSheet === "function") {
+    formatScheduleSheet(sheet);
+  }
 }
 
 /**
