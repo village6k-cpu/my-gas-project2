@@ -37,8 +37,8 @@ assert.match(
 
 assert.match(
   checkAvailability,
-  /var isSetHeader = !!\(curID && setName && equipName && setName === equipName &&[\s\S]{0,120}setGroupKeys\[makeScheduleSetKey_\(curID,\s*setName\)\]\);/,
-  '세트 헤더는 같은 거래ID 안에 구성품 행이 있는 C=D 행만 해당해야 한다'
+  /var isSetHeader = !!\(curID && equipName && \([\s\S]{0,220}!setName && setGroupKeys\[makeScheduleSetKey_\(curID,\s*equipName\)\]/,
+  '세트 헤더는 C=D 신형 행과 C가 빈 구형 대표행을 모두 처리해야 한다'
 );
 
 assert.match(

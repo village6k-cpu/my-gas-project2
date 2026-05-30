@@ -9321,8 +9321,10 @@ function formatScheduleSheet(schedSheet) {
     var setName = String(data[i][1] || "").trim();
     var equipName = String(data[i][2] || "").trim();
     var isSetComponent = !!(curID && setName && equipName && setName !== equipName);
-    var isSetHeader = !!(curID && setName && equipName && setName === equipName &&
-      setGroupKeys[makeScheduleSetKey_(curID, setName)]);
+    var isSetHeader = !!(curID && equipName && (
+      (setName && setName === equipName && setGroupKeys[makeScheduleSetKey_(curID, setName)]) ||
+      (!setName && setGroupKeys[makeScheduleSetKey_(curID, equipName)])
+    ));
 
     if (isSetHeader) {
       itemBackgrounds.push([SCHEDULE_SET_HEADER_COLOR, SCHEDULE_SET_HEADER_COLOR]);
