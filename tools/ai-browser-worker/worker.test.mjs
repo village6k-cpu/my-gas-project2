@@ -11,6 +11,11 @@ import {
   extractJsonObject,
   buildSheetAppendPayload,
   buildFollowUpRows,
+  buildSheetFailureFollowUpRows,
+  buildSheetAvailabilityReport,
+  enrichFollowUpRowsWithSheetAvailability,
+  fetchExistingConfirmRequestResultForDecision,
+  extractConfirmRequestIds,
   mapDecisionToStatusPatch,
   buildGasReadUrl,
   buildReadOnlyRagContext,
@@ -20,6 +25,9 @@ import {
   buildHermesArgs,
   resolveHermesCommand,
   resolveCuaDriverCommand,
+  normalizeKakaoWorkerControlMode,
+  parseMacHidIdleSeconds,
+  checkKakaoCuaFallbackAllowed,
   buildKakaoTabAppleScript,
   ensureKakaoChannelManagerTabViaDevtools,
   ensureKakaoChannelManagerTab,
@@ -27,8 +35,11 @@ import {
   pickKakaoMainListTarget,
   pickKakaoMainListWindow,
   pickKakaoConversationWindow,
+  pickKakaoConversationTarget,
   findChatRowElementIndex,
+  findKakaoChatSearchInputElementIndex,
   extractKakaoConversationEvidence,
+  openKakaoTargetChatViaDevtools,
   openKakaoTargetChatFromList,
   extractNavigationHints,
   buildCompactJobForPrompt,
@@ -39,14 +50,20 @@ import {
   filterFollowUpRowsAfterAutoReply,
   filterFollowUpRowsAgainstClosedHistory,
   mergeFollowUpRowsByTopic,
+  routeFollowUpToSlack,
+  buildSlackFollowUpMessage,
+  resolveSlackChannelId,
+  deliverSlackFollowUpRows,
   findKakaoMessageInputElementIndex,
   findKakaoSendButtonElementIndex,
   kakaoConversationContainsMessage,
   sendKakaoMessageViaChrome,
+  sendKakaoMessageViaDevtools,
   runHermes,
   appendToSheet,
   buildCloseKakaoConversationWindowAppleScript,
-  closeKakaoConversationWindow
+  closeKakaoConversationWindow,
+  closeKakaoConversationTargetViaDevtools
 } from './worker.mjs';
 
 test('buildHermesPrompt keeps code as plumbing and requires AI-visible Kakao verification', () => {
@@ -113,7 +130,7 @@ test('buildHermesPrompt uses compact job evidence instead of embedding full raw 
   assert.match(prompt, /JOB EVIDENCE FROM SUPABASE/);
   assert.doesNotMatch(prompt, /JOB FROM SUPABASE/);
   assert.equal(prompt.includes('x'.repeat(1000)), false);
-  assert.ok(prompt.length < 13000, `prompt too large: ${prompt.length}`);
+  assert.ok(prompt.length < 15000, `prompt too large: ${prompt.length}`);
 });
 
 test('buildHermesPrompt uses navigation hints without letting code judge business meaning', () => {
@@ -220,6 +237,16 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   assert.match(prompt, /불확실한 장비명.*입력 차단 사유가 아니라/s);
 });
 
+test('buildHermesPrompt treats read catch-up rows as possible missed reservations', () => {
+  const prompt = buildHermesPrompt({ id: 'job-read', preview_text: '중요 최민석 감사합니다. 견적서 부탁드리겠습니다 5월 29일' });
+
+  assert.match(prompt, /read-catchup\/backstop/);
+  assert.match(prompt, /마지막 버블.*네네\/감사합니다\/견적서 부탁/s);
+  assert.match(prompt, /예약형식 메시지가 있으면.*확인요청\/계약\/스케줄 등록 여부를 확인/s);
+  assert.match(prompt, /자동화가 만든 것이라고 추정하거나 보고하지 마라/s);
+  assert.match(prompt, /기존 RQ 발견으로 중복 입력 방지/s);
+});
+
 test('buildGasReadUrl creates read-only GAS URLs with encoded parameters', () => {
   const url = buildGasReadUrl('https://script.example/exec', 'secret key', {
     action: 'search',
@@ -256,6 +283,8 @@ test('buildReadOnlyLookupContext fetches kill switch and exposes read-only looku
   assert.match(requested[0], /sheet=%EC%84%A4%EC%A0%95/);
   assert.equal(context.lookup_policy.mode, 'read_only');
   assert.match(context.lookup_urls.set_master_search_template, /action=search/);
+  assert.match(context.lookup_urls.request_recent_with_results_gviz, /SELECT\+A%2CB%2CC%2CD%2CE%2CF%2CG%2CI%2CJ%2CK/);
+  assert.match(context.lookup_urls.request_by_req_id_gviz_template, /AI_REQ_ID/);
   assert.match(context.lookup_urls.contract_master_recent_gviz, /%EA%B3%84%EC%95%BD%EB%A7%88%EC%8A%A4%ED%84%B0/);
 });
 
@@ -286,6 +315,15 @@ test('buildHermesPrompt injects read-only lookup context and permits terminal on
   assert.match(prompt, /write\/insert\/register\/send APIs.*금지/s);
 });
 
+test('buildHermesPrompt requires existing RQ availability result before follow-up reporting', () => {
+  const prompt = buildHermesPrompt({ id: 'job-rq', preview_text: '최재원 AX-700 가능 문의' });
+
+  assert.match(prompt, /확인요청에 이미 RQ.*I열\(결과\).*J열\(상세\)/s);
+  assert.match(prompt, /사람에게 "RQ 결과를 검토하라"고만 떠넘기지 마라/);
+  assert.match(prompt, /결과가 ✅ 가용일 때만.*예약 가능/s);
+  assert.match(prompt, /follow-up must report the availability result itself/s);
+});
+
 test('buildHermesArgs preserves AI computer_use and bypasses approval with yolo', () => {
   const args = buildHermesArgs('prompt text');
   assert.deepEqual(args.slice(0, 8), ['chat', '--yolo', '-Q', '-t', 'terminal,computer_use,vision', '-q', 'prompt text']);
@@ -309,10 +347,38 @@ test('resolveCuaDriverCommand finds cua-driver in launchctl-safe fallback dirs o
   assert.match(resolved, /(^$|\/cua-driver$)/);
 });
 
+test('normalizeKakaoWorkerControlMode supports non-stealing DevTools modes', () => {
+  assert.equal(normalizeKakaoWorkerControlMode(''), 'devtools_first');
+  assert.equal(normalizeKakaoWorkerControlMode('devtools_only'), 'devtools_only');
+  assert.equal(normalizeKakaoWorkerControlMode('no_cua'), 'devtools_only');
+  assert.equal(normalizeKakaoWorkerControlMode('cua_first'), 'cua_first');
+});
+
+test('parseMacHidIdleSeconds converts macOS idle nanoseconds', () => {
+  assert.equal(parseMacHidIdleSeconds('    "HIDIdleTime" = 2500000000'), 2.5);
+  assert.equal(parseMacHidIdleSeconds('no idle field'), null);
+});
+
+test('checkKakaoCuaFallbackAllowed gates CUA by mode before touching the screen', async () => {
+  assert.deepEqual(
+    await checkKakaoCuaFallbackAllowed({ mode: 'devtools_only', minIdleSeconds: 120 }),
+    { allowed: false, mode: 'devtools_only', reason: 'cua_disabled_by_control_mode' }
+  );
+  assert.deepEqual(
+    await checkKakaoCuaFallbackAllowed({ mode: 'cua_first', minIdleSeconds: 120 }),
+    { allowed: true, mode: 'cua_first', reason: 'cua_first_mode' }
+  );
+  assert.deepEqual(
+    await checkKakaoCuaFallbackAllowed({ mode: 'devtools_first', minIdleSeconds: 0 }),
+    { allowed: true, mode: 'devtools_first', reason: 'idle_guard_disabled' }
+  );
+});
+
 test('buildKakaoTabAppleScript focuses existing Kakao Channel Manager tabs or opens one', () => {
   const script = buildKakaoTabAppleScript();
   assert.match(script, /business\.kakao\.com/);
   assert.match(script, /center-pf\.kakao\.com/);
+  assert.match(script, /tabUrl contains "\/chats\/"/);
   assert.match(script, / - 빌리지 - 카카오비즈니스/);
   assert.match(script, /set URL of tab t of window w to targetUrl/);
   assert.match(script, /set URL of active tab of newWindow to targetUrl/);
@@ -331,6 +397,7 @@ test('kakaoDevtoolsBaseUrlFromEnv resolves explicit URL and port envs', () => {
 test('pickKakaoMainListTarget selects list tab and avoids customer popup', () => {
   const target = pickKakaoMainListTarget([
     { id: 'popup', type: 'page', url: 'https://business.kakao.com/_x/chats', title: '최재형 - 빌리지 - 카카오비즈니스 파트너센터' },
+    { id: 'conversation-url', type: 'page', url: 'https://business.kakao.com/_x/chats/4925785461840981', title: 'Loading...' },
     { id: 'main', type: 'page', url: 'https://center-pf.kakao.com/_x/chats', title: '카카오비즈니스 파트너센터' }
   ]);
   assert.equal(target.id, 'main');
@@ -414,6 +481,14 @@ test('pickKakaoConversationWindow selects individual Kakao popup matching naviga
   assert.equal(win.window_id, 30);
 });
 
+test('pickKakaoConversationTarget selects DevTools customer chat target by hint', () => {
+  const target = pickKakaoConversationTarget([
+    { type: 'page', title: '카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats', id: 'list' },
+    { type: 'page', title: '박재인 - 빌리지 - 카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats/123', id: 'chat' }
+  ], ['박재인']);
+  assert.equal(target.id, 'chat');
+});
+
 test('findChatRowElementIndex finds AXLink row from navigation hint', () => {
   const tree = `
 - [170] AXButton "중요"
@@ -421,6 +496,28 @@ test('findChatRowElementIndex finds AXLink row from navigation hint', () => {
 - [172] AXStaticText = "정진우"
 `;
   assert.equal(findChatRowElementIndex(tree, ['정진우']), 171);
+});
+
+test('findChatRowElementIndex also matches hints rendered in AXLink child text', () => {
+  const tree = `
+- [170] AXButton "중요"
+- [171] AXLink actions=[AXShowMenu, AXScrollToVisible]
+  - [172] AXStaticText = "정진우"
+  - [173] AXStaticText = "네, 장비 준비돼 있는 거 반출 하시면 됩니다"
+  - [174] AXStaticText = "오후 8:20"
+`;
+  assert.equal(findChatRowElementIndex(tree, ['정진우']), 171);
+});
+
+test('findKakaoChatSearchInputElementIndex finds chat search field and ignores message composer', () => {
+  const tree = `
+- [11] AXTextField "주소창"
+- [100] AXStaticText = "채팅방 검색"
+- [101] AXTextField "고객 이름 또는 채팅방 검색"
+- [500] AXStaticText = "채팅 메시지 입력 폼"
+- [501] AXTextArea "메시지 입력"
+`;
+  assert.equal(findKakaoChatSearchInputElementIndex(tree), 101);
 });
 
 test('extractKakaoConversationEvidence returns compact live AX text tail without classifying', () => {
@@ -476,6 +573,172 @@ test('openKakaoTargetChatFromList clicks matching AXLink row only for navigation
   assert.equal(result.element_index, 171);
   assert.equal(result.conversation_window.window_id, 80);
   assert.ok(calls.some((c) => c.args.includes('click')));
+});
+
+test('openKakaoTargetChatFromList uses an already-open matching conversation before searching the list', async () => {
+  const calls = [];
+  const spawnImpl = (cmd, args) => {
+    calls.push({ cmd, args });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (args.includes('list_windows')) {
+        child.stdout.write(JSON.stringify({
+          windows: [
+            { app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터', is_on_screen: true, bounds: { width: 1280, height: 1050 }, pid: 7, window_id: 70 },
+            { app_name: 'Google Chrome', title: '정진우 - 빌리지 - 카카오비즈니스 파트너센터', is_on_screen: true, pid: 8, window_id: 80 }
+          ]
+        }));
+        child.emit('close', 0);
+      } else if (args.includes('get_window_state')) {
+        child.stdout.write(JSON.stringify({ tree_markdown: '- [22] AXStaticText = "정진우"\n- [23] AXStaticText = "네, 장비 준비돼 있는 거 반출 하시면 됩니다"' }));
+        child.emit('close', 0);
+      } else {
+        child.stderr.write('unexpected');
+        child.emit('close', 1);
+      }
+    });
+    return child;
+  };
+
+  const result = await openKakaoTargetChatFromList({ preview_text: '중요 정진우 네, 장비 준비돼 있는 거 반출 하시면 됩니다 오후 8:20' }, { spawnImpl });
+  assert.equal(result.status, 'opened_target_chat');
+  assert.equal(result.already_open, true);
+  assert.equal(result.conversation_window.window_id, 80);
+  assert.equal(result.conversation_evidence.hint_matched, true);
+  assert.equal(calls.some((c) => c.args.includes('click')), false);
+});
+
+test('openKakaoTargetChatFromList uses DevTools when matching conversation is on another macOS Space', async () => {
+  const spawnImpl = (_cmd, args) => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (args.includes('list_windows')) {
+        child.stdout.write(JSON.stringify({
+          windows: [
+            { app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터', is_on_screen: false, pid: 7, window_id: 70 },
+            { app_name: 'Google Chrome', title: '오래된고객 - 빌리지 - 카카오비즈니스 파트너센터', is_on_screen: false, pid: 8, window_id: 80 }
+          ]
+        }));
+        child.emit('close', 0);
+      } else {
+        child.stderr.write('unexpected');
+        child.emit('close', 1);
+      }
+    });
+    return child;
+  };
+  let listCalls = 0;
+  const fetchImpl = async () => {
+    listCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([
+        { type: 'page', id: 'chat', title: '오래된고객 - 빌리지 - 카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats/123', webSocketDebuggerUrl: 'ws://chat' }
+      ])
+    };
+  };
+  const result = await openKakaoTargetChatFromList({
+    customer_name: '오래된고객',
+    preview_text: '오래된고객 문의'
+  }, {
+    spawnImpl,
+    cdpBaseUrl: 'http://fake-devtools',
+    fetchImpl,
+    evaluateImpl: async () => ({ title: '오래된고객 - 빌리지 - 카카오비즈니스 파트너센터', text: '오래된고객\n문의 내용' })
+  });
+  assert.equal(result.status, 'opened_target_chat');
+  assert.equal(result.via_devtools, true);
+  assert.equal(result.conversation_target.id, 'chat');
+  assert.equal(listCalls, 1);
+});
+
+test('openKakaoTargetChatFromList searches by customer name when target row is not visible', async () => {
+  const calls = [];
+  let listCalls = 0;
+  let stateCalls = 0;
+  const spawnImpl = (cmd, args) => {
+    calls.push({ cmd, args });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (args.includes('list_windows')) {
+        listCalls += 1;
+        const windows = listCalls === 1
+          ? [{ app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터', is_on_screen: true, bounds: { width: 1280, height: 1050 }, pid: 7, window_id: 70 }]
+          : [
+              { app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터', is_on_screen: true, bounds: { width: 1280, height: 1050 }, pid: 7, window_id: 70 },
+              { app_name: 'Google Chrome', title: '오래된고객 - 빌리지 - 카카오비즈니스 파트너센터', is_on_screen: true, pid: 8, window_id: 80 }
+            ];
+        child.stdout.write(JSON.stringify({ windows }));
+        child.emit('close', 0);
+      } else if (args.includes('get_window_state')) {
+        stateCalls += 1;
+        const tree = stateCalls === 1
+          ? '- [100] AXStaticText = "채팅방 검색"\n- [101] AXTextField "고객 이름 또는 채팅방 검색"\n- [171] AXLink (최근고객 네 오후 8:20)'
+          : '- [101] AXTextField "고객 이름 또는 채팅방 검색"\n- [222] AXLink (오래된고객 지난 문의 이어서 확인 부탁드립니다 오후 1:10)\n- [223] AXStaticText = "오래된고객"';
+        child.stdout.write(JSON.stringify({ tree_markdown: tree }));
+        child.emit('close', 0);
+      } else if (args.includes('press_key') || args.includes('type_text') || args.includes('click')) {
+        child.stdout.write(JSON.stringify({ ok: true }));
+        child.emit('close', 0);
+      } else {
+        child.stderr.write('unexpected');
+        child.emit('close', 1);
+      }
+    });
+    return child;
+  };
+
+  const result = await openKakaoTargetChatFromList({
+    customer_name: '오래된고객',
+    preview_text: '오래된고객 지난 문의 이어서 확인 부탁드립니다'
+  }, { spawnImpl });
+
+  assert.equal(result.status, 'opened_target_chat');
+  assert.equal(result.element_index, 222);
+  assert.equal(result.search.searched, true);
+  assert.equal(result.search.search_term, '오래된고객');
+  assert.equal(result.conversation_window.window_id, 80);
+  assert.ok(calls.some((c) => c.args.includes('type_text') && c.args.join(' ').includes('오래된고객')));
+});
+
+test('openKakaoTargetChatViaDevtools searches list DOM when CUA cannot see off-space Chrome body', async () => {
+  const evalCalls = [];
+  let listCalls = 0;
+  const fetchImpl = async (url) => {
+    listCalls += 1;
+    const targets = listCalls === 1
+      ? [{ type: 'page', id: 'list', title: '카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats', webSocketDebuggerUrl: 'ws://list' }]
+      : [
+          { type: 'page', id: 'list', title: '카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats', webSocketDebuggerUrl: 'ws://list' },
+          { type: 'page', id: 'chat', title: '오래된고객 - 빌리지 - 카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats/123', webSocketDebuggerUrl: 'ws://chat' }
+        ];
+    return { ok: true, status: 200, text: async () => JSON.stringify(targets) };
+  };
+  const evaluateImpl = async (target, expression) => {
+    evalCalls.push({ target, expression });
+    if (target.id === 'list') return { ok: true, status: 'clicked_chat_row_via_devtools', searchTerm: '오래된고객', tried: ['오래된고객'] };
+    return { title: target.title, href: target.url, text: '채팅방 레이어\n오래된고객\n지난 문의 이어서 확인 부탁드립니다\n채팅 메시지 입력 폼' };
+  };
+
+  const result = await openKakaoTargetChatViaDevtools({
+    customer_name: '오래된고객',
+    preview_text: '오래된고객 지난 문의 이어서 확인 부탁드립니다'
+  }, { cdpBaseUrl: 'http://127.0.0.1:9223', fetchImpl, evaluateImpl });
+
+  assert.equal(result.status, 'opened_target_chat');
+  assert.equal(result.via_devtools, true);
+  assert.equal(result.opened_by_devtools_search, true);
+  assert.equal(result.conversation_target.id, 'chat');
+  assert.equal(result.search.search_term, '오래된고객');
+  assert.equal(result.conversation_evidence.hint_matched, true);
+  assert.ok(evalCalls[0].expression.includes('input[placeholder*="채팅방 이름"]'));
 });
 
 test('openKakaoTargetChatFromList does not claim verified chat when popup is missing', async () => {
@@ -806,6 +1069,225 @@ test('appendToSheet calls insertAndCheckRequest with the Claude coworker GET con
   assert.equal(result.reqID, 'RQ-260601-001');
 });
 
+test('appendToSheet returns structured GAS business errors instead of crashing the worker', async () => {
+  const result = await appendToSheet({
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'secret',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ error: '셀 B52에 입력한 데이터가 이 셀에 설정된 데이터 확인 규칙을 위반했습니다.' })
+    })
+  }, {
+    action: 'run',
+    func: 'insertAndCheckRequest',
+    args: { 반출일: '2026-04-31', 예약자명: '박정민', 장비: [{ 이름: '어퓨쳐 600C', 수량: 2 }] }
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.error_type, 'sheet_validation');
+  assert.equal(result.recoverable, false);
+  assert.match(result.error, /데이터 확인 규칙/);
+});
+
+test('appendToSheet preserves duplicate insertAndCheckRequest availability results', async () => {
+  const result = await appendToSheet({
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'secret',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        duplicate: true,
+        reqID: 'RQ-260531-003',
+        message: '중복 요청: 동일한 예약자/반출일시/장비 조합이 이미 존재합니다 (RQ-260531-003)',
+        results: [
+          { 장비명: '소니 캠 AX-700', 수량: '1', 결과: '✅ 가용1', 상세: '예약 가능' }
+        ]
+      })
+    })
+  }, {
+    action: 'run',
+    func: 'insertAndCheckRequest',
+    args: { 반출일: '2026-05-30', 예약자명: '최재원', 장비: [{ 이름: '소니 캠 AX-700', 수량: 1 }] }
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.duplicate, true);
+  assert.equal(result.reqID, 'RQ-260531-003');
+  assert.deepEqual(result.results, [
+    { equipment: '소니 캠 AX-700', quantity: '1', result: '✅ 가용1', detail: '예약 가능' }
+  ]);
+});
+
+test('buildSheetAvailabilityReport turns GAS results into availability-based action text', () => {
+  const report = buildSheetAvailabilityReport({
+    reqID: 'RQ-260531-003',
+    duplicate: true,
+    results: [
+      { 장비명: '소니 캠 AX-700', 수량: '1', 결과: '✅ 가용1', 상세: '예약 가능' }
+    ]
+  }, {
+    args: {
+      예약자명: '최재원',
+      장비: [{ 이름: '소니 캠 AX-700', 수량: 1 }]
+    }
+  });
+
+  assert.equal(report.status, 'available');
+  assert.match(report.summary, /기존 중복 RQ/);
+  assert.match(report.recommendedAction, /결과가 가용/);
+  assert.match(report.suggestedReplyDraft, /예약 가능하십니다/);
+
+  const blocked = buildSheetAvailabilityReport({
+    reqID: 'RQ-260531-004',
+    results: [
+      { 장비명: '소니 캠 AX-700', 수량: '1', 결과: '⚠️ 겹침(가용0)', 상세: '동일 시간 예약 있음' }
+    ]
+  }, {
+    args: {
+      예약자명: '최재원',
+      장비: [{ 이름: '소니 캠 AX-700', 수량: 1 }]
+    }
+  });
+
+  assert.equal(blocked.status, 'unavailable');
+  assert.match(blocked.recommendedAction, /가능하다고 안내하지 말고/);
+  assert.doesNotMatch(blocked.suggestedReplyDraft, /예약 가능하십니다|예약 가능/);
+});
+
+test('fetchExistingConfirmRequestResultForDecision reads RQ result rows from 확인요청 search', async () => {
+  const requested = [];
+  const result = await fetchExistingConfirmRequestResultForDecision({
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'secret',
+    fetchImpl: async (url) => {
+      requested.push(new URL(String(url)));
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          sheet: '확인요청',
+          query: 'RQ-260531-003',
+          headers: ['요청ID', '반출일', '반출시간', '반납일', '반납시간', '장비or세트명', '수량', '확인', '결과', '상세'],
+          count: 1,
+          results: [{
+            row: 12,
+            data: ['RQ-260531-003', '2026-05-30', '23:00', '2026-05-31', '23:00', '소니 캠 AX-700', '1', '', '✅ 가용1', '예약 가능']
+          }]
+        })
+      };
+    }
+  }, {
+    reason: '기존 RQ 발견으로 중복 입력 방지: RQ-260531-003'
+  }, []);
+
+  assert.equal(requested[0].searchParams.get('action'), 'search');
+  assert.equal(requested[0].searchParams.get('sheet'), '확인요청');
+  assert.equal(requested[0].searchParams.get('col'), 'A');
+  assert.equal(requested[0].searchParams.get('query'), 'RQ-260531-003');
+  assert.equal(result.reqID, 'RQ-260531-003');
+  assert.equal(result.duplicate, true);
+  assert.deepEqual(result.results, [
+    { equipment: '소니 캠 AX-700', quantity: '1', result: '✅ 가용1', detail: '예약 가능' }
+  ]);
+});
+
+test('enrichFollowUpRowsWithSheetAvailability replaces inspect-RQ card with result-based report', () => {
+  const rows = buildFollowUpRows({
+    classification: 'reservation',
+    confidence: 'high',
+    customer: { name: '최재원' },
+    follow_up_items: [{
+      type: 'sheet_duplicate_check',
+      priority: 'urgent',
+      status: 'open',
+      title: '최재원 AX-700 예약 가능 문의 응답 필요',
+      customer_name: '최재원',
+      summary: '확인요청 시트에는 이미 동일 고객/동일 반출일/동일 장비 RQ가 존재합니다.',
+      recommended_action: '기존 확인요청 RQ의 확인 결과를 검토한 뒤 고객에게 가능 여부를 안내하세요.',
+      suggested_reply_draft: '확인해보니 소니 캠 AX-700 해당 일정 예약 가능하십니다.',
+      evidence: ['기존 RQ 발견']
+    }]
+  }, {
+    id: '11111111-1111-4111-8111-111111111111',
+    room_key: 'preview:choi'
+  });
+
+  const enriched = enrichFollowUpRowsWithSheetAvailability(rows, {
+    reqID: 'RQ-260531-003',
+    duplicate: true,
+    results: [
+      { 장비명: '소니 캠 AX-700', 수량: '1', 결과: '⚠️ 겹침(가용0)', 상세: '기존 예약과 겹침' }
+    ]
+  }, {
+    args: {
+      예약자명: '최재원',
+      반출일: '2026-05-30',
+      반출시간: '23:00',
+      반납일: '2026-05-31',
+      반납시간: '23:00',
+      장비: [{ 이름: '소니 캠 AX-700', 수량: 1 }]
+    }
+  }, { classification: 'reservation', confidence: 'high', customer: { name: '최재원' } }, {
+    id: '11111111-1111-4111-8111-111111111111',
+    room_key: 'preview:choi'
+  });
+
+  assert.equal(enriched.length, 1);
+  assert.equal(enriched[0].type, 'reservation_review');
+  assert.match(enriched[0].summary, /RQ-260531-003/);
+  assert.match(enriched[0].recommended_action, /가능하다고 안내하지 말고/);
+  assert.match(enriched[0].evidence.join('\n'), /⚠️ 겹침\(가용0\)/);
+  assert.doesNotMatch(enriched[0].suggested_reply_draft, /예약 가능하십니다|예약 가능/);
+});
+
+test('extractConfirmRequestIds finds unique RQ ids in AI decisions and rows', () => {
+  assert.deepEqual(extractConfirmRequestIds({
+    reason: '기존 RQ-260531-003 발견',
+    rows: [{ summary: '다시 RQ-260531-003 / 다른 RQ-260601-001' }]
+  }), ['RQ-260531-003', 'RQ-260601-001']);
+});
+
+test('buildSheetFailureFollowUpRows creates actionable cards for validation errors and suppresses duplicates', () => {
+  const decision = {
+    classification: 'reservation',
+    customer: { name: '박정민' }
+  };
+  const job = {
+    id: '11111111-1111-4111-8111-111111111111',
+    room_key: 'preview:park'
+  };
+  const sheetPayload = {
+    args: {
+      반출일: '2026-04-31',
+      반출시간: '12:30',
+      반납일: '2026-05-01',
+      반납시간: '12:30',
+      예약자명: '박정민',
+      장비: [{ 이름: '어퓨쳐 600C', 수량: 2 }]
+    }
+  };
+  const rows = buildSheetFailureFollowUpRows(decision, job, {
+    success: false,
+    error_type: 'sheet_validation',
+    error: '셀 B52에 입력한 데이터가 이 셀에 설정된 데이터 확인 규칙을 위반했습니다.'
+  }, sheetPayload);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].type, 'reservation_review');
+  assert.equal(rows[0].priority, 'urgent');
+  assert.equal(rows[0].decision_classification, 'sheet_write_rejected');
+  assert.match(rows[0].summary, /GAS가 확인요청 입력을 거절/);
+  assert.match(rows[0].evidence.join('\n'), /2026-04-31/);
+
+  assert.deepEqual(buildSheetFailureFollowUpRows(decision, job, {
+    success: false,
+    error_type: 'duplicate_request',
+    error: '중복 요청: 동일 건이 이미 예약 등록되어 있습니다'
+  }, sheetPayload), []);
+});
+
 test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', () => {
   const rows = buildFollowUpRows({
     classification: 'price',
@@ -832,6 +1314,132 @@ test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', (
   assert.equal(rows[0].decision_classification, 'price');
   assert.deepEqual(rows[0].evidence, ['고객: 견적서 받을 수 있을까요?']);
   assert.match(rows[0].follow_up_key, /^room-label:홍길동:홍길동:quote_send:/);
+});
+
+test('routeFollowUpToSlack maps follow-up types to the agent channels', () => {
+  assert.deepEqual(routeFollowUpToSlack({ type: 'reservation_review' }), { route: 'schedule', channel: '스케쥴-agent' });
+  assert.deepEqual(routeFollowUpToSlack({ type: 'quote_send' }), { route: 'document', channel: '서류발송-agent' });
+  assert.deepEqual(routeFollowUpToSlack({ type: 'payment_check' }), { route: 'settlement', channel: '정산-agent' });
+  assert.deepEqual(routeFollowUpToSlack({ type: 'reply_needed' }), { route: 'other', channel: '기타문의' });
+  assert.deepEqual(routeFollowUpToSlack({ type: 'damage_repair' }), { route: 'other', channel: '기타문의' });
+});
+
+test('buildSlackFollowUpMessage includes action buttons and 헤이빌리 instruction', () => {
+  const message = buildSlackFollowUpMessage({
+    id: 'follow-1',
+    type: 'reservation_review',
+    priority: 'urgent',
+    status: 'open',
+    title: '최재원 AX-700 예약 가능 문의',
+    customer_name: '최재원',
+    summary: '고객이 5/30 23:00~5/31 23:00 AX-700 가능 여부를 문의했습니다.',
+    recommended_action: '확인요청 결과가 ✅ 가용이면 가능 안내 후 예약 진행 여부를 확인하세요.',
+    suggested_reply_draft: '확인해보니 해당 일정 예약 가능하십니다.',
+    evidence: ['확인요청 RQ-260531-003: ✅ 가용1']
+  }, {
+    config: { slackAgentMention: '헤이빌리', slackDashboardUrl: 'https://dashboard.example' }
+  });
+
+  assert.equal(message.channel, '스케쥴-agent');
+  assert.match(JSON.stringify(message.blocks), /village_followup_send/);
+  assert.match(JSON.stringify(message.blocks), /village_followup_edit_send/);
+  assert.match(JSON.stringify(message.blocks), /village_followup_status_done/);
+  assert.match(JSON.stringify(message.blocks), /헤이빌리/);
+  assert.match(JSON.stringify(message.blocks), /dashboard.example/);
+});
+
+test('resolveSlackChannelId searches Slack channel names and caches the id', async () => {
+  let calls = 0;
+  const config = {
+    slackBotToken: 'xoxb-test',
+    slackFetchImpl: async (url, init) => {
+      calls += 1;
+      assert.match(String(url), /conversations\.list/);
+      assert.equal(init.headers.authorization, 'Bearer xoxb-test');
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          channels: [{ id: 'C123SCHEDULE', name: '스케쥴-agent' }]
+        })
+      };
+    }
+  };
+
+  assert.equal(await resolveSlackChannelId('스케쥴-agent', config), 'C123SCHEDULE');
+  assert.equal(await resolveSlackChannelId('스케쥴-agent', config), 'C123SCHEDULE');
+  assert.equal(calls, 1);
+});
+
+test('resolveSlackChannelId resolves the document-send agent channel name', async () => {
+  const config = {
+    slackBotToken: 'xoxb-test',
+    slackFetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        ok: true,
+        channels: [{ id: 'C123DOCS', name: '서류발송-agent' }]
+      })
+    })
+  };
+
+  assert.equal(await resolveSlackChannelId('서류발송-agent', config), 'C123DOCS');
+});
+
+test('deliverSlackFollowUpRows posts new rows once and writes delivery metadata', async () => {
+  const requests = [];
+  const config = {
+    slackFollowUpEnabled: true,
+    slackBotToken: 'xoxb-test',
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    slackFetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      if (String(url).includes('conversations.list')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, channels: [{ id: 'C123SCHEDULE', name: '스케쥴-agent' }] })
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, channel: 'C123SCHEDULE', ts: '171111.000100', message: { thread_ts: '171111.000100' } })
+      };
+    },
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      assert.match(String(url), /ai_follow_up_items\?/);
+      assert.match(String(url), /id=eq\.follow-1/);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => init?.method === 'PATCH'
+          ? JSON.stringify([{ id: 'follow-1', payload: { slack_delivery: { status: 'delivered' } } }])
+          : JSON.stringify([{ payload: {} }])
+      };
+    }
+  };
+
+  const result = await deliverSlackFollowUpRows(config, [{
+    id: 'follow-1',
+    type: 'reservation_review',
+    status: 'open',
+    priority: 'high',
+    title: '예약 확인',
+    customer_name: '홍길동',
+    summary: '요약'
+  }]);
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.results[0].ok, true);
+  assert.ok(requests.some((r) => r.url.includes('chat.postMessage')));
+  const patch = requests.find((r) => r.url.includes('supabase.example') && r.init?.method === 'PATCH');
+  assert.equal(JSON.parse(patch.init.body).payload.slack_delivery.message_ts, '171111.000100');
 });
 
 test('filterFollowUpRowsAfterAutoReply suppresses reply card after successful auto-send', () => {
@@ -1114,6 +1722,20 @@ test('closeKakaoConversationWindow targets only the opened Kakao customer popup'
   assert.equal(args[3], '정시온');
 });
 
+test('closeKakaoConversationTargetViaDevtools closes only the target id', async () => {
+  let requestedUrl = '';
+  const result = await closeKakaoConversationTargetViaDevtools({ id: 'target-1' }, {
+    cdpBaseUrl: 'http://127.0.0.1:9223',
+    fetchImpl: async (url) => {
+      requestedUrl = String(url);
+      return { ok: true, status: 200, text: async () => 'Target is closing' };
+    }
+  });
+
+  assert.equal(result.status, 'closed_conversation_target');
+  assert.match(requestedUrl, /\/json\/close\/target-1$/);
+});
+
 test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe replies', () => {
   const baseDecision = {
     confidence: 'high',
@@ -1205,7 +1827,8 @@ test('auto reply dedupe key uses customer message and outgoing text', () => {
 });
 
 test('hasRecentSentAutoReply blocks duplicate sent replies only inside window', () => {
-  const logPath = path.join(os.tmpdir(), `tmp-auto-replies-${Date.now()}.ndjson`);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmp-auto-replies-'));
+  const logPath = path.join(tmpDir, 'auto-replies.ndjson');
   const now = new Date('2026-05-26T17:40:00.000Z');
   const key = '최재형|빌리지 위치가 어떻게 되나요?|동교로 23길 32';
   fs.writeFileSync(logPath, [
@@ -1215,7 +1838,7 @@ test('hasRecentSentAutoReply blocks duplicate sent replies only inside window', 
 
   assert.equal(hasRecentSentAutoReply({ autoSendLogPath: logPath }, key, { now, windowMs: 30 * 60 * 1000 }), true);
   assert.equal(hasRecentSentAutoReply({ autoSendLogPath: logPath }, key, { now, windowMs: 5 * 60 * 1000 }), false);
-  fs.unlinkSync(logPath);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 test('findKakaoMessageInputElementIndex finds the Kakao message input field', () => {
@@ -1286,6 +1909,35 @@ test('sendKakaoMessageViaChrome clicks send button and verifies sent bubble', as
   assert.equal(calls[4].args[1], 'get_window_state');
   assert.equal(calls[5].args[1], 'click');
   assert.equal(calls[7].args[1], 'get_window_state');
+});
+
+test('sendKakaoMessageViaChrome falls back to DevTools target when AX window is unavailable', async () => {
+  const evalCalls = [];
+  const result = await sendKakaoMessageViaChrome('확인했습니다.', {
+    conversation_target: {
+      id: 'chat',
+      title: '오래된고객 - 빌리지 - 카카오비즈니스 파트너센터',
+      url: 'https://business.kakao.com/_xhPMls/chats/123',
+      webSocketDebuggerUrl: 'ws://chat'
+    }
+  }, {
+    evaluateImpl: async (target, expression) => {
+      evalCalls.push({ target, expression });
+      return { sent: true, reason: 'sent_via_devtools_verified', window_title: target.title };
+    }
+  });
+
+  assert.equal(result.sent, true);
+  assert.equal(result.reason, 'sent_via_devtools_verified');
+  assert.equal(result.via_devtools, true);
+  assert.ok(evalCalls[0].expression.includes('textarea[placeholder*="메시지"]'));
+});
+
+test('sendKakaoMessageViaDevtools refuses sent=true without a conversation target', async () => {
+  assert.deepEqual(await sendKakaoMessageViaDevtools('확인했습니다.', {}), {
+    sent: false,
+    reason: 'conversation_target_missing'
+  });
 });
 
 test('sendKakaoMessageViaChrome reactivates target window and retries disabled send button', async () => {
@@ -1401,6 +2053,26 @@ test('mapDecisionToStatusPatch routes write and no-write decisions to review sta
   assert.deepEqual(mapDecisionToStatusPatch({ should_write_to_sheet: true }, { sheetResult: { success: true } }), {
     status: 'needs_human_review',
     error_message: null
+  });
+  assert.deepEqual(mapDecisionToStatusPatch({ should_write_to_sheet: true }, {
+    sheetResult: {
+      success: false,
+      error_type: 'sheet_validation',
+      error: '셀 B52에 입력한 데이터가 이 셀에 설정된 데이터 확인 규칙을 위반했습니다.'
+    }
+  }), {
+    status: 'needs_human_review',
+    error_message: 'GAS sheet write rejected: 셀 B52에 입력한 데이터가 이 셀에 설정된 데이터 확인 규칙을 위반했습니다.'
+  });
+  assert.deepEqual(mapDecisionToStatusPatch({ should_write_to_sheet: true }, {
+    sheetResult: {
+      success: false,
+      error_type: 'duplicate_request',
+      error: '중복 요청: 동일 건이 이미 예약 등록되어 있습니다'
+    }
+  }), {
+    status: 'ai_skipped_needs_review',
+    error_message: 'GAS duplicate skipped: 중복 요청: 동일 건이 이미 예약 등록되어 있습니다'
   });
   assert.deepEqual(mapDecisionToStatusPatch({ should_write_to_sheet: false, reason: '정보부족' }), {
     status: 'ai_skipped_needs_review',

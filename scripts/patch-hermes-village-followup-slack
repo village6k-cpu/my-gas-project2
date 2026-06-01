@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HERMES_SLACK_PY="${HERMES_SLACK_PY:-${HERMES_AGENT_DIR:-$HOME/.hermes/hermes-agent}/gateway/platforms/slack.py}"
+
+if [[ ! -f "$HERMES_SLACK_PY" ]]; then
+  echo "Hermes Slack adapter not found: $HERMES_SLACK_PY"
+  exit 0
+fi
+
+if grep -q "_handle_village_followup_action" "$HERMES_SLACK_PY" \
+  && grep -q "village_followup_edit_send_submit" "$HERMES_SLACK_PY" \
+  && grep -q "VILLAGE_FOLLOWUP_ACTION_URL" "$HERMES_SLACK_PY"; then
+  python3 -m py_compile "$HERMES_SLACK_PY"
+  echo "Hermes Slack VILLAGE follow-up patch: present"
+  exit 0
+fi
+
+python3 - "$HERMES_SLACK_PY" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+registration = '''            self._app.action(re.compile(r"^village_followup_(send|edit_send|status_.+)$"))(
+                self._handle_village_followup_action
+            )
+            self._app.view("village_followup_edit_send_submit")(
+                self._handle_village_followup_view_submission
+            )
+
+'''
+
+registration_anchor = "            # Start Socket Mode handler\n"
+if 'self._app.action(re.compile(r"^village_followup_' not in text:
+    if registration_anchor not in text:
+        raise SystemExit("Could not find Slack Socket Mode handler anchor")
+    text = text.replace(registration_anchor, registration + registration_anchor, 1)
+
+methods = r'''    def _village_followup_action_url(self) -> str:
+        return os.getenv(
+            "VILLAGE_FOLLOWUP_ACTION_URL",
+            "http://127.0.0.1:8787/slack/actions",
+        ).strip()
+
+    def _village_followup_lookup_url(self, follow_up_id: str) -> str:
+        base = os.getenv(
+            "VILLAGE_FOLLOWUP_LOOKUP_URL",
+            "http://127.0.0.1:8787/slack/follow-up",
+        ).strip()
+        separator = "&" if "?" in base else "?"
+        return f"{base}{separator}id={follow_up_id}"
+
+    def _slack_user_allowed_for_followup(self, user_id: str) -> bool:
+        allowed_csv = os.getenv("SLACK_ALLOWED_USERS", "").strip()
+        if not allowed_csv:
+            return True
+        allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
+        return "*" in allowed_ids or user_id in allowed_ids
+
+    async def _post_village_followup_bridge(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(self._village_followup_action_url(), json=payload) as resp:
+                text = await resp.text()
+                try:
+                    data = json.loads(text) if text else {}
+                except Exception:
+                    data = {"raw": text}
+                if resp.status >= 400 or data.get("ok") is False:
+                    raise RuntimeError(f"Village follow-up bridge failed: {resp.status} {data}")
+                return data
+
+    async def _fetch_village_followup_row(self, follow_up_id: str) -> Dict[str, Any]:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(self._village_followup_lookup_url(follow_up_id)) as resp:
+                text = await resp.text()
+                try:
+                    data = json.loads(text) if text else {}
+                except Exception:
+                    data = {"raw": text}
+                if resp.status >= 400 or data.get("ok") is False:
+                    raise RuntimeError(f"Village follow-up lookup failed: {resp.status} {data}")
+                row = data.get("row") if isinstance(data, dict) else None
+                return row if isinstance(row, dict) else {}
+
+    def _extract_village_followup_draft_from_message(self, message: Dict[str, Any]) -> str:
+        for block in message.get("blocks", []) or []:
+            if block.get("type") != "section":
+                continue
+            text_obj = block.get("text", {}) or {}
+            block_text = text_obj.get("text", "") if isinstance(text_obj, dict) else ""
+            if "답변 초안" not in block_text:
+                continue
+            match = re.search(r"```(.*?)```", block_text, flags=re.S)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    def _build_village_followup_edit_modal(
+        self,
+        follow_up_id: str,
+        item: Dict[str, Any],
+        fallback_draft: str,
+        channel_id: str,
+        message_ts: str,
+    ) -> Dict[str, Any]:
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        initial = str(
+            payload.get("slack_draft_override")
+            or item.get("suggested_reply_draft")
+            or fallback_draft
+            or "확인 후 바로 안내드리겠습니다."
+        )[:2900]
+        metadata = json.dumps({
+            "followUpId": follow_up_id,
+            "channelId": channel_id,
+            "messageTs": message_ts,
+        }, ensure_ascii=False)
+        customer = str(item.get("customer_name") or "고객명 미확인")
+        title = str(item.get("title") or "후속처리")
+        return {
+            "type": "modal",
+            "callback_id": "village_followup_edit_send_submit",
+            "private_metadata": metadata,
+            "title": {"type": "plain_text", "text": "카카오 답변 수정"},
+            "submit": {"type": "plain_text", "text": "전송 요청"},
+            "close": {"type": "plain_text", "text": "취소"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*{customer}* / {title}"[:2900],
+                    },
+                },
+                {
+                    "type": "input",
+                    "block_id": "draft_block",
+                    "label": {"type": "plain_text", "text": "카카오 전송 문구"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "draft_text",
+                        "multiline": True,
+                        "initial_value": initial,
+                    },
+                },
+            ],
+        }
+
+    async def _send_village_followup_feedback(
+        self,
+        channel_id: str,
+        user_id: str,
+        message_ts: str,
+        text: str,
+    ) -> None:
+        if not channel_id or not user_id:
+            return
+        try:
+            kwargs: Dict[str, Any] = {
+                "channel": channel_id,
+                "user": user_id,
+                "text": text,
+            }
+            if message_ts:
+                kwargs["thread_ts"] = message_ts
+            await self._get_client(channel_id).chat_postEphemeral(**kwargs)
+        except Exception as exc:
+            logger.warning("[Slack] Failed to post village follow-up feedback: %s", exc)
+
+    async def _handle_village_followup_action(self, ack, body, action) -> None:
+        """Handle VILLAGE follow-up dashboard buttons delivered by Slack Socket Mode."""
+        await ack()
+
+        action_id = action.get("action_id", "")
+        follow_up_id = action.get("value", "")
+        message = body.get("message", {}) or {}
+        channel_id = (body.get("channel", {}) or {}).get("id", "")
+        user = body.get("user", {}) or {}
+        user_id = user.get("id", "")
+        user_name = user.get("name", "unknown")
+        message_ts = message.get("ts", "")
+
+        if not self._slack_user_allowed_for_followup(user_id):
+            logger.warning("[Slack] Unauthorized VILLAGE follow-up click by %s (%s)", user_name, user_id)
+            return
+
+        if not follow_up_id:
+            await self._send_village_followup_feedback(channel_id, user_id, message_ts, "후속처리 ID가 없어 처리하지 못했습니다.")
+            return
+
+        try:
+            if action_id == "village_followup_edit_send":
+                item = await self._fetch_village_followup_row(follow_up_id)
+                fallback_draft = self._extract_village_followup_draft_from_message(message)
+                await self._get_client(channel_id).views_open(
+                    trigger_id=body.get("trigger_id", ""),
+                    view=self._build_village_followup_edit_modal(
+                        follow_up_id,
+                        item,
+                        fallback_draft,
+                        channel_id,
+                        message_ts,
+                    ),
+                )
+                return
+
+            result = await self._post_village_followup_bridge({
+                "action_id": action_id,
+                "followUpId": follow_up_id,
+                "user_id": user_id,
+                "user_name": user_name,
+                "channel_id": channel_id,
+                "message_ts": message_ts,
+            })
+            if action_id == "village_followup_send":
+                feedback = "카카오 전송 요청을 접수했습니다. 로컬 브릿지가 전송합니다."
+            elif action_id.startswith("village_followup_status_"):
+                feedback = f"상태 변경을 반영했습니다: {result.get('status', 'updated')}"
+            else:
+                feedback = "후속처리 요청을 반영했습니다."
+            await self._send_village_followup_feedback(channel_id, user_id, message_ts, feedback)
+        except Exception as exc:
+            logger.error("Failed to handle VILLAGE follow-up Slack action: %s", exc, exc_info=True)
+            await self._send_village_followup_feedback(channel_id, user_id, message_ts, f"처리 실패: {exc}")
+
+    async def _handle_village_followup_view_submission(self, ack, body, view) -> None:
+        """Handle the VILLAGE edit-and-send modal submission."""
+        values = view.get("state", {}).get("values", {}) or {}
+        draft = ""
+        for block in values.values():
+            field = block.get("draft_text") if isinstance(block, dict) else None
+            if isinstance(field, dict) and field.get("value") is not None:
+                draft = str(field.get("value") or "").strip()
+                break
+        if not draft:
+            await ack(response_action="errors", errors={"draft_block": "전송 문구를 입력하세요."})
+            return
+        await ack()
+
+        try:
+            metadata = json.loads(view.get("private_metadata", "{}") or "{}")
+        except Exception:
+            metadata = {}
+        follow_up_id = str(metadata.get("followUpId") or "").strip()
+        channel_id = str(metadata.get("channelId") or "").strip()
+        message_ts = str(metadata.get("messageTs") or "").strip()
+        user = body.get("user", {}) or {}
+        user_id = user.get("id", "")
+        user_name = user.get("name", "unknown")
+
+        if not self._slack_user_allowed_for_followup(user_id):
+            logger.warning("[Slack] Unauthorized VILLAGE follow-up modal submit by %s (%s)", user_name, user_id)
+            return
+
+        try:
+            await self._post_village_followup_bridge({
+                "action_id": "village_followup_edit_send_submit",
+                "followUpId": follow_up_id,
+                "draftOverride": draft,
+                "user_id": user_id,
+                "user_name": user_name,
+                "channel_id": channel_id,
+                "message_ts": message_ts,
+            })
+            await self._send_village_followup_feedback(
+                channel_id,
+                user_id,
+                message_ts,
+                "수정한 문구로 카카오 전송 요청을 접수했습니다.",
+            )
+        except Exception as exc:
+            logger.error("Failed to submit VILLAGE follow-up edit modal: %s", exc, exc_info=True)
+            await self._send_village_followup_feedback(channel_id, user_id, message_ts, f"전송 요청 실패: {exc}")
+
+'''
+
+method_anchor = "    async def _handle_approval_action(self, ack, body, action) -> None:\n"
+if "    def _village_followup_action_url" not in text:
+    if method_anchor not in text:
+        raise SystemExit("Could not find Slack approval handler anchor")
+    text = text.replace(method_anchor, methods + method_anchor, 1)
+
+path.write_text(text)
+PY
+
+python3 -m py_compile "$HERMES_SLACK_PY"
+echo "Hermes Slack VILLAGE follow-up patch: applied"

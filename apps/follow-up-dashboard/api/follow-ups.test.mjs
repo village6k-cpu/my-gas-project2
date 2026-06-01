@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildDashboardSemanticKey, dedupeFollowUpItems, shouldHideLowValueActiveItem } from './follow-ups.js';
+import {
+  buildDashboardSemanticKey,
+  dedupeFollowUpItems,
+  duplicateFollowUpIdsForItem,
+  shouldHideLowValueActiveItem
+} from './follow-ups.js';
 
 test('dedupeFollowUpItems collapses repeated legacy cards for the same customer task', () => {
   const items = [
@@ -209,4 +214,288 @@ test('dedupeFollowUpItems collapses quote cards from the same Kakao room despite
 
   assert.equal(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
   assert.deepEqual(dedupeFollowUpItems(items).map((item) => item.id), ['newer']);
+});
+
+test('dedupeFollowUpItems collapses quote cards with unstable preview room keys when amount anchors match', () => {
+  const items = [
+    {
+      id: 'newer',
+      room_key: 'preview:d5b8b726c6578bef',
+      customer_name: '박정민',
+      type: 'quote_send',
+      status: 'open',
+      title: '박정민 견적서 발송 확인',
+      summary: "직원이 136,800원 안내 후 '견적서는 들어가서 보내줄게'라고 말한 상태입니다."
+    },
+    {
+      id: 'older',
+      room_key: 'preview:c5bb9c1fb31c4ef3',
+      customer_name: '박정민',
+      type: 'quote_send',
+      status: 'open',
+      title: '박정민님 견적서 발송 여부 확인',
+      summary: '직원이 136,800원이라고 안내하면서 밖이라 견적서는 들어가서 보내겠다고 말했습니다.'
+    }
+  ];
+
+  assert.notEqual(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
+  assert.deepEqual(dedupeFollowUpItems(items).map((item) => item.id), ['newer']);
+});
+
+test('dedupeFollowUpItems collapses reservation cards with unstable preview room keys when date anchors match', () => {
+  const items = [
+    {
+      id: 'newer',
+      room_key: 'preview:d5b8b726c6578bef',
+      customer_name: '박정민',
+      type: 'reservation_review',
+      status: 'open',
+      title: '박정민 예약 확인요청 등록 검토',
+      summary: '600C 2개, 포그 머신, 바텐 추가 요청. 2026-05-31 12:30부터 2026-06-01 12:30까지.'
+    },
+    {
+      id: 'older',
+      room_key: 'preview:c5bb9c1fb31c4ef3',
+      customer_name: '박정민',
+      type: 'reservation_review',
+      status: 'open',
+      title: '박정민 5/31~6/1 기존 예약에 바텐 추가 요청 확인',
+      summary: '고객이 기존 5/31 12:30~6/1 12:30 예약에 바텐을 추가하겠다고 했습니다.'
+    }
+  ];
+
+  assert.notEqual(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
+  assert.deepEqual(dedupeFollowUpItems(items).map((item) => item.id), ['newer']);
+});
+
+test('dedupeFollowUpItems collapses return extension operation cards with unstable preview room keys', () => {
+  const items = [
+    {
+      id: 'newer',
+      room_key: 'preview:kim-new',
+      customer_name: '김기환',
+      type: 'return_extension',
+      status: 'open',
+      title: '김기환 반납일 변경 및 SDI/2구 차저 추가 대여 내역 확인',
+      summary: '기존 계약에서 고객이 반납일을 6/1 14:00로 변경 가능한지 문의했고, 이후 SDI 2개와 2구 차저를 대여했다고 전달했습니다.'
+    },
+    {
+      id: 'older',
+      room_key: 'preview:kim-old',
+      customer_name: '김기환',
+      type: 'completed_log',
+      status: 'open',
+      title: '김기환 기존 예약 건 추가 대여/반납연장 확인 필요',
+      summary: '고객이 SDI 2개와 2구 차저를 대여했다고 알리고 6/1 14:00 반납 연장 가능 여부도 확인 대기 상태입니다.'
+    }
+  ];
+
+  assert.equal(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
+  assert.deepEqual(dedupeFollowUpItems(items).map((item) => item.id), ['newer']);
+});
+
+test('dedupeFollowUpItems collapses damage or missing-equipment cards across schedule and reply types', () => {
+  const items = [
+    {
+      id: 'schedule',
+      room_key: 'preview:lens',
+      customer_name: '김진호',
+      type: 'schedule_check',
+      status: 'open',
+      title: '김진호 FX3 24-70 변경/렌즈 누락 현장 확인',
+      summary: '고객이 기존 6/1 02:00~6/2 02:00 예약에서 24-70 GM 렌즈가 없다고 문의했습니다.'
+    },
+    {
+      id: 'reply',
+      room_key: 'preview:lens',
+      customer_name: '김진호',
+      type: 'reply_needed',
+      status: 'open',
+      title: '김진호 FX3 24-70 변경/렌즈 누락 확인 필요',
+      summary: '고객이 기존 6/1 02:00~6/2 02:00 예약 건에서 렌즈가 없다고 문의했습니다.'
+    }
+  ];
+
+  assert.equal(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
+  assert.deepEqual(dedupeFollowUpItems(items).map((item) => item.id), ['schedule']);
+});
+
+test('dedupeFollowUpItems treats sheet duplicate checks as the same reservation task when dates match', () => {
+  const items = [
+    {
+      id: 'duplicate',
+      room_key: 'preview:moon',
+      customer_name: '문시후',
+      type: 'sheet_duplicate_check',
+      status: 'open',
+      title: '문시후 예약 기존 RQ 중복 확인 및 24-70 GM 누락 여부 확인',
+      summary: '5/31 22:00 - 6/1 22:00, 소니 FX3 바디세트 + 24-70 GM 렌즈 예약 건입니다.'
+    },
+    {
+      id: 'reservation',
+      room_key: 'preview:moon',
+      customer_name: '문시후',
+      type: 'reservation_review',
+      status: 'open',
+      title: '문시후 예약 확인요청 입력 필요',
+      summary: '고객이 FX3 바디세트와 24-70 GM 렌즈를 5/31 22:00부터 6/1 22:00까지 예약 요청했습니다.'
+    }
+  ];
+
+  assert.equal(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
+  assert.deepEqual(dedupeFollowUpItems(items).map((item) => item.id), ['duplicate']);
+});
+
+test('dedupeFollowUpItems folds low-information Kakao read errors into the concrete customer task', () => {
+  const items = [
+    {
+      id: 'diagnostic',
+      customer_name: '안재도',
+      type: 'reply_needed',
+      status: 'open',
+      priority: 'normal',
+      title: '안재도 카카오 대화 내용 확인 필요',
+      summary: '대상 채팅방 제목은 확인됐지만 실제 대화 말풍선 텍스트가 읽히지 않아 최신 고객 메시지와 직원 답변 여부를 판별하지 못했습니다.',
+      evidence: ['AX capture exposed chat status button but did not expose readable chat bubble text']
+    },
+    {
+      id: 'concrete',
+      customer_name: '안재도',
+      type: 'reservation_review',
+      status: 'open',
+      priority: 'high',
+      title: '안재도 DJI 마이크 기존 예약 날짜변경 요청 확인',
+      summary: '고객이 기존 5월28일 DJI 마이크 렌탈건을 6월4일 09:00~6월6일 09:00로 변경 가능한지 문의했습니다.'
+    }
+  ];
+
+  const deduped = dedupeFollowUpItems(items);
+  assert.deepEqual(deduped.map((item) => item.id), ['concrete']);
+  assert.equal(deduped[0].priority, 'high');
+  assert.deepEqual(deduped[0].evidence, ['AX capture exposed chat status button but did not expose readable chat bubble text']);
+});
+
+test('dedupeFollowUpItems collapses quote and document cards for the same payment-document request', () => {
+  const items = [
+    {
+      id: 'document',
+      room_key: 'preview:doc-a',
+      customer_name: '박정병',
+      type: 'contract_document',
+      status: 'open',
+      title: '박정병 견적서/세금계산서 요청 최신 메시지 화면 확인 필요',
+      summary: '고객이 26일 장비 반출내역 견적서, 세금계산서 부탁 메시지를 보냈는지 화면 확인이 필요합니다.'
+    },
+    {
+      id: 'quote',
+      room_key: 'preview:doc-b',
+      customer_name: '박정병',
+      type: 'quote_send',
+      status: 'open',
+      title: '박정병 견적서 요청',
+      summary: '고객이 반납 완료를 알린 뒤 견적서 전달을 요청했습니다.'
+    }
+  ];
+
+  assert.notEqual(buildDashboardSemanticKey(items[0]), buildDashboardSemanticKey(items[1]));
+  assert.deepEqual(dedupeFollowUpItems(items).map((item) => item.id), ['quote']);
+});
+
+test('dedupeFollowUpItems collapses repeated low-information diagnostics for one customer', () => {
+  const items = [
+    {
+      id: 'mismatch',
+      customer_name: '김태완',
+      type: 'reservation_review',
+      status: 'open',
+      priority: 'normal',
+      title: '대상 카카오 대화 불일치로 AI 처리 보류',
+      summary: '작업 대상 preview_text와 현재 열린 대화가 일치하지 않아 자동 분류/시트 입력을 중단했습니다.'
+    },
+    {
+      id: 'manual',
+      customer_name: '김태완',
+      type: 'reservation_review',
+      status: 'open',
+      priority: 'high',
+      title: '김태완 예약 문의 대화 확인 필요',
+      summary: '실제 카카오 채팅방 메시지 본문을 읽지 못해 AI-first 기준상 시트 입력 판단을 보류합니다.'
+    }
+  ];
+
+  const deduped = dedupeFollowUpItems(items);
+  assert.deepEqual(deduped.map((item) => item.id), ['mismatch']);
+  assert.equal(deduped[0].priority, 'high');
+});
+
+test('duplicateFollowUpIdsForItem includes alternate-key duplicates and hidden diagnostics', () => {
+  const concrete = {
+    id: 'concrete',
+    customer_name: '안재도',
+    type: 'reservation_review',
+    status: 'open',
+    title: '안재도 DJI 마이크 기존 예약 날짜변경 요청 확인',
+    summary: '고객이 기존 5월28일 DJI 마이크 렌탈건을 6월4일 09:00~6월6일 09:00로 변경 가능한지 문의했습니다.'
+  };
+  const diagnostic = {
+    id: 'diagnostic',
+    customer_name: '안재도',
+    type: 'reply_needed',
+    status: 'open',
+    title: '안재도 카카오 대화 내용 확인 필요',
+    summary: '실제 대화 말풍선 텍스트가 읽히지 않아 최신 고객 메시지와 직원 답변 여부를 판별하지 못했습니다.'
+  };
+  const other = {
+    id: 'other',
+    customer_name: '박정민',
+    type: 'reservation_review',
+    status: 'open',
+    title: '박정민 예약 확인',
+    summary: '다른 고객의 예약 확인입니다.'
+  };
+
+  assert.deepEqual(duplicateFollowUpIdsForItem(concrete, [diagnostic, other, concrete]), ['diagnostic', 'concrete']);
+});
+
+test('duplicateFollowUpIdsForItem uses payment-document alternate keys for status updates', () => {
+  const document = {
+    id: 'document',
+    room_key: 'preview:doc-a',
+    customer_name: '박정병',
+    type: 'contract_document',
+    status: 'open',
+    title: '박정병 견적서/세금계산서 요청 최신 메시지 화면 확인 필요',
+    summary: '고객이 26일 장비 반출내역 견적서, 세금계산서 부탁 메시지를 보냈는지 화면 확인이 필요합니다.'
+  };
+  const quote = {
+    id: 'quote',
+    room_key: 'preview:doc-b',
+    customer_name: '박정병',
+    type: 'quote_send',
+    status: 'open',
+    title: '박정병 견적서 요청',
+    summary: '고객이 반납 완료를 알린 뒤 견적서 전달을 요청했습니다.'
+  };
+
+  assert.deepEqual(duplicateFollowUpIdsForItem(quote, [document, quote]), ['document', 'quote']);
+});
+
+test('shouldHideLowValueActiveItem hides simple return-complete logs but keeps recordable handoff notes', () => {
+  assert.equal(shouldHideLowValueActiveItem({
+    type: 'completed_log',
+    priority: 'normal',
+    status: 'open',
+    title: '김형석 고객 반납 완료 알림',
+    summary: '고객이 BMPCC 6K 풀세트 대여 건으로 보이는 장비 반납 완료를 알렸습니다.',
+    recommended_action: '실제 반납/검수 상태는 내부 운영 절차에 따라 확인하고, 필요하면 간단히 수신 확인 답장을 보내면 됩니다.'
+  }), true);
+
+  assert.equal(shouldHideLowValueActiveItem({
+    type: 'completed_log',
+    priority: 'normal',
+    status: 'open',
+    title: '고창현 반출/현장반납 변경사항 기록 필요',
+    summary: '고객이 현장 반납 품목과 특이사항을 전달했습니다.',
+    recommended_action: '기존 예약/계약 건의 반출·반납 메모에 현장 반납 품목과 특이사항을 기록하세요.'
+  }), false);
 });
