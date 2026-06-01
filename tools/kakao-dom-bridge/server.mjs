@@ -774,6 +774,9 @@ function appendLimited(current, chunk, limit = 20_000) {
   return next.length > limit ? next.slice(-limit) : next;
 }
 
+const WORKER_STDOUT_LIMIT = 2_000_000;
+const WORKER_STDERR_LIMIT = 50_000;
+
 function runWorker(job) {
   if (!CONFIG.workerCommand) return Promise.resolve({ skipped: true });
 
@@ -804,8 +807,8 @@ function runWorker(job) {
       finish(reject, error);
     }, CONFIG.workerTimeoutMs);
 
-    child.stdout.on('data', (chunk) => { stdout = appendLimited(stdout, chunk); });
-    child.stderr.on('data', (chunk) => { stderr = appendLimited(stderr, chunk); });
+    child.stdout.on('data', (chunk) => { stdout = appendLimited(stdout, chunk, WORKER_STDOUT_LIMIT); });
+    child.stderr.on('data', (chunk) => { stderr = appendLimited(stderr, chunk, WORKER_STDERR_LIMIT); });
     child.on('error', (error) => finish(reject, error));
     child.on('close', (code, signal) => {
       const result = { code, signal, timedOut, stdout, stderr };

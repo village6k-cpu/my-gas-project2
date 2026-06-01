@@ -2954,11 +2954,15 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   if (decision?.safety_checks?.kakao_conversation_opened !== true) return { allowed: false, reason: 'conversation_not_opened' };
   if (decision?.safety_checks?.did_not_classify_from_preview_only !== true) return { allowed: false, reason: 'preview_only' };
   if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) return { allowed: false, reason: 'latest_turn_not_customer' };
-  const blockedClassifications = new Set(['price', 'reservation', 'reservation_request', 'reservation_review', 'payment', 'payment_check', 'schedule_check', 'damage_repair']);
+  const blockedClassifications = new Set(['price', 'reservation_review', 'payment', 'payment_check', 'schedule_check', 'damage_repair']);
   if (blockedClassifications.has(classification)) return { allowed: false, reason: `classification_${classification}_requires_review` };
   if (decision.owner_review_required === true || decision.ownerReviewRequired === true) return { allowed: false, reason: 'owner_review_required' };
-  const blocked = ['refund', '환불', '분실', '파손', '손상', '결제 취소', '예약 확정', '재고 가능', '가능 확정', '가능합니다', '대여 가능', '예약 가능', '확정', '만원', ' 원', '입금', '계좌', '금액'];
-  if (blocked.some((word) => textValue.includes(word))) return { allowed: false, reason: 'sensitive_commitment_text' };
+  const sensitiveCommitmentPattern = /(refund|환불|분실|파손|손상|결제\s*취소|예약\s*확정|재고\s*가능|가능\s*확정|(?:대여|예약)?\s*가능(?:합니다|하세요|하십니다|해요|함)?|확정|[0-9,]+\s*(?:원|만원)|입금|계좌|금액)/i;
+  if (sensitiveCommitmentPattern.test(textValue)) return { allowed: false, reason: 'sensitive_commitment_text' };
+  if (classification === 'reservation' || classification === 'reservation_request') {
+    const safeOperationalAck = /(확인|접수|공유|전달|참고|검토|방문|수령|반납|재학증명|서류|파일|네|넵|감사)/.test(textValue);
+    if (!safeOperationalAck) return { allowed: false, reason: `classification_${classification}_requires_review` };
+  }
   return { allowed: true, reason: 'allowed', text: textValue, replyMode: mode, confidence };
 }
 

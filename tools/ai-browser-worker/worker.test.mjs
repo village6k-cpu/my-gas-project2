@@ -1833,8 +1833,18 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, suggested_reply_draft: '예약 확정됐습니다', reply_decision: { ...baseDecision.reply_decision, text: '예약 확정됐습니다' } }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price' }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'reservation_review' }, { autoSendEnabled: true }).allowed, false);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'reservation' }, { autoSendEnabled: true }).allowed, true);
+  assert.equal(canAutoSendCustomerAnswer({
+    ...baseDecision,
+    classification: 'reservation',
+    reply_decision: {
+      ...baseDecision.reply_decision,
+      text: '재학증명서 확인했습니다! 6월 2일 19시 30분에 방문해 주시면 됩니다. 감사합니다.'
+    }
+  }, { autoSendEnabled: true }).allowed, true);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, owner_review_required: true }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, reply_decision: { ...baseDecision.reply_decision, text: '네 대여 가능합니다.' } }, { autoSendEnabled: true }).allowed, false);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'reservation', reply_decision: { ...baseDecision.reply_decision, text: '네 예약 가능합니다.' } }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'faq', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).allowed, true);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
 });

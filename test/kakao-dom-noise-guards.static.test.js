@@ -186,6 +186,18 @@ assert.match(
 
 assert.match(
   bridge,
+  /const WORKER_STDOUT_LIMIT = 2_000_000;/,
+  'Bridge must not truncate large AI worker JSON stdout before parsing it'
+);
+
+assert.match(
+  bridge,
+  /stdout = appendLimited\(stdout, chunk, WORKER_STDOUT_LIMIT\)/,
+  'Bridge worker stdout capture must use the large JSON-safe limit'
+);
+
+assert.match(
+  bridge,
   /function isActionChromePreview\(text\)/,
   'Bridge must filter Kakao UI/action chrome rows before queueing AI jobs'
 );
