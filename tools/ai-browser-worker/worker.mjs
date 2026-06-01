@@ -408,7 +408,7 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 확인요청에 이미 RQ가 있으면 중복 입력은 금지하되, 반드시 그 RQ의 I열(결과)과 J열(상세)을 읽어서 가용확인 결과 기준으로 follow_up_items.summary/recommended_action/suggested_reply_draft를 만든다. 사람에게 "RQ 결과를 검토하라"고만 떠넘기지 마라.
 - 기존 RQ 결과가 비어 있거나 읽히지 않으면 "가용확인 결과 없음/재확인 필요"로 보고한다. 결과가 ✅ 가용일 때만 고객 답변 초안에 예약 가능하다고 쓴다. ⚠️/❌/가용0/결과없음이면 가능 단정 금지.
 - 예약/가격/FAQ/무시를 AI가 분류한다. 미리보기 텍스트만으로 예약·가격·FAQ를 확정하지 않는다.
-- 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/대시보드 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
+- 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/처리판 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
 - FAQ 고정 답변 후보: 주소=서울 마포구 동교로 23길 32, 2층 / 네이버 지도=https://naver.me/5mIWTFQ1 / 영업시간=24시간 운영 / 절차=장비명+기간 전달→가용확인→방문수령→반납.
 - 가격 문의는 세트마스터 단가, 고객할인, 장기할인으로 초안/follow_up을 만든다. price_paused면 가격 자동발송 금지.
 - 계약서/견적서/세금계산서/거래명세서 등 서류 요청은 금액 계산을 생략하지 않는다. 거래ID가 보이면 계약마스터+스케줄상세를 읽고, 스케줄상세 L열 단가가 있는 대표/단품 행 기준으로 정가=수량×대여일수×단가를 계산한다.
@@ -962,11 +962,41 @@ function splitReadableClauses(value = '', limit = 4) {
     .slice(0, limit);
 }
 
-function bulletizeForSlack(value = '', { limit = 4, maxLine = 180 } = {}) {
-  const lines = splitReadableClauses(value, limit)
-    .map((line) => truncateSlackText(line, maxLine))
-    .filter(Boolean);
-  return lines.map((line) => `• ${line}`).join('\n');
+function splitLongMobileLine(value = '', maxLine = 54) {
+  let remaining = text(value).trim();
+  const chunks = [];
+  const separators = [' / ', ' — ', ' - ', ', ', '이며 ', '이고 ', '이나 ', '다만 ', '단 ', ' 결과는 ', ' 기준 ', ' 확인 ', ' 요청 ', ' 필요 '];
+  while (remaining.length > maxLine) {
+    let splitAt = -1;
+    for (const sep of separators) {
+      const idx = remaining.lastIndexOf(sep, maxLine);
+      if (idx > 18) {
+        splitAt = idx + sep.length;
+        break;
+      }
+    }
+    if (splitAt < 0) {
+      const spaceIdx = remaining.lastIndexOf(' ', maxLine);
+      splitAt = spaceIdx > 18 ? spaceIdx + 1 : maxLine;
+    }
+    chunks.push(remaining.slice(0, splitAt).trim());
+    remaining = remaining.slice(splitAt).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks.filter(Boolean);
+}
+
+function mobileBulletsForSlack(value = '', { limit = 5, maxLine = 54, icon = '•' } = {}) {
+  const clauses = splitReadableClauses(value, limit * 2);
+  const lines = [];
+  for (const clause of clauses) {
+    for (const part of splitLongMobileLine(clause, maxLine)) {
+      lines.push(`${icon} ${escapeSlackText(part)}`);
+      if (lines.length >= limit) break;
+    }
+    if (lines.length >= limit) break;
+  }
+  return lines.join('\n\n');
 }
 
 function normalizeDatePart(value = '') {
@@ -1331,39 +1361,40 @@ export function routeFollowUpToSlack(row = {}, config = {}) {
   };
 }
 
-function formatSlackAgentMention(value = '') {
-  const mention = text(value || '헤이빌리').trim() || '헤이빌리';
-  if (/^<@[A-Z0-9]+>$/.test(mention)) return mention;
-  if (/^U[A-Z0-9]+$/.test(mention)) return `<@${mention}>`;
-  return mention;
-}
-
 function formatSlackCalculationBlock(row = {}) {
   const calc = row.payload?.operational_calculation;
   if (!calc?.lines?.length) return '';
-  const lines = calc.lines.map((line) => `• ${truncateSlackText(line, 260)}`);
-  if (calc.totalVatIncluded) {
-    lines.push(`• 합계 기준 VAT 포함 ${formatMoney(calc.totalVatIncluded)}`);
+  const lines = [];
+  for (const line of calc.lines) {
+    const chunks = splitLongMobileLine(line, 56);
+    lines.push(`🧾 ${escapeSlackText(chunks[0] || line)}`);
+    for (const chunk of chunks.slice(1, 4)) {
+      lines.push(`   ${escapeSlackText(chunk)}`);
+    }
+    lines.push('');
   }
-  return lines.join('\n');
+  if (calc.totalVatIncluded) {
+    lines.push(`💰 합계 VAT 포함 ${formatMoney(calc.totalVatIncluded)}`);
+  }
+  return lines.filter((line, index, arr) => line || arr[index - 1]).join('\n').trim();
 }
 
 function formatSlackRecommendation(row = {}) {
   const calc = row.payload?.operational_calculation;
   const lines = [];
   if (calc?.lines?.length) {
-    lines.push('1. 위 계산 결과와 계약서/견적서 실제 파일 금액을 대조');
+    lines.push('1. 🧾 계산 금액과 파일 금액 대조');
     if (calc.unresolved?.length) {
-      lines.push(`2. 미계산/미등록 항목 확인: ${calc.unresolved.join(', ')}`);
-      lines.push('3. 확인된 파일만 고객에게 발송');
+      lines.push(`2. 🔎 미계산 항목 확인: ${calc.unresolved.join(', ')}`);
+      lines.push('3. 📤 확인된 파일만 고객에게 발송');
     } else {
-      lines.push('2. 금액이 맞으면 파일 발송');
-      lines.push('3. 발송 후 완료 처리');
+      lines.push('2. 📤 금액이 맞으면 파일 발송');
+      lines.push('3. ✅ 발송 후 완료 처리');
     }
   }
-  const original = bulletizeForSlack(row.recommended_action, { limit: calc?.lines?.length ? 2 : 4, maxLine: 220 });
+  const original = mobileBulletsForSlack(row.recommended_action, { limit: calc?.lines?.length ? 2 : 5, maxLine: 54, icon: '▫️' });
   if (original) lines.push(original);
-  return lines.join('\n') || bulletizeForSlack(row.recommended_action, { limit: 4, maxLine: 220 });
+  return lines.join('\n\n') || mobileBulletsForSlack(row.recommended_action, { limit: 5, maxLine: 54, icon: '▫️' });
 }
 
 export function buildSlackFollowUpMessage(row = {}, options = {}) {
@@ -1372,13 +1403,10 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
   const priorityLabel = row.priority === 'urgent' ? '긴급' : row.priority === 'high' ? '중요' : row.priority || 'normal';
   const title = truncateSlackText(row.title || `${typeLabel} 후속처리`, 140);
   const customer = truncateSlackText(row.customer_name || '고객명 미확인', 120);
-  const agentMention = formatSlackAgentMention(options.agentMention || options.config?.slackAgentMention || '헤이빌리');
-  const dashboardUrl = text(options.dashboardUrl || options.config?.slackDashboardUrl || '').trim();
   const draft = text(row.suggested_reply_draft || '').trim();
   const evidence = Array.isArray(row.evidence) ? row.evidence.map(text).filter(Boolean).slice(0, 5) : [];
   const calculationBlock = formatSlackCalculationBlock(row);
   const recommendationBlock = formatSlackRecommendation(row);
-  const buttonHelp = `버튼은 ${agentMention} Slack 앱이 받아 로컬 브릿지로 전달합니다. "전송"은 아래 초안 그대로, "수정 후 전송"은 모달에서 고친 문구로 카카오 발송 요청을 넣습니다.`;
   const blocks = [
     {
       type: 'header',
@@ -1395,7 +1423,7 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
     }
   ];
   if (row.summary) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*👀 요약*\n${bulletizeForSlack(row.summary, { limit: 5, maxLine: 240 }) || truncateSlackText(row.summary, 1000)}` } });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*👀 요약*\n${mobileBulletsForSlack(row.summary, { limit: 7, maxLine: 52, icon: '•' }) || truncateSlackText(row.summary, 1000)}` } });
   }
   if (calculationBlock) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🧮 계산*\n${truncateSlackText(calculationBlock, 1800)}` } });
@@ -1407,9 +1435,21 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 답변 초안*\n${codeBlockForSlack(draft, 1800)}` } });
   }
   if (evidence.length) {
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: truncateSlackText(`📌 근거: ${evidence.join(' / ')}`, 1800) }] });
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*📌 근거*\n${evidence.map((item) => `• ${escapeSlackText(splitLongMobileLine(item, 58).slice(0, 3).join('\n  '))}`).join('\n\n')}`
+      }
+    });
   }
-  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: truncateSlackText(`🤖 ${buttonHelp}`, 700) }] });
+  blocks.push({
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: '*🔘 버튼 동작*\n• 전송: 현재 초안으로 카카오 발송 요청\n\n• 수정 후 전송: 문구 수정창을 연 뒤 발송 요청\n\n• 진행중/완료/무시: 처리판 상태만 변경'
+    }
+  });
   const actionElements = [
     { type: 'button', text: { type: 'plain_text', text: '전송' }, style: 'primary', action_id: 'village_followup_send', value: String(row.id || '') },
     { type: 'button', text: { type: 'plain_text', text: '수정 후 전송' }, action_id: 'village_followup_edit_send', value: String(row.id || '') },
@@ -1417,14 +1457,7 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
     { type: 'button', text: { type: 'plain_text', text: '완료' }, action_id: 'village_followup_status_done', value: String(row.id || '') },
     { type: 'button', text: { type: 'plain_text', text: '무시' }, style: 'danger', action_id: 'village_followup_status_dismissed', value: String(row.id || '') }
   ];
-  if (dashboardUrl) {
-    const url = `${dashboardUrl.replace(/\/$/, '')}?focus=${encodeURIComponent(row.id || '')}`;
-    actionElements.push({ type: 'button', text: { type: 'plain_text', text: '대시보드' }, url });
-  }
   blocks.push({ type: 'actions', elements: actionElements.slice(0, 5) });
-  if (dashboardUrl) {
-    blocks.push({ type: 'actions', elements: [actionElements[actionElements.length - 1]] });
-  }
   return {
     channel: route.channel,
     text: `[${typeLabel}] ${row.customer_name || ''} ${row.title || ''}`.trim(),
@@ -1659,8 +1692,6 @@ function requireConfig() {
     autoSendTimeoutMs: Number(process.env.AI_WORKER_AUTO_SEND_TIMEOUT_MS || 20000) || 20000,
     slackFollowUpEnabled: process.env.SLACK_FOLLOW_UP_ENABLED === '1',
     slackBotToken: process.env.SLACK_BOT_TOKEN || '',
-    slackAgentMention: process.env.SLACK_AGENT_MENTION || '헤이빌리',
-    slackDashboardUrl: process.env.SLACK_DASHBOARD_URL || process.env.FOLLOW_UP_DASHBOARD_URL || '',
     slackChannels: {
       schedule: process.env.SLACK_CHANNEL_SCHEDULE_AGENT || DEFAULT_SLACK_CHANNELS.schedule,
       document: process.env.SLACK_CHANNEL_DOCUMENT_AGENT || DEFAULT_SLACK_CHANNELS.document,

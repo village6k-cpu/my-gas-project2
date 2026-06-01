@@ -1344,7 +1344,7 @@ test('routeFollowUpToSlack maps follow-up types to the agent channels', () => {
   assert.deepEqual(routeFollowUpToSlack({ type: 'damage_repair' }), { route: 'other', channel: '기타문의' });
 });
 
-test('buildSlackFollowUpMessage includes action buttons and clear Heybilly button help', () => {
+test('buildSlackFollowUpMessage includes action buttons and compact button help', () => {
   const message = buildSlackFollowUpMessage({
     id: 'follow-1',
     type: 'reservation_review',
@@ -1356,18 +1356,16 @@ test('buildSlackFollowUpMessage includes action buttons and clear Heybilly butto
     recommended_action: '확인요청 결과가 ✅ 가용이면 가능 안내 후 예약 진행 여부를 확인하세요.',
     suggested_reply_draft: '확인해보니 해당 일정 예약 가능하십니다.',
     evidence: ['확인요청 RQ-260531-003: ✅ 가용1']
-  }, {
-    config: { slackAgentMention: '헤이빌리', slackDashboardUrl: 'https://dashboard.example' }
   });
 
   assert.equal(message.channel, '스케쥴-agent');
   assert.match(JSON.stringify(message.blocks), /village_followup_send/);
   assert.match(JSON.stringify(message.blocks), /village_followup_edit_send/);
   assert.match(JSON.stringify(message.blocks), /village_followup_status_done/);
-  assert.match(JSON.stringify(message.blocks), /헤이빌리/);
-  assert.doesNotMatch(JSON.stringify(message.blocks), /헤이빌리 호출문/);
-  assert.match(JSON.stringify(message.blocks), /버튼은/);
-  assert.match(JSON.stringify(message.blocks), /dashboard.example/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /헤이빌리/);
+  assert.match(JSON.stringify(message.blocks), /버튼 동작/);
+  assert.match(JSON.stringify(message.blocks), /현재 초안으로 카카오 발송 요청/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /대시보드/);
 });
 
 test('enrichFollowUpRowWithOperationalCalculations calculates contract and RQ document amounts', async () => {
