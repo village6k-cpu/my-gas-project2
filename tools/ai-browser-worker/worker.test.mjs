@@ -51,6 +51,7 @@ import {
   filterFollowUpRowsAgainstClosedHistory,
   mergeFollowUpRowsByTopic,
   routeFollowUpToSlack,
+  enrichFollowUpRowWithOperationalCalculations,
   buildSlackFollowUpMessage,
   resolveSlackChannelId,
   deliverSlackFollowUpRows,
@@ -1343,7 +1344,7 @@ test('routeFollowUpToSlack maps follow-up types to the agent channels', () => {
   assert.deepEqual(routeFollowUpToSlack({ type: 'damage_repair' }), { route: 'other', channel: '기타문의' });
 });
 
-test('buildSlackFollowUpMessage includes action buttons and 헤이빌리 instruction', () => {
+test('buildSlackFollowUpMessage includes action buttons and clear Heybilly button help', () => {
   const message = buildSlackFollowUpMessage({
     id: 'follow-1',
     type: 'reservation_review',
@@ -1364,7 +1365,56 @@ test('buildSlackFollowUpMessage includes action buttons and 헤이빌리 instruc
   assert.match(JSON.stringify(message.blocks), /village_followup_edit_send/);
   assert.match(JSON.stringify(message.blocks), /village_followup_status_done/);
   assert.match(JSON.stringify(message.blocks), /헤이빌리/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /헤이빌리 호출문/);
+  assert.match(JSON.stringify(message.blocks), /버튼은/);
   assert.match(JSON.stringify(message.blocks), /dashboard.example/);
+});
+
+test('enrichFollowUpRowWithOperationalCalculations calculates contract and RQ document amounts', async () => {
+  const gvizBody = `/*O_o*/\ngoogle.visualization.Query.setResponse({"version":"0.6","status":"ok","table":{"cols":[{"label":"요청ID"},{"label":"반출일"},{"label":"반출시간"},{"label":"반납일"},{"label":"반납시간"},{"label":"장비or세트명"},{"label":"수량"},{"label":"결과"},{"label":"상세"},{"label":"예약자명"},{"label":"연락처"},{"label":"할인유형"},{"label":"비고"},{"label":"추가요청"}],"rows":[{"c":[{"v":"RQ-260531-007"},{"v":"Date(2026,5,1)","f":"2026. 6. 1"},{"v":"Date(1899,11,30,8,0,0)","f":"8:00"},{"v":"Date(2026,5,3)","f":"2026. 6. 3"},{"v":"Date(1899,11,30,23,59,0)","f":"23:59"},{"v":"V마운트 셋업"},{"v":3,"f":"3"},{"v":"❓ 미등록 장비"},{"v":"장비마스터/세트마스터에 없음"},{"v":"최민석"},{"v":"010-4506-6615"},{"v":"일반"},{"v":"마운드미디어"},{"v":"V마운트 확인"}]},{"c":[{"v":"RQ-260531-007"},null,null,null,null,{"v":"V마운트 배터리"},{"v":10,"f":"10"},{"v":"✅ 가용40"},{"v":"보유56"},null,null,null,null,null]},{"c":[{"v":"RQ-260531-007"},null,null,null,null,{"v":"V마운트 배터리 충전기"},{"v":1,"f":"1"},{"v":"✅ 가용6"},{"v":"보유10"},null,null,null,null,null]}]}});`;
+  const config = {
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'key',
+    fetchImpl: async (url) => {
+      const u = new URL(String(url));
+      if (u.hostname === 'docs.google.com') {
+        return { ok: true, status: 200, text: async () => gvizBody };
+      }
+      const sheet = u.searchParams.get('sheet');
+      const query = u.searchParams.get('query');
+      if (sheet === '계약마스터' && query === '260530-003') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ results: [{ data: ['260530-003', '최민석', '010-4506-6615', '', '', '', '', '', 3, '예약', '제휴', ''] }] }) };
+      }
+      if (sheet === '스케줄상세' && query === '260530-003') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ results: [
+          { data: ['260530-003-01', '260530-003', '소니 A7S3 바디세트', '소니 A7S3 바디세트', 1, '2026-06-01', '8:00', '2026-06-03', '23:00', '대기', '', 40000, '최민석'] },
+          { data: ['260530-003-02', '260530-003', '소니 A7S3 바디세트', '소니 A7S3 바디(케이지)', 1, '2026-06-01', '8:00', '2026-06-03', '23:00', '대기', '', 0, '최민석'] },
+          { data: ['260530-003-07', '260530-003', '소니 GM 70-200mm II', '소니 GM 70-200mm II', 1, '2026-06-01', '8:00', '2026-06-03', '23:00', '대기', '', 30000, '최민석'] },
+          { data: ['260530-003-08', '260530-003', '셔틀러에이스 M (75볼)', '셔틀러에이스 M (75볼)', 1, '2026-06-01', '8:00', '2026-06-03', '23:00', '대기', '', 10000, '최민석'] }
+        ] }) };
+      }
+      if (sheet === '세트마스터') {
+        const price = query === 'V마운트 배터리' || query === 'V마운트 배터리 충전기' ? 5000 : 0;
+        return { ok: true, status: 200, text: async () => JSON.stringify({ results: price ? [{ data: [query, '', '', '', '', '', price] }] : [] }) };
+      }
+      throw new Error(`unexpected URL ${url}`);
+    }
+  };
+
+  const row = await enrichFollowUpRowWithOperationalCalculations(config, {
+    id: 'follow-doc',
+    type: 'contract_document',
+    title: '최민석 2건 계약서 파일 발송 요청',
+    customer_name: '최민석',
+    summary: '계약마스터 260530-003 및 확인요청 RQ-260531-007 관련 서류 요청',
+    recommended_action: '계약서 파일 2건을 발송하세요.',
+    evidence: ['계약마스터 조회: 260530-003', '확인요청 조회: RQ-260531-007']
+  });
+
+  assert.match(row.recommended_action, /135,170원/);
+  assert.match(row.recommended_action, /145,200원/);
+  assert.match(row.recommended_action, /V마운트 셋업 x3/);
+  assert.equal(row.payload.operational_calculation.totalVatIncluded, 280370);
 });
 
 test('resolveSlackChannelId searches Slack channel names and caches the id', async () => {

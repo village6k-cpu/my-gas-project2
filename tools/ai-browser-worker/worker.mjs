@@ -312,9 +312,21 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
       request_recent_gviz: buildGvizUrl('확인요청', "SELECT K,B,F WHERE K!='' ORDER BY A DESC LIMIT 50"),
       request_recent_with_results_gviz: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE A!='' ORDER BY A DESC LIMIT 80"),
       request_by_req_id_gviz_template: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE A='{AI_REQ_ID}' LIMIT 30"),
-      request_by_customer_gviz_template: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE K='{AI_CUSTOMER_NAME}' ORDER BY A DESC LIMIT 30")
+      request_by_customer_gviz_template: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE K='{AI_CUSTOMER_NAME}' ORDER BY A DESC LIMIT 30"),
+      contract_by_trade_id_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
+        action: 'search',
+        sheet: '계약마스터',
+        col: 1,
+        query: '{AI_TRADE_ID}'
+      }),
+      schedule_by_trade_id_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
+        action: 'search',
+        sheet: '스케줄상세',
+        col: 2,
+        query: '{AI_TRADE_ID}'
+      })
     },
-    note: 'These URLs are read-only lookup aids. 확인요청 columns: A=reqID, B-E period, F equipment, G qty, I result, J detail, K customer, L phone, M discount, Q memo, R extra. AI must decide what to query and how to interpret results. Do not use write/run/register/send actions.'
+    note: 'These URLs are read-only lookup aids. 확인요청 columns: A=reqID, B-E period, F equipment, G qty, I result, J detail, K customer, L phone, M discount, Q memo, R extra. 계약마스터 columns include A tradeID, B customer, C phone, E-H period, J status, K discount. 스케줄상세 L is unit price. AI must decide what to query and how to interpret results. Do not use write/run/register/send actions.'
   };
 }
 
@@ -399,6 +411,9 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/대시보드 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
 - FAQ 고정 답변 후보: 주소=서울 마포구 동교로 23길 32, 2층 / 네이버 지도=https://naver.me/5mIWTFQ1 / 영업시간=24시간 운영 / 절차=장비명+기간 전달→가용확인→방문수령→반납.
 - 가격 문의는 세트마스터 단가, 고객할인, 장기할인으로 초안/follow_up을 만든다. price_paused면 가격 자동발송 금지.
+- 계약서/견적서/세금계산서/거래명세서 등 서류 요청은 금액 계산을 생략하지 않는다. 거래ID가 보이면 계약마스터+스케줄상세를 읽고, 스케줄상세 L열 단가가 있는 대표/단품 행 기준으로 정가=수량×대여일수×단가를 계산한다.
+- 서류 요청 금액 산식은 계약서 생성 로직과 맞춘다: 대여일수는 24시간=1일, 6시간 이내 초과는 같은 일수, 그 이상은 +1일. 결제금액은 정가 × 고객/제휴/단골 할인 배율 × 장기할인 배율, VAT 포함 최종금액은 할인후 금액×1.1을 10원 단위 올림으로 계산한다.
+- 서류 요청에서 확인요청 RQ만 있고 아직 계약 등록 전이면 확인요청 결과와 세트마스터 단가로 계산 가능한 항목은 반드시 부분 계산하고, 미등록/단가불명 항목은 "미계산/확인 필요"로 따로 표시한다. 사람에게 "금액 확인"이라고만 떠넘기지 않는다.
 - unread/미처리면 오래된 메시지도 검토한다. 날짜만 오래된 backfill/row movement는 자동발송하지 않는다.
 - 유입로그 단서는 evidence에만 보존한다. API 별도 worker 책임이다.
 
@@ -917,6 +932,371 @@ function codeBlockForSlack(value = '', max = 2400) {
   return `\`\`\`${clipped}\`\`\``;
 }
 
+function formatMoney(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '';
+  return `${Math.round(number).toLocaleString('ko-KR')}원`;
+}
+
+function parseNumber(value, fallback = 0) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const raw = text(value).replace(/,/g, '').trim();
+  const match = raw.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return fallback;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function splitReadableClauses(value = '', limit = 4) {
+  const raw = text(value).replace(/\s+/g, ' ').trim();
+  if (!raw) return [];
+  const normalized = raw
+    .replace(/다\. /g, '다.\n')
+    .replace(/요\. /g, '요.\n')
+    .replace(/입니다\. /g, '입니다.\n')
+    .replace(/\. /g, '.\n');
+  return normalized
+    .split(/\n+|(?<=\])\s+|(?<=\))\s+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function bulletizeForSlack(value = '', { limit = 4, maxLine = 180 } = {}) {
+  const lines = splitReadableClauses(value, limit)
+    .map((line) => truncateSlackText(line, maxLine))
+    .filter(Boolean);
+  return lines.map((line) => `• ${line}`).join('\n');
+}
+
+function normalizeDatePart(value = '') {
+  const raw = text(value).trim();
+  let match = raw.match(/Date\((\d{4}),\s*(\d{1,2}),\s*(\d{1,2})/);
+  if (match) return `${match[1]}-${String(Number(match[2]) + 1).padStart(2, '0')}-${String(Number(match[3])).padStart(2, '0')}`;
+  match = raw.match(/(\d{4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})/);
+  if (match) return `${match[1]}-${String(Number(match[2])).padStart(2, '0')}-${String(Number(match[3])).padStart(2, '0')}`;
+  return '';
+}
+
+function normalizeTimePart(value = '') {
+  const raw = text(value).trim();
+  let match = raw.match(/Date\(\d{4},\s*\d{1,2},\s*\d{1,2},\s*(\d{1,2}),\s*(\d{1,2})/);
+  if (match) return `${String(Number(match[1])).padStart(2, '0')}:${String(Number(match[2])).padStart(2, '0')}`;
+  match = raw.match(/(\d{1,2}):(\d{2})/);
+  if (match) return `${String(Number(match[1])).padStart(2, '0')}:${match[2]}`;
+  return '';
+}
+
+function parseLocalDateTime(dateValue = '', timeValue = '') {
+  const date = normalizeDatePart(dateValue);
+  const time = normalizeTimePart(timeValue) || '00:00';
+  if (!date) return null;
+  const parts = `${date}T${time}`.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  if (!parts) return null;
+  return new Date(Date.UTC(
+    Number(parts[1]),
+    Number(parts[2]) - 1,
+    Number(parts[3]),
+    Number(parts[4]),
+    Number(parts[5])
+  ));
+}
+
+function calcRentalDaysForQuote(startDate, startTime, endDate, endTime) {
+  const start = parseLocalDateTime(startDate, startTime);
+  const end = parseLocalDateTime(endDate, endTime);
+  if (!start || !end || end <= start) return 1;
+  const totalHours = (end - start) / (1000 * 60 * 60);
+  return Math.max(1, Math.ceil((totalHours - 6) / 24));
+}
+
+function longTermDiscountRate(days) {
+  const d = Number(days) || 1;
+  if (d >= 20) return 50;
+  if (d >= 15) return 45;
+  if (d >= 10) return 40;
+  if (d >= 6) return 35;
+  if (d >= 3) return 20;
+  if (d >= 2) return 10;
+  return 0;
+}
+
+function discountRatesForType(discountType = '') {
+  const type = text(discountType).trim();
+  if (type === '학생') return [{ label: '학생', rate: 30 }];
+  if (type === '개인사업자/프리랜서') return [{ label: '개인사업자/프리랜서', rate: 20 }];
+  if (type === '단골') return [{ label: '개인사업자/프리랜서 기준', rate: 20 }, { label: '단골', rate: 10 }];
+  if (type === '제휴') return [{ label: '개인사업자/프리랜서 기준', rate: 20 }, { label: '제휴', rate: 20 }];
+  return [];
+}
+
+function calculateVillagePayment(baseAmount, days, discountType = '') {
+  const base = Math.max(0, Number(baseAmount) || 0);
+  const discountRates = [
+    ...discountRatesForType(discountType),
+    ...(longTermDiscountRate(days) ? [{ label: '장기', rate: longTermDiscountRate(days) }] : [])
+  ];
+  const multiplier = discountRates.reduce((acc, item) => acc * Math.max(0, 1 - (item.rate / 100)), 1);
+  const discountedAmount = base * multiplier;
+  const finalVatIncluded = Math.ceil((discountedAmount * 1.1) / 10) * 10;
+  return {
+    baseAmount: base,
+    days: Number(days) || 1,
+    discountType: text(discountType).trim() || '일반',
+    discountRates,
+    discountMultiplier: multiplier,
+    discountedAmount,
+    finalVatIncluded
+  };
+}
+
+function discountLabel(payment = {}) {
+  if (!Array.isArray(payment.discountRates) || !payment.discountRates.length) return '할인 없음';
+  return payment.discountRates.map((item) => `${item.label}${item.rate}%`).join(' × ');
+}
+
+function parseGvizTable(textBody = '') {
+  const raw = text(textBody);
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end < start) throw new Error('Invalid gviz response');
+  const parsed = JSON.parse(raw.slice(start, end + 1));
+  const cols = parsed?.table?.cols || [];
+  const rows = parsed?.table?.rows || [];
+  return rows.map((row) => {
+    const out = {};
+    (row.c || []).forEach((cell, index) => {
+      const key = cols[index]?.label || cols[index]?.id || String(index);
+      out[key] = cell?.f ?? cell?.v ?? '';
+    });
+    return out;
+  });
+}
+
+async function fetchGvizRows(config = {}, sheet, tq) {
+  const fetchImpl = config.fetchImpl || fetch;
+  const response = await fetchImpl(buildGvizUrl(sheet, tq), {
+    signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
+  });
+  const body = await response.text();
+  if (!response.ok) throw new Error(`GViz lookup failed HTTP ${response.status}: ${body.slice(0, 500)}`);
+  return parseGvizTable(body);
+}
+
+async function fetchGasSearch(config = {}, sheet, col, query) {
+  const data = await fetchReadOnlyJson(buildGasReadUrl(config.gasApiUrl || DEFAULT_GAS_API_URL, config.sheetApiKey || DEFAULT_SHEET_API_KEY, {
+    action: 'search',
+    sheet,
+    col,
+    query
+  }), {
+    fetchImpl: config.fetchImpl || fetch,
+    timeoutMs: 30000
+  });
+  return Array.isArray(data?.results) ? data.results : [];
+}
+
+function extractTradeIdsFromFollowUp(row = {}) {
+  const combined = followUpCombinedText(row);
+  const ids = [];
+  for (const match of combined.matchAll(/\b\d{6}-\d{3}\b/g)) {
+    const before = combined.slice(Math.max(0, match.index - 3), match.index).toUpperCase();
+    if (before === 'RQ-') continue;
+    ids.push(match[0]);
+  }
+  return Array.from(new Set(ids)).slice(0, 4);
+}
+
+function shouldCalculateForFollowUp(row = {}) {
+  const type = String(row.type || '');
+  if (['quote_send', 'tax_invoice', 'contract_document', 'payment_check', 'price_review'].includes(type)) return true;
+  return /(계약서|견적서|세금계산|거래명세|결제|금액|정산|서류)/.test(followUpCombinedText(row));
+}
+
+async function fetchSetMasterPrice(config = {}, name = '') {
+  const query = text(name).trim();
+  if (!query) return null;
+  const results = await fetchGasSearch(config, '세트마스터', 1, query);
+  const rows = results.map((entry) => Array.isArray(entry?.data) ? entry.data : []);
+  const exact = rows.filter((row) => text(row[0]).trim() === query && parseNumber(row[6], 0) > 0);
+  const exactStandalone = exact.find((row) => !text(row[1]).trim());
+  const chosen = exactStandalone || exact[0] || rows.find((row) => parseNumber(row[6], 0) > 0);
+  if (!chosen) return null;
+  return {
+    name: text(chosen[0]).trim() || query,
+    price: parseNumber(chosen[6], 0)
+  };
+}
+
+async function buildContractCalculation(config = {}, tradeId = '') {
+  const [contractRows, scheduleRows] = await Promise.all([
+    fetchGasSearch(config, '계약마스터', 1, tradeId),
+    fetchGasSearch(config, '스케줄상세', 2, tradeId)
+  ]);
+  const contract = Array.isArray(contractRows?.[0]?.data) ? contractRows[0].data : [];
+  const schedule = scheduleRows.map((entry) => Array.isArray(entry?.data) ? entry.data : []).filter((row) => row.length);
+  if (!contract.length || !schedule.length) return null;
+  const first = schedule.find((row) => row[5] && row[7]) || schedule[0];
+  const days = calcRentalDaysForQuote(first[5], first[6], first[7], first[8]);
+  const pricedItems = schedule
+    .map((row) => ({
+      name: text(row[3] || row[2]).trim(),
+      qty: parseNumber(row[4], 1) || 1,
+      price: parseNumber(row[11], 0)
+    }))
+    .filter((item) => item.name && item.price > 0);
+  const baseAmount = pricedItems.reduce((sum, item) => sum + (item.qty * item.price * days), 0);
+  if (!baseAmount) return {
+    kind: 'contract',
+    tradeId,
+    customer: text(contract[1]).trim(),
+    error: 'priced_schedule_rows_not_found'
+  };
+  const payment = calculateVillagePayment(baseAmount, days, contract[10] || '일반');
+  return {
+    kind: 'contract',
+    tradeId,
+    customer: text(contract[1]).trim(),
+    phone: text(contract[2]).trim(),
+    status: text(contract[9]).trim(),
+    discountType: text(contract[10]).trim() || '일반',
+    period: `${normalizeDatePart(first[5])} ${normalizeTimePart(first[6])} ~ ${normalizeDatePart(first[7])} ${normalizeTimePart(first[8])}`.replace(/\s+/g, ' ').trim(),
+    pricedItems,
+    payment
+  };
+}
+
+async function fetchConfirmRequestRows(config = {}, reqID = '') {
+  const tq = `SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE A='${String(reqID).replace(/'/g, "\\'")}' LIMIT 30`;
+  return fetchGvizRows(config, '확인요청', tq);
+}
+
+async function buildConfirmRequestCalculation(config = {}, reqID = '') {
+  const rows = await fetchConfirmRequestRows(config, reqID);
+  if (!rows.length) return null;
+  const first = rows.find((row) => row['반출일'] || row['반납일']) || rows[0];
+  const days = calcRentalDaysForQuote(first['반출일'], first['반출시간'], first['반납일'], first['반납시간']);
+  const items = [];
+  const unresolved = [];
+  for (const row of rows) {
+    const name = text(row['장비or세트명']).trim();
+    if (!name) continue;
+    const qty = parseNumber(row['수량'], 1) || 1;
+    let priceInfo = null;
+    try { priceInfo = await fetchSetMasterPrice(config, name); } catch {}
+    if (priceInfo?.price > 0) {
+      items.push({
+        name,
+        qty,
+        price: priceInfo.price,
+        result: text(row['결과']).trim(),
+        detail: text(row['상세']).trim()
+      });
+    } else {
+      unresolved.push({
+        name,
+        qty,
+        result: text(row['결과']).trim(),
+        detail: text(row['상세']).trim()
+      });
+    }
+  }
+  const baseAmount = items.reduce((sum, item) => sum + (item.qty * item.price * days), 0);
+  const payment = calculateVillagePayment(baseAmount, days, first['할인유형'] || '일반');
+  return {
+    kind: 'confirm_request',
+    reqID,
+    customer: text(first['예약자명']).trim(),
+    phone: text(first['연락처']).trim(),
+    discountType: text(first['할인유형']).trim() || '일반',
+    period: `${normalizeDatePart(first['반출일'])} ${normalizeTimePart(first['반출시간'])} ~ ${normalizeDatePart(first['반납일'])} ${normalizeTimePart(first['반납시간'])}`.replace(/\s+/g, ' ').trim(),
+    pricedItems: items,
+    unresolvedItems: unresolved,
+    payment: baseAmount ? payment : null,
+    availabilityLines: rows.map((row) => `${text(row['장비or세트명']).trim()}: ${text(row['결과']).trim()} ${text(row['상세']).trim()}`.trim()).filter(Boolean)
+  };
+}
+
+function formatCalculationLine(calc = {}) {
+  if (calc.kind === 'contract') {
+    if (calc.error) return `거래 ${calc.tradeId}: 금액 계산 실패(${calc.error})`;
+    return `거래 ${calc.tradeId}: 정가 ${formatMoney(calc.payment.baseAmount)} → 할인 후 ${formatMoney(calc.payment.discountedAmount)} → VAT 포함 ${formatMoney(calc.payment.finalVatIncluded)} (${calc.payment.days}일, ${discountLabel(calc.payment)})`;
+  }
+  if (calc.kind === 'confirm_request') {
+    const unresolved = (calc.unresolvedItems || []).map((item) => `${item.name} x${item.qty}`).join(', ');
+    if (!calc.payment) return `RQ ${calc.reqID}: 계산 가능한 단가 없음${unresolved ? ` / 미계산 ${unresolved}` : ''}`;
+    return `RQ ${calc.reqID}: 계산 가능 항목 정가 ${formatMoney(calc.payment.baseAmount)} → VAT 포함 ${formatMoney(calc.payment.finalVatIncluded)} (${calc.payment.days}일, ${discountLabel(calc.payment)})${unresolved ? ` / 미계산 ${unresolved}` : ''}`;
+  }
+  return '';
+}
+
+function buildCalculationPayload(calculations = []) {
+  const lines = calculations.map(formatCalculationLine).filter(Boolean);
+  const unresolved = calculations
+    .flatMap((calc) => calc.unresolvedItems || [])
+    .map((item) => `${item.name} x${item.qty}`);
+  const totalVatIncluded = calculations.reduce((sum, calc) => sum + (calc.payment?.finalVatIncluded || 0), 0);
+  return {
+    calculations,
+    lines,
+    unresolved,
+    totalVatIncluded: totalVatIncluded || null
+  };
+}
+
+export async function enrichFollowUpRowWithOperationalCalculations(config = {}, row = {}) {
+  if (!row?.id && !row?.follow_up_key) return row;
+  if (!shouldCalculateForFollowUp(row)) return row;
+  if (row.payload?.operational_calculation?.lines?.length) return row;
+
+  const tradeIds = extractTradeIdsFromFollowUp(row);
+  const reqIDs = extractConfirmRequestIds(followUpCombinedText(row));
+  if (!tradeIds.length && !reqIDs.length) return row;
+
+  const calculations = [];
+  for (const tradeId of tradeIds.slice(0, 3)) {
+    try {
+      const calc = await buildContractCalculation(config, tradeId);
+      if (calc) calculations.push(calc);
+    } catch (error) {
+      calculations.push({ kind: 'contract', tradeId, error: error.message });
+    }
+  }
+  for (const reqID of reqIDs.slice(0, 3)) {
+    try {
+      const calc = await buildConfirmRequestCalculation(config, reqID);
+      if (calc) calculations.push(calc);
+    } catch (error) {
+      calculations.push({ kind: 'confirm_request', reqID, error: error.message });
+    }
+  }
+  if (!calculations.length) return row;
+
+  const calculationPayload = buildCalculationPayload(calculations);
+  const calcText = calculationPayload.lines.join('\n');
+  const unresolvedText = calculationPayload.unresolved.length
+    ? `\n미계산/확인 필요: ${calculationPayload.unresolved.join(', ')}`
+    : '';
+  const recommended = [
+    calcText ? `계산 결과를 기준으로 서류/계약서/견적서 금액을 확인하세요.\n${calcText}${unresolvedText}` : '',
+    row.recommended_action
+  ].filter(Boolean).join('\n');
+
+  return {
+    ...row,
+    summary: row.summary,
+    recommended_action: recommended || row.recommended_action,
+    evidence: Array.from(new Set([
+      ...(Array.isArray(row.evidence) ? row.evidence.map(text).filter(Boolean) : []),
+      ...calculationPayload.lines
+    ])).slice(0, 12),
+    payload: {
+      ...(row.payload && typeof row.payload === 'object' ? row.payload : {}),
+      operational_calculation: calculationPayload
+    }
+  };
+}
+
 function slackTypeLabel(type = '') {
   const labels = {
     reply_needed: '답변 필요',
@@ -958,6 +1338,34 @@ function formatSlackAgentMention(value = '') {
   return mention;
 }
 
+function formatSlackCalculationBlock(row = {}) {
+  const calc = row.payload?.operational_calculation;
+  if (!calc?.lines?.length) return '';
+  const lines = calc.lines.map((line) => `• ${truncateSlackText(line, 260)}`);
+  if (calc.totalVatIncluded) {
+    lines.push(`• 합계 기준 VAT 포함 ${formatMoney(calc.totalVatIncluded)}`);
+  }
+  return lines.join('\n');
+}
+
+function formatSlackRecommendation(row = {}) {
+  const calc = row.payload?.operational_calculation;
+  const lines = [];
+  if (calc?.lines?.length) {
+    lines.push('1. 위 계산 결과와 계약서/견적서 실제 파일 금액을 대조');
+    if (calc.unresolved?.length) {
+      lines.push(`2. 미계산/미등록 항목 확인: ${calc.unresolved.join(', ')}`);
+      lines.push('3. 확인된 파일만 고객에게 발송');
+    } else {
+      lines.push('2. 금액이 맞으면 파일 발송');
+      lines.push('3. 발송 후 완료 처리');
+    }
+  }
+  const original = bulletizeForSlack(row.recommended_action, { limit: calc?.lines?.length ? 2 : 4, maxLine: 220 });
+  if (original) lines.push(original);
+  return lines.join('\n') || bulletizeForSlack(row.recommended_action, { limit: 4, maxLine: 220 });
+}
+
 export function buildSlackFollowUpMessage(row = {}, options = {}) {
   const route = options.route || routeFollowUpToSlack(row, options.config || {});
   const typeLabel = slackTypeLabel(row.type);
@@ -968,7 +1376,9 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
   const dashboardUrl = text(options.dashboardUrl || options.config?.slackDashboardUrl || '').trim();
   const draft = text(row.suggested_reply_draft || '').trim();
   const evidence = Array.isArray(row.evidence) ? row.evidence.map(text).filter(Boolean).slice(0, 5) : [];
-  const hermesInstruction = `${agentMention} ${customer} 고객 ${typeLabel} 건 처리해줘. follow_up_id=${row.id || row.follow_up_key || 'unknown'}`;
+  const calculationBlock = formatSlackCalculationBlock(row);
+  const recommendationBlock = formatSlackRecommendation(row);
+  const buttonHelp = `버튼은 ${agentMention} Slack 앱이 받아 로컬 브릿지로 전달합니다. "전송"은 아래 초안 그대로, "수정 후 전송"은 모달에서 고친 문구로 카카오 발송 요청을 넣습니다.`;
   const blocks = [
     {
       type: 'header',
@@ -985,18 +1395,21 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
     }
   ];
   if (row.summary) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*요약*\n${truncateSlackText(row.summary, 1800)}` } });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*👀 요약*\n${bulletizeForSlack(row.summary, { limit: 5, maxLine: 240 }) || truncateSlackText(row.summary, 1000)}` } });
   }
-  if (row.recommended_action) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*추천 조치*\n${truncateSlackText(row.recommended_action, 1800)}` } });
+  if (calculationBlock) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🧮 계산*\n${truncateSlackText(calculationBlock, 1800)}` } });
+  }
+  if (recommendationBlock) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*➡️ 추천 조치*\n${truncateSlackText(recommendationBlock, 1800)}` } });
   }
   if (draft) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*답변 초안*\n${codeBlockForSlack(draft, 1800)}` } });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 답변 초안*\n${codeBlockForSlack(draft, 1800)}` } });
   }
-  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*헤이빌리 호출문*\n${truncateSlackText(hermesInstruction, 600)}` } });
   if (evidence.length) {
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: truncateSlackText(`근거: ${evidence.join(' / ')}`, 1800) }] });
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: truncateSlackText(`📌 근거: ${evidence.join(' / ')}`, 1800) }] });
   }
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: truncateSlackText(`🤖 ${buttonHelp}`, 700) }] });
   const actionElements = [
     { type: 'button', text: { type: 'plain_text', text: '전송' }, style: 'primary', action_id: 'village_followup_send', value: String(row.id || '') },
     { type: 'button', text: { type: 'plain_text', text: '수정 후 전송' }, action_id: 'village_followup_edit_send', value: String(row.id || '') },
@@ -1015,8 +1428,7 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
   return {
     channel: route.channel,
     text: `[${typeLabel}] ${row.customer_name || ''} ${row.title || ''}`.trim(),
-    blocks,
-    hermesInstruction
+    blocks
   };
 }
 
@@ -1111,9 +1523,10 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
     || row.slack_delivery_status === 'delivered'
     || row.payload?.slack_delivery?.status === 'delivered'
   ) return { skipped: true, reason: 'already_delivered', rowId: row.id };
-  const route = routeFollowUpToSlack(row, config);
+  const enrichedRow = await enrichFollowUpRowWithOperationalCalculations(config, row);
+  const route = routeFollowUpToSlack(enrichedRow, config);
   const channelId = await resolveSlackChannelId(route.channel, config);
-  const message = buildSlackFollowUpMessage(row, { route, config });
+  const message = buildSlackFollowUpMessage(enrichedRow, { route, config });
   const posted = await slackApi(config, 'chat.postMessage', {
     channel: channelId,
     text: message.text,
@@ -1131,6 +1544,10 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
       delivered_at: new Date().toISOString(),
       error: null
     }
+  }, {
+    summary: enrichedRow.summary,
+    recommended_action: enrichedRow.recommended_action,
+    evidence: enrichedRow.evidence
   });
   return { ok: true, rowId: row.id, route, channelId, ts: posted.ts, updated };
 }
