@@ -18,6 +18,12 @@ test('Slack follow-up delivery routes to the three agent channels', () => {
   assert.match(worker, /chat\.postMessage/);
 });
 
+test('Live worker loads Hermes Slack token before delivering follow-up cards', () => {
+  const processOneJob = worker.match(/export async function processOneJob[\s\S]*?const config = requireConfig\(\);/)?.[0] || '';
+  assert.match(processOneJob, /\.hermes\/\.env/);
+  assert.match(processOneJob, /\.\.\/kakao-dom-bridge\/\.env/);
+});
+
 test('Slack follow-up schema has delivery and action columns', () => {
   assert.match(schema, /slack_delivery_status/);
   assert.match(schema, /slack_action_status/);

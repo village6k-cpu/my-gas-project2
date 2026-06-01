@@ -3265,6 +3265,7 @@ export async function processManualSend({ customerName = '', roomTitle = '', tex
 }
 
 export async function processOneJob({ dryRun = false, claim = true, fakeDecisionPath = '' } = {}) {
+  loadEnvFile(path.resolve(process.env.HOME || '', '.hermes/.env'));
   loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
   loadEnvFile(path.resolve(__dirname, '.env'));
   const config = requireConfig();
