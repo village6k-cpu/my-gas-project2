@@ -9,6 +9,14 @@
     bridgeUrl: 'http://127.0.0.1:8787/events',
     minSilenceMs: 1500,
     maxTextLength: 280,
+    topRowsSnapshotLimit: 30,
+    topRowsPostLimit: 30,
+    topRowsBackstopIntervalMs: 60000,
+    deepBackstopEnabled: true,
+    deepBackstopIntervalMs: 600000,
+    deepBackstopStartupDelayMs: 30000,
+    deepBackstopMaxRows: 80,
+    deepBackstopStepDelayMs: 300,
     debug: false
   };
 
@@ -18,12 +26,16 @@
     observer: null,
     heartbeatTimer: null,
     topRowPollTimer: null,
+    deepBackstopTimer: null,
+    deepBackstopStartupTimer: null,
     snapshotTimer: null,
     initialScanTimer: null,
     urlWatchTimer: null,
     lastUrl: location.href,
     started: false,
-    lastTopRowsSignature: null
+    lastTopRowsSignature: null,
+    lastTopRowsBackstopAt: 0,
+    deepBackstopRunning: false
   };
 
   function log(...args) {
@@ -35,6 +47,13 @@
     const path = location.pathname;
     const isKakaoManagerHost = host === 'business.kakao.com' || host === 'center-pf.kakao.com';
     return isKakaoManagerHost && (/^\/_[^/]+\/chats(?:\/|$)/.test(path) || /^\/_chats(?:\/|$)/.test(path));
+  }
+
+  function isKakaoMainChatListPage() {
+    const host = location.hostname;
+    const path = location.pathname;
+    const isKakaoManagerHost = host === 'business.kakao.com' || host === 'center-pf.kakao.com';
+    return isKakaoManagerHost && (/^\/_[^/]+\/chats\/?$/.test(path) || /^\/_chats\/?$/.test(path));
   }
 
   function loadConfig() {
@@ -70,10 +89,9 @@
 
   function nearestChatRow(el) {
     if (!el || !(el instanceof Element)) return null;
+    const structuralRow = el.closest('[role="listitem"], [role="row"], li');
+    if (structuralRow) return structuralRow;
     return el.closest([
-      '[role="listitem"]',
-      '[role="row"]',
-      'li',
       '[class*="chat"]',
       '[class*="Chat"]',
       '[class*="talk"]',
@@ -242,6 +260,7 @@
   }
 
   function chatRowCandidates() {
+    const seenRows = new Set();
     return Array.from(document.querySelectorAll([
       '[role="listitem"]',
       '[role="row"]',
@@ -258,6 +277,11 @@
         const rect = row.getBoundingClientRect?.();
         return { row, text, top: rect ? rect.top : Number.POSITIVE_INFINITY, left: rect ? rect.left : Number.POSITIVE_INFINITY };
       })
+      .filter(({ row }) => {
+        if (seenRows.has(row)) return false;
+        seenRows.add(row);
+        return true;
+      })
       .filter(({ row, text, top }) => text && text.length >= 4 && text.length <= 220 && top > 0 && !isPageContainerLike(row, text));
   }
 
@@ -266,7 +290,7 @@
     return rows[0] || null;
   }
 
-  function topRowsSnapshot(limit = 12) {
+  function topRowsSnapshot(limit = STATE.config.topRowsSnapshotLimit || 30) {
     const seen = new Set();
     const rows = [];
     for (const item of chatRowCandidates().sort((a, b) => (a.top - b.top) || (a.left - b.left))) {
@@ -284,6 +308,57 @@
       if (rows.length >= limit) break;
     }
     return rows;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function chatListScrollContainer() {
+    const candidates = [
+      document.scrollingElement,
+      ...Array.from(document.querySelectorAll('main, section, [role="main"], [role="list"], div, ul'))
+    ].filter(Boolean)
+      .filter((el) => el.scrollHeight > el.clientHeight + 80 && isVisible(el));
+
+    return candidates
+      .map((el) => {
+        const rowsInside = chatRowCandidates().filter((item) => el === document.scrollingElement || el.contains(item.row)).length;
+        return { el, score: rowsInside * 1000 + Math.min(el.clientHeight || 0, 1000) };
+      })
+      .sort((a, b) => b.score - a.score)[0]?.el || document.scrollingElement;
+  }
+
+  async function runDeepBackstopSweep(reason = 'deep_backstop') {
+    if (!STATE.config.enabled || !STATE.config.deepBackstopEnabled || STATE.deepBackstopRunning) return;
+    if (!isKakaoMainChatListPage()) return;
+    const scroller = chatListScrollContainer();
+    if (!scroller) return;
+
+    STATE.deepBackstopRunning = true;
+    const originalTop = scroller.scrollTop;
+    const seen = new Set();
+    let posted = 0;
+    try {
+      for (let step = 0; step < 20 && posted < STATE.config.deepBackstopMaxRows; step += 1) {
+        const rows = topRowsSnapshot(STATE.config.topRowsSnapshotLimit || 30);
+        for (const row of rows) {
+          if (posted >= STATE.config.deepBackstopMaxRows) break;
+          if (seen.has(row.signature)) continue;
+          seen.add(row.signature);
+          posted += 1;
+          postEvent(createEvent(row.row, 'top_rows_backstop', row.text));
+        }
+        const nextTop = Math.min(scroller.scrollTop + Math.max(240, Math.floor(scroller.clientHeight * 0.85)), scroller.scrollHeight - scroller.clientHeight);
+        if (!Number.isFinite(nextTop) || nextTop <= scroller.scrollTop + 4) break;
+        scroller.scrollTop = nextTop;
+        await sleep(STATE.config.deepBackstopStepDelayMs);
+      }
+      log(reason, 'posted rows', posted);
+    } finally {
+      scroller.scrollTop = originalTop;
+      STATE.deepBackstopRunning = false;
+    }
   }
 
   function diagnosticRows(rows) {
@@ -339,12 +414,15 @@
         previousRows = currentRows;
         return;
       }
-      if (signature === STATE.lastTopRowsSignature) return;
-      const changed = changedRows(previousRows, currentRows);
+      const now = Date.now();
+      const backstopDue = now - STATE.lastTopRowsBackstopAt >= STATE.config.topRowsBackstopIntervalMs;
+      if (signature === STATE.lastTopRowsSignature && !backstopDue) return;
+      const changed = signature === STATE.lastTopRowsSignature ? [] : changedRows(previousRows, currentRows);
       const unreadBackstop = currentRows.filter((row) => hasUnreadSignal(row.row, row.text));
+      const readBackstop = backstopDue ? currentRows : [];
       const toPost = [];
       const seen = new Set();
-      for (const row of [...changed, ...unreadBackstop].slice(0, 12)) {
+      for (const row of [...changed, ...unreadBackstop, ...readBackstop].slice(0, STATE.config.topRowsPostLimit || 30)) {
         const key = row.signature;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -352,12 +430,21 @@
       }
       STATE.lastTopRowsSignature = signature;
       previousRows = currentRows;
+      if (backstopDue) STATE.lastTopRowsBackstopAt = now;
       const changedKeys = new Set(changed.map((row) => row.signature));
       for (const row of toPost) {
         const key = row.signature;
         postEvent(createEvent(row.row, changedKeys.has(key) ? 'top_row_changed' : 'top_rows_backstop', row.text));
       }
     }, 2000);
+  }
+
+  function startDeepBackstop() {
+    if (STATE.deepBackstopTimer) window.clearInterval(STATE.deepBackstopTimer);
+    if (STATE.deepBackstopStartupTimer) window.clearTimeout(STATE.deepBackstopStartupTimer);
+    if (!STATE.config.deepBackstopEnabled) return;
+    STATE.deepBackstopStartupTimer = window.setTimeout(() => runDeepBackstopSweep('deep_backstop_startup'), STATE.config.deepBackstopStartupDelayMs);
+    STATE.deepBackstopTimer = window.setInterval(() => runDeepBackstopSweep('deep_backstop_interval'), STATE.config.deepBackstopIntervalMs);
   }
 
   function startObserver() {
@@ -415,12 +502,17 @@
     }
     if (STATE.heartbeatTimer) window.clearInterval(STATE.heartbeatTimer);
     if (STATE.topRowPollTimer) window.clearInterval(STATE.topRowPollTimer);
+    if (STATE.deepBackstopTimer) window.clearInterval(STATE.deepBackstopTimer);
+    if (STATE.deepBackstopStartupTimer) window.clearTimeout(STATE.deepBackstopStartupTimer);
     if (STATE.snapshotTimer) window.clearTimeout(STATE.snapshotTimer);
     if (STATE.initialScanTimer) window.clearTimeout(STATE.initialScanTimer);
     STATE.heartbeatTimer = null;
     STATE.topRowPollTimer = null;
+    STATE.deepBackstopTimer = null;
+    STATE.deepBackstopStartupTimer = null;
     STATE.snapshotTimer = null;
     STATE.initialScanTimer = null;
+    STATE.deepBackstopRunning = false;
     STATE.started = false;
     if (['replaced_by_new_content_script', 'pagehide', 'beforeunload'].includes(reason) && STATE.urlWatchTimer) {
       window.clearInterval(STATE.urlWatchTimer);
@@ -451,6 +543,7 @@
     STATE.started = true;
     startObserver();
     startTopRowPolling();
+    startDeepBackstop();
     startHeartbeat();
     STATE.snapshotTimer = window.setTimeout(() => postTopRowsSnapshot('top_rows_snapshot'), 1500);
     postEvent({

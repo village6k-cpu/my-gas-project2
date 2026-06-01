@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node dev-server.mjs",
-    "check": "node --test api/follow-ups.test.mjs && node --check api/follow-ups.js && node --check api/operations.js && node --check dev-server.mjs"
+    "check": "node --test api/*.test.mjs && node --check api/follow-ups.js && node --check api/operations.js && node --check api/slack-actions.js && node --check dev-server.mjs"
   },
   "engines": {
     "node": ">=20"

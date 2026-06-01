@@ -34,7 +34,16 @@ load_env() {
   export MAX_WAIT_MS="${MAX_WAIT_MS:-180000}"
   export PROCESS_INITIAL_SCAN="${PROCESS_INITIAL_SCAN:-false}"
   export WORKER_TIMEOUT_MS="${WORKER_TIMEOUT_MS:-240000}"
+  export HERMES_WORKER_TIMEOUT_MS="${HERMES_WORKER_TIMEOUT_MS:-$WORKER_TIMEOUT_MS}"
   export SUPABASE_TIMEOUT_MS="${SUPABASE_TIMEOUT_MS:-7000}"
+  export SUPABASE_RECOVERY_ENABLED="${SUPABASE_RECOVERY_ENABLED:-true}"
+  export SUPABASE_RECOVERY_INTERVAL_MS="${SUPABASE_RECOVERY_INTERVAL_MS:-300000}"
+  export SUPABASE_RECOVERY_BATCH_SIZE="${SUPABASE_RECOVERY_BATCH_SIZE:-2}"
+  export SUPABASE_RECOVERY_LOOKBACK_HOURS="${SUPABASE_RECOVERY_LOOKBACK_HOURS:-36}"
+  export SUPABASE_RECOVERY_ERROR_RETRY_MS="${SUPABASE_RECOVERY_ERROR_RETRY_MS:-900000}"
+  export SUPABASE_RECOVERY_MAX_ATTEMPTS="${SUPABASE_RECOVERY_MAX_ATTEMPTS:-2}"
+  export KAKAO_TAB_CLEANUP_ENABLED="${KAKAO_TAB_CLEANUP_ENABLED:-true}"
+  export KAKAO_TAB_CLEANUP_INTERVAL_MS="${KAKAO_TAB_CLEANUP_INTERVAL_MS:-120000}"
   export QUEUE_DIR="${QUEUE_DIR:-$BRIDGE_DIR/queue}"
   export VILLAGE_AI_WORKER_CMD="${VILLAGE_AI_WORKER_CMD:-$WORKER_CMD}"
   export VILLAGE_KAKAO_CHROME_DIR="${VILLAGE_KAKAO_CHROME_DIR:-$HOME/.village-kakao-chrome}"
@@ -114,6 +123,10 @@ health() {
   curl -sS --max-time 3 "http://127.0.0.1:${PORT}/health"
 }
 
+post_bridge_json() {
+  curl -sS --max-time "${2:-900}" -X POST "http://127.0.0.1:${PORT}$1"
+}
+
 chrome_automation_profile_running() {
   local escaped_profile
   escaped_profile="$(printf '%s' "$VILLAGE_KAKAO_CHROME_DIR" | sed 's/[][^$.*/]/\\&/g')"
@@ -165,7 +178,7 @@ chrome_devtools_close_non_chat_kakao_tabs() {
   chrome_devtools_ready || return 0
   local ids
   ids="$(curl -sS --max-time 2 "$(chrome_devtools_url)/json/list" \
-    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); for (const t of tabs) { const url = t.url || ""; const isKakao = /^https:\/\/(business|center-pf)\.kakao\.com\//.test(url); const isChat = /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats/.test(url); if (t.type === "page" && t.id && isKakao && !isChat) console.log(t.id); } });')"
+    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); for (const t of tabs) { const url = t.url || ""; const isKakao = /^https:\/\/(business|center-pf)\.kakao\.com\//.test(url); const isMainChatList = /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats(?:[?#]|$)/.test(url); if (t.type === "page" && t.id && isKakao && !isMainChatList) console.log(t.id); } });')"
   for id in $ids; do
     curl -sS --max-time 2 -X PUT "$(chrome_devtools_url)/json/close/${id}" >/dev/null \
       || curl -sS --max-time 2 "$(chrome_devtools_url)/json/close/${id}" >/dev/null \
@@ -256,7 +269,16 @@ export DEBOUNCE_MS="\${DEBOUNCE_MS:-60000}"
 export MAX_WAIT_MS="\${MAX_WAIT_MS:-180000}"
 export PROCESS_INITIAL_SCAN="\${PROCESS_INITIAL_SCAN:-false}"
 export WORKER_TIMEOUT_MS="\${WORKER_TIMEOUT_MS:-240000}"
+export HERMES_WORKER_TIMEOUT_MS="\${HERMES_WORKER_TIMEOUT_MS:-\$WORKER_TIMEOUT_MS}"
 export SUPABASE_TIMEOUT_MS="\${SUPABASE_TIMEOUT_MS:-7000}"
+export SUPABASE_RECOVERY_ENABLED="\${SUPABASE_RECOVERY_ENABLED:-true}"
+export SUPABASE_RECOVERY_INTERVAL_MS="\${SUPABASE_RECOVERY_INTERVAL_MS:-300000}"
+export SUPABASE_RECOVERY_BATCH_SIZE="\${SUPABASE_RECOVERY_BATCH_SIZE:-2}"
+export SUPABASE_RECOVERY_LOOKBACK_HOURS="\${SUPABASE_RECOVERY_LOOKBACK_HOURS:-36}"
+export SUPABASE_RECOVERY_ERROR_RETRY_MS="\${SUPABASE_RECOVERY_ERROR_RETRY_MS:-900000}"
+export SUPABASE_RECOVERY_MAX_ATTEMPTS="\${SUPABASE_RECOVERY_MAX_ATTEMPTS:-2}"
+export KAKAO_TAB_CLEANUP_ENABLED="\${KAKAO_TAB_CLEANUP_ENABLED:-true}"
+export KAKAO_TAB_CLEANUP_INTERVAL_MS="\${KAKAO_TAB_CLEANUP_INTERVAL_MS:-120000}"
 export QUEUE_DIR="\${QUEUE_DIR:-\$BRIDGE_DIR/queue}"
 export VILLAGE_AI_WORKER_CMD="\${VILLAGE_AI_WORKER_CMD:-\$WORKER_CMD}"
 export VILLAGE_NODE_BIN="\${VILLAGE_NODE_BIN:-\$NODE_BIN}"
@@ -323,6 +345,7 @@ launch_bridge() {
 
 cmd_start() {
   load_env
+  "$ROOT_DIR/scripts/patch-hermes-village-followup-slack"
   mkdir -p "$QUEUE_DIR"
   if pid_alive; then
     bridge_pid >"$PID_FILE"
@@ -369,11 +392,12 @@ cmd_start() {
 
 cmd_stop() {
   load_env
-  stop_automation_workers
   launchctl bootout "gui/$(id -u)/$LAUNCH_LABEL" >/dev/null 2>&1 || true
   if [[ -f "$PLIST_FILE" ]]; then
     launchctl bootout "gui/$(id -u)" "$PLIST_FILE" >/dev/null 2>&1 || true
   fi
+  # Stop the bridge before child workers so intentional restarts do not create
+  # synthetic "worker exited SIGTERM" failure cards.
   if pid_alive; then
     local pid
     pid="$(bridge_pid)"
@@ -528,7 +552,18 @@ cmd_logs() {
   tail -n "${1:-120}" "$LOG_FILE"
 }
 
+cmd_recover() {
+  load_env
+  post_bridge_json "/maintenance/recover" "${1:-900}"
+}
+
+cmd_cleanup_tabs() {
+  load_env
+  post_bridge_json "/maintenance/cleanup-tabs" 10
+}
+
 cmd_check() {
+  "$ROOT_DIR/scripts/patch-hermes-village-followup-slack"
   (cd "$ROOT_DIR/tools/ai-browser-worker" && npm test && node --check worker.mjs)
   (cd "$ROOT_DIR/tools/kakao-dom-bridge" && npm run check)
   (cd "$ROOT_DIR/apps/follow-up-dashboard" && npm run check)
@@ -545,6 +580,8 @@ Usage:
   scripts/kakao-automation restart   Restart bridge
   scripts/kakao-automation status    Show bridge health and Kakao tabs
   scripts/kakao-automation logs [N]  Show bridge log tail
+  scripts/kakao-automation recover   Run Supabase ready/error job recovery sweep now
+  scripts/kakao-automation cleanup-tabs Close stale individual Kakao chat tabs now
   scripts/kakao-automation check     Run regression checks
 
 Env:
@@ -552,6 +589,8 @@ Env:
   PORT=8787
   AI_WORKER_LIVE=0                    Run worker in dry-run mode
   AI_WORKER_AUTO_SEND=0               Disable safe auto-send
+  SUPABASE_RECOVERY_ENABLED=false     Disable durable DB ready/error sweeper
+  KAKAO_TAB_CLEANUP_ENABLED=false     Disable idle cleanup of individual Kakao chat tabs
   KAKAO_REMOTE_DEBUGGING_PORT=9223    DevTools port for isolated automation Chrome
   CUA_DRIVER_COMMAND=/path/cua-driver Override CUA desktop-control binary
 EOF
@@ -563,6 +602,8 @@ case "${1:-status}" in
   restart) cmd_restart ;;
   status) cmd_status ;;
   logs) cmd_logs "${2:-120}" ;;
+  recover) cmd_recover "${2:-900}" ;;
+  cleanup-tabs) cmd_cleanup_tabs ;;
   check) cmd_check ;;
   *) usage; exit 2 ;;
 esac

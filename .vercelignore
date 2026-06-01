@@ -1,0 +1,7 @@
+.git/
+.DS_Store
+node_modules/
+**/node_modules/
+apps/follow-up-dashboard/.vercel/
+tools/kakao-dom-bridge/.env
+tools/kakao-dom-bridge/queue/

@@ -92,8 +92,8 @@ function combinedFollowUpText(item = {}) {
 }
 
 function extractAmountAnchors(value) {
-  return (text(value).normalize('NFKC').match(/\d+(?:\.\d+)?\s*(?:만원|원)/g) || [])
-    .map((v) => v.replace(/\s+/g, ''));
+  return (text(value).normalize('NFKC').match(/\d[\d,]*(?:\.\d+)?\s*(?:만원|원)/g) || [])
+    .map((v) => v.replace(/[\s,]+/g, ''));
 }
 
 function extractDateAnchors(value) {
@@ -129,6 +129,7 @@ function extractTopicBuckets(combined) {
 function isReservationTask(item = {}, combined = '') {
   const type = String(item.type || '');
   if (type === 'reservation_review') return true;
+  if (type === 'sheet_duplicate_check' && /(확인요청|예약|반출|반납|대여|렌탈)/.test(combined)) return true;
   if (!['reply_needed', 'schedule_check', 'quote_send'].includes(type)) return false;
   return /(예약\s*(?:가능|진행|요청|의사|접수)|대여\s*가능|렌탈\s*가능|대여\s*할\s*수|대여\s*할수|렌탈\s*할\s*수|장비\s*예약)/.test(combined);
 }
@@ -138,12 +139,31 @@ function reservationScopeAnchors(item = {}, combined = '') {
   if (roomKey && roomKey !== 'unknown') return [`room:${roomKey}`];
   const dates = extractDateAnchors(combined);
   if (dates.length) return [...new Set(dates)];
+  const amounts = extractAmountAnchors(combined);
+  if (amounts.length) return [...new Set(amounts)];
+  if (roomKey && roomKey !== 'unknown') return [`room:${roomKey}`];
   return [];
 }
 
 function taskOwnerKey(item = {}, customer = normalizeCustomerForTask(item.customer_name)) {
   const roomKey = normalizeKeyPart(item.room_key || '', 120);
   return roomKey && roomKey !== 'unknown' ? `room:${roomKey}` : customer;
+}
+
+function isUnstablePreviewRoomKey(item = {}) {
+  return /^preview:[a-f0-9]{12,}$/i.test(String(item.room_key || '').trim());
+}
+
+function concreteScopeAnchors(combined = '') {
+  return [...new Set([
+    ...extractDateAnchors(combined),
+    ...extractAmountAnchors(combined)
+  ])];
+}
+
+function isLowInformationDiagnosticItem(item = {}) {
+  const combined = combinedFollowUpText(item);
+  return /(채팅방.*(?:본문|메시지).*확인|카카오\s*대화.*확인|대화\s*최신\s*메시지\s*확인|메시지\s*본문\s*확인|채팅방\s*로드\s*실패|불러오는데\s*실패|본문을\s*읽지\s*못|말풍선\s*텍스트가\s*읽히지|AX\/?CUA|CUA\/?AX|preview\s*text|preview만|미리보기.*판단|대상\s*카카오\s*대화\s*불일치|AI\s*처리\s*보류|자동\s*분류\/시트\s*입력.*중단|화면\s*검증\s*전|화면\s*확인\s*필요|수동\s*확인\s*필요)/i.test(combined);
 }
 
 export function buildDashboardSemanticKey(item) {
@@ -157,26 +177,80 @@ export function buildDashboardSemanticKey(item) {
   ];
   const buckets = extractTopicBuckets(combined);
   if (type === 'quote_send') {
-    return ['semantic', owner, 'quote_send', ...reservationScopeAnchors(item, combined)]
+    const scope = reservationScopeAnchors(item, combined);
+    return ['semantic', owner, 'quote_send', ...scope]
       .map((v) => normalizeKeyPart(v, 120))
       .join(':');
   }
   if (isReservationTask(item, combined)) {
-    return ['semantic', owner, 'reservation_review', ...reservationScopeAnchors(item, combined)]
+    const scope = reservationScopeAnchors(item, combined);
+    return ['semantic', owner, 'reservation_review', ...scope]
       .map((v) => normalizeKeyPart(v, 120))
       .join(':');
   }
   if (buckets.includes('operations_update')) {
-    return ['semantic', owner, 'operations_update'].map((v) => normalizeKeyPart(v, 120)).join(':');
+    return ['semantic', customer, 'operations_update'].map((v) => normalizeKeyPart(v, 120)).join(':');
   }
   if (buckets.includes('discount_policy')) {
     return ['semantic', owner, type, ...new Set(specificAnchors), 'discount_policy'].map((v) => normalizeKeyPart(v, 120)).join(':');
   }
   if (buckets.includes('damage_repair')) {
-    return ['semantic', owner, type, ...new Set(specificAnchors), 'damage_repair'].map((v) => normalizeKeyPart(v, 120)).join(':');
+    return ['semantic', owner, 'damage_repair', ...new Set(specificAnchors)].map((v) => normalizeKeyPart(v, 120)).join(':');
   }
   if (!specificAnchors.length && !buckets.length) return `exact:${normalizeKeyPart(item.follow_up_key || item.id || item.title || '', 200)}`;
   return ['semantic', owner, type, ...new Set(specificAnchors), ...new Set(buckets)].map((v) => normalizeKeyPart(v, 120)).join(':');
+}
+
+function buildDashboardAlternateSemanticKeys(item) {
+  const customer = normalizeCustomerForTask(item.customer_name);
+  const owner = taskOwnerKey(item, customer);
+  const type = normalizeKeyPart(item.type, 60);
+  const combined = combinedFollowUpText(item);
+  const buckets = extractTopicBuckets(combined);
+  const anchors = concreteScopeAnchors(combined);
+  const keys = [];
+  const add = (parts) => keys.push(parts.map((v) => normalizeKeyPart(v, 120)).join(':'));
+  const addPerAnchor = (baseParts) => {
+    if (anchors.length) add([...baseParts, ...anchors]);
+    for (const anchor of anchors) add([...baseParts, anchor]);
+  };
+  const addScoped = (baseParts) => {
+    if (anchors.length) addPerAnchor(baseParts);
+    else add(baseParts);
+  };
+
+  if (buckets.includes('damage_repair')) add(['semantic', owner, 'damage_repair']);
+
+  if (buckets.includes('payment_docs') && ['contract_document', 'quote_send', 'tax_invoice'].includes(type)) {
+    addScoped(['semantic', owner, 'payment_docs']);
+    if (isUnstablePreviewRoomKey(item)) addScoped(['semantic', customer, 'payment_docs']);
+  }
+
+  if (buckets.includes('reservation_review') && !isReservationTask(item, combined)) {
+    addPerAnchor(['semantic', owner, 'reservation_review']);
+    if (isUnstablePreviewRoomKey(item)) addPerAnchor(['semantic', customer, 'reservation_review']);
+  }
+
+  if (type === 'price_review' && anchors.length) {
+    addPerAnchor(['semantic', owner, 'price_review']);
+    if (isUnstablePreviewRoomKey(item)) addPerAnchor(['semantic', customer, 'price_review']);
+  }
+
+  if (!isUnstablePreviewRoomKey(item) || !anchors.length) return Array.from(new Set(keys));
+  if (type === 'quote_send') {
+    addPerAnchor(['semantic', customer, 'quote_send']);
+  }
+  if (isReservationTask(item, combined)) {
+    addPerAnchor(['semantic', customer, 'reservation_review']);
+  }
+  if (!['quote_send', 'price_review'].includes(type)) {
+    addPerAnchor(['semantic', customer, type]);
+  }
+  return Array.from(new Set(keys));
+}
+
+function dashboardSemanticKeys(item) {
+  return Array.from(new Set([buildDashboardSemanticKey(item), ...buildDashboardAlternateSemanticKeys(item)]));
 }
 
 function mergeDuplicateFollowUpItem(primary, duplicate) {
@@ -194,29 +268,74 @@ function mergeDuplicateFollowUpItem(primary, duplicate) {
   return merged;
 }
 
+function mergeLowInformationDiagnosticItems(items) {
+  const diagnosticsByCustomer = new Map();
+  const concreteByCustomer = new Map();
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index] || {};
+    const customer = normalizeCustomerForTask(item.customer_name);
+    const target = isLowInformationDiagnosticItem(item) ? diagnosticsByCustomer : concreteByCustomer;
+    const entries = target.get(customer) || [];
+    entries.push(index);
+    target.set(customer, entries);
+  }
+
+  const remove = new Set();
+  const merged = [...items];
+  for (const [customer, diagnosticIndexes] of diagnosticsByCustomer.entries()) {
+    const concreteIndexes = concreteByCustomer.get(customer) || [];
+    if (!concreteIndexes.length && diagnosticIndexes.length < 2) continue;
+    const targetIndex = concreteIndexes[0] ?? diagnosticIndexes[0];
+    for (const diagnosticIndex of diagnosticIndexes) {
+      if (diagnosticIndex === targetIndex) continue;
+      merged[targetIndex] = mergeDuplicateFollowUpItem(merged[targetIndex], merged[diagnosticIndex]);
+      remove.add(diagnosticIndex);
+    }
+  }
+  return merged.filter((_, index) => !remove.has(index));
+}
+
 export function dedupeFollowUpItems(items) {
   const seen = new Map();
   const deduped = [];
   for (const item of Array.isArray(items) ? items : []) {
-    const key = buildDashboardSemanticKey(item || {});
-    if (seen.has(key)) {
-      const index = seen.get(key);
+    const keys = dashboardSemanticKeys(item || {});
+    const matchedKey = keys.find((key) => seen.has(key));
+    if (matchedKey) {
+      const index = seen.get(matchedKey);
       deduped[index] = mergeDuplicateFollowUpItem(deduped[index], item);
+      for (const key of keys) seen.set(key, index);
       continue;
     }
-    seen.set(key, deduped.length);
+    for (const key of keys) seen.set(key, deduped.length);
     deduped.push(item);
   }
-  return deduped;
+  return mergeLowInformationDiagnosticItems(deduped);
+}
+
+export function duplicateFollowUpIdsForItem(current, candidates) {
+  const targetKeys = new Set(dashboardSemanticKeys(current || {}));
+  const targetCustomer = normalizeCustomerForTask(current?.customer_name);
+  const ids = [];
+  for (const item of Array.isArray(candidates) ? candidates : []) {
+    if (!item?.id) continue;
+    const itemKeys = dashboardSemanticKeys(item || {});
+    const keyMatch = itemKeys.some((key) => targetKeys.has(key));
+    const sameCustomer = normalizeCustomerForTask(item.customer_name) === targetCustomer;
+    const diagnosticMatch = sameCustomer && isLowInformationDiagnosticItem(item);
+    if (keyMatch || diagnosticMatch) ids.push(item.id);
+  }
+  return Array.from(new Set(ids));
 }
 
 export function shouldHideLowValueActiveItem(item) {
   if (item?.status && ['done', 'dismissed'].includes(item.status)) return false;
   if (item?.type !== 'completed_log') return false;
-  if (item?.priority && item.priority !== 'low') return false;
   const combined = combinedFollowUpText(item);
-  return /(감사|감사히|잘\s*썼|잘썼|고맙)/.test(combined)
-    && !/(미반납|파손|입금|결제|변경|추가|확인\s*필요|등록\s*필요)/.test(combined);
+  const hasActionableRecord = /(미반납|누락|분실|파손|손상|수리|입금|결제|변경|추가|확인\s*필요|등록\s*필요|기록\s*필요|메모|특이사항|현장\s*반납|반영)/.test(combined);
+  if (hasActionableRecord) return false;
+  if (/(감사|감사히|잘\s*썼|잘썼|고맙)/.test(combined)) return true;
+  return /(반납\s*완료|반납을\s*완료|수신\s*확인|내부\s*확인|실물\s*반납\s*상태만)/.test(combined);
 }
 
 function summarize(items) {
@@ -287,14 +406,8 @@ export default async function handler(req, res) {
       const currentRows = await supabaseFetch(`${table}?select=${selectFields}&id=eq.${encodeURIComponent(id)}`);
       const current = Array.isArray(currentRows) ? currentRows[0] : null;
       if (!current) return json(res, 404, { error: 'not found' });
-      const targetSemanticKey = buildDashboardSemanticKey(current);
       const candidateRows = await supabaseFetch(`${table}?select=${selectFields}&status=not.in.(done,dismissed)&limit=500&order=created_at.desc`);
-      const duplicateIds = Array.from(new Set(
-        (Array.isArray(candidateRows) ? candidateRows : [])
-          .filter((item) => buildDashboardSemanticKey(item || {}) === targetSemanticKey)
-          .map((item) => item.id)
-          .filter(Boolean)
-      ));
+      const duplicateIds = duplicateFollowUpIdsForItem(current, candidateRows);
       if (!duplicateIds.includes(id)) duplicateIds.push(id);
       const patchBody = status === 'open' ? { status, completed_at: null } : { status };
       const row = await supabaseFetch(`${table}?id=in.(${duplicateIds.map(encodeURIComponent).join(',')})`, {

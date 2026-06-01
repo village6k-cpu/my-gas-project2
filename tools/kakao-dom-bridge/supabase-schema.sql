@@ -54,11 +54,39 @@ create table if not exists public.ai_follow_up_items (
   due_hint text,
   decision_classification text,
   decision_confidence text,
+  slack_channel_name text,
+  slack_channel_id text,
+  slack_message_ts text,
+  slack_thread_ts text,
+  slack_delivery_status text not null default 'pending',
+  slack_delivery_error text,
+  slack_delivered_at timestamptz,
+  slack_action_type text,
+  slack_action_status text not null default 'idle',
+  slack_action_requested_at timestamptz,
+  slack_action_handled_at timestamptz,
+  slack_action_error text,
+  slack_draft_override text,
   payload jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   completed_at timestamptz
 );
+
+alter table public.ai_follow_up_items
+  add column if not exists slack_channel_name text,
+  add column if not exists slack_channel_id text,
+  add column if not exists slack_message_ts text,
+  add column if not exists slack_thread_ts text,
+  add column if not exists slack_delivery_status text not null default 'pending',
+  add column if not exists slack_delivery_error text,
+  add column if not exists slack_delivered_at timestamptz,
+  add column if not exists slack_action_type text,
+  add column if not exists slack_action_status text not null default 'idle',
+  add column if not exists slack_action_requested_at timestamptz,
+  add column if not exists slack_action_handled_at timestamptz,
+  add column if not exists slack_action_error text,
+  add column if not exists slack_draft_override text;
 
 create index if not exists ai_follow_up_items_status_priority_idx
   on public.ai_follow_up_items (status, priority, created_at desc);
@@ -68,6 +96,12 @@ create index if not exists ai_follow_up_items_type_status_idx
 
 create index if not exists ai_follow_up_items_customer_idx
   on public.ai_follow_up_items (customer_name, created_at desc);
+
+create index if not exists ai_follow_up_items_slack_delivery_idx
+  on public.ai_follow_up_items (slack_delivery_status, created_at desc);
+
+create index if not exists ai_follow_up_items_slack_action_idx
+  on public.ai_follow_up_items (slack_action_status, slack_action_requested_at asc);
 
 create or replace function public.set_ai_processing_events_updated_at()
 returns trigger
