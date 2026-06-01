@@ -576,6 +576,8 @@ test('buildHermesPrompt requires sender separation and customer turn clustering'
   assert.match(prompt, /latest customer\/inbound message or a cluster/s);
   assert.match(prompt, /안녕하세요.*27일날.*fx3 가능한가요/s);
   assert.match(prompt, /latest_customer_message_after_last_staff_reply/);
+  assert.match(prompt, /staff-confirmed-unregistered case/);
+  assert.match(prompt, /reservation_inquiry\.confirmed=true/);
   assert.match(prompt, /conversation_turns/);
 });
 
@@ -595,6 +597,48 @@ test('buildSheetAppendPayload refuses writes when latest actionable message is n
     sheet_row_candidate: { item: '소니 FX3 바디세트', customer_name: '홍길동' }
   };
   assert.equal(buildSheetAppendPayload(decision, { apiKey: 'secret' }), null);
+});
+
+test('buildSheetAppendPayload allows staff-confirmed unregistered reservations without a new customer turn', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    classification: 'already_answered',
+    customer: { name: '문치호' },
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      confirmed: true,
+      already_registered: false,
+      rental_start: '2026-06-06',
+      pickup_time: '09:00',
+      rental_end: '2026-06-07',
+      return_time: '18:00',
+      discount_type: '일반',
+      equipment_requested: [
+        { raw_text: 'FX3 바디세트', exact_name_from_set_master: '소니 FX3 바디세트', quantity: 1 }
+      ]
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
+      latest_customer_message_after_last_staff_reply: false,
+      no_auto_reply_sent: true
+    },
+    sheet_row_candidate: {
+      customer_name: '문치호',
+      memo: '재형님 카톡 확정 후 시트 미입력'
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+
+  assert.equal(payload.func, 'insertAndCheckRequest');
+  assert.deepEqual(payload.args.장비, [{ 이름: '소니 FX3 바디세트', 수량: 1 }]);
+  assert.equal(payload.args.예약자명, '문치호');
+  assert.equal(payload.args.비고, '재형님 카톡 확정 후 시트 미입력');
 });
 
 test('buildSheetAppendPayload returns null when AI says not to write', () => {
@@ -1102,6 +1146,8 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'reservation_review' }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, owner_review_required: true }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, reply_decision: { ...baseDecision.reply_decision, text: '네 대여 가능합니다.' } }, { autoSendEnabled: true }).allowed, false);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'faq', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).allowed, true);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
 });
 
 test('isAutoSendEligibleLiveJob allows unread same-day rows and blocks dated/backfill rows from auto-send', () => {
