@@ -1374,7 +1374,9 @@ function classifyGasSheetError(message) {
 }
 
 function formatSheetRequestSummary(payload = {}) {
-  const args = payload.args || {};
+  const args = payload && typeof payload === 'object' && payload.args && typeof payload.args === 'object'
+    ? payload.args
+    : {};
   const equipment = Array.isArray(args.장비)
     ? args.장비.map((item) => `${text(item.이름).trim()} x${item.수량 || 1}`).filter(Boolean).join(', ')
     : '';

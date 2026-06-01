@@ -1242,6 +1242,25 @@ test('enrichFollowUpRowsWithSheetAvailability replaces inspect-RQ card with resu
   assert.doesNotMatch(enriched[0].suggested_reply_draft, /예약 가능하십니다|예약 가능/);
 });
 
+test('enrichFollowUpRowsWithSheetAvailability handles duplicate RQ result without sheet payload', () => {
+  const enriched = enrichFollowUpRowsWithSheetAvailability([], {
+    reqID: 'RQ-260601-001',
+    duplicate: true,
+    results: [
+      { 장비명: '소니 FX3 바디세트', 수량: '1', 결과: '✅ 가용1', 상세: '예약 가능' }
+    ]
+  }, null, { classification: 'reservation', confidence: 'high', customer: { name: '정민주' } }, {
+    id: '22222222-2222-4222-8222-222222222222',
+    room_key: 'preview:jung'
+  });
+
+  assert.equal(enriched.length, 1);
+  assert.equal(enriched[0].customer_name, '정민주');
+  assert.match(enriched[0].summary, /RQ-260601-001/);
+  assert.match(enriched[0].evidence.join('\n'), /✅ 가용1/);
+  assert.equal(enriched[0].payload.sheet_request, null);
+});
+
 test('extractConfirmRequestIds finds unique RQ ids in AI decisions and rows', () => {
   assert.deepEqual(extractConfirmRequestIds({
     reason: '기존 RQ-260531-003 발견',
