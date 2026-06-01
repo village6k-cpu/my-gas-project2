@@ -50,6 +50,7 @@ import {
   filterFollowUpRowsAfterAutoReply,
   filterFollowUpRowsAgainstClosedHistory,
   mergeFollowUpRowsByTopic,
+  upsertFollowUpRows,
   routeFollowUpToSlack,
   enrichFollowUpRowWithOperationalCalculations,
   buildSlackFollowUpMessage,
@@ -1377,10 +1378,12 @@ test('buildSlackFollowUpMessage includes action buttons and compact button help'
   assert.match(JSON.stringify(message.blocks), /핵심/);
   assert.match(JSON.stringify(message.blocks), /최근 대화/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /근거/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /추천 조치/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /라우팅/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /RQ-260531-003/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /헤이빌리/);
-  assert.match(JSON.stringify(message.blocks), /버튼 동작/);
-  assert.match(JSON.stringify(message.blocks), /현재 초안으로 카카오 발송 요청/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /버튼 동작/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /현재 초안으로 카카오 발송 요청/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /대시보드/);
 });
 
@@ -1523,6 +1526,113 @@ test('deliverSlackFollowUpRows posts new rows once and writes delivery metadata'
   assert.ok(requests.some((r) => r.url.includes('chat.postMessage')));
   const patch = requests.find((r) => r.url.includes('supabase.example') && r.init?.method === 'PATCH');
   assert.equal(JSON.parse(patch.init.body).payload.slack_delivery.message_ts, '171111.000100');
+});
+
+test('deliverSlackFollowUpRows updates an existing delivered Slack card instead of reposting', async () => {
+  const requests = [];
+  const config = {
+    slackFollowUpEnabled: true,
+    slackBotToken: 'xoxb-test',
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    slackFetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, channel: 'C123DOC', ts: '171111.000100' })
+      };
+    },
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => init?.method === 'PATCH'
+          ? JSON.stringify([{ id: 'follow-1', payload: { slack_delivery: { status: 'delivered', refreshed_at: 'now' } } }])
+          : JSON.stringify([{ payload: { slack_delivery: { status: 'delivered', channel_id: 'C123DOC', message_ts: '171111.000100' } } }])
+      };
+    }
+  };
+
+  const result = await deliverSlackFollowUpRows(config, [{
+    id: 'follow-1',
+    type: 'contract_document',
+    status: 'open',
+    priority: 'high',
+    title: '서류 발송',
+    customer_name: '홍길동',
+    summary: '요약',
+    payload: {
+      slack_delivery: {
+        status: 'delivered',
+        channel_id: 'C123DOC',
+        message_ts: '171111.000100'
+      }
+    }
+  }]);
+
+  assert.equal(result.results[0].updatedSlack, true);
+  assert.ok(requests.some((r) => r.url.includes('chat.update')));
+  assert.ok(!requests.some((r) => r.url.includes('chat.postMessage')));
+});
+
+test('upsertFollowUpRows merges same conversation into an active row instead of inserting a duplicate', async () => {
+  const requests = [];
+  const existing = {
+    id: 'existing-1',
+    follow_up_key: 'preview:min:최민석:contract_document:payment_docs',
+    room_key: 'preview:min',
+    customer_name: '최민석',
+    type: 'contract_document',
+    status: 'open',
+    priority: 'high',
+    title: '최민석 계약서 파일 발송 요청',
+    summary: '고객이 계약서 파일 발송을 요청했습니다.',
+    recommended_action: '계약서를 확인하세요.',
+    evidence: ['최신 고객 메시지: 계약서 보내주세요'],
+    payload: { slack_delivery: { status: 'delivered', channel_id: 'C123DOC', message_ts: '171111.000100' } }
+  };
+  const config = {
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      if (String(url).includes('status=in.(done,dismissed)')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([]) };
+      }
+      if (String(url).includes('status=not.in.(done,dismissed)')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([existing]) };
+      }
+      if (init.method === 'PATCH') {
+        const patch = JSON.parse(init.body);
+        return { ok: true, status: 200, text: async () => JSON.stringify([{ ...existing, ...patch }]) };
+      }
+      throw new Error(`unexpected request ${init.method || 'GET'} ${url}`);
+    }
+  };
+
+  const result = await upsertFollowUpRows(config, [{
+    follow_up_key: 'preview:min:최민석:payment_check:payment_check',
+    room_key: 'preview:min',
+    customer_name: '최민석',
+    type: 'payment_check',
+    status: 'open',
+    priority: 'high',
+    title: '최민석 V마운트 카드결제 확인',
+    summary: '고객이 V마운트는 카드결제하겠다고 전달했습니다.',
+    recommended_action: '카드결제 상태를 확인하세요.',
+    evidence: ['카카오 최신 고객 메시지: 사장님 V마운트는 카드결제할게용'],
+    payload: { latest_customer_message_cluster: '사장님 V마운트는 카드결제할게용' }
+  }]);
+
+  assert.equal(result.mergedActive, 1);
+  assert.equal(result.rows[0].id, 'existing-1');
+  assert.equal(result.rows[0].type, 'contract_document');
+  assert.match(result.rows[0].summary, /카드결제/);
+  assert.ok(!requests.some((r) => r.init?.method === 'POST'));
 });
 
 test('filterFollowUpRowsAfterAutoReply suppresses reply card after successful auto-send', () => {

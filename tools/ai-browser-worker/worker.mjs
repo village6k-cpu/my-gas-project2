@@ -824,6 +824,94 @@ export function mergeFollowUpRowsByTopic(rows = []) {
   });
 }
 
+function priorityRank(value) {
+  const priority = { urgent: 0, high: 1, normal: 2, low: 3 };
+  return priority[value] ?? 2;
+}
+
+function routeRankForMerge(row = {}) {
+  const type = String(row.type || '');
+  const combined = followUpCombinedText(row);
+  if (['contract_document', 'quote_send', 'tax_invoice'].includes(type) || /(계약|견적|서류|거래명세|세금계산)/.test(combined)) return 0;
+  if (type === 'payment_check' || /(입금|결제|카드|정산|환불|미수)/.test(combined)) return 1;
+  if (['reservation_review', 'schedule_check', 'sheet_duplicate_check'].includes(type) || /(예약|확인요청|가용|반출|반납|대여|렌탈)/.test(combined)) return 2;
+  if (type === 'reply_needed') return 3;
+  return 4;
+}
+
+function mergeFollowUpRowGroup(items = []) {
+  const rows = (Array.isArray(items) ? items : []).filter(Boolean);
+  if (!rows.length) return null;
+  const sorted = rows.slice().sort((a, b) => {
+    const routeDiff = routeRankForMerge(a) - routeRankForMerge(b);
+    if (routeDiff) return routeDiff;
+    return priorityRank(a.priority) - priorityRank(b.priority);
+  });
+  const primary = { ...sorted[0] };
+  const latest = rows[rows.length - 1] || primary;
+  const summaries = rows.map((item) => text(item.summary)).filter(Boolean);
+  const actions = rows.map((item) => text(item.recommended_action)).filter(Boolean);
+  const drafts = rows.map((item) => text(item.suggested_reply_draft)).filter(Boolean);
+  const evidence = rows.flatMap((item) => Array.isArray(item.evidence) ? item.evidence.map(text).filter(Boolean) : []);
+  const latestPayload = [...rows].reverse().find((item) => item.payload && typeof item.payload === 'object')?.payload || {};
+  const primaryPayload = primary.payload && typeof primary.payload === 'object' ? primary.payload : {};
+
+  primary.priority = rows.reduce((best, item) => (
+    priorityRank(item.priority) < priorityRank(best) ? item.priority : best
+  ), primary.priority || 'normal');
+  primary.status = 'open';
+  primary.title = text(primary.title) || text(latest.title);
+  primary.summary = text(latest.summary) || summaries[0] || primary.summary;
+  primary.recommended_action = Array.from(new Set(actions)).slice(0, 3).join('\n') || primary.recommended_action;
+  primary.suggested_reply_draft = drafts[0] || primary.suggested_reply_draft;
+  primary.evidence = Array.from(new Set(evidence)).slice(0, 12);
+  primary.payload = {
+    ...primaryPayload,
+    ...latestPayload,
+    merged_follow_up_items: rows.map((item) => ({
+      id: item.id || null,
+      type: item.type,
+      title: item.title,
+      summary: item.summary,
+      recommended_action: item.recommended_action
+    }))
+  };
+  return primary;
+}
+
+function conversationBundleKey(row = {}) {
+  const customer = normalizeCustomerForTask(row.customer_name || row.customerName);
+  const room = normalizeKeyPart(row.room_key || row.roomKey, 120);
+  if (!customer || customer === 'unknown' || !room || room === 'unknown') return '';
+  const type = String(row.type || '');
+  if (type === 'completed_log') return '';
+  return ['conversation', room, customer].join(':');
+}
+
+function sameConversationBundle(a = {}, b = {}) {
+  const aKey = conversationBundleKey(a);
+  const bKey = conversationBundleKey(b);
+  return Boolean(aKey && bKey && aKey === bKey);
+}
+
+function mergeFollowUpRowsByConversation(rows = []) {
+  const groups = new Map();
+  const passthrough = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const key = conversationBundleKey(row);
+    if (!key) {
+      passthrough.push(row);
+      continue;
+    }
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  const merged = [...groups.values()].map((items) => (
+    items.length > 1 ? mergeFollowUpRowGroup(items) : items[0]
+  )).filter(Boolean);
+  return [...passthrough, ...merged];
+}
+
 function buildStableFollowUpKey({ roomKey, customerName, type, title, summary, recommendedAction, evidence }) {
   const combined = [title, summary, recommendedAction, Array.isArray(evidence) ? evidence.join(' ') : ''].join(' ');
   const rowForKey = { customer_name: customerName, type, title, summary, recommended_action: recommendedAction, evidence };
@@ -916,15 +1004,33 @@ export function buildFollowUpRows(decision, job = {}) {
 export async function upsertFollowUpRows(config, rows) {
   if (!rows.length) return { inserted: 0, rows: [] };
   const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
-  const mergedRows = mergeFollowUpRowsByTopic(rows);
+  const mergedRows = mergeFollowUpRowsByTopic(mergeFollowUpRowsByConversation(rows));
   const filteredRows = await filterFollowUpRowsWithClosedHistory(config, mergedRows);
   if (!filteredRows.length) return { inserted: 0, rows: [], skippedClosed: rows.length };
+  const activeMergeResult = await mergeFollowUpRowsWithActiveHistory(config, filteredRows);
+  const rowsToInsert = activeMergeResult.rowsToInsert || [];
+  if (!rowsToInsert.length) {
+    return {
+      inserted: activeMergeResult.updatedRows.length,
+      rows: activeMergeResult.updatedRows,
+      merged: rows.length - mergedRows.length,
+      skippedClosed: mergedRows.length - filteredRows.length,
+      mergedActive: activeMergeResult.updatedRows.length
+    };
+  }
   const inserted = await supabaseFetch(config, `${table}?on_conflict=follow_up_key`, {
     method: 'POST',
     headers: supabaseHeaders(config, 'resolution=merge-duplicates,return=representation'),
-    body: JSON.stringify(filteredRows)
+    body: JSON.stringify(rowsToInsert)
   });
-  return { inserted: Array.isArray(inserted) ? inserted.length : filteredRows.length, rows: inserted, merged: rows.length - mergedRows.length, skippedClosed: mergedRows.length - filteredRows.length };
+  const insertedRows = Array.isArray(inserted) ? inserted : [];
+  return {
+    inserted: activeMergeResult.updatedRows.length + insertedRows.length,
+    rows: [...activeMergeResult.updatedRows, ...insertedRows],
+    merged: rows.length - mergedRows.length,
+    skippedClosed: mergedRows.length - filteredRows.length,
+    mergedActive: activeMergeResult.updatedRows.length
+  };
 }
 
 function escapeSlackText(value = '') {
@@ -1380,17 +1486,21 @@ function formatSlackCalculationBlock(row = {}) {
   if (!calc?.lines?.length) return '';
   const lines = [];
   for (const line of calc.lines) {
-    const chunks = splitLongMobileLine(line, 56);
-    lines.push(`🧾 ${escapeSlackText(chunks[0] || line)}`);
-    for (const chunk of chunks.slice(1, 4)) {
-      lines.push(`   ${escapeSlackText(chunk)}`);
-    }
-    lines.push('');
+    const raw = text(line);
+    const label = raw.split(':')[0].replace(/^거래\s+/, '거래 ').slice(0, 34);
+    const amount = raw.match(/VAT\s*포함\s*([\d,]+원)/)?.[1] || raw.match(/([\d,]+원)/)?.[1] || '';
+    const unresolved = raw.match(/미계산\s*([^/]+)/)?.[1]?.trim() || '';
+    const compact = [
+      label,
+      amount,
+      unresolved ? `확인 ${unresolved}` : ''
+    ].filter(Boolean).join(' · ');
+    lines.push(`🧾 ${escapeSlackText(compact || raw.slice(0, 70))}`);
   }
   if (calc.totalVatIncluded) {
     lines.push(`💰 합계 VAT 포함 ${formatMoney(calc.totalVatIncluded)}`);
   }
-  return lines.filter((line, index, arr) => line || arr[index - 1]).join('\n').trim();
+  return lines.filter(Boolean).slice(0, 4).join('\n').trim();
 }
 
 function formatSlackRecommendation(row = {}) {
@@ -1515,10 +1625,10 @@ function formatSlackRecentChat(row = {}) {
     .map((message) => {
       const body = cleanSlackChatText(message?.message).replace(/\n+/g, ' / ');
       if (!body) return '';
-      return `• ${slackSpeakerLabel(message?.sender)}: ${escapeSlackText(splitLongMobileLine(body, 58).slice(0, 2).join('\n  '))}`;
+      return `• ${slackSpeakerLabel(message?.sender)}: ${escapeSlackText(splitLongMobileLine(body, 48).slice(0, 1).join('\n  '))}`;
     })
     .filter(Boolean)
-    .slice(-3);
+    .slice(-2);
   if (lines.length) return lines.join('\n\n');
   const latest = cleanSlackChatText(payload.latest_customer_message_cluster || '');
   if (latest) return splitLongMobileLine(latest, 58).slice(0, 3).map((line) => `• 고객: ${escapeSlackText(line)}`).join('\n\n');
@@ -1533,7 +1643,6 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
   const customer = truncateSlackText(row.customer_name || '고객명 미확인', 120);
   const draft = text(row.suggested_reply_draft || '').trim();
   const calculationBlock = formatSlackCalculationBlock(row);
-  const recommendationBlock = formatSlackRecommendation(row);
   const recentChatBlock = formatSlackRecentChat(row);
   const blocks = [
     {
@@ -1541,37 +1650,24 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
       text: { type: 'plain_text', text: title.slice(0, 150), emoji: true }
     },
     {
-      type: 'section',
-      fields: [
-        { type: 'mrkdwn', text: `*고객*\n${customer}` },
-        { type: 'mrkdwn', text: `*분류*\n${truncateSlackText(typeLabel, 80)}` },
-        { type: 'mrkdwn', text: `*우선순위*\n${truncateSlackText(priorityLabel, 80)}` },
-        { type: 'mrkdwn', text: `*라우팅*\n#${truncateSlackText(route.channel, 80)}` }
+      type: 'context',
+      elements: [
+        { type: 'mrkdwn', text: `${customer} · ${truncateSlackText(typeLabel, 80)} · ${truncateSlackText(priorityLabel, 80)}` }
       ]
     }
   ];
-  if (row.summary) {
+  if (row.summary || row.recommended_action || recentChatBlock) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*⚡ 핵심*\n${formatSlackBriefSummary(row)}` } });
   }
   if (recentChatBlock) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 최근 대화*\n${recentChatBlock}` } });
   }
   if (calculationBlock) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🧮 계산*\n${truncateSlackText(calculationBlock, 1800)}` } });
-  }
-  if (recommendationBlock) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*➡️ 추천 조치*\n${truncateSlackText(recommendationBlock, 1800)}` } });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🧮 계산*\n${truncateSlackText(calculationBlock, 1200)}` } });
   }
   if (draft) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 답변 초안*\n${codeBlockForSlack(draft, 1800)}` } });
   }
-  blocks.push({
-    type: 'section',
-    text: {
-      type: 'mrkdwn',
-      text: '*🔘 버튼 동작*\n• 전송: 현재 초안으로 카카오 발송 요청\n\n• 수정 후 전송: 문구 수정창을 연 뒤 발송 요청\n\n• 진행중/완료/무시: 처리판 상태만 변경'
-    }
-  });
   const actionElements = [
     { type: 'button', text: { type: 'plain_text', text: '전송' }, style: 'primary', action_id: 'village_followup_send', value: String(row.id || '') },
     { type: 'button', text: { type: 'plain_text', text: '수정 후 전송' }, action_id: 'village_followup_edit_send', value: String(row.id || '') },
@@ -1673,15 +1769,49 @@ async function mergeFollowUpPayload(config, rowId, payloadPatch = {}, extraPatch
 export async function postSlackFollowUpRow(config = {}, row = {}) {
   if (!row?.id) return { skipped: true, reason: 'missing_follow_up_id' };
   if (row.status && ['done', 'dismissed'].includes(row.status)) return { skipped: true, reason: 'closed_follow_up' };
-  if (
-    row.slack_message_ts
-    || row.slack_delivery_status === 'delivered'
-    || row.payload?.slack_delivery?.status === 'delivered'
-  ) return { skipped: true, reason: 'already_delivered', rowId: row.id };
   const enrichedRow = await enrichFollowUpRowWithOperationalCalculations(config, row);
   const route = routeFollowUpToSlack(enrichedRow, config);
-  const channelId = await resolveSlackChannelId(route.channel, config);
   const message = buildSlackFollowUpMessage(enrichedRow, { route, config });
+
+  const existingDelivery = enrichedRow.payload?.slack_delivery || {};
+  const existingTs = row.slack_message_ts || existingDelivery.message_ts;
+  const existingChannelId = row.slack_channel_id || existingDelivery.channel_id;
+  if (
+    existingTs
+    || row.slack_delivery_status === 'delivered'
+    || existingDelivery.status === 'delivered'
+  ) {
+    if (!existingTs) return { skipped: true, reason: 'already_delivered_missing_ts', rowId: row.id };
+    const channelId = existingChannelId || await resolveSlackChannelId(existingDelivery.channel_name || route.channel, config);
+    const updatedMessage = await slackApi(config, 'chat.update', {
+      channel: channelId,
+      ts: existingTs,
+      text: message.text,
+      blocks: message.blocks,
+      unfurl_links: false,
+      unfurl_media: false
+    });
+    const updated = await mergeFollowUpPayload(config, row.id, {
+      operational_calculation: enrichedRow.payload?.operational_calculation || null,
+      slack_delivery: {
+        ...existingDelivery,
+        status: 'delivered',
+        channel_name: existingDelivery.channel_name || route.channel,
+        channel_id: updatedMessage.channel || channelId,
+        message_ts: existingTs,
+        thread_ts: existingDelivery.thread_ts || existingTs,
+        refreshed_at: new Date().toISOString(),
+        error: null
+      }
+    }, {
+      summary: enrichedRow.summary,
+      recommended_action: enrichedRow.recommended_action,
+      evidence: enrichedRow.evidence
+    });
+    return { ok: true, updatedSlack: true, rowId: row.id, route, channelId, ts: existingTs, updated };
+  }
+
+  const channelId = await resolveSlackChannelId(route.channel, config);
   const posted = await slackApi(config, 'chat.postMessage', {
     channel: channelId,
     text: message.text,
@@ -1756,6 +1886,59 @@ async function filterFollowUpRowsWithClosedHistory(config, rows) {
   const scopedHistory = (Array.isArray(history) ? history : [])
     .filter((row) => customerNames.includes(normalizeKeyPart(row.customer_name, 80)));
   return filterFollowUpRowsAgainstClosedHistory(rows, scopedHistory);
+}
+
+async function mergeFollowUpRowsWithActiveHistory(config, rows) {
+  if (!rows.length) return { rowsToInsert: [], updatedRows: [] };
+  const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
+  const customerNames = new Set(rows.map((row) => normalizeCustomerForTask(row.customer_name)).filter((value) => value && value !== 'unknown'));
+  const roomKeys = new Set(rows.map((row) => normalizeKeyPart(row.room_key, 120)).filter((value) => value && value !== 'unknown'));
+  if (!customerNames.size || !roomKeys.size) return { rowsToInsert: rows, updatedRows: [] };
+
+  const activeRows = await supabaseFetch(config, `${table}?select=*&status=not.in.(done,dismissed)&order=updated_at.desc&limit=1000`, {
+    headers: supabaseHeaders(config)
+  });
+  const scopedActiveRows = (Array.isArray(activeRows) ? activeRows : [])
+    .filter((row) => customerNames.has(normalizeCustomerForTask(row.customer_name)))
+    .filter((row) => roomKeys.has(normalizeKeyPart(row.room_key, 120)));
+
+  const rowsToInsert = [];
+  const updatedRows = [];
+  const activeById = new Map(scopedActiveRows.map((row) => [row.id, row]));
+
+  for (const row of rows) {
+    const match = [...activeById.values()].find((active) => sameConversationBundle(active, row));
+    if (!match?.id) {
+      rowsToInsert.push(row);
+      continue;
+    }
+
+    const merged = mergeFollowUpRowGroup([match, row]);
+    const patch = {
+      type: merged.type,
+      priority: merged.priority,
+      status: 'open',
+      title: merged.title,
+      summary: merged.summary,
+      recommended_action: merged.recommended_action,
+      suggested_reply_draft: merged.suggested_reply_draft,
+      evidence: merged.evidence,
+      blocking_reason: merged.blocking_reason || null,
+      due_hint: merged.due_hint || null,
+      payload: merged.payload
+    };
+    const patched = await supabaseFetch(config, `${table}?id=eq.${encodeURIComponent(match.id)}`, {
+      method: 'PATCH',
+      headers: supabaseHeaders(config, 'return=representation'),
+      body: JSON.stringify(patch)
+    });
+    const updated = Array.isArray(patched) ? patched[0] : patched;
+    if (updated) {
+      activeById.set(match.id, updated);
+      updatedRows.push(updated);
+    }
+  }
+  return { rowsToInsert, updatedRows };
 }
 
 export function filterFollowUpRowsAfterAutoReply(rows = [], autoReplyResult = {}) {
