@@ -863,6 +863,17 @@ export function buildFollowUpRows(decision, job = {}) {
   const allowedTypes = new Set(['reply_needed', 'quote_send', 'tax_invoice', 'schedule_check', 'reservation_review', 'price_review', 'payment_check', 'contract_document', 'return_extension', 'damage_repair', 'sheet_duplicate_check', 'completed_log']);
   const allowedPriorities = new Set(['urgent', 'high', 'normal', 'low']);
   const allowedStatuses = new Set(['open', 'done', 'dismissed']);
+  const conversationSnapshot = {
+    latest_customer_message_cluster: text(decision?.latest_customer_message_cluster).slice(0, 1500),
+    latest_staff_message: text(decision?.latest_staff_message).slice(0, 1000),
+    visible_messages_used: Array.isArray(decision?.visible_messages_used)
+      ? decision.visible_messages_used.slice(-5).map((message) => ({
+          sender: text(message?.sender).slice(0, 80),
+          message: text(message?.message).slice(0, 1200),
+          time: text(message?.time).slice(0, 80) || null
+        })).filter((message) => message.message)
+      : []
+  };
   return items
     .filter((item) => item && typeof item === 'object')
     .filter((item) => !shouldSuppressFollowUpItem(decision, item))
@@ -894,7 +905,10 @@ export function buildFollowUpRows(decision, job = {}) {
         due_hint: text(item.due_hint || item.dueHint).slice(0, 80) || null,
         decision_classification: text(decision?.classification).slice(0, 80),
         decision_confidence: text(decision?.confidence).slice(0, 80),
-        payload: item
+        payload: {
+          ...item,
+          ...conversationSnapshot
+        }
       };
     });
 }
@@ -1392,9 +1406,123 @@ function formatSlackRecommendation(row = {}) {
       lines.push('3. ✅ 발송 후 완료 처리');
     }
   }
-  const original = mobileBulletsForSlack(row.recommended_action, { limit: calc?.lines?.length ? 2 : 5, maxLine: 54, icon: '▫️' });
+  const original = mobileBulletsForSlack(row.recommended_action, { limit: calc?.lines?.length ? 1 : 3, maxLine: 48, icon: '▫️' });
   if (original) lines.push(original);
-  return lines.join('\n\n') || mobileBulletsForSlack(row.recommended_action, { limit: 5, maxLine: 54, icon: '▫️' });
+  return lines.join('\n\n') || mobileBulletsForSlack(row.recommended_action, { limit: 3, maxLine: 48, icon: '▫️' });
+}
+
+function cleanSlackBriefText(value = '') {
+  return text(value)
+    .replace(/\s+/g, ' ')
+    .replace(/^고객[이가은는을\s]*/g, '')
+    .replace(/^카카오(?:\s*화면)?[:：]?\s*/g, '')
+    .replace(/^확인요청\s*(?:조회|결과)?[:：]?\s*/g, '')
+    .replace(/했습니다\.?$/g, '')
+    .replace(/합니다\.?$/g, '')
+    .trim();
+}
+
+function cleanSlackChatText(value = '') {
+  return text(value)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cleanEvidenceChatBody(value = '') {
+  return cleanSlackChatText(value)
+    .replace(/^카카오\s*(?:화면|최신)?[:：]?\s*/g, '')
+    .replace(/^(?:최신\s*)?고객\s*메시지[:：]?\s*/g, '')
+    .replace(/^고객(?:이|은|는)?\s*/g, '')
+    .replace(/^직전\s*직원\s*답변[:：]?\s*/g, '')
+    .replace(/^직원\s*(?:최신|직전)?\s*답변(?:\s*이후)?[:：]?\s*/g, '')
+    .replace(/^[\"'“”‘’]+|[\"'“”‘’]+$/g, '')
+    .replace(/\s+오[전후]\s*\d{1,2}:\d{2}$/g, '')
+    .trim();
+}
+
+function evidenceChatMessages(row = {}) {
+  const evidence = Array.isArray(row.evidence) ? row.evidence.map(text).filter(Boolean) : [];
+  return evidence.map((item) => {
+    const isStaff = /^(?:직전\s*)?직원\s*(?:최신|직전)?\s*답변[:：]|^직전\s*직원\s*답변[:：]|^(?:빌리지|김준영|최재형).{0,20}답변[:：]/.test(item);
+    const isCustomer = /최신 고객 메시지|카카오 화면:\s*고객|고객 최종 양식|고객이 예약|고객이 ['"“”]|고객이 .*(?:보냄|공유|요청|문의|전송)/.test(item);
+    if (!isStaff && !isCustomer) return null;
+    const body = cleanEvidenceChatBody(item);
+    if (!body) return null;
+    return { sender: isStaff ? '직원' : '고객', message: body };
+  }).filter(Boolean).slice(-4);
+}
+
+function latestCustomerChatText(row = {}) {
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+  const messages = Array.isArray(payload.visible_messages_used) ? payload.visible_messages_used : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (slackSpeakerLabel(message?.sender) !== '고객') continue;
+    const body = cleanSlackChatText(message?.message);
+    if (body) return body;
+  }
+  const evidenceCustomer = evidenceChatMessages(row)
+    .reverse()
+    .find((message) => slackSpeakerLabel(message?.sender) === '고객');
+  return cleanSlackChatText(payload.latest_customer_message_cluster || evidenceCustomer?.message || '');
+}
+
+function conciseSlackActionLine(row = {}) {
+  const calc = row.payload?.operational_calculation;
+  if (calc?.unresolved?.length) return `미확인 항목 확인: ${calc.unresolved.slice(0, 2).join(', ')}`;
+  if (calc?.lines?.length) return '계산 금액 대조 후 파일 발송';
+  const type = String(row.type || '');
+  if (['quote_send', 'contract_document'].includes(type)) return '서류/파일 확인 후 발송';
+  if (type === 'tax_invoice') return '세금계산서 정보 확인 후 발행';
+  if (type === 'payment_check') return '입금/결제 상태 확인';
+  if (['reservation_review', 'schedule_check', 'sheet_duplicate_check'].includes(type)) return '가용 결과 확인 후 답변';
+  if (type === 'price_review') return '가격 계산 후 답변';
+  if (type === 'return_extension') return '반납/연장 변경 확인 후 답변';
+  if (type === 'damage_repair') return '파손/수리 상태 확인';
+  if (type === 'reply_needed') return '짧게 답변';
+  return cleanSlackBriefText(row.recommended_action).slice(0, 80);
+}
+
+function formatSlackBriefSummary(row = {}) {
+  const customerAsk = latestCustomerChatText(row);
+  const action = conciseSlackActionLine(row);
+  const fallback = splitReadableClauses(row.summary || row.title, 2)
+    .map(cleanSlackBriefText)
+    .find((line) => line && !/^(카카오 화면|확인요청 조회|세트마스터 조회|계약마스터|스케줄상세)/.test(line));
+  const pieces = [
+    customerAsk ? `고객 요청: ${customerAsk}` : fallback,
+    action ? `할 일: ${action}` : ''
+  ].filter(Boolean).slice(0, 2);
+  return pieces
+    .map((line) => splitLongMobileLine(line, 54).slice(0, 2).join('\n  '))
+    .map((line) => `• ${escapeSlackText(line)}`)
+    .join('\n\n') || `• ${truncateSlackText(row.title || row.summary, 120)}`;
+}
+
+function slackSpeakerLabel(sender = '') {
+  const value = text(sender);
+  if (/빌리지|김준영|최재형|직원|챗봇|상담원|매니저/.test(value)) return '직원';
+  return '고객';
+}
+
+function formatSlackRecentChat(row = {}) {
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+  const messages = Array.isArray(payload.visible_messages_used)
+    ? payload.visible_messages_used
+    : [];
+  const displayMessages = messages.length ? messages : evidenceChatMessages(row);
+  const lines = displayMessages
+    .map((message) => {
+      const body = cleanSlackChatText(message?.message).replace(/\n+/g, ' / ');
+      if (!body) return '';
+      return `• ${slackSpeakerLabel(message?.sender)}: ${escapeSlackText(splitLongMobileLine(body, 58).slice(0, 2).join('\n  '))}`;
+    })
+    .filter(Boolean)
+    .slice(-3);
+  if (lines.length) return lines.join('\n\n');
+  const latest = cleanSlackChatText(payload.latest_customer_message_cluster || '');
+  if (latest) return splitLongMobileLine(latest, 58).slice(0, 3).map((line) => `• 고객: ${escapeSlackText(line)}`).join('\n\n');
+  return '';
 }
 
 export function buildSlackFollowUpMessage(row = {}, options = {}) {
@@ -1404,9 +1532,9 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
   const title = truncateSlackText(row.title || `${typeLabel} 후속처리`, 140);
   const customer = truncateSlackText(row.customer_name || '고객명 미확인', 120);
   const draft = text(row.suggested_reply_draft || '').trim();
-  const evidence = Array.isArray(row.evidence) ? row.evidence.map(text).filter(Boolean).slice(0, 5) : [];
   const calculationBlock = formatSlackCalculationBlock(row);
   const recommendationBlock = formatSlackRecommendation(row);
+  const recentChatBlock = formatSlackRecentChat(row);
   const blocks = [
     {
       type: 'header',
@@ -1423,7 +1551,10 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
     }
   ];
   if (row.summary) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*👀 요약*\n${mobileBulletsForSlack(row.summary, { limit: 7, maxLine: 52, icon: '•' }) || truncateSlackText(row.summary, 1000)}` } });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*⚡ 핵심*\n${formatSlackBriefSummary(row)}` } });
+  }
+  if (recentChatBlock) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 최근 대화*\n${recentChatBlock}` } });
   }
   if (calculationBlock) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🧮 계산*\n${truncateSlackText(calculationBlock, 1800)}` } });
@@ -1433,15 +1564,6 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
   }
   if (draft) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 답변 초안*\n${codeBlockForSlack(draft, 1800)}` } });
-  }
-  if (evidence.length) {
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `*📌 근거*\n${evidence.map((item) => `• ${escapeSlackText(splitLongMobileLine(item, 58).slice(0, 3).join('\n  '))}`).join('\n\n')}`
-      }
-    });
   }
   blocks.push({
     type: 'section',

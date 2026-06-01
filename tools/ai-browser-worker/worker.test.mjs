@@ -1313,6 +1313,10 @@ test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', (
     classification: 'price',
     confidence: 'medium',
     customer: { name: '홍길동' },
+    latest_customer_message_cluster: '견적서 받을 수 있을까요?',
+    visible_messages_used: [
+      { sender: '홍길동', message: '견적서 받을 수 있을까요?', time: '오후 3:10' }
+    ],
     follow_up_items: [{
       type: 'quote_send',
       priority: 'high',
@@ -1333,6 +1337,8 @@ test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', (
   assert.equal(rows[0].job_id, '11111111-1111-4111-8111-111111111111');
   assert.equal(rows[0].decision_classification, 'price');
   assert.deepEqual(rows[0].evidence, ['고객: 견적서 받을 수 있을까요?']);
+  assert.equal(rows[0].payload.latest_customer_message_cluster, '견적서 받을 수 있을까요?');
+  assert.equal(rows[0].payload.visible_messages_used[0].message, '견적서 받을 수 있을까요?');
   assert.match(rows[0].follow_up_key, /^room-label:홍길동:홍길동:quote_send:/);
 });
 
@@ -1355,13 +1361,23 @@ test('buildSlackFollowUpMessage includes action buttons and compact button help'
     summary: '고객이 5/30 23:00~5/31 23:00 AX-700 가능 여부를 문의했습니다.',
     recommended_action: '확인요청 결과가 ✅ 가용이면 가능 안내 후 예약 진행 여부를 확인하세요.',
     suggested_reply_draft: '확인해보니 해당 일정 예약 가능하십니다.',
-    evidence: ['확인요청 RQ-260531-003: ✅ 가용1']
+    evidence: ['확인요청 RQ-260531-003: ✅ 가용1'],
+    payload: {
+      visible_messages_used: [
+        { sender: '최재원', message: '소니 캠 AX-700 5월30일 밤부터 31일 밤까지 가능할까요?', time: '오후 5:01' },
+        { sender: '빌리지님', message: '확인해보겠습니다.', time: '오후 5:02' }
+      ]
+    }
   });
 
   assert.equal(message.channel, '스케쥴-agent');
   assert.match(JSON.stringify(message.blocks), /village_followup_send/);
   assert.match(JSON.stringify(message.blocks), /village_followup_edit_send/);
   assert.match(JSON.stringify(message.blocks), /village_followup_status_done/);
+  assert.match(JSON.stringify(message.blocks), /핵심/);
+  assert.match(JSON.stringify(message.blocks), /최근 대화/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /근거/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /RQ-260531-003/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /헤이빌리/);
   assert.match(JSON.stringify(message.blocks), /버튼 동작/);
   assert.match(JSON.stringify(message.blocks), /현재 초안으로 카카오 발송 요청/);
