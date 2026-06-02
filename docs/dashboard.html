@@ -1364,6 +1364,26 @@
     animation: spin 0.7s linear infinite;
     margin: 0 auto 14px;
   }
+  .empty-state.load-error .sub {
+    font-size: 12px; color: var(--text-muted); margin-top: 6px; opacity: 0.85;
+  }
+  .retry-btn {
+    margin-top: 16px;
+    padding: 9px 20px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+  }
+  .retry-btn:hover { opacity: 0.88; }
+  #refreshBtn.refresh-failed {
+    box-shadow: 0 0 0 2px var(--accent);
+    border-radius: 8px;
+  }
 
   .tel-link {
     color: var(--accent);
@@ -1723,6 +1743,70 @@ function refreshDashboardSearchResults() {
   return true;
 }
 
+// ── 견고한 대시보드 fetch: 타임아웃 + 자동 재시도 + 응답 검증 ──
+// GAS 웹앱은 콜드 캐시 지연(최대 ~30초), 일시적 500/리다이렉트, HTML 오류페이지를 흔히 반환한다.
+// 단순 fetch + r.json()은 이 경우 무한 스피너 또는 즉시 "로드 실패"로 끝나므로 아래로 감싼다.
+//   - externalSignal: 중복 요청(날짜 이동/새로고침) 취소용. 취소되면 재시도하지 않는다.
+//   - timeout: 한 번의 시도가 이 시간을 넘기면 중단하고 재시도 대상이 됨.
+//   - retries: 추가 재시도 횟수 (총 시도 = retries + 1).
+function dashboardFetchJson(url, externalSignal, opts) {
+  opts = opts || {};
+  var timeout = opts.timeout != null ? opts.timeout : 25000;
+  var maxRetries = opts.retries != null ? opts.retries : 2;
+  var attempt = 0;
+
+  function abortError() { var e = new Error('superseded'); e.name = 'AbortError'; return e; }
+
+  function tryOnce() {
+    return new Promise(function(resolve, reject) {
+      if (externalSignal && externalSignal.aborted) { reject(abortError()); return; }
+      var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      var timedOut = false;
+      var timer = setTimeout(function() {
+        timedOut = true;
+        if (ctrl) { try { ctrl.abort(); } catch (e) {} }
+      }, timeout);
+      var onExternalAbort = function() { if (ctrl) { try { ctrl.abort(); } catch (e) {} } };
+      if (externalSignal && externalSignal.addEventListener) externalSignal.addEventListener('abort', onExternalAbort);
+      var cleanup = function() {
+        clearTimeout(timer);
+        if (externalSignal && externalSignal.removeEventListener) externalSignal.removeEventListener('abort', onExternalAbort);
+      };
+      fetch(url, ctrl ? { signal: ctrl.signal } : {})
+        .then(function(r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.text();
+        })
+        .then(function(text) {
+          var data;
+          try { data = JSON.parse(text); }
+          catch (e) { throw new Error('비정상 응답(JSON 아님)'); }
+          cleanup();
+          resolve(data);
+        })
+        .catch(function(err) {
+          cleanup();
+          if (externalSignal && externalSignal.aborted && !timedOut) { reject(abortError()); return; }
+          reject(timedOut ? new Error('시간 초과') : err);
+        });
+    });
+  }
+
+  function loop() {
+    return tryOnce().catch(function(err) {
+      if (err && err.name === 'AbortError') throw err;               // 다른 요청으로 대체됨 → 중단
+      if (externalSignal && externalSignal.aborted) throw abortError();
+      if (attempt >= maxRetries) throw err;
+      attempt++;
+      var backoff = Math.min(4000, 700 * Math.pow(2, attempt - 1));  // 0.7s → 1.4s
+      return new Promise(function(res) { setTimeout(res, backoff); }).then(loop);
+    });
+  }
+  return loop();
+}
+
+var dashboardSlowTimer = null;
+
 function loadData(forceFresh) {
   var dateStr = formatDate(currentDate);
   var lsKey = DASHBOARD_CACHE_PREFIX + dateStr;
@@ -1754,29 +1838,67 @@ function loadData(forceFresh) {
     document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('visible'); });
   }
 
+  // 응답이 늦어질 때(콜드 캐시 등) 안심 메시지로 교체 — 빈 화면 체감 완화
+  if (dashboardSlowTimer) { clearTimeout(dashboardSlowTimer); dashboardSlowTimer = null; }
+  if (!renderedCached && !hasVisibleData) {
+    dashboardSlowTimer = setTimeout(function() {
+      if (!isCurrentDashboardRequest(requestId, dateStr)) return;
+      var loading = document.getElementById('loadingArea');
+      if (!loading || loading.style.display === 'none') return;
+      var msg = loading.querySelector('.loading-msg');
+      if (msg) msg.textContent = '서버 응답이 늦어지고 있어요. 잠시만 기다려주세요…';
+    }, 7000);
+  }
+
   var url = API_URL + '?key=village2026&action=dashboard&date=' + dateStr;
   if (forceFresh) url += '&nocache=1';
-  var fetchOptions = dashboardAbortController ? { signal: dashboardAbortController.signal } : {};
+  var signal = dashboardAbortController ? dashboardAbortController.signal : null;
 
-  fetch(url, fetchOptions)
-    .then(function(r) { return r.json(); })
+  dashboardFetchJson(url, signal, { timeout: 25000, retries: 2 })
     .then(function(data) {
+      if (dashboardSlowTimer) { clearTimeout(dashboardSlowTimer); dashboardSlowTimer = null; }
       if (!isCurrentDashboardRequest(requestId, dateStr) || !isDashboardDateMatch(data, dateStr)) return;
       if (!canApplyDashboardResponse(mutationSeqAtRequest)) return;
+      if (data && data.error) throw new Error(data.error);
       dashboardData = data;
       renderDashboard(data, dateStr);
       writeDashboardLocalCache(dateStr, data);
     })
     .catch(function(err) {
+      if (dashboardSlowTimer) { clearTimeout(dashboardSlowTimer); dashboardSlowTimer = null; }
       if (err && err.name === 'AbortError') return;
       if (!isCurrentDashboardRequest(requestId, dateStr)) return;
       if (!renderedCached) {
-        document.getElementById('loadingArea').innerHTML =
-          '<div class="empty-state"><div class="icon">!</div><div class="text">데이터 로드 실패</div></div>';
+        renderDashboardLoadError(!!forceFresh);
       } else {
-        document.getElementById('loadingArea').style.display = 'none';
+        // 이미 캐시 데이터가 화면에 떠 있음 → 막다른 에러 대신 조용히 갱신실패만 표시
+        var loading = document.getElementById('loadingArea');
+        if (loading) loading.style.display = 'none';
+        flagDashboardRefreshFailed();
       }
     });
+}
+
+// 캐시 미존재 상태에서 로드 실패 시: 막다른 길 대신 다시 시도 버튼 제공
+function renderDashboardLoadError(wasForceFresh) {
+  var loading = document.getElementById('loadingArea');
+  if (!loading) return;
+  loading.style.display = 'block';
+  loading.innerHTML =
+    '<div class="empty-state load-error">' +
+      '<div class="icon">⚠️</div>' +
+      '<div class="text">일정을 불러오지 못했어요</div>' +
+      '<div class="sub">네트워크 또는 서버 응답이 일시적으로 불안정할 수 있어요.</div>' +
+      '<button type="button" class="retry-btn" onclick="loadData(' + (wasForceFresh ? 'true' : 'false') + ')">다시 시도</button>' +
+    '</div>';
+}
+
+// 캐시가 떠 있는 상태에서 갱신 실패 시: 새로고침 버튼을 잠깐 강조
+function flagDashboardRefreshFailed() {
+  var btn = document.getElementById('refreshBtn');
+  if (!btn) return;
+  btn.classList.add('refresh-failed');
+  setTimeout(function() { btn.classList.remove('refresh-failed'); }, 4000);
 }
 
 function refreshData() {
@@ -1794,7 +1916,7 @@ function refreshData() {
 function showDashboardLoading(dateStr, keepVisible) {
   var loading = document.getElementById('loadingArea');
   if (!loading) return;
-  loading.innerHTML = '<div class="spinner"></div><div>' + escHtml(dateStr) + ' 일정 불러오는 중...</div>';
+  loading.innerHTML = '<div class="spinner"></div><div class="loading-msg">' + escHtml(dateStr) + ' 일정 불러오는 중...</div>';
   loading.style.display = keepVisible ? 'none' : 'block';
 }
 
