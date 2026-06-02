@@ -295,9 +295,8 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   ws.getRange(itemStart, 8, ITEMS_PER_SIDE, 1).setBackgrounds(rightBgs);
   ws.getRange(itemStart, 8, ITEMS_PER_SIDE, 5).setFontWeights(rightWeights.map(function(w) { return [w[0], w[0], w[0], w[0], w[0]]; }));
 
-  // ── 계약서 '마스터' 시트를 세트마스터 현재가로 갱신 (생성 때마다 → 항상 최신 단가) ──
-  // 이걸 자동채움보다 먼저 해야 빈 줄 드롭다운/VLOOKUP이 최신 마스터를 참조함.
-  try { refreshContractMaster_(ss, newSS); } catch (mErr) { Logger.log("계약서 마스터 갱신 실패(무시): " + mErr.message); }
+  // 참고: '마스터' 시트 최신화는 세트마스터 수정 시 onEdit 디바운스로 템플릿을 동기화함
+  // (scheduleTemplateMasterSync_ in Code.js). 생성 때는 갱신하지 않아 속도 영향 없음.
 
   // ── 빈 줄: 수동 추가용 품목 드롭다운 + 단가 VLOOKUP 자동채움 (방식 A) ──
   // 채워진 줄(실제 예약 품목)은 스케줄상세 실단가 유지, 빈 줄만 '마스터' 시트에서 자동 조회.
@@ -443,42 +442,6 @@ function applyManualEntryAutofill_(ws, ss, itemStart, perSide, totalItems) {
   }
 }
 
-// 세트마스터 → [장비명, 단가] 행 배열 (단가>0만, 이름 정렬). 계약서 마스터 동기화용.
-// 개별 장비: A열 이름 + B열(구성장비) 빈칸 → G열 단가.
-// 세트 상품:  A열 세트명 + B열 구성장비 있음 → 첫 행 G열 단가 (세트당 1건).
-function buildSetMasterPriceRows_(setSheet) {
-  if (!setSheet || setSheet.getLastRow() < 2) return [];
-  var data = setSheet.getRange(2, 1, setSheet.getLastRow() - 1, 7).getValues();
-  var priceMap = {}, seenSets = {};
-  for (var i = 0; i < data.length; i++) {
-    var name = String(data[i][0] || "").trim();
-    var sub = String(data[i][1] || "").trim();
-    var price = data[i][6];
-    if (!name) continue;
-    if (!sub) {
-      if (price && Number(price) > 0) priceMap[name] = Number(price);
-    } else {
-      if (!seenSets[name] && price && Number(price) > 0) { priceMap[name] = Number(price); seenSets[name] = true; }
-    }
-  }
-  return Object.keys(priceMap).sort().map(function (k) { return [k, priceMap[k]]; });
-}
-
-// 계약서 스프레드시트의 '마스터' 시트를 세트마스터 현재가로 덮어씀 (생성 때마다 호출 → 항상 최신).
-function refreshContractMaster_(activeSS, contractSS) {
-  var rows = buildSetMasterPriceRows_(activeSS.getSheetByName("세트마스터"));
-  if (!rows.length) return 0;
-  var sheets = contractSS.getSheets(), ms = null;
-  for (var s = 1; s < sheets.length; s++) {  // 메인 계약서 시트(0) 제외
-    if (sheets[s].getName().indexOf("마스터") >= 0) { ms = sheets[s]; break; }
-  }
-  if (!ms) ms = contractSS.insertSheet("마스터");
-  ms.clearContents();
-  ms.getRange(1, 1, 1, 2).setValues([["장비명", "단가"]]);
-  ms.getRange(2, 1, rows.length, 2).setValues(rows);
-  ms.getRange(2, 2, rows.length, 1).setNumberFormat("#,##0");
-  return rows.length;
-}
 
 function repairContractItemHeaders_(ws, rows) {
   if (!ws || !rows || !rows.itemStart) return;

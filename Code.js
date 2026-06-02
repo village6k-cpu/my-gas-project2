@@ -288,6 +288,12 @@ function onEditInstallable(e) {
       Logger.log("계약마스터 할인유형 변경 처리 실패: " + err.message);
     }
   }
+
+  // 세트마스터 수정(가격/장비) → 계약서 템플릿 마스터 동기화 (디바운스, 백그라운드)
+  if (sheet.getName() === "세트마스터" && row >= 2) {
+    try { scheduleTemplateMasterSync_(); }
+    catch (err) { Logger.log("템플릿 마스터 동기화 예약 실패: " + err.message); }
+  }
 }
 
 function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
@@ -1131,6 +1137,65 @@ function regenPendingContracts() {
     if (stillPending) {
       ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
       props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 세트마스터 변경 → 계약서 템플릿 '마스터' 동기화 (디바운스)
+// onEdit이 편집마다 호출하지만, 실제 동기화는 편집이 멈춘 뒤 1회만 실행.
+// 계약서 생성과 분리 → 생성 속도 영향 없음.
+// ─────────────────────────────────────────────────────────────
+var TEMPLATE_SYNC_EDIT_TS_PROP_ = 'setMasterEditTS_v1';
+var TEMPLATE_SYNC_TRIGGER_PROP_ = 'templateSyncTriggerScheduledAt_v1';
+var TEMPLATE_SYNC_TRIGGER_STALE_MS_ = 10 * 60 * 1000;
+
+function scheduleTemplateMasterSync_() {
+  var props = PropertiesService.getScriptProperties();
+  var now = Date.now();
+  props.setProperty(TEMPLATE_SYNC_EDIT_TS_PROP_, String(now));
+
+  var scheduledAt = Number(props.getProperty(TEMPLATE_SYNC_TRIGGER_PROP_) || 0);
+  var hasRecent = scheduledAt && (now - scheduledAt < TEMPLATE_SYNC_TRIGGER_STALE_MS_);
+  if (!hasRecent) {
+    var exists = ScriptApp.getProjectTriggers().some(function (t) {
+      return t.getHandlerFunction() === 'syncTemplateMasterDebounced';
+    });
+    if (!exists) {
+      ScriptApp.newTrigger('syncTemplateMasterDebounced').timeBased().after(8000).create();
+    }
+    props.setProperty(TEMPLATE_SYNC_TRIGGER_PROP_, String(now));
+  }
+}
+
+function syncTemplateMasterDebounced() {
+  var STABLE_MS = 7000;
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { return; }
+  try {
+    var props = PropertiesService.getScriptProperties();
+    ScriptApp.getProjectTriggers().forEach(function (t) {
+      if (t.getHandlerFunction() === 'syncTemplateMasterDebounced') ScriptApp.deleteTrigger(t);
+    });
+    props.deleteProperty(TEMPLATE_SYNC_TRIGGER_PROP_);
+
+    var ts = Number(props.getProperty(TEMPLATE_SYNC_EDIT_TS_PROP_) || 0);
+    if (!ts) return;
+
+    if (Date.now() - ts >= STABLE_MS) {
+      props.deleteProperty(TEMPLATE_SYNC_EDIT_TS_PROP_);
+      try {
+        var r = syncTemplateMasterFromSetMaster();
+        Logger.log("세트마스터 변경 → 템플릿 마스터 동기화: " + r);
+      } catch (err) {
+        Logger.log("템플릿 마스터 동기화 실패: " + err.message);
+      }
+    } else {
+      // 아직 편집 중 → 다시 예약
+      ScriptApp.newTrigger('syncTemplateMasterDebounced').timeBased().after(8000).create();
+      props.setProperty(TEMPLATE_SYNC_TRIGGER_PROP_, String(Date.now()));
     }
   } finally {
     lock.releaseLock();

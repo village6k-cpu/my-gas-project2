@@ -1005,7 +1005,8 @@ function runFunction(funcName, params) {
       warmDashboardCache: typeof warmDashboardCache !== "undefined" ? warmDashboardCache : null,
       getInventoryConflicts: typeof getInventoryConflicts !== "undefined" ? getInventoryConflicts : null,
       getInventoryConflictsSlackMessage: typeof getInventoryConflictsSlackMessage !== "undefined" ? getInventoryConflictsSlackMessage : null,
-      listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null
+      listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null,
+      syncTemplateMasterFromSetMaster: typeof syncTemplateMasterFromSetMaster !== "undefined" ? syncTemplateMasterFromSetMaster : null
     };
     if (globalFuncs[funcName]) {
       var fnResult = globalFuncs[funcName]();
