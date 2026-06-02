@@ -295,6 +295,11 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   ws.getRange(itemStart, 8, ITEMS_PER_SIDE, 1).setBackgrounds(rightBgs);
   ws.getRange(itemStart, 8, ITEMS_PER_SIDE, 5).setFontWeights(rightWeights.map(function(w) { return [w[0], w[0], w[0], w[0], w[0]]; }));
 
+  // ── 빈 줄: 수동 추가용 품목 드롭다운 + 단가 VLOOKUP 자동채움 (방식 A) ──
+  // 채워진 줄(실제 예약 품목)은 스케줄상세 실단가 유지, 빈 줄만 '마스터' 시트에서 자동 조회.
+  try { applyManualEntryAutofill_(ws, newSS, itemStart, ITEMS_PER_SIDE, combinedItems.length); }
+  catch (afErr) { Logger.log("수동입력 자동채움 설정 실패(무시): " + afErr.message); }
+
   // ── 할인 드롭다운 초기화 — 사전(C44), 추가(I44), 장기(C45), 쿠폰(I45) ──
   // 계약마스터 K(할인유형)에 따라 사전/추가 할인을 자동 주입
   // 계약서 템플릿 실제 드롭다운 옵션명:
@@ -379,6 +384,59 @@ function _colLetter(n) {
   var s = "";
   while (n > 0) { var r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); }
   return s;
+}
+
+// 빈 품목 줄에 "품목 드롭다운 + 단가 VLOOKUP + 금액 수식" 세팅 (수동 추가용).
+// 채워진 줄은 건드리지 않음 (실제 예약 단가 보존).
+// 가격 출처 = 계약서 내 '마스터' 시트 (A:장비명, B:단가, 세트마스터에서 동기화).
+function applyManualEntryAutofill_(ws, ss, itemStart, perSide, totalItems) {
+  // '마스터' 시트 탐색 (이름에 '마스터' 포함, 메인 계약서 시트 제외)
+  var masterName = null, sheets = ss.getSheets();
+  for (var si = 1; si < sheets.length; si++) {
+    if (sheets[si].getName().indexOf("마스터") >= 0) { masterName = sheets[si].getName(); break; }
+  }
+  if (!masterName) return;  // 마스터 없으면 자동채움 스킵 (기존 동작 유지)
+  var ms = ss.getSheetByName(masterName);
+  if (!ms || ms.getLastRow() < 2) return;
+
+  // 시트명에 공백/특수문자 있으면 따옴표 처리
+  var qn = /[^A-Za-z0-9가-힣_]/.test(masterName) ? "'" + masterName.replace(/'/g, "''") + "'" : masterName;
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireValueInRange(ms.getRange(2, 1, ms.getLastRow() - 1, 1), true)
+    .setAllowInvalid(true).build();
+
+  var leftCount = Math.min(totalItems, perSide);
+  var rightCount = Math.max(0, Math.min(totalItems - perSide, perSide));
+
+  // 좌측 빈 줄 (품목 B:C 병합, 수량 D, 일수 E, 단가 F, 금액 G)
+  var leftN = perSide - leftCount;
+  if (leftN > 0) {
+    var lr = itemStart + leftCount, lPrice = [], lAmt = [], lDv = [];
+    for (var i = 0; i < leftN; i++) {
+      var r = lr + i;
+      lPrice.push(['=IFERROR(VLOOKUP($B' + r + ',' + qn + '!$A:$B,2,FALSE),"")']);
+      lAmt.push(['=IF($B' + r + '="","",$D' + r + '*$E' + r + '*$F' + r + ')']);
+      lDv.push([rule, rule]);  // B:C 병합 → 두 칸 모두
+    }
+    ws.getRange(lr, 6, leftN, 1).setFormulas(lPrice);      // F 단가
+    ws.getRange(lr, 7, leftN, 1).setFormulas(lAmt);        // G 금액
+    try { ws.getRange(lr, 2, leftN, 2).setDataValidations(lDv); } catch (e) { Logger.log("좌 품목 드롭다운 스킵: " + e.message); }
+  }
+
+  // 우측 빈 줄 (품목 H:I 병합, 수량 J, 일수 K, 단가 L, 금액 M)
+  var rightN = perSide - rightCount;
+  if (rightN > 0) {
+    var rr = itemStart + rightCount, rPrice = [], rAmt = [], rDv = [];
+    for (var j = 0; j < rightN; j++) {
+      var r2 = rr + j;
+      rPrice.push(['=IFERROR(VLOOKUP($H' + r2 + ',' + qn + '!$A:$B,2,FALSE),"")']);
+      rAmt.push(['=IF($H' + r2 + '="","",$J' + r2 + '*$K' + r2 + '*$L' + r2 + ')']);
+      rDv.push([rule, rule]);  // H:I 병합 → 두 칸 모두
+    }
+    ws.getRange(rr, 12, rightN, 1).setFormulas(rPrice);     // L 단가
+    ws.getRange(rr, 13, rightN, 1).setFormulas(rAmt);       // M 금액
+    try { ws.getRange(rr, 8, rightN, 2).setDataValidations(rDv); } catch (e) { Logger.log("우 품목 드롭다운 스킵: " + e.message); }
+  }
 }
 
 function repairContractItemHeaders_(ws, rows) {
