@@ -411,7 +411,7 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
   text-overflow: ellipsis;
   cursor: grab;
   z-index: 6;
-  transition: box-shadow 0.15s, transform 0.1s;
+  transition: box-shadow 0.15s;  /* transform은 트랜지션 제외 → 드래그 시 0.1s 지연 없이 커서에 즉시 붙음 */
   touch-action: none;
 }
 .tl-bar:hover {
@@ -1773,8 +1773,8 @@ function onBarPointerDown(e) {
       if (newW < colW) newW = colW;
       bar.style.width = newW + "px";
     } else {
-      // 이동: transform으로 커서를 상하좌우 자유롭게 따라옴(둥둥 뜬 느낌). reflow 없어 버터처럼 부드러움.
-      bar.style.transform = "translate(" + dx + "px," + dy + "px)";
+      // 이동: translate3d로 커서를 상하좌우 자유롭게 즉시 따라옴(GPU 합성, reflow/지연 없음).
+      bar.style.transform = "translate3d(" + dx + "px," + dy + "px,0)";
     }
   }
 
