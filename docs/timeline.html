@@ -1773,15 +1773,15 @@ function onBarPointerDown(e) {
       if (newW < colW) newW = colW;
       bar.style.width = newW + "px";
     } else {
-      // 이동: transform(translateX)으로 — GPU 합성이라 reflow 없이 커서를 그대로 따라옴(버터처럼 부드럽게)
-      bar.style.transform = "translateX(" + dx + "px)";
+      // 이동: transform으로 커서를 상하좌우 자유롭게 따라옴(둥둥 뜬 느낌). reflow 없어 버터처럼 부드러움.
+      bar.style.transform = "translate(" + dx + "px," + dy + "px)";
     }
   }
 
-  // 변경 없음/실패 시 원래 위치로 부드럽게 복귀
+  // 변경 없음/실패 시 원래 위치(행 제자리)로 부드럽게 복귀
   function snapBarBack() {
     bar.style.transition = "transform 0.15s ease, left 0.15s ease, width 0.15s ease";
-    bar.style.transform = "translateX(0px)";
+    bar.style.transform = "translate(0px,0px)";
     bar.style.left = origLeft + "px";
     bar.style.width = origWidth + "px";
     setTimeout(function() { bar.style.transition = ""; bar.style.transform = ""; }, 180);
@@ -1810,6 +1810,12 @@ function onBarPointerDown(e) {
     var dx = ev.clientX - startX;
     var dayShift = Math.round(dx / colW);
     if (dayShift === 0) { snapBarBack(); return; }  // 반나절 미만 이동 → 변경 없이 복귀
+
+    // 손 떼면: 떠 있던 위치에서 → 제 행의 새 날짜 칸으로 살짝 안착(세로 복귀 + 가로 스냅)
+    if (!isResize) {
+      bar.style.transition = "transform 0.14s ease";
+      bar.style.transform = "translate(" + (dayShift * colW) + "px, 0px)";
+    }
 
     var newStart, newEnd;
     if (isResize && isLeftHandle) {
