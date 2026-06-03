@@ -420,10 +420,11 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
   z-index: 7;
 }
 .tl-bar.dragging {
-  opacity: 0.85;
-  box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+  opacity: 0.72;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.28);
   cursor: grabbing;
-  z-index: 20;
+  z-index: 30;
+  will-change: transform;
 }
 .tl-bar .resize-handle {
   position: absolute;
@@ -1772,16 +1773,18 @@ function onBarPointerDown(e) {
       if (newW < colW) newW = colW;
       bar.style.width = newW + "px";
     } else {
-      bar.style.left = (origLeft + dx) + "px";
+      // 이동: transform(translateX)으로 — GPU 합성이라 reflow 없이 커서를 그대로 따라옴(버터처럼 부드럽게)
+      bar.style.transform = "translateX(" + dx + "px)";
     }
   }
 
   // 변경 없음/실패 시 원래 위치로 부드럽게 복귀
   function snapBarBack() {
-    bar.style.transition = "left 0.15s ease, width 0.15s ease";
+    bar.style.transition = "transform 0.15s ease, left 0.15s ease, width 0.15s ease";
+    bar.style.transform = "translateX(0px)";
     bar.style.left = origLeft + "px";
     bar.style.width = origWidth + "px";
-    setTimeout(function() { bar.style.transition = ""; }, 180);
+    setTimeout(function() { bar.style.transition = ""; bar.style.transform = ""; }, 180);
   }
 
   function cleanup(ev) {
