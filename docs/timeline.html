@@ -420,10 +420,11 @@ a.app-tab:hover { background: rgba(0,0,0,0.03); color: var(--accent); }
   z-index: 7;
 }
 .tl-bar.dragging {
-  opacity: 0.85;
-  box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+  opacity: 0.72;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.28);
   cursor: grabbing;
-  z-index: 20;
+  z-index: 30;
+  will-change: transform;
 }
 .tl-bar .resize-handle {
   position: absolute;
@@ -1300,15 +1301,6 @@ function loadData(forceFresh, opts) {
   if (timelineAbortController && timelineAbortController.abort) {
     try { timelineAbortController.abort(); } catch (e) {}
   }
-  timelineAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
-  var fetchOptions = timelineAbortController ? { signal: timelineAbortController.signal } : {};
-  var timedOut = false;
-  var timeoutId = setTimeout(function() {
-    timedOut = true;
-    if (timelineAbortController && timelineAbortController.abort) {
-      try { timelineAbortController.abort(); } catch (e) {}
-    }
-  }, TIMELINE_FETCH_TIMEOUT_MS);
   var range = getTimelineFetchRange();
   var requestKey = range.from + "_" + range.to;
   var url = API_URL + "?key=village2026&action=timeline"
@@ -1323,34 +1315,65 @@ function loadData(forceFresh, opts) {
     showLoading(false);
     updateRefreshInfo();
     opts.silent = true;
-    showLoading(false);
   }
   if (!opts.silent) showLoading(true);
-  return fetch(url, fetchOptions)
-    .then(function(r) { return r.text(); })
-    .then(function(text) {
-      clearTimeout(timeoutId);
-      if (requestId !== timelineRequestSeq) return;
-      var responseKey = requestKey + "\n" + text;
-      if (!forceFresh && responseKey === timelineLastResponseKey) {
+
+  var maxRetries = 2;  // 총 시도 = maxRetries + 1
+
+  // GAS 콜드 캐시/일시 500/리다이렉트/HTML 오류페이지에 대해 타임아웃 + 자동 재시도.
+  function attempt(tryNo) {
+    if (requestId !== timelineRequestSeq) return Promise.resolve();  // 다른 요청으로 대체됨
+    timelineAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    var fetchOptions = timelineAbortController ? { signal: timelineAbortController.signal } : {};
+    var timedOut = false;
+    var timeoutId = setTimeout(function() {
+      timedOut = true;
+      if (timelineAbortController && timelineAbortController.abort) {
+        try { timelineAbortController.abort(); } catch (e) {}
+      }
+    }, TIMELINE_FETCH_TIMEOUT_MS);
+
+    return fetch(url, fetchOptions)
+      .then(function(r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      })
+      .then(function(text) {
+        clearTimeout(timeoutId);
+        if (requestId !== timelineRequestSeq) return;
+        var data;
+        try { data = JSON.parse(text); }
+        catch (e) { throw new Error("비정상 응답(JSON 아님)"); }
+        var responseKey = requestKey + "\n" + text;
+        if (!forceFresh && responseKey === timelineLastResponseKey) {
+          showLoading(false);
+          updateRefreshInfo();
+          return;
+        }
+        timelineLastResponseKey = responseKey;
+        writeTimelineLocalCache(requestKey, data);
+        renderTimelineData(data);
         showLoading(false);
         updateRefreshInfo();
-        return;
-      }
-      var data = JSON.parse(text);
-      timelineLastResponseKey = responseKey;
-      writeTimelineLocalCache(requestKey, data);
-      renderTimelineData(data);
-      showLoading(false);
-      updateRefreshInfo();
-    })
-    .catch(function(err) {
-      clearTimeout(timeoutId);
-      if (err && err.name === "AbortError" && !timedOut) return;
-      if (requestId !== timelineRequestSeq) return;
-      showLoading(false);
-      showToast(timedOut ? "데이터 로드 시간 초과" : "데이터 로드 실패");
-    });
+      })
+      .catch(function(err) {
+        clearTimeout(timeoutId);
+        if (requestId !== timelineRequestSeq) return;             // 대체됨
+        if (err && err.name === "AbortError" && !timedOut) return; // supersede에 의한 중단
+        if (tryNo < maxRetries) {
+          var backoff = Math.min(4000, 700 * Math.pow(2, tryNo));  // 0.7s → 1.4s
+          return new Promise(function(res) { setTimeout(res, backoff); })
+            .then(function() { return attempt(tryNo + 1); });
+        }
+        showLoading(false);
+        // 캐시가 화면에 떠 있으면 조용히, 없으면 안내 토스트
+        if (!cachedData) {
+          showToast(timedOut ? "응답이 지연됐어요. 다시 시도해 주세요" : "데이터를 불러오지 못했어요. 다시 시도해 주세요");
+        }
+      });
+  }
+
+  return attempt(0);
 }
 window.loadData = loadData;
 
@@ -1637,13 +1660,17 @@ function setupScrollSync() {
   var dateHeader = document.getElementById("dateHeader");
   var revenueScroll = document.getElementById("revenueScroll");
 
+  // rAF로 묶어 헤더/매출바 스크롤 동기화를 한 프레임에 1회만 → 가로 스크롤 부드럽게
   gridScroll.addEventListener("scroll", function() {
     if (scrollSyncFlag) return;
     scrollSyncFlag = true;
-    dateHeader.scrollLeft = gridScroll.scrollLeft;
-    revenueScroll.scrollLeft = gridScroll.scrollLeft;
-    scrollSyncFlag = false;
-  });
+    requestAnimationFrame(function() {
+      var x = gridScroll.scrollLeft;
+      dateHeader.scrollLeft = x;
+      revenueScroll.scrollLeft = x;
+      scrollSyncFlag = false;
+    });
+  }, { passive: true });
 }
 
 // ── Bar Interactions (drag, resize, click, context menu) ──
@@ -1669,6 +1696,7 @@ function getItemById(id) {
 }
 
 function onBarClick(e) {
+  if (this.__dragMoved) { this.__dragMoved = false; return; }  // 방금 드래그한 바 → 상세 안 열림
   if (e.target.classList.contains("resize-handle")) return;
   var item = getItemById(this.getAttribute("data-item-id"));
   if (item) showDetail(item);
@@ -1709,42 +1737,79 @@ function onBarPointerDown(e) {
 
   var colW = getColW();
   var startX = e.clientX;
+  var startY = e.clientY;
   var origLeft = parseInt(bar.style.left) || 0;
   var origWidth = parseInt(bar.style.width) || colW;
   var origStartDay = new Date(item._startDay);
   var origEndDay = new Date(item._endDay);
 
-  bar.classList.add("dragging");
-  bar.setPointerCapture(e.pointerId);
+  var DRAG_THRESHOLD = 4;  // 이 거리 미만 이동은 클릭으로 간주 (클릭/드래그 충돌 방지)
+  var moved = false;
+
+  try { bar.setPointerCapture(e.pointerId); } catch (err) {}
+
+  function beginDrag() {
+    moved = true;
+    bar.classList.add("dragging");
+    bar.style.transition = "none";  // 드래그 중엔 전환 끔 → 손가락/커서를 부드럽게 따라옴
+  }
 
   function onMove(ev) {
     var dx = ev.clientX - startX;
-    var dayShift = Math.round(dx / colW);
-
+    var dy = ev.clientY - startY;
+    if (!moved) {
+      if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+      beginDrag();
+    }
+    // 픽셀 단위로 부드럽게 따라가기 (날짜 스냅은 손 뗄 때 1회)
     if (isResize && isLeftHandle) {
-      var newLeft = origLeft + dayShift * colW;
-      var newWidth = origWidth - dayShift * colW;
+      var newLeft = origLeft + dx;
+      var newWidth = origWidth - dx;
       if (newWidth < colW) { newWidth = colW; newLeft = origLeft + origWidth - colW; }
       bar.style.left = newLeft + "px";
       bar.style.width = newWidth + "px";
     } else if (isResize && isRightHandle) {
-      var newW = origWidth + dayShift * colW;
+      var newW = origWidth + dx;
       if (newW < colW) newW = colW;
       bar.style.width = newW + "px";
     } else {
-      bar.style.left = (origLeft + dayShift * colW) + "px";
+      // 이동: transform(translateX)으로 — GPU 합성이라 reflow 없이 커서를 그대로 따라옴(버터처럼 부드럽게)
+      bar.style.transform = "translateX(" + dx + "px)";
     }
   }
 
-  function onUp(ev) {
+  // 변경 없음/실패 시 원래 위치로 부드럽게 복귀
+  function snapBarBack() {
+    bar.style.transition = "transform 0.15s ease, left 0.15s ease, width 0.15s ease";
+    bar.style.transform = "translateX(0px)";
+    bar.style.left = origLeft + "px";
+    bar.style.width = origWidth + "px";
+    setTimeout(function() { bar.style.transition = ""; bar.style.transform = ""; }, 180);
+  }
+
+  function cleanup(ev) {
     bar.classList.remove("dragging");
-    bar.releasePointerCapture(ev.pointerId);
+    try { bar.releasePointerCapture(ev.pointerId); } catch (err) {}
     bar.removeEventListener("pointermove", onMove);
     bar.removeEventListener("pointerup", onUp);
+    bar.removeEventListener("pointercancel", onCancel);
+  }
+
+  // 스크롤이 포인터를 가로채는 등으로 취소될 때 상태 정리 (멈춤/유령 드래그 방지)
+  function onCancel(ev) {
+    cleanup(ev);
+    if (moved) snapBarBack();
+  }
+
+  function onUp(ev) {
+    cleanup(ev);
+    if (!moved) return;  // 임계값 미만 → 클릭으로 처리 (상세 패널 열림)
+
+    bar.__dragMoved = true;  // 드래그 직후 따라오는 click 억제
 
     var dx = ev.clientX - startX;
     var dayShift = Math.round(dx / colW);
-    if (dayShift === 0 && !isResize) return;
+    if (dayShift === 0) { snapBarBack(); return; }  // 반나절 미만 이동 → 변경 없이 복귀
 
     var newStart, newEnd;
     if (isResize && isLeftHandle) {
@@ -1756,12 +1821,11 @@ function onBarPointerDown(e) {
       newEnd = addDays(origEndDay, dayShift);
       if (newEnd < newStart) newEnd = newStart;
     } else {
-      if (dayShift === 0) return;
       newStart = addDays(origStartDay, dayShift);
       newEnd = addDays(origEndDay, dayShift);
     }
 
-    // Preserve original times
+    // 원래 시각 보존 (날짜만 이동/조정)
     var origStartTime = item._start;
     var origEndTime = item._end;
     var startISO = new Date(newStart.getFullYear(), newStart.getMonth(), newStart.getDate(),
@@ -1774,7 +1838,7 @@ function onBarPointerDown(e) {
       "&start=" + encodeURIComponent(startISO) + "&end=" + encodeURIComponent(endISO) + riParam)
       .then(function(r) { return r.json(); })
       .then(function(res) {
-        if (res.success) {
+        if (res && res.success) {
           showToast("일정이 변경되었습니다");
           item._start = new Date(startISO);
           item._end = new Date(endISO);
@@ -1785,18 +1849,19 @@ function onBarPointerDown(e) {
           computeDateRange();
           render();
         } else {
-          showToast("변경 실패: " + (res.error || ""));
-          render();
+          showToast("변경 실패: " + ((res && res.error) || ""));
+          snapBarBack();
         }
       })
       .catch(function() {
-        showToast("네트워크 오류");
-        render();
+        showToast("네트워크 오류 — 변경되지 않았습니다");
+        snapBarBack();
       });
   }
 
   bar.addEventListener("pointermove", onMove);
   bar.addEventListener("pointerup", onUp);
+  bar.addEventListener("pointercancel", onCancel);
   e.preventDefault();
 }
 
