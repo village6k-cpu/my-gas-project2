@@ -1300,15 +1300,6 @@ function loadData(forceFresh, opts) {
   if (timelineAbortController && timelineAbortController.abort) {
     try { timelineAbortController.abort(); } catch (e) {}
   }
-  timelineAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
-  var fetchOptions = timelineAbortController ? { signal: timelineAbortController.signal } : {};
-  var timedOut = false;
-  var timeoutId = setTimeout(function() {
-    timedOut = true;
-    if (timelineAbortController && timelineAbortController.abort) {
-      try { timelineAbortController.abort(); } catch (e) {}
-    }
-  }, TIMELINE_FETCH_TIMEOUT_MS);
   var range = getTimelineFetchRange();
   var requestKey = range.from + "_" + range.to;
   var url = API_URL + "?key=village2026&action=timeline"
@@ -1323,34 +1314,65 @@ function loadData(forceFresh, opts) {
     showLoading(false);
     updateRefreshInfo();
     opts.silent = true;
-    showLoading(false);
   }
   if (!opts.silent) showLoading(true);
-  return fetch(url, fetchOptions)
-    .then(function(r) { return r.text(); })
-    .then(function(text) {
-      clearTimeout(timeoutId);
-      if (requestId !== timelineRequestSeq) return;
-      var responseKey = requestKey + "\n" + text;
-      if (!forceFresh && responseKey === timelineLastResponseKey) {
+
+  var maxRetries = 2;  // 총 시도 = maxRetries + 1
+
+  // GAS 콜드 캐시/일시 500/리다이렉트/HTML 오류페이지에 대해 타임아웃 + 자동 재시도.
+  function attempt(tryNo) {
+    if (requestId !== timelineRequestSeq) return Promise.resolve();  // 다른 요청으로 대체됨
+    timelineAbortController = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    var fetchOptions = timelineAbortController ? { signal: timelineAbortController.signal } : {};
+    var timedOut = false;
+    var timeoutId = setTimeout(function() {
+      timedOut = true;
+      if (timelineAbortController && timelineAbortController.abort) {
+        try { timelineAbortController.abort(); } catch (e) {}
+      }
+    }, TIMELINE_FETCH_TIMEOUT_MS);
+
+    return fetch(url, fetchOptions)
+      .then(function(r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      })
+      .then(function(text) {
+        clearTimeout(timeoutId);
+        if (requestId !== timelineRequestSeq) return;
+        var data;
+        try { data = JSON.parse(text); }
+        catch (e) { throw new Error("비정상 응답(JSON 아님)"); }
+        var responseKey = requestKey + "\n" + text;
+        if (!forceFresh && responseKey === timelineLastResponseKey) {
+          showLoading(false);
+          updateRefreshInfo();
+          return;
+        }
+        timelineLastResponseKey = responseKey;
+        writeTimelineLocalCache(requestKey, data);
+        renderTimelineData(data);
         showLoading(false);
         updateRefreshInfo();
-        return;
-      }
-      var data = JSON.parse(text);
-      timelineLastResponseKey = responseKey;
-      writeTimelineLocalCache(requestKey, data);
-      renderTimelineData(data);
-      showLoading(false);
-      updateRefreshInfo();
-    })
-    .catch(function(err) {
-      clearTimeout(timeoutId);
-      if (err && err.name === "AbortError" && !timedOut) return;
-      if (requestId !== timelineRequestSeq) return;
-      showLoading(false);
-      showToast(timedOut ? "데이터 로드 시간 초과" : "데이터 로드 실패");
-    });
+      })
+      .catch(function(err) {
+        clearTimeout(timeoutId);
+        if (requestId !== timelineRequestSeq) return;             // 대체됨
+        if (err && err.name === "AbortError" && !timedOut) return; // supersede에 의한 중단
+        if (tryNo < maxRetries) {
+          var backoff = Math.min(4000, 700 * Math.pow(2, tryNo));  // 0.7s → 1.4s
+          return new Promise(function(res) { setTimeout(res, backoff); })
+            .then(function() { return attempt(tryNo + 1); });
+        }
+        showLoading(false);
+        // 캐시가 화면에 떠 있으면 조용히, 없으면 안내 토스트
+        if (!cachedData) {
+          showToast(timedOut ? "응답이 지연됐어요. 다시 시도해 주세요" : "데이터를 불러오지 못했어요. 다시 시도해 주세요");
+        }
+      });
+  }
+
+  return attempt(0);
 }
 window.loadData = loadData;
 
