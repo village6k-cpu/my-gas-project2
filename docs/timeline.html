@@ -1748,10 +1748,24 @@ function onBarPointerDown(e) {
 
   try { bar.setPointerCapture(e.pointerId); } catch (err) {}
 
+  // 살짝 관성(lerp): 매 프레임 커서 목표 쪽으로 일부만 따라붙어 부드러운 가중감. (CSS 지연과 달리 sluggish하지 않음)
+  var targetX = 0, targetY = 0, curX = 0, curY = 0, dragRAF = 0;
+  var DRAG_EASE = 0.3;  // 1=즉시, 작을수록 관성 큼 (0.3 = 살짝)
+
+  function dragTick() {
+    curX += (targetX - curX) * DRAG_EASE;
+    curY += (targetY - curY) * DRAG_EASE;
+    if (Math.abs(targetX - curX) < 0.1) curX = targetX;
+    if (Math.abs(targetY - curY) < 0.1) curY = targetY;
+    bar.style.transform = "translate3d(" + curX + "px," + curY + "px,0)";
+    dragRAF = requestAnimationFrame(dragTick);
+  }
+
   function beginDrag() {
     moved = true;
     bar.classList.add("dragging");
-    bar.style.transition = "none";  // 드래그 중엔 전환 끔 → 손가락/커서를 부드럽게 따라옴
+    bar.style.transition = "none";  // 드래그 중엔 CSS 전환 끔 (관성은 rAF가 담당)
+    dragRAF = requestAnimationFrame(dragTick);
   }
 
   function onMove(ev) {
@@ -1761,7 +1775,6 @@ function onBarPointerDown(e) {
       if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
       beginDrag();
     }
-    // 픽셀 단위로 부드럽게 따라가기 (날짜 스냅은 손 뗄 때 1회)
     if (isResize && isLeftHandle) {
       var newLeft = origLeft + dx;
       var newWidth = origWidth - dx;
@@ -1773,8 +1786,9 @@ function onBarPointerDown(e) {
       if (newW < colW) newW = colW;
       bar.style.width = newW + "px";
     } else {
-      // 이동: translate3d로 커서를 상하좌우 자유롭게 즉시 따라옴(GPU 합성, reflow/지연 없음).
-      bar.style.transform = "translate3d(" + dx + "px," + dy + "px,0)";
+      // 이동: 목표만 갱신 → rAF 루프가 살짝 관성을 주며 따라옴
+      targetX = dx;
+      targetY = dy;
     }
   }
 
@@ -1788,6 +1802,7 @@ function onBarPointerDown(e) {
   }
 
   function cleanup(ev) {
+    if (dragRAF) { cancelAnimationFrame(dragRAF); dragRAF = 0; }  // 관성 루프 정지
     bar.classList.remove("dragging");
     try { bar.releasePointerCapture(ev.pointerId); } catch (err) {}
     bar.removeEventListener("pointermove", onMove);
