@@ -577,6 +577,12 @@
     border-color: var(--green-text);
     color: #fff;
   }
+  .task-toggle:disabled,
+  .task-toggle.is-saving {
+    opacity: 0.72;
+    cursor: wait;
+    pointer-events: none;
+  }
 
   /* ── 체크리스트 스타일 ── */
   .equip-checklist {
@@ -636,6 +642,12 @@
     background: var(--green-text);
     border-color: var(--green-text);
     color: #fff;
+  }
+  .equip-checkbox.is-saving {
+    opacity: 0.72;
+    cursor: wait;
+    pointer-events: none;
+    box-shadow: 0 0 0 2px rgba(68, 131, 97, 0.18);
   }
   .equip-name { flex: 1; min-width: 0; word-break: break-word; }
   .equip-set-tag {
@@ -1564,6 +1576,8 @@ var dashboardSilentRefreshTimer = null;
 var dashboardDatePrefetching = {};
 var dashboardPendingMutationCount = 0;
 var dashboardLocalMutationSeq = 0;
+var dashboardTaskToggleInFlight = {};
+var dashboardItemToggleInFlight = {};
 var dashboardContractRegenTimers = {};
 var dashboardContractRegenInFlight = {};
 var dashboardContractRegenQueued = {};
@@ -3053,8 +3067,9 @@ function renderList(containerId, items, type, isSearching, options) {
       // 카드 타입별 done 플래그 분리: 반출=setupDone, 반납=returnDone
       var taskDone = (cardType === 'checkout' ? item.setupDone : (cardType === 'checkin' ? item.returnDone : false));
       var taskAction = (cardType === 'checkout' ? 'toggleSetup' : 'toggleReturn');
+      var taskSaving = !!dashboardTaskToggleInFlight[dashboardTaskToggleKey(item.tradeId, taskAction)];
       var doneCls = taskDone ? ' task-done' : '';
-      var toggleCls = taskDone ? 'task-toggle checked' : 'task-toggle';
+      var toggleCls = (taskDone ? 'task-toggle checked' : 'task-toggle') + (taskSaving ? ' is-saving' : '');
       var toggleLabel = taskToggleLabel(cardType, taskDone, item);
       var attentionReasons = getDashboardAttentionReasons(item);
       html += '<div class="schedule-card type-' + cardType + (attentionReasons.length ? ' has-attention' : '') + doneCls + '" data-tid="' + escHtml(item.tradeId) + '" data-cardtype="' + cardType + '" onclick="toggleDetail(\'' + cardId + '\')">';
@@ -3062,7 +3077,7 @@ function renderList(containerId, items, type, isSearching, options) {
       html += '<div style="display:flex;align-items:flex-start;gap:0;">';
       // 반출/반납 모두 토글 노출
       if (cardType === 'checkout' || cardType === 'checkin') {
-        html += '<button class="' + toggleCls + '" data-task-action="' + taskAction + '" data-trade-id="' + escAttr(item.tradeId) + '" onclick="event.stopPropagation();toggleTask(this,\'' + escHtml(item.tradeId) + '\',\'' + taskAction + '\')">' + escHtml(toggleLabel) + '</button>';
+        html += '<button class="' + toggleCls + '" data-task-action="' + taskAction + '" data-trade-id="' + escAttr(item.tradeId) + '"' + (taskSaving ? ' disabled aria-busy="true"' : '') + ' onclick="event.stopPropagation();toggleTask(this,\'' + escHtml(item.tradeId) + '\',\'' + taskAction + '\')">' + escHtml(toggleLabel) + '</button>';
       }
       html += '<div>';
       html += '<div class="customer-name">' + escHtml(item.name) + '</div>';
@@ -3096,8 +3111,9 @@ function renderList(containerId, items, type, isSearching, options) {
         var checked = (cardType === 'checkout' ? eq.checkedCheckout : eq.checkedCheckin);
         if (checked) rowCls += ' checked';
 
-        var cbCls = 'equip-checkbox' + (checked ? ' checked' : '');
         var phaseStr = (cardType === 'checkout' ? 'checkout' : 'checkin');
+        var itemSaving = !!dashboardItemToggleInFlight[dashboardItemToggleKey(eq.scheduleId, phaseStr)];
+        var cbCls = 'equip-checkbox' + (checked ? ' checked' : '') + (itemSaving ? ' is-saving' : '');
         var sidEsc = escJs(eq.scheduleId);
         var nameEsc = escJs(eq.name);
         var qtyValue = eq.qty || 1;
@@ -3114,7 +3130,7 @@ function renderList(containerId, items, type, isSearching, options) {
         if (eq.pending) {
           html += '<span class="' + cbCls + '"></span>';
         } else {
-          html += '<span class="' + cbCls + '" data-schedule-id="' + escAttr(eq.scheduleId) + '" data-phase="' + phaseStr + '" onclick="toggleItem(this,\'' + sidEsc + '\',\'' + phaseStr + '\')">' + (checked ? '✓' : '') + '</span>';
+          html += '<span class="' + cbCls + '" data-schedule-id="' + escAttr(eq.scheduleId) + '" data-phase="' + phaseStr + '"' + (itemSaving ? ' aria-disabled="true" aria-busy="true"' : '') + ' onclick="toggleItem(this,\'' + sidEsc + '\',\'' + phaseStr + '\')">' + (checked ? '✓' : '') + '</span>';
         }
         html += '<span class="equip-name">';
         if (eq.isSet) html += '<span class="equip-set-tag">SET</span>';
@@ -3565,43 +3581,190 @@ function syncEquipmentCheckInMemory(payload, res) {
   persistCurrentDashboardCache();
 }
 
+function dashboardTaskToggleKey(tid, action) {
+  return String(action || '') + '|' + String(tid || '').trim();
+}
+
+function dashboardItemToggleKey(scheduleId, phase) {
+  return String(phase || '') + '|' + String(scheduleId || '').trim();
+}
+
+function setTaskToggleSaving(tid, action, saving) {
+  document.querySelectorAll('.task-toggle[data-task-action][data-trade-id]').forEach(function(button) {
+    if ((button.getAttribute('data-task-action') || '') !== action) return;
+    if ((button.getAttribute('data-trade-id') || '') !== tid) return;
+    button.disabled = !!saving;
+    button.classList.toggle('is-saving', !!saving);
+    if (saving) button.setAttribute('aria-busy', 'true');
+    else button.removeAttribute('aria-busy');
+  });
+}
+
+function setEquipmentCheckSaving(scheduleId, phase, saving) {
+  document.querySelectorAll('.equip-checkbox[data-schedule-id][data-phase]').forEach(function(box) {
+    if ((box.getAttribute('data-schedule-id') || '') !== scheduleId) return;
+    if ((box.getAttribute('data-phase') || '') !== phase) return;
+    box.classList.toggle('is-saving', !!saving);
+    if (saving) {
+      box.setAttribute('aria-disabled', 'true');
+      box.setAttribute('aria-busy', 'true');
+    } else {
+      box.removeAttribute('aria-disabled');
+      box.removeAttribute('aria-busy');
+    }
+  });
+}
+
+function captureDashboardTaskDoneSnapshot(tid, action) {
+  var snapshot = { tid: tid, action: action, records: [], done: false, doneAt: '', contractStatus: '' };
+  dashboardItemsForTrade(tid).forEach(function(item) {
+    var record = {
+      item: item,
+      setupDone: !!item.setupDone,
+      setupDoneAt: item.setupDoneAt || '',
+      returnDone: !!item.returnDone,
+      returnDoneAt: item.returnDoneAt || '',
+      contractStatus: item.contractStatus || ''
+    };
+    if (snapshot.records.length === 0) {
+      snapshot.done = action === 'toggleSetup' ? record.setupDone : record.returnDone;
+      snapshot.doneAt = action === 'toggleSetup' ? record.setupDoneAt : record.returnDoneAt;
+      snapshot.contractStatus = record.contractStatus;
+    }
+    snapshot.records.push(record);
+  });
+  return snapshot;
+}
+
+function restoreDashboardTaskDoneSnapshot(snapshot) {
+  if (!snapshot) return;
+  (snapshot.records || []).forEach(function(record) {
+    record.item.setupDone = record.setupDone;
+    record.item.setupDoneAt = record.setupDoneAt;
+    record.item.returnDone = record.returnDone;
+    record.item.returnDoneAt = record.returnDoneAt;
+    record.item.contractStatus = record.contractStatus;
+  });
+  persistCurrentDashboardCache();
+  syncTaskToggleDom(snapshot.tid, snapshot.action, snapshot.done, snapshot.doneAt);
+  if (snapshot.action === 'toggleReturn') {
+    syncContractStatusInMemory(snapshot.tid, snapshot.contractStatus);
+  }
+}
+
+function captureDashboardItemCheckSnapshot(scheduleId, phase) {
+  var snapshot = { scheduleId: scheduleId, phase: phase, records: [], checked: false };
+  dashboardItemsForScheduleId(scheduleId).forEach(function(item) {
+    (item.equipments || []).forEach(function(eq) {
+      if (eq.scheduleId !== scheduleId) return;
+      var record = {
+        equipment: eq,
+        checkedCheckout: !!eq.checkedCheckout,
+        checkedCheckin: !!eq.checkedCheckin
+      };
+      if (snapshot.records.length === 0) {
+        snapshot.checked = phase === 'checkout' ? record.checkedCheckout : record.checkedCheckin;
+      }
+      snapshot.records.push(record);
+    });
+  });
+  return snapshot;
+}
+
+function restoreDashboardItemCheckSnapshot(snapshot) {
+  if (!snapshot) return;
+  (snapshot.records || []).forEach(function(record) {
+    record.equipment.checkedCheckout = record.checkedCheckout;
+    record.equipment.checkedCheckin = record.checkedCheckin;
+  });
+  persistCurrentDashboardCache();
+  syncEquipmentCheckDom(snapshot.scheduleId, snapshot.phase, snapshot.checked);
+}
+
 function toggleItem(cb, scheduleId, phase) {
+  var key = dashboardItemToggleKey(scheduleId, phase);
+  if (!scheduleId || dashboardItemToggleInFlight[key]) return;
   var nowDone = !cb.classList.contains('checked');
+  var mutationToken = beginDashboardMutation();
+  var snapshot = captureDashboardItemCheckSnapshot(scheduleId, phase);
+  dashboardItemToggleInFlight[key] = true;
   syncEquipmentCheckDom(scheduleId, phase, nowDone);
   syncItemCheckInMemory(scheduleId, phase, nowDone);
+  setEquipmentCheckSaving(scheduleId, phase, true);
 
-  fetch(API_URL + '?key=village2026&action=toggleItem'
-    + '&scheduleId=' + encodeURIComponent(scheduleId)
-    + '&phase=' + phase
-    + '&done=' + (nowDone ? '1' : '0'))
+  fetch(API_URL || '', {
+    method: 'POST',
+    body: JSON.stringify({
+      key: 'village2026',
+      action: 'toggleItem',
+      scheduleId: scheduleId,
+      phase: phase,
+      done: nowDone ? '1' : '0'
+    })
+  })
     .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res && res.error) throw new Error(res.error);
+      var savedDone = res && Object.prototype.hasOwnProperty.call(res, 'checked') ? !!res.checked : nowDone;
+      syncEquipmentCheckDom(scheduleId, phase, savedDone);
+      syncItemCheckInMemory(scheduleId, phase, savedDone);
+      finishDashboardMutation(mutationToken);
+      delete dashboardItemToggleInFlight[key];
+      setEquipmentCheckSaving(scheduleId, phase, false);
+      queueDashboardSilentRefresh(1500);
+    })
     .catch(function() {
-      syncEquipmentCheckDom(scheduleId, phase, !nowDone);
-      syncItemCheckInMemory(scheduleId, phase, !nowDone);
+      restoreDashboardItemCheckSnapshot(snapshot);
+      finishDashboardMutation(mutationToken);
+      delete dashboardItemToggleInFlight[key];
+      setEquipmentCheckSaving(scheduleId, phase, false);
     });
 }
 
 function toggleTask(btn, tid, action) {
   // action = 'toggleSetup' (반출) 또는 'toggleReturn' (반납)
+  var key = dashboardTaskToggleKey(tid, action);
+  if (!tid || dashboardTaskToggleInFlight[key]) return;
   var nowDone = !btn.classList.contains('checked');
+  var mutationToken = beginDashboardMutation();
+  var snapshot = captureDashboardTaskDoneSnapshot(tid, action);
+  dashboardTaskToggleInFlight[key] = true;
   var optimisticDoneAt = nowDone ? formatDashboardClientDoneAt(new Date()) : '';
   syncTaskToggleDom(tid, action, nowDone, optimisticDoneAt);
   syncTaskDoneInMemory(tid, action, nowDone, optimisticDoneAt);
+  setTaskToggleSaving(tid, action, true);
 
-  fetch(API_URL + '?key=village2026&action=' + action + '&tid=' + encodeURIComponent(tid) + '&done=' + (nowDone ? '1' : '0'))
+  fetch(API_URL || '', {
+    method: 'POST',
+    body: JSON.stringify({
+      key: 'village2026',
+      action: action,
+      tid: tid,
+      done: nowDone ? '1' : '0'
+    })
+  })
     .then(function(r) { return r.json(); })
     .then(function(res) {
       if (res && res.error) throw new Error(res.error);
-      var doneAt = res && (res.doneAt || res.setupDoneAt || res.returnDoneAt || '');
-      syncTaskToggleDom(tid, action, nowDone, doneAt || optimisticDoneAt);
-      syncTaskDoneInMemory(tid, action, nowDone, doneAt);
+      var savedDone = nowDone;
+      if (action === 'toggleSetup' && res && Object.prototype.hasOwnProperty.call(res, 'setupDone')) savedDone = !!res.setupDone;
+      if (action === 'toggleReturn' && res && Object.prototype.hasOwnProperty.call(res, 'returnDone')) savedDone = !!res.returnDone;
+      var doneAt = savedDone ? (res && (res.doneAt || res.setupDoneAt || res.returnDoneAt || '') || optimisticDoneAt) : '';
+      syncTaskToggleDom(tid, action, savedDone, doneAt);
+      syncTaskDoneInMemory(tid, action, savedDone, doneAt);
       if (action === 'toggleReturn' && res && res.contractStatus) {
         syncContractStatusInMemory(tid, res.contractStatus);
       }
+      finishDashboardMutation(mutationToken);
+      delete dashboardTaskToggleInFlight[key];
+      setTaskToggleSaving(tid, action, false);
+      queueDashboardSilentRefresh(1500);
     })
     .catch(function() {
-      syncTaskToggleDom(tid, action, !nowDone, '');
-      syncTaskDoneInMemory(tid, action, !nowDone, '');
+      restoreDashboardTaskDoneSnapshot(snapshot);
+      finishDashboardMutation(mutationToken);
+      delete dashboardTaskToggleInFlight[key];
+      setTaskToggleSaving(tid, action, false);
     });
 }
 
