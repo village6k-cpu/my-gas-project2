@@ -29,7 +29,7 @@ const logic = read('checkAvailability.js');
     "time ? prefix + ' ' + time",
     "prefix + ' 저장중'",
     'function dashboardDoneTime(value)',
-    'syncTaskDoneInMemory(tid, action, nowDone, doneAt)'
+    'syncTaskDoneInMemory(tid, action, savedDone, doneAt)'
   ].forEach((contract) => {
     assert(
       html.includes(contract),

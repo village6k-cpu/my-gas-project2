@@ -389,6 +389,26 @@ assert.doesNotMatch(
     /function toggleTask\(btn,\s*tid,\s*action\)[\s\S]*var optimisticDoneAt[\s\S]*syncTaskToggleDom\(tid,\s*action,\s*nowDone,\s*optimisticDoneAt\)[\s\S]*fetch\(/,
     `${file} return/setup toggles must show the checked result before the slow GAS write returns`
   );
+  assert.match(
+    html,
+    /var dashboardTaskToggleInFlight\s*=\s*\{\};[\s\S]*function dashboardTaskToggleKey\(tid,\s*action\)/,
+    `${file} task toggles must track in-flight saves by trade/action`
+  );
+  assert.match(
+    html,
+    /function toggleTask\(btn,\s*tid,\s*action\)[\s\S]*beginDashboardMutation\(\)[\s\S]*captureDashboardTaskDoneSnapshot\(tid,\s*action\)[\s\S]*dashboardTaskToggleInFlight\[key\]\s*=\s*true[\s\S]*setTaskToggleSaving\(tid,\s*action,\s*true\)[\s\S]*delete dashboardTaskToggleInFlight\[key\][\s\S]*setTaskToggleSaving\(tid,\s*action,\s*false\)/,
+    `${file} task toggles must lock duplicate clicks and protect optimistic state from stale refreshes`
+  );
+  assert.match(
+    html,
+    /function toggleTask\(btn,\s*tid,\s*action\)[\s\S]*method:\s*'POST'[\s\S]*action:\s*action[\s\S]*done:\s*nowDone \? '1' : '0'/,
+    `${file} task toggles must use POST mutations instead of cache-prone GET mutations`
+  );
+  assert.match(
+    html,
+    /function toggleTask\(btn,\s*tid,\s*action\)[\s\S]*catch\(function\(\) \{[\s\S]*restoreDashboardTaskDoneSnapshot\(snapshot\)[\s\S]*finishDashboardMutation\(mutationToken\)/,
+    `${file} task toggles must rollback optimistic state on failed saves`
+  );
 
   assert.match(
     html,
@@ -404,6 +424,26 @@ assert.doesNotMatch(
     html,
     /function toggleItem\(cb,\s*scheduleId,\s*phase\)[\s\S]*syncEquipmentCheckDom\(scheduleId,\s*phase,\s*nowDone\)[\s\S]*fetch\(/,
     `${file} equipment checkbox clicks must update visible search rows before GAS returns`
+  );
+  assert.match(
+    html,
+    /var dashboardItemToggleInFlight\s*=\s*\{\};[\s\S]*function dashboardItemToggleKey\(scheduleId,\s*phase\)/,
+    `${file} equipment checkboxes must track in-flight saves by schedule/phase`
+  );
+  assert.match(
+    html,
+    /function toggleItem\(cb,\s*scheduleId,\s*phase\)[\s\S]*beginDashboardMutation\(\)[\s\S]*captureDashboardItemCheckSnapshot\(scheduleId,\s*phase\)[\s\S]*dashboardItemToggleInFlight\[key\]\s*=\s*true[\s\S]*setEquipmentCheckSaving\(scheduleId,\s*phase,\s*true\)[\s\S]*delete dashboardItemToggleInFlight\[key\][\s\S]*setEquipmentCheckSaving\(scheduleId,\s*phase,\s*false\)/,
+    `${file} equipment checkboxes must lock duplicate clicks and protect optimistic state from stale refreshes`
+  );
+  assert.match(
+    html,
+    /function toggleItem\(cb,\s*scheduleId,\s*phase\)[\s\S]*method:\s*'POST'[\s\S]*action:\s*'toggleItem'[\s\S]*done:\s*nowDone \? '1' : '0'/,
+    `${file} equipment checkboxes must use POST mutations instead of cache-prone GET mutations`
+  );
+  assert.match(
+    html,
+    /function toggleItem\(cb,\s*scheduleId,\s*phase\)[\s\S]*catch\(function\(\) \{[\s\S]*restoreDashboardItemCheckSnapshot\(snapshot\)[\s\S]*finishDashboardMutation\(mutationToken\)/,
+    `${file} equipment checkboxes must rollback optimistic state on failed saves`
   );
 
   const addBody = html.match(/function confirmAddEquip\([\s\S]*?<\/script>/);

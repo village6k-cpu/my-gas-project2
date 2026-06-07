@@ -1368,7 +1368,7 @@ function loadData(forceFresh, opts) {
         showLoading(false);
         // 캐시가 화면에 떠 있으면 조용히, 없으면 안내 토스트
         if (!cachedData) {
-          showToast(timedOut ? "응답이 지연됐어요. 다시 시도해 주세요" : "데이터를 불러오지 못했어요. 다시 시도해 주세요");
+          showToast(timedOut ? "데이터 로드 시간 초과" : "데이터를 불러오지 못했어요. 다시 시도해 주세요");
         }
       });
   }
