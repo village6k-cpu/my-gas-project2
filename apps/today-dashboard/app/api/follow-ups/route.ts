@@ -2,30 +2,33 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { dedupeFollowUpItems, duplicateFollowUpIdsForItem, shouldHideLowValueActiveItem, summarize } from "@/lib/followups/logic";
 
-// 후속조치(카톡 AI봇) 보드 API — ai_follow_up_items(public 스키마)를 로그인 사용자 토큰으로 읽고/갱신.
-// service-role 대신 authenticated RLS 사용 (supabase/followups-rls.sql 적용 필요).
+// 후속조치(카톡 AI봇) 보드 API — ai_follow_up_items(public 스키마).
+// 로그인 게이트(사용자 토큰 검증) + DB는 service-role(서버 전용, 브라우저 노출 없음).
 const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TABLE = process.env.SUPABASE_FOLLOW_UP_TABLE || "ai_follow_up_items";
 const authClient = SUPA_URL && ANON ? createClient(SUPA_URL, ANON) : null;
 
 const FIELDS =
   "id,follow_up_key,job_id,room_key,customer_name,type,priority,status,title,summary,recommended_action,suggested_reply_draft,evidence,blocking_reason,due_hint,decision_classification,decision_confidence,created_at,updated_at,completed_at";
 
-async function userToken(req: NextRequest): Promise<string | null> {
+// 로그인 검증(게이트). Supabase 미설정(로컬)이면 통과.
+async function requireUser(req: NextRequest): Promise<boolean> {
+  if (!authClient) return true;
   const h = req.headers.get("authorization") ?? "";
   const t = h.startsWith("Bearer ") ? h.slice(7) : "";
-  if (!authClient) return t || "dev"; // Supabase 미설정(로컬) → 통과
-  if (!t) return null;
+  if (!t) return false;
   const { data, error } = await authClient.auth.getUser(t);
-  return !error && data.user ? t : null;
+  return !error && !!data.user;
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-async function supaFetch(pathAndQuery: string, token: string, init: RequestInit = {}): Promise<any> {
+async function supaFetch(pathAndQuery: string, init: RequestInit = {}): Promise<any> {
+  const key = SERVICE_KEY || ANON!;
   const res = await fetch(`${SUPA_URL}/rest/v1/${pathAndQuery}`, {
     ...init,
-    headers: { apikey: ANON!, authorization: `Bearer ${token}`, "content-type": "application/json", ...(init.headers || {}) },
+    headers: { apikey: key, authorization: `Bearer ${key}`, "content-type": "application/json", ...(init.headers || {}) },
   });
   const txt = await res.text();
   let data: any = null;
@@ -41,8 +44,7 @@ async function supaFetch(pathAndQuery: string, token: string, init: RequestInit 
 }
 
 export async function GET(req: NextRequest) {
-  const token = await userToken(req);
-  if (!token) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
+  if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
   try {
     const sp = req.nextUrl.searchParams;
     const status = sp.get("status") || "active";
@@ -50,7 +52,7 @@ export async function GET(req: NextRequest) {
     const filters = [`select=${FIELDS}`, `limit=${limit}`, "order=created_at.desc"];
     if (status === "active") filters.push("status=not.in.(done,dismissed)");
     else if (status && status !== "all") filters.push(`status=eq.${encodeURIComponent(status)}`);
-    const raw = await supaFetch(`${TABLE}?${filters.join("&")}`, token);
+    const raw = await supaFetch(`${TABLE}?${filters.join("&")}`);
     const items = dedupeFollowUpItems(raw).filter((it: any) => status !== "active" || !shouldHideLowValueActiveItem(it));
     return NextResponse.json({ ok: true, updatedAt: new Date().toISOString(), summary: summarize(items), items });
   } catch (e: any) {
@@ -59,8 +61,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
-  const token = await userToken(req);
-  if (!token) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
+  if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
   try {
     const body = await req.json().catch(() => ({}));
     const id = String(body.id || "");
@@ -74,20 +75,20 @@ export async function PATCH(req: NextRequest) {
     }
     const patchBody = status === "open" ? { status, completed_at: null } : { status };
     if (ids.length) {
-      const rows = await supaFetch(`${TABLE}?id=in.(${ids.map(encodeURIComponent).join(",")})`, token, {
+      const rows = await supaFetch(`${TABLE}?id=in.(${ids.map(encodeURIComponent).join(",")})`, {
         method: "PATCH",
         headers: { prefer: "return=representation" },
         body: JSON.stringify(patchBody),
       });
       return NextResponse.json({ ok: true, items: Array.isArray(rows) ? rows : [], updatedIds: ids, updatedCount: Array.isArray(rows) ? rows.length : 0 });
     }
-    const cur = await supaFetch(`${TABLE}?select=${FIELDS}&id=eq.${encodeURIComponent(id)}`, token);
+    const cur = await supaFetch(`${TABLE}?select=${FIELDS}&id=eq.${encodeURIComponent(id)}`);
     const current = Array.isArray(cur) ? cur[0] : null;
     if (!current) return NextResponse.json({ error: "not found" }, { status: 404 });
-    const cands = await supaFetch(`${TABLE}?select=${FIELDS}&status=not.in.(done,dismissed)&limit=500&order=created_at.desc`, token);
+    const cands = await supaFetch(`${TABLE}?select=${FIELDS}&status=not.in.(done,dismissed)&limit=500&order=created_at.desc`);
     const dupIds = duplicateFollowUpIdsForItem(current, cands);
     if (!dupIds.includes(id)) dupIds.push(id);
-    const row = await supaFetch(`${TABLE}?id=in.(${dupIds.map(encodeURIComponent).join(",")})`, token, {
+    const row = await supaFetch(`${TABLE}?id=in.(${dupIds.map(encodeURIComponent).join(",")})`, {
       method: "PATCH",
       headers: { prefer: "return=representation" },
       body: JSON.stringify(patchBody),

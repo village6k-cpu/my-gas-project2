@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { loadDay, useDashboard } from "@/lib/data/store";
 import { ymd } from "@/lib/domain/status";
 import { buildItems, type GroupMode } from "@/lib/domain/timeline";
@@ -14,8 +14,8 @@ const MODES: { v: GroupMode; label: string }[] = [
   { v: "status", label: "상태별" },
 ];
 
-/** embedded=true → PC 합본 우측 패널용 (AppSwitcher 숨김, 폭 제한 없음) */
-export function ScheduleView({ embedded }: { embedded?: boolean }) {
+/** embedded=true → PC 합본 우측 패널용 (AppSwitcher 숨김, 폭 제한 없음). headerLeft=토글 등 */
+export function ScheduleView({ embedded, headerLeft }: { embedded?: boolean; headerLeft?: ReactNode }) {
   const [today, setToday] = useState("");
   const [mode, setMode] = useState<GroupMode>("set");
   const [q, setQ] = useState("");
@@ -39,7 +39,7 @@ export function ScheduleView({ embedded }: { embedded?: boolean }) {
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
         <div className="flex items-center justify-between px-4 pt-2.5">
           {embedded ? (
-            <span className="text-[15px] font-black tracking-tight text-brand-700">빌리지 스케줄</span>
+            headerLeft ?? <span className="text-[15px] font-black tracking-tight text-brand-700">빌리지 스케줄</span>
           ) : (
             <AppSwitcher active="schedule" />
           )}

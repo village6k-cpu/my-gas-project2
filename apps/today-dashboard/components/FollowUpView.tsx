@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { TYPE_LABELS } from "@/lib/followups/logic";
 import { AppSwitcher } from "@/components/AppSwitcher";
@@ -49,7 +49,7 @@ const STATUS_TABS: { v: "active" | "all" | "done"; label: string }[] = [
   { v: "done", label: "완료" },
 ];
 
-export function FollowUpView() {
+export function FollowUpView({ embedded, headerLeft }: { embedded?: boolean; headerLeft?: ReactNode } = {}) {
   const [status, setStatus] = useState<"active" | "all" | "done">("active");
   const [data, setData] = useState<{ items: FU[]; summary: any } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -96,10 +96,10 @@ export function FollowUpView() {
   const s = data?.summary;
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-2xl flex-col bg-[#f4f5f7]">
+    <div className={`flex flex-col bg-[#f4f5f7] ${embedded ? "min-h-full" : "mx-auto min-h-screen max-w-2xl"}`}>
       <header className="safe-top sticky top-0 z-30 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
         <div className="flex items-center justify-between px-4 pt-2.5">
-          <AppSwitcher active="follow" />
+          {headerLeft ?? <AppSwitcher active="follow" />}
           <button onClick={() => load()} className="tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft">
             <Refresh className="h-4 w-4" />
           </button>
