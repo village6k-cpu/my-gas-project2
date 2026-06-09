@@ -9,7 +9,7 @@ export function AppSwitcher({ active }: { active: "today" | "schedule" }) {
   const off = "px-3 py-1 text-ink-faint";
   return (
     <div className="flex items-center gap-2">
-      <div className="flex items-center gap-1 rounded-full bg-black/[0.05] p-0.5 text-[13px] font-bold">
+      <div className="flex items-center gap-1 rounded-full bg-black/[0.05] p-0.5 text-[13px] font-bold lg:hidden">
         <Link href="/" className={active === "today" ? on : off}>
           오늘 일정
         </Link>
