@@ -1,5 +1,7 @@
 .claude/
 node_modules/
+.next/
+*.tsbuildinfo
 .DS_Store
 .gstack/
 .superpowers/
