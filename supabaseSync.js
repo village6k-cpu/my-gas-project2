@@ -162,6 +162,7 @@ function buildSupabaseTrades_(tids) {
         set_name: e2.setName || null,
         is_set_header: !!e2.isHeader,
         is_component: !!e2.isComponent,
+        category: e2.category || null,
         checkout_state: e2.checkedCheckout ? 'taken' : 'pending'
       });
     }

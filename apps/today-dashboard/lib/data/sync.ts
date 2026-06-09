@@ -125,7 +125,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
     isSetHeader: !!e.isHeader,
     isComponent: !!e.isComponent,
     emphasize: EMPH.test(e.name) || undefined,
-    category: categoryOf(e.name) ?? undefined,
+    category: e.category || categoryOf(e.name) || undefined, // 장비마스터 실제 카테고리 우선
     checkoutState: e.checkedCheckout ? "taken" : "pending",
   }));
   const returnCounts: Record<string, ReturnCount> = {};

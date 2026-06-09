@@ -819,6 +819,19 @@ function getDashboardData(targetDate, skipCache, options) {
   const contractSheet = ss.getSheetByName('계약마스터');
   const setSheet = ss.getSheetByName('세트마스터');
 
+  // 장비명 → 카테고리 (장비마스터 C열=카테고리, D열=장비명) — 반납 분류용
+  var equipCat = {};
+  try {
+    var masterSheet_ = ss.getSheetByName('장비마스터');
+    if (masterSheet_ && masterSheet_.getLastRow() > 1) {
+      var mRows_ = masterSheet_.getRange(2, 3, masterSheet_.getLastRow() - 1, 2).getValues(); // C, D
+      for (var mci = 0; mci < mRows_.length; mci++) {
+        var mcName = String(mRows_[mci][1] || '').trim();
+        if (mcName) equipCat[mcName] = String(mRows_[mci][0] || '').trim();
+      }
+    }
+  } catch (mcErr) {}
+
   if (!schedSheet || schedSheet.getLastRow() < 2) {
     return {
       date: today,
@@ -925,6 +938,7 @@ function getDashboardData(targetDate, skipCache, options) {
         isHeader: eq.isHeader,                                       // 단품 또는 세트 대표행
         isSet: eq.isHeader && !!setsWithComponents[eq.name],          // 세트 대표(구성품 있음)
         isComponent: !!eq.setName && !eq.isHeader,                    // 세트 구성품
+        category: equipCat[eq.name] || '',                           // 장비마스터 카테고리(반납 분류용)
         checkedCheckout: props['itemCheck_' + eq.scheduleId + '_checkout'] === '1',
         checkedCheckin:  props['itemCheck_' + eq.scheduleId + '_checkin']  === '1'
       };

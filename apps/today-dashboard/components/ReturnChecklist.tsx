@@ -3,12 +3,26 @@
 import { useState } from "react";
 import type { Trade } from "@/lib/domain/types";
 import { aggregateReturns, missingOf, type AggReturn } from "@/lib/domain/status";
+import { coarseGroup } from "@/lib/domain/catalog";
 import { setReturnCount } from "@/lib/data/store";
 import { Check } from "./icons";
 
 export function ReturnChecklist({ trade }: { trade: Trade }) {
-  // 시트 순서(세트 단위로 자연 묶임) 그대로 — 억지 장비/악세사리 분류 제거
-  const rows = aggregateReturns(trade).map((a) => <ReturnRow key={a.name} tradeId={trade.tradeId} a={a} />);
+  const aggs = aggregateReturns(trade);
+  const rows: React.ReactNode[] = [];
+  let lastG = "";
+  for (const a of aggs) {
+    const g = coarseGroup(a.category);
+    if (g !== lastG) {
+      rows.push(
+        <li key={`h-${g}`} className={`px-3 py-1 text-[11px] font-bold ${g === "장비" ? "bg-black/[0.03] text-ink-soft" : "bg-amber-50 text-amber-700"}`}>
+          {g}
+        </li>,
+      );
+      lastG = g;
+    }
+    rows.push(<ReturnRow key={a.name} tradeId={trade.tradeId} a={a} />);
+  }
   return (
     <div className="mt-1.5">
       <p className="mb-1.5 px-0.5 text-[12px] text-ink-mute">
@@ -25,10 +39,11 @@ function ReturnRow({ tradeId, a }: { tradeId: string; a: AggReturn }) {
   const missing = missingOf(a);
   const allGood = good === a.expected && damaged === 0 && lost === 0;
   const touched = good + damaged + lost > 0;
+  const acc = coarseGroup(a.category) === "악세사리·라인";
   const set = (p: Partial<typeof a.count>) => setReturnCount(tradeId, a.name, p);
 
   return (
-    <li>
+    <li className={acc ? "bg-amber-50/30" : ""}>
       <div className="flex items-center gap-3 px-3 py-3">
         {/* 큰 네모 체크박스 = 회수 완료 */}
         <button
