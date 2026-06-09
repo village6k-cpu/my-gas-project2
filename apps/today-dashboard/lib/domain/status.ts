@@ -1,7 +1,6 @@
 // 상태/시간 헬퍼 — 한국어 시간 정렬, 확인필요 집계, 인계 요약
 
 import type { ReturnCount, Trade, TabKey } from "./types";
-import { coarseRank } from "./catalog";
 
 const WEEKDAY = ["일", "월", "화", "수", "목", "금", "토"];
 
@@ -59,32 +58,30 @@ export function phaseForDate(t: Trade, date: string): "checkout" | "checkin" | "
 // ── 반납: 품목 종류별 합산 ──────────────────────────────────────
 export interface AggReturn {
   name: string;
+  scheduleId: string;
   category?: string;
-  expected: number; // 나간 총 수량(부분픽업 반영, 제외 제외)
-  onsiteQty: number; // 그중 현장 추가분
-  count: ReturnCount; // 반납 합산
+  expected: number; // 나간 수량(부분픽업 반영)
+  onsiteQty: number;
+  count: ReturnCount; // 반납 상태
 }
 
 const EMPTY_RC: ReturnCount = { good: 0, damaged: 0, lost: 0 };
 
-export function rcOf(t: Trade, name: string): ReturnCount {
-  return t.returnCounts?.[name] ?? EMPTY_RC;
+/** 반납 상태는 scheduleId 단위(returnCounts[scheduleId])로 기록 — 세트 구성품 개별 추적 */
+export function rcOf(t: Trade, scheduleId: string): ReturnCount {
+  return t.returnCounts?.[scheduleId] ?? EMPTY_RC;
 }
 
-/** 거래의 나간 품목을 품목명별로 합산 + 카테고리 그룹 정렬 */
+/** 거래의 나간 품목을 줄(scheduleId) 단위로 — 세트 묶음/시트순서 보존, 집계·진행도용 */
 export function aggregateReturns(t: Trade): AggReturn[] {
-  const map = new Map<string, AggReturn>();
+  const out: AggReturn[] = [];
   for (const e of t.equipments) {
     if (e.isSetHeader) continue;
     if (e.checkoutState === "excluded") continue; // 안 나감 → 받을 것 없음
     const qty = e.takenQty ?? e.qty;
-    const cur = map.get(e.name) ?? { name: e.name, category: e.category, expected: 0, onsiteQty: 0, count: rcOf(t, e.name) };
-    cur.expected += qty;
-    if (e.onsite) cur.onsiteQty += qty;
-    map.set(e.name, cur);
+    out.push({ name: e.name, scheduleId: e.scheduleId, category: e.category, expected: qty, onsiteQty: e.onsite ? qty : 0, count: rcOf(t, e.scheduleId) });
   }
-  // 장비 먼저, 악세사리·라인 다음 (같은 그룹 안은 시트 순서 유지 — V8 stable sort)
-  return [...map.values()].sort((a, b) => coarseRank(a.category) - coarseRank(b.category));
+  return out;
 }
 
 export function missingOf(a: AggReturn): number {

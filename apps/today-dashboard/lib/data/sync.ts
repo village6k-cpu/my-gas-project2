@@ -132,8 +132,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
   for (const e of it.equipments ?? []) {
     if (e.isHeader) continue;
     if (e.checkedCheckin) {
-      const k = e.name;
-      returnCounts[k] = { good: (returnCounts[k]?.good ?? 0) + (Number(e.qty) || 1), damaged: 0, lost: 0 };
+      returnCounts[e.scheduleId] = { good: Number(e.qty) || 1, damaged: 0, lost: 0 }; // scheduleId 단위
     }
   }
   return {

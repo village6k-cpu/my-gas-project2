@@ -260,13 +260,21 @@ export function removeItem(tradeId: string, scheduleId: string) {
   flashSave(tradeId);
 }
 
-// ── 반납: 품목 종류별 합산 카운트 ───────────────────────────────
-export function setReturnCount(tradeId: string, name: string, patch: Partial<ReturnCount>) {
+// ── 반납: 품목(scheduleId) 단위 카운트 + 시트 write-back ────────────
+export function setReturnCount(tradeId: string, scheduleId: string, patch: Partial<ReturnCount>) {
+  let writeback: boolean | undefined;
   mutateTrade(tradeId, (t) => {
-    const cur = t.returnCounts?.[name] ?? { good: 0, damaged: 0, lost: 0 };
-    return { ...t, returnCounts: { ...t.returnCounts, [name]: { ...cur, ...patch } } };
+    const item = t.equipments.find((e) => e.scheduleId === scheduleId);
+    const expected = item ? item.takenQty ?? item.qty : 0;
+    const cur = t.returnCounts?.[scheduleId] ?? { good: 0, damaged: 0, lost: 0 };
+    const next = { ...cur, ...patch };
+    const wasIn = expected > 0 && cur.good + cur.damaged + cur.lost >= expected;
+    const isIn = expected > 0 && next.good + next.damaged + next.lost >= expected;
+    if (wasIn !== isIn) writeback = isIn; // 줄이 전부 처리됨 ↔ 해제 전환 시에만 시트 반영
+    return { ...t, returnCounts: { ...t.returnCounts, [scheduleId]: next } };
   });
   flashSave(tradeId);
+  if (writeback !== undefined) gasWrite("toggleItem", { scheduleId, phase: "checkin", done: writeback });
 }
 
 // ── 결제·정산 (개고생2.0 회계로 write-back 대상) ────────────────
