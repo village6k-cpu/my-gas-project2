@@ -2,6 +2,7 @@
 import { supabase } from "../supabase/client";
 import type { HandoverNote, Trade } from "../domain/types";
 import { itemFromRow, itemToRow, noteToRow, tradeFromRow, tradeToRow } from "./mappers";
+import { normalizeItems } from "../domain/catalog";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -16,7 +17,7 @@ export async function fetchAllTrades(): Promise<Trade[]> {
   if (ie) throw ie;
   const byTrade = new Map<string, any[]>();
   for (const it of items ?? []) (byTrade.get(it.trade_id) ?? byTrade.set(it.trade_id, []).get(it.trade_id)!).push(it);
-  return (trades ?? []).map((r: any) => tradeFromRow(r, (byTrade.get(r.trade_id) ?? []).map(itemFromRow)));
+  return (trades ?? []).map((r: any) => tradeFromRow(r, normalizeItems((byTrade.get(r.trade_id) ?? []).map(itemFromRow))));
 }
 
 export async function fetchNotes(): Promise<HandoverNote[]> {

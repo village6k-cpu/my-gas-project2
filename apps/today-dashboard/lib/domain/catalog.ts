@@ -1,5 +1,6 @@
 // 장비 카탈로그 (프로토타입 시드). 실제로는 목록/장비마스터/세트마스터에서 옴.
 // 현장추가 드롭다운 + 카테고리(시각 구분/재고연동)의 소스.
+import type { EquipmentItem } from "./types";
 
 export type Category =
   | "바디"
@@ -157,6 +158,31 @@ export function coarseGroup(c?: string): Coarse {
 }
 export function coarseRank(c?: string): number {
   return coarseGroup(c) === "장비" ? 0 : 1;
+}
+
+/** 세트명이 번들 라벨(=실제 장비 아님): 풀세트/패키지 류 */
+const BUNDLE_NAME = /풀세트|패키지/;
+
+/**
+ * Supabase 읽기 시 세트 헤더 판정 + 카테고리 보정 (단일 소스 — GAS/sync가 뭘 저장했든 여기서 결정).
+ * 저장된 isSetHeader는 '헤더 여부(isHeader: 단품 또는 세트 대표행)'. 이를 '라벨(숨김)' 의미로 재계산:
+ *  - 세트 대표행인데 본체 구성품이 따로 있거나(이름이 세트명의 접두) 풀세트/패키지면 → 라벨(숨김)
+ *  - 아니면(세트명 자체가 대표 장비) 또는 단품 → 노출
+ */
+export function normalizeItems(items: EquipmentItem[]): EquipmentItem[] {
+  const bodyComp = new Set<string>(); // 본체 구성품(이름이 세트명의 접두)을 가진 세트명
+  for (const e of items) {
+    if (e.isComponent && e.setName && e.setName.startsWith(e.name) && e.name !== e.setName) {
+      bodyComp.add(e.setName);
+    }
+  }
+  return items.map((e) => {
+    const cat = e.category ?? categoryOf(e.name);
+    if (!e.isSetHeader) return cat === e.category ? e : { ...e, category: cat };
+    const isLabel = !!e.setName && (BUNDLE_NAME.test(e.name) || bodyComp.has(e.setName));
+    // 노출되는 대표 장비는 '세트' 카테고리로(장비 그룹에 묶이게), 라벨은 카테고리 보정만
+    return { ...e, isSetHeader: isLabel, category: isLabel ? cat : cat ?? "세트" };
+  });
 }
 
 // 총 보유 수량(충돌 판정용). 실제론 장비마스터 E열. 프로토타입 기본값.
