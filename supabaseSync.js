@@ -5,13 +5,36 @@
  */
 
 function SUPA_CFG_() {
-  // RLS 잠금 후엔 서비스키(secret)로 RLS 우회. 우선순위: SERVICE_KEY > ANON_KEY > 공개키 기본값.
-  // 서비스키는 비밀 → 코드에 두지 말고 initSupabaseConfig()로 Script Property에만 저장.
+  // 봇 계정 로그인 방식: publishable 키(apikey, 공개·차단없음) + 봇 user JWT(Authorization).
+  // secret/service 키는 GAS(브라우저로 오인)에서 전부 차단되므로 안 씀.
   var p = PropertiesService.getScriptProperties();
   return {
     url: p.getProperty('SUPABASE_URL') || 'https://tedffwpijiylklfuzkua.supabase.co',
-    key: p.getProperty('SUPABASE_SERVICE_KEY') || p.getProperty('SUPABASE_ANON_KEY') || 'sb_publishable_bSfUmM7z0scyXEPEQvIfWQ_Cx7fyuHg'
+    apikey: p.getProperty('SUPABASE_ANON_KEY') || 'sb_publishable_bSfUmM7z0scyXEPEQvIfWQ_Cx7fyuHg',
+    botEmail: p.getProperty('SUPABASE_BOT_EMAIL'),
+    botPassword: p.getProperty('SUPABASE_BOT_PASSWORD')
   };
+}
+
+// 봇 계정으로 로그인해 access_token 획득 (캐시 + 만료 시 재로그인). user JWT라 secret-키 차단에 안 걸림.
+function supaToken_(cfg) {
+  var p = PropertiesService.getScriptProperties();
+  var cached = p.getProperty('SUPA_TOKEN');
+  var exp = Number(p.getProperty('SUPA_TOKEN_EXP') || 0);
+  if (cached && Date.now() < exp - 60000) return cached;
+  if (!cfg.botEmail || !cfg.botPassword) { Logger.log('봇 계정 미설정 — initSupabaseConfig 실행 필요'); return null; }
+  var res = UrlFetchApp.fetch(cfg.url + '/auth/v1/token?grant_type=password', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { apikey: cfg.apikey },
+    payload: JSON.stringify({ email: cfg.botEmail, password: cfg.botPassword }),
+    muteHttpExceptions: true
+  });
+  if (res.getResponseCode() >= 300) { Logger.log('봇 로그인 실패: ' + res.getContentText().slice(0, 200)); return null; }
+  var j = JSON.parse(res.getContentText());
+  p.setProperty('SUPA_TOKEN', j.access_token);
+  p.setProperty('SUPA_TOKEN_EXP', String(Date.now() + ((j.expires_in || 3600) * 1000)));
+  return j.access_token;
 }
 
 /** 설치형 onEdit (별도 트리거) — 편집된 거래ID만 dirty 목록에 표시. 절대 편집을 막지 않음. */
@@ -37,7 +60,7 @@ function onEditSupabaseMark(e) {
 /** 1분 트리거 — dirty 거래들을 빌드해 Supabase upsert 후 클리어. */
 function flushDirtyToSupabase() {
   var cfg = SUPA_CFG_();
-  if (!cfg.url || !cfg.key) { Logger.log('Supabase 설정 없음'); return; }
+  if (!cfg.url || !cfg.apikey) { Logger.log('Supabase 설정 없음'); return; }
   var p = PropertiesService.getScriptProperties();
   var dirty = {};
   try { dirty = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
@@ -149,13 +172,15 @@ function buildSupabaseTrades_(tids) {
 /** Supabase REST 벌크 upsert (anon 키, merge-duplicates). */
 function supaUpsert_(cfg, table, rows, conflict) {
   if (!rows.length) return;
+  var token = supaToken_(cfg);
+  if (!token) { Logger.log('봇 토큰 없음 → 동기화 중단'); return; }
   var res = UrlFetchApp.fetch(cfg.url + '/rest/v1/' + table + '?on_conflict=' + conflict, {
     method: 'post',
     contentType: 'application/json',
     headers: {
-      apikey: cfg.key,
-      Authorization: 'Bearer ' + cfg.key,
-      'Content-Profile': 'village', // village 스키마 지정 (public 아님)
+      apikey: cfg.apikey,                 // publishable (공개·차단 없음)
+      Authorization: 'Bearer ' + token,   // 봇 user JWT (authenticated 역할 → RLS auth_rw 통과)
+      'Content-Profile': 'village',       // village 스키마 지정 (public 아님)
       'Accept-Profile': 'village',
       Prefer: 'resolution=merge-duplicates,return=minimal'
     },
@@ -190,7 +215,7 @@ function fullSyncToSupabase() {
   var tids = {};
   (tl.items || []).forEach(function (it) { if (it.tid) tids[it.tid] = 1; });
   var cfg = SUPA_CFG_();
-  if (!cfg.url || !cfg.key) { Logger.log('Supabase 설정 없음'); return; }
+  if (!cfg.url || !cfg.apikey) { Logger.log('Supabase 설정 없음'); return; }
   var built = buildSupabaseTrades_(Object.keys(tids));
   supaUpsert_(cfg, 'trades', built.trades, 'trade_id');
   supaUpsert_(cfg, 'schedule_items', built.items, 'schedule_id');
@@ -200,19 +225,19 @@ function fullSyncToSupabase() {
 /* ───────────── 스크립트 속성 관리 (속성 50개+ 라 UI 읽기전용일 때 사용) ───────────── */
 
 /**
- * Supabase 서비스키(secret)를 저장(UI 읽기전용 우회 + RLS 잠금 후 동기화용).
- * RLS를 잠그면 publishable 키로는 못 쓰므로 service_role(secret) 키가 필요함.
- * 사용법: Supabase Settings>API Keys의 secret(service_role) 키를 아래 SERVICE_KEY에 붙여넣고 ▶ 실행 → 끝나면 다시 비우세요.
+ * 동기화용 봇 계정(이메일+비번)을 저장. GAS가 이걸로 로그인해 user JWT로 씀 → secret 키 차단 회피.
+ * 사용법: Supabase에 만든 계정(직원 계정 재사용 가능)을 아래에 넣고 ▶ 실행 → 끝나면 비밀번호 줄 비우세요.
  */
 function initSupabaseConfig() {
   var URL = 'https://tedffwpijiylklfuzkua.supabase.co';
-  var SERVICE_KEY = ''; // ← Supabase secret(service_role) 키 붙여넣고 실행, 실행 후 다시 '' 로 비우기 (비밀키라 코드에 남기면 안 됨)
-  if (!SERVICE_KEY) { Logger.log('⚠️ SERVICE_KEY를 채우고 다시 실행하세요 (Supabase Settings>API의 secret 키)'); return; }
-  PropertiesService.getScriptProperties().setProperties({
-    SUPABASE_URL: URL,
-    SUPABASE_SERVICE_KEY: SERVICE_KEY
-  }, false); // false = 기존 속성 유지(삭제 안 함)
-  Logger.log('✅ 서비스키 저장 완료. 이제 위 SERVICE_KEY 줄을 다시 비워 저장하세요. (RLS 잠금 후에도 동기화 동작)');
+  var BOT_EMAIL = '';    // ← 동기화용 계정 이메일 (직원 계정 재사용 OK)
+  var BOT_PASSWORD = ''; // ← 그 계정 비밀번호 (실행 후 이 줄 비우기)
+  if (!BOT_EMAIL || !BOT_PASSWORD) { Logger.log('⚠️ BOT_EMAIL, BOT_PASSWORD 둘 다 채우고 실행하세요'); return; }
+  var p = PropertiesService.getScriptProperties();
+  p.setProperties({ SUPABASE_URL: URL, SUPABASE_BOT_EMAIL: BOT_EMAIL, SUPABASE_BOT_PASSWORD: BOT_PASSWORD }, false);
+  p.deleteProperty('SUPABASE_SERVICE_KEY'); // 차단됐던 secret 키 제거
+  p.deleteProperty('SUPA_TOKEN'); p.deleteProperty('SUPA_TOKEN_EXP'); // 토큰 캐시 초기화
+  Logger.log('✅ 봇 계정 저장 완료. 이제 위 BOT_PASSWORD 줄을 다시 비워 저장하세요.');
 }
 
 /** 진단(읽기전용): 속성이 몇 개인지, 종류별 개수, 보존 대상(설정값) 표시 */
