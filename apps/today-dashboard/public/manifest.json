@@ -1,0 +1,16 @@
+{
+  "name": "빌리지 · 오늘 일정",
+  "short_name": "빌리지",
+  "description": "빌리지 렌탈 운영 대시보드",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f5f7",
+  "theme_color": "#4f46e5",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

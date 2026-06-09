@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: #f4f5f7;
+  color: #16181d;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior-y: none;
+}
+
+/* 모바일 안전영역 */
+.safe-bottom {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);
+}
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+/* 스크롤바 슬림 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(16, 18, 29, 0.16);
+  border-radius: 99px;
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-pop {
+  animation: pop-in 0.16s ease-out;
+}
+
+@keyframes toast-up {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 10px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+.animate-toast {
+  animation: toast-up 0.18s ease-out;
+}
+
+@keyframes conflict-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(235, 87, 87, 0.5); }
+  50% { box-shadow: 0 0 0 3px rgba(235, 87, 87, 0); }
+}
+.conflict {
+  outline: 2px solid #eb5757;
+  outline-offset: -1px;
+  animation: conflict-pulse 1.6s ease-in-out infinite;
+}
+
+/* 체크 토글 눌림 */
+.tap {
+  transition: transform 0.08s ease, background-color 0.12s ease, border-color 0.12s ease;
+}
+.tap:active {
+  transform: scale(0.97);
+}
