@@ -151,15 +151,13 @@ export function categoryRank(c?: string): number {
 }
 
 // 거친 2분류 (직원 직관용). 세세한 카테고리는 정렬에만 사용.
-const GEAR_CATS = new Set<string>([
-  // 프로토타입 카탈로그 명
-  "바디", "렌즈", "세트", "짐벌·리그", "조명", "음향", "모니터", "삼각대·서포트",
-  // 장비마스터 실제 카테고리 (렌즈·조명·모니터는 이름 동일)
-  "카메라", "로닌/짐벌", "오디오", "삼각대",
-]);
+// 카테고리명에 이 키워드가 들어가면 '장비'(메인), 아니면 '악세사리·라인'.
+// 키워드 포함 방식 — "100볼 삼각대", "로닌/짐벌" 같은 변형도 잡음.
+const GEAR_KEYWORDS = ["카메라", "바디", "렌즈", "짐벌", "로닌", "조명", "오디오", "음향", "모니터", "삼각대", "세트", "그립", "리그", "서포트", "슬라이더"];
 export type Coarse = "장비" | "악세사리·라인";
 export function coarseGroup(c?: string): Coarse {
-  return c != null && GEAR_CATS.has(c) ? "장비" : "악세사리·라인";
+  if (!c) return "악세사리·라인";
+  return GEAR_KEYWORDS.some((k) => c.includes(k)) ? "장비" : "악세사리·라인";
 }
 export function coarseRank(c?: string): number {
   return coarseGroup(c) === "장비" ? 0 : 1;
