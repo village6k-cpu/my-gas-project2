@@ -2,11 +2,12 @@
 
 import { useState } from "react";
 import type { EquipmentItem, ReturnCount, Trade } from "@/lib/domain/types";
-import { rcOf } from "@/lib/domain/status";
+import { groupBySet, rcOf } from "@/lib/domain/status";
 import { setReturnCount, setItemMemo } from "@/lib/data/store";
+import { SetBox, LooseList } from "./SetBox";
 import { Check } from "./icons";
 
-// 반납도 반출과 동일하게 세트 묶음(세트 라벨 + 구성품 줄) 시트순서로. 줄(scheduleId) 단위로 회수 체크.
+// 반납도 반출과 동일하게 세트별 구획(세트명 헤더 + 구성품). 줄(scheduleId) 단위로 회수 체크.
 export function ReturnChecklist({ trade }: { trade: Trade }) {
   const booked = trade.equipments.filter((e) => !e.onsite && e.checkoutState !== "excluded");
   const onsite = trade.equipments.filter((e) => e.onsite && e.checkoutState !== "excluded");
@@ -16,28 +17,39 @@ export function ReturnChecklist({ trade }: { trade: Trade }) {
       <p className="mb-1.5 px-0.5 text-[12px] text-ink-mute">
         다 받은 줄은 왼쪽 <span className="font-bold text-checkin-fg">네모를 체크</span>하세요. 개수가 안 맞으면 줄을 눌러 수정.
       </p>
-      <ul className="divide-y divide-black/5 overflow-hidden rounded-xl bg-white ring-1 ring-black/5">
-        {booked.map((e) => (e.isSetHeader ? <SetLabel key={e.scheduleId} name={e.name} /> : <ReturnRow key={e.scheduleId} t={trade} e={e} />))}
-      </ul>
+      <div className="space-y-2">
+        {groupBySet(booked).map((g) =>
+          g.setName ? (
+            <SetBox key={g.key} name={g.setName}>
+              {g.rows.map((e) => <ReturnRow key={e.scheduleId} t={trade} e={e} />)}
+            </SetBox>
+          ) : (
+            <LooseList key={g.key}>
+              {g.rows.map((e) => <ReturnRow key={e.scheduleId} t={trade} e={e} />)}
+            </LooseList>
+          ),
+        )}
+      </div>
 
       {onsite.length > 0 && (
         <div className="mt-2 rounded-xl border border-brand-200 bg-brand-50/40 p-1.5">
           <div className="px-1.5 py-1 text-[11.5px] font-bold text-brand-700">현장 추가 {onsite.length}건</div>
-          <ul className="divide-y divide-black/5 overflow-hidden rounded-lg bg-white ring-1 ring-black/5">
-            {onsite.map((e) => (e.isSetHeader ? <SetLabel key={e.scheduleId} name={e.name} /> : <ReturnRow key={e.scheduleId} t={trade} e={e} />))}
-          </ul>
+          <div className="space-y-1.5">
+            {groupBySet(onsite).map((g) =>
+              g.setName ? (
+                <SetBox key={g.key} name={g.setName}>
+                  {g.rows.map((e) => <ReturnRow key={e.scheduleId} t={trade} e={e} />)}
+                </SetBox>
+              ) : (
+                <LooseList key={g.key}>
+                  {g.rows.map((e) => <ReturnRow key={e.scheduleId} t={trade} e={e} />)}
+                </LooseList>
+              ),
+            )}
+          </div>
         </div>
       )}
     </div>
-  );
-}
-
-function SetLabel({ name }: { name: string }) {
-  return (
-    <li className="flex items-center gap-2 bg-black/[0.025] px-3 py-1.5">
-      <span className="inline-flex h-5 items-center rounded-md bg-brand-100 px-1.5 text-[10px] font-bold text-brand-700">SET</span>
-      <span className="text-[13px] font-semibold text-ink-soft">{name}</span>
-    </li>
   );
 }
 
@@ -52,7 +64,7 @@ function ReturnRow({ t, e }: { t: Trade; e: EquipmentItem }) {
 
   return (
     <li>
-      <div className={`flex items-center gap-3 px-3 py-2.5 ${e.isComponent ? "pl-6" : ""}`}>
+      <div className="flex items-center gap-3 px-3 py-2.5">
         <button
           onClick={() => set(allGood ? { good: 0, damaged: 0, lost: 0 } : { good: expected - damaged - lost })}
           aria-label="회수 완료 체크"

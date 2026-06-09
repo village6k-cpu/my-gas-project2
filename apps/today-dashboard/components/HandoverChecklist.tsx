@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
-import { handoverSummary } from "@/lib/domain/status";
+import { groupBySet, handoverSummary } from "@/lib/domain/status";
 import { categoryOf, coarseGroup, searchCatalog, SET_COMPOSITION, type CatalogItem } from "@/lib/domain/catalog";
+import { SetBox, LooseList } from "./SetBox";
 import {
   addOnsiteItems,
   removeItem,
@@ -42,19 +43,24 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
         <ReturnChecklist trade={trade} />
       ) : (
         <>
-          {/* 예약분 */}
-          <ul className="divide-y divide-black/5 overflow-hidden rounded-xl bg-black/[0.015] ring-1 ring-black/5">
-            {booked.map((e) =>
-              e.isSetHeader ? (
-                <li key={e.scheduleId} className="flex items-center gap-2 bg-black/[0.025] px-3 py-1.5">
-                  <span className="inline-flex h-5 items-center rounded-md bg-brand-100 px-1.5 text-[10px] font-bold text-brand-700">SET</span>
-                  <span className="text-[13px] font-semibold text-ink-soft">{e.name}</span>
-                </li>
+          {/* 예약분 — 세트별 구획(세트명 헤더) */}
+          <div className="space-y-2">
+            {groupBySet(booked).map((g) =>
+              g.setName ? (
+                <SetBox key={g.key} name={g.setName}>
+                  {g.rows.map((e) => (
+                    <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                  ))}
+                </SetBox>
               ) : (
-                <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                <LooseList key={g.key}>
+                  {g.rows.map((e) => (
+                    <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                  ))}
+                </LooseList>
               ),
             )}
-          </ul>
+          </div>
 
           {/* 현장 추가 — 별도 그룹 */}
           <div className="mt-2 rounded-xl border border-brand-200 bg-brand-50/40 p-1.5">
@@ -63,19 +69,30 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
               <span className="text-brand-700/70">{onsite.length}건 · 라인·암·악세사리 등</span>
             </div>
             {onsite.length > 0 && (
-              <ul className="divide-y divide-black/5 overflow-hidden rounded-lg bg-white ring-1 ring-black/5">
-                {onsite.map((e) =>
-                  e.isSetHeader ? (
-                    <li key={e.scheduleId} className="flex items-center gap-2 bg-black/[0.025] px-3 py-1.5">
-                      <span className="inline-flex h-5 items-center rounded-md bg-brand-100 px-1.5 text-[10px] font-bold text-brand-700">SET</span>
-                      <span className="flex-1 text-[13px] font-semibold text-ink-soft">{e.name}</span>
-                      <button onClick={() => removeItem(trade.tradeId, e.scheduleId)} className="tap px-1 text-ink-faint">✕</button>
-                    </li>
+              <div className="space-y-1.5">
+                {groupBySet(onsite).map((g) =>
+                  g.setName ? (
+                    <SetBox
+                      key={g.key}
+                      name={g.setName}
+                      onRemove={() => {
+                        if (g.header) removeItem(trade.tradeId, g.header.scheduleId);
+                        g.rows.forEach((r) => removeItem(trade.tradeId, r.scheduleId));
+                      }}
+                    >
+                      {g.rows.map((e) => (
+                        <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                      ))}
+                    </SetBox>
                   ) : (
-                    <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                    <LooseList key={g.key}>
+                      {g.rows.map((e) => (
+                        <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                      ))}
+                    </LooseList>
                   ),
                 )}
-              </ul>
+              </div>
             )}
             {adding ? (
               <OnsiteCombobox tradeId={trade.tradeId} onClose={() => setAdding(false)} />

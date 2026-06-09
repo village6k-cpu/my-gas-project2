@@ -1,6 +1,6 @@
 // 상태/시간 헬퍼 — 한국어 시간 정렬, 확인필요 집계, 인계 요약
 
-import type { ReturnCount, Trade, TabKey } from "./types";
+import type { EquipmentItem, ReturnCount, Trade, TabKey } from "./types";
 
 const WEEKDAY = ["일", "월", "화", "수", "목", "금", "토"];
 
@@ -82,6 +82,35 @@ export function aggregateReturns(t: Trade): AggReturn[] {
     out.push({ name: e.name, scheduleId: e.scheduleId, category: e.category, expected: qty, onsiteQty: e.onsite ? qty : 0, count: rcOf(t, e.scheduleId) });
   }
   return out;
+}
+
+/** 품목을 세트 단위로 묶음 (반출/반납 공통). 세트명 있는 것끼리, 단품은 연속해서 한 묶음. */
+export interface SetGroup {
+  key: string;
+  setName?: string; // 있으면 세트 박스, 없으면 단품 묶음
+  header?: EquipmentItem; // 세트 대표행
+  rows: EquipmentItem[]; // 구성품/단품
+}
+export function groupBySet(items: EquipmentItem[]): SetGroup[] {
+  const groups: SetGroup[] = [];
+  const bySet = new Map<string, SetGroup>();
+  for (const e of items) {
+    if (e.setName) {
+      let g = bySet.get(e.setName);
+      if (!g) {
+        g = { key: "set:" + e.setName, setName: e.setName, rows: [] };
+        bySet.set(e.setName, g);
+        groups.push(g);
+      }
+      if (e.isSetHeader) g.header = e;
+      else g.rows.push(e);
+    } else {
+      const last = groups[groups.length - 1];
+      if (last && !last.setName) last.rows.push(e); // 연속 단품 합침
+      else groups.push({ key: "loose:" + e.scheduleId, rows: [e] });
+    }
+  }
+  return groups;
 }
 
 export function missingOf(a: AggReturn): number {
