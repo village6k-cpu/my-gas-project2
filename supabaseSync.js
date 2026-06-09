@@ -5,11 +5,12 @@
  */
 
 function SUPA_CFG_() {
-  // 공개용(publishable) 키라 코드에 직접 둠. Script Property로 덮어쓰기 가능(없으면 아래 기본값 사용).
+  // RLS 잠금 후엔 서비스키(secret)로 RLS 우회. 우선순위: SERVICE_KEY > ANON_KEY > 공개키 기본값.
+  // 서비스키는 비밀 → 코드에 두지 말고 initSupabaseConfig()로 Script Property에만 저장.
   var p = PropertiesService.getScriptProperties();
   return {
     url: p.getProperty('SUPABASE_URL') || 'https://tedffwpijiylklfuzkua.supabase.co',
-    key: p.getProperty('SUPABASE_ANON_KEY') || 'sb_publishable_bSfUmM7z0scyXEPEQvIfWQ_Cx7fyuHg'
+    key: p.getProperty('SUPABASE_SERVICE_KEY') || p.getProperty('SUPABASE_ANON_KEY') || 'sb_publishable_bSfUmM7z0scyXEPEQvIfWQ_Cx7fyuHg'
   };
 }
 
@@ -199,18 +200,19 @@ function fullSyncToSupabase() {
 /* ───────────── 스크립트 속성 관리 (속성 50개+ 라 UI 읽기전용일 때 사용) ───────────── */
 
 /**
- * Supabase 키를 프로그래밍 방식으로 저장(UI 읽기전용 우회).
- * 사용법: 아래 ANON_KEY 에 .env.local의 anon 키를 붙여넣고 ▶ 실행 → 끝나면 다시 비우세요.
+ * Supabase 서비스키(secret)를 저장(UI 읽기전용 우회 + RLS 잠금 후 동기화용).
+ * RLS를 잠그면 publishable 키로는 못 쓰므로 service_role(secret) 키가 필요함.
+ * 사용법: Supabase Settings>API Keys의 secret(service_role) 키를 아래 SERVICE_KEY에 붙여넣고 ▶ 실행 → 끝나면 다시 비우세요.
  */
 function initSupabaseConfig() {
   var URL = 'https://tedffwpijiylklfuzkua.supabase.co';
-  var ANON_KEY = ''; // ← 여기에 anon 키 붙여넣고 실행, 실행 후 다시 '' 로 비우기
-  if (!ANON_KEY) { Logger.log('⚠️ ANON_KEY를 채우고 다시 실행하세요'); return; }
+  var SERVICE_KEY = ''; // ← Supabase secret(service_role) 키 붙여넣고 실행, 실행 후 다시 '' 로 비우기 (비밀키라 코드에 남기면 안 됨)
+  if (!SERVICE_KEY) { Logger.log('⚠️ SERVICE_KEY를 채우고 다시 실행하세요 (Supabase Settings>API의 secret 키)'); return; }
   PropertiesService.getScriptProperties().setProperties({
     SUPABASE_URL: URL,
-    SUPABASE_ANON_KEY: ANON_KEY
+    SUPABASE_SERVICE_KEY: SERVICE_KEY
   }, false); // false = 기존 속성 유지(삭제 안 함)
-  Logger.log('✅ Supabase 설정 저장 완료. 이제 위 ANON_KEY 줄을 다시 비워 저장하세요.');
+  Logger.log('✅ 서비스키 저장 완료. 이제 위 SERVICE_KEY 줄을 다시 비워 저장하세요. (RLS 잠금 후에도 동기화 동작)');
 }
 
 /** 진단(읽기전용): 속성이 몇 개인지, 종류별 개수, 보존 대상(설정값) 표시 */

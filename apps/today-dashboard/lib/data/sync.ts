@@ -3,6 +3,7 @@
 import type { EquipmentItem, ReturnCount, RiskWarning, Trade } from "../domain/types";
 import { categoryOf } from "../domain/catalog";
 import { fetchAllTrades, persistTrade } from "./remote";
+import { gasFetch } from "./apiClient";
 import { ymd } from "../domain/status";
 
 const DAY = 86400000;
@@ -81,7 +82,7 @@ export async function syncTimelineToSupabase(opts?: { fromDays?: number; toDays?
   const from = ymd(new Date(today.getTime() + (opts?.fromDays ?? -7) * 86400000));
   const to = ymd(new Date(today.getTime() + (opts?.toDays ?? 30) * 86400000));
   log(`GAS timeline 읽는 중… (${from} ~ ${to})`);
-  const res = await fetch(`/api/gas?action=timeline&from=${from}&to=${to}&compact=2`);
+  const res = await gasFetch(`action=timeline&from=${from}&to=${to}&compact=2`);
   const data = await res.json();
   if (data.error) throw new Error(data.error);
   const trades = parseTimeline(data);
@@ -172,7 +173,7 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
   for (let i = fromD; i <= toD; i++) {
     const date = ymd(new Date(Date.now() + i * DAY));
     try {
-      const res = await fetch(`/api/gas?action=dashboard&date=${date}`);
+      const res = await gasFetch(`action=dashboard&date=${date}`);
       const data = await res.json();
       if (data.error) continue;
       const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
@@ -211,7 +212,7 @@ export async function pollTimelineChanges(current: Trade[]): Promise<Trade[]> {
   const today = new Date();
   const from = ymd(new Date(today.getTime() - 7 * DAY));
   const to = ymd(new Date(today.getTime() + 30 * DAY));
-  const res = await fetch(`/api/gas?action=timeline&from=${from}&to=${to}&compact=2`);
+  const res = await gasFetch(`action=timeline&from=${from}&to=${to}&compact=2`);
   const data = await res.json();
   if (data.error) return [];
   const fresh = parseTimeline(data);

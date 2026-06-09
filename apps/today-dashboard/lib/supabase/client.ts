@@ -10,7 +10,7 @@ export const supabase =
   url && anon
     ? createClient(url, anon, {
         db: { schema: "village" },
-        auth: { persistSession: false },
+        auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
         realtime: { params: { eventsPerSecond: 8 } },
       })
     : null;
