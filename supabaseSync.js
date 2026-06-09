@@ -173,6 +173,15 @@ function buildSupabaseTrades_(tids) {
 /** Supabase REST 벌크 upsert (anon 키, merge-duplicates). */
 function supaUpsert_(cfg, table, rows, conflict) {
   if (!rows.length) return;
+  // 같은 conflict 키(schedule_id/trade_id) 중복 제거 — Postgres 'ON CONFLICT ... twice'(21000) 방지. 마지막 값 유지.
+  var byKey = {};
+  for (var di = 0; di < rows.length; di++) byKey[String(rows[di][conflict])] = rows[di];
+  var keys = Object.keys(byKey);
+  if (keys.length < rows.length) {
+    var deduped = [];
+    for (var ki = 0; ki < keys.length; ki++) deduped.push(byKey[keys[ki]]);
+    rows = deduped;
+  }
   var token = supaToken_(cfg);
   if (!token) { Logger.log('봇 토큰 없음 → 동기화 중단'); return; }
   var res = UrlFetchApp.fetch(cfg.url + '/rest/v1/' + table + '?on_conflict=' + conflict, {
