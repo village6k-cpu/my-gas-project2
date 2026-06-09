@@ -1,8 +1,7 @@
 "use client";
 
-import { ConfirmView } from "@/components/ConfirmView";
+import { AppShell } from "@/components/AppShell";
 
-// 모바일 전용 라우트 (PC에선 '/' 우측 패널 토글로 표시됨)
 export default function ConfirmPage() {
-  return <ConfirmView />;
+  return <AppShell initial="confirm" />;
 }

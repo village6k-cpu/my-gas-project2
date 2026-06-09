@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { authFetch } from "@/lib/data/authFetch";
-import { AppSwitcher } from "@/components/AppSwitcher";
+import { ViewHeader } from "@/components/ViewHeader";
 import { Refresh } from "@/components/icons";
 
 // 후속조치(카톡 AI봇) 보드 — 실제 follow-up-dashboard(index.html) 구조를 네이티브로 이식.
@@ -123,7 +123,7 @@ function useWide(): boolean {
   return wide;
 }
 
-export function FollowUpView({ embedded, headerLeft }: { embedded?: boolean; headerLeft?: ReactNode } = {}) {
+export function FollowUpView() {
   const [data, setData] = useState<Payload | null>(null);
   const [status, setStatus] = useState("active");
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -246,31 +246,28 @@ export function FollowUpView({ embedded, headerLeft }: { embedded?: boolean; hea
   const empty = active.length === 0 && !(showClosed && closed.length);
 
   return (
-    <div className={`flex min-h-screen flex-col bg-[#f4f5f7] ${embedded ? "lg:min-h-full" : ""}`}>
+    <div className="flex min-h-screen flex-col bg-[#f4f5f7]">
       {/* 헤더 */}
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
-        <div className="flex items-center justify-between gap-2 px-4 pt-2.5 pb-2.5">
-          {embedded ? headerLeft ?? <span className="text-[15px] font-black text-accent-700">후속조치</span> : <AppSwitcher active="follow" />}
-          <div className="flex shrink-0 items-center gap-2">
-            <select
-              value={status}
-              onChange={(e) => {
-                setSelected(new Set());
-                setFocusedId(null);
-                setStatus(e.target.value);
-              }}
-              className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-[12.5px] font-semibold text-ink-soft outline-none"
-            >
-              <option value="active">열린 업무</option>
-              <option value="all">전체</option>
-              <option value="done">완료</option>
-              <option value="dismissed">무시</option>
-            </select>
-            <button onClick={() => load(status)} className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
-              <Refresh className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
+        <ViewHeader title="후속조치">
+          <select
+            value={status}
+            onChange={(e) => {
+              setSelected(new Set());
+              setFocusedId(null);
+              setStatus(e.target.value);
+            }}
+            className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-[12.5px] font-semibold text-ink-soft outline-none"
+          >
+            <option value="active">열린 업무</option>
+            <option value="all">전체</option>
+            <option value="done">완료</option>
+            <option value="dismissed">무시</option>
+          </select>
+          <button onClick={() => load(status)} className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
+            <Refresh className="h-4 w-4" />
+          </button>
+        </ViewHeader>
         {data?.updatedAt && <div className="px-4 pb-1.5 text-[11px] text-ink-faint">마지막 업데이트 {fmtClock(data.updatedAt)}</div>}
       </header>
 

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { authFetch } from "@/lib/data/authFetch";
-import { AppSwitcher } from "@/components/AppSwitcher";
+import { ViewHeader } from "@/components/ViewHeader";
 import { Refresh } from "@/components/icons";
 
 // 확인요청 관리 — GAS Schedule API(/api/confirm)를 네이티브로. 대기/보류 카드 목록 + 장비별 가용성 결과
@@ -57,7 +57,7 @@ function isFail(r?: string) {
   return /❌|가용0/.test(r || "");
 }
 
-export function ConfirmView({ embedded, headerLeft }: { embedded?: boolean; headerLeft?: ReactNode } = {}) {
+export function ConfirmView() {
   const [items, setItems] = useState<Req[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -157,17 +157,14 @@ export function ConfirmView({ embedded, headerLeft }: { embedded?: boolean; head
   );
 
   return (
-    <div className={`flex min-h-screen flex-col bg-[#f4f5f7] ${embedded ? "lg:min-h-full" : ""}`}>
+    <div className="flex min-h-screen flex-col bg-[#f4f5f7]">
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
-        <div className="flex items-center justify-between gap-2 px-4 pt-2.5 pb-2.5">
-          {embedded ? headerLeft ?? <span className="text-[15px] font-black text-accent-700">확인요청</span> : <AppSwitcher active="confirm" />}
-          <div className="flex shrink-0 items-center gap-2">
-            <span className="rounded-full bg-checkout-bg px-2.5 py-1 text-[12px] font-bold text-checkout-fg">대기 {items.length}건</span>
-            <button onClick={load} className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
-              <Refresh className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
+        <ViewHeader title="확인요청">
+          <span className="rounded-full bg-checkout-bg px-2.5 py-1 text-[12px] font-bold text-checkout-fg">대기 {items.length}건</span>
+          <button onClick={load} className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
+            <Refresh className="h-4 w-4" />
+          </button>
+        </ViewHeader>
       </header>
 
       <main className="flex-1 space-y-2.5 p-3 pb-24">

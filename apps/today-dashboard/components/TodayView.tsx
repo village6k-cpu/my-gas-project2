@@ -14,7 +14,7 @@ import {
   ymd,
 } from "@/lib/domain/status";
 import { ScheduleCard } from "@/components/ScheduleCard";
-import { AppSwitcher } from "@/components/AppSwitcher";
+import { ViewHeader } from "@/components/ViewHeader";
 import { HandoverBoard } from "@/components/HandoverBoard";
 import { Toast } from "@/components/Toast";
 import { Calendar, Check, ChevronLeft, ChevronRight, Refresh, Search } from "@/components/icons";
@@ -101,12 +101,11 @@ export function TodayView() {
     <div className="flex min-h-screen flex-col bg-[#f4f5f7] lg:min-h-full">
       {/* 상단 고정 헤더 */}
       <header className="safe-top sticky top-0 z-30 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
-        <div className="flex items-center justify-between px-4 pt-2.5">
-          <AppSwitcher active="today" />
-          <button onClick={() => go(date)} className="tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft">
+        <ViewHeader title="오늘 일정">
+          <button onClick={() => go(date)} className="tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft" title="새로고침">
             <Refresh className="h-4 w-4" />
           </button>
-        </div>
+        </ViewHeader>
 
         {/* 날짜 내비 */}
         <div className="flex items-center gap-2 px-4 pt-2">
@@ -146,10 +145,40 @@ export function TodayView() {
             )}
           </div>
         </div>
+
+        {/* 오늘일정 내부 필터 (반출/반납/전체/확인필요) — 세그먼트 */}
+        <div className="flex items-stretch gap-1 px-3 pb-2">
+          {TABS.map((t) => {
+            const active = !searching && tab === t.key;
+            const count = counts[t.key];
+            const isAttn = t.key === "attention";
+            return (
+              <button
+                key={t.key}
+                onClick={() => {
+                  setQ("");
+                  setTab(t.key);
+                }}
+                className={`tap relative flex flex-1 items-center justify-center gap-1.5 rounded-lg py-1.5 ${
+                  active ? "bg-brand-50 text-brand-700 ring-1 ring-brand-100" : "text-ink-mute"
+                }`}
+              >
+                <span className="text-[12.5px] font-bold">{t.label}</span>
+                <span
+                  className={`min-w-[18px] rounded-full px-1 text-center text-[10.5px] font-bold tabular-nums ${
+                    isAttn && count > 0 ? "bg-attention-fg text-white" : active ? "bg-brand-600 text-white" : "bg-black/[0.06] text-ink-mute"
+                  }`}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </header>
 
       {/* 본문 */}
-      <main className="flex-1 space-y-3 px-4 pb-28 pt-3">
+      <main className="flex-1 space-y-3 px-4 pb-24 pt-3">
         {!searching && <HandoverBoard notes={data.notes} />}
 
         {searching && (
@@ -222,42 +251,6 @@ export function TodayView() {
           </div>
         )}
       </main>
-
-      {/* 하단 탭바 — 모바일: 화면 하단 중앙 / PC: 좌측 패널(420px) 하단 */}
-      <nav className="safe-bottom fixed bottom-0 left-0 right-0 z-30 mx-auto max-w-md lg:right-auto lg:mx-0 lg:w-[420px] lg:max-w-none">
-        <div className="m-2 flex items-stretch gap-1 rounded-2xl bg-white/95 p-1.5 shadow-pop ring-1 ring-black/5 backdrop-blur">
-          {TABS.map((t) => {
-            const active = !searching && tab === t.key;
-            const count = counts[t.key];
-            const isAttn = t.key === "attention";
-            return (
-              <button
-                key={t.key}
-                onClick={() => {
-                  setQ("");
-                  setTab(t.key);
-                }}
-                className={`tap relative flex flex-1 flex-col items-center rounded-xl py-1.5 ${
-                  active ? "bg-brand-50 text-brand-700" : "text-ink-mute"
-                }`}
-              >
-                <span className="text-[12.5px] font-bold">{t.label}</span>
-                <span
-                  className={`mt-0.5 min-w-5 rounded-full px-1.5 text-[11px] font-bold tabular-nums ${
-                    isAttn && count > 0
-                      ? "bg-attention-fg text-white"
-                      : active
-                        ? "bg-brand-600 text-white"
-                        : "bg-black/[0.06] text-ink-mute"
-                  }`}
-                >
-                  {count}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </nav>
 
       <Toast />
     </div>

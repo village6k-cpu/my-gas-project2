@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { authFetch } from "@/lib/data/authFetch";
-import { AppSwitcher } from "@/components/AppSwitcher";
+import { ViewHeader } from "@/components/ViewHeader";
 import { Refresh } from "@/components/icons";
 
 // 운영판 — GAS action=operations(/api/operations) 단일 응답을 네이티브로 렌더. 읽기전용 + 60초 폴링.
@@ -53,7 +53,7 @@ function mdDow(ymd?: string): string {
   return `${dt.getMonth() + 1}월 ${dt.getDate()}일 (${WD[dt.getDay()]})`;
 }
 
-export function OperationsView({ embedded, headerLeft }: { embedded?: boolean; headerLeft?: ReactNode } = {}) {
+export function OperationsView() {
   const [data, setData] = useState<Ops | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -90,14 +90,13 @@ export function OperationsView({ embedded, headerLeft }: { embedded?: boolean; h
   const pace = data?.health?.checkoutPace;
 
   return (
-    <div className={`flex min-h-screen flex-col bg-[#f4f5f7] ${embedded ? "lg:min-h-full" : ""}`}>
+    <div className="flex min-h-screen flex-col bg-[#f4f5f7]">
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
-        <div className="flex items-center justify-between gap-2 px-4 pt-2.5 pb-2.5">
-          {embedded ? headerLeft ?? <span className="text-[15px] font-black text-accent-700">운영판</span> : <AppSwitcher active="operations" />}
+        <ViewHeader title="운영판">
           <button onClick={load} className={`tap flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
             <Refresh className="h-4 w-4" />
           </button>
-        </div>
+        </ViewHeader>
         {data?.generatedAt && <div className="px-4 pb-1.5 text-[11px] text-ink-faint">마지막 업데이트 {fmtClock(data.generatedAt)}</div>}
       </header>
 

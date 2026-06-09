@@ -1,8 +1,8 @@
 "use client";
 
-import { ScheduleView } from "@/components/ScheduleView";
+import { AppShell } from "@/components/AppShell";
 
-// 모바일 전용 라우트 (PC에선 '/'에 합본으로 표시됨)
+// 딥링크/북마크용 — 통합 셸을 스케줄로 시작
 export default function SchedulePage() {
-  return <ScheduleView />;
+  return <AppShell initial="schedule" />;
 }

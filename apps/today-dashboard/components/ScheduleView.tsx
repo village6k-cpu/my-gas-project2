@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { loadDay, useDashboard } from "@/lib/data/store";
 import { ymd } from "@/lib/domain/status";
 import { buildItems, type GroupMode } from "@/lib/domain/timeline";
-import { AppSwitcher } from "@/components/AppSwitcher";
+import { ViewHeader } from "@/components/ViewHeader";
 import { VillageTimeline } from "@/components/VillageTimeline";
 import { Search } from "@/components/icons";
 
@@ -14,8 +14,7 @@ const MODES: { v: GroupMode; label: string }[] = [
   { v: "status", label: "상태별" },
 ];
 
-/** embedded=true → PC 합본 우측 패널용 (AppSwitcher 숨김, 폭 제한 없음). headerLeft=토글 등 */
-export function ScheduleView({ embedded, headerLeft }: { embedded?: boolean; headerLeft?: ReactNode }) {
+export function ScheduleView() {
   const [today, setToday] = useState("");
   const [mode, setMode] = useState<GroupMode>("set");
   const [q, setQ] = useState("");
@@ -35,16 +34,11 @@ export function ScheduleView({ embedded, headerLeft }: { embedded?: boolean; hea
   if (!today) return <div className="flex h-screen items-center justify-center text-ink-faint">불러오는 중…</div>;
 
   return (
-    <div className={`flex min-h-screen flex-col bg-[#f4f5f7] ${embedded ? "lg:min-h-full" : "mx-auto max-w-5xl"}`}>
+    <div className="flex min-h-screen flex-col bg-[#f4f5f7]">
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
-        <div className="flex items-center justify-between px-4 pt-2.5">
-          {embedded ? (
-            headerLeft ?? <span className="text-[15px] font-black tracking-tight text-brand-700">빌리지 스케줄</span>
-          ) : (
-            <AppSwitcher active="schedule" />
-          )}
-          <span className="text-[12px] text-ink-faint">장비별 예약 현황</span>
-        </div>
+        <ViewHeader title="빌리지 스케줄">
+          <span className="hidden text-[12px] text-ink-faint sm:inline">장비별 예약 현황</span>
+        </ViewHeader>
 
         <div className="flex flex-wrap items-center gap-2 px-4 pb-2.5 pt-2">
           <div className="flex items-center gap-0.5 rounded-lg bg-black/[0.05] p-0.5">

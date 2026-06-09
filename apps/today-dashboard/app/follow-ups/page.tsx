@@ -1,7 +1,7 @@
 "use client";
 
-import { FollowUpView } from "@/components/FollowUpView";
+import { AppShell } from "@/components/AppShell";
 
 export default function FollowUpsPage() {
-  return <FollowUpView />;
+  return <AppShell initial="follow" />;
 }
