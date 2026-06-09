@@ -186,3 +186,64 @@ function fullSyncToSupabase() {
   supaUpsert_(cfg, 'schedule_items', built.items, 'schedule_id');
   Logger.log('전체 동기화: ' + built.trades.length + '건');
 }
+
+/* ───────────── 스크립트 속성 관리 (속성 50개+ 라 UI 읽기전용일 때 사용) ───────────── */
+
+/**
+ * Supabase 키를 프로그래밍 방식으로 저장(UI 읽기전용 우회).
+ * 사용법: 아래 ANON_KEY 에 .env.local의 anon 키를 붙여넣고 ▶ 실행 → 끝나면 다시 비우세요.
+ */
+function initSupabaseConfig() {
+  var URL = 'https://tedffwpijiylklfuzkua.supabase.co';
+  var ANON_KEY = ''; // ← 여기에 anon 키 붙여넣고 실행, 실행 후 다시 '' 로 비우기
+  if (!ANON_KEY) { Logger.log('⚠️ ANON_KEY를 채우고 다시 실행하세요'); return; }
+  PropertiesService.getScriptProperties().setProperties({
+    SUPABASE_URL: URL,
+    SUPABASE_ANON_KEY: ANON_KEY
+  }, false); // false = 기존 속성 유지(삭제 안 함)
+  Logger.log('✅ Supabase 설정 저장 완료. 이제 위 ANON_KEY 줄을 다시 비워 저장하세요.');
+}
+
+/** 진단(읽기전용): 속성이 몇 개인지, 종류별 개수, 보존 대상(설정값) 표시 */
+function auditScriptProperties() {
+  var all = PropertiesService.getScriptProperties().getProperties();
+  var keys = Object.keys(all);
+  var cat = {};
+  keys.forEach(function (k) {
+    var pre = /^(itemCheck|setupDone|setupDoneAt)_/.test(k) ? k.split('_')[0] + '_*' : k;
+    cat[pre] = (cat[pre] || 0) + 1;
+  });
+  Logger.log('총 속성: ' + keys.length + '개');
+  Logger.log('── 종류별 ──');
+  Object.keys(cat).sort(function (a, b) { return cat[b] - cat[a]; }).forEach(function (pre) {
+    if (cat[pre] > 1) Logger.log('  ' + pre + ' : ' + cat[pre] + '개');
+  });
+  var config = keys.filter(function (k) { return !/^(itemCheck|setupDone|setupDoneAt)_/.test(k); });
+  Logger.log('── 설정/기타(보존해야 함) ' + config.length + '개 ──');
+  Logger.log('  ' + config.join('\n  '));
+}
+
+/**
+ * 오래된 거래의 검수상태 속성 정리. itemCheck_/setupDone_/setupDoneAt_ 중
+ * 거래ID 날짜(YYMMDD)가 cutoff 이전인 것만 삭제. 설정값(개고생2_URL 등)은 절대 안 건드림.
+ * 사용법: 먼저 cleanupOldTradeProps('260401', true) 로 미리보기 → 확인 후 false로 실제 삭제.
+ */
+function cleanupOldTradeProps(cutoffYYMMDD, dryRun) {
+  if (!cutoffYYMMDD || !/^\d{6}$/.test(cutoffYYMMDD)) { Logger.log("⚠️ cutoff를 'YYMMDD'로 주세요. 예: cleanupOldTradeProps('260401', true)"); return; }
+  if (dryRun === undefined) dryRun = true;
+  var p = PropertiesService.getScriptProperties();
+  var all = p.getProperties();
+  var toDelete = [];
+  Object.keys(all).forEach(function (k) {
+    var m = k.match(/^(?:itemCheck|setupDone|setupDoneAt)_(\d{6})-/);
+    if (m && m[1] < cutoffYYMMDD) toDelete.push(k);
+  });
+  Logger.log((dryRun ? '[미리보기] ' : '[실제삭제] ') + cutoffYYMMDD + ' 이전 거래 속성 ' + toDelete.length + '개');
+  Logger.log(toDelete.slice(0, 30).join('\n') + (toDelete.length > 30 ? '\n…외 ' + (toDelete.length - 30) + '개' : ''));
+  if (!dryRun) {
+    toDelete.forEach(function (k) { p.deleteProperty(k); });
+    Logger.log('✅ 삭제 완료. 남은 속성: ' + Object.keys(p.getProperties()).length + '개');
+  } else {
+    Logger.log('→ 실제 삭제하려면 dryRun=false 로: cleanupOldTradeProps(\'' + cutoffYYMMDD + '\', false)');
+  }
+}
