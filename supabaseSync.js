@@ -95,8 +95,8 @@ function buildSupabaseTrades_(tids) {
 
   // 1) 날짜·예약 골격: 넓은 윈도우 timeline (보정된 epoch ms)
   var today = new Date();
-  var fromKey = Utilities.formatDate(new Date(today.getTime() - 14 * 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
-  var toKey = Utilities.formatDate(new Date(today.getTime() + 60 * 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
+  var fromKey = Utilities.formatDate(new Date(today.getTime() - 30 * 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
+  var toKey = Utilities.formatDate(new Date(today.getTime() + 365 * 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
   var tl = getTimelineData({ from: fromKey, to: toKey, compact: 2 });
   var groups = {};
   (tl.groups || []).forEach(function (g) { groups[g.i] = g.c; });
@@ -209,8 +209,8 @@ function setupSupabaseSync() {
 /** 수동 전체 동기화(초기 1회용): 활성 윈도우 거래 전부 push. */
 function fullSyncToSupabase() {
   var today = new Date();
-  var fromKey = Utilities.formatDate(new Date(today.getTime() - 7 * 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
-  var toKey = Utilities.formatDate(new Date(today.getTime() + 30 * 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
+  var fromKey = Utilities.formatDate(new Date(today.getTime() - 30 * 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
+  var toKey = Utilities.formatDate(new Date(today.getTime() + 180 * 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
   var tl = getTimelineData({ from: fromKey, to: toKey, compact: 2 });
   var tids = {};
   (tl.items || []).forEach(function (it) { if (it.tid) tids[it.tid] = 1; });

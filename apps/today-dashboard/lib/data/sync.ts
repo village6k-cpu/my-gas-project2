@@ -1,7 +1,7 @@
 // 시트 → Supabase 읽기 동기화 (Phase 1, 단방향).
 // 소스: 기존 GAS action=timeline (날짜가 보정된 epoch ms를 줌 → 1899 버그 회피).
 import type { EquipmentItem, ReturnCount, RiskWarning, Trade } from "../domain/types";
-import { categoryOf } from "../domain/catalog";
+import { categoryOf, coarseGroup } from "../domain/catalog";
 import { fetchAllTrades, persistTrade } from "./remote";
 import { gasFetch } from "./apiClient";
 import { ymd } from "../domain/status";
@@ -79,8 +79,8 @@ export function parseTimeline(resp: any): Trade[] {
 export async function syncTimelineToSupabase(opts?: { fromDays?: number; toDays?: number; onLog?: (s: string) => void }): Promise<number> {
   const log = opts?.onLog ?? (() => {});
   const today = new Date();
-  const from = ymd(new Date(today.getTime() + (opts?.fromDays ?? -7) * 86400000));
-  const to = ymd(new Date(today.getTime() + (opts?.toDays ?? 30) * 86400000));
+  const from = ymd(new Date(today.getTime() + (opts?.fromDays ?? -30) * 86400000));
+  const to = ymd(new Date(today.getTime() + (opts?.toDays ?? 180) * 86400000));
   log(`GAS timeline 읽는 중… (${from} ~ ${to})`);
   const res = await gasFetch(`action=timeline&from=${from}&to=${to}&compact=2`);
   const data = await res.json();
@@ -114,22 +114,41 @@ function mapRisk(arr: any): RiskWarning[] {
   });
 }
 
+/** 세트명이 번들 라벨(=실제 장비 아님)인지: 풀세트/패키지 류 */
+const BUNDLE_NAME = /풀세트|패키지/;
+
 /** action=dashboard 항목을 기존 거래(날짜 유지) 위에 상세 덮어쓰기 */
 function mergeDashboard(base: Trade, it: any): Trade {
-  const equipments: EquipmentItem[] = (it.equipments ?? []).map((e: any) => ({
-    scheduleId: e.scheduleId,
-    name: e.name,
-    qty: Number(e.qty) || 1,
-    setName: e.setName || undefined,
-    isSetHeader: !!e.isHeader,
-    isComponent: !!e.isComponent,
-    emphasize: EMPH.test(e.name) || undefined,
-    category: categoryOf(e.name) ?? undefined,
-    checkoutState: e.checkedCheckout ? "taken" : "pending",
-  }));
+  const rawEq: any[] = it.equipments ?? [];
+  // 세트별로 '본체(장비)' 구성품이 따로 행으로 있는지 → 있으면 세트 헤더는 단순 라벨
+  const setHasMainComp: Record<string, boolean> = {};
+  for (const e of rawEq) {
+    if (e.isComponent && e.setName && coarseGroup(categoryOf(e.name) ?? undefined) === "장비") {
+      setHasMainComp[e.setName] = true;
+    }
+  }
+  const equipments: EquipmentItem[] = rawEq.map((e: any) => {
+    // 세트 대표행: 본체가 따로 있거나 이름이 번들(풀세트)이면 → 라벨(체크리스트서 숨김).
+    // 아니면 '세트명 자체가 대표 장비'이므로 체크 가능한 항목으로 노출.
+    const isLabel = !!e.isHeader && !!e.setName && (!!setHasMainComp[e.setName] || BUNDLE_NAME.test(e.name));
+    // 노출되는 세트 대표장비인데 카탈로그에 없으면 '장비'로 묶이게 세트 카테고리 부여
+    const repDevice = !!e.isHeader && !!e.setName && !isLabel;
+    return {
+      scheduleId: e.scheduleId,
+      name: e.name,
+      qty: Number(e.qty) || 1,
+      setName: e.setName || undefined,
+      isSetHeader: isLabel,
+      isComponent: !!e.isComponent,
+      emphasize: EMPH.test(e.name) || undefined,
+      category: categoryOf(e.name) ?? (repDevice ? "세트" : undefined),
+      checkoutState: e.checkedCheckout ? "taken" : "pending",
+    };
+  });
   const returnCounts: Record<string, ReturnCount> = {};
-  for (const e of it.equipments ?? []) {
-    if (e.isHeader) continue;
+  for (const e of rawEq) {
+    const isLabel = !!e.isHeader && !!e.setName && (!!setHasMainComp[e.setName] || BUNDLE_NAME.test(e.name));
+    if (isLabel) continue; // 라벨(번들 헤더)만 제외 — 대표장비는 포함
     if (e.checkedCheckin) {
       const k = e.name;
       returnCounts[k] = { good: (returnCounts[k]?.good ?? 0) + (Number(e.qty) || 1), damaged: 0, lost: 0 };
@@ -200,7 +219,7 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
 
 /** 전체 동기화: timeline(날짜·예약) → dashboard(상세) */
 export async function syncAll(onLog?: (s: string) => void): Promise<void> {
-  await syncTimelineToSupabase({ fromDays: -7, toDays: 30, onLog });
+  await syncTimelineToSupabase({ fromDays: -30, toDays: 180, onLog });
   await syncDashboardToSupabase({ fromDays: -2, toDays: 14, onLog });
 }
 
@@ -210,8 +229,8 @@ export async function syncAll(onLog?: (s: string) => void): Promise<void> {
  */
 export async function pollTimelineChanges(current: Trade[]): Promise<Trade[]> {
   const today = new Date();
-  const from = ymd(new Date(today.getTime() - 7 * DAY));
-  const to = ymd(new Date(today.getTime() + 30 * DAY));
+  const from = ymd(new Date(today.getTime() - 30 * DAY));
+  const to = ymd(new Date(today.getTime() + 180 * DAY));
   const res = await gasFetch(`action=timeline&from=${from}&to=${to}&compact=2`);
   const data = await res.json();
   if (data.error) return [];
