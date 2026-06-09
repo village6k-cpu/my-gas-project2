@@ -5,7 +5,9 @@ import { signOut } from "@/components/AuthGate";
 import { VillageLogo } from "@/components/VillageLogo";
 import { NAV_ITEMS, type NavKey } from "@/components/navConfig";
 
-// PC(lg+) 좌측 세로 레일 — VILLAGE 로고 + 5섹션 네비 + 로그아웃. 상태기반 즉시 전환.
+// PC(lg+) 좌측 세로 레일 — VILLAGE 로고 + 4섹션 네비 + 로그아웃. (오늘일정은 우측 고정이라 제외)
+const RAIL_ITEMS = NAV_ITEMS.filter((n) => n.key !== "today");
+
 export function SideRail({ view, onNav }: { view: NavKey; onNav: (k: NavKey) => void }) {
   return (
     <nav className="hidden shrink-0 flex-col border-r border-black/5 bg-white/70 px-3 py-4 lg:flex lg:w-[176px]">
@@ -13,7 +15,7 @@ export function SideRail({ view, onNav }: { view: NavKey; onNav: (k: NavKey) => 
         <VillageLogo size="md" />
       </div>
       <div className="flex flex-1 flex-col gap-1">
-        {NAV_ITEMS.map((n) => {
+        {RAIL_ITEMS.map((n) => {
           const active = view === n.key;
           return (
             <button
