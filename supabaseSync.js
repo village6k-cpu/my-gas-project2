@@ -5,8 +5,12 @@
  */
 
 function SUPA_CFG_() {
+  // 공개용(publishable) 키라 코드에 직접 둠. Script Property로 덮어쓰기 가능(없으면 아래 기본값 사용).
   var p = PropertiesService.getScriptProperties();
-  return { url: p.getProperty('SUPABASE_URL'), key: p.getProperty('SUPABASE_ANON_KEY') };
+  return {
+    url: p.getProperty('SUPABASE_URL') || 'https://tedffwpijiylklfuzkua.supabase.co',
+    key: p.getProperty('SUPABASE_ANON_KEY') || 'sb_publishable_bSfUmM7z0scyXEPEQvIfWQ_Cx7fyuHg'
+  };
 }
 
 /** 설치형 onEdit (별도 트리거) — 편집된 거래ID만 dirty 목록에 표시. 절대 편집을 막지 않음. */
@@ -150,6 +154,8 @@ function supaUpsert_(cfg, table, rows, conflict) {
     headers: {
       apikey: cfg.key,
       Authorization: 'Bearer ' + cfg.key,
+      'Content-Profile': 'village', // village 스키마 지정 (public 아님)
+      'Accept-Profile': 'village',
       Prefer: 'resolution=merge-duplicates,return=minimal'
     },
     payload: JSON.stringify(rows),
@@ -169,6 +175,9 @@ function setupSupabaseSync() {
   ScriptApp.newTrigger('onEditSupabaseMark').forSpreadsheet(SpreadsheetApp.getActive()).onEdit().create();
   ScriptApp.newTrigger('flushDirtyToSupabase').timeBased().everyMinutes(1).create();
   Logger.log('✅ Supabase 동기화 트리거 설치 완료 (onEdit 표시 + 1분 flush)');
+  Logger.log('초기 백필 시작…');
+  fullSyncToSupabase();
+  Logger.log('🎉 전부 완료. 이제 시트 편집하면 ~1분 내 앱에 자동 반영됩니다.');
 }
 
 /** 수동 전체 동기화(초기 1회용): 활성 윈도우 거래 전부 push. */
