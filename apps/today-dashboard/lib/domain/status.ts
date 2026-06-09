@@ -1,7 +1,6 @@
 // 상태/시간 헬퍼 — 한국어 시간 정렬, 확인필요 집계, 인계 요약
 
 import type { ReturnCount, Trade, TabKey } from "./types";
-import { categoryRank, coarseRank } from "./catalog";
 
 const WEEKDAY = ["일", "월", "화", "수", "목", "금", "토"];
 
@@ -83,12 +82,8 @@ export function aggregateReturns(t: Trade): AggReturn[] {
     if (e.onsite) cur.onsiteQty += qty;
     map.set(e.name, cur);
   }
-  return [...map.values()].sort(
-    (a, b) =>
-      coarseRank(a.category) - coarseRank(b.category) ||
-      categoryRank(a.category) - categoryRank(b.category) ||
-      a.name.localeCompare(b.name),
-  );
+  // 시트 순서(세트 단위로 자연 묶임) 유지 — 억지 카테고리 재분류 안 함
+  return [...map.values()];
 }
 
 export function missingOf(a: AggReturn): number {
