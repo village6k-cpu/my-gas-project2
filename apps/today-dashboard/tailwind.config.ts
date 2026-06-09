@@ -31,6 +31,8 @@ const config: Config = {
         checkin: { bg: "#ecfdf5", fg: "#047857", ring: "#a7f3d0" }, // 반납 = 초록
         attention: { bg: "#fef2f2", fg: "#b91c1c", ring: "#fecaca" }, // 확인필요 = 빨강
         warn: { bg: "#fffbeb", fg: "#b45309", ring: "#fde68a" },
+        // VILLAGE 시그니처 오렌지 (로고/브랜드 포인트)
+        accent: { DEFAULT: "#ea5b36", 50: "#fff3ef", 100: "#ffe2d8", 600: "#d94b27", 700: "#b73d1f" },
       },
       borderRadius: {
         xl2: "1.125rem",
@@ -50,6 +52,7 @@ const config: Config = {
           "Roboto",
           "sans-serif",
         ],
+        village: ['"Big Shoulders Display"', "Helvetica Neue", "Arial Black", "sans-serif"],
       },
     },
   },
