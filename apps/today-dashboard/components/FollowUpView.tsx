@@ -246,7 +246,7 @@ export function FollowUpView() {
   const empty = active.length === 0 && !(showClosed && closed.length);
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f4f5f7]">
+    <div className="flex min-h-screen flex-col bg-[#f6f5f2]">
       {/* 헤더 */}
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
         <ViewHeader title="후속조치">

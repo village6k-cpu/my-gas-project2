@@ -90,7 +90,7 @@ export function OperationsView() {
   const pace = data?.health?.checkoutPace;
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f4f5f7]">
+    <div className="flex min-h-screen flex-col bg-[#f6f5f2]">
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
         <ViewHeader title="운영판">
           <button onClick={load} className={`tap flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">

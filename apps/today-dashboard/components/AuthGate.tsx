@@ -30,7 +30,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (!isSupabase) return <>{children}</>; // 시드 모드 = 인증 없음
   if (loading) {
     return (
-      <div className="flex min-h-dvh items-center justify-center bg-[#f4f5f7] text-ink-faint">
+      <div className="flex min-h-dvh items-center justify-center bg-[#f6f5f2] text-ink-faint">
         <div className="animate-pulse text-sm">불러오는 중…</div>
       </div>
     );
@@ -48,7 +48,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-[#f4f5f7] px-6">
+    <div className="flex min-h-dvh items-center justify-center bg-[#f6f5f2] px-6">
       <form onSubmit={login} className="w-full max-w-xs space-y-4">
         <div className="text-center">
           <div className="text-2xl font-black tracking-tight text-brand-700">빌리지</div>

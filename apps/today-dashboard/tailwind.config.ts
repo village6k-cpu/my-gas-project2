@@ -16,23 +16,24 @@ const config: Config = {
           mute: "#6b7280",
           faint: "#9aa1ac",
         },
+        // 브랜드 = VILLAGE 로고 오렌지 (인터랙션 강조색 전체를 로고 톤으로 통일)
         brand: {
-          50: "#eef2ff",
-          100: "#e0e7ff",
-          200: "#c7d2fe",
-          300: "#a5b4fc",
-          400: "#818cf8",
-          500: "#6366f1",
-          600: "#4f46e5",
-          700: "#4338ca",
+          50: "#fef3ee",
+          100: "#fcdfd2",
+          200: "#f8c3ae",
+          300: "#f39b79",
+          400: "#ee7647",
+          500: "#ea5b36", // 로고 색
+          600: "#d2440f",
+          700: "#ae360d",
         },
         // 운영 상태색
         checkout: { bg: "#eff6ff", fg: "#1d4ed8", ring: "#bfdbfe" }, // 반출 = 파랑
         checkin: { bg: "#ecfdf5", fg: "#047857", ring: "#a7f3d0" }, // 반납 = 초록
         attention: { bg: "#fef2f2", fg: "#b91c1c", ring: "#fecaca" }, // 확인필요 = 빨강
         warn: { bg: "#fffbeb", fg: "#b45309", ring: "#fde68a" },
-        // VILLAGE 시그니처 오렌지 (로고/브랜드 포인트)
-        accent: { DEFAULT: "#ea5b36", 50: "#fff3ef", 100: "#ffe2d8", 600: "#d94b27", 700: "#b73d1f" },
+        // VILLAGE 시그니처 오렌지 (로고/네비 — brand와 동일 톤)
+        accent: { DEFAULT: "#ea5b36", 50: "#fef3ee", 100: "#fcdfd2", 600: "#d2440f", 700: "#ae360d" },
       },
       borderRadius: {
         xl2: "1.125rem",

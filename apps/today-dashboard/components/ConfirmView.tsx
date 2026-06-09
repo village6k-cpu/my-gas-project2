@@ -157,7 +157,7 @@ export function ConfirmView() {
   );
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f4f5f7]">
+    <div className="flex min-h-screen flex-col bg-[#f6f5f2]">
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
         <ViewHeader title="확인요청">
           <span className="rounded-full bg-checkout-bg px-2.5 py-1 text-[12px] font-bold text-checkout-fg">대기 {items.length}건</span>

@@ -296,9 +296,9 @@ export function VillageTimeline({
               const isToday = ms === todayMs;
               const weekend = dow === 0 || dow === 6;
               return (
-                <div key={ms} style={{ width: colW }} className={`flex shrink-0 flex-col items-center justify-center ${isToday ? "bg-[#ebf5ff]" : weekend ? "bg-black/[0.015]" : ""}`}>
+                <div key={ms} style={{ width: colW }} className={`flex shrink-0 flex-col items-center justify-center ${isToday ? "bg-brand-50" : weekend ? "bg-black/[0.015]" : ""}`}>
                   {(dt.getDate() === 1 || i === 0) && <span className="text-[9.5px] font-bold text-ink-faint">{dt.getMonth() + 1}월</span>}
-                  <span className={`text-[13px] font-bold ${isToday ? "text-[#2383e2]" : dow === 0 ? "text-attention-fg" : dow === 6 ? "text-checkout-fg" : "text-ink"}`}>{dt.getDate()}</span>
+                  <span className={`text-[13px] font-bold ${isToday ? "text-brand-600" : dow === 0 ? "text-attention-fg" : dow === 6 ? "text-checkout-fg" : "text-ink"}`}>{dt.getDate()}</span>
                   {colW >= 60 && <span className="text-[9.5px] text-ink-faint">{WEEKDAY[dow]}</span>}
                 </div>
               );
@@ -312,11 +312,11 @@ export function VillageTimeline({
               const dow = new Date(ms).getDay();
               const isToday = ms === todayMs;
               if (!isToday && dow !== 0 && dow !== 6) return null;
-              return <div key={ms} className={`absolute top-0 bottom-0 ${isToday ? "bg-[#ebf5ff]/60" : "bg-black/[0.012]"}`} style={{ left: i * colW, width: colW }} />;
+              return <div key={ms} className={`absolute top-0 bottom-0 ${isToday ? "bg-brand-50/60" : "bg-black/[0.012]"}`} style={{ left: i * colW, width: colW }} />;
             })}
             {todayOff >= 0 && todayOff < days && (
-              <div className="absolute top-0 bottom-0 z-20" style={{ left: todayOff * colW + Math.round(colW / 2) - 1, width: 2, background: "#eb5757" }}>
-                <span className="absolute left-1/2 -translate-x-1/2 rounded-b bg-[#eb5757] px-1 text-[9px] font-bold text-white">오늘</span>
+              <div className="absolute top-0 bottom-0 z-20" style={{ left: todayOff * colW + Math.round(colW / 2) - 1, width: 2, background: "#d2440f" }}>
+                <span className="absolute left-1/2 -translate-x-1/2 rounded-b bg-brand-600 px-1 text-[9px] font-bold text-white">오늘</span>
               </div>
             )}
             <div className="relative z-10">{rows.length ? rows : <div className="py-16 text-center text-[14px] text-ink-faint">예약이 없어요</div>}</div>
@@ -330,7 +330,7 @@ export function VillageTimeline({
                   <div
                     key={i}
                     title={`${Math.round(r).toLocaleString("ko-KR")}원`}
-                    className="absolute bottom-1 rounded-sm bg-[#2383e2]/30 transition-colors hover:bg-[#2383e2]/60"
+                    className="absolute bottom-1 rounded-sm bg-brand-500/30 transition-colors hover:bg-brand-500/60"
                     style={{ left: i * colW + colW * 0.2, width: colW * 0.6, height: Math.max(2, (r / maxRev) * (REV_H - 14)) }}
                   />
                 ) : null,

@@ -34,7 +34,7 @@ export function ScheduleView() {
   if (!today) return <div className="flex h-screen items-center justify-center text-ink-faint">불러오는 중…</div>;
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f4f5f7]">
+    <div className="flex min-h-screen flex-col bg-[#f6f5f2]">
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
         <ViewHeader title="빌리지 스케줄">
           <span className="hidden text-[12px] text-ink-faint sm:inline">장비별 예약 현황</span>

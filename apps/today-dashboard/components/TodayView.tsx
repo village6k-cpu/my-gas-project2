@@ -98,7 +98,7 @@ export function TodayView() {
   let cardIndex = -1;
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f4f5f7] lg:min-h-full">
+    <div className="flex min-h-screen flex-col bg-[#f6f5f2] lg:min-h-full">
       {/* 상단 고정 헤더 */}
       <header className="safe-top sticky top-0 z-30 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
         <ViewHeader title="오늘 일정">
