@@ -3,14 +3,21 @@ import "./globals.css";
 import { AuthGate } from "@/components/AuthGate";
 
 export const metadata: Metadata = {
-  title: "빌리지 · 오늘 일정",
-  description: "빌리지 렌탈 운영 대시보드",
+  title: "헤이빌리",
+  description: "헤이빌리 — 빌리지 렌탈 운영 대시보드",
   manifest: "/manifest.json",
-  appleWebApp: { capable: true, statusBarStyle: "default", title: "빌리지" },
+  appleWebApp: { capable: true, statusBarStyle: "default", title: "헤이빌리" },
+  icons: {
+    icon: [
+      { url: "/icon.svg", type: "image/svg+xml" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180" }],
+  },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#4f46e5",
+  themeColor: "#ffffff",
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,

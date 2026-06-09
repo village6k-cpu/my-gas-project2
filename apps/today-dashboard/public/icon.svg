@@ -1,5 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#4f46e5"/>
-  <path d="M18 22h28M18 32h28M18 42h18" stroke="#fff" stroke-width="4.5" stroke-linecap="round"/>
-  <circle cx="44" cy="42" r="3.5" fill="#a5b4fc"/>
+  <rect width="64" height="64" rx="14" fill="#FBF6EE"/>
+  <text x="19.5" y="27" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="800" letter-spacing="-0.6" fill="#1b1d22">hey</text>
+  <text x="16" y="53.5" font-family="'Arial Black',Helvetica,sans-serif" font-size="43" font-weight="900" fill="#ea5b36">V</text>
+  <rect x="41.5" y="41" width="9" height="9" rx="2.2" fill="#16181d"/>
 </svg>
