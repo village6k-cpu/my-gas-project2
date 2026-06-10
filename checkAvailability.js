@@ -31,7 +31,7 @@ function onOpen() {
   ui.createMenu("📋 빌리지 스케줄")
     .addItem("🔍 가용 확인 (수동 전체)", "manualProcessAll")
     .addItem("✅ 예약 등록 (수동)", "manualRegister")
-    .addItem("📄 계약서 생성", "createContractFromMenu")
+    .addItem("📄 계약서 생성/재생성", "createContractFromMenu")
     .addItem("🐞 가용확인 디버그 (선택행)", "debugCheckAvailForSelected")
     .addItem("⚡ 가용확인 강제 재실행 (선택행 reqID)", "forceRerunCheckAvailForSelected")
     .addSeparator()

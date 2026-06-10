@@ -4182,6 +4182,9 @@ function cardActionHtml(item, cardType) {
   } else {
     html += '<span class="card-contract-btn disabled">계약서 없음</span>';
   }
+  if (!item.contractRegenPending && item.tradeId) {
+    html += '<button class="trade-action-btn" onclick="event.stopPropagation();startDashboardContractRegeneration(\'' + escJs(item.tradeId) + '\')">계약서 재생성</button>';
+  }
   html += '<button class="trade-action-btn" onclick="event.stopPropagation();runTradeOpsAction(this,\'' + escJs(item.tradeId) + '\',\'sendEstimate\')">견적서 발송</button>';
   if (cardType === 'checkin' && item.tradeId) {
     html += '<button class="trade-action-btn danger" onclick="event.stopPropagation();cancelDashboardTrade(this,\'' + escJs(item.tradeId) + '\',\'' + escJs(item.name || item.tradeId) + '\')">취소처리</button>';

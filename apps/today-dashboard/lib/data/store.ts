@@ -18,7 +18,7 @@ import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
-import { gasWrite } from "./writeback";
+import { gasMutation, gasWrite } from "./writeback";
 import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults } from "./sync";
 
 interface State {
@@ -402,6 +402,23 @@ export function sendEstimate(tradeId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, estimateSent: true }));
   flashSave(tradeId);
   gasWrite("sendEstimate", { tid: tradeId });
+}
+
+export async function regenerateContract(tradeId: string) {
+  mutateTrade(tradeId, (t) => ({ ...t, contractRegenPending: true }));
+  flashSave(tradeId);
+  try {
+    const res = await gasMutation("regenerateContract", { tid: tradeId });
+    const result = res?.result || res;
+    const url = result?.url || res?.url || "";
+    mutateTrade(tradeId, (t) => ({ ...t, contractUrl: url || t.contractUrl, contractRegenPending: false }));
+    flashSave(tradeId);
+  } catch (error) {
+    mutateTrade(tradeId, (t) => ({ ...t, contractRegenPending: false }));
+    flashSave(tradeId);
+    console.error("[contract] regenerate failed:", error);
+    throw error;
+  }
 }
 
 // ── 타임라인: 이 품목(막대)만 날짜 이동/리사이즈 (드래그) ────────
