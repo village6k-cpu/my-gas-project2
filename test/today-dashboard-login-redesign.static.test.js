@@ -4,7 +4,11 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const authGatePath = path.join(root, 'apps/today-dashboard/components/AuthGate.tsx');
+const globalsPath = path.join(root, 'apps/today-dashboard/app/globals.css');
+const tailwindPath = path.join(root, 'apps/today-dashboard/tailwind.config.ts');
 const authGate = fs.readFileSync(authGatePath, 'utf8');
+const globals = fs.readFileSync(globalsPath, 'utf8');
+const tailwind = fs.readFileSync(tailwindPath, 'utf8');
 
 assert(
   authGate.includes('import { VillageLogo } from "@/components/VillageLogo";'),
@@ -42,8 +46,10 @@ assert(
 );
 
 assert(
-  authGate.includes('bg-[#f6f5f2]'),
-  'login screen background must keep the same warm app/homepage base tone'
+  authGate.includes('bg-paper') &&
+    globals.includes('background: #f5f3ef') &&
+    /paper:\s*"#F5F3EF"/.test(tailwind),
+  'login screen background must use the shared warm paper token matching the app/homepage base tone'
 );
 
 console.log('today-dashboard login redesign static checks passed');
