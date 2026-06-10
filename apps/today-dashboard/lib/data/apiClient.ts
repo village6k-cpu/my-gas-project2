@@ -14,3 +14,19 @@ export async function gasFetch(query: string): Promise<Response> {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
 }
+
+export async function gasPost(payload: Record<string, unknown>): Promise<Response> {
+  let token = "";
+  if (supabase) {
+    const { data } = await supabase.auth.getSession();
+    token = data.session?.access_token ?? "";
+  }
+  return fetch("/api/gas", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+}

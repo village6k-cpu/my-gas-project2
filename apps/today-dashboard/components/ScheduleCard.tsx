@@ -138,7 +138,7 @@ export function ScheduleCard({
         <div className="px-4 pb-4 pl-5 pt-1">
           <HandoverChecklist trade={trade} phase={phase} />
           <RiskPanel warnings={trade.riskWarnings} phase={phase} />
-          <PhotoStrip photos={trade.photos} />
+          <PhotoStrip tradeId={trade.tradeId} photos={trade.photos} />
           <PaymentControls trade={trade} />
         </div>
       )}

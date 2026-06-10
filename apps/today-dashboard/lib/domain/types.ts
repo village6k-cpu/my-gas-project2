@@ -55,6 +55,12 @@ export interface PhotoMeta {
   swatch: string;
   label: string;
   memo?: string;
+  url?: string;
+  thumbnailUrl?: string;
+  fileId?: string;
+  sheetValue?: string;
+  uploadedAt?: string;
+  row?: number;
 }
 
 export interface RiskWarning {

@@ -10,6 +10,7 @@ import type {
   EquipmentItem,
   HandoverNote,
   Phase,
+  PhotoMeta,
   ReturnCount,
   Settlement,
   Trade,
@@ -18,7 +19,7 @@ import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
-import { gasMutation, gasWrite } from "./writeback";
+import { gasMutation, gasRead, gasWrite } from "./writeback";
 import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults } from "./sync";
 
 interface State {
@@ -487,6 +488,96 @@ export function resizeEquipment(tradeId: string, scheduleId: string, edge: "star
 // ── 반출/반납 전체 메모 (분리) ──────────────────────────────────
 export function setPhaseNote(tradeId: string, phase: Phase, text: string) {
   mutateTrade(tradeId, (t) => (phase === "checkout" ? { ...t, noteCheckout: text } : { ...t, noteCheckin: text }));
+  flashSave(tradeId);
+}
+
+// ── 반출/반납 사진 ──────────────────────────────────────────────
+function normalizePhotoPhase(value: unknown): Phase | "other" {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (raw === "checkout" || raw.includes("반출") || raw.includes("출고")) return "checkout";
+  if (raw === "checkin" || raw.includes("반납") || raw.includes("입고") || raw.includes("회수")) return "checkin";
+  return "other";
+}
+
+function photoLabel(phase: Phase | "other"): string {
+  return phase === "checkout" ? "반출 사진" : phase === "checkin" ? "반납 사진" : "사진";
+}
+
+function photoSwatch(phase: Phase | "other"): string {
+  return phase === "checkout" ? "#2d5be3" : phase === "checkin" ? "#0f8a61" : "#787774";
+}
+
+function photoKey(photo: PhotoMeta): string {
+  return photo.fileId || photo.url || photo.thumbnailUrl || photo.id;
+}
+
+function normalizeGasPhoto(raw: unknown, fallbackPhase: Phase | "other", index: number): PhotoMeta {
+  const src = (raw || {}) as Record<string, unknown>;
+  const phase = normalizePhotoPhase(src.phase ?? fallbackPhase);
+  const uploadedAt = String(src.uploadedAt ?? "");
+  const fileId = String(src.fileId ?? "");
+  const url = String(src.url ?? "");
+  const thumbnailUrl = String(src.thumbnailUrl ?? "");
+  const id = String(src.id ?? "") || fileId || url || thumbnailUrl || `${phase}-${uploadedAt || Date.now()}-${index}`;
+  return {
+    id,
+    phase,
+    swatch: String(src.swatch ?? photoSwatch(phase)),
+    label: String(src.label ?? (uploadedAt ? `${photoLabel(phase)} ${uploadedAt}` : photoLabel(phase))),
+    memo: src.memo != null ? String(src.memo) : undefined,
+    url: url || undefined,
+    thumbnailUrl: thumbnailUrl || undefined,
+    fileId: fileId || undefined,
+    sheetValue: src.sheetValue != null ? String(src.sheetValue) : undefined,
+    uploadedAt: uploadedAt || undefined,
+    row: typeof src.row === "number" ? src.row : undefined,
+  };
+}
+
+function flattenGasPhotos(raw: unknown): PhotoMeta[] {
+  if (Array.isArray(raw)) return raw.map((p, index) => normalizeGasPhoto(p, "other", index));
+  const bucket = (raw || {}) as Record<string, unknown>;
+  return (["checkout", "checkin", "other"] as const).flatMap((phase) => {
+    const list = Array.isArray(bucket[phase]) ? (bucket[phase] as unknown[]) : [];
+    return list.map((p, index) => normalizeGasPhoto(p, phase, index));
+  });
+}
+
+function mergePhotos(existing: PhotoMeta[], incoming: PhotoMeta[]): PhotoMeta[] {
+  const map = new Map<string, PhotoMeta>();
+  for (const photo of existing) map.set(photoKey(photo), photo);
+  for (const photo of incoming) map.set(photoKey(photo), { ...map.get(photoKey(photo)), ...photo });
+  return Array.from(map.values());
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("사진 파일 읽기 실패"));
+    reader.readAsDataURL(file);
+  });
+}
+
+export async function refreshTradePhotos(tradeId: string): Promise<void> {
+  const res = await gasRead("dashboardPhotos", { tid: tradeId });
+  const photos = flattenGasPhotos(res?.photos || res?.result?.photos);
+  if (!photos.length) return;
+  mutateTrade(tradeId, (t) => ({ ...t, photos: mergePhotos(t.photos, photos) }));
+}
+
+export async function uploadTradePhoto(tradeId: string, phase: Phase, file: File): Promise<void> {
+  const data = await readFileAsDataUrl(file);
+  const res = await gasMutation("uploadDashboardPhoto", {
+    tid: tradeId,
+    phase,
+    fileName: file.name || `${tradeId}-${phase}.jpg`,
+    mimeType: file.type || "image/jpeg",
+    data,
+  });
+  if (res?.skipped) throw new Error("사진 업로드 쓰기 경로가 비활성화되어 있습니다");
+  const photo = normalizeGasPhoto(res?.photo || res?.result?.photo, phase, 0);
+  mutateTrade(tradeId, (t) => ({ ...t, photos: mergePhotos(t.photos, [photo]) }));
   flashSave(tradeId);
 }
 
