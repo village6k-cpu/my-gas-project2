@@ -90,7 +90,7 @@ export function OperationsView() {
   const pace = data?.health?.checkoutPace;
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f6f5f2]">
+    <div className="flex min-h-screen flex-col bg-paper">
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
         <ViewHeader title="운영판">
           <button onClick={load} className={`tap flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
@@ -138,7 +138,7 @@ export function OperationsView() {
               <Kpi label="오늘 반출" value={s.todayCheckout ?? 0} bar="bg-checkout-fg" />
               <Kpi label="오늘 반납" value={s.todayCheckin ?? 0} bar="bg-checkin-fg" />
               <Kpi label="미확정 예약" value={s.unconfirmed ?? 0} bar="bg-attention-fg" alert={(s.unconfirmed ?? 0) > 0} />
-              <Kpi label="임박 반출" value={s.imminent ?? 0} bar="bg-[#ea580c]" />
+              <Kpi label="임박 반출" value={s.imminent ?? 0} bar="bg-brand-500" />
             </div>
 
             {/* 건강 지표 2카드 */}
@@ -205,8 +205,8 @@ function Kpi({ label, value, bar, alert }: { label: string; value: number; bar: 
 
 function Gauge({ util }: { util?: { inUse?: number; total?: number; percent?: number } }) {
   const pct = util?.percent ?? 0;
-  const tone = pct >= 50 ? "text-checkin-fg" : pct >= 30 ? "text-[#ea580c]" : "text-attention-fg";
-  const barColor = pct >= 50 ? "bg-checkin-fg" : pct >= 30 ? "bg-[#ea580c]" : "bg-attention-fg";
+  const tone = pct >= 50 ? "text-checkin-fg" : pct >= 30 ? "text-warn-fg" : "text-attention-fg";
+  const barColor = pct >= 50 ? "bg-checkin-fg" : pct >= 30 ? "bg-warn-fg" : "bg-attention-fg";
   return (
     <div className="rounded-xl bg-white p-3.5 shadow-card ring-1 ring-black/5">
       <div className="text-[12px] font-semibold text-ink-mute">장비 가동률</div>

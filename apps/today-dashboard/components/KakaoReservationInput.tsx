@@ -388,7 +388,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
           <div className="grid gap-3 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <div className="space-y-3">
               <div
-                className="rounded-xl border border-dashed border-black/12 bg-[#f8f7f4] p-3"
+                className="rounded-xl border border-dashed border-black/12 bg-paper p-3"
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={handleDropImage}
               >
@@ -532,7 +532,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
           </div>
 
           {result && (
-            <div className="mt-3 rounded-xl border border-black/8 bg-[#fbfaf7] p-3">
+            <div className="mt-3 rounded-xl border border-black/8 bg-paper p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <div className="text-[12px] font-bold text-ink-faint">가용 체크 결과</div>
@@ -586,12 +586,12 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
           padding: 0.5rem 0.65rem;
           font-size: 13.5px;
           font-weight: 600;
-          color: #16181d;
+          color: #1a1a1a;
           outline: none;
         }
         .entry-input:focus {
-          border-color: #e24a1a;
-          box-shadow: 0 0 0 2px rgba(226, 74, 26, 0.12);
+          border-color: #e8593c;
+          box-shadow: 0 0 0 2px rgba(232, 89, 60, 0.12);
         }
       `}</style>
     </section>

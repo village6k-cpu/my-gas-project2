@@ -158,7 +158,7 @@ export function ConfirmView() {
   );
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f6f5f2]">
+    <div className="flex min-h-screen flex-col bg-paper">
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
         <ViewHeader title="확인요청">
           <span className="rounded-full bg-checkout-bg px-2.5 py-1 text-[12px] font-bold text-checkout-fg">대기 {items.length}건</span>
@@ -419,11 +419,11 @@ function EditPanel({
           border-radius: 0.6rem;
           padding: 0.55rem 0.7rem;
           font-size: 13.5px;
-          color: #16181d;
+          color: #1a1a1a;
           outline: none;
         }
         .inp:focus {
-          border-color: #6366f1;
+          border-color: #e8593c;
         }
       `}</style>
     </div>

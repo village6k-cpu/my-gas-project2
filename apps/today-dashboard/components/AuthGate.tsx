@@ -31,7 +31,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (!isSupabase) return <>{children}</>; // 시드 모드 = 인증 없음
   if (loading) {
     return (
-      <div className="flex min-h-dvh items-center justify-center bg-[#f6f5f2] text-ink-faint">
+      <div className="flex min-h-dvh items-center justify-center bg-paper text-ink-faint">
         <div className="flex flex-col items-center gap-5">
           <VillageLogo size="lg" />
           <div className="animate-pulse text-[13px] font-semibold">불러오는 중...</div>
@@ -52,7 +52,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-[#f6f5f2] px-5 py-10 text-ink">
+    <div className="flex min-h-dvh items-center justify-center bg-paper px-5 py-10 text-ink">
       <form onSubmit={login} className="w-full max-w-[340px] sm:max-w-[420px]">
         <div className="mb-9 flex flex-col items-center text-center">
           <VillageLogo size="lg" />
@@ -94,7 +94,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           </label>
 
           {err && (
-            <div aria-live="polite" className="rounded-[8px] border border-rose-200 bg-rose-50 px-3 py-2.5 text-[13px] font-bold text-rose-700">
+            <div aria-live="polite" className="rounded-[8px] border border-attention-ring bg-attention-bg px-3 py-2.5 text-[13px] font-bold text-attention-fg">
               {err}
             </div>
           )}

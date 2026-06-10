@@ -12,18 +12,18 @@ export function HandoverBoard({ notes }: { notes: HandoverNote[] }) {
   const [size, setSize] = useState(1);
 
   return (
-    <section className="rounded-xl2 bg-[#fffdf3] p-3 shadow-card ring-1 ring-amber-200/70">
+    <section className="rounded-xl2 bg-warn-bg p-3 shadow-card ring-1 ring-warn-ring/70">
       <div className="flex items-center justify-between">
-        <button onClick={() => setOpen((v) => !v)} className="flex items-center gap-1.5 text-[13px] font-bold text-amber-900">
+        <button onClick={() => setOpen((v) => !v)} className="flex items-center gap-1.5 text-[13px] font-bold text-warn-fg">
           📌 인수인계 메모
-          <span className="rounded-full bg-amber-200/70 px-1.5 text-[11px] font-semibold text-amber-800">{notes.length}</span>
+          <span className="rounded-full bg-warn-ring/70 px-1.5 text-[11px] font-semibold text-warn-fg">{notes.length}</span>
         </button>
         <div className="flex items-center gap-1">
           {["A-", "A", "A+"].map((l, i) => (
             <button
               key={l}
               onClick={() => setSize(i)}
-              className={`tap h-6 rounded-md px-1.5 text-[11px] font-bold ${size === i ? "bg-amber-200 text-amber-900" : "text-amber-700/60"}`}
+              className={`tap h-6 rounded-md px-1.5 text-[11px] font-bold ${size === i ? "bg-warn-ring text-warn-fg" : "text-warn-fg/60"}`}
             >
               {l}
             </button>
@@ -34,16 +34,16 @@ export function HandoverBoard({ notes }: { notes: HandoverNote[] }) {
       {open && (
         <div className="mt-2 space-y-1.5">
           {notes.map((n) => (
-            <div key={n.id} className="group flex items-start gap-2 rounded-lg bg-amber-100/50 px-2.5 py-1.5">
+            <div key={n.id} className="group flex items-start gap-2 rounded-lg bg-white/55 px-2.5 py-1.5">
               <NoteArea body={n.body} sizeCls={SIZES[size]} size={size} onSave={(v) => updateNote(n.id, v)} />
-              <button onClick={() => deleteNote(n.id)} className="tap mt-0.5 shrink-0 text-amber-700/40 hover:text-attention-fg">
+              <button onClick={() => deleteNote(n.id)} className="tap mt-0.5 shrink-0 text-warn-fg/40 hover:text-attention-fg">
                 ✕
               </button>
             </div>
           ))}
           <button
             onClick={addNote}
-            className="tap flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-amber-300 py-1.5 text-[12.5px] font-semibold text-amber-700"
+            className="tap flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-warn-ring py-1.5 text-[12.5px] font-semibold text-warn-fg"
           >
             <Plus className="h-3.5 w-3.5" /> 메모 추가
           </button>
@@ -72,7 +72,7 @@ function NoteArea({ body, sizeCls, size, onSave }: { body: string; sizeCls: stri
       onInput={grow}
       onBlur={(e) => onSave(e.target.value)}
       rows={1}
-      className={`flex-1 resize-none overflow-hidden bg-transparent leading-snug text-amber-950 outline-none placeholder:text-amber-700/40 ${sizeCls}`}
+      className={`flex-1 resize-none overflow-hidden bg-transparent leading-snug text-ink outline-none placeholder:text-warn-fg/40 ${sizeCls}`}
       placeholder="메모 입력…"
     />
   );

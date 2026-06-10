@@ -13,8 +13,8 @@ body {
 }
 
 body {
-  background: #f6f5f2;
-  color: #16181d;
+  background: #f5f3ef; /* 홈페이지 bg-primary와 동일 */
+  color: #1a1a1a;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overscroll-behavior-y: none;
@@ -67,11 +67,11 @@ body {
 }
 
 @keyframes conflict-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(235, 87, 87, 0.5); }
-  50% { box-shadow: 0 0 0 3px rgba(235, 87, 87, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(178, 58, 40, 0.5); }
+  50% { box-shadow: 0 0 0 3px rgba(178, 58, 40, 0); }
 }
 .conflict {
-  outline: 2px solid #eb5757;
+  outline: 2px solid #b23a28;
   outline-offset: -1px;
   animation: conflict-pulse 1.6s ease-in-out infinite;
 }

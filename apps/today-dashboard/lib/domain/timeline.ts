@@ -48,18 +48,19 @@ export function statusKeyOf(status: string): StatusKey {
 }
 
 // 상태별 막대 색 (대기 파랑 / 반출중 앰버 / 반납완료 초록 / 취소 회색 / 기타 보라)
+// tailwind.config의 checkout/warn/checkin 시맨틱 팔레트와 같은 웜톤 계열 (홈페이지 크림 바탕에 맞춤)
 export function statusBar(k: StatusKey): { bar: string; strike?: boolean } {
   switch (k) {
     case "대기":
-      return { bar: "bg-[#d3e5ef] text-[#24609c]" };
+      return { bar: "bg-[#D8E4F2] text-[#3A6195]" };
     case "반출중":
-      return { bar: "bg-[#fdecc8] text-[#93640d]" };
+      return { bar: "bg-[#F2E3BF] text-[#8A6618]" };
     case "반납완료":
-      return { bar: "bg-[#dbeddb] text-[#2b6b2b]" };
+      return { bar: "bg-[#DBE7D5] text-[#44703E]" };
     case "취소":
-      return { bar: "bg-[#e8e8e5] text-[#787774]", strike: true };
+      return { bar: "bg-[#EAE8E3] text-[#8B877E]", strike: true };
     default:
-      return { bar: "bg-[#e8deee] text-[#6940a5]" };
+      return { bar: "bg-[#E8E1ED] text-[#6F5990]" };
   }
 }
 

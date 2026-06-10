@@ -149,7 +149,7 @@ function rowTint(e: EquipmentItem, excluded: boolean): string {
   if (excluded) return "bg-attention-bg/30";
   if (e.onsite) return "";
   // 세트 구성품은 세트 밑에 묶이므로 악세사리 톤 안 입힘. loose하게 단독으로 있는 라인·암만 구분.
-  if (!e.isComponent && coarseGroup(e.category) === "악세사리·라인") return "border-l-2 border-amber-200 bg-amber-50/40";
+  if (!e.isComponent && coarseGroup(e.category) === "악세사리·라인") return "border-l-2 border-warn-ring bg-warn-bg/40";
   return "";
 }
 
@@ -269,7 +269,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
             {matches.map((m) => (
               <button key={m.name} onClick={() => { setPicked(m); setQ(m.name); }} className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]">
                 <span className="flex-1 text-[13px] text-ink">{m.name}</span>
-                <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-amber-100 text-amber-700" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
+                <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-warn-ring/60 text-warn-fg" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
               </button>
             ))}
             {!exact && (
@@ -413,7 +413,7 @@ function FloatingCatalogMenu({
           className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]"
         >
           <span className="flex-1 truncate text-[13px] text-ink">{m.name}</span>
-          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-amber-100 text-amber-700" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-warn-ring/60 text-warn-fg" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
         </button>
       ))}
       {!exact && (

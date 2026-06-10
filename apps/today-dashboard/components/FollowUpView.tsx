@@ -61,19 +61,19 @@ const LANE_DEFS: { key: string; label: string; match: (x: Item) => boolean }[] =
   { key: "ops", label: "운영·기타", match: () => true },
 ];
 
-// priority → 색 (앱 시맨틱 팔레트에 맞춤)
-const DOT: Record<string, string> = { urgent: "bg-[#dc2626]", high: "bg-[#ea580c]", normal: "bg-[#0284c7]", low: "bg-[#16a34a]" };
-const BAR: Record<string, string> = { urgent: "bg-[#dc2626]", high: "bg-[#ea580c]", normal: "bg-[#0284c7]", low: "bg-[#16a34a]" };
+// priority → 색 (앱 시맨틱 팔레트에 맞춤: 긴급 빨강 / 높음 브랜드 오렌지 / 보통 파랑 / 낮음 초록)
+const DOT: Record<string, string> = { urgent: "bg-attention-fg", high: "bg-brand-500", normal: "bg-checkout-fg", low: "bg-checkin-fg" };
+const BAR: Record<string, string> = { urgent: "bg-attention-fg", high: "bg-brand-500", normal: "bg-checkout-fg", low: "bg-checkin-fg" };
 const PRIORITY_CHIP: Record<string, string> = {
   urgent: "bg-attention-bg text-attention-fg",
-  high: "bg-warn-bg text-warn-fg",
+  high: "bg-brand-50 text-brand-600",
   normal: "bg-checkout-bg text-checkout-fg",
   low: "bg-checkin-bg text-checkin-fg",
 };
 const STATUS_CHIP: Record<string, string> = {
-  in_progress: "bg-cyan-50 text-cyan-800",
-  waiting_customer: "bg-amber-50 text-amber-800",
-  waiting_internal: "bg-amber-50 text-amber-800",
+  in_progress: "bg-checkout-bg text-checkout-fg",
+  waiting_customer: "bg-warn-bg text-warn-fg",
+  waiting_internal: "bg-warn-bg text-warn-fg",
   done: "bg-black/[0.05] text-ink-mute",
   dismissed: "bg-black/[0.05] text-ink-mute",
 };
@@ -246,7 +246,7 @@ export function FollowUpView() {
   const empty = active.length === 0 && !(showClosed && closed.length);
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f6f5f2]">
+    <div className="flex min-h-screen flex-col bg-paper">
       {/* 헤더 */}
       <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
         <ViewHeader title="후속조치">
@@ -353,7 +353,7 @@ export function FollowUpView() {
 }
 
 function Stat({ label, value, tone }: { label: string; value: number; tone?: "urgent" | "high" }) {
-  const color = tone === "urgent" ? "text-attention-fg" : tone === "high" ? "text-[#ea580c]" : "text-ink";
+  const color = tone === "urgent" ? "text-attention-fg" : tone === "high" ? "text-brand-600" : "text-ink";
   return (
     <div className="rounded-xl bg-white p-3.5 shadow-card ring-1 ring-black/5">
       <div className="text-[12px] font-semibold text-ink-mute">{label}</div>
@@ -490,7 +490,7 @@ function DetailCard({
           )}
 
           {item.suggested_reply_draft && !closed ? (
-            <div className="mt-2.5 rounded-lg bg-[#f8fafc] p-3 ring-1 ring-black/5">
+            <div className="mt-2.5 rounded-lg bg-paper p-3 ring-1 ring-black/5">
               <label className="mb-1.5 block text-[11px] font-extrabold tracking-wide text-ink-mute">답변 초안</label>
               <textarea value={draft} onChange={(e) => setDraft(e.target.value)} className="min-h-[92px] w-full resize-y rounded-lg border border-black/10 bg-white p-2.5 text-[13.5px] leading-relaxed text-ink outline-none focus:border-brand-500" />
               {err && <div className="mt-1.5 text-[12px] font-medium text-attention-fg">{err}</div>}
@@ -501,7 +501,7 @@ function DetailCard({
                   setErr("");
                   onSend(item, draft).catch((e) => setErr(e instanceof Error ? e.message : String(e))).finally(() => setSending(false));
                 }}
-                className="tap mt-2 w-full rounded-lg bg-[#0f766e] py-2.5 text-[13.5px] font-bold text-white disabled:opacity-50"
+                className="tap mt-2 w-full rounded-lg bg-brand-600 py-2.5 text-[13.5px] font-bold text-white disabled:opacity-50"
               >
                 {sending ? "전송 중…" : "전송"}
               </button>

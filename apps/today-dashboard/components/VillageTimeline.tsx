@@ -313,7 +313,7 @@ export function VillageTimeline({
               return <div key={ms} className={`absolute top-0 bottom-0 ${isToday ? "bg-brand-50/60" : "bg-black/[0.012]"}`} style={{ left: i * colW, width: colW }} />;
             })}
             {todayOff >= 0 && todayOff < days && (
-              <div className="absolute top-0 bottom-0 z-20" style={{ left: todayOff * colW + Math.round(colW / 2) - 1, width: 2, background: "#d2440f" }}>
+              <div className="absolute top-0 bottom-0 z-20" style={{ left: todayOff * colW + Math.round(colW / 2) - 1, width: 2, background: "#D04A2E" }}>
                 <span className="absolute left-1/2 -translate-x-1/2 rounded-b bg-brand-600 px-1 text-[9px] font-bold text-white">오늘</span>
               </div>
             )}

@@ -252,7 +252,7 @@ function FloatingCatalogMenu({
           className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]"
         >
           <span className="flex-1 truncate text-[13px] text-ink">{m.name}</span>
-          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-amber-100 text-amber-700" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-warn-ring/60 text-warn-fg" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
         </button>
       ))}
       {!exact && (
