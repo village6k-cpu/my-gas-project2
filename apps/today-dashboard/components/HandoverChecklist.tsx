@@ -19,6 +19,19 @@ import { Check, Plus } from "./icons";
 import { ReturnChecklist } from "./ReturnChecklist";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
+type SetGroup = ReturnType<typeof groupBySet>[number];
+
+function sameSetName(a?: string | null, b?: string | null): boolean {
+  const norm = (value?: string | null) => String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+  return !!norm(a) && norm(a) === norm(b);
+}
+
+function singleControllableSetItem(g: SetGroup): EquipmentItem | null {
+  if (!g.setName) return null;
+  if (g.rows.length === 0) return g.header ?? null;
+  if (g.rows.length === 1 && sameSetName(g.rows[0].name, g.setName)) return g.rows[0];
+  return null;
+}
 
 export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -45,21 +58,28 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
         <>
           {/* 예약분 — 세트별 구획(세트명 헤더) */}
           <div className="space-y-2">
-            {groupBySet(booked).map((g) =>
-              g.setName ? (
-                <SetBox key={g.key} name={g.setName}>
-                  {g.rows.map((e) => (
-                    <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
-                  ))}
-                </SetBox>
+            {groupBySet(booked).map((g) => {
+              const singleSetItem = singleControllableSetItem(g);
+              return g.setName ? (
+                singleSetItem ? (
+                  <LooseList key={g.key}>
+                    <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge />
+                  </LooseList>
+                ) : (
+                  <SetBox key={g.key} name={g.setName}>
+                    {g.rows.map((e) => (
+                      <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                    ))}
+                  </SetBox>
+                )
               ) : (
                 <LooseList key={g.key}>
                   {g.rows.map((e) => (
                     <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
                   ))}
                 </LooseList>
-              ),
-            )}
+              );
+            })}
           </div>
 
           {/* 현장 추가 — 별도 그룹 */}
@@ -70,28 +90,35 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
             </div>
             {onsite.length > 0 && (
               <div className="space-y-1.5">
-                {groupBySet(onsite).map((g) =>
-                  g.setName ? (
-                    <SetBox
-                      key={g.key}
-                      name={g.setName}
-                      onRemove={() => {
-                        if (g.header) removeItem(trade.tradeId, g.header.scheduleId);
-                        g.rows.forEach((r) => removeItem(trade.tradeId, r.scheduleId));
-                      }}
-                    >
-                      {g.rows.map((e) => (
-                        <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
-                      ))}
-                    </SetBox>
+                {groupBySet(onsite).map((g) => {
+                  const singleSetItem = singleControllableSetItem(g);
+                  return g.setName ? (
+                    singleSetItem ? (
+                      <LooseList key={g.key}>
+                        <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge />
+                      </LooseList>
+                    ) : (
+                      <SetBox
+                        key={g.key}
+                        name={g.setName}
+                        onRemove={() => {
+                          if (g.header) removeItem(trade.tradeId, g.header.scheduleId);
+                          g.rows.forEach((r) => removeItem(trade.tradeId, r.scheduleId));
+                        }}
+                      >
+                        {g.rows.map((e) => (
+                          <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                        ))}
+                      </SetBox>
+                    )
                   ) : (
                     <LooseList key={g.key}>
                       {g.rows.map((e) => (
                         <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
                       ))}
                     </LooseList>
-                  ),
-                )}
+                  );
+                })}
               </div>
             )}
             {adding ? (
@@ -118,7 +145,7 @@ function rowTint(e: EquipmentItem, excluded: boolean): string {
   return "";
 }
 
-function CheckoutRow({ t, e, open, onToggle }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void }) {
+function CheckoutRow({ t, e, open, onToggle, setBadge = false }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean }) {
   const taken = e.checkoutState === "taken";
   const excluded = e.checkoutState === "excluded";
   const partial = e.takenQty != null && e.takenQty !== e.qty;
@@ -135,6 +162,7 @@ function CheckoutRow({ t, e, open, onToggle }: { t: Trade; e: EquipmentItem; ope
         </button>
 
         <button onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+          {setBadge && <span className="shrink-0 rounded bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">세트</span>}
           <span className={`truncate text-[14px] ${excluded ? "text-ink-faint line-through" : taken ? "text-ink" : "text-ink-soft"}`}>{e.name}</span>
           {e.offCatalog && <span className="shrink-0 rounded bg-black/5 px-1 text-[10px] font-semibold text-ink-faint">자유입력</span>}
         </button>
