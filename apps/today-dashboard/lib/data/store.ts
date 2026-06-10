@@ -18,7 +18,7 @@ import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
 import { gasWrite } from "./writeback";
-import { pollTimelineChanges, repairDashboardDetailsForEmptyEquipments } from "./sync";
+import { pollTimelineChanges, repairDashboardDetailsForIncompleteTrades } from "./sync";
 
 interface State {
   date: string;
@@ -71,7 +71,7 @@ function mergeTradeChanges(base: Trade[], changed: Trade[]): Trade[] {
 }
 
 async function repairEmptyEquipmentTrades(base = state.trades): Promise<boolean> {
-  const changed = await repairDashboardDetailsForEmptyEquipments(base);
+  const changed = await repairDashboardDetailsForIncompleteTrades(base);
   if (!changed.length) return false;
   set({ trades: mergeTradeChanges(base, changed) });
   for (const t of changed) persistTrade(t).catch(() => {});

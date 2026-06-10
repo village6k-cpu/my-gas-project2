@@ -14,7 +14,7 @@ const remoteSource = fs.readFileSync(remotePath, 'utf8');
 const mapperSource = fs.readFileSync(mapperPath, 'utf8');
 
 assert(
-  syncSource.includes('export async function repairDashboardDetailsForEmptyEquipments'),
+  syncSource.includes('export async function repairDashboardDetailsForIncompleteTrades'),
   'sync layer must expose a dashboard-detail repair path for trades cached with 0 equipment rows'
 );
 assert(
@@ -22,12 +22,12 @@ assert(
   'empty-equipment repair must use dashboard detail data, not timeline-only equipment snapshots'
 );
 assert(
-  syncSource.includes('if (!emptyIds.size) return []'),
+  syncSource.includes('if (!repairIds.size) return []'),
   'empty-equipment repair must skip GAS calls when there are no empty equipment trades'
 );
 
 assert(
-  storeSource.includes('repairDashboardDetailsForEmptyEquipments'),
+  storeSource.includes('repairDashboardDetailsForIncompleteTrades'),
   'store load/poll path must call dashboard-detail repair so users do not wait on a manual seed sync'
 );
 assert(

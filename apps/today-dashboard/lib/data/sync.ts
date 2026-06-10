@@ -199,15 +199,19 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
   return n;
 }
 
-/** Supabase에 거래만 있고 품목이 비어 있는 캐시를 dashboard 상세로 즉시 복구 */
-export async function repairDashboardDetailsForEmptyEquipments(current: Trade[]): Promise<Trade[]> {
-  const emptyIds = new Set(current.filter((t) => t.equipments.length === 0).map((t) => t.tradeId));
-  if (!emptyIds.size) return [];
+function needsDashboardDetailRepair(t: Trade): boolean {
+  return t.equipments.length === 0 || !t.contractUrl;
+}
+
+/** Supabase 캐시에 품목/계약서 등 dashboard 상세가 빠진 거래를 즉시 복구 */
+export async function repairDashboardDetailsForIncompleteTrades(current: Trade[]): Promise<Trade[]> {
+  const repairIds = new Set(current.filter(needsDashboardDetailRepair).map((t) => t.tradeId));
+  if (!repairIds.size) return [];
 
   const existing = new Map(current.map((t) => [t.tradeId, t]));
   const dates = new Set<string>();
   for (const t of current) {
-    if (!emptyIds.has(t.tradeId)) continue;
+    if (!repairIds.has(t.tradeId)) continue;
     dates.add(ymd(new Date(t.checkoutAt)));
     dates.add(ymd(new Date(t.returnAt)));
   }
@@ -221,7 +225,7 @@ export async function repairDashboardDetailsForEmptyEquipments(current: Trade[])
       const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
       for (const it of items) {
         const tid = it.tradeId;
-        if (!emptyIds.has(tid) || changed.has(tid) || !it.equipments?.length) continue;
+        if (!repairIds.has(tid) || changed.has(tid)) continue;
         const base = existing.get(tid);
         if (!base) continue;
         changed.set(tid, mergeDashboard(base, it));
