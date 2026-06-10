@@ -34,8 +34,8 @@ assert(
   'equipment name editor must follow remote value changes when the input is not dirty'
 );
 assert(
-  /function EquipmentNameCombobox\([\s\S]*const matches = searchCatalog\(q\)/.test(checklist),
-  'equipment name editor must search the catalog while typing'
+  /function EquipmentNameCombobox\([\s\S]*useEquipmentCatalog\(\)[\s\S]*const matches = searchEquipmentCatalog\(catalog\.items, q\)/.test(checklist),
+  'equipment name editor must search the sheet-master catalog while typing'
 );
 assert(
   /matches\.map\(\(m\)[\s\S]*onClick=\{\(\) => select\(m\)\}/.test(checklist),

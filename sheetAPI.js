@@ -241,6 +241,12 @@ function handleRequest(e) {
           names: getDashboardEquipNameList_(SpreadsheetApp.getActiveSpreadsheet())
         });
 
+      case "dashboardEquipmentCatalog":
+        return jsonResponse({
+          success: true,
+          catalog: getDashboardEquipmentCatalog_(SpreadsheetApp.getActiveSpreadsheet())
+        });
+
       case "dashboardSearch":
         return jsonResponse(getDashboardSearchData(
           params.q || params.query || postBody.q || postBody.query || "",

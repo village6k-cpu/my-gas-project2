@@ -25,7 +25,7 @@ async function isAuthed(req: NextRequest): Promise<boolean> {
 const cache = new Map<string, { at: number; body: string }>();
 const TTL = 30_000;
 // 읽기 액션 화이트리스트 (캐시됨)
-const READ_ACTIONS = new Set(["timeline", "dashboard", "operations", "search", "read", "info", "sheets", "list", "scan", "dashboardSearch", "dashboardContractExtras", "dashboardEquipNames"]);
+const READ_ACTIONS = new Set(["timeline", "dashboard", "operations", "search", "read", "info", "sheets", "list", "scan", "dashboardSearch", "dashboardContractExtras", "dashboardEquipNames", "dashboardEquipmentCatalog"]);
 // 쓰기 액션 화이트리스트 (캐시 안 함). 시트/상태 변경 → 신중.
 const WRITE_ACTIONS = new Set([
   "toggleSetup",
