@@ -327,21 +327,21 @@ function ConfirmCard({
             const isSetComponent = row.role === "set-component";
             const sel = !isSetHeader && checked.has(row.장비명);
             const rowCls = isSetHeader
-              ? "border border-brand-700/20 bg-brand-600 px-3 py-2.5 text-white shadow-sm"
+              ? "border border-line/60 bg-brand-50 px-3 py-2"
               : isSetComponent
-                ? "ml-3 border border-line/70 border-l-2 border-l-brand-500 bg-white px-2.5 py-2"
+                ? "ml-3 border border-line/70 border-l-2 border-l-brand-200 bg-white px-2.5 py-2"
                 : "bg-paper/60 px-2 py-1.5";
             return (
               <div key={row.rowKey} data-confirm-role={row.role} className={`flex items-start gap-2 rounded-xl ${rowCls}`}>
                 {isSetHeader ? (
                   <>
-                    <span className="shrink-0 rounded-md bg-white/20 px-2 py-0.5 text-[11px] font-extrabold text-white ring-1 ring-white/20">세트</span>
+                    <span className="shrink-0 rounded-md bg-brand-600 px-2 py-0.5 text-[11px] font-extrabold text-white">세트</span>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-baseline gap-1.5">
-                        <span className="truncate text-[14px] font-extrabold text-white">{row.장비명}</span>
-                        {row.수량 > 1 && <span className="shrink-0 text-[12px] font-bold tabular-nums text-white/85">×{row.수량}</span>}
+                        <span className="truncate text-[13.5px] font-extrabold text-brand-700">{row.장비명}</span>
+                        {row.수량 > 1 && <span className="shrink-0 text-[12px] font-bold tabular-nums text-brand-700/80">×{row.수량}</span>}
                       </div>
-                      <div className="mt-0.5 text-[11px] font-semibold text-white/70">{row.componentCount ? `구성품 ${row.componentCount}개` : "세트명 기준 장비"}</div>
+                      {row.componentCount ? <div className="mt-0.5 text-[11px] font-semibold text-brand-700/65">구성품 {row.componentCount}개</div> : null}
                     </div>
                   </>
                 ) : (
@@ -353,7 +353,6 @@ function ConfirmCard({
                     )}
                     <div className="min-w-0 flex-1">
                       <div className="flex min-w-0 items-baseline gap-1.5">
-                        {isSetComponent && <span className="shrink-0 rounded bg-brand-50 px-1.5 py-0.5 text-[10.5px] font-extrabold text-brand-700">구성품</span>}
                         <span className={`truncate text-[13.5px] font-semibold ${isSetComponent ? "text-ink-soft" : "text-ink"}`}>{row.장비명}</span>
                         <span className="shrink-0 text-[12px] font-bold tabular-nums text-ink-soft">×{row.수량}</span>
                       </div>

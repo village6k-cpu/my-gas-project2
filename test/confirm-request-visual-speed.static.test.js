@@ -27,8 +27,14 @@ assert.match(
 );
 
 assert(
-  confirmView.includes('bg-brand-600') && confirmView.includes('text-white') && confirmView.includes('border-l-2') && confirmView.includes('구성품'),
-  '세트 헤더는 진한 헤더 색, 구성품은 들여쓰기/좌측선/구성품 라벨로 명확히 구분돼야 한다'
+  confirmView.includes('bg-brand-50 px-3 py-2') && confirmView.includes('text-brand-700') && confirmView.includes('border-l-brand-200'),
+  '세트 헤더는 오늘 일정 대시보드처럼 연한 헤더와 세트 배지 정도로만 구분돼야 한다'
+);
+
+assert.doesNotMatch(
+  confirmView,
+  /bg-brand-600 px-3 py-2\.5 text-white shadow-sm/,
+  '확인요청 세트 헤더 전체를 진한 버튼색으로 칠하면 오늘 일정 대시보드 톤보다 과하다'
 );
 
 assert.match(
