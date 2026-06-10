@@ -1,15 +1,34 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import dynamic from "next/dynamic";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { authFetch } from "@/lib/data/authFetch";
 import { ViewHeader } from "@/components/ViewHeader";
 import { Refresh } from "@/components/icons";
-import { KakaoReservationInput } from "@/components/KakaoReservationInput";
+
+const KakaoReservationInput = dynamic(
+  () => import("@/components/KakaoReservationInput").then((mod) => mod.KakaoReservationInput),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="rounded-xl2 bg-white p-3 text-[13px] font-bold text-ink-mute shadow-card ring-1 ring-line/70">
+        카톡 예약입력 준비 중...
+      </div>
+    ),
+  },
+);
 
 // 확인요청 관리 — GAS Schedule API(/api/confirm)를 네이티브로. 대기/보류 카드 목록 + 장비별 가용성 결과
 // + 확인(가용성체크)/선택등록/전체보류/전체거절/수정. 디자인은 통합앱 토큰.
 
 type Equip = { 장비명: string; 수량: number; 결과?: string; 상세?: string };
+type ConfirmEquipmentRole = "set-header" | "set-component" | "single";
+type ConfirmEquipmentRow = Equip & {
+  role: ConfirmEquipmentRole;
+  rowKey: string;
+  groupName?: string;
+  componentCount?: number;
+};
 type Req = {
   reqID: string;
    반출일?: string;
@@ -21,6 +40,8 @@ type Req = {
    추가요청?: string;
    등록상태?: string;
 };
+
+const EMPTY_CONFIRM_EQUIPS: Equip[] = [];
 
 function resultTone(r?: string): "ok" | "warn" | "fail" | "unknown" | "set" | "none" {
   if (!r) return "none";
@@ -56,6 +77,37 @@ const STATUS_CHIP: Record<string, string> = {
 
 function isFail(r?: string) {
   return /❌|가용0/.test(r || "");
+}
+
+function buildConfirmEquipmentRows(equips: Equip[]): ConfirmEquipmentRow[] {
+  const rows: ConfirmEquipmentRow[] = [];
+  let currentSetIndex = -1;
+
+  equips.forEach((equip, index) => {
+    if (equip.결과 === "세트") {
+      currentSetIndex = rows.length;
+      rows.push({
+        ...equip,
+        role: "set-header",
+        rowKey: `set-header-${index}-${equip.장비명}`,
+        groupName: equip.장비명,
+        componentCount: 0,
+      });
+      return;
+    }
+
+    const parent = currentSetIndex >= 0 ? rows[currentSetIndex] : undefined;
+    if (parent) parent.componentCount = (parent.componentCount || 0) + 1;
+
+    rows.push({
+      ...equip,
+      role: parent ? "set-component" : "single",
+      rowKey: `${parent ? "set-component" : "single"}-${index}-${equip.장비명}`,
+      groupName: parent?.장비명,
+    });
+  });
+
+  return rows;
 }
 
 export function ConfirmView() {
@@ -157,6 +209,14 @@ export function ConfirmView() {
     [doAction, load],
   );
 
+  const cards = useMemo(
+    () =>
+      items.map((req) => (
+        <ConfirmCard key={req.reqID} req={req} busy={busy === req.reqID} onAct={act} onRegisterSelected={registerSelected} onEdit={() => setEdit(req)} />
+      )),
+    [items, busy, act, registerSelected],
+  );
+
   return (
     <div className="flex min-h-screen flex-col bg-paper">
       <header className="safe-top sticky top-0 z-40 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
@@ -179,9 +239,7 @@ export function ConfirmView() {
         )}
         {loading && !items.length && <div className="py-16 text-center text-[14px] text-ink-faint">불러오는 중…</div>}
 
-        {items.map((req) => (
-          <ConfirmCard key={req.reqID} req={req} busy={busy === req.reqID} onAct={act} onRegisterSelected={registerSelected} onEdit={() => setEdit(req)} />
-        ))}
+        {cards}
       </main>
 
       {edit && (
@@ -205,23 +263,29 @@ function ConfirmCard({
 }: {
   req: Req; busy: boolean; onAct: (action: string, reqID: string) => void; onRegisterSelected: (req: Req, excluded: string[]) => void; onEdit: () => void;
 }) {
-  const equips = req.장비목록 || [];
+  const equips = req.장비목록 || EMPTY_CONFIRM_EQUIPS;
+  const equipmentRows = useMemo(() => buildConfirmEquipmentRows(equips), [equips]);
   const status = (req.등록상태 || "").trim();
   const actionable = status === "대기" || status === "" || status === "AI_REVIEW" || status === "등록대기";
   const hasResult = equips.some((e) => e.결과 && e.결과 !== "");
   // 체크 상태: 기본 = 가용0/❌ 아닌 것만 체크
-  const [checked, setChecked] = useState<Set<string>>(() => new Set(equips.filter((e) => e.결과 !== "세트" && !isFail(e.결과)).map((e) => e.장비명)));
+  const defaultChecked = useMemo(() => new Set(equipmentRows.filter((row) => row.role !== "set-header" && !isFail(row.결과)).map((row) => row.장비명)), [equipmentRows]);
+  const [checked, setChecked] = useState<Set<string>>(defaultChecked);
 
-  const toggle = (name: string) =>
+  useEffect(() => {
+    setChecked(defaultChecked);
+  }, [defaultChecked]);
+
+  const toggle = useCallback((name: string) =>
     setChecked((prev) => {
       const n = new Set(prev);
       if (n.has(name)) n.delete(name);
       else n.add(name);
       return n;
-    });
+    }), []);
 
-  const selectableEquips = equips.filter((e) => e.결과 !== "세트");
-  const excluded = selectableEquips.filter((e) => !checked.has(e.장비명)).map((e) => e.장비명);
+  const selectableEquips = useMemo(() => equipmentRows.filter((row) => row.role !== "set-header"), [equipmentRows]);
+  const excluded = useMemo(() => selectableEquips.filter((e) => !checked.has(e.장비명)).map((e) => e.장비명), [selectableEquips, checked]);
 
   const barCls = STATUS_BAR[status] ?? "bg-checkout-fg";
   const chipCls = STATUS_CHIP[status] ?? "bg-checkout-bg text-checkout-fg";
@@ -256,26 +320,48 @@ function ConfirmCard({
         )}
 
         {/* 장비 목록 */}
-        <div className="mt-2 space-y-1">
-          {equips.map((e, i) => {
-            const tone = resultTone(e.결과);
-            const isSet = e.결과 === "세트";
-            const sel = !isSet && checked.has(e.장비명);
+        <div className="mt-2 space-y-1.5">
+          {equipmentRows.map((row) => {
+            const tone = resultTone(row.결과);
+            const isSetHeader = row.role === "set-header";
+            const isSetComponent = row.role === "set-component";
+            const sel = !isSetHeader && checked.has(row.장비명);
+            const rowCls = isSetHeader
+              ? "border border-brand-700/20 bg-brand-600 px-3 py-2.5 text-white shadow-sm"
+              : isSetComponent
+                ? "ml-3 border border-line/70 border-l-2 border-l-brand-500 bg-white px-2.5 py-2"
+                : "bg-paper/60 px-2 py-1.5";
             return (
-              <div key={i} className={`flex items-start gap-2 rounded-lg px-2 py-1.5 ${isSet ? "bg-brand-50/50" : "bg-paper/60"}`}>
-                {actionable && hasResult && !isSet ? (
-                  <input type="checkbox" checked={sel} onChange={() => toggle(e.장비명)} className="mt-0.5 h-[16px] w-[16px] shrink-0 accent-brand-600" aria-label="등록 선택" />
+              <div key={row.rowKey} data-confirm-role={row.role} className={`flex items-start gap-2 rounded-xl ${rowCls}`}>
+                {isSetHeader ? (
+                  <>
+                    <span className="shrink-0 rounded-md bg-white/20 px-2 py-0.5 text-[11px] font-extrabold text-white ring-1 ring-white/20">세트</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline gap-1.5">
+                        <span className="truncate text-[14px] font-extrabold text-white">{row.장비명}</span>
+                        {row.수량 > 1 && <span className="shrink-0 text-[12px] font-bold tabular-nums text-white/85">×{row.수량}</span>}
+                      </div>
+                      <div className="mt-0.5 text-[11px] font-semibold text-white/70">{row.componentCount ? `구성품 ${row.componentCount}개` : "세트명 기준 장비"}</div>
+                    </div>
+                  </>
                 ) : (
-                  <span className="mt-0.5 w-[16px] shrink-0" aria-hidden />
+                  <>
+                    {actionable && hasResult ? (
+                      <input type="checkbox" checked={sel} onChange={() => toggle(row.장비명)} className="mt-0.5 h-[16px] w-[16px] shrink-0 accent-brand-600" aria-label="등록 선택" />
+                    ) : (
+                      <span className="mt-0.5 w-[16px] shrink-0" aria-hidden />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-baseline gap-1.5">
+                        {isSetComponent && <span className="shrink-0 rounded bg-brand-50 px-1.5 py-0.5 text-[10.5px] font-extrabold text-brand-700">구성품</span>}
+                        <span className={`truncate text-[13.5px] font-semibold ${isSetComponent ? "text-ink-soft" : "text-ink"}`}>{row.장비명}</span>
+                        <span className="shrink-0 text-[12px] font-bold tabular-nums text-ink-soft">×{row.수량}</span>
+                      </div>
+                      {row.상세 && <div className="truncate text-[11px] text-ink-faint">{row.상세}</div>}
+                    </div>
+                    {row.결과 && <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`}>{row.결과}</span>}
+                  </>
                 )}
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-baseline gap-1.5">
-                    <span className={`truncate text-[13.5px] ${isSet ? "font-extrabold text-brand-700" : "font-semibold text-ink"}`}>{e.장비명}</span>
-                    <span className="shrink-0 text-[12px] font-bold tabular-nums text-ink-soft">×{e.수량}</span>
-                  </div>
-                  {e.상세 && <div className="truncate text-[11px] text-ink-faint">{e.상세}</div>}
-                </div>
-                {e.결과 && <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`}>{e.결과}</span>}
               </div>
             );
           })}
