@@ -106,26 +106,26 @@ export function TodayView() {
   return (
     <div className="flex min-h-screen flex-col bg-paper lg:min-h-full">
       {/* 상단 고정 헤더 */}
-      <header className="safe-top sticky top-0 z-30 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
+      <header className="safe-top sticky top-0 z-30 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
         <ViewHeader title="오늘 일정">
-          <button onClick={() => go(date)} className="tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft" title="새로고침">
+          <button onClick={() => go(date)} className="tap flex h-9 w-9 items-center justify-center rounded-full bg-white ring-1 ring-line/60 text-ink-soft" title="새로고침">
             <Refresh className="h-4 w-4" />
           </button>
         </ViewHeader>
 
         {/* 날짜 내비 */}
         <div className="flex items-center gap-2 px-4 pt-2">
-          <button onClick={() => go(addDays(date, -1))} className="tap flex h-9 w-9 items-center justify-center rounded-lg bg-black/[0.04] text-ink-soft">
+          <button onClick={() => go(addDays(date, -1))} className="tap flex h-9 w-9 items-center justify-center rounded-lg bg-white ring-1 ring-line/60 text-ink-soft">
             <ChevronLeft className="h-5 w-5" />
           </button>
           <div className="flex-1 text-center">
             <div className="text-[15px] font-extrabold text-ink">{isToday ? "오늘" : formatDateLabel(date).split("(")[0].trim()}</div>
             <div className="text-[11.5px] text-ink-mute">{formatDateLabel(date)}</div>
           </div>
-          <button onClick={() => go(addDays(date, 1))} className="tap flex h-9 w-9 items-center justify-center rounded-lg bg-black/[0.04] text-ink-soft">
+          <button onClick={() => go(addDays(date, 1))} className="tap flex h-9 w-9 items-center justify-center rounded-lg bg-white ring-1 ring-line/60 text-ink-soft">
             <ChevronRight className="h-5 w-5" />
           </button>
-          <label className="tap relative flex h-9 w-9 items-center justify-center rounded-lg bg-black/[0.04] text-ink-soft">
+          <label className="tap relative flex h-9 w-9 items-center justify-center rounded-lg bg-white ring-1 ring-line/60 text-ink-soft">
             <Calendar className="h-4 w-4" />
             <input type="date" value={date} onChange={(e) => e.target.value && go(e.target.value)} className="absolute inset-0 opacity-0" />
           </label>
@@ -138,7 +138,7 @@ export function TodayView() {
 
         {/* 검색 */}
         <div className="px-4 pb-2.5 pt-2">
-          <div className="flex items-center gap-2 rounded-xl bg-black/[0.05] px-3 py-2">
+          <div className="flex items-center gap-2 rounded-xl bg-white ring-1 ring-line/60 px-3 py-2">
             <Search className="h-4 w-4 text-ink-faint" />
             <input
               value={q}
@@ -172,7 +172,7 @@ export function TodayView() {
                 <span className="text-[12.5px] font-bold">{t.label}</span>
                 <span
                   className={`min-w-[18px] rounded-full px-1 text-center text-[10.5px] font-bold tabular-nums ${
-                    isAttn && count > 0 ? "bg-attention-fg text-white" : active ? "bg-brand-600 text-white" : "bg-black/[0.06] text-ink-mute"
+                    isAttn && count > 0 ? "bg-attention-fg text-white" : active ? "bg-brand-600 text-white" : "bg-line/40 text-ink-mute"
                   }`}
                 >
                   {count}
@@ -194,7 +194,7 @@ export function TodayView() {
         )}
 
         {(searching ? searchGroups.length === 0 : groups.length === 0 && doneList.length === 0) && (
-          <div className="rounded-xl2 bg-white py-16 text-center text-[14px] text-ink-faint shadow-card ring-1 ring-black/5">
+          <div className="rounded-xl2 bg-white py-16 text-center text-[14px] text-ink-faint shadow-card ring-1 ring-line/70">
             {searching ? "검색 결과가 없습니다" : "해당 항목이 없습니다"}
           </div>
         )}
@@ -213,7 +213,7 @@ export function TodayView() {
                 <div className="flex items-center gap-2 pl-1 pt-1">
                   <span className="text-[12px] font-bold text-ink-mute">{group}</span>
                   <span className="text-[11px] text-ink-faint">{events.length}건</span>
-                  <span className="h-px flex-1 bg-black/5" />
+                  <span className="h-px flex-1 bg-line/60" />
                 </div>
                 {events.map((event) => {
                   cardIndex += 1;
@@ -235,7 +235,7 @@ export function TodayView() {
                 <div className="flex items-center gap-2 pl-1 pt-1">
                   <span className="text-[12px] font-bold text-ink-mute">{band}</span>
                   <span className="text-[11px] text-ink-faint">{items.length}건</span>
-                  <span className="h-px flex-1 bg-black/5" />
+                  <span className="h-px flex-1 bg-line/60" />
                 </div>
                 {items.map((t) => {
                   cardIndex += 1;

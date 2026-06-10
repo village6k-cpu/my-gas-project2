@@ -35,9 +35,9 @@ const RESULT_CLS: Record<string, string> = {
   ok: "bg-checkin-bg text-checkin-fg",
   warn: "bg-warn-bg text-warn-fg",
   fail: "bg-attention-bg text-attention-fg",
-  unknown: "bg-black/[0.05] text-ink-mute",
+  unknown: "bg-line/40 text-ink-mute",
   set: "bg-brand-50 text-brand-700",
-  none: "bg-black/[0.03] text-ink-faint",
+  none: "bg-line/30 text-ink-faint",
 };
 const STATUS_BAR: Record<string, string> = {
   대기: "bg-checkout-fg",
@@ -159,10 +159,10 @@ export function ConfirmView() {
 
   return (
     <div className="flex min-h-screen flex-col bg-paper">
-      <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
+      <header className="safe-top sticky top-0 z-40 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
         <ViewHeader title="확인요청">
           <span className="rounded-full bg-checkout-bg px-2.5 py-1 text-[12px] font-bold text-checkout-fg">대기 {items.length}건</span>
-          <button onClick={load} className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
+          <button onClick={load} className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white ring-1 ring-line/60 text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
             <Refresh className="h-4 w-4" />
           </button>
         </ViewHeader>
@@ -172,7 +172,7 @@ export function ConfirmView() {
         <KakaoReservationInput onRequestCreated={load} />
         {error && <div className="rounded-xl bg-attention-bg px-3.5 py-2.5 text-[13px] font-medium text-attention-fg ring-1 ring-attention-ring">{error}</div>}
         {!items.length && !loading && !error && (
-          <div className="rounded-xl2 border border-dashed border-black/10 bg-white py-16 text-center">
+          <div className="rounded-xl2 border border-dashed border-line bg-white py-16 text-center">
             <div className="text-[15px] font-extrabold text-ink-soft">대기 중인 확인요청이 없습니다</div>
             <div className="mt-1.5 text-[13px] text-ink-mute">새 예약 요청이 들어오면 여기에 표시됩니다.</div>
           </div>
@@ -227,7 +227,7 @@ function ConfirmCard({
   const chipCls = STATUS_CHIP[status] ?? "bg-checkout-bg text-checkout-fg";
 
   return (
-    <article className="relative overflow-hidden rounded-xl2 bg-white p-3.5 shadow-card ring-1 ring-black/5">
+    <article className="relative overflow-hidden rounded-xl2 bg-white p-3.5 shadow-card ring-1 ring-line/70">
       <span className={`absolute inset-y-0 left-0 w-1 ${barCls}`} aria-hidden />
       <div className="pl-1.5">
         {/* 헤더 */}
@@ -244,13 +244,13 @@ function ConfirmCard({
             </div>
           </div>
           {actionable && (
-            <button onClick={onEdit} className="tap shrink-0 rounded-lg bg-black/[0.04] px-2.5 py-1.5 text-[12px] font-bold text-ink-soft">✎ 수정</button>
+            <button onClick={onEdit} className="tap shrink-0 rounded-lg bg-paper ring-1 ring-line/60 px-2.5 py-1.5 text-[12px] font-bold text-ink-soft">✎ 수정</button>
           )}
         </div>
 
         {/* 기간 */}
         {(req.반출일 || req.반납일) && (
-          <div className="mt-2 rounded-lg bg-black/[0.02] px-3 py-2 text-[12.5px] font-semibold text-ink-soft">
+          <div className="mt-2 rounded-lg bg-paper/70 px-3 py-2 text-[12.5px] font-semibold text-ink-soft">
             {req.반출일 || "?"} <span className="text-ink-faint">→</span> {req.반납일 || "?"}
           </div>
         )}
@@ -262,7 +262,7 @@ function ConfirmCard({
             const isSet = e.결과 === "세트";
             const sel = !isSet && checked.has(e.장비명);
             return (
-              <div key={i} className={`flex items-start gap-2 rounded-lg px-2 py-1.5 ${isSet ? "bg-brand-50/50" : "bg-black/[0.015]"}`}>
+              <div key={i} className={`flex items-start gap-2 rounded-lg px-2 py-1.5 ${isSet ? "bg-brand-50/50" : "bg-paper/60"}`}>
                 {actionable && hasResult && !isSet ? (
                   <input type="checkbox" checked={sel} onChange={() => toggle(e.장비명)} className="mt-0.5 h-[16px] w-[16px] shrink-0 accent-brand-600" aria-label="등록 선택" />
                 ) : (
@@ -318,7 +318,7 @@ function Btn({ children, onClick, primary, ghost, disabled }: { children: ReactN
     <button
       disabled={disabled}
       onClick={onClick}
-      className={`tap min-h-[38px] flex-1 rounded-lg px-3 text-[13px] font-bold disabled:opacity-50 ${primary ? "bg-brand-600 text-white" : ghost ? "text-attention-fg ring-1 ring-attention-ring" : "bg-white text-ink-soft ring-1 ring-black/10"}`}
+      className={`tap min-h-[38px] flex-1 rounded-lg px-3 text-[13px] font-bold disabled:opacity-50 ${primary ? "bg-brand-600 text-white" : ghost ? "text-attention-fg ring-1 ring-attention-ring" : "bg-white text-ink-soft ring-1 ring-line"}`}
     >
       {children}
     </button>

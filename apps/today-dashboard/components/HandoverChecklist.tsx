@@ -55,7 +55,7 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
       {summary.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1">
           {summary.map((s, i) => (
-            <span key={i} className="rounded-md bg-black/[0.05] px-2 py-0.5 text-[11.5px] font-semibold text-ink-soft">{s}</span>
+            <span key={i} className="rounded-md bg-line/40 px-2 py-0.5 text-[11.5px] font-semibold text-ink-soft">{s}</span>
           ))}
         </div>
       )}
@@ -164,7 +164,7 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         <button
           onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "taken")}
           className={`tap flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 ${
-            taken ? "border-brand-600 bg-brand-600 text-white" : excluded ? "border-attention-ring bg-white text-attention-fg" : "border-black/15 bg-white text-transparent"
+            taken ? "border-brand-600 bg-brand-600 text-white" : excluded ? "border-attention-ring bg-white text-attention-fg" : "border-line bg-white text-transparent"
           }`}
         >
           {excluded ? <span className="text-[13px] font-black">✕</span> : <Check className="h-3.5 w-3.5" />}
@@ -172,7 +172,7 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
 
         <button onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
           <span className={`truncate text-[14px] ${excluded ? "text-ink-faint line-through" : setTone ? "font-extrabold text-brand-700" : taken ? "text-ink" : "text-ink-soft"}`}>{e.name}</span>
-          {e.offCatalog && <span className="shrink-0 rounded bg-black/5 px-1 text-[10px] font-semibold text-ink-faint">자유입력</span>}
+          {e.offCatalog && <span className="shrink-0 rounded bg-line/40 px-1 text-[10px] font-semibold text-ink-faint">자유입력</span>}
         </button>
 
         <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[12px] font-semibold tabular-nums ${e.emphasize ? "bg-warn-bg text-warn-fg ring-1 ring-warn-ring" : "text-ink-mute"}`}>
@@ -182,14 +182,14 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         {e.onsite ? (
           <button onClick={() => removeItem(t.tradeId, e.scheduleId)} className="tap shrink-0 px-1 text-ink-faint">✕</button>
         ) : (
-          <button onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "excluded")} className={`tap shrink-0 rounded-md px-1.5 py-1 text-[11.5px] font-bold ${excluded ? "bg-attention-fg text-white" : "text-ink-faint ring-1 ring-black/10"}`}>제외</button>
+          <button onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "excluded")} className={`tap shrink-0 rounded-md px-1.5 py-1 text-[11.5px] font-bold ${excluded ? "bg-attention-fg text-white" : "text-ink-faint ring-1 ring-line"}`}>제외</button>
         )}
       </div>
 
       {e.onsite && !e.isComponent && (
         <div className="flex items-center gap-1 pb-2 pl-9">
           {(["무상", "유상"] as Settlement[]).map((s) => (
-            <button key={s} onClick={() => setOnsiteSettlement(t.tradeId, e.scheduleId, s)} className={`tap rounded-md px-2 py-0.5 text-[11px] font-bold ${e.settlement === s ? "bg-brand-600 text-white" : "text-ink-mute ring-1 ring-black/10"}`}>{s}</button>
+            <button key={s} onClick={() => setOnsiteSettlement(t.tradeId, e.scheduleId, s)} className={`tap rounded-md px-2 py-0.5 text-[11px] font-bold ${e.settlement === s ? "bg-brand-600 text-white" : "text-ink-mute ring-1 ring-line"}`}>{s}</button>
           ))}
         </div>
       )}
@@ -255,7 +255,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
           value={picked ? picked.name : q}
           onChange={(e) => { setPicked(null); setQ(e.target.value); }}
           placeholder="품목·세트 검색 (목록에서 선택 · 없으면 자유입력)"
-          className="w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-[13.5px] outline-none focus:border-brand-500"
+          className="w-full rounded-lg border border-line bg-white px-3 py-2 text-[13.5px] outline-none focus:border-brand-500"
         />
         {picked && (
           <div className="mt-1 flex items-center gap-1.5 text-[11.5px]">
@@ -265,18 +265,18 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
           </div>
         )}
         {showList && (
-          <div className="mt-1 max-h-44 overflow-y-auto rounded-lg ring-1 ring-black/10">
+          <div className="mt-1 max-h-44 overflow-y-auto rounded-lg ring-1 ring-line">
             {matches.map((m) => (
               <button key={m.name} onClick={() => { setPicked(m); setQ(m.name); }} className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]">
                 <span className="flex-1 text-[13px] text-ink">{m.name}</span>
-                <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-warn-ring/60 text-warn-fg" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
+                <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-warn-ring/60 text-warn-fg" : "bg-line/40 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
               </button>
             ))}
             {!exact && (
-              <button onClick={submit} className="tap flex w-full items-center gap-2 border-t border-black/5 bg-black/[0.02] px-2.5 py-1.5 text-left">
+              <button onClick={submit} className="tap flex w-full items-center gap-2 border-t border-line/60 bg-paper/70 px-2.5 py-1.5 text-left">
                 <Plus className="h-3.5 w-3.5 text-ink-mute" />
                 <span className="text-[13px] text-ink-soft">‘{q.trim()}’ 자유입력 추가</span>
-                <span className="ml-auto rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
+                <span className="ml-auto rounded bg-line/40 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
               </button>
             )}
           </div>
@@ -287,7 +287,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
         {!isSet && <Stepper value={qty} onChange={setQty} />}
         <div className="flex gap-1">
           {(["무상", "유상"] as Settlement[]).map((s) => (
-            <button key={s} onClick={() => setSettlement(s)} className={`tap rounded-md px-2.5 py-1 text-[12px] font-bold ${settlement === s ? "bg-brand-600 text-white" : "text-ink-mute ring-1 ring-black/10"}`}>{s}</button>
+            <button key={s} onClick={() => setSettlement(s)} className={`tap rounded-md px-2.5 py-1 text-[12px] font-bold ${settlement === s ? "bg-brand-600 text-white" : "text-ink-mute ring-1 ring-line"}`}>{s}</button>
           ))}
         </div>
         <div className="ml-auto flex gap-1.5">
@@ -313,7 +313,7 @@ function PhaseNote({ trade, phase }: { trade: Trade; phase: Phase }) {
           onChange={(e) => { setVal(e.target.value); setDirty(true); }}
           rows={2}
           placeholder={`${label} (품목과 무관한 일반 사항만)`}
-          className="w-full resize-none rounded-lg border border-black/10 bg-white px-3 py-2 text-[13px] outline-none placeholder:text-ink-faint focus:border-brand-500"
+          className="w-full resize-none rounded-lg border border-line bg-white px-3 py-2 text-[13px] outline-none placeholder:text-ink-faint focus:border-brand-500"
         />
         {dirty && (
           <div className="mt-1 flex justify-end">
@@ -327,7 +327,7 @@ function PhaseNote({ trade, phase }: { trade: Trade; phase: Phase }) {
 
 function Stepper({ value, min = 0, max, onChange }: { value: number; min?: number; max?: number; onChange: (v: number) => void }) {
   return (
-    <div className="inline-flex items-center overflow-hidden rounded-lg ring-1 ring-black/15">
+    <div className="inline-flex items-center overflow-hidden rounded-lg ring-1 ring-line">
       <button onClick={() => onChange(Math.max(min, value - 1))} className="tap h-7 w-7 bg-white text-[15px] font-bold text-ink-soft">−</button>
       <span className="w-7 text-center text-[13px] font-bold tabular-nums">{value}</span>
       <button onClick={() => onChange(max != null ? Math.min(max, value + 1) : value + 1)} className="tap h-7 w-7 bg-white text-[15px] font-bold text-ink-soft">+</button>
@@ -394,7 +394,7 @@ function FloatingCatalogMenu({
 
   return createPortal(
     <div
-      className="rounded-lg bg-white shadow-pop ring-1 ring-black/10"
+      className="rounded-lg bg-white shadow-pop ring-1 ring-line"
       style={{
         position: "fixed",
         left: rect.left,
@@ -413,18 +413,18 @@ function FloatingCatalogMenu({
           className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]"
         >
           <span className="flex-1 truncate text-[13px] text-ink">{m.name}</span>
-          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-warn-ring/60 text-warn-fg" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-warn-ring/60 text-warn-fg" : "bg-line/40 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
         </button>
       ))}
       {!exact && (
         <button
           onMouseDown={(event) => event.preventDefault()}
           onClick={onFreeInput}
-          className="tap flex w-full items-center gap-2 border-t border-black/5 bg-black/[0.02] px-2.5 py-1.5 text-left"
+          className="tap flex w-full items-center gap-2 border-t border-line/60 bg-paper/70 px-2.5 py-1.5 text-left"
         >
           <Plus className="h-3.5 w-3.5 text-ink-mute" />
           <span className="text-[13px] text-ink-soft">‘{query.trim()}’ {freeLabel}</span>
-          <span className="ml-auto rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
+          <span className="ml-auto rounded bg-line/40 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
         </button>
       )}
     </div>,
@@ -501,7 +501,7 @@ function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: s
           }
         }}
         placeholder="장비명 검색"
-        className="w-full rounded-lg border border-black/10 bg-white px-2.5 py-1.5 text-[12.5px] font-medium text-ink outline-none focus:border-brand-500"
+        className="w-full rounded-lg border border-line bg-white px-2.5 py-1.5 text-[12.5px] font-medium text-ink outline-none focus:border-brand-500"
       />
       {selected && (
         <div className="mt-1 flex items-center gap-1.5 text-[11.5px]">
@@ -524,7 +524,7 @@ function MemoInput({ value, onSave, placeholder }: { value: string; onSave: (v: 
       onChange={(e) => { setV(e.target.value); setDirty(true); }}
       onBlur={() => { if (dirty) { onSave(v); setDirty(false); } }}
       placeholder={placeholder}
-      className="w-full rounded-lg border border-black/10 bg-white px-2.5 py-1.5 text-[12.5px] outline-none placeholder:text-ink-faint focus:border-brand-500"
+      className="w-full rounded-lg border border-line bg-white px-2.5 py-1.5 text-[12.5px] outline-none placeholder:text-ink-faint focus:border-brand-500"
     />
   );
 }

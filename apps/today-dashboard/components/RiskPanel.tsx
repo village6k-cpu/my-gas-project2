@@ -6,7 +6,7 @@ import { Alert } from "./icons";
 const LEVEL: Record<string, string> = {
   high: "bg-attention-bg text-attention-fg ring-attention-ring",
   medium: "bg-warn-bg text-warn-fg ring-warn-ring",
-  low: "bg-black/5 text-ink-mute ring-black/10",
+  low: "bg-paper text-ink-mute ring-line",
 };
 
 export function RiskPanel({ warnings, phase }: { warnings: RiskWarning[]; phase: Phase }) {
@@ -28,7 +28,7 @@ export function RiskPanel({ warnings, phase }: { warnings: RiskWarning[]; phase:
               <p className="mt-0.5 text-[12.5px] leading-snug opacity-90">{w.customerMessage}</p>
               {w.guidanceState === "발송권장" && (
                 <div className="mt-2 flex gap-1.5">
-                  <button className="tap rounded-lg bg-white px-2.5 py-1 text-[12px] font-semibold ring-1 ring-black/10">
+                  <button className="tap rounded-lg bg-white px-2.5 py-1 text-[12px] font-semibold ring-1 ring-line">
                     카톡 안내 발송
                   </button>
                   <button className="tap rounded-lg px-2.5 py-1 text-[12px] font-semibold opacity-70">

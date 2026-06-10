@@ -74,8 +74,8 @@ const STATUS_CHIP: Record<string, string> = {
   in_progress: "bg-checkout-bg text-checkout-fg",
   waiting_customer: "bg-warn-bg text-warn-fg",
   waiting_internal: "bg-warn-bg text-warn-fg",
-  done: "bg-black/[0.05] text-ink-mute",
-  dismissed: "bg-black/[0.05] text-ink-mute",
+  done: "bg-line/40 text-ink-mute",
+  dismissed: "bg-line/40 text-ink-mute",
 };
 
 function fmtRelative(iso?: string): string {
@@ -248,7 +248,7 @@ export function FollowUpView() {
   return (
     <div className="flex min-h-screen flex-col bg-paper">
       {/* 헤더 */}
-      <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
+      <header className="safe-top sticky top-0 z-40 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
         <ViewHeader title="후속조치">
           <select
             value={status}
@@ -257,14 +257,14 @@ export function FollowUpView() {
               setFocusedId(null);
               setStatus(e.target.value);
             }}
-            className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-[12.5px] font-semibold text-ink-soft outline-none"
+            className="rounded-full border border-line bg-white px-3 py-1.5 text-[12.5px] font-semibold text-ink-soft outline-none"
           >
             <option value="active">열린 업무</option>
             <option value="all">전체</option>
             <option value="done">완료</option>
             <option value="dismissed">무시</option>
           </select>
-          <button onClick={() => load(status)} className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
+          <button onClick={() => load(status)} className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white ring-1 ring-line/60 text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
             <Refresh className="h-4 w-4" />
           </button>
         </ViewHeader>
@@ -283,7 +283,7 @@ export function FollowUpView() {
 
         {/* 벌크바 */}
         {selected.size > 0 && (
-          <div className="sticky top-[60px] z-20 flex flex-col gap-2 rounded-xl bg-white/95 p-2.5 shadow-card ring-1 ring-black/10 sm:flex-row sm:items-center sm:justify-between">
+          <div className="sticky top-[60px] z-20 flex flex-col gap-2 rounded-xl bg-white/95 p-2.5 shadow-card ring-1 ring-line sm:flex-row sm:items-center sm:justify-between">
             <span className="text-[13px] font-extrabold text-ink-soft">{selected.size}개 선택</span>
             <div className="flex flex-wrap gap-1.5">
               <BulkBtn onClick={() => patch([...selected], "done")} primary>완료</BulkBtn>
@@ -319,7 +319,7 @@ export function FollowUpView() {
                 {focused ? (
                   <DetailCard item={focused} selected={selected.has(focused.id)} onToggle={toggleSelect} onPatch={patch} onSend={sendReply} />
                 ) : (
-                  <div className="rounded-xl2 border border-dashed border-black/10 bg-white px-4 py-6 text-center text-[13px] font-semibold text-ink-faint">선택된 업무가 없습니다</div>
+                  <div className="rounded-xl2 border border-dashed border-line bg-white px-4 py-6 text-center text-[13px] font-semibold text-ink-faint">선택된 업무가 없습니다</div>
                 )}
               </aside>
             )}
@@ -342,7 +342,7 @@ export function FollowUpView() {
         )}
 
         {empty && (
-          <div className="rounded-xl2 border border-dashed border-black/10 bg-white py-16 text-center">
+          <div className="rounded-xl2 border border-dashed border-line bg-white py-16 text-center">
             <div className="text-[15px] font-extrabold text-ink-soft">{status === "active" ? "지금 할 일이 없습니다" : "표시할 항목이 없습니다"}</div>
             <div className="mt-1.5 text-[13px] text-ink-mute">{status === "active" ? "모든 후속조치가 정리되었습니다." : "필터를 바꿔보세요."}</div>
           </div>
@@ -355,7 +355,7 @@ export function FollowUpView() {
 function Stat({ label, value, tone }: { label: string; value: number; tone?: "urgent" | "high" }) {
   const color = tone === "urgent" ? "text-attention-fg" : tone === "high" ? "text-brand-600" : "text-ink";
   return (
-    <div className="rounded-xl bg-white p-3.5 shadow-card ring-1 ring-black/5">
+    <div className="rounded-xl bg-white p-3.5 shadow-card ring-1 ring-line/70">
       <div className="text-[12px] font-semibold text-ink-mute">{label}</div>
       <div className={`mt-1 text-[26px] font-extrabold leading-none tabular-nums ${color}`}>{value}</div>
     </div>
@@ -369,10 +369,10 @@ function Lane({
   onFocus: (id: string) => void; onToggle: (id: string) => void; onPatch: (ids: string[], st: string) => void; onSend: (i: Item, t: string) => Promise<void>;
 }) {
   return (
-    <section className="min-w-0 overflow-hidden rounded-xl bg-white/70 ring-1 ring-black/5">
-      <div className="flex min-h-[42px] items-center justify-between gap-2 border-b border-black/5 bg-black/[0.015] px-3 py-2.5">
+    <section className="min-w-0 overflow-hidden rounded-xl bg-white ring-1 ring-line/70">
+      <div className="flex min-h-[42px] items-center justify-between gap-2 border-b border-line/60 bg-paper/60 px-3 py-2.5">
         <h2 className="text-[13px] font-extrabold text-ink-soft">{label}</h2>
-        <span className={`inline-flex h-[22px] min-w-[22px] items-center justify-center rounded-full px-1.5 text-[12px] font-extrabold ${laneKey === "now" ? "bg-attention-bg text-attention-fg" : "bg-white text-ink-mute ring-1 ring-black/10"}`}>{items.length}</span>
+        <span className={`inline-flex h-[22px] min-w-[22px] items-center justify-center rounded-full px-1.5 text-[12px] font-extrabold ${laneKey === "now" ? "bg-attention-bg text-attention-fg" : "bg-white text-ink-mute ring-1 ring-line"}`}>{items.length}</span>
       </div>
       <div className="flex flex-col gap-2 p-2">
         {items.length === 0 ? (
@@ -410,7 +410,7 @@ function TaskRow({
       <article
         onClick={() => !closed && onFocus(item.id)}
         className={`grid w-full cursor-pointer grid-cols-[22px_minmax(0,1fr)] gap-2 rounded-lg bg-white p-2.5 ring-1 transition ${
-          focused ? "ring-2 ring-ink/30" : selected ? "ring-2 ring-brand-400" : "ring-black/5 hover:ring-black/15"
+          focused ? "ring-2 ring-ink/30" : selected ? "ring-2 ring-brand-400" : "ring-line/70 hover:ring-line"
         }`}
       >
         {closed ? (
@@ -465,15 +465,15 @@ function DetailCard({
   useEffect(() => setDraft(item.suggested_reply_draft || ""), [item.id, item.suggested_reply_draft]);
 
   return (
-    <article className={`relative overflow-hidden rounded-xl2 bg-white p-3.5 shadow-card ring-1 ${selected ? "ring-2 ring-brand-400" : "ring-black/5"}`}>
+    <article className={`relative overflow-hidden rounded-xl2 bg-white p-3.5 shadow-card ring-1 ${selected ? "ring-2 ring-brand-400" : "ring-line/70"}`}>
       <span className={`absolute inset-y-0 left-0 w-1 ${BAR[pr] || BAR.normal}`} aria-hidden />
       <div className="flex items-start gap-2.5 pl-1">
         {!closed && <input type="checkbox" checked={selected} onChange={() => onToggle(item.id)} className="mt-0.5 h-6 w-6 shrink-0 accent-brand-600" aria-label="선택" />}
         <div className="min-w-0 flex-1">
           <div className="mb-2 flex flex-wrap gap-1.5">
-            {TYPE_LABELS[item.type || ""] && <span className="rounded-full bg-black/[0.04] px-2 py-0.5 text-[11px] font-bold text-ink-soft ring-1 ring-black/5">{TYPE_LABELS[item.type || ""]}</span>}
+            {TYPE_LABELS[item.type || ""] && <span className="rounded-full bg-paper px-2 py-0.5 text-[11px] font-bold text-ink-soft ring-1 ring-line/70">{TYPE_LABELS[item.type || ""]}</span>}
             <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${PRIORITY_CHIP[pr] || PRIORITY_CHIP.normal}`}>{PRIORITY_LABELS[pr] || pr}</span>
-            <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${STATUS_CHIP[st] || "bg-black/[0.04] text-ink-soft"}`}>{STATUS_LABELS[st] || st}</span>
+            <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${STATUS_CHIP[st] || "bg-line/40 text-ink-soft"}`}>{STATUS_LABELS[st] || st}</span>
           </div>
           <h3 className="text-[16px] font-bold leading-snug text-ink [word-break:keep-all]">{item.title || "제목 없음"}</h3>
           <div className="mt-1 text-[12px] text-ink-mute">
@@ -490,9 +490,9 @@ function DetailCard({
           )}
 
           {item.suggested_reply_draft && !closed ? (
-            <div className="mt-2.5 rounded-lg bg-paper p-3 ring-1 ring-black/5">
+            <div className="mt-2.5 rounded-lg bg-paper p-3 ring-1 ring-line/70">
               <label className="mb-1.5 block text-[11px] font-extrabold tracking-wide text-ink-mute">답변 초안</label>
-              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} className="min-h-[92px] w-full resize-y rounded-lg border border-black/10 bg-white p-2.5 text-[13.5px] leading-relaxed text-ink outline-none focus:border-brand-500" />
+              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} className="min-h-[92px] w-full resize-y rounded-lg border border-line bg-white p-2.5 text-[13.5px] leading-relaxed text-ink outline-none focus:border-brand-500" />
               {err && <div className="mt-1.5 text-[12px] font-medium text-attention-fg">{err}</div>}
               <button
                 disabled={sending}
@@ -509,7 +509,7 @@ function DetailCard({
           ) : item.suggested_reply_draft ? (
             <details className="mt-2.5">
               <summary className="cursor-pointer text-[12.5px] font-semibold text-ink-mute">답변 초안 보기</summary>
-              <div className="mt-1.5 whitespace-pre-wrap break-words rounded-lg bg-black/[0.02] px-3 py-2 text-[13px] text-ink-soft">{item.suggested_reply_draft}</div>
+              <div className="mt-1.5 whitespace-pre-wrap break-words rounded-lg bg-paper/70 px-3 py-2 text-[13px] text-ink-soft">{item.suggested_reply_draft}</div>
             </details>
           ) : null}
 
@@ -544,7 +544,7 @@ function MiniBtn({ children, onClick, primary }: { children: ReactNode; onClick:
   return (
     <button
       onClick={(e) => { e.stopPropagation(); onClick(); }}
-      className={`tap min-h-[28px] rounded-md px-2 text-[11.5px] font-extrabold ${primary ? "bg-brand-600 text-white" : "bg-black/[0.04] text-ink-soft ring-1 ring-black/5"}`}
+      className={`tap min-h-[28px] rounded-md px-2 text-[11.5px] font-extrabold ${primary ? "bg-brand-600 text-white" : "bg-paper text-ink-soft ring-1 ring-line/70"}`}
     >
       {children}
     </button>
@@ -552,14 +552,14 @@ function MiniBtn({ children, onClick, primary }: { children: ReactNode; onClick:
 }
 function BulkBtn({ children, onClick, primary, ghost }: { children: ReactNode; onClick: () => void; primary?: boolean; ghost?: boolean }) {
   return (
-    <button onClick={onClick} className={`tap min-h-[34px] rounded-lg px-2.5 text-[12.5px] font-bold ${primary ? "bg-brand-600 text-white" : ghost ? "text-ink-mute" : "bg-black/[0.04] text-ink-soft ring-1 ring-black/5"}`}>
+    <button onClick={onClick} className={`tap min-h-[34px] rounded-lg px-2.5 text-[12.5px] font-bold ${primary ? "bg-brand-600 text-white" : ghost ? "text-ink-mute" : "bg-paper text-ink-soft ring-1 ring-line/70"}`}>
       {children}
     </button>
   );
 }
 function ActBtn({ children, onClick, primary, ghost }: { children: ReactNode; onClick: () => void; primary?: boolean; ghost?: boolean }) {
   return (
-    <button onClick={onClick} className={`tap min-h-[40px] flex-1 rounded-lg px-3.5 text-[13.5px] font-bold ${primary ? "bg-brand-600 text-white" : ghost ? "text-ink-mute ring-1 ring-black/5" : "bg-white text-ink-soft ring-1 ring-black/10"}`}>
+    <button onClick={onClick} className={`tap min-h-[40px] flex-1 rounded-lg px-3.5 text-[13.5px] font-bold ${primary ? "bg-brand-600 text-white" : ghost ? "text-ink-mute ring-1 ring-line/70" : "bg-white text-ink-soft ring-1 ring-line"}`}>
       {children}
     </button>
   );

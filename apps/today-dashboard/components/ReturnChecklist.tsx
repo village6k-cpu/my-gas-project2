@@ -129,7 +129,7 @@ function ReturnRow({ t, e, setBadge = false, setTone = false }: { t: Trade; e: E
       </div>
 
       {open && (
-        <div className="space-y-2 bg-black/[0.02] py-2.5">
+        <div className="space-y-2 bg-paper/70 py-2.5">
           <div className="block text-[12px] font-semibold text-ink-mute">
             장비명
             <EquipmentNameCombobox value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />
@@ -157,7 +157,7 @@ function ReturnRow({ t, e, setBadge = false, setTone = false }: { t: Trade; e: E
               setItemMemo(t.tradeId, e.scheduleId, "checkin", v);
             }}
             placeholder="이 품목 반납 메모 (예: 1번 라인 단선)"
-            className="w-full rounded-lg border border-black/10 bg-white px-2.5 py-1.5 text-[12.5px] outline-none placeholder:text-ink-faint focus:border-brand-500"
+            className="w-full rounded-lg border border-line bg-white px-2.5 py-1.5 text-[12.5px] outline-none placeholder:text-ink-faint focus:border-brand-500"
           />
         </div>
       )}
@@ -168,7 +168,7 @@ function ReturnRow({ t, e, setBadge = false, setTone = false }: { t: Trade; e: E
 function Stepper({ value, min = 0, max, onChange, small }: { value: number; min?: number; max?: number; onChange: (v: number) => void; small?: boolean }) {
   const s = small ? "h-6 w-6 text-[13px]" : "h-7 w-7 text-[15px]";
   return (
-    <div className="inline-flex items-center overflow-hidden rounded-lg ring-1 ring-black/15">
+    <div className="inline-flex items-center overflow-hidden rounded-lg ring-1 ring-line">
       <button onClick={() => onChange(Math.max(min, value - 1))} className={`tap bg-white font-bold text-ink-soft ${s}`}>−</button>
       <span className={`text-center font-bold tabular-nums ${small ? "w-6 text-[12px]" : "w-8 text-[13px]"}`}>{value}</span>
       <button onClick={() => onChange(max != null ? Math.min(Math.max(min, max), value + 1) : value + 1)} className={`tap bg-white font-bold text-ink-soft ${s}`}>+</button>
@@ -233,7 +233,7 @@ function FloatingCatalogMenu({
 
   return createPortal(
     <div
-      className="rounded-lg bg-white shadow-pop ring-1 ring-black/10"
+      className="rounded-lg bg-white shadow-pop ring-1 ring-line"
       style={{
         position: "fixed",
         left: rect.left,
@@ -252,18 +252,18 @@ function FloatingCatalogMenu({
           className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]"
         >
           <span className="flex-1 truncate text-[13px] text-ink">{m.name}</span>
-          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-warn-ring/60 text-warn-fg" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-warn-ring/60 text-warn-fg" : "bg-line/40 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
         </button>
       ))}
       {!exact && (
         <button
           onMouseDown={(event) => event.preventDefault()}
           onClick={onFreeInput}
-          className="tap flex w-full items-center gap-2 border-t border-black/5 bg-black/[0.02] px-2.5 py-1.5 text-left"
+          className="tap flex w-full items-center gap-2 border-t border-line/60 bg-paper/70 px-2.5 py-1.5 text-left"
         >
           <Plus className="h-3.5 w-3.5 text-ink-mute" />
           <span className="text-[13px] text-ink-soft">‘{query.trim()}’ 자유입력 저장</span>
-          <span className="ml-auto rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
+          <span className="ml-auto rounded bg-line/40 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
         </button>
       )}
     </div>,
@@ -340,7 +340,7 @@ function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: s
           }
         }}
         placeholder="장비명 검색"
-        className="w-full rounded-lg border border-black/10 bg-white px-2.5 py-1.5 text-[12.5px] font-medium text-ink outline-none focus:border-brand-500"
+        className="w-full rounded-lg border border-line bg-white px-2.5 py-1.5 text-[12.5px] font-medium text-ink outline-none focus:border-brand-500"
       />
       {selected && (
         <div className="mt-1 flex items-center gap-1.5 text-[11.5px]">

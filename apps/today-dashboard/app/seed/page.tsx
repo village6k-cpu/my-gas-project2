@@ -67,12 +67,12 @@ export default function SeedPage() {
         <button
           onClick={run}
           disabled={busy || !isSupabase}
-          className="tap rounded-xl bg-black/[0.06] px-4 py-2.5 text-[14px] font-bold text-ink-soft disabled:opacity-40"
+          className="tap rounded-xl bg-line/50 px-4 py-2.5 text-[14px] font-bold text-ink-soft disabled:opacity-40"
         >
           시드(데모) 적재
         </button>
       </div>
-      <div className="mt-4 space-y-1 rounded-xl bg-white p-3 text-[12.5px] ring-1 ring-black/5">
+      <div className="mt-4 space-y-1 rounded-xl bg-white p-3 text-[12.5px] ring-1 ring-line/70">
         {log.length === 0 ? <span className="text-ink-faint">로그가 여기에 표시됩니다.</span> : log.map((l, i) => <div key={i} className="font-mono text-ink-soft">{l}</div>)}
       </div>
     </div>

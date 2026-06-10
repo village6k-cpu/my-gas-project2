@@ -363,7 +363,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
   const rows = resultRowsOf(result);
 
   return (
-    <section className="rounded-xl2 bg-white shadow-card ring-1 ring-black/5">
+    <section className="rounded-xl2 bg-white shadow-card ring-1 ring-line/70">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
@@ -378,17 +378,17 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
             <span className="block truncate text-[12px] font-medium text-ink-faint">카톡 내용이나 캡처에서 확인요청을 만듭니다</span>
           </span>
         </span>
-        <span className="rounded-full bg-black/[0.04] px-2.5 py-1 text-[12px] font-bold text-ink-soft">{open ? "닫기" : "열기"}</span>
+        <span className="rounded-full bg-paper px-2.5 py-1 text-[12px] font-bold text-ink-soft">{open ? "닫기" : "열기"}</span>
       </button>
 
       {open && (
-        <div className="border-t border-black/5 px-3.5 py-3">
+        <div className="border-t border-line/60 px-3.5 py-3">
           {error && <div className="mb-3 rounded-xl bg-attention-bg px-3 py-2 text-[12.5px] font-bold text-attention-fg ring-1 ring-attention-ring">{error}</div>}
 
           <div className="grid gap-3 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <div className="space-y-3">
               <div
-                className="rounded-xl border border-dashed border-black/12 bg-paper p-3"
+                className="rounded-xl border border-dashed border-line bg-paper p-3"
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={handleDropImage}
               >
@@ -398,7 +398,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
                   onChange={(event) => setText(event.target.value)}
                   onPaste={handlePasteImage}
                   rows={7}
-                  className="min-h-[132px] w-full resize-y rounded-xl border border-black/10 bg-white px-3 py-2.5 text-[13.5px] leading-6 text-ink outline-none focus:border-brand-500"
+                  className="min-h-[132px] w-full resize-y rounded-xl border border-line bg-white px-3 py-2.5 text-[13.5px] leading-6 text-ink outline-none focus:border-brand-500"
                   placeholder="카톡 대화 텍스트를 붙여넣거나 캡처 이미지를 붙여넣기/드래그하세요."
                 />
                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -411,7 +411,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
                     <Check className="h-4 w-4" />
                     {parseBusy ? "AI 파싱 중…" : "AI 파싱"}
                   </button>
-                  <label className="tap inline-flex min-h-[38px] cursor-pointer items-center gap-1.5 rounded-xl bg-white px-3 text-[13px] font-bold text-ink-soft ring-1 ring-black/10">
+                  <label className="tap inline-flex min-h-[38px] cursor-pointer items-center gap-1.5 rounded-xl bg-white px-3 text-[13px] font-bold text-ink-soft ring-1 ring-line">
                     <Camera className="h-4 w-4" />
                     이미지 선택
                     <input
@@ -429,7 +429,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
                   {catalog.error && <span className="text-[12px] font-semibold text-warn-fg">장비목록 오류: {catalog.error}</span>}
                 </div>
                 {image && (
-                  <div className="mt-2 flex items-center gap-2 rounded-xl bg-white p-2 ring-1 ring-black/8">
+                  <div className="mt-2 flex items-center gap-2 rounded-xl bg-white p-2 ring-1 ring-line/80">
                     <img src={image.dataUrl} alt="첨부 이미지" className="h-16 w-16 rounded-lg object-cover" />
                     <div className="min-w-0 flex-1 text-[12px] font-semibold text-ink-soft">{image.mediaType} 캡처 첨부됨</div>
                     <button type="button" onClick={() => setImage(null)} className="tap rounded-lg px-2 py-1 text-[12px] font-bold text-ink-faint">제거</button>
@@ -438,7 +438,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
               </div>
 
               {log.length > 0 && (
-                <div className="rounded-xl bg-black/[0.025] px-3 py-2 text-[12px] leading-5 text-ink-soft">
+                <div className="rounded-xl bg-paper/70 px-3 py-2 text-[12px] leading-5 text-ink-soft">
                   {log.map((line, index) => <div key={`${line}-${index}`}>{line}</div>)}
                 </div>
               )}
@@ -470,7 +470,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
                   <span className="text-[11px] font-semibold text-ink-faint" title={CATALOG_SOURCE_LABEL}>세트마스터 기준</span>
                 </div>
                 <div className="space-y-1.5">
-                  {equipment.length === 0 && <div className="rounded-xl bg-black/[0.025] px-3 py-4 text-center text-[13px] font-semibold text-ink-faint">장비를 추가해주세요.</div>}
+                  {equipment.length === 0 && <div className="rounded-xl bg-paper/70 px-3 py-4 text-center text-[13px] font-semibold text-ink-faint">장비를 추가해주세요.</div>}
                   {equipment.map((item, index) => (
                     <EquipmentRow
                       key={`${item.raw || item.name}-${index}`}
@@ -497,11 +497,11 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
                     className="entry-input flex-1"
                     placeholder="장비명 검색"
                   />
-                  <button type="button" onClick={() => addEquipment(addSuggestions[0]?.name)} className="tap inline-flex w-12 items-center justify-center rounded-xl bg-white text-ink-soft ring-1 ring-black/10">
+                  <button type="button" onClick={() => addEquipment(addSuggestions[0]?.name)} className="tap inline-flex w-12 items-center justify-center rounded-xl bg-white text-ink-soft ring-1 ring-line">
                     <Plus className="h-4.5 w-4.5" />
                   </button>
                   {addName.trim() && addSuggestions.length > 0 && (
-                    <div className="absolute left-0 right-14 top-[calc(100%+4px)] z-30 max-h-56 overflow-y-auto rounded-xl bg-white py-1 shadow-card ring-1 ring-black/10">
+                    <div className="absolute left-0 right-14 top-[calc(100%+4px)] z-30 max-h-56 overflow-y-auto rounded-xl bg-white py-1 shadow-card ring-1 ring-line">
                       {addSuggestions.map((item) => (
                         <button
                           key={item.name}
@@ -532,7 +532,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
           </div>
 
           {result && (
-            <div className="mt-3 rounded-xl border border-black/8 bg-paper p-3">
+            <div className="mt-3 rounded-xl border border-line/80 bg-paper p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <div className="text-[12px] font-bold text-ink-faint">가용 체크 결과</div>
@@ -540,7 +540,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
                 </div>
                 {result.duplicate && <span className="rounded-full bg-warn-bg px-2.5 py-1 text-[12px] font-extrabold text-warn-fg">중복 요청</span>}
               </div>
-              {result.message && <div className="mt-2 rounded-lg bg-white px-3 py-2 text-[12.5px] font-semibold text-ink-soft ring-1 ring-black/5">{result.message}</div>}
+              {result.message && <div className="mt-2 rounded-lg bg-white px-3 py-2 text-[12.5px] font-semibold text-ink-soft ring-1 ring-line/70">{result.message}</div>}
               {rows.length > 0 && (
                 <div className="mt-2 space-y-1.5">
                   {rows.map((row, index) => {
@@ -548,12 +548,12 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
                     const name = row.장비명 || row.name || "장비명 없음";
                     const detail = row.상세 || row.detail || row.status || row.결과 || "";
                     return (
-                      <div key={`${name}-${index}`} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-2 ring-1 ring-black/5">
+                      <div key={`${name}-${index}`} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-2 ring-1 ring-line/70">
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-[13px] font-bold text-ink">{name}</div>
                           {detail && <div className="truncate text-[11.5px] font-semibold text-ink-faint">{detail}</div>}
                         </div>
-                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-extrabold ${tone === "ok" ? "bg-checkin-bg text-checkin-fg" : tone === "fail" ? "bg-attention-bg text-attention-fg" : tone === "warn" ? "bg-warn-bg text-warn-fg" : "bg-black/[0.04] text-ink-faint"}`}>
+                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-extrabold ${tone === "ok" ? "bg-checkin-bg text-checkin-fg" : tone === "fail" ? "bg-attention-bg text-attention-fg" : tone === "warn" ? "bg-warn-bg text-warn-fg" : "bg-line/40 text-ink-faint"}`}>
                           {row.결과 || "확인"}
                         </span>
                       </div>
@@ -630,7 +630,7 @@ function EquipmentRow({
   );
 
   return (
-    <div className="relative flex items-center gap-1.5 rounded-xl bg-white px-2 py-1.5 ring-1 ring-black/8">
+    <div className="relative flex items-center gap-1.5 rounded-xl bg-white px-2 py-1.5 ring-1 ring-line/80">
       <div className="min-w-0 flex-1">
         <input
           value={item.name}
@@ -644,12 +644,12 @@ function EquipmentRow({
       <input
         value={item.qty}
         onChange={(event) => onQty(index, event.target.value)}
-        className="h-9 w-14 rounded-lg border border-black/10 text-center text-[13px] font-extrabold text-ink outline-none"
+        className="h-9 w-14 rounded-lg border border-line text-center text-[13px] font-extrabold text-ink outline-none"
         inputMode="numeric"
       />
       <button type="button" onClick={() => onRemove(index)} className="tap h-9 w-8 rounded-lg text-[18px] font-bold text-ink-faint">×</button>
       {focused && q && suggestions.length > 0 && (
-        <div className="absolute left-2 right-16 top-[calc(100%+4px)] z-40 max-h-52 overflow-y-auto rounded-xl bg-white py-1 shadow-card ring-1 ring-black/10">
+        <div className="absolute left-2 right-16 top-[calc(100%+4px)] z-40 max-h-52 overflow-y-auto rounded-xl bg-white py-1 shadow-card ring-1 ring-line">
           {suggestions.map((name) => (
             <button
               key={name}

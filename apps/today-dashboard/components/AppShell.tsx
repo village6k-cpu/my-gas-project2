@@ -61,7 +61,7 @@ export function AppShell({ initial = "today" }: { initial?: NavKey }) {
         {pane("confirm", <ConfirmView />)}
       </main>
       {isLg && (
-        <aside className="hidden w-[400px] shrink-0 overflow-y-auto border-l border-black/5 lg:block xl:w-[440px]">
+        <aside className="hidden w-[400px] shrink-0 overflow-y-auto border-l border-line/60 lg:block xl:w-[440px]">
           <TodayView />
         </aside>
       )}

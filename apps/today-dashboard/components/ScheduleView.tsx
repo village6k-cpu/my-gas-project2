@@ -35,28 +35,28 @@ export function ScheduleView() {
 
   return (
     <div className="flex min-h-screen flex-col bg-paper">
-      <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
+      <header className="safe-top sticky top-0 z-40 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
         <ViewHeader title="빌리지 스케줄">
           <span className="hidden text-[12px] text-ink-faint sm:inline">장비별 예약 현황</span>
         </ViewHeader>
 
         <div className="flex flex-wrap items-center gap-2 px-4 pb-2.5 pt-2">
-          <div className="flex items-center gap-0.5 rounded-lg bg-black/[0.05] p-0.5">
+          <div className="flex items-center gap-0.5 rounded-lg bg-white ring-1 ring-line/60 p-0.5">
             {MODES.map((m) => (
-              <button key={m.v} onClick={() => setMode(m.v)} className={`tap rounded-md px-2.5 py-1.5 text-[12.5px] font-bold ${mode === m.v ? "bg-white text-brand-700 shadow-sm" : "text-ink-mute"}`}>
+              <button key={m.v} onClick={() => setMode(m.v)} className={`tap rounded-md px-2.5 py-1.5 text-[12.5px] font-bold ${mode === m.v ? "bg-brand-50 text-brand-700" : "text-ink-mute"}`}>
                 {m.label}
               </button>
             ))}
           </div>
 
-          <div className="flex min-w-[180px] flex-1 items-center gap-2 rounded-lg bg-black/[0.05] px-3 py-2">
+          <div className="flex min-w-[180px] flex-1 items-center gap-2 rounded-lg bg-white ring-1 ring-line/60 px-3 py-2">
             <Search className="h-4 w-4 text-ink-faint" />
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="예약자·장비·거래ID 검색" className="flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-faint" />
             {q && <button onClick={() => setQ("")} className="text-ink-faint">✕</button>}
           </div>
 
           {/* 날짜 범위 필터 */}
-          <div className="flex items-center gap-1 rounded-lg bg-black/[0.05] px-2 py-1.5 text-[12.5px]">
+          <div className="flex items-center gap-1 rounded-lg bg-white ring-1 ring-line/60 px-2 py-1.5 text-[12.5px]">
             <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="bg-transparent text-ink outline-none" />
             <span className="text-ink-faint">~</span>
             <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="bg-transparent text-ink outline-none" />

@@ -91,9 +91,9 @@ export function OperationsView() {
 
   return (
     <div className="flex min-h-screen flex-col bg-paper">
-      <header className="safe-top sticky top-0 z-40 bg-white/90 backdrop-blur-md ring-1 ring-black/5">
+      <header className="safe-top sticky top-0 z-40 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
         <ViewHeader title="운영판">
-          <button onClick={load} className={`tap flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
+          <button onClick={load} className={`tap flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white ring-1 ring-line/60 text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
             <Refresh className="h-4 w-4" />
           </button>
         </ViewHeader>
@@ -179,7 +179,7 @@ export function OperationsView() {
             </div>
 
             {/* 주간 신규예약 */}
-            <div className="flex items-center justify-between rounded-xl bg-white p-3.5 shadow-card ring-1 ring-black/5">
+            <div className="flex items-center justify-between rounded-xl bg-white p-3.5 shadow-card ring-1 ring-line/70">
               <div>
                 <div className="text-[12px] font-semibold text-ink-mute">이번주 신규 예약</div>
                 <div className="text-[11.5px] text-ink-faint">{md(data.week?.start)} ~ {md(data.week?.end)}</div>
@@ -195,7 +195,7 @@ export function OperationsView() {
 
 function Kpi({ label, value, bar, alert }: { label: string; value: number; bar: string; alert?: boolean }) {
   return (
-    <div className="relative overflow-hidden rounded-xl bg-white p-3.5 shadow-card ring-1 ring-black/5">
+    <div className="relative overflow-hidden rounded-xl bg-white p-3.5 shadow-card ring-1 ring-line/70">
       <span className={`absolute inset-y-0 left-0 w-[3px] ${bar}`} aria-hidden />
       <div className="text-[12px] font-semibold text-ink-mute">{label}</div>
       <div className={`mt-1 text-[24px] font-extrabold leading-none tabular-nums ${alert ? "text-attention-fg" : "text-ink"}`}>{value}<span className="text-[13px] font-bold text-ink-faint">건</span></div>
@@ -208,10 +208,10 @@ function Gauge({ util }: { util?: { inUse?: number; total?: number; percent?: nu
   const tone = pct >= 50 ? "text-checkin-fg" : pct >= 30 ? "text-warn-fg" : "text-attention-fg";
   const barColor = pct >= 50 ? "bg-checkin-fg" : pct >= 30 ? "bg-warn-fg" : "bg-attention-fg";
   return (
-    <div className="rounded-xl bg-white p-3.5 shadow-card ring-1 ring-black/5">
+    <div className="rounded-xl bg-white p-3.5 shadow-card ring-1 ring-line/70">
       <div className="text-[12px] font-semibold text-ink-mute">장비 가동률</div>
       <div className={`mt-1 text-[34px] font-extrabold leading-none tabular-nums ${tone}`}>{pct}<span className="text-[16px]">%</span></div>
-      <div className="mt-2 h-2 overflow-hidden rounded-full bg-black/[0.06]">
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-line/40">
         <div className={`h-full rounded-full ${barColor}`} style={{ width: `${Math.min(100, pct)}%` }} />
       </div>
       <div className="mt-1.5 text-[11.5px] text-ink-mute">대여 중 {util?.inUse ?? 0}개 / 전체 보유 {util?.total ?? 0}개</div>
@@ -225,11 +225,11 @@ function Pace({ pace }: { pace?: { thisWeek?: number; avg4Week?: number; percent
   const arrow = na ? "" : pct >= 110 ? "▲" : pct >= 80 ? "▬" : "▼";
   const tone = na ? "text-ink-faint" : pct! >= 110 ? "text-checkin-fg" : pct! >= 80 ? "text-ink-soft" : "text-attention-fg";
   return (
-    <div className="rounded-xl bg-white p-3.5 shadow-card ring-1 ring-black/5">
+    <div className="rounded-xl bg-white p-3.5 shadow-card ring-1 ring-line/70">
       <div className="text-[12px] font-semibold text-ink-mute">이번주 출고 페이스</div>
       <div className={`mt-1 text-[34px] font-extrabold leading-none tabular-nums ${tone}`}>{na ? "데이터 부족" : <>{arrow} {pct}<span className="text-[16px]">%</span></>}</div>
       {!na && (
-        <div className="relative mt-2 h-2 overflow-hidden rounded-full bg-black/[0.06]">
+        <div className="relative mt-2 h-2 overflow-hidden rounded-full bg-line/40">
           <div className="absolute inset-y-0 left-1/2 w-px bg-black/20" aria-hidden />
           <div className="h-full rounded-full bg-ink-soft" style={{ width: `${Math.min(200, Math.max(0, pct!)) / 2}%` }} />
         </div>
@@ -248,8 +248,8 @@ function Section({ title, count, empty, children }: { title: string; count: numb
         <h2 className="text-[14px] font-bold text-ink-soft">{title}</h2>
         <span className="text-[12px] text-ink-mute">{count}건</span>
       </div>
-      <div className="overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-black/5">
-        {has ? <div className="divide-y divide-black/5">{arr}</div> : <div className="px-3 py-5 text-center text-[12.5px] font-semibold text-ink-faint">{empty}</div>}
+      <div className="overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-line/70">
+        {has ? <div className="divide-y divide-line/60">{arr}</div> : <div className="px-3 py-5 text-center text-[12.5px] font-semibold text-ink-faint">{empty}</div>}
       </div>
     </section>
   );
@@ -260,7 +260,7 @@ function OpsRow({ left, who, sub, tid, pill, pillTone, date }: { left?: string; 
     pillTone === "urgent" ? "bg-attention-bg text-attention-fg"
     : pillTone === "high" ? "bg-warn-bg text-warn-fg"
     : pillTone === "normal" ? "bg-checkout-bg text-checkout-fg"
-    : "bg-black/[0.04] text-ink-mute";
+    : "bg-line/40 text-ink-mute";
   return (
     <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2.5 px-3 py-2.5">
       <span className="text-[12.5px] font-bold tabular-nums text-ink-soft">{left || ""}</span>

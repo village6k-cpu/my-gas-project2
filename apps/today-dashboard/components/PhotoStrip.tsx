@@ -15,7 +15,7 @@ function PhotoTile({ photo }: { photo: PhotoMeta }) {
   const src = photo.thumbnailUrl || photo.url;
   if (src) {
     return (
-      <a href={photo.url || src} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-xl bg-black/[0.04] ring-1 ring-black/10">
+      <a href={photo.url || src} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-xl bg-paper ring-1 ring-line">
         <img src={src} alt={photo.label} className="aspect-square w-full object-cover" loading="lazy" />
       </a>
     );
@@ -86,7 +86,7 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="tap inline-flex items-center gap-1.5 rounded-lg bg-black/[0.04] px-2.5 py-1.5 text-[12.5px] font-semibold text-ink-soft ring-1 ring-black/5"
+          className="tap inline-flex items-center gap-1.5 rounded-lg bg-paper px-2.5 py-1.5 text-[12.5px] font-semibold text-ink-soft ring-1 ring-line/70"
         >
           <Camera className="h-4 w-4" />
           사진
@@ -150,7 +150,7 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
                       ))}
                     </div>
                   ) : (
-                    <div className="rounded-xl border border-dashed border-black/15 px-3 py-5 text-center text-[12px] font-semibold text-ink-faint">
+                    <div className="rounded-xl border border-dashed border-line px-3 py-5 text-center text-[12px] font-semibold text-ink-faint">
                       등록된 사진 없음
                     </div>
                   )}

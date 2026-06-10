@@ -56,7 +56,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       <form onSubmit={login} className="w-full max-w-[340px] sm:max-w-[420px]">
         <div className="mb-9 flex flex-col items-center text-center">
           <VillageLogo size="lg" />
-          <div className="mt-5 inline-flex rounded-full border border-black/10 bg-white/55 px-3 py-1 text-[12px] font-bold text-ink-mute">
+          <div className="mt-5 inline-flex rounded-full border border-line bg-white/55 px-3 py-1 text-[12px] font-bold text-ink-mute">
             운영 대시보드
           </div>
           <h1 className="mt-4 text-[24px] font-black leading-tight tracking-normal text-ink">직원 로그인</h1>
@@ -65,7 +65,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           </p>
         </div>
 
-        <div className="space-y-3 rounded-[8px] border border-black/[0.08] bg-white/80 p-4 shadow-[0_1px_2px_rgba(16,18,29,0.04)] backdrop-blur">
+        <div className="space-y-3 rounded-[8px] border border-line/80 bg-white/80 p-4 shadow-[0_1px_2px_rgba(16,18,29,0.04)] backdrop-blur">
           <label className="block">
             <span className="mb-1.5 block text-[12px] font-bold text-ink-mute">이메일</span>
             <input
@@ -75,7 +75,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               placeholder="name@village6k.co.kr"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-[8px] border border-black/10 bg-white px-4 py-3.5 text-[15px] font-semibold text-ink outline-none transition placeholder:text-ink-faint/70 focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+              className="w-full rounded-[8px] border border-line bg-white px-4 py-3.5 text-[15px] font-semibold text-ink outline-none transition placeholder:text-ink-faint/70 focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
               required
             />
           </label>
@@ -88,7 +88,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               placeholder="비밀번호"
               value={pw}
               onChange={(e) => setPw(e.target.value)}
-              className="w-full rounded-[8px] border border-black/10 bg-white px-4 py-3.5 text-[15px] font-semibold text-ink outline-none transition placeholder:text-ink-faint/70 focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+              className="w-full rounded-[8px] border border-line bg-white px-4 py-3.5 text-[15px] font-semibold text-ink outline-none transition placeholder:text-ink-faint/70 focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
               required
             />
           </label>

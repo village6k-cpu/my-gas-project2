@@ -240,7 +240,7 @@ export function VillageTimeline({
         <button onClick={() => setCollapsed((c) => ({ ...c, [g.key]: !c[g.key] }))} className="tap sticky left-0 z-10 flex h-full items-center gap-1.5 bg-white/95 pl-3 pr-4 backdrop-blur">
           <ChevronRight className={`h-3.5 w-3.5 text-ink-mute transition-transform ${isCol ? "" : "rotate-90"}`} />
           <span className="text-[13px] font-bold text-ink">{g.key}</span>
-          <span className="rounded-full bg-black/[0.05] px-1.5 text-[11px] font-semibold text-ink-mute">{g.items.length}</span>
+          <span className="rounded-full bg-line/40 px-1.5 text-[11px] font-semibold text-ink-mute">{g.items.length}</span>
         </button>
       </div>,
     );
@@ -283,18 +283,18 @@ export function VillageTimeline({
   }
 
   return (
-    <div className="relative overflow-hidden rounded-xl2 bg-white shadow-card ring-1 ring-black/5">
+    <div className="relative overflow-hidden rounded-xl2 bg-white shadow-card ring-1 ring-line/70">
       <div ref={scrollRef} className="overflow-auto" style={{ maxHeight: "calc(100vh - 190px)" }}>
         <div style={{ width: totalW, position: "relative" }}>
           {/* 날짜 헤더 */}
-          <div className="sticky top-0 z-30 flex border-b border-black/10 bg-white/95 backdrop-blur" style={{ height: HEAD_H }}>
+          <div className="sticky top-0 z-30 flex border-b border-line bg-white/95 backdrop-blur" style={{ height: HEAD_H }}>
             {dates.map((ms, i) => {
               const dt = new Date(ms);
               const dow = dt.getDay();
               const isToday = ms === todayMs;
               const weekend = dow === 0 || dow === 6;
               return (
-                <div key={ms} style={{ width: colW }} className={`flex shrink-0 flex-col items-center justify-center ${isToday ? "bg-brand-50" : weekend ? "bg-black/[0.015]" : ""}`}>
+                <div key={ms} style={{ width: colW }} className={`flex shrink-0 flex-col items-center justify-center ${isToday ? "bg-brand-50" : weekend ? "bg-paper/70" : ""}`}>
                   {(dt.getDate() === 1 || i === 0) && <span className="text-[9.5px] font-bold text-ink-faint">{dt.getMonth() + 1}월</span>}
                   <span className={`text-[13px] font-bold ${isToday ? "text-brand-600" : dow === 0 ? "text-attention-fg" : dow === 6 ? "text-checkout-fg" : "text-ink"}`}>{dt.getDate()}</span>
                   {colW >= 60 && <span className="text-[9.5px] text-ink-faint">{WEEKDAY[dow]}</span>}
@@ -310,7 +310,7 @@ export function VillageTimeline({
               const dow = new Date(ms).getDay();
               const isToday = ms === todayMs;
               if (!isToday && dow !== 0 && dow !== 6) return null;
-              return <div key={ms} className={`absolute top-0 bottom-0 ${isToday ? "bg-brand-50/60" : "bg-black/[0.012]"}`} style={{ left: i * colW, width: colW }} />;
+              return <div key={ms} className={`absolute top-0 bottom-0 ${isToday ? "bg-brand-50/60" : "bg-paper/60"}`} style={{ left: i * colW, width: colW }} />;
             })}
             {todayOff >= 0 && todayOff < days && (
               <div className="absolute top-0 bottom-0 z-20" style={{ left: todayOff * colW + Math.round(colW / 2) - 1, width: 2, background: "#D04A2E" }}>
@@ -321,7 +321,7 @@ export function VillageTimeline({
           </div>
 
           {/* 매출바 (모바일 숨김) */}
-          <div className="sticky bottom-0 z-20 hidden border-t border-black/10 bg-white/95 backdrop-blur sm:block" style={{ height: REV_H }}>
+          <div className="sticky bottom-0 z-20 hidden border-t border-line bg-white/95 backdrop-blur sm:block" style={{ height: REV_H }}>
             <div className="relative h-full">
               {revenue.map((r, i) =>
                 r > 0 ? (
@@ -340,7 +340,7 @@ export function VillageTimeline({
       </div>
 
       {/* 컨트롤 (오늘 + 줌) */}
-      <div className="absolute bottom-3 right-3 z-40 flex items-center gap-1 rounded-xl bg-white/95 p-1 shadow-pop ring-1 ring-black/10 backdrop-blur">
+      <div className="absolute bottom-3 right-3 z-40 flex items-center gap-1 rounded-xl bg-white/95 p-1 shadow-pop ring-1 ring-line backdrop-blur">
         <button onClick={scrollToToday} className="tap mr-1 rounded-lg px-2.5 py-1 text-[12px] font-bold text-brand-700">오늘</button>
         <button onClick={() => setColW((w) => Math.max(44, Math.round(w / 1.3)))} className="tap flex h-8 w-8 items-center justify-center rounded-lg text-[18px] font-bold text-ink-soft">−</button>
         <button onClick={() => setColW((w) => Math.min(220, Math.round(w * 1.3)))} className="tap flex h-8 w-8 items-center justify-center rounded-lg text-[18px] font-bold text-ink-soft">＋</button>
@@ -352,7 +352,7 @@ export function VillageTimeline({
         <>
           <div className="fixed inset-0 z-50" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
           <div
-            className={`fixed z-50 overflow-hidden bg-white shadow-pop ring-1 ring-black/10 ${menu.mobile ? "inset-x-0 bottom-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]" : "w-56 rounded-xl"}`}
+            className={`fixed z-50 overflow-hidden bg-white shadow-pop ring-1 ring-line ${menu.mobile ? "inset-x-0 bottom-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]" : "w-56 rounded-xl"}`}
             style={menu.mobile ? undefined : { left: Math.min(menu.x, (typeof window !== "undefined" ? window.innerWidth : 9999) - 232), top: menu.y }}
           >
             <MenuItem onClick={() => runMenu("addEquip", menu.item)}>
@@ -405,7 +405,7 @@ function BarSheet({ it, onClose }: { it: TLItem; onClose: () => void }) {
           </div>
         </div>
         <div className="mt-4 flex gap-2">
-          <button onClick={onClose} className="tap flex-1 rounded-xl bg-black/[0.05] py-3 text-[14px] font-bold text-ink-soft">닫기</button>
+          <button onClick={onClose} className="tap flex-1 rounded-xl bg-line/40 py-3 text-[14px] font-bold text-ink-soft">닫기</button>
           <Link href={`/?tid=${it.tradeId}`} className="tap flex-1 rounded-xl bg-brand-600 py-3 text-center text-[14px] font-bold text-white shadow-sm">
             이 거래 보기
           </Link>

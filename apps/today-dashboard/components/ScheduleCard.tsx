@@ -11,7 +11,7 @@ import { PaymentControls } from "./PaymentControls";
 import { Check, ChevronRight, Phone } from "./icons";
 
 const STATUS_BADGE: Record<string, string> = {
-  예약: "bg-black/5 text-ink-mute",
+  예약: "bg-line/40 text-ink-soft",
   반출: "bg-checkout-bg text-checkout-fg",
   반납완료: "bg-checkin-bg text-checkin-fg",
   취소: "bg-attention-bg text-attention-fg line-through",
@@ -59,7 +59,7 @@ export function ScheduleCard({
   return (
     <div
       className={`animate-pop relative overflow-hidden rounded-xl2 shadow-card ring-1 transition-all duration-300 ${
-        done ? "bg-checkin-bg/40 opacity-75 ring-checkin-ring" : "bg-white ring-black/[0.04]"
+        done ? "bg-checkin-bg/40 opacity-75 ring-checkin-ring" : "bg-white ring-line/60"
       }`}
     >
       <span className={`absolute inset-y-0 left-0 w-1 ${done ? "bg-checkin-fg" : accent}`} />
@@ -96,7 +96,7 @@ export function ScheduleCard({
           <span className="hidden text-[13.5px] font-semibold tabular-nums text-ink-soft sm:inline">{trade.customerPhone}</span>
           <a
             href={`tel:${trade.customerPhone.replace(/-/g, "")}`}
-            className="tap flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-ink-soft"
+            className="tap flex h-9 w-9 items-center justify-center rounded-full bg-paper ring-1 ring-line/60 text-ink-soft"
             aria-label="전화 걸기"
           >
             <Phone className="h-4 w-4" />
@@ -125,7 +125,7 @@ export function ScheduleCard({
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="tap flex h-11 items-center gap-1.5 rounded-xl border border-black/15 bg-white px-3 text-[13px] font-bold text-ink-soft shadow-sm"
+          className="tap flex h-11 items-center gap-1.5 rounded-xl border border-line bg-white px-3 text-[13px] font-bold text-ink-soft shadow-sm"
         >
           {open ? "접기" : "품목 체크"}
           <span className="tabular-nums text-ink-mute">{prog.done}/{prog.total}</span>

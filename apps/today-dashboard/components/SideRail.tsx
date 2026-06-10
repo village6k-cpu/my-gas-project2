@@ -10,7 +10,7 @@ const RAIL_ITEMS = NAV_ITEMS.filter((n) => n.key !== "today");
 
 export function SideRail({ view, onNav }: { view: NavKey; onNav: (k: NavKey) => void }) {
   return (
-    <nav className="hidden shrink-0 flex-col border-r border-black/5 bg-white/70 px-3 py-4 lg:flex lg:w-[176px]">
+    <nav className="hidden shrink-0 flex-col border-r border-line/60 bg-paper px-3 py-4 lg:flex lg:w-[176px]">
       <div className="px-2 pb-4">
         <VillageLogo size="md" />
       </div>

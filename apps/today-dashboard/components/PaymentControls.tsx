@@ -37,7 +37,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
   if (isTax && trade.issueStatus) tokens.push({ t: trade.issueStatus, bad: isBad(trade.issueStatus) });
 
   return (
-    <div className="mt-3 border-t border-black/5 pt-3">
+    <div className="mt-3 border-t border-line/60 pt-3">
       {/* 접힌 요약 — 탭하면 편집 */}
       <button onClick={() => setOpen((v) => !v)} className="tap flex w-full items-center gap-2 text-left">
         <span className="shrink-0 text-[12px] font-bold text-ink-soft">결제 · 정산</span>
@@ -73,7 +73,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
                   defaultValue={trade.billingCompany ?? ""}
                   onBlur={(e) => setBillingCompany(trade.tradeId, e.target.value)}
                   placeholder="상호 입력"
-                  className="flex-1 rounded-lg border border-black/15 bg-white px-3 py-2 text-[13.5px] font-semibold text-ink outline-none focus:border-brand-500"
+                  className="flex-1 rounded-lg border border-line bg-white px-3 py-2 text-[13.5px] font-semibold text-ink outline-none focus:border-brand-500"
                 />
                 <datalist id="billing-known">
                   {BILLING_KNOWN.map((b) => (
@@ -83,7 +83,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               </label>
               <div className="flex items-center gap-2">
                 <span className="w-12 shrink-0 text-[12px] font-semibold text-ink-mute">발행상태</span>
-                <span className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-[13.5px] font-semibold ${isBad(trade.issueStatus) ? "border-attention-ring bg-attention-bg text-attention-fg" : "border-black/10 bg-black/[0.02] text-ink-soft"}`}>
+                <span className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-[13.5px] font-semibold ${isBad(trade.issueStatus) ? "border-attention-ring bg-attention-bg text-attention-fg" : "border-line bg-paper/70 text-ink-soft"}`}>
                   {trade.issueStatus || "미발행"}
                 </span>
                 <button
@@ -97,7 +97,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
                       .catch((err) => window.alert("계산서 발행 실패: " + (err instanceof Error ? err.message : String(err))))
                       .finally(() => setIssuing(false));
                   }}
-                  className="tap shrink-0 rounded-lg bg-brand-600 px-3 py-2 text-[13px] font-bold text-white shadow-sm disabled:bg-black/[0.08] disabled:text-ink-faint disabled:shadow-none"
+                  className="tap shrink-0 rounded-lg bg-brand-600 px-3 py-2 text-[13px] font-bold text-white shadow-sm disabled:bg-line/60 disabled:text-ink-faint disabled:shadow-none"
                 >
                   {issuing ? "요청 중..." : "계산서 발행요청"}
                 </button>
@@ -122,7 +122,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               href={trade.contractUrl ?? undefined}
               target="_blank"
               className={`tap inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-bold ring-1 ${
-                trade.contractUrl ? "bg-white text-ink-soft ring-black/15" : "bg-black/[0.03] text-ink-faint ring-black/5"
+                trade.contractUrl ? "bg-white text-ink-soft ring-line" : "bg-paper text-ink-faint ring-line/70"
               }`}
             >
               <Doc className="h-3.5 w-3.5" />
@@ -138,7 +138,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
                   .catch(() => undefined)
                   .finally(() => setRegenerating(false));
               }}
-              className="tap inline-flex items-center gap-1.5 rounded-lg bg-brand-50 px-3 py-2 text-[13px] font-bold text-brand-700 ring-1 ring-brand-200 disabled:bg-black/[0.03] disabled:text-ink-faint disabled:ring-black/5"
+              className="tap inline-flex items-center gap-1.5 rounded-lg bg-brand-50 px-3 py-2 text-[13px] font-bold text-brand-700 ring-1 ring-brand-200 disabled:bg-paper disabled:text-ink-faint disabled:ring-line/70"
             >
               <Refresh className={`h-3.5 w-3.5 ${isRegenerating ? "animate-spin" : ""}`} />
               {isRegenerating ? "재생성 중…" : "계약서 재생성"}
@@ -155,7 +155,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               {trade.customerName}님 · {trade.customerPhone}
             </p>
             <div className="mt-4 flex gap-2">
-              <button onClick={() => setConfirming(false)} className="tap flex-1 rounded-xl bg-black/[0.05] py-3 text-[14px] font-bold text-ink-soft">
+              <button onClick={() => setConfirming(false)} className="tap flex-1 rounded-xl bg-line/40 py-3 text-[14px] font-bold text-ink-soft">
                 취소
               </button>
               <button
@@ -196,7 +196,7 @@ function Select({
           value={value ?? ""}
           onChange={(e) => onChange(e.target.value)}
           className={`w-full appearance-none rounded-lg border bg-white px-3 py-2 pr-8 text-[13.5px] font-semibold outline-none focus:border-brand-500 ${
-            danger ? "border-attention-ring text-attention-fg" : "border-black/15 text-ink"
+            danger ? "border-attention-ring text-attention-fg" : "border-line text-ink"
           }`}
         >
           <option value="" disabled>
