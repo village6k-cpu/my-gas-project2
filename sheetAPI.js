@@ -434,6 +434,20 @@ function handleRequest(e) {
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
+      case "regenerateContract":
+        var contractExtraText =
+          params.extraText !== undefined ? params.extraText :
+          postBody.extraText !== undefined ? postBody.extraText :
+          params.추가요청 !== undefined ? params.추가요청 :
+          postBody.추가요청 !== undefined ? postBody.추가요청 :
+          params.memo !== undefined ? params.memo :
+          postBody.memo !== undefined ? postBody.memo :
+          params.note !== undefined ? params.note : postBody.note;
+        return jsonResponse(regenerateContractById(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId || params.거래ID || postBody.거래ID,
+          contractExtraText
+        ));
+
       case "issueProof":
         return jsonResponse(requestTradeProofIssue(
           params.tid || postBody.tid || params.tradeId || postBody.tradeId

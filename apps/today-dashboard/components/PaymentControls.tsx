@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { Trade } from "@/lib/domain/types";
 import {
+  regenerateContract,
   sendEstimate,
   setBillingCompany,
   setDepositStatus,
@@ -11,7 +12,7 @@ import {
   setProofType,
 } from "@/lib/data/store";
 import { won } from "@/lib/domain/status";
-import { ChevronRight, Doc, Send } from "./icons";
+import { ChevronRight, Doc, Refresh, Send } from "./icons";
 
 const PAY = ["계좌이체", "현장카드", "카드결제", "현금"];
 const DEPOSIT = ["입금완료", "결제대기", "미입금"];
@@ -24,7 +25,9 @@ const isBad = (s?: string) => !!s && /미|대기|예정/.test(s);
 export function PaymentControls({ trade }: { trade: Trade }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
   const isTax = trade.proofType === "세금계산서";
+  const isRegenerating = trade.contractRegenPending || regenerating;
 
   // 한 줄 요약 토큰
   const tokens: { t: string; bad?: boolean }[] = [];
@@ -102,6 +105,21 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               <Doc className="h-3.5 w-3.5" />
               {trade.contractRegenPending ? "계약서 갱신중…" : trade.contractUrl ? "계약서 열기" : "계약서 없음"}
             </a>
+            <button
+              type="button"
+              disabled={isRegenerating}
+              onClick={() => {
+                if (isRegenerating) return;
+                setRegenerating(true);
+                regenerateContract(trade.tradeId)
+                  .catch(() => undefined)
+                  .finally(() => setRegenerating(false));
+              }}
+              className="tap inline-flex items-center gap-1.5 rounded-lg bg-brand-50 px-3 py-2 text-[13px] font-bold text-brand-700 ring-1 ring-brand-200 disabled:bg-black/[0.03] disabled:text-ink-faint disabled:ring-black/5"
+            >
+              <Refresh className={`h-3.5 w-3.5 ${isRegenerating ? "animate-spin" : ""}`} />
+              {isRegenerating ? "재생성 중…" : "계약서 재생성"}
+            </button>
           </div>
         </div>
       )}

@@ -7,13 +7,25 @@ import { gasFetch } from "./apiClient";
 
 export const writeBackEnabled = isSupabase && process.env.NEXT_PUBLIC_WRITE_BACK === "1";
 
-/** GAS 쓰기 액션 호출 (실패해도 앱은 옵티미스틱 유지, 로그만) */
-export function gasWrite(action: string, params: Record<string, string | number | boolean>): void {
-  if (!writeBackEnabled) return;
+type GasParam = string | number | boolean;
+
+/** GAS 쓰기 액션 호출 후 응답을 반환해야 하는 변이에 사용 */
+export async function gasMutation(action: string, params: Record<string, GasParam>): Promise<any> {
+  if (!writeBackEnabled) return { skipped: true };
   const qs = new URLSearchParams({ action });
   for (const [k, v] of Object.entries(params)) qs.set(k, String(v));
-  gasFetch(qs.toString())
-    .then((r) => r.json())
+  const r = await gasFetch(qs.toString());
+  const res = await r.json().catch(() => null);
+  if (!r.ok || (res && res.error)) {
+    throw new Error((res && res.error) || `GAS 호출 실패 (${r.status})`);
+  }
+  return res;
+}
+
+/** GAS 쓰기 액션 호출 (실패해도 앱은 옵티미스틱 유지, 로그만) */
+export function gasWrite(action: string, params: Record<string, GasParam>): void {
+  if (!writeBackEnabled) return;
+  gasMutation(action, params)
     .then((res) => {
       if (res && res.error) console.error("[write-back] GAS 오류:", action, res.error);
     })
