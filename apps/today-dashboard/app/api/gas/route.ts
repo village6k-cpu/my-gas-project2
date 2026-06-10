@@ -53,6 +53,8 @@ const WRITE_ACTIONS = new Set([
   "updateBillingCompany",
   "sendEstimate",
   "regenerateContract",
+  "aiParse",
+  "registerAsync",
   "updateEquipQty",
   "updateEquipName",
   "uploadDashboardPhoto",

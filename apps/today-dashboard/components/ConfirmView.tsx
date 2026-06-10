@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { authFetch } from "@/lib/data/authFetch";
 import { ViewHeader } from "@/components/ViewHeader";
 import { Refresh } from "@/components/icons";
+import { KakaoReservationInput } from "@/components/KakaoReservationInput";
 
 // 확인요청 관리 — GAS Schedule API(/api/confirm)를 네이티브로. 대기/보류 카드 목록 + 장비별 가용성 결과
 // + 확인(가용성체크)/선택등록/전체보류/전체거절/수정. 디자인은 통합앱 토큰.
@@ -168,6 +169,7 @@ export function ConfirmView() {
       </header>
 
       <main className="flex-1 space-y-2.5 p-3 pb-24">
+        <KakaoReservationInput onRequestCreated={load} />
         {error && <div className="rounded-xl bg-attention-bg px-3.5 py-2.5 text-[13px] font-medium text-attention-fg ring-1 ring-attention-ring">{error}</div>}
         {!items.length && !loading && !error && (
           <div className="rounded-xl2 border border-dashed border-black/10 bg-white py-16 text-center">
