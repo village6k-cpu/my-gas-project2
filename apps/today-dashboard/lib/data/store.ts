@@ -56,12 +56,28 @@ function dayData(date: string) {
 // ── Supabase(실데이터) 모드 ────────────────────────────────────
 let remoteLoaded = false;
 let subscribed = false;
-let pendingPersist = 0;
 let refetchTimer: ReturnType<typeof setTimeout> | null = null;
 const persistTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+const persistGenerations: Record<string, number> = {};
+const pendingPersistTrades = new Set<string>();
 let notesTimer: ReturnType<typeof setTimeout> | null = null;
+let notesPersistGeneration = 0;
+let notesPersistPending = false;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 const POLL_MS = 90_000;
+let localMutationSeq = 0;
+
+function markLocalMutation() {
+  localMutationSeq++;
+}
+
+function hasPendingPersist(): boolean {
+  return pendingPersistTrades.size > 0 || notesPersistPending;
+}
+
+function canApplyRemoteSnapshot(mutationSeqAtStart: number): boolean {
+  return !hasPendingPersist() && mutationSeqAtStart === localMutationSeq;
+}
 
 function mergeTradeChanges(base: Trade[], changed: Trade[]): Trade[] {
   const byId = new Map(changed.map((t) => [t.tradeId, t]));
@@ -70,9 +86,10 @@ function mergeTradeChanges(base: Trade[], changed: Trade[]): Trade[] {
   return merged;
 }
 
-async function repairEmptyEquipmentTrades(base = state.trades): Promise<boolean> {
+async function repairEmptyEquipmentTrades(base = state.trades, mutationSeqAtStart = localMutationSeq): Promise<boolean> {
   const changed = await repairDashboardDetailsForIncompleteTrades(base);
   if (!changed.length) return false;
+  if (!canApplyRemoteSnapshot(mutationSeqAtStart)) return false;
   set({ trades: mergeTradeChanges(base, changed) });
   for (const t of changed) persistTrade(t).catch(() => {});
   return true;
@@ -90,13 +107,16 @@ async function loadRemote() {
   if (!subscribed) {
     subscribed = true;
     subscribeChanges(() => {
-      if (pendingPersist > 0) return; // 내 변이 반영 중이면 스킵
+      if (hasPendingPersist()) return; // 내 변이 반영 중이면 스킵
+      const mutationSeqAtSchedule = localMutationSeq;
       if (refetchTimer) clearTimeout(refetchTimer);
       refetchTimer = setTimeout(async () => {
+        if (!canApplyRemoteSnapshot(mutationSeqAtSchedule)) return;
         try {
           const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
+          if (!canApplyRemoteSnapshot(mutationSeqAtSchedule)) return;
           set({ trades, notes });
-          await repairEmptyEquipmentTrades(trades);
+          await repairEmptyEquipmentTrades(trades, mutationSeqAtSchedule);
         } catch {
           /* noop */
         }
@@ -106,11 +126,13 @@ async function loadRemote() {
   // 시트→앱 자동 폴링(변경분만): 90초마다 timeline에서 예약 변경 감지
   if (!pollTimer) {
     pollTimer = setInterval(async () => {
-      if (pendingPersist > 0 || document.hidden) return;
+      if (hasPendingPersist() || document.hidden) return;
+      const mutationSeqAtPoll = localMutationSeq;
       try {
-        if (await repairEmptyEquipmentTrades(state.trades)) return;
+        if (await repairEmptyEquipmentTrades(state.trades, mutationSeqAtPoll)) return;
         const changed = await pollTimelineChanges(state.trades);
         if (!changed.length) return;
+        if (!canApplyRemoteSnapshot(mutationSeqAtPoll)) return;
         set({ trades: mergeTradeChanges(state.trades, changed) });
         for (const t of changed) persistTrade(t).catch(() => {});
       } catch {
@@ -122,22 +144,30 @@ async function loadRemote() {
 
 function schedulePersistTrade(trade: Trade) {
   if (!isSupabase) return;
-  pendingPersist++;
+  const tradeId = trade.tradeId;
+  const generation = (persistGenerations[tradeId] ?? 0) + 1;
+  persistGenerations[tradeId] = generation;
+  pendingPersistTrades.add(tradeId);
   if (persistTimers[trade.tradeId]) clearTimeout(persistTimers[trade.tradeId]);
   persistTimers[trade.tradeId] = setTimeout(async () => {
-    const latest = state.trades.find((t) => t.tradeId === trade.tradeId) ?? trade;
+    const latest = state.trades.find((t) => t.tradeId === tradeId) ?? trade;
     try {
       await persistTrade(latest);
     } catch (e) {
       console.error("[supabase] 저장 실패", e);
     } finally {
-      pendingPersist = Math.max(0, pendingPersist - 1);
+      if (persistGenerations[tradeId] === generation) {
+        delete persistGenerations[tradeId];
+        delete persistTimers[tradeId];
+        pendingPersistTrades.delete(tradeId);
+      }
     }
   }, 450);
 }
 function schedulePersistNotes() {
   if (!isSupabase) return;
-  pendingPersist++;
+  const generation = ++notesPersistGeneration;
+  notesPersistPending = true;
   if (notesTimer) clearTimeout(notesTimer);
   notesTimer = setTimeout(async () => {
     try {
@@ -145,7 +175,7 @@ function schedulePersistNotes() {
     } catch (e) {
       console.error("[supabase] 메모 저장 실패", e);
     } finally {
-      pendingPersist = Math.max(0, pendingPersist - 1);
+      if (notesPersistGeneration === generation) notesPersistPending = false;
     }
   }, 600);
 }
@@ -178,6 +208,7 @@ function flashSave(tradeId?: string) {
 }
 
 function mutateTrade(tradeId: string, fn: (t: Trade) => Trade) {
+  markLocalMutation();
   let changed: Trade | undefined;
   const trades = state.trades.map((t) => (t.tradeId === tradeId ? (changed = fn(t)) : t));
   if (!isSupabase) cache[state.date] = { trades, notes: state.notes };
@@ -354,6 +385,7 @@ export function setPhaseNote(tradeId: string, phase: Phase, text: string) {
 
 // ── 인수인계 메모 ──────────────────────────────────────────────
 function mutateNotes(notes: HandoverNote[]) {
+  markLocalMutation();
   if (!isSupabase) cache[state.date] = { trades: state.trades, notes };
   set({ notes });
   schedulePersistNotes();
