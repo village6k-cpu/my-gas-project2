@@ -7,7 +7,9 @@ import {
   addDays,
   cardDone,
   formatDateLabel,
+  searchTradeEvents,
   tabCounts,
+  type TradeSearchEvent,
   timeBand,
   timeSortKey,
   tradesForTab,
@@ -54,19 +56,9 @@ export function TodayView() {
   );
 
   const searching = q.trim().length > 0;
-  const results = useMemo<Trade[]>(() => {
-    if (!searching) return [];
-    const k = q.trim().toLowerCase();
-    return data.trades.filter(
-      (t) =>
-        t.customerName.toLowerCase().includes(k) ||
-        t.customerPhone.replace(/-/g, "").includes(k.replace(/-/g, "")) ||
-        t.tradeId.toLowerCase().includes(k) ||
-        t.equipments.some((e) => e.name.toLowerCase().includes(k)),
-    );
-  }, [q, data.trades, searching]);
+  const searchEvents = useMemo<TradeSearchEvent[]>(() => (searching ? searchTradeEvents(data.trades, q) : []), [q, data.trades, searching]);
 
-  const list = useMemo(() => (searching ? results : tradesForTab(data.trades, date, tab)), [searching, results, data.trades, date, tab]);
+  const list = useMemo(() => tradesForTab(data.trades, date, tab), [data.trades, date, tab]);
 
   // 처리 완료 카드는 아래로 분리 (검색 모드에선 분리 안 함)
   const activeList = useMemo(() => (searching ? list : list.filter((t) => !cardDone(t, date, tab))), [searching, list, date, tab]);
@@ -88,6 +80,14 @@ export function TodayView() {
     }
     return Object.entries(byBand);
   }, [activeList, tab]);
+
+  const searchGroups = useMemo(() => {
+    const byGroup: Record<string, TradeSearchEvent[]> = {};
+    for (const event of searchEvents) {
+      (byGroup[event.groupLabel] ||= []).push(event);
+    }
+    return Object.entries(byGroup);
+  }, [searchEvents]);
 
   if (!date) {
     return <div className="flex h-screen items-center justify-center text-ink-faint">불러오는 중…</div>;
@@ -183,11 +183,11 @@ export function TodayView() {
 
         {searching && (
           <div className="text-[12.5px] font-semibold text-ink-mute">
-            검색 결과 {results.length}건 — “{q.trim()}”
+            검색 결과 {searchEvents.length}건 — “{q.trim()}”
           </div>
         )}
 
-        {groups.length === 0 && doneList.length === 0 && (
+        {(searching ? searchGroups.length === 0 : groups.length === 0 && doneList.length === 0) && (
           <div className="rounded-xl2 bg-white py-16 text-center text-[14px] text-ink-faint shadow-card ring-1 ring-black/5">
             {searching ? "검색 결과가 없습니다" : "해당 항목이 없습니다"}
           </div>
@@ -201,28 +201,51 @@ export function TodayView() {
           </div>
         )}
 
-        {groups.map(([band, items]) => (
-          <div key={band} className="space-y-2.5">
-            <div className="flex items-center gap-2 pl-1 pt-1">
-              <span className="text-[12px] font-bold text-ink-mute">{band}</span>
-              <span className="text-[11px] text-ink-faint">{items.length}건</span>
-              <span className="h-px flex-1 bg-black/5" />
-            </div>
-            {items.map((t) => {
-              cardIndex += 1;
-              return (
-                <ScheduleCard
-                  key={t.tradeId + (searching ? "-s" : "")}
-                  trade={t}
-                  date={date}
-                  tab={searching ? "all" : tab}
-                  saving={!!data.savingTrades[t.tradeId]}
-                  defaultOpen={cardIndex === 0}
-                />
-              );
-            })}
-          </div>
-        ))}
+        {searching
+          ? searchGroups.map(([group, events]) => (
+              <div key={group} className="space-y-2.5">
+                <div className="flex items-center gap-2 pl-1 pt-1">
+                  <span className="text-[12px] font-bold text-ink-mute">{group}</span>
+                  <span className="text-[11px] text-ink-faint">{events.length}건</span>
+                  <span className="h-px flex-1 bg-black/5" />
+                </div>
+                {events.map((event) => {
+                  cardIndex += 1;
+                  return (
+                    <ScheduleCard
+                      key={event.key}
+                      trade={event.trade}
+                      date={event.date}
+                      tab={event.phase}
+                      saving={!!data.savingTrades[event.trade.tradeId]}
+                      defaultOpen={cardIndex === 0}
+                    />
+                  );
+                })}
+              </div>
+            ))
+          : groups.map(([band, items]) => (
+              <div key={band} className="space-y-2.5">
+                <div className="flex items-center gap-2 pl-1 pt-1">
+                  <span className="text-[12px] font-bold text-ink-mute">{band}</span>
+                  <span className="text-[11px] text-ink-faint">{items.length}건</span>
+                  <span className="h-px flex-1 bg-black/5" />
+                </div>
+                {items.map((t) => {
+                  cardIndex += 1;
+                  return (
+                    <ScheduleCard
+                      key={t.tradeId}
+                      trade={t}
+                      date={date}
+                      tab={tab}
+                      saving={!!data.savingTrades[t.tradeId]}
+                      defaultOpen={cardIndex === 0}
+                    />
+                  );
+                })}
+              </div>
+            ))}
 
         {/* 완료 — 아래로 치움 (펼쳐서 되돌리기) */}
         {doneList.length > 0 && (
