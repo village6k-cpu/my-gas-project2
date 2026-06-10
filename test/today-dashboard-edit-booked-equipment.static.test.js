@@ -38,7 +38,8 @@ assert(
   'equipment name editor must search the sheet-master catalog while typing'
 );
 assert(
-  /matches\.map\(\(m\)[\s\S]*onClick=\{\(\) => select\(m\)\}/.test(checklist),
+  /function FloatingCatalogMenu[\s\S]*items\.map\(\(m\)[\s\S]*onClick=\{\(\) => onSelect\(m\)\}/.test(checklist) &&
+    /function EquipmentNameCombobox[\s\S]*<FloatingCatalogMenu[\s\S]*onSelect=\{select\}/.test(checklist),
   'equipment name editor must show a selectable dropdown of catalog matches'
 );
 assert(
