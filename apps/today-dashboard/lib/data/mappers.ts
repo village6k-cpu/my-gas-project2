@@ -3,9 +3,49 @@ import type { EquipmentItem, HandoverNote, PhotoMeta, ReturnCount, RiskWarning, 
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+export function canonicalOnsiteScheduleId(scheduleId: string, tradeId?: string): string {
+  let id = String(scheduleId || "").trim();
+  if (!id) return id;
+  const tradePrefix = tradeId ? `${tradeId}-` : "";
+  if (tradePrefix && id.startsWith(`${tradePrefix}ONS-`)) id = id.slice(tradePrefix.length);
+  id = id.replace(/^\d{6}-\d{3}-(ONS-\d+(?:__\d+)?)$/, "$1");
+  return id.replace(/__\d+$/, "");
+}
+
+export function dedupeOnsiteItems(items: EquipmentItem[]): EquipmentItem[] {
+  const out: EquipmentItem[] = [];
+  const onsiteIndex = new Map<string, number>();
+  for (const item of items) {
+    if (!item.onsite) {
+      out.push(item);
+      continue;
+    }
+    const normalized = { ...item, scheduleId: canonicalOnsiteScheduleId(item.scheduleId) };
+    const key = normalized.scheduleId;
+    const existingIndex = onsiteIndex.get(key);
+    if (existingIndex == null) {
+      onsiteIndex.set(key, out.length);
+      out.push(normalized);
+      continue;
+    }
+    const existing = out[existingIndex];
+    out[existingIndex] = {
+      ...existing,
+      ...normalized,
+      scheduleId: existing.scheduleId,
+      qty: Math.max(existing.qty || 1, normalized.qty || 1),
+      takenQty: Math.max(existing.takenQty ?? 0, normalized.takenQty ?? 0) || undefined,
+      checkoutState: existing.checkoutState === "taken" || normalized.checkoutState === "taken" ? "taken" : normalized.checkoutState,
+      memoCheckout: normalized.memoCheckout ?? existing.memoCheckout,
+      memoCheckin: normalized.memoCheckin ?? existing.memoCheckin,
+    };
+  }
+  return out;
+}
+
 export function itemFromRow(r: any): EquipmentItem {
   return {
-    scheduleId: r.schedule_id,
+    scheduleId: r.onsite ? canonicalOnsiteScheduleId(r.schedule_id, r.trade_id) : r.schedule_id,
     name: r.name,
     qty: r.qty,
     takenQty: r.taken_qty ?? undefined,
@@ -26,7 +66,8 @@ export function itemFromRow(r: any): EquipmentItem {
 }
 
 export function itemToRow(e: EquipmentItem, tradeId: string, sort: number): any {
-  const dbScheduleId = e.scheduleId.startsWith(`${tradeId}-`) ? e.scheduleId : `${tradeId}-${e.scheduleId}`;
+  const appScheduleId = e.onsite ? canonicalOnsiteScheduleId(e.scheduleId, tradeId) : e.scheduleId;
+  const dbScheduleId = appScheduleId.startsWith(`${tradeId}-`) ? appScheduleId : `${tradeId}-${appScheduleId}`;
   return {
     schedule_id: dbScheduleId,
     trade_id: tradeId,

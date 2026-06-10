@@ -1,7 +1,7 @@
 // Supabase 원격 데이터 레이어 (실데이터 모드)
 import { supabase } from "../supabase/client";
 import type { HandoverNote, Trade } from "../domain/types";
-import { itemFromRow, itemToRow, noteToRow, tradeFromRow, tradeToRow } from "./mappers";
+import { canonicalOnsiteScheduleId, dedupeOnsiteItems, itemFromRow, itemToRow, noteToRow, tradeFromRow, tradeToRow } from "./mappers";
 import { normalizeItems } from "../domain/catalog";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -39,9 +39,12 @@ function uniqueScheduleRows(trade: Trade): any[] {
     const baseId = row.schedule_id;
     const seen = seenScheduleIds.get(baseId) ?? 0;
     seenScheduleIds.set(baseId, seen + 1);
-    if (seen > 0) row.schedule_id = `${baseId}__${seen + 1}`;
+    if (seen > 0) {
+      if (row.onsite) return null;
+      row.schedule_id = `${baseId}__${seen + 1}`;
+    }
     return row;
-  });
+  }).filter((row): row is any => !!row);
 }
 
 export async function fetchAllTrades(): Promise<Trade[]> {
@@ -57,7 +60,7 @@ export async function fetchAllTrades(): Promise<Trade[]> {
   ]);
   const byTrade = new Map<string, any[]>();
   for (const it of items ?? []) (byTrade.get(it.trade_id) ?? byTrade.set(it.trade_id, []).get(it.trade_id)!).push(it);
-  return (trades ?? []).map((r: any) => tradeFromRow(r, normalizeItems((byTrade.get(r.trade_id) ?? []).map(itemFromRow))));
+  return (trades ?? []).map((r: any) => tradeFromRow(r, dedupeOnsiteItems(normalizeItems((byTrade.get(r.trade_id) ?? []).map(itemFromRow)))));
 }
 
 export async function fetchNotes(): Promise<HandoverNote[]> {
@@ -79,7 +82,22 @@ export async function persistTrade(trade: Trade): Promise<void> {
 export async function deleteScheduleItem(tradeId: string, scheduleId: string): Promise<void> {
   const sb = supabase;
   if (!sb) return;
+  const variants = deleteScheduleItemVariants(tradeId, scheduleId);
+  if (variants) {
+    await sb
+      .from("schedule_items")
+      .delete()
+      .eq("trade_id", tradeId)
+      .or(`schedule_id.eq.${variants.canonical},schedule_id.eq.${variants.prefixed},schedule_id.like.${variants.prefixed}__%`);
+    return;
+  }
   await sb.from("schedule_items").delete().eq("trade_id", tradeId).eq("schedule_id", scheduleId);
+}
+
+function deleteScheduleItemVariants(tradeId: string, scheduleId: string): { canonical: string; prefixed: string } | null {
+  const canonical = canonicalOnsiteScheduleId(scheduleId, tradeId);
+  if (!/^ONS-\d+$/.test(canonical)) return null;
+  return { canonical, prefixed: `${tradeId}-${canonical}` };
 }
 
 export async function persistNotes(notes: HandoverNote[]): Promise<void> {
