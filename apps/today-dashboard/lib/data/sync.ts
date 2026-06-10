@@ -5,6 +5,7 @@ import { categoryOf } from "../domain/catalog";
 import { fetchAllTrades, persistTrade } from "./remote";
 import { gasFetch } from "./apiClient";
 import { ymd } from "../domain/status";
+import { mergeTimelineTradeSnapshot, shouldRestoreMissingTimelineEquipments } from "./timelineMerge";
 
 const DAY = 86400000;
 const EMPH = /배터리|메모리|카드|CFexpress|SD|미디어/;
@@ -224,15 +225,13 @@ export async function pollTimelineChanges(current: Trade[]): Promise<Trade[]> {
       changed.push(tl); // 신규 예약(시트에서 막 들어옴)
       continue;
     }
-    if (ex.checkoutAt !== tl.checkoutAt || ex.returnAt !== tl.returnAt || ex.customerName !== tl.customerName) {
-      changed.push({
-        ...ex, // ops 보존
-        checkoutAt: tl.checkoutAt,
-        returnAt: tl.returnAt,
-        customerName: tl.customerName,
-        customerPhone: tl.customerPhone || ex.customerPhone,
-        amount: tl.amount ?? ex.amount,
-      });
+    if (
+      ex.checkoutAt !== tl.checkoutAt ||
+      ex.returnAt !== tl.returnAt ||
+      ex.customerName !== tl.customerName ||
+      shouldRestoreMissingTimelineEquipments(ex, tl)
+    ) {
+      changed.push(mergeTimelineTradeSnapshot(ex, tl));
     }
   }
   return changed;
