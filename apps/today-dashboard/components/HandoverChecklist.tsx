@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
 import { groupBySet, handoverSummary } from "@/lib/domain/status";
 import { categoryOf, coarseGroup, searchCatalog, SET_COMPOSITION, type CatalogItem } from "@/lib/domain/catalog";
@@ -9,6 +9,7 @@ import {
   addOnsiteItems,
   removeItem,
   setItemCheckout,
+  setItemName,
   setItemMemo,
   setItemQty,
   setOnsiteSettlement,
@@ -31,6 +32,10 @@ function singleControllableSetItem(g: SetGroup): EquipmentItem | null {
   if (g.rows.length === 0) return g.header ?? null;
   if (g.rows.length === 1 && sameSetName(g.rows[0].name, g.setName)) return g.rows[0];
   return null;
+}
+
+function SetSingleList({ children }: { children: ReactNode }) {
+  return <ul className="divide-y divide-brand-200/70 overflow-hidden rounded-xl bg-brand-50 shadow-card ring-1 ring-brand-200">{children}</ul>;
 }
 
 export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase }) {
@@ -62,9 +67,9 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
               const singleSetItem = singleControllableSetItem(g);
               return g.setName ? (
                 singleSetItem ? (
-                  <LooseList key={g.key}>
-                    <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge />
-                  </LooseList>
+                  <SetSingleList key={g.key}>
+                    <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge setTone />
+                  </SetSingleList>
                 ) : (
                   <SetBox key={g.key} name={g.setName}>
                     {g.rows.map((e) => (
@@ -94,9 +99,9 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                   const singleSetItem = singleControllableSetItem(g);
                   return g.setName ? (
                     singleSetItem ? (
-                      <LooseList key={g.key}>
-                        <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge />
-                      </LooseList>
+                      <SetSingleList key={g.key}>
+                        <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge setTone />
+                      </SetSingleList>
                     ) : (
                       <SetBox
                         key={g.key}
@@ -145,13 +150,14 @@ function rowTint(e: EquipmentItem, excluded: boolean): string {
   return "";
 }
 
-function CheckoutRow({ t, e, open, onToggle, setBadge = false }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean }) {
+function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean; setTone?: boolean }) {
   const taken = e.checkoutState === "taken";
   const excluded = e.checkoutState === "excluded";
   const partial = e.takenQty != null && e.takenQty !== e.qty;
   return (
-    <li className={`px-3 ${rowTint(e, excluded)}`}>
+    <li className={`px-3 ${setTone ? "bg-brand-50" : rowTint(e, excluded)}`}>
       <div className="flex items-center gap-2.5 py-2.5">
+        {setBadge && <span className="shrink-0 rounded-md bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">세트</span>}
         <button
           onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "taken")}
           className={`tap flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 ${
@@ -162,8 +168,7 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false }: { t: Trade; e: 
         </button>
 
         <button onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-          {setBadge && <span className="shrink-0 rounded bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">세트</span>}
-          <span className={`truncate text-[14px] ${excluded ? "text-ink-faint line-through" : taken ? "text-ink" : "text-ink-soft"}`}>{e.name}</span>
+          <span className={`truncate text-[14px] ${excluded ? "text-ink-faint line-through" : setTone ? "font-extrabold text-brand-700" : taken ? "text-ink" : "text-ink-soft"}`}>{e.name}</span>
           {e.offCatalog && <span className="shrink-0 rounded bg-black/5 px-1 text-[10px] font-semibold text-ink-faint">자유입력</span>}
         </button>
 
@@ -188,10 +193,13 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false }: { t: Trade; e: 
 
       {open && (
         <div className="space-y-2 pb-2.5 pl-9">
+          <label className="block text-[12px] font-semibold text-ink-mute">
+            장비명
+            <EditableText value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />
+          </label>
           <div className="flex items-center gap-2 text-[12px] text-ink-mute">
-            수량
-            <Stepper value={e.takenQty ?? e.qty} max={e.qty} onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)} />
-            <span>/ {e.qty}</span>
+            예약 수량
+            <Stepper value={e.qty} min={1} onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)} />
           </div>
           <MemoInput value={e.memoCheckout ?? ""} onSave={(v) => setItemMemo(t.tradeId, e.scheduleId, "checkout", v)} placeholder="이 품목 반출 메모 (예: 본인 지참)" />
         </div>
@@ -312,13 +320,38 @@ function PhaseNote({ trade, phase }: { trade: Trade; phase: Phase }) {
   );
 }
 
-function Stepper({ value, max, onChange }: { value: number; max?: number; onChange: (v: number) => void }) {
+function Stepper({ value, min = 0, max, onChange }: { value: number; min?: number; max?: number; onChange: (v: number) => void }) {
   return (
     <div className="inline-flex items-center overflow-hidden rounded-lg ring-1 ring-black/15">
-      <button onClick={() => onChange(Math.max(0, value - 1))} className="tap h-7 w-7 bg-white text-[15px] font-bold text-ink-soft">−</button>
+      <button onClick={() => onChange(Math.max(min, value - 1))} className="tap h-7 w-7 bg-white text-[15px] font-bold text-ink-soft">−</button>
       <span className="w-7 text-center text-[13px] font-bold tabular-nums">{value}</span>
       <button onClick={() => onChange(max != null ? Math.min(max, value + 1) : value + 1)} className="tap h-7 w-7 bg-white text-[15px] font-bold text-ink-soft">+</button>
     </div>
+  );
+}
+
+function EditableText({ value, onSave }: { value: string; onSave: (v: string) => void }) {
+  const [v, setV] = useState(value);
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    if (!dirty) setV(value);
+  }, [dirty, value]);
+  const save = () => {
+    const clean = v.trim();
+    if (dirty && clean && clean !== value) onSave(clean);
+    setDirty(false);
+  };
+  return (
+    <input
+      value={v}
+      onChange={(e) => { setV(e.target.value); setDirty(true); }}
+      onBlur={save}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") { setV(value); setDirty(false); e.currentTarget.blur(); }
+      }}
+      className="mt-1 w-full rounded-lg border border-black/10 bg-white px-2.5 py-1.5 text-[12.5px] font-medium text-ink outline-none focus:border-brand-500"
+    />
   );
 }
 

@@ -27,7 +27,17 @@ const TTL = 30_000;
 // 읽기 액션 화이트리스트 (캐시됨)
 const READ_ACTIONS = new Set(["timeline", "dashboard", "operations", "search", "read", "info", "sheets", "list", "scan", "dashboardSearch", "dashboardContractExtras", "dashboardEquipNames"]);
 // 쓰기 액션 화이트리스트 (캐시 안 함). 시트/상태 변경 → 신중.
-const WRITE_ACTIONS = new Set(["toggleSetup", "toggleReturn", "toggleItem", "updatePayment", "updateTradeProof", "updateBillingCompany", "sendEstimate"]);
+const WRITE_ACTIONS = new Set([
+  "toggleSetup",
+  "toggleReturn",
+  "toggleItem",
+  "updatePayment",
+  "updateTradeProof",
+  "updateBillingCompany",
+  "sendEstimate",
+  "updateEquipQty",
+  "updateEquipName",
+]);
 
 function call(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
