@@ -177,11 +177,20 @@ function sameCatalogSetKey(a?: string | null, b?: string | null): boolean {
  */
 export function normalizeItems(items: EquipmentItem[]): EquipmentItem[] {
   const setNameByKey = new Map<string, string>();
+  const detailedHeaderKeys = new Set<string>();
   items.forEach((e) => {
     if (e.setName) setNameByKey.set(catalogSetKeyOf(e.setName), e.setName);
+    if (e.isSetHeader) {
+      const key = catalogSetKeyOf(e.name);
+      if (key) detailedHeaderKeys.add(key);
+    }
   });
 
-  return items.map((e) => {
+  return items.filter((e) => {
+    const key = catalogSetKeyOf(e.name);
+    // timeline 요약 row와 dashboard 상세 row가 공존하면 상세 row가 authoritative하다.
+    return !key || e.isSetHeader || e.isComponent || !!e.setName || !detailedHeaderKeys.has(key);
+  }).map((e) => {
     const category = e.category ?? categoryOf(e.name) ?? undefined;
     const inferredSetName = e.setName ?? setNameByKey.get(catalogSetKeyOf(e.name));
     const isSetHeader = !!inferredSetName && (!!e.isSetHeader || (!e.setName && sameCatalogSetKey(e.name, inferredSetName)));
