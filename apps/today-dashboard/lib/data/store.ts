@@ -416,10 +416,25 @@ export function setReturnCount(tradeId: string, scheduleId: string, patch: Parti
 }
 
 // ── 결제·정산 (개고생2.0 회계로 write-back 대상) ────────────────
-export function setPaymentMethod(tradeId: string, method: string) {
+export async function setPaymentMethod(tradeId: string, method: string) {
   mutateTrade(tradeId, (t) => ({ ...t, paymentMethod: method }));
   flashSave(tradeId);
-  gasWrite("updatePayment", { tid: tradeId, method });
+  try {
+    const res = await gasMutation("updatePayment", { tid: tradeId, method });
+    const result = res?.result || res || {};
+    const sideEffects = result.sideEffects;
+    if (sideEffects?.applied) {
+      mutateTrade(tradeId, (t) => ({
+        ...t,
+        proofType: sideEffects.columns.K || t.proofType,
+        issueStatus: sideEffects.columns.L || t.issueStatus,
+        depositStatus: sideEffects.columns.M || t.depositStatus,
+        paymentWarning: sideEffects.columns.M ? /미|대기|예정/.test(sideEffects.columns.M) : t.paymentWarning,
+      }));
+    }
+  } catch (err) {
+    console.error("[write-back] 결제수단 저장 실패:", err);
+  }
 }
 export function setDepositStatus(tradeId: string, status: string) {
   mutateTrade(tradeId, (t) => ({ ...t, depositStatus: status, paymentWarning: /미|대기|예정/.test(status) }));

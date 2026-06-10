@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Trade } from "@/lib/domain/types";
 import {
   regenerateContract,
@@ -11,23 +11,92 @@ import {
   setPaymentMethod,
   setProofType,
 } from "@/lib/data/store";
+import { gasRead } from "@/lib/data/writeback";
 import { won } from "@/lib/domain/status";
 import { ChevronRight, Doc, Refresh, Send } from "./icons";
 
-const PAY = ["계좌이체", "현장카드", "카드결제", "현금"];
-const DEPOSIT = ["입금완료", "결제대기", "미입금"];
-const PROOF = ["세금계산서", "현금영수증", "안함"];
-const BILLING_KNOWN = ["노을미디어", "감성필름", "원데이웍스", "빌리지"];
+const FALLBACK_PAYMENT_OPTIONS = ["미정", "계좌", "카드", "현금", "기타"];
+const FALLBACK_DEPOSIT_STATUS_OPTIONS = ["미입금", "입금완료", "부분입금", "환불"];
+const FALLBACK_PROOF_TYPE_OPTIONS = ["미발행", "세금계산서", "현금영수증(전화번호)", "현금영수증(사업자번호)"];
+
+type PaymentControlOptions = {
+  paymentOptions: string[];
+  depositStatusOptions: string[];
+  proofTypeOptions: string[];
+  billingCompanyOptions: string[];
+};
+
+const FALLBACK_CONTROL_OPTIONS: PaymentControlOptions = {
+  paymentOptions: FALLBACK_PAYMENT_OPTIONS,
+  depositStatusOptions: FALLBACK_DEPOSIT_STATUS_OPTIONS,
+  proofTypeOptions: FALLBACK_PROOF_TYPE_OPTIONS,
+  billingCompanyOptions: [],
+};
+
+let cachedPaymentControlOptions: PaymentControlOptions | null = null;
+let paymentControlOptionsPromise: Promise<PaymentControlOptions> | null = null;
 
 const isBad = (s?: string) => !!s && /미|대기|예정|실패/.test(s);
+
+function readOptions(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return fallback;
+  const options = value.map((v) => String(v || "").trim()).filter(Boolean);
+  return options.length ? Array.from(new Set(options)) : fallback;
+}
+
+function withCurrentOption(options: string[], value?: string) {
+  const current = String(value || "").trim();
+  if (!current || options.includes(current)) return options;
+  return [current, ...options];
+}
+
+async function loadPaymentControlOptions(): Promise<PaymentControlOptions> {
+  if (cachedPaymentControlOptions) return cachedPaymentControlOptions;
+  if (!paymentControlOptionsPromise) {
+    paymentControlOptionsPromise = gasRead("dashboard")
+      .then((data) => {
+        const loaded = {
+          paymentOptions: readOptions(data.paymentOptions, FALLBACK_PAYMENT_OPTIONS),
+          proofTypeOptions: readOptions(data.proofTypeOptions, FALLBACK_PROOF_TYPE_OPTIONS),
+          depositStatusOptions: readOptions(data.depositStatusOptions, FALLBACK_DEPOSIT_STATUS_OPTIONS),
+          billingCompanyOptions: readOptions(data.billingCompanyOptions, []),
+        };
+        cachedPaymentControlOptions = loaded;
+        return loaded;
+      })
+      .catch(() => FALLBACK_CONTROL_OPTIONS)
+      .finally(() => {
+        paymentControlOptionsPromise = null;
+      });
+  }
+  return paymentControlOptionsPromise;
+}
+
+function usePaymentControlOptions() {
+  const [options, setOptions] = useState<PaymentControlOptions>(() => cachedPaymentControlOptions || FALLBACK_CONTROL_OPTIONS);
+
+  useEffect(() => {
+    let alive = true;
+    loadPaymentControlOptions().then((loaded) => {
+      if (alive) setOptions(loaded);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  return options;
+}
 
 export function PaymentControls({ trade }: { trade: Trade }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [issuing, setIssuing] = useState(false);
+  const options = usePaymentControlOptions();
   const isTax = trade.proofType === "세금계산서";
   const isRegenerating = trade.contractRegenPending || regenerating;
+  const billingDatalistId = `billing-known-${trade.tradeId}`;
 
   // 한 줄 요약 토큰
   const tokens: { t: string; bad?: boolean }[] = [];
@@ -59,9 +128,9 @@ export function PaymentControls({ trade }: { trade: Trade }) {
 
       {open && (
         <div className="mt-2.5 space-y-2">
-          <Select label="결제수단" options={PAY} value={trade.paymentMethod} onChange={(v) => setPaymentMethod(trade.tradeId, v)} />
-          <Select label="입금상태" options={DEPOSIT} value={trade.depositStatus} onChange={(v) => setDepositStatus(trade.tradeId, v)} danger={isBad(trade.depositStatus)} />
-          <Select label="증빙" options={PROOF} value={trade.proofType} onChange={(v) => setProofType(trade.tradeId, v)} />
+          <Select label="결제수단" options={withCurrentOption(options.paymentOptions, trade.paymentMethod)} value={trade.paymentMethod} onChange={(v) => setPaymentMethod(trade.tradeId, v)} />
+          <Select label="입금상태" options={withCurrentOption(options.depositStatusOptions, trade.depositStatus)} value={trade.depositStatus} onChange={(v) => setDepositStatus(trade.tradeId, v)} danger={isBad(trade.depositStatus)} />
+          <Select label="증빙" options={withCurrentOption(options.proofTypeOptions, trade.proofType)} value={trade.proofType} onChange={(v) => setProofType(trade.tradeId, v)} />
 
           {/* 세금계산서일 때만 발행처·발행상태 */}
           {isTax && (
@@ -69,14 +138,14 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               <label className="flex items-center gap-2">
                 <span className="w-12 shrink-0 text-[12px] font-semibold text-ink-mute">발행처</span>
                 <input
-                  list="billing-known"
+                  list={billingDatalistId}
                   defaultValue={trade.billingCompany ?? ""}
                   onBlur={(e) => setBillingCompany(trade.tradeId, e.target.value)}
                   placeholder="상호 입력"
                   className="flex-1 rounded-lg border border-line bg-white px-3 py-2 text-[13.5px] font-semibold text-ink outline-none focus:border-brand-500"
                 />
-                <datalist id="billing-known">
-                  {BILLING_KNOWN.map((b) => (
+                <datalist id={billingDatalistId}>
+                  {withCurrentOption(options.billingCompanyOptions, trade.billingCompany).map((b) => (
                     <option key={b} value={b} />
                   ))}
                 </datalist>
