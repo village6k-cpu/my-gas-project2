@@ -16,7 +16,7 @@ import type {
 } from "../domain/types";
 import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
-import { fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
+import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
 import { gasWrite } from "./writeback";
 import { pollTimelineChanges, repairDashboardDetailsForEmptyEquipments } from "./sync";
 
@@ -273,6 +273,7 @@ export function setOnsiteSettlement(tradeId: string, scheduleId: string, settlem
 export function removeItem(tradeId: string, scheduleId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId) }));
   flashSave(tradeId);
+  deleteScheduleItem(tradeId, scheduleId).catch(() => {});
 }
 
 // ── 반납: 품목(scheduleId) 단위 카운트 + 시트 write-back ────────────

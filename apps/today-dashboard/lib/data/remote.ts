@@ -40,18 +40,19 @@ export async function fetchNotes(): Promise<HandoverNote[]> {
   return (data ?? []).map((r: any) => ({ id: r.id, body: r.body ?? "" }));
 }
 
-/** 거래 1건 + 그 품목들 저장 (DB에 없는 품목은 삭제) */
+/** 거래 1건 + 현재 가진 품목들을 저장. 부분 스냅샷은 authoritative하지 않으므로 누락 품목을 삭제하지 않는다. */
 export async function persistTrade(trade: Trade): Promise<void> {
   const sb = supabase;
   if (!sb) return;
   await sb.from("trades").upsert(tradeToRow(trade), { onConflict: "trade_id" });
   const rows = uniqueScheduleRows(trade);
   if (rows.length) await sb.from("schedule_items").upsert(rows, { onConflict: "schedule_id" });
-  const keepIds = rows.map((r) => r.schedule_id);
-  if (!keepIds.length) return;
-  let del = sb.from("schedule_items").delete().eq("trade_id", trade.tradeId);
-  del = del.not("schedule_id", "in", `(${keepIds.map((s) => `"${s}"`).join(",")})`);
-  await del;
+}
+
+export async function deleteScheduleItem(tradeId: string, scheduleId: string): Promise<void> {
+  const sb = supabase;
+  if (!sb) return;
+  await sb.from("schedule_items").delete().eq("trade_id", tradeId).eq("schedule_id", scheduleId);
 }
 
 export async function persistNotes(notes: HandoverNote[]): Promise<void> {
