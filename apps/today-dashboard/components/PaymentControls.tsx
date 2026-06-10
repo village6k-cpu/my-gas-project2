@@ -4,10 +4,10 @@ import { useState } from "react";
 import type { Trade } from "@/lib/domain/types";
 import {
   regenerateContract,
+  requestProofIssue,
   sendEstimate,
   setBillingCompany,
   setDepositStatus,
-  setIssueStatus,
   setPaymentMethod,
   setProofType,
 } from "@/lib/data/store";
@@ -17,15 +17,15 @@ import { ChevronRight, Doc, Refresh, Send } from "./icons";
 const PAY = ["계좌이체", "현장카드", "카드결제", "현금"];
 const DEPOSIT = ["입금완료", "결제대기", "미입금"];
 const PROOF = ["세금계산서", "현금영수증", "안함"];
-const ISSUE = ["발행대기", "발행완료"];
 const BILLING_KNOWN = ["노을미디어", "감성필름", "원데이웍스", "빌리지"];
 
-const isBad = (s?: string) => !!s && /미|대기|예정/.test(s);
+const isBad = (s?: string) => !!s && /미|대기|예정|실패/.test(s);
 
 export function PaymentControls({ trade }: { trade: Trade }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
+  const [issuing, setIssuing] = useState(false);
   const isTax = trade.proofType === "세금계산서";
   const isRegenerating = trade.contractRegenPending || regenerating;
 
@@ -81,7 +81,30 @@ export function PaymentControls({ trade }: { trade: Trade }) {
                   ))}
                 </datalist>
               </label>
-              <Select label="발행상태" options={ISSUE} value={trade.issueStatus} onChange={(v) => setIssueStatus(trade.tradeId, v)} danger={isBad(trade.issueStatus)} />
+              <div className="flex items-center gap-2">
+                <span className="w-12 shrink-0 text-[12px] font-semibold text-ink-mute">발행상태</span>
+                <span className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-[13.5px] font-semibold ${isBad(trade.issueStatus) ? "border-attention-ring bg-attention-bg text-attention-fg" : "border-black/10 bg-black/[0.02] text-ink-soft"}`}>
+                  {trade.issueStatus || "미발행"}
+                </span>
+                <button
+                  type="button"
+                  disabled={issuing}
+                  onClick={() => {
+                    if (issuing) return;
+                    if (!window.confirm("이 거래건의 계산서/현금영수증을 실제 발행할까요?")) return;
+                    setIssuing(true);
+                    requestProofIssue(trade.tradeId)
+                      .catch((err) => window.alert("계산서 발행 실패: " + (err instanceof Error ? err.message : String(err))))
+                      .finally(() => setIssuing(false));
+                  }}
+                  className="tap shrink-0 rounded-lg bg-brand-600 px-3 py-2 text-[13px] font-bold text-white shadow-sm disabled:bg-black/[0.08] disabled:text-ink-faint disabled:shadow-none"
+                >
+                  {issuing ? "요청 중..." : "계산서 발행요청"}
+                </button>
+              </div>
+              {trade.issueNote && /실패|오류|증빙|발행/.test(trade.issueNote) && (
+                <p className="pl-14 text-[12px] font-semibold text-ink-mute">{trade.issueNote}</p>
+              )}
             </>
           )}
 
