@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
 import { groupBySet, handoverSummary } from "@/lib/domain/status";
 import { categoryOf, coarseGroup } from "@/lib/domain/catalog";
@@ -22,6 +23,7 @@ import { ReturnChecklist } from "./ReturnChecklist";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
 type SetGroup = ReturnType<typeof groupBySet>[number];
+type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
 
 function sameSetName(a?: string | null, b?: string | null): boolean {
   const norm = (value?: string | null) => String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
@@ -333,8 +335,106 @@ function Stepper({ value, min = 0, max, onChange }: { value: number; min?: numbe
   );
 }
 
+function FloatingCatalogMenu({
+  open,
+  anchorRef,
+  items,
+  exact,
+  query,
+  onSelect,
+  onFreeInput,
+  freeLabel,
+}: {
+  open: boolean;
+  anchorRef: RefObject<HTMLElement | null>;
+  items: EquipmentCatalogItem[];
+  exact: boolean;
+  query: string;
+  onSelect: (item: EquipmentCatalogItem) => void;
+  onFreeInput: () => void;
+  freeLabel: string;
+}) {
+  const [rect, setRect] = useState<FloatingRect | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open || typeof window === "undefined") {
+      setRect(null);
+      return undefined;
+    }
+
+    const update = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const box = anchor.getBoundingClientRect();
+      const gap = 4;
+      const minHeight = 128;
+      const preferredHeight = 176;
+      const below = window.innerHeight - box.bottom - 8;
+      const above = box.top - 8;
+      const openUp = below < minHeight && above > below;
+      const available = Math.max(minHeight, Math.min(preferredHeight, openUp ? above : below));
+      setRect({
+        left: Math.max(8, box.left),
+        top: openUp ? Math.max(8, box.top - available - gap) : box.bottom + gap,
+        width: Math.max(180, Math.min(box.width, window.innerWidth - Math.max(8, box.left) - 8)),
+        maxHeight: available,
+      });
+    };
+
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [anchorRef, items.length, open, query]);
+
+  if (!open || !rect || typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      className="rounded-lg bg-white shadow-pop ring-1 ring-black/10"
+      style={{
+        position: "fixed",
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        maxHeight: rect.maxHeight,
+        overflowY: "auto",
+        zIndex: 9999,
+      }}
+    >
+      {items.map((m) => (
+        <button
+          key={m.name}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => onSelect(m)}
+          className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]"
+        >
+          <span className="flex-1 truncate text-[13px] text-ink">{m.name}</span>
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-amber-100 text-amber-700" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
+        </button>
+      ))}
+      {!exact && (
+        <button
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={onFreeInput}
+          className="tap flex w-full items-center gap-2 border-t border-black/5 bg-black/[0.02] px-2.5 py-1.5 text-left"
+        >
+          <Plus className="h-3.5 w-3.5 text-ink-mute" />
+          <span className="text-[13px] text-ink-soft">‘{query.trim()}’ {freeLabel}</span>
+          <span className="ml-auto rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
+        </button>
+      )}
+    </div>,
+    document.body,
+  );
+}
+
 function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: string) => void }) {
   const catalog = useEquipmentCatalog();
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const [q, setQ] = useState(value);
   const [dirty, setDirty] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -372,6 +472,7 @@ function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: s
   return (
     <div className="relative mt-1">
       <input
+        ref={inputRef}
         value={q}
         onFocus={() => setFocused(true)}
         onChange={(e) => { setSelected(null); setQ(e.target.value); setDirty(true); }}
@@ -409,32 +510,7 @@ function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: s
           <button onClick={() => { setSelected(null); setDirty(true); }} className="ml-auto text-ink-faint">변경</button>
         </div>
       )}
-      {showList && (
-        <div className="absolute left-0 right-0 z-20 mt-1 max-h-44 overflow-y-auto rounded-lg bg-white shadow-card ring-1 ring-black/10">
-          {matches.map((m) => (
-            <button
-              key={m.name}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => select(m)}
-              className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]"
-            >
-              <span className="flex-1 truncate text-[13px] text-ink">{m.name}</span>
-              <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-amber-100 text-amber-700" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
-            </button>
-          ))}
-          {!exact && (
-            <button
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => saveValue(q)}
-              className="tap flex w-full items-center gap-2 border-t border-black/5 bg-black/[0.02] px-2.5 py-1.5 text-left"
-            >
-              <Plus className="h-3.5 w-3.5 text-ink-mute" />
-              <span className="text-[13px] text-ink-soft">‘{q.trim()}’ 자유입력 저장</span>
-              <span className="ml-auto rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
-            </button>
-          )}
-        </div>
-      )}
+      <FloatingCatalogMenu open={showList} anchorRef={inputRef} items={matches} exact={exact} query={q} onSelect={select} onFreeInput={() => saveValue(q)} freeLabel="자유입력 저장" />
     </div>
   );
 }
