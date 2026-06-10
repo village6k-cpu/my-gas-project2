@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
 import { groupBySet, handoverSummary } from "@/lib/domain/status";
-import { categoryOf, coarseGroup, searchCatalog, SET_COMPOSITION, type CatalogItem } from "@/lib/domain/catalog";
+import { categoryOf, coarseGroup } from "@/lib/domain/catalog";
+import { searchEquipmentCatalog, useEquipmentCatalog, type EquipmentCatalogItem } from "@/lib/data/equipmentCatalog";
 import { SetBox, LooseList } from "./SetBox";
 import {
   addOnsiteItems,
@@ -209,15 +210,17 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
 }
 
 function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => void }) {
+  const catalog = useEquipmentCatalog();
   const [q, setQ] = useState("");
-  const [picked, setPicked] = useState<CatalogItem | null>(null);
+  const [picked, setPicked] = useState<EquipmentCatalogItem | null>(null);
   const [qty, setQty] = useState(1);
   const [settlement, setSettlement] = useState<Settlement>("무상");
 
-  const matches = searchCatalog(q);
+  const matches = searchEquipmentCatalog(catalog.items, q);
   const exact = matches.some((m) => m.name === q.trim());
   const showList = q.trim().length > 0 && !picked;
-  const isSet = picked?.category === "세트" && !!SET_COMPOSITION[picked.name];
+  const isSet = !!picked?.components?.length;
+  const catalogByName = new Map(catalog.items.map((item) => [item.name, item]));
 
   const submit = () => {
     const name = picked ? picked.name : q.trim();
@@ -225,11 +228,11 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
     let entries: OnsiteEntry[];
     if (isSet && picked) {
       entries = [
-        { name: picked.name, qty: 1, category: "세트", isSetHeader: true },
-        ...SET_COMPOSITION[picked.name].map((c) => ({
+        { name: picked.name, qty: 1, category: "세트", isSetHeader: true, setName: picked.name },
+        ...(picked.components ?? []).map((c) => ({
           name: c.name,
           qty: c.qty,
-          category: categoryOf(c.name),
+          category: catalogByName.get(c.name)?.category ?? categoryOf(c.name),
           isComponent: true,
           setName: picked.name,
           emphasize: MEDIA_RE.test(c.name),
@@ -254,7 +257,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
         />
         {picked && (
           <div className="mt-1 flex items-center gap-1.5 text-[11.5px]">
-            <span className="rounded bg-brand-100 px-1.5 py-0.5 font-bold text-brand-700">{isSet ? "세트" : coarseGroup(picked.category)}</span>
+            <span className="rounded bg-brand-100 px-1.5 py-0.5 font-bold text-brand-700">{picked.category === "세트" ? "세트" : coarseGroup(picked.category)}</span>
             <span className="text-ink-mute">{isSet ? "세트 — 구성품 자동 전개 · 재고 연동" : "재고 연동됨"}</span>
             <button onClick={() => { setPicked(null); setQ(""); }} className="ml-auto text-ink-faint">변경</button>
           </div>
@@ -331,10 +334,11 @@ function Stepper({ value, min = 0, max, onChange }: { value: number; min?: numbe
 }
 
 function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: string) => void }) {
+  const catalog = useEquipmentCatalog();
   const [q, setQ] = useState(value);
   const [dirty, setDirty] = useState(false);
   const [focused, setFocused] = useState(false);
-  const [selected, setSelected] = useState<CatalogItem | null>(null);
+  const [selected, setSelected] = useState<EquipmentCatalogItem | null>(null);
   const skipNextBlurSave = useRef(false);
 
   useEffect(() => {
@@ -344,7 +348,7 @@ function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: s
     }
   }, [dirty, value]);
 
-  const matches = searchCatalog(q);
+  const matches = searchEquipmentCatalog(catalog.items, q);
   const exact = matches.some((m) => m.name === q.trim());
   const showList = focused && q.trim().length > 0 && !selected;
 
@@ -356,7 +360,7 @@ function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: s
     setDirty(false);
   };
 
-  const select = (item: CatalogItem) => {
+  const select = (item: EquipmentCatalogItem) => {
     setSelected(item);
     saveValue(item.name);
   };

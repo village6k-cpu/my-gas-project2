@@ -4879,6 +4879,17 @@ function getDashboardEquipNameList_(ss) {
   });
 }
 
+function getDashboardEquipmentCatalog_(ss) {
+  var names = getDashboardEquipNameList_(ss);
+  var setLookup = buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
+  return {
+    names: names,
+    components: setLookup.components || {},
+    prices: setLookup.prices || {},
+    items: setLookup.items || {}
+  };
+}
+
 function buildDashboardSetLookup_(setSheet) {
   return getDashboardCachedJson_("dashboardSetLookup_v2", 300, function() {
     var lookup = { components: {}, prices: {}, items: {} };
