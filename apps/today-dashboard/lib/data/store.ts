@@ -19,7 +19,7 @@ import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
 import { gasWrite } from "./writeback";
-import { pollTimelineChanges, repairDashboardDetailsForIncompleteTrades } from "./sync";
+import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults } from "./sync";
 
 interface State {
   date: string;
@@ -96,12 +96,36 @@ async function repairEmptyEquipmentTrades(base = state.trades, mutationSeqAtStar
   return true;
 }
 
+async function applyDashboardRepairs(changed: Trade[], mutationSeqAtStart: number): Promise<boolean> {
+  if (!changed.length) return false;
+  if (!canApplyRemoteSnapshot(mutationSeqAtStart)) return false;
+  set({ trades: mergeTradeChanges(state.trades, changed) });
+  for (const t of changed) persistTrade(t).catch(() => {});
+  return true;
+}
+
+async function repairDayDetails(date: string, mutationSeqAtStart = localMutationSeq): Promise<boolean> {
+  if (!isSupabase || hasPendingPersist()) return false;
+  const changed = await repairDashboardDateDetails(state.trades, date);
+  return applyDashboardRepairs(changed, mutationSeqAtStart);
+}
+
+export async function repairSearchResults(query: string): Promise<void> {
+  if (!isSupabase || hasPendingPersist()) return;
+  const q = query.trim();
+  if (q.length < 2) return;
+  const mutationSeqAtSearch = localMutationSeq;
+  const changed = await repairDashboardSearchResults(state.trades, q);
+  await applyDashboardRepairs(changed, mutationSeqAtSearch);
+}
+
 async function loadRemote() {
   try {
     const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
     remoteLoaded = true;
     set({ trades, notes });
     await repairEmptyEquipmentTrades(trades);
+    if (state.date) await repairDayDetails(state.date);
   } catch (e) {
     console.error("[supabase] load 실패", e);
   }
@@ -185,6 +209,7 @@ export function loadDay(date: string) {
   if (isSupabase) {
     if (state.date !== date) set({ date });
     if (!remoteLoaded) loadRemote();
+    else repairDayDetails(date);
     return;
   }
   if (state.date === date && state.trades.length) return;

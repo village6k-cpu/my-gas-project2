@@ -203,6 +203,33 @@ function needsDashboardDetailRepair(t: Trade): boolean {
   return t.equipments.length === 0 || !t.contractUrl;
 }
 
+function currentEquipmentCount(t: Trade): number {
+  return t.equipments.length;
+}
+
+function incomingEquipmentCount(it: any): number {
+  return Array.isArray(it?.equipments) ? it.equipments.length : 0;
+}
+
+function shouldUseDashboardDetail(base: Trade, it: any): boolean {
+  return incomingEquipmentCount(it) > currentEquipmentCount(base) || (!base.contractUrl && !!it.contractUrl);
+}
+
+function repairFromDashboardItems(current: Trade[], items: any[]): Trade[] {
+  const existing = new Map(current.map((t) => [t.tradeId, t]));
+  const changed = new Map<string, Trade>();
+  for (const it of items) {
+    const tid = it.tradeId;
+    if (!tid || changed.has(tid)) continue;
+    const base = existing.get(tid);
+    if (!base) continue;
+    if (shouldUseDashboardDetail(base, it)) {
+      changed.set(tid, mergeDashboard(base, it));
+    }
+  }
+  return [...changed.values()];
+}
+
 /** Supabase 캐시에 품목/계약서 등 dashboard 상세가 빠진 거래를 즉시 복구 */
 export async function repairDashboardDetailsForIncompleteTrades(current: Trade[]): Promise<Trade[]> {
   const repairIds = new Set(current.filter(needsDashboardDetailRepair).map((t) => t.tradeId));
@@ -235,6 +262,35 @@ export async function repairDashboardDetailsForIncompleteTrades(current: Trade[]
     }
   }
   return [...changed.values()];
+}
+
+/** 날짜 화면 진입 시 Supabase 캐시가 원장보다 짧은 거래를 dashboard 상세로 즉시 복구 */
+export async function repairDashboardDateDetails(current: Trade[], date: string): Promise<Trade[]> {
+  date = date.trim();
+  if (!date) return [];
+  try {
+    const res = await gasFetch(`action=dashboard&date=${date}`);
+    const data = await res.json();
+    if (data.error) return [];
+    return repairFromDashboardItems(current, [...(data.checkout ?? []), ...(data.checkin ?? [])]);
+  } catch {
+    return [];
+  }
+}
+
+/** 검색 중 Supabase 캐시가 원장보다 짧은 거래를 dashboardSearch 상세로 즉시 복구 */
+export async function repairDashboardSearchResults(current: Trade[], query: string): Promise<Trade[]> {
+  query = query.trim();
+  if (query.length < 2) return [];
+
+  try {
+    const res = await gasFetch(`action=dashboardSearch&q=${encodeURIComponent(query)}`);
+    const data = await res.json();
+    if (data.error) return [];
+    return repairFromDashboardItems(current, [...(data.checkout ?? []), ...(data.checkin ?? [])]);
+  } catch {
+    return [];
+  }
 }
 
 /** 전체 동기화: timeline(날짜·예약) → dashboard(상세) */

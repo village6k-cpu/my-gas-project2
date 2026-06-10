@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { TabKey, Trade } from "@/lib/domain/types";
-import { loadDay, useDashboard } from "@/lib/data/store";
+import { loadDay, repairSearchResults, useDashboard } from "@/lib/data/store";
 import {
   addDays,
   cardDone,
@@ -57,6 +57,12 @@ export function TodayView() {
 
   const searching = q.trim().length > 0;
   const searchEvents = useMemo<TradeSearchEvent[]>(() => (searching ? searchTradeEvents(data.trades, q) : []), [q, data.trades, searching]);
+
+  useEffect(() => {
+    if (!searching) return;
+    const timer = setTimeout(() => repairSearchResults(q), 350);
+    return () => clearTimeout(timer);
+  }, [q, searching]);
 
   const list = useMemo(() => tradesForTab(data.trades, date, tab), [data.trades, date, tab]);
 
