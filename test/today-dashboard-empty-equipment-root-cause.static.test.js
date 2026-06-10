@@ -36,12 +36,12 @@ assert(
 );
 
 assert(
-  remoteSource.includes('if (!keepIds.length) return'),
-  'persistTrade must not delete all schedule_items when a stale client state has an empty equipment list'
+  remoteSource.includes('export async function deleteScheduleItem'),
+  'schedule item deletion must be explicit instead of being hidden inside persistTrade'
 );
 assert(
-  !/let del = sb\\.from\\(\"schedule_items\"\\)\\.delete\\(\\)\\.eq\\(\"trade_id\", trade\\.tradeId\\);\\s*if \\(keepIds\\.length\\)[\\s\\S]*await del;/.test(remoteSource),
-  'persistTrade must guard the prune/delete path instead of awaiting an unconditional delete builder'
+  !/persistTrade[\\s\\S]*delete\\(\\)\\.eq\\(\"trade_id\", trade\\.tradeId\\)/.test(remoteSource),
+  'persistTrade must not prune schedule_items from stale or partial client snapshots'
 );
 assert(
   remoteSource.includes('uniqueScheduleRows'),
