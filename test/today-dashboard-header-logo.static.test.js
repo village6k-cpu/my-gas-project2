@@ -5,10 +5,12 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const logoPath = path.join(root, 'apps/today-dashboard/components/VillageLogo.tsx');
 const headerPath = path.join(root, 'apps/today-dashboard/components/ViewHeader.tsx');
+const shellPath = path.join(root, 'apps/today-dashboard/components/AppShell.tsx');
 const publicLogoPath = path.join(root, 'apps/today-dashboard/public/village-wordmark.png');
 
 const logo = fs.readFileSync(logoPath, 'utf8');
 const header = fs.readFileSync(headerPath, 'utf8');
+const shell = fs.readFileSync(shellPath, 'utf8');
 
 assert(
   fs.existsSync(publicLogoPath),
@@ -28,6 +30,12 @@ assert(
 assert(
   logo.includes('import Link from "next/link";') && logo.includes('href="/"') && logo.includes('aria-label="홈으로 이동"'),
   'VillageLogo must be a link back to the today-dashboard home'
+);
+
+assert.match(
+  shell,
+  /useEffect\(\(\) => \{\s*setView\(initial\);\s*\}, \[initial\]\);/,
+  'AppShell must sync route-driven initial view changes so logo home navigation works on iPhone/PWA client transitions'
 );
 
 assert(

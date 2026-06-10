@@ -56,6 +56,11 @@ function useIsLg() {
 export function AppShell({ initial = "today" }: { initial?: NavKey }) {
   const isLg = useIsLg();
   const [view, setView] = useState<NavKey>(initial);
+
+  useEffect(() => {
+    setView(initial);
+  }, [initial]);
+
   const handleNav = useCallback((next: NavKey) => {
     setView((current) => (current === next ? current : next));
   }, []);
