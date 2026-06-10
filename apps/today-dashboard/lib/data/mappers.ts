@@ -26,8 +26,9 @@ export function itemFromRow(r: any): EquipmentItem {
 }
 
 export function itemToRow(e: EquipmentItem, tradeId: string, sort: number): any {
+  const dbScheduleId = e.scheduleId.startsWith(`${tradeId}-`) ? e.scheduleId : `${tradeId}-${e.scheduleId}`;
   return {
-    schedule_id: e.scheduleId,
+    schedule_id: dbScheduleId,
     trade_id: tradeId,
     sort,
     name: e.name,

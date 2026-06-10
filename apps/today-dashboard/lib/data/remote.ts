@@ -6,6 +6,18 @@ import { normalizeItems } from "../domain/catalog";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+function uniqueScheduleRows(trade: Trade): any[] {
+  const seenScheduleIds = new Map<string, number>();
+  return trade.equipments.map((e, i) => {
+    const row = itemToRow(e, trade.tradeId, i);
+    const baseId = row.schedule_id;
+    const seen = seenScheduleIds.get(baseId) ?? 0;
+    seenScheduleIds.set(baseId, seen + 1);
+    if (seen > 0) row.schedule_id = `${baseId}__${seen + 1}`;
+    return row;
+  });
+}
+
 export async function fetchAllTrades(): Promise<Trade[]> {
   const sb = supabase;
   if (!sb) return [];
@@ -33,11 +45,12 @@ export async function persistTrade(trade: Trade): Promise<void> {
   const sb = supabase;
   if (!sb) return;
   await sb.from("trades").upsert(tradeToRow(trade), { onConflict: "trade_id" });
-  const rows = trade.equipments.map((e, i) => itemToRow(e, trade.tradeId, i));
+  const rows = uniqueScheduleRows(trade);
   if (rows.length) await sb.from("schedule_items").upsert(rows, { onConflict: "schedule_id" });
-  const keepIds = trade.equipments.map((e) => e.scheduleId);
+  const keepIds = rows.map((r) => r.schedule_id);
+  if (!keepIds.length) return;
   let del = sb.from("schedule_items").delete().eq("trade_id", trade.tradeId);
-  if (keepIds.length) del = del.not("schedule_id", "in", `(${keepIds.map((s) => `"${s}"`).join(",")})`);
+  del = del.not("schedule_id", "in", `(${keepIds.map((s) => `"${s}"`).join(",")})`);
   await del;
 }
 
