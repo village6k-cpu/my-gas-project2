@@ -24,14 +24,27 @@ assert(
   'set badge must render before the checkbox button'
 );
 assert(
-  checklist.includes('EditableText') &&
+  checklist.includes('EquipmentNameCombobox') &&
     checklist.includes('장비명') &&
     checklist.includes('onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)}'),
-  'expanded equipment details must allow editing the registered equipment name'
+  'expanded equipment details must allow editing the registered equipment name with a catalog dropdown'
 );
 assert(
-  checklist.includes('useEffect') && /if \(!dirty\) setV\(value\)/.test(checklist),
+  checklist.includes('useEffect') && /if \(!dirty\)[\s\S]*setQ\(value\)/.test(checklist),
   'equipment name editor must follow remote value changes when the input is not dirty'
+);
+assert(
+  /function EquipmentNameCombobox\([\s\S]*const matches = searchCatalog\(q\)/.test(checklist),
+  'equipment name editor must search the catalog while typing'
+);
+assert(
+  /matches\.map\(\(m\)[\s\S]*onClick=\{\(\) => select\(m\)\}/.test(checklist),
+  'equipment name editor must show a selectable dropdown of catalog matches'
+);
+assert(
+  /selected[\s\S]*재고 연동됨/.test(checklist) &&
+    /자유입력 저장/.test(checklist),
+  'equipment name editor must distinguish catalog-linked selections from free-input saves'
 );
 assert(
   checklist.includes('예약 수량') &&
