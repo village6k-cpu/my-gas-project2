@@ -18,7 +18,7 @@ import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
 import { gasWrite } from "./writeback";
-import { pollTimelineChanges } from "./sync";
+import { pollTimelineChanges, repairDashboardDetailsForEmptyEquipments } from "./sync";
 
 interface State {
   date: string;
@@ -63,11 +63,27 @@ let notesTimer: ReturnType<typeof setTimeout> | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 const POLL_MS = 90_000;
 
+function mergeTradeChanges(base: Trade[], changed: Trade[]): Trade[] {
+  const byId = new Map(changed.map((t) => [t.tradeId, t]));
+  const merged = base.map((t) => byId.get(t.tradeId) ?? t);
+  for (const t of changed) if (!base.some((x) => x.tradeId === t.tradeId)) merged.push(t);
+  return merged;
+}
+
+async function repairEmptyEquipmentTrades(base = state.trades): Promise<boolean> {
+  const changed = await repairDashboardDetailsForEmptyEquipments(base);
+  if (!changed.length) return false;
+  set({ trades: mergeTradeChanges(base, changed) });
+  for (const t of changed) persistTrade(t).catch(() => {});
+  return true;
+}
+
 async function loadRemote() {
   try {
     const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
     remoteLoaded = true;
     set({ trades, notes });
+    await repairEmptyEquipmentTrades(trades);
   } catch (e) {
     console.error("[supabase] load 실패", e);
   }
@@ -80,6 +96,7 @@ async function loadRemote() {
         try {
           const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
           set({ trades, notes });
+          await repairEmptyEquipmentTrades(trades);
         } catch {
           /* noop */
         }
@@ -91,12 +108,10 @@ async function loadRemote() {
     pollTimer = setInterval(async () => {
       if (pendingPersist > 0 || document.hidden) return;
       try {
+        if (await repairEmptyEquipmentTrades(state.trades)) return;
         const changed = await pollTimelineChanges(state.trades);
         if (!changed.length) return;
-        const byId = new Map(changed.map((t) => [t.tradeId, t]));
-        const merged = state.trades.map((t) => byId.get(t.tradeId) ?? t);
-        for (const t of changed) if (!state.trades.some((x) => x.tradeId === t.tradeId)) merged.push(t);
-        set({ trades: merged });
+        set({ trades: mergeTradeChanges(state.trades, changed) });
         for (const t of changed) persistTrade(t).catch(() => {});
       } catch {
         /* noop */

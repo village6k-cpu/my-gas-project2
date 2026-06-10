@@ -199,6 +199,40 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
   return n;
 }
 
+/** Supabase에 거래만 있고 품목이 비어 있는 캐시를 dashboard 상세로 즉시 복구 */
+export async function repairDashboardDetailsForEmptyEquipments(current: Trade[]): Promise<Trade[]> {
+  const emptyIds = new Set(current.filter((t) => t.equipments.length === 0).map((t) => t.tradeId));
+  if (!emptyIds.size) return [];
+
+  const existing = new Map(current.map((t) => [t.tradeId, t]));
+  const dates = new Set<string>();
+  for (const t of current) {
+    if (!emptyIds.has(t.tradeId)) continue;
+    dates.add(ymd(new Date(t.checkoutAt)));
+    dates.add(ymd(new Date(t.returnAt)));
+  }
+
+  const changed = new Map<string, Trade>();
+  for (const date of dates) {
+    try {
+      const res = await gasFetch(`action=dashboard&date=${date}`);
+      const data = await res.json();
+      if (data.error) continue;
+      const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
+      for (const it of items) {
+        const tid = it.tradeId;
+        if (!emptyIds.has(tid) || changed.has(tid) || !it.equipments?.length) continue;
+        const base = existing.get(tid);
+        if (!base) continue;
+        changed.set(tid, mergeDashboard(base, it));
+      }
+    } catch {
+      /* 복구 실패 날짜만 건너뜀 */
+    }
+  }
+  return [...changed.values()];
+}
+
 /** 전체 동기화: timeline(날짜·예약) → dashboard(상세) */
 export async function syncAll(onLog?: (s: string) => void): Promise<void> {
   await syncTimelineToSupabase({ fromDays: -30, toDays: 180, onLog });
