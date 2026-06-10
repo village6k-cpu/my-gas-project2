@@ -182,7 +182,7 @@ export function buildSeed(today: string): { trades: Trade[]; notes: HandoverNote
       amount: 410000,
       contractUrl: "https://example.com/c21",
       equipments: [
-        item("소니 A1 바디", 1, { checkoutState: "taken" }),
+        item("소니 FX6 바디", 1, { checkoutState: "taken" }),
         item("소니 GM 50mm F1.2", 1, { checkoutState: "taken" }),
       ],
       photos: [],

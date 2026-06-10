@@ -12,6 +12,8 @@ const catalogData = fs.existsSync(path.join(root, 'apps/today-dashboard/lib/data
 const gasRoute = read('apps/today-dashboard/app/api/gas/route.ts');
 const sheetApi = read('sheetAPI.js');
 const gasBackend = read('checkAvailability.js');
+const domainCatalog = read('apps/today-dashboard/lib/domain/catalog.ts');
+const seedData = read('apps/today-dashboard/lib/data/seed.ts');
 
 assert(
   catalogData.includes('action=dashboardEquipmentCatalog') &&
@@ -40,6 +42,11 @@ assert(
 assert(
   /function getDashboardEquipmentCatalog_\(ss\)[\s\S]*getDashboardEquipNameList_\(ss\)[\s\S]*buildDashboardSetLookup_\(ss\.getSheetByName\("세트마스터"\)\)/.test(gasBackend),
   'GAS dashboardEquipmentCatalog must be based on 목록/세트마스터, not the app prototype catalog'
+);
+assert(
+  !domainCatalog.includes('"소니 A1 바디"') &&
+    !seedData.includes('"소니 A1 바디"'),
+  'non-master prototype equipment such as 소니 A1 바디 must not remain in app catalog or demo seed data'
 );
 
 console.log('today-dashboard sheet-master catalog dropdown static checks passed');

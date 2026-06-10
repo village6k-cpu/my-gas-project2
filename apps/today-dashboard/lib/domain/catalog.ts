@@ -44,7 +44,6 @@ export const CATALOG: CatalogItem[] = [
   // 바디
   { name: "소니 A7S3 바디", category: "바디" },
   { name: "소니 A7M4 바디", category: "바디" },
-  { name: "소니 A1 바디", category: "바디" },
   { name: "소니 FX3 바디", category: "바디" },
   { name: "소니 FX6 바디", category: "바디" },
   { name: "캐논 R5 바디", category: "바디" },
