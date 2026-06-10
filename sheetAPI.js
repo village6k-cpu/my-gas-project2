@@ -359,6 +359,14 @@ function handleRequest(e) {
           { dryRun: params.dryRun || postBody.dryRun }
         ));
 
+      case "updateEquipName":
+        return jsonResponse(dashboardUpdateEquipmentName(
+          params.tid || postBody.tid,
+          params.scheduleId || postBody.scheduleId,
+          params.equipName || postBody.equipName || params.name || postBody.name,
+          { dryRun: params.dryRun || postBody.dryRun }
+        ));
+
       case "tradeCandidates":
         return jsonResponse(findTradeCandidatesForSchedule(
           params.name || postBody.name || "",

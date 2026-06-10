@@ -16,6 +16,7 @@ import type {
 } from "../domain/types";
 import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
+import { categoryOf } from "../domain/catalog";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
 import { gasWrite } from "./writeback";
 import { pollTimelineChanges, repairDashboardDetailsForIncompleteTrades } from "./sync";
@@ -253,9 +254,31 @@ export function setItemCheckout(tradeId: string, scheduleId: string, next: Check
   else if (final === "pending") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: false });
   // 'excluded'(제외)는 시트에 대응 칸 없음 → Supabase 전용
 }
-export function setItemQty(tradeId: string, scheduleId: string, takenQty: number) {
-  mutateTrade(tradeId, (t) => mapItem(t, scheduleId, (e) => ({ ...e, takenQty: Math.max(0, takenQty) })));
+export function setItemName(tradeId: string, scheduleId: string, name: string) {
+  const clean = name.trim();
+  if (!clean) return;
+  mutateTrade(tradeId, (t) =>
+    mapItem(t, scheduleId, (e) => ({
+      ...e,
+      name: clean,
+      setName: e.setName && e.setName.trim() === e.name.trim() ? clean : e.setName,
+      category: categoryOf(clean) ?? e.category,
+    })),
+  );
   flashSave(tradeId);
+  gasWrite("updateEquipName", { tid: tradeId, scheduleId, equipName: clean });
+}
+export function setItemQty(tradeId: string, scheduleId: string, qty: number) {
+  const safeQty = Math.max(1, Math.round(qty));
+  mutateTrade(tradeId, (t) =>
+    mapItem(t, scheduleId, (e) => ({
+      ...e,
+      qty: safeQty,
+      takenQty: e.takenQty != null ? Math.min(e.takenQty, safeQty) : undefined,
+    })),
+  );
+  flashSave(tradeId);
+  gasWrite("updateEquipQty", { tid: tradeId, scheduleId, qty: safeQty });
 }
 export function setItemMemo(tradeId: string, scheduleId: string, phase: Phase, text: string) {
   mutateTrade(tradeId, (t) =>
