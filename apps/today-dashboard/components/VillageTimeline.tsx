@@ -40,28 +40,26 @@ export function VillageTimeline({
   const scrollRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
-  const groups = useMemo(() => groupItems(items, mode, search), [items, mode, search]);
-  const conflicts = useMemo(() => computeConflicts(items), [items]);
-
-  // 표시 범위: 필터 있으면 그 범위, 없으면 오늘±(7,14) + 예약 포함 확장
-  const { rangeStartMs, days } = useMemo(() => {
+  // 표시 범위: 필터 있으면 그 범위, 없으면 오늘 기준 3주만 보여준다.
+  const { rangeStartMs, rangeEndMs, days } = useMemo(() => {
     const t = dateOnlyMs(today + "T00:00:00");
     if (filterStart && filterEnd) {
       const s = parseYmd(filterStart).getTime();
       const e = parseYmd(filterEnd).getTime();
-      return { rangeStartMs: s, days: Math.max(1, daysBetween(s, e) + 1) };
+      return { rangeStartMs: s, rangeEndMs: e, days: Math.max(1, daysBetween(s, e) + 1) };
     }
-    let min = t - 7 * DAY;
-    let max = t + 14 * DAY;
-    for (const it of items) {
-      if (it.startMs < min) min = it.startMs;
-      if (it.endMs > max) max = it.endMs;
-    }
-    return { rangeStartMs: min, days: daysBetween(min, max) + 1 };
-  }, [items, today, filterStart, filterEnd]);
+    const s = t - 7 * DAY;
+    const e = t + 14 * DAY;
+    return { rangeStartMs: s, rangeEndMs: e, days: daysBetween(s, e) + 1 };
+  }, [today, filterStart, filterEnd]);
+
+  const visibleItems = useMemo(() => items.filter((it) => it.endMs >= rangeStartMs && it.startMs <= rangeEndMs), [items, rangeStartMs, rangeEndMs]);
+  const groups = useMemo(() => groupItems(visibleItems, mode, search), [visibleItems, mode, search]);
+  const conflicts = useMemo(() => computeConflicts(visibleItems), [visibleItems]);
 
   const todayMs = dateOnlyMs(today + "T00:00:00");
   const todayOff = daysBetween(rangeStartMs, todayMs);
+  const scrollOff = Math.min(days - 1, Math.max(0, todayOff));
   const totalW = days * colW;
   const dates = useMemo(() => Array.from({ length: days }, (_, i) => rangeStartMs + i * DAY), [rangeStartMs, days]);
   const revenue = useMemo(() => revenueByDay(trades, rangeStartMs, days), [trades, rangeStartMs, days]);
@@ -69,16 +67,16 @@ export function VillageTimeline({
 
   const scrollToToday = () => {
     const el = scrollRef.current;
-    if (el) el.scrollTo({ left: todayOff * colW - el.clientWidth / 2 + colW / 2, behavior: "smooth" });
+    if (el) el.scrollTo({ left: scrollOff * colW - el.clientWidth / 2 + colW / 2, behavior: "smooth" });
   };
   const didScroll = useRef(false);
   useEffect(() => {
     const el = scrollRef.current;
     if (el && !didScroll.current && totalW > 0) {
-      el.scrollLeft = todayOff * colW - el.clientWidth / 2 + colW / 2;
+      el.scrollLeft = scrollOff * colW - el.clientWidth / 2 + colW / 2;
       didScroll.current = true;
     }
-  }, [todayOff, colW, totalW]);
+  }, [scrollOff, colW, totalW]);
 
   // Ctrl/⌘ + 휠 줌
   useEffect(() => {
@@ -252,7 +250,7 @@ export function VillageTimeline({
       const e2 = Math.min(days - 1, daysBetween(rangeStartMs, it.endMs));
       const span = Math.max(1, e2 - s + 1);
       const clipL = it.startMs < rangeStartMs;
-      const clipR = it.endMs > rangeStartMs + (days - 1) * DAY;
+      const clipR = it.endMs > rangeEndMs;
       const sc = statusBar(it.statusKey);
       const conf = conflicts.has(it.id);
       rows.push(

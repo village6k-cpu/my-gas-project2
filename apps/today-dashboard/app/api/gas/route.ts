@@ -24,8 +24,25 @@ async function isAuthed(req: NextRequest): Promise<boolean> {
 // 읽기 응답 짧게 캐시(GAS 콜드스타트 완화)
 const cache = new Map<string, { at: number; body: string }>();
 const TTL = 30_000;
-// 읽기 액션 화이트리스트 (캐시됨)
-const READ_ACTIONS = new Set(["timeline", "dashboard", "operations", "search", "read", "info", "sheets", "list", "scan", "dashboardSearch", "dashboardContractExtras", "dashboardEquipNames", "dashboardEquipmentCatalog"]);
+// 읽기 액션 화이트리스트 (GET은 캐시됨)
+const READ_ACTIONS = new Set([
+  "timeline",
+  "dashboard",
+  "operations",
+  "search",
+  "read",
+  "info",
+  "sheets",
+  "list",
+  "scan",
+  "dashboardSearch",
+  "dashboardContractExtras",
+  "dashboardEquipNames",
+  "dashboardEquipmentCatalog",
+  "dashboardPhotoMeta",
+  "dashboardPhotos",
+  "dashboardPhotosBatch",
+]);
 // 쓰기 액션 화이트리스트 (캐시 안 함). 시트/상태 변경 → 신중.
 const WRITE_ACTIONS = new Set([
   "toggleSetup",
@@ -38,13 +55,19 @@ const WRITE_ACTIONS = new Set([
   "regenerateContract",
   "updateEquipQty",
   "updateEquipName",
+  "uploadDashboardPhoto",
 ]);
 
-function call(req: NextRequest) {
+function allowed(action: string): { ok: boolean; isWrite: boolean } {
+  const isWrite = WRITE_ACTIONS.has(action);
+  return { ok: READ_ACTIONS.has(action) || isWrite, isWrite };
+}
+
+async function callGet(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   const action = sp.get("action") ?? "";
-  const isWrite = WRITE_ACTIONS.has(action);
-  if (!READ_ACTIONS.has(action) && !isWrite) {
+  const { ok, isWrite } = allowed(action);
+  if (!ok) {
     return NextResponse.json({ error: `action '${action}' 미허용` }, { status: 400 });
   }
   const qs = new URLSearchParams(sp);
@@ -67,9 +90,53 @@ function call(req: NextRequest) {
     .catch((e) => NextResponse.json({ error: "GAS 호출 실패: " + (e instanceof Error ? e.message : String(e)) }, { status: 502 }));
 }
 
+async function callPost(req: NextRequest) {
+  let body: Record<string, unknown> = {};
+  try {
+    body = await req.json();
+  } catch {
+    body = {};
+  }
+  const sp = req.nextUrl.searchParams;
+  const action = String(body.action ?? sp.get("action") ?? "");
+  const { ok, isWrite } = allowed(action);
+  if (!ok) {
+    return NextResponse.json({ error: `action '${action}' 미허용` }, { status: 400 });
+  }
+
+  const payload: Record<string, unknown> = {};
+  sp.forEach((value, key) => {
+    payload[key] = value;
+  });
+  Object.assign(payload, body, { action, key: GAS_KEY });
+
+  try {
+    const r = await fetch(GAS_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      redirect: "follow",
+      signal: AbortSignal.timeout(60_000),
+    });
+    const responseBody = await r.text();
+    return new NextResponse(responseBody, {
+      headers: { "content-type": "application/json", "x-cache": isWrite ? "POST-WRITE" : "POST" },
+    });
+  } catch (e) {
+    return NextResponse.json({ error: "GAS 호출 실패: " + (e instanceof Error ? e.message : String(e)) }, { status: 502 });
+  }
+}
+
 export async function GET(req: NextRequest) {
   if (!(await isAuthed(req))) {
     return NextResponse.json({ error: "인증 필요" }, { status: 401 });
   }
-  return call(req);
+  return callGet(req);
+}
+
+export async function POST(req: NextRequest) {
+  if (!(await isAuthed(req))) {
+    return NextResponse.json({ error: "인증 필요" }, { status: 401 });
+  }
+  return callPost(req);
 }
