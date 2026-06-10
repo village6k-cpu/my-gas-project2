@@ -33,7 +33,6 @@ const cache: Record<string, { trades: Trade[]; notes: HandoverNote[] }> = {};
 let state: State = { date: "", trades: [], notes: [], savingTrades: {}, toast: null };
 const listeners = new Set<() => void>();
 let toastSeq = 0;
-let onsiteSeq = 0;
 
 function emit() {
   for (const l of listeners) l();
@@ -324,24 +323,67 @@ export type OnsiteEntry = {
   emphasize?: boolean;
 };
 
+function onsiteNumber(scheduleId: string): number {
+  const match = String(scheduleId || "").match(/(?:^|-)ONS-(\d+)/);
+  return match ? Number(match[1]) : 0;
+}
+
+function nextOnsiteScheduleId(t: Trade): string {
+  const next = t.equipments.reduce((max, e) => Math.max(max, onsiteNumber(e.scheduleId)), 0) + 1;
+  return `ONS-${next}`;
+}
+
+function sameOnsiteName(a: string, b: string): boolean {
+  return a.trim().replace(/\s+/g, " ").toLowerCase() === b.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function findMergeableOnsiteItem(t: Trade, en: OnsiteEntry, settlement: Settlement): EquipmentItem | undefined {
+  if (en.isSetHeader || en.isComponent || en.setName) return undefined;
+  return t.equipments.find(
+    (e) =>
+      e.onsite &&
+      !e.isSetHeader &&
+      !e.isComponent &&
+      !e.setName &&
+      sameOnsiteName(e.name, en.name) &&
+      (e.settlement ?? settlement) === settlement,
+  );
+}
+
 export function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], settlement: Settlement) {
   mutateTrade(tradeId, (t) => {
-    const add: EquipmentItem[] = entries.map((en) => ({
-      scheduleId: `ONS-${++onsiteSeq}`,
-      name: en.name,
-      qty: en.qty,
-      category: en.category,
-      offCatalog: en.offCatalog,
-      isSetHeader: en.isSetHeader,
-      isComponent: en.isComponent,
-      setName: en.setName,
-      emphasize: en.emphasize,
-      onsite: true,
-      settlement,
-      checkoutState: "taken",
-      returnState: "pending",
-    }));
-    return { ...t, equipments: [...t.equipments, ...add] };
+    let nextTrade = { ...t, equipments: [...t.equipments] };
+    for (const en of entries) {
+      const target = findMergeableOnsiteItem(nextTrade, en, settlement);
+      if (target) {
+        nextTrade = {
+          ...nextTrade,
+          equipments: nextTrade.equipments.map((e) =>
+            e.scheduleId === target.scheduleId
+              ? { ...e, qty: target.qty + en.qty, checkoutState: "taken", settlement }
+              : e,
+          ),
+        };
+        continue;
+      }
+      const add: EquipmentItem = {
+        scheduleId: nextOnsiteScheduleId(nextTrade),
+        name: en.name,
+        qty: en.qty,
+        category: en.category,
+        offCatalog: en.offCatalog,
+        isSetHeader: en.isSetHeader,
+        isComponent: en.isComponent,
+        setName: en.setName,
+        emphasize: en.emphasize,
+        onsite: true,
+        settlement,
+        checkoutState: "taken",
+        returnState: "pending",
+      };
+      nextTrade = { ...nextTrade, equipments: [...nextTrade.equipments, add] };
+    }
+    return nextTrade;
   });
   flashSave(tradeId);
 }
