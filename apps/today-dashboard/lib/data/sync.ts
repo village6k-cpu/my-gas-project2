@@ -151,6 +151,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
     depositStatus: it.depositStatus || undefined,
     proofType: it.proofType || undefined,
     issueStatus: it.issueStatus || undefined,
+    issueNote: it.issueNote || undefined,
     billingCompany: it.billingCompany || undefined,
     contractUrl: it.contractUrl || base.contractUrl,
     contractRegenPending: !!it.contractRegenPending,

@@ -95,6 +95,7 @@ export interface Trade {
   depositStatus?: string;
   proofType?: string;
   issueStatus?: string;
+  issueNote?: string;
   billingCompany?: string;
   amount?: number;
 

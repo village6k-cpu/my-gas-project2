@@ -436,6 +436,23 @@ export function setIssueStatus(tradeId: string, issueStatus: string) {
   flashSave(tradeId);
   gasWrite("updateTradeProof", { tid: tradeId, field: "issueStatus", value: issueStatus });
 }
+export async function requestProofIssue(tradeId: string) {
+  mutateTrade(tradeId, (t) => ({ ...t, issueStatus: "발행요청", issueNote: "발행 요청 중..." }));
+  flashSave(tradeId);
+  try {
+    const res = await gasMutation("updateTradeProof", { tid: tradeId, field: "issueStatus", value: "발행요청" });
+    const result = res?.result || res || {};
+    mutateTrade(tradeId, (t) => ({
+      ...t,
+      issueStatus: result.issueStatus || "발행완료",
+      issueNote: result.message || result.error || t.issueNote,
+    }));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    mutateTrade(tradeId, (t) => ({ ...t, issueStatus: "전송실패", issueNote: message }));
+    throw err;
+  }
+}
 export function setBillingCompany(tradeId: string, billingCompany: string) {
   mutateTrade(tradeId, (t) => ({ ...t, billingCompany }));
   flashSave(tradeId);
