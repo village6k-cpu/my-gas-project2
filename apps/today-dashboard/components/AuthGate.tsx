@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { isSupabase, supabase } from "@/lib/supabase/client";
+import { VillageLogo } from "@/components/VillageLogo";
 
 // 로그인 게이트: 세션 없으면 로그인 폼, 있으면 앱. (시드 모드면 통과)
 export function AuthGate({ children }: { children: React.ReactNode }) {
@@ -31,7 +32,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (loading) {
     return (
       <div className="flex min-h-dvh items-center justify-center bg-[#f6f5f2] text-ink-faint">
-        <div className="animate-pulse text-sm">불러오는 중…</div>
+        <div className="flex flex-col items-center gap-5">
+          <VillageLogo size="lg" />
+          <div className="animate-pulse text-[13px] font-semibold">불러오는 중...</div>
+        </div>
       </div>
     );
   }
@@ -48,42 +52,63 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-[#f6f5f2] px-6">
-      <form onSubmit={login} className="w-full max-w-xs space-y-4">
-        <div className="text-center">
-          <div className="text-2xl font-black tracking-tight text-brand-700">빌리지</div>
-          <div className="mt-1 text-[13px] text-ink-faint">운영 대시보드 · 직원 로그인</div>
+    <div className="flex min-h-dvh items-center justify-center bg-[#f6f5f2] px-5 py-10 text-ink">
+      <form onSubmit={login} className="w-full max-w-[340px] sm:max-w-[420px]">
+        <div className="mb-9 flex flex-col items-center text-center">
+          <VillageLogo size="lg" />
+          <div className="mt-5 inline-flex rounded-full border border-black/10 bg-white/55 px-3 py-1 text-[12px] font-bold text-ink-mute">
+            운영 대시보드
+          </div>
+          <h1 className="mt-4 text-[24px] font-black leading-tight tracking-normal text-ink">직원 로그인</h1>
+          <p className="mt-2 text-[13px] font-medium leading-relaxed text-ink-faint">
+            운영 계정으로 계속하세요.
+          </p>
         </div>
-        <div className="space-y-2">
-          <input
-            type="email"
-            inputMode="email"
-            autoComplete="username"
-            placeholder="이메일"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded-xl border border-black/10 bg-white px-4 py-3 text-[15px] outline-none focus:border-brand-500"
-            required
-          />
-          <input
-            type="password"
-            autoComplete="current-password"
-            placeholder="비밀번호"
-            value={pw}
-            onChange={(e) => setPw(e.target.value)}
-            className="w-full rounded-xl border border-black/10 bg-white px-4 py-3 text-[15px] outline-none focus:border-brand-500"
-            required
-          />
+
+        <div className="space-y-3 rounded-[8px] border border-black/[0.08] bg-white/80 p-4 shadow-[0_1px_2px_rgba(16,18,29,0.04)] backdrop-blur">
+          <label className="block">
+            <span className="mb-1.5 block text-[12px] font-bold text-ink-mute">이메일</span>
+            <input
+              type="email"
+              inputMode="email"
+              autoComplete="username"
+              placeholder="name@village6k.co.kr"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full rounded-[8px] border border-black/10 bg-white px-4 py-3.5 text-[15px] font-semibold text-ink outline-none transition placeholder:text-ink-faint/70 focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+              required
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1.5 block text-[12px] font-bold text-ink-mute">비밀번호</span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              placeholder="비밀번호"
+              value={pw}
+              onChange={(e) => setPw(e.target.value)}
+              className="w-full rounded-[8px] border border-black/10 bg-white px-4 py-3.5 text-[15px] font-semibold text-ink outline-none transition placeholder:text-ink-faint/70 focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+              required
+            />
+          </label>
+
+          {err && (
+            <div aria-live="polite" className="rounded-[8px] border border-rose-200 bg-rose-50 px-3 py-2.5 text-[13px] font-bold text-rose-700">
+              {err}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={busy}
+            className="tap w-full rounded-[8px] bg-brand-600 py-3.5 text-[15px] font-black text-white shadow-sm transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {busy ? "로그인 중..." : "로그인"}
+          </button>
         </div>
-        {err && <div className="text-center text-[13px] font-semibold text-rose-600">{err}</div>}
-        <button
-          type="submit"
-          disabled={busy}
-          className="w-full rounded-xl bg-brand-600 py-3 text-[15px] font-bold text-white shadow-sm active:scale-[0.99] disabled:opacity-60"
-        >
-          {busy ? "로그인 중…" : "로그인"}
-        </button>
-        <div className="text-center text-[11px] text-ink-faint">계정은 관리자에게 문의하세요.</div>
+
+        <div className="mt-5 text-center text-[12px] font-medium text-ink-faint">계정은 관리자에게 문의하세요.</div>
       </form>
     </div>
   );
