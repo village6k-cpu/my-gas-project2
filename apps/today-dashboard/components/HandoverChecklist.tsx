@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
 import { groupBySet, handoverSummary } from "@/lib/domain/status";
 import { categoryOf, coarseGroup, searchCatalog, SET_COMPOSITION, type CatalogItem } from "@/lib/domain/catalog";
@@ -193,10 +193,10 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
 
       {open && (
         <div className="space-y-2 pb-2.5 pl-9">
-          <label className="block text-[12px] font-semibold text-ink-mute">
+          <div className="block text-[12px] font-semibold text-ink-mute">
             장비명
-            <EditableText value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />
-          </label>
+            <EquipmentNameCombobox value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />
+          </div>
           <div className="flex items-center gap-2 text-[12px] text-ink-mute">
             예약 수량
             <Stepper value={e.qty} min={1} onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)} />
@@ -330,28 +330,108 @@ function Stepper({ value, min = 0, max, onChange }: { value: number; min?: numbe
   );
 }
 
-function EditableText({ value, onSave }: { value: string; onSave: (v: string) => void }) {
-  const [v, setV] = useState(value);
+function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: string) => void }) {
+  const [q, setQ] = useState(value);
   const [dirty, setDirty] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [selected, setSelected] = useState<CatalogItem | null>(null);
+  const skipNextBlurSave = useRef(false);
+
   useEffect(() => {
-    if (!dirty) setV(value);
+    if (!dirty) {
+      setQ(value);
+      setSelected(null);
+    }
   }, [dirty, value]);
-  const save = () => {
-    const clean = v.trim();
-    if (dirty && clean && clean !== value) onSave(clean);
+
+  const matches = searchCatalog(q);
+  const exact = matches.some((m) => m.name === q.trim());
+  const showList = focused && q.trim().length > 0 && !selected;
+
+  const saveValue = (nextName: string) => {
+    const clean = nextName.trim();
+    if (!clean) return;
+    if (clean !== value) onSave(clean);
+    setQ(clean);
     setDirty(false);
   };
+
+  const select = (item: CatalogItem) => {
+    setSelected(item);
+    saveValue(item.name);
+  };
+
+  const save = () => {
+    if (dirty) saveValue(q);
+  };
+
   return (
-    <input
-      value={v}
-      onChange={(e) => { setV(e.target.value); setDirty(true); }}
-      onBlur={save}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") e.currentTarget.blur();
-        if (e.key === "Escape") { setV(value); setDirty(false); e.currentTarget.blur(); }
-      }}
-      className="mt-1 w-full rounded-lg border border-black/10 bg-white px-2.5 py-1.5 text-[12.5px] font-medium text-ink outline-none focus:border-brand-500"
-    />
+    <div className="relative mt-1">
+      <input
+        value={q}
+        onFocus={() => setFocused(true)}
+        onChange={(e) => { setSelected(null); setQ(e.target.value); setDirty(true); }}
+        onBlur={() => {
+          setFocused(false);
+          if (skipNextBlurSave.current) {
+            skipNextBlurSave.current = false;
+            return;
+          }
+          save();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            skipNextBlurSave.current = true;
+            if (matches[0] && !exact) select(matches[0]);
+            else save();
+            e.currentTarget.blur();
+          }
+          if (e.key === "Escape") {
+            skipNextBlurSave.current = true;
+            setQ(value);
+            setSelected(null);
+            setDirty(false);
+            e.currentTarget.blur();
+          }
+        }}
+        placeholder="장비명 검색"
+        className="w-full rounded-lg border border-black/10 bg-white px-2.5 py-1.5 text-[12.5px] font-medium text-ink outline-none focus:border-brand-500"
+      />
+      {selected && (
+        <div className="mt-1 flex items-center gap-1.5 text-[11.5px]">
+          <span className="rounded bg-brand-100 px-1.5 py-0.5 font-bold text-brand-700">{selected.category === "세트" ? "세트" : coarseGroup(selected.category)}</span>
+          <span className="text-ink-mute">재고 연동됨</span>
+          <button onClick={() => { setSelected(null); setDirty(true); }} className="ml-auto text-ink-faint">변경</button>
+        </div>
+      )}
+      {showList && (
+        <div className="absolute left-0 right-0 z-20 mt-1 max-h-44 overflow-y-auto rounded-lg bg-white shadow-card ring-1 ring-black/10">
+          {matches.map((m) => (
+            <button
+              key={m.name}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => select(m)}
+              className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]"
+            >
+              <span className="flex-1 truncate text-[13px] text-ink">{m.name}</span>
+              <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${m.category === "세트" ? "bg-brand-100 text-brand-700" : coarseGroup(m.category) === "악세사리·라인" ? "bg-amber-100 text-amber-700" : "bg-black/5 text-ink-mute"}`}>{m.category === "세트" ? "세트" : coarseGroup(m.category)}</span>
+            </button>
+          ))}
+          {!exact && (
+            <button
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => saveValue(q)}
+              className="tap flex w-full items-center gap-2 border-t border-black/5 bg-black/[0.02] px-2.5 py-1.5 text-left"
+            >
+              <Plus className="h-3.5 w-3.5 text-ink-mute" />
+              <span className="text-[13px] text-ink-soft">‘{q.trim()}’ 자유입력 저장</span>
+              <span className="ml-auto rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
