@@ -162,15 +162,30 @@ export function coarseRank(c?: string): number {
   return coarseGroup(c) === "장비" ? 0 : 1;
 }
 
+function catalogSetKeyOf(value?: string | null): string {
+  return String(value ?? "").trim().replace(/\s+/g, "").toLowerCase();
+}
+
+function sameCatalogSetKey(a?: string | null, b?: string | null): boolean {
+  const ak = catalogSetKeyOf(a);
+  return !!ak && ak === catalogSetKeyOf(b);
+}
+
 /**
  * Supabase 읽기 시 카테고리 보정 + 세트 헤더 정규화.
  * 세트 묶음은 유지: 세트 대표행(세트명 있는 헤더)은 그룹 라벨, 단품(세트명 없는 헤더)은 항목, 구성품은 세트 밑.
  */
 export function normalizeItems(items: EquipmentItem[]): EquipmentItem[] {
+  const setNameByKey = new Map<string, string>();
+  items.forEach((e) => {
+    if (e.setName) setNameByKey.set(catalogSetKeyOf(e.setName), e.setName);
+  });
+
   return items.map((e) => {
     const category = e.category ?? categoryOf(e.name) ?? undefined;
-    const isSetHeader = !!e.isSetHeader && !!e.setName; // 세트명 있는 헤더만 세트 라벨(단품 제외)
-    return { ...e, isSetHeader, category };
+    const inferredSetName = e.setName ?? setNameByKey.get(catalogSetKeyOf(e.name));
+    const isSetHeader = !!inferredSetName && (!!e.isSetHeader || (!e.setName && sameCatalogSetKey(e.name, inferredSetName)));
+    return { ...e, setName: inferredSetName ?? e.setName, isSetHeader, category };
   });
 }
 

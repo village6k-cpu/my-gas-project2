@@ -91,18 +91,35 @@ export interface SetGroup {
   header?: EquipmentItem; // 세트 대표행
   rows: EquipmentItem[]; // 구성품/단품
 }
+
+function setKeyOf(value?: string | null): string {
+  return String(value ?? "").trim().replace(/\s+/g, "").toLowerCase();
+}
+
+function sameSetKey(a?: string | null, b?: string | null): boolean {
+  const ak = setKeyOf(a);
+  return !!ak && ak === setKeyOf(b);
+}
+
 export function groupBySet(items: EquipmentItem[]): SetGroup[] {
   const groups: SetGroup[] = [];
   const bySet = new Map<string, SetGroup>();
+  const setNameByKey = new Map<string, string>();
+  items.forEach((e) => {
+    if (e.setName) setNameByKey.set(setKeyOf(e.setName), e.setName);
+  });
+
   for (const e of items) {
-    if (e.setName) {
-      let g = bySet.get(e.setName);
+    const inferredSetName = e.setName ?? setNameByKey.get(setKeyOf(e.name));
+    if (inferredSetName) {
+      const inferredSetHeader = !!e.isSetHeader || (!e.setName && sameSetKey(e.name, inferredSetName));
+      let g = bySet.get(inferredSetName);
       if (!g) {
-        g = { key: "set:" + e.setName, setName: e.setName, rows: [] };
-        bySet.set(e.setName, g);
+        g = { key: "set:" + inferredSetName, setName: inferredSetName, rows: [] };
+        bySet.set(inferredSetName, g);
         groups.push(g);
       }
-      if (e.isSetHeader) g.header = e;
+      if (inferredSetHeader) g.header = { ...e, setName: inferredSetName, isSetHeader: true };
       else g.rows.push(e);
     } else {
       const last = groups[groups.length - 1];
