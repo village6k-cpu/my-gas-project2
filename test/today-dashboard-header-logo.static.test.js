@@ -28,8 +28,13 @@ assert(
 );
 
 assert(
-  logo.includes('import Link from "next/link";') && logo.includes('href="/"') && logo.includes('aria-label="홈으로 이동"'),
-  'VillageLogo must be a link back to the today-dashboard home'
+  logo.includes('<a') && logo.includes('href="/"') && logo.includes('aria-label="홈으로 이동"'),
+  'VillageLogo must be a native anchor back to the today-dashboard home'
+);
+
+assert(
+  !logo.includes('import Link from "next/link";') && !logo.includes('<Link'),
+  'logo home navigation must not depend on Next client routing because iPhone/PWA can keep stale shell state'
 );
 
 assert.match(
