@@ -1,6 +1,6 @@
 // 상태/시간 헬퍼 — 한국어 시간 정렬, 확인필요 집계, 인계 요약
 
-import type { EquipmentItem, ReturnCount, Trade, TabKey } from "./types";
+import type { EquipmentItem, ReturnCount, Trade, TabKey, Phase } from "./types";
 
 const WEEKDAY = ["일", "월", "화", "수", "목", "금", "토"];
 
@@ -158,6 +158,63 @@ export function tradesForTab(trades: Trade[], date: string, tab: TabKey): Trade[
     const ka = tab === "checkin" ? a.returnAt : a.checkoutAt;
     const kb = tab === "checkin" ? b.returnAt : b.checkoutAt;
     return timeSortKey(ka) - timeSortKey(kb);
+  });
+}
+
+export interface TradeSearchEvent {
+  key: string;
+  trade: Trade;
+  phase: Phase;
+  at: string;
+  date: string;
+  groupLabel: string;
+}
+
+function normalizeSearchText(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "");
+}
+
+function tradeSearchText(t: Trade): string {
+  return [
+    t.customerName,
+    t.customerPhone,
+    t.tradeId,
+    t.company,
+    t.contractStatus,
+    ...t.equipments.map((e) => e.name),
+  ].join(" ");
+}
+
+function searchEventFor(t: Trade, phase: Phase): TradeSearchEvent {
+  const at = phase === "checkout" ? t.checkoutAt : t.returnAt;
+  const date = ymd(new Date(at));
+  const label = phase === "checkout" ? "반출" : "반납";
+  return {
+    key: `${t.tradeId}:${phase}:${date}`,
+    trade: t,
+    phase,
+    at,
+    date,
+    groupLabel: `${formatDateLabel(date)} · ${label}`,
+  };
+}
+
+export function searchTradeEvents(trades: Trade[], query: string): TradeSearchEvent[] {
+  const needle = normalizeSearchText(query);
+  if (!needle) return [];
+
+  const events = trades
+    .filter((t) => normalizeSearchText(tradeSearchText(t)).includes(needle))
+    .flatMap((t) => [searchEventFor(t, "checkout"), searchEventFor(t, "checkin")]);
+
+  return events.sort((a, b) => {
+    const dateCompare = new Date(a.at).getTime() - new Date(b.at).getTime();
+    if (dateCompare) return dateCompare;
+    if (a.phase !== b.phase) return a.phase === "checkout" ? -1 : 1;
+    return a.trade.tradeId.localeCompare(b.trade.tradeId);
   });
 }
 
