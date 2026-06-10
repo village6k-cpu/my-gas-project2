@@ -26,6 +26,11 @@ assert(
 );
 
 assert(
+  logo.includes('import Link from "next/link";') && logo.includes('href="/"') && logo.includes('aria-label="홈으로 이동"'),
+  'VillageLogo must be a link back to the today-dashboard home'
+);
+
+assert(
   !logo.includes('font-village') && !logo.includes('<span>illage</span>'),
   'VillageLogo must not fall back to the old CSS text wordmark'
 );
