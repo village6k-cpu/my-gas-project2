@@ -6,6 +6,32 @@ import { normalizeItems } from "../domain/catalog";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+const PAGE_SIZE = 1000;
+
+type SupabaseOrder = {
+  column: string;
+  ascending?: boolean;
+};
+
+async function fetchRowsPaginated<T>(
+  sb: any,
+  table: string,
+  select: string,
+  orders: SupabaseOrder[] = []
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    let query = sb.from(table).select(select);
+    for (const order of orders) query = query.order(order.column, { ascending: order.ascending ?? true });
+    const { data, error } = await query.range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = (data ?? []) as T[];
+    rows.push(...page);
+    if (page.length < PAGE_SIZE) break;
+  }
+  return rows;
+}
+
 function uniqueScheduleRows(trade: Trade): any[] {
   const seenScheduleIds = new Map<string, number>();
   return trade.equipments.map((e, i) => {
@@ -21,12 +47,14 @@ function uniqueScheduleRows(trade: Trade): any[] {
 export async function fetchAllTrades(): Promise<Trade[]> {
   const sb = supabase;
   if (!sb) return [];
-  const [{ data: trades, error: te }, { data: items, error: ie }] = await Promise.all([
-    sb.from("trades").select("*"),
-    sb.from("schedule_items").select("*").order("sort", { ascending: true }),
+  const [trades, items] = await Promise.all([
+    fetchRowsPaginated<any>(sb, "trades", "*", [{ column: "trade_id" }]),
+    fetchRowsPaginated<any>(sb, "schedule_items", "*", [
+      { column: "trade_id" },
+      { column: "sort" },
+      { column: "schedule_id" },
+    ]),
   ]);
-  if (te) throw te;
-  if (ie) throw ie;
   const byTrade = new Map<string, any[]>();
   for (const it of items ?? []) (byTrade.get(it.trade_id) ?? byTrade.set(it.trade_id, []).get(it.trade_id)!).push(it);
   return (trades ?? []).map((r: any) => tradeFromRow(r, normalizeItems((byTrade.get(r.trade_id) ?? []).map(itemFromRow))));
@@ -35,8 +63,7 @@ export async function fetchAllTrades(): Promise<Trade[]> {
 export async function fetchNotes(): Promise<HandoverNote[]> {
   const sb = supabase;
   if (!sb) return [];
-  const { data, error } = await sb.from("handover_notes").select("*").order("position", { ascending: true });
-  if (error) throw error;
+  const data = await fetchRowsPaginated<any>(sb, "handover_notes", "*", [{ column: "position" }]);
   return (data ?? []).map((r: any) => ({ id: r.id, body: r.body ?? "" }));
 }
 
