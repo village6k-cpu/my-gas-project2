@@ -3,7 +3,28 @@
 import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { isSupabase, supabase } from "@/lib/supabase/client";
-import { VillageLogo } from "@/components/VillageLogo";
+
+// 로그인 워드마크 락업 — 본래 로고 PNG + 에디션(운영 대시보드), finance 로그인과 같은 광학 규칙.
+// 보정값은 PNG 픽셀 측정 기반(h-10 = 원본 96px의 40px 스케일):
+//  · translate +2.7px = VILLAGE 글자만 정중앙(+6.5) − 점 무게 절반(−3.7)
+//  · 에디션 mr 18.8px = 점·우측 여백 20.4px 안쪽(E 오른쪽 끝) − 자간 0.13em 트레일링 보정
+function LoginWordmark() {
+  return (
+    <div className="flex justify-center">
+      <div className="translate-x-[2.7px]">
+        <img
+          src="/village-wordmark.png"
+          alt="VILLAGE"
+          className="block h-10 w-[195px] select-none"
+          draggable={false}
+        />
+        <span className="mr-[18.8px] mt-1 block text-right text-[12px] font-semibold tracking-[0.13em] text-ink-faint">
+          운영 대시보드
+        </span>
+      </div>
+    </div>
+  );
+}
 
 // 로그인 게이트: 세션 없으면 로그인 폼, 있으면 앱. (시드 모드면 통과)
 export function AuthGate({ children }: { children: React.ReactNode }) {
@@ -31,10 +52,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (!isSupabase) return <>{children}</>; // 시드 모드 = 인증 없음
   if (loading) {
     return (
-      <div className="flex min-h-dvh items-center justify-center bg-paper text-ink-faint">
-        <div className="flex flex-col items-center gap-5">
-          <VillageLogo size="lg" />
-          <div className="animate-pulse text-[13px] font-semibold">불러오는 중...</div>
+      <div className="flex min-h-dvh items-center justify-center bg-paper">
+        <div className="flex flex-col items-center gap-4">
+          <LoginWordmark />
+          <div className="animate-pulse text-[13px] font-semibold text-ink-faint">불러오는 중...</div>
         </div>
       </div>
     );
@@ -54,15 +75,8 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-dvh items-center justify-center bg-paper px-5 py-10 text-ink">
       <form onSubmit={login} className="w-full max-w-[340px] sm:max-w-[420px]">
-        <div className="mb-9 flex flex-col items-center text-center">
-          <VillageLogo size="lg" />
-          <div className="mt-5 inline-flex rounded-full border border-line bg-white/55 px-3 py-1 text-[12px] font-bold text-ink-mute">
-            운영 대시보드
-          </div>
-          <h1 className="mt-4 text-[24px] font-black leading-tight tracking-normal text-ink">직원 로그인</h1>
-          <p className="mt-2 text-[13px] font-medium leading-relaxed text-ink-faint">
-            운영 계정으로 계속하세요.
-          </p>
+        <div className="mb-8">
+          <LoginWordmark />
         </div>
 
         <div className="space-y-3 rounded-[8px] border border-line/80 bg-white/80 p-4 shadow-[0_1px_2px_rgba(16,18,29,0.04)] backdrop-blur">
