@@ -67,8 +67,8 @@ assert(
   'setItemName must write through to GAS so sheet-master data does not revert'
 );
 assert(
-  /setItemQty[\s\S]*qty: safeQty[\s\S]*takenQty: e\.takenQty != null \? Math\.min\(e\.takenQty, safeQty\) : undefined[\s\S]*gasWrite\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: safeQty \}\)/.test(store),
-  'setItemQty must update registered qty and call existing updateEquipQty GAS writeback'
+  /setItemQty[\s\S]*qty: safeQty[\s\S]*takenQty: e\.takenQty != null \? Math\.min\(e\.takenQty, safeQty\) : undefined[\s\S]*gasMutation\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: safeQty \}\)/.test(store),
+  'setItemQty must update registered qty and write through updateEquipQty (gasMutation so set-component scaling is applied back)'
 );
 
 assert(

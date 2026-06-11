@@ -188,15 +188,19 @@ function buildSupabaseTrades_(tids) {
       setup_done_at: d.setupDoneAt || null,
       return_done: !!d.returnDone,
       return_done_at: d.returnDoneAt || null,
-      payment_method: d.paymentMethod || null,
-      payment_warning: !!d.paymentWarning,
-      deposit_status: d.depositStatus || null,
-      proof_type: d.proofType || null,
-      issue_status: d.issueStatus || null,
-      billing_company: d.billingCompany || null,
       contract_url: d.contractUrl || null,
       contract_regen_pending: !!d.contractRegenPending
     };
+    // GAS paymentWarning은 '거래내역 조회 실패' 에러 문자열 — 실패 시 결제 필드를 보내지 않아 기존값 보존.
+    // payment_warning 플래그는 앱 전용이라 flush가 관리하지 않음 (에러를 경고로 둔갑시키지 않음).
+    var extrasFailed = typeof d.paymentWarning === 'string' && d.paymentWarning.trim();
+    if (!extrasFailed) {
+      row.payment_method = d.paymentMethod || null;
+      row.deposit_status = d.depositStatus || null;
+      row.proof_type = d.proofType || null;
+      row.issue_status = d.issueStatus || null;
+      row.billing_company = d.billingCompany || null;
+    }
     // 빈 값으로 기존 데이터를 지우지 않는 필드는 값이 있을 때만 포함 (부분 upsert)
     var rowName = d.name || m.name || '';
     if (rowName) row.customer_name = rowName;

@@ -162,3 +162,20 @@ assert(
   'item toggles must not write synthetic schedule IDs back to the sheet'
 );
 console.log('audit-round-4 checks OK');
+
+// ── 감사 5차: 결제필드 보존·세트수량 비대칭·반납해제 복원 ──
+const supaSync3 = read('supabaseSync.js');
+assert(
+  supaSync3.includes('extrasFailed') && !supaSync3.includes('payment_warning: !!d.paymentWarning'),
+  'flush must skip payment fields on extras failure and never write the app-only payment_warning flag'
+);
+const storeTs4 = read('apps/today-dashboard/lib/data/store.ts');
+assert(
+  /gasMutation\("toggleReturn"[\s\S]{0,400}restored/.test(storeTs4),
+  'toggleReturn off must apply the contract status restored by GAS'
+);
+assert(
+  /gasMutation\("updateEquipQty"[\s\S]{0,500}updatedItems/.test(storeTs4),
+  'set-header qty changes must apply GAS component scaling to app state'
+);
+console.log('audit-round-5 checks OK');

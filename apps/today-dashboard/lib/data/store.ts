@@ -271,7 +271,15 @@ export function toggleReturn(tradeId: string) {
     return { ...t, returnDone: on, returnDoneAt: on ? new Date().toISOString() : null, contractStatus: on ? "반납완료" : "반출" };
   });
   flashSave(tradeId);
-  gasWrite("toggleReturn", { tid: tradeId, done: on });
+  // 해제 시 GAS는 이전 계약상태(예약 등)를 복원 — 앱이 무조건 '반출'로 두면 어긋남
+  gasMutation("toggleReturn", { tid: tradeId, done: on })
+    .then((res) => {
+      const restored = res?.contractStatus;
+      if (!on && restored && restored !== "반출") {
+        mutateTrade(tradeId, (t) => ({ ...t, contractStatus: restored }));
+      }
+    })
+    .catch((e) => console.error("[write-back] toggleReturn 실패:", e));
 }
 
 // ── 품목별 반출/반납 상태 ───────────────────────────────────────
@@ -316,7 +324,18 @@ export function setItemQty(tradeId: string, scheduleId: string, qty: number) {
     })),
   );
   flashSave(tradeId);
-  gasWrite("updateEquipQty", { tid: tradeId, scheduleId, qty: safeQty });
+  // 세트 헤더 수량 변경 시 GAS가 구성품 수량을 비례 조정 — 응답을 받아 앱/Supabase도 동일하게
+  gasMutation("updateEquipQty", { tid: tradeId, scheduleId, qty: safeQty })
+    .then((res) => {
+      const updates: { scheduleId: string; newQty: number }[] = res?.updatedItems ?? [];
+      if (updates.length <= 1) return;
+      const byId = new Map(updates.map((u) => [u.scheduleId, Number(u.newQty) || 1]));
+      mutateTrade(tradeId, (t) => ({
+        ...t,
+        equipments: t.equipments.map((e) => (byId.has(e.scheduleId) ? { ...e, qty: byId.get(e.scheduleId)! } : e)),
+      }));
+    })
+    .catch((e) => console.error("[write-back] updateEquipQty 실패:", e));
 }
 export function setItemMemo(tradeId: string, scheduleId: string, phase: Phase, text: string) {
   mutateTrade(tradeId, (t) =>
