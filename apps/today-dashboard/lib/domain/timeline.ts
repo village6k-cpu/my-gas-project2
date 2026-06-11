@@ -67,6 +67,7 @@ export function statusBar(k: StatusKey): { bar: string; strike?: boolean } {
 export function buildItems(trades: Trade[]): TLItem[] {
   const out: TLItem[] = [];
   for (const t of trades) {
+    if (t.contractStatus === "취소") continue; // 취소 거래는 점유/충돌 계산에서 제외
     for (const e of t.equipments) {
       if (e.isComponent) continue; // 세트 구성품은 세트 막대에 포함
       if (e.checkoutState === "excluded") continue;

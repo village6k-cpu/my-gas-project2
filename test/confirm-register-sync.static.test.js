@@ -208,3 +208,14 @@ assert(
   'updateScheduleTime/updateScheduleStatus must mark affected trades dirty for Supabase'
 );
 console.log('audit-round-8 checks OK');
+
+// ── 감사 9차: 취소 거래는 작업 카드·타임라인 점유에서 제외 ──
+assert(
+  read('apps/today-dashboard/lib/domain/status.ts').includes('t.contractStatus !== "취소"'),
+  'cancelled trades must be excluded from today work cards'
+);
+assert(
+  read('apps/today-dashboard/lib/domain/timeline.ts').includes('t.contractStatus === "취소"'),
+  'cancelled trades must not occupy timeline bars or conflict math'
+);
+console.log('audit-round-9 checks OK');
