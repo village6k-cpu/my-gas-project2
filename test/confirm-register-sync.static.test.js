@@ -199,3 +199,12 @@ assert(
   'operations utilization and conflict maps must exclude early-returned rows like the availability engine'
 );
 console.log('audit-round-7 checks OK');
+
+// ── 감사 8차: 타임라인 드래그/상태변경도 Supabase 동기화 마킹 ──
+const backend8 = read('checkAvailability.js');
+assert(
+  /function supaMarkScheduleRowsDirty_/.test(backend8) &&
+    (backend8.match(/supaMarkScheduleRowsDirty_\(sheet, rows\)/g) || []).length >= 2,
+  'updateScheduleTime/updateScheduleStatus must mark affected trades dirty for Supabase'
+);
+console.log('audit-round-8 checks OK');

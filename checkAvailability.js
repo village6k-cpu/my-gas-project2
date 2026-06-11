@@ -790,6 +790,7 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
     sheet.getRange(r, 9).setNumberFormat("@").setValue(endTime);      // I: 반납시간
   });
 
+  supaMarkScheduleRowsDirty_(sheet, rows); // 스크립트 쓰기 — Supabase 동기화 표시
   // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh (드래그된 날짜 포함)
   try { invalidateDashboardCache([newStart, newEnd]); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
@@ -10094,6 +10095,20 @@ function showLog_(lines) {
  * @param {string} newStatus - 새 상태 (대기/반출중/반납완료/취소)
  * @param {string} [rowIndices] - 같은 세트 전체 행 JSON
  */
+
+/** 스케줄상세 행 번호들의 거래ID(B열)를 Supabase 동기화 대상으로 마킹 (스크립트 쓰기 경로용) */
+function supaMarkScheduleRowsDirty_(sheet, rows) {
+  try {
+    var seen = {};
+    (rows || []).forEach(function(r) {
+      var ri = Number(r);
+      if (ri < 2) return;
+      var tid = sheet.getRange(ri, 2).getValue();
+      if (tid && !seen[tid]) { seen[tid] = true; supaMarkTradeDirty_(tid); }
+    });
+  } catch (e) {}
+}
+
 function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName('스케줄상세');
@@ -10118,6 +10133,7 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
     }
   });
 
+  supaMarkScheduleRowsDirty_(sheet, rows); // 스크립트 쓰기 — Supabase 동기화 표시
   try { invalidateDashboardCache(); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 
