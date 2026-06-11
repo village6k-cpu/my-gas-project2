@@ -87,6 +87,7 @@
 - **Code.js** — 트리거 (onEdit, onEditInstallable), 실사기록 동기화, 장비사진 열 설정
 - **checkAvailability.js** — 핵심 로직 (스케줄 확인/등록/보류/거절, 알림톡, 타임라인/대시보드 데이터, 중복 체크)
 - **sheetAPI.js** — 통합 API (doGet/doPost, key인증, Sheet API + Schedule API, 페이지 라우팅)
+- **publicAvailability.js** — 고객용 공개 가용성/견적 조회 (읽기 전용, 개인정보 미포함, action=publicAvail)
 - **generatecontract.js** — 계약서 생성 (Google Sheets 템플릿 복사, 할인율 계산, 전체 시트 유효성 해제)
 - **setupSchedule.js** — 초기 세팅 (계약마스터, 세트마스터 구조 생성)
 - **sheetProtection.js** — 시트 보호 (수식 열 보호)
@@ -112,6 +113,7 @@
 - Sheet API: sheets, info, read, write, append, update, search, run
 - Schedule API: list, scan, 확인, 등록, 보류, 거절, 발송승인
 - 데이터 API: timeline, dashboard (date 파라미터 지원)
+- 공개 API: publicAvail — 고객용 가용성+견적 (apps/today-dashboard `/availability` 공개 페이지가 서버 라우트 `/api/public/*` 경유로 호출, 예약 신청은 run&func=insertAndCheckRequest 재사용)
 
 ### 핵심 로직
 - 확인요청 H열 "확인" → processByReqID() 자동 가용성 체크

@@ -247,6 +247,15 @@ function handleRequest(e) {
           catalog: getDashboardEquipmentCatalog_(SpreadsheetApp.getActiveSpreadsheet())
         });
 
+      case "publicAvail": {
+        // 고객용 공개 가용성/견적 — 읽기 전용, 개인정보 미포함 (publicAvailability.js)
+        var pvReq = postBody.req || postBody;
+        if (params.req) {
+          try { pvReq = JSON.parse(params.req); } catch (pvErr) { return jsonResponse({ success: false, error: "req JSON 파싱 실패" }); }
+        }
+        return jsonResponse(getPublicAvailability(pvReq));
+      }
+
       case "dashboardSearch":
         return jsonResponse(getDashboardSearchData(
           params.q || params.query || postBody.q || postBody.query || "",
