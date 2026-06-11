@@ -118,17 +118,34 @@ function mapRisk(arr: any): RiskWarning[] {
 /** action=dashboard 항목을 기존 거래(날짜 유지) 위에 상세 덮어쓰기.
  *  isSetHeader는 raw 헤더여부(isHeader)로 저장 → 라벨/노출 판정은 읽기(normalizeItems) 단일소스. */
 function mergeDashboard(base: Trade, it: any): Trade {
-  const equipments: EquipmentItem[] = (it.equipments ?? []).map((e: any) => ({
-    scheduleId: e.scheduleId,
-    name: e.name,
-    qty: Number(e.qty) || 1,
-    setName: e.setName || undefined,
-    isSetHeader: !!e.isHeader,
-    isComponent: !!e.isComponent,
-    emphasize: EMPH.test(e.name) || undefined,
-    category: e.category || categoryOf(e.name) || undefined, // 장비마스터 실제 카테고리 우선
-    checkoutState: e.checkedCheckout ? "taken" : "pending",
-  }));
+  // 품목은 scheduleId 단위 merge — 시트가 모르는 앱 전용 상태(제외/부분픽업/메모/오프셋/정산)를 보존
+  const baseById = new Map(base.equipments.map((e) => [e.scheduleId, e]));
+  const incoming: EquipmentItem[] = (it.equipments ?? []).map((e: any) => {
+    const prev = baseById.get(e.scheduleId);
+    return {
+      scheduleId: e.scheduleId,
+      name: e.name,
+      qty: Number(e.qty) || 1,
+      setName: e.setName || undefined,
+      isSetHeader: !!e.isHeader,
+      isComponent: !!e.isComponent,
+      emphasize: EMPH.test(e.name) || undefined,
+      category: e.category || categoryOf(e.name) || undefined, // 장비마스터 실제 카테고리 우선
+      checkoutState: prev?.checkoutState === "excluded" ? "excluded" : e.checkedCheckout ? "taken" : "pending",
+      takenQty: prev?.takenQty,
+      memoCheckout: prev?.memoCheckout,
+      memoCheckin: prev?.memoCheckin,
+      startShiftDays: prev?.startShiftDays,
+      endShiftDays: prev?.endShiftDays,
+      settlement: prev?.settlement,
+      offCatalog: prev?.offCatalog,
+    } as EquipmentItem;
+  });
+  // 시트에 없는 앱 전용 품목(현장추가 등 유상 청구 대상)은 절대 삭제하지 않음
+  const incomingIds = new Set(incoming.map((e) => e.scheduleId));
+  const appOnly = base.equipments.filter((e) => !incomingIds.has(e.scheduleId) && (e.onsite || e.offCatalog));
+  const equipments = incoming.length ? [...incoming, ...appOnly] : base.equipments;
+
   const returnCounts: Record<string, ReturnCount> = {};
   for (const e of it.equipments ?? []) {
     if (e.isHeader) continue;
@@ -136,6 +153,31 @@ function mergeDashboard(base: Trade, it: any): Trade {
       returnCounts[e.scheduleId] = { good: Number(e.qty) || 1, damaged: 0, lost: 0 }; // scheduleId 단위
     }
   }
+  // 앱이 기록한 파손/분실 카운트는 시트 체크박스보다 정보가 많음 — 보존
+  for (const [sid, rc] of Object.entries(base.returnCounts ?? {})) {
+    if ((rc.damaged ?? 0) > 0 || (rc.lost ?? 0) > 0) returnCounts[sid] = rc;
+  }
+
+  // GAS paymentWarning은 "거래내역 조회 실패" 에러 문자열 — 실패 시 결제 필드 merge 금지 (기본값 wipe 방지)
+  const extrasFailed = typeof it.paymentWarning === "string" && it.paymentWarning.trim().length > 0;
+  const payment = extrasFailed
+    ? {
+        paymentMethod: base.paymentMethod,
+        depositStatus: base.depositStatus,
+        proofType: base.proofType,
+        issueStatus: base.issueStatus,
+        issueNote: base.issueNote,
+        billingCompany: base.billingCompany,
+      }
+    : {
+        paymentMethod: it.paymentMethod || base.paymentMethod,
+        depositStatus: it.depositStatus || base.depositStatus,
+        proofType: it.proofType || base.proofType,
+        issueStatus: it.issueStatus || base.issueStatus,
+        issueNote: it.issueNote || base.issueNote,
+        billingCompany: it.billingCompany || base.billingCompany,
+      };
+
   return {
     ...base,
     // 거래내역 I열 실 결제금액이 정산 표시의 기준 — 타임라인 단가합(추정치)을 대체
@@ -148,19 +190,14 @@ function mergeDashboard(base: Trade, it: any): Trade {
     returnDone: !!it.returnDone,
     setupDoneAt: it.setupDoneAt || undefined,
     returnDoneAt: it.returnDoneAt || undefined,
-    paymentMethod: it.paymentMethod || undefined,
-    paymentWarning: !!it.paymentWarning,
-    depositStatus: it.depositStatus || undefined,
-    proofType: it.proofType || undefined,
-    issueStatus: it.issueStatus || undefined,
-    issueNote: it.issueNote || undefined,
-    billingCompany: it.billingCompany || undefined,
+    ...payment,
+    paymentWarning: base.paymentWarning, // 에러 문자열을 경고 플래그로 둔갑시키지 않음
     contractUrl: it.contractUrl || base.contractUrl,
     contractRegenPending: !!it.contractRegenPending,
     noteCheckin: it.returnMemo || base.noteCheckin,
     riskWarnings: mapRisk(it.riskWarnings),
     returnCounts,
-    equipments: equipments.length ? equipments : base.equipments,
+    equipments,
   };
 }
 

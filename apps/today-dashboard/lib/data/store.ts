@@ -402,9 +402,14 @@ export function setOnsiteSettlement(tradeId: string, scheduleId: string, settlem
   flashSave(tradeId);
 }
 export function removeItem(tradeId: string, scheduleId: string) {
+  const item = state.trades.find((t) => t.tradeId === tradeId)?.equipments.find((e) => e.scheduleId === scheduleId);
   mutateTrade(tradeId, (t) => ({ ...t, equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId) }));
   flashSave(tradeId);
   deleteScheduleItem(tradeId, scheduleId).catch(() => {});
+  // 시트 유래 품목은 스케줄상세 행도 삭제 — 가용성 점유와 repair 부활 방지 (현장추가는 Supabase 전용)
+  if (item && !item.onsite && new RegExp(`^${tradeId}-\\d+$`).test(scheduleId)) {
+    gasWrite("removeEquip", { tid: tradeId, scheduleId, equipName: item.name });
+  }
 }
 
 // ── 반납: 품목(scheduleId) 단위 카운트 + 시트 write-back ────────────

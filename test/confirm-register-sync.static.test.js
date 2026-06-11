@@ -107,3 +107,22 @@ assert(
   'timeline polling must compare epochs (not ISO strings) and ignore the tradeId name fallback'
 );
 console.log('audit-round-1 checks OK');
+
+// ── 감사 2차: 병합 보존 규칙 + 품목 삭제 시트 반영 ──
+const syncTs2 = read('apps/today-dashboard/lib/data/sync.ts');
+assert(
+  syncTs2.includes('appOnly') && syncTs2.includes('e.onsite || e.offCatalog') &&
+    syncTs2.includes('prev?.checkoutState === "excluded"') && syncTs2.includes('extrasFailed'),
+  'dashboard merge must preserve onsite items, excluded state, and skip payment merge on extras failure'
+);
+assert(
+  /rc\.damaged ?\?\? 0\) > 0 \|\| \(rc\.lost ?\?\? 0\) > 0/.test(syncTs2),
+  'dashboard merge must preserve app-recorded damaged/lost return counts'
+);
+const storeTs2 = read('apps/today-dashboard/lib/data/store.ts');
+assert(
+  /removeItem[\s\S]{0,600}gasWrite\("removeEquip"/.test(storeTs2) &&
+    read('apps/today-dashboard/app/api/gas/route.ts').includes('"removeEquip"'),
+  'removing a sheet-derived item must also delete the 스케줄상세 row via removeEquip'
+);
+console.log('audit-round-2 checks OK');
