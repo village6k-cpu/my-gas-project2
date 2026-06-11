@@ -1207,6 +1207,7 @@ function syncTemplateMasterDebounced() {
  */
 function cancelContract(ss, 거래ID, contractRow) {
   var contractSheet = ss.getSheetByName("계약마스터");
+  supaMarkTradeDirty_(거래ID); // 취소도 Supabase로 — timeline에서 사라져도 계약마스터 상태로 반영됨
 
   // 1. 스케줄상세에서 해당 거래ID 행 삭제 (아래부터)
   var schedSheet = ss.getSheetByName("스케줄상세");

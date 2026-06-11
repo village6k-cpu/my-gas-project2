@@ -4496,9 +4496,13 @@ function updateTradeBillingCompany(tid, billingCompany) {
     if (!row) return { error: "거래내역에서 거래ID를 찾지 못했습니다: " + tid };
 
     var billingCompanyCol = 7; // G: 발행처 상호
-    var opts = paymentOptionsFromRule_(거래시트.getRange(row, billingCompanyCol).getDataValidation());
-    if (billingCompany && opts.length > 0 && opts.indexOf(billingCompany) < 0) {
-      return { error: "발행처 상호 드롭다운에 없는 값입니다: " + billingCompany };
+    // 검증 기준 = 발행처DB 마스터 (옵션 목록과 동일 출처) + G열 룰은 보조 — 둘 중 하나에 있으면 허용
+    var ruleOpts = paymentOptionsFromRule_(거래시트.getRange(row, billingCompanyCol).getDataValidation());
+    var masterOpts = [];
+    try { masterOpts = getTradeBillingCompanyOptions_() || []; } catch (optErr) {}
+    var allOpts = masterOpts.concat(ruleOpts);
+    if (billingCompany && allOpts.length > 0 && allOpts.indexOf(billingCompany) < 0) {
+      return { error: "발행처 목록에 없는 값입니다 (발행처DB에 먼저 등록하세요): " + billingCompany };
     }
 
     거래시트.getRange(row, billingCompanyCol).setValue(billingCompany);
@@ -7815,10 +7819,16 @@ function scheduleRegister(reqID) {
   // 대기열에 reqID 추가 — 단일 속성 덮어쓰기 금지 (연속 등록 시 앞 건 유실 방지)
   // 행 번호는 저장하지 않는다: 실행 시점에 다시 찾는다 (세트 전개 등으로 행이 밀릴 수 있음)
   var qProps = PropertiesService.getScriptProperties();
-  var queue = [];
-  try { queue = JSON.parse(qProps.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
-  if (queue.indexOf(reqID) === -1) queue.push(reqID);
-  qProps.setProperty("_pendingRegisterQueue", JSON.stringify(queue));
+  var qLock = LockService.getScriptLock();
+  var qLocked = qLock.tryLock(10000);
+  try {
+    var queue = [];
+    try { queue = JSON.parse(qProps.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
+    if (queue.indexOf(reqID) === -1) queue.push(reqID);
+    qProps.setProperty("_pendingRegisterQueue", JSON.stringify(queue));
+  } finally {
+    if (qLocked) qLock.releaseLock();
+  }
 
   // 1초 후 실행되는 트리거 생성
   ScriptApp.newTrigger("_runPendingRegister")
@@ -7842,19 +7852,26 @@ function _runPendingRegister() {
   });
 
   var props = PropertiesService.getScriptProperties();
+  // 큐 읽기→비우기를 락으로 감싸 동시 추가분 유실 방지
+  var drainLock = LockService.getScriptLock();
+  var drainLocked = drainLock.tryLock(10000);
   var queue = [];
-  try { queue = JSON.parse(props.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
-  // 구버전 단일 속성도 큐로 흡수 (배포 경계 호환)
-  var legacy = props.getProperty("_pendingRegister");
-  if (legacy) {
-    props.deleteProperty("_pendingRegister");
-    try {
-      var li = JSON.parse(legacy);
-      if (li && li.reqID && queue.indexOf(li.reqID) === -1) queue.push(li.reqID);
-    } catch (le) {}
+  try {
+    try { queue = JSON.parse(props.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
+    // 구버전 단일 속성도 큐로 흡수 (배포 경계 호환)
+    var legacy = props.getProperty("_pendingRegister");
+    if (legacy) {
+      props.deleteProperty("_pendingRegister");
+      try {
+        var li = JSON.parse(legacy);
+        if (li && li.reqID && queue.indexOf(li.reqID) === -1) queue.push(li.reqID);
+      } catch (le) {}
+    }
+    if (queue.length) props.deleteProperty("_pendingRegisterQueue");
+  } finally {
+    if (drainLocked) drainLock.releaseLock();
   }
   if (!queue.length) return;
-  props.deleteProperty("_pendingRegisterQueue");
 
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("확인요청");

@@ -83,3 +83,27 @@ assert(
   'billing company options must come from 발행처DB first, with 거래내역 G열 only as fallback'
 );
 console.log('settlement-amount & billing-company checks OK');
+
+// ── 감사 1차 수정분 회귀 가드 ──
+const supaSync2 = read('supabaseSync.js');
+assert(
+  supaSync2.includes('supaUpsertGrouped_') && /skeleton/.test(supaSync2) && supaSync2.includes("wm.status || '취소'"),
+  'flush must use grouped partial upserts, never overwrite ops fields with defaults, and propagate cancellations'
+);
+assert(
+  read('Code.js').includes('supaMarkTradeDirty_(거래ID); // 취소'),
+  'cancelContract must mark the trade dirty for Supabase'
+);
+assert(
+  backend.includes('getTradeBillingCompanyOptions_() || []') && backend.includes('masterOpts.concat(ruleOpts)'),
+  'billing company write validation must accept the 발행처DB master list'
+);
+assert(
+  /drainLock/.test(backend) && /qLock/.test(backend),
+  'register queue read-modify-write must be lock-protected'
+);
+assert(
+  /toMs\(ex\.checkoutAt\) !== toMs\(tl\.checkoutAt\)/.test(syncTs) && /tl\.customerName !== tl\.tradeId/.test(syncTs),
+  'timeline polling must compare epochs (not ISO strings) and ignore the tradeId name fallback'
+);
+console.log('audit-round-1 checks OK');

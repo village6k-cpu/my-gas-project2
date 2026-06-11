@@ -336,10 +336,12 @@ export async function pollTimelineChanges(current: Trade[]): Promise<Trade[]> {
       changed.push(tl); // 신규 예약(시트에서 막 들어옴)
       continue;
     }
+    // 문자열 비교 금지: timestamptz 왕복(+00:00)과 toISOString(.000Z)이 같은 시각도 다르게 보임 → epoch 비교
+    const nameChanged = ex.customerName !== tl.customerName && tl.customerName !== tl.tradeId; // 계약마스터 매칭 실패 시 cn=거래ID 폴백 제외
     if (
-      ex.checkoutAt !== tl.checkoutAt ||
-      ex.returnAt !== tl.returnAt ||
-      ex.customerName !== tl.customerName ||
+      toMs(ex.checkoutAt) !== toMs(tl.checkoutAt) ||
+      toMs(ex.returnAt) !== toMs(tl.returnAt) ||
+      nameChanged ||
       shouldRestoreMissingTimelineEquipments(ex, tl)
     ) {
       changed.push(mergeTimelineTradeSnapshot(ex, tl));
