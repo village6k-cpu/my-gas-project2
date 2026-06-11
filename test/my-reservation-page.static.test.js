@@ -76,4 +76,18 @@ assert(
   'GAS helper must keep the API key server-side'
 );
 
+// ── 등록완료 알림톡: 내 예약 링크 포함, 미설정 시 스킵, 거래당 1회, 등록 흐름 비차단 ──
+const backend = read('checkAvailability.js');
+assert(
+  /function sendRegisterCompleteAlimtalk_/.test(backend) &&
+    backend.includes("getProperty('POPBILL_TPL_REGISTER')") &&
+    backend.includes('getMyPageLink(거래ID)') &&
+    backend.includes("'REG_ALIM_SENT_' + 거래ID"),
+  'register-complete alimtalk must include the my-page link, skip without a template, and dedupe per trade'
+);
+assert(
+  /try \{\s*sendRegisterCompleteAlimtalk_\(거래ID, 예약자명, 연락처, 반출일, 반출시간, 반납일, 반납시간\);\s*\} catch/.test(backend),
+  'registerByReqID must call the alimtalk inside try/catch so registration never fails on send errors'
+);
+
 console.log('my-reservation-page.static.test.js OK');

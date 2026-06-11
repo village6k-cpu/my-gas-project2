@@ -8330,8 +8330,13 @@ function registerByReqID(sheet, triggerRow) {
     sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
   }
 
-  // ── 등록완료 알림톡 — 비활성화 (코워크 에이전트가 카톡으로 직접 발송) ──
-  // 반출/반납 안내톡(checkGuideAlimtalk)은 유지됨
+  // ── 등록완료 알림톡 + 내 예약 링크 (거래당 1회, 실패해도 등록은 진행) ──
+  // POPBILL_TPL_REGISTER 템플릿 미설정 시 자동 스킵 (기존처럼 코워크 카톡 발송으로 운영 가능)
+  try {
+    sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출일, 반출시간, 반납일, 반납시간);
+  } catch (almErr) {
+    Logger.log("등록완료 알림톡 실패(등록은 정상): " + almErr.message);
+  }
 
   // dashboard/timeline 캐시 즉시 무효화 → 새로고침 안 해도 다음 fetch는 fresh
   try { invalidateDashboardCache(); } catch (e) {}
@@ -9156,6 +9161,56 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars) {
 
 var TPL_CHECKOUT = '026040000902';  // 반출 안내
 var TPL_CHECKIN  = '026040000904';  // 반납 안내
+
+/**
+ * 등록완료 알림톡 — 예약 확정 안내 + 내 예약 페이지 링크
+ * 사전 조건 (없으면 조용히 스킵 = 기존 코워크 카톡 방식 그대로):
+ *   - Script Properties POPBILL_TPL_REGISTER: 팝빌 승인 템플릿 코드
+ *   - setupMyPage() 실행 + MYPAGE_BASE_URL 설정 (링크 생성용)
+ * 템플릿 변수: #{고객명} #{반출일시} #{반납일시} #{내예약링크}
+ * 중복 방지: 거래ID당 1회만 발송 (합침 재등록 시 재발송 안 함)
+ */
+function sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출일, 반출시간, 반납일, 반납시간) {
+  var props = PropertiesService.getScriptProperties();
+  var tpl = props.getProperty('POPBILL_TPL_REGISTER');
+  if (!tpl) return { skipped: '템플릿 미설정' };
+  if (!연락처 || !예약자명) return { skipped: '고객 정보 없음' };
+
+  var sentFlag = 'REG_ALIM_SENT_' + 거래ID;
+  if (props.getProperty(sentFlag)) return { skipped: '이미 발송됨' };
+
+  var link = getMyPageLink(거래ID);
+  if (!link.success || !link.url || link.url.indexOf('http') !== 0) {
+    Logger.log('등록완료 알림톡 스킵: 내 예약 링크 생성 불가 (setupMyPage/MYPAGE_BASE_URL 확인)');
+    return { skipped: '링크 생성 불가' };
+  }
+
+  var 반출표시 = fmtDT(반출일, 반출시간);
+  var 반납표시 = fmtDT(반납일, 반납시간);
+  var msg = _buildRegisterMsg(예약자명, 반출표시, 반납표시, link.url);
+  var vars = {
+    '#{고객명}': String(예약자명),
+    '#{반출일시}': 반출표시,
+    '#{반납일시}': 반납표시,
+    '#{내예약링크}': link.url
+  };
+
+  var res = sendAlimtalk(tpl, String(연락처), String(예약자명), msg, vars);
+  props.setProperty(sentFlag, Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm'));
+  Logger.log('✅ 등록완료 알림톡: ' + 거래ID + ' ' + 예약자명 + ' → ' + JSON.stringify(res));
+  return { sent: true };
+}
+
+/** 등록완료 알림톡 본문 — 팝빌 승인 템플릿과 동일해야 함 */
+function _buildRegisterMsg(고객명, 반출표시, 반납표시, 링크) {
+  return 고객명 + ' 감독님, 안녕하세요.\n빌리지 렌탈샵입니다.\n\n' +
+    '예약이 확정되었습니다 : )\n\n' +
+    '· 반출: ' + 반출표시 + '\n' +
+    '· 반납: ' + 반납표시 + '\n\n' +
+    '아래 링크에서 예약 내용과 계약서를 언제든 확인하실 수 있어요.\n' +
+    링크 + '\n\n' +
+    '변경·연장·취소는 카카오톡 채널로 메시지 주세요.\n감사합니다!';
+}
 
 var GUIDE_SEND_START = 8;   // 발송 가능 시작 시각
 var GUIDE_SEND_END   = 22;  // 발송 가능 종료 시각
