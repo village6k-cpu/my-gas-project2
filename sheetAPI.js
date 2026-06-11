@@ -1220,12 +1220,13 @@ function getOperationsData_(targetDate, skipCache) {
     }
 
     // 가동률 분자: 오늘 활성 스케줄(반출일 ≤ 오늘 ≤ 반납일)의 수량 합
-    if (coDate && ciDate && coDate <= todayStr && todayStr <= ciDate) {
+    // 조기 반납(반납완료) 건은 더 이상 장비를 점유하지 않음 — 가용성 엔진과 동일 기준
+    if (status !== "반납완료" && coDate && ciDate && coDate <= todayStr && todayStr <= ciDate) {
       activeQtySum += (Number(row[4]) || 0);
     }
 
-    // 재고 충돌 — 향후 90일 이내 활성 스케줄을 일자×장비별로 누적 (세트 헤더 행 제외)
-    if (coDate && ciDate && opItem && opItem.name) {
+    // 재고 충돌 — 향후 90일 이내 활성 스케줄을 일자×장비별로 누적 (세트 헤더 행 제외, 반납완료 제외)
+    if (status !== "반납완료" && coDate && ciDate && opItem && opItem.name) {
       var winStart = coDate < todayStr ? todayStr : coDate;
       var winEnd = ciDate > conflictHorizonEndStr ? conflictHorizonEndStr : ciDate;
       if (winStart <= winEnd) {
@@ -1282,7 +1283,7 @@ function getOperationsData_(targetDate, skipCache) {
       unconfirmedMap[reqID] = {
         reqID: String(reqID),
         customer: String(r[10] || ""),
-        company: String(r[12] || ""),
+        company: (function(dt) { return dt && dt !== "일반" ? dt : ""; })(String(r[12] || "").trim()), // M열=할인유형 (구 업체명)
         checkoutDate: rDate,
         checkoutTime: rTime,
         items: []

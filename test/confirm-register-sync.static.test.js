@@ -191,3 +191,11 @@ assert(
   'multi-row edits must mark every affected trade dirty'
 );
 console.log('audit-round-6 checks OK');
+
+// ── 감사 7차: 운영판 — 조기 반납 점유 제외 ──
+const sheetApi7 = read('sheetAPI.js');
+assert(
+  (sheetApi7.match(/status !== "반납완료"/g) || []).length >= 2,
+  'operations utilization and conflict maps must exclude early-returned rows like the availability engine'
+);
+console.log('audit-round-7 checks OK');
