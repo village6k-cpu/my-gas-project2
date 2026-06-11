@@ -57,3 +57,29 @@ assert(
 );
 
 console.log('confirm-register-sync.static.test.js OK');
+
+// ── 정산 금액 = 거래내역 I열 실 결제금액 (타임라인 단가합 추정치가 기준이 되면 안 됨) ──
+assert(
+  backend.includes('actualAmountCol = 9') && backend.includes('extra.actualAmount'),
+  'dashboard trade extras must read the actual paid amount from 거래내역 I열'
+);
+assert(
+  (backend.match(/actualAmount: typeof extra\.actualAmount === 'number'/g) || []).length >= 2,
+  'both dashboard item builders must attach actualAmount'
+);
+assert(
+  syncTs.includes('it.actualAmount') && /amountFix/.test(syncTs),
+  'app must prefer the actual paid amount and trigger repair when it differs'
+);
+const timelineMerge = read('apps/today-dashboard/lib/data/timelineMerge.ts');
+assert(
+  timelineMerge.includes('existing.amount ?? timeline.amount'),
+  'timeline polling must not overwrite the actual amount with the list-price sum'
+);
+
+// ── 발행처 드롭다운은 발행처DB(마스터) 우선 — 거래내역 과거 오타가 옵션이 되면 안 됨 ──
+assert(
+  /getTradeBillingCompanyOptionsFromIssuerDb_\(\);\s*\n\s*if \(options\.length > 0\) return options;\s*\n\s*return getTradeColumnOptionsFromSheet_\(7, \[\]\);/.test(backend),
+  'billing company options must come from 발행처DB first, with 거래내역 G열 only as fallback'
+);
+console.log('settlement-amount & billing-company checks OK');

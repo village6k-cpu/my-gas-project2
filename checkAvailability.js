@@ -970,6 +970,7 @@ function getDashboardData(targetDate, skipCache, options) {
       proofType: extra.proofType || '',
       issueStatus: extra.issueStatus || '',
       billingCompany: extra.billingCompany || '',
+      actualAmount: typeof extra.actualAmount === 'number' ? extra.actualAmount : null,
       issueNote: extra.issueNote || '',
       returnStatus: checkInfo.returnStatus || '',
       returnMemo: checkInfo.returnMemo || '',
@@ -1688,6 +1689,7 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRu
     proofType: extra.proofType || '',
     issueStatus: extra.issueStatus || '',
     billingCompany: extra.billingCompany || '',
+    actualAmount: typeof extra.actualAmount === 'number' ? extra.actualAmount : null,
     issueNote: extra.issueNote || '',
     returnStatus: checkInfo.returnStatus || '',
     returnMemo: checkInfo.returnMemo || '',
@@ -3437,7 +3439,7 @@ function normalizeEquipmentCheckTradeId_(value) {
 /**
  * 개고생2.0/빌리지2.0 거래내역에서 계약서 링크, G열 발행처 상호, J열 결제수단을 읽어 대시보드에 붙인다.
  */
-var DASHBOARD_TRADE_EXTRA_CACHE_PREFIX_ = 'dashboard_trade_extra_v2_';
+var DASHBOARD_TRADE_EXTRA_CACHE_PREFIX_ = 'dashboard_trade_extra_v3_';
 var DASHBOARD_TRADE_EXTRA_CACHE_SECONDS_ = 300;
 
 function emptyDashboardTradeExtra_() {
@@ -3451,7 +3453,8 @@ function emptyDashboardTradeExtra_() {
     proofType: '',
     issueStatus: '',
     billingCompany: '',
-    issueNote: ''
+    issueNote: '',
+    actualAmount: null
   };
 }
 
@@ -3470,6 +3473,8 @@ function buildDashboardTradeExtraFromRow_(row, columns) {
   extra.issueStatus = String(row[columns.issueCol - 1] || '').trim();
   extra.depositStatus = String(row[columns.depositCol - 1] || '').trim();
   extra.issueNote = String(row[columns.noteCol - 1] || '').trim();
+  var amtRaw = String(row[columns.actualAmountCol - 1] || '').replace(/[^0-9.-]/g, '');
+  extra.actualAmount = amtRaw && !isNaN(Number(amtRaw)) ? Number(amtRaw) : null; // I열: 실 결제금액
   return extra;
 }
 
@@ -3547,6 +3552,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var idCol = _findHeaderCol_(headers, ["거래ID", "거래 Id", "거래id"]) || 5;
     var contractCol = _findHeaderCol_(headers, ["계약서링크", "계약서 링크", "계약서", "계약서URL", "계약서 URL"]) || 3;
     var billingCompanyCol = 7; // G열: 발행처 상호
+    var actualAmountCol = 9; // I열: 실 결제금액 (정산 표시용 — 단가합이 아닌 이 값이 기준)
     var paymentCol = 10; // J열: 결제수단
     var proofCol = 11;   // K열: 증빙유형
     var issueCol = 12;   // L열: 발행상태
@@ -3554,7 +3560,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var noteCol = 14;    // N열: 비고
     var wanted = {};
     missingIds.forEach(function(tid) { wanted[String(tid)] = true; });
-    var readCols = Math.max(idCol, contractCol, billingCompanyCol, paymentCol, proofCol, issueCol, depositCol, noteCol);
+    var readCols = Math.max(idCol, contractCol, billingCompanyCol, actualAmountCol, paymentCol, proofCol, issueCol, depositCol, noteCol);
     var idValues = 거래시트.getRange(2, idCol, 거래시트.getLastRow() - 1, 1).getDisplayValues();
     var rowsToRead = [];
     idValues.forEach(function(row, idx) {
@@ -3566,6 +3572,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var columns = {
       contractCol: contractCol,
       billingCompanyCol: billingCompanyCol,
+      actualAmountCol: actualAmountCol,
       paymentCol: paymentCol,
       proofCol: proofCol,
       issueCol: issueCol,
@@ -4153,10 +4160,11 @@ function getTradeDepositStatusOptions_() {
 }
 
 function getTradeBillingCompanyOptions_() {
-  return getCachedDashboardTradeOptions_('dashboard_trade_billing_company_options_v1', function() {
-    var options = getTradeColumnOptionsFromSheet_(7, []);
+  return getCachedDashboardTradeOptions_('dashboard_trade_billing_company_options_v2', function() {
+    // 발행처DB가 마스터 — 거래내역 G열 과거 입력값(오타 포함)은 DB가 비었을 때만 fallback
+    var options = getTradeBillingCompanyOptionsFromIssuerDb_();
     if (options.length > 0) return options;
-    return getTradeBillingCompanyOptionsFromIssuerDb_();
+    return getTradeColumnOptionsFromSheet_(7, []);
   }, []);
 }
 

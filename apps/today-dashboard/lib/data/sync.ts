@@ -138,6 +138,8 @@ function mergeDashboard(base: Trade, it: any): Trade {
   }
   return {
     ...base,
+    // 거래내역 I열 실 결제금액이 정산 표시의 기준 — 타임라인 단가합(추정치)을 대체
+    amount: typeof it.actualAmount === "number" && it.actualAmount > 0 ? it.actualAmount : base.amount,
     customerName: it.name || base.customerName,
     customerPhone: it.tel || base.customerPhone,
     company: it.company || base.company,
@@ -213,7 +215,9 @@ function incomingEquipmentCount(it: any): number {
 }
 
 function shouldUseDashboardDetail(base: Trade, it: any): boolean {
-  return incomingEquipmentCount(it) > currentEquipmentCount(base) || (!base.contractUrl && !!it.contractUrl);
+  const amountFix =
+    typeof it?.actualAmount === "number" && it.actualAmount > 0 && it.actualAmount !== (base.amount ?? 0);
+  return incomingEquipmentCount(it) > currentEquipmentCount(base) || (!base.contractUrl && !!it.contractUrl) || amountFix;
 }
 
 function repairFromDashboardItems(current: Trade[], items: any[]): Trade[] {
