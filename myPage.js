@@ -7,11 +7,11 @@
  * - 토큰 = {ID}.{HMAC-SHA256(ID, 비밀키) 앞 20자리} → 추측 불가, 저장 불필요
  * - ID = 거래ID(등록 후) 또는 요청ID(RQ-..., 등록 전)
  * - 응답에 연락처는 절대 포함하지 않고, 예약자명은 마스킹한다.
+ * - 변경/연장/취소는 페이지에서 받지 않는다 — 카카오톡 채널 안내만 표시.
  * - 가용성/단가/다른 고객 정보는 노출하지 않는다.
  *
  * 진입 (sheetAPI.js):
  *   action=myPage&token=...            → getMyReservation(token)
- *   action=myPageRequest (POST)        → submitMyPageRequest(token, type, detail)
  *   action=run&func=getMyPageLink      → 직원/봇이 고객에게 보낼 링크 생성
  *
  * 1회 설정: setupMyPage() 실행 → MYPAGE_SECRET 자동 생성.
@@ -102,7 +102,9 @@ function getMyReservation(token) {
   var id = myPageVerify_(token);
   if (!id) return { success: false, error: "유효하지 않은 링크입니다" };
 
-  var notice = PropertiesService.getScriptProperties().getProperty("MYPAGE_NOTICE") || "";
+  var props = PropertiesService.getScriptProperties();
+  var notice = props.getProperty("MYPAGE_NOTICE") || "";
+  var kakaoUrl = props.getProperty("MYPAGE_KAKAO_URL") || ""; // 카카오톡 채널 링크 (선택)
 
   if (id.indexOf("RQ-") === 0) {
     var reqView = myPageRequestView_(id);
@@ -110,14 +112,14 @@ function getMyReservation(token) {
     // 등록 완료된 요청이면 거래 상세도 함께
     if (reqView.tradeId) {
       var tradeView = myPageTradeView_(reqView.tradeId);
-      if (tradeView) return { success: true, kind: "trade", request: reqView, trade: tradeView, notice: notice };
+      if (tradeView) return { success: true, kind: "trade", request: reqView, trade: tradeView, notice: notice, kakaoUrl: kakaoUrl };
     }
-    return { success: true, kind: "request", request: reqView, notice: notice };
+    return { success: true, kind: "request", request: reqView, notice: notice, kakaoUrl: kakaoUrl };
   }
 
   var trade = myPageTradeView_(id);
   if (!trade) return { success: false, error: "예약을 찾을 수 없습니다" };
-  return { success: true, kind: "trade", trade: trade, notice: notice };
+  return { success: true, kind: "trade", trade: trade, notice: notice, kakaoUrl: kakaoUrl };
 }
 
 /** 확인요청 단계 뷰 — 같은 요청ID의 행 묶음 */
@@ -215,71 +217,4 @@ function myPageTradeView_(tradeId) {
     items: items,
     contractUrl: contractUrl
   };
-}
-
-var MYPAGE_REQUEST_TYPES_ = ["연장", "변경", "취소", "문의"];
-
-/**
- * 고객 요청 접수 — '고객요청' 시트에 기록 (기존 시트 구조는 건드리지 않음).
- * 직원이 시트에서 확인 후 기존 추가/삭제/날짜변경/취소 절차로 처리한다.
- */
-function submitMyPageRequest(token, type, detail) {
-  var id = myPageVerify_(token);
-  if (!id) return { success: false, error: "유효하지 않은 링크입니다" };
-
-  type = String(type || "").trim();
-  if (MYPAGE_REQUEST_TYPES_.indexOf(type) === -1) {
-    return { success: false, error: "요청 유형은 연장/변경/취소/문의 중 하나여야 합니다" };
-  }
-  detail = String(detail || "").trim().slice(0, 500);
-  if (!detail && type !== "취소") {
-    return { success: false, error: "요청 내용을 입력해주세요" };
-  }
-
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName("고객요청");
-  if (!sheet) {
-    sheet = ss.insertSheet("고객요청");
-    sheet.getRange(1, 1, 1, 6).setValues([["접수일시", "거래/요청ID", "예약자명", "유형", "내용", "처리상태"]]);
-    sheet.getRange(1, 1, 1, 6).setFontWeight("bold").setBackground("#E8F0FE");
-    sheet.setFrozenRows(1);
-  }
-
-  // 예약자명은 내부 기록용으로 원본 조회 (응답에는 포함하지 않음)
-  var customerName = "";
-  if (id.indexOf("RQ-") === 0) {
-    var rv = myPageRequestView_(id);
-    if (!rv) return { success: false, error: "요청을 찾을 수 없습니다" };
-  } else {
-    var contractSheet = ss.getSheetByName("계약마스터");
-    if (contractSheet && contractSheet.getLastRow() >= 2) {
-      var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 2).getValues();
-      for (var i = 0; i < rows.length; i++) {
-        if (String(rows[i][0]).trim() === id) { customerName = String(rows[i][1] || "").trim(); break; }
-      }
-    }
-    if (!customerName) return { success: false, error: "예약을 찾을 수 없습니다" };
-  }
-
-  // 도배 방지: 같은 ID의 미처리 요청 5건 이상이면 차단
-  var lastRow = sheet.getLastRow();
-  if (lastRow >= 2) {
-    var existing = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
-    var pending = 0;
-    for (var r = 0; r < existing.length; r++) {
-      if (String(existing[r][1]).trim() === id && !String(existing[r][5] || "").trim()) pending++;
-    }
-    if (pending >= 5) return { success: false, error: "처리 대기 중인 요청이 많습니다. 카카오톡 채널로 문의해주세요." };
-  }
-
-  sheet.appendRow([
-    Utilities.formatDate(new Date(), "Asia/Seoul", "yyyy-MM-dd HH:mm:ss"),
-    id,
-    customerName,
-    type,
-    detail,
-    ""
-  ]);
-
-  return { success: true, message: "요청이 접수되었습니다. 확인 후 카카오톡으로 안내드립니다." };
 }

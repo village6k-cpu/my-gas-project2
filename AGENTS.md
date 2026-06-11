@@ -87,7 +87,7 @@
 - **Code.js** — 트리거 (onEdit, onEditInstallable), 실사기록 동기화, 장비사진 열 설정
 - **checkAvailability.js** — 핵심 로직 (스케줄 확인/등록/보류/거절, 알림톡, 타임라인/대시보드 데이터, 중복 체크)
 - **sheetAPI.js** — 통합 API (doGet/doPost, key인증, Sheet API + Schedule API, 페이지 라우팅)
-- **myPage.js** — 고객용 내 예약 페이지 백엔드 (HMAC 토큰 검증, 이름 마스킹·연락처 미포함, 고객요청 시트 접수)
+- **myPage.js** — 고객용 내 예약 페이지 백엔드 (HMAC 토큰 검증, 이름 마스킹·연락처 미포함, 읽기 전용 — 변경/취소는 카톡 안내)
 - **generatecontract.js** — 계약서 생성 (Google Sheets 템플릿 복사, 할인율 계산, 전체 시트 유효성 해제)
 - **setupSchedule.js** — 초기 세팅 (계약마스터, 세트마스터 구조 생성)
 - **sheetProtection.js** — 시트 보호 (수식 열 보호)
@@ -113,7 +113,7 @@
 - Sheet API: sheets, info, read, write, append, update, search, run
 - Schedule API: list, scan, 확인, 등록, 보류, 거절, 발송승인
 - 데이터 API: timeline, dashboard (date 파라미터 지원)
-- 고객용 API: myPage(조회)·myPageRequest(연장/변경/취소/문의 접수) — apps/today-dashboard `/my?t=토큰` 페이지가 서버 라우트 `/api/my` 경유로 호출. 링크 생성은 run&func=getMyPageLink (1회 설정: setupMyPage, Script Properties MYPAGE_BASE_URL)
+- 고객용 API: myPage(조회 전용) — apps/today-dashboard `/my?t=토큰` 페이지가 서버 라우트 `/api/my` 경유로 호출. 변경/연장/취소는 카톡 채널 안내만. 링크 생성은 run&func=getMyPageLink (1회 설정: setupMyPage, Script Properties MYPAGE_BASE_URL·MYPAGE_NOTICE·MYPAGE_KAKAO_URL)
 
 ### 핵심 로직
 - 확인요청 H열 "확인" → processByReqID() 자동 가용성 체크

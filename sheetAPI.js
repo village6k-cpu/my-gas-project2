@@ -251,14 +251,6 @@ function handleRequest(e) {
         // 고객용 내 예약 조회 — 거래/요청별 토큰 검증, 연락처 등 민감정보 미포함 (myPage.js)
         return jsonResponse(getMyReservation(params.token || postBody.token || ""));
 
-      case "myPageRequest":
-        // 고객용 연장/변경/취소/문의 요청 접수 — '고객요청' 시트에 기록
-        return jsonResponse(submitMyPageRequest(
-          params.token || postBody.token || "",
-          params.type || postBody.type || "",
-          params.detail || postBody.detail || ""
-        ));
-
       case "dashboardSearch":
         return jsonResponse(getDashboardSearchData(
           params.q || params.query || postBody.q || postBody.query || "",

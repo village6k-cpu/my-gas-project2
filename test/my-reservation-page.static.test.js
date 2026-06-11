@@ -20,7 +20,7 @@ assert(!exists('apps/today-dashboard/app/availability'), 'public availability pa
 assert(!exists('apps/today-dashboard/app/api/public'), 'public availability/reserve API routes must not exist');
 assert(!sheetApi.includes('publicAvail'), 'sheetAPI must not expose a public availability action');
 
-// ── GAS: 토큰 검증 + 민감정보 차단 ──
+// ── GAS: 토큰 검증 + 민감정보 차단 + 완전 읽기 전용 ──
 assert(
   /function getMyReservation\(token\)/.test(myPage) &&
     /computeHmacSha256Signature/.test(myPage) &&
@@ -36,15 +36,26 @@ assert(
   'my-page must never read or return the customer phone column'
 );
 assert(
-  /case "myPage":/.test(sheetApi) && /case "myPageRequest":/.test(sheetApi) && sheetApi.includes('"getMyPageLink"'),
-  'sheetAPI must expose myPage/myPageRequest actions and whitelist getMyPageLink'
+  !/setValue|appendRow|insertSheet|insertRow|deleteRow/.test(myPageCode.replace(/setProperty\("MYPAGE_SECRET"[^)]*\)/, '')),
+  'my-page backend must be read-only (no sheet writes)'
 );
-// 고객요청은 전용 시트에만 기록 — 기존 시트 구조는 건드리지 않음
 assert(
-  myPage.includes('getSheetByName("고객요청")') &&
-    !myPageCode.includes('확인요청").appendRow') &&
-    !myPageCode.includes('스케줄상세").appendRow'),
-  'customer requests must be appended only to the dedicated 고객요청 sheet'
+  /case "myPage":/.test(sheetApi) && sheetApi.includes('"getMyPageLink"'),
+  'sheetAPI must expose the myPage action and whitelist getMyPageLink'
+);
+
+// ── 페이지에서 직접 요청 접수는 금지 — 카카오톡 안내만 ──
+assert(
+  !sheetApi.includes('myPageRequest') && !myPage.includes('submitMyPageRequest'),
+  'the my-page must not accept change/extension/cancel submissions'
+);
+assert(
+  !route.includes('export async function POST') && !page.includes('method: "POST"'),
+  'the /api/my route and page must be read-only (no POST)'
+);
+assert(
+  page.includes('카카오톡 채널') && page.includes('연장 · 변경 · 취소'),
+  'the my-page must guide customers to the KakaoTalk channel for changes'
 );
 
 // ── 앱: /my만 공개, 페이지는 /api/my만 사용 ──
@@ -57,8 +68,8 @@ assert(
   'my-page must only call the /api/my server route'
 );
 assert(
-  route.includes('rateLimited') && route.includes('action: "myPage"') && route.includes('myPageRequest'),
-  'the /api/my route must rate limit and proxy the GAS myPage actions'
+  route.includes('rateLimited') && route.includes('action: "myPage"'),
+  'the /api/my route must rate limit and proxy the GAS myPage action'
 );
 assert(
   gasHelper.includes('GAS_API_KEY') && gasHelper.includes('rateLimited'),
