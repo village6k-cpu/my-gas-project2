@@ -277,13 +277,17 @@ export function toggleReturn(tradeId: string) {
 // ── 품목별 반출/반납 상태 ───────────────────────────────────────
 export function setItemCheckout(tradeId: string, scheduleId: string, next: CheckoutState) {
   let final: CheckoutState | undefined;
+  let isSynthetic = false;
   mutateTrade(tradeId, (t) =>
     mapItem(t, scheduleId, (e) => {
       final = e.checkoutState === next ? "pending" : next;
+      isSynthetic = !!e.synthetic;
       return { ...e, checkoutState: final };
     }),
   );
   flashSave(tradeId);
+  // 합성 ID(시트 행번호)는 실제 스케줄ID와 달라 엉뚱한 품목에 체크가 기록될 수 있음 → 시트 write 차단
+  if (isSynthetic) return;
   if (final === "taken") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: true });
   else if (final === "pending") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: false });
   // 'excluded'(제외)는 시트에 대응 칸 없음 → Supabase 전용
@@ -426,6 +430,8 @@ export function setReturnCount(tradeId: string, scheduleId: string, patch: Parti
     return { ...t, returnCounts: { ...t.returnCounts, [scheduleId]: next } };
   });
   flashSave(tradeId);
+  const rcItem = state.trades.find((t) => t.tradeId === tradeId)?.equipments.find((e) => e.scheduleId === scheduleId);
+  if (rcItem?.synthetic) return; // 합성 ID — 시트 write 금지
   if (writeback !== undefined) gasWrite("toggleItem", { scheduleId, phase: "checkin", done: writeback });
 }
 

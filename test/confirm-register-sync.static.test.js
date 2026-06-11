@@ -141,3 +141,24 @@ assert(
   'contract cancellation must invalidate the cancelled trade dates'
 );
 console.log('audit-round-3 checks OK');
+
+// ── 감사 4차: 전체 동기화 보존 + 금액 중복합산 + 합성 ID 가드 ──
+const syncTs3 = read('apps/today-dashboard/lib/data/sync.ts');
+assert(
+  syncTs3.includes('seenAmountKeys') && syncTs3.includes('replace(/[^0-9]/g, "")'),
+  'timeline amount must not multiply by set bar count, and qty must parse "2세트"-style strings'
+);
+assert(
+  /syncTimelineToSupabase[\s\S]*?existingMap[\s\S]*?mergeTimelineTradeSnapshot\(ex, t\)/.test(syncTs3),
+  'full sync must merge-preserve existing trades instead of wholesale overwrite'
+);
+assert(
+  syncTs3.includes('synthetic: true'),
+  'timeline-derived items must be marked synthetic'
+);
+const storeTs3 = read('apps/today-dashboard/lib/data/store.ts');
+assert(
+  storeTs3.includes('if (isSynthetic) return;') && storeTs3.includes('rcItem?.synthetic'),
+  'item toggles must not write synthetic schedule IDs back to the sheet'
+);
+console.log('audit-round-4 checks OK');

@@ -41,6 +41,9 @@ export interface EquipmentItem {
   startShiftDays?: number;
   endShiftDays?: number;
 
+  /** timeline 합성 ID(시트 행번호 기반) — 실제 스케줄ID와 다르므로 시트 write-back 금지 */
+  synthetic?: boolean;
+
   checkoutState: CheckoutState;
   /** (레거시) 품목별 반납 상태. 반납은 returnCounts(종류별 합산) 사용 */
   returnState?: ReturnState;

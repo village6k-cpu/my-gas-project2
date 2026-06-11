@@ -39,17 +39,24 @@ export function parseTimeline(resp: any): Trade[] {
     let minS = Infinity;
     let maxE = -Infinity;
     let amount = 0;
+    const seenAmountKeys = new Set<string>();
     const equipments: EquipmentItem[] = items.map((it: any, idx: number) => {
       const s = toMs(it.s);
       const e = toMs(it.e);
       if (s < minS) minS = s;
       if (e > maxE) maxE = e;
-      if (typeof it.p === "number") amount += it.p;
+      // 세트 수량 N이면 같은 행이 바 N개로 복제됨 — 행당 1회만 합산 (금액 N배 부풀림 방지)
+      const amtKey = `${it.g}|${it.r ?? idx}`;
+      if (typeof it.p === "number" && !seenAmountKeys.has(amtKey)) {
+        amount += it.p;
+        seenAmountKeys.add(amtKey);
+      }
       const name = groups.get(it.g) ?? it.eq ?? "장비";
       return {
         scheduleId: `${tid}-${it.r ?? idx}`,
+        synthetic: true, // 행번호 기반 합성 ID — dashboard merge 전까지 시트 write-back 금지
         name,
-        qty: Number(it.q) || 1,
+        qty: parseInt(String(it.q ?? "").replace(/[^0-9]/g, ""), 10) || 1, // "2세트" 같은 문자열 수량 파싱
         category: categoryOf(name) ?? undefined,
         checkoutState: it.st === "대기" ? "pending" : "taken",
       } as EquipmentItem;
@@ -88,13 +95,16 @@ export async function syncTimelineToSupabase(opts?: { fromDays?: number; toDays?
   if (data.error) throw new Error(data.error);
   const trades = parseTimeline(data);
   log(`예약 ${trades.length}건 파싱 → Supabase 적재 중…`);
+  // 기존 거래는 merge 경유로만 갱신 — 사진/반납카운트/검수플래그를 timeline 추정값으로 리셋하지 않음
+  const existingMap = new Map((await fetchAllTrades()).map((t) => [t.tradeId, t]));
   let n = 0;
   for (const t of trades) {
-    await persistTrade(t);
+    const ex = existingMap.get(t.tradeId);
+    await persistTrade(ex ? mergeTimelineTradeSnapshot(ex, t) : t);
     n++;
     if (n % 10 === 0) log(`  …${n}/${trades.length}`);
   }
-  log(`완료: ${n}건 동기화됨`);
+  log(`완료: ${n}건 동기화됨 (기존 ${existingMap.size}건은 보존 merge)`);
   return n;
 }
 
