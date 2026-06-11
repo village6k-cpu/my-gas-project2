@@ -247,14 +247,17 @@ function handleRequest(e) {
           catalog: getDashboardEquipmentCatalog_(SpreadsheetApp.getActiveSpreadsheet())
         });
 
-      case "publicAvail": {
-        // 고객용 공개 가용성/견적 — 읽기 전용, 개인정보 미포함 (publicAvailability.js)
-        var pvReq = postBody.req || postBody;
-        if (params.req) {
-          try { pvReq = JSON.parse(params.req); } catch (pvErr) { return jsonResponse({ success: false, error: "req JSON 파싱 실패" }); }
-        }
-        return jsonResponse(getPublicAvailability(pvReq));
-      }
+      case "myPage":
+        // 고객용 내 예약 조회 — 거래/요청별 토큰 검증, 연락처 등 민감정보 미포함 (myPage.js)
+        return jsonResponse(getMyReservation(params.token || postBody.token || ""));
+
+      case "myPageRequest":
+        // 고객용 연장/변경/취소/문의 요청 접수 — '고객요청' 시트에 기록
+        return jsonResponse(submitMyPageRequest(
+          params.token || postBody.token || "",
+          params.type || postBody.type || "",
+          params.detail || postBody.detail || ""
+        ));
 
       case "dashboardSearch":
         return jsonResponse(getDashboardSearchData(
@@ -940,7 +943,8 @@ function runFunction(funcName, params) {
     "getInventoryConflictsSlackMessage",
     "listAllTriggers",
     "diagEquipmentRiskBackendConfig",
-    "setupEquipmentRiskBackendConfig"
+    "setupEquipmentRiskBackendConfig",
+    "getMyPageLink"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -981,6 +985,12 @@ function runFunction(funcName, params) {
       var reqID = typeof args === "string" ? args : args.reqID;
       var result = deleteRequest(reqID);
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "getMyPageLink") {
+      var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
+      var linkId = typeof args === "string" ? args : (args.id || args.tradeId || args.reqID || args.거래ID || "");
+      var result = getMyPageLink(linkId);
+      return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "regenerateContractById") {
       var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;

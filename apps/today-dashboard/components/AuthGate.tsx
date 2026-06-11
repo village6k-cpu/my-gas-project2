@@ -6,8 +6,8 @@ import type { Session } from "@supabase/supabase-js";
 import { isSupabase, supabase } from "@/lib/supabase/client";
 import { VillageLogo } from "@/components/VillageLogo";
 
-// 고객용 공개 경로 — 직원 로그인 없이 접근 (개인정보 없는 화면만 등록할 것)
-const PUBLIC_PATHS = ["/availability"];
+// 고객용 공개 경로 — 직원 로그인 없이 접근 (토큰으로 본인 예약만 보는 화면)
+const PUBLIC_PATHS = ["/my"];
 
 // 로그인 게이트: 세션 없으면 로그인 폼, 있으면 앱. (시드 모드면 통과)
 export function AuthGate({ children }: { children: React.ReactNode }) {
