@@ -126,3 +126,18 @@ assert(
   'removing a sheet-derived item must also delete the 스케줄상세 row via removeEquip'
 );
 console.log('audit-round-2 checks OK');
+
+// ── 감사 3차: 영향 날짜 캐시 무효화 (모레 이후 15분 stale 방지) ──
+const backend3 = read('checkAvailability.js');
+assert(
+  /function invalidateDashboardCache\(extraDates\)/.test(backend3) &&
+    backend3.includes('invalidateDashboardCache([반출일, 반납일])') &&
+    backend3.includes('invalidateDashboardCache([newStart, newEnd])') &&
+    (backend3.match(/invalidateDashboardCacheForTrade_\(거래ID\)/g) || []).length >= 3,
+  'mutations must invalidate the dashboard cache for the affected dates, not just today±1'
+);
+assert(
+  read('Code.js').includes('invalidateDashboardCacheForTrade_(거래ID)'),
+  'contract cancellation must invalidate the cancelled trade dates'
+);
+console.log('audit-round-3 checks OK');

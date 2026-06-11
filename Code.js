@@ -1250,8 +1250,8 @@ function cancelContract(ss, 거래ID, contractRow) {
   rowRange.setFontColor("#9C0006");
   rowRange.setFontLine("line-through");
 
-  // 4. dashboard/timeline 캐시 무효화
-  try { invalidateDashboardCache(); } catch (e) {}
+  // 4. dashboard/timeline 캐시 무효화 (취소된 거래의 반출/반납 날짜 포함)
+  try { invalidateDashboardCacheForTrade_(거래ID); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 
   Logger.log("계약 취소 완료: " + 거래ID);

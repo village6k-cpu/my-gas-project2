@@ -786,8 +786,8 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
     sheet.getRange(r, 9).setValue(endTime);     // I: 반납시간
   });
 
-  // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh
-  try { invalidateDashboardCache(); } catch (e) {}
+  // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh (드래그된 날짜 포함)
+  try { invalidateDashboardCache([newStart, newEnd]); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 
   return { success: true };
@@ -2609,14 +2609,50 @@ function setupDashboardWarmerTrigger() {
 /**
  * Dashboard 캐시 무효화. 등록/취소/일정변경 후 호출.
  */
-function invalidateDashboardCache() {
+function dashboardDateKey_(v) {
+  if (!v) return '';
+  if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Seoul', 'yyyy-MM-dd');
+  var str = String(v).trim();
+  var m = str.match(/(\d{4})\D(\d{1,2})\D(\d{1,2})/);
+  if (m) return m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+  var d = new Date(str);
+  return isNaN(d.getTime()) ? '' : Utilities.formatDate(d, 'Asia/Seoul', 'yyyy-MM-dd');
+}
+
+/** 계약마스터에서 거래의 반출/반납 날짜를 찾아 해당 날짜 캐시까지 무효화 */
+function invalidateDashboardCacheForTrade_(tid) {
+  var dates = [];
+  try {
+    var cSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
+    if (cSheet && cSheet.getLastRow() >= 2) {
+      var ids = cSheet.getRange(2, 1, cSheet.getLastRow() - 1, 1).getValues();
+      for (var i = 0; i < ids.length; i++) {
+        if (String(ids[i][0]).trim() === String(tid).trim()) {
+          var disp = cSheet.getRange(i + 2, 5, 1, 3).getDisplayValues()[0]; // E:반출일 ~ G:반납일
+          dates = [disp[0], disp[2]];
+          break;
+        }
+      }
+    }
+  } catch (e) {}
+  invalidateDashboardCache(dates);
+}
+
+function invalidateDashboardCache(extraDates) {
   try {
     touchDashboardSearchCacheVersion_();
     var cache = CacheService.getScriptCache();
     var today = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
     var yesterday = Utilities.formatDate(new Date(Date.now() - 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
     var tomorrow = Utilities.formatDate(new Date(Date.now() + 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
-    [today, yesterday, tomorrow].forEach(function(d) {
+    var dateKeys = { };
+    [today, yesterday, tomorrow].forEach(function(d) { dateKeys[d] = true; });
+    // 모레 이후 일정 변경이 최대 15분 옛 데이터로 보이던 문제 — 영향 날짜를 함께 무효화
+    (extraDates || []).forEach(function(v) {
+      var k = dashboardDateKey_(v);
+      if (k) dateKeys[k] = true;
+    });
+    Object.keys(dateKeys).forEach(function(d) {
       removeDashboardCacheJson_(cache, 'dashboard_v4_' + d);
       removeDashboardCacheJson_(cache, 'dashboard_v4_' + d + '_risk');
       cache.remove('dashboard_v3_' + d);
@@ -8394,7 +8430,7 @@ function registerByReqID(sheet, triggerRow) {
   }
 
   // dashboard/timeline 캐시 즉시 무효화 → 새로고침 안 해도 다음 fetch는 fresh
-  try { invalidateDashboardCache(); } catch (e) {}
+  try { invalidateDashboardCache([반출일, 반납일]); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 
   } finally {
@@ -8514,6 +8550,7 @@ function addEquipmentToContract(sheet, row) {
     return;
   }
   supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
+  try { invalidateDashboardCacheForTrade_(거래ID); } catch (cacheErr) {} // 영향 날짜 캐시 무효화
 
   // 가용 경고 여부 (차단하지 않고 경고만)
   var 가용경고 = "";
@@ -8606,6 +8643,7 @@ function removeEquipmentFromContract(sheet, row) {
     return;
   }
   supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
+  try { invalidateDashboardCacheForTrade_(거래ID); } catch (cacheErr) {} // 영향 날짜 캐시 무효화
 
   const schedLastRow = schedSheet.getLastRow();
   if (schedLastRow < 2) {
@@ -8671,6 +8709,7 @@ function changeDatesForContract(sheet, row) {
     return;
   }
   supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
+  try { invalidateDashboardCacheForTrade_(거래ID); } catch (cacheErr) {} // 영향 날짜 캐시 무효화
 
   if (!새반출일Raw || !새반납일Raw) {
     sheet.getRange(row, 15).setValue("❌ B~E열에 새 반출/반납 일시 입력 필요");
