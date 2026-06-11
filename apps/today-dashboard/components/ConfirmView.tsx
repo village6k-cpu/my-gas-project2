@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { authFetch } from "@/lib/data/authFetch";
+import { pollSheetChangesNow } from "@/lib/data/store";
 import { ViewHeader } from "@/components/ViewHeader";
 import { Refresh } from "@/components/icons";
 
@@ -192,8 +193,21 @@ export function ConfirmView() {
         const json = await res.json().catch(() => ({}));
         if (!res.ok || json.status !== "OK") throw new Error(json.message || json.error || "등록 실패");
         await load();
+        void pollSheetChangesNow(); // 신규 거래를 오늘일정·검색에 즉시 반영
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        // 등록은 GAS에서 계속 진행되는데 응답만 시간초과로 끊기는 경우가 잦다 —
+        // "실패"로 단정하지 말고 확인 안내 + 자동 재확인
+        const msg = e instanceof Error ? e.message : String(e);
+        const looksTimeout = /timeout|timed?\s?out|aborted|네트워크|fetch|504|502/i.test(msg);
+        if (looksTimeout) {
+          setError(`⏳ ${req.reqID} 등록 응답이 늦어지고 있어요. 등록 자체는 계속 진행 중일 수 있으니 잠시 후 목록이 자동 갱신되면 확인해주세요.`);
+          setTimeout(() => {
+            void load();
+            void pollSheetChangesNow();
+          }, 10_000);
+        } else {
+          setError(msg);
+        }
       } finally {
         setBusy(null);
       }

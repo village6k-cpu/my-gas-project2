@@ -150,20 +150,29 @@ async function loadRemote() {
   }
   // 시트→앱 자동 폴링(변경분만): 90초마다 timeline에서 예약 변경 감지
   if (!pollTimer) {
-    pollTimer = setInterval(async () => {
-      if (hasPendingPersist() || document.hidden) return;
-      const mutationSeqAtPoll = localMutationSeq;
-      try {
-        if (await repairEmptyEquipmentTrades(state.trades, mutationSeqAtPoll)) return;
-        const changed = await pollTimelineChanges(state.trades);
-        if (!changed.length) return;
-        if (!canApplyRemoteSnapshot(mutationSeqAtPoll)) return;
-        set({ trades: mergeTradeChanges(state.trades, changed) });
-        for (const t of changed) persistTrade(t).catch(() => {});
-      } catch {
-        /* noop */
-      }
+    pollTimer = setInterval(() => {
+      if (document.hidden) return;
+      void pollSheetChangesNow();
     }, POLL_MS);
+  }
+}
+
+/**
+ * 시트 변경분 즉시 반영 — 등록/수정 직후 90초 폴링을 기다리지 않고 호출.
+ * (확인요청 등록 완료 시 신규 거래가 오늘일정·검색에 바로 보이도록)
+ */
+export async function pollSheetChangesNow(): Promise<void> {
+  if (!isSupabase || hasPendingPersist()) return;
+  const mutationSeqAtPoll = localMutationSeq;
+  try {
+    if (await repairEmptyEquipmentTrades(state.trades, mutationSeqAtPoll)) return;
+    const changed = await pollTimelineChanges(state.trades);
+    if (!changed.length) return;
+    if (!canApplyRemoteSnapshot(mutationSeqAtPoll)) return;
+    set({ trades: mergeTradeChanges(state.trades, changed) });
+    for (const t of changed) persistTrade(t).catch(() => {});
+  } catch {
+    /* noop */
   }
 }
 

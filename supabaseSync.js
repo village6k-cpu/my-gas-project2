@@ -47,13 +47,29 @@ function onEditSupabaseMark(e) {
     if (!col) return;
     var tid = sheet.getRange(e.range.getRow(), col).getValue();
     if (!tid) return;
+    supaMarkTradeDirty_(tid);
+  } catch (err) {
+    // 편집 경로는 무조건 보호 — 에러 삼킴
+  }
+}
+
+/**
+ * 스크립트 쓰기용 dirty 마킹 — onEdit은 사람 손 편집에만 발화하므로,
+ * registerByReqID/추가/삭제/날짜변경처럼 스크립트가 계약·스케줄 시트를 쓰는 경로는
+ * 이 함수를 직접 호출해야 1분 트리거(flushDirtyToSupabase)가 Supabase로 밀어준다.
+ * 절대 throw하지 않음 (호출부 흐름 보호).
+ */
+function supaMarkTradeDirty_(tid) {
+  try {
+    tid = String(tid || '').trim();
+    if (!tid) return;
     var p = PropertiesService.getScriptProperties();
     var dirty = {};
     try { dirty = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
-    dirty[String(tid)] = 1;
+    dirty[tid] = 1;
     p.setProperty('SUPA_DIRTY', JSON.stringify(dirty));
   } catch (err) {
-    // 편집 경로는 무조건 보호 — 에러 삼킴
+    // 동기화 마킹 실패가 본 작업을 막으면 안 됨
   }
 }
 

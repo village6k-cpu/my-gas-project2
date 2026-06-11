@@ -7804,8 +7804,13 @@ function scheduleRegister(reqID) {
   // O열에 처리중 표시
   sheet.getRange(targetRow, 15).setValue("⏳ 등록 처리중...");
 
-  // PropertiesService에 reqID + targetRow 저장 (트리거에서 읽기 위해)
-  PropertiesService.getScriptProperties().setProperty("_pendingRegister", JSON.stringify({ reqID: reqID, row: targetRow }));
+  // 대기열에 reqID 추가 — 단일 속성 덮어쓰기 금지 (연속 등록 시 앞 건 유실 방지)
+  // 행 번호는 저장하지 않는다: 실행 시점에 다시 찾는다 (세트 전개 등으로 행이 밀릴 수 있음)
+  var qProps = PropertiesService.getScriptProperties();
+  var queue = [];
+  try { queue = JSON.parse(qProps.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
+  if (queue.indexOf(reqID) === -1) queue.push(reqID);
+  qProps.setProperty("_pendingRegisterQueue", JSON.stringify(queue));
 
   // 1초 후 실행되는 트리거 생성
   ScriptApp.newTrigger("_runPendingRegister")
@@ -7828,19 +7833,41 @@ function _runPendingRegister() {
     }
   });
 
-  var prop = PropertiesService.getScriptProperties().getProperty("_pendingRegister");
-  if (!prop) return;
-  PropertiesService.getScriptProperties().deleteProperty("_pendingRegister");
+  var props = PropertiesService.getScriptProperties();
+  var queue = [];
+  try { queue = JSON.parse(props.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
+  // 구버전 단일 속성도 큐로 흡수 (배포 경계 호환)
+  var legacy = props.getProperty("_pendingRegister");
+  if (legacy) {
+    props.deleteProperty("_pendingRegister");
+    try {
+      var li = JSON.parse(legacy);
+      if (li && li.reqID && queue.indexOf(li.reqID) === -1) queue.push(li.reqID);
+    } catch (le) {}
+  }
+  if (!queue.length) return;
+  props.deleteProperty("_pendingRegisterQueue");
 
-  var info = JSON.parse(prop);
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("확인요청");
   if (!sheet) return;
 
-  try {
-    registerByReqID(sheet, info.row);
-  } catch (e) {
-    sheet.getRange(info.row, 15).setValue("❌ 등록 실패: " + e.message);
+  for (var qi = 0; qi < queue.length; qi++) {
+    var pendingReqID = queue[qi];
+    // 실행 시점에 행을 새로 찾는다 (앞 건 등록의 세트 전개로 행이 밀렸을 수 있음)
+    var qLastRow = sheet.getLastRow();
+    if (qLastRow < 2) return;
+    var qIds = sheet.getRange(2, 1, qLastRow - 1, 1).getValues();
+    var qRow = -1;
+    for (var i = 0; i < qIds.length; i++) {
+      if (qIds[i][0] === pendingReqID) { qRow = i + 2; break; }
+    }
+    if (qRow < 0) continue;
+    try {
+      registerByReqID(sheet, qRow);
+    } catch (e) {
+      sheet.getRange(qRow, 15).setValue("❌ 등록 실패: " + e.message);
+    }
   }
 }
 
@@ -8330,6 +8357,9 @@ function registerByReqID(sheet, triggerRow) {
     sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
   }
 
+  // ── Supabase 동기화 마킹 — 스크립트 쓰기는 onEdit이 안 울리므로 직접 표시 ──
+  supaMarkTradeDirty_(거래ID);
+
   // ── 등록완료 알림톡 + 내 예약 링크 (거래당 1회, 실패해도 등록은 진행) ──
   // POPBILL_TPL_REGISTER 템플릿 미설정 시 자동 스킵 (기존처럼 코워크 카톡 발송으로 운영 가능)
   try {
@@ -8458,6 +8488,7 @@ function addEquipmentToContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
+  supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
 
   // 가용 경고 여부 (차단하지 않고 경고만)
   var 가용경고 = "";
@@ -8549,6 +8580,7 @@ function removeEquipmentFromContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
+  supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
 
   const schedLastRow = schedSheet.getLastRow();
   if (schedLastRow < 2) {
@@ -8613,6 +8645,7 @@ function changeDatesForContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
+  supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
 
   if (!새반출일Raw || !새반납일Raw) {
     sheet.getRange(row, 15).setValue("❌ B~E열에 새 반출/반납 일시 입력 필요");

@@ -288,7 +288,19 @@ export async function repairDashboardSearchResults(current: Trade[], query: stri
     const res = await gasFetch(`action=dashboardSearch&q=${encodeURIComponent(query)}`);
     const data = await res.json();
     if (data.error) return [];
-    return repairFromDashboardItems(current, [...(data.checkout ?? []), ...(data.checkin ?? [])]);
+    const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
+    const changed = repairFromDashboardItems(current, items);
+
+    // 시트에는 있는데 스토어에 아직 없는 신규 거래(방금 등록된 건) → timeline에서 통째로 가져와 합류
+    const known = new Set(current.map((t) => t.tradeId));
+    const hasUnknown = items.some((it) => it?.tradeId && !known.has(it.tradeId));
+    if (hasUnknown) {
+      const fresh = await pollTimelineChanges(current);
+      const byId = new Map(changed.map((t) => [t.tradeId, t]));
+      for (const t of fresh) if (!byId.has(t.tradeId)) byId.set(t.tradeId, t);
+      return [...byId.values()];
+    }
+    return changed;
   } catch {
     return [];
   }
