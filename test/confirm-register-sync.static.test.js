@@ -179,3 +179,15 @@ assert(
   'set-header qty changes must apply GAS component scaling to app state'
 );
 console.log('audit-round-5 checks OK');
+
+// ── 감사 6차: 드래그 날짜 텍스트 포맷·다중행 dirty ──
+const backend6 = read('checkAvailability.js');
+assert(
+  /updateScheduleTime[\s\S]{0,1200}setNumberFormat\("@"\)\.setValue\(startDateStr\)/.test(backend6),
+  'timeline drag must write dates as text-formatted strings like registration does'
+);
+assert(
+  read('supabaseSync.js').includes('getNumRows()'),
+  'multi-row edits must mark every affected trade dirty'
+);
+console.log('audit-round-6 checks OK');

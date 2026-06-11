@@ -779,11 +779,15 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
     rows = [rowIndex];
   }
 
+  // 등록부(F~I 텍스트 포맷 "yyyy-MM-dd" 문자열)와 동일하게 기록 —
+  // Date 객체를 쓰면 표시 포맷이 달라져 displayValue 완전일치 기반 대시보드/검색 매칭에서 누락됨
+  var startDateStr = Utilities.formatDate(startDate, 'Asia/Seoul', 'yyyy-MM-dd');
+  var endDateStr = Utilities.formatDate(endDate, 'Asia/Seoul', 'yyyy-MM-dd');
   rows.forEach(function(r) {
-    sheet.getRange(r, 6).setValue(startDate);   // F: 반출일
-    sheet.getRange(r, 7).setValue(startTime);   // G: 반출시간
-    sheet.getRange(r, 8).setValue(endDate);     // H: 반납일
-    sheet.getRange(r, 9).setValue(endTime);     // I: 반납시간
+    sheet.getRange(r, 6).setNumberFormat("@").setValue(startDateStr); // F: 반출일
+    sheet.getRange(r, 7).setNumberFormat("@").setValue(startTime);    // G: 반출시간
+    sheet.getRange(r, 8).setNumberFormat("@").setValue(endDateStr);   // H: 반납일
+    sheet.getRange(r, 9).setNumberFormat("@").setValue(endTime);      // I: 반납시간
   });
 
   // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh (드래그된 날짜 포함)

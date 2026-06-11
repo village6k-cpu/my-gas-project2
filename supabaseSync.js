@@ -45,9 +45,13 @@ function onEditSupabaseMark(e) {
     var name = sheet.getName();
     var col = name === '계약마스터' ? 1 : name === '스케줄상세' ? 2 : 0; // 거래ID 열
     if (!col) return;
-    var tid = sheet.getRange(e.range.getRow(), col).getValue();
-    if (!tid) return;
-    supaMarkTradeDirty_(tid);
+    // 다중 행 붙여넣기/드래그 채우기도 전부 마킹 (기존엔 첫 행만)
+    var startRow = e.range.getRow();
+    var numRows = Math.min(e.range.getNumRows(), 200);
+    var tidValues = sheet.getRange(startRow, col, numRows, 1).getValues();
+    for (var ri = 0; ri < tidValues.length; ri++) {
+      if (tidValues[ri][0]) supaMarkTradeDirty_(tidValues[ri][0]);
+    }
   } catch (err) {
     // 편집 경로는 무조건 보호 — 에러 삼킴
   }
