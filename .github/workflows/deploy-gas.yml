@@ -16,6 +16,8 @@ on:
       - "*.js"
       - "*.html"
       - "appsscript.json"
+      - "scripts/ci-deploy-gas.sh"
+      - ".github/workflows/deploy-gas.yml"
   workflow_dispatch:
     inputs:
       skip_drift_guard:
