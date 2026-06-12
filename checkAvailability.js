@@ -9218,7 +9218,7 @@ function _getPopbillToken() {
  * @param {string} content - 메시지 내용
  * @param {Object} [vars] - 템플릿 변수 (예: {"#{고객명}": "홍길동"})
  */
-function sendAlimtalk(templateCode, receiver, receiverName, content, vars) {
+function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns) {
   var props = PropertiesService.getScriptProperties();
   var corpNum = props.getProperty('POPBILL_CORP_NUM');
   var senderNum = props.getProperty('POPBILL_SENDER_NUM');
@@ -9243,6 +9243,7 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars) {
     templateCode: templateCode,
     altSendType: 'A'
   };
+  if (btns && btns.length) body.btns = btns; // 템플릿 버튼 (예: 웹링크 '내 예약 확인')
 
   var options = {
     method: 'post',
@@ -9296,28 +9297,28 @@ function sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출
 
   var 반출표시 = fmtDT(반출일, 반출시간);
   var 반납표시 = fmtDT(반납일, 반납시간);
-  var msg = _buildRegisterMsg(예약자명, 반출표시, 반납표시, link.url);
+  var msg = _buildRegisterMsg(예약자명, 반출표시, 반납표시);
   var vars = {
     '#{고객명}': String(예약자명),
     '#{반출일시}': 반출표시,
-    '#{반납일시}': 반납표시,
-    '#{내예약링크}': link.url
+    '#{반납일시}': 반납표시
   };
+  // 링크는 본문이 아니라 '내 예약 확인' 웹링크 버튼으로
+  var btns = [{ n: '내 예약 확인', t: 'WL', u1: link.url, u2: link.url }];
 
-  var res = sendAlimtalk(tpl, String(연락처), String(예약자명), msg, vars);
+  var res = sendAlimtalk(tpl, String(연락처), String(예약자명), msg, vars, btns);
   props.setProperty(sentFlag, Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm'));
   Logger.log('✅ 등록완료 알림톡: ' + 거래ID + ' ' + 예약자명 + ' → ' + JSON.stringify(res));
   return { sent: true };
 }
 
-/** 등록완료 알림톡 본문 — 팝빌 승인 템플릿과 동일해야 함 */
-function _buildRegisterMsg(고객명, 반출표시, 반납표시, 링크) {
+/** 등록완료 알림톡 본문 — 팝빌 승인 템플릿과 글자 단위 동일해야 함 (링크는 '내 예약 확인' 버튼) */
+function _buildRegisterMsg(고객명, 반출표시, 반납표시) {
   return 고객명 + ' 감독님, 안녕하세요.\n빌리지 렌탈샵입니다.\n\n' +
     '예약이 확정되었습니다 : )\n\n' +
     '· 반출: ' + 반출표시 + '\n' +
     '· 반납: ' + 반납표시 + '\n\n' +
-    '아래 링크에서 예약 내용과 계약서를 언제든 확인하실 수 있어요.\n' +
-    링크 + '\n\n' +
+    '아래 링크에서 예약 내용과 계약서를 언제든 확인하실 수 있어요.\n\n' +
     '변경·연장·취소는 카카오톡 채널로 메시지 주세요.\n감사합니다!';
 }
 
