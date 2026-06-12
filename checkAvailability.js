@@ -6824,13 +6824,79 @@ function excludeEquipFromRequest(req) {
     var 장비명 = String(data[i][5] || "").trim();
     if (req.제외장비.indexOf(장비명) >= 0) {
       var row = i + 2;
-      sheet.getRange(row, 14).setValue("보류");     // N열
-      sheet.getRange(row, 15).setValue("보류");     // O열
+      // "제외"는 행 단위 전용 마커 — "보류"를 쓰면 registerByReqID의 재등록 리셋이
+      // 지워버려서 제외 품목까지 등록됐다 (등록 루프는 거절/보류/제외 모두 스킵)
+      sheet.getRange(row, 15).setValue("제외");     // O열
       excluded++;
     }
   }
   SpreadsheetApp.flush();
   return { status: "OK", excluded: excluded };
+}
+
+/**
+ * 확인요청 품목 한 행만 수정 — 이름/수량 변경 시 그 행만 가용성 재확인, 제외 토글 지원.
+ * 오늘 대시보드의 품목 단위 편집과 같은 UX를 확인요청 단계에 제공한다.
+ * req: { reqID, 장비명, 비고?, 순번?, 새이름?, 수량?, 제외?: true|false }
+ *  - 비고/순번: 같은 장비명이 여러 행일 때 정확한 행 지정 (비고=Q열 세트마커, 순번=동명 n번째)
+ *  - 제외 마커는 "보류"가 아닌 "제외" — registerByReqID 재등록 리셋이 보류는 지우기 때문
+ * 세트 구성품(Q열 "[세트]..." 행)도 동일하게 동작한다.
+ */
+function updateRequestItem(req) {
+  if (!req || !req.reqID || !req.장비명) throw new Error("reqID와 장비명 필수");
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("확인요청");
+  if (!sheet) throw new Error("확인요청 시트 없음");
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) throw new Error("데이터 없음");
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
+  var wantTag = req.비고 !== undefined && req.비고 !== null ? String(req.비고).trim() : null;
+  var ordinal = Number(req.순번) || 0;
+  var seen = 0;
+  var target = -1;
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim() !== String(req.reqID).trim()) continue;
+    if (String(data[i][5] || "").trim() !== String(req.장비명).trim()) continue;
+    if (wantTag !== null && String(data[i][16] || "").trim() !== wantTag) continue;
+    if (seen === ordinal) { target = i + 2; break; }
+    seen++;
+  }
+  if (target < 0) throw new Error("품목을 찾을 수 없음: " + req.장비명);
+
+  var changed = false;
+  var 새이름 = req.새이름 !== undefined && req.새이름 !== null ? String(req.새이름).trim() : "";
+  if (새이름 && 새이름 !== String(req.장비명).trim()) {
+    sheet.getRange(target, 6).setValue(새이름); // F: 장비/세트명
+    changed = true;
+  }
+  if (req.수량 !== undefined && req.수량 !== null && String(req.수량) !== "") {
+    var q = Number(req.수량);
+    if (isNaN(q) || q < 1) throw new Error("수량이 올바르지 않음: " + req.수량);
+    if (q !== Number(data[target - 2][6])) {
+      sheet.getRange(target, 7).setValue(q); // G: 수량
+      changed = true;
+    }
+  }
+  if (req.제외 === true) {
+    sheet.getRange(target, 15).setValue("제외"); // O열 — 등록 시 이 행만 스킵 (재등록 리셋에도 보존)
+  } else if (req.제외 === false) {
+    sheet.getRange(target, 15).clearContent();
+  }
+
+  var reChecked = false;
+  if (changed) {
+    // 이 행의 결과만 비우면 processByReqID가 결과 없는 행만 재확인 (다른 품목 결과 보존,
+    // 세트명으로 바꾼 경우 펼침/고아 구성품 정리도 기존 로직이 처리)
+    sheet.getRange(target, 9, 1, 2).clearContent(); // I:결과, J:상세
+    SpreadsheetApp.flush();
+    processByReqID(sheet, target);
+    reChecked = true;
+  } else {
+    SpreadsheetApp.flush();
+  }
+  return { status: "OK", row: target, reChecked: reChecked };
 }
 
 
@@ -8083,7 +8149,7 @@ function registerByReqID(sheet, triggerRow) {
   var dupEquips = [];
   for (var di = 0; di < allData.length; di++) {
     if (allData[di][0] !== reqID) continue;
-    if (allData[di][14] === "거절" || allData[di][14] === "보류") continue;
+    if (allData[di][14] === "거절" || allData[di][14] === "보류" || allData[di][14] === "제외") continue;
     if (allData[di][1]) {
       var dv = allData[di][1];
       dupDate = dv instanceof Date ? Utilities.formatDate(dv, "Asia/Seoul", "yyyy-MM-dd") : String(dv).trim();
@@ -8264,7 +8330,7 @@ function registerByReqID(sheet, triggerRow) {
       var neededRows = 0;
       for (let ci = 0; ci < allData.length; ci++) {
         if (allData[ci][0] === reqID && allData[ci][5] && allData[ci][14] !== "거절" &&
-            allData[ci][14] !== "보류") neededRows++;
+            allData[ci][14] !== "보류" && allData[ci][14] !== "제외") neededRows++;
       }
       if (mergeMode && mergeTargetTID) {
         var _mrgData = schedSheet.getRange(2, 2, schedLastRow - 1, 1).getValues();
@@ -8288,7 +8354,7 @@ function registerByReqID(sheet, triggerRow) {
       const 장비명 = allData[i][5];
       const 수량 = allData[i][6] || 1;
       if (!장비명) continue;
-      if (allData[i][14] === "거절" || allData[i][14] === "보류") continue;
+      if (allData[i][14] === "거절" || allData[i][14] === "보류" || allData[i][14] === "제외") continue;
 
       const 결과 = allData[i][8] || "";   // I열
       const 비고 = allData[i][16] || "";   // Q열
@@ -8422,7 +8488,7 @@ function registerByReqID(sheet, triggerRow) {
   // ── 확인요청에 등록 결과 표시 ──
   for (let i = 0; i < allData.length; i++) {
     if (allData[i][0] !== reqID) continue;
-      if (allData[i][14] === '거절' || allData[i][14] === '보류') continue;  // 거절/보류 스킵
+      if (allData[i][14] === '거절' || allData[i][14] === '보류' || allData[i][14] === '제외') continue;  // 거절/보류/제외 스킵
     const row = i + 2;
     sheet.getRange(row, 14).setValue("등록");      // N열: 등록
       sheet.getRange(row, 15).setValue(mergeMode ? "등록완료(합침)" : "등록완료");   // O열: 등록상태

@@ -22,11 +22,12 @@ const KakaoReservationInput = dynamic(
 // 확인요청 관리 — GAS Schedule API(/api/confirm)를 네이티브로. 대기/보류 카드 목록 + 장비별 가용성 결과
 // + 확인(가용성체크)/선택등록/전체보류/전체거절/수정. 디자인은 통합앱 토큰.
 
-type Equip = { 장비명: string; 수량: number; 결과?: string; 상세?: string; 비고?: string };
+type Equip = { 장비명: string; 수량: number; 결과?: string; 상세?: string; 비고?: string; 제외?: boolean; 순번?: number };
 type ConfirmEquipmentRole = "set-header" | "set-component" | "single";
 type ConfirmEquipmentRow = Equip & {
   role: ConfirmEquipmentRole;
   rowKey: string;
+  sourceIndex: number;
   groupName?: string;
   componentCount?: number;
 };
@@ -91,6 +92,7 @@ function buildConfirmEquipmentRows(equips: Equip[]): ConfirmEquipmentRow[] {
         ...equip,
         role: "set-header",
         rowKey: `set-header-${index}-${equip.장비명}`,
+        sourceIndex: index,
         groupName: equip.장비명,
         componentCount: 0,
       });
@@ -110,6 +112,7 @@ function buildConfirmEquipmentRows(equips: Equip[]): ConfirmEquipmentRow[] {
       ...equip,
       role: parent ? "set-component" : "single",
       rowKey: `${parent ? "set-component" : "single"}-${index}-${equip.장비명}`,
+      sourceIndex: index,
       groupName: parent?.장비명,
     });
   });
@@ -123,6 +126,7 @@ export function ConfirmView() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [edit, setEdit] = useState<Req | null>(null);
+  const [itemEdit, setItemEdit] = useState<{ req: Req; item: Equip } | null>(null);
   const loadingRef = useRef(false);
 
   const load = useCallback(async () => {
@@ -232,7 +236,7 @@ export function ConfirmView() {
   const cards = useMemo(
     () =>
       items.map((req) => (
-        <ConfirmCard key={req.reqID} req={req} busy={busy === req.reqID} onAct={act} onRegisterSelected={registerSelected} onEdit={() => setEdit(req)} />
+        <ConfirmCard key={req.reqID} req={req} busy={busy === req.reqID} onAct={act} onRegisterSelected={registerSelected} onEdit={() => setEdit(req)} onItemEdit={(item) => setItemEdit({ req, item })} />
       )),
     [items, busy, act, registerSelected],
   );
@@ -274,22 +278,40 @@ export function ConfirmView() {
           setError={setError}
         />
       )}
+
+      {itemEdit && (
+        <ItemEditSheet
+          req={itemEdit.req}
+          item={itemEdit.item}
+          onClose={() => setItemEdit(null)}
+          onSaved={async () => {
+            setItemEdit(null);
+            await load();
+          }}
+          runFunc={runFunc}
+        />
+      )}
     </div>
   );
 }
 
 function ConfirmCard({
-  req, busy, onAct, onRegisterSelected, onEdit,
+  req, busy, onAct, onRegisterSelected, onEdit, onItemEdit,
 }: {
-  req: Req; busy: boolean; onAct: (action: string, reqID: string) => void; onRegisterSelected: (req: Req, excluded: string[]) => void; onEdit: () => void;
+  req: Req; busy: boolean; onAct: (action: string, reqID: string) => void; onRegisterSelected: (req: Req, excluded: string[]) => void; onEdit: () => void; onItemEdit: (item: Equip) => void;
 }) {
+  // 같은 장비명이 여러 행일 때 정확한 행을 지정하기 위한 동명 순번 (시트 행 순서 = 장비목록 순서)
+  const itemOrdinal = useCallback((row: ConfirmEquipmentRow) => {
+    const list = req.장비목록 || [];
+    return list.slice(0, row.sourceIndex).filter((e) => e.장비명 === row.장비명 && String(e.비고 || "") === String(row.비고 || "")).length;
+  }, [req.장비목록]);
   const equips = req.장비목록 || EMPTY_CONFIRM_EQUIPS;
   const equipmentRows = useMemo(() => buildConfirmEquipmentRows(equips), [equips]);
   const status = (req.등록상태 || "").trim();
   const actionable = status === "대기" || status === "" || status === "AI_REVIEW" || status === "등록대기";
   const hasResult = equips.some((e) => e.결과 && e.결과 !== "");
   // 체크 상태: 기본 = 가용0/❌ 아닌 것만 체크
-  const defaultChecked = useMemo(() => new Set(equipmentRows.filter((row) => row.role !== "set-header" && !isFail(row.결과)).map((row) => row.장비명)), [equipmentRows]);
+  const defaultChecked = useMemo(() => new Set(equipmentRows.filter((row) => row.role !== "set-header" && !isFail(row.결과) && !row.제외).map((row) => row.장비명)), [equipmentRows]);
   const [checked, setChecked] = useState<Set<string>>(defaultChecked);
 
   useEffect(() => {
@@ -363,22 +385,29 @@ function ConfirmCard({
                       </div>
                       {row.componentCount ? <div className="mt-0.5 text-[11px] font-semibold text-brand-700/65">구성품 {row.componentCount}개</div> : null}
                     </div>
+                    {actionable && (
+                      <button onClick={onEdit} className="tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold text-brand-700/70" aria-label="세트 수정(전체 편집)">✎</button>
+                    )}
                   </>
                 ) : (
                   <>
-                    {actionable && hasResult ? (
+                    {actionable && hasResult && !row.제외 ? (
                       <input type="checkbox" checked={sel} onChange={() => toggle(row.장비명)} className="mt-0.5 h-[16px] w-[16px] shrink-0 accent-brand-600" aria-label="등록 선택" />
                     ) : (
                       <span className="mt-0.5 w-[16px] shrink-0" aria-hidden />
                     )}
                     <div className="min-w-0 flex-1">
                       <div className="flex min-w-0 items-baseline gap-1.5">
-                        <span className={`truncate text-[13.5px] font-semibold ${isSetComponent ? "text-ink-soft" : "text-ink"}`}>{row.장비명}</span>
+                        <span className={`truncate text-[13.5px] font-semibold ${row.제외 ? "text-ink-faint line-through" : isSetComponent ? "text-ink-soft" : "text-ink"}`}>{row.장비명}</span>
                         <span className="shrink-0 text-[12px] font-bold tabular-nums text-ink-soft">×{row.수량}</span>
                       </div>
                       {row.상세 && <div className="truncate text-[11px] text-ink-faint">{row.상세}</div>}
                     </div>
-                    {row.결과 && <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`}>{row.결과}</span>}
+                    {row.제외 && <span className="shrink-0 rounded-full bg-attention-bg px-2 py-0.5 text-[10.5px] font-bold text-attention-fg">제외</span>}
+                    {!row.제외 && row.결과 && <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`}>{row.결과}</span>}
+                    {actionable && (
+                      <button onClick={() => onItemEdit({ ...row, 순번: itemOrdinal(row) })} className="tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold text-ink-faint" aria-label="품목 수정">✎</button>
+                    )}
                   </>
                 )}
               </div>
@@ -545,5 +574,82 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
       <span className="mb-1 block text-[12px] font-bold text-ink-mute">{label}</span>
       {children}
     </label>
+  );
+}
+
+/** 품목 한 줄만 수정 — 이름/수량 변경 시 그 품목만 가용성 재확인, 제외(보류) 토글 (오늘 대시보드와 동일 UX) */
+function ItemEditSheet({
+  req, item, onClose, onSaved, runFunc,
+}: {
+  req: Req; item: Equip; onClose: () => void; onSaved: () => void; runFunc: (func: string, args: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const [name, setName] = useState(item.장비명);
+  const [qty, setQty] = useState(String(item.수량 || 1));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const call = async (args: Record<string, unknown>) => {
+    setBusy(true);
+    setErr("");
+    try {
+      await runFunc("updateRequestItem", { reqID: req.reqID, 장비명: item.장비명, 비고: String(item.비고 || ""), 순번: item.순번 || 0, ...args });
+      onSaved();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
+  const save = () => {
+    const q = Number(qty);
+    if (!name.trim() || !Number.isFinite(q) || q < 1) {
+      setErr("이름과 1 이상의 수량을 입력하세요");
+      return;
+    }
+    void call({ 새이름: name.trim(), 수량: q });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={onClose}>
+      <div className="animate-pop w-full max-w-lg rounded-t-2xl bg-white p-4 pb-8" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="truncate text-[15px] font-extrabold text-ink">품목 수정 · {item.장비명}</h3>
+          <button onClick={onClose} className="tap rounded-lg px-2 py-1 text-ink-faint">✕</button>
+        </div>
+        <div className="space-y-2.5">
+          <div className="flex items-center gap-1.5">
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="장비명" className="itm-inp flex-1" />
+            <input value={qty} onChange={(e) => setQty(e.target.value)} className="itm-inp w-16 text-center" inputMode="numeric" aria-label="수량" />
+          </div>
+          {err && <p className="text-[12px] font-bold text-attention-fg">{err}</p>}
+          <button disabled={busy} onClick={save} className="tap w-full rounded-xl bg-brand-600 py-3 text-[14px] font-extrabold text-white disabled:opacity-50">
+            {busy ? "처리 중…" : "저장 + 이 품목만 재확인"}
+          </button>
+          {item.제외 ? (
+            <button disabled={busy} onClick={() => void call({ 제외: false })} className="tap w-full rounded-xl bg-paper py-3 text-[14px] font-extrabold text-ink-soft ring-1 ring-line disabled:opacity-50">
+              제외 해제 (다시 등록 대상에 포함)
+            </button>
+          ) : (
+            <button disabled={busy} onClick={() => void call({ 제외: true })} className="tap w-full rounded-xl bg-attention-bg py-3 text-[14px] font-extrabold text-attention-fg disabled:opacity-50">
+              이 품목 제외 (등록에서 빼기)
+            </button>
+          )}
+          <p className="text-[11px] text-ink-faint">이름·수량을 바꾸면 이 품목만 다시 가용성을 확인합니다. 다른 품목 결과는 그대로 유지됩니다.</p>
+        </div>
+      </div>
+      <style jsx>{`
+        .itm-inp {
+          border: 1px solid rgba(0, 0, 0, 0.12);
+          border-radius: 0.6rem;
+          padding: 0.55rem 0.7rem;
+          font-size: 13.5px;
+          color: #1a1a1a;
+          outline: none;
+        }
+        .itm-inp:focus {
+          border-color: #e8593c;
+        }
+      `}</style>
+    </div>
   );
 }

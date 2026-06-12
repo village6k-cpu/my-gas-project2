@@ -384,3 +384,58 @@ console.log('contract-regen-stuck-queue checks OK');
   );
 }
 console.log('guide-skip-completed checks OK');
+
+// ── 확인요청 품목 단위 수정: 단건 재확인 + "제외" 전용 마커 + 행 타게팅 ──
+{
+  const ca = read('checkAvailability.js');
+  const api = read('sheetAPI.js');
+  const view = read('apps/today-dashboard/components/ConfirmView.tsx');
+  const route = read('apps/today-dashboard/app/api/confirm/route.ts');
+  assert(
+    /function updateRequestItem\(req\)/.test(ca) &&
+      /getRange\(target, 9, 1, 2\)\.clearContent\(\)/.test(ca) &&
+      /processByReqID\(sheet, target\)/.test(ca),
+    'updateRequestItem must clear only the edited row result then reuse processByReqID (preserves other rows)'
+  );
+  // 행 단위 제외는 "보류"가 아닌 "제외" — registerByReqID 재등록 리셋이 보류를 지워서
+  // 제외 품목이 그대로 등록되던 P1 (기존 선택등록 경로도 동일 버그였음)
+  assert(
+    /setValue\("제외"\)/.test(ca) && !/setValues\(\[\["보류", "보류"\]\]\)/.test(ca),
+    'row-level exclusion must use the dedicated 제외 marker, never 보류'
+  );
+  const exFn = ca.slice(ca.indexOf('function excludeEquipFromRequest'), ca.indexOf('function updateRequestItem'));
+  assert(
+    exFn.includes('setValue("제외")') && !exFn.includes('setValue("보류")'),
+    'excludeEquipFromRequest (선택등록 경로) must also write 제외 — 보류 is wiped by the re-register reset'
+  );
+  assert(
+    (ca.match(/=== ["']제외["']\) continue;|!== "제외"\) neededRows/g) || []).length >= 4,
+    'every registration skip loop must also skip 제외 rows'
+  );
+  assert(
+    /var wantTag = req\.비고/.test(ca) && /var ordinal = Number\(req\.순번\)/.test(ca),
+    'updateRequestItem must target rows by (장비명, Q-marker, ordinal) — name-only matching edits the wrong duplicate'
+  );
+  assert(
+    api.includes('"updateRequestItem"') && api.includes('funcName === "updateRequestItem"'),
+    'updateRequestItem must be whitelisted and dispatched in sheetAPI run'
+  );
+  assert(
+    /제외: String\(data\[i\]\[14\] \|\| ""\)\.trim\(\) === "제외"/.test(api),
+    'doListPending items must expose the row-level 제외 flag'
+  );
+  assert(
+    /rowStatus !== "제외"\) g\.status = rowStatus/.test(api) && /등록상태: g\.status \|\| "대기"/.test(api),
+    'group 등록상태 must ignore row-level 제외 (first-row exclusion must not disable the card)'
+  );
+  assert(
+    route.includes('"updateRequestItem"'),
+    'app /api/confirm FUNCS must allow updateRequestItem'
+  );
+  assert(
+    /function ItemEditSheet/.test(view) && view.includes('runFunc("updateRequestItem"') &&
+      /순번: itemOrdinal\(row\)/.test(view) && /!row\.제외/.test(view),
+    'ConfirmView must offer per-item edit with ordinal targeting and exclude 제외 rows from default selection'
+  );
+}
+console.log('request-item-edit checks OK');

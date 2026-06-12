@@ -20,7 +20,7 @@ async function requireUser(req: NextRequest): Promise<boolean> {
 }
 
 const ACTIONS = new Set(["확인", "등록", "보류", "거절", "발송승인"]);
-const FUNCS = new Set(["updateRequest", "excludeEquipFromRequest", "deleteRequest", "insertAndCheckRequest"]);
+const FUNCS = new Set(["updateRequest", "updateRequestItem", "excludeEquipFromRequest", "deleteRequest", "insertAndCheckRequest"]);
 
 // 등록(registerByReqID)은 계약서 생성 포함 시 1분 이상 걸릴 수 있어 함수 수명을 늘린다.
 // (요금제 한도보다 짧게 잘리면 그 경우에도 GAS 쪽 등록은 계속 진행됨)
