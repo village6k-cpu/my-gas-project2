@@ -568,10 +568,18 @@ function doListPending() {
 
   const data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
 
-  // Date → 문자열 변환 헬퍼 (getDisplayValues 호출 제거)
-  function fmtCell(v) {
-    if (v instanceof Date) return Utilities.formatDate(v, "Asia/Seoul", "yyyy-MM-dd HH:mm");
-    return String(v || "");
+  // 날짜/시간 셀이 Date 직렬값이면 "시트에 입력된 그대로"를 복원해야 한다.
+  // 스프레드시트 타임존(예: LA)과 Asia/Seoul이 다르면 Asia/Seoul 포맷은
+  // 날짜에 16:00이 붙고 시간은 1899 LMT(+8:27) 쓰레기가 됐고, 앱 편집 모달이
+  // 그 값을 다시 저장하면서 진짜 시간이 오염되는 루프가 있었다.
+  const ssTz = ss.getSpreadsheetTimeZone();
+  function fmtDateCell(v) {
+    if (v instanceof Date) return Utilities.formatDate(v, ssTz, "yyyy-MM-dd");
+    return String(v || "").trim();
+  }
+  function fmtTimeCell(v) {
+    if (v instanceof Date) return Utilities.formatDate(v, ssTz, "HH:mm");
+    return String(v || "").trim();
   }
 
   // ── 단일 패스로 reqID별 그룹핑 ──
@@ -616,10 +624,10 @@ function doListPending() {
     const i = g.firstIdx;
     pending.push({
       reqID: reqID,
-      반출일: fmtCell(data[i][1]),
-      반출시간: fmtCell(data[i][2]),
-      반납일: fmtCell(data[i][3]),
-      반납시간: fmtCell(data[i][4]),
+      반출일: fmtDateCell(data[i][1]),
+      반출시간: fmtTimeCell(data[i][2]),
+      반납일: fmtDateCell(data[i][3]),
+      반납시간: fmtTimeCell(data[i][4]),
       예약자명: data[i][10] || "",     // K열
       연락처: data[i][11] || "",       // L열
       업체명: data[i][12] || "",       // M열
@@ -922,6 +930,7 @@ function runFunction(funcName, params) {
     "insertAndCheckRequest",
     "updateRequest",
     "updateRequestItem",
+    "normalizeConfirmRequestDates",
     "deleteRequest",
     "excludeEquipFromRequest",
     "formatScheduleSheet",
@@ -1094,7 +1103,8 @@ function runFunction(funcName, params) {
       getInventoryConflicts: typeof getInventoryConflicts !== "undefined" ? getInventoryConflicts : null,
       getInventoryConflictsSlackMessage: typeof getInventoryConflictsSlackMessage !== "undefined" ? getInventoryConflictsSlackMessage : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null,
-      syncTemplateMasterFromSetMaster: typeof syncTemplateMasterFromSetMaster !== "undefined" ? syncTemplateMasterFromSetMaster : null
+      syncTemplateMasterFromSetMaster: typeof syncTemplateMasterFromSetMaster !== "undefined" ? syncTemplateMasterFromSetMaster : null,
+      normalizeConfirmRequestDates: typeof normalizeConfirmRequestDates !== "undefined" ? normalizeConfirmRequestDates : null
     };
     if (globalFuncs[funcName]) {
       var fnResult = globalFuncs[funcName]();
