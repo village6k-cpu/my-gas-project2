@@ -145,7 +145,7 @@ console.log('audit-round-3 checks OK');
 // ── 감사 4차: 전체 동기화 보존 + 금액 중복합산 + 합성 ID 가드 ──
 const syncTs3 = read('apps/today-dashboard/lib/data/sync.ts');
 assert(
-  syncTs3.includes('seenAmountKeys') && syncTs3.includes('replace(/[^0-9]/g, "")'),
+  (syncTs3.includes('seenAmountKeys') || syncTs3.includes('seenRowKeys')) && syncTs3.includes('replace(/[^0-9]/g, "")'),
   'timeline amount must not multiply by set bar count, and qty must parse "2세트"-style strings'
 );
 assert(
@@ -241,3 +241,15 @@ assert(
   'timeline stock conflicts must use real 장비마스터 stock with category estimates only as fallback'
 );
 console.log('audit-round-11 checks OK');
+
+// ── 핫픽스: 타임라인 바 복제 → 품목 N배 중복 표시 ──
+const syncDup = read('apps/today-dashboard/lib/data/sync.ts');
+assert(
+  /seenRowKeys[\s\S]{0,800}if \(seenRowKeys\.has\(rowKey\)\) return;/.test(syncDup),
+  'parseTimeline must emit one equipment row per schedule row, not per visual bar (qty N = N bars)'
+);
+assert(
+  /hasSynthetic/.test(syncDup) && /base\.equipments\.some\(\(e\) => e\.synthetic\)/.test(syncDup),
+  'dashboard repair must replace synthetic (possibly inflated) equipment lists regardless of count'
+);
+console.log('timeline-dup hotfix checks OK');
