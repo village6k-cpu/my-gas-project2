@@ -9537,13 +9537,14 @@ function checkGuideAlimtalk() {
     var sentRaw = props.getProperty(sentKey);
     if (sentRaw) sentData = JSON.parse(sentRaw);
   } catch(e) {}
-  // 구버전(날짜별 키) 기록 병합 — 전환 직후 기존 발송분 중복 방지
-  var yesterdayStr = Utilities.formatDate(new Date(now.getTime() - 24 * 60 * 60 * 1000), 'Asia/Seoul', 'yyyyMMdd');
-  [todayStr, yesterdayStr].forEach(function(ds) {
+  // 구버전(날짜별 키) 기록 전부 병합 — 반납 구간(+48h)은 이틀 전 발송분도 살아있을 수 있음
+  props.getKeys().forEach(function(k) {
+    var m = k.match(/^GUIDE_SENT_(\d{8})$/);
+    if (!m) return;
     try {
-      var legacy = JSON.parse(props.getProperty('GUIDE_SENT_' + ds) || '{}');
+      var legacy = JSON.parse(props.getProperty(k) || '{}');
       Object.keys(legacy).forEach(function(f) {
-        if (!sentData[f]) sentData[f] = ds + ' ' + legacy[f];
+        if (!sentData[f]) sentData[f] = m[1] + ' ' + legacy[f];
       });
     } catch(e) {}
   });
@@ -9600,9 +9601,10 @@ function checkGuideAlimtalk() {
     }
   });
 
-  // ── 발송 기록 저장 (7일 지난 플래그는 정리 — 값 형식 "yyyyMMdd HH:mm") ──
+  // ── 발송 기록 저장 (3일 지난 플래그는 정리 — 발송 가능 구간이 최대 +48h라 충분.
+  //     단일 프로퍼티 9KB 한도 대비 보존을 짧게 유지) ──
   var cutoffStr = Utilities.formatDate(
-    new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000), 'Asia/Seoul', 'yyyyMMdd');
+    new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000), 'Asia/Seoul', 'yyyyMMdd');
   Object.keys(sentData).forEach(function(f) {
     var d = String(sentData[f]).slice(0, 8);
     if (/^\d{8}$/.test(d) && d < cutoffStr) delete sentData[f];
