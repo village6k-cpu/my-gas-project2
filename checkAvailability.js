@@ -9482,16 +9482,17 @@ function checkGuideAlimtalk() {
   var todayStr = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd');
 
   // ── 계약마스터 데이터 로드 ──
-  // A=거래ID, B=예약자명, C=연락처
+  // A=거래ID, B=예약자명, C=연락처, J=계약상태
   var cmLastRow = contractSheet.getLastRow();
-  var cmData = contractSheet.getRange(2, 1, cmLastRow - 1, 3).getValues();
+  var cmData = contractSheet.getRange(2, 1, cmLastRow - 1, 10).getValues();
 
-  var contractMap = {};   // 거래ID → { name, tel }
+  var contractMap = {};   // 거래ID → { name, tel, status }
   for (var ci = 0; ci < cmData.length; ci++) {
     var tid = String(cmData[ci][0] || '').trim();
     var name = String(cmData[ci][1] || '').trim();
     var tel = String(cmData[ci][2] || '').trim();
-    if (tid) contractMap[tid] = { name: name, tel: tel };
+    var cStatus = String(cmData[ci][9] || '').trim();
+    if (tid) contractMap[tid] = { name: name, tel: tel, status: cStatus };
   }
 
   // ── 고객DB에서 누적이용횟수 로드 ──
@@ -9556,6 +9557,9 @@ function checkGuideAlimtalk() {
     var info = tradeInfo[tid];
     var cust = contractMap[tid];
     if (!cust || !cust.name || !cust.tel) return;
+
+    // 취소/이미 반납 완료된 계약에는 안내 불필요 ("반납일이 다가와" 오발송 방지)
+    if (/취소|완료/.test(cust.status)) return;
 
     // 3회 미만 고객만
     if ((usageCount[cust.name] || 0) >= 3) return;
