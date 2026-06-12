@@ -39,27 +39,28 @@ export function parseTimeline(resp: any): Trade[] {
     let minS = Infinity;
     let maxE = -Infinity;
     let amount = 0;
-    const seenAmountKeys = new Set<string>();
-    const equipments: EquipmentItem[] = items.map((it: any, idx: number) => {
+    const seenRowKeys = new Set<string>();
+    const equipments: EquipmentItem[] = [];
+    items.forEach((it: any, idx: number) => {
       const s = toMs(it.s);
       const e = toMs(it.e);
       if (s < minS) minS = s;
       if (e > maxE) maxE = e;
-      // 세트 수량 N이면 같은 행이 바 N개로 복제됨 — 행당 1회만 합산 (금액 N배 부풀림 방지)
-      const amtKey = `${it.g}|${it.r ?? idx}`;
-      if (typeof it.p === "number" && !seenAmountKeys.has(amtKey)) {
-        amount += it.p;
-        seenAmountKeys.add(amtKey);
-      }
+      // 타임라인은 세트 수량 N이면 같은 스케줄 행을 바 N개로 복제한다(시각화용) —
+      // 품목/금액은 행당 1번만 만들어야 함. 안 그러면 "숏노가암 ×4"가 4줄로 중복 표시됨.
+      const rowKey = `${it.g}|${it.r ?? idx}`;
+      if (seenRowKeys.has(rowKey)) return;
+      seenRowKeys.add(rowKey);
+      if (typeof it.p === "number") amount += it.p;
       const name = groups.get(it.g) ?? it.eq ?? "장비";
-      return {
+      equipments.push({
         scheduleId: `${tid}-${it.r ?? idx}`,
         synthetic: true, // 행번호 기반 합성 ID — dashboard merge 전까지 시트 write-back 금지
         name,
         qty: parseInt(String(it.q ?? "").replace(/[^0-9]/g, ""), 10) || 1, // "2세트" 같은 문자열 수량 파싱
         category: categoryOf(name) ?? undefined,
         checkoutState: it.st === "대기" ? "pending" : "taken",
-      } as EquipmentItem;
+      } as EquipmentItem);
     });
     const cs = st2contract(first.st);
     trades.push({
@@ -264,7 +265,15 @@ function incomingEquipmentCount(it: any): number {
 function shouldUseDashboardDetail(base: Trade, it: any): boolean {
   const amountFix =
     typeof it?.actualAmount === "number" && it.actualAmount > 0 && it.actualAmount !== (base.amount ?? 0);
-  return incomingEquipmentCount(it) > currentEquipmentCount(base) || (!base.contractUrl && !!it.contractUrl) || amountFix;
+  // 합성(타임라인 유래) 품목이 남아 있으면 개수와 무관하게 dashboard 실데이터로 교체 —
+  // 과거 중복 생성된 목록은 정상 목록보다 길어서 개수 비교만으로는 영원히 복구되지 않음
+  const hasSynthetic = incomingEquipmentCount(it) > 0 && base.equipments.some((e) => e.synthetic);
+  return (
+    incomingEquipmentCount(it) > currentEquipmentCount(base) ||
+    (!base.contractUrl && !!it.contractUrl) ||
+    amountFix ||
+    hasSynthetic
+  );
 }
 
 function repairFromDashboardItems(current: Trade[], items: any[]): Trade[] {
