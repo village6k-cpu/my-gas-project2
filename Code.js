@@ -247,8 +247,9 @@ function onEditInstallable(e) {
     }
   }
 
-  // 스케줄상세 품목/수량 수정 시 계약서 재생성 (디바운스) — 여러 건 연속 편집 시 단 1회 재생성
-  if (sheet.getName() === "스케줄상세" && (col === 3 || col === 4 || col === 5) && row >= 2) {
+  // 스케줄상세 수정 시 계약서 재생성 (디바운스) — 품목/수량(C~E) + 반출·반납 일시(F~I) + 단가(L)
+  // 일시·단가도 계약서에 찍히는 값이라 함께 재생성해야 함
+  if (sheet.getName() === "스케줄상세" && ((col >= 3 && col <= 9) || col === 12) && row >= 2) {
     try {
       var 거래ID = sheet.getRange(row, 2).getValue();  // B열: 거래ID
       if (거래ID) {
@@ -273,6 +274,19 @@ function onEditInstallable(e) {
       }
     } catch (err) {
       Logger.log("계약마스터 일정 변경 처리 실패: " + err.message);
+    }
+  }
+
+  // 계약마스터 B~D열(예약자명/연락처/업체명) 수정 → 계약서 임차인 정보 재생성 예약
+  if (sheet.getName() === "계약마스터" && col >= 2 && col <= 4 && row >= 2) {
+    try {
+      var infoRowCount = e.range.getNumRows ? e.range.getNumRows() : 1;
+      for (var infoIdx = 0; infoIdx < infoRowCount; infoIdx++) {
+        var infoTradeId = String(sheet.getRange(row + infoIdx, 1).getValue()).trim();
+        if (infoTradeId) scheduleContractRegen(infoTradeId);
+      }
+    } catch (err) {
+      Logger.log("계약마스터 임차인정보 변경 처리 실패: " + err.message);
     }
   }
 
@@ -1123,6 +1137,7 @@ function regenPendingContracts() {
           try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
           try { invalidateDashboardCache(); } catch (e1) {}
           try { invalidateTimelineCache(); } catch (e2) {}
+          try { supaMarkTradeDirty_(거래ID); } catch (eMark) {} // 새 계약서 링크 → Supabase/앱 전파
           Logger.log("계약서 재생성 완료(디바운스): " + 거래ID);
         } catch (err) {
           try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e3) {}

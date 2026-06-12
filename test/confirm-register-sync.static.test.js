@@ -253,3 +253,21 @@ assert(
   'dashboard repair must replace synthetic (possibly inflated) equipment lists regardless of count'
 );
 console.log('timeline-dup hotfix checks OK');
+
+// ── 계약서 실시간 반영: 재생성 트리거 범위 + 새 링크 전파 ──
+const codeJs12 = read('Code.js');
+assert(
+  codeJs12.includes('((col >= 3 && col <= 9) || col === 12)') &&
+    /계약마스터" && col >= 2 && col <= 4/.test(codeJs12),
+  'contract regen must also trigger on 스케줄상세 dates/price and 계약마스터 customer-info edits'
+);
+assert(
+  (codeJs12.match(/supaMarkTradeDirty_\(거래ID\)/g) || []).length >= 2 &&
+    (read('generatecontract.js').match(/supaMarkTradeDirty_/g) || []).length >= 2,
+  'every contract regen completion path must mark the trade dirty so the new link reaches the app'
+);
+assert(
+  read('apps/today-dashboard/lib/data/sync.ts').includes('contractUrlChanged'),
+  'app repair must refresh when the contract link CHANGES, not only when missing'
+);
+console.log('contract-realtime checks OK');
