@@ -22,12 +22,15 @@ export interface EquipmentCatalogState {
   items: EquipmentCatalogItem[];
   names: string[];
   components: Record<string, EquipmentCatalogComponent[]>;
+  /** 장비마스터 실재고 (장비명 → 수량) — 타임라인 재고충돌 판정용 */
+  stocks: Record<string, number>;
 }
 
 interface RawCatalog {
   names?: unknown;
   components?: unknown;
   items?: unknown;
+  stocks?: unknown;
 }
 
 const EMPTY_STATE: EquipmentCatalogState = {
@@ -37,6 +40,7 @@ const EMPTY_STATE: EquipmentCatalogState = {
   items: [],
   names: [],
   components: {},
+  stocks: {},
 };
 
 let state = EMPTY_STATE;
@@ -139,6 +143,14 @@ function buildItems(raw: RawCatalog): EquipmentCatalogState {
   });
 
   const items = Array.from(byName.values());
+  const stocks: Record<string, number> = {};
+  if (raw.stocks && typeof raw.stocks === "object") {
+    Object.entries(raw.stocks as Record<string, unknown>).forEach(([name, qty]) => {
+      const clean = normalizeName(name);
+      const n = Number(qty);
+      if (clean && Number.isFinite(n) && n > 0) stocks[clean] = n;
+    });
+  }
   return {
     loading: false,
     ready: true,
@@ -146,6 +158,7 @@ function buildItems(raw: RawCatalog): EquipmentCatalogState {
     items,
     names: Array.from(setNames),
     components,
+    stocks,
   };
 }
 
@@ -157,6 +170,7 @@ function readCatalogPayload(payload: unknown): RawCatalog {
     names: catalog.names,
     components: catalog.components,
     items: catalog.items,
+    stocks: catalog.stocks,
   };
 }
 
@@ -211,4 +225,11 @@ export function searchEquipmentCatalog(items: EquipmentCatalogItem[], q: string,
   const key = searchKey(q);
   if (!key) return items.slice(0, limit);
   return items.filter((item) => searchKey(item.name).includes(key)).slice(0, limit);
+}
+
+/** 장비마스터 실재고 조회 (카탈로그 로드 전이면 undefined → 호출부가 추정값 폴백) */
+export function catalogStockOf(name: string): number | undefined {
+  const clean = normalizeName(name);
+  if (!clean) return undefined;
+  return state.stocks[clean];
 }

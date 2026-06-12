@@ -1,3 +1,4 @@
+import { catalogStockOf } from "../data/equipmentCatalog";
 // 빌리지 스케줄 타임라인 데이터 — 기존 docs/timeline.html 구조 재현.
 // 행 = 예약 막대 1줄. 그룹(세트별/고객별/상태별) 헤더 아래로 쌓임.
 import type { Trade } from "./types";
@@ -83,7 +84,7 @@ export function buildItems(trades: Trade[]): TLItem[] {
         status: t.contractStatus,
         statusKey: statusKeyOf(t.contractStatus),
         qty: e.isSetHeader ? 1 : e.takenQty ?? e.qty,
-        stock: stockOf(e.category),
+        stock: catalogStockOf(e.name) ?? stockOf(e.category), // 장비마스터 실재고 우선 — 하드코딩 추정치는 폴백
         category: e.category,
         startMs: dateOnlyMs(new Date(co).toISOString()),
         endMs: dateOnlyMs(new Date(ro).toISOString()),

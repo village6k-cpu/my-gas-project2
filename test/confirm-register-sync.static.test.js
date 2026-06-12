@@ -232,3 +232,12 @@ assert(
   'edit modal must keep sets as set-name rows and drop components (GAS re-expands), with marker-based roles'
 );
 console.log('audit-round-10 checks OK');
+
+// ── 감사 11차(#11): 타임라인 재고충돌은 장비마스터 실재고 우선 ──
+assert(
+  read('checkAvailability.js').includes('stocks: stocks') &&
+    read('apps/today-dashboard/lib/data/equipmentCatalog.ts').includes('catalogStockOf') &&
+    read('apps/today-dashboard/lib/domain/timeline.ts').includes('catalogStockOf(e.name) ?? stockOf(e.category)'),
+  'timeline stock conflicts must use real 장비마스터 stock with category estimates only as fallback'
+);
+console.log('audit-round-11 checks OK');

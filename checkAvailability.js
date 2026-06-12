@@ -4935,11 +4935,14 @@ function getDashboardEquipNameList_(ss) {
 function getDashboardEquipmentCatalog_(ss) {
   var names = getDashboardEquipNameList_(ss);
   var setLookup = buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
+  var stocks = {};
+  try { stocks = getTimelineStockMap_(ss) || {}; } catch (stockErr) {} // 장비마스터 실재고 — 앱 재고충돌 표시용
   return {
     names: names,
     components: setLookup.components || {},
     prices: setLookup.prices || {},
-    items: setLookup.items || {}
+    items: setLookup.items || {},
+    stocks: stocks
   };
 }
 
