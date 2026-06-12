@@ -352,3 +352,24 @@ console.log('guide-alimtalk-test-tool checks OK');
   );
 }
 console.log('alimtalk-reliability checks OK');
+
+// ── 계약서 재생성 디바운스: 좀비 트리거 고착 방지 (실제 15일 대기열 고아화 발생) ──
+{
+  const code = read('Code.js');
+  const sched = code.slice(code.indexOf('function scheduleContractRegen'), code.indexOf('function regenPendingContracts'));
+  assert(
+    !/var exists = ScriptApp\.getProjectTriggers\(\)\.some/.test(sched) &&
+      /deleteTrigger\(t\)/.test(sched) && /newTrigger\('regenPendingContracts'\)/.test(sched),
+    'scheduleContractRegen must delete possibly-consumed one-shot triggers and always create a fresh one when stale (fired one-shots stay listed → "exists" check orphans the queue)'
+  );
+  const regen = code.slice(code.indexOf('function regenPendingContracts'), code.indexOf('function regenPendingContracts') + 1600);
+  assert(
+    /waitLock\(10000\); \} catch \(e\) \{[\s\S]{0,600}newTrigger\('regenPendingContracts'\)/.test(regen),
+    'lock-timeout path must reschedule a retry trigger — silent return orphans the queue (observed: 10s lock wait → bail)'
+  );
+  assert(
+    /BUDGET_MS/.test(regen) && /stillPending = true; break;/.test(regen),
+    'regen loop must stop before the 6-min execution cap and reschedule (20-item backlog hit the cap)'
+  );
+}
+console.log('contract-regen-stuck-queue checks OK');
