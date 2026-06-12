@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { authFetch } from "@/lib/data/authFetch";
+import { useEquipmentCatalog } from "@/lib/data/equipmentCatalog";
 import { pollSheetChangesNow } from "@/lib/data/store";
 import { ViewHeader } from "@/components/ViewHeader";
 import { Refresh } from "@/components/icons";
@@ -489,6 +490,7 @@ function EditPanel({
       .map((r) => ({ 이름: r.장비명, 수량: String(r.수량 || 1) })),
   );
   const [saving, setSaving] = useState(false);
+  const catalog = useEquipmentCatalog();
 
   const setEq = (i: number, k: "이름" | "수량", v: string) => setEquips((prev) => prev.map((e, j) => (j === i ? { ...e, [k]: v } : e)));
   const addEq = () => setEquips((prev) => [...prev, { 이름: "", 수량: "1" }]);
@@ -541,7 +543,7 @@ function EditPanel({
             <div className="space-y-1.5">
               {equips.map((e, i) => (
                 <div key={i} className="flex items-center gap-1.5">
-                  <input value={e.이름} onChange={(ev) => setEq(i, "이름", ev.target.value)} placeholder="장비명" className="inp flex-1" />
+                  <EquipNameInput value={e.이름} onChange={(v) => setEq(i, "이름", v)} names={catalog.names} placeholder="장비명" />
                   <input value={e.수량} onChange={(ev) => setEq(i, "수량", ev.target.value)} className="inp w-16 text-center" inputMode="numeric" />
                   <button onClick={() => delEq(i)} className="tap px-2 text-ink-faint">✕</button>
                 </div>
@@ -591,6 +593,7 @@ function ItemEditSheet({
   const [qty, setQty] = useState(String(item.수량 || 1));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const catalog = useEquipmentCatalog();
 
   const call = async (args: Record<string, unknown>) => {
     setBusy(true);
@@ -622,7 +625,7 @@ function ItemEditSheet({
         </div>
         <div className="space-y-2.5">
           <div className="flex items-center gap-1.5">
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="장비명" className="itm-inp flex-1" />
+            <EquipNameInput value={name} onChange={setName} names={catalog.names} placeholder="장비명" />
             <input value={qty} onChange={(e) => setQty(e.target.value)} className="itm-inp w-16 text-center" inputMode="numeric" aria-label="수량" />
           </div>
           {err && <p className="text-[12px] font-bold text-attention-fg">{err}</p>}
@@ -654,6 +657,52 @@ function ItemEditSheet({
           border-color: #e8593c;
         }
       `}</style>
+    </div>
+  );
+}
+
+/** 장비명 입력 + 드롭다운 자동완성 — 확인요청 시트 F열 드롭다운과 같은 목록(세트마스터 기준) */
+function EquipNameInput({
+  value, onChange, names, placeholder,
+}: {
+  value: string; onChange: (v: string) => void; names: string[]; placeholder?: string;
+}) {
+  const [focused, setFocused] = useState(false);
+  const q = value.trim().toLowerCase();
+  const suggestions = useMemo(
+    () => (q ? names.filter((n) => n.toLowerCase().includes(q)).slice(0, 8) : names.slice(0, 8)),
+    [names, q],
+  );
+  const known = !value.trim() || names.includes(value.trim());
+  return (
+    <div className="relative min-w-0 flex-1">
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setTimeout(() => setFocused(false), 120)}
+        placeholder={placeholder}
+        className={`w-full rounded-[0.6rem] border px-2.5 py-2 text-[13.5px] text-ink outline-none focus:border-brand-600 ${known ? "border-black/10" : "border-warn-ring"}`}
+      />
+      {!known && <div className="px-1 pt-0.5 text-[10.5px] font-bold text-warn-fg">목록에 없는 이름</div>}
+      {focused && suggestions.length > 0 && (
+        <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-50 max-h-52 overflow-y-auto rounded-xl bg-white py-1 shadow-card ring-1 ring-line">
+          {suggestions.map((n) => (
+            <button
+              key={n}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onChange(n);
+                setFocused(false);
+              }}
+              className="block w-full px-3 py-2 text-left text-[13px] font-semibold text-ink hover:bg-brand-50"
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
