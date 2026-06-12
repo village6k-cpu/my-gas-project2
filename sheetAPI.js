@@ -593,7 +593,8 @@ function doListPending() {
         장비명: data[i][5],
         수량: data[i][6] || 1,
         결과: data[i][8] || "",
-        상세: data[i][9] || ""
+        상세: data[i][9] || "",
+        비고: String(data[i][16] || "") // Q열 — "[세트]세트명" 구성품 마커
       });
     }
   }

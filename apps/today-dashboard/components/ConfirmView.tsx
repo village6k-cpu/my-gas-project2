@@ -22,7 +22,7 @@ const KakaoReservationInput = dynamic(
 // 확인요청 관리 — GAS Schedule API(/api/confirm)를 네이티브로. 대기/보류 카드 목록 + 장비별 가용성 결과
 // + 확인(가용성체크)/선택등록/전체보류/전체거절/수정. 디자인은 통합앱 토큰.
 
-type Equip = { 장비명: string; 수량: number; 결과?: string; 상세?: string };
+type Equip = { 장비명: string; 수량: number; 결과?: string; 상세?: string; 비고?: string };
 type ConfirmEquipmentRole = "set-header" | "set-component" | "single";
 type ConfirmEquipmentRow = Equip & {
   role: ConfirmEquipmentRole;
@@ -97,7 +97,13 @@ function buildConfirmEquipmentRows(equips: Equip[]): ConfirmEquipmentRow[] {
       return;
     }
 
-    const parent = currentSetIndex >= 0 ? rows[currentSetIndex] : undefined;
+    // 비고 마커("[세트]...")가 있으면 그것이 정답 — 순서 추정은 세트 뒤에 오는 단품을 구성품으로 오인함
+    const hasMarkerInfo = typeof equip.비고 === "string";
+    const markedComponent = hasMarkerInfo && equip.비고!.startsWith("[세트]");
+    const parentCandidate = currentSetIndex >= 0 ? rows[currentSetIndex] : undefined;
+    const isComponent = hasMarkerInfo ? markedComponent && !!parentCandidate : !!parentCandidate;
+    if (hasMarkerInfo && !markedComponent) currentSetIndex = -1; // 단품 확정 → 세트 묶음 종료
+    const parent = isComponent ? parentCandidate : undefined;
     if (parent) parent.componentCount = (parent.componentCount || 0) + 1;
 
     rows.push({
@@ -442,8 +448,12 @@ function EditPanel({
   const [outT, setOutT] = useState(out.t);
   const [retD, setRetD] = useState(ret.d);
   const [retT, setRetT] = useState(ret.t);
+  // 세트는 세트명(헤더)으로 보존하고 구성품은 제외 — 저장 시 GAS가 세트를 다시 전개하므로
+  // 구성품을 단품으로 보내면 세트 구조·세트 단가가 소실된다
   const [equips, setEquips] = useState<{ 이름: string; 수량: string }[]>(
-    (req.장비목록 || []).filter((e) => e.결과 !== "세트").map((e) => ({ 이름: e.장비명, 수량: String(e.수량 || 1) })),
+    buildConfirmEquipmentRows(req.장비목록 || [])
+      .filter((r) => r.role !== "set-component")
+      .map((r) => ({ 이름: r.장비명, 수량: String(r.수량 || 1) })),
   );
   const [saving, setSaving] = useState(false);
 

@@ -219,3 +219,16 @@ assert(
   'cancelled trades must not occupy timeline bars or conflict math'
 );
 console.log('audit-round-9 checks OK');
+
+// ── 감사 10차: 확인요청 편집이 세트 구조를 파괴하지 않도록 ──
+assert(
+  read('sheetAPI.js').includes('비고: String(data[i][16] || "")'),
+  'list API must expose the Q-column set-component marker'
+);
+const confirmView10 = read('apps/today-dashboard/components/ConfirmView.tsx');
+assert(
+  confirmView10.includes('markedComponent') &&
+    /buildConfirmEquipmentRows\(req\.장비목록 \|\| \[\]\)[\s\S]{0,200}role !== "set-component"/.test(confirmView10),
+  'edit modal must keep sets as set-name rows and drop components (GAS re-expands), with marker-based roles'
+);
+console.log('audit-round-10 checks OK');
