@@ -9216,34 +9216,54 @@ function clearAllRequests() {
 }
 
 /**
- * 자동 초기화 (타이머 트리거에서 실행 — 팝업 없이 조용히)
- * 등록완료된 건만 삭제합니다. 나머지는 전부 남겨둡니다.
+ * 자동 초기화 (1시간 타이머 트리거 — setupAutoClearTrigger로 설치)
+ * 등록완료된 "요청 묶음" 전체를 지웁니다 (같은 요청의 제외/보류 행 포함 —
+ * 행 단위로 등록완료만 지우면 제외 행이 영영 남음). 나머지는 전부 남겨둡니다.
  */
 function autoClearRequests() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("확인요청");
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return;
+  if (lastRow < 2) return { cleared: 0 };
 
   const data = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
 
-  // 아래에서 위로 삭제 (행 번호 꼬임 방지)
-  for (let i = data.length - 1; i >= 0; i--) {
-    const row = i + 2;
-    const regStatus = data[i][14];  // O: 등록상태
-
-    // 등록완료된 건만 삭제 (L열=12 수식은 보존)
-    if (regStatus === "등록완료") {
-      // A~K열 (1~11) 클리어
-      sheet.getRange(row, 1, 1, 11).clearContent();
-      sheet.getRange(row, 1, 1, 11).setBackground(null);
-      // L열(12)은 수식이므로 건드리지 않음
-      // M~Q열 (13~17) 클리어
-      sheet.getRange(row, 13, 1, 5).clearContent();
-      sheet.getRange(row, 13, 1, 5).setBackground(null);
+  // 1) 등록완료 행이 하나라도 있는 요청ID 수집 (건 단위 삭제)
+  const doneReqIDs = new Set();
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][14] || "").trim() === "등록완료") {
+      const rid = String(data[i][0] || "").trim();
+      if (rid) doneReqIDs.add(rid);
     }
   }
 
+  // 2) 해당 요청의 모든 행 클리어 (아래에서 위로 — L열=12 수식은 보존)
+  let cleared = 0;
+  for (let i = data.length - 1; i >= 0; i--) {
+    const rid = String(data[i][0] || "").trim();
+    const rowDone = String(data[i][14] || "").trim() === "등록완료";
+    if (!rowDone && !(rid && doneReqIDs.has(rid))) continue;
+    const row = i + 2;
+    sheet.getRange(row, 1, 1, 11).clearContent();   // A~K
+    sheet.getRange(row, 1, 1, 11).setBackground(null);
+    sheet.getRange(row, 13, 1, 5).clearContent();   // M~Q
+    sheet.getRange(row, 13, 1, 5).setBackground(null);
+    cleared++;
+  }
+  if (cleared > 0) SpreadsheetApp.flush();
+  return { cleared: cleared, requests: doneReqIDs.size };
+}
+
+/**
+ * 등록완료 건 자동 정리 트리거 설치 (1시간마다 autoClearRequests)
+ * 함수만 있고 트리거가 설치돼 있지 않아 자동 삭제가 동작하지 않던 문제의 복구용.
+ */
+function setupAutoClearTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'autoClearRequests') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('autoClearRequests').timeBased().everyHours(1).create();
+  return { status: "OK", message: "autoClearRequests 1시간 트리거 설치 완료" };
 }
 
 /**
