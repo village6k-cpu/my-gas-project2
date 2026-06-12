@@ -4,6 +4,7 @@ const path = require('path');
 
 const checkAvailability = fs.readFileSync(path.resolve(__dirname, '..', 'checkAvailability.js'), 'utf8');
 const code = fs.readFileSync(path.resolve(__dirname, '..', 'Code.js'), 'utf8');
+const sheetAPI = fs.readFileSync(path.resolve(__dirname, '..', 'sheetAPI.js'), 'utf8');
 
 assert.match(
   checkAvailability,
@@ -69,6 +70,18 @@ assert.match(
   code,
   /function autoExpandSetInSchedule[\s\S]*typeof formatScheduleSheet === "function"[\s\S]*formatScheduleSheet\(sheet\);/,
   '스케줄상세에서 직접 세트를 입력해 자동 펼침된 경우에도 즉시 새 색상 규칙을 적용해야 한다'
+);
+
+assert.match(
+  checkAvailability,
+  /function inspectScheduleDetailVisualState\(\)[\s\S]*formatScheduleSheet\(schedSheet\);[\s\S]*getBackgrounds\(\)[\s\S]*expectedHeaderBgRows[\s\S]*oldGreenRows/,
+  '스케줄상세 실제 시트 배경색을 재포맷 후 진단할 수 있어야 한다'
+);
+
+assert.match(
+  sheetAPI,
+  /"inspectScheduleDetailVisualState"[\s\S]*inspectScheduleDetailVisualState: typeof inspectScheduleDetailVisualState !== "undefined" \? inspectScheduleDetailVisualState : null/,
+  '스케줄상세 색상 진단 함수는 sheetAPI action=run으로 호출 가능해야 한다'
 );
 
 console.log('schedule detail visual grouping static checks passed');

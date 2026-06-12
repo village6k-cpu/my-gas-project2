@@ -9535,6 +9535,122 @@ function formatScheduleSheet(schedSheet) {
   }
 }
 
+function inspectScheduleDetailVisualState() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schedSheet = ss.getSheetByName("스케줄상세");
+  if (!schedSheet) return { error: "스케줄상세 시트 없음" };
+
+  formatScheduleSheet(schedSheet);
+  SpreadsheetApp.flush();
+
+  var lastRow = schedSheet.getLastRow();
+  if (lastRow < 2) {
+    return {
+      ok: true,
+      sheet: "스케줄상세",
+      lastRow: lastRow,
+      message: "데이터 행 없음"
+    };
+  }
+
+  var rowCount = lastRow - 1;
+  var data = schedSheet.getRange(2, 2, rowCount, 3).getValues(); // B:D
+  var backgrounds = schedSheet.getRange(2, 3, rowCount, 2).getBackgrounds();
+  var fontColors = schedSheet.getRange(2, 3, rowCount, 2).getFontColors();
+  var setGroupKeys = {};
+
+  for (var s = 0; s < data.length; s++) {
+    var sTradeId = String(data[s][0] || "").trim();
+    var sSetName = String(data[s][1] || "").trim();
+    var sEquipName = String(data[s][2] || "").trim();
+    if (sTradeId && sSetName && sEquipName && sSetName !== sEquipName) {
+      setGroupKeys[makeScheduleSetKey_(sTradeId, sSetName)] = true;
+    }
+  }
+
+  var expected = {
+    headerBg: SCHEDULE_SET_HEADER_COLOR,
+    componentBg: SCHEDULE_SET_COMPONENT_COLOR,
+    setFont: SCHEDULE_SET_FONT_COLOR
+  };
+  var counts = {
+    setHeaderRows: 0,
+    setComponentRows: 0,
+    standaloneRows: 0,
+    expectedHeaderBgRows: 0,
+    expectedComponentBgRows: 0,
+    oldGreenRows: 0,
+    yellowRows: 0,
+    otherSetColorRows: 0
+  };
+  var examples = [];
+
+  function normColor_(value) {
+    return String(value || "").toUpperCase();
+  }
+  function isOldGreenOrYellow_(cBg, dBg) {
+    var joined = [cBg, dBg].join("|");
+    return /#D9EAD3|#EAF4E4|#274E13/.test(joined) ? "oldGreen" :
+      /#FFF2CC|#FFEB9C/.test(joined) ? "yellow" : "";
+  }
+
+  for (var i = 0; i < data.length; i++) {
+    var curID = String(data[i][0] || "").trim();
+    var setName = String(data[i][1] || "").trim();
+    var equipName = String(data[i][2] || "").trim();
+    var isSetComponent = !!(curID && setName && equipName && setName !== equipName);
+    var isSetHeader = !!(curID && equipName && (
+      (setName && setName === equipName && setGroupKeys[makeScheduleSetKey_(curID, setName)]) ||
+      (!setName && setGroupKeys[makeScheduleSetKey_(curID, equipName)])
+    ));
+    var cBg = normColor_(backgrounds[i][0]);
+    var dBg = normColor_(backgrounds[i][1]);
+    var cFont = normColor_(fontColors[i][0]);
+    var dFont = normColor_(fontColors[i][1]);
+    var issue = isOldGreenOrYellow_(cBg, dBg);
+
+    if (isSetHeader) {
+      counts.setHeaderRows++;
+      if (cBg === expected.headerBg && dBg === expected.headerBg) counts.expectedHeaderBgRows++;
+      else counts.otherSetColorRows++;
+    } else if (isSetComponent) {
+      counts.setComponentRows++;
+      if (cBg === expected.componentBg && dBg === expected.componentBg) counts.expectedComponentBgRows++;
+      else counts.otherSetColorRows++;
+    } else {
+      counts.standaloneRows++;
+    }
+
+    if (issue === "oldGreen") counts.oldGreenRows++;
+    if (issue === "yellow") counts.yellowRows++;
+
+    if ((isSetHeader || isSetComponent || issue) && examples.length < 12) {
+      examples.push({
+        row: i + 2,
+        type: isSetHeader ? "setHeader" : isSetComponent ? "setComponent" : "otherHighlighted",
+        tradeId: curID,
+        setName: setName,
+        equipName: equipName,
+        cBg: cBg,
+        dBg: dBg,
+        cFont: cFont,
+        dFont: dFont
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    spreadsheetId: ss.getId(),
+    spreadsheetName: ss.getName(),
+    sheet: schedSheet.getName(),
+    lastRow: lastRow,
+    expected: expected,
+    counts: counts,
+    examples: examples
+  };
+}
+
 
 function fixScheduleHeaders() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
