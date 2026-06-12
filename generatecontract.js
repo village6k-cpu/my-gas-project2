@@ -59,8 +59,9 @@ function createContractFromMenu() {
   try {
     // 기존 파일 있으면 삭제 후 새로 생성 → 신규든 재생성이든 동일하게 처리
     const result = deleteAndRegenerateContract(ss, 거래ID);
-    // 디바운스 대기 큐에 쌓여있었다면 정리
+    // 디바운스 대기 큐에 쌓여있었다면 정리 + 새 링크 동기화 마킹
     try { PropertiesService.getScriptProperties().deleteProperty('contractEditTS_' + 거래ID); } catch (e) {}
+    try { if (typeof supaMarkTradeDirty_ !== 'undefined') supaMarkTradeDirty_(거래ID); } catch (eMark) {}
     ss.toast("✅ 완료", "계약서 " + 거래ID, 5);
     ui.alert(
       `✅ 계약서 생성 완료!\n\n` +
@@ -830,6 +831,10 @@ function clearDirectContractRegenPending_(거래ID) {
   try {
     PropertiesService.getScriptProperties().deleteProperty('contractEditTS_' + 거래ID);
   } catch (e) {}
+  // 새 계약서 링크(거래내역 C열)가 Supabase/앱으로 전파되도록 동기화 마킹
+  try {
+    if (typeof supaMarkTradeDirty_ !== 'undefined') supaMarkTradeDirty_(거래ID);
+  } catch (eMark) {}
   try {
     if (typeof invalidateDashboardTradeExtraCache_ !== 'undefined') invalidateDashboardTradeExtraCache_([거래ID]);
   } catch (e1) {}

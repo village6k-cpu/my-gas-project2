@@ -268,9 +268,11 @@ function shouldUseDashboardDetail(base: Trade, it: any): boolean {
   // 합성(타임라인 유래) 품목이 남아 있으면 개수와 무관하게 dashboard 실데이터로 교체 —
   // 과거 중복 생성된 목록은 정상 목록보다 길어서 개수 비교만으로는 영원히 복구되지 않음
   const hasSynthetic = incomingEquipmentCount(it) > 0 && base.equipments.some((e) => e.synthetic);
+  // 계약서 재생성으로 링크가 '바뀐' 경우 — 없을 때만 갱신하면 옛 링크를 영원히 들고 있음
+  const contractUrlChanged = !!it?.contractUrl && it.contractUrl !== base.contractUrl;
   return (
     incomingEquipmentCount(it) > currentEquipmentCount(base) ||
-    (!base.contractUrl && !!it.contractUrl) ||
+    contractUrlChanged ||
     amountFix ||
     hasSynthetic
   );
