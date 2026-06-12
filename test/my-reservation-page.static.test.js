@@ -90,4 +90,12 @@ assert(
   'registerByReqID must call the alimtalk inside try/catch so registration never fails on send errors'
 );
 
+// ── 라이브 검증 후속: 평문 ID 링크 생성 + 원격 1회 설정 ──
+assert(
+  /getMyPageLink[\s\S]{0,500}catch \(argErr\)/.test(sheetApi) &&
+    sheetApi.includes('"setupMyPage"') &&
+    /setupMyPage[\s\S]{0,500}JSON\.parse\(setupArgs\)/.test(sheetApi),
+  'getMyPageLink must accept plain-string ids and setupMyPage must be callable via the run API'
+);
+
 console.log('my-reservation-page.static.test.js OK');

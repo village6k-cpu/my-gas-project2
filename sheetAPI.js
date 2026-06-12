@@ -943,7 +943,8 @@ function runFunction(funcName, params) {
     "listAllTriggers",
     "diagEquipmentRiskBackendConfig",
     "setupEquipmentRiskBackendConfig",
-    "getMyPageLink"
+    "getMyPageLink",
+    "setupMyPage"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -986,10 +987,23 @@ function runFunction(funcName, params) {
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "getMyPageLink") {
-      var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
+      var args = params.args;
+      if (typeof args === "string") {
+        try { args = JSON.parse(args); } catch (argErr) { /* 평문 ID("260615-001")는 그대로 사용 */ }
+      }
+      if (args === undefined || args === null || args === "") args = params;
       var linkId = typeof args === "string" ? args : (args.id || args.tradeId || args.reqID || args.거래ID || "");
       var result = getMyPageLink(linkId);
       return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "setupMyPage") {
+      var setupArgs = params.args;
+      if (typeof setupArgs === "string") {
+        try { setupArgs = JSON.parse(setupArgs); } catch (suErr) { setupArgs = {}; }
+      }
+      if (setupArgs === undefined || setupArgs === null || setupArgs === "") setupArgs = params;
+      var suResult = setupMyPage(setupArgs || {});
+      return { success: !suResult.error, function: funcName, result: suResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "regenerateContractById") {
       var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;

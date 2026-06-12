@@ -14,8 +14,7 @@
  *   action=myPage&token=...            → getMyReservation(token)
  *   action=run&func=getMyPageLink      → 직원/봇이 고객에게 보낼 링크 생성
  *
- * 1회 설정: setupMyPage() 실행 → MYPAGE_SECRET 자동 생성.
- *   Script Properties의 MYPAGE_BASE_URL에 고객 페이지 도메인(예: https://앱도메인)을 넣을 것.
+ * 1회 설정: setupMyPage({baseUrl,kakaoUrl,notice}) 실행 → 비밀키/고객 페이지 설정 준비.
  */
 
 function MYPAGE_CFG_() {
@@ -26,16 +25,22 @@ function MYPAGE_CFG_() {
   };
 }
 
-/** 1회 설정 — 비밀키가 없으면 생성 */
-function setupMyPage() {
+/** 1회 설정 — 비밀키가 없으면 생성. opts로 도메인/안내문도 함께 설정 가능 (API run 호출용) */
+function setupMyPage(opts) {
   var p = PropertiesService.getScriptProperties();
   if (!p.getProperty("MYPAGE_SECRET")) {
     p.setProperty("MYPAGE_SECRET", Utilities.getUuid() + Utilities.getUuid());
   }
+  opts = opts || {};
+  if (opts.baseUrl) p.setProperty("MYPAGE_BASE_URL", String(opts.baseUrl).trim());
+  if (opts.kakaoUrl) p.setProperty("MYPAGE_KAKAO_URL", String(opts.kakaoUrl).trim());
+  if (opts.notice) p.setProperty("MYPAGE_NOTICE", String(opts.notice));
   return {
     success: true,
-    message: "MYPAGE_SECRET 준비 완료. MYPAGE_BASE_URL(고객 페이지 도메인)을 Script Properties에 설정하세요.",
-    baseUrl: MYPAGE_CFG_().baseUrl || "(미설정)"
+    message: "MYPAGE_SECRET 준비 완료.",
+    baseUrl: MYPAGE_CFG_().baseUrl || "(미설정)",
+    kakaoUrl: p.getProperty("MYPAGE_KAKAO_URL") || "(미설정)",
+    noticeSet: !!p.getProperty("MYPAGE_NOTICE")
   };
 }
 
