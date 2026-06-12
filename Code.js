@@ -1084,12 +1084,13 @@ function scheduleContractRegen(거래ID) {
   var scheduledAt = Number(props.getProperty(CONTRACT_REGEN_TRIGGER_PROP_) || 0);
   var hasRecentScheduledTrigger = scheduledAt && (now - scheduledAt < CONTRACT_REGEN_TRIGGER_STALE_MS_);
   if (!hasRecentScheduledTrigger) {
-    var exists = ScriptApp.getProjectTriggers().some(function(t) {
-      return t.getHandlerFunction() === 'regenPendingContracts';
+    // 주의: GAS 일회성 트리거는 발화 후에도 목록에 남는다. 스테일 상태에서 목록에
+    // 보이는 트리거는 소진된 좀비일 가능성이 높음 — "있으니 안 만들기"로 두면
+    // 대기열이 영구 고아화됨(실제 15일 고착 발생). 지우고 새로 건다.
+    ScriptApp.getProjectTriggers().forEach(function(t) {
+      if (t.getHandlerFunction() === 'regenPendingContracts') ScriptApp.deleteTrigger(t);
     });
-    if (!exists) {
-      ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
-    }
+    ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
     props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(now));
   }
 
@@ -1105,7 +1106,19 @@ function scheduleContractRegen(거래ID) {
 function regenPendingContracts() {
   var STABLE_MS = 2800;
   var lock = LockService.getScriptLock();
-  try { lock.waitLock(10000); } catch (e) { return; }
+  try { lock.waitLock(10000); } catch (e) {
+    // 이 실행을 깨운 일회성 트리거는 이미 소진됨 — 조용히 반환하면 대기열 고아화.
+    // 30초 뒤 재시도 트리거를 새로 걸어두고 빠진다.
+    try {
+      ScriptApp.getProjectTriggers().forEach(function(t) {
+        if (t.getHandlerFunction() === 'regenPendingContracts') ScriptApp.deleteTrigger(t);
+      });
+      ScriptApp.newTrigger('regenPendingContracts').timeBased().after(30000).create();
+      PropertiesService.getScriptProperties()
+        .setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
+    } catch (e2) {}
+    return;
+  }
 
   try {
     var props = PropertiesService.getScriptProperties();
@@ -1121,9 +1134,12 @@ function regenPendingContracts() {
     var now = Date.now();
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var stillPending = false;
+    var BUDGET_MS = 4 * 60 * 1000; // 6분 실행 한도 전에 끊고 재예약 (대량 적체 대비)
+    var startedAt = Date.now();
 
     for (var key in all) {
       if (!key.startsWith('contractEditTS_')) continue;
+      if (Date.now() - startedAt > BUDGET_MS) { stillPending = true; break; }
       var 거래ID = key.substring('contractEditTS_'.length);
 
       // 타임스탬프 재조회 — 루프 중 onEdit이 새로 썼을 수 있음
