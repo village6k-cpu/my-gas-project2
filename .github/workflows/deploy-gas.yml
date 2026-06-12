@@ -1,0 +1,83 @@
+# main에 GAS 파일이 머지되면 자동으로 clasp push + deploy.
+# endwork.sh의 안전장치(드리프트 가드·백업)를 그대로 따른다 — scripts/ci-deploy-gas.sh 참고.
+#
+# 1회 설정 (필수): GitHub 레포 Settings → Secrets and variables → Actions 에
+#   CLASPRC_JSON = 맥의 ~/.clasprc.json 파일 내용 전체
+# 를 등록해야 동작한다. 미등록 시 워크플로는 안내만 남기고 스킵된다.
+# (clasp 버전이 맥과 다르면 인증 포맷이 안 맞을 수 있음 — 맥에서 `clasp --version` 확인 후
+#  아래 CLASP_VERSION 을 같은 버전으로 맞출 것)
+
+name: Deploy GAS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "*.js"
+      - "*.html"
+      - "appsscript.json"
+  workflow_dispatch:
+    inputs:
+      skip_drift_guard:
+        description: "GAS 드리프트 가드 건너뛰기 (의도된 덮어쓰기일 때만 true)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-gas
+  cancel-in-progress: false
+
+env:
+  CLASP_VERSION: "3.3.0"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 시크릿 확인
+        id: secrets
+        run: |
+          if [ -z "${{ secrets.CLASPRC_JSON }}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CLASPRC_JSON 시크릿 미등록 — GAS 자동 배포 스킵. 맥의 ~/.clasprc.json 내용을 레포 Secrets에 등록하세요."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Node 설정
+        if: steps.secrets.outputs.configured == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: clasp 설치·인증
+        if: steps.secrets.outputs.configured == 'true'
+        run: |
+          npm i -g @google/clasp@${{ env.CLASP_VERSION }}
+          printf '%s' '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
+
+      - name: 정적 테스트
+        if: steps.secrets.outputs.configured == 'true'
+        run: |
+          fails=0
+          for f in test/*.test.js; do node "$f" >/dev/null 2>&1 || { fails=1; echo "FAIL: $f"; }; done
+          [ "$fails" -eq 0 ]
+
+      - name: GAS 배포 (드리프트 가드 + 백업 포함)
+        if: steps.secrets.outputs.configured == 'true'
+        env:
+          SKIP_DRIFT_GUARD: ${{ inputs.skip_drift_guard == true && '1' || '0' }}
+        run: |
+          chmod +x scripts/ci-deploy-gas.sh
+          scripts/ci-deploy-gas.sh "CI deploy ${{ github.sha }}"
+
+      - name: 배포 전 GAS 백업 아티팩트 업로드
+        if: always() && steps.secrets.outputs.configured == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gas-backup-${{ github.run_number }}
+          path: gas-backup/
+          retention-days: 30
+          if-no-files-found: ignore
