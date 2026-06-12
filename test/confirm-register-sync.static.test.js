@@ -279,16 +279,28 @@ assert(
 );
 console.log('memo-visibility checks OK');
 
-// ── 팝빌 토큰 HMAC: GAS는 (String, Byte[]) 미지원 — 양쪽 Byte[] 필수 ──
+// ── 팝빌 연동: 공식 SDK 스펙 준수 (linkhub 2.0 토큰 + /ATS 발송) ──
 {
   const ca = read('checkAvailability.js');
   assert(
-    /computeHmacSha256Signature\(\s*Utilities\.newBlob\(stringToSign\)\.getBytes\(\),\s*Utilities\.base64Decode\(secretKey\)\s*\)/.test(ca),
+    /computeHmacSha256Signature\(\s*Utilities\.newBlob\(digestTarget\)\.getBytes\(\),\s*Utilities\.base64Decode\(secretKey\)\s*\)/.test(ca),
     'popbill token signing must pass Byte[] for both value and key (String+Byte[] throws in GAS)'
   );
   assert(
-    !/computeHmacSha256Signature\(stringToSign,/.test(ca),
-    'popbill token signing must not pass a raw String with a Byte[] key'
+    /access_id:\s*corpNum/.test(ca) && !/access_id:\s*linkID/.test(ca),
+    'linkhub token access_id must be the corpNum (사업자번호), not the LinkID'
+  );
+  assert(
+    /SHA_256,\s*reqBody/.test(ca) && /\\n' \+ '2\.0\\n' \+ uri/.test(ca.replace(/\s+/g,' ')) || /'2\.0\\n'/.test(ca),
+    'token signature must use SHA256 body digest and include the 2.0 version line'
+  );
+  assert(
+    /popbill\.linkhub\.co\.kr\/ATS'/.test(ca) && !/url \+ '\/' \+ corpNum/.test(ca),
+    'alimtalk send must POST to /ATS (corpNum is bound to the token, not the path)'
+  );
+  assert(
+    /x-lh-forwarded/.test(ca),
+    'token request must use forwarded-IP wildcard — GAS egress IPs change between calls'
   );
 }
 console.log('popbill-hmac checks OK');
