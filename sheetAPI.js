@@ -944,7 +944,8 @@ function runFunction(funcName, params) {
     "diagEquipmentRiskBackendConfig",
     "setupEquipmentRiskBackendConfig",
     "getMyPageLink",
-    "setupMyPage"
+    "setupMyPage",
+    "testRegisterAlimtalk"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -995,6 +996,14 @@ function runFunction(funcName, params) {
       var linkId = typeof args === "string" ? args : (args.id || args.tradeId || args.reqID || args.거래ID || "");
       var result = getMyPageLink(linkId);
       return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "testRegisterAlimtalk") {
+      var taArgs = params.args;
+      if (typeof taArgs === "string") {
+        try { taArgs = JSON.parse(taArgs); } catch (taErr) { taArgs = { 연락처: taArgs }; }
+      }
+      var taResult = testRegisterAlimtalk(taArgs || {});
+      return { success: !taResult.error, function: funcName, result: taResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "setupMyPage") {
       var setupArgs = params.args;

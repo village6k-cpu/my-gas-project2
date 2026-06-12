@@ -35,12 +35,14 @@ function setupMyPage(opts) {
   if (opts.baseUrl) p.setProperty("MYPAGE_BASE_URL", String(opts.baseUrl).trim());
   if (opts.kakaoUrl) p.setProperty("MYPAGE_KAKAO_URL", String(opts.kakaoUrl).trim());
   if (opts.notice) p.setProperty("MYPAGE_NOTICE", String(opts.notice));
+  if (opts.tplRegister) p.setProperty("POPBILL_TPL_REGISTER", String(opts.tplRegister).trim());
   return {
     success: true,
     message: "MYPAGE_SECRET 준비 완료.",
     baseUrl: MYPAGE_CFG_().baseUrl || "(미설정)",
     kakaoUrl: p.getProperty("MYPAGE_KAKAO_URL") || "(미설정)",
-    noticeSet: !!p.getProperty("MYPAGE_NOTICE")
+    noticeSet: !!p.getProperty("MYPAGE_NOTICE"),
+    tplRegister: p.getProperty("POPBILL_TPL_REGISTER") || "(미설정)"
   };
 }
 
