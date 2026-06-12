@@ -9176,23 +9176,26 @@ function _getPopbillToken() {
   var props = PropertiesService.getScriptProperties();
   var linkID = props.getProperty('POPBILL_LINK_ID');
   var secretKey = props.getProperty('POPBILL_SECRET_KEY');
+  var corpNum = String(props.getProperty('POPBILL_CORP_NUM') || '').replace(/-/g, '');
 
-  var scope = ['153'];
-  var tokenRequestURL = 'https://auth.linkhub.co.kr/POPBILL/Token';
-
-  var xDate = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  // linkhub 2.0 스펙 (공식 SDK TokenBuilder와 동일):
+  //   access_id = 사업자번호(corpNum), 서명 = SHA256(body) 기반, 버전 라인 포함
+  //   x-lh-forwarded '*' — GAS는 호출마다 IP가 바뀌므로 IP 미검증 토큰 필요
+  var uri = '/POPBILL/Token';
+  var xDate = new Date().toISOString();
+  var forwardIP = '*';
   var reqBody = JSON.stringify({
-    access_id: linkID,
-    scope: scope
+    access_id: corpNum,
+    scope: ['153', '154', '155', '156', '157']
   });
 
-  var md5 = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, reqBody, Utilities.Charset.UTF_8);
-  var contentMD5 = Utilities.base64Encode(md5);
+  var sha = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, reqBody, Utilities.Charset.UTF_8);
+  var bodyDigest = Utilities.base64Encode(sha);
 
-  var stringToSign = 'POST\n' + contentMD5 + '\n' + xDate + '\n\n/POPBILL/Token';
+  var digestTarget = 'POST\n' + bodyDigest + '\n' + xDate + '\n' + forwardIP + '\n' + '2.0\n' + uri;
   // GAS는 (String, Byte[]) 조합을 지원하지 않음 — 양쪽 모두 Byte[]로 맞춰야 함
   var hmac = Utilities.computeHmacSha256Signature(
-    Utilities.newBlob(stringToSign).getBytes(),
+    Utilities.newBlob(digestTarget).getBytes(),
     Utilities.base64Decode(secretKey)
   );
   var signature = Utilities.base64Encode(hmac);
@@ -9203,14 +9206,18 @@ function _getPopbillToken() {
     headers: {
       'x-lh-date': xDate,
       'x-lh-version': '2.0',
+      'x-lh-forwarded': forwardIP,
       'Authorization': 'LINKHUB ' + linkID + ' ' + signature
     },
     payload: reqBody,
     muteHttpExceptions: true
   };
 
-  var response = UrlFetchApp.fetch(tokenRequestURL, options);
+  var response = UrlFetchApp.fetch('https://auth.linkhub.co.kr' + uri, options);
   var result = JSON.parse(response.getContentText());
+  if (!result.session_token) {
+    throw new Error('팝빌 토큰 발급 실패: ' + response.getContentText());
+  }
   return result.session_token;
 }
 
@@ -9224,11 +9231,11 @@ function _getPopbillToken() {
  */
 function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns) {
   var props = PropertiesService.getScriptProperties();
-  var corpNum = props.getProperty('POPBILL_CORP_NUM');
   var senderNum = props.getProperty('POPBILL_SENDER_NUM');
 
   var token = _getPopbillToken();
-  var url = 'https://popbill.linkhub.co.kr/KakaoTalk';
+  // 공식 SDK와 동일: 발송 경로는 /ATS, corpNum은 토큰에 바인딩됨 (경로에 넣으면 404)
+  var url = 'https://popbill.linkhub.co.kr/ATS';
 
   var msgObj = {
     rcv: receiver.replace(/-/g, ''),
@@ -9243,6 +9250,7 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns)
   var body = {
     snd: senderNum,
     content: content,
+    altContent: content,
     msgs: [msgObj],
     templateCode: templateCode,
     altSendType: 'A'
@@ -9251,16 +9259,15 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns)
 
   var options = {
     method: 'post',
-    contentType: 'application/json',
+    contentType: 'application/json;charset=utf-8',
     headers: {
-      'Authorization': 'Bearer ' + token,
-      'x-pb-userid': 'MASTER'
+      'Authorization': 'Bearer ' + token
     },
     payload: JSON.stringify(body),
     muteHttpExceptions: true
   };
 
-  var response = UrlFetchApp.fetch(url + '/' + corpNum, options);
+  var response = UrlFetchApp.fetch(url, options);
   return JSON.parse(response.getContentText());
 
 }
