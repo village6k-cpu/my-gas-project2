@@ -373,3 +373,14 @@ console.log('alimtalk-reliability checks OK');
   );
 }
 console.log('contract-regen-stuck-queue checks OK');
+
+// ── 반출/반납 안내: 취소·반납완료 계약 스킵 (조기 반납 고객에게 "반납일 다가와" 오발송 방지) ──
+{
+  const ca = read('checkAvailability.js');
+  const fn = ca.slice(ca.indexOf('function checkGuideAlimtalk'), ca.indexOf('// ── 발송 기록 저장'));
+  assert(
+    /\/취소\|완료\/\.test\(cust\.status\)/.test(fn) && /contractSheet\.getRange\(2, 1, cmLastRow - 1, 10\)/.test(fn),
+    'guide alimtalk must skip trades whose 계약상태 is 취소/완료 (J열까지 로드 필요)'
+  );
+}
+console.log('guide-skip-completed checks OK');
