@@ -7,14 +7,26 @@ const code = fs.readFileSync(path.resolve(__dirname, '..', 'Code.js'), 'utf8');
 
 assert.match(
   checkAvailability,
-  /const SCHEDULE_SET_HEADER_COLOR = "#D9EAD3";/,
-  '스케줄상세 세트 헤더는 확인요청과 같은 초록색을 써야 한다'
+  /const SCHEDULE_SET_HEADER_COLOR = "#E6E0F8";/,
+  '스케줄상세 세트 헤더는 시트 검색/경고 색과 겹치지 않는 라벤더색을 써야 한다'
 );
 
 assert.match(
   checkAvailability,
-  /const SCHEDULE_SET_COMPONENT_COLOR = "#EAF4E4";/,
-  '스케줄상세 세트 구성품은 헤더보다 약한 초록색으로 구분해야 한다'
+  /const SCHEDULE_SET_COMPONENT_COLOR = "#F4F0FB";/,
+  '스케줄상세 세트 구성품은 헤더보다 약한 라벤더색으로 구분해야 한다'
+);
+
+assert.match(
+  checkAvailability,
+  /const SCHEDULE_SET_FONT_COLOR = "#4B3A7A";/,
+  '스케줄상세 세트 텍스트는 라벤더 배경에서 충분히 읽히는 보라색이어야 한다'
+);
+
+assert.doesNotMatch(
+  checkAvailability,
+  /const SCHEDULE_SET_(?:HEADER|COMPONENT|FONT)_COLOR = "#(?:D9EAD3|EAF4E4|274E13|FFF2CC|FFEB9C)";/,
+  '스케줄상세 세트 색은 검색/경고와 헷갈리는 초록·노랑 계열로 돌아가면 안 된다'
 );
 
 assert.match(

@@ -11,13 +11,15 @@ const globals = fs.readFileSync(globalsPath, 'utf8');
 const tailwind = fs.readFileSync(tailwindPath, 'utf8');
 
 assert(
-  authGate.includes('import { VillageLogo } from "@/components/VillageLogo";'),
-  'login screen must reuse the shared VILLAGE image logo'
+  authGate.includes('function LoginWordmark()') &&
+    authGate.includes('src="/village-wordmark.png"') &&
+    authGate.includes('alt="VILLAGE"'),
+  'login screen must reuse the shared VILLAGE wordmark image'
 );
 
 assert(
-  authGate.includes('<VillageLogo size="lg" />'),
-  'login screen must show the large VILLAGE wordmark instead of Korean text'
+  authGate.includes('<LoginWordmark />') && authGate.includes('운영 대시보드'),
+  'login screen must show the VILLAGE wordmark lockup instead of Korean text'
 );
 
 assert(
@@ -31,7 +33,7 @@ assert(
 );
 
 assert(
-  authGate.includes('운영 대시보드') && authGate.includes('직원 로그인'),
+  authGate.includes('운영 대시보드') && authGate.includes('{busy ? "로그인 중..." : "로그인"}'),
   'login screen must keep the operational login context'
 );
 

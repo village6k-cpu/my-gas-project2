@@ -9394,14 +9394,15 @@ function setupGuideAlimtalkTrigger() {
 /**
  * 스케줄상세 시트 가독성 포맷팅
  * - 같은 거래ID(B열) 그룹끼리 교차 배경색 (흰색 ↔ 연한 회색)
- * - 같은 거래 안에서 세트 헤더/구성품은 C:D열만 초록 계열로 표시
+ * - 같은 거래 안에서 세트 헤더/구성품은 C:D열만 라벤더 계열로 표시
+ *   (시트 검색/경고 하이라이트의 노랑·초록 계열과 분리)
  * - 거래ID가 바뀌는 경계에 하단 테두리
  */
 const SCHEDULE_TRADE_COLOR_A = "#FFFFFF";
 const SCHEDULE_TRADE_COLOR_B = "#F3F3F3";
-const SCHEDULE_SET_HEADER_COLOR = "#D9EAD3";
-const SCHEDULE_SET_COMPONENT_COLOR = "#EAF4E4";
-const SCHEDULE_SET_FONT_COLOR = "#274E13";
+const SCHEDULE_SET_HEADER_COLOR = "#E6E0F8";
+const SCHEDULE_SET_COMPONENT_COLOR = "#F4F0FB";
+const SCHEDULE_SET_FONT_COLOR = "#4B3A7A";
 const SCHEDULE_DEFAULT_FONT_COLOR = "#000000";
 
 function makeScheduleSetKey_(tradeId, setName) {
