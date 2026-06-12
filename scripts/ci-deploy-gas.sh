@@ -25,13 +25,23 @@ if [[ -z "$GAS_FILE_LIST" ]]; then
   exit 2
 fi
 
+# 판별 기준: GAS 파일이 현재 레포와 같으면 OK.
+# 다르더라도 그 내용이 레포 히스토리에 존재하면 "그냥 아직 배포 안 된 구버전" → 덮어써도 안전.
+# 히스토리에 없는 내용이면 GAS 편집기에서만 수정된 진짜 드리프트 → 차단.
+# (fetch-depth: 0 필요 — workflow에서 설정)
 REMOTE_CHANGED=0
 while IFS= read -r f; do
   [[ "$f" == ".clasp.json" ]] && continue
-  if [[ ! -f "$f" ]] || ! diff -q "$TMP_GAS/$f" "$f" >/dev/null 2>&1; then
-    echo "  ⚠️  레포와 다른 GAS 파일: $f"
-    REMOTE_CHANGED=1
+  if [[ -f "$f" ]] && diff -q "$TMP_GAS/$f" "$f" >/dev/null 2>&1; then
+    continue # 레포 최신과 동일
   fi
+  BLOB="$(git hash-object "$TMP_GAS/$f")"
+  if git cat-file -e "$BLOB" 2>/dev/null; then
+    echo "  ℹ️  $f — GAS가 레포 과거 버전과 일치 (새 변경 배포 대상)"
+    continue
+  fi
+  echo "  ⚠️  레포 히스토리에 없는 GAS 변경: $f (GAS 편집기에서 수정된 것으로 보임)"
+  REMOTE_CHANGED=1
 done <<< "$GAS_FILE_LIST"
 
 if [[ "$REMOTE_CHANGED" -ne 0 && "$SKIP_GUARD" != "1" ]]; then
