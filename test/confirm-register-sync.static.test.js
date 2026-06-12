@@ -271,3 +271,10 @@ assert(
   'app repair must refresh when the contract link CHANGES, not only when missing'
 );
 console.log('contract-realtime checks OK');
+
+// ── 품목 메모는 접힌 상태에서도 항상 노출 (펼쳐야만 보이면 특이사항 누락) ──
+assert(
+  /\{!open && \(e\.memoCheckout \?\? ""\)\.trim\(\)/.test(read('apps/today-dashboard/components/HandoverChecklist.tsx')),
+  'item memos must be visible on collapsed rows, not only when expanded'
+);
+console.log('memo-visibility checks OK');
