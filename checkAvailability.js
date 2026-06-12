@@ -9312,6 +9312,36 @@ function sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출
   return { sent: true };
 }
 
+/**
+ * 등록완료 알림톡 테스트 발송 — 지정 번호로 1건만, 시트/중복방지 플래그에 아무 기록 없음.
+ * args: { 연락처: "010-...", 거래ID?: "260603-001" } — 거래ID 주면 실데이터, 없으면 샘플 데이터.
+ * 템플릿 심사중이면 팝빌이 거절 응답을 반환(메시지 미발송) — 배선 점검용으로도 사용 가능.
+ */
+function testRegisterAlimtalk(args) {
+  args = args || {};
+  var 연락처 = String(args.연락처 || args.phone || "").trim();
+  if (!연락처) return { error: "연락처 필수" };
+  var tpl = PropertiesService.getScriptProperties().getProperty('POPBILL_TPL_REGISTER');
+  if (!tpl) return { error: "POPBILL_TPL_REGISTER 미설정" };
+
+  var 고객명 = "테스트", 반출표시 = "2026-06-15 10:00", 반납표시 = "2026-06-18 18:00";
+  var tid = String(args.거래ID || args.tradeId || "").trim() || "TEST-001";
+  if (args.거래ID || args.tradeId) {
+    var tv = myPageTradeView_(tid);
+    if (tv) { 고객명 = tv.customerName.replace(/\*/g, ''); 반출표시 = tv.checkoutAt; 반납표시 = tv.returnAt; }
+  }
+  var link = getMyPageLink(tid);
+  var msg = _buildRegisterMsg(고객명, 반출표시, 반납표시);
+  var vars = { '#{고객명}': 고객명, '#{반출일시}': 반출표시, '#{반납일시}': 반납표시 };
+  var btns = [{ n: '내 예약 확인', t: 'WL', u1: link.url, u2: link.url }];
+  try {
+    var res = sendAlimtalk(tpl, 연락처, 고객명, msg, vars, btns);
+    return { success: true, popbill: res, template: tpl, link: link.url };
+  } catch (e) {
+    return { error: e.message, template: tpl };
+  }
+}
+
 /** 등록완료 알림톡 본문 — 팝빌 승인 템플릿과 글자 단위 동일해야 함 (링크는 '내 예약 확인' 버튼) */
 function _buildRegisterMsg(고객명, 반출표시, 반납표시) {
   return 고객명 + ' 감독님, 안녕하세요.\n빌리지 렌탈샵입니다.\n\n' +
