@@ -6833,6 +6833,63 @@ function excludeEquipFromRequest(req) {
   return { status: "OK", excluded: excluded };
 }
 
+/**
+ * 확인요청 품목 한 행만 수정 — 이름/수량 변경 시 그 행만 가용성 재확인, 제외(보류) 토글 지원.
+ * 오늘 대시보드의 품목 단위 편집과 같은 UX를 확인요청 단계에 제공한다.
+ * req: { reqID, 장비명, 새이름?, 수량?, 제외?: true|false }
+ * 세트 구성품(Q열 "[세트]..." 행)도 동일하게 동작한다.
+ */
+function updateRequestItem(req) {
+  if (!req || !req.reqID || !req.장비명) throw new Error("reqID와 장비명 필수");
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("확인요청");
+  if (!sheet) throw new Error("확인요청 시트 없음");
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) throw new Error("데이터 없음");
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
+  var target = -1;
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim() !== String(req.reqID).trim()) continue;
+    if (String(data[i][5] || "").trim() === String(req.장비명).trim()) { target = i + 2; break; }
+  }
+  if (target < 0) throw new Error("품목을 찾을 수 없음: " + req.장비명);
+
+  var changed = false;
+  var 새이름 = req.새이름 !== undefined && req.새이름 !== null ? String(req.새이름).trim() : "";
+  if (새이름 && 새이름 !== String(req.장비명).trim()) {
+    sheet.getRange(target, 6).setValue(새이름); // F: 장비/세트명
+    changed = true;
+  }
+  if (req.수량 !== undefined && req.수량 !== null && String(req.수량) !== "") {
+    var q = Number(req.수량);
+    if (isNaN(q) || q < 1) throw new Error("수량이 올바르지 않음: " + req.수량);
+    if (q !== Number(data[target - 2][6])) {
+      sheet.getRange(target, 7).setValue(q); // G: 수량
+      changed = true;
+    }
+  }
+  if (req.제외 === true) {
+    sheet.getRange(target, 14, 1, 2).setValues([["보류", "보류"]]); // N,O: 등록 제외
+  } else if (req.제외 === false) {
+    sheet.getRange(target, 14, 1, 2).setValues([["", ""]]);
+  }
+
+  var reChecked = false;
+  if (changed) {
+    // 이 행의 결과만 비우면 processByReqID가 결과 없는 행만 재확인 (다른 품목 결과 보존,
+    // 세트명으로 바꾼 경우 펼침/고아 구성품 정리도 기존 로직이 처리)
+    sheet.getRange(target, 9, 1, 2).clearContent(); // I:결과, J:상세
+    SpreadsheetApp.flush();
+    processByReqID(sheet, target);
+    reChecked = true;
+  } else {
+    SpreadsheetApp.flush();
+  }
+  return { status: "OK", row: target, reChecked: reChecked };
+}
+
 
 function updateRequest(req) {
   if (!req.reqID) throw new Error("reqID 필수");

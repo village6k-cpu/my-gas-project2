@@ -384,3 +384,39 @@ console.log('contract-regen-stuck-queue checks OK');
   );
 }
 console.log('guide-skip-completed checks OK');
+
+// ── 확인요청 품목 단위 수정 (오늘 대시보드와 동일 UX): 한 품목만 재확인 + 제외 토글 ──
+{
+  const ca = read('checkAvailability.js');
+  const api = read('sheetAPI.js');
+  const view = read('apps/today-dashboard/components/ConfirmView.tsx');
+  const route = read('apps/today-dashboard/app/api/confirm/route.ts');
+  assert(
+    /function updateRequestItem\(req\)/.test(ca) &&
+      /getRange\(target, 9, 1, 2\)\.clearContent\(\)/.test(ca) &&
+      /processByReqID\(sheet, target\)/.test(ca),
+    'updateRequestItem must clear only the edited row result then reuse processByReqID (preserves other rows)'
+  );
+  assert(
+    /setValues\(\[\["보류", "보류"\]\]\)/.test(ca) && /setValues\(\[\["", ""\]\]\)/.test(ca),
+    'updateRequestItem must support exclude(보류) AND un-exclude on N/O columns'
+  );
+  assert(
+    api.includes('"updateRequestItem"') && api.includes('funcName === "updateRequestItem"'),
+    'updateRequestItem must be whitelisted and dispatched in sheetAPI run'
+  );
+  assert(
+    /제외: String\(data\[i\]\[13\]/.test(api),
+    'doListPending items must expose row-level 제외 flag (N/O 보류) so the app can render excluded items'
+  );
+  assert(
+    route.includes('"updateRequestItem"'),
+    'app /api/confirm FUNCS must allow updateRequestItem'
+  );
+  assert(
+    /function ItemEditSheet/.test(view) && view.includes('runFunc("updateRequestItem"') &&
+      /onItemEdit\(row\)/.test(view) && /!row\.제외/.test(view),
+    'ConfirmView must offer per-item edit (incl. set components) and exclude 제외 rows from default register selection'
+  );
+}
+console.log('request-item-edit checks OK');

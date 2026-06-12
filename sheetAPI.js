@@ -599,7 +599,8 @@ function doListPending() {
         수량: data[i][6] || 1,
         결과: data[i][8] || "",
         상세: data[i][9] || "",
-        비고: String(data[i][16] || "") // Q열 — "[세트]세트명" 구성품 마커
+        비고: String(data[i][16] || ""), // Q열 — "[세트]세트명" 구성품 마커
+        제외: String(data[i][13] || "").trim() === "보류" || String(data[i][14] || "").trim() === "보류" // N/O열 행 단위 등록 제외
       });
     }
   }
@@ -918,6 +919,7 @@ function runFunction(funcName, params) {
     "syncAuditFromMaster",
     "insertAndCheckRequest",
     "updateRequest",
+    "updateRequestItem",
     "deleteRequest",
     "excludeEquipFromRequest",
     "formatScheduleSheet",
@@ -975,6 +977,11 @@ function runFunction(funcName, params) {
     if (funcName === "updateRequest" && params.args) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
       var result = updateRequest(args);
+      return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "updateRequestItem" && params.args) {
+      var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var result = updateRequestItem(args);
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "excludeEquipFromRequest" && params.args) {
