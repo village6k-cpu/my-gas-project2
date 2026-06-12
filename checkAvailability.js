@@ -6764,6 +6764,9 @@ function _insertAndCheckRequest(req) {
       i === 0 ? (req.비고 || "") : "",       // Q: 비고 (첫 행만)
       i === 0 ? (req.추가요청 || "") : ""  // R: 추가요청 (첫 행만)
     ];
+    // 날짜/시간(B~E)은 텍스트로 고정 — 시트 타임존이 Asia/Seoul과 다르면
+    // 자동 변환된 직렬값이 읽기 시 16:00/1899-LMT 쓰레기가 되므로 원천 차단
+    sheet.getRange(row, 2, 1, 4).setNumberFormat("@");
     sheet.getRange(row, 1, 1, 18).setValues([rowData]);
 
     // 첫 행: 굵은 글씨 + 배경색으로 예약 건 구분
@@ -6832,6 +6835,35 @@ function excludeEquipFromRequest(req) {
   }
   SpreadsheetApp.flush();
   return { status: "OK", excluded: excluded };
+}
+
+/**
+ * 확인요청 B~E(날짜/시간) 정상화 — Date 직렬값으로 오염된 셀을
+ * "시트에 입력된 그대로"(시트 타임존 기준)의 텍스트로 되돌린다. 1회 실행용.
+ * 시트 타임존≠Asia/Seoul 환경에서 생긴 16:00/1899-LMT 오염 복구.
+ */
+function normalizeConfirmRequestDates() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("확인요청");
+  if (!sheet || sheet.getLastRow() < 2) return { status: "OK", fixed: 0 };
+  var tz = ss.getSpreadsheetTimeZone();
+  var n = sheet.getLastRow() - 1;
+  var rng = sheet.getRange(2, 2, n, 4); // B~E
+  var vals = rng.getValues();
+  var fixed = 0;
+  for (var i = 0; i < vals.length; i++) {
+    for (var c = 0; c < 4; c++) {
+      var v = vals[i][c];
+      if (!(v instanceof Date)) { vals[i][c] = String(v || ""); continue; }
+      var isDateCol = c === 0 || c === 2; // B/D 날짜, C/E 시간
+      vals[i][c] = Utilities.formatDate(v, tz, isDateCol ? "yyyy-MM-dd" : "HH:mm");
+      fixed++;
+    }
+  }
+  rng.setNumberFormat("@");
+  rng.setValues(vals);
+  SpreadsheetApp.flush();
+  return { status: "OK", fixed: fixed, timezone: tz };
 }
 
 /**
@@ -6966,7 +6998,10 @@ function updateRequest(req) {
         "", "", "", "", "",
         j === 0 ? 추가요청 : ""
       ];
-      sheet.getRange(row, 1, 1, 18).setValues([rowData]);
+      // 날짜/시간(B~E)은 텍스트로 고정 — 시트 타임존이 Asia/Seoul과 다르면
+    // 자동 변환된 직렬값이 읽기 시 16:00/1899-LMT 쓰레기가 되므로 원천 차단
+    sheet.getRange(row, 2, 1, 4).setNumberFormat("@");
+    sheet.getRange(row, 1, 1, 18).setValues([rowData]);
     }
     SpreadsheetApp.flush();
 

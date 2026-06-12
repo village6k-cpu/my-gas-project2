@@ -34,7 +34,9 @@ type ConfirmEquipmentRow = Equip & {
 type Req = {
   reqID: string;
    반출일?: string;
+   반출시간?: string;
    반납일?: string;
+   반납시간?: string;
    예약자명?: string;
    연락처?: string;
    업체명?: string;
@@ -473,10 +475,12 @@ function EditPanel({
   const ret = splitDT(req.반납일);
   const [name, setName] = useState(req.예약자명 || "");
   const [phone, setPhone] = useState(req.연락처 || "");
+  // 시간은 전용 필드(반출시간/반납시간)가 정답 — 반출일에 붙은 시간 토막은
+  // 시트 타임존 어긋남에서 온 쓰레기(16:00)였던 적이 있어 폴백으로만 사용
   const [outD, setOutD] = useState(out.d);
-  const [outT, setOutT] = useState(out.t);
+  const [outT, setOutT] = useState(req.반출시간 || out.t);
   const [retD, setRetD] = useState(ret.d);
-  const [retT, setRetT] = useState(ret.t);
+  const [retT, setRetT] = useState(req.반납시간 || ret.t);
   // 세트는 세트명(헤더)으로 보존하고 구성품은 제외 — 저장 시 GAS가 세트를 다시 전개하므로
   // 구성품을 단품으로 보내면 세트 구조·세트 단가가 소실된다
   const [equips, setEquips] = useState<{ 이름: string; 수량: string }[]>(

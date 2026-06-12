@@ -439,3 +439,28 @@ console.log('guide-skip-completed checks OK');
   );
 }
 console.log('request-item-edit checks OK');
+
+// ── 확인요청 날짜 오염 방지: 시트 타임존 어긋남(16:00/1899-LMT) 루프 차단 ──
+{
+  const api = read('sheetAPI.js');
+  const ca = read('checkAvailability.js');
+  const view = read('apps/today-dashboard/components/ConfirmView.tsx');
+  assert(
+    /getSpreadsheetTimeZone\(\)/.test(api) && /fmtDateCell/.test(api) && /fmtTimeCell/.test(api) &&
+      !/Utilities\.formatDate\(v, "Asia\/Seoul", "yyyy-MM-dd HH:mm"\)/.test(api),
+    'doListPending must restore as-typed date/time using the SPREADSHEET timezone, never Asia/Seoul datetime'
+  );
+  assert(
+    (ca.match(/getRange\(row, 2, 1, 4\)\.setNumberFormat\("@"\)/g) || []).length >= 2,
+    'request rows must force B~E to text on write (insert + updateRequest re-entry) so sheets never auto-convert'
+  );
+  assert(
+    /function normalizeConfirmRequestDates\(\)/.test(ca) && api.includes('"normalizeConfirmRequestDates"'),
+    'one-time repair for already-corrupted B~E cells must exist and be whitelisted'
+  );
+  assert(
+    /useState\(req\.반출시간 \|\| out\.t\)/.test(view) && /useState\(req\.반납시간 \|\| ret\.t\)/.test(view),
+    'EditPanel must take times from 반출시간/반납시간 fields — splitDT(반출일).t was the corruption loop'
+  );
+}
+console.log('request-date-integrity checks OK');
