@@ -9190,7 +9190,11 @@ function _getPopbillToken() {
   var contentMD5 = Utilities.base64Encode(md5);
 
   var stringToSign = 'POST\n' + contentMD5 + '\n' + xDate + '\n\n/POPBILL/Token';
-  var hmac = Utilities.computeHmacSha256Signature(stringToSign, Utilities.base64Decode(secretKey));
+  // GAS는 (String, Byte[]) 조합을 지원하지 않음 — 양쪽 모두 Byte[]로 맞춰야 함
+  var hmac = Utilities.computeHmacSha256Signature(
+    Utilities.newBlob(stringToSign).getBytes(),
+    Utilities.base64Decode(secretKey)
+  );
   var signature = Utilities.base64Encode(hmac);
 
   var options = {

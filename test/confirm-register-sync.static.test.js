@@ -278,3 +278,17 @@ assert(
   'item memos must be visible on collapsed rows, not only when expanded'
 );
 console.log('memo-visibility checks OK');
+
+// ── 팝빌 토큰 HMAC: GAS는 (String, Byte[]) 미지원 — 양쪽 Byte[] 필수 ──
+{
+  const ca = read('checkAvailability.js');
+  assert(
+    /computeHmacSha256Signature\(\s*Utilities\.newBlob\(stringToSign\)\.getBytes\(\),\s*Utilities\.base64Decode\(secretKey\)\s*\)/.test(ca),
+    'popbill token signing must pass Byte[] for both value and key (String+Byte[] throws in GAS)'
+  );
+  assert(
+    !/computeHmacSha256Signature\(stringToSign,/.test(ca),
+    'popbill token signing must not pass a raw String with a Byte[] key'
+  );
+}
+console.log('popbill-hmac checks OK');
