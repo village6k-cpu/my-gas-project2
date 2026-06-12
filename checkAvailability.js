@@ -779,15 +779,20 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
     rows = [rowIndex];
   }
 
+  // 등록부(F~I 텍스트 포맷 "yyyy-MM-dd" 문자열)와 동일하게 기록 —
+  // Date 객체를 쓰면 표시 포맷이 달라져 displayValue 완전일치 기반 대시보드/검색 매칭에서 누락됨
+  var startDateStr = Utilities.formatDate(startDate, 'Asia/Seoul', 'yyyy-MM-dd');
+  var endDateStr = Utilities.formatDate(endDate, 'Asia/Seoul', 'yyyy-MM-dd');
   rows.forEach(function(r) {
-    sheet.getRange(r, 6).setValue(startDate);   // F: 반출일
-    sheet.getRange(r, 7).setValue(startTime);   // G: 반출시간
-    sheet.getRange(r, 8).setValue(endDate);     // H: 반납일
-    sheet.getRange(r, 9).setValue(endTime);     // I: 반납시간
+    sheet.getRange(r, 6).setNumberFormat("@").setValue(startDateStr); // F: 반출일
+    sheet.getRange(r, 7).setNumberFormat("@").setValue(startTime);    // G: 반출시간
+    sheet.getRange(r, 8).setNumberFormat("@").setValue(endDateStr);   // H: 반납일
+    sheet.getRange(r, 9).setNumberFormat("@").setValue(endTime);      // I: 반납시간
   });
 
-  // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh
-  try { invalidateDashboardCache(); } catch (e) {}
+  supaMarkScheduleRowsDirty_(sheet, rows); // 스크립트 쓰기 — Supabase 동기화 표시
+  // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh (드래그된 날짜 포함)
+  try { invalidateDashboardCache([newStart, newEnd]); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 
   return { success: true };
@@ -970,6 +975,7 @@ function getDashboardData(targetDate, skipCache, options) {
       proofType: extra.proofType || '',
       issueStatus: extra.issueStatus || '',
       billingCompany: extra.billingCompany || '',
+      actualAmount: typeof extra.actualAmount === 'number' ? extra.actualAmount : null,
       issueNote: extra.issueNote || '',
       returnStatus: checkInfo.returnStatus || '',
       returnMemo: checkInfo.returnMemo || '',
@@ -1688,6 +1694,7 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRu
     proofType: extra.proofType || '',
     issueStatus: extra.issueStatus || '',
     billingCompany: extra.billingCompany || '',
+    actualAmount: typeof extra.actualAmount === 'number' ? extra.actualAmount : null,
     issueNote: extra.issueNote || '',
     returnStatus: checkInfo.returnStatus || '',
     returnMemo: checkInfo.returnMemo || '',
@@ -2607,14 +2614,50 @@ function setupDashboardWarmerTrigger() {
 /**
  * Dashboard 캐시 무효화. 등록/취소/일정변경 후 호출.
  */
-function invalidateDashboardCache() {
+function dashboardDateKey_(v) {
+  if (!v) return '';
+  if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Seoul', 'yyyy-MM-dd');
+  var str = String(v).trim();
+  var m = str.match(/(\d{4})\D(\d{1,2})\D(\d{1,2})/);
+  if (m) return m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+  var d = new Date(str);
+  return isNaN(d.getTime()) ? '' : Utilities.formatDate(d, 'Asia/Seoul', 'yyyy-MM-dd');
+}
+
+/** 계약마스터에서 거래의 반출/반납 날짜를 찾아 해당 날짜 캐시까지 무효화 */
+function invalidateDashboardCacheForTrade_(tid) {
+  var dates = [];
+  try {
+    var cSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
+    if (cSheet && cSheet.getLastRow() >= 2) {
+      var ids = cSheet.getRange(2, 1, cSheet.getLastRow() - 1, 1).getValues();
+      for (var i = 0; i < ids.length; i++) {
+        if (String(ids[i][0]).trim() === String(tid).trim()) {
+          var disp = cSheet.getRange(i + 2, 5, 1, 3).getDisplayValues()[0]; // E:반출일 ~ G:반납일
+          dates = [disp[0], disp[2]];
+          break;
+        }
+      }
+    }
+  } catch (e) {}
+  invalidateDashboardCache(dates);
+}
+
+function invalidateDashboardCache(extraDates) {
   try {
     touchDashboardSearchCacheVersion_();
     var cache = CacheService.getScriptCache();
     var today = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
     var yesterday = Utilities.formatDate(new Date(Date.now() - 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
     var tomorrow = Utilities.formatDate(new Date(Date.now() + 86400000), 'Asia/Seoul', 'yyyy-MM-dd');
-    [today, yesterday, tomorrow].forEach(function(d) {
+    var dateKeys = { };
+    [today, yesterday, tomorrow].forEach(function(d) { dateKeys[d] = true; });
+    // 모레 이후 일정 변경이 최대 15분 옛 데이터로 보이던 문제 — 영향 날짜를 함께 무효화
+    (extraDates || []).forEach(function(v) {
+      var k = dashboardDateKey_(v);
+      if (k) dateKeys[k] = true;
+    });
+    Object.keys(dateKeys).forEach(function(d) {
       removeDashboardCacheJson_(cache, 'dashboard_v4_' + d);
       removeDashboardCacheJson_(cache, 'dashboard_v4_' + d + '_risk');
       cache.remove('dashboard_v3_' + d);
@@ -3437,7 +3480,7 @@ function normalizeEquipmentCheckTradeId_(value) {
 /**
  * 개고생2.0/빌리지2.0 거래내역에서 계약서 링크, G열 발행처 상호, J열 결제수단을 읽어 대시보드에 붙인다.
  */
-var DASHBOARD_TRADE_EXTRA_CACHE_PREFIX_ = 'dashboard_trade_extra_v2_';
+var DASHBOARD_TRADE_EXTRA_CACHE_PREFIX_ = 'dashboard_trade_extra_v3_';
 var DASHBOARD_TRADE_EXTRA_CACHE_SECONDS_ = 300;
 
 function emptyDashboardTradeExtra_() {
@@ -3451,7 +3494,8 @@ function emptyDashboardTradeExtra_() {
     proofType: '',
     issueStatus: '',
     billingCompany: '',
-    issueNote: ''
+    issueNote: '',
+    actualAmount: null
   };
 }
 
@@ -3470,6 +3514,8 @@ function buildDashboardTradeExtraFromRow_(row, columns) {
   extra.issueStatus = String(row[columns.issueCol - 1] || '').trim();
   extra.depositStatus = String(row[columns.depositCol - 1] || '').trim();
   extra.issueNote = String(row[columns.noteCol - 1] || '').trim();
+  var amtRaw = String(row[columns.actualAmountCol - 1] || '').replace(/[^0-9.-]/g, '');
+  extra.actualAmount = amtRaw && !isNaN(Number(amtRaw)) ? Number(amtRaw) : null; // I열: 실 결제금액
   return extra;
 }
 
@@ -3547,6 +3593,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var idCol = _findHeaderCol_(headers, ["거래ID", "거래 Id", "거래id"]) || 5;
     var contractCol = _findHeaderCol_(headers, ["계약서링크", "계약서 링크", "계약서", "계약서URL", "계약서 URL"]) || 3;
     var billingCompanyCol = 7; // G열: 발행처 상호
+    var actualAmountCol = 9; // I열: 실 결제금액 (정산 표시용 — 단가합이 아닌 이 값이 기준)
     var paymentCol = 10; // J열: 결제수단
     var proofCol = 11;   // K열: 증빙유형
     var issueCol = 12;   // L열: 발행상태
@@ -3554,7 +3601,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var noteCol = 14;    // N열: 비고
     var wanted = {};
     missingIds.forEach(function(tid) { wanted[String(tid)] = true; });
-    var readCols = Math.max(idCol, contractCol, billingCompanyCol, paymentCol, proofCol, issueCol, depositCol, noteCol);
+    var readCols = Math.max(idCol, contractCol, billingCompanyCol, actualAmountCol, paymentCol, proofCol, issueCol, depositCol, noteCol);
     var idValues = 거래시트.getRange(2, idCol, 거래시트.getLastRow() - 1, 1).getDisplayValues();
     var rowsToRead = [];
     idValues.forEach(function(row, idx) {
@@ -3566,6 +3613,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
     var columns = {
       contractCol: contractCol,
       billingCompanyCol: billingCompanyCol,
+      actualAmountCol: actualAmountCol,
       paymentCol: paymentCol,
       proofCol: proofCol,
       issueCol: issueCol,
@@ -4153,10 +4201,11 @@ function getTradeDepositStatusOptions_() {
 }
 
 function getTradeBillingCompanyOptions_() {
-  return getCachedDashboardTradeOptions_('dashboard_trade_billing_company_options_v1', function() {
-    var options = getTradeColumnOptionsFromSheet_(7, []);
+  return getCachedDashboardTradeOptions_('dashboard_trade_billing_company_options_v2', function() {
+    // 발행처DB가 마스터 — 거래내역 G열 과거 입력값(오타 포함)은 DB가 비었을 때만 fallback
+    var options = getTradeBillingCompanyOptionsFromIssuerDb_();
     if (options.length > 0) return options;
-    return getTradeBillingCompanyOptionsFromIssuerDb_();
+    return getTradeColumnOptionsFromSheet_(7, []);
   }, []);
 }
 
@@ -4488,9 +4537,13 @@ function updateTradeBillingCompany(tid, billingCompany) {
     if (!row) return { error: "거래내역에서 거래ID를 찾지 못했습니다: " + tid };
 
     var billingCompanyCol = 7; // G: 발행처 상호
-    var opts = paymentOptionsFromRule_(거래시트.getRange(row, billingCompanyCol).getDataValidation());
-    if (billingCompany && opts.length > 0 && opts.indexOf(billingCompany) < 0) {
-      return { error: "발행처 상호 드롭다운에 없는 값입니다: " + billingCompany };
+    // 검증 기준 = 발행처DB 마스터 (옵션 목록과 동일 출처) + G열 룰은 보조 — 둘 중 하나에 있으면 허용
+    var ruleOpts = paymentOptionsFromRule_(거래시트.getRange(row, billingCompanyCol).getDataValidation());
+    var masterOpts = [];
+    try { masterOpts = getTradeBillingCompanyOptions_() || []; } catch (optErr) {}
+    var allOpts = masterOpts.concat(ruleOpts);
+    if (billingCompany && allOpts.length > 0 && allOpts.indexOf(billingCompany) < 0) {
+      return { error: "발행처 목록에 없는 값입니다 (발행처DB에 먼저 등록하세요): " + billingCompany };
     }
 
     거래시트.getRange(row, billingCompanyCol).setValue(billingCompany);
@@ -4886,11 +4939,14 @@ function getDashboardEquipNameList_(ss) {
 function getDashboardEquipmentCatalog_(ss) {
   var names = getDashboardEquipNameList_(ss);
   var setLookup = buildDashboardSetLookup_(ss.getSheetByName("세트마스터"));
+  var stocks = {};
+  try { stocks = getTimelineStockMap_(ss) || {}; } catch (stockErr) {} // 장비마스터 실재고 — 앱 재고충돌 표시용
   return {
     names: names,
     components: setLookup.components || {},
     prices: setLookup.prices || {},
-    items: setLookup.items || {}
+    items: setLookup.items || {},
+    stocks: stocks
   };
 }
 
@@ -7808,8 +7864,19 @@ function scheduleRegister(reqID) {
   // O열에 처리중 표시
   sheet.getRange(targetRow, 15).setValue("⏳ 등록 처리중...");
 
-  // PropertiesService에 reqID + targetRow 저장 (트리거에서 읽기 위해)
-  PropertiesService.getScriptProperties().setProperty("_pendingRegister", JSON.stringify({ reqID: reqID, row: targetRow }));
+  // 대기열에 reqID 추가 — 단일 속성 덮어쓰기 금지 (연속 등록 시 앞 건 유실 방지)
+  // 행 번호는 저장하지 않는다: 실행 시점에 다시 찾는다 (세트 전개 등으로 행이 밀릴 수 있음)
+  var qProps = PropertiesService.getScriptProperties();
+  var qLock = LockService.getScriptLock();
+  var qLocked = qLock.tryLock(10000);
+  try {
+    var queue = [];
+    try { queue = JSON.parse(qProps.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
+    if (queue.indexOf(reqID) === -1) queue.push(reqID);
+    qProps.setProperty("_pendingRegisterQueue", JSON.stringify(queue));
+  } finally {
+    if (qLocked) qLock.releaseLock();
+  }
 
   // 1초 후 실행되는 트리거 생성
   ScriptApp.newTrigger("_runPendingRegister")
@@ -7832,19 +7899,48 @@ function _runPendingRegister() {
     }
   });
 
-  var prop = PropertiesService.getScriptProperties().getProperty("_pendingRegister");
-  if (!prop) return;
-  PropertiesService.getScriptProperties().deleteProperty("_pendingRegister");
+  var props = PropertiesService.getScriptProperties();
+  // 큐 읽기→비우기를 락으로 감싸 동시 추가분 유실 방지
+  var drainLock = LockService.getScriptLock();
+  var drainLocked = drainLock.tryLock(10000);
+  var queue = [];
+  try {
+    try { queue = JSON.parse(props.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
+    // 구버전 단일 속성도 큐로 흡수 (배포 경계 호환)
+    var legacy = props.getProperty("_pendingRegister");
+    if (legacy) {
+      props.deleteProperty("_pendingRegister");
+      try {
+        var li = JSON.parse(legacy);
+        if (li && li.reqID && queue.indexOf(li.reqID) === -1) queue.push(li.reqID);
+      } catch (le) {}
+    }
+    if (queue.length) props.deleteProperty("_pendingRegisterQueue");
+  } finally {
+    if (drainLocked) drainLock.releaseLock();
+  }
+  if (!queue.length) return;
 
-  var info = JSON.parse(prop);
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("확인요청");
   if (!sheet) return;
 
-  try {
-    registerByReqID(sheet, info.row);
-  } catch (e) {
-    sheet.getRange(info.row, 15).setValue("❌ 등록 실패: " + e.message);
+  for (var qi = 0; qi < queue.length; qi++) {
+    var pendingReqID = queue[qi];
+    // 실행 시점에 행을 새로 찾는다 (앞 건 등록의 세트 전개로 행이 밀렸을 수 있음)
+    var qLastRow = sheet.getLastRow();
+    if (qLastRow < 2) return;
+    var qIds = sheet.getRange(2, 1, qLastRow - 1, 1).getValues();
+    var qRow = -1;
+    for (var i = 0; i < qIds.length; i++) {
+      if (qIds[i][0] === pendingReqID) { qRow = i + 2; break; }
+    }
+    if (qRow < 0) continue;
+    try {
+      registerByReqID(sheet, qRow);
+    } catch (e) {
+      sheet.getRange(qRow, 15).setValue("❌ 등록 실패: " + e.message);
+    }
   }
 }
 
@@ -8334,11 +8430,19 @@ function registerByReqID(sheet, triggerRow) {
     sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
   }
 
-  // ── 등록완료 알림톡 — 비활성화 (코워크 에이전트가 카톡으로 직접 발송) ──
-  // 반출/반납 안내톡(checkGuideAlimtalk)은 유지됨
+  // ── Supabase 동기화 마킹 — 스크립트 쓰기는 onEdit이 안 울리므로 직접 표시 ──
+  supaMarkTradeDirty_(거래ID);
+
+  // ── 등록완료 알림톡 + 내 예약 링크 (거래당 1회, 실패해도 등록은 진행) ──
+  // POPBILL_TPL_REGISTER 템플릿 미설정 시 자동 스킵 (기존처럼 코워크 카톡 발송으로 운영 가능)
+  try {
+    sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출일, 반출시간, 반납일, 반납시간);
+  } catch (almErr) {
+    Logger.log("등록완료 알림톡 실패(등록은 정상): " + almErr.message);
+  }
 
   // dashboard/timeline 캐시 즉시 무효화 → 새로고침 안 해도 다음 fetch는 fresh
-  try { invalidateDashboardCache(); } catch (e) {}
+  try { invalidateDashboardCache([반출일, 반납일]); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 
   } finally {
@@ -8457,6 +8561,8 @@ function addEquipmentToContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
+  supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
+  try { invalidateDashboardCacheForTrade_(거래ID); } catch (cacheErr) {} // 영향 날짜 캐시 무효화
 
   // 가용 경고 여부 (차단하지 않고 경고만)
   var 가용경고 = "";
@@ -8548,6 +8654,8 @@ function removeEquipmentFromContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
+  supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
+  try { invalidateDashboardCacheForTrade_(거래ID); } catch (cacheErr) {} // 영향 날짜 캐시 무효화
 
   const schedLastRow = schedSheet.getLastRow();
   if (schedLastRow < 2) {
@@ -8612,6 +8720,8 @@ function changeDatesForContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
+  supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
+  try { invalidateDashboardCacheForTrade_(거래ID); } catch (cacheErr) {} // 영향 날짜 캐시 무효화
 
   if (!새반출일Raw || !새반납일Raw) {
     sheet.getRange(row, 15).setValue("❌ B~E열에 새 반출/반납 일시 입력 필요");
@@ -9160,6 +9270,56 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars) {
 
 var TPL_CHECKOUT = '026040000902';  // 반출 안내
 var TPL_CHECKIN  = '026040000904';  // 반납 안내
+
+/**
+ * 등록완료 알림톡 — 예약 확정 안내 + 내 예약 페이지 링크
+ * 사전 조건 (없으면 조용히 스킵 = 기존 코워크 카톡 방식 그대로):
+ *   - Script Properties POPBILL_TPL_REGISTER: 팝빌 승인 템플릿 코드
+ *   - setupMyPage() 실행 + MYPAGE_BASE_URL 설정 (링크 생성용)
+ * 템플릿 변수: #{고객명} #{반출일시} #{반납일시} #{내예약링크}
+ * 중복 방지: 거래ID당 1회만 발송 (합침 재등록 시 재발송 안 함)
+ */
+function sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출일, 반출시간, 반납일, 반납시간) {
+  var props = PropertiesService.getScriptProperties();
+  var tpl = props.getProperty('POPBILL_TPL_REGISTER');
+  if (!tpl) return { skipped: '템플릿 미설정' };
+  if (!연락처 || !예약자명) return { skipped: '고객 정보 없음' };
+
+  var sentFlag = 'REG_ALIM_SENT_' + 거래ID;
+  if (props.getProperty(sentFlag)) return { skipped: '이미 발송됨' };
+
+  var link = getMyPageLink(거래ID);
+  if (!link.success || !link.url || link.url.indexOf('http') !== 0) {
+    Logger.log('등록완료 알림톡 스킵: 내 예약 링크 생성 불가 (setupMyPage/MYPAGE_BASE_URL 확인)');
+    return { skipped: '링크 생성 불가' };
+  }
+
+  var 반출표시 = fmtDT(반출일, 반출시간);
+  var 반납표시 = fmtDT(반납일, 반납시간);
+  var msg = _buildRegisterMsg(예약자명, 반출표시, 반납표시, link.url);
+  var vars = {
+    '#{고객명}': String(예약자명),
+    '#{반출일시}': 반출표시,
+    '#{반납일시}': 반납표시,
+    '#{내예약링크}': link.url
+  };
+
+  var res = sendAlimtalk(tpl, String(연락처), String(예약자명), msg, vars);
+  props.setProperty(sentFlag, Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm'));
+  Logger.log('✅ 등록완료 알림톡: ' + 거래ID + ' ' + 예약자명 + ' → ' + JSON.stringify(res));
+  return { sent: true };
+}
+
+/** 등록완료 알림톡 본문 — 팝빌 승인 템플릿과 동일해야 함 */
+function _buildRegisterMsg(고객명, 반출표시, 반납표시, 링크) {
+  return 고객명 + ' 감독님, 안녕하세요.\n빌리지 렌탈샵입니다.\n\n' +
+    '예약이 확정되었습니다 : )\n\n' +
+    '· 반출: ' + 반출표시 + '\n' +
+    '· 반납: ' + 반납표시 + '\n\n' +
+    '아래 링크에서 예약 내용과 계약서를 언제든 확인하실 수 있어요.\n' +
+    링크 + '\n\n' +
+    '변경·연장·취소는 카카오톡 채널로 메시지 주세요.\n감사합니다!';
+}
 
 var GUIDE_SEND_START = 8;   // 발송 가능 시작 시각
 var GUIDE_SEND_END   = 22;  // 발송 가능 종료 시각
@@ -10059,6 +10219,20 @@ function showLog_(lines) {
  * @param {string} newStatus - 새 상태 (대기/반출중/반납완료/취소)
  * @param {string} [rowIndices] - 같은 세트 전체 행 JSON
  */
+
+/** 스케줄상세 행 번호들의 거래ID(B열)를 Supabase 동기화 대상으로 마킹 (스크립트 쓰기 경로용) */
+function supaMarkScheduleRowsDirty_(sheet, rows) {
+  try {
+    var seen = {};
+    (rows || []).forEach(function(r) {
+      var ri = Number(r);
+      if (ri < 2) return;
+      var tid = sheet.getRange(ri, 2).getValue();
+      if (tid && !seen[tid]) { seen[tid] = true; supaMarkTradeDirty_(tid); }
+    });
+  } catch (e) {}
+}
+
 function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName('스케줄상세');
@@ -10083,6 +10257,7 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
     }
   });
 
+  supaMarkScheduleRowsDirty_(sheet, rows); // 스크립트 쓰기 — Supabase 동기화 표시
   try { invalidateDashboardCache(); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 

@@ -45,15 +45,35 @@ function onEditSupabaseMark(e) {
     var name = sheet.getName();
     var col = name === '계약마스터' ? 1 : name === '스케줄상세' ? 2 : 0; // 거래ID 열
     if (!col) return;
-    var tid = sheet.getRange(e.range.getRow(), col).getValue();
+    // 다중 행 붙여넣기/드래그 채우기도 전부 마킹 (기존엔 첫 행만)
+    var startRow = e.range.getRow();
+    var numRows = Math.min(e.range.getNumRows(), 200);
+    var tidValues = sheet.getRange(startRow, col, numRows, 1).getValues();
+    for (var ri = 0; ri < tidValues.length; ri++) {
+      if (tidValues[ri][0]) supaMarkTradeDirty_(tidValues[ri][0]);
+    }
+  } catch (err) {
+    // 편집 경로는 무조건 보호 — 에러 삼킴
+  }
+}
+
+/**
+ * 스크립트 쓰기용 dirty 마킹 — onEdit은 사람 손 편집에만 발화하므로,
+ * registerByReqID/추가/삭제/날짜변경처럼 스크립트가 계약·스케줄 시트를 쓰는 경로는
+ * 이 함수를 직접 호출해야 1분 트리거(flushDirtyToSupabase)가 Supabase로 밀어준다.
+ * 절대 throw하지 않음 (호출부 흐름 보호).
+ */
+function supaMarkTradeDirty_(tid) {
+  try {
+    tid = String(tid || '').trim();
     if (!tid) return;
     var p = PropertiesService.getScriptProperties();
     var dirty = {};
     try { dirty = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
-    dirty[String(tid)] = 1;
+    dirty[tid] = 1;
     p.setProperty('SUPA_DIRTY', JSON.stringify(dirty));
   } catch (err) {
-    // 편집 경로는 무조건 보호 — 에러 삼킴
+    // 동기화 마킹 실패가 본 작업을 막으면 안 됨
   }
 }
 
@@ -72,8 +92,8 @@ function flushDirtyToSupabase() {
   try {
     var built = buildSupabaseTrades_(tids);
     if (built.trades.length) {
-      supaUpsert_(cfg, 'trades', built.trades, 'trade_id');
-      if (built.items.length) supaUpsert_(cfg, 'schedule_items', built.items, 'schedule_id');
+      supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id');
+      if (built.items.length) supaUpsertGrouped_(cfg, 'schedule_items', built.items, 'schedule_id');
     }
     // 처리된 것만 제거(처리 중 새로 들어온 건 유지)
     var after = {};
@@ -123,37 +143,79 @@ function buildSupabaseTrades_(tids) {
     });
   }
 
+  // 계약마스터 폴백/취소 판정용 — tid -> {name, status, startISO, endISO}
+  var master = {};
+  try {
+    var mSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
+    if (mSheet && mSheet.getLastRow() >= 2) {
+      var mRows = mSheet.getRange(2, 1, mSheet.getLastRow() - 1, 10).getValues();
+      var mDisp = mSheet.getRange(2, 1, mSheet.getLastRow() - 1, 10).getDisplayValues();
+      for (var mi = 0; mi < mRows.length; mi++) {
+        var mTid = String(mRows[mi][0]).trim();
+        if (!mTid || !want[mTid]) continue;
+        var mStart = parseDT(mRows[mi][4], mDisp[mi][5]); // E,F: 반출 일시
+        var mEnd = parseDT(mRows[mi][6], mDisp[mi][7]);   // G,H: 반납 일시
+        master[mTid] = {
+          name: String(mRows[mi][1] || '').trim(),
+          status: String(mRows[mi][9] || '').trim(),      // J: 계약상태
+          startISO: mStart ? mStart.toISOString() : null,
+          endISO: mEnd ? mEnd.toISOString() : null
+        };
+      }
+    }
+  } catch (mErr) {}
+
   var trades = [], items = [];
   for (var tid2 in dates) {
-    var d = detail[tid2] || {};
+    var d = detail[tid2] || null;
+    var m = master[tid2] || {};
     var startISO = new Date(dates[tid2].start).toISOString();
     var endISO = new Date(dates[tid2].end).toISOString();
-    trades.push({
+
+    if (!d) {
+      // 상세 조회 실패/누락 — 운영 필드를 기본값으로 덮어쓰지 않도록 골격만 부분 upsert
+      var skeleton = { trade_id: tid2, checkout_at: startISO, return_at: endISO };
+      if (m.name) skeleton.customer_name = m.name;
+      if (m.status) skeleton.contract_status = m.status;
+      trades.push(skeleton);
+      continue;
+    }
+
+    var row = {
       trade_id: tid2,
-      customer_name: d.name || '',
       customer_phone: d.tel || null,
       company: d.company || null,
       checkout_at: startISO,
       return_at: endISO,
-      contract_status: d.contractStatus || '예약',
+      contract_status: d.contractStatus || m.status || '예약',
       setup_done: !!d.setupDone,
       setup_done_at: d.setupDoneAt || null,
       return_done: !!d.returnDone,
       return_done_at: d.returnDoneAt || null,
-      payment_method: d.paymentMethod || null,
-      payment_warning: !!d.paymentWarning,
-      deposit_status: d.depositStatus || null,
-      proof_type: d.proofType || null,
-      issue_status: d.issueStatus || null,
-      billing_company: d.billingCompany || null,
       contract_url: d.contractUrl || null,
-      contract_regen_pending: !!d.contractRegenPending,
-      note_checkin: d.returnMemo || null
-    });
+      contract_regen_pending: !!d.contractRegenPending
+    };
+    // GAS paymentWarning은 '거래내역 조회 실패' 에러 문자열 — 실패 시 결제 필드를 보내지 않아 기존값 보존.
+    // payment_warning 플래그는 앱 전용이라 flush가 관리하지 않음 (에러를 경고로 둔갑시키지 않음).
+    var extrasFailed = typeof d.paymentWarning === 'string' && d.paymentWarning.trim();
+    if (!extrasFailed) {
+      row.payment_method = d.paymentMethod || null;
+      row.deposit_status = d.depositStatus || null;
+      row.proof_type = d.proofType || null;
+      row.issue_status = d.issueStatus || null;
+      row.billing_company = d.billingCompany || null;
+    }
+    // 빈 값으로 기존 데이터를 지우지 않는 필드는 값이 있을 때만 포함 (부분 upsert)
+    var rowName = d.name || m.name || '';
+    if (rowName) row.customer_name = rowName;
+    if (typeof d.actualAmount === 'number') row.amount = d.actualAmount;
+    if (d.returnMemo) row.note_checkin = d.returnMemo; // 앱 입력 메모를 null로 지우지 않음
+    trades.push(row);
+
     var eqs = d.equipments || [];
     for (var k = 0; k < eqs.length; k++) {
       var e2 = eqs[k];
-      items.push({
+      var item = {
         schedule_id: e2.scheduleId,
         trade_id: tid2,
         sort: k,
@@ -162,12 +224,40 @@ function buildSupabaseTrades_(tids) {
         set_name: e2.setName || null,
         is_set_header: !!e2.isHeader,
         is_component: !!e2.isComponent,
-        category: e2.category || null,
-        checkout_state: e2.checkedCheckout ? 'taken' : 'pending'
-      });
+        category: e2.category || null
+      };
+      // 시트 체크된 것만 taken으로 — 미체크는 키 자체를 빼서 앱의 excluded/taken 상태 보존
+      if (e2.checkedCheckout) item.checkout_state = 'taken';
+      items.push(item);
     }
   }
+
+  // 취소/과거 등 timeline에 더는 없는 거래 — 계약마스터 기준으로 상태 반영 (조용한 유실 방지)
+  for (var wTid in want) {
+    if (dates[wTid]) continue;
+    var wm = master[wTid];
+    if (!wm || !wm.startISO || !wm.endISO) continue; // 계약마스터에도 없으면 보류
+    var cancelled = {
+      trade_id: wTid,
+      checkout_at: wm.startISO,
+      return_at: wm.endISO,
+      contract_status: wm.status || '취소'
+    };
+    if (wm.name) cancelled.customer_name = wm.name;
+    trades.push(cancelled);
+  }
+
   return { trades: trades, items: items };
+}
+
+/** payload 키 구성이 같은 행끼리 묶어 upsert — PostgREST는 배치 내 키 불일치를 거부하므로. */
+function supaUpsertGrouped_(cfg, table, rows, conflict) {
+  var groups = {};
+  for (var i = 0; i < rows.length; i++) {
+    var sig = Object.keys(rows[i]).sort().join(',');
+    (groups[sig] = groups[sig] || []).push(rows[i]);
+  }
+  for (var sig2 in groups) supaUpsert_(cfg, table, groups[sig2], conflict);
 }
 
 /** Supabase REST 벌크 upsert (anon 키, merge-duplicates). */

@@ -58,6 +58,7 @@ const WRITE_ACTIONS = new Set([
   "registerAsync",
   "updateEquipQty",
   "updateEquipName",
+  "removeEquip",
   "uploadDashboardPhoto",
 ]);
 

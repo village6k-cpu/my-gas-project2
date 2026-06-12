@@ -150,20 +150,29 @@ async function loadRemote() {
   }
   // 시트→앱 자동 폴링(변경분만): 90초마다 timeline에서 예약 변경 감지
   if (!pollTimer) {
-    pollTimer = setInterval(async () => {
-      if (hasPendingPersist() || document.hidden) return;
-      const mutationSeqAtPoll = localMutationSeq;
-      try {
-        if (await repairEmptyEquipmentTrades(state.trades, mutationSeqAtPoll)) return;
-        const changed = await pollTimelineChanges(state.trades);
-        if (!changed.length) return;
-        if (!canApplyRemoteSnapshot(mutationSeqAtPoll)) return;
-        set({ trades: mergeTradeChanges(state.trades, changed) });
-        for (const t of changed) persistTrade(t).catch(() => {});
-      } catch {
-        /* noop */
-      }
+    pollTimer = setInterval(() => {
+      if (document.hidden) return;
+      void pollSheetChangesNow();
     }, POLL_MS);
+  }
+}
+
+/**
+ * 시트 변경분 즉시 반영 — 등록/수정 직후 90초 폴링을 기다리지 않고 호출.
+ * (확인요청 등록 완료 시 신규 거래가 오늘일정·검색에 바로 보이도록)
+ */
+export async function pollSheetChangesNow(): Promise<void> {
+  if (!isSupabase || hasPendingPersist()) return;
+  const mutationSeqAtPoll = localMutationSeq;
+  try {
+    if (await repairEmptyEquipmentTrades(state.trades, mutationSeqAtPoll)) return;
+    const changed = await pollTimelineChanges(state.trades);
+    if (!changed.length) return;
+    if (!canApplyRemoteSnapshot(mutationSeqAtPoll)) return;
+    set({ trades: mergeTradeChanges(state.trades, changed) });
+    for (const t of changed) persistTrade(t).catch(() => {});
+  } catch {
+    /* noop */
   }
 }
 
@@ -262,19 +271,31 @@ export function toggleReturn(tradeId: string) {
     return { ...t, returnDone: on, returnDoneAt: on ? new Date().toISOString() : null, contractStatus: on ? "반납완료" : "반출" };
   });
   flashSave(tradeId);
-  gasWrite("toggleReturn", { tid: tradeId, done: on });
+  // 해제 시 GAS는 이전 계약상태(예약 등)를 복원 — 앱이 무조건 '반출'로 두면 어긋남
+  gasMutation("toggleReturn", { tid: tradeId, done: on })
+    .then((res) => {
+      const restored = res?.contractStatus;
+      if (!on && restored && restored !== "반출") {
+        mutateTrade(tradeId, (t) => ({ ...t, contractStatus: restored }));
+      }
+    })
+    .catch((e) => console.error("[write-back] toggleReturn 실패:", e));
 }
 
 // ── 품목별 반출/반납 상태 ───────────────────────────────────────
 export function setItemCheckout(tradeId: string, scheduleId: string, next: CheckoutState) {
   let final: CheckoutState | undefined;
+  let isSynthetic = false;
   mutateTrade(tradeId, (t) =>
     mapItem(t, scheduleId, (e) => {
       final = e.checkoutState === next ? "pending" : next;
+      isSynthetic = !!e.synthetic;
       return { ...e, checkoutState: final };
     }),
   );
   flashSave(tradeId);
+  // 합성 ID(시트 행번호)는 실제 스케줄ID와 달라 엉뚱한 품목에 체크가 기록될 수 있음 → 시트 write 차단
+  if (isSynthetic) return;
   if (final === "taken") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: true });
   else if (final === "pending") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: false });
   // 'excluded'(제외)는 시트에 대응 칸 없음 → Supabase 전용
@@ -303,7 +324,18 @@ export function setItemQty(tradeId: string, scheduleId: string, qty: number) {
     })),
   );
   flashSave(tradeId);
-  gasWrite("updateEquipQty", { tid: tradeId, scheduleId, qty: safeQty });
+  // 세트 헤더 수량 변경 시 GAS가 구성품 수량을 비례 조정 — 응답을 받아 앱/Supabase도 동일하게
+  gasMutation("updateEquipQty", { tid: tradeId, scheduleId, qty: safeQty })
+    .then((res) => {
+      const updates: { scheduleId: string; newQty: number }[] = res?.updatedItems ?? [];
+      if (updates.length <= 1) return;
+      const byId = new Map(updates.map((u) => [u.scheduleId, Number(u.newQty) || 1]));
+      mutateTrade(tradeId, (t) => ({
+        ...t,
+        equipments: t.equipments.map((e) => (byId.has(e.scheduleId) ? { ...e, qty: byId.get(e.scheduleId)! } : e)),
+      }));
+    })
+    .catch((e) => console.error("[write-back] updateEquipQty 실패:", e));
 }
 export function setItemMemo(tradeId: string, scheduleId: string, phase: Phase, text: string) {
   mutateTrade(tradeId, (t) =>
@@ -393,9 +425,14 @@ export function setOnsiteSettlement(tradeId: string, scheduleId: string, settlem
   flashSave(tradeId);
 }
 export function removeItem(tradeId: string, scheduleId: string) {
+  const item = state.trades.find((t) => t.tradeId === tradeId)?.equipments.find((e) => e.scheduleId === scheduleId);
   mutateTrade(tradeId, (t) => ({ ...t, equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId) }));
   flashSave(tradeId);
   deleteScheduleItem(tradeId, scheduleId).catch(() => {});
+  // 시트 유래 품목은 스케줄상세 행도 삭제 — 가용성 점유와 repair 부활 방지 (현장추가는 Supabase 전용)
+  if (item && !item.onsite && new RegExp(`^${tradeId}-\\d+$`).test(scheduleId)) {
+    gasWrite("removeEquip", { tid: tradeId, scheduleId, equipName: item.name });
+  }
 }
 
 // ── 반납: 품목(scheduleId) 단위 카운트 + 시트 write-back ────────────
@@ -412,6 +449,8 @@ export function setReturnCount(tradeId: string, scheduleId: string, patch: Parti
     return { ...t, returnCounts: { ...t.returnCounts, [scheduleId]: next } };
   });
   flashSave(tradeId);
+  const rcItem = state.trades.find((t) => t.tradeId === tradeId)?.equipments.find((e) => e.scheduleId === scheduleId);
+  if (rcItem?.synthetic) return; // 합성 ID — 시트 write 금지
   if (writeback !== undefined) gasWrite("toggleItem", { scheduleId, phase: "checkin", done: writeback });
 }
 

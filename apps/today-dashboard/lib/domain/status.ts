@@ -157,7 +157,8 @@ export function needsAttention(t: Trade, date: string): boolean {
 }
 
 export function tradesForTab(trades: Trade[], date: string, tab: TabKey): Trade[] {
-  let list = trades;
+  // 취소 거래는 작업 카드에서 제외 (검색 이벤트에서는 계속 노출 — 이력 확인용)
+  let list = trades.filter((t) => t.contractStatus !== "취소");
   if (tab === "checkout") {
     list = trades.filter((t) => {
       const p = phaseForDate(t, date);

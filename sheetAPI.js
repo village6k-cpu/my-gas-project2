@@ -247,6 +247,10 @@ function handleRequest(e) {
           catalog: getDashboardEquipmentCatalog_(SpreadsheetApp.getActiveSpreadsheet())
         });
 
+      case "myPage":
+        // 고객용 내 예약 조회 — 거래/요청별 토큰 검증, 연락처 등 민감정보 미포함 (myPage.js)
+        return jsonResponse(getMyReservation(params.token || postBody.token || ""));
+
       case "dashboardSearch":
         return jsonResponse(getDashboardSearchData(
           params.q || params.query || postBody.q || postBody.query || "",
@@ -594,7 +598,8 @@ function doListPending() {
         장비명: data[i][5],
         수량: data[i][6] || 1,
         결과: data[i][8] || "",
-        상세: data[i][9] || ""
+        상세: data[i][9] || "",
+        비고: String(data[i][16] || "") // Q열 — "[세트]세트명" 구성품 마커
       });
     }
   }
@@ -937,7 +942,8 @@ function runFunction(funcName, params) {
     "getInventoryConflictsSlackMessage",
     "listAllTriggers",
     "diagEquipmentRiskBackendConfig",
-    "setupEquipmentRiskBackendConfig"
+    "setupEquipmentRiskBackendConfig",
+    "getMyPageLink"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -978,6 +984,12 @@ function runFunction(funcName, params) {
       var reqID = typeof args === "string" ? args : args.reqID;
       var result = deleteRequest(reqID);
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "getMyPageLink") {
+      var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
+      var linkId = typeof args === "string" ? args : (args.id || args.tradeId || args.reqID || args.거래ID || "");
+      var result = getMyPageLink(linkId);
+      return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "regenerateContractById") {
       var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
@@ -1216,12 +1228,13 @@ function getOperationsData_(targetDate, skipCache) {
     }
 
     // 가동률 분자: 오늘 활성 스케줄(반출일 ≤ 오늘 ≤ 반납일)의 수량 합
-    if (coDate && ciDate && coDate <= todayStr && todayStr <= ciDate) {
+    // 조기 반납(반납완료) 건은 더 이상 장비를 점유하지 않음 — 가용성 엔진과 동일 기준
+    if (status !== "반납완료" && coDate && ciDate && coDate <= todayStr && todayStr <= ciDate) {
       activeQtySum += (Number(row[4]) || 0);
     }
 
-    // 재고 충돌 — 향후 90일 이내 활성 스케줄을 일자×장비별로 누적 (세트 헤더 행 제외)
-    if (coDate && ciDate && opItem && opItem.name) {
+    // 재고 충돌 — 향후 90일 이내 활성 스케줄을 일자×장비별로 누적 (세트 헤더 행 제외, 반납완료 제외)
+    if (status !== "반납완료" && coDate && ciDate && opItem && opItem.name) {
       var winStart = coDate < todayStr ? todayStr : coDate;
       var winEnd = ciDate > conflictHorizonEndStr ? conflictHorizonEndStr : ciDate;
       if (winStart <= winEnd) {
@@ -1278,7 +1291,7 @@ function getOperationsData_(targetDate, skipCache) {
       unconfirmedMap[reqID] = {
         reqID: String(reqID),
         customer: String(r[10] || ""),
-        company: String(r[12] || ""),
+        company: (function(dt) { return dt && dt !== "일반" ? dt : ""; })(String(r[12] || "").trim()), // M열=할인유형 (구 업체명)
         checkoutDate: rDate,
         checkoutTime: rTime,
         items: []

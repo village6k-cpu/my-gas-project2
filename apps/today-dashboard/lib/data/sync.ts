@@ -39,17 +39,24 @@ export function parseTimeline(resp: any): Trade[] {
     let minS = Infinity;
     let maxE = -Infinity;
     let amount = 0;
+    const seenAmountKeys = new Set<string>();
     const equipments: EquipmentItem[] = items.map((it: any, idx: number) => {
       const s = toMs(it.s);
       const e = toMs(it.e);
       if (s < minS) minS = s;
       if (e > maxE) maxE = e;
-      if (typeof it.p === "number") amount += it.p;
+      // 세트 수량 N이면 같은 행이 바 N개로 복제됨 — 행당 1회만 합산 (금액 N배 부풀림 방지)
+      const amtKey = `${it.g}|${it.r ?? idx}`;
+      if (typeof it.p === "number" && !seenAmountKeys.has(amtKey)) {
+        amount += it.p;
+        seenAmountKeys.add(amtKey);
+      }
       const name = groups.get(it.g) ?? it.eq ?? "장비";
       return {
         scheduleId: `${tid}-${it.r ?? idx}`,
+        synthetic: true, // 행번호 기반 합성 ID — dashboard merge 전까지 시트 write-back 금지
         name,
-        qty: Number(it.q) || 1,
+        qty: parseInt(String(it.q ?? "").replace(/[^0-9]/g, ""), 10) || 1, // "2세트" 같은 문자열 수량 파싱
         category: categoryOf(name) ?? undefined,
         checkoutState: it.st === "대기" ? "pending" : "taken",
       } as EquipmentItem;
@@ -88,13 +95,16 @@ export async function syncTimelineToSupabase(opts?: { fromDays?: number; toDays?
   if (data.error) throw new Error(data.error);
   const trades = parseTimeline(data);
   log(`예약 ${trades.length}건 파싱 → Supabase 적재 중…`);
+  // 기존 거래는 merge 경유로만 갱신 — 사진/반납카운트/검수플래그를 timeline 추정값으로 리셋하지 않음
+  const existingMap = new Map((await fetchAllTrades()).map((t) => [t.tradeId, t]));
   let n = 0;
   for (const t of trades) {
-    await persistTrade(t);
+    const ex = existingMap.get(t.tradeId);
+    await persistTrade(ex ? mergeTimelineTradeSnapshot(ex, t) : t);
     n++;
     if (n % 10 === 0) log(`  …${n}/${trades.length}`);
   }
-  log(`완료: ${n}건 동기화됨`);
+  log(`완료: ${n}건 동기화됨 (기존 ${existingMap.size}건은 보존 merge)`);
   return n;
 }
 
@@ -118,17 +128,34 @@ function mapRisk(arr: any): RiskWarning[] {
 /** action=dashboard 항목을 기존 거래(날짜 유지) 위에 상세 덮어쓰기.
  *  isSetHeader는 raw 헤더여부(isHeader)로 저장 → 라벨/노출 판정은 읽기(normalizeItems) 단일소스. */
 function mergeDashboard(base: Trade, it: any): Trade {
-  const equipments: EquipmentItem[] = (it.equipments ?? []).map((e: any) => ({
-    scheduleId: e.scheduleId,
-    name: e.name,
-    qty: Number(e.qty) || 1,
-    setName: e.setName || undefined,
-    isSetHeader: !!e.isHeader,
-    isComponent: !!e.isComponent,
-    emphasize: EMPH.test(e.name) || undefined,
-    category: e.category || categoryOf(e.name) || undefined, // 장비마스터 실제 카테고리 우선
-    checkoutState: e.checkedCheckout ? "taken" : "pending",
-  }));
+  // 품목은 scheduleId 단위 merge — 시트가 모르는 앱 전용 상태(제외/부분픽업/메모/오프셋/정산)를 보존
+  const baseById = new Map(base.equipments.map((e) => [e.scheduleId, e]));
+  const incoming: EquipmentItem[] = (it.equipments ?? []).map((e: any) => {
+    const prev = baseById.get(e.scheduleId);
+    return {
+      scheduleId: e.scheduleId,
+      name: e.name,
+      qty: Number(e.qty) || 1,
+      setName: e.setName || undefined,
+      isSetHeader: !!e.isHeader,
+      isComponent: !!e.isComponent,
+      emphasize: EMPH.test(e.name) || undefined,
+      category: e.category || categoryOf(e.name) || undefined, // 장비마스터 실제 카테고리 우선
+      checkoutState: prev?.checkoutState === "excluded" ? "excluded" : e.checkedCheckout ? "taken" : "pending",
+      takenQty: prev?.takenQty,
+      memoCheckout: prev?.memoCheckout,
+      memoCheckin: prev?.memoCheckin,
+      startShiftDays: prev?.startShiftDays,
+      endShiftDays: prev?.endShiftDays,
+      settlement: prev?.settlement,
+      offCatalog: prev?.offCatalog,
+    } as EquipmentItem;
+  });
+  // 시트에 없는 앱 전용 품목(현장추가 등 유상 청구 대상)은 절대 삭제하지 않음
+  const incomingIds = new Set(incoming.map((e) => e.scheduleId));
+  const appOnly = base.equipments.filter((e) => !incomingIds.has(e.scheduleId) && (e.onsite || e.offCatalog));
+  const equipments = incoming.length ? [...incoming, ...appOnly] : base.equipments;
+
   const returnCounts: Record<string, ReturnCount> = {};
   for (const e of it.equipments ?? []) {
     if (e.isHeader) continue;
@@ -136,8 +163,35 @@ function mergeDashboard(base: Trade, it: any): Trade {
       returnCounts[e.scheduleId] = { good: Number(e.qty) || 1, damaged: 0, lost: 0 }; // scheduleId 단위
     }
   }
+  // 앱이 기록한 파손/분실 카운트는 시트 체크박스보다 정보가 많음 — 보존
+  for (const [sid, rc] of Object.entries(base.returnCounts ?? {})) {
+    if ((rc.damaged ?? 0) > 0 || (rc.lost ?? 0) > 0) returnCounts[sid] = rc;
+  }
+
+  // GAS paymentWarning은 "거래내역 조회 실패" 에러 문자열 — 실패 시 결제 필드 merge 금지 (기본값 wipe 방지)
+  const extrasFailed = typeof it.paymentWarning === "string" && it.paymentWarning.trim().length > 0;
+  const payment = extrasFailed
+    ? {
+        paymentMethod: base.paymentMethod,
+        depositStatus: base.depositStatus,
+        proofType: base.proofType,
+        issueStatus: base.issueStatus,
+        issueNote: base.issueNote,
+        billingCompany: base.billingCompany,
+      }
+    : {
+        paymentMethod: it.paymentMethod || base.paymentMethod,
+        depositStatus: it.depositStatus || base.depositStatus,
+        proofType: it.proofType || base.proofType,
+        issueStatus: it.issueStatus || base.issueStatus,
+        issueNote: it.issueNote || base.issueNote,
+        billingCompany: it.billingCompany || base.billingCompany,
+      };
+
   return {
     ...base,
+    // 거래내역 I열 실 결제금액이 정산 표시의 기준 — 타임라인 단가합(추정치)을 대체
+    amount: typeof it.actualAmount === "number" && it.actualAmount > 0 ? it.actualAmount : base.amount,
     customerName: it.name || base.customerName,
     customerPhone: it.tel || base.customerPhone,
     company: it.company || base.company,
@@ -146,19 +200,14 @@ function mergeDashboard(base: Trade, it: any): Trade {
     returnDone: !!it.returnDone,
     setupDoneAt: it.setupDoneAt || undefined,
     returnDoneAt: it.returnDoneAt || undefined,
-    paymentMethod: it.paymentMethod || undefined,
-    paymentWarning: !!it.paymentWarning,
-    depositStatus: it.depositStatus || undefined,
-    proofType: it.proofType || undefined,
-    issueStatus: it.issueStatus || undefined,
-    issueNote: it.issueNote || undefined,
-    billingCompany: it.billingCompany || undefined,
+    ...payment,
+    paymentWarning: base.paymentWarning, // 에러 문자열을 경고 플래그로 둔갑시키지 않음
     contractUrl: it.contractUrl || base.contractUrl,
     contractRegenPending: !!it.contractRegenPending,
     noteCheckin: it.returnMemo || base.noteCheckin,
     riskWarnings: mapRisk(it.riskWarnings),
     returnCounts,
-    equipments: equipments.length ? equipments : base.equipments,
+    equipments,
   };
 }
 
@@ -213,7 +262,9 @@ function incomingEquipmentCount(it: any): number {
 }
 
 function shouldUseDashboardDetail(base: Trade, it: any): boolean {
-  return incomingEquipmentCount(it) > currentEquipmentCount(base) || (!base.contractUrl && !!it.contractUrl);
+  const amountFix =
+    typeof it?.actualAmount === "number" && it.actualAmount > 0 && it.actualAmount !== (base.amount ?? 0);
+  return incomingEquipmentCount(it) > currentEquipmentCount(base) || (!base.contractUrl && !!it.contractUrl) || amountFix;
 }
 
 function repairFromDashboardItems(current: Trade[], items: any[]): Trade[] {
@@ -288,7 +339,19 @@ export async function repairDashboardSearchResults(current: Trade[], query: stri
     const res = await gasFetch(`action=dashboardSearch&q=${encodeURIComponent(query)}`);
     const data = await res.json();
     if (data.error) return [];
-    return repairFromDashboardItems(current, [...(data.checkout ?? []), ...(data.checkin ?? [])]);
+    const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
+    const changed = repairFromDashboardItems(current, items);
+
+    // 시트에는 있는데 스토어에 아직 없는 신규 거래(방금 등록된 건) → timeline에서 통째로 가져와 합류
+    const known = new Set(current.map((t) => t.tradeId));
+    const hasUnknown = items.some((it) => it?.tradeId && !known.has(it.tradeId));
+    if (hasUnknown) {
+      const fresh = await pollTimelineChanges(current);
+      const byId = new Map(changed.map((t) => [t.tradeId, t]));
+      for (const t of fresh) if (!byId.has(t.tradeId)) byId.set(t.tradeId, t);
+      return [...byId.values()];
+    }
+    return changed;
   } catch {
     return [];
   }
@@ -320,10 +383,12 @@ export async function pollTimelineChanges(current: Trade[]): Promise<Trade[]> {
       changed.push(tl); // 신규 예약(시트에서 막 들어옴)
       continue;
     }
+    // 문자열 비교 금지: timestamptz 왕복(+00:00)과 toISOString(.000Z)이 같은 시각도 다르게 보임 → epoch 비교
+    const nameChanged = ex.customerName !== tl.customerName && tl.customerName !== tl.tradeId; // 계약마스터 매칭 실패 시 cn=거래ID 폴백 제외
     if (
-      ex.checkoutAt !== tl.checkoutAt ||
-      ex.returnAt !== tl.returnAt ||
-      ex.customerName !== tl.customerName ||
+      toMs(ex.checkoutAt) !== toMs(tl.checkoutAt) ||
+      toMs(ex.returnAt) !== toMs(tl.returnAt) ||
+      nameChanged ||
       shouldRestoreMissingTimelineEquipments(ex, tl)
     ) {
       changed.push(mergeTimelineTradeSnapshot(ex, tl));
