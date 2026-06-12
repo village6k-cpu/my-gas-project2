@@ -16,6 +16,8 @@ on:
       - "*.js"
       - "*.html"
       - "appsscript.json"
+      - "scripts/ci-deploy-gas.sh"
+      - ".github/workflows/deploy-gas.yml"
   workflow_dispatch:
     inputs:
       skip_drift_guard:
@@ -35,6 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 드리프트 가드가 히스토리 blob 존재 여부로 판별
 
       - name: 시크릿 확인
         id: secrets
