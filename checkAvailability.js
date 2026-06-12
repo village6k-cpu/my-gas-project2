@@ -9346,6 +9346,27 @@ function testRegisterAlimtalk(args) {
   }
 }
 
+/**
+ * 반출/반납 안내 알림톡 테스트 발송 — 이미 승인된 템플릿이라 실물 도착까지 검증 가능.
+ * args: { 연락처: "010-...", 종류?: "반출"|"반납", 이름?: "테스트" }
+ * 시트/GUIDE_SENT_ 중복방지 플래그에 아무 기록 없음.
+ */
+function testGuideAlimtalk(args) {
+  args = args || {};
+  var 연락처 = String(args.연락처 || args.phone || "").trim();
+  if (!연락처) return { error: "연락처 필수" };
+  var 종류 = String(args.종류 || "반출").trim();
+  var 이름 = String(args.이름 || "테스트").trim();
+  var tpl = 종류 === "반납" ? TPL_CHECKIN : TPL_CHECKOUT;
+  var msg = 종류 === "반납" ? _buildCheckinMsg(이름) : _buildCheckoutMsg(이름);
+  try {
+    var res = sendAlimtalk(tpl, 연락처, 이름, msg, { '#{고객명}': 이름 });
+    return { success: true, 종류: 종류, template: tpl, popbill: res };
+  } catch (e) {
+    return { error: e.message, 종류: 종류, template: tpl };
+  }
+}
+
 /** 등록완료 알림톡 본문 — 팝빌 승인 템플릿과 글자 단위 동일해야 함 (링크는 '내 예약 확인' 버튼) */
 function _buildRegisterMsg(고객명, 반출표시, 반납표시) {
   return 고객명 + ' 감독님, 안녕하세요.\n빌리지 렌탈샵입니다.\n\n' +

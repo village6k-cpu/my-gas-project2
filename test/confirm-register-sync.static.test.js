@@ -292,3 +292,24 @@ console.log('memo-visibility checks OK');
   );
 }
 console.log('popbill-hmac checks OK');
+
+// ── 반출/반납 안내 테스트 발송 도구 — 승인 템플릿으로 실물 도착 검증용 ──
+{
+  const ca = read('checkAvailability.js');
+  const api = read('sheetAPI.js');
+  assert(
+    /function testGuideAlimtalk\(args\)/.test(ca) &&
+      /TPL_CHECKIN : TPL_CHECKOUT/.test(ca) &&
+      /_buildCheckinMsg\(이름\) : _buildCheckoutMsg\(이름\)/.test(ca),
+    'testGuideAlimtalk must reuse the exact approved guide templates and message builders'
+  );
+  assert(
+    api.includes('"testGuideAlimtalk"') && api.includes('funcName === "testGuideAlimtalk"'),
+    'testGuideAlimtalk must be whitelisted AND dispatched in sheetAPI run'
+  );
+  assert(
+    !/GUIDE_SENT_/.test(ca.slice(ca.indexOf('function testGuideAlimtalk'), ca.indexOf('function testGuideAlimtalk') + 900)),
+    'test send must not touch GUIDE_SENT_ dedupe flags'
+  );
+}
+console.log('guide-alimtalk-test-tool checks OK');
