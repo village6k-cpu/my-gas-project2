@@ -325,3 +325,30 @@ console.log('popbill-hmac checks OK');
   );
 }
 console.log('guide-alimtalk-test-tool checks OK');
+
+// ── 알림톡 발송 신뢰성: 접수 성공시에만 플래그 + 날짜 경계 무관 중복방지 ──
+{
+  const ca = read('checkAvailability.js');
+  assert(
+    /function _alimtalkAccepted_\(res\)/.test(ca) && /res\.receiptNum/.test(ca),
+    'popbill responses must be checked for receiptNum — error JSON is not an exception'
+  );
+  assert(
+    /if \(!_alimtalkAccepted_\(res\)\)[\s\S]{0,300}return \{ error/.test(ca) &&
+      ca.indexOf('_alimtalkAccepted_(res)') < ca.indexOf("props.setProperty(sentFlag"),
+    'register alimtalk must NOT set REG_ALIM_SENT_ flag when popbill rejects (e.g. template under review)'
+  );
+  assert(
+    /_alimtalkAccepted_\(outRes\)/.test(ca) && /_alimtalkAccepted_\(inRes\)/.test(ca),
+    'guide alimtalk must only mark sent when popbill issued a receiptNum'
+  );
+  assert(
+    /GUIDE_SENT_V2/.test(ca) && !/sentKey = 'GUIDE_SENT_' \+ todayStr/.test(ca),
+    'guide dedupe must use a single date-independent key — per-day keys resend after midnight (checkin window spans 2 days)'
+  );
+  assert(
+    /yyyyMMdd HH:mm'\)/.test(ca) && /d < cutoffStr\) delete sentData\[f\]/.test(ca),
+    'V2 flags must carry their date so stale entries (>7d) can be pruned in place'
+  );
+}
+console.log('alimtalk-reliability checks OK');

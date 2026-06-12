@@ -9276,12 +9276,17 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns)
 // 반출/반납 안내톡 (3회 미만 고객 대상)
 // 반출: 반출 시간 12시간 전 발송
 // 반납: 반출 시간 + 3시간 후 발송
-// 발송 가능 시간: 09:00~21:00 (밖이면 09:00으로 지연)
+// 발송 가능 시간: 08:00~22:00 (GUIDE_SEND_START/END, 밖이면 다음 가능 시각으로 지연)
 // 트리거: 30분마다 checkGuideAlimtalk 실행
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 var TPL_CHECKOUT = '026040000902';  // 반출 안내
 var TPL_CHECKIN  = '026040000904';  // 반납 안내
+
+/** 팝빌 발송 응답이 정상 접수인지 — 접수번호(receiptNum)가 있어야 실제 발송 큐에 들어간 것 */
+function _alimtalkAccepted_(res) {
+  return !!(res && res.receiptNum);
+}
 
 /**
  * 등록완료 알림톡 — 예약 확정 안내 + 내 예약 페이지 링크
@@ -9318,6 +9323,11 @@ function sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출
   var btns = [{ n: '내 예약 확인', t: 'WL', u1: link.url, u2: link.url }];
 
   var res = sendAlimtalk(tpl, String(연락처), String(예약자명), msg, vars, btns);
+  if (!_alimtalkAccepted_(res)) {
+    // 접수 실패(템플릿 검수중, 잔액부족 등) — 플래그를 남기지 않아야 다음 등록/승인 후 재시도 가능
+    Logger.log('⚠️ 등록완료 알림톡 접수 실패: ' + 거래ID + ' → ' + JSON.stringify(res));
+    return { error: (res && res.message) || '팝빌 접수 실패', popbill: res };
+  }
   props.setProperty(sentFlag, Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm'));
   Logger.log('✅ 등록완료 알림톡: ' + 거래ID + ' ' + 예약자명 + ' → ' + JSON.stringify(res));
   return { sent: true };
@@ -9518,14 +9528,26 @@ function checkGuideAlimtalk() {
     tradeInfo[거래ID] = { checkoutDT: checkoutDT };
   }
 
-  // ── 중복 발송 방지 ──
+  // ── 중복 발송 방지 (거래 단위 단일 키 — 날짜별 키는 자정 넘으면 플래그가 사라져
+  //     반납 안내[반출+3h~+48h]처럼 이틀에 걸친 구간에서 중복 발송됐음) ──
   var props = PropertiesService.getScriptProperties();
-  var sentKey = 'GUIDE_SENT_' + todayStr;
+  var sentKey = 'GUIDE_SENT_V2';
   var sentData = {};
   try {
     var sentRaw = props.getProperty(sentKey);
     if (sentRaw) sentData = JSON.parse(sentRaw);
   } catch(e) {}
+  // 구버전(날짜별 키) 기록 전부 병합 — 반납 구간(+48h)은 이틀 전 발송분도 살아있을 수 있음
+  props.getKeys().forEach(function(k) {
+    var m = k.match(/^GUIDE_SENT_(\d{8})$/);
+    if (!m) return;
+    try {
+      var legacy = JSON.parse(props.getProperty(k) || '{}');
+      Object.keys(legacy).forEach(function(f) {
+        if (!sentData[f]) sentData[f] = m[1] + ' ' + legacy[f];
+      });
+    } catch(e) {}
+  });
 
   var results = { sent: [], skipped: [], errors: [] };
   var nowMs = now.getTime();
@@ -9548,7 +9570,8 @@ function checkGuideAlimtalk() {
         var outMsg = _buildCheckoutMsg(cust.name);
         var outVars = { '#{고객명}': cust.name };
         var outRes = sendAlimtalk(TPL_CHECKOUT, cust.tel, cust.name, outMsg, outVars);
-        sentData[outFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'HH:mm');
+        if (!_alimtalkAccepted_(outRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(outRes));
+        sentData[outFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
         results.sent.push('반출 ' + tid + ' ' + cust.name);
         Logger.log('✅ 반출 안내톡: ' + tid + ' ' + cust.name + ' → ' + JSON.stringify(outRes));
       } catch(err) {
@@ -9567,7 +9590,8 @@ function checkGuideAlimtalk() {
         var inMsg = _buildCheckinMsg(cust.name);
         var inVars = { '#{고객명}': cust.name };
         var inRes = sendAlimtalk(TPL_CHECKIN, cust.tel, cust.name, inMsg, inVars);
-        sentData[inFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'HH:mm');
+        if (!_alimtalkAccepted_(inRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(inRes));
+        sentData[inFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
         results.sent.push('반납 ' + tid + ' ' + cust.name);
         Logger.log('✅ 반납 안내톡: ' + tid + ' ' + cust.name + ' → ' + JSON.stringify(inRes));
       } catch(err) {
@@ -9577,17 +9601,19 @@ function checkGuideAlimtalk() {
     }
   });
 
-  // ── 발송 기록 저장 ──
+  // ── 발송 기록 저장 (3일 지난 플래그는 정리 — 발송 가능 구간이 최대 +48h라 충분.
+  //     단일 프로퍼티 9KB 한도 대비 보존을 짧게 유지) ──
+  var cutoffStr = Utilities.formatDate(
+    new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000), 'Asia/Seoul', 'yyyyMMdd');
+  Object.keys(sentData).forEach(function(f) {
+    var d = String(sentData[f]).slice(0, 8);
+    if (/^\d{8}$/.test(d) && d < cutoffStr) delete sentData[f];
+  });
   props.setProperty(sentKey, JSON.stringify(sentData));
 
-  // ── 오래된 발송 기록 정리 (7일 이전) ──
-  var allKeys = props.getKeys();
-  var cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  var cutoffStr = 'GUIDE_SENT_' + Utilities.formatDate(cutoff, 'Asia/Seoul', 'yyyyMMdd');
-  allKeys.forEach(function(k) {
-    if (k.indexOf('GUIDE_SENT_') === 0 && k < cutoffStr) {
-      props.deleteProperty(k);
-    }
+  // ── 구버전 날짜별 키 제거 (V2로 병합 완료) ──
+  props.getKeys().forEach(function(k) {
+    if (/^GUIDE_SENT_\d{8}$/.test(k)) props.deleteProperty(k);
   });
 
   if (results.sent.length > 0 || results.errors.length > 0) {
