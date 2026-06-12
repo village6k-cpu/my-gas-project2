@@ -6,6 +6,7 @@ import {
   regenerateContract,
   requestProofIssue,
   sendEstimate,
+  sendStatement,
   setBillingCompany,
   setDepositStatus,
   setPaymentMethod,
@@ -91,8 +92,10 @@ function usePaymentControlOptions() {
 export function PaymentControls({ trade }: { trade: Trade }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [confirmingStatement, setConfirmingStatement] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [issuing, setIssuing] = useState(false);
+  const [sendingStatement, setSendingStatement] = useState(false);
   const options = usePaymentControlOptions();
   const isTax = trade.proofType === "세금계산서";
   const isRegenerating = trade.contractRegenPending || regenerating;
@@ -187,6 +190,15 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               <Send className="h-3.5 w-3.5" />
               {trade.estimateSent ? "견적서 발송됨" : "견적서 발송"}
             </button>
+            <button
+              type="button"
+              disabled={sendingStatement}
+              onClick={() => setConfirmingStatement(true)}
+              className="tap inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-[13px] font-bold text-ink-soft ring-1 ring-line disabled:bg-paper disabled:text-ink-faint"
+            >
+              <Send className="h-3.5 w-3.5" />
+              {sendingStatement ? "발송 중..." : trade.statementSent ? "거래명세서 발송됨" : "거래명세서 발송"}
+            </button>
             <a
               href={trade.contractUrl ?? undefined}
               target="_blank"
@@ -231,6 +243,34 @@ export function PaymentControls({ trade }: { trade: Trade }) {
                 onClick={() => {
                   sendEstimate(trade.tradeId);
                   setConfirming(false);
+                }}
+                className="tap flex-1 rounded-xl bg-brand-600 py-3 text-[14px] font-bold text-white shadow-sm"
+              >
+                발송
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmingStatement && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center" onClick={() => setConfirmingStatement(false)}>
+          <div className="animate-pop w-full max-w-md rounded-t-2xl bg-white p-5 shadow-pop sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
+            <p className="text-[16px] font-bold text-ink">거래명세서를 발송할까요?</p>
+            <p className="mt-1 text-[13.5px] text-ink-mute">
+              {trade.customerName}님 · {trade.customerPhone}
+            </p>
+            <div className="mt-4 flex gap-2">
+              <button onClick={() => setConfirmingStatement(false)} className="tap flex-1 rounded-xl bg-line/40 py-3 text-[14px] font-bold text-ink-soft">
+                취소
+              </button>
+              <button
+                onClick={() => {
+                  setConfirmingStatement(false);
+                  setSendingStatement(true);
+                  sendStatement(trade.tradeId)
+                    .catch((err) => window.alert("거래명세서 발송 실패: " + (err instanceof Error ? err.message : String(err))))
+                    .finally(() => setSendingStatement(false));
                 }}
                 className="tap flex-1 rounded-xl bg-brand-600 py-3 text-[14px] font-bold text-white shadow-sm"
               >

@@ -479,6 +479,27 @@ export function sendEstimate(tradeId: string) {
   gasWrite("sendEstimate", { tid: tradeId });
 }
 
+export async function sendStatement(tradeId: string) {
+  mutateTrade(tradeId, (t) => ({ ...t, issueNote: "거래명세서 발송 요청 중..." }));
+  flashSave(tradeId);
+  try {
+    const res = await gasMutation("sendStatement", { tid: tradeId });
+    const result = res?.result || res || {};
+    mutateTrade(tradeId, (t) => ({
+      ...t,
+      statementSent: true,
+      issueNote: result.message || "거래명세서 발송 접수 완료",
+    }));
+    flashSave(tradeId);
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    mutateTrade(tradeId, (t) => ({ ...t, issueNote: message }));
+    flashSave(tradeId);
+    throw err;
+  }
+}
+
 export async function regenerateContract(tradeId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, contractRegenPending: true }));
   flashSave(tradeId);

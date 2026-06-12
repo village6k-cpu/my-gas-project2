@@ -4565,6 +4565,10 @@ function requestTradeEstimate(tid) {
   return callVillageOpsApi_("sendEstimate", tid);
 }
 
+function requestTradeStatement(tid) {
+  return callVillageOpsApi_("sendStatement", tid);
+}
+
 function requestTradeProofIssue(tid) {
   var ready = validateTradeProofIssueReady_(tid);
   if (ready && ready.error) return ready;
