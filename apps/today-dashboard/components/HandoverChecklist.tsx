@@ -186,6 +186,13 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         )}
       </div>
 
+      {!open && (e.memoCheckout ?? "").trim() && (
+        <button onClick={onToggle} className="tap -mt-1 mb-2 ml-9 flex max-w-full items-start gap-1 rounded-md bg-warn-bg px-2 py-1 text-left text-[12px] font-bold leading-snug text-warn-fg ring-1 ring-warn-ring">
+          <span aria-hidden>📝</span>
+          <span className="min-w-0 break-words">{e.memoCheckout}</span>
+        </button>
+      )}
+
       {e.onsite && !e.isComponent && (
         <div className="flex items-center gap-1 pb-2 pl-9">
           {(["무상", "유상"] as Settlement[]).map((s) => (
