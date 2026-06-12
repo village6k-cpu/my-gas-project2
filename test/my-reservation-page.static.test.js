@@ -91,3 +91,11 @@ assert(
 );
 
 console.log('my-reservation-page.static.test.js OK');
+
+// ── 라이브 검증 후속: 평문 ID 링크 생성 + 원격 1회 설정 ──
+const sheetApiLive = read('sheetAPI.js');
+assert(
+  /getMyPageLink[\s\S]{0,400}catch \(argErr\)/.test(sheetApiLive) && sheetApiLive.includes('"setupMyPage"'),
+  'getMyPageLink must accept plain-string ids and setupMyPage must be callable via the run API'
+);
+console.log('mypage-live-fix checks OK');
