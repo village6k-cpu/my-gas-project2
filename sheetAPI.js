@@ -592,6 +592,8 @@ function doListPending() {
     if (rowStatus === "등록완료" || rowStatus === "거절") {
       g.isCompleted = true;
     }
+    // 그룹 등록상태: 행 단위 "제외" 마커는 무시 — 첫 품목이 제외돼도 카드가 비활성화되면 안 됨
+    if (!g.status && rowStatus && rowStatus !== "제외") g.status = rowStatus;
 
     if (data[i][5]) {
       g.items.push({
@@ -600,7 +602,7 @@ function doListPending() {
         결과: data[i][8] || "",
         상세: data[i][9] || "",
         비고: String(data[i][16] || ""), // Q열 — "[세트]세트명" 구성품 마커
-        제외: String(data[i][13] || "").trim() === "보류" || String(data[i][14] || "").trim() === "보류" // N/O열 행 단위 등록 제외
+        제외: String(data[i][14] || "").trim() === "제외" // O열 행 단위 등록 제외 ("보류"와 구분되는 전용 마커)
       });
     }
   }
@@ -624,7 +626,7 @@ function doListPending() {
       장비목록: g.items,
       추가요청: data[i][17] || "",     // R열
       결과요약: data[i][8] || "",
-      등록상태: data[i][14] || "대기"
+      등록상태: g.status || "대기"
     });
   }
 

@@ -22,11 +22,12 @@ const KakaoReservationInput = dynamic(
 // 확인요청 관리 — GAS Schedule API(/api/confirm)를 네이티브로. 대기/보류 카드 목록 + 장비별 가용성 결과
 // + 확인(가용성체크)/선택등록/전체보류/전체거절/수정. 디자인은 통합앱 토큰.
 
-type Equip = { 장비명: string; 수량: number; 결과?: string; 상세?: string; 비고?: string; 제외?: boolean };
+type Equip = { 장비명: string; 수량: number; 결과?: string; 상세?: string; 비고?: string; 제외?: boolean; 순번?: number };
 type ConfirmEquipmentRole = "set-header" | "set-component" | "single";
 type ConfirmEquipmentRow = Equip & {
   role: ConfirmEquipmentRole;
   rowKey: string;
+  sourceIndex: number;
   groupName?: string;
   componentCount?: number;
 };
@@ -91,6 +92,7 @@ function buildConfirmEquipmentRows(equips: Equip[]): ConfirmEquipmentRow[] {
         ...equip,
         role: "set-header",
         rowKey: `set-header-${index}-${equip.장비명}`,
+        sourceIndex: index,
         groupName: equip.장비명,
         componentCount: 0,
       });
@@ -110,6 +112,7 @@ function buildConfirmEquipmentRows(equips: Equip[]): ConfirmEquipmentRow[] {
       ...equip,
       role: parent ? "set-component" : "single",
       rowKey: `${parent ? "set-component" : "single"}-${index}-${equip.장비명}`,
+      sourceIndex: index,
       groupName: parent?.장비명,
     });
   });
@@ -297,6 +300,11 @@ function ConfirmCard({
 }: {
   req: Req; busy: boolean; onAct: (action: string, reqID: string) => void; onRegisterSelected: (req: Req, excluded: string[]) => void; onEdit: () => void; onItemEdit: (item: Equip) => void;
 }) {
+  // 같은 장비명이 여러 행일 때 정확한 행을 지정하기 위한 동명 순번 (시트 행 순서 = 장비목록 순서)
+  const itemOrdinal = useCallback((row: ConfirmEquipmentRow) => {
+    const list = req.장비목록 || [];
+    return list.slice(0, row.sourceIndex).filter((e) => e.장비명 === row.장비명 && String(e.비고 || "") === String(row.비고 || "")).length;
+  }, [req.장비목록]);
   const equips = req.장비목록 || EMPTY_CONFIRM_EQUIPS;
   const equipmentRows = useMemo(() => buildConfirmEquipmentRows(equips), [equips]);
   const status = (req.등록상태 || "").trim();
@@ -398,7 +406,7 @@ function ConfirmCard({
                     {row.제외 && <span className="shrink-0 rounded-full bg-attention-bg px-2 py-0.5 text-[10.5px] font-bold text-attention-fg">제외</span>}
                     {!row.제외 && row.결과 && <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`}>{row.결과}</span>}
                     {actionable && (
-                      <button onClick={() => onItemEdit(row)} className="tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold text-ink-faint" aria-label="품목 수정">✎</button>
+                      <button onClick={() => onItemEdit({ ...row, 순번: itemOrdinal(row) })} className="tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold text-ink-faint" aria-label="품목 수정">✎</button>
                     )}
                   </>
                 )}
@@ -584,7 +592,7 @@ function ItemEditSheet({
     setBusy(true);
     setErr("");
     try {
-      await runFunc("updateRequestItem", { reqID: req.reqID, 장비명: item.장비명, ...args });
+      await runFunc("updateRequestItem", { reqID: req.reqID, 장비명: item.장비명, 비고: String(item.비고 || ""), 순번: item.순번 || 0, ...args });
       onSaved();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
