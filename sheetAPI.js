@@ -931,6 +931,8 @@ function runFunction(funcName, params) {
     "updateRequest",
     "updateRequestItem",
     "normalizeConfirmRequestDates",
+    "autoClearRequests",
+    "setupAutoClearTrigger",
     "deleteRequest",
     "excludeEquipFromRequest",
     "formatScheduleSheet",
@@ -1104,7 +1106,9 @@ function runFunction(funcName, params) {
       getInventoryConflictsSlackMessage: typeof getInventoryConflictsSlackMessage !== "undefined" ? getInventoryConflictsSlackMessage : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null,
       syncTemplateMasterFromSetMaster: typeof syncTemplateMasterFromSetMaster !== "undefined" ? syncTemplateMasterFromSetMaster : null,
-      normalizeConfirmRequestDates: typeof normalizeConfirmRequestDates !== "undefined" ? normalizeConfirmRequestDates : null
+      normalizeConfirmRequestDates: typeof normalizeConfirmRequestDates !== "undefined" ? normalizeConfirmRequestDates : null,
+      autoClearRequests: typeof autoClearRequests !== "undefined" ? autoClearRequests : null,
+      setupAutoClearTrigger: typeof setupAutoClearTrigger !== "undefined" ? setupAutoClearTrigger : null
     };
     if (globalFuncs[funcName]) {
       var fnResult = globalFuncs[funcName]();

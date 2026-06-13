@@ -464,3 +464,22 @@ console.log('request-item-edit checks OK');
   );
 }
 console.log('request-date-integrity checks OK');
+
+// ── 등록완료 자동 정리: 트리거 설치 함수 존재 + 건 단위 정리 ──
+{
+  const ca = read('checkAvailability.js');
+  const api = read('sheetAPI.js');
+  assert(
+    /function setupAutoClearTrigger\(\)/.test(ca) && /everyHours\(1\)/.test(ca),
+    'autoClearRequests had no trigger installer — hourly setup function must exist'
+  );
+  assert(
+    /doneReqIDs/.test(ca) && /doneReqIDs\.has\(rid\)/.test(ca),
+    'auto-clear must remove the whole completed request group (제외/보류 rows would otherwise linger forever)'
+  );
+  assert(
+    api.includes('"setupAutoClearTrigger"') && api.includes('"autoClearRequests"'),
+    'auto-clear functions must be whitelisted for remote install/run'
+  );
+}
+console.log('auto-clear checks OK');
