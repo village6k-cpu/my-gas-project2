@@ -34,7 +34,9 @@ async function fetchRowsPaginated<T>(
 
 function uniqueScheduleRows(trade: Trade): any[] {
   const seenScheduleIds = new Map<string, number>();
-  return trade.equipments.map((e, i) => {
+  // 합성(synthetic) 품목은 timeline 행번호 기반 가짜 scheduleId라 실제 행과 안 맞는다.
+  // 시트뿐 아니라 Supabase에도 쓰면 유령 행이 생기고 체크/제외가 엉뚱하게 기록됨 → 영속화 제외.
+  return trade.equipments.filter((e) => !e.synthetic).map((e, i) => {
     const row = itemToRow(e, trade.tradeId, i);
     const baseId = row.schedule_id;
     const seen = seenScheduleIds.get(baseId) ?? 0;
