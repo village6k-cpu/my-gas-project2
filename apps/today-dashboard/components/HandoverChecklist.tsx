@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
-import { groupBySet, handoverSummary } from "@/lib/domain/status";
+import { groupBySet, handoverSummary, isRealDeviceHeader, singleControllableSetItem } from "@/lib/domain/status";
 import { categoryOf, coarseGroup } from "@/lib/domain/catalog";
 import { searchEquipmentCatalog, useEquipmentCatalog, type EquipmentCatalogItem } from "@/lib/data/equipmentCatalog";
 import { SetBox, LooseList } from "./SetBox";
@@ -22,20 +22,7 @@ import { Check, Plus } from "./icons";
 import { ReturnChecklist } from "./ReturnChecklist";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
-type SetGroup = ReturnType<typeof groupBySet>[number];
 type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
-
-function sameSetName(a?: string | null, b?: string | null): boolean {
-  const norm = (value?: string | null) => String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
-  return !!norm(a) && norm(a) === norm(b);
-}
-
-function singleControllableSetItem(g: SetGroup): EquipmentItem | null {
-  if (!g.setName) return null;
-  if (g.rows.length === 0) return g.header ?? null;
-  if (g.rows.length === 1 && sameSetName(g.rows[0].name, g.setName)) return g.rows[0];
-  return null;
-}
 
 function SetSingleList({ children }: { children: ReactNode }) {
   return <ul className="divide-y divide-brand-200/70 overflow-hidden rounded-xl bg-brand-50 shadow-card ring-1 ring-brand-200">{children}</ul>;
@@ -74,7 +61,15 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                     <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge setTone />
                   </SetSingleList>
                 ) : (
-                  <SetBox key={g.key} name={g.setName}>
+                  <SetBox
+                    key={g.key}
+                    name={g.setName}
+                    headerRow={
+                      isRealDeviceHeader(g.header, g.rows) ? (
+                        <CheckoutRow key={g.header!.scheduleId} t={trade} e={g.header!} open={!!expanded[g.header!.scheduleId]} onToggle={() => toggle(g.header!.scheduleId)} setBadge setTone />
+                      ) : undefined
+                    }
+                  >
                     {g.rows.map((e) => (
                       <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
                     ))}
@@ -113,6 +108,11 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                           if (g.header) removeItem(trade.tradeId, g.header.scheduleId);
                           g.rows.forEach((r) => removeItem(trade.tradeId, r.scheduleId));
                         }}
+                        headerRow={
+                          isRealDeviceHeader(g.header, g.rows) ? (
+                            <CheckoutRow key={g.header!.scheduleId} t={trade} e={g.header!} open={!!expanded[g.header!.scheduleId]} onToggle={() => toggle(g.header!.scheduleId)} setBadge setTone />
+                          ) : undefined
+                        }
                       >
                         {g.rows.map((e) => (
                           <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />

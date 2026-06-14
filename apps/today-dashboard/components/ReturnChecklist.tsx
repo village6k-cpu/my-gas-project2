@@ -3,27 +3,14 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import type { EquipmentItem, ReturnCount, Trade } from "@/lib/domain/types";
-import { groupBySet, rcOf } from "@/lib/domain/status";
+import { groupBySet, isRealDeviceHeader, rcOf, singleControllableSetItem } from "@/lib/domain/status";
 import { coarseGroup } from "@/lib/domain/catalog";
 import { searchEquipmentCatalog, useEquipmentCatalog, type EquipmentCatalogItem } from "@/lib/data/equipmentCatalog";
 import { setItemName, setItemQty, setReturnCount, setItemMemo } from "@/lib/data/store";
 import { SetBox, LooseList } from "./SetBox";
 import { Check, Plus } from "./icons";
 
-type SetGroup = ReturnType<typeof groupBySet>[number];
 type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
-
-function sameSetName(a?: string | null, b?: string | null): boolean {
-  const norm = (value?: string | null) => String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
-  return !!norm(a) && norm(a) === norm(b);
-}
-
-function singleControllableSetItem(g: SetGroup): EquipmentItem | null {
-  if (!g.setName) return null;
-  if (g.rows.length === 0) return g.header ?? null;
-  if (g.rows.length === 1 && sameSetName(g.rows[0].name, g.setName)) return g.rows[0];
-  return null;
-}
 
 function SetSingleList({ children }: { children: ReactNode }) {
   return <ul className="divide-y divide-brand-200/70 overflow-hidden rounded-xl bg-brand-50 shadow-card ring-1 ring-brand-200">{children}</ul>;
@@ -48,7 +35,11 @@ export function ReturnChecklist({ trade }: { trade: Trade }) {
                 <ReturnRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} setBadge setTone />
               </SetSingleList>
             ) : (
-              <SetBox key={g.key} name={g.setName}>
+              <SetBox
+                key={g.key}
+                name={g.setName}
+                headerRow={isRealDeviceHeader(g.header, g.rows) ? <ReturnRow key={g.header!.scheduleId} t={trade} e={g.header!} setBadge setTone /> : undefined}
+              >
                 {g.rows.map((e) => <ReturnRow key={e.scheduleId} t={trade} e={e} />)}
               </SetBox>
             )
@@ -72,7 +63,11 @@ export function ReturnChecklist({ trade }: { trade: Trade }) {
                     <ReturnRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} setBadge setTone />
                   </SetSingleList>
                 ) : (
-                  <SetBox key={g.key} name={g.setName}>
+                  <SetBox
+                    key={g.key}
+                    name={g.setName}
+                    headerRow={isRealDeviceHeader(g.header, g.rows) ? <ReturnRow key={g.header!.scheduleId} t={trade} e={g.header!} setBadge setTone /> : undefined}
+                  >
                     {g.rows.map((e) => <ReturnRow key={e.scheduleId} t={trade} e={e} />)}
                   </SetBox>
                 )
