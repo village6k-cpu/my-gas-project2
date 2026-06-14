@@ -128,8 +128,22 @@ function ReturnRow({ t, e, setBadge = false, setTone = false }: { t: Trade; e: E
         </button>
       </div>
 
+      {/* 반출 때 적은 특이사항 — 반납 검수 시 참고용. 펼치지 않아도 항상 보이게(놓치면 치명적) */}
+      {(e.memoCheckout ?? "").trim() && (
+        <button onClick={() => setOpen((o) => !o)} className="tap -mt-1 mb-2 ml-[46px] flex max-w-full items-start gap-1 rounded-md bg-warn-bg px-2 py-1 text-left text-[12px] font-bold leading-snug text-warn-fg ring-1 ring-warn-ring">
+          <span aria-hidden>📝</span>
+          <span className="shrink-0">반출:</span>
+          <span className="min-w-0 break-words">{e.memoCheckout}</span>
+        </button>
+      )}
+
       {open && (
         <div className="space-y-2 bg-paper/70 py-2.5">
+          {(e.memoCheckout ?? "").trim() && (
+            <div className="rounded-lg bg-warn-bg px-2.5 py-1.5 text-[12px] font-semibold leading-snug text-warn-fg ring-1 ring-warn-ring">
+              <span className="font-bold">반출 메모</span> · {e.memoCheckout}
+            </div>
+          )}
           <div className="block text-[12px] font-semibold text-ink-mute">
             장비명
             <EquipmentNameCombobox value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />

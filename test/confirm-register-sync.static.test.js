@@ -483,3 +483,17 @@ console.log('request-date-integrity checks OK');
   );
 }
 console.log('auto-clear checks OK');
+
+// ── 반출 특이사항을 반납 카드에서도 보여줘야 함 (반납 검수 활용 목적) ──
+{
+  const ret = read('apps/today-dashboard/components/ReturnChecklist.tsx');
+  assert(
+    /e\.memoCheckout/.test(ret),
+    'ReturnChecklist must surface the checkout memo (memoCheckout) — return staff needs the handover note'
+  );
+  assert(
+    /\{\(e\.memoCheckout \?\? ""\)\.trim\(\) &&[\s\S]{0,400}반출/.test(ret),
+    'checkout memo must be visible on the return row (always-on badge, not hidden behind expand)'
+  );
+}
+console.log('return-shows-checkout-memo checks OK');
