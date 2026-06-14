@@ -497,3 +497,44 @@ console.log('auto-clear checks OK');
   );
 }
 console.log('return-shows-checkout-memo checks OK');
+
+// ── 체크/제외/현장추가 동기화 — 전체 라운드트립 + 반납 카드 반영 가드 ──
+{
+  const map = read('apps/today-dashboard/lib/data/mappers.ts');
+  const sync = read('apps/today-dashboard/lib/data/sync.ts');
+  const remote = read('apps/today-dashboard/lib/data/remote.ts');
+  const ret = read('apps/today-dashboard/components/ReturnChecklist.tsx');
+
+  // 저장(write): 체크상태/현장추가/부분반출/정산 전부 Supabase 컬럼으로
+  assert(
+    /checkout_state: e\.checkoutState/.test(map) && /onsite: !!e\.onsite/.test(map) &&
+      /taken_qty: e\.takenQty/.test(map) && /settlement: e\.settlement/.test(map),
+    'itemToRow must persist checkout_state(체크/제외)/onsite(추가)/taken_qty/settlement to Supabase'
+  );
+  // 복원(read): 같은 필드 되읽기
+  assert(
+    /checkoutState: r\.checkout_state/.test(map) && /onsite: r\.onsite/.test(map) && /takenQty: r\.taken_qty/.test(map),
+    'fromRow must restore checkoutState/onsite/takenQty'
+  );
+  // GAS 새로고침 머지가 제외/부분수량/현장추가를 덮어쓰지 않음
+  assert(
+    /prev\?\.checkoutState === "excluded" \? "excluded"/.test(sync),
+    'mergeDashboard must preserve app-only 제외(excluded) on sheet refresh'
+  );
+  assert(
+    /e\.onsite \|\| e\.offCatalog\)/.test(sync) && /appOnly/.test(sync),
+    'mergeDashboard must keep onsite(현장추가) items the sheet does not know about'
+  );
+  // 합성 품목은 Supabase에 쓰지 않음 (유령 행/엉뚱한 체크 방지)
+  assert(
+    /filter\(\(e\) => !e\.synthetic\)\.map/.test(remote),
+    'uniqueScheduleRows must skip synthetic items (row-id fakes) when persisting to Supabase'
+  );
+  // 반납 카드 반영: 제외 숨김 + 현장추가 별도 노출
+  assert(
+    /filter\(\(e\) => !e\.onsite && e\.checkoutState !== "excluded"\)/.test(ret) &&
+      /filter\(\(e\) => e\.onsite && e\.checkoutState !== "excluded"\)/.test(ret),
+    'ReturnChecklist must hide excluded and surface onsite-added items'
+  );
+}
+console.log('checkout-state-sync checks OK');
