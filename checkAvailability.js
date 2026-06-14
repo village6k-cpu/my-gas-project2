@@ -5374,6 +5374,9 @@ function dashboardAddEquipments(tid, entries, options) {
   options = options || {};
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
   var profile = options.profile === true || options.profile === 1 || options.profile === "1" || options.profile === "true";
+  // rawNames: 입력 장비명을 목록(장비마스터) 퍼지매칭으로 덮어쓰지 않고 그대로 사용.
+  // 현장추가(자유입력)는 즉흥 품목이 많아 강제 매칭하면 엉뚱하게 바뀌거나 드롭됨 → 세트마스터만 참고.
+  var rawNames = options.rawNames === true || options.rawNames === 1 || options.rawNames === "1" || options.rawNames === "true";
   var profileStart = Date.now();
   var profileMarks = [];
   function markProfile_(step) {
@@ -5401,11 +5404,12 @@ function dashboardAddEquipments(tid, entries, options) {
     if (!equipSheet) return { error: "장비마스터 없음" };
     markProfile_('sheets');
 
-    var nameList = getDashboardEquipNameList_(ss);
+    var nameList = rawNames ? [] : getDashboardEquipNameList_(ss);
     markProfile_('equipment_name_list');
     var resolvedMap = {};
     var resolvedOrder = [];
     addEntries.forEach(function(entry) {
+      // rawNames면 nameList가 비어 있어 입력명을 그대로 사용(자유입력 보존). 세트 전개·단가는 세트마스터에서.
       var resolved = nameList.length ? fuzzyMatchEquipName(entry.name, nameList) : entry.name;
       resolved = String(resolved || "").trim();
       if (!resolved) return;
@@ -5572,7 +5576,7 @@ function dashboardAddEquipments(tid, entries, options) {
 
 function dashboardRecordOnsiteAddon(tid, entries, options) {
   options = options || {};
-  var addResult = dashboardAddEquipments(tid, entries, { dryRun: options.dryRun });
+  var addResult = dashboardAddEquipments(tid, entries, { dryRun: options.dryRun, rawNames: options.rawNames });
   if (!addResult || addResult.error) return addResult;
   if (addResult.dryRun) return addResult;
 
