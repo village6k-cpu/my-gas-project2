@@ -9,6 +9,7 @@ const store = read('apps/today-dashboard/lib/data/store.ts');
 const sync = read('apps/today-dashboard/lib/data/sync.ts');
 const logic = read('checkAvailability.js');
 const api = read('sheetAPI.js');
+const gasProxy = read('apps/today-dashboard/app/api/gas/route.ts');
 
 // ── 프론트: 현장추가가 스케줄상세(시트)에 기록되도록 onsiteAddon 호출 ──
 assert(
@@ -18,6 +19,10 @@ assert(
 assert(
   /gasMutation\("onsiteAddon"/.test(store),
   'addOnsiteItems must call the GAS onsiteAddon action to append rows to 스케줄상세'
+);
+assert(
+  /const WRITE_ACTIONS = new Set\(\[[\s\S]*"onsiteAddon"[\s\S]*\]\)/.test(gasProxy),
+  'today-dashboard /api/gas proxy must allow onsiteAddon write-back action'
 );
 assert(
   store.includes('entries: JSON.stringify(payload)'),
