@@ -9250,8 +9250,8 @@ function autoClearRequests() {
     const row = i + 2;
     sheet.getRange(row, 1, 1, 11).clearContent();   // A~K
     sheet.getRange(row, 1, 1, 11).setBackground(null);
-    sheet.getRange(row, 13, 1, 5).clearContent();   // M~Q
-    sheet.getRange(row, 13, 1, 5).setBackground(null);
+    sheet.getRange(row, 13, 1, 6).clearContent();   // M~R (L열 수식만 보존)
+    sheet.getRange(row, 13, 1, 6).setBackground(null);
     cleared++;
   }
   if (cleared > 0) SpreadsheetApp.flush();
@@ -9278,11 +9278,11 @@ function doClearRequests() {
   const sheet = ss.getSheetByName("확인요청");
   const lastRow = sheet.getLastRow();
   if (lastRow >= 2) {
-    // L열(12) 수식 보존: A~K, M~Q만 삭제
+    // L열(12) 수식 보존: A~K, M~R 삭제
     sheet.getRange(2, 1, lastRow - 1, 11).clearContent();   // A~K
     sheet.getRange(2, 1, lastRow - 1, 11).setBackground(null);
-    sheet.getRange(2, 13, lastRow - 1, 5).clearContent();   // M~Q
-    sheet.getRange(2, 13, lastRow - 1, 5).setBackground(null);
+    sheet.getRange(2, 13, lastRow - 1, 6).clearContent();   // M~R
+    sheet.getRange(2, 13, lastRow - 1, 6).setBackground(null);
   }
   // 초기화 후 F열 드롭다운(장비+세트) 자동 갱신
   refreshEquipmentList();
