@@ -385,6 +385,34 @@ console.log('contract-regen-stuck-queue checks OK');
 }
 console.log('guide-skip-completed checks OK');
 
+// ── 반납 안내톡 발송 시점: 반납 시각 12시간 전 (반출+3h 아님) ──
+// 다일 대여 시 반출 직후 "반납 임박" 톡이 하루 이상 전에 나가던 버그 방지
+{
+  const ca = read('checkAvailability.js');
+  const fn = ca.slice(ca.indexOf('function checkGuideAlimtalk'), ca.indexOf('// ── 발송 기록 저장'));
+  assert(
+    /var 반납일 = schedData\[si\]\[7\]/.test(fn) && /var 반납시간 = schedData\[si\]\[8\]/.test(fn),
+    'guide alimtalk must read 반납일/반납시간 (H/I) to anchor the check-in reminder on the return time'
+  );
+  assert(
+    /returnDT: returnDT/.test(fn),
+    'tradeInfo must carry returnDT so the check-in reminder is scheduled off the return datetime'
+  );
+  assert(
+    /var inSendMs = returnMs - GUIDE_CHECKIN_LEAD_MS/.test(fn),
+    'check-in reminder must fire GUIDE_CHECKIN_LEAD_MS before the return time, not after checkout'
+  );
+  assert(
+    !/var inSendMs = checkoutMs \+ \(3 \* 60 \* 60 \* 1000\)/.test(fn),
+    'check-in reminder must no longer be anchored to checkout + 3h (caused day-early sends on multi-day rentals)'
+  );
+  assert(
+    /var GUIDE_CHECKIN_LEAD_MS = 12 \* 60 \* 60 \* 1000/.test(ca),
+    'GUIDE_CHECKIN_LEAD_MS must define the 12h-before-return lead time'
+  );
+}
+console.log('guide-checkin-timing checks OK');
+
 // ── 확인요청 품목 단위 수정: 단건 재확인 + "제외" 전용 마커 + 행 타게팅 ──
 {
   const ca = read('checkAvailability.js');
