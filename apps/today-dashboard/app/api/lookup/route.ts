@@ -24,17 +24,37 @@ const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const LOOKUP_TOKEN = process.env.LOOKUP_TOKEN;
 
+// 토스 프론트 플러그인은 plugin-dev/plugin origin에서 실행되어 preflight가 발생한다.
+const LOOKUP_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, x-lookup-token",
+  "Access-Control-Max-Age": "86400",
+};
+
+function lookupJson(body: unknown, init: ResponseInit = {}): NextResponse {
+  const headers = new Headers(init.headers);
+  for (const [key, value] of Object.entries(LOOKUP_CORS_HEADERS)) {
+    headers.set(key, value);
+  }
+  return NextResponse.json(body, { ...init, headers });
+}
+
+export async function OPTIONS(): Promise<NextResponse> {
+  return new NextResponse(null, { status: 204, headers: LOOKUP_CORS_HEADERS });
+}
+
 // ── 토큰 가드 ─────────────────────────────────────────────────────
 function checkToken(req: NextRequest): NextResponse | null {
   if (!LOOKUP_TOKEN) {
-    return NextResponse.json(
+    return lookupJson(
       { error: "LOOKUP_TOKEN 환경변수가 설정되지 않았습니다. 서버 관리자에게 문의하세요." },
       { status: 503 }
     );
   }
   const provided = req.headers.get("x-lookup-token") ?? "";
   if (provided !== LOOKUP_TOKEN) {
-    return NextResponse.json({ error: "인증 실패" }, { status: 401 });
+    return lookupJson({ error: "인증 실패" }, { status: 401 });
   }
   return null;
 }
@@ -82,7 +102,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const reservation = sp.get("reservation") ?? "";
 
   if (!rawPhone && !reservation) {
-    return NextResponse.json(
+    return lookupJson(
       { error: "phone 또는 reservation 파라미터가 필요합니다." },
       { status: 400 }
     );
@@ -91,7 +111,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // 3) Supabase 클라이언트 확인
   const sb = makeServiceClient();
   if (!sb) {
-    return NextResponse.json(
+    return lookupJson(
       { error: "Supabase 환경변수(SUPABASE_SERVICE_ROLE_KEY 또는 NEXT_PUBLIC_SUPABASE_ANON_KEY) 미설정" },
       { status: 503 }
     );
@@ -141,7 +161,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     );
 
     if (trades.length === 0) {
-      return NextResponse.json({ matches: [] });
+      return lookupJson({ matches: [] });
     }
 
     // 5) 품목 조회 (해당 거래들만)
@@ -174,10 +194,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       depositStatus: t.deposit_status,
     }));
 
-    return NextResponse.json({ matches });
+    return lookupJson({ matches });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[lookup] 조회 오류:", msg);
-    return NextResponse.json({ error: "조회 중 오류: " + msg }, { status: 502 });
+    return lookupJson({ error: "조회 중 오류: " + msg }, { status: 502 });
   }
 }

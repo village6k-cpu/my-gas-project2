@@ -9,15 +9,16 @@
  *   2) tradeId 유효성 확인
  *   3) GAS updatePayment 호출 → 시트 '입금완료' 기록 → Supabase 90초 동기
  *
- * ⚠️  현재 상태: 뼈대(skeleton).
- *      토스 단말기 결제 후 이 API를 호출하는 실제 포맷·타이밍·인증은
- *      토스 프론트 플러그인 SDK 승인 후 확정됩니다.
- *      그 전까지는 내부 포맷으로만 동작합니다.
+ *  GAS 계약 확정: action=updatePayment, params { tid, method:'카드결제' }
+ *      (checkAvailability.js updateTradePaymentMethod(tid, method))
+ *      → 거래내역 J열 결제수단='카드결제'
+ *      → 부수효과(applyTradePaymentSideEffects_)로 K/L/M = 미발행/발행완료/입금완료
+ *      → Supabase village.trades 90초 내 동기 → 이후 /api/lookup 에서 제외됨.
+ *      ⚠️ method !== '카드결제' 이면 입금완료 부수효과가 안 찍힘(결제수단만 변경).
  *
- * TODO (토스 SDK 승인 후):
- *   - 토스 결제 콜백 포맷 반영 (paymentKey, orderId, amount 등)
- *   - 토스→우리 서버 인증(서명·HMAC·IP 화이트리스트) 추가
- *   - 멱등성 키(paymentKey) 기반 중복처리 방지
+ * 남은 TODO (토스 단말기 운영 전환 시):
+ *   - 토스→우리 서버 인증(현 x-lookup-token → 토스 서명·HMAC·IP 화이트리스트)
+ *   - 멱등성: 동일 paymentKey 중복 confirm 차단(현재 입금완료 재설정은 무해)
  *   - 실제 결제금액 vs 예약금액 검증 (초과 결제 차단)
  *   - 부분결제 처리 (현재 DB에 잔액 컬럼 없음 → 설계 필요)
  */
@@ -30,17 +31,37 @@ export const runtime = "nodejs";
 // ── 환경변수 ──────────────────────────────────────────────────────
 const LOOKUP_TOKEN = process.env.LOOKUP_TOKEN;
 
+// 토스 프론트 플러그인은 plugin-dev/plugin origin에서 실행되어 preflight가 발생한다.
+const LOOKUP_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, x-lookup-token",
+  "Access-Control-Max-Age": "86400",
+};
+
+function lookupJson(body: unknown, init: ResponseInit = {}): NextResponse {
+  const headers = new Headers(init.headers);
+  for (const [key, value] of Object.entries(LOOKUP_CORS_HEADERS)) {
+    headers.set(key, value);
+  }
+  return NextResponse.json(body, { ...init, headers });
+}
+
+export async function OPTIONS(): Promise<NextResponse> {
+  return new NextResponse(null, { status: 204, headers: LOOKUP_CORS_HEADERS });
+}
+
 // ── 토큰 가드 ─────────────────────────────────────────────────────
 function checkToken(req: NextRequest): NextResponse | null {
   if (!LOOKUP_TOKEN) {
-    return NextResponse.json(
+    return lookupJson(
       { error: "LOOKUP_TOKEN 환경변수가 설정되지 않았습니다. 서버 관리자에게 문의하세요." },
       { status: 503 }
     );
   }
   const provided = req.headers.get("x-lookup-token") ?? "";
   if (provided !== LOOKUP_TOKEN) {
-    return NextResponse.json({ error: "인증 실패" }, { status: 401 });
+    return lookupJson({ error: "인증 실패" }, { status: 401 });
   }
   return null;
 }
@@ -50,7 +71,8 @@ interface ConfirmBody {
   tradeId?: string;
   paidAmount?: number;
   method?: string;
-  // TODO (토스 SDK 승인 후): paymentKey, orderId, status 등 추가
+  paymentKey?: string; // 토스 결제키 — 멱등성/로그용
+  approvalNumber?: string; // 카드 승인번호 — 로그/대사용
 }
 
 // ── 핸들러 ────────────────────────────────────────────────────────
@@ -64,47 +86,46 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "요청 바디가 JSON이 아닙니다." }, { status: 400 });
+    return lookupJson({ error: "요청 바디가 JSON이 아닙니다." }, { status: 400 });
   }
 
-  const { tradeId, paidAmount, method } = body;
+  const { tradeId, paidAmount, paymentKey, approvalNumber } = body;
 
   if (!tradeId || typeof tradeId !== "string" || !tradeId.trim()) {
-    return NextResponse.json({ error: "tradeId가 필요합니다." }, { status: 400 });
+    return lookupJson({ error: "tradeId가 필요합니다." }, { status: 400 });
   }
 
-  // 3) GAS updatePayment 호출 → 시트 '입금완료' 기록
-  //    기존 /api/gas?action=updatePayment 패턴을 따르되, 여기서는 서버→GAS 직접 호출.
-  //    GAS updatePayment 함수는 tradeId + depositStatus + (선택) paymentMethod를 받는다.
-  //
-  //    TODO: GAS updatePayment의 실제 파라미터 키 이름을 확인 후 맞춤
-  //          (현재는 기존 /api/gas 라우트의 WRITE_ACTIONS: 'updatePayment' 패턴 준용)
+  // 프론트 플러그인은 카드 단말 결제이므로 '카드결제'.
+  // ⚠️ GAS updateTradePaymentMethod는 method === '카드결제'일 때만
+  //    applyTradePaymentSideEffects_로 M열 입금상태='입금완료'를 찍는다.
+  //    다른 값/빈 값이면 결제수단만 바뀌고 입금완료 처리가 안 됨.
+  const method = (body.method && body.method.trim()) || "카드결제";
+
+  // 3) GAS updatePayment 호출 → 시트 결제수단='카드결제' → 부수효과로 입금완료
+  //    실제 계약: action=updatePayment, params { tid, method }
   try {
     const gasPayload: Record<string, unknown> = {
       action: "updatePayment",
-      tradeId: tradeId.trim(),
-      depositStatus: "입금완료",
+      tid: tradeId.trim(),
+      method,
     };
-
-    if (method) gasPayload.paymentMethod = method;
-    if (paidAmount != null) gasPayload.paidAmount = paidAmount;
-
-    // TODO (토스 SDK 승인 후):
-    //   gasPayload.paymentKey = body.paymentKey;   // 토스 결제키 (멱등성)
-    //   gasPayload.orderId    = body.orderId;        // 주문번호 (검증용)
 
     const result = await gasPost(gasPayload);
 
-    return NextResponse.json({
+    return lookupJson({
       ok: true,
       tradeId: tradeId.trim(),
-      message: "입금완료로 처리되었습니다. Supabase 동기까지 최대 90초 소요.",
+      method,
+      paidAmount: paidAmount ?? null,
+      paymentKey: paymentKey ?? null,
+      approvalNumber: approvalNumber ?? null,
+      message: "결제수단 '카드결제' 반영 — 입금완료 처리됨. Supabase 동기까지 최대 90초.",
       gasResult: result,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[lookup/confirm] GAS 호출 오류:", msg);
-    return NextResponse.json(
+    return lookupJson(
       { error: "결제 처리 중 오류: " + msg },
       { status: 502 }
     );

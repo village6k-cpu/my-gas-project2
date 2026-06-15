@@ -1,7 +1,8 @@
 # 토스 프론트 플러그인 설계문서
 
 **작성일**: 2026-06-15  
-**상태**: 서버 API 완료 / 단말기 플러그인 SDK 토스 승인 대기 중
+**상태**: 서버 API 완료 / 단말기 플러그인 **코드 완성 + 개발 배포 완료** (`toss-front-plugin/`) — 실제 프론트 단말기 재온보딩 필요
+**갱신**: 2026-06-15 (공식 Template API 확인 → 플러그인 구현 + confirm GAS 계약 수정 + lookup CORS 보강)
 
 ---
 
@@ -10,14 +11,14 @@
 ```
 [손님]
   ↓ 매장 토스 단말기에 전화번호 또는 예약번호 입력
-[토스 단말기 — 토스 프론트 플러그인 SDK]  ← 승인 대기 중, 아직 미구현
+[토스 단말기 — 토스 프론트 플러그인 SDK]  ← 코드/개발배포 완료, 실제 단말기 dev 트랙 노출 미해결
   ↓ GET /api/lookup?phone=... (x-lookup-token 헤더)
 [우리 서버: /api/lookup]                  ✅ 완료
   ↓ Supabase village.trades + schedule_items 조회
   ↓ 미결제 예약 목록 + 금액 반환
-[토스 단말기 — Template UI]               ← 승인 대기 중, 아직 미구현
+[토스 단말기 — Template UI]               ← 단말기 재온보딩 후 확인 필요
   ↓ 손님이 예약 선택 → 결제 진행
-[토스 결제 처리]                           ← 승인 대기 중, 아직 미구현
+[토스 결제 처리]                           ← 단말기 노출 후 실결제 테스트 필요
   ↓ POST /api/lookup/confirm {tradeId, paidAmount, method}
 [우리 서버: /api/lookup/confirm]           ✅ 뼈대 완료 (실 연동은 승인 후)
   ↓ GAS updatePayment 호출
@@ -50,16 +51,33 @@
 
 ---
 
-## 토스 SDK 승인 후 할 것
+## 단말기 플러그인 — 구현 완료 (2026-06-15)
+
+코드: `toss-front-plugin/village-front/` (index.html · app.js · config.js). 공식 Template API 기준 흐름:
+- 대기 `renderIdlePage` → `renderInputPage(type:'phone')` 전화번호 입력 → `/api/lookup` 조회
+- 여러 건 → `renderSelectPage` 선택 → `renderOrderPage` 금액 확인
+- `sdk.payment.requestPayment({paymentKey,tax,supplyValue})` 카드 승인 → `/api/lookup/confirm` → 시트 입금완료
+- `renderResultPage` 결과. 결제 중 이탈은 부팅 시 `sdk.payment.getPaymentByKey`로 복구.
+
+confirm GAS 계약 수정: 기존 뼈대가 `{tradeId, depositStatus}`로 보내 GAS가 무시(입금완료 미반영) →
+실제 계약 `{action:'updatePayment', tid, method:'카드결제'}`로 교체(부수효과로 입금완료 자동 처리).
+
+### 운영 전환 시 남은 것
 
 | 항목 | 내용 |
 |------|------|
-| 단말기 플러그인 SDK | 토스가 제공하는 JS/TS SDK로 단말기 측 구현 |
-| Template UI | 단말기 화면에 예약 목록 표시하는 토스 UI 템플릿 |
-| 실제 결제 연동 | 단말기 → 토스 결제 → 우리 서버 콜백 전체 파이프라인 |
+| 단말기 재온보딩 | 개발 배포는 테스트 가맹점 온보딩 + 테스트 단말기 등록 + 재온보딩 후 적용 |
 | 토스 공식 인증 | 현재 x-lookup-token은 임시. 토스가 정하는 서명·HMAC·IP 화이트리스트로 교체 |
-| confirm 포맷 | 토스 결제 콜백 포맷(paymentKey, orderId, amount, status)에 맞게 `/api/lookup/confirm` 수정 |
-| 멱등성 처리 | paymentKey 기반 중복결제 방지 |
+| 멱등성 처리 | paymentKey 기반 중복결제 방지(현재 입금완료 재설정은 무해) |
+| 금액 검증 | 실제 결제금액 vs 예약금액 (초과 결제 차단) |
+
+### 단말기 노출 문제 조사 결과 (2026-06-15)
+
+- 공식 문서상 개발 배포는 테스트 단말기 대상으로만 반영된다.
+- 테스트 단말기 등록 후에는 프론트 온보딩을 다시 수행해야 개발 트랙 코드가 적용된다.
+- ACL 변경 후에도 프론트 단말기 로그아웃 후 재온보딩이 필요하다.
+- Mac `Toss POS.app`은 이미 테스트 가맹점 `빌(BILL.)` 로그인 상태로 확인했다. 남은 핵심은 실제 손님용 프론트 단말기가 같은 테스트 가맹점으로 온보딩됐는지, 등록된 테스트 단말기 일련번호와 일치하는지다.
+- `/api/lookup`과 `/api/lookup/confirm`은 플러그인 origin의 preflight가 통과하도록 `OPTIONS`와 CORS 헤더를 반환한다.
 
 ---
 

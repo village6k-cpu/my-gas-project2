@@ -1,0 +1,6 @@
+# 실제 토큰이 든 설정은 커밋하지 않음 (config.example.js만 커밋)
+village-front/config.js
+HANDOFF.md
+# 빌드 산출물
+*.zip
+.DS_Store
