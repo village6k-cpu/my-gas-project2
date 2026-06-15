@@ -9408,6 +9408,21 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns)
 var TPL_CHECKOUT = '026040000902';  // 반출 안내
 var TPL_CHECKIN  = '026040000904';  // 반납 안내
 
+function _getCheckoutGuideTemplate_() {
+  // 새 셀프결제 안내톡은 팝빌에서 승인된 뒤 Script Properties에 코드가 들어오면 전환한다.
+  return PropertiesService.getScriptProperties().getProperty('POPBILL_TPL_CHECKOUT_SELF_PAYMENT') || TPL_CHECKOUT;
+}
+
+function _hasSelfPaymentCheckoutTemplate_() {
+  return !!PropertiesService.getScriptProperties().getProperty('POPBILL_TPL_CHECKOUT_SELF_PAYMENT');
+}
+
+function _buildCheckoutGuideMsg(customerName) {
+  return _hasSelfPaymentCheckoutTemplate_()
+    ? _buildCheckoutMsg(customerName)
+    : _buildCheckoutLegacyMsg(customerName);
+}
+
 /** 팝빌 발송 응답이 정상 접수인지 — 접수번호(receiptNum)가 있어야 실제 발송 큐에 들어간 것 */
 function _alimtalkAccepted_(res) {
   return !!(res && res.receiptNum);
@@ -9517,8 +9532,9 @@ function testGuideAlimtalk(args) {
   if (!연락처) return { error: "연락처 필수" };
   var 종류 = String(args.종류 || "반출").trim();
   var 이름 = String(args.이름 || "테스트").trim();
-  var tpl = 종류 === "반납" ? TPL_CHECKIN : TPL_CHECKOUT;
-  var msg = 종류 === "반납" ? _buildCheckinMsg(이름) : _buildCheckoutMsg(이름);
+  var isCheckin = 종류 === "반납";
+  var tpl = isCheckin ? TPL_CHECKIN : _getCheckoutGuideTemplate_();
+  var msg = isCheckin ? _buildCheckinMsg(이름) : _buildCheckoutGuideMsg(이름);
   try {
     var res = sendAlimtalk(tpl, 연락처, 이름, msg, { '#{고객명}': 이름 });
     return { success: true, 종류: 종류, template: tpl, popbill: res };
@@ -9546,6 +9562,21 @@ var GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS = 3 * 60 * 60 * 1000;  // 단, 반출+3h
  * 반출 안내톡 메시지 생성
  */
 function _buildCheckoutMsg(customerName) {
+  return customerName + ' 감독님, 안녕하세요.\n'
+    + '빌리지 렌탈샵입니다.\n\n'
+    + '예약하신 장비 대여 건의 반출일이 다가와 안내드립니다.\n'
+    + '만약 직원이 부재할 시에 아래 내용을 참고해주세요 : )\n\n'
+    + '1. 문을 열고 들어오셔서 감독님 성함과 반출 시간이 적힌 테이블을 찾아주시고, 장비를 테스트하신 후 반출해주시면 됩니다.\n\n'
+    + '모든 장비는 담당자가 확인을 마친 장비이며, 반출 시 확인하신 손상이나 이상은 사진과 함께 카카오톡 채널로 보내주시면 감사드리겠습니다.\n\n'
+    + '2. 미결제 예약은 카운터의 토스 프론트 단말기에서 셀프 카드결제 부탁드립니다.\n'
+    + '- 화면에서 [전화번호로 결제] 또는 [예약번호로 결제]를 선택해주세요.\n'
+    + '- 예약 조회 후 금액을 확인하고 카드로 결제해주세요.\n'
+    + '- 결제가 완료되면 자동으로 확인됩니다.\n\n'
+    + '이미 결제하신 경우에는 바로 반출해주셔도 됩니다.\n\n'
+    + '감사합니다!';
+}
+
+function _buildCheckoutLegacyMsg(customerName) {
   return customerName + ' 감독님, 안녕하세요.\n'
     + '빌리지 렌탈샵입니다.\n\n'
     + '예약하신 장비 대여 건의 반출일이 다가와 안내드립니다.\n'
@@ -9720,9 +9751,9 @@ function checkGuideAlimtalk() {
     var outFlag = 'out_' + tid;
     if (!sentData[outFlag] && nowMs >= outSendMs && nowMs < checkoutMs) {
       try {
-        var outMsg = _buildCheckoutMsg(cust.name);
+        var outMsg = _buildCheckoutGuideMsg(cust.name);
         var outVars = { '#{고객명}': cust.name };
-        var outRes = sendAlimtalk(TPL_CHECKOUT, cust.tel, cust.name, outMsg, outVars);
+        var outRes = sendAlimtalk(_getCheckoutGuideTemplate_(), cust.tel, cust.name, outMsg, outVars);
         if (!_alimtalkAccepted_(outRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(outRes));
         sentData[outFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
         results.sent.push('반출 ' + tid + ' ' + cust.name);

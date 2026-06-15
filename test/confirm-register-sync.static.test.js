@@ -311,9 +311,9 @@ console.log('popbill-hmac checks OK');
   const api = read('sheetAPI.js');
   assert(
     /function testGuideAlimtalk\(args\)/.test(ca) &&
-      /TPL_CHECKIN : TPL_CHECKOUT/.test(ca) &&
-      /_buildCheckinMsg\(이름\) : _buildCheckoutMsg\(이름\)/.test(ca),
-    'testGuideAlimtalk must reuse the exact approved guide templates and message builders'
+      /isCheckin \? TPL_CHECKIN : _getCheckoutGuideTemplate_\(\)/.test(ca) &&
+      /isCheckin \? _buildCheckinMsg\(이름\) : _buildCheckoutGuideMsg\(이름\)/.test(ca),
+    'testGuideAlimtalk must reuse the exact guide template/message pair that automatic sends use'
   );
   assert(
     api.includes('"testGuideAlimtalk"') && api.includes('funcName === "testGuideAlimtalk"'),
@@ -325,6 +325,39 @@ console.log('popbill-hmac checks OK');
   );
 }
 console.log('guide-alimtalk-test-tool checks OK');
+
+// ── 반출 안내톡 문구: 토스 프론트 셀프결제 흐름 안내 ──
+{
+  const ca = read('checkAvailability.js');
+  const checkoutMsg = ca.slice(ca.indexOf('function _buildCheckoutMsg'), ca.indexOf('function _buildCheckoutLegacyMsg'));
+  assert(
+    checkoutMsg.includes('토스 프론트 단말기') &&
+      checkoutMsg.includes('전화번호로 결제') &&
+      checkoutMsg.includes('예약번호로 결제') &&
+      checkoutMsg.includes('예약 조회') &&
+      checkoutMsg.includes('결제가 완료되면 자동으로 확인됩니다'),
+    'checkout guide alimtalk must explain the new Toss Front self-payment flow'
+  );
+  assert(
+    !checkoutMsg.includes("금액 입력 (계약서상 \\'VAT포함가\\')") &&
+      !checkoutMsg.includes('녹색 버튼') &&
+      !checkoutMsg.includes('영수증 1부는 테이블 위'),
+    'checkout guide alimtalk must remove the old manual card-terminal amount-entry instructions'
+  );
+  assert(
+    /function _buildCheckoutLegacyMsg\(customerName\)/.test(ca) &&
+      /function _getCheckoutGuideTemplate_\(\)/.test(ca) &&
+      ca.includes("POPBILL_TPL_CHECKOUT_SELF_PAYMENT"),
+    'checkout guide alimtalk must keep a legacy approved-template fallback until the new self-payment Popbill template is approved'
+  );
+  const guideFn = ca.slice(ca.indexOf('function checkGuideAlimtalk'), ca.indexOf('// ── 발송 기록 저장'));
+  assert(
+    guideFn.includes('_buildCheckoutGuideMsg(cust.name)') &&
+      guideFn.includes('_getCheckoutGuideTemplate_()'),
+    'automatic checkout guide sends must switch template and message together'
+  );
+}
+console.log('checkout-guide-self-payment-copy checks OK');
 
 // ── 등록완료 알림톡 테스트 발송 — 실거래 테스트는 마스킹된 myPage 이름이 아니라 계약마스터 원본 이름을 사용 ──
 {

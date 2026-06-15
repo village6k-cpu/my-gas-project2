@@ -43,6 +43,12 @@ function shortDate(iso) {
   return m ? Number(m[2]) + '/' + Number(m[3]) : '';
 }
 
+function parseAmount(value) {
+  var digits = String(value || '').replace(/[^\d]/g, '');
+  var amount = Number(digits);
+  return amount > 0 ? amount : 0;
+}
+
 // 화면 렌더는 항상 try/catch — 오류 시 대기화면 복귀(손님이 갇히지 않게)
 function safe(fn) {
   return function () {
@@ -59,6 +65,53 @@ async function errMsg(res, fallback) {
   var msg = fallback + ' (' + res.status + ')';
   try { var j = await res.json(); if (j && j.error) msg = j.error; } catch (e) {}
   return msg;
+}
+
+function ensureAppRoot() {
+  var root = document.getElementById('app');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'app';
+    document.body.appendChild(root);
+  }
+  return root;
+}
+
+function leaveVillageIdle() {
+  document.body.classList.remove('village-idle-page');
+  var root = document.getElementById('app');
+  if (root) {
+    root.className = '';
+    root.innerHTML = '';
+  }
+}
+
+function renderVillageIdle() {
+  var root = ensureAppRoot();
+  document.body.classList.add('village-idle-page');
+  root.className = 'village-idle';
+  root.innerHTML = [
+    '<section class="village-idle__content" aria-label="VILLAGE 셀프결제">',
+    '  <img class="village-idle__logo" src="./assets/village-logo.png" alt="VILLAGE" />',
+    '  <p class="village-idle__title">예약 조회 · 셀프 결제</p>',
+    '  <p class="village-idle__copy">전화번호 또는 예약번호로<br />미결제 예약을 확인하고<br />카드로 결제하세요.</p>',
+    '  <div class="village-idle__actions">',
+    '    <button id="village-phone-button" class="village-idle__button village-idle__button--primary" type="button">전화번호로 결제</button>',
+    '    <button id="village-reservation-button" class="village-idle__button village-idle__button--secondary" type="button">예약번호로 결제</button>',
+    '    <button id="village-amount-button" class="village-idle__button village-idle__button--tertiary" type="button">금액 직접 결제</button>',
+    '  </div>',
+    '</section>',
+  ].join('');
+
+  document.getElementById('village-phone-button').onclick = function () {
+    showPhoneInput();
+  };
+  document.getElementById('village-reservation-button').onclick = function () {
+    showReservationInput();
+  };
+  document.getElementById('village-amount-button').onclick = function () {
+    showManualAmountInput();
+  };
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -95,15 +148,16 @@ async function confirmPaid(trade, payment) {
 // ──────────────────────────────────────────────────────────────
 // 결제 (단말기 카드 승인) — 토스 공식 예제 패턴
 // ──────────────────────────────────────────────────────────────
-async function chargeCard(trade) {
-  var price = Number(trade.amount);
+async function requestCardPayment(price, pendingTradeId) {
   var paymentKey =
     typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'vlg-' + Date.now();
   var tax = Math.floor(price / 11); // 부가세 10% 포함가 기준
   var supplyValue = price - tax;
 
-  // 결제 중 이탈 대비 — 진행중 결제 백업
-  await storageSet('pending', { paymentKey: paymentKey, tradeId: trade.tradeId, amount: price });
+  if (pendingTradeId) {
+    // 결제 중 이탈 대비 — 예약 결제는 진행중 결제를 백업해 시트 반영을 복구한다.
+    await storageSet('pending', { paymentKey: paymentKey, tradeId: pendingTradeId, amount: price });
+  }
 
   var result = await sdk.payment.requestPayment({
     paymentKey: paymentKey,
@@ -123,11 +177,19 @@ async function chargeCard(trade) {
     };
   }
 
-  await storageDel('pending');
+  if (pendingTradeId) await storageDel('pending');
   var t = (result && result.type) || 'UNKNOWN';
   var err = new Error('결제가 완료되지 않았습니다 (' + t + ')');
   err.paymentType = t;
   throw err;
+}
+
+async function chargeCard(trade) {
+  return requestCardPayment(Number(trade.amount), trade.tradeId);
+}
+
+async function chargeManualAmount(amount) {
+  return requestCardPayment(Number(amount), null);
 }
 
 // sdk.storage 래퍼 (없으면 조용히 무시)
@@ -151,22 +213,14 @@ async function storageDel(key) {
 // 화면들
 // ──────────────────────────────────────────────────────────────
 
-// 1) 대기화면 — 전화번호 / 예약번호 두 경로 제공
+// 1) 대기화면 — 예약 조회 결제 / 현장 금액 결제 제공
 var showIdle = safe(function () {
-  sdk.template.renderIdlePage({
-    type: 'twoButton',
-    title: {
-      text1: 'VILLAGE',
-      text2: '셀프 카드결제',
-      text3: '직원이 자리를 비웠어도 결제하실 수 있어요',
-    },
-    primaryButton: { text: '전화번호로 결제', onClick: function () { showPhoneInput(); } },
-    secondaryButton: { text: '예약번호로 결제', onClick: function () { showReservationInput(); } },
-  });
+  renderVillageIdle();
 });
 
 // 2) 전화번호 입력
 var showPhoneInput = safe(function () {
+  leaveVillageIdle();
   sdk.template.renderInputPage({
     type: 'phone',
     top: { title: '전화번호를 입력해주세요', subtitle: '예약하실 때 사용한 번호예요' },
@@ -179,12 +233,33 @@ var showPhoneInput = safe(function () {
 
 // 2-b) 예약번호 입력
 var showReservationInput = safe(function () {
+  leaveVillageIdle();
   sdk.template.renderInputPage({
     type: 'text',
     top: { title: '예약번호를 입력해주세요', subtitle: '문자로 받으신 예약번호예요' },
     input: { placeholder: '예약번호' },
     button: { label: '예약 조회' },
     onSubmit: async function (value) { await runLookup({ reservation: value }); },
+    onBack: function () { showIdle(); },
+  });
+});
+
+// 2-c) 현장 금액 직접 입력
+var showManualAmountInput = safe(function () {
+  leaveVillageIdle();
+  sdk.template.renderInputPage({
+    type: 'number',
+    top: { title: '결제 금액을 입력해주세요', subtitle: '현장에서 바로 결제할 금액이에요' },
+    input: { placeholder: '금액 입력', maxLength: 8 },
+    button: { label: '금액 확인' },
+    disclaimer: '예약 조회 없이 입력한 금액으로 카드 결제됩니다.',
+    onSubmit: async function (value) {
+      var amount = parseAmount(value);
+      if (!amount) {
+        return showError('금액을 확인해주세요', '1원 이상 입력해주세요.', { retryManual: true });
+      }
+      return showManualOrder(amount);
+    },
     onBack: function () { showIdle(); },
   });
 });
@@ -245,7 +320,19 @@ var showOrder = safe(function (m) {
   });
 });
 
-// 5) 결제 실행 → 시트 반영
+var showManualOrder = safe(function (amount) {
+  sdk.template.renderOrderPage({
+    order: {
+      items: [{ label: '현장 입력 금액', value: amount, quantity: 1 }],
+      discounts: [],
+      summary: { totalAmount: amount },
+    },
+    onClick: function () { doManualCharge(amount); },
+    onBack: function () { showManualAmountInput(); },
+  });
+});
+
+// 5) 예약 결제 실행 → 시트 반영
 async function doCharge(m) {
   var payment;
   try {
@@ -267,6 +354,18 @@ async function doCharge(m) {
   return showSuccess(payment, {});
 }
 
+// 5-b) 현장 금액 결제 실행 — 예약/시트 반영 없이 카드 승인만 수행
+async function doManualCharge(amount) {
+  var payment;
+  try {
+    payment = await chargeManualAmount(amount);
+  } catch (e) {
+    return showError('결제 실패', e.message || '결제가 취소되었습니다.', { retryManual: true });
+  }
+
+  return showSuccess(payment, {});
+}
+
 // 6) 결과 화면
 var showSuccess = safe(function (payment, opts) {
   opts = opts || {};
@@ -285,6 +384,7 @@ var showError = safe(function (title, desc, opts) {
   opts = opts || {};
   var buttons = [];
   if (opts.retry) buttons.push({ label: '다시 조회', onClick: function () { showIdle(); } });
+  if (opts.retryManual) buttons.push({ label: '금액 다시 입력', onClick: function () { showManualAmountInput(); } });
   buttons.push({ label: '처음으로', onClick: function () { showIdle(); }, closeOnClick: true });
   sdk.template.renderResultPage({
     type: 'image',
