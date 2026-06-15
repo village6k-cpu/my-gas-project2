@@ -9400,7 +9400,7 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 반출/반납 안내톡 (3회 미만 고객 대상)
 // 반출: 반출 시간 12시간 전 발송
-// 반납: 반출 시간 + 3시간 후 발송
+// 반납: 반납 12시간 전 ↔ 반출+3시간 중 늦은 시각 (당일 반출-반납은 반출+3h, 다일은 반납-12h)
 // 발송 가능 시간: 08:00~22:00 (GUIDE_SEND_START/END, 밖이면 다음 가능 시각으로 지연)
 // 트리거: 30분마다 checkGuideAlimtalk 실행
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -9539,6 +9539,8 @@ function _buildRegisterMsg(고객명, 반출표시, 반납표시) {
 
 var GUIDE_SEND_START = 8;   // 발송 가능 시작 시각
 var GUIDE_SEND_END   = 22;  // 발송 가능 종료 시각
+var GUIDE_CHECKIN_LEAD_MS = 12 * 60 * 60 * 1000;  // 반납 안내톡: 기본 반납 시각 12시간 전 발송
+var GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS = 3 * 60 * 60 * 1000;  // 단, 반출+3h보다 이르게는 안 보냄(당일 반출-반납 대비)
 
 /**
  * 반출 안내톡 메시지 생성
@@ -9604,7 +9606,7 @@ function _isInSendWindow(nowKST) {
  * 30분마다 실행 — 반출/반납 안내톡 발송 시점 체크
  *
  * 반출 안내톡: 반출 시간 12시간 전 (발송 가능 시간 내에서)
- * 반납 안내톡: 반출 시간 + 3시간 후 (발송 가능 시간 내에서)
+ * 반납 안내톡: 반납 12시간 전 ↔ 반출+3시간 중 늦은 시각 (당일 반출-반납 건은 반출 전 발송 방지)
  * 대상: 3회 미만 고객만
  */
 function checkGuideAlimtalk() {
@@ -9661,6 +9663,8 @@ function checkGuideAlimtalk() {
     var 거래ID = String(schedData[si][1] || '').trim();  // B
     var 반출일 = schedData[si][5];   // F
     var 반출시간 = schedData[si][6]; // G
+    var 반납일 = schedData[si][7];   // H
+    var 반납시간 = schedData[si][8]; // I
     var 상태 = String(schedData[si][9] || '').trim();  // J
 
     if (!거래ID || 상태 === '취소') continue;
@@ -9668,12 +9672,14 @@ function checkGuideAlimtalk() {
 
     var checkoutDT = _parseCheckoutDateTime(반출일, 반출시간);
     if (!checkoutDT) continue;
+    // _parseCheckoutDateTime은 날짜+시간 → Date 범용 파서라 반납에도 그대로 사용
+    var returnDT = _parseCheckoutDateTime(반납일, 반납시간);
 
-    tradeInfo[거래ID] = { checkoutDT: checkoutDT };
+    tradeInfo[거래ID] = { checkoutDT: checkoutDT, returnDT: returnDT };
   }
 
   // ── 중복 발송 방지 (거래 단위 단일 키 — 날짜별 키는 자정 넘으면 플래그가 사라져
-  //     반납 안내[반출+3h~+48h]처럼 이틀에 걸친 구간에서 중복 발송됐음) ──
+  //     반납 안내[반납-12h~반납]처럼 자정을 걸치는 구간에서 중복 발송됐음) ──
   var props = PropertiesService.getScriptProperties();
   var sentKey = 'GUIDE_SENT_V2';
   var sentData = {};
@@ -9727,23 +9733,30 @@ function checkGuideAlimtalk() {
       }
     }
 
-    // ── 반납 안내톡: 반출 3시간 후 ──
-    var inSendMs = checkoutMs + (3 * 60 * 60 * 1000);
-    var inFlag = 'in_' + tid;
-    // 반출 당일~다음날 사이에만 발송 (너무 지난 건 무시)
-    var inDeadlineMs = checkoutMs + (48 * 60 * 60 * 1000);
-    if (!sentData[inFlag] && nowMs >= inSendMs && nowMs < inDeadlineMs) {
-      try {
-        var inMsg = _buildCheckinMsg(cust.name);
-        var inVars = { '#{고객명}': cust.name };
-        var inRes = sendAlimtalk(TPL_CHECKIN, cust.tel, cust.name, inMsg, inVars);
-        if (!_alimtalkAccepted_(inRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(inRes));
-        sentData[inFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
-        results.sent.push('반납 ' + tid + ' ' + cust.name);
-        Logger.log('✅ 반납 안내톡: ' + tid + ' ' + cust.name + ' → ' + JSON.stringify(inRes));
-      } catch(err) {
-        results.errors.push('반납 ' + tid + ': ' + err.message);
-        Logger.log('❌ 반납 안내톡 실패: ' + tid + ' ' + err.message);
+    // ── 반납 안내톡 ──
+    // "반납일이 다가와" 안내라 기본은 반납 12시간 전. 단 당일 반출-반납 건은 그러면 반납-12h가
+    // 반출보다 앞서 "반출 전에 반납 톡"이 가버리므로, 반출+3시간보다 이르게는 안 보냄(둘 중 늦은 시각).
+    // → 당일 건은 반출+3h가 이기고(기존 동작 유지), 다일 건은 반납-12h가 이김. 절대 반출 전엔 안 감.
+    if (info.returnDT) {
+      var returnMs = info.returnDT.getTime();
+      var inSendMs = Math.max(checkoutMs + GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS, returnMs - GUIDE_CHECKIN_LEAD_MS);
+      // 반출+3h가 반납을 넘는 초단기 대여는 반출~반납 중간 지점으로(반납 전 보장)
+      if (inSendMs >= returnMs) inSendMs = checkoutMs + Math.floor((returnMs - checkoutMs) / 2);
+      var inFlag = 'in_' + tid;
+      var inDeadlineMs = returnMs;  // 반납 시각 지나면 발송 안 함 (이미 반납했을 것)
+      if (!sentData[inFlag] && nowMs >= inSendMs && nowMs < inDeadlineMs) {
+        try {
+          var inMsg = _buildCheckinMsg(cust.name);
+          var inVars = { '#{고객명}': cust.name };
+          var inRes = sendAlimtalk(TPL_CHECKIN, cust.tel, cust.name, inMsg, inVars);
+          if (!_alimtalkAccepted_(inRes)) throw new Error('팝빌 접수 실패: ' + JSON.stringify(inRes));
+          sentData[inFlag] = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd HH:mm');
+          results.sent.push('반납 ' + tid + ' ' + cust.name);
+          Logger.log('✅ 반납 안내톡: ' + tid + ' ' + cust.name + ' → ' + JSON.stringify(inRes));
+        } catch(err) {
+          results.errors.push('반납 ' + tid + ': ' + err.message);
+          Logger.log('❌ 반납 안내톡 실패: ' + tid + ' ' + err.message);
+        }
       }
     }
   });
