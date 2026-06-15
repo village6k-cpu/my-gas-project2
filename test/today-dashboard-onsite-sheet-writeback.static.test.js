@@ -24,6 +24,10 @@ assert(
   'on-site entries must be sent as a JSON string (GAS normalizeDashboardAddEntries_ parses it)'
 );
 assert(
+  /rawNames:\s*true/.test(store),
+  'on-site additions must set rawNames=true so free-input names are not fuzzy-matched into the wrong catalog item'
+);
+assert(
   /filter\(\(e\) => !e\.isComponent\)/.test(store),
   'only set headers/standalone items are sent — backend re-expands set components from 세트마스터'
 );

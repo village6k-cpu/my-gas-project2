@@ -442,6 +442,7 @@ export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], se
   const res = await gasMutation("onsiteAddon", {
     tid: tradeId,
     entries: JSON.stringify(payload),
+    rawNames: true,
     settlement_status: settlement,
     actorName: "오늘 일정 웹앱",
   });
