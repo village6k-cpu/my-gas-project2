@@ -142,7 +142,12 @@ function mergeDashboard(base: Trade, it: any): Trade {
       isComponent: !!e.isComponent,
       emphasize: EMPH.test(e.name) || undefined,
       category: e.category || categoryOf(e.name) || undefined, // 장비마스터 실제 카테고리 우선
-      checkoutState: prev?.checkoutState === "excluded" ? "excluded" : e.checkedCheckout ? "taken" : "pending",
+      // 현장추가는 물리적으로 이미 나간 품목 — 시트 체크박스가 늦더라도 taken 유지
+      checkoutState:
+        prev?.checkoutState === "excluded" ? "excluded"
+        : e.checkedCheckout ? "taken"
+        : prev?.onsite && prev?.checkoutState === "taken" ? "taken"
+        : "pending",
       takenQty: prev?.takenQty,
       memoCheckout: prev?.memoCheckout,
       memoCheckin: prev?.memoCheckin,
@@ -150,6 +155,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
       endShiftDays: prev?.endShiftDays,
       settlement: prev?.settlement,
       offCatalog: prev?.offCatalog,
+      onsite: prev?.onsite, // 시트에 기록된 현장추가도 '현장 추가' 구획에 계속 묶이도록 보존
     } as EquipmentItem;
   });
   // 시트에 없는 앱 전용 품목(현장추가 등 유상 청구 대상)은 절대 삭제하지 않음

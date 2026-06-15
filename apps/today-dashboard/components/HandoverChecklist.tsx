@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
-import { groupBySet, handoverSummary } from "@/lib/domain/status";
+import { groupBySet, handoverSummary, isRealDeviceHeader, singleControllableSetItem } from "@/lib/domain/status";
 import { categoryOf, coarseGroup } from "@/lib/domain/catalog";
 import { searchEquipmentCatalog, useEquipmentCatalog, type EquipmentCatalogItem } from "@/lib/data/equipmentCatalog";
 import { SetBox, LooseList } from "./SetBox";
@@ -22,20 +22,7 @@ import { Check, Plus } from "./icons";
 import { ReturnChecklist } from "./ReturnChecklist";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
-type SetGroup = ReturnType<typeof groupBySet>[number];
 type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
-
-function sameSetName(a?: string | null, b?: string | null): boolean {
-  const norm = (value?: string | null) => String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
-  return !!norm(a) && norm(a) === norm(b);
-}
-
-function singleControllableSetItem(g: SetGroup): EquipmentItem | null {
-  if (!g.setName) return null;
-  if (g.rows.length === 0) return g.header ?? null;
-  if (g.rows.length === 1 && sameSetName(g.rows[0].name, g.setName)) return g.rows[0];
-  return null;
-}
 
 function SetSingleList({ children }: { children: ReactNode }) {
   return <ul className="divide-y divide-brand-200/70 overflow-hidden rounded-xl bg-brand-50 shadow-card ring-1 ring-brand-200">{children}</ul>;
@@ -74,7 +61,15 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                     <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge setTone />
                   </SetSingleList>
                 ) : (
-                  <SetBox key={g.key} name={g.setName}>
+                  <SetBox
+                    key={g.key}
+                    name={g.setName}
+                    headerRow={
+                      isRealDeviceHeader(g.header, g.rows) ? (
+                        <CheckoutRow key={g.header!.scheduleId} t={trade} e={g.header!} open={!!expanded[g.header!.scheduleId]} onToggle={() => toggle(g.header!.scheduleId)} setBadge setTone />
+                      ) : undefined
+                    }
+                  >
                     {g.rows.map((e) => (
                       <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
                     ))}
@@ -113,6 +108,11 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                           if (g.header) removeItem(trade.tradeId, g.header.scheduleId);
                           g.rows.forEach((r) => removeItem(trade.tradeId, r.scheduleId));
                         }}
+                        headerRow={
+                          isRealDeviceHeader(g.header, g.rows) ? (
+                            <CheckoutRow key={g.header!.scheduleId} t={trade} e={g.header!} open={!!expanded[g.header!.scheduleId]} onToggle={() => toggle(g.header!.scheduleId)} setBadge setTone />
+                          ) : undefined
+                        }
                       >
                         {g.rows.map((e) => (
                           <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
@@ -224,6 +224,8 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
   const [picked, setPicked] = useState<EquipmentCatalogItem | null>(null);
   const [qty, setQty] = useState(1);
   const [settlement, setSettlement] = useState<Settlement>("무상");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const matches = searchEquipmentCatalog(catalog.items, q);
   const exact = matches.some((m) => m.name === q.trim());
@@ -231,9 +233,9 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
   const isSet = !!picked?.components?.length;
   const catalogByName = new Map(catalog.items.map((item) => [item.name, item]));
 
-  const submit = () => {
+  const submit = async () => {
     const name = picked ? picked.name : q.trim();
-    if (!name) return;
+    if (!name || submitting) return;
     let entries: OnsiteEntry[];
     if (isSet && picked) {
       entries = [
@@ -250,8 +252,17 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
     } else {
       entries = [{ name, qty, category: picked?.category ?? "소품·기타", offCatalog: !picked, emphasize: MEDIA_RE.test(name) }];
     }
-    addOnsiteItems(tradeId, entries, settlement);
-    onClose();
+    setSubmitting(true);
+    setError(null);
+    try {
+      // 스케줄상세(시트)에 기록 — 가용 불가 등 실패 시 에러를 던지므로 닫지 않고 표시
+      await addOnsiteItems(tradeId, entries, settlement);
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "현장 추가 실패");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -280,7 +291,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
               </button>
             ))}
             {!exact && (
-              <button onClick={submit} className="tap flex w-full items-center gap-2 border-t border-line/60 bg-paper/70 px-2.5 py-1.5 text-left">
+              <button onClick={submit} disabled={submitting} className="tap flex w-full items-center gap-2 border-t border-line/60 bg-paper/70 px-2.5 py-1.5 text-left disabled:opacity-50">
                 <Plus className="h-3.5 w-3.5 text-ink-mute" />
                 <span className="text-[13px] text-ink-soft">‘{q.trim()}’ 자유입력 추가</span>
                 <span className="ml-auto rounded bg-line/40 px-1.5 py-0.5 text-[10px] font-semibold text-ink-faint">재고 미연동</span>
@@ -289,6 +300,12 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
           </div>
         )}
       </div>
+
+      {error && (
+        <div className="rounded-lg bg-attention-bg px-2.5 py-1.5 text-[12px] font-semibold leading-snug text-attention-fg ring-1 ring-attention-ring">
+          {error}
+        </div>
+      )}
 
       <div className="flex items-center gap-2">
         {!isSet && <Stepper value={qty} onChange={setQty} />}
@@ -299,7 +316,9 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
         </div>
         <div className="ml-auto flex gap-1.5">
           <button onClick={onClose} className="tap rounded-lg px-2.5 py-1.5 text-[12.5px] font-semibold text-ink-mute">취소</button>
-          <button onClick={submit} disabled={!(picked || q.trim())} className="tap rounded-lg bg-brand-600 px-3 py-1.5 text-[12.5px] font-bold text-white disabled:opacity-40">추가</button>
+          <button onClick={submit} disabled={submitting || !(picked || q.trim())} className="tap rounded-lg bg-brand-600 px-3 py-1.5 text-[12.5px] font-bold text-white disabled:opacity-40">
+            {submitting ? "추가 중…" : "추가"}
+          </button>
         </div>
       </div>
     </div>

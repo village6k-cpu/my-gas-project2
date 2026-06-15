@@ -72,16 +72,15 @@ export function rcOf(t: Trade, scheduleId: string): ReturnCount {
   return t.returnCounts?.[scheduleId] ?? EMPTY_RC;
 }
 
-/** 거래의 나간 품목을 줄(scheduleId) 단위로 — 세트 묶음/시트순서 보존, 집계·진행도용 */
+/** 거래의 나간 품목을 줄(scheduleId) 단위로 — 세트 묶음/시트순서 보존, 집계·진행도용.
+ *  체크리스트가 실제로 렌더하는 '체크 가능한 행'(checkableItems)과 동일 집합을 사용해
+ *  진행도 카운트와 화면 줄 수가 항상 일치하도록 한다.
+ *  (세트 대표행 = 실제 메인 장비면 포함, 단순 번들 라벨이면 제외) */
 export function aggregateReturns(t: Trade): AggReturn[] {
-  const out: AggReturn[] = [];
-  for (const e of t.equipments) {
-    if (e.isSetHeader) continue;
-    if (e.checkoutState === "excluded") continue; // 안 나감 → 받을 것 없음
+  return checkableItems(t, "checkin").map((e) => {
     const qty = e.takenQty ?? e.qty;
-    out.push({ name: e.name, scheduleId: e.scheduleId, category: e.category, expected: qty, onsiteQty: e.onsite ? qty : 0, count: rcOf(t, e.scheduleId) });
-  }
-  return out;
+    return { name: e.name, scheduleId: e.scheduleId, category: e.category, expected: qty, onsiteQty: e.onsite ? qty : 0, count: rcOf(t, e.scheduleId) };
+  });
 }
 
 /** 품목을 세트 단위로 묶음 (반출/반납 공통). 세트명 있는 것끼리, 단품은 연속해서 한 묶음. */
@@ -128,6 +127,63 @@ export function groupBySet(items: EquipmentItem[]): SetGroup[] {
     }
   }
   return groups;
+}
+
+/** 세트 묶음에서 '단일 컨트롤 행'(체크박스 하나로 세트 전체를 다루는 단품형 세트) 추출.
+ *  구성품이 없거나(대표행만), 구성품 1개가 세트명과 동일하면 그 행 하나만 컨트롤로 노출. */
+export function singleControllableSetItem(g: SetGroup): EquipmentItem | null {
+  if (!g.setName) return null;
+  if (g.rows.length === 0) return g.header ?? null;
+  if (g.rows.length === 1 && sameSetKey(g.rows[0].name, g.setName)) return g.rows[0];
+  return null;
+}
+
+// '~세트/셋업/패키지' 처럼 묶음 자체를 가리키는 라벨 — 대표행이 실제 장비가 아님
+const BUNDLE_LABEL_RE = /세트|셋트|셋업|패키지|풀구성/;
+
+/** 구성품이 있는 세트의 대표행(g.header)이 '실제 메인 장비'인지 판정.
+ *  - 이름이 번들 라벨(~세트/셋업/패키지)이면 메인 장비 아님(제목으로만)
+ *  - 구성품 중 대표행 이름과 포함관계인 것이 있으면(예: '소니 FX6 바디' ⊂ '소니 FX6 바디세트')
+ *    그 구성품이 실제 본체이므로 대표행은 라벨로 취급
+ *  - 그 외(예: '스몰HD 인디7' + 구성품 'D탭')는 대표행 자체가 메인 장비 → 체크 대상 */
+export function isRealDeviceHeader(header: EquipmentItem | undefined, rows: EquipmentItem[]): boolean {
+  if (!header) return false;
+  const hk = setKeyOf(header.name);
+  if (!hk) return false;
+  if (BUNDLE_LABEL_RE.test(String(header.name).replace(/\s+/g, ""))) return false;
+  for (const r of rows) {
+    const rk = setKeyOf(r.name);
+    if (rk && (hk.includes(rk) || rk.includes(hk))) return false;
+  }
+  return true;
+}
+
+/** 한 묶음 리스트를 체크리스트가 렌더하는 '체크 가능한 행' 순서대로 평탄화 (렌더링과 동일 규칙) */
+function flatGroupCheckable(list: EquipmentItem[]): EquipmentItem[] {
+  const out: EquipmentItem[] = [];
+  for (const g of groupBySet(list)) {
+    if (g.setName) {
+      const single = singleControllableSetItem(g);
+      if (single) {
+        out.push(single);
+        continue;
+      }
+      if (isRealDeviceHeader(g.header, g.rows)) out.push(g.header!);
+      out.push(...g.rows);
+    } else {
+      out.push(...g.rows);
+    }
+  }
+  return out;
+}
+
+/** 체크리스트에 인터랙티브(체크/제외/메모) 행으로 노출되는 품목들 — 진행도 카운트의 단일 소스.
+ *  반납은 반출에서 제외된 품목(안 나간 것)은 받을 게 없으므로 뺀다. */
+export function checkableItems(t: Trade, phase: "checkout" | "checkin"): EquipmentItem[] {
+  const pool = phase === "checkin" ? t.equipments.filter((e) => e.checkoutState !== "excluded") : t.equipments;
+  const booked = pool.filter((e) => !e.onsite);
+  const onsite = pool.filter((e) => e.onsite);
+  return [...flatGroupCheckable(booked), ...flatGroupCheckable(onsite)];
 }
 
 export function missingOf(a: AggReturn): number {
@@ -256,15 +312,13 @@ export function tabCounts(trades: Trade[], date: string): Record<TabKey, number>
   };
 }
 
-const items = (t: Trade) => t.equipments.filter((e) => !e.isSetHeader);
-
-/** 반출/반납 진행도 */
+/** 반출/반납 진행도 — 화면에 노출되는 체크 가능한 행과 동일 집합으로 계산 */
 export function setupProgress(t: Trade, phase: "checkout" | "checkin"): { done: number; total: number } {
   if (phase === "checkin") {
     const aggs = aggregateReturns(t);
     return { done: aggs.filter(isReturnDone).length, total: aggs.length };
   }
-  const list = items(t);
+  const list = checkableItems(t, "checkout");
   const done = list.filter((e) => e.checkoutState !== "pending").length;
   return { done, total: list.length };
 }
@@ -273,7 +327,7 @@ export function setupProgress(t: Trade, phase: "checkout" | "checkin"): { done: 
 export function handoverSummary(t: Trade, phase: "checkout" | "checkin"): string[] {
   const out: string[] = [];
   if (phase === "checkout") {
-    const list = items(t);
+    const list = checkableItems(t, "checkout");
     const taken = list.filter((e) => e.checkoutState === "taken").length;
     const excluded = list.filter((e) => e.checkoutState === "excluded");
     const onsite = list.filter((e) => e.onsite);

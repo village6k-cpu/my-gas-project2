@@ -19,7 +19,7 @@ import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
-import { gasMutation, gasRead, gasWrite } from "./writeback";
+import { gasMutation, gasRead, gasWrite, writeBackEnabled } from "./writeback";
 import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults } from "./sync";
 
 interface State {
@@ -383,7 +383,11 @@ function findMergeableOnsiteItem(t: Trade, en: OnsiteEntry, settlement: Settleme
   );
 }
 
-export function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], settlement: Settlement) {
+// 메모리/배터리/카드 등 수량 주의 품목 강조 (sync.ts EMPH와 동일 기준)
+const ONSITE_EMPH = /배터리|메모리|카드|CFexpress|SD|미디어/;
+
+/** 현장추가 — 앱(Supabase) 전용 옵티미스틱 추가. write-back이 꺼져 있을 때의 폴백. */
+function addOnsiteItemsLocal(tradeId: string, entries: OnsiteEntry[], settlement: Settlement) {
   mutateTrade(tradeId, (t) => {
     let nextTrade = { ...t, equipments: [...t.equipments] };
     for (const en of entries) {
@@ -420,6 +424,78 @@ export function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], settleme
   });
   flashSave(tradeId);
 }
+
+/** 현장추가 — 스케줄상세(시트)에 실제로 기록되도록 GAS onsiteAddon 호출 후, 시트가 발급한
+ *  실 scheduleId로 품목을 반영한다. 세트는 백엔드가 세트마스터로 구성품을 전개하므로 대표/단품만 보낸다.
+ *  자유입력 품목은 rawNames로 그대로 시트에 기록됨(장비마스터 매칭 안 함). 가용 불가면 에러를 던진다. */
+export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], settlement: Settlement) {
+  // write-back 비활성(프리뷰/세이프가드)일 땐 기존처럼 앱 전용으로만 추가
+  if (!writeBackEnabled) {
+    addOnsiteItemsLocal(tradeId, entries, settlement);
+    return;
+  }
+
+  // 세트 구성품은 백엔드가 세트마스터로 다시 전개하므로 대표행/단품만 전송(중복 방지)
+  const payload = entries.filter((e) => !e.isComponent).map((e) => ({ name: e.name, qty: e.qty }));
+  if (payload.length === 0) return;
+
+  const res = await gasMutation("onsiteAddon", {
+    tid: tradeId,
+    entries: JSON.stringify(payload),
+    rawNames: true,
+    settlement_status: settlement,
+    actorName: "오늘 일정 웹앱",
+  });
+
+  // write-back 게이트가 막았으면 폴백
+  if (res?.skipped) {
+    addOnsiteItemsLocal(tradeId, entries, settlement);
+    return;
+  }
+
+  const out = res?.result ?? res ?? {};
+  const added = (out.addedItems ?? []) as Array<{
+    scheduleId?: string;
+    name?: string;
+    qty?: number;
+    setName?: string;
+    isHeader?: boolean;
+    isComponent?: boolean;
+  }>;
+  if (added.length === 0) {
+    throw new Error(out.error || "현장 추가가 스케줄상세에 반영되지 않았습니다");
+  }
+
+  // 원래 입력의 자유입력 여부 매핑(시트엔 기록되지만 재고 미연동 표시용)
+  const offByName = new Map(entries.map((e) => [e.name.trim(), !!e.offCatalog]));
+
+  const newItems: EquipmentItem[] = added.map((a) => {
+    const name = String(a.name ?? "").trim();
+    return {
+      scheduleId: String(a.scheduleId ?? "").trim(),
+      name,
+      qty: Number(a.qty) || 1,
+      setName: a.setName || undefined,
+      isSetHeader: a.isHeader || undefined,
+      isComponent: a.isComponent || undefined,
+      category: categoryOf(name) ?? undefined,
+      offCatalog: offByName.get(name) || undefined,
+      emphasize: ONSITE_EMPH.test(name) || undefined,
+      onsite: true,
+      settlement,
+      checkoutState: "taken",
+      returnState: "pending",
+    };
+  });
+
+  // 시트가 발급한 실 scheduleId로 반영(같은 ID가 이미 있으면 교체)
+  const ids = new Set(newItems.map((i) => i.scheduleId));
+  mutateTrade(tradeId, (t) => ({
+    ...t,
+    equipments: [...t.equipments.filter((e) => !ids.has(e.scheduleId)), ...newItems],
+  }));
+  flashSave(tradeId);
+}
 export function setOnsiteSettlement(tradeId: string, scheduleId: string, settlement: Settlement) {
   mutateTrade(tradeId, (t) => mapItem(t, scheduleId, (e) => ({ ...e, settlement })));
   flashSave(tradeId);
@@ -429,8 +505,9 @@ export function removeItem(tradeId: string, scheduleId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId) }));
   flashSave(tradeId);
   deleteScheduleItem(tradeId, scheduleId).catch(() => {});
-  // 시트 유래 품목은 스케줄상세 행도 삭제 — 가용성 점유와 repair 부활 방지 (현장추가는 Supabase 전용)
-  if (item && !item.onsite && new RegExp(`^${tradeId}-\\d+$`).test(scheduleId)) {
+  // 실 스케줄ID(tid-NN) 행은 스케줄상세에서도 삭제 — 가용성 점유·repair 부활 방지.
+  // 시트에 기록된 현장추가도 실 ID라 포함됨. (레거시 앱 전용 ONS-N은 tid-ONS-N이라 매칭 안 돼 제외)
+  if (item && new RegExp(`^${tradeId}-\\d+$`).test(scheduleId)) {
     gasWrite("removeEquip", { tid: tradeId, scheduleId, equipName: item.name });
   }
 }

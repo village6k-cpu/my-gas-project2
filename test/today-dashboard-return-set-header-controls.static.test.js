@@ -5,9 +5,11 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const checklist = fs.readFileSync(path.join(root, 'apps/today-dashboard/components/ReturnChecklist.tsx'), 'utf8');
 
+// 세트 판정 헬퍼는 status.ts 단일 소스에서 import (반출/반납 동일 규칙)
 assert(
-  checklist.includes('function singleControllableSetItem'),
-  'return checklist must detect single-row sets instead of rendering them as a non-controllable set header'
+  /import \{[^}]*singleControllableSetItem[^}]*\} from "@\/lib\/domain\/status"/.test(checklist) &&
+    /import \{[^}]*isRealDeviceHeader[^}]*\} from "@\/lib\/domain\/status"/.test(checklist),
+  'return checklist must import shared set helpers (singleControllableSetItem, isRealDeviceHeader) from status'
 );
 assert(
   checklist.includes('function SetSingleList'),
@@ -18,15 +20,20 @@ assert(
   'return set rendering must compute a single controllable set row for each set group'
 );
 assert(
-  /singleSetItem \? \([\s\S]*<SetSingleList key=\{g\.key\}>[\s\S]*<ReturnRow[\s\S]*e=\{singleSetItem\}[\s\S]*setBadge[\s\S]*setTone/.test(checklist),
+  /singleSetItem \? \([\s\S]*?<SetSingleList key=\{g\.key\}>[\s\S]*?<ReturnRow[\s\S]*?e=\{singleSetItem\}[\s\S]*?setBadge setTone/.test(checklist),
   'single-row sets in return cards must render as one controllable return row with set styling'
 );
+// 구성품 있는 세트의 실제 메인 장비(대표행)는 headerRow로 회수 체크 가능하게 노출
 assert(
-  /function ReturnRow\([\s\S]*setBadge = false[\s\S]*setTone = false/.test(checklist),
-  'return rows must accept setBadge and setTone flags for standalone set equipment'
+  /<SetBox[\s\S]*?headerRow=\{isRealDeviceHeader\(g\.header, g\.rows\)[\s\S]*?<ReturnRow[\s\S]*?e=\{g\.header!\}[\s\S]*?setBadge setTone/.test(checklist),
+  'real-device set headers must render as an interactive return row via SetBox headerRow'
 );
 assert(
-  /setBadge && <span[\s\S]*>세트<\/span>[\s\S]*<button[\s\S]*aria-label="회수 완료 체크"/.test(checklist),
+  /function ReturnRow\([\s\S]*?setBadge = false[\s\S]*?setTone = false/.test(checklist),
+  'return rows must accept setBadge and setTone flags for standalone/main set equipment'
+);
+assert(
+  /setBadge && <span[\s\S]*?>세트<\/span>[\s\S]*?<button[\s\S]*?aria-label="회수 완료 체크"/.test(checklist),
   'set badge must render before the return checkbox button'
 );
 assert(
@@ -36,11 +43,11 @@ assert(
   'expanded return details must allow editing the registered equipment name with a catalog dropdown'
 );
 assert(
-  /function EquipmentNameCombobox\([\s\S]*useEquipmentCatalog\(\)[\s\S]*const matches = searchEquipmentCatalog\(catalog\.items, q\)/.test(checklist),
+  /function EquipmentNameCombobox\([\s\S]*?useEquipmentCatalog\(\)[\s\S]*?const matches = searchEquipmentCatalog\(catalog\.items, q\)/.test(checklist),
   'return equipment name editor must search the sheet-master catalog while typing'
 );
 assert(
-  /function FloatingCatalogMenu[\s\S]*createPortal[\s\S]*document\.body/.test(checklist),
+  /function FloatingCatalogMenu[\s\S]*?createPortal[\s\S]*?document\.body/.test(checklist),
   'return equipment dropdown must use a body portal so set/card containers cannot clip it'
 );
 assert(
