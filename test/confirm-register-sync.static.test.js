@@ -326,6 +326,23 @@ console.log('popbill-hmac checks OK');
 }
 console.log('guide-alimtalk-test-tool checks OK');
 
+// ── 등록완료 알림톡 테스트 발송 — 실거래 테스트는 마스킹된 myPage 이름이 아니라 계약마스터 원본 이름을 사용 ──
+{
+  const ca = read('checkAvailability.js');
+  const testFn = ca.slice(ca.indexOf('function testRegisterAlimtalk'), ca.indexOf('/**\n * 반출/반납 안내 알림톡 테스트 발송'));
+  assert(
+    /function getRegisterAlimtalkTradeSnapshot_\(tradeId\)/.test(ca) &&
+      /contractSheet\.getRange\(2,\s*1,\s*contractSheet\.getLastRow\(\) - 1,\s*8\)/.test(ca),
+    'register alimtalk test must read original customer name/date-time from 계약마스터'
+  );
+  assert(
+    testFn.includes('getRegisterAlimtalkTradeSnapshot_(tid)') &&
+      !testFn.includes('customerName.replace(/\\*/g'),
+    'register alimtalk test must not reconstruct names from masked myPage customerName'
+  );
+}
+console.log('register-alimtalk-test-tool checks OK');
+
 // ── 알림톡 발송 신뢰성: 접수 성공시에만 플래그 + 날짜 경계 무관 중복방지 ──
 {
   const ca = read('checkAvailability.js');

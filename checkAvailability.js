@@ -9473,8 +9473,8 @@ function testRegisterAlimtalk(args) {
   var 고객명 = "테스트", 반출표시 = "2026-06-15 10:00", 반납표시 = "2026-06-18 18:00";
   var tid = String(args.거래ID || args.tradeId || "").trim() || "TEST-001";
   if (args.거래ID || args.tradeId) {
-    var tv = myPageTradeView_(tid);
-    if (tv) { 고객명 = tv.customerName.replace(/\*/g, ''); 반출표시 = tv.checkoutAt; 반납표시 = tv.returnAt; }
+    var snap = getRegisterAlimtalkTradeSnapshot_(tid);
+    if (snap) { 고객명 = snap.customerName; 반출표시 = snap.checkoutAt; 반납표시 = snap.returnAt; }
   }
   var link = getMyPageLink(tid);
   var msg = _buildRegisterMsg(고객명, 반출표시, 반납표시);
@@ -9486,6 +9486,23 @@ function testRegisterAlimtalk(args) {
   } catch (e) {
     return { error: e.message, template: tpl };
   }
+}
+
+function getRegisterAlimtalkTradeSnapshot_(tradeId) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var contractSheet = ss.getSheetByName("계약마스터");
+  if (!contractSheet || contractSheet.getLastRow() < 2) return null;
+
+  var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 8).getValues();
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i][0]).trim() !== String(tradeId).trim()) continue;
+    return {
+      customerName: String(rows[i][1] || "").trim() || "테스트",
+      checkoutAt: myPageFmtDT_(rows[i][4], rows[i][5]),
+      returnAt: myPageFmtDT_(rows[i][6], rows[i][7])
+    };
+  }
+  return null;
 }
 
 /**
