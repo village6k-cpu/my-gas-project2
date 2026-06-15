@@ -10126,6 +10126,118 @@ function clearValidation() {
   refreshEquipmentList();
 }
 
+function getContractStatusOptions_() {
+  return ["예약", "반출", "취소", "반납완료"];
+}
+
+function getContractStatusValidationRule_() {
+  return SpreadsheetApp.newDataValidation()
+    .requireValueInList(getContractStatusOptions_(), true)
+    .setAllowInvalid(false)
+    .build();
+}
+
+function isContractStatusValidationRule_(rule) {
+  if (!rule) return false;
+  if (rule.getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) return false;
+
+  var criteriaValues = rule.getCriteriaValues();
+  var actual = (criteriaValues && criteriaValues[0]) || [];
+  var expected = getContractStatusOptions_();
+  if (actual.length !== expected.length) return false;
+
+  for (var i = 0; i < expected.length; i++) {
+    if (String(actual[i]) !== expected[i]) return false;
+  }
+  return true;
+}
+
+function applyContractStatusValidation_(sheet, rowCount) {
+  rowCount = Number(rowCount) || 0;
+  if (!sheet || rowCount < 1) return { appliedRows: 0, range: "" };
+
+  var range = sheet.getRange(2, 10, rowCount, 1); // J열 계약상태
+  range.setDataValidation(getContractStatusValidationRule_());
+  return {
+    appliedRows: rowCount,
+    range: range.getA1Notation(),
+    options: getContractStatusOptions_()
+  };
+}
+
+function inspectContractStatusValidation_(sheet, rowCount, sampleLimit) {
+  rowCount = Number(rowCount) || 0;
+  sampleLimit = Number(sampleLimit) || 20;
+  var result = {
+    totalRows: rowCount,
+    ok: 0,
+    missing: 0,
+    invalid: 0,
+    sampleIssues: []
+  };
+  if (!sheet || rowCount < 1) return result;
+
+  var range = sheet.getRange(2, 10, rowCount, 1); // J열 계약상태
+  var validations = range.getDataValidations();
+  var values = range.getDisplayValues();
+
+  for (var i = 0; i < rowCount; i++) {
+    var rule = validations[i] && validations[i][0];
+    var valid = isContractStatusValidationRule_(rule);
+    if (valid) {
+      result.ok++;
+      continue;
+    }
+
+    var issue = rule ? "invalid" : "missing";
+    if (rule) result.invalid++;
+    else result.missing++;
+
+    if (result.sampleIssues.length < sampleLimit) {
+      result.sampleIssues.push({
+        row: i + 2,
+        issue: issue,
+        value: values[i] && values[i][0] ? values[i][0] : ""
+      });
+    }
+  }
+
+  return result;
+}
+
+function inspectContractStatusValidation() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("계약마스터");
+  if (!sheet) return { error: "계약마스터 시트 없음" };
+
+  var rowCount = Math.max(sheet.getMaxRows() - 1, 0);
+  var result = inspectContractStatusValidation_(sheet, rowCount, 20);
+  result.sheet = "계약마스터";
+  result.column = "J";
+  result.options = getContractStatusOptions_();
+  return result;
+}
+
+function restoreContractStatusDropdown() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("계약마스터");
+  if (!sheet) return { error: "계약마스터 시트 없음" };
+
+  var rowCount = Math.max(sheet.getMaxRows() - 1, 0);
+  var before = inspectContractStatusValidation_(sheet, rowCount, 20);
+  var applied = applyContractStatusValidation_(sheet, rowCount);
+  var after = inspectContractStatusValidation_(sheet, rowCount, 20);
+
+  return {
+    success: after.missing === 0 && after.invalid === 0,
+    sheet: "계약마스터",
+    column: "J",
+    applied: applied,
+    before: before,
+    after: after
+  };
+}
+
 /**
  * 계약마스터 시트 가독성 포맷팅
  * - E,F 반출일/시간: 연파랑
@@ -10167,6 +10279,9 @@ function formatContractSheet() {
   // 3) E~J 굵게 (전체 행)
   sheet.getRange(2, 5, fullRows, 6).setFontWeight("bold");
 
+  // 4) J 계약상태 드롭다운. 서식 복구가 데이터 유효성까지 함께 보존해야 한다.
+  applyContractStatusValidation_(sheet, fullRows);
+
   // 5) 조건부 서식: 계약상태 기준 행 전체 — 시트 최대 행까지 적용해 신규 행도 자동 커버
   var ruleRange = sheet.getRange(2, 1, fullRows, lastCol);
   var existing = sheet.getConditionalFormatRules().filter(function(r) {
@@ -10201,7 +10316,7 @@ function formatContractSheet() {
   // 6) 헤더 고정
   sheet.setFrozenRows(1);
 
-  return "✅ 시트 전체(" + fullRows + "행) 서식 적용 완료";
+  return "✅ 시트 전체(" + fullRows + "행) 서식 및 계약상태 드롭다운 적용 완료";
 }
 
 // ===================================================================
