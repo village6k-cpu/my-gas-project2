@@ -385,8 +385,8 @@ console.log('contract-regen-stuck-queue checks OK');
 }
 console.log('guide-skip-completed checks OK');
 
-// ── 반납 안내톡 발송 시점: 반납 시각 12시간 전 (반출+3h 아님) ──
-// 다일 대여 시 반출 직후 "반납 임박" 톡이 하루 이상 전에 나가던 버그 방지
+// ── 반납 안내톡 발송 시점: 반납-12h ↔ 반출+3h 중 늦은 시각 ──
+// 다일 대여는 반납 임박에, 당일 반출-반납은 반출+3h에 (반출 전 발송 방지). 절대 반출 전엔 안 감.
 {
   const ca = read('checkAvailability.js');
   const fn = ca.slice(ca.indexOf('function checkGuideAlimtalk'), ca.indexOf('// ── 발송 기록 저장'));
@@ -399,16 +399,21 @@ console.log('guide-skip-completed checks OK');
     'tradeInfo must carry returnDT so the check-in reminder is scheduled off the return datetime'
   );
   assert(
-    /var inSendMs = returnMs - GUIDE_CHECKIN_LEAD_MS/.test(fn),
-    'check-in reminder must fire GUIDE_CHECKIN_LEAD_MS before the return time, not after checkout'
+    /var inSendMs = Math\.max\(checkoutMs \+ GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS, returnMs - GUIDE_CHECKIN_LEAD_MS\)/.test(fn),
+    'check-in reminder must fire at the later of (checkout+3h) and (return-12h) — never before checkout, near return for multi-day'
   );
   assert(
-    !/var inSendMs = checkoutMs \+ \(3 \* 60 \* 60 \* 1000\)/.test(fn),
-    'check-in reminder must no longer be anchored to checkout + 3h (caused day-early sends on multi-day rentals)'
+    /if \(inSendMs >= returnMs\) inSendMs = checkoutMs \+ Math\.floor\(\(returnMs - checkoutMs\) \/ 2\)/.test(fn),
+    'ultra-short same-day rentals (checkout+3h past return) must fall back to the checkout~return midpoint'
   );
   assert(
-    /var GUIDE_CHECKIN_LEAD_MS = 12 \* 60 \* 60 \* 1000/.test(ca),
-    'GUIDE_CHECKIN_LEAD_MS must define the 12h-before-return lead time'
+    /var inDeadlineMs = returnMs/.test(fn),
+    'check-in reminder must not be sent after the return time'
+  );
+  assert(
+    /var GUIDE_CHECKIN_LEAD_MS = 12 \* 60 \* 60 \* 1000/.test(ca) &&
+      /var GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS = 3 \* 60 \* 60 \* 1000/.test(ca),
+    'lead time (12h before return) and minimum offset (3h after checkout) constants must be defined'
   );
 }
 console.log('guide-checkin-timing checks OK');
