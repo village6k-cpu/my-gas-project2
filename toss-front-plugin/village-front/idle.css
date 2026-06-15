@@ -10,10 +10,6 @@ body.village-idle-page {
   overflow: hidden;
 }
 
-body.village-idle-page > :not(#app):not(script):not(style):not(link) {
-  display: none !important;
-}
-
 #app.village-idle {
   position: fixed;
   inset: 0;

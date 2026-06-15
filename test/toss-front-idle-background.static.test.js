@@ -52,10 +52,10 @@ assert(
   'custom idle screen must show the VILLAGE logo and keep the requested three-line copy and payment choices'
 );
 assert(
-  read('toss-front-plugin/village-front/idle.css').includes(
+  !read('toss-front-plugin/village-front/idle.css').includes(
     'body.village-idle-page > :not(#app):not(script):not(style):not(link)'
   ),
-  'idle screen CSS must hide Toss/dev preview overlay elements injected outside #app, such as the red IP badge'
+  'idle screen CSS must not hide every element injected outside #app because Toss settings overlays may live there'
 );
 assert(
   buildZip.includes('idle.css') &&
