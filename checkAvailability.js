@@ -9496,10 +9496,11 @@ function getRegisterAlimtalkTradeSnapshot_(tradeId) {
   var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 8).getValues();
   for (var i = 0; i < rows.length; i++) {
     if (String(rows[i][0]).trim() !== String(tradeId).trim()) continue;
+    var schedSnap = (typeof myPageScheduleSnapshot_ === "function") ? myPageScheduleSnapshot_(ss, tradeId) : null;
     return {
       customerName: String(rows[i][1] || "").trim() || "테스트",
-      checkoutAt: myPageFmtDT_(rows[i][4], rows[i][5]),
-      returnAt: myPageFmtDT_(rows[i][6], rows[i][7])
+      checkoutAt: (schedSnap && schedSnap.checkoutAt) || myPageFmtDT_(rows[i][4], rows[i][5]),
+      returnAt: (schedSnap && schedSnap.returnAt) || myPageFmtDT_(rows[i][6], rows[i][7])
     };
   }
   return null;

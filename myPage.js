@@ -101,6 +101,48 @@ function myPageFmtDT_(dateVal, timeVal) {
   return Utilities.formatDate(dt, "Asia/Seoul", "yyyy-MM-dd HH:mm");
 }
 
+function myPageNormalizeDateText_(value) {
+  if (value instanceof Date) return Utilities.formatDate(value, "Asia/Seoul", "yyyy-MM-dd");
+  var s = String(value || "").trim();
+  if (!s) return "";
+
+  var m = s.match(/^(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+  if (m) return m[1] + "-" + ("0" + m[2]).slice(-2) + "-" + ("0" + m[3]).slice(-2);
+  return s;
+}
+
+function myPageNormalizeTimeText_(value) {
+  if (value instanceof Date) return Utilities.formatDate(value, "Asia/Seoul", "HH:mm");
+  var s = String(value || "").trim();
+  if (!s) return "";
+
+  var m = s.match(/(\d{1,2}):(\d{2})/);
+  if (m) return ("0" + m[1]).slice(-2) + ":" + m[2];
+  return s;
+}
+
+function myPageJoinDTText_(dateVal, timeVal) {
+  var d = myPageNormalizeDateText_(dateVal);
+  var t = myPageNormalizeTimeText_(timeVal);
+  return d ? (d + (t ? " " + t : "")) : "";
+}
+
+function myPageScheduleSnapshot_(ss, tradeId) {
+  var schedSheet = ss.getSheetByName("스케줄상세");
+  if (!schedSheet || schedSheet.getLastRow() < 2) return null;
+
+  var values = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getValues();
+  var display = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getDisplayValues();
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i][1]).trim() !== String(tradeId).trim()) continue; // B: 거래ID
+    return {
+      checkoutAt: myPageJoinDTText_(display[i][5] || values[i][5], display[i][6] || values[i][6]),
+      returnAt: myPageJoinDTText_(display[i][7] || values[i][7], display[i][8] || values[i][8])
+    };
+  }
+  return null;
+}
+
 /**
  * 고객용 내 예약 조회 — 본인 건 1건만, 민감정보 미포함.
  * 거래ID 토큰 → 계약마스터+스케줄상세 / 요청ID 토큰 → 확인요청 (등록되면 거래 뷰 포함)
@@ -191,6 +233,7 @@ function myPageTradeView_(tradeId) {
 
   // 스케줄상세에서 품목 (세트 헤더/구성품 구조 유지, 본인 거래 행만)
   var items = [];
+  var scheduleSnapshot = myPageScheduleSnapshot_(ss, tradeId);
   var schedSheet = ss.getSheetByName("스케줄상세");
   if (schedSheet && schedSheet.getLastRow() >= 2) {
     var sched = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getValues();
@@ -217,8 +260,8 @@ function myPageTradeView_(tradeId) {
   return {
     tradeId: tradeId,
     customerName: myPageMaskName_(c[1]),            // B: 예약자명
-    checkoutAt: myPageFmtDT_(c[4], c[5]),           // E,F: 반출 일시
-    returnAt: myPageFmtDT_(c[6], c[7]),             // G,H: 반납 일시
+    checkoutAt: (scheduleSnapshot && scheduleSnapshot.checkoutAt) || myPageFmtDT_(c[4], c[5]),
+    returnAt: (scheduleSnapshot && scheduleSnapshot.returnAt) || myPageFmtDT_(c[6], c[7]),
     status: String(c[9] || "").trim() || "예약",    // J: 계약상태
     discountType: String(c[10] || "").trim(),       // K: 할인유형
     items: items,

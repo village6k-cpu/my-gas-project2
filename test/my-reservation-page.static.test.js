@@ -32,6 +32,14 @@ assert(
   'customer names must be masked in my-page responses'
 );
 assert(
+  /function myPageScheduleSnapshot_\(ss, tradeId\)/.test(myPage) &&
+    myPage.includes('getSheetByName("스케줄상세")') &&
+    myPage.includes('getDisplayValues()') &&
+    /scheduleSnapshot[\s\S]{0,180}checkoutAt/.test(myPage) &&
+    /scheduleSnapshot[\s\S]{0,220}returnAt/.test(myPage),
+  'my-page must prefer 스케줄상세 display date-times over 계약마스터 internal Date values'
+);
+assert(
   !myPageCode.includes('연락처') && !/\bc\[2\]/.test(myPageCode),
   'my-page must never read or return the customer phone column'
 );

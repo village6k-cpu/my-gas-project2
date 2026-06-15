@@ -332,8 +332,9 @@ console.log('guide-alimtalk-test-tool checks OK');
   const testFn = ca.slice(ca.indexOf('function testRegisterAlimtalk'), ca.indexOf('/**\n * 반출/반납 안내 알림톡 테스트 발송'));
   assert(
     /function getRegisterAlimtalkTradeSnapshot_\(tradeId\)/.test(ca) &&
-      /contractSheet\.getRange\(2,\s*1,\s*contractSheet\.getLastRow\(\) - 1,\s*8\)/.test(ca),
-    'register alimtalk test must read original customer name/date-time from 계약마스터'
+      /contractSheet\.getRange\(2,\s*1,\s*contractSheet\.getLastRow\(\) - 1,\s*8\)/.test(ca) &&
+      ca.includes('myPageScheduleSnapshot_(ss, tradeId)'),
+    'register alimtalk test must read original customer name from 계약마스터 and date-times from 스케줄상세'
   );
   assert(
     testFn.includes('getRegisterAlimtalkTradeSnapshot_(tid)') &&
