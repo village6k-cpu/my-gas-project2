@@ -99,14 +99,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   try {
     // 4) 거래 조회
-    let tradesQuery = sb
+    // ⚠️ 미결제 판정은 JS에서 — PostgREST .neq("deposit_status","입금완료")는
+    //    deposit_status=NULL 행을 제외해버림(SQL상 NULL<>'입금완료'=UNKNOWN).
+    //    실데이터 다수가 deposit_status NULL(미기록)이고 이건 "미결제"로 봐야 함.
+    const baseSelect = sb
       .from("trades")
       .select("trade_id, customer_name, customer_phone, amount, checkout_at, deposit_status, contract_status")
-      .neq("deposit_status", "입금완료")
-      .neq("contract_status", "취소")
       .order("checkout_at", { ascending: false });
 
-    let trades: Array<{
+    type Row = {
       trade_id: string;
       customer_name: string;
       customer_phone: string | null;
@@ -114,24 +115,30 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       checkout_at: string;
       deposit_status: string | null;
       contract_status: string;
-    }> = [];
+    };
 
+    let rows: Row[] = [];
     if (reservation) {
       // 거래ID 정확매칭
-      const { data, error } = await tradesQuery.eq("trade_id", reservation);
+      const { data, error } = await baseSelect.eq("trade_id", reservation);
       if (error) throw error;
-      trades = data ?? [];
+      rows = (data ?? []) as Row[];
     } else {
-      // 전화번호: 전체 미결제 로드 후 끝 8자리로 매칭
+      // 전화번호: 전체 로드 후 끝 8자리로 매칭
       // (PostgREST에서 함수 기반 필터가 없어 클라이언트 필터링)
       // TODO: 데이터가 수천 건 이상이면 DB FUNCTION 또는 generated column 고려
-      const { data, error } = await tradesQuery;
+      const { data, error } = await baseSelect;
       if (error) throw error;
       const needle = normalizePhoneLast8(rawPhone);
-      trades = (data ?? []).filter(
+      rows = ((data ?? []) as Row[]).filter(
         (t) => t.customer_phone && normalizePhoneLast8(t.customer_phone) === needle
       );
     }
+
+    // 미결제(입금완료 아님 — NULL 포함) + 미취소
+    const trades = rows.filter(
+      (t) => t.deposit_status !== "입금완료" && t.contract_status !== "취소"
+    );
 
     if (trades.length === 0) {
       return NextResponse.json({ matches: [] });
