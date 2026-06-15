@@ -77,6 +77,52 @@ function ensureAppRoot() {
   return root;
 }
 
+function isTossDevAddressText(text) {
+  return /^[^\d]{0,4}\s*(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}$/.test(
+    String(text || '').replace(/\s+/g, ' ').trim()
+  );
+}
+
+function shouldHideTossDevAddressElement(el) {
+  if (!el || el === document.documentElement || el === document.body || el.id === 'app') return false;
+  var tag = String(el.tagName || '').toLowerCase();
+  if (tag === 'script' || tag === 'style' || tag === 'link' || tag === 'meta') return false;
+  if (el.querySelector && el.querySelector('#app')) return false;
+  if (el.children && el.children.length > 4) return false;
+  return isTossDevAddressText(el.textContent);
+}
+
+function hideTossDevAddressBadges(root) {
+  var scope = root && root.querySelectorAll ? root : document.body;
+  if (!scope) return;
+
+  var nodes = [];
+  if (scope.nodeType === 1) nodes.push(scope);
+  if (scope.querySelectorAll) {
+    Array.prototype.push.apply(nodes, Array.prototype.slice.call(scope.querySelectorAll('*')));
+  }
+
+  nodes.forEach(function (el) {
+    if (!shouldHideTossDevAddressElement(el)) return;
+    el.setAttribute('data-village-hidden-dev-address', '1');
+    el.style.setProperty('display', 'none', 'important');
+  });
+}
+
+function installTossDevAddressBadgeGuard() {
+  hideTossDevAddressBadges(document.body);
+  if (!window.MutationObserver || !document.body) return;
+
+  var observer = new MutationObserver(function (mutations) {
+    mutations.forEach(function (mutation) {
+      Array.prototype.forEach.call(mutation.addedNodes || [], function (node) {
+        if (node && node.nodeType === 1) hideTossDevAddressBadges(node);
+      });
+    });
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
 function leaveVillageIdle() {
   document.body.classList.remove('village-idle-page');
   var root = document.getElementById('app');
@@ -418,6 +464,7 @@ async function recoverPending() {
 }
 
 (async function init() {
+  installTossDevAddressBadgeGuard();
   if (!sdk || !sdk.template) {
     var el = document.getElementById('app');
     if (el) el.innerText = 'TossFrontSDK 로드 실패 — 단말기/네트워크를 확인하세요.';

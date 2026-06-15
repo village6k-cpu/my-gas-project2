@@ -8,6 +8,7 @@ const exists = (file) => fs.existsSync(path.join(root, file));
 
 const index = read('toss-front-plugin/village-front/index.html');
 const app = read('toss-front-plugin/village-front/app.js');
+const css = read('toss-front-plugin/village-front/idle.css');
 const buildZip = read('toss-front-plugin/build-zip.sh');
 
 assert(
@@ -52,10 +53,17 @@ assert(
   'custom idle screen must show the VILLAGE logo and keep the requested three-line copy and payment choices'
 );
 assert(
-  !read('toss-front-plugin/village-front/idle.css').includes(
-    'body.village-idle-page > :not(#app):not(script):not(style):not(link)'
-  ),
+  !css.includes('body.village-idle-page > :not(#app):not(script):not(style):not(link)'),
   'idle screen CSS must not hide every element injected outside #app because Toss settings overlays may live there'
+);
+assert(
+  app.includes('function hideTossDevAddressBadges') &&
+    app.includes('function installTossDevAddressBadgeGuard') &&
+    app.includes('MutationObserver') &&
+    app.includes('data-village-hidden-dev-address') &&
+    /\\d\{1,3\}\\\./.test(app) &&
+    app.includes(':\\d{2,5}'),
+  'idle screen must hide only the Toss dev IP:port badge with a targeted DOM guard'
 );
 assert(
   buildZip.includes('idle.css') &&
