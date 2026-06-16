@@ -328,20 +328,28 @@ console.log('popbill-hmac checks OK');
 }
 console.log('guide-alimtalk-test-tool checks OK');
 
-// ── 반출 안내톡 문구: 토스 프론트 셀프결제 흐름 안내 ──
+// ── 반출 안내톡 문구: 계좌이체 + 토스 프론트 셀프결제 흐름 안내 ──
 {
   const ca = read('checkAvailability.js');
   const checkoutMsg = ca.slice(ca.indexOf('function _buildCheckoutMsg'), ca.indexOf('function _buildCheckoutLegacyMsg'));
   assert(
-    checkoutMsg.includes('토스 프론트 단말기') &&
+    checkoutMsg.includes('2. 결제') &&
+      checkoutMsg.includes('1) 계좌이체: 안내받으신 견적서 상 금액을 [우리은행 1005-404-109661 최재형(빌리지)] 계좌로 이체해주시면 됩니다.(세금계산서/현금영수증 시 반드시 부가세포함가 입금)') &&
+      checkoutMsg.includes('2) 카드결제: 카운터의 토스 프론트 단말기에서 셀프 카드결제 부탁드립니다.') &&
       checkoutMsg.includes('전화번호로 결제') &&
       checkoutMsg.includes('예약번호로 결제') &&
       checkoutMsg.includes('예약 조회') &&
       checkoutMsg.includes('결제가 완료되면 자동으로 확인됩니다'),
-    'checkout guide alimtalk must explain the new Toss Front self-payment flow'
+    'checkout guide alimtalk must explain bank transfer and the Toss Front self-payment flow'
   );
   assert(
-    !checkoutMsg.includes("금액 입력 (계약서상 \\'VAT포함가\\')") &&
+    checkoutMsg.indexOf('1) 계좌이체') < checkoutMsg.indexOf('2) 카드결제') &&
+      checkoutMsg.indexOf('2) 카드결제') < checkoutMsg.indexOf('이미 결제하신 경우'),
+    'checkout guide alimtalk must present bank transfer before card payment, then the already-paid note'
+  );
+  assert(
+    !checkoutMsg.includes('2. 미결제 예약은') &&
+      !checkoutMsg.includes("금액 입력 (계약서상 \\'VAT포함가\\')") &&
       !checkoutMsg.includes('녹색 버튼') &&
       !checkoutMsg.includes('영수증 1부는 테이블 위'),
     'checkout guide alimtalk must remove the old manual card-terminal amount-entry instructions'
