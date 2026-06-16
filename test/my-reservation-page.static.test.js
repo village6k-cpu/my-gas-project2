@@ -133,9 +133,10 @@ assert(
   'registerByReqID must call the alimtalk inside try/catch so registration never fails on send errors'
 );
 assert(
-  !backend.includes('예약 내용과 계약서') &&
-    backend.includes('예약 내용과 견적서 PDF'),
-  'register-complete alimtalk copy must not tell customers they can view the contract'
+  backend.includes('팝빌 승인 템플릿과 글자 단위 동일') &&
+    backend.includes('예약 내용과 계약서를 언제든 확인하실 수 있어요.') &&
+    !backend.includes('예약 내용과 견적서 PDF를 언제든 확인하실 수 있어요.'),
+  'register-complete alimtalk copy must match the currently approved Popbill template wording'
 );
 
 // ── 라이브 검증 후속: 평문 ID 링크 생성 + 원격 1회 설정 ──
