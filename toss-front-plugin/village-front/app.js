@@ -212,6 +212,38 @@ function renderVillageIdle() {
   installTossSettingsHotzone();
 }
 
+function restoreVillageIdleIfEmpty() {
+  if (!document.body || !document.body.classList.contains('village-idle-page')) return;
+  var root = document.getElementById('app');
+  if (!root || String(root.className || '').indexOf('village-idle') === -1) return;
+  if (
+    !document.getElementById('village-phone-button') ||
+    !document.getElementById('village-reservation-button') ||
+    !document.getElementById('village-amount-button')
+  ) {
+    renderVillageIdle();
+  }
+}
+
+function returnToIdle() {
+  setTimeout(function () { showIdle(); }, 0);
+  setTimeout(restoreVillageIdleIfEmpty, 120);
+  setTimeout(restoreVillageIdleIfEmpty, 500);
+}
+
+function installVillageIdleRecoveryGuard() {
+  if (window.__villageIdleRecoveryGuardInstalled) return;
+  window.__villageIdleRecoveryGuardInstalled = true;
+  window.addEventListener('pageshow', restoreVillageIdleIfEmpty);
+  window.addEventListener('popstate', function () {
+    setTimeout(restoreVillageIdleIfEmpty, 120);
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) restoreVillageIdleIfEmpty();
+  });
+  setInterval(restoreVillageIdleIfEmpty, 750);
+}
+
 // ──────────────────────────────────────────────────────────────
 // 서버 호출
 // ──────────────────────────────────────────────────────────────
@@ -325,7 +357,7 @@ var showPhoneInput = safe(function () {
     input: { placeholder: "'-' 없이 숫자만", maxLength: 11 },
     button: { label: '예약 조회' },
     onSubmit: async function (value) { await runLookup({ phone: value }); },
-    onBack: function () { showIdle(); },
+    onBack: function () { returnToIdle(); },
   });
 });
 
@@ -338,7 +370,7 @@ var showReservationInput = safe(function () {
     input: { placeholder: '예약번호' },
     button: { label: '예약 조회' },
     onSubmit: async function (value) { await runLookup({ reservation: value }); },
-    onBack: function () { showIdle(); },
+    onBack: function () { returnToIdle(); },
   });
 });
 
@@ -358,7 +390,7 @@ var showManualAmountInput = safe(function () {
       }
       return showManualOrder(amount);
     },
-    onBack: function () { showIdle(); },
+    onBack: function () { returnToIdle(); },
   });
 });
 
@@ -400,7 +432,7 @@ var showSelect = safe(function (items) {
         onClick: function () { showOrder(m); },
       };
     }),
-    onBack: function () { showIdle(); },
+    onBack: function () { returnToIdle(); },
   });
 });
 
@@ -414,7 +446,7 @@ var showOrder = safe(function (m) {
       summary: { totalAmount: amount },
     },
     onClick: function () { doCharge(m); },
-    onBack: function () { showIdle(); },
+    onBack: function () { returnToIdle(); },
   });
 });
 
@@ -473,24 +505,24 @@ var showSuccess = safe(function (payment, opts) {
     title: '결제가 완료되었어요',
     description: won(payment.amount) + (opts.syncWarning ? ' · 영수증 처리는 잠시 후 반영돼요' : ''),
     timerMs: 5000,
-    onTimeout: function () { showIdle(); },
-    buttons: [{ label: '확인', onClick: function () { showIdle(); }, closeOnClick: true }],
+    onTimeout: function () { returnToIdle(); },
+    buttons: [{ label: '확인', onClick: function () { returnToIdle(); }, closeOnClick: true }],
   });
 });
 
 var showError = safe(function (title, desc, opts) {
   opts = opts || {};
   var buttons = [];
-  if (opts.retry) buttons.push({ label: '다시 조회', onClick: function () { showIdle(); } });
+  if (opts.retry) buttons.push({ label: '다시 조회', onClick: function () { returnToIdle(); } });
   if (opts.retryManual) buttons.push({ label: '금액 다시 입력', onClick: function () { showManualAmountInput(); } });
-  buttons.push({ label: '처음으로', onClick: function () { showIdle(); }, closeOnClick: true });
+  buttons.push({ label: '처음으로', onClick: function () { returnToIdle(); }, closeOnClick: true });
   sdk.template.renderResultPage({
     type: 'image',
     status: 'error',
     title: title,
     description: desc,
     timerMs: 8000,
-    onTimeout: function () { showIdle(); },
+    onTimeout: function () { returnToIdle(); },
     buttons: buttons,
   });
 });
@@ -523,5 +555,6 @@ async function recoverPending() {
     return;
   }
   try { await recoverPending(); } catch (e) {}
+  installVillageIdleRecoveryGuard();
   showIdle();
 })();
