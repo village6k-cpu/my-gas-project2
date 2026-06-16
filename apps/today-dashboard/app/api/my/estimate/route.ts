@@ -14,7 +14,7 @@ const VILLAGE_OPS_API_URL =
   process.env.VILLAGE_OPS_API_URL ??
   "https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec";
 const VILLAGE_OPS_API_KEY = process.env.VILLAGE_OPS_API_KEY ?? process.env.VILLAGE_OPS_KEY ?? process.env.GAS_API_KEY ?? "village2026";
-const QUOTE_PDF_CACHE_MS = 5 * 60_000;
+const QUOTE_PDF_CACHE_MS = 6 * 60 * 60_000;
 const quotePdfCache = new Map<string, { at: number; pdfUrl: string }>();
 
 type MyPageResult = {
@@ -71,6 +71,7 @@ async function createQuotePdfUrl(tradeId: string) {
   url.searchParams.set("action", "previewQuote");
   url.searchParams.set("id", tradeId);
   url.searchParams.set("key", VILLAGE_OPS_API_KEY);
+  url.searchParams.set("reuse", "1");
 
   const res = await fetch(url.toString(), { cache: "no-store", redirect: "follow" });
   const data = (await res.json()) as QuoteResult;

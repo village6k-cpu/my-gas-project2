@@ -28,7 +28,7 @@ function MYPAGE_CFG_() {
 }
 
 var MYPAGE_VIEW_CACHE_SECONDS_ = 90;
-var MYPAGE_ESTIMATE_CACHE_SECONDS_ = 600;
+var MYPAGE_ESTIMATE_CACHE_SECONDS_ = 21600;
 
 function myPageSafeKey_(value) {
   return String(value || "").trim().replace(/[^A-Za-z0-9가-힣_-]/g, "_").slice(0, 120);
@@ -358,7 +358,8 @@ function myPageEstimatePdfUrl_(tradeId) {
   var payload = {
     action: "previewQuote",
     id: tradeId,
-    key: myPageVillageOpsApiKey_(props)
+    key: myPageVillageOpsApiKey_(props),
+    reuse: "1"
   };
   var qs = Object.keys(payload).map(function(key) {
     return encodeURIComponent(key) + "=" + encodeURIComponent(payload[key]);

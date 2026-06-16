@@ -114,6 +114,8 @@ assert(
 assert(
   /gasGet\(\{ action: "myPage", token \}\)/.test(estimateRoute) &&
     /action", "previewQuote"/.test(estimateRoute) &&
+    /reuse", "1"/.test(estimateRoute) &&
+    /QUOTE_PDF_CACHE_MS = 6 \* 60 \* 60_000/.test(estimateRoute) &&
     /rejectNonQuotePdfUrl/.test(estimateRoute) &&
     !/isGoogleSheetPdfExportUrl/.test(estimateRoute) &&
     !/\/spreadsheets\/d\/[^/]+\/export/.test(estimateRoute) &&
