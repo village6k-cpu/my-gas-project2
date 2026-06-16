@@ -338,8 +338,13 @@ export function setItemQty(tradeId: string, scheduleId: string, qty: number) {
     .catch((e) => console.error("[write-back] updateEquipQty 실패:", e));
 }
 export function setItemMemo(tradeId: string, scheduleId: string, phase: Phase, text: string) {
+  const memo = text.trim();
   mutateTrade(tradeId, (t) =>
-    mapItem(t, scheduleId, (e) => (phase === "checkout" ? { ...e, memoCheckout: text } : { ...e, memoCheckin: text })),
+    mapItem(t, scheduleId, (e) =>
+      phase === "checkout"
+        ? { ...e, memoCheckout: memo, memoCheckin: memo }
+        : { ...e, memoCheckout: memo, memoCheckin: memo },
+    ),
   );
   flashSave(tradeId);
 }

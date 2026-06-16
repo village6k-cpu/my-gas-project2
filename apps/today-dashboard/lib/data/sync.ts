@@ -149,8 +149,8 @@ function mergeDashboard(base: Trade, it: any): Trade {
         : prev?.onsite && prev?.checkoutState === "taken" ? "taken"
         : "pending",
       takenQty: prev?.takenQty,
-      memoCheckout: prev?.memoCheckout,
-      memoCheckin: prev?.memoCheckin,
+      memoCheckout: prev?.memoCheckout ?? prev?.memoCheckin,
+      memoCheckin: prev?.memoCheckin ?? prev?.memoCheckout,
       startShiftDays: prev?.startShiftDays,
       endShiftDays: prev?.endShiftDays,
       settlement: prev?.settlement,

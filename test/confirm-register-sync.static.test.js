@@ -276,8 +276,8 @@ console.log('contract-realtime checks OK');
 
 // ── 품목 메모는 접힌 상태에서도 항상 노출 (펼쳐야만 보이면 특이사항 누락) ──
 assert(
-  /\{!open && \(e\.memoCheckout \?\? ""\)\.trim\(\)/.test(read('apps/today-dashboard/components/HandoverChecklist.tsx')),
-  'item memos must be visible on collapsed rows, not only when expanded'
+  /function CheckoutRow\([\s\S]*const itemMemo = itemMemoText\(e\);[\s\S]*\{!open && itemMemo &&/.test(read('apps/today-dashboard/components/HandoverChecklist.tsx')),
+  'shared item memos must be visible on collapsed checkout rows, not only when expanded'
 );
 console.log('memo-visibility checks OK');
 
@@ -607,15 +607,50 @@ console.log('auto-clear checks OK');
 {
   const ret = read('apps/today-dashboard/components/ReturnChecklist.tsx');
   assert(
-    /e\.memoCheckout/.test(ret),
-    'ReturnChecklist must surface the checkout memo (memoCheckout) — return staff needs the handover note'
+    /function itemMemoText\(e: EquipmentItem\)[\s\S]*e\.memoCheckout[\s\S]{0,120}e\.memoCheckin/.test(ret),
+    'ReturnChecklist must surface the shared item memo including checkout memo — return staff needs the handover note'
   );
   assert(
-    /\{\(e\.memoCheckout \?\? ""\)\.trim\(\) &&[\s\S]{0,400}반출/.test(ret),
-    'checkout memo must be visible on the return row (always-on badge, not hidden behind expand)'
+    /\{itemMemo &&[\s\S]{0,400}특이사항/.test(ret),
+    'shared item memo must be visible on the return row (always-on badge, not hidden behind expand)'
   );
 }
 console.log('return-shows-checkout-memo checks OK');
+
+// ── 품목 특이사항 메모는 반출/반납 카드가 동일하게 보여야 함 + 양방향 동기화 ──
+{
+  const checkout = read('apps/today-dashboard/components/HandoverChecklist.tsx');
+  const ret = read('apps/today-dashboard/components/ReturnChecklist.tsx');
+  const store = read('apps/today-dashboard/lib/data/store.ts');
+  const sync = read('apps/today-dashboard/lib/data/sync.ts');
+
+  assert(
+    /function itemMemoText\(e: EquipmentItem\)/.test(checkout) &&
+      /e\.memoCheckout[\s\S]{0,120}e\.memoCheckin/.test(checkout),
+    'checkout card must compute one shared item memo from both checkout and checkin memo fields'
+  );
+  assert(
+    /function itemMemoText\(e: EquipmentItem\)/.test(ret) &&
+      /e\.memoCheckout[\s\S]{0,120}e\.memoCheckin/.test(ret),
+    'return card must compute the same shared item memo from both checkout and checkin memo fields'
+  );
+  assert(
+    /setItemMemo\(t\.tradeId, e\.scheduleId, "checkout", v\)/.test(checkout) &&
+      /setItemMemo\(t\.tradeId, e\.scheduleId, "checkin", v\)/.test(ret),
+    'each card must still save through its own phase so write-back provenance is preserved'
+  );
+  assert(
+    /phase === "checkout"[\s\S]{0,180}memoCheckout: memo[\s\S]{0,180}memoCheckin: memo/.test(store) &&
+      /:\s*\{ \.\.\.e, memoCheckout: memo, memoCheckin: memo \}/.test(store),
+    'setItemMemo must mirror item memos across checkout/checkin fields for immediate bidirectional card sync'
+  );
+  assert(
+    /memoCheckout: prev\?\.memoCheckout \?\? prev\?\.memoCheckin/.test(sync) &&
+      /memoCheckin: prev\?\.memoCheckin \?\? prev\?\.memoCheckout/.test(sync),
+    'sheet refresh merge must keep either side of an item memo available to both cards'
+  );
+}
+console.log('roundtrip-item-memo-sync checks OK');
 
 // ── 체크/제외/현장추가 동기화 — 전체 라운드트립 + 반납 카드 반영 가드 ──
 {

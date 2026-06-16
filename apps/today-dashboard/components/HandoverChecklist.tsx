@@ -153,10 +153,15 @@ function rowTint(e: EquipmentItem, excluded: boolean): string {
   return "";
 }
 
+function itemMemoText(e: EquipmentItem): string {
+  return String(e.memoCheckout || e.memoCheckin || "").trim();
+}
+
 function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean; setTone?: boolean }) {
   const taken = e.checkoutState === "taken";
   const excluded = e.checkoutState === "excluded";
   const partial = e.takenQty != null && e.takenQty !== e.qty;
+  const itemMemo = itemMemoText(e);
   return (
     <li className={`px-3 ${setTone ? "bg-brand-50" : rowTint(e, excluded)}`}>
       <div className="flex items-center gap-2.5 py-2.5">
@@ -186,10 +191,11 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         )}
       </div>
 
-      {!open && (e.memoCheckout ?? "").trim() && (
+      {!open && itemMemo && (
         <button onClick={onToggle} className="tap -mt-1 mb-2 ml-9 flex max-w-full items-start gap-1 rounded-md bg-warn-bg px-2 py-1 text-left text-[12px] font-bold leading-snug text-warn-fg ring-1 ring-warn-ring">
           <span aria-hidden>📝</span>
-          <span className="min-w-0 break-words">{e.memoCheckout}</span>
+          <span className="shrink-0">특이사항:</span>
+          <span className="min-w-0 break-words">{itemMemo}</span>
         </button>
       )}
 
@@ -211,7 +217,7 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
             예약 수량
             <Stepper value={e.qty} min={1} onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)} />
           </div>
-          <MemoInput value={e.memoCheckout ?? ""} onSave={(v) => setItemMemo(t.tradeId, e.scheduleId, "checkout", v)} placeholder="이 품목 반출 메모 (예: 본인 지참)" />
+          <MemoInput value={itemMemo} onSave={(v) => setItemMemo(t.tradeId, e.scheduleId, "checkout", v)} placeholder="이 품목 특이사항 (예: 본인 지참)" />
         </div>
       )}
     </li>
