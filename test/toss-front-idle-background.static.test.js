@@ -66,6 +66,14 @@ assert(
   'idle screen must hide only the Toss dev IP:port badge with a targeted DOM guard'
 );
 assert(
+  app.includes('village-dev-badge-mask') &&
+    css.includes('.village-dev-badge-mask') &&
+    css.includes('z-index: 2147483647') &&
+    css.includes('pointer-events: none') &&
+    css.includes('transform: translateX(-50%)'),
+  'idle screen must include a top-center mask as a fallback for Toss dev badges outside normal DOM text matching'
+);
+assert(
   app.includes('function inspectTossDevAddressMutationNode') &&
     app.includes('characterData: true') &&
     app.includes('mutation.target') &&

@@ -187,6 +187,7 @@ function renderVillageIdle() {
   document.body.classList.add('village-idle-page');
   root.className = 'village-idle';
   root.innerHTML = [
+    '<div class="village-dev-badge-mask" aria-hidden="true"></div>',
     '<section class="village-idle__content" aria-label="VILLAGE 셀프결제">',
     '  <img class="village-idle__logo" src="./assets/village-logo.png" alt="VILLAGE" />',
     '  <p class="village-idle__title">예약 조회 · 셀프 결제</p>',
