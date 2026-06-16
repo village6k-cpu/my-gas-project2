@@ -728,6 +728,79 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+const DASHBOARD_PHOTO_MAX_SIDE = 1600;
+const DASHBOARD_PHOTO_JPEG_QUALITY = 0.82;
+const DASHBOARD_PHOTO_MAX_DATA_URL_CHARS = 4_000_000;
+
+type DashboardPhotoUploadPayload = {
+  fileName: string;
+  mimeType: string;
+  data: string;
+};
+
+function loadDashboardPhotoImage_(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("사진을 압축할 수 없습니다"));
+    img.src = dataUrl;
+  });
+}
+
+async function prepareDashboardPhotoUpload_(file: File): Promise<DashboardPhotoUploadPayload> {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("이미지 파일만 업로드할 수 있습니다");
+  }
+
+  const original = await readFileAsDataUrl(file);
+  let img: HTMLImageElement;
+  try {
+    img = await loadDashboardPhotoImage_(original);
+  } catch (error) {
+    if (original.length <= DASHBOARD_PHOTO_MAX_DATA_URL_CHARS) {
+      return {
+        fileName: file.name || "photo.jpg",
+        mimeType: file.type || "image/jpeg",
+        data: original,
+      };
+    }
+    throw error;
+  }
+
+  const width = img.naturalWidth || img.width;
+  const height = img.naturalHeight || img.height;
+  if (!width || !height) throw new Error("사진 크기를 확인할 수 없습니다");
+
+  const attempts = [
+    { maxSide: DASHBOARD_PHOTO_MAX_SIDE, quality: DASHBOARD_PHOTO_JPEG_QUALITY },
+    { maxSide: 1280, quality: 0.78 },
+    { maxSide: 1024, quality: 0.72 },
+  ];
+  const baseName = (file.name || "photo").replace(/\.[^.]+$/, "") || "photo";
+
+  for (const { maxSide, quality } of attempts) {
+    const scale = Math.min(1, maxSide / Math.max(width, height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("사진 압축을 시작할 수 없습니다");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const data = canvas.toDataURL("image/jpeg", quality);
+    if (data.length <= DASHBOARD_PHOTO_MAX_DATA_URL_CHARS) {
+      return {
+        fileName: `${baseName}.jpg`,
+        mimeType: "image/jpeg",
+        data,
+      };
+    }
+  }
+
+  throw new Error("사진 용량이 너무 큽니다. 카메라 해상도를 낮추거나 다시 촬영해 주세요.");
+}
+
 export async function refreshTradePhotos(tradeId: string): Promise<void> {
   const res = await gasRead("dashboardPhotos", { tid: tradeId });
   const photos = flattenGasPhotos(res?.photos || res?.result?.photos);
@@ -736,13 +809,13 @@ export async function refreshTradePhotos(tradeId: string): Promise<void> {
 }
 
 export async function uploadTradePhoto(tradeId: string, phase: Phase, file: File): Promise<void> {
-  const data = await readFileAsDataUrl(file);
+  const upload = await prepareDashboardPhotoUpload_(file);
   const res = await gasMutation("uploadDashboardPhoto", {
     tid: tradeId,
     phase,
-    fileName: file.name || `${tradeId}-${phase}.jpg`,
-    mimeType: file.type || "image/jpeg",
-    data,
+    fileName: upload.fileName,
+    mimeType: upload.mimeType,
+    data: upload.data,
   });
   if (res?.skipped) throw new Error("사진 업로드 쓰기 경로가 비활성화되어 있습니다");
   const photo = normalizeGasPhoto(res?.photo || res?.result?.photo, phase, 0);
