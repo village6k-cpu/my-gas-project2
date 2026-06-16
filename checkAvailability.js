@@ -1471,7 +1471,7 @@ function getDashboardSearchClientIndex_() {
 
 function getDashboardSearchIndex_(ss, schedSheet, contractSheet) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_search_index_v9_' + getTimelineCacheVersion_() + '_' +
+  var cacheKey = 'dashboard_search_index_v10_' + getTimelineCacheVersion_() + '_' +
     getDashboardSearchCacheVersion_() + '_' + schedSheet.getLastRow();
   var cached = getDashboardCacheJson_(cache, cacheKey);
   if (cached && Array.isArray(cached.entries)) return cached;
@@ -1738,6 +1738,7 @@ function buildDashboardSearchText_(group, cust, extra, checkInfo) {
     extra.proofType,
     extra.issueStatus,
     extra.billingCompany,
+    extra.actualAmount,
     checkInfo.returnStatus,
     checkInfo.returnMemo
   ];
@@ -4473,6 +4474,7 @@ function updateTradePaymentMethod(tid, method) {
     warning = "거래내역 결제수단 반영 실패: " + err.message;
   }
   invalidateDashboardTradeExtraCache_([tid]);
+  touchDashboardSearchCacheVersion_();
   invalidateDashboardCache();
   return {
     success: wroteSheet,

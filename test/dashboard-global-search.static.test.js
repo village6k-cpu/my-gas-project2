@@ -22,7 +22,7 @@ assert.match(
 
 assert.match(
   backend,
-  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v9_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
+  /function getDashboardSearchIndex_\(ss,\s*schedSheet,\s*contractSheet\)[\s\S]*dashboard_search_index_v10_[\s\S]*putDashboardCacheJson_\(cache,\s*cacheKey,\s*index,\s*300\)/,
   'global search must cache the expensive all-reservation search index'
 );
 
@@ -78,6 +78,18 @@ assert.match(
   backend,
   /function compactDashboardSearchTextParts_\(parts\)[\s\S]*seen\[token\][\s\S]*out\.push\(token\)/,
   'global search index text must dedupe repeated normalized tokens'
+);
+
+assert.match(
+  backend,
+  /function buildDashboardSearchText_\(group,\s*cust,\s*extra,\s*checkInfo\)[\s\S]*extra\.actualAmount/,
+  'global search text must include actual paid amount so Toss exact-amount writeback can find unpaid trades'
+);
+
+assert.match(
+  backend,
+  /function updateTradePaymentMethod\(tid,\s*method\)[\s\S]*invalidateDashboardTradeExtraCache_\(\[tid\]\)[\s\S]*touchDashboardSearchCacheVersion_\(\)[\s\S]*invalidateDashboardCache\(\)/,
+  'payment updates must invalidate the search index because deposit status and payment method are indexed'
 );
 
 assert.doesNotMatch(
