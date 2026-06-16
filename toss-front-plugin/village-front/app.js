@@ -123,6 +123,45 @@ function installTossDevAddressBadgeGuard() {
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
+function openTossFrontSettings() {
+  if (sdk && sdk.app && typeof sdk.app.openSetting === 'function') {
+    return sdk.app.openSetting();
+  }
+  console.warn('[village] sdk.app.openSetting 사용 불가');
+}
+
+function installTossSettingsHotzone() {
+  var zone = document.getElementById('village-settings-hotzone');
+  if (!zone) return;
+
+  var settingsTapCount = 0;
+  var firstSettingsTapAt = 0;
+  var resetAfterMs = 2500;
+
+  function onSettingsTap(event) {
+    if (event && event.preventDefault) event.preventDefault();
+    var now = Date.now();
+    if (!firstSettingsTapAt || now - firstSettingsTapAt > resetAfterMs) {
+      firstSettingsTapAt = now;
+      settingsTapCount = 0;
+    }
+
+    settingsTapCount += 1;
+    if (settingsTapCount >= 5) {
+      settingsTapCount = 0;
+      firstSettingsTapAt = 0;
+      openTossFrontSettings();
+    }
+  }
+
+  if (window.PointerEvent) {
+    zone.onpointerup = onSettingsTap;
+  } else {
+    zone.ontouchend = onSettingsTap;
+    zone.onclick = onSettingsTap;
+  }
+}
+
 function leaveVillageIdle() {
   document.body.classList.remove('village-idle-page');
   var root = document.getElementById('app');
@@ -146,6 +185,7 @@ function renderVillageIdle() {
     '    <button id="village-reservation-button" class="village-idle__button village-idle__button--secondary" type="button">예약번호로 결제</button>',
     '    <button id="village-amount-button" class="village-idle__button village-idle__button--tertiary" type="button">금액 직접 결제</button>',
     '  </div>',
+    '  <button id="village-settings-hotzone" class="village-settings-hotzone" type="button" aria-label="설정" tabindex="-1"></button>',
     '</section>',
   ].join('');
 
@@ -158,6 +198,7 @@ function renderVillageIdle() {
   document.getElementById('village-amount-button').onclick = function () {
     showManualAmountInput();
   };
+  installTossSettingsHotzone();
 }
 
 // ──────────────────────────────────────────────────────────────
