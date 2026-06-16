@@ -388,6 +388,10 @@ console.log('checkout-guide-self-payment-copy checks OK');
     /sendAlimtalk\(tpl, 연락처, 고객명, msg, vars, btns, \{ altSendType: '' \}\)/.test(testFn),
     'register alimtalk test sends must block Popbill SMS/LMS fallback'
   );
+  assert(
+    /myPagePrimeFastCaches_\(tid\)/.test(testFn),
+    'register alimtalk test sends must prewarm my-page caches so the tester does not wait on first open'
+  );
 }
 console.log('register-alimtalk-test-tool checks OK');
 
@@ -406,6 +410,10 @@ console.log('register-alimtalk-test-tool checks OK');
   assert(
     /sendAlimtalk\(tpl, String\(연락처\), String\(예약자명\), msg, vars, btns, \{ altSendType: '' \}\)/.test(registerFn),
     'register-complete alimtalk must never fall back to SMS/LMS when Kakao delivery is unavailable'
+  );
+  assert(
+    /myPagePrimeFastCaches_\(거래ID\)/.test(registerFn),
+    'register-complete alimtalk must prewarm my-page caches before the customer opens the link'
   );
   assert(
     /function _alimtalkAccepted_\(res\)/.test(ca) && /res\.receiptNum/.test(ca),

@@ -9639,6 +9639,7 @@ function sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출
     Logger.log('⚠️ 등록완료 알림톡 접수 실패: ' + 거래ID + ' → ' + JSON.stringify(res));
     return { error: (res && res.message) || '팝빌 접수 실패', popbill: res };
   }
+  try { myPagePrimeFastCaches_(거래ID); } catch (warmErr) {}
   props.setProperty(sentFlag, Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm'));
   Logger.log('✅ 등록완료 알림톡: ' + 거래ID + ' ' + 예약자명 + ' → ' + JSON.stringify(res));
   return { sent: true };
@@ -9668,6 +9669,7 @@ function testRegisterAlimtalk(args) {
   var btns = [{ n: '내 예약 확인', t: 'WL', u1: link.url, u2: link.url }];
   try {
     var res = sendAlimtalk(tpl, 연락처, 고객명, msg, vars, btns, { altSendType: '' });
+    try { myPagePrimeFastCaches_(tid); } catch (warmErr) {}
     return { success: true, popbill: res, template: tpl, link: link.url };
   } catch (e) {
     return { error: e.message, template: tpl };

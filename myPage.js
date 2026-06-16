@@ -412,6 +412,40 @@ function myPageContractPdfExportUrl_(tradeId) {
   }
 }
 
+function myPagePrimeFastCaches_(id) {
+  id = String(id || "").trim();
+  if (!id) return { success: false, error: "id 필수" };
+
+  var token = id + "." + myPageSig_(id);
+  var warmed = { success: true, id: id, reservation: false, estimate: false, publicApi: false };
+
+  try {
+    getMyReservation(token);
+    warmed.reservation = true;
+  } catch (e) {}
+
+  if (id.indexOf("RQ-") !== 0) {
+    try {
+      var exportUrl = myPageContractPdfExportUrl_(id);
+      if (exportUrl) {
+        myPagePutCachedJson_(myPageEstimateCacheKey_(id), { pdfUrl: exportUrl }, MYPAGE_ESTIMATE_CACHE_SECONDS_);
+        warmed.estimate = true;
+      }
+    } catch (estimateErr) {}
+  }
+
+  try {
+    var cfg = MYPAGE_CFG_();
+    if (cfg.baseUrl) {
+      var publicUrl = cfg.baseUrl + "/api/my?t=" + encodeURIComponent(token);
+      UrlFetchApp.fetch(publicUrl, { method: "get", muteHttpExceptions: true });
+      warmed.publicApi = true;
+    }
+  } catch (publicErr) {}
+
+  return warmed;
+}
+
 function getMyReservationEstimatePdf(token) {
   var id = myPageVerify_(token);
   if (!id) return { success: false, error: "유효하지 않은 링크입니다" };
