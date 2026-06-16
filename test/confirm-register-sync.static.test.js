@@ -211,7 +211,7 @@ console.log('audit-round-8 checks OK');
 
 // ── 감사 9차: 취소 거래는 작업 카드·타임라인 점유에서 제외 ──
 assert(
-  read('apps/today-dashboard/lib/domain/status.ts').includes('t.contractStatus !== "취소"'),
+  read('apps/today-dashboard/lib/domain/status.ts').includes('!isCancelledTrade(t)'),
   'cancelled trades must be excluded from today work cards'
 );
 assert(

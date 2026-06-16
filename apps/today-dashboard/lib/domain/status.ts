@@ -212,21 +212,25 @@ export function needsAttention(t: Trade, date: string): boolean {
   return false;
 }
 
+export function isCancelledTrade(t: Trade): boolean {
+  return t.contractStatus === "취소";
+}
+
 export function tradesForTab(trades: Trade[], date: string, tab: TabKey): Trade[] {
-  // 취소 거래는 작업 카드에서 제외 (검색 이벤트에서는 계속 노출 — 이력 확인용)
-  let list = trades.filter((t) => t.contractStatus !== "취소");
+  // 취소 거래는 오조작 방지를 위해 오늘일정 작업 카드에서 제외한다.
+  let list = trades.filter((t) => !isCancelledTrade(t));
   if (tab === "checkout") {
-    list = trades.filter((t) => {
+    list = list.filter((t) => {
       const p = phaseForDate(t, date);
       return p === "checkout" || p === "both";
     });
   } else if (tab === "checkin") {
-    list = trades.filter((t) => {
+    list = list.filter((t) => {
       const p = phaseForDate(t, date);
       return p === "checkin" || p === "both";
     });
   } else if (tab === "attention") {
-    list = trades.filter((t) => needsAttention(t, date));
+    list = list.filter((t) => needsAttention(t, date));
   }
   return [...list].sort((a, b) => {
     const ka = tab === "checkin" ? a.returnAt : a.checkoutAt;
@@ -281,6 +285,7 @@ export function searchTradeEvents(trades: Trade[], query: string): TradeSearchEv
   if (!needle) return [];
 
   const events = trades
+    .filter((t) => !isCancelledTrade(t))
     .filter((t) => normalizeSearchText(tradeSearchText(t)).includes(needle))
     .flatMap((t) => [searchEventFor(t, "checkout"), searchEventFor(t, "checkin")]);
 
@@ -307,7 +312,7 @@ export function tabCounts(trades: Trade[], date: string): Record<TabKey, number>
   return {
     checkout: tradesForTab(trades, date, "checkout").length,
     checkin: tradesForTab(trades, date, "checkin").length,
-    all: trades.length,
+    all: tradesForTab(trades, date, "all").length,
     attention: tradesForTab(trades, date, "attention").length,
   };
 }

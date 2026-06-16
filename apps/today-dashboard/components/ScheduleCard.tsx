@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { TabKey, Trade } from "@/lib/domain/types";
-import { phaseForDate, setupProgress, timeLabel } from "@/lib/domain/status";
+import { isCancelledTrade, phaseForDate, setupProgress, timeLabel } from "@/lib/domain/status";
 import { toggleReturn, toggleSetup } from "@/lib/data/store";
 import { HandoverChecklist } from "./HandoverChecklist";
 import { RiskPanel } from "./RiskPanel";
@@ -42,6 +42,7 @@ export function ScheduleCard({
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const cancelled = isCancelledTrade(trade);
   const phase = displayPhase(trade, date, tab);
   const isCheckout = phase === "checkout";
   const done = isCheckout ? trade.setupDone : trade.returnDone;
@@ -55,6 +56,8 @@ export function ScheduleCard({
   useEffect(() => {
     if (done) setOpen(false);
   }, [done]);
+
+  if (cancelled) return null;
 
   return (
     <div
