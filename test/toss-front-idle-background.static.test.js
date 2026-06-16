@@ -57,29 +57,12 @@ assert(
   'idle screen CSS must not hide every element injected outside #app because Toss settings overlays may live there'
 );
 assert(
-  app.includes('function hideTossDevAddressBadges') &&
-    app.includes('function installTossDevAddressBadgeGuard') &&
-    app.includes('MutationObserver') &&
-    app.includes('data-village-hidden-dev-address') &&
-    /\\d\{1,3\}\\\./.test(app) &&
-    app.includes(':\\d{2,5}'),
-  'idle screen must hide only the Toss dev IP:port badge with a targeted DOM guard'
-);
-assert(
-  app.includes('village-dev-badge-mask') &&
-    css.includes('.village-dev-badge-mask') &&
-    css.includes('z-index: 2147483647') &&
-    css.includes('pointer-events: none') &&
-    css.includes('transform: translateX(-50%)'),
-  'idle screen must include a top-center mask as a fallback for Toss dev badges outside normal DOM text matching'
-);
-assert(
-  app.includes('function inspectTossDevAddressMutationNode') &&
-    app.includes('characterData: true') &&
-    app.includes('mutation.target') &&
-    app.includes('parentElement') &&
-    app.includes('setInterval(function () { hideTossDevAddressBadges(document.body); }'),
-  'dev IP:port badge guard must also catch badges whose text is filled after the element is inserted'
+  !app.includes('hideTossDevAddressBadges') &&
+    !app.includes('installTossDevAddressBadgeGuard') &&
+    !app.includes('data-village-hidden-dev-address') &&
+    !app.includes('village-dev-badge-mask') &&
+    !css.includes('.village-dev-badge-mask'),
+  'idle screen must not try to hide the Toss native dev IP badge because those attempts crop the VILLAGE logo'
 );
 assert(
   buildZip.includes('idle.css') &&

@@ -77,63 +77,6 @@ function ensureAppRoot() {
   return root;
 }
 
-function isTossDevAddressText(text) {
-  var normalized = String(text || '').replace(/\s+/g, ' ').trim();
-  return /(?:^|[^\d])(?:https?:\/\/)?(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}(?:\/)?(?:$|[^\d])/.test(
-    normalized
-  );
-}
-
-function shouldHideTossDevAddressElement(el) {
-  if (!el || el === document.documentElement || el === document.body || el.id === 'app') return false;
-  var tag = String(el.tagName || '').toLowerCase();
-  if (tag === 'script' || tag === 'style' || tag === 'link' || tag === 'meta') return false;
-  if (el.querySelector && el.querySelector('#app')) return false;
-  if (el.children && el.children.length > 4) return false;
-  var text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
-  if (text.length > 96) return false;
-  return isTossDevAddressText(text);
-}
-
-function hideTossDevAddressBadges(root) {
-  var scope = root && root.querySelectorAll ? root : document.body;
-  if (!scope) return;
-
-  var nodes = [];
-  if (scope.nodeType === 1) nodes.push(scope);
-  if (scope.querySelectorAll) {
-    Array.prototype.push.apply(nodes, Array.prototype.slice.call(scope.querySelectorAll('*')));
-  }
-
-  nodes.forEach(function (el) {
-    if (!shouldHideTossDevAddressElement(el)) return;
-    el.setAttribute('data-village-hidden-dev-address', '1');
-    el.style.setProperty('display', 'none', 'important');
-  });
-}
-
-function inspectTossDevAddressMutationNode(node) {
-  if (!node) return;
-  if (node.nodeType === 1) hideTossDevAddressBadges(node);
-  if (node.parentElement) hideTossDevAddressBadges(node.parentElement);
-}
-
-function installTossDevAddressBadgeGuard() {
-  hideTossDevAddressBadges(document.body);
-  if (!window.MutationObserver || !document.body) return;
-
-  var observer = new MutationObserver(function (mutations) {
-    mutations.forEach(function (mutation) {
-      inspectTossDevAddressMutationNode(mutation.target);
-      Array.prototype.forEach.call(mutation.addedNodes || [], function (node) {
-        inspectTossDevAddressMutationNode(node);
-      });
-    });
-  });
-  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-  setInterval(function () { hideTossDevAddressBadges(document.body); }, 1000);
-}
-
 function openTossFrontSettings() {
   if (sdk && sdk.app && typeof sdk.app.openSetting === 'function') {
     return sdk.app.openSetting();
@@ -187,7 +130,6 @@ function renderVillageIdle() {
   document.body.classList.add('village-idle-page');
   root.className = 'village-idle';
   root.innerHTML = [
-    '<div class="village-dev-badge-mask" aria-hidden="true"></div>',
     '<section class="village-idle__content" aria-label="VILLAGE 셀프결제">',
     '  <img class="village-idle__logo" src="./assets/village-logo.png" alt="VILLAGE" />',
     '  <p class="village-idle__title">예약 조회 · 셀프 결제</p>',
@@ -549,7 +491,6 @@ async function recoverPending() {
 }
 
 (async function init() {
-  installTossDevAddressBadgeGuard();
   if (!sdk || !sdk.template) {
     var el = document.getElementById('app');
     if (el) el.innerText = 'TossFrontSDK 로드 실패 — 단말기/네트워크를 확인하세요.';

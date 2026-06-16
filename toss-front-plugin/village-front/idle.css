@@ -127,18 +127,6 @@ body.village-idle-page {
   background: #191919;
 }
 
-.village-dev-badge-mask {
-  position: fixed;
-  top: 0;
-  left: 50%;
-  z-index: 2147483647;
-  width: min(460px, 72vw);
-  height: 92px;
-  transform: translateX(-50%);
-  pointer-events: none;
-  background: #f6f4f0;
-}
-
 .village-settings-hotzone {
   position: fixed;
   top: 0;
