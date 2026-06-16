@@ -448,6 +448,11 @@ function handleRequest(e) {
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
+      case "sendPayAppPaymentLink":
+        return jsonResponse(requestPayAppPaymentLink(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId
+        ));
+
       case "regenerateContract":
         var contractExtraText =
           params.extraText !== undefined ? params.extraText :

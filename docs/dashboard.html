@@ -4187,6 +4187,7 @@ function cardActionHtml(item, cardType) {
   }
   html += '<button class="trade-action-btn" onclick="event.stopPropagation();runTradeOpsAction(this,\'' + escJs(item.tradeId) + '\',\'sendEstimate\')">견적서 발송</button>';
   html += '<button class="trade-action-btn" onclick="event.stopPropagation();runTradeOpsAction(this,\'' + escJs(item.tradeId) + '\',\'sendStatement\')">거래명세서 발송</button>';
+  html += '<button class="trade-action-btn" onclick="event.stopPropagation();runTradeOpsAction(this,\'' + escJs(item.tradeId) + '\',\'sendPayAppPaymentLink\')">결제링크 발송</button>';
   if (cardType === 'checkin' && item.tradeId) {
     html += '<button class="trade-action-btn danger" onclick="event.stopPropagation();cancelDashboardTrade(this,\'' + escJs(item.tradeId) + '\',\'' + escJs(item.name || item.tradeId) + '\')">취소처리</button>';
   }
@@ -4359,8 +4360,9 @@ function updateTradeProofField(event, select, tradeId, field) {
 function runTradeOpsAction(button, tradeId, action) {
   var isIssue = action === 'issueProof';
   var isStatement = action === 'sendStatement';
-  var failureLabel = isIssue ? '계산서 발행 실패: ' : isStatement ? '거래명세서 발송 실패: ' : '견적서 발송 실패: ';
-  var successLabel = isIssue ? '계산서 발행 요청 완료' : isStatement ? '거래명세서 발송 요청 완료' : '견적서 발송 요청 완료';
+  var isPayApp = action === 'sendPayAppPaymentLink';
+  var failureLabel = isIssue ? '계산서 발행 실패: ' : isStatement ? '거래명세서 발송 실패: ' : isPayApp ? '결제링크 발송 실패: ' : '견적서 발송 실패: ';
+  var successLabel = isIssue ? '계산서 발행 요청 완료' : isStatement ? '거래명세서 발송 요청 완료' : isPayApp ? '결제링크 발송 완료' : '견적서 발송 요청 완료';
   if (isIssue && !confirm('이 거래건의 계산서/현금영수증을 실제 발행할까요?')) return;
   if (isStatement && !confirm('이 거래건의 거래명세서를 발송할까요?')) return;
 

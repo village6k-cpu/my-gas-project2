@@ -616,6 +616,26 @@ export async function sendStatement(tradeId: string) {
   }
 }
 
+export async function sendPayAppPaymentLink(tradeId: string) {
+  mutateTrade(tradeId, (t) => ({ ...t, issueNote: "결제링크 발송 요청 중..." }));
+  flashSave(tradeId);
+  try {
+    const res = await gasMutation("sendPayAppPaymentLink", { tid: tradeId });
+    const result = res?.result || res || {};
+    mutateTrade(tradeId, (t) => ({
+      ...t,
+      issueNote: result.message || "결제링크 발송 완료",
+    }));
+    flashSave(tradeId);
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    mutateTrade(tradeId, (t) => ({ ...t, issueNote: message }));
+    flashSave(tradeId);
+    throw err;
+  }
+}
+
 export async function regenerateContract(tradeId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, contractRegenPending: true }));
   flashSave(tradeId);

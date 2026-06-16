@@ -6,6 +6,7 @@ import {
   regenerateContract,
   requestProofIssue,
   sendEstimate,
+  sendPayAppPaymentLink,
   sendStatement,
   setBillingCompany,
   setDepositStatus,
@@ -95,6 +96,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
   const [confirmingStatement, setConfirmingStatement] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [issuing, setIssuing] = useState(false);
+  const [sendingPayAppLink, setSendingPayAppLink] = useState(false);
   const [sendingStatement, setSendingStatement] = useState(false);
   const options = usePaymentControlOptions();
   const isTax = trade.proofType === "세금계산서";
@@ -198,6 +200,22 @@ export function PaymentControls({ trade }: { trade: Trade }) {
             >
               <Send className="h-3.5 w-3.5" />
               {sendingStatement ? "발송 중..." : trade.statementSent ? "거래명세서 발송됨" : "거래명세서 발송"}
+            </button>
+            <button
+              type="button"
+              disabled={sendingPayAppLink}
+              onClick={() => {
+                if (sendingPayAppLink) return;
+                setSendingPayAppLink(true);
+                sendPayAppPaymentLink(trade.tradeId)
+                  .then((result) => window.alert(result?.message || "결제링크 발송 완료"))
+                  .catch((err) => window.alert("결제링크 발송 실패: " + (err instanceof Error ? err.message : String(err))))
+                  .finally(() => setSendingPayAppLink(false));
+              }}
+              className="tap inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-[13px] font-bold text-ink-soft ring-1 ring-line disabled:bg-paper disabled:text-ink-faint"
+            >
+              <Send className="h-3.5 w-3.5" />
+              {sendingPayAppLink ? "발송 중..." : "결제링크 발송"}
             </button>
             <a
               href={trade.contractUrl ?? undefined}

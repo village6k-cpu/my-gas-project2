@@ -4628,6 +4628,144 @@ function requestTradeStatement(tid) {
   return callVillageOpsApi_("sendStatement", tid);
 }
 
+function requestPayAppPaymentLink(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { error: 'tid 필요' };
+
+  var request = buildPayAppPaymentRequest_(tid);
+  if (request.error) return request;
+
+  var response;
+  try {
+    response = UrlFetchApp.fetch('https://api.payapp.kr/oapi/apiLoad.html', {
+      method: 'post',
+      payload: request.payload,
+      muteHttpExceptions: true
+    });
+  } catch (err) {
+    return { error: 'PayApp 결제요청 실패: ' + err.message };
+  }
+
+  var status = response.getResponseCode();
+  var body = response.getContentText();
+  var parsed = parsePayAppQueryResponse_(body);
+  if (status < 200 || status >= 300) {
+    return { error: 'PayApp 응답 오류 (' + status + '): ' + body };
+  }
+  if (String(parsed.state || '') !== '1') {
+    return { error: 'PayApp 결제요청 실패: ' + (parsed.errorMessage || body || 'unknown') };
+  }
+
+  var payurl = String(parsed.payurl || '').trim();
+  var mulNo = String(parsed.mul_no || '').trim();
+  rememberPayAppPaymentRequest_(tid, {
+    tid: tid,
+    mulNo: mulNo,
+    payurl: payurl,
+    amount: request.amount,
+    phone: request.phone,
+    customerName: request.customerName,
+    requestedAt: Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss')
+  });
+
+  return {
+    success: true,
+    tid: tid,
+    mulNo: mulNo,
+    payurl: payurl,
+    amount: request.amount,
+    phoneMasked: maskPhoneForDisplay_(request.phone),
+    message: '결제링크 발송 완료: ' + request.customerName + ' / ' + formatWon_(request.amount) + ' / ' + maskPhoneForDisplay_(request.phone)
+  };
+}
+
+function buildPayAppPaymentRequest_(tid) {
+  var props = PropertiesService.getScriptProperties();
+  var userid = String(props.getProperty('PAYAPP_USERID') || '').trim();
+  if (!userid) return { error: 'PAYAPP_USERID 미설정: 페이앱 판매자 아이디를 Script Properties에 넣어주세요.' };
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var contractSheet = ss.getSheetByName('계약마스터');
+  var cust = getDashboardContractMapForIds_(contractSheet, [tid])[tid] || {};
+  var customerName = String(cust.name || tid).trim();
+  var phone = normalizePayAppPhone_(cust.tel || '');
+  if (!phone) return { error: '계약마스터 연락처가 없어 결제링크를 보낼 수 없습니다: ' + tid };
+
+  var extra = getTradeExtrasForIds_([tid])[tid] || {};
+  var amount = Number(extra.actualAmount || 0);
+  if (!amount || isNaN(amount)) return { error: '거래내역 I열 실 결제금액이 없어 결제링크를 만들 수 없습니다: ' + tid };
+  amount = Math.round(amount);
+  if (amount < 1000) return { error: 'PayApp 결제요청 최소금액은 1,000원입니다: ' + formatWon_(amount) };
+
+  var goodname = String(props.getProperty('PAYAPP_GOODNAME_PREFIX') || 'VILLAGE 렌탈 결제').trim();
+  var memo = customerName + ' / ' + tid;
+  var openpaytype = String(props.getProperty('PAYAPP_OPENPAYTYPE') || 'card').trim();
+  var feedbackurl = String(props.getProperty('PAYAPP_FEEDBACK_URL') || '').trim();
+  var returnurl = String(props.getProperty('PAYAPP_RETURN_URL') || '').trim();
+
+  var payload = {
+    cmd: 'payrequest',
+    userid: userid,
+    goodname: goodname + ' (' + tid + ')',
+    price: String(amount),
+    recvphone: phone,
+    memo: memo,
+    reqaddr: '0',
+    smsuse: String(props.getProperty('PAYAPP_SMS_USE') || 'y').trim() || 'y',
+    openpaytype: openpaytype,
+    checkretry: feedbackurl ? 'y' : 'n',
+    var1: tid,
+    var2: customerName
+  };
+  if (feedbackurl) payload.feedbackurl = feedbackurl;
+  if (returnurl) payload.returnurl = returnurl;
+
+  return {
+    payload: payload,
+    amount: amount,
+    phone: phone,
+    customerName: customerName
+  };
+}
+
+function parsePayAppQueryResponse_(body) {
+  var out = {};
+  String(body || '').split('&').forEach(function(part) {
+    if (!part) return;
+    var eq = part.indexOf('=');
+    var key = eq >= 0 ? part.slice(0, eq) : part;
+    var value = eq >= 0 ? part.slice(eq + 1) : '';
+    key = decodeURIComponent(String(key || '').replace(/\+/g, ' '));
+    value = decodeURIComponent(String(value || '').replace(/\+/g, ' '));
+    out[key] = value;
+  });
+  return out;
+}
+
+function normalizePayAppPhone_(value) {
+  var digits = String(value || '').replace(/[^0-9]/g, '');
+  if (digits.indexOf('82') === 0 && digits.length >= 11) digits = '0' + digits.slice(2);
+  return digits;
+}
+
+function maskPhoneForDisplay_(phone) {
+  var digits = String(phone || '').replace(/[^0-9]/g, '');
+  if (digits.length < 7) return digits;
+  return digits.slice(0, 3) + '-****-' + digits.slice(-4);
+}
+
+function formatWon_(amount) {
+  amount = Number(amount || 0);
+  return Utilities.formatString('%s원', amount.toLocaleString ? amount.toLocaleString('ko-KR') : String(amount));
+}
+
+function rememberPayAppPaymentRequest_(tid, info) {
+  try {
+    var key = 'PAYAPP_REQ_' + String(tid || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
+    PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(info || {}));
+  } catch (err) {}
+}
+
 function requestTradeProofIssue(tid) {
   var ready = validateTradeProofIssueReady_(tid);
   if (ready && ready.error) return ready;
