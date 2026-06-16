@@ -170,6 +170,73 @@ function copyBlankCellsFromRow_(sheet, sourceRow, targetRow, col, width) {
   }
 }
 
+function scheduleDetailContractRegenColumnsTouched_(startCol, colCount) {
+  var endCol = startCol + (Number(colCount) || 1) - 1;
+  // B:I = 거래ID/품목/수량/일시, L = 단가. 계약서 생성 입력값만 대상으로 한다.
+  return !(endCol < 2 || startCol > 12) && (
+    !(endCol < 2 || startCol > 9) ||
+    (startCol <= 12 && endCol >= 12)
+  );
+}
+
+function queueScheduleDetailContractRegensForRows_(sheet, rows, extraTradeIds) {
+  if (!sheet || sheet.getName() !== "스케줄상세") return [];
+
+  var rowSeen = {};
+  var cleanRows = [];
+  (rows || []).forEach(function(r) {
+    var rowNum = Number(r);
+    if (rowNum < 2 || rowSeen[rowNum]) return;
+    rowSeen[rowNum] = true;
+    cleanRows.push(rowNum);
+  });
+
+  var tradeIds = {};
+  function addTradeId(raw) {
+    var tradeId = String(raw || "").trim();
+    if (tradeId) tradeIds[tradeId] = true;
+  }
+
+  (extraTradeIds || []).forEach(addTradeId);
+
+  if (cleanRows.length > 0) {
+    var minRow = Math.min.apply(null, cleanRows);
+    var maxRow = Math.max.apply(null, cleanRows);
+    var bValues = sheet.getRange(minRow, 2, maxRow - minRow + 1, 1).getValues();
+    cleanRows.forEach(function(rowNum) {
+      addTradeId(bValues[rowNum - minRow][0]);
+    });
+  }
+
+  var queued = [];
+  Object.keys(tradeIds).forEach(function(tradeId) {
+    scheduleContractRegen(tradeId);
+    queued.push(tradeId);
+  });
+  return queued;
+}
+
+function queueScheduleDetailContractRegensForEdit_(sheet, range, oldValue) {
+  if (!sheet || sheet.getName() !== "스케줄상세" || !range) return [];
+
+  var row = range.getRow();
+  var rowCount = range.getNumRows ? range.getNumRows() : 1;
+  var col = range.getColumn();
+  var colCount = range.getNumColumns ? range.getNumColumns() : 1;
+  if (row + rowCount - 1 < 2) return [];
+  if (!scheduleDetailContractRegenColumnsTouched_(col, colCount)) return [];
+
+  var rows = [];
+  var startRow = Math.max(row, 2);
+  for (var r = startRow; r <= row + rowCount - 1; r++) rows.push(r);
+
+  var extraTradeIds = [];
+  if (col === 2 && colCount === 1 && rowCount === 1 && oldValue) {
+    extraTradeIds.push(oldValue);
+  }
+  return queueScheduleDetailContractRegensForRows_(sheet, rows, extraTradeIds);
+}
+
 /**
  * Installable trigger 전용 함수
  * N열(14) "등록" 처리 → 개고생2.0 거래내역 쓰기 포함
@@ -247,14 +314,13 @@ function onEditInstallable(e) {
     }
   }
 
-  // 스케줄상세 수정 시 계약서 재생성 (디바운스) — 품목/수량(C~E) + 반출·반납 일시(F~I) + 단가(L)
-  // 일시·단가도 계약서에 찍히는 값이라 함께 재생성해야 함
-  if (sheet.getName() === "스케줄상세" && ((col >= 3 && col <= 9) || col === 12) && row >= 2) {
+  // 스케줄상세 수정 시 계약서 재생성 (디바운스) — 거래ID/품목/수량/일시/단가(B~I, L)
+  // 일시·단가도 계약서에 찍히는 값이라 함께 재생성해야 함. 여러 행 붙여넣기도 모두 처리.
+  if (sheet.getName() === "스케줄상세" && row >= 2) {
     try {
-      var 거래ID = sheet.getRange(row, 2).getValue();  // B열: 거래ID
-      if (거래ID) {
-        scheduleContractRegen(String(거래ID).trim());
-        Logger.log("스케줄상세 수정 → 계약서 재생성 예약: " + 거래ID);
+      var queuedTradeIds = queueScheduleDetailContractRegensForEdit_(sheet, e.range, e.oldValue);
+      if (queuedTradeIds.length > 0) {
+        Logger.log("스케줄상세 수정 → 계약서 재생성 예약: " + queuedTradeIds.join(", "));
       }
     } catch (err) {
       Logger.log("스케줄상세 수정 → 재생성 예약 실패: " + err.message);

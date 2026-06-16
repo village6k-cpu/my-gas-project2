@@ -790,12 +790,18 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
     sheet.getRange(r, 9).setNumberFormat("@").setValue(endTime);      // I: 반납시간
   });
 
+  var queuedContractRegens = [];
+  try {
+    queuedContractRegens = queueScheduleDetailContractRegensForRows_(sheet, rows);
+  } catch (eRegen) {
+    Logger.log("타임라인 일정 변경 → 계약서 재생성 예약 실패: " + eRegen.message);
+  }
   supaMarkScheduleRowsDirty_(sheet, rows); // 스크립트 쓰기 — Supabase 동기화 표시
   // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh (드래그된 날짜 포함)
   try { invalidateDashboardCache([newStart, newEnd]); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 
-  return { success: true };
+  return { success: true, contractRegenPending: true, contractRegenTradeIds: queuedContractRegens };
 }
 
 

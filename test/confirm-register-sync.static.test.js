@@ -257,7 +257,9 @@ console.log('timeline-dup hotfix checks OK');
 // ── 계약서 실시간 반영: 재생성 트리거 범위 + 새 링크 전파 ──
 const codeJs12 = read('Code.js');
 assert(
-  codeJs12.includes('((col >= 3 && col <= 9) || col === 12)') &&
+  /function queueScheduleDetailContractRegensForEdit_/.test(codeJs12) &&
+    /scheduleDetailContractRegenColumnsTouched_/.test(codeJs12) &&
+    /queueScheduleDetailContractRegensForEdit_\(sheet,\s*e\.range,\s*e\.oldValue\)/.test(codeJs12) &&
     /계약마스터" && col >= 2 && col <= 4/.test(codeJs12),
   'contract regen must also trigger on 스케줄상세 dates/price and 계약마스터 customer-info edits'
 );
