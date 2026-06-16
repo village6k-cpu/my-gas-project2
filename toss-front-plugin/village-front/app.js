@@ -78,8 +78,9 @@ function ensureAppRoot() {
 }
 
 function isTossDevAddressText(text) {
-  return /^[^\d]{0,4}\s*(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}$/.test(
-    String(text || '').replace(/\s+/g, ' ').trim()
+  var normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  return /(?:^|[^\d])(?:https?:\/\/)?(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}(?:\/)?(?:$|[^\d])/.test(
+    normalized
   );
 }
 
@@ -89,7 +90,9 @@ function shouldHideTossDevAddressElement(el) {
   if (tag === 'script' || tag === 'style' || tag === 'link' || tag === 'meta') return false;
   if (el.querySelector && el.querySelector('#app')) return false;
   if (el.children && el.children.length > 4) return false;
-  return isTossDevAddressText(el.textContent);
+  var text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+  if (text.length > 96) return false;
+  return isTossDevAddressText(text);
 }
 
 function hideTossDevAddressBadges(root) {
@@ -109,18 +112,26 @@ function hideTossDevAddressBadges(root) {
   });
 }
 
+function inspectTossDevAddressMutationNode(node) {
+  if (!node) return;
+  if (node.nodeType === 1) hideTossDevAddressBadges(node);
+  if (node.parentElement) hideTossDevAddressBadges(node.parentElement);
+}
+
 function installTossDevAddressBadgeGuard() {
   hideTossDevAddressBadges(document.body);
   if (!window.MutationObserver || !document.body) return;
 
   var observer = new MutationObserver(function (mutations) {
     mutations.forEach(function (mutation) {
+      inspectTossDevAddressMutationNode(mutation.target);
       Array.prototype.forEach.call(mutation.addedNodes || [], function (node) {
-        if (node && node.nodeType === 1) hideTossDevAddressBadges(node);
+        inspectTossDevAddressMutationNode(node);
       });
     });
   });
-  observer.observe(document.body, { childList: true, subtree: true });
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  setInterval(function () { hideTossDevAddressBadges(document.body); }, 1000);
 }
 
 function openTossFrontSettings() {

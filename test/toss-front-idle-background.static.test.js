@@ -66,6 +66,14 @@ assert(
   'idle screen must hide only the Toss dev IP:port badge with a targeted DOM guard'
 );
 assert(
+  app.includes('function inspectTossDevAddressMutationNode') &&
+    app.includes('characterData: true') &&
+    app.includes('mutation.target') &&
+    app.includes('parentElement') &&
+    app.includes('setInterval(function () { hideTossDevAddressBadges(document.body); }'),
+  'dev IP:port badge guard must also catch badges whose text is filled after the element is inserted'
+);
+assert(
   buildZip.includes('idle.css') &&
     buildZip.includes('assets/village-idle-bg.png') &&
     buildZip.includes('assets/village-logo.png'),
