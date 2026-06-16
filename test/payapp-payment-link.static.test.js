@@ -14,12 +14,16 @@ const controls = read('apps/today-dashboard/components/PaymentControls.tsx');
 
 assert(
   /case "sendPayAppPaymentLink":/.test(api) &&
-    /requestPayAppPaymentLink\(/.test(api),
-  'sheetAPI must expose a sendPayAppPaymentLink action'
+    /requestPayAppPaymentLink\(/.test(api) &&
+    /case "setupPayAppUserId":/.test(api) &&
+    /case "diagPayAppConfig":/.test(api),
+  'sheetAPI must expose PayApp send/setup/diagnostic actions'
 );
 
 assert(
   /function requestPayAppPaymentLink\(tid\)/.test(ca) &&
+    /function setupPayAppUserId\(userid\)/.test(ca) &&
+    /function diagPayAppConfig\(\)/.test(ca) &&
     ca.includes('https://api.payapp.kr/oapi/apiLoad.html') &&
     ca.includes("cmd: 'payrequest'") &&
     ca.includes('PAYAPP_USERID') &&

@@ -4679,6 +4679,29 @@ function requestPayAppPaymentLink(tid) {
   };
 }
 
+function setupPayAppUserId(userid) {
+  userid = String(userid || '').trim();
+  if (!userid) throw new Error('userid 필요');
+  PropertiesService.getScriptProperties().setProperty('PAYAPP_USERID', userid);
+  return diagPayAppConfig();
+}
+
+function diagPayAppConfig() {
+  var props = PropertiesService.getScriptProperties();
+  var userid = String(props.getProperty('PAYAPP_USERID') || '').trim();
+  var openpaytype = String(props.getProperty('PAYAPP_OPENPAYTYPE') || 'card').trim();
+  var smsuse = String(props.getProperty('PAYAPP_SMS_USE') || 'y').trim() || 'y';
+  return {
+    ok: !!userid,
+    hasUserId: !!userid,
+    userid: userid,
+    openpaytype: openpaytype,
+    smsuse: smsuse,
+    hasFeedbackUrl: !!String(props.getProperty('PAYAPP_FEEDBACK_URL') || '').trim(),
+    hasReturnUrl: !!String(props.getProperty('PAYAPP_RETURN_URL') || '').trim()
+  };
+}
+
 function buildPayAppPaymentRequest_(tid) {
   var props = PropertiesService.getScriptProperties();
   var userid = String(props.getProperty('PAYAPP_USERID') || '').trim();

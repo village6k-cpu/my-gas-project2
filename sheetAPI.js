@@ -453,6 +453,14 @@ function handleRequest(e) {
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
+      case "setupPayAppUserId":
+        return jsonResponse(setupPayAppUserId(
+          params.userid || postBody.userid || params.userId || postBody.userId
+        ));
+
+      case "diagPayAppConfig":
+        return jsonResponse(diagPayAppConfig());
+
       case "regenerateContract":
         var contractExtraText =
           params.extraText !== undefined ? params.extraText :
