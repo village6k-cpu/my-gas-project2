@@ -453,6 +453,15 @@ function handleRequest(e) {
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
+      case "sendPayAppTestPaymentLink":
+        return jsonResponse(requestPayAppTestPaymentLink({
+          phone: params.phone || postBody.phone || params.recvphone || postBody.recvphone || params.tel || postBody.tel,
+          amount: params.amount || postBody.amount || params.price || postBody.price,
+          customerName: params.customerName || postBody.customerName || params.name || postBody.name,
+          goodname: params.goodname || postBody.goodname,
+          memo: params.memo || postBody.memo
+        }));
+
       case "setupPayAppUserId":
         return jsonResponse(setupPayAppUserId(
           params.userid || postBody.userid || params.userId || postBody.userId

@@ -4635,33 +4635,13 @@ function requestPayAppPaymentLink(tid) {
   var request = buildPayAppPaymentRequest_(tid);
   if (request.error) return request;
 
-  var response;
-  try {
-    response = UrlFetchApp.fetch('https://api.payapp.kr/oapi/apiLoad.html', {
-      method: 'post',
-      payload: request.payload,
-      muteHttpExceptions: true
-    });
-  } catch (err) {
-    return { error: 'PayApp 결제요청 실패: ' + err.message };
-  }
+  var result = sendPayAppPaymentRequest_(request);
+  if (result.error) return result;
 
-  var status = response.getResponseCode();
-  var body = response.getContentText();
-  var parsed = parsePayAppQueryResponse_(body);
-  if (status < 200 || status >= 300) {
-    return { error: 'PayApp 응답 오류 (' + status + '): ' + body };
-  }
-  if (String(parsed.state || '') !== '1') {
-    return { error: 'PayApp 결제요청 실패: ' + (parsed.errorMessage || body || 'unknown') };
-  }
-
-  var payurl = String(parsed.payurl || '').trim();
-  var mulNo = String(parsed.mul_no || '').trim();
   rememberPayAppPaymentRequest_(tid, {
     tid: tid,
-    mulNo: mulNo,
-    payurl: payurl,
+    mulNo: result.mulNo,
+    payurl: result.payurl,
     amount: request.amount,
     phone: request.phone,
     customerName: request.customerName,
@@ -4671,11 +4651,41 @@ function requestPayAppPaymentLink(tid) {
   return {
     success: true,
     tid: tid,
-    mulNo: mulNo,
-    payurl: payurl,
+    mulNo: result.mulNo,
+    payurl: result.payurl,
     amount: request.amount,
-    phoneMasked: maskPhoneForDisplay_(request.phone),
+    phoneMasked: result.phoneMasked,
     message: '결제링크 발송 완료: ' + request.customerName + ' / ' + formatWon_(request.amount) + ' / ' + maskPhoneForDisplay_(request.phone)
+  };
+}
+
+function requestPayAppTestPaymentLink(args) {
+  var request = buildPayAppTestPaymentRequest_(args || {});
+  if (request.error) return request;
+
+  var result = sendPayAppPaymentRequest_(request);
+  if (result.error) return result;
+
+  rememberPayAppTestPaymentRequest_(request.testId, {
+    test: true,
+    testId: request.testId,
+    mulNo: result.mulNo,
+    payurl: result.payurl,
+    amount: request.amount,
+    phone: request.phone,
+    customerName: request.customerName,
+    requestedAt: Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss')
+  });
+
+  return {
+    success: true,
+    test: true,
+    testId: request.testId,
+    mulNo: result.mulNo,
+    payurl: result.payurl,
+    amount: request.amount,
+    phoneMasked: result.phoneMasked,
+    message: '테스트 결제링크 발송 완료: ' + formatWon_(request.amount) + ' / ' + maskPhoneForDisplay_(request.phone)
   };
 }
 
@@ -4751,6 +4761,86 @@ function buildPayAppPaymentRequest_(tid) {
   };
 }
 
+function buildPayAppTestPaymentRequest_(args) {
+  args = args || {};
+  var props = PropertiesService.getScriptProperties();
+  var userid = String(props.getProperty('PAYAPP_USERID') || '').trim();
+  if (!userid) return { error: 'PAYAPP_USERID 미설정: 페이앱 판매자 아이디를 Script Properties에 넣어주세요.' };
+
+  var phone = normalizePayAppPhone_(args.phone || args.recvphone || args.tel || '');
+  if (!phone) return { error: '테스트 발송 전화번호가 필요합니다.' };
+
+  var amount = Number(String(args.amount || args.price || 1000).replace(/[^0-9.-]/g, ''));
+  if (!amount || isNaN(amount)) amount = 1000;
+  amount = Math.round(amount);
+  if (amount < 1000) return { error: 'PayApp 결제요청 최소금액은 1,000원입니다: ' + formatWon_(amount) };
+
+  var now = new Date();
+  var testId = 'PAYAPP-TEST-' + Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd-HHmmss');
+  var customerName = String(args.customerName || args.name || '테스트').trim();
+  var goodname = String(args.goodname || props.getProperty('PAYAPP_TEST_GOODNAME') || 'VILLAGE 테스트 결제').trim();
+  var memo = String(args.memo || customerName + ' / ' + testId).trim();
+  var openpaytype = String(props.getProperty('PAYAPP_OPENPAYTYPE') || 'card').trim();
+  var feedbackurl = String(props.getProperty('PAYAPP_FEEDBACK_URL') || '').trim();
+  var returnurl = String(props.getProperty('PAYAPP_RETURN_URL') || '').trim();
+
+  var payload = {
+    cmd: 'payrequest',
+    userid: userid,
+    goodname: goodname,
+    price: String(amount),
+    recvphone: phone,
+    memo: memo,
+    reqaddr: '0',
+    smsuse: String(props.getProperty('PAYAPP_SMS_USE') || 'y').trim() || 'y',
+    openpaytype: openpaytype,
+    checkretry: feedbackurl ? 'y' : 'n',
+    var1: testId,
+    var2: customerName
+  };
+  if (feedbackurl) payload.feedbackurl = feedbackurl;
+  if (returnurl) payload.returnurl = returnurl;
+
+  return {
+    payload: payload,
+    testId: testId,
+    amount: amount,
+    phone: phone,
+    customerName: customerName
+  };
+}
+
+function sendPayAppPaymentRequest_(request) {
+  var response;
+  try {
+    response = UrlFetchApp.fetch('https://api.payapp.kr/oapi/apiLoad.html', {
+      method: 'post',
+      payload: request.payload,
+      muteHttpExceptions: true
+    });
+  } catch (err) {
+    return { error: 'PayApp 결제요청 실패: ' + err.message };
+  }
+
+  var status = response.getResponseCode();
+  var body = response.getContentText();
+  var parsed = parsePayAppQueryResponse_(body);
+  if (status < 200 || status >= 300) {
+    return { error: 'PayApp 응답 오류 (' + status + '): ' + body };
+  }
+  if (String(parsed.state || '') !== '1') {
+    return { error: 'PayApp 결제요청 실패: ' + (parsed.errorMessage || body || 'unknown') };
+  }
+
+  return {
+    success: true,
+    mulNo: String(parsed.mul_no || '').trim(),
+    payurl: String(parsed.payurl || '').trim(),
+    amount: request.amount,
+    phoneMasked: maskPhoneForDisplay_(request.phone)
+  };
+}
+
 function parsePayAppQueryResponse_(body) {
   var out = {};
   String(body || '').split('&').forEach(function(part) {
@@ -4785,6 +4875,13 @@ function formatWon_(amount) {
 function rememberPayAppPaymentRequest_(tid, info) {
   try {
     var key = 'PAYAPP_REQ_' + String(tid || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
+    PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(info || {}));
+  } catch (err) {}
+}
+
+function rememberPayAppTestPaymentRequest_(testId, info) {
+  try {
+    var key = 'PAYAPP_TEST_REQ_' + String(testId || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
     PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(info || {}));
   } catch (err) {}
 }

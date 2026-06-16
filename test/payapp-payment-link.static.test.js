@@ -14,16 +14,20 @@ const controls = read('apps/today-dashboard/components/PaymentControls.tsx');
 
 assert(
   /case "sendPayAppPaymentLink":/.test(api) &&
+    /case "sendPayAppTestPaymentLink":/.test(api) &&
     /requestPayAppPaymentLink\(/.test(api) &&
+    /requestPayAppTestPaymentLink\(/.test(api) &&
     /case "setupPayAppUserId":/.test(api) &&
     /case "diagPayAppConfig":/.test(api),
-  'sheetAPI must expose PayApp send/setup/diagnostic actions'
+  'sheetAPI must expose PayApp send/test/setup/diagnostic actions'
 );
 
 assert(
   /function requestPayAppPaymentLink\(tid\)/.test(ca) &&
+    /function requestPayAppTestPaymentLink\(args\)/.test(ca) &&
     /function setupPayAppUserId\(userid\)/.test(ca) &&
     /function diagPayAppConfig\(\)/.test(ca) &&
+    /function sendPayAppPaymentRequest_\(request\)/.test(ca) &&
     ca.includes('https://api.payapp.kr/oapi/apiLoad.html') &&
     ca.includes("cmd: 'payrequest'") &&
     ca.includes('PAYAPP_USERID') &&
@@ -33,14 +37,17 @@ assert(
     ca.includes('recvphone') &&
     ca.includes('payurl') &&
     ca.includes('mul_no'),
-  'GAS must build and send a PayApp payrequest from trade data'
+  'GAS must build and send PayApp payrequests from trade and test data'
 );
 
 assert(
   /price:\s*String\(amount\)/.test(ca) &&
     /var1:\s*tid/.test(ca) &&
-    /VILLAGE 렌탈 결제/.test(ca),
-  'PayApp request must use the trade amount, trade id, and a consistent good name'
+    /VILLAGE 렌탈 결제/.test(ca) &&
+    /PAYAPP-TEST-/.test(ca) &&
+    /VILLAGE 테스트 결제/.test(ca) &&
+    /PAYAPP_TEST_REQ_/.test(ca),
+  'PayApp request must use trade data and keep a safe test-only path'
 );
 
 assert(
