@@ -37,7 +37,6 @@ interface TradeView {
   status: string; // 예약 | 반출 | 반납완료 | 취소 ...
   discountType: string;
   items: TradeItem[];
-  contractUrl: string;
 }
 
 interface MyPageData {
@@ -96,6 +95,7 @@ function MyPageInner() {
 
   const trade = data?.trade;
   const request = data?.request;
+  const estimateUrl = token ? `/api/my/estimate?t=${encodeURIComponent(token)}` : "";
 
   return (
     <div className="min-h-dvh bg-paper px-4 py-8 text-ink">
@@ -186,15 +186,15 @@ function MyPageInner() {
               </section>
             ) : null}
 
-            {/* ── 계약서 ── */}
-            {trade?.contractUrl && (
+            {/* ── 견적서 PDF ── */}
+            {trade && estimateUrl && (
               <a
-                href={trade.contractUrl}
+                href={estimateUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="tap mt-4 block w-full rounded-[8px] border border-line bg-white py-3.5 text-center text-[15px] font-black text-ink shadow-sm transition hover:border-brand-300 hover:text-brand-600"
               >
-                📄 계약서 · 견적 확인
+                📄 견적서 PDF 확인
               </a>
             )}
 

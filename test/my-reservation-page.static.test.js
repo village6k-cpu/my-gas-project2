@@ -12,6 +12,9 @@ const sheetApi = read('sheetAPI.js');
 const authGate = read('apps/today-dashboard/components/AuthGate.tsx');
 const page = read('apps/today-dashboard/app/my/page.tsx');
 const route = read('apps/today-dashboard/app/api/my/route.ts');
+const estimateRoute = exists('apps/today-dashboard/app/api/my/estimate/route.ts')
+  ? read('apps/today-dashboard/app/api/my/estimate/route.ts')
+  : '';
 const gasHelper = read('apps/today-dashboard/lib/server/gasPublic.ts');
 
 // ── 가용성/견적 공개 기능은 존재하면 안 됨 (외부 오픈 금지) ──
@@ -51,6 +54,25 @@ assert(
   /case "myPage":/.test(sheetApi) && sheetApi.includes('"getMyPageLink"'),
   'sheetAPI must expose the myPage action and whitelist getMyPageLink'
 );
+assert(
+  /case "myPageEstimate":/.test(sheetApi) &&
+    /getMyReservationEstimatePdf\(params\.token \|\| postBody\.token \|\| ""\)/.test(sheetApi),
+  'sheetAPI must expose a token-verified myPageEstimate action for the customer quote PDF'
+);
+assert(
+  /function getMyReservationEstimatePdf\(token\)/.test(myPage) &&
+    /myPageVerify_\(token\)/.test(myPage) &&
+    /action:\s*"previewQuote"/.test(myPage) &&
+    /pdfUrl/.test(myPage),
+  'myPage.js must create the customer-visible quote PDF through the token-verified previewQuote path'
+);
+assert(
+  !/getTimelineContractLink\(tradeId\)/.test(myPage) &&
+    !/contractUrl:\s*contractUrl/.test(myPage) &&
+    !/contractUrl:\s*string/.test(page) &&
+    !/trade\.contractUrl/.test(page),
+  'my-page must never expose the Google Sheets contract URL to customers'
+);
 
 // ── 페이지에서 직접 요청 접수는 금지 — 카카오톡 안내만 ──
 assert(
@@ -62,8 +84,21 @@ assert(
   'the /api/my route and page must be read-only (no POST)'
 );
 assert(
+  /gasGet\(\{ action: "myPageEstimate", token \}\)/.test(estimateRoute) &&
+    /NextResponse\.redirect\(result\.pdfUrl/.test(estimateRoute) &&
+    /TOKEN_RE/.test(estimateRoute) &&
+    /rateLimited/.test(estimateRoute),
+  'the customer quote route must validate the token, call myPageEstimate, and redirect only to the PDF URL'
+);
+assert(
   page.includes('카카오톡 채널') && page.includes('연장 · 변경 · 취소'),
   'the my-page must guide customers to the KakaoTalk channel for changes'
+);
+assert(
+  page.includes('/api/my/estimate') &&
+    page.includes('견적서 PDF 확인') &&
+    !page.includes('계약서 · 견적 확인'),
+  'the my-page document button must open only the quote PDF route'
 );
 
 // ── 앱: /my만 공개, 페이지는 /api/my만 사용 ──
@@ -96,6 +131,11 @@ assert(
 assert(
   /try \{\s*sendRegisterCompleteAlimtalk_\(거래ID, 예약자명, 연락처, 반출일, 반출시간, 반납일, 반납시간\);\s*\} catch/.test(backend),
   'registerByReqID must call the alimtalk inside try/catch so registration never fails on send errors'
+);
+assert(
+  !backend.includes('예약 내용과 계약서') &&
+    backend.includes('예약 내용과 견적서 PDF'),
+  'register-complete alimtalk copy must not tell customers they can view the contract'
 );
 
 // ── 라이브 검증 후속: 평문 ID 링크 생성 + 원격 1회 설정 ──

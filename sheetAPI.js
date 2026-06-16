@@ -251,6 +251,10 @@ function handleRequest(e) {
         // 고객용 내 예약 조회 — 거래/요청별 토큰 검증, 연락처 등 민감정보 미포함 (myPage.js)
         return jsonResponse(getMyReservation(params.token || postBody.token || ""));
 
+      case "myPageEstimate":
+        // 고객용 견적서 PDF — 같은 토큰을 재검증하고 Google Sheets 계약서 원본은 반환하지 않음 (myPage.js)
+        return jsonResponse(getMyReservationEstimatePdf(params.token || postBody.token || ""));
+
       case "dashboardSearch":
         return jsonResponse(getDashboardSearchData(
           params.q || params.query || postBody.q || postBody.query || "",

@@ -9,9 +9,11 @@
  * - 응답에 연락처는 절대 포함하지 않고, 예약자명은 마스킹한다.
  * - 변경/연장/취소는 페이지에서 받지 않는다 — 카카오톡 채널 안내만 표시.
  * - 가용성/단가/다른 고객 정보는 노출하지 않는다.
+ * - 고객에게 Google Sheets 계약서 원본 링크를 노출하지 않는다. 문서는 견적서 PDF만 별도 토큰 검증 후 제공한다.
  *
  * 진입 (sheetAPI.js):
  *   action=myPage&token=...            → getMyReservation(token)
+ *   action=myPageEstimate&token=...    → getMyReservationEstimatePdf(token)
  *   action=run&func=getMyPageLink      → 직원/봇이 고객에게 보낼 링크 생성
  *
  * 1회 설정: setupMyPage({baseUrl,kakaoUrl,notice}) 실행 → 비밀키/고객 페이지 설정 준비.
@@ -218,7 +220,87 @@ function myPageRequestView_(reqID) {
   };
 }
 
-/** 등록(거래) 단계 뷰 — 계약마스터 + 스케줄상세 + 계약서 링크 */
+function myPageVillageOpsApiUrl_(props) {
+  if (typeof getVillageOpsApiUrl_ === "function") return getVillageOpsApiUrl_(props);
+  return String(
+    props.getProperty("개고생2_API_URL") ||
+    props.getProperty("VILLAGE2_API_URL") ||
+    props.getProperty("VILLAGE_OPS_API_URL") ||
+    "https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec"
+  ).trim();
+}
+
+function myPageVillageOpsApiKey_(props) {
+  if (typeof getVillageOpsApiKey_ === "function") return getVillageOpsApiKey_(props);
+  return String(
+    props.getProperty("개고생2_API_KEY") ||
+    props.getProperty("VILLAGE_OPS_KEY") ||
+    "village2026"
+  ).trim();
+}
+
+function myPageEstimatePdfUrl_(tradeId) {
+  tradeId = String(tradeId || "").trim();
+  if (!tradeId) throw new Error("거래ID 필수");
+
+  var props = PropertiesService.getScriptProperties();
+  var url = myPageVillageOpsApiUrl_(props);
+  var payload = {
+    action: "previewQuote",
+    id: tradeId,
+    key: myPageVillageOpsApiKey_(props)
+  };
+  var qs = Object.keys(payload).map(function(key) {
+    return encodeURIComponent(key) + "=" + encodeURIComponent(payload[key]);
+  }).join("&");
+  var sep = url.indexOf("?") === -1 ? "?" : "&";
+  var res = UrlFetchApp.fetch(url + sep + qs, {
+    method: "get",
+    muteHttpExceptions: true
+  });
+  var text = res.getContentText();
+  var data;
+  try {
+    data = JSON.parse(text);
+  } catch (parseErr) {
+    throw new Error("견적서 PDF 응답 파싱 실패");
+  }
+  if (res.getResponseCode() < 200 || res.getResponseCode() >= 300) {
+    throw new Error("견적서 PDF 생성 실패: HTTP " + res.getResponseCode());
+  }
+  if (data.error) throw new Error(data.error);
+
+  var pdfUrl = String(data.pdfUrl || (data.result && data.result.pdfUrl) || "").trim();
+  if (!pdfUrl || !/^https:\/\/.+/i.test(pdfUrl)) throw new Error("견적서 PDF URL을 받지 못했습니다");
+  return pdfUrl;
+}
+
+function getMyReservationEstimatePdf(token) {
+  var id = myPageVerify_(token);
+  if (!id) return { success: false, error: "유효하지 않은 링크입니다" };
+
+  var tradeId = id;
+  if (id.indexOf("RQ-") === 0) {
+    var reqView = myPageRequestView_(id);
+    if (!reqView) return { success: false, error: "요청을 찾을 수 없습니다" };
+    tradeId = reqView.tradeId || "";
+    if (!tradeId) return { success: false, error: "예약 확정 후 견적서 PDF를 확인할 수 있습니다" };
+  }
+
+  if (!myPageTradeView_(tradeId)) return { success: false, error: "예약을 찾을 수 없습니다" };
+
+  try {
+    return {
+      success: true,
+      tradeId: tradeId,
+      pdfUrl: myPageEstimatePdfUrl_(tradeId)
+    };
+  } catch (e) {
+    return { success: false, error: e.message || "견적서 PDF 생성 실패" };
+  }
+}
+
+/** 등록(거래) 단계 뷰 — 계약마스터 + 스케줄상세. 고객에게 문서 원본 링크는 내려주지 않는다. */
 function myPageTradeView_(tradeId) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var contractSheet = ss.getSheetByName("계약마스터");
@@ -251,12 +333,6 @@ function myPageTradeView_(tradeId) {
     }
   }
 
-  var contractUrl = "";
-  try {
-    var link = getTimelineContractLink(tradeId);
-    if (link && link.success) contractUrl = link.contractUrl || "";
-  } catch (e) {}
-
   return {
     tradeId: tradeId,
     customerName: myPageMaskName_(c[1]),            // B: 예약자명
@@ -264,7 +340,6 @@ function myPageTradeView_(tradeId) {
     returnAt: (scheduleSnapshot && scheduleSnapshot.returnAt) || myPageFmtDT_(c[6], c[7]),
     status: String(c[9] || "").trim() || "예약",    // J: 계약상태
     discountType: String(c[10] || "").trim(),       // K: 할인유형
-    items: items,
-    contractUrl: contractUrl
+    items: items
   };
 }
