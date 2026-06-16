@@ -89,11 +89,11 @@ assert(
   );
 }
 assert(
-  /function myPageContractPdfExportUrl_/.test(myPage) &&
-    /getTimelineContractLink\(tradeId\)/.test(myPage) &&
-    /\/export\?format=pdf/.test(myPage) &&
-    myPage.indexOf('myPageContractPdfExportUrl_(tradeId)') < myPage.indexOf('action: "previewQuote"'),
-  'myPage estimate PDF should reuse the generated contract document PDF before falling back to slow previewQuote generation'
+  !/function myPageContractPdfExportUrl_/.test(myPage) &&
+    !/getTimelineContractLink\(tradeId\)/.test(myPage) &&
+    !/\/spreadsheets\/d\/.*\/export\?format=pdf/.test(myPage) &&
+    /action:\s*"previewQuote"/.test(myPage),
+  'myPage estimate PDF must use the quote preview path only, never the generated contract document'
 );
 assert(
   !/contractUrl:\s*contractUrl/.test(myPage) &&
@@ -112,13 +112,15 @@ assert(
   'the /api/my route and page must be read-only (no POST)'
 );
 assert(
-  /gasGet\(\{ action: "myPageEstimate", token \}\)/.test(estimateRoute) &&
-    /isGoogleSheetPdfExportUrl/.test(estimateRoute) &&
-    /fetch\(result\.pdfUrl/.test(estimateRoute) &&
-    /NextResponse\.redirect\(result\.pdfUrl/.test(estimateRoute) &&
+  /gasGet\(\{ action: "myPage", token \}\)/.test(estimateRoute) &&
+    /action", "previewQuote"/.test(estimateRoute) &&
+    /rejectNonQuotePdfUrl/.test(estimateRoute) &&
+    !/isGoogleSheetPdfExportUrl/.test(estimateRoute) &&
+    !/\/spreadsheets\/d\/[^/]+\/export/.test(estimateRoute) &&
+    /NextResponse\.redirect\(pdfUrl/.test(estimateRoute) &&
     /TOKEN_RE/.test(estimateRoute) &&
     /rateLimited/.test(estimateRoute),
-  'the customer quote route must validate the token, proxy sheet PDF exports, and redirect only safe PDF URLs'
+  'the customer quote route must validate the token, call previewQuote directly, and never proxy contract sheet exports'
 );
 assert(
   page.includes('카카오톡 채널') && page.includes('연장 · 변경 · 취소'),

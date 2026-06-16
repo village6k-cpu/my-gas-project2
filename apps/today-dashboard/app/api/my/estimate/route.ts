@@ -10,25 +10,77 @@ const NO_STORE_HEADERS = {
   "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
 };
 
-function isGoogleSheetPdfExportUrl(value: string) {
+const VILLAGE_OPS_API_URL =
+  process.env.VILLAGE_OPS_API_URL ??
+  "https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec";
+const VILLAGE_OPS_API_KEY = process.env.VILLAGE_OPS_API_KEY ?? process.env.VILLAGE_OPS_KEY ?? process.env.GAS_API_KEY ?? "village2026";
+const QUOTE_PDF_CACHE_MS = 5 * 60_000;
+const quotePdfCache = new Map<string, { at: number; pdfUrl: string }>();
+
+type MyPageResult = {
+  success?: boolean;
+  kind?: string;
+  error?: string;
+  trade?: { tradeId?: string };
+  request?: { tradeId?: string };
+  tradeId?: string;
+};
+
+type QuoteResult = {
+  error?: string;
+  pdfUrl?: string;
+  result?: { pdfUrl?: string };
+};
+
+function tradeIdFromMyPageResult(result: MyPageResult) {
+  return String(result.trade?.tradeId || result.request?.tradeId || result.tradeId || "").trim();
+}
+
+function cachedQuotePdf(tradeId: string) {
+  const cached = quotePdfCache.get(tradeId);
+  if (!cached) return "";
+  if (Date.now() - cached.at > QUOTE_PDF_CACHE_MS) {
+    quotePdfCache.delete(tradeId);
+    return "";
+  }
+  return cached.pdfUrl;
+}
+
+function putQuotePdfCache(tradeId: string, pdfUrl: string) {
+  if (quotePdfCache.size > 1000) quotePdfCache.clear();
+  quotePdfCache.set(tradeId, { at: Date.now(), pdfUrl });
+}
+
+function rejectNonQuotePdfUrl(value: string) {
   try {
     const url = new URL(value);
-    return (
-      url.protocol === "https:" &&
-      url.hostname === "docs.google.com" &&
-      /^\/spreadsheets\/d\/[^/]+\/export$/.test(url.pathname) &&
-      url.searchParams.get("format") === "pdf"
-    );
+    if (url.protocol !== "https:") return "";
+    if (url.hostname === "docs.google.com" && /^\/spreadsheets\/d\//.test(url.pathname)) return "";
+    if (/\/spreadsheets\/d\//.test(url.pathname)) return "";
+    return url.toString();
   } catch {
-    return false;
+    return "";
   }
 }
 
-type EstimateResult = {
-  success?: boolean;
-  pdfUrl?: string;
-  error?: string;
-};
+async function createQuotePdfUrl(tradeId: string) {
+  const cached = cachedQuotePdf(tradeId);
+  if (cached) return cached;
+
+  const url = new URL(VILLAGE_OPS_API_URL);
+  url.searchParams.set("action", "previewQuote");
+  url.searchParams.set("id", tradeId);
+  url.searchParams.set("key", VILLAGE_OPS_API_KEY);
+
+  const res = await fetch(url.toString(), { cache: "no-store", redirect: "follow" });
+  const data = (await res.json()) as QuoteResult;
+  if (!res.ok || data.error) throw new Error(data.error || `견적서 PDF 생성 실패 (${res.status})`);
+
+  const pdfUrl = rejectNonQuotePdfUrl(String(data.pdfUrl || data.result?.pdfUrl || ""));
+  if (!pdfUrl) throw new Error("견적서 PDF URL을 받지 못했습니다");
+  putQuotePdfCache(tradeId, pdfUrl);
+  return pdfUrl;
+}
 
 export async function GET(req: NextRequest) {
   if (rateLimited(`my-estimate:${clientIp(req)}`, 12)) {
@@ -47,34 +99,24 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const result = (await gasGet({ action: "myPageEstimate", token })) as EstimateResult;
-    if (!result?.success || !result.pdfUrl || !/^https:\/\/.+/i.test(String(result.pdfUrl))) {
+    const verified = (await gasGet({ action: "myPage", token })) as MyPageResult;
+    if (!verified?.success) {
       return NextResponse.json(
-        { success: false, error: result?.error || "견적서 PDF를 준비하지 못했습니다." },
-        { status: 502, headers: NO_STORE_HEADERS },
+        { success: false, error: verified?.error || "유효하지 않은 링크입니다" },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
 
-    if (isGoogleSheetPdfExportUrl(String(result.pdfUrl))) {
-      const upstream = await fetch(result.pdfUrl, { cache: "no-store", redirect: "follow" });
-      if (!upstream.ok) {
-        return NextResponse.json(
-          { success: false, error: "견적서 PDF를 불러오지 못했습니다." },
-          { status: 502, headers: NO_STORE_HEADERS },
-        );
-      }
-      const pdf = await upstream.arrayBuffer();
-      return new NextResponse(pdf, {
-        status: 200,
-        headers: {
-          ...NO_STORE_HEADERS,
-          "Content-Type": upstream.headers.get("content-type") || "application/pdf",
-          "Content-Disposition": 'inline; filename="village-estimate.pdf"',
-        },
-      });
+    const tradeId = tradeIdFromMyPageResult(verified);
+    if (!tradeId) {
+      return NextResponse.json(
+        { success: false, error: "예약 확정 후 견적서 PDF를 확인할 수 있습니다." },
+        { status: 409, headers: NO_STORE_HEADERS },
+      );
     }
 
-    const response = NextResponse.redirect(result.pdfUrl, 302);
+    const pdfUrl = await createQuotePdfUrl(tradeId);
+    const response = NextResponse.redirect(pdfUrl, 302);
     Object.entries(NO_STORE_HEADERS).forEach(([key, value]) => response.headers.set(key, value));
     return response;
   } catch (e) {

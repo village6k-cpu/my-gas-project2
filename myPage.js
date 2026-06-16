@@ -353,12 +353,6 @@ function myPageEstimatePdfUrl_(tradeId) {
   var cached = myPageGetCachedJson_(cacheKey);
   if (cached && cached.pdfUrl) return cached.pdfUrl;
 
-  var existingPdfUrl = myPageContractPdfExportUrl_(tradeId);
-  if (existingPdfUrl) {
-    myPagePutCachedJson_(cacheKey, { pdfUrl: existingPdfUrl }, MYPAGE_ESTIMATE_CACHE_SECONDS_);
-    return existingPdfUrl;
-  }
-
   var props = PropertiesService.getScriptProperties();
   var url = myPageVillageOpsApiUrl_(props);
   var payload = {
@@ -392,26 +386,6 @@ function myPageEstimatePdfUrl_(tradeId) {
   return pdfUrl;
 }
 
-function myPageExtractSpreadsheetId_(url) {
-  var s = String(url || "").trim();
-  var m = s.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/);
-  return m ? m[1] : "";
-}
-
-function myPageContractPdfExportUrl_(tradeId) {
-  if (typeof getTimelineContractLink !== "function") return "";
-  try {
-    var linkResult = getTimelineContractLink(tradeId);
-    var contractUrl = String(linkResult && linkResult.contractUrl || "").trim();
-    var fileId = myPageExtractSpreadsheetId_(contractUrl);
-    if (!fileId) return "";
-    return "https://docs.google.com/spreadsheets/d/" + encodeURIComponent(fileId) +
-      "/export?format=pdf&portrait=true&fitw=true&sheetnames=false&printtitle=false&pagenumbers=false&gridlines=false&fzr=false";
-  } catch (e) {
-    return "";
-  }
-}
-
 function myPagePrimeFastCaches_(id) {
   id = String(id || "").trim();
   if (!id) return { success: false, error: "id 필수" };
@@ -426,9 +400,8 @@ function myPagePrimeFastCaches_(id) {
 
   if (id.indexOf("RQ-") !== 0) {
     try {
-      var exportUrl = myPageContractPdfExportUrl_(id);
-      if (exportUrl) {
-        myPagePutCachedJson_(myPageEstimateCacheKey_(id), { pdfUrl: exportUrl }, MYPAGE_ESTIMATE_CACHE_SECONDS_);
+      var quotePdfUrl = myPageEstimatePdfUrl_(id);
+      if (quotePdfUrl) {
         warmed.estimate = true;
       }
     } catch (estimateErr) {}
