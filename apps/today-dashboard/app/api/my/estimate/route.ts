@@ -10,6 +10,20 @@ const NO_STORE_HEADERS = {
   "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
 };
 
+function isGoogleSheetPdfExportUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "docs.google.com" &&
+      /^\/spreadsheets\/d\/[^/]+\/export$/.test(url.pathname) &&
+      url.searchParams.get("format") === "pdf"
+    );
+  } catch {
+    return false;
+  }
+}
+
 type EstimateResult = {
   success?: boolean;
   pdfUrl?: string;
@@ -39,6 +53,25 @@ export async function GET(req: NextRequest) {
         { success: false, error: result?.error || "견적서 PDF를 준비하지 못했습니다." },
         { status: 502, headers: NO_STORE_HEADERS },
       );
+    }
+
+    if (isGoogleSheetPdfExportUrl(String(result.pdfUrl))) {
+      const upstream = await fetch(result.pdfUrl, { cache: "no-store", redirect: "follow" });
+      if (!upstream.ok) {
+        return NextResponse.json(
+          { success: false, error: "견적서 PDF를 불러오지 못했습니다." },
+          { status: 502, headers: NO_STORE_HEADERS },
+        );
+      }
+      const pdf = await upstream.arrayBuffer();
+      return new NextResponse(pdf, {
+        status: 200,
+        headers: {
+          ...NO_STORE_HEADERS,
+          "Content-Type": upstream.headers.get("content-type") || "application/pdf",
+          "Content-Disposition": 'inline; filename="village-estimate.pdf"',
+        },
+      });
     }
 
     const response = NextResponse.redirect(result.pdfUrl, 302);

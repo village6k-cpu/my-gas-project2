@@ -13,6 +13,23 @@ const TOKEN_RE = /^[A-Za-z0-9가-힣_-]{3,40}\.[a-f0-9]{20}$/;
 const NO_STORE_HEADERS = {
   "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
 };
+const MY_PAGE_RESPONSE_CACHE_MS = 90_000;
+const myPageResponseCache = new Map<string, { at: number; body: unknown }>();
+
+function getCachedMyPageResponse(token: string) {
+  const cached = myPageResponseCache.get(token);
+  if (!cached) return null;
+  if (Date.now() - cached.at > MY_PAGE_RESPONSE_CACHE_MS) {
+    myPageResponseCache.delete(token);
+    return null;
+  }
+  return cached.body;
+}
+
+function setCachedMyPageResponse(token: string, body: unknown) {
+  if (myPageResponseCache.size > 1000) myPageResponseCache.clear();
+  myPageResponseCache.set(token, { at: Date.now(), body });
+}
 
 export async function GET(req: NextRequest) {
   if (rateLimited(`my:${clientIp(req)}`, 30)) {
@@ -28,9 +45,16 @@ export async function GET(req: NextRequest) {
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
+  const cached = getCachedMyPageResponse(token);
+  if (cached) {
+    return NextResponse.json(cached, { headers: { ...NO_STORE_HEADERS, "x-cache": "HIT" } });
+  }
   try {
     const result = await gasGet({ action: "myPage", token });
-    return NextResponse.json(result, { headers: NO_STORE_HEADERS });
+    if (result && typeof result === "object" && "success" in result) {
+      setCachedMyPageResponse(token, result);
+    }
+    return NextResponse.json(result, { headers: { ...NO_STORE_HEADERS, "x-cache": "MISS" } });
   } catch (e) {
     return NextResponse.json(
       { success: false, error: e instanceof Error ? e.message : "조회 실패" },

@@ -38,8 +38,8 @@ assert(
   /function myPageScheduleSnapshot_\(ss, tradeId\)/.test(myPage) &&
     myPage.includes('getSheetByName("스케줄상세")') &&
     myPage.includes('getDisplayValues()') &&
-    /scheduleSnapshot[\s\S]{0,180}checkoutAt/.test(myPage) &&
-    /scheduleSnapshot[\s\S]{0,220}returnAt/.test(myPage),
+    /scheduleView[\s\S]{0,180}checkoutAt/.test(myPage) &&
+    /scheduleView[\s\S]{0,220}returnAt/.test(myPage),
   'my-page must prefer 스케줄상세 display date-times over 계약마스터 internal Date values'
 );
 assert(
@@ -67,8 +67,36 @@ assert(
   'myPage.js must create the customer-visible quote PDF through the token-verified previewQuote path'
 );
 assert(
-  !/getTimelineContractLink\(tradeId\)/.test(myPage) &&
-    !/contractUrl:\s*contractUrl/.test(myPage) &&
+  /MYPAGE_VIEW_CACHE_SECONDS_/.test(myPage) &&
+    /function myPageReservationCacheKey_/.test(myPage) &&
+    /CacheService\.getScriptCache\(\)/.test(myPage) &&
+    /myPageGetCachedJson_/.test(myPage) &&
+    /myPagePutCachedJson_/.test(myPage),
+  'myPage must cache token-verified reservation payloads briefly so customer refreshes are fast'
+);
+assert(
+  /function myPageFindRowByExact_/.test(myPage) &&
+    /createTextFinder\(String\(value\)\)/.test(myPage) &&
+    /function myPageTradeScheduleView_/.test(myPage),
+  'myPage trade lookups must use exact row lookup helpers instead of full-sheet scans'
+);
+{
+  const tradeViewBody = myPage.slice(myPage.indexOf('function myPageTradeView_'), myPage.indexOf('function myPageTradeExists_'));
+  assert(
+    !/contractSheet\.getRange\(2,\s*1,\s*contractSheet\.getLastRow\(\) - 1,\s*12\)\.getValues\(\)/.test(tradeViewBody) &&
+      !/schedSheet\.getRange\(2,\s*1,\s*schedSheet\.getLastRow\(\) - 1,\s*10\)\.getValues\(\)/.test(tradeViewBody),
+    'myPage trade view must not read full 계약마스터/스케줄상세 ranges for one customer token'
+  );
+}
+assert(
+  /function myPageContractPdfExportUrl_/.test(myPage) &&
+    /getTimelineContractLink\(tradeId\)/.test(myPage) &&
+    /\/export\?format=pdf/.test(myPage) &&
+    myPage.indexOf('myPageContractPdfExportUrl_(tradeId)') < myPage.indexOf('action: "previewQuote"'),
+  'myPage estimate PDF should reuse the generated contract document PDF before falling back to slow previewQuote generation'
+);
+assert(
+  !/contractUrl:\s*contractUrl/.test(myPage) &&
     !/contractUrl:\s*string/.test(page) &&
     !/trade\.contractUrl/.test(page),
   'my-page must never expose the Google Sheets contract URL to customers'
@@ -85,10 +113,12 @@ assert(
 );
 assert(
   /gasGet\(\{ action: "myPageEstimate", token \}\)/.test(estimateRoute) &&
+    /isGoogleSheetPdfExportUrl/.test(estimateRoute) &&
+    /fetch\(result\.pdfUrl/.test(estimateRoute) &&
     /NextResponse\.redirect\(result\.pdfUrl/.test(estimateRoute) &&
     /TOKEN_RE/.test(estimateRoute) &&
     /rateLimited/.test(estimateRoute),
-  'the customer quote route must validate the token, call myPageEstimate, and redirect only to the PDF URL'
+  'the customer quote route must validate the token, proxy sheet PDF exports, and redirect only safe PDF URLs'
 );
 assert(
   page.includes('카카오톡 채널') && page.includes('연장 · 변경 · 취소'),
@@ -113,6 +143,13 @@ assert(
 assert(
   route.includes('rateLimited') && route.includes('action: "myPage"'),
   'the /api/my route must rate limit and proxy the GAS myPage action'
+);
+assert(
+  /const myPageResponseCache = new Map/.test(route) &&
+    /MY_PAGE_RESPONSE_CACHE_MS/.test(route) &&
+    /myPageResponseCache\.get\(token\)/.test(route) &&
+    /myPageResponseCache\.set\(token/.test(route),
+  'the /api/my route must keep a short server-side token cache so repeated customer opens avoid slow GAS roundtrips'
 );
 assert(
   gasHelper.includes('GAS_API_KEY') && gasHelper.includes('rateLimited'),

@@ -27,6 +27,36 @@ function MYPAGE_CFG_() {
   };
 }
 
+var MYPAGE_VIEW_CACHE_SECONDS_ = 90;
+var MYPAGE_ESTIMATE_CACHE_SECONDS_ = 600;
+
+function myPageSafeKey_(value) {
+  return String(value || "").trim().replace(/[^A-Za-z0-9가-힣_-]/g, "_").slice(0, 120);
+}
+
+function myPageReservationCacheKey_(id) {
+  return "mypage_view_v4_" + myPageSafeKey_(id);
+}
+
+function myPageEstimateCacheKey_(tradeId) {
+  return "mypage_estimate_pdf_v2_" + myPageSafeKey_(tradeId);
+}
+
+function myPageGetCachedJson_(key) {
+  try {
+    var raw = CacheService.getScriptCache().get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function myPagePutCachedJson_(key, value, seconds) {
+  try {
+    CacheService.getScriptCache().put(key, JSON.stringify(value), seconds || 60);
+  } catch (e) {}
+}
+
 /** 1회 설정 — 비밀키가 없으면 생성. opts로 도메인/안내문도 함께 설정 가능 (API run 호출용) */
 function setupMyPage(opts) {
   var p = PropertiesService.getScriptProperties();
@@ -129,20 +159,83 @@ function myPageJoinDTText_(dateVal, timeVal) {
   return d ? (d + (t ? " " + t : "")) : "";
 }
 
-function myPageScheduleSnapshot_(ss, tradeId) {
-  var schedSheet = ss.getSheetByName("스케줄상세");
-  if (!schedSheet || schedSheet.getLastRow() < 2) return null;
+function myPageFindRowByExact_(sheet, col, value) {
+  if (!sheet || sheet.getLastRow() < 2) return 0;
+  var range = sheet.getRange(2, col, sheet.getLastRow() - 1, 1);
+  var finder = range.createTextFinder(String(value));
+  finder.matchEntireCell(true);
+  var cell = finder.findNext();
+  return cell ? cell.getRow() : 0;
+}
 
-  var values = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getValues();
-  var display = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getDisplayValues();
-  for (var i = 0; i < values.length; i++) {
-    if (String(values[i][1]).trim() !== String(tradeId).trim()) continue; // B: 거래ID
-    return {
-      checkoutAt: myPageJoinDTText_(display[i][5] || values[i][5], display[i][6] || values[i][6]),
-      returnAt: myPageJoinDTText_(display[i][7] || values[i][7], display[i][8] || values[i][8])
-    };
+function myPageFindRowsByExact_(sheet, col, value) {
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  var range = sheet.getRange(2, col, sheet.getLastRow() - 1, 1);
+  var finder = range.createTextFinder(String(value));
+  finder.matchEntireCell(true);
+  var cells = finder.findAll() || [];
+  return cells.map(function(cell) { return cell.getRow(); }).sort(function(a, b) { return a - b; });
+}
+
+function myPageReadRows_(sheet, rowNums, width) {
+  if (!rowNums || rowNums.length === 0) return [];
+  var rows = [];
+  var start = rowNums[0];
+  var prev = rowNums[0];
+
+  function flushGroup_(s, e) {
+    var len = e - s + 1;
+    var values = sheet.getRange(s, 1, len, width).getValues();
+    var display = sheet.getRange(s, 1, len, width).getDisplayValues();
+    for (var i = 0; i < len; i++) rows.push({ values: values[i], display: display[i] });
   }
-  return null;
+
+  for (var i = 1; i < rowNums.length; i++) {
+    if (rowNums[i] === prev + 1) {
+      prev = rowNums[i];
+      continue;
+    }
+    flushGroup_(start, prev);
+    start = rowNums[i];
+    prev = rowNums[i];
+  }
+  flushGroup_(start, prev);
+  return rows;
+}
+
+function myPageTradeScheduleView_(ss, tradeId) {
+  var schedSheet = ss.getSheetByName("스케줄상세");
+  if (!schedSheet || schedSheet.getLastRow() < 2) return { checkoutAt: "", returnAt: "", items: [] };
+
+  var rows = myPageReadRows_(schedSheet, myPageFindRowsByExact_(schedSheet, 2, tradeId), 10);
+  var view = { checkoutAt: "", returnAt: "", items: [] };
+  for (var i = 0; i < rows.length; i++) {
+    var values = rows[i].values;
+    var display = rows[i].display;
+    if (!view.checkoutAt) {
+      view.checkoutAt = myPageJoinDTText_(display[5] || values[5], display[6] || values[6]);
+      view.returnAt = myPageJoinDTText_(display[7] || values[7], display[8] || values[8]);
+    }
+    var setName = String(values[2] || "").trim();   // C: 세트명
+    var equip = String(values[3] || "").trim();     // D: 장비명
+    if (!setName && !equip) continue;
+    view.items.push({
+      name: equip || setName,
+      setName: setName,
+      isSetHeader: !!setName && !equip,
+      qty: Number(values[4]) || 1                    // E: 수량
+    });
+  }
+  return view;
+}
+
+function myPageScheduleSnapshot_(ss, tradeId) {
+  var view = myPageTradeScheduleView_(ss, tradeId);
+  if (!view || (!view.checkoutAt && !view.returnAt)) return null;
+  return {
+    checkoutAt: view.checkoutAt,
+    returnAt: view.returnAt
+  };
 }
 
 /**
@@ -153,9 +246,14 @@ function getMyReservation(token) {
   var id = myPageVerify_(token);
   if (!id) return { success: false, error: "유효하지 않은 링크입니다" };
 
+  var cacheKey = myPageReservationCacheKey_(id);
+  var cached = myPageGetCachedJson_(cacheKey);
+  if (cached) return cached;
+
   var props = PropertiesService.getScriptProperties();
   var notice = props.getProperty("MYPAGE_NOTICE") || "";
   var kakaoUrl = props.getProperty("MYPAGE_KAKAO_URL") || ""; // 카카오톡 채널 링크 (선택)
+  var result;
 
   if (id.indexOf("RQ-") === 0) {
     var reqView = myPageRequestView_(id);
@@ -163,14 +261,22 @@ function getMyReservation(token) {
     // 등록 완료된 요청이면 거래 상세도 함께
     if (reqView.tradeId) {
       var tradeView = myPageTradeView_(reqView.tradeId);
-      if (tradeView) return { success: true, kind: "trade", request: reqView, trade: tradeView, notice: notice, kakaoUrl: kakaoUrl };
+      if (tradeView) {
+        result = { success: true, kind: "trade", request: reqView, trade: tradeView, notice: notice, kakaoUrl: kakaoUrl };
+        myPagePutCachedJson_(cacheKey, result, MYPAGE_VIEW_CACHE_SECONDS_);
+        return result;
+      }
     }
-    return { success: true, kind: "request", request: reqView, notice: notice, kakaoUrl: kakaoUrl };
+    result = { success: true, kind: "request", request: reqView, notice: notice, kakaoUrl: kakaoUrl };
+    myPagePutCachedJson_(cacheKey, result, MYPAGE_VIEW_CACHE_SECONDS_);
+    return result;
   }
 
   var trade = myPageTradeView_(id);
   if (!trade) return { success: false, error: "예약을 찾을 수 없습니다" };
-  return { success: true, kind: "trade", trade: trade, notice: notice, kakaoUrl: kakaoUrl };
+  result = { success: true, kind: "trade", trade: trade, notice: notice, kakaoUrl: kakaoUrl };
+  myPagePutCachedJson_(cacheKey, result, MYPAGE_VIEW_CACHE_SECONDS_);
+  return result;
 }
 
 /** 확인요청 단계 뷰 — 같은 요청ID의 행 묶음 */
@@ -243,6 +349,16 @@ function myPageEstimatePdfUrl_(tradeId) {
   tradeId = String(tradeId || "").trim();
   if (!tradeId) throw new Error("거래ID 필수");
 
+  var cacheKey = myPageEstimateCacheKey_(tradeId);
+  var cached = myPageGetCachedJson_(cacheKey);
+  if (cached && cached.pdfUrl) return cached.pdfUrl;
+
+  var existingPdfUrl = myPageContractPdfExportUrl_(tradeId);
+  if (existingPdfUrl) {
+    myPagePutCachedJson_(cacheKey, { pdfUrl: existingPdfUrl }, MYPAGE_ESTIMATE_CACHE_SECONDS_);
+    return existingPdfUrl;
+  }
+
   var props = PropertiesService.getScriptProperties();
   var url = myPageVillageOpsApiUrl_(props);
   var payload = {
@@ -272,7 +388,28 @@ function myPageEstimatePdfUrl_(tradeId) {
 
   var pdfUrl = String(data.pdfUrl || (data.result && data.result.pdfUrl) || "").trim();
   if (!pdfUrl || !/^https:\/\/.+/i.test(pdfUrl)) throw new Error("견적서 PDF URL을 받지 못했습니다");
+  myPagePutCachedJson_(cacheKey, { pdfUrl: pdfUrl }, MYPAGE_ESTIMATE_CACHE_SECONDS_);
   return pdfUrl;
+}
+
+function myPageExtractSpreadsheetId_(url) {
+  var s = String(url || "").trim();
+  var m = s.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/);
+  return m ? m[1] : "";
+}
+
+function myPageContractPdfExportUrl_(tradeId) {
+  if (typeof getTimelineContractLink !== "function") return "";
+  try {
+    var linkResult = getTimelineContractLink(tradeId);
+    var contractUrl = String(linkResult && linkResult.contractUrl || "").trim();
+    var fileId = myPageExtractSpreadsheetId_(contractUrl);
+    if (!fileId) return "";
+    return "https://docs.google.com/spreadsheets/d/" + encodeURIComponent(fileId) +
+      "/export?format=pdf&portrait=true&fitw=true&sheetnames=false&printtitle=false&pagenumbers=false&gridlines=false&fzr=false";
+  } catch (e) {
+    return "";
+  }
 }
 
 function getMyReservationEstimatePdf(token) {
@@ -287,7 +424,7 @@ function getMyReservationEstimatePdf(token) {
     if (!tradeId) return { success: false, error: "예약 확정 후 견적서 PDF를 확인할 수 있습니다" };
   }
 
-  if (!myPageTradeView_(tradeId)) return { success: false, error: "예약을 찾을 수 없습니다" };
+  if (!myPageTradeExists_(tradeId)) return { success: false, error: "예약을 찾을 수 없습니다" };
 
   try {
     return {
@@ -306,40 +443,26 @@ function myPageTradeView_(tradeId) {
   var contractSheet = ss.getSheetByName("계약마스터");
   if (!contractSheet || contractSheet.getLastRow() < 2) return null;
 
-  var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 12).getValues();
-  var c = null;
-  for (var i = 0; i < rows.length; i++) {
-    if (String(rows[i][0]).trim() === tradeId) { c = rows[i]; break; }
-  }
-  if (!c) return null;
+  var row = myPageFindRowByExact_(contractSheet, 1, tradeId);
+  if (!row) return null;
+  var c = contractSheet.getRange(row, 1, 1, 12).getValues()[0];
 
   // 스케줄상세에서 품목 (세트 헤더/구성품 구조 유지, 본인 거래 행만)
-  var items = [];
-  var scheduleSnapshot = myPageScheduleSnapshot_(ss, tradeId);
-  var schedSheet = ss.getSheetByName("스케줄상세");
-  if (schedSheet && schedSheet.getLastRow() >= 2) {
-    var sched = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getValues();
-    for (var s = 0; s < sched.length; s++) {
-      if (String(sched[s][1]).trim() !== tradeId) continue; // B: 거래ID
-      var setName = String(sched[s][2] || "").trim();   // C: 세트명
-      var equip = String(sched[s][3] || "").trim();     // D: 장비명
-      if (!setName && !equip) continue;
-      items.push({
-        name: equip || setName,
-        setName: setName,
-        isSetHeader: !!setName && !equip,
-        qty: Number(sched[s][4]) || 1                    // E: 수량
-      });
-    }
-  }
+  var scheduleView = myPageTradeScheduleView_(ss, tradeId);
 
   return {
     tradeId: tradeId,
     customerName: myPageMaskName_(c[1]),            // B: 예약자명
-    checkoutAt: (scheduleSnapshot && scheduleSnapshot.checkoutAt) || myPageFmtDT_(c[4], c[5]),
-    returnAt: (scheduleSnapshot && scheduleSnapshot.returnAt) || myPageFmtDT_(c[6], c[7]),
+    checkoutAt: (scheduleView && scheduleView.checkoutAt) || myPageFmtDT_(c[4], c[5]),
+    returnAt: (scheduleView && scheduleView.returnAt) || myPageFmtDT_(c[6], c[7]),
     status: String(c[9] || "").trim() || "예약",    // J: 계약상태
     discountType: String(c[10] || "").trim(),       // K: 할인유형
-    items: items
+    items: (scheduleView && scheduleView.items) || []
   };
+}
+
+function myPageTradeExists_(tradeId) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var contractSheet = ss.getSheetByName("계약마스터");
+  return !!myPageFindRowByExact_(contractSheet, 1, tradeId);
 }
