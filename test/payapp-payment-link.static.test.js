@@ -18,16 +18,19 @@ assert(
     /requestPayAppPaymentLink\(/.test(api) &&
     /requestPayAppTestPaymentLink\(/.test(api) &&
     /case "setupPayAppUserId":/.test(api) &&
+    /case "setupPayAppPaymentTypes":/.test(api) &&
     /case "diagPayAppConfig":/.test(api),
-  'sheetAPI must expose PayApp send/test/setup/diagnostic actions'
+  'sheetAPI must expose PayApp send/test/setup/payment-type diagnostic actions'
 );
 
 assert(
   /function requestPayAppPaymentLink\(tid\)/.test(ca) &&
     /function requestPayAppTestPaymentLink\(args\)/.test(ca) &&
     /function setupPayAppUserId\(userid\)/.test(ca) &&
+    /function setupPayAppPaymentTypes\(openpaytype\)/.test(ca) &&
     /function diagPayAppConfig\(\)/.test(ca) &&
     /function sendPayAppPaymentRequest_\(request\)/.test(ca) &&
+    /function normalizePayAppOpenpaytype_\(value\)/.test(ca) &&
     ca.includes('https://api.payapp.kr/oapi/apiLoad.html') &&
     ca.includes("cmd: 'payrequest'") &&
     ca.includes('PAYAPP_USERID') &&
@@ -46,7 +49,9 @@ assert(
     /VILLAGE 렌탈 결제/.test(ca) &&
     /PAYAPP-TEST-/.test(ca) &&
     /VILLAGE 테스트 결제/.test(ca) &&
-    /PAYAPP_TEST_REQ_/.test(ca),
+    /PAYAPP_TEST_REQ_/.test(ca) &&
+    /kakaopay,naverpay,tosspay,card/.test(ca) &&
+    /openpaytype:\s*openpaytype/.test(ca),
   'PayApp request must use trade data and keep a safe test-only path'
 );
 

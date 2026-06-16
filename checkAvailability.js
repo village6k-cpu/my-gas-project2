@@ -4696,10 +4696,16 @@ function setupPayAppUserId(userid) {
   return diagPayAppConfig();
 }
 
+function setupPayAppPaymentTypes(openpaytype) {
+  var value = normalizePayAppOpenpaytype_(openpaytype || getDefaultPayAppOpenpaytype_());
+  PropertiesService.getScriptProperties().setProperty('PAYAPP_OPENPAYTYPE', value);
+  return diagPayAppConfig();
+}
+
 function diagPayAppConfig() {
   var props = PropertiesService.getScriptProperties();
   var userid = String(props.getProperty('PAYAPP_USERID') || '').trim();
-  var openpaytype = String(props.getProperty('PAYAPP_OPENPAYTYPE') || 'card').trim();
+  var openpaytype = normalizePayAppOpenpaytype_(props.getProperty('PAYAPP_OPENPAYTYPE'));
   var smsuse = String(props.getProperty('PAYAPP_SMS_USE') || 'y').trim() || 'y';
   return {
     ok: !!userid,
@@ -4732,7 +4738,7 @@ function buildPayAppPaymentRequest_(tid) {
 
   var goodname = String(props.getProperty('PAYAPP_GOODNAME_PREFIX') || 'VILLAGE 렌탈 결제').trim();
   var memo = customerName + ' / ' + tid;
-  var openpaytype = String(props.getProperty('PAYAPP_OPENPAYTYPE') || 'card').trim();
+  var openpaytype = normalizePayAppOpenpaytype_(props.getProperty('PAYAPP_OPENPAYTYPE'));
   var feedbackurl = String(props.getProperty('PAYAPP_FEEDBACK_URL') || '').trim();
   var returnurl = String(props.getProperty('PAYAPP_RETURN_URL') || '').trim();
 
@@ -4780,7 +4786,7 @@ function buildPayAppTestPaymentRequest_(args) {
   var customerName = String(args.customerName || args.name || '테스트').trim();
   var goodname = String(args.goodname || props.getProperty('PAYAPP_TEST_GOODNAME') || 'VILLAGE 테스트 결제').trim();
   var memo = String(args.memo || customerName + ' / ' + testId).trim();
-  var openpaytype = String(props.getProperty('PAYAPP_OPENPAYTYPE') || 'card').trim();
+  var openpaytype = normalizePayAppOpenpaytype_(props.getProperty('PAYAPP_OPENPAYTYPE'));
   var feedbackurl = String(props.getProperty('PAYAPP_FEEDBACK_URL') || '').trim();
   var returnurl = String(props.getProperty('PAYAPP_RETURN_URL') || '').trim();
 
@@ -4839,6 +4845,37 @@ function sendPayAppPaymentRequest_(request) {
     amount: request.amount,
     phoneMasked: maskPhoneForDisplay_(request.phone)
   };
+}
+
+function getDefaultPayAppOpenpaytype_() {
+  return 'kakaopay,naverpay,tosspay,card';
+}
+
+function normalizePayAppOpenpaytype_(value) {
+  var raw = String(value || getDefaultPayAppOpenpaytype_());
+  var allowed = {
+    card: true,
+    phone: true,
+    kakaopay: true,
+    naverpay: true,
+    tosspay: true,
+    smilepay: true,
+    payco: true,
+    applepay: true,
+    rbank: true,
+    vbank: true,
+    myaccount: true,
+    wechat: true
+  };
+  var seen = {};
+  var list = [];
+  raw.split(',').forEach(function(part) {
+    var item = String(part || '').trim().toLowerCase();
+    if (!item || !allowed[item] || seen[item]) return;
+    seen[item] = true;
+    list.push(item);
+  });
+  return list.length ? list.join(',') : getDefaultPayAppOpenpaytype_();
 }
 
 function parsePayAppQueryResponse_(body) {

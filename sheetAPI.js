@@ -467,6 +467,11 @@ function handleRequest(e) {
           params.userid || postBody.userid || params.userId || postBody.userId
         ));
 
+      case "setupPayAppPaymentTypes":
+        return jsonResponse(setupPayAppPaymentTypes(
+          params.openpaytype || postBody.openpaytype || params.paymentTypes || postBody.paymentTypes
+        ));
+
       case "diagPayAppConfig":
         return jsonResponse(diagPayAppConfig());
 
