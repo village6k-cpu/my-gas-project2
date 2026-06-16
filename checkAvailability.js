@@ -9359,10 +9359,14 @@ function _getPopbillToken() {
  * @param {string} receiverName - 수신자 이름
  * @param {string} content - 메시지 내용
  * @param {Object} [vars] - 템플릿 변수 (예: {"#{고객명}": "홍길동"})
+ * @param {Object} [options] - 발송 옵션
+ * @param {string} [options.altSendType='A'] - 팝빌 대체발송 유형. 빈 문자열이면 문자 대체발송 없음.
  */
-function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns) {
+function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns, options) {
+  options = options || {};
   var props = PropertiesService.getScriptProperties();
   var senderNum = props.getProperty('POPBILL_SENDER_NUM');
+  var altSendType = Object.prototype.hasOwnProperty.call(options, 'altSendType') ? String(options.altSendType) : 'A';
 
   var token = _getPopbillToken();
   // 공식 SDK와 동일: 발송 경로는 /ATS, corpNum은 토큰에 바인딩됨 (경로에 넣으면 404)
@@ -9384,7 +9388,7 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns)
     altContent: content,
     msgs: [msgObj],
     templateCode: templateCode,
-    altSendType: 'A'
+    altSendType: altSendType
   };
   if (btns && btns.length) body.btns = btns; // 템플릿 버튼 (예: 웹링크 '내 예약 확인')
 
@@ -9468,7 +9472,7 @@ function sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출
   // 링크는 본문이 아니라 '내 예약 확인' 웹링크 버튼으로
   var btns = [{ n: '내 예약 확인', t: 'WL', u1: link.url, u2: link.url }];
 
-  var res = sendAlimtalk(tpl, String(연락처), String(예약자명), msg, vars, btns);
+  var res = sendAlimtalk(tpl, String(연락처), String(예약자명), msg, vars, btns, { altSendType: '' });
   if (!_alimtalkAccepted_(res)) {
     // 접수 실패(템플릿 검수중, 잔액부족 등) — 플래그를 남기지 않아야 다음 등록/승인 후 재시도 가능
     Logger.log('⚠️ 등록완료 알림톡 접수 실패: ' + 거래ID + ' → ' + JSON.stringify(res));
@@ -9502,7 +9506,7 @@ function testRegisterAlimtalk(args) {
   var vars = { '#{고객명}': 고객명, '#{반출일시}': 반출표시, '#{반납일시}': 반납표시 };
   var btns = [{ n: '내 예약 확인', t: 'WL', u1: link.url, u2: link.url }];
   try {
-    var res = sendAlimtalk(tpl, 연락처, 고객명, msg, vars, btns);
+    var res = sendAlimtalk(tpl, 연락처, 고객명, msg, vars, btns, { altSendType: '' });
     return { success: true, popbill: res, template: tpl, link: link.url };
   } catch (e) {
     return { error: e.message, template: tpl };

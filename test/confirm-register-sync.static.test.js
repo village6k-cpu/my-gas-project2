@@ -384,12 +384,29 @@ console.log('checkout-guide-self-payment-copy checks OK');
       !testFn.includes('customerName.replace(/\\*/g'),
     'register alimtalk test must not reconstruct names from masked myPage customerName'
   );
+  assert(
+    /sendAlimtalk\(tpl, 연락처, 고객명, msg, vars, btns, \{ altSendType: '' \}\)/.test(testFn),
+    'register alimtalk test sends must block Popbill SMS/LMS fallback'
+  );
 }
 console.log('register-alimtalk-test-tool checks OK');
 
 // ── 알림톡 발송 신뢰성: 접수 성공시에만 플래그 + 날짜 경계 무관 중복방지 ──
 {
   const ca = read('checkAvailability.js');
+  const sendStart = ca.indexOf('function sendAlimtalk');
+  const sendFn = ca.slice(sendStart, ca.indexOf('// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', sendStart));
+  const registerFn = ca.slice(ca.indexOf('function sendRegisterCompleteAlimtalk_'), ca.indexOf('/**\n * 등록완료 알림톡 테스트 발송'));
+  assert(
+    /function sendAlimtalk\(templateCode, receiver, receiverName, content, vars, btns, options\)/.test(sendFn) &&
+      sendFn.includes("Object.prototype.hasOwnProperty.call(options, 'altSendType')") &&
+      /altSendType:\s*altSendType/.test(sendFn),
+    'sendAlimtalk must allow callers to explicitly disable Popbill SMS/LMS fallback'
+  );
+  assert(
+    /sendAlimtalk\(tpl, String\(연락처\), String\(예약자명\), msg, vars, btns, \{ altSendType: '' \}\)/.test(registerFn),
+    'register-complete alimtalk must never fall back to SMS/LMS when Kakao delivery is unavailable'
+  );
   assert(
     /function _alimtalkAccepted_\(res\)/.test(ca) && /res\.receiptNum/.test(ca),
     'popbill responses must be checked for receiptNum — error JSON is not an exception'
