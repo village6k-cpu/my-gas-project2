@@ -486,11 +486,13 @@ console.log('guide-skip-completed checks OK');
     'tradeInfo must carry returnDT so the check-in reminder is scheduled off the return datetime'
   );
   assert(
-    /var inSendMs = Math\.max\(checkoutMs \+ GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS, returnMs - GUIDE_CHECKIN_LEAD_MS\)/.test(fn),
-    'check-in reminder must fire at the later of (checkout+3h) and (return-12h) — never before checkout, near return for multi-day'
+    /function _getGuideCheckinSendMs_\(checkoutMs, returnMs\)/.test(ca) &&
+      /var inSendMs = _getGuideCheckinSendMs_\(checkoutMs, returnMs\)/.test(fn),
+    'check-in reminder timing must be centralized in _getGuideCheckinSendMs_ so regressions cannot re-inline checkout+3h logic'
   );
   assert(
-    /if \(inSendMs >= returnMs\) inSendMs = checkoutMs \+ Math\.floor\(\(returnMs - checkoutMs\) \/ 2\)/.test(fn),
+    /Math\.max\(checkoutMs \+ GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS, returnMs - GUIDE_CHECKIN_LEAD_MS\)/.test(ca) &&
+      /if \(sendMs >= returnMs\) sendMs = checkoutMs \+ Math\.floor\(\(returnMs - checkoutMs\) \/ 2\)/.test(ca),
     'ultra-short same-day rentals (checkout+3h past return) must fall back to the checkout~return midpoint'
   );
   assert(
@@ -504,6 +506,21 @@ console.log('guide-skip-completed checks OK');
   );
 }
 console.log('guide-checkin-timing checks OK');
+
+// ── 반출/반납 안내 진단 도구: 실거래별 다음 발송 예정시각을 live API로 확인 가능해야 함 ──
+{
+  const ca = read('checkAvailability.js');
+  const api = read('sheetAPI.js');
+  assert(
+    /function diagGuideAlimtalkSchedule\(args\)/.test(ca),
+    'diagGuideAlimtalkSchedule must expose dry-run schedule diagnostics for live trade ids'
+  );
+  assert(
+    api.includes('"diagGuideAlimtalkSchedule"') && api.includes('funcName === "diagGuideAlimtalkSchedule"'),
+    'diagGuideAlimtalkSchedule must be whitelisted and dispatched in sheetAPI run'
+  );
+}
+console.log('guide-alimtalk-schedule-diagnostics checks OK');
 
 // ── 확인요청 품목 단위 수정: 단건 재확인 + "제외" 전용 마커 + 행 타게팅 ──
 {

@@ -9943,6 +9943,120 @@ function _isInSendWindow(nowKST) {
   return hour >= GUIDE_SEND_START && hour < GUIDE_SEND_END;
 }
 
+function _getGuideCheckinSendMs_(checkoutMs, returnMs) {
+  checkoutMs = Number(checkoutMs || 0);
+  returnMs = Number(returnMs || 0);
+  if (!checkoutMs || !returnMs || isNaN(checkoutMs) || isNaN(returnMs) || returnMs <= checkoutMs) return null;
+
+  var sendMs = Math.max(checkoutMs + GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS, returnMs - GUIDE_CHECKIN_LEAD_MS);
+  if (sendMs >= returnMs) sendMs = checkoutMs + Math.floor((returnMs - checkoutMs) / 2);
+  return sendMs;
+}
+
+function _formatGuideKst_(value) {
+  if (!value) return '';
+  var dt = value instanceof Date ? value : new Date(value);
+  return Utilities.formatDate(dt, 'Asia/Seoul', 'yyyy-MM-dd HH:mm');
+}
+
+function _getGuideSentData_(props) {
+  props = props || PropertiesService.getScriptProperties();
+  var sentData = {};
+  try {
+    var sentRaw = props.getProperty('GUIDE_SENT_V2');
+    if (sentRaw) sentData = JSON.parse(sentRaw);
+  } catch(e) {}
+  props.getKeys().forEach(function(k) {
+    var m = k.match(/^GUIDE_SENT_(\d{8})$/);
+    if (!m) return;
+    try {
+      var legacy = JSON.parse(props.getProperty(k) || '{}');
+      Object.keys(legacy).forEach(function(f) {
+        if (!sentData[f]) sentData[f] = m[1] + ' ' + legacy[f];
+      });
+    } catch(e) {}
+  });
+  return sentData;
+}
+
+function diagGuideAlimtalkSchedule(args) {
+  args = args || {};
+  var rawIds = args.tradeIds || args.tids || args.ids || args.tradeId || args.tid || args.id || '';
+  var ids = Array.isArray(rawIds)
+    ? rawIds
+    : String(rawIds || '').split(/[,\s]+/);
+  var target = {};
+  ids.forEach(function(id) {
+    id = String(id || '').trim();
+    if (id) target[id] = true;
+  });
+  if (!Object.keys(target).length) return { error: 'tradeIds 필요' };
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  var contractSheet = ss.getSheetByName('계약마스터');
+  if (!schedSheet || !contractSheet) return { error: '스케줄상세/계약마스터 시트 필요' };
+
+  var contractMap = {};
+  if (contractSheet.getLastRow() >= 2) {
+    var cmData = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getValues();
+    cmData.forEach(function(row) {
+      var tid = String(row[0] || '').trim();
+      if (!target[tid]) return;
+      contractMap[tid] = {
+        name: String(row[1] || '').trim(),
+        tel: String(row[2] || '').trim(),
+        status: String(row[9] || '').trim()
+      };
+    });
+  }
+
+  var sentData = _getGuideSentData_(PropertiesService.getScriptProperties());
+  var now = new Date();
+  var nowMs = now.getTime();
+  var rows = [];
+  var seen = {};
+  if (schedSheet.getLastRow() >= 2) {
+    var schedData = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getValues();
+    for (var i = 0; i < schedData.length; i++) {
+      var tid = String(schedData[i][1] || '').trim();
+      if (!target[tid] || seen[tid]) continue;
+      seen[tid] = true;
+
+      var checkoutDT = _parseCheckoutDateTime(schedData[i][5], schedData[i][6]);
+      var returnDT = _parseCheckoutDateTime(schedData[i][7], schedData[i][8]);
+      var checkoutMs = checkoutDT ? checkoutDT.getTime() : null;
+      var returnMs = returnDT ? returnDT.getTime() : null;
+      var checkinSendMs = _getGuideCheckinSendMs_(checkoutMs, returnMs);
+      var checkinFlag = 'in_' + tid;
+      var checkoutFlag = 'out_' + tid;
+
+      rows.push({
+        tid: tid,
+        name: (contractMap[tid] && contractMap[tid].name) || '',
+        phoneMasked: maskPhoneForDisplay_((contractMap[tid] && contractMap[tid].tel) || ''),
+        contractStatus: (contractMap[tid] && contractMap[tid].status) || '',
+        scheduleStatus: String(schedData[i][9] || '').trim(),
+        checkoutAt: _formatGuideKst_(checkoutDT),
+        returnAt: _formatGuideKst_(returnDT),
+        legacyCheckoutPlus3At: checkoutMs ? _formatGuideKst_(checkoutMs + GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS) : '',
+        checkinSendAt: checkinSendMs ? _formatGuideKst_(checkinSendMs) : '',
+        checkinDeadlineAt: returnMs ? _formatGuideKst_(returnMs) : '',
+        checkinDueNow: !!(checkinSendMs && returnMs && nowMs >= checkinSendMs && nowMs < returnMs),
+        checkinSentAt: sentData[checkinFlag] || '',
+        checkoutSentAt: sentData[checkoutFlag] || ''
+      });
+    }
+  }
+
+  return {
+    now: _formatGuideKst_(now),
+    sendWindowOpen: _isInSendWindow(now),
+    count: rows.length,
+    rows: rows
+  };
+}
+
 /**
  * 30분마다 실행 — 반출/반납 안내톡 발송 시점 체크
  *
@@ -10023,22 +10137,7 @@ function checkGuideAlimtalk() {
   //     반납 안내[반납-12h~반납]처럼 자정을 걸치는 구간에서 중복 발송됐음) ──
   var props = PropertiesService.getScriptProperties();
   var sentKey = 'GUIDE_SENT_V2';
-  var sentData = {};
-  try {
-    var sentRaw = props.getProperty(sentKey);
-    if (sentRaw) sentData = JSON.parse(sentRaw);
-  } catch(e) {}
-  // 구버전(날짜별 키) 기록 전부 병합 — 반납 구간(+48h)은 이틀 전 발송분도 살아있을 수 있음
-  props.getKeys().forEach(function(k) {
-    var m = k.match(/^GUIDE_SENT_(\d{8})$/);
-    if (!m) return;
-    try {
-      var legacy = JSON.parse(props.getProperty(k) || '{}');
-      Object.keys(legacy).forEach(function(f) {
-        if (!sentData[f]) sentData[f] = m[1] + ' ' + legacy[f];
-      });
-    } catch(e) {}
-  });
+  var sentData = _getGuideSentData_(props);
 
   var results = { sent: [], skipped: [], errors: [] };
   var nowMs = now.getTime();
@@ -10080,9 +10179,8 @@ function checkGuideAlimtalk() {
     // → 당일 건은 반출+3h가 이기고(기존 동작 유지), 다일 건은 반납-12h가 이김. 절대 반출 전엔 안 감.
     if (info.returnDT) {
       var returnMs = info.returnDT.getTime();
-      var inSendMs = Math.max(checkoutMs + GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS, returnMs - GUIDE_CHECKIN_LEAD_MS);
-      // 반출+3h가 반납을 넘는 초단기 대여는 반출~반납 중간 지점으로(반납 전 보장)
-      if (inSendMs >= returnMs) inSendMs = checkoutMs + Math.floor((returnMs - checkoutMs) / 2);
+      var inSendMs = _getGuideCheckinSendMs_(checkoutMs, returnMs);
+      if (inSendMs === null) return;
       var inFlag = 'in_' + tid;
       var inDeadlineMs = returnMs;  // 반납 시각 지나면 발송 안 함 (이미 반납했을 것)
       if (!sentData[inFlag] && nowMs >= inSendMs && nowMs < inDeadlineMs) {
