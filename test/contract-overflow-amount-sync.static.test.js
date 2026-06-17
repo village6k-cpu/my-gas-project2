@@ -30,6 +30,30 @@ assert.match(
 
 assert.match(
   source,
+  /function applyContractTotalFormula_\(ws,\s*rows,\s*refs\)[\s\S]*itemEnd\s*=\s*itemStart\s*\+\s*\(rows\.itemRows\s*\|\|\s*22\)\s*-\s*1[\s\S]*SUM\(G/,
+  'contract generation must rewrite the total formula to include the expanded item row range'
+);
+
+assert.match(
+  source,
+  /applyContractTotalFormula_\(ws,\s*rows,\s*paymentRefs\)[\s\S]*applyContractPaymentFormula_\(ws,\s*paymentRefs\)/,
+  'contract generation must update the total before calculating discounted/final amounts'
+);
+
+assert.match(
+  source,
+  /function isContractItemEndRow_\(rowValues\)[\s\S]*특이사항[\s\S]*합계[\s\S]*총 결제 금액/,
+  'template row detection must use section labels to find the end of the item table'
+);
+
+assert.doesNotMatch(
+  source,
+  /rowText\.includes\("라인"\)[\s\S]*rowText\.includes\("HDMI"\)[\s\S]*rowText\.includes\("W\/O"\)/,
+  'item names containing 라인, HDMI, or W/O must not be mistaken for the end of the item table'
+);
+
+assert.match(
+  source,
   /function updateContractLink\(거래ID,\s*contractUrl,\s*finalAmount\)[\s\S]*getRange\(i \+ 2,\s*9\)[\s\S]*setValue\(Number\(finalAmount\)\)/,
   'updateContractLink must sync the final contract amount into 거래내역 I열'
 );

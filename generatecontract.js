@@ -354,6 +354,7 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   // ── 결제금액 수식 보정 ──
   // 빌리지 견적 기준은 할인 곱셈이다. 예: 학생30% + 장기20% => 0.7 * 0.8 = 56% 결제.
   // 계약서 템플릿도 같은 정책을 쓰도록 생성 시 수식을 명시적으로 보정한다.
+  applyContractTotalFormula_(ws, rows, paymentRefs);
   applyContractPaymentFormula_(ws, paymentRefs);
 
   // ── 계약일자 ──
@@ -602,6 +603,16 @@ function applyContractPaymentFormula_(ws, refs) {
   ws.getRange(refs.finalAmountCell).setFormula("=IFERROR(CEILING(" + refs.discountedAmountCell + "*1.1,10),\"\")");
 }
 
+function applyContractTotalFormula_(ws, rows, refs) {
+  if (!ws || !rows || !rows.itemStart) return;
+  refs = refs || findContractPaymentRefs_(ws, rows);
+  var itemStart = rows.itemStart;
+  var itemEnd = itemStart + (rows.itemRows || 22) - 1;
+  ws.getRange(refs.totalBeforeDiscountCell).setFormula(
+    "=SUM(G" + itemStart + ":G" + itemEnd + ",M" + itemStart + ":M" + itemEnd + ")"
+  );
+}
+
 function readContractAmount_(ws, cellA1) {
   var raw = ws.getRange(cellA1).getDisplayValue() || ws.getRange(cellA1).getValue();
   var normalized = String(raw || "").replace(/[^0-9.-]/g, "");
@@ -647,7 +658,7 @@ function findTemplateRows(ws) {
   };
 
   let itemHeaderRow = null;   // 품목 헤더 행 (SET|품목 등)
-  let cableRow = null;        // 라인/기타 행 (품목 끝 판별용)
+  let itemEndRow = null;      // 품목 표 다음 섹션 행
 
   for (let i = 0; i < data.length; i++) {
     const rowText = data[i].join("|");
@@ -679,8 +690,8 @@ function findTemplateRows(ws) {
       itemHeaderRow = i + 1;
       result.itemStart = i + 2;  // 헤더 다음 행
     }
-    if ((rowText.includes("라인") || rowText.includes("HDMI") || rowText.includes("기타") || rowText.includes("합계") || rowText.includes("특이사항") || rowText.includes("W/O")) && itemHeaderRow && !cableRow) {
-      cableRow = i + 1;
+    if (itemHeaderRow && !itemEndRow && isContractItemEndRow_(data[i])) {
+      itemEndRow = i + 1;
     }
     if (rowText.includes("계약일자") && !result.signDate) {
       result.signDate = i + 1;
@@ -690,9 +701,9 @@ function findTemplateRows(ws) {
     }
   }
 
-  // 품목 행 수 계산: 헤더 다음 ~ 라인/기타 행 직전
-  if (result.itemStart && cableRow) {
-    result.itemRows = cableRow - result.itemStart;
+  // 품목 행 수 계산: 헤더 다음 ~ 다음 섹션 행 직전
+  if (result.itemStart && itemEndRow) {
+    result.itemRows = itemEndRow - result.itemStart;
   }
 
   // 못 찾은 경우 기본값 (기존 빌리지 계약서 템플릿 기준)
@@ -708,6 +719,17 @@ function findTemplateRows(ws) {
   if (!result.signLessee) result.signLessee = 55;
 
   return result;
+}
+
+function isContractItemEndRow_(rowValues) {
+  var rowText = rowValues.join("|");
+  if (rowText.includes("특이사항")) return true;
+  if (rowText.includes("합계")) return true;
+  if (rowText.includes("사전 할인")) return true;
+  if (rowText.includes("총 결제 금액")) return true;
+  if (rowText.includes("주요 약관")) return true;
+  if (rowText.includes("계약일자")) return true;
+  return false;
 }
 
 
@@ -814,6 +836,7 @@ function setupContractTemplate() {
   out.push("장기할인 수식 적용 (품목 첫 행 일수 기반)");
 
   // 4) 할인은 곱셈 적용
+  applyContractTotalFormula_(ws, rows, refs);
   applyContractPaymentFormula_(ws, refs);
   out.push("최종 금액 할인 곱셈 수식 적용");
 
