@@ -54,8 +54,20 @@ assert.doesNotMatch(
 
 assert.match(
   source,
-  /function updateContractLink\(거래ID,\s*contractUrl,\s*finalAmount\)[\s\S]*getRange\(i \+ 2,\s*9\)[\s\S]*setValue\(Number\(finalAmount\)\)/,
+  /var TRADE_AMOUNT_NUMBER_FORMAT_\s*=\s*['"]"?₩"?#,##0['"][\s\S]*function setTradeAmountValue_\(range,\s*amount\)[\s\S]*setNumberFormat\(TRADE_AMOUNT_NUMBER_FORMAT_\)[\s\S]*setValue\(Number\(amount\)\)/,
+  'trade amount sync must preserve a visible currency number format'
+);
+
+assert.match(
+  source,
+  /function updateContractLink\(거래ID,\s*contractUrl,\s*finalAmount\)[\s\S]*setTradeAmountValue_\(거래시트\.getRange\(i \+ 2,\s*9\),\s*finalAmount\)/,
   'updateContractLink must sync the final contract amount into 거래내역 I열'
+);
+
+assert.doesNotMatch(
+  source,
+  /getRange\(i \+ 2,\s*9\)\.setNumberFormat\("#,##0"\)\.setValue\(Number\(finalAmount\)\)/,
+  '거래내역 I열 amount sync must not strip the currency symbol from regenerated rows'
 );
 
 assert.match(

@@ -620,6 +620,12 @@ function readContractAmount_(ws, cellA1) {
   return amount && amount > 0 ? amount : null;
 }
 
+var TRADE_AMOUNT_NUMBER_FORMAT_ = '"₩"#,##0';
+
+function setTradeAmountValue_(range, amount) {
+  range.setNumberFormat(TRADE_AMOUNT_NUMBER_FORMAT_).setValue(Number(amount));
+}
+
 function getAdditionalRequestTextByTradeId_(ss, 거래ID) {
   var sheet = ss.getSheetByName("확인요청");
   if (!sheet || sheet.getLastRow() < 2) return "";
@@ -758,7 +764,7 @@ function updateContractLink(거래ID, contractUrl, finalAmount) {
         // C열(3)에 계약서 링크 입력
         거래시트.getRange(i + 2, 3).setValue(contractUrl);
         if (finalAmount && !isNaN(Number(finalAmount))) {
-          거래시트.getRange(i + 2, 9).setNumberFormat("#,##0").setValue(Number(finalAmount));
+          setTradeAmountValue_(거래시트.getRange(i + 2, 9), finalAmount);
         }
         try { if (typeof invalidateDashboardTradeExtraCache_ !== 'undefined') invalidateDashboardTradeExtraCache_([거래ID]); } catch (cacheErr) {}
         try { if (typeof touchDashboardSearchCacheVersion_ !== 'undefined') touchDashboardSearchCacheVersion_(); } catch (searchErr) {}
