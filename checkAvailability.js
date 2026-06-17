@@ -10057,6 +10057,33 @@ function diagGuideAlimtalkSchedule(args) {
   };
 }
 
+function markGuideAlimtalkSent(args) {
+  args = args || {};
+  var rawIds = args.tradeIds || args.tids || args.ids || args.tradeId || args.tid || args.id || '';
+  var ids = Array.isArray(rawIds)
+    ? rawIds
+    : String(rawIds || '').split(/[,\s]+/);
+  var kind = String(args.kind || args.종류 || '반납').trim();
+  var prefix = kind === '반출' ? 'out_' : 'in_';
+  var props = PropertiesService.getScriptProperties();
+  var sentData = _getGuideSentData_(props);
+  var sentAt = String(args.sentAt || args.sent_at || '').trim();
+  if (!sentAt) sentAt = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMdd HH:mm');
+
+  var marked = [];
+  ids.forEach(function(id) {
+    id = String(id || '').trim();
+    if (!id) return;
+    var key = prefix + id;
+    sentData[key] = sentAt;
+    marked.push({ tid: id, flag: key, sentAt: sentAt });
+  });
+  if (!marked.length) return { error: 'tradeIds 필요' };
+
+  props.setProperty('GUIDE_SENT_V2', JSON.stringify(sentData));
+  return { success: true, kind: kind, marked: marked };
+}
+
 /**
  * 30분마다 실행 — 반출/반납 안내톡 발송 시점 체크
  *

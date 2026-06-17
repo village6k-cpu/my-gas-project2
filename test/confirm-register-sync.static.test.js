@@ -519,6 +519,12 @@ console.log('guide-checkin-timing checks OK');
     api.includes('"diagGuideAlimtalkSchedule"') && api.includes('funcName === "diagGuideAlimtalkSchedule"'),
     'diagGuideAlimtalkSchedule must be whitelisted and dispatched in sheetAPI run'
   );
+  assert(
+    /function markGuideAlimtalkSent\(args\)/.test(ca) &&
+      api.includes('"markGuideAlimtalkSent"') &&
+      api.includes('funcName === "markGuideAlimtalkSent"'),
+    'markGuideAlimtalkSent must allow already-sent guide messages to be flagged so they are not resent'
+  );
 }
 console.log('guide-alimtalk-schedule-diagnostics checks OK');
 

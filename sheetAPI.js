@@ -996,7 +996,8 @@ function runFunction(funcName, params) {
     "setupMyPage",
     "testRegisterAlimtalk",
     "testGuideAlimtalk",
-    "diagGuideAlimtalkSchedule"
+    "diagGuideAlimtalkSchedule",
+    "markGuideAlimtalkSent"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -1076,6 +1077,14 @@ function runFunction(funcName, params) {
       }
       var dgResult = diagGuideAlimtalkSchedule(dgArgs || {});
       return { success: !dgResult.error, function: funcName, result: dgResult, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "markGuideAlimtalkSent") {
+      var mgArgs = params.args;
+      if (typeof mgArgs === "string") {
+        try { mgArgs = JSON.parse(mgArgs); } catch (mgErr) { mgArgs = { tradeIds: mgArgs }; }
+      }
+      var mgResult = markGuideAlimtalkSent(mgArgs || {});
+      return { success: !mgResult.error, function: funcName, result: mgResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "setupMyPage") {
       var setupArgs = params.args;
