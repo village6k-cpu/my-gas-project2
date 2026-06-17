@@ -9712,16 +9712,15 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns,
 // 트리거: 30분마다 checkGuideAlimtalk 실행
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-var TPL_CHECKOUT = '026040000902';  // 반출 안내
+var TPL_CHECKOUT = '026060000711';  // 반출 안내
 var TPL_CHECKIN  = '026040000904';  // 반납 안내
 
 function _getCheckoutGuideTemplate_() {
-  // 새 셀프결제 안내톡은 팝빌에서 승인된 뒤 Script Properties에 코드가 들어오면 전환한다.
-  return PropertiesService.getScriptProperties().getProperty('POPBILL_TPL_CHECKOUT_SELF_PAYMENT') || TPL_CHECKOUT;
+  return TPL_CHECKOUT;
 }
 
 function _hasSelfPaymentCheckoutTemplate_() {
-  return !!PropertiesService.getScriptProperties().getProperty('POPBILL_TPL_CHECKOUT_SELF_PAYMENT');
+  return true;
 }
 
 function _buildCheckoutGuideMsg(customerName) {

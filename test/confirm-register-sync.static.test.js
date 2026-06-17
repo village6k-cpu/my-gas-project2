@@ -357,8 +357,9 @@ console.log('guide-alimtalk-test-tool checks OK');
   assert(
     /function _buildCheckoutLegacyMsg\(customerName\)/.test(ca) &&
       /function _getCheckoutGuideTemplate_\(\)/.test(ca) &&
-      ca.includes("POPBILL_TPL_CHECKOUT_SELF_PAYMENT"),
-    'checkout guide alimtalk must keep a legacy approved-template fallback until the new self-payment Popbill template is approved'
+      ca.includes("var TPL_CHECKOUT = '026060000711'") &&
+      /function _hasSelfPaymentCheckoutTemplate_\(\) \{\s*return true;\s*\}/.test(ca),
+    'checkout guide alimtalk must use the approved self-payment Popbill template by default'
   );
   const guideFn = ca.slice(ca.indexOf('function checkGuideAlimtalk'), ca.indexOf('// ── 발송 기록 저장'));
   assert(

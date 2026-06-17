@@ -116,7 +116,7 @@
 ### 외부 서비스
 - **개고생2.0 (AppSheet/시트)**: `generatecontract.js:457` `SpreadsheetApp.openByUrl(개고생2_URL)`. 거래내역 시트 M열 계약서 링크 입력 + 고객DB I열 할인유형 매칭 → 확인요청 M열 자동 채움. 인증: 같은 구글 계정 권한.
 - **village-ai (Vercel)**: `villageAiClient.js:38` POST `${VILLAGE_AI_URL}/api/advise-booking`. 응답 `{verdict: ok|warn|block, blocks, warnings, notes}`. 호출 실패 시 warn fallback (block 안 함).
-- **팝빌**: `checkAvailability.js:3571` POST `auth.linkhub.co.kr/POPBILL/Token` (토큰 발급, HMAC SHA-256 서명). `checkAvailability.js:3621` POST `popbill.linkhub.co.kr/KakaoTalk/{corpNum}` (알림톡 발송). 템플릿 코드 `TPL_CHECKOUT='026040000902'`, `TPL_CHECKIN='026040000904'`.
+- **팝빌**: `checkAvailability.js:3571` POST `auth.linkhub.co.kr/POPBILL/Token` (토큰 발급, HMAC SHA-256 서명). `checkAvailability.js:3621` POST `popbill.linkhub.co.kr/KakaoTalk/{corpNum}` (알림톡 발송). 템플릿 코드 `TPL_CHECKOUT='026060000711'`, `TPL_CHECKIN='026040000904'`.
 - **Google Drive**: `generatecontract.js:92,93` 템플릿 복사 → 지정 폴더 저장. `DriveApp` 사용.
 - **GitHub Pages**: docs/ 폴더 git push만 하면 자동 반영. 별도 빌드 X.
 - **Slack**: GAS는 호출 X. `getInventoryConflictsSlackMessage`로 텍스트만 만들고 외부 봇/n8n/cowork이 fetch해서 슬랙 메시지로 사용. 매일 아침 보고서용 (커밋 `9d629d0`).
