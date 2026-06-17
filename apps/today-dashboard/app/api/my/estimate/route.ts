@@ -14,8 +14,6 @@ const VILLAGE_OPS_API_URL =
   process.env.VILLAGE_OPS_API_URL ??
   "https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec";
 const VILLAGE_OPS_API_KEY = process.env.VILLAGE_OPS_API_KEY ?? process.env.VILLAGE_OPS_KEY ?? process.env.GAS_API_KEY ?? "village2026";
-const QUOTE_PDF_CACHE_MS = 6 * 60 * 60_000;
-const quotePdfCache = new Map<string, { at: number; pdfUrl: string }>();
 
 type MyPageResult = {
   success?: boolean;
@@ -36,21 +34,6 @@ function tradeIdFromMyPageResult(result: MyPageResult) {
   return String(result.trade?.tradeId || result.request?.tradeId || result.tradeId || "").trim();
 }
 
-function cachedQuotePdf(tradeId: string) {
-  const cached = quotePdfCache.get(tradeId);
-  if (!cached) return "";
-  if (Date.now() - cached.at > QUOTE_PDF_CACHE_MS) {
-    quotePdfCache.delete(tradeId);
-    return "";
-  }
-  return cached.pdfUrl;
-}
-
-function putQuotePdfCache(tradeId: string, pdfUrl: string) {
-  if (quotePdfCache.size > 1000) quotePdfCache.clear();
-  quotePdfCache.set(tradeId, { at: Date.now(), pdfUrl });
-}
-
 function rejectNonQuotePdfUrl(value: string) {
   try {
     const url = new URL(value);
@@ -64,14 +47,10 @@ function rejectNonQuotePdfUrl(value: string) {
 }
 
 async function createQuotePdfUrl(tradeId: string) {
-  const cached = cachedQuotePdf(tradeId);
-  if (cached) return cached;
-
   const url = new URL(VILLAGE_OPS_API_URL);
   url.searchParams.set("action", "previewQuote");
   url.searchParams.set("id", tradeId);
   url.searchParams.set("key", VILLAGE_OPS_API_KEY);
-  url.searchParams.set("reuse", "1");
 
   const res = await fetch(url.toString(), { cache: "no-store", redirect: "follow" });
   const data = (await res.json()) as QuoteResult;
@@ -79,7 +58,6 @@ async function createQuotePdfUrl(tradeId: string) {
 
   const pdfUrl = rejectNonQuotePdfUrl(String(data.pdfUrl || data.result?.pdfUrl || ""));
   if (!pdfUrl) throw new Error("견적서 PDF URL을 받지 못했습니다");
-  putQuotePdfCache(tradeId, pdfUrl);
   return pdfUrl;
 }
 

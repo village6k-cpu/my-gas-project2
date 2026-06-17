@@ -28,7 +28,6 @@ function MYPAGE_CFG_() {
 }
 
 var MYPAGE_VIEW_CACHE_SECONDS_ = 90;
-var MYPAGE_ESTIMATE_CACHE_SECONDS_ = 21600;
 
 function myPageSafeKey_(value) {
   return String(value || "").trim().replace(/[^A-Za-z0-9가-힣_-]/g, "_").slice(0, 120);
@@ -36,10 +35,6 @@ function myPageSafeKey_(value) {
 
 function myPageReservationCacheKey_(id) {
   return "mypage_view_v4_" + myPageSafeKey_(id);
-}
-
-function myPageEstimateCacheKey_(tradeId) {
-  return "mypage_estimate_pdf_v2_" + myPageSafeKey_(tradeId);
 }
 
 function myPageGetCachedJson_(key) {
@@ -349,17 +344,12 @@ function myPageEstimatePdfUrl_(tradeId) {
   tradeId = String(tradeId || "").trim();
   if (!tradeId) throw new Error("거래ID 필수");
 
-  var cacheKey = myPageEstimateCacheKey_(tradeId);
-  var cached = myPageGetCachedJson_(cacheKey);
-  if (cached && cached.pdfUrl) return cached.pdfUrl;
-
   var props = PropertiesService.getScriptProperties();
   var url = myPageVillageOpsApiUrl_(props);
   var payload = {
     action: "previewQuote",
     id: tradeId,
-    key: myPageVillageOpsApiKey_(props),
-    reuse: "1"
+    key: myPageVillageOpsApiKey_(props)
   };
   var qs = Object.keys(payload).map(function(key) {
     return encodeURIComponent(key) + "=" + encodeURIComponent(payload[key]);
@@ -383,7 +373,6 @@ function myPageEstimatePdfUrl_(tradeId) {
 
   var pdfUrl = String(data.pdfUrl || (data.result && data.result.pdfUrl) || "").trim();
   if (!pdfUrl || !/^https:\/\/.+/i.test(pdfUrl)) throw new Error("견적서 PDF URL을 받지 못했습니다");
-  myPagePutCachedJson_(cacheKey, { pdfUrl: pdfUrl }, MYPAGE_ESTIMATE_CACHE_SECONDS_);
   return pdfUrl;
 }
 

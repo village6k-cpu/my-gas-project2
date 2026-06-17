@@ -63,8 +63,10 @@ assert(
   /function getMyReservationEstimatePdf\(token\)/.test(myPage) &&
     /myPageVerify_\(token\)/.test(myPage) &&
     /action:\s*"previewQuote"/.test(myPage) &&
-    /pdfUrl/.test(myPage),
-  'myPage.js must create the customer-visible quote PDF through the token-verified previewQuote path'
+    /pdfUrl/.test(myPage) &&
+    !/myPageEstimateCacheKey_/.test(myPage) &&
+    !/reuse:\s*"1"/.test(myPage),
+  'myPage.js must create the customer-visible quote PDF through the token-verified previewQuote path without stale PDF reuse'
 );
 assert(
   /MYPAGE_VIEW_CACHE_SECONDS_/.test(myPage) &&
@@ -114,15 +116,16 @@ assert(
 assert(
   /gasGet\(\{ action: "myPage", token \}\)/.test(estimateRoute) &&
     /action", "previewQuote"/.test(estimateRoute) &&
-    /reuse", "1"/.test(estimateRoute) &&
-    /QUOTE_PDF_CACHE_MS = 6 \* 60 \* 60_000/.test(estimateRoute) &&
     /rejectNonQuotePdfUrl/.test(estimateRoute) &&
     !/isGoogleSheetPdfExportUrl/.test(estimateRoute) &&
+    !/reuse", "1"/.test(estimateRoute) &&
+    !/QUOTE_PDF_CACHE_MS/.test(estimateRoute) &&
+    !/quotePdfCache/.test(estimateRoute) &&
     !/\/spreadsheets\/d\/[^/]+\/export/.test(estimateRoute) &&
     /NextResponse\.redirect\(pdfUrl/.test(estimateRoute) &&
     /TOKEN_RE/.test(estimateRoute) &&
     /rateLimited/.test(estimateRoute),
-  'the customer quote route must validate the token, call previewQuote directly, and never proxy contract sheet exports'
+  'the customer quote route must validate the token, call previewQuote without stale PDF reuse, and never proxy contract sheet exports'
 );
 assert(
   page.includes('카카오톡 채널') && page.includes('연장 · 변경 · 취소'),
