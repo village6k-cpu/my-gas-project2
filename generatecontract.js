@@ -172,7 +172,7 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   // ★ 템플릿 행 위치 (계약서_템플릿.xlsx 구조 기준)
   // 이 값들은 템플릿 구조에 맞게 조정해야 합니다
   // findRow() 로 자동 탐색
-  const rows = findTemplateRows(ws);
+  let rows = findTemplateRows(ws);
   repairContractItemHeaders_(ws, rows);
 
   // ── 전체 시트 데이터 유효성 검사 해제 (드롭다운 등으로 인한 입력 오류 방지) ──
@@ -218,9 +218,6 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   // 템플릿에서 B+C, H+I 이미 병합됨. 좌측: B(품목), D,E,F(수량,일수,단가), G(금액수식).
   //                                 우측: H(품목), J,K,L(수량,일수,단가), M(금액수식).
   // 성능: 기존 400+ 셀 API 호출 → 배치 10여 회로 축소 (~15x 빠름).
-  const ITEMS_PER_SIDE = rows.itemRows || 22;
-  const itemStart = rows.itemStart;
-
   // 추가요청을 items 뒤에 이어붙이기 (같은 배열로 통합 처리)
   // 견적/최종금액 메모는 계약서 품목으로 넣지 않고, 아래 결제금액 보정에만 사용한다.
   const combinedItems = items.slice();
@@ -229,10 +226,17 @@ function generateContractFile(ss, 거래ID, 추가요청) {
       var line = String(s || "").trim();
       return line && !isQuoteMemoLine_(line);
     });
-    for (let ai = 0; ai < 추가items.length && combinedItems.length < ITEMS_PER_SIDE * 2; ai++) {
+    for (let ai = 0; ai < 추가items.length; ai++) {
       combinedItems.push({ 세트명: "", 장비명: 추가items[ai].trim(), 수량: 1, 단가: 0 });
     }
   }
+
+  rows = expandContractItemTableIfNeeded_(ws, rows, Math.max(1, Math.ceil(combinedItems.length / 2)));
+  repairContractItemHeaders_(ws, rows);
+
+  const ITEMS_PER_SIDE = rows.itemRows || 22;
+  const itemStart = rows.itemStart;
+  const paymentRefs = findContractPaymentRefs_(ws, rows);
 
   // 좌/우 분할
   const leftItems = [];
@@ -304,7 +308,7 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   try { applyManualEntryAutofill_(ws, newSS, itemStart, ITEMS_PER_SIDE, combinedItems.length); }
   catch (afErr) { Logger.log("수동입력 자동채움 설정 실패(무시): " + afErr.message); }
 
-  // ── 할인 드롭다운 초기화 — 사전(C44), 추가(I44), 장기(C45), 쿠폰(I45) ──
+  // ── 할인 드롭다운 초기화 — 사전/추가/장기/쿠폰 할인 셀 ──
   // 계약마스터 K(할인유형)에 따라 사전/추가 할인을 자동 주입
   // 계약서 템플릿 실제 드롭다운 옵션명:
   //   사전할인: 해당없음 / 학생30% / 개인사업자/프리랜서20%
@@ -330,15 +334,14 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   }
   // ── 할인 셀 4개 모두 텍스트 포맷 강제 (중요!) ──
   // setValue("10%") 처럼 % 포함 문자열을 percent 셀에 쓰면 Sheets가 0.1 숫자로 자동 변환.
-  // 그러면 H46의 REGEXEXTRACT(C45, "\d+")가 0.1에서 "0"만 추출해 할인 0% 처리됨.
+  // 그러면 할인 수식의 REGEXEXTRACT가 0.1에서 "0"만 추출해 할인 0% 처리됨.
   // 텍스트 포맷(@)으로 강제해 "10%" 문자열 그대로 저장 → REGEXEXTRACT가 "10" 정확히 추출.
-  ws.getRange("C44:C45").setNumberFormat("@");
-  ws.getRange("I44:I45").setNumberFormat("@");
+  ws.getRange(paymentRefs.preDiscountCell).setNumberFormat("@").setValue(사전할인);
+  ws.getRange(paymentRefs.addDiscountCell).setNumberFormat("@").setValue(추가할인);
+  ws.getRange(paymentRefs.longDiscountCell).setNumberFormat("@").setValue("해당없음");
+  ws.getRange(paymentRefs.couponDiscountCell).setNumberFormat("@").setValue("해당없음");
 
-  ws.getRange("C44:C45").setValues([[사전할인], ["해당없음"]]);
-  ws.getRange("I44:I45").setValues([[추가할인], ["해당없음"]]);
-
-  // ── 장기할인 (C45) — 일수 기반 직접 setValue + 드롭다운 적용 ──
+  // ── 장기할인 — 일수 기반 직접 setValue + 드롭다운 적용 ──
   var ltRate = getLongTermDiscountRate(일수 || 1);
   var ltText = ltRate === 0 ? "해당없음" : (ltRate + "%");
   var ltRule = SpreadsheetApp.newDataValidation()
@@ -346,12 +349,12 @@ function generateContractFile(ss, 거래ID, 추가요청) {
     .setAllowInvalid(true)
     .setHelpText("1일=해당없음 / 2일=10% / 3~5일=20% / 6~9일=35% / 10~14일=40% / 15~19일=45% / 20일+=50%")
     .build();
-  ws.getRange("C45").setDataValidation(ltRule).setValue(ltText);
+  ws.getRange(paymentRefs.longDiscountCell).setDataValidation(ltRule).setValue(ltText);
 
   // ── 결제금액 수식 보정 ──
   // 빌리지 견적 기준은 할인 곱셈이다. 예: 학생30% + 장기20% => 0.7 * 0.8 = 56% 결제.
   // 계약서 템플릿도 같은 정책을 쓰도록 생성 시 수식을 명시적으로 보정한다.
-  applyContractPaymentFormula_(ws);
+  applyContractPaymentFormula_(ws, paymentRefs);
 
   // ── 계약일자 ──
   const today = new Date();
@@ -369,6 +372,7 @@ function generateContractFile(ss, 거래ID, 추가요청) {
 
   // 저장
   SpreadsheetApp.flush();
+  const finalAmount = readContractAmount_(ws, paymentRefs.finalAmountCell);
 
   // ── 링크가 있는 사람은 누구나 열람 가능 (직원 PC 열람용) ──
   try {
@@ -377,10 +381,10 @@ function generateContractFile(ss, 거래ID, 추가요청) {
     Logger.log("공유 설정 실패 (무시): " + shareErr.message);
   }
 
-  // ── 개고생2.0 거래내역 C열(이동 후)에 계약서 링크 입력 ──
-  updateContractLink(거래ID, newUrl);
+  // ── 개고생2.0 거래내역 C열 계약서 링크 + I열 최종 금액 입력 ──
+  updateContractLink(거래ID, newUrl, finalAmount);
 
-  return { fileName: fileName, url: newUrl, fileId: newFileId };
+  return { fileName: fileName, url: newUrl, fileId: newFileId, finalAmount: finalAmount };
 }
 
 // 컬럼 번호 → 문자 (1→A, 2→B ...). 배치 IO 수식 생성용.
@@ -456,6 +460,98 @@ function repairContractItemHeaders_(ws, rows) {
   ws.getRange(headerRow, 12, 1, 2).setValues([["단가", "금액"]]);
 }
 
+function expandContractItemTableIfNeeded_(ws, rows, requiredRowsPerSide) {
+  if (!ws || !rows || !rows.itemStart) return rows;
+  var currentRows = rows.itemRows || 22;
+  var requiredRows = Math.max(currentRows, Number(requiredRowsPerSide) || currentRows);
+  if (requiredRows <= currentRows) return rows;
+
+  var extraRows = requiredRows - currentRows;
+  var insertAt = rows.itemStart + currentRows;
+  ws.insertRowsBefore(insertAt, extraRows);
+
+  var templateRow = Math.max(rows.itemStart, insertAt - 1);
+  var source = ws.getRange(templateRow, 1, 1, 13);
+  var target = ws.getRange(insertAt, 1, extraRows, 13);
+  source.copyTo(target, { formatOnly: true });
+
+  try {
+    var rowHeight = ws.getRowHeight(templateRow);
+    ws.setRowHeights(insertAt, extraRows, rowHeight);
+  } catch (heightErr) {}
+
+  for (var r = insertAt; r < insertAt + extraRows; r++) {
+    restoreContractItemMergedCells_(ws, r);
+  }
+
+  rows.itemRows = requiredRows;
+  return findTemplateRows(ws);
+}
+
+function restoreContractItemMergedCells_(ws, row) {
+  [[2, 2], [8, 2]].forEach(function(spec) {
+    var range = ws.getRange(row, spec[0], 1, spec[1]);
+    try { range.breakApart(); } catch (e) {}
+    try { range.merge(); } catch (e2) {}
+  });
+}
+
+function findContractPaymentRefs_(ws, rows) {
+  var preRow = findRowContainingText_(ws, "사전 할인", rows);
+  var longRow = findRowContainingText_(ws, "장기 할인", rows);
+  var discountedRow = findRowContainingText_(ws, "할인 적용 금액", rows);
+  var finalRow = findRowContainingText_(ws, "총 결제 금액", rows);
+  var totalRow = findRowContainingText_(ws, "합계", rows);
+
+  var refs = {
+    preDiscountCell: "C44",
+    addDiscountCell: "I44",
+    longDiscountCell: "C45",
+    couponDiscountCell: "I45",
+    totalBeforeDiscountCell: "J42",
+    discountedAmountCell: "H46",
+    finalAmountCell: "H47"
+  };
+
+  if (preRow) {
+    refs.preDiscountCell = cellA1_(preRow, findValueColAfterLabel_(ws, preRow, "사전 할인", 3));
+    refs.addDiscountCell = cellA1_(preRow, findValueColAfterLabel_(ws, preRow, "추가 할인", 9));
+  }
+  if (longRow) {
+    refs.longDiscountCell = cellA1_(longRow, findValueColAfterLabel_(ws, longRow, "장기 할인", 3));
+    refs.couponDiscountCell = cellA1_(longRow, findValueColAfterLabel_(ws, longRow, "쿠폰 할인", 9));
+  }
+  if (totalRow) {
+    refs.totalBeforeDiscountCell = cellA1_(totalRow, findValueColAfterLabel_(ws, totalRow, "합계", 10));
+  }
+  if (discountedRow) {
+    refs.discountedAmountCell = cellA1_(discountedRow, findValueColAfterLabel_(ws, discountedRow, "할인 적용 금액", 8));
+  }
+  if (finalRow) {
+    refs.finalAmountCell = cellA1_(finalRow, findValueColAfterLabel_(ws, finalRow, "총 결제 금액", 8));
+  }
+
+  return refs;
+}
+
+function findRowContainingText_(ws, text, rows) {
+  if (!ws || !text) return 0;
+  var start = rows && rows.itemStart ? Math.max(1, rows.itemStart - 4) : 1;
+  var last = ws.getLastRow();
+  if (last < start) return 0;
+  var values = ws.getRange(start, 1, last - start + 1, Math.min(ws.getLastColumn(), 14)).getDisplayValues();
+  for (var r = 0; r < values.length; r++) {
+    for (var c = 0; c < values[r].length; c++) {
+      if (String(values[r][c] || "").indexOf(text) !== -1) return start + r;
+    }
+  }
+  return 0;
+}
+
+function cellA1_(row, col) {
+  return _colLetter(col) + row;
+}
+
 function findTextCol_(ws, row, labelText, fallbackCol) {
   var values = ws.getRange(row, 1, 1, 14).getDisplayValues()[0];
   for (var c = 0; c < values.length; c++) {
@@ -484,19 +580,33 @@ function isQuoteMemoLine_(line) {
   return /견적|정가|최종\s*결제\s*금액|최종가|결제\s*금액|할인|off|OFF|기준/.test(String(line || ""));
 }
 
-function getDiscountMultiplierFormula_() {
+function getDiscountMultiplierFormula_(refs) {
+  refs = refs || {
+    preDiscountCell: "C44",
+    addDiscountCell: "I44",
+    longDiscountCell: "C45",
+    couponDiscountCell: "I45"
+  };
   return [
-    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(C44,"\\d+"))/100,0))',
-    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(I44,"\\d+"))/100,0))',
-    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(C45,"\\d+"))/100,0))',
-    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(I45,"\\d+"))/100,0))'
+    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(' + refs.preDiscountCell + ',"\\d+"))/100,0))',
+    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(' + refs.addDiscountCell + ',"\\d+"))/100,0))',
+    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(' + refs.longDiscountCell + ',"\\d+"))/100,0))',
+    'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(' + refs.couponDiscountCell + ',"\\d+"))/100,0))'
   ].join("*");
 }
 
-function applyContractPaymentFormula_(ws) {
-  var discountMultiplier = getDiscountMultiplierFormula_();
-  ws.getRange("H46").setFormula("=J42*(" + discountMultiplier + ")");
-  ws.getRange("H47").setFormula('=IFERROR(CEILING($H$46*1.1,10),"")');
+function applyContractPaymentFormula_(ws, refs) {
+  refs = refs || findContractPaymentRefs_(ws, findTemplateRows(ws));
+  var discountMultiplier = getDiscountMultiplierFormula_(refs);
+  ws.getRange(refs.discountedAmountCell).setFormula("=" + refs.totalBeforeDiscountCell + "*(" + discountMultiplier + ")");
+  ws.getRange(refs.finalAmountCell).setFormula("=IFERROR(CEILING(" + refs.discountedAmountCell + "*1.1,10),\"\")");
+}
+
+function readContractAmount_(ws, cellA1) {
+  var raw = ws.getRange(cellA1).getDisplayValue() || ws.getRange(cellA1).getValue();
+  var normalized = String(raw || "").replace(/[^0-9.-]/g, "");
+  var amount = normalized && !isNaN(Number(normalized)) ? Number(normalized) : null;
+  return amount && amount > 0 ? amount : null;
 }
 
 function getAdditionalRequestTextByTradeId_(ss, 거래ID) {
@@ -602,10 +712,10 @@ function findTemplateRows(ws) {
 
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 개고생2.0 거래내역 M열 계약서 링크 입력
+// 개고생2.0 거래내역 C열 계약서 링크 + I열 최종 금액 입력
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function updateContractLink(거래ID, contractUrl) {
+function updateContractLink(거래ID, contractUrl, finalAmount) {
   try {
     const props = PropertiesService.getScriptProperties();
     const 개고생URL = props.getProperty("개고생2_URL");
@@ -619,12 +729,21 @@ function updateContractLink(거래ID, contractUrl) {
     if (lastRow < 2) return;
 
     // 2026-04-23 컬럼 재배치 반영: 거래ID D(4) → E(5), 계약서링크 M(13) → C(3)
+    // I(9)=실 결제금액. 계약서 재생성 후 결제링크/정산 기준과 계약서 H47을 맞춘다.
     const ids = 거래시트.getRange(2, 5, lastRow - 1, 1).getValues();
     for (let i = 0; i < ids.length; i++) {
       if (ids[i][0] === 거래ID) {
         // C열(3)에 계약서 링크 입력
         거래시트.getRange(i + 2, 3).setValue(contractUrl);
-        Logger.log("개고생2.0 거래내역 C열 계약서 링크 입력 완료: " + 거래ID);
+        if (finalAmount && !isNaN(Number(finalAmount))) {
+          거래시트.getRange(i + 2, 9).setNumberFormat("#,##0").setValue(Number(finalAmount));
+        }
+        try { if (typeof invalidateDashboardTradeExtraCache_ !== 'undefined') invalidateDashboardTradeExtraCache_([거래ID]); } catch (cacheErr) {}
+        try { if (typeof touchDashboardSearchCacheVersion_ !== 'undefined') touchDashboardSearchCacheVersion_(); } catch (searchErr) {}
+        try { if (typeof invalidateDashboardCache !== 'undefined') invalidateDashboardCache(); } catch (dashErr) {}
+        try { if (typeof invalidateTimelineCache !== 'undefined') invalidateTimelineCache(); } catch (timeErr) {}
+        try { if (typeof supaMarkTradeDirty_ !== 'undefined') supaMarkTradeDirty_(거래ID); } catch (markErr) {}
+        Logger.log("개고생2.0 거래내역 C열 링크/I열 금액 입력 완료: " + 거래ID + " / " + finalAmount);
         return;
       }
     }
@@ -647,19 +766,17 @@ function updateContractLink(거래ID, contractUrl) {
  * @returns {Object} { fileName, url, fileId }
  */
 /**
- * 진단: 계약서 템플릿의 C44/C45/I44/I45 셀에 설정된 데이터 유효성 옵션 목록 + 현재 값 반환.
+ * 진단: 계약서 템플릿의 할인 셀에 설정된 데이터 유효성 옵션 목록 + 현재 값 반환.
  * 장기할인 드롭다운 옵션이 정확히 무엇인지 알아야 setValue로 매칭 가능.
  */
 /**
  * 계약서 템플릿 자체에 안전한 할인 셋업 적용 (1회 실행).
- * - C44/C45/I44/I45 → 텍스트 포맷(@) 강제 (% 자동변환 방지)
- * - C45 드롭다운: 해당없음 / 10% / 20% / 35% / 40% / 45% / 50%
- * - C45 수식: 일수(E14) 기반 자동 적용
- *     =IF(E14>=20,"50%",IF(E14>=15,"45%",IF(E14>=10,"40%",
- *      IF(E14>=6,"35%",IF(E14>=3,"20%",IF(E14>=2,"10%","해당없음"))))))
+ * - 할인 셀 → 텍스트 포맷(@) 강제 (% 자동변환 방지)
+ * - 장기할인 드롭다운: 해당없음 / 10% / 20% / 35% / 40% / 45% / 50%
+ * - 장기할인 수식: 품목 첫 행의 일수 기반 자동 적용
  *   → 템플릿 단독으로 열어 일수 입력해도 자동 계산됨
  *   → 계약서 생성 코드도 setValue로 덮어쓰지만, 코드가 실패하더라도 템플릿이 안전망
- * - H46 수식: 할인 곱셈 적용
+ * - 최종 금액 수식: 할인 곱셈 적용
  */
 function setupContractTemplate() {
   var props = PropertiesService.getScriptProperties();
@@ -670,38 +787,41 @@ function setupContractTemplate() {
   var ws = ss.getSheets()[0];
   var out = [];
 
-  repairContractItemHeaders_(ws, findTemplateRows(ws));
+  var rows = findTemplateRows(ws);
+  var refs = findContractPaymentRefs_(ws, rows);
+  repairContractItemHeaders_(ws, rows);
   out.push("품목 헤더 F/G/L/M 낡은 수식 제거");
 
   // 1) 4개 할인 셀 모두 텍스트 포맷
-  ws.getRange("C44:C45").setNumberFormat("@");
-  ws.getRange("I44:I45").setNumberFormat("@");
-  out.push("C44/C45/I44/I45 텍스트 포맷 적용");
+  [refs.preDiscountCell, refs.addDiscountCell, refs.longDiscountCell, refs.couponDiscountCell].forEach(function(cell) {
+    ws.getRange(cell).setNumberFormat("@");
+  });
+  out.push("할인 셀 텍스트 포맷 적용");
 
-  // 2) C45 드롭다운
+  // 2) 장기할인 드롭다운
   var ltRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(["해당없음", "10%", "20%", "35%", "40%", "45%", "50%"], true)
     .setAllowInvalid(true)
     .setHelpText("1일=해당없음 / 2일=10% / 3~5일=20% / 6~9일=35% / 10~14일=40% / 15~19일=45% / 20일+=50%")
     .build();
-  ws.getRange("C45").setDataValidation(ltRule);
-  out.push("C45 드롭다운 적용");
+  ws.getRange(refs.longDiscountCell).setDataValidation(ltRule);
+  out.push("장기할인 드롭다운 적용");
 
-  // 3) C45 수식 — 일수(E14) 기반 자동 계산
-  ws.getRange("C45").setFormula(
-    '=IF(E14>=20,"50%",IF(E14>=15,"45%",IF(E14>=10,"40%",IF(E14>=6,"35%",IF(E14>=3,"20%",IF(E14>=2,"10%","해당없음"))))))'
+  // 3) 장기할인 수식 — 품목 첫 행 일수 기반 자동 계산
+  ws.getRange(refs.longDiscountCell).setFormula(
+    '=IF(E' + rows.itemStart + '>=20,"50%",IF(E' + rows.itemStart + '>=15,"45%",IF(E' + rows.itemStart + '>=10,"40%",IF(E' + rows.itemStart + '>=6,"35%",IF(E' + rows.itemStart + '>=3,"20%",IF(E' + rows.itemStart + '>=2,"10%","해당없음"))))))'
   );
-  out.push("C45 수식 적용 (E14 일수 기반)");
+  out.push("장기할인 수식 적용 (품목 첫 행 일수 기반)");
 
   // 4) 할인은 곱셈 적용
-  applyContractPaymentFormula_(ws);
-  out.push("H46/H47 할인 곱셈 수식 적용");
+  applyContractPaymentFormula_(ws, refs);
+  out.push("최종 금액 할인 곱셈 수식 적용");
 
   // 5) 다른 할인 셀은 초기값을 '해당없음'으로 (드롭다운 옵션 일치)
-  ws.getRange("C44").setValue("해당없음");
-  ws.getRange("I44").setValue("해당없음");
-  ws.getRange("I45").setValue("해당없음");
-  out.push("C44/I44/I45 초기값 '해당없음'");
+  ws.getRange(refs.preDiscountCell).setValue("해당없음");
+  ws.getRange(refs.addDiscountCell).setValue("해당없음");
+  ws.getRange(refs.couponDiscountCell).setValue("해당없음");
+  out.push("사전/추가/쿠폰 할인 초기값 '해당없음'");
 
   return "✅ 템플릿 셋업 완료: " + out.join(" | ");
 }
@@ -713,13 +833,17 @@ function inspectContractTemplateDiscounts() {
 
   var ss = SpreadsheetApp.openById(templateId);
   var ws = ss.getSheets()[0];
-  // 할인 영역 + 합계/결제 영역 모두 스캔 (43~48행)
-  var rng = ws.getRange("A43:M48");
+  var rows = findTemplateRows(ws);
+  var refs = findContractPaymentRefs_(ws, rows);
+  var scanStart = Math.max(1, (rows.itemStart || 14) + (rows.itemRows || 22));
+  var scanRows = Math.max(1, Math.min(12, ws.getLastRow() - scanStart + 1));
+  // 할인 영역 + 합계/결제 영역 모두 스캔
+  var rng = ws.getRange(scanStart, 1, scanRows, 13);
   var values = rng.getValues();
   var formulas = rng.getFormulas();
-  var out = { discountCells: {}, scanArea: [] };
+  var out = { refs: refs, discountCells: {}, scanArea: [] };
 
-  ["C44", "I44", "C45", "I45"].forEach(function(addr) {
+  [refs.preDiscountCell, refs.addDiscountCell, refs.longDiscountCell, refs.couponDiscountCell].forEach(function(addr) {
     var c = ws.getRange(addr);
     var dv = c.getDataValidation();
     var opts = null;
@@ -744,7 +868,7 @@ function inspectContractTemplateDiscounts() {
       var v = values[r][col];
       var f = formulas[r][col];
       if (v === "" && !f) continue;
-      rowOut.push(letter + (43 + r) + ": " + (f ? "=" + f : JSON.stringify(v)));
+      rowOut.push(letter + (scanStart + r) + ": " + (f ? "=" + f : JSON.stringify(v)));
     }
     if (rowOut.length) out.scanArea.push(rowOut.join(" | "));
   }
@@ -851,6 +975,7 @@ function getGeneratedContractSummary_(fileId) {
     var ss = SpreadsheetApp.openById(fileId);
     var ws = ss.getSheets()[0];
     var rows = findTemplateRows(ws);
+    var refs = findContractPaymentRefs_(ws, rows);
     var lesseeCol = findValueColAfterLabel_(ws, rows.lessee1, "예약자", 3);
     var contactCol = findValueColAfterLabel_(ws, rows.lessee1, "연락처", rows.contactCol || 9);
     var rentalStartCol = findValueColAfterLabel_(ws, rows.rentalStart, "대여일자", 3);
@@ -860,9 +985,10 @@ function getGeneratedContractSummary_(fileId) {
       contact: ws.getRange(rows.lessee1, contactCol).getDisplayValue(),
       rentalStart: ws.getRange(rows.rentalStart, rentalStartCol).getDisplayValue(),
       rentalEnd: ws.getRange(rows.rentalStart + 1, rentalEndCol).getDisplayValue(),
-      totalBeforeDiscount: ws.getRange("J42").getDisplayValue(),
-      discountedAmount: ws.getRange("H46").getDisplayValue(),
-      finalAmount: ws.getRange("H47").getDisplayValue()
+      itemRowsPerSide: rows.itemRows,
+      totalBeforeDiscount: ws.getRange(refs.totalBeforeDiscountCell).getDisplayValue(),
+      discountedAmount: ws.getRange(refs.discountedAmountCell).getDisplayValue(),
+      finalAmount: ws.getRange(refs.finalAmountCell).getDisplayValue()
     };
   } catch (e) {
     return { error: e.message };
