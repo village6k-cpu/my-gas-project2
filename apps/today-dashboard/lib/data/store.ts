@@ -589,10 +589,18 @@ export async function requestProofIssue(tradeId: string) {
     throw err;
   }
 }
-export function setBillingCompany(tradeId: string, billingCompany: string) {
+export async function setBillingCompany(tradeId: string, billingCompany: string) {
   mutateTrade(tradeId, (t) => ({ ...t, billingCompany }));
   flashSave(tradeId);
-  gasWrite("updateBillingCompany", { tid: tradeId, billingCompany });
+  try {
+    const res = await gasMutation("updateBillingCompany", { tid: tradeId, billingCompany });
+    const result = res?.result || res || {};
+    if (Object.prototype.hasOwnProperty.call(result, "billingCompany")) {
+      mutateTrade(tradeId, (t) => ({ ...t, billingCompany: result.billingCompany }));
+    }
+  } catch (err) {
+    console.error("[write-back] 발행처 저장 실패:", err);
+  }
 }
 export function sendEstimate(tradeId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, estimateSent: true }));

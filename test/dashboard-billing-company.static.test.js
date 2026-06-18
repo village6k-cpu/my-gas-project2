@@ -46,6 +46,30 @@ assert.match(
 
 assert.match(
   backend,
+  /function\s+getTradeBillingCompanyHeaderCandidates_\(\)[\s\S]{0,180}상호명/,
+  'billing company options must recognize 발행처DB 상호명 as the company-name column'
+);
+
+assert.match(
+  backend,
+  /_findHeaderCol_\(headers,\s*getTradeBillingCompanyHeaderCandidates_\(\)\)\s*\|\|\s*\(lastCol\s*>=\s*2\s*\?\s*2\s*:\s*1\)/,
+  'billing company master fallback must use 발행처DB B열, not 사업자번호 A열'
+);
+
+assert.match(
+  backend,
+  /function\s+ensureTradeBillingCompanyValidation_\(\)[\s\S]*requireValueInRange\(sourceRange,\s*true\)[\s\S]*getRange\(2,\s*7,/,
+  'backend must be able to restore 거래내역 G열 발행처 dropdown from 발행처DB'
+);
+
+assert.match(
+  api,
+  /"repairTradeBillingCompanyDropdown"/,
+  'sheetAPI run allowlist must expose the 발행처 dropdown repair function'
+);
+
+assert.match(
+  backend,
   /function\s+validateTradeProofIssueReady_\(tid\)/,
   'backend must preflight tax invoice issue requests'
 );
@@ -74,31 +98,31 @@ assert.match(
   assert.match(
     html,
     /\.billing-company-input/,
-    `${file} must style the 발행처 상호 autocomplete input`
+    `${file} must style the 발행처 상호 dropdown`
   );
 
   assert.match(
     html,
     /function\s+billingCompanyInputHtml\(item\)/,
-    `${file} must render a 발행처 상호 autocomplete input`
+    `${file} must render a 발행처 상호 dropdown`
+  );
+
+  assert.match(
+    html,
+    /<select class=["']billing-company-select/,
+    `${file} must render 발행처 상호 as a real select dropdown`
   );
 
   assert.doesNotMatch(
     html,
-    /<select class=["']billing-company-select/,
-    `${file} must not render 발행처 상호 as a long select dropdown`
-  );
-
-  assert.match(
-    html,
     /<datalist id=["']billingCompanyOptionsList["']/,
-    `${file} must provide a shared 발행처 상호 datalist`
+    `${file} must not rely on datalist for the 발행처 dropdown`
   );
 
-  assert.match(
+  assert.doesNotMatch(
     html,
     /list=["']billingCompanyOptionsList["']/,
-    `${file} 발행처 input must use the shared datalist`
+    `${file} 발행처 control must not use datalist autocomplete`
   );
 
   assert.match(

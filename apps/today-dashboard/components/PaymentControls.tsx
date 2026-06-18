@@ -101,7 +101,6 @@ export function PaymentControls({ trade }: { trade: Trade }) {
   const options = usePaymentControlOptions();
   const isTax = trade.proofType === "세금계산서";
   const isRegenerating = trade.contractRegenPending || regenerating;
-  const billingDatalistId = `billing-known-${trade.tradeId}`;
 
   // 한 줄 요약 토큰
   const tokens: { t: string; bad?: boolean }[] = [];
@@ -140,21 +139,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
           {/* 세금계산서일 때만 발행처·발행상태 */}
           {isTax && (
             <>
-              <label className="flex items-center gap-2">
-                <span className="w-12 shrink-0 text-[12px] font-semibold text-ink-mute">발행처</span>
-                <input
-                  list={billingDatalistId}
-                  defaultValue={trade.billingCompany ?? ""}
-                  onBlur={(e) => setBillingCompany(trade.tradeId, e.target.value)}
-                  placeholder="상호 입력"
-                  className="flex-1 rounded-lg border border-line bg-white px-3 py-2 text-[13.5px] font-semibold text-ink outline-none focus:border-brand-500"
-                />
-                <datalist id={billingDatalistId}>
-                  {withCurrentOption(options.billingCompanyOptions, trade.billingCompany).map((b) => (
-                    <option key={b} value={b} />
-                  ))}
-                </datalist>
-              </label>
+              <Select label="발행처" options={withCurrentOption(options.billingCompanyOptions, trade.billingCompany)} value={trade.billingCompany} onChange={(v) => setBillingCompany(trade.tradeId, v)} />
               <div className="flex items-center gap-2">
                 <span className="w-12 shrink-0 text-[12px] font-semibold text-ink-mute">발행상태</span>
                 <span className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-[13.5px] font-semibold ${isBad(trade.issueStatus) ? "border-attention-ring bg-attention-bg text-attention-fg" : "border-line bg-paper/70 text-ink-soft"}`}>

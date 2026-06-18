@@ -82,6 +82,10 @@ assert(
   /getTradeBillingCompanyOptionsFromIssuerDb_\(\);\s*\n\s*if \(options\.length > 0\) return options;\s*\n\s*return getTradeColumnOptionsFromSheet_\(7, \[\]\);/.test(backend),
   'billing company options must come from 발행처DB first, with 거래내역 G열 only as fallback'
 );
+assert(
+  backend.includes('"상호명"') && /companyCol\s*=\s*_findHeaderCol_\(headers,\s*getTradeBillingCompanyHeaderCandidates_\(\)\)\s*\|\|\s*\(lastCol\s*>=\s*2\s*\?\s*2\s*:\s*1\)/.test(backend),
+  'billing company options must read 발행처DB 상호명/B열 instead of 사업자번호 A열'
+);
 console.log('settlement-amount & billing-company checks OK');
 
 // ── 감사 1차 수정분 회귀 가드 ──

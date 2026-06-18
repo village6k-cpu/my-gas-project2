@@ -4208,7 +4208,7 @@ function getTradeDepositStatusOptions_() {
 }
 
 function getTradeBillingCompanyOptions_() {
-  return getCachedDashboardTradeOptions_('dashboard_trade_billing_company_options_v2', function() {
+  return getCachedDashboardTradeOptions_('dashboard_trade_billing_company_options_v3', function() {
     // 발행처DB가 마스터 — 거래내역 G열 과거 입력값(오타 포함)은 DB가 비었을 때만 fallback
     var options = getTradeBillingCompanyOptionsFromIssuerDb_();
     if (options.length > 0) return options;
@@ -4216,29 +4216,116 @@ function getTradeBillingCompanyOptions_() {
   }, []);
 }
 
-function getTradeBillingCompanyOptionsFromIssuerDb_() {
+function getTradeBillingCompanyHeaderCandidates_() {
+  return [
+    "발행처상호",
+    "발행처 상호",
+    "상호명",
+    "상호",
+    "업체명",
+    "회사명"
+  ];
+}
+
+function getTradeBillingCompanyMasterInfo_() {
   try {
     var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
-    if (!개고생URL) return [];
+    if (!개고생URL) return null;
     var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
     var 발행처시트 = 개고생SS.getSheetByName("발행처DB");
-    if (!발행처시트 || 발행처시트.getLastRow() < 2) return [];
+    if (!발행처시트) return null;
 
     var lastCol = Math.max(발행처시트.getLastColumn(), 1);
     var headers = 발행처시트.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
-    var companyCol = _findHeaderCol_(headers, [
-      "발행처상호",
-      "발행처 상호",
-      "상호",
-      "업체명",
-      "회사명"
-    ]) || 1;
-    var values = 발행처시트.getRange(2, companyCol, 발행처시트.getLastRow() - 1, 1)
+    var companyCol = _findHeaderCol_(headers, getTradeBillingCompanyHeaderCandidates_()) || (lastCol >= 2 ? 2 : 1);
+    return {
+      sheet: 발행처시트,
+      companyCol: companyCol,
+      header: String(headers[companyCol - 1] || "")
+    };
+  } catch (err) {}
+  return null;
+}
+
+function getTradeBillingCompanyOptionsFromIssuerDb_() {
+  try {
+    var info = getTradeBillingCompanyMasterInfo_();
+    if (!info) return [];
+    var 발행처시트 = info.sheet;
+    if (!발행처시트 || 발행처시트.getLastRow() < 2) return [];
+
+    var values = 발행처시트.getRange(2, info.companyCol, 발행처시트.getLastRow() - 1, 1)
       .getDisplayValues()
       .map(function(row) { return row[0]; });
     return uniqueDashboardStringOptions_(values);
   } catch (err) {}
   return [];
+}
+
+function ensureTradeBillingCompanyValidation_() {
+  var 거래시트 = getVillageTradeSheet_();
+  var info = getTradeBillingCompanyMasterInfo_();
+  if (!info || !info.sheet) {
+    return { success: false, error: "발행처DB 시트 없음" };
+  }
+
+  var sourceRows = Math.max(info.sheet.getMaxRows() - 1, 1);
+  var sourceRange = info.sheet.getRange(2, info.companyCol, sourceRows, 1);
+  var targetRows = Math.max(거래시트.getMaxRows() - 1, 1);
+  var targetRange = 거래시트.getRange(2, 7, targetRows, 1); // G: 발행처 상호
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireValueInRange(sourceRange, true)
+    .setAllowInvalid(false)
+    .build();
+
+  targetRange.setDataValidation(rule);
+  try { CacheService.getScriptCache().remove('dashboard_trade_billing_company_options_v3'); } catch (cacheErr) {}
+
+  return {
+    success: true,
+    targetSheet: 거래시트.getName(),
+    targetRange: targetRange.getA1Notation(),
+    sourceSheet: info.sheet.getName(),
+    sourceHeader: info.header,
+    sourceColumn: columnToLetter_(info.companyCol),
+    sourceRange: sourceRange.getA1Notation()
+  };
+}
+
+function repairTradeBillingCompanyDropdown() {
+  return ensureTradeBillingCompanyValidation_();
+}
+
+function inspectTradeBillingCompanyDropdown() {
+  var result = {
+    targetSheet: "거래내역",
+    targetColumn: "G",
+    optionsCount: 0,
+    optionsSample: [],
+    validationType: "",
+    validationOptionsSample: []
+  };
+  try {
+    var info = getTradeBillingCompanyMasterInfo_();
+    if (info) {
+      result.sourceSheet = info.sheet.getName();
+      result.sourceHeader = info.header;
+      result.sourceColumn = columnToLetter_(info.companyCol);
+    }
+    var options = getTradeBillingCompanyOptions_();
+    result.optionsCount = options.length;
+    result.optionsSample = options.slice(0, 20);
+
+    var 거래시트 = getVillageTradeSheet_();
+    var rule = 거래시트.getRange(2, 7).getDataValidation();
+    if (rule) {
+      result.validationType = String(rule.getCriteriaType());
+      result.validationOptionsSample = paymentOptionsFromRule_(rule).slice(0, 20);
+    }
+  } catch (err) {
+    result.error = err.message;
+  }
+  return result;
 }
 
 function getTradeColumnOptions_(column, fallbackOptions) {
@@ -4545,6 +4632,7 @@ function updateTradeBillingCompany(tid, billingCompany) {
     if (!row) return { error: "거래내역에서 거래ID를 찾지 못했습니다: " + tid };
 
     var billingCompanyCol = 7; // G: 발행처 상호
+    try { ensureTradeBillingCompanyValidation_(); } catch (validationErr) {}
     // 검증 기준 = 발행처DB 마스터 (옵션 목록과 동일 출처) + G열 룰은 보조 — 둘 중 하나에 있으면 허용
     var ruleOpts = paymentOptionsFromRule_(거래시트.getRange(row, billingCompanyCol).getDataValidation());
     var masterOpts = [];

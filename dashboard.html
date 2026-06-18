@@ -1442,7 +1442,6 @@
   </div>
 </div>
 <div id="dashboardSearchStatus" class="dashboard-search-status"></div>
-<datalist id="billingCompanyOptionsList"></datalist>
 
 <div class="content">
   <div id="loadingArea" class="loading">
@@ -3390,7 +3389,14 @@ function paymentSelectHtml(item) {
 
 function billingCompanyInputHtml(item) {
   var current = item.billingCompany || '';
-  return '<input class="billing-company-input" type="text" list="billingCompanyOptionsList" autocomplete="off" placeholder="발행처 상호" value="' + escAttr(current) + '" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updateBillingCompany(event,this,\'' + escJs(item.tradeId) + '\')" onblur="updateBillingCompany(event,this,\'' + escJs(item.tradeId) + '\')" onkeydown="if(event.key===\'Enter\'){event.preventDefault();this.blur();}">';
+  var options = [''].concat((dashboardData && dashboardData.billingCompanyOptions) || []);
+  if (current && options.indexOf(current) < 0) options.splice(1, 0, current);
+  var html = '<select class="billing-company-select billing-company-input" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updateBillingCompany(event,this,\'' + escJs(item.tradeId) + '\')">';
+  options.forEach(function(opt) {
+    html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(opt || '발행처 상호') + '</option>';
+  });
+  html += '</select>';
+  return html;
 }
 
 function updatePaymentMethod(event, select, tradeId) {
