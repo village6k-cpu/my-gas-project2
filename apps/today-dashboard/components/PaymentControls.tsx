@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import type { Trade } from "@/lib/domain/types";
 import {
   regenerateContract,
@@ -139,7 +140,11 @@ export function PaymentControls({ trade }: { trade: Trade }) {
           {/* 세금계산서일 때만 발행처·발행상태 */}
           {isTax && (
             <>
-              <Select label="발행처" options={withCurrentOption(options.billingCompanyOptions, trade.billingCompany)} value={trade.billingCompany} onChange={(v) => setBillingCompany(trade.tradeId, v)} />
+              <BillingCompanyCombobox
+                value={trade.billingCompany ?? ""}
+                options={options.billingCompanyOptions}
+                onSave={(v) => setBillingCompany(trade.tradeId, v)}
+              />
               <div className="flex items-center gap-2">
                 <span className="w-12 shrink-0 text-[12px] font-semibold text-ink-mute">발행상태</span>
                 <span className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-[13.5px] font-semibold ${isBad(trade.issueStatus) ? "border-attention-ring bg-attention-bg text-attention-fg" : "border-line bg-paper/70 text-ink-soft"}`}>
@@ -322,6 +327,206 @@ function Select({
         </select>
         <ChevronRight className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 rotate-90 text-ink-faint" />
       </div>
+    </label>
+  );
+}
+
+type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
+
+function normalizeBillingCompanyText(value: string) {
+  return String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+}
+
+function searchBillingCompanyOptions(options: string[], query: string, limit = 8) {
+  const seen = new Set<string>();
+  const cleaned = options.map((option) => String(option || "").trim()).filter(Boolean);
+  const unique = cleaned.filter((option) => {
+    if (seen.has(option)) return false;
+    seen.add(option);
+    return true;
+  });
+  const needle = normalizeBillingCompanyText(query);
+  if (!needle) return unique.slice(0, limit);
+
+  return unique
+    .filter((option) => normalizeBillingCompanyText(option).includes(needle))
+    .sort((a, b) => {
+      const aStarts = normalizeBillingCompanyText(a).startsWith(needle) ? 0 : 1;
+      const bStarts = normalizeBillingCompanyText(b).startsWith(needle) ? 0 : 1;
+      return aStarts - bStarts;
+    })
+    .slice(0, limit);
+}
+
+function FloatingBillingCompanyMenu({
+  open,
+  anchorRef,
+  options,
+  exact,
+  query,
+  onSelect,
+  onFreeInput,
+}: {
+  open: boolean;
+  anchorRef: RefObject<HTMLElement | null>;
+  options: string[];
+  exact: boolean;
+  query: string;
+  onSelect: (value: string) => void;
+  onFreeInput: () => void;
+}) {
+  const [rect, setRect] = useState<FloatingRect | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open || typeof window === "undefined") {
+      setRect(null);
+      return undefined;
+    }
+
+    const update = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const box = anchor.getBoundingClientRect();
+      const gap = 4;
+      const minHeight = 120;
+      const preferredHeight = 220;
+      const below = window.innerHeight - box.bottom - 8;
+      const above = box.top - 8;
+      const openUp = below < minHeight && above > below;
+      const available = Math.max(minHeight, Math.min(preferredHeight, openUp ? above : below));
+      setRect({
+        left: Math.max(8, box.left),
+        top: openUp ? Math.max(8, box.top - available - gap) : box.bottom + gap,
+        width: Math.max(220, Math.min(box.width, window.innerWidth - Math.max(8, box.left) - 8)),
+        maxHeight: available,
+      });
+    };
+
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [anchorRef, open, options.length, query]);
+
+  if (!open || !rect || typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      className="rounded-lg bg-white shadow-pop ring-1 ring-line"
+      style={{
+        position: "fixed",
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        maxHeight: rect.maxHeight,
+        overflowY: "auto",
+        zIndex: 9999,
+      }}
+    >
+      {options.map((option) => (
+        <button
+          key={option}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => onSelect(option)}
+          className="tap flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.03]"
+        >
+          <span className="flex-1 truncate text-[13px] font-semibold text-ink">{option}</span>
+          <span className="rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-bold text-brand-700">DB</span>
+        </button>
+      ))}
+      {query.trim() && !exact && (
+        <button
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={onFreeInput}
+          className="tap flex w-full items-center gap-2 border-t border-line/60 bg-paper/70 px-2.5 py-1.5 text-left"
+        >
+          <span className="min-w-0 flex-1 truncate text-[13px] text-ink-soft">‘{query.trim()}’ 직접 입력</span>
+        </button>
+      )}
+    </div>,
+    document.body,
+  );
+}
+
+function BillingCompanyCombobox({
+  value,
+  options,
+  onSave,
+}: {
+  value: string;
+  options: string[];
+  onSave: (value: string) => void | Promise<void>;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [query, setQuery] = useState(value || "");
+  const [focused, setFocused] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const committedValue = String(value || "").trim();
+  const matches = useMemo(() => searchBillingCompanyOptions(withCurrentOption(options, value), query), [options, query, value]);
+  const exact = !!query.trim() && matches.some((option) => option === query.trim());
+  const showMenu = focused && (matches.length > 0 || !!query.trim());
+
+  useEffect(() => {
+    if (!focused && !dirty) setQuery(value || "");
+  }, [dirty, focused, value]);
+
+  const commit = (nextValue: string) => {
+    const clean = nextValue.trim();
+    setQuery(clean);
+    setDirty(false);
+    setFocused(false);
+    if (clean !== committedValue) void onSave(clean);
+  };
+
+  return (
+    <label className="flex items-center gap-2">
+      <span className="w-12 shrink-0 text-[12px] font-semibold text-ink-mute">발행처</span>
+      <div className="relative flex-1">
+        <input
+          ref={inputRef}
+          value={query}
+          onFocus={() => setFocused(true)}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setDirty(true);
+            setFocused(true);
+          }}
+          onBlur={() => {
+            if (dirty) commit(query);
+            else setFocused(false);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commit(query);
+              event.currentTarget.blur();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setQuery(value || "");
+              setDirty(false);
+              setFocused(false);
+              event.currentTarget.blur();
+            }
+          }}
+          placeholder="발행처 상호"
+          autoComplete="off"
+          className="w-full rounded-lg border border-line bg-white px-3 py-2 text-[13.5px] font-semibold text-ink outline-none placeholder:text-ink-faint focus:border-brand-500"
+        />
+        <ChevronRight className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 rotate-90 text-ink-faint" />
+      </div>
+      <FloatingBillingCompanyMenu
+        open={showMenu}
+        anchorRef={inputRef}
+        options={matches}
+        exact={exact}
+        query={query}
+        onSelect={commit}
+        onFreeInput={() => commit(query)}
+      />
     </label>
   );
 }

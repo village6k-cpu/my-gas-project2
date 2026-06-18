@@ -4275,7 +4275,7 @@ function ensureTradeBillingCompanyValidation_() {
   var targetRange = 거래시트.getRange(2, 7, targetRows, 1); // G: 발행처 상호
   var rule = SpreadsheetApp.newDataValidation()
     .requireValueInRange(sourceRange, true)
-    .setAllowInvalid(false)
+    .setAllowInvalid(true)
     .build();
 
   targetRange.setDataValidation(rule);
@@ -4288,7 +4288,8 @@ function ensureTradeBillingCompanyValidation_() {
     sourceSheet: info.sheet.getName(),
     sourceHeader: info.header,
     sourceColumn: columnToLetter_(info.companyCol),
-    sourceRange: sourceRange.getA1Notation()
+    sourceRange: sourceRange.getA1Notation(),
+    allowInvalid: true
   };
 }
 
@@ -4320,6 +4321,7 @@ function inspectTradeBillingCompanyDropdown() {
     var rule = 거래시트.getRange(2, 7).getDataValidation();
     if (rule) {
       result.validationType = String(rule.getCriteriaType());
+      try { result.allowInvalid = rule.getAllowInvalid(); } catch (allowErr) {}
       result.validationOptionsSample = paymentOptionsFromRule_(rule).slice(0, 20);
     }
   } catch (err) {
@@ -4638,9 +4640,7 @@ function updateTradeBillingCompany(tid, billingCompany) {
     var masterOpts = [];
     try { masterOpts = getTradeBillingCompanyOptions_() || []; } catch (optErr) {}
     var allOpts = masterOpts.concat(ruleOpts);
-    if (billingCompany && allOpts.length > 0 && allOpts.indexOf(billingCompany) < 0) {
-      return { error: "발행처 목록에 없는 값입니다 (발행처DB에 먼저 등록하세요): " + billingCompany };
-    }
+    var knownBillingCompany = !billingCompany || allOpts.length === 0 || allOpts.indexOf(billingCompany) >= 0;
 
     거래시트.getRange(row, billingCompanyCol).setValue(billingCompany);
     invalidateDashboardTradeExtraCache_([tid]);
@@ -4649,6 +4649,7 @@ function updateTradeBillingCompany(tid, billingCompany) {
       success: true,
       tid: tid,
       billingCompany: billingCompany,
+      knownBillingCompany: knownBillingCompany,
       row: row,
       column: "G"
     };

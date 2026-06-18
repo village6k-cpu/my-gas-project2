@@ -47,8 +47,20 @@ assert.match(
 
 assert.match(
   controls,
-  /<Select label="발행처"[\s\S]{0,180}options=\{withCurrentOption\(options\.billingCompanyOptions,\s*trade\.billingCompany\)\}/,
-  'Next 발행처 control must render as the same real Select dropdown used by the other payment controls'
+  /function BillingCompanyCombobox\([\s\S]*value=\{query\}[\s\S]*onChange=\{\(event\) => \{[\s\S]*setQuery\(event\.target\.value\)/,
+  'Next 발행처 control must allow direct typing'
+);
+
+assert.match(
+  controls,
+  /function searchBillingCompanyOptions\(options: string\[\], query: string,[\s\S]*normalizeBillingCompanyText\(option\)\.includes\(needle\)/,
+  'Next 발행처 autocomplete must filter 발행처DB options by typed text'
+);
+
+assert.match(
+  controls,
+  /function FloatingBillingCompanyMenu\([\s\S]*createPortal[\s\S]*onSelect\(option\)/,
+  'Next 발행처 autocomplete must show a floating dropdown menu below the input'
 );
 
 assert.doesNotMatch(

@@ -1116,6 +1116,54 @@
   }
   .billing-company-input { width: 190px; }
   .billing-company-input::placeholder { color: var(--text-muted); }
+  .billing-company-combo {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+  .billing-company-combo .billing-company-input {
+    padding-right: 26px;
+  }
+  .billing-company-arrow {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-muted);
+    font-size: 10px;
+    pointer-events: none;
+  }
+  .billing-company-menu {
+    display: none;
+    position: absolute;
+    left: 0;
+    top: calc(100% + 4px);
+    width: min(280px, 80vw);
+    max-height: 220px;
+    overflow-y: auto;
+    z-index: 80;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow-lg);
+  }
+  .billing-company-menu.open { display: block; }
+  .billing-company-option {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--text-primary);
+    padding: 8px 10px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .billing-company-option:hover { background: var(--surface-hover); }
+  .billing-company-option.free {
+    border-top: 1px solid var(--border-light);
+    color: var(--text-secondary);
+  }
   .payment-select:focus,
   .billing-company-input:focus,
   .proof-select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(35,131,226,0.15); }
@@ -2670,7 +2718,6 @@ function renderDashboard(data, expectedDate) {
   var filteredCheckin = filterDashboardItems(checkin, 'checkin');
   var attention = buildDashboardAttentionItems(filteredCheckout, filteredCheckin);
   var isSearching = !!dashboardSearchQuery;
-  renderBillingCompanyDatalist(data);
   document.getElementById('loadingArea').style.display = 'none';
 
   document.getElementById('tabCheckout').textContent = filteredCheckout.length;
@@ -2717,7 +2764,6 @@ function renderDashboardGlobalSearch(data) {
   document.getElementById('tabAll').textContent = all.length;
   var attention = buildDashboardAttentionItems(checkout, checkin);
   document.getElementById('tabAttention').textContent = attention.length;
-  renderBillingCompanyDatalist(data);
 
   dashboardCurrentView = {
     mode: 'search',
@@ -2818,16 +2864,6 @@ function resetDashboardSearchCollapsedGroups(data, previousGroups) {
 
 function dashboardSearchGroupId(label) {
   return 'search_' + String(label || 'unknown').replace(/[^A-Za-z0-9가-힣_-]+/g, '_');
-}
-
-function renderBillingCompanyDatalist(data) {
-  var list = document.getElementById('billingCompanyOptionsList');
-  if (!list) return;
-  var options = (data && data.billingCompanyOptions) ||
-    (dashboardData && dashboardData.billingCompanyOptions) || [];
-  list.innerHTML = (options || []).filter(Boolean).map(function(opt) {
-    return '<option value="' + escAttr(opt) + '"></option>';
-  }).join('');
 }
 
 function riskGuidanceLabel(state, reason) {
@@ -4214,14 +4250,97 @@ function paymentSelectHtml(item) {
 
 function billingCompanyInputHtml(item) {
   var current = item.billingCompany || '';
-  var options = [''].concat((dashboardData && dashboardData.billingCompanyOptions) || []);
-  if (current && options.indexOf(current) < 0) options.splice(1, 0, current);
-  var html = '<select class="billing-company-select billing-company-input" data-prev="' + escAttr(current) + '" onclick="event.stopPropagation()" onchange="updateBillingCompany(event,this,\'' + escJs(item.tradeId) + '\')">';
-  options.forEach(function(opt) {
-    html += '<option value="' + escAttr(opt) + '"' + (opt === current ? ' selected' : '') + '>' + escHtml(opt || '발행처 상호') + '</option>';
-  });
-  html += '</select>';
+  var html = '<span class="billing-company-combo" onclick="event.stopPropagation()">';
+  html += '<input class="billing-company-input" type="text" autocomplete="off" placeholder="발행처 상호" value="' + escAttr(current) + '" data-prev="' + escAttr(current) + '" data-trade-id="' + escAttr(item.tradeId || '') + '" onfocus="openBillingCompanyMenu(this)" oninput="openBillingCompanyMenu(this)" onblur="commitBillingCompanySoon(this)" onkeydown="handleBillingCompanyKey(event,this)">';
+  html += '<span class="billing-company-arrow">⌄</span>';
+  html += '<span class="billing-company-menu"></span>';
+  html += '</span>';
   return html;
+}
+
+function normalizeBillingCompanyText(value) {
+  return String(value || '').trim().replace(/\s+/g, '').toLowerCase();
+}
+
+function getBillingCompanyMatches(query, limit) {
+  var options = ((dashboardData && dashboardData.billingCompanyOptions) || [])
+    .map(function(opt) { return String(opt || '').trim(); })
+    .filter(Boolean);
+  var seen = {};
+  options = options.filter(function(opt) {
+    if (seen[opt]) return false;
+    seen[opt] = true;
+    return true;
+  });
+
+  var needle = normalizeBillingCompanyText(query);
+  if (!needle) return options.slice(0, limit || 8);
+  return options
+    .filter(function(opt) { return normalizeBillingCompanyText(opt).indexOf(needle) >= 0; })
+    .sort(function(a, b) {
+      var aStarts = normalizeBillingCompanyText(a).indexOf(needle) === 0 ? 0 : 1;
+      var bStarts = normalizeBillingCompanyText(b).indexOf(needle) === 0 ? 0 : 1;
+      return aStarts - bStarts;
+    })
+    .slice(0, limit || 8);
+}
+
+function billingCompanyMenuForInput(input) {
+  var wrap = input && input.closest ? input.closest('.billing-company-combo') : null;
+  return wrap ? wrap.querySelector('.billing-company-menu') : null;
+}
+
+function openBillingCompanyMenu(input) {
+  var menu = billingCompanyMenuForInput(input);
+  if (!menu) return;
+  var value = input.value || '';
+  var matches = getBillingCompanyMatches(value, 8);
+  var exact = !!value.trim() && matches.some(function(opt) { return opt === value.trim(); });
+  var html = matches.map(function(opt) {
+    return '<button type="button" class="billing-company-option" data-value="' + escAttr(opt) + '" onmousedown="event.preventDefault()" onclick="chooseBillingCompanyOption(event,this)">' + escHtml(opt) + '</button>';
+  }).join('');
+  if (value.trim() && !exact) {
+    html += '<button type="button" class="billing-company-option free" data-value="' + escAttr(value.trim()) + '" onmousedown="event.preventDefault()" onclick="chooseBillingCompanyOption(event,this)">‘' + escHtml(value.trim()) + '’ 직접 입력</button>';
+  }
+  menu.innerHTML = html;
+  menu.classList.toggle('open', !!html);
+}
+
+function closeBillingCompanyMenu(input) {
+  var menu = billingCompanyMenuForInput(input);
+  if (menu) menu.classList.remove('open');
+}
+
+function chooseBillingCompanyOption(event, button) {
+  event.stopPropagation();
+  var wrap = button.closest('.billing-company-combo');
+  var input = wrap ? wrap.querySelector('.billing-company-input') : null;
+  if (!input) return;
+  input.value = button.getAttribute('data-value') || '';
+  closeBillingCompanyMenu(input);
+  updateBillingCompany({ stopPropagation: function() {} }, input, input.getAttribute('data-trade-id') || '');
+}
+
+function commitBillingCompanySoon(input) {
+  setTimeout(function() {
+    closeBillingCompanyMenu(input);
+    updateBillingCompany({ stopPropagation: function() {} }, input, input.getAttribute('data-trade-id') || '');
+  }, 120);
+}
+
+function handleBillingCompanyKey(event, input) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    closeBillingCompanyMenu(input);
+    updateBillingCompany({ stopPropagation: function() {} }, input, input.getAttribute('data-trade-id') || '');
+    input.blur();
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    input.value = input.getAttribute('data-prev') || '';
+    closeBillingCompanyMenu(input);
+    input.blur();
+  }
 }
 
 function updatePaymentMethod(event, select, tradeId) {

@@ -103,6 +103,10 @@ assert(
   'billing company write validation must accept the 발행처DB master list'
 );
 assert(
+  !backend.includes('발행처 목록에 없는 값입니다') && backend.includes('knownBillingCompany'),
+  'billing company write path must allow directly typed values while still reporting whether they are in 발행처DB'
+);
+assert(
   /drainLock/.test(backend) && /qLock/.test(backend),
   'register queue read-modify-write must be lock-protected'
 );

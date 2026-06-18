@@ -44,6 +44,12 @@ assert.match(
   'backend must expose updateTradeBillingCompany'
 );
 
+assert.doesNotMatch(
+  backend,
+  /발행처 목록에 없는 값입니다/,
+  'backend must not reject directly typed 발행처 values'
+);
+
 assert.match(
   backend,
   /function\s+getTradeBillingCompanyHeaderCandidates_\(\)[\s\S]{0,180}상호명/,
@@ -58,8 +64,8 @@ assert.match(
 
 assert.match(
   backend,
-  /function\s+ensureTradeBillingCompanyValidation_\(\)[\s\S]*requireValueInRange\(sourceRange,\s*true\)[\s\S]*getRange\(2,\s*7,/,
-  'backend must be able to restore 거래내역 G열 발행처 dropdown from 발행처DB'
+  /function\s+ensureTradeBillingCompanyValidation_\(\)[\s\S]*requireValueInRange\(sourceRange,\s*true\)[\s\S]*\.setAllowInvalid\(true\)[\s\S]*getRange\(2,\s*7,/,
+  'backend must restore 거래내역 G열 발행처 dropdown from 발행처DB while allowing direct input'
 );
 
 assert.match(
@@ -98,19 +104,25 @@ assert.match(
   assert.match(
     html,
     /\.billing-company-input/,
-    `${file} must style the 발행처 상호 dropdown`
+    `${file} must style the 발행처 상호 autocomplete input`
   );
 
   assert.match(
     html,
     /function\s+billingCompanyInputHtml\(item\)/,
-    `${file} must render a 발행처 상호 dropdown`
+    `${file} must render a 발행처 상호 autocomplete input`
+  );
+
+  assert.doesNotMatch(
+    html,
+    /<select class=["']billing-company-select/,
+    `${file} must not lock 발행처 상호 into a select-only dropdown`
   );
 
   assert.match(
     html,
-    /<select class=["']billing-company-select/,
-    `${file} must render 발행처 상호 as a real select dropdown`
+    /class=["']billing-company-combo["'][\s\S]{0,320}<input class=["']billing-company-input["'][\s\S]{0,220}oninput=["']openBillingCompanyMenu\(this\)/,
+    `${file} must allow 직접 입력 with a custom 발행처 autocomplete menu`
   );
 
   assert.doesNotMatch(
@@ -127,8 +139,14 @@ assert.match(
 
   assert.match(
     html,
-    /function\s+renderBillingCompanyDatalist\(data\)/,
-    `${file} must refresh 발행처 autocomplete options from dashboard data`
+    /function\s+getBillingCompanyMatches\(query,\s*limit\)[\s\S]*dashboardData\.billingCompanyOptions/,
+    `${file} must search 발행처DB options from dashboardData.billingCompanyOptions`
+  );
+
+  assert.match(
+    html,
+    /function\s+chooseBillingCompanyOption\(event,\s*button\)[\s\S]*updateBillingCompany/,
+    `${file} must save a clicked 발행처 autocomplete option`
   );
 
   assert.match(
