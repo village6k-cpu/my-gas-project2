@@ -253,6 +253,7 @@ export function VillageTimeline({
       const clipR = it.endMs > rangeEndMs;
       const sc = statusBar(it.statusKey);
       const conf = conflicts.has(it.id);
+      const unit = unitBadge(it);
       rows.push(
         <div key={it.id} className="relative" style={{ height: ROW_H, width: totalW }}>
           <button
@@ -268,9 +269,9 @@ export function VillageTimeline({
               <span onPointerDown={(ev) => rsDown(ev, it, "start")} className="absolute left-0 top-0 z-10 h-full w-2 cursor-col-resize bg-black/10 opacity-0 group-hover:opacity-100" style={{ touchAction: "none" }} />
             )}
             {clipL && <span className="shrink-0">◀</span>}
+            {unit && <span className="shrink-0 rounded bg-white/40 px-1 text-[10px] font-extrabold tabular-nums">{unit}</span>}
             <span className="truncate">
               {it.label} · {it.custName}
-              {it.qty > 1 ? ` ×${it.qty}` : ""}
             </span>
             {clipR && <span className="ml-auto shrink-0">▶</span>}
             {!clipR && (
@@ -379,16 +380,21 @@ function MenuItem({ children, onClick, danger }: { children: React.ReactNode; on
   );
 }
 
+function unitBadge(it: TLItem): string {
+  return it.unitCount && it.unitCount > 1 ? `${it.unitIndex || 1}/${it.unitCount}` : "";
+}
+
 function BarSheet({ it, onClose }: { it: TLItem; onClose: () => void }) {
   const co = new Date(it.checkoutAt);
   const ro = new Date(it.returnAt);
   const fmt = (d: Date, iso: string) => `${d.getMonth() + 1}/${d.getDate()} ${timeLabel(iso)}`;
+  const unit = unitBadge(it);
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center" onClick={onClose}>
       <div className="animate-pop w-full max-w-md rounded-t-2xl bg-white p-5 shadow-pop sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-2">
           <span className="text-[16px] font-extrabold text-ink">{it.label}</span>
-          {it.qty > 1 && <span className="rounded-md bg-warn-bg px-1.5 py-0.5 text-[12px] font-bold text-warn-fg">×{it.qty}</span>}
+          {unit && <span className="rounded-md bg-warn-bg px-1.5 py-0.5 text-[12px] font-bold text-warn-fg">{unit}</span>}
         </div>
         <div className="mt-2 space-y-1 text-[13.5px] text-ink-soft">
           <div>

@@ -418,8 +418,8 @@ function buildTimelineData_(fromKey, toKey, options) {
       ? 'status-' + e.상태 : 'status-기타';
     var extra = options.includeContractUrl === false ? {} : (tradeExtras[String(e.거래ID || '').trim()] || {});
 
-    // 세트: 수량만큼 바 생성, 개별장비: 1개 바
-    var barCount = e.isSingleItem ? 1 : (e.수량 || 1);
+    // 수량 N은 표시 바 N개로 노출한다. 동기화 파서는 rowIndex로 다시 1행으로 접는다.
+    var barCount = Math.max(1, Math.floor(Number(e.수량) || 1));
 
     for (var s = 0; s < barCount; s++) {
       itemList.push({

@@ -17,6 +17,8 @@ export interface TLItem {
   status: string;
   statusKey: StatusKey;
   qty: number;
+  unitIndex?: number;
+  unitCount?: number;
   stock: number;
   category?: string;
   startMs: number; // 자정 절단 ms
@@ -74,23 +76,29 @@ export function buildItems(trades: Trade[]): TLItem[] {
       if (e.checkoutState === "excluded") continue;
       const co = new Date(t.checkoutAt).getTime() + (e.startShiftDays ?? 0) * DAY;
       const ro = new Date(t.returnAt).getTime() + (e.endShiftDays ?? 0) * DAY;
-      out.push({
-        id: `${t.tradeId}__${e.scheduleId}`,
-        tradeId: t.tradeId,
-        scheduleId: e.scheduleId,
-        contractUrl: t.contractUrl,
-        label: e.name,
-        custName: t.customerName,
-        status: t.contractStatus,
-        statusKey: statusKeyOf(t.contractStatus),
-        qty: e.isSetHeader ? 1 : e.takenQty ?? e.qty,
-        stock: catalogStockOf(e.name) ?? stockOf(e.category), // 장비마스터 실재고 우선 — 하드코딩 추정치는 폴백
-        category: e.category,
-        startMs: dateOnlyMs(new Date(co).toISOString()),
-        endMs: dateOnlyMs(new Date(ro).toISOString()),
-        checkoutAt: new Date(co).toISOString(),
-        returnAt: new Date(ro).toISOString(),
-      });
+      const rawQty = Number(e.takenQty ?? e.qty);
+      const unitCount = Math.max(1, Math.floor(Number.isFinite(rawQty) ? rawQty : 1));
+      for (let unitIndex = 1; unitIndex <= unitCount; unitIndex += 1) {
+        out.push({
+          id: `${t.tradeId}__${e.scheduleId}__u${unitIndex}`,
+          tradeId: t.tradeId,
+          scheduleId: e.scheduleId,
+          contractUrl: t.contractUrl,
+          label: e.name,
+          custName: t.customerName,
+          status: t.contractStatus,
+          statusKey: statusKeyOf(t.contractStatus),
+          qty: 1,
+          unitIndex,
+          unitCount,
+          stock: catalogStockOf(e.name) ?? stockOf(e.category), // 장비마스터 실재고 우선 — 하드코딩 추정치는 폴백
+          category: e.category,
+          startMs: dateOnlyMs(new Date(co).toISOString()),
+          endMs: dateOnlyMs(new Date(ro).toISOString()),
+          checkoutAt: new Date(co).toISOString(),
+          returnAt: new Date(ro).toISOString(),
+        });
+      }
     }
   }
   return out;
@@ -114,7 +122,15 @@ export function groupItems(items: TLItem[], mode: GroupMode, search: string): TL
     (map.get(key) ?? map.set(key, []).get(key)!).push(it);
   }
   const keys = [...map.keys()].sort((a, b) => a.localeCompare(b, "ko"));
-  return keys.map((key) => ({ key, items: map.get(key)!.sort((a, b) => a.startMs - b.startMs) }));
+  return keys.map((key) => ({
+    key,
+    items: map.get(key)!.sort((a, b) =>
+      a.startMs - b.startMs ||
+      a.tradeId.localeCompare(b.tradeId, "ko") ||
+      a.scheduleId.localeCompare(b.scheduleId, "ko") ||
+      (a.unitIndex ?? 1) - (b.unitIndex ?? 1),
+    ),
+  }));
 }
 
 // 일별 매출 (거래 단가를 예약일수로 분배해 합산)
@@ -159,4 +175,3 @@ export function computeConflicts(items: TLItem[]): Set<string> {
   }
   return conflict;
 }
-
