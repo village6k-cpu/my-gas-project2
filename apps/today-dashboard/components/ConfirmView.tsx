@@ -80,6 +80,13 @@ const STATUS_CHIP: Record<string, string> = {
   등록대기: "bg-checkout-bg text-checkout-fg",
 };
 
+function normalizeRegisterStatus(status?: string) {
+  const s = (status || "").trim().replace(/^⏳\s*/, "").replace(/\s+/g, " ");
+  if (/^등록\s*대기/.test(s) || s === "등록대기") return "등록대기";
+  if (/^등록\s*처리\s*중/.test(s) || /^등록\s*처리중/.test(s)) return "등록대기";
+  return s;
+}
+
 function isFail(r?: string) {
   return /❌|가용0/.test(r || "");
 }
@@ -310,7 +317,7 @@ function ConfirmCard({
   }, [req.장비목록]);
   const equips = req.장비목록 || EMPTY_CONFIRM_EQUIPS;
   const equipmentRows = useMemo(() => buildConfirmEquipmentRows(equips), [equips]);
-  const status = (req.등록상태 || "").trim();
+  const status = normalizeRegisterStatus(req.등록상태);
   const actionable = status === "대기" || status === "" || status === "AI_REVIEW" || status === "등록대기";
   const hasResult = equips.some((e) => e.결과 && e.결과 !== "");
   // 체크 상태: 기본 = 가용0/❌ 아닌 것만 체크

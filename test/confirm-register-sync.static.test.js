@@ -6,6 +6,7 @@ const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 const backend = read('checkAvailability.js');
+const api = read('sheetAPI.js');
 const supaSync = read('supabaseSync.js');
 const storeTs = read('apps/today-dashboard/lib/data/store.ts');
 const syncTs = read('apps/today-dashboard/lib/data/sync.ts');
@@ -29,6 +30,31 @@ assert(
     !backend.includes('JSON.stringify({ reqID: reqID, row: targetRow })'),
   'scheduleRegister must queue reqIDs instead of overwriting a single property with a stale row number'
 );
+assert(
+  /function normalizeRegisterQueueStatus_\(status\)/.test(backend) &&
+    /function markRegisterQueued_\(sheet, row\)/.test(backend) &&
+    /function enqueuePendingRegister_\(reqID, delayMs\)/.test(backend) &&
+    /function isRecoverableRegisterStatus_\(status\)/.test(backend),
+  'registration queue status must be normalized and must have a reusable enqueue path'
+);
+assert(
+  /if \(!regLock\.tryLock\(30000\)\) \{[\s\S]{0,220}markRegisterQueued_\(sheet, triggerRow\);[\s\S]{0,220}enqueuePendingRegister_\(pendingReqID, 30000\);[\s\S]{0,80}return;[\s\S]{0,40}\}/.test(backend),
+  'registerByReqID lock contention must mark 등록대기 and schedule a retry instead of leaving a dead sheet state'
+);
+assert(
+  /processRegistrationQueue_\(sheet\);[\s\S]{0,80}\}\s*\n\s*\/\*\*[\s\S]{0,200}function registerByReqID/.test(backend) &&
+    /if \(!isRegisterQueueStatus_\(oCol\[i\]\[0\]\)\) continue;/.test(backend),
+  '_runPendingRegister must recover O-column 등록대기 rows, and processRegistrationQueue_ must accept normalized pending statuses'
+);
+assert(
+  /finally \{[\s\S]{0,80}regLock\.releaseLock\(\);[\s\S]{0,120}processRegistrationQueue_\(sheet\);/.test(backend),
+  'registerByReqID must drain 등록대기 in finally so validation returns and exceptions do not strand later requests'
+);
+assert(
+  /function recoverPendingRegistrations\(\)/.test(backend) &&
+    /function recoverPendingRegistrations\(\)[\s\S]{0,1500}processRegistrationQueue_\(sheet\);/.test(backend),
+  'there must be a callable repair function that immediately drains already-stuck 등록대기 rows'
+);
 
 // ── 앱: 등록 직후 90초 폴링을 기다리지 않고 신규 거래 즉시 반영 ──
 assert(
@@ -38,6 +64,18 @@ assert(
 assert(
   confirmView.includes('pollSheetChangesNow'),
   'ConfirmView must trigger an immediate poll after successful registration'
+);
+assert(
+  /function normalizeRegisterStatus\(status\?: string\)/.test(confirmView) &&
+    /const status = normalizeRegisterStatus\(req\.등록상태\);/.test(confirmView) &&
+    /status === "등록대기"/.test(confirmView),
+  'ConfirmView must treat old ⏳ 등록대기/등록 처리중 statuses as actionable 등록대기'
+);
+assert(
+  /normalizeRegisterQueueStatus_\(rowStatus\)/.test(api) &&
+    api.includes('"recoverPendingRegistrations"') &&
+    confirmRoute.includes('"recoverPendingRegistrations"'),
+  'confirm API must normalize pending queue statuses and expose the repair function'
 );
 
 // ── 앱: 검색 복구가 스토어에 없는 신규 거래도 합류시킨다 ──
@@ -576,7 +614,7 @@ console.log('guide-alimtalk-schedule-diagnostics checks OK');
     'doListPending items must expose the row-level 제외 flag'
   );
   assert(
-    /rowStatus !== "제외"\) g\.status = rowStatus/.test(api) && /등록상태: g\.status \|\| "대기"/.test(api),
+    /groupStatus !== "제외"\) g\.status = groupStatus/.test(api) && /등록상태: g\.status \|\| "대기"/.test(api),
     'group 등록상태 must ignore row-level 제외 (first-row exclusion must not disable the card)'
   );
   assert(

@@ -8338,6 +8338,122 @@ function getSetComponents(name, setSheet) {
 // 예약 등록 — 같은 요청ID 일괄
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+function normalizeRegisterQueueStatus_(status) {
+  var s = String(status || "").trim();
+  if (!s) return "";
+  s = s.replace(/^⏳\s*/, "").replace(/\s+/g, " ");
+  if (/^등록\s*대기/.test(s) || s === "등록대기") return "등록대기";
+  if (/^등록\s*처리\s*중/.test(s) || /^등록\s*처리중/.test(s)) return "등록대기";
+  return String(status || "").trim();
+}
+
+function isRegisterQueueStatus_(status) {
+  var s = String(status || "").trim().replace(/^⏳\s*/, "").replace(/\s+/g, " ");
+  return /^등록\s*대기/.test(s) || s === "등록대기";
+}
+
+function isRecoverableRegisterStatus_(status) {
+  return normalizeRegisterQueueStatus_(status) === "등록대기";
+}
+
+function markRegisterQueued_(sheet, row) {
+  sheet.getRange(row, 15).setValue("등록대기");
+  sheet.getRange(row, 15).setBackground("#E8F0FE");
+}
+
+function ensurePendingRegisterTrigger_(delayMs) {
+  var hasTrigger = false;
+  try {
+    var triggers = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction && triggers[i].getHandlerFunction() === "_runPendingRegister") {
+        hasTrigger = true;
+        break;
+      }
+    }
+  } catch (e) {}
+  if (!hasTrigger) {
+    ScriptApp.newTrigger("_runPendingRegister")
+      .timeBased()
+      .after(delayMs || 1000)
+      .create();
+  }
+}
+
+function enqueuePendingRegister_(reqID, delayMs) {
+  if (!reqID) return;
+  var qProps = PropertiesService.getScriptProperties();
+  var qLock = LockService.getScriptLock();
+  var qLocked = false;
+  try {
+    qLocked = qLock.tryLock(10000);
+    if (qLocked) {
+      var queue = [];
+      try { queue = JSON.parse(qProps.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
+      if (queue.indexOf(reqID) === -1) queue.push(reqID);
+      qProps.setProperty("_pendingRegisterQueue", JSON.stringify(queue));
+    }
+  } catch (e) {
+    Logger.log("등록 대기열 저장 실패(시트 상태 복구 트리거로 재시도): " + e.message);
+  } finally {
+    if (qLocked) qLock.releaseLock();
+  }
+  ensurePendingRegisterTrigger_(delayMs || 1000);
+}
+
+function collectPendingRegisterReqIDs_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  var data = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
+  var seen = {};
+  var reqIDs = [];
+  for (var i = 0; i < data.length; i++) {
+    var reqID = String(data[i][0] || "").trim();
+    if (!reqID || seen[reqID]) continue;
+    if (isRecoverableRegisterStatus_(data[i][14])) {
+      seen[reqID] = true;
+      reqIDs.push(reqID);
+    }
+  }
+  return reqIDs;
+}
+
+function recoverPendingRegistrations() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("확인요청");
+  if (!sheet) return { ok: false, message: "확인요청 시트 없음" };
+
+  var reqIDs = collectPendingRegisterReqIDs_(sheet);
+  if (!reqIDs.length) return { ok: true, queued: 0, message: "등록대기 없음" };
+
+  var lastRow = sheet.getLastRow();
+  var data = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
+  for (var i = 0; i < data.length; i++) {
+    var rid = String(data[i][0] || "").trim();
+    if (reqIDs.indexOf(rid) >= 0 && isRecoverableRegisterStatus_(data[i][14])) {
+      markRegisterQueued_(sheet, i + 2);
+    }
+  }
+  for (var qi = 0; qi < reqIDs.length; qi++) {
+    enqueuePendingRegister_(reqIDs[qi], 1000);
+  }
+  var drainedNow = false;
+  try {
+    processRegistrationQueue_(sheet);
+    drainedNow = true;
+  } catch (drainErr) {
+    Logger.log("등록대기 즉시 복구 실패(트리거로 재시도): " + drainErr.message);
+    try { ensurePendingRegisterTrigger_(30000); } catch (triggerErr) {}
+  }
+  return {
+    ok: true,
+    queued: reqIDs.length,
+    reqIDs: reqIDs,
+    drainedNow: drainedNow,
+    message: drainedNow ? "등록대기 즉시 처리 완료" : "등록대기 재시도 예약 완료"
+  };
+}
+
 /**
  * 비동기 등록 — 1초 후 시간 기반 트리거로 registerByReqID 실행.
  * API에서 즉시 응답을 반환하고, 실제 등록은 백그라운드에서 처리.
@@ -8358,28 +8474,9 @@ function scheduleRegister(reqID) {
   }
   if (targetRow < 0) return { success: false, error: "요청ID를 찾을 수 없음: " + reqID };
 
-  // O열에 처리중 표시
-  sheet.getRange(targetRow, 15).setValue("⏳ 등록 처리중...");
-
-  // 대기열에 reqID 추가 — 단일 속성 덮어쓰기 금지 (연속 등록 시 앞 건 유실 방지)
-  // 행 번호는 저장하지 않는다: 실행 시점에 다시 찾는다 (세트 전개 등으로 행이 밀릴 수 있음)
-  var qProps = PropertiesService.getScriptProperties();
-  var qLock = LockService.getScriptLock();
-  var qLocked = qLock.tryLock(10000);
-  try {
-    var queue = [];
-    try { queue = JSON.parse(qProps.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
-    if (queue.indexOf(reqID) === -1) queue.push(reqID);
-    qProps.setProperty("_pendingRegisterQueue", JSON.stringify(queue));
-  } finally {
-    if (qLocked) qLock.releaseLock();
-  }
-
-  // 1초 후 실행되는 트리거 생성
-  ScriptApp.newTrigger("_runPendingRegister")
-    .timeBased()
-    .after(1000)
-    .create();
+  // O열에 큐 상태 표시 + 재시도 트리거 보장
+  markRegisterQueued_(sheet, targetRow);
+  enqueuePendingRegister_(reqID, 1000);
 
   return { success: true, message: "등록이 백그라운드에서 시작됩니다. 1~3분 후 완료됩니다.", reqID: reqID };
 }
@@ -8439,6 +8536,9 @@ function _runPendingRegister() {
       sheet.getRange(qRow, 15).setValue("❌ 등록 실패: " + e.message);
     }
   }
+
+  // 속성 큐가 유실되거나 구버전에서 O열만 등록대기로 남은 건도 복구한다.
+  processRegistrationQueue_(sheet);
 }
 
 /**
@@ -8448,8 +8548,9 @@ function registerByReqID(sheet, triggerRow) {
   // ── 전체 등록 프로세스 직렬화 (동시 실행 방지) ──
   var regLock = LockService.getScriptLock();
   if (!regLock.tryLock(30000)) {
-    sheet.getRange(triggerRow, 15).setValue("⏳ 등록대기");
-    sheet.getRange(triggerRow, 15).setBackground("#E8F0FE");
+    var pendingReqID = String(sheet.getRange(triggerRow, 1).getValue() || "").trim();
+    markRegisterQueued_(sheet, triggerRow);
+    enqueuePendingRegister_(pendingReqID, 30000);
     return;
   }
   try {
@@ -8944,10 +9045,13 @@ function registerByReqID(sheet, triggerRow) {
 
   } finally {
     regLock.releaseLock();
+    try {
+      processRegistrationQueue_(sheet);
+    } catch (queueErr) {
+      Logger.log("등록대기 자동 처리 실패: " + queueErr.message);
+      try { ensurePendingRegisterTrigger_(30000); } catch (triggerErr) {}
+    }
   }
-
-  // ── 대기열 자동 처리: "등록대기" 상태인 건 순차 처리 ──
-  processRegistrationQueue_(sheet);
 }
 
 
@@ -8964,7 +9068,7 @@ function processRegistrationQueue_(sheet) {
   var processedReqIDs = new Set();
 
   for (var i = 0; i < oCol.length; i++) {
-    if (String(oCol[i][0]).trim() !== "⏳ 등록대기") continue;
+    if (!isRegisterQueueStatus_(oCol[i][0])) continue;
     var pendingReqID = String(aCol[i][0]).trim();
     if (!pendingReqID || processedReqIDs.has(pendingReqID)) continue;
 

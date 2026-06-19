@@ -629,11 +629,14 @@ function doListPending() {
     const g = groupMap[reqID];
 
     const rowStatus = String(data[i][14] || "").trim();
+    const groupStatus = (typeof normalizeRegisterQueueStatus_ === "function")
+      ? normalizeRegisterQueueStatus_(rowStatus)
+      : rowStatus;
     if (rowStatus === "등록완료" || rowStatus === "거절") {
       g.isCompleted = true;
     }
     // 그룹 등록상태: 행 단위 "제외" 마커는 무시 — 첫 품목이 제외돼도 카드가 비활성화되면 안 됨
-    if (!g.status && rowStatus && rowStatus !== "제외") g.status = rowStatus;
+    if (!g.status && groupStatus && groupStatus !== "제외") g.status = groupStatus;
 
     if (data[i][5]) {
       g.items.push({
@@ -740,6 +743,8 @@ function doScheduleAction(action, reqID) {
       try {
         registerByReqID(sheet, targetRow);
       } catch (regErr) {
+        sheet.getRange(targetRow, 15).setValue("❌ 등록 실패: " + regErr.message);
+        sheet.getRange(targetRow, 14).clearContent();
         return jsonResponse({ status: "ERROR", action: "등록", reqID: reqID, message: regErr.message });
       }
       // 등록 후 O열 상태 읽어서 반환
@@ -963,6 +968,7 @@ function runFunction(funcName, params) {
     "updateRequest",
     "updateRequestItem",
     "normalizeConfirmRequestDates",
+    "recoverPendingRegistrations",
     "autoClearRequests",
     "setupAutoClearTrigger",
     "deleteRequest",
@@ -1165,6 +1171,7 @@ function runFunction(funcName, params) {
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null,
       syncTemplateMasterFromSetMaster: typeof syncTemplateMasterFromSetMaster !== "undefined" ? syncTemplateMasterFromSetMaster : null,
       normalizeConfirmRequestDates: typeof normalizeConfirmRequestDates !== "undefined" ? normalizeConfirmRequestDates : null,
+      recoverPendingRegistrations: typeof recoverPendingRegistrations !== "undefined" ? recoverPendingRegistrations : null,
       autoClearRequests: typeof autoClearRequests !== "undefined" ? autoClearRequests : null,
       setupAutoClearTrigger: typeof setupAutoClearTrigger !== "undefined" ? setupAutoClearTrigger : null
     };
