@@ -39,6 +39,20 @@ assert(
   'PaymentControls must render and call a visible 거래명세서 발송 action'
 );
 
+assert(
+  paymentControls.includes('createPortal') &&
+    /function DocumentSendDialog/.test(paymentControls) &&
+    /createPortal\([\s\S]{0,1600}document\.body/.test(paymentControls),
+  'document send confirmation dialogs must portal to document.body so schedule cards cannot cover or clip them on mobile'
+);
+
+assert(
+  /z-\[100\]/.test(paymentControls) &&
+    /<DocumentSendDialog[\s\S]{0,180}title="견적서를 발송할까요\?"/.test(paymentControls) &&
+    /<DocumentSendDialog[\s\S]{0,180}title="거래명세서를 발송할까요\?"/.test(paymentControls),
+  'estimate and statement confirmation dialogs must use the shared top-layer dialog'
+);
+
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
   const html = read(file);
   assert(

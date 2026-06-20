@@ -91,6 +91,43 @@ function usePaymentControlOptions() {
   return options;
 }
 
+function DocumentSendDialog({
+  title,
+  trade,
+  onClose,
+  onConfirm,
+}: {
+  title: string;
+  trade: Trade;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-end justify-center bg-black/45 px-3 pb-[env(safe-area-inset-bottom)] sm:items-center sm:p-4" onClick={onClose}>
+      <div
+        className="animate-pop max-h-[88dvh] w-full max-w-md overflow-y-auto rounded-t-2xl bg-white p-5 shadow-pop ring-1 ring-line sm:rounded-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <p className="text-[16px] font-bold text-ink">{title}</p>
+        <p className="mt-1 text-[13.5px] text-ink-mute">
+          {trade.customerName}님 · {trade.customerPhone}
+        </p>
+        <div className="mt-4 flex gap-2">
+          <button onClick={onClose} className="tap flex-1 rounded-xl bg-line/40 py-3 text-[14px] font-bold text-ink-soft">
+            취소
+          </button>
+          <button onClick={onConfirm} className="tap flex-1 rounded-xl bg-brand-600 py-3 text-[14px] font-bold text-white shadow-sm">
+            발송
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 export function PaymentControls({ trade }: { trade: Trade }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -237,56 +274,30 @@ export function PaymentControls({ trade }: { trade: Trade }) {
       )}
 
       {confirming && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center" onClick={() => setConfirming(false)}>
-          <div className="animate-pop w-full max-w-md rounded-t-2xl bg-white p-5 shadow-pop sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
-            <p className="text-[16px] font-bold text-ink">견적서를 발송할까요?</p>
-            <p className="mt-1 text-[13.5px] text-ink-mute">
-              {trade.customerName}님 · {trade.customerPhone}
-            </p>
-            <div className="mt-4 flex gap-2">
-              <button onClick={() => setConfirming(false)} className="tap flex-1 rounded-xl bg-line/40 py-3 text-[14px] font-bold text-ink-soft">
-                취소
-              </button>
-              <button
-                onClick={() => {
-                  sendEstimate(trade.tradeId);
-                  setConfirming(false);
-                }}
-                className="tap flex-1 rounded-xl bg-brand-600 py-3 text-[14px] font-bold text-white shadow-sm"
-              >
-                발송
-              </button>
-            </div>
-          </div>
-        </div>
+        <DocumentSendDialog
+          title="견적서를 발송할까요?"
+          trade={trade}
+          onClose={() => setConfirming(false)}
+          onConfirm={() => {
+            sendEstimate(trade.tradeId);
+            setConfirming(false);
+          }}
+        />
       )}
 
       {confirmingStatement && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center" onClick={() => setConfirmingStatement(false)}>
-          <div className="animate-pop w-full max-w-md rounded-t-2xl bg-white p-5 shadow-pop sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
-            <p className="text-[16px] font-bold text-ink">거래명세서를 발송할까요?</p>
-            <p className="mt-1 text-[13.5px] text-ink-mute">
-              {trade.customerName}님 · {trade.customerPhone}
-            </p>
-            <div className="mt-4 flex gap-2">
-              <button onClick={() => setConfirmingStatement(false)} className="tap flex-1 rounded-xl bg-line/40 py-3 text-[14px] font-bold text-ink-soft">
-                취소
-              </button>
-              <button
-                onClick={() => {
-                  setConfirmingStatement(false);
-                  setSendingStatement(true);
-                  sendStatement(trade.tradeId)
-                    .catch((err) => window.alert("거래명세서 발송 실패: " + (err instanceof Error ? err.message : String(err))))
-                    .finally(() => setSendingStatement(false));
-                }}
-                className="tap flex-1 rounded-xl bg-brand-600 py-3 text-[14px] font-bold text-white shadow-sm"
-              >
-                발송
-              </button>
-            </div>
-          </div>
-        </div>
+        <DocumentSendDialog
+          title="거래명세서를 발송할까요?"
+          trade={trade}
+          onClose={() => setConfirmingStatement(false)}
+          onConfirm={() => {
+            setConfirmingStatement(false);
+            setSendingStatement(true);
+            sendStatement(trade.tradeId)
+              .catch((err) => window.alert("거래명세서 발송 실패: " + (err instanceof Error ? err.message : String(err))))
+              .finally(() => setSendingStatement(false));
+          }}
+        />
       )}
     </div>
   );
