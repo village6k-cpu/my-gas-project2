@@ -82,6 +82,18 @@ assert.match(
 
 assert.match(
   store,
+  /export function ensureTradePhotos\(tradeIds: string\[\]\)/,
+  'store must batch-load saved dashboard photos for visible cards'
+);
+
+assert.match(
+  store,
+  /dashboardPhotosBatch[\s\S]{0,220}JSON\.stringify\(batch\)/,
+  'visible card photo loading must use the GAS batch endpoint'
+);
+
+assert.match(
+  store,
   /export async function uploadTradePhoto\(tradeId: string, phase: Phase, file: File\)/,
   'store must expose a real photo upload action'
 );
@@ -114,6 +126,24 @@ assert.match(
   photoStrip,
   /refreshTradePhotos\(tradeId\)/,
   'PhotoStrip must load already saved photos when opened'
+);
+
+assert.match(
+  photoStrip,
+  /z-\[120\][\s\S]{0,180}pb-\[env\(safe-area-inset-bottom\)\]/,
+  'PhotoStrip modal must sit above fixed app chrome and respect iPhone safe area'
+);
+
+assert.match(
+  photoStrip,
+  /max-h-\[calc\(100dvh-1rem\)\]/,
+  'PhotoStrip modal must use dynamic viewport height on mobile camera return'
+);
+
+assert.match(
+  scheduleCard,
+  /ensureTradePhotos\(\[trade\.tradeId\]\)/,
+  'ScheduleCard must preload saved photos from the legacy sheet DB'
 );
 
 assert.match(

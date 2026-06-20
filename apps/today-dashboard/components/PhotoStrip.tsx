@@ -114,9 +114,14 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
       <input ref={inputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={onFileChange} />
 
       {open && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center" onClick={() => setOpen(false)}>
+        <div
+          className="fixed inset-0 z-[120] flex items-end justify-center bg-black/45 px-2 pb-[env(safe-area-inset-bottom)] sm:items-center sm:p-4"
+          onClick={() => setOpen(false)}
+        >
           <div
-            className="animate-pop max-h-[80vh] w-full max-w-md overflow-y-auto rounded-t-2xl bg-white p-4 shadow-pop sm:rounded-2xl"
+            role="dialog"
+            aria-modal="true"
+            className="animate-pop max-h-[calc(100dvh-1rem)] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-2xl bg-white p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] shadow-pop sm:max-h-[min(80vh,720px)] sm:rounded-2xl sm:pb-4"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-3 flex items-center justify-between">

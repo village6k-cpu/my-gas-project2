@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import type { TabKey, Trade } from "@/lib/domain/types";
 import { isCancelledTrade, phaseForDate, setupProgress, timeLabel } from "@/lib/domain/status";
-import { toggleReturn, toggleSetup } from "@/lib/data/store";
+import { ensureTradePhotos, toggleReturn, toggleSetup } from "@/lib/data/store";
 import { HandoverChecklist } from "./HandoverChecklist";
 import { RiskPanel } from "./RiskPanel";
 import { PhotoStrip } from "./PhotoStrip";
@@ -56,6 +56,10 @@ export function ScheduleCard({
   useEffect(() => {
     if (done) setOpen(false);
   }, [done]);
+
+  useEffect(() => {
+    ensureTradePhotos([trade.tradeId]);
+  }, [trade.tradeId]);
 
   if (cancelled) return null;
 

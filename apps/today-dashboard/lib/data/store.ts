@@ -80,10 +80,26 @@ function canApplyRemoteSnapshot(mutationSeqAtStart: number): boolean {
   return !hasPendingPersist() && mutationSeqAtStart === localMutationSeq;
 }
 
+function preserveTradePhotos(next: Trade, previous?: Trade): Trade {
+  const existing = previous?.photos ?? [];
+  if (!existing.length) return next;
+  if (!next.photos?.length) return { ...next, photos: existing };
+  return { ...next, photos: mergePhotos(existing, next.photos) };
+}
+
+function preservePhotosInSnapshot(next: Trade[], previous = state.trades): Trade[] {
+  const previousById = new Map(previous.map((t) => [t.tradeId, t]));
+  return next.map((t) => preserveTradePhotos(t, previousById.get(t.tradeId)));
+}
+
 function mergeTradeChanges(base: Trade[], changed: Trade[]): Trade[] {
+  const baseById = new Map(base.map((t) => [t.tradeId, t]));
   const byId = new Map(changed.map((t) => [t.tradeId, t]));
-  const merged = base.map((t) => byId.get(t.tradeId) ?? t);
-  for (const t of changed) if (!base.some((x) => x.tradeId === t.tradeId)) merged.push(t);
+  const merged = base.map((t) => {
+    const next = byId.get(t.tradeId);
+    return next ? preserveTradePhotos(next, t) : t;
+  });
+  for (const t of changed) if (!baseById.has(t.tradeId)) merged.push(t);
   return merged;
 }
 
@@ -122,9 +138,10 @@ export async function repairSearchResults(query: string): Promise<void> {
 async function loadRemote() {
   try {
     const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
+    const mergedTrades = preservePhotosInSnapshot(trades);
     remoteLoaded = true;
-    set({ trades, notes });
-    await repairEmptyEquipmentTrades(trades);
+    set({ trades: mergedTrades, notes });
+    await repairEmptyEquipmentTrades(mergedTrades);
     if (state.date) await repairDayDetails(state.date);
   } catch (e) {
     console.error("[supabase] load 실패", e);
@@ -140,8 +157,9 @@ async function loadRemote() {
         try {
           const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
           if (!canApplyRemoteSnapshot(mutationSeqAtSchedule)) return;
-          set({ trades, notes });
-          await repairEmptyEquipmentTrades(trades, mutationSeqAtSchedule);
+          const mergedTrades = preservePhotosInSnapshot(trades);
+          set({ trades: mergedTrades, notes });
+          await repairEmptyEquipmentTrades(mergedTrades, mutationSeqAtSchedule);
         } catch {
           /* noop */
         }
@@ -752,6 +770,79 @@ function mergePhotos(existing: PhotoMeta[], incoming: PhotoMeta[]): PhotoMeta[] 
   return Array.from(map.values());
 }
 
+const DASHBOARD_PHOTO_BATCH_DELAY_MS = 80;
+const DASHBOARD_PHOTO_BATCH_SIZE = 35;
+const loadedPhotoTrades = new Set<string>();
+const loadingPhotoTrades = new Set<string>();
+const queuedPhotoTrades = new Set<string>();
+let photoBatchTimer: ReturnType<typeof setTimeout> | null = null;
+
+function normalizeTradeIds(tradeIds: string[]): string[] {
+  return Array.from(new Set(tradeIds.map((id) => String(id || "").trim()).filter(Boolean)));
+}
+
+function extractGasPhotoMap(res: any, tradeIds: string[]): Record<string, unknown> {
+  const body = res?.result ?? res ?? {};
+  if (body.photosByTrade && typeof body.photosByTrade === "object") return body.photosByTrade as Record<string, unknown>;
+  if (tradeIds.length === 1) return { [tradeIds[0]]: body.photos ?? res?.photos };
+  return {};
+}
+
+function mergeTradePhotosFromGas(photoMap: Map<string, PhotoMeta[]>): void {
+  if (!photoMap.size) return;
+  let changed = false;
+  const trades = state.trades.map((t) => {
+    const incoming = photoMap.get(t.tradeId);
+    if (!incoming?.length) return t;
+    changed = true;
+    return { ...t, photos: mergePhotos(t.photos, incoming) };
+  });
+  if (!changed) return;
+  if (!isSupabase) cache[state.date] = { trades, notes: state.notes };
+  set({ trades });
+}
+
+async function loadTradePhotosBatch_(tradeIds: string[], force = false): Promise<void> {
+  const ids = normalizeTradeIds(tradeIds).filter((id) => !loadingPhotoTrades.has(id) && (force || !loadedPhotoTrades.has(id)));
+  if (!ids.length) return;
+
+  ids.forEach((id) => loadingPhotoTrades.add(id));
+  try {
+    for (let i = 0; i < ids.length; i += DASHBOARD_PHOTO_BATCH_SIZE) {
+      const batch = ids.slice(i, i + DASHBOARD_PHOTO_BATCH_SIZE);
+      const res =
+        batch.length === 1
+          ? await gasRead("dashboardPhotos", { tid: batch[0] })
+          : await gasRead("dashboardPhotosBatch", { tids: JSON.stringify(batch) });
+      const rawMap = extractGasPhotoMap(res, batch);
+      const photoMap = new Map<string, PhotoMeta[]>();
+      for (const tradeId of batch) {
+        loadedPhotoTrades.add(tradeId);
+        photoMap.set(tradeId, flattenGasPhotos(rawMap[tradeId]));
+      }
+      mergeTradePhotosFromGas(photoMap);
+    }
+  } finally {
+    ids.forEach((id) => loadingPhotoTrades.delete(id));
+  }
+}
+
+export function ensureTradePhotos(tradeIds: string[]): void {
+  for (const tradeId of normalizeTradeIds(tradeIds)) {
+    if (loadedPhotoTrades.has(tradeId) || loadingPhotoTrades.has(tradeId)) continue;
+    queuedPhotoTrades.add(tradeId);
+  }
+  if (!queuedPhotoTrades.size || photoBatchTimer) return;
+  photoBatchTimer = setTimeout(() => {
+    photoBatchTimer = null;
+    const batch = Array.from(queuedPhotoTrades);
+    queuedPhotoTrades.clear();
+    void loadTradePhotosBatch_(batch).catch(() => {
+      // 다음 카드 마운트나 상세 열기에서 다시 시도한다.
+    });
+  }, DASHBOARD_PHOTO_BATCH_DELAY_MS);
+}
+
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -835,10 +926,7 @@ async function prepareDashboardPhotoUpload_(file: File): Promise<DashboardPhotoU
 }
 
 export async function refreshTradePhotos(tradeId: string): Promise<void> {
-  const res = await gasRead("dashboardPhotos", { tid: tradeId });
-  const photos = flattenGasPhotos(res?.photos || res?.result?.photos);
-  if (!photos.length) return;
-  mutateTrade(tradeId, (t) => ({ ...t, photos: mergePhotos(t.photos, photos) }));
+  await loadTradePhotosBatch_([tradeId], true);
 }
 
 export async function uploadTradePhoto(tradeId: string, phase: Phase, file: File): Promise<void> {
