@@ -4719,6 +4719,17 @@ function requestTradeStatement(tid) {
   return callVillageOpsApi_("sendStatement", tid);
 }
 
+function requestTradeElectronicReceipt(tid, opts) {
+  opts = opts || {};
+  return callVillageOpsApi_("sendElectronicReceipt", tid, {
+    receiptPhone: opts.receiptPhone || opts.phone || opts.recvphone || opts.tel || "",
+    paidAmount: opts.paidAmount || opts.amount || "",
+    paymentKey: opts.paymentKey || "",
+    approvalNumber: opts.approvalNumber || "",
+    source: opts.source || "dashboard"
+  });
+}
+
 function requestPayAppPaymentLink(tid) {
   tid = String(tid || '').trim();
   if (!tid) return { error: 'tid 필요' };
@@ -5065,6 +5076,12 @@ function callVillageOpsApi_(action, tid) {
       id: tid,
       key: getVillageOpsApiKey_(props)
     };
+    var extraPayload = arguments.length > 2 ? arguments[2] : null;
+    if (extraPayload && typeof extraPayload === "object") {
+      Object.keys(extraPayload).forEach(function(key) {
+        if (extraPayload[key] !== undefined) payload[key] = extraPayload[key];
+      });
+    }
     var res = UrlFetchApp.fetch(url, {
       method: "post",
       contentType: "application/json",

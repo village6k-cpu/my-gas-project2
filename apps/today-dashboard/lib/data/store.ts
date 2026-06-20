@@ -629,6 +629,31 @@ export async function sendStatement(tradeId: string) {
   }
 }
 
+export async function sendElectronicReceipt(tradeId: string, opts: { receiptPhone?: string; source?: string } = {}) {
+  mutateTrade(tradeId, (t) => ({ ...t, issueNote: "전자영수증 발송 요청 중..." }));
+  flashSave(tradeId);
+  try {
+    const res = await gasMutation("sendElectronicReceipt", {
+      tid: tradeId,
+      receiptPhone: opts.receiptPhone || "",
+      source: opts.source || "today-dashboard-manual",
+    });
+    const result = res?.result || res || {};
+    mutateTrade(tradeId, (t) => ({
+      ...t,
+      electronicReceiptSent: true,
+      issueNote: result.message || "전자영수증 발송 요청 완료",
+    }));
+    flashSave(tradeId);
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    mutateTrade(tradeId, (t) => ({ ...t, issueNote: message }));
+    flashSave(tradeId);
+    throw err;
+  }
+}
+
 export async function sendPayAppPaymentLink(tradeId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, issueNote: "결제링크 발송 요청 중..." }));
   flashSave(tradeId);

@@ -448,6 +448,18 @@ function handleRequest(e) {
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
+      case "sendElectronicReceipt":
+        return jsonResponse(requestTradeElectronicReceipt(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          {
+            receiptPhone: params.receiptPhone || postBody.receiptPhone || params.phone || postBody.phone,
+            paidAmount: params.paidAmount || postBody.paidAmount || params.amount || postBody.amount,
+            paymentKey: params.paymentKey || postBody.paymentKey,
+            approvalNumber: params.approvalNumber || postBody.approvalNumber,
+            source: params.source || postBody.source
+          }
+        ));
+
       case "sendPayAppPaymentLink":
         return jsonResponse(requestPayAppPaymentLink(
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
