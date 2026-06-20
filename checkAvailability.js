@@ -5204,6 +5204,41 @@ function resolveEquipmentName_(input, ss) {
   return names.length ? fuzzyMatchEquipName(raw, names) : raw;
 }
 
+function isUnsafeFuzzyEquipInput_(inputLower) {
+  var key = String(inputLower || '').trim();
+  if (!key) return true;
+  var broadTerms = {
+    sdi: true,
+    hdmi: true,
+    bnc: true,
+    xlr: true,
+    usb: true,
+    dc: true,
+    ac: true,
+    cable: true,
+    line: true,
+    cableline: true,
+    cable라인: true,
+    케이블: true,
+    라인: true,
+    모니터: true,
+    배터리: true,
+    충전기: true,
+    렌즈: true,
+    바디: true,
+    조명: true,
+    스탠드: true,
+    삼각대: true,
+    마이크: true,
+    카드: true,
+    메모리: true
+  };
+  if (broadTerms[key]) return true;
+  if (!/[0-9]/.test(key) && key.length <= 4) return true;
+  if (/^(sdi|hdmi|bnc|xlr|usb|dc|ac)/.test(key) && !/[0-9]/.test(key)) return true;
+  return false;
+}
+
 function buildAvailabilityItems_(equipName, qty, components) {
   var map = {};
   qty = Number(qty) || 1;
@@ -5783,9 +5818,10 @@ function dashboardAddEquipments(tid, entries, options) {
   options = options || {};
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
   var profile = options.profile === true || options.profile === 1 || options.profile === "1" || options.profile === "true";
-  // rawNames: 입력 장비명을 목록(장비마스터) 퍼지매칭으로 덮어쓰지 않고 그대로 사용.
-  // 현장추가(자유입력)는 즉흥 품목이 많아 강제 매칭하면 엉뚱하게 바뀌거나 드롭됨 → 세트마스터만 참고.
-  var rawNames = options.rawNames === true || options.rawNames === 1 || options.rawNames === "1" || options.rawNames === "true";
+  // 기본값은 입력명 보존. 자동 치환은 rawNames=false를 명시한 내부 경로에서만 허용한다.
+  // 세트 전개·단가는 입력명이 세트마스터와 정확히 맞을 때만 적용된다.
+  var rawNames = options.rawNames;
+  rawNames = !(rawNames === false || rawNames === 0 || rawNames === "0" || rawNames === "false");
   var profileStart = Date.now();
   var profileMarks = [];
   function markProfile_(step) {
@@ -6751,6 +6787,10 @@ function fuzzyMatchEquipName(input, nameList) {
   for (var i = 0; i < nameList.length; i++) {
     if (nameList[i].toLowerCase().replace(/\s+/g, "") === inputLower) return nameList[i];
   }
+
+  // SDI/HDMI/렌즈/모니터처럼 넓은 카테고리 단어는 특정 장비로 자동 치환하면 데이터가 오염된다.
+  // 정확 일치까지만 허용하고, 부분/키워드/유사도 매칭은 사용자가 명시적으로 고른 경우에만 프론트에서 처리한다.
+  if (isUnsafeFuzzyEquipInput_(inputLower)) return input;
 
   // 3. 한쪽이 다른 쪽을 포함 (입력값이 목록 항목 포함 또는 반대)
   var containMatches = [];

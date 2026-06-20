@@ -157,13 +157,14 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
 
   const appendLog = (message: string) => setLog((prev) => [...prev, message]);
 
+  const catalogExactKey = (value: string) => value.trim().toLowerCase().replace(/\s+/g, "");
+
   const bestCatalogName = (name: string) => {
     const trimmed = name.trim();
     if (!trimmed) return { name: "", warn: true };
-    const exact = catalog.items.find((item) => item.name === trimmed);
+    const exactKey = catalogExactKey(trimmed);
+    const exact = catalog.items.find((item) => catalogExactKey(item.name) === exactKey);
     if (exact) return { name: exact.name, warn: false };
-    const found = searchEquipmentCatalog(catalog.items, trimmed, 1)[0];
-    if (found) return { name: found.name, warn: false };
     return { name: trimmed, warn: true };
   };
 

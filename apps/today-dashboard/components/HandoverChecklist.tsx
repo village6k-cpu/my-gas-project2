@@ -24,6 +24,10 @@ import { ReturnChecklist } from "./ReturnChecklist";
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
 type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
 
+function catalogExactKey(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, "");
+}
+
 function SetSingleList({ children }: { children: ReactNode }) {
   return <ul className="divide-y divide-brand-200/70 overflow-hidden rounded-xl bg-brand-50 shadow-card ring-1 ring-brand-200">{children}</ul>;
 }
@@ -481,7 +485,8 @@ function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: s
   }, [dirty, value]);
 
   const matches = searchEquipmentCatalog(catalog.items, q);
-  const exact = matches.some((m) => m.name === q.trim());
+  const exactMatch = catalog.items.find((m) => catalogExactKey(m.name) === catalogExactKey(q));
+  const exact = !!exactMatch;
   const showList = focused && q.trim().length > 0 && !selected;
 
   const saveValue = (nextName: string) => {
@@ -520,7 +525,7 @@ function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: s
           if (e.key === "Enter") {
             e.preventDefault();
             skipNextBlurSave.current = true;
-            if (matches[0] && !exact) select(matches[0]);
+            if (exactMatch) select(exactMatch);
             else save();
             e.currentTarget.blur();
           }
