@@ -107,6 +107,7 @@ export interface Trade {
   contractRegenPending?: boolean;
   estimateSent?: boolean;
   statementSent?: boolean;
+  electronicReceiptSent?: boolean;
 
   // 인계 메모 — 반출/반납 완전 분리 (자유 텍스트는 보조용)
   noteCheckout?: string;

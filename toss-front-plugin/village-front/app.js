@@ -212,6 +212,9 @@ async function confirmPaid(trade, payment) {
       paidAmount: payment.amount,
       paymentKey: payment.paymentKey,
       approvalNumber: payment.approvalNumber,
+      sendReceipt: Boolean(trade.receiptPhone),
+      receiptPhone: trade.receiptPhone || '',
+      receiptSource: 'toss-front-auto',
     }),
   });
   if (!res.ok) throw new Error(await errMsg(res, '결제완료 반영 실패'));
@@ -221,7 +224,7 @@ async function confirmPaid(trade, payment) {
 // ──────────────────────────────────────────────────────────────
 // 결제 (단말기 카드 승인) — 토스 공식 예제 패턴
 // ──────────────────────────────────────────────────────────────
-async function requestCardPayment(price, pendingTradeId) {
+async function requestCardPayment(price, pendingTradeId, receiptPhone) {
   var paymentKey =
     typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'vlg-' + Date.now();
   var tax = Math.floor(price / 11); // 부가세 10% 포함가 기준
@@ -229,7 +232,7 @@ async function requestCardPayment(price, pendingTradeId) {
 
   if (pendingTradeId) {
     // 결제 중 이탈 대비 — 예약 결제는 진행중 결제를 백업해 시트 반영을 복구한다.
-    await storageSet('pending', { paymentKey: paymentKey, tradeId: pendingTradeId, amount: price });
+    await storageSet('pending', { paymentKey: paymentKey, tradeId: pendingTradeId, amount: price, receiptPhone: receiptPhone || '' });
   }
 
   var result = await sdk.payment.requestPayment({
@@ -258,7 +261,7 @@ async function requestCardPayment(price, pendingTradeId) {
 }
 
 async function chargeCard(trade) {
-  return requestCardPayment(Number(trade.amount), trade.tradeId);
+  return requestCardPayment(Number(trade.amount), trade.tradeId, trade.receiptPhone);
 }
 
 async function chargeManualAmount(amount) {
@@ -348,6 +351,16 @@ async function runLookup(query) {
     return showError('조회 실패', e.message || '잠시 후 다시 시도해주세요.', { retry: true });
   }
 
+  if (query && query.phone) {
+    var receiptPhone = String(query.phone || '').trim();
+    matches = matches.map(function (m) {
+      var next = {};
+      for (var k in m) next[k] = m[k];
+      next.receiptPhone = receiptPhone;
+      return next;
+    });
+  }
+
   if (!matches || matches.length === 0) {
     return showError('예약을 찾지 못했어요', '번호를 다시 확인하시거나 직원을 불러주세요.', { retry: true });
   }
@@ -408,6 +421,7 @@ var showManualOrder = safe(function (amount) {
 // 5) 예약 결제 실행 → 시트 반영
 async function doCharge(m) {
   var payment;
+  var confirmResult;
   try {
     payment = await chargeCard(m);
   } catch (e) {
@@ -416,7 +430,9 @@ async function doCharge(m) {
 
   // 카드 승인 성공 → 시트 '입금완료' 반영
   try {
-    await confirmPaid(m, payment);
+    confirmResult = await confirmPaid(m, payment);
+    payment.receiptResult = confirmResult && confirmResult.receiptResult;
+    payment.receiptError = confirmResult && confirmResult.receiptError;
   } catch (e) {
     // 카드는 승인됐는데 시트 반영만 실패 → 손님에겐 완료로 안내, pending 유지(다음 부팅 때 복구)
     console.error('[village] confirmPaid 실패(카드는 승인됨):', e);
@@ -442,11 +458,14 @@ async function doManualCharge(amount) {
 // 6) 결과 화면
 var showSuccess = safe(function (payment, opts) {
   opts = opts || {};
+  var receiptStatus = '';
+  if (payment.receiptError) receiptStatus = ' · 전자영수증 전송 확인 필요';
+  else if (payment.receiptResult) receiptStatus = ' · 전자영수증 전송 요청됨';
   sdk.template.renderResultPage({
     type: 'image',
     status: 'success',
     title: '결제가 완료되었어요',
-    description: won(payment.amount) + (opts.syncWarning ? ' · 영수증 처리는 잠시 후 반영돼요' : ''),
+    description: won(payment.amount) + (opts.syncWarning ? ' · 영수증 처리는 잠시 후 반영돼요' : receiptStatus),
     timerMs: 5000,
     onTimeout: function () { returnToIdle(); },
     buttons: [{ label: '확인', onClick: function () { returnToIdle(); }, closeOnClick: true }],
@@ -480,7 +499,7 @@ async function recoverPending() {
     var found = sdk.payment.getPaymentByKey ? await sdk.payment.getPaymentByKey(pending.paymentKey) : null;
     if (found) {
       await confirmPaid(
-        { tradeId: pending.tradeId },
+        { tradeId: pending.tradeId, receiptPhone: pending.receiptPhone || '' },
         { amount: pending.amount, paymentKey: pending.paymentKey, approvalNumber: found.approvalNumber }
       );
     }

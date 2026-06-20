@@ -73,6 +73,21 @@ interface ConfirmBody {
   method?: string;
   paymentKey?: string; // 토스 결제키 — 멱등성/로그용
   approvalNumber?: string; // 카드 승인번호 — 로그/대사용
+  sendReceipt?: boolean; // 전화번호 조회 결제 후 전자영수증 자동 발송
+  receiptPhone?: string;
+  receiptSource?: string;
+}
+
+function resultError(result: unknown): string | null {
+  if (!result || typeof result !== "object") return null;
+  const obj = result as Record<string, unknown>;
+  if (typeof obj.error === "string" && obj.error.trim()) return obj.error;
+  const nested = obj.result;
+  if (nested && typeof nested === "object") {
+    const nestedError = (nested as Record<string, unknown>).error;
+    if (typeof nestedError === "string" && nestedError.trim()) return nestedError;
+  }
+  return null;
 }
 
 // ── 핸들러 ────────────────────────────────────────────────────────
@@ -111,6 +126,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     };
 
     const result = await gasPost(gasPayload);
+    let receiptResult: unknown = null;
+    let receiptError: string | null = null;
+
+    if (body.sendReceipt) {
+      try {
+        const receiptPayload: Record<string, unknown> = {
+          action: "sendElectronicReceipt",
+          tid: tradeId.trim(),
+          receiptPhone: String(body.receiptPhone ?? "").trim(),
+          paidAmount: paidAmount ?? null,
+          paymentKey: paymentKey ?? null,
+          approvalNumber: approvalNumber ?? null,
+          source: body.receiptSource || "toss-front-auto",
+        };
+        receiptResult = await gasPost(receiptPayload);
+        receiptError = resultError(receiptResult);
+        if (receiptError) receiptResult = null;
+      } catch (err) {
+        receiptError = err instanceof Error ? err.message : String(err);
+      }
+
+      if (receiptError) {
+        console.error("[lookup/confirm] 전자영수증 발송 요청 실패:", receiptError);
+      }
+    }
 
     return lookupJson({
       ok: true,
@@ -119,6 +159,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       paidAmount: paidAmount ?? null,
       paymentKey: paymentKey ?? null,
       approvalNumber: approvalNumber ?? null,
+      receiptResult,
+      receiptError,
       message: "결제수단 '카드결제' 반영 — 입금완료 처리됨. Supabase 동기까지 최대 90초.",
       gasResult: result,
     });
