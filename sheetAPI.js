@@ -644,7 +644,10 @@ function doListPending() {
     const groupStatus = (typeof normalizeRegisterQueueStatus_ === "function")
       ? normalizeRegisterQueueStatus_(rowStatus)
       : rowStatus;
-    if (rowStatus === "등록완료" || rowStatus === "거절") {
+    const completedStatus = (typeof isRegisterCompletedStatus_ === "function")
+      ? isRegisterCompletedStatus_(rowStatus)
+      : rowStatus.indexOf("등록완료") === 0;
+    if (completedStatus || rowStatus === "거절") {
       g.isCompleted = true;
     }
     // 그룹 등록상태: 행 단위 "제외" 마커는 무시 — 첫 품목이 제외돼도 카드가 비활성화되면 안 됨

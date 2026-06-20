@@ -32,10 +32,12 @@ assert(
 );
 assert(
   /function normalizeRegisterQueueStatus_\(status\)/.test(backend) &&
+    /function isRegisterCompletedStatus_\(status\)/.test(backend) &&
     /function markRegisterQueued_\(sheet, row\)/.test(backend) &&
+    /function markRequestRegistered_\(sheet, allData, reqID, tradeID, statusLabel\)/.test(backend) &&
     /function enqueuePendingRegister_\(reqID, delayMs\)/.test(backend) &&
     /function isRecoverableRegisterStatus_\(status\)/.test(backend),
-  'registration queue status must be normalized and must have a reusable enqueue path'
+  'registration queue status must be normalized and must have reusable enqueue/completion paths'
 );
 assert(
   /if \(!regLock\.tryLock\(30000\)\) \{[\s\S]{0,220}markRegisterQueued_\(sheet, triggerRow\);[\s\S]{0,220}enqueuePendingRegister_\(pendingReqID, 30000\);[\s\S]{0,80}return;[\s\S]{0,40}\}/.test(backend),
@@ -43,12 +45,33 @@ assert(
 );
 assert(
   /processRegistrationQueue_\(sheet\);[\s\S]{0,80}\}\s*\n\s*\/\*\*[\s\S]{0,200}function registerByReqID/.test(backend) &&
-    /if \(!isRegisterQueueStatus_\(oCol\[i\]\[0\]\)\) continue;/.test(backend),
-  '_runPendingRegister must recover O-column 등록대기 rows, and processRegistrationQueue_ must accept normalized pending statuses'
+    /collectPendingRegisterReqIDs_\(sheet\)/.test(backend) &&
+    /findConfirmRequestRowByReqID_\(sheet, pendingReqID\)/.test(backend),
+  '_runPendingRegister must recover O-column 등록대기 rows, and processRegistrationQueue_ must use reqID-based fresh row lookup'
+);
+assert(
+  /if \(REGISTER_QUEUE_PROCESSING_\) return;/.test(backend) &&
+    /try \{\s*registerByReqID\(sheet, pendingRow\);[\s\S]{0,260}catch \(e\) \{[\s\S]{0,160}등록 실패/.test(backend),
+  'processRegistrationQueue_ must prevent nested drains and isolate each reqID failure so later registrations keep moving'
 );
 assert(
   /finally \{[\s\S]{0,80}regLock\.releaseLock\(\);[\s\S]{0,120}processRegistrationQueue_\(sheet\);/.test(backend),
   'registerByReqID must drain 등록대기 in finally so validation returns and exceptions do not strand later requests'
+);
+assert(
+  /const startedFromRegisterQueue = requestHasRecoverableRegisterStatus_\(allData, reqID\);/.test(backend) &&
+    /if \(startedFromRegisterQueue\) \{[\s\S]{0,220}markRequestRegistered_\(sheet, allData, reqID, dupTid, "등록완료"\);/.test(backend),
+  'a retry that already created schedule/contract rows must finalize 확인요청 with the existing 거래ID instead of leaving a duplicate warning'
+);
+assert(
+  /function getBlockingRegisterIssue_\(data, reqID\)/.test(backend) &&
+    /markRequestRegisterFailed_\(sheet, allData, reqID, blockingRegisterIssue\);/.test(backend),
+  'structurally invalid requests such as 날짜 오류 must leave 등록대기 with a visible failure instead of retrying forever'
+);
+assert(
+  backend.includes('s.match(/(\\d{4})\\D+(\\d{1,2})\\D+(\\d{1,2})/)') &&
+    /dateStr = normalizeTimelineDateKey_\(dateVal\) \|\| String\(dateVal\)\.trim\(\);/.test(backend),
+  'date parsing must normalize common sheet display dates such as 2026. 6. 28 before registration'
 );
 assert(
   /function recoverPendingRegistrations\(\)/.test(backend) &&
@@ -73,9 +96,10 @@ assert(
 );
 assert(
   /normalizeRegisterQueueStatus_\(rowStatus\)/.test(api) &&
+    /isRegisterCompletedStatus_\(rowStatus\)/.test(api) &&
     api.includes('"recoverPendingRegistrations"') &&
     confirmRoute.includes('"recoverPendingRegistrations"'),
-  'confirm API must normalize pending queue statuses and expose the repair function'
+  'confirm API must normalize pending/completed queue statuses and expose the repair function'
 );
 
 // ── 앱: 검색 복구가 스토어에 없는 신규 거래도 합류시킨다 ──

@@ -684,7 +684,7 @@ function normalizeTimelineDateKey_(value) {
     return value.getFullYear() + '-' + ('0' + (value.getMonth() + 1)).slice(-2) + '-' + ('0' + value.getDate()).slice(-2);
   }
   var s = String(value).trim();
-  var m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  var m = s.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
   if (!m) return '';
   return m[1] + '-' + ('0' + Number(m[2])).slice(-2) + '-' + ('0' + Number(m[3])).slice(-2);
 }
@@ -6546,7 +6546,7 @@ function parseDT(dateVal, timeVal) {
     if (dateVal instanceof Date) {
       dateStr = Utilities.formatDate(dateVal, 'Asia/Seoul', 'yyyy-MM-dd');
     } else {
-      dateStr = String(dateVal).trim();
+      dateStr = normalizeTimelineDateKey_(dateVal) || String(dateVal).trim();
     }
     if (!dateStr || dateStr === '') return null;
 
@@ -6575,7 +6575,7 @@ function fmtDT(dateVal, timeVal) {
     let d, t;
     if (dateVal instanceof Date) {
       d = Utilities.formatDate(dateVal, 'Asia/Seoul', 'yyyy-MM-dd');
-    } else { d = String(dateVal || '').trim(); }
+    } else { d = normalizeTimelineDateKey_(dateVal) || String(dateVal || '').trim(); }
     if (timeVal instanceof Date) {
       t = Utilities.formatDate(timeVal, 'Asia/Seoul', 'HH:mm');
     } else { t = String(timeVal || '').trim(); }
@@ -8398,20 +8398,85 @@ function getSetComponents(name, setSheet) {
 function normalizeRegisterQueueStatus_(status) {
   var s = String(status || "").trim();
   if (!s) return "";
-  s = s.replace(/^⏳\s*/, "").replace(/\s+/g, " ");
+  s = s.replace(/^[⏳⌛]\s*/, "").replace(/[.。…]+$/g, "").replace(/\s+/g, " ");
   if (/^등록\s*대기/.test(s) || s === "등록대기") return "등록대기";
   if (/^등록\s*처리\s*중/.test(s) || /^등록\s*처리중/.test(s)) return "등록대기";
   return String(status || "").trim();
 }
 
 function isRegisterQueueStatus_(status) {
-  var s = String(status || "").trim().replace(/^⏳\s*/, "").replace(/\s+/g, " ");
-  return /^등록\s*대기/.test(s) || s === "등록대기";
+  return normalizeRegisterQueueStatus_(status) === "등록대기";
 }
 
 function isRecoverableRegisterStatus_(status) {
   return normalizeRegisterQueueStatus_(status) === "등록대기";
 }
+
+function isRegisterCompletedStatus_(status) {
+  var s = String(status || "").trim().replace(/^✅\s*/, "").replace(/\s+/g, " ");
+  return /^등록\s*완료/.test(s) || /^등록완료/.test(s);
+}
+
+function requestHasRecoverableRegisterStatus_(data, reqID) {
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][0] === reqID && isRecoverableRegisterStatus_(data[i][14])) return true;
+  }
+  return false;
+}
+
+function findConfirmRequestRowByReqID_(sheet, reqID) {
+  if (!reqID) return -1;
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return -1;
+  var ids = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0] || "").trim() === String(reqID).trim()) return i + 2;
+  }
+  return -1;
+}
+
+function markRequestRegistered_(sheet, allData, reqID, tradeID, statusLabel) {
+  var label = statusLabel || "등록완료";
+  for (var i = 0; i < allData.length; i++) {
+    if (allData[i][0] !== reqID) continue;
+    if (allData[i][14] === "거절" || allData[i][14] === "보류" || allData[i][14] === "제외") continue;
+    var row = i + 2;
+    sheet.getRange(row, 14).setValue("등록");
+    sheet.getRange(row, 15).setValue(label);
+    sheet.getRange(row, 16).setValue(tradeID);
+    sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
+  }
+}
+
+function getBlockingRegisterIssue_(data, reqID) {
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][0] !== reqID) continue;
+    var result = String(data[i][8] || "").trim();
+    if (/^❌\s*날짜/.test(result)) return result.replace(/^❌\s*/, "");
+    if (/^⚠️?\s*모델 선택/.test(result)) return result.replace(/^⚠️?\s*/, "");
+  }
+  return "";
+}
+
+function markRequestRegisterFailed_(sheet, allData, reqID, message) {
+  var firstMarked = false;
+  for (var i = 0; i < allData.length; i++) {
+    if (allData[i][0] !== reqID) continue;
+    if (allData[i][14] === "거절" || allData[i][14] === "보류" || allData[i][14] === "제외") continue;
+    var row = i + 2;
+    sheet.getRange(row, 14).clearContent();
+    if (!firstMarked) {
+      sheet.getRange(row, 15).setValue("❌ 등록 불가: " + message);
+      sheet.getRange(row, 15).setBackground("#FFC7CE");
+      firstMarked = true;
+    } else {
+      sheet.getRange(row, 15).clearContent();
+      sheet.getRange(row, 15).setBackground(null);
+    }
+  }
+}
+
+var REGISTER_QUEUE_PROCESSING_ = false;
 
 function markRegisterQueued_(sheet, row) {
   sheet.getRange(row, 15).setValue("등록대기");
@@ -8579,13 +8644,7 @@ function _runPendingRegister() {
   for (var qi = 0; qi < queue.length; qi++) {
     var pendingReqID = queue[qi];
     // 실행 시점에 행을 새로 찾는다 (앞 건 등록의 세트 전개로 행이 밀렸을 수 있음)
-    var qLastRow = sheet.getLastRow();
-    if (qLastRow < 2) return;
-    var qIds = sheet.getRange(2, 1, qLastRow - 1, 1).getValues();
-    var qRow = -1;
-    for (var i = 0; i < qIds.length; i++) {
-      if (qIds[i][0] === pendingReqID) { qRow = i + 2; break; }
-    }
+    var qRow = findConfirmRequestRowByReqID_(sheet, pendingReqID);
     if (qRow < 0) continue;
     try {
       registerByReqID(sheet, qRow);
@@ -8625,6 +8684,7 @@ function registerByReqID(sheet, triggerRow) {
   for (var di = 0; di < allData.length; di++) { allData[di][2] = regDisplayData[di][2]; allData[di][4] = regDisplayData[di][4]; allData[di][11] = regDisplayData[di][11]; }
   const triggerIdx = triggerRow - 2;
   const reqID = allData[triggerIdx][0];
+  const startedFromRegisterQueue = requestHasRecoverableRegisterStatus_(allData, reqID);
 
   if (!reqID) {
     sheet.getRange(triggerRow, 15).setValue("❌ 요청ID 없음");
@@ -8642,6 +8702,11 @@ function registerByReqID(sheet, triggerRow) {
     allData[rdi][2] = regDisplayData[rdi][2];
     allData[rdi][4] = regDisplayData[rdi][4];
     allData[rdi][11] = regDisplayData[rdi][11];
+  }
+  var blockingRegisterIssue = getBlockingRegisterIssue_(allData, reqID);
+  if (blockingRegisterIssue) {
+    markRequestRegisterFailed_(sheet, allData, reqID, blockingRegisterIssue);
+    return;
   }
 
   // ── 예약자명 확인 ──
@@ -8699,7 +8764,7 @@ function registerByReqID(sheet, triggerRow) {
   for (let i = 0; i < allData.length; i++) {
     if (allData[i][0] === reqID) {
       var rowStatus = String(allData[i][14] || "").trim();
-      if (rowStatus === "등록완료") hasCompleted = true;
+      if (isRegisterCompletedStatus_(rowStatus)) hasCompleted = true;
       if (rowStatus === "거절" || rowStatus === "보류") hasRejectedOrHeld = true;
     }
   }
@@ -8712,7 +8777,7 @@ function registerByReqID(sheet, triggerRow) {
     for (let i = 0; i < allData.length; i++) {
       if (allData[i][0] === reqID) {
         var rs = String(allData[i][14] || "").trim();
-        if (rs === "거절" || rs === "보류" || rs === "등록완료") {
+        if (rs === "거절" || rs === "보류" || isRegisterCompletedStatus_(rs)) {
           sheet.getRange(i + 2, 14).clearContent();  // N열 초기화
           sheet.getRange(i + 2, 15).clearContent();  // O열 초기화
           sheet.getRange(i + 2, 15).setBackground(null);
@@ -8726,7 +8791,7 @@ function registerByReqID(sheet, triggerRow) {
   // ── O열 재확인 (동시 클릭 대비 — 락 안에서 실행) ──
   var recheckData = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
   for (let i = 0; i < recheckData.length; i++) {
-    if (recheckData[i][0] === reqID && recheckData[i][14] === "등록완료") {
+    if (recheckData[i][0] === reqID && isRegisterCompletedStatus_(recheckData[i][14])) {
       sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
       sheet.getRange(triggerRow, 14).clearContent();
       return;
@@ -8748,6 +8813,13 @@ function registerByReqID(sheet, triggerRow) {
   if (dupDate && dupEquips.length > 0 && 예약자명) {
     var dupTid = checkDuplicateRequest(ss, 예약자명, dupDate, dupEquips);
     if (dupTid) {
+      if (startedFromRegisterQueue) {
+        markRequestRegistered_(sheet, allData, reqID, dupTid, "등록완료");
+        try { supaMarkTradeDirty_(dupTid); } catch (dirtyErr) {}
+        try { invalidateDashboardCache([반출일str || dupDate, 반납일str || dupDate]); } catch (cacheErr) {}
+        try { invalidateTimelineCache(); } catch (timelineErr) {}
+        return;
+      }
       sheet.getRange(triggerRow, 15).setValue("⚠️ 중복: 동일 건이 이미 등록됨 (거래ID: " + dupTid + ")");
       sheet.getRange(triggerRow, 14).clearContent();
       return;
@@ -9117,27 +9189,31 @@ function registerByReqID(sheet, triggerRow) {
  * O열이 "등록대기"인 행을 찾아서 하나씩 registerByReqID 호출
  */
 function processRegistrationQueue_(sheet) {
-  var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return;
+  if (REGISTER_QUEUE_PROCESSING_) return;
+  REGISTER_QUEUE_PROCESSING_ = true;
+  try {
+    var reqIDs = collectPendingRegisterReqIDs_(sheet);
+    for (var i = 0; i < reqIDs.length; i++) {
+      var pendingReqID = reqIDs[i];
+      var pendingRow = findConfirmRequestRowByReqID_(sheet, pendingReqID);
+      if (pendingRow < 0) continue;
 
-  var oCol = sheet.getRange(2, 15, lastRow - 1, 1).getValues(); // O열
-  var aCol = sheet.getRange(2, 1, lastRow - 1, 1).getValues();  // A열
-  var processedReqIDs = new Set();
+      // 대기 상태 표시 업데이트
+      sheet.getRange(pendingRow, 15).setValue("⏳ 등록 처리 중...");
+      SpreadsheetApp.flush();
 
-  for (var i = 0; i < oCol.length; i++) {
-    if (!isRegisterQueueStatus_(oCol[i][0])) continue;
-    var pendingReqID = String(aCol[i][0]).trim();
-    if (!pendingReqID || processedReqIDs.has(pendingReqID)) continue;
-
-    processedReqIDs.add(pendingReqID);
-    var pendingRow = i + 2;
-
-    // 대기 상태 표시 업데이트
-    sheet.getRange(pendingRow, 15).setValue("⏳ 등록 처리 중...");
-    SpreadsheetApp.flush();
-
-    // 등록 실행
-    registerByReqID(sheet, pendingRow);
+      // 등록 실행. 한 건 실패가 뒤 요청 등록을 막지 않도록 reqID 단위로 격리한다.
+      try {
+        registerByReqID(sheet, pendingRow);
+      } catch (e) {
+        sheet.getRange(pendingRow, 15).setValue("❌ 등록 실패: " + e.message);
+        sheet.getRange(pendingRow, 14).clearContent();
+        sheet.getRange(pendingRow, 15).setBackground("#FFC7CE");
+        Logger.log("등록대기 처리 실패(" + pendingReqID + "): " + e.message);
+      }
+    }
+  } finally {
+    REGISTER_QUEUE_PROCESSING_ = false;
   }
 }
 
@@ -9788,7 +9864,7 @@ function autoClearRequests() {
   // 1) 등록완료 행이 하나라도 있는 요청ID 수집 (건 단위 삭제)
   const doneReqIDs = new Set();
   for (let i = 0; i < data.length; i++) {
-    if (String(data[i][14] || "").trim() === "등록완료") {
+    if (isRegisterCompletedStatus_(data[i][14])) {
       const rid = String(data[i][0] || "").trim();
       if (rid) doneReqIDs.add(rid);
     }
@@ -9798,7 +9874,7 @@ function autoClearRequests() {
   let cleared = 0;
   for (let i = data.length - 1; i >= 0; i--) {
     const rid = String(data[i][0] || "").trim();
-    const rowDone = String(data[i][14] || "").trim() === "등록완료";
+    const rowDone = isRegisterCompletedStatus_(data[i][14]);
     if (!rowDone && !(rid && doneReqIDs.has(rid))) continue;
     const row = i + 2;
     sheet.getRange(row, 1, 1, 11).clearContent();   // A~K
