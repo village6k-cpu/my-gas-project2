@@ -212,8 +212,9 @@ async function confirmPaid(trade, payment) {
       paidAmount: payment.amount,
       paymentKey: payment.paymentKey,
       approvalNumber: payment.approvalNumber,
-      sendReceipt: Boolean(trade.receiptPhone),
+      sendReceipt: Boolean(trade.receiptPhone && payment.officialReceiptUrl),
       receiptPhone: trade.receiptPhone || '',
+      officialReceiptUrl: payment.officialReceiptUrl || '',
       receiptSource: 'toss-front-auto',
     }),
   });
@@ -245,10 +246,16 @@ async function requestCardPayment(price, pendingTradeId, receiptPhone) {
 
   if (result && result.type === 'SUCCESS') {
     var r = result.response || {};
+    var officialReceiptUrl =
+      r.officialReceiptUrl ||
+      r.receiptUrl ||
+      (r.receipt && r.receipt.url) ||
+      '';
     return {
       paymentKey: paymentKey,
       amount: r.amount != null ? r.amount : price,
       approvalNumber: r.approvalNumber,
+      officialReceiptUrl: officialReceiptUrl,
       raw: r,
     };
   }
@@ -496,11 +503,22 @@ async function recoverPending() {
   var pending = await storageGet('pending');
   if (!pending || !pending.paymentKey) return;
   try {
-    var found = sdk.payment.getPaymentByKey ? await sdk.payment.getPaymentByKey(pending.paymentKey) : null;
-    if (found) {
+    var found = sdk.payment.getPayment ? await sdk.payment.getPayment({ paymentKey: pending.paymentKey }) : null;
+    if (found && found.type === 'SUCCESS') {
+      var response = found.response || {};
+      var officialReceiptUrl =
+        response.officialReceiptUrl ||
+        response.receiptUrl ||
+        (response.receipt && response.receipt.url) ||
+        '';
       await confirmPaid(
         { tradeId: pending.tradeId, receiptPhone: pending.receiptPhone || '' },
-        { amount: pending.amount, paymentKey: pending.paymentKey, approvalNumber: found.approvalNumber }
+        {
+          amount: pending.amount,
+          paymentKey: pending.paymentKey,
+          approvalNumber: response.approvalNumber,
+          officialReceiptUrl: officialReceiptUrl
+        }
       );
     }
   } catch (e) {

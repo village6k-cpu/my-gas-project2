@@ -629,20 +629,24 @@ export async function sendStatement(tradeId: string) {
   }
 }
 
-export async function sendElectronicReceipt(tradeId: string, opts: { receiptPhone?: string; source?: string } = {}) {
-  mutateTrade(tradeId, (t) => ({ ...t, issueNote: "전자영수증 발송 요청 중..." }));
+export async function sendElectronicReceipt(tradeId: string, opts: { receiptPhone?: string; receiptUrl?: string; source?: string } = {}) {
+  if (!opts.receiptUrl) {
+    throw new Error("Toss 공식 영수증 URL이 없어 전자영수증을 발송할 수 없습니다.");
+  }
+  mutateTrade(tradeId, (t) => ({ ...t, issueNote: "Toss 공식 영수증 링크 발송 요청 중..." }));
   flashSave(tradeId);
   try {
-    const res = await gasMutation("sendElectronicReceipt", {
+    const res = await gasMutation("sendOfficialReceiptLink", {
       tid: tradeId,
       receiptPhone: opts.receiptPhone || "",
+      receiptUrl: opts.receiptUrl,
       source: opts.source || "today-dashboard-manual",
     });
     const result = res?.result || res || {};
     mutateTrade(tradeId, (t) => ({
       ...t,
       electronicReceiptSent: true,
-      issueNote: result.message || "전자영수증 발송 요청 완료",
+      issueNote: result.message || "Toss 공식 영수증 링크 발송 요청 완료",
     }));
     flashSave(tradeId);
     return result;

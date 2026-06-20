@@ -73,8 +73,9 @@ interface ConfirmBody {
   method?: string;
   paymentKey?: string; // 토스 결제키 — 멱등성/로그용
   approvalNumber?: string; // 카드 승인번호 — 로그/대사용
-  sendReceipt?: boolean; // 전화번호 조회 결제 후 전자영수증 자동 발송
+  sendReceipt?: boolean; // 전화번호 조회 결제 후 Toss 공식 영수증 링크 자동 발송
   receiptPhone?: string;
+  officialReceiptUrl?: string;
   receiptSource?: string;
 }
 
@@ -130,26 +131,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     let receiptError: string | null = null;
 
     if (body.sendReceipt) {
-      try {
-        const receiptPayload: Record<string, unknown> = {
-          action: "sendElectronicReceipt",
-          tid: tradeId.trim(),
-          receiptPhone: String(body.receiptPhone ?? "").trim(),
-          paidAmount: paidAmount ?? null,
-          paymentKey: paymentKey ?? null,
-          approvalNumber: approvalNumber ?? null,
-          source: body.receiptSource || "toss-front-auto",
-        };
-        receiptResult = await gasPost(receiptPayload);
-        receiptError = resultError(receiptResult);
-        if (receiptError) receiptResult = null;
-      } catch (err) {
-        receiptError = err instanceof Error ? err.message : String(err);
+      const officialReceiptUrl = String(body.officialReceiptUrl ?? "").trim();
+      if (!officialReceiptUrl) {
+        receiptError = "Toss 공식 영수증 URL이 없어 전자영수증을 발송하지 않았습니다.";
+      } else {
+        receiptError = "Toss 공식 영수증 링크 발송 API가 아직 연결되지 않았습니다.";
       }
-
-      if (receiptError) {
-        console.error("[lookup/confirm] 전자영수증 발송 요청 실패:", receiptError);
-      }
+      console.error("[lookup/confirm] Toss 공식 전자영수증 발송 차단:", receiptError);
     }
 
     return lookupJson({
