@@ -9924,6 +9924,7 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns,
 
 var TPL_CHECKOUT = '026060000711';  // 반출 안내
 var TPL_CHECKIN  = '026040000904';  // 반납 안내
+var GUIDE_MAX_VISIT_COUNT_ = 3;     // 누적이용횟수 3회 미만만 반출/반납 안내 발송
 
 function _getCheckoutGuideTemplate_() {
   return TPL_CHECKOUT;
@@ -10169,6 +10170,159 @@ function _formatGuideKst_(value) {
   return Utilities.formatDate(dt, 'Asia/Seoul', 'yyyy-MM-dd HH:mm');
 }
 
+function normalizeGuideCustomerPhone_(value) {
+  var s = String(value == null ? '' : value).replace(/[^0-9]/g, '');
+  return s.length > 10 ? s.slice(-10) : s;
+}
+
+function parseGuideVisitCount_(value) {
+  if (value === '' || value === null || typeof value === 'undefined') return 0;
+  var n = parseInt(String(value).replace(/[^0-9-]/g, ''), 10);
+  return isNaN(n) ? null : n;
+}
+
+function readGuideCustomerVisitMap_() {
+  var result = {
+    ok: false,
+    source: '개고생2.0 고객DB',
+    byPhone: {},
+    byName: {},
+    rows: 0,
+    error: ''
+  };
+
+  var url = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
+  if (!url) {
+    result.error = '개고생2_URL 미설정';
+    return result;
+  }
+
+  var dbSheet;
+  try {
+    dbSheet = SpreadsheetApp.openByUrl(url).getSheetByName('고객DB');
+  } catch (e) {
+    result.error = '개고생2.0 고객DB 열기 실패: ' + e.message;
+    return result;
+  }
+  if (!dbSheet || dbSheet.getLastRow() < 2) {
+    result.error = '고객DB 시트/데이터 없음';
+    return result;
+  }
+
+  // 빌리지2.0 고객DB: A=예약자ID(휴대폰), B=성함, C=누적이용횟수
+  var data = dbSheet.getRange(2, 1, dbSheet.getLastRow() - 1, 3).getValues();
+  for (var i = 0; i < data.length; i++) {
+    var phone = normalizeGuideCustomerPhone_(data[i][0]);
+    var name = String(data[i][1] || '').trim();
+    var visitCount = parseGuideVisitCount_(data[i][2]);
+    if (!phone && !name) continue;
+
+    var rec = {
+      phone: phone,
+      name: name,
+      visitCount: visitCount,
+      row: i + 2
+    };
+
+    if (phone) {
+      if (!result.byPhone[phone]) result.byPhone[phone] = [];
+      result.byPhone[phone].push(rec);
+    }
+    if (name) {
+      if (!result.byName[name]) result.byName[name] = [];
+      result.byName[name].push(rec);
+    }
+    result.rows++;
+  }
+
+  result.ok = true;
+  return result;
+}
+
+function buildGuideVisitInfo_(rec, matchedBy) {
+  if (rec.visitCount === null) {
+    return {
+      found: true,
+      eligible: false,
+      matchedBy: matchedBy,
+      visitCount: null,
+      sourceRow: rec.row,
+      reason: '누적이용횟수 값 오류'
+    };
+  }
+
+  var eligible = rec.visitCount < GUIDE_MAX_VISIT_COUNT_;
+  return {
+    found: true,
+    eligible: eligible,
+    matchedBy: matchedBy,
+    visitCount: rec.visitCount,
+    sourceRow: rec.row,
+    reason: eligible ? '' : '누적이용횟수 ' + rec.visitCount + '회'
+  };
+}
+
+function getGuideCustomerVisitInfo_(visitMap, customerName, tel) {
+  var name = String(customerName || '').trim();
+  var phone = normalizeGuideCustomerPhone_(tel);
+
+  if (!visitMap || !visitMap.ok) {
+    return {
+      found: false,
+      eligible: false,
+      matchedBy: '',
+      visitCount: null,
+      sourceRow: null,
+      reason: (visitMap && visitMap.error) || '고객DB 로드 실패'
+    };
+  }
+
+  if (phone) {
+    var phoneMatches = visitMap.byPhone[phone] || [];
+    if (phoneMatches.length === 1) return buildGuideVisitInfo_(phoneMatches[0], 'phone');
+    if (phoneMatches.length > 1) {
+      return {
+        found: false,
+        eligible: false,
+        matchedBy: 'phone',
+        visitCount: null,
+        sourceRow: null,
+        reason: '고객DB 연락처 중복 ' + phoneMatches.length + '건'
+      };
+    }
+    return {
+      found: false,
+      eligible: false,
+      matchedBy: 'phone',
+      visitCount: null,
+      sourceRow: null,
+      reason: '고객DB 연락처 미매칭'
+    };
+  }
+
+  var nameMatches = name ? (visitMap.byName[name] || []) : [];
+  if (nameMatches.length === 1) return buildGuideVisitInfo_(nameMatches[0], 'name');
+  if (nameMatches.length > 1) {
+    return {
+      found: false,
+      eligible: false,
+      matchedBy: 'name',
+      visitCount: null,
+      sourceRow: null,
+      reason: '고객DB 동명이인 ' + nameMatches.length + '건'
+    };
+  }
+
+  return {
+    found: false,
+    eligible: false,
+    matchedBy: '',
+    visitCount: null,
+    sourceRow: null,
+    reason: '고객DB 미매칭'
+  };
+}
+
 function _getGuideSentData_(props) {
   props = props || PropertiesService.getScriptProperties();
   var sentData = {};
@@ -10222,6 +10376,7 @@ function diagGuideAlimtalkSchedule(args) {
   }
 
   var sentData = _getGuideSentData_(PropertiesService.getScriptProperties());
+  var visitMap = readGuideCustomerVisitMap_();
   var now = new Date();
   var nowMs = now.getTime();
   var rows = [];
@@ -10240,13 +10395,20 @@ function diagGuideAlimtalkSchedule(args) {
       var checkinSendMs = _getGuideCheckinSendMs_(checkoutMs, returnMs);
       var checkinFlag = 'in_' + tid;
       var checkoutFlag = 'out_' + tid;
+      var contract = contractMap[tid] || {};
+      var visitInfo = getGuideCustomerVisitInfo_(visitMap, contract.name, contract.tel);
 
       rows.push({
         tid: tid,
-        name: (contractMap[tid] && contractMap[tid].name) || '',
-        phoneMasked: maskPhoneForDisplay_((contractMap[tid] && contractMap[tid].tel) || ''),
-        contractStatus: (contractMap[tid] && contractMap[tid].status) || '',
+        name: contract.name || '',
+        phoneMasked: maskPhoneForDisplay_(contract.tel || ''),
+        contractStatus: contract.status || '',
         scheduleStatus: String(schedData[i][9] || '').trim(),
+        guideEligible: visitInfo.eligible,
+        visitCount: visitInfo.visitCount,
+        visitMatchedBy: visitInfo.matchedBy,
+        visitSourceRow: visitInfo.sourceRow,
+        visitSkipReason: visitInfo.eligible ? '' : visitInfo.reason,
         checkoutAt: _formatGuideKst_(checkoutDT),
         returnAt: _formatGuideKst_(returnDT),
         legacyCheckoutPlus3At: checkoutMs ? _formatGuideKst_(checkoutMs + GUIDE_CHECKIN_MIN_AFTER_CHECKOUT_MS) : '',
@@ -10262,6 +10424,12 @@ function diagGuideAlimtalkSchedule(args) {
   return {
     now: _formatGuideKst_(now),
     sendWindowOpen: _isInSendWindow(now),
+    customerDb: {
+      ok: visitMap.ok,
+      source: visitMap.source,
+      rows: visitMap.rows,
+      error: visitMap.error
+    },
     count: rows.length,
     rows: rows
   };
@@ -10316,8 +10484,6 @@ function checkGuideAlimtalk() {
     return;
   }
 
-  var todayStr = Utilities.formatDate(now, 'Asia/Seoul', 'yyyyMMdd');
-
   // ── 계약마스터 데이터 로드 ──
   // A=거래ID, B=예약자명, C=연락처, J=계약상태
   var cmLastRow = contractSheet.getLastRow();
@@ -10332,18 +10498,7 @@ function checkGuideAlimtalk() {
     if (tid) contractMap[tid] = { name: name, tel: tel, status: cStatus };
   }
 
-  // ── 고객DB에서 누적이용횟수 로드 ──
-  // A=연락처, B=예약자명, C=누적이용횟수
-  var dbSheet = ss.getSheetByName('고객DB');
-  var usageCount = {};  // 예약자명 → 누적이용횟수
-  if (dbSheet && dbSheet.getLastRow() >= 2) {
-    var dbData = dbSheet.getRange(2, 1, dbSheet.getLastRow() - 1, 3).getValues();
-    for (var di = 0; di < dbData.length; di++) {
-      var dbName = String(dbData[di][1] || '').trim();
-      var count = parseInt(dbData[di][2]) || 0;
-      if (dbName) usageCount[dbName] = count;
-    }
-  }
+  var visitMap = readGuideCustomerVisitMap_();
 
   // ── 스케줄상세에서 거래ID별 반출일시 수집 ──
   var schedData = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getValues();
@@ -10388,7 +10543,11 @@ function checkGuideAlimtalk() {
     if (/취소|완료/.test(cust.status)) return;
 
     // 3회 미만 고객만
-    if ((usageCount[cust.name] || 0) >= 3) return;
+    var visitInfo = getGuideCustomerVisitInfo_(visitMap, cust.name, cust.tel);
+    if (!visitInfo.eligible) {
+      results.skipped.push('방문횟수 제외 ' + tid + ' ' + cust.name + ': ' + visitInfo.reason);
+      return;
+    }
 
     var checkoutMs = info.checkoutDT.getTime();
 

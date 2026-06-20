@@ -518,6 +518,57 @@ console.log('contract-regen-stuck-queue checks OK');
 }
 console.log('guide-skip-completed checks OK');
 
+// ── 반출/반납 안내: 빌리지2.0 고객DB 누적이용횟수 3회 미만 고객에게만 발송 ──
+{
+  const ca = read('checkAvailability.js');
+  const fn = ca.slice(ca.indexOf('function checkGuideAlimtalk'), ca.indexOf('// ── 발송 기록 저장'));
+  const helpers = ca.slice(ca.indexOf('function normalizeGuideCustomerPhone_'), ca.indexOf('function _getGuideSentData_'));
+  const diag = ca.slice(ca.indexOf('function diagGuideAlimtalkSchedule'), ca.indexOf('function markGuideAlimtalkSent'));
+
+  assert(
+    /var GUIDE_MAX_VISIT_COUNT_ = 3/.test(ca) &&
+      /rec\.visitCount < GUIDE_MAX_VISIT_COUNT_/.test(helpers),
+    'guide alimtalk visit limit must be a single 3-visit threshold'
+  );
+  assert(
+    /getProperty\('개고생2_URL'\)/.test(helpers) &&
+      /SpreadsheetApp\.openByUrl\(url\)\.getSheetByName\('고객DB'\)/.test(helpers) &&
+      /getRange\(2, 1, dbSheet\.getLastRow\(\) - 1, 3\)/.test(helpers),
+    'guide alimtalk must read A:C from the Village 2.0 고객DB via 개고생2_URL'
+  );
+  assert(
+    /function normalizeGuideCustomerPhone_\(value\)/.test(helpers) &&
+      /replace\(\s*\/\[\^0-9\]\/g,\s*''\s*\)/.test(helpers) &&
+      /s\.length > 10 \? s\.slice\(-10\) : s/.test(helpers),
+    'guide alimtalk must normalize phone numbers by comparing the last 10 digits'
+  );
+  assert(
+    /var phoneMatches = visitMap\.byPhone\[phone\] \|\| \[\]/.test(helpers) &&
+      /phoneMatches\.length === 1/.test(helpers) &&
+      /phoneMatches\.length > 1/.test(helpers) &&
+      helpers.includes('고객DB 연락처 미매칭'),
+    'guide alimtalk must match customers by phone first and fail closed on duplicate/missing phone matches'
+  );
+  assert(
+    /var visitMap = readGuideCustomerVisitMap_\(\)/.test(fn) &&
+      /getGuideCustomerVisitInfo_\(visitMap, cust\.name, cust\.tel\)/.test(fn) &&
+      /if \(!visitInfo\.eligible\)/.test(fn),
+    'automatic guide sends must pass through the visit-count eligibility gate immediately before sending'
+  );
+  assert(
+    !/ss\.getSheetByName\('고객DB'\)/.test(fn) && !/usageCount/.test(fn),
+    'automatic guide sends must not use the active spreadsheet 고객DB or default missing customers to 0 visits'
+  );
+  assert(
+    /customerDb: \{/.test(diag) &&
+      /guideEligible: visitInfo\.eligible/.test(diag) &&
+      /visitCount: visitInfo\.visitCount/.test(diag) &&
+      /visitSkipReason: visitInfo\.eligible \? '' : visitInfo\.reason/.test(diag),
+    'guide diagnostics must expose customer DB load state and visit-count eligibility per trade'
+  );
+}
+console.log('guide-visit-count-gate checks OK');
+
 // ── 반납 안내톡 발송 시점: 반납-12h ↔ 반출+3h 중 늦은 시각 ──
 // 다일 대여는 반납 임박에, 당일 반출-반납은 반출+3h에 (반출 전 발송 방지). 절대 반출 전엔 안 감.
 {
