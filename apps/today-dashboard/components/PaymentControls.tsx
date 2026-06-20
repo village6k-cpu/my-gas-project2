@@ -6,7 +6,6 @@ import type { Trade } from "@/lib/domain/types";
 import {
   regenerateContract,
   requestProofIssue,
-  sendElectronicReceipt,
   sendEstimate,
   sendPayAppPaymentLink,
   sendStatement,
@@ -133,17 +132,13 @@ export function PaymentControls({ trade }: { trade: Trade }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [confirmingStatement, setConfirmingStatement] = useState(false);
-  const [confirmingReceipt, setConfirmingReceipt] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [issuing, setIssuing] = useState(false);
-  const [sendingElectronicReceipt, setSendingElectronicReceipt] = useState(false);
   const [sendingPayAppLink, setSendingPayAppLink] = useState(false);
   const [sendingStatement, setSendingStatement] = useState(false);
   const options = usePaymentControlOptions();
   const isTax = trade.proofType === "세금계산서";
   const isRegenerating = trade.contractRegenPending || regenerating;
-  const isCardPaymentComplete = /카드/.test(trade.paymentMethod || "") && trade.depositStatus === "입금완료";
-  const officialReceiptUrl = (trade.officialReceiptUrl || "").trim();
 
   // 한 줄 요약 토큰
   const tokens: { t: string; bad?: boolean }[] = [];
@@ -233,30 +228,6 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               <Send className="h-3.5 w-3.5" />
               {sendingStatement ? "발송 중..." : trade.statementSent ? "거래명세서 발송됨" : "거래명세서 발송"}
             </button>
-            {isCardPaymentComplete && (
-              <button
-                type="button"
-                disabled={sendingElectronicReceipt || !trade.customerPhone || !officialReceiptUrl}
-                onClick={() => setConfirmingReceipt(true)}
-                className="tap inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-[13px] font-bold text-ink-soft ring-1 ring-line disabled:bg-paper disabled:text-ink-faint"
-                title={
-                  !trade.customerPhone
-                    ? "고객 전화번호가 없어 전자영수증을 보낼 수 없습니다"
-                    : !officialReceiptUrl
-                      ? "Toss 공식 영수증 URL이 없어 앱에서 전자영수증을 보낼 수 없습니다"
-                      : undefined
-                }
-              >
-                <Send className="h-3.5 w-3.5" />
-                {sendingElectronicReceipt
-                  ? "발송 중..."
-                  : trade.electronicReceiptSent
-                    ? "전자영수증 발송됨"
-                    : officialReceiptUrl
-                      ? "전자영수증 발송"
-                      : "공식영수증 링크 없음"}
-              </button>
-            )}
             <button
               type="button"
               disabled={sendingPayAppLink}
@@ -329,25 +300,6 @@ export function PaymentControls({ trade }: { trade: Trade }) {
         />
       )}
 
-      {confirmingReceipt && (
-        <DocumentSendDialog
-          title="전자영수증을 발송할까요?"
-          trade={trade}
-          onClose={() => setConfirmingReceipt(false)}
-          onConfirm={() => {
-            setConfirmingReceipt(false);
-            setSendingElectronicReceipt(true);
-            sendElectronicReceipt(trade.tradeId, {
-              receiptPhone: trade.customerPhone,
-              receiptUrl: officialReceiptUrl,
-              source: "today-dashboard-manual",
-            })
-              .then((result) => window.alert(result?.message || "전자영수증 발송 요청 완료"))
-              .catch((err) => window.alert("전자영수증 발송 실패: " + (err instanceof Error ? err.message : String(err))))
-              .finally(() => setSendingElectronicReceipt(false));
-          }}
-        />
-      )}
     </div>
   );
 }

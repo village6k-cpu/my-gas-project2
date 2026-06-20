@@ -73,22 +73,6 @@ interface ConfirmBody {
   method?: string;
   paymentKey?: string; // 토스 결제키 — 멱등성/로그용
   approvalNumber?: string; // 카드 승인번호 — 로그/대사용
-  sendReceipt?: boolean; // 전화번호 조회 결제 후 Toss 공식 영수증 링크 자동 발송
-  receiptPhone?: string;
-  officialReceiptUrl?: string;
-  receiptSource?: string;
-}
-
-function resultError(result: unknown): string | null {
-  if (!result || typeof result !== "object") return null;
-  const obj = result as Record<string, unknown>;
-  if (typeof obj.error === "string" && obj.error.trim()) return obj.error;
-  const nested = obj.result;
-  if (nested && typeof nested === "object") {
-    const nestedError = (nested as Record<string, unknown>).error;
-    if (typeof nestedError === "string" && nestedError.trim()) return nestedError;
-  }
-  return null;
 }
 
 // ── 핸들러 ────────────────────────────────────────────────────────
@@ -127,18 +111,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     };
 
     const result = await gasPost(gasPayload);
-    let receiptResult: unknown = null;
-    let receiptError: string | null = null;
-
-    if (body.sendReceipt) {
-      const officialReceiptUrl = String(body.officialReceiptUrl ?? "").trim();
-      if (!officialReceiptUrl) {
-        receiptError = "Toss 공식 영수증 URL이 없어 전자영수증을 발송하지 않았습니다.";
-      } else {
-        receiptError = "Toss 공식 영수증 링크 발송 API가 아직 연결되지 않았습니다.";
-      }
-      console.error("[lookup/confirm] Toss 공식 전자영수증 발송 차단:", receiptError);
-    }
 
     return lookupJson({
       ok: true,
@@ -147,8 +119,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       paidAmount: paidAmount ?? null,
       paymentKey: paymentKey ?? null,
       approvalNumber: approvalNumber ?? null,
-      receiptResult,
-      receiptError,
       message: "결제수단 '카드결제' 반영 — 입금완료 처리됨. Supabase 동기까지 최대 90초.",
       gasResult: result,
     });

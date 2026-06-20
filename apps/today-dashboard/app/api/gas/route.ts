@@ -55,7 +55,6 @@ const WRITE_ACTIONS = new Set([
   "updateBillingCompany",
   "sendEstimate",
   "sendStatement",
-  "sendElectronicReceipt",
   "regenerateContract",
   "aiParse",
   "registerAsync",

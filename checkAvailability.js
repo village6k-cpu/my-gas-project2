@@ -4719,17 +4719,6 @@ function requestTradeStatement(tid) {
   return callVillageOpsApi_("sendStatement", tid);
 }
 
-function requestTradeElectronicReceipt(tid, opts) {
-  opts = opts || {};
-  return callVillageOpsApi_("sendElectronicReceipt", tid, {
-    receiptPhone: opts.receiptPhone || opts.phone || opts.recvphone || opts.tel || "",
-    paidAmount: opts.paidAmount || opts.amount || "",
-    paymentKey: opts.paymentKey || "",
-    approvalNumber: opts.approvalNumber || "",
-    source: opts.source || "dashboard"
-  });
-}
-
 function requestPayAppPaymentLink(tid) {
   tid = String(tid || '').trim();
   if (!tid) return { error: 'tid 필요' };
