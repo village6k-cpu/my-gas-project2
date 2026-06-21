@@ -46,10 +46,14 @@ load_env() {
   export KAKAO_TAB_CLEANUP_INTERVAL_MS="${KAKAO_TAB_CLEANUP_INTERVAL_MS:-120000}"
   export QUEUE_DIR="${QUEUE_DIR:-$BRIDGE_DIR/queue}"
   export VILLAGE_AI_WORKER_CMD="${VILLAGE_AI_WORKER_CMD:-$WORKER_CMD}"
-  export VILLAGE_KAKAO_CHROME_DIR="${VILLAGE_KAKAO_CHROME_DIR:-$HOME/.village-kakao-chrome}"
+  export VILLAGE_KAKAO_CHROME_DIR="${VILLAGE_KAKAO_CHROME_DIR:-$HOME/Library/Application Support/Google/Chrome}"
   export KAKAO_MANAGER_URL="${KAKAO_MANAGER_URL:-${KAKAO_CHANNEL_MANAGER_URL:-$DEFAULT_KAKAO_MANAGER_URL}}"
   export KAKAO_CHANNEL_MANAGER_URL="${KAKAO_CHANNEL_MANAGER_URL:-$KAKAO_MANAGER_URL}"
   export KAKAO_REMOTE_DEBUGGING_PORT="${KAKAO_REMOTE_DEBUGGING_PORT:-9223}"
+  export VILLAGE_NODE_BIN="${VILLAGE_NODE_BIN:-$(resolve_node_command)}"
+  if [[ -x "$VILLAGE_NODE_BIN" ]]; then
+    export PATH="$(dirname "$VILLAGE_NODE_BIN"):$PATH"
+  fi
   if [[ "${HERMES_WORKER_COMMAND:-}" == "" || "${HERMES_WORKER_COMMAND:-}" == "hermes" ]]; then
     export HERMES_WORKER_COMMAND="$(resolve_hermes_command)"
   else
@@ -95,6 +99,25 @@ resolve_hermes_command() {
   printf 'hermes\n'
 }
 
+resolve_node_command() {
+  if command -v node >/dev/null 2>&1; then
+    command -v node
+    return
+  fi
+  for candidate in \
+    "$HOME/.local/opt/node-v24.15.0-darwin-arm64/bin/node" \
+    "$HOME/.local/bin/node" \
+    "/opt/homebrew/bin/node" \
+    "/usr/local/bin/node"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf 'node\n'
+}
+
 resolve_cua_driver_command() {
   if command -v cua-driver >/dev/null 2>&1; then
     command -v cua-driver
@@ -127,13 +150,34 @@ post_bridge_json() {
   curl -sS --max-time "${2:-900}" -X POST "http://127.0.0.1:${PORT}$1"
 }
 
+default_chrome_user_data_dir() {
+  printf '%s/Library/Application Support/Google/Chrome' "$HOME"
+}
+
+using_default_chrome_user_data_dir() {
+  [[ "$VILLAGE_KAKAO_CHROME_DIR" == "$(default_chrome_user_data_dir)" ]]
+}
+
+chrome_app_running() {
+  pgrep -x "Google Chrome" >/dev/null 2>&1
+}
+
 chrome_automation_profile_running() {
+  if using_default_chrome_user_data_dir; then
+    chrome_app_running
+    return
+  fi
   local escaped_profile
   escaped_profile="$(printf '%s' "$VILLAGE_KAKAO_CHROME_DIR" | sed 's/[][^$.*/]/\\&/g')"
   ps -axo pid=,command= | grep -E "Google Chrome.*--user-data-dir=${escaped_profile}( |$)" | grep -v grep >/dev/null
 }
 
 chrome_automation_profile_pids() {
+  if using_default_chrome_user_data_dir; then
+    # Never kill normal Chrome when automation uses the user's real Chrome profile store.
+    # That could close the staff-only Chrome profile too.
+    return 0
+  fi
   ps -axo pid=,command= \
     | awk -v profile="$VILLAGE_KAKAO_CHROME_DIR" '
       index($0, "Google Chrome") && index($0, "--user-data-dir=" profile) { print $1 }
@@ -141,6 +185,21 @@ chrome_automation_profile_pids() {
 }
 
 chrome_automation_profile_has_kakao_url() {
+  if using_default_chrome_user_data_dir; then
+    osascript >/dev/null 2>&1 <<'APPLESCRIPT'
+tell application "Google Chrome"
+  if it is not running then error "Chrome not running"
+  repeat with w in windows
+    repeat with t in tabs of w
+      set u to URL of t as text
+      if u contains "business.kakao.com" or u contains "center-pf.kakao.com" then return "yes"
+    end repeat
+  end repeat
+end tell
+error "Kakao tab not found"
+APPLESCRIPT
+    return
+  fi
   local escaped_profile
   escaped_profile="$(printf '%s' "$VILLAGE_KAKAO_CHROME_DIR" | sed 's/[][^$.*/]/\\&/g')"
   ps -axo pid=,command= \
@@ -186,6 +245,30 @@ chrome_devtools_close_non_chat_kakao_tabs() {
   done
 }
 
+chrome_devtools_close_non_kakao_page_tabs() {
+  chrome_devtools_ready || return 0
+  local ids
+  ids="$(curl -sS --max-time 2 "$(chrome_devtools_url)/json/list" \
+    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); for (const t of tabs) { const url = t.url || ""; const isMainChatList = /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats(?:[?#]|$)/.test(url); if (t.type === "page" && t.id && !isMainChatList) console.log(t.id); } });')"
+  for id in $ids; do
+    curl -sS --max-time 2 -X PUT "$(chrome_devtools_url)/json/close/${id}" >/dev/null \
+      || curl -sS --max-time 2 "$(chrome_devtools_url)/json/close/${id}" >/dev/null \
+      || true
+  done
+}
+
+chrome_devtools_activate_chat_tab() {
+  chrome_devtools_ready || return 0
+  local id
+  id="$(curl -sS --max-time 2 "$(chrome_devtools_url)/json/list" \
+    | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const tabs = JSON.parse(raw || "[]"); const tab = tabs.find(t => t.type === "page" && /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats(?:[?#]|$)/.test(t.url || "")); if (tab && tab.id) console.log(tab.id); });')"
+  if [[ -n "$id" ]]; then
+    curl -sS --max-time 2 -X PUT "$(chrome_devtools_url)/json/activate/${id}" >/dev/null \
+      || curl -sS --max-time 2 "$(chrome_devtools_url)/json/activate/${id}" >/dev/null \
+      || true
+  fi
+}
+
 stop_automation_chrome_profile() {
   local pids
   pids="$(chrome_automation_profile_pids | tr '\n' ' ')"
@@ -229,9 +312,9 @@ stop_automation_workers() {
 
 write_launch_agent() {
   local node_bin
-  node_bin="$(command -v node)"
-  if [[ -z "$node_bin" ]]; then
-    echo "node not found in PATH" >&2
+  node_bin="${VILLAGE_NODE_BIN:-$(resolve_node_command)}"
+  if [[ ! -x "$node_bin" ]]; then
+    echo "node not found in PATH or known install locations" >&2
     exit 1
   fi
 
@@ -323,6 +406,8 @@ EOF
   <string>$(xml_escape "$LOG_FILE")</string>
   <key>RunAtLoad</key>
   <true/>
+  <key>KeepAlive</key>
+  <true/>
 </dict>
 </plist>
 EOF
@@ -363,10 +448,14 @@ cmd_start() {
   if chrome_automation_profile_running; then
     echo "automation Chrome profile already running: $VILLAGE_KAKAO_CHROME_DIR"
     if ! chrome_devtools_ready; then
-      echo "automation Chrome profile is missing DevTools port ${KAKAO_REMOTE_DEBUGGING_PORT}; relaunching profile"
-      stop_automation_chrome_profile
-      "$CHROME_SCRIPT" "$KAKAO_MANAGER_URL" >/dev/null
-      echo "relaunched isolated Chrome profile with DevTools: $(chrome_devtools_url)"
+      if using_default_chrome_user_data_dir; then
+        echo "normal Chrome profile is running without DevTools; leaving it alone and relying on installed DOM watcher extension + AppleScript/CUA worker fallback"
+      else
+        echo "automation Chrome profile is missing DevTools port ${KAKAO_REMOTE_DEBUGGING_PORT}; relaunching profile"
+        stop_automation_chrome_profile
+        "$CHROME_SCRIPT" "$KAKAO_MANAGER_URL" >/dev/null
+        echo "relaunched isolated Chrome profile with DevTools: $(chrome_devtools_url)"
+      fi
     fi
     if chrome_devtools_ready && ! chrome_devtools_has_chat_tab; then
       chrome_devtools_open_url "$KAKAO_MANAGER_URL" || true
@@ -381,12 +470,24 @@ cmd_start() {
     fi
     if chrome_devtools_has_chat_tab; then
       chrome_devtools_close_non_chat_kakao_tabs || true
+      chrome_devtools_close_non_kakao_page_tabs || true
+      chrome_devtools_activate_chat_tab || true
     fi
   else
     "$CHROME_SCRIPT" "$KAKAO_MANAGER_URL" >/dev/null
-    echo "opened isolated Chrome profile: $VILLAGE_KAKAO_CHROME_DIR"
+    echo "opened Chrome profile: $VILLAGE_KAKAO_CHROME_DIR / $VILLAGE_KAKAO_CHROME_PROFILE_DIRECTORY"
   fi
   sleep 1
+  if [[ -x "$BRIDGE_DIR/inject-watcher-cdp.py" ]] && chrome_devtools_ready; then
+    local inject_output
+    if inject_output="$(python3 "$BRIDGE_DIR/inject-watcher-cdp.py" --port "$KAKAO_REMOTE_DEBUGGING_PORT" 2>&1)"; then
+      echo "watcher injection: $inject_output"
+    else
+      echo "WARNING: watcher injection failed: $inject_output" >&2
+    fi
+  elif [[ -x "$BRIDGE_DIR/inject-watcher-cdp.py" ]] && ! chrome_devtools_ready; then
+    echo "watcher injection skipped: DevTools unavailable; using installed Chrome extension"
+  fi
   cmd_status || true
 }
 
@@ -494,8 +595,17 @@ cmd_status() {
   echo "  DevTools: $(chrome_devtools_url)"
   if chrome_devtools_ready; then
     echo "  DevTools status: reachable"
+    if chrome_devtools_has_chat_tab; then
+      echo "  Kakao chat tab: present"
+    else
+      echo "  Kakao chat tab: missing"
+    fi
   else
-    echo "  DevTools status: unavailable"
+    if using_default_chrome_user_data_dir; then
+      echo "  DevTools status: unavailable (expected with normal Chrome profile; worker fallback is AppleScript/CUA)"
+    else
+      echo "  DevTools status: unavailable"
+    fi
   fi
   echo
   echo "Hermes worker:"
@@ -540,6 +650,11 @@ cmd_status() {
   echo "Kakao Chrome tabs visible to AppleScript (diagnostic only):"
   print_applescript_kakao_tabs
   echo "  note: only the DevTools tabs above are automation-controlled; AppleScript-visible Kakao tabs may be a normal Chrome profile."
+  if pid_alive && chrome_devtools_ready && ! chrome_devtools_has_chat_tab; then
+    echo
+    echo "WARNING: bridge is running but the automation Chrome profile has no Kakao chat-list tab."
+    echo "         Run scripts/kakao-automation start to reopen the chat tab without restarting the bridge."
+  fi
 }
 
 cmd_restart() {
@@ -562,10 +677,16 @@ cmd_cleanup_tabs() {
   post_bridge_json "/maintenance/cleanup-tabs" 10
 }
 
+cmd_slack_backstop() {
+  load_env
+  (cd "$ROOT_DIR" && node tools/slack-followup-backstop/slack-followup-backstop.mjs "$@")
+}
+
 cmd_check() {
   "$ROOT_DIR/scripts/patch-hermes-village-followup-slack"
   (cd "$ROOT_DIR/tools/ai-browser-worker" && npm test && node --check worker.mjs)
   (cd "$ROOT_DIR/tools/kakao-dom-bridge" && npm run check)
+  (cd "$ROOT_DIR/tools/slack-followup-backstop" && node --test *.test.mjs && node --check slack-followup-backstop.mjs)
   (cd "$ROOT_DIR/apps/follow-up-dashboard" && npm run check)
   (cd "$ROOT_DIR" && node --test test/*.js)
 }
@@ -582,6 +703,7 @@ Usage:
   scripts/kakao-automation logs [N]  Show bridge log tail
   scripts/kakao-automation recover   Run Supabase ready/error job recovery sweep now
   scripts/kakao-automation cleanup-tabs Close stale individual Kakao chat tabs now
+  scripts/kakao-automation slack-backstop [--write] [args]  Scan Slack and backfill follow-up board
   scripts/kakao-automation check     Run regression checks
 
 Env:
@@ -604,6 +726,7 @@ case "${1:-status}" in
   logs) cmd_logs "${2:-120}" ;;
   recover) cmd_recover "${2:-900}" ;;
   cleanup-tabs) cmd_cleanup_tabs ;;
+  slack-backstop) shift; cmd_slack_backstop "$@" ;;
   check) cmd_check ;;
   *) usage; exit 2 ;;
 esac

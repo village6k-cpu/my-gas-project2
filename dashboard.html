@@ -631,6 +631,19 @@
     color: #B42318;
     white-space: nowrap;
   }
+  .return-memo-badge {
+    max-width: min(280px, 58vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 11px;
+    font-weight: 850;
+    padding: 3px 8px;
+    border: 1px solid rgba(37,99,235,0.22);
+    border-radius: 6px;
+    background: #EEF4FF;
+    color: #1D4ED8;
+    white-space: nowrap;
+  }
   .risk-warning-badge {
     font-size: 11px;
     font-weight: 850;
@@ -2434,6 +2447,22 @@ function isPaymentPending(item) {
   return !method || method === '미정' || method === '미입금' || method === '미결제';
 }
 
+function dashboardReturnMemoValue(item) {
+  if (!item) return '';
+  var memoKey = memoDraftKeyForTrade(item.tradeId);
+  if (Object.prototype.hasOwnProperty.call(dashboardMemoDrafts, memoKey)) {
+    return dashboardMemoDrafts[memoKey] || '';
+  }
+  return item.returnMemo || '';
+}
+
+function returnMemoSummaryHtml(item) {
+  var memo = String(dashboardReturnMemoValue(item) || '').replace(/\s+/g, ' ').trim();
+  if (!memo) return '';
+  var label = memo.length > 42 ? memo.slice(0, 42) + '...' : memo;
+  return '<div class="return-memo-badge" title="' + escAttr(memo) + '">특이사항 ' + escHtml(label) + '</div>';
+}
+
 function getDashboardAttentionReasons(item) {
   var reasons = [];
   if (isReturnStatusAbnormal(item)) {
@@ -2958,6 +2987,7 @@ function renderList(containerId, items, type, isSearching, options) {
       attentionReasons.forEach(function(reason) {
         html += '<div class="attention-reason-badge">' + escHtml(reason) + '</div>';
       });
+      html += returnMemoSummaryHtml(item);
       html += riskWarningSummaryHtml(item, cardType);
       html += '<div class="time-badge">' + escHtml(item.time || '시간 미정') + '</div></div></div>';
 
@@ -4441,6 +4471,7 @@ function updateEquipmentCheck(el, triggerBtn) {
       if (field === 'memo') syncMemoSaveButton(el);
       setEquipmentCheckState(el, '저장됨', false);
       finishDashboardMutation(mutationToken);
+      if (field === 'memo' || field === 'returnStatus') renderDashboardEquipmentMutation();
       queueDashboardSilentRefresh(1500);
       setTimeout(function() { setEquipmentCheckState(el, '', false); }, 1200);
     })

@@ -93,6 +93,26 @@ assert.match(
     /attention-reason-badge/,
     `${file} must show why each attention card is included`
   );
+
+  assert.match(
+    html,
+    /function returnMemoSummaryHtml\(item\)[\s\S]*return-memo-badge[\s\S]*특이사항/,
+    `${file} must render saved return memos as compact card badges`
+  );
+
+  assert.match(
+    html,
+    /html \+= returnMemoSummaryHtml\(item\);[\s\S]*html \+= riskWarningSummaryHtml\(item, cardType\);/,
+    `${file} must show memo badges in the folded card header before risk/time badges`
+  );
+
+  const memoSaveBody = html.match(/function updateEquipmentCheck\([\s\S]*?\n}\n\nfunction updateContractStatus/);
+  assert.ok(memoSaveBody, `${file} must expose updateEquipmentCheck before updateContractStatus`);
+  assert.match(
+    memoSaveBody[0],
+    /if \(field === 'memo' \|\| field === 'returnStatus'\) renderDashboardEquipmentMutation\(\);/,
+    `${file} must rerender cards immediately after memo or return-status saves`
+  );
 });
 
 console.log('dashboard attention filter static checks passed');
