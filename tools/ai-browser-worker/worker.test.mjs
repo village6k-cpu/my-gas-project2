@@ -44,6 +44,15 @@ import {
   extractNavigationHints,
   buildCompactJobForPrompt,
   canAutoSendCustomerAnswer,
+  canAutoSendCustomerDocumentAssets,
+  isCustomerDocumentAssetRequest,
+  customerDocumentAssetsAlreadySent,
+  normalizeConfirmRequestTimeForSheet,
+  mutablePolicyAutoReplyRisk,
+  currentConfirmedPolicyAutoReplySupport,
+  autoReplyRequiresRagSupport,
+  buildAutoReplyRagQuestion,
+  evaluateAutoReplyRagSupport,
   isAutoSendEligibleLiveJob,
   buildAutoReplyDedupeKey,
   hasRecentSentAutoReply,
@@ -63,6 +72,7 @@ import {
   sendKakaoMessageViaDevtools,
   runHermes,
   appendToSheet,
+  normalizeConfirmRequestDateForSheet,
   buildCloseKakaoConversationWindowAppleScript,
   closeKakaoConversationWindow,
   closeKakaoConversationTargetViaDevtools
@@ -159,6 +169,11 @@ test('buildHermesPrompt exposes village-ai RAG only as optional read-only refere
   assert.match(prompt, /must not replace current Kakao screen evidence/);
   assert.match(prompt, /question string itself/);
   assert.match(prompt, /RAG 답변을 그대로 복붙하지 말고/);
+  assert.match(prompt, /auto_send.*call RAG/s);
+  assert.match(prompt, /CURRENT_CONFIRMED_POLICY/);
+  assert.match(prompt, /학생 30%/);
+  assert.match(prompt, /current-policy match or high-confidence retrieved support/);
+  assert.match(prompt, /"rag_usage"/);
   assert.doesNotMatch(prompt, /secret-value/);
 });
 
@@ -229,14 +244,16 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
 
   assert.match(prompt, /장비명은 AI가 최대한 추론\/정규화해서.*F열 item/s);
   assert.match(prompt, /정확 매칭이 불완전하면.*best normalized guess/s);
-  assert.match(prompt, /정규화가 애매하거나 실패했다고.*입력 자체를 막지 않는다/s);
-  assert.match(prompt, /확인요청은 최종 등록이 아니라/s);
+  assert.match(prompt, /정규화가 애매해도.*확인요청 입력은 막지 않는다/s);
+  assert.match(prompt, /Q\/R에는 원문\/추론\/가용확인 후 안내/s);
   assert.match(prompt, /FX3.*A7S3.*FX6/s);
   assert.match(prompt, /할인유형.*학생.*개인사업자\/프리랜서.*일반/s);
   assert.match(prompt, /단골.*일반/s);
   assert.match(prompt, /계약마스터.*스케줄상세.*확인요청/s);
   assert.match(prompt, /예약형식.*should_write_to_sheet=true/s);
   assert.match(prompt, /불확실한 장비명.*입력 차단 사유가 아니라/s);
+  assert.match(prompt, /연락처.*고객DB.*should_write_to_sheet=false/s);
+  assert.match(prompt, /예약 등록이 불가능해서 연락처부터/s);
 });
 
 test('buildHermesPrompt treats read catch-up rows as possible missed reservations', () => {
@@ -285,6 +302,8 @@ test('buildReadOnlyLookupContext fetches kill switch and exposes read-only looku
   assert.match(requested[0], /sheet=%EC%84%A4%EC%A0%95/);
   assert.equal(context.lookup_policy.mode, 'read_only');
   assert.match(context.lookup_urls.set_master_search_template, /action=search/);
+  assert.match(context.lookup_urls.customer_db_by_name_search_template, /sheet=%EA%B3%A0%EA%B0%9DDB/);
+  assert.match(context.lookup_urls.customer_db_by_name_search_template, /col=2/);
   assert.match(context.lookup_urls.request_recent_with_results_gviz, /SELECT\+A%2CB%2CC%2CD%2CE%2CF%2CG%2CI%2CJ%2CK/);
   assert.match(context.lookup_urls.request_by_req_id_gviz_template, /AI_REQ_ID/);
   assert.match(context.lookup_urls.contract_master_recent_gviz, /%EA%B3%84%EC%95%BD%EB%A7%88%EC%8A%A4%ED%84%B0/);
@@ -405,7 +424,7 @@ test('pickKakaoMainListTarget selects list tab and avoids customer popup', () =>
   assert.equal(target.id, 'main');
 });
 
-test('ensureKakaoChannelManagerTabViaDevtools focuses automation profile tab', async () => {
+test('ensureKakaoChannelManagerTabViaDevtools reuses automation profile tab without activating it', async () => {
   const requests = [];
   const fetchImpl = async (url, init = {}) => {
     requests.push({ url, method: init.method || 'GET' });
@@ -418,9 +437,6 @@ test('ensureKakaoChannelManagerTabViaDevtools focuses automation profile tab', a
         ])
       };
     }
-    if (url === 'http://127.0.0.1:9223/json/activate/main-tab') {
-      return { ok: true, status: 200, text: async () => 'Target activated' };
-    }
     throw new Error(`unexpected request ${url}`);
   };
 
@@ -430,11 +446,11 @@ test('ensureKakaoChannelManagerTabViaDevtools focuses automation profile tab', a
   });
 
   assert.deepEqual(result, {
-    status: 'focused_list_via_devtools',
+    status: 'ready_list_via_devtools',
     targetId: 'main-tab',
     url: 'https://center-pf.kakao.com/_x/chats'
   });
-  assert.deepEqual(requests.map((request) => request.method), ['GET', 'PUT']);
+  assert.deepEqual(requests.map((request) => request.method), ['GET']);
 });
 
 test('ensureKakaoChannelManagerTab invokes osascript with target chat URL when CDP is not configured', async () => {
@@ -710,6 +726,48 @@ test('openKakaoTargetChatFromList searches by customer name when target row is n
   assert.ok(calls.some((c) => c.args.includes('type_text') && c.args.join(' ').includes('오래된고객')));
 });
 
+test('openKakaoTargetChatFromList skips Kakao search typing when search fallback is disabled', async () => {
+  const calls = [];
+  const spawnImpl = (cmd, args) => {
+    calls.push({ cmd, args });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (args.includes('list_windows')) {
+        child.stdout.write(JSON.stringify({
+          windows: [{ app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터', is_on_screen: true, bounds: { width: 1280, height: 1050 }, pid: 7, window_id: 70 }]
+        }));
+        child.emit('close', 0);
+      } else if (args.includes('get_window_state')) {
+        child.stdout.write(JSON.stringify({
+          tree_markdown: '- [100] AXStaticText = "채팅방 검색"\n- [101] AXTextField "고객 이름 또는 채팅방 검색"\n- [171] AXLink (최근고객 네 오후 8:20)'
+        }));
+        child.emit('close', 0);
+      } else {
+        child.stderr.write('unexpected');
+        child.emit('close', 1);
+      }
+    });
+    return child;
+  };
+
+  const result = await openKakaoTargetChatFromList({
+    customer_name: '오래된고객',
+    preview_text: '오래된고객 지난 문의 이어서 확인 부탁드립니다'
+  }, {
+    spawnImpl,
+    controlMode: 'cua_first',
+    cdpBaseUrl: '',
+    allowSearch: false
+  });
+
+  assert.equal(result.status, 'chat_row_not_found');
+  assert.equal(result.search.disabled, true);
+  assert.equal(result.search.reason, 'search_disabled');
+  assert.ok(!calls.some((c) => c.args.includes('type_text')));
+});
+
 test('openKakaoTargetChatViaDevtools searches list DOM when CUA cannot see off-space Chrome body', async () => {
   const evalCalls = [];
   let listCalls = 0;
@@ -741,6 +799,41 @@ test('openKakaoTargetChatViaDevtools searches list DOM when CUA cannot see off-s
   assert.equal(result.search.search_term, '오래된고객');
   assert.equal(result.conversation_evidence.hint_matched, true);
   assert.ok(evalCalls[0].expression.includes('input[placeholder*="채팅방 이름"]'));
+});
+
+test('openKakaoTargetChatViaDevtools can avoid visible Kakao search fallback', async () => {
+  let listCalls = 0;
+  const fetchImpl = async () => {
+    listCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([
+        { type: 'page', id: 'list', title: '카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats', webSocketDebuggerUrl: 'ws://list' }
+      ])
+    };
+  };
+  const evaluateImpl = async (target, expression) => {
+    assert.equal(target.id, 'list');
+    assert.match(expression, /allowSearchArg/);
+    assert.match(expression, /false\)$/);
+    return { ok: false, status: 'visible_chat_row_not_found_search_disabled', tried: [] };
+  };
+
+  const result = await openKakaoTargetChatViaDevtools({
+    customer_name: '오래된고객',
+    preview_text: '오래된고객 지난 문의 이어서 확인 부탁드립니다'
+  }, {
+    cdpBaseUrl: 'http://127.0.0.1:9223',
+    fetchImpl,
+    evaluateImpl,
+    allowSearch: false
+  });
+
+  assert.equal(result.status, 'visible_chat_row_not_found_search_disabled');
+  assert.equal(result.search.searched, false);
+  assert.equal(result.search.disabled, true);
+  assert.equal(listCalls, 1);
 });
 
 test('openKakaoTargetChatFromList does not claim verified chat when popup is missing', async () => {
@@ -894,6 +987,7 @@ test('buildSheetAppendPayload allows staff-confirmed unregistered reservations w
     },
     sheet_row_candidate: {
       customer_name: '문치호',
+      phone: '010-1111-2222',
       memo: '재형님 카톡 확정 후 시트 미입력'
     }
   };
@@ -903,7 +997,7 @@ test('buildSheetAppendPayload allows staff-confirmed unregistered reservations w
   assert.equal(payload.func, 'insertAndCheckRequest');
   assert.deepEqual(payload.args.장비, [{ 이름: '소니 FX3 바디세트', 수량: 1 }]);
   assert.equal(payload.args.예약자명, '문치호');
-  assert.equal(payload.args.비고, '재형님 카톡 확정 후 시트 미입력');
+  assert.equal(payload.args.비고, '');
 });
 
 test('buildSheetAppendPayload returns null when AI says not to write', () => {
@@ -911,6 +1005,35 @@ test('buildSheetAppendPayload returns null when AI says not to write', () => {
     should_write_to_sheet: false,
     sheet_row_candidate: { customer_name: '최재형' }
   };
+  assert.equal(buildSheetAppendPayload(decision, { apiKey: 'k' }), null);
+});
+
+test('buildSheetAppendPayload refuses confirmation-request writes without a usable phone', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
+      latest_customer_message_after_last_staff_reply: true,
+      no_auto_reply_sent: true
+    },
+    customer: { name: '찬승' },
+    sheet_row_candidate: {
+      start_date: '2026-06-27',
+      pickup_time: '23:00',
+      end_date: '2026-06-29',
+      return_time: '23:00',
+      equipment: [{ item: '소니 BURANO 베이직세트', quantity: 1 }],
+      customer_name: '찬승',
+      phone: '',
+      memo: '카카오 닉네임만 있고 예약자명/연락처 없음'
+    }
+  };
+
   assert.equal(buildSheetAppendPayload(decision, { apiKey: 'k' }), null);
 });
 
@@ -957,7 +1080,7 @@ test('buildSheetAppendPayload maps AI-decided fields into insertAndCheckRequest 
     예약자명: '홍길동',
     연락처: '010-0000-0000',
     할인유형: '학생',
-    비고: 'AI 검토 필요',
+    비고: '',
     추가요청: '렌즈 포함',
     장비: [
       { 이름: '소니 FX6 바디세트', 수량: 1 },
@@ -965,6 +1088,106 @@ test('buildSheetAppendPayload maps AI-decided fields into insertAndCheckRequest 
     ]
   });
   assert.equal(JSON.stringify(payload).includes('AI-'), false);
+});
+
+test('buildSheetAppendPayload does not leak AI reasons or review actions into confirmation request memo fields', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    reason: '카카오 실제 대화에서 예약형식이라 판단했고 가용확인 후 고객 안내 필요',
+    suggested_human_review_action: '확인요청 가용확인 결과를 확인한 뒤 고객에게 안내하세요',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
+      latest_customer_message_after_last_staff_reply: true,
+      no_auto_reply_sent: true
+    },
+    sheet_row_candidate: {
+      start_date: '2026-06-01',
+      pickup_time: '10:00',
+      end_date: '2026-06-02',
+      return_time: '18:00',
+      equipment: [{ item: '소니 FX3 바디세트', quantity: 1 }],
+      customer_name: '홍길동',
+      phone: '010-0000-0000',
+      memo: '카카오 예약형식 메시지에서 접수. 고객 원문 장비명: FX3',
+      extra_request: '가용확인 후 고객 안내 필요'
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+
+  assert.equal(payload.args.비고, '');
+  assert.equal(payload.args.추가요청, '');
+});
+
+test('buildSheetAppendPayload floors minute-level confirm request times to whole hours', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
+      latest_customer_message_after_last_staff_reply: true,
+      no_auto_reply_sent: true
+    },
+    sheet_row_candidate: {
+      start_date: '2026-06-01',
+      pickup_time: '12:30',
+      end_date: '2026-06-02',
+      return_time: '18:45',
+      equipment: [{ item: '소니 FX3 바디세트', quantity: 1 }],
+      customer_name: '홍길동',
+      phone: '010-2222-3333'
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+
+  assert.equal(normalizeConfirmRequestTimeForSheet('7시30분'), '07:00');
+  assert.equal(payload.args.반출시간, '12:00');
+  assert.equal(payload.args.반납시간, '18:00');
+});
+
+test('buildSheetAppendPayload normalizes relative/korean dates and 24시 to API-safe range', () => {
+  const now = new Date('2026-06-06T07:54:00+09:00');
+  const decision = {
+    should_write_to_sheet: true,
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: true,
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
+      latest_customer_message_after_last_staff_reply: true,
+      no_auto_reply_sent: true
+    },
+    sheet_row_candidate: {
+      start_date: '오늘',
+      pickup_time: '10시',
+      end_date: '6월 6일',
+      return_time: '24시',
+      equipment: [{ item: '소니 A7S3 바디세트', quantity: 1 }],
+      customer_name: '이규직',
+      phone: '01022500612'
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret', now });
+
+  assert.equal(normalizeConfirmRequestDateForSheet('오늘', { now }), '2026-06-06');
+  assert.equal(normalizeConfirmRequestTimeForSheet('24시'), '00:00');
+  assert.equal(payload.args.반출일, '2026-06-06');
+  assert.equal(payload.args.반출시간, '10:00');
+  assert.equal(payload.args.반납일, '2026-06-07');
+  assert.equal(payload.args.반납시간, '00:00');
 });
 
 test('buildSheetAppendPayload allows reservation-format writes when non-blocking checks are incomplete', () => {
@@ -980,7 +1203,7 @@ test('buildSheetAppendPayload allows reservation-format writes when non-blocking
       latest_customer_message_after_last_staff_reply: true,
       no_auto_reply_sent: false
     },
-    sheet_row_candidate: { item: 'FX6', customer_name: '홍길동', memo: '장비명/중복 검증 필요' }
+    sheet_row_candidate: { item: 'FX6', customer_name: '홍길동', phone: '010-4444-5555', memo: '장비명/중복 검증 필요' }
   };
 
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
@@ -988,7 +1211,7 @@ test('buildSheetAppendPayload allows reservation-format writes when non-blocking
   assert.equal(payload.func, 'insertAndCheckRequest');
   assert.deepEqual(payload.args.장비, [{ 이름: 'FX6', 수량: 1 }]);
   assert.equal(payload.args.예약자명, '홍길동');
-  assert.equal(payload.args.비고, '장비명/중복 검증 필요');
+  assert.equal(payload.args.비고, '');
 });
 
 test('buildSheetAppendPayload falls back to reservation equipment array instead of joining items into one row', () => {
@@ -1014,6 +1237,7 @@ test('buildSheetAppendPayload falls back to reservation equipment array instead 
     },
     sheet_row_candidate: {
       customer_name: '김성윤',
+      phone: '010-7777-8888',
       item: '셔틀러 에이스 2개, 소니 A7S3 바디세트 2개, 소니 GM 24-70mm II 2개',
       memo: 'fallback should prefer structured reservation equipment'
     }
@@ -1090,6 +1314,26 @@ test('appendToSheet returns structured GAS business errors instead of crashing t
   assert.equal(result.error_type, 'sheet_validation');
   assert.equal(result.recoverable, false);
   assert.match(result.error, /데이터 확인 규칙/);
+});
+
+test('appendToSheet classifies missing contact rejections as no_contact', async () => {
+  const result = await appendToSheet({
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'secret',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ error: 'NO_CONTACT: 연락처가 없으면 예약 등록이 불가능합니다. 고객DB에서 연락처 없음 — 고객에게 연락처부터 요청하세요.' })
+    })
+  }, {
+    action: 'run',
+    func: 'insertAndCheckRequest',
+    args: { 예약자명: '홍길동', 장비: [{ 이름: 'FX6', 수량: 1 }] }
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.error_type, 'no_contact');
+  assert.match(result.error, /예약 등록이 불가능/);
 });
 
 test('appendToSheet preserves duplicate insertAndCheckRequest availability results', async () => {
@@ -1348,10 +1592,79 @@ test('routeFollowUpToSlack maps follow-up types to the agent channels', () => {
   assert.deepEqual(routeFollowUpToSlack({ type: 'quote_send' }), { route: 'document', channel: '서류발송-agent' });
   assert.deepEqual(routeFollowUpToSlack({ type: 'payment_check' }), { route: 'settlement', channel: '정산-agent' });
   assert.deepEqual(routeFollowUpToSlack({ type: 'reply_needed' }), { route: 'other', channel: '기타문의' });
-  assert.deepEqual(routeFollowUpToSlack({ type: 'damage_repair' }), { route: 'other', channel: '기타문의' });
+  assert.deepEqual(routeFollowUpToSlack({ type: 'damage_repair' }), { route: 'inventory', channel: '재고관리-agent' });
 });
 
-test('buildSlackFollowUpMessage includes action buttons and compact button help', () => {
+test('routeFollowUpToSlack keeps operational follow-ups out of document channel despite document words', () => {
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'damage_repair',
+    title: '이기욱 파손 건 및 견적서 확인 후속',
+    summary: '파손 확인과 견적서 금액 대조가 함께 필요합니다.'
+  }), { route: 'inventory', channel: '재고관리-agent' });
+
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'completed_log',
+    title: '박정우 6/10 예약 확정 건 확인요청 입력 필요',
+    summary: '확인요청 입력 후 처리 완료 기록'
+  }), { route: 'schedule', channel: '스케쥴-agent' });
+
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'completed_log',
+    title: '이기욱 파손 건 및 견적서 확인 후속',
+    summary: '파손 확인 후 완료 기록'
+  }), { route: 'inventory', channel: '재고관리-agent' });
+
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'price_review',
+    title: '박용배 견적 및 방문시간 답변 필요',
+    summary: '고객이 방문 준비물과 금액을 물었습니다.'
+  }), { route: 'other', channel: '기타문의' });
+});
+
+test('routeFollowUpToSlack routes explicit document requests from generic cards to document channel', () => {
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'reply_needed',
+    title: '하현준 사업자등록증·통장사본 전달 요청',
+    summary: '고객이 사업자등록증과 통장사본 전달을 요청했습니다.'
+  }), { route: 'document', channel: '서류발송-agent' });
+});
+
+test('routeFollowUpToSlack sends reservation-like reply cards to schedule agent', () => {
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'reply_needed',
+    title: '이기욱 예약 후보 확인 필요',
+    summary: '고객이 6/3~6/4 장비 예약 진행을 요청했습니다.'
+  }), { route: 'schedule', channel: '스케쥴-agent' });
+});
+
+test('routeFollowUpToSlack keeps target Kakao mismatch diagnostics out of settlement despite payment preview text', () => {
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'reply_needed',
+    title: '대상 카카오 대화 확인 불가',
+    summary: "고객 요청: 헉 저는 최근에 메모리 빌린적이 없습니다. 잡 프리뷰는 '입금드릴게요!! 오전09:34'였지만 현재 열린 카카오 대화는 김나영 채팅이며 해당 메시지가 보이지 않았습니다.",
+    recommended_action: '짧게 답변',
+    evidence: [
+      '고객: 헉 저는 최근에 메모리 빌린적이 없습니다',
+      '직원: 죄송합니다. 감독님! 동명이인이어서 잘못 연락 드렸습니다!'
+    ]
+  }), { route: 'other', channel: '기타문의' });
+});
+
+test('routeFollowUpToSlack keeps reservation cards in schedule route even when evidence mentions 계약마스터', () => {
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'reservation_review',
+    title: '김정혜 DJI 무선마이크 당일 예약 확인요청 입력 및 18시 수령 안내',
+    summary: '확인요청 RQ-260609-004 가용확인 결과: DJI 마이크 미니2 x1: 세트',
+    recommended_action: '기존 RQ 기준으로 처리하고 내부 등록/가용확인 상태를 확인하세요.',
+    evidence: [
+      '카카오 화면: 고객이 DJI 무선마이크 예약 정보를 제공',
+      '계약마스터 조회: 거래ID 260609-005, 김정혜, 예약 상태',
+      '스케줄상세 조회: 거래ID 260609-005, DJI 마이크 미니2, 상태 대기'
+    ]
+  }), { route: 'schedule', channel: '스케쥴-agent' });
+});
+
+test('buildSlackFollowUpMessage includes action buttons and deduplicated automation-style summary', () => {
   const message = buildSlackFollowUpMessage({
     id: 'follow-1',
     type: 'reservation_review',
@@ -1364,6 +1677,19 @@ test('buildSlackFollowUpMessage includes action buttons and compact button help'
     suggested_reply_draft: '확인해보니 해당 일정 예약 가능하십니다.',
     evidence: ['확인요청 RQ-260531-003: ✅ 가용1'],
     payload: {
+      sheet_request: {
+        반출일: '2026-05-30',
+        반출시간: '23:00',
+        반납일: '2026-05-31',
+        반납시간: '23:00',
+        장비: [{ 이름: '소니 캠 AX-700', 수량: 1 }]
+      },
+      sheet_availability: {
+        reqID: 'RQ-260531-003',
+        status: 'available',
+        duplicate: true,
+        results: [{ equipment: '소니 캠 AX-700', quantity: '1', result: '✅ 가용1', detail: '예약 가능' }]
+      },
       visible_messages_used: [
         { sender: '최재원', message: '소니 캠 AX-700 5월30일 밤부터 31일 밤까지 가능할까요?', time: '오후 5:01' },
         { sender: '빌리지님', message: '확인해보겠습니다.', time: '오후 5:02' }
@@ -1375,16 +1701,72 @@ test('buildSlackFollowUpMessage includes action buttons and compact button help'
   assert.match(JSON.stringify(message.blocks), /village_followup_send/);
   assert.match(JSON.stringify(message.blocks), /village_followup_edit_send/);
   assert.match(JSON.stringify(message.blocks), /village_followup_status_done/);
-  assert.match(JSON.stringify(message.blocks), /핵심/);
+  assert.match(JSON.stringify(message.blocks), /처리 요약/);
+  assert.match(JSON.stringify(message.blocks), /⚠️ 분류\/상태/);
+  assert.match(JSON.stringify(message.blocks), /🧩 문제/);
+  assert.match(JSON.stringify(message.blocks), /🎒 장비 \/ 📅 기간/);
+  assert.match(JSON.stringify(message.blocks), /➡️ 다음/);
   assert.match(JSON.stringify(message.blocks), /최근 대화/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /근거/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /추천 조치/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /라우팅/);
-  assert.doesNotMatch(JSON.stringify(message.blocks), /RQ-260531-003/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /Agent 호출/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /헤이빌리/);
+  assert.match(JSON.stringify(message.blocks), /RQ-260531-003/);
+  assert.match(JSON.stringify(message.blocks), /소니 캠 AX-700 x1: ✅ 가용1/);
+  assert.match(JSON.stringify(message.blocks), /가능 안내 후 예약 진행 여부 확인/);
+  assert.equal((JSON.stringify(message.blocks).match(/최재원/g) || []).length, 1);
+  assert.equal((JSON.stringify(message.blocks).match(/예약 후보 확인/g) || []).length, 1);
+  assert.equal((JSON.stringify(message.blocks).match(/RQ-260531-003/g) || []).length, 1);
   assert.doesNotMatch(JSON.stringify(message.blocks), /버튼 동작/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /현재 초안으로 카카오 발송 요청/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /대시보드/);
+  assert.doesNotMatch(JSON.stringify(message.blocks), /\\n  /);
+});
+
+test('buildSlackFollowUpMessage keeps warning availability cards actionable', () => {
+  const message = buildSlackFollowUpMessage({
+    id: 'follow-lee',
+    type: 'reservation_review',
+    priority: 'urgent',
+    status: 'open',
+    title: '이기욱 INSIDE FILM 예약 가용 확인 결과',
+    customer_name: '이기욱 INSIDE FILM',
+    summary: '기존 중복 RQ에서 읽은 결과입니다.',
+    recommended_action: '확인요청 RQ-260601-010 결과에 경고가 있습니다.',
+    suggested_reply_draft: '감독님, 확인 후 바로 안내드리겠습니다.',
+    payload: {
+      sheet_request: {
+        반출일: '2026-06-03',
+        반출시간: '05:30',
+        반납일: '2026-06-04',
+        반납시간: '05:30',
+        장비: [{ 이름: 'Fx3 소니 GM 렌즈 세트', 수량: 1 }]
+      },
+      sheet_availability: {
+        reqID: 'RQ-260601-010',
+        status: 'warning',
+        duplicate: true,
+        results: [
+          { equipment: 'Fx3 소니 GM 렌즈 세트', quantity: '1', result: '⚠️ 겹침', detail: '일부 구성 확인 필요' },
+          { equipment: '솔리드컴 C1 PRO 7구', quantity: '1', result: '✅ 가용1', detail: '대체 가능' }
+        ]
+      }
+    }
+  });
+  const blocks = JSON.stringify(message.blocks);
+
+  assert.match(blocks, /요청/);
+  assert.match(blocks, /RQ-260601-010/);
+  assert.match(blocks, /기존 중복/);
+  assert.match(blocks, /기존 확인요청에서 읽은 가용확인 결과입니다/);
+  assert.match(blocks, /Fx3 소니 GM 렌즈 세트 x1: ⚠️ 겹침/);
+  assert.match(blocks, /경고\/부족 항목 확인 후 대안 또는 추가확인 안내/);
+  assert.doesNotMatch(blocks, /가용 결과 확인 후 답변/);
+  assert.doesNotMatch(blocks, /Agent 호출/);
+  assert.doesNotMatch(blocks, /헤이빌리/);
+  assert.equal((blocks.match(/RQ-260601-010/g) || []).length, 1);
+  assert.doesNotMatch(blocks, /\\n\\n•/);
 });
 
 test('enrichFollowUpRowWithOperationalCalculations calculates contract and RQ document amounts', async () => {
@@ -1434,6 +1816,44 @@ test('enrichFollowUpRowWithOperationalCalculations calculates contract and RQ do
   assert.equal(row.payload.operational_calculation.totalVatIncluded, 280370);
 });
 
+test('enrichFollowUpRowWithOperationalCalculations does not price expanded components as another parent set', async () => {
+  const gvizBody = `/*O_o*/\ngoogle.visualization.Query.setResponse({"version":"0.6","status":"ok","table":{"cols":[{"label":"요청ID"},{"label":"반출일"},{"label":"반출시간"},{"label":"반납일"},{"label":"반납시간"},{"label":"장비or세트명"},{"label":"수량"},{"label":"결과"},{"label":"상세"},{"label":"예약자명"},{"label":"연락처"},{"label":"할인유형"},{"label":"비고"},{"label":"추가요청"}],"rows":[{"c":[{"v":"RQ-260608-003"},{"v":"Date(2026,5,12)","f":"2026. 6. 12"},{"v":"Date(1899,11,30,9,0,0)","f":"9:00"},{"v":"Date(2026,5,12)","f":"2026. 6. 12"},{"v":"Date(1899,11,30,19,0,0)","f":"19:00"},{"v":"메모리*1 / 배터리*2 / 앞캡 / 렌즈 후드"},{"v":1,"f":"1"},{"v":"❓ 미등록 장비"},{"v":"장비마스터/세트마스터에 없음"},{"v":"조아현"},{"v":"010-6559-6771"},{"v":"일반"},null,null]},{"c":[{"v":"RQ-260608-003"},null,null,null,null,{"v":"소니 Z90"},{"v":1,"f":"1"},{"v":"✅ 가용1"},{"v":"세트"},null,null,null,null,null]}]}});`;
+  const config = {
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'key',
+    fetchImpl: async (url) => {
+      const u = new URL(String(url));
+      if (u.hostname === 'docs.google.com') {
+        return { ok: true, status: 200, text: async () => gvizBody };
+      }
+      const sheet = u.searchParams.get('sheet');
+      const query = u.searchParams.get('query');
+      if (sheet === '세트마스터' && query === '소니 Z90') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ results: [{ data: ['소니 Z90', '메모리*1 / 배터리*2 / 앞캡 / 렌즈 후드', 1, '', '', 'Y', 50000] }] }) };
+      }
+      if (sheet === '세트마스터' && query === '메모리*1 / 배터리*2 / 앞캡 / 렌즈 후드') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ results: [{ data: ['소니 Z90', '메모리*1 / 배터리*2 / 앞캡 / 렌즈 후드', 1, '', '', 'Y', 50000] }] }) };
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify({ results: [] }) };
+    }
+  };
+
+  const row = await enrichFollowUpRowWithOperationalCalculations(config, {
+    id: 'follow-z90',
+    type: 'tax_invoice',
+    title: '조아현 세금계산서 요청',
+    customer_name: '조아현',
+    summary: '확인요청 RQ-260608-003 관련 서류 요청',
+    recommended_action: '금액 확인',
+    evidence: ['확인요청 조회: RQ-260608-003']
+  });
+
+  assert.match(row.recommended_action, /VAT 포함 55,000원/);
+  assert.doesNotMatch(row.recommended_action, /110,000원|110,010원/);
+  assert.equal(row.payload.operational_calculation.totalVatIncluded, 55000);
+  assert.deepEqual(row.payload.operational_calculation.unresolved, ['메모리*1 / 배터리*2 / 앞캡 / 렌즈 후드 x1']);
+});
+
 test('resolveSlackChannelId searches Slack channel names and caches the id', async () => {
   let calls = 0;
   const config = {
@@ -1473,6 +1893,88 @@ test('resolveSlackChannelId resolves the document-send agent channel name', asyn
 
   assert.equal(await resolveSlackChannelId('서류발송-agent', config), 'C123DOCS');
 });
+
+test('deliverSlackFollowUpRows suppresses Daily audit automation report rows', async () => {
+  const requests = [];
+  const result = await deliverSlackFollowUpRows({
+    slackFollowUpEnabled: true,
+    slackBotToken: 'xoxb-test',
+    slackFetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
+    },
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return { ok: true, status: 200, text: async () => JSON.stringify([]) };
+    }
+  }, [{
+    id: 'daily-audit-1',
+    source: 'daily_audit',
+    type: 'ops_issue',
+    status: 'open',
+    title: 'Daily audit worker timeout/skipped 이력 점검 필요',
+    customer_name: '시스템',
+    payload: { daily_audit_20260607: true }
+  }]);
+
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, 'automation_audit_rows');
+  assert.equal(requests.length, 0);
+});
+
+
+test('deliverSlackFollowUpRows delivers real DOM watcher task rows even when audit metadata exists', async () => {
+  const requests = [];
+  const config = {
+    slackFollowUpEnabled: true,
+    slackBotToken: 'xoxb-test',
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    slackFetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      if (String(url).includes('conversations.list')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, channels: [{ id: 'C123SCHEDULE', name: '스케쥴-agent' }] })
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, channel: 'C123SCHEDULE', ts: '171111.000200', message: { thread_ts: '171111.000200' } })
+      };
+    },
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => init?.method === 'PATCH'
+          ? JSON.stringify([{ id: 'follow-real-task', payload: { slack_delivery: { status: 'delivered' } } }])
+          : JSON.stringify([{ payload: { daily_audit_20260608: { seen: true } } }])
+      };
+    }
+  };
+
+  const result = await deliverSlackFollowUpRows(config, [{
+    id: 'follow-real-task',
+    source: 'kakao_dom_bridge',
+    type: 'reservation_review',
+    status: 'open',
+    priority: 'high',
+    title: '최승식 예약 변경 확인 필요',
+    customer_name: '최승식',
+    summary: 'DOM watcher 실시간 고객 태스크',
+    payload: { daily_audit_20260608: { discovered_by: 'audit' } }
+  }]);
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.results[0].ok, true);
+  assert.ok(requests.some((r) => r.url.includes('chat.postMessage')));
+});
+
 
 test('deliverSlackFollowUpRows posts new rows once and writes delivery metadata', async () => {
   const requests = [];
@@ -1526,6 +2028,74 @@ test('deliverSlackFollowUpRows posts new rows once and writes delivery metadata'
   assert.ok(requests.some((r) => r.url.includes('chat.postMessage')));
   const patch = requests.find((r) => r.url.includes('supabase.example') && r.init?.method === 'PATCH');
   assert.equal(JSON.parse(patch.init.body).payload.slack_delivery.message_ts, '171111.000100');
+});
+
+test('deliverSlackFollowUpRows posts same-conversation follow-ups as thread replies when enabled', async () => {
+  const requests = [];
+  const config = {
+    slackFollowUpEnabled: true,
+    slackThreadFollowUpsEnabled: true,
+    slackBotToken: 'xoxb-test',
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    slackFetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      if (String(url).includes('conversations.list')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, channels: [{ id: 'C123SCHEDULE', name: '스케쥴-agent' }] })
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, channel: 'C123SCHEDULE', ts: '171111.000300', message: { thread_ts: '171111.000100' } })
+      };
+    },
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      const href = String(url);
+      if (href.includes('select=id%2Croom_key') || href.includes('select=id,room_key')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([{
+          id: 'parent-1',
+          room_key: 'kakao:park',
+          customer_name: '박정우',
+          type: 'reservation_review',
+          status: 'open',
+          payload: { slack_delivery: { status: 'delivered', channel_id: 'C123SCHEDULE', message_ts: '171111.000100', thread_ts: '171111.000100' } }
+        }]) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => init?.method === 'PATCH'
+          ? JSON.stringify([{ id: 'child-1', payload: { slack_delivery: { status: 'delivered', is_thread_reply: true } } }])
+          : JSON.stringify([{ payload: {} }])
+      };
+    }
+  };
+
+  const result = await deliverSlackFollowUpRows(config, [{
+    id: 'child-1',
+    room_key: 'kakao:park',
+    type: 'completed_log',
+    status: 'open',
+    priority: 'normal',
+    title: '박정우 6/10 예약 확정 건 확인요청 입력 필요',
+    customer_name: '박정우',
+    summary: '확인요청 입력 후속'
+  }]);
+
+  assert.equal(result.results[0].ok, true);
+  const post = requests.find((r) => r.url.includes('chat.postMessage'));
+  const body = JSON.parse(post.init.body);
+  assert.equal(body.thread_ts, '171111.000100');
+  const patch = requests.find((r) => r.url.includes('supabase.example') && r.init?.method === 'PATCH');
+  const payload = JSON.parse(patch.init.body).payload.slack_delivery;
+  assert.equal(payload.is_thread_reply, true);
+  assert.equal(payload.parent_follow_up_id, 'parent-1');
 });
 
 test('deliverSlackFollowUpRows updates an existing delivered Slack card instead of reposting', async () => {
@@ -1632,6 +2202,61 @@ test('upsertFollowUpRows merges same conversation into an active row instead of 
   assert.equal(result.rows[0].id, 'existing-1');
   assert.equal(result.rows[0].type, 'contract_document');
   assert.match(result.rows[0].summary, /카드결제/);
+  assert.ok(!requests.some((r) => r.init?.method === 'POST'));
+});
+
+test('upsertFollowUpRows merges same room when customer name has message or company suffix', async () => {
+  const requests = [];
+  const existing = {
+    id: 'existing-lee',
+    follow_up_key: 'preview:lee:이기욱:reservation_review:2026-06-03',
+    room_key: 'preview:lee',
+    customer_name: '이기욱',
+    type: 'reservation_review',
+    status: 'open',
+    priority: 'high',
+    title: '이기욱 예약 확인요청 입력 완료',
+    summary: '기존 RQ 입력 완료',
+    recommended_action: 'RQ를 확인하세요.',
+    evidence: ['기존 메시지'],
+    payload: {}
+  };
+  const config = {
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      if (String(url).includes('status=in.(done,dismissed)')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([]) };
+      }
+      if (String(url).includes('status=not.in.(done,dismissed)')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([existing]) };
+      }
+      if (init.method === 'PATCH') {
+        const patch = JSON.parse(init.body);
+        return { ok: true, status: 200, text: async () => JSON.stringify([{ ...existing, ...patch }]) };
+      }
+      throw new Error(`unexpected request ${init.method || 'GET'} ${url}`);
+    }
+  };
+
+  const result = await upsertFollowUpRows(config, [{
+    follow_up_key: 'preview:lee:이기욱 inside film:reservation_review:2026-06-03',
+    room_key: 'preview:lee',
+    customer_name: '이기욱 INSIDE FILM 넵 그럴게 부탁드리겠습니다 !',
+    type: 'reservation_review',
+    status: 'open',
+    priority: 'high',
+    title: '이기욱 INSIDE FILM 예약 가용 확인 결과',
+    summary: '고객이 6/3~6/4 장비 예약 진행을 요청했습니다.',
+    recommended_action: '기존 RQ와 대조하세요.',
+    evidence: ['최신 고객 메시지: 넵 그럴게 부탁드리겠습니다 !']
+  }]);
+
+  assert.equal(result.mergedActive, 1);
+  assert.equal(result.rows[0].id, 'existing-lee');
+  assert.match(result.rows[0].summary, /6\/3~6\/4/);
   assert.ok(!requests.some((r) => r.init?.method === 'POST'));
 });
 
@@ -1971,25 +2596,372 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, owner_review_required: true }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, reply_decision: { ...baseDecision.reply_decision, text: '네 대여 가능합니다.' } }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'reservation', reply_decision: { ...baseDecision.reply_decision, text: '네 예약 가능합니다.' } }, { autoSendEnabled: true }).allowed, false);
+  assert.deepEqual(canAutoSendCustomerAnswer({
+    ...baseDecision,
+    classification: 'reservation',
+    latest_customer_message_cluster: '그럼 이렇게 부탁드립니다',
+    latest_staff_message: '네 감독님, 해당 구성 예약 가능합니다.',
+    visible_messages_used: [
+      { sender: '빌리지님', message: '네 감독님, 해당 구성 예약 가능합니다.', time: '오후 1:00' },
+      { sender: '김채현', message: '그럼 이렇게 부탁드립니다', time: '오후 1:01' }
+    ],
+    reply_decision: {
+      ...baseDecision.reply_decision,
+      text: '네 감독님, 말씀 주신 구성으로 예약 확정해드렸습니다.'
+    }
+  }, { autoSendEnabled: true }), {
+    allowed: true,
+    reason: 'staff_confirmed_reservation_acceptance',
+    text: '네 감독님, 말씀 주신 구성으로 예약 확정해드렸습니다.',
+    replyMode: 'auto_send',
+    confidence: 'high'
+  });
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'faq', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).allowed, true);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
 });
 
+test('autoReplyRequiresRagSupport skips RAG for pre-approved bankbook/business-registration file handoff', () => {
+  assert.deepEqual(autoReplyRequiresRagSupport({
+    classification: 'faq',
+    latest_customer_message_cluster: '통장 사본이랑 사업자등록증 보내주세요'
+  }, '요청하신 통장 사본과 사업자등록증 전달드립니다.'), {
+    required: false,
+    reason: 'standard_customer_document_assets'
+  });
+});
+
+test('standard document auto-send only triggers from latest customer request, not old history', () => {
+  const decision = {
+    classification: 'faq',
+    kill_switch_observed: 'active',
+    latest_customer_message_cluster: '감사합니다! podong@dodam.media 으로 세금계산서 발행해주시면 입금진행하겠습니다',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    visible_messages_used: [
+      { sender: '김예지', message: '또, 빌리지렌탈샵의 사업자 / 통장사본도 부탁드립니다' },
+      { sender: '빌리지님', message: '안녕하세요 빌리지입니다. 요청하신 통장 사본과 사업자등록증 보내드립니다.' },
+      { sender: '김예지', message: '감사합니다! podong@dodam.media 으로 세금계산서 발행해주시면 입금진행하겠습니다' }
+    ]
+  };
+
+  assert.equal(isCustomerDocumentAssetRequest(decision), false);
+  assert.equal(canAutoSendCustomerDocumentAssets(decision, { autoSendEnabled: true }).reason, 'not_latest_customer_document_request');
+});
+
+test('standard document auto-send is blocked after a staff document delivery message', () => {
+  const decision = {
+    classification: 'faq',
+    kill_switch_observed: 'active',
+    latest_customer_message_cluster: '사업자등록증이랑 통장 사본 부탁드립니다',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    visible_messages_used: [
+      { sender: '김예지', message: '사업자등록증이랑 통장 사본 부탁드립니다' },
+      { sender: '빌리지님', message: '요청하신 통장 사본과 사업자등록증 전달드립니다.' }
+    ]
+  };
+
+  assert.equal(customerDocumentAssetsAlreadySent(decision), true);
+  assert.equal(canAutoSendCustomerDocumentAssets(decision, { autoSendEnabled: true }).reason, 'customer_document_assets_already_sent');
+});
+
+test('standard document auto-send does not treat customer tax-invoice business-registration upload as Village document request', () => {
+  const decision = {
+    classification: 'ignore',
+    kill_switch_observed: 'active',
+    latest_customer_message_cluster: '알티스트레이블 사업자등록증 (1) (1).pdf, ivan@rtstlabel.com, 여기로 세금계산서 발행해 주시면 감사하겠습니다!, 발행해주시고 말씀한번 해주시면 감사하겠습니다',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    visible_messages_used: [
+      { sender: '하현준', message: '세금계산서 발급받고 싶습니다. 사업자등록증좀 전달해주시면 감사하겠습니다' },
+      { sender: '빌리지님', message: '세금계산서 발급하실 거면 저희가 아니라 감독님 사업자등록증 보내주셔야되는데 확인 되실까요?' },
+      { sender: '하현준', message: '알티스트레이블 사업자등록증 (1) (1).pdf' },
+      { sender: '하현준', message: 'ivan@rtstlabel.com' },
+      { sender: '하현준', message: '여기로 세금계산서 발행해 주시면 감사하겠습니다!' },
+      { sender: '하현준', message: '발행해주시고 말씀한번 해주시면 감사하겠습니다' }
+    ]
+  };
+
+  assert.equal(isCustomerDocumentAssetRequest(decision), false);
+  assert.equal(canAutoSendCustomerDocumentAssets(decision, { autoSendEnabled: true }).reason, 'classification_not_customer_document_faq');
+});
+
+test('standard document auto-send allows explicit Village bankbook/business-registration request in latest turn', () => {
+  const decision = {
+    classification: 'faq',
+    kill_switch_observed: 'active',
+    latest_customer_message_cluster: '빌리지렌탈샵의 사업자 / 통장사본도 부탁드립니다',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    visible_messages_used: [
+      { sender: '김예지', message: '빌리지렌탈샵의 사업자 / 통장사본도 부탁드립니다' }
+    ]
+  };
+
+  assert.equal(isCustomerDocumentAssetRequest(decision), true);
+  assert.equal(canAutoSendCustomerDocumentAssets(decision, {
+    autoSendEnabled: true,
+    customerDocumentAssetPaths: [
+      '/Users/village6k/.hermes/village-documents/customer-request-docs/village_woori_bankbook_copy.jpeg',
+      '/Users/village6k/.hermes/village-documents/customer-request-docs/village_business_registration_certificate.jpeg'
+    ]
+  }).reason, 'standard_customer_document_assets');
+});
+
+test('autoReplyRequiresRagSupport marks FAQ and policy/procedure replies for RAG verification', () => {
+  assert.deepEqual(autoReplyRequiresRagSupport({ classification: 'faq' }, '네, 주소 안내드릴게요.'), {
+    required: true,
+    reason: 'classification_faq'
+  });
+  assert.deepEqual(autoReplyRequiresRagSupport({ classification: 'reservation' }, '네, 확인했습니다.'), {
+    required: false,
+    reason: 'not_policy_or_faq_auto_reply'
+  });
+  assert.deepEqual(autoReplyRequiresRagSupport({ classification: 'reservation' }, '방문 수령 절차 안내드리겠습니다.'), {
+    required: true,
+    reason: 'policy_or_procedure_terms'
+  });
+});
+
+test('autoReplyRequiresRagSupport marks mutable policy FAQ for current-policy or RAG verification', () => {
+  assert.deepEqual(mutablePolicyAutoReplyRisk({
+    latest_customer_message_cluster: '학생할인 몇 프로인가요?'
+  }, '학생 할인은 30%입니다.'), {
+    mutable: true,
+    reason: 'mutable_policy_terms'
+  });
+  assert.deepEqual(autoReplyRequiresRagSupport({
+    classification: 'faq',
+    latest_customer_message_cluster: '비학생인데 학생가 적용 가능한가요?'
+  }, '학생가는 적용 어렵습니다.'), {
+    required: true,
+    reason: 'mutable_policy_terms',
+    mutablePolicy: true
+  });
+});
+
+test('currentConfirmedPolicyAutoReplySupport allows owner-confirmed latest discount facts', () => {
+  assert.deepEqual(currentConfirmedPolicyAutoReplySupport({
+    latest_customer_message_cluster: '학생할인 몇 프로인가요?'
+  }, '학생 할인은 30%입니다.'), {
+    applicable: true,
+    allowed: true,
+    reason: 'current_confirmed_policy_match',
+    topics: ['student_discount_rate'],
+    failedTopics: []
+  });
+  assert.equal(currentConfirmedPolicyAutoReplySupport({
+    latest_customer_message_cluster: '학생할인 몇 프로인가요?'
+  }, '학생 할인은 40%입니다.').allowed, false);
+  assert.equal(currentConfirmedPolicyAutoReplySupport({
+    latest_customer_message_cluster: '보증금 있나요?'
+  }, '보증금은 없습니다.').reason, 'policy_not_in_current_confirmed_set_use_rag');
+  assert.deepEqual(currentConfirmedPolicyAutoReplySupport({
+    latest_customer_message_cluster: '영업시간이 어떻게 되나요?'
+  }, '저희는 24시간 운영하고 있습니다.'), {
+    applicable: true,
+    allowed: true,
+    reason: 'current_confirmed_policy_match',
+    topics: ['business_hours_policy'],
+    failedTopics: []
+  });
+});
+
+test('buildAutoReplyRagQuestion includes current Kakao context and proposed reply without asking current stock truth', () => {
+  const question = buildAutoReplyRagQuestion({
+    decision: {
+      classification: 'faq',
+      customer: { name: '박정병' },
+      latest_customer_message_cluster: '혹시 코모도 x도 보유중이신가요?',
+      visible_messages_used: [
+        { sender: '박정병', message: '혹시 코모도 x도 보유중이신가요?' },
+        { sender: '빌리지님', message: '확인해보겠습니다.' }
+      ]
+    },
+    replyText: '안녕하세요 감독님! 코모도 X는 현재 보유 목록에서 확인이 안 됩니다.'
+  });
+
+  assert.match(question, /박정병/);
+  assert.match(question, /혹시 코모도 x도 보유중/);
+  assert.match(question, /AI가 보내려는 답변 초안/);
+  assert.match(question, /현재 재고\/예약 가능 여부\/스케줄 확정은 판단하지 말고/);
+});
+
+test('buildAutoReplyRagQuestion tells RAG current confirmed policy wins over older history', () => {
+  const question = buildAutoReplyRagQuestion({
+    decision: {
+      classification: 'faq',
+      customer: { name: '최재형' },
+      latest_customer_message_cluster: '학생 할인율이 몇 퍼센트인가요?'
+    },
+    replyText: '학생 할인은 30%입니다.'
+  });
+
+  assert.match(question, /현재 확정 정책/);
+  assert.match(question, /학생30%/);
+  assert.match(question, /확정 정책에 없는 보증금\/환불\/계좌\/증빙/);
+});
+
+test('evaluateAutoReplyRagSupport allows owner-confirmed current policy FAQ without RAG', async () => {
+  let called = false;
+  const supported = await evaluateAutoReplyRagSupport({
+    config: {},
+    decision: {
+      classification: 'faq',
+      customer: { name: '최필립' },
+      latest_customer_message_cluster: '안녕하세요. 영업시간이 어떻게 되나요?'
+    },
+    replyText: '안녕하세요! 빌리지는 24시간 운영합니다.',
+    askImpl: async () => {
+      called = true;
+      throw new Error('RAG should not be called for current confirmed business hours');
+    }
+  });
+
+  assert.equal(supported.allowed, true);
+  assert.equal(supported.reason, 'current_confirmed_policy_match');
+  assert.deepEqual(supported.currentPolicy.topics, ['business_hours_policy']);
+  assert.equal(called, false);
+});
+
+test('evaluateAutoReplyRagSupport requires high-confidence retrieved RAG for FAQ auto-send', async () => {
+  const base = {
+    config: { villageAiUrl: 'https://village-ai.example', ragTimeoutMs: 1000 },
+    decision: {
+      classification: 'faq',
+      customer: { name: '홍길동' },
+      latest_customer_message_cluster: '위치가 어디인가요?'
+    },
+    job: { preview_text: '홍길동 위치가 어디인가요? 오후 2:30' },
+    replyText: '빌리지는 서울 마포구 동교로 23길 32, 2층입니다.'
+  };
+  const supported = await evaluateAutoReplyRagSupport({
+    ...base,
+    askImpl: async (payload) => ({
+      text: `근거 있음: ${payload.question.slice(0, 20)}`,
+      confidence: 'high',
+      knowledgeSource: 'retrieved',
+      ownerReview: false,
+      usedSources: [{ id: 'source-1' }],
+      logId: 'rag-1'
+    })
+  });
+  const weak = await evaluateAutoReplyRagSupport({
+    ...base,
+    askImpl: async () => ({ text: '일반 답변', confidence: 'high', knowledgeSource: 'general', ownerReview: false })
+  });
+
+  assert.equal(supported.allowed, true);
+  assert.equal(supported.reason, 'rag_high_confidence_retrieved');
+  assert.equal(supported.logId, 'rag-1');
+  assert.equal(weak.allowed, false);
+  assert.equal(weak.reason, 'rag_not_strong_enough_for_auto_send');
+});
+
+test('evaluateAutoReplyRagSupport allows owner-confirmed current policy auto-send without RAG', async () => {
+  let called = false;
+  const supported = await evaluateAutoReplyRagSupport({
+    config: { villageAiUrl: 'https://village-ai.example', ragTimeoutMs: 1000 },
+    decision: {
+      classification: 'faq',
+      customer: { name: '최재형' },
+      latest_customer_message_cluster: '학생 할인은 몇 프로예요?'
+    },
+    replyText: '학생 할인은 30%입니다.',
+    askImpl: async () => {
+      called = true;
+      return {
+        text: '학생 할인은 과거에 30%로 안내했습니다.',
+        confidence: 'high',
+        knowledgeSource: 'retrieved',
+        ownerReview: false
+      };
+    }
+  });
+
+  assert.equal(supported.allowed, true);
+  assert.equal(supported.reason, 'current_confirmed_policy_match');
+  assert.equal(called, false);
+  assert.deepEqual(supported.currentPolicy.topics, ['student_discount_rate']);
+});
+
+test('evaluateAutoReplyRagSupport blocks current policy mismatch and uses RAG for unconfirmed policy FAQ', async () => {
+  const mismatch = await evaluateAutoReplyRagSupport({
+    config: { villageAiUrl: 'https://village-ai.example', ragTimeoutMs: 1000 },
+    decision: {
+      classification: 'faq',
+      customer: { name: '최재형' },
+      latest_customer_message_cluster: '학생 할인은 몇 프로예요?'
+    },
+    replyText: '학생 할인은 40%입니다.',
+    askImpl: async () => {
+      throw new Error('RAG should not be called for current-policy mismatch');
+    }
+  });
+  let called = false;
+  const unknown = await evaluateAutoReplyRagSupport({
+    config: { villageAiUrl: 'https://village-ai.example', ragTimeoutMs: 1000 },
+    decision: {
+      classification: 'faq',
+      customer: { name: '홍길동' },
+      latest_customer_message_cluster: '보증금 있나요?'
+    },
+    replyText: '보증금 안내드리겠습니다.',
+    askImpl: async () => {
+      called = true;
+      return {
+        text: '보증금 정책 근거 있음',
+        confidence: 'high',
+        knowledgeSource: 'retrieved',
+        ownerReview: false,
+        logId: 'rag-deposit'
+      };
+    }
+  });
+
+  assert.equal(mismatch.allowed, false);
+  assert.equal(mismatch.reason, 'current_policy_mismatch_requires_review');
+  assert.equal(unknown.allowed, true);
+  assert.equal(unknown.reason, 'rag_high_confidence_retrieved');
+  assert.equal(unknown.logId, 'rag-deposit');
+  assert.equal(called, true);
+});
+
 test('isAutoSendEligibleLiveJob allows unread same-day rows and blocks dated/backfill rows from auto-send', () => {
+  const now = new Date('2026-06-02T06:50:00.000Z'); // 2026-06-02 15:50 KST
   assert.deepEqual(isAutoSendEligibleLiveJob({
     preview_text: '중요 홍길동 네 감사합니다 오후 3:45',
     events: [{ reason: 'top_row_changed' }]
-  }), {
+  }, { now }), {
     eligible: true,
     reason: 'top_row_live_time_format'
   });
-  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'mutation' }] }).eligible, false);
-  assert.equal(isAutoSendEligibleLiveJob({ payload: { previewText: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'top_row_changed' }] } }).eligible, true);
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    preview_text: '중요 홍길동 네 감사합니다 오후 3:45',
+    events: [{ reason: 'top_row_changed' }]
+  }, { now: new Date('2026-06-02T08:00:00.000Z') }), {
+    eligible: false,
+    reason: 'top_row_time_outside_live_window'
+  });
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'mutation' }] }, { now }).eligible, false);
+  assert.equal(isAutoSendEligibleLiveJob({ payload: { previewText: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'top_row_changed' }] } }, { now }).eligible, true);
   assert.deepEqual(isAutoSendEligibleLiveJob({
     preview_text: '중요 홍길동 3 네 감사합니다 오후 3:45',
     unread_count: 3,
     events: [{ reason: 'top_rows_backstop' }]
-  }), {
+  }, { now }), {
     eligible: true,
     reason: 'top_row_unread'
   });
@@ -1997,18 +2969,33 @@ test('isAutoSendEligibleLiveJob allows unread same-day rows and blocks dated/bac
     preview_text: '중요 홍길동 네 감사합니다 오후 3:45',
     unread_count: null,
     events: [{ reason: 'top_rows_backstop', unreadCount: 3 }]
-  }), {
+  }, { now }), {
     eligible: true,
     reason: 'top_row_unread'
+  });
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    preview_text: '중요 홍길동 3 네 감사합니다 6월 2일',
+    unread_count: 3,
+    events: [{ reason: 'top_rows_backstop' }]
+  }, { now }), {
+    eligible: true,
+    reason: 'top_row_unread'
+  });
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    preview_text: '중요 홍길동 안녕하세요. 영업시간이 어떻게 되나요? 6월 2일',
+    events: [{ reason: 'top_row_changed' }]
+  }, { now }), {
+    eligible: true,
+    reason: 'top_row_current_date_label'
   });
   assert.equal(isAutoSendEligibleLiveJob({
     preview_text: '중요 홍길동 3 네 감사합니다 5월 26일',
     unread_count: 3,
     events: [{ reason: 'top_rows_backstop' }]
-  }).eligible, false);
-  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'top_rows_backstop' }] }).eligible, false);
-  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 한시우/60x 파손 video 5월 25일', events: [{ reason: 'top_row_changed' }] }).eligible, false);
-  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 배성문 1월 15일 건은 4만원입니다. 오후 3:45', events: [{ reason: 'top_row_changed' }] }).eligible, false);
+  }, { now }).eligible, false);
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 홍길동 네 감사합니다 오후 3:45', events: [{ reason: 'top_rows_backstop' }] }, { now }).eligible, false);
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 한시우/60x 파손 video 5월 25일', events: [{ reason: 'top_row_changed' }] }, { now }).eligible, false);
+  assert.equal(isAutoSendEligibleLiveJob({ preview_text: '중요 배성문 1월 15일 건은 4만원입니다. 오후 3:45', events: [{ reason: 'top_row_changed' }] }, { now }).eligible, false);
 });
 
 test('auto reply dedupe key uses customer message and outgoing text', () => {
@@ -2027,6 +3014,28 @@ test('auto reply dedupe key uses customer message and outgoing text', () => {
   assert.match(key, /최재형/);
   assert.match(key, /빌리지 위치가 어떻게 되나요/);
   assert.match(key, /동교로 23길 32/);
+});
+
+test('auto reply dedupe key prefers stable room key over inconsistent customer label', () => {
+  const first = buildAutoReplyDedupeKey({
+    job: { roomKey: 'preview:cd489b98fab6669f', preview_text: '김예지2 감사합니다 오후 11:11' },
+    decision: {
+      customer: { name: '김예지2' },
+      visible_messages_used: [{ sender: '김예지', message: '감사합니다! podong@dodam.media 으로 세금계산서 발행해주시면 입금진행하겠습니다' }],
+      reply_decision: { text: '요청하신 통장 사본과 사업자등록증 전달드립니다.' }
+    }
+  });
+  const second = buildAutoReplyDedupeKey({
+    job: { room_key: 'preview:cd489b98fab6669f', preview_text: '김예지2 감사합니다 오후 11:11' },
+    decision: {
+      customer: { name: '김예지' },
+      visible_messages_used: [{ sender: '김예지', message: '감사합니다! podong@dodam.media 으로 세금계산서 발행해주시면 입금진행하겠습니다' }],
+      reply_decision: { text: '요청하신 통장 사본과 사업자등록증 전달드립니다.' }
+    }
+  });
+
+  assert.equal(first, second);
+  assert.match(first, /^preview:cd489b98fab6669f\|/);
 });
 
 test('hasRecentSentAutoReply blocks duplicate sent replies only inside window', () => {
@@ -2141,6 +3150,45 @@ test('sendKakaoMessageViaDevtools refuses sent=true without a conversation targe
     sent: false,
     reason: 'conversation_target_missing'
   });
+});
+
+test('sendKakaoMessageViaDevtools attaches local files through Chrome DevTools after text send', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kakao-attach-'));
+  const bankbookPath = path.join(dir, 'bankbook.jpeg');
+  const businessPath = path.join(dir, 'business.jpeg');
+  fs.writeFileSync(bankbookPath, 'bankbook');
+  fs.writeFileSync(businessPath, 'business');
+  const cdpCalls = [];
+  const evalExpressions = [];
+
+  const result = await sendKakaoMessageViaDevtools('요청하신 통장 사본과 사업자등록증 전달드립니다.', {
+    conversation_target: {
+      id: 'chat',
+      title: '최재형 - 빌리지 - 카카오비즈니스 파트너센터',
+      webSocketDebuggerUrl: 'ws://example.test/devtools/page/chat'
+    }
+  }, {
+    attachmentPaths: [bankbookPath, businessPath],
+    evaluateImpl: async (_target, expression) => {
+      evalExpressions.push(expression);
+      if (expression.includes('kakaoSendMessage')) {
+        return { sent: true, reason: 'sent_via_devtools_verified', window_title: '최재형' };
+      }
+      return { sendClicked: true, selectedFileCount: 2, window_title: '최재형' };
+    },
+    cdpCallImpl: async (_target, method, params) => {
+      cdpCalls.push({ method, params });
+      if (method === 'DOM.getDocument') return { root: { nodeId: 1 } };
+      if (method === 'DOM.querySelector') return { nodeId: 42 };
+      if (method === 'DOM.setFileInputFiles') return {};
+      return {};
+    }
+  });
+
+  assert.equal(result.sent, true);
+  assert.equal(result.attachments.attached, true);
+  assert.deepEqual(cdpCalls.find((call) => call.method === 'DOM.setFileInputFiles').params.files, [bankbookPath, businessPath]);
+  assert.equal(evalExpressions.some((expression) => expression.includes('kakaoSendPendingAttachments')), true);
 });
 
 test('sendKakaoMessageViaChrome reactivates target window and retries disabled send button', async () => {

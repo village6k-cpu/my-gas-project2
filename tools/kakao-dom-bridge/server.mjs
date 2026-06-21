@@ -5,6 +5,25 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
 
+function loadSelectedEnvFile(filePath, keys = []) {
+  const allowed = new Set(keys);
+  if (!filePath || !fs.existsSync(filePath)) return;
+  const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const match = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match || !allowed.has(match[1]) || process.env[match[1]]) continue;
+    let value = match[2].trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    process.env[match[1]] = value;
+  }
+}
+
+loadSelectedEnvFile(path.resolve(process.env.HOME || '', '.hermes/.env'), ['SLACK_BOT_TOKEN']);
+
 const CONFIG = {
   port: Number(process.env.PORT || 8787),
   debounceMs: Number(process.env.DEBOUNCE_MS || 90_000),
@@ -33,6 +52,8 @@ const CONFIG = {
   supabaseRecoveryMaxAttempts: Number(process.env.SUPABASE_RECOVERY_MAX_ATTEMPTS || 2),
   slackActionPollEnabled: process.env.SLACK_ACTION_POLL_ENABLED !== 'false',
   slackActionPollIntervalMs: Number(process.env.SLACK_ACTION_POLL_INTERVAL_MS || 10_000),
+  slackBotToken: process.env.SLACK_BOT_TOKEN || '',
+  manualSendDedupeWindowMs: Number(process.env.MANUAL_SEND_DEDUPE_WINDOW_MS || 10 * 60_000),
   kakaoDevtoolsUrl: (process.env.KAKAO_DEVTOOLS_URL || process.env.KAKAO_CDP_HTTP_URL || process.env.KAKAO_CDP_URL || '').replace(/\/+$/, ''),
   kakaoRemoteDebuggingPort: process.env.KAKAO_REMOTE_DEBUGGING_PORT || process.env.VILLAGE_KAKAO_REMOTE_DEBUGGING_PORT || '9223',
   kakaoTabCleanupEnabled: process.env.KAKAO_TAB_CLEANUP_ENABLED !== 'false',
@@ -60,6 +81,7 @@ const state = {
   tabCleanupRunning: false,
   lastTabCleanup: null,
   rooms: new Map(),
+  activeWorkerJobIds: new Set(),
   seenGroupingTexts: new Set(),
   lastContentScriptStartedAtMs: 0
 };
@@ -109,12 +131,24 @@ async function readJsonBody(req) {
   return JSON.parse(body);
 }
 
+function inferKakaoUnreadCountFromPreview(text = '') {
+  const preview = String(text || '').replace(/\s+/g, ' ').trim();
+  const match = /^중요\s+(.{1,90}?)\s+([1-9]\d?)\s+(\S.*)$/.exec(preview);
+  if (!match) return null;
+  const count = Number(match[2]);
+  if (!Number.isFinite(count) || count <= 0 || count > 20) return null;
+  const next = match[3] || '';
+  if (/^(월|일|시|분|초|원|개|건|구|세트|set\b)/i.test(next)) return null;
+  return count;
+}
+
 function normalizeEvent(raw) {
   const source = String(raw.source || 'kakao_channel_manager_dom');
   const roomKey = String(raw.roomKey || raw.room_key || raw.roomHint || raw.previewText || 'unknown-room');
   const previewText = String(raw.previewText || raw.preview_text || '').slice(0, 500);
   const detectedAt = String(raw.detectedAt || raw.detected_at || nowIso());
   const eventHash = String(raw.eventHash || raw.event_hash || sha256(JSON.stringify({ source, roomKey, previewText, detectedAt })));
+  const unreadCount = raw.unreadCount ?? raw.unread_count ?? inferKakaoUnreadCountFromPreview(previewText);
 
   return {
     source,
@@ -127,7 +161,7 @@ function normalizeEvent(raw) {
     roomKey,
     eventHash,
     previewText,
-    unreadCount: raw.unreadCount ?? raw.unread_count ?? null,
+    unreadCount,
     pageVisibility: raw.pageVisibility || raw.page_visibility || null,
     raw
   };
@@ -190,6 +224,8 @@ function isStaffOrOutboundPreview(text) {
   const preview = cleanPreviewText(text);
   if (!preview) return true;
   return /(빌리지님|김준영님|최재형님|운영자|상담원|매니저)님?이?\s*보냄|보낸 메시지 가이드/.test(preview)
+    || /요청하신\s*(?:통장\s*사본|계좌\s*사본).*사업자\s*등록증.*(?:전달|보내)드립니다/.test(preview)
+    || /요청하신.*사업자\s*등록증.*(?:통장\s*사본|계좌\s*사본).*(?:전달|보내)드립니다/.test(preview)
     || /^저장하기(?:\s|$)/.test(preview)
     || /알림톡\/친구톡 메시지는 관리자센터에서 확인할 수 없습니다/.test(preview);
 }
@@ -337,7 +373,8 @@ function daysSinceDatedPreview(text, now = new Date()) {
 
 function hasUnreadCount(event = {}) {
   if (event.raw?.unreadSignal === true || event.unreadSignal === true) return true;
-  const count = Number(event.unreadCount ?? event.unread_count ?? event.raw?.unreadCount ?? event.raw?.unread_count ?? 0);
+  const inferred = inferKakaoUnreadCountFromPreview(event.previewText || event.raw?.previewText || '');
+  const count = Number(event.unreadCount ?? event.unread_count ?? event.raw?.unreadCount ?? event.raw?.unread_count ?? inferred ?? 0);
   if (!Number.isFinite(count) || count <= 0) return false;
   if (event.reason === 'top_rows_backstop' || event.reason === 'top_row_changed') return true;
   const preview = String(event.previewText || '');
@@ -380,8 +417,9 @@ function isLiveTopRowPreview(text, now = new Date()) {
 function shouldQueueTopRowEvent(event) {
   if (isActionChromePreview(event.previewText)) return false;
   if (hasUnreadCount(event)) return !hasDatedPreview(event.previewText) || isRecentDatedPreview(event.previewText);
-  return (event.reason === 'top_row_changed' || event.reason === 'top_rows_backstop')
-    && (isLiveTopRowPreview(event.previewText) || isRecentReadCatchupPreview(event.previewText));
+  if (event.reason === 'top_rows_backstop') return false;
+  return event.reason === 'top_row_changed'
+    && isLiveTopRowPreview(event.previewText);
 }
 
 function hasLivePreviewTime(text) {
@@ -539,16 +577,28 @@ function shouldRunDuplicateJob(existing = {}) {
   const status = String(existing?.status || '');
   if (!status) return true;
   if (status === 'processing_by_ai_worker') return isDuplicateProcessingStale(existing);
-  if (['ready_for_ai_worker', 'ai_worker_error', 'ai_decision_ready_no_sheet_write', 'pending_ai_review'].includes(status)) {
-    return true;
+
+  // Do not re-enqueue the same unread/backstop job on every DOM scan while the
+  // durable recovery sweeper is responsible for ready/error rows. The previous
+  // behaviour requeued duplicate ready_for_ai_worker rows indefinitely, which
+  // kept the in-memory worker queue full and delayed real auto-replies.
+  if (['ready_for_ai_worker', 'pending_ai_review'].includes(status)) {
+    return rowAgeMs(existing, ['updated_at', 'created_at']) > Math.max(CONFIG.workerTimeoutMs * 2, 10 * 60_000);
   }
+  if (status === 'ai_worker_error') {
+    if (recoveryAttemptCount(existing) >= CONFIG.supabaseRecoveryMaxAttempts) return false;
+    return rowAgeMs(existing) >= CONFIG.supabaseRecoveryErrorRetryMs;
+  }
+  if (status === 'ai_decision_ready_no_sheet_write') return false;
   return false;
 }
 
 function duplicateSkipReason(existing = {}) {
-  return existing?.status === 'processing_by_ai_worker'
-    ? 'duplicate_supabase_job_in_progress'
-    : 'duplicate_supabase_job_already_handled';
+  const status = String(existing?.status || '');
+  if (status === 'processing_by_ai_worker') return 'duplicate_supabase_job_in_progress';
+  if (['ready_for_ai_worker', 'pending_ai_review'].includes(status)) return 'duplicate_supabase_job_waiting_for_recovery_sweeper';
+  if (status === 'ai_worker_error') return 'duplicate_supabase_job_error_retry_cooldown';
+  return 'duplicate_supabase_job_already_handled';
 }
 
 function parseWorkerStdoutJson(workerResult = {}) {
@@ -822,9 +872,73 @@ function runWorker(job) {
 }
 
 let workerChain = Promise.resolve();
+const manualSendInFlight = new Map();
+const manualSendRecent = new Map();
+
+function normalizeManualSendDedupeText(value = '') {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function manualSendDedupeKey(payload = {}) {
+  if (payload.allowDuplicate === true || payload.allow_duplicate === true) return '';
+  const explicit = normalizeManualSendDedupeText(payload.idempotencyKey || payload.idempotency_key || '');
+  if (explicit) return `explicit:${sha256(explicit)}`;
+  const keyPayload = {
+    customerName: normalizeManualSendDedupeText(payload.customerName || payload.customer_name || ''),
+    roomTitle: normalizeManualSendDedupeText(payload.roomTitle || payload.room_title || ''),
+    text: normalizeManualSendDedupeText(payload.text || ''),
+    customerDocumentAssets: Boolean(payload.customerDocumentAssets || payload.customer_document_assets),
+    attachmentPaths: Array.isArray(payload.attachmentPaths || payload.attachment_paths)
+      ? (payload.attachmentPaths || payload.attachment_paths).map(normalizeManualSendDedupeText).sort()
+      : []
+  };
+  if (!keyPayload.text || (!keyPayload.customerName && !keyPayload.roomTitle)) return '';
+  return `auto:${sha256(JSON.stringify(keyPayload))}`;
+}
+
+function pruneManualSendRecent(nowMs = Date.now()) {
+  const ttl = Math.max(0, Number(CONFIG.manualSendDedupeWindowMs || 0));
+  for (const [key, entry] of manualSendRecent.entries()) {
+    if (!entry || nowMs - Number(entry.atMs || 0) > ttl) manualSendRecent.delete(key);
+  }
+}
+
+function recentManualSendResult(dedupeKey) {
+  if (!dedupeKey || CONFIG.manualSendDedupeWindowMs <= 0) return null;
+  const nowMs = Date.now();
+  pruneManualSendRecent(nowMs);
+  const entry = manualSendRecent.get(dedupeKey);
+  if (!entry || nowMs - Number(entry.atMs || 0) > CONFIG.manualSendDedupeWindowMs) return null;
+  return entry.result || null;
+}
+
+function rememberManualSendResult(dedupeKey, result) {
+  if (!dedupeKey || CONFIG.manualSendDedupeWindowMs <= 0 || !result?.sent) return;
+  manualSendRecent.set(dedupeKey, { atMs: Date.now(), result });
+  pruneManualSendRecent();
+}
+
+function duplicateManualSendResult(result, reason) {
+  return {
+    ...(result || {}),
+    attempted: true,
+    sent: Boolean(result?.sent),
+    reason: result?.sent ? reason : (result?.reason || reason),
+    deduped: true,
+    dedupeReason: reason
+  };
+}
 
 function enqueueWorker(job) {
   if (!CONFIG.workerCommand) return Promise.resolve({ skipped: true });
+  const jobId = String(job?.jobId || '');
+  if (jobId && state.activeWorkerJobIds.has(jobId)) {
+    const result = { skipped: true, reason: 'local_duplicate_job_active', jobId };
+    appendNdjson('worker-skipped.ndjson', { at: nowIso(), jobId, reason: result.reason, roomKey: job.roomKey || '' });
+    console.info('[dom-bridge] worker skipped local duplicate job', jobId, job.roomKey || '');
+    return Promise.resolve(result);
+  }
+  if (jobId) state.activeWorkerJobIds.add(jobId);
   state.workerQueueLength += 1;
   const run = async () => {
     state.workerQueueLength = Math.max(0, state.workerQueueLength - 1);
@@ -840,6 +954,7 @@ function enqueueWorker(job) {
       state.lastWorkerError = { at: nowIso(), jobId: job.jobId, message: error.message.slice(0, 1000) };
       throw error;
     } finally {
+      if (jobId) state.activeWorkerJobIds.delete(jobId);
       state.workerRunning = false;
       state.currentJobId = null;
       state.workerStartedAt = null;
@@ -853,6 +968,35 @@ function enqueueWorker(job) {
 
 function enqueueManualSend(payload) {
   const jobId = `manual-send-${Date.now()}`;
+  const dedupeKey = manualSendDedupeKey(payload);
+  const recentResult = recentManualSendResult(dedupeKey);
+  if (recentResult) {
+    const result = duplicateManualSendResult(recentResult, 'duplicate_manual_send_suppressed_recent_success');
+    appendNdjson('manual-send-dedupe.ndjson', {
+      at: nowIso(),
+      jobId,
+      dedupeKey,
+      action: result.dedupeReason,
+      payload: { ...payload, text: '[redacted]' },
+      sent: result.sent
+    });
+    console.info('[dom-bridge] manual send duplicate suppressed recent', jobId, payload.customerName || payload.roomTitle || '');
+    return Promise.resolve(result);
+  }
+
+  const inFlight = dedupeKey ? manualSendInFlight.get(dedupeKey) : null;
+  if (inFlight) {
+    appendNdjson('manual-send-dedupe.ndjson', {
+      at: nowIso(),
+      jobId,
+      dedupeKey,
+      action: 'duplicate_manual_send_joined_inflight',
+      payload: { ...payload, text: '[redacted]' }
+    });
+    console.info('[dom-bridge] manual send duplicate joined in-flight', jobId, payload.customerName || payload.roomTitle || '');
+    return inFlight.then((result) => duplicateManualSendResult(result, 'duplicate_manual_send_suppressed_inflight'));
+  }
+
   const run = async () => {
     state.workerRunning = true;
     state.currentJobId = jobId;
@@ -861,11 +1005,12 @@ function enqueueManualSend(payload) {
     try {
       const result = await processManualSend(payload);
       state.lastWorkerError = null;
-      appendNdjson('manual-sends.ndjson', { at: nowIso(), jobId, payload: { ...payload, text: '[redacted]' }, result });
+      rememberManualSendResult(dedupeKey, result);
+      appendNdjson('manual-sends.ndjson', { at: nowIso(), jobId, dedupeKey, payload: { ...payload, text: '[redacted]' }, result });
       return result;
     } catch (error) {
       state.lastWorkerError = { at: nowIso(), jobId, message: error.message.slice(0, 1000) };
-      appendNdjson('errors.ndjson', { at: nowIso(), type: 'manual_send', message: error.message, payload: { ...payload, text: '[redacted]' } });
+      appendNdjson('errors.ndjson', { at: nowIso(), type: 'manual_send', message: error.message, dedupeKey, payload: { ...payload, text: '[redacted]' } });
       throw error;
     } finally {
       state.workerRunning = false;
@@ -875,6 +1020,12 @@ function enqueueManualSend(payload) {
     }
   };
   const queued = workerChain.then(run, run);
+  if (dedupeKey) {
+    manualSendInFlight.set(dedupeKey, queued);
+    queued.finally(() => {
+      if (manualSendInFlight.get(dedupeKey) === queued) manualSendInFlight.delete(dedupeKey);
+    }).catch(() => {});
+  }
   workerChain = queued.catch(() => {});
   return queued;
 }
@@ -943,6 +1094,124 @@ function slackStatusFromActionId(actionId = '') {
     : '';
 }
 
+function slackEscape(value = '') {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function truncateSlack(value = '', max = 240) {
+  const clean = slackEscape(value).trim();
+  return clean.length > max ? `${clean.slice(0, Math.max(0, max - 1))}…` : clean;
+}
+
+function slackStatusLabel(status = '') {
+  const labels = {
+    open: '열림',
+    in_progress: '진행중',
+    waiting_customer: '고객 대기',
+    waiting_internal: '내부 확인 대기',
+    done: '완료',
+    dismissed: '무시'
+  };
+  return labels[status] || status || '처리됨';
+}
+
+function slackResolutionLabel(resolution = {}) {
+  if (resolution.kind === 'send_pending') return { icon: '📨', label: '카카오 전송 요청 접수', detail: '로컬 브릿지가 전송을 처리하는 중입니다.' };
+  if (resolution.kind === 'send_done') return { icon: '✅', label: '카카오 전송 완료', detail: '카카오 발송 확인까지 완료했습니다.' };
+  if (resolution.kind === 'send_error') return { icon: '⚠️', label: '카카오 전송 실패', detail: resolution.error || '전송 처리 중 오류가 발생했습니다.' };
+  if (resolution.kind === 'status') {
+    if (resolution.status === 'done') return { icon: '✅', label: '완료 처리됨', detail: '이 후속처리는 완료로 표시됐습니다.' };
+    if (resolution.status === 'dismissed') return { icon: '🚫', label: '무시 처리됨', detail: '이 후속처리는 무시로 표시됐습니다.' };
+    if (resolution.status === 'in_progress') return { icon: '🟡', label: '진행중으로 잡힘', detail: '누군가 이 건을 처리 중입니다.' };
+    return { icon: '☑️', label: `${slackStatusLabel(resolution.status)} 상태로 변경됨`, detail: '버튼 입력이 반영됐습니다.' };
+  }
+  return { icon: '☑️', label: '버튼 입력 반영됨', detail: '이 카드의 버튼은 비활성화됐습니다.' };
+}
+
+function slackMessageRefForAction(row = {}, resolution = {}) {
+  const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+  const delivery = payload.slack_delivery && typeof payload.slack_delivery === 'object' ? payload.slack_delivery : {};
+  const action = payload.slack_action && typeof payload.slack_action === 'object' ? payload.slack_action : {};
+  return {
+    channel: resolution.channelId || action.channel_id || delivery.channel_id || row.slack_channel_id || '',
+    ts: resolution.messageTs || action.message_ts || delivery.message_ts || row.slack_message_ts || ''
+  };
+}
+
+function buildResolvedSlackFollowUpMessage(row = {}, resolution = {}) {
+  const { icon, label, detail } = slackResolutionLabel(resolution);
+  const customer = truncateSlack(row.customer_name || '고객명 미확인', 80);
+  const title = truncateSlack(row.title || row.summary || '후속처리', 260);
+  const requestedBy = resolution.requestedBy ? `<@${slackEscape(resolution.requestedBy)}>` : 'Slack 버튼';
+  const requestedAt = resolution.requestedAt || nowIso();
+  const lines = [
+    `*상태*\n${icon} ${slackEscape(label)}`,
+    detail ? `*메모*\n${truncateSlack(detail, 500)}` : '',
+    `*작업*\n${title}`,
+    `*처리*\n${requestedBy} · ${slackEscape(requestedAt)}`
+  ].filter(Boolean);
+  return {
+    text: `${icon} ${row.customer_name || '후속처리'} ${label}`,
+    blocks: [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: `${icon} ${customer}`.slice(0, 150), emoji: true }
+      },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: lines.join('\n\n') }
+      }
+    ]
+  };
+}
+
+async function slackApi(method, payload = {}) {
+  if (!CONFIG.slackBotToken) throw new Error('Missing SLACK_BOT_TOKEN');
+  const response = await fetch(`https://slack.com/api/${method}`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${CONFIG.slackBotToken}`,
+      'content-type': 'application/json; charset=utf-8'
+    },
+    body: JSON.stringify(payload)
+  });
+  const body = await response.text();
+  let data = null;
+  try { data = body ? JSON.parse(body) : {}; } catch { data = { raw: body }; }
+  if (!response.ok || data?.ok === false) throw new Error(`Slack ${method} failed: ${data?.error || body}`);
+  return data;
+}
+
+async function replaceSlackFollowUpCard(row = {}, resolution = {}) {
+  const ref = slackMessageRefForAction(row, resolution);
+  if (!ref.channel || !ref.ts) return { skipped: true, reason: 'missing_slack_message_ref' };
+  const message = buildResolvedSlackFollowUpMessage(row, resolution);
+  const result = await slackApi('chat.update', {
+    channel: ref.channel,
+    ts: ref.ts,
+    text: message.text,
+    blocks: message.blocks
+  });
+  return { ok: true, channel: ref.channel, ts: ref.ts, result };
+}
+
+async function tryReplaceSlackFollowUpCard(row = {}, resolution = {}) {
+  try {
+    return await replaceSlackFollowUpCard(row, resolution);
+  } catch (error) {
+    appendNdjson('errors.ndjson', {
+      at: nowIso(),
+      type: 'slack_card_update',
+      followUpId: row?.id || null,
+      message: error.message
+    });
+    return { ok: false, error: error.message };
+  }
+}
+
 async function applySlackFollowUpActionRequest(body = {}) {
   const actionId = String(body.action_id || body.actionId || body.action || '').trim();
   const followUpId = String(body.followUpId || body.follow_up_id || body.value || body.id || '').trim();
@@ -974,8 +1243,16 @@ async function applySlackFollowUpActionRequest(body = {}) {
         handled_at: requestedAt
       }
     }, { status: targetStatus });
+    const slackMessageUpdate = await tryReplaceSlackFollowUpCard(updated || row, {
+      kind: 'status',
+      status: targetStatus,
+      requestedBy,
+      requestedAt,
+      channelId: baseSlackAction.channel_id,
+      messageTs: baseSlackAction.message_ts
+    });
     appendNdjson('slack-actions.ndjson', { at: requestedAt, action: actionId, followUpId, targetStatus, requestedBy });
-    return { ok: true, kind: 'status', followUpId, status: targetStatus, updated };
+    return { ok: true, kind: 'status', followUpId, status: targetStatus, updated, slackMessageUpdate };
   }
 
   if (['village_followup_send', 'village_followup_edit_send_submit'].includes(actionId)) {
@@ -990,8 +1267,15 @@ async function applySlackFollowUpActionRequest(body = {}) {
     };
     if (draftOverride) payloadPatch.slack_draft_override = draftOverride;
     const updated = await mergeFollowUpPayloadById(row, payloadPatch, { status: 'in_progress' });
+    const slackMessageUpdate = await tryReplaceSlackFollowUpCard(updated || row, {
+      kind: 'send_pending',
+      requestedBy,
+      requestedAt,
+      channelId: baseSlackAction.channel_id,
+      messageTs: baseSlackAction.message_ts
+    });
     appendNdjson('slack-actions.ndjson', { at: requestedAt, action: actionId, followUpId, requestedBy, hasDraftOverride: Boolean(draftOverride) });
-    return { ok: true, kind: 'send', followUpId, updated };
+    return { ok: true, kind: 'send', followUpId, updated, slackMessageUpdate };
   }
 
   throw new Error(`unsupported Slack follow-up action: ${actionId}`);
@@ -1052,17 +1336,25 @@ async function handlePendingSlackActionRow(row) {
     };
     const patch = {};
     if (sendResult.sent) patch.status = 'done';
-    await mergeFollowUpPayloadById(claimed, payloadPatch, patch);
+    const updated = await mergeFollowUpPayloadById(claimed, payloadPatch, patch);
+    await tryReplaceSlackFollowUpCard(updated || claimed, {
+      kind: sendResult.sent ? 'send_done' : 'send_error',
+      error: sendResult.sent ? null : String(sendResult.reason || 'manual send failed').slice(0, 1000)
+    });
     state.slackActionsHandled += sendResult.sent ? 1 : 0;
     return { ok: Boolean(sendResult.sent), id: row.id, result: sendResult };
   } catch (error) {
-    await mergeFollowUpPayloadById(claimed, {
+    const updated = await mergeFollowUpPayloadById(claimed, {
       slack_action: {
         ...(claimed.payload?.slack_action || {}),
         status: 'error',
         error: error.message.slice(0, 1000),
         handled_at: nowIso()
       }
+    });
+    await tryReplaceSlackFollowUpCard(updated || claimed, {
+      kind: 'send_error',
+      error: error.message.slice(0, 1000)
     });
     return { ok: false, id: row.id, error: error.message };
   }
@@ -1096,6 +1388,9 @@ async function runSlackActionPoll(reason = 'interval') {
 async function runWorkerAndRecord(job, context = {}) {
   try {
     const workerResult = await enqueueWorker(job);
+    if (workerResult?.skipped && workerResult?.reason === 'local_duplicate_job_active') {
+      return { ok: true, skipped: true, workerResult };
+    }
     try {
       await updateSupabaseEventByHash(job.jobId, buildWorkerResultPatch(job, workerResult));
     } catch (error) {
@@ -1421,13 +1716,20 @@ function scheduleDebouncedJob(event) {
   roomState.lastAt = nowIso();
   const eventIdentity = groupedEvent.eventHash || sha256(JSON.stringify(groupedEvent));
 
-  if (!roomState.hashes.has(eventIdentity)) {
+  const isNewEvent = !roomState.hashes.has(eventIdentity);
+  if (isNewEvent) {
     roomState.events.push(groupedEvent);
     roomState.hashes.add(eventIdentity);
   }
 
-  if (roomState.timer) clearTimeout(roomState.timer);
-  roomState.timer = setTimeout(() => flushRoom(roomKey), CONFIG.debounceMs);
+  // Repeated backstop scans can post the same unread row every few seconds.
+  // If every duplicate resets debounce, the room never flushes and the AI worker
+  // never runs even though detection is alive. Only a genuinely new event should
+  // extend the debounce window; duplicates keep the original timer.
+  if (isNewEvent || !roomState.timer) {
+    if (roomState.timer) clearTimeout(roomState.timer);
+    roomState.timer = setTimeout(() => flushRoom(roomKey), CONFIG.debounceMs);
+  }
 }
 
 function kakaoDevtoolsBaseUrl() {

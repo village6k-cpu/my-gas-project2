@@ -364,7 +364,11 @@ export default async function handler(req, res) {
         `limit=${limit}`,
         'order=created_at.desc'
       ];
-      if (status === 'active') filters.push('status=not.in.(done,dismissed)');
+      if (status === 'active') {
+        filters.push('status=not.in.(done,dismissed)');
+        // The follow-up board is now a Slack-derived safety net, not a second Kakao/DOM inbox.
+        filters.push('source=eq.slack_backstop');
+      }
       else if (status && status !== 'all') filters.push(`status=eq.${encodeURIComponent(status)}`);
       const rawItems = await supabaseFetch(`${table}?${filters.join('&')}`);
       const items = dedupeFollowUpItems(rawItems)

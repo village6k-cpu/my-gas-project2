@@ -24,8 +24,8 @@ assert.doesNotMatch(
 
 assert.match(
   content,
-  /unreadSignal/,
-  'Kakao watcher must send an explicit unread signal instead of relying on arbitrary numeric text'
+  /topRowBadge = \/\^중요\\s\+/,
+  'Kakao watcher must infer unread badges only from the Kakao top-row badge shape'
 );
 
 assert.match(
@@ -114,6 +114,18 @@ assert.match(
 
 assert.match(
   bridge,
+  /function inferKakaoUnreadCountFromPreview\(text = ''\)/,
+  'Bridge must recover missing Kakao unread counts from the conservative top-row badge shape'
+);
+
+assert.match(
+  bridge,
+  /count > 20/,
+  'Bridge must not treat arbitrary large numbers in previews as unread badges'
+);
+
+assert.match(
+  bridge,
   /event\.reason === 'top_rows_backstop' \|\| event\.reason === 'top_row_changed'\) return true;/,
   'Bridge must queue unread top-row/backstop events even when unreadSignal is absent'
 );
@@ -156,8 +168,20 @@ assert.match(
 
 assert.match(
   bridge,
-  /\['ready_for_ai_worker', 'ai_worker_error', 'ai_decision_ready_no_sheet_write', 'pending_ai_review'\]\.includes\(status\)/,
-  'Bridge must replay duplicate jobs that are still unprocessed or previously failed'
+  /duplicate_supabase_job_waiting_for_recovery_sweeper/,
+  'Bridge must not requeue fresh duplicate ready jobs on every DOM scan; recovery sweeper owns them'
+);
+
+assert.match(
+  bridge,
+  /rowAgeMs\(existing, \['updated_at', 'created_at'\]\) > Math\.max\(CONFIG\.workerTimeoutMs \* 2, 10 \* 60_000\)/,
+  'Bridge must only replay duplicate ready/pending jobs after a stale-age threshold'
+);
+
+assert.match(
+  bridge,
+  /status === 'ai_worker_error'/,
+  'Bridge must still retry duplicate worker errors through bounded retry logic'
 );
 
 assert.match(
@@ -176,6 +200,18 @@ assert.match(
   bridge,
   /function updateSupabaseEventByHash\(eventHash, patch\)/,
   'Bridge must update Supabase job status after local worker execution'
+);
+
+assert.match(
+  bridge,
+  /activeWorkerJobIds: new Set\(\)/,
+  'Bridge must track active local worker job ids'
+);
+
+assert.match(
+  bridge,
+  /local_duplicate_job_active/,
+  'Bridge must not enqueue the same stable job id while it is already running or queued locally'
 );
 
 assert.match(
@@ -247,19 +283,25 @@ assert.match(
 assert.match(
   bridge,
   /function isRecentReadCatchupPreview\(text, now = new Date\(\)\)/,
-  'Bridge must have an explicit bounded path for chats the user read before automation saw the unread badge'
+  'Bridge may keep an explicit catch-up helper, but stale read top-row changes must not enter the live worker path'
 );
 
 assert.match(
   bridge,
-  /isLiveTopRowPreview\(event\.previewText\) \|\| isRecentReadCatchupPreview\(event\.previewText\)/,
-  'Bridge must queue recent read top-row changes so manually-read chats are still inspected by AI'
+  /event\.reason === 'top_row_changed'\s+&& isLiveTopRowPreview\(event\.previewText\)/,
+  'Bridge must only queue unread-free top-row changes inside the short live window'
+);
+
+assert.doesNotMatch(
+  bridge,
+  /event\.reason === 'top_row_changed'\s+&& \(isLiveTopRowPreview\(event\.previewText\) \|\| isRecentReadCatchupPreview\(event\.previewText\)\)/,
+  'Bridge must not reopen hours-old read rows through the catch-up window'
 );
 
 assert.match(
   bridge,
-  /\(event\.reason === 'top_row_changed' \|\| event\.reason === 'top_rows_backstop'\)/,
-  'Bridge must allow periodic read backstop rows through the same bounded recency gate'
+  /if \(event\.reason === 'top_rows_backstop'\) return false;/,
+  'Bridge must not let read-only periodic backstop rows flood the AI worker queue'
 );
 
 assert.match(

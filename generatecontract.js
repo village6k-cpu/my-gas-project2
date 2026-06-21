@@ -221,13 +221,12 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   const itemStart = rows.itemStart;
 
   // 추가요청을 items 뒤에 이어붙이기 (같은 배열로 통합 처리)
+  // 단, 확인요청 R열은 자동화/직원 메모가 섞일 수 있으므로 계약서에 그대로 넣지 않는다.
+  // 명시적인 계약 품목 형태(수량이 있는 짧은 품목 라인 또는 "추가품목:" 접두어)만 0원 품목으로 반영한다.
   // 견적/최종금액 메모는 계약서 품목으로 넣지 않고, 아래 결제금액 보정에만 사용한다.
   const combinedItems = items.slice();
   if (추가요청) {
-    const 추가items = 추가요청.split("\n").filter(function(s) {
-      var line = String(s || "").trim();
-      return line && !isQuoteMemoLine_(line);
-    });
+    const 추가items = sanitizeContractAdditionalRequestText_(추가요청).split("\n").filter(Boolean);
     for (let ai = 0; ai < 추가items.length && combinedItems.length < ITEMS_PER_SIDE * 2; ai++) {
       combinedItems.push({ 세트명: "", 장비명: 추가items[ai].trim(), 수량: 1, 단가: 0 });
     }
@@ -421,6 +420,31 @@ function isQuoteMemoLine_(line) {
   return /견적|정가|최종\s*결제\s*금액|최종가|결제\s*금액|할인|off|OFF|기준/.test(String(line || ""));
 }
 
+function sanitizeContractAdditionalRequestText_(value) {
+  var raw = String(value || "").replace(/\r/g, "\n");
+  if (!raw.trim()) return "";
+  var internalPattern = /(카카오|원문|고객\s*메시지|메시지에서|예약형식|가용\s*확인|가용확인|확인요청|계약마스터|스케줄상세|고객DB|중복|정규화|세트마스터|장비마스터|모델\s*선택|미등록|AI|자동화|worker|reason|evidence|follow[_\s-]*up|후속|검토\s*필요|안내\s*필요|고객에게|답변|시트|등록\s*대상|작성\s*필요)/i;
+  var itemPrefix = /^(?:계약서?\s*)?(?:추가\s*)?품목\s*[:：]\s*/;
+  var quantityPattern = /(?:^|\s)(?:\d+(?:\.\d+)?\s*(?:개|대|세트|ea|EA|조|장|롤|pcs?)|각\s*\d+)/;
+  var seen = {};
+  var lines = [];
+  raw.split(/\n+/).forEach(function(line) {
+    line = String(line || "").trim().replace(/^[-•*]\s*/, "");
+    if (!line) return;
+    if (line.length > 80) return;
+    if (isQuoteMemoLine_(line) || internalPattern.test(line)) return;
+    var hadPrefix = itemPrefix.test(line);
+    line = line.replace(itemPrefix, "").trim();
+    if (!line) return;
+    if (!hadPrefix && !quantityPattern.test(line)) return;
+    var key = line.replace(/\s+/g, " ");
+    if (seen[key]) return;
+    seen[key] = true;
+    lines.push(line);
+  });
+  return lines.join("\n");
+}
+
 function getDiscountMultiplierFormula_() {
   return [
     'MAX(0,1-IFERROR(VALUE(REGEXEXTRACT(C44,"\\d+"))/100,0))',
@@ -445,7 +469,7 @@ function getAdditionalRequestTextByTradeId_(ss, 거래ID) {
   var lines = [];
   for (var i = 0; i < data.length; i++) {
     if (String(data[i][15] || "").trim() !== String(거래ID || "").trim()) continue;
-    var text = String(data[i][17] || "").trim();
+    var text = sanitizeContractAdditionalRequestText_(data[i][17]);
     if (!text || seen[text]) continue;
     seen[text] = true;
     lines.push(text);

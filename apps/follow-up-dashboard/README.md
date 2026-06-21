@@ -4,8 +4,12 @@ Remote web dashboard for Kakao AI worker follow-up items.
 
 ## Data flow
 
-Kakao AI worker writes AI-decided `follow_up_items` to Supabase table `ai_follow_up_items`.
-This dashboard reads that table through a server-side Vercel API route, so the Supabase service-role key is never exposed to the browser.
+Slack is now the source of truth for human follow-up pressure.
+
+- Kakao DOM automation handles Kakao reading, sheet writes, safe replies, and operational logs.
+- Kakao DOM automation should run with `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0`, so it does not duplicate the same task into Slack and the follow-up board.
+- `tools/slack-followup-backstop` scans Heybilli/agent Slack channels for unresolved tasks and writes those safety-net items into Supabase table `ai_follow_up_items`.
+- This dashboard reads that table through a server-side Vercel API route, so the Supabase service-role key is never exposed to the browser.
 
 ## Required Vercel environment variables
 
@@ -16,20 +20,31 @@ This dashboard reads that table through a server-side Vercel API route, so the S
 
 ## Slack Agent Workflow
 
-The Kakao AI worker can post each follow-up item to Slack as an actionable work
-card. The dashboard remains the status board, while Slack becomes the primary
-work inbox.
+The Kakao AI worker no longer owns the human follow-up board. It may still handle
+Kakao/sheet/auto-reply work, but human pressure should converge in Slack first.
+The follow-up board is a backstop: `tools/slack-followup-backstop` scans Slack
+for unresolved Heybilli/agent-channel tasks and upserts those rows into
+`ai_follow_up_items`.
 
-Channel defaults:
+Keep the direct Kakao→Slack/board duplicate paths off in normal operation:
 
-- `reservation_review`, `schedule_check`, `sheet_duplicate_check`: `스케쥴-agent`
-- `quote_send`, `tax_invoice`, `contract_document`, `price_review`: `서류발송-agent`
-- `payment_check`: `정산-agent`
-- everything else: `기타문의`
+- `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0`
+- `SLACK_FOLLOW_UP_ENABLED=0`
+- `SLACK_AGENT_CARD_DELIVERY_ENABLED=0`
+
+Channel defaults scanned by the Slack backstop:
+
+- `스케쥴-agent`
+- `서류발송-agent`
+- `정산-agent`
+- `재고관리-agent`
+- `기타문의`
 
 Local bridge / worker env:
 
-- `SLACK_FOLLOW_UP_ENABLED=1`
+- `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0`
+- `SLACK_FOLLOW_UP_ENABLED=0`
+- `SLACK_AGENT_CARD_DELIVERY_ENABLED=0`
 - `SLACK_BOT_TOKEN`
 - `SLACK_AGENT_MENTION=헤이빌리`
 - `SLACK_CHANNEL_SCHEDULE_AGENT=스케쥴-agent`

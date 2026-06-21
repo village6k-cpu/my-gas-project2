@@ -7,15 +7,18 @@
 1. 네 맥의 자동화 전용 Chrome profile에서 카카오톡 채널관리자 화면을 열어둔다.
 2. Chrome 확장 프로그램 `tools/kakao-dom-watcher-extension`이 채팅 목록의 새 메시지를 감지한다.
 3. 로컬 bridge 서버 `tools/kakao-dom-bridge`가 `http://127.0.0.1:8787`에서 확장 프로그램 이벤트를 받는다.
-4. AI worker `tools/ai-browser-worker`가 Chrome의 카카오 채팅방을 열고 고객 메시지, 직원 메시지, 시트 입력 필요 여부, 후속조치 업무를 판단한다.
-5. Supabase가 처리 queue, AI 처리 결과, 후속조치 업무 카드를 저장한다.
-6. Vercel 대시보드 `apps/follow-up-dashboard`가 Supabase의 후속조치 업무를 모바일/다른 PC에서 볼 수 있게 보여준다.
+4. AI worker `tools/ai-browser-worker`가 Chrome의 카카오 채팅방을 열고 고객 메시지, 직원 메시지, 시트 입력 필요 여부, 안전한 자동답장을 판단한다.
+5. `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0` 운영에서는 AI worker가 카카오 DOM 이벤트를 후속조치판에 직접 쌓지 않는다. 중복 압박을 막기 위해 후속조치판은 Slack backstop이 담당한다.
+6. Supabase가 처리 queue, AI 처리 결과, Slack-derived 후속조치 업무 카드를 저장한다.
+7. `tools/slack-followup-backstop`이 Heybilli/agent Slack 채널의 미해결 태스크를 찾아 `ai_follow_up_items`에 upsert한다.
+8. Vercel 대시보드 `apps/follow-up-dashboard`가 Supabase의 후속조치 업무를 모바일/다른 PC에서 볼 수 있게 보여준다.
 
 ## 어디에 존재하는가?
 
 - Chrome 확장 프로그램: `tools/kakao-dom-watcher-extension`
 - 로컬 bridge 서버: `tools/kakao-dom-bridge`
 - AI worker: `tools/ai-browser-worker`
+- Slack 후속조치 backstop: `tools/slack-followup-backstop`
 - Supabase schema: `tools/kakao-dom-bridge/supabase-schema.sql`
 - 원격 후속조치 대시보드: `apps/follow-up-dashboard`
 
@@ -52,7 +55,7 @@ scripts/kakao-automation start
 scripts/kakao-automation status
 ```
 
-운영 기본값은 `AI_WORKER_LIVE=1`, `AI_WORKER_AUTO_SEND=1`이다. 즉 AI worker가 실제 카카오 화면을 열어 읽고, 확인요청/후속조치/안전한 자동답장 후보를 처리한다. 임시 점검 때만 `AI_WORKER_LIVE=0` 또는 `AI_WORKER_AUTO_SEND=0`으로 낮춘다.
+운영 기본값은 `AI_WORKER_LIVE=1`, `AI_WORKER_AUTO_SEND=1`, `AI_WORKER_FOLLOW_UP_ITEMS_ENABLED=0`이다. 즉 AI worker가 실제 카카오 화면을 열어 읽고, 확인요청/안전한 자동답장 후보를 처리하지만, 카카오 DOM 이벤트를 사람용 후속조치판에 직접 중복 적재하지 않는다. 후속조치판은 Slack backstop이 Slack의 미해결 태스크를 선별해 채운다. 임시 점검 때만 `AI_WORKER_LIVE=0` 또는 `AI_WORKER_AUTO_SEND=0`으로 낮춘다.
 
 `scripts/kakao-automation status`에서 `Automation Chrome profile > DevTools status: reachable`가 떠야 worker가 일반 Chrome이 아니라 자동화 profile의 탭을 제어한다. 기존에 포트 없이 떠 있던 자동화 Chrome은 `scripts/kakao-automation start` 또는 `restart` 때 자동으로 닫고 다시 연다.
 

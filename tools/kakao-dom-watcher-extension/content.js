@@ -137,6 +137,12 @@
       const match = re.exec(text);
       if (match && Number(match[1]) > 0) return Number(match[1]);
     }
+    const topRowBadge = /^중요\s+(.{1,90}?)\s+([1-9]\d?)\s+(\S.*)$/.exec(normalizeText(text));
+    if (topRowBadge) {
+      const count = Number(topRowBadge[2]);
+      const next = topRowBadge[3] || '';
+      if (count > 0 && count <= 20 && !/^(월|일|시|분|초|원|개|건|구|세트|set\b)/i.test(next)) return count;
+    }
     return null;
   }
 

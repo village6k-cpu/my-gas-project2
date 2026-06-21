@@ -17,6 +17,7 @@ const DEFAULT_SLACK_CHANNELS = {
   schedule: '스케쥴-agent',
   document: '서류발송-agent',
   settlement: '정산-agent',
+  inventory: '재고관리-agent',
   other: '기타문의'
 };
 
@@ -225,21 +226,22 @@ export function buildReadOnlyRagContext(config = {}) {
       use_after_opening_kakao_conversation: true,
       include_screen_context_in_question_string: true,
       use_cases: [
-        'price, discount, included components, pickup/return procedure, and FAQ policy reference',
+        'current-safe FAQ, included components, pickup/return procedure, and non-mutable policy reference',
         'similar past Kakao conversations and village reply tone examples',
         'follow-up questions such as 그거/이거/같이/아까 말한 것 where recent Kakao context must be summarized into the question',
-        'homepage or village historical policy grounding before drafting a reply'
+        'homepage or village historical policy grounding before drafting a reviewed reply'
       ],
       forbidden_uses: [
         'do not replace Kakao screen evidence',
         'do not replace Sheets/GAS duplicate checks',
         'do not use for current inventory availability, actual booking confirmation, or schedule/contract mutations',
+        'do not override the worker current_confirmed_policy block with older historical Kakao/RAG when they conflict',
         'do not send Kakao messages or write Sheets from RAG tool output',
         'do not copy-paste RAG text verbatim into the final reply draft'
       ],
       interpretation_rules: {
-        high: 'Use actively as reply/policy reference, but never assert current inventory or final booking from RAG alone.',
-        low: 'Use only for tone/policy hints; be cautious.',
+        high: 'Use actively as reply/procedure reference. For mutable policies, current_confirmed_policy wins when present; otherwise high/retrieved RAG may support auto-send.',
+        low: 'Use only for tone/procedure hints; be cautious.',
         no_match_or_empty: 'Do not trust RAG; rely on Kakao screen and operational flow.',
         ownerReview_true: 'Price/discount/payment/refund sensitive; require extra human verification before any auto-send phase.',
         knowledgeSource_retrieved: 'Village material based.',
@@ -263,7 +265,7 @@ export function buildReadOnlyRagContext(config = {}) {
         }
       : null,
     unavailable_reason: enabled ? null : 'VILLAGE_AI_URL is not configured in the worker environment.',
-    note: 'RAG 답변을 그대로 복붙하지 말고, 카카오 화면의 실제 대화 순서와 최신 고객 메시지를 1차 진실로 보고 RAG는 가격/정책/말투 참고자료로만 합성한다.'
+    note: 'RAG 답변을 그대로 복붙하지 말고, 카카오 화면의 실제 대화 순서와 최신 고객 메시지를 1차 진실로 본다. 현재 확정 정책과 충돌하는 과거 카톡/RAG는 무시하고, 확정 정책에 없는 보증금/환불/계좌/증빙 등은 high/retrieved RAG로 보강한다.'
   };
 }
 
@@ -313,6 +315,12 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
       request_recent_with_results_gviz: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE A!='' ORDER BY A DESC LIMIT 80"),
       request_by_req_id_gviz_template: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE A='{AI_REQ_ID}' LIMIT 30"),
       request_by_customer_gviz_template: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE K='{AI_CUSTOMER_NAME}' ORDER BY A DESC LIMIT 30"),
+      customer_db_by_name_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
+        action: 'search',
+        sheet: '고객DB',
+        col: 2,
+        query: '{AI_CUSTOMER_NAME}'
+      }),
       contract_by_trade_id_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
         action: 'search',
         sheet: '계약마스터',
@@ -326,7 +334,7 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
         query: '{AI_TRADE_ID}'
       })
     },
-    note: 'These URLs are read-only lookup aids. 확인요청 columns: A=reqID, B-E period, F equipment, G qty, I result, J detail, K customer, L phone, M discount, Q memo, R extra. 계약마스터 columns include A tradeID, B customer, C phone, E-H period, J status, K discount. 스케줄상세 L is unit price. AI must decide what to query and how to interpret results. Do not use write/run/register/send actions.'
+    note: 'These URLs are read-only lookup aids. 확인요청 columns: A=reqID, B-E period, F equipment, G qty, I result, J detail, K customer, L phone, M discount, Q memo, R extra. 계약마스터 columns include A tradeID, B customer, C phone, E-H period, J status, K discount. 고객DB columns: A phone, B customer name, C affiliation, I loyalty/partner flag when present. AI must decide what to query and how to interpret results. Do not use write/run/register/send actions.'
   };
 }
 
@@ -385,7 +393,10 @@ export function buildHermesPrompt(job, options = {}) {
     ? `\nBROWSER NAVIGATION RESULT:\n${JSON.stringify(options.navigationContext, null, 2)}\n\nThis was deterministic UI navigation and live AX text capture only. If status is opened_target_chat and conversation_evidence.hint_matched is true, treat conversation_evidence.visible_static_text_tail as current Kakao screen evidence to inspect first; do not spend extra actions re-opening the chat list unless the evidence is insufficient or mismatched. Do not treat the navigation step itself as business classification evidence; the AI must still judge from the visible Kakao evidence.\n`
     : '';
   const ragContextText = options.ragContext
-    ? `\nREAD-ONLY VILLAGE-AI RAG TOOL:\n${options.ragContext.enabled ? 'enabled' : 'disabled'}; command: node tools/ai-browser-worker/worker.mjs --rag-lookup; input: {question,userRole:"customer",context?}; output: {text,confidence,ownerReview,knowledgeSource,usedSources,topSimilarity,logId,error}.\nUse RAG only after reading Kakao screen as long-term reference memory, and only for price/discount/components/procedure/FAQ, past tone/policy, or ambiguous follow-up wording. Put short visible Kakao context inside the question string itself. RAG must not replace current Kakao screen evidence or Sheets/GAS duplicate checks. Never use RAG for current inventory, booking confirmation, Sheets/contract/schedule mutation, or duplicate checks. confidence=high informs draft but cannot assert availability; low/no_match/error means weak/ignore; ownerReview=true means extra human review. RAG 답변을 그대로 복붙하지 말고 현재 Kakao 대화와 합성한다.\n`
+    ? `\nREAD-ONLY VILLAGE-AI RAG TOOL:\n${options.ragContext.enabled ? 'enabled' : 'disabled'}; command: node tools/ai-browser-worker/worker.mjs --rag-lookup; input: {question,userRole:"customer",context?}; output: {text,confidence,ownerReview,knowledgeSource,usedSources,topSimilarity,logId,error}.\nUse as long-term reference memory after Kakao; put visible Kakao context in the question string itself. RAG must not replace current Kakao screen evidence or Sheets/GAS, and never covers inventory, booking, mutations, or duplicates. CURRENT_CONFIRMED_POLICY wins over older RAG conflicts. Uncovered policy FAQ: high/retrieved RAG may support auto_send; low/no_match/error ignore; ownerReview=true review. RAG 답변을 그대로 복붙하지 말고 현재 Kakao 대화와 합성한다.\n`
+    : '';
+  const currentConfirmedPolicyText = options.ragContext
+    ? `\nCURRENT_CONFIRMED_POLICY: 주소=서울 마포구 동교로 23길 32, 2층, 지도=https://naver.me/5mIWTFQ1, 영업=24시간. 절차=장비명+기간→가용확인→방문수령→반납, 필수=장비명/수량/반출일시/반납일시/예약자명/연락처. 할인=학생 30%, 개인사업자/프리랜서 20%, 단골=개사프20%+10%, 제휴=개사프20%+20%. 장기=2일10%,3~5일20%,6~9일35%,10~14일40%,15~19일45%,20일+50%. 계산=할인 곱셈, 24시간 1일, +6시간 동일, 6시간 초과 +1일, VAT=할인후*1.1 10원 올림.\n`
     : '';
   return `AI-first Kakao rental-shop worker task.
 
@@ -396,7 +407,7 @@ CRITICAL RULES:
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use at most 5 UI navigation actions total. If the matching conversation is not found within that budget, stop and return classification="unclear" / should_write_to_sheet=false with reason="matching Kakao conversation not visible within budget".
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때만 간단한 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
-- 자동발송 후보는 간단/확실한 FAQ, 절차 안내, 수령/반납 안내, 이미 확인된 단순 후속 답변, 예약 접수 acknowledgement 정도로 제한한다. 재고 가능 단정, 예약 확정, 가격/할인 최종 확정, 결제/환불, 분실/파손, 법적/세금 민감 답변은 auto_send가 아니라 draft_only/task로 둔다.
+- 자동발송 후보: FAQ/절차/수령·반납/단순 후속/예약 접수/연락처 우선 요청. 재고·예약 확정은 원칙 금지지만, 직전 직원이 “가능/예약 가능”이라고 했고 최신 고객이 “그럼 이렇게 부탁/진행/예약해주세요”처럼 수락한 경우만 짧은 확정 답변 auto_send 후보로 둔다. 가격/결제/환불/파손/세금은 draft_only/task.
 - 예약 확정, 재고 가능 단정, 가격 확정은 화면/시트 근거 없이 단정하지 않는다. 하지만 고객이 예약형식에 맞게 정보를 준 경우 확인요청 시트 입력은 적극 수행한다.
 - Google Sheets 입력은 API로 가능하다. 어떤 값을 넣을지는 AI가 판단하되, 예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다.
 
@@ -409,11 +420,10 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 기존 RQ 결과가 비어 있거나 읽히지 않으면 "가용확인 결과 없음/재확인 필요"로 보고한다. 결과가 ✅ 가용일 때만 고객 답변 초안에 예약 가능하다고 쓴다. ⚠️/❌/가용0/결과없음이면 가능 단정 금지.
 - 예약/가격/FAQ/무시를 AI가 분류한다. 미리보기 텍스트만으로 예약·가격·FAQ를 확정하지 않는다.
 - 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/처리판 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
-- FAQ 고정 답변 후보: 주소=서울 마포구 동교로 23길 32, 2층 / 네이버 지도=https://naver.me/5mIWTFQ1 / 영업시간=24시간 운영 / 절차=장비명+기간 전달→가용확인→방문수령→반납.
+- CURRENT_CONFIRMED_POLICY가 최신 FAQ/정책 기준이다. RAG가 충돌하면 현재 정책으로 고치고, 없는 정책 FAQ는 high/retrieved RAG로 보강하거나 draft_only/follow_up.
 - 가격 문의는 세트마스터 단가, 고객할인, 장기할인으로 초안/follow_up을 만든다. price_paused면 가격 자동발송 금지.
-- 계약서/견적서/세금계산서/거래명세서 등 서류 요청은 금액 계산을 생략하지 않는다. 거래ID가 보이면 계약마스터+스케줄상세를 읽고, 스케줄상세 L열 단가가 있는 대표/단품 행 기준으로 정가=수량×대여일수×단가를 계산한다.
-- 서류 요청 금액 산식은 계약서 생성 로직과 맞춘다: 대여일수는 24시간=1일, 6시간 이내 초과는 같은 일수, 그 이상은 +1일. 결제금액은 정가 × 고객/제휴/단골 할인 배율 × 장기할인 배율, VAT 포함 최종금액은 할인후 금액×1.1을 10원 단위 올림으로 계산한다.
-- 서류 요청에서 확인요청 RQ만 있고 아직 계약 등록 전이면 확인요청 결과와 세트마스터 단가로 계산 가능한 항목은 반드시 부분 계산하고, 미등록/단가불명 항목은 "미계산/확인 필요"로 따로 표시한다. 사람에게 "금액 확인"이라고만 떠넘기지 않는다.
+- 서류(계약서/견적서/세금계산서/거래명세서)는 계산 생략 금지. 거래ID는 계약마스터+스케줄상세 대표/단품 L열 단가로 수량×일수×단가 계산; RQ는 확인요청 결과+세트마스터 단가로 부분계산하고 미등록/단가불명은 "미계산/확인 필요"로 표시한다.
+- 금액 산식: 24시간=1일, +6시간 동일, 초과 +1일; 정가×고객/제휴/단골 할인×장기할인×VAT1.1, 10원 올림.
 - unread/미처리면 오래된 메시지도 검토한다. 날짜만 오래된 backfill/row movement는 자동발송하지 않는다.
 - 유입로그 단서는 evidence에만 보존한다. API 별도 worker 책임이다.
 
@@ -429,18 +439,22 @@ SENDER AND TURN-TAKING POLICY:
 
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
-- 단, 정규화가 애매하거나 실패했다고 확인요청 시트 입력 자체를 막지 않는다. 확인요청은 최종 등록이 아니라 사람이 보고 수정하는 대기열이다. 정말 정규화할 수 없을 때만 고객 원문을 item에 넣고, memo/extra_request에 원문과 검증필요를 남긴다.
+- 정규화가 애매해도 확인요청 입력은 막지 않는다. 실패 시 원문을 item에 넣고, Q/R에는 원문/추론/가용확인 후 안내 등 내부 설명을 넣지 않는다.
 - 약어/속어는 검색 키워드 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. AI는 가능한 한 장비명을 추론/정규화해야 하며, 원문 그대로 쓰는 것은 정규화 실패 시 fallback이다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
 - 할인유형은 학생 / 개인사업자/프리랜서 / 일반 중 하나만 쓴다. 단골 또는 제휴는 절대 쓰지 말고 일반으로 둔다. 단골/제휴 여부는 GAS/고객DB가 판단한다.
-- 중복 입력 방지: 가능하면 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 예약형식이면 일부 확인이 불완전해도 쓰고 memo에 남긴다. 직원 확정 후 미등록 예약도 쓴다.
-- 예약형식에 맞춰 들어온 건은 확인요청 시트 입력이 기본 동작이다. 불확실한 장비명/중복확인/전화번호 누락은 입력 차단 사유가 아니라 memo/extra_request에 남길 보완사항이다.
+- 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리; 없거나 동명이인이면 should_write_to_sheet=false, 가능하면 auto_send로 "예약 등록이 불가능해서 연락처부터" 짧게 요청한다. 연락처가 재고/가용/가격보다 우선이다.
+- 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
+- 예약형식이면 확인요청 입력이 기본이다. 불확실한 장비명/중복확인은 입력 차단 사유가 아니라 follow_up/evidence 대상이다. F열 item은 best 장비명으로 넣고, Q/R에는 AI 설명을 넣지 않는다. 연락처는 필수다.
+- memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
+- 확인요청 반출/반납시간은 정시 HH:00만 쓴다. 고객이 12:30처럼 분 단위로 말해도 12:00으로 내림 입력한다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
 - read-catchup에서 기존 RQ를 발견한 경우에도 확인요청 I/J 결과를 읽은 뒤, 그 결과가 ✅/⚠️/❌/미확인 중 무엇인지 후속카드에 명시한다.
 
 JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
+${currentConfirmedPolicyText}
 ${navigationContextText}
 ${lookupContextText}${ragContextText}
 SHEETS TOOL AVAILABLE VIA GAS API:
@@ -450,21 +464,24 @@ SHEETS TOOL AVAILABLE VIA GAS API:
 - Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write when appropriate.
 
 TASK:
-1. First use the supplied BROWSER NAVIGATION RESULT / live DevTools DOM evidence. It is captured from the isolated automation Chrome and is designed to avoid taking over the human mouse, keyboard, frontmost app, or macOS Space.
-2. Keep automation quality first: use terminal-driven CUA when DevTools evidence is insufficient/mismatched or visible UI truth is materially better. Keep CUA scope small and read/navigation-oriented: "cua-driver call list_windows --compact", "cua-driver call get_window_state ... --compact", and "cua-driver call page ... get_text/query_dom". Do not use terminal CUA to write Sheets or send Kakao messages.
-3. If you use CUA output, never print raw full AX/page output. Always pipe through Python filtering and print at most 2000 characters total, centered on navigation_hints/customer name and the chosen window_id.
+1. Use supplied BROWSER NAVIGATION RESULT/live DevTools DOM first; it is isolated automation Chrome evidence.
+2. Use terminal CUA only when DevTools evidence is insufficient/mismatched and allowed; read/navigation only (list_windows/get_window_state/page get_text/query_dom). Never use CUA to write Sheets or send Kakao.
+3. If using CUA output, print only filtered context around hints/customer, max 2000 chars.
 4. If BROWSER NAVIGATION RESULT says opened_target_chat with hint_matched=true, start from its live conversation_evidence and do not re-open the chat list.
 4. Use computer_use read-only capture only if needed. The worker forces capture mode="ax" and max_elements=80 for speed; do not request image/vision capture in the autonomous worker. If AX text is insufficient after navigation attempts, return unclear instead of escalating to screenshot capture.
 5. Use JOB EVIDENCE navigation_hints only to find/open the target Kakao chat. This is navigation evidence, not business classification evidence.
-6. If the currently open conversation title/messages do not match the navigation_hints/preview_text, go back to the Kakao chat list or use the visible Kakao search/chat-list UI to find the matching customer/room. You may click/type only for navigation inside Kakao; never type into the message compose box and never send.
+6. If the currently open conversation title/messages do not match the navigation_hints/preview_text, do not type into the visible Kakao search box in autonomous worker mode. Use already-open conversation evidence, visible chat-list rows, or supplied DevTools navigation evidence only; if the target room is not visible/open, return unclear instead of searching. never type into the message compose box and never send.
 7. Read visible conversation content and recent context; separate staff/outbound vs customer/inbound before classifying. Merge consecutive customer bubbles in the latest customer turn; do not treat staff/outbound messages as customer requests.
-8. If RAG is enabled and useful, call the village-ai helper only after reading the Kakao screen. Build the RAG question by briefly embedding the visible Kakao context and latest customer/inbound message cluster in the question string. Use RAG only for price/discount/components/procedure/FAQ, prior tone/policy reference, or ambiguous follow-up wording; never for current inventory availability, booking confirmation, Sheets/contract/schedule mutation, or duplicate checks.
-9. RAG interpretation: confidence=high can inform a reply draft but still cannot assert inventory/booking; confidence=low is tone/policy hint only; no_match/empty/error means ignore RAG; ownerReview=true means extra human verification before any future auto-send; knowledgeSource=general is not firm village policy.
+8. If RAG is useful, call it only after reading Kakao. Embed visible Kakao context in the question. Never use RAG for inventory, booking, mutations, duplicates, or to override CURRENT_CONFIRMED_POLICY.
+9. RAG interpretation: high/retrieved can support policy FAQ draft/auto_send when not covered by CURRENT_CONFIRMED_POLICY; low is tone/procedure hint; no_match/empty/error means ignore; ownerReview=true means review; knowledgeSource=general is not firm village policy.
+9-1. For FAQ/procedure/policy/components auto_send, use CURRENT_CONFIRMED_POLICY first, otherwise call RAG and fill rag_usage. Outer worker verifies current-policy match or high-confidence retrieved support. Never use RAG for current stock/booking/schedule truth.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
-11. For reservation-format requests, prefer should_write_to_sheet=true. Missing phone/equipment/duplicate lookup goes to memo/extra_request. Set false only for non-reservation, unopened/mismatched chat, unclear sender order, or obvious duplicate/already-registered booking. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; otherwise no write.
+10-1. Doc types은 서류 생성/발송/발행만. 확인요청/예약/가용/스케줄/파손/반납/정산은 견적서 단어가 섞여도 doc 아님; primary item에 합친다.
+11. For reservation-format requests, prefer should_write_to_sheet=true only after phone is available from Kakao or a unique 고객DB match. If phone is missing, search 고객DB by customer name first. If no unique DB phone is found, set should_write_to_sheet=false and make the immediate reply ask for contact first because reservation registration is impossible without contact. Missing equipment/duplicate lookup goes to memo/extra_request, but missing phone with no DB match is blocking. Set false also for non-reservation, unopened/mismatched chat, unclear sender order, or obvious duplicate/already-registered booking. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered with a phone from Kakao/DB; otherwise no write.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
 11-2. For multiple equipment items, put each item into sheet_row_candidate.equipment as a separate object. Do not concatenate multiple equipment names into one item string. One equipment object becomes one 확인요청 row under the same GAS-generated request ID.
-11-3. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
+11-3. sheet_row_candidate date/time must be API-safe: YYYY-MM-DD HH:MM. Resolve 오늘/내일 from Kakao date context. 6월6일 24시 => 2026-06-07 00:00. If context unavailable, don't write; make human review.
+11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. Create at most one follow_up_item per latest customer message cluster. Do not split one customer turn into separate reply_needed/schedule_check/damage_repair/completed_log cards. Choose the single primary type and put the rest as a concise checklist inside recommended_action/evidence.
 13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for simple, high-confidence replies that are safe to send now under the kill-switch policy. Otherwise use draft_only or no_reply.
 14. Return only the final machine-readable JSON below.
@@ -507,6 +524,7 @@ The JSON schema:
   "latest_customer_message_cluster": string,
   "latest_staff_message": string | null,
   "visible_messages_used": [{ "sender": string, "message": string, "time": string | null }],
+  "rag_usage": { "used": boolean, "required_for_auto_send": boolean, "question": string | null, "logId": string | null, "confidence": string | null, "knowledgeSource": string | null, "usedSources": array, "applied_to_reply": boolean, "reason": string },
   "follow_up_items": [
     {
       "type": "reply_needed" | "quote_send" | "tax_invoice" | "schedule_check" | "reservation_review" | "price_review" | "payment_check" | "contract_document" | "return_extension" | "damage_repair" | "sheet_duplicate_check" | "completed_log",
@@ -558,6 +576,128 @@ export function extractJsonObject(text) {
 
 function text(value) {
   return value === null || value === undefined ? '' : String(value);
+}
+
+const CUSTOMER_DOCUMENT_DEFAULT_REPLY = '요청하신 통장 사본과 사업자등록증 전달드립니다.';
+
+export function normalizeKakaoAttachmentPaths(value = []) {
+  const rawItems = Array.isArray(value)
+    ? value
+    : text(value).split(/[\n,]/);
+  const home = process.env.HOME || '';
+  return rawItems
+    .map((item) => text(item).trim())
+    .filter(Boolean)
+    .map((item) => item.startsWith('~/') && home ? path.join(home, item.slice(2)) : item)
+    .map((item) => path.resolve(item));
+}
+
+export function defaultCustomerDocumentAssetPaths(env = process.env) {
+  const home = env.HOME || process.env.HOME || '';
+  const baseDir = env.VILLAGE_CUSTOMER_DOCUMENT_ASSET_DIR
+    || (home ? path.join(home, '.hermes/village-documents/customer-request-docs') : '');
+  if (!baseDir) return [];
+  return normalizeKakaoAttachmentPaths([
+    env.VILLAGE_CUSTOMER_DOCUMENT_BANKBOOK_PATH || path.join(baseDir, 'village_woori_bankbook_copy.jpeg'),
+    env.VILLAGE_CUSTOMER_DOCUMENT_BUSINESS_REGISTRATION_PATH || path.join(baseDir, 'village_business_registration_certificate.jpeg')
+  ]);
+}
+
+function customerDocumentRequestEvidenceText(decision = {}) {
+  if (typeof decision === 'string') return decision.normalize('NFKC');
+  // Only the latest customer turn may trigger the standard document send.
+  // Older visible history is useful for context, but using it as a trigger
+  // caused duplicates when a later customer message was just "감사합니다" or
+  // a separate 세금계산서 request after the documents had already been sent.
+  return text(decision?.latest_customer_message_cluster).normalize('NFKC');
+}
+
+function hasDocumentSendVerbNear(pattern, body = '') {
+  const requestVerbs = '(?:보내|전달|공유|첨부|부탁|요청|주세요|주시면|주실|주실수|있을까요|있나요)';
+  return new RegExp(`${pattern}.{0,35}${requestVerbs}`).test(body)
+    || new RegExp(`${requestVerbs}.{0,35}${pattern}`).test(body);
+}
+
+function isDirectCustomerDocumentAssetRequestText(value = '') {
+  const body = text(value).normalize('NFKC').replace(/\s+/g, ' ').trim();
+  if (!body) return false;
+  const bankPattern = '(?:통장\\s*사본|계좌\\s*사본|입금\\s*계좌|은행\\s*계좌|계좌정보)';
+  const businessPattern = '(?:사업자\\s*등록증|사업자등록증)';
+  const asksBank = hasDocumentSendVerbNear(bankPattern, body);
+  const asksBusiness = hasDocumentSendVerbNear(businessPattern, body);
+  if (asksBank) return true;
+  if (!asksBusiness) return false;
+
+  // A bare "사업자등록증" inside a tax-invoice turn often means the customer is
+  // sending *their* registration PDF for 세금계산서. Do not answer that by sending
+  // Village's documents unless the customer clearly asks for Village/our docs.
+  const clearlyVillageOwned = /(빌리지|귀사|업체|렌탈샵|사업장|빌리지렌탈샵|우리|저희).{0,20}(?:사업자|등록증)|(?:사업자|등록증).{0,20}(빌리지|귀사|업체|렌탈샵|사업장|빌리지렌탈샵|우리|저희)/.test(body);
+  const taxInvoiceContext = /(세금\s*계산서|계산서|전자세금|발급|발행|이메일|메일|@|\.pdf|pdf)/i.test(body);
+  return clearlyVillageOwned || !taxInvoiceContext;
+}
+
+function isKakaoStaffSenderLabel(value = '') {
+  return /(빌리지|김준영|최재형|운영자|상담원|매니저)/.test(text(value));
+}
+
+function isCustomerDocumentDeliveryMessage(value = '') {
+  const body = text(value).normalize('NFKC');
+  return /요청하신\s*(?:통장\s*사본|계좌\s*사본).*사업자\s*등록증.*(?:전달|보내)드립니다/.test(body)
+    || /요청하신.*사업자\s*등록증.*(?:통장\s*사본|계좌\s*사본).*(?:전달|보내)드립니다/.test(body);
+}
+
+export function customerDocumentAssetsAlreadySent(decision = {}) {
+  const messages = Array.isArray(decision?.visible_messages_used) ? decision.visible_messages_used : [];
+  let lastRequestIndex = -1;
+  messages.forEach((message, index) => {
+    if (isKakaoStaffSenderLabel(message?.sender)) return;
+    if (isDirectCustomerDocumentAssetRequestText(message?.message)) lastRequestIndex = index;
+  });
+  if (lastRequestIndex < 0) return false;
+  return messages.slice(lastRequestIndex + 1).some((message) => (
+    isKakaoStaffSenderLabel(message?.sender)
+    && isCustomerDocumentDeliveryMessage(message?.message)
+  ));
+}
+
+export function isCustomerDocumentAssetRequest(decision = {}) {
+  return isDirectCustomerDocumentAssetRequestText(customerDocumentRequestEvidenceText(decision));
+}
+
+export function customerDocumentAssetPathsForDecision(decision = {}, config = {}) {
+  if (!isCustomerDocumentAssetRequest(decision)) return [];
+  const configured = config.customerDocumentAssetPaths || process.env.VILLAGE_CUSTOMER_DOCUMENT_ATTACHMENT_PATHS || '';
+  const paths = normalizeKakaoAttachmentPaths(configured).length
+    ? normalizeKakaoAttachmentPaths(configured)
+    : defaultCustomerDocumentAssetPaths();
+  return paths;
+}
+
+export function canAutoSendCustomerDocumentAssets(decision = {}, config = {}) {
+  if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
+  const classification = text(decision?.classification).trim();
+  if (classification && classification !== 'faq') return { allowed: false, reason: 'classification_not_customer_document_faq' };
+  if (!isCustomerDocumentAssetRequest(decision)) return { allowed: false, reason: 'not_latest_customer_document_request' };
+  if (customerDocumentAssetsAlreadySent(decision)) return { allowed: false, reason: 'customer_document_assets_already_sent' };
+  const killSwitch = text(decision.kill_switch_observed).trim();
+  if (killSwitch === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
+  if (killSwitch !== 'active' && killSwitch !== 'price_paused') return { allowed: false, reason: `kill_switch_${killSwitch || 'unknown'}` };
+  if (decision?.safety_checks?.kakao_conversation_opened !== true) return { allowed: false, reason: 'conversation_not_opened' };
+  if (decision?.safety_checks?.did_not_classify_from_preview_only !== true) return { allowed: false, reason: 'preview_only' };
+  if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) return { allowed: false, reason: 'latest_turn_not_customer' };
+  if (decision.owner_review_required === true || decision.ownerReviewRequired === true) return { allowed: false, reason: 'owner_review_required' };
+  const attachmentPaths = customerDocumentAssetPathsForDecision(decision, config);
+  if (!attachmentPaths.length) return { allowed: false, reason: 'customer_document_assets_missing_config' };
+  const missing = attachmentPaths.filter((filePath) => !fs.existsSync(filePath));
+  if (missing.length) return { allowed: false, reason: 'customer_document_asset_file_missing', missing, attachmentPaths };
+  return {
+    allowed: true,
+    reason: 'standard_customer_document_assets',
+    text: CUSTOMER_DOCUMENT_DEFAULT_REPLY,
+    replyMode: 'auto_send',
+    confidence: 'high',
+    attachmentPaths
+  };
 }
 
 const REQUIRED_SHEET_SAFETY_CHECKS = [
@@ -618,21 +758,142 @@ function normalizeSheetEquipmentItems(decision = {}) {
   return [{ item: fallbackItem, quantity: row.quantity ?? row.qty ?? row.수량 ?? 1 }];
 }
 
+export function normalizeConfirmRequestTimeForSheet(value = '') {
+  const raw = text(value).trim();
+  if (!raw) return '';
+  let match = raw.match(/Date\(\d{4},\s*\d{1,2},\s*\d{1,2},\s*(\d{1,2}),\s*(\d{1,2})/);
+  if (!match) match = raw.match(/\b(\d{1,2}):(\d{2})\b/);
+  if (!match) match = raw.match(/\b(\d{1,2})\s*시(?:\s*\d{1,2}\s*분)?/);
+  if (!match) return raw;
+  const hour = Number(match[1]);
+  if (!Number.isFinite(hour) || hour < 0 || hour > 24) return raw;
+  if (hour === 24) return '00:00';
+  return `${String(hour).padStart(2, '0')}:00`;
+}
+
+function kstDateParts(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(now).reduce((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day) };
+}
+
+function ymd({ year, month, day }) {
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function addDaysToYmd(dateText, days) {
+  const match = String(dateText || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return dateText;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + days));
+  return date.toISOString().slice(0, 10);
+}
+
+export function normalizeConfirmRequestDateForSheet(value = '', { now = new Date() } = {}) {
+  const raw = text(value).normalize('NFKC').trim();
+  if (!raw) return '';
+  const today = kstDateParts(now);
+  if (/(오늘|금일|당일)/.test(raw)) return ymd(today);
+  if (/(내일|명일)/.test(raw)) return addDaysToYmd(ymd(today), 1);
+  if (/모레/.test(raw)) return addDaysToYmd(ymd(today), 2);
+
+  let match = raw.match(/(20\d{2})\s*[년.\/-]\s*(\d{1,2})\s*(?:월|[.\/-])\s*(\d{1,2})\s*일?/);
+  if (match) return ymd({ year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) });
+
+  match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (match) return ymd({ year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) });
+
+  match = raw.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일?/);
+  if (!match) match = raw.match(/\b(\d{1,2})\s*[./]\s*(\d{1,2})\b/);
+  if (match) return ymd({ year: today.year, month: Number(match[1]), day: Number(match[2]) });
+
+  return raw;
+}
+
+function parseConfirmRequestTimeForSheet(value = '') {
+  const raw = text(value).normalize('NFKC').trim();
+  const normalized = normalizeConfirmRequestTimeForSheet(raw);
+  const rawMatch = raw.match(/\b(\d{1,2})(?::\d{2}|\s*시)/);
+  const normalizedMatch = normalized.match(/^(\d{2}):(\d{2})$/);
+  const rawHour = rawMatch ? Number(rawMatch[1]) : null;
+  const minutes = normalizedMatch ? Number(normalizedMatch[1]) * 60 + Number(normalizedMatch[2]) : null;
+  return { raw, normalized, rawHour, minutes, isEndOfDay24: rawHour === 24 };
+}
+
+function normalizeConfirmRequestDateTimeFields(row = {}, decision = {}, options = {}) {
+  const startDate = normalizeConfirmRequestDateForSheet(row.start_date || decision.reservation_inquiry?.rental_start, options);
+  let endDate = normalizeConfirmRequestDateForSheet(row.end_date || decision.reservation_inquiry?.rental_end, options);
+  const pickup = parseConfirmRequestTimeForSheet(row.pickup_time || decision.reservation_inquiry?.pickup_time);
+  const ret = parseConfirmRequestTimeForSheet(row.return_time || decision.reservation_inquiry?.return_time);
+
+  if (ret.isEndOfDay24 && endDate) {
+    endDate = addDaysToYmd(endDate, 1);
+  } else if (startDate && endDate && startDate === endDate && pickup.minutes !== null && ret.minutes !== null && ret.minutes < pickup.minutes) {
+    // Kakao customers often say same-day overnight windows casually. Prevent GAS/date-range rejection.
+    endDate = addDaysToYmd(endDate, 1);
+  }
+
+  return {
+    startDate,
+    pickupTime: pickup.normalized,
+    endDate,
+    returnTime: ret.normalized
+  };
+}
+
+function hasUsableConfirmRequestPhone(value = '') {
+  const raw = text(value).trim();
+  if (!raw) return false;
+  // 연락처는 GAS/시트 등록 단계의 구조적 필수값이다. 카카오 닉네임만으로 RQ를 만들면
+  // 같은 실제 고객을 나중에 본명/연락처로 다시 입력하게 되어 중복이 생긴다.
+  return raw.replace(/[^0-9]/g, '').length >= 7;
+}
+
+const CONFIRM_REQUEST_INTERNAL_NOTE_PATTERN = /(?:카카오|원문|고객\s*메시지|메시지에서|예약형식|가용\s*확인|가용확인|확인요청|계약마스터|스케줄상세|고객DB|중복|정규화|세트마스터|장비마스터|모델\s*선택|미등록|AI|자동화|worker|reason|evidence|follow[_\s-]*up|후속|검토\s*필요|안내\s*필요|고객에게|답변|시트|등록\s*대상|작성\s*필요)/i;
+
+function sanitizeConfirmRequestFreeText(value = '', { maxLength = 180 } = {}) {
+  const lines = text(value)
+    .normalize('NFKC')
+    .split(/\r?\n+/)
+    .map((line) => line.trim().replace(/^[-•*]\s*/, ''))
+    .filter(Boolean)
+    .filter((line) => !CONFIRM_REQUEST_INTERNAL_NOTE_PATTERN.test(line))
+    .filter((line) => line.length <= 80);
+  const deduped = [];
+  const seen = new Set();
+  for (const line of lines) {
+    const key = line.replace(/\s+/g, ' ');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(line);
+  }
+  return deduped.join('\n').slice(0, maxLength);
+}
+
 export function buildSheetAppendPayload(decision, options = {}) {
   if (!decision || decision.should_write_to_sheet !== true) return null;
   if (!hasRequiredSheetSafetyChecks(decision)) return null;
   const row = decision.sheet_row_candidate || {};
   const equipment = normalizeSheetEquipmentItems(decision);
   if (!equipment.length) return null;
-  const memo = text(row.memo || decision.reason);
-  const extra = text(row.extra_request || decision.suggested_human_review_action || '');
+  const phone = text(row.phone || decision.customer?.phone).trim();
+  if (!hasUsableConfirmRequestPhone(phone)) return null;
+  const memo = sanitizeConfirmRequestFreeText(row.memo || '', { maxLength: 180 });
+  const extra = sanitizeConfirmRequestFreeText(row.extra_request || '', { maxLength: 180 });
+  const dateTime = normalizeConfirmRequestDateTimeFields(row, decision, options);
   const args = {
-    반출일: text(row.start_date || decision.reservation_inquiry?.rental_start),
-    반출시간: text(row.pickup_time || decision.reservation_inquiry?.pickup_time),
-    반납일: text(row.end_date || decision.reservation_inquiry?.rental_end),
-    반납시간: text(row.return_time || decision.reservation_inquiry?.return_time),
+    반출일: dateTime.startDate,
+    반출시간: dateTime.pickupTime,
+    반납일: dateTime.endDate,
+    반납시간: dateTime.returnTime,
     예약자명: text(row.customer_name || decision.customer?.name),
-    연락처: text(row.phone || decision.customer?.phone),
+    연락처: phone,
     할인유형: text(row.discount_type || decision.reservation_inquiry?.discount_type || '일반') || '일반',
     비고: memo,
     추가요청: extra,
@@ -666,6 +927,16 @@ function normalizeCustomerForTask(value) {
     .replace(/\/.*$/, '')
     .replace(/\s+(?:파손|미반납|누락|분실|반납|확인).*$/, '')
     .trim() || normalized;
+}
+
+function conversationCustomerKey(value) {
+  const normalized = normalizeCustomerForTask(value);
+  const withoutStatus = normalized
+    .replace(/^중요\s+/, '')
+    .replace(/\s+\d+\s*$/, '')
+    .trim();
+  const firstKoreanName = withoutStatus.match(/^([가-힣]{2,5})(?:\s+\d+)?(?:\s+|$)/)?.[1];
+  return firstKoreanName || withoutStatus || normalized;
 }
 
 function extractSemanticAnchors(value) {
@@ -735,11 +1006,38 @@ function followUpCombinedText(row = {}) {
   ].map(text).join(' ').normalize('NFKC');
 }
 
+const DOCUMENT_FOLLOW_UP_TYPES = new Set(['contract_document', 'quote_send', 'tax_invoice']);
+const SCHEDULE_FOLLOW_UP_TYPES = new Set(['reservation_review', 'schedule_check', 'sheet_duplicate_check']);
+const SETTLEMENT_FOLLOW_UP_TYPES = new Set(['payment_check']);
+const OPERATIONAL_NON_DOCUMENT_TYPES = new Set(['damage_repair', 'return_extension', 'completed_log']);
+
+function hasScheduleFollowUpSignal(combined = '') {
+  return /(확인요청|가용확인|예약\s*(?:가능|진행|요청|의사|접수|확정|후보)|예약자|스케줄|일정|반출|반납|대여|렌탈|장비\s*예약|입력\s*필요)/.test(combined);
+}
+
+function hasReservationFollowUpSignal(combined = '') {
+  return /(확인요청|가용확인|예약\s*(?:가능|진행|요청|의사|접수|확정|후보)|장비\s*예약|대여\s*가능|렌탈\s*가능|대여\s*할\s*수|대여\s*할수|렌탈\s*할\s*수)/.test(combined);
+}
+
+function hasSettlementFollowUpSignal(combined = '') {
+  return /(입금|결제|카드|정산|환불|미수)/.test(combined);
+}
+
+function hasDamageFollowUpSignal(combined = '') {
+  return /(미반납|누락|분실|파손|손상|수리|고장|회수|경고\s*메시지|배터리)/.test(combined);
+}
+
+function hasDocumentRequestSignal(combined = '') {
+  const docNoun = '(?:세금계산서|현금영수증|계산서|견적서|거래명세서?|계약서|증빙|영수증|서류|사업자등록증|사업자\s*등록증|통장\s*사본)';
+  const docAction = '(?:발송|전송|보내|보내줘|전달|작성|생성|발행|발급|요청|준비|받(?:을|고|아)?|필요|확인)';
+  return new RegExp(`${docNoun}.{0,24}${docAction}|${docAction}.{0,24}${docNoun}`).test(combined);
+}
+
 function isReservationFollowUpTopic(row = {}, combined = followUpCombinedText(row)) {
   const type = String(row.type || row.follow_up_type || '');
   if (type === 'reservation_review') return true;
-  if (!['reply_needed', 'schedule_check'].includes(type)) return false;
-  return /(예약\s*(?:가능|진행|요청|의사|접수)|대여\s*가능|렌탈\s*가능|대여\s*할\s*수|대여\s*할수|렌탈\s*할\s*수|장비\s*예약)/.test(combined);
+  if (!['reply_needed', 'schedule_check', 'completed_log'].includes(type)) return false;
+  return hasReservationFollowUpSignal(combined);
 }
 
 function stableFollowUpType(row = {}, combined = followUpCombinedText(row)) {
@@ -832,11 +1130,12 @@ function priorityRank(value) {
 function routeRankForMerge(row = {}) {
   const type = String(row.type || '');
   const combined = followUpCombinedText(row);
-  if (['contract_document', 'quote_send', 'tax_invoice'].includes(type) || /(계약|견적|서류|거래명세|세금계산)/.test(combined)) return 0;
-  if (type === 'payment_check' || /(입금|결제|카드|정산|환불|미수)/.test(combined)) return 1;
-  if (['reservation_review', 'schedule_check', 'sheet_duplicate_check'].includes(type) || /(예약|확인요청|가용|반출|반납|대여|렌탈)/.test(combined)) return 2;
-  if (type === 'reply_needed') return 3;
-  return 4;
+  if (SCHEDULE_FOLLOW_UP_TYPES.has(type) || isReservationFollowUpTopic(row, combined)) return 0;
+  if (type === 'damage_repair' || type === 'return_extension') return 1;
+  if (DOCUMENT_FOLLOW_UP_TYPES.has(type) || isDocumentFollowUpTopic(type, combined)) return 2;
+  if (SETTLEMENT_FOLLOW_UP_TYPES.has(type) || hasSettlementFollowUpSignal(combined)) return 3;
+  if (type === 'reply_needed') return 4;
+  return 5;
 }
 
 function mergeFollowUpRowGroup(items = []) {
@@ -880,7 +1179,7 @@ function mergeFollowUpRowGroup(items = []) {
 }
 
 function conversationBundleKey(row = {}) {
-  const customer = normalizeCustomerForTask(row.customer_name || row.customerName);
+  const customer = conversationCustomerKey(row.customer_name || row.customerName);
   const room = normalizeKeyPart(row.room_key || row.roomKey, 120);
   if (!customer || customer === 'unknown' || !room || room === 'unknown') return '';
   const type = String(row.type || '');
@@ -891,6 +1190,19 @@ function conversationBundleKey(row = {}) {
 function sameConversationBundle(a = {}, b = {}) {
   const aKey = conversationBundleKey(a);
   const bKey = conversationBundleKey(b);
+  return Boolean(aKey && bKey && aKey === bKey);
+}
+
+function threadConversationBundleKey(row = {}) {
+  const customer = conversationCustomerKey(row.customer_name || row.customerName);
+  const room = normalizeKeyPart(row.room_key || row.roomKey, 120);
+  if (!customer || customer === 'unknown' || !room || room === 'unknown') return '';
+  return ['conversation', room, customer].join(':');
+}
+
+function sameConversationThreadBundle(a = {}, b = {}) {
+  const aKey = threadConversationBundleKey(a);
+  const bKey = threadConversationBundleKey(b);
   return Boolean(aKey && bKey && aKey === bKey);
 }
 
@@ -954,6 +1266,20 @@ export function buildFollowUpRows(decision, job = {}) {
   const conversationSnapshot = {
     latest_customer_message_cluster: text(decision?.latest_customer_message_cluster).slice(0, 1500),
     latest_staff_message: text(decision?.latest_staff_message).slice(0, 1000),
+    rag_usage: decision?.rag_usage && typeof decision.rag_usage === 'object'
+      ? {
+          used: Boolean(decision.rag_usage.used),
+          required_for_auto_send: Boolean(decision.rag_usage.required_for_auto_send),
+          logId: text(decision.rag_usage.logId || decision.rag_usage.log_id).slice(0, 120) || null,
+          confidence: text(decision.rag_usage.confidence).slice(0, 40) || null,
+          knowledgeSource: text(decision.rag_usage.knowledgeSource || decision.rag_usage.knowledge_source).slice(0, 80) || null,
+          usedSources: Array.isArray(decision.rag_usage.usedSources || decision.rag_usage.used_sources)
+            ? (decision.rag_usage.usedSources || decision.rag_usage.used_sources).slice(0, 5)
+            : [],
+          applied_to_reply: Boolean(decision.rag_usage.applied_to_reply),
+          reason: text(decision.rag_usage.reason).slice(0, 500)
+        }
+      : null,
     visible_messages_used: Array.isArray(decision?.visible_messages_used)
       ? decision.visible_messages_used.slice(-5).map((message) => ({
           sender: text(message?.sender).slice(0, 80),
@@ -1001,10 +1327,25 @@ export function buildFollowUpRows(decision, job = {}) {
     });
 }
 
+function isAutomationAuditFollowUpRow(row = {}) {
+  const source = text(row.source || '').trim().toLowerCase();
+  if (source === 'daily_audit' || source === 'automation_audit') return true;
+  const title = text(row.title || row.summary || '');
+  if (/Daily audit|자동화\s*(감사|점검|보고)|감사\s*후속처리/i.test(title)) return true;
+  const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+  return payload.report_only_audit === true || payload.runtime_audit === true;
+}
+
+function filterAutomationAuditFollowUpRows(rows = []) {
+  return (Array.isArray(rows) ? rows : []).filter((row) => !isAutomationAuditFollowUpRow(row));
+}
+
 export async function upsertFollowUpRows(config, rows) {
   if (!rows.length) return { inserted: 0, rows: [] };
+  const taskRows = filterAutomationAuditFollowUpRows(rows);
+  if (!taskRows.length) return { inserted: 0, rows: [], skippedAutomationAudit: rows.length };
   const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
-  const mergedRows = mergeFollowUpRowsByTopic(mergeFollowUpRowsByConversation(rows));
+  const mergedRows = mergeFollowUpRowsByTopic(mergeFollowUpRowsByConversation(taskRows));
   const filteredRows = await filterFollowUpRowsWithClosedHistory(config, mergedRows);
   if (!filteredRows.length) return { inserted: 0, rows: [], skippedClosed: rows.length };
   const activeMergeResult = await mergeFollowUpRowsWithActiveHistory(config, filteredRows);
@@ -1188,7 +1529,10 @@ function calculateVillagePayment(baseAmount, days, discountType = '') {
   ];
   const multiplier = discountRates.reduce((acc, item) => acc * Math.max(0, 1 - (item.rate / 100)), 1);
   const discountedAmount = base * multiplier;
-  const finalVatIncluded = Math.ceil((discountedAmount * 1.1) / 10) * 10;
+  // Avoid floating-point tails (e.g. 50000 * 1.1 = 55000.00000000001)
+  // being rounded up by an extra 10원.
+  const vatIncludedRaw = discountedAmount * 1.1;
+  const finalVatIncluded = Math.ceil((vatIncludedRaw - 1e-6) / 10) * 10;
   return {
     baseAmount: base,
     days: Number(days) || 1,
@@ -1270,7 +1614,11 @@ async function fetchSetMasterPrice(config = {}, name = '') {
   const rows = results.map((entry) => Array.isArray(entry?.data) ? entry.data : []);
   const exact = rows.filter((row) => text(row[0]).trim() === query && parseNumber(row[6], 0) > 0);
   const exactStandalone = exact.find((row) => !text(row[1]).trim());
-  const chosen = exactStandalone || exact[0] || rows.find((row) => parseNumber(row[6], 0) > 0);
+  // GAS search is substring-like: searching a component bundle such as
+  // "메모리*1 / 배터리*2 / ..." can return its parent set row (e.g. 소니 Z90).
+  // For calculation enrichment, do not price non-exact hits as separate billable
+  // items; otherwise expanded components double-count the parent set.
+  const chosen = exactStandalone || exact[0];
   if (!chosen) return null;
   return {
     name: text(chosen[0]).trim() || query,
@@ -1465,12 +1813,40 @@ function slackTypeLabel(type = '') {
   return labels[type] || type || '후속처리';
 }
 
+function isDocumentFollowUpTopic(type = '', combined = '') {
+  if (DOCUMENT_FOLLOW_UP_TYPES.has(type)) return true;
+  // 서류발송 채널은 순수 서류요청만. 구조화 타입이 예약/정산/파손/반납/완료기록이면
+  // 본문에 "견적서" 같은 단어가 섞여도 내부 근거/후속 메모로 보고 문서 라우팅을 막는다.
+  if (SCHEDULE_FOLLOW_UP_TYPES.has(type) || SETTLEMENT_FOLLOW_UP_TYPES.has(type) || OPERATIONAL_NON_DOCUMENT_TYPES.has(type)) return false;
+  if (hasDamageFollowUpSignal(combined)) return false;
+  return hasDocumentRequestSignal(combined);
+}
+
+function isKakaoTargetMismatchDiagnostic(row = {}, combined = followUpCombinedText(row)) {
+  const type = String(row.type || '');
+  if (!['reply_needed', 'completed_log'].includes(type)) return false;
+  return /(대상\s*카카오\s*대화\s*(?:확인\s*불가|불일치)|현재\s*열린\s*카카오\s*대화.*(?:보이지\s*않|불일치)|잡\s*프리뷰.*현재\s*열린\s*카카오\s*대화)/.test(combined);
+}
+
 export function routeFollowUpToSlack(row = {}, config = {}) {
   const type = String(row.type || '');
+  const combined = followUpCombinedText(row);
   let route = 'other';
-  if (['reservation_review', 'schedule_check', 'sheet_duplicate_check'].includes(type)) route = 'schedule';
-  if (['quote_send', 'tax_invoice', 'contract_document', 'price_review'].includes(type)) route = 'document';
-  if (['payment_check'].includes(type)) route = 'settlement';
+  if (!isKakaoTargetMismatchDiagnostic(row, combined)) {
+    if (SCHEDULE_FOLLOW_UP_TYPES.has(type)) route = 'schedule';
+    else if (SETTLEMENT_FOLLOW_UP_TYPES.has(type)) route = 'settlement';
+    else if (type === 'damage_repair') route = 'inventory';
+    else if (type === 'return_extension') route = 'schedule';
+    else if (type === 'completed_log') {
+      if (hasScheduleFollowUpSignal(combined)) route = 'schedule';
+      else if (hasSettlementFollowUpSignal(combined)) route = 'settlement';
+      else if (hasDamageFollowUpSignal(combined)) route = 'inventory';
+    } else if (DOCUMENT_FOLLOW_UP_TYPES.has(type)) route = 'document';
+    else if (hasDamageFollowUpSignal(combined)) route = 'inventory';
+    else if (isDocumentFollowUpTopic(type, combined)) route = 'document';
+    else if (isReservationFollowUpTopic(row, combined)) route = 'schedule';
+    else if (hasSettlementFollowUpSignal(combined)) route = 'settlement';
+  }
   const channels = {
     ...DEFAULT_SLACK_CHANNELS,
     ...(config.slackChannels || {})
@@ -1577,10 +1953,145 @@ function latestCustomerChatText(row = {}) {
   return cleanSlackChatText(payload.latest_customer_message_cluster || evidenceCustomer?.message || '');
 }
 
+function compactSheetRequestLine(row = {}) {
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+  const request = payload.sheet_request && typeof payload.sheet_request === 'object' ? payload.sheet_request : null;
+  if (!request) return '';
+  const period = [
+    request.반출일,
+    request.반출시간,
+    request.반납일 ? '~' : '',
+    request.반납일,
+    request.반납시간
+  ].map(text).filter(Boolean).join(' ').replace(/\s+~\s+/g, '~').trim();
+  const equipment = Array.isArray(request.장비)
+    ? request.장비
+      .map((item) => {
+        const name = text(item?.이름 || item?.name || item?.item);
+        if (!name) return '';
+        const qty = text(item?.수량 || item?.quantity || item?.qty);
+        return `${name}${qty ? ` x${qty}` : ''}`;
+      })
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(', ')
+    : text(request.장비or세트명 || request.equipment || request.item);
+  return [period, equipment].filter(Boolean).join(' · ');
+}
+
+function availabilityStatusLabel(status = '') {
+  if (status === 'available') return '전체 가용';
+  if (status === 'warning') return '확인 필요';
+  if (status === 'unavailable') return '불가/가용0';
+  return '결과 미확인';
+}
+
+function availabilityProblemRank(row = {}) {
+  const combined = `${row.result || ''} ${row.detail || ''}`.normalize('NFKC');
+  if (/(❌|가용\s*0|가용0|사용\s*중|전량\s*사용|불가)/.test(combined)) return 0;
+  if (/(⚠️|❓|부족|겹침|모델\s*선택|확인\s*필요|미등록)/.test(combined)) return 1;
+  if (/(✅|가용\s*[1-9]\d*)/.test(combined)) return 2;
+  return 3;
+}
+
+function formatAvailabilityRowForSlack(row = {}) {
+  const name = text(row.equipment || row.name || row.item || '장비명 미확인');
+  const qty = text(row.quantity || row.qty);
+  const result = text(row.result || '결과 없음');
+  const detail = text(row.detail);
+  const line = `${name}${qty ? ` x${qty}` : ''}: ${result}${detail ? ` · ${detail}` : ''}`;
+  return splitLongMobileLine(line, 68).slice(0, 1).join('');
+}
+
+function formatSlackAvailabilityBriefLines(row = {}) {
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+  const availability = payload.sheet_availability && typeof payload.sheet_availability === 'object'
+    ? payload.sheet_availability
+    : null;
+  if (!availability) return [];
+  const rows = Array.isArray(availability.results) ? availability.results : [];
+  const header = [
+    availability.reqID ? availability.reqID : 'RQ 미확인',
+    availability.duplicate ? '기존 중복' : '',
+    availabilityStatusLabel(availability.status)
+  ].filter(Boolean).join(' · ');
+  const resultLines = rows
+    .slice()
+    .sort((a, b) => availabilityProblemRank(a) - availabilityProblemRank(b))
+    .map(formatAvailabilityRowForSlack)
+    .filter(Boolean);
+  const visible = resultLines.slice(0, 3);
+  if (resultLines.length > visible.length) visible.push(`외 ${resultLines.length - visible.length}개`);
+  return [header, ...visible];
+}
+
+function compactSheetRequestParts(row = {}) {
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+  const request = payload.sheet_request && typeof payload.sheet_request === 'object' ? payload.sheet_request : null;
+  const evidence = Array.isArray(row.evidence) ? row.evidence.map(text).filter(Boolean).join('\n') : '';
+  let period = '';
+  let equipment = '';
+
+  if (request) {
+    period = [
+      request.반출일,
+      request.반출시간,
+      request.반납일 ? '~' : '',
+      request.반납일,
+      request.반납시간
+    ].map(text).filter(Boolean).join(' ').replace(/\s+~\s+/g, ' ~ ').trim();
+    if (Array.isArray(request.장비)) {
+      const items = request.장비
+        .map((item) => {
+          const name = text(item?.이름 || item?.name || item?.item);
+          if (!name) return '';
+          const qty = text(item?.수량 || item?.quantity || item?.qty);
+          return `${name}${qty ? ` x${qty}` : ''}`;
+        })
+        .filter(Boolean);
+      equipment = [
+        items.slice(0, 4).join(', '),
+        items.length > 4 ? `외 ${items.length - 4}개` : ''
+      ].filter(Boolean).join(', ');
+    } else {
+      equipment = text(request.장비or세트명 || request.equipment || request.item);
+    }
+  }
+
+  if (!period) period = evidence.match(/기간:\s*([^\n]+)/)?.[1]?.trim() || '';
+  if (!equipment) equipment = evidence.match(/장비:\s*([^\n]+)/)?.[1]?.trim() || '';
+  return { period, equipment };
+}
+
+function formatSlackEquipmentPeriodBlock(row = {}, { includeEquipment = true } = {}) {
+  const { period, equipment } = compactSheetRequestParts(row);
+  const lines = [];
+  if (includeEquipment && equipment) lines.push(`장비: ${equipment}`);
+  if (period) lines.push(`기간: ${period}`);
+  const latest = latestCustomerChatText(row);
+  if (!lines.length && latest && /(예약|가용|가능|대여|렌탈|반출|반납|촬영|일정)/.test(latest)) {
+    lines.push(`요청 원문: ${latest}`);
+  }
+  return lines.map((line) => truncateSlackText(line, 320)).join('\n');
+}
+
 function conciseSlackActionLine(row = {}) {
   const calc = row.payload?.operational_calculation;
   if (calc?.unresolved?.length) return `미확인 항목 확인: ${calc.unresolved.slice(0, 2).join(', ')}`;
   if (calc?.lines?.length) return '계산 금액 대조 후 파일 발송';
+  const availability = row.payload?.sheet_availability;
+  if (availability) {
+    if (availability.status === 'available') return '가능 안내 후 예약 진행 여부 확인';
+    if (availability.status === 'warning') return '경고/부족 항목 확인 후 대안 또는 추가확인 안내';
+    if (availability.status === 'unavailable') return '불가 항목 확인 후 대체 일정/장비 안내';
+    const detailed = text(row.recommended_action)
+      .replace(/확인요청\s*RQ-\d{6}-\d{3}\s*/gi, '')
+      .replace(/\bRQ-\d{6}-\d{3}\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (detailed && !/^가용 결과 확인 후 답변$/.test(detailed)) return truncateSlackText(detailed, 180);
+    return 'RQ I/J 결과 재확인 후 안내';
+  }
   const type = String(row.type || '');
   if (['quote_send', 'contract_document'].includes(type)) return '서류/파일 확인 후 발송';
   if (type === 'tax_invoice') return '세금계산서 정보 확인 후 발행';
@@ -1593,20 +2104,63 @@ function conciseSlackActionLine(row = {}) {
   return cleanSlackBriefText(row.recommended_action).slice(0, 80);
 }
 
-function formatSlackBriefSummary(row = {}) {
+function priorityLabelForSlack(priority = '') {
+  if (priority === 'urgent') return '긴급';
+  if (priority === 'high') return '중요';
+  if (priority === 'normal') return '보통';
+  if (priority === 'low') return '낮음';
+  return text(priority || '보통');
+}
+
+function formatSlackProblemBlock(row = {}) {
+  const availability = row.payload?.sheet_availability;
+  if (availability) {
+    const lines = [];
+    if (availability.duplicate) lines.push('기존 확인요청에서 읽은 가용확인 결과입니다.');
+    if (availability.status === 'available') lines.push('요청 일정은 전체 가용으로 확인됐습니다.');
+    else if (availability.status === 'warning') lines.push('일부 항목에 겹침/부족/확인 필요가 있습니다.');
+    else if (availability.status === 'unavailable') lines.push('불가 또는 가용0 항목이 있습니다.');
+    else lines.push('가용확인 결과 판독이 필요합니다.');
+    return lines.join('\n');
+  }
   const customerAsk = latestCustomerChatText(row);
-  const action = conciseSlackActionLine(row);
-  const fallback = splitReadableClauses(row.summary || row.title, 2)
+  const summaryLines = splitReadableClauses(row.summary || row.title, 3)
     .map(cleanSlackBriefText)
-    .find((line) => line && !/^(카카오 화면|확인요청 조회|세트마스터 조회|계약마스터|스케줄상세)/.test(line));
-  const pieces = [
-    customerAsk ? `고객 요청: ${customerAsk}` : fallback,
-    action ? `할 일: ${action}` : ''
-  ].filter(Boolean).slice(0, 2);
-  return pieces
-    .map((line) => splitLongMobileLine(line, 54).slice(0, 2).join('\n  '))
-    .map((line) => `• ${escapeSlackText(line)}`)
-    .join('\n\n') || `• ${truncateSlackText(row.title || row.summary, 120)}`;
+    .filter((line) => line && !/^(카카오 화면|확인요청 조회|세트마스터 조회|계약마스터|스케줄상세)/.test(line));
+  const lines = [];
+  if (customerAsk) lines.push(`고객 요청: ${customerAsk}`);
+  for (const line of summaryLines) {
+    if (!lines.some((existing) => existing.includes(line) || line.includes(existing.replace(/^고객 요청:\s*/, '')))) {
+      lines.push(line);
+    }
+  }
+  return lines.slice(0, 4).map((line) => truncateSlackText(line, 360)).join('\n');
+}
+
+function formatSlackCardTitle(row = {}, typeLabel = '') {
+  const customer = text(row.customer_name || '').trim();
+  return (customer || typeLabel || cleanSlackBriefText(row.title || '') || '후속처리').slice(0, 150);
+}
+
+function formatSlackBriefSummary(row = {}, { typeLabel = '', priorityLabel = '' } = {}) {
+  const availabilityLines = formatSlackAvailabilityBriefLines(row);
+  const equipmentPeriod = formatSlackEquipmentPeriodBlock(row, { includeEquipment: availabilityLines.length <= 1 });
+  const action = conciseSlackActionLine(row);
+  const statusLines = [
+    [typeLabel || slackTypeLabel(row.type), priorityLabel || priorityLabelForSlack(row.priority)].filter(Boolean).join(' · '),
+    availabilityLines[0] || ''
+  ].filter(Boolean);
+  const detailLines = [
+    equipmentPeriod,
+    ...availabilityLines.slice(1, 5).map((line) => `결과: ${line}`)
+  ].filter(Boolean);
+  const sections = [
+    statusLines.length ? `⚠️ 분류/상태\n${statusLines.join('\n')}` : '',
+    `🧩 문제\n${formatSlackProblemBlock(row) || truncateSlackText(row.summary || row.title, 240)}`,
+    detailLines.length ? `🎒 장비 / 📅 기간\n${detailLines.join('\n')}` : '',
+    action ? `➡️ 다음\n${truncateSlackText(action, 360)}` : ''
+  ];
+  return sections.filter(Boolean).join('\n\n');
 }
 
 function slackSpeakerLabel(sender = '') {
@@ -1625,22 +2179,21 @@ function formatSlackRecentChat(row = {}) {
     .map((message) => {
       const body = cleanSlackChatText(message?.message).replace(/\n+/g, ' / ');
       if (!body) return '';
-      return `• ${slackSpeakerLabel(message?.sender)}: ${escapeSlackText(splitLongMobileLine(body, 48).slice(0, 1).join('\n  '))}`;
+      return `• ${slackSpeakerLabel(message?.sender)}: ${truncateSlackText(body, 240)}`;
     })
     .filter(Boolean)
-    .slice(-2);
+    .slice(-3);
   if (lines.length) return lines.join('\n\n');
   const latest = cleanSlackChatText(payload.latest_customer_message_cluster || '');
-  if (latest) return splitLongMobileLine(latest, 58).slice(0, 3).map((line) => `• 고객: ${escapeSlackText(line)}`).join('\n\n');
+  if (latest) return `• 고객: ${truncateSlackText(latest, 320)}`;
   return '';
 }
 
 export function buildSlackFollowUpMessage(row = {}, options = {}) {
   const route = options.route || routeFollowUpToSlack(row, options.config || {});
   const typeLabel = slackTypeLabel(row.type);
-  const priorityLabel = row.priority === 'urgent' ? '긴급' : row.priority === 'high' ? '중요' : row.priority || 'normal';
-  const title = truncateSlackText(row.title || `${typeLabel} 후속처리`, 140);
-  const customer = truncateSlackText(row.customer_name || '고객명 미확인', 120);
+  const priorityLabel = priorityLabelForSlack(row.priority);
+  const title = formatSlackCardTitle(row, typeLabel);
   const draft = text(row.suggested_reply_draft || '').trim();
   const calculationBlock = formatSlackCalculationBlock(row);
   const recentChatBlock = formatSlackRecentChat(row);
@@ -1648,16 +2201,10 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
     {
       type: 'header',
       text: { type: 'plain_text', text: title.slice(0, 150), emoji: true }
-    },
-    {
-      type: 'context',
-      elements: [
-        { type: 'mrkdwn', text: `${customer} · ${truncateSlackText(typeLabel, 80)} · ${truncateSlackText(priorityLabel, 80)}` }
-      ]
     }
   ];
   if (row.summary || row.recommended_action || recentChatBlock) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*⚡ 핵심*\n${formatSlackBriefSummary(row)}` } });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*처리 요약*\n${formatSlackBriefSummary(row, { typeLabel, priorityLabel })}` } });
   }
   if (recentChatBlock) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 최근 대화*\n${recentChatBlock}` } });
@@ -1766,6 +2313,43 @@ async function mergeFollowUpPayload(config, rowId, payloadPatch = {}, extraPatch
   return Array.isArray(rows) ? rows[0] : rows;
 }
 
+async function findSlackThreadParentForRow(config = {}, row = {}, route = {}, channelId = '') {
+  if (config.slackThreadFollowUpsEnabled !== true) return null;
+  const roomKey = text(row.room_key || row.roomKey || '').trim();
+  if (!roomKey || !row?.id || !config.supabaseUrl || !config.serviceRoleKey) return null;
+  const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
+  const query = [
+    'select=id,room_key,customer_name,type,status,payload,created_at,updated_at',
+    `room_key=eq.${encodeURIComponent(roomKey)}`,
+    `id=neq.${encodeURIComponent(row.id)}`,
+    'order=updated_at.desc',
+    'limit=30'
+  ].join('&');
+  const candidates = await supabaseFetch(config, `${table}?${query}`, {
+    headers: supabaseHeaders(config)
+  });
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    if (!sameConversationThreadBundle(candidate, row)) continue;
+    const delivery = candidate?.payload?.slack_delivery && typeof candidate.payload.slack_delivery === 'object'
+      ? candidate.payload.slack_delivery
+      : {};
+    if (delivery.status !== 'delivered') continue;
+    const deliveredChannel = text(delivery.channel_id || '').trim();
+    const deliveredName = text(delivery.channel_name || '').trim();
+    if (deliveredChannel && channelId && deliveredChannel !== channelId) continue;
+    if (!deliveredChannel && deliveredName && route?.channel && deliveredName !== route.channel) continue;
+    const threadTs = text(delivery.thread_ts || delivery.message_ts || '').trim();
+    if (!threadTs) continue;
+    return {
+      rowId: candidate.id,
+      threadTs,
+      channelId: deliveredChannel || channelId,
+      channelName: deliveredName || route.channel || ''
+    };
+  }
+  return null;
+}
+
 export async function postSlackFollowUpRow(config = {}, row = {}) {
   if (!row?.id) return { skipped: true, reason: 'missing_follow_up_id' };
   if (row.status && ['done', 'dismissed'].includes(row.status)) return { skipped: true, reason: 'closed_follow_up' };
@@ -1812,20 +2396,28 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
   }
 
   const channelId = await resolveSlackChannelId(route.channel, config);
-  const posted = await slackApi(config, 'chat.postMessage', {
+  const threadParent = await findSlackThreadParentForRow(config, enrichedRow, route, channelId);
+  const postPayload = {
     channel: channelId,
     text: message.text,
     blocks: message.blocks,
     unfurl_links: false,
     unfurl_media: false
-  });
+  };
+  if (threadParent?.threadTs) {
+    postPayload.thread_ts = threadParent.threadTs;
+    postPayload.reply_broadcast = false;
+  }
+  const posted = await slackApi(config, 'chat.postMessage', postPayload);
   const updated = await mergeFollowUpPayload(config, row.id, {
     slack_delivery: {
       status: 'delivered',
       channel_name: route.channel,
       channel_id: posted.channel || channelId,
       message_ts: posted.ts || null,
-      thread_ts: posted.message?.thread_ts || posted.ts || null,
+      thread_ts: threadParent?.threadTs || posted.message?.thread_ts || posted.ts || null,
+      is_thread_reply: Boolean(threadParent?.threadTs),
+      parent_follow_up_id: threadParent?.rowId || null,
       delivered_at: new Date().toISOString(),
       error: null
     }
@@ -1834,14 +2426,16 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
     recommended_action: enrichedRow.recommended_action,
     evidence: enrichedRow.evidence
   });
-  return { ok: true, rowId: row.id, route, channelId, ts: posted.ts, updated };
+  return { ok: true, rowId: row.id, route, channelId, ts: posted.ts, threadTs: threadParent?.threadTs || posted.message?.thread_ts || posted.ts, updated };
 }
 
 export async function deliverSlackFollowUpRows(config = {}, rows = []) {
   if (!config.slackFollowUpEnabled) return { skipped: true, reason: 'disabled', results: [] };
   if (!rows.length) return { skipped: true, reason: 'no_rows', results: [] };
+  const deliverableRows = filterAutomationAuditFollowUpRows(rows);
+  if (!deliverableRows.length) return { skipped: true, reason: 'automation_audit_rows', results: [] };
   const results = [];
-  for (const row of rows) {
+  for (const row of deliverableRows) {
     try {
       results.push(await postSlackFollowUpRow(config, row));
     } catch (error) {
@@ -1891,16 +2485,20 @@ async function filterFollowUpRowsWithClosedHistory(config, rows) {
 async function mergeFollowUpRowsWithActiveHistory(config, rows) {
   if (!rows.length) return { rowsToInsert: [], updatedRows: [] };
   const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
-  const customerNames = new Set(rows.map((row) => normalizeCustomerForTask(row.customer_name)).filter((value) => value && value !== 'unknown'));
+  const customerNames = new Set(rows.map((row) => conversationCustomerKey(row.customer_name)).filter((value) => value && value !== 'unknown'));
   const roomKeys = new Set(rows.map((row) => normalizeKeyPart(row.room_key, 120)).filter((value) => value && value !== 'unknown'));
-  if (!customerNames.size || !roomKeys.size) return { rowsToInsert: rows, updatedRows: [] };
+  if (!roomKeys.size) return { rowsToInsert: rows, updatedRows: [] };
 
   const activeRows = await supabaseFetch(config, `${table}?select=*&status=not.in.(done,dismissed)&order=updated_at.desc&limit=1000`, {
     headers: supabaseHeaders(config)
   });
   const scopedActiveRows = (Array.isArray(activeRows) ? activeRows : [])
-    .filter((row) => customerNames.has(normalizeCustomerForTask(row.customer_name)))
-    .filter((row) => roomKeys.has(normalizeKeyPart(row.room_key, 120)));
+    .filter((row) => roomKeys.has(normalizeKeyPart(row.room_key, 120)))
+    .filter((row) => {
+      if (!customerNames.size) return true;
+      const activeCustomer = conversationCustomerKey(row.customer_name);
+      return customerNames.has(activeCustomer);
+    });
 
   const rowsToInsert = [];
   const updatedRows = [];
@@ -1981,10 +2579,12 @@ function requireConfig() {
     gasApiUrl: process.env.GAS_API_URL || DEFAULT_GAS_API_URL,
     sheetApiKey: process.env.SHEET_API_KEY || DEFAULT_SHEET_API_KEY,
     hermesCommand: resolveHermesCommand(process.env.HERMES_WORKER_COMMAND || 'hermes'),
+    hermesProfile: process.env.HERMES_WORKER_PROFILE || '',
     hermesTimeoutMs: Number(process.env.HERMES_WORKER_TIMEOUT_MS || process.env.WORKER_TIMEOUT_MS || '240000'),
     ensureKakaoTab: process.env.KAKAO_WORKER_ENSURE_TAB !== '0',
     kakaoChannelManagerUrl: process.env.KAKAO_CHANNEL_MANAGER_URL || DEFAULT_KAKAO_CHANNEL_MANAGER_URL,
     openTargetChat: process.env.KAKAO_WORKER_OPEN_TARGET_CHAT !== '0',
+    searchTargetChat: process.env.KAKAO_WORKER_SEARCH_TARGET_CHAT !== '0',
     cuaDriverCommand: resolveCuaDriverCommand(process.env.CUA_DRIVER_COMMAND || 'cua-driver'),
     workerControlMode: normalizeKakaoWorkerControlMode(process.env.KAKAO_WORKER_CONTROL_MODE),
     cuaMinIdleSeconds: Math.max(0, numberFromEnv(process.env.KAKAO_CUA_MIN_IDLE_SECONDS, 0)),
@@ -1992,15 +2592,22 @@ function requireConfig() {
     villageAiKakaoSkillSecret: process.env.VILLAGE_AI_KAKAO_SKILL_SECRET || process.env.KAKAO_SKILL_SECRET || '',
     ragTimeoutMs: Number(process.env.VILLAGE_AI_RAG_TIMEOUT_MS || 30000) || 30000,
     followUpTable: process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items',
+    followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
     autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
     autoSendLogPath: process.env.AI_WORKER_AUTO_SEND_LOG || path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson'),
     autoSendTimeoutMs: Number(process.env.AI_WORKER_AUTO_SEND_TIMEOUT_MS || 20000) || 20000,
-    slackFollowUpEnabled: process.env.SLACK_FOLLOW_UP_ENABLED === '1',
+    requireAutomationChromeProfile: process.env.KAKAO_REQUIRE_AUTOMATION_CHROME_PROFILE === '1',
+    customerDocumentAssetPaths: normalizeKakaoAttachmentPaths(process.env.VILLAGE_CUSTOMER_DOCUMENT_ATTACHMENT_PATHS).length
+      ? normalizeKakaoAttachmentPaths(process.env.VILLAGE_CUSTOMER_DOCUMENT_ATTACHMENT_PATHS)
+      : defaultCustomerDocumentAssetPaths(),
+    slackFollowUpEnabled: process.env.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1',
+    slackThreadFollowUpsEnabled: process.env.SLACK_FOLLOW_UP_THREAD_REPLIES !== '0',
     slackBotToken: process.env.SLACK_BOT_TOKEN || '',
     slackChannels: {
       schedule: process.env.SLACK_CHANNEL_SCHEDULE_AGENT || DEFAULT_SLACK_CHANNELS.schedule,
       document: process.env.SLACK_CHANNEL_DOCUMENT_AGENT || DEFAULT_SLACK_CHANNELS.document,
       settlement: process.env.SLACK_CHANNEL_SETTLEMENT_AGENT || DEFAULT_SLACK_CHANNELS.settlement,
+      inventory: process.env.SLACK_CHANNEL_INVENTORY_AGENT || DEFAULT_SLACK_CHANNELS.inventory,
       other: process.env.SLACK_CHANNEL_OTHER_AGENT || DEFAULT_SLACK_CHANNELS.other
     }
   };
@@ -2122,6 +2729,7 @@ export async function appendToSheet(config, payload) {
 function classifyGasSheetError(message) {
   const value = text(message);
   if (/중복 요청|이미 예약 등록|duplicate/i.test(value)) return 'duplicate_request';
+  if (/NO_CONTACT|연락처.*(필요|없|불가|불가능)|예약 등록.*연락처/i.test(value)) return 'no_contact';
   if (/데이터 확인 규칙|validation|invalid/i.test(value)) return 'sheet_validation';
   return 'gas_rejected';
 }
@@ -2431,6 +3039,7 @@ export function buildSheetFailureFollowUpRows(decision, job = {}, sheetResult = 
     .digest('hex')
     .slice(0, 16);
   const isValidation = sheetResult.error_type === 'sheet_validation';
+  const isNoContact = sheetResult.error_type === 'no_contact';
   return [{
     follow_up_key: [
       normalizeKeyPart(roomKey, 120),
@@ -2445,10 +3054,14 @@ export function buildSheetFailureFollowUpRows(decision, job = {}, sheetResult = 
     type: 'reservation_review',
     priority: isValidation ? 'urgent' : 'high',
     status: 'open',
-    title: `${customerName} 확인요청 시트 입력 확인 필요`,
+    title: isNoContact ? `${customerName} 연락처 요청 필요` : `${customerName} 확인요청 시트 입력 확인 필요`,
     summary: `GAS가 확인요청 입력을 거절했습니다: ${error}`,
-    recommended_action: '날짜/시간/장비명/드롭다운 값을 확인한 뒤 확인요청을 수동 수정하거나 고객에게 필요한 정보를 다시 확인하세요.',
-    suggested_reply_draft: '감독님, 확인 후 바로 안내드리겠습니다.',
+    recommended_action: isNoContact
+      ? '고객에게 연락처를 먼저 요청하세요. 연락처가 확인되기 전에는 확인요청/예약 등록을 진행하지 마세요.'
+      : '날짜/시간/장비명/드롭다운 값을 확인한 뒤 확인요청을 수동 수정하거나 고객에게 필요한 정보를 다시 확인하세요.',
+    suggested_reply_draft: isNoContact
+      ? '감독님, 예약 등록은 연락처가 있어야 가능해서 먼저 연락처 부탁드립니다. 연락처 확인되면 바로 이어서 확인 도와드리겠습니다.'
+      : '감독님, 확인 후 바로 안내드리겠습니다.',
     evidence: [requestSummary, error].filter(Boolean).slice(0, 12),
     blocking_reason: error,
     due_hint: 'now',
@@ -2463,8 +3076,11 @@ export function buildSheetFailureFollowUpRows(decision, job = {}, sheetResult = 
   }];
 }
 
-export function buildHermesArgs(prompt) {
-  return ['chat', '--yolo', '-Q', '-t', 'terminal,computer_use,vision', '-q', prompt];
+export function buildHermesArgs(prompt, config = {}) {
+  const args = [];
+  if (config.hermesProfile) args.push('--profile', config.hermesProfile);
+  args.push('chat', '--yolo', '-Q', '-t', 'terminal,computer_use,vision', '-q', prompt);
+  return args;
 }
 
 export function buildKakaoTabAppleScript() {
@@ -2620,6 +3236,167 @@ async function devtoolsEvaluateOnTarget(target, expression, {
   }
 }
 
+async function devtoolsCdpCallOnTarget(target, method, params = {}, {
+  timeoutMs = 15000,
+  WebSocketImpl = globalThis.WebSocket
+} = {}) {
+  if (!target?.webSocketDebuggerUrl) throw new Error('DevTools target is missing webSocketDebuggerUrl');
+  if (!WebSocketImpl) throw new Error('WebSocket is unavailable for Chrome DevTools fallback');
+  const ws = new WebSocketImpl(target.webSocketDebuggerUrl);
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    try { ws.close?.(); } catch {}
+  };
+  const opened = new Promise((resolve, reject) => {
+    if (typeof ws.addEventListener === 'function') {
+      ws.addEventListener('open', resolve, { once: true });
+      ws.addEventListener('error', reject, { once: true });
+    } else {
+      ws.on('open', resolve);
+      ws.on('error', reject);
+    }
+  });
+  try {
+    await Promise.race([
+      opened,
+      timeoutPromise(timeoutMs, `Chrome DevTools websocket open timed out after ${timeoutMs}ms`)
+    ]);
+    const responsePromise = new Promise((resolve, reject) => {
+      const onMessage = (eventOrData) => {
+        const payload = typeof eventOrData?.data === 'string' ? eventOrData.data : String(eventOrData);
+        const message = JSON.parse(payload);
+        if (message.id === 1) resolve(message);
+      };
+      if (typeof ws.addEventListener === 'function') ws.addEventListener('message', onMessage);
+      else ws.on('message', onMessage);
+      try {
+        ws.send(JSON.stringify({ id: 1, method, params }));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    const response = await Promise.race([
+      responsePromise,
+      timeoutPromise(timeoutMs, `Chrome DevTools ${method} timed out after ${timeoutMs}ms`)
+    ]);
+    if (response.error) throw new Error(`Chrome DevTools ${method} failed: ${response.error.message || JSON.stringify(response.error)}`);
+    return response.result ?? {};
+  } finally {
+    cleanup();
+  }
+}
+
+function buildKakaoRevealFileInputExpression() {
+  return `(${async function kakaoRevealFileInput() {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const existing = [...document.querySelectorAll('input[type="file"]')];
+    if (existing.length) return { inputCount: existing.length, clicked: false, window_title: document.title };
+    const candidates = [...document.querySelectorAll('button, a, label, [role="button"]')];
+    const uploadButton = candidates.find((element) => {
+      const value = [
+        element.innerText,
+        element.textContent,
+        element.getAttribute?.('aria-label'),
+        element.getAttribute?.('title'),
+        element.getAttribute?.('data-testid'),
+        element.className
+      ].join(' ').toLowerCase();
+      return /(파일|사진|이미지|첨부|photo|image|file|attach|upload)/i.test(value);
+    });
+    if (!uploadButton) return { inputCount: 0, clicked: false, reason: 'upload_button_not_found', window_title: document.title };
+    uploadButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    uploadButton.click?.();
+    await sleep(300);
+    return {
+      inputCount: document.querySelectorAll('input[type="file"]').length,
+      clicked: true,
+      window_title: document.title
+    };
+  }.toString()})()`;
+}
+
+function buildKakaoSendPendingAttachmentsExpression(expectedCount = 0) {
+  return `(${async function kakaoSendPendingAttachments(count) {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const inputs = [...document.querySelectorAll('input[type="file"]')];
+    const selectedFileCount = inputs.reduce((sum, input) => sum + (input.files?.length || 0), 0);
+    for (const input of inputs) {
+      if (input.files?.length) {
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+    await sleep(700);
+    const buttons = [...document.querySelectorAll('button')].filter((button) => !button.disabled && button.getAttribute('aria-disabled') !== 'true');
+    const sendButton = [...buttons].reverse().find((button) => (button.innerText || button.textContent || '').trim() === '전송')
+      || [...buttons].reverse().find((button) => String(button.className || '').includes('btn_submit'));
+    if (sendButton) {
+      sendButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      sendButton.click?.();
+      await sleep(1800);
+    }
+    return {
+      selectedFileCount,
+      expectedFileCount: count,
+      sendClicked: Boolean(sendButton),
+      window_title: document.title
+    };
+  }.toString()})(${JSON.stringify(expectedCount)})`;
+}
+
+export async function attachKakaoFilesViaDevtools(target, attachmentPaths = [], {
+  timeoutMs = 20000,
+  evaluateImpl = devtoolsEvaluateOnTarget,
+  cdpCallImpl = devtoolsCdpCallOnTarget
+} = {}) {
+  if (!target?.webSocketDebuggerUrl) return { attached: false, reason: 'conversation_target_missing' };
+  const files = normalizeKakaoAttachmentPaths(attachmentPaths);
+  if (!files.length) return { attached: false, reason: 'no_attachment_paths', files: [] };
+  const missing = files.filter((filePath) => !fs.existsSync(filePath));
+  if (missing.length) return { attached: false, reason: 'attachment_file_missing', files, missing };
+
+  let revealResult = null;
+  try {
+    revealResult = await evaluateImpl(target, buildKakaoRevealFileInputExpression(), { timeoutMs });
+  } catch (error) {
+    revealResult = { error: error.message.slice(0, 500) };
+  }
+
+  const findFileInput = async () => {
+    const doc = await cdpCallImpl(target, 'DOM.getDocument', { depth: -1, pierce: true }, { timeoutMs });
+    const rootNodeId = doc?.root?.nodeId;
+    if (!rootNodeId) return 0;
+    const query = await cdpCallImpl(target, 'DOM.querySelector', { nodeId: rootNodeId, selector: 'input[type="file"]' }, { timeoutMs });
+    return Number(query?.nodeId || 0);
+  };
+
+  let nodeId = await findFileInput();
+  if (!nodeId && !revealResult?.clicked) {
+    revealResult = await evaluateImpl(target, buildKakaoRevealFileInputExpression(), { timeoutMs }).catch((error) => ({ error: error.message.slice(0, 500) }));
+    nodeId = await findFileInput();
+  }
+  if (!nodeId) {
+    return { attached: false, reason: 'file_input_not_found', files, revealResult };
+  }
+
+  await cdpCallImpl(target, 'DOM.setFileInputFiles', { nodeId, files }, { timeoutMs });
+  const sendResult = await evaluateImpl(target, buildKakaoSendPendingAttachmentsExpression(files.length), { timeoutMs })
+    .catch((error) => ({ sendClicked: false, error: error.message.slice(0, 500) }));
+  const selectedFileCount = Number(sendResult?.selectedFileCount || 0);
+  const attached = selectedFileCount >= files.length && sendResult?.sendClicked !== false;
+  return {
+    attached,
+    reason: attached ? 'files_selected_and_send_clicked' : 'attachment_send_not_verified',
+    files,
+    fileCount: files.length,
+    inputNodeId: nodeId,
+    revealResult,
+    sendResult
+  };
+}
+
 async function devtoolsFetchTextWithFallbackMethod(baseUrl, pathname, options = {}) {
   try {
     return await devtoolsFetchText(baseUrl, pathname, { ...options, method: 'PUT' });
@@ -2638,8 +3415,7 @@ export async function ensureKakaoChannelManagerTabViaDevtools({
   const targets = await devtoolsFetchJson(cdpBaseUrl, '/json/list', { fetchImpl, timeoutMs });
   const existing = pickKakaoMainListTarget(Array.isArray(targets) ? targets : []);
   if (existing?.id) {
-    await devtoolsFetchTextWithFallbackMethod(cdpBaseUrl, `/json/activate/${encodeURIComponent(existing.id)}`, { fetchImpl, timeoutMs });
-    return { status: 'focused_list_via_devtools', targetId: existing.id, url: existing.url || '' };
+    return { status: 'ready_list_via_devtools', targetId: existing.id, url: existing.url || '' };
   }
 
   const newTargetBody = await devtoolsFetchTextWithFallbackMethod(
@@ -3087,8 +3863,8 @@ function extractKakaoConversationEvidenceFromText(bodyText = '', { title = '', h
   };
 }
 
-function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = []) {
-  return `(${async function kakaoSearchAndOpen(searchTermsArg, hintsArg) {
+function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = [], { allowSearch = true } = {}) {
+  return `(${async function kakaoSearchAndOpen(searchTermsArg, hintsArg, allowSearchArg) {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
     const input = document.querySelector('input[placeholder*="채팅방 이름"], input[name="keyword"], input.tf_g');
@@ -3113,6 +3889,7 @@ function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = []) {
     let usedSearchTerm = null;
     const tried = [];
     if (!row) {
+      if (!allowSearchArg) return { ok: false, status: 'visible_chat_row_not_found_search_disabled', tried };
       if (!input) return { ok: false, status: 'chat_search_input_not_found' };
       for (const term of (searchTermsArg || [])) {
         const cleanTerm = normalize(term);
@@ -3138,7 +3915,7 @@ function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = []) {
     }
     await sleep(1500);
     return { ok: true, status: 'clicked_chat_row_via_devtools', searchTerm: usedSearchTerm, tried, clickedText };
-  }.toString()})(${JSON.stringify(searchTerms)}, ${JSON.stringify(hints)})`;
+  }.toString()})(${JSON.stringify(searchTerms)}, ${JSON.stringify(hints)}, ${JSON.stringify(Boolean(allowSearch))})`;
 }
 
 function buildKakaoConversationTextExpression() {
@@ -3149,7 +3926,8 @@ export async function openKakaoTargetChatViaDevtools(job, {
   cdpBaseUrl = kakaoDevtoolsBaseUrlFromEnv(),
   timeoutMs = 20000,
   fetchImpl = fetch,
-  evaluateImpl = devtoolsEvaluateOnTarget
+  evaluateImpl = devtoolsEvaluateOnTarget,
+  allowSearch = process.env.KAKAO_WORKER_SEARCH_TARGET_CHAT !== '0'
 } = {}) {
   const hints = extractNavigationHints(job);
   if (!hints.length) return { status: 'no_navigation_hints' };
@@ -3181,14 +3959,15 @@ export async function openKakaoTargetChatViaDevtools(job, {
   const mainTarget = pickKakaoMainListTarget(targetList);
   if (!mainTarget) return { status: 'main_list_target_not_found', hints };
   const searchTerms = buildKakaoChatSearchTerms(hints);
-  const openResult = await evaluateImpl(mainTarget, buildKakaoSearchAndOpenExpression(searchTerms, hints), { timeoutMs });
+  const openResult = await evaluateImpl(mainTarget, buildKakaoSearchAndOpenExpression(searchTerms, hints, { allowSearch }), { timeoutMs });
   if (!openResult?.ok) {
     return {
       status: openResult?.status || 'devtools_search_failed',
       hints,
       via_devtools: true,
       search: {
-        searched: true,
+        searched: Boolean(allowSearch),
+        disabled: !allowSearch,
         search_terms: searchTerms,
         tried: openResult?.tried || []
       }
@@ -3202,7 +3981,8 @@ export async function openKakaoTargetChatViaDevtools(job, {
       hints,
       via_devtools: true,
       search: {
-        searched: true,
+        searched: Boolean(allowSearch),
+        disabled: !allowSearch,
         search_term: openResult.searchTerm || null,
         search_terms: searchTerms,
         tried: openResult.tried || []
@@ -3228,7 +4008,8 @@ export async function openKakaoTargetChatViaDevtools(job, {
       webSocketDebuggerUrl: conversationTarget.webSocketDebuggerUrl
     },
     search: {
-      searched: true,
+      searched: Boolean(allowSearch),
+      disabled: !allowSearch,
       search_term: openResult.searchTerm || null,
       search_terms: searchTerms,
       tried: openResult.tried || []
@@ -3240,6 +4021,42 @@ export async function openKakaoTargetChatViaDevtools(job, {
   };
 }
 
+function isStaffConfirmedReservationAcceptance(decision = {}, replyText = '') {
+  const classification = String(decision.classification || '').trim();
+  if (!['reservation', 'reservation_request', 'already_answered'].includes(classification)) return false;
+  const messages = Array.isArray(decision.visible_messages_used) ? decision.visible_messages_used : [];
+  let latestCustomerIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (!isStaffSenderLabel(messages[index]?.sender) && text(messages[index]?.message).trim()) {
+      latestCustomerIndex = index;
+      break;
+    }
+  }
+  if (latestCustomerIndex < 0) return false;
+  const latestCustomer = text(messages[latestCustomerIndex]?.message || decision.latest_customer_message_cluster).normalize('NFKC');
+  const priorStaff = [...messages.slice(0, latestCustomerIndex)].reverse()
+    .find((message) => isStaffSenderLabel(message?.sender) && text(message?.message).trim());
+  const staffText = text(priorStaff?.message || decision.latest_staff_message).normalize('NFKC');
+  const reply = text(replyText || decision.reply_decision?.text || decision.suggested_reply_draft).normalize('NFKC');
+  const customerAccepted = /(그럼|그러면|네|넵|예|좋습니다|이렇게|대로|부탁|진행|예약|확정|해주세요|해주세|할게요|하겠습니다)/.test(latestCustomer);
+  const staffConfirmed = /(가능|됩니다|돼요|진행\s*가능|예약\s*가능|확인.*가능|문제\s*없|해드릴게요|해드리겠습니다)/.test(staffText)
+    && !/(불가|어렵|안\s*되|안되|부족|확인\s*필요|대안)/.test(staffText);
+  const replyConfirms = /(확정|예약|진행|잡아|해드렸|해두)/.test(reply)
+    && !/(금액|입금|계좌|환불|파손|분실|결제\s*취소)/.test(reply);
+  return customerAccepted && staffConfirmed && replyConfirms;
+}
+
+function isContactFirstReservationReply(value = '') {
+  const input = text(value).normalize('NFKC').replace(/\s+/g, ' ').trim();
+  if (!/(연락처|전화번호|휴대폰|핸드폰)/.test(input)) return false;
+  if (!/(예약\s*(?:등록|접수|진행)|예약하려면|예약을\s*위해)/.test(input)) return false;
+  if (!/(필요|부탁|알려|남겨|확인|있어야|없으면|불가|불가능|어렵)/.test(input)) return false;
+  const withoutContactPolicy = input
+    .replace(/예약\s*(?:등록|접수|진행)은?\s*연락처가?\s*(?:있어야|필요해서|필요해|필수라서)?\s*가능(?:합니다|해요|하세요|하십니다)?/g, '')
+    .replace(/연락처가?\s*(?:없으면|없을 경우)\s*예약\s*(?:등록|접수|진행)[^.!?。\n]*(?:불가|불가능|어렵|안\s*되|안되)/g, '');
+  return !/(재고\s*가능|대여\s*가능|예약\s*가능(?:합니다|해요|하세요|하십니다)?|예약\s*확정|확정|[0-9,]+\s*(?:원|만원)|입금|계좌|환불|파손|분실)/i.test(withoutContactPolicy);
+}
+
 export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
   const reply = decision.reply_decision && typeof decision.reply_decision === 'object' ? decision.reply_decision : {};
@@ -3248,6 +4065,8 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   const textValue = text(reply.text || decision.suggested_reply_draft).trim();
   const killSwitch = String(decision.kill_switch_observed || '').trim();
   const classification = String(decision.classification || '').trim();
+  const staffConfirmedAcceptance = isStaffConfirmedReservationAcceptance(decision, textValue);
+  const contactFirstReservationReply = isContactFirstReservationReply(textValue);
   const priceLikeClassifications = new Set(['price', 'price_review', 'quote_send']);
   if (killSwitch === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
   if (killSwitch === 'price_paused' && priceLikeClassifications.has(classification)) return { allowed: false, reason: 'kill_switch_price_paused' };
@@ -3263,12 +4082,253 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   if (blockedClassifications.has(classification)) return { allowed: false, reason: `classification_${classification}_requires_review` };
   if (decision.owner_review_required === true || decision.ownerReviewRequired === true) return { allowed: false, reason: 'owner_review_required' };
   const sensitiveCommitmentPattern = /(refund|환불|분실|파손|손상|결제\s*취소|예약\s*확정|재고\s*가능|가능\s*확정|(?:대여|예약)?\s*가능(?:합니다|하세요|하십니다|해요|함)?|확정|[0-9,]+\s*(?:원|만원)|입금|계좌|금액)/i;
-  if (sensitiveCommitmentPattern.test(textValue)) return { allowed: false, reason: 'sensitive_commitment_text' };
+  if (sensitiveCommitmentPattern.test(textValue) && !staffConfirmedAcceptance && !contactFirstReservationReply) return { allowed: false, reason: 'sensitive_commitment_text' };
   if (classification === 'reservation' || classification === 'reservation_request') {
-    const safeOperationalAck = /(확인|접수|공유|전달|참고|검토|방문|수령|반납|재학증명|서류|파일|네|넵|감사)/.test(textValue);
-    if (!safeOperationalAck) return { allowed: false, reason: `classification_${classification}_requires_review` };
+    const safeOperationalAck = /(확인|접수|공유|전달|참고|검토|방문|수령|반납|재학증명|서류|파일|연락처|전화번호|휴대폰|핸드폰|네|넵|감사)/.test(textValue);
+    if (!safeOperationalAck && !staffConfirmedAcceptance) return { allowed: false, reason: `classification_${classification}_requires_review` };
   }
-  return { allowed: true, reason: 'allowed', text: textValue, replyMode: mode, confidence };
+  return { allowed: true, reason: staffConfirmedAcceptance ? 'staff_confirmed_reservation_acceptance' : contactFirstReservationReply ? 'contact_first_reservation_reply' : 'allowed', text: textValue, replyMode: mode, confidence };
+}
+
+function isStaffSenderLabel(value = '') {
+  return /(빌리지|김준영|최재형|직원|운영자|상담원|매니저|village)/i.test(text(value));
+}
+
+function latestCustomerMessageForRag(decision = {}, job = {}) {
+  const cluster = text(decision.latest_customer_message_cluster).trim();
+  if (cluster) return cluster;
+  const messages = Array.isArray(decision.visible_messages_used) ? decision.visible_messages_used : [];
+  const latest = [...messages].reverse().find((message) => text(message?.message) && !isStaffSenderLabel(message?.sender));
+  return text(latest?.message || job.preview_text || job.previewText || job.payload?.previewText).trim();
+}
+
+export function mutablePolicyAutoReplyRisk(decision = {}, replyText = '') {
+  const visibleMessages = Array.isArray(decision.visible_messages_used)
+    ? decision.visible_messages_used.map((message) => message?.message)
+    : [];
+  const combined = [
+    decision.latest_customer_message_cluster,
+    decision.suggested_reply_draft,
+    decision.reply_decision?.text,
+    replyText,
+    ...visibleMessages
+  ].map(text).join(' ').normalize('NFKC');
+  if (/(학생\s*할인|학생할인|학생가|비학생|할인율|몇\s*(?:프로|퍼센트)|\d+\s*%|가격|요금|견적|단가|할인|제휴|단골|사업자|프리랜서|보증금|환불|결제|계좌|입금|세금\s*계산|세금계산|거래\s*명세|거래명세|VAT|부가세)/i.test(combined)) {
+    return { mutable: true, reason: 'mutable_policy_terms' };
+  }
+  return { mutable: false, reason: 'not_mutable_policy' };
+}
+
+function hasNearbyPolicyRate(value = '', labelPattern, rate) {
+  const input = text(value).normalize('NFKC');
+  const label = input.search(labelPattern);
+  const rateMatch = input.search(new RegExp(`${rate}\\s*(?:%|퍼센트|프로)`));
+  if (label < 0 || rateMatch < 0) return false;
+  return Math.abs(label - rateMatch) <= 80;
+}
+
+function includesAny(value = '', patterns = []) {
+  const input = text(value).normalize('NFKC');
+  return patterns.some((pattern) => pattern.test(input));
+}
+
+export function currentConfirmedPolicyAutoReplySupport(decision = {}, replyText = '') {
+  const visibleMessages = Array.isArray(decision.visible_messages_used)
+    ? decision.visible_messages_used.map((message) => message?.message)
+    : [];
+  const combined = [
+    decision.latest_customer_message_cluster,
+    decision.suggested_reply_draft,
+    decision.reply_decision?.text,
+    replyText,
+    ...visibleMessages
+  ].map(text).join(' ').normalize('NFKC');
+  const reply = text(replyText || decision.reply_decision?.text || decision.suggested_reply_draft).normalize('NFKC');
+  const checks = [];
+
+  if (/(학생\s*할인|학생할인|학생가)/.test(combined) && !/비학생/.test(combined)) {
+    checks.push({
+      topic: 'student_discount_rate',
+      ok: hasNearbyPolicyRate(reply, /학생\s*(?:할인|가)?/, 30) || /30\s*(?:%|퍼센트|프로)[^.\n]{0,30}학생/.test(reply)
+    });
+  }
+  if (/(개인\s*사업자|사업자|프리랜서|개사프)/.test(combined)) {
+    checks.push({
+      topic: 'business_freelancer_discount_rate',
+      ok: hasNearbyPolicyRate(reply, /개인\s*사업자|사업자|프리랜서|개사프/, 20) || /20\s*(?:%|퍼센트|프로)[^.\n]{0,40}(?:개인\s*사업자|사업자|프리랜서|개사프)/.test(reply)
+    });
+  }
+  if (/단골/.test(combined)) {
+    checks.push({
+      topic: 'regular_customer_discount_rate',
+      ok: hasNearbyPolicyRate(reply, /단골/, 10) || /단골[^.\n]{0,60}(?:개인\s*사업자|프리랜서)[^.\n]{0,60}20\s*(?:%|퍼센트|프로)/.test(reply)
+    });
+  }
+  if (/제휴/.test(combined)) {
+    checks.push({
+      topic: 'partner_discount_rate',
+      ok: hasNearbyPolicyRate(reply, /제휴/, 20)
+    });
+  }
+  if (/(장기\s*할인|장기할인|2일|3~5일|3-5일|6~9일|10~14일|15~19일|20일\s*(?:이상|\+)?)/.test(combined)) {
+    checks.push({
+      topic: 'long_term_discount_policy',
+      ok: /(2일[^.\n]{0,20}10\s*(?:%|퍼센트|프로)|3\s*[~-]\s*5일[^.\n]{0,20}20\s*(?:%|퍼센트|프로)|6\s*[~-]\s*9일[^.\n]{0,20}35\s*(?:%|퍼센트|프로)|10\s*[~-]\s*14일[^.\n]{0,20}40\s*(?:%|퍼센트|프로)|15\s*[~-]\s*19일[^.\n]{0,20}45\s*(?:%|퍼센트|프로)|20일\s*(?:이상|\+)?[^.\n]{0,20}50\s*(?:%|퍼센트|프로)|장기\s*할인)/.test(reply)
+    });
+  }
+  if (/(영업\s*시간|운영\s*시간|몇\s*시(?:부터|까지)|언제\s*(?:열|닫)|24\s*시간)/.test(combined)) {
+    checks.push({
+      topic: 'business_hours_policy',
+      ok: /24\s*시간/.test(reply)
+    });
+  }
+  if (/(대여\s*일수|6\s*시간|하루|1일\s*계산|(?:렌탈|대여)[^.\n]{0,30}24\s*시간)/.test(combined) && !/(영업\s*시간|운영\s*시간)/.test(combined)) {
+    checks.push({
+      topic: 'rental_day_policy',
+      ok: /(24\s*시간[^.\n]{0,20}1일|6\s*시간[^.\n]{0,40}(?:같은\s*일수|\+1일|추가|초과))/.test(reply)
+    });
+  }
+  if (/(VAT|vat|부가세|최종\s*금액|최종금액)/i.test(combined)) {
+    checks.push({
+      topic: 'vat_final_amount_policy',
+      ok: /(VAT|vat|부가세|1\.1|10\s*%|10원\s*단위|올림)/i.test(reply)
+    });
+  }
+  if (/(할인\s*계산|할인율\s*계산|곱셈|더하기|합산)/.test(combined)) {
+    checks.push({
+      topic: 'discount_multiplier_policy',
+      ok: /(곱셈|곱해서|곱해|0\.7\s*\*\s*0\.8|더하지\s*않)/.test(reply)
+    });
+  }
+
+  if (!checks.length) {
+    const unconfirmedMutable = includesAny(combined, [
+      /비학생/,
+      /보증금/,
+      /환불/,
+      /취소/,
+      /계좌/,
+      /입금/,
+      /결제/,
+      /세금\s*계산|세금계산/,
+      /거래\s*명세|거래명세/,
+      /현금\s*영수|현금영수/,
+      /주차/,
+      /배송|퀵/,
+      /연장/,
+      /파손|분실/
+    ]);
+    return {
+      applicable: false,
+      allowed: false,
+      reason: unconfirmedMutable ? 'policy_not_in_current_confirmed_set_use_rag' : 'not_current_confirmed_policy'
+    };
+  }
+
+  const failed = checks.filter((check) => !check.ok).map((check) => check.topic);
+  return {
+    applicable: true,
+    allowed: failed.length === 0,
+    reason: failed.length ? 'current_policy_reply_mismatch' : 'current_confirmed_policy_match',
+    topics: checks.map((check) => check.topic),
+    failedTopics: failed
+  };
+}
+
+export function autoReplyRequiresRagSupport(decision = {}, replyText = '') {
+  if (isCustomerDocumentAssetRequest(decision)) {
+    return { required: false, reason: 'standard_customer_document_assets' };
+  }
+  const classification = String(decision.classification || '').trim();
+  const mutablePolicy = mutablePolicyAutoReplyRisk(decision, replyText);
+  if (mutablePolicy.mutable) {
+    return { required: true, reason: mutablePolicy.reason, mutablePolicy: true };
+  }
+  if (classification === 'faq') return { required: true, reason: 'classification_faq' };
+  const combined = [
+    decision.latest_customer_message_cluster,
+    replyText,
+    decision.suggested_reply_draft
+  ].map(text).join(' ').normalize('NFKC');
+  if (/(주소|위치|오시는\s*길|영업\s*시간|운영\s*시간|방문\s*(?:수령|절차|방법)?|수령\s*(?:절차|방법)?|반납\s*(?:절차|방법)?|픽업|주차|신분증|재학증명|학생\s*할인|할인율|보증금|구성품?|포함\s*(?:사항|여부)?|절차|방법|홈페이지|인스타|전화|연락처)/.test(combined)) {
+    return { required: true, reason: 'policy_or_procedure_terms' };
+  }
+  return { required: false, reason: 'not_policy_or_faq_auto_reply' };
+}
+
+export function buildAutoReplyRagQuestion({ decision = {}, job = {}, replyText = '' } = {}) {
+  const customer = text(decision?.customer?.name || decision?.customer_name || job.customer_name || '').trim();
+  const latestCustomer = latestCustomerMessageForRag(decision, job);
+  const mutablePolicy = mutablePolicyAutoReplyRisk(decision, replyText);
+  const visibleMessages = Array.isArray(decision.visible_messages_used)
+    ? decision.visible_messages_used.slice(-6).map((message) => {
+        const sender = text(message?.sender || 'unknown').slice(0, 40);
+        const body = text(message?.message).replace(/\s+/g, ' ').slice(0, 240);
+        return body ? `${sender}: ${body}` : '';
+      }).filter(Boolean).join('\n')
+    : '';
+  return [
+    '빌리지 카카오 자동응답 검증용 RAG 질문입니다.',
+    '현재 재고/예약 가능 여부/스케줄 확정은 판단하지 말고, 과거 빌리지 대화/문서는 정책/절차/말투 예시로 확인해 주세요.',
+    mutablePolicy.mutable ? '주의: 현재 확정 정책(학생30%, 개사프20%, 장기할인표, VAT/일수 계산)과 충돌하면 현재 확정 정책이 우선입니다. 확정 정책에 없는 보증금/환불/계좌/증빙 등은 RAG 근거로 판단하세요.' : '',
+    customer ? `고객명: ${customer}` : '',
+    `분류: ${text(decision.classification || 'unknown')}`,
+    latestCustomer ? `최신 고객 메시지: ${latestCustomer}` : '',
+    visibleMessages ? `최근 카카오 맥락:\n${visibleMessages}` : '',
+    replyText ? `AI가 보내려는 답변 초안: ${replyText}` : '',
+    '위 답변이 빌리지 정책/절차/말투와 맞는지, 더 빌리지답게 조정할 포인트가 있는지 짧게 알려주세요.'
+  ].filter(Boolean).join('\n');
+}
+
+export async function evaluateAutoReplyRagSupport({ config = {}, decision = {}, job = {}, replyText = '', askImpl = askVillageAi } = {}) {
+  const requirement = autoReplyRequiresRagSupport(decision, replyText);
+  if (!requirement.required) return { required: false, allowed: true, reason: requirement.reason };
+  const currentPolicy = currentConfirmedPolicyAutoReplySupport(decision, replyText);
+  if (currentPolicy.applicable) {
+    return {
+      required: true,
+      allowed: currentPolicy.allowed,
+      reason: currentPolicy.allowed ? 'current_confirmed_policy_match' : 'current_policy_mismatch_requires_review',
+      requirement,
+      currentPolicy
+    };
+  }
+  if (!config.villageAiUrl) return { required: true, allowed: false, reason: 'rag_not_configured', requirement };
+  const question = buildAutoReplyRagQuestion({ decision, job, replyText });
+  try {
+    const result = await askImpl({ question, userRole: 'customer' }, config, { timeoutMs: config.ragTimeoutMs });
+    const confidence = String(result.confidence || '').toLowerCase();
+    const knowledgeSource = String(result.knowledgeSource || '').toLowerCase();
+    const allowed = !result.error
+      && confidence === 'high'
+      && knowledgeSource === 'retrieved'
+      && result.ownerReview !== true
+      && Boolean(text(result.text));
+    return {
+      required: true,
+      allowed,
+      reason: allowed ? 'rag_high_confidence_retrieved' : 'rag_not_strong_enough_for_auto_send',
+      requirement,
+      question: question.slice(0, 1200),
+      text: text(result.text).slice(0, 1600),
+      confidence: result.confidence || null,
+      ownerReview: result.ownerReview ?? null,
+      knowledgeSource: result.knowledgeSource || null,
+      usedSources: Array.isArray(result.usedSources) ? result.usedSources.slice(0, 5) : [],
+      topSimilarity: result.topSimilarity ?? null,
+      logId: result.logId || null,
+      error: result.error || null
+    };
+  } catch (error) {
+    return {
+      required: true,
+      allowed: false,
+      reason: 'rag_lookup_error',
+      requirement,
+      question: question.slice(0, 1200),
+      error: error.message.slice(0, 500)
+    };
+  }
 }
 
 export function findKakaoMessageInputElementIndex(treeMarkdown = '') {
@@ -3339,16 +4399,34 @@ function buildKakaoSendMessageExpression(textToSend = '') {
 
 export async function sendKakaoMessageViaDevtools(textToSend, navigationContext = {}, {
   timeoutMs = 20000,
-  evaluateImpl = devtoolsEvaluateOnTarget
+  evaluateImpl = devtoolsEvaluateOnTarget,
+  cdpCallImpl = devtoolsCdpCallOnTarget,
+  attachmentPaths = []
 } = {}) {
   const target = navigationContext?.conversation_target;
   if (!target?.webSocketDebuggerUrl) return { sent: false, reason: 'conversation_target_missing' };
-  const result = await evaluateImpl(target, buildKakaoSendMessageExpression(textToSend), { timeoutMs });
+  const files = normalizeKakaoAttachmentPaths(attachmentPaths);
+  const textValue = text(textToSend).trim();
+  const result = textValue
+    ? await evaluateImpl(target, buildKakaoSendMessageExpression(textValue), { timeoutMs })
+    : { sent: true, reason: 'text_skipped', window_title: target.title || '' };
+  const textSent = Boolean(result?.sent);
+  let attachmentResult = null;
+  if (textSent && files.length) {
+    attachmentResult = await attachKakaoFilesViaDevtools(target, files, { timeoutMs, evaluateImpl, cdpCallImpl });
+  } else if (files.length) {
+    attachmentResult = { attached: false, reason: 'text_send_failed_attachments_skipped', files };
+  }
+  const attachmentOk = !files.length || attachmentResult?.attached === true;
+  const sent = textSent && attachmentOk;
   return {
-    sent: Boolean(result?.sent),
-    reason: result?.reason || 'devtools_send_unknown',
+    sent,
+    reason: sent
+      ? (files.length ? 'sent_via_devtools_verified_with_attachments' : (result?.reason || 'devtools_send_unknown'))
+      : (attachmentResult?.reason || result?.reason || 'devtools_send_unknown'),
     window_title: result?.window_title || target.title || '',
-    via_devtools: true
+    via_devtools: true,
+    ...(files.length ? { attachments: attachmentResult } : {})
   };
 }
 
@@ -3421,17 +4499,119 @@ async function clickKakaoSendButton({ win, sendButtonIndex, cuaDriverCommand, ti
   }
 }
 
+async function listCuaWindows({ cuaDriverCommand, timeoutMs, spawnImpl }) {
+  const windowsText = await spawnText(cuaDriverCommand, ['call', 'list_windows', '--compact'], {
+    timeoutMs,
+    spawnImpl,
+    maxBuffer: 3_000_000
+  });
+  return JSON.parse(windowsText).windows || [];
+}
+
+function pickMacOpenPanelWindow(windows = [], chromePid) {
+  return windows.find((w) => w?.pid === chromePid && /^(열기|Open)$/.test(text(w.title).trim()))
+    || windows.find((w) => /^(열기|Open)$/.test(text(w.title).trim()))
+    || windows.find((w) => /Open and Save Panel/i.test(text(w.app_name || w.app)));
+}
+
+async function openKakaoFileChooserViaCua({ win, cuaDriverCommand, timeoutMs, spawnImpl }) {
+  const bounds = win.bounds || {};
+  const x = Math.max(18, Math.min(34, Number(bounds.width || 380) - 24));
+  const y = Math.max(20, Number(bounds.height || 816) - 29);
+  await spawnText(cuaDriverCommand, [
+    'call', 'click', JSON.stringify({ pid: win.pid, window_id: win.window_id, x, y }), '--compact'
+  ], { timeoutMs, spawnImpl });
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 350 : 500));
+    const windows = await listCuaWindows({ cuaDriverCommand, timeoutMs, spawnImpl });
+    const panel = pickMacOpenPanelWindow(windows, win.pid);
+    if (panel?.pid && panel?.window_id) return { panel, clickPoint: { x, y } };
+  }
+  return { panel: null, clickPoint: { x, y }, reason: 'open_panel_not_found' };
+}
+
+async function chooseFileInMacOpenPanelViaCua({ panel, filePath, cuaDriverCommand, timeoutMs, spawnImpl }) {
+  await spawnText(cuaDriverCommand, [
+    'call', 'hotkey', JSON.stringify({ pid: panel.pid, window_id: panel.window_id, keys: ['cmd', 'shift', 'g'] }), '--compact'
+  ], { timeoutMs, spawnImpl });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await spawnText(cuaDriverCommand, [
+    'call', 'type_text', JSON.stringify({ pid: panel.pid, window_id: panel.window_id, text: filePath, delay_ms: 0 }), '--compact'
+  ], { timeoutMs, spawnImpl });
+  await spawnText(cuaDriverCommand, [
+    'call', 'press_key', JSON.stringify({ pid: panel.pid, window_id: panel.window_id, key: 'return' }), '--compact'
+  ], { timeoutMs, spawnImpl });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await spawnText(cuaDriverCommand, [
+    'call', 'press_key', JSON.stringify({ pid: panel.pid, window_id: panel.window_id, key: 'return' }), '--compact'
+  ], { timeoutMs, spawnImpl });
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  return { selected: true, filePath };
+}
+
+async function attachSingleKakaoFileViaCua({ win, filePath, cuaDriverCommand, timeoutMs, spawnImpl }) {
+  const chooser = await openKakaoFileChooserViaCua({ win, cuaDriverCommand, timeoutMs, spawnImpl });
+  if (!chooser.panel) return { attached: false, reason: chooser.reason || 'open_panel_not_found', filePath, clickPoint: chooser.clickPoint };
+  await chooseFileInMacOpenPanelViaCua({ panel: chooser.panel, filePath, cuaDriverCommand, timeoutMs, spawnImpl });
+  await activateGoogleChromeForCua({ timeoutMs: Math.min(timeoutMs, 5000), spawnImpl, windowTitle: win.title || '' });
+  const readyState = await getKakaoWindowState({ win, cuaDriverCommand, timeoutMs, spawnImpl, maxElements: 900 });
+  const sendButtonIndex = findKakaoSendButtonElementIndex(readyState.tree_markdown || '');
+  let clickResult = null;
+  if (sendButtonIndex) {
+    clickResult = await clickKakaoSendButton({ win, sendButtonIndex, cuaDriverCommand, timeoutMs, spawnImpl });
+  } else {
+    await spawnText(cuaDriverCommand, [
+      'call', 'press_key', JSON.stringify({ pid: win.pid, window_id: win.window_id, key: 'return' }), '--compact'
+    ], { timeoutMs, spawnImpl });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1600));
+  return {
+    attached: Boolean(sendButtonIndex ? clickResult?.clicked !== false : true),
+    reason: sendButtonIndex ? 'file_selected_and_send_clicked_via_cua' : 'file_selected_return_pressed_via_cua',
+    filePath,
+    panel: { pid: chooser.panel.pid, window_id: chooser.panel.window_id, title: chooser.panel.title || '' },
+    sendButtonIndex: sendButtonIndex || null,
+    clickPoint: chooser.clickPoint
+  };
+}
+
+async function attachKakaoFilesViaCua(win, attachmentPaths = [], { cuaDriverCommand, timeoutMs, spawnImpl }) {
+  const files = normalizeKakaoAttachmentPaths(attachmentPaths);
+  if (!files.length) return { attached: false, reason: 'no_attachment_paths', files: [] };
+  const missing = files.filter((filePath) => !fs.existsSync(filePath));
+  if (missing.length) return { attached: false, reason: 'attachment_file_missing', files, missing };
+  if (!win?.pid || !win?.window_id) return { attached: false, reason: 'conversation_window_missing', files };
+  const results = [];
+  for (const filePath of files) {
+    const result = await attachSingleKakaoFileViaCua({ win, filePath, cuaDriverCommand, timeoutMs, spawnImpl });
+    results.push(result);
+    if (!result.attached) break;
+  }
+  const attached = results.length === files.length && results.every((result) => result.attached);
+  return {
+    attached,
+    reason: attached ? 'files_selected_and_send_clicked_via_cua' : (results.find((result) => !result.attached)?.reason || 'attachment_send_not_verified'),
+    files,
+    fileCount: files.length,
+    results
+  };
+}
+
 export async function sendKakaoMessageViaChrome(textToSend, navigationContext = {}, {
   timeoutMs = 20000,
   spawnImpl = spawn,
   cuaDriverCommand = 'cua-driver',
   evaluateImpl = devtoolsEvaluateOnTarget,
+  cdpCallImpl = devtoolsCdpCallOnTarget,
+  attachmentPaths = [],
+  requireAutomationChromeProfile = process.env.KAKAO_REQUIRE_AUTOMATION_CHROME_PROFILE === '1',
   controlMode = process.env.KAKAO_WORKER_CONTROL_MODE,
   cuaMinIdleSeconds = numberFromEnv(process.env.KAKAO_CUA_MIN_IDLE_SECONDS, 0),
   execFileImpl = execFile
 } = {}) {
+  const files = normalizeKakaoAttachmentPaths(attachmentPaths);
   if (navigationContext?.conversation_target?.webSocketDebuggerUrl) {
-    return sendKakaoMessageViaDevtools(textToSend, navigationContext, { timeoutMs, evaluateImpl });
+    return sendKakaoMessageViaDevtools(textToSend, navigationContext, { timeoutMs, evaluateImpl, cdpCallImpl, attachmentPaths: files });
   }
   const win = navigationContext?.conversation_window;
   if (!win?.pid || !win?.window_id) {
@@ -3449,6 +4629,9 @@ export async function sendKakaoMessageViaChrome(textToSend, navigationContext = 
   }
   await activateGoogleChromeForCua({ timeoutMs: Math.min(timeoutMs, 5000), spawnImpl, windowTitle: win.title || '' });
   const state = await getKakaoWindowState({ win, cuaDriverCommand, timeoutMs, spawnImpl, maxElements: 700 });
+  if (requireAutomationChromeProfile && !String(state.tree_markdown || '').includes('🤖 자동화 크롬')) {
+    return { sent: false, reason: 'automation_chrome_profile_required', window_title: win.title || state.title || '', required_profile: '🤖 자동화 크롬' };
+  }
   const elementIndex = findKakaoMessageInputElementIndex(state.tree_markdown || '');
   if (!elementIndex) return { sent: false, reason: 'message_input_not_found', window_title: win.title || state.title || '' };
   await spawnText(cuaDriverCommand, [
@@ -3479,13 +4662,29 @@ export async function sendKakaoMessageViaChrome(textToSend, navigationContext = 
       retried_after_frontmost_activation: Boolean(clickResult?.retriedAfterFrontmostActivation)
     };
   }
+  let attachmentResult = null;
+  if (files.length) {
+    attachmentResult = await attachKakaoFilesViaCua(win, files, { cuaDriverCommand, timeoutMs, spawnImpl });
+    if (!attachmentResult.attached) {
+      return {
+        sent: false,
+        reason: attachmentResult.reason || 'attachment_send_not_verified',
+        window_title: win.title || verifyState.title || state.title || '',
+        element_index: elementIndex,
+        send_button_index: clickResult?.sendButtonIndex || sendButtonIndex || null,
+        retried_after_frontmost_activation: Boolean(clickResult?.retriedAfterFrontmostActivation),
+        attachments: attachmentResult
+      };
+    }
+  }
   return {
     sent: true,
-    reason: 'sent_via_chrome_verified',
+    reason: files.length ? 'sent_via_chrome_verified_with_cua_attachments' : 'sent_via_chrome_verified',
     window_title: win.title || verifyState.title || state.title || '',
     element_index: elementIndex,
     send_button_index: clickResult?.sendButtonIndex || sendButtonIndex || null,
-    retried_after_frontmost_activation: Boolean(clickResult?.retriedAfterFrontmostActivation)
+    retried_after_frontmost_activation: Boolean(clickResult?.retriedAfterFrontmostActivation),
+    ...(files.length ? { attachments: attachmentResult } : {})
   };
 }
 
@@ -3500,13 +4699,14 @@ function normalizeAutoReplyText(value = '') {
 }
 
 export function buildAutoReplyDedupeKey({ decision = {}, job = {}, replyText = '' } = {}) {
+  const stableRoomKey = normalizeAutoReplyText(job.room_key || job.roomKey || job.payload?.roomKey || '');
   const customer = normalizeAutoReplyText(decision?.customer?.name || decision?.customer_name || '');
   const customerEvidence = Array.isArray(decision?.visible_messages_used)
     ? [...decision.visible_messages_used].reverse().find((item) => String(item?.sender || '').includes(customer) || !String(item?.sender || '').includes('빌리지'))
     : null;
   const customerMessage = normalizeAutoReplyText(customerEvidence?.message || job.preview_text || job.previewText || job.payload?.previewText || '');
   const reply = normalizeAutoReplyText(replyText || decision?.reply_decision?.text || decision?.suggested_reply_draft || '');
-  return [customer, customerMessage, reply].filter(Boolean).join('|').slice(0, 500);
+  return [stableRoomKey || customer, customerMessage, reply].filter(Boolean).join('|').slice(0, 500);
 }
 
 export function hasRecentSentAutoReply(config, dedupeKey, { now = new Date(), windowMs = 30 * 60 * 1000 } = {}) {
@@ -3523,7 +4723,70 @@ export function hasRecentSentAutoReply(config, dedupeKey, { now = new Date(), wi
   return false;
 }
 
-export function isAutoSendEligibleLiveJob(job = {}) {
+function parseKakaoPreviewClockMinutes(value = '') {
+  const matches = Array.from(String(value || '').matchAll(/(오전|오후)\s*(\d{1,2}):(\d{2})/g));
+  const match = matches[matches.length - 1];
+  if (!match) return null;
+  let hour = Number(match[2]);
+  const minute = Number(match[3]);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  if (match[1] === '오전') {
+    if (hour === 12) hour = 0;
+  } else if (hour !== 12) {
+    hour += 12;
+  }
+  return (hour * 60) + minute;
+}
+
+function kstClockParts(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul',
+    hourCycle: 'h23',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).formatToParts(now);
+  const get = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
+  return {
+    month: get('month'),
+    day: get('day'),
+    hour: get('hour'),
+    minute: get('minute')
+  };
+}
+
+function kstClockMinutes(now = new Date()) {
+  const parts = kstClockParts(now);
+  return (parts.hour * 60) + parts.minute;
+}
+
+function minutesSinceKakaoPreviewClock(value = '', now = new Date()) {
+  const previewMinutes = parseKakaoPreviewClockMinutes(value);
+  if (previewMinutes === null) return null;
+  let diff = kstClockMinutes(now) - previewMinutes;
+  if (diff < -1) diff += 1440;
+  return diff;
+}
+
+function parseKakaoKoreanMonthDayLabels(value = '') {
+  const matches = [...text(value).matchAll(/(\d{1,2})월\s*(\d{1,2})일/g)];
+  return matches.map((match) => ({
+    month: Number(match[1]),
+    day: Number(match[2]),
+    index: match.index ?? -1,
+    text: match[0]
+  })).filter((label) => Number.isFinite(label.month) && Number.isFinite(label.day));
+}
+
+function hasNonCurrentKakaoDateLabel(value = '', now = new Date()) {
+  const labels = parseKakaoKoreanMonthDayLabels(value);
+  if (!labels.length) return false;
+  const current = kstClockParts(now);
+  return labels.some((label) => label.month !== current.month || label.day !== current.day);
+}
+
+export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWindowMinutes = 20 } = {}) {
   const preview = text(job.preview_text || job.previewText || job.payload?.previewText || '');
   const events = Array.isArray(job.events) ? job.events : (Array.isArray(job.payload?.events) ? job.payload.events : []);
   const reasons = events.map((event) => String(event?.reason || '')).filter(Boolean);
@@ -3535,10 +4798,15 @@ export function isAutoSendEligibleLiveJob(job = {}) {
   const hasTopRowChanged = reasons.includes('top_row_changed');
   const hasUnreadBackstop = reasons.includes('top_rows_backstop') && hasUnread;
   if (!hasTopRowChanged && !hasUnreadBackstop) return { eligible: false, reason: 'not_top_row_live_event' };
-  if (/\d{1,2}월\s*\d{1,2}일/.test(preview)) return { eligible: false, reason: 'preview_has_old_date' };
+  if (hasNonCurrentKakaoDateLabel(preview, now)) return { eligible: false, reason: 'preview_has_old_date' };
   if (/\d{4}\.\d{1,2}\.\d{1,2}/.test(preview)) return { eligible: false, reason: 'preview_has_absolute_date' };
   if (hasUnread) return { eligible: true, reason: 'top_row_unread' };
-  if (!/(오전|오후)\s*\d{1,2}:\d{2}/.test(preview)) return { eligible: false, reason: 'preview_not_live_time_format' };
+  const ageMinutes = minutesSinceKakaoPreviewClock(preview, now);
+  if (ageMinutes === null) {
+    if (parseKakaoKoreanMonthDayLabels(preview).length) return { eligible: true, reason: 'top_row_current_date_label' };
+    return { eligible: false, reason: 'preview_not_live_time_format' };
+  }
+  if (ageMinutes < -1 || ageMinutes > liveWindowMinutes) return { eligible: false, reason: 'top_row_time_outside_live_window' };
   return { eligible: true, reason: 'top_row_live_time_format' };
 }
 
@@ -3549,7 +4817,8 @@ async function maybeAutoSendReply({ config, decision, job, navigationContext }) 
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', preview: job.preview_text || job.previewText || '' });
     return result;
   }
-  const gate = canAutoSendCustomerAnswer(decision, config);
+  const documentGate = canAutoSendCustomerDocumentAssets(decision, config);
+  const gate = documentGate.allowed ? documentGate : canAutoSendCustomerAnswer(decision, config);
   if (!gate.allowed) {
     const result = { attempted: false, sent: false, gate };
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '' });
@@ -3561,19 +4830,40 @@ async function maybeAutoSendReply({ config, decision, job, navigationContext }) 
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', dedupeKey });
     return result;
   }
+  const ragSupport = await evaluateAutoReplyRagSupport({ config, decision, job, replyText: gate.text });
+  if (ragSupport.required && !ragSupport.allowed) {
+    const result = {
+      attempted: false,
+      sent: false,
+      gate: { allowed: false, reason: ragSupport.reason },
+      ragSupport
+    };
+    logAutoReply(config, {
+      jobId: job.id || job.jobId || null,
+      result,
+      customer: decision?.customer?.name || '',
+      classification: decision?.classification || '',
+      evidence: decision?.visible_messages_used || [],
+      dedupeKey,
+      ragSupport
+    });
+    return result;
+  }
   let sendResult;
   try {
     sendResult = await sendKakaoMessageViaChrome(gate.text, navigationContext, {
       timeoutMs: config.autoSendTimeoutMs,
       cuaDriverCommand: config.cuaDriverCommand,
+      attachmentPaths: gate.attachmentPaths || [],
+      requireAutomationChromeProfile: config.requireAutomationChromeProfile,
       controlMode: config.workerControlMode,
       cuaMinIdleSeconds: config.cuaMinIdleSeconds
     });
   } catch (error) {
     sendResult = { sent: false, reason: 'send_error', error: error.message.slice(0, 500) };
   }
-  const result = { attempted: true, sent: Boolean(sendResult.sent), gate, sendResult, text: gate.text };
-  logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [], dedupeKey });
+  const result = { attempted: true, sent: Boolean(sendResult.sent), gate, sendResult, text: gate.text, ragSupport };
+  logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [], dedupeKey, ragSupport });
   return result;
 }
 
@@ -3587,13 +4877,14 @@ export async function openKakaoTargetChatFromList(job, {
   controlMode = process.env.KAKAO_WORKER_CONTROL_MODE,
   cuaMinIdleSeconds = numberFromEnv(process.env.KAKAO_CUA_MIN_IDLE_SECONDS, 0),
   execFileImpl = execFile,
+  allowSearch = process.env.KAKAO_WORKER_SEARCH_TARGET_CHAT !== '0',
   preferDevtools = normalizeKakaoWorkerControlMode(controlMode) !== 'cua_first'
 } = {}) {
   const hints = extractNavigationHints(job);
   if (!hints.length) return { status: 'no_navigation_hints' };
   let devtoolsFirst = null;
   if (preferDevtools) {
-    devtoolsFirst = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl }).catch((error) => ({
+    devtoolsFirst = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch }).catch((error) => ({
       status: 'devtools_first_failed',
       error: error.message.slice(0, 500)
     }));
@@ -3631,12 +4922,12 @@ export async function openKakaoTargetChatFromList(job, {
     };
   }
   if (existingConversationWindow?.is_on_screen === false) {
-    const devtoolsExisting = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl }).catch(() => null);
+    const devtoolsExisting = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch }).catch(() => null);
     if (devtoolsExisting?.status === 'opened_target_chat') return devtoolsExisting;
   }
   const win = pickKakaoMainListWindow(windows);
   if (!win) {
-    return openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl }).catch((error) => ({
+    return openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch }).catch((error) => ({
       status: 'main_list_window_not_found',
       hints,
       devtoolsFallbackError: error.message.slice(0, 500)
@@ -3648,7 +4939,7 @@ export async function openKakaoTargetChatFromList(job, {
   const state = JSON.parse(stateText);
   let elementIndex = findChatRowElementIndex(state.tree_markdown || '', hints);
   let searchResult = null;
-  if (!elementIndex) {
+  if (!elementIndex && allowSearch) {
     searchResult = await findChatRowElementIndexViaSearch({
       win,
       hints,
@@ -3658,9 +4949,11 @@ export async function openKakaoTargetChatFromList(job, {
       spawnImpl
     });
     elementIndex = searchResult.elementIndex;
+  } else if (!elementIndex) {
+    searchResult = { searched: false, disabled: true, reason: 'search_disabled' };
   }
   if (!elementIndex) {
-    const devtoolsFallback = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl }).catch((error) => ({
+    const devtoolsFallback = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch }).catch((error) => ({
       status: 'devtools_fallback_failed',
       error: error.message.slice(0, 500)
     }));
@@ -3673,7 +4966,9 @@ export async function openKakaoTargetChatFromList(job, {
       search: searchResult
         ? {
             searched: Boolean(searchResult.searched),
+            disabled: Boolean(searchResult.disabled),
             search_input_found: Boolean(searchResult.searchInputIndex),
+            reason: searchResult.reason || undefined,
             tried: searchResult.tried || [],
             search_terms: searchResult.searchTerms || []
           }
@@ -3725,8 +5020,10 @@ export async function openKakaoTargetChatFromList(job, {
     search: searchResult
       ? {
           searched: Boolean(searchResult.searched),
+          disabled: Boolean(searchResult.disabled),
           search_input_found: Boolean(searchResult.searchInputIndex),
           search_term: searchResult.searchTerm || null,
+          reason: searchResult.reason || undefined,
           tried: searchResult.tried || [],
           search_terms: searchResult.searchTerms || []
         }
@@ -3749,7 +5046,7 @@ export function runHermes(prompt, config, options = {}) {
   const killTree = options.killTree || ((pid) => terminateChildTree({ pid }, 'SIGTERM'));
   const timeoutMs = Number(config.hermesTimeoutMs || 180000);
   return new Promise((resolve, reject) => {
-    const child = spawnImpl(config.hermesCommand, buildHermesArgs(prompt), {
+    const child = spawnImpl(config.hermesCommand, buildHermesArgs(prompt, config), {
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: path.resolve(__dirname, '../..'),
       detached: true,
@@ -3794,7 +5091,8 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
         navigationContext = await openKakaoTargetChatFromList(job, {
           cuaDriverCommand: config.cuaDriverCommand,
           controlMode: config.workerControlMode,
-          cuaMinIdleSeconds: config.cuaMinIdleSeconds
+          cuaMinIdleSeconds: config.cuaMinIdleSeconds,
+          allowSearch: config.searchTargetChat
         }).catch((error) => ({
           status: 'navigation_failed',
           reason: error.message.slice(0, 500)
@@ -3821,7 +5119,9 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     const sheetPayload = buildSheetAppendPayload(decision, { apiKey: config.sheetApiKey });
     const sheetResult = await appendToSheet(config, sheetPayload);
     const autoReplyResult = sheetResult?.success === false
-      ? { attempted: false, sent: false, reason: 'sheet_write_rejected_no_auto_send', sheetErrorType: sheetResult.error_type }
+      ? (sheetResult.error_type === 'no_contact'
+          ? await maybeAutoSendReply({ config, decision, job, navigationContext })
+          : { attempted: false, sent: false, reason: 'sheet_write_rejected_no_auto_send', sheetErrorType: sheetResult.error_type })
       : await maybeAutoSendReply({ config, decision, job, navigationContext });
     const baseFollowUpRows = [
       ...buildFollowUpRows(decision, job),
@@ -3839,12 +5139,18 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     );
     const followUpRows = filterFollowUpRowsAfterAutoReply(availabilityAwareRows, autoReplyResult);
     let followUpResult;
-    try {
-      followUpResult = await upsertFollowUpRows(config, followUpRows);
-    } catch (error) {
-      followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
+    if (config.followUpRowsEnabled === false) {
+      followUpResult = { inserted: 0, skipped: true, reason: 'kakao_follow_up_rows_disabled', rows: followUpRows };
+    } else {
+      try {
+        followUpResult = await upsertFollowUpRows(config, followUpRows);
+      } catch (error) {
+        followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
+      }
     }
-    const slackDeliveryResult = await deliverSlackFollowUpRows(config, followUpResult.rows || []);
+    const slackDeliveryResult = config.followUpRowsEnabled === false
+      ? { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] }
+      : await deliverSlackFollowUpRows(config, followUpResult.rows || []);
     Object.assign(result, { status: 'ai_completed', decision, sheetResult, existingRequestResult, followUpResult, slackDeliveryResult, autoReplyResult, hermesOutputTail: hermesOutput.slice(-4000) });
     return result;
 	  } finally {
@@ -3905,7 +5211,7 @@ export async function processProvidedJob(stdinJob, { dryRun = false, fakeDecisio
   return runAiAndMaybeWrite({ config, job: stdinJob, dryRun, fakeDecisionPath });
 }
 
-export async function processManualSend({ customerName = '', roomTitle = '', text: replyText = '', followUpId = '' } = {}) {
+export async function processManualSend({ customerName = '', roomTitle = '', text: replyText = '', followUpId = '', attachmentPaths = [], customerDocumentAssets = false } = {}) {
   loadEnvFile(path.resolve(process.env.HOME || '', '.hermes/.env'));
   loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
   loadEnvFile(path.resolve(__dirname, '.env'));
@@ -3913,6 +5219,10 @@ export async function processManualSend({ customerName = '', roomTitle = '', tex
   const cleanText = text(replyText).trim();
   const cleanCustomer = text(customerName).trim();
   const cleanRoomTitle = text(roomTitle).trim();
+  const manualAttachmentPaths = [
+    ...normalizeKakaoAttachmentPaths(attachmentPaths),
+    ...(customerDocumentAssets ? config.customerDocumentAssetPaths : [])
+  ];
   if (!cleanText || cleanText.length < 2) throw new Error('manual send text is required');
   if (!cleanCustomer && !cleanRoomTitle) throw new Error('manual send customerName or roomTitle is required');
 
@@ -3924,7 +5234,7 @@ export async function processManualSend({ customerName = '', roomTitle = '', tex
     room_title: cleanRoomTitle,
     preview_text: [cleanCustomer || cleanRoomTitle, cleanText].filter(Boolean).join(' '),
     payload: { customerName: cleanCustomer, roomTitle: cleanRoomTitle }
-  }, { timeoutMs: config.autoSendTimeoutMs }).catch((error) => ({
+  }, { timeoutMs: config.autoSendTimeoutMs, allowSearch: true }).catch((error) => ({
     status: 'devtools_manual_send_navigation_failed',
     reason: error.message.slice(0, 500)
   }));
@@ -3966,7 +5276,7 @@ export async function processManualSend({ customerName = '', roomTitle = '', tex
           room_title: cleanRoomTitle,
           preview_text: [cleanCustomer || cleanRoomTitle, cleanText].filter(Boolean).join(' '),
           payload: { customerName: cleanCustomer, roomTitle: cleanRoomTitle }
-        }, { timeoutMs: config.autoSendTimeoutMs });
+        }, { timeoutMs: config.autoSendTimeoutMs, allowSearch: true });
       } else {
         navigationContext = await openKakaoTargetChatFromList({
           customer_name: cleanCustomer,
@@ -3977,7 +5287,8 @@ export async function processManualSend({ customerName = '', roomTitle = '', tex
           timeoutMs: config.autoSendTimeoutMs,
           cuaDriverCommand: config.cuaDriverCommand,
           controlMode: config.workerControlMode,
-          cuaMinIdleSeconds: config.cuaMinIdleSeconds
+          cuaMinIdleSeconds: config.cuaMinIdleSeconds,
+          allowSearch: true
         });
       }
     }
@@ -3989,6 +5300,8 @@ export async function processManualSend({ customerName = '', roomTitle = '', tex
     sendResult = await sendKakaoMessageViaChrome(cleanText, navigationContext, {
       timeoutMs: config.autoSendTimeoutMs,
       cuaDriverCommand: config.cuaDriverCommand,
+      attachmentPaths: manualAttachmentPaths,
+      requireAutomationChromeProfile: config.requireAutomationChromeProfile,
       controlMode: config.workerControlMode,
       cuaMinIdleSeconds: config.cuaMinIdleSeconds
     });

@@ -9,13 +9,15 @@ const slackActions = fs.readFileSync('apps/follow-up-dashboard/api/slack-actions
 const kakaoAutomation = fs.readFileSync('scripts/kakao-automation', 'utf8');
 const hermesPatch = fs.readFileSync('scripts/patch-hermes-village-followup-slack', 'utf8');
 
-test('Slack follow-up delivery routes to the three agent channels', () => {
+test('Slack follow-up agent-card delivery is opt-in only', () => {
   assert.match(worker, /스케쥴-agent/);
   assert.match(worker, /서류발송-agent/);
   assert.match(worker, /정산-agent/);
   assert.match(worker, /기타문의/);
   assert.match(worker, /routeFollowUpToSlack/);
   assert.match(worker, /chat\.postMessage/);
+  assert.match(worker, /SLACK_AGENT_CARD_DELIVERY_ENABLED/);
+  assert.doesNotMatch(worker, /slackFollowUpEnabled:\s*process\.env\.SLACK_FOLLOW_UP_ENABLED\s*===\s*'1'/);
 });
 
 test('Live worker loads Hermes Slack token before delivering follow-up cards', () => {
@@ -49,6 +51,31 @@ test('Local bridge polls Slack send requests and uses the existing manual-send p
   assert.match(bridge, /mergeFollowUpPayloadById/);
   assert.match(bridge, /\/slack\/actions/);
   assert.match(bridge, /village_followup_edit_send_submit/);
+});
+
+test('Local bridge replaces Slack follow-up cards after button actions', () => {
+  assert.match(bridge, /loadSelectedEnvFile\(path\.resolve\(process\.env\.HOME \|\| '', '\.hermes\/\.env'\), \['SLACK_BOT_TOKEN'\]\)/);
+  assert.match(bridge, /buildResolvedSlackFollowUpMessage/);
+  assert.match(bridge, /replaceSlackFollowUpCard/);
+  assert.match(bridge, /chat\.update/);
+  assert.match(bridge, /tryReplaceSlackFollowUpCard\(updated \|\| row/);
+  assert.match(bridge, /kind:\s*'send_pending'/);
+  assert.match(bridge, /kind:\s*sendResult\.sent \? 'send_done' : 'send_error'/);
+  assert.doesNotMatch(bridge.match(/function buildResolvedSlackFollowUpMessage[\s\S]*?async function slackApi/)?.[0] || '', /type:\s*'actions'/);
+});
+
+test('Manual Slack send may search old Kakao rooms even when background worker search is disabled', () => {
+  const processManualSend = worker.match(/export async function processManualSend[\s\S]*?return result;/)?.[0] || '';
+  assert.match(worker, /searchTargetChat:\s*process\.env\.KAKAO_WORKER_SEARCH_TARGET_CHAT !== '0'/);
+  assert.match(processManualSend, /allowSearch:\s*true/);
+});
+
+test('Local manual-send suppresses duplicate same customer/text requests', () => {
+  assert.match(bridge, /manualSendDedupeWindowMs/);
+  assert.match(bridge, /manualSendDedupeKey/);
+  assert.match(bridge, /manualSendInFlight/);
+  assert.match(bridge, /duplicate_manual_send_suppressed_inflight/);
+  assert.match(bridge, /duplicate_manual_send_suppressed_recent_success/);
 });
 
 test('Kakao automation applies the Hermes Socket Mode Slack follow-up patch', () => {

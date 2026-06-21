@@ -877,6 +877,7 @@ function runFunction(funcName, params) {
 
   const allowedFunctions = [
     "refreshEquipmentList",
+    "refreshModelSelectionPrompts",
     "syncAuditFromMaster",
     "insertAndCheckRequest",
     "updateRequest",
