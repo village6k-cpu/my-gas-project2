@@ -16,6 +16,7 @@ const estimateRoute = exists('apps/today-dashboard/app/api/my/estimate/route.ts'
   ? read('apps/today-dashboard/app/api/my/estimate/route.ts')
   : '';
 const gasHelper = read('apps/today-dashboard/lib/server/gasPublic.ts');
+const myPageData = read('apps/today-dashboard/lib/server/myPageData.ts');
 
 // ── 가용성/견적 공개 기능은 존재하면 안 됨 (외부 오픈 금지) ──
 assert(!exists('publicAvailability.js'), 'public availability module must not exist');
@@ -138,25 +139,42 @@ assert(
   'the my-page document button must open only the quote PDF route'
 );
 
-// ── 앱: /my만 공개, 페이지는 /api/my만 사용 ──
+// ── 앱: /my만 공개, 페이지는 서버 렌더링 + 서버 전용 데이터 헬퍼만 사용 ──
 assert(
   authGate.includes('PUBLIC_PATHS') && authGate.includes('"/my"') && !authGate.includes('"/availability"'),
   'AuthGate must allow only the /my public path'
 );
 assert(
-  page.includes('/api/my') && !page.includes('/api/gas') && !page.includes('authFetch'),
-  'my-page must only call the /api/my server route'
+  !page.includes('"use client"') &&
+    !page.includes('useSearchParams') &&
+    !page.includes('useEffect') &&
+    !/fetch\(/.test(page) &&
+    page.includes('getMyPageResponse') &&
+    page.includes('export const dynamic = "force-dynamic"') &&
+    !page.includes('/api/gas') &&
+    !page.includes('authFetch'),
+  'my-page must server-render reservation data without a client-side fetch waterfall'
 );
 assert(
-  route.includes('rateLimited') && route.includes('action: "myPage"'),
-  'the /api/my route must rate limit and proxy the GAS myPage action'
+  page.includes('Suspense') &&
+    page.includes('MyPageLoading') &&
+    page.includes('예약 정보를 확인하는 중'),
+  'my-page initial HTML must include an immediate loading state instead of a blank shell'
 );
 assert(
-  /const myPageResponseCache = new Map/.test(route) &&
-    /MY_PAGE_RESPONSE_CACHE_MS/.test(route) &&
-    /myPageResponseCache\.get\(token\)/.test(route) &&
-    /myPageResponseCache\.set\(token/.test(route),
-  'the /api/my route must keep a short server-side token cache so repeated customer opens avoid slow GAS roundtrips'
+  route.includes('rateLimited') &&
+    route.includes('getMyPageResponse') &&
+    route.includes('isValidMyPageToken'),
+  'the /api/my route must rate limit and use the shared token-verified my-page data path'
+);
+assert(
+  /const myPageResponseCache = new Map/.test(myPageData) &&
+    /MY_PAGE_RESPONSE_CACHE_MS/.test(myPageData) &&
+    /myPageResponseCache\.get\(token\)/.test(myPageData) &&
+    /myPageResponseCache\.set\(token/.test(myPageData) &&
+    myPageData.includes('unstable_cache') &&
+    /gasGet\(\{ action: "myPage", token \}\)/.test(myPageData),
+  'the shared my-page data path must keep short memory and server caches so repeated customer opens avoid slow GAS roundtrips'
 );
 assert(
   gasHelper.includes('GAS_API_KEY') && gasHelper.includes('rateLimited'),
