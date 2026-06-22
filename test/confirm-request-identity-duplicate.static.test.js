@@ -12,7 +12,7 @@ assert.match(
 
 assert.match(
   source,
-  /if \(!sameName && !samePhone\) continue;/,
+  /if \(!sameName && !samePhone\) return false;/,
   '예약자명 또는 연락처 중 하나라도 같은 실제 고객 단서가 있어야 같은 요청 후보로 비교해야 한다'
 );
 

@@ -7037,65 +7037,169 @@ function _confirmRequestContainsAllEquip_(existingEquips, requestedEquips) {
   });
 }
 
-function _findDuplicateConfirmRequest_(sheet, req, requestedEquipNames) {
-  var reqName = String(req.예약자명 || "").trim();
-  var reqDate = _confirmRequestDateKey_(req.반출일);
-  var reqStartTime = _confirmRequestTimeKey_(req.반출시간);
-  var reqEndDate = _confirmRequestDateKey_(req.반납일);
-  var reqEndTime = _confirmRequestTimeKey_(req.반납시간);
-  var reqPhone = _confirmRequestPhoneKey_(req.연락처);
-  if (!reqName || !reqDate || !requestedEquipNames || requestedEquipNames.length === 0) return null;
+function _confirmRequestEquipQty_(item) {
+  var qty = 1;
+  if (item && typeof item === "object") qty = Number(item.qty || item.quantity || item.수량 || 1);
+  if (!isFinite(qty) || qty <= 0) qty = 1;
+  return qty;
+}
 
+function _confirmRequestEquipNameFromItem_(item) {
+  if (item && typeof item === "object") return item.name || item.이름 || item.item || "";
+  return item;
+}
+
+function _confirmRequestEquipListSignature_(items) {
+  var counts = {};
+  (items || []).forEach(function(item) {
+    var key = _confirmRequestEquipKey_(_confirmRequestEquipNameFromItem_(item));
+    if (!key) return;
+    var qty = _confirmRequestEquipQty_(item);
+    var countKey = key + "::" + qty;
+    counts[countKey] = (counts[countKey] || 0) + 1;
+  });
+  return Object.keys(counts).sort().map(function(key) { return key + "x" + counts[key]; }).join("|");
+}
+
+function _confirmRequestEquipListEquivalent_(existingItems, requestedItems) {
+  var existingSig = _confirmRequestEquipListSignature_(existingItems);
+  var requestedSig = _confirmRequestEquipListSignature_(requestedItems);
+  return !!existingSig && existingSig === requestedSig;
+}
+
+function _buildConfirmRequestGroups_(sheet) {
   var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return null;
+  if (lastRow < 2) return [];
 
   var dataRange = sheet.getRange(2, 1, lastRow - 1, 18);
   var allData = dataRange.getValues();
   var allDisplayData = dataRange.getDisplayValues();
   var reqGroups = {};
+  var order = [];
   for (var di = 0; di < allData.length; di++) {
     var rowData = allData[di];
     var rowDisplay = allDisplayData[di] || [];
     var rid = rowDisplay[0] || rowData[0];
     if (!rid) continue;
+    rid = String(rid).trim();
     if (!reqGroups[rid]) {
       reqGroups[rid] = {
-        reqID: String(rid).trim(),
+        reqID: rid,
+        rows: [],
         name: "",
         phone: "",
         startDate: "",
         startTime: "",
         endDate: "",
         endTime: "",
-        equips: []
+        equips: [],
+        topLevelEquipItems: [],
+        registerActions: [],
+        statuses: [],
+        tradeIds: []
       };
+      order.push(rid);
     }
     var g = reqGroups[rid];
+    g.rows.push(di + 2);
     if ((rowData[10] || rowDisplay[10]) && !g.name) g.name = String(rowDisplay[10] || rowData[10]).trim();      // K: 예약자명
     if ((rowData[11] || rowDisplay[11]) && !g.phone) g.phone = _confirmRequestPhoneKey_(rowDisplay[11] || rowData[11]); // L: 연락처
     if ((rowData[1] || rowDisplay[1]) && !g.startDate) g.startDate = _confirmRequestDateKey_(rowData[1], rowDisplay[1]); // B: 반출일
     if ((rowData[2] || rowDisplay[2]) && !g.startTime) g.startTime = _confirmRequestTimeKey_(rowData[2], rowDisplay[2]); // C: 반출시간
     if ((rowData[3] || rowDisplay[3]) && !g.endDate) g.endDate = _confirmRequestDateKey_(rowData[3], rowDisplay[3]);     // D: 반납일
     if ((rowData[4] || rowDisplay[4]) && !g.endTime) g.endTime = _confirmRequestTimeKey_(rowData[4], rowDisplay[4]);     // E: 반납시간
-    if (rowData[5] || rowDisplay[5]) g.equips.push(String(rowDisplay[5] || rowData[5]).trim());             // F: 장비명
+    var equipName = String(rowDisplay[5] || rowData[5] || "").trim();
+    if (equipName) {
+      g.equips.push(equipName); // F: 장비명
+      var memo = String(rowDisplay[16] || rowData[16] || "").trim(); // Q: 비고, 세트 구성품은 [세트]로 시작
+      if (memo.indexOf("[세트]") !== 0) {
+        g.topLevelEquipItems.push({ name: equipName, qty: rowDisplay[6] || rowData[6] || 1 });
+      }
+    }
+    var registerAction = String(rowDisplay[13] || rowData[13] || "").trim(); // N: 등록
+    var status = String(rowDisplay[14] || rowData[14] || "").trim();         // O: 등록상태
+    var tradeId = String(rowDisplay[15] || rowData[15] || "").trim();        // P: 거래ID
+    if (registerAction) g.registerActions.push(registerAction);
+    if (status) g.statuses.push(status);
+    if (tradeId) g.tradeIds.push(tradeId);
   }
+  return order.map(function(rid) { return reqGroups[rid]; });
+}
 
-  for (var rid in reqGroups) {
-    var group = reqGroups[rid];
-    var sameName = group.name === reqName;
-    var samePhone = !!(reqPhone && group.phone && reqPhone === group.phone);
-    if (!sameName && !samePhone) continue;
-    // 동명이인 보호: 이름만 같고 서로 다른 연락처가 명확하면 다른 고객으로 본다.
-    // 반대로 연락처가 같으면 카카오 닉네임/예약자명 표기가 달라도 같은 실제 고객으로 보아 중복 차단한다.
-    if (sameName && !samePhone && reqPhone && group.phone && reqPhone !== group.phone) continue;
-    if (group.startDate !== reqDate) continue;
-    if (reqStartTime && group.startTime && reqStartTime !== group.startTime) continue;
-    if (reqEndDate && group.endDate && group.endDate !== reqEndDate) continue;
-    if (reqEndTime && group.endTime && reqEndTime !== group.endTime) continue;
-    if (!_confirmRequestContainsAllEquip_(group.equips, requestedEquipNames)) continue;
+function _confirmRequestSameIdentity_(group, reqName, reqPhone) {
+  var sameName = group.name === reqName;
+  var samePhone = !!(reqPhone && group.phone && reqPhone === group.phone);
+  if (!sameName && !samePhone) return false;
+  // 동명이인 보호: 이름만 같고 서로 다른 연락처가 명확하면 다른 고객으로 본다.
+  // 반대로 연락처가 같으면 카카오 닉네임/예약자명 표기가 달라도 같은 실제 고객으로 보아 중복 차단한다(또는 교체 대상으로 본다).
+  if (sameName && !samePhone && reqPhone && group.phone && reqPhone !== group.phone) return false;
+  return true;
+}
+
+function _confirmRequestSamePeriod_(group, reqDate, reqStartTime, reqEndDate, reqEndTime) {
+  if (group.startDate !== reqDate) return false;
+  if (reqStartTime && group.startTime && reqStartTime !== group.startTime) return false;
+  if (reqEndDate && group.endDate && group.endDate !== reqEndDate) return false;
+  if (reqEndTime && group.endTime && reqEndTime !== group.endTime) return false;
+  return true;
+}
+
+function _isMutableConfirmRequestGroup_(group) {
+  if (!group) return false;
+  if ((group.tradeIds || []).filter(Boolean).length > 0) return false;
+  var statusText = (group.registerActions || []).concat(group.statuses || []).join(" ");
+  // 이미 등록/등록대기/보류/거절된 건은 사람이 건드린 상태일 수 있으므로 자동 교체하지 않는다.
+  return !/(등록완료|등록대기|등록\s*처리|개고생2\.0|거절|보류)/.test(statusText);
+}
+
+function _findDuplicateConfirmRequest_(sheet, req, requestedEquipItems) {
+  var reqName = String(req.예약자명 || "").trim();
+  var reqDate = _confirmRequestDateKey_(req.반출일);
+  var reqStartTime = _confirmRequestTimeKey_(req.반출시간);
+  var reqEndDate = _confirmRequestDateKey_(req.반납일);
+  var reqEndTime = _confirmRequestTimeKey_(req.반납시간);
+  var reqPhone = _confirmRequestPhoneKey_(req.연락처);
+  if (!reqName || !reqDate || !requestedEquipItems || requestedEquipItems.length === 0) return null;
+
+  var groups = _buildConfirmRequestGroups_(sheet);
+  for (var gi = 0; gi < groups.length; gi++) {
+    var group = groups[gi];
+    if (!_confirmRequestSameIdentity_(group, reqName, reqPhone)) continue;
+    if (!_confirmRequestSamePeriod_(group, reqDate, reqStartTime, reqEndDate, reqEndTime)) continue;
+    if (!_confirmRequestEquipListEquivalent_(group.topLevelEquipItems, requestedEquipItems)) continue;
     return group;
   }
   return null;
+}
+
+function _findReplaceableConfirmRequestGroups_(sheet, req, requestedEquipItems) {
+  var reqName = String(req.예약자명 || "").trim();
+  var reqDate = _confirmRequestDateKey_(req.반출일);
+  var reqStartTime = _confirmRequestTimeKey_(req.반출시간);
+  var reqEndDate = _confirmRequestDateKey_(req.반납일);
+  var reqEndTime = _confirmRequestTimeKey_(req.반납시간);
+  var reqPhone = _confirmRequestPhoneKey_(req.연락처);
+  if (!reqName || !reqDate || !requestedEquipItems || requestedEquipItems.length === 0) return [];
+
+  return _buildConfirmRequestGroups_(sheet).filter(function(group) {
+    if (!_isMutableConfirmRequestGroup_(group)) return false;
+    if (!_confirmRequestSameIdentity_(group, reqName, reqPhone)) return false;
+    if (!_confirmRequestSamePeriod_(group, reqDate, reqStartTime, reqEndDate, reqEndTime)) return false;
+    // 같은 고객/같은 반출·반납창인데 장비/수량이 달라졌으면 이전 후보는 stale이다.
+    // 김재우 건처럼 장비를 계속 바꾼 경우, 최신 확인요청 1개만 남긴다.
+    return !_confirmRequestEquipListEquivalent_(group.topLevelEquipItems, requestedEquipItems);
+  });
+}
+
+function _deleteConfirmRequestGroups_(sheet, groups) {
+  var rowSet = {};
+  (groups || []).forEach(function(group) {
+    (group.rows || []).forEach(function(row) { rowSet[row] = true; });
+  });
+  var rows = Object.keys(rowSet).map(function(row) { return Number(row); }).filter(function(row) { return row > 1; });
+  rows.sort(function(a, b) { return b - a; });
+  rows.forEach(function(row) { sheet.deleteRow(row); });
+  return rows.length;
 }
 
 function _collectConfirmRequestResultsByReqID_(sheet, reqID) {
@@ -7157,58 +7261,13 @@ function _insertAndCheckRequest(req) {
     }
   } catch(e) {}
 
-  // ── 중복 체크: 같은 예약자명 + 반출일 + 장비목록 ──
-  var requestedEquipNames = (req.장비 || []).map(function(e) {
-    return fuzzyMatchEquipName(String(e.이름 || "").trim(), equipNames);
-  }).filter(function(name) { return name; });
-  var duplicateRequest = _findDuplicateConfirmRequest_(sheet, req, requestedEquipNames);
-  if (duplicateRequest) {
-    return {
-      reqID: duplicateRequest.reqID,
-      duplicate: true,
-      message: "중복 요청: 동일한 예약자/반출일시/장비 조합이 이미 존재합니다 (" + duplicateRequest.reqID + ")",
-      results: _collectConfirmRequestResultsByReqID_(sheet, duplicateRequest.reqID)
-    };
-  }
+  var requestedEquipItems = (req.장비 || []).map(function(e) {
+    var matchedName = fuzzyMatchEquipName(String(e.이름 || "").trim(), equipNames);
+    if (!matchedName) return null;
+    return { name: matchedName, qty: e.수량 || 1 };
+  }).filter(function(item) { return item && item.name; });
+  var requestedEquipNames = requestedEquipItems.map(function(item) { return item.name; });
 
-  var reqName = String(req.예약자명 || "").trim();
-  var reqDate = _confirmRequestDateKey_(req.반출일);
-  if (reqName && reqDate && requestedEquipNames.length > 0) {
-    // 스케줄상세(등록 완료된 건)에서도 중복 체크
-    var dupTid = checkDuplicateRequest(ss, reqName, reqDate, requestedEquipNames);
-    if (dupTid) {
-      throw new Error("중복 요청: 동일 건이 이미 예약 등록되어 있습니다 (거래ID: " + dupTid + ")");
-    }
-  }
-
-  // 요청ID 생성
-  const now = new Date();
-  const dateStr = Utilities.formatDate(now, "Asia/Seoul", "yyMMdd");
-  const prefix = "RQ-" + dateStr;
-  const lastRow = sheet.getLastRow();
-  let maxNum = 0;
-  if (lastRow >= 2) {
-    sheet.getRange(2, 1, lastRow - 1, 1).getValues().flat().forEach(function(id) {
-      if (id && id.toString().startsWith(prefix)) {
-        var num = parseInt(id.toString().split("-")[2]);
-        if (num > maxNum) maxNum = num;
-      }
-    });
-  }
-  var reqID = prefix + "-" + String(maxNum + 1).padStart(3, "0");
-
-  // 첫 번째 빈 행 찾기 (A열 기준)
-  var startRow = 2;
-  if (lastRow >= 2) {
-    var aCol = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-    for (var r = 0; r < aCol.length; r++) {
-      if (!aCol[r][0] || String(aCol[r][0]).trim() === "") {
-        startRow = r + 2;
-        break;
-      }
-      startRow = r + 3; // 마지막 데이터 다음 행
-    }
-  }
   // 연락처 미입력 시 고객DB에서 조회한다.
   // 고객DB에도 없거나 동명이인이면 확인요청/예약 등록 자체를 만들지 않는다.
   // 연락처 없는 예약행은 이후 계약/문서/정산 단계에서 구조적으로 막히므로,
@@ -7235,6 +7294,68 @@ function _insertAndCheckRequest(req) {
         : "고객DB에서 연락처 없음")
       : "예약자명 없음으로 고객DB 조회 불가";
     throw new Error("NO_CONTACT: 연락처가 없으면 예약 등록이 불가능합니다. " + contactReason + " — 고객에게 연락처부터 요청하세요.");
+  }
+
+  var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone });
+
+  // ── 중복 체크: 같은 예약자명/연락처 + 반출·반납창 + 같은 최상위 장비/수량 ──
+  var duplicateRequest = _findDuplicateConfirmRequest_(sheet, reqForDedupe, requestedEquipItems);
+  if (duplicateRequest) {
+    return {
+      reqID: duplicateRequest.reqID,
+      duplicate: true,
+      message: "중복 요청: 동일한 예약자/반출일시/장비 조합이 이미 존재합니다 (" + duplicateRequest.reqID + ")",
+      results: _collectConfirmRequestResultsByReqID_(sheet, duplicateRequest.reqID)
+    };
+  }
+
+  var reqName = String(req.예약자명 || "").trim();
+  var reqDate = _confirmRequestDateKey_(req.반출일);
+  if (reqName && reqDate && requestedEquipNames.length > 0) {
+    // 스케줄상세(등록 완료된 건)에서도 중복 체크
+    var dupTid = checkDuplicateRequest(ss, reqName, reqDate, requestedEquipNames);
+    if (dupTid) {
+      throw new Error("중복 요청: 동일 건이 이미 예약 등록되어 있습니다 (거래ID: " + dupTid + ")");
+    }
+  }
+
+  // 요청ID는 stale 삭제 전에 스캔해서 번호를 재사용하지 않는다.
+  const now = new Date();
+  const dateStr = Utilities.formatDate(now, "Asia/Seoul", "yyMMdd");
+  const prefix = "RQ-" + dateStr;
+  var idScanLastRow = sheet.getLastRow();
+  let maxNum = 0;
+  if (idScanLastRow >= 2) {
+    sheet.getRange(2, 1, idScanLastRow - 1, 1).getValues().flat().forEach(function(id) {
+      if (id && id.toString().startsWith(prefix)) {
+        var num = parseInt(id.toString().split("-")[2]);
+        if (num > maxNum) maxNum = num;
+      }
+    });
+  }
+  var reqID = prefix + "-" + String(maxNum + 1).padStart(3, "0");
+
+  var replacedGroups = _findReplaceableConfirmRequestGroups_(sheet, reqForDedupe, requestedEquipItems);
+  var replacedReqIDs = replacedGroups.map(function(group) { return group.reqID; });
+  var replacedRows = 0;
+  if (replacedGroups.length > 0) {
+    replacedRows = _deleteConfirmRequestGroups_(sheet, replacedGroups);
+    SpreadsheetApp.flush();
+  }
+
+  var lastRow = sheet.getLastRow();
+
+  // 첫 번째 빈 행 찾기 (A열 기준)
+  var startRow = 2;
+  if (lastRow >= 2) {
+    var aCol = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var r = 0; r < aCol.length; r++) {
+      if (!aCol[r][0] || String(aCol[r][0]).trim() === "") {
+        startRow = r + 2;
+        break;
+      }
+      startRow = r + 3; // 마지막 데이터 다음 행
+    }
   }
 
   var items = req.장비 || [];
@@ -7300,7 +7421,12 @@ function _insertAndCheckRequest(req) {
     });
   }
 
-  return { reqID: reqID, results: results };
+  var response = { reqID: reqID, results: results };
+  if (replacedReqIDs.length > 0) {
+    response.replacedReqIDs = replacedReqIDs;
+    response.replacedRows = replacedRows;
+  }
+  return response;
 }
 
 
