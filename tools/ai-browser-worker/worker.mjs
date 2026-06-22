@@ -423,6 +423,7 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - CURRENT_CONFIRMED_POLICY가 최신 FAQ/정책 기준이다. RAG가 충돌하면 현재 정책으로 고치고, 없는 정책 FAQ는 high/retrieved RAG로 보강하거나 draft_only/follow_up.
 - 가격 문의는 세트마스터 단가, 고객할인, 장기할인으로 초안/follow_up을 만든다. price_paused면 가격 자동발송 금지.
 - 서류(계약서/견적서/세금계산서/거래명세서)는 계산 생략 금지. 거래ID는 계약마스터+스케줄상세 대표/단품 L열 단가로 수량×일수×단가 계산; RQ는 확인요청 결과+세트마스터 단가로 부분계산하고 미등록/단가불명은 "미계산/확인 필요"로 표시한다.
+-반복견적=내예약 견적 안내
 - 금액 산식: 24시간=1일, +6시간 동일, 초과 +1일; 정가×고객/제휴/단골 할인×장기할인×VAT1.1, 10원 올림.
 - unread/미처리면 오래된 메시지도 검토한다. 날짜만 오래된 backfill/row movement는 자동발송하지 않는다.
 - 유입로그 단서는 evidence에만 보존한다. API 별도 worker 책임이다.
@@ -4057,6 +4058,23 @@ function isContactFirstReservationReply(value = '') {
   return !/(재고\s*가능|대여\s*가능|예약\s*가능(?:합니다|해요|하세요|하십니다)?|예약\s*확정|확정|[0-9,]+\s*(?:원|만원)|입금|계좌|환불|파손|분실)/i.test(withoutContactPolicy);
 }
 
+function isLiveQuoteRecheckInfoReply(value = '', decision = {}) {
+  const reply = text(value).normalize('NFKC').replace(/\s+/g, ' ').trim();
+  if (!reply) return false;
+  if (!/(내\s*예약\s*링크|예약\s*링크|처음\s*보내드린\s*링크|최초\s*.*링크|기존\s*.*링크)/.test(reply)) return false;
+  if (!/(최신\s*견적서|견적서.*최신|수정.*견적|변경.*견적|장비.*수정|일정.*수정)/.test(reply)) return false;
+  if (/(예약\s*확정|재고\s*가능|대여\s*가능|가능\s*합니다|[0-9,]+\s*(?:원|만원)|입금|계좌|환불|파손|분실)/.test(reply)) return false;
+
+  const latest = text(decision.latest_customer_message_cluster).normalize('NFKC');
+  const visible = Array.isArray(decision.visible_messages_used)
+    ? decision.visible_messages_used.map((message) => text(message?.message)).join(' ')
+    : '';
+  const requestText = `${latest} ${visible}`.normalize('NFKC');
+  if (!/(견적서|견적|금액|가격)/.test(requestText)) return false;
+  if (!/(다시|새로|수정|변경|업데이트|재요청|재발송|또|한번|한 번|확인)/.test(requestText)) return false;
+  return true;
+}
+
 export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
   const reply = decision.reply_decision && typeof decision.reply_decision === 'object' ? decision.reply_decision : {};
@@ -4067,6 +4085,7 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   const classification = String(decision.classification || '').trim();
   const staffConfirmedAcceptance = isStaffConfirmedReservationAcceptance(decision, textValue);
   const contactFirstReservationReply = isContactFirstReservationReply(textValue);
+  const liveQuoteRecheckInfoReply = isLiveQuoteRecheckInfoReply(textValue, decision);
   const priceLikeClassifications = new Set(['price', 'price_review', 'quote_send']);
   if (killSwitch === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
   if (killSwitch === 'price_paused' && priceLikeClassifications.has(classification)) return { allowed: false, reason: 'kill_switch_price_paused' };
@@ -4082,12 +4101,12 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   if (blockedClassifications.has(classification)) return { allowed: false, reason: `classification_${classification}_requires_review` };
   if (decision.owner_review_required === true || decision.ownerReviewRequired === true) return { allowed: false, reason: 'owner_review_required' };
   const sensitiveCommitmentPattern = /(refund|환불|분실|파손|손상|결제\s*취소|예약\s*확정|재고\s*가능|가능\s*확정|(?:대여|예약)?\s*가능(?:합니다|하세요|하십니다|해요|함)?|확정|[0-9,]+\s*(?:원|만원)|입금|계좌|금액)/i;
-  if (sensitiveCommitmentPattern.test(textValue) && !staffConfirmedAcceptance && !contactFirstReservationReply) return { allowed: false, reason: 'sensitive_commitment_text' };
+  if (sensitiveCommitmentPattern.test(textValue) && !staffConfirmedAcceptance && !contactFirstReservationReply && !liveQuoteRecheckInfoReply) return { allowed: false, reason: 'sensitive_commitment_text' };
   if (classification === 'reservation' || classification === 'reservation_request') {
     const safeOperationalAck = /(확인|접수|공유|전달|참고|검토|방문|수령|반납|재학증명|서류|파일|연락처|전화번호|휴대폰|핸드폰|네|넵|감사)/.test(textValue);
     if (!safeOperationalAck && !staffConfirmedAcceptance) return { allowed: false, reason: `classification_${classification}_requires_review` };
   }
-  return { allowed: true, reason: staffConfirmedAcceptance ? 'staff_confirmed_reservation_acceptance' : contactFirstReservationReply ? 'contact_first_reservation_reply' : 'allowed', text: textValue, replyMode: mode, confidence };
+  return { allowed: true, reason: staffConfirmedAcceptance ? 'staff_confirmed_reservation_acceptance' : contactFirstReservationReply ? 'contact_first_reservation_reply' : liveQuoteRecheckInfoReply ? 'live_quote_recheck_info' : 'allowed', text: textValue, replyMode: mode, confidence };
 }
 
 function isStaffSenderLabel(value = '') {
@@ -4238,6 +4257,9 @@ export function currentConfirmedPolicyAutoReplySupport(decision = {}, replyText 
 export function autoReplyRequiresRagSupport(decision = {}, replyText = '') {
   if (isCustomerDocumentAssetRequest(decision)) {
     return { required: false, reason: 'standard_customer_document_assets' };
+  }
+  if (isLiveQuoteRecheckInfoReply(replyText || decision.reply_decision?.text || decision.suggested_reply_draft, decision)) {
+    return { required: false, reason: 'live_quote_recheck_info' };
   }
   const classification = String(decision.classification || '').trim();
   const mutablePolicy = mutablePolicyAutoReplyRisk(decision, replyText);

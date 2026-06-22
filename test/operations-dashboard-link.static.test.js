@@ -83,6 +83,17 @@ const sheetApi = read('sheetAPI.js');
       `${file} must accept operations-board deep links into today schedule: ${contract}`
     );
   });
+  [
+    'function dashboardMyReservationUrl(item)',
+    'https://village6k-cpu.github.io/village-agreement/?id=',
+    '&admin=1',
+    '내예약 열기'
+  ].forEach((contract) => {
+    assert(
+      html.includes(contract),
+      `${file} must expose an owner-visible my-reservation link on reservation cards: ${contract}`
+    );
+  });
 });
 
 console.log('operations dashboard link static checks passed');

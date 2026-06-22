@@ -3807,8 +3807,18 @@ function mergePhotoList_(target, source) {
   });
 }
 
+function dashboardMyReservationUrl(item) {
+  var tid = String((item && item.tradeId) || '').trim();
+  if (!tid) return '';
+  return 'https://village6k-cpu.github.io/village-agreement/?id=' + encodeURIComponent(tid) + '&admin=1';
+}
+
 function cardActionHtml(item, cardType) {
   var html = '<div class="card-actions" onclick="event.stopPropagation()">';
+  var reservationUrl = dashboardMyReservationUrl(item);
+  if (reservationUrl) {
+    html += '<a class="card-contract-btn" href="' + escAttr(reservationUrl) + '" target="_blank" onclick="event.stopPropagation()">내예약 열기</a>';
+  }
   if (item.contractRegenPending) {
     html += '<span class="card-contract-btn disabled">계약서 갱신 중</span>';
   } else if (item.contractUrl) {
