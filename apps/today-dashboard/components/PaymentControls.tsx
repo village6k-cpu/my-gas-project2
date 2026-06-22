@@ -16,6 +16,7 @@ import {
 } from "@/lib/data/store";
 import { gasRead } from "@/lib/data/writeback";
 import { won } from "@/lib/domain/status";
+import { MyReservationLinkButton } from "./MyReservationLinkButton";
 import { ChevronRight, Doc, Refresh, Send } from "./icons";
 
 const FALLBACK_PAYMENT_OPTIONS = ["미정", "계좌", "카드", "현금", "기타"];
@@ -211,6 +212,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
           )}
 
           <div className="flex flex-wrap items-center gap-2 pt-0.5">
+            <MyReservationLinkButton tradeId={trade.tradeId} />
             <button
               onClick={() => !trade.estimateSent && setConfirming(true)}
               className={`tap inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-bold ${

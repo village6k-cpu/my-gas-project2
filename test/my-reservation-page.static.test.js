@@ -11,7 +11,12 @@ const myPageCode = myPage.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, 
 const sheetApi = read('sheetAPI.js');
 const authGate = read('apps/today-dashboard/components/AuthGate.tsx');
 const page = read('apps/today-dashboard/app/my/page.tsx');
+const myPageClient = read('apps/today-dashboard/app/my/MyPageClient.tsx');
 const route = read('apps/today-dashboard/app/api/my/route.ts');
+const gasRoute = read('apps/today-dashboard/app/api/gas/route.ts');
+const scheduleCard = read('apps/today-dashboard/components/ScheduleCard.tsx');
+const paymentControls = read('apps/today-dashboard/components/PaymentControls.tsx');
+const myReservationButton = read('apps/today-dashboard/components/MyReservationLinkButton.tsx');
 const estimateRoute = exists('apps/today-dashboard/app/api/my/estimate/route.ts')
   ? read('apps/today-dashboard/app/api/my/estimate/route.ts')
   : '';
@@ -100,8 +105,8 @@ assert(
 );
 assert(
   !/contractUrl:\s*contractUrl/.test(myPage) &&
-    !/contractUrl:\s*string/.test(page) &&
-    !/trade\.contractUrl/.test(page),
+    !/contractUrl:\s*string/.test(page + myPageClient) &&
+    !/trade\.contractUrl/.test(page + myPageClient),
   'my-page must never expose the Google Sheets contract URL to customers'
 );
 
@@ -111,7 +116,7 @@ assert(
   'the my-page must not accept change/extension/cancel submissions'
 );
 assert(
-  !route.includes('export async function POST') && !page.includes('method: "POST"'),
+  !route.includes('export async function POST') && !page.includes('method: "POST"') && !myPageClient.includes('method: "POST"'),
   'the /api/my route and page must be read-only (no POST)'
 );
 assert(
@@ -129,13 +134,13 @@ assert(
   'the customer quote route must validate the token, call previewQuote without stale PDF reuse, and never proxy contract sheet exports'
 );
 assert(
-  page.includes('카카오톡 채널') && page.includes('연장 · 변경 · 취소'),
+  myPageClient.includes('카카오톡 채널') && myPageClient.includes('연장 · 변경 · 취소'),
   'the my-page must guide customers to the KakaoTalk channel for changes'
 );
 assert(
-  page.includes('/api/my/estimate') &&
-    page.includes('견적서 PDF 확인') &&
-    !page.includes('계약서 · 견적 확인'),
+  myPageClient.includes('/api/my/estimate') &&
+    myPageClient.includes('견적서 PDF 확인') &&
+    !myPageClient.includes('계약서 · 견적 확인'),
   'the my-page document button must open only the quote PDF route'
 );
 
@@ -146,19 +151,27 @@ assert(
 );
 assert(
   !page.includes('"use client"') &&
-    !page.includes('useSearchParams') &&
-    !page.includes('useEffect') &&
-    !/fetch\(/.test(page) &&
-    page.includes('getMyPageResponse') &&
-    page.includes('export const dynamic = "force-dynamic"') &&
+    page.includes('MyPageClient') &&
+    page.includes('MyPageLoading') &&
+    page.includes('내 예약') &&
+    !page.includes('getMyPageResponse') &&
     !page.includes('/api/gas') &&
     !page.includes('authFetch'),
-  'my-page must server-render reservation data without a client-side fetch waterfall'
+  'my-page shell must render immediately without blocking first paint on the GAS reservation lookup'
 );
 assert(
-  page.includes('Suspense') &&
-    page.includes('MyPageLoading') &&
-    page.includes('예약 정보를 확인하는 중'),
+  myPageClient.includes('"use client"') &&
+    myPageClient.includes('window.sessionStorage') &&
+    myPageClient.includes('SESSION_CACHE_MS') &&
+    myPageClient.includes('fetch(`/api/my?t=${encodeURIComponent(token)}`') &&
+    !myPageClient.includes('/api/gas') &&
+    !myPageClient.includes('authFetch'),
+  'my-page client must use fast session cache plus the token-verified /api/my route, never the staff GAS proxy'
+);
+assert(
+  page.includes('<noscript>') &&
+    myPageClient.includes('MyPageLoading') &&
+    myPageClient.includes('예약 정보를 확인하는 중'),
   'my-page initial HTML must include an immediate loading state instead of a blank shell'
 );
 assert(
@@ -207,6 +220,21 @@ assert(
     sheetApi.includes('"setupMyPage"') &&
     /setupMyPage[\s\S]{0,500}JSON\.parse\(setupArgs\)/.test(sheetApi),
   'getMyPageLink must accept plain-string ids and setupMyPage must be callable via the run API'
+);
+
+assert(
+  gasRoute.includes('STAFF_RUN_FUNCTIONS') &&
+    gasRoute.includes('"getMyPageLink"') &&
+    /allowed\(action, func\)/.test(gasRoute),
+  'today-dashboard staff GAS proxy must allow only the safe getMyPageLink run function for 내예약 열기'
+);
+assert(
+  myReservationButton.includes('gasRead("run", { func: "getMyPageLink", args: tradeId })') &&
+    myReservationButton.includes('내예약 열기') &&
+    myReservationButton.includes('window.open("about:blank", "_blank")') &&
+    scheduleCard.includes('<MyReservationLinkButton tradeId={trade.tradeId} compact />') &&
+    paymentControls.includes('<MyReservationLinkButton tradeId={trade.tradeId} />'),
+  'today dashboard must expose a visible owner button that opens the exact customer my-reservation page'
 );
 
 console.log('my-reservation-page.static.test.js OK');

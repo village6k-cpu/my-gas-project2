@@ -8,6 +8,7 @@ import { HandoverChecklist } from "./HandoverChecklist";
 import { RiskPanel } from "./RiskPanel";
 import { PhotoStrip } from "./PhotoStrip";
 import { PaymentControls } from "./PaymentControls";
+import { MyReservationLinkButton } from "./MyReservationLinkButton";
 import { Check, ChevronRight, Phone } from "./icons";
 
 const STATUS_BADGE: Record<string, string> = {
@@ -99,6 +100,7 @@ export function ScheduleCard({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
+          <MyReservationLinkButton tradeId={trade.tradeId} compact />
           {/* PC(넓은 화면)에선 번호 노출 — 보고 폰으로 검 */}
           <span className="hidden text-[13.5px] font-semibold tabular-nums text-ink-soft sm:inline">{trade.customerPhone}</span>
           <a

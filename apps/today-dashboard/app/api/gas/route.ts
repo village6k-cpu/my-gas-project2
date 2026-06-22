@@ -66,7 +66,10 @@ const WRITE_ACTIONS = new Set([
   "uploadDashboardPhoto",
 ]);
 
-function allowed(action: string): { ok: boolean; isWrite: boolean } {
+const STAFF_RUN_FUNCTIONS = new Set(["getMyPageLink"]);
+
+function allowed(action: string, func?: string): { ok: boolean; isWrite: boolean } {
+  if (action === "run" && STAFF_RUN_FUNCTIONS.has(String(func || ""))) return { ok: true, isWrite: false };
   const isWrite = WRITE_ACTIONS.has(action);
   return { ok: READ_ACTIONS.has(action) || isWrite, isWrite };
 }
@@ -74,7 +77,8 @@ function allowed(action: string): { ok: boolean; isWrite: boolean } {
 async function callGet(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   const action = sp.get("action") ?? "";
-  const { ok, isWrite } = allowed(action);
+  const func = sp.get("func") ?? "";
+  const { ok, isWrite } = allowed(action, func);
   if (!ok) {
     return NextResponse.json({ error: `action '${action}' 미허용` }, { status: 400 });
   }
@@ -107,7 +111,8 @@ async function callPost(req: NextRequest) {
   }
   const sp = req.nextUrl.searchParams;
   const action = String(body.action ?? sp.get("action") ?? "");
-  const { ok, isWrite } = allowed(action);
+  const func = String(body.func ?? sp.get("func") ?? "");
+  const { ok, isWrite } = allowed(action, func);
   if (!ok) {
     return NextResponse.json({ error: `action '${action}' 미허용` }, { status: 400 });
   }
