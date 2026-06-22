@@ -11,6 +11,7 @@ const dashboard = read('dashboard.html');
 const docsDashboard = read('docs/dashboard.html');
 const store = read('apps/today-dashboard/lib/data/store.ts');
 const controls = read('apps/today-dashboard/components/PaymentControls.tsx');
+const gasProxy = read('apps/today-dashboard/app/api/gas/route.ts');
 
 assert(
   /case "sendPayAppPaymentLink":/.test(api) &&
@@ -75,6 +76,11 @@ assert(
   /export async function sendPayAppPaymentLink\(tradeId: string\)/.test(store) &&
     /gasMutation\("sendPayAppPaymentLink",\s*\{ tid: tradeId \}\)/.test(store),
   'Next store must expose a PayApp payment-link mutation'
+);
+
+assert(
+  /const WRITE_ACTIONS = new Set\(\[[\s\S]*"sendPayAppPaymentLink"/.test(gasProxy),
+  'Next GAS proxy must allow the PayApp payment-link write action'
 );
 
 assert(
