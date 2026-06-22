@@ -2620,6 +2620,37 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
 });
 
+test('live quote re-request guidance can auto-send without treating it as a new quote task', () => {
+  const reply = '감독님, 최초에 보내드린 내 예약 링크에서 최신 견적서를 확인하실 수 있습니다. 장비/일정이 수정되면 그 링크의 견적서도 최신 내용으로 다시 계산됩니다.';
+  const decision = {
+    classification: 'faq',
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    latest_customer_message_cluster: '장비 수정했는데 견적서 다시 보내주실 수 있나요?',
+    visible_messages_used: [
+      { sender: '고객', message: '장비 수정했는데 견적서 다시 보내주실 수 있나요?', time: '오후 2:00' }
+    ],
+    reply_decision: { replyMode: 'auto_send', confidence: 'high', text: reply },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    }
+  };
+
+  assert.deepEqual(canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }), {
+    allowed: true,
+    reason: 'live_quote_recheck_info',
+    text: reply,
+    replyMode: 'auto_send',
+    confidence: 'high'
+  });
+  assert.deepEqual(autoReplyRequiresRagSupport(decision, reply), {
+    required: false,
+    reason: 'live_quote_recheck_info'
+  });
+});
+
 test('autoReplyRequiresRagSupport skips RAG for pre-approved bankbook/business-registration file handoff', () => {
   assert.deepEqual(autoReplyRequiresRagSupport({
     classification: 'faq',
