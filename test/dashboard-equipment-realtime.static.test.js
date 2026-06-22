@@ -178,8 +178,8 @@ assert.match(
 );
 assert.match(
   removeBackendBody[0],
-  /contractRegenPending:\s*true/,
-  'dashboardRemoveEquipment must tell the UI that the contract link is temporarily stale'
+  /var contractRegenPending = true[\s\S]*contractRegenPending = false[\s\S]*catch \(regenErr\)[\s\S]*scheduleContractRegen\(tid\)[\s\S]*contractRegenPending:\s*contractRegenPending/,
+  'dashboardRemoveEquipment must clear pending after direct regeneration and keep pending when fallback regeneration is queued'
 );
 assert.doesNotMatch(
   removeBackendBody[0],

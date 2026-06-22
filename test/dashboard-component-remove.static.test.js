@@ -14,7 +14,7 @@ assert(
 );
 
 [
-  'function dashboardRemoveEquipment(tid, equipName, scheduleId)',
+  'function dashboardRemoveEquipment(tid, equipName, scheduleId, options)',
   'if (isComponent) {',
   'rowsToDelete.push(targetRow);',
   'hasComponents && rowSetName === setKey'

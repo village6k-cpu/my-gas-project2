@@ -42,9 +42,15 @@ assert(
 assert(
   /contractRegenPending: true/.test(store) &&
     /gasMutation\("regenerateContract", \{ tid: tradeId \}\)/.test(store) &&
-    /contractUrl: url \|\| t\.contractUrl/.test(store) &&
+    /contractUrl: url/.test(store) &&
+    /amount: amount \?\? t\.amount/.test(store) &&
     /contractRegenPending: false/.test(store),
-  'regenerateContract must set pending, call GAS, apply the returned URL, and clear pending'
+  'regenerateContract must set pending, call GAS, apply the returned URL/amount, and clear pending'
+);
+
+assert(
+  /finalAmount: result && result\.finalAmount/.test(read('generatecontract.js')),
+  'regenerateContractById must return finalAmount so the app can update the displayed payment amount'
 );
 
 assert(

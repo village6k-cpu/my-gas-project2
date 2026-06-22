@@ -363,7 +363,12 @@ function handleRequest(e) {
         return jsonResponse(dashboardRemoveEquipment(
           params.tid || postBody.tid,
           params.equipName || postBody.equipName,
-          params.scheduleId || postBody.scheduleId
+          params.scheduleId || postBody.scheduleId,
+          {
+            directRegenerate:
+              params.directRegenerate || postBody.directRegenerate ||
+              params.regenerateNow || postBody.regenerateNow
+          }
         ));
 
       case "updateEquipQty":
@@ -408,7 +413,13 @@ function handleRequest(e) {
       case "scheduleRemoveEquip":
         return jsonResponse(dashboardRemoveEquipment(
           params.tid || postBody.tid,
-          params.equipName || postBody.equipName
+          params.equipName || postBody.equipName,
+          params.scheduleId || postBody.scheduleId,
+          {
+            directRegenerate:
+              params.directRegenerate || postBody.directRegenerate ||
+              params.regenerateNow || postBody.regenerateNow
+          }
         ));
 
       case "scheduleUpdateEquipQty":

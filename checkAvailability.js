@@ -6444,11 +6444,21 @@ function dashboardAddEquipment(tid, equipName, qty) {
  * - 세트 구성품이면 해당 구성품 행만 삭제한다.
  * - scheduleId가 없으면 기존 호환 경로로 장비명/세트명 일치 행을 삭제한다.
  */
-function dashboardRemoveEquipment(tid, equipName, scheduleId) {
+function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
   if (!tid || (!equipName && !scheduleId)) return { error: "tid와 장비명 또는 스케줄ID 필수" };
   tid = String(tid).trim();
   equipName = String(equipName || "").trim();
   scheduleId = String(scheduleId || "").trim();
+  options = options || {};
+  var directRegenerate =
+    options.directRegenerate === true ||
+    options.directRegenerate === 1 ||
+    options.directRegenerate === "1" ||
+    options.directRegenerate === "true" ||
+    options.regenerateNow === true ||
+    options.regenerateNow === 1 ||
+    options.regenerateNow === "1" ||
+    options.regenerateNow === "true";
 
   var lock = LockService.getScriptLock();
   try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
@@ -6533,12 +6543,38 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId) {
     });
 
     deleteDashboardRowsDescending_(sched, rowsToDelete);
-    scheduleContractRegen(tid);
+    var contractResult = null;
+    var contractRegenPending = true;
+    var contractRegenError = "";
+    if (directRegenerate) {
+      try {
+        contractResult = deleteAndRegenerateContract(ss, tid);
+        contractRegenPending = false;
+        try {
+          if (typeof clearDirectContractRegenPending_ !== "undefined") {
+            clearDirectContractRegenPending_(tid);
+          } else {
+            PropertiesService.getScriptProperties().deleteProperty("contractEditTS_" + tid);
+          }
+        } catch (clearErr) {}
+      } catch (regenErr) {
+        contractRegenError = regenErr && regenErr.message ? regenErr.message : String(regenErr);
+        scheduleContractRegen(tid);
+      }
+    } else {
+      scheduleContractRegen(tid);
+    }
     try { invalidateDashboardCache(); } catch (eCache) {}
     try { invalidateTimelineCache(); } catch (eTimeline) {}
     return {
       success: true,
-      contractRegenPending: true,
+      contractRegenPending: contractRegenPending,
+      contractRegenError: contractRegenError,
+      url: contractResult && contractResult.url ? contractResult.url : "",
+      contractUrl: contractResult && contractResult.url ? contractResult.url : "",
+      fileId: contractResult && contractResult.fileId ? contractResult.fileId : "",
+      finalAmount: contractResult && contractResult.finalAmount ? contractResult.finalAmount : null,
+      amount: contractResult && contractResult.finalAmount ? contractResult.finalAmount : null,
       removedRows: rowsToDelete.length,
       removedScheduleIds: removedScheduleIds,
       removedEquipments: removedEquipments,

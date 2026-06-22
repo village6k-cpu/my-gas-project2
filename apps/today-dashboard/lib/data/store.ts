@@ -68,6 +68,19 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 const POLL_MS = 90_000;
 let localMutationSeq = 0;
 
+type ContractMutationPayload = {
+  result?: ContractMutationPayload;
+  skipped?: boolean;
+  error?: string;
+  url?: string;
+  contractUrl?: string;
+  amount?: unknown;
+  finalAmount?: unknown;
+  contractRegenPending?: boolean;
+  removedScheduleIds?: unknown;
+  removedEquipments?: unknown;
+};
+
 function markLocalMutation() {
   localMutationSeq++;
 }
@@ -272,6 +285,96 @@ function mapItem(t: Trade, scheduleId: string, fn: (e: Trade["equipments"][numbe
   return { ...t, equipments: t.equipments.map((e) => (e.scheduleId === scheduleId ? fn(e) : e)) };
 }
 
+function unwrapContractMutation(raw: unknown): ContractMutationPayload {
+  const payload = (raw ?? {}) as ContractMutationPayload;
+  return payload.result ?? payload;
+}
+
+function numberFromMutation(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value.replace(/[^0-9.-]/g, ""));
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return undefined;
+}
+
+function amountFromMutation(result: ContractMutationPayload): number | undefined {
+  return numberFromMutation(result.finalAmount) ?? numberFromMutation(result.amount);
+}
+
+function contractUrlFromMutation(result: ContractMutationPayload): string {
+  return String(result.url || result.contractUrl || "").trim();
+}
+
+function removedScheduleIdsFromMutation(result: ContractMutationPayload, fallback: string[]): string[] {
+  const ids = Array.isArray(result.removedScheduleIds) ? result.removedScheduleIds : [];
+  const clean = ids.map((id) => String(id || "").trim()).filter(Boolean);
+  fallback.forEach((id) => {
+    const cleanId = String(id || "").trim();
+    if (cleanId && !clean.includes(cleanId)) clean.push(cleanId);
+  });
+  return clean;
+}
+
+function applyContractMutationResult(tradeId: string, raw: unknown, fallbackRemovedIds: string[] = []) {
+  const result = unwrapContractMutation(raw);
+  if (result.skipped) throw new Error("쓰기 백이 비활성화되어 원장에 반영되지 않았습니다");
+  if (result.error) throw new Error(result.error);
+
+  const url = contractUrlFromMutation(result);
+  const amount = amountFromMutation(result);
+  const removedIds = removedScheduleIdsFromMutation(result, fallbackRemovedIds);
+  const removedSet = new Set(removedIds);
+  removedIds.forEach((id) => deleteScheduleItem(tradeId, id).catch(() => {}));
+
+  mutateTrade(tradeId, (t) => ({
+    ...t,
+    equipments: removedSet.size ? t.equipments.filter((e) => !removedSet.has(e.scheduleId)) : t.equipments,
+    amount: amount ?? t.amount,
+    contractUrl: url || t.contractUrl || null,
+    contractRegenPending: !!result.contractRegenPending && !url,
+  }));
+  flashSave(tradeId);
+}
+
+function restoreRemovedItem(tradeId: string, item: EquipmentItem, message: string) {
+  mutateTrade(tradeId, (t) => {
+    const exists = t.equipments.some((e) => e.scheduleId === item.scheduleId);
+    return {
+      ...t,
+      equipments: exists ? t.equipments : [...t.equipments, { ...item, checkoutState: "pending" }],
+      contractRegenPending: false,
+      issueNote: message,
+    };
+  });
+  flashSave(tradeId);
+}
+
+function removeEquipmentAndRegenerateContract(tradeId: string, item: EquipmentItem) {
+  const scheduleId = item.scheduleId;
+  mutateTrade(tradeId, (t) => ({
+    ...t,
+    equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId),
+    contractRegenPending: true,
+  }));
+  flashSave(tradeId);
+  deleteScheduleItem(tradeId, scheduleId).catch(() => {});
+
+  gasMutation("removeEquip", {
+    tid: tradeId,
+    scheduleId,
+    equipName: item.name,
+    directRegenerate: true,
+  })
+    .then((res) => applyContractMutationResult(tradeId, res, [scheduleId]))
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      restoreRemovedItem(tradeId, item, "장비 제외/계약서 갱신 실패: " + message);
+      console.error("[write-back] removeEquip 실패:", error);
+    });
+}
+
 // ── 거래 단위 검수 토글 ─────────────────────────────────────────
 export function toggleSetup(tradeId: string) {
   let done = false;
@@ -304,19 +407,25 @@ export function toggleReturn(tradeId: string) {
 export function setItemCheckout(tradeId: string, scheduleId: string, next: CheckoutState) {
   let final: CheckoutState | undefined;
   let isSynthetic = false;
+  let targetItem: EquipmentItem | undefined;
   mutateTrade(tradeId, (t) =>
     mapItem(t, scheduleId, (e) => {
       final = e.checkoutState === next ? "pending" : next;
       isSynthetic = !!e.synthetic;
+      targetItem = e;
       return { ...e, checkoutState: final };
     }),
   );
   flashSave(tradeId);
   // 합성 ID(시트 행번호)는 실제 스케줄ID와 달라 엉뚱한 품목에 체크가 기록될 수 있음 → 시트 write 차단
   if (isSynthetic) return;
+  if (final === "excluded" && targetItem && writeBackEnabled) {
+    removeEquipmentAndRegenerateContract(tradeId, targetItem);
+    return;
+  }
   if (final === "taken") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: true });
   else if (final === "pending") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: false });
-  // 'excluded'(제외)는 시트에 대응 칸 없음 → Supabase 전용
+  // write-back이 꺼진 로컬/시드 모드에서는 'excluded'를 앱 상태로만 유지한다.
 }
 export function setItemName(tradeId: string, scheduleId: string, name: string) {
   const clean = name.trim();
@@ -525,14 +634,17 @@ export function setOnsiteSettlement(tradeId: string, scheduleId: string, settlem
 }
 export function removeItem(tradeId: string, scheduleId: string) {
   const item = state.trades.find((t) => t.tradeId === tradeId)?.equipments.find((e) => e.scheduleId === scheduleId);
-  mutateTrade(tradeId, (t) => ({ ...t, equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId) }));
-  flashSave(tradeId);
-  deleteScheduleItem(tradeId, scheduleId).catch(() => {});
   // 실 스케줄ID(tid-NN) 행은 스케줄상세에서도 삭제 — 가용성 점유·repair 부활 방지.
   // 시트에 기록된 현장추가도 실 ID라 포함됨. (레거시 앱 전용 ONS-N은 tid-ONS-N이라 매칭 안 돼 제외)
   if (item && new RegExp(`^${tradeId}-\\d+$`).test(scheduleId)) {
-    gasWrite("removeEquip", { tid: tradeId, scheduleId, equipName: item.name });
+    if (writeBackEnabled) {
+      removeEquipmentAndRegenerateContract(tradeId, item);
+      return;
+    }
   }
+  mutateTrade(tradeId, (t) => ({ ...t, equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId) }));
+  flashSave(tradeId);
+  deleteScheduleItem(tradeId, scheduleId).catch(() => {});
 }
 
 // ── 반납: 품목(scheduleId) 단위 카운트 + 시트 write-back ────────────
@@ -672,12 +784,17 @@ export async function regenerateContract(tradeId: string) {
   flashSave(tradeId);
   try {
     const res = await gasMutation("regenerateContract", { tid: tradeId });
-    const result = res?.result || res;
-    const url = result?.url || res?.url || "";
-    mutateTrade(tradeId, (t) => ({ ...t, contractUrl: url || t.contractUrl, contractRegenPending: false }));
+    const result = unwrapContractMutation(res);
+    if (result.skipped) throw new Error("쓰기 백이 비활성화되어 계약서를 재생성하지 못했습니다");
+    if (result.error) throw new Error(result.error);
+    const url = contractUrlFromMutation(result);
+    if (!url) throw new Error("새 계약서 URL이 응답에 없습니다");
+    const amount = amountFromMutation(result);
+    mutateTrade(tradeId, (t) => ({ ...t, contractUrl: url, amount: amount ?? t.amount, contractRegenPending: false }));
     flashSave(tradeId);
   } catch (error) {
-    mutateTrade(tradeId, (t) => ({ ...t, contractRegenPending: false }));
+    const message = error instanceof Error ? error.message : String(error);
+    mutateTrade(tradeId, (t) => ({ ...t, contractUrl: null, contractRegenPending: false, issueNote: "계약서 재생성 실패: " + message }));
     flashSave(tradeId);
     console.error("[contract] regenerate failed:", error);
     throw error;

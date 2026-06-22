@@ -139,6 +139,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
   const options = usePaymentControlOptions();
   const isTax = trade.proofType === "세금계산서";
   const isRegenerating = trade.contractRegenPending || regenerating;
+  const canOpenContract = !!trade.contractUrl && !trade.contractRegenPending;
 
   // 한 줄 요약 토큰
   const tokens: { t: string; bad?: boolean }[] = [];
@@ -245,10 +246,13 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               {sendingPayAppLink ? "발송 중..." : "결제링크 발송"}
             </button>
             <a
-              href={trade.contractUrl ?? undefined}
+              href={canOpenContract ? (trade.contractUrl ?? undefined) : undefined}
               target="_blank"
+              onClick={(event) => {
+                if (!canOpenContract) event.preventDefault();
+              }}
               className={`tap inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-bold ring-1 ${
-                trade.contractUrl ? "bg-white text-ink-soft ring-line" : "bg-paper text-ink-faint ring-line/70"
+                canOpenContract ? "bg-white text-ink-soft ring-line" : "bg-paper text-ink-faint ring-line/70"
               }`}
             >
               <Doc className="h-3.5 w-3.5" />
@@ -261,7 +265,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
                 if (isRegenerating) return;
                 setRegenerating(true);
                 regenerateContract(trade.tradeId)
-                  .catch(() => undefined)
+                  .catch((err) => window.alert("계약서 재생성 실패: " + (err instanceof Error ? err.message : String(err))))
                   .finally(() => setRegenerating(false));
               }}
               className="tap inline-flex items-center gap-1.5 rounded-lg bg-brand-50 px-3 py-2 text-[13px] font-bold text-brand-700 ring-1 ring-brand-200 disabled:bg-paper disabled:text-ink-faint disabled:ring-line/70"

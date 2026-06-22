@@ -191,9 +191,10 @@ assert(
 );
 const storeTs2 = read('apps/today-dashboard/lib/data/store.ts');
 assert(
-  /removeItem[\s\S]{0,600}gasWrite\("removeEquip"/.test(storeTs2) &&
+  /removeItem[\s\S]{0,900}removeEquipmentAndRegenerateContract/.test(storeTs2) &&
+    /gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*true/.test(storeTs2) &&
     read('apps/today-dashboard/app/api/gas/route.ts').includes('"removeEquip"'),
-  'removing a sheet-derived item must also delete the 스케줄상세 row via removeEquip'
+  'removing a sheet-derived item must delete 스케줄상세 via removeEquip and return contract updates'
 );
 console.log('audit-round-2 checks OK');
 

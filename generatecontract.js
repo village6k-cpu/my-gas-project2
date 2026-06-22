@@ -225,7 +225,7 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   const combinedItems = items.slice();
   if (추가요청) {
     const 추가items = sanitizeContractAdditionalRequestText_(추가요청).split("\n").filter(Boolean);
-    for (let ai = 0; ai < 추가items.length && combinedItems.length < ITEMS_PER_SIDE * 2; ai++) {
+    for (let ai = 0; ai < 추가items.length; ai++) {
       combinedItems.push({ 세트명: "", 장비명: 추가items[ai].trim(), 수량: 1, 단가: 0 });
     }
   }
@@ -999,6 +999,8 @@ function regenerateContractById(거래ID, 추가요청) {
     tradeId: 거래ID,
     url: result && result.url ? result.url : "",
     fileId: result && result.fileId ? result.fileId : "",
+    finalAmount: result && result.finalAmount ? result.finalAmount : null,
+    amount: result && result.finalAmount ? result.finalAmount : null,
     extraRequestFound: !!extraText,
     summary: summary
   };

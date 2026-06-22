@@ -51,8 +51,9 @@ assert(
 
 // 시트에 기록된 현장추가도 실 scheduleID라 삭제 시 스케줄상세 행도 제거되어야 함
 assert(
-  /if \(item && new RegExp\(`\^\$\{tradeId\}-\\\\d\+\$`\)\.test\(scheduleId\)\) \{\s*\n\s*gasWrite\("removeEquip"/.test(store),
-  'removeItem must delete real-id rows (incl. sheet-recorded on-site) from 스케줄상세'
+  /if \(item && new RegExp\(`\^\$\{tradeId\}-\\\\d\+\$`\)\.test\(scheduleId\)\) \{[\s\S]*removeEquipmentAndRegenerateContract\(tradeId,\s*item\)/.test(store) &&
+    /gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*true/.test(store),
+  'removeItem must delete real-id rows (incl. sheet-recorded on-site) from 스케줄상세 and refresh contract data'
 );
 
 // 시트 재동기화 후에도 현장추가는 '현장 추가' 구획에 묶이도록 onsite 보존

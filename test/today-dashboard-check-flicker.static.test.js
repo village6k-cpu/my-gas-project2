@@ -23,7 +23,7 @@ assert(
   'trade mutations must mark a local mutation before applying optimistic checked state'
 );
 assert(
-  /subscribeChanges\(\(\) => \{[\s\S]*const mutationSeqAtSchedule = localMutationSeq[\s\S]*setTimeout\(async \(\) => \{[\s\S]*if \(!canApplyRemoteSnapshot\(mutationSeqAtSchedule\)\) return;[\s\S]*fetchAllTrades\(\)[\s\S]*if \(!canApplyRemoteSnapshot\(mutationSeqAtSchedule\)\) return;[\s\S]*set\(\{ trades, notes \}\)/.test(storeSource),
+  /subscribeChanges\(\(\) => \{[\s\S]*const mutationSeqAtSchedule = localMutationSeq[\s\S]*setTimeout\(async \(\) => \{[\s\S]*if \(!canApplyRemoteSnapshot\(mutationSeqAtSchedule\)\) return;[\s\S]*fetchAllTrades\(\)[\s\S]*if \(!canApplyRemoteSnapshot\(mutationSeqAtSchedule\)\) return;[\s\S]*set\(\{ trades: mergedTrades, notes \}\)/.test(storeSource),
   'delayed realtime refetch must re-check local mutation sequence before it overwrites the store'
 );
 assert(
