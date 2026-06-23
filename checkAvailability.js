@@ -4779,39 +4779,6 @@ function requestPayAppPaymentLink(tid) {
   };
 }
 
-function getPayAppPaymentRequest(tid) {
-  tid = String(tid || '').trim();
-  if (!tid) return { error: 'tid 필요' };
-
-  var raw = '';
-  try {
-    raw = PropertiesService.getScriptProperties().getProperty(getPayAppPaymentRequestKey_(tid)) || '';
-  } catch (err) {
-    return { error: 'PayApp 결제링크 조회 실패: ' + err.message };
-  }
-  if (!raw) return { error: '저장된 PayApp 결제링크가 없습니다: ' + tid };
-
-  var info = {};
-  try {
-    info = JSON.parse(raw);
-  } catch (err2) {
-    return { error: '저장된 PayApp 결제링크 기록을 읽을 수 없습니다: ' + tid };
-  }
-
-  var amount = Number(info.amount || 0);
-  return {
-    success: true,
-    tid: tid,
-    mulNo: String(info.mulNo || ''),
-    payurl: String(info.payurl || ''),
-    amount: amount || null,
-    phoneMasked: maskPhoneForDisplay_(info.phone || ''),
-    customerName: String(info.customerName || ''),
-    requestedAt: String(info.requestedAt || ''),
-    message: '최근 PayApp 결제링크: ' + (info.customerName || tid) + ' / ' + formatWon_(amount) + ' / ' + maskPhoneForDisplay_(info.phone || '')
-  };
-}
-
 function requestPayAppTestPaymentLink(args) {
   var request = buildPayAppTestPaymentRequest_(args || {});
   if (request.error) return request;
@@ -5065,12 +5032,9 @@ function formatWon_(amount) {
 
 function rememberPayAppPaymentRequest_(tid, info) {
   try {
-    PropertiesService.getScriptProperties().setProperty(getPayAppPaymentRequestKey_(tid), JSON.stringify(info || {}));
+    var key = 'PAYAPP_REQ_' + String(tid || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
+    PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(info || {}));
   } catch (err) {}
-}
-
-function getPayAppPaymentRequestKey_(tid) {
-  return 'PAYAPP_REQ_' + String(tid || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
 }
 
 function rememberPayAppTestPaymentRequest_(testId, info) {

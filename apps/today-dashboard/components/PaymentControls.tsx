@@ -4,7 +4,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject }
 import { createPortal } from "react-dom";
 import type { Trade } from "@/lib/domain/types";
 import {
-  getPayAppPaymentRequest,
   regenerateContract,
   requestProofIssue,
   sendEstimate,
@@ -65,22 +64,6 @@ function buildPayAppConfirmMessage(trade: Trade) {
     `연락처: ${trade.customerPhone || "-"}`,
     `금액: ${amount}`,
   ].join("\n");
-}
-
-function formatPayAppPaymentRequestResult(result: any) {
-  const amount = result?.amount != null ? won(Number(result.amount)) : "";
-  return [
-    result?.message || "PayApp 결제링크 정보",
-    "",
-    result?.payurl ? `고객 결제URL: ${result.payurl}` : "",
-    result?.mulNo ? `PayApp 요청번호: ${result.mulNo}` : "",
-    amount ? `요청금액: ${amount}` : "",
-    result?.customerName ? `예약자: ${result.customerName}` : "",
-    result?.phoneMasked ? `연락처: ${result.phoneMasked}` : "",
-    result?.requestedAt ? `요청시각: ${result.requestedAt}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
 }
 
 async function loadPaymentControlOptions(): Promise<PaymentControlOptions> {
@@ -165,7 +148,6 @@ export function PaymentControls({ trade }: { trade: Trade }) {
   const [regenerating, setRegenerating] = useState(false);
   const [issuing, setIssuing] = useState(false);
   const [sendingPayAppLink, setSendingPayAppLink] = useState(false);
-  const [checkingPayAppLink, setCheckingPayAppLink] = useState(false);
   const [sendingStatement, setSendingStatement] = useState(false);
   const options = usePaymentControlOptions();
   const isTax = trade.proofType === "세금계산서";
@@ -269,7 +251,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
                 if (!window.confirm(buildPayAppConfirmMessage(trade))) return;
                 setSendingPayAppLink(true);
                 sendPayAppPaymentLink(trade.tradeId)
-                  .then((result) => window.alert(formatPayAppPaymentRequestResult(result)))
+                  .then((result) => window.alert(result?.message || "결제링크 발송 완료"))
                   .catch((err) => window.alert("결제링크 발송 실패: " + (err instanceof Error ? err.message : String(err))))
                   .finally(() => setSendingPayAppLink(false));
               }}
@@ -277,22 +259,6 @@ export function PaymentControls({ trade }: { trade: Trade }) {
             >
               <Send className="h-3.5 w-3.5" />
               {sendingPayAppLink ? "발송 중..." : "결제링크 발송"}
-            </button>
-            <button
-              type="button"
-              disabled={checkingPayAppLink}
-              onClick={() => {
-                if (checkingPayAppLink) return;
-                setCheckingPayAppLink(true);
-                getPayAppPaymentRequest(trade.tradeId)
-                  .then((result) => window.alert(formatPayAppPaymentRequestResult(result)))
-                  .catch((err) => window.alert("결제링크 확인 실패: " + (err instanceof Error ? err.message : String(err))))
-                  .finally(() => setCheckingPayAppLink(false));
-              }}
-              className="tap inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-[13px] font-bold text-ink-soft ring-1 ring-line disabled:bg-paper disabled:text-ink-faint"
-            >
-              <Send className="h-3.5 w-3.5" />
-              {checkingPayAppLink ? "확인 중..." : "결제링크 확인"}
             </button>
             <a
               href={canOpenContract ? (trade.contractUrl ?? undefined) : undefined}

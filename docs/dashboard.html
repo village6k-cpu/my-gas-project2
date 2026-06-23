@@ -4264,7 +4264,6 @@ function cardActionHtml(item, cardType) {
   html += '<button class="trade-action-btn" onclick="event.stopPropagation();runTradeOpsAction(this,\'' + escJs(item.tradeId) + '\',\'sendEstimate\')">견적서 발송</button>';
   html += '<button class="trade-action-btn" onclick="event.stopPropagation();runTradeOpsAction(this,\'' + escJs(item.tradeId) + '\',\'sendStatement\')">거래명세서 발송</button>';
   html += '<button class="trade-action-btn" onclick="event.stopPropagation();runTradeOpsAction(this,\'' + escJs(item.tradeId) + '\',\'sendPayAppPaymentLink\')">결제링크 발송</button>';
-  html += '<button class="trade-action-btn" onclick="event.stopPropagation();runPayAppPaymentRequestLookup(this,\'' + escJs(item.tradeId) + '\',\'getPayAppPaymentRequest\')">결제링크 확인</button>';
   if (cardType === 'checkin' && item.tradeId) {
     html += '<button class="trade-action-btn danger" onclick="event.stopPropagation();cancelDashboardTrade(this,\'' + escJs(item.tradeId) + '\',\'' + escJs(item.name || item.tradeId) + '\')">취소처리</button>';
   }
@@ -4555,48 +4554,13 @@ function runTradeOpsAction(button, tradeId, action) {
         return;
       }
       if (isIssue) syncTradeProofInMemory(tradeId, 'issueStatus', res.issueStatus || '발행요청', res);
-      alert(isPayApp ? formatPayAppPaymentRequestResult(res) : (res.message || successLabel));
+      alert(res.message || successLabel);
     })
     .catch(function(err) {
       button.disabled = false;
       button.textContent = label;
       alert(failureLabel + err.message);
     });
-}
-
-function runPayAppPaymentRequestLookup(button, tradeId, action) {
-  var label = button.textContent;
-  button.disabled = true;
-  button.textContent = '확인 중';
-
-  fetch((API_URL || '') + '?key=village2026&action=' + encodeURIComponent(action || 'getPayAppPaymentRequest') + '&tid=' + encodeURIComponent(tradeId))
-    .then(function(r) { return r.json(); })
-    .then(function(res) {
-      button.disabled = false;
-      button.textContent = label;
-      if (res.error) {
-        alert('결제링크 확인 실패: ' + res.error);
-        return;
-      }
-      alert(formatPayAppPaymentRequestResult(res));
-    })
-    .catch(function(err) {
-      button.disabled = false;
-      button.textContent = label;
-      alert('결제링크 확인 실패: ' + err.message);
-    });
-}
-
-function formatPayAppPaymentRequestResult(res) {
-  res = res || {};
-  var lines = [res.message || 'PayApp 결제링크 정보', ''];
-  if (res.payurl) lines.push('고객 결제URL: ' + res.payurl);
-  if (res.mulNo) lines.push('PayApp 요청번호: ' + res.mulNo);
-  if (res.amount) lines.push('요청금액: ' + String(Math.round(Number(res.amount))).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '원');
-  if (res.customerName) lines.push('예약자: ' + res.customerName);
-  if (res.phoneMasked) lines.push('연락처: ' + res.phoneMasked);
-  if (res.requestedAt) lines.push('요청시각: ' + res.requestedAt);
-  return lines.filter(Boolean).join('\n');
 }
 
 function buildPayAppConfirmText(tradeId) {

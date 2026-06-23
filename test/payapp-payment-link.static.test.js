@@ -15,10 +15,8 @@ const gasProxy = read('apps/today-dashboard/app/api/gas/route.ts');
 
 assert(
   /case "sendPayAppPaymentLink":/.test(api) &&
-    /case "getPayAppPaymentRequest":/.test(api) &&
     /case "sendPayAppTestPaymentLink":/.test(api) &&
     /requestPayAppPaymentLink\(/.test(api) &&
-    /getPayAppPaymentRequest\(/.test(api) &&
     /requestPayAppTestPaymentLink\(/.test(api) &&
     /case "setupPayAppUserId":/.test(api) &&
     /case "setupPayAppPaymentTypes":/.test(api) &&
@@ -28,7 +26,6 @@ assert(
 
 assert(
   /function requestPayAppPaymentLink\(tid\)/.test(ca) &&
-    /function getPayAppPaymentRequest\(tid\)/.test(ca) &&
     /function requestPayAppTestPaymentLink\(args\)/.test(ca) &&
     /function setupPayAppUserId\(userid\)/.test(ca) &&
     /function setupPayAppPaymentTypes\(openpaytype\)/.test(ca) &&
@@ -43,9 +40,8 @@ assert(
     ca.includes('actualAmount') &&
     ca.includes('recvphone') &&
     ca.includes('payurl') &&
-    ca.includes('mul_no') &&
-    /PAYAPP_REQ_/.test(ca),
-  'GAS must build, send, and expose PayApp payrequests from trade and test data'
+    ca.includes('mul_no'),
+  'GAS must build and send PayApp payrequests from trade and test data'
 );
 
 assert(
@@ -66,10 +62,7 @@ assert(
 
 assert(
   /결제링크 발송/.test(dashboard) &&
-    /결제링크 확인/.test(dashboard) &&
     /runTradeOpsAction\(this,[\s\S]{0,140}sendPayAppPaymentLink/.test(dashboard) &&
-    /runPayAppPaymentRequestLookup\(this,[\s\S]{0,140}getPayAppPaymentRequest/.test(dashboard) &&
-    /formatPayAppPaymentRequestResult/.test(dashboard) &&
     /buildPayAppConfirmText\(tradeId\)/.test(dashboard) &&
     /결제링크 발송 실패/.test(dashboard) &&
     /결제링크 발송 완료/.test(dashboard),
@@ -78,10 +71,7 @@ assert(
 
 assert(
   /결제링크 발송/.test(docsDashboard) &&
-    /결제링크 확인/.test(docsDashboard) &&
     /runTradeOpsAction\(this,[\s\S]{0,140}sendPayAppPaymentLink/.test(docsDashboard) &&
-    /runPayAppPaymentRequestLookup\(this,[\s\S]{0,140}getPayAppPaymentRequest/.test(docsDashboard) &&
-    /formatPayAppPaymentRequestResult/.test(docsDashboard) &&
     /buildPayAppConfirmText\(tradeId\)/.test(docsDashboard) &&
     /결제링크 발송 실패/.test(docsDashboard) &&
     /결제링크 발송 완료/.test(docsDashboard),
@@ -90,26 +80,18 @@ assert(
 
 assert(
   /export async function sendPayAppPaymentLink\(tradeId: string\)/.test(store) &&
-    /gasMutation\("sendPayAppPaymentLink",\s*\{ tid: tradeId \}\)/.test(store) &&
-    /export async function getPayAppPaymentRequest\(tradeId: string\)/.test(store) &&
-    /gasRead\("getPayAppPaymentRequest",\s*\{ tid: tradeId \}\)/.test(store),
-  'Next store must expose PayApp payment-link send and lookup actions'
+    /gasMutation\("sendPayAppPaymentLink",\s*\{ tid: tradeId \}\)/.test(store),
+  'Next store must expose a PayApp payment-link mutation'
 );
 
 assert(
-  /const WRITE_ACTIONS = new Set\(\[[\s\S]*"sendPayAppPaymentLink"/.test(gasProxy) &&
-    /const READ_ACTIONS = new Set\(\[[\s\S]*"getPayAppPaymentRequest"/.test(gasProxy),
-  'Next GAS proxy must allow PayApp payment-link write and lookup actions'
+  /const WRITE_ACTIONS = new Set\(\[[\s\S]*"sendPayAppPaymentLink"/.test(gasProxy),
+  'Next GAS proxy must allow the PayApp payment-link write action'
 );
 
 assert(
   /sendPayAppPaymentLink/.test(controls) &&
-    /getPayAppPaymentRequest/.test(controls) &&
     /결제링크 발송/.test(controls) &&
-    /결제링크 확인/.test(controls) &&
-    /formatPayAppPaymentRequestResult/.test(controls) &&
-    /payurl/.test(controls) &&
-    /mulNo/.test(controls) &&
     /buildPayAppConfirmMessage\(trade\)/.test(controls) &&
     /window\.confirm\(buildPayAppConfirmMessage\(trade\)\)/.test(controls) &&
     /결제링크 발송 실패/.test(controls),
