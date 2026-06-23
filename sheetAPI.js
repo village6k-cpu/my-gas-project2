@@ -491,6 +491,11 @@ function handleRequest(e) {
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
+      case "getPayAppPaymentRequest":
+        return jsonResponse(getPayAppPaymentRequest(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId
+        ));
+
       case "sendPayAppTestPaymentLink":
         return jsonResponse(requestPayAppTestPaymentLink({
           phone: params.phone || postBody.phone || params.recvphone || postBody.recvphone || params.tel || postBody.tel,

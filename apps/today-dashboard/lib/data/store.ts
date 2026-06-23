@@ -809,6 +809,10 @@ export async function sendPayAppPaymentLink(tradeId: string) {
   }
 }
 
+export async function getPayAppPaymentRequest(tradeId: string) {
+  return gasRead("getPayAppPaymentRequest", { tid: tradeId });
+}
+
 export async function regenerateContract(tradeId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, contractRegenPending: true }));
   flashSave(tradeId);
