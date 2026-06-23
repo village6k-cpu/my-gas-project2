@@ -4531,6 +4531,7 @@ function runTradeOpsAction(button, tradeId, action) {
   var successLabel = isIssue ? '계산서 발행 요청 완료' : isStatement ? '거래명세서 발송 요청 완료' : isPayApp ? '결제링크 발송 완료' : '견적서 발송 요청 완료';
   if (isIssue && !confirm('이 거래건의 계산서/현금영수증을 실제 발행할까요?')) return;
   if (isStatement && !confirm('이 거래건의 거래명세서를 발송할까요?')) return;
+  if (isPayApp && !confirm(buildPayAppConfirmText(tradeId))) return;
 
   var label = button.textContent;
   button.disabled = true;
@@ -4560,6 +4561,21 @@ function runTradeOpsAction(button, tradeId, action) {
       button.textContent = label;
       alert(failureLabel + err.message);
     });
+}
+
+function buildPayAppConfirmText(tradeId) {
+  var items = dashboardItemsForTrade(tradeId);
+  var item = items && items.length ? items[0] : {};
+  var amount = item.actualAmount != null ? item.actualAmount : item.amount;
+  var amountText = amount != null && amount !== '' ? String(amount).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '원' : '금액 없음';
+  return [
+    '이 거래건으로 결제링크를 발송할까요?',
+    '',
+    '거래ID: ' + tradeId,
+    '예약자: ' + (item.name || item.customerName || '-'),
+    '연락처: ' + (item.tel || item.customerPhone || '-'),
+    '금액: ' + amountText
+  ].join('\n');
 }
 
 function syncTradeProofInMemory(tid, field, value, res) {

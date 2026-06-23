@@ -3515,6 +3515,7 @@ var DASHBOARD_TRADE_EXTRA_CACHE_SECONDS_ = 300;
 
 function emptyDashboardTradeExtra_() {
   return {
+    tradeRowFound: false,
     contractUrl: '',
     contractRegenPending: false,
     paymentMethod: '',
@@ -3536,6 +3537,7 @@ function getDashboardTradeExtraCacheKey_(tid) {
 
 function buildDashboardTradeExtraFromRow_(row, columns) {
   var extra = emptyDashboardTradeExtra_();
+  extra.tradeRowFound = true;
   extra.contractUrl = String(row[columns.contractCol - 1] || '').trim();
   extra.billingCompany = String(row[columns.billingCompanyCol - 1] || '').trim();
   extra.paymentMethod = String(row[columns.paymentCol - 1] || '').trim();
@@ -3565,8 +3567,10 @@ function invalidateDashboardTradeExtraCache_(tradeIds) {
   } catch (err) {}
 }
 
-function getTradeExtrasForIds_(tradeIds, props) {
+function getTradeExtrasForIds_(tradeIds, props, options) {
   var result = {};
+  options = options || {};
+  var skipCache = options.skipCache === true || options.forceFresh === true;
   props = props || PropertiesService.getScriptProperties().getProperties();
   var ids = [];
   var seenIds = {};
@@ -3587,6 +3591,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
   var cache = null;
   var missingIds = ids.slice();
   try {
+    if (skipCache) throw new Error('skip cache');
     cache = CacheService.getScriptCache();
     var keys = ids.map(function(tid) {
       return getDashboardTradeExtraCacheKey_(tid);
@@ -3601,7 +3606,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
       }
       if (cached[key]) {
         try {
-          result[tid] = JSON.parse(cached[key]);
+          result[tid] = Object.assign(emptyDashboardTradeExtra_(), JSON.parse(cached[key]));
           return;
         } catch (parseErr) {}
       }
@@ -3609,6 +3614,7 @@ function getTradeExtrasForIds_(tradeIds, props) {
     });
   } catch (cacheErr) {
     cache = null;
+    if (skipCache) missingIds = ids.slice();
   }
   if (missingIds.length === 0) return result;
 
@@ -3657,11 +3663,11 @@ function getTradeExtrasForIds_(tradeIds, props) {
       result[tid] = buildDashboardTradeExtraFromRow_(row, columns);
       if (pendingRegenIds[tid]) {
         result[tid].contractRegenPending = true;
-      } else if (cache) {
+      } else if (cache && !skipCache) {
         cachePayload[getDashboardTradeExtraCacheKey_(tid)] = JSON.stringify(result[tid]);
       }
     });
-    if (cache && Object.keys(cachePayload).length > 0) {
+    if (cache && !skipCache && Object.keys(cachePayload).length > 0) {
       cache.putAll(cachePayload, DASHBOARD_TRADE_EXTRA_CACHE_SECONDS_);
     }
   } catch (err) {
@@ -4844,7 +4850,8 @@ function buildPayAppPaymentRequest_(tid) {
   var phone = normalizePayAppPhone_(cust.tel || '');
   if (!phone) return { error: '계약마스터 연락처가 없어 결제링크를 보낼 수 없습니다: ' + tid };
 
-  var extra = getTradeExtrasForIds_([tid])[tid] || {};
+  var extra = getTradeExtrasForIds_([tid], null, { forceFresh: true })[tid] || {};
+  if (!extra.tradeRowFound) return { error: '거래내역에서 거래ID를 찾지 못했습니다: ' + tid };
   var amount = Number(extra.actualAmount || 0);
   if (!amount || isNaN(amount)) return { error: '거래내역 I열 실 결제금액이 없어 결제링크를 만들 수 없습니다: ' + tid };
   amount = Math.round(amount);
@@ -7050,7 +7057,9 @@ function _confirmRequestTimeKey_(v, displayValue) {
 }
 
 function _confirmRequestPhoneKey_(v) {
-  return String(v || "").replace(/\D/g, "");
+  var digits = String(v || "").replace(/\D/g, "");
+  if (digits.indexOf("82") === 0 && digits.length >= 11) digits = "0" + digits.slice(2);
+  return digits.length > 10 ? digits.slice(-10) : digits;
 }
 
 function _confirmRequestEquipKey_(v) {
@@ -9390,11 +9399,11 @@ function registerByReqID(sheet, triggerRow) {
         var 기존여부 = false;
         if (고객lastRow >= 2) {
           var 고객data = 고객DB시트.getRange(2, 1, 고객lastRow - 1, 2).getValues();
-          var telClean = String(연락처).replace(/[-\s]/g, "");
+          var telClean = _confirmRequestPhoneKey_(연락처);
           for (var gi = 0; gi < 고객data.length; gi++) {
-            var existTel = String(고객data[gi][0] || "").replace(/[-\s]/g, "");
+            var existTel = _confirmRequestPhoneKey_(고객data[gi][0]);
             var existName = String(고객data[gi][1] || "").trim();
-            if (existTel === telClean || existName === String(예약자명).trim()) {
+            if ((telClean && existTel === telClean) || existName === String(예약자명).trim()) {
               기존여부 = true;
               break;
             }
@@ -10575,8 +10584,7 @@ function _formatGuideKst_(value) {
 }
 
 function normalizeGuideCustomerPhone_(value) {
-  var s = String(value == null ? '' : value).replace(/[^0-9]/g, '');
-  return s.length > 10 ? s.slice(-10) : s;
+  return _confirmRequestPhoneKey_(value);
 }
 
 function parseGuideVisitCount_(value) {

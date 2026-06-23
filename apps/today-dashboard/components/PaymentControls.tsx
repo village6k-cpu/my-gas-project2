@@ -54,6 +54,18 @@ function withCurrentOption(options: string[], value?: string) {
   return [current, ...options];
 }
 
+function buildPayAppConfirmMessage(trade: Trade) {
+  const amount = trade.amount != null ? won(trade.amount) : "금액 없음";
+  return [
+    "이 거래건으로 결제링크를 발송할까요?",
+    "",
+    `거래ID: ${trade.tradeId}`,
+    `예약자: ${trade.customerName || "-"}`,
+    `연락처: ${trade.customerPhone || "-"}`,
+    `금액: ${amount}`,
+  ].join("\n");
+}
+
 async function loadPaymentControlOptions(): Promise<PaymentControlOptions> {
   if (cachedPaymentControlOptions) return cachedPaymentControlOptions;
   if (!paymentControlOptionsPromise) {
@@ -236,6 +248,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               disabled={sendingPayAppLink}
               onClick={() => {
                 if (sendingPayAppLink) return;
+                if (!window.confirm(buildPayAppConfirmMessage(trade))) return;
                 setSendingPayAppLink(true);
                 sendPayAppPaymentLink(trade.tradeId)
                   .then((result) => window.alert(result?.message || "결제링크 발송 완료"))

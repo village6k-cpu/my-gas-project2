@@ -74,6 +74,12 @@ assert(
   'date parsing must normalize common sheet display dates such as 2026. 6. 28 before registration'
 );
 assert(
+  /function _confirmRequestPhoneKey_\(v\)[\s\S]{0,260}digits\.length > 10 \? digits\.slice\(-10\) : digits/.test(backend) &&
+    /var telClean = _confirmRequestPhoneKey_\(연락처\);/.test(backend) &&
+    /var existTel = _confirmRequestPhoneKey_\(고객data\[gi\]\[0\]\);/.test(backend),
+  'registration/customer DB matching must treat 010-prefixed and bare 10-digit phone values as the same customer'
+);
+assert(
   /function recoverPendingRegistrations\(\)/.test(backend) &&
     /function recoverPendingRegistrations\(\)[\s\S]{0,1500}processRegistrationQueue_\(sheet\);/.test(backend),
   'there must be a callable repair function that immediately drains already-stuck 등록대기 rows'

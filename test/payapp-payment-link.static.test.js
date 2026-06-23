@@ -46,6 +46,10 @@ assert(
 
 assert(
   /price:\s*String\(amount\)/.test(ca) &&
+    /getTradeExtrasForIds_\(\[tid\],\s*null,\s*\{\s*forceFresh:\s*true\s*\}\)/.test(ca) &&
+    /거래내역에서 거래ID를 찾지 못했습니다/.test(ca) &&
+    /tradeRowFound:\s*false/.test(ca) &&
+    /extra\.tradeRowFound\s*=\s*true/.test(ca) &&
     /var1:\s*tid/.test(ca) &&
     /VILLAGE 렌탈 결제/.test(ca) &&
     /PAYAPP-TEST-/.test(ca) &&
@@ -59,17 +63,19 @@ assert(
 assert(
   /결제링크 발송/.test(dashboard) &&
     /runTradeOpsAction\(this,[\s\S]{0,140}sendPayAppPaymentLink/.test(dashboard) &&
+    /buildPayAppConfirmText\(tradeId\)/.test(dashboard) &&
     /결제링크 발송 실패/.test(dashboard) &&
     /결제링크 발송 완료/.test(dashboard),
-  'classic dashboard must show a one-click PayApp payment link button and labels'
+  'classic dashboard must confirm PayApp payment-link details before sending'
 );
 
 assert(
   /결제링크 발송/.test(docsDashboard) &&
     /runTradeOpsAction\(this,[\s\S]{0,140}sendPayAppPaymentLink/.test(docsDashboard) &&
+    /buildPayAppConfirmText\(tradeId\)/.test(docsDashboard) &&
     /결제링크 발송 실패/.test(docsDashboard) &&
     /결제링크 발송 완료/.test(docsDashboard),
-  'GitHub Pages dashboard must show the PayApp payment link button and labels'
+  'GitHub Pages dashboard must confirm PayApp payment-link details before sending'
 );
 
 assert(
@@ -86,8 +92,10 @@ assert(
 assert(
   /sendPayAppPaymentLink/.test(controls) &&
     /결제링크 발송/.test(controls) &&
+    /buildPayAppConfirmMessage\(trade\)/.test(controls) &&
+    /window\.confirm\(buildPayAppConfirmMessage\(trade\)\)/.test(controls) &&
     /결제링크 발송 실패/.test(controls),
-  'Next payment controls must include a PayApp payment-link button'
+  'Next payment controls must confirm PayApp payment-link details before sending'
 );
 
 console.log('payapp-payment-link static checks OK');
