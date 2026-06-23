@@ -142,10 +142,11 @@ function mergeDashboard(base: Trade, it: any): Trade {
       isComponent: !!e.isComponent,
       emphasize: EMPH.test(e.name) || undefined,
       category: e.category || categoryOf(e.name) || undefined, // 장비마스터 실제 카테고리 우선
+      // 원장에 다시 보이는 행은 앱 캐시의 excluded 상태로 숨기지 않는다.
+      // 제외는 GAS 삭제 성공 후 원장에서 사라져야 확정이다.
       // 현장추가는 물리적으로 이미 나간 품목 — 시트 체크박스가 늦더라도 taken 유지
       checkoutState:
-        prev?.checkoutState === "excluded" ? "excluded"
-        : e.checkedCheckout ? "taken"
+        e.checkedCheckout ? "taken"
         : prev?.onsite && prev?.checkoutState === "taken" ? "taken"
         : "pending",
       takenQty: prev?.takenQty,

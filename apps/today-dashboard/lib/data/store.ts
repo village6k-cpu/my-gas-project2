@@ -19,7 +19,7 @@ import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
-import { gasMutation, gasRead, gasWrite, writeBackEnabled } from "./writeback";
+import { gasMutation, gasRead, gasWrite, writeBackDisabledReason, writeBackEnabled } from "./writeback";
 import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults } from "./sync";
 
 interface State {
@@ -375,6 +375,23 @@ function removeEquipmentAndRegenerateContract(tradeId: string, item: EquipmentIt
     });
 }
 
+function isSheetBackedScheduleId(tradeId: string, scheduleId: string): boolean {
+  return new RegExp(`^${tradeId}-\\d+$`).test(scheduleId);
+}
+
+function rejectSheetBackedRemovalWithoutWriteBack(tradeId: string, scheduleId?: string) {
+  const message = "장비 제외 실패: " + writeBackDisabledReason;
+  mutateTrade(tradeId, (t) => {
+    const restored = scheduleId ? mapItem(t, scheduleId, (e) => ({ ...e, checkoutState: "pending" })) : t;
+    return {
+      ...restored,
+      contractRegenPending: false,
+      issueNote: message,
+    };
+  });
+  flashSave(tradeId);
+}
+
 // ── 거래 단위 검수 토글 ─────────────────────────────────────────
 export function toggleSetup(tradeId: string) {
   let done = false;
@@ -419,13 +436,17 @@ export function setItemCheckout(tradeId: string, scheduleId: string, next: Check
   flashSave(tradeId);
   // 합성 ID(시트 행번호)는 실제 스케줄ID와 달라 엉뚱한 품목에 체크가 기록될 수 있음 → 시트 write 차단
   if (isSynthetic) return;
-  if (final === "excluded" && targetItem && writeBackEnabled) {
-    removeEquipmentAndRegenerateContract(tradeId, targetItem);
+  if (final === "excluded" && targetItem) {
+    if (writeBackEnabled) {
+      removeEquipmentAndRegenerateContract(tradeId, targetItem);
+    } else {
+      rejectSheetBackedRemovalWithoutWriteBack(tradeId, scheduleId);
+    }
     return;
   }
   if (final === "taken") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: true });
   else if (final === "pending") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: false });
-  // write-back이 꺼진 로컬/시드 모드에서는 'excluded'를 앱 상태로만 유지한다.
+  // 원장 쓰기가 꺼져 있으면 제외를 앱 상태로만 숨기지 않는다.
 }
 export function setItemName(tradeId: string, scheduleId: string, name: string) {
   const clean = name.trim();
@@ -636,11 +657,13 @@ export function removeItem(tradeId: string, scheduleId: string) {
   const item = state.trades.find((t) => t.tradeId === tradeId)?.equipments.find((e) => e.scheduleId === scheduleId);
   // 실 스케줄ID(tid-NN) 행은 스케줄상세에서도 삭제 — 가용성 점유·repair 부활 방지.
   // 시트에 기록된 현장추가도 실 ID라 포함됨. (레거시 앱 전용 ONS-N은 tid-ONS-N이라 매칭 안 돼 제외)
-  if (item && new RegExp(`^${tradeId}-\\d+$`).test(scheduleId)) {
+  if (item && isSheetBackedScheduleId(tradeId, scheduleId)) {
     if (writeBackEnabled) {
       removeEquipmentAndRegenerateContract(tradeId, item);
       return;
     }
+    rejectSheetBackedRemovalWithoutWriteBack(tradeId);
+    return;
   }
   mutateTrade(tradeId, (t) => ({ ...t, equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId) }));
   flashSave(tradeId);

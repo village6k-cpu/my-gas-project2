@@ -5,7 +5,11 @@
 import { isSupabase } from "../supabase/client";
 import { gasFetch, gasPost } from "./apiClient";
 
-export const writeBackEnabled = isSupabase && process.env.NEXT_PUBLIC_WRITE_BACK === "1";
+const WRITE_BACK_FLAG = process.env.NEXT_PUBLIC_WRITE_BACK;
+export const writeBackEnabled = isSupabase && WRITE_BACK_FLAG === "1";
+export const writeBackDisabledReason = !isSupabase
+  ? "실데이터 모드가 아니라 원장 쓰기가 비활성화되어 있습니다"
+  : "원장 쓰기 환경변수(NEXT_PUBLIC_WRITE_BACK)가 1이 아닙니다";
 
 type GasParam = string | number | boolean;
 
