@@ -4863,6 +4863,38 @@ function queueDashboardContractRegeneration(tid) {
   }, 250);
 }
 
+function dashboardMutationResult(res) {
+  return (res && res.result) || res || {};
+}
+
+function parseDashboardMutationAmount(value) {
+  if (typeof value === 'number' && isFinite(value)) return value;
+  if (typeof value === 'string') {
+    var parsed = Number(value.replace(/[^0-9.-]/g, ''));
+    if (isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function applyDashboardContractMutationResult(tid, res) {
+  var result = dashboardMutationResult(res);
+  var url = String(result.contractUrl || result.url || '').trim();
+  var rawAmount = result.finalAmount != null ? result.finalAmount : result.amount;
+  var amount = parseDashboardMutationAmount(rawAmount);
+  var hasPending = Object.prototype.hasOwnProperty.call(result, 'contractRegenPending');
+  var hasContractData = !!url || amount != null || hasPending;
+  if (!hasContractData) return false;
+  dashboardEquipmentMutationTargets(tid).forEach(function(item) {
+    if (url) item.contractUrl = url;
+    if (amount != null) {
+      item.actualAmount = amount;
+      item.amount = amount;
+    }
+    if (url || hasPending) item.contractRegenPending = url ? false : result.contractRegenPending !== false;
+  });
+  return true;
+}
+
 function collectDashboardPendingContractTids() {
   var seen = {};
   var tids = [];
@@ -5002,11 +5034,7 @@ function startDashboardContractRegeneration(tid) {
       }
       var result = res.result || {};
       if (result.error) throw new Error(result.error);
-      var url = result.url || res.url || '';
-      dashboardEquipmentMutationTargets(tid).forEach(function(item) {
-        if (url) item.contractUrl = url;
-        item.contractRegenPending = false;
-      });
+      applyDashboardContractMutationResult(tid, res);
       renderDashboardEquipmentMutation();
       showDashboardToast('계약서 갱신 완료');
       queueDashboardSilentRefresh(800);
@@ -5035,7 +5063,9 @@ function applyDashboardEquipmentMutation(tid, res, context) {
   if (context.operation === 'remove') changed = syncDashboardEquipmentRemoval(tid, res, context);
   if (context.operation === 'qty') changed = syncDashboardEquipmentQtyUpdate(tid, res, context);
   if (context.operation === 'add' || context.operation === 'remove' || context.operation === 'qty') {
-    markDashboardContractRegenPending(tid, !(res && res.contractRegenPending === false));
+    if (!applyDashboardContractMutationResult(tid, res)) {
+      markDashboardContractRegenPending(tid, !(res && res.contractRegenPending === false));
+    }
     changed = true;
   }
   if (changed) renderDashboardEquipmentMutation();
@@ -5065,7 +5095,9 @@ function syncDashboardContractFieldsFromData(data) {
       if (!item || !item.tradeId) return;
       byTid[item.tradeId] = {
         contractUrl: item.contractUrl || '',
-        contractRegenPending: !!item.contractRegenPending
+        contractRegenPending: !!item.contractRegenPending,
+        actualAmount: item.actualAmount,
+        amount: item.amount
       };
     });
   });
@@ -5073,6 +5105,8 @@ function syncDashboardContractFieldsFromData(data) {
     dashboardEquipmentMutationTargets(tid).forEach(function(item) {
       item.contractUrl = byTid[tid].contractUrl;
       item.contractRegenPending = byTid[tid].contractRegenPending;
+      if (byTid[tid].actualAmount != null) item.actualAmount = byTid[tid].actualAmount;
+      if (byTid[tid].amount != null) item.amount = byTid[tid].amount;
     });
   });
 }
@@ -5372,7 +5406,8 @@ function setAddEquipModalMode(mode) {
 
 function postAddEquipBatch(tid, entries) {
   return fetch(API_URL + '?key=village2026&action=addEquips&tid=' + encodeURIComponent(tid)
-    + '&entries=' + encodeURIComponent(JSON.stringify(entries)))
+    + '&entries=' + encodeURIComponent(JSON.stringify(entries))
+    + '&directRegenerate=true')
     .then(function(r) { return r.json(); })
     .then(function(res) {
       if (res.error) throw new Error(res.error);
@@ -5387,7 +5422,8 @@ function postOnsiteAddonBatch(tid, entries) {
     action: 'onsiteAddon',
     tid: tid,
     entries: entries,
-    settlementStatus: settlement ? settlement.value : 'pending'
+    settlementStatus: settlement ? settlement.value : 'pending',
+    directRegenerate: true
   };
   return fetch(API_URL || '', {
     method: 'POST',
@@ -5452,7 +5488,10 @@ function confirmAddEquip() {
       entries: entries,
       mode: mode
     });
-    queueDashboardContractRegeneration(tid);
+    var contractResult = dashboardMutationResult(res);
+    if (contractResult.contractRegenPending !== false && !(contractResult.contractUrl || contractResult.url)) {
+      queueDashboardContractRegeneration(tid);
+    }
     if (res.onsiteAddonWarning) {
       finishDashboardMutation(mutationToken);
       queueDashboardSilentRefresh(6500);

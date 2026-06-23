@@ -5837,6 +5837,15 @@ function dashboardAddEquipments(tid, entries, options) {
   options = options || {};
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
   var profile = options.profile === true || options.profile === 1 || options.profile === "1" || options.profile === "true";
+  var directRegenerate =
+    options.directRegenerate === true ||
+    options.directRegenerate === 1 ||
+    options.directRegenerate === "1" ||
+    options.directRegenerate === "true" ||
+    options.regenerateNow === true ||
+    options.regenerateNow === 1 ||
+    options.regenerateNow === "1" ||
+    options.regenerateNow === "true";
   // 기본값은 입력명 보존. 자동 치환은 rawNames=false를 명시한 내부 경로에서만 허용한다.
   // 세트 전개·단가는 입력명이 세트마스터와 정확히 맞을 때만 적용된다.
   var rawNames = options.rawNames;
@@ -6013,7 +6022,27 @@ function dashboardAddEquipments(tid, entries, options) {
     markProfile_('write_new_rows');
     applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidRow, hadFollowingRow);
     markProfile_('format_new_rows');
-    scheduleContractRegen(tid);
+    var contractResult = null;
+    var contractRegenPending = true;
+    var contractRegenError = "";
+    if (directRegenerate) {
+      try {
+        contractResult = deleteAndRegenerateContract(ss, tid);
+        contractRegenPending = false;
+        try {
+          if (typeof clearDirectContractRegenPending_ !== "undefined") {
+            clearDirectContractRegenPending_(tid);
+          } else {
+            PropertiesService.getScriptProperties().deleteProperty("contractEditTS_" + tid);
+          }
+        } catch (clearErr) {}
+      } catch (regenErr) {
+        contractRegenError = regenErr && regenErr.message ? regenErr.message : String(regenErr);
+        scheduleContractRegen(tid);
+      }
+    } else {
+      scheduleContractRegen(tid);
+    }
     try { invalidateDashboardCache(); } catch (eCache) {}
     try { invalidateTimelineCache(); } catch (eTimeline) {}
     markProfile_('schedule_contract_regen');
@@ -6021,7 +6050,13 @@ function dashboardAddEquipments(tid, entries, options) {
     return attachProfile_({
       success: true,
       availabilityChecked: true,
-      contractRegenPending: true,
+      contractRegenPending: contractRegenPending,
+      contractRegenError: contractRegenError,
+      url: contractResult && contractResult.url ? contractResult.url : "",
+      contractUrl: contractResult && contractResult.url ? contractResult.url : "",
+      fileId: contractResult && contractResult.fileId ? contractResult.fileId : "",
+      finalAmount: contractResult && contractResult.finalAmount ? contractResult.finalAmount : null,
+      amount: contractResult && contractResult.finalAmount ? contractResult.finalAmount : null,
       addedEquipments: addEntries.length,
       addedRows: newRows.length,
       addedItems: dashboardAddedItemsFromRows_(newRows),
@@ -6040,7 +6075,11 @@ function dashboardAddEquipments(tid, entries, options) {
 
 function dashboardRecordOnsiteAddon(tid, entries, options) {
   options = options || {};
-  var addResult = dashboardAddEquipments(tid, entries, { dryRun: options.dryRun, rawNames: options.rawNames });
+  var addResult = dashboardAddEquipments(tid, entries, {
+    dryRun: options.dryRun,
+    rawNames: options.rawNames,
+    directRegenerate: options.directRegenerate || options.regenerateNow
+  });
   if (!addResult || addResult.error) return addResult;
   if (addResult.dryRun) return addResult;
 

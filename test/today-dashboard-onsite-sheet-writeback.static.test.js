@@ -33,6 +33,14 @@ assert(
   'on-site additions must set rawNames=true so free-input names are not fuzzy-matched into the wrong catalog item'
 );
 assert(
+  /gasMutation\("onsiteAddon",\s*\{[\s\S]*directRegenerate:\s*true/.test(store),
+  'on-site additions must request immediate contract regeneration so the app amount and contract link do not stay stale'
+);
+assert(
+  /export async function addOnsiteItems\([\s\S]*const mutationResult = unwrapContractMutation\(res\)[\s\S]*amount: amount \?\? t\.amount[\s\S]*contractUrl: url \|\| t\.contractUrl \|\| null[\s\S]*contractRegenPending: !!mutationResult\.contractRegenPending && !url/.test(store),
+  'addOnsiteItems must apply returned finalAmount/contractUrl to the local trade after sheet write-back'
+);
+assert(
   /filter\(\(e\) => !e\.isComponent\)/.test(store),
   'only set headers/standalone items are sent — backend re-expands set components from 세트마스터'
 );
@@ -51,7 +59,7 @@ assert(
 
 // 시트에 기록된 현장추가도 실 scheduleID라 삭제 시 스케줄상세 행도 제거되어야 함
 assert(
-  /if \(item && new RegExp\(`\^\$\{tradeId\}-\\\\d\+\$`\)\.test\(scheduleId\)\) \{[\s\S]*removeEquipmentAndRegenerateContract\(tradeId,\s*item\)/.test(store) &&
+  /if \(item && isSheetBackedScheduleId\(tradeId,\s*scheduleId\)\) \{[\s\S]*removeEquipmentAndRegenerateContract\(tradeId,\s*item\)/.test(store) &&
     /gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*true/.test(store),
   'removeItem must delete real-id rows (incl. sheet-recorded on-site) from 스케줄상세 and refresh contract data'
 );
@@ -72,12 +80,34 @@ assert(
   'rawNames must skip 목록/장비마스터 fuzzy matching so free-input names are kept verbatim'
 );
 assert(
-  /dashboardAddEquipments\(tid, entries, \{ dryRun: options\.dryRun, rawNames: options\.rawNames \}\)/.test(logic),
-  'dashboardRecordOnsiteAddon must pass rawNames through to dashboardAddEquipments'
+  /dashboardRecordOnsiteAddon\(tid, entries, options\)[\s\S]*dashboardAddEquipments\(tid, entries, \{[\s\S]*rawNames: options\.rawNames[\s\S]*directRegenerate: options\.directRegenerate \|\| options\.regenerateNow/.test(logic),
+  'dashboardRecordOnsiteAddon must pass rawNames and directRegenerate through to dashboardAddEquipments'
 );
 assert(
   /rawNames: params\.rawNames \|\| postBody\.rawNames/.test(api),
   'sheetAPI onsiteAddon case must forward rawNames from the request'
 );
+assert(
+  /case "onsiteAddon":[\s\S]*directRegenerate:[\s\S]*params\.directRegenerate \|\| postBody\.directRegenerate/.test(api),
+  'sheetAPI onsiteAddon case must forward directRegenerate from the request'
+);
+assert(
+  /function dashboardAddEquipments\(tid,\s*entries,\s*options\)[\s\S]*var directRegenerate[\s\S]*deleteAndRegenerateContract\(ss,\s*tid\)[\s\S]*finalAmount: contractResult && contractResult\.finalAmount/.test(logic),
+  'dashboardAddEquipments must return the regenerated contract URL and finalAmount when directRegenerate is requested'
+);
+
+['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+  const html = read(file);
+  assert(
+    /action=addEquips[\s\S]*directRegenerate=true/.test(html) &&
+      /action:\s*'onsiteAddon'[\s\S]*directRegenerate:\s*true/.test(html),
+    file + ' must request immediate regeneration for schedule and onsite additions'
+  );
+  assert(
+    /function applyDashboardContractMutationResult\(tid,\s*res\)[\s\S]*item\.contractUrl = url/.test(html) &&
+      /function applyDashboardContractMutationResult\(tid,\s*res\)[\s\S]*item\.actualAmount = amount/.test(html),
+    file + ' must apply returned finalAmount and contractUrl to the visible dashboard state'
+  );
+});
 
 console.log('today-dashboard onsite sheet write-back static checks passed');

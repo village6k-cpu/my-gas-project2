@@ -25,8 +25,8 @@ assert.match(
 );
 assert.match(
   batchAddBody[0],
-  /contractRegenPending:\s*true/,
-  'dashboardAddEquipments must tell the UI that the contract link is temporarily stale'
+  /var contractRegenPending = true[\s\S]*contractRegenPending = false[\s\S]*contractRegenPending:\s*contractRegenPending/,
+  'dashboardAddEquipments must clear pending after direct regeneration and keep pending when fallback regeneration is queued'
 );
 assert.match(
   batchAddBody[0],
@@ -465,12 +465,12 @@ assert.doesNotMatch(
   );
   assert.match(
     addBody[0],
-    /queueDashboardContractRegeneration\(tid\)/,
-    `${file} confirmAddEquip must start contract regeneration immediately after the schedule edit succeeds`
+    /contractResult\.contractRegenPending !== false[\s\S]*queueDashboardContractRegeneration\(tid\)/,
+    `${file} confirmAddEquip must queue background regeneration only when the write-back response still has a pending contract`
   );
   assert.match(
     html,
-    /function startDashboardContractRegeneration\(tid\)[\s\S]*action:\s*'run'[\s\S]*func:\s*'regenerateContractById'[\s\S]*tradeId:\s*tid[\s\S]*contractRegenPending\s*=\s*false/,
+    /function startDashboardContractRegeneration\(tid\)[\s\S]*action:\s*'run'[\s\S]*func:\s*'regenerateContractById'[\s\S]*tradeId:\s*tid[\s\S]*applyDashboardContractMutationResult\(tid,\s*res\)/,
     `${file} must regenerate the contract in the background and clear the pending button state when the new link is ready`
   );
   assert.match(

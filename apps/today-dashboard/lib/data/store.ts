@@ -598,6 +598,7 @@ export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], se
     rawNames: true,
     settlement_status: settlement,
     actorName: "오늘 일정 웹앱",
+    directRegenerate: true,
   });
 
   // write-back 게이트가 막았으면 폴백
@@ -607,6 +608,9 @@ export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], se
   }
 
   const out = res?.result ?? res ?? {};
+  const mutationResult = unwrapContractMutation(res);
+  const url = contractUrlFromMutation(mutationResult);
+  const amount = amountFromMutation(mutationResult);
   const added = (out.addedItems ?? []) as Array<{
     scheduleId?: string;
     name?: string;
@@ -646,6 +650,9 @@ export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], se
   mutateTrade(tradeId, (t) => ({
     ...t,
     equipments: [...t.equipments.filter((e) => !ids.has(e.scheduleId)), ...newItems],
+    amount: amount ?? t.amount,
+    contractUrl: url || t.contractUrl || null,
+    contractRegenPending: !!mutationResult.contractRegenPending && !url,
   }));
   flashSave(tradeId);
 }

@@ -335,7 +335,13 @@ function handleRequest(e) {
             name: params.equipName || postBody.equipName,
             qty: params.qty || postBody.qty || 1
           }],
-          { dryRun: params.dryRun || postBody.dryRun, profile: params.profile || postBody.profile }
+          {
+            dryRun: params.dryRun || postBody.dryRun,
+            profile: params.profile || postBody.profile,
+            directRegenerate:
+              params.directRegenerate || postBody.directRegenerate ||
+              params.regenerateNow || postBody.regenerateNow
+          }
         ));
 
       case "addEquips":
@@ -343,7 +349,13 @@ function handleRequest(e) {
         return jsonResponse(dashboardAddEquipments(
           params.tid || postBody.tid,
           params.entries || postBody.entries || params.items || postBody.items,
-          { dryRun: params.dryRun || postBody.dryRun, profile: params.profile || postBody.profile }
+          {
+            dryRun: params.dryRun || postBody.dryRun,
+            profile: params.profile || postBody.profile,
+            directRegenerate:
+              params.directRegenerate || postBody.directRegenerate ||
+              params.regenerateNow || postBody.regenerateNow
+          }
         ));
 
       case "onsiteAddon":
@@ -355,7 +367,10 @@ function handleRequest(e) {
             dryRun: params.dryRun || postBody.dryRun,
             rawNames: params.rawNames || postBody.rawNames || params.raw_names || postBody.raw_names,
             settlementStatus: params.settlementStatus || postBody.settlementStatus || params.settlement_status || postBody.settlement_status,
-            actorName: params.actorName || postBody.actorName || params.actor_name || postBody.actor_name
+            actorName: params.actorName || postBody.actorName || params.actor_name || postBody.actor_name,
+            directRegenerate:
+              params.directRegenerate || postBody.directRegenerate ||
+              params.regenerateNow || postBody.regenerateNow
           }
         ));
 
@@ -400,14 +415,26 @@ function handleRequest(e) {
             name: params.equipName || postBody.equipName,
             qty: params.qty || postBody.qty || 1
           }],
-          { dryRun: params.dryRun || postBody.dryRun, profile: params.profile || postBody.profile }
+          {
+            dryRun: params.dryRun || postBody.dryRun,
+            profile: params.profile || postBody.profile,
+            directRegenerate:
+              params.directRegenerate || postBody.directRegenerate ||
+              params.regenerateNow || postBody.regenerateNow
+          }
         ));
 
       case "scheduleAddEquips":
         return jsonResponse(dashboardAddEquipments(
           params.tid || postBody.tid,
           params.entries || postBody.entries || params.items || postBody.items,
-          { dryRun: params.dryRun || postBody.dryRun, profile: params.profile || postBody.profile }
+          {
+            dryRun: params.dryRun || postBody.dryRun,
+            profile: params.profile || postBody.profile,
+            directRegenerate:
+              params.directRegenerate || postBody.directRegenerate ||
+              params.regenerateNow || postBody.regenerateNow
+          }
         ));
 
       case "scheduleRemoveEquip":
