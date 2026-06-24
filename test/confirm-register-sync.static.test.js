@@ -44,10 +44,11 @@ assert(
   'registerByReqID lock contention must mark 등록대기 and schedule a retry instead of leaving a dead sheet state'
 );
 assert(
-  /processRegistrationQueue_\(sheet\);[\s\S]{0,80}\}\s*\n\s*\/\*\*[\s\S]{0,200}function registerByReqID/.test(backend) &&
+  /function _runPendingRegister\(\)[\s\S]*var sheet = ss\.getSheetByName\("확인요청"\);[\s\S]*if \(!queue\.length\) \{[\s\S]{0,160}processRegistrationQueue_\(sheet\);[\s\S]{0,80}return;[\s\S]{0,40}\}/.test(backend) &&
+    !/if \(!queue\.length\) return;/.test(backend) &&
     /collectPendingRegisterReqIDs_\(sheet\)/.test(backend) &&
     /findConfirmRequestRowByReqID_\(sheet, pendingReqID\)/.test(backend),
-  '_runPendingRegister must recover O-column 등록대기 rows, and processRegistrationQueue_ must use reqID-based fresh row lookup'
+  '_runPendingRegister must recover O-column 등록대기 rows even when the property queue is empty, and processRegistrationQueue_ must use reqID-based fresh row lookup'
 );
 assert(
   /if \(REGISTER_QUEUE_PROCESSING_\) return;/.test(backend) &&
@@ -60,8 +61,11 @@ assert(
 );
 assert(
   /const startedFromRegisterQueue = requestHasRecoverableRegisterStatus_\(allData, reqID\);/.test(backend) &&
+    /function getRequestExistingTradeID_\(data, reqID\)/.test(backend) &&
+    /function finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, tradeID\)/.test(backend) &&
+    /if \(startedFromRegisterQueue && completedTradeID\) \{[\s\S]{0,180}finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, completedTradeID\);/.test(backend) &&
     /if \(startedFromRegisterQueue\) \{[\s\S]{0,220}markRequestRegistered_\(sheet, allData, reqID, dupTid, "등록완료"\);/.test(backend),
-  'a retry that already created schedule/contract rows must finalize 확인요청 with the existing 거래ID instead of leaving a duplicate warning'
+  'a retry that already created schedule/contract rows must finalize 확인요청 with the existing 거래ID instead of leaving a duplicate/already-registered warning'
 );
 assert(
   /function getBlockingRegisterIssue_\(data, reqID\)/.test(backend) &&
@@ -81,8 +85,9 @@ assert(
 );
 assert(
   /function recoverPendingRegistrations\(\)/.test(backend) &&
-    /function recoverPendingRegistrations\(\)[\s\S]{0,1500}processRegistrationQueue_\(sheet\);/.test(backend),
-  'there must be a callable repair function that immediately drains already-stuck 등록대기 rows'
+    /function recoverPartiallyRegisteredRequests\(\)/.test(backend) &&
+    /function recoverPendingRegistrations\(\)[\s\S]{0,900}recoverPartiallyRegisteredRequests_\(sheet\);[\s\S]{0,1200}processRegistrationQueue_\(sheet\);/.test(backend),
+  'there must be callable repair functions that finalize partially registered rows and drain already-stuck 등록대기 rows'
 );
 
 // ── 앱: 등록 직후 90초 폴링을 기다리지 않고 신규 거래 즉시 반영 ──
@@ -101,9 +106,10 @@ assert(
   'ConfirmView must treat old ⏳ 등록대기/등록 처리중 statuses as actionable 등록대기'
 );
 assert(
-  /normalizeRegisterQueueStatus_\(rowStatus\)/.test(api) &&
+    /normalizeRegisterQueueStatus_\(rowStatus\)/.test(api) &&
     /isRegisterCompletedStatus_\(rowStatus\)/.test(api) &&
     api.includes('"recoverPendingRegistrations"') &&
+    api.includes('"recoverPartiallyRegisteredRequests"') &&
     confirmRoute.includes('"recoverPendingRegistrations"'),
   'confirm API must normalize pending/completed queue statuses and expose the repair function'
 );

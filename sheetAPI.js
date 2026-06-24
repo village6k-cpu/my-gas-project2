@@ -1011,6 +1011,7 @@ function runFunction(funcName, params) {
     "updateRequestItem",
     "normalizeConfirmRequestDates",
     "recoverPendingRegistrations",
+    "recoverPartiallyRegisteredRequests",
     "autoClearRequests",
     "setupAutoClearTrigger",
     "deleteRequest",
@@ -1214,6 +1215,7 @@ function runFunction(funcName, params) {
       syncTemplateMasterFromSetMaster: typeof syncTemplateMasterFromSetMaster !== "undefined" ? syncTemplateMasterFromSetMaster : null,
       normalizeConfirmRequestDates: typeof normalizeConfirmRequestDates !== "undefined" ? normalizeConfirmRequestDates : null,
       recoverPendingRegistrations: typeof recoverPendingRegistrations !== "undefined" ? recoverPendingRegistrations : null,
+      recoverPartiallyRegisteredRequests: typeof recoverPartiallyRegisteredRequests !== "undefined" ? recoverPartiallyRegisteredRequests : null,
       autoClearRequests: typeof autoClearRequests !== "undefined" ? autoClearRequests : null,
       setupAutoClearTrigger: typeof setupAutoClearTrigger !== "undefined" ? setupAutoClearTrigger : null
     };

@@ -8775,6 +8775,70 @@ function markRequestRegistered_(sheet, allData, reqID, tradeID, statusLabel) {
   }
 }
 
+function getRequestExistingTradeID_(data, reqID) {
+  var counts = {};
+  var order = [];
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][0] !== reqID) continue;
+    var tradeID = String(data[i][15] || "").trim();
+    if (!tradeID) continue;
+    if (!counts[tradeID]) {
+      counts[tradeID] = 0;
+      order.push(tradeID);
+    }
+    counts[tradeID]++;
+  }
+  var best = "";
+  var bestCount = 0;
+  for (var oi = 0; oi < order.length; oi++) {
+    var tid = order[oi];
+    if (counts[tid] > bestCount) {
+      best = tid;
+      bestCount = counts[tid];
+    }
+  }
+  return best;
+}
+
+function finalizeQueuedRequestFromExistingTrade_(sheet, allData, reqID, tradeID) {
+  if (!tradeID) return false;
+  markRequestRegistered_(sheet, allData, reqID, tradeID, "등록완료");
+  try { supaMarkTradeDirty_(tradeID); } catch (dirtyErr) {}
+  try { invalidateDashboardCacheForTrade_(tradeID); } catch (cacheErr) {}
+  try { invalidateTimelineCache(); } catch (timelineErr) {}
+  return true;
+}
+
+function recoverPartiallyRegisteredRequests_(sheet) {
+  var fixed = [];
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { fixed: 0, reqIDs: [] };
+  var data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
+  var pendingReqs = {};
+  var reqTradeIDs = {};
+  for (var i = 0; i < data.length; i++) {
+    var reqID = String(data[i][0] || "").trim();
+    if (!reqID) continue;
+    if (isRecoverableRegisterStatus_(data[i][14])) pendingReqs[reqID] = true;
+    var tradeID = String(data[i][15] || "").trim();
+    if (tradeID) reqTradeIDs[reqID] = tradeID;
+  }
+  for (var rid in pendingReqs) {
+    var tid = reqTradeIDs[rid] || getRequestExistingTradeID_(data, rid);
+    if (!tid) continue;
+    if (finalizeQueuedRequestFromExistingTrade_(sheet, data, rid, tid)) fixed.push(rid);
+  }
+  return { fixed: fixed.length, reqIDs: fixed };
+}
+
+function recoverPartiallyRegisteredRequests() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("확인요청");
+  if (!sheet) return { ok: false, message: "확인요청 시트 없음" };
+  var result = recoverPartiallyRegisteredRequests_(sheet);
+  return { ok: true, fixed: result.fixed, reqIDs: result.reqIDs, message: result.fixed ? "반쪽 등록 상태 복구 완료" : "반쪽 등록 상태 없음" };
+}
+
 function getBlockingRegisterIssue_(data, reqID) {
   for (var i = 0; i < data.length; i++) {
     if (data[i][0] !== reqID) continue;
@@ -8872,8 +8936,18 @@ function recoverPendingRegistrations() {
   var sheet = ss.getSheetByName("확인요청");
   if (!sheet) return { ok: false, message: "확인요청 시트 없음" };
 
+  var partialBefore = recoverPartiallyRegisteredRequests_(sheet);
+  if (partialBefore.fixed) SpreadsheetApp.flush();
   var reqIDs = collectPendingRegisterReqIDs_(sheet);
-  if (!reqIDs.length) return { ok: true, queued: 0, message: "등록대기 없음" };
+  if (!reqIDs.length) {
+    return {
+      ok: true,
+      queued: 0,
+      partialFixed: partialBefore.fixed,
+      partialReqIDs: partialBefore.reqIDs,
+      message: partialBefore.fixed ? "반쪽 등록 상태 복구 완료" : "등록대기 없음"
+    };
+  }
 
   var lastRow = sheet.getLastRow();
   var data = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
@@ -8889,6 +8963,7 @@ function recoverPendingRegistrations() {
   var drainedNow = false;
   try {
     processRegistrationQueue_(sheet);
+    recoverPartiallyRegisteredRequests_(sheet);
     drainedNow = true;
   } catch (drainErr) {
     Logger.log("등록대기 즉시 복구 실패(트리거로 재시도): " + drainErr.message);
@@ -8898,6 +8973,8 @@ function recoverPendingRegistrations() {
     ok: true,
     queued: reqIDs.length,
     reqIDs: reqIDs,
+    partialFixed: partialBefore.fixed,
+    partialReqIDs: partialBefore.reqIDs,
     drainedNow: drainedNow,
     message: drainedNow ? "등록대기 즉시 처리 완료" : "등록대기 재시도 예약 완료"
   };
@@ -8962,11 +9039,16 @@ function _runPendingRegister() {
   } finally {
     if (drainLocked) drainLock.releaseLock();
   }
-  if (!queue.length) return;
-
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("확인요청");
   if (!sheet) return;
+
+  recoverPartiallyRegisteredRequests_(sheet);
+
+  if (!queue.length) {
+    processRegistrationQueue_(sheet);
+    return;
+  }
 
   for (var qi = 0; qi < queue.length; qi++) {
     var pendingReqID = queue[qi];
@@ -9096,6 +9178,11 @@ function registerByReqID(sheet, triggerRow) {
     }
   }
   if (hasCompleted && !hasRejectedOrHeld) {
+    var completedTradeID = getRequestExistingTradeID_(allData, reqID);
+    if (startedFromRegisterQueue && completedTradeID) {
+      finalizeQueuedRequestFromExistingTrade_(sheet, allData, reqID, completedTradeID);
+      return;
+    }
     sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
     return;
   }
@@ -9119,6 +9206,14 @@ function registerByReqID(sheet, triggerRow) {
   var recheckData = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
   for (let i = 0; i < recheckData.length; i++) {
     if (recheckData[i][0] === reqID && isRegisterCompletedStatus_(recheckData[i][14])) {
+      if (startedFromRegisterQueue) {
+        var recheckAllData = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
+        var recheckTradeID = getRequestExistingTradeID_(recheckAllData, reqID);
+        if (recheckTradeID) {
+          finalizeQueuedRequestFromExistingTrade_(sheet, recheckAllData, reqID, recheckTradeID);
+          return;
+        }
+      }
       sheet.getRange(triggerRow, 15).setValue("⚠️ 이미 등록됨");
       sheet.getRange(triggerRow, 14).clearContent();
       return;
