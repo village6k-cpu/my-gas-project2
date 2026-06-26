@@ -32,6 +32,7 @@ type ConfirmEquipmentRow = Equip & {
   groupName?: string;
   componentCount?: number;
 };
+type ExcludedConfirmItem = { 장비명: string; 비고: string; 순번: number };
 type Req = {
   reqID: string;
    반출일?: string;
@@ -87,6 +88,39 @@ function normalizeRegisterStatus(status?: string) {
   return s;
 }
 
+function isConfirmRequestTerminalStatus(status?: string) {
+  const s = normalizeRegisterStatus(status);
+  return /^등록완료/.test(s) || s === "거절" || s === "보류" || /^⚠️?\s*이미 등록/.test(s);
+}
+
+function isConfirmRequestWorkingStatus(status?: string) {
+  const s = normalizeRegisterStatus(status);
+  return /개고생2\.0|계약서|입력\s*중|생성\s*중/.test(s);
+}
+
+function canEditConfirmRequest(status?: string) {
+  const s = normalizeRegisterStatus(status);
+  if (!s || s === "대기" || s === "AI_REVIEW" || s === "등록대기") return true;
+  if (isConfirmRequestTerminalStatus(s) || isConfirmRequestWorkingStatus(s)) return false;
+  return true;
+}
+
+function statusBarClass(status?: string) {
+  const s = normalizeRegisterStatus(status);
+  if (STATUS_BAR[s] !== undefined) return STATUS_BAR[s];
+  if (/^❌|등록\s*불가|등록\s*실패/.test(s)) return "bg-attention-fg";
+  if (/모델|미등록|필요|부족|중복|날짜|연락처|예약자/.test(s)) return "bg-warn-fg";
+  return "bg-checkout-fg";
+}
+
+function statusChipClass(status?: string) {
+  const s = normalizeRegisterStatus(status);
+  if (STATUS_CHIP[s] !== undefined) return STATUS_CHIP[s];
+  if (/^❌|등록\s*불가|등록\s*실패/.test(s)) return "bg-attention-bg text-attention-fg";
+  if (/모델|미등록|필요|부족|중복|날짜|연락처|예약자/.test(s)) return "bg-warn-bg text-warn-fg";
+  return "bg-checkout-bg text-checkout-fg";
+}
+
 function isFail(r?: string) {
   return /❌|가용0/.test(r || "");
 }
@@ -134,10 +168,22 @@ export function ConfirmView() {
   const [items, setItems] = useState<Req[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busyReqIDs, setBusyReqIDs] = useState<Set<string>>(() => new Set());
+  const [queuedRegisterIDs, setQueuedRegisterIDs] = useState<string[]>([]);
   const [edit, setEdit] = useState<Req | null>(null);
   const [itemEdit, setItemEdit] = useState<{ req: Req; item: Equip } | null>(null);
   const loadingRef = useRef(false);
+  const registerQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const queuedRegisterSetRef = useRef<Set<string>>(new Set());
+
+  const setReqBusy = useCallback((reqID: string, nextBusy: boolean) => {
+    setBusyReqIDs((prev) => {
+      const next = new Set(prev);
+      if (nextBusy) next.add(reqID);
+      else next.delete(reqID);
+      return next;
+    });
+  }, []);
 
   const load = useCallback(async () => {
     if (loadingRef.current) return;
@@ -164,7 +210,7 @@ export function ConfirmView() {
   // 액션 실행 (확인/등록/보류/거절) — POST /api/confirm
   const doAction = useCallback(
     async (action: string, reqID: string): Promise<boolean> => {
-      setBusy(reqID);
+      setReqBusy(reqID, true);
       setError("");
       try {
         const res = await authFetch("/api/confirm", {
@@ -180,10 +226,10 @@ export function ConfirmView() {
         setError(e instanceof Error ? e.message : String(e));
         return false;
       } finally {
-        setBusy(null);
+        setReqBusy(reqID, false);
       }
     },
-    [],
+    [setReqBusy],
   );
 
   const runFunc = useCallback(async (func: string, args: Record<string, unknown>): Promise<boolean> => {
@@ -199,21 +245,34 @@ export function ConfirmView() {
   }, []);
 
   // 선택 등록: 제외 장비 보류 처리 후 등록
-  const registerSelected = useCallback(
-    async (req: Req, excluded: string[]) => {
-      setBusy(req.reqID);
+  const registerSelectedNow = useCallback(
+    async (req: Req, excludedItems: ExcludedConfirmItem[]) => {
+      setReqBusy(req.reqID, true);
       setError("");
       try {
-        if (excluded.length) await runFunc("excludeEquipFromRequest", { reqID: req.reqID, 제외장비: excluded });
+        for (const excluded of excludedItems) {
+          await runFunc("updateRequestItem", {
+            reqID: req.reqID,
+            장비명: excluded.장비명,
+            비고: excluded.비고,
+            순번: excluded.순번,
+            제외: true,
+          });
+        }
         const res = await authFetch("/api/confirm", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ action: "등록", reqID: req.reqID }),
+          body: JSON.stringify({ action: "registerAsync", reqID: req.reqID }),
         });
         const json = await res.json().catch(() => ({}));
-        if (!res.ok || json.status !== "OK") throw new Error(json.message || json.error || "등록 실패");
+        const ok = json.status === "OK" || json.success === true;
+        if (!res.ok || !ok) throw new Error(json.message || json.error || "등록 대기열 등록 실패");
         await load();
-        void pollSheetChangesNow(); // 신규 거래를 오늘일정·검색에 즉시 반영
+        setTimeout(() => void load(), 3_000);
+        setTimeout(() => {
+          void load();
+          void pollSheetChangesNow();
+        }, 15_000);
       } catch (e) {
         // 등록은 GAS에서 계속 진행되는데 응답만 시간초과로 끊기는 경우가 잦다 —
         // "실패"로 단정하지 말고 확인 안내 + 자동 재확인
@@ -229,10 +288,31 @@ export function ConfirmView() {
           setError(msg);
         }
       } finally {
-        setBusy(null);
+        setReqBusy(req.reqID, false);
       }
     },
-    [runFunc, load],
+    [runFunc, load, setReqBusy],
+  );
+
+  const registerSelected = useCallback(
+    (req: Req, excludedItems: ExcludedConfirmItem[]) => {
+      if (queuedRegisterSetRef.current.has(req.reqID)) {
+        setError(`${req.reqID}는 이미 등록 대기열에 들어가 있습니다.`);
+        return;
+      }
+      queuedRegisterSetRef.current.add(req.reqID);
+      setQueuedRegisterIDs((prev) => [...prev, req.reqID]);
+      registerQueueRef.current = registerQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          await registerSelectedNow(req, excludedItems);
+        })
+        .finally(() => {
+          queuedRegisterSetRef.current.delete(req.reqID);
+          setQueuedRegisterIDs((prev) => prev.filter((id) => id !== req.reqID));
+        });
+    },
+    [registerSelectedNow],
   );
 
   const act = useCallback(
@@ -246,9 +326,18 @@ export function ConfirmView() {
   const cards = useMemo(
     () =>
       items.map((req) => (
-        <ConfirmCard key={req.reqID} req={req} busy={busy === req.reqID} onAct={act} onRegisterSelected={registerSelected} onEdit={() => setEdit(req)} onItemEdit={(item) => setItemEdit({ req, item })} />
+        <ConfirmCard
+          key={req.reqID}
+          req={req}
+          busy={busyReqIDs.has(req.reqID)}
+          queueIndex={queuedRegisterIDs.indexOf(req.reqID)}
+          onAct={act}
+          onRegisterSelected={registerSelected}
+          onEdit={() => setEdit(req)}
+          onItemEdit={(item) => setItemEdit({ req, item })}
+        />
       )),
-    [items, busy, act, registerSelected],
+    [items, busyReqIDs, queuedRegisterIDs, act, registerSelected],
   );
 
   return (
@@ -306,9 +395,15 @@ export function ConfirmView() {
 }
 
 function ConfirmCard({
-  req, busy, onAct, onRegisterSelected, onEdit, onItemEdit,
+  req, busy, queueIndex, onAct, onRegisterSelected, onEdit, onItemEdit,
 }: {
-  req: Req; busy: boolean; onAct: (action: string, reqID: string) => void; onRegisterSelected: (req: Req, excluded: string[]) => void; onEdit: () => void; onItemEdit: (item: Equip) => void;
+  req: Req;
+  busy: boolean;
+  queueIndex: number;
+  onAct: (action: string, reqID: string) => void;
+  onRegisterSelected: (req: Req, excludedItems: ExcludedConfirmItem[]) => void;
+  onEdit: () => void;
+  onItemEdit: (item: Equip) => void;
 }) {
   // 같은 장비명이 여러 행일 때 정확한 행을 지정하기 위한 동명 순번 (시트 행 순서 = 장비목록 순서)
   const itemOrdinal = useCallback((row: ConfirmEquipmentRow) => {
@@ -318,29 +413,38 @@ function ConfirmCard({
   const equips = req.장비목록 || EMPTY_CONFIRM_EQUIPS;
   const equipmentRows = useMemo(() => buildConfirmEquipmentRows(equips), [equips]);
   const status = normalizeRegisterStatus(req.등록상태);
-  const actionable = status === "대기" || status === "" || status === "AI_REVIEW" || status === "등록대기";
+  const queuedStatus = status === "등록대기";
+  const actionable = queuedStatus || canEditConfirmRequest(status);
   const hasResult = equips.some((e) => e.결과 && e.결과 !== "");
   // 체크 상태: 기본 = 가용0/❌ 아닌 것만 체크
-  const defaultChecked = useMemo(() => new Set(equipmentRows.filter((row) => row.role !== "set-header" && !isFail(row.결과) && !row.제외).map((row) => row.장비명)), [equipmentRows]);
+  const defaultChecked = useMemo(() => new Set(equipmentRows.filter((row) => row.role !== "set-header" && !isFail(row.결과) && !row.제외).map((row) => row.rowKey)), [equipmentRows]);
   const [checked, setChecked] = useState<Set<string>>(defaultChecked);
 
   useEffect(() => {
     setChecked(defaultChecked);
   }, [defaultChecked]);
 
-  const toggle = useCallback((name: string) =>
+  const toggle = useCallback((key: string) =>
     setChecked((prev) => {
       const n = new Set(prev);
-      if (n.has(name)) n.delete(name);
-      else n.add(name);
+      if (n.has(key)) n.delete(key);
+      else n.add(key);
       return n;
     }), []);
 
   const selectableEquips = useMemo(() => equipmentRows.filter((row) => row.role !== "set-header"), [equipmentRows]);
-  const excluded = useMemo(() => selectableEquips.filter((e) => !checked.has(e.장비명)).map((e) => e.장비명), [selectableEquips, checked]);
+  const excludedItems = useMemo(
+    () =>
+      selectableEquips
+        .filter((row) => !checked.has(row.rowKey))
+        .map((row) => ({ 장비명: row.장비명, 비고: String(row.비고 || ""), 순번: itemOrdinal(row) })),
+    [selectableEquips, checked, itemOrdinal],
+  );
+  const excludedLabels = useMemo(() => excludedItems.map((item) => item.장비명), [excludedItems]);
 
-  const barCls = STATUS_BAR[status] ?? "bg-checkout-fg";
-  const chipCls = STATUS_CHIP[status] ?? "bg-checkout-bg text-checkout-fg";
+  const barCls = statusBarClass(status);
+  const chipCls = statusChipClass(status);
+  const isQueued = queueIndex >= 0;
 
   return (
     <article className="relative overflow-hidden rounded-xl2 bg-white p-3.5 shadow-card ring-1 ring-line/70">
@@ -352,6 +456,7 @@ function ConfirmCard({
             <div className="flex items-center gap-2">
               <span className="text-[15px] font-extrabold text-ink">{req.예약자명 || "예약자 미상"}</span>
               <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${chipCls}`}>{status || "대기"}</span>
+              {isQueued && <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-bold text-brand-700">앱 대기 {queueIndex + 1}</span>}
             </div>
             <div className="mt-0.5 text-[11.5px] text-ink-faint">
               {req.reqID}
@@ -359,7 +464,7 @@ function ConfirmCard({
               {req.연락처 ? ` · ${req.연락처}` : ""}
             </div>
           </div>
-          {actionable && (
+          {actionable && !busy && !isQueued && (
             <button onClick={onEdit} className="tap shrink-0 rounded-lg bg-paper ring-1 ring-line/60 px-2.5 py-1.5 text-[12px] font-bold text-ink-soft">✎ 수정</button>
           )}
         </div>
@@ -377,7 +482,10 @@ function ConfirmCard({
             const tone = resultTone(row.결과);
             const isSetHeader = row.role === "set-header";
             const isSetComponent = row.role === "set-component";
-            const sel = !isSetHeader && checked.has(row.장비명);
+            const sel = !isSetHeader && checked.has(row.rowKey);
+            const editItem = () => onItemEdit({ ...row, 순번: itemOrdinal(row) });
+            const canEditItem = actionable && !busy && !isQueued;
+            const needsModelChoice = /모델|미등록|❓/.test(`${row.결과 || ""} ${row.상세 || ""}`);
             const rowCls = isSetHeader
               ? "border border-line/60 bg-brand-50 px-3 py-2"
               : isSetComponent
@@ -395,14 +503,14 @@ function ConfirmCard({
                       </div>
                       {row.componentCount ? <div className="mt-0.5 text-[11px] font-semibold text-brand-700/65">구성품 {row.componentCount}개</div> : null}
                     </div>
-                    {actionable && (
+                    {canEditItem && (
                       <button onClick={onEdit} className="tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold text-brand-700/70" aria-label="세트 수정(전체 편집)">✎</button>
                     )}
                   </>
                 ) : (
                   <>
-                    {actionable && hasResult && !row.제외 ? (
-                      <input type="checkbox" checked={sel} onChange={() => toggle(row.장비명)} className="mt-0.5 h-[16px] w-[16px] shrink-0 accent-brand-600" aria-label="등록 선택" />
+                    {actionable && hasResult && !row.제외 && !busy && !isQueued ? (
+                      <input type="checkbox" checked={sel} onChange={() => toggle(row.rowKey)} className="mt-0.5 h-[16px] w-[16px] shrink-0 accent-brand-600" aria-label="등록 선택" />
                     ) : (
                       <span className="mt-0.5 w-[16px] shrink-0" aria-hidden />
                     )}
@@ -414,9 +522,19 @@ function ConfirmCard({
                       {row.상세 && <div className="truncate text-[11px] text-ink-faint">{row.상세}</div>}
                     </div>
                     {row.제외 && <span className="shrink-0 rounded-full bg-attention-bg px-2 py-0.5 text-[10.5px] font-bold text-attention-fg">제외</span>}
-                    {!row.제외 && row.결과 && <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`}>{row.결과}</span>}
-                    {actionable && (
-                      <button onClick={() => onItemEdit({ ...row, 순번: itemOrdinal(row) })} className="tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold text-ink-faint" aria-label="품목 수정">✎</button>
+                    {!row.제외 && row.결과 && (
+                      canEditItem && needsModelChoice ? (
+                        <button onClick={editItem} className={`tap shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`} aria-label="모델 선택">
+                          {row.결과}
+                        </button>
+                      ) : (
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`}>{row.결과}</span>
+                      )
+                    )}
+                    {canEditItem && (
+                      <button onClick={editItem} className={`tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold ${needsModelChoice ? "text-warn-fg" : "text-ink-faint"}`} aria-label={needsModelChoice ? "모델 선택/품목 수정" : "품목 수정"}>
+                        {needsModelChoice ? "수정" : "✎"}
+                      </button>
                     )}
                   </>
                 )}
@@ -436,18 +554,18 @@ function ConfirmCard({
               <>
                 <Btn
                   primary
-                  disabled={busy}
+                  disabled={busy || isQueued}
                   onClick={() => {
                     const total = selectableEquips.length;
-                    const sel = total - excluded.length;
-                    const msg = excluded.length ? `${sel}/${total}개 장비를 등록합니다.\n제외: ${excluded.join(", ")}` : `${total}개 장비를 모두 등록합니다.`;
-                    if (confirm(msg)) onRegisterSelected(req, excluded);
+                    const sel = total - excludedItems.length;
+                    const msg = excludedItems.length ? `${sel}/${total}개 장비를 등록 대기열에 넣습니다.\n제외: ${excludedLabels.join(", ")}` : `${total}개 장비를 모두 등록 대기열에 넣습니다.`;
+                    if (confirm(msg)) onRegisterSelected(req, excludedItems);
                   }}
                 >
-                  {busy ? "처리 중…" : excluded.length ? `선택 등록 (${selectableEquips.length - excluded.length})` : "전체 등록"}
+                  {busy ? "처리 중…" : isQueued ? `등록 대기 ${queueIndex + 1}` : excludedItems.length ? `선택 등록 (${selectableEquips.length - excludedItems.length})` : "전체 등록"}
                 </Btn>
-                <Btn disabled={busy} onClick={() => onAct("보류", req.reqID)}>전체 보류</Btn>
-                <Btn ghost disabled={busy} onClick={() => { if (confirm("이 요청을 거절할까요?")) onAct("거절", req.reqID); }}>전체 거절</Btn>
+                <Btn disabled={busy || isQueued} onClick={() => onAct("보류", req.reqID)}>전체 보류</Btn>
+                <Btn ghost disabled={busy || isQueued} onClick={() => { if (confirm("이 요청을 거절할까요?")) onAct("거절", req.reqID); }}>전체 거절</Btn>
               </>
             )}
           </div>
