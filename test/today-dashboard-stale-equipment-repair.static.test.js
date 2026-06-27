@@ -23,9 +23,22 @@ assert(
   'search repair must replace stale Supabase equipment lists when GAS has more equipment rows'
 );
 assert(
+  /function hasSheetBackedItemsMissingFromDashboard\(base: Trade, it: any\): boolean[\s\S]*!e\.onsite[\s\S]*!e\.offCatalog[\s\S]*!e\.synthetic[\s\S]*!incomingIds\.has\(e\.scheduleId\)/.test(syncSource),
+  'sync repair must detect sheet-backed schedule items removed from GAS dashboard detail'
+);
+assert(
+  /const sheetBackedDeleted = hasSheetBackedItemsMissingFromDashboard\(base, it\)/.test(syncSource) &&
+    /sheetBackedDeleted/.test(syncSource.match(/function shouldUseDashboardDetail[\s\S]*?\n}\n/)?.[0] ?? ''),
+  'dashboard repair must refresh when GAS no longer returns a sheet-backed schedule item'
+);
+assert(
   syncSource.includes('export async function repairDashboardDateDetails') &&
-    /action=dashboard&date=\$\{date\}/.test(syncSource),
-  'sync layer must also repair stale partial equipment caches when a date is opened directly'
+    /action=dashboard&date=\$\{date\}&nocache=1/.test(syncSource),
+  'date repair must bypass GAS dashboard cache so manual sheet deletes are read from the source sheet'
+);
+assert(
+  /export async function pollSheetChangesNow\(\): Promise<void>[\s\S]*state\.date && await repairDayDetails\(state\.date, mutationSeqAtPoll\)/.test(storeSource),
+  'sheet polling must repair the open date details so manual sheet deletes disappear without a full reload'
 );
 assert(
   storeSource.includes('repairDashboardSearchResults') &&

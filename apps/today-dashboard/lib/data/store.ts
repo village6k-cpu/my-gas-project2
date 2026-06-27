@@ -197,6 +197,7 @@ export async function pollSheetChangesNow(): Promise<void> {
   const mutationSeqAtPoll = localMutationSeq;
   try {
     if (await repairEmptyEquipmentTrades(state.trades, mutationSeqAtPoll)) return;
+    if (state.date && await repairDayDetails(state.date, mutationSeqAtPoll)) return;
     const changed = await pollTimelineChanges(state.trades);
     if (!changed.length) return;
     if (!canApplyRemoteSnapshot(mutationSeqAtPoll)) return;

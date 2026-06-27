@@ -269,16 +269,30 @@ function incomingEquipmentCount(it: any): number {
   return Array.isArray(it?.equipments) ? it.equipments.length : 0;
 }
 
+function hasSheetBackedItemsMissingFromDashboard(base: Trade, it: any): boolean {
+  const incomingIds = new Set(
+    (it?.equipments ?? [])
+      .map((e: any) => String(e?.scheduleId || "").trim())
+      .filter(Boolean),
+  );
+  if (!incomingIds.size) return false;
+  return base.equipments.some((e) => !e.onsite && !e.offCatalog && !e.synthetic && !incomingIds.has(e.scheduleId));
+}
+
 function shouldUseDashboardDetail(base: Trade, it: any): boolean {
   const amountFix =
     typeof it?.actualAmount === "number" && it.actualAmount > 0 && it.actualAmount !== (base.amount ?? 0);
   // 합성(타임라인 유래) 품목이 남아 있으면 개수와 무관하게 dashboard 실데이터로 교체 —
   // 과거 중복 생성된 목록은 정상 목록보다 길어서 개수 비교만으로는 영원히 복구되지 않음
   const hasSynthetic = incomingEquipmentCount(it) > 0 && base.equipments.some((e) => e.synthetic);
+  // 스케줄상세에서 수동 삭제된 행은 Supabase 캐시에 남기면 앱에 유령 장비가 계속 보인다.
+  // 단, 현장추가/자유입력 앱 전용 품목은 mergeDashboard에서 계속 보존한다.
+  const sheetBackedDeleted = hasSheetBackedItemsMissingFromDashboard(base, it);
   // 계약서 재생성으로 링크가 '바뀐' 경우 — 없을 때만 갱신하면 옛 링크를 영원히 들고 있음
   const contractUrlChanged = !!it?.contractUrl && it.contractUrl !== base.contractUrl;
   return (
     incomingEquipmentCount(it) > currentEquipmentCount(base) ||
+    sheetBackedDeleted ||
     contractUrlChanged ||
     amountFix ||
     hasSynthetic
@@ -339,7 +353,7 @@ export async function repairDashboardDateDetails(current: Trade[], date: string)
   date = date.trim();
   if (!date) return [];
   try {
-    const res = await gasFetch(`action=dashboard&date=${date}`);
+    const res = await gasFetch(`action=dashboard&date=${date}&nocache=1`);
     const data = await res.json();
     if (data.error) return [];
     return repairFromDashboardItems(current, [...(data.checkout ?? []), ...(data.checkin ?? [])]);
