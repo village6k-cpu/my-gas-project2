@@ -20,7 +20,7 @@ import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
 import { gasMutation, gasRead, gasWrite, writeBackDisabledReason, writeBackEnabled } from "./writeback";
-import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults, shouldPruneMissingSheetBacked } from "./sync";
+import { fetchGasTimelineTrades, pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults, shouldPruneMissingSheetBacked } from "./sync";
 
 interface State {
   date: string;
@@ -66,7 +66,9 @@ let notesPersistGeneration = 0;
 let notesPersistPending = false;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 const POLL_MS = 90_000;
+const REMOTE_LOAD_TIMEOUT_MS = 7_000;
 let localMutationSeq = 0;
+let gasFallbackMode = false;
 
 type ContractMutationPayload = {
   result?: ContractMutationPayload;
@@ -91,6 +93,13 @@ function hasPendingPersist(): boolean {
 
 function canApplyRemoteSnapshot(mutationSeqAtStart: number): boolean {
   return !hasPendingPersist() && mutationSeqAtStart === localMutationSeq;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Supabase read timeout")), ms)),
+  ]);
 }
 
 function preserveTradePhotos(next: Trade, previous?: Trade): Trade {
@@ -134,7 +143,7 @@ async function applyDashboardRepairs(changed: Trade[], mutationSeqAtStart: numbe
 }
 
 async function repairDayDetails(date: string, mutationSeqAtStart = localMutationSeq): Promise<boolean> {
-  if (!isSupabase || hasPendingPersist()) return false;
+  if (!isSupabase || gasFallbackMode || hasPendingPersist()) return false;
   const changed = await repairDashboardDateDetails(state.trades, date);
   return applyDashboardRepairs(changed, mutationSeqAtStart);
 }
@@ -148,16 +157,31 @@ export async function repairSearchResults(query: string): Promise<void> {
   await applyDashboardRepairs(changed, mutationSeqAtSearch);
 }
 
+async function loadGasFallback(date = state.date): Promise<void> {
+  const timelineTrades = preservePhotosInSnapshot(await fetchGasTimelineTrades());
+  const changed = date ? await repairDashboardDateDetails(timelineTrades, date) : [];
+  const trades = changed.length ? mergeTradeChanges(timelineTrades, changed) : timelineTrades;
+  gasFallbackMode = true;
+  remoteLoaded = true;
+  set({ trades, notes: state.notes ?? [] });
+}
+
 async function loadRemote() {
   try {
-    const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
+    const [trades, notes] = await withTimeout(
+      Promise.all([fetchAllTrades(), fetchNotes()]),
+      REMOTE_LOAD_TIMEOUT_MS,
+    );
     const mergedTrades = preservePhotosInSnapshot(trades);
     remoteLoaded = true;
+    gasFallbackMode = false;
     set({ trades: mergedTrades, notes });
     await repairEmptyEquipmentTrades(mergedTrades);
     if (state.date) await repairDayDetails(state.date);
   } catch (e) {
     console.error("[supabase] load 실패", e);
+    await loadGasFallback(state.date).catch((fallbackError) => console.error("[gas] fallback load 실패", fallbackError));
+    return;
   }
   if (!subscribed) {
     subscribed = true;
@@ -194,6 +218,10 @@ async function loadRemote() {
  */
 export async function pollSheetChangesNow(): Promise<void> {
   if (!isSupabase || hasPendingPersist()) return;
+  if (gasFallbackMode) {
+    await loadGasFallback(state.date);
+    return;
+  }
   const mutationSeqAtPoll = localMutationSeq;
   try {
     if (await repairEmptyEquipmentTrades(state.trades, mutationSeqAtPoll)) return;
@@ -209,7 +237,7 @@ export async function pollSheetChangesNow(): Promise<void> {
 }
 
 function schedulePersistTrade(trade: Trade) {
-  if (!isSupabase) return;
+  if (!isSupabase || gasFallbackMode) return;
   const tradeId = trade.tradeId;
   const generation = (persistGenerations[tradeId] ?? 0) + 1;
   persistGenerations[tradeId] = generation;
@@ -231,7 +259,7 @@ function schedulePersistTrade(trade: Trade) {
   }, 450);
 }
 function schedulePersistNotes() {
-  if (!isSupabase) return;
+  if (!isSupabase || gasFallbackMode) return;
   const generation = ++notesPersistGeneration;
   notesPersistPending = true;
   if (notesTimer) clearTimeout(notesTimer);
@@ -249,6 +277,10 @@ function schedulePersistNotes() {
 export function loadDay(date: string) {
   if (isSupabase) {
     if (state.date !== date) set({ date });
+    if (gasFallbackMode) {
+      loadGasFallback(date);
+      return;
+    }
     if (!remoteLoaded) loadRemote();
     else repairDayDetails(date);
     return;

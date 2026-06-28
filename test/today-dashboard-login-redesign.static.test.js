@@ -4,9 +4,13 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const authGatePath = path.join(root, 'apps/today-dashboard/components/AuthGate.tsx');
+const authFetchPath = path.join(root, 'apps/today-dashboard/lib/data/authFetch.ts');
+const supabaseClientPath = path.join(root, 'apps/today-dashboard/lib/supabase/client.ts');
 const globalsPath = path.join(root, 'apps/today-dashboard/app/globals.css');
 const tailwindPath = path.join(root, 'apps/today-dashboard/tailwind.config.ts');
 const authGate = fs.readFileSync(authGatePath, 'utf8');
+const authFetch = fs.readFileSync(authFetchPath, 'utf8');
+const supabaseClient = fs.readFileSync(supabaseClientPath, 'utf8');
 const globals = fs.readFileSync(globalsPath, 'utf8');
 const tailwind = fs.readFileSync(tailwindPath, 'utf8');
 
@@ -61,6 +65,13 @@ assert(
     authGate.includes('if (cancelled || !restoredSession) return;') &&
     authGate.includes('setSession(restoredSession);'),
   'AuthGate must still accept a late existing session after the splash timeout'
+);
+
+assert(
+  supabaseClient.includes('export function readPersistedSupabaseSession') &&
+    authGate.includes('readPersistedSupabaseSession()') &&
+    authFetch.includes('readPersistedSupabaseSession()'),
+  'Auth recovery must fall back to the persisted PWA session when Supabase Auth bootstrap hangs'
 );
 
 assert(

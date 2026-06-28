@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import type { Session } from "@supabase/supabase-js";
-import { isSupabase, supabase } from "@/lib/supabase/client";
+import { isSupabase, readPersistedSupabaseSession, supabase } from "@/lib/supabase/client";
 
 // 로그인 워드마크 락업 — 본래 로고 PNG + 에디션(운영 대시보드), finance 로그인과 같은 광학 규칙.
 // 보정값은 PNG 픽셀 측정 기반(h-10 = 원본 96px의 40px 스케일):
@@ -59,6 +59,8 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     ]).then((result) => {
       if (cancelled) return;
       if (result === "timeout") {
+        const cachedSession = readPersistedSupabaseSession();
+        if (cachedSession) setSession(cachedSession);
         setLoading(false);
         return;
       }
