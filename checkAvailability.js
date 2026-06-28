@@ -7352,34 +7352,29 @@ function _insertAndCheckRequest(req) {
   }).filter(function(item) { return item && item.name; });
   var requestedEquipNames = requestedEquipItems.map(function(item) { return item.name; });
 
-  // 연락처 미입력 시 고객DB에서 조회한다.
-  // 고객DB에도 없거나 동명이인이면 확인요청/예약 등록 자체를 만들지 않는다.
-  // 연락처 없는 예약행은 이후 계약/문서/정산 단계에서 구조적으로 막히므로,
-  // 자동화는 고객에게 연락처를 먼저 요청해야 한다.
+  // 연락처 미입력 시 고객DB에서 조회하되, 실패해도 확인요청 입력은 허용한다.
+  // 연락처가 없으면 _processByReqID()가 O열에 "연락처 입력 필요"를 남기고,
+  // 직원이 연락처를 보강한 뒤 확인/등록을 계속한다.
   var resolvedPhone = req.연락처 || "";
   var phoneLookupMatches = [];
   if (!resolvedPhone && req.예약자명) {
     var dbSheet = ss.getSheetByName("고객DB");
     if (dbSheet && dbSheet.getLastRow() >= 2) {
       var dbData = dbSheet.getDataRange().getValues();
+      var seenPhones = {};
       for (var di = 1; di < dbData.length; di++) {
         if (String(dbData[di][1]).trim() === String(req.예약자명).trim()) {
           var candidatePhone = String(dbData[di][0]).trim();
-          if (candidatePhone) phoneLookupMatches.push(candidatePhone);
+          var phoneKey = _confirmRequestPhoneKey_(candidatePhone);
+          if (candidatePhone && !seenPhones[phoneKey]) {
+            seenPhones[phoneKey] = true;
+            phoneLookupMatches.push(candidatePhone);
+          }
         }
       }
       if (phoneLookupMatches.length === 1) resolvedPhone = phoneLookupMatches[0];
     }
   }
-  if (!resolvedPhone) {
-    var contactReason = req.예약자명
-      ? (phoneLookupMatches.length > 1
-        ? "고객DB에 동명이인 " + phoneLookupMatches.length + "명 존재"
-        : "고객DB에서 연락처 없음")
-      : "예약자명 없음으로 고객DB 조회 불가";
-    throw new Error("NO_CONTACT: 연락처가 없으면 예약 등록이 불가능합니다. " + contactReason + " — 고객에게 연락처부터 요청하세요.");
-  }
-
   var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone });
 
   // ── 중복 체크: 같은 예약자명/연락처 + 반출·반납창 + 같은 최상위 장비/수량 ──
@@ -7397,7 +7392,7 @@ function _insertAndCheckRequest(req) {
   var reqDate = _confirmRequestDateKey_(req.반출일);
   if (reqName && reqDate && requestedEquipNames.length > 0) {
     // 스케줄상세(등록 완료된 건)에서도 중복 체크
-    var dupTid = checkDuplicateRequest(ss, reqName, reqDate, requestedEquipNames);
+    var dupTid = checkDuplicateRequest(ss, reqName, reqDate, requestedEquipNames, resolvedPhone);
     if (dupTid) {
       throw new Error("중복 요청: 동일 건이 이미 예약 등록되어 있습니다 (거래ID: " + dupTid + ")");
     }
@@ -9233,7 +9228,7 @@ function registerByReqID(sheet, triggerRow) {
     if (allData[di][5]) dupEquips.push(String(allData[di][5]).trim());
   }
   if (dupDate && dupEquips.length > 0 && 예약자명) {
-    var dupTid = checkDuplicateRequest(ss, 예약자명, dupDate, dupEquips);
+    var dupTid = checkDuplicateRequest(ss, 예약자명, dupDate, dupEquips, 연락처);
     if (dupTid) {
       if (startedFromRegisterQueue) {
         markRequestRegistered_(sheet, allData, reqID, dupTid, "등록완료");
@@ -10054,14 +10049,15 @@ function rejectByReqID(sheet, allData, reqID) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * 스케줄상세 중복 등록 체크: 같은 예약자명 + 반출일 + 장비목록
+ * 스케줄상세 중복 등록 체크: 같은 실제 고객(예약자명 또는 연락처) + 반출일 + 장비목록
  * @param {Spreadsheet} ss
  * @param {string} 예약자명
  * @param {string} 반출일 - "yyyy-MM-dd" 문자열 또는 Date
  * @param {string[]} 장비목록 - 장비명 배열
+ * @param {string=} 연락처 - 카카오 닉네임/예약자명 alias 방지용 전화번호
  * @returns {string|null} 중복 거래ID 또는 null
  */
-function checkDuplicateRequest(ss, 예약자명, 반출일, 장비목록) {
+function checkDuplicateRequest(ss, 예약자명, 반출일, 장비목록, 연락처) {
   if (!예약자명 || !반출일 || !장비목록 || 장비목록.length === 0) return null;
 
   var schedSheet = ss.getSheetByName("스케줄상세");
@@ -10071,11 +10067,17 @@ function checkDuplicateRequest(ss, 예약자명, 반출일, 장비목록) {
 
   var dupDate = _confirmRequestDateKey_(반출일);
   var dupEquipArr = 장비목록.map(function(e) { return String(e).trim(); }).filter(function(e) { return e; });
+  var reqPhone = _confirmRequestPhoneKey_(연락처);
 
-  // 계약마스터에서 거래ID → 예약자명 매핑
+  // 계약마스터에서 거래ID → 예약자명/연락처/상태 매핑
   var cMap = {};
-  contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 2).getValues().forEach(function(r) {
-    if (r[0]) cMap[r[0]] = String(r[1] || "").trim();
+  contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getValues().forEach(function(r) {
+    if (!r[0]) return;
+    cMap[r[0]] = {
+      name: String(r[1] || "").trim(),
+      phone: _confirmRequestPhoneKey_(r[2]),
+      status: String(r[9] || "").trim()
+    };
   });
 
   // 스케줄상세: 거래ID별 반출일 + 장비목록
@@ -10093,8 +10095,15 @@ function checkDuplicateRequest(ss, 예약자명, 반출일, 장비목록) {
   }
   for (var tid in schedGroups) {
     var sg = schedGroups[tid];
-    var schedName = cMap[tid] || "";
-    if (schedName === 예약자명 && sg.date === dupDate && _confirmRequestContainsAllEquip_(sg.equips, dupEquipArr)) {
+    var contract = cMap[tid] || { name: "", phone: "", status: "" };
+    if (/^취소/.test(contract.status)) continue;
+    var sameName = contract.name === 예약자명;
+    var samePhone = !!(reqPhone && contract.phone && reqPhone === contract.phone);
+    if (!sameName && !samePhone) continue;
+    // 동명이인 보호: 이름만 같고 양쪽 연락처가 명확히 다르면 다른 고객으로 본다.
+    // 반대로 연락처가 같으면 카카오 닉네임/예약자명 표기가 달라도 등록 중복으로 차단한다.
+    if (sameName && !samePhone && reqPhone && contract.phone && reqPhone !== contract.phone) continue;
+    if (sg.date === dupDate && _confirmRequestContainsAllEquip_(sg.equips, dupEquipArr)) {
       return tid;
     }
   }
