@@ -30,7 +30,7 @@ function LoginWordmark() {
 // 고객용 공개 경로 — 직원 로그인 없이 접근 (토큰으로 본인 예약만 보는 화면)
 const PUBLIC_PATHS = ["/my"];
 const AUTH_SESSION_TIMEOUT_MS = 3500;
-const AUTH_LOGIN_TIMEOUT_MS = 12000;
+const AUTH_LOGIN_SLOW_MS = 12000;
 
 // 로그인 게이트: 세션 없으면 로그인 폼, 있으면 앱. (시드 모드면 통과)
 export function AuthGate({ children }: { children: React.ReactNode }) {
@@ -98,16 +98,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     if (!supabase) return;
     setBusy(true);
     setErr("");
+    const slowLoginTimer = window.setTimeout(() => {
+      setErr("로그인 서버 응답이 지연되고 있습니다. 계속 시도 중입니다.");
+    }, AUTH_LOGIN_SLOW_MS);
     try {
-      const loginResult = await Promise.race([
-        supabase.auth.signInWithPassword({ email: email.trim(), password: pw }),
-        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), AUTH_LOGIN_TIMEOUT_MS)),
-      ]);
-      if (loginResult === "timeout") {
-        setErr("로그인 서버 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요.");
-        return;
-      }
-      const { data, error } = loginResult;
+      const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
       if (error) {
         setErr("로그인 실패 — 이메일·비밀번호를 확인하세요.");
         return;
@@ -116,6 +111,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     } catch {
       setErr("로그인 실패 — 잠시 후 다시 시도해주세요.");
     } finally {
+      window.clearTimeout(slowLoginTimer);
       setBusy(false);
     }
   }

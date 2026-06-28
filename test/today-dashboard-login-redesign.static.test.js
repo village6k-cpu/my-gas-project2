@@ -65,16 +65,18 @@ assert(
 
 assert(
   authGate.includes('supabase.auth.signInWithPassword({ email: email.trim(), password: pw })') &&
-    authGate.includes('const { data, error } = loginResult;') &&
+    authGate.includes('const { data, error } = await supabase.auth.signInWithPassword') &&
     authGate.includes('setSession(data.session);'),
   'successful password login must immediately update the active session'
 );
 
 assert(
-  /const AUTH_LOGIN_TIMEOUT_MS = 12000/.test(authGate) &&
-    /setTimeout\(\(\) => resolve\("timeout"\), AUTH_LOGIN_TIMEOUT_MS\)/.test(authGate) &&
-    authGate.includes('로그인 서버 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요.'),
-  'password login must leave the busy state when Supabase Auth does not respond'
+  /const AUTH_LOGIN_SLOW_MS = 12000/.test(authGate) &&
+    authGate.includes('const slowLoginTimer = window.setTimeout') &&
+    authGate.includes('로그인 서버 응답이 지연되고 있습니다. 계속 시도 중입니다.') &&
+    authGate.includes('window.clearTimeout(slowLoginTimer)') &&
+    !authGate.includes('const loginResult = await Promise.race'),
+  'password login must not cancel a slow Supabase Auth response'
 );
 
 assert(
