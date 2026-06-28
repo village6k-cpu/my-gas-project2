@@ -58,13 +58,6 @@ assert(
   'sheet polling must repair the open date details so manual sheet deletes disappear without a full reload'
 );
 assert(
-  /export async function fetchGasTimelineTrades/.test(syncSource) &&
-    /gasFallbackMode/.test(storeSource) &&
-    /loadGasFallback/.test(storeSource) &&
-    /withTimeout\(\s*Promise\.all\(\[fetchAllTrades\(\), fetchNotes\(\)\]\)/.test(storeSource),
-  'dashboard must fall back to GAS source-of-truth when Supabase keyed reads hang'
-);
-assert(
   storeSource.includes('repairDashboardSearchResults') &&
     /export async function repairSearchResults\(query: string\)/.test(storeSource),
   'store must expose a search repair action wired to the sync layer'

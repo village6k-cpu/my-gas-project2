@@ -13,37 +13,14 @@ const GAS_KEY = process.env.GAS_API_KEY ?? "village2026";
 const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPA_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const authClient = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
-const AUTH_VERIFY_TIMEOUT_MS = 2500;
 
-function decodeJwtPayload(token: string): any | null {
-  try {
-    const payload = token.split(".")[1];
-    if (!payload) return null;
-    return JSON.parse(Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function isEmergencyReadableToken(token: string): boolean {
-  const payload = decodeJwtPayload(token);
-  if (!payload || payload.role !== "authenticated" || !payload.sub) return false;
-  if (typeof payload.exp !== "number" || payload.exp <= Math.floor(Date.now() / 1000)) return false;
-  return true;
-}
-
-async function isAuthed(req: NextRequest, isWrite = true): Promise<boolean> {
+async function isAuthed(req: NextRequest): Promise<boolean> {
   if (!authClient) return true; // Supabase 미설정(로컬/시드) → 통과
   const h = req.headers.get("authorization") ?? "";
   const token = h.startsWith("Bearer ") ? h.slice(7) : "";
   if (!token) return false;
-  const result = await Promise.race([
-    authClient.auth.getUser(token).then(({ data, error }) => (!error && !!data.user ? "ok" : "fail")).catch(() => "fail"),
-    new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), AUTH_VERIFY_TIMEOUT_MS)),
-  ]);
-  if (result === "ok") return true;
-  if (!isWrite && result === "timeout" && isEmergencyReadableToken(token)) return true;
-  return false;
+  const { data, error } = await authClient.auth.getUser(token);
+  return !error && !!data.user;
 }
 
 // 읽기 응답 짧게 캐시(GAS 콜드스타트 완화)
@@ -164,11 +141,7 @@ async function callPost(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
-  const sp = req.nextUrl.searchParams;
-  const action = sp.get("action") ?? "";
-  const func = sp.get("func") ?? "";
-  const allowedAction = allowed(action, func);
-  if (!(await isAuthed(req, allowedAction.isWrite))) {
+  if (!(await isAuthed(req))) {
     return NextResponse.json({ error: "인증 필요" }, { status: 401 });
   }
   return callGet(req);

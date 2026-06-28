@@ -4,17 +4,9 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const authGatePath = path.join(root, 'apps/today-dashboard/components/AuthGate.tsx');
-const authFetchPath = path.join(root, 'apps/today-dashboard/lib/data/authFetch.ts');
-const apiClientPath = path.join(root, 'apps/today-dashboard/lib/data/apiClient.ts');
-const gasRoutePath = path.join(root, 'apps/today-dashboard/app/api/gas/route.ts');
-const supabaseClientPath = path.join(root, 'apps/today-dashboard/lib/supabase/client.ts');
 const globalsPath = path.join(root, 'apps/today-dashboard/app/globals.css');
 const tailwindPath = path.join(root, 'apps/today-dashboard/tailwind.config.ts');
 const authGate = fs.readFileSync(authGatePath, 'utf8');
-const authFetch = fs.readFileSync(authFetchPath, 'utf8');
-const apiClient = fs.readFileSync(apiClientPath, 'utf8');
-const gasRoute = fs.readFileSync(gasRoutePath, 'utf8');
-const supabaseClient = fs.readFileSync(supabaseClientPath, 'utf8');
 const globals = fs.readFileSync(globalsPath, 'utf8');
 const tailwind = fs.readFileSync(tailwindPath, 'utf8');
 
@@ -53,61 +45,6 @@ assert(
 assert(
   authGate.includes('aria-live="polite"'),
   'login failure message should be announced politely to assistive tech'
-);
-
-assert(
-  /const AUTH_SESSION_TIMEOUT_MS = 3500/.test(authGate) &&
-    /setTimeout\(\(\) => resolve\("timeout"\), AUTH_SESSION_TIMEOUT_MS\)/.test(authGate) &&
-    /\.catch\(\(\) => null\)/.test(authGate) &&
-    /if \(cancelled\) return/.test(authGate),
-  'AuthGate must leave the loading splash even when Supabase session restore hangs or fails'
-);
-
-assert(
-  authGate.includes('const sessionPromise = sb.auth') &&
-    authGate.includes('sessionPromise.then((restoredSession) => {') &&
-    authGate.includes('if (cancelled || !restoredSession) return;') &&
-    authGate.includes('setSession(restoredSession);'),
-  'AuthGate must still accept a late existing session after the splash timeout'
-);
-
-assert(
-  supabaseClient.includes('export function readPersistedSupabaseSession') &&
-    authGate.includes('readPersistedSupabaseSession()') &&
-    authGate.includes('const nextSession = result ?? readPersistedSupabaseSession();') &&
-    authFetch.includes('readPersistedSupabaseSession()') &&
-    apiClient.includes('readPersistedSupabaseSession()'),
-  'Auth recovery must fall back to the persisted PWA session when Supabase Auth bootstrap hangs'
-);
-
-assert(
-  /const GAS_FETCH_SESSION_TIMEOUT_MS = 2500/.test(apiClient) &&
-    apiClient.includes('Promise.race') &&
-    apiClient.includes('readPersistedSupabaseSession()'),
-  'GAS proxy client must not hang while reading the Supabase session during Auth incidents'
-);
-
-assert(
-  /const AUTH_VERIFY_TIMEOUT_MS = 2500/.test(gasRoute) &&
-    gasRoute.includes('isEmergencyReadableToken') &&
-    gasRoute.includes('if (!isWrite && result === "timeout" && isEmergencyReadableToken(token)) return true'),
-  'GAS proxy must allow read-only emergency fallback when Supabase Auth verification stalls'
-);
-
-assert(
-  authGate.includes('supabase.auth.signInWithPassword({ email: email.trim(), password: pw })') &&
-    authGate.includes('const { data, error } = await supabase.auth.signInWithPassword') &&
-    authGate.includes('setSession(data.session);'),
-  'successful password login must immediately update the active session'
-);
-
-assert(
-  /const AUTH_LOGIN_SLOW_MS = 12000/.test(authGate) &&
-    authGate.includes('const slowLoginTimer = window.setTimeout') &&
-    authGate.includes('로그인 서버 응답이 지연되고 있습니다. 계속 시도 중입니다.') &&
-    authGate.includes('window.clearTimeout(slowLoginTimer)') &&
-    !authGate.includes('const loginResult = await Promise.race'),
-  'password login must not cancel a slow Supabase Auth response'
 );
 
 assert(

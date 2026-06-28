@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import type { Session } from "@supabase/supabase-js";
-import { isSupabase, readPersistedSupabaseSession, supabase } from "@/lib/supabase/client";
+import { isSupabase, supabase } from "@/lib/supabase/client";
 
 // 로그인 워드마크 락업 — 본래 로고 PNG + 에디션(운영 대시보드), finance 로그인과 같은 광학 규칙.
 // 보정값은 PNG 픽셀 측정 기반(h-10 = 원본 96px의 40px 스케일):
@@ -29,8 +29,6 @@ function LoginWordmark() {
 
 // 고객용 공개 경로 — 직원 로그인 없이 접근 (토큰으로 본인 예약만 보는 화면)
 const PUBLIC_PATHS = ["/my"];
-const AUTH_SESSION_TIMEOUT_MS = 3500;
-const AUTH_LOGIN_SLOW_MS = 12000;
 
 // 로그인 게이트: 세션 없으면 로그인 폼, 있으면 앱. (시드 모드면 통과)
 export function AuthGate({ children }: { children: React.ReactNode }) {
@@ -47,37 +45,13 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       setLoading(false);
       return;
     }
-    let cancelled = false;
     const sb = supabase;
-    const sessionPromise = sb.auth
-      .getSession()
-      .then(({ data }) => data.session)
-      .catch(() => null);
-    Promise.race([
-      sessionPromise,
-      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), AUTH_SESSION_TIMEOUT_MS)),
-    ]).then((result) => {
-      if (cancelled) return;
-      if (result === "timeout") {
-        const cachedSession = readPersistedSupabaseSession();
-        if (cachedSession) setSession(cachedSession);
-        setLoading(false);
-        return;
-      }
-      const nextSession = result ?? readPersistedSupabaseSession();
-      setSession(nextSession);
-      setLoading(false);
-    });
-    sessionPromise.then((restoredSession) => {
-      if (cancelled || !restoredSession) return;
-      setSession(restoredSession);
+    sb.auth.getSession().then(({ data }) => {
+      setSession(data.session);
       setLoading(false);
     });
     const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
-    return () => {
-      cancelled = true;
-      sub.subscription.unsubscribe();
-    };
+    return () => sub.subscription.unsubscribe();
   }, []);
 
   if (pathname && PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"))) {
@@ -101,22 +75,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     if (!supabase) return;
     setBusy(true);
     setErr("");
-    const slowLoginTimer = window.setTimeout(() => {
-      setErr("로그인 서버 응답이 지연되고 있습니다. 계속 시도 중입니다.");
-    }, AUTH_LOGIN_SLOW_MS);
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
-      if (error) {
-        setErr("로그인 실패 — 이메일·비밀번호를 확인하세요.");
-        return;
-      }
-      setSession(data.session);
-    } catch {
-      setErr("로그인 실패 — 잠시 후 다시 시도해주세요.");
-    } finally {
-      window.clearTimeout(slowLoginTimer);
-      setBusy(false);
-    }
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
+    if (error) setErr("로그인 실패 — 이메일·비밀번호를 확인하세요.");
+    setBusy(false);
   }
 
   return (

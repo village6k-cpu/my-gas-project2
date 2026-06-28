@@ -101,16 +101,6 @@ export function parseTimeline(resp: any): Trade[] {
   return trades;
 }
 
-export async function fetchGasTimelineTrades(opts?: { fromDays?: number; toDays?: number }): Promise<Trade[]> {
-  const today = new Date();
-  const from = ymd(new Date(today.getTime() + (opts?.fromDays ?? -30) * DAY));
-  const to = ymd(new Date(today.getTime() + (opts?.toDays ?? 180) * DAY));
-  const res = await gasFetch(`action=timeline&from=${from}&to=${to}&compact=2`);
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
-  return parseTimeline(data);
-}
-
 /** 동기화 실행: timeline 범위 읽어 Supabase에 upsert. onLog로 진행 보고 */
 export async function syncTimelineToSupabase(opts?: { fromDays?: number; toDays?: number; onLog?: (s: string) => void }): Promise<number> {
   const log = opts?.onLog ?? (() => {});
@@ -118,7 +108,10 @@ export async function syncTimelineToSupabase(opts?: { fromDays?: number; toDays?
   const from = ymd(new Date(today.getTime() + (opts?.fromDays ?? -30) * 86400000));
   const to = ymd(new Date(today.getTime() + (opts?.toDays ?? 180) * 86400000));
   log(`GAS timeline 읽는 중… (${from} ~ ${to})`);
-  const trades = await fetchGasTimelineTrades({ fromDays: opts?.fromDays, toDays: opts?.toDays });
+  const res = await gasFetch(`action=timeline&from=${from}&to=${to}&compact=2`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  const trades = parseTimeline(data);
   log(`예약 ${trades.length}건 파싱 → Supabase 적재 중…`);
   // 기존 거래는 merge 경유로만 갱신 — 사진/반납카운트/검수플래그를 timeline 추정값으로 리셋하지 않음
   const existingMap = new Map((await fetchAllTrades()).map((t) => [t.tradeId, t]));
