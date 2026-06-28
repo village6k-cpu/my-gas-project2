@@ -20,7 +20,7 @@ import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
 import { gasMutation, gasRead, gasWrite, writeBackDisabledReason, writeBackEnabled } from "./writeback";
-import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults } from "./sync";
+import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults, shouldPruneMissingSheetBacked } from "./sync";
 
 interface State {
   date: string;
@@ -129,7 +129,7 @@ async function applyDashboardRepairs(changed: Trade[], mutationSeqAtStart: numbe
   if (!changed.length) return false;
   if (!canApplyRemoteSnapshot(mutationSeqAtStart)) return false;
   set({ trades: mergeTradeChanges(state.trades, changed) });
-  for (const t of changed) persistTrade(t).catch(() => {});
+  for (const t of changed) persistTrade(t, { pruneMissingSheetBacked: shouldPruneMissingSheetBacked(t) }).catch(() => {});
   return true;
 }
 

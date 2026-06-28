@@ -13,6 +13,10 @@ type SupabaseOrder = {
   ascending?: boolean;
 };
 
+type PersistTradeOptions = {
+  pruneMissingSheetBacked?: boolean;
+};
+
 async function fetchRowsPaginated<T>(
   sb: any,
   table: string,
@@ -72,13 +76,30 @@ export async function fetchNotes(): Promise<HandoverNote[]> {
   return (data ?? []).map((r: any) => ({ id: r.id, body: r.body ?? "" }));
 }
 
-/** 거래 1건 + 현재 가진 품목들을 저장. 부분 스냅샷은 authoritative하지 않으므로 누락 품목을 삭제하지 않는다. */
-export async function persistTrade(trade: Trade): Promise<void> {
+function postgrestInList(values: string[]): string {
+  return `(${values.map((s) => `"${String(s).replace(/"/g, '\\"')}"`).join(",")})`;
+}
+
+async function pruneMissingSheetBackedItems(sb: any, tradeId: string, rows: any[]): Promise<void> {
+  const keepIds = rows.map((row) => String(row.schedule_id || "").trim()).filter(Boolean);
+  if (!keepIds.length) return;
+  await sb
+    .from("schedule_items")
+    .delete()
+    .eq("trade_id", tradeId)
+    .eq("onsite", false)
+    .eq("off_catalog", false)
+    .not("schedule_id", "in", postgrestInList(keepIds));
+}
+
+/** 거래 1건 + 현재 가진 품목들을 저장. 기본 저장은 부분 스냅샷 보호를 위해 누락 품목을 삭제하지 않는다. */
+export async function persistTrade(trade: Trade, options: PersistTradeOptions = {}): Promise<void> {
   const sb = supabase;
   if (!sb) return;
   await sb.from("trades").upsert(tradeToRow(trade), { onConflict: "trade_id" });
   const rows = uniqueScheduleRows(trade);
   if (rows.length) await sb.from("schedule_items").upsert(rows, { onConflict: "schedule_id" });
+  if (options.pruneMissingSheetBacked) await pruneMissingSheetBackedItems(sb, trade.tradeId, rows);
 }
 
 export async function deleteScheduleItem(tradeId: string, scheduleId: string): Promise<void> {

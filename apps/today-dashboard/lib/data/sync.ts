@@ -9,6 +9,23 @@ import { mergeTimelineTradeSnapshot, shouldRestoreMissingTimelineEquipments } fr
 
 const DAY = 86400000;
 const EMPH = /배터리|메모리|카드|CFexpress|SD|미디어/;
+const PRUNE_MISSING_SHEET_BACKED = "__pruneMissingSheetBacked";
+
+type DashboardDetailOptions = {
+  authoritativeForMissingSheetBacked?: boolean;
+};
+
+type DashboardRepairTrade = Trade & {
+  [PRUNE_MISSING_SHEET_BACKED]?: true;
+};
+
+function markPruneMissingSheetBacked(trade: Trade): DashboardRepairTrade {
+  return { ...trade, [PRUNE_MISSING_SHEET_BACKED]: true };
+}
+
+export function shouldPruneMissingSheetBacked(trade: Trade): boolean {
+  return (trade as DashboardRepairTrade)[PRUNE_MISSING_SHEET_BACKED] === true;
+}
 
 function st2contract(st: string): Trade["contractStatus"] {
   if (st === "반출중" || st === "반출") return "반출";
@@ -279,7 +296,7 @@ function hasSheetBackedItemsMissingFromDashboard(base: Trade, it: any): boolean 
   return base.equipments.some((e) => !e.onsite && !e.offCatalog && !e.synthetic && !incomingIds.has(e.scheduleId));
 }
 
-function shouldUseDashboardDetail(base: Trade, it: any): boolean {
+function shouldUseDashboardDetail(base: Trade, it: any, options: DashboardDetailOptions = {}): boolean {
   const amountFix =
     typeof it?.actualAmount === "number" && it.actualAmount > 0 && it.actualAmount !== (base.amount ?? 0);
   // 합성(타임라인 유래) 품목이 남아 있으면 개수와 무관하게 dashboard 실데이터로 교체 —
@@ -287,7 +304,7 @@ function shouldUseDashboardDetail(base: Trade, it: any): boolean {
   const hasSynthetic = incomingEquipmentCount(it) > 0 && base.equipments.some((e) => e.synthetic);
   // 스케줄상세에서 수동 삭제된 행은 Supabase 캐시에 남기면 앱에 유령 장비가 계속 보인다.
   // 단, 현장추가/자유입력 앱 전용 품목은 mergeDashboard에서 계속 보존한다.
-  const sheetBackedDeleted = hasSheetBackedItemsMissingFromDashboard(base, it);
+  const sheetBackedDeleted = options.authoritativeForMissingSheetBacked && hasSheetBackedItemsMissingFromDashboard(base, it);
   // 계약서 재생성으로 링크가 '바뀐' 경우 — 없을 때만 갱신하면 옛 링크를 영원히 들고 있음
   const contractUrlChanged = !!it?.contractUrl && it.contractUrl !== base.contractUrl;
   return (
@@ -299,7 +316,7 @@ function shouldUseDashboardDetail(base: Trade, it: any): boolean {
   );
 }
 
-function repairFromDashboardItems(current: Trade[], items: any[]): Trade[] {
+function repairFromDashboardItems(current: Trade[], items: any[], options: DashboardDetailOptions = {}): Trade[] {
   const existing = new Map(current.map((t) => [t.tradeId, t]));
   const changed = new Map<string, Trade>();
   for (const it of items) {
@@ -307,11 +324,51 @@ function repairFromDashboardItems(current: Trade[], items: any[]): Trade[] {
     if (!tid || changed.has(tid)) continue;
     const base = existing.get(tid);
     if (!base) continue;
-    if (shouldUseDashboardDetail(base, it)) {
-      changed.set(tid, mergeDashboard(base, it));
+    if (shouldUseDashboardDetail(base, it, options)) {
+      const merged = mergeDashboard(base, it);
+      changed.set(
+        tid,
+        options.authoritativeForMissingSheetBacked && hasSheetBackedItemsMissingFromDashboard(base, it)
+          ? markPruneMissingSheetBacked(merged)
+          : merged,
+      );
     }
   }
   return [...changed.values()];
+}
+
+function missingSheetBackedTradeIds(current: Trade[], items: any[]): string[] {
+  const existing = new Map(current.map((t) => [t.tradeId, t]));
+  const ids = new Set<string>();
+  for (const it of items) {
+    const tid = String(it?.tradeId || "").trim();
+    if (!tid || ids.has(tid)) continue;
+    const base = existing.get(tid);
+    if (base && hasSheetBackedItemsMissingFromDashboard(base, it)) ids.add(tid);
+  }
+  return [...ids];
+}
+
+async function fetchDashboardSearchItemsForTradeIds(tradeIds: string[]): Promise<any[]> {
+  const wanted = new Set(tradeIds.map((tid) => tid.trim()).filter(Boolean));
+  if (!wanted.size) return [];
+
+  const byId = new Map<string, any>();
+  for (const tid of wanted) {
+    try {
+      const res = await gasFetch(`action=dashboardSearch&q=${encodeURIComponent(tid)}&limit=20`);
+      const data = await res.json();
+      if (data.error) continue;
+      const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
+      for (const it of items) {
+        const itemTid = String(it?.tradeId || "").trim();
+        if (wanted.has(itemTid) && !byId.has(itemTid)) byId.set(itemTid, it);
+      }
+    } catch {
+      /* 검색 복구 실패 거래만 건너뜀 */
+    }
+  }
+  return [...byId.values()];
 }
 
 /** Supabase 캐시에 품목/계약서 등 dashboard 상세가 빠진 거래를 즉시 복구 */
@@ -356,7 +413,13 @@ export async function repairDashboardDateDetails(current: Trade[], date: string)
     const res = await gasFetch(`action=dashboard&date=${date}&nocache=1`);
     const data = await res.json();
     if (data.error) return [];
-    return repairFromDashboardItems(current, [...(data.checkout ?? []), ...(data.checkin ?? [])]);
+    const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
+    const changed = repairFromDashboardItems(current, items);
+    const authoritativeItems = await fetchDashboardSearchItemsForTradeIds(missingSheetBackedTradeIds(current, items));
+    const authoritativeChanged = repairFromDashboardItems(current, authoritativeItems, { authoritativeForMissingSheetBacked: true });
+    const byId = new Map(changed.map((t) => [t.tradeId, t]));
+    for (const t of authoritativeChanged) byId.set(t.tradeId, t);
+    return [...byId.values()];
   } catch {
     return [];
   }
@@ -372,7 +435,7 @@ export async function repairDashboardSearchResults(current: Trade[], query: stri
     const data = await res.json();
     if (data.error) return [];
     const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
-    const changed = repairFromDashboardItems(current, items);
+    const changed = repairFromDashboardItems(current, items, { authoritativeForMissingSheetBacked: true });
 
     // 시트에는 있는데 스토어에 아직 없는 신규 거래(방금 등록된 건) → timeline에서 통째로 가져와 합류
     const known = new Set(current.map((t) => t.tradeId));
