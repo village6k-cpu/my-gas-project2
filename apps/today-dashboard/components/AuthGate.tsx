@@ -64,7 +64,8 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         setLoading(false);
         return;
       }
-      setSession(result);
+      const nextSession = result ?? readPersistedSupabaseSession();
+      setSession(nextSession);
       setLoading(false);
     });
     sessionPromise.then((restoredSession) => {

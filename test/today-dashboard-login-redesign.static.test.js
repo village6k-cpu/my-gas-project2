@@ -74,6 +74,7 @@ assert(
 assert(
   supabaseClient.includes('export function readPersistedSupabaseSession') &&
     authGate.includes('readPersistedSupabaseSession()') &&
+    authGate.includes('const nextSession = result ?? readPersistedSupabaseSession();') &&
     authFetch.includes('readPersistedSupabaseSession()') &&
     apiClient.includes('readPersistedSupabaseSession()'),
   'Auth recovery must fall back to the persisted PWA session when Supabase Auth bootstrap hangs'
