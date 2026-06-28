@@ -50,9 +50,23 @@ assert(
 assert(
   /const AUTH_SESSION_TIMEOUT_MS = 3500/.test(authGate) &&
     /setTimeout\(\(\) => resolve\("timeout"\), AUTH_SESSION_TIMEOUT_MS\)/.test(authGate) &&
-    /\.catch\(\(\) => \(\{ data: \{ session: null \} \}\)\)/.test(authGate) &&
+    /\.catch\(\(\) => null\)/.test(authGate) &&
     /if \(cancelled\) return/.test(authGate),
   'AuthGate must leave the loading splash even when Supabase session restore hangs or fails'
+);
+
+assert(
+  authGate.includes('const sessionPromise = sb.auth') &&
+    authGate.includes('sessionPromise.then((restoredSession) => {') &&
+    authGate.includes('if (cancelled || !restoredSession) return;') &&
+    authGate.includes('setSession(restoredSession);'),
+  'AuthGate must still accept a late existing session after the splash timeout'
+);
+
+assert(
+  /const \{ data, error \} = await supabase\.auth\.signInWithPassword/.test(authGate) &&
+    authGate.includes('setSession(data.session);'),
+  'successful password login must immediately update the active session'
 );
 
 assert(

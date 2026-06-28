@@ -48,18 +48,25 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     }
     let cancelled = false;
     const sb = supabase;
+    const sessionPromise = sb.auth
+      .getSession()
+      .then(({ data }) => data.session)
+      .catch(() => null);
     Promise.race([
-      sb.auth.getSession().catch(() => ({ data: { session: null } })),
+      sessionPromise,
       new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), AUTH_SESSION_TIMEOUT_MS)),
     ]).then((result) => {
       if (cancelled) return;
       if (result === "timeout") {
-        setSession(null);
         setLoading(false);
         return;
       }
-      const { data } = result;
-      setSession(data.session);
+      setSession(result);
+      setLoading(false);
+    });
+    sessionPromise.then((restoredSession) => {
+      if (cancelled || !restoredSession) return;
+      setSession(restoredSession);
       setLoading(false);
     });
     const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
@@ -90,9 +97,18 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     if (!supabase) return;
     setBusy(true);
     setErr("");
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
-    if (error) setErr("로그인 실패 — 이메일·비밀번호를 확인하세요.");
-    setBusy(false);
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
+      if (error) {
+        setErr("로그인 실패 — 이메일·비밀번호를 확인하세요.");
+        return;
+      }
+      setSession(data.session);
+    } catch {
+      setErr("로그인 실패 — 잠시 후 다시 시도해주세요.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
