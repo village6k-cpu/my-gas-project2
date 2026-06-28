@@ -29,6 +29,7 @@ function LoginWordmark() {
 
 // 고객용 공개 경로 — 직원 로그인 없이 접근 (토큰으로 본인 예약만 보는 화면)
 const PUBLIC_PATHS = ["/my"];
+const AUTH_SESSION_TIMEOUT_MS = 3500;
 
 // 로그인 게이트: 세션 없으면 로그인 폼, 있으면 앱. (시드 모드면 통과)
 export function AuthGate({ children }: { children: React.ReactNode }) {
@@ -45,13 +46,27 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       setLoading(false);
       return;
     }
+    let cancelled = false;
     const sb = supabase;
-    sb.auth.getSession().then(({ data }) => {
+    Promise.race([
+      sb.auth.getSession().catch(() => ({ data: { session: null } })),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), AUTH_SESSION_TIMEOUT_MS)),
+    ]).then((result) => {
+      if (cancelled) return;
+      if (result === "timeout") {
+        setSession(null);
+        setLoading(false);
+        return;
+      }
+      const { data } = result;
       setSession(data.session);
       setLoading(false);
     });
     const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
-    return () => sub.subscription.unsubscribe();
+    return () => {
+      cancelled = true;
+      sub.subscription.unsubscribe();
+    };
   }, []);
 
   if (pathname && PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"))) {

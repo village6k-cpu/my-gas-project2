@@ -48,6 +48,14 @@ assert(
 );
 
 assert(
+  /const AUTH_SESSION_TIMEOUT_MS = 3500/.test(authGate) &&
+    /setTimeout\(\(\) => resolve\("timeout"\), AUTH_SESSION_TIMEOUT_MS\)/.test(authGate) &&
+    /\.catch\(\(\) => \(\{ data: \{ session: null \} \}\)\)/.test(authGate) &&
+    /if \(cancelled\) return/.test(authGate),
+  'AuthGate must leave the loading splash even when Supabase session restore hangs or fails'
+);
+
+assert(
   authGate.includes('bg-paper') &&
     globals.includes('background: #f5f3ef') &&
     /paper:\s*"#F5F3EF"/.test(tailwind),
