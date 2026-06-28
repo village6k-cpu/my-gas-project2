@@ -5,11 +5,15 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const authGatePath = path.join(root, 'apps/today-dashboard/components/AuthGate.tsx');
 const authFetchPath = path.join(root, 'apps/today-dashboard/lib/data/authFetch.ts');
+const apiClientPath = path.join(root, 'apps/today-dashboard/lib/data/apiClient.ts');
+const gasRoutePath = path.join(root, 'apps/today-dashboard/app/api/gas/route.ts');
 const supabaseClientPath = path.join(root, 'apps/today-dashboard/lib/supabase/client.ts');
 const globalsPath = path.join(root, 'apps/today-dashboard/app/globals.css');
 const tailwindPath = path.join(root, 'apps/today-dashboard/tailwind.config.ts');
 const authGate = fs.readFileSync(authGatePath, 'utf8');
 const authFetch = fs.readFileSync(authFetchPath, 'utf8');
+const apiClient = fs.readFileSync(apiClientPath, 'utf8');
+const gasRoute = fs.readFileSync(gasRoutePath, 'utf8');
 const supabaseClient = fs.readFileSync(supabaseClientPath, 'utf8');
 const globals = fs.readFileSync(globalsPath, 'utf8');
 const tailwind = fs.readFileSync(tailwindPath, 'utf8');
@@ -70,8 +74,23 @@ assert(
 assert(
   supabaseClient.includes('export function readPersistedSupabaseSession') &&
     authGate.includes('readPersistedSupabaseSession()') &&
-    authFetch.includes('readPersistedSupabaseSession()'),
+    authFetch.includes('readPersistedSupabaseSession()') &&
+    apiClient.includes('readPersistedSupabaseSession()'),
   'Auth recovery must fall back to the persisted PWA session when Supabase Auth bootstrap hangs'
+);
+
+assert(
+  /const GAS_FETCH_SESSION_TIMEOUT_MS = 2500/.test(apiClient) &&
+    apiClient.includes('Promise.race') &&
+    apiClient.includes('readPersistedSupabaseSession()'),
+  'GAS proxy client must not hang while reading the Supabase session during Auth incidents'
+);
+
+assert(
+  /const AUTH_VERIFY_TIMEOUT_MS = 2500/.test(gasRoute) &&
+    gasRoute.includes('isEmergencyReadableToken') &&
+    gasRoute.includes('if (!isWrite && result === "timeout" && isEmergencyReadableToken(token)) return true'),
+  'GAS proxy must allow read-only emergency fallback when Supabase Auth verification stalls'
 );
 
 assert(
