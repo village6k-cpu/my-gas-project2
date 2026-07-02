@@ -7,6 +7,7 @@ import type { Trade } from "@/lib/domain/types";
 import type { GroupMode, TLItem } from "@/lib/domain/timeline";
 import { DAY, computeConflicts, dateOnlyMs, daysBetween, groupItems, revenueByDay, statusBar } from "@/lib/domain/timeline";
 import { removeItem, resizeEquipment, shiftEquipmentDates } from "@/lib/data/store";
+import { ledgerStockFor, useLedgerStocks, type LedgerStock } from "@/lib/data/equipmentStock";
 import { parseYmd, timeLabel } from "@/lib/domain/status";
 import { ChevronRight, Doc, Plus } from "./icons";
 
@@ -39,6 +40,8 @@ export function VillageTimeline({
   const [menu, setMenu] = useState<{ item: TLItem; x: number; y: number; mobile: boolean } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+  // 재고관리대장 보유수량 — 세트별 레인 헤더 배지용 (확신 매칭만 표시, 없으면 조용히 생략)
+  const { byName: ledgerStocks } = useLedgerStocks();
 
   // 표시 범위: 필터 있으면 그 범위, 없으면 오늘 기준 3주만 보여준다.
   const { rangeStartMs, rangeEndMs, days } = useMemo(() => {
@@ -235,12 +238,15 @@ export function VillageTimeline({
   const rows: React.ReactNode[] = [];
   for (const g of groups) {
     const isCol = collapsed[g.key];
+    // 세트별 모드의 그룹 키 = 장비명 → 원장 보유수량 배지 (고객별/상태별 키는 장비가 아니라 제외)
+    const ledger = mode === "set" ? ledgerStockFor(ledgerStocks, g.key) : null;
     rows.push(
       <div key={"g_" + g.key} className="relative flex items-center" style={{ height: ROW_H, width: totalW }}>
         <button onClick={() => setCollapsed((c) => ({ ...c, [g.key]: !c[g.key] }))} className="tap sticky left-0 z-10 flex h-full items-center gap-1.5 bg-white/95 pl-3 pr-4 backdrop-blur">
           <ChevronRight className={`h-3.5 w-3.5 text-ink-mute transition-transform ${isCol ? "" : "rotate-90"}`} />
           <span className="text-[13px] font-bold text-ink">{g.key}</span>
           <span className="rounded-full bg-line/40 px-1.5 text-[11px] font-semibold text-ink-mute">{g.items.length}</span>
+          {ledger && <StockBadge ledger={ledger} />}
         </button>
       </div>,
     );
@@ -384,11 +390,28 @@ function unitBadge(it: TLItem): string {
   return it.unitCount && it.unitCount > 1 ? `${it.unitIndex || 1}/${it.unitCount}` : "";
 }
 
+// 재고관리대장 보유수량 배지 — 은은하게. 정비중이 있으면 실가용이 줄어드므로 warn 색으로 병기.
+function StockBadge({ ledger }: { ledger: LedgerStock }) {
+  return (
+    <span className="whitespace-nowrap text-[11px] font-semibold text-ink-faint">
+      보유 {ledger.stockTotal}
+      {ledger.stockMaint > 0 && (
+        <>
+          {" · "}
+          <span className="text-warn-fg">정비 {ledger.stockMaint}</span>
+        </>
+      )}
+    </span>
+  );
+}
+
 function BarSheet({ it, onClose }: { it: TLItem; onClose: () => void }) {
   const co = new Date(it.checkoutAt);
   const ro = new Date(it.returnAt);
   const fmt = (d: Date, iso: string) => `${d.getMonth() + 1}/${d.getDate()} ${timeLabel(iso)}`;
   const unit = unitBadge(it);
+  const { byName } = useLedgerStocks();
+  const ledger = ledgerStockFor(byName, it.label); // 확신 매칭일 때만 표시
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center" onClick={onClose}>
       <div className="animate-pop w-full max-w-md rounded-t-2xl bg-white p-5 shadow-pop sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
@@ -409,6 +432,17 @@ function BarSheet({ it, onClose }: { it: TLItem; onClose: () => void }) {
           <div>
             <span className="text-ink-mute">상태</span> {it.status}
           </div>
+          {ledger && (
+            <div>
+              <span className="text-ink-mute">보유</span> {ledger.stockTotal}대
+              {ledger.stockMaint > 0 && (
+                <>
+                  {" · "}
+                  <span className="font-semibold text-warn-fg">정비 {ledger.stockMaint}대</span>
+                </>
+              )}
+            </div>
+          )}
         </div>
         <div className="mt-4 flex gap-2">
           <button onClick={onClose} className="tap flex-1 rounded-xl bg-line/40 py-3 text-[14px] font-bold text-ink-soft">닫기</button>
