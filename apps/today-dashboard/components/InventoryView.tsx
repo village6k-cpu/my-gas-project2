@@ -35,8 +35,9 @@ type FilterKey = "all" | "attention" | "unverified" | "verified";
 
 type VerifyDraft = { count: string; issueOn: boolean; issueLabel: string };
 
-// 장비명/비고/문제 인라인 편집 초안 — 기존 항목의 tradeId/at 메타는 유지하고 label만 고침
-type IssueEditDraft = { name: string; note: string; issues: OpenIssue[] };
+// 장비명/수량/비고/문제 인라인 편집 초안 — 기존 항목의 tradeId/at 메타는 유지하고 label만 고침
+// stockTotal 빈칸 = 미기록(null), stockMaint 빈칸 = 0
+type IssueEditDraft = { name: string; note: string; issues: OpenIssue[]; stockTotal: string; stockMaint: string };
 
 // 장비 추가 초안 — 대분류는 카테고리 선택 시 자동 추천(직접 고르면 그대로 유지)
 type AddDraft = {
@@ -168,7 +169,7 @@ export function InventoryView() {
   // 비고/문제 편집 패널은 "edit:장비ID" — 같은 openKey를 쓰므로 스테퍼와 동시에 열리지 않음
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [draft, setDraft] = useState<VerifyDraft>({ count: "0", issueOn: false, issueLabel: "" });
-  const [editDraft, setEditDraft] = useState<IssueEditDraft>({ name: "", note: "", issues: [] });
+  const [editDraft, setEditDraft] = useState<IssueEditDraft>({ name: "", note: "", issues: [], stockTotal: "", stockMaint: "0" });
 
   // 장비 추가 패널 + 보관 목록 토글
   const [addOpen, setAddOpen] = useState(false);
@@ -330,9 +331,16 @@ export function InventoryView() {
     [draft, rows, userEmail, showToast],
   );
 
-  const openIssueEdit = useCallback((r: LedgerRow) => {
-    setOpenKey(`edit:${r.equipment_id}`);
-    setEditDraft({ name: r.name, note: r.note ?? "", issues: r.open_issues.map((i) => ({ ...i })) });
+  // section: "edit"(전체 목록) | "editToday"(오늘 확인할 장비) — 같은 장비가 두 섹션에 보여도 누른 쪽만 펼침
+  const openIssueEdit = useCallback((section: string, r: LedgerRow) => {
+    setOpenKey(`${section}:${r.equipment_id}`);
+    setEditDraft({
+      name: r.name,
+      note: r.note ?? "",
+      issues: r.open_issues.map((i) => ({ ...i })),
+      stockTotal: r.stock_total == null ? "" : String(r.stock_total),
+      stockMaint: String(r.stock_maint),
+    });
   }, []);
 
   const submitIssueEdit = useCallback(
@@ -343,6 +351,21 @@ export function InventoryView() {
         showToast("장비명을 입력해주세요", false);
         return;
       }
+      // 수량 파싱 — 보유수량 빈칸 = 미기록(null), 정비중수량 빈칸 = 0
+      const totalStr = editDraft.stockTotal.trim();
+      const newTotal = totalStr === "" ? null : Number(totalStr);
+      if (newTotal != null && (!Number.isInteger(newTotal) || newTotal < 0)) {
+        showToast("보유수량을 숫자로 입력해주세요", false);
+        return;
+      }
+      const maintStr = editDraft.stockMaint.trim();
+      const maintRaw = maintStr === "" ? 0 : Number(maintStr);
+      if (!Number.isInteger(maintRaw) || maintRaw < 0) {
+        showToast("정비중수량을 숫자로 입력해주세요", false);
+        return;
+      }
+      // 정비중수량은 보유수량을 넘지 않게 소프트 클램프 (보유 미기록이면 그대로)
+      const newMaint = newTotal == null ? maintRaw : Math.min(maintRaw, newTotal);
       const nowIso = new Date().toISOString();
 
       // 빈 항목 제거 + 같은 내용 중복 제거 (기존 항목의 tradeId/at은 유지, 새 항목은 지금 시각)
@@ -356,22 +379,27 @@ export function InventoryView() {
       }
       const note = editDraft.note.trim() || null;
 
-      // 상태 재계산: 문제/정비/비정상 있으면 주의, 없으면 확인 이력 여부로 확인됨/미검증
+      // 상태 재계산: 문제/정비(수정된 값 기준)/비정상 있으면 주의, 없으면 확인 이력 여부로 확인됨/미검증
+      // 수량 수정은 기억에 의존한 장부 정정이므로 last_verified_at/by는 건드리지 않음 (실물 확인은 [확인] 플로우)
       const nextStatus: VerifyStatus =
-        cleaned.length > 0 || row.stock_maint > 0 || row.state !== "정상"
+        cleaned.length > 0 || newMaint > 0 || row.state !== "정상"
           ? "attention"
           : row.last_verified_at
             ? "verified"
             : "unverified";
 
       const nameChanged = name !== row.name;
-      const before = { name: row.name, note: row.note, open_issues: row.open_issues };
+      const totalChanged = newTotal !== row.stock_total;
+      const maintChanged = newMaint !== row.stock_maint;
+      const before = { name: row.name, note: row.note, open_issues: row.open_issues, stock_total: row.stock_total, stock_maint: row.stock_maint };
 
       // 옵티미스틱 반영 + 패널 닫기
       const prevRows = rows;
       setRows((prev) =>
         prev.map((r) =>
-          r.equipment_id === row.equipment_id ? { ...r, name, note, open_issues: cleaned, verify_status: nextStatus } : r,
+          r.equipment_id === row.equipment_id
+            ? { ...r, name, note, open_issues: cleaned, verify_status: nextStatus, stock_total: newTotal, stock_maint: newMaint }
+            : r,
         ),
       );
       setOpenKey(null);
@@ -379,7 +407,14 @@ export function InventoryView() {
       try {
         const { error } = await supabase
           .from("equipment_ledger")
-          .update({ note, open_issues: cleaned, verify_status: nextStatus, ...(nameChanged ? { name } : {}) })
+          .update({
+            note,
+            open_issues: cleaned,
+            verify_status: nextStatus,
+            ...(nameChanged ? { name } : {}),
+            ...(totalChanged ? { stock_total: newTotal } : {}),
+            ...(maintChanged ? { stock_maint: newMaint } : {}),
+          })
           .eq("equipment_id", row.equipment_id);
         if (error) throw error;
         showToast(`수정 완료: ${name}`);
@@ -387,7 +422,7 @@ export function InventoryView() {
         const { error: evError } = await supabase.from("equipment_events").insert({
           equipment_id: row.equipment_id,
           type: "issue_edited",
-          payload: { before, after: { name, note, open_issues: cleaned } },
+          payload: { before, after: { name, note, open_issues: cleaned, stock_total: newTotal, stock_maint: newMaint } },
           actor: userEmail,
         });
         if (evError) console.error("[inventory] 이벤트 기록 실패", evError);
@@ -673,10 +708,32 @@ export function InventoryView() {
                             </div>
                             {r.note && <div className="mt-0.5 truncate text-[11.5px] text-ink-mute">{r.note}</div>}
                           </div>
-                          <VerifyButton onClick={() => openVerify("today", r)} />
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            {/* 항상 보이는 수정 진입점 (오늘 확인 섹션) */}
+                            <button
+                              onClick={() => (openKey === `editToday:${r.equipment_id}` ? setOpenKey(null) : openIssueEdit("editToday", r))}
+                              className={`tap flex h-[32px] w-[32px] items-center justify-center rounded-lg ring-1 ${
+                                openKey === `editToday:${r.equipment_id}` ? "bg-brand-50 text-brand-700 ring-brand-200" : "bg-white text-ink-soft ring-line/70"
+                              }`}
+                              title="장비 정보 수정"
+                              aria-label="장비 정보 수정"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                            <VerifyButton onClick={() => openVerify("today", r)} />
+                          </div>
                         </div>
                         {openKey === `today:${r.equipment_id}` && (
                           <VerifyPanel row={r} draft={draft} setDraft={setDraft} onCancel={() => setOpenKey(null)} onSubmit={() => submitVerify(r)} />
+                        )}
+                        {openKey === `editToday:${r.equipment_id}` && (
+                          <IssueEditPanel
+                            draft={editDraft}
+                            setDraft={setEditDraft}
+                            onCancel={() => setOpenKey(null)}
+                            onSubmit={() => submitIssueEdit(r)}
+                            onArchive={() => archiveRow(r)}
+                          />
                         )}
                       </div>
                     ))}
@@ -714,7 +771,7 @@ export function InventoryView() {
                               </div>
                               {(r.note || issues) && (
                                 <button
-                                  onClick={() => openIssueEdit(r)}
+                                  onClick={() => openIssueEdit("edit", r)}
                                   className="tap mt-0.5 flex w-full min-w-0 items-center gap-1 text-left"
                                   title="비고·문제 수정"
                                 >
@@ -730,7 +787,7 @@ export function InventoryView() {
                             <div className="flex shrink-0 items-center gap-1.5">
                               {/* 항상 보이는 수정 진입점 — 비고/문제가 없는 행도 장비명 수정·보관 처리 가능 */}
                               <button
-                                onClick={() => (openKey === `edit:${r.equipment_id}` ? setOpenKey(null) : openIssueEdit(r))}
+                                onClick={() => (openKey === `edit:${r.equipment_id}` ? setOpenKey(null) : openIssueEdit("edit", r))}
                                 className={`tap flex h-[32px] w-[32px] items-center justify-center rounded-lg ring-1 ${
                                   openKey === `edit:${r.equipment_id}` ? "bg-brand-50 text-brand-700 ring-brand-200" : "bg-white text-ink-soft ring-line/70"
                                 }`}
@@ -934,6 +991,24 @@ function IssueEditPanel({
 }) {
   const [confirmArchive, setConfirmArchive] = useState(false);
   const nameValid = draft.name.trim() !== "";
+  // 보유수량: 빈칸 = 미기록. − 는 빈칸에서 동작 안 함, ＋ 는 0부터 시작
+  const stepTotal = (delta: number) =>
+    setDraft((d) => {
+      if (d.stockTotal.trim() === "" && delta < 0) return d;
+      const cur = Number(d.stockTotal);
+      const base = d.stockTotal.trim() !== "" && Number.isInteger(cur) ? cur : 0;
+      return { ...d, stockTotal: String(Math.max(0, base + delta)) };
+    });
+  // 정비중수량: 최소 0, 보유수량이 기록돼 있으면 그 이하로만
+  const stepMaint = (delta: number) =>
+    setDraft((d) => {
+      const cur = Number(d.stockMaint);
+      const base = d.stockMaint.trim() !== "" && Number.isInteger(cur) ? cur : 0;
+      let next = Math.max(0, base + delta);
+      const total = d.stockTotal.trim() === "" ? null : Number(d.stockTotal);
+      if (total != null && Number.isInteger(total)) next = Math.min(next, total);
+      return { ...d, stockMaint: String(next) };
+    });
   return (
     <div className="animate-pop border-t border-line/60 bg-paper/70 px-3 py-3">
       <label className="block">
@@ -945,6 +1020,38 @@ function IssueEditPanel({
           className="w-full rounded-lg bg-white px-3 py-2.5 text-[13px] font-semibold text-ink outline-none ring-1 ring-line/60 placeholder:text-ink-faint"
         />
       </label>
+
+      <div className="mt-2.5 flex flex-wrap gap-x-4 gap-y-2">
+        <div>
+          <span className="mb-1 block text-[12px] font-bold text-ink-mute">보유수량</span>
+          <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5 ring-1 ring-line/60">
+            <button onClick={() => stepTotal(-1)} className="tap h-9 w-9 rounded-md text-[17px] font-black text-ink-soft" aria-label="보유수량 줄이기">−</button>
+            <input
+              inputMode="numeric"
+              value={draft.stockTotal}
+              onChange={(e) => setDraft((d) => ({ ...d, stockTotal: e.target.value.replace(/[^\d]/g, "") }))}
+              placeholder="미기록"
+              className="w-14 bg-transparent text-center text-[15px] font-extrabold tabular-nums text-ink outline-none placeholder:text-[11.5px] placeholder:font-semibold placeholder:text-ink-faint"
+              aria-label="보유수량"
+            />
+            <button onClick={() => stepTotal(1)} className="tap h-9 w-9 rounded-md text-[17px] font-black text-ink-soft" aria-label="보유수량 늘리기">＋</button>
+          </div>
+        </div>
+        <div>
+          <span className="mb-1 block text-[12px] font-bold text-ink-mute">정비중수량</span>
+          <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5 ring-1 ring-line/60">
+            <button onClick={() => stepMaint(-1)} className="tap h-9 w-9 rounded-md text-[17px] font-black text-ink-soft" aria-label="정비중수량 줄이기">−</button>
+            <input
+              inputMode="numeric"
+              value={draft.stockMaint}
+              onChange={(e) => setDraft((d) => ({ ...d, stockMaint: e.target.value.replace(/[^\d]/g, "") }))}
+              className="w-14 bg-transparent text-center text-[15px] font-extrabold tabular-nums text-ink outline-none"
+              aria-label="정비중수량"
+            />
+            <button onClick={() => stepMaint(1)} className="tap h-9 w-9 rounded-md text-[17px] font-black text-ink-soft" aria-label="정비중수량 늘리기">＋</button>
+          </div>
+        </div>
+      </div>
 
       <label className="mt-2.5 block">
         <span className="mb-1 block text-[12px] font-bold text-ink-mute">비고</span>
