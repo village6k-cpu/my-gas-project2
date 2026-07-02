@@ -35,8 +35,8 @@ type FilterKey = "all" | "attention" | "unverified" | "verified";
 
 type VerifyDraft = { count: string; issueOn: boolean; issueLabel: string };
 
-// 비고/문제 인라인 편집 초안 — 기존 항목의 tradeId/at 메타는 유지하고 label만 고침
-type IssueEditDraft = { note: string; issues: OpenIssue[] };
+// 장비명/비고/문제 인라인 편집 초안 — 기존 항목의 tradeId/at 메타는 유지하고 label만 고침
+type IssueEditDraft = { name: string; note: string; issues: OpenIssue[] };
 
 // 장비 추가 초안 — 대분류는 카테고리 선택 시 자동 추천(직접 고르면 그대로 유지)
 type AddDraft = {
@@ -168,7 +168,7 @@ export function InventoryView() {
   // 비고/문제 편집 패널은 "edit:장비ID" — 같은 openKey를 쓰므로 스테퍼와 동시에 열리지 않음
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [draft, setDraft] = useState<VerifyDraft>({ count: "0", issueOn: false, issueLabel: "" });
-  const [editDraft, setEditDraft] = useState<IssueEditDraft>({ note: "", issues: [] });
+  const [editDraft, setEditDraft] = useState<IssueEditDraft>({ name: "", note: "", issues: [] });
 
   // 장비 추가 패널 + 보관 목록 토글
   const [addOpen, setAddOpen] = useState(false);
@@ -332,12 +332,17 @@ export function InventoryView() {
 
   const openIssueEdit = useCallback((r: LedgerRow) => {
     setOpenKey(`edit:${r.equipment_id}`);
-    setEditDraft({ note: r.note ?? "", issues: r.open_issues.map((i) => ({ ...i })) });
+    setEditDraft({ name: r.name, note: r.note ?? "", issues: r.open_issues.map((i) => ({ ...i })) });
   }, []);
 
   const submitIssueEdit = useCallback(
     async (row: LedgerRow) => {
       if (!supabase) return;
+      const name = editDraft.name.trim();
+      if (!name) {
+        showToast("장비명을 입력해주세요", false);
+        return;
+      }
       const nowIso = new Date().toISOString();
 
       // 빈 항목 제거 + 같은 내용 중복 제거 (기존 항목의 tradeId/at은 유지, 새 항목은 지금 시각)
@@ -359,13 +364,14 @@ export function InventoryView() {
             ? "verified"
             : "unverified";
 
-      const before = { note: row.note, open_issues: row.open_issues };
+      const nameChanged = name !== row.name;
+      const before = { name: row.name, note: row.note, open_issues: row.open_issues };
 
       // 옵티미스틱 반영 + 패널 닫기
       const prevRows = rows;
       setRows((prev) =>
         prev.map((r) =>
-          r.equipment_id === row.equipment_id ? { ...r, note, open_issues: cleaned, verify_status: nextStatus } : r,
+          r.equipment_id === row.equipment_id ? { ...r, name, note, open_issues: cleaned, verify_status: nextStatus } : r,
         ),
       );
       setOpenKey(null);
@@ -373,15 +379,15 @@ export function InventoryView() {
       try {
         const { error } = await supabase
           .from("equipment_ledger")
-          .update({ note, open_issues: cleaned, verify_status: nextStatus })
+          .update({ note, open_issues: cleaned, verify_status: nextStatus, ...(nameChanged ? { name } : {}) })
           .eq("equipment_id", row.equipment_id);
         if (error) throw error;
-        showToast(`수정 완료: ${row.name}`);
+        showToast(`수정 완료: ${name}`);
         // 이력은 부가 기록 — 실패해도 원장 반영은 유지 (콘솔에만 남김)
         const { error: evError } = await supabase.from("equipment_events").insert({
           equipment_id: row.equipment_id,
           type: "issue_edited",
-          payload: { before, after: { note, open_issues: cleaned } },
+          payload: { before, after: { name, note, open_issues: cleaned } },
           actor: userEmail,
         });
         if (evError) console.error("[inventory] 이벤트 기록 실패", evError);
@@ -721,7 +727,20 @@ export function InventoryView() {
                                 </button>
                               )}
                             </div>
-                            <VerifyButton onClick={() => openVerify("list", r)} />
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              {/* 항상 보이는 수정 진입점 — 비고/문제가 없는 행도 장비명 수정·보관 처리 가능 */}
+                              <button
+                                onClick={() => (openKey === `edit:${r.equipment_id}` ? setOpenKey(null) : openIssueEdit(r))}
+                                className={`tap flex h-[32px] w-[32px] items-center justify-center rounded-lg ring-1 ${
+                                  openKey === `edit:${r.equipment_id}` ? "bg-brand-50 text-brand-700 ring-brand-200" : "bg-white text-ink-soft ring-line/70"
+                                }`}
+                                title="장비 정보 수정"
+                                aria-label="장비 정보 수정"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </button>
+                              <VerifyButton onClick={() => openVerify("list", r)} />
+                            </div>
                           </div>
                           {openKey === `list:${r.equipment_id}` && (
                             <VerifyPanel row={r} draft={draft} setDraft={setDraft} onCancel={() => setOpenKey(null)} onSubmit={() => submitVerify(r)} />
@@ -914,9 +933,20 @@ function IssueEditPanel({
   onArchive: () => void;
 }) {
   const [confirmArchive, setConfirmArchive] = useState(false);
+  const nameValid = draft.name.trim() !== "";
   return (
     <div className="animate-pop border-t border-line/60 bg-paper/70 px-3 py-3">
       <label className="block">
+        <span className="mb-1 block text-[12px] font-bold text-ink-mute">장비명 <b className="text-attention-fg">*</b></span>
+        <input
+          value={draft.name}
+          onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+          placeholder="장비명을 입력해주세요"
+          className="w-full rounded-lg bg-white px-3 py-2.5 text-[13px] font-semibold text-ink outline-none ring-1 ring-line/60 placeholder:text-ink-faint"
+        />
+      </label>
+
+      <label className="mt-2.5 block">
         <span className="mb-1 block text-[12px] font-bold text-ink-mute">비고</span>
         <input
           value={draft.note}
@@ -962,7 +992,11 @@ function IssueEditPanel({
       </div>
 
       <div className="mt-2.5 flex gap-2">
-        <button onClick={onSubmit} className="tap min-h-[38px] flex-1 rounded-lg bg-brand-600 px-3.5 text-[13.5px] font-bold text-white">
+        <button
+          onClick={onSubmit}
+          disabled={!nameValid}
+          className="tap min-h-[38px] flex-1 rounded-lg bg-brand-600 px-3.5 text-[13.5px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
           저장
         </button>
         <button onClick={onCancel} className="tap min-h-[38px] rounded-lg px-3.5 text-[13.5px] font-bold text-ink-mute ring-1 ring-line/70">
