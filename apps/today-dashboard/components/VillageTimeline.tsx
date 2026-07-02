@@ -390,16 +390,18 @@ function unitBadge(it: TLItem): string {
   return it.unitCount && it.unitCount > 1 ? `${it.unitIndex || 1}/${it.unitCount}` : "";
 }
 
-// 재고관리대장 보유수량 배지 — 은은하게. 정비중이 있으면 실가용이 줄어드므로 warn 색으로 병기.
+// 재고관리대장 보유수량 배지 — 칩 형태로 또렷하게 (사장 피드백: 잘 안 보임).
+// 정비중이 있으면 실가용이 줄어드므로 warn 칩으로 병기. 흰 헤더 위라 브랜드 톤 칩 사용.
 function StockBadge({ ledger }: { ledger: LedgerStock }) {
   return (
-    <span className="whitespace-nowrap text-[11px] font-semibold text-ink-faint">
-      보유 {ledger.stockTotal}
+    <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
+      <span className="rounded-md bg-brand-50 px-1.5 py-0.5 text-[12px] font-bold text-brand-700 ring-1 ring-brand-200">
+        보유 {ledger.stockTotal}
+      </span>
       {ledger.stockMaint > 0 && (
-        <>
-          {" · "}
-          <span className="text-warn-fg">정비 {ledger.stockMaint}</span>
-        </>
+        <span className="rounded-md bg-warn-bg px-1.5 py-0.5 text-[12px] font-bold text-warn-fg ring-1 ring-warn-ring">
+          정비 {ledger.stockMaint}
+        </span>
       )}
     </span>
   );
