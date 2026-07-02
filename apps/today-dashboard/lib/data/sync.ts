@@ -6,6 +6,7 @@ import { fetchAllTrades, persistTrade } from "./remote";
 import { gasFetch } from "./apiClient";
 import { ymd } from "../domain/status";
 import { mergeTimelineTradeSnapshot, shouldRestoreMissingTimelineEquipments } from "./timelineMerge";
+import { isSheetBackedScheduleId } from "./mappers";
 
 const DAY = 86400000;
 const EMPH = /배터리|메모리|카드|CFexpress|SD|미디어/;
@@ -176,9 +177,10 @@ function mergeDashboard(base: Trade, it: any): Trade {
       onsite: prev?.onsite, // 시트에 기록된 현장추가도 '현장 추가' 구획에 계속 묶이도록 보존
     } as EquipmentItem;
   });
-  // 시트에 없는 앱 전용 품목(현장추가 등 유상 청구 대상)은 절대 삭제하지 않음
+  // 시트에 없는 앱 전용 품목(현장추가 등 유상 청구 대상)은 절대 삭제하지 않음.
+  // 단, 거래ID-숫자 형태의 원장 스케줄ID는 onsite/offCatalog 플래그가 남아 있어도 시트 행으로 본다.
   const incomingIds = new Set(incoming.map((e) => e.scheduleId));
-  const appOnly = base.equipments.filter((e) => !incomingIds.has(e.scheduleId) && (e.onsite || e.offCatalog));
+  const appOnly = base.equipments.filter((e) => !incomingIds.has(e.scheduleId) && isPreservedAppOnlyItem(base.tradeId, e));
   const equipments = incoming.length ? [...incoming, ...appOnly] : base.equipments;
 
   const returnCounts: Record<string, ReturnCount> = {};
@@ -286,6 +288,10 @@ function incomingEquipmentCount(it: any): number {
   return Array.isArray(it?.equipments) ? it.equipments.length : 0;
 }
 
+function isPreservedAppOnlyItem(tradeId: string, e: EquipmentItem): boolean {
+  return !!(e.onsite || e.offCatalog) && !isSheetBackedScheduleId(e.scheduleId, tradeId);
+}
+
 function hasSheetBackedItemsMissingFromDashboard(base: Trade, it: any): boolean {
   const incomingIds = new Set(
     (it?.equipments ?? [])
@@ -293,7 +299,9 @@ function hasSheetBackedItemsMissingFromDashboard(base: Trade, it: any): boolean 
       .filter(Boolean),
   );
   if (!incomingIds.size) return false;
-  return base.equipments.some((e) => !e.onsite && !e.offCatalog && !e.synthetic && !incomingIds.has(e.scheduleId));
+  return base.equipments.some(
+    (e) => !e.synthetic && isSheetBackedScheduleId(e.scheduleId, base.tradeId) && !incomingIds.has(e.scheduleId),
+  );
 }
 
 function shouldUseDashboardDetail(base: Trade, it: any, options: DashboardDetailOptions = {}): boolean {

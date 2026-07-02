@@ -1,7 +1,7 @@
 // Supabase 원격 데이터 레이어 (실데이터 모드)
 import { supabase } from "../supabase/client";
 import type { HandoverNote, Trade } from "../domain/types";
-import { canonicalOnsiteScheduleId, dedupeOnsiteItems, itemFromRow, itemToRow, noteToRow, tradeFromRow, tradeToRow } from "./mappers";
+import { canonicalOnsiteScheduleId, dedupeOnsiteItems, isSheetBackedScheduleId, itemFromRow, itemToRow, noteToRow, tradeFromRow, tradeToRow } from "./mappers";
 import { normalizeItems } from "../domain/catalog";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -76,20 +76,23 @@ export async function fetchNotes(): Promise<HandoverNote[]> {
   return (data ?? []).map((r: any) => ({ id: r.id, body: r.body ?? "" }));
 }
 
-function postgrestInList(values: string[]): string {
-  return `(${values.map((s) => `"${String(s).replace(/"/g, '\\"')}"`).join(",")})`;
-}
-
 async function pruneMissingSheetBackedItems(sb: any, tradeId: string, rows: any[]): Promise<void> {
-  const keepIds = rows.map((row) => String(row.schedule_id || "").trim()).filter(Boolean);
-  if (!keepIds.length) return;
+  const keepSet = new Set(rows.map((row) => String(row.schedule_id || "").trim()).filter(Boolean));
+  if (!keepSet.size) return;
+  const { data: existingRows, error } = await sb
+    .from("schedule_items")
+    .select("schedule_id")
+    .eq("trade_id", tradeId);
+  if (error) throw error;
+  const staleIds = (existingRows ?? [])
+    .map((row: any) => String(row.schedule_id || "").trim())
+    .filter((scheduleId: string) => isSheetBackedScheduleId(scheduleId, tradeId) && !keepSet.has(scheduleId));
+  if (!staleIds.length) return;
   await sb
     .from("schedule_items")
     .delete()
     .eq("trade_id", tradeId)
-    .eq("onsite", false)
-    .eq("off_catalog", false)
-    .not("schedule_id", "in", postgrestInList(keepIds));
+    .in("schedule_id", staleIds);
 }
 
 /** 거래 1건 + 현재 가진 품목들을 저장. 기본 저장은 부분 스냅샷 보호를 위해 누락 품목을 삭제하지 않는다. */

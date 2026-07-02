@@ -12,6 +12,18 @@ export function canonicalOnsiteScheduleId(scheduleId: string, tradeId?: string):
   return id.replace(/__\d+$/, "");
 }
 
+function escapeRegExpLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function isSheetBackedScheduleId(scheduleId: string, tradeId?: string): boolean {
+  const id = String(scheduleId || "").trim();
+  if (!id) return false;
+  const rowSuffix = "\\d+(?:__\\d+)?";
+  if (tradeId) return new RegExp(`^${escapeRegExpLiteral(tradeId)}-${rowSuffix}$`).test(id);
+  return /^\d{6}-\d{3}-\d+(?:__\d+)?$/.test(id);
+}
+
 export function dedupeOnsiteItems(items: EquipmentItem[]): EquipmentItem[] {
   const out: EquipmentItem[] = [];
   const onsiteIndex = new Map<string, number>();

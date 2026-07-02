@@ -25,8 +25,9 @@ assert(
   'search repair must replace stale Supabase equipment lists when GAS has more equipment rows'
 );
 assert(
-  /function hasSheetBackedItemsMissingFromDashboard\(base: Trade, it: any\): boolean[\s\S]*!e\.onsite[\s\S]*!e\.offCatalog[\s\S]*!e\.synthetic[\s\S]*!incomingIds\.has\(e\.scheduleId\)/.test(syncSource),
-  'sync repair must detect sheet-backed schedule items removed from GAS dashboard detail'
+  syncSource.includes('isSheetBackedScheduleId(e.scheduleId, base.tradeId)') &&
+    /function hasSheetBackedItemsMissingFromDashboard\(base: Trade, it: any\): boolean[\s\S]*!e\.synthetic[\s\S]*isSheetBackedScheduleId\(e\.scheduleId, base\.tradeId\)[\s\S]*!incomingIds\.has\(e\.scheduleId\)/.test(syncSource),
+  'sync repair must detect removed sheet-backed schedule items by scheduleId shape, even if stale rows were misflagged onsite/offCatalog'
 );
 assert(
   /const sheetBackedDeleted = options\.authoritativeForMissingSheetBacked && hasSheetBackedItemsMissingFromDashboard\(base, it\)/.test(syncSource) &&
@@ -79,8 +80,13 @@ assert(
   'persistTrade must support explicit stale sheet-backed schedule_items pruning'
 );
 assert(
-  /async function pruneMissingSheetBackedItems\(sb: any, tradeId: string, rows: any\[\]\)[\s\S]*from\("schedule_items"\)[\s\S]*delete\(\)[\s\S]*eq\("trade_id", tradeId\)[\s\S]*eq\("onsite", false\)[\s\S]*eq\("off_catalog", false\)[\s\S]*not\("schedule_id", "in"/.test(remoteSource),
-  'Supabase pruning must delete only stale sheet-backed rows while preserving onsite and off-catalog rows'
+  /const staleIds = \(existingRows \?\? \[\]\)[\s\S]*\.map\(\(row: any\) => String\(row\.schedule_id \|\| ""\)\.trim\(\)\)[\s\S]*isSheetBackedScheduleId\(scheduleId, tradeId\)[\s\S]*!keepSet\.has\(scheduleId\)/.test(remoteSource) &&
+    /from\("schedule_items"\)[\s\S]*delete\(\)[\s\S]*eq\("trade_id", tradeId\)[\s\S]*in\("schedule_id", staleIds\)/.test(remoteSource),
+  'Supabase pruning must delete stale sheet-backed numeric schedule IDs even when stale rows are misflagged onsite/offCatalog, while preserving true ONS app-only rows'
+);
+assert(
+  read('apps/today-dashboard/lib/data/mappers.ts').includes('export function isSheetBackedScheduleId'),
+  'sheet-backed schedule ID detection must live in the mapper layer so sync and remote pruning use the same rule'
 );
 assert(
   todayViewSource.includes('repairSearchResults') &&
