@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { ViewHeader } from "@/components/ViewHeader";
-import { Check, Pencil, Refresh, Search } from "@/components/icons";
+import { Check, ChevronRight, Pencil, Refresh, Search } from "@/components/icons";
+import { normalizeStockName } from "@/lib/data/equipmentStock";
+import nameLinkQueueJson from "@/lib/data/nameLinkQueue.json";
 
 // 재고 — village.equipment_ledger(재고관리대장) 뷰 + 실물 확인(검증) 플로우.
 // 275행 전체 1회 로드(페이지네이션 불필요) → 칩 필터/검색 + 옵티미스틱 업데이트 + equipment_events 이력.
@@ -55,6 +57,18 @@ const EMPTY_ADD_DRAFT: AddDraft = { name: "", category: "", majorSel: "", majorC
 
 // 보관 처리(소프트 삭제) — 스키마 변경 없이 state 컬럼 재사용
 const ARCHIVED_STATE = "보관종료";
+
+// ── 이름 연결 큐 — 대여기록 장비명 ↔ 원장 장비명 불일치 해소 작업 목록 ──
+// 해결 판정: (a) 정규화 이름이 활성 원장 이름/별칭과 일치, (b) SYS-000 name_link_decision 이벤트 존재
+type QueueCandidate = { id: string; name: string };
+type QueueLinkItem = { name: string; count: number; candidates: QueueCandidate[] };
+type QueueAddItem = { name: string; count: number };
+
+const NAME_LINK_QUEUE = nameLinkQueueJson as { generatedAt: string; link: QueueLinkItem[]; add: QueueAddItem[] };
+const QUEUE_TOTAL = NAME_LINK_QUEUE.link.length + NAME_LINK_QUEUE.add.length;
+const QUEUE_PAGE = 15;
+// 이름연결 결정 기록용 센티널 행 — 원장 목록(보관됨 포함)에 절대 노출하지 않음
+const SYS_EQUIPMENT_ID = "SYS-000";
 
 const STATUS_LABEL: Record<VerifyStatus, string> = {
   attention: "주의",
@@ -176,6 +190,11 @@ export function InventoryView() {
   const [addDraft, setAddDraft] = useState<AddDraft>(EMPTY_ADD_DRAFT);
   const [showArchived, setShowArchived] = useState(false);
 
+  // 이름 연결 큐 — SYS-000 결정 이력(해당 없음/무시) + 카드 펼침/표시 개수
+  const [linkDecisions, setLinkDecisions] = useState<Set<string>>(new Set());
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [linkShown, setLinkShown] = useState(QUEUE_PAGE);
+
   // 토스트 (뷰 로컬 — 스토어 저장 토스트와 동일 룩)
   const [toast, setToast] = useState<{ id: number; text: string; ok: boolean } | null>(null);
   const toastSeq = useRef(0);
@@ -191,10 +210,24 @@ export function InventoryView() {
       return;
     }
     try {
-      const { data, error } = await supabase.from("equipment_ledger").select("*").order("equipment_id");
+      const [ledgerRes, decisionRes] = await Promise.all([
+        supabase.from("equipment_ledger").select("*").order("equipment_id"),
+        // 이름연결 결정 이력 (SYS-000) — 실패해도 큐만 미해결로 남을 뿐 화면은 정상
+        supabase.from("equipment_events").select("payload").eq("equipment_id", SYS_EQUIPMENT_ID).eq("type", "name_link_decision"),
+      ]);
       // 테이블 미생성(PGRST205/42P01) 포함 모든 에러 → 안내 문구로 강등 (크래시 금지)
-      if (error) throw error;
-      setRows((data ?? []).map(rowFromDb));
+      if (ledgerRes.error) throw ledgerRes.error;
+      setRows((ledgerRes.data ?? []).map(rowFromDb));
+      if (decisionRes.error) {
+        console.error("[inventory] 이름연결 이력 로드 실패", decisionRes.error);
+      } else {
+        const decided = new Set<string>();
+        for (const ev of decisionRes.data ?? []) {
+          const n = (ev as { payload?: { name?: unknown } })?.payload?.name;
+          if (typeof n === "string" && n) decided.add(n);
+        }
+        setLinkDecisions(decided);
+      }
       setPhase("ready");
     } catch (e) {
       console.error("[inventory] 원장 로드 실패", e);
@@ -208,8 +241,30 @@ export function InventoryView() {
   }, [load]);
 
   // 보관종료 행은 모든 목록/칩/검증률/오늘 확인에서 제외 — 하단 "보관됨 보기"에서만 노출
+  // SYS-000(이름연결 센티널)은 보관됨 목록에서도 숨김
   const activeRows = useMemo(() => rows.filter((r) => r.state !== ARCHIVED_STATE), [rows]);
-  const archivedRows = useMemo(() => rows.filter((r) => r.state === ARCHIVED_STATE), [rows]);
+  const archivedRows = useMemo(
+    () => rows.filter((r) => r.state === ARCHIVED_STATE && r.equipment_id !== SYS_EQUIPMENT_ID),
+    [rows],
+  );
+
+  // 이름 연결 큐 미해결 항목 — 원장 이름/별칭 매칭 또는 SYS-000 결정으로 해결됨 처리 (재접속·다기기 안전)
+  const ledgerNameKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const r of activeRows) {
+      keys.add(normalizeStockName(r.name));
+      for (const a of r.aliases) keys.add(normalizeStockName(a));
+    }
+    keys.delete("");
+    return keys;
+  }, [activeRows]);
+  const isQueueResolved = useCallback(
+    (name: string) => ledgerNameKeys.has(normalizeStockName(name)) || linkDecisions.has(name),
+    [ledgerNameKeys, linkDecisions],
+  );
+  const pendingLink = useMemo(() => NAME_LINK_QUEUE.link.filter((it) => !isQueueResolved(it.name)), [isQueueResolved]);
+  const pendingAdd = useMemo(() => NAME_LINK_QUEUE.add.filter((it) => !isQueueResolved(it.name)), [isQueueResolved]);
+  const queuePending = pendingLink.length + pendingAdd.length;
 
   const counts = useMemo(
     () => ({
@@ -596,6 +651,76 @@ export function InventoryView() {
     [rows, userEmail, showToast],
   );
 
+  // ── 이름 연결 큐 액션 ─────────────────────────────────────────
+  // 후보 연결: 선택한 원장 장비의 별칭에 기록 이름을 추가 → 이름 매칭 규칙으로 항목이 자동 해결됨
+  const linkAlias = useCallback(
+    async (queueName: string, cand: QueueCandidate) => {
+      if (!supabase) return;
+      const target = rows.find((r) => r.equipment_id === cand.id);
+      if (!target) {
+        showToast("대상 장비를 찾을 수 없어요 — 새로고침 후 다시 시도해주세요", false);
+        return;
+      }
+      const key = normalizeStockName(queueName);
+      const nextAliases = target.aliases.some((a) => normalizeStockName(a) === key)
+        ? target.aliases
+        : [...target.aliases, queueName];
+
+      const prevRows = rows;
+      setRows((prev) => prev.map((r) => (r.equipment_id === cand.id ? { ...r, aliases: nextAliases } : r)));
+      try {
+        const { error } = await supabase.from("equipment_ledger").update({ aliases: nextAliases }).eq("equipment_id", cand.id);
+        if (error) throw error;
+        showToast(`연결됨: ${queueName} → ${target.name}`);
+        // 이력은 부가 기록 — 실패해도 별칭 반영은 유지 (콘솔에만 남김)
+        const { error: evError } = await supabase.from("equipment_events").insert({
+          equipment_id: cand.id,
+          type: "alias_added",
+          payload: { alias: queueName, source: "name-link-queue" },
+          actor: userEmail,
+        });
+        if (evError) console.error("[inventory] 이벤트 기록 실패", evError);
+      } catch (e) {
+        console.error("[inventory] 별칭 연결 실패", e);
+        setRows(prevRows); // 롤백
+        showToast("연결에 실패했어요 — 다시 시도해주세요", false);
+      }
+    },
+    [rows, userEmail, showToast],
+  );
+
+  // 해당 없음/무시 — SYS-000 이벤트가 곧 영속 기록이므로 INSERT 실패 시 되돌림
+  const dismissQueueItem = useCallback(
+    async (queueName: string, decision: "none" | "ignore") => {
+      if (!supabase) return;
+      const prevDecisions = linkDecisions;
+      setLinkDecisions(new Set(prevDecisions).add(queueName));
+      try {
+        const { error } = await supabase.from("equipment_events").insert({
+          equipment_id: SYS_EQUIPMENT_ID,
+          type: "name_link_decision",
+          payload: { name: queueName, decision },
+          actor: userEmail,
+        });
+        if (error) throw error;
+        showToast(decision === "none" ? `처리됨: ${queueName} (해당 없음)` : `무시됨: ${queueName}`);
+      } catch (e) {
+        console.error("[inventory] 이름연결 처리 실패", e);
+        setLinkDecisions(prevDecisions); // 롤백
+        showToast("처리에 실패했어요 — 다시 시도해주세요", false);
+      }
+    },
+    [linkDecisions, userEmail, showToast],
+  );
+
+  // 장비로 추가 — 기존 추가 패널을 기록 이름으로 프리필해 열기. 등록되면 이름 매칭으로 자동 해결
+  const openAddFromQueue = useCallback((queueName: string) => {
+    setAddDraft({ ...EMPTY_ADD_DRAFT, name: queueName });
+    setAddOpen(true);
+    setOpenKey(null);
+    window.setTimeout(() => document.getElementById("inv-add-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  }, []);
+
   return (
     <div className="flex min-h-screen flex-col bg-paper">
       <header className="safe-top sticky top-0 z-40 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
@@ -674,15 +799,102 @@ export function InventoryView() {
           <>
             {/* 장비 추가 패널 */}
             {addOpen && (
-              <AddPanel
-                draft={addDraft}
-                setDraft={setAddDraft}
-                categories={categories}
-                majors={majors}
-                suggestMajor={suggestMajor}
-                onCancel={() => setAddOpen(false)}
-                onSubmit={submitAdd}
-              />
+              <div id="inv-add-panel">
+                <AddPanel
+                  draft={addDraft}
+                  setDraft={setAddDraft}
+                  categories={categories}
+                  majors={majors}
+                  suggestMajor={suggestMajor}
+                  onCancel={() => setAddOpen(false)}
+                  onSubmit={submitAdd}
+                />
+              </div>
+            )}
+
+            {/* 이름 연결 큐 — 대여기록 이름 ↔ 원장 이름 불일치 해소 (하루 15건씩) */}
+            {filter === "all" && !q.trim() && queuePending > 0 && (
+              <section className="overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-line/70">
+                <button onClick={() => setLinkOpen((v) => !v)} className="tap w-full px-3.5 py-3 text-left">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[14px] font-bold text-ink">이름 연결 — 남은 {queuePending}건</span>
+                    <ChevronRight className={`h-4 w-4 shrink-0 text-ink-mute transition-transform ${linkOpen ? "rotate-90" : ""}`} />
+                  </div>
+                  <div className="mt-0.5 text-[11.5px] text-ink-mute">하루 15건이면 1주에 끝나요</div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-line/40">
+                    <div
+                      className="h-full rounded-full bg-checkin-fg"
+                      style={{ width: `${QUEUE_TOTAL ? Math.round(((QUEUE_TOTAL - queuePending) / QUEUE_TOTAL) * 100) : 0}%` }}
+                    />
+                  </div>
+                </button>
+                {linkOpen && (
+                  <div className="divide-y divide-line/60 border-t border-line/60">
+                    {[
+                      ...pendingLink.map((it) => ({ kind: "link" as const, link: it, add: null as QueueAddItem | null })),
+                      ...pendingAdd.map((it) => ({ kind: "add" as const, link: null as QueueLinkItem | null, add: it })),
+                    ]
+                      .slice(0, linkShown)
+                      .map((entry) => {
+                        const name = entry.kind === "link" ? entry.link!.name : entry.add!.name;
+                        const count = entry.kind === "link" ? entry.link!.count : entry.add!.count;
+                        return (
+                          <div key={`${entry.kind}:${name}`} className="px-3.5 py-2.5">
+                            <div className="flex items-baseline gap-1.5">
+                              <span className="min-w-0 truncate text-[13.5px] font-bold text-ink">“{name}”</span>
+                              <span className="shrink-0 text-[11.5px] text-ink-mute">기록 {count}회</span>
+                            </div>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                              {entry.kind === "link" ? (
+                                <>
+                                  {entry.link!.candidates.map((c) => (
+                                    <button
+                                      key={c.id}
+                                      onClick={() => linkAlias(name, c)}
+                                      className="tap flex max-w-full items-center gap-1 rounded-lg bg-brand-50 px-2.5 py-1.5 text-[12px] font-bold text-brand-700 ring-1 ring-brand-200"
+                                    >
+                                      <span className="shrink-0 tabular-nums">{c.id}</span>
+                                      <span className="truncate">{c.name}</span>
+                                    </button>
+                                  ))}
+                                  <button
+                                    onClick={() => dismissQueueItem(name, "none")}
+                                    className="tap rounded-lg bg-white px-2.5 py-1.5 text-[12px] font-bold text-ink-faint ring-1 ring-line/60"
+                                  >
+                                    해당 없음
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    onClick={() => openAddFromQueue(name)}
+                                    className="tap rounded-lg bg-brand-600 px-2.5 py-1.5 text-[12px] font-bold text-white"
+                                  >
+                                    장비로 추가
+                                  </button>
+                                  <button
+                                    onClick={() => dismissQueueItem(name, "ignore")}
+                                    className="tap rounded-lg bg-white px-2.5 py-1.5 text-[12px] font-bold text-ink-faint ring-1 ring-line/60"
+                                  >
+                                    무시
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    {queuePending > linkShown && (
+                      <button
+                        onClick={() => setLinkShown((n) => n + QUEUE_PAGE)}
+                        className="tap w-full px-3.5 py-2.5 text-center text-[12.5px] font-bold text-brand-700"
+                      >
+                        더 보기 {Math.min(QUEUE_PAGE, queuePending - linkShown)}건
+                      </button>
+                    )}
+                  </div>
+                )}
+              </section>
             )}
 
             {/* 오늘 확인할 장비 — 우선순위 10개 */}

@@ -1,0 +1,1041 @@
+{
+  "generatedAt": "2026-07-02",
+  "link": [
+    {
+      "name": "소니 CF-A 리더기",
+      "count": 42,
+      "candidates": [
+        {
+          "id": "RDR-001",
+          "name": "소니 CFA/SD 리더기"
+        },
+        {
+          "id": "RDR-003",
+          "name": "소니 XQD 리더기"
+        },
+        {
+          "id": "MEM-001",
+          "name": "소니 CF-A 160"
+        }
+      ]
+    },
+    {
+      "name": "라이트돔 II",
+      "count": 14,
+      "candidates": [
+        {
+          "id": "LNS-003",
+          "name": "소니 GM 24-70mm II"
+        },
+        {
+          "id": "LNS-005",
+          "name": "소니 GM 70-200mm II"
+        },
+        {
+          "id": "LNS-027",
+          "name": "캐논 100-400mm II"
+        }
+      ]
+    },
+    {
+      "name": "100볼 트라이",
+      "count": 8,
+      "candidates": [
+        {
+          "id": "TRP-001",
+          "name": "셔틀러 비디오20 II (100볼)"
+        },
+        {
+          "id": "TRP-002",
+          "name": "캠기어 엘리트15 (100볼)"
+        },
+        {
+          "id": "TRP-003",
+          "name": "서튼비디오 V-15 (100볼)"
+        }
+      ]
+    },
+    {
+      "name": "소니 CF-B 리더기",
+      "count": 6,
+      "candidates": [
+        {
+          "id": "RDR-001",
+          "name": "소니 CFA/SD 리더기"
+        },
+        {
+          "id": "RDR-003",
+          "name": "소니 XQD 리더기"
+        },
+        {
+          "id": "AUD-001",
+          "name": "소니 ECM-XM1"
+        }
+      ]
+    },
+    {
+      "name": "V마운트 배터리 충전기(SWIT)",
+      "count": 5,
+      "candidates": [
+        {
+          "id": "BAT-001",
+          "name": "V마운트 배터리"
+        },
+        {
+          "id": "BAT-002",
+          "name": "V마운트 배터리 충전기"
+        },
+        {
+          "id": "BAT-005",
+          "name": "오막포 배터리 (전체)"
+        }
+      ]
+    },
+    {
+      "name": "970더미*1 / SDI or HDMI*1 / 숏암*1",
+      "count": 5,
+      "candidates": [
+        {
+          "id": "CBL-003",
+          "name": "SDI 연선"
+        }
+      ]
+    },
+    {
+      "name": "베이비 콤보*2",
+      "count": 4,
+      "candidates": [
+        {
+          "id": "TRP-007",
+          "name": "베이비"
+        }
+      ]
+    },
+    {
+      "name": "소니 BURANO 바디(풀케이지)",
+      "count": 4,
+      "candidates": [
+        {
+          "id": "CAM-001",
+          "name": "소니 FX3 바디(케이지)"
+        },
+        {
+          "id": "CAM-002",
+          "name": "소니 FX6 바디(케이지)"
+        },
+        {
+          "id": "CAM-003",
+          "name": "소니 FX9 바디(케이지)"
+        }
+      ]
+    },
+    {
+      "name": "미라지 매트박스",
+      "count": 4,
+      "candidates": [
+        {
+          "id": "MTB-002",
+          "name": "틸타 MB-T16(미라지)"
+        },
+        {
+          "id": "MTB-004",
+          "name": "스몰리그 매트박스 미니"
+        }
+      ]
+    },
+    {
+      "name": "소니 CF-B 1920",
+      "count": 3,
+      "candidates": [
+        {
+          "id": "AUD-001",
+          "name": "소니 ECM-XM1"
+        },
+        {
+          "id": "AUD-002",
+          "name": "소니 XLR-K3M"
+        },
+        {
+          "id": "AUD-003",
+          "name": "소니 XLR-H1"
+        }
+      ]
+    },
+    {
+      "name": "소니 CF-B 960",
+      "count": 3,
+      "candidates": [
+        {
+          "id": "AUD-001",
+          "name": "소니 ECM-XM1"
+        },
+        {
+          "id": "AUD-002",
+          "name": "소니 XLR-K3M"
+        },
+        {
+          "id": "AUD-003",
+          "name": "소니 XLR-H1"
+        }
+      ]
+    },
+    {
+      "name": "셔틀러 비디오 20",
+      "count": 3,
+      "candidates": [
+        {
+          "id": "TRP-001",
+          "name": "셔틀러 비디오20 II (100볼)"
+        },
+        {
+          "id": "LNS-014",
+          "name": "시그마 FF 하이스피드 프라임(20/35/50/85)"
+        }
+      ]
+    },
+    {
+      "name": "75볼 트라이",
+      "count": 3,
+      "candidates": [
+        {
+          "id": "TRP-004",
+          "name": "셔틀러에이스 M (75볼)"
+        },
+        {
+          "id": "TRP-005",
+          "name": "캠기어 마크4 (75볼)"
+        },
+        {
+          "id": "TRP-006",
+          "name": "스몰리그 (75볼)"
+        }
+      ]
+    },
+    {
+      "name": "롱 SDI or HDMI",
+      "count": 3,
+      "candidates": [
+        {
+          "id": "CBL-003",
+          "name": "SDI 연선"
+        },
+        {
+          "id": "CBL-004",
+          "name": "HDMI 대"
+        },
+        {
+          "id": "CBL-005",
+          "name": "HDMI 중"
+        }
+      ]
+    },
+    {
+      "name": "D탭 / SDI or HDMI *1",
+      "count": 3,
+      "candidates": [
+        {
+          "id": "CBL-003",
+          "name": "SDI 연선"
+        },
+        {
+          "id": "CBL-004",
+          "name": "HDMI 대"
+        },
+        {
+          "id": "CBL-005",
+          "name": "HDMI 중"
+        }
+      ]
+    },
+    {
+      "name": "D탭*1 / SDI or HDMI*1 / 안테나*2",
+      "count": 2,
+      "candidates": [
+        {
+          "id": "CBL-003",
+          "name": "SDI 연선"
+        }
+      ]
+    },
+    {
+      "name": "헤드 / 반도어 / 보웬스 어댑터 / D탭 / AC 라인",
+      "count": 2,
+      "candidates": [
+        {
+          "id": "LGT-041",
+          "name": "300용 반도어"
+        },
+        {
+          "id": "LGT-042",
+          "name": "반도어 크리에이트"
+        }
+      ]
+    },
+    {
+      "name": "매직캠*1 / 슈퍼클램프*1",
+      "count": 2,
+      "candidates": [
+        {
+          "id": "ETC-019",
+          "name": "슈퍼클램프"
+        }
+      ]
+    },
+    {
+      "name": "USB 케이블",
+      "count": 2,
+      "candidates": [
+        {
+          "id": "RDR-004",
+          "name": "FX9 XQD/SD/USB 리더기 비정품"
+        },
+        {
+          "id": "CBL-001",
+          "name": "TV로직 D탭 케이블"
+        },
+        {
+          "id": "CBL-006",
+          "name": "HDMI V2.0 케이블"
+        }
+      ]
+    },
+    {
+      "name": "D탭*2 / SDI or HDMI*2 / 숏암*2",
+      "count": 2,
+      "candidates": [
+        {
+          "id": "CBL-003",
+          "name": "SDI 연선"
+        }
+      ]
+    },
+    {
+      "name": "BMPCC 6K PRO 바디(케이지)",
+      "count": 2,
+      "candidates": [
+        {
+          "id": "CAM-011",
+          "name": "BMPCC 6K"
+        },
+        {
+          "id": "CAM-012",
+          "name": "BMPCC 6K PRO"
+        },
+        {
+          "id": "CAM-010",
+          "name": "레드 코모도 6K 바디(케이지)"
+        }
+      ]
+    },
+    {
+      "name": "콤보스탠드",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "LGT-045",
+          "name": "미니 콤보스탠드(어벤져 A1010CS)"
+        }
+      ]
+    },
+    {
+      "name": "매직암 11인치",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "ETC-015",
+          "name": "매직암(소)"
+        },
+        {
+          "id": "ETC-016",
+          "name": "매직암(중)"
+        }
+      ]
+    },
+    {
+      "name": "소니 A1 바디",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "CAM-001",
+          "name": "소니 FX3 바디(케이지)"
+        },
+        {
+          "id": "CAM-002",
+          "name": "소니 FX6 바디(케이지)"
+        },
+        {
+          "id": "CAM-003",
+          "name": "소니 FX9 바디(케이지)"
+        }
+      ]
+    },
+    {
+      "name": "소니 GM 50mm F1.2",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "LNS-006",
+          "name": "소니 GM 100-400mm"
+        },
+        {
+          "id": "LNS-002",
+          "name": "소니 GM 24-70mm"
+        },
+        {
+          "id": "LNS-001",
+          "name": "소니 GM 16-35mm"
+        }
+      ]
+    },
+    {
+      "name": "소니 XQD 256",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "MEM-006",
+          "name": "AV PRO CF 256"
+        },
+        {
+          "id": "RDR-003",
+          "name": "소니 XQD 리더기"
+        },
+        {
+          "id": "MEM-004",
+          "name": "소니 XQD 120"
+        }
+      ]
+    },
+    {
+      "name": "소니 XQD 128",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "MEM-002",
+          "name": "소니 CF-A 128"
+        },
+        {
+          "id": "RDR-003",
+          "name": "소니 XQD 리더기"
+        },
+        {
+          "id": "MEM-004",
+          "name": "소니 XQD 120"
+        }
+      ]
+    },
+    {
+      "name": "비디오 헤드 / 75볼 트라이*2 / 970배터리*2",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "TRP-006",
+          "name": "스몰리그 (75볼)"
+        },
+        {
+          "id": "TRP-004",
+          "name": "셔틀러에이스 M (75볼)"
+        },
+        {
+          "id": "TRP-005",
+          "name": "캠기어 마크4 (75볼)"
+        }
+      ]
+    },
+    {
+      "name": "AV PRO CF 리더기",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "MEM-006",
+          "name": "AV PRO CF 256"
+        },
+        {
+          "id": "MEM-007",
+          "name": "AV PRO CF 512"
+        }
+      ]
+    },
+    {
+      "name": "티비로직 D탭 / SDI or HDMI *1",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "MON-008",
+          "name": "티비로직 LVM-075A"
+        },
+        {
+          "id": "MON-004",
+          "name": "티비로직 VFM-055A"
+        },
+        {
+          "id": "MON-007",
+          "name": "티비로직 F-7HS"
+        }
+      ]
+    },
+    {
+      "name": "모터 / 컨트롤러 / D탭 / 배터리*4 / 충전기",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "BAT-006",
+          "name": "오막포 충전기"
+        },
+        {
+          "id": "BAT-008",
+          "name": "970 충전기 (전체)"
+        },
+        {
+          "id": "BAT-012",
+          "name": "NP-FZ100 충전기"
+        }
+      ]
+    },
+    {
+      "name": "배터리*12 / 충전기",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "BAT-002",
+          "name": "V마운트 배터리 충전기"
+        },
+        {
+          "id": "BAT-004",
+          "name": "캠코더 충전기 NP-FV100"
+        },
+        {
+          "id": "BAT-006",
+          "name": "오막포 충전기"
+        }
+      ]
+    },
+    {
+      "name": "배터리*5 / 충전기",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "BAT-002",
+          "name": "V마운트 배터리 충전기"
+        },
+        {
+          "id": "BAT-004",
+          "name": "캠코더 충전기 NP-FV100"
+        },
+        {
+          "id": "BAT-006",
+          "name": "오막포 충전기"
+        }
+      ]
+    },
+    {
+      "name": "970더미*2 / SDI or HDMI*2 / 숏암*2",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "CBL-003",
+          "name": "SDI 연선"
+        }
+      ]
+    },
+    {
+      "name": "67 / 72 / 77 / 82 업링",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "FLT-021",
+          "name": "업링 72-86mm"
+        },
+        {
+          "id": "FLT-022",
+          "name": "업링 77-86mm"
+        },
+        {
+          "id": "FLT-023",
+          "name": "업링 82-86mm"
+        }
+      ]
+    },
+    {
+      "name": "캐논 배터리 충전기",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "BAT-002",
+          "name": "V마운트 배터리 충전기"
+        },
+        {
+          "id": "CAM-007",
+          "name": "캐논 오막포"
+        },
+        {
+          "id": "LNS-026",
+          "name": "캐논 24-70mm"
+        }
+      ]
+    },
+    {
+      "name": "D탭",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "CBL-001",
+          "name": "TV로직 D탭 케이블"
+        },
+        {
+          "id": "CBL-008",
+          "name": "코모도 전용 D탭"
+        }
+      ]
+    },
+    {
+      "name": "SD 리더기",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "RDR-001",
+          "name": "소니 CFA/SD 리더기"
+        },
+        {
+          "id": "RDR-002",
+          "name": "FX9 XQD/SD 리더기"
+        },
+        {
+          "id": "RDR-004",
+          "name": "FX9 XQD/SD/USB 리더기 비정품"
+        }
+      ]
+    },
+    {
+      "name": "C to HDMI*1 / 100볼 트라이",
+      "count": 1,
+      "candidates": [
+        {
+          "id": "TRP-002",
+          "name": "캠기어 엘리트15 (100볼)"
+        },
+        {
+          "id": "TRP-003",
+          "name": "서튼비디오 V-15 (100볼)"
+        },
+        {
+          "id": "TRP-001",
+          "name": "셔틀러 비디오20 II (100볼)"
+        }
+      ]
+    },
+    {
+      "name": "매트박스",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "MTB-004",
+          "name": "스몰리그 매트박스 미니"
+        }
+      ]
+    },
+    {
+      "name": "7인치 모니터",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "MON-005",
+          "name": "포트키 7인치"
+        },
+        {
+          "id": "MON-001",
+          "name": "5인치 모니터 BM5"
+        },
+        {
+          "id": "MON-002",
+          "name": "5인치 모니터 FEELWORLD 4K"
+        }
+      ]
+    },
+    {
+      "name": "5인치 모니터",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "MON-001",
+          "name": "5인치 모니터 BM5"
+        },
+        {
+          "id": "MON-002",
+          "name": "5인치 모니터 FEELWORLD 4K"
+        },
+        {
+          "id": "MON-003",
+          "name": "5인치 모니터 BON FM055F"
+        }
+      ]
+    },
+    {
+      "name": "마이크로SD / 배터리*3  / 충전기",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "BAT-006",
+          "name": "오막포 충전기"
+        },
+        {
+          "id": "BAT-008",
+          "name": "970 충전기 (전체)"
+        },
+        {
+          "id": "BAT-012",
+          "name": "NP-FZ100 충전기"
+        }
+      ]
+    },
+    {
+      "name": "캐논 백사투 렌즈",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "CAM-007",
+          "name": "캐논 오막포"
+        },
+        {
+          "id": "LNS-026",
+          "name": "캐논 24-70mm"
+        },
+        {
+          "id": "LNS-028",
+          "name": "캐논 100-500mm"
+        }
+      ]
+    },
+    {
+      "name": "캐논 100-500 렌즈",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "CAM-007",
+          "name": "캐논 오막포"
+        },
+        {
+          "id": "LNS-026",
+          "name": "캐논 24-70mm"
+        },
+        {
+          "id": "LNS-028",
+          "name": "캐논 100-500mm"
+        }
+      ]
+    },
+    {
+      "name": "배터리*8 / 충전기",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "BAT-002",
+          "name": "V마운트 배터리 충전기"
+        },
+        {
+          "id": "BAT-004",
+          "name": "캠코더 충전기 NP-FV100"
+        },
+        {
+          "id": "BAT-006",
+          "name": "오막포 충전기"
+        }
+      ]
+    },
+    {
+      "name": "충전기",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "BAT-002",
+          "name": "V마운트 배터리 충전기"
+        },
+        {
+          "id": "BAT-004",
+          "name": "캠코더 충전기 NP-FV100"
+        },
+        {
+          "id": "BAT-006",
+          "name": "오막포 충전기"
+        }
+      ]
+    },
+    {
+      "name": "무전기*2 / 이어폰*2 / 충전기*2",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "AUD-015",
+          "name": "이어폰"
+        }
+      ]
+    },
+    {
+      "name": "파워박스 / 듀얼그립 or 링그립",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "GBL-004",
+          "name": "로닌 링그립"
+        }
+      ]
+    },
+    {
+      "name": "17인치 모니터",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "MON-015",
+          "name": "BON 17인치"
+        },
+        {
+          "id": "MON-016",
+          "name": "SEETEC 17인치"
+        },
+        {
+          "id": "MON-001",
+          "name": "5인치 모니터 BM5"
+        }
+      ]
+    },
+    {
+      "name": "무선 송수신기",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "AUD-009",
+          "name": "소니 UWP-D21 세트(송수신기)"
+        }
+      ]
+    },
+    {
+      "name": "D탭*3 / SDI or HDMI*3 / 안테나*6 / 숏암*3",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "CBL-003",
+          "name": "SDI 연선"
+        }
+      ]
+    },
+    {
+      "name": "D탭*2 / SDI or HDMI*2 / 안테나*6",
+      "count": 0,
+      "candidates": [
+        {
+          "id": "CBL-003",
+          "name": "SDI 연선"
+        }
+      ]
+    }
+  ],
+  "add": [
+    {
+      "name": "헤드 / 발라스터 / 클램프 / 라인*2",
+      "count": 16
+    },
+    {
+      "name": "배터리그립 / 플레이트*2",
+      "count": 11
+    },
+    {
+      "name": "패널 / 발라스터 / 연장라인 / AC라인 / 프레임대",
+      "count": 6
+    },
+    {
+      "name": "루버 / 실크1 / 실크2",
+      "count": 6
+    },
+    {
+      "name": "AC라인",
+      "count": 5
+    },
+    {
+      "name": "헤드 / 리플렉터 / 디퓨져 / AC 라인",
+      "count": 4
+    },
+    {
+      "name": "아이리스 / 고보 *3",
+      "count": 3
+    },
+    {
+      "name": "메모리*1 / 배터리*2 / 앞캡 / 후드",
+      "count": 3
+    },
+    {
+      "name": "패널 / 발라스터 / 연장라인 / AC라인",
+      "count": 3
+    },
+    {
+      "name": "루버 / 실크",
+      "count": 3
+    },
+    {
+      "name": "마이크*2 / 마이크 송신기",
+      "count": 3
+    },
+    {
+      "name": "블림프 / 붐폴 / XLR / 데드캣",
+      "count": 3
+    },
+    {
+      "name": "TX *1 / RX*2 / 3.5 라인*1",
+      "count": 2
+    },
+    {
+      "name": "전용케이스",
+      "count": 2
+    },
+    {
+      "name": "본체 / 마이크로SD / 여분 배터리*1",
+      "count": 2
+    },
+    {
+      "name": "탐론 28-75mm G2",
+      "count": 1
+    },
+    {
+      "name": "중계선 20m",
+      "count": 1
+    },
+    {
+      "name": "헤드 / 발라스터 / 라인*2",
+      "count": 1
+    },
+    {
+      "name": "아이리스 / 고보 *2",
+      "count": 1
+    },
+    {
+      "name": "릴선",
+      "count": 1
+    },
+    {
+      "name": "메모리*1 / 배터리*2 / 앞캡 / 렌즈 후드",
+      "count": 1
+    },
+    {
+      "name": "고보 / 실크 / 싱글 / 더블 / 우드락",
+      "count": 1
+    },
+    {
+      "name": "폴리",
+      "count": 1
+    },
+    {
+      "name": "석션컵 브라켓(롱숏) / 파워서플라이 플레이트",
+      "count": 1
+    },
+    {
+      "name": "2핀 LEMO / V프레이트 / 공기주입기",
+      "count": 1
+    },
+    {
+      "name": "소프트박스",
+      "count": 1
+    },
+    {
+      "name": "플로어 스탠드*4 / 아크릴그립*8 / 오링*4",
+      "count": 1
+    },
+    {
+      "name": "D탭*2 / 안테나*7 / SDI*2 / 숏암*2",
+      "count": 1
+    },
+    {
+      "name": "SD카드 32GB",
+      "count": 1
+    },
+    {
+      "name": "메모리*1 / 배터리*2",
+      "count": 1
+    },
+    {
+      "name": "32기가 메모리",
+      "count": 1
+    },
+    {
+      "name": "아이솔레이터 / 브라켓 / 도브테일 / 나토레일",
+      "count": 1
+    },
+    {
+      "name": "뉴클-M",
+      "count": 0
+    },
+    {
+      "name": "메모리 *1 / 배터리*2 / 바디캡",
+      "count": 0
+    },
+    {
+      "name": "메모리*1 / 배터리*2 / 앞캡 / 뒷캡 / 후드",
+      "count": 0
+    },
+    {
+      "name": "셀피 스틱",
+      "count": 0
+    },
+    {
+      "name": "이어셋*5",
+      "count": 0
+    },
+    {
+      "name": "D탭*2 / SDI*2 / 안테나*2 / 숏암*2",
+      "count": 0
+    },
+    {
+      "name": "모터 / 컨트롤러 / C to D탭*1 / 로드 / 클램프 / 기어링",
+      "count": 0
+    },
+    {
+      "name": "기어링 *1",
+      "count": 0
+    },
+    {
+      "name": "모터 / 컨트롤러 / 그립 / 미니로드*2 / 어댑터*1",
+      "count": 0
+    },
+    {
+      "name": "모터 배터리*2 / 컨트롤러 배터리*2",
+      "count": 0
+    },
+    {
+      "name": "D탭*3 / 안테나*12 / SDI*3 / 숏암*3",
+      "count": 0
+    },
+    {
+      "name": "18-35 / 50-100",
+      "count": 0
+    },
+    {
+      "name": "실리콘 디퓨전*2 / 볼헤드*2 / 충전케이스 / 케이블",
+      "count": 0
+    },
+    {
+      "name": "조명기 / 파우치",
+      "count": 0
+    },
+    {
+      "name": "충전 케이스 / 케이블",
+      "count": 0
+    },
+    {
+      "name": "플로어 스탠드*2 / 아크릴 그립*4 / 오링*2",
+      "count": 0
+    },
+    {
+      "name": "충전기*2",
+      "count": 0
+    },
+    {
+      "name": "노바용 소프트박스",
+      "count": 0
+    },
+    {
+      "name": "충전기*4",
+      "count": 0
+    },
+    {
+      "name": "본체 / 케이블*3",
+      "count": 0
+    }
+  ]
+}
