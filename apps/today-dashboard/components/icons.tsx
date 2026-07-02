@@ -54,3 +54,6 @@ export const Chart = ({ className }: P) => (
 export const Clipboard = ({ className }: P) => (
   <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="4" width="14" height="17" rx="2" /><path d="M9 4V3h6v1" /><path d="m8.5 13 2 2 4-4" /></svg>
 );
+export const Archive = ({ className }: P) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8v12a1 1 0 01-1 1H4a1 1 0 01-1-1V8" /><rect x="1" y="3" width="22" height="5" rx="1" /><path d="M10 12h4" /></svg>
+);
