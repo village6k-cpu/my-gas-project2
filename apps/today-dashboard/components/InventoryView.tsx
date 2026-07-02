@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { ViewHeader } from "@/components/ViewHeader";
-import { Check, Refresh, Search } from "@/components/icons";
+import { Check, Pencil, Refresh, Search } from "@/components/icons";
 
 // 재고 — village.equipment_ledger(재고관리대장) 뷰 + 실물 확인(검증) 플로우.
 // 275행 전체 1회 로드(페이지네이션 불필요) → 칩 필터/검색 + 옵티미스틱 업데이트 + equipment_events 이력.
@@ -34,6 +34,9 @@ type LedgerRow = {
 type FilterKey = "all" | "attention" | "unverified" | "verified";
 
 type VerifyDraft = { count: string; issueOn: boolean; issueLabel: string };
+
+// 비고/문제 인라인 편집 초안 — 기존 항목의 tradeId/at 메타는 유지하고 label만 고침
+type IssueEditDraft = { note: string; issues: OpenIssue[] };
 
 const STATUS_LABEL: Record<VerifyStatus, string> = {
   attention: "주의",
@@ -109,8 +112,10 @@ export function InventoryView() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
   // 확인(검증) 인라인 스테퍼 — 한 번에 한 행만 펼침. 같은 장비가 두 섹션에 보여도 누른 쪽만 펼침("섹션:장비ID")
+  // 비고/문제 편집 패널은 "edit:장비ID" — 같은 openKey를 쓰므로 스테퍼와 동시에 열리지 않음
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [draft, setDraft] = useState<VerifyDraft>({ count: "0", issueOn: false, issueLabel: "" });
+  const [editDraft, setEditDraft] = useState<IssueEditDraft>({ note: "", issues: [] });
 
   // 토스트 (뷰 로컬 — 스토어 저장 토스트와 동일 룩)
   const [toast, setToast] = useState<{ id: number; text: string; ok: boolean } | null>(null);
@@ -232,6 +237,70 @@ export function InventoryView() {
       }
     },
     [draft, rows, userEmail, showToast],
+  );
+
+  const openIssueEdit = useCallback((r: LedgerRow) => {
+    setOpenKey(`edit:${r.equipment_id}`);
+    setEditDraft({ note: r.note ?? "", issues: r.open_issues.map((i) => ({ ...i })) });
+  }, []);
+
+  const submitIssueEdit = useCallback(
+    async (row: LedgerRow) => {
+      if (!supabase) return;
+      const nowIso = new Date().toISOString();
+
+      // 빈 항목 제거 + 같은 내용 중복 제거 (기존 항목의 tradeId/at은 유지, 새 항목은 지금 시각)
+      const seen = new Set<string>();
+      const cleaned: OpenIssue[] = [];
+      for (const it of editDraft.issues) {
+        const label = it.label.trim();
+        if (!label || seen.has(label)) continue;
+        seen.add(label);
+        cleaned.push({ label, ...(it.tradeId ? { tradeId: it.tradeId } : {}), at: it.at ?? nowIso });
+      }
+      const note = editDraft.note.trim() || null;
+
+      // 상태 재계산: 문제/정비/비정상 있으면 주의, 없으면 확인 이력 여부로 확인됨/미검증
+      const nextStatus: VerifyStatus =
+        cleaned.length > 0 || row.stock_maint > 0 || row.state !== "정상"
+          ? "attention"
+          : row.last_verified_at
+            ? "verified"
+            : "unverified";
+
+      const before = { note: row.note, open_issues: row.open_issues };
+
+      // 옵티미스틱 반영 + 패널 닫기
+      const prevRows = rows;
+      setRows((prev) =>
+        prev.map((r) =>
+          r.equipment_id === row.equipment_id ? { ...r, note, open_issues: cleaned, verify_status: nextStatus } : r,
+        ),
+      );
+      setOpenKey(null);
+
+      try {
+        const { error } = await supabase
+          .from("equipment_ledger")
+          .update({ note, open_issues: cleaned, verify_status: nextStatus })
+          .eq("equipment_id", row.equipment_id);
+        if (error) throw error;
+        showToast(`수정 완료: ${row.name}`);
+        // 이력은 부가 기록 — 실패해도 원장 반영은 유지 (콘솔에만 남김)
+        const { error: evError } = await supabase.from("equipment_events").insert({
+          equipment_id: row.equipment_id,
+          type: "issue_edited",
+          payload: { before, after: { note, open_issues: cleaned } },
+          actor: userEmail,
+        });
+        if (evError) console.error("[inventory] 이벤트 기록 실패", evError);
+      } catch (e) {
+        console.error("[inventory] 비고/문제 저장 실패", e);
+        setRows(prevRows); // 롤백
+        showToast("저장에 실패했어요 — 다시 시도해주세요", false);
+      }
+    },
+    [editDraft, rows, userEmail, showToast],
   );
 
   return (
@@ -361,17 +430,27 @@ export function InventoryView() {
                                 {r.last_verified_at && <span>{fmtMd(r.last_verified_at)} 확인</span>}
                               </div>
                               {(r.note || issues) && (
-                                <div className="mt-0.5 truncate text-[11.5px]">
-                                  {issues && <span className="font-semibold text-attention-fg">{issues}</span>}
-                                  {issues && r.note && <span className="text-ink-faint"> · </span>}
-                                  {r.note && <span className="text-ink-mute">{r.note}</span>}
-                                </div>
+                                <button
+                                  onClick={() => openIssueEdit(r)}
+                                  className="tap mt-0.5 flex w-full min-w-0 items-center gap-1 text-left"
+                                  title="비고·문제 수정"
+                                >
+                                  <span className="min-w-0 truncate text-[11.5px]">
+                                    {issues && <span className="font-semibold text-attention-fg">{issues}</span>}
+                                    {issues && r.note && <span className="text-ink-faint"> · </span>}
+                                    {r.note && <span className="text-ink-mute">{r.note}</span>}
+                                  </span>
+                                  <Pencil className="h-3 w-3 shrink-0 text-ink-faint" />
+                                </button>
                               )}
                             </div>
                             <VerifyButton onClick={() => openVerify("list", r)} />
                           </div>
                           {openKey === `list:${r.equipment_id}` && (
                             <VerifyPanel row={r} draft={draft} setDraft={setDraft} onCancel={() => setOpenKey(null)} onSubmit={() => submitVerify(r)} />
+                          )}
+                          {openKey === `edit:${r.equipment_id}` && (
+                            <IssueEditPanel draft={editDraft} setDraft={setEditDraft} onCancel={() => setOpenKey(null)} onSubmit={() => submitIssueEdit(r)} />
                           )}
                         </div>
                       );
@@ -498,6 +577,74 @@ function VerifyPanel({
           className="tap min-h-[38px] flex-1 rounded-lg bg-brand-600 px-3.5 text-[13.5px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
         >
           확인 완료
+        </button>
+        <button onClick={onCancel} className="tap min-h-[38px] rounded-lg px-3.5 text-[13.5px] font-bold text-ink-mute ring-1 ring-line/70">
+          취소
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// 비고/문제 편집 패널 — 인라인 펼침. 빈 항목·중복은 저장 시 자동 정리.
+function IssueEditPanel({
+  draft, setDraft, onCancel, onSubmit,
+}: {
+  draft: IssueEditDraft;
+  setDraft: React.Dispatch<React.SetStateAction<IssueEditDraft>>;
+  onCancel: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="animate-pop border-t border-line/60 bg-paper/70 px-3 py-3">
+      <label className="block">
+        <span className="mb-1 block text-[12px] font-bold text-ink-mute">비고</span>
+        <input
+          value={draft.note}
+          onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))}
+          placeholder="비고 없음"
+          className="w-full rounded-lg bg-white px-3 py-2.5 text-[13px] text-ink outline-none ring-1 ring-line/60 placeholder:text-ink-faint"
+        />
+      </label>
+
+      <div className="mt-2.5">
+        <span className="mb-1 block text-[12px] font-bold text-ink-mute">문제 목록</span>
+        {draft.issues.length === 0 ? (
+          <div className="rounded-lg bg-white/60 px-3 py-2 text-[11.5px] text-ink-faint ring-1 ring-line/40">등록된 문제가 없어요</div>
+        ) : (
+          <div className="space-y-1.5">
+            {draft.issues.map((it, i) => (
+              <div key={i} className="flex items-center gap-1.5">
+                <input
+                  value={it.label}
+                  onChange={(e) =>
+                    setDraft((d) => ({ ...d, issues: d.issues.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)) }))
+                  }
+                  placeholder="문제 내용"
+                  className="min-w-0 flex-1 rounded-lg bg-white px-3 py-2.5 text-[13px] text-ink outline-none ring-1 ring-attention-ring placeholder:text-ink-faint"
+                />
+                <button
+                  onClick={() => setDraft((d) => ({ ...d, issues: d.issues.filter((_, j) => j !== i) }))}
+                  className="tap flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-[14px] font-bold text-ink-mute ring-1 ring-line/60"
+                  aria-label="문제 삭제"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <button
+          onClick={() => setDraft((d) => ({ ...d, issues: [...d.issues, { label: "" }] }))}
+          className="tap mt-1.5 rounded-lg bg-white px-2.5 py-1.5 text-[12px] font-bold text-ink-soft ring-1 ring-line/70"
+        >
+          ＋ 문제 추가
+        </button>
+      </div>
+
+      <div className="mt-2.5 flex gap-2">
+        <button onClick={onSubmit} className="tap min-h-[38px] flex-1 rounded-lg bg-brand-600 px-3.5 text-[13.5px] font-bold text-white">
+          저장
         </button>
         <button onClick={onCancel} className="tap min-h-[38px] rounded-lg px-3.5 text-[13.5px] font-bold text-ink-mute ring-1 ring-line/70">
           취소
