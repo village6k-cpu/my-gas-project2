@@ -168,6 +168,12 @@ function handleRequest(e) {
         return jsonResponse(updateCell(uSheet, params.cell || postBody.cell, params.value !== undefined ? params.value : postBody.value));
       }
 
+      case "equipmentMasterSync": {
+        // 재고 원장 앱(equipment_ledger) → 장비마스터 시트 미러링 전용.
+        // 일반 write 화이트리스트와 분리해 필요한 열(D/E/H/I/J)만 갱신, 신규는 append.
+        return jsonResponse(syncEquipmentMaster(postBody.rows || [], postBody.append || []));
+      }
+
       case "search":
         return jsonResponse(searchSheet(
           params.sheet,
@@ -1687,4 +1693,47 @@ function jsonResponse(data, statusCode) {
   const output = ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
   return output;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 장비마스터 미러링 (재고 원장 앱 → 시트)
+// 열: A대분류 B장비ID C카테고리 D장비명 E총보유 F가용 G대여중 H정비중 I상태 J비고 K최근실사 L단가
+// F(가용)/G(대여중)/K(최근실사)는 절대 건드리지 않는다.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function syncEquipmentMaster(rows, newRows) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("장비마스터");
+  if (!sheet) return { error: "장비마스터 시트 없음" };
+  var last = sheet.getLastRow();
+  var ids = last > 1 ? sheet.getRange(2, 2, last - 1, 1).getValues() : [];
+  var rowById = {};
+  for (var i = 0; i < ids.length; i++) {
+    var id = String(ids[i][0] || "").trim();
+    if (id && !rowById[id]) rowById[id] = i + 2;
+  }
+  var updated = 0, appended = 0, skipped = [];
+  (rows || []).forEach(function (r) {
+    var rowNum = rowById[String(r.id || "").trim()];
+    if (!rowNum) { skipped.push(r.id || "(no id)"); return; }
+    if (r.name != null)  sheet.getRange(rowNum, 4).setValue(r.name);
+    if (r.total != null) sheet.getRange(rowNum, 5).setValue(r.total);
+    if (r.maint != null) sheet.getRange(rowNum, 8).setValue(r.maint);
+    if (r.state != null) sheet.getRange(rowNum, 9).setValue(r.state);
+    if (r.note !== undefined) sheet.getRange(rowNum, 10).setValue(r.note || "");
+    updated++;
+  });
+  (newRows || []).forEach(function (r) {
+    var idNew = String(r.id || "").trim();
+    if (!idNew || rowById[idNew]) { skipped.push(idNew || "(no id)"); return; }
+    var target = sheet.getLastRow() + 1;
+    sheet.getRange(target, 1, 1, 12).setValues([[
+      r.major || "", idNew, r.category || "", r.name || "",
+      r.total != null ? r.total : "", "", "",
+      r.maint != null ? r.maint : 0,
+      r.state || "정상", r.note || "", "", r.price != null ? r.price : ""
+    ]]);
+    rowById[idNew] = target;
+    appended++;
+  });
+  return { success: true, updated: updated, appended: appended, skipped: skipped };
 }

@@ -38,6 +38,23 @@ type VerifyDraft = { count: string; issueOn: boolean; issueLabel: string };
 // 비고/문제 인라인 편집 초안 — 기존 항목의 tradeId/at 메타는 유지하고 label만 고침
 type IssueEditDraft = { note: string; issues: OpenIssue[] };
 
+// 장비 추가 초안 — 대분류는 카테고리 선택 시 자동 추천(직접 고르면 그대로 유지)
+type AddDraft = {
+  name: string;
+  category: string;
+  majorSel: string; // 기존 대분류 값 또는 "__custom__"(직접 입력)
+  majorCustom: string;
+  majorTouched: boolean;
+  count: string;
+  price: string;
+  note: string;
+};
+
+const EMPTY_ADD_DRAFT: AddDraft = { name: "", category: "", majorSel: "", majorCustom: "", majorTouched: false, count: "1", price: "", note: "" };
+
+// 보관 처리(소프트 삭제) — 스키마 변경 없이 state 컬럼 재사용
+const ARCHIVED_STATE = "보관종료";
+
 const STATUS_LABEL: Record<VerifyStatus, string> = {
   attention: "주의",
   unverified: "미검증",
@@ -94,6 +111,42 @@ function fmtMd(iso: string | null): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
+// 장비ID 자동 생성 — 접두어는 같은 카테고리에서 가장 흔한 것(없으면 ETC),
+// 순번은 보관 포함 전체 행에서 해당 접두어 최대 숫자 + 1 (3자리 0패딩)
+function idPrefixOf(equipmentId: string): string | null {
+  const m = equipmentId.match(/^([A-Za-z]+)-/);
+  return m ? m[1] : null;
+}
+function genEquipmentId(rows: LedgerRow[], category: string): string {
+  const prefixCounts = new Map<string, number>();
+  for (const r of rows) {
+    if ((r.category ?? "") !== category) continue;
+    const p = idPrefixOf(r.equipment_id);
+    if (!p) continue;
+    prefixCounts.set(p, (prefixCounts.get(p) ?? 0) + 1);
+  }
+  let prefix = "ETC";
+  let best = 0;
+  for (const [p, c] of prefixCounts) {
+    if (c > best) {
+      best = c;
+      prefix = p;
+    }
+  }
+  let maxSeq = 0;
+  const re = new RegExp(`^${prefix}-(\\d+)$`);
+  for (const r of rows) {
+    const m = r.equipment_id.match(re);
+    if (m) maxSeq = Math.max(maxSeq, Number(m[1]));
+  }
+  return `${prefix}-${String(maxSeq + 1).padStart(3, "0")}`;
+}
+function bumpEquipmentId(id: string): string {
+  const m = id.match(/^(.*)-(\d+)$/);
+  if (!m) return `${id}-001`;
+  return `${m[1]}-${String(Number(m[2]) + 1).padStart(Math.max(m[2].length, 3), "0")}`;
+}
+
 // 오늘 확인할 장비 우선순위: 주의(단가 높은 순) → 미검증(단가 높은 순) → 확인됨(확인이 오래된 순 = 롤링 재점검)
 const byPriceDesc = (a: LedgerRow, b: LedgerRow) => (b.price ?? -1) - (a.price ?? -1);
 const byOldestVerified = (a: LedgerRow, b: LedgerRow) => (a.last_verified_at ?? "").localeCompare(b.last_verified_at ?? "");
@@ -116,6 +169,11 @@ export function InventoryView() {
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [draft, setDraft] = useState<VerifyDraft>({ count: "0", issueOn: false, issueLabel: "" });
   const [editDraft, setEditDraft] = useState<IssueEditDraft>({ note: "", issues: [] });
+
+  // 장비 추가 패널 + 보관 목록 토글
+  const [addOpen, setAddOpen] = useState(false);
+  const [addDraft, setAddDraft] = useState<AddDraft>(EMPTY_ADD_DRAFT);
+  const [showArchived, setShowArchived] = useState(false);
 
   // 토스트 (뷰 로컬 — 스토어 저장 토스트와 동일 룩)
   const [toast, setToast] = useState<{ id: number; text: string; ok: boolean } | null>(null);
@@ -148,22 +206,26 @@ export function InventoryView() {
     supabase?.auth.getSession().then(({ data }) => setUserEmail(data.session?.user?.email ?? null)).catch(() => {});
   }, [load]);
 
+  // 보관종료 행은 모든 목록/칩/검증률/오늘 확인에서 제외 — 하단 "보관됨 보기"에서만 노출
+  const activeRows = useMemo(() => rows.filter((r) => r.state !== ARCHIVED_STATE), [rows]);
+  const archivedRows = useMemo(() => rows.filter((r) => r.state === ARCHIVED_STATE), [rows]);
+
   const counts = useMemo(
     () => ({
-      all: rows.length,
-      attention: rows.filter((r) => r.verify_status === "attention").length,
-      unverified: rows.filter((r) => r.verify_status === "unverified").length,
-      verified: rows.filter((r) => r.verify_status === "verified").length,
+      all: activeRows.length,
+      attention: activeRows.filter((r) => r.verify_status === "attention").length,
+      unverified: activeRows.filter((r) => r.verify_status === "unverified").length,
+      verified: activeRows.filter((r) => r.verify_status === "verified").length,
     }),
-    [rows],
+    [activeRows],
   );
   const verifiedPct = counts.all ? Math.round((counts.verified / counts.all) * 100) : 0;
 
-  const picks = useMemo(() => todayPicks(rows), [rows]);
+  const picks = useMemo(() => todayPicks(activeRows), [activeRows]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return rows.filter((r) => {
+    return activeRows.filter((r) => {
       if (filter !== "all" && r.verify_status !== filter) return false;
       if (!needle) return true;
       return (
@@ -172,7 +234,36 @@ export function InventoryView() {
         r.aliases.some((a) => a.toLowerCase().includes(needle))
       );
     });
-  }, [rows, filter, q]);
+  }, [activeRows, filter, q]);
+
+  // 장비 추가 폼 보조 데이터 — 카테고리/대분류 후보 + 카테고리별 최다 대분류 추천
+  const categories = useMemo(
+    () => Array.from(new Set(activeRows.map((r) => (r.category ?? "").trim()).filter(Boolean))).sort(),
+    [activeRows],
+  );
+  const majors = useMemo(
+    () => Array.from(new Set(activeRows.map((r) => (r.major ?? "").trim()).filter(Boolean))).sort(),
+    [activeRows],
+  );
+  const suggestMajor = useCallback(
+    (category: string): string => {
+      const tally = new Map<string, number>();
+      for (const r of activeRows) {
+        if ((r.category ?? "").trim() !== category.trim() || !r.major) continue;
+        tally.set(r.major, (tally.get(r.major) ?? 0) + 1);
+      }
+      let major = "";
+      let best = 0;
+      for (const [m, c] of tally) {
+        if (c > best) {
+          best = c;
+          major = m;
+        }
+      }
+      return major;
+    },
+    [activeRows],
+  );
 
   const openVerify = useCallback((section: string, r: LedgerRow) => {
     setOpenKey(`${section}:${r.equipment_id}`);
@@ -303,6 +394,167 @@ export function InventoryView() {
     [editDraft, rows, userEmail, showToast],
   );
 
+  const submitAdd = useCallback(async () => {
+    if (!supabase) return;
+    const name = addDraft.name.trim();
+    if (!name) {
+      showToast("장비명을 입력해주세요", false);
+      return;
+    }
+    const count = Number(addDraft.count);
+    if (!Number.isInteger(count) || count < 0 || addDraft.count.trim() === "") {
+      showToast("보유수량을 숫자로 입력해주세요", false);
+      return;
+    }
+    const price = addDraft.price.trim() ? Number(addDraft.price) : null;
+    if (price != null && (!Number.isInteger(price) || price < 0)) {
+      showToast("단가를 숫자로 입력해주세요", false);
+      return;
+    }
+    const category = addDraft.category.trim() || null;
+    const major = (addDraft.majorSel === "__custom__" ? addDraft.majorCustom : addDraft.majorSel).trim() || null;
+    const note = addDraft.note.trim() || null;
+    const nowIso = new Date().toISOString();
+
+    const firstId = genEquipmentId(rows, category ?? "");
+    const newRow: LedgerRow = {
+      equipment_id: firstId,
+      major,
+      category,
+      name,
+      aliases: [],
+      stock_total: count,
+      stock_maint: 0,
+      price,
+      state: "정상",
+      note,
+      verify_status: "verified", // 등록하는 사람이 실물을 보고 있음
+      last_verified_at: nowIso,
+      last_verified_by: userEmail,
+      last_activity_at: null,
+      open_issues: [],
+    };
+
+    // 옵티미스틱 추가 + 패널 닫기
+    const prevRows = rows;
+    setRows((prev) => [...prev, newRow].sort((a, b) => a.equipment_id.localeCompare(b.equipment_id)));
+    setAddOpen(false);
+
+    try {
+      // ID 충돌(23505) 시 순번 올려 최대 3회 시도
+      let equipmentId = firstId;
+      let inserted = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const { error } = await supabase.from("equipment_ledger").insert({
+          equipment_id: equipmentId,
+          major,
+          category,
+          name,
+          aliases: [],
+          stock_total: count,
+          stock_maint: 0,
+          price,
+          state: "정상",
+          note,
+          verify_status: "verified",
+          last_verified_at: nowIso,
+          last_verified_by: userEmail,
+          open_issues: [],
+          source: "app",
+        });
+        if (!error) {
+          inserted = true;
+          break;
+        }
+        if ((error as { code?: string }).code === "23505") {
+          equipmentId = bumpEquipmentId(equipmentId);
+          continue;
+        }
+        throw error;
+      }
+      if (!inserted) throw new Error("장비ID 중복으로 등록하지 못했습니다");
+      // 재시도로 ID가 바뀌었으면 화면에도 반영
+      if (equipmentId !== firstId) {
+        setRows((prev) =>
+          prev
+            .map((r) => (r === newRow || r.equipment_id === firstId ? { ...r, equipment_id: equipmentId } : r))
+            .sort((a, b) => a.equipment_id.localeCompare(b.equipment_id)),
+        );
+      }
+      showToast(`등록 완료: ${name} (${equipmentId})`);
+      setAddDraft(EMPTY_ADD_DRAFT);
+      // 이력은 부가 기록 — 실패해도 원장 반영은 유지 (콘솔에만 남김)
+      const { error: evError } = await supabase.from("equipment_events").insert({
+        equipment_id: equipmentId,
+        type: "created",
+        payload: { name, stock_total: count },
+        actor: userEmail,
+      });
+      if (evError) console.error("[inventory] 이벤트 기록 실패", evError);
+    } catch (e) {
+      console.error("[inventory] 장비 등록 실패", e);
+      setRows(prevRows); // 롤백
+      setAddOpen(true); // 입력값 보존한 채 다시 열기
+      showToast("등록에 실패했어요 — 다시 시도해주세요", false);
+    }
+  }, [addDraft, rows, userEmail, showToast]);
+
+  const archiveRow = useCallback(
+    async (row: LedgerRow) => {
+      if (!supabase) return;
+      const prevRows = rows;
+      setRows((prev) => prev.map((r) => (r.equipment_id === row.equipment_id ? { ...r, state: ARCHIVED_STATE } : r)));
+      setOpenKey(null);
+      try {
+        const { error } = await supabase.from("equipment_ledger").update({ state: ARCHIVED_STATE }).eq("equipment_id", row.equipment_id);
+        if (error) throw error;
+        showToast(`보관 처리 완료: ${row.name}`);
+        const { error: evError } = await supabase.from("equipment_events").insert({
+          equipment_id: row.equipment_id,
+          type: "archived",
+          payload: { name: row.name, before_state: row.state },
+          actor: userEmail,
+        });
+        if (evError) console.error("[inventory] 이벤트 기록 실패", evError);
+      } catch (e) {
+        console.error("[inventory] 보관 처리 실패", e);
+        setRows(prevRows); // 롤백
+        showToast("보관 처리에 실패했어요 — 다시 시도해주세요", false);
+      }
+    },
+    [rows, userEmail, showToast],
+  );
+
+  const restoreRow = useCallback(
+    async (row: LedgerRow) => {
+      if (!supabase) return;
+      const prevRows = rows;
+      setRows((prev) =>
+        prev.map((r) => (r.equipment_id === row.equipment_id ? { ...r, state: "정상", verify_status: "unverified" } : r)),
+      );
+      try {
+        const { error } = await supabase
+          .from("equipment_ledger")
+          .update({ state: "정상", verify_status: "unverified" })
+          .eq("equipment_id", row.equipment_id);
+        if (error) throw error;
+        showToast(`복원 완료: ${row.name}`);
+        const { error: evError } = await supabase.from("equipment_events").insert({
+          equipment_id: row.equipment_id,
+          type: "restored",
+          payload: { name: row.name },
+          actor: userEmail,
+        });
+        if (evError) console.error("[inventory] 이벤트 기록 실패", evError);
+      } catch (e) {
+        console.error("[inventory] 복원 실패", e);
+        setRows(prevRows); // 롤백
+        showToast("복원에 실패했어요 — 다시 시도해주세요", false);
+      }
+    },
+    [rows, userEmail, showToast],
+  );
+
   return (
     <div className="flex min-h-screen flex-col bg-paper">
       <header className="safe-top sticky top-0 z-40 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
@@ -325,6 +577,18 @@ export function InventoryView() {
               <FilterChip label="주의" count={counts.attention} tone="attention" active={filter === "attention"} onClick={() => setFilter("attention")} />
               <FilterChip label="미검증" count={counts.unverified} tone="mute" active={filter === "unverified"} onClick={() => setFilter("unverified")} />
               <FilterChip label="확인됨" count={counts.verified} tone="ok" active={filter === "verified"} onClick={() => setFilter("verified")} />
+              <button
+                onClick={() => {
+                  setAddOpen((v) => !v);
+                  setOpenKey(null);
+                  if (!addOpen) setAddDraft(EMPTY_ADD_DRAFT);
+                }}
+                className={`tap rounded-full px-2.5 py-1.5 text-[12px] font-bold ring-1 ${
+                  addOpen ? "bg-brand-50 text-brand-700 ring-brand-200" : "bg-white text-brand-700 ring-line/60"
+                }`}
+              >
+                ＋ 장비 추가
+              </button>
             </div>
 
             {/* 검증률 진행바 */}
@@ -367,6 +631,19 @@ export function InventoryView() {
 
         {phase === "ready" && (
           <>
+            {/* 장비 추가 패널 */}
+            {addOpen && (
+              <AddPanel
+                draft={addDraft}
+                setDraft={setAddDraft}
+                categories={categories}
+                majors={majors}
+                suggestMajor={suggestMajor}
+                onCancel={() => setAddOpen(false)}
+                onSubmit={submitAdd}
+              />
+            )}
+
             {/* 오늘 확인할 장비 — 우선순위 10개 */}
             {filter === "all" && !q.trim() && picks.length > 0 && (
               <section>
@@ -450,7 +727,13 @@ export function InventoryView() {
                             <VerifyPanel row={r} draft={draft} setDraft={setDraft} onCancel={() => setOpenKey(null)} onSubmit={() => submitVerify(r)} />
                           )}
                           {openKey === `edit:${r.equipment_id}` && (
-                            <IssueEditPanel draft={editDraft} setDraft={setEditDraft} onCancel={() => setOpenKey(null)} onSubmit={() => submitIssueEdit(r)} />
+                            <IssueEditPanel
+                              draft={editDraft}
+                              setDraft={setEditDraft}
+                              onCancel={() => setOpenKey(null)}
+                              onSubmit={() => submitIssueEdit(r)}
+                              onArchive={() => archiveRow(r)}
+                            />
                           )}
                         </div>
                       );
@@ -458,6 +741,40 @@ export function InventoryView() {
                   </div>
                 )}
               </div>
+
+              {/* 보관된 장비 — 목록/칩/검증률에서 제외, 여기서만 확인·복원 */}
+              {archivedRows.length > 0 && (
+                <div className="mt-2.5 px-1">
+                  <button onClick={() => setShowArchived((v) => !v)} className="tap text-[12px] font-semibold text-ink-faint">
+                    {showArchived ? "보관됨 숨기기" : `보관됨 ${archivedRows.length}개 보기`}
+                  </button>
+                  {showArchived && (
+                    <div className="mt-2 overflow-hidden rounded-xl bg-white/70 ring-1 ring-line/60">
+                      <div className="divide-y divide-line/50">
+                        {archivedRows.map((r) => (
+                          <div key={r.equipment_id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2.5 px-3 py-2.5">
+                            <div className="min-w-0">
+                              <div className="flex min-w-0 items-baseline gap-1.5">
+                                <span className="truncate text-[13.5px] font-bold text-ink-mute">{r.name}</span>
+                                <span className="shrink-0 text-[11px] font-semibold text-ink-faint">{r.equipment_id}</span>
+                              </div>
+                              <div className="mt-0.5 truncate text-[11.5px] text-ink-faint">
+                                보관종료{r.note ? ` · ${r.note}` : ""}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => restoreRow(r)}
+                              className="tap min-h-[32px] shrink-0 rounded-lg bg-white px-3 text-[12.5px] font-bold text-ink-soft ring-1 ring-line/70"
+                            >
+                              복원
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </section>
           </>
         )}
@@ -586,15 +903,17 @@ function VerifyPanel({
   );
 }
 
-// 비고/문제 편집 패널 — 인라인 펼침. 빈 항목·중복은 저장 시 자동 정리.
+// 비고/문제 편집 패널 — 인라인 펼침. 빈 항목·중복은 저장 시 자동 정리. 하단에 보관 처리(2단계 확인).
 function IssueEditPanel({
-  draft, setDraft, onCancel, onSubmit,
+  draft, setDraft, onCancel, onSubmit, onArchive,
 }: {
   draft: IssueEditDraft;
   setDraft: React.Dispatch<React.SetStateAction<IssueEditDraft>>;
   onCancel: () => void;
   onSubmit: () => void;
+  onArchive: () => void;
 }) {
+  const [confirmArchive, setConfirmArchive] = useState(false);
   return (
     <div className="animate-pop border-t border-line/60 bg-paper/70 px-3 py-3">
       <label className="block">
@@ -650,6 +969,166 @@ function IssueEditPanel({
           취소
         </button>
       </div>
+
+      {/* 보관 처리 — 소프트 삭제 (2단계 확인) */}
+      <div className="mt-3 border-t border-line/50 pt-2.5">
+        {!confirmArchive ? (
+          <button onClick={() => setConfirmArchive(true)} className="tap text-[12px] font-bold text-attention-fg">
+            이 장비 보관 처리
+          </button>
+        ) : (
+          <div className="rounded-lg bg-attention-bg px-3 py-2.5 ring-1 ring-attention-ring">
+            <div className="text-[12px] font-bold text-attention-fg">보관 처리하면 목록에서 숨겨져요. 기록은 남습니다.</div>
+            <div className="mt-2 flex gap-2">
+              <button onClick={onArchive} className="tap min-h-[32px] rounded-lg bg-attention-fg px-3 text-[12.5px] font-bold text-white">
+                보관 처리
+              </button>
+              <button
+                onClick={() => setConfirmArchive(false)}
+                className="tap min-h-[32px] rounded-lg bg-white px-3 text-[12.5px] font-bold text-ink-mute ring-1 ring-line/60"
+              >
+                취소
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
+  );
+}
+
+// 장비 추가 패널 — 카테고리는 기존 값 자동완성, 대분류는 카테고리 최다값 자동 추천(직접 입력 가능).
+function AddPanel({
+  draft, setDraft, categories, majors, suggestMajor, onCancel, onSubmit,
+}: {
+  draft: AddDraft;
+  setDraft: React.Dispatch<React.SetStateAction<AddDraft>>;
+  categories: string[];
+  majors: string[];
+  suggestMajor: (category: string) => string;
+  onCancel: () => void;
+  onSubmit: () => void;
+}) {
+  const count = Number(draft.count);
+  const valid = draft.name.trim() !== "" && Number.isInteger(count) && count >= 0 && draft.count.trim() !== "";
+  const step = (delta: number) =>
+    setDraft((d) => {
+      const cur = Number(d.count);
+      const base = Number.isInteger(cur) ? cur : 1;
+      return { ...d, count: String(Math.max(0, base + delta)) };
+    });
+
+  return (
+    <section className="animate-pop rounded-xl bg-white p-3.5 shadow-card ring-1 ring-line/70">
+      <h2 className="text-[14px] font-bold text-ink-soft">장비 추가</h2>
+
+      <label className="mt-2.5 block">
+        <span className="mb-1 block text-[12px] font-bold text-ink-mute">장비명 <b className="text-attention-fg">*</b></span>
+        <input
+          value={draft.name}
+          onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+          placeholder="예) 소니 FX30 바디"
+          className="w-full rounded-lg bg-white px-3 py-2.5 text-[13px] text-ink outline-none ring-1 ring-line/60 placeholder:text-ink-faint"
+          autoFocus
+        />
+      </label>
+
+      <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-1 block text-[12px] font-bold text-ink-mute">카테고리</span>
+          <input
+            value={draft.category}
+            onChange={(e) => {
+              const v = e.target.value;
+              setDraft((d) => (d.majorTouched ? { ...d, category: v } : { ...d, category: v, majorSel: suggestMajor(v) }));
+            }}
+            list="inventory-category-options"
+            placeholder="예) 카메라"
+            className="w-full rounded-lg bg-white px-3 py-2.5 text-[13px] text-ink outline-none ring-1 ring-line/60 placeholder:text-ink-faint"
+          />
+          <datalist id="inventory-category-options">
+            {categories.map((c) => (
+              <option key={c} value={c} />
+            ))}
+          </datalist>
+        </label>
+
+        <label className="block">
+          <span className="mb-1 block text-[12px] font-bold text-ink-mute">대분류</span>
+          <select
+            value={draft.majorSel}
+            onChange={(e) => setDraft((d) => ({ ...d, majorSel: e.target.value, majorTouched: true }))}
+            className="w-full rounded-lg bg-white px-3 py-2.5 text-[13px] text-ink outline-none ring-1 ring-line/60"
+          >
+            <option value="">대분류 없음</option>
+            {majors.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+            <option value="__custom__">직접 입력…</option>
+          </select>
+          {draft.majorSel === "__custom__" && (
+            <input
+              value={draft.majorCustom}
+              onChange={(e) => setDraft((d) => ({ ...d, majorCustom: e.target.value }))}
+              placeholder="새 대분류 입력"
+              className="mt-1.5 w-full rounded-lg bg-white px-3 py-2.5 text-[13px] text-ink outline-none ring-1 ring-line/60 placeholder:text-ink-faint"
+              autoFocus
+            />
+          )}
+        </label>
+      </div>
+
+      <div className="mt-2.5 flex flex-wrap items-end gap-2.5">
+        <div>
+          <span className="mb-1 block text-[12px] font-bold text-ink-mute">보유수량</span>
+          <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5 ring-1 ring-line/60">
+            <button onClick={() => step(-1)} className="tap h-9 w-9 rounded-md text-[17px] font-black text-ink-soft" aria-label="수량 줄이기">−</button>
+            <input
+              inputMode="numeric"
+              value={draft.count}
+              onChange={(e) => setDraft((d) => ({ ...d, count: e.target.value.replace(/[^\d]/g, "") }))}
+              className="w-12 bg-transparent text-center text-[16px] font-extrabold tabular-nums text-ink outline-none"
+              aria-label="보유수량"
+            />
+            <button onClick={() => step(1)} className="tap h-9 w-9 rounded-md text-[17px] font-black text-ink-soft" aria-label="수량 늘리기">＋</button>
+          </div>
+        </div>
+        <label className="min-w-[120px] flex-1">
+          <span className="mb-1 block text-[12px] font-bold text-ink-mute">1일 단가 (선택)</span>
+          <input
+            inputMode="numeric"
+            value={draft.price}
+            onChange={(e) => setDraft((d) => ({ ...d, price: e.target.value.replace(/[^\d]/g, "") }))}
+            placeholder="예) 30000"
+            className="w-full rounded-lg bg-white px-3 py-2.5 text-[13px] tabular-nums text-ink outline-none ring-1 ring-line/60 placeholder:text-ink-faint"
+          />
+        </label>
+      </div>
+
+      <label className="mt-2.5 block">
+        <span className="mb-1 block text-[12px] font-bold text-ink-mute">비고 (선택)</span>
+        <input
+          value={draft.note}
+          onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))}
+          placeholder="비고 없음"
+          className="w-full rounded-lg bg-white px-3 py-2.5 text-[13px] text-ink outline-none ring-1 ring-line/60 placeholder:text-ink-faint"
+        />
+      </label>
+
+      <div className="mt-3 flex gap-2">
+        <button
+          onClick={onSubmit}
+          disabled={!valid}
+          className="tap min-h-[38px] flex-1 rounded-lg bg-brand-600 px-3.5 text-[13.5px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          등록
+        </button>
+        <button onClick={onCancel} className="tap min-h-[38px] rounded-lg px-3.5 text-[13.5px] font-bold text-ink-mute ring-1 ring-line/70">
+          취소
+        </button>
+      </div>
+    </section>
   );
 }
