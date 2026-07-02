@@ -242,10 +242,11 @@ export function VillageTimeline({
     const ledger = mode === "set" ? ledgerStockFor(ledgerStocks, g.key) : null;
     rows.push(
       <div key={"g_" + g.key} className="relative flex items-center" style={{ height: ROW_H, width: totalW }}>
-        <button onClick={() => setCollapsed((c) => ({ ...c, [g.key]: !c[g.key] }))} className="tap sticky left-0 z-10 flex h-full items-center gap-1.5 bg-white/95 pl-3 pr-4 backdrop-blur">
-          <ChevronRight className={`h-3.5 w-3.5 text-ink-mute transition-transform ${isCol ? "" : "rotate-90"}`} />
-          <span className="text-[13px] font-bold text-ink">{g.key}</span>
-          <span className="rounded-full bg-line/40 px-1.5 text-[11px] font-semibold text-ink-mute">{g.items.length}</span>
+        {/* 모바일: 헤더 폭을 화면 안으로 제한하고 장비명만 말줄임 — 보유/정비 배지가 항상 보이게 */}
+        <button onClick={() => setCollapsed((c) => ({ ...c, [g.key]: !c[g.key] }))} className="tap sticky left-0 z-10 flex h-full max-w-[calc(100dvw-8px)] items-center gap-1.5 bg-white/95 pl-3 pr-4 backdrop-blur">
+          <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-ink-mute transition-transform ${isCol ? "" : "rotate-90"}`} />
+          <span className="min-w-0 truncate text-[13px] font-bold text-ink">{g.key}</span>
+          <span className="shrink-0 rounded-full bg-line/40 px-1.5 text-[11px] font-semibold text-ink-mute">{g.items.length}</span>
           {ledger && <StockBadge ledger={ledger} />}
         </button>
       </div>,
