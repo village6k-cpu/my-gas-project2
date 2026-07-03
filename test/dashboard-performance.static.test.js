@@ -89,94 +89,28 @@ assert.deepStrictEqual(
   'contract map should read only the matched dashboard contract rows'
 );
 
-assert.strictEqual(
-  typeof gasContext.buildDashboardSetComponentLookup_,
-  'function',
-  'dashboard risk candidates must support a prebuilt set component lookup'
-);
-
-const candidates = gasContext.buildDashboardEquipmentRiskCandidates_(
-  [{
-    scheduleId: 'SCH-001',
-    name: 'FX3 풀세트',
-    qty: 1,
-    setName: '',
-    isHeader: true,
-    isSet: true,
-    isComponent: false
-  }],
-  {
-    getLastRow() {
-      throw new Error('setSheet should not be read when lookup is provided');
-    }
-  },
-  {
-    'FX3 풀세트': [
-      { name: '미라지 매트박스', qty: 1, alt: '' },
-      { name: 'FX3 바디', qty: 1, alt: '' }
-    ]
-  }
-);
-
-assert.ok(
-  candidates.some((eq) => eq.name === '미라지 매트박스' && eq.setName === 'FX3 풀세트'),
-  'risk candidate building must reuse the prebuilt set component lookup'
-);
-
-const singleCandidates = gasContext.buildDashboardEquipmentRiskCandidates_(
-  [{
-    scheduleId: 'SCH-002',
-    name: 'FX3 바디',
-    qty: 1,
-    setName: '',
-    isHeader: true,
-    isSet: false,
-    isComponent: false
-  }],
-  {
-    getLastRow() {
-      throw new Error('single equipment must not trigger setSheet fallback reads');
-    }
-  },
-  {}
-);
-
-assert.deepStrictEqual(
-  JSON.parse(JSON.stringify(singleCandidates)),
-  [{
-    scheduleId: 'SCH-002',
-    name: 'FX3 바디',
-    qty: 1,
-    setName: '',
-    isHeader: true,
-    isSet: false,
-    isComponent: false
-  }],
-  'single equipment risk candidates must not scan 세트마스터 as a fallback'
+assert.match(
+  backend,
+  /function fetchCardCautionsBatch_\(requests\)[\s\S]*UrlFetchApp\.fetchAll\(fetchRequests\)/,
+  'dashboard card cautions must batch card API calls with UrlFetchApp.fetchAll'
 );
 
 assert.match(
   backend,
-  /var riskCandidateLookup\s*=\s*buildDashboardSetComponentLookup_\(setSheet\)/,
-  'getDashboardData must build the set component lookup once per payload'
+  /checkoutList\.sort\(compareDashboardItemsByTime_\);[\s\S]*checkinList\.sort\(compareDashboardItemsByTime_\);[\s\S]*attachDashboardCardCautions_\(checkoutList,\s*checkinList\);/,
+  'date dashboard payload must attach card cautions after checkout/checkin cards are built'
+);
+
+assert.doesNotMatch(
+  backend,
+  /getEquipmentRiskRules_|buildDashboardEquipmentRiskCandidates_|attachEquipmentRiskWarnings_|evaluateEquipmentRiskGuidanceStates_/,
+  'dashboard payload must not use the old local equipment-risk sheet matching path'
 );
 
 assert.match(
   backend,
-  /buildDashboardEquipmentRiskCandidates_\(displayEquip,\s*setSheet,\s*riskCandidateLookup\)/,
-  'date dashboard payload must pass the shared set component lookup into risk candidate building'
-);
-
-assert.match(
-  backend,
-  /var evaluateRisk\s*=[\s\S]*options\.evaluateRisk/,
-  'getDashboardData must keep external equipment-risk evaluation behind an explicit option'
-);
-
-assert.match(
-  backend,
-  /if \(evaluateRisk\) \{[\s\S]*evaluateEquipmentRiskGuidanceStates_\(result\);[\s\S]*\} else \{[\s\S]*markEquipmentRiskSearchEvaluationSkipped_\(result\);/,
-  'default dashboard payload must not wait for external equipment-risk evaluation'
+  /function normalizeCardCautionsResponse_\(phase,\s*data\)[\s\S]*rawCautions\.slice\(0,\s*5\)/,
+  'card caution normalization must cap visible cautions at five'
 );
 
 const dashboardDataBody = backend.match(/function getDashboardData\([\s\S]*?\n}\n\nfunction getDashboardSearchData/);
@@ -222,14 +156,14 @@ assert.match(
 
 assert.match(
   read('sheetAPI.js'),
-  /evaluateRisk:\s*params\.riskEval\s*\|\|\s*postBody\.riskEval/,
-  'sheetAPI dashboard action must expose explicit riskEval opt-in without slowing the default path'
+  /includeCautions:\s*params\.includeCautions\s*\|\|\s*postBody\.includeCautions/,
+  'sheetAPI dashboard search action must expose explicit includeCautions opt-in for lazy search details'
 );
 
 assert.match(
   backend,
-  /removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d \+ '_risk'\)/,
-  'invalidateDashboardCache must clear the current dashboard v4 cache keys'
+  /removeDashboardCacheJson_\(cache,\s*'dashboard_v5_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d \+ '_risk'\)/,
+  'invalidateDashboardCache must clear the current dashboard v5 cache key and legacy v4 keys'
 );
 
 assert.match(

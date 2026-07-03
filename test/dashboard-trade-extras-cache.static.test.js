@@ -67,8 +67,8 @@ assert.match(
 
 assert.match(
   backend,
-  /function getEquipmentRiskRules_\(\)\s*\{[\s\S]*getDashboardCachedJson_\("dashboard_equipment_risk_rules_v1",\s*300/,
-  'dashboard equipment risk rules must use script cache instead of reading the rule sheet every payload'
+  /function fetchCardCautionsBatch_\(requests\)[\s\S]*UrlFetchApp\.fetchAll\(fetchRequests\)/,
+  'dashboard card cautions must use one batched external API call group instead of local rule-sheet matching'
 );
 
 console.log('dashboard trade extras cache static checks passed');
