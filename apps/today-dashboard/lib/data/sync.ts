@@ -1,6 +1,6 @@
 // 시트 → Supabase 읽기 동기화 (Phase 1, 단방향).
 // 소스: 기존 GAS action=timeline (날짜가 보정된 epoch ms를 줌 → 1899 버그 회피).
-import type { EquipmentItem, ReturnCount, RiskWarning, Trade } from "../domain/types";
+import type { EquipmentItem, Phase, ReturnCount, RiskLevel, RiskWarning, Trade } from "../domain/types";
 import { categoryOf } from "../domain/catalog";
 import { fetchAllTrades, persistTrade } from "./remote";
 import { gasFetch } from "./apiClient";
@@ -128,20 +128,74 @@ export async function syncTimelineToSupabase(opts?: { fromDays?: number; toDays?
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-function mapRisk(arr: any): RiskWarning[] {
-  if (!Array.isArray(arr)) return [];
-  return arr.map((r: any, i: number) => {
-    const lvl = String(r.riskLevel ?? "").toLowerCase();
-    const riskLevel = lvl.includes("high") || lvl.includes("상") ? "high" : lvl.includes("low") || lvl.includes("하") ? "low" : "medium";
-    return {
-      id: String(r.ruleId ?? i),
-      phase: "checkout",
-      equipmentName: r.equipmentName ?? "",
-      riskLevel,
-      customerMessage: r.customerMessage ?? r.returnCheckText ?? "",
-      guidanceState: (r.guidanceState as RiskWarning["guidanceState"]) ?? "대상없음",
-    };
-  });
+function dashboardCautionPhase(it: any): Phase {
+  const phase = String(it?.cardCautionsPhase || it?._type || it?.phase || "").toLowerCase();
+  return phase === "return" || phase === "checkin" ? "checkin" : "checkout";
+}
+
+function dashboardCautionSeverity(value: unknown): 1 | 2 | 3 {
+  const severity = Number(value || 1);
+  return severity === 3 || severity === 2 ? severity : 1;
+}
+
+function dashboardCautionRiskLevel(severity: number): RiskLevel {
+  if (severity === 3) return "high";
+  if (severity === 2) return "medium";
+  return "low";
+}
+
+function mapDashboardCardCautions(it: any): RiskWarning[] {
+  const raw = Array.isArray(it?.cardCautions) ? it.cardCautions : [];
+  const phase = dashboardCautionPhase(it);
+  const hiddenCount = Math.max(0, Number(it?.cardCautionsHiddenCount || 0) || 0);
+  const totalMatched = Math.max(0, Number(it?.cardCautionsTotalMatched || 0) || 0);
+  return raw
+    .filter((c: any) => String(c?.text || "").trim())
+    .slice(0, 5)
+    .map((c: any, i: number) => {
+      const severity = dashboardCautionSeverity(c?.severity);
+      const equipmentName = String(c?.equipment || c?.matched_item || "").trim();
+      const text = String(c?.text || "").trim();
+      return {
+        id: `card-caution:${phase}:${i}:${equipmentName}:${text.slice(0, 40)}`,
+        phase,
+        equipmentName,
+        riskLevel: dashboardCautionRiskLevel(severity),
+        customerMessage: text,
+        guidanceState: severity === 3 ? "발송권장" : "대상없음",
+        source: "cardCaution",
+        severity,
+        scope: String(c?.scope || "").trim() || undefined,
+        matchedItem: String(c?.matched_item || "").trim() || undefined,
+        hiddenCount,
+        totalMatched,
+      };
+    });
+}
+
+function mergeDashboardCardCautions(base: Trade, it: any): RiskWarning[] {
+  const phase = dashboardCautionPhase(it);
+  const preservedOtherPhase = (base.riskWarnings ?? []).filter((w) => w.source === "cardCaution" && w.phase !== phase);
+  return [...preservedOtherPhase, ...mapDashboardCardCautions(it)];
+}
+
+function dashboardCardCautionSignature(warnings: RiskWarning[]): string {
+  return JSON.stringify(
+    warnings
+      .filter((w) => w.source === "cardCaution")
+      .map((w) => ({
+        phase: w.phase,
+        text: w.customerMessage,
+        equipment: w.equipmentName,
+        severity: w.severity,
+        hidden: w.hiddenCount || 0,
+        total: w.totalMatched || 0,
+      })),
+  );
+}
+
+function hasDashboardCardCautionChange(base: Trade, it: any): boolean {
+  return dashboardCardCautionSignature(base.riskWarnings ?? []) !== dashboardCardCautionSignature(mergeDashboardCardCautions(base, it));
 }
 
 /** action=dashboard 항목을 기존 거래(날짜 유지) 위에 상세 덮어쓰기.
@@ -232,7 +286,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
     contractUrl: it.contractUrl || base.contractUrl,
     contractRegenPending: !!it.contractRegenPending,
     noteCheckin: it.returnMemo || base.noteCheckin,
-    riskWarnings: mapRisk(it.riskWarnings),
+    riskWarnings: mergeDashboardCardCautions(base, it),
     returnCounts,
     equipments,
   };
@@ -243,7 +297,7 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
   const log = opts?.onLog ?? (() => {});
   const existing = new Map((await fetchAllTrades()).map((t) => [t.tradeId, t]));
   log(`기존 ${existing.size}건 기준, 대시보드 상세 동기화…`);
-  const seen = new Set<string>();
+  const pending = new Map<string, Trade>();
   let n = 0;
   let skipped = 0;
   const fromD = opts?.fromDays ?? -2;
@@ -257,14 +311,13 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
       const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
       for (const it of items) {
         const tid = it.tradeId;
-        if (!tid || seen.has(tid)) continue;
-        seen.add(tid);
-        const base = existing.get(tid);
+        if (!tid) continue;
+        const base = pending.get(tid) ?? existing.get(tid);
         if (!base) {
           skipped++;
           continue;
         }
-        await persistTrade(mergeDashboard(base, it));
+        pending.set(tid, mergeDashboard(base, it));
         n++;
       }
       log(`  ${date}: 누적 ${n}건`);
@@ -272,6 +325,7 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
       /* 한 날짜 실패는 건너뜀 */
     }
   }
+  for (const t of pending.values()) await persistTrade(t);
   log(`대시보드 상세 ${n}건 반영 (윈도우 밖 ${skipped}건 스킵)`);
   return n;
 }
@@ -315,12 +369,14 @@ function shouldUseDashboardDetail(base: Trade, it: any, options: DashboardDetail
   const sheetBackedDeleted = options.authoritativeForMissingSheetBacked && hasSheetBackedItemsMissingFromDashboard(base, it);
   // 계약서 재생성으로 링크가 '바뀐' 경우 — 없을 때만 갱신하면 옛 링크를 영원히 들고 있음
   const contractUrlChanged = !!it?.contractUrl && it.contractUrl !== base.contractUrl;
+  const cautionsChanged = hasDashboardCardCautionChange(base, it);
   return (
     incomingEquipmentCount(it) > currentEquipmentCount(base) ||
     sheetBackedDeleted ||
     contractUrlChanged ||
     amountFix ||
-    hasSynthetic
+    hasSynthetic ||
+    cautionsChanged
   );
 }
 

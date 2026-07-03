@@ -208,7 +208,7 @@ export function needsAttention(t: Trade, date: string): boolean {
   if (t.paymentWarning) return true;
   const overdue = new Date(t.returnAt) < new Date(`${date}T00:00:00`) && !t.returnDone;
   if (overdue) return true;
-  if (t.riskWarnings.some((r) => r.guidanceState === "발송권장")) return true;
+  if (t.riskWarnings.some((r) => (r.source === "cardCaution" ? r.severity === 3 : r.guidanceState === "발송권장"))) return true;
   return false;
 }
 

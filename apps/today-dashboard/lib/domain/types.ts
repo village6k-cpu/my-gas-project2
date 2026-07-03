@@ -74,6 +74,12 @@ export interface RiskWarning {
   customerMessage: string;
   guidanceState: "발송권장" | "최근발송" | "대상없음" | "확인함";
   sensitive?: boolean;
+  source?: "cardCaution" | "riskWarning";
+  severity?: 1 | 2 | 3;
+  scope?: string;
+  matchedItem?: string;
+  hiddenCount?: number;
+  totalMatched?: number;
 }
 
 export interface Trade {

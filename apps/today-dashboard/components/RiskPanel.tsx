@@ -3,43 +3,34 @@
 import type { Phase, RiskWarning } from "@/lib/domain/types";
 import { Alert } from "./icons";
 
-const LEVEL: Record<string, string> = {
-  high: "bg-attention-bg text-attention-fg ring-attention-ring",
-  medium: "bg-warn-bg text-warn-fg ring-warn-ring",
-  low: "bg-paper text-ink-mute ring-line",
-};
+function severityLabel(severity?: number): string {
+  if (severity === 3) return "필수";
+  if (severity === 2) return "중요";
+  return "권장";
+}
 
 export function RiskPanel({ warnings, phase }: { warnings: RiskWarning[]; phase: Phase }) {
-  const list = warnings.filter((w) => w.phase === phase);
+  const list = warnings
+    .filter((w) => w.source === "cardCaution" && w.phase === phase && w.customerMessage.trim())
+    .slice(0, 5);
   if (!list.length) return null;
+  const hiddenCount = Math.max(0, ...list.map((w) => Number(w.hiddenCount || 0) || 0));
   return (
-    <div className="mt-3 space-y-2">
+    <div className="mt-3 rounded-xl bg-paper/80 p-3 ring-1 ring-line">
       {list.map((w) => (
-        <div key={w.id} className={`rounded-xl p-3 ring-1 ${LEVEL[w.riskLevel]}`}>
-          <div className="flex items-start gap-2">
-            <Alert className="mt-0.5 h-4 w-4 shrink-0" />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className="text-[13px] font-bold">{w.equipmentName}</span>
-                <span className="rounded-md bg-white/70 px-1.5 py-0.5 text-[10px] font-semibold">
-                  {w.guidanceState}
-                </span>
-              </div>
-              <p className="mt-0.5 text-[12.5px] leading-snug opacity-90">{w.customerMessage}</p>
-              {w.guidanceState === "발송권장" && (
-                <div className="mt-2 flex gap-1.5">
-                  <button className="tap rounded-lg bg-white px-2.5 py-1 text-[12px] font-semibold ring-1 ring-line">
-                    카톡 안내 발송
-                  </button>
-                  <button className="tap rounded-lg px-2.5 py-1 text-[12px] font-semibold opacity-70">
-                    확인함
-                  </button>
-                </div>
-              )}
-            </div>
+        <div key={w.id} className="flex items-start gap-2 py-1.5">
+          <Alert className={`mt-0.5 h-4 w-4 shrink-0 ${w.severity === 3 ? "text-attention-fg" : "text-ink-faint"}`} />
+          <div className={`min-w-0 flex-1 text-[12.5px] leading-snug ${w.severity === 3 ? "font-extrabold text-attention-fg" : "font-normal text-ink-mute"}`}>
+            <div>{severityLabel(w.severity)}{w.equipmentName ? ` · ${w.equipmentName}` : ""}</div>
+            <p>{w.customerMessage}</p>
           </div>
         </div>
       ))}
+      {hiddenCount > 0 && (
+        <button type="button" className="mt-1 text-[12px] font-semibold text-ink-faint">
+          외 {hiddenCount}건 ▸
+        </button>
+      )}
     </div>
   );
 }
