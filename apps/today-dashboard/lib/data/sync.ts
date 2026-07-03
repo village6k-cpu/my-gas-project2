@@ -2,6 +2,7 @@
 // 소스: 기존 GAS action=timeline (날짜가 보정된 epoch ms를 줌 → 1899 버그 회피).
 import type { EquipmentItem, Phase, ReturnCount, RiskLevel, RiskWarning, Trade } from "../domain/types";
 import { categoryOf } from "../domain/catalog";
+import { sanitizeCautionDisplayText } from "../domain/cautions";
 import { fetchAllTrades, persistTrade } from "./remote";
 import { gasFetch } from "./apiClient";
 import { ymd } from "../domain/status";
@@ -150,12 +151,12 @@ function mapDashboardCardCautions(it: any): RiskWarning[] {
   const hiddenCount = Math.max(0, Number(it?.cardCautionsHiddenCount || 0) || 0);
   const totalMatched = Math.max(0, Number(it?.cardCautionsTotalMatched || 0) || 0);
   return raw
-    .filter((c: any) => String(c?.text || "").trim())
+    .map((c: any) => ({ caution: c, text: sanitizeCautionDisplayText(c?.text) }))
+    .filter(({ text }: { text: string }) => text)
     .slice(0, 5)
-    .map((c: any, i: number) => {
+    .map(({ caution: c, text }: { caution: any; text: string }, i: number) => {
       const severity = dashboardCautionSeverity(c?.severity);
       const equipmentName = String(c?.equipment || c?.matched_item || "").trim();
-      const text = String(c?.text || "").trim();
       return {
         id: `card-caution:${phase}:${i}:${equipmentName}:${text.slice(0, 40)}`,
         phase,

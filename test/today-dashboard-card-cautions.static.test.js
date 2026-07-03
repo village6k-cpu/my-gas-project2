@@ -9,6 +9,7 @@ const sync = read('apps/today-dashboard/lib/data/sync.ts');
 const panel = read('apps/today-dashboard/components/RiskPanel.tsx');
 const types = read('apps/today-dashboard/lib/domain/types.ts');
 const status = read('apps/today-dashboard/lib/domain/status.ts');
+const cautions = read('apps/today-dashboard/lib/domain/cautions.ts');
 
 [
   'source?: "cardCaution" | "riskWarning"',
@@ -22,6 +23,7 @@ const status = read('apps/today-dashboard/lib/domain/status.ts');
 [
   'function mapDashboardCardCautions(it: any): RiskWarning[]',
   'Array.isArray(it?.cardCautions) ? it.cardCautions : []',
+  'sanitizeCautionDisplayText(c?.text)',
   '.slice(0, 5)',
   'cardCautionsHiddenCount',
   'source: "cardCaution"',
@@ -38,6 +40,7 @@ const status = read('apps/today-dashboard/lib/domain/status.ts');
 
 [
   'w.source === "cardCaution" && w.phase === phase',
+  'sanitizeCautionDisplayText(w.customerMessage)',
   '.slice(0, 5)',
   'const hiddenCount = Math.max(0, ...list.map((w) => Number(w.hiddenCount || 0) || 0))',
   '외 {hiddenCount}건 ▸',
@@ -58,5 +61,14 @@ assert.ok(
   status.includes('r.source === "cardCaution" ? r.severity === 3 : r.guidanceState === "발송권장"'),
   'attention filter must treat required card cautions as attention without reviving old list rendering',
 );
+
+[
+  'export function sanitizeCautionDisplayText(value: unknown): string',
+  'NotebookLM',
+  'kakao[-_\\s]?\\d{4}',
+  'corrections?\\.md',
+].forEach((contract) => {
+  assert.ok(cautions.includes(contract), `caution sanitizer must strip internal evidence labels: ${contract}`);
+});
 
 console.log('today-dashboard card caution static checks passed');

@@ -1,6 +1,7 @@
 "use client";
 
 import type { Phase, RiskWarning } from "@/lib/domain/types";
+import { sanitizeCautionDisplayText } from "@/lib/domain/cautions";
 import { Alert } from "./icons";
 
 function severityLabel(severity?: number): string {
@@ -12,6 +13,8 @@ function severityLabel(severity?: number): string {
 export function RiskPanel({ warnings, phase }: { warnings: RiskWarning[]; phase: Phase }) {
   const list = warnings
     .filter((w) => w.source === "cardCaution" && w.phase === phase && w.customerMessage.trim())
+    .map((w) => ({ ...w, customerMessage: sanitizeCautionDisplayText(w.customerMessage) }))
+    .filter((w) => w.customerMessage)
     .slice(0, 5);
   if (!list.length) return null;
   const hiddenCount = Math.max(0, ...list.map((w) => Number(w.hiddenCount || 0) || 0));
