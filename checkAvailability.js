@@ -92,7 +92,8 @@ var TIMELINE_DEFAULT_LOOKAHEAD_DAYS_ = 14;
 var DASHBOARD_SEARCH_CACHE_VERSION_PROP_ = 'dashboardSearchCacheVersion_v1';
 var DASHBOARD_CACHE_CHUNK_SIZE_ = 85000;
 var DASHBOARD_CACHE_MAX_CHUNKS_ = 30;
-var EQUIPMENT_RISK_RULE_SHEET_NAME = '장비주의사항';
+var CARD_CAUTIONS_API_BASE_URL_ = 'https://village-ai-six.vercel.app';
+var CARD_CAUTIONS_API_PATH_ = '/api/cautions';
 
 /**
  * 타임라인 HTML/API에서 호출.
@@ -812,11 +813,10 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
 function getDashboardData(targetDate, skipCache, options) {
   var today = targetDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
   options = options || {};
-  var evaluateRisk = options.evaluateRisk === true || options.evaluateRisk === '1' || options.evaluateRisk === 'true';
 
   // 캐시 5분으로 확장. 등록/취소/일정변경 시 invalidateDashboardCache() 호출로 무효화.
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_v4_' + today + (evaluateRisk ? '_risk' : '');
+  var cacheKey = 'dashboard_v5_' + today;
   if (!skipCache) {
     var cachedResult = getDashboardCacheJson_(cache, cacheKey);
     if (cachedResult) {
@@ -828,7 +828,6 @@ function getDashboardData(targetDate, skipCache, options) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
-  const setSheet = ss.getSheetByName('세트마스터');
 
   // 장비명 → 카테고리 (장비마스터 C열=카테고리, D열=장비명) — 반납 분류용
   var equipCat = {};
@@ -923,8 +922,6 @@ function getDashboardData(targetDate, skipCache, options) {
   var contractMap = getDashboardContractMapForIds_(contractSheet, dashboardTradeIds);
   var tradeExtras = getTradeExtrasForIds_(dashboardTradeIds, props);
   var equipmentChecks = getEquipmentCheckMapForIds_(dashboardTradeIds);
-  var riskRules = getEquipmentRiskRules_();
-  var riskCandidateLookup = buildDashboardSetComponentLookup_(setSheet);
 
   dashboardTradeIds.forEach(function(tid) {
     var g = tradeGroups[tid];
@@ -988,7 +985,10 @@ function getDashboardData(targetDate, skipCache, options) {
       returnStatus: checkInfo.returnStatus || '',
       returnMemo: checkInfo.returnMemo || '',
       equipmentCheckRow: checkInfo.row || 0,
-      riskWarnings: attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet, riskCandidateLookup), riskRules),
+      cardCautions: [],
+      cardCautionsHiddenCount: 0,
+      cardCautionsTotalMatched: 0,
+      riskWarnings: [],
       equipments: displayEquip
     };
 
@@ -1020,6 +1020,7 @@ function getDashboardData(targetDate, skipCache, options) {
   // 시간순 정렬
   checkoutList.sort(compareDashboardItemsByTime_);
   checkinList.sort(compareDashboardItemsByTime_);
+  attachDashboardCardCautions_(checkoutList, checkinList);
 
   var result = {
     date: today,
@@ -1032,11 +1033,6 @@ function getDashboardData(targetDate, skipCache, options) {
     depositStatusOptions: getTradeDepositStatusOptions_(),
     billingCompanyOptions: getTradeBillingCompanyOptions_()
   };
-  if (evaluateRisk) {
-    evaluateEquipmentRiskGuidanceStates_(result);
-  } else {
-    markEquipmentRiskSearchEvaluationSkipped_(result);
-  }
   // 등록/취소/일정변경 시 invalidateDashboardCache로 무효화되므로, 날짜 이동 체감을 위해 15분 유지.
   putDashboardCacheJson_(cache, cacheKey, result, 900);
   return result;
@@ -1140,7 +1136,6 @@ function getDashboardSearchData(query, options) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var schedSheet = ss.getSheetByName('스케줄상세');
   var contractSheet = ss.getSheetByName('계약마스터');
-  var setSheet = ss.getSheetByName('세트마스터');
   if (!schedSheet || schedSheet.getLastRow() < 2) {
     return attachProfile_({ query: query, checkout: [], checkin: [], total: 0, limit: limit });
   }
@@ -1206,16 +1201,10 @@ function getDashboardSearchData(query, options) {
   }
 
   var props = PropertiesService.getScriptProperties().getProperties();
-  var includeSearchRiskWarnings = options.includeRiskWarnings === true ||
-    options.includeRiskWarnings === 1 ||
-    options.includeRiskWarnings === '1' ||
-    options.includeRiskWarnings === 'true';
-  var riskRules = [];
-  var riskCandidateLookup = {};
-  if (includeSearchRiskWarnings) {
-    riskRules = getEquipmentRiskRules_();
-    riskCandidateLookup = buildDashboardSetComponentLookup_(setSheet);
-  }
+  var includeSearchCautions = options.includeCautions === true ||
+    options.includeCautions === 1 ||
+    options.includeCautions === '1' ||
+    options.includeCautions === 'true';
   markProfile_('options');
 
   var visibleTradeIds = [];
@@ -1270,10 +1259,7 @@ function getDashboardSearchData(query, options) {
         visibleExtras[tid] || {},
         getEquipmentCheckForTrade_(visibleEquipmentChecks, tid),
         props,
-        riskRules,
-        includeSearchRiskWarnings ? setSheet : null,
-        riskCandidateLookup,
-        { includeRiskWarnings: includeSearchRiskWarnings }
+        {}
       );
     }
 
@@ -1321,7 +1307,7 @@ function getDashboardSearchData(query, options) {
     depositStatusOptions: getTradeDepositStatusOptions_(),
     billingCompanyOptions: getTradeBillingCompanyOptions_()
   };
-  markEquipmentRiskSearchEvaluationSkipped_(result);
+  if (includeSearchCautions) attachDashboardCardCautions_(result.checkout, result.checkin);
   return attachProfile_(result);
 }
 
@@ -1658,10 +1644,8 @@ function touchDashboardSearchCacheVersion_() {
   } catch (e) {}
 }
 
-function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRules, setSheet, riskCandidateLookup, options) {
+function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, options) {
   options = options || {};
-  var includeRiskWarnings = options.includeRiskWarnings !== false;
-  if (includeRiskWarnings && !riskRules) riskRules = getEquipmentRiskRules_();
   var setsWithComponents = {};
   g.equipments.forEach(function(eq) {
     if (!eq.isHeader && eq.setName) setsWithComponents[eq.setName] = true;
@@ -1709,9 +1693,10 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, riskRu
     returnStatus: checkInfo.returnStatus || '',
     returnMemo: checkInfo.returnMemo || '',
     equipmentCheckRow: checkInfo.row || 0,
-    riskWarnings: includeRiskWarnings
-      ? attachEquipmentRiskWarnings_(buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet, riskCandidateLookup), riskRules)
-      : [],
+    cardCautions: [],
+    cardCautionsHiddenCount: 0,
+    cardCautionsTotalMatched: 0,
+    riskWarnings: [],
     equipments: displayEquip
   };
 }
@@ -1778,271 +1763,157 @@ function compactDashboardSearchTextParts_(parts) {
   return out.join(' ');
 }
 
-function getEquipmentRiskRules_() {
-  return getDashboardCachedJson_("dashboard_equipment_risk_rules_v1", 300, function() {
-    return readEquipmentRiskRules_();
-  });
+function getCardCautionsApiUrl_() {
+  return CARD_CAUTIONS_API_BASE_URL_.replace(/\/+$/, '') + CARD_CAUTIONS_API_PATH_;
 }
 
-function readEquipmentRiskRules_() {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(EQUIPMENT_RISK_RULE_SHEET_NAME);
-    if (!sheet || sheet.getLastRow() < 2) return [];
-
-    var lastCol = sheet.getLastColumn();
-    var headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
-    var headerMap = buildEquipmentRiskHeaderMap_(headers);
-    var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, lastCol).getDisplayValues();
-    var rules = [];
-
-    values.forEach(function(row, idx) {
-      var activeRaw = readEquipmentRiskCell_(row, headerMap.active);
-      if (activeRaw && !isEquipmentRiskActive_(activeRaw)) return;
-
-      var equipmentName = readEquipmentRiskCell_(row, headerMap.equipmentName);
-      var aliases = splitEquipmentRiskAliases_(readEquipmentRiskCell_(row, headerMap.aliases));
-      if (equipmentName) aliases.unshift(equipmentName);
-      aliases = uniqueEquipmentRiskAliases_(aliases);
-      if (!aliases.length) return;
-
-      var cooldownDays = Number(readEquipmentRiskCell_(row, headerMap.cooldownDays));
-      if (!cooldownDays || cooldownDays < 0) cooldownDays = 90;
-
-      var ruleVersion = Number(readEquipmentRiskCell_(row, headerMap.ruleVersion));
-      if (!ruleVersion || ruleVersion < 1) ruleVersion = 1;
-
-      var ruleId = readEquipmentRiskCell_(row, headerMap.ruleId) ||
-        normalizeEquipmentRiskName_(aliases[0]) + '_v' + ruleVersion;
-
-      rules.push({
-        ruleId: ruleId,
-        row: idx + 2,
-        equipmentName: equipmentName || aliases[0],
-        aliases: aliases,
-        riskLevel: readEquipmentRiskCell_(row, headerMap.riskLevel) || '주의',
-        pickupStaffText: readEquipmentRiskCell_(row, headerMap.pickupStaffText),
-        customerMessage: readEquipmentRiskCell_(row, headerMap.customerMessage),
-        returnCheckText: readEquipmentRiskCell_(row, headerMap.returnCheckText),
-        sensitive: parseEquipmentRiskBoolean_(readEquipmentRiskCell_(row, headerMap.sensitive)),
-        cooldownDays: cooldownDays,
-        ruleVersion: ruleVersion
-      });
-    });
-
-    return rules;
-  } catch (err) {
-    Logger.log('getEquipmentRiskRules_ failed: ' + err.message);
-    return [];
-  }
+function normalizeCardCautionsPhase_(phase) {
+  return String(phase || '') === 'return' || String(phase || '') === 'checkin'
+    ? 'return'
+    : 'checkout';
 }
 
-function buildEquipmentRiskHeaderMap_(headers) {
+function emptyCardCautionsResponse_(phase) {
   return {
-    active: findEquipmentRiskHeader_(headers, ['활성', '사용', '사용여부', 'active', 'enabled', 'isActive']),
-    ruleId: findEquipmentRiskHeader_(headers, ['규칙ID', '룰ID', 'ruleId', 'rule_id', 'id']),
-    equipmentName: findEquipmentRiskHeader_(headers, ['장비명', '장비', '대상장비', 'equipment', 'equipmentName', 'name']),
-    aliases: findEquipmentRiskHeader_(headers, ['별칭', '키워드', 'aliases', 'alias', 'keywords']),
-    riskLevel: findEquipmentRiskHeader_(headers, ['위험도', '주의도', '리스크레벨', 'riskLevel', 'risk_level', 'level']),
-    pickupStaffText: findEquipmentRiskHeader_(headers, ['반출직원문구', '반출직원안내', '직원안내', 'pickupStaffText', 'pickup_staff_text']),
-    customerMessage: findEquipmentRiskHeader_(headers, ['고객카톡문구', '고객문구', '고객안내', '고객메시지', 'customerMessage', 'customer_message']),
-    returnCheckText: findEquipmentRiskHeader_(headers, ['반납체크문구', '반납확인', '반납검수', 'returnCheckText', 'return_check_text']),
-    sensitive: findEquipmentRiskHeader_(headers, ['민감발송', '민감', '민감여부', 'sensitive', 'isSensitive']),
-    cooldownDays: findEquipmentRiskHeader_(headers, ['재추천차단일', '쿨다운일', '쿨다운', 'cooldownDays', 'cooldown_days']),
-    ruleVersion: findEquipmentRiskHeader_(headers, ['버전', '규칙버전', 'ruleVersion', 'rule_version', 'version'])
+    phase: normalizeCardCautionsPhase_(phase),
+    cautions: [],
+    hidden_count: 0,
+    total_matched: 0
   };
 }
 
-function findEquipmentRiskHeader_(headers, candidates) {
-  var normalized = {};
-  (headers || []).forEach(function(header, idx) {
-    normalized[normalizeEquipmentRiskHeader_(header)] = idx;
-  });
-  for (var i = 0; i < candidates.length; i++) {
-    var key = normalizeEquipmentRiskHeader_(candidates[i]);
-    if (normalized[key] !== undefined) return normalized[key];
-  }
-  return -1;
-}
-
-function normalizeEquipmentRiskHeader_(value) {
-  return String(value || '').toLowerCase().replace(/[\s_\-()]/g, '').trim();
-}
-
-function readEquipmentRiskCell_(row, idx) {
-  if (idx === undefined || idx < 0) return '';
-  return String(row[idx] || '').trim();
-}
-
-function isEquipmentRiskActive_(value) {
-  var v = String(value || '').toLowerCase().replace(/\s+/g, '').trim();
-  return ['0', 'false', 'n', 'no', 'off', '비활성', '중지', '아니오', '아님', '미사용'].indexOf(v) === -1;
-}
-
-function parseEquipmentRiskBoolean_(value) {
-  var v = String(value || '').toLowerCase().replace(/\s+/g, '').trim();
-  return ['1', 'true', 'y', 'yes', 'on', '민감', '예', '사용', '주의'].indexOf(v) !== -1;
-}
-
-function splitEquipmentRiskAliases_(value) {
-  return String(value || '')
-    .split(/[,;\n|]+/)
-    .map(function(v) { return String(v || '').trim(); })
-    .filter(function(v) { return v; });
-}
-
-function uniqueEquipmentRiskAliases_(aliases) {
+function normalizeCardCautionItemNames_(itemNames) {
   var seen = {};
-  var result = [];
-  (aliases || []).forEach(function(alias) {
-    var clean = String(alias || '').trim();
-    var key = normalizeEquipmentRiskName_(clean);
-    if (!clean || !key || seen[key]) return;
+  var names = [];
+  (itemNames || []).forEach(function(name) {
+    var clean = String(name || '').trim();
+    var key = clean.toLowerCase();
+    if (!clean || seen[key]) return;
     seen[key] = true;
-    result.push(clean);
+    names.push(clean);
   });
-  return result;
+  return names;
 }
 
-function normalizeEquipmentRiskName_(value) {
-  return String(value || '').toLowerCase().replace(/[\s\[\]\(\){}·•_,.]/g, '').trim();
+function normalizeCardCautionsResponse_(phase, data) {
+  if (!data || data.error) return emptyCardCautionsResponse_(phase);
+
+  var rawCautions = Array.isArray(data.cautions) ? data.cautions : [];
+  var hiddenCount = Number(data.hidden_count || 0);
+  if (rawCautions.length > 5) hiddenCount += rawCautions.length - 5;
+
+  return {
+    phase: normalizeCardCautionsPhase_(data.phase || phase),
+    cautions: rawCautions.slice(0, 5).map(function(caution) {
+      caution = caution || {};
+      var severity = Number(caution.severity || 1);
+      if (severity !== 3 && severity !== 2) severity = 1;
+      return {
+        text: String(caution.text || '').trim(),
+        equipment: String(caution.equipment || '').trim(),
+        severity: severity,
+        scope: String(caution.scope || '').trim(),
+        matched_item: String(caution.matched_item || '').trim()
+      };
+    }).filter(function(caution) {
+      return caution.text;
+    }),
+    hidden_count: hiddenCount > 0 ? hiddenCount : 0,
+    total_matched: Number(data.total_matched || 0) || 0
+  };
 }
 
-function buildDashboardSetComponentLookup_(setSheet) {
+function fetchCardCautions(phase, itemNames) {
+  phase = normalizeCardCautionsPhase_(phase);
+  itemNames = normalizeCardCautionItemNames_(itemNames);
+  if (!itemNames.length) return emptyCardCautionsResponse_(phase);
+
   try {
-    return (buildDashboardSetLookup_(setSheet).components || {});
-  } catch (err) {
-    return {};
+    var res = UrlFetchApp.fetch(getCardCautionsApiUrl_(), {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({ phase: phase, items: itemNames }),
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() !== 200) return emptyCardCautionsResponse_(phase);
+    return normalizeCardCautionsResponse_(phase, JSON.parse(res.getContentText() || '{}'));
+  } catch (e) {
+    return emptyCardCautionsResponse_(phase);
   }
 }
 
-function buildDashboardEquipmentRiskCandidates_(displayEquip, setSheet, setComponentLookup) {
-  var candidates = [];
-  var seen = {};
-  var setComponentCache = {};
-  setComponentLookup = setComponentLookup || {};
-
-  function pushCandidate(eq) {
-    var name = String((eq && eq.name) || '').trim();
-    if (!name) return;
-
-    var setName = String((eq && (eq.setName || eq.sourceSetName)) || '').trim();
-    var key = normalizeEquipmentRiskName_(name) + '|' + normalizeEquipmentRiskName_(setName);
-    if (seen[key]) return;
-    seen[key] = true;
-    candidates.push(eq);
-  }
-
-  (displayEquip || []).forEach(function(eq) {
-    pushCandidate(eq);
-
-    if (!eq || !eq.isHeader || eq.isComponent) return;
-
-    var setName = String(eq.name || '').trim();
-    if (!setName) return;
-    if (eq.isSet !== true && !Object.prototype.hasOwnProperty.call(setComponentLookup, setName)) return;
-
-    if (setComponentCache[setName] === undefined) {
-      if (Object.prototype.hasOwnProperty.call(setComponentLookup, setName)) {
-        setComponentCache[setName] = setComponentLookup[setName] || [];
-      } else {
-        try {
-          setComponentCache[setName] = getSetComponents(setName, setSheet) || [];
-        } catch (err) {
-          setComponentCache[setName] = [];
-        }
-      }
-    }
-
-    (setComponentCache[setName] || []).forEach(function(component) {
-      var componentName = String((component && component.name) || '').trim();
-      if (!componentName) return;
-
-      pushCandidate({
-        scheduleId: eq.scheduleId,
-        name: componentName,
-        qty: component.qty || 1,
-        setName: setName,
-        isHeader: false,
-        isSet: false,
-        isComponent: true,
-        sourceSetName: setName,
-        riskSource: 'set_component',
-        checkedCheckout: eq.checkedCheckout,
-        checkedCheckin: eq.checkedCheckin
-      });
-    });
-  });
-
-  return candidates;
-}
-
-function matchEquipmentRiskRulesForEquipments_(equipments, rules) {
-  var matches = [];
-  var seen = {};
-  (equipments || []).forEach(function(eq) {
-    var eqName = String((eq && eq.name) || '').trim();
-    var eqKey = normalizeEquipmentRiskName_(eqName);
-    if (!eqKey) return;
-
-    (rules || []).forEach(function(rule) {
-      var aliases = rule.aliases || [];
-      var matchedAlias = '';
-      for (var i = 0; i < aliases.length; i++) {
-        var alias = String(aliases[i] || '').trim();
-        var aliasKey = normalizeEquipmentRiskName_(alias);
-        if (!aliasKey || aliasKey.length < 2) continue;
-        if (eqKey === aliasKey || eqKey.indexOf(aliasKey) >= 0 || aliasKey.indexOf(eqKey) >= 0) {
-          matchedAlias = alias;
-          break;
-        }
-      }
-      if (!matchedAlias) return;
-
-      var key = String(rule.ruleId || '') + '|' + eqKey;
-      if (seen[key]) return;
-      seen[key] = true;
-      matches.push({
-        rule: rule,
-        equipment: eq,
-        equipmentName: eqName,
-        matchedAlias: matchedAlias
-      });
-    });
-  });
-  return matches;
-}
-
-function attachEquipmentRiskWarnings_(displayEquip, riskRules) {
-  return matchEquipmentRiskRulesForEquipments_(displayEquip, riskRules).map(function(match) {
-    var rule = match.rule || {};
+function fetchCardCautionsBatch_(requests) {
+  requests = (requests || []).map(function(request) {
+    var phase = normalizeCardCautionsPhase_(request && request.phase);
     return {
-      ruleId: rule.ruleId || '',
-      ruleVersion: rule.ruleVersion || 1,
-      riskLevel: rule.riskLevel || '주의',
-      equipmentName: match.equipmentName || rule.equipmentName || '',
-      matchedAlias: match.matchedAlias || '',
-      pickupStaffText: rule.pickupStaffText || '',
-      customerMessage: rule.customerMessage || '',
-      returnCheckText: rule.returnCheckText || '',
-      sensitive: !!rule.sensitive,
-      cooldownDays: rule.cooldownDays || 90,
-      guidanceState: 'history_unknown',
-      canDirectSend: false,
-      guidanceReason: ''
+      phase: phase,
+      itemNames: normalizeCardCautionItemNames_((request && request.itemNames) || []),
+      item: request && request.item
+    };
+  }).filter(function(request) {
+    return request.item && request.itemNames.length;
+  });
+
+  if (!requests.length) return [];
+
+  var fetchRequests = requests.map(function(request) {
+    return {
+      url: getCardCautionsApiUrl_(),
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({ phase: request.phase, items: request.itemNames }),
+      muteHttpExceptions: true
     };
   });
+
+  try {
+    var responses = UrlFetchApp.fetchAll(fetchRequests);
+    return responses.map(function(response, idx) {
+      var phase = requests[idx].phase;
+      if (!response || response.getResponseCode() !== 200) return emptyCardCautionsResponse_(phase);
+      try {
+        return normalizeCardCautionsResponse_(phase, JSON.parse(response.getContentText() || '{}'));
+      } catch (parseErr) {
+        return emptyCardCautionsResponse_(phase);
+      }
+    });
+  } catch (err) {
+    return requests.map(function(request) {
+      return emptyCardCautionsResponse_(request.phase);
+    });
+  }
 }
 
-function markEquipmentRiskSearchEvaluationSkipped_(result) {
-  collectEquipmentRiskDashboardItems_(result).forEach(function(item) {
-    (item.riskWarnings || []).forEach(function(warning) {
-      warning.guidanceState = 'history_unknown';
-      warning.canDirectSend = false;
-      warning.guidanceReason = 'search_evaluation_skipped';
-    });
+function getDashboardCardCautionItemNames_(item) {
+  return normalizeCardCautionItemNames_(((item && item.equipments) || []).map(function(eq) {
+    return eq && eq.name;
+  }));
+}
+
+function attachDashboardCardCautions_(checkoutList, checkinList) {
+  var requests = [];
+
+  function enqueue(item, phase) {
+    if (!item) return;
+    item.cardCautions = [];
+    item.cardCautionsHiddenCount = 0;
+    item.cardCautionsTotalMatched = 0;
+    var itemNames = getDashboardCardCautionItemNames_(item);
+    if (!itemNames.length) return;
+    requests.push({ item: item, phase: phase, itemNames: itemNames });
+  }
+
+  (checkoutList || []).forEach(function(item) { enqueue(item, 'checkout'); });
+  (checkinList || []).forEach(function(item) { enqueue(item, 'return'); });
+
+  var results = fetchCardCautionsBatch_(requests);
+  requests.forEach(function(request, idx) {
+    var result = results[idx] || emptyCardCautionsResponse_(request.phase);
+    request.item.cardCautions = result.cautions || [];
+    request.item.cardCautionsHiddenCount = Number(result.hidden_count || 0) || 0;
+    request.item.cardCautionsTotalMatched = Number(result.total_matched || 0) || 0;
+    request.item.cardCautionsPhase = result.phase || request.phase;
   });
-  return result;
 }
 
 function getEquipmentRiskBackendConfig_() {
@@ -2101,138 +1972,6 @@ function verifyEquipmentRiskBackendConfig_(baseUrl, token) {
   } catch (err) {
     return { ok: false, status: err && err.message ? err.message : 'request_failed' };
   }
-}
-
-function equipmentRiskReservationPayload_(item) {
-  item = item || {};
-  return {
-    tradeId: item.tradeId || '',
-    cardType: item._type || '',
-    customerName: item.name || '',
-    customerPhone: item.customerPhone || item.tel || item.customerTel || '',
-    customerTel: item.customerTel || item.tel || '',
-    userType: item.userType || '',
-    userId: item.userId || '',
-    kakaoUser: item.kakaoUser || null,
-    company: item.company || '',
-    checkoutDate: item.checkoutDate || '',
-    returnDate: item.returnDate || '',
-    time: item.time || '',
-    equipments: (item.equipments || []).map(function(eq) {
-      return {
-        scheduleId: eq.scheduleId || '',
-        name: eq.name || '',
-        qty: eq.qty || 1,
-        setName: eq.setName || '',
-        isSet: !!eq.isSet,
-        isComponent: !!eq.isComponent
-      };
-    }),
-    riskItems: (item.riskWarnings || []).map(equipmentRiskBackendItem_)
-  };
-}
-
-function equipmentRiskBackendItem_(warning) {
-  warning = warning || {};
-  return {
-    ruleId: warning.ruleId || '',
-    ruleVersion: warning.ruleVersion || 1,
-    riskLevel: warning.riskLevel || '',
-    equipmentName: warning.equipmentName || '',
-    matchedAlias: warning.matchedAlias || '',
-    pickupStaffText: warning.pickupStaffText || '',
-    customerMessage: warning.customerMessage || '',
-    returnCheckText: warning.returnCheckText || '',
-    sensitive: !!warning.sensitive,
-    cooldownDays: warning.cooldownDays || 90
-  };
-}
-
-function evaluateEquipmentRiskGuidanceStates_(result) {
-  var items = collectEquipmentRiskDashboardItems_(result);
-  var itemsWithWarnings = items.filter(function(item) {
-    return item.riskWarnings && item.riskWarnings.length;
-  });
-  if (!itemsWithWarnings.length) return result;
-
-  var response = postEquipmentRiskBackend_('/admin/equipment-risk/evaluate', {
-    reservations: itemsWithWarnings.map(equipmentRiskReservationPayload_)
-  });
-
-  if (!response.success) {
-    markEquipmentRiskWarnings_(itemsWithWarnings, response.reason || 'backend_evaluation_failed');
-    return result;
-  }
-
-  applyEquipmentRiskEvaluation_(itemsWithWarnings, response.data || {});
-  return result;
-}
-
-function collectEquipmentRiskDashboardItems_(result) {
-  var items = [];
-  ['checkout', 'checkin'].forEach(function(key) {
-    ((result && result[key]) || []).forEach(function(item) { items.push(item); });
-  });
-  return items;
-}
-
-function markEquipmentRiskWarnings_(items, reason) {
-  (items || []).forEach(function(item) {
-    (item.riskWarnings || []).forEach(function(warning) {
-      warning.guidanceState = 'history_unknown';
-      warning.canDirectSend = false;
-      warning.guidanceReason = reason || 'backend_evaluation_failed';
-    });
-  });
-}
-
-function applyEquipmentRiskEvaluation_(items, data) {
-  var byTradeId = {};
-  var evaluationList = data.reservations || data.items || (Array.isArray(data.results) ? data.results : []);
-  evaluationList.forEach(function(entry) {
-    if (entry && entry.tradeId) byTradeId[String(entry.tradeId)] = entry;
-  });
-  if (data.results && !Array.isArray(data.results)) {
-    Object.keys(data.results).forEach(function(tid) {
-      byTradeId[String(tid)] = data.results[tid];
-    });
-  }
-
-  (items || []).forEach(function(item) {
-    var evaluated = byTradeId[String(item.tradeId || '')] || {};
-    var evaluatedWarnings = evaluated.riskItems || evaluated.warnings || evaluated.riskWarnings || [];
-    if (!evaluatedWarnings.length && data.riskItems && items.length === 1) {
-      evaluatedWarnings = data.riskItems;
-    }
-    if (!evaluatedWarnings.length && (evaluated.guidanceState || evaluated.canDirectSend !== undefined)) {
-      evaluatedWarnings = [evaluated];
-    }
-
-    (item.riskWarnings || []).forEach(function(warning) {
-      var matched = findEvaluatedRiskWarning_(warning, evaluatedWarnings);
-      if (!matched) return;
-      if (matched.guidanceState || matched.state) warning.guidanceState = matched.guidanceState || matched.state;
-      if (matched.canDirectSend !== undefined) warning.canDirectSend = !!matched.canDirectSend;
-      if (matched.guidanceReason || matched.reason) warning.guidanceReason = matched.guidanceReason || matched.reason;
-      if (matched.lastSentAt) warning.lastSentAt = matched.lastSentAt;
-      if (matched.lastEventAt) warning.lastEventAt = matched.lastEventAt;
-      if (matched.requiresApproval !== undefined) warning.requiresApproval = !!matched.requiresApproval;
-      if (matched.userType) warning.userType = matched.userType;
-      if (matched.userId) warning.userId = matched.userId;
-      if (matched.kakaoUser) warning.kakaoUser = matched.kakaoUser;
-      if (matched.customerKey) warning.customerKey = matched.customerKey;
-      if (matched.recipientSource) warning.recipientSource = matched.recipientSource;
-    });
-  });
-}
-
-function findEvaluatedRiskWarning_(warning, evaluatedWarnings) {
-  for (var i = 0; i < evaluatedWarnings.length; i++) {
-    var candidate = evaluatedWarnings[i] || {};
-    if (candidate.ruleId && warning.ruleId && String(candidate.ruleId) === String(warning.ruleId)) return candidate;
-    if (candidate.equipmentName && warning.equipmentName && String(candidate.equipmentName) === String(warning.equipmentName)) return candidate;
-  }
-  return evaluatedWarnings.length === 1 ? evaluatedWarnings[0] : null;
 }
 
 function postEquipmentRiskBackend_(path, payload) {
@@ -2681,6 +2420,7 @@ function invalidateDashboardCache(extraDates) {
       if (k) dateKeys[k] = true;
     });
     Object.keys(dateKeys).forEach(function(d) {
+      removeDashboardCacheJson_(cache, 'dashboard_v5_' + d);
       removeDashboardCacheJson_(cache, 'dashboard_v4_' + d);
       removeDashboardCacheJson_(cache, 'dashboard_v4_' + d + '_risk');
       cache.remove('dashboard_v3_' + d);

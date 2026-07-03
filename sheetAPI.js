@@ -237,9 +237,7 @@ function handleRequest(e) {
       case "dashboard":
         // nocache=1 이면 캐시 우회 (새로고침 버튼용)
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
-        return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache, {
-          evaluateRisk: params.riskEval || postBody.riskEval
-        }));
+        return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache, {}));
 
       case "dashboardEquipNames":
         return jsonResponse({
@@ -268,7 +266,8 @@ function handleRequest(e) {
             limit: Number(params.limit || postBody.limit) || 80,
             profile: params.profile || postBody.profile,
             summary: params.summary || postBody.summary,
-            detailGroup: params.detailGroup || postBody.detailGroup
+            detailGroup: params.detailGroup || postBody.detailGroup,
+            includeCautions: params.includeCautions || postBody.includeCautions
           }
         ));
 

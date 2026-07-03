@@ -10,219 +10,171 @@ const backend = read('checkAvailability.js');
 const api = read('sheetAPI.js');
 
 [
-  "var EQUIPMENT_RISK_RULE_SHEET_NAME = '장비주의사항';",
-  'function getEquipmentRiskRules_()',
-  'function matchEquipmentRiskRulesForEquipments_(equipments, rules)',
-  'evaluateEquipmentRiskGuidanceStates_(result);'
+  "var CARD_CAUTIONS_API_BASE_URL_ = 'https://village-ai-six.vercel.app';",
+  "var CARD_CAUTIONS_API_PATH_ = '/api/cautions';",
+  'function fetchCardCautions(phase, itemNames)',
+  'function fetchCardCautionsBatch_(requests)',
+  'function attachDashboardCardCautions_(checkoutList, checkinList)',
+  'UrlFetchApp.fetchAll(fetchRequests)',
+  'cardCautions: []',
+  'cardCautionsHiddenCount: 0'
 ].forEach((contract) => {
   assert.ok(
     backend.indexOf(contract) !== -1,
-    `checkAvailability.js must include contract: ${contract}`
+    `checkAvailability.js must include card caution contract: ${contract}`
   );
 });
 
-assert.match(
-  backend,
-  /function buildDashboardEquipmentRiskCandidates_\(displayEquip,\s*setSheet,\s*setComponentLookup\)/,
-  'risk candidate builder must accept the optional dashboard set component lookup'
-);
+[
+  'EQUIPMENT_RISK_RULE_SHEET_NAME',
+  'function getEquipmentRiskRules_()',
+  'function readEquipmentRiskRules_()',
+  'function matchEquipmentRiskRulesForEquipments_',
+  'function attachEquipmentRiskWarnings_',
+  'function evaluateEquipmentRiskGuidanceStates_',
+  'markEquipmentRiskSearchEvaluationSkipped_(result)',
+  'options.evaluateRisk',
+  'params.riskEval'
+].forEach((removed) => {
+  assert.ok(
+    backend.indexOf(removed) === -1 && api.indexOf(removed) === -1,
+    `old direct equipment-risk matching/evaluation contract must be removed: ${removed}`
+  );
+});
 
-assert.match(
-  backend,
-  /riskWarnings:\s*attachEquipmentRiskWarnings_\(buildDashboardEquipmentRiskCandidates_\(displayEquip,\s*setSheet,\s*riskCandidateLookup\),\s*riskRules\)/,
-  'dashboard risk warnings must use the prebuilt set component lookup'
-);
+const fetchCalls = [];
+const fetchAllCalls = [];
+const response = (status, body) => ({
+  getResponseCode: () => status,
+  getContentText: () => JSON.stringify(body)
+});
 
-const gasContext = { console, Logger: { log() {} } };
+const gasContext = {
+  console,
+  Logger: { log() {} },
+  UrlFetchApp: {
+    fetch(url, options) {
+      fetchCalls.push({ url, options });
+      return response(200, {
+        phase: 'checkout',
+        cautions: [
+          { text: '필수 1', equipment: 'FX3', severity: 3 },
+          { text: '중요 2', equipment: 'FX3', severity: 2 },
+          { text: '권장 3', equipment: 'FX3', severity: 1 },
+          { text: '권장 4', equipment: 'FX3', severity: 1 },
+          { text: '권장 5', equipment: 'FX3', severity: 1 },
+          { text: '권장 6', equipment: 'FX3', severity: 1 }
+        ],
+        hidden_count: 2,
+        total_matched: 8
+      });
+    },
+    fetchAll(requests) {
+      fetchAllCalls.push(requests);
+      return requests.map((request) => {
+        const payload = JSON.parse(request.payload);
+        if (payload.phase === 'return') {
+          return response(200, {
+            phase: 'return',
+            cautions: [
+              { text: '반납 렌즈 마운트 확인', equipment: 'FX3', severity: 1 }
+            ],
+            hidden_count: 0,
+            total_matched: 1
+          });
+        }
+        return response(200, {
+          phase: 'checkout',
+          cautions: [
+            { text: 'SDI 단자 확인', equipment: 'FX3', severity: 3 },
+            { text: '케이지 나사 확인', equipment: 'FX3', severity: 2 }
+          ],
+          hidden_count: 4,
+          total_matched: 6
+        });
+      });
+    }
+  }
+};
+
 vm.createContext(gasContext);
 vm.runInContext(backend, gasContext);
 
-assert.strictEqual(
-  typeof gasContext.buildDashboardEquipmentRiskCandidates_,
-  'function',
-  'checkAvailability.js must expose buildDashboardEquipmentRiskCandidates_'
-);
+const single = gasContext.fetchCardCautions('checkout', ['FX3', 'FX3', '']);
+assert.strictEqual(fetchCalls.length, 1, 'single helper must call /api/cautions once');
+assert.strictEqual(fetchCalls[0].url, 'https://village-ai-six.vercel.app/api/cautions');
+assert.deepStrictEqual(JSON.parse(fetchCalls[0].options.payload), {
+  phase: 'checkout',
+  items: ['FX3']
+});
+assert.strictEqual(single.cautions.length, 5, 'single helper must cap cautions to five');
+assert.strictEqual(single.hidden_count, 3, 'single helper must preserve server hidden_count plus local overflow');
 
-const fakeSetSheet = {
-  getLastRow: () => 3,
-  getLastColumn: () => 6,
-  getRange: () => ({
-    getValues: () => [
-      ['FX3 풀세트', '미라지 매트박스', 1, '', '', 'Y'],
-      ['FX3 풀세트', 'FX3 바디', 1, '', '', 'Y']
-    ]
-  })
+const checkoutItem = {
+  tradeId: '260701-001',
+  equipments: [{ name: 'FX3' }, { name: 'FX3' }, { name: '' }]
 };
+const returnItem = {
+  tradeId: '260701-002',
+  equipments: [{ name: 'FX3' }]
+};
+gasContext.attachDashboardCardCautions_([checkoutItem], [returnItem]);
 
-const riskCandidates = gasContext.buildDashboardEquipmentRiskCandidates_([
-  {
-    scheduleId: 'SCH-001',
-    name: 'FX3 풀세트',
-    qty: 1,
-    setName: '',
-    isHeader: true,
-    isSet: true,
-    isComponent: false
-  }
-], fakeSetSheet);
-
-assert.ok(
-  riskCandidates.some((eq) => eq.name === '미라지 매트박스' && eq.setName === 'FX3 풀세트'),
-  'set header risk candidates must include set master components'
+assert.strictEqual(fetchAllCalls.length, 1, 'dashboard attachment must batch card caution requests with fetchAll');
+assert.strictEqual(fetchAllCalls[0].length, 2, 'checkout and return cards must be requested in one batch');
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(fetchAllCalls[0].map((request) => JSON.parse(request.payload)))),
+  [
+    { phase: 'checkout', items: ['FX3'] },
+    { phase: 'return', items: ['FX3'] }
+  ],
+  'batch payload must preserve checkout/return phase and displayed equipment names'
 );
-
-const setRiskWarnings = gasContext.attachEquipmentRiskWarnings_(riskCandidates, [{
-  ruleId: 'mirage-mattebox-v1',
-  ruleVersion: 1,
-  equipmentName: '미라지 매트박스',
-  aliases: ['미라지 매트박스'],
-  pickupStaffText: '조임쇠를 너무 세게 조이지 않도록 안내',
-  customerMessage: '조임쇠를 너무 세게 조이지 말아주세요.',
-  returnCheckText: '조임쇠 파손 여부 확인',
-  cooldownDays: 90
-}]);
-
-assert.ok(
-  setRiskWarnings.some((warning) => warning.equipmentName === '미라지 매트박스'),
-  'risk warnings must trigger for risky set master components'
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(checkoutItem.cardCautions.map((caution) => caution.severity))),
+  [3, 2],
+  'checkout cautions must keep server severity order'
 );
+assert.strictEqual(checkoutItem.cardCautionsHiddenCount, 4);
+assert.strictEqual(returnItem.cardCautions[0].text, '반납 렌즈 마운트 확인');
+assert.strictEqual(returnItem.cardCautionsPhase, 'return');
 
 [
-  '고객카톡문구',
-  '민감발송',
-  '재추천차단일',
-  'customerPhone: item.customerPhone || item.tel || item.customerTel ||',
-  'riskItems: (item.riskWarnings || []).map(equipmentRiskBackendItem_)',
-  'var evaluatedWarnings = evaluated.riskItems || evaluated.warnings || evaluated.riskWarnings || [];',
-  'if (matched.userType) warning.userType = matched.userType;',
-  'if (matched.userId) warning.userId = matched.userId;',
-  'if (matched.kakaoUser) warning.kakaoUser = matched.kakaoUser;',
-  'evaluateEquipmentRiskGuidanceStates_(result);',
-  'markEquipmentRiskSearchEvaluationSkipped_(result);',
-  "warning.guidanceReason = 'search_evaluation_skipped';",
-  "if (payload.riskAction === 'approval' || payload.sendMode === 'approval_request') payload.action = 'approval';",
-  "postEquipmentRiskBackend_('/admin/equipment-risk/customer-guidance'",
-  "postEquipmentRiskBackend_('/admin/equipment-risk/events'",
-  'function diagEquipmentRiskBackendConfig()',
-  'function setupEquipmentRiskBackendConfig(adminUrl, adminToken)',
-  'function verifyEquipmentRiskBackendConfig_(baseUrl, token)',
-  "VILLAGE_KAKAO_AI_ADMIN_TOKEN: token"
+  'includeCautions: params.includeCautions || postBody.includeCautions',
+  'getDashboardData(params.date || postBody.date || null, skipCache, {})'
 ].forEach((contract) => {
-  assert.ok(
-    backend.indexOf(contract) !== -1,
-    `checkAvailability.js must include backend contract: ${contract}`
-  );
-});
-
-assert.doesNotMatch(
-  backend,
-  /postEquipmentRiskBackend_\('\/admin\/equipment-risk\/send'/,
-  'send proxy must not use the old /send path'
-);
-
-assert.doesNotMatch(
-  backend,
-  /postEquipmentRiskBackend_\('\/admin\/equipment-risk\/event'/,
-  'event proxy must not use the old singular /event path'
-);
-
-assert.ok(
-  (backend.match(/evaluateEquipmentRiskGuidanceStates_\(result\);/g) || []).length === 1,
-  'only the date dashboard should live-evaluate equipment risk guidance states'
-);
-
-assert.match(
-  backend,
- /function getDashboardSearchData[\s\S]*markEquipmentRiskSearchEvaluationSkipped_\(result\);[\s\S]*return result;/,
-  'dashboard search must mark risk evaluation skipped instead of calling the live backend'
-);
-
-[
-  "case \"equipmentRiskSend\":",
-  'jsonResponse(sendEquipmentRiskGuidance_(postBody.payload || postBody))',
-  "case \"equipmentRiskEvent\":",
-  'jsonResponse(recordEquipmentRiskEvent_(postBody.payload || postBody))'
-].forEach((contract) => {
-  assert.ok(
-    api.indexOf(contract) !== -1,
-    `sheetAPI.js must include contract: ${contract}`
-  );
-});
-
-[
-  '"diagEquipmentRiskBackendConfig"',
-  '"setupEquipmentRiskBackendConfig"',
-  'setupEquipmentRiskBackendConfig('
-].forEach((contract) => {
-  assert.ok(
-    api.indexOf(contract) !== -1,
-    `sheetAPI.js must expose guarded config helper: ${contract}`
-  );
+  assert.ok(api.indexOf(contract) !== -1, `sheetAPI.js must include contract: ${contract}`);
 });
 
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
   const html = read(file);
 
   [
+    'function cardCautionSummaryHtml(item, cardType)',
+    'function cardCautionsPanelHtml(item, cardType)',
+    'function cardCautionSeverityLabel(severity)',
+    'cardCautionSummaryHtml(item, cardType)',
+    'cardCautionsPanelHtml(item, cardType)',
+    '.card-caution-row.severity-3 .card-caution-meta',
+    '.card-caution-row.severity-3 .card-caution-text',
+    'class="card-caution-more"',
+    '외 ',
+    'hiddenCount + \'건 ▸</button>\'',
+    '&includeCautions=1'
+  ].forEach((contract) => {
+    assert.ok(html.indexOf(contract) !== -1, `${file} must include caution UI contract: ${contract}`);
+  });
+
+  [
     'function riskWarningSummaryHtml(item, cardType)',
     'function equipmentRiskPanelHtml(item, cardType)',
     'function sendEquipmentRiskGuidance(btn)',
-    'function recordEquipmentRiskEvent(btn, eventType)'
-  ].forEach((contract) => {
-    assert.ok(
-      html.indexOf(contract) !== -1,
-      `${file} must include contract: ${contract}`
-    );
-  });
-
-  [
-    'customerPhone: item.customerPhone || item.tel || item.customerTel ||',
-    "userType: item.userType || warning.userType || '',",
-    "userId: item.userId || warning.userId || '',",
-    'kakaoUser: item.kakaoUser || warning.kakaoUser || null,',
-    'pickup_ack',
-    'return_ok',
-    'return_issue',
-    'return_not_checked',
-    "var hasRecentSend = warning.guidanceState === 'recent_sent'",
-    'var canDirectSend = !warning.sensitive && hasKakaoTarget && !hasRecentSend;',
-    "riskButtonPayload(item, warning, cardType, { sendMode: 'direct' })",
-    "if (hasRecentSend) sendLabel = '최근 발송됨';",
-    'payload.notes = note;',
-    "if (state === 'recommend') return '발송 권장';",
-    "if (state === 'recent_sent') return '최근 발송';",
-    "if (state === 'recipient_missing') return '대상 없음';",
-    "confirm(confirmText)",
+    'function recordEquipmentRiskEvent(btn, eventType)',
     "dashboardApiPayload('equipmentRiskSend'",
-    'dashboardApiPayload('
-  ].forEach((contract) => {
-    assert.ok(
-      html.indexOf(contract) !== -1,
-      `${file} must include dashboard contract: ${contract}`
-    );
-  });
-
-  const confirmIndex = html.indexOf('confirm(confirmText)');
-  const sendIndex = html.indexOf("dashboardApiPayload('equipmentRiskSend'");
-  assert.ok(
-    confirmIndex !== -1 && sendIndex !== -1 && confirmIndex < sendIndex,
-    `${file} must confirm before posting equipmentRiskSend`
-  );
-
-  [
-    'pickup_acknowledged',
-    'return_unknown',
-    'payload.note = note',
-    'approval_request',
-    '처리판 승인 요청',
-    "payload.action = 'approval';",
-    "payload.riskAction = 'approval';"
-  ].forEach((unsupported) => {
-    assert.ok(
-      html.indexOf(unsupported) === -1,
-      `${file} must not use unsupported event name: ${unsupported}`
-    );
+    "dashboardApiPayload('equipmentRiskEvent'",
+    '.risk-warning-badge',
+    '.equipment-risk-actions'
+  ].forEach((removed) => {
+    assert.ok(html.indexOf(removed) === -1, `${file} must remove old risk UI contract: ${removed}`);
   });
 });
-
-console.log('equipment risk dashboard static checks passed');

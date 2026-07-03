@@ -102,8 +102,8 @@ assert.match(
 
   assert.match(
     html,
-    /html \+= returnMemoSummaryHtml\(item\);[\s\S]*html \+= riskWarningSummaryHtml\(item, cardType\);/,
-    `${file} must show memo badges in the folded card header before risk/time badges`
+    /html \+= returnMemoSummaryHtml\(item\);[\s\S]*html \+= cardCautionSummaryHtml\(item, cardType\);/,
+    `${file} must show memo badges in the folded card header before caution/time badges`
   );
 
   const memoSaveBody = html.match(/function updateEquipmentCheck\([\s\S]*?\n}\n\nfunction updateContractStatus/);

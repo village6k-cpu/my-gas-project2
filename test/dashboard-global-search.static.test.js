@@ -150,20 +150,20 @@ assert.match(
 
 assert.match(
   backend,
-  /var includeSearchRiskWarnings\s*=\s*options\.includeRiskWarnings === true/,
-  'global search must keep equipment-risk warning expansion opt-in for fast search details'
+  /var includeSearchCautions\s*=\s*options\.includeCautions === true/,
+  'global search must keep card caution API calls opt-in for fast search details'
+);
+
+assert.doesNotMatch(
+  backend,
+  /includeSearchRiskWarnings|getEquipmentRiskRules_|buildDashboardEquipmentRiskCandidates_/,
+  'global search must not use old equipment-risk sheet expansion'
 );
 
 assert.match(
   backend,
-  /includeSearchRiskWarnings \? setSheet : null/,
-  'global search must skip set-component risk expansion unless risk warnings are explicitly requested'
-);
-
-assert.match(
-  backend,
-  /function buildDashboardSearchItem_\([^\)]*options\)[\s\S]*includeRiskWarnings[\s\S]*riskWarnings:\s*includeRiskWarnings/,
-  'search card building must be able to omit expensive risk warning decoration'
+  /if \(includeSearchCautions\) attachDashboardCardCautions_\(result\.checkout,\s*result\.checkin\);/,
+  'search card building must attach cautions only when lazy detail requests opt in'
 );
 
 assert.match(
