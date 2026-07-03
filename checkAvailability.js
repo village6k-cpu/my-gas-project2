@@ -7424,6 +7424,19 @@ function _insertAndCheckRequest(req) {
 
   var lastRow = sheet.getLastRow();
 
+  var confirmRequestFRule = null;
+  try {
+    if (listSheet && equipNames.length > 0) {
+      confirmRequestFRule = SpreadsheetApp.newDataValidation()
+        .requireValueInRange(listSheet.getRange("A2:A" + (equipNames.length + 1)), true)
+        .setAllowInvalid(true)
+        .setHelpText("장비명 또는 세트명을 검색하세요")
+        .build();
+    }
+  } catch (validationRuleErr) {
+    confirmRequestFRule = null;
+  }
+
   // 첫 번째 빈 행 찾기 (A열 기준)
   var startRow = 2;
   if (lastRow >= 2) {
@@ -7466,7 +7479,12 @@ function _insertAndCheckRequest(req) {
     ];
     // 날짜/시간(B~E)은 텍스트로 고정 — 시트 타임존이 Asia/Seoul과 다르면
     // 자동 변환된 직렬값이 읽기 시 16:00/1899-LMT 쓰레기가 되므로 원천 차단
+    // 빈 행이 예전 세트 구성품/모델선택 행이면 F열에 strict row-level validation이
+    // 남아 있어 자유입력/미등록 품목 append가 실패한다. 확인요청 기본 rule(allow invalid)로 되돌린다.
     sheet.getRange(row, 2, 1, 4).setNumberFormat("@");
+    var fCellForInsert = sheet.getRange(row, 6);
+    if (confirmRequestFRule) fCellForInsert.setDataValidation(confirmRequestFRule);
+    else fCellForInsert.clearDataValidations();
     sheet.getRange(row, 1, 1, 18).setValues([rowData]);
 
     // 첫 행: 굵은 글씨 + 배경색으로 예약 건 구분
