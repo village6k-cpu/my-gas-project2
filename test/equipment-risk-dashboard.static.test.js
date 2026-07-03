@@ -155,6 +155,8 @@ assert.strictEqual(returnItem.cardCautionsPhase, 'return');
     'function cardCautionSeverityLabel(severity)',
     'cardCautionSummaryHtml(item, cardType)',
     'cardCautionsPanelHtml(item, cardType)',
+    "var label = '주의 ' + cautions.length;",
+    '}).slice(0, 5);',
     '.card-caution-row.severity-3 .card-caution-meta',
     '.card-caution-row.severity-3 .card-caution-text',
     'class="card-caution-more"',
@@ -177,4 +179,9 @@ assert.strictEqual(returnItem.cardCautionsPhase, 'return');
   ].forEach((removed) => {
     assert.ok(html.indexOf(removed) === -1, `${file} must remove old risk UI contract: ${removed}`);
   });
+
+  assert.ok(
+    html.indexOf("var label = '주의 ' + cautions.length + (hiddenCount > 0 ? '+' + hiddenCount : '');") === -1,
+    `${file} must not include hidden_count in the visible caution badge`
+  );
 });

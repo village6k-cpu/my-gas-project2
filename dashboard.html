@@ -2719,8 +2719,7 @@ function cardCautionSummaryHtml(item, cardType) {
   if (cardType !== 'checkout' && cardType !== 'checkin') return '';
   var cautions = cardCautionList(item);
   if (!cautions.length) return '';
-  var hiddenCount = cardCautionHiddenCount(item);
-  var label = '주의 ' + cautions.length + (hiddenCount > 0 ? '+' + hiddenCount : '');
+  var label = '주의 ' + cautions.length;
   return '<div class="card-caution-badge">' + escHtml(label) + '</div>';
 }
 
