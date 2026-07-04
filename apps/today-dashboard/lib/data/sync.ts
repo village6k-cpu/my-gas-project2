@@ -153,12 +153,12 @@ function mapDashboardCardCautions(it: any): RiskWarning[] {
   return raw
     .map((c: any) => ({ caution: c, text: sanitizeCautionDisplayText(c?.text) }))
     .filter(({ text }: { text: string }) => text)
-    .slice(0, 5)
     .map(({ caution: c, text }: { caution: any; text: string }, i: number) => {
       const severity = dashboardCautionSeverity(c?.severity);
       const equipmentName = String(c?.equipment || c?.matched_item || "").trim();
+      const cautionId = String(c?.id || "").trim();
       return {
-        id: `card-caution:${phase}:${i}:${equipmentName}:${text.slice(0, 40)}`,
+        id: cautionId || `card-caution:${phase}:${i}:${equipmentName}:${text.slice(0, 40)}`,
         phase,
         equipmentName,
         riskLevel: dashboardCautionRiskLevel(severity),
@@ -166,7 +166,7 @@ function mapDashboardCardCautions(it: any): RiskWarning[] {
         guidanceState: severity === 3 ? "발송권장" : "대상없음",
         source: "cardCaution",
         severity,
-        cautionId: String(c?.id || "").trim() || undefined,
+        cautionId: cautionId || undefined,
         scope: String(c?.scope || "").trim() || undefined,
         matchedItem: String(c?.matched_item || "").trim() || undefined,
         hiddenCount,

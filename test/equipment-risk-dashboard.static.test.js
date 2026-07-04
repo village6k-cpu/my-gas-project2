@@ -12,6 +12,7 @@ const api = read('sheetAPI.js');
 [
   "var CARD_CAUTIONS_API_BASE_URL_ = 'https://village-ai-six.vercel.app';",
   "var CARD_CAUTIONS_API_PATH_ = '/api/cautions';",
+  'var CARD_CAUTIONS_MAX_RENDERED_ = 10;',
   'function fetchCardCautions(phase, itemNames)',
   'function fetchCardCautionsBatch_(requests)',
   'function attachDashboardCardCautions_(checkoutList, checkinList)',
@@ -105,10 +106,11 @@ assert.strictEqual(fetchCalls.length, 1, 'single helper must call /api/cautions 
 assert.strictEqual(fetchCalls[0].url, 'https://village-ai-six.vercel.app/api/cautions');
 assert.deepStrictEqual(JSON.parse(fetchCalls[0].options.payload), {
   phase: 'checkout',
-  items: ['FX3']
+  items: ['FX3'],
+  limit: 10
 });
-assert.strictEqual(single.cautions.length, 5, 'single helper must cap cautions to five');
-assert.strictEqual(single.hidden_count, 3, 'single helper must preserve server hidden_count plus local overflow');
+assert.strictEqual(single.cautions.length, 6, 'single helper must keep expanded caution rows');
+assert.strictEqual(single.hidden_count, 2, 'single helper must preserve server hidden_count after expanded rows');
 assert.strictEqual(single.cautions[0].id, 'caution-required-1', 'single helper must preserve mined caution id');
 
 const checkoutItem = {
@@ -126,8 +128,8 @@ assert.strictEqual(fetchAllCalls[0].length, 2, 'checkout and return cards must b
 assert.deepStrictEqual(
   JSON.parse(JSON.stringify(fetchAllCalls[0].map((request) => JSON.parse(request.payload)))),
   [
-    { phase: 'checkout', items: ['FX3'] },
-    { phase: 'return', items: ['FX3'] }
+    { phase: 'checkout', items: ['FX3'], limit: 10 },
+    { phase: 'return', items: ['FX3'], limit: 10 }
   ],
   'batch payload must preserve checkout/return phase and displayed equipment names'
 );

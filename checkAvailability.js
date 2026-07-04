@@ -94,6 +94,7 @@ var DASHBOARD_CACHE_CHUNK_SIZE_ = 85000;
 var DASHBOARD_CACHE_MAX_CHUNKS_ = 30;
 var CARD_CAUTIONS_API_BASE_URL_ = 'https://village-ai-six.vercel.app';
 var CARD_CAUTIONS_API_PATH_ = '/api/cautions';
+var CARD_CAUTIONS_MAX_RENDERED_ = 10;
 
 /**
  * 타임라인 HTML/API에서 호출.
@@ -1800,11 +1801,11 @@ function normalizeCardCautionsResponse_(phase, data) {
 
   var rawCautions = Array.isArray(data.cautions) ? data.cautions : [];
   var hiddenCount = Number(data.hidden_count || 0);
-  if (rawCautions.length > 5) hiddenCount += rawCautions.length - 5;
+  if (rawCautions.length > CARD_CAUTIONS_MAX_RENDERED_) hiddenCount += rawCautions.length - CARD_CAUTIONS_MAX_RENDERED_;
 
   return {
     phase: normalizeCardCautionsPhase_(data.phase || phase),
-    cautions: rawCautions.slice(0, 5).map(function(caution) {
+    cautions: rawCautions.slice(0, CARD_CAUTIONS_MAX_RENDERED_).map(function(caution) {
       caution = caution || {};
       var severity = Number(caution.severity || 1);
       if (severity !== 3 && severity !== 2) severity = 1;
@@ -1833,7 +1834,7 @@ function fetchCardCautions(phase, itemNames) {
     var res = UrlFetchApp.fetch(getCardCautionsApiUrl_(), {
       method: 'post',
       contentType: 'application/json',
-      payload: JSON.stringify({ phase: phase, items: itemNames }),
+      payload: JSON.stringify({ phase: phase, items: itemNames, limit: CARD_CAUTIONS_MAX_RENDERED_ }),
       muteHttpExceptions: true
     });
     if (res.getResponseCode() !== 200) return emptyCardCautionsResponse_(phase);
@@ -1862,7 +1863,7 @@ function fetchCardCautionsBatch_(requests) {
       url: getCardCautionsApiUrl_(),
       method: 'post',
       contentType: 'application/json',
-      payload: JSON.stringify({ phase: request.phase, items: request.itemNames }),
+      payload: JSON.stringify({ phase: request.phase, items: request.itemNames, limit: CARD_CAUTIONS_MAX_RENDERED_ }),
       muteHttpExceptions: true
     };
   });

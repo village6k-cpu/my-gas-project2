@@ -13,8 +13,10 @@ function severityLabel(severity?: number): string {
 }
 
 type SeverityText = "필수" | "중요" | "권장";
+type DisplayCaution = RiskWarning & { actionId: string; customerMessage: string };
 
 const SEVERITY_OPTIONS: SeverityText[] = ["필수", "중요", "권장"];
+const COLLAPSED_CAUTION_LIMIT = 5;
 
 function severityValue(severity: SeverityText): 1 | 2 | 3 {
   if (severity === "필수") return 3;
@@ -47,6 +49,98 @@ async function responseMessage(res: Response): Promise<string> {
   }
 }
 
+function cautionActionId(warning: RiskWarning): string {
+  return String(warning.cautionId || warning.id || "").trim();
+}
+
+function CautionRow({
+  warning,
+  editedText,
+  editing,
+  editSavingId,
+  onDismiss,
+  onStartEdit,
+  onEditChange,
+  onCancelEdit,
+  onSaveEdit,
+}: {
+  warning: DisplayCaution;
+  editedText?: string;
+  editing: { id: string; text: string } | null;
+  editSavingId: string | null;
+  onDismiss: (cautionId: string) => void;
+  onStartEdit: (cautionId: string, text: string) => void;
+  onEditChange: (cautionId: string, text: string) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: () => void;
+}) {
+  const text = editedText ?? warning.customerMessage;
+  return (
+    <div className="py-1.5" data-caution-id={warning.actionId}>
+      <div className="flex items-start gap-2">
+        <Alert className={`mt-0.5 h-4 w-4 shrink-0 ${warning.severity === 3 ? "text-attention-fg" : "text-ink-faint"}`} />
+        <div className={`min-w-0 flex-1 text-[12.5px] leading-snug ${warning.severity === 3 ? "font-extrabold text-attention-fg" : "font-normal text-ink-mute"}`}>
+          <div>{severityLabel(warning.severity)}{warning.equipmentName ? ` · ${warning.equipmentName}` : ""}</div>
+          <p>{text}</p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            aria-label="주의사항 수정"
+            title="주의사항 수정"
+            data-caution-action="edit"
+            data-caution-id={warning.actionId}
+            className="grid h-5 w-5 place-items-center rounded-full text-ink-faint hover:bg-line/80 hover:text-ink"
+            onClick={(event) => {
+              event.stopPropagation();
+              onStartEdit(warning.actionId, text);
+            }}
+          >
+            <Pencil className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-label="주의사항 숨김"
+            title="주의사항 숨김"
+            data-caution-action="delete"
+            data-caution-id={warning.actionId}
+            className="grid h-5 w-5 place-items-center rounded-full text-[13px] font-semibold text-ink-faint hover:bg-line/80 hover:text-ink"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDismiss(warning.actionId);
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+      {editing && editing.id === warning.actionId && (
+        <div className="mt-2 space-y-1.5 pl-6">
+          <textarea
+            value={editing.text}
+            onChange={(event) => onEditChange(warning.actionId, event.target.value)}
+            className="min-h-[68px] w-full resize-none rounded-lg border border-line bg-white px-2.5 py-2 text-[13px] font-medium leading-snug text-ink outline-none focus:border-brand-300"
+            maxLength={200}
+          />
+          <div className="flex items-center justify-end gap-1.5">
+            <button type="button" className="tap rounded-lg px-2.5 py-1.5 text-[12px] font-bold text-ink-faint" onClick={onCancelEdit}>
+              취소
+            </button>
+            <button
+              type="button"
+              className="tap inline-flex items-center gap-1 rounded-lg bg-brand-600 px-2.5 py-1.5 text-[12px] font-bold text-white disabled:opacity-50"
+              onClick={onSaveEdit}
+              disabled={editSavingId === editing.id || !editing.text.trim()}
+            >
+              <Check className="h-3.5 w-3.5" /> 저장
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function RiskPanel({ warnings, phase, equipments }: { warnings: RiskWarning[]; phase: Phase; equipments: EquipmentItem[] }) {
   const [hiddenCautionIds, setHiddenCautionIds] = useState<Set<string>>(new Set());
   const [editedTexts, setEditedTexts] = useState<Record<string, string>>({});
@@ -59,6 +153,7 @@ export function RiskPanel({ warnings, phase, equipments }: { warnings: RiskWarni
   const [addSeverity, setAddSeverity] = useState<SeverityText>("중요");
   const [savingAdd, setSavingAdd] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   function handleDismissCaution(cautionId: string) {
     setHiddenCautionIds((prev) => {
@@ -66,7 +161,7 @@ export function RiskPanel({ warnings, phase, equipments }: { warnings: RiskWarni
       next.add(cautionId);
       return next;
     });
-    setLocalWarnings((prev) => prev.filter((w) => w.cautionId !== cautionId));
+    setLocalWarnings((prev) => prev.filter((w) => cautionActionId(w) !== cautionId));
     void authFetch(`/api/cautions?id=${encodeURIComponent(cautionId)}`, { method: "DELETE" }).catch(() => {});
   }
 
@@ -84,7 +179,7 @@ export function RiskPanel({ warnings, phase, equipments }: { warnings: RiskWarni
       });
       if (!res.ok) throw new Error(await responseMessage(res));
       setEditedTexts((prev) => ({ ...prev, [editing.id]: text }));
-      setLocalWarnings((prev) => prev.map((w) => (w.cautionId === editing.id ? { ...w, customerMessage: text } : w)));
+      setLocalWarnings((prev) => prev.map((w) => (cautionActionId(w) === editing.id ? { ...w, customerMessage: text } : w)));
       setEditing(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -136,96 +231,63 @@ export function RiskPanel({ warnings, phase, equipments }: { warnings: RiskWarni
     }
   }
 
+  function handleEditChange(cautionId: string, text: string) {
+    setEditing((current) => current && current.id === cautionId ? { ...current, text } : current);
+  }
+
   const combined = [...warnings, ...localWarnings];
   const seenKeys = new Set<string>();
-  const list = combined
+  const allList: DisplayCaution[] = combined
     .filter((w) => w.source === "cardCaution" && w.phase === phase && w.customerMessage.trim())
-    .filter((w) => !w.cautionId || !hiddenCautionIds.has(w.cautionId))
-    .map((w) => ({ ...w, customerMessage: sanitizeCautionDisplayText(w.cautionId ? (editedTexts[w.cautionId] ?? w.customerMessage) : w.customerMessage) }))
+    .map((w) => ({ ...w, actionId: cautionActionId(w) }))
+    .filter((w) => !hiddenCautionIds.has(w.actionId))
+    .map((w) => ({ ...w, customerMessage: sanitizeCautionDisplayText(editedTexts[w.actionId] ?? w.customerMessage) }))
     .filter((w) => w.customerMessage)
     .filter((w) => {
-      const key = w.cautionId || w.id;
+      const key = w.actionId;
       if (seenKeys.has(key)) return false;
       seenKeys.add(key);
       return true;
-    })
-    .slice(0, 5);
-  const hiddenCount = Math.max(0, ...list.map((w) => Number(w.hiddenCount || 0) || 0));
+    });
+  const visibleList = expanded ? allList : allList.slice(0, COLLAPSED_CAUTION_LIMIT);
+  const serverHiddenCount = Math.max(0, ...allList.map((w) => Number(w.hiddenCount || 0) || 0));
+  const hiddenBehindToggleCount = Math.max(0, allList.length - COLLAPSED_CAUTION_LIMIT);
+  const hasMoreToggle = hiddenBehindToggleCount > 0;
   const equipmentNames = uniqueEquipmentNames(equipments);
   const canAdd = equipmentNames.length > 0;
 
-  if (!list.length && !adding && !canAdd) return null;
+  if (!allList.length && !adding && !canAdd) return null;
 
   return (
     <div className="mt-3 rounded-xl bg-paper/80 p-3 ring-1 ring-line">
-      {list.map((w) => (
-        <div key={w.id} className="py-1.5">
-          <div className="flex items-start gap-2">
-            <Alert className={`mt-0.5 h-4 w-4 shrink-0 ${w.severity === 3 ? "text-attention-fg" : "text-ink-faint"}`} />
-            <div className={`min-w-0 flex-1 text-[12.5px] leading-snug ${w.severity === 3 ? "font-extrabold text-attention-fg" : "font-normal text-ink-mute"}`}>
-              <div>{severityLabel(w.severity)}{w.equipmentName ? ` · ${w.equipmentName}` : ""}</div>
-              <p>{w.customerMessage}</p>
-            </div>
-            {w.cautionId && !hiddenCautionIds.has(w.cautionId) && (
-              <div className="flex shrink-0 items-center gap-1">
-                <button
-                  type="button"
-                  aria-label="주의사항 수정"
-                  title="주의사항 수정"
-                  className="grid h-5 w-5 place-items-center rounded-full text-ink-faint hover:bg-line/80 hover:text-ink"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setEditing({ id: w.cautionId!, text: editedTexts[w.cautionId!] ?? w.customerMessage });
-                  }}
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  aria-label="주의사항 숨김"
-                  title="주의사항 숨김"
-                  className="grid h-5 w-5 place-items-center rounded-full text-[13px] font-semibold text-ink-faint hover:bg-line/80 hover:text-ink"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    if (w.cautionId) handleDismissCaution(w.cautionId);
-                  }}
-                >
-                  ✕
-                </button>
-              </div>
-            )}
-          </div>
-          {editing && editing.id === w.cautionId && (
-            <div className="mt-2 space-y-1.5 pl-6">
-              <textarea
-                value={editing.text}
-                onChange={(event) =>
-                  setEditing((current) => current && current.id === w.cautionId ? { ...current, text: event.target.value } : current)
-                }
-                className="min-h-[68px] w-full resize-none rounded-lg border border-line bg-white px-2.5 py-2 text-[13px] font-medium leading-snug text-ink outline-none focus:border-brand-300"
-                maxLength={200}
-              />
-              <div className="flex items-center justify-end gap-1.5">
-                <button type="button" className="tap rounded-lg px-2.5 py-1.5 text-[12px] font-bold text-ink-faint" onClick={() => setEditing(null)}>
-                  취소
-                </button>
-                <button
-                  type="button"
-                  className="tap inline-flex items-center gap-1 rounded-lg bg-brand-600 px-2.5 py-1.5 text-[12px] font-bold text-white disabled:opacity-50"
-                  onClick={handleSaveEdit}
-                  disabled={editSavingId === editing.id || !editing.text.trim()}
-                >
-                  <Check className="h-3.5 w-3.5" /> 저장
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
+      {visibleList.map((w) => (
+        <CautionRow
+          key={w.actionId}
+          warning={w}
+          editedText={editedTexts[w.actionId]}
+          editing={editing}
+          editSavingId={editSavingId}
+          onDismiss={handleDismissCaution}
+          onStartEdit={(cautionId, text) => setEditing({ id: cautionId, text })}
+          onEditChange={handleEditChange}
+          onCancelEdit={() => setEditing(null)}
+          onSaveEdit={handleSaveEdit}
+        />
       ))}
-      {hiddenCount > 0 && (
-        <button type="button" className="mt-1 text-[12px] font-semibold text-ink-faint">
-          외 {hiddenCount}건 ▸
+      {hasMoreToggle && (
+        <button
+          type="button"
+          className="mt-1 text-[12px] font-semibold text-ink-faint"
+          onClick={(event) => {
+            event.stopPropagation();
+            setExpanded((value) => !value);
+          }}
+        >
+          {expanded ? "접기 ▴" : `외 ${hiddenBehindToggleCount}건 ▸`}
         </button>
+      )}
+      {serverHiddenCount > 0 && !hasMoreToggle && (
+        <div className="mt-1 text-[12px] font-semibold text-ink-faint">외 {serverHiddenCount}건</div>
       )}
       {error && <div className="mt-2 rounded-lg bg-attention-bg px-2.5 py-1.5 text-[12px] font-bold text-attention-fg">{error}</div>}
       {adding ? (

@@ -27,10 +27,11 @@ const cautionRoute = read('apps/today-dashboard/app/api/cautions/route.ts');
   'function mapDashboardCardCautions(it: any): RiskWarning[]',
   'Array.isArray(it?.cardCautions) ? it.cardCautions : []',
   'sanitizeCautionDisplayText(c?.text)',
-  '.slice(0, 5)',
   'cardCautionsHiddenCount',
   'source: "cardCaution"',
-  'cautionId: String(c?.id || "").trim() || undefined',
+  'const cautionId = String(c?.id || "").trim()',
+  'id: cautionId || `card-caution:${phase}:${i}:${equipmentName}:${text.slice(0, 40)}`',
+  'cautionId: cautionId || undefined',
   'function mergeDashboardCardCautions(base: Trade, it: any): RiskWarning[]',
   'w.source === "cardCaution" && w.phase !== phase',
   'riskWarnings: mergeDashboardCardCautions(base, it)',
@@ -45,16 +46,23 @@ const cautionRoute = read('apps/today-dashboard/app/api/cautions/route.ts');
 [
   'w.source === "cardCaution" && w.phase === phase',
   'useState<Set<string>>(new Set())',
-  'w.cautionId && !hiddenCautionIds.has(w.cautionId)',
-  'handleDismissCaution(w.cautionId)',
+  'function CautionRow({',
+  'data-caution-id={warning.actionId}',
+  'data-caution-action="edit"',
+  'data-caution-action="delete"',
+  'onDismiss(warning.actionId)',
   'authFetch(`/api/cautions?id=${encodeURIComponent(cautionId)}`',
   'method: "DELETE"',
-  'sanitizeCautionDisplayText(w.cautionId ? (editedTexts[w.cautionId] ?? w.customerMessage) : w.customerMessage)',
-  '.slice(0, 5)',
-  'const hiddenCount = Math.max(0, ...list.map((w) => Number(w.hiddenCount || 0) || 0))',
-  '외 {hiddenCount}건 ▸',
-  'w.severity === 3 ? "font-extrabold text-attention-fg" : "font-normal text-ink-mute"',
-  'setEditing({ id: w.cautionId!, text: editedTexts[w.cautionId!] ?? w.customerMessage })',
+  'sanitizeCautionDisplayText(editedTexts[w.actionId] ?? w.customerMessage)',
+  'allList.slice(0, COLLAPSED_CAUTION_LIMIT)',
+  'visibleList.map((w) => (',
+  'const serverHiddenCount = Math.max(0, ...allList.map((w) => Number(w.hiddenCount || 0) || 0))',
+  'const hiddenBehindToggleCount = Math.max(0, allList.length - COLLAPSED_CAUTION_LIMIT)',
+  'const hasMoreToggle = hiddenBehindToggleCount > 0',
+  '`외 ${hiddenBehindToggleCount}건 ▸`',
+  '<div className="mt-1 text-[12px] font-semibold text-ink-faint">외 {serverHiddenCount}건</div>',
+  'warning.severity === 3 ? "font-extrabold text-attention-fg" : "font-normal text-ink-mute"',
+  'onStartEdit(warning.actionId, text)',
   'method: "PATCH"',
   'body: JSON.stringify({ text })',
   'authFetch("/api/cautions",',
@@ -64,6 +72,14 @@ const cautionRoute = read('apps/today-dashboard/app/api/cautions/route.ts');
   '<option value="공통">공통</option>',
 ].forEach((contract) => {
   assert.ok(panel.includes(contract), `RiskPanel must render only capped card cautions: ${contract}`);
+});
+
+[
+  'w.cautionId && !hiddenCautionIds.has(w.cautionId)',
+  'if (w.cautionId) handleDismissCaution(w.cautionId)',
+  'setEditing({ id: w.cautionId!, text: editedTexts[w.cautionId!] ?? w.customerMessage })',
+].forEach((removed) => {
+  assert.ok(!panel.includes(removed), `RiskPanel must not gate per-row controls on old cautionId condition: ${removed}`);
 });
 
 assert.ok(
