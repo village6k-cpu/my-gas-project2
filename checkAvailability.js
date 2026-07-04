@@ -1809,6 +1809,7 @@ function normalizeCardCautionsResponse_(phase, data) {
       var severity = Number(caution.severity || 1);
       if (severity !== 3 && severity !== 2) severity = 1;
       return {
+        id: String(caution.id || '').trim(),
         text: String(caution.text || '').trim(),
         equipment: String(caution.equipment || '').trim(),
         severity: severity,

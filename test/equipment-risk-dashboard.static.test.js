@@ -58,7 +58,7 @@ const gasContext = {
       return response(200, {
         phase: 'checkout',
         cautions: [
-          { text: '필수 1', equipment: 'FX3', severity: 3 },
+          { id: 'caution-required-1', text: '필수 1', equipment: 'FX3', severity: 3 },
           { text: '중요 2', equipment: 'FX3', severity: 2 },
           { text: '권장 3', equipment: 'FX3', severity: 1 },
           { text: '권장 4', equipment: 'FX3', severity: 1 },
@@ -77,7 +77,7 @@ const gasContext = {
           return response(200, {
             phase: 'return',
             cautions: [
-              { text: '반납 렌즈 마운트 확인', equipment: 'FX3', severity: 1 }
+              { id: 'caution-return-1', text: '반납 렌즈 마운트 확인', equipment: 'FX3', severity: 1 }
             ],
             hidden_count: 0,
             total_matched: 1
@@ -86,7 +86,7 @@ const gasContext = {
         return response(200, {
           phase: 'checkout',
           cautions: [
-            { text: 'SDI 단자 확인', equipment: 'FX3', severity: 3 },
+            { id: 'caution-checkout-1', text: 'SDI 단자 확인', equipment: 'FX3', severity: 3 },
             { text: '케이지 나사 확인', equipment: 'FX3', severity: 2 }
           ],
           hidden_count: 4,
@@ -109,6 +109,7 @@ assert.deepStrictEqual(JSON.parse(fetchCalls[0].options.payload), {
 });
 assert.strictEqual(single.cautions.length, 5, 'single helper must cap cautions to five');
 assert.strictEqual(single.hidden_count, 3, 'single helper must preserve server hidden_count plus local overflow');
+assert.strictEqual(single.cautions[0].id, 'caution-required-1', 'single helper must preserve mined caution id');
 
 const checkoutItem = {
   tradeId: '260701-001',
@@ -136,7 +137,9 @@ assert.deepStrictEqual(
   'checkout cautions must keep server severity order'
 );
 assert.strictEqual(checkoutItem.cardCautionsHiddenCount, 4);
+assert.strictEqual(checkoutItem.cardCautions[0].id, 'caution-checkout-1', 'dashboard card cautions must preserve mined caution id');
 assert.strictEqual(returnItem.cardCautions[0].text, '반납 렌즈 마운트 확인');
+assert.strictEqual(returnItem.cardCautions[0].id, 'caution-return-1', 'return card cautions must preserve mined caution id');
 assert.strictEqual(returnItem.cardCautionsPhase, 'return');
 
 [

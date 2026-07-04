@@ -14,6 +14,7 @@ const cautions = read('apps/today-dashboard/lib/domain/cautions.ts');
 [
   'source?: "cardCaution" | "riskWarning"',
   'severity?: 1 | 2 | 3',
+  'cautionId?: string',
   'hiddenCount?: number',
   'totalMatched?: number',
 ].forEach((contract) => {
@@ -27,6 +28,7 @@ const cautions = read('apps/today-dashboard/lib/domain/cautions.ts');
   '.slice(0, 5)',
   'cardCautionsHiddenCount',
   'source: "cardCaution"',
+  'cautionId: String(c?.id || "").trim() || undefined',
   'function mergeDashboardCardCautions(base: Trade, it: any): RiskWarning[]',
   'w.source === "cardCaution" && w.phase !== phase',
   'riskWarnings: mergeDashboardCardCautions(base, it)',
@@ -40,6 +42,11 @@ const cautions = read('apps/today-dashboard/lib/domain/cautions.ts');
 
 [
   'w.source === "cardCaution" && w.phase === phase',
+  'useState<Set<string>>(new Set())',
+  'w.cautionId && !hiddenCautionIds.has(w.cautionId)',
+  'handleDismissCaution(w.cautionId)',
+  'https://village-ai-six.vercel.app/api/cautions?id=${encodeURIComponent(cautionId)}',
+  'method: "DELETE"',
   'sanitizeCautionDisplayText(w.customerMessage)',
   '.slice(0, 5)',
   'const hiddenCount = Math.max(0, ...list.map((w) => Number(w.hiddenCount || 0) || 0))',

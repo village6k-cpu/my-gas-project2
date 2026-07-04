@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { Phase, RiskWarning } from "@/lib/domain/types";
 import { sanitizeCautionDisplayText } from "@/lib/domain/cautions";
 import { Alert } from "./icons";
@@ -11,8 +12,20 @@ function severityLabel(severity?: number): string {
 }
 
 export function RiskPanel({ warnings, phase }: { warnings: RiskWarning[]; phase: Phase }) {
+  const [hiddenCautionIds, setHiddenCautionIds] = useState<Set<string>>(new Set());
+
+  function handleDismissCaution(cautionId: string) {
+    setHiddenCautionIds((prev) => {
+      const next = new Set(prev);
+      next.add(cautionId);
+      return next;
+    });
+    void fetch(`https://village-ai-six.vercel.app/api/cautions?id=${encodeURIComponent(cautionId)}`, { method: "DELETE" }).catch(() => {});
+  }
+
   const list = warnings
     .filter((w) => w.source === "cardCaution" && w.phase === phase && w.customerMessage.trim())
+    .filter((w) => !w.cautionId || !hiddenCautionIds.has(w.cautionId))
     .map((w) => ({ ...w, customerMessage: sanitizeCautionDisplayText(w.customerMessage) }))
     .filter((w) => w.customerMessage)
     .slice(0, 5);
@@ -27,6 +40,20 @@ export function RiskPanel({ warnings, phase }: { warnings: RiskWarning[]; phase:
             <div>{severityLabel(w.severity)}{w.equipmentName ? ` · ${w.equipmentName}` : ""}</div>
             <p>{w.customerMessage}</p>
           </div>
+          {w.cautionId && !hiddenCautionIds.has(w.cautionId) && (
+            <button
+              type="button"
+              aria-label="주의사항 숨김"
+              title="주의사항 숨김"
+              className="grid h-5 w-5 shrink-0 place-items-center rounded-full text-[13px] font-semibold text-ink-faint hover:bg-line/80 hover:text-ink"
+              onClick={(event) => {
+                event.stopPropagation();
+                if (w.cautionId) handleDismissCaution(w.cautionId);
+              }}
+            >
+              ✕
+            </button>
+          )}
         </div>
       ))}
       {hiddenCount > 0 && (

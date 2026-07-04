@@ -76,6 +76,7 @@ export interface RiskWarning {
   sensitive?: boolean;
   source?: "cardCaution" | "riskWarning";
   severity?: 1 | 2 | 3;
+  cautionId?: string;
   scope?: string;
   matchedItem?: string;
   hiddenCount?: number;
