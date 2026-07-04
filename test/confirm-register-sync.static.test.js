@@ -194,8 +194,9 @@ console.log('audit-round-1 checks OK');
 const syncTs2 = read('apps/today-dashboard/lib/data/sync.ts');
 assert(
   syncTs2.includes('appOnly') && syncTs2.includes('e.onsite || e.offCatalog') &&
-    syncTs2.includes('prev?.checkoutState === "excluded"') && syncTs2.includes('extrasFailed'),
-  'dashboard merge must preserve onsite items, excluded state, and skip payment merge on extras failure'
+    syncTs2.includes('원장에 다시 보이는 행은 앱 캐시의 excluded 상태로 숨기지 않는다.') &&
+    !syncTs2.includes('prev?.checkoutState === "excluded"') && syncTs2.includes('extrasFailed'),
+  'dashboard merge must preserve onsite items, avoid stale excluded-state revival, and skip payment merge on extras failure'
 );
 assert(
   /rc\.damaged ?\?\? 0\) > 0 \|\| \(rc\.lost ?\?\? 0\) > 0/.test(syncTs2),
@@ -575,8 +576,16 @@ console.log('guide-skip-completed checks OK');
   );
   assert(
     /function normalizeGuideCustomerPhone_\(value\)/.test(helpers) &&
-      /replace\(\s*\/\[\^0-9\]\/g,\s*''\s*\)/.test(helpers) &&
-      /s\.length > 10 \? s\.slice\(-10\) : s/.test(helpers),
+      (
+        (
+          /replace\(\s*\/\[\^0-9\]\/g,\s*''\s*\)/.test(helpers) &&
+          /s\.length > 10 \? s\.slice\(-10\) : s/.test(helpers)
+        ) ||
+        (
+          /return _confirmRequestPhoneKey_\(value\);/.test(helpers) &&
+          /function _confirmRequestPhoneKey_\(v\)[\s\S]{0,220}replace\(\/\\D\/g,\s*""\)[\s\S]{0,220}digits\.length > 10 \? digits\.slice\(-10\) : digits/.test(ca)
+        )
+      ),
     'guide alimtalk must normalize phone numbers by comparing the last 10 digits'
   );
   assert(
@@ -828,10 +837,11 @@ console.log('roundtrip-item-memo-sync checks OK');
     /checkoutState: r\.checkout_state/.test(map) && /onsite: r\.onsite/.test(map) && /takenQty: r\.taken_qty/.test(map),
     'fromRow must restore checkoutState/onsite/takenQty'
   );
-  // GAS 새로고침 머지가 제외/부분수량/현장추가를 덮어쓰지 않음
+  // GAS 새로고침 머지가 시트에 다시 보이는 행을 stale excluded로 숨기지 않음
   assert(
-    /prev\?\.checkoutState === "excluded" \? "excluded"/.test(sync),
-    'mergeDashboard must preserve app-only 제외(excluded) on sheet refresh'
+    sync.includes('원장에 다시 보이는 행은 앱 캐시의 excluded 상태로 숨기지 않는다.') &&
+      !/prev\?\.checkoutState === "excluded" \? "excluded"/.test(sync),
+    'mergeDashboard must not revive stale excluded state for sheet-backed rows'
   );
   assert(
     /e\.onsite \|\| e\.offCatalog\)/.test(sync) && /appOnly/.test(sync),

@@ -109,8 +109,14 @@ assert.doesNotMatch(
 
 assert.match(
   backend,
-  /function normalizeCardCautionsResponse_\(phase,\s*data\)[\s\S]*rawCautions\.slice\(0,\s*5\)/,
-  'card caution normalization must cap visible cautions at five'
+  /var CARD_CAUTIONS_MAX_RENDERED_\s*=\s*10;/,
+  'card caution normalization must allow enough rows for expanded card cautions'
+);
+
+assert.match(
+  backend,
+  /function normalizeCardCautionsResponse_\(phase,\s*data\)[\s\S]*rawCautions\.slice\(0,\s*CARD_CAUTIONS_MAX_RENDERED_\)/,
+  'card caution normalization must cap rendered cautions with the shared limit'
 );
 
 const dashboardDataBody = backend.match(/function getDashboardData\([\s\S]*?\n}\n\nfunction getDashboardSearchData/);
