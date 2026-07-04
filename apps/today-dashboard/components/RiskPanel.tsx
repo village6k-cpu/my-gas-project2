@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { Phase, RiskWarning } from "@/lib/domain/types";
 import { sanitizeCautionDisplayText } from "@/lib/domain/cautions";
+import { authFetch } from "@/lib/data/authFetch";
 import { Alert } from "./icons";
 
 function severityLabel(severity?: number): string {
@@ -20,7 +21,7 @@ export function RiskPanel({ warnings, phase }: { warnings: RiskWarning[]; phase:
       next.add(cautionId);
       return next;
     });
-    void fetch(`https://village-ai-six.vercel.app/api/cautions?id=${encodeURIComponent(cautionId)}`, { method: "DELETE" }).catch(() => {});
+    void authFetch(`/api/cautions?id=${encodeURIComponent(cautionId)}`, { method: "DELETE" }).catch(() => {});
   }
 
   const list = warnings

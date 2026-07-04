@@ -10,6 +10,7 @@ const panel = read('apps/today-dashboard/components/RiskPanel.tsx');
 const types = read('apps/today-dashboard/lib/domain/types.ts');
 const status = read('apps/today-dashboard/lib/domain/status.ts');
 const cautions = read('apps/today-dashboard/lib/domain/cautions.ts');
+const cautionRoute = read('apps/today-dashboard/app/api/cautions/route.ts');
 
 [
   'source?: "cardCaution" | "riskWarning"',
@@ -45,7 +46,7 @@ const cautions = read('apps/today-dashboard/lib/domain/cautions.ts');
   'useState<Set<string>>(new Set())',
   'w.cautionId && !hiddenCautionIds.has(w.cautionId)',
   'handleDismissCaution(w.cautionId)',
-  'https://village-ai-six.vercel.app/api/cautions?id=${encodeURIComponent(cautionId)}',
+  'authFetch(`/api/cautions?id=${encodeURIComponent(cautionId)}`',
   'method: "DELETE"',
   'sanitizeCautionDisplayText(w.customerMessage)',
   '.slice(0, 5)',
@@ -76,6 +77,15 @@ assert.ok(
   'corrections?\\.md',
 ].forEach((contract) => {
   assert.ok(cautions.includes(contract), `caution sanitizer must strip internal evidence labels: ${contract}`);
+});
+
+[
+  'export async function DELETE(req: NextRequest)',
+  'https://village-ai-six.vercel.app/api/cautions',
+  'url.searchParams.set("id", id)',
+  'method: "DELETE"',
+].forEach((contract) => {
+  assert.ok(cautionRoute.includes(contract), `caution delete route must proxy mined caution deletes: ${contract}`);
 });
 
 console.log('today-dashboard card caution static checks passed');
