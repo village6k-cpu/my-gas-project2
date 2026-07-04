@@ -146,7 +146,7 @@ export function ScheduleCard({
       {open && (
         <div className="px-4 pb-4 pl-5 pt-1">
           <HandoverChecklist trade={trade} phase={phase} />
-          <RiskPanel warnings={trade.riskWarnings} phase={phase} />
+          <RiskPanel warnings={trade.riskWarnings} phase={phase} equipments={trade.equipments} />
           <PhotoStrip tradeId={trade.tradeId} photos={trade.photos} />
           <PaymentControls trade={trade} />
         </div>

@@ -43,3 +43,46 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
   }
 }
+
+async function proxyJsonMutation(req: NextRequest, method: "PUT" | "PATCH") {
+  if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
+
+  const url = new URL("https://village-ai-six.vercel.app/api/cautions");
+  const id = String(req.nextUrl.searchParams.get("id") || "").trim();
+  if (method === "PATCH") {
+    if (!id) return NextResponse.json({ error: "id 필요" }, { status: 400 });
+    url.searchParams.set("id", id);
+  }
+
+  try {
+    const body = await req.text();
+    const res = await fetch(url.toString(), {
+      method,
+      headers: { "content-type": req.headers.get("content-type") || "application/json" },
+      body,
+      cache: "no-store",
+    });
+    const text = await res.text();
+    let json: unknown = text;
+    if (text) {
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = { ok: res.ok, body: text };
+      }
+    } else {
+      json = { ok: res.ok };
+    }
+    return NextResponse.json(json, { status: res.status });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
+  }
+}
+
+export async function PUT(req: NextRequest) {
+  return proxyJsonMutation(req, "PUT");
+}
+
+export async function PATCH(req: NextRequest) {
+  return proxyJsonMutation(req, "PATCH");
+}

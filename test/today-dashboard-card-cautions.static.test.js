@@ -7,6 +7,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 const sync = read('apps/today-dashboard/lib/data/sync.ts');
 const panel = read('apps/today-dashboard/components/RiskPanel.tsx');
+const card = read('apps/today-dashboard/components/ScheduleCard.tsx');
 const types = read('apps/today-dashboard/lib/domain/types.ts');
 const status = read('apps/today-dashboard/lib/domain/status.ts');
 const cautions = read('apps/today-dashboard/lib/domain/cautions.ts');
@@ -48,14 +49,27 @@ const cautionRoute = read('apps/today-dashboard/app/api/cautions/route.ts');
   'handleDismissCaution(w.cautionId)',
   'authFetch(`/api/cautions?id=${encodeURIComponent(cautionId)}`',
   'method: "DELETE"',
-  'sanitizeCautionDisplayText(w.customerMessage)',
+  'sanitizeCautionDisplayText(w.cautionId ? (editedTexts[w.cautionId] ?? w.customerMessage) : w.customerMessage)',
   '.slice(0, 5)',
   'const hiddenCount = Math.max(0, ...list.map((w) => Number(w.hiddenCount || 0) || 0))',
   '외 {hiddenCount}건 ▸',
   'w.severity === 3 ? "font-extrabold text-attention-fg" : "font-normal text-ink-mute"',
+  'setEditing({ id: w.cautionId!, text: editedTexts[w.cautionId!] ?? w.customerMessage })',
+  'method: "PATCH"',
+  'body: JSON.stringify({ text })',
+  'authFetch("/api/cautions",',
+  'method: "PUT"',
+  'body: JSON.stringify({ equipment, phase: phaseLabel(phase), text, severity: addSeverity })',
+  'useState<SeverityText>("중요")',
+  '<option value="공통">공통</option>',
 ].forEach((contract) => {
   assert.ok(panel.includes(contract), `RiskPanel must render only capped card cautions: ${contract}`);
 });
+
+assert.ok(
+  card.includes('<RiskPanel warnings={trade.riskWarnings} phase={phase} equipments={trade.equipments} />'),
+  'ScheduleCard must pass card equipment names into the caution add form',
+);
 
 [
   '카톡 안내 발송',
@@ -81,11 +95,15 @@ assert.ok(
 
 [
   'export async function DELETE(req: NextRequest)',
+  'export async function PUT(req: NextRequest)',
+  'export async function PATCH(req: NextRequest)',
   'https://village-ai-six.vercel.app/api/cautions',
   'url.searchParams.set("id", id)',
   'method: "DELETE"',
+  'return proxyJsonMutation(req, "PUT")',
+  'return proxyJsonMutation(req, "PATCH")',
 ].forEach((contract) => {
-  assert.ok(cautionRoute.includes(contract), `caution delete route must proxy mined caution deletes: ${contract}`);
+  assert.ok(cautionRoute.includes(contract), `caution route must proxy mined caution mutations: ${contract}`);
 });
 
 console.log('today-dashboard card caution static checks passed');
