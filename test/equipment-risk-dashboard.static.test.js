@@ -115,7 +115,14 @@ assert.strictEqual(single.cautions[0].id, 'caution-required-1', 'single helper m
 
 const checkoutItem = {
   tradeId: '260701-001',
-  equipments: [{ name: 'FX3' }, { name: 'FX3' }, { name: '' }]
+  equipments: [
+    { name: '소니 A7S3 바디세트' },
+    { name: '소니 A7S3 바디(케이지)' },
+    { name: '소니 CF-A 160' },
+    { name: 'NP-FZ100' },
+    { name: 'NP-FZ100 충전기' },
+    { name: '' }
+  ]
 };
 const returnItem = {
   tradeId: '260701-002',
@@ -128,10 +135,10 @@ assert.strictEqual(fetchAllCalls[0].length, 2, 'checkout and return cards must b
 assert.deepStrictEqual(
   JSON.parse(JSON.stringify(fetchAllCalls[0].map((request) => JSON.parse(request.payload)))),
   [
-    { phase: 'checkout', items: ['FX3'], limit: 5 },
+    { phase: 'checkout', items: ['소니 A7S3 바디세트', '소니 A7S3 바디(케이지)', '소니 CF-A 160'], limit: 5 },
     { phase: 'return', items: ['FX3'], limit: 5 }
   ],
-  'batch payload must preserve checkout/return phase and displayed equipment names'
+  'batch payload must call once per card while omitting duplicate-prone battery/charger components when other equipment exists'
 );
 assert.deepStrictEqual(
   JSON.parse(JSON.stringify(checkoutItem.cardCautions.map((caution) => caution.severity))),
@@ -143,6 +150,18 @@ assert.strictEqual(checkoutItem.cardCautions[0].id, 'caution-checkout-1', 'dashb
 assert.strictEqual(returnItem.cardCautions[0].text, '반납 렌즈 마운트 확인');
 assert.strictEqual(returnItem.cardCautions[0].id, 'caution-return-1', 'return card cautions must preserve mined caution id');
 assert.strictEqual(returnItem.cardCautionsPhase, 'return');
+
+const batteryOnlyItem = {
+  tradeId: '260701-003',
+  equipments: [{ name: 'NP-FZ100' }, { name: 'NP-FZ100 충전기' }]
+};
+fetchAllCalls.length = 0;
+gasContext.attachDashboardCardCautions_([batteryOnlyItem], []);
+assert.deepStrictEqual(
+  JSON.parse(fetchAllCalls[0][0].payload),
+  { phase: 'checkout', items: ['NP-FZ100', 'NP-FZ100 충전기'], limit: 5 },
+  'battery-only cards must still request their own cautions'
+);
 
 [
   'includeCautions: params.includeCautions || postBody.includeCautions',

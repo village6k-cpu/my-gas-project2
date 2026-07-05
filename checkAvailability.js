@@ -95,6 +95,7 @@ var DASHBOARD_CACHE_MAX_CHUNKS_ = 30;
 var CARD_CAUTIONS_API_BASE_URL_ = 'https://village-ai-six.vercel.app';
 var CARD_CAUTIONS_API_PATH_ = '/api/cautions';
 var CARD_CAUTIONS_API_LIMIT_ = 5;
+var CARD_CAUTIONS_COMPONENT_DUPLICATE_RE_ = /배터리|충전기|NP-?FZ|FZ100/i;
 
 /**
  * 타임라인 HTML/API에서 호출.
@@ -1886,9 +1887,13 @@ function fetchCardCautionsBatch_(requests) {
 }
 
 function getDashboardCardCautionItemNames_(item) {
-  return normalizeCardCautionItemNames_(((item && item.equipments) || []).map(function(eq) {
+  var names = normalizeCardCautionItemNames_(((item && item.equipments) || []).map(function(eq) {
     return eq && eq.name;
   }));
+  var primary = names.filter(function(name) {
+    return !CARD_CAUTIONS_COMPONENT_DUPLICATE_RE_.test(name);
+  });
+  return primary.length ? primary : names;
 }
 
 function attachDashboardCardCautions_(checkoutList, checkinList) {
