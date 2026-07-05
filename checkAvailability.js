@@ -818,7 +818,7 @@ function getDashboardData(targetDate, skipCache, options) {
 
   // 캐시 5분으로 확장. 등록/취소/일정변경 시 invalidateDashboardCache() 호출로 무효화.
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'dashboard_v6_' + today;
+  var cacheKey = 'dashboard_v7_' + today;
   if (!skipCache) {
     var cachedResult = getDashboardCacheJson_(cache, cacheKey);
     if (cachedResult) {
@@ -2426,6 +2426,7 @@ function invalidateDashboardCache(extraDates) {
       if (k) dateKeys[k] = true;
     });
     Object.keys(dateKeys).forEach(function(d) {
+      removeDashboardCacheJson_(cache, 'dashboard_v7_' + d);
       removeDashboardCacheJson_(cache, 'dashboard_v6_' + d);
       removeDashboardCacheJson_(cache, 'dashboard_v5_' + d);
       removeDashboardCacheJson_(cache, 'dashboard_v4_' + d);

@@ -168,7 +168,13 @@ assert.match(
 
 assert.match(
   backend,
-  /removeDashboardCacheJson_\(cache,\s*'dashboard_v6_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v5_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d \+ '_risk'\)/,
+  /var cacheKey\s*=\s*'dashboard_v7_' \+ today;/,
+  'getDashboardData must bump server dashboard cache key when caution payload shape changes'
+);
+
+assert.match(
+  backend,
+  /removeDashboardCacheJson_\(cache,\s*'dashboard_v7_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v6_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v5_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d \+ '_risk'\)/,
   'invalidateDashboardCache must clear current and legacy dashboard cache keys'
 );
 

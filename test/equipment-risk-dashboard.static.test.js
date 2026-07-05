@@ -212,7 +212,7 @@ assert.deepStrictEqual(
     `${file} must render the already-capped server cautions without local slicing`
   );
   assert.ok(
-    html.indexOf("var DASHBOARD_CACHE_PREFIX = 'dashCache_v5_';") !== -1,
+    html.indexOf("var DASHBOARD_CACHE_PREFIX = 'dashCache_v6_';") !== -1,
     `${file} must bump localStorage dashboard cache prefix to invalidate old caution payloads`
   );
 });
