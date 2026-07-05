@@ -12,7 +12,7 @@ const api = read('sheetAPI.js');
 [
   "var CARD_CAUTIONS_API_BASE_URL_ = 'https://village-ai-six.vercel.app';",
   "var CARD_CAUTIONS_API_PATH_ = '/api/cautions';",
-  'var CARD_CAUTIONS_MAX_RENDERED_ = 10;',
+  'var CARD_CAUTIONS_API_LIMIT_ = 5;',
   'function fetchCardCautions(phase, itemNames)',
   'function fetchCardCautionsBatch_(requests)',
   'function attachDashboardCardCautions_(checkoutList, checkinList)',
@@ -107,10 +107,10 @@ assert.strictEqual(fetchCalls[0].url, 'https://village-ai-six.vercel.app/api/cau
 assert.deepStrictEqual(JSON.parse(fetchCalls[0].options.payload), {
   phase: 'checkout',
   items: ['FX3'],
-  limit: 10
+  limit: 5
 });
-assert.strictEqual(single.cautions.length, 6, 'single helper must keep expanded caution rows');
-assert.strictEqual(single.hidden_count, 2, 'single helper must preserve server hidden_count after expanded rows');
+assert.strictEqual(single.cautions.length, 6, 'single helper must render the server cautions array as-is');
+assert.strictEqual(single.hidden_count, 2, 'single helper must preserve server hidden_count exactly');
 assert.strictEqual(single.cautions[0].id, 'caution-required-1', 'single helper must preserve mined caution id');
 
 const checkoutItem = {
@@ -128,8 +128,8 @@ assert.strictEqual(fetchAllCalls[0].length, 2, 'checkout and return cards must b
 assert.deepStrictEqual(
   JSON.parse(JSON.stringify(fetchAllCalls[0].map((request) => JSON.parse(request.payload)))),
   [
-    { phase: 'checkout', items: ['FX3'], limit: 10 },
-    { phase: 'return', items: ['FX3'], limit: 10 }
+    { phase: 'checkout', items: ['FX3'], limit: 5 },
+    { phase: 'return', items: ['FX3'], limit: 5 }
   ],
   'batch payload must preserve checkout/return phase and displayed equipment names'
 );
@@ -161,7 +161,6 @@ assert.strictEqual(returnItem.cardCautionsPhase, 'return');
     'cardCautionSummaryHtml(item, cardType)',
     'cardCautionsPanelHtml(item, cardType)',
     "var label = '주의 ' + cautions.length;",
-    '}).slice(0, 5);',
     '.card-caution-row.severity-3 .card-caution-meta',
     '.card-caution-row.severity-3 .card-caution-text',
     'class="card-caution-more"',
@@ -188,5 +187,13 @@ assert.strictEqual(returnItem.cardCautionsPhase, 'return');
   assert.ok(
     html.indexOf("var label = '주의 ' + cautions.length + (hiddenCount > 0 ? '+' + hiddenCount : '');") === -1,
     `${file} must not include hidden_count in the visible caution badge`
+  );
+  assert.ok(
+    html.indexOf('}).slice(0, 5);') === -1,
+    `${file} must render the already-capped server cautions without local slicing`
+  );
+  assert.ok(
+    html.indexOf("var DASHBOARD_CACHE_PREFIX = 'dashCache_v5_';") !== -1,
+    `${file} must bump localStorage dashboard cache prefix to invalidate old caution payloads`
   );
 });

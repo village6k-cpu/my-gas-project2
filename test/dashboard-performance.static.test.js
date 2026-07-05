@@ -109,14 +109,14 @@ assert.doesNotMatch(
 
 assert.match(
   backend,
-  /var CARD_CAUTIONS_MAX_RENDERED_\s*=\s*10;/,
-  'card caution normalization must allow enough rows for expanded card cautions'
+  /var CARD_CAUTIONS_API_LIMIT_\s*=\s*5;/,
+  'card caution requests must ask the server for the final capped card list'
 );
 
-assert.match(
+assert.doesNotMatch(
   backend,
-  /function normalizeCardCautionsResponse_\(phase,\s*data\)[\s\S]*rawCautions\.slice\(0,\s*CARD_CAUTIONS_MAX_RENDERED_\)/,
-  'card caution normalization must cap rendered cautions with the shared limit'
+  /function normalizeCardCautionsResponse_\(phase,\s*data\)[\s\S]*rawCautions\.slice\(/,
+  'card caution normalization must not locally recap or reaggregate server cautions'
 );
 
 const dashboardDataBody = backend.match(/function getDashboardData\([\s\S]*?\n}\n\nfunction getDashboardSearchData/);
@@ -168,8 +168,8 @@ assert.match(
 
 assert.match(
   backend,
-  /removeDashboardCacheJson_\(cache,\s*'dashboard_v5_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d \+ '_risk'\)/,
-  'invalidateDashboardCache must clear the current dashboard v5 cache key and legacy v4 keys'
+  /removeDashboardCacheJson_\(cache,\s*'dashboard_v6_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v5_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d\)[\s\S]*removeDashboardCacheJson_\(cache,\s*'dashboard_v4_' \+ d \+ '_risk'\)/,
+  'invalidateDashboardCache must clear current and legacy dashboard cache keys'
 );
 
 assert.match(
