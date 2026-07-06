@@ -2,7 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Phase, PhotoMeta } from "@/lib/domain/types";
-import { refreshTradePhotos, uploadTradePhoto } from "@/lib/data/store";
+import {
+  discardTradePhotoUpload,
+  getPhotoPreview,
+  refreshTradePhotos,
+  retryTradePhotoUpload,
+  uploadTradePhoto,
+} from "@/lib/data/store";
 import { Camera } from "./icons";
 
 const PHASES: Phase[] = ["checkout", "checkin"];
@@ -11,8 +17,51 @@ function phaseTitle(phase: Phase | "other"): string {
   return phase === "checkout" ? "반출" : phase === "checkin" ? "반납" : "기타";
 }
 
-function PhotoTile({ photo }: { photo: PhotoMeta }) {
-  const src = photo.thumbnailUrl || photo.url;
+function photoSrc(photo: PhotoMeta): string | undefined {
+  return photo.thumbnailUrl || photo.url || getPhotoPreview(photo.queueId);
+}
+
+function PhotoTile({ tradeId, photo }: { tradeId: string; photo: PhotoMeta }) {
+  const src = photoSrc(photo);
+
+  // 업로드 대기/실패 타일 — 서버 URL이 아직 없으므로 로컬 미리보기 위에 상태를 덧씌운다
+  if (photo.status) {
+    return (
+      <div className="relative aspect-square overflow-hidden rounded-xl bg-paper ring-1 ring-line">
+        {src ? (
+          <img src={src} alt={photo.label} className="h-full w-full object-cover" loading="lazy" />
+        ) : (
+          <div className="h-full w-full" style={{ background: photo.swatch }} />
+        )}
+        {photo.status === "uploading" ? (
+          <div className="absolute inset-x-0 bottom-0 bg-black/55 px-1.5 py-1 text-center text-[10px] font-bold text-white">
+            업로드 중…
+          </div>
+        ) : (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-black/60 p-1.5">
+            <div className="text-[10px] font-bold text-white">업로드 실패</div>
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={() => retryTradePhotoUpload(tradeId, photo.queueId || "")}
+                className="tap rounded-md bg-white px-2 py-1 text-[10px] font-bold text-ink"
+              >
+                재시도
+              </button>
+              <button
+                type="button"
+                onClick={() => discardTradePhotoUpload(tradeId, photo.queueId || "")}
+                className="tap rounded-md bg-white/25 px-2 py-1 text-[10px] font-bold text-white"
+              >
+                삭제
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (src) {
     return (
       <a href={photo.url || src} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-xl bg-paper ring-1 ring-line">
@@ -33,7 +82,7 @@ function PhotoTile({ photo }: { photo: PhotoMeta }) {
 export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: PhotoMeta[] }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [uploading, setUploading] = useState<Phase | null>(null);
+  const [preparing, setPreparing] = useState<Phase | null>(null);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const nextPhaseRef = useRef<Phase>("checkout");
@@ -63,20 +112,23 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
     inputRef.current?.click();
   };
 
+  // 압축이 끝나면 즉시 타일이 뜨고, 전송은 백그라운드 큐가 맡는다 — 여기서 네트워크를 기다리지 않는다.
   const onFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.currentTarget.files?.[0];
+    const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = "";
-    if (!file) return;
+    if (!files.length) return;
 
     const nextPhase = nextPhaseRef.current;
-    setUploading(nextPhase);
+    setPreparing(nextPhase);
     setError("");
     try {
-      await uploadTradePhoto(tradeId, nextPhase, file);
+      for (const file of files) {
+        await uploadTradePhoto(tradeId, nextPhase, file);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "사진 업로드에 실패했습니다");
     } finally {
-      setUploading(null);
+      setPreparing(null);
     }
   };
 
@@ -96,7 +148,7 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
         </button>
         <div className="flex -space-x-2">
           {photos.slice(0, 4).map((p) => {
-            const src = p.thumbnailUrl || p.url;
+            const src = photoSrc(p);
             return src ? (
               <img key={p.id} src={src} alt={p.label} className="h-7 w-7 rounded-md object-cover ring-2 ring-white" loading="lazy" />
             ) : (
@@ -111,7 +163,7 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
         </div>
       </div>
 
-      <input ref={inputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={onFileChange} />
+      <input ref={inputRef} type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={onFileChange} />
 
       {open && (
         <div
@@ -141,17 +193,17 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
                     <button
                       type="button"
                       onClick={() => pickPhoto(phase)}
-                      disabled={uploading !== null}
+                      disabled={preparing !== null}
                       className="tap inline-flex items-center gap-1.5 rounded-lg bg-brand-600 px-2.5 py-1.5 text-[12px] font-bold text-white disabled:opacity-50"
                     >
                       <Camera className="h-4 w-4" />
-                      {uploading === phase ? "업로드 중…" : `${phaseTitle(phase)} 사진 추가`}
+                      {preparing === phase ? "사진 준비 중…" : `${phaseTitle(phase)} 사진 추가`}
                     </button>
                   </div>
                   {ps.length ? (
                     <div className="grid grid-cols-3 gap-2">
                       {ps.map((p) => (
-                        <PhotoTile key={p.id} photo={p} />
+                        <PhotoTile key={p.id} tradeId={tradeId} photo={p} />
                       ))}
                     </div>
                   ) : (

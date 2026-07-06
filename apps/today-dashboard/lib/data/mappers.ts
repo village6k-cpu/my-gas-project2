@@ -162,7 +162,8 @@ export function tradeToRow(t: Trade): any {
     estimate_sent: !!t.estimateSent,
     note_checkout: t.noteCheckout ?? null,
     note_checkin: t.noteCheckin ?? null,
-    photos: t.photos,
+    // 업로드 대기/실패 로컬 타일(status 有)은 서버 사진이 아니므로 저장하지 않는다
+    photos: t.photos.filter((p) => !p.status),
     risk_warnings: t.riskWarnings,
     return_counts: t.returnCounts ?? {},
   };

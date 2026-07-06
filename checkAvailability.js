@@ -3769,15 +3769,22 @@ function getDashboardPhotoSheet_(required) {
   return sheet;
 }
 
-function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo) {
+function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo, clientKey) {
   tid = normalizeEquipmentCheckTradeId_(String(tid || '').trim());
   phase = normalizeDashboardPhotoPhase_(phase);
   if (!tid) return { error: "tid 필요" };
   if (phase !== 'checkout' && phase !== 'checkin') return { error: "phase는 checkout/checkin만 허용" };
   if (!data) return { error: "사진 데이터 필요" };
 
-  var lock = LockService.getScriptLock();
-  try { lock.waitLock(10000); } catch (lockErr) {}
+  // 앱 업로드 큐가 재시도해도 같은 사진이 두 번 저장되지 않도록 clientKey로 멱등 처리
+  var dedupKey = '';
+  if (clientKey) {
+    dedupKey = 'dashboard_photo_upload_' + String(clientKey).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
+    try {
+      var dedupCached = CacheService.getScriptCache().get(dedupKey);
+      if (dedupCached) return JSON.parse(dedupCached);
+    } catch (dedupErr) {}
+  }
 
   try {
     var sheet = getDashboardPhotoSheet_(true);
@@ -3799,7 +3806,8 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo) {
     try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (shareErr) {}
 
     var fileId = file.getId();
-    var url = file.getUrl();
+    // Drive 추가 왕복(getUrl) 대신 fileId로 URL을 직접 구성해 업로드 응답을 빠르게 한다
+    var url = "https://drive.google.com/file/d/" + fileId + "/view?usp=drivesdk";
     var thumb = "https://drive.google.com/thumbnail?id=" + encodeURIComponent(fileId) + "&sz=w640";
     var now = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss');
     var width = Math.max(sheet.getLastColumn(), schema.maxCol || 1);
@@ -3819,7 +3827,7 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo) {
     invalidateDashboardPhotoCache_();
     invalidateDashboardCache();
 
-    return {
+    var result = {
       success: true,
       tid: tid,
       phase: phase,
@@ -3833,10 +3841,12 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo) {
         memo: String(memo || '').trim()
       }
     };
+    if (dedupKey) {
+      try { CacheService.getScriptCache().put(dedupKey, JSON.stringify(result), 21600); } catch (dedupPutErr) {}
+    }
+    return result;
   } catch (err) {
     return { error: err.message };
-  } finally {
-    try { lock.releaseLock(); } catch (releaseErr) {}
   }
 }
 

@@ -557,7 +557,8 @@ function handleRequest(e) {
           params.fileName || postBody.fileName,
           params.mimeType || postBody.mimeType,
           params.data || postBody.data || params.base64 || postBody.base64,
-          params.memo || postBody.memo
+          params.memo || postBody.memo,
+          params.clientKey || postBody.clientKey
         ));
 
       case "paymentMeta":

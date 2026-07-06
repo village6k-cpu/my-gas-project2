@@ -64,6 +64,9 @@ export interface PhotoMeta {
   sheetValue?: string;
   uploadedAt?: string;
   row?: number;
+  /** 로컬 업로드 대기열 타일 전용 상태 — 서버 사진에는 없음. status가 있으면 Supabase에 저장하지 않는다 */
+  status?: "uploading" | "failed";
+  queueId?: string;
 }
 
 export interface RiskWarning {

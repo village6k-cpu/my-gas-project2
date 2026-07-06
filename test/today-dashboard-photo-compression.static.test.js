@@ -34,8 +34,14 @@ assert.match(
 
 assert.match(
   store,
-  /prepareDashboardPhotoUpload_\(file\)[\s\S]*gasMutation\("uploadDashboardPhoto"[\s\S]*fileName: upload\.fileName[\s\S]*mimeType: upload\.mimeType[\s\S]*data: upload\.data/,
-  'uploadTradePhoto must send the compressed payload, not the original camera file'
+  /prepareDashboardPhotoUpload_\(file\)[\s\S]*enqueuePhotoUpload\(\{[\s\S]*fileName: upload\.fileName[\s\S]*mimeType: upload\.mimeType[\s\S]*data: upload\.data/,
+  'uploadTradePhoto must enqueue the compressed payload, not the original camera file'
+);
+
+assert.match(
+  store,
+  /gasMutation\("uploadDashboardPhoto",\s*\{[\s\S]*?data: job\.data/,
+  'the upload queue sender must forward the compressed job payload to GAS'
 );
 
 const uploadTradePhotoBody = store.match(/export async function uploadTradePhoto\(tradeId: string, phase: Phase, file: File\): Promise<void> \{[\s\S]*?\n\}/);

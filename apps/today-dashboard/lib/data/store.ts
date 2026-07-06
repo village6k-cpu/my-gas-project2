@@ -20,6 +20,14 @@ import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
 import { gasMutation, gasRead, gasWrite, writeBackDisabledReason, writeBackEnabled } from "./writeback";
+import {
+  configurePhotoUploadQueue,
+  discardPhotoUpload,
+  enqueuePhotoUpload,
+  resumePhotoUploads,
+  retryPhotoUpload,
+  type PhotoUploadJob,
+} from "./photoUploadQueue";
 import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults, shouldPruneMissingSheetBacked } from "./sync";
 
 interface State {
@@ -1077,19 +1085,94 @@ export async function refreshTradePhotos(tradeId: string): Promise<void> {
   await loadTradePhotosBatch_([tradeId], true);
 }
 
+// 업로드 대기 타일의 미리보기(data URL)는 Supabase 저장/동기화에 실리지 않도록 메모리에만 둔다.
+const localPhotoPreviews = new Map<string, string>();
+
+export function getPhotoPreview(queueId: string | undefined): string | undefined {
+  return queueId ? localPhotoPreviews.get(queueId) : undefined;
+}
+
+// 사진은 압축 즉시 화면에 반영하고, 실제 전송은 photoUploadQueue가 뒤에서 처리한다(실패 시 재시도).
 export async function uploadTradePhoto(tradeId: string, phase: Phase, file: File): Promise<void> {
+  if (!writeBackEnabled) throw new Error(writeBackDisabledReason);
   const upload = await prepareDashboardPhotoUpload_(file);
-  const res = await gasMutation("uploadDashboardPhoto", {
-    tid: tradeId,
+  const queueId = `pq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  localPhotoPreviews.set(queueId, upload.data);
+  const optimistic: PhotoMeta = {
+    id: queueId,
+    phase,
+    swatch: photoSwatch(phase),
+    label: `${photoLabel(phase)} 업로드 중`,
+    status: "uploading",
+    queueId,
+  };
+  mutateTrade(tradeId, (t) => ({ ...t, photos: mergePhotos(t.photos, [optimistic]) }));
+  await enqueuePhotoUpload({
+    queueId,
+    tradeId,
     phase,
     fileName: upload.fileName,
     mimeType: upload.mimeType,
     data: upload.data,
+    createdAt: Date.now(),
+    attempts: 0,
   });
-  if (res?.skipped) throw new Error("사진 업로드 쓰기 경로가 비활성화되어 있습니다");
-  const photo = normalizeGasPhoto(res?.photo || res?.result?.photo, phase, 0);
-  mutateTrade(tradeId, (t) => ({ ...t, photos: mergePhotos(t.photos, [photo]) }));
-  flashSave(tradeId);
+}
+
+export function retryTradePhotoUpload(tradeId: string, queueId: string): void {
+  mutateTrade(tradeId, (t) => ({
+    ...t,
+    photos: t.photos.map((p) => (p.queueId === queueId ? { ...p, status: "uploading" as const } : p)),
+  }));
+  retryPhotoUpload(queueId);
+}
+
+export function discardTradePhotoUpload(tradeId: string, queueId: string): void {
+  localPhotoPreviews.delete(queueId);
+  mutateTrade(tradeId, (t) => ({ ...t, photos: t.photos.filter((p) => p.queueId !== queueId) }));
+  void discardPhotoUpload(queueId);
+}
+
+function sendQueuedPhoto_(job: PhotoUploadJob): Promise<unknown> {
+  return gasMutation("uploadDashboardPhoto", {
+    tid: job.tradeId,
+    phase: job.phase,
+    fileName: job.fileName,
+    mimeType: job.mimeType,
+    data: job.data,
+    clientKey: job.queueId,
+  }).then((res) => {
+    if (res?.skipped) {
+      throw Object.assign(new Error("사진 업로드 쓰기 경로가 비활성화되어 있습니다"), { permanent: true });
+    }
+    return res;
+  });
+}
+
+if (typeof window !== "undefined") {
+  configurePhotoUploadQueue({
+    send: sendQueuedPhoto_,
+    onSuccess: (job, res) => {
+      localPhotoPreviews.delete(job.queueId);
+      const raw = (res ?? {}) as { photo?: unknown; result?: { photo?: unknown } };
+      const photo = normalizeGasPhoto(raw.photo || raw.result?.photo, job.phase, 0);
+      mutateTrade(job.tradeId, (t) => ({
+        ...t,
+        photos: mergePhotos(t.photos.filter((p) => p.queueId !== job.queueId), [photo]),
+      }));
+      flashSave(job.tradeId);
+    },
+    onFailure: (job, message, willRetry) => {
+      if (willRetry) return;
+      mutateTrade(job.tradeId, (t) => ({
+        ...t,
+        photos: t.photos.map((p) =>
+          p.queueId === job.queueId ? { ...p, status: "failed" as const, memo: message } : p
+        ),
+      }));
+    },
+  });
+  void resumePhotoUploads();
 }
 
 // ── 인수인계 메모 ──────────────────────────────────────────────
