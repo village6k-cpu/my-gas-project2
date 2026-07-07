@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { ViewHeader } from "@/components/ViewHeader";
-import { Check, ChevronRight, Pencil, Refresh, Search } from "@/components/icons";
+import { Check, ChevronRight, History, Pencil, Refresh, Search } from "@/components/icons";
+import { EquipmentBlackbox } from "@/components/EquipmentBlackbox";
 import { normalizeStockName } from "@/lib/data/equipmentStock";
 import nameLinkQueueJson from "@/lib/data/nameLinkQueue.json";
 
@@ -182,6 +183,8 @@ export function InventoryView() {
   // 확인(검증) 인라인 스테퍼 — 한 번에 한 행만 펼침. 같은 장비가 두 섹션에 보여도 누른 쪽만 펼침("섹션:장비ID")
   // 비고/문제 편집 패널은 "edit:장비ID" — 같은 openKey를 쓰므로 스테퍼와 동시에 열리지 않음
   const [openKey, setOpenKey] = useState<string | null>(null);
+  // 블랙박스(장비 이력) 시트 — 파손/분실 분쟁 때 최근 거래·사진 증거 타임라인
+  const [blackbox, setBlackbox] = useState<LedgerRow | null>(null);
   const [draft, setDraft] = useState<VerifyDraft>({ count: "0", issueOn: false, issueLabel: "" });
   const [editDraft, setEditDraft] = useState<IssueEditDraft>({ name: "", note: "", issues: [], stockTotal: "", stockMaint: "0" });
 
@@ -921,6 +924,14 @@ export function InventoryView() {
                             {r.note && <div className="mt-0.5 truncate text-[11.5px] text-ink-mute">{r.note}</div>}
                           </div>
                           <div className="flex shrink-0 items-center gap-1.5">
+                            <button
+                              onClick={() => setBlackbox(r)}
+                              className="tap flex h-[32px] w-[32px] items-center justify-center rounded-lg bg-white text-ink-soft ring-1 ring-line/70"
+                              title="블랙박스 — 대여 이력·사진 증거"
+                              aria-label="블랙박스 — 대여 이력·사진 증거"
+                            >
+                              <History className="h-3.5 w-3.5" />
+                            </button>
                             {/* 항상 보이는 수정 진입점 (오늘 확인 섹션) */}
                             <button
                               onClick={() => (openKey === `editToday:${r.equipment_id}` ? setOpenKey(null) : openIssueEdit("editToday", r))}
@@ -997,6 +1008,14 @@ export function InventoryView() {
                               )}
                             </div>
                             <div className="flex shrink-0 items-center gap-1.5">
+                              <button
+                                onClick={() => setBlackbox(r)}
+                                className="tap flex h-[32px] w-[32px] items-center justify-center rounded-lg bg-white text-ink-soft ring-1 ring-line/70"
+                                title="블랙박스 — 대여 이력·사진 증거"
+                                aria-label="블랙박스 — 대여 이력·사진 증거"
+                              >
+                                <History className="h-3.5 w-3.5" />
+                              </button>
                               {/* 항상 보이는 수정 진입점 — 비고/문제가 없는 행도 장비명 수정·보관 처리 가능 */}
                               <button
                                 onClick={() => (openKey === `edit:${r.equipment_id}` ? setOpenKey(null) : openIssueEdit("edit", r))}
@@ -1081,6 +1100,8 @@ export function InventoryView() {
           {toast.text}
         </div>
       )}
+
+      {blackbox && <EquipmentBlackbox name={blackbox.name} aliases={blackbox.aliases} onClose={() => setBlackbox(null)} />}
     </div>
   );
 }
