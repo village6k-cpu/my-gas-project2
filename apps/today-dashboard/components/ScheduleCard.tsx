@@ -9,6 +9,7 @@ import { RiskPanel } from "./RiskPanel";
 import { PhotoStrip } from "./PhotoStrip";
 import { PaymentControls } from "./PaymentControls";
 import { MyReservationLinkButton } from "./MyReservationLinkButton";
+import { CustomerSheet } from "./CustomerSheet";
 import { Check, ChevronRight, Phone } from "./icons";
 import { MemoTag } from "./MemoTag";
 
@@ -44,6 +45,8 @@ export function ScheduleCard({
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  // 고객 카드 시트 — 이름 탭하면 "이 사람 누구지?" (5년 프로필 + 라이브 이력)
+  const [customerOpen, setCustomerOpen] = useState(false);
   const cancelled = isCancelledTrade(trade);
   const phase = displayPhase(trade, date, tab);
   const isCheckout = phase === "checkout";
@@ -94,7 +97,14 @@ export function ScheduleCard({
             {saving && <span className="text-[11px] font-medium text-brand-600">저장 중…</span>}
           </div>
           <div className="mt-0.5 flex items-center gap-1.5 text-[14px]">
-            <span className="font-bold text-ink">{trade.customerName}</span>
+            <button
+              type="button"
+              onClick={() => setCustomerOpen(true)}
+              className="tap font-bold text-ink underline decoration-dotted underline-offset-2"
+              title="고객 카드 — 5년 이력 보기"
+            >
+              {trade.customerName}
+            </button>
             {trade.company && <span className="text-ink-faint">· {trade.company}</span>}
           </div>
           <div className="mt-0.5 text-[12px] tabular-nums text-ink-mute">{trade.tradeId}</div>
@@ -155,6 +165,8 @@ export function ScheduleCard({
           <PaymentControls trade={trade} />
         </div>
       )}
+
+      {customerOpen && <CustomerSheet name={trade.customerName} phone={trade.customerPhone} onClose={() => setCustomerOpen(false)} />}
     </div>
   );
 }
