@@ -225,8 +225,9 @@ function mergeDashboard(base: Trade, it: any): Trade {
         : prev?.onsite && prev?.checkoutState === "taken" ? "taken"
         : "pending",
       takenQty: prev?.takenQty,
-      memoCheckout: prev?.memoCheckout ?? prev?.memoCheckin,
-      memoCheckin: prev?.memoCheckin ?? prev?.memoCheckout,
+      // 메모는 적은 시점(반출/반납)별로 보존 — 교차 복사하면 출처 구분이 사라진다
+      memoCheckout: prev?.memoCheckout,
+      memoCheckin: prev?.memoCheckin,
       startShiftDays: prev?.startShiftDays,
       endShiftDays: prev?.endShiftDays,
       settlement: prev?.settlement,

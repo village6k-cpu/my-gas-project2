@@ -19,6 +19,7 @@ import {
   type OnsiteEntry,
 } from "@/lib/data/store";
 import { Check, Plus } from "./icons";
+import { MemoTag, itemMemoEntries } from "./MemoTag";
 import { ReturnChecklist } from "./ReturnChecklist";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
@@ -144,7 +145,7 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
         </>
       )}
 
-      <PhaseNote trade={trade} phase={phase} />
+      <TradeNotes trade={trade} phase={phase} />
     </div>
   );
 }
@@ -157,15 +158,13 @@ function rowTint(e: EquipmentItem, excluded: boolean): string {
   return "";
 }
 
-function itemMemoText(e: EquipmentItem): string {
-  return String(e.memoCheckout || e.memoCheckin || "").trim();
-}
-
 function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean; setTone?: boolean }) {
   const taken = e.checkoutState === "taken";
   const excluded = e.checkoutState === "excluded";
   const partial = e.takenQty != null && e.takenQty !== e.qty;
-  const itemMemo = itemMemoText(e);
+  const memos = itemMemoEntries(e);
+  const checkoutMemo = String(e.memoCheckout || "").trim();
+  const checkinMemo = String(e.memoCheckin || "").trim();
   return (
     <li className={`px-3 ${setTone ? "bg-brand-50" : rowTint(e, excluded)}`}>
       <div className="flex items-center gap-2.5 py-2.5">
@@ -195,12 +194,16 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         )}
       </div>
 
-      {!open && itemMemo && (
-        <button onClick={onToggle} className="tap -mt-1 mb-2 ml-9 flex max-w-full items-start gap-1 rounded-md bg-warn-bg px-2 py-1 text-left text-[12px] font-bold leading-snug text-warn-fg ring-1 ring-warn-ring">
-          <span aria-hidden>📝</span>
-          <span className="shrink-0">특이사항:</span>
-          <span className="min-w-0 break-words">{itemMemo}</span>
-        </button>
+      {!open && memos.length > 0 && (
+        <div className="-mt-1 mb-2 ml-9 space-y-1">
+          {memos.map((m) => (
+            <button key={m.phase} onClick={onToggle} className="tap flex w-full max-w-full items-start gap-1 rounded-md bg-warn-bg px-2 py-1 text-left text-[12px] font-bold leading-snug text-warn-fg ring-1 ring-warn-ring">
+              <span aria-hidden>📝</span>
+              <MemoTag phase={m.phase} shared={m.shared} className="mt-[1px]" />
+              <span className="min-w-0 break-words">{m.text}</span>
+            </button>
+          ))}
+        </div>
       )}
 
       {e.onsite && !e.isComponent && (
@@ -221,7 +224,13 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
             예약 수량
             <Stepper value={e.qty} min={1} onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)} />
           </div>
-          <MemoInput value={itemMemo} onSave={(v) => setItemMemo(t.tradeId, e.scheduleId, "checkout", v)} placeholder="이 품목 특이사항 (예: 본인 지참)" />
+          {checkinMemo && checkinMemo !== checkoutMemo && (
+            <div className="flex items-start gap-1.5 rounded-md bg-warn-bg px-2 py-1 text-[12px] font-semibold leading-snug text-warn-fg ring-1 ring-warn-ring">
+              <MemoTag phase="checkin" className="mt-[1px]" />
+              <span className="min-w-0 break-words">{checkinMemo}</span>
+            </div>
+          )}
+          <MemoInput value={checkoutMemo} onSave={(v) => setItemMemo(t.tradeId, e.scheduleId, "checkout", v)} placeholder="이 품목 반출 특이사항 (예: 본인 지참)" />
         </div>
       )}
     </li>
@@ -335,29 +344,73 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
   );
 }
 
-function PhaseNote({ trade, phase }: { trade: Trade; phase: Phase }) {
-  const initial = phase === "checkout" ? trade.noteCheckout : trade.noteCheckin;
-  const [val, setVal] = useState(initial ?? "");
-  const [dirty, setDirty] = useState(false);
+// 반출/반납 전체 메모 — 둘 다 어느 카드에서든 항상 내용이 보이게 하고, 출처 태그로 구분한다.
+// 접힌 details 안에 숨기지 않는다: 메모 존재 여부를 펼쳐보기 전엔 알 수 없던 문제의 수정.
+function TradeNotes({ trade, phase }: { trade: Trade; phase: Phase }) {
+  const [editing, setEditing] = useState<Phase | null>(null);
+  const notes: { phase: Phase; text: string }[] = [
+    { phase: "checkout", text: String(trade.noteCheckout ?? "").trim() },
+    { phase: "checkin", text: String(trade.noteCheckin ?? "").trim() },
+  ];
+  const current = notes.find((n) => n.phase === phase);
+  return (
+    <div className="mt-2 space-y-1.5">
+      {notes.map((n) =>
+        !n.text || editing === n.phase ? null : (
+          <button
+            key={n.phase}
+            type="button"
+            onClick={() => setEditing(n.phase)}
+            className="tap flex w-full items-start gap-1.5 rounded-lg bg-warn-bg px-2.5 py-1.5 text-left ring-1 ring-warn-ring"
+          >
+            <span aria-hidden className="text-[12px]">📝</span>
+            <MemoTag phase={n.phase} className="mt-[1px]" />
+            <span className="min-w-0 whitespace-pre-wrap break-words text-[12.5px] font-semibold leading-snug text-warn-fg">{n.text}</span>
+          </button>
+        )
+      )}
+      {editing ? (
+        <TradeNoteEditor key={editing} trade={trade} phase={editing} onClose={() => setEditing(null)} />
+      ) : (
+        !current?.text && (
+          <button type="button" onClick={() => setEditing(phase)} className="tap text-[11.5px] font-semibold text-ink-faint">
+            + {phase === "checkout" ? "반출" : "반납"} 전체 메모
+          </button>
+        )
+      )}
+    </div>
+  );
+}
+
+function TradeNoteEditor({ trade, phase, onClose }: { trade: Trade; phase: Phase; onClose: () => void }) {
+  const initial = (phase === "checkout" ? trade.noteCheckout : trade.noteCheckin) ?? "";
+  const [val, setVal] = useState(initial);
   const label = phase === "checkout" ? "반출 전체 메모" : "반납 전체 메모";
   return (
-    <details className="group mt-2">
-      <summary className="cursor-pointer list-none text-[11.5px] font-semibold text-ink-faint">+ {label} {initial && !dirty ? "(작성됨)" : ""}</summary>
-      <div className="mt-1.5">
-        <textarea
-          value={val}
-          onChange={(e) => { setVal(e.target.value); setDirty(true); }}
-          rows={2}
-          placeholder={`${label} (품목과 무관한 일반 사항만)`}
-          className="w-full resize-none rounded-lg border border-line bg-white px-3 py-2 text-[13px] outline-none placeholder:text-ink-faint focus:border-brand-500"
-        />
-        {dirty && (
-          <div className="mt-1 flex justify-end">
-            <button onClick={() => { setPhaseNote(trade.tradeId, phase, val); setDirty(false); }} className="tap rounded-lg bg-brand-600 px-3 py-1 text-[12px] font-semibold text-white">저장</button>
-          </div>
-        )}
+    <div className="rounded-lg bg-paper p-2 ring-1 ring-line">
+      <div className="mb-1 flex items-center gap-1.5">
+        <MemoTag phase={phase} />
+        <span className="text-[11.5px] font-semibold text-ink-mute">{label}</span>
       </div>
-    </details>
+      <textarea
+        autoFocus
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        rows={2}
+        placeholder={`${label} (품목과 무관한 일반 사항만)`}
+        className="w-full resize-none rounded-lg border border-line bg-white px-3 py-2 text-[13px] outline-none placeholder:text-ink-faint focus:border-brand-500"
+      />
+      <div className="mt-1 flex justify-end gap-1.5">
+        <button type="button" onClick={onClose} className="tap rounded-lg px-2.5 py-1 text-[12px] font-semibold text-ink-mute">취소</button>
+        <button
+          type="button"
+          onClick={() => { setPhaseNote(trade.tradeId, phase, val); onClose(); }}
+          className="tap rounded-lg bg-brand-600 px-3 py-1 text-[12px] font-semibold text-white"
+        >
+          저장
+        </button>
+      </div>
+    </div>
   );
 }
 

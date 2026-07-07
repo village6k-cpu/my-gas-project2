@@ -9,6 +9,7 @@ import { searchEquipmentCatalog, useEquipmentCatalog, type EquipmentCatalogItem 
 import { setItemName, setItemQty, setReturnCount, setItemMemo } from "@/lib/data/store";
 import { SetBox, LooseList } from "./SetBox";
 import { Check, Plus } from "./icons";
+import { MemoTag, itemMemoEntries } from "./MemoTag";
 
 type FloatingRect = { left: number; top: number; width: number; maxHeight: number };
 
@@ -88,15 +89,13 @@ export function ReturnChecklist({ trade }: { trade: Trade }) {
   );
 }
 
-function itemMemoText(e: EquipmentItem): string {
-  return String(e.memoCheckout || e.memoCheckin || "").trim();
-}
-
 function ReturnRow({ t, e, setBadge = false, setTone = false }: { t: Trade; e: EquipmentItem; setBadge?: boolean; setTone?: boolean }) {
   const [open, setOpen] = useState(false);
   const expected = e.takenQty ?? e.qty;
   const { good, damaged, lost, memo } = rcOf(t, e.scheduleId);
-  const itemMemo = itemMemoText(e) || String(memo || "").trim();
+  // 반출 때 적은 메모도 반납 카드에 그대로 보이되, 출처 태그로 구분한다
+  const checkinMemo = String(e.memoCheckin || "").trim() || String(memo || "").trim();
+  const memos = itemMemoEntries({ memoCheckout: e.memoCheckout, memoCheckin: checkinMemo });
   const allGood = good === expected && damaged === 0 && lost === 0;
   const touched = good + damaged + lost > 0;
   const missing = Math.max(0, expected - good - damaged - lost);
@@ -132,22 +131,21 @@ function ReturnRow({ t, e, setBadge = false, setTone = false }: { t: Trade; e: E
         </button>
       </div>
 
-      {/* 특이사항 — 반출/반납 카드가 같은 내용을 항상 보이게 한다. */}
-      {itemMemo && (
-        <button onClick={() => setOpen((o) => !o)} className="tap -mt-1 mb-2 ml-[46px] flex max-w-full items-start gap-1 rounded-md bg-warn-bg px-2 py-1 text-left text-[12px] font-bold leading-snug text-warn-fg ring-1 ring-warn-ring">
-          <span aria-hidden>📝</span>
-          <span className="shrink-0">특이사항:</span>
-          <span className="min-w-0 break-words">{itemMemo}</span>
-        </button>
+      {/* 특이사항 — 반출/반납 카드가 같은 내용을 항상 보이게 하되, 출처(반출/반납)를 구분한다. */}
+      {memos.length > 0 && (
+        <div className="-mt-1 mb-2 ml-[46px] space-y-1">
+          {memos.map((m) => (
+            <button key={m.phase} onClick={() => setOpen((o) => !o)} className="tap flex w-full max-w-full items-start gap-1 rounded-md bg-warn-bg px-2 py-1 text-left text-[12px] font-bold leading-snug text-warn-fg ring-1 ring-warn-ring">
+              <span aria-hidden>📝</span>
+              <MemoTag phase={m.phase} shared={m.shared} className="mt-[1px]" />
+              <span className="min-w-0 break-words">{m.text}</span>
+            </button>
+          ))}
+        </div>
       )}
 
       {open && (
         <div className="space-y-2 bg-paper/70 py-2.5">
-          {itemMemo && (
-            <div className="rounded-lg bg-warn-bg px-2.5 py-1.5 text-[12px] font-semibold leading-snug text-warn-fg ring-1 ring-warn-ring">
-              <span className="font-bold">특이사항</span> · {itemMemo}
-            </div>
-          )}
           <div className="block text-[12px] font-semibold text-ink-mute">
             장비명
             <EquipmentNameCombobox value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />
@@ -168,7 +166,7 @@ function ReturnRow({ t, e, setBadge = false, setTone = false }: { t: Trade; e: E
             <Stepper value={lost} max={expected - good - damaged} onChange={(v) => set({ lost: v })} small />
           </div>
           <input
-            defaultValue={itemMemo}
+            defaultValue={checkinMemo}
             onBlur={(ev) => {
               const v = ev.target.value;
               set({ memo: v });

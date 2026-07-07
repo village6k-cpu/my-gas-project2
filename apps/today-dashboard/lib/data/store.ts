@@ -494,13 +494,13 @@ export function setItemQty(tradeId: string, scheduleId: string, qty: number) {
     })
     .catch((e) => console.error("[write-back] updateEquipQty 실패:", e));
 }
+// 품목 메모는 적은 시점(phase)별로 저장한다. 반대쪽 카드에는 출처 태그와 함께 그대로 노출되므로
+// 예전처럼 양쪽 필드에 미러링하지 않는다 (미러링하면 반출/반납 구분이 사라짐).
 export function setItemMemo(tradeId: string, scheduleId: string, phase: Phase, text: string) {
   const memo = text.trim();
   mutateTrade(tradeId, (t) =>
     mapItem(t, scheduleId, (e) =>
-      phase === "checkout"
-        ? { ...e, memoCheckout: memo, memoCheckin: memo }
-        : { ...e, memoCheckout: memo, memoCheckin: memo },
+      phase === "checkout" ? { ...e, memoCheckout: memo } : { ...e, memoCheckin: memo },
     ),
   );
   flashSave(tradeId);

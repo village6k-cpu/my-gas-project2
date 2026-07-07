@@ -359,8 +359,9 @@ assert(
 console.log('contract-realtime checks OK');
 
 // ── 품목 메모는 접힌 상태에서도 항상 노출 (펼쳐야만 보이면 특이사항 누락) ──
+// 2026-07-07부터 반출/반납 메모를 출처 태그와 함께 각각 노출 (itemMemoEntries)
 assert(
-  /function CheckoutRow\([\s\S]*const itemMemo = itemMemoText\(e\);[\s\S]*\{!open && itemMemo &&/.test(read('apps/today-dashboard/components/HandoverChecklist.tsx')),
+  /function CheckoutRow\([\s\S]*const memos = itemMemoEntries\(e\);[\s\S]*\{!open && memos\.length > 0 &&/.test(read('apps/today-dashboard/components/HandoverChecklist.tsx')),
   'shared item memos must be visible on collapsed checkout rows, not only when expanded'
 );
 console.log('memo-visibility checks OK');
@@ -771,20 +772,22 @@ console.log('request-date-integrity checks OK');
 console.log('auto-clear checks OK');
 
 // ── 반출 특이사항을 반납 카드에서도 보여줘야 함 (반납 검수 활용 목적) ──
+// 2026-07-07: 병합 텍스트 대신 출처(반출/반납) 태그가 붙은 개별 칩으로 노출
 {
   const ret = read('apps/today-dashboard/components/ReturnChecklist.tsx');
   assert(
-    /function itemMemoText\(e: EquipmentItem\)[\s\S]*e\.memoCheckout[\s\S]{0,120}e\.memoCheckin/.test(ret),
-    'ReturnChecklist must surface the shared item memo including checkout memo — return staff needs the handover note'
+    /itemMemoEntries\(\{ memoCheckout: e\.memoCheckout, memoCheckin: checkinMemo \}\)/.test(ret),
+    'ReturnChecklist must surface both checkout and checkin item memos — return staff needs the handover note'
   );
   assert(
-    /\{itemMemo &&[\s\S]{0,400}특이사항/.test(ret),
-    'shared item memo must be visible on the return row (always-on badge, not hidden behind expand)'
+    /memos\.length > 0 &&[\s\S]{0,600}<MemoTag phase=\{m\.phase\}/.test(ret),
+    'shared item memo must be visible on the return row (always-on badge with origin tag, not hidden behind expand)'
   );
 }
 console.log('return-shows-checkout-memo checks OK');
 
-// ── 품목 특이사항 메모는 반출/반납 카드가 동일하게 보여야 함 + 양방향 동기화 ──
+// ── 품목 특이사항: 반출/반납 카드 모두에 보이되 출처별로 저장/구분 ──
+// 2026-07-07: 미러링(양쪽 필드 동일 저장) 제거 — 출처 구분 요구사항. 가시성은 태그 칩이 담당.
 {
   const checkout = read('apps/today-dashboard/components/HandoverChecklist.tsx');
   const ret = read('apps/today-dashboard/components/ReturnChecklist.tsx');
@@ -792,14 +795,8 @@ console.log('return-shows-checkout-memo checks OK');
   const sync = read('apps/today-dashboard/lib/data/sync.ts');
 
   assert(
-    /function itemMemoText\(e: EquipmentItem\)/.test(checkout) &&
-      /e\.memoCheckout[\s\S]{0,120}e\.memoCheckin/.test(checkout),
-    'checkout card must compute one shared item memo from both checkout and checkin memo fields'
-  );
-  assert(
-    /function itemMemoText\(e: EquipmentItem\)/.test(ret) &&
-      /e\.memoCheckout[\s\S]{0,120}e\.memoCheckin/.test(ret),
-    'return card must compute the same shared item memo from both checkout and checkin memo fields'
+    /const memos = itemMemoEntries\(e\);/.test(checkout),
+    'checkout card must render item memos from both phase fields (with origin tags)'
   );
   assert(
     /setItemMemo\(t\.tradeId, e\.scheduleId, "checkout", v\)/.test(checkout) &&
@@ -807,14 +804,14 @@ console.log('return-shows-checkout-memo checks OK');
     'each card must still save through its own phase so write-back provenance is preserved'
   );
   assert(
-    /phase === "checkout"[\s\S]{0,180}memoCheckout: memo[\s\S]{0,180}memoCheckin: memo/.test(store) &&
-      /:\s*\{ \.\.\.e, memoCheckout: memo, memoCheckin: memo \}/.test(store),
-    'setItemMemo must mirror item memos across checkout/checkin fields for immediate bidirectional card sync'
+    /phase === "checkout" \? \{ \.\.\.e, memoCheckout: memo \} : \{ \.\.\.e, memoCheckin: memo \}/.test(store),
+    'setItemMemo must store the memo only under its own phase (mirroring erases 반출/반납 provenance)'
   );
   assert(
-    /memoCheckout: prev\?\.memoCheckout \?\? prev\?\.memoCheckin/.test(sync) &&
-      /memoCheckin: prev\?\.memoCheckin \?\? prev\?\.memoCheckout/.test(sync),
-    'sheet refresh merge must keep either side of an item memo available to both cards'
+    !/prev\?\.memoCheckout \?\? prev\?\.memoCheckin/.test(sync) &&
+      /memoCheckout: prev\?\.memoCheckout,/.test(sync) &&
+      /memoCheckin: prev\?\.memoCheckin,/.test(sync),
+    'sheet refresh merge must preserve each memo field as-is without cross-copying phases'
   );
 }
 console.log('roundtrip-item-memo-sync checks OK');
