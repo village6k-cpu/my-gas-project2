@@ -135,6 +135,12 @@ function handleRequest(e) {
 
     switch (action) {
 
+      case "oneoffA7M5SetMaster":
+        return jsonResponse(oneoffA7M5SetMaster_(params));
+
+      case "oneoffA7M5Inventory":
+        return jsonResponse(oneoffA7M5Inventory_(params));
+
       // ━━━ 시트 범용 API ━━━
 
       case "sheets":
