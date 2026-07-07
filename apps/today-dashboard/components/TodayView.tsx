@@ -18,8 +18,9 @@ import {
 import { ScheduleCard } from "@/components/ScheduleCard";
 import { ViewHeader } from "@/components/ViewHeader";
 import { HandoverBoard } from "@/components/HandoverBoard";
+import { ClosingView } from "@/components/ClosingView";
 import { Toast } from "@/components/Toast";
-import { Calendar, Check, ChevronLeft, ChevronRight, Refresh, Search } from "@/components/icons";
+import { Calendar, Check, ChevronLeft, ChevronRight, Moon, Refresh, Search } from "@/components/icons";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "checkout", label: "반출" },
@@ -33,6 +34,8 @@ export function TodayView() {
   const [tab, setTab] = useState<TabKey>("checkout");
   const [q, setQ] = useState("");
   const [showDone, setShowDone] = useState(false);
+  // 마감 조종석 — 오늘 정리 + 내일 준비 + 보고 복사
+  const [closingOpen, setClosingOpen] = useState(false);
   const data = useDashboard();
 
   // 마운트 시 오늘 날짜 로드 (하이드레이션 안전) + ?tid 로 진입 시 해당 거래 검색
@@ -108,6 +111,13 @@ export function TodayView() {
       {/* 상단 고정 헤더 */}
       <header className="safe-top sticky top-0 z-30 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
         <ViewHeader title="오늘 일정">
+          <button
+            onClick={() => setClosingOpen(true)}
+            className="tap flex h-9 items-center gap-1 rounded-full bg-ink px-3 text-[12.5px] font-bold text-white"
+            title="마감 — 오늘 정리 + 내일 준비"
+          >
+            <Moon className="h-3.5 w-3.5" /> 마감
+          </button>
           <button onClick={() => go(date)} className="tap flex h-9 w-9 items-center justify-center rounded-full bg-white ring-1 ring-line/60 text-ink-soft" title="새로고침">
             <Refresh className="h-4 w-4" />
           </button>
@@ -282,6 +292,7 @@ export function TodayView() {
       </main>
 
       <Toast />
+      {closingOpen && <ClosingView onClose={() => setClosingOpen(false)} />}
     </div>
   );
 }
