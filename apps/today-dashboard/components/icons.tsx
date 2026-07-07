@@ -60,3 +60,6 @@ export const Clipboard = ({ className }: P) => (
 export const Archive = ({ className }: P) => (
   <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8v12a1 1 0 01-1 1H4a1 1 0 01-1-1V8" /><rect x="1" y="3" width="22" height="5" rx="1" /><path d="M10 12h4" /></svg>
 );
+export const Academy = ({ className }: P) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 4 10 5-10 5L2 9l10-5z" /><path d="M6 11.5V17c0 1.1 2.7 2.5 6 2.5s6-1.4 6-2.5v-5.5" /><path d="M22 9v5" /></svg>
+);

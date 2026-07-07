@@ -44,6 +44,11 @@ const InventoryView = dynamic(() => import("@/components/InventoryView").then((m
   loading: () => <PaneLoading label="재고" />,
 });
 
+const DojangView = dynamic(() => import("@/components/DojangView").then((mod) => mod.DojangView), {
+  ssr: false,
+  loading: () => <PaneLoading label="훈련소" />,
+});
+
 // PC(lg+): 좌측 레일(4섹션) + 가운데 선택 섹션 + 우측 오늘일정 고정(좁은 컬럼이라 더 잘 보임).
 // 모바일(<lg): 하단 탭바 5섹션 + 단일 콘텐츠(오늘일정 포함). 방문한 뷰는 mount 유지 → 전환 즉시.
 function useIsLg() {
@@ -103,6 +108,7 @@ export function AppShell({ initial = "today" }: { initial?: NavKey }) {
         {pane("operations", <OperationsView />)}
         {pane("confirm", <ConfirmView />)}
         {pane("inventory", <InventoryView />)}
+        {pane("dojang", <DojangView />)}
       </main>
       {isLg && (
         <aside className="hidden w-[400px] shrink-0 overflow-y-auto border-l border-line/60 lg:block xl:w-[440px]">
