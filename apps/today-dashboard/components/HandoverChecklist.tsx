@@ -274,7 +274,8 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
     setSubmitting(true);
     setError(null);
     try {
-      // 스케줄상세(시트)에 기록 — 가용 불가 등 실패 시 에러를 던지므로 닫지 않고 표시
+      // 유상은 스케줄상세/계약서로 승격, 무상은 반출 카드 운영 원장에만 기록.
+      // 유상 가용 불가 등 실패 시 에러를 던지므로 닫지 않고 표시한다.
       await addOnsiteItems(tradeId, entries, settlement);
       onClose();
     } catch (e) {

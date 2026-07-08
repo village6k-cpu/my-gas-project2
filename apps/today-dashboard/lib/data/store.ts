@@ -587,12 +587,13 @@ function addOnsiteItemsLocal(tradeId: string, entries: OnsiteEntry[], settlement
   flashSave(tradeId);
 }
 
-/** 현장추가 — 스케줄상세(시트)에 실제로 기록되도록 GAS onsiteAddon 호출 후, 시트가 발급한
- *  실 scheduleId로 품목을 반영한다. 세트는 백엔드가 세트마스터로 구성품을 전개하므로 대표/단품만 보낸다.
+/** 현장추가 — 유상만 스케줄상세(시트)에 기록되도록 GAS onsiteAddon 호출 후, 시트가 발급한
+ *  실 scheduleId로 품목을 반영한다. 무상/미정은 반출 카드 운영 원장에만 남긴다.
+ *  세트는 백엔드가 세트마스터로 구성품을 전개하므로 대표/단품만 보낸다.
  *  자유입력 품목은 rawNames로 그대로 시트에 기록됨(장비마스터 매칭 안 함). 가용 불가면 에러를 던진다. */
 export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], settlement: Settlement) {
-  // write-back 비활성(프리뷰/세이프가드)일 땐 기존처럼 앱 전용으로만 추가
-  if (!writeBackEnabled) {
+  // 무상/미정 현장추가는 반출 카드 전용 운영 기록이다. 유상만 정산/계약/스케줄 원장으로 승격한다.
+  if (settlement !== "유상" || !writeBackEnabled) {
     addOnsiteItemsLocal(tradeId, entries, settlement);
     return;
   }

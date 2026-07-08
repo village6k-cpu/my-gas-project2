@@ -11,14 +11,19 @@ const logic = read('checkAvailability.js');
 const api = read('sheetAPI.js');
 const gasProxy = read('apps/today-dashboard/app/api/gas/route.ts');
 
-// ── 프론트: 현장추가가 스케줄상세(시트)에 기록되도록 onsiteAddon 호출 ──
+// ── 프론트: 유상 현장추가만 스케줄상세(시트)에 기록되도록 onsiteAddon 호출 ──
 assert(
   /export async function addOnsiteItems\(/.test(store),
-  'addOnsiteItems must be async so it can write the on-site addition to the sheet'
+  'addOnsiteItems must stay async so paid on-site additions can be written to the sheet'
 );
 assert(
   /gasMutation\("onsiteAddon"/.test(store),
-  'addOnsiteItems must call the GAS onsiteAddon action to append rows to 스케줄상세'
+  'paid on-site additions must call the GAS onsiteAddon action to append rows to 스케줄상세'
+);
+assert(
+  /settlement !== "유상"\s*\|\|\s*!writeBackEnabled/.test(store) &&
+    /settlement !== "유상"\s*\|\|\s*!writeBackEnabled[\s\S]{0,180}addOnsiteItemsLocal\(tradeId,\s*entries,\s*settlement\);[\s\S]{0,80}return;/.test(store),
+  'free or unsettled on-site additions must stay card-only/Supabase-only and must not call GAS onsiteAddon'
 );
 assert(
   /const WRITE_ACTIONS = new Set\(\[[\s\S]*"onsiteAddon"[\s\S]*\]\)/.test(gasProxy),
@@ -34,7 +39,7 @@ assert(
 );
 assert(
   /gasMutation\("onsiteAddon",\s*\{[\s\S]*directRegenerate:\s*true/.test(store),
-  'on-site additions must request immediate contract regeneration so the app amount and contract link do not stay stale'
+  'paid on-site additions must request immediate contract regeneration so the app amount and contract link do not stay stale'
 );
 assert(
   /export async function addOnsiteItems\([\s\S]*const mutationResult = unwrapContractMutation\(res\)[\s\S]*amount: amount \?\? t\.amount[\s\S]*contractUrl: url \|\| t\.contractUrl \|\| null[\s\S]*contractRegenPending: !!mutationResult\.contractRegenPending && !url/.test(store),
@@ -49,8 +54,8 @@ assert(
   'addOnsiteItems must reconcile the real sheet scheduleId returned by the backend (no leftover ONS- ids)'
 );
 assert(
-  /if \(!writeBackEnabled\)[\s\S]*?addOnsiteItemsLocal/.test(store),
-  'addOnsiteItems must fall back to local-only add when write-back is disabled'
+  /settlement !== "유상"\s*\|\|\s*!writeBackEnabled[\s\S]{0,180}addOnsiteItemsLocal/.test(store),
+  'addOnsiteItems must fall back to local-only add when write-back is disabled or the addition is not paid'
 );
 assert(
   store.includes('throw new Error') && /가용|반영되지 않/.test(store),

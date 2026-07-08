@@ -235,7 +235,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
       onsite: prev?.onsite, // 시트에 기록된 현장추가도 '현장 추가' 구획에 계속 묶이도록 보존
     } as EquipmentItem;
   });
-  // 시트에 없는 앱 전용 품목(현장추가 등 유상 청구 대상)은 절대 삭제하지 않음.
+  // 시트에 없는 앱 전용 품목(무상/미정 현장추가 등)은 절대 삭제하지 않음.
   // 단, 거래ID-숫자 형태의 원장 스케줄ID는 onsite/offCatalog 플래그가 남아 있어도 시트 행으로 본다.
   const incomingIds = new Set(incoming.map((e) => e.scheduleId));
   const appOnly = base.equipments.filter((e) => !incomingIds.has(e.scheduleId) && isPreservedAppOnlyItem(base.tradeId, e));
