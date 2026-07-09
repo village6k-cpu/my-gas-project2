@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { authFetch } from "@/lib/data/authFetch";
 import { ViewHeader } from "@/components/ViewHeader";
-import { Refresh } from "@/components/icons";
+import { Check, Refresh } from "@/components/icons";
 
 // 후속조치(카톡 AI봇) 보드 — 실제 follow-up-dashboard(index.html) 구조를 네이티브로 이식.
 // 4레인 칸반 + 상세카드(추천조치/답변초안/근거) + 벌크 + 30초 폴링 + 상태 PATCH + 답변 전송.
@@ -372,7 +372,19 @@ function Lane({
     <section className="min-w-0 overflow-hidden rounded-xl bg-white ring-1 ring-line/70">
       <div className="flex min-h-[42px] items-center justify-between gap-2 border-b border-line/60 bg-paper/60 px-3 py-2.5">
         <h2 className="text-[13px] font-extrabold text-ink-soft">{label}</h2>
-        <span className={`inline-flex h-[22px] min-w-[22px] items-center justify-center rounded-full px-1.5 text-[12px] font-extrabold ${laneKey === "now" ? "bg-attention-bg text-attention-fg" : "bg-white text-ink-mute ring-1 ring-line"}`}>{items.length}</span>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => onPatch(items.map((it) => it.id), "done")}
+            disabled={items.length === 0}
+            className="tap flex h-[24px] w-[24px] items-center justify-center rounded-full bg-checkin-bg text-checkin-fg ring-1 ring-checkin-ring transition hover:bg-checkin-ring disabled:cursor-not-allowed disabled:bg-white disabled:text-ink-faint disabled:ring-line/70"
+            aria-label={`${label} 섹션 완료`}
+            title={`${label} 섹션 완료`}
+          >
+            <Check className="h-3.5 w-3.5" />
+          </button>
+          <span className={`inline-flex h-[22px] min-w-[22px] items-center justify-center rounded-full px-1.5 text-[12px] font-extrabold ${laneKey === "now" ? "bg-attention-bg text-attention-fg" : "bg-white text-ink-mute ring-1 ring-line"}`}>{items.length}</span>
+        </div>
       </div>
       <div className="flex flex-col gap-2 p-2">
         {items.length === 0 ? (
