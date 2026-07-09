@@ -4,16 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>VILLAGE. FM</title>
-<meta name="description" content="빌리지 FM — 여명 톤 픽셀 로파이. 매장 일상과 먼 곳을 바라보는 쉼이 무한 반복되는 라이브.">
+<meta name="description" content="빌리지 FM — 새벽 톤 3/4 입체 픽셀 로파이. 매장 일상과 먼 곳을 바라보는 쉼이 5분 주기로 무한 반복.">
 <!--
-  ┌──────────────────────────────────────────────────────────────┐
-  │ VILLAGE. FM  ·  픽셀 로파이 무한루프 (여명 톤)                  │
-  ├──────────────────────────────────────────────────────────────┤
-  │ 음악: Suno로 만든 곡을 이 폴더에 "villagefm.mp3"로 저장하면   │
-  │       ▶ 눌렀을 때 무한반복 재생됨. (프롬프트는 villagefm.md)  │
-  │       파일 없어도 화면은 그대로 돌아감 (소리만 없음).          │
-  │ 외부 리소스 0개 · GitHub Pages 그대로 서빙 가능.              │
-  └──────────────────────────────────────────────────────────────┘
+  VILLAGE. FM — 3/4 입체 픽셀 로파이 무한루프 (새벽 톤 · 한 바퀴 약 5분)
+  음악: Suno 곡을 이 폴더에 "villagefm.mp3"로 저장 → ▶ 누르면 무한반복. (없어도 화면은 동작)
+  외부 리소스 0개 · 자체완결 · GitHub Pages 그대로 서빙.
 -->
 <style>
   :root{ --accent:#d0674a; --cream:#e7ddcc; --dim:#9a8f7e; }
@@ -96,271 +91,194 @@ var W=320,H=180;
 var cv=document.getElementById('cv'), ctx=cv.getContext('2d'); ctx.imageSmoothingEnabled=false;
 var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-// ── 기본 드로잉 ──
 function R(x,a,b,w,h,c){ x.fillStyle=c; x.fillRect(a|0,b|0,w|0,h|0); }
 function gfill(x,y0,y1,st){ var g=x.createLinearGradient(0,y0,0,y1); for(var i=0;i<st.length;i++) g.addColorStop(st[i][0],st[i][1]); return g; }
 function glow(x,cx,cy,rad,c,al){ var g=x.createRadialGradient(cx,cy,0,cx,cy,rad); g.addColorStop(0,c); g.addColorStop(1,'rgba(0,0,0,0)'); x.globalAlpha=al; x.fillStyle=g; x.fillRect(0,0,W,H); x.globalAlpha=1; }
 function mk(){ var c=document.createElement('canvas'); c.width=W; c.height=H; var x=c.getContext('2d'); x.imageSmoothingEnabled=false; return {c:c,x:x}; }
 
-// ── 블록 캐릭터 (단색, 큰 머리·작은 몸·짧은 팔다리) ──
-var CH='#a4623f', EYE='#2c1a12';
-var P={H:CH,e:EYE,s:'rgba(18,16,26,.4)'};
-var FRONT=[" HHHHHHH "," HHHHHHH "," HeHHHeH "," HHHHHHH "," HHHHHHH ","  HHHHH  ","H HHHHH H","H HHHHH H","  HHHHH  ","  HH HH  "];
-var SIDE =[" HHHHHH "," HHHHHH "," HHHeHH "," HHHHHH "," HHHHHH ","  HHHH  "," HHHHHH "," HHHHHH ","  HHHH  ","  HH H  "];
-var BACK =[" HHHHHH "," HHHHHH "," HHHHHH "," HHHHHH ","  HHHH  "," HHHHHH "," HHHHHH ","  HHHH  ","  ssss  "];
-function spr(x,map,ox,oy,s){ for(var j=0;j<map.length;j++){ var row=map[j]; for(var i=0;i<row.length;i++){ var ch=row[i]; if(ch===' ')continue; x.fillStyle=P[ch]||'#f0f'; x.fillRect(ox+i*s,oy+j*s,s,s);} } }
-function bob(t){ return Math.round(Math.sin(t/1500)*0.6); }
+// ── 3/4 입체 블록 (정면 + 윗면 + 우측면) ──
+function cube(x,px,py,w,h,base,top,side,d){ d=d||3;
+  for(var i=1;i<=d;i++){ R(x,px+i,py-i,w,1,top); }        // 윗면(원근)
+  for(var i=1;i<=d;i++){ R(x,px+w-1+i,py-i,1,h,side); }   // 우측면
+  R(x,px,py,w,h,base);                                    // 정면
+}
+var CH='#a4623f', TOP='#c07a4e', SIDE='#733f26';
 
-// 시네카트 (2단 선반 + 튜브 기둥 + 커브 핸들 + 바퀴), 옆모습·오른쪽 진행
-function cineCart(x,cx,gy,t){
-  var frame='#312e46', shelf='#3f3b54', shelfTop='#4c4866', post='#5c5878', postHi='#7a7698',
-      wheel='#191722', hub='#4a465e', g1='#464259', g2='#54506a', cam='#2b2838';
-  var wr=(Math.round(t*0.02)%2); // 바퀴 스포크 깜빡(구르는 느낌)
-  // 바퀴 (앞 크게 / 뒤 작게)
-  R(x,cx+8,gy-6,6,6,wheel); R(x,cx+9,gy-5,4,4,hub); R(x,cx+10+(wr?0:1),gy-4,1,1,'#8a86a4');
-  R(x,cx+34,gy-7,8,8,wheel); R(x,cx+36,gy-5,4,4,hub); R(x,cx+37+(wr?1:0),gy-4,1,1,'#8a86a4');
-  // 아래 선반 + 립
-  R(x,cx+2,gy-15,44,3,shelf); R(x,cx+2,gy-16,44,1,shelfTop); R(x,cx+2,gy-15,2,4,frame); R(x,cx+44,gy-15,2,4,frame);
-  // 튜브 기둥 2개
-  R(x,cx+10,gy-32,2,17,post); R(x,cx+10,gy-32,1,17,postHi);
-  R(x,cx+38,gy-32,2,17,post); R(x,cx+38,gy-32,1,17,postHi);
-  // 위 선반 + 립
-  R(x,cx+6,gy-29,42,3,shelf); R(x,cx+6,gy-30,42,1,shelfTop); R(x,cx+6,gy-29,2,4,frame); R(x,cx+46,gy-29,2,4,frame);
-  // 커브 핸들 (왼쪽 위로)
-  R(x,cx+2,gy-36,2,8,post); R(x,cx-2,gy-36,6,2,post); R(x,cx-3,gy-35,3,2,postHi);
-  // 위 선반 장비 (카메라 케이스 · 박스 · 라이트 스탠드)
-  R(x,cx+9,gy-40,11,11,g1); R(x,cx+12,gy-37,5,5,cam); R(x,cx+13,gy-36,3,3,'#46586a');
-  R(x,cx+24,gy-38,9,9,g2); R(x,cx+34,gy-46,2,17,post); R(x,cx+32,gy-47,6,3,g1); // 삼각대/스탠드
-  // 아래 선반 장비 (박스들)
-  R(x,cx+14,gy-25,10,10,g2); R(x,cx+27,gy-24,13,9,g1); R(x,cx+29,gy-22,4,4,cam);
+// 서 있는 캐릭터 (3/4 뒤·비스듬, 얼굴 없음). armDy: 가까운 팔 높이, prop(hx,hy) 손에 붙는 소품
+function charStand(x,fx,fy,armDy,prop){
+  cube(x,fx-5,fy-6,4,6,CH,TOP,SIDE,2); cube(x,fx+1,fy-6,4,6,CH,TOP,SIDE,2);   // 다리
+  cube(x,fx-9,fy-16,3,7,CH,TOP,SIDE,2);                                       // 먼 팔
+  cube(x,fx-6,fy-17,11,11,CH,TOP,SIDE,3);                                     // 몸통
+  cube(x,fx-7,fy-29,13,12,CH,TOP,SIDE,3);                                     // 머리(뒤통수)
+  var ay=fy-16+(armDy||0);
+  cube(x,fx+6,ay,3,7,CH,TOP,SIDE,2);                                          // 가까운 팔
+  if(prop) prop(fx+8, ay-2);                                                  // 손 위치
+}
+// 앉은 캐릭터 (뒷모습, 작게·아득)
+function charSit(x,fx,fy){
+  cube(x,fx-5,fy-9,11,9,CH,TOP,SIDE,2);                                       // 몸(앉음)
+  cube(x,fx-6,fy-18,13,10,CH,TOP,SIDE,3);                                     // 머리
 }
 
-// ── 파트 기반 캐릭터 (역동적 동작용) ──
-function headB(x,cx,cy,look){ R(x,cx,cy,14,12,CH);
-  if(look==='F'){ R(x,cx+4,cy+5,2,2,EYE); R(x,cx+8,cy+5,2,2,EYE); }
-  else if(look==='R'){ R(x,cx+9,cy+5,2,2,EYE); }
-  else if(look==='L'){ R(x,cx+3,cy+5,2,2,EYE); } }
-function bodyB(x,cx,cy){ R(x,cx,cy,10,10,CH); }
-function seg(x,x0,y0,x1,y1){ var dx=x1-x0,dy=y1-y0,n=Math.max(Math.abs(dx),Math.abs(dy),1);
-  for(var i=0;i<=n;i+=2){ var tt=i/n; R(x,Math.round(x0+dx*tt),Math.round(y0+dy*tt),2,2,CH); } }
-function legs(x,fx,fy,sL,sR){ seg(x,fx-4,fy-10,fx-4+sL,fy); seg(x,fx+2,fy-10,fx+2+sR,fy); }
-function drawZ(x,zx,zy,w,col){ R(x,zx,zy,w,2,col); for(var i=0;i<w;i+=2){ R(x,zx+w-2-i,zy+2+i,2,2,col); } R(x,zx,zy+w+2,w,2,col); }
-
-// ── 여명/노을/밤 하늘 (muted) ──
-function sky(x,kind){
-  var HZ, st, stars=false;
-  if(kind==='dawn'){ HZ=94; st=[[0,'#3f4668'],[.45,'#6d6480'],[.75,'#a67a72'],[1,'#c99a72']]; stars=true; }
-  else if(kind==='dusk'){ HZ=96; st=[[0,'#39355c'],[.4,'#5d4d6a'],[.72,'#9a5f58'],[1,'#c98a58']]; }
-  else { HZ=104; st=[[0,'#181d33'],[.5,'#242742'],[1,'#3f3850']]; stars=true; }
-  x.fillStyle=gfill(x,0,HZ,st); x.fillRect(0,0,W,HZ);
-  x.fillStyle=(kind==='dusk')?'#241a2c':'#201f30'; // 지면
-  x.fillRect(0,HZ,W,H-HZ); R(x,0,HZ,W,2,'#2c2740');
-  R(x,0,HZ-3,W,4,'rgba(200,192,196,.24)'); // 물안개
-  return {HZ:HZ,stars:stars};
-}
-function starField(x,list){ for(var i=0;i<list.length;i++) R(x,list[i][0],list[i][1],1,1,'rgba(220,216,232,.55)'); }
-var STARS=[[30,18],[62,30],[104,14],[150,22],[196,16],[238,26],[276,20],[300,32],[80,44],[176,40],[214,50],[130,52],[46,54]];
-
-// 먼지/입자 (t로 결정)
-function motes(x,t,n,x0,x1,ytop,ybot,col){
-  for(var i=0;i<n;i++){
-    var ph=i*1.7, span=ybot-ytop;
-    var yy = ybot - ((t*0.006 + i*23) % span);
-    var xx = x0 + ((x1-x0)*((i*37%100)/100)) + Math.sin(t*0.001+ph)*4;
-    var a = 0.25 + 0.35*Math.sin(t*0.002+ph);
-    if(a<0) a=0;
-    x.fillStyle=col.replace('A',a.toFixed(2)); x.fillRect(xx|0,yy|0,1,1);
-  }
-}
-
-// 실내 (muted 트와일라잇, 옆에서 은은한 여명빛)
-function interior(x,lightLeft){
-  x.fillStyle=gfill(x,0,H,[[0,'#33304a'],[.62,'#2a2738'],[1,'#232032']]); x.fillRect(0,0,W,H);
-  x.save(); x.globalAlpha=.16; x.fillStyle='#c69a78';
-  x.beginPath();
-  if(lightLeft){ x.moveTo(0,10); x.lineTo(130,10); x.lineTo(64,180); x.lineTo(0,180); }
-  else { x.moveTo(320,10); x.lineTo(190,10); x.lineTo(256,180); x.lineTo(320,180); }
+// ── 실내 (새벽 톤) ──
+function interiorDawn(x,lightLeft){
+  x.fillStyle=gfill(x,0,132,[[0,'#3f4668'],[.42,'#6d6480'],[.72,'#a67a72'],[1,'#c99a72']]); x.fillRect(0,0,W,132); // 벽(새벽)
+  R(x,0,132,W,H-132,'#241f30'); R(x,0,132,W,1,'#33293c');                     // 바닥
+  x.save(); x.globalAlpha=.12; x.fillStyle='#f2d2a2'; x.beginPath();
+  if(lightLeft){ x.moveTo(0,8); x.lineTo(120,8); x.lineTo(64,132); x.lineTo(0,132); }
+  else { x.moveTo(W,8); x.lineTo(200,8); x.lineTo(256,132); x.lineTo(W,132); }
   x.closePath(); x.fill(); x.restore();
-  glow(x, lightLeft?26:294, 46, 92, 'rgba(226,168,116,.30)', .5);
-  R(x,0,124,W,H-124,'#1f1d2b'); R(x,0,124,W,2,'#2a2740'); // 바닥
+  glow(x, lightLeft?24:296, 40, 92, 'rgba(242,204,152,.22)', .5);
+}
+// ── 야외 하늘 (새벽/노을/밤) ──
+function sky(x,kind){
+  var HZ, st;
+  if(kind==='dawn'){ HZ=100; st=[[0,'#3f4668'],[.45,'#6d6480'],[.75,'#a67a72'],[1,'#c99a72']]; }
+  else if(kind==='dusk'){ HZ=100; st=[[0,'#39355c'],[.4,'#5d4d6a'],[.72,'#9a5f58'],[1,'#c98a58']]; }
+  else { HZ=104; st=[[0,'#1a1f37'],[.5,'#282b47'],[1,'#463f55']]; }
+  x.fillStyle=gfill(x,0,HZ,st); x.fillRect(0,0,W,HZ);
+  x.fillStyle=(kind==='dusk')?'#241a2c':'#221f32'; x.fillRect(0,HZ,W,H-HZ); R(x,0,HZ,W,1,'#2e2940');
+  R(x,0,HZ-3,W,4,'rgba(200,192,196,.22)');
+  return HZ;
+}
+var STARS=[[30,18],[62,30],[104,14],[150,22],[196,16],[238,26],[276,20],[300,32],[80,44],[176,40],[214,50],[130,52]];
+
+// ── 철제 랙 (아이소 3D) ──
+function rack3d(x){
+  var rx=176, sw=70, d=6, sh=[58,80,102,124];
+  cube(x,rx+sw-4,50,3,80,'#26232f','#312d3d','#1b1926',d); cube(x,rx-4,50,3,80,'#26232f','#312d3d','#1b1926',d); // 뒤 기둥
+  sh.forEach(function(sy){ for(var i=1;i<=d;i++){ R(x,rx+i,sy-i,sw,1,'#4a4560'); } R(x,rx,sy,sw,3,'#37334a'); }); // 선반
+  cube(x,rx+sw-4,58,3,74,'#312d3d','#3d3850','#211e2b',d); cube(x,rx-1,58,3,74,'#312d3d','#3d3850','#211e2b',d);  // 앞 기둥
+  cube(x,rx+8,sh[0]-12,12,12,'#494560','#565274','#312e42',4); cube(x,rx+11,sh[0]-8,5,5,'#20262e','#2a3441','#161b22',2); // 카메라
+  cube(x,rx+40,sh[0]-10,10,10,'#443f58','#524d6a','#2e2a3c',4);
+  cube(x,rx+10,sh[1]-11,14,11,'#4a4664','#585278','#322e44',4); cube(x,rx+44,sh[1]-9,9,9,'#443f58','#524d6a','#2e2a3c',3);
+  cube(x,rx+12,sh[2]-9,11,9,'#494560','#565274','#312e42',3); cube(x,rx+40,sh[2]-11,10,11,'#443f58','#524d6a','#2e2a3c',3);
+}
+// ── 아이소 데스크 (앞모서리 dy, 폭/깊이) ──
+function desk3d(x,ox,dy,w){
+  for(var i=1;i<=9;i++){ R(x,ox+i,dy-i,w,1,'#5a4e5e'); }   // 윗면(원근)
+  R(x,ox,dy,w,5,'#3a3040');                                // 앞면
+  cube(x,ox+2,dy+5,3,10,'#2e2636','#3a3346','#201a28',2); cube(x,ox+w-6,dy+5,3,10,'#2e2636','#3a3346','#201a28',2); // 다리
+}
+// ── 아이소 시네카트 ──
+function cart3d(x,cx,gy){
+  cube(x,cx+8,gy-6,6,6,'#1c1a26','#2a2838','#111019',2); cube(x,cx+34,gy-7,7,7,'#1c1a26','#2a2838','#111019',2); // 바퀴
+  for(var i=1;i<=5;i++){ R(x,cx+2+i,gy-15-i,44,1,'#4c4866'); } R(x,cx+2,gy-15,44,3,'#37334a');                   // 아래판
+  cube(x,cx+8,gy-31,2,16,'#5a5878','#6e6c90','#3e3c58',2); cube(x,cx+36,gy-31,2,16,'#5a5878','#6e6c90','#3e3c58',2); // 기둥
+  for(var i=1;i<=5;i++){ R(x,cx+6+i,gy-29-i,40,1,'#4c4866'); } R(x,cx+6,gy-29,40,3,'#37334a');                   // 위판
+  cube(x,cx+2,gy-36,2,8,'#5a5878','#6e6c90','#3e3c58',2); R(x,cx-3,gy-36,7,2,'#5a5878');                          // 핸들
+  cube(x,cx+10,gy-40,11,11,'#494560','#585278','#312e42',3); cube(x,cx+13,gy-36,5,5,'#20262e','#2a3441','#161b22',2); // 장비
+  cube(x,cx+26,gy-38,9,9,'#443f58','#524d6a','#2e2a3c',3); cube(x,cx+14,gy-24,10,9,'#494560','#585278','#312e42',3);
 }
 
-// ═══════════ 씬 정의 ═══════════
+function vignette(x){ var v=x.createRadialGradient(160,84,58,160,90,205); v.addColorStop(0,'rgba(0,0,0,0)'); v.addColorStop(1,'rgba(8,6,12,.5)'); x.fillStyle=v; x.fillRect(0,0,W,H); }
+
+// ══════════ 씬 (3/4 입체 · 최소 움직임 · 새벽) ══════════
 var scenes=[];
+var DUR=34000, GAZE=48000; // 6*34 + 2*48 = 300s ≈ 5분
 
 // 1) 먼지 털기
-scenes.push({ dur:15000, cap:'먼지를 털다, 문득 먼 곳', trk:'고요한 아침',
-  bake:function(x){ interior(x,true);
-    // 철제 랙 (보울리스 4단 선반) — 렌탈샵 장비 보관
-    var rx=166, rw=92, rt=42, rb=124;
-    R(x,rx,rt,3,rb-rt,'#2e2b3e'); R(x,rx+rw-3,rt,3,rb-rt,'#2e2b3e');            // 기둥
-    for(var yy=rt+5; yy<rb; yy+=6){ R(x,rx+1,yy,1,2,'#48445e'); R(x,rx+rw-2,yy,1,2,'#48445e'); } // 슬롯
-    [50,72,94,118].forEach(function(sy){ R(x,rx,sy,rw,3,'#3d3950'); R(x,rx,sy,rw,1,'#4c4866'); }); // 선반 4단
-    R(x,rx+12,39,13,11,'#494560'); R(x,rx+15,42,6,6,'#2a3040'); R(x,rx+30,41,9,9,'#443f58');       // 1단: 카메라+박스
-    R(x,rx+52,61,11,11,'#494560'); R(x,rx+52,61,4,11,'#2a3040'); R(x,rx+68,63,12,9,'#443f58');      // 2단: 렌즈통+박스
-    R(x,rx+10,83,15,11,'#4a4664'); R(x,rx+13,85,9,7,'#2a3040'); R(x,rx+38,84,10,10,'#443f58');      // 3단: 소프트박스+케이스
-    R(x,rx+54,107,15,11,'#494560'); R(x,rx+30,109,11,9,'#443f58');                                  // 4단: 박스들
-  },
-  anim:function(x,t){ var ox=138, oy=100+bob(t);
-    spr(x,FRONT,ox,oy,2);
-    var sw=Math.round(Math.sin(t/150)*7);               // 먼지떨이 좌우 스윽 (랙 3단)
-    R(x,ox+15,oy-6,3,8,CH);                              // 오른팔(짧게 위로)
-    R(x,ox+16+sw,oy-10,6,4,'#c9a24b');                   // 먼지떨이 뭉치
-    R(x,ox+18+sw,oy-7,1,3,'#7a5a3c');                    // 손잡이
-    for(var i=0;i<6;i++){ var pp=((t*0.03)+i*20)%54; var a=(1-pp/54)*0.6; if(a>0) R(x,ox+18+sw+Math.round(Math.cos(i*1.7)*pp*0.3),oy-10-Math.round(pp*0.5),1,1,'rgba(226,196,140,'+a.toFixed(2)+')'); } // 먼지 퍼프
+scenes.push({ dur:DUR, cap:'선반 먼지를 털다', trk:'고요한 아침',
+  bake:function(x){ interiorDawn(x,true); rack3d(x); vignette(x); },
+  anim:function(x,t){
+    var up=Math.round((Math.sin(t/1400)*0.5+0.5)*6);      // 0~6, 아주 천천히
+    charStand(x,130,130,-12-up, function(hx,hy){ R(x,hx+2,hy-2,5,3,'#c9a24b'); R(x,hx+1,hy,1,3,'#7a5a3c'); }); // 먼지떨이(팔에 붙음)
+    if(up>4){ R(x,148,60,1,1,'rgba(226,196,140,.5)'); R(x,152,56,1,1,'rgba(226,196,140,.35)'); } // 먼지 한 톨
   }});
 
-// 2) 시네카트 밀기 (천천히 이동)
-scenes.push({ dur:20000, cap:'장비를 싣고, 천천히', trk:'느린 바퀴',
-  bake:function(x){ sky(x,'dawn'); starField(x,STARS.slice(0,6)); glow(x,60,88,50,'rgba(214,160,110,.4)',.5); R(x,55,84,10,7,'#d8ad84'); R(x,56,85,8,5,'#e6c39a'); },
-  anim:function(x,t){ var gx=Math.round(2 + t*0.010), gy=122;
-    cineCart(x,gx,gy,t);
-    // 캐릭터: 왼쪽에서 걸으며 밀기 (통통 블록, 걸음 바운스+발 교대)
-    var walk=Math.round(Math.abs(Math.sin(t/150))*2);
-    var cox=gx-20, coy=gy-20-walk;
-    spr(x,SIDE,cox,coy,2);
-    var st=Math.round(Math.sin(t/150)*2);
-    R(x,cox+4+st,gy-4,4,4,CH); R(x,cox+10-st,gy-4,4,4,CH); // 발 교대
-    R(x,cox+14,coy+11,4,3,CH);                            // 미는 팔→핸들
+// 2) 시네카트 밀기
+scenes.push({ dur:DUR, cap:'장비를 싣고, 천천히', trk:'느린 바퀴',
+  bake:function(x){ sky(x,'dawn'); glow(x,60,96,50,'rgba(214,160,110,.4)',.5); R(x,55,92,10,7,'#d8ad84'); R(x,56,93,8,5,'#e6c39a'); vignette(x); },
+  anim:function(x,t){ var gx=Math.round(6 + (t%DUR)*0.010), gy=124;   // 아주 천천히 가로지름
+    cart3d(x,gx,gy);
+    charStand(x,gx-14,gy+6,-2, function(hx,hy){ R(x,hx,hy+2,3,2,CH); }); // 미는 팔(핸들쪽)
   }});
 
-// 3) 쉼 · 노을 바다 (아득)
-scenes.push({ dur:21000, cap:'하던 걸 멈추고, 수평선', trk:'먼 바다',
-  bake:function(x){ var s=sky(x,'dusk'); var HZ=s.HZ;
-    glow(x,168,HZ-2,52,'rgba(230,150,80,.5)',.7); R(x,162,HZ-11,11,11,'#e0a860'); R(x,163,HZ-10,9,9,'#f2ca88');
-    x.fillStyle=gfill(x,HZ,HZ+22,[[0,'#b07444'],[1,'#241a2c']]); x.fillRect(0,HZ,W,22);
-  },
-  anim:function(x,t){ var HZ=96;
-    for(var i=0;i<6;i++){ var a=(0.4-i*0.05)*(0.6+0.4*Math.sin(t*0.002+i)); R(x,168,HZ+2+i*3,7-i,1,'rgba(250,224,160,'+(a<0?0:a).toFixed(2)+')'); } // 윤슬
-    var b=bob(t); spr(x,BACK,150,HZ+8+b,2);
+// 3) 쉼 · 노을 바다
+scenes.push({ dur:GAZE, cap:'하던 걸 멈추고, 수평선', trk:'먼 바다',
+  bake:function(x){ var HZ=sky(x,'dusk'); glow(x,168,HZ-2,52,'rgba(230,150,80,.5)',.7); R(x,162,HZ-11,11,11,'#e0a860'); R(x,163,HZ-10,9,9,'#f2ca88');
+    x.fillStyle=gfill(x,HZ,HZ+22,[[0,'#b07444'],[1,'#241a2c']]); x.fillRect(0,HZ,W,22); vignette(x); },
+  anim:function(x,t){ var HZ=100;
+    for(var i=0;i<6;i++){ var a=(0.4-i*0.05)*(0.6+0.4*Math.sin(t*0.0018+i)); R(x,168,HZ+2+i*3,7-i,1,'rgba(250,224,160,'+(a<0?0:a).toFixed(2)+')'); } // 윤슬
+    charSit(x,150,HZ+12);
   }});
 
 // 4) 렌즈 닦기
-scenes.push({ dur:15000, cap:'렌즈에 후- 불고, 스윽', trk:'맑은 유리',
-  bake:function(x){ interior(x,false);
-    R(x,60,58,2,26,'#3a3650'); R(x,50,52,14,7,'#443f58'); R(x,52,59,10,2,'#d8a86a'); // 램프(왼 스탠드 대신 우측光이라 왼쪽 소품)
-  },
-  anim:function(x,t){ var ox=124, oy=92+bob(t); var p=(t%2000)/2000;
-    spr(x,FRONT,ox,oy,2);
-    R(x,0,108,W,H-108,'#211f2d'); R(x,0,108,W,2,'#2c2940');   // 데스크
-    var wipe=(p>0.5)?Math.round(Math.sin(t/110)*3):0;         // 렌즈 좌우로 닦기
-    R(x,ox+14,oy+6,3,4,CH);                                   // 든 팔(짧음)
-    R(x,ox+16+wipe,oy+3,5,5,'#2e2b3e'); R(x,ox+17+wipe,oy+4,3,3,'#46586a'); // 렌즈(얼굴 앞)
-    if(p>0.25&&p<0.45){ for(var i=0;i<6;i++){ var pp=((t*0.06)+i*8)%16; var a=(1-pp/16)*0.8; R(x,ox+13+Math.round(pp*0.9),oy+5+Math.round((i-3)*0.8),1,1,'rgba(232,228,212,'+(a<0?0:a).toFixed(2)+')'); } } // 후- 공기
+scenes.push({ dur:DUR, cap:'렌즈를 살펴보며', trk:'맑은 유리',
+  bake:function(x){ interiorDawn(x,false); desk3d(x,126,116,74); vignette(x); },
+  anim:function(x,t){
+    var w=Math.round(Math.sin(t/1600)*2);                 // 아주 천천히 좌우
+    charStand(x,118,120,-4, function(hx,hy){ R(x,hx+w,hy-1,5,5,'#2e2b3e'); R(x,hx+1+w,hy,3,3,'#46586a'); }); // 렌즈(손에)
   }});
 
 // 5) 커피 한잔
-scenes.push({ dur:14000, cap:'잠깐, 김 나는 한 잔', trk:'식지 않게',
-  bake:function(x){ interior(x,true);
-    R(x,40,72,60,2,'#3d3950'); R(x,54,60,10,12,'#443f58'); R(x,74,62,12,10,'#494560'); // 뒤 선반
-  },
-  anim:function(x,t){ var ox=142, oy=100+bob(t); var p=(t%2600)/2600; var lo=oy+9, hi=oy+1, my;
-    if(p<0.3) my=Math.round(lo-(p/0.3)*(lo-hi));           // 허리→입 올림
-    else if(p<0.6) my=hi;                                  // 마심
-    else if(p<0.85) my=Math.round(hi+((p-0.6)/0.25)*(lo-hi)); // 내림
-    else my=lo;
-    spr(x,FRONT,ox,oy,2);
-    R(x,ox+15,my+2,3,4,CH);                                // 오른팔(짧음)
-    R(x,ox+16,my,5,6,'#b0492e'); R(x,ox+16,my,5,2,'#c85a3a'); // 머그(허리↔입)
-    for(var i=0;i<3;i++){ var sy=my-2-((t*0.02+i*7)%12); R(x,ox+18+Math.round(Math.sin(t*0.006+i)*2),sy,1,2,'rgba(210,190,164,.5)'); } // 김
+scenes.push({ dur:DUR, cap:'잠깐, 김이 오르는 한 잔', trk:'식지 않게',
+  bake:function(x){ interiorDawn(x,true); vignette(x); },
+  anim:function(x,t){ var p=(t%DUR)/DUR; var sip= (p>0.4&&p<0.5)? Math.round(Math.sin((p-0.4)/0.1*Math.PI)*7) : 0; // 사이클당 딱 한 번, 느린 한 모금
+    charStand(x,150,130,-2-sip, function(hx,hy){ R(x,hx,hy-1,5,6,'#b0492e'); R(x,hx,hy-1,5,2,'#c85a3a');
+      for(var i=0;i<3;i++){ var sy=hy-3-((t*0.015+i*8)%12); R(x,hx+1+Math.round(Math.sin(t*0.005+i)*2),sy,1,2,'rgba(210,190,164,.5)'); } }); // 김
   }});
 
-// 6) 쉼 · 새벽 별 (아득)
-scenes.push({ dur:21000, cap:'아직 어두운, 여명 전', trk:'별이 지는 시간',
-  bake:function(x){ var s=sky(x,'night'); starField(x,STARS);
-    R(x,250,26,4,4,'#e6e0cf'); R(x,251,27,3,3,'#f2ecdb'); glow(x,252,28,24,'rgba(220,220,200,.24)',.5); // 달
-    R(x,0,s.HZ-2,W,3,'rgba(90,90,120,.25)');
-  },
-  anim:function(x,t){
-    for(var i=0;i<STARS.length;i++){ if((i+((t/700)|0))%3===0) R(x,STARS[i][0],STARS[i][1],1,1,'rgba(255,248,224,.9)'); } // 반짝
-    var b=bob(t); spr(x,BACK,112,116+b,2);
-  }});
+// 6) 쉼 · 새벽 별
+scenes.push({ dur:GAZE, cap:'아직 어두운, 여명 전', trk:'별이 지는 시간',
+  bake:function(x){ var HZ=sky(x,'night'); for(var i=0;i<STARS.length;i++) R(x,STARS[i][0],STARS[i][1],1,1,'rgba(220,216,232,.5)');
+    R(x,250,26,4,4,'#e6e0cf'); R(x,251,27,3,3,'#f2ecdb'); glow(x,252,28,24,'rgba(220,220,200,.22)',.5); vignette(x); },
+  anim:function(x,t){ for(var i=0;i<STARS.length;i++){ if((i+((t/900)|0))%3===0) R(x,STARS[i][0],STARS[i][1],1,1,'rgba(255,248,224,.85)'); }
+    charSit(x,112,116); }});
 
 // 7) 장부 정리
-scenes.push({ dur:15000, cap:'오늘의 대여를, 한 줄씩', trk:'장부와 연필',
-  bake:function(x){ interior(x,false);
-    R(x,250,56,2,26,'#3a3650'); R(x,244,50,12,7,'#443f58'); R(x,246,57,8,2,'#d8a86a'); // 램프(우)
-  },
-  anim:function(x,t){ var ox=126, oy=92+bob(t);
-    spr(x,FRONT,ox,oy,2);
-    R(x,0,108,W,H-108,'#211f2d'); R(x,0,108,W,2,'#2c2940');
-    R(x,150,104,22,7,'#cabfa6'); R(x,150,104,11,7,'#d6ccb4'); R(x,161,103,1,9,'#a89e86'); // 펼친 장부
-    var scb=Math.round(Math.sin(t/90)*4);                  // 글씨 끄적(좌우)
-    R(x,ox+15,oy+9,3,3,CH);                                // 팔(짧음)
-    R(x,ox+18+scb,oy+9,2,4,CH); R(x,ox+18+scb,oy+12,1,2,'#2c1a12'); // 손+펜
+scenes.push({ dur:DUR, cap:'오늘의 대여를, 한 줄씩', trk:'장부와 연필',
+  bake:function(x){ interiorDawn(x,false); desk3d(x,126,116,74);
+    for(var i=1;i<=6;i++){ R(x,150+i,112-i,22,1,'#cabfa6'); } R(x,150,112,22,2,'#b3a88e'); }, // 장부(윗면)
+  anim:function(x,t){
+    var wx=Math.round(Math.sin(t/900)*3);                 // 천천히 끄적
+    charStand(x,118,120,4, function(hx,hy){ R(x,hx+wx,hy,2,3,CH); R(x,hx+wx,hy+3,1,2,'#2c1a12'); }); // 손+펜
+    vignette(x);
   }});
 
 // 8) 꾸벅 졸기
-scenes.push({ dur:14000, cap:'스르륵, 잠깐만…', trk:'졸음',
-  bake:function(x){ interior(x,true);
-    R(x,60,58,2,26,'#3a3650'); R(x,50,52,12,7,'#443f58'); R(x,52,59,8,2,'#d8a86a');
-  },
-  anim:function(x,t){ var cx=134, oy=100; var p=(t%2400)/2400;
-    var nod=p<0.72? Math.round((p/0.72)*5) : Math.round(5*(1-(p-0.72)/0.08)); if(nod<0)nod=0; // 꾸벅→확 듦
-    R(x,cx-9,oy+8,18,12,CH);                               // 몸통(청키)
-    R(x,cx-7,oy-6+nod,14,12,CH);                           // 머리(청키, 꾸벅)
-    R(x,cx-3,oy-1+nod,2,2,EYE); R(x,cx+1,oy-1+nod,2,2,EYE); // 눈
-    R(x,0,108,W,H-108,'#211f2d'); R(x,0,108,W,2,'#2c2940');
-    R(x,150,102,18,6,'#2e2b3e'); R(x,154,100,6,4,'#28323e'); // 책상 카메라
-    for(var i=0;i<3;i++){ var zp=((t*0.025)+i*33)%100; var za=1-zp/100; if(za>0) drawZ(x,cx+14+Math.round(zp*0.14),oy-10-Math.round(zp*0.32),4+Math.round(zp*0.04),'rgba(232,216,168,'+za.toFixed(2)+')'); } // Z Z Z 떠오름
+scenes.push({ dur:DUR, cap:'스르륵, 잠깐만…', trk:'졸음',
+  bake:function(x){ interiorDawn(x,true); desk3d(x,126,116,70);
+    cube(x,150,106,14,8,'#2e2b3e','#3a3648','#1e1c28',3); cube(x,154,103,6,4,'#20262e','#2a3441','#161b22',2); }, // 책상 위 카메라
+  anim:function(x,t){
+    var nod = Math.round((Math.sin(t/2200 - Math.PI/2)*0.5+0.5)*5); // 천천히 숙였다 아주 가끔 듦
+    // 머리만 살짝 숙임: charStand 대신 직접
+    cube(x,118-5,120-6,4,6,CH,TOP,SIDE,2); cube(x,118+1,120-6,4,6,CH,TOP,SIDE,2);
+    cube(x,118-6,120-17,11,11,CH,TOP,SIDE,3);
+    cube(x,118-7,120-29+nod,13,12,CH,TOP,SIDE,3);          // 머리 꾸벅
+    for(var i=0;i<3;i++){ var zp=((t*0.02)+i*33)%100; var za=1-zp/100; if(za>0){ var zw=3+Math.round(zp*0.03), zx=126+Math.round(zp*0.12), zy=90-Math.round(zp*0.34);
+      x.fillStyle='rgba(232,216,168,'+za.toFixed(2)+')'; R(x,zx,zy,zw,1); for(var k=0;k<zw;k+=1){ R(x,zx+zw-1-k,zy+1+k,1,1); } R(x,zx,zy+zw+1,zw,1); } } // Z Z Z
+    vignette(x);
   }});
 
-// ═══════════ 렌더 루프 ═══════════
+// ══════════ 렌더 루프 ══════════
 scenes.forEach(function(s){ s.bg=mk(); s.bake(s.bg.x); });
-var bufA=mk(), bufB=mk();
-var FADE=2800;
-
-function overlay(x){
-  var g=x.createRadialGradient(160,84,58,160,90,205);
-  g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,'rgba(8,6,12,.5)');
-  x.fillStyle=g; x.fillRect(0,0,W,H);
-  var im=x.getImageData(0,0,W,H), d=im.data;
-  for(var i=0;i<d.length;i+=4){ var n=Math.random()*7-3.5; d[i]+=n; d[i+1]+=n; d[i+2]+=n; }
-  x.putImageData(im,0,0);
-}
-
-var idx=0, t0=0, last=0, started=false;
+var bufA=mk(), bufB=mk(), FADE=3000;
+function grain(x){ var im=x.getImageData(0,0,W,H),d=im.data; for(var i=0;i<d.length;i+=4){ var n=Math.random()*7-3.5; d[i]+=n; d[i+1]+=n; d[i+2]+=n; } x.putImageData(im,0,0); }
+var idx=0, t0=0, last=0;
 var trkEl=document.getElementById('trk'), capEl=document.getElementById('cap');
 function setLabels(i){ trkEl.textContent=scenes[i].trk; capEl.textContent=scenes[i].cap; }
-
-function drawScene(buf, i, tin){ buf.x.drawImage(scenes[i].bg.c,0,0); scenes[i].anim(buf.x, tin); }
-
-function frame(now){
-  requestAnimationFrame(frame);
-  if(now-last<50) return; last=now;
-  if(!t0) t0=now;
-  var tin=now-t0;
-  var cur=scenes[idx];
+function drawScene(buf,i,tin){ buf.x.drawImage(scenes[i].bg.c,0,0); scenes[i].anim(buf.x,tin); }
+function frame(now){ requestAnimationFrame(frame); if(now-last<55) return; last=now; if(!t0) t0=now;
+  var tin=now-t0, cur=scenes[idx];
   if(tin>=cur.dur){ idx=(idx+1)%scenes.length; t0=now; tin=0; setLabels(idx); }
-  drawScene(bufA, idx, tin);
-  ctx.globalAlpha=1; ctx.drawImage(bufA.c,0,0);
-  if(tin > cur.dur - FADE){
-    var ni=(idx+1)%scenes.length; var a=(tin-(cur.dur-FADE))/FADE;
-    drawScene(bufB, ni, tin-(cur.dur-FADE));
-    ctx.globalAlpha=a; ctx.drawImage(bufB.c,0,0); ctx.globalAlpha=1;
-  }
-  overlay(ctx);
+  drawScene(bufA,idx,tin); ctx.globalAlpha=1; ctx.drawImage(bufA.c,0,0);
+  if(tin>cur.dur-FADE){ var ni=(idx+1)%scenes.length, a=(tin-(cur.dur-FADE))/FADE; drawScene(bufB,ni,tin-(cur.dur-FADE)); ctx.globalAlpha=a; ctx.drawImage(bufB.c,0,0); ctx.globalAlpha=1; }
+  grain(ctx);
 }
+if(reduce){ drawScene(bufA,2,1000); ctx.drawImage(bufA.c,0,0); grain(ctx); setLabels(2); }
+else { setLabels(0); requestAnimationFrame(frame); }
 
-if(reduce){
-  // 정지: 새벽 쉼 한 프레임
-  var si=5; drawScene(bufA, si, 0); ctx.drawImage(bufA.c,0,0); overlay(ctx); setLabels(si);
-} else {
-  setLabels(0);
-  requestAnimationFrame(frame);
-}
-
-// ── 실시간 시계 ──
+// 시계
 var clk=document.getElementById('clk');
 function tick(){ var d=new Date(), p=function(n){return(n<10?'0':'')+n;}; clk.textContent=p(d.getHours())+':'+p(d.getMinutes()); }
 tick(); setInterval(tick,10000);
 
-// ── 오디오 ──
+// 오디오
 var bgm=document.getElementById('bgm'), gate=document.getElementById('gate'), play=document.getElementById('play');
 var sound=document.getElementById('sound'), mute=document.getElementById('mute'), vol=document.getElementById('vol'), hint=document.getElementById('hint');
 bgm.volume=0.7;
-function start(){ gate.classList.add('hidden'); sound.classList.add('show');
-  var p=bgm.play(); if(p&&p.catch) p.catch(function(){ hint.textContent='🎵 villagefm.mp3 넣으면 재생'; }); }
+function start(){ gate.classList.add('hidden'); sound.classList.add('show'); var p=bgm.play(); if(p&&p.catch) p.catch(function(){ hint.textContent='🎵 villagefm.mp3 넣으면 재생'; }); }
 play.addEventListener('click',start);
 bgm.addEventListener('error',function(){ if(gate.classList.contains('hidden')) hint.textContent='🎵 villagefm.mp3 넣으면 재생'; });
 mute.addEventListener('click',function(){ bgm.muted=!bgm.muted; mute.textContent=bgm.muted?'🔇':'🔊'; });
