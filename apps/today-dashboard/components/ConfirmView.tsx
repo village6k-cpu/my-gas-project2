@@ -48,6 +48,28 @@ type Req = {
 };
 
 const EMPTY_CONFIRM_EQUIPS: Equip[] = [];
+const CONFIRM_LIST_CACHE_KEY = "village-confirm-list-cache-v1";
+
+function readConfirmListCache(): Req[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.sessionStorage.getItem(CONFIRM_LIST_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.items) ? parsed.items : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeConfirmListCache(items: Req[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(CONFIRM_LIST_CACHE_KEY, JSON.stringify({ items, cachedAt: Date.now() }));
+  } catch {
+    // 저장소가 막혀도 확인요청 자체는 계속 동작해야 한다.
+  }
+}
 
 function resultTone(r?: string): "ok" | "warn" | "fail" | "unknown" | "set" | "none" {
   if (!r) return "none";
@@ -165,11 +187,12 @@ function buildConfirmEquipmentRows(equips: Equip[]): ConfirmEquipmentRow[] {
 }
 
 export function ConfirmView() {
-  const [items, setItems] = useState<Req[]>([]);
+  const [items, setItems] = useState<Req[]>(() => readConfirmListCache());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [busyReqIDs, setBusyReqIDs] = useState<Set<string>>(() => new Set());
   const [queuedRegisterIDs, setQueuedRegisterIDs] = useState<string[]>([]);
+  const [showKakaoInput, setShowKakaoInput] = useState(false);
   const [edit, setEdit] = useState<Req | null>(null);
   const [itemEdit, setItemEdit] = useState<{ req: Req; item: Equip } | null>(null);
   const loadingRef = useRef(false);
@@ -194,7 +217,9 @@ export function ConfirmView() {
       const res = await authFetch("/api/confirm?action=list");
       const json = await res.json();
       if (!res.ok || (json.status && json.status !== "OK")) throw new Error(json.error || json.message || "불러오기 실패");
-      setItems(Array.isArray(json.items) ? json.items : []);
+      const nextItems = Array.isArray(json.items) ? json.items : [];
+      setItems(nextItems);
+      writeConfirmListCache(nextItems);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -323,6 +348,11 @@ export function ConfirmView() {
     [doAction, load],
   );
 
+  const handleKakaoRequestCreated = useCallback(async () => {
+    await load();
+    setShowKakaoInput(false);
+  }, [load]);
+
   const cards = useMemo(
     () =>
       items.map((req) => (
@@ -352,7 +382,21 @@ export function ConfirmView() {
       </header>
 
       <main className="flex-1 space-y-2.5 p-3 pb-24">
-        <KakaoReservationInput onRequestCreated={load} />
+        {showKakaoInput ? (
+          <KakaoReservationInput onRequestCreated={handleKakaoRequestCreated} />
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowKakaoInput(true)}
+            className="tap flex w-full items-center justify-between rounded-xl2 bg-white px-3.5 py-3 text-left shadow-card ring-1 ring-line/70"
+          >
+            <span>
+              <span className="block text-[13px] font-extrabold text-ink">카톡 예약입력</span>
+              <span className="block text-[12px] font-semibold text-ink-faint">필요할 때만 열어서 확인요청 목록을 빠르게 유지합니다</span>
+            </span>
+            <span className="rounded-full bg-brand-50 px-2.5 py-1 text-[12px] font-extrabold text-brand-700">열기</span>
+          </button>
+        )}
         {error && <div className="rounded-xl bg-attention-bg px-3.5 py-2.5 text-[13px] font-medium text-attention-fg ring-1 ring-attention-ring">{error}</div>}
         {!items.length && !loading && !error && (
           <div className="rounded-xl2 border border-dashed border-line bg-white py-16 text-center">
@@ -485,6 +529,7 @@ function ConfirmCard({
             const sel = !isSetHeader && checked.has(row.rowKey);
             const editItem = () => onItemEdit({ ...row, 순번: itemOrdinal(row) });
             const canEditItem = actionable && !busy && !isQueued;
+            const canOpenRow = canEditItem && !isSetHeader;
             const needsModelChoice = /모델|미등록|❓/.test(`${row.결과 || ""} ${row.상세 || ""}`);
             const rowCls = isSetHeader
               ? "border border-line/60 bg-brand-50 px-3 py-2"
@@ -492,7 +537,21 @@ function ConfirmCard({
                 ? "ml-3 border border-line/70 border-l-2 border-l-brand-200 bg-white px-2.5 py-2"
                 : "bg-paper/60 px-2 py-1.5";
             return (
-              <div key={row.rowKey} data-confirm-role={row.role} className={`flex items-start gap-2 rounded-xl ${rowCls}`}>
+              <div
+                key={row.rowKey}
+                data-confirm-role={row.role}
+                onClick={canOpenRow ? editItem : undefined}
+                onKeyDown={canOpenRow ? (e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    editItem();
+                  }
+                } : undefined}
+                role={canOpenRow ? "button" : undefined}
+                tabIndex={canOpenRow ? 0 : undefined}
+                aria-label={canOpenRow ? `${row.장비명} 품목 수정` : undefined}
+                className={`flex items-start gap-2 rounded-xl ${rowCls} ${canOpenRow ? "cursor-pointer transition hover:ring-2 hover:ring-brand-200 focus:outline-none focus:ring-2 focus:ring-brand-400" : ""}`}
+              >
                 {isSetHeader ? (
                   <>
                     <span className="shrink-0 rounded-md bg-brand-600 px-2 py-0.5 text-[11px] font-extrabold text-white">세트</span>
@@ -510,7 +569,7 @@ function ConfirmCard({
                 ) : (
                   <>
                     {actionable && hasResult && !row.제외 && !busy && !isQueued ? (
-                      <input type="checkbox" checked={sel} onChange={() => toggle(row.rowKey)} className="mt-0.5 h-[16px] w-[16px] shrink-0 accent-brand-600" aria-label="등록 선택" />
+                      <input type="checkbox" checked={sel} onClick={(e) => e.stopPropagation()} onChange={() => toggle(row.rowKey)} className="mt-0.5 h-[16px] w-[16px] shrink-0 accent-brand-600" aria-label="등록 선택" />
                     ) : (
                       <span className="mt-0.5 w-[16px] shrink-0" aria-hidden />
                     )}
@@ -524,7 +583,7 @@ function ConfirmCard({
                     {row.제외 && <span className="shrink-0 rounded-full bg-attention-bg px-2 py-0.5 text-[10.5px] font-bold text-attention-fg">제외</span>}
                     {!row.제외 && row.결과 && (
                       canEditItem && needsModelChoice ? (
-                        <button onClick={editItem} className={`tap shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`} aria-label="모델 선택">
+                        <button onClick={(e) => { e.stopPropagation(); editItem(); }} className={`tap shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`} aria-label="모델 선택">
                           {row.결과}
                         </button>
                       ) : (
@@ -532,7 +591,7 @@ function ConfirmCard({
                       )
                     )}
                     {canEditItem && (
-                      <button onClick={editItem} className={`tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold ${needsModelChoice ? "text-warn-fg" : "text-ink-faint"}`} aria-label={needsModelChoice ? "모델 선택/품목 수정" : "품목 수정"}>
+                      <button onClick={(e) => { e.stopPropagation(); editItem(); }} className={`tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold ${needsModelChoice ? "text-warn-fg" : "text-ink-faint"}`} aria-label={needsModelChoice ? "모델 선택/품목 수정" : "품목 수정"}>
                         {needsModelChoice ? "수정" : "✎"}
                       </button>
                     )}

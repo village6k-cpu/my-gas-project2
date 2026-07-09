@@ -45,6 +45,30 @@ assert.match(
 
 assert.match(
   confirmView,
+  /const \[showKakaoInput,\s*setShowKakaoInput\] = useState\(false\)/,
+  '확인요청 첫 화면은 카톡 AI 예약 입력 패널을 필요할 때만 열어야 한다'
+);
+
+assert.doesNotMatch(
+  confirmView,
+  /<KakaoReservationInput onRequestCreated=\{load\} \/>/,
+  '카톡 AI 예약 입력 패널을 확인요청 진입과 동시에 마운트하면 목록 표시가 느려진다'
+);
+
+assert.match(
+  confirmView,
+  /const CONFIRM_LIST_CACHE_KEY = "village-confirm-list-cache-v1"/,
+  '확인요청 목록은 최근 성공 응답을 캐시해서 다음 진입 때 즉시 보여줘야 한다'
+);
+
+assert.match(
+  confirmView,
+  /useState<Req\[\]>\(\(\) => readConfirmListCache\(\)\)/,
+  '확인요청 목록은 첫 렌더에서 캐시된 항목을 바로 사용해야 한다'
+);
+
+assert.match(
+  confirmView,
   /const cards\s*=\s*useMemo\(/,
   '확인요청 카드 렌더링은 탭 전환/입력 중 불필요한 map 재생성을 줄이기 위해 memoized cards를 사용해야 한다'
 );

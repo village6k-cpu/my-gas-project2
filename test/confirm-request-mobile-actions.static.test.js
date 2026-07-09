@@ -39,6 +39,19 @@ assert(
 );
 
 assert(
+  /const canOpenRow = canEditItem && !isSetHeader/.test(view) &&
+    /onClick=\{canOpenRow \? editItem : undefined\}/.test(view) &&
+    /aria-label=\{canOpenRow \? `\$\{row\.장비명\} 품목 수정` : undefined\}/.test(view),
+  'desktop operators must be able to click the equipment row itself to edit it, not hunt for a tiny pencil button'
+);
+
+assert(
+  /onClick=\{\(e\) => e\.stopPropagation\(\)\}/.test(view) &&
+    /onChange=\{\(\) => toggle\(row\.rowKey\)\}/.test(view),
+  'row checkbox clicks must not also open the item edit sheet'
+);
+
+assert(
   /map\(\(row\) => row\.rowKey\)/.test(view) &&
     /filter\(\(row\) => !checked\.has\(row\.rowKey\)\)/.test(view) &&
     /runFunc\("updateRequestItem"[\s\S]*제외: true/.test(view),
