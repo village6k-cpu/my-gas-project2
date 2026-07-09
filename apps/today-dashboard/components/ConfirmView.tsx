@@ -364,10 +364,11 @@ export function ConfirmView() {
           onAct={act}
           onRegisterSelected={registerSelected}
           onEdit={() => setEdit(req)}
-          onItemEdit={(item) => setItemEdit({ req, item })}
+          onItemSaved={load}
+          runFunc={runFunc}
         />
       )),
-    [items, busyReqIDs, queuedRegisterIDs, act, registerSelected],
+    [items, busyReqIDs, queuedRegisterIDs, act, registerSelected, load, runFunc],
   );
 
   return (
@@ -439,7 +440,7 @@ export function ConfirmView() {
 }
 
 function ConfirmCard({
-  req, busy, queueIndex, onAct, onRegisterSelected, onEdit, onItemEdit,
+  req, busy, queueIndex, onAct, onRegisterSelected, onEdit, onItemSaved, runFunc,
 }: {
   req: Req;
   busy: boolean;
@@ -447,7 +448,8 @@ function ConfirmCard({
   onAct: (action: string, reqID: string) => void;
   onRegisterSelected: (req: Req, excludedItems: ExcludedConfirmItem[]) => void;
   onEdit: () => void;
-  onItemEdit: (item: Equip) => void;
+  onItemSaved: () => void | Promise<void>;
+  runFunc: (func: string, args: Record<string, unknown>) => Promise<boolean>;
 }) {
   // 같은 장비명이 여러 행일 때 정확한 행을 지정하기 위한 동명 순번 (시트 행 순서 = 장비목록 순서)
   const itemOrdinal = useCallback((row: ConfirmEquipmentRow) => {
@@ -463,10 +465,17 @@ function ConfirmCard({
   // 체크 상태: 기본 = 가용0/❌ 아닌 것만 체크
   const defaultChecked = useMemo(() => new Set(equipmentRows.filter((row) => row.role !== "set-header" && !isFail(row.결과) && !row.제외).map((row) => row.rowKey)), [equipmentRows]);
   const [checked, setChecked] = useState<Set<string>>(defaultChecked);
+  const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
 
   useEffect(() => {
     setChecked(defaultChecked);
   }, [defaultChecked]);
+
+  useEffect(() => {
+    setEditingRowKey(null);
+  }, [req.reqID, req.장비목록]);
+
+  const openInlineItemEdit = (row: ConfirmEquipmentRow) => setEditingRowKey(row.rowKey);
 
   const toggle = useCallback((key: string) =>
     setChecked((prev) => {
@@ -527,9 +536,11 @@ function ConfirmCard({
             const isSetHeader = row.role === "set-header";
             const isSetComponent = row.role === "set-component";
             const sel = !isSetHeader && checked.has(row.rowKey);
-            const editItem = () => onItemEdit({ ...row, 순번: itemOrdinal(row) });
+            const editableItem = { ...row, 순번: itemOrdinal(row) };
             const canEditItem = actionable && !busy && !isQueued;
             const canOpenRow = canEditItem && !isSetHeader;
+            const isEditingRow = editingRowKey === row.rowKey;
+            const rowOpensInlineEdit = canOpenRow && !isEditingRow;
             const needsModelChoice = /모델|미등록|❓/.test(`${row.결과 || ""} ${row.상세 || ""}`);
             const rowCls = isSetHeader
               ? "border border-line/60 bg-brand-50 px-3 py-2"
@@ -540,17 +551,17 @@ function ConfirmCard({
               <div
                 key={row.rowKey}
                 data-confirm-role={row.role}
-                onClick={canOpenRow ? editItem : undefined}
-                onKeyDown={canOpenRow ? (e) => {
+                onClick={rowOpensInlineEdit ? () => openInlineItemEdit(row) : undefined}
+                onKeyDown={rowOpensInlineEdit ? (e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    editItem();
+                    openInlineItemEdit(row);
                   }
                 } : undefined}
-                role={canOpenRow ? "button" : undefined}
-                tabIndex={canOpenRow ? 0 : undefined}
-                aria-label={canOpenRow ? `${row.장비명} 품목 수정` : undefined}
-                className={`flex items-start gap-2 rounded-xl ${rowCls} ${canOpenRow ? "cursor-pointer transition hover:ring-2 hover:ring-brand-200 focus:outline-none focus:ring-2 focus:ring-brand-400" : ""}`}
+                role={rowOpensInlineEdit ? "button" : undefined}
+                tabIndex={rowOpensInlineEdit ? 0 : undefined}
+                aria-label={rowOpensInlineEdit ? `${row.장비명} 행에서 바로 수정` : undefined}
+                className={`flex items-start gap-2 rounded-xl ${rowCls} ${rowOpensInlineEdit ? "cursor-pointer transition hover:ring-2 hover:ring-brand-200 focus:outline-none focus:ring-2 focus:ring-brand-400" : ""}`}
               >
                 {isSetHeader ? (
                   <>
@@ -573,27 +584,42 @@ function ConfirmCard({
                     ) : (
                       <span className="mt-0.5 w-[16px] shrink-0" aria-hidden />
                     )}
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-baseline gap-1.5">
-                        <span className={`truncate text-[13.5px] font-semibold ${row.제외 ? "text-ink-faint line-through" : isSetComponent ? "text-ink-soft" : "text-ink"}`}>{row.장비명}</span>
-                        <span className="shrink-0 text-[12px] font-bold tabular-nums text-ink-soft">×{row.수량}</span>
-                      </div>
-                      {row.상세 && <div className="truncate text-[11px] text-ink-faint">{row.상세}</div>}
-                    </div>
-                    {row.제외 && <span className="shrink-0 rounded-full bg-attention-bg px-2 py-0.5 text-[10.5px] font-bold text-attention-fg">제외</span>}
-                    {!row.제외 && row.결과 && (
-                      canEditItem && needsModelChoice ? (
-                        <button onClick={(e) => { e.stopPropagation(); editItem(); }} className={`tap shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`} aria-label="모델 선택">
-                          {row.결과}
-                        </button>
-                      ) : (
-                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`}>{row.결과}</span>
-                      )
-                    )}
-                    {canEditItem && (
-                      <button onClick={(e) => { e.stopPropagation(); editItem(); }} className={`tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold ${needsModelChoice ? "text-warn-fg" : "text-ink-faint"}`} aria-label={needsModelChoice ? "모델 선택/품목 수정" : "품목 수정"}>
-                        {needsModelChoice ? "수정" : "✎"}
-                      </button>
+                    {isEditingRow ? (
+                      <InlineItemEditor
+                        req={req}
+                        item={editableItem}
+                        onCancel={() => setEditingRowKey(null)}
+                        onSaved={async () => {
+                          setEditingRowKey(null);
+                          await onItemSaved();
+                        }}
+                        runFunc={runFunc}
+                      />
+                    ) : (
+                      <>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 items-baseline gap-1.5">
+                            <span className={`truncate text-[13.5px] font-semibold ${row.제외 ? "text-ink-faint line-through" : isSetComponent ? "text-ink-soft" : "text-ink"}`}>{row.장비명}</span>
+                            <span className="shrink-0 text-[12px] font-bold tabular-nums text-ink-soft">×{row.수량}</span>
+                          </div>
+                          {row.상세 && <div className="truncate text-[11px] text-ink-faint">{row.상세}</div>}
+                        </div>
+                        {row.제외 && <span className="shrink-0 rounded-full bg-attention-bg px-2 py-0.5 text-[10.5px] font-bold text-attention-fg">제외</span>}
+                        {!row.제외 && row.결과 && (
+                          canEditItem && needsModelChoice ? (
+                            <button onClick={(e) => { e.stopPropagation(); openInlineItemEdit(row); }} className={`tap shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`} aria-label="모델 선택">
+                              {row.결과}
+                            </button>
+                          ) : (
+                            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${RESULT_CLS[tone]}`}>{row.결과}</span>
+                          )
+                        )}
+                        {canEditItem && (
+                          <button onClick={(e) => { e.stopPropagation(); openInlineItemEdit(row); }} className={`tap shrink-0 rounded-md px-1.5 py-1 text-[12px] font-bold ${needsModelChoice ? "text-warn-fg" : "text-ink-faint"}`} aria-label={needsModelChoice ? "모델 선택/품목 수정" : "품목 수정"}>
+                            {needsModelChoice ? "수정" : "✎"}
+                          </button>
+                        )}
+                      </>
                     )}
                   </>
                 )}
@@ -764,6 +790,73 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
       <span className="mb-1 block text-[12px] font-bold text-ink-mute">{label}</span>
       {children}
     </label>
+  );
+}
+
+/** 품목 행 내부 편집 — 화면을 덮지 않고 시트처럼 해당 행에서 바로 수정한다. */
+function InlineItemEditor({
+  req, item, onCancel, onSaved, runFunc,
+}: {
+  req: Req; item: Equip; onCancel: () => void; onSaved: () => void; runFunc: (func: string, args: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const [name, setName] = useState(item.장비명);
+  const [qty, setQty] = useState(String(item.수량 || 1));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const catalog = useEquipmentCatalog();
+
+  const call = async (args: Record<string, unknown>) => {
+    setBusy(true);
+    setErr("");
+    try {
+      await runFunc("updateRequestItem", { reqID: req.reqID, 장비명: item.장비명, 비고: String(item.비고 || ""), 순번: item.순번 || 0, ...args });
+      await onSaved();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
+  const save = () => {
+    const q = Number(qty);
+    if (!name.trim() || !Number.isFinite(q) || q < 1) {
+      setErr("이름과 1 이상의 수량을 입력하세요");
+      return;
+    }
+    void call({ 새이름: name.trim(), 수량: q });
+  };
+
+  return (
+    <div className="min-w-0 flex-1 rounded-lg bg-white p-2 shadow-sm ring-2 ring-brand-300" onClick={(e) => e.stopPropagation()}>
+      <div className="flex min-w-0 items-start gap-1.5">
+        <EquipNameInput value={name} onChange={setName} names={catalog.names} placeholder="장비명" />
+        <input
+          value={qty}
+          onChange={(e) => setQty(e.target.value)}
+          className="h-9 w-14 shrink-0 rounded-md border border-black/10 px-2 text-center text-[13px] font-bold text-ink outline-none focus:border-brand-600"
+          inputMode="numeric"
+          aria-label="수량"
+        />
+      </div>
+      {err && <p className="mt-1 text-[12px] font-bold text-attention-fg">{err}</p>}
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <button disabled={busy} onClick={save} className="tap min-h-8 flex-[2] rounded-lg bg-brand-600 px-2 text-[12px] font-extrabold text-white disabled:opacity-50">
+          {busy ? "처리 중..." : "저장 + 이 품목만 재확인"}
+        </button>
+        <button disabled={busy} onClick={onCancel} className="tap min-h-8 flex-1 rounded-lg bg-white px-2 text-[12px] font-extrabold text-ink-soft ring-1 ring-line disabled:opacity-50">
+          취소
+        </button>
+        {item.제외 ? (
+          <button disabled={busy} onClick={() => void call({ 제외: false })} className="tap min-h-8 flex-1 rounded-lg bg-paper px-2 text-[12px] font-extrabold text-ink-soft ring-1 ring-line disabled:opacity-50">
+            제외 해제 (다시 등록 대상에 포함)
+          </button>
+        ) : (
+          <button disabled={busy} onClick={() => void call({ 제외: true })} className="tap min-h-8 flex-1 rounded-lg bg-attention-bg px-2 text-[12px] font-extrabold text-attention-fg disabled:opacity-50">
+            이 품목 제외
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
