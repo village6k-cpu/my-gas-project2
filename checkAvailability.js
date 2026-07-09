@@ -10012,7 +10012,7 @@ function manualProcessAll() {
     return;
   }
 
-  const data = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
+  const data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
   let count = 0;
 
   const processedIDs = new Set();
@@ -10086,21 +10086,46 @@ function autoClearRequests() {
     }
   }
 
-  // 2) 해당 요청의 모든 행 클리어 (아래에서 위로 — L열=12 수식은 보존)
+  // 2) 해당 요청의 모든 행 클리어 (아래에서 위로 — L열 수식이 있으면 수식만 복원)
   let cleared = 0;
   for (let i = data.length - 1; i >= 0; i--) {
     const rid = String(data[i][0] || "").trim();
     const rowDone = isRegisterCompletedStatus_(data[i][14]);
     if (!rowDone && !(rid && doneReqIDs.has(rid))) continue;
     const row = i + 2;
-    sheet.getRange(row, 1, 1, 11).clearContent();   // A~K
-    sheet.getRange(row, 1, 1, 11).setBackground(null);
-    sheet.getRange(row, 13, 1, 6).clearContent();   // M~R (L열 수식만 보존)
-    sheet.getRange(row, 13, 1, 6).setBackground(null);
+    clearConfirmRequestRowPreservingFormulas_(sheet, row);
     cleared++;
   }
-  if (cleared > 0) SpreadsheetApp.flush();
-  return { cleared: cleared, requests: doneReqIDs.size };
+  var orphanContacts = 0;
+  for (let i = data.length - 1; i >= 0; i--) {
+    const row = i + 2;
+    if (isOrphanContactOnlyRequestRow_(sheet, row, data[i])) {
+      clearConfirmRequestRowPreservingFormulas_(sheet, row);
+      orphanContacts++;
+    }
+  }
+  if (cleared > 0 || orphanContacts > 0) SpreadsheetApp.flush();
+  return { cleared: cleared, requests: doneReqIDs.size, orphanContacts: orphanContacts };
+}
+
+function clearConfirmRequestRowPreservingFormulas_(sheet, row) {
+  var lFormula = sheet.getRange(row, 12).getFormula();
+  sheet.getRange(row, 1, 1, 18).clearContent();   // A~R, L열 연락처 값 포함
+  sheet.getRange(row, 1, 1, 18).setBackground(null);
+  if (lFormula) sheet.getRange(row, 12).setFormula(lFormula);
+}
+
+function isBlankConfirmRequestCell_(value) {
+  return String(value || "").trim() === "";
+}
+
+function isOrphanContactOnlyRequestRow_(sheet, row, values) {
+  var contact = String(values[11] || "").trim();
+  if (!contact) return false;
+  if (sheet.getRange(row, 12).getFormula()) return false;
+  if (!/\d{2,4}[-\s]?\d{3,4}[-\s]?\d{4}/.test(contact)) return false;
+  return values.slice(0, 11).every(isBlankConfirmRequestCell_) &&
+    values.slice(12, 18).every(isBlankConfirmRequestCell_);
 }
 
 /**
@@ -10123,11 +10148,10 @@ function doClearRequests() {
   const sheet = ss.getSheetByName("확인요청");
   const lastRow = sheet.getLastRow();
   if (lastRow >= 2) {
-    // L열(12) 수식 보존: A~K, M~R 삭제
-    sheet.getRange(2, 1, lastRow - 1, 11).clearContent();   // A~K
-    sheet.getRange(2, 1, lastRow - 1, 11).setBackground(null);
-    sheet.getRange(2, 13, lastRow - 1, 6).clearContent();   // M~R
-    sheet.getRange(2, 13, lastRow - 1, 6).setBackground(null);
+    const lFormulas = sheet.getRange(2, 12, lastRow - 1, 1).getFormulas();
+    sheet.getRange(2, 1, lastRow - 1, 18).clearContent();   // A~R, L열 연락처 값 포함
+    sheet.getRange(2, 1, lastRow - 1, 18).setBackground(null);
+    sheet.getRange(2, 12, lastRow - 1, 1).setFormulas(lFormulas);
   }
   // 초기화 후 F열 드롭다운(장비+세트) 자동 갱신
   refreshEquipmentList();
