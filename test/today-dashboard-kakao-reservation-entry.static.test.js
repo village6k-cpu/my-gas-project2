@@ -15,8 +15,13 @@ assert(
 );
 
 assert(
-  confirmView.includes('onRequestCreated={load}'),
-  'new reservation input must refresh the confirmation list'
+  confirmView.includes('onRequestCreated={handleKakaoRequestCreated}'),
+  'new reservation input must refresh the confirmation list after creation'
+);
+
+assert(
+  confirmView.includes('setShowKakaoInput(false)'),
+  'new reservation input must close after it creates a request so the fast list stays primary'
 );
 
 assert(
