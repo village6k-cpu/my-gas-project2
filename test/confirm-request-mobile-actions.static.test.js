@@ -39,10 +39,32 @@ assert(
 );
 
 assert(
-  /const canOpenRow = canEditItem && !isSetHeader/.test(view) &&
-    /onClick=\{canOpenRow \? editItem : undefined\}/.test(view) &&
-    /aria-label=\{canOpenRow \? `\$\{row\.장비명\} 품목 수정` : undefined\}/.test(view),
-  'desktop operators must be able to click the equipment row itself to edit it, not hunt for a tiny pencil button'
+  /const \[editingRowKey, setEditingRowKey\] = useState<string \| null>\(null\)/.test(view) &&
+    /const openInlineItemEdit = \(row: ConfirmEquipmentRow\) => setEditingRowKey\(row\.rowKey\)/.test(view) &&
+    /const rowOpensInlineEdit = canOpenRow && !isEditingRow/.test(view) &&
+    /onClick=\{rowOpensInlineEdit \? \(\) => openInlineItemEdit\(row\) : undefined\}/.test(view) &&
+    /aria-label=\{rowOpensInlineEdit \? `\$\{row\.장비명\} 행에서 바로 수정` : undefined\}/.test(view),
+  'desktop operators must edit equipment directly inside the clicked row, not through a modal or tiny pencil hunt'
+);
+
+assert(
+  !/onClick=\{canOpenRow \? editItem : undefined\}/.test(view),
+  'equipment row click must not open ItemEditSheet, because the sheet-style workflow needs inline row editing'
+);
+
+assert(
+  /const isEditingRow = editingRowKey === row\.rowKey/.test(view) &&
+    /<InlineItemEditor/.test(view) &&
+    /onCancel=\{\(\) => setEditingRowKey\(null\)\}/.test(view),
+  'an active equipment row must render an inline editor with a local cancel path'
+);
+
+assert(
+  /function InlineItemEditor/.test(view) &&
+    /runFunc\("updateRequestItem"/.test(view) &&
+    /저장 \+ 이 품목만 재확인/.test(view) &&
+    /제외 해제 \(다시 등록 대상에 포함\)/.test(view),
+  'inline equipment editing must preserve the same single-row update and exclude controls as the old item sheet'
 );
 
 assert(
