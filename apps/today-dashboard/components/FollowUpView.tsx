@@ -239,6 +239,17 @@ export function FollowUpView() {
       else n.add(id);
       return n;
     });
+  const toggleSectionSelect = useCallback((ids: string[]) => {
+    const sectionIds = ids.filter(Boolean);
+    if (!sectionIds.length) return;
+    setSelected((prev) => {
+      const allSelected = sectionIds.length > 0 && sectionIds.every((id) => prev.has(id));
+      const next = new Set(prev);
+      if (allSelected) sectionIds.forEach((id) => next.delete(id));
+      else sectionIds.forEach((id) => next.add(id));
+      return next;
+    });
+  }, []);
 
   const summary = data?.summary || {};
   const showClosed = (status === "done" || status === "dismissed" || status === "all") && closed.length > 0;
@@ -309,6 +320,7 @@ export function FollowUpView() {
                   inlineDetail={!wide}
                   onFocus={setFocusedId}
                   onToggle={toggleSelect}
+                  onToggleSection={toggleSectionSelect}
                   onPatch={patch}
                   onSend={sendReply}
                 />
@@ -363,11 +375,13 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: "ur
 }
 
 function Lane({
-  label, laneKey, items, focusedId, selected, inlineDetail, onFocus, onToggle, onPatch, onSend,
+  label, laneKey, items, focusedId, selected, inlineDetail, onFocus, onToggle, onToggleSection, onPatch, onSend,
 }: {
   label: string; laneKey: string; items: Item[]; focusedId: string | null; selected: Set<string>; inlineDetail: boolean;
-  onFocus: (id: string) => void; onToggle: (id: string) => void; onPatch: (ids: string[], st: string) => void; onSend: (i: Item, t: string) => Promise<void>;
+  onFocus: (id: string) => void; onToggle: (id: string) => void; onToggleSection: (ids: string[]) => void; onPatch: (ids: string[], st: string) => void; onSend: (i: Item, t: string) => Promise<void>;
 }) {
+  const sectionIds = items.map((it) => it.id);
+  const allSelected = sectionIds.length > 0 && sectionIds.every((id) => selected.has(id));
   return (
     <section className="min-w-0 overflow-hidden rounded-xl bg-white ring-1 ring-line/70">
       <div className="flex min-h-[42px] items-center justify-between gap-2 border-b border-line/60 bg-paper/60 px-3 py-2.5">
@@ -375,11 +389,14 @@ function Lane({
         <div className="flex items-center gap-1.5">
           <button
             type="button"
-            onClick={() => onPatch(items.map((it) => it.id), "done")}
+            onClick={() => onToggleSection(sectionIds)}
             disabled={items.length === 0}
-            className="tap flex h-[24px] w-[24px] items-center justify-center rounded-full bg-checkin-bg text-checkin-fg ring-1 ring-checkin-ring transition hover:bg-checkin-ring disabled:cursor-not-allowed disabled:bg-white disabled:text-ink-faint disabled:ring-line/70"
-            aria-label={`${label} 섹션 완료`}
-            title={`${label} 섹션 완료`}
+            className={`tap flex h-[24px] w-[24px] items-center justify-center rounded-full ring-1 transition disabled:cursor-not-allowed disabled:bg-white disabled:text-ink-faint disabled:ring-line/70 ${
+              allSelected ? "bg-brand-600 text-white ring-brand-600" : "bg-white text-ink-mute ring-line hover:bg-checkin-bg hover:text-checkin-fg hover:ring-checkin-ring"
+            }`}
+            aria-pressed={allSelected}
+            aria-label={allSelected ? `${label} 섹션 선택 해제` : `${label} 섹션 선택`}
+            title={allSelected ? `${label} 섹션 선택 해제` : `${label} 섹션 선택`}
           >
             <Check className="h-3.5 w-3.5" />
           </button>
