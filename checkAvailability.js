@@ -7743,6 +7743,17 @@ function _processByReqID(sheet, triggerRow) {
     reqRows.push({ idx: i, row: i + 2, 장비명: allData[i][5], 수량: allData[i][6] || 1, result: allData[i][8] });
   }
 
+  // ── 재확인 시 과거 "❌ 등록 불가" 배너는 무효 → 지운다 ──
+  // 가용 재확인을 돌리면 결과가 새로 계산되므로, 예전 등록 실패로 남은 O열 배너가 그대로
+  // 붙어 있으면 사장님이 "자꾸 등록 불가로 뜬다"고 오해한다. 제외/등록완료/등록대기/보류/거절
+  // 같은 실제 상태는 건드리지 않고, 전이성 실패 배너("❌ 등록 불가…")만 정리한다.
+  for (let ci = 0; ci < allData.length; ci++) {
+    if (allData[ci][0] !== triggerReqID) continue;
+    if (/^❌\s*등록\s*불가/.test(String(allData[ci][14] || ""))) {
+      sheet.getRange(ci + 2, 15).clearContent().setBackground(null);
+    }
+  }
+
   // 세트마스터 A열 이름 목록 (한번만 읽기)
   var setMasterNames = new Set();
   if (setSheet.getLastRow() >= 2) {
@@ -8740,6 +8751,13 @@ function recoverPartiallyRegisteredRequests() {
 function getBlockingRegisterIssue_(data, reqID) {
   for (var i = 0; i < data.length; i++) {
     if (data[i][0] !== reqID) continue;
+    // 제외/거절/보류 행은 애초에 등록 대상이 아니므로 등록을 막지 않는다.
+    var status = String(data[i][14] || "").trim();  // O열: 등록상태
+    if (status === "제외" || status === "거절" || status === "보류") continue;
+    // 세트 구성품(비고 Q열이 "[세트]…")은 세트 단위로 등록된다. 리더기·헤드·발라스터·
+    // 루버 같은 비추적 부속의 "미등록/모델 선택 필요"가 예약 전체 등록을 막으면 안 된다.
+    // (세트 헤더·개별 장비 등 최상위 품목의 모델 미선택은 그대로 등록을 막는다.)
+    if (String(data[i][16] || "").indexOf("[세트]") === 0) continue;  // Q열: 비고(세트 태그)
     var result = String(data[i][8] || "").trim();
     if (/^❌\s*날짜/.test(result)) return result.replace(/^❌\s*/, "");
     if (/^⚠️?\s*모델 선택/.test(result)) return result.replace(/^⚠️?\s*/, "");
