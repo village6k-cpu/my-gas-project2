@@ -9169,6 +9169,10 @@ function registerByReqID(sheet, triggerRow) {
   const 미선택목록 = [];
   for (let i = 0; i < allData.length; i++) {
     if (allData[i][0] !== reqID) continue;
+    // 제외/거절/보류 행은 사장님이 이미 뺀 것 → 모델 미선택이어도 등록을 막지 않는다.
+    // (예: 세트 구성품 '소프트박스'를 제외했는데도 계속 등록이 막히던 문제)
+    var 행상태 = String(allData[i][14] || "").trim(); // O열: 등록상태
+    if (행상태 === "제외" || 행상태 === "거절" || 행상태 === "보류") continue;
     const 장비명 = allData[i][5]; // F열
     if (!장비명) continue;
     if (String(allData[i][8]) === "세트") continue; // 세트 헤더 스킵

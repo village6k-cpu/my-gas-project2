@@ -114,4 +114,19 @@ assert(
   '_processByReqID는 재확인 시 과거 "❌ 등록 불가" 배너(O열)를 지워야 한다'
 );
 
+// ── Fix C: registerByReqID의 "카테고리 미선택 장비 체크"(❌ 모델 미선택) 루프도
+//    제외/거절/보류 행을 건너뛰어야 한다. 세트 구성품 '소프트박스'를 제외했는데도
+//    "❌ 모델 미선택: N행 …"으로 계속 막히던 문제. ──
+const guard2 = backend.match(/카테고리 미선택 장비 체크[\s\S]*?미선택목록\.push\(label\);/);
+assert(guard2, 'registerByReqID의 카테고리 미선택 체크 루프를 찾지 못함');
+assert(
+  /행상태 === "제외" \|\| 행상태 === "거절" \|\| 행상태 === "보류"\) continue;/.test(guard2[0]),
+  '카테고리 미선택 체크는 제외/거절/보류 행을 건너뛰어야 한다(사장님이 제외한 행은 등록을 막으면 안 됨)'
+);
+// 상태 스킵이 findEquipment 판정보다 먼저 와야 한다(스킵 전에 미선택목록에 담기면 안 됨).
+assert(
+  guard2[0].indexOf('행상태 === "제외"') < guard2[0].indexOf('findEquipment(장비명'),
+  '제외/거절/보류 스킵은 findEquipment 판정보다 앞에 있어야 한다'
+);
+
 console.log('confirm register block guard static checks passed');
