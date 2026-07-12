@@ -6791,17 +6791,99 @@ function autoGenerateReqID(sheet, row) {
  * - "학생" 포함 → "학생"
  * - "사업자" / "프리랜서" / "프리" / "개사프" → "개인사업자/프리랜서"
  */
-function _normalizeDiscountType(v) {
+function _normalizeDiscountTypeOrBlank_(v) {
   var s = String(v || "").trim();
-  if (!s) return "일반";
-  // 정식값 그대로 온 경우
-  if (s === "일반" || s === "학생" || s === "개인사업자/프리랜서") return s;
-  // 단골/제휴는 파서가 넣지 못하게 차단 → 일반으로 변환 (시스템이 고객DB 매칭으로 처리)
-  if (s === "단골" || s === "제휴") return "일반";
-  // 키워드 매칭
+  if (!s) return "";
+  s = s.replace(/\s+/g, "");
+
+  // 정식값/고객DB 값 그대로 또는 할인율 접미어 포함값 처리
+  if (s === "일반") return "일반";
+  if (/단골/.test(s)) return "단골";
+  if (/제휴/.test(s)) return "제휴";
   if (/학생|재학|학번|학사|대학|고등|중학/.test(s)) return "학생";
-  if (/사업자|프리랜서|프리|개사프|프리라이더|자영|1인|소상공/.test(s)) return "개인사업자/프리랜서";
-  return "일반";
+  if (/사업자|프리랜서|개인사업자|프리|개사프|프리라이더|자영|1인|소상공/.test(s)) return "개인사업자/프리랜서";
+  return "";
+}
+
+function _normalizeDiscountType(v) {
+  return _normalizeDiscountTypeOrBlank_(v) || "일반";
+}
+
+function _confirmRequestCustomerDbSheets_(ss) {
+  var sheets = [];
+  var seen = {};
+  function addSheet(sheet, source) {
+    if (!sheet || sheet.getLastRow() < 2) return;
+    var key;
+    try { key = sheet.getParent().getId() + ":" + sheet.getSheetId(); }
+    catch (e) { key = source + ":" + sheet.getName(); }
+    if (seen[key]) return;
+    seen[key] = true;
+    sheets.push({ sheet: sheet, source: source });
+  }
+
+  // 개고생2.0 / 빌리지 2.0 고객DB가 할인유형(I열)의 기준이다.
+  // Properties가 비어 있는 환경도 있어, 운영 매뉴얼의 고정 sheetId를 fallback으로 둔다.
+  try {
+    var props = PropertiesService.getScriptProperties();
+    ["개고생2_URL", "VILLAGE2_SHEET_URL", "VILLAGE2_URL"].forEach(function(key) {
+      var url = props.getProperty(key);
+      if (!url) return;
+      try { addSheet(SpreadsheetApp.openByUrl(url).getSheetByName("고객DB"), key); } catch (e) {}
+    });
+  } catch (e) {}
+  try {
+    addSheet(SpreadsheetApp.openById("1ssb6EyuRRCU04Zf4UAtdbpYYkWcseGqnhWVONdrqol8").getSheetByName("고객DB"), "VILLAGE2_SHEET_ID");
+  } catch (e) {}
+  try { addSheet(ss.getSheetByName("고객DB"), "active_spreadsheet"); } catch (e) {}
+  return sheets;
+}
+
+function _findConfirmRequestCustomerDbMatches_(ss, customerName, phone) {
+  var nameKey = String(customerName || "").trim();
+  var phoneKey = _confirmRequestPhoneKey_(phone);
+  if (!nameKey && !phoneKey) return [];
+
+  var phoneMatches = [];
+  var nameMatches = [];
+  _confirmRequestCustomerDbSheets_(ss).forEach(function(ref) {
+    var sheet = ref.sheet;
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return;
+    var width = Math.min(Math.max(9, sheet.getLastColumn()), sheet.getMaxColumns());
+    var data = sheet.getRange(2, 1, lastRow - 1, width).getValues();
+    data.forEach(function(row) {
+      var dbPhoneRaw = row[0];
+      var dbName = String(row[1] || "").trim();
+      var dbPhoneKey = _confirmRequestPhoneKey_(dbPhoneRaw);
+      var match = {
+        source: ref.source,
+        name: dbName,
+        phone: String(dbPhoneRaw || "").trim(),
+        phoneKey: dbPhoneKey,
+        discount: row.length >= 9 ? String(row[8] || "").trim() : ""
+      };
+      if (phoneKey && dbPhoneKey && dbPhoneKey === phoneKey) phoneMatches.push(match);
+      if (nameKey && dbName === nameKey) nameMatches.push(match);
+    });
+  });
+  return phoneMatches.length > 0 ? phoneMatches : nameMatches;
+}
+
+function _bestConfirmRequestCustomerDbDiscount_(matches) {
+  var rank = { "일반": 1, "개인사업자/프리랜서": 2, "학생": 3, "제휴": 4, "단골": 5 };
+  var best = "";
+  var bestRank = 0;
+  (matches || []).forEach(function(match) {
+    var discount = _normalizeDiscountTypeOrBlank_(match.discount);
+    if (!discount) return;
+    var score = rank[discount] || 0;
+    if (score > bestRank) {
+      best = discount;
+      bestRank = score;
+    }
+  });
+  return best;
 }
 
 function _sanitizeConfirmRequestFreeText_(value, maxLength) {
@@ -7068,7 +7150,7 @@ function _collectConfirmRequestResultsByReqID_(sheet, reqID) {
  *   반출일, 반출시간, 반납일, 반납시간,
  *   장비: [{이름, 수량}],
  *   예약자명?, 연락처?,
- *   할인유형? (일반|학생|개인사업자/프리랜서 중 하나; 단골/제휴는 파서가 넣지 않음 — 시스템이 고객DB 매칭으로 자동 처리),
+ *   할인유형? (일반|학생|개인사업자/프리랜서|단골|제휴; 빌리지2.0 고객DB I열 값이 있으면 이 값보다 우선),
  *   추가요청?
  * }
  * 구버전 호환: req.업체명 이 오면 req.할인유형으로 간주 (코워크 파서 마이그레이션 전 임시 fallback)
@@ -7110,30 +7192,30 @@ function _insertAndCheckRequest(req) {
   }).filter(function(item) { return item && item.name; });
   var requestedEquipNames = requestedEquipItems.map(function(item) { return item.name; });
 
-  // 연락처 미입력 시 고객DB에서 조회하되, 실패해도 확인요청 입력은 허용한다.
-  // 연락처가 없으면 _processByReqID()가 O열에 "연락처 입력 필요"를 남기고,
-  // 직원이 연락처를 보강한 뒤 확인/등록을 계속한다.
+  // 연락처/할인유형은 카톡보다 빌리지 2.0/개고생2.0 고객DB를 우선한다.
+  // - 연락처 미입력: 고객DB 이름 매칭이 정확히 1개일 때만 보강
+  // - 그래도 연락처가 없으면 L열 공란으로 확인요청은 생성한다. 등록 단계에서만 연락처가 필요하다.
+  // - 할인유형: 고객DB I열(학생/개인사업자/단골/제휴/일반)이 있으면 파서/카톡 값보다 우선
   var resolvedPhone = req.연락처 || "";
+  var customerDbMatches = _findConfirmRequestCustomerDbMatches_(ss, req.예약자명, resolvedPhone);
   var phoneLookupMatches = [];
-  if (!resolvedPhone && req.예약자명) {
-    var dbSheet = ss.getSheetByName("고객DB");
-    if (dbSheet && dbSheet.getLastRow() >= 2) {
-      var dbData = dbSheet.getDataRange().getValues();
-      var seenPhones = {};
-      for (var di = 1; di < dbData.length; di++) {
-        if (String(dbData[di][1]).trim() === String(req.예약자명).trim()) {
-          var candidatePhone = String(dbData[di][0]).trim();
-          var phoneKey = _confirmRequestPhoneKey_(candidatePhone);
-          if (candidatePhone && !seenPhones[phoneKey]) {
-            seenPhones[phoneKey] = true;
-            phoneLookupMatches.push(candidatePhone);
-          }
-        }
+  if (!resolvedPhone && req.예약자명 && customerDbMatches.length > 0) {
+    var seenPhones = {};
+    customerDbMatches.forEach(function(match) {
+      var candidatePhone = String(match.phone || "").trim();
+      var phoneKey = _confirmRequestPhoneKey_(candidatePhone);
+      if (candidatePhone && phoneKey && !seenPhones[phoneKey]) {
+        seenPhones[phoneKey] = true;
+        phoneLookupMatches.push(candidatePhone);
       }
-      if (phoneLookupMatches.length === 1) resolvedPhone = phoneLookupMatches[0];
-    }
+    });
+    if (phoneLookupMatches.length === 1) resolvedPhone = phoneLookupMatches[0];
   }
-  var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone });
+  var dbDiscount = (!resolvedPhone && phoneLookupMatches.length > 1)
+    ? ""
+    : _bestConfirmRequestCustomerDbDiscount_(customerDbMatches);
+  var resolvedDiscount = dbDiscount || _normalizeDiscountType(req.할인유형 || req.업체명);
+  var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone, 할인유형: resolvedDiscount });
 
   // ── 중복 체크: 같은 예약자명/연락처 + 반출·반납창 + 같은 최상위 장비/수량 ──
   var duplicateRequest = _findDuplicateConfirmRequest_(sheet, reqForDedupe, requestedEquipItems);
@@ -7228,7 +7310,7 @@ function _insertAndCheckRequest(req) {
       "",                       // J: 상세
       i === 0 ? (req.예약자명 || "") : "",// K: 예약자명 (첫 행만)
       i === 0 ? resolvedPhone : "",       // L: 연락처 (첫 행만, 고객DB 자동조회)
-      i === 0 ? _normalizeDiscountType(req.할인유형 || req.업체명) : "",  // M: 할인유형 (첫 행만)
+      i === 0 ? resolvedDiscount : "",  // M: 할인유형 (첫 행만, 고객DB I열 우선)
       "",                       // N: 등록
       "",                       // O: 등록상태
       "",                       // P: 거래ID
