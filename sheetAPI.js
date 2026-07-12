@@ -253,6 +253,10 @@ function handleRequest(e) {
         // 장비 수익 레이더 — 읽기 전용 집계 (장비마스터/스케줄상세). PII 없음.
         return jsonResponse(getEquipmentProfitRadar(params));
 
+      case "autopilot":
+        // 그로스 오토파일럿 — 주간 실행 팩(재활성·청구누락·유휴·KPI+할일). 읽기전용, PII 포함(연락처)이라 key 뒤에서만.
+        return jsonResponse(getGrowthAutopilot(params));
+
       case "dashboardEquipNames":
         return jsonResponse({
           success: true,
