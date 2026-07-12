@@ -35,7 +35,7 @@ interface State {
   trades: Trade[];
   notes: HandoverNote[];
   savingTrades: Record<string, boolean>;
-  toast: { id: number; text: string; kind: "saving" | "saved" } | null;
+  toast: { id: number; text: string; kind: "saving" | "saved" | "error" } | null;
 }
 
 const cache: Record<string, { trades: Trade[]; notes: HandoverNote[] }> = {};
@@ -229,6 +229,10 @@ function schedulePersistTrade(trade: Trade) {
       await persistTrade(latest);
     } catch (e) {
       console.error("[supabase] 저장 실패", e);
+      // 실패를 화면에 알린다(예전엔 조용히 삼켜 '저장됨'만 떠서 유실을 몰랐다).
+      // 다음 편집 시 schedulePersistTrade가 다시 호출되어 재저장이 시도된다.
+      set({ toast: { id: ++toastSeq, text: "⚠️ 저장 실패 — 인터넷/로그인 확인 후 다시 시도", kind: "error" } });
+      return;
     } finally {
       if (persistGenerations[tradeId] === generation) {
         delete persistGenerations[tradeId];
@@ -248,6 +252,7 @@ function schedulePersistNotes() {
       await persistNotes(state.notes);
     } catch (e) {
       console.error("[supabase] 메모 저장 실패", e);
+      set({ toast: { id: ++toastSeq, text: "⚠️ 메모 저장 실패 — 인터넷/로그인 확인 후 다시 시도", kind: "error" } });
     } finally {
       if (notesPersistGeneration === generation) notesPersistPending = false;
     }

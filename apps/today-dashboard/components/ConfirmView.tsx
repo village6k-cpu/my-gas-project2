@@ -463,13 +463,24 @@ function ConfirmCard({
   const actionable = queuedStatus || canEditConfirmRequest(status);
   const hasResult = equips.some((e) => e.결과 && e.결과 !== "");
   // 체크 상태: 기본 = 가용0/❌ 아닌 것만 체크
-  const defaultChecked = useMemo(() => new Set(equipmentRows.filter((row) => row.role !== "set-header" && !isFail(row.결과) && !row.제외).map((row) => row.rowKey)), [equipmentRows]);
-  const [checked, setChecked] = useState<Set<string>>(defaultChecked);
+  const defaultCheckedKeys = useMemo(
+    () => equipmentRows.filter((row) => row.role !== "set-header" && !isFail(row.결과) && !row.제외).map((row) => row.rowKey),
+    [equipmentRows]
+  );
+  // 기본선택의 "내용" 시그니처 — 30초 폴링/타 카드 액션으로 load()가 새 배열을 내려도
+  // 장비 구성(선택 대상 rowKey 집합)이 실제로 바뀌지 않았으면 사용자가 손으로 해제한
+  // '등록 제외' 체크가 유지되도록 한다. 예전엔 배열 identity가 바뀔 때마다 무조건 리셋됐다.
+  const defaultSig = useMemo(() => [...defaultCheckedKeys].sort().join("|"), [defaultCheckedKeys]);
+  const [checked, setChecked] = useState<Set<string>>(() => new Set(defaultCheckedKeys));
   const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
+  const prevSigRef = useRef<string>(defaultSig);
 
   useEffect(() => {
-    setChecked(defaultChecked);
-  }, [defaultChecked]);
+    if (prevSigRef.current !== defaultSig) {
+      prevSigRef.current = defaultSig;
+      setChecked(new Set(defaultCheckedKeys));
+    }
+  }, [defaultSig, defaultCheckedKeys]);
 
   useEffect(() => {
     setEditingRowKey(null);

@@ -99,9 +99,16 @@ async function pruneMissingSheetBackedItems(sb: any, tradeId: string, rows: any[
 export async function persistTrade(trade: Trade, options: PersistTradeOptions = {}): Promise<void> {
   const sb = supabase;
   if (!sb) return;
-  await sb.from("trades").upsert(tradeToRow(trade), { onConflict: "trade_id" });
+  // supabase-js는 실패 시 throw하지 않고 {error}를 반환한다. 세션 만료(RLS 거부)·네트워크·스키마
+  // 오류를 그냥 무시하면 반출/반납 체크·결제상태가 유실됐는데도 화면엔 '저장됨'으로 뜬다.
+  // error를 확인해 throw → schedulePersistTrade의 catch가 사용자에게 실패를 알리도록 한다.
+  const { error: tradeErr } = await sb.from("trades").upsert(tradeToRow(trade), { onConflict: "trade_id" });
+  if (tradeErr) throw tradeErr;
   const rows = uniqueScheduleRows(trade);
-  if (rows.length) await sb.from("schedule_items").upsert(rows, { onConflict: "schedule_id" });
+  if (rows.length) {
+    const { error: itemErr } = await sb.from("schedule_items").upsert(rows, { onConflict: "schedule_id" });
+    if (itemErr) throw itemErr;
+  }
   if (options.pruneMissingSheetBacked) await pruneMissingSheetBackedItems(sb, trade.tradeId, rows);
 }
 
@@ -129,11 +136,14 @@ function deleteScheduleItemVariants(tradeId: string, scheduleId: string): { cano
 export async function persistNotes(notes: HandoverNote[]): Promise<void> {
   const sb = supabase;
   if (!sb) return;
-  await sb.from("handover_notes").upsert(notes.map((n, i) => noteToRow(n, i)), { onConflict: "id" });
+  // persistTrade와 동일 이유: 반환 {error}를 확인해 인수인계 메모의 조용한 유실을 막는다.
+  const { error: upErr } = await sb.from("handover_notes").upsert(notes.map((n, i) => noteToRow(n, i)), { onConflict: "id" });
+  if (upErr) throw upErr;
   const keep = notes.map((n) => n.id);
   let del = sb.from("handover_notes").delete().neq("id", "__none__");
   if (keep.length) del = del.not("id", "in", `(${keep.map((s) => `"${s}"`).join(",")})`);
-  await del;
+  const { error: delErr } = await del;
+  if (delErr) throw delErr;
 }
 
 export function subscribeChanges(onChange: () => void): () => void {

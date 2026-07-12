@@ -75,12 +75,25 @@ export async function PATCH(req: NextRequest) {
     }
     const patchBody = status === "open" ? { status, completed_at: null } : { status };
     if (ids.length) {
-      const rows = await supaFetch(`${TABLE}?id=in.(${ids.map(encodeURIComponent).join(",")})`, {
+      // 벌크(다중선택·섹션 일괄완료)도 각 항목의 "의미상 중복" 행까지 함께 상태 변경한다.
+      // GET은 dedupeFollowUpItems로 대표 1건만 보여주므로, 벌크에서 대표 id만 닫으면
+      // 숨어있던 중복 행이 다음 폴링에 '되살아나' 같은 업무를 두 번 처리하게 된다(단건 경로와 통일).
+      const cands = await supaFetch(`${TABLE}?select=${FIELDS}&status=not.in.(done,dismissed)&limit=500&order=created_at.desc`);
+      const candList: any[] = Array.isArray(cands) ? cands : [];
+      const byId = new Map<string, any>(candList.map((c: any) => [String(c.id), c]));
+      const target = new Set<string>(ids);
+      for (const oneId of ids) {
+        const cur = byId.get(oneId);
+        if (!cur) continue;
+        for (const dup of duplicateFollowUpIdsForItem(cur, candList)) target.add(dup);
+      }
+      const finalIds = Array.from(target).slice(0, 500);
+      const rows = await supaFetch(`${TABLE}?id=in.(${finalIds.map(encodeURIComponent).join(",")})`, {
         method: "PATCH",
         headers: { prefer: "return=representation" },
         body: JSON.stringify(patchBody),
       });
-      return NextResponse.json({ ok: true, items: Array.isArray(rows) ? rows : [], updatedIds: ids, updatedCount: Array.isArray(rows) ? rows.length : 0 });
+      return NextResponse.json({ ok: true, items: Array.isArray(rows) ? rows : [], updatedIds: finalIds, updatedCount: Array.isArray(rows) ? rows.length : 0 });
     }
     const cur = await supaFetch(`${TABLE}?select=${FIELDS}&id=eq.${encodeURIComponent(id)}`);
     const current = Array.isArray(cur) ? cur[0] : null;

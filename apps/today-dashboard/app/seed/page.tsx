@@ -13,18 +13,26 @@ export default function SeedPage() {
   const add = (s: string) => setLog((l) => [...l, s]);
 
   const run = async () => {
+    // 데모(가짜) 거래를 실 DB에 쓰는 파괴적 동작 — 실수로 오늘 반출 준비를 오염시키지 않도록
+    // 반드시 명시적 확인을 받는다. (예전엔 확인 없이 바로 upsert되어 가짜 예약이 오늘일정에 섞였다)
+    if (typeof window !== "undefined" &&
+        !window.confirm("⚠️ 데모(가짜) 거래를 실제 Supabase에 적재합니다.\n오늘 일정·반출 체크리스트에 가짜 예약이 섞입니다.\n정말 진행할까요? (테스트 목적이 아니면 취소하세요)")) {
+      return;
+    }
     setBusy(true);
     setLog([]);
     try {
       const { trades, notes } = buildSeed(ymd(new Date()));
       add(`시드 생성: 거래 ${trades.length}건, 메모 ${notes.length}개`);
       for (const t of trades) {
-        await persistTrade(t);
-        add(`✓ ${t.tradeId} ${t.customerName} (품목 ${t.equipments.length})`);
+        // 실데이터와 구분되도록 거래ID에 DEMO- 접두. 나중에 필터/정리가 쉬워진다.
+        const demoTrade = t.tradeId.startsWith("DEMO-") ? t : { ...t, tradeId: `DEMO-${t.tradeId}` };
+        await persistTrade(demoTrade);
+        add(`✓ ${demoTrade.tradeId} ${t.customerName} (품목 ${t.equipments.length})`);
       }
       await persistNotes(notes);
       add(`✓ 인수인계 메모 ${notes.length}개`);
-      add("완료 — 이제 /schedule, / 에서 실데이터로 보입니다.");
+      add("완료 — DEMO- 접두 거래로 적재됨. 정리하려면 Supabase에서 trade_id LIKE 'DEMO-%' 삭제.");
     } catch (e) {
       add("오류: " + (e instanceof Error ? e.message : String(e)));
     } finally {
