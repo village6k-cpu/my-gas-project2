@@ -249,6 +249,10 @@ function handleRequest(e) {
         // 재방문 레이더 — 읽기 전용 집계 (계약마스터/스케줄상세). PII 포함이라 key 인증 뒤에서만.
         return jsonResponse(getReactivationRadar(params));
 
+      case "equipRadar":
+        // 장비 수익 레이더 — 읽기 전용 집계 (장비마스터/스케줄상세). PII 없음.
+        return jsonResponse(getEquipmentProfitRadar(params));
+
       case "dashboardEquipNames":
         return jsonResponse({
           success: true,
