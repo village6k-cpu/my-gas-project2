@@ -220,7 +220,18 @@ export function attentionReason(t: Trade, date: string): AttentionReason | null 
   if (overdue) return "overdue";
   if (t.depositStatus && /미|대기|예정/.test(t.depositStatus)) return "deposit";
   if (t.paymentWarning) return "payment";
-  if (t.riskWarnings.some((r) => (r.source === "cardCaution" ? r.severity === 3 : r.guidanceState === "발송권장"))) return "risk";
+  // 위험(장비 카드주의/발송권장)은 '아직 처리 안 된 단계'에만 유효하다. 카드주의는 장비 단위
+  // 상시 안내라, 이미 끝난 거래·지난 단계까지 세면 확인필요가 크게 부풀려진다(완료된 반납 건이
+  // 렌즈 주의문구 하나로 확인필요에 잡히던 문제). 반출 안내는 반출 전, 반납 안내는 반납완료 전까지만.
+  if (
+    t.riskWarnings.some((r) => {
+      const flagged = r.source === "cardCaution" ? r.severity === 3 : r.guidanceState === "발송권장";
+      if (!flagged) return false;
+      if (r.phase === "checkout") return !t.setupDone;
+      return !t.returnDone;
+    })
+  )
+    return "risk";
   return null;
 }
 
@@ -327,6 +338,9 @@ export function searchTradeEvents(trades: Trade[], query: string): TradeSearchEv
 
 /** 이 탭 관점에서 이 카드가 '처리 완료'인지 (완료 카드는 아래로 치움) */
 export function cardDone(t: Trade, date: string, tab: TabKey): boolean {
+  // 확인필요 탭은 그 자체가 '손봐야 할 것' 목록 → 반납완료됐다고 접어 숨기면 배지 숫자와
+  // 실제 보이는 카드가 어긋난다(보증금·파손처럼 반납 후에도 남는 확인필요를 놓침). 다 펼친다.
+  if (tab === "attention") return false;
   if (tab === "checkout") return t.setupDone;
   if (tab === "checkin") return t.returnDone;
   const p = phaseForDate(t, date);

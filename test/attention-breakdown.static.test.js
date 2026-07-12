@@ -35,6 +35,24 @@ assert(
   'overdue(미마감)는 반납일 경과 + 미반납완료로 정의돼야 한다'
 );
 
+// 위험(카드주의)은 아직 처리 안 된 단계에만 유효 — 완료 거래·지난 단계는 제외(94건 부풀림 방지).
+assert(
+  /if \(r\.phase === "checkout"\) return !t\.setupDone;/.test(reasonFn[0]),
+  '위험은 반출 안내면 반출 전(!setupDone)일 때만 확인필요여야 한다'
+);
+assert(
+  /return !t\.returnDone;/.test(reasonFn[0]),
+  '위험은 반납/기타 안내면 반납완료 전(!returnDone)일 때만 확인필요여야 한다'
+);
+
+// 확인필요 탭은 완료 카드를 접지 않는다(배지 숫자 = 실제 보이는 카드).
+const cardDoneFn = status.match(/export function cardDone\([\s\S]*?\n\}/);
+assert(cardDoneFn, 'cardDone 함수를 찾지 못함');
+assert(
+  /if \(tab === "attention"\) return false;/.test(cardDoneFn[0]),
+  '확인필요 탭에서는 어떤 카드도 완료로 접히면 안 된다(배지와 목록 일치)'
+);
+
 // attentionBreakdown은 취소 거래를 제외한다(tradesForTab attention과 동일 → 합계 일치).
 const bdFn = status.match(/export function attentionBreakdown\([\s\S]*?\n\}/);
 assert(bdFn, 'attentionBreakdown 함수를 찾지 못함');
