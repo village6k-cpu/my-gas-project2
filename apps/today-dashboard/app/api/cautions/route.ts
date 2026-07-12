@@ -1,20 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { isAuthedRequest as requireUser } from "@/lib/server/authCache";
 
 export const maxDuration = 20;
-
-const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPA_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const authClient = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
-
-async function requireUser(req: NextRequest): Promise<boolean> {
-  if (!authClient) return true;
-  const header = req.headers.get("authorization") ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-  if (!token) return false;
-  const { data, error } = await authClient.auth.getUser(token);
-  return !error && !!data.user;
-}
 
 export async function DELETE(req: NextRequest) {
   if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
