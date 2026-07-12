@@ -127,12 +127,6 @@ export function OperationsView() {
     <div className="flex min-h-screen flex-col bg-paper">
       <header className="safe-top sticky top-0 z-40 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
         <ViewHeader title="운영판">
-          <a href="/autopilot" className="tap flex h-9 items-center gap-1 rounded-full bg-brand-600 px-3 text-[12.5px] font-bold text-white" title="그로스 오토파일럿">
-            🚀 오토파일럿
-          </a>
-          <a href="/profit" className="tap flex h-9 items-center gap-1 rounded-full bg-white px-3 text-[12.5px] font-bold text-ink-soft ring-1 ring-line/60" title="장비 수익 레이더">
-            💰
-          </a>
           <button onClick={load} className={`tap flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white ring-1 ring-line/60 text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
             <Refresh className="h-4 w-4" />
           </button>
@@ -141,6 +135,9 @@ export function OperationsView() {
       </header>
 
       <main className="flex-1 space-y-3.5 p-3 pb-24">
+        {/* 도구 & 성장 — 반출/반납 같은 메인 업무가 아닌 분석·성장·교육 도구 모음 */}
+        <ToolsHub />
+
         {error && <div className="rounded-xl bg-attention-bg px-3.5 py-2.5 text-[13px] font-medium text-attention-fg ring-1 ring-attention-ring">{error}</div>}
         {!data && !error && <div className="py-16 text-center text-[14px] text-ink-faint">불러오는 중…</div>}
 
@@ -230,6 +227,43 @@ export function OperationsView() {
         )}
       </main>
     </div>
+  );
+}
+
+// 반출/반납 같은 메인 업무 프로세스가 아닌 분석·성장·교육 도구는 하단탭에서 빼고 여기로 모았다.
+// 각 도구는 자체 라우트(/autopilot·/radar·/profit·/dojang) — 전체 페이지 이동.
+const TOOLS: { href: string; emoji: string; title: string; desc: string; primary?: boolean }[] = [
+  { href: "/autopilot", emoji: "🚀", title: "오토파일럿", desc: "이번 주 할 일 자동 조립", primary: true },
+  { href: "/radar", emoji: "🎯", title: "재방문 레이더", desc: "연락 적기·이탈위험 고객" },
+  { href: "/profit", emoji: "💰", title: "장비 수익 레이더", desc: "효자·노는 장비 분석" },
+  { href: "/dojang", emoji: "🎓", title: "훈련소", desc: "신입 교육 모듈" },
+];
+
+function ToolsHub() {
+  return (
+    <section>
+      <div className="mb-2 flex items-baseline justify-between px-1">
+        <h2 className="text-[14px] font-bold text-ink-soft">도구 & 성장</h2>
+        <span className="text-[11.5px] text-ink-faint">분석·성장·교육</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+        {TOOLS.map((t) => (
+          <a
+            key={t.href}
+            href={t.href}
+            className={`tap flex flex-col gap-1 rounded-xl p-3 shadow-card transition active:scale-[0.98] ${
+              t.primary
+                ? "bg-brand-600 text-white ring-1 ring-brand-600"
+                : "bg-white text-ink ring-1 ring-line/70 hover:ring-line"
+            }`}
+          >
+            <span className="text-[20px] leading-none">{t.emoji}</span>
+            <span className={`text-[13.5px] font-extrabold leading-tight ${t.primary ? "text-white" : "text-ink"}`}>{t.title}</span>
+            <span className={`text-[11px] leading-snug ${t.primary ? "text-white/85" : "text-ink-mute"}`}>{t.desc}</span>
+          </a>
+        ))}
+      </div>
+    </section>
   );
 }
 

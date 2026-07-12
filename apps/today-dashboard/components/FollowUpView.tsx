@@ -275,9 +275,6 @@ export function FollowUpView() {
             <option value="done">완료</option>
             <option value="dismissed">무시</option>
           </select>
-          <a href="/radar" className="tap flex h-9 items-center gap-1 rounded-full bg-brand-600 px-3 text-[12.5px] font-bold text-white" title="재방문 레이더">
-            🎯 재방문
-          </a>
           <button onClick={() => load(status)} className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white ring-1 ring-line/60 text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
             <Refresh className="h-4 w-4" />
           </button>

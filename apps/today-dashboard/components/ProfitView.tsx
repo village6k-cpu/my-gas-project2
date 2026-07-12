@@ -63,7 +63,7 @@ export function ProfitView() {
       <header className="safe-top sticky top-0 z-40 bg-paper/90 px-4 pb-2 pt-3 backdrop-blur-md ring-1 ring-line/70">
         <div className="flex items-center justify-between">
           <div>
-            <a href="/operations" className="text-[12px] font-semibold text-ink-faint">← 헤이빌리</a>
+            <a href="/operations" className="text-[12px] font-semibold text-ink-faint">← 운영판</a>
             <h1 className="text-[19px] font-extrabold text-ink">💰 장비 수익 레이더</h1>
           </div>
           <div className="flex items-center gap-2">
