@@ -803,8 +803,9 @@ function EditPanel({
               {equips.map((e, i) => (
                 <div key={i} className="flex items-center gap-1.5">
                   <EquipNameInput value={e.이름} onChange={(v) => setEq(i, "이름", v)} names={catalog.names} placeholder="장비명" />
-                  <input value={e.수량} onChange={(ev) => setEq(i, "수량", ev.target.value)} className="inp w-16 text-center" inputMode="numeric" />
-                  <button onClick={() => delEq(i)} className="tap px-2 text-ink-faint">✕</button>
+                  {/* 수량칸은 고정폭. 인라인 style로 .inp의 width:100%를 덮어써야 장비명칸이 0으로 찌그러지지 않는다. */}
+                  <input value={e.수량} onChange={(ev) => setEq(i, "수량", ev.target.value)} className="inp text-center" style={{ width: "3.25rem", flex: "0 0 3.25rem" }} inputMode="numeric" aria-label="수량" />
+                  <button onClick={() => delEq(i)} className="tap shrink-0 px-1.5 text-ink-faint" aria-label="삭제">✕</button>
                 </div>
               ))}
             </div>
