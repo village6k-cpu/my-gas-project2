@@ -7606,6 +7606,12 @@ function updateRequest(req) {
     }
     SpreadsheetApp.flush();
 
+    // skipCheck: 사장이 "이 장비는 재고 있는 거 안다"는 경우 가용확인을 건너뛴다.
+    // 세트 전개·가용판정은 이후 '바로 등록' 시 registerByReqID가 한 번에 처리하므로 안전하다.
+    if (req.skipCheck) {
+      return { reqID: req.reqID, action: "수정", items: items.length, recheck: false, skippedCheck: true };
+    }
+
     // 가용확인 재실행
     sheet.getRange(startRow, 8).setValue("확인");
     SpreadsheetApp.flush();
@@ -7622,6 +7628,7 @@ function updateRequest(req) {
   if (req.반납시간 !== undefined) { sheet.getRange(firstRow, 5).setValue(req.반납시간); changed.push("반납시간"); }
   if (req.예약자명 !== undefined) { sheet.getRange(firstRow, 11).setValue(req.예약자명); changed.push("예약자명"); }
   if (req.연락처 !== undefined) { sheet.getRange(firstRow, 12).setValue(req.연락처); changed.push("연락처"); }
+  if (req.할인유형 !== undefined) { sheet.getRange(firstRow, 13).setValue(req.할인유형); changed.push("할인유형"); }  // M열
   if (req.추가요청 !== undefined) { sheet.getRange(firstRow, 18).setValue(_sanitizeConfirmRequestFreeText_(req.추가요청, 180)); changed.push("추가요청"); }
 
   // 날짜/시간 변경 시 가용확인 재실행

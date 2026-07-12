@@ -163,7 +163,9 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
         </div>
       </div>
 
-      <input ref={inputRef} type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={onFileChange} />
+      {/* capture 속성 제거 — 카메라 강제 대신 OS 선택창(카메라/사진 보관함/파일)이 뜨게 해서
+          기존에 찍어둔 사진도 올릴 수 있다. */}
+      <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" onChange={onFileChange} />
 
       {open && (
         <div

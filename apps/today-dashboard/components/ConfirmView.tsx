@@ -42,10 +42,15 @@ type Req = {
    예약자명?: string;
    연락처?: string;
    업체명?: string;
+   할인유형?: string;
    장비목록?: Equip[];
    추가요청?: string;
    등록상태?: string;
 };
+
+// 확인요청 M열(할인유형) 선택값. 단골/제휴는 보통 고객DB로 자동 판정되지만,
+// 사장이 직접 지정할 수 있어야 하므로 전부 노출한다.
+const DISCOUNT_OPTIONS = ["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"];
 
 const EMPTY_CONFIRM_EQUIPS: Equip[] = [];
 const CONFIRM_LIST_CACHE_KEY = "village-confirm-list-cache-v1";
@@ -645,7 +650,17 @@ function ConfirmCard({
         {actionable && (
           <div className="mt-3 flex flex-wrap gap-1.5">
             {!hasResult ? (
-              <Btn primary disabled={busy} onClick={() => onAct("확인", req.reqID)}>{busy ? "처리 중…" : "확인 (가용성 체크)"}</Btn>
+              <>
+                <Btn primary disabled={busy} onClick={() => onAct("확인", req.reqID)}>{busy ? "처리 중…" : "확인 (가용성 체크)"}</Btn>
+                <Btn
+                  disabled={busy || isQueued}
+                  onClick={() => {
+                    if (confirm(`가용성 확인을 건너뛰고 ${req.예약자명 || "이 요청"}을(를) 바로 등록할까요?\n(세트 전개·날짜 검증은 등록 과정에서 자동 처리됩니다)`)) onRegisterSelected(req, []);
+                  }}
+                >
+                  {isQueued ? `등록 대기 ${queueIndex + 1}` : "바로 등록"}
+                </Btn>
+              </>
             ) : (
               <>
                 <Btn
@@ -697,6 +712,8 @@ function EditPanel({
   const ret = splitDT(req.반납일);
   const [name, setName] = useState(req.예약자명 || "");
   const [phone, setPhone] = useState(req.연락처 || "");
+  // 할인유형(M열) — 목록 API는 값을 업체명/할인유형 두 키로 모두 내려준다(레거시 호환).
+  const [discount, setDiscount] = useState(req.할인유형 || req.업체명 || "");
   // 시간은 전용 필드(반출시간/반납시간)가 정답 — 반출일에 붙은 시간 토막은
   // 시트 타임존 어긋남에서 온 쓰레기(16:00)였던 적이 있어 폴백으로만 사용
   const [outD, setOutD] = useState(out.d);
@@ -717,7 +734,7 @@ function EditPanel({
   const addEq = () => setEquips((prev) => [...prev, { 이름: "", 수량: "1" }]);
   const delEq = (i: number) => setEquips((prev) => prev.filter((_, j) => j !== i));
 
-  const save = async () => {
+  const save = async (opts?: { skipCheckAndRegister?: boolean }) => {
     setSaving(true);
     setError("");
     try {
@@ -725,13 +742,26 @@ function EditPanel({
         reqID: req.reqID,
         예약자명: name,
         연락처: phone,
+        할인유형: discount,
         반출일: outD,
         반출시간: outT,
         반납일: retD,
         반납시간: retT,
         장비: equips.filter((e) => e.이름.trim()).map((e) => ({ 이름: e.이름.trim(), 수량: e.수량 })),
       };
+      if (opts?.skipCheckAndRegister) args.skipCheck = true; // 가용확인 생략(등록 시 자동 처리)
       await runFunc("updateRequest", args);
+      if (opts?.skipCheckAndRegister) {
+        // 저장 후 곧바로 등록 대기열에 넣는다 — 확인 단계를 건너뛴다.
+        const res = await authFetch("/api/confirm", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "registerAsync", reqID: req.reqID }),
+        });
+        const json = await res.json().catch(() => ({}));
+        const ok = json.status === "OK" || json.success === true;
+        if (!res.ok || !ok) throw new Error(json.message || json.error || "바로 등록 실패");
+      }
       onSaved();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -750,6 +780,14 @@ function EditPanel({
         <div className="space-y-2.5">
           <Field label="예약자명"><input value={name} onChange={(e) => setName(e.target.value)} className="inp" /></Field>
           <Field label="연락처"><input value={phone} onChange={(e) => setPhone(e.target.value)} className="inp" /></Field>
+          <Field label="할인유형">
+            <select value={discount} onChange={(e) => setDiscount(e.target.value)} className="inp">
+              <option value="">선택 안 함(자동)</option>
+              {DISCOUNT_OPTIONS.map((d) => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </Field>
           <div className="grid grid-cols-2 gap-2">
             <Field label="반출일"><input type="date" value={outD} onChange={(e) => setOutD(e.target.value)} className="inp" /></Field>
             <Field label="반출시간"><input type="time" value={outT} onChange={(e) => setOutT(e.target.value)} className="inp" /></Field>
@@ -770,11 +808,16 @@ function EditPanel({
                 </div>
               ))}
             </div>
-            <p className="mt-1.5 text-[11px] text-ink-faint">장비를 바꾸면 기존 행을 지우고 다시 입력 후 가용성을 재확인합니다.</p>
+            <p className="mt-1.5 text-[11px] text-ink-faint">‘재확인’은 장비를 다시 입력하고 가용성을 확인합니다. 재고를 이미 아는 장비는 ‘바로 등록’으로 확인을 건너뛰세요.</p>
           </div>
-          <button disabled={saving} onClick={save} className="tap mt-1 w-full rounded-xl bg-brand-600 py-3 text-[14px] font-extrabold text-white disabled:opacity-50">
-            {saving ? "저장 중…" : "저장 + 가용성 재확인"}
-          </button>
+          <div className="mt-1 grid grid-cols-2 gap-2">
+            <button disabled={saving} onClick={() => save()} className="tap rounded-xl bg-white py-3 text-[13.5px] font-extrabold text-ink-soft ring-1 ring-line disabled:opacity-50">
+              {saving ? "저장 중…" : "저장 + 재확인"}
+            </button>
+            <button disabled={saving} onClick={() => { if (confirm("가용성 확인을 건너뛰고 저장한 뒤 바로 등록할까요?\n(세트 전개·날짜 검증은 등록 과정에서 자동 처리됩니다)")) void save({ skipCheckAndRegister: true }); }} className="tap rounded-xl bg-brand-600 py-3 text-[13.5px] font-extrabold text-white disabled:opacity-50">
+              {saving ? "처리 중…" : "저장 후 바로 등록"}
+            </button>
+          </div>
         </div>
       </div>
       <style jsx>{`

@@ -5,6 +5,7 @@
 import type { ReactNode } from "react";
 import { VillageLogo } from "@/components/VillageLogo";
 import { MyPageClient, MyPageLoading } from "./MyPageClient";
+import { MyPageCloseButton } from "@/components/MyPageCloseButton";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,7 +22,8 @@ function MyPageFrame({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-dvh bg-paper px-4 py-8 text-ink">
       <div className="mx-auto w-full max-w-[560px]">
-        <header className="mb-6 flex flex-col items-center text-center">
+        <header className="relative mb-6 flex flex-col items-center text-center">
+          <MyPageCloseButton />
           <VillageLogo size="lg" />
           <h1 className="mt-4 text-[20px] font-black leading-tight">내 예약</h1>
         </header>

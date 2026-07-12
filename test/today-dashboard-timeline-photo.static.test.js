@@ -110,10 +110,17 @@ assert.match(
   'PhotoStrip must know which trade it uploads photos for'
 );
 
+// 2026-07-12: 사장 요청으로 카메라 강제(capture="environment")를 제거 —
+// 기존에 찍어둔 사진도 올릴 수 있도록 OS 선택창(카메라/보관함/파일)이 뜨게 한다.
 assert.match(
   photoStrip,
-  /type="file"[\s\S]{0,120}accept="image\/\*"[\s\S]{0,120}capture="environment"/,
-  'PhotoStrip must open mobile camera/file input'
+  /type="file"[\s\S]{0,120}accept="image\/\*"[\s\S]{0,120}multiple/,
+  'PhotoStrip must accept image files (camera or gallery, not camera-forced)'
+);
+assert.doesNotMatch(
+  photoStrip,
+  /capture="environment"/,
+  'PhotoStrip must NOT force the camera — gallery upload must be possible'
 );
 
 assert.match(
