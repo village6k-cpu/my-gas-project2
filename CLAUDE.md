@@ -82,7 +82,7 @@
 - 확인요청 관리: `https://village6k-cpu.github.io/my-gas-project2/manage.html`
 - 대시보드 (일정): `https://village6k-cpu.github.io/my-gas-project2/dashboard.html`
 - 약관 동의: `https://village6k-cpu.github.io/my-gas-project2/index.html`
-- 빌리지 FM (앰비언트 라디오): `https://village6k-cpu.github.io/my-gas-project2/fm.html` — Claude FM 오마주 (새벽 지평선 픽셀아트 + 생성 앰비언트). `?autoplay=1` OBS용, `&ui=min` 오버레이 최소화
+- 빌리지 FM (앰비언트 라디오): `https://village6k-cpu.github.io/my-gas-project2/fm.html` — Claude FM 오마주 ('세상 끝의 송신탑' 픽셀아트 + 생성 앰비언트). `?autoplay=1` OBS용, `&ui=min` 오버레이 최소화
 
 ### 파일 구조
 - **Code.js** — 트리거 (onEdit, onEditInstallable), 실사기록 동기화, 장비사진 열 설정
