@@ -14,3 +14,18 @@ export const supabase =
         realtime: { params: { eventsPerSecond: 8 } },
       })
     : null;
+
+// access_token을 모듈 메모리에 캐시 — authFetch/gasFetch가 매 호출마다 getSession()을
+// 직렬 await 하던 지연을 없앤다. onAuthStateChange가 로그인/토큰갱신 때 자동 갱신한다.
+let cachedAccessToken: string | null = null;
+export function getCachedAccessToken(): string | null {
+  return cachedAccessToken;
+}
+if (supabase) {
+  supabase.auth.getSession().then(({ data }) => {
+    cachedAccessToken = data.session?.access_token ?? null;
+  });
+  supabase.auth.onAuthStateChange((_event, session) => {
+    cachedAccessToken = session?.access_token ?? null;
+  });
+}

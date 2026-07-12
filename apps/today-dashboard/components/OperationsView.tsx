@@ -53,8 +53,29 @@ function mdDow(ymd?: string): string {
   return `${dt.getMonth() + 1}월 ${dt.getDate()}일 (${WD[dt.getDay()]})`;
 }
 
+const OPS_CACHE_KEY = "village-operations-cache-v1";
+function readOpsCache(): Ops | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(OPS_CACHE_KEY);
+    return raw ? (JSON.parse(raw) as Ops) : null;
+  } catch {
+    return null;
+  }
+}
+function writeOpsCache(data: Ops) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(OPS_CACHE_KEY, JSON.stringify(data));
+  } catch {
+    // 저장소가 막혀도 화면은 계속 동작
+  }
+}
+
 export function OperationsView() {
-  const [data, setData] = useState<Ops | null>(null);
+  // 마지막 성공 응답을 즉시 렌더(stale-while-revalidate) — 예전엔 진입/새로고침마다
+  // 빈 '불러오는 중…' 화면으로 GAS 콜드스타트(2.6s)를 통째로 기다렸다.
+  const [data, setData] = useState<Ops | null>(() => readOpsCache());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const loadingRef = useRef(false);
@@ -69,6 +90,7 @@ export function OperationsView() {
       const json = await res.json();
       if (!res.ok || !json.success) throw new Error(json.error || "운영판 불러오기 실패");
       setData(json);
+      writeOpsCache(json);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -79,8 +101,20 @@ export function OperationsView() {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 60000);
-    return () => clearInterval(t);
+    // 백그라운드 탭에서는 폴링하지 않는다(배터리·불필요 GAS 왕복 방지). 포커스 복귀 시 즉시 1회.
+    const tick = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      load();
+    };
+    const t = setInterval(tick, 90000);
+    const onVisible = () => {
+      if (typeof document !== "undefined" && !document.hidden) load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [load]);
 
   const s = data?.summary || {};

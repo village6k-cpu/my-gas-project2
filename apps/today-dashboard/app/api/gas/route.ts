@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { isAuthedRequest as isAuthed } from "@/lib/server/authCache";
 
 export const maxDuration = 60;
 
@@ -8,20 +8,6 @@ const GAS_URL =
   process.env.GAS_API_URL ??
   "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
 const GAS_KEY = process.env.GAS_API_KEY ?? "village2026";
-
-// 로그인 검증용 (Supabase 설정돼 있을 때만). 설정 없으면 시드/로컬 → 인증 생략.
-const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPA_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const authClient = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
-
-async function isAuthed(req: NextRequest): Promise<boolean> {
-  if (!authClient) return true; // Supabase 미설정(로컬/시드) → 통과
-  const h = req.headers.get("authorization") ?? "";
-  const token = h.startsWith("Bearer ") ? h.slice(7) : "";
-  if (!token) return false;
-  const { data, error } = await authClient.auth.getUser(token);
-  return !error && !!data.user;
-}
 
 // 읽기 응답 짧게 캐시(GAS 콜드스타트 완화)
 const cache = new Map<string, { at: number; body: string }>();
