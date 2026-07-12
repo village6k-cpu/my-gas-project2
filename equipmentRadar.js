@@ -120,12 +120,12 @@ function getEquipmentProfitRadar(params) {
         inMaster: !!m
       });
     }
-    // 미가격(청구 누락 위험): 대여 이력은 있는데 마스터 단가 0이고 행 단가도 0
-    if (rec.countAll > 0 && price === 0 && !rec.anyRowPrice) {
+    // 미가격(청구 누락 위험): 장비마스터에 "등록된" 장비인데 단가가 0이고 실제 대여 이력이 있음.
+    // inMaster 조건이 핵심 — 세트 구성품 등 마스터에 없는 이름은 매칭 실패 노이즈라 제외.
+    if (m && rec.countAll > 0 && price === 0 && !rec.anyRowPrice) {
       unpriced.push({
         name: rec.name, countAll: rec.countAll, count90: rec.count90,
-        lastRentedAt: rec.lastOut ? Utilities.formatDate(new Date(rec.lastOut), tz, 'yyyy-MM-dd') : '',
-        inMaster: !!m
+        lastRentedAt: rec.lastOut ? Utilities.formatDate(new Date(rec.lastOut), tz, 'yyyy-MM-dd') : ''
       });
     }
   });

@@ -69,14 +69,19 @@ export function RadarView() {
             <a href="/follow-ups" className="text-[12px] font-semibold text-ink-faint">← 헤이빌리</a>
             <h1 className="text-[19px] font-extrabold text-ink">🎯 재방문 레이더</h1>
           </div>
-          <button
-            onClick={load}
-            className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white text-ink-soft ring-1 ring-line/60 ${loading ? "animate-spin" : ""}`}
-            title="새로고침"
-            aria-label="새로고침"
-          >
-            ↻
-          </button>
+          <div className="flex items-center gap-2">
+            <a href="/profit" className="tap flex h-9 items-center gap-1 rounded-full bg-white px-3 text-[12px] font-bold text-ink-soft ring-1 ring-line/60" title="장비 수익 레이더">
+              💰 장비수익
+            </a>
+            <button
+              onClick={load}
+              className={`tap flex h-9 w-9 items-center justify-center rounded-full bg-white text-ink-soft ring-1 ring-line/60 ${loading ? "animate-spin" : ""}`}
+              title="새로고침"
+              aria-label="새로고침"
+            >
+              ↻
+            </button>
+          </div>
         </div>
         <p className="mt-0.5 text-[12px] text-ink-mute">
           5년 계약 이력으로 “지금 연락하면 재대여 가능성 높은 고객”을 자동 산출합니다. 발송은 검토 후 직접.

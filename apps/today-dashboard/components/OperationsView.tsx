@@ -127,6 +127,9 @@ export function OperationsView() {
     <div className="flex min-h-screen flex-col bg-paper">
       <header className="safe-top sticky top-0 z-40 bg-paper/90 backdrop-blur-md ring-1 ring-line/70">
         <ViewHeader title="운영판">
+          <a href="/profit" className="tap flex h-9 items-center gap-1 rounded-full bg-brand-600 px-3 text-[12.5px] font-bold text-white" title="장비 수익 레이더">
+            💰 장비수익
+          </a>
           <button onClick={load} className={`tap flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white ring-1 ring-line/60 text-ink-soft ${loading ? "animate-spin" : ""}`} title="새로고침">
             <Refresh className="h-4 w-4" />
           </button>
