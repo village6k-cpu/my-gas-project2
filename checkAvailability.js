@@ -7197,11 +7197,22 @@ function _insertAndCheckRequest(req) {
   // - 그래도 연락처가 없으면 L열 공란으로 확인요청은 생성한다. 등록 단계에서만 연락처가 필요하다.
   // - 할인유형: 고객DB I열(학생/개인사업자/단골/제휴/일반)이 있으면 파서/카톡 값보다 우선
   var resolvedPhone = req.연락처 || "";
+  var reqPhoneKey = _confirmRequestPhoneKey_(resolvedPhone);
   var customerDbMatches = _findConfirmRequestCustomerDbMatches_(ss, req.예약자명, resolvedPhone);
+  // 동명이인 방어: 요청에 연락처가 있는데 그 연락처가 고객DB의 어떤 행과도 일치하지
+  // 않으면, 이름만 같은 매칭은 "다른 사람"이다. 이 경우 그 사람의 할인유형(단골 등)이나
+  // 전화번호를 신규 고객에게 붙이면 안 된다 — 타인 단골할인 오적용(마진 누수)과
+  // 타인 번호로 등록완료 알림톡·마이페이지 링크 오발송(개인정보 노출)을 막는다.
+  var phoneContradicts = false;
+  if (reqPhoneKey) {
+    var anyPhoneMatch = customerDbMatches.some(function(m) { return m.phoneKey && m.phoneKey === reqPhoneKey; });
+    phoneContradicts = !anyPhoneMatch;
+  }
+  var trustedMatches = phoneContradicts ? [] : customerDbMatches;
   var phoneLookupMatches = [];
-  if (!resolvedPhone && req.예약자명 && customerDbMatches.length > 0) {
+  if (!resolvedPhone && req.예약자명 && trustedMatches.length > 0) {
     var seenPhones = {};
-    customerDbMatches.forEach(function(match) {
+    trustedMatches.forEach(function(match) {
       var candidatePhone = String(match.phone || "").trim();
       var phoneKey = _confirmRequestPhoneKey_(candidatePhone);
       if (candidatePhone && phoneKey && !seenPhones[phoneKey]) {
@@ -7213,7 +7224,7 @@ function _insertAndCheckRequest(req) {
   }
   var dbDiscount = (!resolvedPhone && phoneLookupMatches.length > 1)
     ? ""
-    : _bestConfirmRequestCustomerDbDiscount_(customerDbMatches);
+    : _bestConfirmRequestCustomerDbDiscount_(trustedMatches);
   var resolvedDiscount = dbDiscount || _normalizeDiscountType(req.할인유형 || req.업체명);
   var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone, 할인유형: resolvedDiscount });
 
@@ -7277,20 +7288,32 @@ function _insertAndCheckRequest(req) {
     confirmRequestFRule = null;
   }
 
-  // 첫 번째 빈 행 찾기 (A열 기준)
-  var startRow = 2;
+  var items = req.장비 || [];
+
+  // 삽입 시작 행 찾기 — items.length개의 "연속" 빈 행(A열 기준)이 필요하다.
+  // autoClearRequests가 등록완료 건을 clearContent로 지우면 시트 중간에 빈 행 갭이
+  // 생기는데, 갭 크기 < 품목 수이면 첫 빈 행부터 연속 setValues 할 때 갭 아래의
+  // 활성 요청을 덮어써 대기 예약이 파괴된다(무경고 데이터 유실). 그래서 품목 수만큼
+  // 연속으로 비어 있는 구간에만 삽입하고, 그런 구간이 없으면 데이터 끝(lastRow+1)에 append.
+  var need = items.length || 1;
+  var startRow;
   if (lastRow >= 2) {
     var aCol = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    var runStart = -1, runLen = 0, foundStart = -1;
     for (var r = 0; r < aCol.length; r++) {
-      if (!aCol[r][0] || String(aCol[r][0]).trim() === "") {
-        startRow = r + 2;
-        break;
+      var cellEmpty = (!aCol[r][0] || String(aCol[r][0]).trim() === "");
+      if (cellEmpty) {
+        if (runStart < 0) { runStart = r; runLen = 1; } else { runLen++; }
+        if (runLen >= need) { foundStart = runStart; break; }
+      } else {
+        runStart = -1; runLen = 0;
       }
-      startRow = r + 3; // 마지막 데이터 다음 행
     }
+    startRow = (foundStart >= 0) ? foundStart + 2 : lastRow + 1;
+  } else {
+    startRow = 2;
   }
 
-  var items = req.장비 || [];
   for (var i = 0; i < items.length; i++) {
     // 장비명 퍼지 매칭
     var inputName = String(items[i].이름 || "").trim();
@@ -7524,20 +7547,6 @@ function updateRequest(req) {
     }
     SpreadsheetApp.flush();
 
-    // 삭제 후 첫 번째 빈 행 찾기 (A열 기준)
-    var newLastRow = sheet.getLastRow();
-    var startRow = 2;
-    if (newLastRow >= 2) {
-      var aCol = sheet.getRange(2, 1, newLastRow - 1, 1).getValues();
-      for (var r = 0; r < aCol.length; r++) {
-        if (!aCol[r][0] || String(aCol[r][0]).trim() === "") {
-          startRow = r + 2;
-          break;
-        }
-        startRow = r + 3;
-      }
-    }
-
     // 기존 데이터에서 날짜/시간/예약자명/연락처 가져오기 (req에 없으면)
     var origFirst = data[targetRows[0] - 2];
     var 반출일 = req.반출일 || origFirst[1];
@@ -7546,9 +7555,37 @@ function updateRequest(req) {
     var 반납시간 = req.반납시간 !== undefined ? req.반납시간 : origFirst[4];
     var 예약자명 = req.예약자명 !== undefined ? req.예약자명 : origFirst[10];
     var 연락처 = req.연락처 !== undefined ? req.연락처 : origFirst[11];
+    // 할인유형(M, idx12)·비고(Q, idx16)는 장비 목록 변경 시에도 보존해야 한다.
+    // 예전엔 빈값으로 덮어써서 등록 시 계약마스터 할인유형이 "일반"으로 초기화 →
+    // 학생/단골 고객이 정가 계약서를 받는 과청구 버그가 있었다.
+    var 할인유형 = req.할인유형 !== undefined ? req.할인유형 : origFirst[12];
+    var 비고 = req.비고 !== undefined ? req.비고 : origFirst[16];
     var 추가요청 = req.추가요청 !== undefined ? req.추가요청 : origFirst[17];
 
     var items = req.장비;
+
+    // 삭제 후 삽입 시작 행 찾기 — items.length개의 "연속" 빈 행이 필요.
+    // (_insertAndCheckRequest와 동일한 이유: 중간 갭에 연속 삽입하면 아래 활성 요청을 덮어씀)
+    var newLastRow = sheet.getLastRow();
+    var need = items.length || 1;
+    var startRow;
+    if (newLastRow >= 2) {
+      var aCol = sheet.getRange(2, 1, newLastRow - 1, 1).getValues();
+      var runStart = -1, runLen = 0, foundStart = -1;
+      for (var r = 0; r < aCol.length; r++) {
+        var cellEmpty = (!aCol[r][0] || String(aCol[r][0]).trim() === "");
+        if (cellEmpty) {
+          if (runStart < 0) { runStart = r; runLen = 1; } else { runLen++; }
+          if (runLen >= need) { foundStart = runStart; break; }
+        } else {
+          runStart = -1; runLen = 0;
+        }
+      }
+      startRow = (foundStart >= 0) ? foundStart + 2 : newLastRow + 1;
+    } else {
+      startRow = 2;
+    }
+
     for (var j = 0; j < items.length; j++) {
       var row = startRow + j;
       var rowData = [
@@ -7558,7 +7595,8 @@ function updateRequest(req) {
         items[j].이름, items[j].수량 || 1,
         "", "", "",
         j === 0 ? 예약자명 : "", j === 0 ? 연락처 : "",
-        "", "", "", "", "",
+        j === 0 ? 할인유형 : "", "", "", "",
+        j === 0 ? 비고 : "",
         j === 0 ? 추가요청 : ""
       ];
       // 날짜/시간(B~E)은 텍스트로 고정 — 시트 타임존이 Asia/Seoul과 다르면
@@ -9430,6 +9468,13 @@ function registerByReqID(sheet, triggerRow) {
   }
     } // end !mergeMode (skip 개고생2.0 + 계약서)
 
+  // 합침 등록(mergeMode): 기존 거래에 장비만 추가하고 위 계약서 생성 블록을 건너뛰므로,
+  // 기존 계약서를 재생성해 추가 장비·금액을 반영한다(디바운스 재생성이라 안전).
+  // 누락 시 고객이 받는 계약서에 추가분이 빠져 정산 불일치·분쟁이 생긴다.
+  if (mergeMode && mergeTargetTID) {
+    try { scheduleContractRegen(mergeTargetTID); } catch (mergeRegenErr) {}
+  }
+
   // ── 확인요청에 등록 결과 표시 ──
   for (let i = 0; i < allData.length; i++) {
     if (allData[i][0] !== reqID) continue;
@@ -9614,11 +9659,21 @@ function addEquipmentToContract(sheet, row) {
 
   // 스케줄상세 마지막 행 뒤에 추가
   const schedLastRow = schedSheet.getLastRow();
-  // 해당 거래ID의 스케줄 수 계산 → 다음 schedID 번호
-  const existingScheds = schedSheet.getLastRow() >= 2
-    ? schedSheet.getRange(2, 2, schedSheet.getLastRow() - 1, 1).getValues().flat().filter(id => id === 거래ID).length
-    : 0;
-  const newSchedNum = existingScheds + 1;
+  // 다음 schedID 번호 = 해당 거래ID의 기존 스케줄ID 중 "최대 suffix + 1".
+  // 개수 기반(existingScheds+1)으로 하면 중간 장비를 삭제한 뒤 추가할 때
+  // 이미 존재하는 번호와 겹쳐(예: -03 삭제 후 다시 -03) 체크리스트·사진·수량수정이
+  // 엉뚱한 행에 적용된다. registerByReqID의 merge 경로와 동일하게 최대 번호 방식으로 통일.
+  let maxSchedNum = 0;
+  if (schedLastRow >= 2) {
+    const schedIdCol = schedSheet.getRange(2, 1, schedLastRow - 1, 2).getValues();
+    schedIdCol.forEach(function(r) {
+      if (String(r[1]).trim() !== 거래ID) return;
+      const parts = String(r[0]).trim().split("-");
+      const n = parseInt(parts[parts.length - 1], 10);
+      if (!isNaN(n) && n > maxSchedNum) maxSchedNum = n;
+    });
+  }
+  const newSchedNum = maxSchedNum + 1;
   const schedID = `${거래ID}-${String(newSchedNum).padStart(2, "0")}`;
 
   const setSheet = ss.getSheetByName("세트마스터");

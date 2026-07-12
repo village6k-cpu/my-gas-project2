@@ -928,33 +928,36 @@ function inspectContractTemplateDiscounts() {
   return out;
 }
 
-function deleteAndRegenerateContract(ss, 거래ID, 추가요청) {
+/**
+ * 특정 거래ID의 계약서 Drive 파일(계약서_거래ID_*)을 휴지통으로 이동.
+ * 재생성(deleteAndRegenerateContract)과 취소(cancelContract) 양쪽에서 공용.
+ * 반환: 휴지통으로 옮긴 파일 수.
+ */
+function trashContractFilesForTrade_(거래ID) {
   const props = PropertiesService.getScriptProperties();
   const folderId = props.getProperty("CONTRACT_FOLDER_ID");
   const fileName = `계약서_${거래ID}_`;
-
-  // 기존 파일 휴지통으로 이동
+  var trashed = 0;
   try {
     if (folderId) {
       const folder = DriveApp.getFolderById(folderId);
-      // 파일명 prefix로 검색
       const iter = folder.getFiles();
       while (iter.hasNext()) {
         const f = iter.next();
         if (f.getName().indexOf(fileName) === 0) {
           f.setTrashed(true);
+          trashed++;
           Logger.log("기존 계약서 삭제: " + f.getName());
         }
       }
     } else {
-      // 폴더 미설정 시 Drive 전체에서 검색
-      const iter = DriveApp.getFilesByName(fileName);
-      // prefix 검색은 DriveApp에서 안 되므로 패턴으로 시도
+      // 폴더 미설정 시 Drive 전체에서 prefix 패턴으로 검색
       const searchIter = DriveApp.searchFiles(`title contains '${fileName}'`);
       while (searchIter.hasNext()) {
         const f = searchIter.next();
         if (f.getName().indexOf(fileName) === 0) {
           f.setTrashed(true);
+          trashed++;
           Logger.log("기존 계약서 삭제: " + f.getName());
         }
       }
@@ -962,6 +965,14 @@ function deleteAndRegenerateContract(ss, 거래ID, 추가요청) {
   } catch (err) {
     Logger.log("기존 계약서 삭제 실패 (계속 진행): " + err.message);
   }
+  return trashed;
+}
+
+function deleteAndRegenerateContract(ss, 거래ID, 추가요청) {
+  const props = PropertiesService.getScriptProperties();
+
+  // 기존 파일 휴지통으로 이동
+  trashContractFilesForTrade_(거래ID);
 
   // 개고생2.0 M열 링크 초기화
   try {

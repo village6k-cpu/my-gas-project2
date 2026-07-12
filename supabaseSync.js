@@ -91,16 +91,36 @@ function flushDirtyToSupabase() {
   if (!lock.tryLock(5000)) return;
   try {
     var built = buildSupabaseTrades_(tids);
+    var ok = true;
     if (built.trades.length) {
-      supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id');
-      if (built.items.length) supaUpsertGrouped_(cfg, 'schedule_items', built.items, 'schedule_id');
+      if (!supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id')) ok = false;
+      if (built.items.length) {
+        if (!supaUpsertGrouped_(cfg, 'schedule_items', built.items, 'schedule_id')) ok = false;
+        // 시트에서 삭제된 장비 행을 Supabase에서도 제거해 앱의 '유령 장비'를 없앤다.
+        // 거래별로 이번에 빌드된 schedule_id만 남기고 나머지를 삭제(최소 1개 있을 때만 — 위 가드 참조).
+        var keepByTrade = {};
+        built.items.forEach(function (it) {
+          var tid = String(it.trade_id || '').trim();
+          if (!tid) return;
+          (keepByTrade[tid] = keepByTrade[tid] || []).push(it.schedule_id);
+        });
+        for (var tKey in keepByTrade) {
+          if (!supaDeleteStaleItems_(cfg, tKey, keepByTrade[tKey])) ok = false;
+        }
+      }
     }
-    // 처리된 것만 제거(처리 중 새로 들어온 건 유지)
-    var after = {};
-    try { after = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
-    for (var i = 0; i < tids.length; i++) delete after[tids[i]];
-    p.setProperty('SUPA_DIRTY', JSON.stringify(after));
-    Logger.log('Supabase push: ' + built.trades.length + '건');
+    // ★ 성공한 경우에만 dirty에서 제거. 실패(Supabase 장애·봇 토큰 만료·스키마 오류)면
+    //    dirty를 유지해 다음 1분 트리거가 재시도한다. 예전엔 실패해도 무조건 지워서
+    //    그 분(minute)의 변경분이 영구 유실 → 앱이 낡은 반출/반납 데이터를 표시했다.
+    if (ok) {
+      var after = {};
+      try { after = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
+      for (var i = 0; i < tids.length; i++) delete after[tids[i]];
+      p.setProperty('SUPA_DIRTY', JSON.stringify(after));
+      Logger.log('Supabase push: ' + built.trades.length + '건');
+    } else {
+      Logger.log('Supabase push 일부 실패 → dirty 유지(재시도 예정): ' + tids.length + '건');
+    }
   } catch (err) {
     Logger.log('flushDirty 오류: ' + err);
   } finally {
@@ -250,19 +270,24 @@ function buildSupabaseTrades_(tids) {
   return { trades: trades, items: items };
 }
 
-/** payload 키 구성이 같은 행끼리 묶어 upsert — PostgREST는 배치 내 키 불일치를 거부하므로. */
+/** payload 키 구성이 같은 행끼리 묶어 upsert — PostgREST는 배치 내 키 불일치를 거부하므로.
+ *  반환: 모든 그룹이 성공했을 때만 true (하나라도 실패하면 false → 호출부가 dirty 유지). */
 function supaUpsertGrouped_(cfg, table, rows, conflict) {
   var groups = {};
   for (var i = 0; i < rows.length; i++) {
     var sig = Object.keys(rows[i]).sort().join(',');
     (groups[sig] = groups[sig] || []).push(rows[i]);
   }
-  for (var sig2 in groups) supaUpsert_(cfg, table, groups[sig2], conflict);
+  var allOk = true;
+  for (var sig2 in groups) {
+    if (!supaUpsert_(cfg, table, groups[sig2], conflict)) allOk = false;
+  }
+  return allOk;
 }
 
-/** Supabase REST 벌크 upsert (anon 키, merge-duplicates). */
+/** Supabase REST 벌크 upsert (anon 키, merge-duplicates). 성공 시 true, 실패 시 false. */
 function supaUpsert_(cfg, table, rows, conflict) {
-  if (!rows.length) return;
+  if (!rows.length) return true;
   // 같은 conflict 키(schedule_id/trade_id) 중복 제거 — Postgres 'ON CONFLICT ... twice'(21000) 방지. 마지막 값 유지.
   var byKey = {};
   for (var di = 0; di < rows.length; di++) byKey[String(rows[di][conflict])] = rows[di];
@@ -273,7 +298,7 @@ function supaUpsert_(cfg, table, rows, conflict) {
     rows = deduped;
   }
   var token = supaToken_(cfg);
-  if (!token) { Logger.log('봇 토큰 없음 → 동기화 중단'); return; }
+  if (!token) { Logger.log('봇 토큰 없음 → 동기화 중단'); return false; }
   var res = UrlFetchApp.fetch(cfg.url + '/rest/v1/' + table + '?on_conflict=' + conflict, {
     method: 'post',
     contentType: 'application/json',
@@ -288,7 +313,40 @@ function supaUpsert_(cfg, table, rows, conflict) {
     muteHttpExceptions: true
   });
   var code = res.getResponseCode();
-  if (code >= 300) Logger.log('Supabase ' + table + ' upsert 실패 ' + code + ': ' + res.getContentText().slice(0, 200));
+  if (code >= 300) {
+    Logger.log('Supabase ' + table + ' upsert 실패 ' + code + ': ' + res.getContentText().slice(0, 200));
+    return false;
+  }
+  return true;
+}
+
+/** 특정 거래의 schedule_items 중 keepIds에 없는 행(시트에서 삭제된 장비)을 Supabase에서 제거.
+ *  ★ keepIds가 비어 있으면 절대 삭제하지 않는다 — 상세 조회 실패로 items가 비었을 때
+ *    거래 전체를 날리는 사고를 원천 차단(최소 1개는 남는 것이 보장될 때만 정리). */
+function supaDeleteStaleItems_(cfg, tradeId, keepIds) {
+  if (!tradeId || !keepIds || !keepIds.length) return true;
+  var token = supaToken_(cfg);
+  if (!token) return false;
+  var inList = keepIds.map(function (id) { return '"' + String(id).replace(/"/g, '') + '"'; }).join(',');
+  var url = cfg.url + '/rest/v1/schedule_items'
+    + '?trade_id=eq.' + encodeURIComponent(tradeId)
+    + '&schedule_id=not.in.(' + encodeURIComponent(inList) + ')';
+  var res = UrlFetchApp.fetch(url, {
+    method: 'delete',
+    headers: {
+      apikey: cfg.apikey,
+      Authorization: 'Bearer ' + token,
+      'Content-Profile': 'village',
+      Prefer: 'return=minimal'
+    },
+    muteHttpExceptions: true
+  });
+  var code = res.getResponseCode();
+  if (code >= 300) {
+    Logger.log('Supabase schedule_items 정리 실패 ' + code + ': ' + res.getContentText().slice(0, 200));
+    return false;
+  }
+  return true;
 }
 
 /** 트리거 설치 (1회 실행). 기존 트리거 중복 방지. */

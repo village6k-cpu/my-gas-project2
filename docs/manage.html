@@ -400,6 +400,10 @@ function loadRequests() {
 }
 
 // ━━━ 목록 렌더링 ━━━
+// 고객 자유입력(예약자명 등)이 innerHTML/속성으로 들어가므로 저장형 XSS 방지용 이스케이프.
+// 텍스트/따옴표 속성 양쪽에서 안전하도록 " ' & < > 를 모두 처리한다.
+function escHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+
 function renderList() {
   var el = document.getElementById("cardList");
   var summary = document.getElementById("summaryBar");
@@ -430,9 +434,9 @@ function renderList() {
       var isAvail = !/가용0|❌/.test(r);
       return '<div class="equip-item">' +
         '<label class="equip-check"><input type="checkbox" id="' + checkId + '" ' + (isAvail ? 'checked' : '') + '></label>' +
-        '<div class="equip-info">' + e.장비명 + ' <span class="equip-qty">×' + (e.수량||1) + '</span></div>' +
-        '<div class="equip-result ' + resultClass + '">' + r +
-          (e.상세 ? '<span class="equip-detail">' + e.상세 + '</span>' : '') +
+        '<div class="equip-info">' + escHtml(e.장비명) + ' <span class="equip-qty">×' + (e.수량||1) + '</span></div>' +
+        '<div class="equip-result ' + resultClass + '">' + escHtml(r) +
+          (e.상세 ? '<span class="equip-detail">' + escHtml(e.상세) + '</span>' : '') +
         '</div></div>';
     }).join("");
 
@@ -451,15 +455,15 @@ function renderList() {
 
     return '<div class="req-card status-' + statusClass + '">' +
       '<div class="req-header">' +
-        '<div><div class="req-id">' + req.reqID + '</div>' +
-          '<div class="req-name">' + (req.예약자명 || "이름 없음") + '</div></div>' +
+        '<div><div class="req-id">' + escHtml(req.reqID) + '</div>' +
+          '<div class="req-name">' + escHtml(req.예약자명 || "이름 없음") + '</div></div>' +
         '<div class="req-tools">' +
           '<button class="edit-icon-btn" onclick="openEdit(' + idx + ')" title="수정" aria-label="수정">✎</button>' +
           '<span class="req-status ' + statusLabel + '">' + statusLabel + '</span>' +
         '</div>' +
       '</div>' +
       '<div class="req-date"><span class="meta-label">기간</span><span>' + (req.반출일||"") + ' ' + (req.반출시간||"") + ' → ' + (req.반납일||"") + ' ' + (req.반납시간||"") + '</span></div>' +
-      (req.연락처 ? '<div class="req-tel"><span class="meta-label">연락처</span><span>' + req.연락처 + '</span></div>' : '') +
+      (req.연락처 ? '<div class="req-tel"><span class="meta-label">연락처</span><span>' + escHtml(req.연락처) + '</span></div>' : '') +
       '<div class="equip-list">' + equipHtml + '</div>' +
       (actionsHtml ? '<div class="action-bar">' + actionsHtml + '</div>' : '') +
     '</div>';
@@ -548,7 +552,7 @@ function openEdit(idx) {
 
   var equipRows = (req.장비목록 || []).map(function(e, i) {
     return '<div class="edit-equip-row">' +
-      '<input type="text" value="' + (e.장비명||"").replace(/"/g,"&quot;") + '" data-equip="' + i + '">' +
+      '<input type="text" value="' + escHtml(e.장비명||"") + '" data-equip="' + i + '">' +
       '<input type="text" value="' + (e.수량||1) + '" data-qty="' + i + '">' +
       '<button onclick="this.parentElement.remove()">✕</button>' +
     '</div>';
@@ -557,8 +561,8 @@ function openEdit(idx) {
   document.getElementById("editPanel").innerHTML =
     '<h3>수정: ' + req.reqID + '</h3>' +
     '<div class="edit-grid">' +
-      '<div class="edit-field"><label>예약자명</label><input type="text" id="editName" value="' + (req.예약자명||"") + '"></div>' +
-      '<div class="edit-field"><label>연락처</label><input type="tel" id="editTel" value="' + (req.연락처||"") + '"></div>' +
+      '<div class="edit-field"><label>예약자명</label><input type="text" id="editName" value="' + escHtml(req.예약자명||"") + '"></div>' +
+      '<div class="edit-field"><label>연락처</label><input type="tel" id="editTel" value="' + escHtml(req.연락처||"") + '"></div>' +
       '<div class="edit-field"><label>반출일</label><input type="date" id="editStart" value="' + (req.반출일||"") + '"></div>' +
       '<div class="edit-field"><label>반출시간</label><input type="time" id="editStartTime" value="' + (req.반출시간||"") + '"></div>' +
       '<div class="edit-field"><label>반납일</label><input type="date" id="editEnd" value="' + (req.반납일||"") + '"></div>' +

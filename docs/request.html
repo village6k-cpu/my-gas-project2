@@ -1924,8 +1924,11 @@ async function registerNow(reqId) {
   statusEl.innerHTML = '<span class="badge badge-amber">⏳ 등록 처리 중... 계약서 생성 포함 1~5분 소요. 이 페이지를 닫아도 됩니다.</span>';
   resultBody.appendChild(statusEl);
 
-  // Fire-and-forget: scan&do=등록 호출 (응답 안 기다림)
-  var registerUrl = API_URL + '?key=' + API_KEY + '&action=scan&reqID=' + encodeURIComponent(reqId) + '&do=' + encodeURIComponent('등록');
+  // Fire-and-forget: registerAsync 호출 (응답 안 기다림)
+  // (과거 action=scan&do=등록 은 서버가 무시하는 파라미터라 실제 등록이 전혀 안 됐다 —
+  //  scan은 인자 없는 전체 스캔이고 이 페이지는 N열을 '등록'으로 세팅하지 않기 때문.
+  //  registerAsync 는 reqID 하나로 scheduleRegister(해당 요청 등록)를 정확히 실행한다.)
+  var registerUrl = API_URL + '?key=' + API_KEY + '&action=registerAsync&reqID=' + encodeURIComponent(reqId);
   fetch(registerUrl).then(function(r) { return r.json(); }).then(function(data) {
     // 응답 왔으면 바로 완료 (폴링 종료)
     clearInterval(pollTimer);

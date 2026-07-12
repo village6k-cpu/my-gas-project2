@@ -47,12 +47,12 @@ function protectSheets() {
   
   // === 3. 확인요청 보호 ===
   // 수식: L(고객DB lookup)
-  // 입력: A-K, M-Q
+  // 입력: A-K, M-R  (R = 추가요청 자유입력, 직원이 직접 타이핑하는 컬럼)
   var confirmSheet = ss.getSheetByName('확인요청');
   if (confirmSheet) {
     var prots3 = confirmSheet.getProtections(SpreadsheetApp.ProtectionType.SHEET);
     for (var i = 0; i < prots3.length; i++) prots3[i].remove();
-    
+
     var prot3 = confirmSheet.protect().setDescription('확인요청 수식 보호');
     var lr3 = Math.max(confirmSheet.getLastRow(), 200);
     var lc3 = confirmSheet.getLastColumn();
@@ -60,7 +60,8 @@ function protectSheets() {
       confirmSheet.getRange('A2:K' + lr3),  // L열 전까지
     ];
     if (lc3 >= 13) {
-      unprotected3.push(confirmSheet.getRange('M2:Q' + lr3));  // L열 이후
+      // M2:R — R열(추가요청)까지 포함해야 직원 입력이 막히지 않는다(계약서 추가품목 유입 경로).
+      unprotected3.push(confirmSheet.getRange('M2:R' + lr3));  // L열 이후 ~ R열
     }
     prot3.setUnprotectedRanges(unprotected3);
     prot3.setWarningOnly(false);

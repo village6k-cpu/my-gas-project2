@@ -1341,6 +1341,14 @@ function cancelContract(ss, 거래ID, contractRow) {
     Logger.log("개고생2.0 거래내역 삭제 실패: " + err.message);
   }
 
+  // 2.5 Drive 계약서 파일 휴지통 이동 (취소 건마다 고아 파일이 쌓이던 문제)
+  try {
+    var trashedCount = trashContractFilesForTrade_(거래ID);
+    if (trashedCount) Logger.log("취소 계약서 파일 정리: " + trashedCount + "개 (" + 거래ID + ")");
+  } catch (trashErr) {
+    Logger.log("취소 계약서 파일 정리 실패 (계속 진행): " + trashErr.message);
+  }
+
   // 3. 계약마스터 행 전체를 취소 스타일로 (연빨강 배경 + 취소선 + 어두운 글자)
   var rowRange = contractSheet.getRange(contractRow, 1, 1, 11);  // A:K
   rowRange.setBackground("#FFC7CE");
