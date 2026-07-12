@@ -36,24 +36,24 @@
   }
   #vig {
     position:absolute; inset:0; pointer-events:none;
-    background:radial-gradient(ellipse at center, transparent 52%, rgba(8,6,12,.38) 100%);
+    background:radial-gradient(ellipse at center, transparent 52%, rgba(8,6,12,.32) 100%);
   }
 
   /* ── 오버레이 공통 ── */
-  .ov { position:absolute; text-shadow:0 1px 6px rgba(5,4,8,.7); }
+  .ov { position:absolute; text-shadow:0 1px 6px rgba(5,4,8,.65), 0 0 2px rgba(5,4,8,.4); }
 
   /* 좌상단: 워드마크 */
-  #brand { top:4.6%; left:3.6%; user-select:none; opacity:.85; }
+  #brand { top:4.6%; left:3.6%; user-select:none; opacity:.9; }
   #brand .mark { display:flex; align-items:baseline; gap:11px; }
   #brand .name { font-family:Georgia,'Times New Roman',serif; font-weight:700; font-size:clamp(16px,2.2vw,29px); letter-spacing:.04em; }
   #brand .live { display:inline-flex; align-items:center; gap:5px; font-size:clamp(7px,.8vw,10px); font-weight:700; letter-spacing:.24em; opacity:.8; }
   #brand .live i { width:.6em; height:.6em; border-radius:50%; background:#e5484d; animation:pulse 3s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:.9} 50%{opacity:.2} }
-  #brand .tag  { margin-top:.55em; font-size:clamp(9px,.95vw,13px); opacity:.7; letter-spacing:.02em; }
-  #brand .tag2 { margin-top:.3em; font-family:Georgia,serif; font-style:italic; font-size:clamp(8px,.85vw,11px); opacity:.45; }
+  #brand .tag  { margin-top:.55em; font-size:clamp(9px,.95vw,13px); opacity:.75; letter-spacing:.02em; }
+  #brand .tag2 { margin-top:.3em; font-family:Georgia,serif; font-style:italic; font-size:clamp(8px,.85vw,11px); opacity:.5; }
 
   /* 우상단: 지금 재생 중 */
-  #np { top:5%; right:3.6%; text-align:right; transition:opacity .8s; opacity:.85; }
+  #np { top:5%; right:3.6%; text-align:right; transition:opacity .8s; opacity:.9; }
   #np.fade { opacity:0; }
   #np .row { display:flex; align-items:center; justify-content:flex-end; gap:9px; }
   .eq { display:inline-flex; align-items:flex-end; gap:2px; height:.9em; }
@@ -64,10 +64,10 @@
   @keyframes eq { 0%,100%{transform:scaleY(.35)} 50%{transform:scaleY(1)} }
   body.paused .eq span { animation-play-state:paused; transform:scaleY(.3); }
   #np .title  { font-family:'Menlo','Courier New',monospace; font-weight:700; font-size:clamp(11px,1.2vw,15px); letter-spacing:.03em; }
-  #np .artist { margin-top:.35em; font-family:'Menlo','Courier New',monospace; font-size:clamp(8px,.85vw,11px); opacity:.55; }
+  #np .artist { margin-top:.35em; font-family:'Menlo','Courier New',monospace; font-size:clamp(8px,.85vw,11px); opacity:.6; }
 
   /* 좌하단: 캡션 */
-  #caption { bottom:4%; left:3.6%; font-size:clamp(8px,.85vw,11px); opacity:.4; letter-spacing:.04em; }
+  #caption { bottom:4%; left:3.6%; font-size:clamp(8px,.85vw,11px); opacity:.45; letter-spacing:.04em; }
 
   /* 우하단: 컨트롤 (마우스 멈추면 사라짐) */
   #ctrl {
@@ -154,9 +154,11 @@
 'use strict';
 /* ═══════════════════════════════════════════════════════
    빌리지 FM — Claude FM 오마주
-   광활한 새벽 지평선, 작은 사람, 장비 카트, 필름 그레인.
-   Web Audio 실시간 생성 앰비언트 (저작권 無).
-   URL 파라미터: ?autoplay=1 (OBS용), &ui=min (오버레이 최소화)
+   평원 위의 작은 사람과 시네카트. 하늘은 실제 시각을 따라
+   새벽 → 낮 → 해질녘 → 별이 뜨는 밤으로 흐른다.
+   음악: Web Audio 실시간 생성 — 곡마다 조용히 시작해
+   서서히 고조되었다가 가라앉는 아치 구조 (저작권 無).
+   URL 파라미터: ?autoplay=1 (OBS용), &ui=min (오버레이 최소화), &hour=N (시간 미리보기)
    ═══════════════════════════════════════════════════════ */
 
 const Q = new URLSearchParams(location.search);
@@ -172,31 +174,31 @@ const SH = {
   m11: [0, 7, 15, 20, 26]    // min11
 };
 const TP = (shift, shape) => shape.map(v => v + shift);
-const PENT_m = [0, 3, 5, 7, 10, 12, 15, 17];  // 마이너 펜타토닉
-const PENT_M = [0, 2, 4, 7, 9, 12, 14, 16];   // 메이저 펜타토닉
+const PENT_m = [0, 3, 5, 7, 10];   // 마이너 펜타토닉 (한 옥타브)
+const PENT_M = [0, 2, 4, 7, 9];    // 메이저 펜타토닉 (한 옥타브)
 
-// root: MIDI 노트, dur: 코드 길이(초), pad/pk: 볼륨, plk: 멜로디 간격(초)
+// root: MIDI 노트, dur: 코드 길이(초), pad/pk: 볼륨, scl: 멜로디 스케일
 const TRACKS = [
-  { t:'수평선',           root:45, wave:'sine',     dur:24, pad:.16, pk:.13, plk:9,  scl:PENT_m,
+  { t:'수평선',           root:41, wave:'sine',     dur:16, pad:.15, pk:.19, scl:PENT_M,
+    prog:[TP(0,SH.M9), TP(7,SH.s9), TP(9,SH.m9), TP(5,SH.M6)] },
+  { t:'먼 빛',            root:48, wave:'sine',     dur:15, pad:.14, pk:.20, scl:PENT_M,
+    prog:[TP(0,SH.M9), TP(-5,SH.M9), TP(-3,SH.m9), TP(-7,SH.M6)] },
+  { t:'아무도 듣지 않아도', root:45, wave:'sine',   dur:18, pad:.15, pk:.17, scl:PENT_m,
     prog:[TP(0,SH.m9), TP(-4,SH.M9), TP(3,SH.M6), TP(-2,SH.s9)] },
-  { t:'먼 빛',            root:41, wave:'sine',     dur:22, pad:.14, pk:.14, plk:8,  scl:PENT_M,
+  { t:'신호',             root:43, wave:'triangle', dur:14, pad:.13, pk:.20, scl:PENT_M,
+    prog:[TP(0,SH.M6), TP(5,SH.M9), TP(-5,SH.M9), TP(2,SH.s9)] },
+  { t:'잔광',             root:46, wave:'triangle', dur:16, pad:.13, pk:.19, scl:PENT_M,
     prog:[TP(0,SH.M9), TP(-3,SH.m9), TP(5,SH.M6), TP(7,SH.s9)] },
-  { t:'아무도 듣지 않아도', root:43, wave:'triangle', dur:26, pad:.13, pk:.11, plk:12, scl:PENT_m,
-    prog:[TP(0,SH.m11), TP(-2,SH.M9), TP(5,SH.m9), TP(-4,SH.s9)] },
-  { t:'신호',             root:40, wave:'sine',     dur:22, pad:.16, pk:.12, plk:10, scl:PENT_m,
+  { t:'그리움',           root:40, wave:'sine',     dur:18, pad:.16, pk:.17, scl:PENT_m,
     prog:[TP(0,SH.m9), TP(-4,SH.M9), TP(5,SH.m11), TP(7,SH.s9)] },
-  { t:'잔광',             root:46, wave:'triangle', dur:24, pad:.13, pk:.13, plk:9,  scl:PENT_M,
-    prog:[TP(0,SH.M9), TP(-3,SH.m9), TP(5,SH.M6), TP(7,SH.s9)] },
-  { t:'그리움',           root:47, wave:'sine',     dur:26, pad:.16, pk:.12, plk:11, scl:PENT_m,
-    prog:[TP(0,SH.m9), TP(5,SH.M6), TP(-4,SH.M9), TP(7,SH.s9)] },
-  { t:'무한',             root:48, wave:'sine',     dur:28, pad:.15, pk:.10, plk:14, scl:PENT_M,
-    prog:[TP(0,SH.M9), TP(-7,SH.M9), TP(-3,SH.m9), TP(-5,SH.M6)] },
-  { t:'새벽이 오기 전',   root:42, wave:'sine',     dur:24, pad:.16, pk:.12, plk:10, scl:PENT_m,
-    prog:[TP(0,SH.m9), TP(-4,SH.M9), TP(3,SH.M6), TP(-2,SH.s9)] },
-  { t:'주파수 너머',      root:50, wave:'triangle', dur:22, pad:.13, pk:.14, plk:8,  scl:PENT_m,
-    prog:[TP(0,SH.m9), TP(-5,SH.M6), TP(-3,SH.M9), TP(5,SH.s9)] },
-  { t:'빛이 있던 자리',   root:44, wave:'sine',     dur:26, pad:.15, pk:.11, plk:12, scl:PENT_M,
-    prog:[TP(0,SH.M9), TP(-3,SH.m9), TP(-7,SH.M9), TP(2,SH.s9)] }
+  { t:'무한',             root:50, wave:'sine',     dur:17, pad:.15, pk:.18, scl:PENT_M,
+    prog:[TP(0,SH.M9), TP(-5,SH.M9), TP(-3,SH.m9), TP(-7,SH.M6)] },
+  { t:'새벽이 오기 전',   root:51, wave:'sine',     dur:16, pad:.14, pk:.18, scl:PENT_M,
+    prog:[TP(0,SH.M9), TP(-3,SH.m9), TP(5,SH.M6), TP(-5,SH.s9)] },
+  { t:'주파수 너머',      root:43, wave:'sine',     dur:15, pad:.14, pk:.20, scl:PENT_M,
+    prog:[TP(0,SH.M9), TP(9,SH.m9), TP(5,SH.M9), TP(7,SH.s9)] },
+  { t:'빛이 있던 자리',   root:41, wave:'triangle', dur:16, pad:.14, pk:.18, scl:PENT_M,
+    prog:[TP(0,SH.M9), TP(-3,SH.m9), TP(5,SH.M6), TP(7,SH.s9)] }
 ];
 
 /* ───────────────────────── 오디오 엔진 ───────────────────────── */
@@ -209,6 +211,7 @@ let chordN = 0;
 let timers = [];
 let volume = 0.7;
 let mutedVol = null;
+let trackStartT = 0, trackLen = 210, melP = 3;
 
 const mf = m => 440 * Math.pow(2, (m - 69) / 12);
 const setT = (fn, ms) => { const id = setTimeout(fn, ms); timers.push(id); return id; };
@@ -246,50 +249,57 @@ function buildGraph() {
   comp.attack.value = 0.01; comp.release.value = 0.4;
 
   lpFilter = ctx.createBiquadFilter();
-  lpFilter.type = 'lowpass'; lpFilter.frequency.value = 3000; lpFilter.Q.value = 0.35;
+  lpFilter.type = 'lowpass'; lpFilter.frequency.value = 3200; lpFilter.Q.value = 0.35;
 
   lpFilter.connect(comp); comp.connect(master); master.connect(ctx.destination);
 
-  // 긴 리버브 (생성 IR) — 아득함의 핵심
-  revConv = ctx.createConvolver(); revConv.buffer = makeIR(4.8, 2.2);
-  revGain = ctx.createGain(); revGain.gain.value = 0.55;
+  // 리버브 (생성 IR)
+  revConv = ctx.createConvolver(); revConv.buffer = makeIR(3.6, 2.4);
+  revGain = ctx.createGain(); revGain.gain.value = 0.45;
   revConv.connect(revGain); revGain.connect(lpFilter);
 
   // 딜레이 (멜로디 잔향)
-  dly = ctx.createDelay(2); dly.delayTime.value = 0.58;
-  dlyFb = ctx.createGain(); dlyFb.gain.value = 0.4;
-  const dlyLp = ctx.createBiquadFilter(); dlyLp.type = 'lowpass'; dlyLp.frequency.value = 1500;
+  dly = ctx.createDelay(2); dly.delayTime.value = 0.5;
+  dlyFb = ctx.createGain(); dlyFb.gain.value = 0.35;
+  const dlyLp = ctx.createBiquadFilter(); dlyLp.type = 'lowpass'; dlyLp.frequency.value = 2000;
   dly.connect(dlyLp); dlyLp.connect(dlyFb); dlyFb.connect(dly);
   dly.connect(lpFilter); dly.connect(revConv);
 
-  padBus = ctx.createGain(); padBus.gain.value = 1.5;
+  padBus = ctx.createGain(); padBus.gain.value = 1.3;
   padBus.connect(lpFilter); padBus.connect(revConv);
-  pkBus  = ctx.createGain(); pkBus.gain.value = 1.3;
-  pkBus.connect(dly); pkBus.connect(revConv);
+  pkBus  = ctx.createGain(); pkBus.gain.value = 1.25;
+  pkBus.connect(lpFilter); pkBus.connect(dly); pkBus.connect(revConv);
 
   // 필터에 아주 느린 움직임
-  const lfo = ctx.createOscillator(); lfo.frequency.value = 0.02;
-  const lfoG = ctx.createGain(); lfoG.gain.value = 450;
+  const lfo = ctx.createOscillator(); lfo.frequency.value = 0.025;
+  const lfoG = ctx.createGain(); lfoG.gain.value = 380;
   lfo.connect(lfoG); lfoG.connect(lpFilter.frequency); lfo.start();
 
   // 바람 (낮게 깔리는 브라운 노이즈 + 느린 강약)
   const wind = ctx.createBufferSource(); wind.buffer = makeNoiseBuf(4); wind.loop = true;
   const windLp = ctx.createBiquadFilter(); windLp.type = 'lowpass'; windLp.frequency.value = 260;
-  windGain = ctx.createGain(); windGain.gain.value = 0.02;
+  windGain = ctx.createGain(); windGain.gain.value = 0.015;
   wind.connect(windLp); windLp.connect(windGain); windGain.connect(master);
   wind.start();
   const wLfo = ctx.createOscillator(); wLfo.frequency.value = 0.045;
-  const wLfoG = ctx.createGain(); wLfoG.gain.value = 0.009;
+  const wLfoG = ctx.createGain(); wLfoG.gain.value = 0.007;
   wLfo.connect(wLfoG); wLfoG.connect(windGain.gain); wLfo.start();
+}
+
+/* 곡의 아치: 조용히 시작 → 85% 지점까지 고조 → 마무리에 가라앉음 */
+function intensity() {
+  if (!ctx) return 0;
+  const u = Math.min(1, Math.max(0, (ctx.currentTime - trackStartT) / trackLen));
+  return u < 0.85 ? Math.pow(u / 0.85, 1.4) : Math.pow((1 - u) / 0.15, 0.8);
 }
 
 function playChord(offsets, dur) {
   const tr = TRACKS[trackIdx], t = ctx.currentTime;
   const g = ctx.createGain();
   g.gain.setValueAtTime(0.0001, t);
-  g.gain.linearRampToValueAtTime(tr.pad, t + dur * 0.4);
+  g.gain.linearRampToValueAtTime(tr.pad, t + dur * 0.35);
   g.gain.setValueAtTime(tr.pad, t + dur * 0.7);
-  g.gain.linearRampToValueAtTime(0.0001, t + dur * 1.2);
+  g.gain.linearRampToValueAtTime(0.0001, t + dur * 1.18);
   g.connect(padBus);
   offsets.forEach(o => {
     [-4, 4].forEach(det => {
@@ -299,7 +309,7 @@ function playChord(offsets, dur) {
       osc.detune.value = det + (Math.random() * 2 - 1);
       const og = ctx.createGain(); og.gain.value = 0.5 / offsets.length;
       osc.connect(og); og.connect(g);
-      osc.start(t); osc.stop(t + dur * 1.22);
+      osc.start(t); osc.stop(t + dur * 1.2);
     });
   });
   // 베이스 (한 옥타브 아래 사인)
@@ -307,7 +317,7 @@ function playChord(offsets, dur) {
   b.frequency.value = mf(tr.root + offsets[0] - 12);
   const bg = ctx.createGain();
   bg.gain.setValueAtTime(0.0001, t);
-  bg.gain.linearRampToValueAtTime(tr.pad * 0.75, t + dur * 0.45);
+  bg.gain.linearRampToValueAtTime(tr.pad * 0.75, t + dur * 0.4);
   bg.gain.linearRampToValueAtTime(0.0001, t + dur * 1.15);
   b.connect(bg); bg.connect(padBus);
   b.start(t); b.stop(t + dur * 1.2);
@@ -321,36 +331,62 @@ function chordLoop() {
   setT(chordLoop, tr.dur * 1000);
 }
 
-function playPluck() {
+/* 멜로디 음 하나 (사인 + 옥타브 위 배음 살짝 = 종소리 느낌) */
+function melNote(midi, vel, at, dec) {
+  const osc = ctx.createOscillator(); osc.type = 'sine';
+  osc.frequency.value = mf(midi);
+  const o2 = ctx.createOscillator(); o2.type = 'sine';
+  o2.frequency.value = mf(midi + 12);
+  const g = ctx.createGain(), g2b = ctx.createGain();
+  g2b.gain.value = 0.28;
+  g.gain.setValueAtTime(0.0001, at);
+  g.gain.linearRampToValueAtTime(vel, at + 0.015);
+  g.gain.exponentialRampToValueAtTime(0.0001, at + dec);
+  osc.connect(g); o2.connect(g2b); g2b.connect(g); g.connect(pkBus);
+  osc.start(at); osc.stop(at + dec + 0.5);
+  o2.start(at); o2.stop(at + dec + 0.5);
+}
+
+/* 고조되는 멜로디 — 두세 걸음 오르고, 가끔 내려와 다시 더 높이 오름 */
+function playMelody(inten) {
   const tr = TRACKS[trackIdx], t = ctx.currentTime;
-  const notes = 1 + (Math.random() < 0.25 ? 1 : 0);
-  for (let i = 0; i < notes; i++) {
-    const deg = tr.scl[Math.floor(Math.random() * tr.scl.length)];
-    const chord = tr.prog[(chordN - 1 + tr.prog.length) % tr.prog.length];
-    const base = tr.root + chord[0] + 24;
-    const osc = ctx.createOscillator(); osc.type = 'sine';
-    osc.frequency.value = mf(base + deg);
-    const g = ctx.createGain();
-    const v = tr.pk * (0.4 + Math.random() * 0.6);
-    const st = t + i * (0.5 + Math.random() * 0.5);
-    g.gain.setValueAtTime(0.0001, st);
-    g.gain.linearRampToValueAtTime(v, st + 0.02);
-    g.gain.exponentialRampToValueAtTime(0.0001, st + 2.5 + Math.random() * 1.5);
-    osc.connect(g); g.connect(pkBus);
-    osc.start(st); osc.stop(st + 5);
+  if (Math.random() < 0.22) melP -= 3 + Math.floor(Math.random() * 2);
+  else melP += 1;
+  const top = tr.scl.length * 2 + 2;              // 두 옥타브 남짓
+  if (melP > top) melP = 2 + Math.floor(Math.random() * 3);
+  if (melP < 0) melP = 0;
+  const oct = Math.floor(melP / tr.scl.length), deg = tr.scl[melP % tr.scl.length];
+  const chord = tr.prog[(chordN - 1 + tr.prog.length) % tr.prog.length];
+  const midi = tr.root + chord[0] + 24 + oct * 12 + deg;
+  melNote(midi, tr.pk * (0.35 + 0.75 * inten), t, 1.4 + Math.random() * 0.9);
+  // 고조 구간: 이따금 3음 상승 아르페지오가 반짝임
+  if (inten > 0.6 && Math.random() < 0.35) {
+    for (let i = 0; i < 3; i++) {
+      const d2 = tr.scl[(melP + i * 2) % tr.scl.length] + Math.floor((melP + i * 2) / tr.scl.length) * 12;
+      melNote(tr.root + chord[0] + 24 + d2, tr.pk * 0.28 * inten, t + 0.14 + i * 0.13, 0.9);
+    }
   }
 }
 
-function pluckLoop() {
+function melodyLoop() {
   if (!playing) return;
-  playPluck();
-  const tr = TRACKS[trackIdx];
-  setT(pluckLoop, (tr.plk * 0.6 + Math.random() * tr.plk) * 1000);
+  const inten = intensity();
+  if (inten > 0.06) playMelody(inten);
+  const iv = 2.4 - inten * 1.7;                   // 고조될수록 촘촘해짐
+  setT(melodyLoop, (iv + Math.random() * iv * 0.5) * 1000);
+}
+
+/* 고조에 따라 필터가 열리고 패드가 차오름 */
+function intLoop() {
+  if (!playing) return;
+  const i2 = intensity();
+  lpFilter.frequency.setTargetAtTime(3200 + i2 * 1800, ctx.currentTime, 1.5);
+  padBus.gain.setTargetAtTime(1.3 + i2 * 0.5, ctx.currentTime, 1.5);
+  setT(intLoop, 2000);
 }
 
 function startSchedulers() {
-  chordN = 0;
-  chordLoop(); pluckLoop();
+  chordLoop(); melodyLoop(); intLoop();
 }
 
 function nextTrack() {
@@ -358,10 +394,12 @@ function nextTrack() {
   let n;
   do { n = Math.floor(Math.random() * TRACKS.length); } while (n === trackIdx && TRACKS.length > 1);
   trackIdx = n;
+  chordN = 0; melP = 3;
+  trackStartT = ctx.currentTime;
+  trackLen = 170 + Math.random() * 80;            // 곡 길이 ≈ 3~4분 (아치 한 번)
   updateNP();
   if (playing) startSchedulers();
-  // 트랙 길이 3~4.5분
-  setT(nextTrack, (180 + Math.random() * 90) * 1000);
+  setT(nextTrack, trackLen * 1000);
 }
 
 function updateNP() {
@@ -386,9 +424,10 @@ function start() {
   elStart.classList.add('hide');
   if (trackIdx < 0) nextTrack();
   else {
-    // 일시정지 후 재개: 스케줄러 + 트랙 로테이션 타이머 재가동
+    // 일시정지 후 재개: 스케줄러 + 남은 시간만큼 로테이션 재가동
     startSchedulers();
-    setT(nextTrack, (180 + Math.random() * 90) * 1000);
+    const remain = Math.max(20, trackLen - (ctx.currentTime - trackStartT));
+    setT(nextTrack, remain * 1000);
   }
 }
 
@@ -452,172 +491,230 @@ if (Q.get('autoplay') === '1') {
   }, 700);
 }
 
-/* ───────────────────────── 씬: 세상 끝의 송신탑 ───────────────────────── */
+/* ───────────────────────── 씬: 평원, 그리고 하루 ───────────────────────── */
 const cv = document.getElementById('scene');
 const g2 = cv.getContext('2d');
-const W = 160, H = 90;
+const W = 160, H = 90, HOR = 47;   // 지평선
 
 function px(x, y, w, h, c) { g2.fillStyle = c; g2.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h)); }
 function pa(x, y, w, h, c, a) { g2.globalAlpha = Math.max(0, Math.min(1, a)); px(x, y, w, h, c); g2.globalAlpha = 1; }
-function trLine(x0, y0, x1, y1, c) {
-  const steps = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0));
-  for (let i = 0; i <= steps; i++) px(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps, 1, 1, c);
-}
+function hex2rgb(h) { return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)]; }
 const rnd1 = i => { const s = Math.sin(i * 127.1) * 43758.5453; return s - Math.floor(s); };
+// 둥근 픽셀 블롭 (해·달용)
+function blob5(cx, cy, c, a) {
+  pa(cx - 1, cy - 2, 3, 1, c, a); pa(cx - 2, cy - 1, 5, 3, c, a); pa(cx - 1, cy + 2, 3, 1, c, a);
+}
+function blob7(cx, cy, c, a) {
+  pa(cx - 1, cy - 3, 3, 1, c, a); pa(cx - 2, cy - 2, 5, 1, c, a);
+  pa(cx - 3, cy - 1, 7, 3, c, a);
+  pa(cx - 2, cy + 2, 5, 1, c, a); pa(cx - 1, cy + 3, 3, 1, c, a);
+}
+const lerp3 = (a, b, k) => [a[0]+(b[0]-a[0])*k, a[1]+(b[1]-a[1])*k, a[2]+(b[2]-a[2])*k];
+const rgbs = c => 'rgb(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ')';
 
-/* 능선 실루엣 (완만한 기복) */
-const RIDGE = [];
-{
-  const ctrl = [[0,78],[22,77],[34,74],[48,76],[70,78],[95,77],[112,79],[135,80],[159,78]];
-  for (let x = 0; x < W; x++) {
-    let i = 0;
-    while (i < ctrl.length - 2 && ctrl[i + 1][0] < x) i++;
-    const u = Math.min(1, Math.max(0, (x - ctrl[i][0]) / (ctrl[i + 1][0] - ctrl[i][0] || 1)));
-    const k = (1 - Math.cos(u * Math.PI)) / 2;
-    RIDGE.push(Math.round(ctrl[i][1] + (ctrl[i + 1][1] - ctrl[i][1]) * k));
+// 시간 오버라이드 (&hour=20 → 미리보기)
+const hourOverride = Q.get('hour') !== null ? parseFloat(Q.get('hour')) : null;
+function nowHour() {
+  if (hourOverride !== null && !isNaN(hourOverride)) return ((hourOverride % 24) + 24) % 24;
+  const d = new Date();
+  return d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600;
+}
+
+/* 시간대별 키프레임: [시각, 하늘 상단, 하늘 중단, 지평선] */
+const HKEY = [
+  [0,   '#0b0e20', '#151a35', '#232a4e'],
+  [4,   '#0b0e20', '#151a35', '#232a4e'],
+  [5.5, '#232845', '#5c4f68', '#dc9c64'],
+  [6.5, '#3a4a6e', '#8a7080', '#eab476'],
+  [8,   '#8fb2c9', '#c9cfc9', '#f0e3c0'],
+  [12,  '#a7c4d6', '#cfd8d2', '#efe6c8'],
+  [16,  '#9db8cc', '#cabfae', '#eed9ae'],
+  [17.5,'#7a7a9a', '#c98e6a', '#f2b878'],
+  [19,  '#4a4270', '#a06070', '#e88a5c'],
+  [20.5,'#1c2140', '#3a3560', '#7a5568'],
+  [22,  '#0b0e20', '#151a35', '#232a4e'],
+  [24,  '#0b0e20', '#151a35', '#232a4e']
+];
+const GKEY = [   // 대지 기본색
+  [0,'#16141c'],[5,'#16141c'],[6.5,'#241f26'],[8,'#3f3a40'],[12,'#4a4448'],
+  [16,'#484042'],[17.5,'#3a3038'],[19,'#241d28'],[20.5,'#16141c'],[24,'#16141c']
+];
+const SKEY = [ [0,1],[4.8,1],[6,.4],[7,0],[17.5,0],[19,.15],[20.3,.6],[21.5,1],[24,1] ];   // 별
+const LKEY = [ [0,1],[5.5,1],[7,0],[18,0],[19.3,.5],[20.3,1],[24,1] ];                      // 지평선의 먼 빛
+const DKEY = [ [0,0],[5,0],[6.5,.2],[8,.9],[12,1],[16,1],[17.5,.6],[19,.15],[20,0],[24,0] ]; // 구름(낮)
+
+function kcols(tab, h) {   // HKEY → [top, mid, hor] rgb 배열
+  for (let i = 0; i < tab.length - 1; i++) {
+    if (h >= tab[i][0] && h <= tab[i+1][0]) {
+      const u = (h - tab[i][0]) / (tab[i+1][0] - tab[i][0] || 1);
+      return [1,2,3].map(c => lerp3(hex2rgb(tab[i][c]), hex2rgb(tab[i+1][c]), u));
+    }
   }
+  return [1,2,3].map(c => hex2rgb(tab[tab.length-1][c]));
+}
+function kcol1(tab, h) {   // [시각, '#hex'] → rgb 배열
+  for (let i = 0; i < tab.length - 1; i++) {
+    if (h >= tab[i][0] && h <= tab[i+1][0]) {
+      const u = (h - tab[i][0]) / (tab[i+1][0] - tab[i][0] || 1);
+      return lerp3(hex2rgb(tab[i][1]), hex2rgb(tab[i+1][1]), u);
+    }
+  }
+  return hex2rgb(tab[tab.length-1][1]);
+}
+function kval(tab, h) {
+  for (let i = 0; i < tab.length - 1; i++) {
+    if (h >= tab[i][0] && h <= tab[i+1][0]) {
+      const u = (h - tab[i][0]) / (tab[i+1][0] - tab[i][0] || 1);
+      return tab[i][1] + (tab[i+1][1] - tab[i][1]) * u;
+    }
+  }
+  return tab[tab.length-1][1];
 }
 
-/* 거대한 달 (절반쯤 떠오르는 중) */
-const MX = 126, MY = 70, MR = 15;
-
-/* 은하수 — 대각선으로 흐르는 희미한 별의 강 */
-const MW = [];
-for (let i = 0; i < 240; i++) {
-  const s = rnd1(i * 3.7);
-  const off1 = (rnd1(i * 1.3) + rnd1(i * 2.9) + rnd1(i * 5.1)) / 3 - 0.5;
-  const off2 = (rnd1(i * 7.7) + rnd1(i * 4.3)) / 2 - 0.5;
-  MW.push([150 - 135 * s + off1 * 26, 6 + 36 * s + off2 * 13, 0.04 + rnd1(i * 9.1) * 0.11]);
-}
-
-/* 별 */
+/* 별 (밤에 가득) */
 const STARS = [];
-for (let i = 0; i < 75; i++) STARS.push([Math.floor(rnd1(i) * W), Math.floor(rnd1(i + 99) * 68), rnd1(i + 55)]);
+for (let i = 0; i < 60; i++) STARS.push([Math.floor(rnd1(i) * W), Math.floor(rnd1(i + 99) * HOR * 0.9), rnd1(i + 55)]);
 
-/* 전파 파문 / 연기 / 유성 / 인공위성 상태 */
-let rings = [], ringNext = 4;
-let smoke = [], smokeNext = 3;
+/* 구름 (낮) */
+const CLD = [ {s:0,y:12,w:18,v:.5}, {s:70,y:24,w:26,v:.35}, {s:130,y:7,w:14,v:.6} ];
+
+/* 유성 / 인공위성 / 먼지 상태 */
 let ssNext = 40 + Math.random() * 120, ss = null;
 let satNext = 90 + Math.random() * 180, sat = null;
+let dusts = [], dustNext = 6;
+let blinkNext = 3;
 
 function drawScene(t) {
-  /* 밤하늘 */
-  for (let y = 0; y < 82; y++) {
-    const k = y / 82;
-    g2.fillStyle = 'rgb(' + Math.round(7 + 26 * k) + ',' + Math.round(9 + 29 * k) + ',' + Math.round(26 + 48 * k) + ')';
+  const h = nowHour();
+  const [top, mid, hor] = kcols(HKEY, h);
+  const starF = kval(SKEY, h);
+  const lightF = kval(LKEY, h);
+  const dayF = kval(DKEY, h);
+
+  /* 하늘 */
+  for (let y = 0; y < HOR; y++) {
+    const k = y / (HOR - 1);
+    g2.fillStyle = rgbs(k < 0.55 ? lerp3(top, mid, k / 0.55) : lerp3(mid, hor, (k - 0.55) / 0.45));
     g2.fillRect(0, y, W, 1);
   }
 
-  /* 은하수 (집단적으로 아주 천천히 숨쉼) */
-  const mwB = 0.85 + 0.15 * Math.sin(t * 0.05);
-  MW.forEach(p => pa(p[0], p[1], 1, 1, '#dfe4f6', p[2] * mwB));
-
   /* 별 */
-  STARS.forEach((s, i) => {
-    const tw = i < 6 ? 0.45 + 0.55 * Math.sin(t * 0.7 + i * 2.7) : 0.7 + 0.3 * Math.sin(t * 0.3 + i);
-    pa(s[0], s[1], 1, 1, '#e8e4f0', (0.1 + s[2] * 0.35) * tw);
+  if (starF > 0.02) STARS.forEach((s, i) => {
+    const tw = 0.5 + 0.5 * Math.sin(t * 0.6 + i * 2.7);
+    pa(s[0], s[1], 1, 1, '#e8e4f0', (0.15 + s[2] * 0.5) * tw * starF * (i < 8 ? 1.5 : 1));
   });
 
-  /* 인공위성 — 아주 느리게 하늘을 가로지름 */
-  if (!sat && t > satNext) sat = { x: -2, y: 6 + Math.random() * 20, v: 0.05 + Math.random() * 0.03 };
-  if (sat) {
-    sat.x += sat.v;
-    pa(sat.x, sat.y, 1, 1, '#cbd4e8', 0.4 + 0.15 * Math.sin(t * 3));
-    if (sat.x > W + 2) { sat = null; satNext = t + 150 + Math.random() * 200; }
+  /* 해 */
+  if (h > 6.3 && h < 19.3) {
+    const p = (h - 6.3) / 13;
+    const sx = 14 + p * (W - 28);
+    const sy = HOR - 3 - Math.sin(p * Math.PI) * 34;
+    const warm = (p < 0.18 || p > 0.82) ? 1 : 0;   // 뜨고 질 때 붉게
+    blob7(sx, sy, warm ? '#f2a05e' : '#fff3cc', 0.3 + 0.15 * warm);
+    blob5(sx, sy, warm ? '#f6b06a' : '#fff9e2', 0.9);
+    px(sx - 1, sy - 1, 3, 3, '#fffdf0');
   }
 
-  /* 유성 */
-  if (!ss && t > ssNext) ss = { t0: t, x0: 15 + Math.random() * 110, y0: 4 + Math.random() * 18 };
-  if (ss) {
-    const u = (t - ss.t0) / 0.9;
-    if (u >= 1) { ss = null; ssNext = t + 90 + Math.random() * 180; }
-    else {
-      const x = ss.x0 + u * 22, y = ss.y0 + u * 13;
-      pa(x, y, 1, 1, '#f6f1e7', (1 - u) * 0.9);
-      pa(x - 1, y - 1, 1, 1, '#f6f1e7', (1 - u) * 0.45);
-      pa(x - 2, y - 2, 1, 1, '#f6f1e7', (1 - u) * 0.2);
+  /* 달 */
+  if (h >= 19.8 || h < 5.8) {
+    const mh = h >= 19.8 ? h - 19.8 : h + 4.2;
+    const p = mh / 10;
+    const mx = W - 14 - p * (W - 28);
+    const my = HOR - 6 - Math.sin(p * Math.PI) * 30;
+    blob7(mx, my, '#cfd3e8', 0.14);
+    blob5(mx, my, '#e6e2d4', 1);
+    px(mx - 1, my - 1, 2, 2, '#c9c5b8');
+  }
+
+  /* 구름 (낮) */
+  if (dayF > 0.25) CLD.forEach(c => {
+    const cx = ((c.s + t * c.v) % (W + c.w)) - c.w;
+    pa(cx, c.y, c.w, 2, '#ffffff', 0.28 * dayF);
+    pa(cx + 3, c.y - 1, c.w - 8, 1, '#ffffff', 0.22 * dayF);
+  });
+
+  /* 인공위성 — 밤에만, 아주 느리게 */
+  if (starF > 0.3) {
+    if (!sat && t > satNext) sat = { x: -2, y: 6 + Math.random() * 16, v: 0.05 + Math.random() * 0.03 };
+    if (sat) {
+      sat.x += sat.v;
+      pa(sat.x, sat.y, 1, 1, '#cbd4e8', 0.4 + 0.15 * Math.sin(t * 3));
+      if (sat.x > W + 2) { sat = null; satNext = t + 150 + Math.random() * 200; }
     }
-  }
-
-  /* 달빛 무리 + 달 */
-  const gb = 0.9 + 0.1 * Math.sin(t * 0.1);
-  g2.fillStyle = '#cfd3e8';
-  [[MR + 11, 0.05], [MR + 6, 0.07], [MR + 2.5, 0.1]].forEach(gl => {
-    g2.globalAlpha = gl[1] * gb;
-    g2.beginPath(); g2.arc(MX, MY, gl[0], 0, 7); g2.fill();
-  });
-  g2.globalAlpha = 1;
-  g2.fillStyle = '#d8d2c0';
-  g2.beginPath(); g2.arc(MX, MY, MR, 0, 7); g2.fill();
-  // 크레이터
-  g2.fillStyle = '#c2bcaa';
-  [[MX - 5, MY - 4, 2.2], [MX + 4, MY - 8, 1.5], [MX - 1, MY - 10, 1.1], [MX + 7, MY - 2, 1.8], [MX - 9, MY - 8, 1.3]].forEach(c => {
-    g2.beginPath(); g2.arc(c[0], c[1], c[2], 0, 7); g2.fill();
-  });
-
-  /* 능선 — 거의 암흑, 달빛이 닿는 쪽만 희미한 윤곽 */
-  for (let x = 0; x < W; x++) {
-    px(x, RIDGE[x], 1, H - RIDGE[x], '#07070f');
-    const rim = Math.max(0, 1 - Math.abs(x - MX) / 55) * 0.3;
-    if (rim > 0.02) pa(x, RIDGE[x], 1, 1, '#9b96b3', rim);
-  }
-  pa(0, 84, W, 6, '#020208', 0.5);
-
-  /* ── 오두막 (불 켜진 창 하나 — 빌리지) ── */
-  const hb = RIDGE[28];
-  px(24, hb - 6, 10, 6, '#0b0b15');
-  px(23, hb - 7, 12, 1, '#15151f');
-  px(25, hb - 8, 8, 1, '#15151f');
-  px(31, hb - 10, 1, 2, '#0b0b15');
-  const wf = 0.8 + 0.2 * Math.sin(t * 6.3 + Math.sin(t * 2.7));
-  pa(25, hb - 5, 4, 4, '#ffb45e', 0.12 * wf);
-  pa(26, hb - 4, 2, 2, '#ffb45e', wf);
-  // 굴뚝 연기
-  if (t > smokeNext) { smoke.push({ x: 31, y: hb - 11, t0: t }); smokeNext = t + 4 + Math.random() * 4; }
-  smoke = smoke.filter(s => t - s.t0 < 9);
-  smoke.forEach(s => {
-    const u = (t - s.t0) / 9;
-    pa(s.x + Math.sin((t + s.t0) * 0.8) * 1.5, s.y - u * 14, 1, 1, '#8a86a0', 0.14 * (1 - u));
-  });
-
-  /* ── 송신탑 ── */
-  const tb = RIDGE[36], ty = tb - 30;   // ty: 비콘 위치
-  trLine(33, tb, 36, tb - 26, '#10101c');
-  trLine(39, tb, 36, tb - 26, '#10101c');
-  for (let k = 1; k <= 4; k++) {
-    const w = Math.max(1, Math.round(3 * (1 - k / 5.5)));
-    px(36 - w, tb - 5 * k, w * 2 + 1, 1, '#10101c');
-  }
-  px(36, tb - 29, 1, 3, '#10101c');
-  // 비콘 — 심장박동처럼
-  const bk = Math.pow(Math.max(0, Math.sin(t * 0.9)), 14);
-  if (bk > 0.03) { pa(36, ty, 1, 1, '#e5484d', bk); pa(35, ty - 1, 3, 3, '#e5484d', bk * 0.3); }
-
-  /* 전파 파문 — 아무도 듣지 않아도, 계속 */
-  if (t > ringNext) { rings.push({ t0: t }); ringNext = t + 6 + Math.random() * 5; }
-  rings = rings.filter(r => t - r.t0 < 4.5);
-  rings.forEach(r => {
-    const rr = (t - r.t0) * 5 + 1;
-    const a = Math.max(0, 0.16 * (1 - rr / 24));
-    if (a <= 0) return;
-    for (let i = 0; i < 40; i++) {
-      const th = i / 40 * Math.PI * 2;
-      const X = 36 + Math.cos(th) * rr, Y = ty + Math.sin(th) * rr * 0.8;
-      const cx = Math.max(0, Math.min(W - 1, Math.round(X)));
-      if (X >= 0 && X < W && Y > 0 && Y < RIDGE[cx]) pa(X, Y, 1, 1, '#cfe0ff', a);
+    /* 유성 */
+    if (!ss && t > ssNext) ss = { t0: t, x0: 20 + Math.random() * 100, y0: 4 + Math.random() * 14 };
+    if (ss) {
+      const u = (t - ss.t0) / 0.9;
+      if (u >= 1) { ss = null; ssNext = t + 90 + Math.random() * 180; }
+      else {
+        const x = ss.x0 + u * 22, y = ss.y0 + u * 13;
+        pa(x, y, 1, 1, '#f6f1e7', (1 - u) * 0.9 * starF);
+        pa(x - 1, y - 1, 1, 1, '#f6f1e7', (1 - u) * 0.45 * starF);
+        pa(x - 2, y - 2, 1, 1, '#f6f1e7', (1 - u) * 0.2 * starF);
+      }
     }
-  });
+  } else { ss = null; sat = null; }
 
-  /* ── 달을 기다리는 사람 + 삼각대 ── */
-  const wb = RIDGE[97];
-  px(95, wb - 6, 2, 2, '#0e0e1a');            // 머리 (달 쪽을 향함)
-  px(94, wb - 4, 3, 3, '#0e0e1a');            // 웅크린 몸
-  px(96, wb - 1, 2, 1, '#0e0e1a');            // 뻗은 다리
-  trLine(102, wb, 104, wb - 5, '#0e0e1a');    // 삼각대
-  trLine(107, wb, 105, wb - 5, '#0e0e1a');
-  px(104, wb - 5, 1, 2, '#0e0e1a');
-  px(103, wb - 7, 3, 2, '#0e0e1a');           // 카메라
-  px(106, wb - 7, 1, 1, '#0e0e1a');           // 렌즈 — 달을 향해
+  /* 지평선의 먼 빛 (밤·새벽) */
+  const gl = 0.8 + 0.2 * Math.sin(t * 0.9);
+  if (lightF > 0.02) {
+    pa(9, 38, 40, 10, '#e8a860', 0.09 * gl * lightF);
+    pa(17, 41, 24, 7, '#f0c080', 0.11 * gl * lightF);
+    pa(23, 44, 12, 4, '#f8d9a0', 0.13 * gl * lightF);
+    pa(26, 44, 6, 4, '#f2d9a4', (0.75 + 0.2 * Math.sin(t * 0.35)) * lightF);
+  }
+
+  /* 대지 */
+  const g0 = kcol1(GKEY, h);
+  for (let y = HOR; y < H; y++) {
+    const k = (y - HOR) / (H - HOR);
+    g2.fillStyle = rgbs([g0[0] - k * 9, g0[1] - k * 8, g0[2] - k * 10]);
+    g2.fillRect(0, y, W, 1);
+  }
+  // 빛이 닿는 지면의 잔광
+  if (lightF > 0.02) {
+    pa(10, HOR, 44, 1, '#8a5f4a', 0.35 * gl * lightF);
+    pa(18, HOR + 1, 28, 1, '#6e4c3e', 0.2 * gl * lightF);
+  }
+
+  /* 지면의 먼지 — 이따금 바람에 흘러감 */
+  if (t > dustNext) { dusts.push({ x: W + 2, y: HOR + 3 + Math.random() * 22, v: 0.12 + Math.random() * 0.08, a: 0.08 + Math.random() * 0.1 }); dustNext = t + 14 + Math.random() * 18; }
+  dusts = dusts.filter(d => d.x > -2);
+  dusts.forEach(d => { d.x -= d.v; pa(d.x, d.y, 1, 1, '#8a86a0', d.a * (0.7 + 0.3 * Math.sin(t * 2 + d.y))); });
+
+  /* ── 시네카트 ── */
+  const CX = 66;
+  // 붐 (왼쪽 L자)
+  px(CX - 6, 42, 4, 1, '#565064'); px(CX - 6, 42, 1, 3, '#565064');
+  px(CX - 2, 42, 1, 11, '#4a4658');
+  // 안테나 (오른쪽)
+  px(CX + 16, 37, 1, 16, '#4a4658');
+  px(CX + 15, 36, 3, 2, '#565064');
+  // 본체
+  px(CX + 1, 46, 7, 7, '#565064');
+  px(CX + 3, 48, 3, 3, '#3a3644');
+  px(CX + 4, 49, 1, 1, '#9aa8c9');
+  px(CX + 9, 44, 5, 9, '#6b6478');
+  px(CX + 10, 46, 3, 3, '#454052');
+  // 플랫폼 + 바퀴
+  px(CX - 2, 53, 19, 2, '#565064');
+  px(CX - 2, 53, 19, 1, '#6b6478');
+  px(CX, 56, 3, 3, '#3a3644'); px(CX + 1, 57, 1, 1, '#8a86a0');
+  px(CX + 11, 56, 3, 3, '#3a3644'); px(CX + 12, 57, 1, 1, '#8a86a0');
+  // 안테나 끝 비콘 — 5초에 한 번 붉게 깜빡
+  const bk = Math.pow(Math.max(0, Math.sin(t * 1.257)), 12);
+  if (bk > 0.05) { pa(CX + 16, 35, 1, 1, '#e5484d', bk); pa(CX + 15, 34, 3, 3, '#e5484d', bk * 0.25); }
+
+  /* ── 작은 사람 ── */
+  const PX = 55, PY = 49;   // 머리 상단
+  px(PX, PY, 5, 8, '#c97a48');
+  px(PX, PY, 1, 8, '#d98f5c');            // 왼쪽 하이라이트
+  px(PX, PY + 8, 2, 1, '#c97a48'); px(PX + 3, PY + 8, 2, 1, '#c97a48');  // 다리
+  // 눈 (오른쪽 = 카트와 지평선을 바라봄) — 이따금 깜빡
+  if (t > blinkNext + 0.15) blinkNext = t + 3 + Math.random() * 5;
+  if (t < blinkNext) px(PX + 3, PY + 2, 1, 1, '#4a3020');
+  // 팔
+  px(PX + 5, PY + 4, 1, 2, '#c97a48');
 }
 
 /* 필름 그레인 */
