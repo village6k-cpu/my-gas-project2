@@ -245,6 +245,10 @@ function handleRequest(e) {
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
         return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache, {}));
 
+      case "radar":
+        // 재방문 레이더 — 읽기 전용 집계 (계약마스터/스케줄상세). PII 포함이라 key 인증 뒤에서만.
+        return jsonResponse(getReactivationRadar(params));
+
       case "dashboardEquipNames":
         return jsonResponse({
           success: true,
