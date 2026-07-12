@@ -5,6 +5,9 @@ import type { TabKey, Trade } from "@/lib/domain/types";
 import { loadDay, repairSearchResults, useDashboard } from "@/lib/data/store";
 import {
   addDays,
+  attentionBreakdown,
+  ATTENTION_REASON_LABEL,
+  type AttentionReason,
   cardDone,
   formatDateLabel,
   searchTradeEvents,
@@ -55,6 +58,12 @@ export function TodayView() {
 
   const counts = useMemo(
     () => (data.trades.length ? tabCounts(data.trades, date) : { checkout: 0, checkin: 0, all: 0, attention: 0 }),
+    [data.trades, date],
+  );
+
+  // 확인필요 숫자를 '주된 이유'별로 분해 — 왜 이 숫자인지 한눈에. 합계 = counts.attention.
+  const attnBreakdown = useMemo(
+    () => (data.trades.length ? attentionBreakdown(data.trades, date) : null),
     [data.trades, date],
   );
 
@@ -195,6 +204,31 @@ export function TodayView() {
 
       {/* 본문 */}
       <main className="flex-1 space-y-3 px-4 pb-24 pt-3">
+        {/* 확인필요 이유별 분해 — 이 숫자가 왜 이만큼인지 한눈에 (합계 = 확인필요 배지) */}
+        {!searching && tab === "attention" && counts.attention > 0 && attnBreakdown && (
+          <div className="rounded-xl2 bg-white p-3 shadow-card ring-1 ring-line/70">
+            <div className="flex items-baseline justify-between">
+              <span className="text-[13px] font-extrabold text-ink">확인필요 {counts.attention}건 · 이유별</span>
+              <span className="text-[11px] text-ink-faint">−30일~예정 포함</span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {(Object.keys(attnBreakdown) as AttentionReason[])
+                .filter((k) => attnBreakdown[k] > 0)
+                .sort((a, b) => attnBreakdown[b] - attnBreakdown[a])
+                .map((k) => (
+                  <span key={k} className="inline-flex items-center gap-1 rounded-full bg-attention-bg px-2.5 py-1 text-[12px] font-bold text-attention-fg ring-1 ring-attention-ring">
+                    {ATTENTION_REASON_LABEL[k]} <span className="tabular-nums">{attnBreakdown[k]}</span>
+                  </span>
+                ))}
+            </div>
+            {attnBreakdown.overdue > 0 && (
+              <div className="mt-2 text-[11.5px] leading-snug text-ink-mute">
+                <b className="text-ink-soft">미마감 {attnBreakdown.overdue}건</b>은 반납일이 지났는데 앱에서 <b>반납완료</b>로 안 찍힌 건이에요. 실제로 반납된 거면 카드에서 반납완료 처리하면 이 숫자가 줄어듭니다.
+              </div>
+            )}
+          </div>
+        )}
+
         {!searching && <HandoverBoard notes={data.notes} />}
 
         {searching && (

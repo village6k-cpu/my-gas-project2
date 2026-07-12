@@ -201,15 +201,43 @@ export function returnBadge(t: Trade): string | null {
   return null;
 }
 
-export function needsAttention(t: Trade, date: string): boolean {
+// 확인필요로 잡히는 '주된 이유' — 배지 분해용. 한 거래가 여러 조건에 걸려도
+// 아래 우선순위로 딱 하나만 대표 이유로 센다(그래서 분해 합계 = 확인필요 총합).
+export type AttentionReason = "damage" | "overdue" | "deposit" | "payment" | "risk";
+
+export const ATTENTION_REASON_LABEL: Record<AttentionReason, string> = {
+  damage: "파손/분실",
+  overdue: "미마감",
+  deposit: "보증금",
+  payment: "결제",
+  risk: "위험",
+};
+
+export function attentionReason(t: Trade, date: string): AttentionReason | null {
   const aggs = aggregateReturns(t);
-  if (aggs.some((a) => a.count.damaged > 0 || a.count.lost > 0)) return true;
-  if (t.depositStatus && /미|대기|예정/.test(t.depositStatus)) return true;
-  if (t.paymentWarning) return true;
+  if (aggs.some((a) => a.count.damaged > 0 || a.count.lost > 0)) return "damage";
   const overdue = new Date(t.returnAt) < new Date(`${date}T00:00:00`) && !t.returnDone;
-  if (overdue) return true;
-  if (t.riskWarnings.some((r) => (r.source === "cardCaution" ? r.severity === 3 : r.guidanceState === "발송권장"))) return true;
-  return false;
+  if (overdue) return "overdue";
+  if (t.depositStatus && /미|대기|예정/.test(t.depositStatus)) return "deposit";
+  if (t.paymentWarning) return "payment";
+  if (t.riskWarnings.some((r) => (r.source === "cardCaution" ? r.severity === 3 : r.guidanceState === "발송권장"))) return "risk";
+  return null;
+}
+
+export function needsAttention(t: Trade, date: string): boolean {
+  return attentionReason(t, date) !== null;
+}
+
+// 확인필요 총합을 이유별로 분해. 취소 거래는 tradesForTab(attention)과 동일하게 제외 →
+// 분해 합계가 화면 배지 숫자와 정확히 일치한다.
+export function attentionBreakdown(trades: Trade[], date: string): Record<AttentionReason, number> {
+  const acc: Record<AttentionReason, number> = { damage: 0, overdue: 0, deposit: 0, payment: 0, risk: 0 };
+  for (const t of trades) {
+    if (isCancelledTrade(t)) continue;
+    const r = attentionReason(t, date);
+    if (r) acc[r] += 1;
+  }
+  return acc;
 }
 
 export function isCancelledTrade(t: Trade): boolean {
