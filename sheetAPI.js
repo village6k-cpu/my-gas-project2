@@ -1040,6 +1040,7 @@ function runFunction(funcName, params) {
     "autoClearRequests",
     "setupAutoClearTrigger",
     "deleteRequest",
+    "deleteTrade",
     "excludeEquipFromRequest",
     "formatScheduleSheet",
     "inspectScheduleDetailVisualState",

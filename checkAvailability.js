@@ -7677,6 +7677,69 @@ function deleteRequest(reqID) {
   return { reqID: reqID, action: "삭제", deletedRows: targetRows.length };
 }
 
+/**
+ * 거래(예약) 완전 삭제 — 계약마스터 + 스케줄상세 시트 행과 Supabase(trades/schedule_items) 행을
+ * 모두 제거한다. 취소(cancelContract: 취소상태로 남김)와 달리 되돌릴 수 없다. 예시/테스트 데이터 정리용.
+ * 확인요청 행은 건드리지 않는다(그건 deleteRequest 담당).
+ */
+function deleteTrade(tradeId) {
+  var tid = String(tradeId || "").trim();
+  if (!tid) throw new Error("tradeId 필수");
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // 1) 스케줄상세 행 삭제 (B열 = 거래ID) — 아래부터
+  var deletedSched = 0;
+  var schedSheet = ss.getSheetByName("스케줄상세");
+  if (schedSheet && schedSheet.getLastRow() >= 2) {
+    var sd = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 2).getValues();
+    for (var i = sd.length - 1; i >= 0; i--) {
+      if (String(sd[i][1]).trim() === tid) { schedSheet.deleteRow(i + 2); deletedSched++; }
+    }
+  }
+
+  // 2) 계약마스터 행 삭제 (A열 = 거래ID) — 아래부터
+  var deletedContract = 0;
+  var contractSheet = ss.getSheetByName("계약마스터");
+  if (contractSheet && contractSheet.getLastRow() >= 2) {
+    var cd = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 1).getValues();
+    for (var j = cd.length - 1; j >= 0; j--) {
+      if (String(cd[j][0]).trim() === tid) { contractSheet.deleteRow(j + 2); deletedContract++; }
+    }
+  }
+
+  if (deletedSched === 0 && deletedContract === 0) {
+    throw new Error("거래ID를 찾을 수 없음: " + tid);
+  }
+
+  // 3) 개고생2.0 거래내역 행도 있으면 삭제 (취소 로직과 동일 — best-effort)
+  try {
+    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    if (개고생URL) {
+      var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
+      if (거래시트 && 거래시트.getLastRow() >= 2) {
+        var ids = 거래시트.getRange(2, 5, 거래시트.getLastRow() - 1, 1).getValues(); // E열 거래ID
+        for (var k = ids.length - 1; k >= 0; k--) {
+          if (String(ids[k][0]).trim() === tid) 거래시트.deleteRow(k + 2);
+        }
+      }
+    }
+  } catch (kErr) { Logger.log("개고생 거래내역 삭제 실패(계속): " + kErr.message); }
+
+  // 4) 계약서 파일 휴지통 (있으면)
+  var trashed = 0;
+  try { trashed = trashContractFilesForTrade_(tid) || 0; } catch (fErr) {}
+
+  // 5) Supabase 행 삭제 — 앱은 Supabase를 읽으므로 여기서 지워야 화면에서 사라진다.
+  var supa = null;
+  try { supa = supaDeleteTrade_(tid); } catch (sErr) { supa = { ok: false, error: String(sErr && sErr.message || sErr) }; }
+
+  // 6) 캐시 무효화
+  try { invalidateDashboardCacheForTrade_(tid); } catch (c1) {}
+  try { invalidateTimelineCache(); } catch (c2) {}
+
+  return { status: "OK", tradeId: tid, deletedContract: deletedContract, deletedSchedule: deletedSched, trashedFiles: trashed, supabase: supa };
+}
+
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 가용 확인 — 같은 요청ID 일괄 처리

@@ -112,6 +112,17 @@ export async function persistTrade(trade: Trade, options: PersistTradeOptions = 
   if (options.pruneMissingSheetBacked) await pruneMissingSheetBackedItems(sb, trade.tradeId, rows);
 }
 
+// 거래 완전 삭제 — Supabase의 schedule_items(자식) + trades(부모)를 로그인 세션으로 제거.
+// GAS가 계약마스터/스케줄상세 시트행을 지운 뒤 호출(앱은 Supabase를 읽으므로 여기서 지워야 사라짐).
+export async function deleteTradeRemote(tradeId: string): Promise<void> {
+  const sb = supabase;
+  if (!sb) return;
+  const items = await sb.from("schedule_items").delete().eq("trade_id", tradeId);
+  if (items.error) throw items.error;
+  const trade = await sb.from("trades").delete().eq("trade_id", tradeId);
+  if (trade.error) throw trade.error;
+}
+
 export async function deleteScheduleItem(tradeId: string, scheduleId: string): Promise<void> {
   const sb = supabase;
   if (!sb) return;

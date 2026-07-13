@@ -58,6 +58,33 @@ function onEditSupabaseMark(e) {
 }
 
 /**
+ * 거래 완전 삭제용 — Supabase village.schedule_items + village.trades 행을 제거한다.
+ * 시트 삭제(deleteTrade)와 짝. 자식(schedule_items) 먼저, 부모(trades) 나중 삭제.
+ */
+function supaDeleteTrade_(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { ok: false, error: 'tid 없음' };
+  var cfg = SUPA_CFG_();
+  var token = supaToken_(cfg);
+  if (!token) return { ok: false, error: '봇 토큰 없음' };
+  var headers = {
+    apikey: cfg.apikey,
+    Authorization: 'Bearer ' + token,
+    'Content-Profile': 'village',
+    'Accept-Profile': 'village',
+    Prefer: 'return=minimal'
+  };
+  var filt = '?trade_id=eq.' + encodeURIComponent(tid);
+  var rItems = UrlFetchApp.fetch(cfg.url + '/rest/v1/schedule_items' + filt, { method: 'delete', headers: headers, muteHttpExceptions: true });
+  var rTrade = UrlFetchApp.fetch(cfg.url + '/rest/v1/trades' + filt, { method: 'delete', headers: headers, muteHttpExceptions: true });
+  var ci = rItems.getResponseCode(), ct = rTrade.getResponseCode();
+  var ok = ci < 300 && ct < 300;
+  if (!ok) Logger.log('supaDeleteTrade_ 실패 items=' + ci + ' trade=' + ct + ' : ' +
+    rItems.getContentText().slice(0, 150) + ' / ' + rTrade.getContentText().slice(0, 150));
+  return { ok: ok, items: ci, trade: ct };
+}
+
+/**
  * 스크립트 쓰기용 dirty 마킹 — onEdit은 사람 손 편집에만 발화하므로,
  * registerByReqID/추가/삭제/날짜변경처럼 스크립트가 계약·스케줄 시트를 쓰는 경로는
  * 이 함수를 직접 호출해야 1분 트리거(flushDirtyToSupabase)가 Supabase로 밀어준다.

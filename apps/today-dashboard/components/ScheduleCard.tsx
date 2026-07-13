@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 import type { TabKey, Trade } from "@/lib/domain/types";
 import { isCancelledTrade, phaseForDate, setupProgress, timeLabel } from "@/lib/domain/status";
-import { ensureTradePhotos, toggleReturn, toggleSetup } from "@/lib/data/store";
+import { ensureTradePhotos, removeTradeLocally, toggleReturn, toggleSetup } from "@/lib/data/store";
+import { authFetch } from "@/lib/data/authFetch";
+import { deleteTradeRemote } from "@/lib/data/remote";
 import { HandoverChecklist } from "./HandoverChecklist";
 import { RiskPanel } from "./RiskPanel";
 import { PhotoStrip } from "./PhotoStrip";
@@ -47,6 +49,37 @@ export function ScheduleCard({
   const [open, setOpen] = useState(defaultOpen);
   // 고객 카드 시트 — 이름 탭하면 "이 사람 누구지?" (5년 프로필 + 라이브 이력)
   const [customerOpen, setCustomerOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // 거래 완전 삭제 — 예시/테스트 데이터 정리용. 되돌릴 수 없어 거래ID를 그대로 입력해야만 실행.
+  async function handleDeleteTrade() {
+    const typed = window.prompt(
+      `⚠️ 이 거래를 '완전 삭제'하려면 거래ID를 그대로 입력하세요.\n\n대상: ${trade.customerName} (${trade.tradeId})\n계약·스케줄·앱에서 영구 삭제되며 되돌릴 수 없습니다.`,
+      "",
+    );
+    if (typed == null) return;
+    if (typed.trim() !== trade.tradeId) {
+      window.alert("거래ID가 일치하지 않아 삭제를 취소했습니다.");
+      return;
+    }
+    setDeleting(true);
+    try {
+      const res = await authFetch("/api/confirm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "run", func: "deleteTrade", args: { tradeId: trade.tradeId } }),
+      });
+      const json = await res.json().catch(() => ({}));
+      const ok = json.success || json.status === "OK" || json.result?.status === "OK";
+      if (!res.ok || !ok) throw new Error(json.error || json.message || "삭제 실패");
+      // GAS가 시트행을 지운 뒤, 앱이 읽는 Supabase 행도 로그인 세션으로 확실히 제거(재등장 방지)
+      await deleteTradeRemote(trade.tradeId).catch(() => {});
+      removeTradeLocally(trade.tradeId); // 성공 → 카드 즉시 사라짐(언마운트)
+    } catch (e) {
+      window.alert("삭제 실패: " + (e instanceof Error ? e.message : String(e)));
+      setDeleting(false);
+    }
+  }
   const cancelled = isCancelledTrade(trade);
   const phase = displayPhase(trade, date, tab);
   const isCheckout = phase === "checkout";
@@ -163,6 +196,15 @@ export function ScheduleCard({
           <RiskPanel warnings={trade.riskWarnings} phase={phase} equipments={trade.equipments} />
           <PhotoStrip tradeId={trade.tradeId} photos={trade.photos} />
           <PaymentControls trade={trade} />
+          {/* 예시/테스트 거래 완전삭제 — 상세 펼친 뒤에만 노출 + 거래ID 입력 확인(오삭제 방지) */}
+          <button
+            type="button"
+            onClick={handleDeleteTrade}
+            disabled={deleting}
+            className="tap mt-3 w-full rounded-lg border border-attention-ring bg-attention-bg/40 py-2 text-[12px] font-bold text-attention-fg disabled:opacity-50"
+          >
+            {deleting ? "삭제 중…" : "🗑 이 거래 완전삭제 (되돌릴 수 없음)"}
+          </button>
         </div>
       )}
 

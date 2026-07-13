@@ -54,6 +54,11 @@ function subscribe(l: () => void) {
   listeners.add(l);
   return () => listeners.delete(l);
 }
+
+// 거래 완전 삭제 후 즉시 화면에서 제거(낙관적). 서버(GAS+Supabase)에서 이미 지운 뒤 호출.
+export function removeTradeLocally(tradeId: string) {
+  set({ trades: state.trades.filter((t) => t.tradeId !== tradeId) });
+}
 function getSnapshot(): State {
   return state;
 }
