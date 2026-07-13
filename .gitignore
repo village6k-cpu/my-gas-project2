@@ -5,6 +5,7 @@ node_modules/
 .DS_Store
 .gstack/
 .superpowers/
+.playwright-cli/
 tools/kakao-dom-bridge/queue/
 tools/kakao-dom-bridge/.env
 .env

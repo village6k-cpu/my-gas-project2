@@ -8,6 +8,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const routes = [
   'apps/today-dashboard/app/api/lookup/route.ts',
   'apps/today-dashboard/app/api/lookup/confirm/route.ts',
+  'apps/today-dashboard/app/api/lookup/receipts/route.ts',
 ];
 
 function assertCorsContract(file) {

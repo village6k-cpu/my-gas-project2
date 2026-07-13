@@ -4,71 +4,44 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
-const exists = (file) => fs.existsSync(path.join(root, file));
 
 const index = read('toss-front-plugin/village-front/index.html');
 const app = read('toss-front-plugin/village-front/app.js');
-const css = read('toss-front-plugin/village-front/idle.css');
 const buildZip = read('toss-front-plugin/build-zip.sh');
 
 assert(
-  index.includes('./idle.css'),
-  'front plugin index.html must load the custom idle-screen stylesheet'
-);
-assert(
-  index.indexOf('<div id="app"') > -1 &&
-    index.indexOf('<script src="./config.js"></script>') > index.indexOf('<div id="app"') &&
-    index.indexOf('<script src="./app.js"></script>') > index.indexOf('<div id="app"'),
-  'config/app scripts must run after the #app root exists because the custom idle screen writes to it'
-);
-assert(
-  exists('toss-front-plugin/village-front/assets/village-idle-bg.png'),
-  'front plugin must bundle the existing VILLAGE idle background image'
-);
-assert(
-  exists('toss-front-plugin/village-front/assets/village-logo.png'),
-  'front plugin must bundle a visible logo crop from the existing VILLAGE image'
-);
-assert(
-  app.includes('function renderVillageIdle()') &&
-    app.includes('village-phone-button') &&
-    app.includes('village-reservation-button'),
-  'idle screen must be rendered by our custom HTML buttons instead of Toss template text wrapping'
-);
-assert(
-  !app.includes('village-idle__brand'),
-  'idle screen must not render a separate VILLAGE heading because the brand appears in the background image'
-);
-assert(
-  !/renderIdlePage\(/.test(app),
-  'idle screen must not use Toss renderIdlePage because it wraps Korean text badly on the terminal'
-);
-assert(
-  app.includes('예약 조회 · 셀프 결제') &&
-    app.includes('<img class="village-idle__logo" src="./assets/village-logo.png" alt="VILLAGE" />') &&
-    app.includes('전화번호 또는 예약번호로<br />미결제 예약을 확인하고<br />카드로 결제하세요.') &&
-    app.includes('카드로 결제하세요.') &&
-    app.includes('전화번호로 결제') &&
-    app.includes('예약번호로 결제'),
-  'custom idle screen must show the VILLAGE logo and keep the requested three-line copy and payment choices'
-);
-assert(
-  !css.includes('body.village-idle-page > :not(#app):not(script):not(style):not(link)'),
-  'idle screen CSS must not hide every element injected outside #app because Toss settings overlays may live there'
-);
-assert(
-  !app.includes('hideTossDevAddressBadges') &&
-    !app.includes('installTossDevAddressBadgeGuard') &&
-    !app.includes('data-village-hidden-dev-address') &&
-    !app.includes('village-dev-badge-mask') &&
-    !css.includes('.village-dev-badge-mask'),
-  'idle screen must not try to hide the Toss native dev IP badge because those attempts crop the VILLAGE logo'
-);
-assert(
-  buildZip.includes('idle.css') &&
-    buildZip.includes('assets/village-idle-bg.png') &&
-    buildZip.includes('assets/village-logo.png'),
-  'build zip must include the idle stylesheet, background image, and visible logo crop'
+  !index.includes('./idle.css') &&
+    /<div id="app"><\/div>/.test(index),
+  'front plugin must leave #app to the Toss Template API without custom idle HTML or CSS'
 );
 
-console.log('toss-front idle background static checks passed');
+assert(
+  /var showIdle = safe\(function \(\) \{[\s\S]*sdk\.template\.renderSelectPage\(\{/.test(app),
+  'idle screen must be rendered through the official Toss Template API'
+);
+
+[
+  'VILLAGE 셀프 결제',
+  '전화번호로 결제',
+  '금액 직접 결제',
+  '영수증 재출력'
+].forEach((label) => {
+  assert(app.includes(label), `official idle menu must include: ${label}`);
+});
+
+assert(
+  !app.includes('renderVillageIdle') &&
+    !app.includes('village-idle__') &&
+    !app.includes('innerHTML') &&
+    !app.includes('installVillageIdleRecoveryGuard'),
+  'front plugin must not mix custom DOM ownership with the Toss SDK React root'
+);
+
+assert(
+  !buildZip.includes('idle.css') &&
+    !buildZip.includes('village-idle-bg.png') &&
+    !buildZip.includes('village-logo.png'),
+  'upload ZIP must not bundle unused custom-screen CSS or image assets'
+);
+
+console.log('toss-front official idle template static checks passed');

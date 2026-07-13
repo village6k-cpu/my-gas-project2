@@ -6,7 +6,8 @@ const root = path.resolve(__dirname, '..');
 const app = fs.readFileSync(path.join(root, 'toss-front-plugin/village-front/app.js'), 'utf8');
 
 assert(
-  app.includes('village-amount-button') && app.includes('금액 직접 결제'),
+  app.includes("title: '금액 직접 결제'") &&
+    app.includes('onClick: function () { showManualAmountInput(); }'),
   'idle screen must offer a direct amount payment path for walk-in card payments'
 );
 assert(
