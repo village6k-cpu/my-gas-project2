@@ -270,6 +270,18 @@ export function tradesForTab(trades: Trade[], date: string, tab: TabKey): Trade[
     });
   } else if (tab === "attention") {
     list = list.filter((t) => needsAttention(t, date));
+  } else if (tab === "all") {
+    // '전체'는 이 날짜에 실제로 걸치는 거래만 — 오늘 반출/반납 + 오늘 대여 중인 건.
+    // (예전엔 필터가 없어 로드된 -30일~+365일 전체 435건을 다 셌고, 날짜와 무관한 미래
+    //  예약·과거 완료까지 섞여 '전체 435인데 화면엔 몇 개'로 보였다.)
+    const dayStart = new Date(`${date}T00:00:00`).getTime();
+    const dayEnd = new Date(`${date}T23:59:59.999`).getTime();
+    list = list.filter((t) => {
+      const co = new Date(t.checkoutAt).getTime();
+      const ro = new Date(t.returnAt).getTime();
+      if (Number.isNaN(co) || Number.isNaN(ro)) return false;
+      return co <= dayEnd && ro >= dayStart; // 대여기간이 이 날짜와 겹침(반출·반납·진행중 포함)
+    });
   }
   return [...list].sort((a, b) => {
     const ka = tab === "checkin" ? a.returnAt : a.checkoutAt;
