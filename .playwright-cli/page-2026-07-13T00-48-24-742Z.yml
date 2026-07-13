@@ -1,9 +1,0 @@
-- region "VILLAGE 셀프결제" [ref=e2]:
-  - img "VILLAGE" [ref=e3]
-  - paragraph [ref=e4]: 예약 조회 · 셀프 결제
-  - paragraph [ref=e5]: 전화번호로최근 미결제 예약을 확인하고카드로 결제하세요.
-  - generic [ref=e6]:
-    - button "전화번호로 결제" [ref=e7] [cursor=pointer]
-    - button "금액 직접 결제" [ref=e8] [cursor=pointer]
-    - button "영수증 재출력" [ref=e9] [cursor=pointer]
-  - button "설정" [ref=e10] [cursor=pointer]

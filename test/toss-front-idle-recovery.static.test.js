@@ -7,37 +7,20 @@ const app = fs.readFileSync(path.join(root, 'toss-front-plugin/village-front/app
 
 assert(
   app.includes('function returnToIdle()') &&
-    app.includes('function restoreVillageIdleIfEmpty()') &&
-    app.includes('function installVillageIdleRecoveryGuard()'),
-  'front plugin must have a deferred idle return path and a blank-idle recovery guard'
+    app.includes('setTimeout(function () { showIdle(); }, 0)'),
+  'front plugin must defer idle rendering until the current template callback finishes'
 );
 
 assert(
-  app.includes('setTimeout(function () { showIdle(); }, 0)') &&
-    app.includes('setTimeout(restoreVillageIdleIfEmpty, 120)') &&
-    app.includes('setTimeout(restoreVillageIdleIfEmpty, 500)'),
-  'returnToIdle must render after Toss template cleanup and re-check shortly after'
+  !app.includes('restoreVillageIdleIfEmpty') &&
+    !app.includes('installVillageIdleRecoveryGuard') &&
+    !app.includes('setInterval(restoreVillageIdleIfEmpty'),
+  'official Template idle must not use custom DOM repair timers'
 );
 
 assert(
-  app.includes("document.body.classList.contains('village-idle-page')") &&
-    app.includes("!document.getElementById('village-phone-button')") &&
-    app.includes('renderVillageIdle();') &&
-    app.includes('setInterval(restoreVillageIdleIfEmpty, 750)'),
-  'idle recovery guard must redraw the idle screen if only the background shell remains'
-);
-
-assert(
-  app.includes("window.addEventListener('pageshow', restoreVillageIdleIfEmpty)") &&
-    app.includes("window.addEventListener('popstate'") &&
-    app.includes("document.addEventListener('visibilitychange'"),
-  'idle recovery guard must handle browser/app back and foreground transitions'
-);
-
-assert(
-  !/onBack:\s*function\s*\(\)\s*\{\s*showIdle\(\);\s*\}/.test(app) &&
-    /onBack:\s*function\s*\(\)\s*\{\s*returnToIdle\(\);\s*\}/.test(app),
-  'Toss template back callbacks must use deferred returnToIdle instead of immediate showIdle'
+  /onBack:\s*function\s*\(\)\s*\{\s*returnToIdle\(\);\s*\}/.test(app),
+  'Toss template back callbacks must use deferred returnToIdle'
 );
 
 console.log('toss-front idle recovery static checks passed');

@@ -7,25 +7,20 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const exists = (file) => fs.existsSync(path.join(root, file));
 
 const app = read('toss-front-plugin/village-front/app.js');
-const css = read('toss-front-plugin/village-front/idle.css');
 const buildZip = read('toss-front-plugin/build-zip.sh');
 
 assert(
-  app.includes('function installTossSettingsHotzone') &&
-    app.includes('function openTossFrontSettings') &&
+  app.includes('function openTossFrontSettings') &&
     app.includes('sdk.app.openSetting') &&
-    app.includes('village-settings-hotzone') &&
-    app.includes('settingsTapCount') &&
-    /settingsTapCount\s*>=\s*5/.test(app),
-  'idle screen must provide an invisible five-tap settings hotzone that calls sdk.app.openSetting()'
+    /navbarButton:\s*\{\s*label:\s*'설정',[\s\S]*openTossFrontSettings/.test(app),
+  'official idle menu must expose Toss settings through its navbar button'
 );
 
 assert(
-  css.includes('.village-settings-hotzone') &&
-    css.includes('position: fixed') &&
-    css.includes('right: 0') &&
-    css.includes('opacity: 0'),
-  'settings hotzone must sit invisibly in the top-right corner of the idle screen'
+  !app.includes('installTossSettingsHotzone') &&
+    !app.includes('village-settings-hotzone') &&
+    !app.includes('settingsTapCount'),
+  'front plugin must not depend on a custom invisible settings hotzone'
 );
 
 assert(

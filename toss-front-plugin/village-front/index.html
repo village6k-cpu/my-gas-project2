@@ -7,19 +7,12 @@
     <link rel="stylesheet" href="https://static.toss.im/tds/43.9.4/css/tds.min.css" />
     <link rel="stylesheet" type="text/css" href="https://static.toss.im/tps/main.css" />
     <link rel="stylesheet" type="text/css" href="https://static.toss.im/tps/others.css" />
-    <link rel="stylesheet" type="text/css" href="./idle.css" />
     <!-- 토스 프론트 SDK → window.TossFrontSDK -->
     <script src="https://cdn.tossplace.com/toss-front-sdk/v0/index.js"></script>
     <title>VILLAGE 셀프결제</title>
   </head>
   <body>
-    <!-- 진단용 안내문: 플러그인이 정상 로드되면 Template UI가 이 자리를 덮어씀.
-         이 글자가 계속 보이면 = SDK는 떴는데 화면 렌더 단계 문제.
-         완전 깜깜 = index.html 자체를 못 읽음(ZIP 구조). -->
-    <div id="app">
-      <h2>VILLAGE 셀프결제</h2>
-      <p>불러오는 중…<br />이 글자가 계속 보이면 화면을 캡처해 알려주세요.</p>
-    </div>
+    <div id="app"></div>
     <!-- 설정(서버주소·토큰) → window.CONFIG -->
     <script src="./config.js"></script>
     <!-- 결제 흐름 -->

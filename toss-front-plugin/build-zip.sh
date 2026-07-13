@@ -12,6 +12,6 @@ fi
 
 rm -f village-front.zip
 # village-front/ 의 '내용물'을 ZIP 최상위에 담는다 (폴더로 감싸지 않음)
-( cd village-front && zip -r ../village-front.zip index.html settings.html idle.css app.js config.js assets/village-idle-bg.png assets/village-logo.png -x '*.DS_Store' >/dev/null )
+( cd village-front && zip -r ../village-front.zip index.html settings.html app.js config.js -x '*.DS_Store' >/dev/null )
 echo "✓ village-front.zip 생성 (index.html = ZIP 최상위)"
 unzip -l village-front.zip
