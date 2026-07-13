@@ -353,6 +353,23 @@ export function ConfirmView() {
     [doAction, load],
   );
 
+  // 확인요청 삭제 — 확인요청 시트의 해당 reqID 행만 지운다(등록된 예약 자체는 건드리지 않음).
+  const deleteReq = useCallback(
+    async (reqID: string) => {
+      setReqBusy(reqID, true);
+      setError("");
+      try {
+        await runFunc("deleteRequest", { reqID });
+        await load();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setReqBusy(reqID, false);
+      }
+    },
+    [runFunc, load, setReqBusy],
+  );
+
   const handleKakaoRequestCreated = useCallback(async () => {
     await load();
     setShowKakaoInput(false);
@@ -368,12 +385,13 @@ export function ConfirmView() {
           queueIndex={queuedRegisterIDs.indexOf(req.reqID)}
           onAct={act}
           onRegisterSelected={registerSelected}
+          onDelete={deleteReq}
           onEdit={() => setEdit(req)}
           onItemSaved={load}
           runFunc={runFunc}
         />
       )),
-    [items, busyReqIDs, queuedRegisterIDs, act, registerSelected, load, runFunc],
+    [items, busyReqIDs, queuedRegisterIDs, act, registerSelected, deleteReq, load, runFunc],
   );
 
   return (
@@ -445,13 +463,14 @@ export function ConfirmView() {
 }
 
 function ConfirmCard({
-  req, busy, queueIndex, onAct, onRegisterSelected, onEdit, onItemSaved, runFunc,
+  req, busy, queueIndex, onAct, onRegisterSelected, onDelete, onEdit, onItemSaved, runFunc,
 }: {
   req: Req;
   busy: boolean;
   queueIndex: number;
   onAct: (action: string, reqID: string) => void;
   onRegisterSelected: (req: Req, excludedItems: ExcludedConfirmItem[]) => void;
+  onDelete: (reqID: string) => void;
   onEdit: () => void;
   onItemSaved: () => void | Promise<void>;
   runFunc: (func: string, args: Record<string, unknown>) => Promise<boolean>;
@@ -533,8 +552,26 @@ function ConfirmCard({
               {req.연락처 ? ` · ${req.연락처}` : ""}
             </div>
           </div>
-          {actionable && !busy && !isQueued && (
-            <button onClick={onEdit} className="tap shrink-0 rounded-lg bg-paper ring-1 ring-line/60 px-2.5 py-1.5 text-[12px] font-bold text-ink-soft">✎ 수정</button>
+          {!busy && !isQueued && (
+            <div className="flex shrink-0 items-center gap-1.5">
+              {actionable && (
+                <button onClick={onEdit} className="tap rounded-lg bg-paper ring-1 ring-line/60 px-2.5 py-1.5 text-[12px] font-bold text-ink-soft">✎ 수정</button>
+              )}
+              <button
+                onClick={() => {
+                  if (
+                    confirm(
+                      `'${req.예약자명 || "이 요청"}' 확인요청(${req.reqID})을 삭제할까요?\n\n확인요청 목록에서만 지웁니다. 이미 등록된 예약(계약·스케줄)은 그대로 남습니다.\n되돌릴 수 없어요.`,
+                    )
+                  )
+                    onDelete(req.reqID);
+                }}
+                className="tap rounded-lg bg-paper ring-1 ring-line/60 px-2.5 py-1.5 text-[12px] font-bold text-attention-fg"
+                aria-label="확인요청 삭제"
+              >
+                🗑 삭제
+              </button>
+            </div>
           )}
         </div>
 

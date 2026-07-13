@@ -1,0 +1,10 @@
+- generic [ref=e195]:
+  - generic [ref=e196]:
+    - img "error" [ref=e197]
+    - generic [ref=e202]:
+      - generic [ref=e203]: 최근 직접결제 영수증이 없어요
+      - generic [ref=e205]: 이 프론트에서 새로 결제한 금액 직접 결제건만 표시됩니다.
+  - generic [ref=e207]: 7초 뒤에 닫혀요
+  - generic [ref=e209]:
+    - button "영수증 메뉴" [ref=e210] [cursor=pointer]
+    - button "처음으로" [ref=e214] [cursor=pointer]

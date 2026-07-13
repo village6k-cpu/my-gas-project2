@@ -1,0 +1,53 @@
+- generic [ref=e204]:
+  - navigation [ref=e205]:
+    - button "뒤로가기" [ref=e207] [cursor=pointer]
+  - generic [ref=e214]:
+    - heading [level=2] [ref=e215]:
+      - img "영수증 재출력" [ref=e218]:
+        - generic [ref=e221]:
+          - generic [ref=e222]:
+            - generic [ref=e223]: 영
+            - generic [ref=e224]: 수
+            - generic [ref=e225]: 증
+          - generic [ref=e226]:
+            - generic [ref=e227]: 재
+            - generic [ref=e228]: 출
+            - generic [ref=e229]: 력
+    - heading [level=1] [ref=e230]:
+      - img "예약 결제와 직접 결제를 구분해서 찾습니다" [ref=e233]:
+        - generic [ref=e235]:
+          - generic [ref=e236]:
+            - generic [ref=e237]: 예
+            - generic [ref=e238]: 약
+          - generic [ref=e239]:
+            - generic [ref=e240]: 결
+            - generic [ref=e241]: 제
+            - generic [ref=e242]: 와
+          - generic [ref=e243]:
+            - generic [ref=e244]: 직
+            - generic [ref=e245]: 접
+          - generic [ref=e246]:
+            - generic [ref=e247]: 결
+            - generic [ref=e248]: 제
+            - generic [ref=e249]: 를
+          - generic [ref=e250]:
+            - generic [ref=e251]: 구
+            - generic [ref=e252]: 분
+            - generic [ref=e253]: 해
+            - generic [ref=e254]: 서
+          - generic [ref=e255]:
+            - generic [ref=e256]: 찾
+            - generic [ref=e257]: 습
+            - generic [ref=e258]: 니
+            - generic [ref=e259]: 다
+  - generic [ref=e261]:
+    - button "예약 영수증 조회 전화번호 또는 예약번호로 찾기 예약 결제완료 건과 과거 거래영수증" [ref=e262] [cursor=pointer]:
+      - generic [ref=e264]:
+        - generic [ref=e265]: 예약 영수증 조회
+        - generic [ref=e266]: 전화번호 또는 예약번호로 찾기
+        - generic [ref=e267]: 예약 결제완료 건과 과거 거래영수증
+    - button "최근 직접결제 이 프론트에서 결제한 금액 직접 결제 결제일 기준으로 찾기" [ref=e268] [cursor=pointer]:
+      - generic [ref=e270]:
+        - generic [ref=e271]: 최근 직접결제
+        - generic [ref=e272]: 이 프론트에서 결제한 금액 직접 결제
+        - generic [ref=e273]: 결제일 기준으로 찾기
