@@ -13,7 +13,8 @@ where namespace.nspname = 'village'
     'inventory_audit_snapshot_items',
     'inventory_audit_snapshot_rental_exceptions',
     'inventory_audit_observations',
-    'inventory_audit_decisions'
+    'inventory_audit_decisions',
+    'inventory_audit_mirror_attempts'
   )
 order by relation.relname;
 
@@ -33,7 +34,8 @@ where (schemaname = 'village' and tablename in (
   'inventory_audit_snapshot_items',
   'inventory_audit_snapshot_rental_exceptions',
   'inventory_audit_observations',
-  'inventory_audit_decisions'
+  'inventory_audit_decisions',
+  'inventory_audit_mirror_attempts'
 ))
 or (schemaname = 'storage' and tablename = 'objects' and policyname like 'inventory_audit_evidence_%')
 order by schemaname, tablename, policyname;
@@ -70,6 +72,9 @@ where namespace.nspname = 'village'
     'abort_inventory_audit_evidence',
     'finalize_inventory_audit_evidence_abort',
     'request_inventory_audit_recount',
-    'approve_inventory_audit'
+    'approve_inventory_audit',
+    'claim_inventory_audit_mirror',
+    'complete_inventory_audit_mirror',
+    'fail_inventory_audit_mirror'
   )
 order by procedure.proname;
