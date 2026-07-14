@@ -67,6 +67,7 @@ where namespace.nspname = 'village'
     'cancel_inventory_audit',
     'reserve_inventory_audit_evidence',
     'complete_inventory_audit_evidence',
+    'abort_inventory_audit_evidence',
     'request_inventory_audit_recount',
     'approve_inventory_audit'
   )

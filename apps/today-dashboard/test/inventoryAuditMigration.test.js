@@ -27,6 +27,17 @@ function readAuditMigration() {
   return fs.readFileSync(path.join(migrationsDir, matches[0]), "utf8");
 }
 
+function readFunctionDefinition(sql, functionName) {
+  const startMarker = `create function village.${functionName}(`;
+  const endMarker = `revoke execute on function village.${functionName}(`;
+  const start = sql.toLowerCase().indexOf(startMarker.toLowerCase());
+  const end = sql.toLowerCase().indexOf(endMarker.toLowerCase(), start);
+
+  assert.notEqual(start, -1, `${functionName} definition must exist`);
+  assert.notEqual(end, -1, `${functionName} ACL boundary must exist`);
+  return sql.slice(start, end);
+}
+
 test("migration creates the complete inventory-audit data contract", () => {
   const sql = readAuditMigration();
 
@@ -128,6 +139,8 @@ test("evidence storage is private and has no browser mutation policy", () => {
     sql,
     /create policy inventory_audit_evidence_(?:select|insert|update|delete)/i,
   );
+  assert.match(sql, /allowed_mime_types = array\['image\/jpeg'\]::text\[\]/i);
+  assert.doesNotMatch(sql, /image\/(?:png|webp)/i);
 });
 
 test("a security-definer global draft helper gates every authenticated ledger write", () => {
@@ -334,6 +347,11 @@ test("submit and cancel serialize transitions and are service-role only", () => 
     sql,
     /cancel_inventory_audit[\s\S]*status = 'cancelled'[\s\S]*'reused', true/i,
   );
+  const cancelDefinition = readFunctionDefinition(sql, "cancel_inventory_audit");
+  assert.match(
+    cancelDefinition,
+    /jsonb_array_elements\(observation\.evidence_refs\)[\s\S]*status[\s\S]*pending[\s\S]*cannot cancel with pending evidence/i,
+  );
 });
 
 test("evidence reservation RPCs are idempotent and submission-visible", () => {
@@ -342,6 +360,7 @@ test("evidence reservation RPCs are idempotent and submission-visible", () => {
   for (const fn of [
     "reserve_inventory_audit_evidence",
     "complete_inventory_audit_evidence",
+    "abort_inventory_audit_evidence",
   ]) {
     assert.match(
       sql,
@@ -373,6 +392,32 @@ test("evidence reservation RPCs are idempotent and submission-visible", () => {
     /complete_inventory_audit_evidence[\s\S]*'status', 'uploaded'/i,
   );
   assert.match(sql, /jsonb_array_elements\(v_observation\.evidence_refs\)/i);
+
+  const abortDefinition = readFunctionDefinition(
+    sql,
+    "abort_inventory_audit_evidence",
+  );
+  assert.match(
+    abortDefinition,
+    /from village\.inventory_audit_sessions[\s\S]*for update[\s\S]*from village\.inventory_audit_observations[\s\S]*for update/i,
+  );
+  assert.match(
+    abortDefinition,
+    /if not found then[\s\S]*'aborted', true[\s\S]*'reused', true/i,
+  );
+  assert.match(
+    abortDefinition,
+    /status' = 'uploaded'[\s\S]*uploaded evidence cannot be aborted/i,
+  );
+  assert.match(
+    abortDefinition,
+    /status' <> 'pending'[\s\S]*reservation status is invalid/i,
+  );
+  assert.match(
+    abortDefinition,
+    /jsonb_agg[\s\S]*evidence\.ref ->> 'id' <> p_evidence_id::text/i,
+  );
+  assert.doesNotMatch(abortDefinition, /client_updated_at\s*=/i);
 });
 
 test("approval refuses unresolved or invalid rental exceptions", () => {
@@ -491,6 +536,7 @@ test("security verification SQL is read-only and reports every protected surface
     "cancel_inventory_audit",
     "reserve_inventory_audit_evidence",
     "complete_inventory_audit_evidence",
+    "abort_inventory_audit_evidence",
   ]) {
     assert.match(sql, new RegExp(fn, "i"));
   }
