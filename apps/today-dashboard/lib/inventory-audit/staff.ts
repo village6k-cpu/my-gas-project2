@@ -379,10 +379,10 @@ export type StartDraftDecision =
 
 export function evaluateStartDraft(
   globalDraft: { id?: unknown; started_by?: unknown } | null,
-  userId: string,
+  _userId: string,
 ): StartDraftDecision {
   if (!globalDraft) return { kind: "start" };
-  if (globalDraft.started_by === userId && isUuid(globalDraft.id)) {
+  if (isUuid(globalDraft.id)) {
     return { kind: "reuse", sessionId: globalDraft.id };
   }
   return { kind: "conflict" };
@@ -512,12 +512,12 @@ export function buildStaffWorkspace(input: BuildStaffWorkspaceInput) {
   );
   const latestRow = callerSessions[0] ?? null;
   const draftRow = callerSessions.find((row) => row.status === "draft") ?? null;
-  const latestCallerSession = latestRow
-    ? serializedSessions.get(String(latestRow.id)) ?? null
-    : null;
   const activeDraft = draftRow
     ? serializedSessions.get(String(draftRow.id)) ?? null
     : null;
+  const latestCallerSession = activeDraft ?? (latestRow
+    ? serializedSessions.get(String(latestRow.id)) ?? null
+    : null);
   const observations = input.observationRows.map(serializeStaffObservation);
   const confirmedByEquipment = new Map<
     string,
@@ -547,7 +547,7 @@ export function buildStaffWorkspace(input: BuildStaffWorkspaceInput) {
     isOwner: input.isOwner,
     globalDraft: {
       active: input.globalDraft !== null,
-      ownedByCaller: input.globalDraft?.started_by === input.userId,
+      ownedByCaller: input.globalDraft !== null,
     },
     activeDraft,
     latestCallerSession,

@@ -70,6 +70,8 @@ test("server staff helper is server-only, paginates reads, batches trade items, 
   assert.match(source, /p_rental_snapshot/);
   assert.match(source, /p_rental_exceptions/);
   assert.match(source, /latestCallerSession/);
+  assert.doesNotMatch(source, /\.eq\("observed_by",\s*userId\)/);
+  assert.match(source, /globalDraft\?\.status === "draft"/);
 });
 
 test("staff routes contain no direct ledger mutation or hidden snapshot response field", () => {

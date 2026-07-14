@@ -100,7 +100,7 @@ test("start accepts only an explicit movement freeze acknowledgement", () => {
   );
 });
 
-test("start preflight reuses the caller draft and conflicts on another employee draft", () => {
+test("start preflight reuses the shared shop draft across employee handoffs", () => {
   assert.deepEqual(evaluateStartDraft(null, ACTOR.id), { kind: "start" });
   assert.deepEqual(
     evaluateStartDraft({ id: SESSION_ID, started_by: ACTOR.id }, ACTOR.id),
@@ -111,7 +111,7 @@ test("start preflight reuses the caller draft and conflicts on another employee 
       { id: SESSION_ID, started_by: "44444444-4444-4444-8444-444444444444" },
       ACTOR.id,
     ),
-    { kind: "conflict" },
+    { kind: "reuse", sessionId: SESSION_ID },
   );
   assert.equal(statusForStartResult({ reused: false }), 201);
   assert.equal(statusForStartResult({ reused: true }), 200);
@@ -491,6 +491,35 @@ test("workspace marks condition buckets and missing components as issues", () =>
   assert.deepEqual(workspace.globalDraft, { active: true, ownedByCaller: true });
   assert.equal(workspace.activeDraft.id, SESSION_ID);
   assert.equal(workspace.catalog[0].progress, "issue");
+});
+
+test("an active shop draft is continuable by a different authenticated employee", () => {
+  const starterId = "44444444-4444-4444-8444-444444444444";
+  const sharedDraft = {
+    id: SESSION_ID,
+    mode: "full_shop",
+    status: "draft",
+    cutoff_at: CLIENT_TIME,
+    started_at: CLIENT_TIME,
+    submitted_at: null,
+    movement_frozen: true,
+    parent_session_id: null,
+    created_at: CLIENT_TIME,
+    updated_at: CLIENT_TIME,
+    started_by: starterId,
+  };
+  const workspace = buildStaffWorkspace({
+    userId: ACTOR.id,
+    isOwner: false,
+    globalDraft: sharedDraft,
+    callerSessions: [sharedDraft],
+    catalogRows: [],
+    observationRows: [],
+    ownerQueueRows: [],
+  });
+
+  assert.deepEqual(workspace.globalDraft, { active: true, ownedByCaller: true });
+  assert.equal(workspace.activeDraft.id, SESSION_ID);
 });
 
 test("database and configuration errors map to stable HTTP distinctions without raw messages", () => {

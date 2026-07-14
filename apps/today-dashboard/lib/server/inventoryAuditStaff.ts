@@ -58,7 +58,7 @@ export async function loadGlobalInventoryAuditDraft(
 ): Promise<Record<string, unknown> | null> {
   const { data, error } = await client
     .from("inventory_audit_sessions")
-    .select("id,started_by")
+    .select(SESSION_SELECT)
     .eq("mode", "full_shop")
     .eq("status", "draft")
     .order("created_at", { ascending: false })
@@ -115,14 +115,12 @@ async function loadCatalog(
 async function loadObservations(
   client: InventoryAuditServiceClient,
   sessionId: string,
-  userId: string,
 ): Promise<Record<string, unknown>[]> {
   return fetchAllPages<Record<string, unknown>>((from, to) =>
     client
       .from("inventory_audit_observations")
       .select(OBSERVATION_SELECT)
       .eq("session_id", sessionId)
-      .eq("observed_by", userId)
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
       .range(from, to),
@@ -140,21 +138,23 @@ export async function loadStaffWorkspace(
     isOwner ? loadOwnerQueue(client) : Promise.resolve([]),
   ]);
   const activeSessionId =
-    latestCallerSessionRow?.status === "draft" &&
-    typeof latestCallerSessionRow.id === "string"
-      ? latestCallerSessionRow.id
+    globalDraft?.status === "draft" &&
+    typeof globalDraft.id === "string"
+      ? globalDraft.id
       : null;
   const [catalogRows, observationRows] = activeSessionId
     ? await Promise.all([
         loadCatalog(client, activeSessionId),
-        loadObservations(client, activeSessionId, userId),
+        loadObservations(client, activeSessionId),
       ])
     : [[], []];
   const workspace = buildStaffWorkspace({
     userId,
     isOwner,
     globalDraft,
-    callerSessions: latestCallerSessionRow ? [latestCallerSessionRow] : [],
+    callerSessions: [globalDraft, latestCallerSessionRow]
+      .filter((row): row is Record<string, unknown> => row !== null)
+      .filter((row, index, rows) => rows.findIndex((candidate) => candidate.id === row.id) === index),
     catalogRows,
     observationRows,
     ownerQueueRows,
@@ -244,14 +244,13 @@ export async function loadCurrentStaffObservation(
   client: InventoryAuditServiceClient,
   sessionId: string,
   observationId: string,
-  userId: string,
+  _userId: string,
 ) {
   const { data, error } = await client
     .from("inventory_audit_observations")
     .select(OBSERVATION_SELECT)
     .eq("session_id", sessionId)
     .eq("id", observationId)
-    .eq("observed_by", userId)
     .maybeSingle();
   if (error) throw error;
   return data
