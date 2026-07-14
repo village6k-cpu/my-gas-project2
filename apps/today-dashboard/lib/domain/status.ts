@@ -220,6 +220,10 @@ export interface ReturnCompletionBlocker {
  * 정상/파손/분실 중 어느 상태든 합계가 실제 반출 수량과 정확히 같아야 한다.
  */
 export function returnCompletionBlockers(t: Trade): ReturnCompletionBlocker[] {
+  // taken_qty 도입 전 완료된 레거시 거래에는 불변 반출 기준선이 없다. 예약 qty를
+  // 사후 기준선처럼 소급 적용하면 과거 완료 카드 수백 건이 확인필요로 부활한다.
+  // 기준선이 한 행이라도 시작된 거래(김동민 사고 건 및 향후 반출)만 새 차단을 적용한다.
+  if (!checkableItems(t, "checkin").some((e) => Number(e.takenQty ?? 0) > 0)) return [];
   return aggregateReturns(t)
     .map((a) => {
       const accounted = a.count.good + a.count.damaged + a.count.lost;
