@@ -166,7 +166,7 @@ test("service-only RPCs make start, recount, and approval atomic", () => {
   assert.match(sql, /update village\.equipment_ledger/i);
   assert.match(sql, /insert into village\.equipment_events/i);
   assert.match(sql, /status = 'approved'/i);
-  assert.match(sql, /multiple apply_audit decisions target equipment/i);
+  assert.match(sql, /multiple inventory audit decisions target equipment/i);
   assert.match(sql, /unresolved recount decision cannot create child session/i);
   assert.match(sql, /v_verify_status text/i);
   assert.match(
@@ -174,6 +174,90 @@ test("service-only RPCs make start, recount, and approval atomic", () => {
     /jsonb_array_length[\s\S]*open_issues[\s\S]*stock_maint[\s\S]*state[\s\S]*<> '정상'[\s\S]*then 'attention'/i,
   );
   assert.match(sql, /verify_status = v_verify_status/i);
+});
+
+test("approval compares the exact ledger version captured by the reviewer", () => {
+  const sql = readAuditMigration();
+
+  assert.match(sql, /reviewed_ledger_updated_at timestamptz/i);
+  assert.match(sql, /inventory_audit_decision_reviewed_ledger_version_check/i);
+  assert.match(
+    sql,
+    /v_decision\.reviewed_ledger_updated_at\s+is distinct from\s+v_ledger\.updated_at/i,
+  );
+  assert.doesNotMatch(
+    sql,
+    /v_decision\.reviewed_at\s*<\s*v_ledger\.updated_at/i,
+  );
+});
+
+test("approval requires one canonical decision for each existing equipment target", () => {
+  const sql = readAuditMigration();
+
+  assert.match(sql, /multiple inventory audit decisions target equipment/i);
+  assert.match(
+    sql,
+    /coalesce\(decision_row\.equipment_id, decision_row\.resolved_equipment_id\)/i,
+  );
+  assert.doesNotMatch(sql, /multiple apply_audit decisions target equipment/i);
+});
+
+test("verification metadata comes from an actual relevant observation", () => {
+  const sql = readAuditMigration();
+
+  assert.match(sql, /v_observed_at timestamptz/i);
+  assert.match(sql, /v_observed_by_email text/i);
+  assert.match(sql, /observation\.client_updated_at/i);
+  assert.match(
+    sql,
+    /last_verified_at = case[\s\S]*v_decision\.decision = 'apply_audit'[\s\S]*v_observed_at is not null[\s\S]*then v_observed_at[\s\S]*else last_verified_at/i,
+  );
+  assert.match(
+    sql,
+    /last_verified_by = case[\s\S]*then v_observed_by_email[\s\S]*else last_verified_by/i,
+  );
+  assert.doesNotMatch(sql, /last_verified_at = v_approved_at/i);
+});
+
+test("effective status derives from final ledger state even without an observation", () => {
+  const sql = readAuditMigration();
+
+  assert.match(sql, /verify_status = v_verify_status/i);
+  assert.doesNotMatch(
+    sql,
+    /verify_status = case[\s\S]*v_observed_at is not null[\s\S]*then v_verify_status/i,
+  );
+});
+
+test("new equipment verification metadata comes from its source observation", () => {
+  const sql = readAuditMigration();
+  const createEquipmentLoop = sql.match(
+    /for v_decision in\s+select decision_row\.\*[\s\S]*?resolution = 'create_equipment'[\s\S]*?v_created_count := v_created_count \+ 1;/i,
+  )?.[0];
+
+  assert.ok(createEquipmentLoop, "create_equipment approval loop must exist");
+  assert.match(
+    createEquipmentLoop,
+    /select observation\.client_updated_at, observation\.observed_by_email/i,
+  );
+  assert.match(
+    createEquipmentLoop,
+    /v_verify_status,\s*v_observed_at,\s*v_observed_by_email,\s*v_decision\.final_open_issues/i,
+  );
+  assert.doesNotMatch(
+    createEquipmentLoop,
+    /v_verify_status,\s*v_approved_at,\s*btrim\(p_approved_by_email\)/i,
+  );
+});
+
+test("evidence object leaf is a UUID jpg filename", () => {
+  const sql = readAuditMigration();
+
+  assert.match(sql, /storage\.filename\(name\)/i);
+  assert.match(
+    sql,
+    /storage\.filename\(name\)[\s\S]*\[0-9a-f\][\s\S]*\\\.jpg\$/i,
+  );
 });
 
 test("security verification SQL is read-only and reports every protected surface", () => {

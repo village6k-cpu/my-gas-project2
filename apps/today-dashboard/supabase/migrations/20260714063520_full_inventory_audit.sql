@@ -160,6 +160,7 @@ create table village.inventory_audit_decisions (
   reviewed_by uuid not null,
   reviewed_by_email text not null,
   reviewed_at timestamptz not null default now(),
+  reviewed_ledger_updated_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint inventory_audit_decision_kind_check
@@ -185,6 +186,11 @@ create table village.inventory_audit_decisions (
     check (new_equipment_payload is null or jsonb_typeof(new_equipment_payload) = 'object'),
   constraint inventory_audit_decision_reviewer_email_check
     check (nullif(btrim(reviewed_by_email), '') is not null),
+  constraint inventory_audit_decision_reviewed_ledger_version_check
+    check (
+      (equipment_id is null and resolution is distinct from 'existing_equipment')
+      or reviewed_ledger_updated_at is not null
+    ),
   constraint inventory_audit_decision_resolution_shape
     check (
       (resolution is null and resolved_equipment_id is null and new_equipment_payload is null)
@@ -346,6 +352,7 @@ create policy inventory_audit_evidence_insert
   with check (
     bucket_id = 'inventory-audit-evidence'
     and cardinality(storage.foldername(name)) = 2
+    and storage.filename(name) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jpg$'
     and exists (
       select 1
       from village.inventory_audit_sessions as audit_session
@@ -770,6 +777,8 @@ declare
   v_after jsonb;
   v_target_id text;
   v_verify_status text;
+  v_observed_at timestamptz;
+  v_observed_by_email text;
   v_approved_at timestamptz;
   v_updated_count integer := 0;
   v_created_count integer := 0;
@@ -822,11 +831,20 @@ begin
   if exists (
     select 1
     from village.inventory_audit_snapshot_items as snapshot
-    left join village.inventory_audit_decisions as decision_row
-      on decision_row.session_id = snapshot.session_id
-      and decision_row.equipment_id = snapshot.equipment_id
     where snapshot.session_id = p_session_id
-      and decision_row.id is null
+      and not exists (
+        select 1
+        from village.inventory_audit_decisions as decision_row
+        where decision_row.session_id = snapshot.session_id
+          and (
+            decision_row.equipment_id = snapshot.equipment_id
+            or (
+              decision_row.source_observation_id is not null
+              and decision_row.resolution = 'existing_equipment'
+              and decision_row.resolved_equipment_id = snapshot.equipment_id
+            )
+          )
+      )
   ) then
     raise exception 'missing audit decision for one or more snapshot items' using errcode = 'P0001';
   end if;
@@ -898,20 +916,19 @@ begin
   if exists (
     select effective_target.equipment_id
     from (
-      select case
-        when decision_row.equipment_id is not null then decision_row.equipment_id
-        when decision_row.resolution = 'existing_equipment' then decision_row.resolved_equipment_id
-        else null
-      end as equipment_id
+      select coalesce(decision_row.equipment_id, decision_row.resolved_equipment_id) as equipment_id
       from village.inventory_audit_decisions as decision_row
       where decision_row.session_id = p_session_id
-        and decision_row.decision = 'apply_audit'
+        and (
+          decision_row.equipment_id is not null
+          or decision_row.resolution = 'existing_equipment'
+        )
     ) as effective_target
     where effective_target.equipment_id is not null
     group by effective_target.equipment_id
     having count(*) > 1
   ) then
-    raise exception 'multiple apply_audit decisions target equipment'
+    raise exception 'multiple inventory audit decisions target equipment'
       using errcode = 'P0001';
   end if;
 
@@ -933,23 +950,15 @@ begin
           decision_row.source_observation_id is not null
           and decision_row.resolution = 'existing_equipment'
           and decision_row.resolved_equipment_id = v_snapshot.equipment_id
-          and decision_row.decision = 'apply_audit'
         )
-      )
-    order by case
-      when decision_row.source_observation_id is not null
-        and decision_row.decision = 'apply_audit' then 0
-      else 1
-    end
-    limit 1;
+      );
 
     select *
     into strict v_ledger
     from village.equipment_ledger
     where equipment_id = v_snapshot.equipment_id;
 
-    if v_ledger.updated_at is distinct from v_snapshot.ledger_updated_at
-       and v_decision.reviewed_at < v_ledger.updated_at then
+    if v_decision.reviewed_ledger_updated_at is distinct from v_ledger.updated_at then
       raise exception 'ledger version conflict for equipment %', v_snapshot.equipment_id
         using errcode = '40001';
     end if;
@@ -971,6 +980,25 @@ begin
       'open_issues', v_ledger.open_issues,
       'updated_at', v_ledger.updated_at
     );
+
+    v_observed_at := null;
+    v_observed_by_email := null;
+
+    if v_decision.decision = 'apply_audit' then
+      select observation.client_updated_at, observation.observed_by_email
+      into v_observed_at, v_observed_by_email
+      from village.inventory_audit_observations as observation
+      where observation.session_id = p_session_id
+        and (
+          observation.id = v_decision.source_observation_id
+          or (
+            v_decision.source_observation_id is null
+            and observation.equipment_id = v_snapshot.equipment_id
+          )
+        )
+      order by observation.client_updated_at desc, observation.id desc
+      limit 1;
+    end if;
 
     v_verify_status := case
       when jsonb_array_length(
@@ -1009,8 +1037,16 @@ begin
           else open_issues
         end,
         verify_status = v_verify_status,
-        last_verified_at = v_approved_at,
-        last_verified_by = btrim(p_approved_by_email)
+        last_verified_at = case
+          when v_decision.decision = 'apply_audit' and v_observed_at is not null
+            then v_observed_at
+          else last_verified_at
+        end,
+        last_verified_by = case
+          when v_decision.decision = 'apply_audit' and v_observed_at is not null
+            then v_observed_by_email
+          else last_verified_by
+        end
     where equipment_id = v_snapshot.equipment_id
     returning * into v_ledger;
 
@@ -1083,6 +1119,12 @@ begin
       else 'verified'
     end;
 
+    select observation.client_updated_at, observation.observed_by_email
+    into strict v_observed_at, v_observed_by_email
+    from village.inventory_audit_observations as observation
+    where observation.id = v_decision.source_observation_id
+      and observation.session_id = p_session_id;
+
     if exists (
       select 1 from village.equipment_ledger where equipment_id = v_target_id
     ) then
@@ -1121,8 +1163,8 @@ begin
       coalesce(v_decision.final_state, nullif(btrim(v_decision.new_equipment_payload ->> 'state'), ''), '정상'),
       nullif(btrim(v_decision.new_equipment_payload ->> 'note'), ''),
       v_verify_status,
-      v_approved_at,
-      btrim(p_approved_by_email),
+      v_observed_at,
+      v_observed_by_email,
       v_decision.final_open_issues,
       'inventory-audit:' || p_session_id::text
     );
