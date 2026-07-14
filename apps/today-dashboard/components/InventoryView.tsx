@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase/client";
 import { ViewHeader } from "@/components/ViewHeader";
 import { Check, ChevronRight, History, Pencil, Refresh, Search } from "@/components/icons";
 import { EquipmentBlackbox } from "@/components/EquipmentBlackbox";
+import { InventoryAuditMvp } from "@/components/inventory-audit/InventoryAuditMvp";
 import { normalizeStockName } from "@/lib/data/equipmentStock";
 import nameLinkQueueJson from "@/lib/data/nameLinkQueue.json";
 
@@ -176,6 +177,7 @@ function todayPicks(rows: LedgerRow[], limit = 10): LedgerRow[] {
 export function InventoryView() {
   const [rows, setRows] = useState<LedgerRow[]>([]);
   const [phase, setPhase] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [auditLocked, setAuditLocked] = useState(true);
   const [filter, setFilter] = useState<FilterKey>("all");
   const [q, setQ] = useState("");
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -738,7 +740,7 @@ export function InventoryView() {
           </button>
         </ViewHeader>
 
-        {phase === "ready" && (
+        {phase === "ready" && !auditLocked && (
           <div className="space-y-2 px-4 pb-2.5 pt-1">
             {/* 상태 칩 = 필터 */}
             <div className="flex flex-wrap items-center gap-1.5">
@@ -787,6 +789,8 @@ export function InventoryView() {
       </header>
 
       <main className="flex-1 space-y-3.5 p-3 pb-24">
+        <InventoryAuditMvp onLockChange={setAuditLocked} />
+
         {phase === "loading" && <div className="py-16 text-center text-[14px] text-ink-faint">불러오는 중…</div>}
 
         {phase === "unavailable" && (
@@ -798,7 +802,13 @@ export function InventoryView() {
           </div>
         )}
 
-        {phase === "ready" && (
+        {phase === "ready" && auditLocked && (
+          <div className="rounded-xl bg-warn-bg px-3.5 py-3 text-[12.5px] font-semibold text-warn-fg ring-1 ring-warn-ring">
+            전체 실사 중에는 기존 재고 수량 수정 기능이 잠깁니다. 위 버튼으로 실사를 이어서 진행해 주세요.
+          </div>
+        )}
+
+        {phase === "ready" && !auditLocked && (
           <>
             {/* 장비 추가 패널 */}
             {addOpen && (
