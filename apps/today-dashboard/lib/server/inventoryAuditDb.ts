@@ -1,3 +1,5 @@
+import "server-only";
+
 import { createClient } from "@supabase/supabase-js";
 
 export class InventoryAuditServiceUnavailableError extends Error {

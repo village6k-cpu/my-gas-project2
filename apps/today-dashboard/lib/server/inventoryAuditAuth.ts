@@ -4,6 +4,9 @@ import type { NextRequest } from "next/server";
 import { getAuthedUser } from "./authCache";
 
 type UserWithEmail = Pick<User, "email">;
+export type InventoryUserResolver = (
+  req: NextRequest,
+) => Promise<User | null>;
 
 export function parseInventoryOwnerEmails(
   raw: string | undefined,
@@ -27,13 +30,15 @@ export function isInventoryOwner(
 
 export async function requireInventoryUser(
   req: NextRequest,
+  resolveUser: InventoryUserResolver = getAuthedUser,
 ): Promise<User | null> {
-  return getAuthedUser(req);
+  return resolveUser(req);
 }
 
 export async function requireInventoryOwner(
   req: NextRequest,
+  resolveUser: InventoryUserResolver = getAuthedUser,
 ): Promise<User | null> {
-  const user = await requireInventoryUser(req);
+  const user = await requireInventoryUser(req, resolveUser);
   return isInventoryOwner(user) ? user : null;
 }

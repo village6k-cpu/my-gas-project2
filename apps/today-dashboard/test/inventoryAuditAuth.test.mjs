@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import test from "node:test";
 
@@ -29,6 +30,13 @@ clearInventoryAuthEnv();
 // TypeScript runner needs the extension supplied by this test-only resolver.
 const moduleHooks = registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier === "server-only") {
+      return {
+        format: "module",
+        shortCircuit: true,
+        url: "data:text/javascript,export {};",
+      };
+    }
     if (specifier === "./authCache") {
       const result = nextResolve("./authCache.ts", context);
       return { ...result, format: "module-typescript" };
@@ -41,6 +49,7 @@ const moduleHooks = registerHooks({
 });
 
 const auth = await import("../lib/server/inventoryAuditAuth.ts");
+const authCache = await import("../lib/server/authCache.ts");
 const db = await import("../lib/server/inventoryAuditDb.ts");
 
 test.after(() => {
@@ -78,6 +87,42 @@ test("owner matching uses only the normalized verified user email", () => {
   assert.equal(auth.isInventoryOwner(null, configured), false);
 });
 
+test("configured inventory guard trusts the verified user, not a spoofed request email", async (t) => {
+  process.env.INVENTORY_OWNER_EMAILS = "owner@example.com";
+  t.after(() => delete process.env.INVENTORY_OWNER_EMAILS);
+
+  const verifiedOwner = {
+    id: "00000000-0000-4000-8000-000000000001",
+    email: "OWNER@example.com",
+  };
+  const verifiedStaff = {
+    id: "00000000-0000-4000-8000-000000000002",
+    email: "staff@example.com",
+  };
+  const ownerRequest = {
+    headers: new Headers({ "x-user-email": "staff@example.com" }),
+  };
+  const spoofedOwnerRequest = {
+    headers: new Headers({ "x-user-email": "owner@example.com" }),
+  };
+
+  assert.equal(
+    await auth.requireInventoryUser(ownerRequest, async () => verifiedOwner),
+    verifiedOwner,
+  );
+  assert.equal(
+    await auth.requireInventoryOwner(ownerRequest, async () => verifiedOwner),
+    verifiedOwner,
+  );
+  assert.equal(
+    await auth.requireInventoryOwner(
+      spoofedOwnerRequest,
+      async () => verifiedStaff,
+    ),
+    null,
+  );
+});
+
 test("inventory guards fail closed while legacy boolean auth remains fail-open without Supabase config", async () => {
   const req = {
     headers: new Headers({
@@ -85,8 +130,6 @@ test("inventory guards fail closed while legacy boolean auth remains fail-open w
       "x-user-email": "owner@example.com",
     }),
   };
-  const authCache = await import("../lib/server/authCache.ts");
-
   assert.equal(await authCache.getAuthedUser(req), null);
   assert.equal(await authCache.isAuthedRequest(req), true);
   assert.equal(await auth.requireInventoryUser(req), null);
@@ -120,20 +163,69 @@ test("verified user lookup returns and caches the Supabase user while boolean au
     delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   });
 
-  const configuredAuth = await import(
-    `../lib/server/authCache.ts?configured=${Date.now()}`
-  );
   const req = {
     headers: new Headers({ authorization: "Bearer verified-token" }),
   };
 
-  const first = await configuredAuth.getAuthedUser(req);
-  const second = await configuredAuth.getAuthedUser(req);
+  const first = await authCache.getAuthedUser(req);
+  const second = await authCache.getAuthedUser(req);
 
   assert.equal(first?.email, "Owner@Example.com");
   assert.equal(second?.id, first?.id);
-  assert.equal(await configuredAuth.isAuthedRequest(req), true);
+  assert.equal(await authCache.isAuthedRequest(req), true);
   assert.equal(fetchCount, 1);
+});
+
+test("verified user cache stays capped at 300 entries and evicts the oldest token", async (t) => {
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://capacity.example.supabase.co";
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "capacity-test-anon-key";
+
+  const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return new Response(
+      JSON.stringify({
+        id: "00000000-0000-4000-8000-000000000099",
+        aud: "authenticated",
+        role: "authenticated",
+        email: "staff@example.com",
+        created_at: "2026-07-14T00:00:00.000Z",
+        app_metadata: {},
+        user_metadata: {},
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  });
+
+  const requestFor = (token) => ({
+    headers: new Headers({ authorization: `Bearer ${token}` }),
+  });
+
+  for (let index = 0; index <= 300; index += 1) {
+    await authCache.getAuthedUser(requestFor(`token-${index}`));
+  }
+  assert.equal(fetchCount, 301);
+
+  await authCache.getAuthedUser(requestFor("token-0"));
+  assert.equal(fetchCount, 302);
+
+  await authCache.getAuthedUser(requestFor("token-300"));
+  assert.equal(fetchCount, 302);
+});
+
+test("inventory audit database module is explicitly server-only", () => {
+  const source = readFileSync(
+    new URL("../lib/server/inventoryAuditDb.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /^import "server-only";/m);
 });
 
 test("inventory audit database refuses anon fallback and reports missing server secrets as 503", () => {
