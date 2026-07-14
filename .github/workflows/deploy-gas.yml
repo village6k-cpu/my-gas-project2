@@ -62,6 +62,10 @@ jobs:
           npm i -g @google/clasp@${{ env.CLASP_VERSION }}
           printf '%s' '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
 
+      - name: 대시보드 테스트 의존성 설치
+        if: steps.secrets.outputs.configured == 'true'
+        run: npm ci --prefix apps/today-dashboard --ignore-scripts
+
       - name: 정적 테스트
         if: steps.secrets.outputs.configured == 'true'
         run: |
