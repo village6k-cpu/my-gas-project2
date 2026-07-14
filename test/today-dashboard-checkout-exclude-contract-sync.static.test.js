@@ -10,7 +10,7 @@ const sheetApi = read('sheetAPI.js');
 const backend = read('checkAvailability.js');
 const paymentControls = read('apps/today-dashboard/components/PaymentControls.tsx');
 
-const setItemCheckout = store.match(/export function setItemCheckout\([\s\S]*?\n}\nexport function setItemName/);
+const setItemCheckout = store.match(/export function setItemCheckout\([\s\S]*?\n}\nexport async function setItemName/);
 assert.ok(setItemCheckout, 'setItemCheckout must exist before setItemName');
 assert.match(
   setItemCheckout[0],

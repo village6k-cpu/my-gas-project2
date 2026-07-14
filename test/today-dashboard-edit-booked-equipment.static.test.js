@@ -55,20 +55,21 @@ assert(
 );
 
 assert(
-  /export function setItemName\(tradeId: string, scheduleId: string, name: string\)/.test(store),
-  'store must expose setItemName for registered equipment edits'
+  /export async function setItemName\(tradeId: string, scheduleId: string, name: string\)/.test(store),
+  'store must expose fail-closed async setItemName for registered equipment edits'
 );
 assert(
-  /setItemName[\s\S]*mapItem\(t, scheduleId, \(e\) => \(\{[\s\S]*name: clean[\s\S]*setName:[\s\S]*category: categoryOf\(clean\)/.test(store),
-  'setItemName must optimistically update name, matching standalone setName, and category'
+  /setItemName[\s\S]*await gasMutation\("updateEquipName"[\s\S]*name: nextName[\s\S]*setName:[\s\S]*category: categoryOf\(nextName\)/.test(store),
+  'setItemName must apply the canonical GAS name, matching standalone setName, and category after write success'
 );
 assert(
-  /gasWrite\("updateEquipName", \{ tid: tradeId, scheduleId, equipName: clean \}\)/.test(store),
-  'setItemName must write through to GAS so sheet-master data does not revert'
+  /await gasMutation\("updateEquipName", \{ tid: tradeId, scheduleId, equipName: clean \}\)/.test(store),
+  'setItemName must await GAS so sheet-master failure cannot leave a Supabase-only rename'
 );
 assert(
-  /setItemQty[\s\S]*qty: safeQty[\s\S]*takenQty: e\.takenQty != null \? Math\.min\(e\.takenQty, safeQty\) : undefined[\s\S]*gasMutation\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: safeQty \}\)/.test(store),
-  'setItemQty must update registered qty and write through updateEquipQty (gasMutation so set-component scaling is applied back)'
+  /setItemQty[\s\S]*await gasMutation\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: safeQty \}\)[\s\S]*const nextQty = byId\.get\(e\.scheduleId\)![\s\S]*takenQty: e\.takenQty/.test(store) &&
+    !/takenQty: e\.takenQty != null \? Math\.min/.test(store),
+  'setItemQty must await updateEquipQty, apply authoritative set-component scaling, and never rewrite the checkout baseline'
 );
 
 assert(

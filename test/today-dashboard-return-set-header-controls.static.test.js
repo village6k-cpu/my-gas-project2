@@ -8,8 +8,8 @@ const checklist = fs.readFileSync(path.join(root, 'apps/today-dashboard/componen
 // 세트 판정 헬퍼는 status.ts 단일 소스에서 import (반출/반납 동일 규칙)
 assert(
   /import \{[^}]*singleControllableSetItem[^}]*\} from "@\/lib\/domain\/status"/.test(checklist) &&
-    /import \{[^}]*isRealDeviceHeader[^}]*\} from "@\/lib\/domain\/status"/.test(checklist),
-  'return checklist must import shared set helpers (singleControllableSetItem, isRealDeviceHeader) from status'
+    /import \{[^}]*realDeviceHeaders[^}]*\} from "@\/lib\/domain\/status"/.test(checklist),
+  'return checklist must import shared set helpers (singleControllableSetItem, realDeviceHeaders) from status'
 );
 assert(
   checklist.includes('function SetSingleList'),
@@ -25,8 +25,8 @@ assert(
 );
 // 구성품 있는 세트의 실제 메인 장비(대표행)는 headerRow로 회수 체크 가능하게 노출
 assert(
-  /<SetBox[\s\S]*?headerRow=\{isRealDeviceHeader\(g\.header, g\.rows\)[\s\S]*?<ReturnRow[\s\S]*?e=\{g\.header!\}[\s\S]*?setBadge setTone/.test(checklist),
-  'real-device set headers must render as an interactive return row via SetBox headerRow'
+  /<SetBox[\s\S]*?headerRow=\{realDeviceHeaders\(g\)\.map\(\(header\)[\s\S]*?<ReturnRow[\s\S]*?e=\{header\}[\s\S]*?setBadge setTone/.test(checklist),
+  'all real-device set headers must render as interactive return rows via SetBox headerRow'
 );
 assert(
   /function ReturnRow\([\s\S]*?setBadge = false[\s\S]*?setTone = false/.test(checklist),
@@ -37,24 +37,12 @@ assert(
   'set badge must render before the return checkbox button'
 );
 assert(
-  checklist.includes('EquipmentNameCombobox') &&
-    checklist.includes('장비명') &&
-    checklist.includes('onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)}'),
-  'expanded return details must allow editing the registered equipment name with a catalog dropdown'
-);
-assert(
-  /function EquipmentNameCombobox\([\s\S]*?useEquipmentCatalog\(\)[\s\S]*?const matches = searchEquipmentCatalog\(catalog\.items, q\)/.test(checklist),
-  'return equipment name editor must search the sheet-master catalog while typing'
-);
-assert(
-  /function FloatingCatalogMenu[\s\S]*?createPortal[\s\S]*?document\.body/.test(checklist),
-  'return equipment dropdown must use a body portal so set/card containers cannot clip it'
-);
-assert(
-  checklist.includes('예약 수량') &&
-    checklist.includes('Stepper value={e.qty}') &&
-    checklist.includes('onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)}'),
-  'expanded return details must edit the registered reservation quantity'
+  checklist.includes('반출 기준') &&
+    checklist.includes('e.name} · {expected}개') &&
+    checklist.includes('반출 후 장비명·예약 수량 수정 불가') &&
+    !checklist.includes('EquipmentNameCombobox') &&
+    !checklist.includes('setItemQty(t.tradeId'),
+  'return details must display the immutable checkout identity and must not edit its equipment name or booked quantity'
 );
 assert(
   checklist.includes('setItemMemo(t.tradeId, e.scheduleId, "checkin", v)'),

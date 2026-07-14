@@ -11,19 +11,24 @@ const logic = read('checkAvailability.js');
 const api = read('sheetAPI.js');
 const gasProxy = read('apps/today-dashboard/app/api/gas/route.ts');
 
-// ── 프론트: 유상 현장추가만 스케줄상세(시트)에 기록되도록 onsiteAddon 호출 ──
+// ── 프론트: 모든 실데이터 현장추가를 스케줄상세(시트)에 기록해 반출 기준선에서 빠지지 않게 함 ──
 assert(
   /export async function addOnsiteItems\(/.test(store),
-  'addOnsiteItems must stay async so paid on-site additions can be written to the sheet'
+  'addOnsiteItems must stay async so every live on-site addition can be written to the sheet'
 );
 assert(
   /gasMutation\("onsiteAddon"/.test(store),
-  'paid on-site additions must call the GAS onsiteAddon action to append rows to 스케줄상세'
+  'live on-site additions must call the GAS onsiteAddon action to append rows to 스케줄상세'
 );
+const onsiteStart = store.indexOf('export async function addOnsiteItems');
+const onsiteEnd = store.indexOf('\nexport function setOnsiteSettlement', onsiteStart);
+const onsiteFn = store.slice(onsiteStart, onsiteEnd);
 assert(
-  /settlement !== "유상"\s*\|\|\s*!writeBackEnabled/.test(store) &&
-    /settlement !== "유상"\s*\|\|\s*!writeBackEnabled[\s\S]{0,180}addOnsiteItemsLocal\(tradeId,\s*entries,\s*settlement\);[\s\S]{0,80}return;/.test(store),
-  'free or unsettled on-site additions must stay card-only/Supabase-only and must not call GAS onsiteAddon'
+  !/settlement !== "유상"/.test(onsiteFn) &&
+    /if \(!isSupabase\)[\s\S]{0,180}addOnsiteItemsLocal/.test(onsiteFn) &&
+    /if \(!writeBackEnabled\)[\s\S]{0,180}throw new Error/.test(onsiteFn) &&
+    /if \(res\?\.skipped\)[\s\S]{0,180}throw new Error/.test(onsiteFn),
+  'free/unsettled live additions must also use GAS-first persistence and fail closed when write-back is unavailable'
 );
 assert(
   /const WRITE_ACTIONS = new Set\(\[[\s\S]*"onsiteAddon"[\s\S]*\]\)/.test(gasProxy),
@@ -39,7 +44,7 @@ assert(
 );
 assert(
   /gasMutation\("onsiteAddon",\s*\{[\s\S]*directRegenerate:\s*true/.test(store),
-  'paid on-site additions must request immediate contract regeneration so the app amount and contract link do not stay stale'
+  'on-site additions must request immediate contract regeneration so the app amount and contract link do not stay stale'
 );
 assert(
   /export async function addOnsiteItems\([\s\S]*const mutationResult = unwrapContractMutation\(res\)[\s\S]*amount: amount \?\? t\.amount[\s\S]*contractUrl: url \|\| t\.contractUrl \|\| null[\s\S]*contractRegenPending: !!mutationResult\.contractRegenPending && !url/.test(store),
@@ -52,10 +57,6 @@ assert(
 assert(
   /out\.addedItems/.test(store) && /a\.scheduleId/.test(store),
   'addOnsiteItems must reconcile the real sheet scheduleId returned by the backend (no leftover ONS- ids)'
-);
-assert(
-  /settlement !== "유상"\s*\|\|\s*!writeBackEnabled[\s\S]{0,180}addOnsiteItemsLocal/.test(store),
-  'addOnsiteItems must fall back to local-only add when write-back is disabled or the addition is not paid'
 );
 assert(
   store.includes('throw new Error') && /가용|반영되지 않/.test(store),
@@ -87,6 +88,11 @@ assert(
 assert(
   /dashboardRecordOnsiteAddon\(tid, entries, options\)[\s\S]*dashboardAddEquipments\(tid, entries, \{[\s\S]*rawNames: options\.rawNames[\s\S]*directRegenerate: options\.directRegenerate \|\| options\.regenerateNow/.test(logic),
   'dashboardRecordOnsiteAddon must pass rawNames and directRegenerate through to dashboardAddEquipments'
+);
+assert(
+  /function dashboardRecordOnsiteAddon[\s\S]{0,1000}forceZeroPrice:\s*!isPaid/.test(logic) &&
+    /price:\s*forceZeroPrice \? 0 :/.test(logic),
+  'free/unsettled on-site additions must still enter the physical schedule but carry zero price'
 );
 assert(
   /rawNames: params\.rawNames \|\| postBody\.rawNames/.test(api),

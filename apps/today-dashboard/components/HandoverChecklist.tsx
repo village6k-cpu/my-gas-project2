@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
-import { groupBySet, handoverSummary, isRealDeviceHeader, singleControllableSetItem } from "@/lib/domain/status";
+import { groupBySet, handoverSummary, realDeviceHeaders, singleControllableSetItem } from "@/lib/domain/status";
 import { categoryOf, coarseGroup } from "@/lib/domain/catalog";
 import { searchEquipmentCatalog, useEquipmentCatalog, type EquipmentCatalogItem } from "@/lib/data/equipmentCatalog";
 import { SetBox, LooseList } from "./SetBox";
@@ -69,11 +69,9 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                   <SetBox
                     key={g.key}
                     name={g.setName}
-                    headerRow={
-                      isRealDeviceHeader(g.header, g.rows) ? (
-                        <CheckoutRow key={g.header!.scheduleId} t={trade} e={g.header!} open={!!expanded[g.header!.scheduleId]} onToggle={() => toggle(g.header!.scheduleId)} setBadge setTone />
-                      ) : undefined
-                    }
+                    headerRow={realDeviceHeaders(g).map((header) => (
+                      <CheckoutRow key={header.scheduleId} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} setBadge setTone />
+                    ))}
                   >
                     {g.rows.map((e) => (
                       <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
@@ -110,14 +108,12 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                         key={g.key}
                         name={g.setName}
                         onRemove={() => {
-                          if (g.header) removeItem(trade.tradeId, g.header.scheduleId);
+                          g.headers.forEach((header) => removeItem(trade.tradeId, header.scheduleId));
                           g.rows.forEach((r) => removeItem(trade.tradeId, r.scheduleId));
                         }}
-                        headerRow={
-                          isRealDeviceHeader(g.header, g.rows) ? (
-                            <CheckoutRow key={g.header!.scheduleId} t={trade} e={g.header!} open={!!expanded[g.header!.scheduleId]} onToggle={() => toggle(g.header!.scheduleId)} setBadge setTone />
-                          ) : undefined
-                        }
+                        headerRow={realDeviceHeaders(g).map((header) => (
+                          <CheckoutRow key={header.scheduleId} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} setBadge setTone />
+                        ))}
                       >
                         {g.rows.map((e) => (
                           <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />

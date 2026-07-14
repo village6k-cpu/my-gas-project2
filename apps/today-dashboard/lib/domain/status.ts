@@ -87,7 +87,8 @@ export function aggregateReturns(t: Trade): AggReturn[] {
 export interface SetGroup {
   key: string;
   setName?: string; // 있으면 세트 박스, 없으면 단품 묶음
-  header?: EquipmentItem; // 세트 대표행
+  header?: EquipmentItem; // 첫 세트 대표행(호환용)
+  headers: EquipmentItem[]; // 같은 세트명으로 독립 반출된 대표행을 모두 보존
   rows: EquipmentItem[]; // 구성품/단품
 }
 
@@ -112,18 +113,23 @@ export function groupBySet(items: EquipmentItem[]): SetGroup[] {
     const inferredSetName = e.setName ?? setNameByKey.get(setKeyOf(e.name));
     if (inferredSetName) {
       const inferredSetHeader = !!e.isSetHeader || (!e.setName && sameSetKey(e.name, inferredSetName));
-      let g = bySet.get(inferredSetName);
+      const groupKey = setKeyOf(inferredSetName);
+      let g = bySet.get(groupKey);
       if (!g) {
-        g = { key: "set:" + inferredSetName, setName: inferredSetName, rows: [] };
-        bySet.set(inferredSetName, g);
+        g = { key: "set:" + inferredSetName, setName: inferredSetName, headers: [], rows: [] };
+        bySet.set(groupKey, g);
         groups.push(g);
       }
-      if (inferredSetHeader) g.header = { ...e, setName: inferredSetName, isSetHeader: true };
+      if (inferredSetHeader) {
+        const header = { ...e, setName: inferredSetName, isSetHeader: true };
+        g.headers.push(header);
+        if (!g.header) g.header = header;
+      }
       else g.rows.push(e);
     } else {
       const last = groups[groups.length - 1];
       if (last && !last.setName) last.rows.push(e); // 연속 단품 합침
-      else groups.push({ key: "loose:" + e.scheduleId, rows: [e] });
+      else groups.push({ key: "loose:" + e.scheduleId, headers: [], rows: [e] });
     }
   }
   return groups;
@@ -133,8 +139,8 @@ export function groupBySet(items: EquipmentItem[]): SetGroup[] {
  *  구성품이 없거나(대표행만), 구성품 1개가 세트명과 동일하면 그 행 하나만 컨트롤로 노출. */
 export function singleControllableSetItem(g: SetGroup): EquipmentItem | null {
   if (!g.setName) return null;
-  if (g.rows.length === 0) return g.header ?? null;
-  if (g.rows.length === 1 && sameSetKey(g.rows[0].name, g.setName)) return g.rows[0];
+  if (g.rows.length === 0) return g.headers.length === 1 ? g.headers[0] : null;
+  if (g.rows.length === 1 && sameSetKey(g.rows[0].name, g.setName) && realDeviceHeaders(g).length === 0) return g.rows[0];
   return null;
 }
 
@@ -158,6 +164,13 @@ export function isRealDeviceHeader(header: EquipmentItem | undefined, rows: Equi
   return true;
 }
 
+/** 같은 세트명 아래 중복 대표행을 덮어쓰지 않고, 실제 장비인 대표행을 모두 반환한다. */
+export function realDeviceHeaders(g: SetGroup): EquipmentItem[] {
+  if (!g.setName) return [];
+  if (g.rows.length === 0) return g.headers;
+  return g.headers.filter((header) => isRealDeviceHeader(header, g.rows));
+}
+
 /** 한 묶음 리스트를 체크리스트가 렌더하는 '체크 가능한 행' 순서대로 평탄화 (렌더링과 동일 규칙) */
 function flatGroupCheckable(list: EquipmentItem[]): EquipmentItem[] {
   const out: EquipmentItem[] = [];
@@ -168,7 +181,7 @@ function flatGroupCheckable(list: EquipmentItem[]): EquipmentItem[] {
         out.push(single);
         continue;
       }
-      if (isRealDeviceHeader(g.header, g.rows)) out.push(g.header!);
+      out.push(...realDeviceHeaders(g));
       out.push(...g.rows);
     } else {
       out.push(...g.rows);
@@ -190,7 +203,36 @@ export function missingOf(a: AggReturn): number {
   return Math.max(0, a.expected - a.count.good - a.count.damaged - a.count.lost);
 }
 export function isReturnDone(a: AggReturn): boolean {
-  return a.count.good + a.count.damaged + a.count.lost >= a.expected;
+  return a.count.good + a.count.damaged + a.count.lost === a.expected;
+}
+
+export interface ReturnCompletionBlocker {
+  scheduleId: string;
+  name: string;
+  expected: number;
+  accounted: number;
+  missing: number;
+  over: number;
+}
+
+/**
+ * 거래 전체를 반납완료로 닫기 전에 반드시 해소해야 하는 수량 불일치.
+ * 정상/파손/분실 중 어느 상태든 합계가 실제 반출 수량과 정확히 같아야 한다.
+ */
+export function returnCompletionBlockers(t: Trade): ReturnCompletionBlocker[] {
+  return aggregateReturns(t)
+    .map((a) => {
+      const accounted = a.count.good + a.count.damaged + a.count.lost;
+      return {
+        scheduleId: a.scheduleId,
+        name: a.name,
+        expected: a.expected,
+        accounted,
+        missing: Math.max(0, a.expected - accounted),
+        over: Math.max(0, accounted - a.expected),
+      };
+    })
+    .filter((a) => a.accounted !== a.expected);
 }
 
 export function returnBadge(t: Trade): string | null {
@@ -203,9 +245,10 @@ export function returnBadge(t: Trade): string | null {
 
 // 확인필요로 잡히는 '주된 이유' — 배지 분해용. 한 거래가 여러 조건에 걸려도
 // 아래 우선순위로 딱 하나만 대표 이유로 센다(그래서 분해 합계 = 확인필요 총합).
-export type AttentionReason = "damage" | "overdue" | "deposit" | "payment" | "risk";
+export type AttentionReason = "return_mismatch" | "damage" | "overdue" | "deposit" | "payment" | "risk";
 
 export const ATTENTION_REASON_LABEL: Record<AttentionReason, string> = {
+  return_mismatch: "반납수량",
   damage: "파손/분실",
   overdue: "미마감",
   deposit: "보증금",
@@ -215,6 +258,8 @@ export const ATTENTION_REASON_LABEL: Record<AttentionReason, string> = {
 
 export function attentionReason(t: Trade, date: string): AttentionReason | null {
   const aggs = aggregateReturns(t);
+  // 이미 닫힌 과거 데이터라도 수량이 맞지 않으면 완료로 숨기지 않고 즉시 다시 드러낸다.
+  if (t.returnDone && returnCompletionBlockers(t).length > 0) return "return_mismatch";
   if (aggs.some((a) => a.count.damaged > 0 || a.count.lost > 0)) return "damage";
   const overdue = new Date(t.returnAt) < new Date(`${date}T00:00:00`) && !t.returnDone;
   if (overdue) return "overdue";
@@ -242,7 +287,7 @@ export function needsAttention(t: Trade, date: string): boolean {
 // 확인필요 총합을 이유별로 분해. 취소 거래는 tradesForTab(attention)과 동일하게 제외 →
 // 분해 합계가 화면 배지 숫자와 정확히 일치한다.
 export function attentionBreakdown(trades: Trade[], date: string): Record<AttentionReason, number> {
-  const acc: Record<AttentionReason, number> = { damage: 0, overdue: 0, deposit: 0, payment: 0, risk: 0 };
+  const acc: Record<AttentionReason, number> = { return_mismatch: 0, damage: 0, overdue: 0, deposit: 0, payment: 0, risk: 0 };
   for (const t of trades) {
     if (isCancelledTrade(t)) continue;
     const r = attentionReason(t, date);
@@ -354,12 +399,12 @@ export function cardDone(t: Trade, date: string, tab: TabKey): boolean {
   // 실제 보이는 카드가 어긋난다(보증금·파손처럼 반납 후에도 남는 확인필요를 놓침). 다 펼친다.
   if (tab === "attention") return false;
   if (tab === "checkout") return t.setupDone;
-  if (tab === "checkin") return t.returnDone;
+  if (tab === "checkin") return t.returnDone && returnCompletionBlockers(t).length === 0;
   const p = phaseForDate(t, date);
   if (p === "checkout") return t.setupDone;
-  if (p === "checkin") return t.returnDone;
-  if (p === "both") return t.setupDone && t.returnDone;
-  return t.returnDone;
+  if (p === "checkin") return t.returnDone && returnCompletionBlockers(t).length === 0;
+  if (p === "both") return t.setupDone && t.returnDone && returnCompletionBlockers(t).length === 0;
+  return t.returnDone && returnCompletionBlockers(t).length === 0;
 }
 
 export function tabCounts(trades: Trade[], date: string): Record<TabKey, number> {

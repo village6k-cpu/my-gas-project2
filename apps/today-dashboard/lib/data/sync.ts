@@ -201,6 +201,17 @@ function hasDashboardCardCautionChange(base: Trade, it: any): boolean {
   return dashboardCardCautionSignature(base.riskWarnings ?? []) !== dashboardCardCautionSignature(mergeDashboardCardCautions(base, it));
 }
 
+function sameReturnEvidenceIdentity(previous: EquipmentItem, current: EquipmentItem): boolean {
+  const text = (value?: string | null) => String(value ?? "").trim();
+  return (
+    text(previous.name) === text(current.name) &&
+    text(previous.setName) === text(current.setName) &&
+    !!previous.isSetHeader === !!current.isSetHeader &&
+    !!previous.isComponent === !!current.isComponent &&
+    (previous.takenQty ?? previous.qty) === (current.takenQty ?? current.qty)
+  );
+}
+
 /** action=dashboard 항목을 기존 거래(날짜 유지) 위에 상세 덮어쓰기.
  *  isSetHeader는 raw 헤더여부(isHeader)로 저장 → 라벨/노출 판정은 읽기(normalizeItems) 단일소스. */
 function mergeDashboard(base: Trade, it: any): Trade {
@@ -223,6 +234,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
       checkoutState:
         e.checkedCheckout ? "taken"
         : prev?.onsite && prev?.checkoutState === "taken" ? "taken"
+        : (base.setupDone || base.returnDone) && prev?.checkoutState === "taken" ? "taken"
         : "pending",
       takenQty: prev?.takenQty,
       // 메모는 적은 시점(반출/반납)별로 보존 — 교차 복사하면 출처 구분이 사라진다
@@ -242,15 +254,15 @@ function mergeDashboard(base: Trade, it: any): Trade {
   const equipments = incoming.length ? [...incoming, ...appOnly] : base.equipments;
 
   const returnCounts: Record<string, ReturnCount> = {};
-  for (const e of it.equipments ?? []) {
-    if (e.isHeader) continue;
-    if (e.checkedCheckin) {
-      returnCounts[e.scheduleId] = { good: Number(e.qty) || 1, damaged: 0, lost: 0 }; // scheduleId 단위
-    }
-  }
-  // 앱이 기록한 파손/분실 카운트는 시트 체크박스보다 정보가 많음 — 보존
+  // 앱이 기록한 상세 수량(정상/파손/분실/명시적 0)은 GAS의 이진 체크박스로
+  // 되읽을 수 없으므로 같은 행 정체성일 때 보존한다. 이름/세트/수량/역할이 바뀐
+  // 행의 과거 수량은 새 품목의 반납 증거가 아니므로 반드시 버려 재검수시킨다.
+  const currentById = new Map(equipments.map((e) => [e.scheduleId, e]));
   for (const [sid, rc] of Object.entries(base.returnCounts ?? {})) {
-    if ((rc.damaged ?? 0) > 0 || (rc.lost ?? 0) > 0) returnCounts[sid] = rc;
+    const previous = baseById.get(sid);
+    const current = currentById.get(sid);
+    if (!previous || !current || !sameReturnEvidenceIdentity(previous, current)) continue;
+    returnCounts[sid] = rc;
   }
 
   // GAS paymentWarning은 "거래내역 조회 실패" 에러 문자열 — 실패 시 결제 필드 merge 금지 (기본값 wipe 방지)

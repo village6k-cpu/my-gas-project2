@@ -18,6 +18,7 @@ import type {
 import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
+import { returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
 import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
 import { gasMutation, gasRead, gasWrite, writeBackDisabledReason, writeBackEnabled } from "./writeback";
 import {
@@ -73,7 +74,10 @@ let subscribed = false;
 let refetchTimer: ReturnType<typeof setTimeout> | null = null;
 const persistTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 const persistGenerations: Record<string, number> = {};
+const persistInFlight: Record<string, Promise<Trade> | undefined> = {};
 const pendingPersistTrades = new Set<string>();
+const returnCountWriteChains: Record<string, Promise<boolean> | undefined> = {};
+const returnCountWriteGenerations: Record<string, number> = {};
 let notesTimer: ReturnType<typeof setTimeout> | null = null;
 let notesPersistGeneration = 0;
 let notesPersistPending = false;
@@ -221,6 +225,24 @@ export async function pollSheetChangesNow(): Promise<void> {
   }
 }
 
+/** 같은 거래의 전체행 upsert를 직렬화해 오래된 요청이 최신 상태 뒤에 끝나는 일을 막는다. */
+function enqueueTradePersist(tradeId: string, fallback: Trade): Promise<Trade> {
+  const previous = persistInFlight[tradeId];
+  const task = (previous ?? Promise.resolve(fallback))
+    .catch(() => fallback)
+    .then(async () => {
+      const latest = state.trades.find((t) => t.tradeId === tradeId) ?? fallback;
+      await persistTrade(latest);
+      return latest;
+    });
+  persistInFlight[tradeId] = task;
+  const clear = () => {
+    if (persistInFlight[tradeId] === task) delete persistInFlight[tradeId];
+  };
+  void task.then(clear, clear);
+  return task;
+}
+
 function schedulePersistTrade(trade: Trade) {
   if (!isSupabase) return;
   const tradeId = trade.tradeId;
@@ -231,7 +253,7 @@ function schedulePersistTrade(trade: Trade) {
   persistTimers[trade.tradeId] = setTimeout(async () => {
     const latest = state.trades.find((t) => t.tradeId === tradeId) ?? trade;
     try {
-      await persistTrade(latest);
+      await enqueueTradePersist(tradeId, latest);
     } catch (e) {
       console.error("[supabase] 저장 실패", e);
       // 실패를 화면에 알린다(예전엔 조용히 삼켜 '저장됨'만 떠서 유실을 몰랐다).
@@ -246,6 +268,28 @@ function schedulePersistTrade(trade: Trade) {
       }
     }
   }, 450);
+}
+
+/** 대기 timer를 취소하고 이미 시작된 저장 뒤에 최신 스냅샷을 즉시 내구 저장한다. */
+async function flushTradePersist(tradeId: string): Promise<Trade> {
+  const fallback = state.trades.find((t) => t.tradeId === tradeId);
+  if (!fallback) throw new Error("저장할 거래를 찾을 수 없습니다");
+  if (!isSupabase) return fallback;
+
+  const generation = (persistGenerations[tradeId] ?? 0) + 1;
+  persistGenerations[tradeId] = generation;
+  pendingPersistTrades.add(tradeId);
+  if (persistTimers[tradeId]) clearTimeout(persistTimers[tradeId]);
+  delete persistTimers[tradeId];
+  try {
+    return await enqueueTradePersist(tradeId, fallback);
+  } finally {
+    if (persistGenerations[tradeId] === generation) {
+      delete persistGenerations[tradeId];
+      delete persistTimers[tradeId];
+      pendingPersistTrades.delete(tradeId);
+    }
+  }
 }
 function schedulePersistNotes() {
   if (!isSupabase) return;
@@ -378,7 +422,6 @@ function removeEquipmentAndRegenerateContract(tradeId: string, item: EquipmentIt
     contractRegenPending: true,
   }));
   flashSave(tradeId);
-  deleteScheduleItem(tradeId, scheduleId).catch(() => {});
 
   gasMutation("removeEquip", {
     tid: tradeId,
@@ -412,35 +455,126 @@ function rejectSheetBackedRemovalWithoutWriteBack(tradeId: string, scheduleId?: 
 }
 
 // ── 거래 단위 검수 토글 ─────────────────────────────────────────
-export function toggleSetup(tradeId: string) {
-  let done = false;
-  mutateTrade(tradeId, (t) => {
-    done = !t.setupDone;
-    return { ...t, setupDone: done, setupDoneAt: done ? new Date().toISOString() : null };
-  });
-  flashSave(tradeId);
-  gasWrite("toggleSetup", { tid: tradeId, done });
+export type ToggleSetupResult = { ok: true } | { ok: false; error: string };
+
+export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
+  const current = state.trades.find((t) => t.tradeId === tradeId);
+  if (!current) return { ok: false, error: "거래를 찾을 수 없습니다" };
+  const done = !current.setupDone;
+  if (isSupabase && !writeBackEnabled) {
+    const error = `반출 상태 변경 실패: ${writeBackDisabledReason}`;
+    set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
+    return { ok: false, error };
+  }
+
+  let gasSucceeded = false;
+  try {
+    // 반출 기준선이 GAS/Supabase에 먼저 고정된 뒤에만 화면을 완료로 바꾼다.
+    const res = await gasMutation("toggleSetup", { tid: tradeId, done });
+    gasSucceeded = true;
+    const doneAt = done ? String(res?.setupDoneAt || res?.doneAt || new Date().toISOString()) : null;
+    mutateTrade(tradeId, (t) => ({ ...t, setupDone: done, setupDoneAt: doneAt }));
+    if (isSupabase) await flushTradePersist(tradeId);
+    flashSave(tradeId);
+    return { ok: true };
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    const error = gasSucceeded
+      ? `원장 반출 상태는 변경됐지만 앱 저장 확인에 실패했습니다. 새로고침 후 재확인해주세요 — ${detail}`
+      : detail;
+    console.error("[write-back] toggleSetup 실패:", e);
+    set({ toast: { id: ++toastSeq, text: `⚠️ 반출 상태 변경 실패 — ${error}`, kind: "error" } });
+    return { ok: false, error };
+  }
 }
-export function toggleReturn(tradeId: string) {
-  let on = false;
-  mutateTrade(tradeId, (t) => {
-    on = !t.returnDone;
-    return { ...t, returnDone: on, returnDoneAt: on ? new Date().toISOString() : null, contractStatus: on ? "반납완료" : "반출" };
-  });
-  flashSave(tradeId);
-  // 해제 시 GAS는 이전 계약상태(예약 등)를 복원 — 앱이 무조건 '반출'로 두면 어긋남
-  gasMutation("toggleReturn", { tid: tradeId, done: on })
-    .then((res) => {
-      const restored = res?.contractStatus;
-      if (!on && restored && restored !== "반출") {
-        mutateTrade(tradeId, (t) => ({ ...t, contractStatus: restored }));
+export type ToggleReturnResult =
+  | { ok: true; blockers: [] }
+  | { ok: false; blockers: ReturnCompletionBlocker[]; error: string };
+
+export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult> {
+  // Stepper 연타 중의 수량 저장/GAS 증거 갱신이 모두 끝난 뒤 현재 상태를 판정한다.
+  // 그렇지 않으면 이전의 "정확히 일치" 요청이 뒤늦게 도착해 미완료 거래를 닫을 수 있다.
+  const returnWrites = Object.entries(returnCountWriteChains)
+    .filter(([key]) => key.startsWith(`${tradeId}:`))
+    .map(([, task]) => task)
+    .filter((task): task is Promise<boolean> => !!task);
+  if (returnWrites.length) {
+    const results = await Promise.all(returnWrites);
+    if (results.some((ok) => !ok)) {
+      const error = "품목별 반납 수량 저장이 끝나지 않았습니다. 네트워크를 확인하고 다시 시도해주세요.";
+      set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
+      return { ok: false, blockers: [], error };
+    }
+  }
+  const current = state.trades.find((t) => t.tradeId === tradeId);
+  if (!current) return { ok: false, blockers: [], error: "거래를 찾을 수 없습니다" };
+
+  const on = !current.returnDone;
+  const blockers = on ? returnCompletionBlockers(current) : [];
+  if (blockers.length > 0) {
+    const missing = blockers.reduce((sum, b) => sum + b.missing, 0);
+    const over = blockers.reduce((sum, b) => sum + b.over, 0);
+    const detail = missing > 0 ? `미확인 ${missing}개` : `초과 ${over}개`;
+    const error = `반납완료 차단 — ${detail}. 품목별 수량을 확인해주세요.`;
+    set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
+    return { ok: false, blockers, error };
+  }
+
+  // 실데이터에서는 원장(GAS)이 먼저 성공해야 앱/Supabase도 완료 상태로 바꾼다.
+  // 원장 쓰기가 꺼져 있을 때 로컬만 닫히는 조용한 불일치를 만들지 않는다.
+  if (isSupabase && !writeBackEnabled) {
+    const error = `반납 상태 변경 실패: ${writeBackDisabledReason}`;
+    set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
+    return { ok: false, blockers: [], error };
+  }
+
+  try {
+    // 품목별 정상/파손/분실 상세가 먼저 내구 저장되어야 한다. 이것이 실패한 상태에서
+    // 거래를 닫으면 GAS의 이진 체크만 남아 상세 사실이 사라질 수 있으므로 완료를 막는다.
+    if (on && isSupabase) {
+      const persisted = await flushTradePersist(tradeId);
+      const refreshedBlockers = returnCompletionBlockers(persisted);
+      if (refreshedBlockers.length > 0) {
+        const missing = refreshedBlockers.reduce((sum, b) => sum + b.missing, 0);
+        const over = refreshedBlockers.reduce((sum, b) => sum + b.over, 0);
+        const detail = missing > 0 ? `미확인 ${missing}개` : `초과 ${over}개`;
+        const error = `반납완료 차단 — ${detail}. 품목별 수량을 다시 확인해주세요.`;
+        set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
+        return { ok: false, blockers: refreshedBlockers, error };
       }
-    })
-    .catch((e) => console.error("[write-back] toggleReturn 실패:", e));
+    }
+    const res = await gasMutation("toggleReturn", { tid: tradeId, done: on });
+    const restored = !on && res?.contractStatus ? res.contractStatus : "반출";
+    mutateTrade(tradeId, (t) => ({
+      ...t,
+      returnDone: on,
+      returnDoneAt: on ? new Date().toISOString() : null,
+      contractStatus: on ? "반납완료" : restored,
+    }));
+    // GAS 완료 뒤의 최종 상태도 앞선 모든 저장 뒤에 즉시 직렬 저장한다.
+    // 실패하면 성공으로 가장하지 않고 작업자에게 불일치를 드러낸다.
+    if (isSupabase) await flushTradePersist(tradeId);
+    flashSave(tradeId);
+    return { ok: true, blockers: [] };
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    console.error("[write-back] toggleReturn 실패:", e);
+    set({ toast: { id: ++toastSeq, text: `⚠️ 반납 상태 변경 실패 — ${error}`, kind: "error" } });
+    return { ok: false, blockers: [], error };
+  }
 }
 
 // ── 품목별 반출/반납 상태 ───────────────────────────────────────
 export function setItemCheckout(tradeId: string, scheduleId: string, next: CheckoutState) {
+  const currentTrade = state.trades.find((t) => t.tradeId === tradeId);
+  const baselineStarted = !!currentTrade && (
+    currentTrade.setupDone || currentTrade.returnDone ||
+    currentTrade.equipments.some((equipment) => Number(equipment.takenQty || 0) > 0)
+  );
+  if (baselineStarted) {
+    set({ toast: { id: ++toastSeq, text: "⚠️ 반출 기준선이 고정되어 품목 포함 여부를 바꿀 수 없습니다", kind: "error" } });
+    return;
+  }
   let final: CheckoutState | undefined;
   let isSynthetic = false;
   let targetItem: EquipmentItem | undefined;
@@ -467,42 +601,99 @@ export function setItemCheckout(tradeId: string, scheduleId: string, next: Check
   else if (final === "pending") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: false });
   // 원장 쓰기가 꺼져 있으면 제외를 앱 상태로만 숨기지 않는다.
 }
-export function setItemName(tradeId: string, scheduleId: string, name: string) {
+export async function setItemName(tradeId: string, scheduleId: string, name: string): Promise<boolean> {
   const clean = name.trim();
-  if (!clean) return;
-  mutateTrade(tradeId, (t) =>
-    mapItem(t, scheduleId, (e) => ({
-      ...e,
-      name: clean,
-      setName: e.setName && e.setName.trim() === e.name.trim() ? clean : e.setName,
-      category: categoryOf(clean) ?? e.category,
-    })),
-  );
-  flashSave(tradeId);
-  gasWrite("updateEquipName", { tid: tradeId, scheduleId, equipName: clean });
-}
-export function setItemQty(tradeId: string, scheduleId: string, qty: number) {
-  const safeQty = Math.max(1, Math.round(qty));
-  mutateTrade(tradeId, (t) =>
-    mapItem(t, scheduleId, (e) => ({
-      ...e,
-      qty: safeQty,
-      takenQty: e.takenQty != null ? Math.min(e.takenQty, safeQty) : undefined,
-    })),
-  );
-  flashSave(tradeId);
-  // 세트 헤더 수량 변경 시 GAS가 구성품 수량을 비례 조정 — 응답을 받아 앱/Supabase도 동일하게
-  gasMutation("updateEquipQty", { tid: tradeId, scheduleId, qty: safeQty })
-    .then((res) => {
-      const updates: { scheduleId: string; newQty: number }[] = res?.updatedItems ?? [];
-      if (updates.length <= 1) return;
-      const byId = new Map(updates.map((u) => [u.scheduleId, Number(u.newQty) || 1]));
-      mutateTrade(tradeId, (t) => ({
+  if (!clean) return false;
+
+  if (isSupabase && !writeBackEnabled) {
+    set({ toast: { id: ++toastSeq, text: `⚠️ 장비명 변경 실패: ${writeBackDisabledReason}`, kind: "error" } });
+    return false;
+  }
+
+  try {
+    const res = isSupabase
+      ? await gasMutation("updateEquipName", { tid: tradeId, scheduleId, equipName: clean })
+      : null;
+    if (res?.unchanged) return true;
+    const canonicalName = String(res?.equipName || clean).trim();
+    const updates: { scheduleId: string; field?: string; newName?: string }[] =
+      res?.updatedItems ?? [{ scheduleId, field: "equipment", newName: canonicalName }];
+    const affectedIds = new Set(updates.map((item) => item.scheduleId).filter(Boolean));
+    affectedIds.add(scheduleId);
+    mutateTrade(tradeId, (t) => {
+      const returnCounts = { ...(t.returnCounts ?? {}) };
+      affectedIds.forEach((id) => delete returnCounts[id]);
+      return {
         ...t,
-        equipments: t.equipments.map((e) => (byId.has(e.scheduleId) ? { ...e, qty: byId.get(e.scheduleId)! } : e)),
-      }));
-    })
-    .catch((e) => console.error("[write-back] updateEquipQty 실패:", e));
+        equipments: t.equipments.map((e) => {
+          const update = updates.find((item) => item.scheduleId === e.scheduleId);
+          if (!update) return e;
+          const nextName = String(update.newName || canonicalName).trim();
+          if (update.field === "setName") return { ...e, setName: nextName };
+          return {
+            ...e,
+            name: nextName,
+            setName: e.setName && e.setName.trim() === e.name.trim() ? nextName : e.setName,
+            category: categoryOf(nextName) ?? e.category,
+          };
+        }),
+        returnCounts,
+        returnDone: false,
+        returnDoneAt: null,
+        contractStatus: t.contractStatus === "반납완료" ? (res?.contractStatus || "반출") : t.contractStatus,
+      };
+    });
+    if (isSupabase) await flushTradePersist(tradeId);
+    flashSave(tradeId);
+    return true;
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    set({ toast: { id: ++toastSeq, text: `⚠️ 장비명 변경 실패 — ${error}`, kind: "error" } });
+    return false;
+  }
+}
+export async function setItemQty(tradeId: string, scheduleId: string, qty: number): Promise<boolean> {
+  const safeQty = Math.max(1, Math.round(qty));
+  if (isSupabase && !writeBackEnabled) {
+    set({ toast: { id: ++toastSeq, text: `⚠️ 수량 변경 실패: ${writeBackDisabledReason}`, kind: "error" } });
+    return false;
+  }
+
+  try {
+    // 세트 헤더 수량 변경 시 GAS가 구성품 수량을 비례 조정하므로 원장을 먼저 확정한다.
+    const res = isSupabase
+      ? await gasMutation("updateEquipQty", { tid: tradeId, scheduleId, qty: safeQty })
+      : null;
+    if (res?.unchanged) return true;
+    const updates: { scheduleId: string; newQty: number }[] = res?.updatedItems ?? [{ scheduleId, newQty: safeQty }];
+    const affectedIds = new Set(updates.map((u) => u.scheduleId).filter(Boolean));
+    affectedIds.add(scheduleId);
+    mutateTrade(tradeId, (t) => {
+      const byId = new Map(updates.map((u) => [u.scheduleId, Number(u.newQty) || 1]));
+      const returnCounts = { ...(t.returnCounts ?? {}) };
+      affectedIds.forEach((id) => delete returnCounts[id]);
+      return {
+        ...t,
+        equipments: t.equipments.map((e) => {
+          if (!byId.has(e.scheduleId)) return e;
+          const nextQty = byId.get(e.scheduleId)!;
+          // takenQty는 반출 순간의 불변 기준선이다. 예약 수량 수정이 과거 반출량을 줄이면 안 된다.
+          return { ...e, qty: nextQty, takenQty: e.takenQty };
+        }),
+        returnCounts,
+        returnDone: false,
+        returnDoneAt: null,
+        contractStatus: t.contractStatus === "반납완료" ? (res?.contractStatus || "반출") : t.contractStatus,
+      };
+    });
+    if (isSupabase) await flushTradePersist(tradeId);
+    flashSave(tradeId);
+    return true;
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    set({ toast: { id: ++toastSeq, text: `⚠️ 수량 변경 실패 — ${error}`, kind: "error" } });
+    return false;
+  }
 }
 // 품목 메모는 적은 시점(phase)별로 저장한다. 반대쪽 카드에는 출처 태그와 함께 그대로 노출되므로
 // 예전처럼 양쪽 필드에 미러링하지 않는다 (미러링하면 반출/반납 구분이 사라짐).
@@ -597,15 +788,17 @@ function addOnsiteItemsLocal(tradeId: string, entries: OnsiteEntry[], settlement
   flashSave(tradeId);
 }
 
-/** 현장추가 — 유상만 스케줄상세(시트)에 기록되도록 GAS onsiteAddon 호출 후, 시트가 발급한
- *  실 scheduleId로 품목을 반영한다. 무상/미정은 반출 카드 운영 원장에만 남긴다.
+/** 현장추가 — 정산유형과 무관하게 모든 물리 반출을 스케줄상세/GAS에 기록한 뒤, 시트가 발급한
+ *  실 scheduleId로 품목을 반영한다. 무상/미정은 0원으로 기록하되 반출 기준선에서는 빠지지 않는다.
  *  세트는 백엔드가 세트마스터로 구성품을 전개하므로 대표/단품만 보낸다.
  *  자유입력 품목은 rawNames로 그대로 시트에 기록됨(장비마스터 매칭 안 함). 가용 불가면 에러를 던진다. */
 export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], settlement: Settlement) {
-  // 무상/미정 현장추가는 반출 카드 전용 운영 기록이다. 유상만 정산/계약/스케줄 원장으로 승격한다.
-  if (settlement !== "유상" || !writeBackEnabled) {
+  if (!isSupabase) {
     addOnsiteItemsLocal(tradeId, entries, settlement);
     return;
+  }
+  if (!writeBackEnabled) {
+    throw new Error(`현장 추가 실패: ${writeBackDisabledReason}`);
   }
 
   // 세트 구성품은 백엔드가 세트마스터로 다시 전개하므로 대표행/단품만 전송(중복 방지)
@@ -621,10 +814,9 @@ export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], se
     directRegenerate: true,
   });
 
-  // write-back 게이트가 막았으면 폴백
+  // 실데이터에서 로컬 폴백은 물리 반출 기준선을 만들지 못하므로 실패-폐쇄한다.
   if (res?.skipped) {
-    addOnsiteItemsLocal(tradeId, entries, settlement);
-    return;
+    throw new Error(`현장 추가 실패: ${writeBackDisabledReason}`);
   }
 
   const out = res?.result ?? res ?? {};
@@ -692,28 +884,98 @@ export function removeItem(tradeId: string, scheduleId: string) {
     rejectSheetBackedRemovalWithoutWriteBack(tradeId);
     return;
   }
+  if (isSupabase) {
+    // 레거시 앱 전용 ONS 행도 원격 삭제가 실제 성공한 뒤에만 화면에서 없앤다.
+    // taken_qty 기준선이 있으면 remote 계층이 삭제를 거부해 물리 반출 기록을 보존한다.
+    void deleteScheduleItem(tradeId, scheduleId)
+      .then(() => {
+        mutateTrade(tradeId, (t) => ({ ...t, equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId) }));
+        flashSave(tradeId);
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        set({ toast: { id: ++toastSeq, text: `⚠️ 품목 삭제 차단 — ${message}`, kind: "error" } });
+      });
+    return;
+  }
   mutateTrade(tradeId, (t) => ({ ...t, equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId) }));
   flashSave(tradeId);
-  deleteScheduleItem(tradeId, scheduleId).catch(() => {});
 }
 
 // ── 반납: 품목(scheduleId) 단위 카운트 + 시트 write-back ────────────
-export function setReturnCount(tradeId: string, scheduleId: string, patch: Partial<ReturnCount>) {
+export async function setReturnCount(tradeId: string, scheduleId: string, patch: Partial<ReturnCount>): Promise<boolean> {
   let writeback: boolean | undefined;
   mutateTrade(tradeId, (t) => {
     const item = t.equipments.find((e) => e.scheduleId === scheduleId);
     const expected = item ? item.takenQty ?? item.qty : 0;
     const cur = t.returnCounts?.[scheduleId] ?? { good: 0, damaged: 0, lost: 0 };
     const next = { ...cur, ...patch };
-    const wasIn = expected > 0 && cur.good + cur.damaged + cur.lost >= expected;
-    const isIn = expected > 0 && next.good + next.damaged + next.lost >= expected;
+    const wasIn = expected > 0 && cur.good + cur.damaged + cur.lost === expected;
+    const isIn = expected > 0 && next.good + next.damaged + next.lost === expected;
     if (wasIn !== isIn) writeback = isIn; // 줄이 전부 처리됨 ↔ 해제 전환 시에만 시트 반영
     return { ...t, returnCounts: { ...t.returnCounts, [scheduleId]: next } };
   });
   flashSave(tradeId);
   const rcItem = state.trades.find((t) => t.tradeId === tradeId)?.equipments.find((e) => e.scheduleId === scheduleId);
-  if (rcItem?.synthetic) return; // 합성 ID — 시트 write 금지
-  if (writeback !== undefined) gasWrite("toggleItem", { scheduleId, phase: "checkin", done: writeback });
+  if (rcItem?.synthetic || !isSupabase || writeback === undefined) return true;
+  if (!writeBackEnabled) {
+    set({ toast: { id: ++toastSeq, text: `⚠️ 반납 수량 저장 실패: ${writeBackDisabledReason}`, kind: "error" } });
+    return false;
+  }
+
+  const queueKey = `${tradeId}:${scheduleId}`;
+  const generation = (returnCountWriteGenerations[queueKey] ?? 0) + 1;
+  returnCountWriteGenerations[queueKey] = generation;
+  const previous = returnCountWriteChains[queueKey];
+  const task = (previous ?? Promise.resolve(true))
+    .catch(() => false)
+    .then(async () => {
+      try {
+        if (writeback === false) {
+          // 미완료 전환은 서버의 완료 증거부터 지워야 상세 저장 실패 시에도 닫히지 않는다.
+          await gasMutation("toggleItem", { scheduleId, phase: "checkin", done: false });
+          await flushTradePersist(tradeId);
+          return true;
+        }
+
+        if (writeback === true) {
+          // 완료 증거는 정상/파손/분실 상세가 먼저 내구 저장된 뒤에만 만든다.
+          await flushTradePersist(tradeId);
+          const latestTrade = state.trades.find((t) => t.tradeId === tradeId);
+          const latestItem = latestTrade?.equipments.find((e) => e.scheduleId === scheduleId);
+          const latestCount = latestTrade?.returnCounts?.[scheduleId];
+          const latestExpected = latestItem ? latestItem.takenQty ?? latestItem.qty : 0;
+          const latestAccounted = latestCount ? latestCount.good + latestCount.damaged + latestCount.lost : 0;
+          const stillCurrent = returnCountWriteGenerations[queueKey] === generation;
+          const mayComplete = stillCurrent && latestExpected > 0 && latestAccounted === latestExpected;
+          await gasMutation("toggleItem", { scheduleId, phase: "checkin", done: mayComplete });
+
+          // 네트워크 호출 도중 더 최신 Stepper 변경이 생겼다면 옛 true 증거를 즉시 제거한다.
+          const afterTrade = state.trades.find((t) => t.tradeId === tradeId);
+          const afterItem = afterTrade?.equipments.find((e) => e.scheduleId === scheduleId);
+          const afterCount = afterTrade?.returnCounts?.[scheduleId];
+          const afterExpected = afterItem ? afterItem.takenQty ?? afterItem.qty : 0;
+          const afterAccounted = afterCount ? afterCount.good + afterCount.damaged + afterCount.lost : 0;
+          if (
+            mayComplete &&
+            (returnCountWriteGenerations[queueKey] !== generation || afterExpected <= 0 || afterAccounted !== afterExpected)
+          ) {
+            await gasMutation("toggleItem", { scheduleId, phase: "checkin", done: false });
+          }
+        }
+        return true;
+      } catch (error) {
+        console.error("[write-back] 반납 수량 저장 실패:", error);
+        set({ toast: { id: ++toastSeq, text: "⚠️ 반납 수량 저장 실패 — 인터넷/로그인 확인 후 다시 시도", kind: "error" } });
+        return false;
+      }
+    });
+  returnCountWriteChains[queueKey] = task;
+  try {
+    return await task;
+  } finally {
+    if (returnCountWriteChains[queueKey] === task) delete returnCountWriteChains[queueKey];
+  }
 }
 
 // ── 결제·정산 (개고생2.0 회계로 write-back 대상) ────────────────

@@ -41,10 +41,9 @@ assert(
 );
 assert(
   !/if \(matches\[0\] && !exact\) select\(matches\[0\]\)/.test(checklist) &&
-    !/if \(matches\[0\] && !exact\) select\(matches\[0\]\)/.test(returnChecklist) &&
     /if \(exactMatch\) select\(exactMatch\);[\s\S]*else save\(\);/.test(checklist) &&
-    /if \(exactMatch\) select\(exactMatch\);[\s\S]*else save\(\);/.test(returnChecklist),
-  'handover/return equipment name editors must save typed free input on Enter instead of selecting the first fuzzy match'
+    !returnChecklist.includes('EquipmentNameCombobox'),
+  'handover equipment editor must preserve free input, while return rows must not edit the immutable checkout identity'
 );
 assert(
   gasRoute.includes('"dashboardEquipmentCatalog"'),

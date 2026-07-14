@@ -1,14 +1,15 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { Children, type ReactNode } from "react";
 
 // 세트별 구획 박스 — 세트명을 헤더로 명확히 구분, 구성품을 안에 묶음.
 // headerRow가 있으면 세트 대표행이 '실제 메인 장비'인 경우로, 제목 대신 그 인터랙티브 행을
 // 상단 바로 노출(체크/제외/메모/수정 가능). 없으면 세트명만 라벨로 표시(번들 라벨형).
 export function SetBox({ name, onRemove, headerRow, children }: { name: string; onRemove?: () => void; headerRow?: ReactNode; children: ReactNode }) {
+  const hasHeaderRow = Children.count(headerRow) > 0;
   return (
     <div className="overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-line">
-      {headerRow ? (
+      {hasHeaderRow ? (
         <ul className="border-b border-line/60 bg-brand-50">{headerRow}</ul>
       ) : (
         <div className="flex items-center gap-2 border-b border-line/60 bg-brand-50 px-3 py-2">

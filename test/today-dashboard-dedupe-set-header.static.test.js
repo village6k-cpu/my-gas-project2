@@ -24,9 +24,9 @@ assert(
 );
 
 assert(
-  /if \(inferredSetHeader\) g\.header = \{ \.\.\.e, setName: inferredSetName, isSetHeader: true \}/.test(status) &&
+  /if \(inferredSetHeader\) \{[\s\S]{0,260}g\.headers\.push\(header\)/.test(status) &&
     /else g\.rows\.push\(e\)/.test(status),
-  'inferred set headers must be stored as group headers and excluded from component rows'
+  'inferred set headers must all be stored in group headers and excluded from component rows'
 );
 
 assert(

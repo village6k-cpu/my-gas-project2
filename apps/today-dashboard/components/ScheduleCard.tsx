@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { TabKey, Trade } from "@/lib/domain/types";
-import { isCancelledTrade, phaseForDate, setupProgress, timeLabel } from "@/lib/domain/status";
+import { isCancelledTrade, phaseForDate, returnCompletionBlockers, setupProgress, timeLabel } from "@/lib/domain/status";
 import { ensureTradePhotos, removeTradeLocally, toggleReturn, toggleSetup } from "@/lib/data/store";
 import { authFetch } from "@/lib/data/authFetch";
 import { deleteTradeRemote } from "@/lib/data/remote";
@@ -83,12 +83,25 @@ export function ScheduleCard({
   const cancelled = isCancelledTrade(trade);
   const phase = displayPhase(trade, date, tab);
   const isCheckout = phase === "checkout";
-  const done = isCheckout ? trade.setupDone : trade.returnDone;
+  const returnBlockers = isCheckout ? [] : returnCompletionBlockers(trade);
+  const invalidClosedReturn = !isCheckout && trade.returnDone && returnBlockers.length > 0;
+  const done = isCheckout ? trade.setupDone : trade.returnDone && returnBlockers.length === 0;
   const doneAt = isCheckout ? trade.setupDoneAt : trade.returnDoneAt;
   const prog = setupProgress(trade, phase);
   const accent = isCheckout ? "bg-checkout-fg" : "bg-checkin-fg";
   const time = timeLabel(isCheckout ? trade.checkoutAt : trade.returnAt);
   const overdue = !trade.returnDone && new Date(trade.returnAt) < new Date(`${date}T00:00:00`);
+
+  async function handleDoneToggle() {
+    if (isCheckout) {
+      const result = await toggleSetup(trade.tradeId);
+      if (!result.ok) setOpen(true);
+      return;
+    }
+    if (returnBlockers.length > 0) setOpen(true);
+    const result = await toggleReturn(trade.tradeId);
+    if (!result.ok) setOpen(true);
+  }
 
   // 완료되면 상세 자동 접힘 (처리됨 느낌)
   useEffect(() => {
@@ -161,7 +174,7 @@ export function ScheduleCard({
       <div className="flex items-center gap-2.5 px-4 pl-5 pt-3">
         <button
           type="button"
-          onClick={() => (isCheckout ? toggleSetup(trade.tradeId) : toggleReturn(trade.tradeId))}
+          onClick={handleDoneToggle}
           className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 ${
             done
               ? "bg-checkin-bg text-checkin-fg ring-checkin-ring"
@@ -173,7 +186,11 @@ export function ScheduleCard({
           <span className={`flex h-5 w-5 items-center justify-center rounded-full ${done ? "bg-checkin-fg/15" : "bg-white/25"}`}>
             <Check className="h-3.5 w-3.5" />
           </span>
-          {isCheckout ? (done ? "반출 완료됨" : "반출 완료") : done ? "반납 완료됨" : "반납 완료"}
+          {isCheckout
+            ? done ? "반출 완료됨" : "반출 완료"
+            : invalidClosedReturn ? "잘못 닫힌 카드 다시 열기"
+            : done ? "반납 완료됨"
+            : returnBlockers.length ? "수량 확인 후 반납완료" : "반납 완료"}
         </button>
         <button
           type="button"
@@ -185,6 +202,26 @@ export function ScheduleCard({
           <ChevronRight className={`h-4 w-4 transition-transform ${open ? "-rotate-90" : "rotate-90"}`} />
         </button>
       </div>
+
+      {!isCheckout && returnBlockers.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="tap mx-4 ml-5 mt-2.5 block w-[calc(100%-2.25rem)] rounded-xl bg-attention-bg px-3 py-2.5 text-left ring-1 ring-attention-ring"
+        >
+          <span className="block text-[12px] font-extrabold text-attention-fg">
+            🚨 {invalidClosedReturn ? "반납완료 데이터 불일치 — 카드 재개방 필요" : "반납완료 차단 — 수량 확인 필요"}
+          </span>
+          <span className="mt-1 block text-[12px] font-semibold leading-relaxed text-attention-fg">
+            {returnBlockers.slice(0, 3).map((b) => (
+              <span key={b.scheduleId} className="block">
+                {b.name}: 반출 {b.expected} / 확인 {b.accounted} / {b.missing ? `미확인 ${b.missing}` : `초과 ${b.over}`}
+              </span>
+            ))}
+            {returnBlockers.length > 3 && <span className="block">외 {returnBlockers.length - 3}개 품목</span>}
+          </span>
+        </button>
+      )}
 
       {/* 접힌 상태 메모 미리보기 — 펼치기 전에도 메모 존재와 내용이 보여야 한다 */}
       {!open && <CollapsedMemoPreview trade={trade} onOpen={() => setOpen(true)} />}

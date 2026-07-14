@@ -8,12 +8,12 @@ const status = fs.readFileSync(path.join(root, 'apps/today-dashboard/lib/domain/
 
 // 세트 그룹화/판정 헬퍼는 status.ts 단일 소스 — 진행도 카운트와 렌더가 같은 규칙을 쓰도록 일원화
 assert(
-  /export function singleControllableSetItem\(/.test(status) && /export function isRealDeviceHeader\(/.test(status),
+  /export function singleControllableSetItem\(/.test(status) && /export function realDeviceHeaders\(/.test(status),
   'set grouping helpers must live in status.ts as the single source for both rendering and progress count'
 );
 assert(
   /import \{[^}]*singleControllableSetItem[^}]*\} from "@\/lib\/domain\/status"/.test(source) &&
-    /import \{[^}]*isRealDeviceHeader[^}]*\} from "@\/lib\/domain\/status"/.test(source),
+    /import \{[^}]*realDeviceHeaders[^}]*\} from "@\/lib\/domain\/status"/.test(source),
   'handover checklist must import the shared set helpers instead of redefining them locally'
 );
 assert(
@@ -26,8 +26,8 @@ assert(
 );
 // 구성품이 있는 세트의 대표행(=실제 메인 장비)은 SetBox headerRow로 인터랙티브하게 노출
 assert(
-  /<SetBox[\s\S]*?headerRow=\{[\s\S]*?isRealDeviceHeader\(g\.header, g\.rows\)[\s\S]*?<CheckoutRow[\s\S]*?e=\{g\.header!\}[\s\S]*?setBadge setTone/.test(source),
-  'real-device set headers must render as an interactive checkout row via SetBox headerRow'
+  /<SetBox[\s\S]*?headerRow=\{realDeviceHeaders\(g\)\.map\(\(header\)[\s\S]*?<CheckoutRow[\s\S]*?e=\{header\}[\s\S]*?setBadge setTone/.test(source),
+  'all real-device set headers must render as interactive checkout rows via SetBox headerRow'
 );
 assert(
   /<SetBox[\s\S]*?name=\{g\.setName\}[\s\S]*?>[\s\S]*?g\.rows\.map/.test(source),

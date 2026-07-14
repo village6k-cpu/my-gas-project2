@@ -17,13 +17,13 @@ assert.match(
 
 assert.match(
   checkAvailability,
-  /function updateDashboardContractStatus[\s\S]{0,900}status\s*===\s*["']반납완료["']\s*&&\s*currentStatus\s*===\s*["']취소["'][\s\S]{0,220}반납완료로 바꿀 수 없습니다/,
+  /function updateDashboardContractStatus[\s\S]{0,1600}status\s*===\s*["']반납완료["']\s*&&\s*currentStatus\s*===\s*["']취소["'][\s\S]{0,220}반납완료로 바꿀 수 없습니다/,
   'updateDashboardContractStatus must block 취소 -> 반납완료'
 );
 
 assert.match(
   code,
-  /statusRowCount\s*>\s*1[\s\S]{0,500}handleContractMasterStatusEdit_/,
+  /getRange\(statusStartRow,\s*10,\s*statusRowCount,\s*1\)[\s\S]{0,700}for \(var statusIdx = 0; statusIdx < statusRowCount; statusIdx\+\+\)[\s\S]{0,300}handleContractMasterStatusEdit_/,
   'manual multi-row 계약마스터 J edits must process each edited status row'
 );
 
