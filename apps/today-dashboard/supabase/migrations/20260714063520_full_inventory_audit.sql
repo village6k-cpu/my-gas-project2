@@ -1074,7 +1074,7 @@ begin
     from village.inventory_audit_observations as observation
     cross join lateral jsonb_array_elements(observation.evidence_refs) as evidence(ref)
     where observation.session_id = p_session_id
-      and coalesce(evidence.ref ->> 'status', 'pending') <> 'uploaded'
+      and coalesce(evidence.ref ->> 'status', 'pending') not in ('uploaded', 'aborted')
   ) then
     raise exception 'inventory audit has pending server evidence'
       using errcode = 'P0001';
@@ -1150,7 +1150,7 @@ begin
     from village.inventory_audit_observations as observation
     cross join lateral jsonb_array_elements(observation.evidence_refs) as evidence(ref)
     where observation.session_id = p_session_id
-      and coalesce(evidence.ref ->> 'status', 'pending') <> 'uploaded'
+      and coalesce(evidence.ref ->> 'status', 'pending') not in ('uploaded', 'aborted')
   ) then
     raise exception 'inventory audit cannot cancel with pending evidence'
       using errcode = 'P0001';
@@ -1245,6 +1245,10 @@ begin
   limit 1;
 
   if found then
+    if v_existing_ref ->> 'status' in ('aborting', 'aborted') then
+      raise exception 'inventory audit evidence tombstone cannot be reused'
+        using errcode = '40001';
+    end if;
     if v_existing_ref ->> 'path' = v_path
        and v_existing_ref ->> 'content_type' = p_content_type
        and (v_existing_ref ->> 'size_bytes')::integer = p_size_bytes
@@ -1367,6 +1371,9 @@ begin
       'reused', true
     );
   end if;
+  if v_existing_ref ->> 'status' in ('aborting', 'aborted') then
+    raise exception 'aborted evidence cannot be completed' using errcode = 'P0001';
+  end if;
   if v_session.status <> 'draft' then
     raise exception 'inventory audit evidence cannot be completed after submission'
       using errcode = 'P0001';
@@ -1437,7 +1444,10 @@ declare
   v_session village.inventory_audit_sessions%rowtype;
   v_observation village.inventory_audit_observations%rowtype;
   v_existing_ref jsonb;
+  v_aborting_ref jsonb;
   v_refs jsonb;
+  v_path text;
+  v_abort_started_at timestamptz;
 begin
   if p_session_id is null
      or p_observation_id is null
@@ -1445,6 +1455,8 @@ begin
      or p_actor_id is null then
     raise exception 'inventory audit evidence ids are required' using errcode = '22023';
   end if;
+
+  v_path := p_session_id::text || '/' || p_observation_id::text || '/' || p_evidence_id::text || '.jpg';
 
   select *
   into v_session
@@ -1482,22 +1494,40 @@ begin
   if not found then
     return jsonb_build_object(
       'evidence_id', p_evidence_id,
-      'aborted', true,
+      'status', 'absent',
       'reused', true
     );
   end if;
+  if v_existing_ref ->> 'path' <> v_path then
+    raise exception 'inventory audit evidence reservation path is invalid'
+      using errcode = '40001';
+  end if;
   if v_existing_ref ->> 'status' = 'uploaded' then
     raise exception 'uploaded evidence cannot be aborted' using errcode = 'P0001';
+  end if;
+  if v_existing_ref ->> 'status' in ('aborting', 'aborted') then
+    return jsonb_build_object(
+      'evidence', v_existing_ref,
+      'status', v_existing_ref ->> 'status',
+      'reused', true
+    );
   end if;
   if v_existing_ref ->> 'status' <> 'pending' then
     raise exception 'inventory audit evidence reservation status is invalid'
       using errcode = '40001';
   end if;
 
-  select coalesce(
-    jsonb_agg(evidence.ref order by evidence.ordinality)
-      filter (where evidence.ref ->> 'id' <> p_evidence_id::text),
-    '[]'::jsonb
+  v_abort_started_at := pg_catalog.clock_timestamp();
+  select jsonb_agg(
+    case
+      when evidence.ref ->> 'id' = p_evidence_id::text then
+        (evidence.ref - 'status') || jsonb_build_object(
+          'status', 'aborting',
+          'abort_started_at', v_abort_started_at
+        )
+      else evidence.ref
+    end
+    order by evidence.ordinality
   )
   into v_refs
   from jsonb_array_elements(v_observation.evidence_refs)
@@ -1507,9 +1537,14 @@ begin
   set evidence_refs = v_refs
   where id = p_observation_id;
 
+  select evidence.ref
+  into strict v_aborting_ref
+  from jsonb_array_elements(v_refs) as evidence(ref)
+  where evidence.ref ->> 'id' = p_evidence_id::text;
+
   return jsonb_build_object(
-    'evidence_id', p_evidence_id,
-    'aborted', true,
+    'evidence', v_aborting_ref,
+    'status', 'aborting',
     'reused', false
   );
 end;
@@ -1518,6 +1553,134 @@ $$;
 revoke execute on function village.abort_inventory_audit_evidence(uuid, uuid, uuid, uuid)
   from public, anon, authenticated;
 grant execute on function village.abort_inventory_audit_evidence(uuid, uuid, uuid, uuid)
+  to service_role;
+
+create function village.finalize_inventory_audit_evidence_abort(
+  p_session_id uuid,
+  p_observation_id uuid,
+  p_evidence_id uuid,
+  p_actor_id uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = village, public
+as $$
+declare
+  v_session village.inventory_audit_sessions%rowtype;
+  v_observation village.inventory_audit_observations%rowtype;
+  v_existing_ref jsonb;
+  v_aborted_ref jsonb;
+  v_refs jsonb;
+  v_path text;
+  v_aborted_at timestamptz;
+begin
+  if p_session_id is null
+     or p_observation_id is null
+     or p_evidence_id is null
+     or p_actor_id is null then
+    raise exception 'inventory audit evidence ids are required' using errcode = '22023';
+  end if;
+
+  v_path := p_session_id::text || '/' || p_observation_id::text || '/' || p_evidence_id::text || '.jpg';
+
+  select *
+  into v_session
+  from village.inventory_audit_sessions
+  where id = p_session_id
+  for update;
+
+  if not found then
+    raise exception 'inventory audit session not found' using errcode = 'P0002';
+  end if;
+  if v_session.started_by <> p_actor_id then
+    raise exception 'inventory audit session belongs to another user' using errcode = '42501';
+  end if;
+
+  select *
+  into v_observation
+  from village.inventory_audit_observations
+  where id = p_observation_id
+  for update;
+
+  if not found then
+    raise exception 'inventory audit observation not found' using errcode = 'P0002';
+  end if;
+  if v_observation.session_id <> p_session_id or v_observation.observed_by <> p_actor_id then
+    raise exception 'inventory audit observation belongs to another session or user'
+      using errcode = '42501';
+  end if;
+
+  select evidence.ref
+  into v_existing_ref
+  from jsonb_array_elements(v_observation.evidence_refs) as evidence(ref)
+  where evidence.ref ->> 'id' = p_evidence_id::text
+  limit 1;
+
+  if not found then
+    raise exception 'inventory audit evidence abort tombstone not found' using errcode = 'P0002';
+  end if;
+  if v_existing_ref ->> 'path' <> v_path then
+    raise exception 'inventory audit evidence reservation path is invalid'
+      using errcode = '40001';
+  end if;
+  if v_existing_ref ->> 'status' = 'aborted' then
+    return jsonb_build_object(
+      'evidence', v_existing_ref,
+      'status', 'aborted',
+      'reused', true
+    );
+  end if;
+  if v_existing_ref ->> 'status' <> 'aborting' then
+    raise exception 'inventory audit evidence abort is not ready to finalize'
+      using errcode = 'P0001';
+  end if;
+  if exists (
+    select 1
+    from storage.objects as stored_object
+    where stored_object.bucket_id = 'inventory-audit-evidence'
+      and stored_object.name = v_path
+  ) then
+    raise exception 'inventory audit evidence object still exists'
+      using errcode = 'P0001';
+  end if;
+
+  v_aborted_at := pg_catalog.clock_timestamp();
+  select jsonb_agg(
+    case
+      when evidence.ref ->> 'id' = p_evidence_id::text then
+        (evidence.ref - 'status') || jsonb_build_object(
+          'status', 'aborted',
+          'aborted_at', v_aborted_at
+        )
+      else evidence.ref
+    end
+    order by evidence.ordinality
+  )
+  into v_refs
+  from jsonb_array_elements(v_observation.evidence_refs)
+    with ordinality as evidence(ref, ordinality);
+
+  update village.inventory_audit_observations
+  set evidence_refs = v_refs
+  where id = p_observation_id;
+
+  select evidence.ref
+  into strict v_aborted_ref
+  from jsonb_array_elements(v_refs) as evidence(ref)
+  where evidence.ref ->> 'id' = p_evidence_id::text;
+
+  return jsonb_build_object(
+    'evidence', v_aborted_ref,
+    'status', 'aborted',
+    'reused', false
+  );
+end;
+$$;
+
+revoke execute on function village.finalize_inventory_audit_evidence_abort(uuid, uuid, uuid, uuid)
+  from public, anon, authenticated;
+grant execute on function village.finalize_inventory_audit_evidence_abort(uuid, uuid, uuid, uuid)
   to service_role;
 
 create function village.request_inventory_audit_recount(p_session_id uuid)

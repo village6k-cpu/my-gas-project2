@@ -335,9 +335,10 @@ test("submit and cancel serialize transitions and are service-role only", () => 
 
   assert.match(sql, /p_pending_observation_writes[^,)]*integer/i);
   assert.match(sql, /p_pending_evidence_uploads[^,)]*integer/i);
+  const submitDefinition = readFunctionDefinition(sql, "submit_inventory_audit");
   assert.match(
-    sql,
-    /submit_inventory_audit[\s\S]*jsonb_array_elements\(observation\.evidence_refs\)[\s\S]*pending/i,
+    submitDefinition,
+    /jsonb_array_elements\(observation\.evidence_refs\)[\s\S]*coalesce\([^)]*status[^)]*'pending'\) not in \('uploaded', 'aborted'\)/i,
   );
   assert.match(
     sql,
@@ -350,7 +351,7 @@ test("submit and cancel serialize transitions and are service-role only", () => 
   const cancelDefinition = readFunctionDefinition(sql, "cancel_inventory_audit");
   assert.match(
     cancelDefinition,
-    /jsonb_array_elements\(observation\.evidence_refs\)[\s\S]*status[\s\S]*pending[\s\S]*cannot cancel with pending evidence/i,
+    /jsonb_array_elements\(observation\.evidence_refs\)[\s\S]*coalesce\([^)]*status[^)]*'pending'\) not in \('uploaded', 'aborted'\)[\s\S]*cannot cancel with pending evidence/i,
   );
 });
 
@@ -361,6 +362,7 @@ test("evidence reservation RPCs are idempotent and submission-visible", () => {
     "reserve_inventory_audit_evidence",
     "complete_inventory_audit_evidence",
     "abort_inventory_audit_evidence",
+    "finalize_inventory_audit_evidence_abort",
   ]) {
     assert.match(
       sql,
@@ -393,6 +395,24 @@ test("evidence reservation RPCs are idempotent and submission-visible", () => {
   );
   assert.match(sql, /jsonb_array_elements\(v_observation\.evidence_refs\)/i);
 
+  const reserveDefinition = readFunctionDefinition(
+    sql,
+    "reserve_inventory_audit_evidence",
+  );
+  assert.match(
+    reserveDefinition,
+    /status' in \('aborting', 'aborted'\)[\s\S]*evidence tombstone cannot be reused/i,
+  );
+
+  const completeDefinition = readFunctionDefinition(
+    sql,
+    "complete_inventory_audit_evidence",
+  );
+  assert.match(
+    completeDefinition,
+    /status' in \('aborting', 'aborted'\)[\s\S]*aborted evidence cannot be completed/i,
+  );
+
   const abortDefinition = readFunctionDefinition(
     sql,
     "abort_inventory_audit_evidence",
@@ -403,7 +423,7 @@ test("evidence reservation RPCs are idempotent and submission-visible", () => {
   );
   assert.match(
     abortDefinition,
-    /if not found then[\s\S]*'aborted', true[\s\S]*'reused', true/i,
+    /if not found then[\s\S]*'status', 'absent'[\s\S]*'reused', true/i,
   );
   assert.match(
     abortDefinition,
@@ -411,13 +431,55 @@ test("evidence reservation RPCs are idempotent and submission-visible", () => {
   );
   assert.match(
     abortDefinition,
+    /status' in \('aborting', 'aborted'\)[\s\S]*'reused', true/i,
+  );
+  assert.match(
+    abortDefinition,
     /status' <> 'pending'[\s\S]*reservation status is invalid/i,
   );
   assert.match(
     abortDefinition,
-    /jsonb_agg[\s\S]*evidence\.ref ->> 'id' <> p_evidence_id::text/i,
+    /evidence\.ref - 'status'[\s\S]*'status', 'aborting'[\s\S]*'abort_started_at'/i,
+  );
+  assert.doesNotMatch(
+    abortDefinition,
+    /filter\s*\(where evidence\.ref ->> 'id' <> p_evidence_id::text\)/i,
+  );
+  assert.doesNotMatch(
+    abortDefinition,
+    /evidence\.ref\s*-\s*'(?:id|path|content_type|size_bytes)'/i,
   );
   assert.doesNotMatch(abortDefinition, /client_updated_at\s*=/i);
+
+  const finalizeDefinition = readFunctionDefinition(
+    sql,
+    "finalize_inventory_audit_evidence_abort",
+  );
+  assert.match(
+    finalizeDefinition,
+    /from village\.inventory_audit_sessions[\s\S]*for update[\s\S]*from village\.inventory_audit_observations[\s\S]*for update/i,
+  );
+  assert.match(
+    finalizeDefinition,
+    /status' = 'aborted'[\s\S]*'reused', true/i,
+  );
+  assert.match(
+    finalizeDefinition,
+    /status' <> 'aborting'[\s\S]*abort is not ready to finalize/i,
+  );
+  assert.match(
+    finalizeDefinition,
+    /from storage\.objects[\s\S]*bucket_id = 'inventory-audit-evidence'[\s\S]*name = v_path[\s\S]*object still exists/i,
+  );
+  assert.match(
+    finalizeDefinition,
+    /evidence\.ref - 'status'[\s\S]*'status', 'aborted'[\s\S]*'aborted_at'/i,
+  );
+  assert.doesNotMatch(
+    finalizeDefinition,
+    /evidence\.ref\s*-\s*'(?:id|path|content_type|size_bytes)'/i,
+  );
+  assert.doesNotMatch(finalizeDefinition, /client_updated_at\s*=/i);
 });
 
 test("approval refuses unresolved or invalid rental exceptions", () => {
@@ -537,6 +599,7 @@ test("security verification SQL is read-only and reports every protected surface
     "reserve_inventory_audit_evidence",
     "complete_inventory_audit_evidence",
     "abort_inventory_audit_evidence",
+    "finalize_inventory_audit_evidence_abort",
   ]) {
     assert.match(sql, new RegExp(fn, "i"));
   }
