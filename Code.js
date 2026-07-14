@@ -16,7 +16,9 @@ function onEdit(e) {
   const sheet = e.source.getActiveSheet();
   const col = e.range.getColumn();
   const row = e.range.getRow();
-  if (row === 1) return;
+  const editRowCount = e.range.getNumRows ? e.range.getNumRows() : 1;
+  const editColCount = e.range.getNumColumns ? e.range.getNumColumns() : 1;
+  if (row === 1 && editRowCount === 1) return;
 
   // ─── 기존: 실사 기록 자동입력 ───
   if (sheet.getName() === "실사 기록") {
@@ -249,7 +251,9 @@ function onEditInstallable(e) {
   const sheet = e.source.getActiveSheet();
   const col = e.range.getColumn();
   const row = e.range.getRow();
-  if (row === 1) return;
+  const editRowCount = e.range.getNumRows ? e.range.getNumRows() : 1;
+  const editColCount = e.range.getNumColumns ? e.range.getNumColumns() : 1;
+  if (row === 1 && editRowCount === 1) return;
 
   // 확인요청 A열: 거래ID만 입력하면 자동으로 RQ- 붙이기
   if (sheet.getName() === "확인요청" && col === 1 && row >= 2) {
@@ -264,24 +268,41 @@ function onEditInstallable(e) {
   }
 
   // 계약마스터 J열(10) 계약상태 변경 → 상태별 후속 처리 + 대시보드 캐시 갱신
-  if (sheet.getName() === "계약마스터" && col === 10 && row >= 2) {
+  // 여러 열 붙여넣기가 J를 가로질러도 반드시 같은 완료 검증을 거친다.
+  var statusEditEndCol = col + editColCount - 1;
+  if (sheet.getName() === "계약마스터" && col <= 10 && statusEditEndCol >= 10 && row + editRowCount - 1 >= 2) {
+    var statusStartRow = Math.max(row, 2);
+    var statusRowCount = row + editRowCount - statusStartRow;
+    var statusValues = [];
+    var statusLock = LockService.getScriptLock();
+    var statusLockAcquired = false;
     try {
-      var statusRowCount = e.range.getNumRows ? e.range.getNumRows() : 1;
-      var statusValues = statusRowCount > 1
-        ? e.range.getDisplayValues()
-        : [[e.range.getValue()]];
+      statusValues = sheet.getRange(statusStartRow, 10, statusRowCount, 1).getDisplayValues();
+      statusLock.waitLock(30000);
+      statusLockAcquired = true;
 
       for (var statusIdx = 0; statusIdx < statusRowCount; statusIdx++) {
         handleContractMasterStatusEdit_(
           e.source,
           sheet,
-          row + statusIdx,
+          statusStartRow + statusIdx,
           statusValues[statusIdx][0],
-          statusRowCount === 1 ? e.oldValue : ""
+          col === 10 && editColCount === 1 && statusRowCount === 1 ? e.oldValue : ""
         );
       }
     } catch (err) {
       Logger.log("계약마스터 계약상태 변경 처리 실패: " + err.message);
+      // 검증 자체가 중간에 실패한 경우, 아직 검증됐다고 보장할 수 없는 완료값은 닫지 않는다.
+      for (var restoreIdx = 0; restoreIdx < statusValues.length; restoreIdx++) {
+        if (String(statusValues[restoreIdx][0] || "").trim() !== "반납완료") continue;
+        var safeStatus = col === 10 && editColCount === 1 && statusRowCount === 1 && e.oldValue
+          ? String(e.oldValue).trim()
+          : "반출";
+        sheet.getRange(statusStartRow + restoreIdx, 10).setValue(safeStatus || "반출");
+        try { applyContractMasterStatusRowStyle_(sheet, statusStartRow + restoreIdx, safeStatus || "반출"); } catch (styleErr) {}
+      }
+    } finally {
+      if (statusLockAcquired) try { statusLock.releaseLock(); } catch (statusReleaseErr) {}
     }
   }
 
@@ -316,7 +337,7 @@ function onEditInstallable(e) {
 
   // 스케줄상세 수정 시 계약서 재생성 (디바운스) — 거래ID/품목/수량/일시/단가(B~I, L)
   // 일시·단가도 계약서에 찍히는 값이라 함께 재생성해야 함. 여러 행 붙여넣기도 모두 처리.
-  if (sheet.getName() === "스케줄상세" && row >= 2) {
+  if (sheet.getName() === "스케줄상세" && row + editRowCount - 1 >= 2) {
     try {
       var queuedTradeIds = queueScheduleDetailContractRegensForEdit_(sheet, e.range, e.oldValue);
       if (queuedTradeIds.length > 0) {
@@ -324,6 +345,53 @@ function onEditInstallable(e) {
       }
     } catch (err) {
       Logger.log("스케줄상세 수정 → 재생성 예약 실패: " + err.message);
+    }
+
+    // B~E(거래 귀속/세트/장비명/수량) 또는 J(행 상태)가 바뀌면
+    // 예전 행 기준 반납 체크는 더 이상 증거가 아니다.
+    var editEndCol = col + editColCount - 1;
+    if ((col <= 5 && editEndCol >= 1) || (col <= 10 && editEndCol >= 10)) {
+      var proofLock = LockService.getScriptLock();
+      var proofLockAcquired = false;
+      try {
+        proofLock.waitLock(30000);
+        proofLockAcquired = true;
+        var proofStartRow = Math.max(row, 2);
+        var proofRowCount = row + editRowCount - proofStartRow;
+        var proofRows = sheet.getRange(proofStartRow, 1, proofRowCount, 2).getDisplayValues();
+        var changedByTrade = {};
+        var proofProps = PropertiesService.getScriptProperties();
+        proofRows.forEach(function(values) {
+          var scheduleId = String(values[0] || '').trim();
+          var tradeId = String(values[1] || '').trim();
+          if (!scheduleId) return;
+          var oldProof = proofProps.getProperty('itemCheck_' + scheduleId + '_checkin');
+          var oldProofTradeId = typeof dashboardReturnInspectionTradeId_ === 'function'
+            ? dashboardReturnInspectionTradeId_(oldProof)
+            : '';
+          [tradeId, oldProofTradeId].forEach(function(affectedTradeId) {
+            if (!affectedTradeId) return;
+            if (!changedByTrade[affectedTradeId]) changedByTrade[affectedTradeId] = [];
+            if (changedByTrade[affectedTradeId].indexOf(scheduleId) < 0) changedByTrade[affectedTradeId].push(scheduleId);
+          });
+        });
+        if (col === 2 && editColCount === 1 && proofRowCount === 1 && e.oldValue) {
+          var oldCellTradeId = String(e.oldValue).trim();
+          var onlyScheduleId = String(proofRows[0] && proofRows[0][0] || '').trim();
+          if (oldCellTradeId && onlyScheduleId) changedByTrade[oldCellTradeId] = [onlyScheduleId];
+        }
+        Object.keys(changedByTrade).forEach(function(tradeId) {
+          var result = invalidateDashboardReturnInspectionForTrade_(tradeId, changedByTrade[tradeId], '스케줄상세 행 정체성 직접 변경');
+          if (result && result.error) throw new Error(result.error);
+        });
+        var orphanResult = reconcileDashboardOrphanedReturnProofs_(sheet, proofProps, '스케줄상세 행 비우기/삭제');
+        if (orphanResult && orphanResult.error) throw new Error(orphanResult.error);
+      } catch (proofErr) {
+        Logger.log("스케줄상세 행 변경 → 반납 재검수 전환 실패: " + proofErr.message);
+        throw proofErr;
+      } finally {
+        if (proofLockAcquired) try { proofLock.releaseLock(); } catch (proofReleaseErr) {}
+      }
     }
   }
 
@@ -376,6 +444,66 @@ function onEditInstallable(e) {
   }
 }
 
+/**
+ * 행 전체 clear/delete 뒤에는 A/B가 이미 비어 oldValue만으로 거래를 찾을 수 없다.
+ * 남아 있는 반납 증거의 scheduleId를 현재 A열과 대조해 사라진 행의 계약을 재오픈한다.
+ * 호출자는 반드시 ScriptLock을 보유해야 한다.
+ */
+function reconcileDashboardOrphanedReturnProofs_(sheet, props, reason) {
+  try {
+    if (!sheet || sheet.getName() !== '스케줄상세') return { success: true, reopened: 0 };
+    props = props || PropertiesService.getScriptProperties();
+    var currentIds = {};
+    if (sheet.getLastRow() >= 2) {
+      sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues().forEach(function(row) {
+        var sid = String(row[0] || '').trim();
+        if (sid) currentIds[sid] = true;
+      });
+    }
+    var byTrade = {};
+    var all = props.getProperties();
+    Object.keys(all).forEach(function(key) {
+      var match = key.match(/^itemCheck_(.+)_checkin$/);
+      if (!match) return;
+      var scheduleId = String(match[1] || '').trim();
+      if (!scheduleId || currentIds[scheduleId]) return;
+      var tradeId = typeof dashboardReturnInspectionTradeId_ === 'function'
+        ? dashboardReturnInspectionTradeId_(all[key])
+        : '';
+      if (!tradeId) tradeId = scheduleId.replace(/-\d+$/, '');
+      if (!tradeId || tradeId === scheduleId) return;
+      if (!byTrade[tradeId]) byTrade[tradeId] = [];
+      byTrade[tradeId].push(scheduleId);
+    });
+    Object.keys(byTrade).forEach(function(tradeId) {
+      var result = invalidateDashboardReturnInspectionForTrade_(tradeId, byTrade[tradeId], reason || '스케줄 행 삭제');
+      if (result && result.error) throw new Error(result.error);
+    });
+    return { success: true, reopened: Object.keys(byTrade).length };
+  } catch (err) {
+    return { error: '삭제 행 반납 재검수 실패: ' + (err && err.message ? err.message : String(err)) };
+  }
+}
+
+/** 설치형 onChange: 행 구조 삭제는 onEdit가 발생하지 않으므로 별도 감시한다. */
+function onChangeInstallable(e) {
+  if (!e || !e.source || e.changeType !== 'REMOVE_ROW') return;
+  var sheet = e.source.getActiveSheet();
+  if (!sheet || sheet.getName() !== '스케줄상세') return;
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  try {
+    lock.waitLock(30000);
+    acquired = true;
+    var result = reconcileDashboardOrphanedReturnProofs_(
+      sheet, PropertiesService.getScriptProperties(), '스케줄상세 행 구조 삭제'
+    );
+    if (result && result.error) throw new Error(result.error);
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
 function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
   var status = String(rawStatus || '').trim();
   var previousStatus = String(oldStatus || '').trim();
@@ -405,6 +533,30 @@ function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
       restoreProps.deleteProperty('returnPrevContractStatus_' + tradeId);
       sheet.getRange(row, 10).setValue("취소");
       cancelContract(ss, tradeId, row);
+      return;
+    }
+
+    var completionCheck;
+    try {
+      completionCheck = typeof assertDashboardReturnComplete_ === "function"
+        ? assertDashboardReturnComplete_(tradeId, PropertiesService.getScriptProperties())
+        : { error: "반납완료 차단: 품목 검증 함수를 찾을 수 없습니다" };
+    } catch (validationErr) {
+      completionCheck = {
+        error: "반납완료 차단: 품목 검증 실패 — " +
+          (validationErr && validationErr.message ? validationErr.message : String(validationErr))
+      };
+    }
+    if (completionCheck && completionCheck.error) {
+      var restoreStatus = previousStatus && previousStatus !== "반납완료" ? previousStatus : "반출";
+      var incompleteProps = PropertiesService.getScriptProperties();
+      incompleteProps.deleteProperty('returnDone_' + tradeId);
+      incompleteProps.deleteProperty('returnPrevContractStatus_' + tradeId);
+      sheet.getRange(row, 10).setValue(restoreStatus);
+      if (typeof applyContractMasterStatusRowStyle_ === "function") {
+        applyContractMasterStatusRowStyle_(sheet, row, restoreStatus);
+      }
+      try { ss.toast(completionCheck.error, "반납완료 차단", 8); } catch (toastErr) {}
       return;
     }
   }
@@ -1369,17 +1521,40 @@ function cancelContract(ss, 거래ID, contractRow) {
  */
 function setupInstallableTrigger() {
   const triggers = ScriptApp.getProjectTriggers();
+  var hasEdit = false;
+  var hasChange = false;
+  var created = [];
   for (const t of triggers) {
-    if (t.getHandlerFunction() === "onEditInstallable") {
-      Logger.log("이미 등록된 트리거가 있습니다. 중복 생성 안 함.");
-      return;
-    }
+    if (t.getHandlerFunction() === "onEditInstallable") hasEdit = true;
+    if (t.getHandlerFunction() === "onChangeInstallable") hasChange = true;
   }
-  ScriptApp.newTrigger("onEditInstallable")
-    .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
-    .onEdit()
-    .create();
-  Logger.log("✅ onEditInstallable 트리거 등록 완료");
+  if (!hasEdit) {
+    ScriptApp.newTrigger("onEditInstallable")
+      .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
+      .onEdit()
+      .create();
+    hasEdit = true;
+    created.push("onEditInstallable");
+    Logger.log("✅ onEditInstallable 트리거 등록 완료");
+  }
+  if (!hasChange) {
+    ScriptApp.newTrigger("onChangeInstallable")
+      .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
+      .onChange()
+      .create();
+    hasChange = true;
+    created.push("onChangeInstallable");
+    Logger.log("✅ onChangeInstallable 트리거 등록 완료");
+  }
+  if (created.length === 0 && hasEdit && hasChange) Logger.log("필수 설치형 트리거가 이미 모두 등록되어 있습니다.");
+  return {
+    success: hasEdit && hasChange,
+    created: created,
+    handlers: {
+      onEditInstallable: hasEdit,
+      onChangeInstallable: hasChange
+    }
+  };
 }
 
 

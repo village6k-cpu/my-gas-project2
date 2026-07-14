@@ -85,6 +85,182 @@ function supaDeleteTrade_(tid) {
 }
 
 /**
+ * 반납완료 서버 검증용 상세 수량 조회.
+ * 브라우저가 보낸 boolean을 신뢰하지 않고, 먼저 내구 저장된 village.trades.return_counts를
+ * GAS가 봇 세션으로 직접 읽는다. 조회 실패/행 없음은 완료 허용이 아니라 명시적 실패다.
+ */
+function supaGetTradeReturnCounts_(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { ok: false, error: '거래ID 없음', returnCounts: {} };
+  try {
+    var cfg = SUPA_CFG_();
+    var token = supaToken_(cfg);
+    if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음', returnCounts: {} };
+    var url = cfg.url + '/rest/v1/trades?select=trade_id,return_counts&trade_id=eq.'
+      + encodeURIComponent(tid) + '&limit=1';
+    var res = UrlFetchApp.fetch(url, {
+      method: 'get',
+      headers: {
+        apikey: cfg.apikey,
+        Authorization: 'Bearer ' + token,
+        'Accept-Profile': 'village'
+      },
+      muteHttpExceptions: true
+    });
+    var code = res.getResponseCode();
+    if (code >= 300) {
+      return { ok: false, error: 'Supabase 상세 수량 조회 실패 (' + code + ')', returnCounts: {} };
+    }
+    var rows = JSON.parse(res.getContentText() || '[]');
+    if (!rows || !rows.length) {
+      return { ok: false, error: 'Supabase 거래 행 없음: ' + tid, returnCounts: {} };
+    }
+    var counts = rows[0].return_counts;
+    if (!counts || typeof counts !== 'object' || Array.isArray(counts)) counts = {};
+    var itemRes = UrlFetchApp.fetch(
+      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,set_name,is_set_header,is_component,checkout_state,onsite'
+        + '&trade_id=eq.' + encodeURIComponent(tid) + '&order=sort.asc',
+      {
+        method: 'get',
+        headers: {
+          apikey: cfg.apikey,
+          Authorization: 'Bearer ' + token,
+          'Accept-Profile': 'village'
+        },
+        muteHttpExceptions: true
+      }
+    );
+    var itemCode = itemRes.getResponseCode();
+    if (itemCode >= 300) {
+      return { ok: false, error: 'Supabase 반출 기준선 조회 실패 (' + itemCode + ')', returnCounts: {}, scheduleItems: [] };
+    }
+    var scheduleItems = JSON.parse(itemRes.getContentText() || '[]');
+    return { ok: true, returnCounts: counts, scheduleItems: scheduleItems || [] };
+  } catch (err) {
+    return {
+      ok: false,
+      error: 'Supabase 상세 수량 조회 오류: ' + (err && err.message ? err.message : String(err)),
+      returnCounts: {},
+      scheduleItems: []
+    };
+  }
+}
+
+/** 이미 고정된 반출 기준선 조회. 조회 실패와 기준선 없음은 호출부가 구분해 실패-폐쇄한다. */
+function supaGetCheckoutBaselineState_(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { ok: false, error: '거래ID 없음', started: false, items: [] };
+  try {
+    var cfg = SUPA_CFG_();
+    var token = supaToken_(cfg);
+    if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음', started: false, items: [] };
+    var res = UrlFetchApp.fetch(
+      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,set_name,is_set_header,is_component,checkout_state,onsite'
+        + '&trade_id=eq.' + encodeURIComponent(tid) + '&taken_qty=gt.0&order=sort.asc',
+      {
+        method: 'get',
+        headers: {
+          apikey: cfg.apikey,
+          Authorization: 'Bearer ' + token,
+          'Accept-Profile': 'village'
+        },
+        muteHttpExceptions: true
+      }
+    );
+    var code = res.getResponseCode();
+    if (code >= 300) {
+      return { ok: false, error: 'Supabase 반출 기준선 조회 실패 (' + code + ')', started: false, items: [] };
+    }
+    var items = JSON.parse(res.getContentText() || '[]') || [];
+    return { ok: true, started: items.length > 0, items: items };
+  } catch (err) {
+    return {
+      ok: false,
+      error: 'Supabase 반출 기준선 조회 오류: ' + (err && err.message ? err.message : String(err)),
+      started: false,
+      items: []
+    };
+  }
+}
+
+/**
+ * 반출 순간의 장비 정체성과 수량을 taken_qty로 고정한다.
+ * 이미 고정된 행은 절대 덮어쓰지 않고, 동일성 불일치면 실패한다.
+ * exactExisting=true는 전체 반출완료 시점에 기존 기준선의 삭제/추가까지 검증한다.
+ */
+function supaCaptureCheckoutBaseline_(tid, equipments, exactExisting) {
+  tid = String(tid || '').trim();
+  equipments = equipments || [];
+  if (!tid || !equipments.length) return { ok: false, error: '반출 기준선 품목 없음' };
+  try {
+    var cfg = SUPA_CFG_();
+    var rows = equipments.map(function(eq, index) {
+      var qty = Number(String(eq.qty || 1).replace(/[^0-9.]/g, '')) || 1;
+      return {
+        schedule_id: String(eq.scheduleId || eq.schedule_id || '').trim(),
+        trade_id: tid,
+        sort: Number(eq.sort || index),
+        name: String(eq.name || '').trim(),
+        qty: qty,
+        taken_qty: qty,
+        set_name: String(eq.setName || eq.set_name || '').trim() || null,
+        is_set_header: !!(eq.isHeader || eq.is_set_header),
+        is_component: !!(eq.isComponent || eq.is_component),
+        checkout_state: 'taken',
+        onsite: !!eq.onsite
+      };
+    }).filter(function(row) { return row.schedule_id && row.name; });
+    if (!rows.length) return { ok: false, error: '반출 기준선 유효 품목 없음' };
+
+    var existing = supaGetCheckoutBaselineState_(tid);
+    if (!existing || !existing.ok) {
+      return { ok: false, error: String(existing && existing.error || '기존 반출 기준선 조회 실패') };
+    }
+    var existingById = {};
+    (existing.items || []).forEach(function(item) {
+      existingById[String(item.schedule_id || '').trim()] = item;
+    });
+    var proposedById = {};
+    for (var i = 0; i < rows.length; i++) {
+      if (proposedById[rows[i].schedule_id]) return { ok: false, error: '중복 스케줄ID: ' + rows[i].schedule_id };
+      proposedById[rows[i].schedule_id] = rows[i];
+    }
+    if (exactExisting) {
+      for (var existingId in existingById) {
+        if (!proposedById[existingId]) {
+          return { ok: false, error: '기존 반출 기준선 품목이 현재 시트에서 사라졌습니다: ' + existingId };
+        }
+      }
+    }
+
+    var newRows = [];
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r];
+      var baseline = existingById[row.schedule_id];
+      if (!baseline) {
+        newRows.push(row);
+        continue;
+      }
+      var same = Number(baseline.taken_qty || 0) === Number(row.taken_qty || 0) &&
+        String(baseline.name || '').trim() === row.name &&
+        String(baseline.set_name || '').trim() === String(row.set_name || '').trim() &&
+        !!baseline.is_set_header === !!row.is_set_header &&
+        !!baseline.is_component === !!row.is_component;
+      if (!same) {
+        return { ok: false, error: '이미 고정된 반출 기준선과 현재 품목이 다릅니다: ' + row.schedule_id };
+      }
+    }
+    if (!newRows.length) return { ok: true, count: rows.length, reused: true };
+    if (!supaUpsert_(cfg, 'schedule_items', newRows, 'schedule_id')) {
+      return { ok: false, error: 'Supabase 반출 기준선 저장 실패' };
+    }
+    return { ok: true, count: rows.length, added: newRows.length };
+  } catch (err) {
+    return { ok: false, error: 'Supabase 반출 기준선 저장 오류: ' + (err && err.message ? err.message : String(err)) };
+  }
+}
+
+/**
  * 스크립트 쓰기용 dirty 마킹 — onEdit은 사람 손 편집에만 발화하므로,
  * registerByReqID/추가/삭제/날짜변경처럼 스크립트가 계약·스케줄 시트를 쓰는 경로는
  * 이 함수를 직접 호출해야 1분 트리거(flushDirtyToSupabase)가 Supabase로 밀어준다.
@@ -357,7 +533,9 @@ function supaDeleteStaleItems_(cfg, tradeId, keepIds) {
   var inList = keepIds.map(function (id) { return '"' + String(id).replace(/"/g, '') + '"'; }).join(',');
   var url = cfg.url + '/rest/v1/schedule_items'
     + '?trade_id=eq.' + encodeURIComponent(tradeId)
-    + '&schedule_id=not.in.(' + encodeURIComponent(inList) + ')';
+    + '&schedule_id=not.in.(' + encodeURIComponent(inList) + ')'
+    // 반출 기준선(taken_qty)은 시트 행이 지워져도 감사/완료 검증을 위해 보존한다.
+    + '&taken_qty=is.null';
   var res = UrlFetchApp.fetch(url, {
     method: 'delete',
     headers: {

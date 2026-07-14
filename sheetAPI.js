@@ -23,7 +23,9 @@
 const API_KEY = "village2026";
 
 // 쓰기 허용 시트 화이트리스트
-const WRITABLE_SHEETS = ["확인요청", "스케줄상세", "신규장비 추가", "실사 기록"];
+// 스케줄상세는 반출 불변 기준선/가용성/계약서 부작용을 함께 처리해야 하므로
+// 범용 setValue API로 쓰지 못한다. dashboardAdd/Remove/Update 전용 액션만 사용한다.
+const WRITABLE_SHEETS = ["확인요청", "신규장비 추가", "실사 기록"];
 function isWritableSheet(sheetName) {
   return WRITABLE_SHEETS.indexOf(sheetName) !== -1;
 }
@@ -1067,6 +1069,7 @@ function runFunction(funcName, params) {
     "getInventoryConflicts",
     "getInventoryConflictsSlackMessage",
     "listAllTriggers",
+    "setupInstallableTrigger",
     "diagEquipmentRiskBackendConfig",
     "setupEquipmentRiskBackendConfig",
     "getMyPageLink",
@@ -1120,6 +1123,12 @@ function runFunction(funcName, params) {
       var reqID = typeof args === "string" ? args : args.reqID;
       var result = deleteRequest(reqID);
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "deleteTrade" && params.args) {
+      var delArgs = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var tradeId = typeof delArgs === "string" ? delArgs : (delArgs.tradeId || delArgs.거래ID || delArgs.id);
+      var delResult = deleteTrade(tradeId);
+      return { success: true, function: funcName, result: delResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "getMyPageLink") {
       var args = params.args;
@@ -1238,6 +1247,7 @@ function runFunction(funcName, params) {
       getInventoryConflicts: typeof getInventoryConflicts !== "undefined" ? getInventoryConflicts : null,
       getInventoryConflictsSlackMessage: typeof getInventoryConflictsSlackMessage !== "undefined" ? getInventoryConflictsSlackMessage : null,
       listAllTriggers: typeof listAllTriggers !== "undefined" ? listAllTriggers : null,
+      setupInstallableTrigger: typeof setupInstallableTrigger !== "undefined" ? setupInstallableTrigger : null,
       syncTemplateMasterFromSetMaster: typeof syncTemplateMasterFromSetMaster !== "undefined" ? syncTemplateMasterFromSetMaster : null,
       normalizeConfirmRequestDates: typeof normalizeConfirmRequestDates !== "undefined" ? normalizeConfirmRequestDates : null,
       recoverPendingRegistrations: typeof recoverPendingRegistrations !== "undefined" ? recoverPendingRegistrations : null,

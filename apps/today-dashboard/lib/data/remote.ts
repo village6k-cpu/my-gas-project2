@@ -42,6 +42,9 @@ function uniqueScheduleRows(trade: Trade): any[] {
   // 시트뿐 아니라 Supabase에도 쓰면 유령 행이 생기고 체크/제외가 엉뚱하게 기록됨 → 영속화 제외.
   return trade.equipments.filter((e) => !e.synthetic).map((e, i) => {
     const row = itemToRow(e, trade.tradeId, i);
+    // taken_qty는 반출 순간의 불변 기준선이다. GAS의 toggleSetupDone만 기록하며,
+    // 브라우저의 오래된 스냅샷(null/옛 수량)이 직후 upsert로 기준선을 지우거나 줄이면 안 된다.
+    delete row.taken_qty;
     const baseId = row.schedule_id;
     const seen = seenScheduleIds.get(baseId) ?? 0;
     seenScheduleIds.set(baseId, seen + 1);
@@ -81,10 +84,11 @@ async function pruneMissingSheetBackedItems(sb: any, tradeId: string, rows: any[
   if (!keepSet.size) return;
   const { data: existingRows, error } = await sb
     .from("schedule_items")
-    .select("schedule_id")
+    .select("schedule_id,taken_qty")
     .eq("trade_id", tradeId);
   if (error) throw error;
   const staleIds = (existingRows ?? [])
+    .filter((row: any) => !(Number(row.taken_qty) > 0))
     .map((row: any) => String(row.schedule_id || "").trim())
     .filter((scheduleId: string) => isSheetBackedScheduleId(scheduleId, tradeId) && !keepSet.has(scheduleId));
   if (!staleIds.length) return;
@@ -128,14 +132,26 @@ export async function deleteScheduleItem(tradeId: string, scheduleId: string): P
   if (!sb) return;
   const variants = deleteScheduleItemVariants(tradeId, scheduleId);
   if (variants) {
-    await sb
+    const { data, error } = await sb
       .from("schedule_items")
       .delete()
       .eq("trade_id", tradeId)
-      .or(`schedule_id.eq.${variants.canonical},schedule_id.eq.${variants.prefixed},schedule_id.like.${variants.prefixed}__%`);
+      .is("taken_qty", null)
+      .or(`schedule_id.eq.${variants.canonical},schedule_id.eq.${variants.prefixed},schedule_id.like.${variants.prefixed}__%`)
+      .select("schedule_id");
+    if (error) throw error;
+    if (!data?.length) throw new Error("반출 기준선이 있거나 삭제할 품목이 없습니다");
     return;
   }
-  await sb.from("schedule_items").delete().eq("trade_id", tradeId).eq("schedule_id", scheduleId);
+  const { data, error } = await sb
+    .from("schedule_items")
+    .delete()
+    .eq("trade_id", tradeId)
+    .eq("schedule_id", scheduleId)
+    .is("taken_qty", null)
+    .select("schedule_id");
+  if (error) throw error;
+  if (!data?.length) throw new Error("반출 기준선이 있거나 삭제할 품목이 없습니다");
 }
 
 function deleteScheduleItemVariants(tradeId: string, scheduleId: string): { canonical: string; prefixed: string } | null {

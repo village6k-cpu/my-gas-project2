@@ -952,7 +952,10 @@ function getDashboardData(targetDate, skipCache, options) {
         isComponent: !!eq.setName && !eq.isHeader,                    // 세트 구성품
         category: equipCat[eq.name] || '',                           // 장비마스터 카테고리(반납 분류용)
         checkedCheckout: checkoutChecked,
-        checkedCheckin: getDashboardCheckinItemDefault_(props, eq.scheduleId, checkoutChecked, setupDoneForTrade)
+        checkedCheckin: getDashboardCheckinItemDefault_(
+          props, eq.scheduleId, checkoutChecked, setupDoneForTrade,
+          tid, eq.qty, eq.name, eq.setName, eq.isHeader
+        )
       };
     });
 
@@ -1665,7 +1668,10 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, option
       isSet: eq.isHeader && !!setsWithComponents[eq.name],
       isComponent: !!eq.setName && !eq.isHeader,
       checkedCheckout: checkoutChecked,
-      checkedCheckin: getDashboardCheckinItemDefault_(props, eq.scheduleId, checkoutChecked, setupDoneForTrade)
+      checkedCheckin: getDashboardCheckinItemDefault_(
+        props, eq.scheduleId, checkoutChecked, setupDoneForTrade,
+        tid, eq.qty, eq.name, eq.setName, eq.isHeader
+      )
     };
   });
 
@@ -1703,16 +1709,60 @@ function buildDashboardSearchItem_(tid, g, cust, extra, checkInfo, props, option
   };
 }
 
-function getDashboardCheckinItemDefault_(props, scheduleId, checkoutChecked, setupDoneForTrade) {
+function dashboardReturnQtyToken_(value) {
+  var n = Number(String(value == null ? '' : value).replace(/[^0-9.]/g, ''));
+  return String(n > 0 ? n : 1);
+}
+
+function dashboardReturnInspectionHash_(value) {
+  var text = String(value || '');
+  var h1 = 2166136261;
+  var h2 = 2246822519;
+  for (var i = 0; i < text.length; i++) {
+    var c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 16777619);
+    h2 = Math.imul(h2 ^ c, 3266489917);
+  }
+  return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36);
+}
+
+/** 반납 체크 당시 행의 정체성 전체를 짧게 묶는다. 기존 itemCheck 키 값에 저장해 quota를 아낀다. */
+function dashboardReturnInspectionToken_(tradeId, qty, equipName, setName, isHeader) {
+  var tid = String(tradeId || '').trim();
+  var identity = [
+    String(equipName || '').trim(),
+    String(setName || '').trim(),
+    isHeader === true ? 'H' : 'R'
+  ].join('\u001f');
+  return 'v2|' + tid + '|' + dashboardReturnQtyToken_(qty) + '|' + dashboardReturnInspectionHash_(identity);
+}
+
+function dashboardReturnInspectionTradeId_(token) {
+  var parts = String(token || '').split('|');
+  return parts.length === 4 && parts[0] === 'v2' ? String(parts[1] || '').trim() : '';
+}
+
+function getDashboardPropertyValue_(props, key) {
+  if (props && typeof props.getProperty === 'function') return props.getProperty(key);
+  return props ? props[key] : null;
+}
+
+function getDashboardCheckinItemDefault_(
+  props, scheduleId, checkoutChecked, setupDoneForTrade,
+  tradeId, currentQty, equipName, setName, isHeader
+) {
   props = props || {};
   var checkinKey = 'itemCheck_' + String(scheduleId || '').trim() + '_checkin';
-  var checkinValue = props[checkinKey];
-  if (checkinValue === '1') return true;
-  if (checkinValue === '0') return false;
+  var checkinValue = getDashboardPropertyValue_(props, checkinKey);
+  if (String(checkinValue || '').indexOf('v2|') === 0) {
+    var checkinProof = checkinValue;
+    var currentProof = dashboardReturnInspectionToken_(tradeId, currentQty, equipName, setName, isHeader);
+    return !!checkinProof && checkinProof === currentProof;
+  }
 
-  // 반출 완료 후에도 반출 체크가 안 된 장비는 "안 가져간 장비"로 간주한다.
-  // 반납 화면에서는 회수 대상이 아니므로 기본 체크 처리한다.
-  return setupDoneForTrade === true && checkoutChecked !== true;
+  // 추정으로 반납을 완료 처리하지 않는다. 명시적으로 반납 체크된 행만 완료다.
+  // 반출 제외 품목은 원장에서 제거되므로, 남아 있는 행은 직원이 직접 확인해야 한다.
+  return false;
 }
 
 function dashboardSearchTradeMatches_(terms, group, cust, extra, checkInfo) {
@@ -2450,17 +2500,258 @@ function toggleSetupDone(tid, done) {
   var atKey = 'setupDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
-  var doneAt = "";
-  if (isDone) {
-    doneAt = formatDashboardDoneAt_(new Date());
-    props.setProperty(key, '1');
-    props.setProperty(atKey, doneAt);
-  } else {
-    props.deleteProperty(key);
-    props.deleteProperty(atKey);
+  var previousDone = props.getProperty(key);
+  var previousAt = props.getProperty(atKey);
+  var lock = LockService.getScriptLock();
+  var lockAcquired = false;
+  try {
+    lock.waitLock(10000);
+    lockAcquired = true;
+    var doneAt = "";
+    if (isDone) {
+      var ss = SpreadsheetApp.getActiveSpreadsheet();
+      var sched = ss.getSheetByName('스케줄상세');
+      if (!sched) return { error: '반출 기준선 저장 실패: 스케줄상세 시트 없음' };
+      var groups = getDashboardSearchGroupsForIds_(sched, [tid]);
+      var group = groups[tid];
+      var checkable = getDashboardReturnCheckableItems_(group && group.equipments || []);
+      var baseline = typeof supaCaptureCheckoutBaseline_ === 'function'
+        ? supaCaptureCheckoutBaseline_(tid, checkable, true)
+        : { ok: false, error: 'Supabase 반출 기준선 함수 없음' };
+      if (!baseline || !baseline.ok) {
+        return { error: '반출완료 차단: 불변 수량 기준선을 저장하지 못했습니다 — ' + String(baseline && baseline.error || '저장 실패') };
+      }
+      doneAt = formatDashboardDoneAt_(new Date());
+      var completed = {};
+      completed[key] = '1';
+      completed[atKey] = doneAt;
+      props.setProperties(completed, false);
+    } else {
+      // 반출완료를 화면에서 다시 열어도 이미 물리적으로 나간 수량 기준선은 지우지 않는다.
+      props.deleteProperty(key);
+      props.deleteProperty(atKey);
+    }
+    invalidateDashboardCache();
+    return { tid: tid, setupDone: isDone, setupDoneAt: doneAt, doneAt: doneAt };
+  } catch (err) {
+    // PropertyService 중간 실패 때 화면만 완료되거나 완료시각만 남지 않도록 원상 복구한다.
+    try {
+      if (previousDone === null) props.deleteProperty(key); else props.setProperty(key, previousDone);
+      if (previousAt === null) props.deleteProperty(atKey); else props.setProperty(atKey, previousAt);
+    } catch (rollbackErr) {}
+    return { error: err && err.message ? err.message : String(err) };
+  } finally {
+    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
   }
-  invalidateDashboardCache();
-  return { tid: tid, setupDone: isDone, setupDoneAt: doneAt, doneAt: doneAt };
+}
+
+function normalizeDashboardReturnSetKey_(value) {
+  return String(value || '').trim().replace(/\s+/g, '').toLowerCase();
+}
+
+function isDashboardRealReturnHeader_(header, rows) {
+  if (!header) return false;
+  var headerName = String(header.name || '').replace(/\s+/g, '');
+  if (!headerName) return false;
+  if (/세트|셋트|셋업|패키지|풀구성/.test(headerName)) return false;
+  var headerKey = normalizeDashboardReturnSetKey_(header.name);
+  for (var i = 0; i < rows.length; i++) {
+    var rowKey = normalizeDashboardReturnSetKey_(rows[i].name);
+    if (rowKey && (headerKey.indexOf(rowKey) >= 0 || rowKey.indexOf(headerKey) >= 0)) return false;
+  }
+  return true;
+}
+
+/** 대시보드와 같은 규칙으로 실제 반납 확인이 필요한 행만 뽑는다. */
+function getDashboardReturnCheckableItems_(equipments) {
+  var out = [];
+  var groups = {};
+  var order = [];
+  (equipments || []).forEach(function(eq) {
+    var setName = String(eq.setName || '').trim();
+    if (!setName) {
+      out.push(eq);
+      return;
+    }
+    var key = normalizeDashboardReturnSetKey_(setName);
+    if (!groups[key]) {
+      groups[key] = { headers: [], rows: [] };
+      order.push(key);
+    }
+    if (eq.isHeader) groups[key].headers.push(eq);
+    else groups[key].rows.push(eq);
+  });
+
+  order.forEach(function(key) {
+    var group = groups[key];
+    if (group.rows.length === 0) {
+      group.headers.forEach(function(header) { out.push(header); });
+      return;
+    }
+    group.headers.forEach(function(header) {
+      if (isDashboardRealReturnHeader_(header, group.rows)) out.push(header);
+    });
+    group.rows.forEach(function(row) { out.push(row); });
+  });
+  return out;
+}
+
+/**
+ * 서버 최종 방어선: 모든 실제 품목에 명시적 반납 체크가 있어야 계약을 닫는다.
+ * 클라이언트 화면을 우회한 호출과 레거시 화면에도 동일하게 적용된다.
+ */
+function assertDashboardReturnComplete_(tid, props) {
+  props = props || PropertiesService.getScriptProperties();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  if (!schedSheet) return { error: '반납완료 차단: 스케줄상세 시트를 찾을 수 없습니다: ' + tid };
+
+  // dashboard 검색 그룹은 취소 행을 화면에서 제외한다. 서버 완료 검증까지 그 필터를
+  // 그대로 쓰면 품목을 취소로 바꿔 숨긴 뒤 계약을 닫을 수 있으므로 원본 행을 먼저 본다.
+  if (schedSheet.getLastRow() >= 2) {
+    var rawRows = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getDisplayValues();
+    var cancelledItems = rawRows.filter(function(row) {
+      return String(row[1] || '').trim() === tid && String(row[9] || '').trim() === '취소';
+    }).map(function(row) {
+      return { scheduleId: String(row[0] || '').trim(), name: String(row[3] || '').trim() || '(장비명 없음)' };
+    });
+    if (cancelledItems.length) {
+      return {
+        error: '반납완료 차단: 취소 표시 품목 ' + cancelledItems.length + '건 — ' + cancelledItems.slice(0, 5).map(function(eq) { return eq.name; }).join(', '),
+        cancelled: cancelledItems
+      };
+    }
+  }
+
+  var groups = getDashboardSearchGroupsForIds_(schedSheet, [tid]);
+  var group = groups[tid];
+  if (!group || !group.equipments || !group.equipments.length) {
+    return { error: '반납완료 차단: 확인할 품목 기록이 없습니다: ' + tid };
+  }
+
+  var currentCheckable = getDashboardReturnCheckableItems_(group.equipments);
+  var durable = typeof supaGetTradeReturnCounts_ === 'function'
+    ? supaGetTradeReturnCounts_(tid)
+    : { ok: false, error: '상세 수량 저장소 연결 함수 없음', returnCounts: {}, scheduleItems: [] };
+  if (!durable || !durable.ok) {
+    return {
+      error: '반납완료 차단: 정상/파손/분실 상세 수량을 확인하지 못했습니다 — ' + String(durable && durable.error || '조회 실패')
+    };
+  }
+  // 반출 순간 taken_qty가 고정된 Supabase 행이 불변 기준선이다. 현재 시트 qty/name을
+  // 기준으로 삼으면 6→5 수정이나 행 삭제 뒤 5/5로 닫는 사고가 재발한다.
+  var checkable = (durable.scheduleItems || []).filter(function(item) {
+    return item.checkout_state !== 'excluded' && Number(item.taken_qty || 0) > 0;
+  }).map(function(item) {
+    return {
+      scheduleId: String(item.schedule_id || '').trim(),
+      name: String(item.name || '').trim(),
+      qty: Number(item.taken_qty || 0),
+      setName: String(item.set_name || '').trim(),
+      isHeader: !!item.is_set_header,
+      isComponent: !!item.is_component
+    };
+  });
+  if (!checkable.length) {
+    return { error: '반납완료 차단: 반출 순간의 불변 수량 기준선(taken_qty)이 없습니다: ' + tid };
+  }
+
+  var currentById = {};
+  currentCheckable.forEach(function(eq) { currentById[String(eq.scheduleId || '').trim()] = eq; });
+  var baselineById = {};
+  checkable.forEach(function(eq) { baselineById[eq.scheduleId] = eq; });
+  var identityChanged = checkable.filter(function(baseline) {
+    var current = currentById[baseline.scheduleId];
+    if (!current) return true;
+    var currentQty = Number(String(current.qty || 1).replace(/[^0-9.]/g, '')) || 1;
+    return currentQty !== baseline.qty ||
+      String(current.name || '').trim() !== baseline.name ||
+      String(current.setName || '').trim() !== baseline.setName ||
+      !!current.isHeader !== !!baseline.isHeader;
+  }).concat(currentCheckable.filter(function(current) {
+    return !baselineById[String(current.scheduleId || '').trim()];
+  }));
+  if (identityChanged.length) {
+    return {
+      error: '반납완료 차단: 반출 기준선과 달라진/삭제·추가된 품목 ' + identityChanged.length + '건 — ' +
+        identityChanged.slice(0, 5).map(function(eq) { return eq.name || eq.scheduleId; }).join(', '),
+      identityChanged: identityChanged
+    };
+  }
+  var incomplete = checkable.filter(function(eq) {
+    var expected = Number(String(eq.qty || 1).replace(/[^0-9.]/g, '')) || 1;
+    var count = durable.returnCounts && durable.returnCounts[eq.scheduleId] || {};
+    var accounted = Number(count.good || 0) + Number(count.damaged || 0) + Number(count.lost || 0);
+    var proofMatches = getDashboardCheckinItemDefault_(
+      props, eq.scheduleId, false, false,
+      tid, eq.qty, eq.name, eq.setName, eq.isHeader
+    );
+    return !proofMatches || accounted !== expected;
+  }).map(function(eq) {
+    var count = durable.returnCounts && durable.returnCounts[eq.scheduleId] || {};
+    var accounted = Number(count.good || 0) + Number(count.damaged || 0) + Number(count.lost || 0);
+    return {
+      scheduleId: eq.scheduleId,
+      name: eq.name,
+      expected: Number(String(eq.qty || 1).replace(/[^0-9.]/g, '')) || 1,
+      accounted: accounted
+    };
+  });
+
+  if (incomplete.length) {
+    return {
+      error: '반납완료 차단: 미확인 품목 ' + incomplete.length + '건 — ' + incomplete.slice(0, 5).map(function(eq) { return eq.name; }).join(', '),
+      incomplete: incomplete
+    };
+  }
+  return { success: true, checkedCount: checkable.length };
+}
+
+/** 수량 정정 시 과거 이진 체크와 거래 완료를 무효화해 새 수량으로 재검수하게 한다. */
+function invalidateDashboardReturnInspectionForTrade_(tid, scheduleIds, reason) {
+  try {
+    tid = String(tid || '').trim();
+    if (!tid) return { error: '반납 검수 무효화 실패: 거래ID 없음' };
+    var props = PropertiesService.getScriptProperties();
+    (scheduleIds || []).forEach(function(scheduleId) {
+      var sid = String(scheduleId || '').trim();
+      if (!sid) return;
+      props.deleteProperty('itemCheck_' + sid + '_checkin');
+      props.deleteProperty('itemCheckQty_' + sid + '_checkin');
+      props.deleteProperty('itemCheckProof_' + sid + '_checkin');
+    });
+
+    var shouldReopen = props.getProperty('returnDone_' + tid) === '1';
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var contractSheet = ss.getSheetByName('계약마스터');
+    if (contractSheet && contractSheet.getLastRow() >= 2) {
+      var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getDisplayValues();
+      for (var i = 0; i < rows.length; i++) {
+        if (String(rows[i][0] || '').trim() !== tid) continue;
+        if (String(rows[i][9] || '').trim() === '반납완료') shouldReopen = true;
+        break;
+      }
+    }
+
+    var reopenedStatus = '';
+    if (shouldReopen) {
+      var reopened = setDashboardReturnContractStatus_(tid, false, props);
+      if (reopened && reopened.error) return reopened;
+      reopenedStatus = String(reopened && reopened.status || '').trim();
+    }
+    props.deleteProperty('returnDone_' + tid);
+    props.deleteProperty('returnDoneAt_' + tid);
+    invalidateDashboardCache();
+    return {
+      success: true,
+      tradeId: tid,
+      reopened: shouldReopen,
+      contractStatus: reopenedStatus,
+      reason: String(reason || '')
+    };
+  } catch (err) {
+    return { error: '반납 검수 무효화 실패: ' + (err && err.message ? err.message : String(err)) };
+  }
 }
 
 /**
@@ -2475,34 +2766,73 @@ function toggleReturnDone(tid, done) {
   var isDone = done === true || done === "true" || done === "1" || done === 1;
 
   var lock = LockService.getScriptLock();
-  try { lock.waitLock(5000); } catch (lockErr) {}
+  var lockAcquired = false;
+  try {
+    lock.waitLock(5000);
+    lockAcquired = true;
+  } catch (lockErr) {
+    return { error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.' };
+  }
 
   try {
+    var previousDone = props.getProperty(key);
+    var previousDoneAt = props.getProperty(atKey);
     var contractResult = setDashboardReturnContractStatus_(tid, isDone, props);
     if (contractResult && contractResult.error) return contractResult;
 
-    var doneAt = "";
-    if (isDone) {
-      doneAt = formatDashboardDoneAt_(new Date());
-      props.setProperty(key, '1');
-      props.setProperty(atKey, doneAt);
-    } else {
-      props.deleteProperty(key);
-      props.deleteProperty(atKey);
+    try {
+      var doneAt = "";
+      if (isDone) {
+        doneAt = formatDashboardDoneAt_(new Date());
+        props.setProperty(key, '1');
+        props.setProperty(atKey, doneAt);
+        // quota 정리는 완료 커밋의 필수 조건이 아니다. 실패해도 체크 증거를 보존한 채 로그만 남긴다.
+        try { clearDashboardCheckoutItemChecks_(tid, props); } catch (cleanupErr) {
+          Logger.log('반출 체크 정리 실패(완료 유지): ' + cleanupErr.message);
+        }
+      } else {
+        props.deleteProperty(key);
+        props.deleteProperty(atKey);
+      }
+      invalidateDashboardCache();
+      return {
+        tid: tid,
+        returnDone: isDone,
+        returnDoneAt: doneAt,
+        doneAt: doneAt,
+        contractStatus: contractResult.status,
+        previousContractStatus: contractResult.previousStatus || '',
+        row: contractResult.row
+      };
+    } catch (postErr) {
+      // 속성 저장이 실패했는데 J열만 반납완료로 남지 않도록 보상 트랜잭션을 수행한다.
+      try {
+        if (previousDone === null) props.deleteProperty(key); else props.setProperty(key, previousDone);
+        if (previousDoneAt === null) props.deleteProperty(atKey); else props.setProperty(atKey, previousDoneAt);
+      } catch (restorePropErr) {}
+      try { rollbackDashboardReturnContractStatus_(contractResult, props); } catch (rollbackErr) {
+        return { error: '반납 상태 저장 및 원상복구 실패: ' + rollbackErr.message };
+      }
+      invalidateDashboardCache();
+      return { error: '반납 상태 저장 실패(원상복구): ' + (postErr && postErr.message ? postErr.message : String(postErr)) };
     }
-    invalidateDashboardCache();
-    return {
-      tid: tid,
-      returnDone: isDone,
-      returnDoneAt: doneAt,
-      doneAt: doneAt,
-      contractStatus: contractResult.status,
-      previousContractStatus: contractResult.previousStatus || '',
-      row: contractResult.row
-    };
   } finally {
-    try { lock.releaseLock(); } catch (releaseErr) {}
+    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
   }
+}
+
+/** 반납이 확정된 거래의 반출 체크 키는 더 이상 필요 없으므로 누적 quota에서 제거한다. */
+function clearDashboardCheckoutItemChecks_(tid, props) {
+  props = props || PropertiesService.getScriptProperties();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sched = ss.getSheetByName('스케줄상세');
+  if (!sched) return;
+  var groups = getDashboardSearchGroupsForIds_(sched, [tid]);
+  var group = groups[tid];
+  (group && group.equipments || []).forEach(function(eq) {
+    var sid = String(eq.scheduleId || '').trim();
+    if (sid) props.deleteProperty('itemCheck_' + sid + '_checkout');
+  });
 }
 
 function formatDashboardDoneAt_(date) {
@@ -2511,6 +2841,10 @@ function formatDashboardDoneAt_(date) {
 
 function setDashboardReturnContractStatus_(tid, isDone, props) {
   props = props || PropertiesService.getScriptProperties();
+  if (isDone) {
+    var completionCheck = assertDashboardReturnComplete_(tid, props);
+    if (completionCheck && completionCheck.error) return completionCheck;
+  }
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName('계약마스터');
   if (!sheet || sheet.getLastRow() < 2) return { error: "계약마스터 시트 없음" };
@@ -2522,33 +2856,60 @@ function setDashboardReturnContractStatus_(tid, isDone, props) {
     var row = i + 2;
     var prevKey = 'returnPrevContractStatus_' + tid;
     var currentStatus = String(sheet.getRange(row, 10).getDisplayValue() || '').trim();
+    var previousPrevStatus = props.getProperty(prevKey);
     var nextStatus;
+    try {
+      if (isDone) {
+        if (currentStatus === '취소') {
+          return { error: '취소 처리된 계약은 반납완료로 바꿀 수 없습니다: ' + tid };
+        }
+        // 중복 완료 요청이 실제 이전 상태를 '반납완료'로 덮지 않게 한다.
+        if (currentStatus && currentStatus !== '반납완료') {
+          props.setProperty(prevKey, currentStatus);
+        }
+        nextStatus = '반납완료';
+      } else {
+        nextStatus = props.getProperty(prevKey) || '반출';
+        props.deleteProperty(prevKey);
+      }
 
-    if (isDone) {
-      if (currentStatus === '취소') {
-        return { error: '취소 처리된 계약은 반납완료로 바꿀 수 없습니다: ' + tid };
-      }
-      if (currentStatus && currentStatus !== '반납완료') {
-        props.setProperty(prevKey, currentStatus);
-      }
-      nextStatus = '반납완료';
-    } else {
-      nextStatus = props.getProperty(prevKey) || '반출';
-      props.deleteProperty(prevKey);
+      sheet.getRange(row, 10).setValue(nextStatus); // J열: 계약상태
+      applyContractMasterStatusRowStyle_(sheet, row, nextStatus);
+      return {
+        success: true,
+        tradeId: tid,
+        row: row,
+        previousStatus: currentStatus,
+        previousPrevStatus: previousPrevStatus,
+        status: nextStatus
+      };
+    } catch (statusErr) {
+      // J열만 닫힌 채 API가 실패로 끝나는 부분 커밋을 되돌린다.
+      try { sheet.getRange(row, 10).setValue(currentStatus); } catch (rollbackValueErr) {}
+      try { applyContractMasterStatusRowStyle_(sheet, row, currentStatus); } catch (rollbackStyleErr) {}
+      try {
+        if (previousPrevStatus === null) props.deleteProperty(prevKey);
+        else props.setProperty(prevKey, previousPrevStatus);
+      } catch (rollbackPropErr) {}
+      return { error: '계약상태 변경 실패(원상복구): ' + (statusErr && statusErr.message ? statusErr.message : String(statusErr)) };
     }
-
-    sheet.getRange(row, 10).setValue(nextStatus); // J열: 계약상태
-    applyContractMasterStatusRowStyle_(sheet, row, nextStatus);
-    return {
-      success: true,
-      tradeId: tid,
-      row: row,
-      previousStatus: currentStatus,
-      status: nextStatus
-    };
   }
 
   return { error: "계약마스터에서 거래ID를 찾지 못했습니다: " + tid };
+}
+
+/** 완료 후속 저장 실패 시 계약마스터 상태와 이전상태 포인터를 보상 복구한다. */
+function rollbackDashboardReturnContractStatus_(result, props) {
+  if (!result || !result.success || !result.tradeId || !result.row) return;
+  props = props || PropertiesService.getScriptProperties();
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
+  if (!sheet) throw new Error('계약마스터 시트 없음');
+  var previousStatus = String(result.previousStatus || '').trim() || '반출';
+  sheet.getRange(result.row, 10).setValue(previousStatus);
+  applyContractMasterStatusRowStyle_(sheet, result.row, previousStatus);
+  var prevKey = 'returnPrevContractStatus_' + result.tradeId;
+  if (result.previousPrevStatus === null || result.previousPrevStatus === undefined) props.deleteProperty(prevKey);
+  else props.setProperty(prevKey, result.previousPrevStatus);
 }
 
 function applyContractMasterStatusRowStyle_(sheet, row, status) {
@@ -2627,8 +2988,8 @@ function isCancelStyleFromFormats_(backgrounds, fontColors) {
 }
 
 /**
- * 계약마스터에서 반납일이 기준일보다 지난 건을 반납완료 처리한다.
- * 기준: 반납일 < asOfDate, 취소/반납완료는 제외.
+ * 계약마스터에서 반납일이 기준일보다 지난 미마감 건을 점검 목록으로 반환한다.
+ * 날짜 경과는 검수 완료 증거가 아니므로 이 함수는 계약상태를 절대 변경하지 않는다.
  */
 function markOverdueReturnContracts(asOfDate, dryRun) {
   var asOfSerial = parseContractDateSerial_(asOfDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd'), '');
@@ -2684,39 +3045,18 @@ function markOverdueReturnContracts(asOfDate, dryRun) {
     });
   }
 
-  if (dryRun === true || dryRun === 'true' || dryRun === '1') {
-    return {
-      success: true,
-      dryRun: true,
-      asOfDate: formatContractDateSerial_(asOfSerial),
-      cutoffExclusive: formatContractDateSerial_(asOfSerial),
-      targetCount: targets.length,
-      skipped: skipped,
-      targetsPreview: targets.slice(0, 50)
-    };
-  }
-
-  var lock = LockService.getScriptLock();
-  try { lock.waitLock(10000); } catch (lockErr) {}
-
-  try {
-    targets.forEach(function(target) {
-      sheet.getRange(target.row, 10).setValue('반납완료'); // J열: 계약상태
-      applyContractMasterStatusRowStyle_(sheet, target.row, '반납완료');
-    });
-    invalidateDashboardCache();
-    return {
-      success: true,
-      dryRun: false,
-      asOfDate: formatContractDateSerial_(asOfSerial),
-      cutoffExclusive: formatContractDateSerial_(asOfSerial),
-      updated: targets.length,
-      skipped: skipped,
-      updatedPreview: targets.slice(0, 50)
-    };
-  } finally {
-    try { lock.releaseLock(); } catch (releaseErr) {}
-  }
+  return {
+    success: true,
+    dryRun: true,
+    reportOnly: true,
+    note: '반납일이 지난 미마감 거래 점검 목록입니다. 품목 검수 없이 반납완료 처리하지 않습니다.',
+    asOfDate: formatContractDateSerial_(asOfSerial),
+    cutoffExclusive: formatContractDateSerial_(asOfSerial),
+    targetCount: targets.length,
+    updated: 0,
+    skipped: skipped,
+    targetsPreview: targets.slice(0, 50)
+  };
 }
 
 function inspectContractCancelRecovery(asOfDate) {
@@ -2906,6 +3246,36 @@ function formatContractDateSerial_(serial) {
   return y + '-' + ('0' + m).slice(-2) + '-' + ('0' + d).slice(-2);
 }
 
+function getDashboardScheduleInspectionContext_(scheduleId) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('스케줄상세');
+  if (!sheet || sheet.getLastRow() < 2) return null;
+  var finder = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1)
+    .createTextFinder(String(scheduleId || '').trim())
+    .matchEntireCell(true);
+  var cell = finder.findNext();
+  if (!cell) return null;
+  var row = sheet.getRange(cell.getRow(), 1, 1, 5).getDisplayValues()[0];
+  var tradeId = String(row[1] || '').trim();
+  var setName = String(row[2] || '').trim();
+  var equipName = String(row[3] || '').trim();
+  var isHeader = !setName || setName === equipName;
+  return {
+    tradeId: tradeId,
+    qty: Number(String(row[4] || 1).replace(/[^0-9.]/g, '')) || 1,
+    name: equipName,
+    setName: setName,
+    isHeader: isHeader,
+    isComponent: !!setName && setName !== equipName,
+    token: dashboardReturnInspectionToken_(tradeId, row[4], equipName, setName, isHeader)
+  };
+}
+
+function getDashboardScheduleInspectionToken_(scheduleId) {
+  var context = getDashboardScheduleInspectionContext_(scheduleId);
+  return context ? context.token : '';
+}
+
 /**
  * 개별 장비 행 체크 토글 (Dashboard 체크리스트).
  * @param {string} scheduleId — 스케줄상세 A열 ID (e.g., "260423-001-01")
@@ -2915,20 +3285,103 @@ function formatContractDateSerial_(serial) {
 function toggleItemCheck(scheduleId, phase, done) {
   if (!scheduleId || !phase) return { error: "scheduleId/phase 필수" };
   if (phase !== 'checkout' && phase !== 'checkin') return { error: "phase는 checkout/checkin" };
-  var key = 'itemCheck_' + String(scheduleId).trim() + '_' + phase;
-  var props = PropertiesService.getScriptProperties();
-  var isDone = done === true || done === "true" || done === "1" || done === 1;
-  if (isDone) {
-    props.setProperty(key, '1');
-  } else if (phase === 'checkin') {
-    // 반납 체크는 "반출 미체크 장비 = 반납 기본 체크" 규칙이 있으므로
-    // 직원이 반납 화면에서 직접 해제한 상태를 명시적으로 보존해야 한다.
-    props.setProperty(key, '0');
-  } else {
-    props.deleteProperty(key);
+  scheduleId = String(scheduleId).trim();
+  var lock = LockService.getScriptLock();
+  var lockAcquired = false;
+  try {
+    lock.waitLock(5000);
+    lockAcquired = true;
+
+    var key = 'itemCheck_' + scheduleId + '_' + phase;
+    var checkinQtyKey = 'itemCheckQty_' + scheduleId + '_checkin'; // 레거시 정리용
+    var props = PropertiesService.getScriptProperties();
+    var isDone = done === true || done === "true" || done === "1" || done === 1;
+    var context = getDashboardScheduleInspectionContext_(scheduleId);
+    if (phase === 'checkout' && context && context.tradeId) {
+      var checkoutBaseline = typeof supaGetCheckoutBaselineState_ === 'function'
+        ? supaGetCheckoutBaselineState_(context.tradeId)
+        : { ok: false, error: '반출 기준선 조회 함수 없음', items: [] };
+      if (!checkoutBaseline || !checkoutBaseline.ok) {
+        return { error: '반출 체크 변경 차단: 불변 기준선을 확인하지 못했습니다 — ' + String(checkoutBaseline && checkoutBaseline.error || '조회 실패') };
+      }
+      var alreadyCaptured = (checkoutBaseline.items || []).some(function(item) {
+        return String(item.schedule_id || '').trim() === scheduleId;
+      });
+      if (alreadyCaptured) {
+        return { error: '반출 체크 변경 차단: 이미 고정된 반출 기준선입니다: ' + scheduleId };
+      }
+    }
+    if (isDone) {
+      if (phase === 'checkin') {
+        if (!context || !context.token || !context.tradeId) {
+          return { error: '반납 체크 실패: 현재 스케줄 행을 찾을 수 없습니다: ' + scheduleId };
+        }
+        var durable = typeof supaGetTradeReturnCounts_ === 'function'
+          ? supaGetTradeReturnCounts_(context.tradeId)
+          : { ok: false, error: '상세 수량 저장소 연결 함수 없음', returnCounts: {} };
+        if (!durable || !durable.ok) {
+          return { error: '반납 체크 실패: 정상/파손/분실 상세 수량 조회 실패 — ' + String(durable && durable.error || '조회 실패') };
+        }
+        var baselineItem = (durable.scheduleItems || []).filter(function(item) {
+          return String(item.schedule_id || '').trim() === scheduleId && Number(item.taken_qty || 0) > 0;
+        })[0];
+        if (!baselineItem) {
+          return { error: '반납 체크 실패: 반출 순간의 불변 수량 기준선이 없습니다: ' + scheduleId };
+        }
+        var baselineQty = Number(baselineItem.taken_qty || 0);
+        if (
+          baselineQty !== context.qty ||
+          String(baselineItem.name || '').trim() !== String(context.name || '').trim() ||
+          String(baselineItem.set_name || '').trim() !== String(context.setName || '').trim()
+        ) {
+          return { error: '반납 체크 실패: 현재 품목이 반출 기준선과 달라졌습니다: ' + scheduleId };
+        }
+        var durableCount = durable.returnCounts && durable.returnCounts[scheduleId] || {};
+        var accounted = Number(durableCount.good || 0) + Number(durableCount.damaged || 0) + Number(durableCount.lost || 0);
+        if (accounted !== baselineQty) {
+          return {
+            error: '반납 체크 실패: 상세 수량 불일치 — 반출 ' + baselineQty + ' / 확인 ' + accounted,
+            expected: baselineQty,
+            accounted: accounted
+          };
+        }
+        props.setProperty(key, context.token);
+        props.deleteProperty(checkinQtyKey);
+        props.deleteProperty('itemCheckProof_' + scheduleId + '_checkin');
+      } else {
+        if (!context || !context.tradeId) {
+          return { error: '반출 체크 실패: 현재 스케줄 행을 찾을 수 없습니다: ' + scheduleId };
+        }
+        props.setProperty(key, '1');
+      }
+    } else if (phase === 'checkin') {
+      var proofTradeId = context && context.tradeId
+        ? context.tradeId
+        : dashboardReturnInspectionTradeId_(props.getProperty(key));
+      if (!proofTradeId) {
+        return { error: '반납 체크 해제 실패: 거래ID를 확인할 수 없습니다: ' + scheduleId };
+      }
+      // 같은 ScriptLock 안에서 증거 제거와 계약 재오픈을 함께 처리한다.
+      var invalidated = invalidateDashboardReturnInspectionForTrade_(
+        proofTradeId, [scheduleId], '반납 수량 미완료 전환'
+      );
+      if (invalidated && invalidated.error) return invalidated;
+    } else {
+      props.deleteProperty(key);
+    }
+    invalidateDashboardCache();
+    return {
+      scheduleId: scheduleId,
+      phase: phase,
+      checked: isDone,
+      tradeId: context && context.tradeId || '',
+      reopened: !!(invalidated && invalidated.reopened)
+    };
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err) };
+  } finally {
+    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
   }
-  invalidateDashboardCache();
-  return { scheduleId: scheduleId, phase: phase, checked: isDone };
 }
 
 /**
@@ -3111,7 +3564,13 @@ function updateDashboardContractStatus(tradeId, status) {
   if (!allowed[status]) return { error: "계약상태는 예약/반출/취소/반납완료만 허용" };
 
   var lock = LockService.getScriptLock();
-  try { lock.waitLock(5000); } catch (lockErr) {}
+  var lockAcquired = false;
+  try {
+    lock.waitLock(5000);
+    lockAcquired = true;
+  } catch (lockErr) {
+    return { error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.' };
+  }
 
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -3127,12 +3586,41 @@ function updateDashboardContractStatus(tradeId, status) {
         if (status === "반납완료" && currentStatus === "취소") {
           return { error: "취소 처리된 계약은 반납완료로 바꿀 수 없습니다: " + tradeId };
         }
-
-        sheet.getRange(row, 10).setValue(status); // J열: 계약상태
+        if (status === "반납완료") {
+          var closeProps = PropertiesService.getScriptProperties();
+          var previousDone = closeProps.getProperty('returnDone_' + tradeId);
+          var previousDoneAt = closeProps.getProperty('returnDoneAt_' + tradeId);
+          var contractResult = setDashboardReturnContractStatus_(tradeId, true, closeProps);
+          if (contractResult && contractResult.error) return contractResult;
+          try {
+            var doneAt = formatDashboardDoneAt_(new Date());
+            closeProps.setProperty('returnDone_' + tradeId, '1');
+            closeProps.setProperty('returnDoneAt_' + tradeId, doneAt);
+            try { clearDashboardCheckoutItemChecks_(tradeId, closeProps); } catch (cleanupErr) {
+              Logger.log('반출 체크 정리 실패(완료 유지): ' + cleanupErr.message);
+            }
+            invalidateDashboardCache();
+            return { success: true, tradeId: tradeId, status: status, row: contractResult.row, returnDoneAt: doneAt };
+          } catch (closeErr) {
+            try {
+              if (previousDone === null) closeProps.deleteProperty('returnDone_' + tradeId);
+              else closeProps.setProperty('returnDone_' + tradeId, previousDone);
+              if (previousDoneAt === null) closeProps.deleteProperty('returnDoneAt_' + tradeId);
+              else closeProps.setProperty('returnDoneAt_' + tradeId, previousDoneAt);
+            } catch (restorePropErr) {}
+            try { rollbackDashboardReturnContractStatus_(contractResult, closeProps); } catch (rollbackErr) {
+              return { error: '반납완료 저장 및 원상복구 실패: ' + rollbackErr.message };
+            }
+            invalidateDashboardCache();
+            return { error: '반납완료 저장 실패(원상복구): ' + closeErr.message };
+          }
+        }
 
         if (status === "취소") {
+          sheet.getRange(row, 10).setValue(status); // J열: 계약상태
           var cancelProps = PropertiesService.getScriptProperties();
           cancelProps.deleteProperty('returnDone_' + tradeId);
+          cancelProps.deleteProperty('returnDoneAt_' + tradeId);
           cancelProps.deleteProperty('returnPrevContractStatus_' + tradeId);
           cancelContract(ss, tradeId, row);
           invalidateDashboardCache();
@@ -3140,24 +3628,34 @@ function updateDashboardContractStatus(tradeId, status) {
         }
 
         var props = PropertiesService.getScriptProperties();
-        if (status === "반납완료") {
-          props.setProperty('returnDone_' + tradeId, '1');
-          props.setProperty('returnPrevContractStatus_' + tradeId, currentStatus || '반출');
-        } else {
+        var oldDone = props.getProperty('returnDone_' + tradeId);
+        var oldDoneAt = props.getProperty('returnDoneAt_' + tradeId);
+        var oldPrev = props.getProperty('returnPrevContractStatus_' + tradeId);
+        try {
           props.deleteProperty('returnDone_' + tradeId);
+          props.deleteProperty('returnDoneAt_' + tradeId);
           props.deleteProperty('returnPrevContractStatus_' + tradeId);
+          sheet.getRange(row, 10).setValue(status); // J열: 계약상태
+          applyContractMasterStatusRowStyle_(sheet, row, status);
+          invalidateDashboardCache();
+          return { success: true, tradeId: tradeId, status: status, row: row };
+        } catch (statusErr) {
+          try { sheet.getRange(row, 10).setValue(currentStatus); } catch (rollbackValueErr) {}
+          try { applyContractMasterStatusRowStyle_(sheet, row, currentStatus); } catch (rollbackStyleErr) {}
+          try {
+            if (oldDone === null) props.deleteProperty('returnDone_' + tradeId); else props.setProperty('returnDone_' + tradeId, oldDone);
+            if (oldDoneAt === null) props.deleteProperty('returnDoneAt_' + tradeId); else props.setProperty('returnDoneAt_' + tradeId, oldDoneAt);
+            if (oldPrev === null) props.deleteProperty('returnPrevContractStatus_' + tradeId); else props.setProperty('returnPrevContractStatus_' + tradeId, oldPrev);
+          } catch (rollbackPropErr) {}
+          return { error: '계약상태 변경 실패(원상복구): ' + statusErr.message };
         }
-
-        applyContractMasterStatusRowStyle_(sheet, row, status);
-        invalidateDashboardCache();
-        return { success: true, tradeId: tradeId, status: status, row: row };
       }
     }
     return { error: "계약마스터에서 거래ID를 찾지 못했습니다" };
   } catch (err) {
     return { error: err.message };
   } finally {
-    try { lock.releaseLock(); } catch (releaseErr) {}
+    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
   }
 }
 
@@ -5587,6 +6085,44 @@ function deleteDashboardRowsDescending_(sheet, rows) {
   flush_();
 }
 
+/** 반출이 시작된 거래에서는 품목 삭제가 분실/미반납 증거를 지울 수 있으므로 금지한다. */
+function isDashboardTradeCheckoutStarted_(ss, tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return false;
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('setupDone_' + tid) === '1' || props.getProperty('returnDone_' + tid) === '1') return true;
+
+  var master = ss.getSheetByName('계약마스터');
+  if (master && master.getLastRow() >= 2) {
+    var masterRows = master.getRange(2, 1, master.getLastRow() - 1, 10).getDisplayValues();
+    for (var i = 0; i < masterRows.length; i++) {
+      if (String(masterRows[i][0] || '').trim() !== tid) continue;
+      var contractStatus = String(masterRows[i][9] || '').trim();
+      if (contractStatus === '반출' || contractStatus === '반출중' || contractStatus === '반납완료') return true;
+      break;
+    }
+  }
+
+  var sched = ss.getSheetByName('스케줄상세');
+  if (sched && sched.getLastRow() >= 2) {
+    var schedRows = sched.getRange(2, 2, sched.getLastRow() - 1, 9).getDisplayValues();
+    for (var j = 0; j < schedRows.length; j++) {
+      if (String(schedRows[j][0] || '').trim() !== tid) continue;
+      var rowStatus = String(schedRows[j][8] || '').trim();
+      if (rowStatus === '반출중' || rowStatus === '반납완료') return true;
+    }
+  }
+  // 완료 체크를 다시 열어도 taken_qty 기준선은 물리 반출 사실로 남는다.
+  // 조회 장애를 '아직 반출 안 함'으로 오인하면 기준 수량을 바꿀 수 있으므로 실패 시에도 편집을 막는다.
+  if (typeof supaGetCheckoutBaselineState_ !== 'function') return true;
+  var durable = supaGetCheckoutBaselineState_(tid);
+  if (!durable || !durable.ok) {
+    try { Logger.log('반출 기준선 확인 실패로 편집 차단: ' + tid + ' / ' + String(durable && durable.error || '함수 오류')); } catch (e) {}
+    return true;
+  }
+  return !!durable.started;
+}
+
 function dashboardAddEquipments(tid, entries, options) {
   tid = String(tid || "").trim();
   var addEntries = normalizeDashboardAddEntries_(entries);
@@ -5608,6 +6144,8 @@ function dashboardAddEquipments(tid, entries, options) {
   // 세트 전개·단가는 입력명이 세트마스터와 정확히 맞을 때만 적용된다.
   var rawNames = options.rawNames;
   rawNames = !(rawNames === false || rawNames === 0 || rawNames === "0" || rawNames === "false");
+  var forceZeroPrice = options.forceZeroPrice === true || options.forceZeroPrice === 1 ||
+    options.forceZeroPrice === "1" || options.forceZeroPrice === "true";
   var profileStart = Date.now();
   var profileMarks = [];
   function markProfile_(step) {
@@ -5698,7 +6236,7 @@ function dashboardAddEquipments(tid, entries, options) {
         name: entry.name,
         qty: entry.qty,
         components: components,
-        price: setLookup.prices[entry.name] || 0,
+        price: forceZeroPrice ? 0 : (setLookup.prices[entry.name] || 0),
         isSetMasterItem: !!(setLookup.items && setLookup.items[entry.name])
       });
       availabilityItems = availabilityItems.concat(buildAvailabilityItems_(entry.name, entry.qty, components));
@@ -5771,6 +6309,12 @@ function dashboardAddEquipments(tid, entries, options) {
       });
     }
 
+    var addedScheduleIds = newRows.map(function(newRow) { return String(newRow[0] || '').trim(); }).filter(Boolean);
+    var addInvalidated = invalidateDashboardReturnInspectionForTrade_(
+      tid, addedScheduleIds, '스케줄 품목 추가'
+    );
+    if (addInvalidated && addInvalidated.error) return attachProfile_(addInvalidated);
+
     var insertRow = lastTidRow + 1;
     var hadFollowingRow = insertRow <= lastRow;
     if (insertRow <= lastRow) {
@@ -5780,6 +6324,32 @@ function dashboardAddEquipments(tid, entries, options) {
     markProfile_('write_new_rows');
     applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidRow, hadFollowingRow);
     markProfile_('format_new_rows');
+    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+      var addedBaselineItems = getDashboardReturnCheckableItems_(newRows.map(function(row) {
+        var setName = String(row[2] || '').trim();
+        var name = String(row[3] || '').trim();
+        return {
+          scheduleId: String(row[0] || '').trim(), name: name, qty: row[4], setName: setName,
+          isHeader: !setName || setName === name, isComponent: !!setName && setName !== name, onsite: true
+        };
+      }));
+      var baselineSaved = supaCaptureCheckoutBaseline_(tid, addedBaselineItems);
+      if (!baselineSaved || !baselineSaved.ok) {
+        var rollbackError = '';
+        try {
+          var insertedRows = [];
+          for (var rb = 0; rb < newRows.length; rb++) insertedRows.push(insertRow + rb);
+          deleteDashboardRowsDescending_(sched, insertedRows);
+        } catch (rollbackErr) {
+          rollbackError = ' / 시트 롤백도 실패하여 수동 확인 필요: ' + String(rollbackErr && rollbackErr.message || rollbackErr);
+        }
+        invalidateDashboardCacheForTrade_(tid);
+        return attachProfile_({
+          error: '현장 추가 반출 기준선 저장 실패 — 추가 행을 완료 처리하지 않았습니다: ' +
+            String(baselineSaved && baselineSaved.error || '저장 실패') + rollbackError
+        });
+      }
+    }
     var contractResult = null;
     var contractRegenPending = true;
     var contractRegenError = "";
@@ -5833,10 +6403,13 @@ function dashboardAddEquipments(tid, entries, options) {
 
 function dashboardRecordOnsiteAddon(tid, entries, options) {
   options = options || {};
+  var settlementStatus = String(options.settlementStatus || 'pending').trim();
+  var isPaid = settlementStatus === '유상' || settlementStatus.toLowerCase() === 'paid';
   var addResult = dashboardAddEquipments(tid, entries, {
     dryRun: options.dryRun,
     rawNames: options.rawNames,
-    directRegenerate: options.directRegenerate || options.regenerateNow
+    directRegenerate: options.directRegenerate || options.regenerateNow,
+    forceZeroPrice: !isPaid
   });
   if (!addResult || addResult.error) return addResult;
   if (addResult.dryRun) return addResult;
@@ -5845,7 +6418,7 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
     transactionId: String(tid || '').trim(),
     customerName: addResult.customerName || '',
     items: addResult.requestedItems || addResult.addedItems || [],
-    settlementStatus: options.settlementStatus || 'pending',
+    settlementStatus: settlementStatus,
     source: 'schedule_button',
     actorName: options.actorName || '오늘 일정 웹앱'
   };
@@ -5884,6 +6457,9 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
     var setSheet = ss.getSheetByName("세트마스터");
     if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
     if (!equipSheet) return { error: "장비마스터 없음" };
+    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+      return { error: "반출 시작 후에는 예약 수량을 바꿀 수 없습니다. 반납 수량에서 정상/파손/분실로 기록해주세요." };
+    }
 
     var lastRow = sched.getLastRow();
     var targetRows = findDashboardRowsByValue_(sched, 1, lastRow, scheduleId);
@@ -5971,6 +6547,12 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
     }
 
     if (!dryRun) {
+      var invalidated = invalidateDashboardReturnInspectionForTrade_(
+        tid,
+        updates.map(function(update) { return update.scheduleId; }),
+        '장비 수량 변경'
+      );
+      if (invalidated && invalidated.error) return invalidated;
       updates.forEach(function(update) {
         sched.getRange(update.row, 5).setValue(update.newQty).setNumberFormat("#,##0");
       });
@@ -5995,6 +6577,8 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
         };
       }),
       warnings: availability.warnings || [],
+      returnReopened: !dryRun && !!(invalidated && invalidated.reopened),
+      contractStatus: !dryRun && invalidated ? invalidated.contractStatus || '' : '',
       message: dryRun ? "수량 수정 가능" : "수량 수정 완료"
     };
   } finally {
@@ -6026,6 +6610,9 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
     var equipSheet = ss.getSheetByName("장비마스터");
     if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
     if (!equipSheet) return { error: "장비마스터 없음" };
+    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+      return { error: "반출 시작 후에는 장비명을 바꿀 수 없습니다. 잘못 반출된 품목은 반납 메모와 수량으로 기록해주세요." };
+    }
 
     var newName = resolveEquipmentName_(requestedName, ss);
     var lastRow = sched.getLastRow();
@@ -6068,27 +6655,34 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
       newName: newName,
       field: "equipment"
     }];
+    if (setName === oldName) {
+      var tidRows = findDashboardRowsByValue_(sched, 2, lastRow, tid);
+      tidRows.forEach(function(rowNum) {
+        if (rowNum === targetRow) return;
+        var rowSetName = String(sched.getRange(rowNum, 3).getValue() || "").trim();
+        if (rowSetName !== oldName) return;
+        updatedItems.push({
+          row: rowNum,
+          scheduleId: String(sched.getRange(rowNum, 1).getValue() || "").trim(),
+          oldName: oldName,
+          newName: newName,
+          field: "setName"
+        });
+      });
+    }
 
     if (!dryRun) {
+      var invalidated = invalidateDashboardReturnInspectionForTrade_(
+        tid,
+        updatedItems.map(function(item) { return item.scheduleId; }),
+        '장비명 또는 세트 구성 변경'
+      );
+      if (invalidated && invalidated.error) return invalidated;
       sched.getRange(targetRow, 4).setValue(newName);
       if (setName === oldName) sched.getRange(targetRow, 3).setValue(newName);
-
-      if (setName === oldName) {
-        var tidRows = findDashboardRowsByValue_(sched, 2, lastRow, tid);
-        tidRows.forEach(function(rowNum) {
-          if (rowNum === targetRow) return;
-          var rowSetName = String(sched.getRange(rowNum, 3).getValue() || "").trim();
-          if (rowSetName !== oldName) return;
-          sched.getRange(rowNum, 3).setValue(newName);
-          updatedItems.push({
-            row: rowNum,
-            scheduleId: String(sched.getRange(rowNum, 1).getValue() || "").trim(),
-            oldName: oldName,
-            newName: newName,
-            field: "setName"
-          });
-        });
-      }
+      updatedItems.forEach(function(item) {
+        if (item.field === 'setName') sched.getRange(item.row, 3).setValue(newName);
+      });
 
       scheduleContractRegen(tid);
       try { invalidateDashboardCache(); } catch (eCache) {}
@@ -6104,6 +6698,8 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
       updatedRows: updatedItems.length,
       updatedItems: updatedItems,
       warnings: availability.warnings || [],
+      returnReopened: !dryRun && !!(invalidated && invalidated.reopened),
+      contractStatus: !dryRun && invalidated ? invalidated.contractStatus || '' : '',
       message: dryRun ? "장비명 수정 가능" : "장비명 수정 완료"
     };
   } finally {
@@ -6200,6 +6796,12 @@ function dashboardAddEquipment(tid, equipName, qty) {
       newRows[0][11] = price;
     }
 
+    var addedScheduleIds = newRows.map(function(newRow) { return String(newRow[0] || '').trim(); }).filter(Boolean);
+    var addInvalidated = invalidateDashboardReturnInspectionForTrade_(
+      tid, addedScheduleIds, '스케줄 품목 추가'
+    );
+    if (addInvalidated && addInvalidated.error) return addInvalidated;
+
     // 같은 거래ID의 마지막 행 찾기 → 바로 아래에 삽입
     var lastTidRow = -1;
     for (var j = 0; j < data.length; j++) {
@@ -6222,6 +6824,33 @@ function dashboardAddEquipment(tid, equipName, qty) {
     for (var ri = 0; ri < newRows.length; ri++) inheritRows.push(insertRow + ri);
     if (typeof _inheritGroupBackground !== "undefined") {
       try { _inheritGroupBackground(sched, tid, inheritRows); } catch (e) {}
+    }
+
+    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+      var addedBaselineItems = getDashboardReturnCheckableItems_(newRows.map(function(row) {
+        var setName = String(row[2] || '').trim();
+        var name = String(row[3] || '').trim();
+        return {
+          scheduleId: String(row[0] || '').trim(), name: name, qty: row[4], setName: setName,
+          isHeader: !setName || setName === name, isComponent: !!setName && setName !== name, onsite: true
+        };
+      }));
+      var baselineSaved = supaCaptureCheckoutBaseline_(tid, addedBaselineItems);
+      if (!baselineSaved || !baselineSaved.ok) {
+        var rollbackError = '';
+        try {
+          var insertedRows = [];
+          for (var rb = 0; rb < newRows.length; rb++) insertedRows.push(insertRow + rb);
+          deleteDashboardRowsDescending_(sched, insertedRows);
+        } catch (rollbackErr) {
+          rollbackError = ' / 시트 롤백도 실패하여 수동 확인 필요: ' + String(rollbackErr && rollbackErr.message || rollbackErr);
+        }
+        invalidateDashboardCacheForTrade_(tid);
+        return {
+          error: '추가 반출 기준선 저장 실패 — 추가 행을 완료 처리하지 않았습니다: ' +
+            String(baselineSaved && baselineSaved.error || '저장 실패') + rollbackError
+        };
+      }
     }
 
     try { formatScheduleSheet(sched); } catch (e) {}
@@ -6271,6 +6900,9 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
     if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
+    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+      return { error: "반출 시작 후에는 품목을 삭제할 수 없습니다. 반납 수량에서 분실/미확인으로 기록해주세요." };
+    }
 
     var lastRow = sched.getLastRow();
     var data = sched.getRange(2, 1, lastRow - 1, 4).getValues();
@@ -6345,6 +6977,11 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
         name: String(source[3] || "").trim()
       };
     });
+
+    var removeInvalidated = invalidateDashboardReturnInspectionForTrade_(
+      tid, removedScheduleIds, '스케줄 품목 삭제'
+    );
+    if (removeInvalidated && removeInvalidated.error) return removeInvalidated;
 
     deleteDashboardRowsDescending_(sched, rowsToDelete);
     var contractResult = null;
@@ -9716,6 +10353,11 @@ function addEquipmentToContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
+  if (isDashboardTradeCheckoutStarted_(ss, 거래ID)) {
+    sheet.getRange(row, 15).setValue("❌ 반출 후 추가는 헤이빌리의 현장 추가를 사용하세요");
+    sheet.getRange(row, 14).clearContent();
+    return;
+  }
   supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
   try { invalidateDashboardCacheForTrade_(거래ID); } catch (cacheErr) {} // 영향 날짜 캐시 무효화
 
@@ -9816,6 +10458,11 @@ function removeEquipmentFromContract(sheet, row) {
 
   if (!거래ID || !장비명) {
     sheet.getRange(row, 15).setValue("❌ 거래ID 또는 장비명 없음");
+    sheet.getRange(row, 14).clearContent();
+    return;
+  }
+  if (isDashboardTradeCheckoutStarted_(ss, 거래ID)) {
+    sheet.getRange(row, 15).setValue("❌ 반출 시작 후 품목 삭제 금지 — 반납 수량에 분실/미확인으로 기록");
     sheet.getRange(row, 14).clearContent();
     return;
   }
@@ -12033,18 +12680,47 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
     rows = [rowIndex];
   }
 
-  rows.forEach(function(r) {
-    var ri = Number(r);
-    if (ri >= 2) {
+  rows = rows.map(Number).filter(function(r) { return r >= 2; });
+  if (!rows.length) return { success: false, message: '변경할 스케줄 행 없음' };
+
+  var lock = LockService.getScriptLock();
+  var lockAcquired = false;
+  try {
+    lock.waitLock(10000);
+    lockAcquired = true;
+
+    // 취소 경계를 넘는 변경은 화면 검색에서 행이 사라지기 전에 기존 증거와 완료 상태를
+    // 같은 잠금 안에서 무효화한다. 실패하면 상태 자체를 바꾸지 않는다.
+    var changedByTrade = {};
+    rows.forEach(function(ri) {
+      var values = sheet.getRange(ri, 1, 1, 10).getDisplayValues()[0];
+      var scheduleId = String(values[0] || '').trim();
+      var tradeId = String(values[1] || '').trim();
+      var oldStatus = String(values[9] || '').trim();
+      if (!tradeId || (oldStatus !== '취소' && newStatus !== '취소')) return;
+      if (!changedByTrade[tradeId]) changedByTrade[tradeId] = [];
+      if (scheduleId && changedByTrade[tradeId].indexOf(scheduleId) < 0) changedByTrade[tradeId].push(scheduleId);
+    });
+    Object.keys(changedByTrade).forEach(function(tradeId) {
+      var invalidated = invalidateDashboardReturnInspectionForTrade_(
+        tradeId, changedByTrade[tradeId], '스케줄상세 취소 상태 변경'
+      );
+      if (invalidated && invalidated.error) throw new Error(invalidated.error);
+    });
+
+    rows.forEach(function(ri) {
       sheet.getRange(ri, 10).setValue(newStatus);  // J열 = 10번째 = 상태
-    }
-  });
+    });
 
-  supaMarkScheduleRowsDirty_(sheet, rows); // 스크립트 쓰기 — Supabase 동기화 표시
-  try { invalidateDashboardCache(); } catch (e) {}
-  try { invalidateTimelineCache(); } catch (e2) {}
-
-  return { success: true, message: rows.length + '행 상태 변경 완료', newStatus: newStatus };
+    supaMarkScheduleRowsDirty_(sheet, rows); // 스크립트 쓰기 — Supabase 동기화 표시
+    try { invalidateDashboardCache(); } catch (e) {}
+    try { invalidateTimelineCache(); } catch (e2) {}
+    return { success: true, message: rows.length + '행 상태 변경 완료', newStatus: newStatus };
+  } catch (err) {
+    return { success: false, error: err.message, message: '상태 변경 실패: ' + err.message };
+  } finally {
+    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
 }
 
 /**

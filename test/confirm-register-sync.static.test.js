@@ -199,8 +199,8 @@ assert(
   'dashboard merge must preserve onsite items, avoid stale excluded-state revival, and skip payment merge on extras failure'
 );
 assert(
-  /rc\.damaged ?\?\? 0\) > 0 \|\| \(rc\.lost ?\?\? 0\) > 0/.test(syncTs2),
-  'dashboard merge must preserve app-recorded damaged/lost return counts'
+  /Object\.entries\(base\.returnCounts[\s\S]{0,800}sameReturnEvidenceIdentity[\s\S]{0,300}returnCounts\[sid\]\s*=\s*rc/.test(syncTs2),
+  'dashboard merge must preserve partial return counts only while the schedule row identity is unchanged'
 );
 const storeTs2 = read('apps/today-dashboard/lib/data/store.ts');
 assert(
