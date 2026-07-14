@@ -133,6 +133,13 @@ test("unmatched, ambiguous, conflicting, and invalid rows survive as hidden exce
       taken_qty: 2,
       checkout_state: "taken",
     }),
+    item({
+      schedule_id: "zero-taken-conflict",
+      name: "Canon R5",
+      qty: 1,
+      taken_qty: 0,
+      checkout_state: "taken",
+    }),
     item({ schedule_id: "confirmed", name: "Canon R5", qty: 1 }),
   ];
 
@@ -150,6 +157,7 @@ test("unmatched, ambiguous, conflicting, and invalid rows survive as hidden exce
       ["conflicting", "conflicting_checkout_evidence", 2, ["CAM-002"]],
       ["invalid", "invalid_quantity", 2, ["CAM-002"]],
       ["unmatched", "unmatched_name", 2, []],
+      ["zero-taken-conflict", "conflicting_checkout_evidence", 0, ["CAM-002"]],
     ],
   );
   assert.equal(

@@ -228,11 +228,11 @@ export function buildRentalSnapshot(
         row.taken_qty <= row.qty!);
 
     let exceptionReason: RentalSnapshotExceptionReason | null = null;
-    if (!bookedQuantityValid || !takenQuantityValid) {
+    if (checkoutState === "taken" && hasTakenQuantity && row.taken_qty === 0) {
+      exceptionReason = "conflicting_checkout_evidence";
+    } else if (!bookedQuantityValid || !takenQuantityValid) {
       exceptionReason = "invalid_quantity";
     } else if (hasPositiveTakenQuantity && checkoutState !== "taken") {
-      exceptionReason = "conflicting_checkout_evidence";
-    } else if (checkoutState === "taken" && hasTakenQuantity && row.taken_qty === 0) {
       exceptionReason = "conflicting_checkout_evidence";
     } else if (candidates.length === 0) {
       exceptionReason = "unmatched_name";
