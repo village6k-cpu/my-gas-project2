@@ -3,6 +3,8 @@ import type { NextRequest } from "next/server";
 import {
   InventoryAuditMirrorError,
   getInventoryAuditMirrorConfig,
+  getInventoryAuditMirrorLedgerVersion,
+  inventoryAuditMirrorErrorPreservesLease,
   isInventoryAuditMirrorUuid,
   runInventoryAuditMirror,
   sanitizeInventoryAuditMirrorError,
@@ -40,7 +42,8 @@ function claimedToken(value: unknown): string | null {
   return isInventoryAuditMirrorUuid(value) ? String(value) : null;
 }
 
-function failureHttpStatus(status: number): 502 | 503 | 504 {
+function failureHttpStatus(status: number): 409 | 502 | 503 | 504 {
+  if (status === 409) return 409;
   if (status === 503) return 503;
   if (status === 504) return 504;
   return 502;
@@ -145,7 +148,7 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
       const query = client!
         .from("equipment_ledger")
         .select(
-          "equipment_id,major,category,name,stock_total,stock_maint,price,state,note,open_issues",
+          "equipment_id,major,category,name,stock_total,stock_maint,price,state,note,open_issues,updated_at",
         )
         .order("equipment_id", { ascending: true })
         .range(from, to)
@@ -176,12 +179,16 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
         p_updated_count: result.updatedCount,
         p_appended_count: result.appendedCount,
         p_already_current: result.alreadyCurrent,
+        p_ledger_version_token: getInventoryAuditMirrorLedgerVersion(result),
       },
     );
-    const complete = rpcState(rawComplete);
+    if (completeError?.code === "40001") {
+      throw new InventoryAuditMirrorError("mirror_ledger_changed");
+    }
     if (completeError) {
       throw new InventoryAuditMirrorError("mirror_service_unavailable");
     }
+    const complete = rpcState(rawComplete);
     if (complete.state !== "synced") {
       throw new InventoryAuditMirrorError("mirror_attempt_stale");
     }
@@ -192,7 +199,7 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
     );
   } catch (error: unknown) {
     const safe = sanitizeInventoryAuditMirrorError(error);
-    if (client && attemptToken) {
+    if (client && attemptToken && !inventoryAuditMirrorErrorPreservesLease(error)) {
       try {
         await client.rpc("fail_inventory_audit_mirror", {
           p_session_id: sessionId,
@@ -200,7 +207,7 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
           p_error_code: safe.code,
         });
       } catch {
-        // The two-minute lease remains recoverable. Never replace the stable
+        // The ten-minute lease remains recoverable. Never replace the stable
         // response below with a transport exception from failure bookkeeping.
       }
     }

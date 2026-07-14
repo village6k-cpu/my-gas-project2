@@ -85,6 +85,32 @@ test("failure bookkeeping cannot replace the sanitized route response with a thr
 
   assert.match(
     source,
-    /if \(client && attemptToken\) \{\s*try \{[\s\S]*?await client\.rpc\(\s*"fail_inventory_audit_mirror"[\s\S]*?\}\s*catch \{/,
+    /if \(client && attemptToken && !inventoryAuditMirrorErrorPreservesLease\(error\)\) \{\s*try \{[\s\S]*?await client\.rpc\(\s*"fail_inventory_audit_mirror"[\s\S]*?\}\s*catch \{/,
+  );
+});
+
+test("route passes the internal ledger token to completion without exposing it", () => {
+  const source = readRoute();
+
+  assert.match(source, /updated_at/);
+  assert.match(source, /getInventoryAuditMirrorLedgerVersion\(result\)/);
+  assert.match(source, /p_ledger_version_token:/);
+  assert.doesNotMatch(
+    source,
+    /ledgerVersionToken:\s*getInventoryAuditMirrorLedgerVersion/,
+  );
+  assert.match(
+    source,
+    /completeError\?\.code === "40001"[\s\S]*new InventoryAuditMirrorError\("mirror_ledger_changed"\)/,
+  );
+});
+
+test("outcome-unknown write failures preserve the active lease instead of calling fail RPC", () => {
+  const source = readRoute();
+
+  assert.match(source, /inventoryAuditMirrorErrorPreservesLease\(error\)/);
+  assert.match(
+    source,
+    /if \(client && attemptToken && !inventoryAuditMirrorErrorPreservesLease\(error\)\)/,
   );
 });

@@ -6,6 +6,8 @@ import {
   InventoryAuditMirrorError,
   diffLedgerAgainstSheet,
   getInventoryAuditMirrorConfig,
+  getInventoryAuditMirrorLedgerVersion,
+  inventoryAuditMirrorErrorPreservesLease,
   runInventoryAuditMirror,
   sanitizeInventoryAuditMirrorError,
 } from "../lib/server/inventoryAuditMirrorCore.mjs";
@@ -39,6 +41,7 @@ function ledgerRow(overrides = {}) {
     state: "정상",
     note: "메모",
     open_issues: [{ label: "바디캡 누락" }],
+    updated_at: "2026-07-14T08:00:00.000Z",
     ...overrides,
   };
 }
@@ -216,6 +219,18 @@ test("a real mirror converges every current ledger row and verifies the resultin
     gas.getRows().map((row) => row[1]),
     ["CAM-001", "CAM-002"],
   );
+  assert.deepEqual(getInventoryAuditMirrorLedgerVersion(result), [
+    {
+      equipment_id: "CAM-001",
+      updated_at: "2026-07-14T08:00:00.000Z",
+    },
+    {
+      equipment_id: "CAM-002",
+      updated_at: "2026-07-14T08:00:00.000Z",
+    },
+  ]);
+  assert.equal(JSON.stringify(result).includes("updated_at"), false);
+  assert.equal(JSON.stringify({ ...result }).includes("ledgerVersion"), false);
 });
 
 test("an already-current mirror performs no write and reports reusable success", async () => {
@@ -235,7 +250,85 @@ test("an already-current mirror performs no write and reports reusable success",
   assert.equal(result.updateCount, 0);
   assert.equal(result.appendCount, 0);
   assert.equal(gas.requests.length, 1);
+  assert.equal(getInventoryAuditMirrorLedgerVersion(result).length, 1);
 });
+
+test("post-write verification re-reads the ledger and rejects a mid-flight quantity change", async () => {
+  const before = ledgerRow({ stock_total: 3 });
+  const after = ledgerRow({
+    stock_total: 4,
+    updated_at: "2026-07-14T08:01:00.000Z",
+  });
+  const gas = makeGasFetch([sheetRow({ ...before, stock_total: 99 })]);
+  let ledgerReads = 0;
+
+  await assert.rejects(
+    runInventoryAuditMirror({
+      sessionId: SESSION_ID,
+      loadLedgerPage: async ({ from }) => {
+        if (from !== 0) return [];
+        ledgerReads += 1;
+        return [ledgerReads === 1 ? before : after];
+      },
+      gasUrl: "https://script.google.com/macros/s/deployment/exec",
+      gasKey: SECRET,
+      fetchImpl: gas.fetchImpl,
+    }),
+    (error) => error.code === "mirror_verification_failed",
+  );
+  assert.equal(ledgerReads, 2);
+});
+
+test("a null stock total is sent as an explicit blank and verifies as null", async () => {
+  const row = ledgerRow({ stock_total: null });
+  const gas = makeGasFetch([sheetRow({ ...row, stock_total: 9 })]);
+
+  const result = await runInventoryAuditMirror({
+    sessionId: SESSION_ID,
+    loadLedgerPage: async ({ from }) => (from === 0 ? [row] : []),
+    gasUrl: "https://script.google.com/macros/s/deployment/exec",
+    gasKey: SECRET,
+    fetchImpl: gas.fetchImpl,
+  });
+
+  const writePayload = gas.requests
+    .map((request) => JSON.parse(String(request.init.body)))
+    .find((payload) => payload.action === "equipmentMasterSync");
+  assert.equal(writePayload.rows[0].total, "");
+  assert.equal(result.wrote, true);
+  assert.equal(gas.getRows()[0][4], "");
+});
+
+for (const [name, failure, expectedCode] of [
+  ["network rejection", new TypeError(`network ${SECRET}`), "mirror_upstream_failed"],
+  ["abort", new DOMException(`abort ${SECRET}`, "AbortError"), "mirror_upstream_timeout"],
+]) {
+  test(`an equipmentMasterSync ${name} preserves the global lease`, async () => {
+    const row = ledgerRow();
+    const gas = makeGasFetch([sheetRow({ ...row, stock_total: 99 })]);
+    const fetchImpl = async (url, init) => {
+      const payload = JSON.parse(String(init.body));
+      if (payload.action === "equipmentMasterSync") throw failure;
+      return gas.fetchImpl(url, init);
+    };
+
+    await assert.rejects(
+      runInventoryAuditMirror({
+        sessionId: SESSION_ID,
+        loadLedgerPage: async ({ from }) => (from === 0 ? [row] : []),
+        gasUrl: "https://script.google.com/macros/s/deployment/exec",
+        gasKey: SECRET,
+        fetchImpl,
+      }),
+      (error) => {
+        assert.equal(error.code, expectedCode);
+        assert.equal(inventoryAuditMirrorErrorPreservesLease(error), true);
+        assert.equal(error.message.includes(SECRET), false);
+        return true;
+      },
+    );
+  });
+}
 
 test("headers and IDs are validated before any write", () => {
   assert.throws(
@@ -300,6 +393,22 @@ test("shared server config fails closed and contains no legacy deployment creden
     "utf8",
   );
   assert.doesNotMatch(source, /village2026|AKfy[a-zA-Z0-9_-]+/);
+});
+
+test("inventory database configuration errors sanitize to the stable 503 mirror code", () => {
+  assert.deepEqual(
+    sanitizeInventoryAuditMirrorError({
+      name: "InventoryAuditServiceUnavailableError",
+      status: 503,
+      code: "inventory_audit_service_unavailable",
+      message: `raw ${SECRET}`,
+    }),
+    {
+      code: "mirror_service_unavailable",
+      status: 503,
+      message: "시트 반영 서버 설정을 확인할 수 없습니다.",
+    },
+  );
 });
 
 for (const [name, writeResponse, expectedCode] of [

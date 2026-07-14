@@ -55,7 +55,7 @@ test("mirror attempts are service-only and sessions expose only sanitized delive
   assert.doesNotMatch(sql, /raw_error|error_message|error_detail|secret/i);
 });
 
-test("claim uses one global two-minute lease for same-session and cross-session callers", () => {
+test("claim uses one global ten-minute lease for same-session and cross-session callers", () => {
   const sql = readMigration();
   const claim = functionBody(sql, "claim_inventory_audit_mirror");
 
@@ -64,8 +64,9 @@ test("claim uses one global two-minute lease for same-session and cross-session 
   assert.match(claim, /status = 'running'[\s\S]*lease_expires_at <= v_now[\s\S]*status = 'failed'/i);
   assert.match(
     claim,
-    /lease_expires_at[\s\S]{0,500}v_now \+ interval '2 minutes'/i,
+    /lease_expires_at[\s\S]{0,500}v_now \+ interval '10 minutes'/i,
   );
+  assert.doesNotMatch(claim, /interval '2 minutes'/i);
   assert.match(claim, /where attempt\.status = 'running'[\s\S]*attempt\.lease_expires_at > v_now/i);
   assert.doesNotMatch(
     claim,
@@ -95,9 +96,23 @@ test("complete and fail use exact attempt-token compare-and-swap and cannot roll
 
   assert.match(complete, /mirror_status = 'synced'/i);
   assert.match(complete, /mirror_synced_at = v_now/i);
+  assert.match(complete, /p_ledger_version_token jsonb/i);
+  assert.match(
+    complete,
+    /lock table village\.equipment_ledger in share mode/i,
+  );
+  assert.match(complete, /jsonb_array_elements\(p_ledger_version_token\)/i);
+  assert.match(complete, /ledger\.updated_at[\s\S]*token\.updated_at/i);
+  assert.match(complete, /using errcode = '40001'/i);
+  assert.ok(
+    complete.indexOf("lock table village.equipment_ledger in share mode") <
+      complete.indexOf("update village.inventory_audit_mirror_attempts"),
+    "ledger version CAS must be established before completing the attempt",
+  );
   assert.match(fail, /mirror_status = 'failed'/i);
   assert.match(fail, /mirror_last_error_code = v_error_code/i);
   assert.match(fail, /p_error_code[\s\S]*mirror_[a-z_]+/i);
+  assert.match(fail, /'mirror_ledger_changed'/i);
 });
 
 test("all mirror RPCs are security definers callable only by service_role", () => {
@@ -123,6 +138,19 @@ test("all mirror RPCs are security definers callable only by service_role", () =
       new RegExp(`grant execute on function village\\.${name}\\([\\s\\S]*?to service_role`, "i"),
     );
   }
+});
+
+test("complete RPC ACL includes the internal JSONB ledger version token", () => {
+  const sql = readMigration();
+
+  assert.match(
+    sql,
+    /revoke execute on function village\.complete_inventory_audit_mirror\([\s\S]*boolean, jsonb[\s\S]*\) from public, anon, authenticated/i,
+  );
+  assert.match(
+    sql,
+    /grant execute on function village\.complete_inventory_audit_mirror\([\s\S]*boolean, jsonb[\s\S]*\) to service_role/i,
+  );
 });
 
 test("the read-only security check reports the mirror table and RPC ACLs", () => {

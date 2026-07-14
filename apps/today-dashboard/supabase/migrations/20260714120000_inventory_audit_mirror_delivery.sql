@@ -213,7 +213,7 @@ begin
     p_claimed_by,
     btrim(p_claimed_by_email),
     v_now,
-    v_now + interval '2 minutes'
+    v_now + interval '10 minutes'
   );
 
   update village.inventory_audit_sessions
@@ -233,7 +233,7 @@ begin
     'state', 'claimed',
     'session_id', p_session_id,
     'attempt_token', v_attempt_token,
-    'lease_expires_at', v_now + interval '2 minutes'
+    'lease_expires_at', v_now + interval '10 minutes'
   );
 end;
 $$;
@@ -253,7 +253,8 @@ create function village.complete_inventory_audit_mirror(
   p_wrote boolean,
   p_updated_count integer,
   p_appended_count integer,
-  p_already_current boolean
+  p_already_current boolean,
+  p_ledger_version_token jsonb
 )
 returns jsonb
 language plpgsql
@@ -264,6 +265,9 @@ declare
   v_now timestamptz := pg_catalog.clock_timestamp();
   v_changed integer := 0;
   v_existing_status text;
+  v_token_count bigint := 0;
+  v_token_distinct_count bigint := 0;
+  v_ledger_count bigint := 0;
 begin
   if p_session_id is null
      or p_attempt_token is null
@@ -274,8 +278,20 @@ begin
      or p_updated_count is null or p_updated_count < 0
      or p_appended_count is null or p_appended_count < 0
      or p_wrote is null
-     or p_already_current is null then
+     or p_already_current is null
+     or p_ledger_version_token is null
+     or jsonb_typeof(p_ledger_version_token) <> 'array' then
     raise exception 'inventory audit mirror completion values are invalid'
+      using errcode = '22023';
+  end if;
+  if exists (
+    select 1
+    from jsonb_array_elements(p_ledger_version_token) as token(value)
+    where jsonb_typeof(token.value) <> 'object'
+      or nullif(btrim(token.value ->> 'equipment_id'), '') is null
+      or nullif(btrim(token.value ->> 'updated_at'), '') is null
+  ) then
+    raise exception 'inventory audit mirror ledger version token is invalid'
       using errcode = '22023';
   end if;
   if p_update_count <> p_updated_count
@@ -296,6 +312,43 @@ begin
   perform pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended('village.inventory_audit.mirror', 0)
   );
+
+  lock table village.equipment_ledger in share mode;
+
+  select
+    count(*),
+    count(distinct btrim(token.value ->> 'equipment_id'))
+  into v_token_count, v_token_distinct_count
+  from jsonb_array_elements(p_ledger_version_token) as token(value);
+
+  if v_token_count <> v_token_distinct_count then
+    raise exception 'inventory audit mirror ledger version token contains duplicate ids'
+      using errcode = '22023';
+  end if;
+
+  select count(*)
+  into v_ledger_count
+  from village.equipment_ledger;
+
+  if v_token_count <> p_ledger_row_count
+     or v_ledger_count <> p_ledger_row_count
+     or exists (
+       with token as (
+         select
+           btrim(entry.value ->> 'equipment_id') as equipment_id,
+           (entry.value ->> 'updated_at')::timestamptz as updated_at
+         from jsonb_array_elements(p_ledger_version_token) as entry(value)
+       )
+       select 1
+       from village.equipment_ledger as ledger
+       full join token on token.equipment_id = ledger.equipment_id
+       where ledger.equipment_id is null
+          or token.equipment_id is null
+          or ledger.updated_at is distinct from token.updated_at
+     ) then
+    raise exception 'inventory audit mirror ledger version changed'
+      using errcode = '40001';
+  end if;
 
   update village.inventory_audit_mirror_attempts as attempt
   set status = 'synced',
@@ -364,10 +417,10 @@ end;
 $$;
 
 revoke execute on function village.complete_inventory_audit_mirror(
-  uuid, uuid, integer, integer, integer, integer, boolean, integer, integer, boolean
+  uuid, uuid, integer, integer, integer, integer, boolean, integer, integer, boolean, jsonb
 ) from public, anon, authenticated;
 grant execute on function village.complete_inventory_audit_mirror(
-  uuid, uuid, integer, integer, integer, integer, boolean, integer, integer, boolean
+  uuid, uuid, integer, integer, integer, integer, boolean, integer, integer, boolean, jsonb
 ) to service_role;
 
 create function village.fail_inventory_audit_mirror(
@@ -399,6 +452,7 @@ begin
     'mirror_result_mismatch',
     'mirror_verification_failed',
     'mirror_attempt_stale',
+    'mirror_ledger_changed',
     'mirror_lease_expired'
   ) then
     v_error_code := 'mirror_upstream_failed';

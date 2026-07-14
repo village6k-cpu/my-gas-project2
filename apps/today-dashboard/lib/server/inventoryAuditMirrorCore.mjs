@@ -3,7 +3,8 @@ const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_LEDGER_ROWS = 100_000;
 const SHEET_NAME = "장비마스터";
 const LEDGER_SELECT =
-  "equipment_id,major,category,name,stock_total,stock_maint,price,state,note,open_issues";
+  "equipment_id,major,category,name,stock_total,stock_maint,price,state,note,open_issues,updated_at";
+const LEDGER_VERSION = Symbol("inventoryAuditMirrorLedgerVersion");
 
 const SAFE_ERRORS = Object.freeze({
   mirror_invalid_request: {
@@ -50,15 +51,20 @@ const SAFE_ERRORS = Object.freeze({
     status: 502,
     message: "시트 반영 작업권이 만료되었습니다.",
   },
+  mirror_ledger_changed: {
+    status: 409,
+    message: "시트 반영 중 재고 원장이 변경되었습니다. 다시 시도해 주세요.",
+  },
 });
 
 export class InventoryAuditMirrorError extends Error {
-  constructor(code) {
+  constructor(code, { preserveLease = false } = {}) {
     const safe = SAFE_ERRORS[code] || SAFE_ERRORS.mirror_upstream_failed;
     super(safe.message);
     this.name = "InventoryAuditMirrorError";
     this.code = SAFE_ERRORS[code] ? code : "mirror_upstream_failed";
     this.status = safe.status;
+    this.preserveLease = Boolean(preserveLease);
   }
 }
 
@@ -66,9 +72,61 @@ export function sanitizeInventoryAuditMirrorError(error) {
   const code =
     error instanceof InventoryAuditMirrorError && SAFE_ERRORS[error.code]
       ? error.code
+      : error &&
+          typeof error === "object" &&
+          error.code === "inventory_audit_service_unavailable" &&
+          error.status === 503
+        ? "mirror_service_unavailable"
       : "mirror_upstream_failed";
   const safe = SAFE_ERRORS[code];
   return { code, status: safe.status, message: safe.message };
+}
+
+export function inventoryAuditMirrorErrorPreservesLease(error) {
+  return error instanceof InventoryAuditMirrorError && error.preserveLease;
+}
+
+function buildLedgerVersionToken(ledger) {
+  const seen = new Set();
+  const token = ledger.map((row) => {
+    const equipmentId = String(row?.equipment_id || "").trim();
+    const updatedAt = String(row?.updated_at || "").trim();
+    if (
+      !equipmentId ||
+      seen.has(equipmentId) ||
+      !updatedAt ||
+      Number.isNaN(Date.parse(updatedAt))
+    ) {
+      throw new InventoryAuditMirrorError("mirror_ledger_read_failed");
+    }
+    seen.add(equipmentId);
+    return Object.freeze({
+      equipment_id: equipmentId,
+      updated_at: updatedAt,
+    });
+  });
+  token.sort((left, right) =>
+    left.equipment_id.localeCompare(right.equipment_id),
+  );
+  return Object.freeze(token);
+}
+
+function withLedgerVersion(result, ledger) {
+  Object.defineProperty(result, LEDGER_VERSION, {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: buildLedgerVersionToken(ledger),
+  });
+  return result;
+}
+
+export function getInventoryAuditMirrorLedgerVersion(result) {
+  const token = result?.[LEDGER_VERSION];
+  if (!Array.isArray(token)) {
+    throw new InventoryAuditMirrorError("mirror_invalid_request");
+  }
+  return token;
 }
 
 export function isInventoryAuditMirrorUuid(value) {
@@ -178,7 +236,7 @@ export function diffLedgerAgainstSheet(ledger, sheetHeaders, sheetData) {
     ledgerIds.add(wanted.id);
     const sheetRow = sheetById.get(wanted.id);
     if (!sheetRow) {
-      append.push(wanted);
+      append.push({ ...wanted, total: wanted.total ?? "" });
       continue;
     }
     const current = {
@@ -206,7 +264,7 @@ export function diffLedgerAgainstSheet(ledger, sheetHeaders, sheetData) {
       rows.push({
         id: wanted.id,
         name: wanted.name,
-        total: wanted.total,
+        total: wanted.total ?? "",
         maint: wanted.maint,
         state: wanted.state,
         note: wanted.note,
@@ -258,9 +316,13 @@ async function postGasJson({
     });
   } catch (error) {
     if (signal?.aborted || error?.name === "AbortError") {
-      throw new InventoryAuditMirrorError("mirror_upstream_timeout");
+      throw new InventoryAuditMirrorError("mirror_upstream_timeout", {
+        preserveLease: action === "equipmentMasterSync",
+      });
     }
-    throw new InventoryAuditMirrorError("mirror_upstream_failed");
+    throw new InventoryAuditMirrorError("mirror_upstream_failed", {
+      preserveLease: action === "equipmentMasterSync",
+    });
   }
   if (!response?.ok) {
     throw new InventoryAuditMirrorError("mirror_upstream_failed");
@@ -397,23 +459,23 @@ export async function runInventoryAuditMirror({
       appendCount: changes.append.length,
     };
     if (dryRun) {
-      return {
+      return withLedgerVersion({
         ...base,
         wrote: false,
         updatedCount: 0,
         appendedCount: 0,
         alreadyCurrent:
           changes.rows.length === 0 && changes.append.length === 0,
-      };
+      }, ledger);
     }
     if (changes.rows.length === 0 && changes.append.length === 0) {
-      return {
+      return withLedgerVersion({
         ...base,
         wrote: false,
         updatedCount: 0,
         appendedCount: 0,
         alreadyCurrent: true,
-      };
+      }, ledger);
     }
 
     const write = validateWriteResult(
@@ -427,27 +489,33 @@ export async function runInventoryAuditMirror({
       changes.rows.length,
       changes.append.length,
     );
+    const verifiedLedger = await loadCompleteLedger(
+      loadLedgerPage,
+      pageSize,
+      controller.signal,
+    );
     const verifiedSheet = await readEquipmentMaster({
       ...config,
       fetchImpl,
       signal: controller.signal,
     });
     const remaining = diffLedgerAgainstSheet(
-      ledger,
+      verifiedLedger,
       verifiedSheet.headers,
       verifiedSheet.data,
     );
     if (remaining.rows.length > 0 || remaining.append.length > 0) {
       throw new InventoryAuditMirrorError("mirror_verification_failed");
     }
-    return {
+    return withLedgerVersion({
       ...base,
+      ledgerRowCount: verifiedLedger.length,
       sheetRowCount: verifiedSheet.rowCount,
       wrote: true,
       updatedCount: write.updated,
       appendedCount: write.appended,
       alreadyCurrent: false,
-    };
+    }, verifiedLedger);
   } finally {
     clearTimeout(timer);
   }
