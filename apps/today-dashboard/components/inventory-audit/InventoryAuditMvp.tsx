@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { authFetch } from "@/lib/data/authFetch";
 import { compressInventoryAuditEvidence } from "@/lib/inventory-audit/compressEvidence";
+import { normalizeAuditLocation } from "@/lib/inventory-audit/mvp";
 
 type Session = { id: string; status: string };
 type CatalogItem = {
@@ -98,6 +99,7 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
   const [photo, setPhoto] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [routeDone, setRouteDone] = useState(false);
+  const [savedNotice, setSavedNotice] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -201,9 +203,8 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
     setPhoto(null);
   };
 
-  const saveObservation = async () => {
+  const saveObservation = async (closeAfter = false) => {
     const counts = countsFromDraft(draft);
-    if (!draft.location.trim()) return setError("현재 위치를 입력해 주세요.");
     if (!counts) return setError("네 가지 수량을 0 이상의 정수로 입력해 주세요.");
     if (counts.every((count) => count === 0) && !draft.zeroConfirmed) {
       return setError("실물이 0개임을 직접 확인했다는 체크가 필요합니다.");
@@ -222,7 +223,7 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
         equipmentId: temporary ? null : selected?.equipmentId ?? null,
         temporaryCode: temporary ? `TMP-${id}` : null,
         temporaryLabel: temporary ? draft.temporaryLabel.trim() : null,
-        location: draft.location.trim(),
+        location: normalizeAuditLocation(draft.location),
         countNormal: counts[0],
         countMaintenance: counts[1],
         countDamaged: counts[2],
@@ -278,6 +279,8 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
       setTemporary(false);
       setDraft(EMPTY_DRAFT);
       setPhoto(null);
+      setSavedNotice(photo ? "항목과 사진 저장 완료" : "항목 저장 완료");
+      if (closeAfter) setOpen(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "저장하지 못했습니다.");
     } finally {
@@ -327,7 +330,7 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
         ) : workspace?.globalDraft.active && !ownedDraft ? (
           <div className="mt-2 text-[12.5px] font-semibold text-ink-mute">다른 직원이 전체 실사를 진행 중입니다.</div>
         ) : ownedDraft ? (
-          <button onClick={() => setOpen(true)} className="tap mt-2 w-full rounded-lg bg-brand-600 px-4 py-3 text-[14px] font-bold text-white">전체 재고 실사 이어하기</button>
+          <button onClick={() => setOpen(true)} className="tap mt-2 w-full rounded-lg bg-brand-600 px-4 py-3 text-[14px] font-bold text-white">전체 재고 실사 이어하기 · {workspace?.observations.length ?? 0}건 저장됨</button>
         ) : (
           <>
             <div className="mt-1 text-[12px] text-ink-mute">반출·반납·자리 이동을 모두 멈춘 뒤 시작해 주세요.</div>
@@ -343,11 +346,20 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
               <div className="text-[15px] font-bold text-ink">전체 재고 실사</div>
               <div className="text-[11.5px] text-ink-mute">완료 {progress.counted}/{progress.all} · 미계수 {progress.uncounted} · 문제 {progress.issue}</div>
             </div>
-            <button onClick={() => { setSelected(null); setTemporary(false); setOpen(false); }} className="tap rounded-lg px-3 py-2 text-[13px] font-bold text-ink-mute ring-1 ring-line">닫기</button>
+            <button
+              disabled={saving}
+              onClick={() => {
+                if (selected || temporary) void saveObservation(true);
+                else setOpen(false);
+              }}
+              className="tap rounded-lg px-3 py-2 text-[12px] font-bold text-ink-mute ring-1 ring-line disabled:opacity-50"
+            >
+              저장하고 나가기
+            </button>
           </header>
 
           {selected || temporary ? (
-            <div className="flex-1 overflow-y-auto p-3 pb-28">
+            <div className="flex-1 overflow-y-auto p-3 pb-40">
               <button onClick={() => { setSelected(null); setEditing(null); setTemporary(false); setError(""); }} className="tap mb-3 text-[13px] font-bold text-brand-700">← 목록으로</button>
               <div className="rounded-xl bg-white p-4 shadow-card ring-1 ring-line">
                 <div className="text-[16px] font-bold text-ink">{temporary ? "식별 불확실·목록 외 장비" : selected?.name}</div>
@@ -379,13 +391,24 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
                 <AuditInput label="특이사항" value={draft.note} onChange={(value) => setDraft((row) => ({ ...row, note: value }))} placeholder="파손 위치, 시리얼 등" />
                 <label className="mt-3 block text-[12px] font-bold text-ink-mute">사진</label>
                 <input type="file" accept="image/*" capture="environment" onChange={(event) => setPhoto(event.target.files?.[0] ?? null)} className="mt-1 block w-full text-[12px]" />
+                {photo && <div className="mt-2 rounded-lg bg-checkin-bg px-3 py-2 text-[12px] font-bold text-checkin-fg">사진 선택됨 · 저장 버튼을 누르면 함께 저장됩니다.</div>}
                 {error && <div className="mt-3 rounded-lg bg-attention-bg p-2.5 text-[12px] font-semibold text-attention-fg">{error}</div>}
-                <button disabled={saving} onClick={saveObservation} className="tap mt-4 w-full rounded-lg bg-brand-600 px-4 py-3 text-[14px] font-bold text-white disabled:opacity-50">{saving ? "저장 중…" : editing ? "수정 저장" : "이 위치 계수 확정"}</button>
+              </div>
+              <div className="safe-bottom fixed inset-x-0 bottom-0 z-20 border-t border-line bg-white p-3 shadow-card">
+                <div className="mb-2 text-center text-[11.5px] font-semibold text-ink-mute">저장된 항목은 앱을 닫아도 유지됩니다.</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button disabled={saving} onClick={() => void saveObservation(false)} className="tap rounded-lg bg-brand-600 px-3 py-3 text-[13px] font-bold text-white disabled:opacity-50">{saving ? "저장 중…" : "현재 항목 저장"}</button>
+                  <button disabled={saving} onClick={() => void saveObservation(true)} className="tap rounded-lg bg-ink px-3 py-3 text-[13px] font-bold text-white disabled:opacity-50">저장하고 나가기</button>
+                </div>
               </div>
             </div>
           ) : (
             <div className="flex-1 overflow-y-auto p-3 pb-32">
               <div className="sticky top-0 z-10 space-y-2 bg-paper pb-2">
+                <div className="rounded-lg bg-checkin-bg px-3 py-2 text-[12px] font-bold text-checkin-fg">
+                  현재 {workspace?.observations.length ?? 0}건 서버 저장 완료 · 앱을 닫아도 유지됩니다.
+                  {savedNotice && <div className="mt-0.5">{savedNotice}</div>}
+                </div>
                 <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="장비명·ID·별칭 검색" className="w-full rounded-lg bg-white px-3 py-3 text-[13px] ring-1 ring-line" />
                 <div className="flex gap-1.5 overflow-x-auto">
                   {(["all", "uncounted", "counted", "issue"] as const).map((value) => (
