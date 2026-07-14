@@ -33,6 +33,7 @@ test("migration creates the complete inventory-audit data contract", () => {
   for (const table of [
     "inventory_audit_sessions",
     "inventory_audit_snapshot_items",
+    "inventory_audit_snapshot_rental_exceptions",
     "inventory_audit_observations",
     "inventory_audit_decisions",
   ]) {
@@ -64,7 +65,11 @@ test("browser grants and RLS expose only owner metadata and draft observations",
   );
   assert.match(
     sql,
-    /grant select, insert, update, delete on village\.inventory_audit_observations to authenticated/i,
+    /grant select on village\.inventory_audit_observations to authenticated/i,
+  );
+  assert.doesNotMatch(
+    sql,
+    /grant[^;]*(?:insert|update|delete)[^;]*inventory_audit_observations[^;]*authenticated/i,
   );
   assert.match(
     sql,
@@ -76,27 +81,53 @@ test("browser grants and RLS expose only owner metadata and draft observations",
   );
   assert.match(sql, /create policy inventory_audit_sessions_owner_select/is);
   assert.match(sql, /create policy inventory_audit_observations_owner_select/is);
-  assert.match(sql, /create policy inventory_audit_observations_owner_draft_insert/is);
-  assert.match(sql, /create policy inventory_audit_observations_owner_draft_update/is);
-  assert.match(sql, /create policy inventory_audit_observations_owner_draft_delete/is);
+  assert.doesNotMatch(sql, /create policy inventory_audit_observations_owner_draft_(?:insert|update|delete)/i);
   assert.match(sql, /\(select auth\.uid\(\)\)/i);
 });
 
-test("evidence storage is private and draft-owner insert-only without upsert", () => {
+test("rental exceptions are hidden, constrained, and service-role only", () => {
+  const sql = readAuditMigration();
+
+  assert.match(sql, /create table village\.inventory_audit_snapshot_rental_exceptions/i);
+  assert.match(sql, /unique\s*\(session_id, schedule_id\)/i);
+  assert.match(sql, /reported_qty integer not null/i);
+  assert.match(sql, /reported_qty >= 0/i);
+  for (const reason of [
+    "ambiguous_name",
+    "unmatched_name",
+    "conflicting_checkout_evidence",
+    "invalid_quantity",
+  ]) {
+    assert.match(sql, new RegExp(`'${reason}'`, "i"));
+  }
+  assert.match(sql, /jsonb_typeof\(candidate_equipment_ids\) = 'array'/i);
+  assert.match(sql, /jsonb_typeof\(source_ref\) = 'object'/i);
+  assert.match(sql, /inventory_audit_rental_exception_resolution_shape/i);
+  assert.match(
+    sql,
+    /revoke all on village\.inventory_audit_snapshot_rental_exceptions from anon, authenticated/i,
+  );
+  assert.match(
+    sql,
+    /grant all on village\.inventory_audit_snapshot_rental_exceptions to service_role/i,
+  );
+  assert.doesNotMatch(
+    sql,
+    /create policy[^;]*inventory_audit_snapshot_rental_exceptions/i,
+  );
+});
+
+test("evidence storage is private and has no browser mutation policy", () => {
   const sql = readAuditMigration();
 
   assert.match(sql, /inventory-audit-evidence/i);
   assert.match(sql, /insert into storage\.buckets\s*\([^)]*public[^)]*\)/is);
   assert.match(sql, /'inventory-audit-evidence'[\s\S]*false/i);
   assert.doesNotMatch(sql, /\bon\s+conflict\b|\bupsert\b/i);
-  assert.match(sql, /create policy inventory_audit_evidence_insert/is);
   assert.doesNotMatch(
     sql,
-    /create policy inventory_audit_evidence_(?:select|update|delete)/i,
+    /create policy inventory_audit_evidence_(?:select|insert|update|delete)/i,
   );
-  assert.match(sql, /storage\.foldername\(name\)/i);
-  assert.match(sql, /cardinality\(storage\.foldername\(name\)\) = 2/i);
-  assert.match(sql, /status = 'draft'/i);
 });
 
 test("a security-definer global draft helper gates every authenticated ledger write", () => {
@@ -168,12 +199,193 @@ test("service-only RPCs make start, recount, and approval atomic", () => {
   assert.match(sql, /status = 'approved'/i);
   assert.match(sql, /multiple inventory audit decisions target equipment/i);
   assert.match(sql, /unresolved recount decision cannot create child session/i);
+  assert.match(
+    sql,
+    /request_inventory_audit_recount[\s\S]*from village\.inventory_audit_snapshot_rental_exceptions[\s\S]*for update[\s\S]*unresolved rental exception blocks recount/i,
+  );
+  assert.match(
+    sql,
+    /request_inventory_audit_recount[\s\S]*resolved equipment for rental exception is outside the source snapshot/i,
+  );
   assert.match(sql, /v_verify_status text/i);
   assert.match(
     sql,
     /jsonb_array_length[\s\S]*open_issues[\s\S]*stock_maint[\s\S]*state[\s\S]*<> '정상'[\s\S]*then 'attention'/i,
   );
   assert.match(sql, /verify_status = v_verify_status/i);
+});
+
+test("start snapshots matched rentals and hidden rental exceptions atomically", () => {
+  const sql = readAuditMigration();
+
+  assert.match(
+    sql,
+    /create function village\.start_inventory_audit\([\s\S]*p_rental_snapshot jsonb[\s\S]*p_rental_exceptions jsonb[\s\S]*returns jsonb/i,
+  );
+  assert.doesNotMatch(
+    sql,
+    /p_rental_(?:snapshot|exceptions) jsonb default/i,
+    "all five start arguments must be required so the obsolete four-argument call cannot resolve through defaults",
+  );
+  assert.match(
+    sql,
+    /insert into village\.inventory_audit_snapshot_rental_exceptions/i,
+  );
+  assert.match(
+    sql,
+    /jsonb_to_recordset\(p_rental_exceptions\)/i,
+  );
+  assert.doesNotMatch(
+    sql,
+    /(?:revoke|grant) execute on function village\.start_inventory_audit\(uuid, text, boolean, jsonb\)/i,
+  );
+  assert.match(
+    sql,
+    /drop function if exists village\.start_inventory_audit\(uuid, text, boolean, jsonb\)/i,
+  );
+  assert.match(
+    sql,
+    /revoke execute on function village\.start_inventory_audit\(uuid, text, boolean, jsonb, jsonb\) from public, anon, authenticated/i,
+  );
+  assert.match(
+    sql,
+    /grant execute on function village\.start_inventory_audit\(uuid, text, boolean, jsonb, jsonb\) to service_role/i,
+  );
+});
+
+test("service-only observation save and delete use session locks and compare-and-swap", () => {
+  const sql = readAuditMigration();
+
+  for (const fn of [
+    "save_inventory_audit_observation",
+    "delete_inventory_audit_observation",
+  ]) {
+    assert.match(
+      sql,
+      new RegExp(
+        `create function village\\.${fn}\\([\\s\\S]*?returns jsonb[\\s\\S]*?security definer[\\s\\S]*?set search_path = village, public`,
+        "i",
+      ),
+    );
+    assert.match(
+      sql,
+      new RegExp(
+        `revoke execute on function village\\.${fn}\\([\\s\\S]*?from public, anon, authenticated`,
+        "i",
+      ),
+    );
+    assert.match(
+      sql,
+      new RegExp(
+        `grant execute on function village\\.${fn}\\([\\s\\S]*?to service_role`,
+        "i",
+      ),
+    );
+  }
+
+  assert.match(
+    sql,
+    /save_inventory_audit_observation[\s\S]*from village\.inventory_audit_sessions[\s\S]*for update/i,
+  );
+  assert.match(sql, /p_expected_client_updated_at/i);
+  assert.match(sql, /client_updated_at is distinct from p_expected_client_updated_at/i);
+  assert.match(sql, /using errcode = '40001'/i);
+  assert.match(
+    sql,
+    /save_inventory_audit_observation[\s\S]*evidence_refs[\s\S]*v_existing\.evidence_refs/i,
+  );
+  assert.match(
+    sql,
+    /delete_inventory_audit_observation[\s\S]*client_updated_at is distinct from p_expected_client_updated_at/i,
+  );
+});
+
+test("submit and cancel serialize transitions and are service-role only", () => {
+  const sql = readAuditMigration();
+
+  for (const fn of ["submit_inventory_audit", "cancel_inventory_audit"]) {
+    assert.match(
+      sql,
+      new RegExp(
+        `create function village\\.${fn}\\([\\s\\S]*?returns jsonb[\\s\\S]*?security definer[\\s\\S]*?set search_path = village, public`,
+        "i",
+      ),
+    );
+    assert.match(
+      sql,
+      new RegExp(
+        `${fn}[\\s\\S]*pg_advisory_xact_lock[\\s\\S]*from village\\.inventory_audit_sessions[\\s\\S]*for update`,
+        "i",
+      ),
+    );
+  }
+
+  assert.match(sql, /p_pending_observation_writes[^,)]*integer/i);
+  assert.match(sql, /p_pending_evidence_uploads[^,)]*integer/i);
+  assert.match(
+    sql,
+    /submit_inventory_audit[\s\S]*jsonb_array_elements\(observation\.evidence_refs\)[\s\S]*pending/i,
+  );
+  assert.match(
+    sql,
+    /submit_inventory_audit[\s\S]*status = 'submitted'[\s\S]*'reused', true/i,
+  );
+  assert.match(
+    sql,
+    /cancel_inventory_audit[\s\S]*status = 'cancelled'[\s\S]*'reused', true/i,
+  );
+});
+
+test("evidence reservation RPCs are idempotent and submission-visible", () => {
+  const sql = readAuditMigration();
+
+  for (const fn of [
+    "reserve_inventory_audit_evidence",
+    "complete_inventory_audit_evidence",
+  ]) {
+    assert.match(
+      sql,
+      new RegExp(
+        `create function village\\.${fn}\\([\\s\\S]*?returns jsonb[\\s\\S]*?security definer[\\s\\S]*?set search_path = village, public`,
+        "i",
+      ),
+    );
+    assert.match(
+      sql,
+      new RegExp(`revoke execute on function village\\.${fn}\\(`, "i"),
+    );
+    assert.match(
+      sql,
+      new RegExp(`grant execute on function village\\.${fn}\\([\\s\\S]*?to service_role`, "i"),
+    );
+  }
+
+  assert.match(
+    sql,
+    /reserve_inventory_audit_evidence[\s\S]*p_session_id::text[\s\S]*p_observation_id::text[\s\S]*p_evidence_id::text \|\| '\.jpg'/i,
+  );
+  assert.match(
+    sql,
+    /reserve_inventory_audit_evidence[\s\S]*'status', 'pending'/i,
+  );
+  assert.match(
+    sql,
+    /complete_inventory_audit_evidence[\s\S]*'status', 'uploaded'/i,
+  );
+  assert.match(sql, /jsonb_array_elements\(v_observation\.evidence_refs\)/i);
+});
+
+test("approval refuses unresolved or invalid rental exceptions", () => {
+  const sql = readAuditMigration();
+
+  assert.match(
+    sql,
+    /approve_inventory_audit[\s\S]*inventory_audit_snapshot_rental_exceptions[\s\S]*unresolved rental exception blocks approval/i,
+  );
+  assert.match(
+    sql,
+    /resolved equipment for rental exception is outside the session snapshot/i,
+  );
 });
 
 test("approval compares the exact ledger version captured by the reviewer", () => {
@@ -253,10 +465,13 @@ test("new equipment verification metadata comes from its source observation", ()
 test("evidence object leaf is a UUID jpg filename", () => {
   const sql = readAuditMigration();
 
-  assert.match(sql, /storage\.filename\(name\)/i);
   assert.match(
     sql,
-    /storage\.filename\(name\)[\s\S]*\[0-9a-f\][\s\S]*\\\.jpg\$/i,
+    /reserve_inventory_audit_evidence\([\s\S]*p_evidence_id uuid/i,
+  );
+  assert.match(
+    sql,
+    /p_session_id::text\s*\|\|\s*'\/'\s*\|\|\s*p_observation_id::text\s*\|\|\s*'\/'\s*\|\|\s*p_evidence_id::text\s*\|\|\s*'\.jpg'/i,
   );
 });
 
@@ -268,6 +483,17 @@ test("security verification SQL is read-only and reports every protected surface
   assert.match(sql, /pg_policies/i);
   assert.match(sql, /storage\.buckets/i);
   assert.match(sql, /proacl/i);
+  assert.match(sql, /inventory_audit_snapshot_rental_exceptions/i);
+  for (const fn of [
+    "save_inventory_audit_observation",
+    "delete_inventory_audit_observation",
+    "submit_inventory_audit",
+    "cancel_inventory_audit",
+    "reserve_inventory_audit_evidence",
+    "complete_inventory_audit_evidence",
+  ]) {
+    assert.match(sql, new RegExp(fn, "i"));
+  }
   assert.doesNotMatch(
     sql,
     /\b(?:insert|update|delete|alter|create|drop|truncate|grant|revoke)\b/i,

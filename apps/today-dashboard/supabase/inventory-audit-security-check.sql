@@ -11,6 +11,7 @@ where namespace.nspname = 'village'
     'equipment_ledger',
     'inventory_audit_sessions',
     'inventory_audit_snapshot_items',
+    'inventory_audit_snapshot_rental_exceptions',
     'inventory_audit_observations',
     'inventory_audit_decisions'
   )
@@ -30,6 +31,7 @@ where (schemaname = 'village' and tablename in (
   'equipment_ledger',
   'inventory_audit_sessions',
   'inventory_audit_snapshot_items',
+  'inventory_audit_snapshot_rental_exceptions',
   'inventory_audit_observations',
   'inventory_audit_decisions'
 ))
@@ -59,6 +61,12 @@ where namespace.nspname = 'village'
   and procedure.proname in (
     'inventory_audit_ledger_writes_allowed',
     'start_inventory_audit',
+    'save_inventory_audit_observation',
+    'delete_inventory_audit_observation',
+    'submit_inventory_audit',
+    'cancel_inventory_audit',
+    'reserve_inventory_audit_evidence',
+    'complete_inventory_audit_evidence',
     'request_inventory_audit_recount',
     'approve_inventory_audit'
   )

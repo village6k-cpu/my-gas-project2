@@ -80,6 +80,128 @@ create table village.inventory_audit_snapshot_items (
     check (rental_match_status in ('matched', 'ambiguous', 'unmatched', 'none'))
 );
 
+-- Active-rental rows that cannot be attached safely to one ledger item remain
+-- hidden from staff but available to the owner review. Source identity is
+-- immutable; only the resolution columns may change after the cutoff.
+create table village.inventory_audit_snapshot_rental_exceptions (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references village.inventory_audit_sessions(id) on delete cascade,
+  trade_id text not null,
+  schedule_id text not null,
+  raw_name text not null,
+  normalized_name text not null,
+  reported_qty integer not null,
+  reason text not null,
+  candidate_equipment_ids jsonb not null default '[]'::jsonb,
+  source_ref jsonb not null default '{}'::jsonb,
+  resolution text,
+  resolved_equipment_id text references village.equipment_ledger(equipment_id) on delete restrict,
+  reviewed_by uuid,
+  reviewed_by_email text,
+  reviewed_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique (session_id, schedule_id),
+  constraint inventory_audit_rental_exception_source_check
+    check (
+      nullif(btrim(trade_id), '') is not null
+      and nullif(btrim(schedule_id), '') is not null
+      and nullif(btrim(raw_name), '') is not null
+      and nullif(btrim(normalized_name), '') is not null
+    ),
+  constraint inventory_audit_rental_exception_qty_nonnegative
+    check (reported_qty >= 0),
+  constraint inventory_audit_rental_exception_reason_check
+    check (reason in (
+      'ambiguous_name',
+      'unmatched_name',
+      'conflicting_checkout_evidence',
+      'invalid_quantity'
+    )),
+  constraint inventory_audit_rental_exception_candidates_array
+    check (jsonb_typeof(candidate_equipment_ids) = 'array'),
+  constraint inventory_audit_rental_exception_source_ref_object
+    check (jsonb_typeof(source_ref) = 'object'),
+  constraint inventory_audit_rental_exception_resolution_check
+    check (resolution is null or resolution in ('existing_equipment', 'not_inventory')),
+  constraint inventory_audit_rental_exception_resolution_shape
+    check (
+      (
+        resolution is null
+        and resolved_equipment_id is null
+        and reviewed_by is null
+        and reviewed_by_email is null
+        and reviewed_at is null
+      )
+      or
+      (
+        resolution = 'existing_equipment'
+        and nullif(btrim(resolved_equipment_id), '') is not null
+        and reviewed_by is not null
+        and nullif(btrim(reviewed_by_email), '') is not null
+        and reviewed_at is not null
+      )
+      or
+      (
+        resolution = 'not_inventory'
+        and resolved_equipment_id is null
+        and reviewed_by is not null
+        and nullif(btrim(reviewed_by_email), '') is not null
+        and reviewed_at is not null
+      )
+    )
+);
+
+create index inventory_audit_rental_exceptions_session_idx
+  on village.inventory_audit_snapshot_rental_exceptions (session_id, reason);
+create index inventory_audit_rental_exceptions_resolved_equipment_idx
+  on village.inventory_audit_snapshot_rental_exceptions (resolved_equipment_id)
+  where resolved_equipment_id is not null;
+
+create function village.protect_inventory_audit_rental_exception_source()
+returns trigger
+language plpgsql
+set search_path = village, public
+as $$
+begin
+  if (
+    new.id,
+    new.session_id,
+    new.trade_id,
+    new.schedule_id,
+    new.raw_name,
+    new.normalized_name,
+    new.reported_qty,
+    new.reason,
+    new.candidate_equipment_ids,
+    new.source_ref,
+    new.created_at
+  ) is distinct from (
+    old.id,
+    old.session_id,
+    old.trade_id,
+    old.schedule_id,
+    old.raw_name,
+    old.normalized_name,
+    old.reported_qty,
+    old.reason,
+    old.candidate_equipment_ids,
+    old.source_ref,
+    old.created_at
+  ) then
+    raise exception 'inventory audit rental exception source is immutable'
+      using errcode = '22023';
+  end if;
+  return new;
+end;
+$$;
+
+revoke execute on function village.protect_inventory_audit_rental_exception_source()
+  from public, anon, authenticated;
+
+create trigger inventory_audit_rental_exception_protect_source
+  before update on village.inventory_audit_snapshot_rental_exceptions
+  for each row execute function village.protect_inventory_audit_rental_exception_source();
+
 create table village.inventory_audit_observations (
   id uuid primary key,
   session_id uuid not null references village.inventory_audit_sessions(id) on delete cascade,
@@ -227,23 +349,27 @@ create trigger inventory_audit_decisions_touch_updated_at
 
 alter table village.inventory_audit_sessions enable row level security;
 alter table village.inventory_audit_snapshot_items enable row level security;
+alter table village.inventory_audit_snapshot_rental_exceptions enable row level security;
 alter table village.inventory_audit_observations enable row level security;
 alter table village.inventory_audit_decisions enable row level security;
 
 revoke all on village.inventory_audit_sessions from public;
 revoke all on village.inventory_audit_snapshot_items from public;
+revoke all on village.inventory_audit_snapshot_rental_exceptions from public;
 revoke all on village.inventory_audit_observations from public;
 revoke all on village.inventory_audit_decisions from public;
 revoke all on village.inventory_audit_sessions from anon, authenticated;
 revoke all on village.inventory_audit_snapshot_items from anon, authenticated;
+revoke all on village.inventory_audit_snapshot_rental_exceptions from anon, authenticated;
 revoke all on village.inventory_audit_observations from anon, authenticated;
 revoke all on village.inventory_audit_decisions from anon, authenticated;
 
 grant usage on schema village to authenticated, service_role;
 grant select on village.inventory_audit_sessions to authenticated;
-grant select, insert, update, delete on village.inventory_audit_observations to authenticated;
+grant select on village.inventory_audit_observations to authenticated;
 grant all on village.inventory_audit_sessions to service_role;
 grant all on village.inventory_audit_snapshot_items to service_role;
+grant all on village.inventory_audit_snapshot_rental_exceptions to service_role;
 grant all on village.inventory_audit_observations to service_role;
 grant all on village.inventory_audit_decisions to service_role;
 
@@ -264,61 +390,6 @@ create policy inventory_audit_observations_owner_select
       from village.inventory_audit_sessions as audit_session
       where audit_session.id = session_id
         and audit_session.started_by = (select auth.uid())
-    )
-  );
-
-create policy inventory_audit_observations_owner_draft_insert
-  on village.inventory_audit_observations
-  for insert
-  to authenticated
-  with check (
-    (select auth.uid()) = observed_by
-    and exists (
-      select 1
-      from village.inventory_audit_sessions as audit_session
-      where audit_session.id = session_id
-        and audit_session.started_by = (select auth.uid())
-        and audit_session.status = 'draft'
-    )
-  );
-
-create policy inventory_audit_observations_owner_draft_update
-  on village.inventory_audit_observations
-  for update
-  to authenticated
-  using (
-    (select auth.uid()) = observed_by
-    and exists (
-      select 1
-      from village.inventory_audit_sessions as audit_session
-      where audit_session.id = session_id
-        and audit_session.started_by = (select auth.uid())
-        and audit_session.status = 'draft'
-    )
-  )
-  with check (
-    (select auth.uid()) = observed_by
-    and exists (
-      select 1
-      from village.inventory_audit_sessions as audit_session
-      where audit_session.id = session_id
-        and audit_session.started_by = (select auth.uid())
-        and audit_session.status = 'draft'
-    )
-  );
-
-create policy inventory_audit_observations_owner_draft_delete
-  on village.inventory_audit_observations
-  for delete
-  to authenticated
-  using (
-    (select auth.uid()) = observed_by
-    and exists (
-      select 1
-      from village.inventory_audit_sessions as audit_session
-      where audit_session.id = session_id
-        and audit_session.started_by = (select auth.uid())
-        and audit_session.status = 'draft'
     )
   );
 
@@ -344,27 +415,6 @@ drop policy if exists inventory_audit_evidence_select on storage.objects;
 drop policy if exists inventory_audit_evidence_insert on storage.objects;
 drop policy if exists inventory_audit_evidence_update on storage.objects;
 drop policy if exists inventory_audit_evidence_delete on storage.objects;
-
-create policy inventory_audit_evidence_insert
-  on storage.objects
-  for insert
-  to authenticated
-  with check (
-    bucket_id = 'inventory-audit-evidence'
-    and cardinality(storage.foldername(name)) = 2
-    and storage.filename(name) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jpg$'
-    and exists (
-      select 1
-      from village.inventory_audit_sessions as audit_session
-      join village.inventory_audit_observations as observation
-        on observation.session_id = audit_session.id
-      where audit_session.id::text = (storage.foldername(name))[1]
-        and observation.id::text = (storage.foldername(name))[2]
-        and audit_session.started_by = (select auth.uid())
-        and observation.observed_by = (select auth.uid())
-        and audit_session.status = 'draft'
-    )
-  );
 
 -- This no-argument definer sees every session despite caller RLS. The advisory
 -- lock serializes ordinary ledger writes with audit start/recount/approval.
@@ -423,11 +473,14 @@ create policy equipment_ledger_authenticated_delete
   to authenticated
   using ((select village.inventory_audit_ledger_writes_allowed()));
 
+drop function if exists village.start_inventory_audit(uuid, text, boolean, jsonb);
+
 create function village.start_inventory_audit(
   p_started_by uuid,
   p_started_by_email text,
   p_movement_frozen boolean,
-  p_rental_snapshot jsonb default '[]'::jsonb
+  p_rental_snapshot jsonb,
+  p_rental_exceptions jsonb
 )
 returns jsonb
 language plpgsql
@@ -447,6 +500,9 @@ begin
   end if;
   if p_rental_snapshot is null or jsonb_typeof(p_rental_snapshot) <> 'array' then
     raise exception 'rental snapshot must be a JSON array' using errcode = '22023';
+  end if;
+  if p_rental_exceptions is null or jsonb_typeof(p_rental_exceptions) <> 'array' then
+    raise exception 'rental exceptions must be a JSON array' using errcode = '22023';
   end if;
 
   perform pg_catalog.pg_advisory_xact_lock(
@@ -555,6 +611,41 @@ begin
     raise exception 'cannot start inventory audit with an empty active ledger' using errcode = 'P0001';
   end if;
 
+  insert into village.inventory_audit_snapshot_rental_exceptions (
+    id,
+    session_id,
+    trade_id,
+    schedule_id,
+    raw_name,
+    normalized_name,
+    reported_qty,
+    reason,
+    candidate_equipment_ids,
+    source_ref
+  )
+  select
+    coalesce(rental_exception.id, gen_random_uuid()),
+    v_session_id,
+    btrim(rental_exception.trade_id),
+    btrim(rental_exception.schedule_id),
+    btrim(rental_exception.raw_name),
+    btrim(rental_exception.normalized_name),
+    rental_exception.reported_qty,
+    rental_exception.reason,
+    coalesce(rental_exception.candidate_equipment_ids, '[]'::jsonb),
+    coalesce(rental_exception.source_ref, '{}'::jsonb)
+  from jsonb_to_recordset(p_rental_exceptions) as rental_exception (
+    id uuid,
+    trade_id text,
+    schedule_id text,
+    raw_name text,
+    normalized_name text,
+    reported_qty integer,
+    reason text,
+    candidate_equipment_ids jsonb,
+    source_ref jsonb
+  );
+
   return jsonb_build_object(
     'session_id', v_session_id,
     'reused', false,
@@ -564,8 +655,762 @@ begin
 end;
 $$;
 
-revoke execute on function village.start_inventory_audit(uuid, text, boolean, jsonb) from public, anon, authenticated;
-grant execute on function village.start_inventory_audit(uuid, text, boolean, jsonb) to service_role;
+revoke execute on function village.start_inventory_audit(uuid, text, boolean, jsonb, jsonb) from public, anon, authenticated;
+grant execute on function village.start_inventory_audit(uuid, text, boolean, jsonb, jsonb) to service_role;
+
+create function village.save_inventory_audit_observation(
+  p_session_id uuid,
+  p_observation_id uuid,
+  p_actor_id uuid,
+  p_actor_email text,
+  p_equipment_id text,
+  p_temporary_code text,
+  p_temporary_label text,
+  p_location text,
+  p_count_normal integer,
+  p_count_maintenance integer,
+  p_count_damaged integer,
+  p_count_condition_unknown integer,
+  p_missing_components jsonb,
+  p_note text,
+  p_identification_status text,
+  p_client_updated_at timestamptz,
+  p_expected_client_updated_at timestamptz
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = village, public
+as $$
+declare
+  v_session village.inventory_audit_sessions%rowtype;
+  v_existing village.inventory_audit_observations%rowtype;
+  v_result village.inventory_audit_observations%rowtype;
+  v_equipment_id text := nullif(btrim(p_equipment_id), '');
+  v_temporary_code text := nullif(btrim(p_temporary_code), '');
+  v_temporary_label text := nullif(btrim(p_temporary_label), '');
+  v_location text := btrim(p_location);
+  v_missing_components jsonb := coalesce(p_missing_components, '[]'::jsonb);
+  v_note text := coalesce(p_note, '');
+  v_created boolean := false;
+  v_reused boolean := false;
+begin
+  if p_session_id is null
+     or p_observation_id is null
+     or p_actor_id is null
+     or nullif(btrim(p_actor_email), '') is null then
+    raise exception 'inventory audit observation actor and ids are required'
+      using errcode = '22023';
+  end if;
+  if nullif(v_location, '') is null or p_client_updated_at is null then
+    raise exception 'inventory audit observation location and client timestamp are required'
+      using errcode = '22023';
+  end if;
+  if p_count_normal is null
+     or p_count_maintenance is null
+     or p_count_damaged is null
+     or p_count_condition_unknown is null
+     or p_count_normal < 0
+     or p_count_maintenance < 0
+     or p_count_damaged < 0
+     or p_count_condition_unknown < 0 then
+    raise exception 'inventory audit observation counts must be nonnegative integers'
+      using errcode = '22023';
+  end if;
+  if jsonb_typeof(v_missing_components) <> 'array' then
+    raise exception 'inventory audit missing components must be a JSON array'
+      using errcode = '22023';
+  end if;
+  if not (
+    (
+      p_identification_status = 'confirmed'
+      and v_equipment_id is not null
+      and v_temporary_code is null
+      and v_temporary_label is null
+    )
+    or
+    (
+      p_identification_status in ('uncertain', 'unlisted')
+      and v_equipment_id is null
+      and v_temporary_code is not null
+    )
+  ) then
+    raise exception 'inventory audit observation identity is invalid'
+      using errcode = '22023';
+  end if;
+
+  select *
+  into v_session
+  from village.inventory_audit_sessions
+  where id = p_session_id
+  for update;
+
+  if not found then
+    raise exception 'inventory audit session not found' using errcode = 'P0002';
+  end if;
+  if v_session.started_by <> p_actor_id then
+    raise exception 'inventory audit session belongs to another user' using errcode = '42501';
+  end if;
+
+  select *
+  into v_existing
+  from village.inventory_audit_observations
+  where id = p_observation_id
+  for update;
+
+  if found then
+    if v_existing.session_id <> p_session_id or v_existing.observed_by <> p_actor_id then
+      raise exception 'inventory audit observation belongs to another session or user'
+        using errcode = '42501';
+    end if;
+
+    if row(
+      v_existing.equipment_id,
+      v_existing.temporary_code,
+      v_existing.temporary_label,
+      v_existing.location,
+      v_existing.count_normal,
+      v_existing.count_maintenance,
+      v_existing.count_damaged,
+      v_existing.count_condition_unknown,
+      v_existing.missing_components,
+      v_existing.note,
+      v_existing.identification_status,
+      v_existing.client_updated_at
+    ) is not distinct from row(
+      v_equipment_id,
+      v_temporary_code,
+      v_temporary_label,
+      v_location,
+      p_count_normal,
+      p_count_maintenance,
+      p_count_damaged,
+      p_count_condition_unknown,
+      v_missing_components,
+      v_note,
+      p_identification_status,
+      p_client_updated_at
+    ) then
+      v_result := v_existing;
+      v_reused := true;
+    else
+      if v_session.status <> 'draft' then
+        raise exception 'inventory audit observations are immutable after submission'
+          using errcode = 'P0001';
+      end if;
+      if v_existing.client_updated_at is distinct from p_expected_client_updated_at then
+        raise exception 'inventory audit observation has a stale client base'
+          using errcode = '40001';
+      end if;
+      if p_client_updated_at <= v_existing.client_updated_at then
+        raise exception 'inventory audit observation client timestamp must advance'
+          using errcode = '40001';
+      end if;
+
+      if v_equipment_id is not null and not exists (
+        select 1
+        from village.inventory_audit_snapshot_items as snapshot
+        where snapshot.session_id = p_session_id
+          and snapshot.equipment_id = v_equipment_id
+      ) then
+        raise exception 'confirmed equipment is outside the inventory audit snapshot'
+          using errcode = '22023';
+      end if;
+
+      update village.inventory_audit_observations
+      set equipment_id = v_equipment_id,
+          temporary_code = v_temporary_code,
+          temporary_label = v_temporary_label,
+          location = v_location,
+          count_normal = p_count_normal,
+          count_maintenance = p_count_maintenance,
+          count_damaged = p_count_damaged,
+          count_condition_unknown = p_count_condition_unknown,
+          missing_components = v_missing_components,
+          note = v_note,
+          identification_status = p_identification_status,
+          evidence_refs = v_existing.evidence_refs,
+          client_updated_at = p_client_updated_at
+      where id = p_observation_id
+      returning * into v_result;
+    end if;
+  else
+    if v_session.status <> 'draft' then
+      raise exception 'inventory audit observations are immutable after submission'
+        using errcode = 'P0001';
+    end if;
+    if p_expected_client_updated_at is not null then
+      raise exception 'inventory audit observation create has a stale client base'
+        using errcode = '40001';
+    end if;
+    if v_equipment_id is not null and not exists (
+      select 1
+      from village.inventory_audit_snapshot_items as snapshot
+      where snapshot.session_id = p_session_id
+        and snapshot.equipment_id = v_equipment_id
+    ) then
+      raise exception 'confirmed equipment is outside the inventory audit snapshot'
+        using errcode = '22023';
+    end if;
+
+    insert into village.inventory_audit_observations (
+      id,
+      session_id,
+      equipment_id,
+      temporary_code,
+      temporary_label,
+      location,
+      count_normal,
+      count_maintenance,
+      count_damaged,
+      count_condition_unknown,
+      missing_components,
+      note,
+      identification_status,
+      observed_by,
+      observed_by_email,
+      client_updated_at
+    ) values (
+      p_observation_id,
+      p_session_id,
+      v_equipment_id,
+      v_temporary_code,
+      v_temporary_label,
+      v_location,
+      p_count_normal,
+      p_count_maintenance,
+      p_count_damaged,
+      p_count_condition_unknown,
+      v_missing_components,
+      v_note,
+      p_identification_status,
+      p_actor_id,
+      btrim(p_actor_email),
+      p_client_updated_at
+    )
+    returning * into v_result;
+    v_created := true;
+  end if;
+
+  return jsonb_build_object(
+    'created', v_created,
+    'reused', v_reused,
+    'observation', jsonb_build_object(
+      'id', v_result.id,
+      'session_id', v_result.session_id,
+      'equipment_id', v_result.equipment_id,
+      'temporary_code', v_result.temporary_code,
+      'temporary_label', v_result.temporary_label,
+      'location', v_result.location,
+      'count_normal', v_result.count_normal,
+      'count_maintenance', v_result.count_maintenance,
+      'count_damaged', v_result.count_damaged,
+      'count_condition_unknown', v_result.count_condition_unknown,
+      'missing_components', v_result.missing_components,
+      'note', v_result.note,
+      'identification_status', v_result.identification_status,
+      'evidence_refs', v_result.evidence_refs,
+      'client_updated_at', v_result.client_updated_at,
+      'created_at', v_result.created_at,
+      'updated_at', v_result.updated_at
+    )
+  );
+end;
+$$;
+
+revoke execute on function village.save_inventory_audit_observation(
+  uuid, uuid, uuid, text, text, text, text, text,
+  integer, integer, integer, integer, jsonb, text, text, timestamptz, timestamptz
+) from public, anon, authenticated;
+grant execute on function village.save_inventory_audit_observation(
+  uuid, uuid, uuid, text, text, text, text, text,
+  integer, integer, integer, integer, jsonb, text, text, timestamptz, timestamptz
+) to service_role;
+
+create function village.delete_inventory_audit_observation(
+  p_session_id uuid,
+  p_observation_id uuid,
+  p_actor_id uuid,
+  p_expected_client_updated_at timestamptz
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = village, public
+as $$
+declare
+  v_session village.inventory_audit_sessions%rowtype;
+  v_existing village.inventory_audit_observations%rowtype;
+begin
+  if p_session_id is null or p_observation_id is null or p_actor_id is null then
+    raise exception 'inventory audit observation delete ids are required'
+      using errcode = '22023';
+  end if;
+
+  select *
+  into v_session
+  from village.inventory_audit_sessions
+  where id = p_session_id
+  for update;
+
+  if not found then
+    raise exception 'inventory audit session not found' using errcode = 'P0002';
+  end if;
+  if v_session.started_by <> p_actor_id then
+    raise exception 'inventory audit session belongs to another user' using errcode = '42501';
+  end if;
+
+  select *
+  into v_existing
+  from village.inventory_audit_observations
+  where id = p_observation_id
+  for update;
+
+  if not found then
+    return jsonb_build_object(
+      'observation_id', p_observation_id,
+      'deleted', true,
+      'reused', true
+    );
+  end if;
+  if v_existing.session_id <> p_session_id or v_existing.observed_by <> p_actor_id then
+    raise exception 'inventory audit observation belongs to another session or user'
+      using errcode = '42501';
+  end if;
+  if v_session.status <> 'draft' then
+    raise exception 'inventory audit observations are immutable after submission'
+      using errcode = 'P0001';
+  end if;
+  if v_existing.client_updated_at is distinct from p_expected_client_updated_at then
+    raise exception 'inventory audit observation delete has a stale client base'
+      using errcode = '40001';
+  end if;
+  if jsonb_array_length(v_existing.evidence_refs) > 0 then
+    raise exception 'inventory audit observation with evidence cannot be deleted'
+      using errcode = 'P0001';
+  end if;
+
+  delete from village.inventory_audit_observations
+  where id = p_observation_id;
+
+  return jsonb_build_object(
+    'observation_id', p_observation_id,
+    'deleted', true,
+    'reused', false
+  );
+end;
+$$;
+
+revoke execute on function village.delete_inventory_audit_observation(uuid, uuid, uuid, timestamptz)
+  from public, anon, authenticated;
+grant execute on function village.delete_inventory_audit_observation(uuid, uuid, uuid, timestamptz)
+  to service_role;
+
+create function village.submit_inventory_audit(
+  p_session_id uuid,
+  p_actor_id uuid,
+  p_pending_observation_writes integer,
+  p_pending_evidence_uploads integer
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = village, public
+as $$
+declare
+  v_session village.inventory_audit_sessions%rowtype;
+  v_submitted_at timestamptz;
+  v_observation_count integer;
+begin
+  if p_session_id is null or p_actor_id is null then
+    raise exception 'inventory audit submit ids are required' using errcode = '22023';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('village.inventory_audit.full_shop', 0)
+  );
+
+  select *
+  into v_session
+  from village.inventory_audit_sessions
+  where id = p_session_id
+  for update;
+
+  if not found then
+    raise exception 'inventory audit session not found' using errcode = 'P0002';
+  end if;
+  if v_session.started_by <> p_actor_id then
+    raise exception 'inventory audit session belongs to another user' using errcode = '42501';
+  end if;
+  if v_session.status = 'submitted' then
+    return jsonb_build_object(
+      'session_id', p_session_id,
+      'status', 'submitted',
+      'submitted_at', v_session.submitted_at,
+      'reused', true
+    );
+  end if;
+  if v_session.status <> 'draft' then
+    raise exception 'inventory audit session cannot be submitted from status %', v_session.status
+      using errcode = 'P0001';
+  end if;
+  if p_pending_observation_writes is distinct from 0
+     or p_pending_evidence_uploads is distinct from 0 then
+    raise exception 'inventory audit cannot submit with pending client writes or evidence uploads'
+      using errcode = 'P0001';
+  end if;
+
+  select count(*)::integer
+  into v_observation_count
+  from village.inventory_audit_observations
+  where session_id = p_session_id;
+
+  if v_observation_count = 0 then
+    raise exception 'inventory audit requires at least one observation before submission'
+      using errcode = 'P0001';
+  end if;
+  if exists (
+    select 1
+    from village.inventory_audit_observations as observation
+    cross join lateral jsonb_array_elements(observation.evidence_refs) as evidence(ref)
+    where observation.session_id = p_session_id
+      and coalesce(evidence.ref ->> 'status', 'pending') <> 'uploaded'
+  ) then
+    raise exception 'inventory audit has pending server evidence'
+      using errcode = 'P0001';
+  end if;
+
+  v_submitted_at := pg_catalog.clock_timestamp();
+  update village.inventory_audit_sessions
+  set status = 'submitted',
+      movement_frozen = false,
+      submitted_at = v_submitted_at
+  where id = p_session_id;
+
+  return jsonb_build_object(
+    'session_id', p_session_id,
+    'status', 'submitted',
+    'submitted_at', v_submitted_at,
+    'observation_count', v_observation_count,
+    'reused', false
+  );
+end;
+$$;
+
+revoke execute on function village.submit_inventory_audit(uuid, uuid, integer, integer)
+  from public, anon, authenticated;
+grant execute on function village.submit_inventory_audit(uuid, uuid, integer, integer)
+  to service_role;
+
+create function village.cancel_inventory_audit(
+  p_session_id uuid,
+  p_actor_id uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = village, public
+as $$
+declare
+  v_session village.inventory_audit_sessions%rowtype;
+begin
+  if p_session_id is null or p_actor_id is null then
+    raise exception 'inventory audit cancel ids are required' using errcode = '22023';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('village.inventory_audit.full_shop', 0)
+  );
+
+  select *
+  into v_session
+  from village.inventory_audit_sessions
+  where id = p_session_id
+  for update;
+
+  if not found then
+    raise exception 'inventory audit session not found' using errcode = 'P0002';
+  end if;
+  if v_session.started_by <> p_actor_id then
+    raise exception 'inventory audit session belongs to another user' using errcode = '42501';
+  end if;
+  if v_session.status = 'cancelled' then
+    return jsonb_build_object(
+      'session_id', p_session_id,
+      'status', 'cancelled',
+      'reused', true
+    );
+  end if;
+  if v_session.status <> 'draft' then
+    raise exception 'inventory audit session cannot be cancelled from status %', v_session.status
+      using errcode = 'P0001';
+  end if;
+
+  update village.inventory_audit_sessions
+  set status = 'cancelled',
+      movement_frozen = false
+  where id = p_session_id;
+
+  return jsonb_build_object(
+    'session_id', p_session_id,
+    'status', 'cancelled',
+    'reused', false
+  );
+end;
+$$;
+
+revoke execute on function village.cancel_inventory_audit(uuid, uuid)
+  from public, anon, authenticated;
+grant execute on function village.cancel_inventory_audit(uuid, uuid)
+  to service_role;
+
+create function village.reserve_inventory_audit_evidence(
+  p_session_id uuid,
+  p_observation_id uuid,
+  p_evidence_id uuid,
+  p_actor_id uuid,
+  p_content_type text,
+  p_size_bytes integer
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = village, public
+as $$
+declare
+  v_session village.inventory_audit_sessions%rowtype;
+  v_observation village.inventory_audit_observations%rowtype;
+  v_existing_ref jsonb;
+  v_ref jsonb;
+  v_path text;
+  v_created_at timestamptz;
+begin
+  if p_session_id is null
+     or p_observation_id is null
+     or p_evidence_id is null
+     or p_actor_id is null then
+    raise exception 'inventory audit evidence ids are required' using errcode = '22023';
+  end if;
+  if p_content_type <> 'image/jpeg'
+     or p_size_bytes is null
+     or p_size_bytes <= 0
+     or p_size_bytes > 10485760 then
+    raise exception 'inventory audit evidence must be a JPEG up to 10 MB'
+      using errcode = '22023';
+  end if;
+
+  v_path := p_session_id::text || '/' || p_observation_id::text || '/' || p_evidence_id::text || '.jpg';
+
+  select *
+  into v_session
+  from village.inventory_audit_sessions
+  where id = p_session_id
+  for update;
+
+  if not found then
+    raise exception 'inventory audit session not found' using errcode = 'P0002';
+  end if;
+  if v_session.started_by <> p_actor_id then
+    raise exception 'inventory audit session belongs to another user' using errcode = '42501';
+  end if;
+
+  select *
+  into v_observation
+  from village.inventory_audit_observations
+  where id = p_observation_id
+  for update;
+
+  if not found then
+    raise exception 'inventory audit observation not found' using errcode = 'P0002';
+  end if;
+  if v_observation.session_id <> p_session_id or v_observation.observed_by <> p_actor_id then
+    raise exception 'inventory audit observation belongs to another session or user'
+      using errcode = '42501';
+  end if;
+
+  select evidence.ref
+  into v_existing_ref
+  from jsonb_array_elements(v_observation.evidence_refs) as evidence(ref)
+  where evidence.ref ->> 'id' = p_evidence_id::text
+  limit 1;
+
+  if found then
+    if v_existing_ref ->> 'path' = v_path
+       and v_existing_ref ->> 'content_type' = p_content_type
+       and (v_existing_ref ->> 'size_bytes')::integer = p_size_bytes
+       and v_existing_ref ->> 'status' in ('pending', 'uploaded') then
+      return jsonb_build_object(
+        'evidence', v_existing_ref,
+        'created', false,
+        'reused', true
+      );
+    end if;
+    raise exception 'inventory audit evidence id was reused with conflicting metadata'
+      using errcode = '40001';
+  end if;
+
+  if v_session.status <> 'draft' then
+    raise exception 'inventory audit evidence cannot be reserved after submission'
+      using errcode = 'P0001';
+  end if;
+
+  v_created_at := pg_catalog.clock_timestamp();
+  v_ref := jsonb_build_object(
+    'id', p_evidence_id,
+    'path', v_path,
+    'status', 'pending',
+    'content_type', p_content_type,
+    'size_bytes', p_size_bytes,
+    'created_at', v_created_at
+  );
+
+  update village.inventory_audit_observations
+  set evidence_refs = evidence_refs || jsonb_build_array(v_ref)
+  where id = p_observation_id;
+
+  return jsonb_build_object(
+    'evidence', v_ref,
+    'created', true,
+    'reused', false
+  );
+end;
+$$;
+
+revoke execute on function village.reserve_inventory_audit_evidence(uuid, uuid, uuid, uuid, text, integer)
+  from public, anon, authenticated;
+grant execute on function village.reserve_inventory_audit_evidence(uuid, uuid, uuid, uuid, text, integer)
+  to service_role;
+
+create function village.complete_inventory_audit_evidence(
+  p_session_id uuid,
+  p_observation_id uuid,
+  p_evidence_id uuid,
+  p_actor_id uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = village, public
+as $$
+declare
+  v_session village.inventory_audit_sessions%rowtype;
+  v_observation village.inventory_audit_observations%rowtype;
+  v_existing_ref jsonb;
+  v_completed_ref jsonb;
+  v_refs jsonb;
+  v_path text;
+  v_uploaded_at timestamptz;
+begin
+  if p_session_id is null
+     or p_observation_id is null
+     or p_evidence_id is null
+     or p_actor_id is null then
+    raise exception 'inventory audit evidence ids are required' using errcode = '22023';
+  end if;
+
+  v_path := p_session_id::text || '/' || p_observation_id::text || '/' || p_evidence_id::text || '.jpg';
+
+  select *
+  into v_session
+  from village.inventory_audit_sessions
+  where id = p_session_id
+  for update;
+
+  if not found then
+    raise exception 'inventory audit session not found' using errcode = 'P0002';
+  end if;
+  if v_session.started_by <> p_actor_id then
+    raise exception 'inventory audit session belongs to another user' using errcode = '42501';
+  end if;
+
+  select *
+  into v_observation
+  from village.inventory_audit_observations
+  where id = p_observation_id
+  for update;
+
+  if not found then
+    raise exception 'inventory audit observation not found' using errcode = 'P0002';
+  end if;
+  if v_observation.session_id <> p_session_id or v_observation.observed_by <> p_actor_id then
+    raise exception 'inventory audit observation belongs to another session or user'
+      using errcode = '42501';
+  end if;
+
+  select evidence.ref
+  into v_existing_ref
+  from jsonb_array_elements(v_observation.evidence_refs) as evidence(ref)
+  where evidence.ref ->> 'id' = p_evidence_id::text
+  limit 1;
+
+  if not found then
+    raise exception 'inventory audit evidence reservation not found' using errcode = 'P0002';
+  end if;
+  if v_existing_ref ->> 'path' <> v_path then
+    raise exception 'inventory audit evidence reservation path is invalid'
+      using errcode = '40001';
+  end if;
+  if v_existing_ref ->> 'status' = 'uploaded' then
+    return jsonb_build_object(
+      'evidence', v_existing_ref,
+      'completed', true,
+      'reused', true
+    );
+  end if;
+  if v_session.status <> 'draft' then
+    raise exception 'inventory audit evidence cannot be completed after submission'
+      using errcode = 'P0001';
+  end if;
+  if v_existing_ref ->> 'status' <> 'pending' then
+    raise exception 'inventory audit evidence reservation status is invalid'
+      using errcode = '40001';
+  end if;
+  if not exists (
+    select 1
+    from storage.objects as stored_object
+    where stored_object.bucket_id = 'inventory-audit-evidence'
+      and stored_object.name = v_path
+  ) then
+    raise exception 'inventory audit evidence object not found' using errcode = 'P0002';
+  end if;
+
+  v_uploaded_at := pg_catalog.clock_timestamp();
+  select jsonb_agg(
+    case
+      when evidence.ref ->> 'id' = p_evidence_id::text then
+        (evidence.ref - 'status') || jsonb_build_object(
+          'status', 'uploaded',
+          'uploaded_at', v_uploaded_at
+        )
+      else evidence.ref
+    end
+    order by evidence.ordinality
+  )
+  into v_refs
+  from jsonb_array_elements(v_observation.evidence_refs)
+    with ordinality as evidence(ref, ordinality);
+
+  update village.inventory_audit_observations
+  set evidence_refs = v_refs
+  where id = p_observation_id;
+
+  select evidence.ref
+  into strict v_completed_ref
+  from jsonb_array_elements(v_refs) as evidence(ref)
+  where evidence.ref ->> 'id' = p_evidence_id::text;
+
+  return jsonb_build_object(
+    'evidence', v_completed_ref,
+    'completed', true,
+    'reused', false
+  );
+end;
+$$;
+
+revoke execute on function village.complete_inventory_audit_evidence(uuid, uuid, uuid, uuid)
+  from public, anon, authenticated;
+grant execute on function village.complete_inventory_audit_evidence(uuid, uuid, uuid, uuid)
+  to service_role;
 
 create function village.request_inventory_audit_recount(p_session_id uuid)
 returns jsonb
@@ -621,6 +1466,38 @@ begin
 
   if v_source.status not in ('submitted', 'in_review') then
     raise exception 'inventory audit session cannot request recount from status %', v_source.status
+      using errcode = 'P0001';
+  end if;
+
+  perform 1
+  from village.inventory_audit_snapshot_rental_exceptions
+  where session_id = p_session_id
+  order by id
+  for update;
+
+  if exists (
+    select 1
+    from village.inventory_audit_snapshot_rental_exceptions as rental_exception
+    where rental_exception.session_id = p_session_id
+      and rental_exception.resolution is null
+  ) then
+    raise exception 'unresolved rental exception blocks recount'
+      using errcode = 'P0001';
+  end if;
+
+  if exists (
+    select 1
+    from village.inventory_audit_snapshot_rental_exceptions as rental_exception
+    where rental_exception.session_id = p_session_id
+      and rental_exception.resolution = 'existing_equipment'
+      and not exists (
+        select 1
+        from village.inventory_audit_snapshot_items as snapshot
+        where snapshot.session_id = rental_exception.session_id
+          and snapshot.equipment_id = rental_exception.resolved_equipment_id
+      )
+  ) then
+    raise exception 'resolved equipment for rental exception is outside the source snapshot'
       using errcode = 'P0001';
   end if;
 
@@ -819,6 +1696,38 @@ begin
   where session_id = p_session_id
   order by id
   for update;
+
+  perform 1
+  from village.inventory_audit_snapshot_rental_exceptions
+  where session_id = p_session_id
+  order by id
+  for update;
+
+  if exists (
+    select 1
+    from village.inventory_audit_snapshot_rental_exceptions as rental_exception
+    where rental_exception.session_id = p_session_id
+      and rental_exception.resolution is null
+  ) then
+    raise exception 'unresolved rental exception blocks approval'
+      using errcode = 'P0001';
+  end if;
+
+  if exists (
+    select 1
+    from village.inventory_audit_snapshot_rental_exceptions as rental_exception
+    where rental_exception.session_id = p_session_id
+      and rental_exception.resolution = 'existing_equipment'
+      and not exists (
+        select 1
+        from village.inventory_audit_snapshot_items as snapshot
+        where snapshot.session_id = rental_exception.session_id
+          and snapshot.equipment_id = rental_exception.resolved_equipment_id
+      )
+  ) then
+    raise exception 'resolved equipment for rental exception is outside the session snapshot'
+      using errcode = 'P0001';
+  end if;
 
   perform 1
   from village.equipment_ledger as ledger
