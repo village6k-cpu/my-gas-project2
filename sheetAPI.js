@@ -1121,6 +1121,12 @@ function runFunction(funcName, params) {
       var result = deleteRequest(reqID);
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
+    if (funcName === "deleteTrade" && params.args) {
+      var delArgs = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var tradeId = typeof delArgs === "string" ? delArgs : (delArgs.tradeId || delArgs.거래ID || delArgs.id);
+      var delResult = deleteTrade(tradeId);
+      return { success: true, function: funcName, result: delResult, executionTime: (new Date() - startTime) + "ms" };
+    }
     if (funcName === "getMyPageLink") {
       var args = params.args;
       if (typeof args === "string") {
