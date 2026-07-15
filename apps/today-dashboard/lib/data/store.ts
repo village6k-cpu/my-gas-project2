@@ -552,6 +552,10 @@ export async function cancelTrade(tradeId: string): Promise<{ ok: true; warning?
 }
 
 export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
+  if (state.savingTrades[tradeId]) {
+    const error = "반출 상태 변경이 이미 진행 중입니다";
+    return { ok: false, error };
+  }
   const current = state.trades.find((t) => t.tradeId === tradeId);
   if (!current) return { ok: false, error: "거래를 찾을 수 없습니다" };
   const done = !current.setupDone;

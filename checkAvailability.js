@@ -1600,6 +1600,21 @@ function getDashboardSearchGroupsForIds_(schedSheet, tradeIds, rowsByTid) {
   return groups;
 }
 
+/** 반출완료 단건 처리에서 스케줄상세 전체 A:L을 읽지 않도록 거래ID(B열) 행만 찾는다. */
+function getDashboardRowsByTradeId_(schedSheet, tid) {
+  tid = String(tid || '').trim();
+  var rowsByTid = {};
+  rowsByTid[tid] = [];
+  if (!schedSheet || !tid || schedSheet.getLastRow() < 2) return rowsByTid;
+  var matches = schedSheet
+    .getRange(2, 2, schedSheet.getLastRow() - 1, 1)
+    .createTextFinder(tid)
+    .matchEntireCell(true)
+    .findAll();
+  rowsByTid[tid] = matches.map(function(range) { return range.getRow(); });
+  return rowsByTid;
+}
+
 function compareDashboardSearchCandidates_(a, b) {
   var dateCmp = String(a.sortDate || '').localeCompare(String(b.sortDate || ''));
   if (dateCmp) return dateCmp;
@@ -2506,7 +2521,11 @@ function toggleSetupDone(tid, done) {
       var ss = SpreadsheetApp.getActiveSpreadsheet();
       var sched = ss.getSheetByName('스케줄상세');
       if (!sched) return { error: '반출 기준선 저장 실패: 스케줄상세 시트 없음' };
-      var groups = getDashboardSearchGroupsForIds_(sched, [tid]);
+      var rowsByTid = getDashboardRowsByTradeId_(sched, tid);
+      if (!rowsByTid[tid] || !rowsByTid[tid].length) {
+        return { error: '반출 기준선 저장 실패: 해당 거래의 스케줄 행 없음' };
+      }
+      var groups = getDashboardSearchGroupsForIds_(sched, [tid], rowsByTid);
       var group = groups[tid];
       var checkable = getDashboardReturnCheckableItems_(group && group.equipments || []);
       // 기준선 조회/저장은 HTTP를 포함할 수 있다. 전역 ScriptLock 안에서 실행하면

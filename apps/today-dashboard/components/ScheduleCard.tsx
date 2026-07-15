@@ -148,7 +148,9 @@ export function ScheduleCard({
         <button
           type="button"
           onClick={handleDoneToggle}
-          className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 ${
+          disabled={saving}
+          aria-busy={saving}
+          className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 disabled:cursor-wait disabled:opacity-80 ${
             done
               ? "bg-checkin-bg text-checkin-fg ring-checkin-ring"
               : isCheckout
@@ -160,7 +162,8 @@ export function ScheduleCard({
             <Check className="h-3.5 w-3.5" />
           </span>
           {isCheckout
-            ? done ? "반출 완료됨" : "반출 완료"
+            ? saving ? "반출 처리 중…" : done ? "반출 완료됨" : "반출 완료"
+            : saving ? "반납 처리 중…"
             : invalidClosedReturn ? "잘못 닫힌 카드 다시 열기"
             : done ? "반납 완료됨"
             : returnBlockers.length ? "수량 확인 후 반납완료" : "반납 완료"}
