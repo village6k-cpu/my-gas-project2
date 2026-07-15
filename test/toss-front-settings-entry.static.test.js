@@ -8,6 +8,38 @@ const exists = (file) => fs.existsSync(path.join(root, file));
 
 const app = read('toss-front-plugin/village-front/app.js');
 const buildZip = read('toss-front-plugin/build-zip.sh');
+const settings = read('toss-front-plugin/village-front/settings.html');
+
+function extractBalancedBlock(source, marker) {
+  const markerIndex = source.indexOf(marker);
+  assert(markerIndex >= 0, `missing source marker: ${marker}`);
+
+  const blockStart = source.indexOf('{', markerIndex + marker.length - 1);
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+
+  for (let i = blockStart; i < source.length; i += 1) {
+    const ch = source[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(blockStart, i + 1);
+    }
+  }
+
+  assert.fail(`unterminated source block: ${marker}`);
+}
 
 assert(
   app.includes('function openTossFrontSettings') &&
@@ -25,8 +57,23 @@ assert(
 
 assert(
   exists('toss-front-plugin/village-front/settings.html') &&
-    read('toss-front-plugin/village-front/settings.html').includes('sdk.app.getSerialNumber'),
-  'front plugin must include a settings.html entry compatible with the official Toss template'
+    /window\.VILLAGE_PAGE_MODE\s*=\s*['"]settings['"]/.test(settings) &&
+    settings.includes('./app.js') &&
+    !settings.includes('<style>'),
+  'settings.html must only bootstrap the shared Template UI in settings mode'
+);
+
+assert(
+  /VILLAGE_PAGE_MODE\s*===\s*['"]settings['"]/.test(app) &&
+    app.includes('function showStaffSettings') &&
+    app.includes('최근 결제 취소'),
+  'shared app must route settings mode to the staff cancellation menu'
+);
+
+const showIdle = extractBalancedBlock(app, 'var showIdle = safe(function ()');
+assert(
+  !showIdle.includes('결제 취소'),
+  'customer idle menu must not expose cancellation'
 );
 
 assert(

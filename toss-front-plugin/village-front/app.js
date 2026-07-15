@@ -23,6 +23,7 @@ var sdk = window.TossFrontSDK;
 var CFG = window.CONFIG || {};
 var RECEIPT_RECORDS_KEY = 'receiptRecords';
 var RECEIPT_RECORD_LIMIT = 80;
+var cancelInFlight = false;
 
 // 개발/미리보기: 실제 단말 시리얼·매장정보가 없을 때만 override
 if (CFG.TEST_MODE && sdk && sdk.overrides) {
@@ -307,6 +308,63 @@ async function saveReceiptRecords(records) {
   await storageSet(RECEIPT_RECORDS_KEY, records.slice(0, RECEIPT_RECORD_LIMIT));
 }
 
+async function hydrateCancelRecord(record) {
+  if (hasCancelDetails(record)) return record;
+  if (!record || !record.paymentKey) {
+    throw new Error('취소할 결제키가 없습니다.');
+  }
+  if (!sdk.payment || typeof sdk.payment.getPayment !== 'function') {
+    throw new Error('이 결제의 승인정보를 복구할 수 없습니다.');
+  }
+  var result = await sdk.payment.getPayment({ paymentKey: record.paymentKey });
+  if (!result || result.type !== 'SUCCESS') {
+    throw new Error('최근 승인정보를 찾지 못했습니다.');
+  }
+  var hydrated = Object.assign({}, record, normalizePaymentResponse(result.response, record.amount));
+  if (!hasCancelDetails(hydrated)) {
+    throw new Error('취소에 필요한 승인정보가 부족합니다.');
+  }
+  return hydrated;
+}
+
+async function requestFullPaymentCancel(record) {
+  if (!sdk.payment || typeof sdk.payment.requestPaymentCancel !== 'function') {
+    throw new Error('토스 전액 취소 기능을 사용할 수 없습니다.');
+  }
+  return sdk.payment.requestPaymentCancel({
+    paymentKey: record.paymentKey,
+    paymentMethod: record.paymentMethod,
+    tax: record.tax,
+    supplyValue: record.supplyValue,
+    tip: record.tip || 0,
+    timestamp: record.timestamp,
+    approvalNumber: record.approvalNumber,
+    installment: record.installment || 0,
+    timeoutMs: 60000,
+    extraData: record.extraData || undefined,
+    isSelfIssuance: record.isSelfIssuance || false,
+    localeCode: 'ko'
+  });
+}
+
+async function markPaymentCancelled(record, cancelDetail) {
+  var records = await loadReceiptRecords();
+  var cancelledAt = new Date().toISOString();
+  var marked = null;
+  var updated = records.map(function (stored) {
+    if (!stored || stored.paymentKey !== record.paymentKey) return stored;
+    marked = Object.assign({}, stored, record, {
+      cancelledAt: cancelledAt,
+      cancelApprovalNumber: cancelDetail.approvalNumber || null,
+      cancelSyncPending: record.sourceType === 'reservation'
+    });
+    return marked;
+  });
+  if (!marked) throw new Error('로컬 결제 기록을 찾지 못했습니다.');
+  await saveReceiptRecords(updated);
+  return marked;
+}
+
 async function rememberReceiptRecord(trade, payment) {
   if (!payment || !payment.paymentKey) return;
   var record = {
@@ -430,6 +488,149 @@ var showIdle = safe(function () {
     ]
   });
 });
+
+function showStaffSettings() {
+  sdk.template.renderSelectPage({
+    title: 'VILLAGE 직원 설정',
+    subtitle: '직원 전용 메뉴입니다',
+    options: [
+      {
+        title: '최근 결제 취소',
+        subtitle: '이 프론트에서 승인한 결제만',
+        description: '최근 결제를 확인하고 전액 취소해요',
+        onClick: function () { showCancelablePayments(); }
+      }
+    ]
+  });
+}
+
+function showStaffMessage(status, title, description, backToList) {
+  var back = backToList ? showCancelablePayments : showStaffSettings;
+  sdk.template.renderResultPage({
+    type: 'image',
+    status: status,
+    title: title,
+    description: description,
+    timerMs: 0,
+    buttons: [
+      { label: backToList ? '취소 목록' : '설정으로', onClick: function () { back(); } }
+    ]
+  });
+}
+
+async function showCancelablePayments() {
+  var records;
+  try {
+    records = await loadReceiptRecords();
+  } catch (e) {
+    return showStaffMessage('error', '결제 기록을 불러오지 못했어요', e.message || '잠시 후 다시 시도해주세요.', false);
+  }
+
+  var items = records.filter(function (record) {
+    return record && record.paymentKey && !record.cancelledAt;
+  }).slice(0, 20);
+
+  if (!items.length) {
+    return showStaffMessage('success', '취소 가능한 최근 결제가 없어요', '이 프론트에서 완료된 미취소 결제만 표시됩니다.', false);
+  }
+
+  return sdk.template.renderSelectPage({
+    title: '최근 결제 취소',
+    subtitle: '취소할 결제를 선택해주세요 · 최대 20건',
+    options: items.map(function (record) {
+      return {
+        title: won(record.amount),
+        subtitle: (record.customerName || '현장 직접 결제') + ' · ' + receiptDateTime(record.paidAt),
+        description: (record.tradeId || '직접 결제') + ' · 승인번호 ' + asciiReceiptText(record.approvalNumber, '복구 필요'),
+        onClick: function () { showCancelRecord(record); }
+      };
+    }),
+    onBack: function () { showStaffSettings(); }
+  });
+}
+
+async function showCancelRecord(record) {
+  var hydrated;
+  try {
+    hydrated = await hydrateCancelRecord(record);
+  } catch (e) {
+    return showStaffMessage(
+      'error',
+      '승인정보를 확인할 수 없어요',
+      (e.message || '복구할 수 없는 결제입니다.') + ' 토스 단말 또는 고객센터에서 취소해주세요.',
+      true
+    );
+  }
+
+  return sdk.template.renderResultPage({
+    type: 'image',
+    status: 'error',
+    title: '전액 취소할까요',
+    description: [
+      hydrated.customerName || '현장 직접 결제',
+      hydrated.tradeId || '직접 결제',
+      won(hydrated.amount),
+      receiptDateTime(hydrated.paidAt || hydrated.timestamp),
+      '승인번호 ' + asciiReceiptText(hydrated.approvalNumber, '-')
+    ].join(' · '),
+    timerMs: 0,
+    buttons: [
+      { label: '전액 취소', onClick: function () { executeFullPaymentCancel(hydrated); } },
+      { label: '목록으로', onClick: function () { showCancelablePayments(); } }
+    ]
+  });
+}
+
+async function executeFullPaymentCancel(record) {
+  if (cancelInFlight) {
+    try { if (sdk.template.openToast) sdk.template.openToast({ message: '취소 요청을 처리하고 있어요.' }); } catch (e) {}
+    return;
+  }
+  cancelInFlight = true;
+
+  try {
+    var records = await loadReceiptRecords();
+    var stored = null;
+    for (var i = 0; i < records.length; i += 1) {
+      if (records[i] && records[i].paymentKey === record.paymentKey) {
+        stored = records[i];
+        break;
+      }
+    }
+    if (!stored) throw new Error('로컬 결제 기록을 찾지 못했습니다.');
+    if (stored.cancelledAt) {
+      return showStaffMessage('success', '이미 취소된 결제예요', receiptDateTime(stored.cancelledAt) + ' 취소 완료', false);
+    }
+
+    var cancelRecord = await hydrateCancelRecord(Object.assign({}, stored, record));
+    if (!sdk.payment || typeof sdk.payment.getPaymentCancel !== 'function') {
+      throw new Error('토스 취소 상태를 확인할 수 없습니다.');
+    }
+
+    var previous = await sdk.payment.getPaymentCancel({ paymentKey: cancelRecord.paymentKey });
+    if (previous && previous.type === 'SUCCESS') {
+      await markPaymentCancelled(cancelRecord, previous.response || {});
+      return showStaffMessage('success', '이미 취소된 결제를 확인했어요', '토스 취소 상태와 로컬 기록을 맞췄습니다.', false);
+    }
+
+    var result = await requestFullPaymentCancel(cancelRecord);
+    if (!result || result.type !== 'SUCCESS') {
+      return showStaffMessage(
+        'error',
+        '전액 취소가 완료되지 않았어요',
+        '토스 응답: ' + ((result && result.type) || 'UNKNOWN'),
+        true
+      );
+    }
+
+    await markPaymentCancelled(cancelRecord, result.response || {});
+    return showStaffMessage('success', '전액 취소가 완료됐어요', won(cancelRecord.amount) + ' 승인 취소 완료', false);
+  } catch (e) {
+    return showStaffMessage('error', '전액 취소에 실패했어요', e.message || '토스 취소 상태를 확인해주세요.', true);
+  } finally {
+    cancelInFlight = false;
+  }
+}
 
 // 2) 전화번호 입력
 var showPhoneInput = safe(function () {
@@ -825,6 +1026,10 @@ async function recoverPending() {
   if (!sdk || !sdk.template) {
     var el = document.getElementById('app');
     if (el) el.innerText = 'TossFrontSDK 로드 실패 — 단말기/네트워크를 확인하세요.';
+    return;
+  }
+  if (window.VILLAGE_PAGE_MODE === 'settings') {
+    showStaffSettings();
     return;
   }
   try { await recoverPending(); } catch (e) {}

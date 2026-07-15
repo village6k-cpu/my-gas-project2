@@ -11,3 +11,23 @@ assert(/installment:\s*normalized\.installment/.test(app));
 assert(/extraData:\s*normalized\.extraData/.test(app));
 assert(/tax:\s*normalized\.tax/.test(app));
 assert(/supplyValue:\s*normalized\.supplyValue/.test(app));
+
+assert(app.includes('async function hydrateCancelRecord(record)'));
+assert(app.includes('async function requestFullPaymentCancel(record)'));
+assert(app.includes('async function markPaymentCancelled(record, cancelDetail)'));
+assert(app.includes('async function showCancelablePayments()'));
+assert(/sdk\.payment\.requestPaymentCancel\(\{/.test(app));
+assert(/sdk\.payment\.getPaymentCancel\(\{\s*paymentKey:/.test(app));
+assert(/paymentMethod:\s*record\.paymentMethod/.test(app));
+assert(/timestamp:\s*record\.timestamp/.test(app));
+assert(/approvalNumber:\s*record\.approvalNumber/.test(app));
+assert(/installment:\s*record\.installment\s*\|\|\s*0/.test(app));
+assert(/timeoutMs:\s*60000/.test(app));
+assert(/!record\.cancelledAt/.test(app));
+assert(/\.slice\(0,\s*20\)/.test(app));
+assert(app.includes('cancelledAt'));
+assert(app.includes('cancelApprovalNumber'));
+assert(app.includes('cancelSyncPending'));
+assert(app.includes('cancelInFlight'));
+
+console.log('toss-front payment cancel static checks passed');
