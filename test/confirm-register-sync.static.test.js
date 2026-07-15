@@ -241,8 +241,11 @@ assert(
   'timeline-derived items must be marked synthetic'
 );
 const storeTs3 = read('apps/today-dashboard/lib/data/store.ts');
+const returnCountStart = storeTs3.indexOf('export async function setReturnCount');
+const returnCountEnd = storeTs3.indexOf('\n// ── 결제', returnCountStart);
+const returnCountFn = storeTs3.slice(returnCountStart, returnCountEnd);
 assert(
-  storeTs3.includes('if (isSynthetic) return;') && storeTs3.includes('rcItem?.synthetic'),
+  storeTs3.includes('if (isSynthetic) return;') && !/gasMutation\(["']toggleItem["']/.test(returnCountFn),
   'item toggles must not write synthetic schedule IDs back to the sheet'
 );
 console.log('audit-round-4 checks OK');

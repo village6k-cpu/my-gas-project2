@@ -2691,11 +2691,7 @@ function assertDashboardReturnComplete_(tid, props) {
     var expected = Number(String(eq.qty || 1).replace(/[^0-9.]/g, '')) || 1;
     var count = durable.returnCounts && durable.returnCounts[eq.scheduleId] || {};
     var accounted = Number(count.good || 0) + Number(count.damaged || 0) + Number(count.lost || 0);
-    var proofMatches = getDashboardCheckinItemDefault_(
-      props, eq.scheduleId, false, false,
-      tid, eq.qty, eq.name, eq.setName, eq.isHeader
-    );
-    return !proofMatches || accounted !== expected;
+    return accounted !== expected;
   }).map(function(eq) {
     var count = durable.returnCounts && durable.returnCounts[eq.scheduleId] || {};
     var accounted = Number(count.good || 0) + Number(count.damaged || 0) + Number(count.lost || 0);
@@ -2713,6 +2709,15 @@ function assertDashboardReturnComplete_(tid, props) {
       incomplete: incomplete
     };
   }
+  // 오늘앱의 정상/파손/분실 상세가 유일한 내구 증거다. 최종 완료 시에만 레거시
+  // 대시보드용 품목 체크 토큰을 한 번에 기록해 품목마다 GAS를 호출하지 않는다.
+  var completedProofs = {};
+  checkable.forEach(function(eq) {
+    completedProofs['itemCheck_' + eq.scheduleId + '_checkin'] = dashboardReturnInspectionToken_(
+      tid, eq.qty, eq.name, eq.setName, eq.isHeader
+    );
+  });
+  props.setProperties(completedProofs, false);
   return { success: true, checkedCount: checkable.length };
 }
 

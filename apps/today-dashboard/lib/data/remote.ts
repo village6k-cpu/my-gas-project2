@@ -1,6 +1,6 @@
 // Supabase 원격 데이터 레이어 (실데이터 모드)
 import { supabase } from "../supabase/client";
-import type { HandoverNote, Trade } from "../domain/types";
+import type { HandoverNote, ReturnCount, Trade } from "../domain/types";
 import { canonicalOnsiteScheduleId, dedupeOnsiteItems, isSheetBackedScheduleId, itemFromRow, itemToRow, noteToRow, tradeFromRow, tradeToRow } from "./mappers";
 import { normalizeItems } from "../domain/catalog";
 
@@ -114,6 +114,23 @@ export async function persistTrade(trade: Trade, options: PersistTradeOptions = 
     if (itemErr) throw itemErr;
   }
   if (options.pruneMissingSheetBacked) await pruneMissingSheetBackedItems(sb, trade.tradeId, rows);
+}
+
+/** 반납 체크의 빠른 경로. 거래/품목 전체 upsert 대신 JSON 한 필드만 갱신한다. */
+export async function persistReturnCounts(
+  tradeId: string,
+  returnCounts: Record<string, ReturnCount>,
+): Promise<void> {
+  const sb = supabase;
+  if (!sb) return;
+  const { data, error } = await sb
+    .from("trades")
+    .update({ return_counts: returnCounts })
+    .eq("trade_id", tradeId)
+    .select("trade_id")
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error(`반납 수량 저장 대상 거래가 없습니다: ${tradeId}`);
 }
 
 // 거래 완전 삭제 — Supabase의 schedule_items(자식) + trades(부모)를 로그인 세션으로 제거.
