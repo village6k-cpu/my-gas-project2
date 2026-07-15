@@ -7650,6 +7650,42 @@ function _bestConfirmRequestCustomerDbDiscount_(matches) {
   return best;
 }
 
+/** 확인요청 등록 전, 고객DB에서 이름/전화 기준으로 연락처 후보를 안전하게 조회한다. */
+function lookupConfirmRequestCustomer(args) {
+  args = args || {};
+  var name = String(args.name || args.예약자명 || '').trim();
+  var phone = String(args.phone || args.연락처 || '').trim();
+  if (!name && !phone) return { error: 'name 또는 phone 필수' };
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var matches = _findConfirmRequestCustomerDbMatches_(ss, name, phone);
+  // 정확한 이름이 없을 때만 부분 일치 후보를 보조로 제시한다. 자동 입력은 후보가 하나일 때만 허용한다.
+  if ((!matches || matches.length === 0) && name) {
+    var nameKey = name.replace(/\s+/g, '');
+    matches = [];
+    _confirmRequestCustomerDbSheets_(ss).forEach(function(ref) {
+      var sheet = ref.sheet;
+      var lastRow = sheet.getLastRow();
+      if (lastRow < 2) return;
+      var width = Math.min(Math.max(9, sheet.getLastColumn()), sheet.getMaxColumns());
+      sheet.getRange(2, 1, lastRow - 1, width).getValues().forEach(function(row) {
+        var dbName = String(row[1] || '').trim();
+        var dbKey = dbName.replace(/\s+/g, '');
+        if (!dbKey || !nameKey || (dbKey.indexOf(nameKey) < 0 && nameKey.indexOf(dbKey) < 0)) return;
+        matches.push({ source: ref.source, name: dbName, phone: String(row[0] || '').trim(), discount: row.length >= 9 ? String(row[8] || '').trim() : '' });
+      });
+    });
+  }
+  var seen = {};
+  var candidates = [];
+  (matches || []).forEach(function(match) {
+    var key = _confirmRequestPhoneKey_(match.phone) || (match.source + '|' + match.name);
+    if (seen[key]) return;
+    seen[key] = true;
+    candidates.push({ name: match.name, phone: match.phone, discount: _normalizeDiscountTypeOrBlank_(match.discount), source: match.source });
+  });
+  return { success: true, name: name, candidates: candidates, unique: candidates.length === 1 };
+}
+
 function _sanitizeConfirmRequestFreeText_(value, maxLength) {
   var raw = String(value || "").replace(/\r/g, "\n");
   if (!raw.trim()) return "";
@@ -10641,6 +10677,151 @@ function removeEquipmentFromContract(sheet, row) {
  * N열 "날짜변경" → 계약마스터 + 스케줄상세 + 개고생2.0 날짜 일괄 수정 + 계약서 재생성
  * B~E열에 새 날짜/시간 입력 필요
  */
+/**
+ * 확정된 기존 거래의 반납일시만 안전하게 연장한다.
+ *
+ * 확인요청 신규 등록은 기존 거래와 날짜가 겹칠 때 중복 방지로 막히므로,
+ * 이미 반출된 건의 전체 연장은 새 거래를 만들지 않고 이 경로로 처리한다.
+ * 재고는 수정 전에 본 거래를 제외하고 다시 계산하며, 충돌이면 어떤 시트도 바꾸지 않는다.
+ */
+function extendRegisteredTrade(args) {
+  args = args || {};
+  var tradeId = String(args.tradeId || args.거래ID || args.tid || '').trim();
+  var endDate = String(args.endDate || args.반납일 || '').trim();
+  var endTime = String(args.endTime || args.반납시간 || '').trim();
+  if (!tradeId) throw new Error('tradeId 필수');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) throw new Error('endDate는 yyyy-MM-dd 형식이어야 합니다');
+  if (!/^\d{2}:\d{2}$/.test(endTime)) throw new Error('endTime은 HH:mm 형식이어야 합니다');
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var contractSheet = ss.getSheetByName('계약마스터');
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  var equipSheet = ss.getSheetByName('장비마스터');
+  if (!contractSheet || !schedSheet || !equipSheet) throw new Error('계약마스터/스케줄상세/장비마스터 중 일부가 없습니다');
+
+  var contractLast = contractSheet.getLastRow();
+  var contractData = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 12).getValues() : [];
+  var contractDisplay = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 12).getDisplayValues() : [];
+  var contractRow = -1;
+  var startDate = '';
+  var startTime = '';
+  var currentEndDate = '';
+  var currentEndTime = '';
+  for (var ci = 0; ci < contractData.length; ci++) {
+    if (String(contractData[ci][0] || '').trim() !== tradeId) continue;
+    contractRow = ci + 2;
+    var dateMatch = String(contractDisplay[ci][4] || '').match(/\d{4}-\d{2}-\d{2}/);
+    startDate = dateMatch ? dateMatch[0] : '';
+    var timeMatch = String(contractDisplay[ci][5] || '').match(/\d{1,2}:\d{2}/);
+    startTime = timeMatch ? ('0' + timeMatch[0]).slice(-5) : '';
+    var currentEndDateMatch = String(contractDisplay[ci][6] || '').match(/\d{4}-\d{2}-\d{2}/);
+    currentEndDate = currentEndDateMatch ? currentEndDateMatch[0] : '';
+    var currentEndTimeMatch = String(contractDisplay[ci][7] || '').match(/\d{1,2}:\d{2}/);
+    currentEndTime = currentEndTimeMatch ? ('0' + currentEndTimeMatch[0]).slice(-5) : '';
+    break;
+  }
+  if (contractRow < 0) throw new Error('계약마스터에 거래ID가 없습니다: ' + tradeId);
+  if (!startDate || !startTime || !currentEndDate || !currentEndTime) throw new Error('기존 대여일시를 읽을 수 없습니다: ' + tradeId);
+
+  // 이미 확정된 기존 대여 구간은 다시 검사하지 않고, 실제로 늘어나는 구간만 검사한다.
+  // 기존 가용확인 엔진과 같은 파서로 비교해, 스프레드시트 시간대 차이에 영향을 받지 않는다.
+  var startDT = parseDT(startDate, startTime);
+  var currentEndDT = parseDT(currentEndDate, currentEndTime);
+  var endDT = parseDT(endDate, endTime);
+  var startMs = startDT && startDT.getTime();
+  var availabilityStartMs = currentEndDT && currentEndDT.getTime();
+  var endMs = endDT && endDT.getTime();
+  if (isNaN(startMs) || isNaN(availabilityStartMs) || isNaN(endMs) || endMs <= availabilityStartMs) throw new Error('새 반납일시는 기존 반납일시 이후여야 합니다');
+
+  var schedLast = schedSheet.getLastRow();
+  var schedDisplay = schedLast >= 2 ? schedSheet.getRange(2, 1, schedLast - 1, 13).getDisplayValues() : [];
+  var targetRows = [];
+  var itemMap = {};
+  for (var si = 0; si < schedDisplay.length; si++) {
+    var schedRow = schedDisplay[si];
+    if (String(schedRow[1] || '').trim() !== tradeId) continue;
+    targetRows.push(si + 2);
+    var itemName = String(schedRow[3] || '').trim(); // D: 장비명
+    var qty = Number(schedRow[4]) || 1; // E: 수량
+    if (!itemName || !findEquipment(itemName, equipSheet)) continue; // 세트명/비재고 구성품은 가용성 계산 대상 아님
+    itemMap[itemName] = (itemMap[itemName] || 0) + qty;
+  }
+  if (targetRows.length === 0) throw new Error('스케줄상세에 거래ID가 없습니다: ' + tradeId);
+
+  // 본 거래를 제외한 스케줄과 연장 구간을 대조한다. 기간 중 최대 동시사용량으로 판정한다.
+  var allSchedule = getScheduleData(schedSheet).filter(function(row) {
+    return String(row.contractID || '').trim() !== tradeId && row.status !== '반납완료' && row.status !== '취소';
+  });
+  var conflicts = [];
+  Object.keys(itemMap).forEach(function(itemName) {
+    var itemQty = itemMap[itemName];
+    var info = findEquipment(itemName, equipSheet);
+    if (!info) return;
+    var overlaps = allSchedule.filter(function(row) {
+      return row.equipment === itemName && row.startDT && row.endDT && row.startDT.getTime() < endMs && row.endDT.getTime() > availabilityStartMs;
+    });
+    var points = {};
+    points[availabilityStartMs] = true;
+    overlaps.forEach(function(row) {
+      var rs = row.startDT.getTime(), re = row.endDT.getTime();
+      if (rs > availabilityStartMs && rs < endMs) points[rs] = true;
+      if (re > availabilityStartMs && re < endMs) points[re] = true;
+    });
+    var maxConcurrent = 0;
+    Object.keys(points).map(Number).forEach(function(point) {
+      var concurrent = 0;
+      overlaps.forEach(function(row) {
+        if (row.startDT.getTime() <= point && row.endDT.getTime() > point) concurrent += Number(row.qty) || 1;
+      });
+      if (concurrent > maxConcurrent) maxConcurrent = concurrent;
+    });
+    var available = Number(info.total) - maxConcurrent;
+    if (available < itemQty) conflicts.push({
+      장비명: itemName,
+      요청수량: itemQty,
+      가용수량: Math.max(0, available),
+      보유수량: Number(info.total),
+      최대동시사용: maxConcurrent,
+      겹치는일정: overlaps.map(function(row) {
+        return {
+          거래ID: String(row.contractID || ''),
+          수량: Number(row.qty) || 1,
+          반출: Utilities.formatDate(row.startDT, 'Asia/Seoul', 'yyyy-MM-dd HH:mm'),
+          반납: Utilities.formatDate(row.endDT, 'Asia/Seoul', 'yyyy-MM-dd HH:mm'),
+          상태: String(row.status || '')
+        };
+      })
+    });
+  });
+  if (conflicts.length > 0) return { success: false, status: 'CONFLICT', tradeId: tradeId, conflicts: conflicts };
+
+  // 가용 확인이 통과한 뒤에만 계약·스케줄을 함께 변경한다.
+  contractSheet.getRange(contractRow, 7).setValue(endDate);
+  contractSheet.getRange(contractRow, 8).setValue(endTime);
+  targetRows.forEach(function(rowNum) {
+    schedSheet.getRange(rowNum, 8).setNumberFormat('@').setValue(endDate);
+    schedSheet.getRange(rowNum, 9).setNumberFormat('@').setValue(endTime);
+  });
+  SpreadsheetApp.flush();
+  try { supaMarkTradeDirty_(tradeId); } catch (syncErr) {}
+  try { invalidateDashboardCache([currentEndDate, endDate]); } catch (cacheErr) {}
+  try { invalidateTimelineCache(); } catch (timelineErr) {}
+
+  var regen;
+  try { regen = regenerateContractById(tradeId); } catch (regenErr) { regen = { error: regenErr.message }; }
+  return {
+    success: true,
+    status: 'EXTENDED',
+    tradeId: tradeId,
+    start: startDate + ' ' + startTime,
+    previousEnd: currentEndDate + ' ' + currentEndTime,
+    end: endDate + ' ' + endTime,
+    checkedItems: Object.keys(itemMap),
+    updatedScheduleRows: targetRows.length,
+    contractRegeneration: regen
+  };
+}
+
 function changeDatesForContract(sheet, row) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const schedSheet = ss.getSheetByName("스케줄상세");
