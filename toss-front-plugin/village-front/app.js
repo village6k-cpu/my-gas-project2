@@ -360,16 +360,29 @@ async function retryPendingCancelSyncs() {
       record.sourceType === 'reservation' && record.tradeId
     );
   });
+  var summary = {
+    attempted: pendingRecords.length,
+    synced: 0,
+    failed: 0,
+    failedRecords: []
+  };
 
   for (var i = 0; i < pendingRecords.length; i += 1) {
     var record = pendingRecords[i];
     try {
       await syncCancelledReservation(record);
       await setCancelSyncPending(record, false);
+      summary.synced += 1;
     } catch (e) {
+      summary.failed += 1;
+      summary.failedRecords.push({
+        tradeId: record.tradeId,
+        error: e && e.message ? e.message : String(e)
+      });
       console.error('[village] 예약 환불 장부 재시도 실패:', e);
     }
   }
+  return summary;
 }
 
 async function hydrateCancelRecord(record) {
@@ -620,6 +633,50 @@ function showStaffSettings() {
       }
     ]
   });
+}
+
+function showStaffSyncLoading() {
+  sdk.template.renderResultPage({
+    type: 'image',
+    status: 'success',
+    title: '예약 장부 환불 상태를 확인하고 있어요',
+    description: '완료된 Toss 취소의 장부 반영만 안전하게 재시도합니다.',
+    timerMs: 0,
+    buttons: []
+  });
+}
+
+function showPendingCancelSyncWarning(summary) {
+  var failed = summary && summary.failed ? summary.failed : 1;
+  sdk.template.renderResultPage({
+    type: 'image',
+    status: 'error',
+    title: '토스 취소는 완료됐어요',
+    description: failed + '건의 예약 장부 환불 반영이 아직 대기 중입니다. Toss 취소는 다시 요청하지 않습니다.',
+    timerMs: 0,
+    buttons: [
+      { label: '다시 시도', onClick: function () { return initializeStaffSettings(); } },
+      { label: '직원 설정 열기', onClick: function () { showStaffSettings(); } }
+    ]
+  });
+}
+
+async function initializeStaffSettings() {
+  showStaffSyncLoading();
+  var summary;
+  try {
+    summary = await retryPendingCancelSyncs();
+  } catch (e) {
+    console.error('[village] 예약 환불 장부 재시도 초기화 실패:', e);
+    summary = {
+      attempted: 0,
+      synced: 0,
+      failed: 1,
+      failedRecords: [{ tradeId: null, error: e && e.message ? e.message : String(e) }]
+    };
+  }
+  if (summary.failed > 0) return showPendingCancelSyncWarning(summary);
+  return showStaffSettings();
 }
 
 function showStaffMessage(status, title, description, backToList) {
@@ -1206,10 +1263,7 @@ async function recoverPending() {
     return;
   }
   if (window.VILLAGE_PAGE_MODE === 'settings') {
-    showStaffSettings();
-    try { await retryPendingCancelSyncs(); } catch (e) {
-      console.error('[village] 예약 환불 장부 재시도 초기화 실패:', e);
-    }
+    await initializeStaffSettings();
     return;
   }
   try { await recoverPending(); } catch (e) {}

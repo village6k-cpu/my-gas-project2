@@ -111,7 +111,7 @@ function createHarness(options = {}) {
     clearTimeout,
     crypto: { randomUUID: () => 'test-payment-key' },
     CONFIG: { LOOKUP_BASE: 'https://dashboard.test', LOOKUP_TOKEN: 'lookup-token' },
-    VILLAGE_PAGE_MODE: 'settings',
+    VILLAGE_PAGE_MODE: options.pageMode === undefined ? 'settings' : options.pageMode,
     TossFrontSDK: sdk,
     document: { getElementById: () => null },
     fetch: async (url, init) => {
@@ -294,6 +294,119 @@ async function testSettingsInitRetriesOnlyPendingCancelledReservationsWithoutTos
   assert.strictEqual(byPaymentKey['missing-trade-payment'].cancelSyncPending, true);
 }
 
+async function testSettingsInitBlocksInteractiveMenuUntilRetrySettlesWithoutLosingState() {
+  let releaseLedgerRetry;
+  let notifyRetryStarted;
+  const retryStarted = new Promise((resolve) => { notifyRetryStarted = resolve; });
+  const ledgerRetry = new Promise((resolve) => { releaseLedgerRetry = resolve; });
+  const pending = paymentRecord({
+    tradeId: 'blocking-retry',
+    paymentKey: 'blocking-retry-payment',
+    cancelledAt: '2026-07-15T13:00:00.000Z',
+    cancelSyncPending: true
+  });
+  const untouched = paymentRecord({
+    tradeId: 'untouched-trade',
+    paymentKey: 'untouched-payment',
+    customerName: '보존 대상',
+    cancelSyncPending: false
+  });
+  const harness = createHarness({
+    records: [pending, untouched],
+    getPaymentCancel: async () => { throw new Error('retry must not query Toss cancellation'); },
+    requestPaymentCancel: async () => { throw new Error('retry must not request Toss cancellation'); },
+    fetch: async () => {
+      notifyRetryStarted();
+      return ledgerRetry;
+    }
+  });
+
+  await retryStarted;
+
+  const staffMenusBeforeRetry = harness.pages.filter((entry) => (
+    entry.type === 'select' && entry.page.title === 'VILLAGE 직원 설정'
+  ));
+  assert.strictEqual(
+    staffMenusBeforeRetry.length,
+    0,
+    'interactive staff menu must stay hidden while pending ledger retry is unresolved'
+  );
+  const loadingPage = harness.pages.at(-1);
+  assert.strictEqual(loadingPage.type, 'result');
+  assert.match(loadingPage.page.title, /장부.*확인|환불.*확인/);
+  assert.strictEqual((loadingPage.page.buttons || []).length, 0);
+
+  releaseLedgerRetry({
+    ok: true,
+    status: 200,
+    async json() { return { ok: true, tradeId: 'blocking-retry' }; }
+  });
+  await harness.initPromise;
+
+  const staffMenusAfterRetry = harness.pages.filter((entry) => (
+    entry.type === 'select' && entry.page.title === 'VILLAGE 직원 설정'
+  ));
+  assert.strictEqual(staffMenusAfterRetry.length, 1);
+  assert.strictEqual(harness.records().length, 2);
+  const byPaymentKey = Object.fromEntries(
+    harness.records().map((record) => [record.paymentKey, record])
+  );
+  assert.strictEqual(byPaymentKey['blocking-retry-payment'].cancelSyncPending, false);
+  assert.strictEqual(byPaymentKey['untouched-payment'].tradeId, 'untouched-trade');
+  assert.strictEqual(byPaymentKey['untouched-payment'].customerName, '보존 대상');
+}
+
+async function testRetryPendingCancelSyncsReturnsUsefulSummary() {
+  const records = [
+    paymentRecord({
+      tradeId: 'summary-success',
+      paymentKey: 'summary-success-payment',
+      cancelledAt: '2026-07-15T13:00:00.000Z',
+      cancelSyncPending: true
+    }),
+    paymentRecord({
+      tradeId: 'summary-failure',
+      paymentKey: 'summary-failure-payment',
+      cancelledAt: '2026-07-15T13:00:00.000Z',
+      cancelSyncPending: true
+    })
+  ];
+  const harness = createHarness({
+    pageMode: 'customer',
+    records,
+    getPaymentCancel: async () => { throw new Error('retry must not query Toss cancellation'); },
+    requestPaymentCancel: async () => { throw new Error('retry must not request Toss cancellation'); },
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.tradeId === 'summary-failure') {
+        return {
+          ok: false,
+          status: 502,
+          async json() { return { error: '장부 일시 오류' }; }
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { ok: true, tradeId: body.tradeId }; }
+      };
+    }
+  });
+  await harness.initPromise;
+
+  const summary = await harness.context.retryPendingCancelSyncs();
+
+  assert.ok(summary, 'retryPendingCancelSyncs must return a summary');
+  assert.strictEqual(summary.attempted, 2);
+  assert.strictEqual(summary.synced, 1);
+  assert.strictEqual(summary.failed, 1);
+  assert.strictEqual(summary.failedRecords.length, 1);
+  assert.strictEqual(summary.failedRecords[0].tradeId, 'summary-failure');
+  assert.match(summary.failedRecords[0].error, /장부 일시 오류/);
+  assert.strictEqual(harness.lookupCalls.length, 0);
+  assert.strictEqual(harness.requestCalls.length, 0);
+}
+
 async function testSettingsRetryFailureKeepsPendingWithoutTossCalls() {
   const pending = paymentRecord({
     tradeId: 'retry-fails',
@@ -305,11 +418,17 @@ async function testSettingsRetryFailureKeepsPendingWithoutTossCalls() {
     records: [pending],
     getPaymentCancel: async () => { throw new Error('retry must not query Toss cancellation'); },
     requestPaymentCancel: async () => { throw new Error('retry must not request Toss cancellation'); },
-    fetch: async () => ({
-      ok: false,
-      status: 502,
-      async json() { return { error: '장부 일시 오류' }; }
-    })
+    fetch: async (_url, _init, callNumber) => callNumber === 1
+      ? {
+          ok: false,
+          status: 502,
+          async json() { return { error: '장부 일시 오류' }; }
+        }
+      : {
+          ok: true,
+          status: 200,
+          async json() { return { ok: true, tradeId: 'retry-fails' }; }
+        }
   });
 
   await harness.initPromise;
@@ -318,6 +437,26 @@ async function testSettingsRetryFailureKeepsPendingWithoutTossCalls() {
   assert.strictEqual(harness.lookupCalls.length, 0);
   assert.strictEqual(harness.requestCalls.length, 0);
   assert.strictEqual(harness.records()[0].cancelSyncPending, true);
+  const warningEntries = harness.pages.filter((entry) => entry.type === 'result');
+  assert.ok(warningEntries.length > 0, 'failed settings retry must render a visible warning');
+  const warning = warningEntries.at(-1).page;
+  assert.strictEqual(warning.status, 'error');
+  assert.match(warning.title, /토스 취소.*완료/);
+  assert.match(warning.description, /예약 장부.*환불.*대기/);
+  const labels = (warning.buttons || []).map((button) => button.label);
+  assert.ok(labels.includes('다시 시도'));
+  assert.ok(labels.includes('직원 설정 열기'));
+  const retryButton = warning.buttons.find((button) => button.label === '다시 시도');
+  const retryResult = retryButton.onClick();
+  assert.ok(retryResult && typeof retryResult.then === 'function', 'retry button must return initialization promise');
+  await retryResult;
+  assert.strictEqual(harness.fetchCalls.length, 2);
+  assert.strictEqual(harness.records()[0].cancelSyncPending, false);
+  const finalPage = harness.pages.at(-1);
+  assert.strictEqual(finalPage.type, 'select');
+  assert.strictEqual(finalPage.page.title, 'VILLAGE 직원 설정');
+  assert.strictEqual(harness.lookupCalls.length, 0);
+  assert.strictEqual(harness.requestCalls.length, 0);
 }
 
 async function testPaymentNotFoundStartsOneCancellation() {
@@ -501,7 +640,9 @@ async function testInFlightStaysLockedUntilLocalPersistenceFinishes() {
   await testManualCancelNeverSyncsLedger();
   await testLedgerFailureLeavesPendingAndShowsAccurateWarning();
   await testSettingsInitRetriesOnlyPendingCancelledReservationsWithoutTossCalls();
+  await testRetryPendingCancelSyncsReturnsUsefulSummary();
   await testSettingsRetryFailureKeepsPendingWithoutTossCalls();
+  await testSettingsInitBlocksInteractiveMenuUntilRetrySettlesWithoutLosingState();
   await testPaymentNotFoundStartsOneCancellation();
   await testPaymentNotFoundErrorShapes();
   await testCachedSuccessNeverRecancels();
