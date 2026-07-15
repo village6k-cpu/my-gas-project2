@@ -79,8 +79,9 @@ assert(
 );
 assert(
   /function _confirmRequestPhoneKey_\(v\)[\s\S]{0,260}digits\.length > 10 \? digits\.slice\(-10\) : digits/.test(backend) &&
-    /var telClean = _confirmRequestPhoneKey_\(연락처\);/.test(backend) &&
-    /var existTel = _confirmRequestPhoneKey_\(고객data\[gi\]\[0\]\);/.test(backend),
+    /var phoneKey = _confirmRequestPhoneKey_\(phone\);/.test(backend) &&
+    /var rowPhoneKey = _confirmRequestPhoneKey_\(rows\[i\] && rows\[i\]\[0\]\);/.test(backend) &&
+    /rowPhoneKey === phoneKey/.test(backend),
   'registration/customer DB matching must treat 010-prefixed and bare 10-digit phone values as the same customer'
 );
 assert(

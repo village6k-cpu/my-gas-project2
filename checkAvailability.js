@@ -7759,6 +7759,48 @@ function _confirmRequestPhoneKey_(v) {
   return digits.length > 10 ? digits.slice(-10) : digits;
 }
 
+/**
+ * 예약 등록 시 개고생2.0 고객DB에 적용할 최소 변경을 결정한다.
+ * A=연락처, B=성함, I=할인유형. 연락처가 있으면 이름이 같아도 연락처로만 식별한다.
+ * 기존 할인유형은 확정값으로 간주해 덮어쓰지 않고, 빈 I열만 현재 예약 값으로 채운다.
+ */
+function _planCustomerDbRegistrationWrite_(customerRows, customerName, phone, discountType) {
+  var rows = customerRows || [];
+  var nameKey = String(customerName || "").trim();
+  var phoneKey = _confirmRequestPhoneKey_(phone);
+  var confirmedDiscount = _normalizeDiscountTypeOrBlank_(discountType);
+  var matchedIndex = -1;
+
+  if (phoneKey) {
+    for (var i = 0; i < rows.length; i++) {
+      var rowPhoneKey = _confirmRequestPhoneKey_(rows[i] && rows[i][0]);
+      if (rowPhoneKey && rowPhoneKey === phoneKey) {
+        matchedIndex = i;
+        break;
+      }
+    }
+  } else if (nameKey) {
+    var nameMatches = [];
+    for (var ni = 0; ni < rows.length; ni++) {
+      if (String((rows[ni] && rows[ni][1]) || "").trim() === nameKey) nameMatches.push(ni);
+    }
+    if (nameMatches.length === 1) matchedIndex = nameMatches[0];
+  }
+
+  if (matchedIndex >= 0) {
+    var existingDiscount = String((rows[matchedIndex] && rows[matchedIndex][8]) || "").trim();
+    if (existingDiscount) {
+      return { action: "keep-existing", sheetRow: matchedIndex + 2, discount: existingDiscount };
+    }
+    if (confirmedDiscount) {
+      return { action: "update-discount", sheetRow: matchedIndex + 2, discount: confirmedDiscount };
+    }
+    return { action: "keep-blank", sheetRow: matchedIndex + 2, discount: "" };
+  }
+
+  return { action: "append", discount: confirmedDiscount };
+}
+
 function _confirmRequestEquipKey_(v) {
   return String(v || "")
     .trim()
@@ -10325,31 +10367,26 @@ function registerByReqID(sheet, triggerRow) {
     거래시트.getRange(거래newRow, 6).setNumberFormat("@").setValue(String(연락처 || ""));  // F: 연락처 (구 E=5)
     sheet.getRange(triggerRow, 15).setValue("✅ 개고생2.0 입력완료 (행" + 거래newRow + ")");
 
-    // ── 개고생2.0 고객DB에 신규고객 저장 ──
-    // 고객DB 구조: A=연락처(예약자ID), B=성함, C=소속
+    // ── 개고생2.0 고객DB에 신규고객 저장 + 빈 할인유형 자동 확정 ──
+    // 고객DB 구조: A=연락처(예약자ID), B=성함, I=할인유형
     try {
       var 고객DB시트 = 개고생SS.getSheetByName("고객DB");
       if (고객DB시트 && 연락처 && 예약자명) {
         var 고객lastRow = 고객DB시트.getLastRow();
-        var 기존여부 = false;
+        var 고객data = [];
         if (고객lastRow >= 2) {
-          var 고객data = 고객DB시트.getRange(2, 1, 고객lastRow - 1, 2).getValues();
-          var telClean = _confirmRequestPhoneKey_(연락처);
-          for (var gi = 0; gi < 고객data.length; gi++) {
-            var existTel = _confirmRequestPhoneKey_(고객data[gi][0]);
-            var existName = String(고객data[gi][1] || "").trim();
-            if ((telClean && existTel === telClean) || existName === String(예약자명).trim()) {
-              기존여부 = true;
-              break;
-            }
-          }
+          고객data = 고객DB시트.getRange(2, 1, 고객lastRow - 1, 9).getValues();
         }
-        if (!기존여부) {
+        var 고객쓰기계획 = _planCustomerDbRegistrationWrite_(고객data, 예약자명, 연락처, 할인유형);
+        if (고객쓰기계획.action === "update-discount") {
+          고객DB시트.getRange(고객쓰기계획.sheetRow, 9).setValue(고객쓰기계획.discount);
+        } else if (고객쓰기계획.action === "append") {
           var 고객newRow = 고객lastRow + 1;
           고객DB시트.getRange(고객newRow, 1).setNumberFormat("@").setValue(String(연락처));
           고객DB시트.getRange(고객newRow, 2).setValue(예약자명);
-          // C 업체명, D 할인유형 은 수동 관리 (단골/제휴는 사장이 직접 지정)
-          Logger.log("신규고객 저장: " + 예약자명 + " " + 연락처);
+          if (고객쓰기계획.discount) {
+            고객DB시트.getRange(고객newRow, 9).setValue(고객쓰기계획.discount);
+          }
         }
       }
     } catch (dbErr) {
