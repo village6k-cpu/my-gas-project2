@@ -570,12 +570,38 @@ The JSON schema:
 export function extractJsonObject(text) {
   const input = String(text || '');
   const afterMarker = input.includes('FINAL_JSON') ? input.slice(input.lastIndexOf('FINAL_JSON') + 'FINAL_JSON'.length) : input;
-  const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(afterMarker);
-  const candidate = fence ? fence[1] : afterMarker;
-  const start = candidate.indexOf('{');
-  const end = candidate.lastIndexOf('}');
-  if (start < 0 || end < start) throw new Error('No JSON object found in Hermes output');
-  return JSON.parse(candidate.slice(start, end + 1));
+  let start = afterMarker.indexOf('{');
+  while (start >= 0) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < afterMarker.length; index += 1) {
+      const char = afterMarker[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+      if (char === '{') depth += 1;
+      else if (char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          try {
+            return JSON.parse(afterMarker.slice(start, index + 1));
+          } catch {
+            break;
+          }
+        }
+      }
+    }
+    start = afterMarker.indexOf('{', start + 1);
+  }
+  throw new Error('No valid JSON object found in Hermes output');
 }
 
 function text(value) {
