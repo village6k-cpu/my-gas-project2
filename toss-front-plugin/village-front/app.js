@@ -347,6 +347,50 @@ async function requestFullPaymentCancel(record) {
   });
 }
 
+function isPaymentCancelNotFoundError(error) {
+  var seen = [];
+  var keys = ['code', 'errorCode', 'message', 'name', 'error', 'cause', 'response', 'data', 'body', 'details'];
+
+  function containsPaymentNotFound(value, depth) {
+    if (value == null || depth > 4) return false;
+    if (typeof value === 'string' || typeof value === 'number') {
+      return /(^|[^A-Z0-9_])PAYMENT_NOT_FOUND([^A-Z0-9_]|$)/.test(String(value).toUpperCase());
+    }
+    if (typeof value !== 'object' || seen.indexOf(value) !== -1) return false;
+    seen.push(value);
+    for (var i = 0; i < keys.length; i += 1) {
+      if (containsPaymentNotFound(value[keys[i]], depth + 1)) return true;
+    }
+    return false;
+  }
+
+  return containsPaymentNotFound(error, 0);
+}
+
+async function getCachedPaymentCancel(paymentKey) {
+  if (!sdk.payment || typeof sdk.payment.getPaymentCancel !== 'function') {
+    throw new Error('토스 취소 상태를 확인할 수 없습니다.');
+  }
+  try {
+    return await sdk.payment.getPaymentCancel({ paymentKey: paymentKey });
+  } catch (e) {
+    if (isPaymentCancelNotFoundError(e)) return null;
+    throw e;
+  }
+}
+
+function extractPaymentCancelDetail(result, paymentMethod) {
+  var response = result && result.response ? result.response : {};
+  var method = paymentMethod || response.paymentMethod;
+  if (method === 'CARD') return response.card || {};
+  if (method === 'BARCODE') return response.barcode || {};
+  if (method === 'CASH') {
+    if (response.cash && response.cash.cashReceipt) return response.cash.cashReceipt;
+    return response.cash || response.cashReceipt || {};
+  }
+  return {};
+}
+
 async function markPaymentCancelled(record, cancelDetail) {
   var records = await loadReceiptRecords();
   var cancelledAt = new Date().toISOString();
@@ -362,7 +406,17 @@ async function markPaymentCancelled(record, cancelDetail) {
   });
   if (!marked) throw new Error('로컬 결제 기록을 찾지 못했습니다.');
   await saveReceiptRecords(updated);
-  return marked;
+  var persistedRecords = await loadReceiptRecords();
+  for (var i = 0; i < persistedRecords.length; i += 1) {
+    if (
+      persistedRecords[i] &&
+      persistedRecords[i].paymentKey === record.paymentKey &&
+      persistedRecords[i].cancelledAt === cancelledAt
+    ) {
+      return persistedRecords[i];
+    }
+  }
+  throw new Error('로컬 취소 기록 저장을 확인하지 못했습니다.');
 }
 
 async function rememberReceiptRecord(trade, payment) {
@@ -581,6 +635,21 @@ async function showCancelRecord(record) {
   });
 }
 
+async function recordConfirmedPaymentCancel(record, result, title, description) {
+  var cancelDetail = extractPaymentCancelDetail(result, record.paymentMethod);
+  try {
+    await markPaymentCancelled(record, cancelDetail);
+  } catch (e) {
+    return showStaffMessage(
+      'success',
+      '전액 취소는 완료됐어요',
+      '토스 취소는 확인됐지만 로컬 기록 저장에 실패했습니다. 취소 목록에서 다시 열어 상태를 맞춰주세요.',
+      true
+    );
+  }
+  return showStaffMessage('success', title, description, false);
+}
+
 async function executeFullPaymentCancel(record) {
   if (cancelInFlight) {
     try { if (sdk.template.openToast) sdk.template.openToast({ message: '취소 요청을 처리하고 있어요.' }); } catch (e) {}
@@ -603,17 +672,32 @@ async function executeFullPaymentCancel(record) {
     }
 
     var cancelRecord = await hydrateCancelRecord(Object.assign({}, stored, record));
-    if (!sdk.payment || typeof sdk.payment.getPaymentCancel !== 'function') {
-      throw new Error('토스 취소 상태를 확인할 수 없습니다.');
+    var previous;
+    try {
+      previous = await getCachedPaymentCancel(cancelRecord.paymentKey);
+    } catch (e) {
+      return showStaffMessage(
+        'error',
+        '취소 상태를 확인하지 못했어요',
+        e.message || '토스 취소 상태 조회 후 다시 시도해주세요.',
+        true
+      );
     }
-
-    var previous = await sdk.payment.getPaymentCancel({ paymentKey: cancelRecord.paymentKey });
     if (previous && previous.type === 'SUCCESS') {
-      await markPaymentCancelled(cancelRecord, previous.response || {});
-      return showStaffMessage('success', '이미 취소된 결제를 확인했어요', '토스 취소 상태와 로컬 기록을 맞췄습니다.', false);
+      return await recordConfirmedPaymentCancel(
+        cancelRecord,
+        previous,
+        '이미 취소된 결제를 확인했어요',
+        '토스 취소 상태와 로컬 기록을 맞췄습니다.'
+      );
     }
 
-    var result = await requestFullPaymentCancel(cancelRecord);
+    var result;
+    try {
+      result = await requestFullPaymentCancel(cancelRecord);
+    } catch (e) {
+      return showStaffMessage('error', '전액 취소에 실패했어요', e.message || '토스 취소 상태를 확인해주세요.', true);
+    }
     if (!result || result.type !== 'SUCCESS') {
       return showStaffMessage(
         'error',
@@ -623,8 +707,12 @@ async function executeFullPaymentCancel(record) {
       );
     }
 
-    await markPaymentCancelled(cancelRecord, result.response || {});
-    return showStaffMessage('success', '전액 취소가 완료됐어요', won(cancelRecord.amount) + ' 승인 취소 완료', false);
+    return await recordConfirmedPaymentCancel(
+      cancelRecord,
+      result,
+      '전액 취소가 완료됐어요',
+      won(cancelRecord.amount) + ' 승인 취소 완료'
+    );
   } catch (e) {
     return showStaffMessage('error', '전액 취소에 실패했어요', e.message || '토스 취소 상태를 확인해주세요.', true);
   } finally {
