@@ -2500,13 +2500,7 @@ function toggleSetupDone(tid, done) {
   var atKey = 'setupDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
-  var previousDone = props.getProperty(key);
-  var previousAt = props.getProperty(atKey);
-  var lock = LockService.getScriptLock();
-  var lockAcquired = false;
   try {
-    lock.waitLock(10000);
-    lockAcquired = true;
     var doneAt = "";
     if (isDone) {
       var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2515,6 +2509,9 @@ function toggleSetupDone(tid, done) {
       var groups = getDashboardSearchGroupsForIds_(sched, [tid]);
       var group = groups[tid];
       var checkable = getDashboardReturnCheckableItems_(group && group.equipments || []);
+      // 기준선 조회/저장은 HTTP를 포함할 수 있다. 전역 ScriptLock 안에서 실행하면
+      // 계약서 재생성·동기화 같은 무관한 작업이 반출 완료를 10초 이상 막는다.
+      // 이 함수는 같은 기준선을 재호출하면 재사용하고, 값이 다르면 실패-폐쇄한다.
       var baseline = typeof supaCaptureCheckoutBaseline_ === 'function'
         ? supaCaptureCheckoutBaseline_(tid, checkable, true)
         : { ok: false, error: 'Supabase 반출 기준선 함수 없음' };
@@ -2534,14 +2531,7 @@ function toggleSetupDone(tid, done) {
     invalidateDashboardCache();
     return { tid: tid, setupDone: isDone, setupDoneAt: doneAt, doneAt: doneAt };
   } catch (err) {
-    // PropertyService 중간 실패 때 화면만 완료되거나 완료시각만 남지 않도록 원상 복구한다.
-    try {
-      if (previousDone === null) props.deleteProperty(key); else props.setProperty(key, previousDone);
-      if (previousAt === null) props.deleteProperty(atKey); else props.setProperty(atKey, previousAt);
-    } catch (rollbackErr) {}
     return { error: err && err.message ? err.message : String(err) };
-  } finally {
-    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
   }
 }
 
