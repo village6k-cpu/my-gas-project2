@@ -927,6 +927,18 @@ test('extractJsonObject reads fenced FINAL_JSON object', () => {
   });
 });
 
+test('extractJsonObject ignores trailing diagnostics after the FINAL_JSON object', () => {
+  const text = `FINAL_JSON
+\`\`\`json
+{"should_write_to_sheet":false,"reason":"정상 판단"}
+{"diagnostic":"late tool output"}
+\`\`\``;
+  assert.deepEqual(extractJsonObject(text), {
+    should_write_to_sheet: false,
+    reason: '정상 판단'
+  });
+});
+
 test('buildHermesPrompt requires sender separation and customer turn clustering', () => {
   const prompt = buildHermesPrompt({ id: 'job-sender', preview_text: '중요 홍길동 안녕하세요 오후 1:00' });
   assert.match(prompt, /SENDER AND TURN-TAKING POLICY/);
