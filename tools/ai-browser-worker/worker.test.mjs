@@ -96,6 +96,13 @@ test('buildHermesPrompt keeps code as plumbing and requires AI-visible Kakao ver
   assert.match(prompt, /job-1/);
 });
 
+test('buildHermesPrompt caps total tool calls and batches read-only lookups', () => {
+  const prompt = buildHermesPrompt({ id: 'job-tool-budget', preview_text: '예약 문의' });
+  assert.match(prompt, /at most 10 tool calls total/i);
+  assert.match(prompt, /Batch.*read-only GAS lookups.*one terminal call/i);
+  assert.match(prompt, /reaching.*budget.*FINAL_JSON/i);
+});
+
 test('buildCompactJobForPrompt strips bulky raw payload while preserving latest evidence', () => {
   const compact = buildCompactJobForPrompt({
     id: 'job-compact',
