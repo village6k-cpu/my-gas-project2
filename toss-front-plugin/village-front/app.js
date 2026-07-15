@@ -188,6 +188,38 @@ async function ensureStillPayable(trade) {
 // ──────────────────────────────────────────────────────────────
 // 결제 (단말기 카드 승인) — 토스 공식 예제 패턴
 // ──────────────────────────────────────────────────────────────
+function normalizePaymentResponse(response, amount) {
+  var r = response || {};
+  var method = r.paymentMethod || null;
+  var detail = method === 'CARD'
+    ? r.card
+    : method === 'BARCODE'
+      ? r.barcode
+      : r.cash && r.cash.cashReceipt;
+  detail = detail || {};
+  var paidAmount = Number(amount) || 0;
+  var tax = Math.floor(paidAmount / 11);
+  return {
+    paymentMethod: method,
+    amount: paidAmount,
+    tax: tax,
+    supplyValue: paidAmount - tax,
+    tip: 0,
+    timestamp: detail.timestamp || null,
+    approvalNumber: detail.approvalNumber || null,
+    installment: detail.installment || 0,
+    extraData: r.extraData || null,
+    isSelfIssuance: Boolean(detail.isSelfIssuance)
+  };
+}
+
+function hasCancelDetails(record) {
+  return Boolean(
+    record && record.paymentKey && record.paymentMethod &&
+    Number(record.amount) > 0 && record.timestamp && record.approvalNumber
+  );
+}
+
 async function requestCardPayment(price, pendingTradeId) {
   var paymentKey =
     typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'vlg-' + Date.now();
@@ -209,10 +241,19 @@ async function requestCardPayment(price, pendingTradeId) {
 
   if (result && result.type === 'SUCCESS') {
     var r = result.response || {};
+    var normalized = normalizePaymentResponse(r, price);
     return {
       paymentKey: paymentKey,
-      amount: r.amount != null ? r.amount : price,
-      approvalNumber: r.approvalNumber,
+      paymentMethod: normalized.paymentMethod,
+      amount: normalized.amount,
+      tax: normalized.tax,
+      supplyValue: normalized.supplyValue,
+      tip: normalized.tip,
+      timestamp: normalized.timestamp,
+      approvalNumber: normalized.approvalNumber,
+      installment: normalized.installment,
+      extraData: normalized.extraData,
+      isSelfIssuance: normalized.isSelfIssuance,
       raw: r,
     };
   }
@@ -274,13 +315,20 @@ async function rememberReceiptRecord(trade, payment) {
     paymentKey: payment.paymentKey,
     amount: payment.amount,
     approvalNumber: payment.approvalNumber || null,
+    timestamp: payment.timestamp || null,
+    installment: payment.installment || 0,
+    extraData: payment.extraData || null,
+    tax: payment.tax,
+    supplyValue: payment.supplyValue,
+    tip: payment.tip || 0,
+    isSelfIssuance: Boolean(payment.isSelfIssuance),
     paidAt: new Date().toISOString(),
     customerName: trade && trade.customerName ? trade.customerName : '현장 결제',
     itemSummary: trade && trade.itemSummary ? trade.itemSummary : '현장 입력 금액',
     checkoutAt: trade && trade.checkoutAt ? trade.checkoutAt : '',
     returnAt: trade && trade.returnAt ? trade.returnAt : '',
     depositStatus: '입금완료',
-    paymentMethod: '카드결제'
+    paymentMethod: payment.paymentMethod || null
   };
   var records = await loadReceiptRecords();
   var filtered = records.filter(function (r) {
@@ -756,21 +804,15 @@ async function recoverPending() {
     var found = sdk.payment.getPayment ? await sdk.payment.getPayment({ paymentKey: pending.paymentKey }) : null;
     if (found && found.type === 'SUCCESS') {
       var response = found.response || {};
+      var normalized = normalizePaymentResponse(response, pending.amount);
+      var recoveredPayment = Object.assign({ paymentKey: pending.paymentKey }, normalized, { raw: response });
       await confirmPaid(
         { tradeId: pending.tradeId },
-        {
-          amount: pending.amount,
-          paymentKey: pending.paymentKey,
-          approvalNumber: response.approvalNumber
-        }
+        recoveredPayment
       );
       await rememberReceiptRecord(
         { tradeId: pending.tradeId, customerName: '복구된 예약 결제', itemSummary: '예약 결제', checkoutAt: '', returnAt: '' },
-        {
-          amount: pending.amount,
-          paymentKey: pending.paymentKey,
-          approvalNumber: response.approvalNumber
-        }
+        recoveredPayment
       );
     }
   } catch (e) {
