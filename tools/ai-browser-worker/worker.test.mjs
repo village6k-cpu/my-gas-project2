@@ -1090,6 +1090,119 @@ test('buildSheetAppendPayload maps AI-decided fields into insertAndCheckRequest 
   assert.equal(JSON.stringify(payload).includes('AI-'), false);
 });
 
+test('buildSheetAppendPayload rejects an AI equipment rewrite unrelated to the customer raw text', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    reservation_inquiry: {
+      equipment_requested: [
+        { raw_text: '시그마 아트 18-35', normalized_guess: 'H&Y VND-CPL 67-82mm 가변 ND', quantity: 1 }
+      ]
+    },
+    sheet_row_candidate: {
+      start_date: '2026-07-15',
+      pickup_time: '10:00',
+      end_date: '2026-07-16',
+      return_time: '10:00',
+      customer_name: '원영상',
+      phone: '010-6687-1945',
+      equipment: [{ item: 'H&Y VND-CPL 67-82mm 가변 ND', quantity: 1 }]
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  assert.deepEqual(payload.args.장비, [{ 이름: '시그마 아트 18-35', 수량: 1 }]);
+});
+
+test('buildSheetAppendPayload rejects a same-brand rewrite to a different lens model', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    reservation_inquiry: {
+      equipment_requested: [
+        { raw_text: '시그마 아트 18-35', normalized_guess: '시그마 아트 50-100mm', quantity: 1 }
+      ]
+    },
+    sheet_row_candidate: {
+      start_date: '2026-07-15', pickup_time: '10:00', end_date: '2026-07-16', return_time: '10:00',
+      customer_name: '원영상', phone: '010-6687-1945',
+      equipment: [{ item: '시그마 아트 50-100mm', quantity: 1 }]
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  assert.deepEqual(payload.args.장비, [{ 이름: '시그마 아트 18-35', 수량: 1 }]);
+});
+
+test('buildSheetAppendPayload prefers an explicitly written booking identity over the Kakao profile', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    latest_customer_message_cluster: '예약자 원영상/010-6687-1945로 부탁드립니다.',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    reservation_inquiry: {
+      equipment_requested: [{ raw_text: 'FX3', normalized_guess: '소니 FX3 바디세트', quantity: 1 }]
+    },
+    customer: { name: '설용수' },
+    sheet_row_candidate: {
+      start_date: '2026-07-15', pickup_time: '22:00', end_date: '2026-07-16', return_time: '22:00',
+      customer_name: '설용수', phone: '', equipment: [{ item: '소니 FX3 바디세트', quantity: 1 }]
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  assert.equal(payload.args.예약자명, '원영상');
+  assert.equal(payload.args.연락처, '010-6687-1945');
+});
+
+test('buildSheetAppendPayload keeps a grounded canonical alias rewrite', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    reservation_inquiry: {
+      equipment_requested: [
+        { raw_text: 'solid 4s', exact_name_from_set_master: '홀리랜드 솔리드컴 4S', quantity: 1 }
+      ]
+    },
+    sheet_row_candidate: {
+      start_date: '2026-07-15',
+      pickup_time: '10:00',
+      end_date: '2026-07-16',
+      return_time: '10:00',
+      customer_name: '원영상',
+      phone: '010-6687-1945',
+      equipment: [{ item: '홀리랜드 솔리드컴 4S', quantity: 1 }]
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  assert.deepEqual(payload.args.장비, [{ 이름: '홀리랜드 솔리드컴 4S', 수량: 1 }]);
+});
+
+test('buildHermesPrompt prioritizes explicit booking identity and keeps RAG out of extraction', () => {
+  const prompt = buildHermesPrompt({ id: 'identity-guard', preview_text: '예약자 원영상 010-6687-1945' }, {
+    ragContext: buildReadOnlyRagContext({ villageAiUrl: 'https://village-ai.example' })
+  });
+
+  assert.match(prompt, /예약 메시지에 명시된 예약자명.*프로필명보다 우선/s);
+  assert.match(prompt, /RAG.*장비명 정규화.*예약자명.*연락처.*사용 금지/s);
+});
+
 test('buildSheetAppendPayload does not leak AI reasons or review actions into confirmation request memo fields', () => {
   const decision = {
     should_write_to_sheet: true,
