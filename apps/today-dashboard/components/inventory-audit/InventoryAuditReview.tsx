@@ -16,6 +16,11 @@ type Props = {
   onChanged(): Promise<void> | void;
 };
 
+type FinalCountDraft = {
+  finalStockTotal: string;
+  finalStockMaintenance: string;
+};
+
 async function readJson(response: Response) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -36,6 +41,7 @@ const CLASS_LABEL: Record<InventoryAuditReviewItem["classification"], string> = 
 export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
   const [review, setReview] = useState<Review | null>(null);
   const [actions, setActions] = useState<Record<string, InventoryAuditReviewDecision>>({});
+  const [finalCounts, setFinalCounts] = useState<Record<string, FinalCountDraft>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -52,6 +58,13 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
       )) as Review;
       setReview(next);
       setActions(Object.fromEntries(next.items.map((item) => [item.equipmentId, item.defaultDecision])));
+      setFinalCounts(Object.fromEntries(next.items.map((item) => [
+        item.equipmentId,
+        {
+          finalStockTotal: item.reviewStockTotal === null ? "" : String(item.reviewStockTotal),
+          finalStockMaintenance: String(item.reviewStockMaintenance),
+        },
+      ])));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "검토 자료를 불러오지 못했습니다.");
     } finally {
@@ -80,6 +93,17 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
     [isDraft, review?.items, showAll],
   );
   const hasRecount = Object.values(actions).includes("recount");
+
+  const decisionInput = (item: InventoryAuditReviewItem) => {
+    const counts = finalCounts[item.equipmentId];
+    return {
+      equipmentId: item.equipmentId,
+      decision: actions[item.equipmentId] ?? item.defaultDecision,
+      finalStockTotal: counts?.finalStockTotal,
+      finalStockMaintenance: counts?.finalStockMaintenance,
+      reviewNote: "",
+    };
+  };
 
   const resolveRental = async (
     group: InventoryAuditRentalGroup,
@@ -118,11 +142,7 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          decisions: review.items.map((item) => ({
-            equipmentId: item.equipmentId,
-            decision: actions[item.equipmentId] ?? item.defaultDecision,
-            reviewNote: "",
-          })),
+          decisions: review.items.map(decisionInput),
         }),
       }),
     );
@@ -148,11 +168,7 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
     if (!review || !confirmed) return;
     const decisions = review.items
       .filter((item) => item.physicalTotal !== null && !item.checkpointApprovedAt)
-      .map((item) => ({
-        equipmentId: item.equipmentId,
-        decision: actions[item.equipmentId] ?? item.defaultDecision,
-        reviewNote: "",
-      }));
+      .map(decisionInput);
     const approvingCount = decisions.filter((item) => item.decision !== "recount").length;
     if (
       approvingCount === 0 ||
@@ -306,7 +322,15 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
                     item={item}
                     isDraft={isDraft}
                     decision={actions[item.equipmentId] ?? item.defaultDecision}
-                    onDecision={(decision) => setActions((current) => ({ ...current, [item.equipmentId]: decision }))}
+                    counts={finalCounts[item.equipmentId] ?? { finalStockTotal: "", finalStockMaintenance: "0" }}
+                    onDecision={(decision) => {
+                      setActions((current) => ({ ...current, [item.equipmentId]: decision }));
+                      setConfirmed(false);
+                    }}
+                    onCountsChange={(counts) => {
+                      setFinalCounts((current) => ({ ...current, [item.equipmentId]: counts }));
+                      setConfirmed(false);
+                    }}
                   />
                 ))}
                 {visibleItems.length === 0 && <div className="rounded-lg bg-checkin-bg p-3 text-[12px] font-semibold text-checkin-fg">{isDraft ? "새로 확정할 완료 장비가 없습니다." : "수량 차이·문제·미계수 항목이 없습니다."}</div>}
@@ -345,9 +369,10 @@ function Summary({ label, value, warn = false }: { label: string; value: number;
   return <div className={`rounded-lg p-2.5 text-center ring-1 ${warn ? "bg-warn-bg text-warn-fg ring-warn-fg/20" : "bg-white text-ink ring-line"}`}><div className="text-[10.5px] font-semibold opacity-75">{label}</div><div className="mt-0.5 text-[17px] font-bold tabular-nums">{value}</div></div>;
 }
 
-function ReviewItemCard({ item, isDraft, decision, onDecision }: { item: InventoryAuditReviewItem; isDraft: boolean; decision: InventoryAuditReviewDecision; onDecision(value: InventoryAuditReviewDecision): void }) {
+function ReviewItemCard({ item, isDraft, decision, counts, onDecision, onCountsChange }: { item: InventoryAuditReviewItem; isDraft: boolean; decision: InventoryAuditReviewDecision; counts: FinalCountDraft; onDecision(value: InventoryAuditReviewDecision): void; onCountsChange(value: FinalCountDraft): void }) {
   const locked = item.checkpointApprovedAt !== null;
   const unavailable = locked || (isDraft && item.physicalTotal === null);
+  const countDisabled = unavailable || decision !== "apply_audit";
   return (
     <div className="rounded-xl bg-white p-3 ring-1 ring-line">
       <div className="flex items-start justify-between gap-2">
@@ -359,6 +384,38 @@ function ReviewItemCard({ item, isDraft, decision, onDecision }: { item: Invento
         <Metric label="매장" value={item.physicalTotal} />
         <Metric label="대여중" value={item.matchedActiveRentalQty + item.resolvedOffsiteQty} />
         <Metric label="실사합계" value={item.candidateTotal} />
+      </div>
+      <div className="mt-2 rounded-lg bg-brand-50 p-2.5 ring-1 ring-brand-200">
+        <div className="mb-2 text-[11px] font-bold text-brand-700">사장님 최종 확정 수량</div>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-[10.5px] font-semibold text-ink-soft">
+            최종 총수량
+            <input
+              type="number"
+              inputMode="numeric"
+              min="0"
+              step="1"
+              disabled={countDisabled}
+              value={counts.finalStockTotal}
+              onChange={(event) => onCountsChange({ ...counts, finalStockTotal: event.target.value })}
+              className="mt-1 w-full rounded-lg bg-white px-3 py-2 text-[15px] font-bold tabular-nums text-ink ring-1 ring-line disabled:bg-line/30 disabled:text-ink-mute"
+            />
+          </label>
+          <label className="text-[10.5px] font-semibold text-ink-soft">
+            정비수량
+            <input
+              type="number"
+              inputMode="numeric"
+              min="0"
+              step="1"
+              disabled={countDisabled}
+              value={counts.finalStockMaintenance}
+              onChange={(event) => onCountsChange({ ...counts, finalStockMaintenance: event.target.value })}
+              className="mt-1 w-full rounded-lg bg-white px-3 py-2 text-[15px] font-bold tabular-nums text-ink ring-1 ring-line disabled:bg-line/30 disabled:text-ink-mute"
+            />
+          </label>
+        </div>
+        <div className="mt-1.5 text-[10px] text-brand-700">`실사 적용` 선택 시 이 숫자가 기준재고에 반영됩니다.</div>
       </div>
       {item.finalOpenIssues.length > 0 && <div className="mt-2 rounded-lg bg-attention-bg px-2.5 py-2 text-[11px] font-semibold text-attention-fg">{item.finalOpenIssues.map((issue) => issue.label).join(" · ")}</div>}
       <div className="mt-2 grid grid-cols-3 gap-1.5">

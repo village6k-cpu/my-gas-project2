@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 
 import type { InventoryAuditReviewDecision } from "@/lib/inventory-audit/review";
+import { resolveInventoryAuditFinalCounts } from "@/lib/inventory-audit/ownerFinalCount";
 import { isUuid } from "@/lib/inventory-audit/staff";
 import { requireInventoryOwner } from "@/lib/server/inventoryAuditAuth";
 import { getInventoryAuditServiceClient } from "@/lib/server/inventoryAuditDb";
@@ -15,6 +16,8 @@ type DecisionInput = {
   equipmentId?: unknown;
   decision?: unknown;
   reviewNote?: unknown;
+  finalStockTotal?: unknown;
+  finalStockMaintenance?: unknown;
 };
 
 const CHECKPOINT_DECISIONS = new Set<InventoryAuditReviewDecision>([
@@ -90,12 +93,18 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
       .map(([equipmentId, input]) => {
         const item = eligible.get(equipmentId)!;
         const decision = input.decision as Exclude<InventoryAuditReviewDecision, "recount">;
+        const finalCounts =
+          decision === "apply_audit"
+            ? resolveInventoryAuditFinalCounts(input, {
+                finalStockTotal: item.candidateTotal,
+                finalStockMaintenance: item.finalStockMaintenance,
+              })
+            : null;
         return {
           equipment_id: equipmentId,
           decision,
-          final_stock_total: decision === "apply_audit" ? item.candidateTotal : null,
-          final_stock_maint:
-            decision === "apply_audit" ? item.finalStockMaintenance : null,
+          final_stock_total: finalCounts?.finalStockTotal ?? null,
+          final_stock_maint: finalCounts?.finalStockMaintenance ?? null,
           final_state: decision === "apply_audit" ? item.finalState : null,
           final_open_issues:
             decision === "apply_audit" ? item.finalOpenIssues : [],

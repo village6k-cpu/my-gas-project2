@@ -46,6 +46,8 @@ export type InventoryAuditReviewItem = {
   defaultDecision: InventoryAuditReviewDecision;
   savedDecision: InventoryAuditReviewDecision | null;
   reviewNote: string;
+  reviewStockTotal: number | null;
+  reviewStockMaintenance: number;
   checkpointApprovedAt: string | null;
   checkpointApprovedByEmail: string | null;
 };
@@ -275,6 +277,14 @@ export function buildInventoryAuditReview(input: {
     );
     const approval = approvals.get(equipmentId);
     const checkpointApprovedAt = nullableText(approval?.approved_at);
+    const reviewStockTotal =
+      nullableCount(approval?.final_stock_total) ??
+      nullableCount(saved?.final_stock_total) ??
+      candidateTotal;
+    const reviewStockMaintenance =
+      nullableCount(approval?.final_stock_maint) ??
+      nullableCount(saved?.final_stock_maint) ??
+      finalStockMaintenance;
 
     return {
       equipmentId,
@@ -302,6 +312,8 @@ export function buildInventoryAuditReview(input: {
           : savedDecision ?? (classification === "uncounted" ? "keep_ledger" : "apply_audit"),
       savedDecision,
       reviewNote: text(saved?.review_note),
+      reviewStockTotal,
+      reviewStockMaintenance,
       checkpointApprovedAt,
       checkpointApprovedByEmail: nullableText(approval?.approved_by_email),
     };

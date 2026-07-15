@@ -65,13 +65,13 @@ export async function loadInventoryAuditReview(
       requireRows<Record<string, unknown>>(
         client
           .from("inventory_audit_decisions")
-          .select("equipment_id,decision,review_note,reviewed_at")
+          .select("equipment_id,decision,final_stock_total,final_stock_maint,review_note,reviewed_at")
           .eq("session_id", sessionId),
       ),
       requireRows<Record<string, unknown>>(
         client
           .from("inventory_audit_item_approvals")
-          .select("equipment_id,decision,approved_by_email,approved_at")
+          .select("equipment_id,decision,final_stock_total,final_stock_maint,approved_by_email,approved_at")
           .eq("session_id", sessionId),
       ),
       requireRows<Record<string, unknown>>(
