@@ -117,7 +117,7 @@ git commit -m "feat: 토스 취소용 승인정보 저장"
 
 **Interfaces:**
 - Consumes: Task 1의 `hasCancelDetails(record)`, `normalizePaymentResponse`, `loadReceiptRecords`, `saveReceiptRecords`.
-- Produces: `showStaffSettings`, `showCancelablePayments`, `hydrateCancelRecord`, `requestFullPaymentCancel`, `markPaymentCancelled`, `retryPendingCancelSyncs`.
+- Produces: `showStaffSettings`, `showCancelablePayments`, `hydrateCancelRecord`, `requestFullPaymentCancel`, `markPaymentCancelled`.
 
 - [ ] **Step 1: 직원 모드·공식 취소·중복 방지 실패 테스트 확장**
 
