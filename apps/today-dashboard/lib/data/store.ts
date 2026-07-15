@@ -336,6 +336,23 @@ function flashSave(tradeId?: string) {
   }, 420);
 }
 
+/** 원장 확정이 필요한 작업은 완료 전까지 저장 중 상태를 유지한다. */
+function beginTradeSave(tradeId: string): number {
+  const id = ++toastSeq;
+  set({ savingTrades: { ...state.savingTrades, [tradeId]: true }, toast: { id, text: "저장 중…", kind: "saving" } });
+  return id;
+}
+
+function finishTradeSave(tradeId: string, id: number, kind: "saved" | "error", text: string) {
+  const saving = { ...state.savingTrades };
+  delete saving[tradeId];
+  set({ savingTrades: saving, toast: { id, text, kind } });
+  if (typeof window === "undefined") return;
+  window.setTimeout(() => {
+    if (state.toast?.id === id) set({ toast: null });
+  }, kind === "error" ? 4_000 : 1_100);
+}
+
 function mutateTrade(tradeId: string, fn: (t: Trade) => Trade) {
   markLocalMutation();
   let changed: Trade | undefined;
@@ -467,6 +484,7 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
     return { ok: false, error };
   }
 
+  const saveId = beginTradeSave(tradeId);
   let gasSucceeded = false;
   try {
     // 반출 기준선이 GAS/Supabase에 먼저 고정된 뒤에만 화면을 완료로 바꾼다.
@@ -475,7 +493,7 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
     const doneAt = done ? String(res?.setupDoneAt || res?.doneAt || new Date().toISOString()) : null;
     mutateTrade(tradeId, (t) => ({ ...t, setupDone: done, setupDoneAt: doneAt }));
     if (isSupabase) await flushTradePersist(tradeId);
-    flashSave(tradeId);
+    finishTradeSave(tradeId, saveId, "saved", "저장됨");
     return { ok: true };
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
@@ -483,7 +501,7 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
       ? `원장 반출 상태는 변경됐지만 앱 저장 확인에 실패했습니다. 새로고침 후 재확인해주세요 — ${detail}`
       : detail;
     console.error("[write-back] toggleSetup 실패:", e);
-    set({ toast: { id: ++toastSeq, text: `⚠️ 반출 상태 변경 실패 — ${error}`, kind: "error" } });
+    finishTradeSave(tradeId, saveId, "error", `⚠️ 반출 상태 변경 실패 — ${error}`);
     return { ok: false, error };
   }
 }
