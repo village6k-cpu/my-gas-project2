@@ -7394,10 +7394,23 @@ function refreshEquipmentList() {
  * 입력된 장비명을 목록에서 가장 유사한 이름과 매칭
  * 정확히 매칭되면 그걸 사용, 아니면 부분 매칭 시도, 실패하면 원본 그대로 반환
  */
+function normalizeEquipAliasForMatch_(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/solidcom|solid/g, "솔리드컴")
+    .replace(/알파세븐|alphaseven|alpha7/g, "a7s3")
+    .replace(/sigma/g, "시그마")
+    .replace(/sony/g, "소니")
+    .replace(/body/g, "바디")
+    .replace(/set/g, "세트")
+    .replace(/art/g, "아트");
+}
+
 function fuzzyMatchEquipName(input, nameList) {
   if (!input || nameList.length === 0) return input;
 
-  var inputLower = input.toLowerCase().replace(/\s+/g, "");
+  var inputLower = normalizeEquipAliasForMatch_(input);
 
   // 1. 정확히 일치
   for (var i = 0; i < nameList.length; i++) {
@@ -7406,7 +7419,7 @@ function fuzzyMatchEquipName(input, nameList) {
 
   // 2. 대소문자/공백 무시 일치
   for (var i = 0; i < nameList.length; i++) {
-    if (nameList[i].toLowerCase().replace(/\s+/g, "") === inputLower) return nameList[i];
+    if (normalizeEquipAliasForMatch_(nameList[i]) === inputLower) return nameList[i];
   }
 
   // SDI/HDMI/렌즈/모니터처럼 넓은 카테고리 단어는 특정 장비로 자동 치환하면 데이터가 오염된다.
@@ -7416,7 +7429,7 @@ function fuzzyMatchEquipName(input, nameList) {
   // 3. 한쪽이 다른 쪽을 포함 (입력값이 목록 항목 포함 또는 반대)
   var containMatches = [];
   for (var i = 0; i < nameList.length; i++) {
-    var nameLower = nameList[i].toLowerCase().replace(/\s+/g, "");
+    var nameLower = normalizeEquipAliasForMatch_(nameList[i]);
     if (nameLower.indexOf(inputLower) >= 0 || inputLower.indexOf(nameLower) >= 0) {
       containMatches.push({ name: nameList[i], lenDiff: Math.abs(nameLower.length - inputLower.length) });
     }
@@ -7432,7 +7445,7 @@ function fuzzyMatchEquipName(input, nameList) {
     var bestMatch = null;
     var bestScore = 0;
     for (var i = 0; i < nameList.length; i++) {
-      var nameLower = nameList[i].toLowerCase().replace(/\s+/g, "");
+      var nameLower = normalizeEquipAliasForMatch_(nameList[i]);
       var score = 0;
       for (var k = 0; k < inputKeywords.length; k++) {
         if (nameLower.indexOf(inputKeywords[k].toLowerCase()) >= 0) score++;
@@ -7449,7 +7462,7 @@ function fuzzyMatchEquipName(input, nameList) {
   var bestLev = null;
   var bestDist = Infinity;
   for (var i = 0; i < nameList.length; i++) {
-    var nameLower = nameList[i].toLowerCase().replace(/\s+/g, "");
+    var nameLower = normalizeEquipAliasForMatch_(nameList[i]);
     var dist = levenshtein(inputLower, nameLower);
     var maxLen = Math.max(inputLower.length, nameLower.length);
     // 유사도 60% 이상이면 매칭

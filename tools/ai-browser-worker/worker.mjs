@@ -234,6 +234,7 @@ export function buildReadOnlyRagContext(config = {}) {
       forbidden_uses: [
         'do not replace Kakao screen evidence',
         'do not replace Sheets/GAS duplicate checks',
+        'do not use for equipment-name normalization, booking-name extraction, or phone extraction',
         'do not use for current inventory availability, actual booking confirmation, or schedule/contract mutations',
         'do not override the worker current_confirmed_policy block with older historical Kakao/RAG when they conflict',
         'do not send Kakao messages or write Sheets from RAG tool output',
@@ -401,7 +402,7 @@ export function buildHermesPrompt(job, options = {}) {
   return `AI-first Kakao rental-shop worker task.
 
 CRITICAL RULES:
-- This is AI-first. 코드의 역할은 queue/claim/API 호출 같은 plumbing뿐이다.
+- AI-first: 코드는 queue/claim/API plumbing만 맡는다.
 - 코드가 고객 의도, 예약 여부, 날짜/시간/장비를 최종 판단하면 안 된다. 코드 판단 금지: AI가 화면과 맥락을 보고 판단하고, 코드는 queue/claim/API write만 수행한다.
 - 카카오 Channel Manager Chrome 화면을 computer_use로 직접 확인하고, 화면에서 보이는 대화 맥락을 우선한다.
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
@@ -409,7 +410,7 @@ CRITICAL RULES:
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때만 간단한 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
 - 자동발송 후보: FAQ/절차/수령·반납/단순 후속/예약 접수/연락처 우선 요청. 재고·예약 확정은 원칙 금지지만, 직전 직원이 “가능/예약 가능”이라고 했고 최신 고객이 “그럼 이렇게 부탁/진행/예약해주세요”처럼 수락한 경우만 짧은 확정 답변 auto_send 후보로 둔다. 가격/결제/환불/파손/세금은 draft_only/task.
 - 예약 확정, 재고 가능 단정, 가격 확정은 화면/시트 근거 없이 단정하지 않는다. 하지만 고객이 예약형식에 맞게 정보를 준 경우 확인요청 시트 입력은 적극 수행한다.
-- Google Sheets 입력은 API로 가능하다. 어떤 값을 넣을지는 AI가 판단하되, 예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다.
+- Google Sheets 입력은 API로 한다.
 
 CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 최근 1시간 내 새 메시지 후보라도 반드시 채팅방을 열고, 화면에서 보이는 메시지 + 가능하면 최근 24시간 맥락을 확인한다.
@@ -440,7 +441,9 @@ SENDER AND TURN-TAKING POLICY:
 
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
-- 정규화가 애매해도 확인요청 입력은 막지 않는다. 실패 시 원문을 item에 넣고, Q/R에는 원문/추론/가용확인 후 안내 등 내부 설명을 넣지 않는다.
+- 예약 메시지에 명시된 예약자명/연락처는 프로필명보다 우선한다.
+- RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
+- 정규화가 애매해도 확인요청 입력은 막지 않는다. 실패 시 원문을 쓰고 Q/R에는 원문/추론/가용확인 후 안내를 넣지 않는다.
 - 약어/속어는 검색 키워드 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. AI는 가능한 한 장비명을 추론/정규화해야 하며, 원문 그대로 쓰는 것은 정규화 실패 시 fallback이다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
@@ -731,6 +734,59 @@ function hasRequiredSheetSafetyChecks(decision) {
   return REQUIRED_SHEET_SAFETY_CHECKS.every((key) => checks[key] === true);
 }
 
+function normalizeEquipmentIdentityText(value = '') {
+  return text(value)
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/alpha\s*(?:seven|7)|알파\s*세븐/g, ' 소니 a7s3 ')
+    .replace(/solid\s*(?:com)?/g, ' 솔리드컴 ')
+    .replace(/sigma/g, ' 시그마 ')
+    .replace(/sony/g, ' 소니 ')
+    .replace(/body/g, ' 바디 ')
+    .replace(/set/g, ' 세트 ')
+    .replace(/art/g, ' 아트 ')
+    .replace(/2470\s*gm\s*(?:2|ii)/g, ' 24-70 gm ii ')
+    .replace(/70200\s*gm\s*(?:2|ii)/g, ' 70-200 gm ii ')
+    .replace(/[^0-9a-z가-힣/-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function equipmentIdentityAnchors(value = '') {
+  const normalized = normalizeEquipmentIdentityText(value);
+  const anchors = new Set();
+  const generic = new Set(['세트', '풀세트', '바디', '바디세트', '렌즈', '장비', '카메라', '개', '대', '수량']);
+  for (const token of normalized.split(/[\s/]+/)) {
+    if (!token || generic.has(token)) continue;
+    if (/^\d+(?:개|대)$/.test(token)) continue;
+    if (/^[a-z]*\d+[a-z0-9]*$/.test(token) || /^\d{1,3}-\d{1,3}(?:mm)?$/.test(token)) {
+      anchors.add(token.replace(/mm$/, ''));
+      continue;
+    }
+    if (/^[a-z]{2,}$/.test(token) || /^[가-힣]{2,}$/.test(token)) anchors.add(token);
+  }
+  return anchors;
+}
+
+function isGroundedEquipmentRewrite(raw = '', proposed = '') {
+  const rawText = normalizeEquipmentIdentityText(raw);
+  const proposedText = normalizeEquipmentIdentityText(proposed);
+  if (!rawText || !proposedText) return true;
+  const rawCompact = rawText.replace(/\s+/g, '');
+  const proposedCompact = proposedText.replace(/\s+/g, '');
+  if (Math.min(rawCompact.length, proposedCompact.length) >= 4
+    && (rawCompact.includes(proposedCompact) || proposedCompact.includes(rawCompact))) return true;
+  const rawAnchors = equipmentIdentityAnchors(raw);
+  if (!rawAnchors.size) return true;
+  const proposedAnchors = equipmentIdentityAnchors(proposed);
+  const rawModels = [...rawAnchors].filter((anchor) => /\d/.test(anchor));
+  if (rawModels.length && !rawModels.some((anchor) => proposedAnchors.has(anchor))) return false;
+  const brandAnchors = ['소니', '시그마', '솔리드컴', '홀리랜드', '캐논', '니콘', '어퓨쳐', 'dji', '로닌', '자이스', '슈나이더'];
+  const rawBrands = brandAnchors.filter((anchor) => rawText.includes(anchor));
+  if (rawBrands.length && !rawBrands.some((anchor) => proposedText.includes(anchor))) return false;
+  return [...rawAnchors].some((anchor) => proposedAnchors.has(anchor));
+}
+
 function normalizeSheetEquipmentItems(decision = {}) {
   const row = decision.sheet_row_candidate || {};
   const rawItems = Array.isArray(row.equipment) ? row.equipment
@@ -741,17 +797,24 @@ function normalizeSheetEquipmentItems(decision = {}) {
     item: text(item.item || item.name || item.이름 || item.equipment || item.raw_text),
     quantity: item.quantity ?? item.qty ?? item.수량 ?? ''
   }));
-  const fromReservation = Array.isArray(decision.reservation_inquiry?.equipment_requested)
-    ? decision.reservation_inquiry.equipment_requested.map((item) => ({
-      item: text(item.exact_name_from_set_master || item.normalized_guess || item.raw_text),
-      quantity: item.quantity ?? item.qty ?? item.수량 ?? ''
-    }))
+  const reservationSource = Array.isArray(decision.reservation_inquiry?.equipment_requested)
+    ? decision.reservation_inquiry.equipment_requested
     : [];
-  const items = (fromCandidate.length ? fromCandidate : fromReservation)
+  const fromReservation = reservationSource
     .map((item) => ({
-      item: text(item.item).trim(),
-      quantity: item.quantity === null || item.quantity === undefined || item.quantity === '' ? 1 : item.quantity
-    }))
+      item: text(item.exact_name_from_set_master || item.normalized_guess || item.raw_text),
+      rawItem: text(item.raw_text),
+      quantity: item.quantity ?? item.qty ?? item.수량 ?? ''
+    }));
+  const items = (fromCandidate.length ? fromCandidate : fromReservation)
+    .map((item, index) => {
+      const proposed = text(item.item).trim();
+      const rawItem = text(reservationSource[index]?.raw_text || item.rawItem).trim();
+      return {
+        item: rawItem && proposed && !isGroundedEquipmentRewrite(rawItem, proposed) ? rawItem : proposed,
+        quantity: item.quantity === null || item.quantity === undefined || item.quantity === '' ? 1 : item.quantity
+      };
+    })
     .filter((item) => item.item);
   if (items.length) return items;
   const fallbackItem = text(row.item || row.장비명 || row.equipment_name).trim();
@@ -856,6 +919,26 @@ function hasUsableConfirmRequestPhone(value = '') {
   return raw.replace(/[^0-9]/g, '').length >= 7;
 }
 
+function formatConfirmRequestPhone(value = '') {
+  const digits = text(value).replace(/[^0-9]/g, '');
+  if (digits.length === 11) return `${digits.slice(0, 3)}-${digits.slice(3, 7)}-${digits.slice(7)}`;
+  if (digits.length === 10) return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+  return text(value).trim();
+}
+
+function extractExplicitBookingIdentity(decision = {}) {
+  const cluster = text(decision.latest_customer_message_cluster).normalize('NFKC');
+  if (!cluster) return { name: '', phone: '' };
+  const phoneMatch = cluster.match(/(?:^|[^0-9])(01[016789])[-.\s]?(\d{3,4})[-.\s]?(\d{4})(?!\d)/);
+  const phone = phoneMatch ? formatConfirmRequestPhone(`${phoneMatch[1]}${phoneMatch[2]}${phoneMatch[3]}`) : '';
+  let name = '';
+  const labeled = cluster.match(/(?:예약자(?:명)?|성함|이름)\s*[:：-]?\s*([가-힣A-Za-z][가-힣A-Za-z0-9 .]{1,19}?)(?=\s*[\/|,]\s*01|\s+01)/);
+  const paired = cluster.match(/(?:^|\s)([가-힣]{2,8})\s*[\/|,]\s*01[016789]/);
+  if (labeled) name = labeled[1].trim();
+  else if (paired) name = paired[1].trim();
+  return { name, phone };
+}
+
 const CONFIRM_REQUEST_INTERNAL_NOTE_PATTERN = /(?:카카오|원문|고객\s*메시지|메시지에서|예약형식|가용\s*확인|가용확인|확인요청|계약마스터|스케줄상세|고객DB|중복|정규화|세트마스터|장비마스터|모델\s*선택|미등록|AI|자동화|worker|reason|evidence|follow[_\s-]*up|후속|검토\s*필요|안내\s*필요|고객에게|답변|시트|등록\s*대상|작성\s*필요)/i;
 
 function sanitizeConfirmRequestFreeText(value = '', { maxLength = 180 } = {}) {
@@ -883,7 +966,8 @@ export function buildSheetAppendPayload(decision, options = {}) {
   const row = decision.sheet_row_candidate || {};
   const equipment = normalizeSheetEquipmentItems(decision);
   if (!equipment.length) return null;
-  const phone = text(row.phone || decision.customer?.phone).trim();
+  const explicitIdentity = extractExplicitBookingIdentity(decision);
+  const phone = explicitIdentity.phone || text(row.phone || decision.customer?.phone).trim();
   if (!hasUsableConfirmRequestPhone(phone)) return null;
   const memo = sanitizeConfirmRequestFreeText(row.memo || '', { maxLength: 180 });
   const extra = sanitizeConfirmRequestFreeText(row.extra_request || '', { maxLength: 180 });
@@ -893,7 +977,7 @@ export function buildSheetAppendPayload(decision, options = {}) {
     반출시간: dateTime.pickupTime,
     반납일: dateTime.endDate,
     반납시간: dateTime.returnTime,
-    예약자명: text(row.customer_name || decision.customer?.name),
+    예약자명: explicitIdentity.name || text(row.customer_name || decision.customer?.name),
     연락처: phone,
     할인유형: text(row.discount_type || decision.reservation_inquiry?.discount_type || '일반') || '일반',
     비고: memo,
