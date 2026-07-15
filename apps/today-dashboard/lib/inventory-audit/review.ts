@@ -6,6 +6,7 @@ export type InventoryAuditReviewDecision =
   | "recount";
 
 export type InventoryAuditReviewClassification =
+  | "approved"
   | "match"
   | "quantity_difference"
   | "condition_or_component_issue"
@@ -45,6 +46,8 @@ export type InventoryAuditReviewItem = {
   defaultDecision: InventoryAuditReviewDecision;
   savedDecision: InventoryAuditReviewDecision | null;
   reviewNote: string;
+  checkpointApprovedAt: string | null;
+  checkpointApprovedByEmail: string | null;
 };
 
 export type InventoryAuditReview = {
@@ -63,6 +66,9 @@ export type InventoryAuditReview = {
     unresolvedRentalGroups: number;
     temporaryObservationCount: number;
     savedDecisionCount: number;
+    checkpointApproved: number;
+    checkpointReady: number;
+    canCheckpoint: boolean;
     canApprove: boolean;
   };
   items: InventoryAuditReviewItem[];
@@ -187,6 +193,7 @@ export function buildInventoryAuditReview(input: {
   observationRows: DbRow[];
   rentalExceptionRows: DbRow[];
   decisionRows: DbRow[];
+  approvalRows?: DbRow[];
   ledgerRows: DbRow[];
 }): InventoryAuditReview {
   const rentalGroups = groupRentalExceptions(input.rentalExceptionRows);
@@ -217,6 +224,11 @@ export function buildInventoryAuditReview(input: {
   );
   const ledgers = new Map(
     input.ledgerRows
+      .map((row) => [nullableText(row.equipment_id), row] as const)
+      .filter((entry): entry is [string, DbRow] => entry[0] !== null),
+  );
+  const approvals = new Map(
+    (input.approvalRows ?? [])
       .map((row) => [nullableText(row.equipment_id), row] as const)
       .filter((entry): entry is [string, DbRow] => entry[0] !== null),
   );
@@ -261,6 +273,8 @@ export function buildInventoryAuditReview(input: {
       ledgers.get(equipmentId)?.updated_at,
       text(row.ledger_updated_at),
     );
+    const approval = approvals.get(equipmentId);
+    const checkpointApprovedAt = nullableText(approval?.approved_at);
 
     return {
       equipmentId,
@@ -273,7 +287,7 @@ export function buildInventoryAuditReview(input: {
       ledgerOpenIssues: list(row.ledger_open_issues),
       ledgerUpdatedAt: text(row.ledger_updated_at),
       currentLedgerUpdatedAt,
-      classification,
+      classification: checkpointApprovedAt ? "approved" : classification,
       physicalTotal,
       matchedActiveRentalQty,
       resolvedOffsiteQty,
@@ -283,9 +297,13 @@ export function buildInventoryAuditReview(input: {
       finalOpenIssues,
       locations: [...new Set(observations.map((observation) => text(observation.location)).filter(Boolean))],
       defaultDecision:
-        savedDecision ?? (classification === "uncounted" ? "keep_ledger" : "apply_audit"),
+        checkpointApprovedAt
+          ? "keep_ledger"
+          : savedDecision ?? (classification === "uncounted" ? "keep_ledger" : "apply_audit"),
       savedDecision,
       reviewNote: text(saved?.review_note),
+      checkpointApprovedAt,
+      checkpointApprovedByEmail: nullableText(approval?.approved_by_email),
     };
   });
 
@@ -294,6 +312,12 @@ export function buildInventoryAuditReview(input: {
   ).length;
   const unresolvedRentalGroups = rentalGroups.filter(
     (group) => group.resolution === null,
+  ).length;
+  const checkpointApproved = items.filter(
+    (item) => item.checkpointApprovedAt !== null,
+  ).length;
+  const checkpointReady = items.filter(
+    (item) => item.physicalTotal !== null && item.checkpointApprovedAt === null,
   ).length;
 
   return {
@@ -314,6 +338,13 @@ export function buildInventoryAuditReview(input: {
       unresolvedRentalGroups,
       temporaryObservationCount,
       savedDecisionCount: items.filter((item) => item.savedDecision !== null).length,
+      checkpointApproved,
+      checkpointReady,
+      canCheckpoint:
+        unresolvedRentalGroups === 0 &&
+        temporaryObservationCount === 0 &&
+        checkpointReady > 0 &&
+        text(input.session.status) === "draft",
       canApprove:
         unresolvedRentalGroups === 0 &&
         temporaryObservationCount === 0 &&

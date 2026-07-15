@@ -143,3 +143,75 @@ test("uncounted stock is explicit and unresolved rental names block approval", a
   assert.equal(review.summary.unresolvedRentalGroups, 1);
   assert.equal(review.summary.canApprove, false);
 });
+
+test("draft review exposes counted items for checkpoint and keeps approved items locked", async () => {
+  const { buildInventoryAuditReview } = await import("../lib/inventory-audit/review.ts");
+  const common = {
+    major: "촬영",
+    category: "카메라",
+    ledger_stock_total: 1,
+    ledger_stock_maint: 0,
+    ledger_state: "정상",
+    ledger_open_issues: [],
+    ledger_updated_at: "2026-07-15T00:00:00.000Z",
+    active_rental_qty: 0,
+    rental_match_status: "none",
+  };
+  const review = buildInventoryAuditReview({
+    session: { id: "session-1", status: "draft", started_by_email: "staff@example.com" },
+    snapshotRows: [
+      { ...common, equipment_id: "CAM-001", name: "확정 카메라" },
+      { ...common, equipment_id: "CAM-002", name: "오늘 센 카메라" },
+      { ...common, equipment_id: "CAM-003", name: "아직 안 센 카메라" },
+    ],
+    observationRows: [
+      {
+        id: "obs-1",
+        equipment_id: "CAM-001",
+        location: "A 선반",
+        count_normal: 1,
+        count_maintenance: 0,
+        count_damaged: 0,
+        count_condition_unknown: 0,
+        missing_components: [],
+        note: "",
+        identification_status: "confirmed",
+      },
+      {
+        id: "obs-2",
+        equipment_id: "CAM-002",
+        location: "B 선반",
+        count_normal: 1,
+        count_maintenance: 0,
+        count_damaged: 0,
+        count_condition_unknown: 0,
+        missing_components: [],
+        note: "",
+        identification_status: "confirmed",
+      },
+    ],
+    rentalExceptionRows: [],
+    decisionRows: [],
+    approvalRows: [
+      {
+        equipment_id: "CAM-001",
+        decision: "apply_audit",
+        approved_at: "2026-07-15T01:00:00.000Z",
+        approved_by_email: "owner@example.com",
+      },
+    ],
+    ledgerRows: [
+      { equipment_id: "CAM-001", updated_at: "2026-07-15T00:00:00.000Z" },
+      { equipment_id: "CAM-002", updated_at: "2026-07-15T00:00:00.000Z" },
+      { equipment_id: "CAM-003", updated_at: "2026-07-15T00:00:00.000Z" },
+    ],
+  });
+
+  assert.equal(review.items[0].classification, "approved");
+  assert.equal(review.items[0].checkpointApprovedAt, "2026-07-15T01:00:00.000Z");
+  assert.equal(review.items[0].defaultDecision, "keep_ledger");
+  assert.equal(review.summary.checkpointApproved, 1);
+  assert.equal(review.summary.checkpointReady, 1);
+  assert.equal(review.summary.canCheckpoint, true);
+  assert.equal(review.summary.canApprove, false);
+});

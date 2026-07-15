@@ -25,6 +25,7 @@ async function readJson(response: Response) {
 }
 
 const CLASS_LABEL: Record<InventoryAuditReviewItem["classification"], string> = {
+  approved: "사장님 확정",
   match: "원장 일치",
   quantity_difference: "수량 차이",
   condition_or_component_issue: "상태·구성품 문제",
@@ -66,12 +67,17 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
     () => review?.rentalGroups.filter((group) => group.resolution === null) ?? [],
     [review?.rentalGroups],
   );
+  const isDraft = review?.session.status === "draft";
   const visibleItems = useMemo(
     () =>
       (review?.items ?? []).filter(
-        (item) => showAll || item.classification !== "match",
+        (item) =>
+          showAll ||
+          (isDraft
+            ? item.physicalTotal !== null && !item.checkpointApprovedAt
+            : item.classification !== "match"),
       ),
-    [review?.items, showAll],
+    [isDraft, review?.items, showAll],
   );
   const hasRecount = Object.values(actions).includes("recount");
 
@@ -138,6 +144,47 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
     }
   };
 
+  const checkpoint = async () => {
+    if (!review || !confirmed) return;
+    const decisions = review.items
+      .filter((item) => item.physicalTotal !== null && !item.checkpointApprovedAt)
+      .map((item) => ({
+        equipmentId: item.equipmentId,
+        decision: actions[item.equipmentId] ?? item.defaultDecision,
+        reviewNote: "",
+      }));
+    const approvingCount = decisions.filter((item) => item.decision !== "recount").length;
+    if (
+      approvingCount === 0 ||
+      !window.confirm(
+        `현재 완료된 장비 ${approvingCount}개를 확정할까요? 확정된 장비는 원장에 반영되고 다음 직원이 다시 수정할 수 없습니다.`,
+      )
+    ) return;
+
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await readJson(
+        await authFetch(`/api/inventory-audits/${sessionId}/checkpoint`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decisions }),
+        }),
+      );
+      setConfirmed(false);
+      setNotice(
+        `현재 완료분 ${Number(result.approved_equipment_count) || approvingCount}개를 확정했습니다. 나머지는 다음 직원이 이어서 셉니다.`,
+      );
+      await onChanged();
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "현재 완료분을 확정하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const requestRecount = async () => {
     if (!confirmed || !window.confirm("재실사로 표시한 장비만 새 실사 작업으로 넘길까요?")) return;
     setSaving(true);
@@ -191,8 +238,8 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
     <div className="fixed inset-0 z-[110] flex flex-col bg-paper">
       <header className="safe-top flex items-center justify-between border-b border-line bg-white px-3 py-3">
         <div>
-          <div className="text-[15px] font-bold text-ink">전체 실사 사장님 검토</div>
-          <div className="text-[11.5px] text-ink-mute">직원 입력은 승인 전까지 원장을 바꾸지 않습니다.</div>
+          <div className="text-[15px] font-bold text-ink">{isDraft ? "현재 저장분 사장님 검토" : "전체 실사 사장님 검토"}</div>
+          <div className="text-[11.5px] text-ink-mute">{isDraft ? "확정한 장비만 원장에 반영되고, 나머지는 다음 직원이 이어서 셉니다." : "직원 입력은 승인 전까지 원장을 바꾸지 않습니다."}</div>
         </div>
         <button disabled={saving} onClick={onClose} className="tap rounded-lg px-3 py-2 text-[12px] font-bold ring-1 ring-line disabled:opacity-50">닫기</button>
       </header>
@@ -210,7 +257,7 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
               <Summary label="수량 차이" value={review.summary.differences} warn={review.summary.differences > 0} />
               <Summary label="상태 문제" value={review.summary.issues} warn={review.summary.issues > 0} />
               <Summary label="원장 일치" value={review.summary.matching} />
-              <Summary label="판정 저장" value={review.summary.savedDecisionCount} />
+              <Summary label={isDraft ? "사장님 확정" : "판정 저장"} value={isDraft ? review.summary.checkpointApproved : review.summary.savedDecisionCount} />
             </section>
 
             {unresolvedGroups.length > 0 && (
@@ -248,7 +295,7 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-[14px] font-bold text-ink">2. 장비별 판정</div>
-                  <div className="text-[11.5px] text-ink-mute">차이·문제·미계수 항목을 먼저 표시합니다.</div>
+                  <div className="text-[11.5px] text-ink-mute">{isDraft ? "현재 계수가 끝난 장비만 표시합니다. 재실사는 다음 직원에게 남습니다." : "차이·문제·미계수 항목을 먼저 표시합니다."}</div>
                 </div>
                 <button onClick={() => setShowAll((value) => !value)} className="tap rounded-lg bg-white px-3 py-2 text-[11.5px] font-bold ring-1 ring-line">{showAll ? "문제만 보기" : "전체 보기"}</button>
               </div>
@@ -257,17 +304,18 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
                   <ReviewItemCard
                     key={item.equipmentId}
                     item={item}
+                    isDraft={isDraft}
                     decision={actions[item.equipmentId] ?? item.defaultDecision}
                     onDecision={(decision) => setActions((current) => ({ ...current, [item.equipmentId]: decision }))}
                   />
                 ))}
-                {visibleItems.length === 0 && <div className="rounded-lg bg-checkin-bg p-3 text-[12px] font-semibold text-checkin-fg">수량 차이·문제·미계수 항목이 없습니다.</div>}
+                {visibleItems.length === 0 && <div className="rounded-lg bg-checkin-bg p-3 text-[12px] font-semibold text-checkin-fg">{isDraft ? "새로 확정할 완료 장비가 없습니다." : "수량 차이·문제·미계수 항목이 없습니다."}</div>}
               </div>
             </section>
 
             <label className="mt-4 flex gap-2 rounded-lg bg-white p-3 text-[12px] font-semibold text-ink-soft ring-1 ring-line">
               <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
-              수량 차이·상태 문제·미계수 항목과 선택한 판정을 확인했습니다.
+              {isDraft ? "현재 완료된 장비와 선택한 판정을 확인했습니다." : "수량 차이·상태 문제·미계수 항목과 선택한 판정을 확인했습니다."}
             </label>
           </>
         )}
@@ -275,11 +323,17 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
 
       {review && (
         <div className="safe-bottom fixed inset-x-0 bottom-0 border-t border-line bg-white p-3 shadow-card">
-          <button disabled={saving || !review.summary.canApprove} onClick={() => void saveDecisions()} className="tap w-full rounded-lg bg-white px-4 py-2.5 text-[12px] font-bold text-brand-700 ring-1 ring-brand-200 disabled:opacity-40">검토안 저장 · 원장 변경 없음</button>
-          {hasRecount ? (
-            <button disabled={saving || !review.summary.canApprove || !confirmed} onClick={() => void requestRecount()} className="tap mt-2 w-full rounded-lg bg-warn-fg px-4 py-3 text-[14px] font-bold text-white disabled:opacity-40">선택 장비 재실사 요청</button>
+          {isDraft ? (
+            <button disabled={saving || !review.summary.canCheckpoint || !confirmed} onClick={() => void checkpoint()} className="tap w-full rounded-lg bg-brand-600 px-4 py-3 text-[14px] font-bold text-white disabled:opacity-40">{saving ? "처리 중…" : `현재 완료분 ${review.summary.checkpointReady}개 확정`}</button>
           ) : (
-            <button disabled={saving || !review.summary.canApprove || !confirmed} onClick={() => void approve()} className="tap mt-2 w-full rounded-lg bg-brand-600 px-4 py-3 text-[14px] font-bold text-white disabled:opacity-40">{saving ? "처리 중…" : "기준 재고 확정"}</button>
+            <>
+              <button disabled={saving || !review.summary.canApprove} onClick={() => void saveDecisions()} className="tap w-full rounded-lg bg-white px-4 py-2.5 text-[12px] font-bold text-brand-700 ring-1 ring-brand-200 disabled:opacity-40">검토안 저장 · 원장 변경 없음</button>
+              {hasRecount ? (
+                <button disabled={saving || !review.summary.canApprove || !confirmed} onClick={() => void requestRecount()} className="tap mt-2 w-full rounded-lg bg-warn-fg px-4 py-3 text-[14px] font-bold text-white disabled:opacity-40">선택 장비 재실사 요청</button>
+              ) : (
+                <button disabled={saving || !review.summary.canApprove || !confirmed} onClick={() => void approve()} className="tap mt-2 w-full rounded-lg bg-brand-600 px-4 py-3 text-[14px] font-bold text-white disabled:opacity-40">{saving ? "처리 중…" : "기준 재고 확정"}</button>
+              )}
+            </>
           )}
         </div>
       )}
@@ -291,12 +345,14 @@ function Summary({ label, value, warn = false }: { label: string; value: number;
   return <div className={`rounded-lg p-2.5 text-center ring-1 ${warn ? "bg-warn-bg text-warn-fg ring-warn-fg/20" : "bg-white text-ink ring-line"}`}><div className="text-[10.5px] font-semibold opacity-75">{label}</div><div className="mt-0.5 text-[17px] font-bold tabular-nums">{value}</div></div>;
 }
 
-function ReviewItemCard({ item, decision, onDecision }: { item: InventoryAuditReviewItem; decision: InventoryAuditReviewDecision; onDecision(value: InventoryAuditReviewDecision): void }) {
+function ReviewItemCard({ item, isDraft, decision, onDecision }: { item: InventoryAuditReviewItem; isDraft: boolean; decision: InventoryAuditReviewDecision; onDecision(value: InventoryAuditReviewDecision): void }) {
+  const locked = item.checkpointApprovedAt !== null;
+  const unavailable = locked || (isDraft && item.physicalTotal === null);
   return (
     <div className="rounded-xl bg-white p-3 ring-1 ring-line">
       <div className="flex items-start justify-between gap-2">
         <div><div className="text-[13.5px] font-bold text-ink">{item.name}</div><div className="text-[10.5px] text-ink-mute">{item.equipmentId} · {item.locations.join(", ") || "위치 기록 없음"}</div></div>
-        <span className={`shrink-0 rounded-full px-2 py-1 text-[10.5px] font-bold ${item.classification === "match" ? "bg-checkin-bg text-checkin-fg" : "bg-attention-bg text-attention-fg"}`}>{CLASS_LABEL[item.classification]}</span>
+        <span className={`shrink-0 rounded-full px-2 py-1 text-[10.5px] font-bold ${["match", "approved"].includes(item.classification) ? "bg-checkin-bg text-checkin-fg" : "bg-attention-bg text-attention-fg"}`}>{CLASS_LABEL[item.classification]}</span>
       </div>
       <div className="mt-2 grid grid-cols-4 gap-1 text-center text-[10.5px]">
         <Metric label="원장" value={item.ledgerStockTotal} />
@@ -307,7 +363,7 @@ function ReviewItemCard({ item, decision, onDecision }: { item: InventoryAuditRe
       {item.finalOpenIssues.length > 0 && <div className="mt-2 rounded-lg bg-attention-bg px-2.5 py-2 text-[11px] font-semibold text-attention-fg">{item.finalOpenIssues.map((issue) => issue.label).join(" · ")}</div>}
       <div className="mt-2 grid grid-cols-3 gap-1.5">
         {(["apply_audit", "keep_ledger", "recount"] as const).map((value) => (
-          <button key={value} onClick={() => onDecision(value)} className={`tap rounded-lg px-2 py-2 text-[11px] font-bold ring-1 ${decision === value ? "bg-brand-50 text-brand-700 ring-brand-200" : "bg-white text-ink-mute ring-line"}`}>{{ apply_audit: "실사 적용", keep_ledger: "기존 원장 유지", recount: "재실사" }[value]}</button>
+          <button disabled={unavailable} key={value} onClick={() => onDecision(value)} className={`tap rounded-lg px-2 py-2 text-[11px] font-bold ring-1 disabled:opacity-40 ${decision === value ? "bg-brand-50 text-brand-700 ring-brand-200" : "bg-white text-ink-mute ring-line"}`}>{{ apply_audit: "실사 적용", keep_ledger: "기존 원장 유지", recount: isDraft ? "다음 근무자 재확인" : "재실사" }[value]}</button>
         ))}
       </div>
     </div>

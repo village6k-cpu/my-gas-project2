@@ -9,6 +9,7 @@ const ROUTES = [
   "app/api/inventory-audits/[sessionId]/decisions/route.ts",
   "app/api/inventory-audits/[sessionId]/rental-exceptions/route.ts",
   "app/api/inventory-audits/[sessionId]/approve/route.ts",
+  "app/api/inventory-audits/[sessionId]/checkpoint/route.ts",
   "app/api/inventory-audits/[sessionId]/recount/route.ts",
 ];
 
@@ -33,11 +34,12 @@ test("owner review routes exist and authorize before reads or writes", () => {
 });
 
 test("owner actions use the atomic database contracts", () => {
-  assert.match(read(ROUTES[1]), /save_inventory_audit_review/);
-  assert.match(read(ROUTES[2]), /resolve_inventory_audit_rental_group/);
-  assert.match(read(ROUTES[3]), /approve_inventory_audit/);
-  assert.match(read(ROUTES[4]), /request_inventory_audit_recount/);
-  assert.match(read(ROUTES[0]), /loadInventoryAuditReview/);
+  assert.match(read("app/api/inventory-audits/[sessionId]/decisions/route.ts"), /save_inventory_audit_review/);
+  assert.match(read("app/api/inventory-audits/[sessionId]/rental-exceptions/route.ts"), /resolve_inventory_audit_rental_group/);
+  assert.match(read("app/api/inventory-audits/[sessionId]/approve/route.ts"), /approve_inventory_audit/);
+  assert.match(read("app/api/inventory-audits/[sessionId]/checkpoint/route.ts"), /approve_inventory_audit_items/);
+  assert.match(read("app/api/inventory-audits/[sessionId]/recount/route.ts"), /request_inventory_audit_recount/);
+  assert.match(read("app/api/inventory-audits/[sessionId]/review/route.ts"), /loadInventoryAuditReview/);
 });
 
 test("inventory UI exposes owner review without adding a separate app", () => {
@@ -48,7 +50,12 @@ test("inventory UI exposes owner review without adding a separate app", () => {
   assert.match(review, /기존 원장 유지/);
   assert.match(review, /재실사/);
   assert.match(review, /기준 재고 확정/);
+  assert.match(review, /현재 완료분/);
   assert.match(mvp, /ownerQueue/);
   assert.match(mvp, /InventoryAuditReview/);
   assert.match(mvp, /사장님 검토/);
+  assert.match(mvp, /현재 저장분 검토/);
+  assert.match(mvp, /사장님 확정/);
+  assert.match(read("lib/server/inventoryAuditStaff.ts"), /inventory_audit_item_approvals/);
+  assert.match(read("lib/server/inventoryAuditReview.ts"), /inventory_audit_item_approvals/);
 });

@@ -493,6 +493,61 @@ test("workspace marks condition buckets and missing components as issues", () =>
   assert.equal(workspace.catalog[0].progress, "issue");
 });
 
+test("workspace marks owner-approved equipment as locked for the next employee", () => {
+  const workspace = buildStaffWorkspace({
+    userId: ACTOR.id,
+    isOwner: false,
+    globalDraft: { id: SESSION_ID, started_by: ACTOR.id },
+    callerSessions: [
+      {
+        id: SESSION_ID,
+        mode: "full_shop",
+        status: "draft",
+        cutoff_at: CLIENT_TIME,
+        started_at: CLIENT_TIME,
+        submitted_at: null,
+        movement_frozen: true,
+        parent_session_id: null,
+        created_at: CLIENT_TIME,
+        updated_at: CLIENT_TIME,
+        started_by: ACTOR.id,
+      },
+    ],
+    catalogRows: [
+      {
+        equipment_id: "CAM-001",
+        name: "Sony A7 IV",
+        aliases: [],
+        major: "카메라",
+        category: "미러리스",
+      },
+    ],
+    observationRows: [
+      {
+        id: OBSERVATION_ID,
+        equipment_id: "CAM-001",
+        location: "A 선반",
+        count_normal: 1,
+        count_maintenance: 0,
+        count_damaged: 0,
+        count_condition_unknown: 0,
+        missing_components: [],
+        note: "",
+        identification_status: "confirmed",
+        evidence_refs: [],
+        client_updated_at: CLIENT_TIME,
+        created_at: CLIENT_TIME,
+        updated_at: CLIENT_TIME,
+      },
+    ],
+    approvalRows: [{ equipment_id: "CAM-001" }],
+    ownerQueueRows: [],
+  });
+
+  assert.equal(workspace.catalog[0].progress, "approved");
+  assert.equal(workspace.catalog[0].lockedByOwner, true);
+});
+
 test("an active shop draft is continuable by a different authenticated employee", () => {
   const starterId = "44444444-4444-4444-8444-444444444444";
   const sharedDraft = {

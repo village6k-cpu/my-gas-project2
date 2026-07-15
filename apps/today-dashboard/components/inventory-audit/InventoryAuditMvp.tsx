@@ -14,8 +14,9 @@ type CatalogItem = {
   aliases: string[];
   major: string | null;
   category: string | null;
-  progress: "uncounted" | "counted" | "issue";
+  progress: "uncounted" | "counted" | "issue" | "approved";
   observationCount: number;
+  lockedByOwner: boolean;
 };
 type Observation = {
   id: string;
@@ -173,6 +174,7 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
   }, [workspace?.catalog]);
 
   const openNewObservation = (item: CatalogItem) => {
+    if (item.lockedByOwner) return;
     setSelected(item);
     setEditing(null);
     setTemporary(false);
@@ -181,6 +183,7 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
   };
 
   const openExistingObservation = (item: CatalogItem, observation: Observation) => {
+    if (item.lockedByOwner) return;
     setSelected(item);
     setEditing(observation);
     setTemporary(false);
@@ -327,6 +330,11 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
             사장님 검토 · {workspace.ownerQueue.length}건
           </button>
         )}
+        {workspace?.isOwner && workspace.activeDraft && (
+          <button onClick={() => setOwnerReviewSessionId(workspace.activeDraft!.id)} className="tap mt-2 w-full rounded-lg bg-warn-bg px-4 py-3 text-[13px] font-bold text-warn-fg ring-1 ring-warn-fg/20">
+            현재 저장분 검토 · {workspace.catalog.filter((item) => item.progress !== "uncounted" && item.progress !== "approved").length}개
+          </button>
+        )}
         {loading ? (
           <div className="mt-1 text-[12px] text-ink-mute">실사 상태 확인 중…</div>
         ) : error && !workspace ? (
@@ -434,24 +442,24 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
                   const rows = observationsByEquipment.get(item.equipmentId) ?? [];
                   return (
                     <div key={item.equipmentId} className="rounded-xl bg-white p-3 ring-1 ring-line">
-                      <button onClick={() => openNewObservation(item)} className="tap w-full text-left">
+                      <button disabled={item.lockedByOwner} onClick={() => openNewObservation(item)} className="tap w-full text-left disabled:cursor-default">
                         <div className="flex items-center justify-between gap-2">
                           <div className="min-w-0">
                             <div className="truncate text-[13.5px] font-bold text-ink">{item.name}</div>
                             <div className="text-[11px] text-ink-mute">{item.equipmentId} · {item.category ?? item.major ?? "미분류"}</div>
                           </div>
-                          <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-bold ${item.progress === "uncounted" ? "bg-line/40 text-ink-mute" : item.progress === "issue" ? "bg-attention-bg text-attention-fg" : "bg-checkin-bg text-checkin-fg"}`}>{item.progress === "uncounted" ? "미계수" : item.progress === "issue" ? "문제" : "완료"}</span>
+                          <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-bold ${item.progress === "uncounted" ? "bg-line/40 text-ink-mute" : item.progress === "issue" ? "bg-attention-bg text-attention-fg" : "bg-checkin-bg text-checkin-fg"}`}>{item.progress === "uncounted" ? "미계수" : item.progress === "issue" ? "문제" : item.progress === "approved" ? "사장님 확정" : "완료"}</span>
                         </div>
                       </button>
                       {rows.length > 0 && (
                         <div className="mt-2 space-y-1 border-t border-line pt-2">
                           {rows.map((row) => (
-                            <button key={row.id} onClick={() => openExistingObservation(item, row)} className="tap flex w-full justify-between rounded-lg bg-paper px-2.5 py-2 text-left text-[11.5px]">
+                            <button disabled={item.lockedByOwner} key={row.id} onClick={() => openExistingObservation(item, row)} className="tap flex w-full justify-between rounded-lg bg-paper px-2.5 py-2 text-left text-[11.5px] disabled:cursor-default">
                               <span className="font-semibold text-ink-soft">{row.location}</span>
-                              <span className="text-ink-mute">합계 {row.countNormal + row.countMaintenance + row.countDamaged + row.countConditionUnknown} · 수정</span>
+                              <span className="text-ink-mute">합계 {row.countNormal + row.countMaintenance + row.countDamaged + row.countConditionUnknown} · {item.lockedByOwner ? "확정됨" : "수정"}</span>
                             </button>
                           ))}
-                          <button onClick={() => openNewObservation(item)} className="tap w-full py-1.5 text-[11.5px] font-bold text-brand-700">＋ 다른 위치에서 추가</button>
+                          {!item.lockedByOwner && <button onClick={() => openNewObservation(item)} className="tap w-full py-1.5 text-[11.5px] font-bold text-brand-700">＋ 다른 위치에서 추가</button>}
                         </div>
                       )}
                     </div>

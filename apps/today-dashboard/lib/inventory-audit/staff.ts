@@ -493,6 +493,7 @@ export interface BuildStaffWorkspaceInput {
   callerSessions: Record<string, unknown>[];
   catalogRows: Record<string, unknown>[];
   observationRows: Record<string, unknown>[];
+  approvalRows?: Record<string, unknown>[];
   ownerQueueRows: Record<string, unknown>[];
 }
 
@@ -519,6 +520,11 @@ export function buildStaffWorkspace(input: BuildStaffWorkspaceInput) {
     ? serializedSessions.get(String(latestRow.id)) ?? null
     : null);
   const observations = input.observationRows.map(serializeStaffObservation);
+  const approvedEquipmentIds = new Set(
+    (input.approvalRows ?? [])
+      .map((row) => stringOrNull(row.equipment_id))
+      .filter((equipmentId): equipmentId is string => equipmentId !== null),
+  );
   const confirmedByEquipment = new Map<
     string,
     ReturnType<typeof serializeStaffObservation>[]
@@ -538,8 +544,11 @@ export function buildStaffWorkspace(input: BuildStaffWorkspaceInput) {
       aliases: stringArray(row.aliases),
       major: stringOrNull(row.major),
       category: stringOrNull(row.category),
-      progress: progressForObservations(itemObservations),
+      progress: approvedEquipmentIds.has(equipmentId)
+        ? ("approved" as const)
+        : progressForObservations(itemObservations),
       observationCount: itemObservations.length,
+      lockedByOwner: approvedEquipmentIds.has(equipmentId),
     };
   });
 

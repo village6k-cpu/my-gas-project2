@@ -33,7 +33,7 @@ export async function loadInventoryAuditReview(
     throw error;
   }
 
-  const [snapshotRows, observationRows, rentalExceptionRows, decisionRows, ledgerRows] =
+  const [snapshotRows, observationRows, rentalExceptionRows, decisionRows, approvalRows, ledgerRows] =
     await Promise.all([
       requireRows<Record<string, unknown>>(
         client
@@ -70,6 +70,12 @@ export async function loadInventoryAuditReview(
       ),
       requireRows<Record<string, unknown>>(
         client
+          .from("inventory_audit_item_approvals")
+          .select("equipment_id,decision,approved_by_email,approved_at")
+          .eq("session_id", sessionId),
+      ),
+      requireRows<Record<string, unknown>>(
+        client
           .from("equipment_ledger")
           .select("equipment_id,updated_at")
           .order("equipment_id", { ascending: true }),
@@ -82,6 +88,7 @@ export async function loadInventoryAuditReview(
     observationRows,
     rentalExceptionRows,
     decisionRows,
+    approvalRows,
     ledgerRows,
   });
 }

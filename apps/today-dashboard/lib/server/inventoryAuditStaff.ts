@@ -127,6 +127,20 @@ async function loadObservations(
   );
 }
 
+async function loadApprovalRows(
+  client: InventoryAuditServiceClient,
+  sessionId: string,
+): Promise<Record<string, unknown>[]> {
+  return fetchAllPages<Record<string, unknown>>((from, to) =>
+    client
+      .from("inventory_audit_item_approvals")
+      .select("equipment_id")
+      .eq("session_id", sessionId)
+      .order("equipment_id", { ascending: true })
+      .range(from, to),
+  );
+}
+
 export async function loadStaffWorkspace(
   client: InventoryAuditServiceClient,
   userId: string,
@@ -142,12 +156,13 @@ export async function loadStaffWorkspace(
     typeof globalDraft.id === "string"
       ? globalDraft.id
       : null;
-  const [catalogRows, observationRows] = activeSessionId
+  const [catalogRows, observationRows, approvalRows] = activeSessionId
     ? await Promise.all([
         loadCatalog(client, activeSessionId),
         loadObservations(client, activeSessionId),
+        loadApprovalRows(client, activeSessionId),
       ])
-    : [[], []];
+    : [[], [], []];
   const workspace = buildStaffWorkspace({
     userId,
     isOwner,
@@ -157,6 +172,7 @@ export async function loadStaffWorkspace(
       .filter((row, index, rows) => rows.findIndex((candidate) => candidate.id === row.id) === index),
     catalogRows,
     observationRows,
+    approvalRows,
     ownerQueueRows,
   });
 
