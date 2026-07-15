@@ -283,7 +283,7 @@ async function printOfficialPaymentReceipt(paymentKey) {
   return sdk.printer.printReceipt({ paymentKey: paymentKey, count: 1 });
 }
 
-// sdk.storage 래퍼 (없으면 조용히 무시)
+// sdk.storage 레거시 래퍼 (pending 등 기존 best-effort 흐름용)
 async function storageSet(key, val) {
   try { if (sdk.storage) await sdk.storage.set({ key: key, value: JSON.stringify(val) }); } catch (e) {}
 }
@@ -300,13 +300,63 @@ async function storageDel(key) {
   try { if (sdk.storage) await sdk.storage.set({ key: key, value: '' }); } catch (e) {}
 }
 
+function storageFailureMessage(error, fallback) {
+  return error && error.message ? error.message : fallback;
+}
+
+async function readReceiptRecordsStrict() {
+  if (!sdk || !sdk.storage || typeof sdk.storage.get !== 'function') {
+    throw new Error('receiptRecords 결제 기록 저장소 읽기 API를 사용할 수 없습니다.');
+  }
+
+  var result;
+  try {
+    result = await sdk.storage.get({ key: RECEIPT_RECORDS_KEY });
+  } catch (e) {
+    throw new Error('receiptRecords 결제 기록을 읽지 못했습니다: ' + storageFailureMessage(e, '저장소 오류'));
+  }
+
+  var raw = result && result.value;
+  if (raw == null || raw === '') return [];
+  if (typeof raw !== 'string') {
+    throw new Error('receiptRecords 결제 기록 형식이 올바르지 않습니다.');
+  }
+
+  var records;
+  try {
+    records = JSON.parse(raw);
+  } catch (e) {
+    throw new Error('receiptRecords 결제 기록 JSON이 손상되었습니다.');
+  }
+  if (!Array.isArray(records)) {
+    throw new Error('receiptRecords 결제 기록은 배열 형식이어야 합니다.');
+  }
+  return records;
+}
+
+async function writeReceiptRecordsStrict(records) {
+  if (!sdk || !sdk.storage || typeof sdk.storage.set !== 'function') {
+    throw new Error('receiptRecords 결제 기록 저장소 쓰기 API를 사용할 수 없습니다.');
+  }
+  try {
+    await sdk.storage.set({ key: RECEIPT_RECORDS_KEY, value: JSON.stringify(records) });
+  } catch (e) {
+    throw new Error('receiptRecords 결제 기록을 저장하지 못했습니다: ' + storageFailureMessage(e, '저장소 오류'));
+  }
+}
+
 async function loadReceiptRecords() {
-  var records = await storageGet(RECEIPT_RECORDS_KEY);
-  return Array.isArray(records) ? records : [];
+  return readReceiptRecordsStrict();
 }
 
 async function saveReceiptRecords(records) {
-  await storageSet(RECEIPT_RECORDS_KEY, records.slice(0, RECEIPT_RECORD_LIMIT));
+  var bounded = records.slice(0, RECEIPT_RECORD_LIMIT);
+  await writeReceiptRecordsStrict(bounded);
+  var persisted = await readReceiptRecordsStrict();
+  if (JSON.stringify(persisted) !== JSON.stringify(bounded)) {
+    throw new Error('receiptRecords 결제 기록 저장 결과가 읽기 확인 값과 일치하지 않습니다.');
+  }
+  return persisted;
 }
 
 async function setCancelSyncPending(record, pending) {
@@ -661,6 +711,20 @@ function showPendingCancelSyncWarning(summary) {
   });
 }
 
+function showStaffStorageWarning(error) {
+  console.error('[village] 결제 기록 저장소 확인 실패:', error);
+  sdk.template.renderResultPage({
+    type: 'image',
+    status: 'error',
+    title: '결제 기록 저장소를 확인할 수 없어요',
+    description: '취소 기록과 예약 장부 환불 대기 상태를 확인하지 못해 직원 취소 메뉴를 잠갔습니다. 저장소 연결을 확인한 뒤 다시 시도해주세요.',
+    timerMs: 0,
+    buttons: [
+      { label: '다시 시도', onClick: function () { return initializeStaffSettings(); } }
+    ]
+  });
+}
+
 async function initializeStaffSettings() {
   showStaffSyncLoading();
   var summary;
@@ -668,12 +732,7 @@ async function initializeStaffSettings() {
     summary = await retryPendingCancelSyncs();
   } catch (e) {
     console.error('[village] 예약 환불 장부 재시도 초기화 실패:', e);
-    summary = {
-      attempted: 0,
-      synced: 0,
-      failed: 1,
-      failedRecords: [{ tradeId: null, error: e && e.message ? e.message : String(e) }]
-    };
+    return showStaffStorageWarning(e);
   }
   if (summary.failed > 0) return showPendingCancelSyncWarning(summary);
   return showStaffSettings();
@@ -698,7 +757,7 @@ async function showCancelablePayments() {
   try {
     records = await loadReceiptRecords();
   } catch (e) {
-    return showStaffMessage('error', '결제 기록을 불러오지 못했어요', e.message || '잠시 후 다시 시도해주세요.', false);
+    return showStaffStorageWarning(e);
   }
 
   var items = records.filter(function (record) {
@@ -1129,6 +1188,8 @@ var showManualOrder = safe(function (amount) {
 async function doCharge(m) {
   var trade = m;
   var payment;
+  var historyWarning = false;
+  var syncWarning = false;
   try {
     trade = await ensureStillPayable(m);
   } catch (e) {
@@ -1141,38 +1202,60 @@ async function doCharge(m) {
     return showError('결제 실패', e.message || '결제가 취소되었습니다.', { retry: false });
   }
 
-  await rememberReceiptRecord(trade, payment);
+  try {
+    await rememberReceiptRecord(trade, payment);
+  } catch (e) {
+    historyWarning = true;
+    console.error('[village] 결제 기록 저장 실패(카드는 승인됨):', e);
+  }
 
   // 카드 승인 성공 → 시트 '입금완료' 반영
   try {
     await confirmPaid(trade, payment);
   } catch (e) {
     // 카드는 승인됐는데 시트 반영만 실패 → 손님에겐 완료로 안내, pending 유지(다음 부팅 때 복구)
+    syncWarning = true;
     console.error('[village] confirmPaid 실패(카드는 승인됨):', e);
-    return showSuccess(payment, { syncWarning: true });
   }
 
-  await storageDel('pending');
-  return showSuccess(payment, { trade: trade });
+  if (!historyWarning && !syncWarning) await storageDel('pending');
+  return showSuccess(payment, {
+    trade: trade,
+    historyWarning: historyWarning,
+    syncWarning: syncWarning
+  });
 }
 
 // 5-b) 현장 금액 결제 실행 — 예약/시트 반영 없이 카드 승인만 수행
 async function doManualCharge(amount) {
   var payment;
+  var historyWarning = false;
   try {
     payment = await chargeManualAmount(amount);
   } catch (e) {
     return showError('결제 실패', e.message || '결제가 취소되었습니다.', { retryManual: true });
   }
 
-  await rememberReceiptRecord(buildManualReceiptRecord(amount, payment), payment);
-  return showSuccess(payment, {});
+  try {
+    await rememberReceiptRecord(buildManualReceiptRecord(amount, payment), payment);
+  } catch (e) {
+    historyWarning = true;
+    console.error('[village] 직접 결제 기록 저장 실패(카드는 승인됨):', e);
+  }
+  return showSuccess(payment, { historyWarning: historyWarning });
 }
 
 // 6) 결과 화면
 var showSuccess = safe(function (payment, opts) {
   opts = opts || {};
   var buttons = [];
+  var descriptions = [won(payment.amount)];
+  if (opts.historyWarning) {
+    descriptions.push('로컬 결제기록을 저장하지 못했어요. 영수증 재출력·취소 처리를 위해 직원을 불러주세요.');
+  }
+  if (opts.syncWarning) {
+    descriptions.push('예약 장부 반영은 잠시 후 재시도합니다.');
+  }
   if (payment && payment.paymentKey) {
     buttons.push({
       label: '영수증 출력',
@@ -1190,9 +1273,9 @@ var showSuccess = safe(function (payment, opts) {
   sdk.template.renderResultPage({
     type: 'image',
     status: 'success',
-    title: '결제가 완료되었어요',
-    description: won(payment.amount) + (opts.syncWarning ? ' · 결제 반영은 잠시 후 처리돼요' : ''),
-    timerMs: 5000,
+    title: opts.historyWarning ? '결제 승인은 완료됐어요' : '결제가 완료되었어요',
+    description: descriptions.join(' · '),
+    timerMs: opts.historyWarning ? 0 : 5000,
     onTimeout: function () { returnToIdle(); },
     buttons: buttons,
   });
@@ -1249,11 +1332,13 @@ async function recoverPending() {
         { tradeId: pending.tradeId, customerName: '복구된 예약 결제', itemSummary: '예약 결제', checkoutAt: '', returnAt: '' },
         recoveredPayment
       );
+      await storageDel('pending');
+      return;
     }
+    await storageDel('pending');
   } catch (e) {
     console.error('[village] 미완료 결제 복구 실패:', e);
   }
-  await storageDel('pending');
 }
 
 (async function init() {
