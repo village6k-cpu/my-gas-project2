@@ -5,8 +5,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { authFetch } from "@/lib/data/authFetch";
 import { compressInventoryAuditEvidence } from "@/lib/inventory-audit/compressEvidence";
 import { normalizeAuditLocation } from "@/lib/inventory-audit/mvp";
+import { InventoryAuditReview } from "@/components/inventory-audit/InventoryAuditReview";
 
-type Session = { id: string; status: string };
+type Session = { id: string; status: string; startedByEmail?: string | null };
 type CatalogItem = {
   equipmentId: string;
   name: string;
@@ -32,11 +33,13 @@ type Observation = {
   clientUpdatedAt: string;
 };
 type Workspace = {
+  isOwner: boolean;
   globalDraft: { active: boolean; ownedByCaller: boolean };
   activeDraft: Session | null;
   latestCallerSession: Session | null;
   catalog: CatalogItem[];
   observations: Observation[];
+  ownerQueue: Session[];
 };
 
 type Draft = {
@@ -100,6 +103,7 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
   const [saving, setSaving] = useState(false);
   const [routeDone, setRouteDone] = useState(false);
   const [savedNotice, setSavedNotice] = useState("");
+  const [ownerReviewSessionId, setOwnerReviewSessionId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -318,6 +322,11 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
     <>
       <section className="rounded-xl bg-white p-3.5 shadow-card ring-1 ring-brand-200">
         <div className="text-[14px] font-bold text-ink">전체 재고 실사</div>
+        {workspace?.isOwner && workspace.ownerQueue.length > 0 && (
+          <button onClick={() => setOwnerReviewSessionId(workspace.ownerQueue[0].id)} className="tap mt-2 w-full rounded-lg bg-attention-bg px-4 py-3 text-[13px] font-bold text-attention-fg ring-1 ring-attention-fg/20">
+            사장님 검토 · {workspace.ownerQueue.length}건
+          </button>
+        )}
         {loading ? (
           <div className="mt-1 text-[12px] text-ink-mute">실사 상태 확인 중…</div>
         ) : error && !workspace ? (
@@ -463,6 +472,14 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
             </div>
           )}
         </div>
+      )}
+
+      {ownerReviewSessionId && (
+        <InventoryAuditReview
+          sessionId={ownerReviewSessionId}
+          onClose={() => setOwnerReviewSessionId(null)}
+          onChanged={load}
+        />
       )}
     </>
   );
