@@ -10108,14 +10108,14 @@ function registerByReqID(sheet, triggerRow) {
       거래ID = `${prefix거래}-${String(maxNum + 1).padStart(3, "0")}`;
     }
 
-  // ── 회차 계산 (24시간=1회차, 6시간 이내 초과는 같은 회차) ──
+  // ── 회차 계산 (24시간=1회차, 3시간 이내 초과는 같은 회차) ──
   var 회차 = 1;
   try {
     var startDT = parseDT(반출일str, 반출시간str);
     var endDT = parseDT(반납일str, 반납시간str);
     if (startDT && endDT && endDT > startDT) {
       var totalHours = (endDT - startDT) / (1000 * 60 * 60);
-      회차 = Math.max(1, Math.ceil((totalHours - 6) / 24));
+      회차 = Math.max(1, Math.ceil((totalHours - 3) / 24));
     }
   } catch (e) { }
 

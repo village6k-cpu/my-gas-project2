@@ -208,7 +208,7 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   const rentalEndCol = findValueColAfterLabel_(ws, rows.rentalStart + 1, "반납일자", 3);
   ws.getRange(rows.rentalStart, rentalStartCol).setValue(반출일시);
 
-  // 대여일수 계산 (24시간=1일, 6시간 이내 초과는 같은 일수, 초과 시 +1일)
+  // 대여일수 계산 (24시간=1일, 3시간 이내 초과는 같은 일수, 초과 시 +1일)
   const 일수 = calcRentalDays(contract.반출일, contract.반출시간, contract.반납일, contract.반납시간);
 
   // 반납일자(예정) — rentalStart+1
@@ -1083,8 +1083,8 @@ function getLongTermDiscountRate(days) {
 
 /**
  * 대여일수 계산
- * 24시간 = 1일, 6시간 이내 초과 = 같은 일수, 6시간 초과 = +1일
- * 예: 30시간=1일, 31시간=2일, 54시간=2일, 55시간=3일
+ * 24시간 = 1일, 3시간 이내 초과 = 같은 일수, 3시간 초과 = +1일
+ * 예: 27시간=1일, 28시간=2일, 51시간=2일, 52시간=3일
  */
 function calcRentalDays(반출일, 반출시간, 반납일, 반납시간) {
   const startDT = combineDT_contract(반출일, 반출시간);
@@ -1092,7 +1092,7 @@ function calcRentalDays(반출일, 반출시간, 반납일, 반납시간) {
   if (!startDT || !endDT || endDT <= startDT) return 1;
 
   const totalHours = (endDT - startDT) / (1000 * 60 * 60);
-  return Math.max(1, Math.ceil((totalHours - 6) / 24));
+  return Math.max(1, Math.ceil((totalHours - 3) / 24));
 }
 
 /**
