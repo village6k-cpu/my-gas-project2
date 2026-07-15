@@ -10,6 +10,7 @@
  *   GET  {LOOKUP_BASE}/api/lookup?phone= | ?reservation=   (헤더 x-lookup-token)
  *   GET  {LOOKUP_BASE}/api/lookup/receipts?phone= | ?reservation=
  *   POST {LOOKUP_BASE}/api/lookup/confirm                  (헤더 x-lookup-token)
+ *   POST {LOOKUP_BASE}/api/lookup/cancel                   (헤더 x-lookup-token)
  *
  * 단말기 SDK : window.TossFrontSDK  (index.html에서 CDN 로드)
  * 설정       : window.CONFIG        (config.js)
@@ -306,6 +307,69 @@ async function loadReceiptRecords() {
 
 async function saveReceiptRecords(records) {
   await storageSet(RECEIPT_RECORDS_KEY, records.slice(0, RECEIPT_RECORD_LIMIT));
+}
+
+async function setCancelSyncPending(record, pending) {
+  var records = await loadReceiptRecords();
+  var updatedRecord = null;
+  var updated = records.map(function (stored) {
+    if (!stored || stored.paymentKey !== record.paymentKey) return stored;
+    updatedRecord = Object.assign({}, stored, { cancelSyncPending: Boolean(pending) });
+    return updatedRecord;
+  });
+  if (!updatedRecord) throw new Error('로컬 취소 기록을 찾지 못했습니다.');
+  await saveReceiptRecords(updated);
+
+  var persistedRecords = await loadReceiptRecords();
+  for (var i = 0; i < persistedRecords.length; i += 1) {
+    if (
+      persistedRecords[i] &&
+      persistedRecords[i].paymentKey === record.paymentKey &&
+      persistedRecords[i].cancelSyncPending === Boolean(pending)
+    ) {
+      return persistedRecords[i];
+    }
+  }
+  throw new Error('장부 동기화 상태 저장을 확인하지 못했습니다.');
+}
+
+async function syncCancelledReservation(record) {
+  if (!record || record.sourceType !== 'reservation' || !record.tradeId) return null;
+  if (!record.cancelledAt) throw new Error('로컬 취소 완료 기록이 없습니다.');
+  if (!record.paymentKey) throw new Error('취소 결제키가 없습니다.');
+
+  var res = await fetch(CFG.LOOKUP_BASE + '/api/lookup/cancel', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-lookup-token': CFG.LOOKUP_TOKEN },
+    body: JSON.stringify({
+      tradeId: record.tradeId,
+      paymentKey: record.paymentKey,
+      amount: record.amount,
+      cancelApprovalNumber: record.cancelApprovalNumber || null
+    })
+  });
+  if (!res.ok) throw new Error(await errMsg(res, '환불 장부 반영 실패'));
+  return res.json();
+}
+
+async function retryPendingCancelSyncs() {
+  var records = await loadReceiptRecords();
+  var pendingRecords = records.filter(function (record) {
+    return Boolean(
+      record && record.cancelledAt && record.cancelSyncPending &&
+      record.sourceType === 'reservation' && record.tradeId
+    );
+  });
+
+  for (var i = 0; i < pendingRecords.length; i += 1) {
+    var record = pendingRecords[i];
+    try {
+      await syncCancelledReservation(record);
+      await setCancelSyncPending(record, false);
+    } catch (e) {
+      console.error('[village] 예약 환불 장부 재시도 실패:', e);
+    }
+  }
 }
 
 async function hydrateCancelRecord(record) {
@@ -637,8 +701,9 @@ async function showCancelRecord(record) {
 
 async function recordConfirmedPaymentCancel(record, result, title, description) {
   var cancelDetail = extractPaymentCancelDetail(result, record.paymentMethod);
+  var cancelledRecord;
   try {
-    await markPaymentCancelled(record, cancelDetail);
+    cancelledRecord = await markPaymentCancelled(record, cancelDetail);
   } catch (e) {
     return showStaffMessage(
       'success',
@@ -646,6 +711,30 @@ async function recordConfirmedPaymentCancel(record, result, title, description) 
       '토스 취소는 확인됐지만 로컬 기록 저장에 실패했습니다. 취소 목록에서 다시 열어 상태를 맞춰주세요.',
       true
     );
+  }
+
+  if (cancelledRecord.sourceType === 'reservation' && cancelledRecord.tradeId) {
+    try {
+      await syncCancelledReservation(cancelledRecord);
+    } catch (e) {
+      return showStaffMessage(
+        'success',
+        '전액 취소는 완료됐어요',
+        '토스 취소는 완료됐지만 예약 장부 환불 반영은 아직 대기 중입니다. 직원 설정을 다시 열면 재시도합니다.',
+        true
+      );
+    }
+
+    try {
+      await setCancelSyncPending(cancelledRecord, false);
+    } catch (e) {
+      return showStaffMessage(
+        'success',
+        '전액 취소는 완료됐어요',
+        '예약 장부 환불 반영은 요청됐지만 완료 상태를 저장하지 못했습니다. 직원 설정을 다시 열어 확인해주세요.',
+        true
+      );
+    }
   }
   return showStaffMessage('success', title, description, false);
 }
@@ -1118,6 +1207,9 @@ async function recoverPending() {
   }
   if (window.VILLAGE_PAGE_MODE === 'settings') {
     showStaffSettings();
+    try { await retryPendingCancelSyncs(); } catch (e) {
+      console.error('[village] 예약 환불 장부 재시도 초기화 실패:', e);
+    }
     return;
   }
   try { await recoverPending(); } catch (e) {}

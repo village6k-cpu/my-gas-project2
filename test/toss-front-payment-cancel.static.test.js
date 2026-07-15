@@ -15,6 +15,8 @@ assert(/supplyValue:\s*normalized\.supplyValue/.test(app));
 assert(app.includes('async function hydrateCancelRecord(record)'));
 assert(app.includes('async function requestFullPaymentCancel(record)'));
 assert(app.includes('async function markPaymentCancelled(record, cancelDetail)'));
+assert(app.includes('async function syncCancelledReservation(record)'));
+assert(app.includes('async function retryPendingCancelSyncs()'));
 assert(app.includes('async function showCancelablePayments()'));
 assert(/sdk\.payment\.requestPaymentCancel\(\{/.test(app));
 assert(/sdk\.payment\.getPaymentCancel\(\{\s*paymentKey:/.test(app));
@@ -29,5 +31,8 @@ assert(app.includes('cancelledAt'));
 assert(app.includes('cancelApprovalNumber'));
 assert(app.includes('cancelSyncPending'));
 assert(app.includes('cancelInFlight'));
+assert(/record\.sourceType\s*===\s*['"]reservation['"]/.test(app));
+assert(app.includes('/api/lookup/cancel'));
+assert(/record\.cancelledAt\s*&&\s*record\.cancelSyncPending/.test(app));
 
 console.log('toss-front payment cancel static checks passed');

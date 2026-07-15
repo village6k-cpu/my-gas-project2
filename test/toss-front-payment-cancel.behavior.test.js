@@ -39,6 +39,9 @@ function createHarness(options = {}) {
   let failedWritesRemaining = options.failReceiptWrites || 0;
   const lookupCalls = [];
   const requestCalls = [];
+  const fetchCalls = [];
+  const events = [];
+  const logs = [];
   const pages = [];
   const toasts = [];
 
@@ -52,10 +55,12 @@ function createHarness(options = {}) {
       },
       async getPaymentCancel(payload) {
         lookupCalls.push(payload);
+        events.push({ type: 'tossLookup', payload });
         return options.getPaymentCancel(payload, lookupCalls.length);
       },
       async requestPaymentCancel(payload) {
         requestCalls.push(payload);
+        events.push({ type: 'tossCancel', payload });
         return options.requestPaymentCancel(payload, requestCalls.length);
       }
     },
@@ -71,6 +76,10 @@ function createHarness(options = {}) {
         }
         if (options.beforeReceiptWrite) await options.beforeReceiptWrite();
         records = JSON.parse(value);
+        events.push({
+          type: 'receiptWrite',
+          records: records.map((record) => Object.assign({}, record))
+        });
       }
     },
     template: {
@@ -93,28 +102,222 @@ function createHarness(options = {}) {
   };
 
   const sandbox = {
-    console,
+    console: {
+      log(...args) { logs.push({ level: 'log', args }); },
+      warn(...args) { logs.push({ level: 'warn', args }); },
+      error(...args) { logs.push({ level: 'error', args }); }
+    },
     setTimeout,
     clearTimeout,
     crypto: { randomUUID: () => 'test-payment-key' },
-    CONFIG: {},
+    CONFIG: { LOOKUP_BASE: 'https://dashboard.test', LOOKUP_TOKEN: 'lookup-token' },
     VILLAGE_PAGE_MODE: 'settings',
     TossFrontSDK: sdk,
-    document: { getElementById: () => null }
+    document: { getElementById: () => null },
+    fetch: async (url, init) => {
+      const call = { url, init };
+      fetchCalls.push(call);
+      events.push({ type: 'ledgerSync', call });
+      if (options.fetch) return options.fetch(url, init, fetchCalls.length);
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { ok: true }; }
+      };
+    }
   };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(appSource, sandbox, { filename: 'toss-front-plugin/village-front/app.js' });
+  const initPromise = vm.runInContext(appSource, sandbox, {
+    filename: 'toss-front-plugin/village-front/app.js'
+  });
 
   return {
     context: sandbox,
     lookupCalls,
     requestCalls,
+    fetchCalls,
+    events,
+    logs,
     pages,
     toasts,
+    initPromise,
     records: () => records,
     lastResult: () => pages.filter((entry) => entry.type === 'result').at(-1).page
   };
+}
+
+async function testConfirmedReservationCancelSyncsLedgerAfterLocalPersistence() {
+  const harness = createHarness({
+    getPaymentCancel: async () => { throw paymentNotFound('code'); },
+    requestPaymentCancel: async () => ({
+      type: 'SUCCESS',
+      response: {
+        paymentMethod: 'CARD',
+        card: { approvalNumber: 'CANCEL-SYNC-1', timestamp: '2026-07-15T13:00:00.000Z' }
+      }
+    })
+  });
+
+  await harness.context.executeFullPaymentCancel(paymentRecord());
+
+  assert.strictEqual(harness.fetchCalls.length, 1);
+  const call = harness.fetchCalls[0];
+  assert.strictEqual(call.url, 'https://dashboard.test/api/lookup/cancel');
+  assert.strictEqual(call.init.method, 'POST');
+  assert.strictEqual(call.init.headers['x-lookup-token'], 'lookup-token');
+  assert.deepStrictEqual(JSON.parse(call.init.body), {
+    tradeId: '260715-001',
+    paymentKey: 'payment-key-1',
+    amount: 11000,
+    cancelApprovalNumber: 'CANCEL-SYNC-1'
+  });
+  assert.ok(harness.records()[0].cancelledAt);
+  assert.strictEqual(harness.records()[0].cancelSyncPending, false);
+
+  const cancelIndex = harness.events.findIndex((event) => event.type === 'tossCancel');
+  const persistedIndex = harness.events.findIndex((event) => (
+    event.type === 'receiptWrite' &&
+    event.records[0].cancelledAt &&
+    event.records[0].cancelSyncPending === true
+  ));
+  const ledgerIndex = harness.events.findIndex((event) => event.type === 'ledgerSync');
+  assert.ok(cancelIndex !== -1 && cancelIndex < persistedIndex);
+  assert.ok(persistedIndex < ledgerIndex, 'ledger sync must start only after local cancellation persistence');
+}
+
+async function testManualCancelNeverSyncsLedger() {
+  const manual = paymentRecord({
+    tradeId: 'manual-payment-key-1',
+    sourceType: 'manual'
+  });
+  const harness = createHarness({
+    records: [manual],
+    getPaymentCancel: async () => ({
+      type: 'SUCCESS',
+      response: {
+        paymentMethod: 'CARD',
+        card: { approvalNumber: 'MANUAL-CANCEL-1', timestamp: '2026-07-15T13:00:00.000Z' }
+      }
+    }),
+    requestPaymentCancel: async () => {
+      throw new Error('cached SUCCESS must not request another cancel');
+    }
+  });
+
+  await harness.context.executeFullPaymentCancel(manual);
+
+  assert.strictEqual(harness.fetchCalls.length, 0);
+  assert.ok(harness.records()[0].cancelledAt);
+  assert.strictEqual(harness.records()[0].cancelSyncPending, false);
+}
+
+async function testLedgerFailureLeavesPendingAndShowsAccurateWarning() {
+  const harness = createHarness({
+    getPaymentCancel: async () => { throw paymentNotFound('code'); },
+    requestPaymentCancel: async () => ({
+      type: 'SUCCESS',
+      response: {
+        paymentMethod: 'CARD',
+        card: { approvalNumber: 'PENDING-CANCEL-1', timestamp: '2026-07-15T13:00:00.000Z' }
+      }
+    }),
+    fetch: async () => ({
+      ok: false,
+      status: 502,
+      async json() { return { error: '예약 장부 쓰기 실패' }; }
+    })
+  });
+
+  await harness.context.executeFullPaymentCancel(paymentRecord());
+
+  assert.strictEqual(harness.fetchCalls.length, 1);
+  assert.ok(harness.records()[0].cancelledAt);
+  assert.strictEqual(harness.records()[0].cancelSyncPending, true);
+  assert.strictEqual(harness.lastResult().title, '전액 취소는 완료됐어요');
+  assert.match(harness.lastResult().description, /장부.*아직|장부.*대기/);
+}
+
+async function testSettingsInitRetriesOnlyPendingCancelledReservationsWithoutTossCalls() {
+  const records = [
+    paymentRecord({
+      tradeId: 'retry-me',
+      paymentKey: 'retry-payment',
+      cancelledAt: '2026-07-15T13:00:00.000Z',
+      cancelSyncPending: true
+    }),
+    paymentRecord({
+      tradeId: 'already-synced',
+      paymentKey: 'synced-payment',
+      cancelledAt: '2026-07-15T13:00:00.000Z',
+      cancelSyncPending: false
+    }),
+    paymentRecord({
+      tradeId: 'not-cancelled',
+      paymentKey: 'not-cancelled-payment',
+      cancelledAt: null,
+      cancelSyncPending: true
+    }),
+    paymentRecord({
+      tradeId: 'manual-payment',
+      paymentKey: 'manual-payment',
+      sourceType: 'manual',
+      cancelledAt: '2026-07-15T13:00:00.000Z',
+      cancelSyncPending: true
+    }),
+    paymentRecord({
+      tradeId: '',
+      paymentKey: 'missing-trade-payment',
+      cancelledAt: '2026-07-15T13:00:00.000Z',
+      cancelSyncPending: true
+    })
+  ];
+  const harness = createHarness({
+    records,
+    getPaymentCancel: async () => { throw new Error('retry must not query Toss cancellation'); },
+    requestPaymentCancel: async () => { throw new Error('retry must not request Toss cancellation'); }
+  });
+
+  await harness.initPromise;
+
+  assert.strictEqual(harness.fetchCalls.length, 1);
+  assert.strictEqual(JSON.parse(harness.fetchCalls[0].init.body).tradeId, 'retry-me');
+  assert.strictEqual(harness.lookupCalls.length, 0);
+  assert.strictEqual(harness.requestCalls.length, 0);
+  const byPaymentKey = Object.fromEntries(
+    harness.records().map((record) => [record.paymentKey, record])
+  );
+  assert.strictEqual(byPaymentKey['retry-payment'].cancelSyncPending, false);
+  assert.strictEqual(byPaymentKey['synced-payment'].cancelSyncPending, false);
+  assert.strictEqual(byPaymentKey['not-cancelled-payment'].cancelSyncPending, true);
+  assert.strictEqual(byPaymentKey['manual-payment'].cancelSyncPending, true);
+  assert.strictEqual(byPaymentKey['missing-trade-payment'].cancelSyncPending, true);
+}
+
+async function testSettingsRetryFailureKeepsPendingWithoutTossCalls() {
+  const pending = paymentRecord({
+    tradeId: 'retry-fails',
+    paymentKey: 'retry-fails-payment',
+    cancelledAt: '2026-07-15T13:00:00.000Z',
+    cancelSyncPending: true
+  });
+  const harness = createHarness({
+    records: [pending],
+    getPaymentCancel: async () => { throw new Error('retry must not query Toss cancellation'); },
+    requestPaymentCancel: async () => { throw new Error('retry must not request Toss cancellation'); },
+    fetch: async () => ({
+      ok: false,
+      status: 502,
+      async json() { return { error: '장부 일시 오류' }; }
+    })
+  });
+
+  await harness.initPromise;
+
+  assert.strictEqual(harness.fetchCalls.length, 1);
+  assert.strictEqual(harness.lookupCalls.length, 0);
+  assert.strictEqual(harness.requestCalls.length, 0);
+  assert.strictEqual(harness.records()[0].cancelSyncPending, true);
 }
 
 async function testPaymentNotFoundStartsOneCancellation() {
@@ -294,6 +497,11 @@ async function testInFlightStaysLockedUntilLocalPersistenceFinishes() {
 }
 
 (async function run() {
+  await testConfirmedReservationCancelSyncsLedgerAfterLocalPersistence();
+  await testManualCancelNeverSyncsLedger();
+  await testLedgerFailureLeavesPendingAndShowsAccurateWarning();
+  await testSettingsInitRetriesOnlyPendingCancelledReservationsWithoutTossCalls();
+  await testSettingsRetryFailureKeepsPendingWithoutTossCalls();
   await testPaymentNotFoundStartsOneCancellation();
   await testPaymentNotFoundErrorShapes();
   await testCachedSuccessNeverRecancels();
