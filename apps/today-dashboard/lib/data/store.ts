@@ -19,7 +19,7 @@ import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
-import { deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
+import { cancelTradeRemote, deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistTrade, subscribeChanges } from "./remote";
 import { gasMutation, gasRead, gasWrite, writeBackDisabledReason, writeBackEnabled } from "./writeback";
 import {
   configurePhotoUploadQueue,
@@ -473,6 +473,83 @@ function rejectSheetBackedRemovalWithoutWriteBack(tradeId: string, scheduleId?: 
 
 // ── 거래 단위 검수 토글 ─────────────────────────────────────────
 export type ToggleSetupResult = { ok: true } | { ok: false; error: string };
+
+export type TradeDetailsInput = {
+  customerName: string;
+  customerPhone: string;
+  company: string;
+  checkoutDate: string;
+  checkoutTime: string;
+  returnDate: string;
+  returnTime: string;
+};
+
+/** 고객정보와 예약 일시는 GAS 원장을 먼저 확정한 뒤 앱/Supabase에 반영한다. */
+export async function updateTradeDetails(tradeId: string, input: TradeDetailsInput): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (isSupabase && !writeBackEnabled) {
+    return { ok: false, error: `예약 편집 실패: ${writeBackDisabledReason}` };
+  }
+  const saveId = beginTradeSave(tradeId);
+  try {
+    const res = await gasMutation("updateTrade", { tid: tradeId, ...input });
+    if (res?.skipped) throw new Error(writeBackDisabledReason);
+    mutateTrade(tradeId, (trade) => ({
+      ...trade,
+      customerName: String(res?.customerName || input.customerName).trim(),
+      customerPhone: String(res?.customerPhone ?? input.customerPhone).trim(),
+      company: String(res?.company ?? input.company).trim(),
+      checkoutAt: String(res?.checkoutAt || `${input.checkoutDate}T${input.checkoutTime}:00+09:00`),
+      returnAt: String(res?.returnAt || `${input.returnDate}T${input.returnTime}:00+09:00`),
+      contractUrl: String(res?.contractUrl || trade.contractUrl || "") || null,
+      amount: numberFromMutation(res?.finalAmount) ?? trade.amount,
+      contractRegenPending: !!res?.contractRegenPending,
+    }));
+    if (isSupabase) await flushTradePersist(tradeId);
+    finishTradeSave(tradeId, saveId, "saved", "예약 수정 완료");
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    finishTradeSave(tradeId, saveId, "error", `⚠️ 예약 편집 실패 — ${message}`);
+    return { ok: false, error: message };
+  }
+}
+
+/** 취소는 거래 이력을 남기고 스케줄 점유만 제거한다. */
+export async function cancelTrade(tradeId: string): Promise<{ ok: true; warning?: string } | { ok: false; error: string }> {
+  if (isSupabase && !writeBackEnabled) {
+    return { ok: false, error: `예약 취소 실패: ${writeBackDisabledReason}` };
+  }
+  const saveId = beginTradeSave(tradeId);
+  try {
+    const res = await gasMutation("updateContractStatus", { tid: tradeId, status: "취소" });
+    if (res?.skipped) throw new Error(writeBackDisabledReason);
+    let warning = "";
+    if (isSupabase) {
+      try {
+        await cancelTradeRemote(tradeId);
+      } catch (remoteError) {
+        warning = "원장 취소는 완료됐지만 앱 일정 정리는 재시도 중입니다";
+        console.error("[cancel] Supabase 취소 동기화 실패:", remoteError);
+      }
+    }
+    mutateTrade(tradeId, (trade) => ({
+      ...trade,
+      contractStatus: "취소",
+      contractUrl: null,
+      contractRegenPending: false,
+      returnDone: false,
+      returnDoneAt: null,
+      equipments: [],
+    }));
+    if (isSupabase) await flushTradePersist(tradeId);
+    finishTradeSave(tradeId, saveId, warning ? "error" : "saved", warning ? `⚠️ ${warning}` : "예약 취소 완료");
+    return warning ? { ok: true, warning } : { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    finishTradeSave(tradeId, saveId, "error", `⚠️ 예약 취소 실패 — ${message}`);
+    return { ok: false, error: message };
+  }
+}
 
 export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
   const current = state.trades.find((t) => t.tradeId === tradeId);

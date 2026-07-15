@@ -85,6 +85,43 @@ function supaDeleteTrade_(tid) {
 }
 
 /**
+ * 계약 취소용 — 거래 기록은 남기고 일정 점유(schedule_items)만 제거한 뒤 상태를 취소로 남긴다.
+ * 계약마스터 취소와 같은 요청 안에서 실행해 1분 동기화 전에도 앱 재고 점유가 즉시 사라지게 한다.
+ */
+function supaCancelTrade_(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { ok: false, error: 'tid 없음' };
+  var cfg = SUPA_CFG_();
+  var token = supaToken_(cfg);
+  if (!token) return { ok: false, error: '봇 토큰 없음' };
+  var headers = {
+    apikey: cfg.apikey,
+    Authorization: 'Bearer ' + token,
+    'Content-Profile': 'village',
+    'Accept-Profile': 'village',
+    Prefer: 'return=minimal'
+  };
+  var filt = '?trade_id=eq.' + encodeURIComponent(tid);
+  var rItems = UrlFetchApp.fetch(cfg.url + '/rest/v1/schedule_items' + filt, {
+    method: 'delete',
+    headers: headers,
+    muteHttpExceptions: true
+  });
+  var rTrade = UrlFetchApp.fetch(cfg.url + '/rest/v1/trades' + filt, {
+    method: 'patch',
+    contentType: 'application/json',
+    headers: headers,
+    payload: JSON.stringify({ contract_status: '취소', contract_url: null }),
+    muteHttpExceptions: true
+  });
+  var ci = rItems.getResponseCode(), ct = rTrade.getResponseCode();
+  var ok = ci < 300 && ct < 300;
+  if (!ok) Logger.log('supaCancelTrade_ 실패 items=' + ci + ' trade=' + ct + ' : ' +
+    rItems.getContentText().slice(0, 150) + ' / ' + rTrade.getContentText().slice(0, 150));
+  return { ok: ok, items: ci, trade: ct };
+}
+
+/**
  * 반납완료 서버 검증용 상세 수량 조회.
  * 브라우저가 보낸 boolean을 신뢰하지 않고, 먼저 내구 저장된 village.trades.return_counts를
  * GAS가 봇 세션으로 직접 읽는다. 조회 실패/행 없음은 완료 허용이 아니라 명시적 실패다.

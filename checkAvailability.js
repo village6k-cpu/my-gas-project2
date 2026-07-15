@@ -3545,6 +3545,124 @@ function updateEquipmentCheck(scheduleId, tradeId, label, field, value) {
   }
 }
 
+/** 등록된 예약의 고객정보와 반출·반납 일시를 원장 기준으로 한 번에 수정한다. */
+function dashboardUpdateTradeDetails(tradeId, input) {
+  tradeId = String(tradeId || '').trim();
+  input = input || {};
+  var customerName = String(input.customerName || '').trim();
+  var customerPhone = String(input.customerPhone || '').trim();
+  var company = String(input.company || '').trim();
+  var checkoutDate = String(input.checkoutDate || '').trim();
+  var checkoutTime = String(input.checkoutTime || '').trim();
+  var returnDate = String(input.returnDate || '').trim();
+  var returnTime = String(input.returnTime || '').trim();
+
+  if (!tradeId) return { error: '거래ID 필수' };
+  if (!customerName) return { error: '예약자명 필수' };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(checkoutDate) || !/^\d{4}-\d{2}-\d{2}$/.test(returnDate)) {
+    return { error: '반출일/반납일은 yyyy-MM-dd 형식이어야 합니다' };
+  }
+  if (!/^\d{2}:\d{2}$/.test(checkoutTime) || !/^\d{2}:\d{2}$/.test(returnTime)) {
+    return { error: '반출시간/반납시간은 HH:mm 형식이어야 합니다' };
+  }
+  var checkoutAt = new Date(checkoutDate + 'T' + checkoutTime + ':00+09:00');
+  var returnAt = new Date(returnDate + 'T' + returnTime + ':00+09:00');
+  if (isNaN(checkoutAt.getTime()) || isNaN(returnAt.getTime()) || checkoutAt.getTime() >= returnAt.getTime()) {
+    return { error: '반납 일시는 반출 일시보다 뒤여야 합니다' };
+  }
+
+  var lock = LockService.getScriptLock();
+  var lockAcquired = false;
+  try {
+    lock.waitLock(10000);
+    lockAcquired = true;
+  } catch (lockErr) {
+    return { error: '다른 예약 변경 처리 중입니다. 잠시 후 다시 시도해주세요.' };
+  }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var contractSheet = ss.getSheetByName('계약마스터');
+    if (!contractSheet || contractSheet.getLastRow() < 2) return { error: '계약마스터 시트 없음' };
+    var ids = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 1).getDisplayValues();
+    var row = 0;
+    for (var i = 0; i < ids.length; i++) {
+      if (String(ids[i][0] || '').trim() === tradeId) { row = i + 2; break; }
+    }
+    if (!row) return { error: '계약마스터에서 거래ID를 찾지 못했습니다' };
+    var currentStatus = String(contractSheet.getRange(row, 10).getDisplayValue() || '').trim();
+    if (currentStatus === '취소') return { error: '취소된 예약은 편집할 수 없습니다' };
+
+    // B:H = 예약자명, 연락처, 업체명, 반출일, 반출시간, 반납일, 반납시간.
+    contractSheet.getRange(row, 2, 1, 7).setValues([[
+      customerName, customerPhone, company, checkoutDate, checkoutTime, returnDate, returnTime
+    ]]);
+    contractSheet.getRange(row, 2, 1, 7).setNumberFormats([['@', '@', '@', 'yyyy-MM-dd', '@', 'yyyy-MM-dd', '@']]);
+
+    // 스케줄상세의 일정(F:I)과 예약자명(M)을 함께 맞춘다.
+    propagateContractDates(ss, contractSheet, row, tradeId);
+    var scheduleSheet = ss.getSheetByName('스케줄상세');
+    var scheduleRows = 0;
+    if (scheduleSheet && scheduleSheet.getLastRow() >= 2) {
+      var scheduleIds = scheduleSheet.getRange(2, 2, scheduleSheet.getLastRow() - 1, 1).getDisplayValues();
+      for (var s = 0; s < scheduleIds.length; s++) {
+        if (String(scheduleIds[s][0] || '').trim() !== tradeId) continue;
+        scheduleSheet.getRange(s + 2, 13).setValue(customerName);
+        scheduleRows++;
+      }
+    }
+
+    // 개고생2.0 거래내역의 알려진 고정 열(B 예약자명, F 연락처)도 같은 거래ID(E) 기준으로 갱신.
+    try {
+      var ledgerUrl = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
+      if (ledgerUrl) {
+        var ledgerSheet = SpreadsheetApp.openByUrl(ledgerUrl).getSheetByName('거래내역');
+        if (ledgerSheet && ledgerSheet.getLastRow() >= 2) {
+          var ledgerIds = ledgerSheet.getRange(2, 5, ledgerSheet.getLastRow() - 1, 1).getDisplayValues();
+          for (var l = 0; l < ledgerIds.length; l++) {
+            if (String(ledgerIds[l][0] || '').trim() !== tradeId) continue;
+            ledgerSheet.getRange(l + 2, 2).setValue(customerName);
+            ledgerSheet.getRange(l + 2, 6).setNumberFormat('@').setValue(customerPhone);
+          }
+        }
+      }
+    } catch (ledgerErr) {
+      Logger.log('거래 편집 → 개고생2.0 고객정보 전파 실패(계속): ' + ledgerErr.message);
+    }
+
+    var contractResult = null;
+    var contractRegenPending = false;
+    try {
+      contractResult = deleteAndRegenerateContract(ss, tradeId);
+    } catch (contractErr) {
+      scheduleContractRegen(tradeId);
+      contractRegenPending = true;
+      Logger.log('거래 편집 → 계약서 즉시 재생성 실패, 예약 전환: ' + contractErr.message);
+    }
+
+    supaMarkTradeDirty_(tradeId);
+    invalidateDashboardCache();
+    invalidateTimelineCache();
+    return {
+      success: true,
+      tradeId: tradeId,
+      customerName: customerName,
+      customerPhone: customerPhone,
+      company: company,
+      checkoutAt: checkoutDate + 'T' + checkoutTime + ':00+09:00',
+      returnAt: returnDate + 'T' + returnTime + ':00+09:00',
+      scheduleRows: scheduleRows,
+      contractUrl: contractResult && (contractResult.url || contractResult.contractUrl) || '',
+      finalAmount: contractResult && contractResult.finalAmount,
+      contractRegenPending: contractRegenPending
+    };
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err) };
+  } finally {
+    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
 function updateDashboardContractStatus(tradeId, status) {
   tradeId = String(tradeId || '').trim();
   status = String(status || '').trim();

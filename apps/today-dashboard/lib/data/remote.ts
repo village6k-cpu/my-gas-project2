@@ -127,6 +127,19 @@ export async function deleteTradeRemote(tradeId: string): Promise<void> {
   if (trade.error) throw trade.error;
 }
 
+/** 취소는 거래 이력을 남기되 일정 점유 품목을 제거한다. */
+export async function cancelTradeRemote(tradeId: string): Promise<void> {
+  const sb = supabase;
+  if (!sb) return;
+  const items = await sb.from("schedule_items").delete().eq("trade_id", tradeId);
+  if (items.error) throw items.error;
+  const trade = await sb
+    .from("trades")
+    .update({ contract_status: "취소", contract_url: null })
+    .eq("trade_id", tradeId);
+  if (trade.error) throw trade.error;
+}
+
 export async function deleteScheduleItem(tradeId: string, scheduleId: string): Promise<void> {
   const sb = supabase;
   if (!sb) return;

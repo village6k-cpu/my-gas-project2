@@ -347,6 +347,20 @@ function handleRequest(e) {
           params.value !== undefined ? params.value : postBody.value
         ));
 
+      case "updateTrade":
+        return jsonResponse(dashboardUpdateTradeDetails(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          {
+            customerName: params.customerName || postBody.customerName,
+            customerPhone: params.customerPhone !== undefined ? params.customerPhone : postBody.customerPhone,
+            company: params.company !== undefined ? params.company : postBody.company,
+            checkoutDate: params.checkoutDate || postBody.checkoutDate,
+            checkoutTime: params.checkoutTime || postBody.checkoutTime,
+            returnDate: params.returnDate || postBody.returnDate,
+            returnTime: params.returnTime || postBody.returnTime
+          }
+        ));
+
       case "updateContractStatus":
         return jsonResponse(updateDashboardContractStatus(
           params.tid || postBody.tid || params.tradeId || postBody.tradeId,

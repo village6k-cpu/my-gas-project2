@@ -10,6 +10,7 @@ import { removeItem, resizeEquipment, shiftEquipmentDates } from "@/lib/data/sto
 import { ledgerStockFor, useLedgerStocks, type LedgerStock } from "@/lib/data/equipmentStock";
 import { parseYmd, timeLabel } from "@/lib/domain/status";
 import { ChevronRight, Doc, Plus } from "./icons";
+import { TradeActions } from "./TradeActions";
 
 const ROW_H = 40;
 const BAR_H = 28;
@@ -234,6 +235,7 @@ export function VillageTimeline({
   };
 
   const gridBg = `repeating-linear-gradient(to right, transparent 0 ${colW - 1}px, rgba(0,0,0,0.05) ${colW - 1}px ${colW}px), repeating-linear-gradient(to bottom, transparent 0 ${ROW_H - 1}px, rgba(0,0,0,0.04) ${ROW_H - 1}px ${ROW_H}px)`;
+  const selectedTrade = sel ? trades.find((trade) => trade.tradeId === sel.tradeId) : undefined;
 
   const rows: React.ReactNode[] = [];
   for (const g of groups) {
@@ -354,7 +356,7 @@ export function VillageTimeline({
         <button onClick={() => setColW((w) => Math.min(220, Math.round(w * 1.3)))} className="tap flex h-8 w-8 items-center justify-center rounded-lg text-[18px] font-bold text-ink-soft">＋</button>
       </div>
 
-      {sel && <BarSheet it={sel} onClose={() => setSel(null)} />}
+      {sel && <BarSheet it={sel} trade={selectedTrade} onClose={() => setSel(null)} />}
 
       {menu && (
         <>
@@ -408,7 +410,7 @@ function StockBadge({ ledger }: { ledger: LedgerStock }) {
   );
 }
 
-function BarSheet({ it, onClose }: { it: TLItem; onClose: () => void }) {
+function BarSheet({ it, trade, onClose }: { it: TLItem; trade?: Trade; onClose: () => void }) {
   const co = new Date(it.checkoutAt);
   const ro = new Date(it.returnAt);
   const fmt = (d: Date, iso: string) => `${d.getMonth() + 1}/${d.getDate()} ${timeLabel(iso)}`;
@@ -453,6 +455,11 @@ function BarSheet({ it, onClose }: { it: TLItem; onClose: () => void }) {
             이 거래 보기
           </Link>
         </div>
+        {trade && (
+          <div className="mt-3 border-t border-line pt-3">
+            <TradeActions trade={trade} onRemoved={onClose} />
+          </div>
+        )}
       </div>
     </div>
   );

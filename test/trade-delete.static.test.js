@@ -9,6 +9,7 @@ const supa = read('supabaseSync.js');
 const sheetApi = read('sheetAPI.js');
 const confirmRoute = read('apps/today-dashboard/app/api/confirm/route.ts');
 const card = read('apps/today-dashboard/components/ScheduleCard.tsx');
+const tradeActions = read('apps/today-dashboard/components/TradeActions.tsx');
 const store = read('apps/today-dashboard/lib/data/store.ts');
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -40,11 +41,12 @@ assert(/"deleteTrade"/.test(sheetApi), 'sheetAPI allowedFunctions에 deleteTrade
 assert(/FUNCS = new Set\(\[[^\]]*"deleteTrade"/.test(confirmRoute), '/api/confirm FUNCS에 deleteTrade가 있어야 한다');
 
 // 4) UI — 상세 펼친 뒤 노출 + 거래ID 입력 확인 + run 호출 + 낙관적 제거.
-assert(/이 거래 완전삭제/.test(card), 'ScheduleCard에 완전삭제 버튼이 있어야 한다');
-assert(/window\.prompt\(/.test(card), '삭제는 prompt로 거래ID 입력을 받아야 한다(오삭제 방지)');
-assert(/typed\.trim\(\) !== trade\.tradeId/.test(card), '입력한 거래ID가 일치할 때만 삭제해야 한다');
-assert(/func: "deleteTrade", args: \{ tradeId: trade\.tradeId \}/.test(card), 'deleteTrade run을 호출해야 한다');
-assert(/removeTradeLocally\(trade\.tradeId\)/.test(card), '삭제 성공 시 화면에서 즉시 제거해야 한다');
+assert(/<TradeActions trade=\{trade\}/.test(card), 'ScheduleCard에 상시 예약 관리 버튼이 있어야 한다');
+assert(/완전삭제/.test(tradeActions), 'TradeActions에 완전삭제 버튼이 있어야 한다');
+assert(/window\.prompt\(/.test(tradeActions), '삭제는 prompt로 거래ID 입력을 받아야 한다(오삭제 방지)');
+assert(/typed\.trim\(\) !== trade\.tradeId/.test(tradeActions), '입력한 거래ID가 일치할 때만 삭제해야 한다');
+assert(/func: "deleteTrade", args: \{ tradeId: trade\.tradeId \}/.test(tradeActions), 'deleteTrade run을 호출해야 한다');
+assert(/removeTradeLocally\(trade\.tradeId\)/.test(tradeActions), '삭제 성공 시 화면에서 즉시 제거해야 한다');
 
 // 5) store 헬퍼.
 assert(/export function removeTradeLocally\(tradeId: string\)/.test(store), 'store에 removeTradeLocally가 있어야 한다');
@@ -55,6 +57,6 @@ const rfn = remote.match(/export async function deleteTradeRemote\(tradeId: stri
 assert(rfn, 'deleteTradeRemote 헬퍼가 있어야 한다');
 assert(/from\("schedule_items"\)\.delete\(\)\.eq\("trade_id", tradeId\)/.test(rfn[0]), 'schedule_items를 삭제해야 한다');
 assert(/from\("trades"\)\.delete\(\)\.eq\("trade_id", tradeId\)/.test(rfn[0]), 'trades를 삭제해야 한다');
-assert(/deleteTradeRemote\(trade\.tradeId\)/.test(card), 'ScheduleCard가 GAS 삭제 후 Supabase도 클라이언트로 지워야 한다');
+assert(/deleteTradeRemote\(trade\.tradeId\)/.test(tradeActions), 'TradeActions가 GAS 삭제 후 Supabase도 클라이언트로 지워야 한다');
 
 console.log('trade delete static checks passed');

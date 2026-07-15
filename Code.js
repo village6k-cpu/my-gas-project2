@@ -1472,6 +1472,14 @@ function cancelContract(ss, 거래ID, contractRow) {
     Logger.log("스케줄상세 삭제: " + deletedSched + "행 (" + 거래ID + ")");
   }
 
+  // 앱은 Supabase를 직접 읽는다. 1분 동기화를 기다리지 않고 점유 행 제거 + 취소 상태 보존.
+  try {
+    var supaCancel = supaCancelTrade_(거래ID);
+    if (!supaCancel || !supaCancel.ok) Logger.log("Supabase 취소 동기화 실패(재시도 예정): " + 거래ID);
+  } catch (supaCancelErr) {
+    Logger.log("Supabase 취소 동기화 오류(재시도 예정): " + supaCancelErr.message);
+  }
+
   // 2. 개고생2.0 거래내역에서 해당 거래ID 행 삭제
   try {
     var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");

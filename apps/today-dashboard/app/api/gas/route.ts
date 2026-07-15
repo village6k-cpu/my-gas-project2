@@ -53,6 +53,8 @@ const WRITE_ACTIONS = new Set([
   "removeEquip",
   "onsiteAddon",
   "uploadDashboardPhoto",
+  "updateTrade",
+  "updateContractStatus",
 ]);
 
 const STAFF_RUN_FUNCTIONS = new Set(["getMyPageLink"]);
