@@ -47,6 +47,18 @@ let state = EMPTY_STATE;
 let inflight: Promise<EquipmentCatalogState> | null = null;
 const listeners = new Set<() => void>();
 
+// 최초 로드 실패(GAS 콜드스타트 타임아웃 등)가 세션 전체를 빈 카탈로그로 고착시키지 않도록
+// 다음 접근 시 지수 백오프로 자동 재시도한다(최대 5회). 성공 시에만 ready가 true가 된다.
+let failCount = 0;
+let lastFailedAt = 0;
+const RETRY_BASE_MS = 5_000;
+const RETRY_MAX_MS = 120_000;
+const MAX_AUTO_RETRIES = 5;
+
+function retryCooldownMs(): number {
+  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.max(0, failCount - 1));
+}
+
 function emit() {
   listeners.forEach((listener) => listener());
 }
@@ -175,8 +187,15 @@ function readCatalogPayload(payload: unknown): RawCatalog {
 }
 
 export async function loadEquipmentCatalog(): Promise<EquipmentCatalogState> {
+  // ready는 성공 시에만 true — 실패 상태는 여기서 단락되지 않고 아래 재시도 판정으로 간다.
   if (state.ready) return state;
   if (inflight) return inflight;
+  if (state.error) {
+    // 실패 후: 자동 재시도는 최대 5회, 각 재시도 사이엔 지수 백오프 쿨다운(5s→10s→…→2m).
+    // 마운트 폭주가 다운된 GAS를 두드리지 않게 하면서도 세션 내 복구 경로를 남긴다.
+    if (failCount > MAX_AUTO_RETRIES) return state;
+    if (Date.now() - lastFailedAt < retryCooldownMs()) return state;
+  }
 
   state = { ...state, loading: true, error: null };
   emit();
@@ -186,13 +205,18 @@ export async function loadEquipmentCatalog(): Promise<EquipmentCatalogState> {
       if (!response.ok) throw new Error(`GAS ${response.status}`);
       const json = await response.json();
       state = buildItems(readCatalogPayload(json));
+      failCount = 0;
+      lastFailedAt = 0;
       emit();
       return state;
     })
     .catch((error) => {
+      failCount += 1;
+      lastFailedAt = Date.now();
       state = {
         ...EMPTY_STATE,
-        ready: true,
+        // 실패를 ready(완료)로 고착시키지 않는다 — 다음 접근 시 쿨다운이 지나면 재로드된다.
+        ready: false,
         error: error instanceof Error ? error.message : String(error),
       };
       emit();
@@ -203,6 +227,13 @@ export async function loadEquipmentCatalog(): Promise<EquipmentCatalogState> {
     });
 
   return inflight;
+}
+
+/** 쿨다운·자동 재시도 한도를 무시하고 강제 재로드 — '장비목록 다시 불러오기' 수동 복구용 */
+export function retryEquipmentCatalog(): Promise<EquipmentCatalogState> {
+  failCount = 0;
+  lastFailedAt = 0;
+  return loadEquipmentCatalog();
 }
 
 function subscribe(listener: () => void) {

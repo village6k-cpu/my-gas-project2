@@ -12,6 +12,32 @@ const GAS_KEY = process.env.GAS_API_KEY ?? "village2026";
 // 읽기 응답 짧게 캐시(GAS 콜드스타트 완화)
 const cache = new Map<string, { at: number; body: string }>();
 const TTL = 30_000;
+// 캐시 키가 검색어·날짜별로 무한히 늘어나므로 상한 필수 (authCache의 pruneCache 패턴)
+const MAX_CACHE_SIZE = 200;
+
+function pruneCache(now: number): void {
+  // 1) 만료 엔트리 먼저 제거
+  for (const [key, entry] of cache) {
+    if (now - entry.at > TTL) cache.delete(key);
+  }
+  // 2) 여전히 상한 초과면 오래된 삽입 순서대로 제거 (Map은 삽입 순서 보존)
+  while (cache.size > MAX_CACHE_SIZE) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+// GAS는 스크립트 오류를 200 상태의 {error:...} JSON이나 HTML 페이지로 반환하기도 한다.
+// 그런 본문을 30초 캐시하면 모든 폴링에 에러가 재배포되므로 정상 JSON만 캐시한다.
+function isCacheableBody(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return !(parsed && typeof parsed === "object" && "error" in parsed);
+  } catch {
+    return false;
+  }
+}
 // 읽기 액션 화이트리스트 (GET은 캐시됨)
 const READ_ACTIONS = new Set([
   "timeline",
@@ -73,22 +99,39 @@ async function callGet(req: NextRequest) {
   if (!ok) {
     return NextResponse.json({ error: `action '${action}' 미허용` }, { status: 400 });
   }
+  // nocache=1 — 복구 경로(repairDashboardDateDetails 등)가 신선한 데이터를 요구할 때.
+  // 프록시 캐시 조회/저장은 건너뛰되, GAS 자체 CacheService 우회용이므로 파라미터는 GAS로 그대로 전달한다.
+  const noCacheParam = sp.get("nocache");
+  const noCache = noCacheParam === "1" || noCacheParam === "true";
   const qs = new URLSearchParams(sp);
   qs.set("key", GAS_KEY);
   const url = `${GAS_URL}?${qs.toString()}`;
   const ck = qs.toString();
 
-  if (!isWrite) {
+  if (!isWrite && !noCache) {
     const hit = cache.get(ck);
-    if (hit && Date.now() - hit.at < TTL) {
-      return new NextResponse(hit.body, { headers: { "content-type": "application/json", "x-cache": "HIT" } });
+    if (hit) {
+      if (Date.now() - hit.at < TTL) {
+        return new NextResponse(hit.body, { headers: { "content-type": "application/json", "x-cache": "HIT" } });
+      }
+      cache.delete(ck); // 만료 엔트리는 즉시 비워 힙에 눌러앉지 않게 한다
     }
   }
   return fetch(url, { redirect: "follow", signal: AbortSignal.timeout(40_000) })
     .then(async (r) => {
       const body = await r.text();
-      if (!isWrite) cache.set(ck, { at: Date.now(), body });
-      return new NextResponse(body, { headers: { "content-type": "application/json", "x-cache": isWrite ? "WRITE" : "MISS" } });
+      if (isWrite) {
+        // 쓰기 직후 재조회가 쓰기 이전 캐시를 받아 화면이 되돌아 보이지 않도록 읽기 캐시 전체 무효화
+        cache.clear();
+      } else if (r.ok && !noCache && isCacheableBody(body)) {
+        cache.set(ck, { at: Date.now(), body });
+        if (cache.size > MAX_CACHE_SIZE) pruneCache(Date.now());
+      }
+      // 업스트림 상태 그대로 전파 — 클라이언트(writeback.ts r.ok 검사)가 실패를 구분할 수 있게
+      return new NextResponse(body, {
+        status: r.status,
+        headers: { "content-type": "application/json", "x-cache": isWrite ? "WRITE" : "MISS" },
+      });
     })
     .catch((e) => NextResponse.json({ error: "GAS 호출 실패: " + (e instanceof Error ? e.message : String(e)) }, { status: 502 }));
 }
@@ -123,7 +166,10 @@ async function callPost(req: NextRequest) {
       signal: AbortSignal.timeout(60_000),
     });
     const responseBody = await r.text();
+    // 쓰기 후에는 읽기 캐시를 무효화해 직후 dashboard/timeline 재조회가 이전 상태를 받지 않게 한다
+    if (isWrite) cache.clear();
     return new NextResponse(responseBody, {
+      status: r.status,
       headers: { "content-type": "application/json", "x-cache": isWrite ? "POST-WRITE" : "POST" },
     });
   } catch (e) {

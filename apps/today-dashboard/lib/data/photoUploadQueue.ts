@@ -34,6 +34,8 @@ const jobs = new Map<string, PhotoUploadJob>();
 const nextAttemptAt = new Map<string, number>();
 let processing = false;
 let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+/** 현재 예약된 wake 타이머의 발화 시각 — 더 이른 재시도가 들어오면 선점(clearTimeout) 판단용 */
+let wakeAt: number | null = null;
 
 function openDb(): Promise<IDBDatabase | null> {
   return new Promise((resolve) => {
@@ -112,13 +114,21 @@ function readyJobs(now: number): PhotoUploadJob[] {
 }
 
 function scheduleWake(): void {
-  if (wakeTimer) return;
   const pending = Array.from(jobs.values()).filter((job) => job.attempts < MAX_ATTEMPTS);
   if (!pending.length) return;
   const soonest = Math.min(...pending.map((job) => nextAttemptAt.get(job.queueId) ?? 0));
   const delay = Math.max(250, soonest - Date.now());
+  const at = Date.now() + delay;
+  // 더 이른 재시도가 필요한 잡이 생기면 기존 타이머를 선점하고 짧은 지연으로 재예약한다.
+  // (예전엔 기존 타이머가 있으면 무조건 반환 → 새 실패 잡의 재시도가 최대 60초까지 밀렸다)
+  if (wakeTimer) {
+    if (wakeAt !== null && wakeAt <= at) return;
+    clearTimeout(wakeTimer);
+  }
+  wakeAt = at;
   wakeTimer = setTimeout(() => {
     wakeTimer = null;
+    wakeAt = null;
     void processQueue();
   }, delay);
 }
@@ -146,8 +156,13 @@ async function processQueue(): Promise<void> {
         if (willRetry) {
           const delay = RETRY_DELAYS_MS[Math.min(job.attempts - 1, RETRY_DELAYS_MS.length - 1)];
           nextAttemptAt.set(job.queueId, Date.now() + delay);
+          await idbWrite(job);
+        } else {
+          // 영구 실패: IndexedDB에 수 MB 페이로드를 남기지 않는다(앱 시작마다 재전송 폭주 방지).
+          // 메모리에는 남겨서 실패 타일의 수동 재시도(retryPhotoUpload)가 이번 세션에선 계속 동작한다
+          // — 수동 재시도가 attempts=0으로 되돌리며 다시 idbWrite한다.
+          await idbDelete(job.queueId);
         }
-        await idbWrite(job);
         handlers.onFailure(job, message, willRetry);
       }
     }
@@ -174,6 +189,12 @@ export async function resumePhotoUploads(): Promise<PhotoUploadJob[]> {
   const stored = await idbReadAll();
   for (const job of stored) {
     if (jobs.has(job.queueId)) continue;
+    // 이전 세션에서 이미 소진(영구 실패)된 잡은 attempts=0 리셋 대상에서 제외하고 정리한다
+    // — 예전엔 매 시작마다 부활시켜 수 MB 페이로드를 최대 5회씩 재전송했다.
+    if (job.attempts >= MAX_ATTEMPTS) {
+      void idbDelete(job.queueId);
+      continue;
+    }
     job.attempts = 0;
     job.lastError = undefined;
     jobs.set(job.queueId, job);

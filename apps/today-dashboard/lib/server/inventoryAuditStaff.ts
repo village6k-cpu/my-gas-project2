@@ -19,6 +19,8 @@ export type InventoryAuditServiceClient = ReturnType<
 
 const PAGE_SIZE = 500;
 const TRADE_BATCH_SIZE = 100;
+// schedule_items 배치 조회 동시 실행 상한 — 무제한 Promise.all 대신 소규모 병렬로 DB 부하를 제한
+const TRADE_BATCH_CONCURRENCY = 4;
 const SESSION_SELECT =
   "id,mode,status,cutoff_at,started_by,movement_frozen,started_at,submitted_at,parent_session_id,created_at,updated_at";
 const OWNER_SESSION_SELECT = `${SESSION_SELECT},started_by_email`;
@@ -209,24 +211,31 @@ export async function loadInventoryAuditStartSources(
     ),
   ]);
   const scheduleItems: RentalScheduleItemRow[] = [];
-
-  for (const tradeIds of chunks(
+  const tradeIdBatches = chunks(
     trades.map((trade) => trade.trade_id),
     TRADE_BATCH_SIZE,
-  )) {
-    const rows = await fetchAllPages<RentalScheduleItemRow>((from, to) =>
-      client
-        .from("schedule_items")
-        .select(
-          "schedule_id,trade_id,name,qty,taken_qty,is_set_header,is_component,off_catalog,onsite,checkout_state",
-        )
-        .in("trade_id", tradeIds)
-        .or("taken_qty.gt.0,checkout_state.eq.taken")
-        .order("trade_id", { ascending: true })
-        .order("schedule_id", { ascending: true })
-        .range(from, to),
+  );
+
+  // 배치를 순차 await하지 않고 제한 병렬로 조회 — buildRentalSnapshot이 입력을
+  // 자체 정렬하므로 배치 간 순서는 결과에 영향이 없다.
+  for (const batchGroup of chunks(tradeIdBatches, TRADE_BATCH_CONCURRENCY)) {
+    const results = await Promise.all(
+      batchGroup.map((tradeIds) =>
+        fetchAllPages<RentalScheduleItemRow>((from, to) =>
+          client
+            .from("schedule_items")
+            .select(
+              "schedule_id,trade_id,name,qty,taken_qty,is_set_header,is_component,off_catalog,onsite,checkout_state",
+            )
+            .in("trade_id", tradeIds)
+            .or("taken_qty.gt.0,checkout_state.eq.taken")
+            .order("trade_id", { ascending: true })
+            .order("schedule_id", { ascending: true })
+            .range(from, to),
+        ),
+      ),
     );
-    scheduleItems.push(...rows);
+    for (const rows of results) scheduleItems.push(...rows);
   }
 
   return { ledgerRows, trades, scheduleItems };

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { clientIp, gasGet, rateLimited } from "@/lib/server/gasPublic";
+import { clientIp, rateLimited } from "@/lib/server/gasPublic";
+import { getMyPageResponse } from "@/lib/server/myPageData";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,7 +79,10 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const verified = (await gasGet({ action: "myPage", token })) as MyPageResult;
+    // 토큰 검증은 90초 myPage 캐시(getMyPageResponse) 재사용 — 고객은 견적 버튼을 누르기 직전
+    // /api/my 로딩으로 캐시를 방금 채운 상태라, 클릭당 GAS 직렬 2왕복이 1왕복(previewQuote)으로 준다.
+    const { body } = await getMyPageResponse(token);
+    const verified = body as MyPageResult;
     if (!verified?.success) {
       return NextResponse.json(
         { success: false, error: verified?.error || "유효하지 않은 링크입니다" },

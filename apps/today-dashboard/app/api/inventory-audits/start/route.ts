@@ -21,6 +21,8 @@ import {
 } from "@/lib/server/inventoryAuditStaff";
 
 export const dynamic = "force-dynamic";
+// 활성 거래가 많으면 스냅샷 구성 + 워크스페이스 재조회가 길어질 수 있다 (mirror 라우트와 동일 상한)
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   const user = await requireInventoryUser(req);

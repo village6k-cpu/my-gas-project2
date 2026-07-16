@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type { TabKey, Trade } from "@/lib/domain/types";
 import { isCancelledTrade, phaseForDate, returnCompletionBlockers, setupProgress, timeLabel } from "@/lib/domain/status";
 import { ensureTradePhotos, toggleReturn, toggleSetup } from "@/lib/data/store";
@@ -32,7 +32,10 @@ function displayPhase(t: Trade, date: string, tab: TabKey): "checkout" | "checki
   return new Date(t.checkoutAt) <= new Date(`${date}T23:59:59`) ? "checkin" : "checkout";
 }
 
-export function ScheduleCard({
+// React.memo: 스토어 emit(저장 토스트·savingTrades 깜빡임 등)마다 그날의 카드 수십 장이
+// 통째로 재렌더되는 것을 막는다. props가 전부 원시값 + 스토어의 안정 참조(trade)라
+// 기본 얕은 비교로 충분하다 — mutateTrade는 변경된 거래만 새 참조로 만든다.
+export const ScheduleCard = memo(function ScheduleCard({
   trade,
   date,
   tab,
@@ -215,7 +218,7 @@ export function ScheduleCard({
       {customerOpen && <CustomerSheet name={trade.customerName} phone={trade.customerPhone} onClose={() => setCustomerOpen(false)} />}
     </div>
   );
-}
+});
 
 function CollapsedMemoPreview({ trade, onOpen }: { trade: Trade; onOpen: () => void }) {
   const notes: { phase: "checkout" | "checkin"; text: string }[] = [

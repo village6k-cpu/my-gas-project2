@@ -10,11 +10,11 @@ import { SetBox, LooseList } from "./SetBox";
 import {
   addOnsiteItems,
   clearToast,
+  queueItemQty,
   removeItem,
   setItemCheckout,
   setItemName,
   setItemMemo,
-  setItemQty,
   setOnsiteSettlement,
   setPhaseNote,
   type OnsiteEntry,
@@ -229,7 +229,8 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
               </div>
               <div className="flex items-center gap-2 text-[12px] text-ink-mute">
                 예약 수량
-                <Stepper value={e.qty} min={1} onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)} />
+                {/* 낙관적 반영 — 탭 즉시 표시가 바뀌고 원장 확정은 디바운스 후 1회만 */}
+                <Stepper value={e.qty} min={1} onChange={(v) => queueItemQty(t.tradeId, e.scheduleId, v)} />
               </div>
             </>
           )}

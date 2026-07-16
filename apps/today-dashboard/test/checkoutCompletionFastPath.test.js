@@ -145,7 +145,7 @@ test("원격 새로고침은 반출완료 GAS 저장 중의 즉시 상태를 덮
   assert.match(pending, /Object\.keys\(state\.savingTrades\)\.length\s*>\s*0/);
 });
 
-test("결과 미확정 진입 뒤에는 서버 목표값 확인 전까지 절대 롤백하지 않는다", () => {
+test("결과 미확정 진입 뒤에는 서버 확정값 없이 롤백하지 않고, 재시도 상한에서만 락을 푼다", () => {
   const store = read("lib/data/store.ts");
   const writeback = read("lib/data/writeback.ts");
   const retry = sourceFunction(store, "function queueSetupOutcomeRetry", "\nfunction mutateTrade");
@@ -153,6 +153,16 @@ test("결과 미확정 진입 뒤에는 서버 목표값 확인 전까지 절대
   assert.match(retry, /await fetchSetupCompletion\(tradeId\)/);
   assert.match(retry, /confirmed\.done === done[\s\S]*finishTradeSave/);
   assert.match(retry, /queueSetupOutcomeRetry\(tradeId, done, optimisticDoneAt, saveId, attempt \+ 1\)/);
-  assert.doesNotMatch(retry, /setupDone: previousDone|finishTradeSave\([^)]*"error"/);
+  // 이전 값으로의 맹목적 롤백 금지 — 수렴은 서버 확정값(confirmed.done)으로만 한다
+  assert.doesNotMatch(retry, /setupDone: previousDone/);
+  assert.match(retry, /setupDone: confirmed\.done/, "상한 도달 시 서버 확정값으로 수렴해야 한다");
+  // 무한 재시도가 savingTrades 락을 영구히 쥐지 않도록 상한이 있어야 하고,
+  // 에러 종료(락 해제)는 반드시 상한 도달 가드 안에서만 허용된다.
+  const cap = sourceFunction(store, "const SETUP_OUTCOME_MAX_ATTEMPTS", "\nfunction queueSetupOutcomeRetry");
+  assert.match(cap, /SETUP_OUTCOME_MAX_ATTEMPTS = \d+/);
+  for (const found of retry.matchAll(/finishTradeSave\([^)]*"error"/g)) {
+    const before = retry.slice(Math.max(0, found.index - 600), found.index);
+    assert.match(before, /attempt >= SETUP_OUTCOME_MAX_ATTEMPTS/, "에러 종료는 재시도 상한 도달 분기에서만 허용된다");
+  }
   assert.match(writeback, /try \{[\s\S]*await gasPost[\s\S]*await[\s\S]*gasFetch[\s\S]*catch \(error\)[\s\S]*new GasMutationError\([^,]+, true\)/);
 });

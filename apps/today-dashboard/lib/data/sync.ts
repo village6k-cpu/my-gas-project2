@@ -318,12 +318,25 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
   let skipped = 0;
   const fromD = opts?.fromDays ?? -2;
   const toD = opts?.toDays ?? 14;
-  for (let i = fromD; i <= toD; i++) {
-    const date = ymd(new Date(Date.now() + i * DAY));
-    try {
-      const res = await gasFetch(`action=dashboard&date=${date}`);
-      const data = await res.json();
-      if (data.error) continue;
+  const dateKeys: string[] = [];
+  for (let i = fromD; i <= toD; i++) dateKeys.push(ymd(new Date(Date.now() + i * DAY)));
+  // 날짜별 GAS 조회는 독립 — 4개씩 병렬로 읽고, merge는 날짜 순서대로 적용해 결정성을 유지한다.
+  const CONCURRENCY = 4;
+  for (let i = 0; i < dateKeys.length; i += CONCURRENCY) {
+    const batch = dateKeys.slice(i, i + CONCURRENCY);
+    const responses = await Promise.all(
+      batch.map(async (date) => {
+        try {
+          const res = await gasFetch(`action=dashboard&date=${date}`);
+          const data = await res.json();
+          return data.error ? null : data;
+        } catch {
+          return null; /* 한 날짜 실패는 건너뜀 */
+        }
+      }),
+    );
+    responses.forEach((data, idx) => {
+      if (!data) return;
       const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
       for (const it of items) {
         const tid = it.tradeId;
@@ -336,10 +349,8 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
         pending.set(tid, mergeDashboard(base, it));
         n++;
       }
-      log(`  ${date}: 누적 ${n}건`);
-    } catch {
-      /* 한 날짜 실패는 건너뜀 */
-    }
+      log(`  ${batch[idx]}: 누적 ${n}건`);
+    });
   }
   for (const t of pending.values()) await persistTrade(t);
   log(`대시보드 상세 ${n}건 반영 (윈도우 밖 ${skipped}건 스킵)`);
@@ -349,6 +360,28 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
 function needsDashboardDetailRepair(t: Trade): boolean {
   if (t.contractStatus === "취소" || t.contractStatus === "반납완료") return false;
   return t.equipments.length === 0 || !t.contractUrl;
+}
+
+// 복구 불가능한 거래(원장에도 상세가 없는 경우)를 90초 폴링마다 GAS로 무한 재조회하지 않도록
+// 거래별 지수 백오프를 둔다. 등록 직후 즉시성은 resetRepairBackoff()로 보장한다.
+const repairBackoff = new Map<string, { attempts: number; nextAt: number }>();
+const REPAIR_BACKOFF_BASE_MS = 5 * 60_000;
+const REPAIR_BACKOFF_MAX_MS = 30 * 60_000;
+
+function repairDue(tradeId: string, now: number): boolean {
+  const entry = repairBackoff.get(tradeId);
+  return !entry || now >= entry.nextAt;
+}
+
+function noteRepairMiss(tradeId: string, now: number): void {
+  const attempts = (repairBackoff.get(tradeId)?.attempts ?? 0) + 1;
+  const delay = Math.min(REPAIR_BACKOFF_BASE_MS * 2 ** (attempts - 1), REPAIR_BACKOFF_MAX_MS);
+  repairBackoff.set(tradeId, { attempts, nextAt: now + delay });
+}
+
+/** 등록/명시적 새로고침 직후 호출 — 방금 생긴 거래의 상세 복구가 백오프에 막히지 않게 한다. */
+export function resetRepairBackoff(): void {
+  repairBackoff.clear();
 }
 
 function currentEquipmentCount(t: Trade): number {
@@ -435,26 +468,32 @@ async function fetchDashboardSearchItemsForTradeIds(tradeIds: string[]): Promise
   if (!wanted.size) return [];
 
   const byId = new Map<string, any>();
-  for (const tid of wanted) {
-    try {
-      const res = await gasFetch(`action=dashboardSearch&q=${encodeURIComponent(tid)}&limit=20`);
-      const data = await res.json();
-      if (data.error) continue;
-      const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
-      for (const it of items) {
-        const itemTid = String(it?.tradeId || "").trim();
-        if (wanted.has(itemTid) && !byId.has(itemTid)) byId.set(itemTid, it);
+  // 거래별 조회는 독립 — 직렬 GAS 왕복 대신 병렬로 처리한다.
+  await Promise.all(
+    [...wanted].map(async (tid) => {
+      try {
+        const res = await gasFetch(`action=dashboardSearch&q=${encodeURIComponent(tid)}&limit=20`);
+        const data = await res.json();
+        if (data.error) return;
+        const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
+        for (const it of items) {
+          const itemTid = String(it?.tradeId || "").trim();
+          if (wanted.has(itemTid) && !byId.has(itemTid)) byId.set(itemTid, it);
+        }
+      } catch {
+        /* 검색 복구 실패 거래만 건너뜀 */
       }
-    } catch {
-      /* 검색 복구 실패 거래만 건너뜀 */
-    }
-  }
+    }),
+  );
   return [...byId.values()];
 }
 
 /** Supabase 캐시에 품목/계약서 등 dashboard 상세가 빠진 거래를 즉시 복구 */
 export async function repairDashboardDetailsForIncompleteTrades(current: Trade[]): Promise<Trade[]> {
-  const repairIds = new Set(current.filter(needsDashboardDetailRepair).map((t) => t.tradeId));
+  const now = Date.now();
+  const repairIds = new Set(
+    current.filter((t) => needsDashboardDetailRepair(t) && repairDue(t.tradeId, now)).map((t) => t.tradeId),
+  );
   if (!repairIds.size) return [];
 
   const existing = new Map(current.map((t) => [t.tradeId, t]));
@@ -466,36 +505,49 @@ export async function repairDashboardDetailsForIncompleteTrades(current: Trade[]
   }
 
   const changed = new Map<string, Trade>();
-  for (const date of dates) {
-    try {
-      const res = await gasFetch(`action=dashboard&date=${date}`);
-      const data = await res.json();
-      if (data.error) continue;
-      const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
-      for (const it of items) {
-        const tid = it.tradeId;
-        if (!repairIds.has(tid) || changed.has(tid)) continue;
-        const base = existing.get(tid);
-        if (!base) continue;
-        const merged = mergeDashboard(base, it);
-        const filledEquipment = base.equipments.length === 0 && merged.equipments.length > 0;
-        const filledContract = !base.contractUrl && !!merged.contractUrl;
-        if (!filledEquipment && !filledContract) continue;
-        changed.set(tid, merged);
-      }
-    } catch {
-      /* 복구 실패 날짜만 건너뜀 */
-    }
+  // 날짜별 조회는 서로 독립 — 순차 GAS 왕복 대신 소규모 병렬로 처리한다.
+  const dateList = [...dates];
+  const CONCURRENCY = 4;
+  for (let i = 0; i < dateList.length; i += CONCURRENCY) {
+    await Promise.all(
+      dateList.slice(i, i + CONCURRENCY).map(async (date) => {
+        try {
+          const res = await gasFetch(`action=dashboard&date=${date}`);
+          const data = await res.json();
+          if (data.error) return;
+          const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
+          for (const it of items) {
+            const tid = it.tradeId;
+            if (!repairIds.has(tid) || changed.has(tid)) continue;
+            const base = existing.get(tid);
+            if (!base) continue;
+            const merged = mergeDashboard(base, it);
+            const filledEquipment = base.equipments.length === 0 && merged.equipments.length > 0;
+            const filledContract = !base.contractUrl && !!merged.contractUrl;
+            if (!filledEquipment && !filledContract) continue;
+            changed.set(tid, merged);
+          }
+        } catch {
+          /* 복구 실패 날짜만 건너뜀 */
+        }
+      }),
+    );
+  }
+  for (const tid of repairIds) {
+    if (changed.has(tid)) repairBackoff.delete(tid);
+    else noteRepairMiss(tid, now);
   }
   return [...changed.values()];
 }
 
-/** 날짜 화면 진입 시 Supabase 캐시가 원장보다 짧은 거래를 dashboard 상세로 즉시 복구 */
-export async function repairDashboardDateDetails(current: Trade[], date: string): Promise<Trade[]> {
+/** 날짜 화면 진입 시 Supabase 캐시가 원장보다 짧은 거래를 dashboard 상세로 즉시 복구.
+ *  fresh=false(백그라운드 폴링)면 프록시/GAS 캐시를 그대로 써서 GAS 부하와 지연을 줄인다. */
+export async function repairDashboardDateDetails(current: Trade[], date: string, opts?: { fresh?: boolean }): Promise<Trade[]> {
   date = date.trim();
   if (!date) return [];
+  const fresh = opts?.fresh ?? true;
   try {
-    const res = await gasFetch(`action=dashboard&date=${date}&nocache=1`);
+    const res = await gasFetch(`action=dashboard&date=${date}${fresh ? "&nocache=1" : ""}`);
     const data = await res.json();
     if (data.error) return [];
     const items = [...(data.checkout ?? []), ...(data.checkin ?? [])];
@@ -546,11 +598,13 @@ export async function syncAll(onLog?: (s: string) => void): Promise<void> {
 /**
  * 가벼운 폴링: timeline에서 예약의 날짜/고객/금액 변경·신규만 골라 반환.
  * 앱이 가진 ops(검수·결제·제외·반납카운트·장비구조)는 보존(시트 timeline엔 없으므로 덮어쓰지 않음).
+ * 90초 주기 백그라운드 폴링은 좁은 윈도우(fromDays/toDays)로 페이로드를 줄이고,
+ * 등록 직후/주기적 전체 수렴만 기본 윈도우(-30~+180)를 쓴다.
  */
-export async function pollTimelineChanges(current: Trade[]): Promise<Trade[]> {
+export async function pollTimelineChanges(current: Trade[], opts?: { fromDays?: number; toDays?: number }): Promise<Trade[]> {
   const today = new Date();
-  const from = ymd(new Date(today.getTime() - 30 * DAY));
-  const to = ymd(new Date(today.getTime() + 180 * DAY));
+  const from = ymd(new Date(today.getTime() + (opts?.fromDays ?? -30) * DAY));
+  const to = ymd(new Date(today.getTime() + (opts?.toDays ?? 180) * DAY));
   const res = await gasFetch(`action=timeline&from=${from}&to=${to}&compact=2`);
   const data = await res.json();
   if (data.error) return [];

@@ -19,8 +19,23 @@ import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { isCheckoutBaselineLocked, returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
-import { cancelTradeRemote, deleteScheduleItem, fetchAllTrades, fetchNotes, fetchSetupCompletion, persistNotes, persistReturnCounts, persistTrade, subscribeChanges } from "./remote";
-import { gasMutation, gasRead, gasWrite, isGasOutcomeUnknownError, writeBackDisabledReason, writeBackEnabled } from "./writeback";
+import {
+  activeWindowStartYmd,
+  cancelTradeRemote,
+  deleteScheduleItem,
+  fetchAllTrades,
+  fetchNotes,
+  fetchSetupCompletion,
+  fetchTradesByIds,
+  fetchTradesOverlappingDate,
+  persistNotes,
+  persistReturnCounts,
+  persistTrade,
+  searchTradesRemote,
+  subscribeChanges,
+  type RemoteChange,
+} from "./remote";
+import { gasMutation, gasRead, gasWrite, isGasOutcomeUnknownError, setGasWriteFailureHandler, writeBackDisabledReason, writeBackEnabled } from "./writeback";
 import {
   configurePhotoUploadQueue,
   discardPhotoUpload,
@@ -29,7 +44,7 @@ import {
   retryPhotoUpload,
   type PhotoUploadJob,
 } from "./photoUploadQueue";
-import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults, shouldPruneMissingSheetBacked } from "./sync";
+import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults, resetRepairBackoff, shouldPruneMissingSheetBacked } from "./sync";
 
 interface State {
   date: string;
@@ -72,7 +87,6 @@ function dayData(date: string) {
 let remoteLoaded = false;
 let remoteLoadPromise: Promise<void> | null = null;
 let subscribed = false;
-let refetchTimer: ReturnType<typeof setTimeout> | null = null;
 const persistTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 const persistGenerations: Record<string, number> = {};
 const persistInFlight: Record<string, Promise<Trade> | undefined> = {};
@@ -86,6 +100,9 @@ let notesPersistGeneration = 0;
 let notesPersistPending = false;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 const POLL_MS = 90_000;
+let pollCount = 0;
+let pollInFlight = false;
+let lastPollAt = 0;
 let localMutationSeq = 0;
 
 type ContractMutationPayload = {
@@ -158,9 +175,9 @@ async function applyDashboardRepairs(changed: Trade[], mutationSeqAtStart: numbe
   return true;
 }
 
-async function repairDayDetails(date: string, mutationSeqAtStart = localMutationSeq): Promise<boolean> {
+async function repairDayDetails(date: string, mutationSeqAtStart = localMutationSeq, opts?: { fresh?: boolean }): Promise<boolean> {
   if (!isSupabase || hasPendingPersist()) return false;
-  const changed = await repairDashboardDateDetails(state.trades, date);
+  const changed = await repairDashboardDateDetails(state.trades, date, opts);
   return applyDashboardRepairs(changed, mutationSeqAtStart);
 }
 
@@ -169,8 +186,120 @@ export async function repairSearchResults(query: string): Promise<void> {
   const q = query.trim();
   if (q.length < 2) return;
   const mutationSeqAtSearch = localMutationSeq;
-  const changed = await repairDashboardSearchResults(state.trades, q);
+  // 운영 윈도우 밖 과거 거래도 검색되도록 Supabase에서 지연 로드(원장 검색 복구와 병렬)
+  const [changed, remoteMatches] = await Promise.all([
+    repairDashboardSearchResults(state.trades, q),
+    searchTradesRemote(q).catch(() => [] as Trade[]),
+  ]);
+  if (remoteMatches.length && canApplyRemoteSnapshot(mutationSeqAtSearch)) {
+    const known = new Set(state.trades.map((t) => t.tradeId));
+    const fresh = remoteMatches.filter((t) => !known.has(t.tradeId));
+    if (fresh.length) {
+      fresh.forEach((t) => extraTradeIds.add(t.tradeId));
+      set({ trades: [...state.trades, ...fresh] });
+    }
+  }
   await applyDashboardRepairs(changed, mutationSeqAtSearch);
+}
+
+// ── realtime 변경 반영: 전량 refetch 대신 바뀐 거래만 재조회 ──────
+// 예전엔 어떤 행 1개가 바뀌어도(자기 쓰기 에코 포함) 전 테이블을 다시 내려받았다.
+// 거래가 쌓일수록 이벤트당 비용이 선형 증가 → "점점 느려짐"의 직접 원인.
+const realtimeTradeIds = new Set<string>();
+let realtimeNotesChanged = false;
+let realtimeNeedsFullResync = false;
+let realtimeFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let realtimeFlushInFlight = false;
+const REALTIME_FLUSH_MS = 500;
+const REALTIME_RETRY_MS = 1_500;
+const REALTIME_FULL_RESYNC_THRESHOLD = 40; // 대량 변경(수동 전체 동기화 등)은 전량 수렴이 더 싸다
+
+// 검색/과거 날짜 진입으로 지연 로드한 윈도우 밖 거래 — 전량 수렴 시 유실되지 않게 보존한다.
+const extraTradeIds = new Set<string>();
+
+function noteRemoteChange(change: RemoteChange) {
+  if (change.table === "handover_notes") realtimeNotesChanged = true;
+  else if (change.tradeId) realtimeTradeIds.add(change.tradeId);
+  else realtimeNeedsFullResync = true; // trade_id를 복원할 수 없는 이벤트는 전체 수렴으로
+  scheduleRealtimeFlush(REALTIME_FLUSH_MS);
+}
+
+function scheduleRealtimeFlush(delay: number) {
+  if (realtimeFlushTimer) clearTimeout(realtimeFlushTimer);
+  realtimeFlushTimer = setTimeout(() => {
+    realtimeFlushTimer = null;
+    void flushRealtimeChanges();
+  }, delay);
+}
+
+/** persist 완료 지점에서 호출 — pending 때문에 이월된 realtime 변경을 마저 반영한다. */
+function maybeResumeRealtimeFlush() {
+  if (!realtimeTradeIds.size && !realtimeNotesChanged && !realtimeNeedsFullResync) return;
+  if (hasPendingPersist()) return;
+  scheduleRealtimeFlush(REALTIME_FLUSH_MS);
+}
+
+function requeueRealtimeChanges(ids: string[], notesChanged: boolean, fullResync: boolean) {
+  ids.forEach((id) => realtimeTradeIds.add(id));
+  if (notesChanged) realtimeNotesChanged = true;
+  if (fullResync) realtimeNeedsFullResync = true;
+}
+
+async function flushRealtimeChanges(): Promise<void> {
+  if (realtimeFlushInFlight) return;
+  if (!realtimeTradeIds.size && !realtimeNotesChanged && !realtimeNeedsFullResync) return;
+  // 숨김 탭에서는 반영을 미룬다 — visibilitychange에서 재개(변경 큐는 유지되므로 유실 없음).
+  if (typeof document !== "undefined" && document.hidden) return;
+  // pending 중에는 드롭하지 않고 이월한다(예전엔 조용히 버려 타 기기 변경이 무기한 유실).
+  if (hasPendingPersist()) {
+    scheduleRealtimeFlush(REALTIME_RETRY_MS);
+    return;
+  }
+  const mutationSeqAtFlush = localMutationSeq;
+  const ids = [...realtimeTradeIds];
+  realtimeTradeIds.clear();
+  const notesChanged = realtimeNotesChanged;
+  realtimeNotesChanged = false;
+  const fullResync = realtimeNeedsFullResync || ids.length > REALTIME_FULL_RESYNC_THRESHOLD;
+  realtimeNeedsFullResync = false;
+
+  realtimeFlushInFlight = true;
+  try {
+    if (fullResync) {
+      const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
+      if (!canApplyRemoteSnapshot(mutationSeqAtFlush)) {
+        requeueRealtimeChanges(ids, notesChanged, true);
+        scheduleRealtimeFlush(REALTIME_RETRY_MS);
+        return;
+      }
+      const freshIds = new Set(trades.map((t) => t.tradeId));
+      // 지연 로드된 윈도우 밖 거래는 스냅샷에 없어도 유지
+      const carried = state.trades.filter((t) => extraTradeIds.has(t.tradeId) && !freshIds.has(t.tradeId));
+      const mergedTrades = preservePhotosInSnapshot([...trades, ...carried]);
+      set({ trades: mergedTrades, notes });
+      await repairEmptyEquipmentTrades(mergedTrades, mutationSeqAtFlush);
+      return;
+    }
+    const [changed, notes] = await Promise.all([
+      ids.length ? fetchTradesByIds(ids) : Promise.resolve([]),
+      notesChanged ? fetchNotes() : Promise.resolve(null),
+    ]);
+    if (!canApplyRemoteSnapshot(mutationSeqAtFlush)) {
+      requeueRealtimeChanges(ids, notesChanged, false);
+      scheduleRealtimeFlush(REALTIME_RETRY_MS);
+      return;
+    }
+    const foundIds = new Set(changed.map((t) => t.tradeId));
+    const deletedIds = new Set(ids.filter((id) => !foundIds.has(id)));
+    let trades = mergeTradeChanges(state.trades, changed);
+    if (deletedIds.size) trades = trades.filter((t) => !deletedIds.has(t.tradeId));
+    set(notes ? { trades, notes } : { trades });
+  } catch {
+    requeueRealtimeChanges(ids, notesChanged, fullResync);
+    scheduleRealtimeFlush(REALTIME_RETRY_MS);
+  } finally {
+    realtimeFlushInFlight = false;
+  }
 }
 
 async function loadRemoteOnce(): Promise<void> {
@@ -186,29 +315,25 @@ async function loadRemoteOnce(): Promise<void> {
   }
   if (!subscribed) {
     subscribed = true;
-    subscribeChanges(() => {
-      if (hasPendingPersist()) return; // 내 변이 반영 중이면 스킵
-      const mutationSeqAtSchedule = localMutationSeq;
-      if (refetchTimer) clearTimeout(refetchTimer);
-      refetchTimer = setTimeout(async () => {
-        if (!canApplyRemoteSnapshot(mutationSeqAtSchedule)) return;
-        try {
-          const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
-          if (!canApplyRemoteSnapshot(mutationSeqAtSchedule)) return;
-          const mergedTrades = preservePhotosInSnapshot(trades);
-          set({ trades: mergedTrades, notes });
-          await repairEmptyEquipmentTrades(mergedTrades, mutationSeqAtSchedule);
-        } catch {
-          /* noop */
-        }
-      }, 500);
+    subscribeChanges(noteRemoteChange, () => {
+      // realtime 재연결 — 끊긴 동안의 이벤트 유실 가능성은 전체 수렴으로 복구
+      realtimeNeedsFullResync = true;
+      scheduleRealtimeFlush(REALTIME_FLUSH_MS);
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      // 숨김 중 쌓인 realtime 변경 즉시 반영 + 오래 자리 비웠으면 시트 변경도 당겨온다
+      scheduleRealtimeFlush(0);
+      if (Date.now() - lastPollAt > POLL_MS) void pollSheetChangesNow({ mode: "light", resetBackoff: false });
     });
   }
-  // 시트→앱 자동 폴링(변경분만): 90초마다 timeline에서 예약 변경 감지
+  // 시트→앱 자동 폴링(변경분만): 90초마다 timeline에서 예약 변경 감지.
+  // 평소엔 좁은 윈도우(-7~+45일)로 가볍게, 4회에 1번(6분)만 전체 윈도우로 수렴한다.
   if (!pollTimer) {
     pollTimer = setInterval(() => {
       if (document.hidden) return;
-      void pollSheetChangesNow();
+      pollCount++;
+      void pollSheetChangesNow({ mode: pollCount % 4 === 0 ? "full" : "light", resetBackoff: false });
     }, POLL_MS);
   }
 }
@@ -227,20 +352,31 @@ function loadRemote(): Promise<void> {
 /**
  * 시트 변경분 즉시 반영 — 등록/수정 직후 90초 폴링을 기다리지 않고 호출.
  * (확인요청 등록 완료 시 신규 거래가 오늘일정·검색에 바로 보이도록)
+ * 기본값(mode:"full", resetBackoff:true)은 명시적 호출용 — 백그라운드 인터벌은
+ * light 모드(좁은 timeline 윈도우 + 캐시 허용 읽기)로 GAS 부하를 줄인다.
  */
-export async function pollSheetChangesNow(): Promise<void> {
-  if (!isSupabase || hasPendingPersist()) return;
+export async function pollSheetChangesNow(opts?: { mode?: "light" | "full"; resetBackoff?: boolean }): Promise<void> {
+  if (!isSupabase || pollInFlight || hasPendingPersist()) return;
+  const mode = opts?.mode ?? "full";
+  if (opts?.resetBackoff ?? true) resetRepairBackoff();
   const mutationSeqAtPoll = localMutationSeq;
+  pollInFlight = true;
   try {
     if (await repairEmptyEquipmentTrades(state.trades, mutationSeqAtPoll)) return;
-    if (state.date && await repairDayDetails(state.date, mutationSeqAtPoll)) return;
-    const changed = await pollTimelineChanges(state.trades);
+    if (state.date && await repairDayDetails(state.date, mutationSeqAtPoll, { fresh: mode === "full" })) return;
+    const changed = await pollTimelineChanges(
+      state.trades,
+      mode === "light" ? { fromDays: -7, toDays: 45 } : undefined,
+    );
     if (!changed.length) return;
     if (!canApplyRemoteSnapshot(mutationSeqAtPoll)) return;
     set({ trades: mergeTradeChanges(state.trades, changed) });
     for (const t of changed) persistTrade(t).catch(() => {});
   } catch {
     /* noop */
+  } finally {
+    pollInFlight = false;
+    lastPollAt = Date.now();
   }
 }
 
@@ -285,6 +421,7 @@ function schedulePersistTrade(trade: Trade) {
         delete persistTimers[tradeId];
         pendingPersistTrades.delete(tradeId);
       }
+      maybeResumeRealtimeFlush();
     }
   }, 450);
 }
@@ -308,6 +445,7 @@ async function flushTradePersist(tradeId: string): Promise<Trade> {
       delete persistTimers[tradeId];
       pendingPersistTrades.delete(tradeId);
     }
+    maybeResumeRealtimeFlush();
   }
 }
 
@@ -329,6 +467,7 @@ function enqueueReturnCountsPersist(tradeId: string): Promise<Trade> {
     if (persistInFlight[tradeId] === task) delete persistInFlight[tradeId];
     if (returnCountPersistInFlight[tradeId] === task) delete returnCountPersistInFlight[tradeId];
     if (!returnCountPersistTimers[tradeId] && !returnCountPersistInFlight[tradeId]) pendingReturnCountTrades.delete(tradeId);
+    maybeResumeRealtimeFlush();
   };
   void task.then(clear, clear);
   return task;
@@ -370,15 +509,37 @@ function schedulePersistNotes() {
       set({ toast: { id: ++toastSeq, text: "⚠️ 메모 저장 실패 — 인터넷/로그인 확인 후 다시 시도", kind: "error" } });
     } finally {
       if (notesPersistGeneration === generation) notesPersistPending = false;
+      maybeResumeRealtimeFlush();
     }
   }, 600);
+}
+
+// 운영 윈도우(60일) 밖 과거 날짜로 이동하면 그 날짜와 겹치는 거래만 Supabase에서 지연 로드한다.
+const coveredOldDates = new Set<string>();
+async function ensureDateCoverage(date: string): Promise<void> {
+  if (date >= activeWindowStartYmd() || coveredOldDates.has(date)) return;
+  coveredOldDates.add(date);
+  try {
+    const trades = await fetchTradesOverlappingDate(date);
+    if (!trades.length) return;
+    const known = new Set(state.trades.map((t) => t.tradeId));
+    const fresh = trades.filter((t) => !known.has(t.tradeId));
+    if (!fresh.length) return;
+    fresh.forEach((t) => extraTradeIds.add(t.tradeId));
+    set({ trades: [...state.trades, ...fresh] });
+  } catch {
+    coveredOldDates.delete(date); // 실패 시 다음 진입에서 재시도
+  }
 }
 
 export function loadDay(date: string) {
   if (isSupabase) {
     if (state.date !== date) set({ date });
     if (!remoteLoaded) loadRemote();
-    else repairDayDetails(date);
+    else {
+      void ensureDateCoverage(date);
+      repairDayDetails(date);
+    }
     return;
   }
   if (state.date === date && state.trades.length) return;
@@ -426,13 +587,18 @@ function finishTradeSave(tradeId: string, id: number, kind: "saved" | "error", t
   const saving = { ...state.savingTrades };
   delete saving[tradeId];
   set({ savingTrades: saving, toast: { id, text, kind } });
+  maybeResumeRealtimeFlush();
   if (typeof window === "undefined") return;
   window.setTimeout(() => {
     if (state.toast?.id === id) set({ toast: null });
   }, kind === "error" ? 4_000 : 1_100);
 }
 
-/** 응답만 유실된 쓰기는 실패로 단정하지 않고 같은 목표 상태를 멱등 재시도한다. */
+/** 응답만 유실된 쓰기는 실패로 단정하지 않고 같은 목표 상태를 멱등 재시도한다.
+ *  단, 무한 재시도는 savingTrades 락을 계속 쥐어 앱 전체 동기화를 막으므로
+ *  상한(약 1.5분) 후 서버 확정값으로 수렴하고 락을 푼다. */
+const SETUP_OUTCOME_MAX_ATTEMPTS = 12;
+
 function queueSetupOutcomeRetry(
   tradeId: string,
   done: boolean,
@@ -460,8 +626,19 @@ function queueSetupOutcomeRetry(
           finishTradeSave(tradeId, saveId, "saved", "저장됨");
           return;
         }
+        if (attempt >= SETUP_OUTCOME_MAX_ATTEMPTS) {
+          // 원장이 끝내 목표값을 확정하지 않음 — 서버 확정값으로 되돌리고 재시도 가능하게 락 해제
+          mutateTrade(tradeId, (t) => ({ ...t, setupDone: confirmed.done, setupDoneAt: confirmed.doneAt }), false);
+          finishTradeSave(tradeId, saveId, "error", "⚠️ 반출완료가 원장에 확정되지 않았습니다 — 다시 시도해주세요");
+          return;
+        }
       } catch (confirmError) {
         console.error("[supabase] 반출완료 결과 재확인 실패:", confirmError);
+        if (attempt >= SETUP_OUTCOME_MAX_ATTEMPTS) {
+          // 확인조차 불가(장기 오프라인 등) — 락만 풀고 표시 상태는 유지, 다음 폴링이 수렴시킨다
+          finishTradeSave(tradeId, saveId, "error", "⚠️ 반출완료 결과를 확인하지 못했습니다 — 네트워크 확인 후 화면을 새로고침해주세요");
+          return;
+        }
       }
       console.error("[write-back] 반출완료 결과 미확정 재시도:", error);
       queueSetupOutcomeRetry(tradeId, done, optimisticDoneAt, saveId, attempt + 1);
@@ -804,8 +981,8 @@ export function setItemCheckout(tradeId: string, scheduleId: string, next: Check
     }
     return;
   }
-  if (final === "taken") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: true });
-  else if (final === "pending") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: false });
+  if (final === "taken") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: true }, { tradeId, label: "품목 반출 체크" });
+  else if (final === "pending") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: false }, { tradeId, label: "품목 반출 체크" });
   // 원장 쓰기가 꺼져 있으면 제외를 앱 상태로만 숨기지 않는다.
 }
 export async function setItemName(tradeId: string, scheduleId: string, name: string): Promise<boolean> {
@@ -859,6 +1036,31 @@ export async function setItemName(tradeId: string, scheduleId: string, name: str
     return false;
   }
 }
+/** GAS updateEquipQty 응답(updatedItems, 세트 비례 조정 포함)을 로컬 상태에 정본 반영한다. */
+function applyEquipQtyResult(tradeId: string, scheduleId: string, safeQty: number, res: any): void {
+  const updates: { scheduleId: string; newQty: number }[] = res?.updatedItems ?? [{ scheduleId, newQty: safeQty }];
+  const affectedIds = new Set(updates.map((u) => u.scheduleId).filter(Boolean));
+  affectedIds.add(scheduleId);
+  mutateTrade(tradeId, (t) => {
+    const byId = new Map(updates.map((u) => [u.scheduleId, Number(u.newQty) || 1]));
+    const returnCounts = { ...(t.returnCounts ?? {}) };
+    affectedIds.forEach((id) => delete returnCounts[id]);
+    return {
+      ...t,
+      equipments: t.equipments.map((e) => {
+        if (!byId.has(e.scheduleId)) return e;
+        const nextQty = byId.get(e.scheduleId)!;
+        // takenQty는 반출 순간의 불변 기준선이다. 예약 수량 수정이 과거 반출량을 줄이면 안 된다.
+        return { ...e, qty: nextQty, takenQty: e.takenQty };
+      }),
+      returnCounts,
+      returnDone: false,
+      returnDoneAt: null,
+      contractStatus: t.contractStatus === "반납완료" ? (res?.contractStatus || "반출") : t.contractStatus,
+    };
+  });
+}
+
 export async function setItemQty(tradeId: string, scheduleId: string, qty: number): Promise<boolean> {
   const safeQty = Math.max(1, Math.round(qty));
   if (isSupabase && !writeBackEnabled) {
@@ -872,27 +1074,7 @@ export async function setItemQty(tradeId: string, scheduleId: string, qty: numbe
       ? await gasMutation("updateEquipQty", { tid: tradeId, scheduleId, qty: safeQty })
       : null;
     if (res?.unchanged) return true;
-    const updates: { scheduleId: string; newQty: number }[] = res?.updatedItems ?? [{ scheduleId, newQty: safeQty }];
-    const affectedIds = new Set(updates.map((u) => u.scheduleId).filter(Boolean));
-    affectedIds.add(scheduleId);
-    mutateTrade(tradeId, (t) => {
-      const byId = new Map(updates.map((u) => [u.scheduleId, Number(u.newQty) || 1]));
-      const returnCounts = { ...(t.returnCounts ?? {}) };
-      affectedIds.forEach((id) => delete returnCounts[id]);
-      return {
-        ...t,
-        equipments: t.equipments.map((e) => {
-          if (!byId.has(e.scheduleId)) return e;
-          const nextQty = byId.get(e.scheduleId)!;
-          // takenQty는 반출 순간의 불변 기준선이다. 예약 수량 수정이 과거 반출량을 줄이면 안 된다.
-          return { ...e, qty: nextQty, takenQty: e.takenQty };
-        }),
-        returnCounts,
-        returnDone: false,
-        returnDoneAt: null,
-        contractStatus: t.contractStatus === "반납완료" ? (res?.contractStatus || "반출") : t.contractStatus,
-      };
-    });
+    applyEquipQtyResult(tradeId, scheduleId, safeQty, res);
     if (isSupabase) await flushTradePersist(tradeId);
     flashSave(tradeId);
     return true;
@@ -900,6 +1082,73 @@ export async function setItemQty(tradeId: string, scheduleId: string, qty: numbe
     const error = e instanceof Error ? e.message : String(e);
     set({ toast: { id: ++toastSeq, text: `⚠️ 수량 변경 실패 — ${error}`, kind: "error" } });
     return false;
+  }
+}
+
+// ── 스테퍼용 낙관적 수량 변경 ────────────────────────────────────
+// setItemQty는 원장 왕복(1~3초)을 먼저 기다려 스테퍼가 탭마다 수 초간 무반응이었고,
+// 연타 시 stale 값 기반 경쟁으로 수량이 유실됐다. queueItemQty는 화면을 즉시 바꾸고
+// 350ms 디바운스 후 최종값 1회만 원장에 확정하며, 같은 품목의 전송을 직렬화한다.
+const qtyCommitTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
+const qtyCommitInFlight: Record<string, Promise<void> | undefined> = {};
+const qtyCommitTargets: Record<string, number | undefined> = {};
+const QTY_COMMIT_DEBOUNCE_MS = 350;
+
+export function queueItemQty(tradeId: string, scheduleId: string, qty: number): void {
+  const safeQty = Math.max(1, Math.round(qty));
+  if (isSupabase && !writeBackEnabled) {
+    set({ toast: { id: ++toastSeq, text: `⚠️ 수량 변경 실패: ${writeBackDisabledReason}`, kind: "error" } });
+    return;
+  }
+  // 화면 즉시 반영 (persist=false — 원장 확정 후 flushTradePersist가 저장)
+  mutateTrade(tradeId, (t) => mapItem(t, scheduleId, (e) => ({ ...e, qty: safeQty })), false);
+  if (!isSupabase) {
+    flashSave(tradeId);
+    return;
+  }
+  const key = `${tradeId}|${scheduleId}`;
+  qtyCommitTargets[key] = safeQty;
+  if (qtyCommitTimers[key]) clearTimeout(qtyCommitTimers[key]);
+  qtyCommitTimers[key] = setTimeout(() => {
+    delete qtyCommitTimers[key];
+    void commitQueuedItemQty(tradeId, scheduleId, key);
+  }, QTY_COMMIT_DEBOUNCE_MS);
+}
+
+async function commitQueuedItemQty(tradeId: string, scheduleId: string, key: string): Promise<void> {
+  if (qtyCommitInFlight[key]) return; // 진행 중이면 완료 후 남은 target을 이어서 커밋
+  const target = qtyCommitTargets[key];
+  if (target === undefined) return;
+  delete qtyCommitTargets[key];
+  const saveId = beginTradeSave(tradeId);
+  const task = (async () => {
+    try {
+      const res = await gasMutation("updateEquipQty", { tid: tradeId, scheduleId, qty: target });
+      if (!res?.unchanged) applyEquipQtyResult(tradeId, scheduleId, target, res);
+      await flushTradePersist(tradeId);
+      finishTradeSave(tradeId, saveId, "saved", "저장됨");
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      console.error("[write-back] 수량 변경 실패:", e);
+      finishTradeSave(tradeId, saveId, "error", `⚠️ 수량 변경 실패 — ${error}`);
+      // 낙관 표시를 서버 정본으로 되돌린다(해당 거래만 재조회)
+      try {
+        const [serverTrade] = await fetchTradesByIds([tradeId]);
+        if (serverTrade && !hasPendingPersist()) {
+          set({ trades: mergeTradeChanges(state.trades, [serverTrade]) });
+        }
+      } catch {
+        /* 롤백 실패 시 다음 폴링이 수렴시킨다 */
+      }
+    }
+  })();
+  qtyCommitInFlight[key] = task;
+  try {
+    await task;
+  } finally {
+    if (qtyCommitInFlight[key] === task) delete qtyCommitInFlight[key];
+    // 커밋 중 새 목표값이 들어왔으면 이어서 전송(직렬화)
+    if (qtyCommitTargets[key] !== undefined) void commitQueuedItemQty(tradeId, scheduleId, key);
   }
 }
 // 품목 메모는 적은 시점(phase)별로 저장한다. 반대쪽 카드에는 출처 태그와 함께 그대로 노출되므로
@@ -1175,17 +1424,17 @@ export async function setPaymentMethod(tradeId: string, method: string) {
 export function setDepositStatus(tradeId: string, status: string) {
   mutateTrade(tradeId, (t) => ({ ...t, depositStatus: status, paymentWarning: /미|대기|예정/.test(status) }));
   flashSave(tradeId);
-  gasWrite("updateTradeProof", { tid: tradeId, field: "depositStatus", value: status });
+  gasWrite("updateTradeProof", { tid: tradeId, field: "depositStatus", value: status }, { tradeId, label: "입금 상태" });
 }
 export function setProofType(tradeId: string, proofType: string) {
   mutateTrade(tradeId, (t) => ({ ...t, proofType }));
   flashSave(tradeId);
-  gasWrite("updateTradeProof", { tid: tradeId, field: "proofType", value: proofType });
+  gasWrite("updateTradeProof", { tid: tradeId, field: "proofType", value: proofType }, { tradeId, label: "증빙 유형" });
 }
 export function setIssueStatus(tradeId: string, issueStatus: string) {
   mutateTrade(tradeId, (t) => ({ ...t, issueStatus }));
   flashSave(tradeId);
-  gasWrite("updateTradeProof", { tid: tradeId, field: "issueStatus", value: issueStatus });
+  gasWrite("updateTradeProof", { tid: tradeId, field: "issueStatus", value: issueStatus }, { tradeId, label: "발행 상태" });
 }
 export async function requestProofIssue(tradeId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, issueStatus: "발행요청", issueNote: "발행 요청 중..." }));
@@ -1220,7 +1469,7 @@ export async function setBillingCompany(tradeId: string, billingCompany: string)
 export function sendEstimate(tradeId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, estimateSent: true }));
   flashSave(tradeId);
-  gasWrite("sendEstimate", { tid: tradeId });
+  gasWrite("sendEstimate", { tid: tradeId }, { tradeId, label: "견적 발송" });
 }
 
 export async function sendStatement(tradeId: string) {
@@ -1639,10 +1888,37 @@ export function deleteNote(id: string) {
 }
 
 // ── 훅 ─────────────────────────────────────────────────────────
+// 토스트만 바뀐 emit에 데이터 뷰 전체가 재렌더되지 않도록, useDashboard는
+// date/trades/notes/savingTrades가 실제로 바뀔 때만 새 스냅샷 객체를 만든다.
+let dashSnapshot: DashboardDay & { savingTrades: Record<string, boolean> } = {
+  date: state.date,
+  trades: state.trades,
+  notes: state.notes,
+  savingTrades: state.savingTrades,
+};
+function getDashSnapshot() {
+  if (
+    dashSnapshot.date !== state.date ||
+    dashSnapshot.trades !== state.trades ||
+    dashSnapshot.notes !== state.notes ||
+    dashSnapshot.savingTrades !== state.savingTrades
+  ) {
+    dashSnapshot = { date: state.date, trades: state.trades, notes: state.notes, savingTrades: state.savingTrades };
+  }
+  return dashSnapshot;
+}
 export function useDashboard(): DashboardDay & { savingTrades: Record<string, boolean> } {
-  const s = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  return { date: s.date, trades: s.trades, notes: s.notes, savingTrades: s.savingTrades };
+  return useSyncExternalStore(subscribe, getDashSnapshot, getDashSnapshot);
 }
 export function useToast() {
   return useSyncExternalStore(subscribe, () => state.toast, () => state.toast);
 }
+
+// 파이어-앤-포겟 원장 쓰기 실패를 화면에 알리고, 잠시 후 시트 상태와 자동 수렴시킨다.
+setGasWriteFailureHandler((action, _error, context) => {
+  const label = context?.label ?? action;
+  showTransientError(`⚠️ ${label} 원장 반영 실패 — 시트와 다를 수 있어 잠시 후 자동 재확인합니다`, 5_000);
+  if (typeof window !== "undefined") {
+    window.setTimeout(() => void pollSheetChangesNow({ mode: "light", resetBackoff: false }), 3_000);
+  }
+});

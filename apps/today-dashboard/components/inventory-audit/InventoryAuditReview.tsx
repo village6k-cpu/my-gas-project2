@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   InventoryAuditReview as Review,
@@ -49,26 +49,52 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
   const [showAll, setShowAll] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // 사장님이 손댄(아직 서버에 저장 안 된) 판정·수량 키 — 재조회가 서버 기본값으로 덮어쓰지 않게 보존
+  const dirtyDecisionKeys = useRef<Set<string>>(new Set());
+  const dirtyCountKeys = useRef<Set<string>>(new Set());
+  const clearDirtyKeys = useCallback(() => {
+    dirtyDecisionKeys.current.clear();
+    dirtyCountKeys.current.clear();
+  }, []);
+
+  const load = useCallback(async (options?: { silent?: boolean }) => {
+    // silent: 대여명 판정 등 부분 갱신 뒤 재조회 — 화면을 '불러오는 중…'으로 리셋하지 않는다
+    if (!options?.silent) setLoading(true);
     setError("");
     try {
       const next = (await readJson(
         await authFetch(`/api/inventory-audits/${sessionId}/review`, { cache: "no-store" }),
       )) as Review;
       setReview(next);
-      setActions(Object.fromEntries(next.items.map((item) => [item.equipmentId, item.defaultDecision])));
-      setFinalCounts(Object.fromEntries(next.items.map((item) => [
-        item.equipmentId,
-        {
-          finalStockTotal: item.reviewStockTotal === null ? "" : String(item.reviewStockTotal),
-          finalStockMaintenance: String(item.reviewStockMaintenance),
-        },
-      ])));
+      // 미저장 판정 보존: 서버 기본값으로 재구성하되 사장님이 수정한(dirty) 키는 로컬 값 유지.
+      // 확정(checkpoint)된 장비는 항상 서버 기본값을 따른다.
+      setActions((current) =>
+        Object.fromEntries(next.items.map((item) => [
+          item.equipmentId,
+          item.checkpointApprovedAt === null &&
+          dirtyDecisionKeys.current.has(item.equipmentId) &&
+          current[item.equipmentId] !== undefined
+            ? current[item.equipmentId]
+            : item.defaultDecision,
+        ])),
+      );
+      setFinalCounts((current) =>
+        Object.fromEntries(next.items.map((item) => {
+          const serverDraft: FinalCountDraft = {
+            finalStockTotal: item.reviewStockTotal === null ? "" : String(item.reviewStockTotal),
+            finalStockMaintenance: String(item.reviewStockMaintenance),
+          };
+          const keepLocal =
+            item.checkpointApprovedAt === null &&
+            dirtyCountKeys.current.has(item.equipmentId) &&
+            current[item.equipmentId] !== undefined;
+          return [item.equipmentId, keepLocal ? current[item.equipmentId] : serverDraft];
+        })),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "검토 자료를 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
+      if (!options?.silent) setLoading(false);
     }
   }, [sessionId]);
 
@@ -127,7 +153,9 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
         }),
       );
       setNotice(`‘${group.rawName}’ ${group.occurrenceCount}건을 한 번에 처리했습니다.`);
-      await load();
+      // 그룹 해소는 연결 장비의 실사합계·분류를 바꾸므로 서버 재계산이 필요하다.
+      // silent 재조회 + dirty 보존으로 미저장 판정·수량 입력은 초기화하지 않는다.
+      await load({ silent: true });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "대여명 분류를 저장하지 못했습니다.");
     } finally {
@@ -155,8 +183,9 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
     setNotice("");
     try {
       await persistDecisions();
+      clearDirtyKeys();
       setNotice("장비별 검토 결과를 저장했습니다. 아직 원장은 바뀌지 않았습니다.");
-      await load();
+      await load({ silent: true });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "검토 결과를 저장하지 못했습니다.");
     } finally {
@@ -189,11 +218,12 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
         }),
       );
       setConfirmed(false);
+      clearDirtyKeys();
       setNotice(
         `현재 완료분 ${Number(result.approved_equipment_count) || approvingCount}개를 확정했습니다. 나머지는 다음 직원이 이어서 셉니다.`,
       );
       await onChanged();
-      await load();
+      await load({ silent: true });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "현재 완료분을 확정하지 못했습니다.");
     } finally {
@@ -207,6 +237,7 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
     setError("");
     try {
       await persistDecisions();
+      clearDirtyKeys();
       await readJson(
         await authFetch(`/api/inventory-audits/${sessionId}/recount`, { method: "POST" }),
       );
@@ -225,6 +256,7 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
     setError("");
     try {
       await persistDecisions();
+      clearDirtyKeys();
       await readJson(
         await authFetch(`/api/inventory-audits/${sessionId}/approve`, { method: "POST" }),
       );
@@ -324,10 +356,12 @@ export function InventoryAuditReview({ sessionId, onClose, onChanged }: Props) {
                     decision={actions[item.equipmentId] ?? item.defaultDecision}
                     counts={finalCounts[item.equipmentId] ?? { finalStockTotal: "", finalStockMaintenance: "0" }}
                     onDecision={(decision) => {
+                      dirtyDecisionKeys.current.add(item.equipmentId);
                       setActions((current) => ({ ...current, [item.equipmentId]: decision }));
                       setConfirmed(false);
                     }}
                     onCountsChange={(counts) => {
+                      dirtyCountKeys.current.add(item.equipmentId);
                       setFinalCounts((current) => ({ ...current, [item.equipmentId]: counts }));
                       setConfirmed(false);
                     }}

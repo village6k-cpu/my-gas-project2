@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { authFetch } from "@/lib/data/authFetch";
 import { compressInventoryAuditEvidence } from "@/lib/inventory-audit/compressEvidence";
@@ -74,12 +74,38 @@ function nextTimestamp(previous?: string): string {
   return new Date(Math.max(Date.now(), Number.isFinite(previousMs) ? previousMs + 1 : 0)).toISOString();
 }
 
-async function readJson(response: Response) {
-  const body = await response.json().catch(() => ({}));
+/** 응답 본문(code, currentObservation 등)을 버리지 않고 실어 나르는 에러 — 409 stale_write 복구에 사용 */
+class ApiError extends Error {
+  readonly code: string | null;
+  readonly body: Record<string, unknown>;
+
+  constructor(message: string, code: string | null, body: Record<string, unknown>) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+    this.body = body;
+  }
+}
+
+async function readJson(response: Response): Promise<Record<string, unknown>> {
+  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
-    throw new Error(typeof body.error === "string" ? body.error : "처리하지 못했습니다.");
+    throw new ApiError(
+      typeof body.error === "string" ? body.error : "처리하지 못했습니다.",
+      typeof body.code === "string" ? body.code : null,
+      body,
+    );
   }
   return body;
+}
+
+/** 409 응답의 currentObservation(서버 직렬화 관측)을 안전하게 복원 */
+function observationFromBody(value: unknown): Observation | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  return typeof row.id === "string" && typeof row.clientUpdatedAt === "string"
+    ? (row as unknown as Observation)
+    : null;
 }
 
 function countsFromDraft(draft: Draft): [number, number, number, number] | null {
@@ -98,6 +124,8 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
   const [filter, setFilter] = useState<"all" | "uncounted" | "counted" | "issue">("all");
   const [selected, setSelected] = useState<CatalogItem | null>(null);
   const [editing, setEditing] = useState<Observation | null>(null);
+  // 신규 관측 id는 폼을 열 때 한 번만 발급 — 저장 재시도가 같은 관측을 재사용하게 해 중복 생성을 막는다
+  const [draftObservationId, setDraftObservationId] = useState("");
   const [temporary, setTemporary] = useState(false);
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [photo, setPhoto] = useState<File | null>(null);
@@ -106,23 +134,54 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
   const [savedNotice, setSavedNotice] = useState("");
   const [ownerReviewSessionId, setOwnerReviewSessionId] = useState<string | null>(null);
 
+  // 일시 오류 자동 재시도 (백오프) — 수동 '다시 시도' 버튼과 별개로 최대 3회
+  const retryTimer = useRef<number | null>(null);
+  const retryAttempts = useRef(0);
+  const hasLoadedOnce = useRef(false);
+
   const load = useCallback(async () => {
+    if (retryTimer.current !== null) {
+      window.clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
     setLoading(true);
     setError("");
     try {
-      const data = (await readJson(await authFetch("/api/inventory-audits", { cache: "no-store" }))) as Workspace;
+      const data = (await readJson(await authFetch("/api/inventory-audits", { cache: "no-store" }))) as unknown as Workspace;
+      retryAttempts.current = 0;
+      hasLoadedOnce.current = true;
       setWorkspace(data);
       onLockChange(data.globalDraft.active);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "실사 상태를 불러오지 못했습니다.");
-      onLockChange(true);
+      // 실사 상태 조회 실패가 재고 탭 전체를 잠그지 않도록 격리 — 실제 원장 쓰기 잠금은
+      // 서버 RLS(inventory_audit_ledger_writes_allowed)가 강제하므로 UI는 열어 두고
+      // 실사 카드에만 오류 + 재시도를 띄운다. 한 번이라도 읽은 뒤의 재조회 실패는
+      // 마지막으로 알던 잠금 상태를 유지한다(진행 중 실사를 오판으로 풀지 않음).
+      if (!hasLoadedOnce.current) onLockChange(false);
+      if (retryAttempts.current < 3) {
+        const delay = 5_000 * 2 ** retryAttempts.current;
+        retryAttempts.current += 1;
+        retryTimer.current = window.setTimeout(() => {
+          retryTimer.current = null;
+          void load();
+        }, delay);
+      }
     } finally {
       setLoading(false);
     }
   }, [onLockChange]);
 
+  const retry = useCallback(() => {
+    retryAttempts.current = 0;
+    void load();
+  }, [load]);
+
   useEffect(() => {
     void load();
+    return () => {
+      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
+    };
   }, [load]);
 
   const start = async () => {
@@ -135,7 +194,7 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ movementFrozen: true }),
         }),
-      )) as Workspace & { start?: unknown };
+      )) as unknown as Workspace & { start?: unknown };
       setWorkspace(data);
       onLockChange(true);
       setOpen(true);
@@ -177,6 +236,7 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
     if (item.lockedByOwner) return;
     setSelected(item);
     setEditing(null);
+    setDraftObservationId(crypto.randomUUID());
     setTemporary(false);
     setDraft(EMPTY_DRAFT);
     setPhoto(null);
@@ -186,6 +246,7 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
     if (item.lockedByOwner) return;
     setSelected(item);
     setEditing(observation);
+    setDraftObservationId(observation.id);
     setTemporary(false);
     setDraft({
       location: observation.location,
@@ -205,10 +266,31 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
   const openTemporary = () => {
     setSelected(null);
     setEditing(null);
+    setDraftObservationId(crypto.randomUUID());
     setTemporary(true);
     setDraft({ ...EMPTY_DRAFT, identificationStatus: "unlisted" });
     setPhoto(null);
   };
+
+  /** 저장된 관측 1건을 워크스페이스(관측 목록 + 카탈로그 진행 상태)에 병합 */
+  const applyObservationToWorkspace = useCallback((saved: Observation) => {
+    setWorkspace((current) => {
+      if (!current) return current;
+      const observations = current.observations.some((row) => row.id === saved.id)
+        ? current.observations.map((row) => (row.id === saved.id ? saved : row))
+        : [...current.observations, saved];
+      const catalog = current.catalog.map((item) => {
+        if (item.equipmentId !== saved.equipmentId) return item;
+        const rows = observations.filter((row) => row.equipmentId === item.equipmentId);
+        const issue = rows.some((row) =>
+          row.countMaintenance > 0 || row.countDamaged > 0 || row.countConditionUnknown > 0 || row.missingComponents.length > 0,
+        );
+        const progress: CatalogItem["progress"] = issue ? "issue" : "counted";
+        return { ...item, progress, observationCount: rows.length };
+      });
+      return { ...current, observations, catalog };
+    });
+  }, []);
 
   const saveObservation = async (closeAfter = false) => {
     const counts = countsFromDraft(draft);
@@ -223,64 +305,75 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
     setSaving(true);
     setError("");
     try {
-      const id = editing?.id ?? crypto.randomUUID();
-      const clientUpdatedAt = nextTimestamp(editing?.clientUpdatedAt);
-      const body = {
-        id,
-        equipmentId: temporary ? null : selected?.equipmentId ?? null,
-        temporaryCode: temporary ? `TMP-${id}` : null,
-        temporaryLabel: temporary ? draft.temporaryLabel.trim() : null,
-        location: normalizeAuditLocation(draft.location),
-        countNormal: counts[0],
-        countMaintenance: counts[1],
-        countDamaged: counts[2],
-        countConditionUnknown: counts[3],
-        missingComponents: draft.missing.split(",").map((value) => value.trim()).filter(Boolean),
-        note: draft.note.trim(),
-        identificationStatus: temporary ? draft.identificationStatus : "confirmed",
-        clientUpdatedAt,
-        expectedClientUpdatedAt: editing?.clientUpdatedAt ?? null,
-      };
-      const result = await readJson(
-        await authFetch(`/api/inventory-audits/${sessionId}/observations`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        }),
-      );
-      const saved = result.observation as Observation;
-
-      if (photo) {
-        const blob = await compressInventoryAuditEvidence(photo);
-        const evidenceId = crypto.randomUUID();
-        const form = new FormData();
-        form.set("observationId", saved.id);
-        form.set("evidenceId", evidenceId);
-        form.set("file", blob, `${evidenceId}.jpg`);
-        await readJson(
-          await authFetch(`/api/inventory-audits/${sessionId}/evidence`, {
-            method: "POST",
-            body: form,
+      // 신규 관측도 폼을 열 때 발급한 id를 재사용 — 저장 재시도가 새 관측을 만들지 않는다
+      const id = editing?.id ?? (draftObservationId || crypto.randomUUID());
+      const putObservation = async (base: Observation | null) =>
+        readJson(
+          await authFetch(`/api/inventory-audits/${sessionId}/observations`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              id,
+              equipmentId: temporary ? null : selected?.equipmentId ?? null,
+              temporaryCode: temporary ? `TMP-${id}` : null,
+              temporaryLabel: temporary ? draft.temporaryLabel.trim() : null,
+              location: normalizeAuditLocation(draft.location),
+              countNormal: counts[0],
+              countMaintenance: counts[1],
+              countDamaged: counts[2],
+              countConditionUnknown: counts[3],
+              missingComponents: draft.missing.split(",").map((value) => value.trim()).filter(Boolean),
+              note: draft.note.trim(),
+              identificationStatus: temporary ? draft.identificationStatus : "confirmed",
+              clientUpdatedAt: nextTimestamp(base?.clientUpdatedAt),
+              expectedClientUpdatedAt: base?.clientUpdatedAt ?? null,
+            }),
           }),
         );
+
+      let result: Record<string, unknown>;
+      try {
+        result = await putObservation(editing);
+      } catch (cause) {
+        // 409(stale_write) 복구: 서버가 실어준 현재 관측으로 기준을 맞춘 뒤 1회 자동 재시도 —
+        // 낡은 expectedClientUpdatedAt 때문에 사용자가 영구히 저장 불가에 빠지지 않게 한다
+        const current =
+          cause instanceof ApiError && cause.code === "stale_write"
+            ? observationFromBody(cause.body.currentObservation)
+            : null;
+        if (!current) throw cause;
+        applyObservationToWorkspace(current);
+        setEditing(current);
+        result = await putObservation(current);
+      }
+      const saved = result.observation as Observation;
+
+      // 관측 저장 성공은 사진 업로드 결과와 무관하게 즉시 로컬 상태에 반영한다
+      applyObservationToWorkspace(saved);
+      setEditing(saved);
+
+      if (photo) {
+        try {
+          const blob = await compressInventoryAuditEvidence(photo);
+          const evidenceId = crypto.randomUUID();
+          const form = new FormData();
+          form.set("observationId", saved.id);
+          form.set("evidenceId", evidenceId);
+          form.set("file", blob, `${evidenceId}.jpg`);
+          await readJson(
+            await authFetch(`/api/inventory-audits/${sessionId}/evidence`, {
+              method: "POST",
+              body: form,
+            }),
+          );
+        } catch (cause) {
+          // 관측은 이미 저장됨 — 폼을 열어 둔 채 같은 관측 id로 사진만 다시 시도하게 한다
+          const detail = cause instanceof Error && cause.message ? ` (${cause.message})` : "";
+          setError(`항목은 저장됐고 사진만 실패했습니다${detail}. 다시 저장하면 사진만 다시 전송됩니다.`);
+          return;
+        }
       }
 
-      setWorkspace((current) => {
-        if (!current) return current;
-        const observations = current.observations.some((row) => row.id === saved.id)
-          ? current.observations.map((row) => (row.id === saved.id ? saved : row))
-          : [...current.observations, saved];
-        const catalog = current.catalog.map((item) => {
-          if (item.equipmentId !== saved.equipmentId) return item;
-          const rows = observations.filter((row) => row.equipmentId === item.equipmentId);
-          const issue = rows.some((row) =>
-            row.countMaintenance > 0 || row.countDamaged > 0 || row.countConditionUnknown > 0 || row.missingComponents.length > 0,
-          );
-          const progress: CatalogItem["progress"] = issue ? "issue" : "counted";
-          return { ...item, progress, observationCount: rows.length };
-        });
-        return { ...current, observations, catalog };
-      });
       setSelected(null);
       setEditing(null);
       setTemporary(false);
@@ -340,7 +433,7 @@ export function InventoryAuditMvp({ onLockChange }: { onLockChange(locked: boole
         ) : error && !workspace ? (
           <div className="mt-2">
             <div className="text-[12px] font-semibold text-attention-fg">{error}</div>
-            <button onClick={load} className="tap mt-2 rounded-lg bg-white px-3 py-2 text-[12px] font-bold ring-1 ring-line">다시 시도</button>
+            <button onClick={retry} className="tap mt-2 rounded-lg bg-white px-3 py-2 text-[12px] font-bold ring-1 ring-line">다시 시도</button>
           </div>
         ) : submitted ? (
           <div className="mt-2 rounded-lg bg-checkin-bg px-3 py-2 text-[13px] font-bold text-checkin-fg">제출 완료 · 사장님 승인 대기</div>

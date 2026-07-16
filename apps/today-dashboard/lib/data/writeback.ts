@@ -64,12 +64,29 @@ export async function gasRead(action: string, params: Record<string, GasParam> =
   return res;
 }
 
-/** GAS 쓰기 액션 호출 (실패해도 앱은 옵티미스틱 유지, 로그만) */
-export function gasWrite(action: string, params: Record<string, GasParam>): void {
+export type GasWriteContext = { tradeId?: string; label?: string };
+
+// 파이어-앤-포겟 쓰기의 실패를 화면에 알릴 훅 — store가 등록한다(순환 import 회피).
+// 예전엔 콘솔에만 남아 '저장됨' 표시와 실제 원장이 조용히 어긋났다.
+let gasWriteFailureHandler: ((action: string, error: unknown, context?: GasWriteContext) => void) | null = null;
+export function setGasWriteFailureHandler(
+  handler: (action: string, error: unknown, context?: GasWriteContext) => void,
+): void {
+  gasWriteFailureHandler = handler;
+}
+
+/** GAS 쓰기 액션 호출 (옵티미스틱 유지, 실패 시 등록된 핸들러로 사용자에게 알림) */
+export function gasWrite(action: string, params: Record<string, GasParam>, context?: GasWriteContext): void {
   if (!writeBackEnabled) return;
   gasMutation(action, params)
     .then((res) => {
-      if (res && res.error) console.error("[write-back] GAS 오류:", action, res.error);
+      if (res && res.error) {
+        console.error("[write-back] GAS 오류:", action, res.error);
+        gasWriteFailureHandler?.(action, new Error(String(res.error)), context);
+      }
     })
-    .catch((e) => console.error("[write-back] 호출 실패:", action, e));
+    .catch((e) => {
+      console.error("[write-back] 호출 실패:", action, e);
+      gasWriteFailureHandler?.(action, e, context);
+    });
 }

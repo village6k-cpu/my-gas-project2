@@ -7,6 +7,11 @@ import { normalizeItems } from "../domain/catalog";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const PAGE_SIZE = 1000;
+// 운영 윈도우: 반납일이 최근 N일 이내(+미래 전체)인 거래만 초기 로드.
+// 전체 이력을 매번 내려받으면 거래가 쌓일수록 앱이 선형으로 느려진다.
+// 윈도우 밖 과거 거래는 검색/과거 날짜 진입 시 지연 로드(searchTradesRemote/fetchTradesOverlappingDate).
+const ACTIVE_WINDOW_DAYS = 60;
+const TRADE_ID_CHUNK = 150;
 
 type SupabaseOrder = {
   column: string;
@@ -17,15 +22,26 @@ type PersistTradeOptions = {
   pruneMissingSheetBacked?: boolean;
 };
 
+function activeWindowCutoffISO(): string {
+  return new Date(Date.now() - ACTIVE_WINDOW_DAYS * 86400000).toISOString();
+}
+
+/** 운영 윈도우 시작일(YYYY-MM-DD) — 이보다 과거 날짜 화면은 지연 로드가 필요하다. */
+export function activeWindowStartYmd(): string {
+  return activeWindowCutoffISO().slice(0, 10);
+}
+
 async function fetchRowsPaginated<T>(
   sb: any,
   table: string,
   select: string,
-  orders: SupabaseOrder[] = []
+  orders: SupabaseOrder[] = [],
+  applyFilter?: (query: any) => any
 ): Promise<T[]> {
   const rows: T[] = [];
   for (let from = 0; ; from += PAGE_SIZE) {
     let query = sb.from(table).select(select);
+    if (applyFilter) query = applyFilter(query);
     for (const order of orders) query = query.order(order.column, { ascending: order.ascending ?? true });
     const { data, error } = await query.range(from, from + PAGE_SIZE - 1);
     if (error) throw error;
@@ -56,20 +72,74 @@ function uniqueScheduleRows(trade: Trade): any[] {
   }).filter((row): row is any => !!row);
 }
 
+/** 거래 행 목록에 schedule_items를 붙여 Trade[]로 조립한다(trade_id 청크 병렬 조회). */
+async function attachScheduleItems(sb: any, tradeRows: any[]): Promise<Trade[]> {
+  const ids = tradeRows.map((r: any) => String(r.trade_id));
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += TRADE_ID_CHUNK) chunks.push(ids.slice(i, i + TRADE_ID_CHUNK));
+  const itemPages = await Promise.all(
+    chunks.map((chunk) =>
+      fetchRowsPaginated<any>(
+        sb,
+        "schedule_items",
+        "*",
+        [{ column: "trade_id" }, { column: "sort" }, { column: "schedule_id" }],
+        (q) => q.in("trade_id", chunk)
+      )
+    )
+  );
+  const byTrade = new Map<string, any[]>();
+  for (const it of itemPages.flat()) (byTrade.get(it.trade_id) ?? byTrade.set(it.trade_id, []).get(it.trade_id)!).push(it);
+  return tradeRows.map((r: any) => tradeFromRow(r, dedupeOnsiteItems(normalizeItems((byTrade.get(r.trade_id) ?? []).map(itemFromRow)))));
+}
+
+/** 운영 윈도우(반납일 기준 최근 60일 + 미래 전체) 거래 조회 — 이름은 호환을 위해 유지. */
 export async function fetchAllTrades(): Promise<Trade[]> {
   const sb = supabase;
   if (!sb) return [];
-  const [trades, items] = await Promise.all([
-    fetchRowsPaginated<any>(sb, "trades", "*", [{ column: "trade_id" }]),
-    fetchRowsPaginated<any>(sb, "schedule_items", "*", [
-      { column: "trade_id" },
-      { column: "sort" },
-      { column: "schedule_id" },
-    ]),
-  ]);
-  const byTrade = new Map<string, any[]>();
-  for (const it of items ?? []) (byTrade.get(it.trade_id) ?? byTrade.set(it.trade_id, []).get(it.trade_id)!).push(it);
-  return (trades ?? []).map((r: any) => tradeFromRow(r, dedupeOnsiteItems(normalizeItems((byTrade.get(r.trade_id) ?? []).map(itemFromRow)))));
+  const cutoff = activeWindowCutoffISO();
+  const trades = await fetchRowsPaginated<any>(sb, "trades", "*", [{ column: "trade_id" }], (q) =>
+    q.or(`return_at.gte.${cutoff},return_at.is.null`)
+  );
+  return attachScheduleItems(sb, trades);
+}
+
+/** realtime 변경분 반영용 — 해당 거래만 재조회한다(전량 refetch 대체). */
+export async function fetchTradesByIds(tradeIds: string[]): Promise<Trade[]> {
+  const sb = supabase;
+  const ids = Array.from(new Set(tradeIds.map((id) => String(id || "").trim()).filter(Boolean)));
+  if (!sb || !ids.length) return [];
+  const trades = await fetchRowsPaginated<any>(sb, "trades", "*", [{ column: "trade_id" }], (q) => q.in("trade_id", ids));
+  return attachScheduleItems(sb, trades);
+}
+
+/** 윈도우 밖 과거 거래 검색(지연 로드) — 이름/전화/거래ID 부분일치. */
+export async function searchTradesRemote(query: string, limit = 60): Promise<Trade[]> {
+  const sb = supabase;
+  const term = String(query || "").trim().replace(/[,()%*]/g, "");
+  if (!sb || term.length < 2) return [];
+  const pattern = `*${term}*`;
+  const { data, error } = await sb
+    .from("trades")
+    .select("*")
+    .or(`customer_name.ilike.${pattern},customer_phone.ilike.${pattern},trade_id.ilike.${pattern}`)
+    .order("trade_id", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return attachScheduleItems(sb, data ?? []);
+}
+
+/** 윈도우 밖 과거 날짜 화면 진입 시 그 날짜와 겹치는 거래만 지연 로드. */
+export async function fetchTradesOverlappingDate(date: string): Promise<Trade[]> {
+  const sb = supabase;
+  const day = String(date || "").trim();
+  if (!sb || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return [];
+  const dayStart = `${day}T00:00:00+09:00`;
+  const dayEnd = `${day}T23:59:59+09:00`;
+  const trades = await fetchRowsPaginated<any>(sb, "trades", "*", [{ column: "trade_id" }], (q) =>
+    q.lte("checkout_at", dayEnd).gte("return_at", dayStart)
+  );
+  return attachScheduleItems(sb, trades);
 }
 
 export async function fetchNotes(): Promise<HandoverNote[]> {
@@ -222,15 +292,44 @@ export async function persistNotes(notes: HandoverNote[]): Promise<void> {
   if (delErr) throw delErr;
 }
 
-export function subscribeChanges(onChange: () => void): () => void {
+export type RemoteChange =
+  | { table: "trades" | "schedule_items"; tradeId: string | null }
+  | { table: "handover_notes" };
+
+function tradeIdFromPayload(payload: any): string | null {
+  const row = payload?.new && Object.keys(payload.new).length ? payload.new : payload?.old;
+  const direct = String(row?.trade_id ?? "").trim();
+  if (direct) return direct;
+  // DELETE 이벤트의 old에는 PK(schedule_id)만 올 수 있다 — 접두어(YYMMDD-NNN)에서 복원.
+  const scheduleId = String(row?.schedule_id ?? "").trim();
+  const match = scheduleId.match(/^(\d{6}-\d{3})-/);
+  return match ? match[1] : null;
+}
+
+/**
+ * 변경 이벤트를 테이블·거래 단위로 전달한다(전량 refetch 대신 부분 재조회용).
+ * onResync는 realtime 재연결 시 호출 — 끊긴 동안의 이벤트 유실을 전체 수렴으로 복구한다.
+ */
+export function subscribeChanges(onChange: (change: RemoteChange) => void, onResync?: () => void): () => void {
   const sb = supabase;
   if (!sb) return () => {};
+  let wasSubscribed = false;
   const ch = sb
     .channel("village-changes")
-    .on("postgres_changes", { event: "*", schema: "village", table: "trades" }, onChange)
-    .on("postgres_changes", { event: "*", schema: "village", table: "schedule_items" }, onChange)
-    .on("postgres_changes", { event: "*", schema: "village", table: "handover_notes" }, onChange)
-    .subscribe();
+    .on("postgres_changes", { event: "*", schema: "village", table: "trades" }, (payload: any) =>
+      onChange({ table: "trades", tradeId: tradeIdFromPayload(payload) })
+    )
+    .on("postgres_changes", { event: "*", schema: "village", table: "schedule_items" }, (payload: any) =>
+      onChange({ table: "schedule_items", tradeId: tradeIdFromPayload(payload) })
+    )
+    .on("postgres_changes", { event: "*", schema: "village", table: "handover_notes" }, () =>
+      onChange({ table: "handover_notes" })
+    )
+    .subscribe((status: string) => {
+      if (status !== "SUBSCRIBED") return;
+      if (wasSubscribed) onResync?.();
+      wasSubscribed = true;
+    });
   return () => {
     sb.removeChannel(ch);
   };

@@ -24,7 +24,19 @@ async function callGas(params: Record<string, string>): Promise<NextResponse> {
   qs.set("key", GAS_KEY);
   const r = await fetch(`${GAS_URL}?${qs.toString()}`, { redirect: "follow", signal: AbortSignal.timeout(110_000) });
   const body = await r.text();
-  return new NextResponse(body, { headers: { "content-type": "application/json" } });
+  // 업스트림 상태 그대로 전파 — 200으로 마스킹하면 클라이언트 에러 분기가 죽고
+  // GET(list)의 res.ok 캐시 가드도 항상 참이 되어 에러 본문이 12초 캐시된다.
+  return new NextResponse(body, { status: r.status, headers: { "content-type": "application/json" } });
+}
+
+// GAS가 200 상태로 HTML 에러 페이지나 {error:...}를 반환하는 경우까지 캐시에서 걸러낸다
+function isCacheableListBody(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return !!parsed && typeof parsed === "object" && !("error" in (parsed as Record<string, unknown>));
+  } catch {
+    return false;
+  }
 }
 
 // 목록 (action=list, scan)
@@ -40,7 +52,8 @@ export async function GET(req: NextRequest) {
       }
       const res = await callGas({ action });
       const body = await res.clone().text();
-      if (res.ok) listCache.set("list", { at: Date.now(), body });
+      // 성공 + 정상 JSON 본문만 캐시 — 에러 본문이 12초간 재배포되지 않게
+      if (res.ok && isCacheableListBody(body)) listCache.set("list", { at: Date.now(), body });
       return res;
     }
     return await callGas({ action });
