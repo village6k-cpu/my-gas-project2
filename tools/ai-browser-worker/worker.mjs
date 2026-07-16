@@ -836,8 +836,14 @@ function normalizeSheetEquipmentItems(decision = {}) {
     .map((item, index) => {
       const proposed = text(item.item).trim();
       const rawItem = text(reservationSource[index]?.raw_text || item.rawItem).trim();
+      const exactMasterName = text(reservationSource[index]?.exact_name_from_set_master).trim();
+      const isVerifiedExactMasterName = decision.safety_checks?.exact_equipment_name_verified_from_set_master === true
+        && exactMasterName
+        && normalizeEquipmentIdentityText(exactMasterName) === normalizeEquipmentIdentityText(proposed);
       return {
-        item: rawItem && proposed && !isGroundedEquipmentRewrite(rawItem, proposed) ? rawItem : proposed,
+        item: rawItem && proposed && !isVerifiedExactMasterName && !isGroundedEquipmentRewrite(rawItem, proposed)
+          ? rawItem
+          : proposed,
         quantity: item.quantity === null || item.quantity === undefined || item.quantity === '' ? 1 : item.quantity
       };
     })
