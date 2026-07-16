@@ -12,3 +12,4 @@ tools/kakao-dom-bridge/.env
 .env.*
 !.env.example
 gas-backup/
+/.worktrees/
