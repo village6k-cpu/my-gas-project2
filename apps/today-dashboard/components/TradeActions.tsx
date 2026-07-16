@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import type { EquipmentItem, Trade } from "@/lib/domain/types";
+import { isCheckoutBaselineLocked } from "@/lib/domain/status";
 import { authFetch } from "@/lib/data/authFetch";
 import { deleteTradeRemote } from "@/lib/data/remote";
 import {
@@ -143,7 +144,7 @@ function TradeEditSheet({ trade, onClose }: { trade: Trade; onClose: () => void 
     onClose();
   }
 
-  const equipmentLocked = trade.setupDone || trade.returnDone || trade.equipments.some((item) => Number(item.takenQty || 0) > 0);
+  const equipmentLocked = isCheckoutBaselineLocked(trade);
 
   return (
     <div className="fixed inset-0 z-[80] flex items-end justify-center bg-black/45 sm:items-center" onClick={onClose}>

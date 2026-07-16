@@ -18,7 +18,7 @@ import type {
 import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
-import { returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
+import { isCheckoutBaselineLocked, returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
 import { cancelTradeRemote, deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistReturnCounts, persistTrade, subscribeChanges } from "./remote";
 import { gasMutation, gasRead, gasWrite, writeBackDisabledReason, writeBackEnabled } from "./writeback";
 import {
@@ -70,6 +70,7 @@ function dayData(date: string) {
 
 // ── Supabase(실데이터) 모드 ────────────────────────────────────
 let remoteLoaded = false;
+let remoteLoadPromise: Promise<void> | null = null;
 let subscribed = false;
 let refetchTimer: ReturnType<typeof setTimeout> | null = null;
 const persistTimers: Record<string, ReturnType<typeof setTimeout>> = {};
@@ -166,7 +167,7 @@ export async function repairSearchResults(query: string): Promise<void> {
   await applyDashboardRepairs(changed, mutationSeqAtSearch);
 }
 
-async function loadRemote() {
+async function loadRemoteOnce(): Promise<void> {
   try {
     const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
     const mergedTrades = preservePhotosInSnapshot(trades);
@@ -204,6 +205,17 @@ async function loadRemote() {
       void pollSheetChangesNow();
     }, POLL_MS);
   }
+}
+
+function loadRemote(): Promise<void> {
+  if (remoteLoadPromise) return remoteLoadPromise;
+  const task = loadRemoteOnce();
+  remoteLoadPromise = task;
+  const clear = () => {
+    if (remoteLoadPromise === task) remoteLoadPromise = null;
+  };
+  void task.then(clear, clear);
+  return task;
 }
 
 /**
@@ -382,6 +394,19 @@ function flashSave(tradeId?: string) {
       if (state.toast?.id === id) set({ toast: null });
     }, 1100);
   }, 420);
+}
+
+function showTransientError(text: string, duration = 4_000) {
+  const id = ++toastSeq;
+  set({ toast: { id, text, kind: "error" } });
+  if (typeof window === "undefined") return;
+  window.setTimeout(() => {
+    if (state.toast?.id === id) set({ toast: null });
+  }, duration);
+}
+
+export function clearToast() {
+  if (state.toast) set({ toast: null });
 }
 
 /** 원장 확정이 필요한 작업은 완료 전까지 저장 중 상태를 유지한다. */
@@ -700,10 +725,7 @@ export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult>
 // ── 품목별 반출/반납 상태 ───────────────────────────────────────
 export function setItemCheckout(tradeId: string, scheduleId: string, next: CheckoutState) {
   const currentTrade = state.trades.find((t) => t.tradeId === tradeId);
-  const baselineStarted = !!currentTrade && (
-    currentTrade.setupDone || currentTrade.returnDone ||
-    currentTrade.equipments.some((equipment) => Number(equipment.takenQty || 0) > 0)
-  );
+  const baselineStarted = !!currentTrade && isCheckoutBaselineLocked(currentTrade);
   if (baselineStarted) {
     set({ toast: { id: ++toastSeq, text: "⚠️ 반출 기준선이 고정되어 품목 포함 여부를 바꿀 수 없습니다", kind: "error" } });
     return;
@@ -739,7 +761,7 @@ export async function setItemName(tradeId: string, scheduleId: string, name: str
   if (!clean) return false;
 
   if (isSupabase && !writeBackEnabled) {
-    set({ toast: { id: ++toastSeq, text: `⚠️ 장비명 변경 실패: ${writeBackDisabledReason}`, kind: "error" } });
+    showTransientError(`⚠️ 장비명 변경 실패: ${writeBackDisabledReason}`);
     return false;
   }
 
@@ -781,7 +803,7 @@ export async function setItemName(tradeId: string, scheduleId: string, name: str
     return true;
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
-    set({ toast: { id: ++toastSeq, text: `⚠️ 장비명 변경 실패 — ${error}`, kind: "error" } });
+    showTransientError(`⚠️ 장비명 변경 실패 — ${error}`);
     return false;
   }
 }

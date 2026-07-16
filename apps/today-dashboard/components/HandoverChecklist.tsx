@@ -3,12 +3,13 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
-import { groupBySet, handoverSummary, realDeviceHeaders, singleControllableSetItem } from "@/lib/domain/status";
+import { groupBySet, handoverSummary, isCheckoutBaselineLocked, realDeviceHeaders, singleControllableSetItem } from "@/lib/domain/status";
 import { categoryOf, coarseGroup } from "@/lib/domain/catalog";
 import { searchEquipmentCatalog, useEquipmentCatalog, type EquipmentCatalogItem } from "@/lib/data/equipmentCatalog";
 import { SetBox, LooseList } from "./SetBox";
 import {
   addOnsiteItems,
+  clearToast,
   removeItem,
   setItemCheckout,
   setItemName,
@@ -161,12 +162,14 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
   const memos = itemMemoEntries(e);
   const checkoutMemo = String(e.memoCheckout || "").trim();
   const checkinMemo = String(e.memoCheckin || "").trim();
+  const baselineLocked = isCheckoutBaselineLocked(t);
   return (
     <li className={`px-3 ${setTone ? "bg-brand-50" : rowTint(e, excluded)}`}>
       <div className="flex items-center gap-2.5 py-2.5">
         {setBadge && <span className="shrink-0 rounded-md bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">세트</span>}
         <button
           onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "taken")}
+          disabled={baselineLocked}
           className={`tap flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 ${
             taken ? "border-brand-600 bg-brand-600 text-white" : excluded ? "border-attention-ring bg-white text-attention-fg" : "border-line bg-white text-transparent"
           }`}
@@ -183,7 +186,9 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
           {partial ? `${e.takenQty}/${e.qty}` : `×${e.qty}`}
         </span>
 
-        {e.onsite ? (
+        {baselineLocked ? (
+          <span className="shrink-0 rounded-md bg-line/30 px-1.5 py-1 text-[11px] font-bold text-ink-faint">고정</span>
+        ) : e.onsite ? (
           <button onClick={() => removeItem(t.tradeId, e.scheduleId)} className="tap shrink-0 px-1 text-ink-faint">✕</button>
         ) : (
           <button onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "excluded")} className={`tap shrink-0 rounded-md px-1.5 py-1 text-[11.5px] font-bold ${excluded ? "bg-attention-fg text-white" : "text-ink-faint ring-1 ring-line"}`}>제외</button>
@@ -212,14 +217,22 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
 
       {open && (
         <div className="space-y-2 pb-2.5 pl-9">
-          <div className="block text-[12px] font-semibold text-ink-mute">
-            장비명
-            <EquipmentNameCombobox value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />
-          </div>
-          <div className="flex items-center gap-2 text-[12px] text-ink-mute">
-            예약 수량
-            <Stepper value={e.qty} min={1} onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)} />
-          </div>
+          {baselineLocked ? (
+            <div className="rounded-lg bg-paper px-2.5 py-2 text-[12px] font-semibold leading-snug text-ink-mute ring-1 ring-line">
+              반출 기준선 고정 · 이름과 예약 수량은 바꾸지 않습니다. 추가로 나간 장비는 아래 ‘현장 추가’로 기록하세요.
+            </div>
+          ) : (
+            <>
+              <div className="block text-[12px] font-semibold text-ink-mute">
+                장비명
+                <EquipmentNameCombobox value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />
+              </div>
+              <div className="flex items-center gap-2 text-[12px] text-ink-mute">
+                예약 수량
+                <Stepper value={e.qty} min={1} onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)} />
+              </div>
+            </>
+          )}
           {checkinMemo && checkinMemo !== checkoutMemo && (
             <div className="flex items-start gap-1.5 rounded-md bg-warn-bg px-2 py-1 text-[12px] font-semibold leading-snug text-warn-fg ring-1 ring-warn-ring">
               <MemoTag phase="checkin" className="mt-[1px]" />
@@ -251,6 +264,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
   const submit = async () => {
     const name = picked ? picked.name : q.trim();
     if (!name || submitting) return;
+    clearToast();
     let entries: OnsiteEntry[];
     if (isSet && picked) {
       entries = [

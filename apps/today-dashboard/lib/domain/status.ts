@@ -55,6 +55,17 @@ export function phaseForDate(t: Trade, date: string): "checkout" | "checkin" | "
   return "none";
 }
 
+/** GAS/Supabase의 반출 기준선과 동일한 잠금 판정을 UI·저장 경로가 공유한다. */
+export function isCheckoutBaselineLocked(t: Trade): boolean {
+  return (
+    t.setupDone ||
+    t.returnDone ||
+    t.contractStatus === "반출" ||
+    t.contractStatus === "반납완료" ||
+    t.equipments.some((item) => Number(item.takenQty || 0) > 0)
+  );
+}
+
 // ── 반납: 품목 종류별 합산 ──────────────────────────────────────
 export interface AggReturn {
   name: string;

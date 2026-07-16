@@ -6,7 +6,9 @@ const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 const checklist = read('apps/today-dashboard/components/HandoverChecklist.tsx');
+const tradeActions = read('apps/today-dashboard/components/TradeActions.tsx');
 const store = read('apps/today-dashboard/lib/data/store.ts');
+const status = read('apps/today-dashboard/lib/domain/status.ts');
 const gasRoute = read('apps/today-dashboard/app/api/gas/route.ts');
 const sheetApi = read('sheetAPI.js');
 const checkAvailability = read('checkAvailability.js');
@@ -27,7 +29,35 @@ assert(
   checklist.includes('EquipmentNameCombobox') &&
     checklist.includes('장비명') &&
     checklist.includes('onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)}'),
-  'expanded equipment details must allow editing the registered equipment name with a catalog dropdown'
+  'pre-checkout equipment details must allow editing the registered equipment name with a catalog dropdown'
+);
+assert(
+  /export function isCheckoutBaselineLocked\(t: Trade\)/.test(status) &&
+    /t\.contractStatus === "반출"/.test(status) &&
+    /Number\(item\.takenQty \|\| 0\) > 0/.test(status),
+  'one shared policy must treat durable quantities and checkout contract status as a locked checkout baseline'
+);
+assert(
+  /const baselineLocked = isCheckoutBaselineLocked\(t\)/.test(checklist) &&
+    /baselineLocked \? \([\s\S]*반출 기준선 고정[\s\S]*\) : \([\s\S]*EquipmentNameCombobox/.test(checklist),
+  'checkout rows must replace name/quantity editors with a read-only explanation after the baseline is locked'
+);
+assert(
+  /disabled=\{baselineLocked\}[\s\S]*setItemCheckout/.test(checklist) ||
+    /setItemCheckout[\s\S]{0,500}disabled=\{baselineLocked\}/.test(checklist),
+  'checkout inclusion controls must not offer an operation that the backend guarantees will reject'
+);
+assert(
+  /isCheckoutBaselineLocked\(trade\)/.test(tradeActions) &&
+    /isCheckoutBaselineLocked\(currentTrade\)/.test(store),
+  'all edit entry points must use the same checkout-baseline lock policy'
+);
+assert(
+  /export function clearToast\(\)/.test(store) &&
+    /function showTransientError\([\s\S]{0,420}setTimeout[\s\S]{0,220}toast: null/.test(store) &&
+    /setItemName[\s\S]*showTransientError\(`⚠️ 장비명 변경 실패/.test(store) &&
+    /function OnsiteCombobox[\s\S]*const submit = async \(\) => \{[\s\S]{0,320}clearToast\(\)/.test(checklist),
+  'stale rename failures must expire and be cleared before a separate on-site add operation starts'
 );
 assert(
   checklist.includes('useEffect') && /if \(!dirty\)[\s\S]*setQ\(value\)/.test(checklist),

@@ -347,6 +347,7 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
 }
 
 function needsDashboardDetailRepair(t: Trade): boolean {
+  if (t.contractStatus === "취소" || t.contractStatus === "반납완료") return false;
   return t.equipments.length === 0 || !t.contractUrl;
 }
 
@@ -476,7 +477,11 @@ export async function repairDashboardDetailsForIncompleteTrades(current: Trade[]
         if (!repairIds.has(tid) || changed.has(tid)) continue;
         const base = existing.get(tid);
         if (!base) continue;
-        changed.set(tid, mergeDashboard(base, it));
+        const merged = mergeDashboard(base, it);
+        const filledEquipment = base.equipments.length === 0 && merged.equipments.length > 0;
+        const filledContract = !base.contractUrl && !!merged.contractUrl;
+        if (!filledEquipment && !filledContract) continue;
+        changed.set(tid, merged);
       }
     } catch {
       /* 복구 실패 날짜만 건너뜀 */
