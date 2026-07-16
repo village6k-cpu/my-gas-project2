@@ -13,21 +13,43 @@ export const writeBackDisabledReason = !isSupabase
 
 type GasParam = string | number | boolean;
 
+export class GasMutationError extends Error {
+  readonly outcomeUnknown: boolean;
+
+  constructor(message: string, outcomeUnknown = false) {
+    super(message);
+    this.name = "GasMutationError";
+    this.outcomeUnknown = outcomeUnknown;
+  }
+}
+
+export function isGasOutcomeUnknownError(error: unknown): boolean {
+  return error instanceof GasMutationError && error.outcomeUnknown;
+}
+
 /** GAS 쓰기 액션 호출 후 응답을 반환해야 하는 변이에 사용 */
 export async function gasMutation(action: string, params: Record<string, GasParam>): Promise<any> {
   if (!writeBackEnabled) return { skipped: true };
   const mustPost = action === "uploadDashboardPhoto" || String(params.data ?? "").length > 8_000;
-  const r = mustPost
-    ? await gasPost({ action, ...params })
-    : await (async () => {
-        const qs = new URLSearchParams({ action });
-        for (const [k, v] of Object.entries(params)) qs.set(k, String(v));
-        return gasFetch(qs.toString());
-      })();
-  const res = await r.json().catch(() => null);
-  if (!r.ok || (res && res.error)) {
-    throw new Error((res && res.error) || `GAS 호출 실패 (${r.status})`);
+  let r: Response;
+  try {
+    r = mustPost
+      ? await gasPost({ action, ...params })
+      : await (async () => {
+          const qs = new URLSearchParams({ action });
+          for (const [k, v] of Object.entries(params)) qs.set(k, String(v));
+          return gasFetch(qs.toString());
+        })();
+  } catch (error) {
+    // 요청이 서버에 도달한 뒤 응답만 끊긴 경우와 전송 전 실패를 브라우저는 구분할 수 없다.
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new GasMutationError(`GAS 호출 실패: ${detail}`, true);
   }
+  const res = await r.json().catch(() => null);
+  if (!r.ok) {
+    throw new GasMutationError((res && res.error) || `GAS 호출 실패 (${r.status})`, r.status >= 500);
+  }
+  if (res && res.error) throw new GasMutationError(res.error, false);
   return res;
 }
 

@@ -151,15 +151,26 @@ test('API나 시트에서 수량·장비명·세트·거래 귀속을 바꾸면 
   assert.match(code, /스케줄상세[\s\S]{0,1800}col\s*<=\s*5[\s\S]{0,1800}editEndCol\s*>=\s*1[\s\S]{0,2200}invalidateDashboardReturnInspectionForTrade_/);
 });
 
-test('반출완료는 불변 기준선 저장 성공 뒤에만 화면 상태를 바꾸고 기존 기준선을 덮어쓰지 않는다', () => {
+test('반출완료는 화면에 즉시 반영하되 불변 기준선은 GAS 성공 뒤에만 저장하고 기존 기준선을 덮어쓰지 않는다', () => {
   const gas = read('checkAvailability.js');
   const supa = read('supabaseSync.js');
+  const remote = read('apps/today-dashboard/lib/data/remote.ts');
   const store = read('apps/today-dashboard/lib/data/store.ts');
   const toggleStart = store.indexOf('export async function toggleSetup');
   const toggleEnd = store.indexOf('\nexport type ToggleReturnResult', toggleStart);
   const toggle = store.slice(toggleStart, toggleEnd);
-  assert.ok(toggle.indexOf('await gasMutation("toggleSetup"') < toggle.indexOf('mutateTrade(tradeId'));
+  const optimisticMutation = toggle.indexOf('mutateTrade(tradeId');
+  const gasMutation = toggle.indexOf('await gasMutation("toggleSetup"');
+  assert.ok(optimisticMutation >= 0 && optimisticMutation < gasMutation);
+  assert.match(toggle.slice(optimisticMutation, gasMutation), /setupDone: done[\s\S]*, false\)/);
+  assert.doesNotMatch(toggle, /flushTradePersist\(tradeId\)/);
   assert.match(gas, /supaCaptureCheckoutBaseline_\(tid, checkable, true\)/);
+  assert.match(gas, /supaSetTradeSetupDone_\(tid, true, doneAt\)[\s\S]{0,500}if \(!setupSaved \|\| !setupSaved\.ok\)/);
+  assert.match(supa, /function supaSetTradeSetupDone_[\s\S]{0,1800}Prefer: 'return=representation'[\s\S]{0,300}setup_done: done === true/);
+  assert.match(remote, /delete tradeRow\.setup_done;[\s\S]{0,120}delete tradeRow\.setup_done_at;/);
+  const periodicStart = supa.indexOf('function buildSupabaseTrades_');
+  const periodicEnd = supa.indexOf('/** payload 키 구성이 같은 행끼리', periodicStart);
+  assert.doesNotMatch(supa.slice(periodicStart, periodicEnd), /setup_done(?:_at)?:/);
   assert.match(supa, /function supaGetCheckoutBaselineState_/);
   assert.match(supa, /if \(!same\)[\s\S]{0,220}이미 고정된 반출 기준선/);
   assert.match(supa, /if \(!newRows\.length\) \{[\s\S]{0,180}markDashboardCheckoutBaselineStarted_\(tid\)[\s\S]{0,180}reused: true/);

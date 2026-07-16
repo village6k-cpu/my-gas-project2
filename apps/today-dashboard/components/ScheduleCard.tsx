@@ -162,7 +162,7 @@ export function ScheduleCard({
             <Check className="h-3.5 w-3.5" />
           </span>
           {isCheckout
-            ? saving ? "반출 처리 중…" : done ? "반출 완료됨" : "반출 완료"
+            ? saving ? done ? "반출 완료됨 · 저장 확인 중…" : "반출 처리 중…" : done ? "반출 완료됨" : "반출 완료"
             : saving ? "반납 처리 중…"
             : invalidClosedReturn ? "잘못 닫힌 카드 다시 열기"
             : done ? "반납 완료됨"
