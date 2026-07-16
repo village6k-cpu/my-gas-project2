@@ -122,6 +122,48 @@ function supaCancelTrade_(tid) {
 }
 
 /**
+ * 반출완료 서버 권한 저장. 브라우저 전체 upsert와 분리해 다른 탭/기기의 오래된
+ * 스냅샷이 setup_done을 되돌리지 못하게 한다. 행 없음도 성공으로 간주하지 않는다.
+ */
+function supaSetTradeSetupDone_(tid, done, doneAt) {
+  tid = String(tid || '').trim();
+  if (!tid) return { ok: false, error: '거래ID 없음' };
+  try {
+    var cfg = SUPA_CFG_();
+    var token = supaToken_(cfg);
+    if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음' };
+    var res = UrlFetchApp.fetch(
+      cfg.url + '/rest/v1/trades?trade_id=eq.' + encodeURIComponent(tid) + '&select=trade_id',
+      {
+        method: 'patch',
+        contentType: 'application/json',
+        headers: {
+          apikey: cfg.apikey,
+          Authorization: 'Bearer ' + token,
+          'Content-Profile': 'village',
+          'Accept-Profile': 'village',
+          Prefer: 'return=representation'
+        },
+        payload: JSON.stringify({
+          setup_done: done === true,
+          setup_done_at: done === true ? String(doneAt || '') : null
+        }),
+        muteHttpExceptions: true
+      }
+    );
+    var code = res.getResponseCode();
+    if (code >= 300) {
+      return { ok: false, error: 'Supabase 반출완료 저장 실패 (' + code + ')' };
+    }
+    var rows = JSON.parse(res.getContentText() || '[]');
+    if (!rows || !rows.length) return { ok: false, error: 'Supabase 거래 행 없음: ' + tid };
+    return { ok: true, tradeId: tid };
+  } catch (err) {
+    return { ok: false, error: 'Supabase 반출완료 저장 오류: ' + (err && err.message ? err.message : String(err)) };
+  }
+}
+
+/**
  * 반납완료 서버 검증용 상세 수량 조회.
  * 브라우저가 보낸 boolean을 신뢰하지 않고, 먼저 내구 저장된 village.trades.return_counts를
  * GAS가 봇 세션으로 직접 읽는다. 조회 실패/행 없음은 완료 허용이 아니라 명시적 실패다.
@@ -455,8 +497,6 @@ function buildSupabaseTrades_(tids) {
       checkout_at: startISO,
       return_at: endISO,
       contract_status: d.contractStatus || m.status || '예약',
-      setup_done: !!d.setupDone,
-      setup_done_at: d.setupDoneAt || null,
       return_done: !!d.returnDone,
       return_done_at: d.returnDoneAt || null,
       contract_url: d.contractUrl || null,

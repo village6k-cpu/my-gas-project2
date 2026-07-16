@@ -79,6 +79,20 @@ export async function fetchNotes(): Promise<HandoverNote[]> {
   return (data ?? []).map((r: any) => ({ id: r.id, body: r.body ?? "" }));
 }
 
+/** 결과 미확정 반출완료 요청을 서버 저장값으로 재조정한다. */
+export async function fetchSetupCompletion(tradeId: string): Promise<{ done: boolean; doneAt: string | null }> {
+  const sb = supabase;
+  if (!sb) throw new Error("Supabase 연결 없음");
+  const { data, error } = await sb
+    .from("trades")
+    .select("setup_done,setup_done_at")
+    .eq("trade_id", tradeId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error(`반출완료 확인 대상 거래가 없습니다: ${tradeId}`);
+  return { done: !!data.setup_done, doneAt: data.setup_done_at ?? null };
+}
+
 async function pruneMissingSheetBackedItems(sb: any, tradeId: string, rows: any[]): Promise<void> {
   const keepSet = new Set(rows.map((row) => String(row.schedule_id || "").trim()).filter(Boolean));
   if (!keepSet.size) return;
@@ -106,7 +120,12 @@ export async function persistTrade(trade: Trade, options: PersistTradeOptions = 
   // supabase-js는 실패 시 throw하지 않고 {error}를 반환한다. 세션 만료(RLS 거부)·네트워크·스키마
   // 오류를 그냥 무시하면 반출/반납 체크·결제상태가 유실됐는데도 화면엔 '저장됨'으로 뜬다.
   // error를 확인해 throw → schedulePersistTrade의 catch가 사용자에게 실패를 알리도록 한다.
-  const { error: tradeErr } = await sb.from("trades").upsert(tradeToRow(trade), { onConflict: "trade_id" });
+  const tradeRow = tradeToRow(trade);
+  // 반출완료는 GAS가 기준선과 함께 확정하는 서버 권한 필드다. 브라우저의 오래된 전체
+  // 스냅샷이 다른 탭/기기에서 뒤늦게 upsert되어 완료값을 false로 되돌리지 못하게 한다.
+  delete tradeRow.setup_done;
+  delete tradeRow.setup_done_at;
+  const { error: tradeErr } = await sb.from("trades").upsert(tradeRow, { onConflict: "trade_id" });
   if (tradeErr) throw tradeErr;
   const rows = uniqueScheduleRows(trade);
   if (rows.length) {

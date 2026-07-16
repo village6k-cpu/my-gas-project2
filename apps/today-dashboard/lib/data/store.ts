@@ -19,8 +19,8 @@ import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { isCheckoutBaselineLocked, returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
-import { cancelTradeRemote, deleteScheduleItem, fetchAllTrades, fetchNotes, persistNotes, persistReturnCounts, persistTrade, subscribeChanges } from "./remote";
-import { gasMutation, gasRead, gasWrite, writeBackDisabledReason, writeBackEnabled } from "./writeback";
+import { cancelTradeRemote, deleteScheduleItem, fetchAllTrades, fetchNotes, fetchSetupCompletion, persistNotes, persistReturnCounts, persistTrade, subscribeChanges } from "./remote";
+import { gasMutation, gasRead, gasWrite, isGasOutcomeUnknownError, writeBackDisabledReason, writeBackEnabled } from "./writeback";
 import {
   configurePhotoUploadQueue,
   discardPhotoUpload,
@@ -77,6 +77,7 @@ const persistTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 const persistGenerations: Record<string, number> = {};
 const persistInFlight: Record<string, Promise<Trade> | undefined> = {};
 const pendingPersistTrades = new Set<string>();
+const setupOutcomeRetryTimers: Record<string, number | undefined> = {};
 const returnCountPersistTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
 const returnCountPersistInFlight: Record<string, Promise<Trade> | undefined> = {};
 const pendingReturnCountTrades = new Set<string>();
@@ -105,7 +106,12 @@ function markLocalMutation() {
 }
 
 function hasPendingPersist(): boolean {
-  return pendingPersistTrades.size > 0 || pendingReturnCountTrades.size > 0 || notesPersistPending;
+  return (
+    pendingPersistTrades.size > 0 ||
+    pendingReturnCountTrades.size > 0 ||
+    notesPersistPending ||
+    Object.keys(state.savingTrades).length > 0
+  );
 }
 
 function canApplyRemoteSnapshot(mutationSeqAtStart: number): boolean {
@@ -426,6 +432,43 @@ function finishTradeSave(tradeId: string, id: number, kind: "saved" | "error", t
   }, kind === "error" ? 4_000 : 1_100);
 }
 
+/** 응답만 유실된 쓰기는 실패로 단정하지 않고 같은 목표 상태를 멱등 재시도한다. */
+function queueSetupOutcomeRetry(
+  tradeId: string,
+  done: boolean,
+  optimisticDoneAt: string | null,
+  saveId: number,
+  attempt = 1,
+): void {
+  if (typeof window === "undefined") return;
+  if (setupOutcomeRetryTimers[tradeId]) window.clearTimeout(setupOutcomeRetryTimers[tradeId]);
+  const delay = Math.min(800 * (2 ** (attempt - 1)), 10_000);
+  setupOutcomeRetryTimers[tradeId] = window.setTimeout(async () => {
+    delete setupOutcomeRetryTimers[tradeId];
+    try {
+      const res = await gasMutation("toggleSetup", { tid: tradeId, done });
+      const doneAt = done ? String(res?.setupDoneAt || res?.doneAt || optimisticDoneAt) : null;
+      mutateTrade(tradeId, (t) => ({ ...t, setupDone: done, setupDoneAt: doneAt }), false);
+      finishTradeSave(tradeId, saveId, "saved", "저장됨");
+    } catch (error) {
+      // 최초 요청의 응답을 잃은 뒤에는 재시도 오류만으로 최초 미커밋을 증명할 수 없다.
+      // Supabase 권한 필드가 목표값이면 완료하고, 아니면 같은 멱등 요청을 계속 재확인한다.
+      try {
+        const confirmed = await fetchSetupCompletion(tradeId);
+        if (confirmed.done === done) {
+          mutateTrade(tradeId, (t) => ({ ...t, setupDone: done, setupDoneAt: confirmed.doneAt }), false);
+          finishTradeSave(tradeId, saveId, "saved", "저장됨");
+          return;
+        }
+      } catch (confirmError) {
+        console.error("[supabase] 반출완료 결과 재확인 실패:", confirmError);
+      }
+      console.error("[write-back] 반출완료 결과 미확정 재시도:", error);
+      queueSetupOutcomeRetry(tradeId, done, optimisticDoneAt, saveId, attempt + 1);
+    }
+  }, delay);
+}
+
 function mutateTrade(tradeId: string, fn: (t: Trade) => Trade, persist = true) {
   markLocalMutation();
   let changed: Trade | undefined;
@@ -545,7 +588,7 @@ function rejectSheetBackedRemovalWithoutWriteBack(tradeId: string, scheduleId?: 
 }
 
 // ── 거래 단위 검수 토글 ─────────────────────────────────────────
-export type ToggleSetupResult = { ok: true } | { ok: false; error: string };
+export type ToggleSetupResult = { ok: true; warning?: string } | { ok: false; error: string };
 
 export type TradeDetailsInput = {
   customerName: string;
@@ -632,6 +675,8 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
   const current = state.trades.find((t) => t.tradeId === tradeId);
   if (!current) return { ok: false, error: "거래를 찾을 수 없습니다" };
   const done = !current.setupDone;
+  const previousDone = current.setupDone;
+  const previousDoneAt = current.setupDoneAt ?? null;
   if (isSupabase && !writeBackEnabled) {
     const error = `반출 상태 변경 실패: ${writeBackDisabledReason}`;
     set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
@@ -639,24 +684,31 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
   }
 
   const saveId = beginTradeSave(tradeId);
-  let gasSucceeded = false;
+  const optimisticDoneAt = done ? new Date().toISOString() : null;
+  // 버튼은 즉시 완료 상태로 바꾼다. persist=false라 GAS 기준선보다 먼저 원격 저장되지는 않는다.
+  mutateTrade(tradeId, (t) => ({ ...t, setupDone: done, setupDoneAt: optimisticDoneAt }), false);
   try {
-    // 반출 기준선이 GAS/Supabase에 먼저 고정된 뒤에만 화면을 완료로 바꾼다.
+    // 화면은 즉시 반응하지만, 내구 상태는 GAS가 기준선과 Supabase 완료값을 함께 확정한다.
     const res = await gasMutation("toggleSetup", { tid: tradeId, done });
-    gasSucceeded = true;
-    const doneAt = done ? String(res?.setupDoneAt || res?.doneAt || new Date().toISOString()) : null;
-    mutateTrade(tradeId, (t) => ({ ...t, setupDone: done, setupDoneAt: doneAt }));
-    if (isSupabase) await flushTradePersist(tradeId);
+    const doneAt = done ? String(res?.setupDoneAt || res?.doneAt || optimisticDoneAt) : null;
+    mutateTrade(tradeId, (t) => ({ ...t, setupDone: done, setupDoneAt: doneAt }), false);
     finishTradeSave(tradeId, saveId, "saved", "저장됨");
     return { ok: true };
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
-    const error = gasSucceeded
-      ? `원장 반출 상태는 변경됐지만 앱 저장 확인에 실패했습니다. 새로고침 후 재확인해주세요 — ${detail}`
-      : detail;
     console.error("[write-back] toggleSetup 실패:", e);
-    finishTradeSave(tradeId, saveId, "error", `⚠️ 반출 상태 변경 실패 — ${error}`);
-    return { ok: false, error };
+    if (isGasOutcomeUnknownError(e)) {
+      // GAS가 저장을 끝낸 뒤 응답만 40초 제한에 걸릴 수 있다. 결과 미확정은 완료 표시와
+      // 저장 중 보호를 유지한 채 같은 목표 상태를 재시도하고, 절대 즉시 롤백하지 않는다.
+      const warning = `반출완료는 표시됐고 서버 응답을 다시 확인 중입니다 — ${detail}`;
+      set({ toast: { id: saveId, text: `⚠️ ${warning}`, kind: "saving" } });
+      queueSetupOutcomeRetry(tradeId, done, optimisticDoneAt, saveId);
+      return { ok: true, warning };
+    }
+    // GAS는 기준선과 Supabase 완료값을 모두 저장해야 성공을 반환하므로, 실패 때만 되돌린다.
+    mutateTrade(tradeId, (t) => ({ ...t, setupDone: previousDone, setupDoneAt: previousDoneAt }), false);
+    finishTradeSave(tradeId, saveId, "error", `⚠️ 반출 상태 변경 실패 — ${detail}`);
+    return { ok: false, error: detail };
   }
 }
 export type ToggleReturnResult =

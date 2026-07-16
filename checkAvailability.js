@@ -2514,6 +2514,8 @@ function toggleSetupDone(tid, done) {
   var key = 'setupDone_' + tid;
   var atKey = 'setupDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
+  var previousDoneProp = props.getProperty(key);
+  var previousDoneAtProp = props.getProperty(atKey);
   var isDone = done === true || done === "true" || done === "1" || done === 1;
   try {
     var doneAt = "";
@@ -2542,10 +2544,32 @@ function toggleSetupDone(tid, done) {
       completed[key] = '1';
       completed[atKey] = doneAt;
       props.setProperties(completed, false);
+      var setupSaved = typeof supaSetTradeSetupDone_ === 'function'
+        ? supaSetTradeSetupDone_(tid, true, doneAt)
+        : { ok: false, error: 'Supabase 반출완료 저장 함수 없음' };
+      if (!setupSaved || !setupSaved.ok) {
+        props.deleteProperty(key);
+        props.deleteProperty(atKey);
+        var restoredDone = {};
+        if (previousDoneProp !== null) restoredDone[key] = previousDoneProp;
+        if (previousDoneAtProp !== null) restoredDone[atKey] = previousDoneAtProp;
+        if (Object.keys(restoredDone).length) props.setProperties(restoredDone, false);
+        return { error: '반출완료 차단: 앱 완료 상태를 저장하지 못했습니다 — ' + String(setupSaved && setupSaved.error || '저장 실패') };
+      }
     } else {
       // 반출완료를 화면에서 다시 열어도 이미 물리적으로 나간 수량 기준선은 지우지 않는다.
       props.deleteProperty(key);
       props.deleteProperty(atKey);
+      var setupCleared = typeof supaSetTradeSetupDone_ === 'function'
+        ? supaSetTradeSetupDone_(tid, false, null)
+        : { ok: false, error: 'Supabase 반출완료 저장 함수 없음' };
+      if (!setupCleared || !setupCleared.ok) {
+        var restoredOpen = {};
+        if (previousDoneProp !== null) restoredOpen[key] = previousDoneProp;
+        if (previousDoneAtProp !== null) restoredOpen[atKey] = previousDoneAtProp;
+        if (Object.keys(restoredOpen).length) props.setProperties(restoredOpen, false);
+        return { error: '반출완료 해제 차단: 앱 완료 상태를 저장하지 못했습니다 — ' + String(setupCleared && setupCleared.error || '저장 실패') };
+      }
     }
     invalidateDashboardCache();
     return { tid: tid, setupDone: isDone, setupDoneAt: doneAt, doneAt: doneAt };
