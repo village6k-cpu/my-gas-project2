@@ -162,7 +162,7 @@ test('반출완료는 불변 기준선 저장 성공 뒤에만 화면 상태를 
   assert.match(gas, /supaCaptureCheckoutBaseline_\(tid, checkable, true\)/);
   assert.match(supa, /function supaGetCheckoutBaselineState_/);
   assert.match(supa, /if \(!same\)[\s\S]{0,220}이미 고정된 반출 기준선/);
-  assert.match(supa, /if \(!newRows\.length\) return \{ ok: true,[^\n]*reused: true/);
+  assert.match(supa, /if \(!newRows\.length\) \{[\s\S]{0,180}markDashboardCheckoutBaselineStarted_\(tid\)[\s\S]{0,180}reused: true/);
   assert.match(gas, /function toggleItemCheck[\s\S]{0,2600}phase === ['"]checkout['"][\s\S]{0,1200}이미 고정된 반출 기준선/);
 });
 

@@ -6217,42 +6217,77 @@ function deleteDashboardRowsDescending_(sheet, rows) {
   flush_();
 }
 
+function markDashboardCheckoutBaselineStarted_(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { error: '거래ID 없음' };
+  PropertiesService.getScriptProperties().setProperty('checkoutBaselineStarted_' + tid, '1');
+  return { success: true, tradeId: tid };
+}
+
+function clearDashboardCheckoutBaselineStarted_(tid) {
+  tid = String(tid || '').trim();
+  if (tid) PropertiesService.getScriptProperties().deleteProperty('checkoutBaselineStarted_' + tid);
+}
+
+/** 기존 taken_qty 기준선 거래를 한 번 백필한다. 허용된 거래ID 표식 외에는 쓰지 않는다. */
+function backfillDashboardCheckoutBaselineMarkers(tradeIds) {
+  if (typeof tradeIds === 'string') {
+    try { tradeIds = JSON.parse(tradeIds); } catch (e) { tradeIds = [tradeIds]; }
+  }
+  if (!Array.isArray(tradeIds)) return { error: 'tradeIds 배열 필수' };
+  var values = {};
+  var accepted = [];
+  var seen = {};
+  for (var i = 0; i < tradeIds.length; i++) {
+    var tid = String(tradeIds[i] || '').trim();
+    if (!/^\d{6}-\d{3}$/.test(tid) || seen[tid]) continue;
+    seen[tid] = true;
+    accepted.push(tid);
+    values['checkoutBaselineStarted_' + tid] = '1';
+  }
+  if (!accepted.length) return { success: true, count: 0, tradeIds: [] };
+  PropertiesService.getScriptProperties().setProperties(values, false);
+  return { success: true, count: accepted.length, tradeIds: accepted };
+}
+
 /** 반출이 시작된 거래에서는 품목 삭제가 분실/미반납 증거를 지울 수 있으므로 금지한다. */
 function isDashboardTradeCheckoutStarted_(ss, tid) {
   tid = String(tid || '').trim();
   if (!tid) return false;
   var props = PropertiesService.getScriptProperties();
-  if (props.getProperty('setupDone_' + tid) === '1' || props.getProperty('returnDone_' + tid) === '1') return true;
+  if (
+    props.getProperty('setupDone_' + tid) === '1' ||
+    props.getProperty('returnDone_' + tid) === '1' ||
+    props.getProperty('checkoutBaselineStarted_' + tid) === '1'
+  ) return true;
 
   var master = ss.getSheetByName('계약마스터');
   if (master && master.getLastRow() >= 2) {
-    var masterRows = master.getRange(2, 1, master.getLastRow() - 1, 10).getDisplayValues();
-    for (var i = 0; i < masterRows.length; i++) {
-      if (String(masterRows[i][0] || '').trim() !== tid) continue;
-      var contractStatus = String(masterRows[i][9] || '').trim();
+    var masterRowNums = findDashboardRowsByValue_(master, 1, master.getLastRow(), tid);
+    if (masterRowNums.length) {
+      var masterRow = master.getRange(masterRowNums[0], 1, 1, 10).getDisplayValues()[0];
+      var contractStatus = String(masterRow[9] || '').trim();
       if (contractStatus === '반출' || contractStatus === '반출중' || contractStatus === '반납완료') return true;
-      break;
     }
   }
 
   var sched = ss.getSheetByName('스케줄상세');
   if (sched && sched.getLastRow() >= 2) {
-    var schedRows = sched.getRange(2, 2, sched.getLastRow() - 1, 9).getDisplayValues();
+    var schedRowNums = findDashboardRowsByValue_(sched, 2, sched.getLastRow(), tid);
+    if (!schedRowNums.length) return false;
+    var firstSchedRow = schedRowNums[0];
+    var lastSchedRow = schedRowNums[schedRowNums.length - 1];
+    var schedRows = sched.getRange(firstSchedRow, 2, lastSchedRow - firstSchedRow + 1, 9).getDisplayValues();
     for (var j = 0; j < schedRows.length; j++) {
       if (String(schedRows[j][0] || '').trim() !== tid) continue;
       var rowStatus = String(schedRows[j][8] || '').trim();
       if (rowStatus === '반출중' || rowStatus === '반납완료') return true;
     }
   }
-  // 완료 체크를 다시 열어도 taken_qty 기준선은 물리 반출 사실로 남는다.
-  // 조회 장애를 '아직 반출 안 함'으로 오인하면 기준 수량을 바꿀 수 있으므로 실패 시에도 편집을 막는다.
-  if (typeof supaGetCheckoutBaselineState_ !== 'function') return true;
-  var durable = supaGetCheckoutBaselineState_(tid);
-  if (!durable || !durable.ok) {
-    try { Logger.log('반출 기준선 확인 실패로 편집 차단: ' + tid + ' / ' + String(durable && durable.error || '함수 오류')); } catch (e) {}
-    return true;
-  }
-  return !!durable.started;
+  // taken_qty 저장 성공 시 함께 남긴 영구 표식이 외부 DB 재조회 없이 물리 반출 사실을 보존한다.
+  // 전역 ScriptLock 안에서 Supabase HTTP를 호출하면 일시 인증 장애가 '반출 시작'으로 둔갑하고
+  // 모든 편집 요청을 수 초씩 붙잡으므로, 편집 가드는 로컬의 권위 신호만 사용한다.
+  return false;
 }
 
 function dashboardAddEquipments(tid, entries, options) {

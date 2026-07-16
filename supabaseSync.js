@@ -287,8 +287,15 @@ function supaCaptureCheckoutBaseline_(tid, equipments, exactExisting) {
         return { ok: false, error: '이미 고정된 반출 기준선과 현재 품목이 다릅니다: ' + row.schedule_id };
       }
     }
-    if (!newRows.length) return { ok: true, count: rows.length, reused: true };
+    if (!newRows.length) {
+      markDashboardCheckoutBaselineStarted_(tid);
+      return { ok: true, count: rows.length, reused: true };
+    }
+    // DB에 기준선이 생겼는데 로컬 보호 표식만 없는 중간 상태를 만들지 않는다.
+    // 표식을 먼저 확보하고, DB 저장 실패 때만 표식을 되돌린다(실패-폐쇄).
+    markDashboardCheckoutBaselineStarted_(tid);
     if (!supaUpsert_(cfg, 'schedule_items', newRows, 'schedule_id')) {
+      clearDashboardCheckoutBaselineStarted_(tid);
       return { ok: false, error: 'Supabase 반출 기준선 저장 실패' };
     }
     return { ok: true, count: rows.length, added: newRows.length };
@@ -654,7 +661,7 @@ function auditScriptProperties() {
   Object.keys(cat).sort(function (a, b) { return cat[b] - cat[a]; }).forEach(function (pre) {
     if (cat[pre] > 1) Logger.log('  ' + pre + ' : ' + cat[pre] + '개');
   });
-  var config = keys.filter(function (k) { return !/^(itemCheck|setupDone|setupDoneAt)_/.test(k); });
+  var config = keys.filter(function (k) { return !/^(itemCheck|setupDone|setupDoneAt|checkoutBaselineStarted)_/.test(k); });
   Logger.log('── 설정/기타(보존해야 함) ' + config.length + '개 ──');
   Logger.log('  ' + config.join('\n  '));
 }
@@ -671,7 +678,7 @@ function cleanupOldTradeProps(cutoffYYMMDD, dryRun) {
   var all = p.getProperties();
   var toDelete = [];
   Object.keys(all).forEach(function (k) {
-    var m = k.match(/^(?:itemCheck|setupDone|setupDoneAt)_(\d{6})-/);
+    var m = k.match(/^(?:itemCheck|setupDone|setupDoneAt|checkoutBaselineStarted)_(\d{6})-/);
     if (m && m[1] < cutoffYYMMDD) toDelete.push(k);
   });
   Logger.log((dryRun ? '[미리보기] ' : '[실제삭제] ') + cutoffYYMMDD + ' 이전 거래 속성 ' + toDelete.length + '개');

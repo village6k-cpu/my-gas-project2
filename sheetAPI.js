@@ -1074,6 +1074,7 @@ function runFunction(funcName, params) {
     "markOverdueReturnContracts",
     "inspectContractCancelRecovery",
     "restoreCancelledContractsByIds",
+    "backfillDashboardCheckoutBaselineMarkers",
     "setupDiscountColumns",
     "inspectContractTemplateDiscounts",
     "setupContractTemplate",
@@ -1231,6 +1232,12 @@ function runFunction(funcName, params) {
       var ids = args.ids || args.tradeIds || args;
       var result = restoreCancelledContractsByIds(ids, args.dryRun);
       return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "backfillDashboardCheckoutBaselineMarkers") {
+      var markerArgs = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var markerTradeIds = Array.isArray(markerArgs) ? markerArgs : (markerArgs && markerArgs.tradeIds) || [];
+      var markerResult = backfillDashboardCheckoutBaselineMarkers(markerTradeIds);
+      return { success: !markerResult.error, function: funcName, result: markerResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "diagEquipmentRiskBackendConfig") {
       var result = diagEquipmentRiskBackendConfig();
