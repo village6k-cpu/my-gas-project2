@@ -1217,7 +1217,7 @@ test('buildSheetAppendPayload keeps a grounded canonical alias rewrite', () => {
 test('buildSheetAppendPayload trusts an exact set-master name over the customer request phrase', () => {
   const decision = {
     should_write_to_sheet: true,
-    customer: { name: '전찬영' },
+    customer: { name: '테스트고객' },
     reservation_inquiry: {
       is_reservation_inquiry: true,
       confirmed: true,
@@ -1243,8 +1243,8 @@ test('buildSheetAppendPayload trusts an exact set-master name over the customer 
       latest_customer_message_after_last_staff_reply: true
     },
     sheet_row_candidate: {
-      customer_name: '전찬영',
-      phone: '010-6317-4066',
+      customer_name: '테스트고객',
+      phone: '010-0000-0000',
       start_date: '2026-07-16',
       pickup_time: '14:00',
       end_date: '2026-07-17',
