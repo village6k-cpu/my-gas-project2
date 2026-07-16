@@ -1115,6 +1115,7 @@ test('buildSheetAppendPayload rejects an AI equipment rewrite unrelated to the c
     safety_checks: {
       kakao_conversation_opened: true,
       did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: true,
       latest_customer_message_after_last_staff_reply: true
     },
     reservation_inquiry: {
@@ -1211,6 +1212,51 @@ test('buildSheetAppendPayload keeps a grounded canonical alias rewrite', () => {
 
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
   assert.deepEqual(payload.args.장비, [{ 이름: '홀리랜드 솔리드컴 4S', 수량: 1 }]);
+});
+
+test('buildSheetAppendPayload trusts an exact set-master name over the customer request phrase', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    customer: { name: '전찬영' },
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      confirmed: true,
+      already_registered: false,
+      rental_start: '2026-07-16',
+      pickup_time: '14:00',
+      rental_end: '2026-07-17',
+      return_time: '14:00',
+      discount_type: '단골',
+      equipment_requested: [
+        {
+          raw_text: '셔틀러 에이스 한대 추가',
+          normalized_guess: '셔틀러에이스 M (75볼)',
+          exact_name_from_set_master: '셔틀러에이스 M (75볼)',
+          quantity: 1
+        }
+      ]
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    sheet_row_candidate: {
+      customer_name: '전찬영',
+      phone: '010-6317-4066',
+      start_date: '2026-07-16',
+      pickup_time: '14:00',
+      end_date: '2026-07-17',
+      return_time: '14:00',
+      discount_type: '단골',
+      equipment: [{ item: '셔틀러에이스 M (75볼)', quantity: 1 }]
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+
+  assert.deepEqual(payload.args.장비, [{ 이름: '셔틀러에이스 M (75볼)', 수량: 1 }]);
 });
 
 test('buildHermesPrompt prioritizes explicit booking identity and keeps RAG out of extraction', () => {
