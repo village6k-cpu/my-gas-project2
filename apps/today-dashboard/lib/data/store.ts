@@ -951,6 +951,78 @@ export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult>
   }
 }
 
+// ── 품목 체크 원장 쓰기 신뢰화 ──────────────────────────────────
+// toggleItem은 파이어-앤-포겟이라 제외/현장추가(계약서 재생성)의 긴 GAS 잠금과 겹치면
+// Lock timeout으로 죽고, 재시도가 없어 시트가 앱과 조용히 어긋났다.
+// 품목 단위 목표 상태(최신 승자)로 직렬화하고 일시 오류만 백오프 재시도한다.
+const ITEM_CHECK_RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
+const itemCheckTargets: Record<string, boolean | undefined> = {};
+const itemCheckInFlight: Record<string, Promise<void> | undefined> = {};
+const itemCheckRetryTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
+const itemCheckAttempts: Record<string, number> = {};
+
+/** 잠금 경합·네트워크 순단처럼 다시 보내면 성공할 오류만 재시도한다.
+ *  기준선 차단/행 없음 같은 확정 거절은 즉시 사용자에게 알린다. */
+function isRetryableLedgerError(error: unknown): boolean {
+  if (isGasOutcomeUnknownError(error)) return true; // 네트워크/5xx/타임아웃
+  const message = error instanceof Error ? error.message : String(error);
+  return /lock|잠시 후 다시|처리 중/i.test(message);
+}
+
+function queueItemCheckWrite(tradeId: string, scheduleId: string, done: boolean): void {
+  if (!writeBackEnabled) return;
+  const key = `${tradeId}|${scheduleId}`;
+  itemCheckTargets[key] = done;
+  itemCheckAttempts[key] = 0;
+  // 새 목표가 들어오면 대기 중이던 재시도를 즉시 선점한다
+  if (itemCheckRetryTimers[key]) {
+    clearTimeout(itemCheckRetryTimers[key]);
+    delete itemCheckRetryTimers[key];
+  }
+  void commitItemCheckWrite(tradeId, scheduleId, key);
+}
+
+async function commitItemCheckWrite(tradeId: string, scheduleId: string, key: string): Promise<void> {
+  if (itemCheckInFlight[key] || itemCheckRetryTimers[key]) return;
+  const target = itemCheckTargets[key];
+  if (target === undefined) return;
+  const task = (async () => {
+    try {
+      await gasMutation("toggleItem", { scheduleId, phase: "checkout", done: target });
+      if (itemCheckTargets[key] === target) delete itemCheckTargets[key];
+      delete itemCheckAttempts[key];
+    } catch (error) {
+      if (itemCheckTargets[key] !== target) return; // 새 목표가 이미 대기 — 그쪽 커밋이 이어간다
+      const attempt = itemCheckAttempts[key] ?? 0;
+      if (isRetryableLedgerError(error) && attempt < ITEM_CHECK_RETRY_DELAYS_MS.length) {
+        itemCheckAttempts[key] = attempt + 1;
+        itemCheckRetryTimers[key] = setTimeout(() => {
+          delete itemCheckRetryTimers[key];
+          void commitItemCheckWrite(tradeId, scheduleId, key);
+        }, ITEM_CHECK_RETRY_DELAYS_MS[attempt]);
+        return;
+      }
+      delete itemCheckTargets[key];
+      delete itemCheckAttempts[key];
+      console.error("[write-back] 품목 반출 체크 원장 반영 실패:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      showTransientError(`⚠️ 품목 반출 체크 원장 반영 실패 — ${message}`, 6_000);
+      if (typeof window !== "undefined") {
+        window.setTimeout(() => void pollSheetChangesNow({ mode: "light", resetBackoff: false }), 3_000);
+      }
+    }
+  })();
+  itemCheckInFlight[key] = task;
+  try {
+    await task;
+  } finally {
+    if (itemCheckInFlight[key] === task) delete itemCheckInFlight[key];
+    if (itemCheckTargets[key] !== undefined && !itemCheckRetryTimers[key]) {
+      void commitItemCheckWrite(tradeId, scheduleId, key);
+    }
+  }
+}
+
 // ── 품목별 반출/반납 상태 ───────────────────────────────────────
 export function setItemCheckout(tradeId: string, scheduleId: string, next: CheckoutState) {
   const currentTrade = state.trades.find((t) => t.tradeId === tradeId);
@@ -981,8 +1053,8 @@ export function setItemCheckout(tradeId: string, scheduleId: string, next: Check
     }
     return;
   }
-  if (final === "taken") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: true }, { tradeId, label: "품목 반출 체크" });
-  else if (final === "pending") gasWrite("toggleItem", { scheduleId, phase: "checkout", done: false }, { tradeId, label: "품목 반출 체크" });
+  if (final === "taken") queueItemCheckWrite(tradeId, scheduleId, true);
+  else if (final === "pending") queueItemCheckWrite(tradeId, scheduleId, false);
   // 원장 쓰기가 꺼져 있으면 제외를 앱 상태로만 숨기지 않는다.
 }
 export async function setItemName(tradeId: string, scheduleId: string, name: string): Promise<boolean> {

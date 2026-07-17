@@ -92,6 +92,31 @@ test("useDashboard는 토스트만 바뀐 emit에 새 스냅샷을 만들지 않
   assert.doesNotMatch(hook, /toast/, "대시보드 스냅샷은 toast에 의존하면 안 된다");
 });
 
+test("품목 체크 원장 쓰기는 재시도 큐를 거친다 (잠금 경합 시 조용한 유실 방지)", () => {
+  const store = read("lib/data/store.ts");
+  const checkout = section(store, "export function setItemCheckout", "\nexport async function setItemName");
+  assert.match(checkout, /queueItemCheckWrite\(tradeId, scheduleId, true\)/);
+  assert.match(checkout, /queueItemCheckWrite\(tradeId, scheduleId, false\)/);
+  assert.doesNotMatch(checkout, /gasWrite\("toggleItem"/, "재시도 없는 파이어-앤-포겟 금지");
+  const queue = section(store, "const ITEM_CHECK_RETRY_DELAYS_MS", "\n// ── 품목별 반출/반납 상태");
+  assert.match(queue, /isRetryableLedgerError/, "잠금/네트워크 오류만 재시도해야 한다");
+  assert.match(queue, /itemCheckTargets\[key\] !== target\) return/, "재시도는 최신 목표 상태가 이긴다");
+  assert.match(queue, /clearTimeout\(itemCheckRetryTimers\[key\]\)/, "새 목표가 대기 중 재시도를 선점해야 한다");
+});
+
+test("GAS toggleItemCheck는 검증을 잠금 밖에서 하고 잠금 대기를 20초로 늘린다", () => {
+  const gas = fs.readFileSync(path.resolve(appRoot, "../..", "checkAvailability.js"), "utf8");
+  const fn = section(gas, "function toggleItemCheck", "\nfunction getEquipmentCheckMap_");
+  const contextAt = fn.indexOf("getDashboardScheduleInspectionContext_(scheduleId)");
+  const baselineAt = fn.indexOf("supaGetCheckoutBaselineState_(context.tradeId)");
+  const lockAt = fn.indexOf("lock.waitLock(");
+  assert.ok(contextAt >= 0 && lockAt > contextAt, "행 조회는 잠금 밖(앞)에서 해야 한다");
+  assert.ok(baselineAt >= 0 && lockAt > baselineAt, "Supabase 기준선 HTTP 조회는 잠금 밖(앞)에서 해야 한다");
+  assert.match(fn, /isDashboardTradeCheckoutStarted_\(/, "로컬 마커로 반출 전 거래는 HTTP 조회를 생략해야 한다");
+  assert.match(fn, /lock\.waitLock\(20000\)/, "제외/현장추가의 긴 잠금과 겹쳐도 5초 만에 죽지 않아야 한다");
+  assert.doesNotMatch(fn, /lock\.waitLock\(5000\)/);
+});
+
 test("스테퍼 수량 변경은 낙관 반영 + 디바운스 + 직렬 커밋이다", () => {
   const store = read("lib/data/store.ts");
   const queue = section(store, "export function queueItemQty", "\nasync function commitQueuedItemQty");

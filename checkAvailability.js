@@ -3324,18 +3324,22 @@ function toggleItemCheck(scheduleId, phase, done) {
   if (!scheduleId || !phase) return { error: "scheduleId/phase 필수" };
   if (phase !== 'checkout' && phase !== 'checkin') return { error: "phase는 checkout/checkin" };
   scheduleId = String(scheduleId).trim();
-  var lock = LockService.getScriptLock();
-  var lockAcquired = false;
-  try {
-    lock.waitLock(5000);
-    lockAcquired = true;
 
-    var key = 'itemCheck_' + scheduleId + '_' + phase;
-    var checkinQtyKey = 'itemCheckQty_' + scheduleId + '_checkin'; // 레거시 정리용
-    var props = PropertiesService.getScriptProperties();
-    var isDone = done === true || done === "true" || done === "1" || done === 1;
-    var context = getDashboardScheduleInspectionContext_(scheduleId);
-    if (phase === 'checkout' && context && context.tradeId) {
+  var key = 'itemCheck_' + scheduleId + '_' + phase;
+  var checkinQtyKey = 'itemCheckQty_' + scheduleId + '_checkin'; // 레거시 정리용
+  var props = PropertiesService.getScriptProperties();
+  var isDone = done === true || done === "true" || done === "1" || done === 1;
+
+  // ── 검증 단계: 전부 읽기 전용이라 전역 잠금 밖에서 수행한다 ──
+  // 예전엔 행 조회 + Supabase HTTP 왕복까지 잠금 안에서 돌아 체크 1번의 잠금 점유가
+  // 길어졌고, 제외/현장추가(계약서 재생성 포함)의 긴 잠금과 겹친 체크가
+  // waitLock(5초) 초과로 전부 실패해 시트와 앱이 조용히 어긋났다.
+  var context = getDashboardScheduleInspectionContext_(scheduleId);
+  if (phase === 'checkout' && context && context.tradeId) {
+    // 로컬 마커 우선: 반출이 시작된 흔적(setupDone/기준선 표식/계약상태)이 없으면
+    // 기준선이 존재할 수 없으므로 HTTP 조회 자체를 생략한다(대부분의 체크가 이 경로).
+    var ssForGuard = SpreadsheetApp.getActiveSpreadsheet();
+    if (isDashboardTradeCheckoutStarted_(ssForGuard, context.tradeId)) {
       var checkoutBaseline = typeof supaGetCheckoutBaselineState_ === 'function'
         ? supaGetCheckoutBaselineState_(context.tradeId)
         : { ok: false, error: '반출 기준선 조회 함수 없음', items: [] };
@@ -3349,47 +3353,63 @@ function toggleItemCheck(scheduleId, phase, done) {
         return { error: '반출 체크 변경 차단: 이미 고정된 반출 기준선입니다: ' + scheduleId };
       }
     }
+  }
+  if (isDone) {
+    if (phase === 'checkin') {
+      if (!context || !context.token || !context.tradeId) {
+        return { error: '반납 체크 실패: 현재 스케줄 행을 찾을 수 없습니다: ' + scheduleId };
+      }
+      var durable = typeof supaGetTradeReturnCounts_ === 'function'
+        ? supaGetTradeReturnCounts_(context.tradeId)
+        : { ok: false, error: '상세 수량 저장소 연결 함수 없음', returnCounts: {} };
+      if (!durable || !durable.ok) {
+        return { error: '반납 체크 실패: 정상/파손/분실 상세 수량 조회 실패 — ' + String(durable && durable.error || '조회 실패') };
+      }
+      var baselineItem = (durable.scheduleItems || []).filter(function(item) {
+        return String(item.schedule_id || '').trim() === scheduleId && Number(item.taken_qty || 0) > 0;
+      })[0];
+      if (!baselineItem) {
+        return { error: '반납 체크 실패: 반출 순간의 불변 수량 기준선이 없습니다: ' + scheduleId };
+      }
+      var baselineQty = Number(baselineItem.taken_qty || 0);
+      if (
+        baselineQty !== context.qty ||
+        String(baselineItem.name || '').trim() !== String(context.name || '').trim() ||
+        String(baselineItem.set_name || '').trim() !== String(context.setName || '').trim()
+      ) {
+        return { error: '반납 체크 실패: 현재 품목이 반출 기준선과 달라졌습니다: ' + scheduleId };
+      }
+      var durableCount = durable.returnCounts && durable.returnCounts[scheduleId] || {};
+      var accounted = Number(durableCount.good || 0) + Number(durableCount.damaged || 0) + Number(durableCount.lost || 0);
+      if (accounted !== baselineQty) {
+        return {
+          error: '반납 체크 실패: 상세 수량 불일치 — 반출 ' + baselineQty + ' / 확인 ' + accounted,
+          expected: baselineQty,
+          accounted: accounted
+        };
+      }
+    } else {
+      if (!context || !context.tradeId) {
+        return { error: '반출 체크 실패: 현재 스케줄 행을 찾을 수 없습니다: ' + scheduleId };
+      }
+    }
+  }
+
+  // ── 변이 단계: 속성 쓰기와 증거 무효화만 잠금 안에서 짧게 처리한다 ──
+  // 클라이언트는 파이어-앤-포겟 + 백오프 재시도라 대기 20초가 사용자를 막지 않는다.
+  var lock = LockService.getScriptLock();
+  var lockAcquired = false;
+  try {
+    lock.waitLock(20000);
+    lockAcquired = true;
+
+    var invalidated = null;
     if (isDone) {
       if (phase === 'checkin') {
-        if (!context || !context.token || !context.tradeId) {
-          return { error: '반납 체크 실패: 현재 스케줄 행을 찾을 수 없습니다: ' + scheduleId };
-        }
-        var durable = typeof supaGetTradeReturnCounts_ === 'function'
-          ? supaGetTradeReturnCounts_(context.tradeId)
-          : { ok: false, error: '상세 수량 저장소 연결 함수 없음', returnCounts: {} };
-        if (!durable || !durable.ok) {
-          return { error: '반납 체크 실패: 정상/파손/분실 상세 수량 조회 실패 — ' + String(durable && durable.error || '조회 실패') };
-        }
-        var baselineItem = (durable.scheduleItems || []).filter(function(item) {
-          return String(item.schedule_id || '').trim() === scheduleId && Number(item.taken_qty || 0) > 0;
-        })[0];
-        if (!baselineItem) {
-          return { error: '반납 체크 실패: 반출 순간의 불변 수량 기준선이 없습니다: ' + scheduleId };
-        }
-        var baselineQty = Number(baselineItem.taken_qty || 0);
-        if (
-          baselineQty !== context.qty ||
-          String(baselineItem.name || '').trim() !== String(context.name || '').trim() ||
-          String(baselineItem.set_name || '').trim() !== String(context.setName || '').trim()
-        ) {
-          return { error: '반납 체크 실패: 현재 품목이 반출 기준선과 달라졌습니다: ' + scheduleId };
-        }
-        var durableCount = durable.returnCounts && durable.returnCounts[scheduleId] || {};
-        var accounted = Number(durableCount.good || 0) + Number(durableCount.damaged || 0) + Number(durableCount.lost || 0);
-        if (accounted !== baselineQty) {
-          return {
-            error: '반납 체크 실패: 상세 수량 불일치 — 반출 ' + baselineQty + ' / 확인 ' + accounted,
-            expected: baselineQty,
-            accounted: accounted
-          };
-        }
         props.setProperty(key, context.token);
         props.deleteProperty(checkinQtyKey);
         props.deleteProperty('itemCheckProof_' + scheduleId + '_checkin');
       } else {
-        if (!context || !context.tradeId) {
-          return { error: '반출 체크 실패: 현재 스케줄 행을 찾을 수 없습니다: ' + scheduleId };
-        }
         props.setProperty(key, '1');
       }
     } else if (phase === 'checkin') {
@@ -3400,7 +3420,7 @@ function toggleItemCheck(scheduleId, phase, done) {
         return { error: '반납 체크 해제 실패: 거래ID를 확인할 수 없습니다: ' + scheduleId };
       }
       // 같은 ScriptLock 안에서 증거 제거와 계약 재오픈을 함께 처리한다.
-      var invalidated = invalidateDashboardReturnInspectionForTrade_(
+      invalidated = invalidateDashboardReturnInspectionForTrade_(
         proofTradeId, [scheduleId], '반납 수량 미완료 전환'
       );
       if (invalidated && invalidated.error) return invalidated;
