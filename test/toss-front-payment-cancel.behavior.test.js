@@ -43,6 +43,7 @@ function createHarness(options = {}) {
   const lookupCalls = [];
   const requestCalls = [];
   const paymentCalls = [];
+  const printCalls = [];
   const getPaymentCalls = [];
   const fetchCalls = [];
   const events = [];
@@ -88,6 +89,12 @@ function createHarness(options = {}) {
         requestCalls.push(payload);
         events.push({ type: 'tossCancel', payload });
         return options.requestPaymentCancel(payload, requestCalls.length);
+      }
+    },
+    printer: {
+      async printReceipt(payload) {
+        printCalls.push(payload);
+        if (options.printReceipt) return options.printReceipt(payload, printCalls.length);
       }
     }
   };
@@ -185,6 +192,7 @@ function createHarness(options = {}) {
     lookupCalls,
     requestCalls,
     paymentCalls,
+    printCalls,
     getPaymentCalls,
     fetchCalls,
     events,
@@ -382,6 +390,209 @@ async function testNormalReservationSuccessRemainsUnchanged() {
   assert.strictEqual(harness.pending(), null);
   assert.strictEqual(harness.lastResult().title, '결제가 완료되었어요');
   assert.strictEqual(harness.lastResult().description, '22,000원');
+}
+
+async function testReservationApprovalReplacesOrderWhileReceiptHistoryPersists() {
+  const trade = reservationTrade({ tradeId: '260715-RECEIPT-PERSISTING' });
+  let releaseWrite;
+  let notifyWriteStarted;
+  const writeStarted = new Promise((resolve) => { notifyWriteStarted = resolve; });
+  const writeGate = new Promise((resolve) => { releaseWrite = resolve; });
+  const harness = createHarness({
+    pageMode: 'customer',
+    records: [],
+    requestPayment: async () => approvedCardResult(),
+    fetch: approvedReservationFetch(trade),
+    beforeReceiptWrite: async () => {
+      notifyWriteStarted();
+      await writeGate;
+    }
+  });
+  await harness.initPromise;
+  harness.context.showOrder(trade);
+
+  const charge = harness.context.doCharge(trade);
+  await writeStarted;
+
+  try {
+    const visible = harness.pages.at(-1);
+    assert.strictEqual(visible.type, 'result', 'approved card must immediately replace the order page');
+    assert.match(visible.page.title, /승인.*완료/);
+    assert.deepStrictEqual(
+      Array.from(visible.page.buttons || []),
+      [],
+      'receipt-history persistence screen must not allow another payment action'
+    );
+  } finally {
+    releaseWrite();
+    await charge;
+  }
+}
+
+async function testManualApprovalReplacesOrderWhileReceiptHistoryPersists() {
+  let releaseWrite;
+  let notifyWriteStarted;
+  const writeStarted = new Promise((resolve) => { notifyWriteStarted = resolve; });
+  const writeGate = new Promise((resolve) => { releaseWrite = resolve; });
+  const harness = createHarness({
+    pageMode: 'customer',
+    records: [],
+    requestPayment: async () => approvedCardResult(),
+    beforeReceiptWrite: async () => {
+      notifyWriteStarted();
+      await writeGate;
+    }
+  });
+  await harness.initPromise;
+  harness.context.showManualOrder(33000);
+
+  const charge = harness.context.doManualCharge(33000);
+  await writeStarted;
+
+  try {
+    const visible = harness.pages.at(-1);
+    assert.strictEqual(visible.type, 'result', 'manual approval must immediately replace the order page');
+    assert.match(visible.page.title, /승인.*완료/);
+    assert.deepStrictEqual(Array.from(visible.page.buttons || []), []);
+  } finally {
+    releaseWrite();
+    await charge;
+  }
+}
+
+async function testReservationApprovalShowsReceiptBeforeLedgerSyncFinishes() {
+  const trade = reservationTrade({ tradeId: '260715-IMMEDIATE-RECEIPT' });
+  let releaseConfirm;
+  let notifyConfirmStarted;
+  const confirmStarted = new Promise((resolve) => { notifyConfirmStarted = resolve; });
+  const confirmGate = new Promise((resolve) => { releaseConfirm = resolve; });
+  const harness = createHarness({
+    pageMode: 'customer',
+    records: [],
+    requestPayment: async () => approvedCardResult(),
+    fetch: async (url) => {
+      if (url.includes('/api/lookup?')) return jsonResponse({ matches: [trade] });
+      if (url.endsWith('/api/lookup/confirm')) {
+        notifyConfirmStarted();
+        await confirmGate;
+        return jsonResponse({ ok: true, tradeId: trade.tradeId });
+      }
+      throw new Error('unexpected immediate-receipt request: ' + url);
+    }
+  });
+  await harness.initPromise;
+  harness.context.showOrder(trade);
+
+  const charge = harness.context.doCharge(trade);
+  await confirmStarted;
+
+  try {
+    const visible = harness.pages.at(-1);
+    assert.strictEqual(
+      visible.type,
+      'result',
+      'approved card must replace the order page before ledger synchronization finishes'
+    );
+    assert.ok(
+      visible.page.buttons.some((button) => button.label === '영수증 출력'),
+      'the immediate result page must expose receipt printing'
+    );
+    assert.ok(
+      !visible.page.buttons.some((button) => button.label === '확인'),
+      'the payment flow must not return to idle while ledger synchronization is pending'
+    );
+    assert.strictEqual(visible.page.timerMs, 0, 'the pending-sync receipt page must not time out');
+    assert.strictEqual(harness.paymentCalls.length, 1, 'approval must request payment exactly once');
+  } finally {
+    releaseConfirm();
+    await charge;
+  }
+
+  const settled = harness.lastResult();
+  assert.ok(settled.buttons.some((button) => button.label === '확인'));
+  assert.strictEqual(settled.timerMs, 5000);
+}
+
+async function testReceiptPrintedDuringLedgerSyncKeepsPaymentFlowLocked() {
+  const trade = reservationTrade({ tradeId: '260715-PRINT-DURING-SYNC' });
+  let releaseConfirm;
+  let notifyConfirmStarted;
+  const confirmStarted = new Promise((resolve) => { notifyConfirmStarted = resolve; });
+  const confirmGate = new Promise((resolve) => { releaseConfirm = resolve; });
+  const harness = createHarness({
+    pageMode: 'customer',
+    records: [],
+    requestPayment: async () => approvedCardResult(),
+    fetch: async (url) => {
+      if (url.includes('/api/lookup?')) return jsonResponse({ matches: [trade] });
+      if (url.endsWith('/api/lookup/confirm')) {
+        notifyConfirmStarted();
+        await confirmGate;
+        return jsonResponse({ ok: true, tradeId: trade.tradeId });
+      }
+      throw new Error('unexpected print-during-sync request: ' + url);
+    }
+  });
+  await harness.initPromise;
+
+  const charge = harness.context.doCharge(trade);
+  await confirmStarted;
+  const receiptButton = harness.lastResult().buttons.find((button) => button.label === '영수증 출력');
+  await receiptButton.onClick();
+
+  const printing = harness.lastResult();
+  assert.strictEqual(
+    printing.title,
+    '결제가 완료되었어요',
+    'receipt printing must not navigate away while reservation confirmation is pending'
+  );
+  assert.strictEqual(printing.timerMs, 0);
+  assert.ok(!printing.buttons.some((button) => button.label === '확인'));
+  assert.match(harness.toasts.at(-1).message, /영수증.*출력/);
+
+  releaseConfirm();
+  await charge;
+
+  assert.strictEqual(harness.lastResult().title, '결제가 완료되었어요');
+  assert.ok(harness.lastResult().buttons.some((button) => button.label === '확인'));
+  assert.strictEqual(harness.printCalls.length, 1);
+}
+
+async function testReceiptFailureDuringLedgerSyncKeepsPaymentFlowLocked() {
+  const trade = reservationTrade({ tradeId: '260715-PRINT-FAILURE-DURING-SYNC' });
+  let releaseConfirm;
+  let notifyConfirmStarted;
+  const confirmStarted = new Promise((resolve) => { notifyConfirmStarted = resolve; });
+  const confirmGate = new Promise((resolve) => { releaseConfirm = resolve; });
+  const harness = createHarness({
+    pageMode: 'customer',
+    records: [],
+    requestPayment: async () => approvedCardResult(),
+    printReceipt: async () => { throw new Error('printer unavailable'); },
+    fetch: async (url) => {
+      if (url.includes('/api/lookup?')) return jsonResponse({ matches: [trade] });
+      if (url.endsWith('/api/lookup/confirm')) {
+        notifyConfirmStarted();
+        await confirmGate;
+        return jsonResponse({ ok: true, tradeId: trade.tradeId });
+      }
+      throw new Error('unexpected print-failure request: ' + url);
+    }
+  });
+  await harness.initPromise;
+
+  const charge = harness.context.doCharge(trade);
+  await confirmStarted;
+  const receiptButton = harness.lastResult().buttons.find((button) => button.label === '영수증 출력');
+  await receiptButton.onClick();
+
+  assert.strictEqual(harness.lastResult().title, '결제가 완료되었어요');
+  assert.strictEqual(harness.lastResult().timerMs, 0);
+  assert.match(harness.toasts.at(-1).message, /영수증 출력.*실패/);
+
+  releaseConfirm();
+  await charge;
+  assert.ok(harness.lastResult().buttons.some((button) => button.label === '확인'));
 }
 
 async function testRecoveryHistoryFailureKeepsPendingForAnotherRetry() {
@@ -1097,6 +1308,11 @@ async function testInFlightStaysLockedUntilLocalPersistenceFinishes() {
   await testReservationApprovalCombinesHistoryAndLedgerWarnings();
   await testManualApprovalHistoryFailureShowsApprovedWarning();
   await testNormalReservationSuccessRemainsUnchanged();
+  await testReservationApprovalReplacesOrderWhileReceiptHistoryPersists();
+  await testManualApprovalReplacesOrderWhileReceiptHistoryPersists();
+  await testReservationApprovalShowsReceiptBeforeLedgerSyncFinishes();
+  await testReceiptPrintedDuringLedgerSyncKeepsPaymentFlowLocked();
+  await testReceiptFailureDuringLedgerSyncKeepsPaymentFlowLocked();
   await testRecoveryHistoryFailureKeepsPendingForAnotherRetry();
   await testRecoveryNonSuccessClearsStalePending();
   await testSettingsReadRejectionShowsNonInteractiveDegradedState();
