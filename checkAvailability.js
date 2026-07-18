@@ -2826,7 +2826,12 @@ function assertDashboardReturnComplete_(tid, props) {
     );
   });
   props.setProperties(completedProofs, false);
-  return { success: true, checkedCount: checkable.length };
+  return {
+    success: true,
+    checkedCount: checkable.length,
+    // toggleReturnDone이 반출 체크 키 정리에 재사용 — 같은 그룹 스캔을 두 번 하지 않는다
+    scheduleIds: (group.equipments || []).map(function(eq) { return String(eq.scheduleId || '').trim(); }).filter(Boolean)
+  };
 }
 
 /** 수량 정정 시 과거 이진 체크와 거래 완료를 무효화해 새 수량으로 재검수하게 한다. */
@@ -2895,15 +2900,16 @@ function toggleReturnDone(tid, done, options) {
   // 완료 검증(스케줄상세 전체 스캔 + Supabase 상세수량 HTTP)이 잠금 안에 있으면
   // 계약서 재생성 워커 등 긴 잠금과 겹칠 때 5초 대기가 항상 져서
   // 반납완료 버튼이 계속 실패했다. 잠금 안에는 시트 상태 기록과 속성 쓰기만 남긴다.
+  var cleanupSids = [];
   if (isDone && !force) {
     var completionCheck = assertDashboardReturnComplete_(tid, props);
     if (completionCheck && completionCheck.error) return completionCheck;
+    cleanupSids = (completionCheck && completionCheck.scheduleIds) || [];
   }
   if (isDone && force) {
     Logger.log('반납완료 강제 처리(작업자 확인): ' + tid);
   }
-  var cleanupSids = [];
-  if (isDone) {
+  if (isDone && !cleanupSids.length) {
     try { cleanupSids = listDashboardCheckoutItemCheckSids_(tid); } catch (sidErr) { cleanupSids = []; }
   }
 

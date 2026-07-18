@@ -925,6 +925,19 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
 
   // 잠금 경합 재시도 동안 저장 중 스피너를 유지하고 중복 탭을 막는다.
   const saveId = beginTradeSave(tradeId);
+  const previous = {
+    returnDone: current.returnDone,
+    returnDoneAt: current.returnDoneAt ?? null,
+    contractStatus: current.contractStatus,
+  };
+  // 버튼은 즉시 완료 상태로 바뀐다(반출완료와 같은 낙관 패턴). 원장 확정은 뒤에서 진행하고,
+  // 명확한 거절일 때만 되돌린다. persist=false — GAS 확정 전에 원격 저장하지 않는다.
+  mutateTrade(tradeId, (t) => ({
+    ...t,
+    returnDone: on,
+    returnDoneAt: on ? new Date().toISOString() : null,
+    contractStatus: on ? "반납완료" : "반출",
+  }), false);
   try {
     // 품목별 정상/파손/분실 상세가 먼저 내구 저장되어야 한다. 이것이 실패한 상태에서
     // 거래를 닫으면 GAS의 이진 체크만 남아 상세 사실이 사라질 수 있으므로 완료 전에 저장한다.
@@ -937,6 +950,7 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
           const over = refreshedBlockers.reduce((sum, b) => sum + b.over, 0);
           const detail = missing > 0 ? `미확인 ${missing}개` : `초과 ${over}개`;
           const error = `반납 미확인 품목 — ${detail}`;
+          mutateTrade(tradeId, (t) => ({ ...t, ...previous }), false);
           finishTradeSave(tradeId, saveId, "error", `⚠️ ${error}`);
           return { ok: false, blockers: refreshedBlockers, error };
         }
@@ -944,13 +958,9 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
     }
     // 계약서 재생성 워커 등과의 잠금 경합은 짧은 재시도로 흡수한다(확정 거절은 즉시 실패).
     const res = await gasMutationRetrying("toggleReturn", { tid: tradeId, done: on, ...(force ? { force: 1 } : {}) });
-    const restored = !on && res?.contractStatus ? res.contractStatus : "반출";
-    mutateTrade(tradeId, (t) => ({
-      ...t,
-      returnDone: on,
-      returnDoneAt: on ? new Date().toISOString() : null,
-      contractStatus: on ? "반납완료" : restored,
-    }));
+    if (!on && res?.contractStatus) {
+      mutateTrade(tradeId, (t) => ({ ...t, contractStatus: res.contractStatus }), false);
+    }
     // GAS 완료 뒤의 최종 상태도 앞선 모든 저장 뒤에 즉시 직렬 저장한다.
     // 실패하면 성공으로 가장하지 않고 작업자에게 불일치를 드러낸다.
     if (isSupabase) await flushTradePersist(tradeId);
@@ -959,9 +969,54 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     console.error("[write-back] toggleReturn 실패:", e);
+    if (isGasOutcomeUnknownError(e)) {
+      // 응답만 유실됐을 수 있다 — 표시를 되돌리지 않고 같은 목표 상태를 백그라운드 재확인한다.
+      set({ toast: { id: saveId, text: "⚠️ 반납완료는 표시됐고 서버 응답을 다시 확인 중입니다", kind: "saving" } });
+      queueReturnOutcomeRetry(tradeId, on, force, previous, saveId);
+      return { ok: true, blockers: [] };
+    }
+    // 명확한 거절 — 즉시 표시를 원래 상태로 되돌린다.
+    mutateTrade(tradeId, (t) => ({ ...t, ...previous }), false);
     finishTradeSave(tradeId, saveId, "error", `⚠️ 반납 상태 변경 실패 — ${error}`);
     return { ok: false, blockers: [], error };
   }
+}
+
+/** 응답 유실된 반납완료를 멱등 재시도로 확정한다(반출완료 queueSetupOutcomeRetry와 동일 패턴).
+ *  상한 도달 시에만 표시를 되돌리고 락을 풀어 재시도를 허용한다. */
+const RETURN_OUTCOME_MAX_ATTEMPTS = 8;
+const returnOutcomeRetryTimers: Record<string, number | undefined> = {};
+
+function queueReturnOutcomeRetry(
+  tradeId: string,
+  on: boolean,
+  force: boolean,
+  previous: { returnDone: boolean; returnDoneAt: string | null; contractStatus: Trade["contractStatus"] },
+  saveId: number,
+  attempt = 1,
+): void {
+  if (typeof window === "undefined") return;
+  if (returnOutcomeRetryTimers[tradeId]) window.clearTimeout(returnOutcomeRetryTimers[tradeId]);
+  const delay = Math.min(1_000 * 2 ** (attempt - 1), 15_000);
+  returnOutcomeRetryTimers[tradeId] = window.setTimeout(async () => {
+    delete returnOutcomeRetryTimers[tradeId];
+    try {
+      const res = await gasMutation("toggleReturn", { tid: tradeId, done: on, ...(force ? { force: 1 } : {}) });
+      if (!on && res?.contractStatus) {
+        mutateTrade(tradeId, (t) => ({ ...t, contractStatus: res.contractStatus }), false);
+      }
+      if (isSupabase) await flushTradePersist(tradeId);
+      finishTradeSave(tradeId, saveId, "saved", on ? "반납완료 저장됨" : "저장됨");
+    } catch (error) {
+      if (attempt < RETURN_OUTCOME_MAX_ATTEMPTS && isRetryableLedgerError(error)) {
+        queueReturnOutcomeRetry(tradeId, on, force, previous, saveId, attempt + 1);
+        return;
+      }
+      console.error("[write-back] 반납완료 결과 미확정:", error);
+      mutateTrade(tradeId, (t) => ({ ...t, ...previous }), false);
+      finishTradeSave(tradeId, saveId, "error", "⚠️ 반납완료가 원장에 확정되지 않았습니다 — 다시 시도해주세요");
+    }
+  }, delay);
 }
 
 // ── 품목 체크 원장 쓰기 신뢰화 ──────────────────────────────────
