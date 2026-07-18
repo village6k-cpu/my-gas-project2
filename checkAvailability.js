@@ -842,18 +842,28 @@ function getDashboardData(targetDate, skipCache, options) {
   const schedSheet   = ss.getSheetByName('스케줄상세');
   const contractSheet = ss.getSheetByName('계약마스터');
 
-  // 장비명 → 카테고리 (장비마스터 C열=카테고리, D열=장비명) — 반납 분류용
+  // 장비명 → 카테고리 (장비마스터 C열=카테고리, D열=장비명) — 반납 분류용.
+  // 장비마스터는 거의 안 바뀌는데 매 재구축마다 전체 스캔(~0.9s)이라 10분 캐시한다.
   var equipCat = {};
-  try {
-    var masterSheet_ = ss.getSheetByName('장비마스터');
-    if (masterSheet_ && masterSheet_.getLastRow() > 1) {
-      var mRows_ = masterSheet_.getRange(2, 3, masterSheet_.getLastRow() - 1, 2).getValues(); // C, D
-      for (var mci = 0; mci < mRows_.length; mci++) {
-        var mcName = String(mRows_[mci][1] || '').trim();
-        if (mcName) equipCat[mcName] = String(mRows_[mci][0] || '').trim();
+  var equipCatCache = CacheService.getScriptCache();
+  var equipCatHit = null;
+  try { equipCatHit = equipCatCache.get('dashEquipCat_v1'); } catch (ecReadErr) {}
+  if (equipCatHit) {
+    try { equipCat = JSON.parse(equipCatHit) || {}; } catch (ecParseErr) { equipCat = {}; }
+  }
+  if (!equipCatHit) {
+    try {
+      var masterSheet_ = ss.getSheetByName('장비마스터');
+      if (masterSheet_ && masterSheet_.getLastRow() > 1) {
+        var mRows_ = masterSheet_.getRange(2, 3, masterSheet_.getLastRow() - 1, 2).getValues(); // C, D
+        for (var mci = 0; mci < mRows_.length; mci++) {
+          var mcName = String(mRows_[mci][1] || '').trim();
+          if (mcName) equipCat[mcName] = String(mRows_[mci][0] || '').trim();
+        }
       }
-    }
-  } catch (mcErr) {}
+      try { equipCatCache.put('dashEquipCat_v1', JSON.stringify(equipCat), 600); } catch (ecPutErr) {}
+    } catch (mcErr) {}
+  }
 
   if (!schedSheet || schedSheet.getLastRow() < 2) {
     return {
@@ -1949,7 +1959,42 @@ function fetchCardCautionsBatch_(requests) {
 
   if (!requests.length) return [];
 
-  var fetchRequests = requests.map(function(request) {
+  // 주의사항 매칭은 외부 API 왕복이라 대시보드 재구축의 큰 축(~1.3s)이었다.
+  // 같은 (phase, 품목 목록) 요청은 5분 캐시 — 주의사항 편집이 최대 5분 늦게 반영되는 것은 허용.
+  var cautionsCache = null;
+  var cacheKeys = [];
+  var results = new Array(requests.length);
+  var missIdx = [];
+  try {
+    cautionsCache = CacheService.getScriptCache();
+    cacheKeys = requests.map(function(request) {
+      var digest = Utilities.base64Encode(
+        Utilities.computeDigest(
+          Utilities.DigestAlgorithm.MD5,
+          request.phase + '|' + request.itemNames.join('|'),
+          Utilities.Charset.UTF_8
+        )
+      );
+      return 'cardCaut_v1_' + digest;
+    });
+    var cachedMap = cautionsCache.getAll(cacheKeys) || {};
+    requests.forEach(function(request, idx) {
+      var hit = cachedMap[cacheKeys[idx]];
+      if (hit) {
+        try {
+          results[idx] = JSON.parse(hit);
+          return;
+        } catch (parseErr) {}
+      }
+      missIdx.push(idx);
+    });
+  } catch (cacheErr) {
+    missIdx = requests.map(function(request, idx) { return idx; });
+  }
+  if (!missIdx.length) return results;
+
+  var fetchRequests = missIdx.map(function(idx) {
+    var request = requests[idx];
     return {
       url: getCardCautionsApiUrl_(),
       method: 'post',
@@ -1961,19 +2006,28 @@ function fetchCardCautionsBatch_(requests) {
 
   try {
     var responses = UrlFetchApp.fetchAll(fetchRequests);
-    return responses.map(function(response, idx) {
+    var toCache = {};
+    responses.forEach(function(response, i) {
+      var idx = missIdx[i];
       var phase = requests[idx].phase;
-      if (!response || response.getResponseCode() !== 200) return emptyCardCautionsResponse_(phase);
-      try {
-        return normalizeCardCautionsResponse_(phase, JSON.parse(response.getContentText() || '{}'));
-      } catch (parseErr) {
-        return emptyCardCautionsResponse_(phase);
+      var normalized = emptyCardCautionsResponse_(phase);
+      if (response && response.getResponseCode() === 200) {
+        try {
+          normalized = normalizeCardCautionsResponse_(phase, JSON.parse(response.getContentText() || '{}'));
+          if (cautionsCache && cacheKeys[idx]) toCache[cacheKeys[idx]] = JSON.stringify(normalized);
+        } catch (parseErr) {}
       }
+      results[idx] = normalized;
     });
+    if (cautionsCache) {
+      try { cautionsCache.putAll(toCache, 300); } catch (cachePutErr) {}
+    }
+    return results;
   } catch (err) {
-    return requests.map(function(request) {
-      return emptyCardCautionsResponse_(request.phase);
+    missIdx.forEach(function(idx) {
+      results[idx] = emptyCardCautionsResponse_(requests[idx].phase);
     });
+    return results;
   }
 }
 
@@ -3560,6 +3614,24 @@ function getEquipmentCheckMapForIds_(tradeIds) {
   });
   if (Object.keys(wanted).length === 0) return result;
 
+  // 외부(빌리지2.0) 스프레드시트 열기+읽기가 재구축마다 ~0.9s — 같은 거래 집합은 2분 캐시.
+  // 반납 상태/특이사항이 최대 2분 늦게 보이는 것은 대시보드 용도에서 허용.
+  var checkMapCache = null;
+  var checkMapCacheKey = '';
+  try {
+    checkMapCache = CacheService.getScriptCache();
+    var sortedTids = Object.keys(wanted).sort().join('|');
+    checkMapCacheKey = 'equipChkMap_v1_' + Utilities.base64Encode(
+      Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, sortedTids, Utilities.Charset.UTF_8)
+    );
+    var checkMapHit = checkMapCache.get(checkMapCacheKey);
+    if (checkMapHit) {
+      try { return JSON.parse(checkMapHit); } catch (chkParseErr) {}
+    }
+  } catch (chkCacheErr) {
+    checkMapCache = null;
+  }
+
   try {
     var sheet = getEquipmentCheckSheet_(false);
     if (!sheet || sheet.getLastRow() < 2) return result;
@@ -3598,6 +3670,10 @@ function getEquipmentCheckMapForIds_(tradeIds) {
     result.error = err.message;
   }
 
+  // 정상 결과만 캐시 (에러 응답을 2분간 재배포하지 않도록)
+  if (checkMapCache && checkMapCacheKey && !result.error) {
+    try { checkMapCache.put(checkMapCacheKey, JSON.stringify(result), 120); } catch (chkPutErr) {}
+  }
   return result;
 }
 
