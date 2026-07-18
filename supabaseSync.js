@@ -359,7 +359,8 @@ function supaMarkTradeDirty_(tid) {
     var p = PropertiesService.getScriptProperties();
     var dirty = {};
     try { dirty = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
-    dirty[tid] = 1;
+    // 타임스탬프 값 — flushDirtyToSupabase가 업서트 중 새로 dirty가 된 거래를 구분해 보존한다
+    dirty[tid] = Date.now();
     p.setProperty('SUPA_DIRTY', JSON.stringify(dirty));
   } catch (err) {
     // 동기화 마킹 실패가 본 작업을 막으면 안 됨
@@ -375,12 +376,26 @@ function flushDirtyToSupabase() {
   try { dirty = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
   var tids = Object.keys(dirty);
   if (!tids.length) return;
-  // 동시성: 잠금
+  // dirty 마크 스냅샷 — 업서트 동안 새로 dirty가 된 거래는 지우지 않고 다음 분에 재동기화
+  var snapshot = {};
+  for (var s = 0; s < tids.length; s++) snapshot[tids[s]] = dirty[tids[s]];
+
+  // ★ 잠금은 시트 읽기(빌드) 동안만 쥔다. HTTP 업서트(수 초)까지 잠금 안에서 돌리면
+  //   1분마다 반납완료·품목체크 같은 인터랙티브 쓰기와 경합해 버튼이 실패한다.
+  var built = null;
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return;
   try {
-    var built = buildSupabaseTrades_(tids);
-    var ok = true;
+    built = buildSupabaseTrades_(tids);
+  } catch (buildErr) {
+    Logger.log('flushDirty 빌드 오류: ' + buildErr);
+    return;
+  } finally {
+    lock.releaseLock();
+  }
+
+  var ok = true;
+  try {
     if (built.trades.length) {
       if (!supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id')) ok = false;
       if (built.items.length) {
@@ -398,22 +413,24 @@ function flushDirtyToSupabase() {
         }
       }
     }
-    // ★ 성공한 경우에만 dirty에서 제거. 실패(Supabase 장애·봇 토큰 만료·스키마 오류)면
-    //    dirty를 유지해 다음 1분 트리거가 재시도한다. 예전엔 실패해도 무조건 지워서
-    //    그 분(minute)의 변경분이 영구 유실 → 앱이 낡은 반출/반납 데이터를 표시했다.
-    if (ok) {
-      var after = {};
-      try { after = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
-      for (var i = 0; i < tids.length; i++) delete after[tids[i]];
-      p.setProperty('SUPA_DIRTY', JSON.stringify(after));
-      Logger.log('Supabase push: ' + built.trades.length + '건');
-    } else {
-      Logger.log('Supabase push 일부 실패 → dirty 유지(재시도 예정): ' + tids.length + '건');
-    }
   } catch (err) {
     Logger.log('flushDirty 오류: ' + err);
-  } finally {
-    lock.releaseLock();
+    return;
+  }
+  // ★ 성공한 경우에만 dirty에서 제거. 실패(Supabase 장애·봇 토큰 만료·스키마 오류)면
+  //    dirty를 유지해 다음 1분 트리거가 재시도한다. 예전엔 실패해도 무조건 지워서
+  //    그 분(minute)의 변경분이 영구 유실 → 앱이 낡은 반출/반납 데이터를 표시했다.
+  //    업서트 중 다시 dirty가 된 거래(마크 값이 달라짐)도 보존한다.
+  if (ok) {
+    var after = {};
+    try { after = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
+    for (var i = 0; i < tids.length; i++) {
+      if (after[tids[i]] === snapshot[tids[i]]) delete after[tids[i]];
+    }
+    p.setProperty('SUPA_DIRTY', JSON.stringify(after));
+    Logger.log('Supabase push: ' + built.trades.length + '건');
+  } else {
+    Logger.log('Supabase push 일부 실패 → dirty 유지(재시도 예정): ' + tids.length + '건');
   }
 }
 

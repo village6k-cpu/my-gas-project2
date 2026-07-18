@@ -2803,10 +2803,23 @@ function toggleReturnDone(tid, done) {
   var props = PropertiesService.getScriptProperties();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
 
+  // ── 검증·준비 단계: 읽기 전용이므로 전역 잠금 밖에서 수행한다 ──
+  // 완료 검증(스케줄상세 전체 스캔 + Supabase 상세수량 HTTP)이 잠금 안에 있으면
+  // 계약서 재생성 워커 등 긴 잠금과 겹칠 때 5초 대기가 항상 져서
+  // 반납완료 버튼이 계속 실패했다. 잠금 안에는 시트 상태 기록과 속성 쓰기만 남긴다.
+  if (isDone) {
+    var completionCheck = assertDashboardReturnComplete_(tid, props);
+    if (completionCheck && completionCheck.error) return completionCheck;
+  }
+  var cleanupSids = [];
+  if (isDone) {
+    try { cleanupSids = listDashboardCheckoutItemCheckSids_(tid); } catch (sidErr) { cleanupSids = []; }
+  }
+
   var lock = LockService.getScriptLock();
   var lockAcquired = false;
   try {
-    lock.waitLock(5000);
+    lock.waitLock(20000);
     lockAcquired = true;
   } catch (lockErr) {
     return { error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.' };
@@ -2815,7 +2828,7 @@ function toggleReturnDone(tid, done) {
   try {
     var previousDone = props.getProperty(key);
     var previousDoneAt = props.getProperty(atKey);
-    var contractResult = setDashboardReturnContractStatus_(tid, isDone, props);
+    var contractResult = setDashboardReturnContractStatus_(tid, isDone, props, { skipCompletionCheck: isDone });
     if (contractResult && contractResult.error) return contractResult;
 
     try {
@@ -2825,7 +2838,10 @@ function toggleReturnDone(tid, done) {
         props.setProperty(key, '1');
         props.setProperty(atKey, doneAt);
         // quota 정리는 완료 커밋의 필수 조건이 아니다. 실패해도 체크 증거를 보존한 채 로그만 남긴다.
-        try { clearDashboardCheckoutItemChecks_(tid, props); } catch (cleanupErr) {
+        // 대상 스케줄ID는 잠금 밖에서 미리 조회했으므로 여기선 속성 삭제만 한다.
+        try {
+          cleanupSids.forEach(function(sid) { props.deleteProperty('itemCheck_' + sid + '_checkout'); });
+        } catch (cleanupErr) {
           Logger.log('반출 체크 정리 실패(완료 유지): ' + cleanupErr.message);
         }
       } else {
@@ -2859,17 +2875,23 @@ function toggleReturnDone(tid, done) {
   }
 }
 
+/** 거래의 반출 체크 속성키 대상 스케줄ID 목록 — 읽기 전용이라 잠금 밖에서 호출한다. */
+function listDashboardCheckoutItemCheckSids_(tid) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sched = ss.getSheetByName('스케줄상세');
+  if (!sched) return [];
+  var groups = getDashboardSearchGroupsForIds_(sched, [tid]);
+  var group = groups[tid];
+  return (group && group.equipments || [])
+    .map(function(eq) { return String(eq.scheduleId || '').trim(); })
+    .filter(function(sid) { return !!sid; });
+}
+
 /** 반납이 확정된 거래의 반출 체크 키는 더 이상 필요 없으므로 누적 quota에서 제거한다. */
 function clearDashboardCheckoutItemChecks_(tid, props) {
   props = props || PropertiesService.getScriptProperties();
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sched = ss.getSheetByName('스케줄상세');
-  if (!sched) return;
-  var groups = getDashboardSearchGroupsForIds_(sched, [tid]);
-  var group = groups[tid];
-  (group && group.equipments || []).forEach(function(eq) {
-    var sid = String(eq.scheduleId || '').trim();
-    if (sid) props.deleteProperty('itemCheck_' + sid + '_checkout');
+  listDashboardCheckoutItemCheckSids_(tid).forEach(function(sid) {
+    props.deleteProperty('itemCheck_' + sid + '_checkout');
   });
 }
 
@@ -2877,9 +2899,11 @@ function formatDashboardDoneAt_(date) {
   return Utilities.formatDate(date || new Date(), "Asia/Seoul", "yyyy-MM-dd HH:mm:ss");
 }
 
-function setDashboardReturnContractStatus_(tid, isDone, props) {
+function setDashboardReturnContractStatus_(tid, isDone, props, options) {
   props = props || PropertiesService.getScriptProperties();
-  if (isDone) {
+  // skipCompletionCheck: toggleReturnDone이 잠금 밖에서 이미 완료 검증을 마친 경우
+  // (전체 시트 스캔 + Supabase HTTP를 잠금 안에서 반복하지 않기 위함)
+  if (isDone && !(options && options.skipCompletionCheck)) {
     var completionCheck = assertDashboardReturnComplete_(tid, props);
     if (completionCheck && completionCheck.error) return completionCheck;
   }
@@ -3742,7 +3766,7 @@ function updateDashboardContractStatus(tradeId, status) {
   var lock = LockService.getScriptLock();
   var lockAcquired = false;
   try {
-    lock.waitLock(5000);
+    lock.waitLock(20000);
     lockAcquired = true;
   } catch (lockErr) {
     return { error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.' };

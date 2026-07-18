@@ -784,7 +784,7 @@ export async function updateTradeDetails(tradeId: string, input: TradeDetailsInp
   }
   const saveId = beginTradeSave(tradeId);
   try {
-    const res = await gasMutation("updateTrade", { tid: tradeId, ...input });
+    const res = await gasMutationRetrying("updateTrade", { tid: tradeId, ...input });
     if (res?.skipped) throw new Error(writeBackDisabledReason);
     mutateTrade(tradeId, (trade) => ({
       ...trade,
@@ -814,7 +814,7 @@ export async function cancelTrade(tradeId: string): Promise<{ ok: true; warning?
   }
   const saveId = beginTradeSave(tradeId);
   try {
-    const res = await gasMutation("updateContractStatus", { tid: tradeId, status: "취소" });
+    const res = await gasMutationRetrying("updateContractStatus", { tid: tradeId, status: "취소" });
     if (res?.skipped) throw new Error(writeBackDisabledReason);
     let warning = "";
     if (isSupabase) {
@@ -893,6 +893,9 @@ export type ToggleReturnResult =
   | { ok: false; blockers: ReturnCompletionBlocker[]; error: string };
 
 export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult> {
+  if (state.savingTrades[tradeId]) {
+    return { ok: false, blockers: [], error: "반납 상태 변경이 이미 진행 중입니다" };
+  }
   const current = state.trades.find((t) => t.tradeId === tradeId);
   if (!current) return { ok: false, blockers: [], error: "거래를 찾을 수 없습니다" };
 
@@ -915,6 +918,8 @@ export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult>
     return { ok: false, blockers: [], error };
   }
 
+  // 잠금 경합 재시도 동안 저장 중 스피너를 유지하고 중복 탭을 막는다.
+  const saveId = beginTradeSave(tradeId);
   try {
     // 품목별 정상/파손/분실 상세가 먼저 내구 저장되어야 한다. 이것이 실패한 상태에서
     // 거래를 닫으면 GAS의 이진 체크만 남아 상세 사실이 사라질 수 있으므로 완료를 막는다.
@@ -926,11 +931,12 @@ export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult>
         const over = refreshedBlockers.reduce((sum, b) => sum + b.over, 0);
         const detail = missing > 0 ? `미확인 ${missing}개` : `초과 ${over}개`;
         const error = `반납완료 차단 — ${detail}. 품목별 수량을 다시 확인해주세요.`;
-        set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
+        finishTradeSave(tradeId, saveId, "error", `⚠️ ${error}`);
         return { ok: false, blockers: refreshedBlockers, error };
       }
     }
-    const res = await gasMutation("toggleReturn", { tid: tradeId, done: on });
+    // 계약서 재생성 워커 등과의 잠금 경합은 짧은 재시도로 흡수한다(확정 거절은 즉시 실패).
+    const res = await gasMutationRetrying("toggleReturn", { tid: tradeId, done: on });
     const restored = !on && res?.contractStatus ? res.contractStatus : "반출";
     mutateTrade(tradeId, (t) => ({
       ...t,
@@ -941,12 +947,12 @@ export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult>
     // GAS 완료 뒤의 최종 상태도 앞선 모든 저장 뒤에 즉시 직렬 저장한다.
     // 실패하면 성공으로 가장하지 않고 작업자에게 불일치를 드러낸다.
     if (isSupabase) await flushTradePersist(tradeId);
-    flashSave(tradeId);
+    finishTradeSave(tradeId, saveId, "saved", on ? "반납완료 저장됨" : "저장됨");
     return { ok: true, blockers: [] };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     console.error("[write-back] toggleReturn 실패:", e);
-    set({ toast: { id: ++toastSeq, text: `⚠️ 반납 상태 변경 실패 — ${error}`, kind: "error" } });
+    finishTradeSave(tradeId, saveId, "error", `⚠️ 반납 상태 변경 실패 — ${error}`);
     return { ok: false, blockers: [], error };
   }
 }
@@ -967,6 +973,23 @@ function isRetryableLedgerError(error: unknown): boolean {
   if (isGasOutcomeUnknownError(error)) return true; // 네트워크/5xx/타임아웃
   const message = error instanceof Error ? error.message : String(error);
   return /lock|잠시 후 다시|처리 중/i.test(message);
+}
+
+/** 사용자 대기형 변이(반납완료·취소·예약편집)의 잠금 경합 흡수 —
+ *  저장 스피너를 유지한 채 잠깐 물러났다 재시도한다. 확정 거절은 즉시 던진다. */
+async function gasMutationRetrying(
+  action: string,
+  params: Record<string, string | number | boolean>,
+  delays: number[] = [2_000, 5_000],
+): Promise<any> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await gasMutation(action, params);
+    } catch (error) {
+      if (attempt >= delays.length || !isRetryableLedgerError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
+  }
 }
 
 function queueItemCheckWrite(tradeId: string, scheduleId: string, done: boolean): void {

@@ -1323,72 +1323,68 @@ function scheduleContractRegen(거래ID) {
  */
 function regenPendingContracts() {
   var STABLE_MS = 2800;
+  var props = PropertiesService.getScriptProperties();
+  // 자기 자신(트리거) 먼저 삭제 — 재예약은 마지막에 결정. 트리거 정리는 잠금이 필요 없다.
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'regenPendingContracts') {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+  props.deleteProperty(CONTRACT_REGEN_TRIGGER_PROP_);
+
+  var all = props.getProperties();
+  var now = Date.now();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var stillPending = false;
+  var BUDGET_MS = 4 * 60 * 1000; // 6분 실행 한도 전에 끊고 재예약 (대량 적체 대비)
+  var startedAt = Date.now();
   var lock = LockService.getScriptLock();
-  try { lock.waitLock(10000); } catch (e) {
-    // 이 실행을 깨운 일회성 트리거는 이미 소진됨 — 조용히 반환하면 대기열 고아화.
-    // 30초 뒤 재시도 트리거를 새로 걸어두고 빠진다.
+
+  for (var key in all) {
+    if (!key.startsWith('contractEditTS_')) continue;
+    if (Date.now() - startedAt > BUDGET_MS) { stillPending = true; break; }
+    var 거래ID = key.substring('contractEditTS_'.length);
+
+    // 타임스탬프 재조회 — 루프 중 onEdit이 새로 썼을 수 있음
+    var freshTs = Number(props.getProperty(key));
+    if (!freshTs) continue;
+
+    var age = now - freshTs;
+    if (age < STABLE_MS) { stillPending = true; continue; }
+
+    // ★ 잠금은 거래 1건 재생성 동안만 쥔다. 예전엔 실행 전체(최대 4분)를 통째로 쥐어
+    //   반납완료·품목체크 같은 인터랙티브 쓰기가 5~20초 대기로는 항상 졌다.
+    //   1건마다 풀고(사이 250ms) 버튼 클릭이 끼어들 틈을 보장한다.
+    var acquired = false;
     try {
-      ScriptApp.getProjectTriggers().forEach(function(t) {
-        if (t.getHandlerFunction() === 'regenPendingContracts') ScriptApp.deleteTrigger(t);
-      });
-      ScriptApp.newTrigger('regenPendingContracts').timeBased().after(30000).create();
-      PropertiesService.getScriptProperties()
-        .setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
-    } catch (e2) {}
-    return;
+      lock.waitLock(10000);
+      acquired = true;
+    } catch (lockErr) {
+      stillPending = true;
+      break; // 잠금이 오래 막혀 있으면 이번 실행은 접고 3초 뒤 재시도
+    }
+    try {
+      try {
+        deleteAndRegenerateContract(ss, 거래ID);
+        try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
+        try { invalidateDashboardCache(); } catch (e1) {}
+        try { invalidateTimelineCache(); } catch (e2) {}
+        try { supaMarkTradeDirty_(거래ID); } catch (eMark) {} // 새 계약서 링크 → Supabase/앱 전파
+        Logger.log("계약서 재생성 완료(디바운스): " + 거래ID);
+      } catch (err) {
+        try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e3) {}
+        Logger.log("계약서 재생성 실패: " + 거래ID + " - " + err.message);
+      }
+      props.deleteProperty(key);
+    } finally {
+      if (acquired) try { lock.releaseLock(); } catch (relErr) {}
+    }
+    Utilities.sleep(250);
   }
 
-  try {
-    var props = PropertiesService.getScriptProperties();
-    // 자기 자신(트리거) 먼저 삭제 — 재예약은 마지막에 결정
-    ScriptApp.getProjectTriggers().forEach(function(t) {
-      if (t.getHandlerFunction() === 'regenPendingContracts') {
-        ScriptApp.deleteTrigger(t);
-      }
-    });
-    props.deleteProperty(CONTRACT_REGEN_TRIGGER_PROP_);
-
-    var all = props.getProperties();
-    var now = Date.now();
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var stillPending = false;
-    var BUDGET_MS = 4 * 60 * 1000; // 6분 실행 한도 전에 끊고 재예약 (대량 적체 대비)
-    var startedAt = Date.now();
-
-    for (var key in all) {
-      if (!key.startsWith('contractEditTS_')) continue;
-      if (Date.now() - startedAt > BUDGET_MS) { stillPending = true; break; }
-      var 거래ID = key.substring('contractEditTS_'.length);
-
-      // 타임스탬프 재조회 — 루프 중 onEdit이 새로 썼을 수 있음
-      var freshTs = Number(props.getProperty(key));
-      if (!freshTs) continue;
-
-      var age = now - freshTs;
-      if (age >= STABLE_MS) {
-        try {
-          deleteAndRegenerateContract(ss, 거래ID);
-          try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
-          try { invalidateDashboardCache(); } catch (e1) {}
-          try { invalidateTimelineCache(); } catch (e2) {}
-          try { supaMarkTradeDirty_(거래ID); } catch (eMark) {} // 새 계약서 링크 → Supabase/앱 전파
-          Logger.log("계약서 재생성 완료(디바운스): " + 거래ID);
-        } catch (err) {
-          try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e3) {}
-          Logger.log("계약서 재생성 실패: " + 거래ID + " - " + err.message);
-        }
-        props.deleteProperty(key);
-      } else {
-        stillPending = true;
-      }
-    }
-
-    if (stillPending) {
-      ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
-      props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
-    }
-  } finally {
-    lock.releaseLock();
+  if (stillPending) {
+    ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
+    props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
   }
 }
 

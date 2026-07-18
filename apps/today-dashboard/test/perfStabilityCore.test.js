@@ -117,6 +117,45 @@ test("GAS toggleItemCheck는 검증을 잠금 밖에서 하고 잠금 대기를 
   assert.doesNotMatch(fn, /lock\.waitLock\(5000\)/);
 });
 
+test("GAS 전역 잠금: 무거운 작업이 잠금을 통째로 쥐지 않는다", () => {
+  const gas = fs.readFileSync(path.resolve(appRoot, "../..", "checkAvailability.js"), "utf8");
+  // toggleReturnDone: 완료 검증(전체 시트 스캔 + Supabase HTTP)은 잠금 앞에서
+  const ret = section(gas, "function toggleReturnDone", "function listDashboardCheckoutItemCheckSids_");
+  const assertAt = ret.indexOf("assertDashboardReturnComplete_(tid, props)");
+  const retLockAt = ret.indexOf("lock.waitLock(");
+  assert.ok(assertAt >= 0 && retLockAt > assertAt, "반납완료 검증은 잠금 밖(앞)이어야 한다");
+  assert.match(ret, /lock\.waitLock\(20000\)/);
+  assert.match(ret, /skipCompletionCheck: isDone/, "잠금 안에서 무거운 검증을 반복하지 않아야 한다");
+  assert.doesNotMatch(ret, /lock\.waitLock\(5000\)/);
+
+  // regenPendingContracts: 잠금은 거래 1건 재생성 동안만 + 사이에 틈
+  const code = fs.readFileSync(path.resolve(appRoot, "../..", "Code.js"), "utf8");
+  const regen = section(code, "function regenPendingContracts", "var TEMPLATE_SYNC_EDIT_TS_PROP_");
+  const forAt = regen.indexOf("for (var key in all)");
+  const regenLockAt = regen.indexOf("lock.waitLock(");
+  assert.ok(forAt >= 0 && regenLockAt > forAt, "재생성 워커는 루프 안에서 거래 단위로만 잠가야 한다");
+  assert.match(regen, /Utilities\.sleep\(/, "거래 사이에 인터랙티브 쓰기가 끼어들 틈이 있어야 한다");
+
+  // flushDirtyToSupabase: HTTP 업서트는 잠금 해제 후
+  const supa = fs.readFileSync(path.resolve(appRoot, "../..", "supabaseSync.js"), "utf8");
+  const flush = section(supa, "function flushDirtyToSupabase", "/** 거래ID 배열");
+  const buildAt = flush.indexOf("buildSupabaseTrades_(tids)");
+  const releaseAt = flush.indexOf("lock.releaseLock()");
+  const upsertAt = flush.indexOf("supaUpsertGrouped_");
+  assert.ok(buildAt >= 0 && releaseAt > buildAt && upsertAt > releaseAt, "HTTP 업서트는 잠금 해제 뒤여야 한다");
+  assert.match(flush, /after\[tids\[i\]\] === snapshot\[tids\[i\]\]/, "업서트 중 재변경된 거래의 dirty 마크는 보존해야 한다");
+});
+
+test("반납완료는 잠금 경합을 재시도로 흡수하고 중복 탭을 막는다", () => {
+  const store = read("lib/data/store.ts");
+  const ret = section(store, "export async function toggleReturn", "\n// ── 품목 체크 원장 쓰기 신뢰화");
+  assert.match(ret, /if \(state\.savingTrades\[tradeId\]\)/, "저장 중 재진입을 막아야 한다");
+  assert.match(ret, /beginTradeSave\(tradeId\)/, "재시도 동안 저장 스피너를 유지해야 한다");
+  assert.match(ret, /gasMutationRetrying\("toggleReturn"/, "잠금 경합은 재시도로 흡수해야 한다");
+  assert.match(store, /gasMutationRetrying\("updateContractStatus"/, "취소도 같은 재시도를 써야 한다");
+  assert.match(store, /gasMutationRetrying\("updateTrade"/, "예약 편집도 같은 재시도를 써야 한다");
+});
+
 test("스테퍼 수량 변경은 낙관 반영 + 디바운스 + 직렬 커밋이다", () => {
   const store = read("lib/data/store.ts");
   const queue = section(store, "export function queueItemQty", "\nasync function commitQueuedItemQty");
