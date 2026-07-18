@@ -255,6 +255,11 @@ function onEditInstallable(e) {
   const editColCount = e.range.getNumColumns ? e.range.getNumColumns() : 1;
   if (row === 1 && editRowCount === 1) return;
 
+  // 확인요청 시트를 사람이 직접 편집하면 헤이빌리 확인요청 목록 캐시를 비운다
+  if (sheet.getName() === "확인요청" && typeof invalidateConfirmListCache_ === "function") {
+    invalidateConfirmListCache_();
+  }
+
   // 확인요청 A열: 거래ID만 입력하면 자동으로 RQ- 붙이기
   if (sheet.getName() === "확인요청" && col === 1 && row >= 2) {
     var aVal = String(e.range.getValue()).trim();

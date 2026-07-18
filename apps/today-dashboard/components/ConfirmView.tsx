@@ -237,9 +237,19 @@ export function ConfirmView() {
     load();
   }, [load]);
 
+  // 액션 응답에 실려온 갱신 카드로 그 카드만 즉시 교체한다 — 전체 목록 재조회(수 초)를 기다리지 않는다.
+  // card가 null이면 목록에서 빠진 것(거절/등록완료) → 즉시 제거.
+  const applyCardPatch = useCallback((reqID: string, card: Req | null | undefined) => {
+    setItems((prev) => {
+      const next = card ? prev.map((it) => (it.reqID === reqID ? card : it)) : prev.filter((it) => it.reqID !== reqID);
+      writeConfirmListCache(next);
+      return next;
+    });
+  }, []);
+
   // 액션 실행 (확인/등록/보류/거절) — POST /api/confirm
   const doAction = useCallback(
-    async (action: string, reqID: string): Promise<boolean> => {
+    async (action: string, reqID: string): Promise<Record<string, unknown> | null> => {
       setReqBusy(reqID, true);
       setError("");
       try {
@@ -251,10 +261,10 @@ export function ConfirmView() {
         const json = await res.json().catch(() => ({}));
         const ok = json.status === "OK" || json.success;
         if (!res.ok || !ok) throw new Error(json.message || json.error || `${action} 실패`);
-        return true;
+        return json;
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
-        return false;
+        return null;
       } finally {
         setReqBusy(reqID, false);
       }
@@ -297,7 +307,7 @@ export function ConfirmView() {
         const json = await res.json().catch(() => ({}));
         const ok = json.status === "OK" || json.success === true;
         if (!res.ok || !ok) throw new Error(json.message || json.error || "등록 대기열 등록 실패");
-        await load();
+        void load(); // 대기열 상태 반영은 백그라운드로 — 카드 스피너를 목록 재조회에 묶지 않는다
         setTimeout(() => void load(), 3_000);
         setTimeout(() => {
           void load();
@@ -347,32 +357,49 @@ export function ConfirmView() {
 
   const act = useCallback(
     async (action: string, reqID: string) => {
-      const ok = await doAction(action, reqID);
-      if (ok) setTimeout(load, 600);
+      const json = await doAction(action, reqID);
+      if (!json) return;
+      if ("card" in json) {
+        // 응답의 카드로 즉시 반영 — 전체 재조회는 백그라운드 수렴용으로만
+        applyCardPatch(reqID, (json.card as Req | null) ?? null);
+        setTimeout(() => void load(), 2_500);
+      } else {
+        setTimeout(load, 600);
+      }
     },
-    [doAction, load],
+    [doAction, applyCardPatch, load],
   );
 
   // 확인요청 삭제 — 확인요청 시트의 해당 reqID 행만 지운다(등록된 예약 자체는 건드리지 않음).
+  // 카드는 즉시 사라지고(낙관), 서버 삭제 실패 시에만 되살린다.
   const deleteReq = useCallback(
     async (reqID: string) => {
-      setReqBusy(reqID, true);
+      let removed: Req | undefined;
+      setItems((prev) => {
+        removed = prev.find((it) => it.reqID === reqID);
+        const next = prev.filter((it) => it.reqID !== reqID);
+        writeConfirmListCache(next);
+        return next;
+      });
       setError("");
       try {
         await runFunc("deleteRequest", { reqID });
-        await load();
+        setTimeout(() => void load(), 2_500);
       } catch (e) {
+        if (removed) {
+          const restore = removed;
+          setItems((prev) => (prev.some((it) => it.reqID === reqID) ? prev : [restore, ...prev]));
+        }
         setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setReqBusy(reqID, false);
       }
     },
-    [runFunc, load, setReqBusy],
+    [runFunc, load],
   );
 
-  const handleKakaoRequestCreated = useCallback(async () => {
-    await load();
+  const handleKakaoRequestCreated = useCallback(() => {
+    // 모달은 즉시 닫고 목록은 뒤에서 갱신한다 (예전엔 수 초 재조회를 기다린 뒤 닫혔음)
     setShowKakaoInput(false);
+    void load();
   }, [load]);
 
   const cards = useMemo(

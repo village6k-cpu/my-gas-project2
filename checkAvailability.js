@@ -10155,6 +10155,8 @@ function _runPendingRegister() {
 
   // 속성 큐가 유실되거나 구버전에서 O열만 등록대기로 남은 건도 복구한다.
   processRegistrationQueue_(sheet);
+  // 백그라운드 등록이 O열 상태를 바꿨다 — 헤이빌리 확인요청 목록 캐시 갱신
+  if (typeof invalidateConfirmListCache_ === "function") invalidateConfirmListCache_();
 }
 
 /**

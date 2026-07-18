@@ -190,6 +190,27 @@ test("반납완료 미확인은 강제 차단이 아니라 작업자 확인 후 
   assert.match(gasRet, /반납완료 강제 처리/, "강제 처리는 로그로 남긴다");
 });
 
+test("확인요청 메뉴: 리스트 캐시 + 카드 응답 패치 + 낙관 UI", () => {
+  const gasApi = fs.readFileSync(path.resolve(appRoot, "../..", "sheetAPI.js"), "utf8");
+  // GAS 리스트는 60초 캐시하고, 확인요청을 바꾸는 모든 경로가 무효화한다
+  assert.match(gasApi, /CONFIRM_LIST_CACHE_KEY_/, "리스트 캐시 키가 있어야 한다");
+  assert.match(gasApi, /function invalidateConfirmListCache_/, "무효화 헬퍼가 있어야 한다");
+  const invalidateCalls = [...gasApi.matchAll(/invalidateConfirmListCache_\(\)/g)];
+  assert.ok(invalidateCalls.length >= 3, "액션/run/registerAsync 경로가 캐시를 무효화해야 한다");
+  // 액션 응답에 갱신 카드를 실어 앱이 전체 재조회 없이 그 카드만 교체한다
+  assert.match(gasApi, /function confirmActionResponse_/, "액션 응답에 카드를 동봉해야 한다");
+  assert.match(gasApi, /buildConfirmPendingItems_\(reqID\)/, "카드는 목록과 같은 빌더로 만든다");
+
+  const view = read("components/ConfirmView.tsx");
+  assert.match(view, /applyCardPatch/, "응답 카드로 로컬 패치해야 한다");
+  assert.doesNotMatch(view, /const ok = await doAction\(action, reqID\);\s*\n\s*if \(ok\) setTimeout\(load, 600\);/, "액션 후 전체 재조회 대기 금지");
+  // 삭제는 낙관 반영(즉시 제거, 실패 시 복원)
+  const del = view.slice(view.indexOf("const deleteReq"), view.indexOf("const handleKakaoRequestCreated"));
+  const removeAt = del.indexOf("prev.filter((it) => it.reqID !== reqID)");
+  const funcAt = del.indexOf('runFunc("deleteRequest"');
+  assert.ok(removeAt >= 0 && funcAt > removeAt, "카드 제거가 서버 삭제보다 먼저여야 한다");
+});
+
 test("스테퍼 수량 변경은 낙관 반영 + 디바운스 + 직렬 커밋이다", () => {
   const store = read("lib/data/store.ts");
   const queue = section(store, "export function queueItemQty", "\nasync function commitQueuedItemQty");
