@@ -2879,21 +2879,28 @@ function invalidateDashboardReturnInspectionForTrade_(tid, scheduleIds, reason) 
 /**
  * 거래ID 반납검수 완료 토글 (Dashboard 반납 카드 체크박스).
  */
-function toggleReturnDone(tid, done) {
+function toggleReturnDone(tid, done, options) {
   if (!tid) return { error: "tid 필요" };
   tid = String(tid).trim();
   var key = 'returnDone_' + tid;
   var atKey = 'returnDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
+  // force: 완료 검증을 건너뛰고 작업자 판단으로 종결한다(확인 다이얼로그 뒤에만 전달됨).
+  // 카드는 반납완료 전까지 계속 살아있고 미확인 내역은 returnCounts에 그대로 남으므로,
+  // 강제 차단 대신 사람이 결정하는 소프트 가드가 운영 정책이다.
+  var force = !!(options && (options.force === true || options.force === 1 || options.force === '1' || options.force === 'true'));
 
   // ── 검증·준비 단계: 읽기 전용이므로 전역 잠금 밖에서 수행한다 ──
   // 완료 검증(스케줄상세 전체 스캔 + Supabase 상세수량 HTTP)이 잠금 안에 있으면
   // 계약서 재생성 워커 등 긴 잠금과 겹칠 때 5초 대기가 항상 져서
   // 반납완료 버튼이 계속 실패했다. 잠금 안에는 시트 상태 기록과 속성 쓰기만 남긴다.
-  if (isDone) {
+  if (isDone && !force) {
     var completionCheck = assertDashboardReturnComplete_(tid, props);
     if (completionCheck && completionCheck.error) return completionCheck;
+  }
+  if (isDone && force) {
+    Logger.log('반납완료 강제 처리(작업자 확인): ' + tid);
   }
   var cleanupSids = [];
   if (isDone) {

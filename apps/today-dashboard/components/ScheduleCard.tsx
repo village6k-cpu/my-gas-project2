@@ -71,7 +71,19 @@ export const ScheduleCard = memo(function ScheduleCard({
     }
     if (returnBlockers.length > 0) setOpen(true);
     const result = await toggleReturn(trade.tradeId);
-    if (!result.ok) setOpen(true);
+    if (result.ok) return;
+    setOpen(true);
+    // 미확인/초과는 강제 차단하지 않는다 — 작업자가 내용을 보고 결정한다(소프트 가드).
+    // 카드는 완료 전까지 계속 살아있고, 미확인 내역은 returnCounts 기록으로 남는다.
+    if (result.blockers.length > 0) {
+      const missing = result.blockers.reduce((sum, b) => sum + b.missing, 0);
+      const over = result.blockers.reduce((sum, b) => sum + b.over, 0);
+      const detail = [missing > 0 ? `미확인 ${missing}개` : "", over > 0 ? `초과 ${over}개` : ""].filter(Boolean).join(", ");
+      const confirmed = window.confirm(`${detail} 상태입니다.\n품목 확인 없이 반납완료 처리할까요?\n(미확인 내역은 기록으로 남습니다)`);
+      if (!confirmed) return;
+      const forced = await toggleReturn(trade.tradeId, { force: true });
+      if (!forced.ok) setOpen(true);
+    }
   }
 
   // 완료되면 상세 자동 접힘 (처리됨 느낌)

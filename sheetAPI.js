@@ -330,7 +330,9 @@ function handleRequest(e) {
       case "toggleReturn":
         return jsonResponse(toggleReturnDone(
           params.tid || postBody.tid,
-          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
+          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1),
+          // force=1: 미확인 품목이 있어도 작업자가 확인하고 완료 처리(강제 차단 대신 사람이 결정)
+          { force: (params.force === '1' || params.force === 'true' || postBody.force === true || postBody.force === '1' || postBody.force === 1) }
         ));
 
       case "toggleItem":

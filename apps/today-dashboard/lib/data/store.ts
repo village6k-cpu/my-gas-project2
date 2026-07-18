@@ -895,7 +895,7 @@ export type ToggleReturnResult =
   | { ok: true; blockers: [] }
   | { ok: false; blockers: ReturnCompletionBlocker[]; error: string };
 
-export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult> {
+export async function toggleReturn(tradeId: string, opts?: { force?: boolean }): Promise<ToggleReturnResult> {
   if (state.savingTrades[tradeId]) {
     return { ok: false, blockers: [], error: "반납 상태 변경이 이미 진행 중입니다" };
   }
@@ -903,13 +903,15 @@ export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult>
   if (!current) return { ok: false, blockers: [], error: "거래를 찾을 수 없습니다" };
 
   const on = !current.returnDone;
-  const blockers = on ? returnCompletionBlockers(current) : [];
+  const force = !!opts?.force;
+  const blockers = on && !force ? returnCompletionBlockers(current) : [];
   if (blockers.length > 0) {
+    // 강제 차단하지 않는다 — 호출부(카드)가 미확인 내역을 보여주고 작업자 확인 후
+    // force로 재호출한다. 카드는 완료 전까지 계속 살아있으므로 묻힘 방지는 가시성(알림)이 담당.
     const missing = blockers.reduce((sum, b) => sum + b.missing, 0);
     const over = blockers.reduce((sum, b) => sum + b.over, 0);
     const detail = missing > 0 ? `미확인 ${missing}개` : `초과 ${over}개`;
-    const error = `반납완료 차단 — ${detail}. 품목별 수량을 확인해주세요.`;
-    set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
+    const error = `반납 미확인 품목 — ${detail}`;
     return { ok: false, blockers, error };
   }
 
@@ -925,21 +927,23 @@ export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult>
   const saveId = beginTradeSave(tradeId);
   try {
     // 품목별 정상/파손/분실 상세가 먼저 내구 저장되어야 한다. 이것이 실패한 상태에서
-    // 거래를 닫으면 GAS의 이진 체크만 남아 상세 사실이 사라질 수 있으므로 완료를 막는다.
+    // 거래를 닫으면 GAS의 이진 체크만 남아 상세 사실이 사라질 수 있으므로 완료 전에 저장한다.
     if (on && isSupabase) {
       const persisted = await flushReturnCountsPersist(tradeId);
-      const refreshedBlockers = returnCompletionBlockers(persisted);
-      if (refreshedBlockers.length > 0) {
-        const missing = refreshedBlockers.reduce((sum, b) => sum + b.missing, 0);
-        const over = refreshedBlockers.reduce((sum, b) => sum + b.over, 0);
-        const detail = missing > 0 ? `미확인 ${missing}개` : `초과 ${over}개`;
-        const error = `반납완료 차단 — ${detail}. 품목별 수량을 다시 확인해주세요.`;
-        finishTradeSave(tradeId, saveId, "error", `⚠️ ${error}`);
-        return { ok: false, blockers: refreshedBlockers, error };
+      if (!force) {
+        const refreshedBlockers = returnCompletionBlockers(persisted);
+        if (refreshedBlockers.length > 0) {
+          const missing = refreshedBlockers.reduce((sum, b) => sum + b.missing, 0);
+          const over = refreshedBlockers.reduce((sum, b) => sum + b.over, 0);
+          const detail = missing > 0 ? `미확인 ${missing}개` : `초과 ${over}개`;
+          const error = `반납 미확인 품목 — ${detail}`;
+          finishTradeSave(tradeId, saveId, "error", `⚠️ ${error}`);
+          return { ok: false, blockers: refreshedBlockers, error };
+        }
       }
     }
     // 계약서 재생성 워커 등과의 잠금 경합은 짧은 재시도로 흡수한다(확정 거절은 즉시 실패).
-    const res = await gasMutationRetrying("toggleReturn", { tid: tradeId, done: on });
+    const res = await gasMutationRetrying("toggleReturn", { tid: tradeId, done: on, ...(force ? { force: 1 } : {}) });
     const restored = !on && res?.contractStatus ? res.contractStatus : "반출";
     mutateTrade(tradeId, (t) => ({
       ...t,
@@ -950,7 +954,7 @@ export async function toggleReturn(tradeId: string): Promise<ToggleReturnResult>
     // GAS 완료 뒤의 최종 상태도 앞선 모든 저장 뒤에 즉시 직렬 저장한다.
     // 실패하면 성공으로 가장하지 않고 작업자에게 불일치를 드러낸다.
     if (isSupabase) await flushTradePersist(tradeId);
-    finishTradeSave(tradeId, saveId, "saved", on ? "반납완료 저장됨" : "저장됨");
+    finishTradeSave(tradeId, saveId, "saved", on ? (force ? "반납완료 처리됨 — 미확인 내역은 기록에 남아있어요" : "반납완료 저장됨") : "저장됨");
     return { ok: true, blockers: [] };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
