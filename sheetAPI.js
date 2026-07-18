@@ -243,9 +243,11 @@ function handleRequest(e) {
       }
 
       case "dashboard":
-        // nocache=1 이면 캐시 우회 (새로고침 버튼용)
+        // nocache=1 이면 캐시 우회 (새로고침 버튼용). profile=1 이면 단계별 소요시간 포함(성능 진단용).
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
-        return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache, {}));
+        return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache, {
+          profile: params.profile || postBody.profile
+        }));
 
       case "radar":
         // 재방문 레이더 — 읽기 전용 집계 (계약마스터/스케줄상세). PII 포함이라 key 인증 뒤에서만.

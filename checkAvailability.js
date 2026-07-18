@@ -815,6 +815,17 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
 function getDashboardData(targetDate, skipCache, options) {
   var today = targetDate || Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
   options = options || {};
+  // 성능 진단용 단계별 마크 (profile=1일 때만; 캐시에 저장되지 않음)
+  var dashProfile = options.profile === true || options.profile === 1 ||
+    options.profile === '1' || options.profile === 'true';
+  var dashProfileStart = Date.now();
+  var dashProfileMarks = [];
+  function markDash_(step, details) {
+    if (!dashProfile) return;
+    var item = { step: step, ms: Date.now() - dashProfileStart };
+    if (details) Object.keys(details).forEach(function(k) { item[k] = details[k]; });
+    dashProfileMarks.push(item);
+  }
 
   // 캐시 5분으로 확장. 등록/취소/일정변경 시 invalidateDashboardCache() 호출로 무효화.
   var cache = CacheService.getScriptCache();
@@ -858,14 +869,17 @@ function getDashboardData(targetDate, skipCache, options) {
     };
   }
 
+  markDash_('equip_categories');
   var schedLastRow = schedSheet.getLastRow();
   var todayRowSet = {};
   findDashboardRowsByValue_(schedSheet, 6, schedLastRow, today).forEach(function(row) { todayRowSet[row] = true; });
   findDashboardRowsByValue_(schedSheet, 8, schedLastRow, today).forEach(function(row) { todayRowSet[row] = true; });
   var todayRows = Object.keys(todayRowSet).map(function(row) { return Number(row); });
   todayRows.sort(function(a, b) { return a - b; });
+  markDash_('today_rows', { rows: todayRows.length });
 
   var data = readDashboardScheduleRowsDisplay_(schedSheet, todayRows, 12);
+  markDash_('rows_read');
 
   // 거래ID별 그룹핑
   var tradeGroups = {};
@@ -920,10 +934,14 @@ function getDashboardData(targetDate, skipCache, options) {
 
   // 반출세팅 완료 플래그 일괄 조회 (ScriptProperties 1회 호출)
   var props = PropertiesService.getScriptProperties().getProperties();
+  markDash_('props');
   var dashboardTradeIds = Object.keys(tradeGroups);
   var contractMap = getDashboardContractMapForIds_(contractSheet, dashboardTradeIds);
+  markDash_('contract_map', { trades: dashboardTradeIds.length });
   var tradeExtras = getTradeExtrasForIds_(dashboardTradeIds, props);
+  markDash_('trade_extras');
   var equipmentChecks = getEquipmentCheckMapForIds_(dashboardTradeIds);
+  markDash_('equipment_checks');
 
   dashboardTradeIds.forEach(function(tid) {
     var g = tradeGroups[tid];
@@ -1022,10 +1040,12 @@ function getDashboardData(targetDate, skipCache, options) {
     }
   });
 
+  markDash_('groups_built');
   // 시간순 정렬
   checkoutList.sort(compareDashboardItemsByTime_);
   checkinList.sort(compareDashboardItemsByTime_);
   attachDashboardCardCautions_(checkoutList, checkinList);
+  markDash_('cautions');
 
   var result = {
     date: today,
@@ -1038,6 +1058,12 @@ function getDashboardData(targetDate, skipCache, options) {
     depositStatusOptions: getTradeDepositStatusOptions_(),
     billingCompanyOptions: getTradeBillingCompanyOptions_()
   };
+  markDash_('options_built');
+  if (dashProfile) {
+    // 프로파일 응답은 캐시에 저장하지 않는다(진단용 필드 오염 방지)
+    result.profile = dashProfileMarks;
+    return result;
+  }
   // 등록/취소/일정변경 시 invalidateDashboardCache로 무효화되므로, 날짜 이동 체감을 위해 15분 유지.
   putDashboardCacheJson_(cache, cacheKey, result, 900);
   return result;
