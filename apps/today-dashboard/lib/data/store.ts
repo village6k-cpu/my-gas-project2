@@ -733,11 +733,14 @@ function removeEquipmentAndRegenerateContract(tradeId: string, item: EquipmentIt
   }));
   flashSave(tradeId);
 
+  // 계약서 재생성은 백그라운드 워커(디바운스)에 맡긴다 — 인라인 재생성은 GAS 잠금을
+  // 수 초~수십 초 쥐어 다른 체크/버튼을 실패시키고 제외 응답 자체도 느리게 했다.
+  // 새 링크는 contractRegenPending 배지 → 폴링 merge로 곧 반영된다.
   gasMutation("removeEquip", {
     tid: tradeId,
     scheduleId,
     equipName: item.name,
-    directRegenerate: true,
+    directRegenerate: false,
   })
     .then((res) => applyContractMutationResult(tradeId, res, [scheduleId]))
     .catch((error) => {
@@ -1356,13 +1359,15 @@ export async function addOnsiteItems(tradeId: string, entries: OnsiteEntry[], se
   const payload = entries.filter((e) => !e.isComponent).map((e) => ({ name: e.name, qty: e.qty }));
   if (payload.length === 0) return;
 
+  // 계약서 재생성은 백그라운드 워커에 위임 — 현장추가 응답에서 재생성 시간(수 초~수십 초)을
+  // 제거하고 GAS 잠금 점유도 짧게 만든다. 새 링크는 pending 배지 → 폴링 merge로 반영.
   const res = await gasMutation("onsiteAddon", {
     tid: tradeId,
     entries: JSON.stringify(payload),
     rawNames: true,
     settlement_status: settlement,
     actorName: "오늘 일정 웹앱",
-    directRegenerate: true,
+    directRegenerate: false,
   });
 
   // 실데이터에서 로컬 폴백은 물리 반출 기준선을 만들지 못하므로 실패-폐쇄한다.

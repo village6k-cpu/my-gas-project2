@@ -14,12 +14,32 @@ function sourceFunction(source, startMarker, endMarker) {
   return source.slice(start, end);
 }
 
-test("쓰기 액션 후 읽기 캐시를 무효화한다 (GET·POST 양쪽)", () => {
+test("쓰기 액션 후 관련 읽기 캐시만 선별 무효화한다 (GET·POST 양쪽)", () => {
   const route = read("app/api/gas/route.ts");
   const callGet = sourceFunction(route, "async function callGet", "\nasync function callPost");
   const callPost = sourceFunction(route, "async function callPost", "\nexport async function GET");
-  assert.match(callGet, /if \(isWrite\) \{[\s\S]*?cache\.clear\(\)/, "GET 쓰기 경로에서 캐시를 비워야 한다");
-  assert.match(callPost, /if \(isWrite\) cache\.clear\(\)/, "POST 쓰기 경로에서 캐시를 비워야 한다");
+  assert.match(callGet, /if \(isWrite\) \{[\s\S]*?invalidateCacheForWrite\(action\)/, "GET 쓰기 경로에서 관련 캐시를 비워야 한다");
+  assert.match(callPost, /if \(isWrite\) invalidateCacheForWrite\(action\)/, "POST 쓰기 경로에서 관련 캐시를 비워야 한다");
+  // 전체 clear는 연속 쓰기 중 사진/카탈로그 캐시까지 전멸시키므로 금지
+  assert.doesNotMatch(callGet, /cache\.clear\(\)/, "쓰기마다 캐시 전체 clear 금지 (선별 무효화)");
+  assert.doesNotMatch(callPost, /cache\.clear\(\)/, "쓰기마다 캐시 전체 clear 금지 (선별 무효화)");
+});
+
+test("선별 무효화: 화면 데이터는 비우고 사진/카탈로그 캐시는 유지한다", () => {
+  const route = read("app/api/gas/route.ts");
+  const volatileRe = /VOLATILE_ACTION_RE = \/(.+)\/;/.exec(route);
+  assert.ok(volatileRe, "VOLATILE_ACTION_RE가 정의돼야 한다");
+  const re = new RegExp(volatileRe[1]);
+  // 쓰기 영향이 있는 화면 데이터는 무효화 대상
+  assert.ok(re.test("action=dashboard&date=2026-07-18&key=x"), "dashboard 캐시는 무효화돼야 한다");
+  assert.ok(re.test("key=x&action=timeline&from=a&to=b"), "timeline 캐시는 무효화돼야 한다");
+  assert.ok(re.test("action=dashboardSearch&q=abc"), "검색 캐시는 무효화돼야 한다");
+  // 쓰기와 무관한 무거운 읽기(사진 배치·장비 카탈로그·레이더)는 유지
+  assert.ok(!re.test("action=dashboardPhotosBatch&tids=x"), "사진 배치 캐시는 유지돼야 한다");
+  assert.ok(!re.test("action=dashboardEquipmentCatalog"), "장비 카탈로그 캐시는 유지돼야 한다");
+  assert.ok(!re.test("action=radar"), "레이더 캐시는 유지돼야 한다");
+  // 단, 사진 업로드 쓰기는 사진 캐시도 함께 무효화
+  assert.match(route, /uploadDashboardPhoto[\s\S]*?dashboardPhoto/, "사진 업로드 시 사진 캐시를 무효화해야 한다");
 });
 
 test("nocache=1 요청은 프록시 캐시를 우회하되 GAS로는 파라미터를 그대로 전달한다", () => {

@@ -2641,8 +2641,12 @@ function assertDashboardReturnComplete_(tid, props) {
 
   // dashboard 검색 그룹은 취소 행을 화면에서 제외한다. 서버 완료 검증까지 그 필터를
   // 그대로 쓰면 품목을 취소로 바꿔 숨긴 뒤 계약을 닫을 수 있으므로 원본 행을 먼저 본다.
+  // 전체 시트를 읽지 않고 TextFinder로 이 거래의 행 구간만 읽는다(반납완료 응답 속도).
   if (schedSheet.getLastRow() >= 2) {
-    var rawRows = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 10).getDisplayValues();
+    var tidRowNums = findDashboardRowsByValue_(schedSheet, 2, schedSheet.getLastRow(), tid);
+    var rawRows = tidRowNums.length
+      ? schedSheet.getRange(tidRowNums[0], 1, tidRowNums[tidRowNums.length - 1] - tidRowNums[0] + 1, 10).getDisplayValues()
+      : [];
     var cancelledItems = rawRows.filter(function(row) {
       return String(row[1] || '').trim() === tid && String(row[9] || '').trim() === '취소';
     }).map(function(row) {
@@ -2901,6 +2905,8 @@ function formatDashboardDoneAt_(date) {
 
 function setDashboardReturnContractStatus_(tid, isDone, props, options) {
   props = props || PropertiesService.getScriptProperties();
+  // 계약상태 전이는 '반출 시작' 판정을 바꾸므로 판정 캐시를 먼저 비운다
+  try { CacheService.getScriptCache().remove('dashStarted_' + tid); } catch (cacheErr) {}
   // skipCompletionCheck: toggleReturnDone이 잠금 밖에서 이미 완료 검증을 마친 경우
   // (전체 시트 스캔 + Supabase HTTP를 잠금 안에서 반복하지 않기 위함)
   if (isDone && !(options && options.skipCompletionCheck)) {
@@ -3358,14 +3364,27 @@ function toggleItemCheck(scheduleId, phase, done) {
   // 예전엔 행 조회 + Supabase HTTP 왕복까지 잠금 안에서 돌아 체크 1번의 잠금 점유가
   // 길어졌고, 제외/현장추가(계약서 재생성 포함)의 긴 잠금과 겹친 체크가
   // waitLock(5초) 초과로 전부 실패해 시트와 앱이 조용히 어긋났다.
-  var context = getDashboardScheduleInspectionContext_(scheduleId);
-  if (phase === 'checkout' && context && context.tradeId) {
+  // 반출 체크는 행 전체 조회가 필요 없다 — 스케줄ID 접두어(YYMMDD-NNN)가 곧 거래ID라
+  // TextFinder 시트 검색을 생략한다(반납 검증은 행 정보가 필요해 조회 유지).
+  var context = null;
+  var checkoutTid = '';
+  if (phase === 'checkout') {
+    var prefixMatch = scheduleId.match(/^(\d{6}-\d{3})-/);
+    checkoutTid = prefixMatch ? prefixMatch[1] : '';
+    if (!checkoutTid) {
+      context = getDashboardScheduleInspectionContext_(scheduleId);
+      checkoutTid = context && context.tradeId || '';
+    }
+  } else {
+    context = getDashboardScheduleInspectionContext_(scheduleId);
+  }
+  if (phase === 'checkout' && checkoutTid) {
     // 로컬 마커 우선: 반출이 시작된 흔적(setupDone/기준선 표식/계약상태)이 없으면
     // 기준선이 존재할 수 없으므로 HTTP 조회 자체를 생략한다(대부분의 체크가 이 경로).
     var ssForGuard = SpreadsheetApp.getActiveSpreadsheet();
-    if (isDashboardTradeCheckoutStarted_(ssForGuard, context.tradeId)) {
+    if (isDashboardTradeCheckoutStarted_(ssForGuard, checkoutTid)) {
       var checkoutBaseline = typeof supaGetCheckoutBaselineState_ === 'function'
-        ? supaGetCheckoutBaselineState_(context.tradeId)
+        ? supaGetCheckoutBaselineState_(checkoutTid)
         : { ok: false, error: '반출 기준선 조회 함수 없음', items: [] };
       if (!checkoutBaseline || !checkoutBaseline.ok) {
         return { error: '반출 체크 변경 차단: 불변 기준선을 확인하지 못했습니다 — ' + String(checkoutBaseline && checkoutBaseline.error || '조회 실패') };
@@ -3413,7 +3432,7 @@ function toggleItemCheck(scheduleId, phase, done) {
         };
       }
     } else {
-      if (!context || !context.tradeId) {
+      if (!checkoutTid) {
         return { error: '반출 체크 실패: 현재 스케줄 행을 찾을 수 없습니다: ' + scheduleId };
       }
     }
@@ -3456,7 +3475,7 @@ function toggleItemCheck(scheduleId, phase, done) {
       scheduleId: scheduleId,
       phase: phase,
       checked: isDone,
-      tradeId: context && context.tradeId || '',
+      tradeId: checkoutTid || (context && context.tradeId) || '',
       reopened: !!(invalidated && invalidated.reopened)
     };
   } catch (err) {
@@ -6289,12 +6308,15 @@ function markDashboardCheckoutBaselineStarted_(tid) {
   tid = String(tid || '').trim();
   if (!tid) return { error: '거래ID 없음' };
   PropertiesService.getScriptProperties().setProperty('checkoutBaselineStarted_' + tid, '1');
+  try { CacheService.getScriptCache().remove('dashStarted_' + tid); } catch (cacheErr) {}
   return { success: true, tradeId: tid };
 }
 
 function clearDashboardCheckoutBaselineStarted_(tid) {
   tid = String(tid || '').trim();
-  if (tid) PropertiesService.getScriptProperties().deleteProperty('checkoutBaselineStarted_' + tid);
+  if (!tid) return;
+  PropertiesService.getScriptProperties().deleteProperty('checkoutBaselineStarted_' + tid);
+  try { CacheService.getScriptCache().remove('dashStarted_' + tid); } catch (cacheErr) {}
 }
 
 /** 기존 taken_qty 기준선 거래를 한 번 백필한다. 허용된 거래ID 표식 외에는 쓰지 않는다. */
@@ -6329,33 +6351,45 @@ function isDashboardTradeCheckoutStarted_(ss, tid) {
     props.getProperty('checkoutBaselineStarted_' + tid) === '1'
   ) return true;
 
+  // 시트 폴백(계약마스터·스케줄상세 검색)은 체크마다 반복하기엔 비싸다 — 5분 캐시.
+  // 반출 시작 전이는 항상 setupDone_/checkoutBaselineStarted_ 속성(위 fast path)을 먼저 남기고,
+  // mark/clear 함수가 아래 캐시를 함께 지우므로 신선도가 어긋나지 않는다.
+  var startedCache = CacheService.getScriptCache();
+  var startedCacheKey = 'dashStarted_' + tid;
+  var cachedStarted = startedCache.get(startedCacheKey);
+  if (cachedStarted === '1') return true;
+  if (cachedStarted === '0') return false;
+  var startedResult = false;
+
   var master = ss.getSheetByName('계약마스터');
   if (master && master.getLastRow() >= 2) {
     var masterRowNums = findDashboardRowsByValue_(master, 1, master.getLastRow(), tid);
     if (masterRowNums.length) {
       var masterRow = master.getRange(masterRowNums[0], 1, 1, 10).getDisplayValues()[0];
       var contractStatus = String(masterRow[9] || '').trim();
-      if (contractStatus === '반출' || contractStatus === '반출중' || contractStatus === '반납완료') return true;
+      if (contractStatus === '반출' || contractStatus === '반출중' || contractStatus === '반납완료') startedResult = true;
     }
   }
 
-  var sched = ss.getSheetByName('스케줄상세');
+  var sched = !startedResult ? ss.getSheetByName('스케줄상세') : null;
   if (sched && sched.getLastRow() >= 2) {
     var schedRowNums = findDashboardRowsByValue_(sched, 2, sched.getLastRow(), tid);
-    if (!schedRowNums.length) return false;
-    var firstSchedRow = schedRowNums[0];
-    var lastSchedRow = schedRowNums[schedRowNums.length - 1];
-    var schedRows = sched.getRange(firstSchedRow, 2, lastSchedRow - firstSchedRow + 1, 9).getDisplayValues();
-    for (var j = 0; j < schedRows.length; j++) {
-      if (String(schedRows[j][0] || '').trim() !== tid) continue;
-      var rowStatus = String(schedRows[j][8] || '').trim();
-      if (rowStatus === '반출중' || rowStatus === '반납완료') return true;
+    if (schedRowNums.length) {
+      var firstSchedRow = schedRowNums[0];
+      var lastSchedRow = schedRowNums[schedRowNums.length - 1];
+      var schedRows = sched.getRange(firstSchedRow, 2, lastSchedRow - firstSchedRow + 1, 9).getDisplayValues();
+      for (var j = 0; j < schedRows.length; j++) {
+        if (String(schedRows[j][0] || '').trim() !== tid) continue;
+        var rowStatus = String(schedRows[j][8] || '').trim();
+        if (rowStatus === '반출중' || rowStatus === '반납완료') { startedResult = true; break; }
+      }
     }
   }
+  try { startedCache.put(startedCacheKey, startedResult ? '1' : '0', 300); } catch (cachePutErr) {}
   // taken_qty 저장 성공 시 함께 남긴 영구 표식이 외부 DB 재조회 없이 물리 반출 사실을 보존한다.
   // 전역 ScriptLock 안에서 Supabase HTTP를 호출하면 일시 인증 장애가 '반출 시작'으로 둔갑하고
   // 모든 편집 요청을 수 초씩 붙잡으므로, 편집 가드는 로컬의 권위 신호만 사용한다.
-  return false;
+  return startedResult;
 }
 
 function dashboardAddEquipments(tid, entries, options) {

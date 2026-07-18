@@ -28,6 +28,17 @@ function pruneCache(now: number): void {
   }
 }
 
+// 쓰기 후 캐시 무효화는 선별적으로 — 전체 clear는 반출 작업처럼 연속 쓰기가 이어질 때
+// 사진/장비카탈로그/레이더 캐시까지 전멸시켜 모든 읽기가 GAS 콜드로 가는 부작용이 있었다.
+// 쓰기의 영향을 받는 화면 데이터(dashboard/timeline 등)만 비우고, 사진 업로드일 때만 사진 캐시도 비운다.
+const VOLATILE_ACTION_RE = /(^|&)action=(dashboard|dashboardSearch|dashboardContractExtras|dashboardEquipNames|timeline|operations|scan|search|read|list|info)(&|$)/;
+function invalidateCacheForWrite(action: string): void {
+  const photoWrite = action === "uploadDashboardPhoto";
+  for (const key of cache.keys()) {
+    if (VOLATILE_ACTION_RE.test(key) || (photoWrite && key.includes("dashboardPhoto"))) cache.delete(key);
+  }
+}
+
 // GAS는 스크립트 오류를 200 상태의 {error:...} JSON이나 HTML 페이지로 반환하기도 한다.
 // 그런 본문을 30초 캐시하면 모든 폴링에 에러가 재배포되므로 정상 JSON만 캐시한다.
 function isCacheableBody(body: string): boolean {
@@ -121,8 +132,8 @@ async function callGet(req: NextRequest) {
     .then(async (r) => {
       const body = await r.text();
       if (isWrite) {
-        // 쓰기 직후 재조회가 쓰기 이전 캐시를 받아 화면이 되돌아 보이지 않도록 읽기 캐시 전체 무효화
-        cache.clear();
+        // 쓰기 직후 재조회가 쓰기 이전 캐시를 받아 화면이 되돌아 보이지 않도록 관련 읽기 캐시 무효화
+        invalidateCacheForWrite(action);
       } else if (r.ok && !noCache && isCacheableBody(body)) {
         cache.set(ck, { at: Date.now(), body });
         if (cache.size > MAX_CACHE_SIZE) pruneCache(Date.now());
@@ -166,8 +177,8 @@ async function callPost(req: NextRequest) {
       signal: AbortSignal.timeout(60_000),
     });
     const responseBody = await r.text();
-    // 쓰기 후에는 읽기 캐시를 무효화해 직후 dashboard/timeline 재조회가 이전 상태를 받지 않게 한다
-    if (isWrite) cache.clear();
+    // 쓰기 후에는 관련 읽기 캐시를 무효화해 직후 dashboard/timeline 재조회가 이전 상태를 받지 않게 한다
+    if (isWrite) invalidateCacheForWrite(action);
     return new NextResponse(responseBody, {
       status: r.status,
       headers: { "content-type": "application/json", "x-cache": isWrite ? "POST-WRITE" : "POST" },

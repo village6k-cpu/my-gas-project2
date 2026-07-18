@@ -108,11 +108,13 @@ test("GAS toggleItemCheck는 검증을 잠금 밖에서 하고 잠금 대기를 
   const gas = fs.readFileSync(path.resolve(appRoot, "../..", "checkAvailability.js"), "utf8");
   const fn = section(gas, "function toggleItemCheck", "\nfunction getEquipmentCheckMap_");
   const contextAt = fn.indexOf("getDashboardScheduleInspectionContext_(scheduleId)");
-  const baselineAt = fn.indexOf("supaGetCheckoutBaselineState_(context.tradeId)");
+  const baselineAt = fn.indexOf("supaGetCheckoutBaselineState_(checkoutTid)");
   const lockAt = fn.indexOf("lock.waitLock(");
   assert.ok(contextAt >= 0 && lockAt > contextAt, "행 조회는 잠금 밖(앞)에서 해야 한다");
   assert.ok(baselineAt >= 0 && lockAt > baselineAt, "Supabase 기준선 HTTP 조회는 잠금 밖(앞)에서 해야 한다");
   assert.match(fn, /isDashboardTradeCheckoutStarted_\(/, "로컬 마커로 반출 전 거래는 HTTP 조회를 생략해야 한다");
+  // 반출 체크는 스케줄ID 접두어에서 거래ID를 직접 유도 — TextFinder 시트 검색을 생략한다
+  assert.match(fn, /scheduleId\.match\(\/\^\(\\d\{6\}-\\d\{3\}\)-\/\)/, "반출 체크는 접두어 fast path를 써야 한다");
   assert.match(fn, /lock\.waitLock\(20000\)/, "제외/현장추가의 긴 잠금과 겹쳐도 5초 만에 죽지 않아야 한다");
   assert.doesNotMatch(fn, /lock\.waitLock\(5000\)/);
 });
