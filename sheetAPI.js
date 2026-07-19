@@ -346,6 +346,14 @@ function handleRequest(e) {
           (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
         ));
 
+      case "updateTradeDiscount": {
+        // 등록된 거래의 할인유형 변경 (계약마스터 K열) — 금액·계약서는 재생성 워커가 반영
+        return jsonResponse(updateTradeDiscountType(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.discountType || postBody.discountType || params.할인유형 || postBody.할인유형
+        ));
+      }
+
       case "updateEquipmentCheck":
         return jsonResponse(updateEquipmentCheck(
           params.scheduleId || postBody.scheduleId,

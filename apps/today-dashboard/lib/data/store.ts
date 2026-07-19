@@ -1625,6 +1625,41 @@ export async function setBillingCompany(tradeId: string, billingCompany: string)
     console.error("[write-back] 발행처 저장 실패:", err);
   }
 }
+// 확인요청 M열·계약마스터 K열과 동일한 허용값 — 카드의 할인유형 셀렉터가 사용
+export const DISCOUNT_TYPE_OPTIONS = ["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"];
+
+/** 등록된 거래의 할인유형 변경 — 화면 즉시 반영, 원장(계약마스터 K열)과 계약서·금액
+ *  재생성은 뒤에서 진행된다(재생성 완료 시 폴링 merge가 새 금액·계약서 링크를 가져옴). */
+export async function setDiscountType(tradeId: string, discountType: string): Promise<boolean> {
+  const current = state.trades.find((t) => t.tradeId === tradeId);
+  if (!current) return false;
+  if ((current.discountType || "") === discountType) return true;
+  if (isSupabase && !writeBackEnabled) {
+    showTransientError(`⚠️ 할인유형 변경 실패: ${writeBackDisabledReason}`);
+    return false;
+  }
+  const previous = { discountType: current.discountType, contractRegenPending: current.contractRegenPending };
+  mutateTrade(tradeId, (t) => ({ ...t, discountType, contractRegenPending: true }), false);
+  flashSave(tradeId);
+  if (!isSupabase) return true;
+  try {
+    const res = await gasMutationRetrying("updateTradeDiscount", { tid: tradeId, discountType });
+    if (res?.skipped) throw new Error(writeBackDisabledReason);
+    if (res?.unchanged) mutateTrade(tradeId, (t) => ({ ...t, contractRegenPending: previous.contractRegenPending }), false);
+    await flushTradePersist(tradeId);
+    // 재생성 워커가 새 계약서·금액을 만들면 폴링이 contractUrlChanged/amountFix로 수렴시킨다
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => void pollSheetChangesNow({ mode: "light", resetBackoff: false }), 12_000);
+    }
+    return true;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    mutateTrade(tradeId, (t) => ({ ...t, ...previous }), false);
+    showTransientError(`⚠️ 할인유형 변경 실패 — ${message}`);
+    return false;
+  }
+}
+
 export function sendEstimate(tradeId: string) {
   mutateTrade(tradeId, (t) => ({ ...t, estimateSent: true }));
   flashSave(tradeId);

@@ -92,6 +92,7 @@ const WRITE_ACTIONS = new Set([
   "uploadDashboardPhoto",
   "updateTrade",
   "updateContractStatus",
+  "updateTradeDiscount",
 ]);
 
 const STAFF_RUN_FUNCTIONS = new Set(["getMyPageLink"]);

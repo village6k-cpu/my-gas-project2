@@ -3889,6 +3889,60 @@ function dashboardUpdateTradeDetails(tradeId, input) {
   }
 }
 
+// 확인요청 M열 드롭다운과 동일한 허용값 — 등록된 거래의 계약마스터 K열(할인유형) 변경용
+var DASHBOARD_DISCOUNT_TYPES_ = { "일반": true, "학생": true, "개인사업자/프리랜서": true, "단골": true, "제휴": true };
+
+/** 등록된 거래의 할인유형(계약마스터 K열) 변경 — 금액·계약서는 재생성 워커가 반영한다.
+ *  이 거래 1건에만 적용되며 고객DB(빌리지2.0 I열) 기본값은 바꾸지 않는다. */
+function updateTradeDiscountType(tid, discountType) {
+  tid = String(tid || '').trim();
+  discountType = String(discountType || '').trim();
+  if (!tid) return { error: "거래ID 필수" };
+  if (!DASHBOARD_DISCOUNT_TYPES_[discountType]) {
+    return { error: "할인유형은 일반/학생/개인사업자·프리랜서/단골/제휴만 허용" };
+  }
+
+  var lock = LockService.getScriptLock();
+  var lockAcquired = false;
+  try {
+    lock.waitLock(20000);
+    lockAcquired = true;
+  } catch (lockErr) {
+    return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도해주세요.' };
+  }
+
+  var changed = false;
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName('계약마스터');
+    if (!sheet || sheet.getLastRow() < 2) return { error: "계약마스터 시트 없음" };
+
+    var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues();
+    var row = -1;
+    for (var i = 0; i < ids.length; i++) {
+      if (String(ids[i][0] || '').trim() === tid) { row = i + 2; break; }
+    }
+    if (row < 0) return { error: "거래를 찾을 수 없음: " + tid };
+
+    var current = String(sheet.getRange(row, 11).getDisplayValue() || '').trim(); // K열
+    if (current === discountType) {
+      return { success: true, tradeId: tid, discountType: discountType, unchanged: true, contractRegenPending: false };
+    }
+    sheet.getRange(row, 11).setValue(discountType);
+    changed = true;
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err) };
+  } finally {
+    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+
+  // 잠금 밖: 재생성 예약(디바운스 워커)과 캐시/동기화 갱신 — 잠금 점유를 늘리지 않는다
+  try { scheduleContractRegen(tid); } catch (regenErr) {}
+  try { supaMarkTradeDirty_(tid); } catch (dirtyErr) {}
+  try { invalidateDashboardCacheForTrade_(tid); } catch (cacheErr) {}
+  return { success: true, tradeId: tid, discountType: discountType, contractRegenPending: changed };
+}
+
 function updateDashboardContractStatus(tradeId, status) {
   tradeId = String(tradeId || '').trim();
   status = String(status || '').trim();
