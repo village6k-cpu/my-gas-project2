@@ -211,6 +211,26 @@ test("확인요청 메뉴: 리스트 캐시 + 카드 응답 패치 + 낙관 UI",
   assert.ok(removeAt >= 0 && funcAt > removeAt, "카드 제거가 서버 삭제보다 먼저여야 한다");
 });
 
+test("확인요청 편집은 시트처럼 즉시다 — 편집 큐 + 단일 카드 갱신", () => {
+  const view = read("components/ConfirmView.tsx");
+  // 편집은 로컬 즉시 반영 + reqID별 직렬 큐로 백그라운드 저장
+  assert.match(view, /const queueRequestEdit = useCallback/, "편집 큐가 있어야 한다");
+  assert.match(view, /drainRequestEdits/, "확인/등록/삭제 전에 대기 편집을 비워야 한다");
+  const act = view.slice(view.indexOf("const act = useCallback"), view.indexOf("// 확인요청 삭제"));
+  assert.match(act, /await drainRequestEdits\(reqID\)/, "액션 전에 편집 큐를 드레인해야 한다");
+  // 저장 후 전체 목록이 아니라 그 카드만 갱신
+  assert.match(view, /action=card&reqID=/, "단일 카드 갱신 API를 써야 한다");
+  // 편집 중에는 서버 카드가 로컬 편집을 되덮지 않는다
+  assert.match(view, /pendingEditCountsRef\.current\.get\(reqID\)\) return/, "저장 중 서버 카드 패치를 막아야 한다");
+  // 인라인 편집기는 저장을 기다리지 않고 즉시 닫힌다 (등록 직전 제외 반영은 예외적으로 동기 유지)
+  const inline = view.slice(view.indexOf("function InlineItemEditor"), view.indexOf("/** 품목 한 줄만 수정"));
+  assert.doesNotMatch(inline, /await runFunc/, "인라인 편집기는 저장을 동기로 기다리면 안 된다");
+  assert.match(inline, /queueSave\(/, "인라인 편집기는 편집 큐를 써야 한다");
+
+  const gasApi = fs.readFileSync(path.resolve(appRoot, "../..", "sheetAPI.js"), "utf8");
+  assert.match(gasApi, /function doConfirmCard/, "GAS 단일 카드 조회가 있어야 한다");
+});
+
 test("스테퍼 수량 변경은 낙관 반영 + 디바운스 + 직렬 커밋이다", () => {
   const store = read("lib/data/store.ts");
   const queue = section(store, "export function queueItemQty", "\nasync function commitQueuedItemQty");

@@ -611,6 +611,10 @@ function handleRequest(e) {
       case "list":
         return doListPending();
 
+      case "card":
+        // 단일 확인요청 카드 — 편집 큐가 저장 후 그 카드만 갱신할 때 사용(전체 목록 재구축 회피)
+        return doConfirmCard(params.reqID || postBody.reqID);
+
       case "scan":
         return doScanAll();
 
@@ -701,6 +705,15 @@ function doListPending() {
     try { listCache.put(CONFIRM_LIST_CACHE_KEY_, JSON.stringify(payload), 60); } catch (putErr) {}
   }
   return jsonResponse(payload);
+}
+
+/** 단일 확인요청 카드 조회 — card:null이면 목록에서 빠진 것(등록완료/거절/삭제). */
+function doConfirmCard(reqID) {
+  reqID = String(reqID || '').trim();
+  if (!reqID) return jsonResponse({ status: "ERROR", message: "reqID 필수" });
+  var card = null;
+  try { card = buildConfirmPendingItems_(reqID)[0] || null; } catch (cardErr) {}
+  return jsonResponse({ status: "OK", reqID: reqID, card: card });
 }
 
 /** 확인요청 대기 목록 구성. onlyReqID를 주면 그 그룹만(액션 응답의 카드 갱신용). */

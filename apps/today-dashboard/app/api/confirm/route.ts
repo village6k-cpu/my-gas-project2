@@ -43,8 +43,14 @@ function isCacheableListBody(body: string): boolean {
 export async function GET(req: NextRequest) {
   if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
   const action = req.nextUrl.searchParams.get("action") || "list";
-  if (action !== "list" && action !== "scan") return NextResponse.json({ error: "미허용 action" }, { status: 400 });
+  if (action !== "list" && action !== "scan" && action !== "card") return NextResponse.json({ error: "미허용 action" }, { status: 400 });
   try {
+    if (action === "card") {
+      // 단일 카드 갱신 — 편집 큐 저장 후 그 카드만 새로 그린다(전체 목록 재조회 회피)
+      const reqID = req.nextUrl.searchParams.get("reqID") || "";
+      if (!reqID) return NextResponse.json({ error: "reqID 필수" }, { status: 400 });
+      return await callGas({ action, reqID });
+    }
     if (action === "list") {
       const hit = listCache.get("list");
       if (hit && Date.now() - hit.at < LIST_TTL) {
