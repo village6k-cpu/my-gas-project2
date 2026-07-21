@@ -243,6 +243,7 @@ async function upsertScannedEvents(events: SlackOpsIncomingEvent[]): Promise<Sto
 
   const writes = events.map((event) => {
     const previous = oldByTs.get(event.messageTs);
+    const rawContext = { root: event.root, replies: event.replies ?? [] };
     const changed = !previous || previous.source_hash !== event.sourceHash;
     return {
       channel_id: event.channelId,
@@ -253,7 +254,7 @@ async function upsertScannedEvents(events: SlackOpsIncomingEvent[]): Promise<Sto
       customer_hint: event.customerHint ?? null,
       trade_id_hint: event.tradeIdHint ?? null,
       permalink: event.permalink ?? null,
-      raw_context: { root: event.root, replies: event.replies ?? [] },
+      raw_context: rawContext,
       status: changed ? "pending" : previous?.status ?? "pending",
       matched_trade_id: changed ? null : previous?.matched_trade_id ?? null,
       applied_plan: changed ? null : previous?.applied_plan ?? null,

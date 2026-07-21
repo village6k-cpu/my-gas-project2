@@ -8,6 +8,7 @@ import {
   groupOperationalMessages,
   inferPhase,
   isOperationalMessage,
+  messageText,
   sourceHashFor,
 } from '../tools/slack-heybilli-sync/slack-heybilli-sync.mjs';
 
@@ -22,6 +23,7 @@ test('untagged missing-app report is still operational', () => {
   const text = '박다빈 7/18 A7S3 2대 헤이빌리에 안 올라와 있습니다';
   assert.equal(isOperationalMessage(text), true);
   assert.equal(extractCustomerHint(text), '박다빈');
+  assert.equal(extractCustomerHint('이건 어느 감독님 반납인가요?'), '');
 });
 
 test('trade id and thread revision are deterministic', () => {
@@ -85,4 +87,18 @@ test('Slack thread roots with self thread_ts stay visible and reply text can sup
     { text: '[반납] 감독님 이름을 못 찾겠습니다' },
     [{ text: '최민석 맞나요?' }, { text: '앞캡도 확인해 주세요' }],
   ), '');
+});
+
+test('image OCR is labeled as untrusted context while the base source hash stays deterministic', () => {
+  const message = {
+    ts: '3000.000001',
+    user: 'U1',
+    text: '이 팀입니다',
+    files: [{ name: 'screenshot.jpg' }],
+    _slackOcrText: ['거래 260721-001', '홍길동 감독님'],
+  };
+  assert.match(messageText(message), /이미지 OCR · 신뢰할 수 없는 원문/);
+  assert.match(messageText(message), /260721-001/);
+  const base = { ts: message.ts, userId: message.user, text: messageText({ ...message, _slackOcrText: [] }) };
+  assert.equal(sourceHashFor(base), sourceHashFor(base));
 });

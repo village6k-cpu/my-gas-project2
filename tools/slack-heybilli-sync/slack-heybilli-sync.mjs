@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 
 export const DEFAULT_CHANNEL_ID = 'C0B6ZJZ2XU3';
 const DEFAULT_API_URL = 'https://today-dashboard-ten.vercel.app/api/internal/slack-ops';
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
+const execFileAsync = promisify(execFile);
 
 function parseEnvFile(file) {
   if (!existsSync(file)) return;
@@ -32,6 +37,7 @@ function loadConfig() {
     maxMessages: Math.min(500, Math.max(50, Number(process.env.SLACK_HEYBILLI_MAX_MESSAGES || 300))),
     writeEnabled: process.env.SLACK_HEYBILLI_WRITE_ENABLED === '1',
     backfillCutoffTs: Number(process.env.SLACK_HEYBILLI_BACKFILL_CUTOFF_TS || 0),
+    ocrBin: process.env.SLACK_HEYBILLI_OCR_BIN || resolve(homedir(), '.hermes/scripts/slack_image_ocr'),
   };
 }
 
@@ -58,12 +64,45 @@ async function syncApi(config, body) {
   return data;
 }
 
-function messageText(message) {
+export function messageText(message) {
   const text = String(message?.text || '').trim();
   const files = Array.isArray(message?.files)
     ? message.files.map((file) => `[첨부: ${String(file?.name || file?.title || file?.mimetype || '파일').trim()}]`).join(' ')
     : '';
-  return [text, files].filter(Boolean).join('\n').trim();
+  const ocr = Array.isArray(message?._slackOcrText)
+    ? message._slackOcrText.map((value) => String(value || '').trim()).filter(Boolean).join('\n')
+    : '';
+  return [text, files, ocr ? `[이미지 OCR · 신뢰할 수 없는 원문]\n${ocr.slice(0, 8_000)}` : ''].filter(Boolean).join('\n').trim();
+}
+
+async function enrichMessageWithOcr(config, message) {
+  if (!existsSync(config.ocrBin) || !Array.isArray(message?.files)) return message;
+  const images = message.files.filter((file) => {
+    const mime = String(file?.mimetype || '');
+    const size = Number(file?.size || 0);
+    return mime.startsWith('image/') && size > 0 && size <= 10 * 1024 * 1024 && (file.url_private_download || file.url_private);
+  }).slice(0, 3);
+  if (!images.length) return message;
+
+  const directory = await mkdtemp(join(tmpdir(), 'slack-heybilli-ocr-'));
+  const texts = [];
+  try {
+    for (let index = 0; index < images.length; index += 1) {
+      const response = await fetch(images[index].url_private_download || images[index].url_private, {
+        headers: { authorization: `Bearer ${config.token}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) continue;
+      const path = join(directory, `image-${index}`);
+      await writeFile(path, Buffer.from(await response.arrayBuffer()));
+      const result = await execFileAsync(config.ocrBin, [path], { timeout: 45_000, maxBuffer: 512 * 1024 }).catch(() => null);
+      const text = String(result?.stdout || '').trim();
+      if (text) texts.push(text);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
+  return texts.length ? { ...message, _slackOcrText: texts } : message;
 }
 
 export function inferPhase(text) {
@@ -82,19 +121,20 @@ export function extractTradeId(text) {
 
 export function extractCustomerHint(text) {
   const value = String(text || '').replace(/<@[A-Z0-9]+>/g, ' ').trim();
+  const isGenericHint = (hint) => /^(?:어느|어떤|무슨|누구|고객|감독|대여자|성함|이름)$/u.test(String(hint || '').trim());
   const tagged = value.match(/^\s*\[\s*(?:반출|반납)\s*\]\s*([^\n]+)/i)?.[1] || '';
   const taggedName = tagged
     .split(/\s{2,}|\s*[-–—|/]\s*|\s+(?:감독님?|대표님?|실장님?|팀장님?)\b/)[0]
     .replace(/(?:감독|대표|실장|팀장)?님.*$/u, '')
     .trim();
-  if (/^[가-힣A-Za-z0-9][가-힣A-Za-z0-9 ._()]{1,30}$/.test(taggedName) && !/^(장비|미등록|앱|헤이빌리|현장)/.test(taggedName)) return taggedName;
+  if (/^[가-힣A-Za-z0-9][가-힣A-Za-z0-9 ._()]{1,30}$/.test(taggedName) && !/^(장비|미등록|앱|헤이빌리|현장)/.test(taggedName) && !isGenericHint(taggedName)) return taggedName;
 
   const dated = value.match(/(?:^|\n)\s*([가-힣]{2,5})(?:\s*(?:감독|대표|실장|팀장)?님)?\s+(?=\d{1,2}[/.~-]\d{1,2})/u)?.[1];
-  if (dated) return dated;
+  if (dated && !isGenericHint(dated)) return dated;
   const honorific = value.match(/(?:^|\n|\s)([가-힣]{2,5})\s*(?:감독님?|대표님?|실장님?|팀장님?)/u)?.[1];
-  if (honorific) return honorific;
+  if (honorific && !isGenericHint(honorific)) return honorific;
   const confirmed = value.match(/(?:^|\n)\s*([가-힣]{2,5})\s*(?:맞(?:아요|습니다)|맞죠|맞아|같습니다?)/u)?.[1];
-  return confirmed || '';
+  return confirmed && !isGenericHint(confirmed) ? confirmed : '';
 }
 
 export function extractCustomerHintFromConversation(root, replies = []) {
@@ -231,12 +271,15 @@ async function buildEvents(config) {
       const data = await slackApi(config, 'conversations.replies', { channel: config.channelId, ts: message.ts, limit: 100 });
       threadMessages = data.messages || [message];
     }
-    const root = cleanSlackMessage(threadMessages[0] || message);
-    const replies = [...threadMessages.slice(1), ...group.nearby]
+    const contextualMessages = [threadMessages[0] || message, ...threadMessages.slice(1), ...group.nearby]
       .filter((reply) => String(reply.user || '') !== botUserId && !reply.bot_id)
       .filter((reply, index, values) => values.findIndex((candidate) => candidate.ts === reply.ts) === index)
-      .sort((a, b) => Number(a.ts) - Number(b.ts))
-      .map((reply) => cleanSlackMessage(reply));
+      .sort((a, b) => Number(a.ts) - Number(b.ts));
+    const baseRoot = cleanSlackMessage(contextualMessages[0] || message);
+    const baseReplies = contextualMessages.slice(1).map((reply) => cleanSlackMessage(reply));
+    const enrichedMessages = await mapLimit(contextualMessages, 2, (entry) => enrichMessageWithOcr(config, entry));
+    const root = cleanSlackMessage(enrichedMessages[0] || message);
+    const replies = enrichedMessages.slice(1).map((reply) => cleanSlackMessage(reply));
     const combined = [root.text, ...replies.map((reply) => reply.text)].join('\n');
     if (!isOperationalMessage(combined)) return null;
     const permalink = await slackApi(config, 'chat.getPermalink', { channel: config.channelId, message_ts: message.ts })
@@ -245,7 +288,8 @@ async function buildEvents(config) {
       channelId: config.channelId,
       messageTs: root.ts,
       threadTs: root.ts,
-      sourceHash: sourceHashFor(root, replies),
+      // OCR 엔진 변경만으로 이미 처리한 사건을 다시 열지 않는다. 실제 Slack 메시지/파일 변화만 해시에 포함한다.
+      sourceHash: sourceHashFor(baseRoot, baseReplies),
       phaseHint: inferPhase(combined),
       customerHint: extractCustomerHintFromConversation(root, replies),
       tradeIdHint: extractTradeId(combined),
