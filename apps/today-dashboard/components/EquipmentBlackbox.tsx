@@ -16,6 +16,8 @@ type ItemRow = {
   name: string;
   qty: number;
   taken_qty: number | null;
+  actual_name: string | null;
+  actual_taken_qty: number | null;
   set_name: string | null;
   is_set_header: boolean;
   memo_checkout: string | null;
@@ -56,7 +58,7 @@ const MAX_TRADES = 40;
 const MAX_ITEM_ROWS = 500;
 const MAX_TRADE_IDS = 120;
 
-const ITEM_SELECT = "schedule_id,trade_id,name,qty,taken_qty,set_name,is_set_header,memo_checkout,memo_checkin,settlement,checkout_state";
+const ITEM_SELECT = "schedule_id,trade_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,memo_checkout,memo_checkin,settlement,checkout_state";
 const TRADE_SELECT = "trade_id,customer_name,customer_phone,company,checkout_at,return_at,contract_status,return_done,return_done_at,note_checkout,note_checkin,photos,return_counts";
 
 function fmtDate(iso: string | null): string {
@@ -107,6 +109,7 @@ export function EquipmentBlackbox({ name, aliases, onClose }: { name: string; al
         ];
         const fuzzyQueries = names.flatMap((n) => [
           sb.from("schedule_items").select(ITEM_SELECT).ilike("name", ilikePattern(n)).order("created_at", { ascending: false }).limit(200),
+          sb.from("schedule_items").select(ITEM_SELECT).ilike("actual_name", ilikePattern(n)).order("created_at", { ascending: false }).limit(200),
           sb.from("schedule_items").select(ITEM_SELECT).ilike("set_name", ilikePattern(n)).order("created_at", { ascending: false }).limit(200),
         ]);
         const results = await Promise.all([...exactQueries, ...fuzzyQueries]);
@@ -254,7 +257,8 @@ function TradeCard({ entry, highlightName }: { entry: TimelineEntry; highlightNa
         {items.map((i) => (
           <span key={i.schedule_id} className="rounded bg-paper px-1.5 py-0.5">
             {i.set_name && i.set_name !== i.name && !i.is_set_header ? `[${i.set_name}] ` : ""}
-            {i.name === highlightName ? <b>{i.name}</b> : i.name} ×{i.taken_qty ?? i.qty}
+            {(i.actual_name || i.name) === highlightName ? <b>{i.actual_name || i.name}</b> : (i.actual_name || i.name)} ×{i.actual_taken_qty ?? i.taken_qty ?? i.qty}
+            {(i.actual_name || i.actual_taken_qty != null) && <b className="ml-1 text-warn-fg">Slack 정정</b>}
             {i.settlement && <b className="ml-1 text-warn-fg">정산 {i.settlement}</b>}
           </span>
         ))}

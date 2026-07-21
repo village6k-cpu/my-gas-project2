@@ -21,6 +21,7 @@ import {
 } from "@/lib/data/store";
 import { Check, Plus } from "./icons";
 import { MemoTag, itemMemoEntries } from "./MemoTag";
+import { equipmentActualName, equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
 import { ReturnChecklist } from "./ReturnChecklist";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
@@ -158,7 +159,10 @@ function rowTint(e: EquipmentItem, excluded: boolean): string {
 function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean; setTone?: boolean }) {
   const taken = e.checkoutState === "taken";
   const excluded = e.checkoutState === "excluded";
-  const partial = e.takenQty != null && e.takenQty !== e.qty;
+  const actualName = equipmentActualName(e);
+  const actualQty = equipmentActualTakenQty(e);
+  const corrected = hasEquipmentActualCorrection(e);
+  const partial = actualQty !== e.qty;
   const memos = itemMemoEntries(e);
   const checkoutMemo = String(e.memoCheckout || "").trim();
   const checkinMemo = String(e.memoCheckin || "").trim();
@@ -178,12 +182,13 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         </button>
 
         <button onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-          <span className={`truncate text-[14px] ${excluded ? "text-ink-faint line-through" : setTone ? "font-extrabold text-brand-700" : taken ? "text-ink" : "text-ink-soft"}`}>{e.name}</span>
+          <span className={`truncate text-[14px] ${excluded ? "text-ink-faint line-through" : setTone ? "font-extrabold text-brand-700" : taken ? "text-ink" : "text-ink-soft"}`}>{actualName}</span>
           {e.offCatalog && <span className="shrink-0 rounded bg-line/40 px-1 text-[10px] font-semibold text-ink-faint">자유입력</span>}
+          {corrected && <span className="shrink-0 rounded bg-warn-bg px-1 text-[10px] font-bold text-warn-fg ring-1 ring-warn-ring">Slack 정정</span>}
         </button>
 
         <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[12px] font-semibold tabular-nums ${e.emphasize ? "bg-warn-bg text-warn-fg ring-1 ring-warn-ring" : "text-ink-mute"}`}>
-          {partial ? `${e.takenQty}/${e.qty}` : `×${e.qty}`}
+          {partial ? `${actualQty}/${e.qty}` : `×${e.qty}`}
         </span>
 
         {baselineLocked ? (
@@ -219,7 +224,8 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         <div className="space-y-2 pb-2.5 pl-9">
           {baselineLocked ? (
             <div className="rounded-lg bg-paper px-2.5 py-2 text-[12px] font-semibold leading-snug text-ink-mute ring-1 ring-line">
-              반출 기준선 고정 · 이름과 예약 수량은 바꾸지 않습니다. 추가로 나간 장비는 아래 ‘현장 추가’로 기록하세요.
+              반출 기준선 원본 보존 · 사후 확인된 실제값은 Slack 정정으로 별도 표시합니다. 추가로 나간 장비는 아래 ‘현장 추가’로 기록하세요.
+              {corrected && <div className="mt-1 text-warn-fg">예약 기록: {e.name} · {e.takenQty ?? e.qty}개 / 실제: {actualName} · {actualQty}개</div>}
             </div>
           ) : (
             <>

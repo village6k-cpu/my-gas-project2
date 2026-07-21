@@ -16,7 +16,18 @@ export interface ReturnCount {
   good: number;
   damaged: number;
   lost: number;
+  /** Slack/직원 보고로 미반납 수량이 명시됐다는 증거. 완료 합계에는 포함하지 않는다. */
+  reportedMissing?: number;
   memo?: string;
+}
+
+/** 예약/반출 기준선은 보존한 채, 사후에 확인된 실제값만 별도로 덮어쓰는 감사 정보. */
+export interface EquipmentActualSource {
+  kind: "slack" | "manual";
+  channelId?: string;
+  messageTs?: string;
+  permalink?: string;
+  correctedAt: string;
 }
 
 export interface EquipmentItem {
@@ -25,6 +36,12 @@ export interface EquipmentItem {
   qty: number;
   /** 실제 가져간 수량 (부분 픽업). 미지정이면 qty와 동일 */
   takenQty?: number;
+  /** 사후 증거로 확인된 실제 장비명. 원래 예약/기준선 name은 감사용으로 그대로 둔다. */
+  actualName?: string;
+  /** 사후 증거로 확인된 실제 반출 수량. takenQty 원본은 변경하지 않는다. */
+  actualTakenQty?: number;
+  /** 실제값 정정 출처. */
+  actualSource?: EquipmentActualSource;
   setName?: string | null;
   isSetHeader?: boolean;
   isComponent?: boolean;

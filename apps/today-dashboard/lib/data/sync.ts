@@ -237,6 +237,9 @@ function mergeDashboard(base: Trade, it: any): Trade {
         : (base.setupDone || base.returnDone) && prev?.checkoutState === "taken" ? "taken"
         : "pending",
       takenQty: prev?.takenQty,
+      actualName: prev?.actualName,
+      actualTakenQty: prev?.actualTakenQty,
+      actualSource: prev?.actualSource,
       // 메모는 적은 시점(반출/반납)별로 보존 — 교차 복사하면 출처 구분이 사라진다
       memoCheckout: prev?.memoCheckout,
       memoCheckin: prev?.memoCheckin,

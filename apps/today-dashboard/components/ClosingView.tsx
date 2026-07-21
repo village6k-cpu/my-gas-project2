@@ -18,6 +18,8 @@ type ItemRow = {
   name: string;
   qty: number;
   taken_qty: number | null;
+  actual_name: string | null;
+  actual_taken_qty: number | null;
   set_name: string | null;
   is_set_header: boolean;
   is_component: boolean;
@@ -96,7 +98,7 @@ export function ClosingView({ onClose }: { onClose: () => void }) {
         for (let i = 0; i < ids.length; i += 60) {
           const { data, error } = await sb
             .from("schedule_items")
-            .select("schedule_id,trade_id,name,qty,taken_qty,set_name,is_set_header,is_component,memo_checkout,memo_checkin,checkout_state")
+            .select("schedule_id,trade_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,is_component,memo_checkout,memo_checkin,checkout_state")
             .in("trade_id", ids.slice(i, i + 60));
           if (error) throw error;
           rows = rows.concat((data as ItemRow[]) || []);
@@ -139,7 +141,7 @@ export function ClosingView({ onClose }: { onClose: () => void }) {
         const rc = t.return_counts?.[i.schedule_id];
         if (!rc) continue;
         if ((rc.damaged || 0) > 0 || (rc.lost || 0) > 0 || rc.memo) {
-          incidents.push({ customer: t.customer_name || "?", item: i.name, damaged: rc.damaged || 0, lost: rc.lost || 0, memo: rc.memo || i.memo_checkin || null });
+          incidents.push({ customer: t.customer_name || "?", item: i.actual_name || i.name, damaged: rc.damaged || 0, lost: rc.lost || 0, memo: rc.memo || i.memo_checkin || null });
         }
       }
     }
@@ -154,7 +156,9 @@ export function ClosingView({ onClose }: { onClose: () => void }) {
     for (const t of tomorrowOut) {
       for (const i of itemsBy.get(t.trade_id) || []) {
         if (i.is_set_header && (itemsBy.get(t.trade_id) || []).some((x) => x.set_name === i.name && !x.is_set_header)) continue;
-        need.set(i.name, (need.get(i.name) || 0) + i.qty);
+        const actualName = i.actual_name || i.name;
+        const actualQty = i.actual_taken_qty ?? i.qty;
+        if (actualQty > 0) need.set(actualName, (need.get(actualName) || 0) + actualQty);
       }
     }
     const stillOut = new Map<string, { qty: number; who: string[] }>();
@@ -166,9 +170,12 @@ export function ClosingView({ onClose }: { onClose: () => void }) {
       for (const i of mine) {
         // need와 대칭 — 구성품이 따로 있는 세트 헤더는 물리 장비가 아니라 컨테이너
         if (i.is_set_header && mine.some((x) => x.set_name === i.name && !x.is_set_header)) continue;
-        const key = normalizeStockName(i.name);
+        const actualName = i.actual_name || i.name;
+        const actualQty = i.actual_taken_qty ?? i.taken_qty ?? i.qty;
+        if (actualQty <= 0) continue;
+        const key = normalizeStockName(actualName);
         const cur = stillOut.get(key) || { qty: 0, who: [] };
-        cur.qty += i.taken_qty ?? i.qty;
+        cur.qty += actualQty;
         const label = `${t.customer_name || "?"}(${t.return_at ? hhmm(t.return_at) + " 반납예정" : "반납일 미상"})`;
         if (!cur.who.includes(label)) cur.who.push(label);
         stillOut.set(key, cur);

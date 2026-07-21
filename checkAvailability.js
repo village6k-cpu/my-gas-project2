@@ -2757,13 +2757,18 @@ function assertDashboardReturnComplete_(tid, props) {
   }
   // 반출 순간 taken_qty가 고정된 Supabase 행이 불변 기준선이다. 현재 시트 qty/name을
   // 기준으로 삼으면 6→5 수정이나 행 삭제 뒤 5/5로 닫는 사고가 재발한다.
-  var checkable = (durable.scheduleItems || []).filter(function(item) {
+  var recordedBaselineItems = (durable.scheduleItems || []).filter(function(item) {
     return item.checkout_state !== 'excluded' && Number(item.taken_qty || 0) > 0;
+  });
+  var checkable = recordedBaselineItems.filter(function(item) {
+    return supaActualTakenQty_(item) > 0;
   }).map(function(item) {
     return {
       scheduleId: String(item.schedule_id || '').trim(),
-      name: String(item.name || '').trim(),
-      qty: Number(item.taken_qty || 0),
+      name: supaActualItemName_(item),
+      qty: supaActualTakenQty_(item),
+      recordedName: String(item.name || '').trim(),
+      recordedQty: Number(item.taken_qty || 0),
       setName: String(item.set_name || '').trim(),
       isHeader: !!item.is_set_header,
       isComponent: !!item.is_component
@@ -2776,15 +2781,18 @@ function assertDashboardReturnComplete_(tid, props) {
   var currentById = {};
   currentCheckable.forEach(function(eq) { currentById[String(eq.scheduleId || '').trim()] = eq; });
   var baselineById = {};
-  checkable.forEach(function(eq) { baselineById[eq.scheduleId] = eq; });
-  var identityChanged = checkable.filter(function(baseline) {
-    var current = currentById[baseline.scheduleId];
+  recordedBaselineItems.forEach(function(item) {
+    baselineById[String(item.schedule_id || '').trim()] = item;
+  });
+  var identityChanged = recordedBaselineItems.filter(function(baseline) {
+    var baselineId = String(baseline.schedule_id || '').trim();
+    var current = currentById[baselineId];
     if (!current) return true;
     var currentQty = Number(String(current.qty || 1).replace(/[^0-9.]/g, '')) || 1;
-    return currentQty !== baseline.qty ||
-      String(current.name || '').trim() !== baseline.name ||
-      String(current.setName || '').trim() !== baseline.setName ||
-      !!current.isHeader !== !!baseline.isHeader;
+    return currentQty !== Number(baseline.taken_qty || 0) ||
+      String(current.name || '').trim() !== String(baseline.name || '').trim() ||
+      String(current.setName || '').trim() !== String(baseline.set_name || '').trim() ||
+      !!current.isHeader !== !!baseline.is_set_header;
   }).concat(currentCheckable.filter(function(current) {
     return !baselineById[String(current.scheduleId || '').trim()];
   }));
@@ -3507,9 +3515,10 @@ function toggleItemCheck(scheduleId, phase, done) {
       if (!baselineItem) {
         return { error: '반납 체크 실패: 반출 순간의 불변 수량 기준선이 없습니다: ' + scheduleId };
       }
-      var baselineQty = Number(baselineItem.taken_qty || 0);
+      var baselineQty = supaActualTakenQty_(baselineItem);
+      var recordedBaselineQty = Number(baselineItem.taken_qty || 0);
       if (
-        baselineQty !== context.qty ||
+        recordedBaselineQty !== context.qty ||
         String(baselineItem.name || '').trim() !== String(context.name || '').trim() ||
         String(baselineItem.set_name || '').trim() !== String(context.setName || '').trim()
       ) {
@@ -6841,6 +6850,26 @@ function dashboardAddEquipments(tid, entries, options) {
 
 function dashboardRecordOnsiteAddon(tid, entries, options) {
   options = options || {};
+  var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
+  var idempotencyKey = String(options.idempotencyKey || '').trim();
+  var idemProp = 'slackOpsOnsiteIdempotency_v1';
+  var idemHash = '';
+  var idemRows = [];
+  if (!dryRun && idempotencyKey) {
+    try {
+      idemHash = Utilities.base64EncodeWebSafe(
+        Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idempotencyKey)
+      ).replace(/=+$/g, '').slice(0, 24);
+      idemRows = JSON.parse(PropertiesService.getScriptProperties().getProperty(idemProp) || '[]');
+      if (!Array.isArray(idemRows)) idemRows = [];
+      if (idemRows.some(function(row) { return row && row.k === idemHash; })) {
+        return { success: true, duplicate: true, idempotencyKey: idemHash, message: '이미 반영된 Slack 현장추가' };
+      }
+    } catch (idemReadErr) {
+      // 중복방지 저장소를 읽지 못하면 자동 현장추가를 진행하지 않는다.
+      return { error: 'Slack 현장추가 중복방지 상태를 읽지 못했습니다: ' + String(idemReadErr && idemReadErr.message || idemReadErr) };
+    }
+  }
   var settlementStatus = String(options.settlementStatus || 'pending').trim();
   var isPaid = settlementStatus === '유상' || settlementStatus.toLowerCase() === 'paid';
   var addResult = dashboardAddEquipments(tid, entries, {
@@ -6869,6 +6898,16 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
   addResult.message = addResult.onsiteAddonLogged
     ? '현장 추가 반출 기록 완료'
     : '장비는 추가됐지만 현장 추가 반출 기록 저장은 확인 필요';
+  if (idemHash) {
+    try {
+      idemRows.push({ k: idemHash, at: Date.now() });
+      PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
+      addResult.idempotencyKey = idemHash;
+    } catch (idemWriteErr) {
+      // 장비 추가 자체는 이미 성공했다. 호출부가 재시도해 중복시키지 않도록 성공과 경고를 함께 반환한다.
+      addResult.idempotencyWarning = '중복방지 표식 저장 실패: ' + String(idemWriteErr && idemWriteErr.message || idemWriteErr);
+    }
+  }
   return addResult;
 }
 

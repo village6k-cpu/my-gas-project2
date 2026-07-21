@@ -225,7 +225,7 @@ export async function loadInventoryAuditStartSources(
           client
             .from("schedule_items")
             .select(
-              "schedule_id,trade_id,name,qty,taken_qty,is_set_header,is_component,off_catalog,onsite,checkout_state",
+              "schedule_id,trade_id,name,qty,taken_qty,actual_name,actual_taken_qty,is_set_header,is_component,off_catalog,onsite,checkout_state",
             )
             .in("trade_id", tradeIds)
             .or("taken_qty.gt.0,checkout_state.eq.taken")

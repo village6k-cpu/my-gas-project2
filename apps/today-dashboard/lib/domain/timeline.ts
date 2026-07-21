@@ -4,6 +4,16 @@ import { catalogStockOf } from "../data/equipmentCatalog";
 import type { Trade } from "./types";
 import { stockOf } from "./catalog";
 
+function equipmentActualName(item: Trade["equipments"][number]): string {
+  return String(item.actualName || item.name || "").trim();
+}
+
+function equipmentActualTakenQty(item: Trade["equipments"][number]): number {
+  const value = item.actualTakenQty ?? item.takenQty ?? item.qty;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+}
+
 export type GroupMode = "set" | "customer" | "status";
 export type StatusKey = "대기" | "반출중" | "반납완료" | "취소" | "기타";
 
@@ -76,7 +86,9 @@ export function buildItems(trades: Trade[]): TLItem[] {
       if (e.checkoutState === "excluded") continue;
       const co = new Date(t.checkoutAt).getTime() + (e.startShiftDays ?? 0) * DAY;
       const ro = new Date(t.returnAt).getTime() + (e.endShiftDays ?? 0) * DAY;
-      const rawQty = Number(e.takenQty ?? e.qty);
+      const rawQty = equipmentActualTakenQty(e);
+      if (rawQty <= 0) continue;
+      const actualName = equipmentActualName(e);
       const unitCount = Math.max(1, Math.floor(Number.isFinite(rawQty) ? rawQty : 1));
       for (let unitIndex = 1; unitIndex <= unitCount; unitIndex += 1) {
         out.push({
@@ -84,14 +96,14 @@ export function buildItems(trades: Trade[]): TLItem[] {
           tradeId: t.tradeId,
           scheduleId: e.scheduleId,
           contractUrl: t.contractUrl,
-          label: e.name,
+          label: actualName,
           custName: t.customerName,
           status: t.contractStatus,
           statusKey: statusKeyOf(t.contractStatus),
           qty: 1,
           unitIndex,
           unitCount,
-          stock: catalogStockOf(e.name) ?? stockOf(e.category), // 장비마스터 실재고 우선 — 하드코딩 추정치는 폴백
+          stock: catalogStockOf(actualName) ?? stockOf(e.category), // 장비마스터 실재고 우선 — 하드코딩 추정치는 폴백
           category: e.category,
           startMs: dateOnlyMs(new Date(co).toISOString()),
           endMs: dateOnlyMs(new Date(ro).toISOString()),

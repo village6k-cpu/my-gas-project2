@@ -168,6 +168,17 @@ function supaSetTradeSetupDone_(tid, done, doneAt) {
  * 브라우저가 보낸 boolean을 신뢰하지 않고, 먼저 내구 저장된 village.trades.return_counts를
  * GAS가 봇 세션으로 직접 읽는다. 조회 실패/행 없음은 완료 허용이 아니라 명시적 실패다.
  */
+function supaActualTakenQty_(item) {
+  if (item && item.actual_taken_qty !== null && item.actual_taken_qty !== undefined && item.actual_taken_qty !== '') {
+    return Math.max(0, Number(item.actual_taken_qty) || 0);
+  }
+  return Math.max(0, Number(item && item.taken_qty || 0));
+}
+
+function supaActualItemName_(item) {
+  return String(item && item.actual_name || item && item.name || '').trim();
+}
+
 function supaGetTradeReturnCounts_(tid) {
   tid = String(tid || '').trim();
   if (!tid) return { ok: false, error: '거래ID 없음', returnCounts: {} };
@@ -197,7 +208,7 @@ function supaGetTradeReturnCounts_(tid) {
     var counts = rows[0].return_counts;
     if (!counts || typeof counts !== 'object' || Array.isArray(counts)) counts = {};
     var itemRes = UrlFetchApp.fetch(
-      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,set_name,is_set_header,is_component,checkout_state,onsite'
+      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,is_component,checkout_state,onsite'
         + '&trade_id=eq.' + encodeURIComponent(tid) + '&order=sort.asc',
       {
         method: 'get',
@@ -234,7 +245,7 @@ function supaGetCheckoutBaselineState_(tid) {
     var token = supaToken_(cfg);
     if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음', started: false, items: [] };
     var res = UrlFetchApp.fetch(
-      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,set_name,is_set_header,is_component,checkout_state,onsite'
+      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,is_component,checkout_state,onsite'
         + '&trade_id=eq.' + encodeURIComponent(tid) + '&taken_qty=gt.0&order=sort.asc',
       {
         method: 'get',

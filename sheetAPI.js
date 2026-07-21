@@ -423,6 +423,7 @@ function handleRequest(e) {
             rawNames: params.rawNames || postBody.rawNames || params.raw_names || postBody.raw_names,
             settlementStatus: params.settlementStatus || postBody.settlementStatus || params.settlement_status || postBody.settlement_status,
             actorName: params.actorName || postBody.actorName || params.actor_name || postBody.actor_name,
+            idempotencyKey: params.idempotencyKey || postBody.idempotencyKey || params.idempotency_key || postBody.idempotency_key,
             directRegenerate:
               params.directRegenerate || postBody.directRegenerate ||
               params.regenerateNow || postBody.regenerateNow

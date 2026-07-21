@@ -61,6 +61,10 @@ function uniqueScheduleRows(trade: Trade): any[] {
     // taken_qty는 반출 순간의 불변 기준선이다. GAS의 toggleSetupDone만 기록하며,
     // 브라우저의 오래된 스냅샷(null/옛 수량)이 직후 upsert로 기준선을 지우거나 줄이면 안 된다.
     delete row.taken_qty;
+    // 실제값 overlay도 Slack 서버 동기화만 쓴다. 열어둔 오래된 브라우저가 null로 지우지 못하게 한다.
+    delete row.actual_name;
+    delete row.actual_taken_qty;
+    delete row.actual_source;
     const baseId = row.schedule_id;
     const seen = seenScheduleIds.get(baseId) ?? 0;
     seenScheduleIds.set(baseId, seen + 1);

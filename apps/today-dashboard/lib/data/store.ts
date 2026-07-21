@@ -15,6 +15,7 @@ import type {
   Settlement,
   Trade,
 } from "../domain/types";
+import { equipmentActualTakenQty } from "../domain/equipmentActual";
 import { buildSeed } from "./seed";
 import { isSupabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
@@ -1522,9 +1523,13 @@ export async function setReturnCount(tradeId: string, scheduleId: string, patch:
   let writeback: boolean | undefined;
   mutateTrade(tradeId, (t) => {
     const item = t.equipments.find((e) => e.scheduleId === scheduleId);
-    const expected = item ? item.takenQty ?? item.qty : 0;
+    const expected = item ? equipmentActualTakenQty(item) : 0;
     const cur = t.returnCounts?.[scheduleId] ?? { good: 0, damaged: 0, lost: 0 };
     const next = { ...cur, ...patch };
+    // 직원이 화면에서 수량을 다시 만지면 과거 자동보고 표식은 현재 파생값으로 대체된다.
+    if ((patch.good != null || patch.damaged != null || patch.lost != null) && patch.reportedMissing == null) {
+      next.reportedMissing = undefined;
+    }
     const wasIn = expected > 0 && cur.good + cur.damaged + cur.lost === expected;
     const isIn = expected > 0 && next.good + next.damaged + next.lost === expected;
     if (wasIn !== isIn) writeback = isIn; // 줄이 전부 처리됨 ↔ 해제 전환 시에만 시트 반영
