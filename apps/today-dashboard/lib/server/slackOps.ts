@@ -435,6 +435,40 @@ export async function scanSlackOpsEvents(values: unknown[]): Promise<{ pending: 
   return { pending };
 }
 
+function incomingFromStored(event: StoredEvent): SlackOpsIncomingEvent {
+  return {
+    channelId: event.channel_id,
+    messageTs: event.message_ts,
+    threadTs: event.thread_ts,
+    sourceHash: event.source_hash,
+    phaseHint: event.phase_hint === "checkout" || event.phase_hint === "checkin" ? event.phase_hint : "unknown",
+    customerHint: event.customer_hint || undefined,
+    tradeIdHint: event.trade_id_hint || undefined,
+    permalink: event.permalink || undefined,
+    root: event.raw_context?.root || { ts: event.message_ts, text: "Slack 원문" },
+    replies: event.raw_context?.replies || [],
+  };
+}
+
+async function assertUniqueTopCandidate(event: StoredEvent, tradeId: string): Promise<void> {
+  const incoming = incomingFromStored(event);
+  const { trades, items } = await loadCandidateRows([incoming]);
+  let candidates = trades
+    .map((trade) => ({ trade, score: candidateScore(incoming, trade) }))
+    .filter(({ score }) => score >= 40)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map(({ trade, score }) => candidateFromTrade(trade, items, score));
+  if (!candidates.length) candidates = await findGasCandidates(incoming).catch(() => []);
+
+  const selected = candidates.find((candidate) => candidate.tradeId === tradeId);
+  const topScore = candidates[0]?.score ?? 0;
+  const topCount = candidates.filter((candidate) => candidate.score === topScore).length;
+  if (!selected || selected.score < 100 || selected.score !== topScore || topCount !== 1) {
+    throw new Error("거래가 이 Slack 사건의 유일한 최상위 후보가 아닙니다. 거래ID/대여자 확인이 필요합니다");
+  }
+}
+
 function sanitizePlan(value: unknown): SlackOpsApplyPlan {
   const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
   const phase = cleanText(raw.phase, 20);
@@ -721,6 +755,8 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
   if (event.status === "applied" && JSON.stringify(event.applied_plan) === JSON.stringify(plan)) {
     return { ok: true, duplicate: true, execute, tradeId: plan.tradeId };
   }
+
+  await assertUniqueTopCandidate(event, plan.tradeId);
 
   const { trade, items, imported } = await loadTradeAndItems(plan.tradeId, execute);
   validateActions(plan, items);

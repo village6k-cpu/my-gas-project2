@@ -14,6 +14,7 @@ const sheetApi = read('sheetAPI.js');
 assert(!server.includes('ai_follow_up_items'), 'Slack ops sync must never write the Kakao follow-up board');
 assert(route.includes('timingSafeEqual') && route.includes('SLACK_OPS_SYNC_SECRET || process.env.SLACK_BOT_TOKEN'), 'internal API must fail closed behind a timing-safe shared secret');
 assert(server.includes('dryRun: true') && server.includes('if (!execute) return'), 'live mutations must be preceded by a dry-run path');
+assert(server.includes('assertUniqueTopCandidate') && server.includes('topCount !== 1'), 'live plans must target the unique top transaction candidate');
 assert(server.includes('actual_name') && server.includes('actual_taken_qty') && server.includes('actual_source'), 'confirmed Slack corrections must use an audited overlay instead of rewriting baseline identity');
 assert(remote.includes('delete row.actual_name') && remote.includes('delete row.actual_taken_qty'), 'stale browsers must not erase server-owned correction overlays');
 assert(migration.includes('revoke all on village.slack_ops_events from anon, authenticated'), 'internal sync ledger must not become another employee-visible board');

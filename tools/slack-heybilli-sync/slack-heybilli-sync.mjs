@@ -28,9 +28,10 @@ function loadConfig() {
     token: process.env.SLACK_BOT_TOKEN || '',
     channelId: process.env.SLACK_HEYBILLI_CHANNEL_ID || DEFAULT_CHANNEL_ID,
     apiUrl: process.env.SLACK_HEYBILLI_API_URL || DEFAULT_API_URL,
-    lookbackHours: Math.max(24, Number(process.env.SLACK_HEYBILLI_LOOKBACK_HOURS || 336)),
+    lookbackHours: Math.max(24, Number(process.env.SLACK_HEYBILLI_LOOKBACK_HOURS || 72)),
     maxMessages: Math.min(500, Math.max(50, Number(process.env.SLACK_HEYBILLI_MAX_MESSAGES || 300))),
     writeEnabled: process.env.SLACK_HEYBILLI_WRITE_ENABLED === '1',
+    backfillCutoffTs: Number(process.env.SLACK_HEYBILLI_BACKFILL_CUTOFF_TS || 0),
   };
 }
 
@@ -91,14 +92,85 @@ export function extractCustomerHint(text) {
   const dated = value.match(/(?:^|\n)\s*([가-힣]{2,5})(?:\s*(?:감독|대표|실장|팀장)?님)?\s+(?=\d{1,2}[/.~-]\d{1,2})/u)?.[1];
   if (dated) return dated;
   const honorific = value.match(/(?:^|\n|\s)([가-힣]{2,5})\s*(?:감독님?|대표님?|실장님?|팀장님?)/u)?.[1];
-  return honorific || '';
+  if (honorific) return honorific;
+  const confirmed = value.match(/(?:^|\n)\s*([가-힣]{2,5})\s*(?:맞(?:아요|습니다)|맞죠|맞아|같습니다?)/u)?.[1];
+  return confirmed || '';
+}
+
+export function extractCustomerHintFromConversation(root, replies = []) {
+  const direct = extractCustomerHint(root?.text);
+  if (direct) return direct;
+  for (let index = 0; index < replies.length; index += 1) {
+    const replyHint = extractCustomerHint(replies[index]?.text);
+    if (replyHint) return replyHint;
+    const questioned = String(replies[index]?.text || '').match(/(?:^|\n)\s*([가-힣]{2,5})\s*맞나(?:요)?\??/u)?.[1];
+    const answer = String(replies[index + 1]?.text || '').trim();
+    if (questioned && /^(?:네|넵|예|응|어|ㅇㅇ|맞아요|맞습니다)(?:\s|[.!]|$)/u.test(answer)) return questioned;
+  }
+  return '';
 }
 
 export function isOperationalMessage(text) {
   const value = String(text || '');
   if (!value.trim()) return false;
-  if (/헤이빌리\s*자동반영|SLACK_HEYBILLI_SYNC/.test(value)) return false;
-  return /\[\s*(?:반출|반납)\s*\]|미반납|미수거|파손|분실|현장\s*추가|앱에\s*(?:없|안)|헤이빌리.{0,12}(?:없|안\s*올|누락)|대신.{0,30}(?:나갔|반출)|교체.{0,30}(?:나갔|반출)|실제.{0,20}(?:다름|반출|반납)|수량.{0,20}(?:다름|틀림|누락)|특이\s*사항|결제.{0,20}(?:미|오류|변경)|입금.{0,20}(?:미|확인)|반출|반납/.test(value);
+  if (/헤이빌리\s*자동반영|SLACK_HEYBILLI_SYNC|Hourly\s*백스톱/i.test(value)) return false;
+
+  // 정상 반출·반납 목록까지 매번 처리하면 자동화가 새 업무함이 된다. 거래 차이·누락·특이사항만 고른다.
+  const withoutNoException = value.replace(/특이\s*사항\s*(?:없음|없습니다|없어요|x)/gi, '');
+  const explicitException = /미\s*반출|미\s*반납|미\s*수거|분실|파손|누락|없는\s*(?:목록|내역)|등록.{0,12}안|헤이빌리.{0,20}(?:없|안|누락)|(?:앱|어플).{0,20}(?:없|안|오류|불가)|현장\s*추가|추가\s*반출|추가반출|대신.{0,30}(?:나갔|반출|변경)|교체.{0,30}(?:나갔|반출|변경)|(?:변경|교체)\s*(?:반출|됨|했|및)|실제.{0,20}(?:다름|달랐|반출|반납)|수량.{0,20}(?:다름|틀림|누락|부족)|특이\s*사항|결제.{0,20}(?:취소|재결제|미입금|오류|변경|예정)|입금.{0,20}(?:미|확인|오류|예정)|늦게\s*반납|아직.{0,12}반납/.test(withoutNoException);
+  const tradeContextException = /(?:반출|반납).{0,40}(?:없|안|고장|불량|다르|틀리|부족)|(?:없|안|고장|불량|다르|틀리|부족).{0,40}(?:반출|반납)/.test(withoutNoException);
+  const taggedException = isTaggedReport(withoutNoException)
+    && /없(?:음|습니다|어요|다)(?![가-힣])|안\s*(?:적|올|들어|가져|나갔|나감|맞|됐|되|보이)|고장|불량|다르|틀리|부족/.test(withoutNoException);
+  return explicitException || tradeContextException || taggedException;
+}
+
+function isTaggedReport(text) {
+  return /(?:^|\n)\s*(?:\d{1,2}[/.~-]\d{1,2}\s*)?\[\s*(?:반출|반납)\s*\]/u.test(String(text || ''));
+}
+
+function sameCustomerHint(left, right) {
+  if (!left || !right) return true;
+  return left.replace(/\s/g, '').toLowerCase() === right.replace(/\s/g, '').toLowerCase();
+}
+
+/**
+ * 단톡방에서는 스레드 대신 바로 다음 일반 메시지로 정정하는 경우가 많다.
+ * 10분 이내이며 새 [반출]/[반납] 보고나 다른 고객 사건이 아니면 앞 사건의 문맥으로 묶는다.
+ */
+export function groupOperationalMessages(messages, botUserId = '') {
+  const ordered = [...messages]
+    .filter((message) => {
+      if (!message?.ts || (message.thread_ts && message.thread_ts !== message.ts)) return false;
+      if (message.subtype && message.subtype !== 'file_share') return false;
+      if (String(message.user || '') === botUserId || message.bot_id) return false;
+      return Boolean(messageText(message));
+    })
+    .sort((a, b) => Number(a.ts) - Number(b.ts));
+
+  const groups = [];
+  let current = null;
+  for (const message of ordered) {
+    const text = messageText(message);
+    const operational = isOperationalMessage(text);
+    const customerHint = extractCustomerHint(text);
+    const gapSeconds = current ? Number(message.ts) - Number(current.root.ts) : Number.POSITIVE_INFINITY;
+    const canFollowCurrent = current
+      && gapSeconds >= 0
+      && gapSeconds <= 10 * 60
+      && !isTaggedReport(text)
+      && !extractTradeId(text)
+      && sameCustomerHint(current.customerHint, customerHint);
+
+    if (canFollowCurrent) {
+      current.nearby.push(message);
+      if (!current.customerHint && customerHint) current.customerHint = customerHint;
+      continue;
+    }
+    if (!operational) continue;
+    current = { root: message, nearby: [], customerHint };
+    groups.push(current);
+  }
+  return groups;
 }
 
 function cleanSlackMessage(message, names = new Map()) {
@@ -150,22 +222,20 @@ async function mapLimit(values, limit, mapper) {
 async function buildEvents(config) {
   const auth = await slackApi(config, 'auth.test');
   const botUserId = String(auth.user_id || '');
-  const history = (await pagedHistory(config)).filter((message) => {
-    if (!message?.ts || message.thread_ts) return false;
-    if (message.subtype && message.subtype !== 'file_share') return false;
-    if (String(message.user || '') === botUserId || message.bot_id) return false;
-    return isOperationalMessage(messageText(message)) || Number(message.reply_count || 0) > 0;
-  }).slice(0, 120);
+  const groups = groupOperationalMessages(await pagedHistory(config), botUserId).slice(-120);
 
-  const clusters = await mapLimit(history, 5, async (message) => {
+  const clusters = await mapLimit(groups, 5, async (group) => {
+    const message = group.root;
     let threadMessages = [message];
     if (Number(message.reply_count || 0) > 0) {
       const data = await slackApi(config, 'conversations.replies', { channel: config.channelId, ts: message.ts, limit: 100 });
       threadMessages = data.messages || [message];
     }
     const root = cleanSlackMessage(threadMessages[0] || message);
-    const replies = threadMessages.slice(1)
+    const replies = [...threadMessages.slice(1), ...group.nearby]
       .filter((reply) => String(reply.user || '') !== botUserId && !reply.bot_id)
+      .filter((reply, index, values) => values.findIndex((candidate) => candidate.ts === reply.ts) === index)
+      .sort((a, b) => Number(a.ts) - Number(b.ts))
       .map((reply) => cleanSlackMessage(reply));
     const combined = [root.text, ...replies.map((reply) => reply.text)].join('\n');
     if (!isOperationalMessage(combined)) return null;
@@ -177,7 +247,7 @@ async function buildEvents(config) {
       threadTs: root.ts,
       sourceHash: sourceHashFor(root, replies),
       phaseHint: inferPhase(combined),
-      customerHint: extractCustomerHint(root.text),
+      customerHint: extractCustomerHintFromConversation(root, replies),
       tradeIdHint: extractTradeId(combined),
       permalink,
       root,
@@ -195,8 +265,13 @@ function hermesPrompt(result, config) {
     `작업 디렉터리: ${REPO_ROOT}`,
     `쓰기 모드: ${config.writeEnabled ? '활성' : 'DRY-RUN 전용'}`,
     'slack-heybilli-sync 스킬 규칙을 정확히 따르세요. 새 보드/후속조치 항목은 절대 만들지 마세요.',
+    config.writeEnabled
+      ? 'LIVE 모드입니다. 확정 건은 apply --write, 불명확 건은 ask, 무관한 건은 ignore로 처리하세요.'
+      : 'DRY-RUN입니다. apply를 --write 없이 실행해 검증만 하세요. ask/ignore 및 Slack 메시지 전송은 금지합니다. 불명확 건은 최종 요약에만 남기세요.',
+    config.writeEnabled && config.backfillCutoffTs > 0
+      ? `초기 이관 기준 시각은 Slack ts ${config.backfillCutoffTs}입니다. 이보다 오래된 사건은 확실한 건만 적용하고, 불명확하면 과거 질문을 새로 만들지 말고 ignore하세요. 이 시각 이후 사건은 정보가 부족하면 같은 Slack 스레드에 ask하세요.`
+      : '',
     '각 이벤트의 전체 스레드에서 최신 직원 답변을 우선해 사실을 추출하고, 후보 거래·품목과 대조하세요.',
-    '확실하면 CLI apply, 거래/품목이 불명확하면 CLI ask, 단순 잡담이면 CLI ignore를 사용하세요.',
     '명시되지 않은 결제 상태나 분실을 추측하지 마세요. 미반납은 lost가 아닙니다.',
     '',
     JSON.stringify(result, null, 2),
