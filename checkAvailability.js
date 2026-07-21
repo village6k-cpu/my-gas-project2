@@ -9928,6 +9928,14 @@ function requestHasRecoverableRegisterStatus_(data, reqID) {
   return false;
 }
 
+function requestHasDirectRegisterApproval_(data, reqID) {
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][0] !== reqID) continue;
+    if (String(data[i][13] || "").replace(/\s+/g, "") === "바로등록") return true; // N열
+  }
+  return false;
+}
+
 function findConfirmRequestRowByReqID_(sheet, reqID) {
   if (!reqID) return -1;
   var lastRow = sheet.getLastRow();
@@ -10017,6 +10025,7 @@ function recoverPartiallyRegisteredRequests() {
 }
 
 function getBlockingRegisterIssue_(data, reqID) {
+  var directRegisterApproved = arguments.length > 2 && arguments[2] === true;
   for (var i = 0; i < data.length; i++) {
     if (data[i][0] !== reqID) continue;
     // 제외/거절/보류 행은 애초에 등록 대상이 아니므로 등록을 막지 않는다.
@@ -10028,7 +10037,7 @@ function getBlockingRegisterIssue_(data, reqID) {
     if (String(data[i][16] || "").indexOf("[세트]") === 0) continue;  // Q열: 비고(세트 태그)
     var result = String(data[i][8] || "").trim();
     if (/^❌\s*날짜/.test(result)) return result.replace(/^❌\s*/, "");
-    if (/^⚠️?\s*모델 선택/.test(result)) return result.replace(/^⚠️?\s*/, "");
+    if (!directRegisterApproved && /^⚠️?\s*모델 선택/.test(result)) return result.replace(/^⚠️?\s*/, "");
   }
   return "";
 }
@@ -10184,6 +10193,11 @@ function scheduleRegister(reqID) {
   }
   if (targetRow < 0) return { success: false, error: "요청ID를 찾을 수 없음: " + reqID };
 
+  // 헤이빌리의 '바로 등록'은 모델/재고 경고까지 확인한 최종 승인이다.
+  // 비동기 트리거가 실행될 때도 승인이 남도록 N열에 임시 마커를 기록한다.
+  // 등록 성공 시 registerByReqID가 기존 값인 '등록'으로 확정한다.
+  sheet.getRange(targetRow, 14).setValue("바로등록");
+
   // O열에 큐 상태 표시 + 재시도 트리거 보장
   markRegisterQueued_(sheet, targetRow);
   enqueuePendingRegister_(reqID, 1000);
@@ -10298,7 +10312,8 @@ function registerByReqID(sheet, triggerRow) {
     allData[rdi][4] = regDisplayData[rdi][4];
     allData[rdi][11] = regDisplayData[rdi][11];
   }
-  var blockingRegisterIssue = getBlockingRegisterIssue_(allData, reqID);
+  const directRegisterApproved = requestHasDirectRegisterApproval_(allData, reqID);
+  var blockingRegisterIssue = getBlockingRegisterIssue_(allData, reqID, directRegisterApproved);
   if (blockingRegisterIssue) {
     markRequestRegisterFailed_(sheet, allData, reqID, blockingRegisterIssue);
     return;
@@ -10439,6 +10454,9 @@ function registerByReqID(sheet, triggerRow) {
   const 미선택목록 = [];
   for (let i = 0; i < allData.length; i++) {
     if (allData[i][0] !== reqID) continue;
+    // '바로 등록'은 사장님의 최종 승인이다. 구체 모델 대신 현재 카테고리명을
+    // 그대로 스케줄상세에 기록하고, 날짜/연락처 같은 구조 오류만 계속 차단한다.
+    if (directRegisterApproved) continue;
     // 제외/거절/보류 행은 사장님이 이미 뺀 것 → 모델 미선택이어도 등록을 막지 않는다.
     // (예: 세트 구성품 '소프트박스'를 제외했는데도 계속 등록이 막히던 문제)
     var 행상태 = String(allData[i][14] || "").trim(); // O열: 등록상태
