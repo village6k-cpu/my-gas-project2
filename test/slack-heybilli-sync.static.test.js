@@ -16,7 +16,8 @@ const windowsInstallerBytes = fs.readFileSync(path.join(root, 'tools/slack-heybi
 const syncSkill = read('tools/slack-heybilli-sync/SKILL.md');
 
 assert(!server.includes('ai_follow_up_items'), 'Slack ops sync must never write the Kakao follow-up board');
-assert(route.includes('timingSafeEqual') && route.includes('SLACK_OPS_SYNC_SECRET || process.env.SLACK_BOT_TOKEN'), 'internal API must fail closed behind a timing-safe shared secret');
+assert(route.includes('timingSafeEqual') && route.includes('[process.env.SLACK_OPS_SYNC_SECRET, process.env.SLACK_BOT_TOKEN]'), 'internal API must fail closed while accepting either configured AX2 credential');
+assert(route.includes('if (!expectedSecrets.length) return false'), 'internal API must reject requests when no server credential is configured');
 assert(server.includes('dryRun: true') && server.includes('if (!execute) return'), 'live mutations must be preceded by a dry-run path');
 assert(server.includes('assertUniqueTopCandidate') && server.includes('topCount !== 1'), 'live plans must target the unique top transaction candidate');
 assert(server.includes('previous?.applied_at ?? null') && server.includes('previous?.last_error ?? null'), 'routine scans must preserve reconciliation audit timestamps and reasons');
