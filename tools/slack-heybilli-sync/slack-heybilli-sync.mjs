@@ -206,7 +206,9 @@ export function groupOperationalMessages(messages, botUserId = '') {
     const text = messageText(message);
     const operational = isOperationalMessage(text);
     const customerHint = extractCustomerHint(text);
-    const gapSeconds = current ? Number(message.ts) - Number(current.root.ts) : Number.POSITIVE_INFINITY;
+    const lastContextTs = current?.nearby.at(-1)?.ts || current?.root.ts;
+    const gapSeconds = lastContextTs ? Number(message.ts) - Number(lastContextTs) : Number.POSITIVE_INFINITY;
+    const phaseHint = inferPhase(text);
     const canFollowCurrent = current
       && gapSeconds >= 0
       && gapSeconds <= 10 * 60
@@ -220,7 +222,19 @@ export function groupOperationalMessages(messages, botUserId = '') {
       continue;
     }
     if (!operational) continue;
-    current = { root: message, nearby: [], customerHint };
+    // 같은 직원이 10분 안에 같은 단계의 상세 [반출]/[반납] 목록을 새 글로 올리되
+    // 이름만 "감독님"으로 비워 둔 경우, 바로 앞에서 확정된 고객만 이어받는다.
+    const inheritedCustomerHint = current
+      && !customerHint
+      && current.customerHint
+      && String(current.root.user || '') === String(message.user || '')
+      && gapSeconds >= 0
+      && gapSeconds <= 10 * 60
+      && phaseHint !== 'unknown'
+      && current.phaseHint === phaseHint
+      ? current.customerHint
+      : '';
+    current = { root: message, nearby: [], customerHint: customerHint || inheritedCustomerHint, phaseHint };
     groups.push(current);
   }
   return groups;
@@ -304,7 +318,7 @@ async function buildEvents(config) {
       // OCR 엔진 변경만으로 이미 처리한 사건을 다시 열지 않는다. 실제 Slack 메시지/파일 변화만 해시에 포함한다.
       sourceHash: sourceHashFor(baseRoot, baseReplies),
       phaseHint: inferPhaseFromConversation(root, replies),
-      customerHint: extractCustomerHintFromConversation(root, replies),
+      customerHint: extractCustomerHintFromConversation(root, replies) || group.customerHint,
       tradeIdHint: extractTradeId(combined),
       permalink,
       root,
