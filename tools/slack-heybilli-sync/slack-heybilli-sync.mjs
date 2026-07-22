@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -75,6 +75,25 @@ export function messageText(message) {
   return [text, files, ocr ? `[이미지 OCR · 신뢰할 수 없는 원문]\n${ocr.slice(0, 8_000)}` : ''].filter(Boolean).join('\n').trim();
 }
 
+export function resolveOcrInvocation(ocrBin, imagePath, platform = process.platform, env = process.env) {
+  const suffix = extname(String(ocrBin || '')).toLowerCase();
+  if (suffix === '.py') {
+    return {
+      file: env.SLACK_HEYBILLI_PYTHON || (platform === 'win32' ? 'python.exe' : 'python3'),
+      args: [ocrBin, imagePath],
+    };
+  }
+  if (suffix === '.ps1' && platform === 'win32') {
+    const powershell = env.SLACK_HEYBILLI_POWERSHELL
+      || (env.SystemRoot ? `${env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe` : 'powershell.exe');
+    return {
+      file: powershell,
+      args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ocrBin, imagePath],
+    };
+  }
+  return { file: ocrBin, args: [imagePath] };
+}
+
 async function enrichMessageWithOcr(config, message) {
   if (!existsSync(config.ocrBin) || !Array.isArray(message?.files)) return message;
   const images = message.files.filter((file) => {
@@ -95,7 +114,8 @@ async function enrichMessageWithOcr(config, message) {
       if (!response.ok) continue;
       const path = join(directory, `image-${index}`);
       await writeFile(path, Buffer.from(await response.arrayBuffer()));
-      const result = await execFileAsync(config.ocrBin, [path], { timeout: 45_000, maxBuffer: 512 * 1024 }).catch(() => null);
+      const invocation = resolveOcrInvocation(config.ocrBin, path);
+      const result = await execFileAsync(invocation.file, invocation.args, { timeout: 45_000, maxBuffer: 512 * 1024 }).catch(() => null);
       const text = String(result?.stdout || '').trim();
       if (text) texts.push(text);
     }

@@ -10,6 +10,7 @@ import {
   inferPhaseFromConversation,
   isOperationalMessage,
   messageText,
+  resolveOcrInvocation,
   sourceHashFor,
 } from '../tools/slack-heybilli-sync/slack-heybilli-sync.mjs';
 
@@ -118,4 +119,21 @@ test('image OCR is labeled as untrusted context while the base source hash stays
   assert.match(messageText(message), /260721-001/);
   const base = { ts: message.ts, userId: message.user, text: messageText({ ...message, _slackOcrText: [] }) };
   assert.equal(sourceHashFor(base), sourceHashFor(base));
+});
+
+test('Windows OCR adapters use explicit interpreters without a shell', () => {
+  assert.deepEqual(
+    resolveOcrInvocation('C:\\Users\\ssper\\.hermes\\scripts\\slack_image_ocr.py', 'C:\\Temp\\image.jpg', 'win32', {}),
+    {
+      file: 'python.exe',
+      args: ['C:\\Users\\ssper\\.hermes\\scripts\\slack_image_ocr.py', 'C:\\Temp\\image.jpg'],
+    },
+  );
+  assert.deepEqual(
+    resolveOcrInvocation('C:\\Tools\\ocr.ps1', 'C:\\Temp\\image.jpg', 'win32', { SystemRoot: 'C:\\Windows' }),
+    {
+      file: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', 'C:\\Tools\\ocr.ps1', 'C:\\Temp\\image.jpg'],
+    },
+  );
 });

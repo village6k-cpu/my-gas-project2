@@ -27,3 +27,20 @@ node tools/slack-heybilli-sync/slack-heybilli-sync.mjs ignore < reason.json
 
 `--write`는 `~/.hermes/slack-heybilli.env`의 `SLACK_HEYBILLI_WRITE_ENABLED=1`까지 켜져 있어야
 실제로 쓴다. Slack 토큰은 기존 `~/.hermes/.env`의 `SLACK_BOT_TOKEN`만 읽는다.
+
+## AX2 Windows 운영
+
+Windows Hermes cron은 `hermes-cron-runner.py`를 실행한다. 이 래퍼는 Windows 명령행 길이
+제한을 피하도록 Hermes oneshot을 같은 Python 프로세스에서 호출하며, 일반 Kakao worker의
+`AI_WORKER_LIVE`와 `AI_WORKER_AUTO_SEND`는 항상 `0`으로 고정한다.
+
+AX2에서만 다음 설치기를 사용한다. 최초에는 반드시 DryRun으로 설치·시험하고, 검증 후 Live로
+전환한다. 같은 이름의 cron이 이미 있으면 새 항목을 만들지 않고 그 항목만 갱신한다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\slack-heybilli-sync\install-ax2.ps1 -Mode DryRun -RegisterCron
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\slack-heybilli-sync\install-ax2.ps1 -Mode Live -RegisterCron
+```
+
+이미지 OCR은 `slack-image-ocr.py`가 로컬 Tesseract를 shell 없이 호출한다. `kor` 언어팩이
+없으면 이미지 OCR만 실패 폐쇄되고 텍스트 메시지 동기화는 계속된다.
