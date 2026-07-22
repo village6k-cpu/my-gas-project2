@@ -12,6 +12,7 @@ const gas = read('checkAvailability.js');
 const sheetApi = read('sheetAPI.js');
 const windowsRunner = read('tools/slack-heybilli-sync/hermes-cron-runner.py');
 const windowsInstaller = read('tools/slack-heybilli-sync/install-ax2.ps1');
+const windowsInstallerBytes = fs.readFileSync(path.join(root, 'tools/slack-heybilli-sync/install-ax2.ps1'));
 const syncSkill = read('tools/slack-heybilli-sync/SKILL.md');
 
 assert(!server.includes('ai_follow_up_items'), 'Slack ops sync must never write the Kakao follow-up board');
@@ -29,6 +30,7 @@ assert(windowsRunner.includes('from hermes_cli.oneshot import run_oneshot'), 'Wi
 assert(windowsRunner.includes('trusted_rules = skill_path.read_text'), 'Windows cron must inject the trusted reconciliation skill explicitly');
 assert(windowsRunner.includes('os.environ["LOCALAPPDATA"]') && windowsInstaller.includes("Join-Path $env:LOCALAPPDATA 'hermes'"), 'AX2 runtime must use the Windows native Hermes home');
 assert(windowsInstaller.includes("$env:COMPUTERNAME -ne 'AX2'"), 'the Windows installer must fail closed off AX2');
+assert.deepEqual([...windowsInstallerBytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'Windows PowerShell 5.1 requires a UTF-8 BOM for Korean source text');
 assert(windowsInstaller.includes("SLACK_HEYBILLI_WRITE_ENABLED' $(if ($Mode -eq 'Live')"), 'the Windows installer must make dry-run/live state explicit');
 assert(syncSkill.includes('후속조치 보드와 무관') && !syncSkill.includes('ai_follow_up_items'), 'the deployed AX2 skill must keep Slack reconciliation out of the Kakao follow-up board');
 assert(syncSkill.includes("@'\n{...plan...}\n'@ | node"), 'the deployed skill must include a PowerShell-safe stdin example');

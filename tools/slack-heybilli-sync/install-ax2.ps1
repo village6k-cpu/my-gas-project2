@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [ValidateSet('DryRun', 'Live')]
   [string]$Mode = 'DryRun',
