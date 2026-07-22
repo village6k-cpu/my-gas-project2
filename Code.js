@@ -673,43 +673,75 @@ function lookupDiscountForSelectedRow() {
   ss.toast("✅ " + best.이름 + " → " + best.할인유형 + " (" + best.방식 + " 매칭)", "성공", 8);
 }
 
-function lookupDiscountFromCustomerDB(sheet, row) {
-  var mCell = sheet.getRange(row, 13);
-  var existing = String(mCell.getValue() || "").trim();
-  if (existing && existing !== "일반") return; // 이미 입력됨
+// 고객DB 할인유형 캐시 — K/L 편집마다 외부 시트 전체를 읽던 왕복(1~2초) 제거
+var CUSTOMER_DISCOUNT_CACHE_KEY_ = "customerDiscountMap_v1";
+var CUSTOMER_DISCOUNT_CACHE_TTL_SEC_ = 300;
 
-  var 예약자명 = String(sheet.getRange(row, 11).getValue() || "").trim();
-  var 연락처Raw = sheet.getRange(row, 12).getValue();
-  var 연락처Norm = _normPhone(연락처Raw);
-  if (!예약자명 && !연락처Norm) return;
+/**
+ * 개고생2.0 고객DB를 { tel: {폰정규화→할인유형}, name: {성함→할인유형} } 맵으로 반환.
+ * ScriptCache 300초 캐시. 기존 매칭과 동일하게 중복 폰/성함은 먼저 나온 행 우선.
+ * 고객DB 수백 행 기준 JSON 수십 KB 수준 — 캐시 한도(100KB) 근접 시 put 생략(매번 라이브 읽기로 동작).
+ */
+function _getCustomerDiscountMap_() {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get(CUSTOMER_DISCOUNT_CACHE_KEY_);
+  if (cached) {
+    try { return JSON.parse(cached); } catch (e) {}
+  }
 
   var url = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
-  if (!url) return;
+  if (!url) return null;
   var dbSheet;
   try {
     dbSheet = SpreadsheetApp.openByUrl(url).getSheetByName("고객DB");
-  } catch (e) { return; }
-  if (!dbSheet || dbSheet.getLastRow() < 2) return;
+  } catch (e2) { return null; }
+  if (!dbSheet || dbSheet.getLastRow() < 2) return null;
 
   // A=예약자ID(휴대폰), B=성함, C=누적이용횟수, D=소개건수, E=소개리워드발급,
   // F=소개리워드사용, G=5회쿠폰발송, H=10회쿠폰발송, I=할인유형
   var data = dbSheet.getRange(2, 1, dbSheet.getLastRow() - 1, 9).getValues();
-  var matched = null;
+  var map = { tel: {}, name: {} };
   for (var i = 0; i < data.length; i++) {
     var dbTel = _normPhone(data[i][0]);
     var dbName = String(data[i][1] || "").trim();
-    if (연락처Norm && dbTel && dbTel === 연락처Norm) { matched = data[i]; break; }
-    if (!연락처Norm && 예약자명 && dbName === 예약자명) { matched = data[i]; break; }
+    var 할인 = String(data[i][8] || "").trim(); // I열
+    if (dbTel && !Object.prototype.hasOwnProperty.call(map.tel, dbTel)) map.tel[dbTel] = 할인;
+    if (dbName && !Object.prototype.hasOwnProperty.call(map.name, dbName)) map.name[dbName] = 할인;
   }
-  if (!matched) {
+
+  try {
+    var json = JSON.stringify(map);
+    if (json.length < 95000) cache.put(CUSTOMER_DISCOUNT_CACHE_KEY_, json, CUSTOMER_DISCOUNT_CACHE_TTL_SEC_);
+  } catch (e3) {}
+  return map;
+}
+
+function lookupDiscountFromCustomerDB(sheet, row) {
+  // K(예약자명)/L(연락처)/M(할인유형)을 한 번에 읽음
+  var klm = sheet.getRange(row, 11, 1, 3).getValues()[0];
+  var existing = String(klm[2] || "").trim();
+  if (existing && existing !== "일반") return; // 이미 입력됨
+
+  var 예약자명 = String(klm[0] || "").trim();
+  var 연락처Norm = _normPhone(klm[1]);
+  if (!예약자명 && !연락처Norm) return;
+
+  var map = _getCustomerDiscountMap_();
+  if (!map) return;
+
+  // 기존 매칭과 동일: 연락처가 있으면 폰으로만, 없으면 성함으로만 조회
+  var matched = 연락처Norm
+    ? (Object.prototype.hasOwnProperty.call(map.tel, 연락처Norm) ? map.tel[연락처Norm] : undefined)
+    : (Object.prototype.hasOwnProperty.call(map.name, 예약자명) ? map.name[예약자명] : undefined);
+  if (matched === undefined) {
     Logger.log("고객DB 매칭 실패 — 이름:" + 예약자명 + " 폰(norm):" + 연락처Norm);
     return;
   }
 
-  var 할인 = String(matched[8] || "").trim();  // I열
+  var 할인 = String(matched || "").trim();  // I열
   // 단골/제휴만 자동 채움. 학생/개사프리는 Cowork 파싱이 담당.
   if (할인 === "단골" || 할인 === "제휴") {
-    mCell.setValue(할인);
+    sheet.getRange(row, 13).setValue(할인);
     Logger.log("고객DB 매칭 → " + 예약자명 + " 할인유형 " + 할인);
   }
 }
@@ -980,8 +1012,7 @@ function autoFillScheduleRow(ss, sheet, row, 거래ID) {
   var cm = ss.getSheetByName("계약마스터");
   if (!cm || cm.getLastRow() < 2) return;
 
-  var cmRaw  = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getValues();
-  var cmDisp = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getDisplayValues();
+  var cmRaw = cm.getRange(2, 1, cm.getLastRow() - 1, 8).getValues();
   var found = -1;
   for (var i = 0; i < cmRaw.length; i++) {
     if (String(cmRaw[i][0]).trim() === 거래ID) { found = i; break; }
@@ -995,8 +1026,10 @@ function autoFillScheduleRow(ss, sheet, row, 거래ID) {
   var 예약자명   = cmRaw[found][1];
   var 반출일str   = _fmtDateStr(cmRaw[found][4]);
   var 반납일str   = _fmtDateStr(cmRaw[found][6]);
-  var 반출시간str = String(cmDisp[found][5] || "").trim();
-  var 반납시간str = String(cmDisp[found][7] || "").trim();
+  // 시간(F/H열)은 표시값이 필요 — 전체 getDisplayValues 대신 매칭 행만 1회 읽음
+  var timeDisp = cm.getRange(found + 2, 6, 1, 3).getDisplayValues()[0];
+  var 반출시간str = String(timeDisp[0] || "").trim();
+  var 반납시간str = String(timeDisp[2] || "").trim();
 
   // 스케줄ID 생성: 거래ID-NN (기존 최대 번호 + 1)
   var sLast = sheet.getLastRow();
@@ -1011,23 +1044,34 @@ function autoFillScheduleRow(ss, sheet, row, 거래ID) {
 
   // 현재 행 상태 확인 (빈 셀만 채우기)
   var rowData = sheet.getRange(row, 1, 1, 13).getValues()[0];
-  // A 스케줄ID
-  if (!rowData[0]) sheet.getRange(row, 1).setValue(newSid);
-  // F 반출일 (col 6)
-  if (!rowData[5]) { sheet.getRange(row, 6).setNumberFormat("yyyy-MM-dd").setValue(반출일str); }
-  // G 반출시간 (col 7)
-  if (!rowData[6]) { sheet.getRange(row, 7).setNumberFormat("@").setValue(반출시간str); }
-  // H 반납일 (col 8)
-  if (!rowData[7]) { sheet.getRange(row, 8).setNumberFormat("yyyy-MM-dd").setValue(반납일str); }
-  // I 반납시간 (col 9)
-  if (!rowData[8]) { sheet.getRange(row, 9).setNumberFormat("@").setValue(반납시간str); }
-  // J 상태
-  if (!rowData[9]) sheet.getRange(row, 10).setValue("대기");
-  // M 예약자명 (col 13)
-  if (!rowData[12]) sheet.getRange(row, 13).setValue(예약자명);
+  var fills = {}; // 열번호 → 채울 값 (빈 셀만 — 값 있는 열은 절대 안 건드림)
+  var fmts = {};  // 열번호 → 숫자 서식 (F~I만, 값 쓰기 전 적용)
+  if (!rowData[0]) fills[1] = newSid;                                // A 스케줄ID
+  if (!rowData[5]) { fmts[6] = "yyyy-MM-dd"; fills[6] = 반출일str; }  // F 반출일
+  if (!rowData[6]) { fmts[7] = "@"; fills[7] = 반출시간str; }         // G 반출시간
+  if (!rowData[7]) { fmts[8] = "yyyy-MM-dd"; fills[8] = 반납일str; }  // H 반납일
+  if (!rowData[8]) { fmts[9] = "@"; fills[9] = 반납시간str; }         // I 반납시간
+  if (!rowData[9]) fills[10] = "대기";                                // J 상태
+  if (!rowData[12]) fills[13] = 예약자명;                             // M 예약자명
 
-  // 상태바(K열 비고 활용)에 안내 — 장비명만 선택하면 됨
-  var 장비명Cell = sheet.getRange(row, 4).getValue();
+  // 연속 열 구간별로 묶어 한 번에 쓰기 — 셀 단위 setValue 왕복 제거
+  var applyRuns = function(colMap, apply) {
+    var cols = Object.keys(colMap).map(Number).sort(function(a, b) { return a - b; });
+    var s = 0;
+    while (s < cols.length) {
+      var t = s;
+      while (t + 1 < cols.length && cols[t + 1] === cols[t] + 1) t++;
+      var run = [];
+      for (var c = cols[s]; c <= cols[t]; c++) run.push(colMap[c]);
+      apply(cols[s], run);
+      s = t + 1;
+    }
+  };
+  applyRuns(fmts, function(c0, run) { sheet.getRange(row, c0, 1, run.length).setNumberFormats([run]); });
+  applyRuns(fills, function(c0, run) { sheet.getRange(row, c0, 1, run.length).setValues([run]); });
+
+  // 상태바(K열 비고 활용)에 안내 — 장비명만 선택하면 됨 (D열은 위에서 이미 읽음)
+  var 장비명Cell = rowData[3];
   if (!장비명Cell) {
     sheet.getRange(row, 11).setValue("👉 D열 장비명 선택하세요");
     sheet.getRange(row, 11).setBackground("#FFF2CC");
@@ -1461,18 +1505,20 @@ function cancelContract(ss, 거래ID, contractRow) {
   var contractSheet = ss.getSheetByName("계약마스터");
   supaMarkTradeDirty_(거래ID); // 취소도 Supabase로 — timeline에서 사라져도 계약마스터 상태로 반영됨
 
-  // 1. 스케줄상세에서 해당 거래ID 행 삭제 (아래부터)
+  // 1. 스케줄상세에서 해당 거래ID 행 삭제 (연속 블록 단위, 아래부터 — 위 블록 행번호가 안 밀림)
   var schedSheet = ss.getSheetByName("스케줄상세");
   if (schedSheet && schedSheet.getLastRow() >= 2) {
     var schedData = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 2).getValues();
-    var deletedSched = 0;
-    for (var i = schedData.length - 1; i >= 0; i--) {
-      if (String(schedData[i][1]).trim() === 거래ID) {
-        schedSheet.deleteRow(i + 2);
-        deletedSched++;
-      }
+    var delRows = [];
+    for (var i = 0; i < schedData.length; i++) {
+      if (String(schedData[i][1]).trim() === 거래ID) delRows.push(i + 2);
     }
-    Logger.log("스케줄상세 삭제: " + deletedSched + "행 (" + 거래ID + ")");
+    for (var b = delRows.length - 1; b >= 0; b--) {
+      var blockEnd = delRows[b];
+      while (b - 1 >= 0 && delRows[b - 1] === delRows[b] - 1) b--;
+      schedSheet.deleteRows(delRows[b], blockEnd - delRows[b] + 1);
+    }
+    Logger.log("스케줄상세 삭제: " + delRows.length + "행 (" + 거래ID + ")");
   }
 
   // 앱은 Supabase를 직접 읽는다. 1분 동기화를 기다리지 않고 점유 행 제거 + 취소 상태 보존.
@@ -1492,11 +1538,16 @@ function cancelContract(ss, 거래ID, contractRow) {
       if (거래시트 && 거래시트.getLastRow() >= 2) {
         // 2026-04-23 컬럼 재배치: 거래ID D(4) → E(5)
         var ids = 거래시트.getRange(2, 5, 거래시트.getLastRow() - 1, 1).getValues();
-        for (var j = ids.length - 1; j >= 0; j--) {
-          if (String(ids[j][0]).trim() === 거래ID) {
-            거래시트.deleteRow(j + 2);
-            Logger.log("개고생2.0 거래내역 삭제: 행 " + (j + 2) + " (" + 거래ID + ")");
-          }
+        var 거래delRows = [];
+        for (var j = 0; j < ids.length; j++) {
+          if (String(ids[j][0]).trim() === 거래ID) 거래delRows.push(j + 2);
+        }
+        // 연속 블록 단위, 아래부터 삭제 — 위 블록 행번호가 안 밀림
+        for (var g = 거래delRows.length - 1; g >= 0; g--) {
+          var gEnd = 거래delRows[g];
+          while (g - 1 >= 0 && 거래delRows[g - 1] === 거래delRows[g] - 1) g--;
+          거래시트.deleteRows(거래delRows[g], gEnd - 거래delRows[g] + 1);
+          Logger.log("개고생2.0 거래내역 삭제: 행 " + 거래delRows[g] + (gEnd > 거래delRows[g] ? "~" + gEnd : "") + " (" + 거래ID + ")");
         }
       }
     }
@@ -1601,10 +1652,9 @@ function 회차완료() {
   실사시트.insertColumnBefore(13);
   실사시트.getRange(1, 13).setValue(열헤더);
 
-  for (let r = 2; r <= lastRow; r++) {
-    const val = 실사시트.getRange(r, 6).getValue();
-    실사시트.getRange(r, 13).setValue(val);
-  }
+  // F열 → M열(새 회차 열) 복사 — 셀 단위 getValue/setValue 왕복 제거
+  const fVals = 실사시트.getRange(2, 6, lastRow-1, 1).getValues();
+  실사시트.getRange(2, 13, lastRow-1, 1).setValues(fVals);
 
   실사시트.getRange(2, 6, lastRow-1, 1).clearContent();
   실사시트.getRange(2, 7, lastRow-1, 1).clearContent();
@@ -1613,10 +1663,7 @@ function 회차완료() {
 
   const 회차lastRow = 회차시트.getLastRow();
   const 회차ID = `RC-${String(회차lastRow).padStart(3,'0')}`;
-  회차시트.getRange(회차lastRow+1, 1).setValue(회차ID);
-  회차시트.getRange(회차lastRow+1, 2).setValue(today);
-  회차시트.getRange(회차lastRow+1, 3).setValue(email);
-  회차시트.getRange(회차lastRow+1, 4).setValue("100%");
+  회차시트.getRange(회차lastRow+1, 1, 1, 4).setValues([[회차ID, today, email, "100%"]]);
 
   ui.alert("회차 완료! 데이터가 저장됐습니다.");
 }
@@ -1704,14 +1751,17 @@ function syncAuditFromMaster() {
     };
   }
 
-  // 실사기록 데이터: A(대분류), B(장비ID), C(카테고리), D(장비명)
+  // 실사기록 데이터: A(대분류), B(장비ID), C(카테고리), D(장비명) + H(삭제표시)까지 한 번에 읽음
   const auditLastRow = auditSheet.getLastRow();
   const auditIDs = new Set();
   let updated = 0;
   let marked = 0;
 
   if (auditLastRow >= 2) {
-    const auditData = auditSheet.getRange(2, 1, auditLastRow - 1, 4).getValues();
+    const auditData = auditSheet.getRange(2, 1, auditLastRow - 1, 8).getValues();
+    const abcd = auditData.map(r => r.slice(0, 4)); // A~D 쓰기 버퍼
+    let abcdDirty = false;
+    const markRows = []; // H열 "삭제됨" 표시 대상 행
 
     for (let i = 0; i < auditData.length; i++) {
       const auditID = String(auditData[i][1]).trim(); // B열
@@ -1725,35 +1775,43 @@ function syncAuditFromMaster() {
         const changed = [];
 
         if (String(auditData[i][0]).trim() !== String(m.대분류).trim()) {
-          auditSheet.getRange(row, 1).setValue(m.대분류);
+          abcd[i][0] = m.대분류;
           changed.push("대분류");
         }
         if (String(auditData[i][2]).trim() !== String(m.카테고리).trim()) {
-          auditSheet.getRange(row, 3).setValue(m.카테고리);
+          abcd[i][2] = m.카테고리;
           changed.push("카테고리");
         }
         if (String(auditData[i][3]).trim() !== String(m.장비명).trim()) {
-          auditSheet.getRange(row, 4).setValue(m.장비명);
+          abcd[i][3] = m.장비명;
           changed.push("장비명");
         }
 
-        if (changed.length > 0) updated++;
+        if (changed.length > 0) { updated++; abcdDirty = true; }
       } else {
         // ── 장비마스터에서 삭제된 장비 → 표시만 ──
-        const currentH = auditSheet.getRange(row, 8).getValue();
-        if (String(currentH) !== "삭제됨") {
-          auditSheet.getRange(row, 8).setValue("삭제됨");
-          auditSheet.getRange(row, 8).setBackground("#F4CCCC");
+        if (String(auditData[i][7]) !== "삭제됨") { // H열
+          markRows.push(row);
           marked++;
         }
       }
     }
+
+    // A~D 변경분을 한 번에 반영 (변경 없으면 안 씀)
+    if (abcdDirty) {
+      auditSheet.getRange(2, 1, abcd.length, 4).setValues(abcd);
+    }
+    // H열 "삭제됨" 표시 일괄 반영 (비연속 행은 RangeList로)
+    if (markRows.length > 0) {
+      const markList = auditSheet.getRangeList(markRows.map(r => "H" + r));
+      markList.setValue("삭제됨");
+      markList.setBackground("#F4CCCC");
+    }
   }
 
-  // ── 장비마스터에 있는데 실사기록에 없는 → 새 행 추가 ──
-  let added = 0;
-  let nextRow = Math.max(auditLastRow + 1, 2);
+  // ── 장비마스터에 있는데 실사기록에 없는 → 새 행 일괄 추가 ──
   const masterIDs = Object.keys(masterMap);
+  const newAuditRows = [];
 
   for (let i = 0; i < masterIDs.length; i++) {
     const id = masterIDs[i];
@@ -1761,12 +1819,12 @@ function syncAuditFromMaster() {
 
     const m = masterMap[id];
     // A: 대분류, B: 장비ID, C: 카테고리, D: 장비명 (F~L은 빈칸 유지)
-    auditSheet.getRange(nextRow, 1).setValue(m.대분류);
-    auditSheet.getRange(nextRow, 2).setValue(id);
-    auditSheet.getRange(nextRow, 3).setValue(m.카테고리);
-    auditSheet.getRange(nextRow, 4).setValue(m.장비명);
-    nextRow++;
-    added++;
+    newAuditRows.push([m.대분류, id, m.카테고리, m.장비명]);
+  }
+  const added = newAuditRows.length;
+  if (added > 0) {
+    const nextRow = Math.max(auditLastRow + 1, 2);
+    auditSheet.getRange(nextRow, 1, added, 4).setValues(newAuditRows);
   }
 
   SpreadsheetApp.flush();

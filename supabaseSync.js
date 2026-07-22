@@ -474,7 +474,9 @@ function buildSupabaseTrades_(tids) {
   var detail = {}; // tid -> dashboard item
   for (var dk in dateSet) {
     var dd;
-    try { dd = getDashboardData(dk, true, {}); } catch (x) { continue; }
+    // skipCache=false: 편집 경로가 변경 시 대시보드 캐시를 선별 무효화하므로 웜 캐시 재사용이 안전.
+    // 강제 재구축(true)은 매분 플러시마다 날짜당 2~6초 전체 리빌드로 트리거 쿼터를 소모했다.
+    try { dd = getDashboardData(dk, false, {}); } catch (x) { continue; }
     (dd.checkout || []).concat(dd.checkin || []).forEach(function (t) {
       if (want[t.tradeId] && !detail[t.tradeId]) detail[t.tradeId] = t;
     });

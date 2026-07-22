@@ -386,14 +386,38 @@ var API_URL = "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-C
 var requestData = [];
 
 // ━━━ 데이터 로드 ━━━
+// ── 첫 화면 즉시 표시: localStorage 스냅샷(5분 TTL) 먼저 렌더 → 백그라운드로 최신 갱신 ──
+// GAS 호출이 2~5초(콜드 30초+)라 매 진입마다 빈 화면+스피너였다. 스냅샷은 표시용일 뿐,
+// 항상 서버 응답으로 덮어쓴다.
+var MANAGE_SNAPSHOT_KEY = "manageListSnapshot_v1";
+var MANAGE_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
+
+function tryRenderSnapshot_() {
+  try {
+    var raw = localStorage.getItem(MANAGE_SNAPSHOT_KEY);
+    if (!raw) return false;
+    var snap = JSON.parse(raw);
+    if (!snap || !snap.at || (Date.now() - snap.at) > MANAGE_SNAPSHOT_TTL_MS) return false;
+    if (!Array.isArray(snap.items)) return false;
+    requestData = snap.items;
+    renderList();
+    return true;
+  } catch (e) { return false; }
+}
+
 function loadRequests() {
+  var hadSnapshot = tryRenderSnapshot_();
   fetch(API_URL + "?key=village2026&action=list")
     .then(function(r) { return r.json(); })
     .then(function(data) {
       requestData = data.items || [];
+      try {
+        localStorage.setItem(MANAGE_SNAPSHOT_KEY, JSON.stringify({ at: Date.now(), items: requestData }));
+      } catch (e) { /* 저장 실패해도 표시는 정상 */ }
       renderList();
     })
     .catch(function(e) {
+      if (hadSnapshot) return; // 스냅샷이 이미 떠 있으면 에러로 덮지 않음 (다음 새로고침에서 재시도)
       document.getElementById("cardList").innerHTML =
         '<div class="empty-state"><div class="empty-title">로드 실패</div><div class="msg">' + e.message + '</div></div>';
     });
