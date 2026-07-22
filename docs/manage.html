@@ -506,16 +506,7 @@ function doRegisterSelected(idx) {
     .then(function(r) { return r.json(); })
     .then(function(excludeRes) {
       if (excludeRes.error) throw new Error(excludeRes.error);
-      return fetch(API_URL + "?key=village2026&action=" + encodeURIComponent("등록") + "&reqID=" + encodeURIComponent(req.reqID));
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      if (data.status === "OK") {
-        showToast("등록 완료! (" + checkedCount + "개)");
-        setTimeout(loadRequests, 1000);
-      } else {
-        showToast("오류: " + (data.message || ""));
-      }
+      startAsyncRegister(req.reqID);
     })
     .catch(function(e) { showToast("통신 오류: " + e.message); });
   } else {
@@ -524,9 +515,55 @@ function doRegisterSelected(idx) {
   }
 }
 
+// ━━━ 비동기 등록: registerAsync 접수 후 card 폴링 (동기 등록은 계약서 생성 포함 1~5분 블로킹) ━━━
+function startAsyncRegister(reqID) {
+  showToast("등록 접수 — 백그라운드 처리 중... (1~3분)");
+  fetch(API_URL + "?key=village2026&action=registerAsync&reqID=" + encodeURIComponent(reqID))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data && data.success === false) {
+        showToast("등록 접수 실패: " + (data.error || ""));
+      }
+    })
+    .catch(function(e) { /* 접수 fetch가 끊겨도 폴링이 실제 상태를 확인한다 */ });
+
+  var polls = 0;
+  var pollTimer = setInterval(function() {
+    polls++;
+    if (polls > 30) { // 5분 초과
+      clearInterval(pollTimer);
+      showToast("등록 확인 시간 초과 — 목록을 새로고침해 확인해주세요");
+      loadRequests();
+      return;
+    }
+    fetch(API_URL + "?key=village2026&action=card&reqID=" + encodeURIComponent(reqID))
+      .then(function(r) { return r.json(); })
+      .then(function(res) {
+        if (!res || res.status !== "OK") return; // 일시 오류 — 다음 폴링에서 재확인
+        if (!res.card) { // 대기 목록에서 빠짐 = 등록완료
+          clearInterval(pollTimer);
+          showToast("등록 완료: " + reqID);
+          loadRequests();
+          return;
+        }
+        var st = String(res.card.등록상태 || "");
+        if (/❌|실패/.test(st)) {
+          clearInterval(pollTimer);
+          showToast("등록 실패: " + st);
+          loadRequests();
+        }
+      })
+      .catch(function() { /* 다음 폴링에서 재확인 */ });
+  }, 10000);
+}
+
 // ━━━ 액션 실행 (확인/등록/보류/거절) ━━━
 function doAction(action, reqID) {
-  if (action === "등록" && !confirm("등록하시겠습니까?")) return;
+  if (action === "등록") {
+    if (!confirm("등록하시겠습니까?")) return;
+    startAsyncRegister(reqID);
+    return;
+  }
   if (action === "거절" && !confirm("거절하시겠습니까?")) return;
 
   showToast(action + " 처리 중...");

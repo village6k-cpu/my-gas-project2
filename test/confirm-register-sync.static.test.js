@@ -56,8 +56,8 @@ assert(
   'processRegistrationQueue_ must prevent nested drains and isolate each reqID failure so later registrations keep moving'
 );
 assert(
-  /finally \{[\s\S]{0,80}regLock\.releaseLock\(\);[\s\S]{0,120}processRegistrationQueue_\(sheet\);/.test(backend),
-  'registerByReqID must drain 등록대기 in finally so validation returns and exceptions do not strand later requests'
+  /finally \{[\s\S]{0,80}regLock\.releaseLock\(\);[\s\S]{0,1200}processRegistrationQueue_\(sheet\);/.test(backend),
+  'registerByReqID must drain 등록대기 in finally so validation returns and exceptions do not strand later requests (releaseLock 뒤 락 밖 알림톡 블록을 사이에 허용)'
 );
 assert(
   /const startedFromRegisterQueue = requestHasRecoverableRegisterStatus_\(allData, reqID\);/.test(backend) &&
