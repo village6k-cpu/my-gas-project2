@@ -115,6 +115,14 @@ export function inferPhase(text) {
   return firstTag === '반출' ? 'checkout' : firstTag === '반납' ? 'checkin' : 'unknown';
 }
 
+export function inferPhaseFromConversation(root, replies = []) {
+  // 사건을 시작한 보고가 단계를 명시했다면, 뒤의 "반출건을 앱에 추가했다" 같은
+  // 조치 설명이 원래 반납 사건의 단계를 뒤집지 않게 한다.
+  const rootPhase = inferPhase(root?.text);
+  if (rootPhase !== 'unknown') return rootPhase;
+  return inferPhase([root?.text, ...replies.map((reply) => reply?.text)].filter(Boolean).join('\n'));
+}
+
 export function extractTradeId(text) {
   return String(text || '').match(/\b\d{6}-\d{3}\b/)?.[0] || '';
 }
@@ -128,6 +136,11 @@ export function extractCustomerHint(text) {
     .replace(/(?:감독|대표|실장|팀장)?님.*$/u, '')
     .trim();
   if (/^[가-힣A-Za-z0-9][가-힣A-Za-z0-9 ._()]{1,30}$/.test(taggedName) && !/^(장비|미등록|앱|헤이빌리|현장)/.test(taggedName) && !isGenericHint(taggedName)) return taggedName;
+
+  // 직원이 앱 등록을 마친 뒤 "헤이빌리의 박 다빈 오늘 반출건 추가"처럼 알려주는 경우.
+  // 성과 이름 사이의 공백은 Slack 입력 습관일 뿐이므로 거래 검색용 이름에서는 제거한다.
+  const appNamed = value.match(/헤이빌리(?:에|의)?\s*(?:고객|대여자|감독)?\s*([가-힣]{2,5}|[가-힣]{1,2}\s+[가-힣]{1,3})\s+(?=(?:(?:오늘|금일|어제|내일|\d{1,2}[/.~-]\d{1,2})\s*(?:반출|반납|거래|예약)?|(?:반출|반납|거래|예약)(?:건)?\s*(?:추가|등록|생성)))/u)?.[1]?.replace(/\s+/g, '');
+  if (appNamed && !isGenericHint(appNamed)) return appNamed;
 
   const dated = value.match(/(?:^|\n)\s*([가-힣]{2,5})(?:\s*(?:감독|대표|실장|팀장)?님)?\s+(?=\d{1,2}[/.~-]\d{1,2})/u)?.[1];
   if (dated && !isGenericHint(dated)) return dated;
@@ -290,7 +303,7 @@ async function buildEvents(config) {
       threadTs: root.ts,
       // OCR 엔진 변경만으로 이미 처리한 사건을 다시 열지 않는다. 실제 Slack 메시지/파일 변화만 해시에 포함한다.
       sourceHash: sourceHashFor(baseRoot, baseReplies),
-      phaseHint: inferPhase(combined),
+      phaseHint: inferPhaseFromConversation(root, replies),
       customerHint: extractCustomerHintFromConversation(root, replies),
       tradeIdHint: extractTradeId(combined),
       permalink,

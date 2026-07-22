@@ -74,6 +74,8 @@ type StoredEvent = {
   status: string;
   matched_trade_id: string | null;
   applied_plan: unknown;
+  applied_at: string | null;
+  last_error: string | null;
 };
 
 type TradeRow = {
@@ -258,8 +260,10 @@ async function upsertScannedEvents(events: SlackOpsIncomingEvent[]): Promise<Sto
       status: changed ? "pending" : previous?.status ?? "pending",
       matched_trade_id: changed ? null : previous?.matched_trade_id ?? null,
       applied_plan: changed ? null : previous?.applied_plan ?? null,
-      applied_at: changed ? null : undefined,
-      last_error: changed ? null : undefined,
+      // PostgREST upsert는 누락 열을 null로 취급할 수 있다. 같은 사건을 매번 scan해도
+      // 완료 시각과 마지막 판정 근거가 사라지지 않도록 기존 값을 명시적으로 보존한다.
+      applied_at: changed ? null : previous?.applied_at ?? null,
+      last_error: changed ? null : previous?.last_error ?? null,
     };
   });
 

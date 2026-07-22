@@ -7,6 +7,7 @@ import {
   extractTradeId,
   groupOperationalMessages,
   inferPhase,
+  inferPhaseFromConversation,
   isOperationalMessage,
   messageText,
   sourceHashFor,
@@ -17,12 +18,17 @@ test('tagged checkout/checkin messages yield phase and customer hints', () => {
   assert.equal(extractCustomerHint('[반출] 장희광 감독님\n현장추가 매트박스 1'), '장희광');
   assert.equal(inferPhase('[반납] 이득환 감독님\n셔틀러 미반납'), 'checkin');
   assert.equal(extractCustomerHint('[반납] 이득환 감독님\n셔틀러 미반납'), '이득환');
+  assert.equal(inferPhaseFromConversation(
+    { text: '이건 어느 감독님 반납인가요?' },
+    [{ text: '헤이빌리의 박 다빈 오늘 반출건 추가해놓음' }],
+  ), 'checkin');
 });
 
 test('untagged missing-app report is still operational', () => {
   const text = '박다빈 7/18 A7S3 2대 헤이빌리에 안 올라와 있습니다';
   assert.equal(isOperationalMessage(text), true);
   assert.equal(extractCustomerHint(text), '박다빈');
+  assert.equal(extractCustomerHint('헤이빌리의 박 다빈 오늘 반출건 추가해놓음'), '박다빈');
   assert.equal(extractCustomerHint('이건 어느 감독님 반납인가요?'), '');
 });
 
