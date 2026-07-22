@@ -249,18 +249,23 @@ test('buildHermesPrompt imports Claude Coworker policy while allowing aggressive
 test('buildHermesPrompt prefers sheet writes for reservation-format requests', () => {
   const prompt = buildHermesPrompt({ id: 'job-3', preview_text: 'a7s3 2대 견적' });
 
-  assert.match(prompt, /장비명은 AI가 최대한 추론\/정규화해서.*F열 item/s);
-  assert.match(prompt, /정확 매칭이 불완전하면.*best normalized guess/s);
-  assert.match(prompt, /정규화가 애매해도.*확인요청 입력은 막지 않는다/s);
+  assert.match(prompt, /equipment_catalog_search_template.*목록.*A열/s);
+  assert.match(prompt, /장비별.*조회.*exact_name_from_equipment_catalog/s);
+  assert.match(prompt, /목록.*정확명.*검증된 세트마스터 정확명.*없으면.*should_write_to_sheet=false/s);
+  assert.match(prompt, /normalized_guess.*자동 입력용이 아니라.*사람 확인용/s);
+  assert.doesNotMatch(prompt, /정확 매칭이 불완전하면.*best normalized guess/s);
+  assert.doesNotMatch(prompt, /정규화가 애매해도.*확인요청 입력은 막지 않는다/s);
+  assert.doesNotMatch(prompt, /원문 그대로 쓰는 것은.*fallback/s);
   assert.match(prompt, /Q\/R에는 원문\/추론\/가용확인 후 안내/s);
   assert.match(prompt, /FX3.*A7S3.*FX6/s);
   assert.match(prompt, /할인유형.*학생.*개인사업자\/프리랜서.*일반/s);
   assert.match(prompt, /단골.*일반/s);
   assert.match(prompt, /계약마스터.*스케줄상세.*확인요청/s);
   assert.match(prompt, /예약형식.*should_write_to_sheet=true/s);
-  assert.match(prompt, /불확실한 장비명.*입력 차단 사유가 아니라/s);
+  assert.match(prompt, /추측명과 고객 원문.*follow-up\/evidence/s);
   assert.match(prompt, /연락처.*고객DB.*should_write_to_sheet=false/s);
   assert.match(prompt, /예약 등록이 불가능해서 연락처부터/s);
+  assert.match(prompt, /"exact_name_from_equipment_catalog": string \| null/);
 });
 
 test('buildHermesPrompt treats read catch-up rows as possible missed reservations', () => {
@@ -309,6 +314,9 @@ test('buildReadOnlyLookupContext fetches kill switch and exposes read-only looku
   assert.match(requested[0], /sheet=%EC%84%A4%EC%A0%95/);
   assert.equal(context.lookup_policy.mode, 'read_only');
   assert.match(context.lookup_urls.set_master_search_template, /action=search/);
+  assert.match(context.lookup_urls.equipment_catalog_search_template, /action=search/);
+  assert.match(context.lookup_urls.equipment_catalog_search_template, /sheet=%EB%AA%A9%EB%A1%9D/);
+  assert.match(context.lookup_urls.equipment_catalog_search_template, /col=1/);
   assert.match(context.lookup_urls.customer_db_by_name_search_template, /sheet=%EA%B3%A0%EA%B0%9DDB/);
   assert.match(context.lookup_urls.customer_db_by_name_search_template, /col=2/);
   assert.match(context.lookup_urls.request_recent_with_results_gviz, /SELECT\+A%2CB%2CC%2CD%2CE%2CF%2CG%2CI%2CJ%2CK/);
@@ -460,7 +468,7 @@ test('ensureKakaoChannelManagerTabViaDevtools reuses automation profile tab with
   assert.deepEqual(requests.map((request) => request.method), ['GET']);
 });
 
-test('ensureKakaoChannelManagerTab invokes osascript with target chat URL when CDP is not configured', async () => {
+test('ensureKakaoChannelManagerTab invokes osascript with target chat URL when CDP is not configured', { skip: process.platform !== 'darwin' }, async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
@@ -1368,7 +1376,7 @@ test('buildSheetAppendPayload normalizes relative/korean dates and 24시 to API-
   assert.equal(payload.args.반납시간, '00:00');
 });
 
-test('buildSheetAppendPayload allows reservation-format writes when non-blocking checks are incomplete', () => {
+test('buildSheetAppendPayload blocks explicitly unverified equipment guesses', () => {
   const decision = {
     should_write_to_sheet: true,
     safety_checks: {
@@ -1381,15 +1389,112 @@ test('buildSheetAppendPayload allows reservation-format writes when non-blocking
       latest_customer_message_after_last_staff_reply: true,
       no_auto_reply_sent: false
     },
+    reservation_inquiry: {
+      equipment_requested: [{ raw_text: 'FX6', normalized_guess: 'FX6', quantity: 1 }]
+    },
     sheet_row_candidate: { item: 'FX6', customer_name: '홍길동', phone: '010-4444-5555', memo: '장비명/중복 검증 필요' }
   };
 
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
-  assert.equal(payload.action, 'run');
-  assert.equal(payload.func, 'insertAndCheckRequest');
-  assert.deepEqual(payload.args.장비, [{ 이름: 'FX6', 수량: 1 }]);
-  assert.equal(payload.args.예약자명, '홍길동');
-  assert.equal(payload.args.비고, '');
+  assert.equal(payload, null);
+});
+
+test('buildSheetAppendPayload prefers an exact equipment catalog name over a rough sheet candidate', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: false,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    reservation_inquiry: {
+      equipment_requested: [{
+        raw_text: '70200gm2',
+        normalized_guess: '70-200 GM2',
+        exact_name_from_equipment_catalog: '소니 GM 70-200mm II',
+        quantity: 2
+      }]
+    },
+    sheet_row_candidate: {
+      customer_name: '홍길동',
+      phone: '010-4444-5555',
+      equipment: [{ item: '70-200 GM2', quantity: 9 }]
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  assert.deepEqual(payload.args.장비, [{ 이름: '소니 GM 70-200mm II', 수량: 2 }]);
+});
+
+test('buildSheetAppendPayload preserves exact names, reservation quantities, and original item order', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    reservation_inquiry: {
+      equipment_requested: [
+        { raw_text: 'a7s3 2대', exact_name_from_equipment_catalog: '소니 A7S3 바디세트', quantity: 2 },
+        { raw_text: '70200gm2', exact_name_from_equipment_catalog: '소니 GM 70-200mm II', quantity: 1 },
+        { raw_text: 'solid 4s 3대', exact_name_from_set_master: '홀리랜드 솔리드컴 4S', quantity: 3 }
+      ]
+    },
+    sheet_row_candidate: {
+      customer_name: '김성윤',
+      phone: '010-7777-8888',
+      equipment: [
+        { item: 'A7S3', quantity: 7 },
+        { item: '70-200 GM2', quantity: 8 },
+        { item: 'solid 4s', quantity: 9 }
+      ]
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  assert.deepEqual(payload.args.장비, [
+    { 이름: '소니 A7S3 바디세트', 수량: 2 },
+    { 이름: '소니 GM 70-200mm II', 수량: 1 },
+    { 이름: '홀리랜드 솔리드컴 4S', 수량: 3 }
+  ]);
+});
+
+test('explicitly unverified equipment keeps human-review status and creates a deterministic reservation review', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    reason: '예약 형식이지만 장비명 확인이 필요함',
+    customer: { name: '홍길동' },
+    latest_customer_message_cluster: 'FX6 내일 한 대 부탁드립니다',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: false,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    reservation_inquiry: {
+      equipment_requested: [{ raw_text: 'FX6', normalized_guess: 'FX6', quantity: 1 }]
+    },
+    sheet_row_candidate: {
+      customer_name: '홍길동',
+      phone: '010-4444-5555',
+      equipment: [{ item: 'FX6', quantity: 1 }]
+    },
+    follow_up_items: []
+  };
+
+  assert.equal(buildSheetAppendPayload(decision, { apiKey: 'secret' }), null);
+  const rows = buildFollowUpRows(decision, { room_key: 'room-equipment-review' });
+  assert.ok(rows.length >= 1);
+  assert.equal(rows[0].type, 'reservation_review');
+  assert.match(rows[0].summary, /FX6/);
+  assert.match(`${rows[0].summary}\n${rows[0].evidence.join('\n')}`, /목록 정확명 확인 필요/);
+  assert.deepEqual(mapDecisionToStatusPatch(decision), {
+    status: 'needs_human_review',
+    error_message: '장비 자동 입력 차단: 목록 정확명 확인 필요'
+  });
 });
 
 test('buildSheetAppendPayload falls back to reservation equipment array instead of joining items into one row', () => {
@@ -2691,7 +2796,7 @@ test('mergeFollowUpRowsByTopic normalizes customer aliases with issue suffixes',
   assert.equal(mergeFollowUpRowsByTopic(rows).length, 1);
 });
 
-test('closeKakaoConversationWindow targets only the opened Kakao customer popup', async () => {
+test('closeKakaoConversationWindow targets only the opened Kakao customer popup', { skip: process.platform !== 'darwin' }, async () => {
   const script = buildCloseKakaoConversationWindowAppleScript();
   assert.match(script, /close window w/);
   assert.match(script, / - 빌리지 - 카카오비즈니스/);
@@ -2905,6 +3010,11 @@ test('standard document auto-send does not treat customer tax-invoice business-r
 });
 
 test('standard document auto-send allows explicit Village bankbook/business-registration request in latest turn', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'customer-document-assets-'));
+  const bankbookPath = path.join(dir, 'village_woori_bankbook_copy.jpeg');
+  const businessRegistrationPath = path.join(dir, 'village_business_registration_certificate.jpeg');
+  fs.writeFileSync(bankbookPath, 'bankbook');
+  fs.writeFileSync(businessRegistrationPath, 'business-registration');
   const decision = {
     classification: 'faq',
     kill_switch_observed: 'active',
@@ -2922,11 +3032,9 @@ test('standard document auto-send allows explicit Village bankbook/business-regi
   assert.equal(isCustomerDocumentAssetRequest(decision), true);
   assert.equal(canAutoSendCustomerDocumentAssets(decision, {
     autoSendEnabled: true,
-    customerDocumentAssetPaths: [
-      '/Users/village6k/.hermes/village-documents/customer-request-docs/village_woori_bankbook_copy.jpeg',
-      '/Users/village6k/.hermes/village-documents/customer-request-docs/village_business_registration_certificate.jpeg'
-    ]
+    customerDocumentAssetPaths: [bankbookPath, businessRegistrationPath]
   }).reason, 'standard_customer_document_assets');
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('autoReplyRequiresRagSupport marks FAQ and policy/procedure replies for RAG verification', () => {
@@ -3323,13 +3431,15 @@ test('sendKakaoMessageViaChrome clicks send button and verifies sent bubble', as
 
   assert.equal(result.sent, true);
   assert.equal(result.reason, 'sent_via_chrome_verified');
-  assert.equal(calls[0].cmd, 'osascript');
-  assert.equal(calls[1].args[1], 'get_window_state');
-  assert.equal(calls[2].args[1], 'type_text');
-  assert.match(calls[2].args[2], /네 확인했습니다/);
-  assert.equal(calls[4].args[1], 'get_window_state');
-  assert.equal(calls[5].args[1], 'click');
-  assert.equal(calls[7].args[1], 'get_window_state');
+  const appleScriptCalls = calls.filter((call) => call.cmd === 'osascript');
+  assert.equal(appleScriptCalls.length, process.platform === 'darwin' ? 3 : 0);
+  const cuaCalls = calls.filter((call) => call.cmd === 'cua-driver');
+  assert.equal(cuaCalls[0].args[1], 'get_window_state');
+  assert.equal(cuaCalls[1].args[1], 'type_text');
+  assert.match(cuaCalls[1].args[2], /네 확인했습니다/);
+  assert.equal(cuaCalls[2].args[1], 'get_window_state');
+  assert.equal(cuaCalls[3].args[1], 'click');
+  assert.equal(cuaCalls[4].args[1], 'get_window_state');
 });
 
 test('sendKakaoMessageViaChrome falls back to DevTools target when AX window is unavailable', async () => {
@@ -3444,7 +3554,36 @@ test('sendKakaoMessageViaChrome reactivates target window and retries disabled s
   assert.equal(result.sent, true);
   assert.equal(result.retried_after_frontmost_activation, true);
   assert.equal(clickCalls, 2);
-  assert.ok(calls.filter((call) => call.cmd === 'osascript').length >= 3);
+  const appleScriptCalls = calls.filter((call) => call.cmd === 'osascript');
+  if (process.platform === 'darwin') assert.ok(appleScriptCalls.length >= 3);
+  else assert.equal(appleScriptCalls.length, 0);
+});
+
+test('canAutoSendCustomerAnswer blocks replies while an equipment name needs catalog review', () => {
+  const decision = {
+    classification: 'reservation',
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    reservation_inquiry: {
+      equipment_requested: [{ raw_text: 'FX6', normalized_guess: 'FX6', quantity: 1 }]
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: false,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '네, 확인요청에 접수했습니다.'
+    }
+  };
+
+  assert.deepEqual(canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }), {
+    allowed: false,
+    reason: 'equipment_catalog_review_required'
+  });
 });
 
 test('sendKakaoMessageViaChrome treats Chrome activation failure as non-fatal and verifies send', async () => {
