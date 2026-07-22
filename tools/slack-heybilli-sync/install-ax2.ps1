@@ -36,7 +36,6 @@ $skillDir = Join-Path $hermesHome 'skills\slack-heybilli-sync'
 New-Item -ItemType Directory -Force -Path $scriptsDir, $skillDir | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $source 'hermes-cron-runner.py') -Destination (Join-Path $scriptsDir 'slack_heybilli_sync.py') -Force
-Copy-Item -LiteralPath (Join-Path $source 'slack-image-ocr.py') -Destination (Join-Path $scriptsDir 'slack_image_ocr.py') -Force
 
 $repoSkill = Join-Path $source 'SKILL.md'
 if (Test-Path -LiteralPath $repoSkill -PathType Leaf) {
@@ -86,7 +85,6 @@ Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_LOOKBACK_HOURS' '72'
 Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_MAX_MESSAGES' '300'
 if ($BackfillCutoffTs) { Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_BACKFILL_CUTOFF_TS' $BackfillCutoffTs }
 Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_WRITE_ENABLED' $(if ($Mode -eq 'Live') { '1' } else { '0' })
-Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_OCR_BIN' (Join-Path $scriptsDir 'slack_image_ocr.py')
 
 $env:AI_WORKER_LIVE = '0'
 $env:AI_WORKER_AUTO_SEND = '0'

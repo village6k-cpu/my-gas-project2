@@ -678,14 +678,20 @@ async function loadTradeAndItems(tradeId: string, execute: boolean): Promise<{ t
   return { trade: trade as TradeRow, items: (items ?? []) as ItemRow[], imported };
 }
 
-function validateActions(plan: SlackOpsApplyPlan, items: ItemRow[]) {
+function validateActions(plan: SlackOpsApplyPlan, items: ItemRow[], event: StoredEvent) {
   const byId = new Map(items.map((item) => [item.schedule_id, item]));
   const plannedTakenQty = new Map<string, number>();
+  const slackContext = [event.raw_context?.root?.text, ...(event.raw_context?.replies ?? []).map((reply) => reply.text)]
+    .filter(Boolean).join("\n");
+  const explicitlyAdded = /현장\s*추가|추가\s*(?:반출|대여|지급|장비)|(?:한|하나|1개)?\s*더\s*(?:가져|나갔|반출|챙겨)/u.test(slackContext);
   for (const action of plan.actions ?? []) {
     if (action.type === "item_correction" && action.actualTakenQty != null) plannedTakenQty.set(action.scheduleId, action.actualTakenQty);
   }
   for (const action of plan.actions ?? []) {
-    if (action.type === "onsite_add") continue;
+    if (action.type === "onsite_add") {
+      if (!explicitlyAdded) throw new Error("Slack 원문에 명시적인 추가 반출이 없어 onsite_add를 차단했습니다");
+      continue;
+    }
     const item = byId.get(action.scheduleId);
     if (!item) throw new Error(`거래에 없는 scheduleId: ${action.scheduleId}`);
     if (action.type === "item_correction" && action.actualTakenQty != null && action.actualTakenQty > item.qty) {
@@ -764,7 +770,7 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
   await assertUniqueTopCandidate(event, plan.tradeId);
 
   const { trade, items, imported } = await loadTradeAndItems(plan.tradeId, execute);
-  validateActions(plan, items);
+  validateActions(plan, items, event);
   const onsitePreview = await previewOnsiteActions(plan);
   const preview = {
     tradeId: plan.tradeId,

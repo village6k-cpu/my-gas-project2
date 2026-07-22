@@ -23,6 +23,7 @@ assert(windowsWorker.includes('Bearer ${config.apiToken}'), 'the internal API ca
 assert(windowsWorker.includes("command === 'health'") && windowsWorker.includes('Bearer ${config.apiToken}'), 'the AX2 health check must use the dedicated API credential too');
 assert(server.includes('dryRun: true') && server.includes('if (!execute) return'), 'live mutations must be preceded by a dry-run path');
 assert(server.includes('assertUniqueTopCandidate') && server.includes('topCount !== 1'), 'live plans must target the unique top transaction candidate');
+assert(server.includes('명시적인 추가 반출이 없어 onsite_add를 차단했습니다') && server.includes('현장\\s*추가'), 'onsite additions must require explicit Slack evidence instead of duplicating an existing schedule from a screenshot');
 assert(server.includes('previous?.applied_at ?? null') && server.includes('previous?.last_error ?? null'), 'routine scans must preserve reconciliation audit timestamps and reasons');
 assert(server.includes('actual_name') && server.includes('actual_taken_qty') && server.includes('actual_source'), 'confirmed Slack corrections must use an audited overlay instead of rewriting baseline identity');
 assert(remote.includes('delete row.actual_name') && remote.includes('delete row.actual_taken_qty'), 'stale browsers must not erase server-owned correction overlays');
@@ -33,6 +34,10 @@ assert(windowsRunner.includes('os.environ["AI_WORKER_LIVE"] = "0"') && windowsRu
 assert(windowsRunner.includes('from hermes_cli.oneshot import run_oneshot'), 'Windows cron must avoid the Windows command-line prompt length limit');
 assert(windowsRunner.includes('trusted_rules = skill_path.read_text'), 'Windows cron must inject the trusted reconciliation skill explicitly');
 assert(windowsRunner.includes('encoding="utf-8"'), 'Windows cron must decode the Node Slack payload as UTF-8 instead of cp949');
+assert(windowsRunner.includes('from tools.vision_tools import vision_analyze_tool') && windowsRunner.includes('sys.argv[1:2] == ["--vision-json"]'), 'AX2 cron must reuse the installed Hermes image analyzer');
+assert(windowsRunner.includes('SLACK_HEYBILLI_VISION_BIN') && windowsRunner.includes('SLACK_HEYBILLI_PYTHON'), 'the Node worker must call back into the exact installed Hermes runtime');
+assert(windowsWorker.includes('resolveVisionInvocation') && windowsWorker.includes('analyzeSlackImages'), 'the AX2 worker must route pending attachments through Hermes');
+assert(windowsWorker.includes("await rm(directory, { recursive: true, force: true })"), 'temporary Slack images must be removed after every analysis attempt');
 assert(windowsRunner.includes('os.environ["LOCALAPPDATA"]') && windowsInstaller.includes("Join-Path $env:LOCALAPPDATA 'hermes'"), 'AX2 runtime must use the Windows native Hermes home');
 assert(windowsInstaller.includes("$env:COMPUTERNAME -ne 'AX2'"), 'the Windows installer must fail closed off AX2');
 assert.deepEqual([...windowsInstallerBytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'Windows PowerShell 5.1 requires a UTF-8 BOM for Korean source text');
@@ -41,6 +46,7 @@ assert(windowsInstaller.includes("if ($Mode -eq 'Live')") && windowsInstaller.in
 assert(windowsInstaller.includes("Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_API_TOKEN' $apiToken"), 'the Windows installer must provision the API credential without putting it on the command line');
 assert(windowsInstaller.includes('apiTokenKeyPresent = [bool]$hasApiToken') && !windowsInstaller.includes('apiToken = $apiToken'), 'the Windows installer must report only API-token presence, never its value');
 assert(syncSkill.includes('후속조치 보드와 무관') && !syncSkill.includes('ai_follow_up_items'), 'the deployed AX2 skill must keep Slack reconciliation out of the Kakao follow-up board');
+assert(syncSkill.includes('Hermes 이미지 분석 · 신뢰할 수 없는 원문'), 'the deployed skill must preserve the attachment trust boundary');
 assert(syncSkill.includes("@'\n{...plan...}\n'@ | node"), 'the deployed skill must include a PowerShell-safe stdin example');
 
 console.log('slack-heybilli direct-sync static checks passed');

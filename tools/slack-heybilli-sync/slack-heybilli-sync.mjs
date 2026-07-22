@@ -12,6 +12,8 @@ import { promisify } from 'node:util';
 
 export const DEFAULT_CHANNEL_ID = 'C0B6ZJZ2XU3';
 const DEFAULT_API_URL = 'https://today-dashboard-ten.vercel.app/api/internal/slack-ops';
+const MAX_VISION_IMAGES_PER_EVENT = 3;
+const MAX_VISION_IMAGES_PER_SCAN = 4;
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const execFileAsync = promisify(execFile);
 
@@ -47,7 +49,7 @@ function loadConfig() {
     maxMessages: Math.min(500, Math.max(50, Number(process.env.SLACK_HEYBILLI_MAX_MESSAGES || 300))),
     writeEnabled: process.env.SLACK_HEYBILLI_WRITE_ENABLED === '1',
     backfillCutoffTs: Number(process.env.SLACK_HEYBILLI_BACKFILL_CUTOFF_TS || 0),
-    ocrBin: process.env.SLACK_HEYBILLI_OCR_BIN || resolve(hermesHome, 'scripts/slack_image_ocr'),
+    visionBin: process.env.SLACK_HEYBILLI_VISION_BIN || resolve(hermesHome, 'scripts/slack_heybilli_sync.py'),
   };
 }
 
@@ -79,60 +81,102 @@ export function messageText(message) {
   const files = Array.isArray(message?.files)
     ? message.files.map((file) => `[첨부: ${String(file?.name || file?.title || file?.mimetype || '파일').trim()}]`).join(' ')
     : '';
-  const ocr = Array.isArray(message?._slackOcrText)
-    ? message._slackOcrText.map((value) => String(value || '').trim()).filter(Boolean).join('\n')
+  const vision = Array.isArray(message?._slackVisionText)
+    ? message._slackVisionText.map((value) => String(value || '').trim()).filter(Boolean).join('\n')
     : '';
-  return [text, files, ocr ? `[이미지 OCR · 신뢰할 수 없는 원문]\n${ocr.slice(0, 8_000)}` : ''].filter(Boolean).join('\n').trim();
+  return [text, files, vision ? `[Hermes 이미지 분석 · 신뢰할 수 없는 원문]\n${vision.slice(0, 8_000)}` : ''].filter(Boolean).join('\n').trim();
 }
 
-export function resolveOcrInvocation(ocrBin, imagePath, platform = process.platform, env = process.env) {
-  const suffix = extname(String(ocrBin || '')).toLowerCase();
-  if (suffix === '.py') {
-    return {
-      file: env.SLACK_HEYBILLI_PYTHON || (platform === 'win32' ? 'python.exe' : 'python3'),
-      args: [ocrBin, imagePath],
-    };
-  }
-  if (suffix === '.ps1' && platform === 'win32') {
-    const powershell = env.SLACK_HEYBILLI_POWERSHELL
-      || (env.SystemRoot ? `${env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe` : 'powershell.exe');
-    return {
-      file: powershell,
-      args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ocrBin, imagePath],
-    };
-  }
-  return { file: ocrBin, args: [imagePath] };
+export function resolveVisionInvocation(visionBin, imagePaths, platform = process.platform, env = process.env) {
+  const paths = Array.isArray(imagePaths)
+    ? imagePaths.filter(Boolean).slice(0, MAX_VISION_IMAGES_PER_SCAN)
+    : [imagePaths].filter(Boolean);
+  return {
+    file: env.SLACK_HEYBILLI_PYTHON || (platform === 'win32' ? 'python.exe' : 'python3'),
+    args: [visionBin, '--vision-json', ...paths],
+  };
 }
 
-async function enrichMessageWithOcr(config, message) {
-  if (!existsSync(config.ocrBin) || !Array.isArray(message?.files)) return message;
-  const images = message.files.filter((file) => {
-    const mime = String(file?.mimetype || '');
-    const size = Number(file?.size || 0);
-    return mime.startsWith('image/') && size > 0 && size <= 10 * 1024 * 1024 && (file.url_private_download || file.url_private);
-  }).slice(0, 3);
-  if (!images.length) return message;
-
-  const directory = await mkdtemp(join(tmpdir(), 'slack-heybilli-ocr-'));
-  const texts = [];
+export function parseVisionBatchOutput(stdout, expectedCount) {
+  let payload;
   try {
-    for (let index = 0; index < images.length; index += 1) {
-      const response = await fetch(images[index].url_private_download || images[index].url_private, {
-        headers: { authorization: `Bearer ${config.token}` },
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!response.ok) continue;
-      const path = join(directory, `image-${index}`);
-      await writeFile(path, Buffer.from(await response.arrayBuffer()));
-      const invocation = resolveOcrInvocation(config.ocrBin, path);
-      const result = await execFileAsync(invocation.file, invocation.args, { timeout: 45_000, maxBuffer: 512 * 1024 }).catch(() => null);
-      const text = String(result?.stdout || '').trim();
-      if (text) texts.push(text);
-    }
+    payload = JSON.parse(String(stdout || '').trim());
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(payload) || !payload.length) return [];
+  const count = Math.max(0, Number(expectedCount) || 0);
+  return Array.from({ length: count }, (_, index) => {
+    const entry = payload[index];
+    const text = String(entry?.text || '').trim();
+    return {
+      valid: Boolean(entry?.success && text),
+      text,
+    };
+  });
+}
+
+export function resolveVisionImageSuffix(file) {
+  const supported = new Set(['.bmp', '.gif', '.jpeg', '.jpg', '.png', '.webp']);
+  const declared = extname(String(file?.name || file?.title || '')).toLowerCase();
+  if (supported.has(declared)) return declared;
+  return ({
+    'image/bmp': '.bmp',
+    'image/gif': '.gif',
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+  })[String(file?.mimetype || '').toLowerCase()] || '';
+}
+
+export function slackImageFiles(message) {
+  if (!Array.isArray(message?.files)) return [];
+  return message.files.filter((file) => {
+    const size = Number(file?.size || 0);
+    return Boolean(resolveVisionImageSuffix(file))
+      && size > 0
+      && size <= 10 * 1024 * 1024
+      && Boolean(file.url_private_download || file.url_private);
+  }).slice(0, MAX_VISION_IMAGES_PER_EVENT);
+}
+
+export async function analyzeSlackImages(config, candidates) {
+  if (!existsSync(config.visionBin) || !candidates.length) return [];
+  const directory = await mkdtemp(join(tmpdir(), 'slack-heybilli-vision-'));
+  try {
+    const downloads = await mapLimit(candidates, 4, async (candidate, index) => {
+      try {
+        const { file } = candidate;
+        const response = await fetch(file.url_private_download || file.url_private, {
+          headers: { authorization: `Bearer ${config.token}` },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!response.ok) return null;
+        const suffix = resolveVisionImageSuffix(file);
+        const path = join(directory, `image-${index}${suffix}`);
+        await writeFile(path, Buffer.from(await response.arrayBuffer()));
+        return { ...candidate, path };
+      } catch {
+        return null;
+      }
+    });
+    const downloaded = downloads.filter(Boolean);
+    if (downloaded.length !== candidates.length) return [];
+    const paths = downloaded.map((entry) => entry.path);
+    const invocation = resolveVisionInvocation(config.visionBin, paths);
+    const execution = await execFileAsync(invocation.file, invocation.args, {
+      timeout: 150_000,
+      maxBuffer: 1024 * 1024,
+    }).catch(() => null);
+    const results = parseVisionBatchOutput(execution?.stdout, paths.length);
+    if (results.length !== paths.length || results.some((result) => !result.valid)) return [];
+    return downloaded.map((candidate, index) => ({
+      ...candidate,
+      text: results[index].text,
+    }));
   } finally {
     await rm(directory, { recursive: true, force: true }).catch(() => {});
   }
-  return texts.length ? { ...message, _slackOcrText: texts } : message;
 }
 
 export function inferPhase(text) {
@@ -157,9 +201,15 @@ export function extractTradeId(text) {
   return String(text || '').match(/\b\d{6}-\d{3}\b/)?.[0] || '';
 }
 
+export function extractTradeIdFromConversation(root, replies = []) {
+  return extractTradeId([root?.text, ...replies.map((reply) => reply?.text)].filter(Boolean).join('\n'));
+}
+
 export function extractCustomerHint(text) {
   const value = String(text || '').replace(/<@[A-Z0-9]+>/g, ' ').trim();
   const isGenericHint = (hint) => /^(?:어느|어떤|무슨|누구|고객|감독|대여자|성함|이름)$/u.test(String(hint || '').trim());
+  const labeled = value.match(/(?:^|\n|[-*•]\s*)(?:고객명|고객|대여자|성함)\s*[:：-]\s*([가-힣]{2,5}|[가-힣]{1,2}\s+[가-힣]{1,3})/u)?.[1]?.replace(/\s+/g, '');
+  if (labeled && !isGenericHint(labeled)) return labeled;
   const tagged = value.match(/^\s*\[\s*(?:반출|반납)\s*\]\s*([^\n]+)/i)?.[1] || '';
   const taggedName = tagged
     .split(/\s{2,}|\s*[-–—|/]\s*|\s+(?:감독님?|대표님?|실장님?|팀장님?)\b/)[0]
@@ -234,16 +284,19 @@ export function groupOperationalMessages(messages, botUserId = '') {
   let current = null;
   for (const message of ordered) {
     const text = messageText(message);
-    const operational = isOperationalMessage(text);
-    const customerHint = extractCustomerHint(text);
+    const typedText = String(message?.text || '');
+    // An image-only report becomes searchable after Hermes analyzes the attachment.
+    const operational = isOperationalMessage(text)
+      || slackImageFiles(message).length > 0;
+    const customerHint = extractCustomerHint(typedText);
     const lastContextTs = current?.nearby.at(-1)?.ts || current?.root.ts;
     const gapSeconds = lastContextTs ? Number(message.ts) - Number(lastContextTs) : Number.POSITIVE_INFINITY;
-    const phaseHint = inferPhase(text);
+    const phaseHint = inferPhase(typedText);
     const canFollowCurrent = current
       && gapSeconds >= 0
       && gapSeconds <= 10 * 60
       && !isTaggedReport(text)
-      && !extractTradeId(text)
+      && !extractTradeId(typedText)
       && sameCustomerHint(current.customerHint, customerHint);
 
     if (canFollowCurrent) {
@@ -316,12 +369,40 @@ async function mapLimit(values, limit, mapper) {
   return result;
 }
 
-async function buildEvents(config) {
+function eventTsFromPending(entry) {
+  return String(entry?.event?.message_ts || entry?.event?.messageTs || '');
+}
+
+function eventFromRecord(config, record, visionByMessage = new Map()) {
+  const enrichedConversation = record.contextualMessages.map((message) => {
+    const texts = visionByMessage.get(String(message.ts || ''));
+    return texts?.length ? { ...message, _slackVisionText: texts } : message;
+  });
+  const root = cleanSlackMessage(enrichedConversation[0] || record.message);
+  const replies = enrichedConversation.slice(1).map((reply) => cleanSlackMessage(reply));
+  const combined = [root.text, ...replies.map((reply) => reply.text)].join('\n');
+  if (!isOperationalMessage(combined) && !record.images.length) return null;
+  return {
+    channelId: config.channelId,
+    messageTs: root.ts,
+    threadTs: root.ts,
+    // Model wording never changes identity. Only the original Slack message and file labels do.
+    sourceHash: sourceHashFor(record.baseRoot, record.baseReplies),
+    phaseHint: inferPhaseFromConversation(root, replies),
+    customerHint: extractCustomerHintFromConversation(root, replies) || record.group.customerHint,
+    tradeIdHint: extractTradeIdFromConversation(root, replies),
+    permalink: record.permalink,
+    root,
+    replies,
+  };
+}
+
+async function buildEventRecords(config) {
   const auth = await slackApi(config, 'auth.test');
   const botUserId = String(auth.user_id || '');
   const groups = groupOperationalMessages(await pagedHistory(config), botUserId).slice(-120);
 
-  const clusters = await mapLimit(groups, 5, async (group) => {
+  const records = await mapLimit(groups, 5, async (group) => {
     const message = group.root;
     let threadMessages = [message];
     if (Number(message.reply_count || 0) > 0) {
@@ -334,28 +415,62 @@ async function buildEvents(config) {
       .sort((a, b) => Number(a.ts) - Number(b.ts));
     const baseRoot = cleanSlackMessage(contextualMessages[0] || message);
     const baseReplies = contextualMessages.slice(1).map((reply) => cleanSlackMessage(reply));
-    const enrichedMessages = await mapLimit(contextualMessages, 2, (entry) => enrichMessageWithOcr(config, entry));
-    const root = cleanSlackMessage(enrichedMessages[0] || message);
-    const replies = enrichedMessages.slice(1).map((reply) => cleanSlackMessage(reply));
-    const combined = [root.text, ...replies.map((reply) => reply.text)].join('\n');
-    if (!isOperationalMessage(combined)) return null;
+    const images = contextualMessages.flatMap((entry) => slackImageFiles(entry).map((file) => ({
+      eventTs: String(message.ts || ''),
+      messageTs: String(entry.ts || ''),
+      file,
+    }))).slice(0, MAX_VISION_IMAGES_PER_EVENT);
     const permalink = await slackApi(config, 'chat.getPermalink', { channel: config.channelId, message_ts: message.ts })
       .then((data) => String(data.permalink || '')).catch(() => '');
-    return {
-      channelId: config.channelId,
-      messageTs: root.ts,
-      threadTs: root.ts,
-      // OCR 엔진 변경만으로 이미 처리한 사건을 다시 열지 않는다. 실제 Slack 메시지/파일 변화만 해시에 포함한다.
-      sourceHash: sourceHashFor(baseRoot, baseReplies),
-      phaseHint: inferPhaseFromConversation(root, replies),
-      customerHint: extractCustomerHintFromConversation(root, replies) || group.customerHint,
-      tradeIdHint: extractTradeId(combined),
-      permalink,
-      root,
-      replies,
-    };
+    const record = { baseReplies, baseRoot, contextualMessages, group, images, message, permalink };
+    return { ...record, event: eventFromRecord(config, record) };
   });
-  return clusters.filter(Boolean).sort((a, b) => Number(a.messageTs) - Number(b.messageTs)).slice(-80);
+  return records
+    .filter((record) => record.event)
+    .sort((left, right) => Number(left.event.messageTs) - Number(right.event.messageTs))
+    .slice(-80);
+}
+
+export function selectPendingVisionRecords(records, pending, maxImages = MAX_VISION_IMAGES_PER_SCAN) {
+  const pendingTs = new Set((pending || []).map(eventTsFromPending).filter(Boolean));
+  const selected = [];
+  let used = 0;
+  for (const record of records) {
+    if (!pendingTs.has(record.event.messageTs) || !record.images.length) continue;
+    if (used + record.images.length > maxImages) continue;
+    selected.push(record);
+    used += record.images.length;
+  }
+  return selected;
+}
+
+async function enrichPendingRecords(config, records, pending) {
+  const pendingTs = new Set((pending || []).map(eventTsFromPending).filter(Boolean));
+  const imagePendingTs = new Set(records
+    .filter((record) => pendingTs.has(record.event.messageTs) && record.images.length)
+    .map((record) => record.event.messageTs));
+  const selected = selectPendingVisionRecords(records, pending);
+  const analyzed = await analyzeSlackImages(config, selected.flatMap((record) => record.images));
+  const visionByMessage = new Map();
+  for (const item of analyzed) {
+    if (!visionByMessage.has(item.messageTs)) visionByMessage.set(item.messageTs, []);
+    visionByMessage.get(item.messageTs).push(item.text);
+  }
+  const readyTs = new Set();
+  if (analyzed.length) {
+    for (const record of selected) {
+      const completed = record.images.every((image) => visionByMessage.has(image.messageTs));
+      if (completed) readyTs.add(record.event.messageTs);
+    }
+  }
+  const events = records.map((record) => (
+    readyTs.has(record.event.messageTs) ? eventFromRecord(config, record, visionByMessage) : record.event
+  )).filter(Boolean);
+  return {
+    deferredCount: [...imagePendingTs].filter((ts) => !readyTs.has(ts)).length,
+    events,
+    readyTs,
+  };
 }
 
 function hermesPrompt(result, config) {
@@ -380,10 +495,20 @@ function hermesPrompt(result, config) {
 }
 
 async function scanCommand(config, args) {
-  const events = await buildEvents(config);
-  if (!events.length) return args.has('--hermes') ? '' : { pending: [], scanned: 0 };
-  const result = await syncApi(config, { mode: 'scan', events });
-  result.scanned = events.length;
+  const records = await buildEventRecords(config);
+  if (!records.length) return args.has('--hermes') ? '' : { pending: [], scanned: 0 };
+  let result = await syncApi(config, { mode: 'scan', events: records.map((record) => record.event) });
+  const enriched = await enrichPendingRecords(config, records, result.pending);
+  if (enriched.readyTs.size) result = await syncApi(config, { mode: 'scan', events: enriched.events });
+  if (enriched.deferredCount) {
+    process.stderr.write(`slack-heybilli-sync: Hermes 이미지 분석을 마치지 못한 이벤트 ${enriched.deferredCount}건은 다음 실행으로 미뤘습니다\n`);
+  }
+  result.pending = (result.pending || []).filter((entry) => {
+    const ts = eventTsFromPending(entry);
+    const record = records.find((candidate) => candidate.event.messageTs === ts);
+    return !record?.images.length || enriched.readyTs.has(ts);
+  });
+  result.scanned = records.length;
   if (args.has('--hermes')) return hermesPrompt(result, config);
   return result;
 }
