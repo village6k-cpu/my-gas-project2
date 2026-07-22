@@ -23,6 +23,14 @@ assert(windowsWorker.includes('Bearer ${config.apiToken}'), 'the internal API ca
 assert(windowsWorker.includes("command === 'health'") && windowsWorker.includes('Bearer ${config.apiToken}'), 'the AX2 health check must use the dedicated API credential too');
 assert(server.includes('dryRun: true') && server.includes('if (!execute) return'), 'live mutations must be preceded by a dry-run path');
 assert(server.includes('assertUniqueTopCandidate') && server.includes('topCount !== 1'), 'live plans must target the unique top transaction candidate');
+assert(server.includes('exactCustomer') && server.includes('days <= 1'), 'name matching must be exact and agree with the event phase date');
+assert(!server.includes('findGasCandidates') && !server.includes('importGasTrade'), 'Slack sync must never create or restore a missing Heybilli card from GAS');
+assert(server.includes('헤이빌리에 존재하는 거래 카드가 아닙니다'), 'live apply must fail closed when the target card does not already exist');
+assert(server.includes('slack_ops_events/actual_source'), 'Slack audit identity must stay outside the employee report');
+assert(!server.includes('원문: ${event.permalink}') && !server.includes('${event.message_ts}]\\n${cleanText(text'), 'employee reports must not expose Slack URLs or message timestamps');
+assert(server.includes('summary.length > 500'), 'employee summaries must have a hard concise-report limit');
+assert(windowsWorker.includes('누가·무엇이·어떻게 달라졌는지만 한두 문장, 500자 이내'), 'the AX2 prompt must require concise operational reporting');
+assert(!windowsWorker.includes('Slack 원문 링크와 정정 출처는 같은 거래 카드에 보존했습니다'), 'Slack replies must not claim audit links are copied into employee cards');
 assert(server.includes('명시적인 추가 반출이 없어 onsite_add를 차단했습니다') && server.includes('현장\\s*추가'), 'onsite additions must require explicit Slack evidence instead of duplicating an existing schedule from a screenshot');
 assert(server.includes('previous?.applied_at ?? null') && server.includes('previous?.last_error ?? null'), 'routine scans must preserve reconciliation audit timestamps and reasons');
 assert(server.includes('actual_name') && server.includes('actual_taken_qty') && server.includes('actual_source'), 'confirmed Slack corrections must use an audited overlay instead of rewriting baseline identity');
@@ -37,6 +45,8 @@ assert(windowsRunner.includes('encoding="utf-8"'), 'Windows cron must decode the
 assert(windowsRunner.includes('from tools.vision_tools import vision_analyze_tool') && windowsRunner.includes('sys.argv[1:2] == ["--vision-json"]'), 'AX2 cron must reuse the installed Hermes image analyzer');
 assert(windowsRunner.includes('SLACK_HEYBILLI_VISION_BIN') && windowsRunner.includes('SLACK_HEYBILLI_PYTHON'), 'the Node worker must call back into the exact installed Hermes runtime');
 assert(windowsWorker.includes('resolveVisionInvocation') && windowsWorker.includes('analyzeSlackImages'), 'the AX2 worker must route pending attachments through Hermes');
+assert(windowsWorker.includes('const identityRoot = record.baseRoot') && windowsWorker.includes('extractTradeIdFromConversation(identityRoot'), 'Hermes vision text must not establish transaction identity');
+assert(windowsWorker.includes("replyPhase !== rootPhase") && !windowsWorker.includes('customerHint || inheritedCustomerHint'), 'another phase and a prior post must not leak a customer into an unknown event');
 assert(windowsWorker.includes("await rm(directory, { recursive: true, force: true })"), 'temporary Slack images must be removed after every analysis attempt');
 assert(windowsRunner.includes('os.environ["LOCALAPPDATA"]') && windowsInstaller.includes("Join-Path $env:LOCALAPPDATA 'hermes'"), 'AX2 runtime must use the Windows native Hermes home');
 assert(windowsInstaller.includes("$env:COMPUTERNAME -ne 'AX2'"), 'the Windows installer must fail closed off AX2');

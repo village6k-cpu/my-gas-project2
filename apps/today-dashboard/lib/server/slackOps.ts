@@ -1,6 +1,6 @@
 import "server-only";
 
-import { gasGet, gasPost } from "./gasPublic";
+import { gasPost } from "./gasPublic";
 import { getInventoryAuditServiceClient } from "./inventoryAuditDb";
 
 export const SLACK_OPS_CHANNEL_ID = process.env.SLACK_OPS_CHANNEL_ID?.trim() || "C0B6ZJZ2XU3";
@@ -113,7 +113,7 @@ type ItemRow = {
 };
 
 type Candidate = {
-  source: "heybilli" | "gas";
+  source: "heybilli";
   score: number;
   tradeId: string;
   customerName: string;
@@ -345,74 +345,6 @@ function candidateFromTrade(trade: TradeRow, items: ItemRow[], score: number): C
   };
 }
 
-function kstDateTimeToIso(dateValue: unknown, timeValue: unknown): string {
-  const date = cleanText(dateValue, 20);
-  const time = cleanText(timeValue, 20) || "00:00";
-  const parsed = new Date(`${date}T${/^\d{1,2}:\d{2}$/.test(time) ? time.padStart(5, "0") : "00:00"}:00+09:00`);
-  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : "";
-}
-
-function gasCandidateRows(payload: unknown): Array<Record<string, unknown>> {
-  const data = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
-  return [...(Array.isArray(data.checkout) ? data.checkout : []), ...(Array.isArray(data.checkin) ? data.checkin : [])]
-    .filter((row): row is Record<string, unknown> => !!row && typeof row === "object");
-}
-
-async function findGasCandidates(event: SlackOpsIncomingEvent): Promise<Candidate[]> {
-  const query = event.tradeIdHint || event.customerHint;
-  if (!query || cleanText(query).length < 2) return [];
-  const payload = await gasGet({ action: "dashboardSearch", q: cleanText(query, 120), limit: "20" });
-  const rows = gasCandidateRows(payload);
-  const byTrade = new Map<string, Record<string, unknown>[] >();
-  for (const row of rows) {
-    const id = cleanText(row.tradeId, 20);
-    if (!TRADE_ID_RE.test(id)) continue;
-    (byTrade.get(id) ?? byTrade.set(id, []).get(id)!).push(row);
-  }
-
-  const out: Candidate[] = [];
-  for (const [tradeId, grouped] of byTrade) {
-    const checkout = grouped.find((row) => row._type === "checkout") ?? grouped[0];
-    const checkin = grouped.find((row) => row._type === "checkin") ?? grouped[grouped.length - 1];
-    const tradeLike: TradeRow = {
-      trade_id: tradeId,
-      customer_name: cleanText(checkout.name || checkin.name, 120),
-      customer_phone: null,
-      company: null,
-      checkout_at: kstDateTimeToIso(checkout.searchDate || checkout.sortDate, checkout.time || checkout.sortTime),
-      return_at: kstDateTimeToIso(checkin.searchDate || checkin.sortDate || checkout.returnDate, checkin.time || checkin.sortTime),
-      contract_status: cleanText(checkout.contractStatus || checkin.contractStatus, 30) || "예약",
-      setup_done: checkout.setupDone === true,
-      return_done: checkin.returnDone === true,
-      note_checkout: null,
-      note_checkin: cleanText(checkin.returnMemo, 2_000) || null,
-      return_counts: {},
-    };
-    if (!tradeLike.checkout_at || !tradeLike.return_at) continue;
-    const score = candidateScore(event, tradeLike);
-    if (score < 40) continue;
-    const rawItems = Array.isArray(checkout.equipments) ? checkout.equipments : Array.isArray(checkin.equipments) ? checkin.equipments : [];
-    out.push({
-      source: "gas",
-      score,
-      tradeId,
-      customerName: tradeLike.customer_name,
-      checkoutAt: tradeLike.checkout_at,
-      returnAt: tradeLike.return_at,
-      contractStatus: tradeLike.contract_status,
-      setupDone: tradeLike.setup_done,
-      returnDone: tradeLike.return_done,
-      noteCheckin: tradeLike.note_checkin,
-      items: rawItems.filter((item): item is Record<string, unknown> => !!item && typeof item === "object").map((item) => ({
-        scheduleId: cleanText(item.scheduleId, 80),
-        name: cleanText(item.name, 300),
-        qty: Math.max(1, Number.parseInt(cleanText(item.qty, 20), 10) || 1),
-      })),
-    });
-  }
-  return out.sort((a, b) => b.score - a.score).slice(0, 5);
-}
-
 export async function scanSlackOpsEvents(values: unknown[]): Promise<{ pending: Array<{ event: StoredEvent; candidates: Candidate[] }> }> {
   if (!Array.isArray(values) || values.length === 0 || values.length > MAX_EVENTS) {
     throw new Error(`events는 1~${MAX_EVENTS}건이어야 합니다`);
@@ -434,8 +366,7 @@ export async function scanSlackOpsEvents(values: unknown[]): Promise<{ pending: 
       .sort((a, b) => b.score - a.score)
       .slice(0, 5)
       .map(({ trade, score }) => candidateFromTrade(trade, items, score));
-    const gas = direct.length ? [] : await findGasCandidates(event).catch(() => []);
-    return { event: storedByTs.get(event.messageTs)!, candidates: direct.length ? direct : gas };
+    return { event: storedByTs.get(event.messageTs)!, candidates: direct };
   }));
   return { pending };
 }
@@ -464,13 +395,26 @@ async function assertUniqueTopCandidate(event: StoredEvent, tradeId: string): Pr
     .sort((a, b) => b.score - a.score)
     .slice(0, 5)
     .map(({ trade, score }) => candidateFromTrade(trade, items, score));
-  if (!candidates.length) candidates = await findGasCandidates(incoming).catch(() => []);
 
   const selected = candidates.find((candidate) => candidate.tradeId === tradeId);
   const topScore = candidates[0]?.score ?? 0;
   const topCount = candidates.filter((candidate) => candidate.score === topScore).length;
   if (!selected || selected.score < 100 || selected.score !== topScore || topCount !== 1) {
     throw new Error("거래가 이 Slack 사건의 유일한 최상위 후보가 아닙니다. 거래ID/대여자 확인이 필요합니다");
+  }
+
+  const explicitTradeId = incoming.tradeIdHint === selected.tradeId;
+  const exactCustomer = Boolean(incoming.customerHint)
+    && normalizeName(incoming.customerHint) === normalizeName(selected.customerName);
+  const phase = incoming.phaseHint || "unknown";
+  const eventMs = eventEpochMs(incoming.messageTs);
+  const tradeMs = phase === "unknown" ? 0 : relevantTradeMs({
+    checkout_at: selected.checkoutAt,
+    return_at: selected.returnAt,
+  }, phase);
+  const days = eventMs && tradeMs ? Math.abs(eventMs - tradeMs) / 86_400_000 : Number.POSITIVE_INFINITY;
+  if (!explicitTradeId && !(exactCustomer && phase !== "unknown" && days <= 1)) {
+    throw new Error("거래ID 또는 고객명·단계·예정일이 Slack 원문에서 정확히 확인되지 않았습니다");
   }
 }
 
@@ -479,13 +423,14 @@ function sanitizePlan(value: unknown): SlackOpsApplyPlan {
   const phase = cleanText(raw.phase, 20);
   const tradeId = cleanText(raw.tradeId, 20);
   const sourceHash = cleanText(raw.sourceHash, 128);
-  const summary = cleanText(raw.summary, 2_000);
+  const summary = conciseOperationalNote(raw.summary);
   if (cleanText(raw.channelId, 80) !== SLACK_OPS_CHANNEL_ID) throw new Error("허용되지 않은 Slack 채널");
   if (!/^\d{9,12}\.\d{4,8}$/.test(cleanText(raw.messageTs, 32))) throw new Error("잘못된 messageTs");
   if (!/^[a-f0-9]{64}$/.test(sourceHash)) throw new Error("잘못된 sourceHash");
   if (!TRADE_ID_RE.test(tradeId)) throw new Error("잘못된 거래ID");
   if (phase !== "checkout" && phase !== "checkin") throw new Error("phase는 checkout/checkin이어야 합니다");
   if (!summary) throw new Error("summary가 비어 있습니다");
+  if (summary.length > 500) throw new Error("summary는 필요한 업무 사실만 500자 이내로 작성해야 합니다");
   const actions = Array.isArray(raw.actions) ? raw.actions.slice(0, 30) : [];
   return {
     channelId: SLACK_OPS_CHANNEL_ID,
@@ -546,13 +491,19 @@ function actualQty(item: ItemRow): number {
   return item.actual_taken_qty ?? item.taken_qty ?? item.qty;
 }
 
-function noteBlock(event: StoredEvent, text: string): string {
-  const date = new Date(eventEpochMs(event.message_ts));
-  const label = new Intl.DateTimeFormat("ko-KR", {
-    timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
-  }).format(date);
-  const link = event.permalink ? `\n원문: ${event.permalink}` : "";
-  return `[Slack #단톡방 · ${label} · ${event.message_ts}]\n${cleanText(text, 2_000)}${link}`;
+function conciseOperationalNote(value: unknown): string {
+  return cleanText(value, 2_000)
+    .replace(/^\[Slack #단톡방 ·[^\]]+\]\s*/gmu, "")
+    .replace(/^원문:\s*https?:\/\/\S+\s*$/gmu, "")
+    .replace(/https?:\/\/[^\s]*slack\.com\/archives\/\S+/giu, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function noteBlock(_event: StoredEvent, text: string): string {
+  // Slack event ids and permalinks stay in slack_ops_events/actual_source for
+  // audit.  The employee-facing card receives only the operational fact.
+  return conciseOperationalNote(text);
 }
 
 function upsertNoteBlock(existing: unknown, event: StoredEvent, text: string): string {
@@ -562,120 +513,22 @@ function upsertNoteBlock(existing: unknown, event: StoredEvent, text: string): s
   const tsMarker = `· ${event.message_ts}]`;
   const chunks = current ? current.split(/\n{2,}/) : [];
   const kept = chunks.filter((chunk) => !(chunk.startsWith(marker) && chunk.includes(tsMarker)));
+  if (kept.some((chunk) => conciseOperationalNote(chunk) === block)) return kept.join("\n\n").slice(-20_000);
   return [...kept, block].filter(Boolean).join("\n\n").slice(-20_000);
 }
 
-async function gasTradeSnapshot(tradeId: string): Promise<{ trade: TradeRow; items: ItemRow[]; persistRows: { trade: Record<string, unknown>; items: Array<Record<string, unknown>> } }> {
-  const payload = await gasGet({ action: "dashboardSearch", q: tradeId, limit: "20" });
-  const grouped = gasCandidateRows(payload).filter((row) => cleanText(row.tradeId, 20) === tradeId);
-  if (!grouped.length) throw new Error(`GAS 원장에서도 거래를 찾지 못했습니다: ${tradeId}`);
-  const checkout = grouped.find((row) => row._type === "checkout") ?? grouped[0];
-  const checkin = grouped.find((row) => row._type === "checkin") ?? grouped[grouped.length - 1];
-  const checkoutAt = kstDateTimeToIso(checkout.searchDate || checkout.sortDate, checkout.time || checkout.sortTime);
-  const returnAt = kstDateTimeToIso(checkin.searchDate || checkin.sortDate || checkout.returnDate, checkin.time || checkin.sortTime);
-  if (!checkoutAt || !returnAt) throw new Error(`GAS 거래 날짜를 읽지 못했습니다: ${tradeId}`);
-  const status = cleanText(checkout.contractStatus || checkin.contractStatus, 30) || "예약";
-  const started = checkout.setupDone === true || checkin.returnDone === true || status === "반출" || status === "반납완료";
-  const row: Record<string, unknown> = {
-    trade_id: tradeId,
-    customer_name: cleanText(checkout.name || checkin.name, 120) || "이름 미확인",
-    customer_phone: cleanText(checkout.tel || checkin.tel, 80) || null,
-    company: cleanText(checkout.company || checkin.company, 200) || null,
-    checkout_at: checkoutAt,
-    return_at: returnAt,
-    contract_status: status,
-    setup_done: checkout.setupDone === true || status === "반출" || status === "반납완료",
-    setup_done_at: checkout.setupDoneAt || null,
-    return_done: checkin.returnDone === true || status === "반납완료",
-    return_done_at: checkin.returnDoneAt || null,
-    payment_method: checkout.paymentMethod || null,
-    deposit_status: checkout.depositStatus || null,
-    proof_type: checkout.proofType || null,
-    issue_status: checkout.issueStatus || null,
-    billing_company: checkout.billingCompany || null,
-    amount: typeof checkout.actualAmount === "number" ? checkout.actualAmount : null,
-    contract_url: checkout.contractUrl || null,
-    contract_regen_pending: checkout.contractRegenPending === true,
-    note_checkin: cleanText(checkin.returnMemo, 2_000) || null,
-    photos: [],
-    risk_warnings: [],
-    return_counts: {},
-  };
-  const rawItems = Array.isArray(checkout.equipments) ? checkout.equipments : Array.isArray(checkin.equipments) ? checkin.equipments : [];
-  const itemRows = rawItems.filter((item): item is Record<string, unknown> => !!item && typeof item === "object").map((item, index) => {
-    const qty = Math.max(1, Number.parseInt(cleanText(item.qty, 20), 10) || 1);
-    return {
-      schedule_id: cleanText(item.scheduleId, 100), trade_id: tradeId, sort: index,
-      name: cleanText(item.name, 300) || "장비", qty,
-      taken_qty: started ? qty : null,
-      set_name: cleanText(item.setName, 300) || null,
-      is_set_header: item.isHeader === true,
-      is_component: item.isComponent === true,
-      onsite: false,
-      checkout_state: started ? "taken" : "pending",
-    };
-  }).filter((item) => item.schedule_id);
-  const trade: TradeRow = {
-    trade_id: tradeId,
-    customer_name: String(row.customer_name),
-    customer_phone: row.customer_phone as string | null,
-    company: row.company as string | null,
-    checkout_at: checkoutAt,
-    return_at: returnAt,
-    contract_status: status,
-    setup_done: row.setup_done === true,
-    return_done: row.return_done === true,
-    note_checkout: null,
-    note_checkin: row.note_checkin as string | null,
-    return_counts: {},
-  };
-  const items: ItemRow[] = itemRows.map((item) => ({
-    schedule_id: String(item.schedule_id), trade_id: tradeId, name: String(item.name), qty: Number(item.qty),
-    taken_qty: item.taken_qty as number | null, actual_name: null, actual_taken_qty: null, actual_source: null,
-    set_name: item.set_name as string | null, is_set_header: item.is_set_header === true,
-    is_component: item.is_component === true, onsite: false, settlement: null,
-    checkout_state: String(item.checkout_state), memo_checkout: null, memo_checkin: null,
-  }));
-  return { trade, items, persistRows: { trade: row, items: itemRows } };
-}
-
-async function importGasTrade(tradeId: string): Promise<{ trade: TradeRow; items: ItemRow[] }> {
-  const snapshot = await gasTradeSnapshot(tradeId);
+async function loadTradeAndItems(tradeId: string): Promise<{ trade: TradeRow; items: ItemRow[] }> {
   const db = getInventoryAuditServiceClient();
-  const { error: tradeError } = await db.from("trades").upsert(snapshot.persistRows.trade, { onConflict: "trade_id" });
-  if (tradeError) throw tradeError;
-  if (snapshot.persistRows.items.length) {
-    const { error: itemError } = await db.from("schedule_items").upsert(snapshot.persistRows.items, { onConflict: "schedule_id" });
-    if (itemError) throw itemError;
-  }
-  const { data, error } = await db.from("trades")
-    .select("trade_id,customer_name,customer_phone,company,checkout_at,return_at,contract_status,setup_done,return_done,note_checkout,note_checkin,return_counts")
-    .eq("trade_id", tradeId).single();
-  if (error) throw error;
-  return { trade: data as TradeRow, items: snapshot.items };
-}
-
-async function loadTradeAndItems(tradeId: string, execute: boolean): Promise<{ trade: TradeRow; items: ItemRow[]; imported: boolean }> {
-  const db = getInventoryAuditServiceClient();
-  let { data: trade, error } = await db.from("trades")
+  const { data: trade, error } = await db.from("trades")
     .select("trade_id,customer_name,customer_phone,company,checkout_at,return_at,contract_status,setup_done,return_done,note_checkout,note_checkin,return_counts")
     .eq("trade_id", tradeId).maybeSingle();
   if (error) throw error;
-  let imported = false;
-  if (!trade) {
-    if (!execute) {
-      const snapshot = await gasTradeSnapshot(tradeId);
-      return { trade: snapshot.trade, items: snapshot.items, imported: true };
-    }
-    const importedTrade = await importGasTrade(tradeId);
-    trade = importedTrade.trade;
-    imported = true;
-  }
+  if (!trade) throw new Error(`헤이빌리에 존재하는 거래 카드가 아닙니다: ${tradeId}`);
   const { data: items, error: itemError } = await db.from("schedule_items")
     .select("schedule_id,trade_id,name,qty,taken_qty,actual_name,actual_taken_qty,actual_source,set_name,is_set_header,is_component,onsite,settlement,checkout_state,memo_checkout,memo_checkin")
     .eq("trade_id", tradeId).order("sort", { ascending: true });
   if (itemError) throw itemError;
-  return { trade: trade as TradeRow, items: (items ?? []) as ItemRow[], imported };
+  return { trade: trade as TradeRow, items: (items ?? []) as ItemRow[] };
 }
 
 function validateActions(plan: SlackOpsApplyPlan, items: ItemRow[], event: StoredEvent) {
@@ -769,7 +622,7 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
 
   await assertUniqueTopCandidate(event, plan.tradeId);
 
-  const { trade, items, imported } = await loadTradeAndItems(plan.tradeId, execute);
+  const { trade, items } = await loadTradeAndItems(plan.tradeId);
   validateActions(plan, items, event);
   const onsitePreview = await previewOnsiteActions(plan);
   const preview = {
@@ -779,7 +632,6 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
     summary: plan.summary,
     actions: plan.actions ?? [],
     onsitePreview,
-    importedFromGas: imported,
   };
   if (!execute) return { ok: true, dryRun: true, preview };
 

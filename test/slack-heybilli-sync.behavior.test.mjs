@@ -33,6 +33,10 @@ test('tagged checkout/checkin messages yield phase and customer hints', () => {
     { text: '이건 어느 감독님 반납인가요?' },
     [{ text: '헤이빌리의 박 다빈 오늘 반출건 추가해놓음' }],
   ), 'checkin');
+  assert.equal(extractCustomerHintFromConversation(
+    { text: '이건 어느 감독님 반납인가요?' },
+    [{ text: '헤이빌리의 박 다빈 오늘 반출건 추가해놓음' }],
+  ), '');
 });
 
 test('untagged missing-app report is still operational', () => {
@@ -78,15 +82,15 @@ test('nearby top-level corrections are grouped without merging a new tagged repo
   assert.equal(groups[1].nearby.length, 0);
 });
 
-test('same reporter can carry a just-confirmed customer into a nameless detailed return report', () => {
+test('a separate checkout update cannot name or leak into an unknown return report', () => {
   const groups = groupOperationalMessages([
     { ts: '2000.000001', user: 'U1', text: '이건 어느 감독님 반납인가요? 헤이빌리에 등록이 안 된 것 같습니다' },
     { ts: '2100.000001', user: 'U2', text: '헤이빌리의 박 다빈 오늘 반출건 추가해놓음' },
     { ts: '2390.000001', user: 'U1', text: '[반납] 감독님\n더미 5개 (1개 고장)' },
   ]);
   assert.equal(groups.length, 2);
-  assert.equal(groups[0].customerHint, '박다빈');
-  assert.equal(groups[1].customerHint, '박다빈');
+  assert.equal(groups[0].customerHint, '');
+  assert.equal(groups[1].customerHint, '');
 });
 
 test('Slack thread roots with self thread_ts stay visible and replies can confirm a customer', () => {

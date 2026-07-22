@@ -233,7 +233,13 @@ export function extractCustomerHint(text) {
 export function extractCustomerHintFromConversation(root, replies = []) {
   const direct = extractCustomerHint(root?.text);
   if (direct) return direct;
+  const rootPhase = inferPhase(root?.text);
   for (let index = 0; index < replies.length; index += 1) {
+    const replyPhase = inferPhase(replies[index]?.text);
+    // A later message about another phase is an operational update, not an
+    // answer to the current event's customer identity.  This specifically
+    // prevents "오늘 반출건 추가" from naming an unknown return event.
+    if (rootPhase !== 'unknown' && replyPhase !== 'unknown' && replyPhase !== rootPhase) continue;
     const replyHint = extractCustomerHint(replies[index]?.text);
     if (replyHint) return replyHint;
     const questioned = String(replies[index]?.text || '').match(/(?:^|\n)\s*([가-힣]{2,5})\s*맞나(?:요)?\??/u)?.[1];
@@ -301,23 +307,17 @@ export function groupOperationalMessages(messages, botUserId = '') {
 
     if (canFollowCurrent) {
       current.nearby.push(message);
-      if (!current.customerHint && customerHint) current.customerHint = customerHint;
+      const replyPhase = inferPhase(typedText);
+      const samePhase = current.phaseHint === 'unknown'
+        || replyPhase === 'unknown'
+        || current.phaseHint === replyPhase;
+      if (!current.customerHint && customerHint && samePhase) current.customerHint = customerHint;
       continue;
     }
     if (!operational) continue;
-    // 같은 직원이 10분 안에 같은 단계의 상세 [반출]/[반납] 목록을 새 글로 올리되
-    // 이름만 "감독님"으로 비워 둔 경우, 바로 앞에서 확정된 고객만 이어받는다.
-    const inheritedCustomerHint = current
-      && !customerHint
-      && current.customerHint
-      && String(current.root.user || '') === String(message.user || '')
-      && gapSeconds >= 0
-      && gapSeconds <= 10 * 60
-      && phaseHint !== 'unknown'
-      && current.phaseHint === phaseHint
-      ? current.customerHint
-      : '';
-    current = { root: message, nearby: [], customerHint: customerHint || inheritedCustomerHint, phaseHint };
+    // A nameless top-level report is a new unresolved event.  Carrying the
+    // previous customer's identity across posts can write to the wrong card.
+    current = { root: message, nearby: [], customerHint, phaseHint };
     groups.push(current);
   }
   return groups;
@@ -380,6 +380,10 @@ function eventFromRecord(config, record, visionByMessage = new Map()) {
   });
   const root = cleanSlackMessage(enrichedConversation[0] || record.message);
   const replies = enrichedConversation.slice(1).map((reply) => cleanSlackMessage(reply));
+  // Vision output is useful evidence for equipment details, but it must never
+  // create the transaction identity used for an automatic write.
+  const identityRoot = record.baseRoot;
+  const identityReplies = record.baseReplies;
   const combined = [root.text, ...replies.map((reply) => reply.text)].join('\n');
   if (!isOperationalMessage(combined) && !record.images.length) return null;
   return {
@@ -389,8 +393,8 @@ function eventFromRecord(config, record, visionByMessage = new Map()) {
     // Model wording never changes identity. Only the original Slack message and file labels do.
     sourceHash: sourceHashFor(record.baseRoot, record.baseReplies),
     phaseHint: inferPhaseFromConversation(root, replies),
-    customerHint: extractCustomerHintFromConversation(root, replies) || record.group.customerHint,
-    tradeIdHint: extractTradeIdFromConversation(root, replies),
+    customerHint: extractCustomerHintFromConversation(identityRoot, identityReplies) || record.group.customerHint,
+    tradeIdHint: extractTradeIdFromConversation(identityRoot, identityReplies),
     permalink: record.permalink,
     root,
     replies,
@@ -489,6 +493,7 @@ function hermesPrompt(result, config) {
       : '',
     '각 이벤트의 전체 스레드에서 최신 직원 답변을 우선해 사실을 추출하고, 후보 거래·품목과 대조하세요.',
     '명시되지 않은 결제 상태나 분실을 추측하지 마세요. 미반납은 lost가 아닙니다.',
+    '카드 summary는 누가·무엇이·어떻게 달라졌는지만 한두 문장, 500자 이내로 쓰세요. Slack 링크·메시지 ID·원문 시각·처리과정 설명은 넣지 마세요.',
     '',
     JSON.stringify(result, null, 2),
   ].join('\n');
@@ -547,7 +552,7 @@ async function applyCommand(config, args) {
       `✅ 헤이빌리 자동반영 · ${plan.tradeId} · ${plan.phase === 'checkout' ? '반출' : '반납'}`,
       plan.summary,
       ...actionLines.map((line) => `• ${line}`),
-      'Slack 원문 링크와 정정 출처는 같은 거래 카드에 보존했습니다. [SLACK_HEYBILLI_SYNC]',
+      '원문과 처리 이력은 내부 동기화 기록에 보존했습니다. [SLACK_HEYBILLI_SYNC]',
     ].join('\n'));
   }
   return result;
