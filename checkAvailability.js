@@ -6491,6 +6491,131 @@ function deleteDashboardRowsDescending_(sheet, rows) {
   flush_();
 }
 
+/**
+ * 완료된 거래의 레거시 중복 행을 안전하게 정리하기 위한 검증 계획.
+ * keep/remove 두 행의 B:M 값이 모두 같고, 더 늦은 suffix/행만 remove일 때만 허용한다.
+ * 일반 품목 삭제와 달리 반출·반납 완료 증거는 다시 열지 않는다.
+ */
+function buildDashboardDuplicateRepairPlan_(tid, pairs, scheduleRows) {
+  tid = String(tid || '').trim();
+  if (!/^\d{6}-\d{3}$/.test(tid)) return { ok: false, error: '올바른 거래ID 필요' };
+  if (typeof pairs === 'string') {
+    try { pairs = JSON.parse(pairs); } catch (parseErr) { return { ok: false, error: 'pairs JSON 형식 오류' }; }
+  }
+  if (!Array.isArray(pairs) || !pairs.length || pairs.length > 30) {
+    return { ok: false, error: 'keepId/removeId 쌍 1~30개 필요' };
+  }
+
+  var rowsById = {};
+  (scheduleRows || []).forEach(function(row, index) {
+    var scheduleId = String((row && row[0]) || '').trim();
+    if (!scheduleId || String((row && row[1]) || '').trim() !== tid) return;
+    rowsById[scheduleId] = { row: row, sheetRow: index + 2 };
+  });
+
+  var used = {};
+  var planned = [];
+  for (var i = 0; i < pairs.length; i++) {
+    var keepId = String((pairs[i] && pairs[i].keepId) || '').trim();
+    var removeId = String((pairs[i] && pairs[i].removeId) || '').trim();
+    var idPattern = new RegExp('^' + tid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-(\\d+)$');
+    var keepMatch = keepId.match(idPattern);
+    var removeMatch = removeId.match(idPattern);
+    if (!keepMatch || !removeMatch || keepId === removeId) {
+      return { ok: false, error: '거래ID에 속한 서로 다른 keepId/removeId가 필요합니다' };
+    }
+    if (used[keepId] || used[removeId]) return { ok: false, error: '중복 지정된 스케줄ID가 있습니다' };
+    used[keepId] = true;
+    used[removeId] = true;
+    if (Number(removeMatch[1]) <= Number(keepMatch[1])) {
+      return { ok: false, error: 'removeId는 keepId보다 나중 suffix여야 합니다: ' + removeId };
+    }
+
+    var keep = rowsById[keepId];
+    var remove = rowsById[removeId];
+    if (!keep || !remove) return { ok: false, error: '원본 시트에서 keep/remove 행을 모두 찾지 못했습니다' };
+    if (remove.sheetRow <= keep.sheetRow) return { ok: false, error: 'remove 행은 keep 행보다 뒤에 있어야 합니다' };
+
+    var keepFingerprint = JSON.stringify((keep.row || []).slice(1, 13).map(function(v) { return String(v == null ? '' : v).trim(); }));
+    var removeFingerprint = JSON.stringify((remove.row || []).slice(1, 13).map(function(v) { return String(v == null ? '' : v).trim(); }));
+    if (keepFingerprint !== removeFingerprint) {
+      return { ok: false, error: '행 내용이 완전히 같지 않아 삭제를 차단했습니다: ' + removeId };
+    }
+    planned.push({
+      keepId: keepId,
+      removeId: removeId,
+      keepRow: keep.sheetRow,
+      removeRow: remove.sheetRow,
+      name: String(remove.row[3] || '').trim(),
+      setName: String(remove.row[2] || '').trim(),
+      qty: Number(remove.row[4]) || 1
+    });
+  }
+
+  return {
+    ok: true,
+    tradeId: tid,
+    pairs: planned,
+    removeIds: planned.map(function(row) { return row.removeId; }),
+    removeRows: planned.map(function(row) { return row.removeRow; })
+  };
+}
+
+/**
+ * 정확히 검증된 레거시 중복 행만 원본 스케줄상세에서 제거한다.
+ * 기본값은 dry-run. 반출/반납 완료와 계약 상태는 보존하고 제거 ID의 낡은 체크 속성만 지운다.
+ */
+function repairDashboardDuplicateScheduleRows(tid, pairs, options) {
+  options = options || {};
+  var execute = options.dryRun === false || options.dryRun === 0 || options.dryRun === '0' || options.dryRun === 'false';
+  var lock = null;
+  if (execute) {
+    lock = LockService.getScriptLock();
+    try { lock.waitLock(10000); } catch (lockErr) { return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.' }; }
+  }
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName('스케줄상세');
+    if (!sheet || sheet.getLastRow() < 2) return { error: '스케줄상세 비어있음' };
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 13).getDisplayValues();
+    var plan = buildDashboardDuplicateRepairPlan_(tid, pairs, rows);
+    if (!plan.ok) return { error: plan.error, dryRun: !execute };
+    if (!execute) {
+      return {
+        success: true,
+        dryRun: true,
+        tradeId: plan.tradeId,
+        removeIds: plan.removeIds,
+        pairs: plan.pairs,
+        preservedCompletion: true
+      };
+    }
+
+    deleteDashboardRowsDescending_(sheet, plan.removeRows);
+    var props = PropertiesService.getScriptProperties();
+    plan.removeIds.forEach(function(scheduleId) {
+      props.deleteProperty('itemCheck_' + scheduleId + '_checkout');
+      props.deleteProperty('itemCheck_' + scheduleId + '_checkin');
+      props.deleteProperty('itemCheckQty_' + scheduleId + '_checkin');
+      props.deleteProperty('itemCheckProof_' + scheduleId + '_checkin');
+    });
+    try { supaMarkTradeDirty_(tid); } catch (dirtyErr) {}
+    try { invalidateDashboardCacheForTrade_(tid); } catch (cacheErr) {}
+    try { invalidateTimelineCache(); } catch (timelineErr) {}
+    try { scheduleContractRegen(tid); } catch (regenErr) {}
+    return {
+      success: true,
+      dryRun: false,
+      tradeId: plan.tradeId,
+      removedRows: plan.removeRows.length,
+      removedScheduleIds: plan.removeIds,
+      preservedCompletion: true
+    };
+  } finally {
+    if (lock) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
 function markDashboardCheckoutBaselineStarted_(tid) {
   tid = String(tid || '').trim();
   if (!tid) return { error: '거래ID 없음' };
@@ -10328,6 +10453,79 @@ function _runPendingRegister() {
 /**
  * 특정 행의 요청ID를 기준으로 같은 ID의 모든 행을 일괄 등록
  */
+function planMergedScheduleRows_(allData, reqID, mergeTargetTID, existingScheduleRows) {
+  function scheduleSpecFromRequest_(row) {
+    var name = String((row && row[5]) || '').trim();
+    if (!name) return null;
+    var status = String((row && row[14]) || '').trim();
+    if (status === '거절' || status === '보류' || status === '제외') return null;
+    var result = String((row && row[8]) || '').trim();
+    var note = String((row && row[16]) || '').trim();
+    var setName = result === '세트'
+      ? name
+      : note.indexOf('[세트]') === 0
+        ? note.substring(4).trim()
+        : name;
+    return { setName: setName, name: name, qty: Number(row[6]) || 1 };
+  }
+  function signature_(setName, name, qty) {
+    return JSON.stringify([
+      String(setName || '').trim(),
+      String(name || '').trim(),
+      Number(qty) || 1
+    ]);
+  }
+
+  var existingCounts = {};
+  if (mergeTargetTID) {
+    (existingScheduleRows || []).forEach(function(row) {
+      if (String((row && row[1]) || '').trim() !== String(mergeTargetTID).trim()) return;
+      if (String((row && row[9]) || '').trim() === '취소') return;
+      var sig = signature_(row[2], row[3], row[4]);
+      existingCounts[sig] = (existingCounts[sig] || 0) + 1;
+    });
+  }
+
+  var writeSourceIndexes = [];
+  var skippedDuplicateRows = [];
+  var explicitlyAdditive = false;
+  (allData || []).forEach(function(row, index) {
+    if (String((row && row[0]) || '').trim() !== String(reqID || '').trim()) return;
+    var extraRequest = String((row && row[17]) || '').trim();
+    if (/추가|더/u.test(extraRequest) && !/추가\s*(?:없|불필요)|더\s*(?:없|필요\s*없)/u.test(extraRequest)) {
+      explicitlyAdditive = true;
+    }
+    var spec = scheduleSpecFromRequest_(row);
+    if (!spec) return;
+    var sig = signature_(spec.setName, spec.name, spec.qty);
+    if (mergeTargetTID && existingCounts[sig] > 0) {
+      existingCounts[sig]--;
+      skippedDuplicateRows.push({
+        sourceIndex: index,
+        setName: spec.setName,
+        name: spec.name,
+        qty: spec.qty
+      });
+      return;
+    }
+    writeSourceIndexes.push(index);
+  });
+
+  // A separate add-on request made entirely of an already-active item is still additive.
+  // Treating it as a successful no-op silently loses the customer's extra quantity.
+  if (mergeTargetTID && skippedDuplicateRows.length > 0 && (writeSourceIndexes.length === 0 || explicitlyAdditive)) {
+    writeSourceIndexes = writeSourceIndexes
+      .concat(skippedDuplicateRows.map(function(row) { return row.sourceIndex; }))
+      .sort(function(a, b) { return a - b; });
+    skippedDuplicateRows = [];
+  }
+
+  return {
+    writeSourceIndexes: writeSourceIndexes,
+    skippedDuplicateRows: skippedDuplicateRows
+  };
+}
+
 function registerByReqID(sheet, triggerRow) {
   var _regPerfT0 = Date.now(); // 계측: 총시간/락대기/알림톡/큐 소진 (perfLog_로 기록)
   // ── 전체 등록 프로세스 직렬화 (동시 실행 방지) ──
@@ -10579,20 +10777,45 @@ function registerByReqID(sheet, triggerRow) {
     // ── 동일 예약자명+일정 기존 거래 합치기 모드 ──
     var mergeMode = false;
     var mergeTargetTID = null;
+    var mergeTargetScheduleRows = [];
     if (예약자명 && 반출일str && 반납일str) {
+      var _mergeRequestPhoneKey = _confirmRequestPhoneKey_(연락처);
+      var _mergePhoneByTid = {};
+      var _mergeContractLastRow = contractSheet.getLastRow();
+      if (_mergeRequestPhoneKey && _mergeContractLastRow >= 2) {
+        contractSheet.getRange(2, 1, _mergeContractLastRow - 1, 3).getDisplayValues().forEach(function(row) {
+          var contractTid = String(row[0] || '').trim();
+          if (contractTid) _mergePhoneByTid[contractTid] = _confirmRequestPhoneKey_(row[2]);
+        });
+      }
       var _sLR = schedSheet.getLastRow();
       if (_sLR >= 2) {
         var _sData = schedSheet.getRange(2, 1, _sLR - 1, 13).getDisplayValues();
         for (var si = 0; si < _sData.length; si++) {
           if (_sData[si][12] && _sData[si][12].trim() === 예약자명.trim()
-              && _sData[si][5] === 반출일str && _sData[si][7] === 반납일str && _sData[si][1]) {
-            mergeTargetTID = _sData[si][1];
+              && _sData[si][5] === 반출일str && _sData[si][6] === 반출시간str
+              && _sData[si][7] === 반납일str && _sData[si][8] === 반납시간str
+              && _sData[si][1]) {
+            var _candidateTid = String(_sData[si][1]).trim();
+            var _candidatePhoneKey = _mergePhoneByTid[_candidateTid] || '';
+            if (!_mergeRequestPhoneKey || !_candidatePhoneKey || _candidatePhoneKey !== _mergeRequestPhoneKey) continue;
+            mergeTargetTID = _candidateTid;
             break;
           }
+        }
+        if (mergeTargetTID) {
+          mergeTargetScheduleRows = _sData.filter(function(row) {
+            return String(row[1] || '').trim() === String(mergeTargetTID).trim();
+          });
         }
       }
       if (mergeTargetTID) mergeMode = true;
     }
+    // 합침 요청에는 기존 품목이 섞여 다시 들어오는 경우가 있다. 새 품목만 쓰도록
+    // 현재 거래의 C/D/E(세트/장비/수량)와 정확히 같은 행을 multiset으로 한 번씩 제외한다.
+    var mergeSchedulePlan = planMergedScheduleRows_(
+      allData, reqID, mergeTargetTID, mergeTargetScheduleRows
+    );
 
   // ── 거래ID 생성: YYMMDD-NNN ──
   // 개고생2.0 거래내역과 동일한 포맷 사용
@@ -10689,18 +10912,14 @@ function registerByReqID(sheet, triggerRow) {
       var mergeSchedOffset = schedCount;
       // --- writeBaseRow: merge mode uses insert position, normal uses bottom ---
       var writeBaseRow = schedLastRow;
-      var neededRows = 0;
-      for (let ci = 0; ci < allData.length; ci++) {
-        if (allData[ci][0] === reqID && allData[ci][5] && allData[ci][14] !== "거절" &&
-            allData[ci][14] !== "보류" && allData[ci][14] !== "제외") neededRows++;
-      }
+      var neededRows = mergeSchedulePlan.writeSourceIndexes.length;
       if (mergeMode && mergeTargetTID) {
         var _mrgData = schedSheet.getRange(2, 2, schedLastRow - 1, 1).getValues();
         var mergeLastRow = 0;
         for (var mi = _mrgData.length - 1; mi >= 0; mi--) {
           if (String(_mrgData[mi][0]).trim() === mergeTargetTID) { mergeLastRow = mi + 2; break; }
         }
-        if (mergeLastRow > 0) {
+        if (mergeLastRow > 0 && neededRows > 0) {
           schedSheet.insertRowsAfter(mergeLastRow, neededRows + 2);
           writeBaseRow = mergeLastRow - mergeSchedOffset;
           schedLastRow = schedSheet.getLastRow();
@@ -10711,12 +10930,10 @@ function registerByReqID(sheet, triggerRow) {
         }
       }
 
-    for (let i = 0; i < allData.length; i++) {
-      if (allData[i][0] !== reqID) continue;
+    mergeSchedulePlan.writeSourceIndexes.forEach(function(sourceIndex) {
+      const i = sourceIndex;
       const 장비명 = allData[i][5];
       const 수량 = allData[i][6] || 1;
-      if (!장비명) continue;
-      if (allData[i][14] === "거절" || allData[i][14] === "보류" || allData[i][14] === "제외") continue;
 
       const 결과 = allData[i][8] || "";   // I열
       const 비고 = allData[i][16] || "";   // Q열
@@ -10766,7 +10983,7 @@ function registerByReqID(sheet, triggerRow) {
         schedSheet.getRange(newRow, 12).setNumberFormat("#,##0");
         schedSheet.getRange(newRow, 6, 1, 4).setNumberFormat("@");
       }
-    }
+    });
 
   // ── 스케줄상세 가독성 포맷팅 ──
   formatScheduleSheet(schedSheet);
@@ -10828,7 +11045,7 @@ function registerByReqID(sheet, triggerRow) {
   // 합침 등록(mergeMode): 기존 거래에 장비만 추가하고 위 계약서 생성 블록을 건너뛰므로,
   // 기존 계약서를 재생성해 추가 장비·금액을 반영한다(디바운스 재생성이라 안전).
   // 누락 시 고객이 받는 계약서에 추가분이 빠져 정산 불일치·분쟁이 생긴다.
-  if (mergeMode && mergeTargetTID) {
+  if (mergeMode && mergeTargetTID && mergeSchedulePlan.writeSourceIndexes.length > 0) {
     try { scheduleContractRegen(mergeTargetTID); } catch (mergeRegenErr) {}
   }
 

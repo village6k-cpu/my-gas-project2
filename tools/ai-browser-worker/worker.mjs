@@ -304,6 +304,12 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
         col: 1,
         query: '{AI_ENCODED_SEARCH_QUERY}'
       }),
+      equipment_catalog_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
+        action: 'search',
+        sheet: '목록',
+        col: 1,
+        query: '{AI_ENCODED_SEARCH_QUERY}'
+      }),
       request_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
         action: 'search',
         sheet: '확인요청',
@@ -440,17 +446,17 @@ SENDER AND TURN-TAKING POLICY:
 - For Sheets append, safety_checks.latest_customer_message_after_last_staff_reply must be true except for the staff-confirmed-unregistered case above. If sender order is unclear, set it false and should_write_to_sheet=false.
 
 EQUIPMENT AND SHEET SAFETY POLICY:
-- 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
+- 장비별로 lookup_urls.equipment_catalog_search_template에서 목록 A열을 조회하고 실제 결과 문자열만 exact_name_from_equipment_catalog에 기록한다. 자동 입력은 catalog 정확명, 검증된 exact_name_from_set_master 순서다.
 - 예약 메시지에 명시된 예약자명/연락처는 프로필명보다 우선한다.
 - RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
-- 정규화가 애매해도 확인요청 입력은 막지 않는다. 실패 시 원문을 쓰고 Q/R에는 원문/추론/가용확인 후 안내를 넣지 않는다.
-- 약어/속어는 검색 키워드 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. AI는 가능한 한 장비명을 추론/정규화해야 하며, 원문 그대로 쓰는 것은 정규화 실패 시 fallback이다.
+- 목록 정확명과 검증된 세트마스터 정확명이 없으면 normalized_guess는 자동 입력용이 아니라 사람 확인용이다: should_write_to_sheet=false. 추측명과 고객 원문은 follow-up/evidence에 "목록 정확명 확인 필요"로 보존하고 Q/R에는 원문/추론/가용확인 후 안내를 넣지 않는다.
+- 약어/속어(FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등)는 목록 검색과 사람 확인 evidence용 힌트다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
 - 할인유형은 학생 / 개인사업자/프리랜서 / 일반 중 하나만 쓴다. 단골 또는 제휴는 절대 쓰지 말고 일반으로 둔다. 단골/제휴 여부는 GAS/고객DB가 판단한다.
 - 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리; 없거나 동명이인이면 should_write_to_sheet=false, 가능하면 auto_send로 "예약 등록이 불가능해서 연락처부터" 짧게 요청한다. 연락처가 재고/가용/가격보다 우선이다.
 - 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
-- 예약형식이면 확인요청 입력이 기본이다. 불확실한 장비명/중복확인은 입력 차단 사유가 아니라 follow_up/evidence 대상이다. F열 item은 best 장비명으로 넣고, Q/R에는 AI 설명을 넣지 않는다. 연락처는 필수다.
+- 예약형식 입력에는 모든 장비의 exact catalog/검증된 set-master 이름과 연락처가 필수다. 하나라도 없으면 그룹 전체를 차단한다. 중복확인 불완전성은 follow-up/evidence에만 남긴다.
 - memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
 - 확인요청 반출/반납시간은 정시 HH:00만 쓴다. 고객이 12:30처럼 분 단위로 말해도 12:00으로 내림 입력한다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
@@ -481,7 +487,7 @@ TASK:
 9-1. For FAQ/procedure/policy/components auto_send, use CURRENT_CONFIRMED_POLICY first, otherwise call RAG and fill rag_usage. Outer worker verifies current-policy match or high-confidence retrieved support. Never use RAG for current stock/booking/schedule truth.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 10-1. Doc types은 서류 생성/발송/발행만. 확인요청/예약/가용/스케줄/파손/반납/정산은 견적서 단어가 섞여도 doc 아님; primary item에 합친다.
-11. For reservation-format requests, prefer should_write_to_sheet=true only after phone is available from Kakao or a unique 고객DB match. If phone is missing, search 고객DB by customer name first. If no unique DB phone is found, set should_write_to_sheet=false and make the immediate reply ask for contact first because reservation registration is impossible without contact. Missing equipment/duplicate lookup goes to memo/extra_request, but missing phone with no DB match is blocking. Set false also for non-reservation, unopened/mismatched chat, unclear sender order, or obvious duplicate/already-registered booking. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered with a phone from Kakao/DB; otherwise no write.
+11. Reservation writes require a Kakao/unique 고객DB phone and exact catalog or verified set-master name for every item. Missing phone: search 고객DB, then set false and ask for contact if no unique match. Unverified item: set false and preserve raw/guess in follow-up/evidence for 목록 review. Also set false for non-reservation, mismatched/unopened chat, unclear sender order, or duplicate. Staff-outbound latest may write only for staff-confirmed-unregistered with phone.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
 11-2. For multiple equipment items, put each item into sheet_row_candidate.equipment as a separate object. Do not concatenate multiple equipment names into one item string. One equipment object becomes one 확인요청 row under the same GAS-generated request ID.
 11-3. sheet_row_candidate date/time must be API-safe: YYYY-MM-DD HH:MM. Resolve 오늘/내일 from Kakao date context. 6월6일 24시 => 2026-06-07 00:00. If context unavailable, don't write; make human review.
@@ -503,7 +509,7 @@ The JSON schema:
   "reservation_inquiry": {
     "is_reservation_inquiry": boolean,
     "is_test_message": boolean,
-    "equipment_requested": [{ "raw_text": string, "normalized_guess": string | null, "exact_name_from_set_master": string | null, "quantity": number | string | null, "confidence": "low" | "medium" | "high" }],
+    "equipment_requested": [{ "raw_text": string, "normalized_guess": string | null, "exact_name_from_equipment_catalog": string | null, "exact_name_from_set_master": string | null, "quantity": number | string | null, "confidence": "low" | "medium" | "high" }],
     "rental_start": string | null,
     "rental_end": string | null,
     "pickup_time": string | null,
@@ -813,6 +819,33 @@ function isGroundedEquipmentRewrite(raw = '', proposed = '') {
   return [...rawAnchors].some((anchor) => proposedAnchors.has(anchor));
 }
 
+function hasExplicitlyUnverifiedEquipment(decision = {}) {
+  if (decision?.safety_checks?.exact_equipment_name_verified_from_set_master !== false) return false;
+  const reservationItems = Array.isArray(decision?.reservation_inquiry?.equipment_requested)
+    ? decision.reservation_inquiry.equipment_requested
+    : [];
+  if (!reservationItems.length) return true;
+  return reservationItems.some((item) => !text(item?.exact_name_from_equipment_catalog).trim());
+}
+
+function equipmentNamesNeedingCatalogReview(decision = {}) {
+  const reservationItems = Array.isArray(decision?.reservation_inquiry?.equipment_requested)
+    ? decision.reservation_inquiry.equipment_requested
+    : [];
+  const names = reservationItems
+    .filter((item) => !text(item?.exact_name_from_equipment_catalog).trim())
+    .map((item) => text(item?.raw_text || item?.normalized_guess).trim())
+    .filter(Boolean);
+  if (names.length) return names;
+  const row = decision?.sheet_row_candidate || {};
+  const candidates = Array.isArray(row.equipment) ? row.equipment : [];
+  const fallbackNames = candidates
+    .map((item) => text(item?.item || item?.name || item?.이름).trim())
+    .filter(Boolean);
+  const fallback = text(row.item || row.장비명 || row.equipment_name).trim();
+  return fallbackNames.length ? fallbackNames : (fallback ? [fallback] : ['미확인 장비']);
+}
+
 function normalizeSheetEquipmentItems(decision = {}) {
   const row = decision.sheet_row_candidate || {};
   const rawItems = Array.isArray(row.equipment) ? row.equipment
@@ -826,24 +859,27 @@ function normalizeSheetEquipmentItems(decision = {}) {
   const reservationSource = Array.isArray(decision.reservation_inquiry?.equipment_requested)
     ? decision.reservation_inquiry.equipment_requested
     : [];
+  const allowSetMasterExactName = decision?.safety_checks?.exact_equipment_name_verified_from_set_master !== false;
   const fromReservation = reservationSource
-    .map((item) => ({
-      item: text(item.exact_name_from_set_master || item.normalized_guess || item.raw_text),
-      rawItem: text(item.raw_text),
-      quantity: item.quantity ?? item.qty ?? item.수량 ?? ''
-    }));
-  const items = (fromCandidate.length ? fromCandidate : fromReservation)
+    .map((item, index) => {
+      const exactName = text(
+        item.exact_name_from_equipment_catalog
+        || (allowSetMasterExactName ? item.exact_name_from_set_master : '')
+      ).trim();
+      const candidate = fromCandidate[index] || {};
+      return {
+        item: exactName || text(candidate.item || item.normalized_guess || item.raw_text),
+        rawItem: text(item.raw_text),
+        quantity: item.quantity ?? item.qty ?? item.수량 ?? candidate.quantity ?? '',
+        exactName: Boolean(exactName)
+      };
+    });
+  const items = (fromReservation.length ? fromReservation : fromCandidate)
     .map((item, index) => {
       const proposed = text(item.item).trim();
       const rawItem = text(reservationSource[index]?.raw_text || item.rawItem).trim();
-      const exactMasterName = text(reservationSource[index]?.exact_name_from_set_master).trim();
-      const isVerifiedExactMasterName = decision.safety_checks?.exact_equipment_name_verified_from_set_master === true
-        && exactMasterName
-        && normalizeEquipmentIdentityText(exactMasterName) === normalizeEquipmentIdentityText(proposed);
       return {
-        item: rawItem && proposed && !isVerifiedExactMasterName && !isGroundedEquipmentRewrite(rawItem, proposed)
-          ? rawItem
-          : proposed,
+        item: !item.exactName && rawItem && proposed && !isGroundedEquipmentRewrite(rawItem, proposed) ? rawItem : proposed,
         quantity: item.quantity === null || item.quantity === undefined || item.quantity === '' ? 1 : item.quantity
       };
     })
@@ -994,6 +1030,7 @@ function sanitizeConfirmRequestFreeText(value = '', { maxLength = 180 } = {}) {
 
 export function buildSheetAppendPayload(decision, options = {}) {
   if (!decision || decision.should_write_to_sheet !== true) return null;
+  if (hasExplicitlyUnverifiedEquipment(decision)) return null;
   if (!hasRequiredSheetSafetyChecks(decision)) return null;
   const row = decision.sheet_row_candidate || {};
   const equipment = normalizeSheetEquipmentItems(decision);
@@ -1372,7 +1409,24 @@ function shouldSuppressFollowUpItem(decision, item) {
 }
 
 export function buildFollowUpRows(decision, job = {}) {
-  const items = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
+  const items = Array.isArray(decision?.follow_up_items) ? [...decision.follow_up_items] : [];
+  if (hasExplicitlyUnverifiedEquipment(decision)
+    && !items.some((item) => item?.type === 'reservation_review')) {
+    const rawNames = equipmentNamesNeedingCatalogReview(decision);
+    items.push({
+      type: 'reservation_review',
+      priority: 'high',
+      status: 'open',
+      title: '장비명 목록 정확명 확인 필요',
+      customer_name: text(decision?.customer?.name || decision?.sheet_row_candidate?.customer_name),
+      summary: `확인요청 자동 입력을 차단했습니다. 고객 원문 장비명: ${rawNames.join(', ')}. 목록 정확명 확인 필요.`,
+      recommended_action: '목록 시트 A열에서 각 장비의 정확한 이름을 확인한 뒤 확인요청을 검토하세요.',
+      suggested_reply_draft: '',
+      evidence: [`고객 원문 장비명: ${rawNames.join(', ')}`, '목록 정확명 확인 필요'],
+      blocking_reason: '목록 정확명 확인 필요',
+      due_hint: 'now'
+    });
+  }
   const rawJobId = text(job.id || job.jobId || '');
   const jobId = isUuid(rawJobId) ? rawJobId : null;
   const roomKey = text(job.room_key || job.roomKey || job.payload?.roomKey || '').slice(0, 240);
@@ -2664,6 +2718,9 @@ export function filterFollowUpRowsAfterAutoReply(rows = [], autoReplyResult = {}
 export function mapDecisionToStatusPatch(decision, context = {}) {
   if (decision?.should_write_to_sheet === true && context.sheetResult?.success === true) {
     return { status: 'needs_human_review', error_message: null };
+  }
+  if (hasExplicitlyUnverifiedEquipment(decision) && !context.sheetResult) {
+    return { status: 'needs_human_review', error_message: '장비 자동 입력 차단: 목록 정확명 확인 필요' };
   }
   if (decision?.should_write_to_sheet === true && context.sheetResult?.success === false) {
     const errorMessage = text(context.sheetResult.error).slice(0, 500) || 'GAS rejected sheet write';
@@ -4193,6 +4250,7 @@ function isLiveQuoteRecheckInfoReply(value = '', decision = {}) {
 
 export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
+  if (hasExplicitlyUnverifiedEquipment(decision)) return { allowed: false, reason: 'equipment_catalog_review_required' };
   const reply = decision.reply_decision && typeof decision.reply_decision === 'object' ? decision.reply_decision : {};
   const mode = String(reply.replyMode || reply.reply_mode || '').trim();
   const confidence = String(reply.confidence || decision.confidence || '').trim();

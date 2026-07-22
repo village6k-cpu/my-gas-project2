@@ -1,14 +1,21 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 
 export const DEFAULT_CHANNEL_ID = 'C0B6ZJZ2XU3';
 const DEFAULT_API_URL = 'https://today-dashboard-ten.vercel.app/api/internal/slack-ops';
+const MAX_VISION_IMAGES_PER_EVENT = 3;
+const MAX_VISION_IMAGES_PER_SCAN = 4;
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
+const execFileAsync = promisify(execFile);
 
 function parseEnvFile(file) {
   if (!existsSync(file)) return;
@@ -21,17 +28,28 @@ function parseEnvFile(file) {
   }
 }
 
+export function resolveHermesHome(platform = process.platform, env = process.env, home = homedir()) {
+  if (String(env.HERMES_HOME || '').trim()) return resolve(String(env.HERMES_HOME).trim());
+  if (platform === 'win32' && String(env.LOCALAPPDATA || '').trim()) {
+    return resolve(String(env.LOCALAPPDATA).trim(), 'hermes');
+  }
+  return resolve(home, '.hermes');
+}
+
 function loadConfig() {
-  parseEnvFile(resolve(homedir(), '.hermes/.env'));
-  parseEnvFile(resolve(homedir(), '.hermes/slack-heybilli.env'));
+  const hermesHome = resolveHermesHome();
+  parseEnvFile(resolve(hermesHome, '.env'));
+  parseEnvFile(resolve(hermesHome, 'slack-heybilli.env'));
   return {
     token: process.env.SLACK_BOT_TOKEN || '',
+    apiToken: process.env.SLACK_HEYBILLI_API_TOKEN || process.env.SLACK_BOT_TOKEN || '',
     channelId: process.env.SLACK_HEYBILLI_CHANNEL_ID || DEFAULT_CHANNEL_ID,
     apiUrl: process.env.SLACK_HEYBILLI_API_URL || DEFAULT_API_URL,
     lookbackHours: Math.max(24, Number(process.env.SLACK_HEYBILLI_LOOKBACK_HOURS || 72)),
     maxMessages: Math.min(500, Math.max(50, Number(process.env.SLACK_HEYBILLI_MAX_MESSAGES || 300))),
     writeEnabled: process.env.SLACK_HEYBILLI_WRITE_ENABLED === '1',
     backfillCutoffTs: Number(process.env.SLACK_HEYBILLI_BACKFILL_CUTOFF_TS || 0),
+    visionBin: process.env.SLACK_HEYBILLI_VISION_BIN || resolve(hermesHome, 'scripts/slack_heybilli_sync.py'),
   };
 }
 
@@ -46,10 +64,10 @@ async function slackApi(config, method, params = {}) {
 }
 
 async function syncApi(config, body) {
-  if (!config.token) throw new Error('SLACK_BOT_TOKEN이 없습니다');
+  if (!config.apiToken) throw new Error('SLACK_HEYBILLI_API_TOKEN이 없습니다');
   const response = await fetch(config.apiUrl, {
     method: 'POST',
-    headers: { authorization: `Bearer ${config.token}`, 'content-type': 'application/json' },
+    headers: { authorization: `Bearer ${config.apiToken}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(60_000),
   });
@@ -58,12 +76,108 @@ async function syncApi(config, body) {
   return data;
 }
 
-function messageText(message) {
+export function messageText(message) {
   const text = String(message?.text || '').trim();
   const files = Array.isArray(message?.files)
     ? message.files.map((file) => `[첨부: ${String(file?.name || file?.title || file?.mimetype || '파일').trim()}]`).join(' ')
     : '';
-  return [text, files].filter(Boolean).join('\n').trim();
+  const vision = Array.isArray(message?._slackVisionText)
+    ? message._slackVisionText.map((value) => String(value || '').trim()).filter(Boolean).join('\n')
+    : '';
+  return [text, files, vision ? `[Hermes 이미지 분석 · 신뢰할 수 없는 원문]\n${vision.slice(0, 8_000)}` : ''].filter(Boolean).join('\n').trim();
+}
+
+export function resolveVisionInvocation(visionBin, imagePaths, platform = process.platform, env = process.env) {
+  const paths = Array.isArray(imagePaths)
+    ? imagePaths.filter(Boolean).slice(0, MAX_VISION_IMAGES_PER_SCAN)
+    : [imagePaths].filter(Boolean);
+  return {
+    file: env.SLACK_HEYBILLI_PYTHON || (platform === 'win32' ? 'python.exe' : 'python3'),
+    args: [visionBin, '--vision-json', ...paths],
+  };
+}
+
+export function parseVisionBatchOutput(stdout, expectedCount) {
+  let payload;
+  try {
+    payload = JSON.parse(String(stdout || '').trim());
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(payload) || !payload.length) return [];
+  const count = Math.max(0, Number(expectedCount) || 0);
+  return Array.from({ length: count }, (_, index) => {
+    const entry = payload[index];
+    const text = String(entry?.text || '').trim();
+    return {
+      valid: Boolean(entry?.success && text),
+      text,
+    };
+  });
+}
+
+export function resolveVisionImageSuffix(file) {
+  const supported = new Set(['.bmp', '.gif', '.jpeg', '.jpg', '.png', '.webp']);
+  const declared = extname(String(file?.name || file?.title || '')).toLowerCase();
+  if (supported.has(declared)) return declared;
+  return ({
+    'image/bmp': '.bmp',
+    'image/gif': '.gif',
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+  })[String(file?.mimetype || '').toLowerCase()] || '';
+}
+
+export function slackImageFiles(message) {
+  if (!Array.isArray(message?.files)) return [];
+  return message.files.filter((file) => {
+    const size = Number(file?.size || 0);
+    return Boolean(resolveVisionImageSuffix(file))
+      && size > 0
+      && size <= 10 * 1024 * 1024
+      && Boolean(file.url_private_download || file.url_private);
+  }).slice(0, MAX_VISION_IMAGES_PER_EVENT);
+}
+
+export async function analyzeSlackImages(config, candidates) {
+  if (!existsSync(config.visionBin) || !candidates.length) return [];
+  const directory = await mkdtemp(join(tmpdir(), 'slack-heybilli-vision-'));
+  try {
+    const downloads = await mapLimit(candidates, 4, async (candidate, index) => {
+      try {
+        const { file } = candidate;
+        const response = await fetch(file.url_private_download || file.url_private, {
+          headers: { authorization: `Bearer ${config.token}` },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!response.ok) return null;
+        const suffix = resolveVisionImageSuffix(file);
+        const path = join(directory, `image-${index}${suffix}`);
+        await writeFile(path, Buffer.from(await response.arrayBuffer()));
+        return { ...candidate, path };
+      } catch {
+        return null;
+      }
+    });
+    const downloaded = downloads.filter(Boolean);
+    if (downloaded.length !== candidates.length) return [];
+    const paths = downloaded.map((entry) => entry.path);
+    const invocation = resolveVisionInvocation(config.visionBin, paths);
+    const execution = await execFileAsync(invocation.file, invocation.args, {
+      timeout: 150_000,
+      maxBuffer: 1024 * 1024,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    }).catch(() => null);
+    const results = parseVisionBatchOutput(execution?.stdout, paths.length);
+    if (results.length !== paths.length || results.some((result) => !result.valid)) return [];
+    return downloaded.map((candidate, index) => ({
+      ...candidate,
+      text: results[index].text,
+    }));
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 export function inferPhase(text) {
@@ -76,31 +190,57 @@ export function inferPhase(text) {
   return firstTag === '반출' ? 'checkout' : firstTag === '반납' ? 'checkin' : 'unknown';
 }
 
+export function inferPhaseFromConversation(root, replies = []) {
+  // 사건을 시작한 보고가 단계를 명시했다면, 뒤의 "반출건을 앱에 추가했다" 같은
+  // 조치 설명이 원래 반납 사건의 단계를 뒤집지 않게 한다.
+  const rootPhase = inferPhase(root?.text);
+  if (rootPhase !== 'unknown') return rootPhase;
+  return inferPhase([root?.text, ...replies.map((reply) => reply?.text)].filter(Boolean).join('\n'));
+}
+
 export function extractTradeId(text) {
   return String(text || '').match(/\b\d{6}-\d{3}\b/)?.[0] || '';
 }
 
+export function extractTradeIdFromConversation(root, replies = []) {
+  return extractTradeId([root?.text, ...replies.map((reply) => reply?.text)].filter(Boolean).join('\n'));
+}
+
 export function extractCustomerHint(text) {
   const value = String(text || '').replace(/<@[A-Z0-9]+>/g, ' ').trim();
+  const isGenericHint = (hint) => /^(?:어느|어떤|무슨|누구|고객|감독|대여자|성함|이름)$/u.test(String(hint || '').trim());
+  const labeled = value.match(/(?:^|\n|[-*•]\s*)(?:고객명|고객|대여자|성함)\s*[:：-]\s*([가-힣]{2,5}|[가-힣]{1,2}\s+[가-힣]{1,3})/u)?.[1]?.replace(/\s+/g, '');
+  if (labeled && !isGenericHint(labeled)) return labeled;
   const tagged = value.match(/^\s*\[\s*(?:반출|반납)\s*\]\s*([^\n]+)/i)?.[1] || '';
   const taggedName = tagged
     .split(/\s{2,}|\s*[-–—|/]\s*|\s+(?:감독님?|대표님?|실장님?|팀장님?)\b/)[0]
     .replace(/(?:감독|대표|실장|팀장)?님.*$/u, '')
     .trim();
-  if (/^[가-힣A-Za-z0-9][가-힣A-Za-z0-9 ._()]{1,30}$/.test(taggedName) && !/^(장비|미등록|앱|헤이빌리|현장)/.test(taggedName)) return taggedName;
+  if (/^[가-힣A-Za-z0-9][가-힣A-Za-z0-9 ._()]{1,30}$/.test(taggedName) && !/^(장비|미등록|앱|헤이빌리|현장)/.test(taggedName) && !isGenericHint(taggedName)) return taggedName;
+
+  // 직원이 앱 등록을 마친 뒤 "헤이빌리의 박 다빈 오늘 반출건 추가"처럼 알려주는 경우.
+  // 성과 이름 사이의 공백은 Slack 입력 습관일 뿐이므로 거래 검색용 이름에서는 제거한다.
+  const appNamed = value.match(/헤이빌리(?:에|의)?\s*(?:고객|대여자|감독)?\s*([가-힣]{2,5}|[가-힣]{1,2}\s+[가-힣]{1,3})\s+(?=(?:(?:오늘|금일|어제|내일|\d{1,2}[/.~-]\d{1,2})\s*(?:반출|반납|거래|예약)?|(?:반출|반납|거래|예약)(?:건)?\s*(?:추가|등록|생성)))/u)?.[1]?.replace(/\s+/g, '');
+  if (appNamed && !isGenericHint(appNamed)) return appNamed;
 
   const dated = value.match(/(?:^|\n)\s*([가-힣]{2,5})(?:\s*(?:감독|대표|실장|팀장)?님)?\s+(?=\d{1,2}[/.~-]\d{1,2})/u)?.[1];
-  if (dated) return dated;
+  if (dated && !isGenericHint(dated)) return dated;
   const honorific = value.match(/(?:^|\n|\s)([가-힣]{2,5})\s*(?:감독님?|대표님?|실장님?|팀장님?)/u)?.[1];
-  if (honorific) return honorific;
+  if (honorific && !isGenericHint(honorific)) return honorific;
   const confirmed = value.match(/(?:^|\n)\s*([가-힣]{2,5})\s*(?:맞(?:아요|습니다)|맞죠|맞아|같습니다?)/u)?.[1];
-  return confirmed || '';
+  return confirmed && !isGenericHint(confirmed) ? confirmed : '';
 }
 
 export function extractCustomerHintFromConversation(root, replies = []) {
   const direct = extractCustomerHint(root?.text);
   if (direct) return direct;
+  const rootPhase = inferPhase(root?.text);
   for (let index = 0; index < replies.length; index += 1) {
+    const replyPhase = inferPhase(replies[index]?.text);
+    // A later message about another phase is an operational update, not an
+    // answer to the current event's customer identity.  This specifically
+    // prevents "오늘 반출건 추가" from naming an unknown return event.
+    if (rootPhase !== 'unknown' && replyPhase !== 'unknown' && replyPhase !== rootPhase) continue;
     const replyHint = extractCustomerHint(replies[index]?.text);
     if (replyHint) return replyHint;
     const questioned = String(replies[index]?.text || '').match(/(?:^|\n)\s*([가-힣]{2,5})\s*맞나(?:요)?\??/u)?.[1];
@@ -151,23 +291,34 @@ export function groupOperationalMessages(messages, botUserId = '') {
   let current = null;
   for (const message of ordered) {
     const text = messageText(message);
-    const operational = isOperationalMessage(text);
-    const customerHint = extractCustomerHint(text);
-    const gapSeconds = current ? Number(message.ts) - Number(current.root.ts) : Number.POSITIVE_INFINITY;
+    const typedText = String(message?.text || '');
+    // An image-only report becomes searchable after Hermes analyzes the attachment.
+    const operational = isOperationalMessage(text)
+      || slackImageFiles(message).length > 0;
+    const customerHint = extractCustomerHint(typedText);
+    const lastContextTs = current?.nearby.at(-1)?.ts || current?.root.ts;
+    const gapSeconds = lastContextTs ? Number(message.ts) - Number(lastContextTs) : Number.POSITIVE_INFINITY;
+    const phaseHint = inferPhase(typedText);
     const canFollowCurrent = current
       && gapSeconds >= 0
       && gapSeconds <= 10 * 60
       && !isTaggedReport(text)
-      && !extractTradeId(text)
+      && !extractTradeId(typedText)
       && sameCustomerHint(current.customerHint, customerHint);
 
     if (canFollowCurrent) {
       current.nearby.push(message);
-      if (!current.customerHint && customerHint) current.customerHint = customerHint;
+      const replyPhase = inferPhase(typedText);
+      const samePhase = current.phaseHint === 'unknown'
+        || replyPhase === 'unknown'
+        || current.phaseHint === replyPhase;
+      if (!current.customerHint && customerHint && samePhase) current.customerHint = customerHint;
       continue;
     }
     if (!operational) continue;
-    current = { root: message, nearby: [], customerHint };
+    // A nameless top-level report is a new unresolved event.  Carrying the
+    // previous customer's identity across posts can write to the wrong card.
+    current = { root: message, nearby: [], customerHint, phaseHint };
     groups.push(current);
   }
   return groups;
@@ -219,42 +370,112 @@ async function mapLimit(values, limit, mapper) {
   return result;
 }
 
-async function buildEvents(config) {
+function eventTsFromPending(entry) {
+  return String(entry?.event?.message_ts || entry?.event?.messageTs || '');
+}
+
+function eventFromRecord(config, record, visionByMessage = new Map()) {
+  const enrichedConversation = record.contextualMessages.map((message) => {
+    const texts = visionByMessage.get(String(message.ts || ''));
+    return texts?.length ? { ...message, _slackVisionText: texts } : message;
+  });
+  const root = cleanSlackMessage(enrichedConversation[0] || record.message);
+  const replies = enrichedConversation.slice(1).map((reply) => cleanSlackMessage(reply));
+  // Vision output is useful evidence for equipment details, but it must never
+  // create the transaction identity used for an automatic write.
+  const identityRoot = record.baseRoot;
+  const identityReplies = record.baseReplies;
+  const combined = [root.text, ...replies.map((reply) => reply.text)].join('\n');
+  if (!isOperationalMessage(combined) && !record.images.length) return null;
+  return {
+    channelId: config.channelId,
+    messageTs: root.ts,
+    threadTs: root.ts,
+    // Model wording never changes identity. Only the original Slack message and file labels do.
+    sourceHash: sourceHashFor(record.baseRoot, record.baseReplies),
+    phaseHint: inferPhaseFromConversation(root, replies),
+    customerHint: extractCustomerHintFromConversation(identityRoot, identityReplies) || record.group.customerHint,
+    tradeIdHint: extractTradeIdFromConversation(identityRoot, identityReplies),
+    permalink: record.permalink,
+    root,
+    replies,
+  };
+}
+
+async function buildEventRecords(config) {
   const auth = await slackApi(config, 'auth.test');
   const botUserId = String(auth.user_id || '');
   const groups = groupOperationalMessages(await pagedHistory(config), botUserId).slice(-120);
 
-  const clusters = await mapLimit(groups, 5, async (group) => {
+  const records = await mapLimit(groups, 5, async (group) => {
     const message = group.root;
     let threadMessages = [message];
     if (Number(message.reply_count || 0) > 0) {
       const data = await slackApi(config, 'conversations.replies', { channel: config.channelId, ts: message.ts, limit: 100 });
       threadMessages = data.messages || [message];
     }
-    const root = cleanSlackMessage(threadMessages[0] || message);
-    const replies = [...threadMessages.slice(1), ...group.nearby]
+    const contextualMessages = [threadMessages[0] || message, ...threadMessages.slice(1), ...group.nearby]
       .filter((reply) => String(reply.user || '') !== botUserId && !reply.bot_id)
       .filter((reply, index, values) => values.findIndex((candidate) => candidate.ts === reply.ts) === index)
-      .sort((a, b) => Number(a.ts) - Number(b.ts))
-      .map((reply) => cleanSlackMessage(reply));
-    const combined = [root.text, ...replies.map((reply) => reply.text)].join('\n');
-    if (!isOperationalMessage(combined)) return null;
+      .sort((a, b) => Number(a.ts) - Number(b.ts));
+    const baseRoot = cleanSlackMessage(contextualMessages[0] || message);
+    const baseReplies = contextualMessages.slice(1).map((reply) => cleanSlackMessage(reply));
+    const images = contextualMessages.flatMap((entry) => slackImageFiles(entry).map((file) => ({
+      eventTs: String(message.ts || ''),
+      messageTs: String(entry.ts || ''),
+      file,
+    }))).slice(0, MAX_VISION_IMAGES_PER_EVENT);
     const permalink = await slackApi(config, 'chat.getPermalink', { channel: config.channelId, message_ts: message.ts })
       .then((data) => String(data.permalink || '')).catch(() => '');
-    return {
-      channelId: config.channelId,
-      messageTs: root.ts,
-      threadTs: root.ts,
-      sourceHash: sourceHashFor(root, replies),
-      phaseHint: inferPhase(combined),
-      customerHint: extractCustomerHintFromConversation(root, replies),
-      tradeIdHint: extractTradeId(combined),
-      permalink,
-      root,
-      replies,
-    };
+    const record = { baseReplies, baseRoot, contextualMessages, group, images, message, permalink };
+    return { ...record, event: eventFromRecord(config, record) };
   });
-  return clusters.filter(Boolean).sort((a, b) => Number(a.messageTs) - Number(b.messageTs)).slice(-80);
+  return records
+    .filter((record) => record.event)
+    .sort((left, right) => Number(left.event.messageTs) - Number(right.event.messageTs))
+    .slice(-80);
+}
+
+export function selectPendingVisionRecords(records, pending, maxImages = MAX_VISION_IMAGES_PER_SCAN) {
+  const pendingTs = new Set((pending || []).map(eventTsFromPending).filter(Boolean));
+  const selected = [];
+  let used = 0;
+  for (const record of records) {
+    if (!pendingTs.has(record.event.messageTs) || !record.images.length) continue;
+    if (used + record.images.length > maxImages) continue;
+    selected.push(record);
+    used += record.images.length;
+  }
+  return selected;
+}
+
+async function enrichPendingRecords(config, records, pending) {
+  const pendingTs = new Set((pending || []).map(eventTsFromPending).filter(Boolean));
+  const imagePendingTs = new Set(records
+    .filter((record) => pendingTs.has(record.event.messageTs) && record.images.length)
+    .map((record) => record.event.messageTs));
+  const selected = selectPendingVisionRecords(records, pending);
+  const analyzed = await analyzeSlackImages(config, selected.flatMap((record) => record.images));
+  const visionByMessage = new Map();
+  for (const item of analyzed) {
+    if (!visionByMessage.has(item.messageTs)) visionByMessage.set(item.messageTs, []);
+    visionByMessage.get(item.messageTs).push(item.text);
+  }
+  const readyTs = new Set();
+  if (analyzed.length) {
+    for (const record of selected) {
+      const completed = record.images.every((image) => visionByMessage.has(image.messageTs));
+      if (completed) readyTs.add(record.event.messageTs);
+    }
+  }
+  const events = records.map((record) => (
+    readyTs.has(record.event.messageTs) ? eventFromRecord(config, record, visionByMessage) : record.event
+  )).filter(Boolean);
+  return {
+    deferredCount: [...imagePendingTs].filter((ts) => !readyTs.has(ts)).length,
+    events,
+    readyTs,
+  };
 }
 
 function hermesPrompt(result, config) {
@@ -273,16 +494,27 @@ function hermesPrompt(result, config) {
       : '',
     '각 이벤트의 전체 스레드에서 최신 직원 답변을 우선해 사실을 추출하고, 후보 거래·품목과 대조하세요.',
     '명시되지 않은 결제 상태나 분실을 추측하지 마세요. 미반납은 lost가 아닙니다.',
+    '카드 summary는 누가·무엇이·어떻게 달라졌는지만 한두 문장, 500자 이내로 쓰세요. Slack 링크·메시지 ID·원문 시각·처리과정 설명은 넣지 마세요.',
     '',
     JSON.stringify(result, null, 2),
   ].join('\n');
 }
 
 async function scanCommand(config, args) {
-  const events = await buildEvents(config);
-  if (!events.length) return args.has('--hermes') ? '' : { pending: [], scanned: 0 };
-  const result = await syncApi(config, { mode: 'scan', events });
-  result.scanned = events.length;
+  const records = await buildEventRecords(config);
+  if (!records.length) return args.has('--hermes') ? '' : { pending: [], scanned: 0 };
+  let result = await syncApi(config, { mode: 'scan', events: records.map((record) => record.event) });
+  const enriched = await enrichPendingRecords(config, records, result.pending);
+  if (enriched.readyTs.size) result = await syncApi(config, { mode: 'scan', events: enriched.events });
+  if (enriched.deferredCount) {
+    process.stderr.write(`slack-heybilli-sync: Hermes 이미지 분석을 마치지 못한 이벤트 ${enriched.deferredCount}건은 다음 실행으로 미뤘습니다\n`);
+  }
+  result.pending = (result.pending || []).filter((entry) => {
+    const ts = eventTsFromPending(entry);
+    const record = records.find((candidate) => candidate.event.messageTs === ts);
+    return !record?.images.length || enriched.readyTs.has(ts);
+  });
+  result.scanned = records.length;
   if (args.has('--hermes')) return hermesPrompt(result, config);
   return result;
 }
@@ -321,7 +553,7 @@ async function applyCommand(config, args) {
       `✅ 헤이빌리 자동반영 · ${plan.tradeId} · ${plan.phase === 'checkout' ? '반출' : '반납'}`,
       plan.summary,
       ...actionLines.map((line) => `• ${line}`),
-      'Slack 원문 링크와 정정 출처는 같은 거래 카드에 보존했습니다. [SLACK_HEYBILLI_SYNC]',
+      '원문과 처리 이력은 내부 동기화 기록에 보존했습니다. [SLACK_HEYBILLI_SYNC]',
     ].join('\n'));
   }
   return result;
@@ -351,7 +583,7 @@ async function main() {
   else if (command === 'apply') result = await applyCommand(config, args);
   else if (command === 'ask') result = await markCommand(config, 'needs_context');
   else if (command === 'ignore') result = await markCommand(config, 'ignored');
-  else if (command === 'health') result = await fetch(config.apiUrl, { headers: { authorization: `Bearer ${config.token}` } }).then((response) => response.json());
+  else if (command === 'health') result = await fetch(config.apiUrl, { headers: { authorization: `Bearer ${config.apiToken}` } }).then((response) => response.json());
   else throw new Error(`알 수 없는 명령: ${command}`);
   if (typeof result === 'string') process.stdout.write(result);
   else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

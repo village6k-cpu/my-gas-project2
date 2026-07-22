@@ -442,6 +442,13 @@ function handleRequest(e) {
           }
         ));
 
+      case "repairDuplicateScheduleRows":
+        return jsonResponse(repairDashboardDuplicateScheduleRows(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.pairs || postBody.pairs,
+          { dryRun: params.dryRun !== undefined ? params.dryRun : postBody.dryRun }
+        ));
+
       case "updateEquipQty":
         return jsonResponse(dashboardUpdateEquipmentQty(
           params.tid || postBody.tid,
