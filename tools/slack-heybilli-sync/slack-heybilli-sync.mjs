@@ -452,7 +452,7 @@ async function main() {
   else if (command === 'apply') result = await applyCommand(config, args);
   else if (command === 'ask') result = await markCommand(config, 'needs_context');
   else if (command === 'ignore') result = await markCommand(config, 'ignored');
-  else if (command === 'health') result = await fetch(config.apiUrl, { headers: { authorization: `Bearer ${config.token}` } }).then((response) => response.json());
+  else if (command === 'health') result = await fetch(config.apiUrl, { headers: { authorization: `Bearer ${config.apiToken}` } }).then((response) => response.json());
   else throw new Error(`알 수 없는 명령: ${command}`);
   if (typeof result === 'string') process.stdout.write(result);
   else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

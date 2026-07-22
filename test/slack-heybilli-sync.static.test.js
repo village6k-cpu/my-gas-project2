@@ -20,6 +20,7 @@ assert(!server.includes('ai_follow_up_items'), 'Slack ops sync must never write 
 assert(route.includes('timingSafeEqual') && route.includes('SLACK_OPS_SYNC_SECRET || process.env.SLACK_BOT_TOKEN'), 'internal API must fail closed behind a timing-safe shared secret');
 assert(windowsWorker.includes("apiToken: process.env.SLACK_HEYBILLI_API_TOKEN || process.env.SLACK_BOT_TOKEN"), 'AX2 must support a dedicated internal API credential without replacing its Slack token');
 assert(windowsWorker.includes('Bearer ${config.apiToken}'), 'the internal API call must use the dedicated API credential');
+assert(windowsWorker.includes("command === 'health'") && windowsWorker.includes('Bearer ${config.apiToken}'), 'the AX2 health check must use the dedicated API credential too');
 assert(server.includes('dryRun: true') && server.includes('if (!execute) return'), 'live mutations must be preceded by a dry-run path');
 assert(server.includes('assertUniqueTopCandidate') && server.includes('topCount !== 1'), 'live plans must target the unique top transaction candidate');
 assert(server.includes('previous?.applied_at ?? null') && server.includes('previous?.last_error ?? null'), 'routine scans must preserve reconciliation audit timestamps and reasons');
