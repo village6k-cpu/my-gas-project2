@@ -112,9 +112,14 @@ if ($RegisterCron) {
   $store = Get-Content -LiteralPath $jobsPath -Raw | ConvertFrom-Json
   $installedJobs = @($store.jobs | Where-Object { $_.name -eq 'Slack 단톡방 → 헤이빌리 직접 동기화' })
   if ($installedJobs.Count -ne 1) { throw '등록 후 AX2 cron을 하나로 확정하지 못했습니다' }
-  if (-not $installedJobs[0].enabled -or $installedJobs[0].state -eq 'paused') {
-    & hermes cron resume $installedJobs[0].id | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw 'AX2 cron 활성화 실패' }
+  if ($Mode -eq 'Live') {
+    if (-not $installedJobs[0].enabled -or $installedJobs[0].state -eq 'paused') {
+      & hermes cron resume $installedJobs[0].id | Out-Host
+      if ($LASTEXITCODE -ne 0) { throw 'AX2 cron 활성화 실패' }
+    }
+  } elseif ($installedJobs[0].enabled -or $installedJobs[0].state -ne 'paused') {
+    & hermes cron pause $installedJobs[0].id | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'DryRun cron 중지 실패' }
   }
 }
 

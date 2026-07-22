@@ -35,6 +35,7 @@ assert(windowsRunner.includes('os.environ["LOCALAPPDATA"]') && windowsInstaller.
 assert(windowsInstaller.includes("$env:COMPUTERNAME -ne 'AX2'"), 'the Windows installer must fail closed off AX2');
 assert.deepEqual([...windowsInstallerBytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'Windows PowerShell 5.1 requires a UTF-8 BOM for Korean source text');
 assert(windowsInstaller.includes("SLACK_HEYBILLI_WRITE_ENABLED' $(if ($Mode -eq 'Live')"), 'the Windows installer must make dry-run/live state explicit');
+assert(windowsInstaller.includes("if ($Mode -eq 'Live')") && windowsInstaller.includes('hermes cron pause $installedJobs[0].id'), 'DryRun must leave the AX2 cron paused and only Live may resume it');
 assert(windowsInstaller.includes("Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_API_TOKEN' $apiToken"), 'the Windows installer must provision the API credential without putting it on the command line');
 assert(windowsInstaller.includes('apiTokenKeyPresent = [bool]$hasApiToken') && !windowsInstaller.includes('apiToken = $apiToken'), 'the Windows installer must report only API-token presence, never its value');
 assert(syncSkill.includes('후속조치 보드와 무관') && !syncSkill.includes('ai_follow_up_items'), 'the deployed AX2 skill must keep Slack reconciliation out of the Kakao follow-up board');
