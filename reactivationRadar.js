@@ -21,6 +21,18 @@
 function getReactivationRadar(params) {
   params = params || {};
   var limit = Math.min(parseInt(params.limit, 10) || 40, 100);
+
+  // ── 결과 캐시: 5년치 계약 이력 집계라 천천히 변함 → 15분 TTL (nocache=1로 우회)
+  var skipCache = (params.nocache === '1' || params.nocache === 1);
+  var cache = CacheService.getScriptCache();
+  var cacheKey = 'reactRadar_v1_' + limit;
+  if (!skipCache) {
+    var cached = cache.get(cacheKey);
+    if (cached) {
+      try { return JSON.parse(cached); } catch (e) {}
+    }
+  }
+
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var cm = ss.getSheetByName('계약마스터');
   var sd = ss.getSheetByName('스케줄상세');
@@ -131,7 +143,7 @@ function getReactivationRadar(params) {
   var dueTop = due.slice(0, limit);
   var opportunity = dueTop.reduce(function (s, x) { return s + (x.avgRevenue || 0); }, 0);
 
-  return {
+  var result = {
     ok: true,
     generatedAt: now.toISOString(),
     today: todayStr,
@@ -144,6 +156,10 @@ function getReactivationRadar(params) {
     due: dueTop,
     atRisk: atRisk.slice(0, 20)
   };
+
+  // 캐시 저장 — 100KB 초과 등 실패해도 응답은 정상 반환
+  try { cache.put(cacheKey, JSON.stringify(result), 900); } catch (cacheErr) {}
+  return result;
 }
 
 function _radarToDate_(v) {

@@ -20,6 +20,18 @@
 
 function getGrowthAutopilot(params) {
   params = params || {};
+
+  // ── 결과 캐시: 하위 레이더 2개 + KPI 풀스캔 묶음이라 가장 무거움 → 10분 TTL (nocache=1로 우회)
+  var skipCache = (params.nocache === '1' || params.nocache === 1);
+  var cache = CacheService.getScriptCache();
+  var cacheKey = 'autopilot_v1';
+  if (!skipCache) {
+    var cached = cache.get(cacheKey);
+    if (cached) {
+      try { return JSON.parse(cached); } catch (e) {}
+    }
+  }
+
   var tz = Session.getScriptTimeZone() || 'Asia/Seoul';
   var now = new Date();
   var todayStr = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
@@ -88,7 +100,7 @@ function getGrowthAutopilot(params) {
     title: season.title, desc: season.desc, count: 0, action: '준비'
   });
 
-  return {
+  var result = {
     ok: true,
     generatedAt: now.toISOString(),
     today: todayStr,
@@ -106,9 +118,14 @@ function getGrowthAutopilot(params) {
       actionsThisWeek: todos.length
     }
   };
+
+  // 캐시 저장 — 100KB 초과 등 실패해도 응답은 정상 반환
+  try { cache.put(cacheKey, JSON.stringify(result), 600); } catch (cacheErr) {}
+  return result;
 }
 
-function _autopilotKpi_(tz, now) {
+function _autopilotKpi_(tz, now, preloaded) {
+  preloaded = preloaded || {};   // 선택 인자 { cmRows, sdRows }: 미리 읽은 시트 데이터 재사용 (기본 = 기존처럼 직접 읽음)
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var MS_DAY = 86400000;
   var thisMonth = Utilities.formatDate(now, tz, 'yyyy-MM');
@@ -117,20 +134,22 @@ function _autopilotKpi_(tz, now) {
 
   // 계약마스터: 월별 고유고객 + 거래건수
   var custThis = {}, custLast = {}, txThis = 0, txLast = 0;
-  var cm = ss.getSheetByName('계약마스터');
-  if (cm && cm.getLastRow() >= 2) {
-    var rows = cm.getRange(2, 1, cm.getLastRow() - 1, 6).getValues();
-    for (var i = 0; i < rows.length; i++) {
-      var nm = String(rows[i][1] || '').trim();
-      var out = rows[i][4];
-      var ym = (out instanceof Date) ? Utilities.formatDate(out, tz, 'yyyy-MM') : String(out || '').slice(0, 7);
-      if (ym === thisMonth) { txThis++; if (nm) custThis[nm] = true; }
-      else if (ym === lastMonth) { txLast++; if (nm) custLast[nm] = true; }
-    }
+  var rows = preloaded.cmRows;
+  if (!rows) {
+    var cm = ss.getSheetByName('계약마스터');
+    rows = (cm && cm.getLastRow() >= 2) ? cm.getRange(2, 1, cm.getLastRow() - 1, 6).getValues() : [];
   }
-  // 스케줄상세: 월 매출(청구단위 실단가×일수)
-  var revThis = _autopilotMonthRevenue_(ss, tz, thisMonth);
-  var revLast = _autopilotMonthRevenue_(ss, tz, lastMonth);
+  for (var i = 0; i < rows.length; i++) {
+    var nm = String(rows[i][1] || '').trim();
+    var out = rows[i][4];
+    var ym = (out instanceof Date) ? Utilities.formatDate(out, tz, 'yyyy-MM') : String(out || '').slice(0, 7);
+    if (ym === thisMonth) { txThis++; if (nm) custThis[nm] = true; }
+    else if (ym === lastMonth) { txLast++; if (nm) custLast[nm] = true; }
+  }
+  // 스케줄상세: 월 매출(청구단위 실단가×일수) — 한 번만 읽어서 이번달/지난달 계산에 재사용 (기존: 월마다 풀리드 2회)
+  var sdRows = preloaded.sdRows || _autopilotSdRows_(ss);
+  var revThis = _autopilotMonthRevenue_(ss, tz, thisMonth, sdRows);
+  var revLast = _autopilotMonthRevenue_(ss, tz, lastMonth, sdRows);
 
   return {
     thisMonth: thisMonth, lastMonth: lastMonth,
@@ -140,10 +159,15 @@ function _autopilotKpi_(tz, now) {
   };
 }
 
-function _autopilotMonthRevenue_(ss, tz, ym) {
+function _autopilotSdRows_(ss) {
+  // 스케줄상세 C..L 행 읽기 (월 매출 계산용 공용 리더)
   var sd = ss.getSheetByName('스케줄상세');
-  if (!sd || sd.getLastRow() < 2) return 0;
-  var rows = sd.getRange(2, 3, sd.getLastRow() - 1, 10).getValues(); // C..L
+  if (!sd || sd.getLastRow() < 2) return [];
+  return sd.getRange(2, 3, sd.getLastRow() - 1, 10).getValues(); // C..L
+}
+
+function _autopilotMonthRevenue_(ss, tz, ym, preloadedRows) {
+  var rows = preloadedRows || _autopilotSdRows_(ss); // 선택 인자: 미리 읽은 C..L 행 재사용 (기본 = 기존처럼 직접 읽음)
   var total = 0;
   var MS_DAY = 86400000;
   for (var i = 0; i < rows.length; i++) {
@@ -190,7 +214,7 @@ function _weekLabel_(tz, now) {
  */
 function runGrowthAutopilotWeekly() {
   var pack;
-  try { pack = getGrowthAutopilot({}); } catch (e) { Logger.log('오토파일럿 계산 실패: ' + e); return; }
+  try { pack = getGrowthAutopilot({ nocache: '1' }); } catch (e) { Logger.log('오토파일럿 계산 실패: ' + e); return; }  // 주간 발송은 항상 최신 계산
   if (!pack || !pack.ok) { Logger.log('오토파일럿 결과 없음'); return; }
 
   var webhook = PropertiesService.getScriptProperties().getProperty('GROWTH_SLACK_WEBHOOK');
