@@ -23,7 +23,13 @@ if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'node가 PATH에 없습니다' }
 if (-not (Get-Command hermes -ErrorAction SilentlyContinue)) { throw 'hermes가 PATH에 없습니다' }
 
-$hermesHome = Join-Path $env:USERPROFILE '.hermes'
+$hermesCandidates = [System.Collections.Generic.List[string]]::new()
+if ($env:HERMES_HOME) { [void]$hermesCandidates.Add($env:HERMES_HOME) }
+if ($env:LOCALAPPDATA) { [void]$hermesCandidates.Add((Join-Path $env:LOCALAPPDATA 'hermes')) }
+[void]$hermesCandidates.Add((Join-Path $env:USERPROFILE '.hermes'))
+$hermesHome = $hermesCandidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ '.env') -PathType Leaf } | Select-Object -First 1
+if (-not $hermesHome) { throw '실제 Hermes 홈(.env 포함)을 찾지 못했습니다' }
+$env:HERMES_HOME = $hermesHome
 $scriptsDir = Join-Path $hermesHome 'scripts'
 $skillDir = Join-Path $hermesHome 'skills\slack-heybilli-sync'
 New-Item -ItemType Directory -Force -Path $scriptsDir, $skillDir | Out-Null
@@ -106,6 +112,7 @@ if ($RegisterCron) {
   host = $env:COMPUTERNAME
   mode = $Mode
   repo = $repo
+  hermesHome = $hermesHome
   runnerInstalled = Test-Path -LiteralPath (Join-Path $scriptsDir 'slack_heybilli_sync.py')
   skillInstalled = Test-Path -LiteralPath (Join-Path $skillDir 'SKILL.md')
   slackTokenKeyPresent = [bool]$hasSlackToken

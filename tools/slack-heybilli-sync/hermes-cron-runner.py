@@ -16,6 +16,17 @@ import subprocess
 import sys
 
 
+def hermes_home() -> Path:
+    candidates = []
+    configured = os.environ.get("HERMES_HOME", "").strip()
+    if configured:
+        candidates.append(Path(configured))
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        candidates.append(Path(os.environ["LOCALAPPDATA"]) / "hermes")
+    candidates.append(Path.home() / ".hermes")
+    return next((path.resolve() for path in candidates if (path / ".env").is_file()), candidates[0].resolve())
+
+
 def repo_root() -> Path:
     configured = os.environ.get("SLACK_HEYBILLI_REPO_ROOT", "").strip()
     candidates = []
@@ -39,6 +50,7 @@ def run() -> int:
     # AI worker.  Keep those global live switches fail-closed on AX2.
     os.environ["AI_WORKER_LIVE"] = "0"
     os.environ["AI_WORKER_AUTO_SEND"] = "0"
+    os.environ["HERMES_HOME"] = str(hermes_home())
 
     root = repo_root()
     worker = root / "tools" / "slack-heybilli-sync" / "slack-heybilli-sync.mjs"

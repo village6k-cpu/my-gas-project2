@@ -10,6 +10,7 @@ import {
   inferPhaseFromConversation,
   isOperationalMessage,
   messageText,
+  resolveHermesHome,
   resolveOcrInvocation,
   sourceHashFor,
 } from '../tools/slack-heybilli-sync/slack-heybilli-sync.mjs';
@@ -135,5 +136,16 @@ test('Windows OCR adapters use explicit interpreters without a shell', () => {
       file: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
       args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', 'C:\\Tools\\ocr.ps1', 'C:\\Temp\\image.jpg'],
     },
+  );
+});
+
+test('Hermes home follows the Windows native location or an explicit override', () => {
+  assert.equal(
+    resolveHermesHome('win32', { HERMES_HOME: '/tmp/hermes-home' }, 'C:\\Users\\ssper'),
+    '/tmp/hermes-home',
+  );
+  assert.match(
+    resolveHermesHome('win32', { LOCALAPPDATA: 'C:\\Users\\ssper\\AppData\\Local' }, 'C:\\Users\\ssper'),
+    /hermes$/,
   );
 });

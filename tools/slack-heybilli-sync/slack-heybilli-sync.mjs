@@ -26,9 +26,18 @@ function parseEnvFile(file) {
   }
 }
 
+export function resolveHermesHome(platform = process.platform, env = process.env, home = homedir()) {
+  if (String(env.HERMES_HOME || '').trim()) return resolve(String(env.HERMES_HOME).trim());
+  if (platform === 'win32' && String(env.LOCALAPPDATA || '').trim()) {
+    return resolve(String(env.LOCALAPPDATA).trim(), 'hermes');
+  }
+  return resolve(home, '.hermes');
+}
+
 function loadConfig() {
-  parseEnvFile(resolve(homedir(), '.hermes/.env'));
-  parseEnvFile(resolve(homedir(), '.hermes/slack-heybilli.env'));
+  const hermesHome = resolveHermesHome();
+  parseEnvFile(resolve(hermesHome, '.env'));
+  parseEnvFile(resolve(hermesHome, 'slack-heybilli.env'));
   return {
     token: process.env.SLACK_BOT_TOKEN || '',
     channelId: process.env.SLACK_HEYBILLI_CHANNEL_ID || DEFAULT_CHANNEL_ID,
@@ -37,7 +46,7 @@ function loadConfig() {
     maxMessages: Math.min(500, Math.max(50, Number(process.env.SLACK_HEYBILLI_MAX_MESSAGES || 300))),
     writeEnabled: process.env.SLACK_HEYBILLI_WRITE_ENABLED === '1',
     backfillCutoffTs: Number(process.env.SLACK_HEYBILLI_BACKFILL_CUTOFF_TS || 0),
-    ocrBin: process.env.SLACK_HEYBILLI_OCR_BIN || resolve(homedir(), '.hermes/scripts/slack_image_ocr'),
+    ocrBin: process.env.SLACK_HEYBILLI_OCR_BIN || resolve(hermesHome, 'scripts/slack_image_ocr'),
   };
 }
 
