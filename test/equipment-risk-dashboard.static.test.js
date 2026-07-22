@@ -165,7 +165,7 @@ assert.deepStrictEqual(
 
 [
   'includeCautions: params.includeCautions || postBody.includeCautions',
-  'getDashboardData(params.date || postBody.date || null, skipCache, {})'
+  'getDashboardData(params.date || postBody.date || null, skipCache, {\n          profile: params.profile || postBody.profile\n        })'
 ].forEach((contract) => {
   assert.ok(api.indexOf(contract) !== -1, `sheetAPI.js must include contract: ${contract}`);
 });

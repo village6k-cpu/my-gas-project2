@@ -120,7 +120,8 @@ assert(
   'the /api/my route and page must be read-only (no POST)'
 );
 assert(
-  /gasGet\(\{ action: "myPage", token \}\)/.test(estimateRoute) &&
+  /getMyPageResponse\(token\)/.test(estimateRoute) &&
+    estimateRoute.includes('@/lib/server/myPageData') &&
     /action", "previewQuote"/.test(estimateRoute) &&
     /rejectNonQuotePdfUrl/.test(estimateRoute) &&
     !/isGoogleSheetPdfExportUrl/.test(estimateRoute) &&

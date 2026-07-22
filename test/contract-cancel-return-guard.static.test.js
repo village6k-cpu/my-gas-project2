@@ -11,7 +11,7 @@ const sheetApi = read('sheetAPI.js');
 
 assert.match(
   checkAvailability,
-  /function setDashboardReturnContractStatus_[\s\S]{0,900}currentStatus\s*===\s*['"]취소['"][\s\S]{0,220}반납완료로 바꿀 수 없습니다/,
+  /function setDashboardReturnContractStatus_[\s\S]{0,1600}currentStatus\s*===\s*['"]취소['"][\s\S]{0,220}반납완료로 바꿀 수 없습니다/,
   'toggleReturnDone must block changing 취소 contracts to 반납완료'
 );
 

@@ -206,9 +206,9 @@ assert(
 const storeTs2 = read('apps/today-dashboard/lib/data/store.ts');
 assert(
   /removeItem[\s\S]{0,900}removeEquipmentAndRegenerateContract/.test(storeTs2) &&
-    /gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*true/.test(storeTs2) &&
+    /gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*false/.test(storeTs2) &&
     read('apps/today-dashboard/app/api/gas/route.ts').includes('"removeEquip"'),
-  'removing a sheet-derived item must delete 스케줄상세 via removeEquip and return contract updates'
+  'removing a sheet-derived item must delete 스케줄상세 via removeEquip and queue contract regeneration via the background worker'
 );
 console.log('audit-round-2 checks OK');
 
@@ -259,11 +259,12 @@ assert(
 );
 const storeTs4 = read('apps/today-dashboard/lib/data/store.ts');
 assert(
-  /gasMutation\("toggleReturn"[\s\S]{0,400}restored/.test(storeTs4),
+  /gasMutation(?:Retrying)?\("toggleReturn"[\s\S]{0,400}contractStatus: res\.contractStatus/.test(storeTs4),
   'toggleReturn off must apply the contract status restored by GAS'
 );
 assert(
-  /gasMutation\("updateEquipQty"[\s\S]{0,500}updatedItems/.test(storeTs4),
+  /gasMutation\("updateEquipQty"[\s\S]{0,500}applyEquipQtyResult/.test(storeTs4) &&
+    /applyEquipQtyResult\([\s\S]{0,400}updatedItems/.test(storeTs4),
   'set-header qty changes must apply GAS component scaling to app state'
 );
 console.log('audit-round-5 checks OK');
@@ -325,7 +326,7 @@ console.log('audit-round-10 checks OK');
 assert(
   read('checkAvailability.js').includes('stocks: stocks') &&
     read('apps/today-dashboard/lib/data/equipmentCatalog.ts').includes('catalogStockOf') &&
-    read('apps/today-dashboard/lib/domain/timeline.ts').includes('catalogStockOf(e.name) ?? stockOf(e.category)'),
+    /catalogStockOf\((?:e\.name|actualName)\) \?\? stockOf\(e\.category\)/.test(read('apps/today-dashboard/lib/domain/timeline.ts')),
   'timeline stock conflicts must use real 장비마스터 stock with category estimates only as fallback'
 );
 console.log('audit-round-11 checks OK');
@@ -540,7 +541,8 @@ console.log('alimtalk-reliability checks OK');
   );
   const regen = code.slice(code.indexOf('function regenPendingContracts'), code.indexOf('function regenPendingContracts') + 1600);
   assert(
-    /waitLock\(10000\); \} catch \(e\) \{[\s\S]{0,600}newTrigger\('regenPendingContracts'\)/.test(regen),
+    /waitLock\(10000\);[\s\S]{0,120}catch \(lockErr\) \{[\s\S]{0,120}stillPending = true;[\s\S]{0,80}break;/.test(code) &&
+      /if \(stillPending\) \{[\s\S]{0,120}newTrigger\('regenPendingContracts'\)/.test(code),
     'lock-timeout path must reschedule a retry trigger — silent return orphans the queue (observed: 10s lock wait → bail)'
   );
   assert(
@@ -855,8 +857,8 @@ console.log('roundtrip-item-memo-sync checks OK');
   );
   // 반납 카드 반영: 제외 숨김 + 현장추가 별도 노출
   assert(
-    /filter\(\(e\) => !e\.onsite && e\.checkoutState !== "excluded"\)/.test(ret) &&
-      /filter\(\(e\) => e\.onsite && e\.checkoutState !== "excluded"\)/.test(ret),
+    /filter\(\(e\) => !e\.onsite && e\.checkoutState !== "excluded"/.test(ret) &&
+      /filter\(\(e\) => e\.onsite && e\.checkoutState !== "excluded"/.test(ret),
     'ReturnChecklist must hide excluded and surface onsite-added items'
   );
 }
