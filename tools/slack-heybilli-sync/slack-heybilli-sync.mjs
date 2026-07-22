@@ -40,6 +40,7 @@ function loadConfig() {
   parseEnvFile(resolve(hermesHome, 'slack-heybilli.env'));
   return {
     token: process.env.SLACK_BOT_TOKEN || '',
+    apiToken: process.env.SLACK_HEYBILLI_API_TOKEN || process.env.SLACK_BOT_TOKEN || '',
     channelId: process.env.SLACK_HEYBILLI_CHANNEL_ID || DEFAULT_CHANNEL_ID,
     apiUrl: process.env.SLACK_HEYBILLI_API_URL || DEFAULT_API_URL,
     lookbackHours: Math.max(24, Number(process.env.SLACK_HEYBILLI_LOOKBACK_HOURS || 72)),
@@ -61,10 +62,10 @@ async function slackApi(config, method, params = {}) {
 }
 
 async function syncApi(config, body) {
-  if (!config.token) throw new Error('SLACK_BOT_TOKEN이 없습니다');
+  if (!config.apiToken) throw new Error('SLACK_HEYBILLI_API_TOKEN이 없습니다');
   const response = await fetch(config.apiUrl, {
     method: 'POST',
-    headers: { authorization: `Bearer ${config.token}`, 'content-type': 'application/json' },
+    headers: { authorization: `Bearer ${config.apiToken}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(60_000),
   });

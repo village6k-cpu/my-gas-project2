@@ -7,24 +7,13 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 function authorized(req: NextRequest): boolean {
+  const expected = (process.env.SLACK_OPS_SYNC_SECRET || process.env.SLACK_BOT_TOKEN || "").trim();
   const header = req.headers.get("authorization") || "";
   const actual = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  if (!actual) return false;
-
-  // AX2 already needs the workspace bot token to read #단톡방. Keep the
-  // dedicated sync secret valid when configured, while also accepting that
-  // same bot token for this single internal endpoint. Using `||` here made a
-  // configured sync secret silently disable the documented bot-token fallback.
-  const expectedSecrets = [process.env.SLACK_OPS_SYNC_SECRET, process.env.SLACK_BOT_TOKEN]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
-  if (!expectedSecrets.length) return false;
-
+  if (!expected || !actual) return false;
   const a = Buffer.from(actual);
-  return expectedSecrets.some((expected) => {
-    const b = Buffer.from(expected);
-    return a.length === b.length && timingSafeEqual(a, b);
-  });
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function jsonError(error: unknown, status = 400) {

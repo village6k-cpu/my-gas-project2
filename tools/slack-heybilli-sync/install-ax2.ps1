@@ -4,6 +4,7 @@ param(
   [string]$Mode = 'DryRun',
   [string]$RepoRoot = 'C:\Village\my-gas-project2',
   [string]$BackfillCutoffTs = '',
+  [string]$ApiTokenFile = '',
   [switch]$RegisterCron
 )
 
@@ -70,6 +71,15 @@ function Set-DotEnvValue {
 }
 
 $syncEnv = Join-Path $hermesHome 'slack-heybilli.env'
+if ($ApiTokenFile) {
+  $resolvedApiTokenFile = (Resolve-Path -LiteralPath $ApiTokenFile).Path
+  $apiToken = (Get-Content -LiteralPath $resolvedApiTokenFile -Raw).Trim()
+  if (-not $apiToken) { throw 'API 인증 토큰 파일이 비어 있습니다' }
+  if ($apiToken -match '\s') { throw 'API 인증 토큰에는 공백이나 줄바꿈을 넣을 수 없습니다' }
+  Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_API_TOKEN' $apiToken
+}
+$hasApiToken = (Test-Path -LiteralPath $syncEnv -PathType Leaf) -and (Select-String -LiteralPath $syncEnv -Pattern '^\s*(?:export\s+)?SLACK_HEYBILLI_API_TOKEN\s*=\s*\S+' -Quiet)
+if (-not $hasApiToken) { throw 'slack-heybilli.env에 SLACK_HEYBILLI_API_TOKEN이 없습니다' }
 Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_API_URL' 'https://today-dashboard-ten.vercel.app/api/internal/slack-ops'
 Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_CHANNEL_ID' 'C0B6ZJZ2XU3'
 Set-DotEnvValue $syncEnv 'SLACK_HEYBILLI_LOOKBACK_HOURS' '72'
@@ -116,6 +126,7 @@ if ($RegisterCron) {
   runnerInstalled = (Test-Path -LiteralPath (Join-Path $scriptsDir 'slack_heybilli_sync.py'))
   skillInstalled = (Test-Path -LiteralPath (Join-Path $skillDir 'SKILL.md'))
   slackTokenKeyPresent = [bool]$hasSlackToken
+  apiTokenKeyPresent = [bool]$hasApiToken
   cronRequested = [bool]$RegisterCron
   generalWorkerLive = $env:AI_WORKER_LIVE
   generalWorkerAutoSend = $env:AI_WORKER_AUTO_SEND
