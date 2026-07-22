@@ -15,7 +15,7 @@ assert(
   'paginated fetch helper must call range() so tables larger than PostgREST default limits are fully read'
 );
 assert(
-  remoteSource.includes('fetchRowsPaginated<any>(sb, "schedule_items"'),
+  /fetchRowsPaginated<any>\(\s*sb,\s*"schedule_items"/.test(remoteSource),
   'fetchAllTrades must load schedule_items through the paginated helper'
 );
 assert(

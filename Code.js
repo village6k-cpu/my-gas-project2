@@ -1370,12 +1370,14 @@ function regenPendingContracts() {
     }
     try {
       try {
+        var regenT0 = Date.now();
         deleteAndRegenerateContract(ss, 거래ID);
         try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
         try { invalidateDashboardCache(); } catch (e1) {}
         try { invalidateTimelineCache(); } catch (e2) {}
         try { supaMarkTradeDirty_(거래ID); } catch (eMark) {} // 새 계약서 링크 → Supabase/앱 전파
         Logger.log("계약서 재생성 완료(디바운스): " + 거래ID);
+        try { perfLog_("contractRegen", { reqID: 거래ID, totalMs: Date.now() - regenT0 }); } catch (ePerf) {}
       } catch (err) {
         try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e3) {}
         Logger.log("계약서 재생성 실패: " + 거래ID + " - " + err.message);

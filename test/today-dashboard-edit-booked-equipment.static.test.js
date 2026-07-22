@@ -39,7 +39,7 @@ assert(
 );
 assert(
   /const baselineLocked = isCheckoutBaselineLocked\(t\)/.test(checklist) &&
-    /baselineLocked \? \([\s\S]*반출 기준선 고정[\s\S]*\) : \([\s\S]*EquipmentNameCombobox/.test(checklist),
+    /baselineLocked \? \([\s\S]*반출 기준선 원본 보존[\s\S]*\) : \([\s\S]*EquipmentNameCombobox/.test(checklist),
   'checkout rows must replace name/quantity editors with a read-only explanation after the baseline is locked'
 );
 assert(
@@ -80,7 +80,7 @@ assert(
 assert(
   checklist.includes('예약 수량') &&
     checklist.includes('Stepper value={e.qty}') &&
-    checklist.includes('onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)}'),
+    checklist.includes('onChange={(v) => queueItemQty(t.tradeId, e.scheduleId, v)}'),
   'expanded equipment details must edit the registered reservation quantity, not only taken quantity'
 );
 
@@ -97,9 +97,11 @@ assert(
   'setItemName must await GAS so sheet-master failure cannot leave a Supabase-only rename'
 );
 assert(
-  /setItemQty[\s\S]*await gasMutation\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: safeQty \}\)[\s\S]*const nextQty = byId\.get\(e\.scheduleId\)![\s\S]*takenQty: e\.takenQty/.test(store) &&
+  /function applyEquipQtyResult\([\s\S]*const nextQty = byId\.get\(e\.scheduleId\)![\s\S]*takenQty: e\.takenQty/.test(store) &&
+    /setItemQty[\s\S]*await gasMutation\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: safeQty \}\)[\s\S]*applyEquipQtyResult\(/.test(store) &&
+    /commitQueuedItemQty[\s\S]*await gasMutation\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: target \}\)[\s\S]*applyEquipQtyResult\(/.test(store) &&
     !/takenQty: e\.takenQty != null \? Math\.min/.test(store),
-  'setItemQty must await updateEquipQty, apply authoritative set-component scaling, and never rewrite the checkout baseline'
+  'qty edits (setItemQty and debounced commitQueuedItemQty) must await updateEquipQty, apply authoritative set-component scaling via applyEquipQtyResult, and never rewrite the checkout baseline'
 );
 
 assert(

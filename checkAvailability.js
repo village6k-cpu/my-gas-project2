@@ -3741,7 +3741,9 @@ function updateEquipmentCheck(scheduleId, tradeId, label, field, value) {
   if (value.length > 500) value = value.slice(0, 500);
 
   var lock = LockService.getScriptLock();
-  try { lock.waitLock(5000); } catch (lockErr) {}
+  // 타임아웃 시 락 없이 진행하면 안 된다 — find-or-append가 중복 행을 만들 수 있음.
+  // 다른 쓰기 함수들과 동일하게 에러 반환 → 클라이언트(gasMutationRetrying)가 재시도.
+  try { lock.waitLock(10000); } catch (lockErr) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
 
   try {
     var sheet = getEquipmentCheckSheet_(true);
@@ -5308,7 +5310,9 @@ function updateTradeBillingCompany(tid, billingCompany) {
   if (!tid) return { error: "tid 필요" };
 
   var lock = LockService.getScriptLock();
-  try { lock.waitLock(5000); } catch (lockErr) {}
+  // 타임아웃 시 락 없이 진행하면 안 된다 — find-or-append가 중복 행을 만들 수 있음.
+  // 다른 쓰기 함수들과 동일하게 에러 반환 → 클라이언트(gasMutationRetrying)가 재시도.
+  try { lock.waitLock(10000); } catch (lockErr) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
 
   try {
     var 거래시트 = getVillageTradeSheet_();
@@ -5357,7 +5361,9 @@ function updateTradeProofField(tid, field, value) {
   }
 
   var lock = LockService.getScriptLock();
-  try { lock.waitLock(5000); } catch (lockErr) {}
+  // 타임아웃 시 락 없이 진행하면 안 된다 — find-or-append가 중복 행을 만들 수 있음.
+  // 다른 쓰기 함수들과 동일하게 에러 반환 → 클라이언트(gasMutationRetrying)가 재시도.
+  try { lock.waitLock(10000); } catch (lockErr) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
 
   try {
     var 거래시트 = getVillageTradeSheet_();
@@ -10270,6 +10276,7 @@ function _runPendingRegister() {
  * 특정 행의 요청ID를 기준으로 같은 ID의 모든 행을 일괄 등록
  */
 function registerByReqID(sheet, triggerRow) {
+  var _regPerfT0 = Date.now(); // 계측: 총시간/락대기/알림톡/큐 소진 (perfLog_로 기록)
   // ── 전체 등록 프로세스 직렬화 (동시 실행 방지) ──
   var regLock = LockService.getScriptLock();
   if (!regLock.tryLock(30000)) {
@@ -10278,6 +10285,8 @@ function registerByReqID(sheet, triggerRow) {
     enqueuePendingRegister_(pendingReqID, 30000);
     return;
   }
+  var _postRegisterAlimtalk = null; // 락 해제 후 보낼 알림톡 payload (외부 HTTP를 락 밖으로)
+  var _regPerf = { lockWaitMs: Date.now() - _regPerfT0, reqID: "" };
   try {
   // 락 획득 후 시트 데이터를 새로 읽어야 정확함
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -10761,23 +10770,6 @@ function registerByReqID(sheet, triggerRow) {
     sheet.getRange(triggerRow, 15).setValue("❌ 개고생2.0 실패: " + err.message);
   }
 
-  // ── R열 추가요청 수집 ──
-  var 추가요청목록 = [];
-  for (let i = 0; i < allData.length; i++) {
-    if (allData[i][0] !== reqID) continue;
-    var 추가 = String(allData[i][17] || "").trim();  // R열 (18번째, 인덱스 17)
-    if (추가) 추가요청목록.push(추가);
-  }
-  var 추가요청텍스트 = 추가요청목록.join("\n");
-
-  // ── 계약서 생성 (개고생2.0 입력 후 처리) ──
-  try {
-    const templateId = PropertiesService.getScriptProperties().getProperty("CONTRACT_TEMPLATE_ID");
-    if (templateId) {
-      const result = generateContractFile(ss, 거래ID, 추가요청텍스트);
-    }
-  } catch (err) {
-  }
     } // end !mergeMode (skip 개고생2.0 + 계약서)
 
   // 합침 등록(mergeMode): 기존 거래에 장비만 추가하고 위 계약서 생성 블록을 건너뛰므로,
@@ -10798,16 +10790,28 @@ function registerByReqID(sheet, triggerRow) {
     sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
   }
 
+  // ── 신규 등록 계약서 생성: 합침 등록(위)과 동일한 디바운스 워커로 위임 ──
+  // 인라인 생성(Drive 복사+전체 유효성 해제, 3~8초)을 락 홀드에서 제거.
+  // 워커(regenPendingContracts)는 P열 거래ID로 R열 추가요청을 다시 읽으므로
+  // 반드시 위의 P열 기록 이후에 예약해야 한다.
+  if (!mergeMode) {
+    try {
+      if (PropertiesService.getScriptProperties().getProperty("CONTRACT_TEMPLATE_ID")) {
+        scheduleContractRegen(거래ID);
+      }
+    } catch (regenErr) {}
+  }
+
   // ── Supabase 동기화 마킹 — 스크립트 쓰기는 onEdit이 안 울리므로 직접 표시 ──
   supaMarkTradeDirty_(거래ID);
 
   // ── 등록완료 알림톡 + 내 예약 링크 (거래당 1회, 실패해도 등록은 진행) ──
   // POPBILL_TPL_REGISTER 템플릿 미설정 시 자동 스킵 (기존처럼 코워크 카톡 발송으로 운영 가능)
-  try {
-    sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출일, 반출시간, 반납일, 반납시간);
-  } catch (almErr) {
-    Logger.log("등록완료 알림톡 실패(등록은 정상): " + almErr.message);
-  }
+  // 팝빌 토큰+발송+캐시예열은 외부 HTTP 2~3회 — 전역 락 해제 직후(finally)로 미룬다
+  _postRegisterAlimtalk = {
+    거래ID: 거래ID, 예약자명: 예약자명, 연락처: 연락처,
+    반출일: 반출일, 반출시간: 반출시간, 반납일: 반납일, 반납시간: 반납시간
+  };
 
   // dashboard/timeline 캐시 즉시 무효화 → 새로고침 안 해도 다음 fetch는 fresh
   try { invalidateDashboardCache([반출일, 반납일]); } catch (e) {}
@@ -10815,15 +10819,50 @@ function registerByReqID(sheet, triggerRow) {
 
   } finally {
     regLock.releaseLock();
+    _regPerf.lockHeldMs = Date.now() - _regPerfT0 - _regPerf.lockWaitMs;
+    // 알림톡(외부 HTTP)은 락 해제 직후, 대기열 처리보다 먼저 — 다른 등록 뒤로 밀리지 않게
+    if (_postRegisterAlimtalk) {
+      var _almT0 = Date.now();
+      _regPerf.reqID = String(_postRegisterAlimtalk.거래ID || "");
+      try {
+        sendRegisterCompleteAlimtalk_(
+          _postRegisterAlimtalk.거래ID, _postRegisterAlimtalk.예약자명, _postRegisterAlimtalk.연락처,
+          _postRegisterAlimtalk.반출일, _postRegisterAlimtalk.반출시간,
+          _postRegisterAlimtalk.반납일, _postRegisterAlimtalk.반납시간
+        );
+      } catch (almErr) {
+        Logger.log("등록완료 알림톡 실패(등록은 정상): " + almErr.message);
+      }
+      _regPerf.alimtalkMs = Date.now() - _almT0;
+      _postRegisterAlimtalk = null;
+    }
+    var _drainT0 = Date.now();
     try {
       processRegistrationQueue_(sheet);
     } catch (queueErr) {
       Logger.log("등록대기 자동 처리 실패: " + queueErr.message);
       try { ensurePendingRegisterTrigger_(30000); } catch (triggerErr) {}
     }
+    _regPerf.queueDrainMs = Date.now() - _drainT0;
+    _regPerf.totalMs = Date.now() - _regPerfT0;
+    perfLog_("registerByReqID", _regPerf);
   }
 }
 
+
+/**
+ * 성능 계측 로그 — Cloud Logging(Logger.log JSON) + '성능로그' 시트가 있으면 append.
+ * 시트는 자동 생성하지 않는다 (계측이 운영 시트 구조를 바꾸면 안 됨).
+ */
+function perfLog_(label, fields) {
+  try {
+    var payload = { perf: label };
+    if (fields) Object.keys(fields).forEach(function(k) { payload[k] = fields[k]; });
+    Logger.log("PERF " + JSON.stringify(payload));
+    var logSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("성능로그");
+    if (logSheet) logSheet.appendRow([new Date(), label, JSON.stringify(fields || {})]);
+  } catch (e) {}
+}
 
 /**
  * 등록대기 건 순차 처리
@@ -11770,7 +11809,18 @@ function doClearRequests() {
  * 팝빌 API 토큰 발급
  * 스크립트 속성에 POPBILL_LINK_ID, POPBILL_SECRET_KEY 필요
  */
-function _getPopbillToken() {
+var POPBILL_TOKEN_CACHE_KEY_ = 'popbillSessionToken_v1';
+
+function _getPopbillToken(forceRefresh) {
+  // 세션 토큰은 수 시간 유효한데 매 발송마다 재발급하면 외부 HTTP 1회가 통째로 낭비.
+  // 20분 캐시 + 만료 시 sendAlimtalk의 401 재시도(forceRefresh)로 커버.
+  var tokenCache = null;
+  try { tokenCache = CacheService.getScriptCache(); } catch (cacheErr) {}
+  if (!forceRefresh && tokenCache) {
+    var cachedToken = tokenCache.get(POPBILL_TOKEN_CACHE_KEY_);
+    if (cachedToken) return cachedToken;
+  }
+
   var props = PropertiesService.getScriptProperties();
   var linkID = props.getProperty('POPBILL_LINK_ID');
   var secretKey = props.getProperty('POPBILL_SECRET_KEY');
@@ -11815,6 +11865,9 @@ function _getPopbillToken() {
   var result = JSON.parse(response.getContentText());
   if (!result.session_token) {
     throw new Error('팝빌 토큰 발급 실패: ' + response.getContentText());
+  }
+  if (tokenCache) {
+    try { tokenCache.put(POPBILL_TOKEN_CACHE_KEY_, result.session_token, 1200); } catch (putErr) {}
   }
   return result.session_token;
 }
@@ -11870,6 +11923,12 @@ function sendAlimtalk(templateCode, receiver, receiverName, content, vars, btns,
   };
 
   var response = UrlFetchApp.fetch(url, options);
+  // 캐시된 세션 토큰이 만료됐으면(401) 강제 재발급 후 1회 재시도
+  if (response.getResponseCode() === 401) {
+    token = _getPopbillToken(true);
+    options.headers['Authorization'] = 'Bearer ' + token;
+    response = UrlFetchApp.fetch(url, options);
+  }
   return JSON.parse(response.getContentText());
 
 }
@@ -12732,14 +12791,37 @@ function formatScheduleSheet(schedSheet) {
   schedSheet.getRange(2, 3, rowCount, 2).setFontWeights(itemFontWeights);
   schedSheet.getRange(2, 3, rowCount, 2).setFontColors(itemFontColors);
 
+  // 거래 경계선: 경계마다 setBorder 1회(거래 수만큼 왕복, 시트가 클수록 등록이 느려짐)
+  // 대신 RangeList로 모아 1회 호출. 실패 시에만 기존 행별 방식으로 폴백.
+  var boundaryA1s = [];
   for (var b = 1; b < data.length; b++) {
     var prevTrade = String(data[b - 1][0] || "").trim();
     var nextTrade = String(data[b][0] || "").trim();
     if (nextTrade !== prevTrade) {
-      schedSheet.getRange(b + 1, 1, 1, lastCol)
-        .setBorder(null, null, true, null, null, null, "#999999", SpreadsheetApp.BorderStyle.SOLID);
+      boundaryA1s.push("A" + (b + 1) + ":" + columnLetter_(lastCol) + (b + 1));
     }
   }
+  if (boundaryA1s.length) {
+    try {
+      schedSheet.getRangeList(boundaryA1s)
+        .setBorder(null, null, true, null, null, null, "#999999", SpreadsheetApp.BorderStyle.SOLID);
+    } catch (rangeListErr) {
+      for (var f = 0; f < boundaryA1s.length; f++) {
+        schedSheet.getRange(boundaryA1s[f])
+          .setBorder(null, null, true, null, null, null, "#999999", SpreadsheetApp.BorderStyle.SOLID);
+      }
+    }
+  }
+}
+
+function columnLetter_(col) {
+  var letter = "";
+  while (col > 0) {
+    var rem = (col - 1) % 26;
+    letter = String.fromCharCode(65 + rem) + letter;
+    col = Math.floor((col - 1) / 26);
+  }
+  return letter;
 }
 
 function inspectScheduleDetailVisualState() {

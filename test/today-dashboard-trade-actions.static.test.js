@@ -54,13 +54,13 @@ assert(
 
 assert(
   /export async function updateTradeDetails/.test(store) &&
-    /gasMutation\("updateTrade"/.test(store) &&
+    /gasMutationRetrying\("updateTrade"/.test(store) &&
     /flushTradePersist\(tradeId\)/.test(store),
   '거래 편집은 GAS 원장 성공 뒤 Supabase까지 즉시 저장해야 한다',
 );
 assert(
   /export async function cancelTrade/.test(store) &&
-    /gasMutation\("updateContractStatus"[\s\S]*status: "취소"/.test(store) &&
+    /gasMutationRetrying\("updateContractStatus"[\s\S]*status: "취소"/.test(store) &&
     /cancelTradeRemote\(tradeId\)/.test(store),
   '취소는 GAS 취소 처리와 Supabase 취소 처리를 모두 실행해야 한다',
 );

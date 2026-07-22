@@ -19,6 +19,9 @@ function loadGuard(properties, durableResult) {
         getProperty: (key) => properties[key] ?? null,
       }),
     },
+    CacheService: {
+      getScriptCache: () => ({ get: () => null, put() {}, remove() {} }),
+    },
     Logger: { log() {} },
     findDashboardRowsByValue_: (_sheet, column) => column === 1 || column === 2 ? [2] : [],
     supaGetCheckoutBaselineState_: () => {

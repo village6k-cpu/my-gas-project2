@@ -9,7 +9,7 @@ const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 test('앱 저장 계층이 미완료 수량을 검사한 뒤에만 반납완료를 요청한다', () => {
   const store = read('apps/today-dashboard/lib/data/store.ts');
   assert.match(store, /toggleReturn[\s\S]{0,1200}returnCompletionBlockers/);
-  assert.match(store, /returnCompletionBlockers[\s\S]{0,500}return[\s\S]{0,1200}gasMutation\("toggleReturn"/);
+  assert.match(store, /returnCompletionBlockers[\s\S]{0,500}return[\s\S]{0,1200}gasMutation(?:Retrying)?\("toggleReturn"/);
   assert.match(store, /flushReturnCountsPersist\(tradeId\)[\s\S]{0,1400}gasMutation\("toggleReturn"/);
   assert.match(store, /persistInFlight/);
   assert.match(store, /returnCountPersistInFlight/);
@@ -202,11 +202,12 @@ test('앱 장비명 변경은 원장 성공 뒤에만 적용하고 옛 품목의
 
 test('앱 수량 변경도 원장 성공 뒤에만 적용하고 영향받은 세트 구성품까지 재검수한다', () => {
   const store = read('apps/today-dashboard/lib/data/store.ts');
-  const start = store.indexOf('export async function setItemQty');
+  const start = store.indexOf('function applyEquipQtyResult');
   const end = store.indexOf('\n// 품목 메모', start);
   const fn = store.slice(start, end);
   assert.match(fn, /writeBackEnabled/);
   assert.match(fn, /await gasMutation\("updateEquipQty"/);
+  assert.match(fn, /export async function setItemQty[\s\S]*applyEquipQtyResult\(/);
   assert.match(fn, /affectedIds/);
   assert.match(fn, /returnCounts/);
   assert.match(fn, /returnDone:\s*false/);
@@ -241,7 +242,7 @@ test('품목 추가는 기존 완료를 재오픈하고 반출 시작 뒤 품목
   assert.doesNotMatch(onsite, /settlement\s*!==\s*["']유상["']/);
   assert.match(onsite, /if \(!isSupabase\)[\s\S]{0,200}addOnsiteItemsLocal/);
   assert.match(onsite, /if \(!writeBackEnabled\)[\s\S]{0,180}throw new Error/);
-  assert.match(gas, /function dashboardRecordOnsiteAddon[\s\S]{0,900}forceZeroPrice:\s*!isPaid/);
+  assert.match(gas, /function dashboardRecordOnsiteAddon[\s\S]{0,2000}forceZeroPrice:\s*!isPaid/);
 });
 
 test('GAS 완료 API의 후속 저장 실패는 계약상태를 보상 복구하고 중복 완료는 이전상태를 덮지 않는다', () => {
