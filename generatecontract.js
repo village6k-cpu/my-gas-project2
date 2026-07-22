@@ -362,6 +362,9 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   if (rows.signDate) {
     ws.getRange(rows.signDate, findTextCol_(ws, rows.signDate, "계약일자", 3))
       .setValue("계약일자:       " + dateStr);
+    // 계약일자 셀을 덮어썼으므로, 아래 임차인 라벨 탐색은 최신 상태를 다시 읽게 함
+    // (기존 라이브 읽기와 동일한 쓰기-후-읽기 순서 보존)
+    invalidateContractSheetScan_();
   }
 
   // ── 임차인 서명란 ──
@@ -458,6 +461,8 @@ function repairContractItemHeaders_(ws, rows) {
   // can spill into populated rows and display #REF! in F/G or L/M.
   ws.getRange(headerRow, 6, 1, 2).setValues([["단가", "금액"]]);
   ws.getRange(headerRow, 12, 1, 2).setValues([["단가", "금액"]]);
+  // 헤더 셀(구 ARRAYFORMULA 잔재 포함)을 덮어썼으므로 스캔 메모 무효화
+  invalidateContractSheetScan_();
 }
 
 function expandContractItemTableIfNeeded_(ws, rows, requiredRowsPerSide) {
@@ -469,6 +474,8 @@ function expandContractItemTableIfNeeded_(ws, rows, requiredRowsPerSide) {
   var extraRows = requiredRows - currentRows;
   var insertAt = rows.itemStart + currentRows;
   ws.insertRowsBefore(insertAt, extraRows);
+  // 행 삽입으로 아래쪽 라벨 위치가 전부 밀림 → 스캔 메모 즉시 무효화
+  invalidateContractSheetScan_();
 
   var templateRow = Math.max(rows.itemStart, insertAt - 1);
   var source = ws.getRange(templateRow, 1, 1, 13);
@@ -485,6 +492,8 @@ function expandContractItemTableIfNeeded_(ws, rows, requiredRowsPerSide) {
   }
 
   rows.itemRows = requiredRows;
+  // 확장 후 최신 상태로 다시 스캔 (위 무효화 덕분에 findTemplateRows가 새로 읽음)
+  invalidateContractSheetScan_();
   return findTemplateRows(ws);
 }
 
@@ -494,6 +503,8 @@ function restoreContractItemMergedCells_(ws, row) {
     try { range.breakApart(); } catch (e) {}
     try { range.merge(); } catch (e2) {}
   });
+  // 병합 범위가 바뀌었으므로 스캔 메모 무효화
+  invalidateContractSheetScan_();
 }
 
 function findContractPaymentRefs_(ws, rows) {
@@ -534,15 +545,83 @@ function findContractPaymentRefs_(ws, rows) {
   return refs;
 }
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 시트 스캔 메모 (실행 1회 단위 캐시) — 라벨 탐색 IO 최적화
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 라벨 탐색 헬퍼(findTemplateRows / findRowContainingText_ / findTextCol_ /
+// findValueColAfterLabel_)가 매 호출마다 시트를 다시 읽으면
+// 계약서 1건당 읽기 API가 30여 회 발생하고, setValue 사이에 읽기가 끼어
+// 매번 강제 flush까지 일어난다 (2~5초 손실).
+// → 시트 전체(A~N열)를 실행 중 한 번만 읽어 메모리에서 재사용한다.
+// - 캐시 키 = 파일ID:시트ID → 다른 파일/시트로 넘어가면 자동으로 새로 읽음
+// - 행 삽입, 병합 변경, 라벨 셀 재작성 등 스캔 결과가 바뀔 수 있는 쓰기 후에는
+//   반드시 invalidateContractSheetScan_() 호출 (정확성 > 속도)
+// - 수식 계산 결과를 읽어야 하는 곳(readContractAmount_, 요약의 금액 셀)은
+//   메모를 쓰지 않고 기존처럼 라이브로 읽는다.
+var CONTRACT_SHEET_SCAN_CACHE_ = null;
+var CONTRACT_SCAN_COLS_ = 14;  // 라벨 탐색 범위 A~N열 (기존 헬퍼들과 동일)
+
+function invalidateContractSheetScan_() {
+  CONTRACT_SHEET_SCAN_CACHE_ = null;
+}
+
+function getContractSheetScan_(ws) {
+  var key = ws.getParent().getId() + ":" + ws.getSheetId();
+  var scan = CONTRACT_SHEET_SCAN_CACHE_;
+  if (!scan || scan.key !== key) {
+    scan = { key: key, lastRow: ws.getLastRow(), values: null, display: null, merged: null };
+    CONTRACT_SHEET_SCAN_CACHE_ = scan;
+  }
+  return scan;
+}
+
+// 원시 값(getValues) — findTemplateRows 전용 (기존과 동일하게 raw 값으로 탐색)
+function contractScanValues_(ws) {
+  var scan = getContractSheetScan_(ws);
+  if (!scan.values) {
+    scan.values = scan.lastRow > 0 ? ws.getRange(1, 1, scan.lastRow, CONTRACT_SCAN_COLS_).getValues() : [];
+  }
+  return scan.values;
+}
+
+// 표시 값(getDisplayValues) — 라벨 텍스트 탐색용
+function contractScanDisplay_(ws) {
+  var scan = getContractSheetScan_(ws);
+  if (!scan.display) {
+    scan.display = scan.lastRow > 0 ? ws.getRange(1, 1, scan.lastRow, CONTRACT_SCAN_COLS_).getDisplayValues() : [];
+  }
+  return scan.display;
+}
+
+// 병합 범위 — findValueColAfterLabel_의 라벨 병합폭 계산용 (경계만 저장)
+function contractScanMerged_(ws) {
+  var scan = getContractSheetScan_(ws);
+  if (!scan.merged) {
+    scan.merged = [];
+    if (scan.lastRow > 0) {
+      var ranges = ws.getRange(1, 1, scan.lastRow, CONTRACT_SCAN_COLS_).getMergedRanges();
+      for (var i = 0; i < ranges.length; i++) {
+        scan.merged.push({
+          rowStart: ranges[i].getRow(),
+          rowEnd: ranges[i].getLastRow(),
+          colStart: ranges[i].getColumn(),
+          colEnd: ranges[i].getLastColumn()
+        });
+      }
+    }
+  }
+  return scan.merged;
+}
+
 function findRowContainingText_(ws, text, rows) {
   if (!ws || !text) return 0;
+  var scan = getContractSheetScan_(ws);
   var start = rows && rows.itemStart ? Math.max(1, rows.itemStart - 4) : 1;
-  var last = ws.getLastRow();
-  if (last < start) return 0;
-  var values = ws.getRange(start, 1, last - start + 1, Math.min(ws.getLastColumn(), 14)).getDisplayValues();
-  for (var r = 0; r < values.length; r++) {
+  if (scan.lastRow < start) return 0;
+  var values = contractScanDisplay_(ws);
+  for (var r = start - 1; r < values.length; r++) {
     for (var c = 0; c < values[r].length; c++) {
-      if (String(values[r][c] || "").indexOf(text) !== -1) return start + r;
+      if (String(values[r][c] || "").indexOf(text) !== -1) return r + 1;
     }
   }
   return 0;
@@ -553,7 +632,7 @@ function cellA1_(row, col) {
 }
 
 function findTextCol_(ws, row, labelText, fallbackCol) {
-  var values = ws.getRange(row, 1, 1, 14).getDisplayValues()[0];
+  var values = contractScanDisplay_(ws)[row - 1] || [];
   for (var c = 0; c < values.length; c++) {
     if (String(values[c] || "").indexOf(labelText) !== -1) return c + 1;
   }
@@ -561,15 +640,17 @@ function findTextCol_(ws, row, labelText, fallbackCol) {
 }
 
 function findValueColAfterLabel_(ws, row, labelText, fallbackCol) {
-  var values = ws.getRange(row, 1, 1, 14).getDisplayValues()[0];
+  var values = contractScanDisplay_(ws)[row - 1] || [];
   for (var c = 0; c < values.length; c++) {
     if (String(values[c] || "").indexOf(labelText) === -1) continue;
 
-    var labelCell = ws.getRange(row, c + 1);
     var lastLabelCol = c + 1;
-    var mergedRanges = labelCell.getMergedRanges();
-    for (var i = 0; i < mergedRanges.length; i++) {
-      lastLabelCol = Math.max(lastLabelCol, mergedRanges[i].getLastColumn());
+    var merged = contractScanMerged_(ws);
+    for (var i = 0; i < merged.length; i++) {
+      var m = merged[i];
+      if (row >= m.rowStart && row <= m.rowEnd && c + 1 >= m.colStart && c + 1 <= m.colEnd) {
+        lastLabelCol = Math.max(lastLabelCol, m.colEnd);
+      }
     }
     return Math.min(lastLabelCol + 1, 14);
   }
@@ -673,8 +754,8 @@ function getAdditionalRequestTextByTradeId_(ss, 거래ID) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function findTemplateRows(ws) {
-  const lastRow = ws.getLastRow();
-  const data = ws.getRange(1, 1, lastRow, 14).getValues();
+  // 시트 스캔 메모 재사용 — 같은 실행에서 이미 읽었으면 API 호출 없이 반환
+  const data = contractScanValues_(ws);
 
   const result = {
     lessee1: null,      // 예약자(상호) 행
@@ -1040,6 +1121,8 @@ function getGeneratedContractSummary_(fileId) {
   try {
     var ss = SpreadsheetApp.openById(fileId);
     var ws = ss.getSheets()[0];
+    // 생성 중 쓴 값이 반영된 최신 상태를 요약해야 하므로 스캔 메모를 버리고 다시 읽음
+    invalidateContractSheetScan_();
     var rows = findTemplateRows(ws);
     var refs = findContractPaymentRefs_(ws, rows);
     var lesseeCol = findValueColAfterLabel_(ws, rows.lessee1, "예약자", 3);
