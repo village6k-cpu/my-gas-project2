@@ -31,6 +31,7 @@ assert(sheetApi.includes('idempotencyKey:'), 'sheet API must forward the onsite 
 assert(windowsRunner.includes('os.environ["AI_WORKER_LIVE"] = "0"') && windowsRunner.includes('os.environ["AI_WORKER_AUTO_SEND"] = "0"'), 'AX2 cron must keep the general AI worker switches fail-closed');
 assert(windowsRunner.includes('from hermes_cli.oneshot import run_oneshot'), 'Windows cron must avoid the Windows command-line prompt length limit');
 assert(windowsRunner.includes('trusted_rules = skill_path.read_text'), 'Windows cron must inject the trusted reconciliation skill explicitly');
+assert(windowsRunner.includes('encoding="utf-8"'), 'Windows cron must decode the Node Slack payload as UTF-8 instead of cp949');
 assert(windowsRunner.includes('os.environ["LOCALAPPDATA"]') && windowsInstaller.includes("Join-Path $env:LOCALAPPDATA 'hermes'"), 'AX2 runtime must use the Windows native Hermes home');
 assert(windowsInstaller.includes("$env:COMPUTERNAME -ne 'AX2'"), 'the Windows installer must fail closed off AX2');
 assert.deepEqual([...windowsInstallerBytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'Windows PowerShell 5.1 requires a UTF-8 BOM for Korean source text');

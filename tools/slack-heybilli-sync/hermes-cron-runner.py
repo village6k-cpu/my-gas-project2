@@ -62,6 +62,7 @@ def run() -> int:
         [node, str(worker), "scan", "--hermes"],
         cwd=root,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         timeout=180,
         check=False,
