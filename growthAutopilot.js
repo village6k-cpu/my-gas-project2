@@ -40,14 +40,14 @@ function getGrowthAutopilot(params) {
   // ── 1) 재방문 레이더 (엔진 재사용) ──
   var react = { due: [], atRisk: [], stats: {} };
   try {
-    var r = getReactivationRadar({ limit: 25 });
+    var r = getReactivationRadar({ limit: 25, nocache: params.nocache });   // nocache 전파 — 강제 새로고침 시 하위 캐시도 우회
     if (r && r.ok) react = r;
   } catch (e) {}
 
   // ── 2) 장비 수익 레이더 (엔진 재사용) — 청구누락·유휴 ──
   var equip = { unbilled: [], idle: [], stats: {} };
   try {
-    var e2 = getEquipmentProfitRadar({ limit: 20 });
+    var e2 = getEquipmentProfitRadar({ limit: 20, nocache: params.nocache });   // nocache 전파
     if (e2 && e2.ok) equip = e2;
   } catch (e) {}
   // 청구누락은 "정가 있는데 0원"(확실)만 액션 대상으로
