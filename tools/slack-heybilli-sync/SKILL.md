@@ -25,6 +25,14 @@ node tools/slack-heybilli-sync/slack-heybilli-sync.mjs apply --write <<'JSON'
 JSON
 ```
 
+Windows PowerShell에서는 bash heredoc을 쓰지 말고 다음처럼 stdin으로 넘긴다.
+
+```powershell
+@'
+{...plan...}
+'@ | node tools/slack-heybilli-sync/slack-heybilli-sync.mjs apply --write
+```
+
 쓰기 모드가 DRY-RUN이면 `--write`를 빼고 실행한다. `ask`와 `ignore`도 stdin JSON을 받는다.
 
 DRY-RUN에서는 `apply`를 `--write` 없이 실행하는 것만 허용한다. `ask`, `ignore`, Slack 메시지
@@ -90,6 +98,8 @@ node tools/slack-heybilli-sync/slack-heybilli-sync.mjs ask <<'JSON'
 JSON
 ```
 
+Windows PowerShell에서는 동일 JSON을 `@' ... '@ | node ... ask` 형태로 stdin에 넘긴다.
+
 단순 잡담/업무 사실 아님:
 
 ```bash
@@ -97,6 +107,8 @@ node tools/slack-heybilli-sync/slack-heybilli-sync.mjs ignore <<'JSON'
 {"event":{"messageTs":"...","sourceHash":"..."},"reason":"운영 기록이 아닌 이유"}
 JSON
 ```
+
+Windows PowerShell에서는 동일 JSON을 `@' ... '@ | node ... ignore` 형태로 stdin에 넘긴다.
 
 LIVE 모드에서는 모든 pending 이벤트를 apply, ask, ignore 중 하나로 끝낸다. 최종 답은 처리 건수만 한 줄로 쓴다.
 초기 이관 기준 시각이 프롬프트에 있으면, 그보다 오래된 불명확 사건은 새 질문을 만들지 않고

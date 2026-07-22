@@ -26,9 +26,11 @@ assert(gas.includes('slackOpsOnsiteIdempotency_v1') && gas.includes('duplicate: 
 assert(sheetApi.includes('idempotencyKey:'), 'sheet API must forward the onsite idempotency key');
 assert(windowsRunner.includes('os.environ["AI_WORKER_LIVE"] = "0"') && windowsRunner.includes('os.environ["AI_WORKER_AUTO_SEND"] = "0"'), 'AX2 cron must keep the general AI worker switches fail-closed');
 assert(windowsRunner.includes('from hermes_cli.oneshot import run_oneshot'), 'Windows cron must avoid the Windows command-line prompt length limit');
+assert(windowsRunner.includes('trusted_rules = skill_path.read_text'), 'Windows cron must inject the trusted reconciliation skill explicitly');
 assert(windowsRunner.includes('os.environ["LOCALAPPDATA"]') && windowsInstaller.includes("Join-Path $env:LOCALAPPDATA 'hermes'"), 'AX2 runtime must use the Windows native Hermes home');
 assert(windowsInstaller.includes("$env:COMPUTERNAME -ne 'AX2'"), 'the Windows installer must fail closed off AX2');
 assert(windowsInstaller.includes("SLACK_HEYBILLI_WRITE_ENABLED' $(if ($Mode -eq 'Live')"), 'the Windows installer must make dry-run/live state explicit');
 assert(syncSkill.includes('후속조치 보드와 무관') && !syncSkill.includes('ai_follow_up_items'), 'the deployed AX2 skill must keep Slack reconciliation out of the Kakao follow-up board');
+assert(syncSkill.includes("@'\n{...plan...}\n'@ | node"), 'the deployed skill must include a PowerShell-safe stdin example');
 
 console.log('slack-heybilli direct-sync static checks passed');

@@ -113,8 +113,8 @@ if ($RegisterCron) {
   mode = $Mode
   repo = $repo
   hermesHome = $hermesHome
-  runnerInstalled = Test-Path -LiteralPath (Join-Path $scriptsDir 'slack_heybilli_sync.py')
-  skillInstalled = Test-Path -LiteralPath (Join-Path $skillDir 'SKILL.md')
+  runnerInstalled = (Test-Path -LiteralPath (Join-Path $scriptsDir 'slack_heybilli_sync.py'))
+  skillInstalled = (Test-Path -LiteralPath (Join-Path $skillDir 'SKILL.md'))
   slackTokenKeyPresent = [bool]$hasSlackToken
   cronRequested = [bool]$RegisterCron
   generalWorkerLive = $env:AI_WORKER_LIVE
