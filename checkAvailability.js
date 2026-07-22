@@ -48,8 +48,8 @@ function onOpen() {
     .addItem("📖 업무 매뉴얼", "showManual")
     .addToUi();
 
-  // 시트 열 때마다 장비 목록 자동 갱신
-  try { refreshEquipmentList(); } catch (e) { /* 첫 실행 시 무시 */ }
+  // 시트 열 때마다 장비 목록 자동 갱신 — 세트마스터가 안 바뀌었으면 스킵 (매 오픈 2~5초 절약)
+  try { refreshEquipmentList(true); } catch (e) { /* 첫 실행 시 무시 */ }
 }
 
 
@@ -4870,9 +4870,10 @@ function getTradePaymentOptionsFromSheet_() {
 
     var maxRows = Math.max(거래시트.getMaxRows(), 2);
     var scanRows = Math.min(Math.max(maxRows - 1, 1), 50);
-    for (var r = 2; r < 2 + scanRows; r++) {
-      var rule = 거래시트.getRange(r, 10).getDataValidation(); // J열
-      var opts = paymentOptionsFromRule_(rule);
+    // 셀별 getDataValidation() 50회 왕복 → 범위 1회 배치 조회
+    var rules = 거래시트.getRange(2, 10, scanRows, 1).getDataValidations(); // J열
+    for (var r = 0; r < rules.length; r++) {
+      var opts = paymentOptionsFromRule_(rules[r][0]);
       if (opts.length > 0) return opts;
     }
   } catch (err) {}
@@ -5029,8 +5030,10 @@ function getTradeColumnOptionsFromSheet_(column, fallbackOptions) {
 
     var maxRows = Math.max(거래시트.getMaxRows(), 2);
     var scanRows = Math.min(Math.max(maxRows - 1, 1), 80);
-    for (var r = 2; r < 2 + scanRows; r++) {
-      var opts = paymentOptionsFromRule_(거래시트.getRange(r, column).getDataValidation());
+    // 셀별 getDataValidation() 80회 왕복 → 범위 1회 배치 조회 (캐시 만료 시 2~8초 스파이크 제거)
+    var colRules = 거래시트.getRange(2, column, scanRows, 1).getDataValidations();
+    for (var r = 0; r < colRules.length; r++) {
+      var opts = paymentOptionsFromRule_(colRules[r][0]);
       if (opts.length > 0) return opts;
     }
   } catch (err) {}
@@ -7639,7 +7642,7 @@ function handleScheduleEdit(e) {
  * ★ 장비를 추가/삭제했을 때 메뉴에서 "목록 갱신"을 실행하세요.
  * ★ 또는 onOpen()에서 자동 실행되도록 설정되어 있습니다.
  */
-function refreshEquipmentList() {
+function refreshEquipmentList(skipIfUnchanged) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
   const setSheet = ss.getSheetByName("세트마스터");
@@ -7652,6 +7655,25 @@ function refreshEquipmentList() {
   }
 
   const sorted = Array.from(names).sort();
+
+  // ── 변경 없으면 스킵 (onOpen 자동 갱신용) ──
+  // 목록 재구축+열 전체 유효성 재설정이 2~5초라, 세트마스터·확인요청 행수가 그대로면 생략.
+  // 메뉴/셋업/API 호출(인자 없음)은 항상 전체 갱신.
+  var refreshProps = PropertiesService.getScriptProperties();
+  var refreshReqSheet = ss.getSheetByName("확인요청");
+  var refreshHash = "";
+  var refreshSchedSheet = ss.getSheetByName("스케줄상세");
+  try {
+    refreshHash = Utilities.base64Encode(Utilities.computeDigest(
+      Utilities.DigestAlgorithm.MD5,
+      sorted.join("\n") + "|" + (refreshReqSheet ? refreshReqSheet.getMaxRows() : 0) +
+        "|" + (refreshSchedSheet ? refreshSchedSheet.getMaxRows() : 0)
+    ));
+  } catch (hashErr) {}
+  if (skipIfUnchanged && refreshHash && ss.getSheetByName("목록") &&
+      refreshProps.getProperty("EQUIP_LIST_REFRESH_HASH_V1") === refreshHash) {
+    return;
+  }
 
   // ── "목록" 시트 생성 또는 초기화 ──
   let listSheet = ss.getSheetByName("목록");
@@ -7731,6 +7753,11 @@ function refreshEquipmentList() {
       .build();
     schedSheet.getRange(2, 3, schedLastRow - 1, 1).setDataValidation(schedRule); // C열
     schedSheet.getRange(2, 4, schedLastRow - 1, 1).setDataValidation(schedRule); // D열
+  }
+
+  // 전체 갱신 완료 — 다음 onOpen이 스킵 판단할 수 있게 해시 저장
+  if (refreshHash) {
+    try { refreshProps.setProperty("EQUIP_LIST_REFRESH_HASH_V1", refreshHash); } catch (propErr) {}
   }
 
   return sorted.length;
@@ -9876,14 +9903,40 @@ function expandSetRows(sheet, setRow, reqID, components, qty) {
 /**
  * 세트마스터에서 구성품 조회 (가용체크=Y만)
  */
+// ── 마스터 시트 실행당 1회 읽기 캐시 ──
+// 장비마스터/세트마스터는 확인·등록 흐름에서 읽기 전용인데, findEquipment/getSetComponents/
+// findSetPrice가 호출마다 전체 시트를 다시 읽어 요청당 15~25회 왕복(3~10초)이 낭비됐다.
+// GAS 전역은 실행마다 초기화되므로 실행 간 스테일 없음. 이 두 시트를 같은 실행 안에서
+// 수정하는 경로가 생기면 해당 지점에서 캐시 변수를 null로 리셋할 것.
+var EQUIP_MASTER_SCAN_ = null; // { id: sheetId, rows: [12열 values] }
+var SET_MASTER_SCAN_ = null;   // { id: sheetId, rows: [>=7열 values] }
+
+function getEquipMasterRows_(equipSheet) {
+  if (!equipSheet) return [];
+  // 테스트 목(mock) 시트는 getSheetId가 없다 — 그 경우 캐시 없이 직접 읽기(기존 동작)
+  var sid = (typeof equipSheet.getSheetId === "function") ? equipSheet.getSheetId() : null;
+  if (sid !== null && EQUIP_MASTER_SCAN_ && EQUIP_MASTER_SCAN_.id === sid) return EQUIP_MASTER_SCAN_.rows;
+  var lastRow = equipSheet.getLastRow();
+  var rows = lastRow < 2 ? [] : equipSheet.getRange(2, 1, lastRow - 1, 12).getValues();
+  if (sid !== null) EQUIP_MASTER_SCAN_ = { id: sid, rows: rows };
+  return rows;
+}
+
+function getSetMasterRows_(setSheet) {
+  if (!setSheet) return [];
+  var sid = (typeof setSheet.getSheetId === "function") ? setSheet.getSheetId() : null;
+  if (sid !== null && SET_MASTER_SCAN_ && SET_MASTER_SCAN_.id === sid) return SET_MASTER_SCAN_.rows;
+  var lastRow = setSheet.getLastRow();
+  var lastCol = Math.max(setSheet.getLastColumn(), 7); // F:가용체크, G:단가까지 포함
+  var rows = lastRow < 2 ? [] : setSheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  if (sid !== null) SET_MASTER_SCAN_ = { id: sid, rows: rows };
+  return rows;
+}
+
 function getSetComponents(name, setSheet) {
   if (!name) return [];
   if (!setSheet) return [];
-  const lastRow = setSheet.getLastRow();
-  if (lastRow < 2) return [];
-
-  var lastCol = Math.max(setSheet.getLastColumn(), 5);
-  const data = setSheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  const data = getSetMasterRows_(setSheet);
   // A: 세트명, B: 구성장비명, C: 수량, D: 비고, E: 대체가능장비, F: 가용체크(없으면 전부 포함)
   const items = data.filter(row => {
     if (row[0].toString().trim() !== name.toString().trim()) return false;
@@ -11575,10 +11628,7 @@ function getScheduleData(schedSheet) {
  *   F:가용수량, G:대여중수량, H:정비중수량, I:상태, J:비고, K:최근실사, L:단가(레거시)
  */
 function findEquipment(name, equipSheet) {
-  const lastRow = equipSheet.getLastRow();
-  if (lastRow < 2) return null;
-
-  const data = equipSheet.getRange(2, 1, lastRow - 1, 12).getValues();
+  const data = getEquipMasterRows_(equipSheet);
   for (let i = 0; i < data.length; i++) {
     if (data[i][3] === name) {
       return { total: data[i][4] || 0, 단가: data[i][11] || 0 };
@@ -11595,10 +11645,7 @@ function findEquipment(name, equipSheet) {
  */
 function findSetPrice(name, setSheet) {
   if (!setSheet) return 0;
-  const lastRow = setSheet.getLastRow();
-  if (lastRow < 2) return 0;
-
-  const data = setSheet.getRange(2, 1, lastRow - 1, 7).getValues();
+  const data = getSetMasterRows_(setSheet);
   for (let i = 0; i < data.length; i++) {
     if (String(data[i][0]).trim() === String(name).trim()) {
       // 세트 상품: 첫 행에 단가 / 개별 장비: 해당 행에 단가
@@ -11610,13 +11657,10 @@ function findSetPrice(name, setSheet) {
 
 function isSetMasterName(name, setSheet) {
   if (!name || !setSheet) return false;
-  const lastRow = setSheet.getLastRow();
-  if (lastRow < 2) return false;
-
   const target = String(name).trim();
-  const names = setSheet.getRange(2, 1, lastRow - 1, 1).getValues();
-  for (let i = 0; i < names.length; i++) {
-    if (String(names[i][0] || "").trim() === target) return true;
+  const rows = getSetMasterRows_(setSheet);
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0] || "").trim() === target) return true;
   }
   return false;
 }
@@ -11626,9 +11670,7 @@ function isSetMasterName(name, setSheet) {
  * 예: findEquipmentByCategory("7인치 모니터") → [{name:"티비로직 7인치",...}, {name:"스몰HD 7인치",...}]
  */
 function findEquipmentByCategory(categoryName, equipSheet) {
-  const lastRow = equipSheet.getLastRow();
-  if (lastRow < 2) return [];
-  const data = equipSheet.getRange(2, 1, lastRow - 1, 12).getValues();
+  const data = getEquipMasterRows_(equipSheet);
   const items = [];
   for (let i = 0; i < data.length; i++) {
     if (String(data[i][2]).trim() === String(categoryName).trim() && data[i][3]) {
