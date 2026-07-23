@@ -48,37 +48,39 @@ function getVillageOperationCapabilities_() {
       { id: "payment.metadata", action: "paymentMeta", policy: "read_only" },
       { id: "confirmation_request.list", action: "list", policy: "read_only" },
       { id: "confirmation_request.scan", action: "scan", policy: "read_only" },
+      { id: "operation.receipt", action: "operationReceipt", policy: "read_only", verification: "authoritative_read" },
       { id: "confirmation_request.create", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback" },
       { id: "confirmation_request.create_batch", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback" },
       { id: "confirmation_request.update", action: "updateRequest", policy: "internal_write", verification: "authoritative_readback" },
       { id: "schedule.change_dates", action: "scheduleChangeDates", policy: "internal_write", verification: "authoritative_readback" },
-      { id: "schedule.update_time", action: "updateTime", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "schedule.update_status", action: "updateStatus", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "schedule.toggle_setup", action: "toggleSetup", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "schedule.toggle_return", action: "toggleReturn", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "schedule.toggle_item", action: "toggleItem", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "equipment.check_update", action: "updateEquipmentCheck", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "equipment.add", action: "addEquip", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "equipment.add_batch", action: "addEquips", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "equipment.record_onsite_addon", action: "recordOnsiteAddon", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "equipment.remove", action: "removeEquip", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "equipment.update_quantity", action: "updateEquipQty", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "equipment.update_name", action: "updateEquipName", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "contract.update_status", action: "updateContractStatus", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "contract.regenerate", action: "regenerateContract", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "payment.update_method", action: "updatePayment", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "billing.update_company", action: "updateBillingCompany", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "proof.update_field", action: "updateTradeProof", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "dashboard.save_notes", action: "saveDashboardNotes", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "confirmation_request.confirm", action: "확인", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "confirmation_request.hold", action: "보류", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "confirmation_request.reject", action: "거절", policy: "internal_write", verification: "unverified_server_result" },
-      { id: "confirmation_request.register", action: "등록", policy: "final_registration", verification: "unverified_server_result" },
-      { id: "customer.send_estimate", action: "sendEstimate", policy: "customer_send", verification: "unverified_server_result" },
-      { id: "customer.send_statement", action: "sendStatement", policy: "customer_send", verification: "unverified_server_result" },
-      { id: "customer.send_payment_link", action: "sendPayAppPaymentLink", policy: "customer_send", verification: "unverified_server_result" },
-      { id: "customer.issue_proof", action: "issueProof", policy: "customer_send", verification: "unverified_server_result" },
-      { id: "customer.send_equipment_risk_guidance", action: "equipmentRiskSend", policy: "customer_send", verification: "unverified_server_result" }
+      { id: "schedule.update_time", action: "updateTime", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "schedule.update_status", action: "updateStatus", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "schedule.toggle_setup", action: "toggleSetup", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "schedule.toggle_return", action: "toggleReturn", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "schedule.toggle_item", action: "toggleItem", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "equipment.check_update", action: "updateEquipmentCheck", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "equipment.add", action: "addEquip", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "equipment.add_batch", action: "addEquips", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "equipment.record_onsite_addon", action: "recordOnsiteAddon", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "equipment.remove", action: "removeEquip", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "equipment.update_quantity", action: "updateEquipQty", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "equipment.update_name", action: "updateEquipName", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "contract.update_status", action: "updateContractStatus", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "contract.regenerate", action: "regenerateContract", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "payment.update_method", action: "updatePayment", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "billing.update_company", action: "updateBillingCompany", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "proof.update_field", action: "updateTradeProof", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "dashboard.save_notes", action: "saveDashboardNotes", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "dashboard.upload_photo", action: "uploadDashboardPhoto", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "confirmation_request.confirm", action: "확인", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "confirmation_request.hold", action: "보류", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "confirmation_request.reject", action: "거절", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "confirmation_request.register", action: "등록", policy: "final_registration", verification: "authoritative_server_ack" },
+      { id: "customer.send_estimate", action: "sendEstimate", policy: "customer_send", verification: "authoritative_server_ack" },
+      { id: "customer.send_statement", action: "sendStatement", policy: "customer_send", verification: "authoritative_server_ack" },
+      { id: "customer.send_payment_link", action: "sendPayAppPaymentLink", policy: "customer_send", verification: "authoritative_server_ack" },
+      { id: "customer.issue_proof", action: "issueProof", policy: "customer_send", verification: "authoritative_server_ack" },
+      { id: "customer.send_equipment_risk_guidance", action: "equipmentRiskSend", policy: "customer_send", verification: "authoritative_server_ack" }
     ]
   };
 }
@@ -186,12 +188,195 @@ function doPost(e) {
   return handleRequest(e);
 }
 
+function stableVillageOperationJson_(value) {
+  if (value === null || value === undefined) return JSON.stringify(value === undefined ? null : value);
+  if (Array.isArray(value)) {
+    return "[" + value.map(stableVillageOperationJson_).join(",") + "]";
+  }
+  if (typeof value === "object") {
+    return "{" + Object.keys(value).sort().map(function (key) {
+      return JSON.stringify(key) + ":" + stableVillageOperationJson_(value[key]);
+    }).join(",") + "}";
+  }
+  return JSON.stringify(value);
+}
+
+function villageOperationDigest_(capability, action, body) {
+  var copy = Object.assign({}, body || {});
+  delete copy.key;
+  delete copy.operationId;
+  delete copy.capability;
+  delete copy.action;
+  var bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    stableVillageOperationJson_({ capability: capability, action: action, parameters: copy }),
+    Utilities.Charset.UTF_8
+  );
+  return bytes.map(function (item) {
+    var value = item < 0 ? item + 256 : item;
+    return (value < 16 ? "0" : "") + value.toString(16);
+  }).join("");
+}
+
+function villageOperationReceiptKey_(operationId) {
+  return "village_operation_receipt_v1_" + operationId;
+}
+
+function villageOperationIssuedAtMs_(operationId) {
+  var match = String(operationId || "").match(/^(\d{10,13})-/);
+  if (!match) return 0;
+  var value = Number(match[1]);
+  return match[1].length === 10 ? value * 1000 : value;
+}
+
+function getVillageOperationCapability_(capabilityId, action) {
+  var capabilities = getVillageOperationCapabilities_().capabilities || [];
+  for (var i = 0; i < capabilities.length; i++) {
+    var item = capabilities[i];
+    if (item.id === capabilityId && item.action === action) return item;
+  }
+  return null;
+}
+
+function readVillageOperationReceipt_(operationId) {
+  if (!/^[a-f0-9-]{16,80}$/i.test(String(operationId || ""))) return null;
+  var text = PropertiesService.getScriptProperties().getProperty(villageOperationReceiptKey_(operationId));
+  if (!text) return null;
+  try { return JSON.parse(text); } catch (error) { return { status: "indeterminate", operationId: operationId }; }
+}
+
+function pruneVillageOperationReceipts_(properties) {
+  var markerKey = "village_operation_receipt_pruned_at_v1";
+  var now = Date.now();
+  var last = Number(properties.getProperty(markerKey) || 0);
+  if (now - last < 86400000) return;
+  var all = properties.getProperties();
+  Object.keys(all).forEach(function (key) {
+    if (key.indexOf("village_operation_receipt_v1_") !== 0) return;
+    try {
+      var receipt = JSON.parse(all[key]);
+      if (now - Number(receipt.updatedAtMs || receipt.startedAtMs || 0) > 2592000000) {
+        properties.deleteProperty(key);
+      }
+    } catch (error) {
+      properties.deleteProperty(key);
+    }
+  });
+  properties.setProperty(markerKey, String(now));
+}
+
+function withVillageOperationReceipt_(e, execute) {
+  var params = e.parameter || {};
+  var body = {};
+  if (e.postData) {
+    try { body = JSON.parse(e.postData.contents); } catch (error) { body = {}; }
+  }
+  var key = params.key || body.key;
+  var action = params.action || body.action || "";
+  var operationId = String(body.operationId || "");
+  var capabilityId = String(body.capability || "");
+  var capability = getVillageOperationCapability_(capabilityId, action);
+  if (key !== API_KEY || !operationId || action === "operationReceipt") {
+    return execute();
+  }
+  if (
+    !/^[a-f0-9-]{16,80}$/i.test(operationId) ||
+    !capability ||
+    capability.policy === "read_only" ||
+    capability.verification !== "authoritative_server_ack"
+  ) {
+    return jsonResponse({
+      success: false,
+      status: "ERROR",
+      error: "operationId requests require an exact acknowledged capability/action binding"
+    });
+  }
+
+  var digest = villageOperationDigest_(capabilityId, action, body);
+  var properties = PropertiesService.getScriptProperties();
+  var receiptKey = villageOperationReceiptKey_(operationId);
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var existing = readVillageOperationReceipt_(operationId);
+    if (existing) {
+      if (existing.requestDigest !== digest || existing.capability !== capabilityId || existing.action !== action) {
+        return jsonResponse({ success: false, status: "ERROR", error: "operationId request mismatch" });
+      }
+      if (existing.status === "applied") {
+        return jsonResponse({
+          success: true,
+          status: "applied",
+          operationId: operationId,
+          capability: capabilityId,
+          idempotentReplay: true,
+          resultDigest: existing.resultDigest || ""
+        });
+      }
+      return jsonResponse({
+        success: false,
+        status: existing.status || "indeterminate",
+        operationId: operationId,
+        capability: capabilityId,
+        error: "operation outcome requires reconciliation"
+      });
+    }
+
+    var pending = {
+      kind: "village-operation-receipt",
+      operationId: operationId,
+      capability: capabilityId,
+      action: action,
+      requestDigest: digest,
+      status: "in_progress",
+      startedAt: new Date().toISOString(),
+      startedAtMs: Date.now()
+    };
+    pruneVillageOperationReceipts_(properties);
+    properties.setProperty(receiptKey, JSON.stringify(pending));
+    var output = execute();
+    var content = output && typeof output.getContent === "function" ? output.getContent() : "";
+    var result = null;
+    try { result = JSON.parse(content); } catch (error) { result = null; }
+    var applied = !!result && !result.error && result.ok !== false && result.success !== false && result.status !== "ERROR";
+    var finalized = Object.assign({}, pending, {
+      status: applied ? "applied" : "indeterminate",
+      updatedAt: new Date().toISOString(),
+      updatedAtMs: Date.now(),
+      resultDigest: villageOperationDigest_(capabilityId, action, { result: result })
+    });
+    properties.setProperty(receiptKey, JSON.stringify(finalized));
+    return output;
+  } catch (error) {
+    var current = readVillageOperationReceipt_(operationId) || {};
+    properties.setProperty(receiptKey, JSON.stringify(Object.assign({}, current, {
+      kind: "village-operation-receipt",
+      operationId: operationId,
+      capability: capabilityId,
+      action: action,
+      requestDigest: digest,
+      status: "indeterminate",
+      updatedAt: new Date().toISOString(),
+      updatedAtMs: Date.now()
+    })));
+    throw error;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 통합 요청 처리
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function handleRequest(e) {
+  return withVillageOperationReceipt_(e, function () {
+    return handleRequestCore_(e);
+  });
+}
+
+function handleRequestCore_(e) {
   try {
     // ── 인증 확인 ──
     let params = e.parameter || {};
@@ -221,6 +406,36 @@ function handleRequest(e) {
 
       case "capabilities":
         return jsonResponse(getVillageOperationCapabilities_());
+
+      case "operationReceipt": {
+        var receiptOperationId = params.operationId || postBody.operationId || "";
+        var operationReceipt = readVillageOperationReceipt_(receiptOperationId);
+        if (!operationReceipt) {
+          var issuedAtMs = villageOperationIssuedAtMs_(receiptOperationId);
+          var ageMs = issuedAtMs ? Date.now() - issuedAtMs : Number.POSITIVE_INFINITY;
+          // Receipts are retained for 30 days. Only a timestamped operation ID
+          // issued within 24 hours may use absence as proof it never started.
+          // Older, unknown-age, future-skewed, or pruned IDs stay indeterminate.
+          var safelyAbsent = ageMs >= -300000 && ageMs <= 86400000;
+          return jsonResponse({
+            success: true,
+            found: false,
+            status: safelyAbsent ? "not_found" : "expired",
+            operationId: receiptOperationId,
+            retrySafe: safelyAbsent
+          });
+        }
+        return jsonResponse({
+          success: true,
+          found: true,
+          status: operationReceipt.status || "indeterminate",
+          operationId: operationReceipt.operationId,
+          capability: operationReceipt.capability,
+          action: operationReceipt.action,
+          requestDigest: operationReceipt.requestDigest,
+          updatedAt: operationReceipt.updatedAt || operationReceipt.startedAt || ""
+        });
+      }
 
       case "sheets":
         return jsonResponse(getSheetList());

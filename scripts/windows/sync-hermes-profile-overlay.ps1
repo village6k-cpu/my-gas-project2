@@ -499,6 +499,7 @@ $runtimeRunnerNames = @(
     'village-live-query.js',
     'village-confirm-request.js',
     'village-trade-date-change.js',
+    'village-network-isolation-preload.js',
     'village-capability-promote.js',
     'village-operation-broker.js'
 )
@@ -752,6 +753,7 @@ try {
             foreach ($requiredPath in @(
                 (Join-Path $runtimeScriptsDestination 'village-operation-broker.js'),
                 (Join-Path $runtimeScriptsDestination 'village-capability-promote.js'),
+                (Join-Path $runtimeScriptsDestination 'village-network-isolation-preload.js'),
                 (Join-Path $runtimePluginDestination 'plugin.yaml'),
                 (Join-Path $runtimePluginDestination '__init__.py'),
                 (Join-Path $skillsRoot 'productivity\village-operations\SKILL.md'),

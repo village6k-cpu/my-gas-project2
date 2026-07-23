@@ -7,6 +7,7 @@ const {
   CAPABILITIES,
   catalog,
   executeOperation,
+  operationRequestDigest,
   prepareOperation,
   runBroker
 } = require('../scripts/windows/village-operation-broker.js');
@@ -29,6 +30,7 @@ test('the broker exposes a broad typed catalog without generic sheet-write or so
   assert.ok(CAPABILITIES['confirmation_request.create_batch']);
   assert.ok(CAPABILITIES['contract.regenerate']);
   assert.ok(CAPABILITIES['payment.update_method']);
+  assert.ok(CAPABILITIES['operation.receipt']);
   assert.ok(CAPABILITIES['customer.send_estimate']);
   assert.equal(CAPABILITIES['sheet.write'], undefined);
   assert.equal(CAPABILITIES['api.run_function'], undefined);
@@ -90,7 +92,7 @@ test('a direct first-use execute also enters the learn-register-resume lifecycle
   assert.equal(calls, 0);
 });
 
-test('an internal write needs explicit owner authorization and never claims a server response is readback', async () => {
+test('an internal write needs explicit owner authorization and accepts only the synchronous server acknowledgement', async () => {
   let calls = 0;
   const fetchImpl = async (url, options) => {
     calls += 1;
@@ -124,15 +126,50 @@ test('an internal write needs explicit owner authorization and never claims a se
     fetchImpl
   });
   assert.equal(calls, 1);
-  assert.equal(result.ok, false);
-  assert.equal(result.status, 'UNVERIFIED_WRITE');
+  assert.equal(result.ok, true);
   assert.equal(result.capability, 'payment.update_method');
   assert.equal(result.executionCount, 1);
-  assert.equal(result.verification, 'unverified_server_result');
-  assert.equal(result.verified, false);
-  assert.equal(result.mutationMayHaveOccurred, true);
-  assert.equal(result.retryAllowed, false);
+  assert.equal(result.verification, 'authoritative_server_ack');
+  assert.equal(result.verified, true);
+  assert.equal(result.readback, false);
   assert.doesNotMatch(JSON.stringify(result), /synthetic-key/);
+});
+
+test('a failed read is explicitly retry-safe and never becomes an uncertain write', async () => {
+  const result = await runBroker({
+    phase: 'execute',
+    capability: 'inventory.lookup',
+    parameters: { query: 'camera' }
+  }, {
+    config,
+    handlers: {
+      lookupVillage: async () => { throw new Error('synthetic read timeout'); }
+    }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 'READ_FAILED');
+  assert.equal(result.policy, 'read_only');
+  assert.equal(result.mutationMayHaveOccurred, false);
+  assert.equal(result.retrySafe, true);
+});
+
+test('a write rejected before network access is retry-safe and never becomes uncertain', async () => {
+  let calls = 0;
+  const result = await runBroker({
+    phase: 'execute',
+    capability: 'equipment.add',
+    parameters: { tid: '260723-010', equipName: 'FX3' },
+    authorization: {},
+    operationId: '11111111-1111-4111-8111-111111111111'
+  }, {
+    config,
+    fetchImpl: async () => { calls += 1; return response({ success: true }); }
+  });
+  assert.equal(calls, 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 'REQUEST_REJECTED');
+  assert.equal(result.mutationMayHaveOccurred, false);
+  assert.equal(result.retrySafe, true);
 });
 
 test('a new capability has explicit validate promote confirm phases before resume', async () => {
@@ -149,6 +186,10 @@ test('a new capability has explicit validate promote confirm phases before resum
     confirmRegistration: async (request) => {
       calls.push(['confirm', request.capability]);
       return { ok: true, confirmed: true, runtimeConfirmed: true, liveCatalogConfirmed: true };
+    },
+    rollbackPromotion: async (request) => {
+      calls.push(['rollback', request.capability]);
+      return { ok: true, rolledBack: true, promotionId: request.promotionId };
     }
   };
 
@@ -183,40 +224,158 @@ test('a new capability has explicit validate promote confirm phases before resum
     promotionId: 'promotion-1'
   }, { promotionHandlers });
   assert.equal(confirmed.confirmed, true);
+
+  await assert.rejects(
+    () => runBroker({
+      phase: 'rollback_promotion',
+      capability: 'new.operation',
+      promotionId: 'promotion-1',
+      authorization: { ownerApproved: true }
+    }, { promotionHandlers }),
+    /systemAdminApproved=true/
+  );
+  const rolledBack = await runBroker({
+    phase: 'rollback_promotion',
+    capability: 'new.operation',
+    promotionId: 'promotion-1',
+    authorization: { ownerApproved: true, systemAdminApproved: true }
+  }, { promotionHandlers });
+  assert.equal(rolledBack.rolledBack, true);
   assert.deepEqual(calls, [
     ['validate', 'new.operation'],
     ['promote', 'new.operation'],
-    ['confirm', 'new.operation']
+    ['confirm', 'new.operation'],
+    ['rollback', 'new.operation']
   ]);
 });
 
-test('uncertain writes reconcile only through a registered read-only capability', async () => {
+test('uncertain writes reconcile only through the original write capability authoritative reader', async () => {
   await assert.rejects(
     () => runBroker({
       phase: 'reconcile',
-      capability: 'payment.update_method',
-      parameters: { tid: '260723-010', method: 'card' }
+      originalCapability: 'payment.update_method',
+      originalParameters: { tid: '260723-010', method: 'card' },
+      capability: 'inventory.lookup',
+      parameters: { query: 'camera' }
     }, { config }),
-    /read_only capability/
+    /not an authoritative reconciliation path/
   );
 
   let calls = 0;
-  const result = await runBroker({
+  let observedMethod = 'card';
+  const reconcileRequest = {
     phase: 'reconcile',
-    capability: 'schedule.timeline',
-    parameters: { from: '2026-07-23', to: '2026-07-23' }
-  }, {
+    originalCapability: 'payment.update_method',
+    originalParameters: { tid: '260723-010', method: 'card' },
+    capability: 'finance.lookup',
+    parameters: { query: '260723-010' }
+  };
+  const reconciliationDependencies = {
     config,
-    fetchImpl: async (_url, options) => {
+    handlers: {
+      lookupVillage: async ({ domain, query }) => {
+        assert.equal(domain, 'finance');
+        assert.equal(query, '260723-010');
+        calls += 1;
+        return {
+          ok: true,
+          sheets: [{
+            sheet: '거래내역',
+            headers: ['거래ID', '결제수단'],
+            results: [[query, observedMethod]]
+          }]
+        };
+      }
+    },
+    fetchImpl: async () => {
       calls += 1;
-      assert.equal(JSON.parse(options.body).action, 'timeline');
-      return response({ success: true, items: [] });
+      throw new Error('reconciliation must use the declared specialized reader');
     }
-  });
+  };
+  const result = await runBroker({
+    ...reconcileRequest
+  }, reconciliationDependencies);
   assert.equal(calls, 1);
   assert.equal(result.ok, true);
   assert.equal(result.reconciliation, true);
   assert.equal(result.verification, 'authoritative_read');
+  assert.equal(result.originalCapability, 'payment.update_method');
+  assert.equal(result.reconciliationOutcome, 'already_applied');
+
+  observedMethod = 'cash';
+  const notApplied = await runBroker(reconcileRequest, reconciliationDependencies);
+  assert.equal(calls, 2);
+  assert.equal(notApplied.ok, true);
+  assert.equal(notApplied.reconciliationOutcome, 'not_applied');
+
+  reconciliationDependencies.handlers.lookupVillage = async ({ query }) => ({
+    ok: true,
+    sheets: [{
+      sheet: '발행처DB',
+      headers: ['거래ID', '결제수단'],
+      results: [[query, 'card']]
+    }]
+  });
+  const wrongSheet = await runBroker(reconcileRequest, reconciliationDependencies);
+  assert.equal(wrongSheet.ok, false);
+  assert.equal(wrongSheet.status, 'RECONCILIATION_INDETERMINATE');
+});
+
+test('generic acknowledged writes reconcile through their durable operation receipt', async () => {
+  const operationId = `${Math.floor(Date.now() / 1000)}-22222222-2222-4222-8222-222222222222`;
+  let receiptStatus = 'applied';
+  let receiptDigest = operationRequestDigest(
+    'equipment.add',
+    CAPABILITIES['equipment.add'],
+    { tid: '260723-010', equipName: 'FX3' }
+  );
+  const request = {
+    phase: 'reconcile',
+    originalCapability: 'equipment.add',
+    originalParameters: { tid: '260723-010', equipName: 'FX3' },
+    originalOperationId: operationId,
+    capability: 'operation.receipt',
+    parameters: { operationId }
+  };
+  const fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    assert.equal(body.action, 'operationReceipt');
+    assert.equal(body.operationId, operationId);
+    return response({
+      success: true,
+      found: !['not_found', 'expired'].includes(receiptStatus),
+      status: receiptStatus,
+      operationId,
+      capability: 'equipment.add',
+      requestDigest: receiptDigest,
+      retrySafe: receiptStatus === 'not_found'
+    });
+  };
+
+  const applied = await runBroker(request, { config, fetchImpl });
+  assert.equal(applied.ok, true);
+  assert.equal(applied.reconciliationOutcome, 'already_applied');
+
+  receiptStatus = 'not_found';
+  const absent = await runBroker(request, { config, fetchImpl });
+  assert.equal(absent.ok, true);
+  assert.equal(absent.reconciliationOutcome, 'not_applied');
+
+  receiptStatus = 'in_progress';
+  const pending = await runBroker(request, { config, fetchImpl });
+  assert.equal(pending.ok, false);
+  assert.equal(pending.status, 'RECONCILIATION_INDETERMINATE');
+
+  receiptStatus = 'expired';
+  const expired = await runBroker(request, { config, fetchImpl });
+  assert.equal(expired.ok, false);
+  assert.equal(expired.reconciliationOutcome, 'indeterminate');
+
+  receiptStatus = 'applied';
+  receiptDigest = 'wrong-request-digest';
+  const mismatched = await runBroker(request, { config, fetchImpl });
+  assert.equal(mismatched.ok, false);
+  assert.equal(mismatched.reconciliationReason, 'receipt_identity_mismatch');
 });
 
 test('customer-facing sends require a separate current-request approval', async () => {

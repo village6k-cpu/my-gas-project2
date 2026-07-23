@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
@@ -14,6 +15,7 @@ const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 const {
   confirmRegistration,
   promoteCandidate,
+  rollbackPromotion,
   validateCandidate
 } = require('./village-capability-promote.js');
 
@@ -34,7 +36,7 @@ function capability({ title, policy, required = [], optional = [], handler, apiA
     handler: handler || 'api',
     apiAction: apiAction || null,
     fixed: Object.freeze({ ...fixed }),
-    verification: verification || (policy === POLICIES.READ_ONLY ? 'authoritative_read' : 'unverified_server_result')
+    verification: verification || (policy === POLICIES.READ_ONLY ? 'authoritative_read' : 'authoritative_server_ack')
   });
 }
 
@@ -53,6 +55,7 @@ const CAPABILITIES = Object.freeze({
   'confirmation_request.list': capability({ title: 'List pending confirmation requests', policy: POLICIES.READ_ONLY, apiAction: 'list' }),
   'confirmation_request.scan': capability({ title: 'Scan unresolved confirmation requests', policy: POLICIES.READ_ONLY, apiAction: 'scan' }),
   'confirmation_request.resolve_equipment': capability({ title: 'Resolve equipment aliases against the authoritative catalog', policy: POLICIES.READ_ONLY, required: ['queries'], handler: 'resolve_equipment' }),
+  'operation.receipt': capability({ title: 'Read the durable receipt for one Hermes mutation', policy: POLICIES.READ_ONLY, required: ['operationId'], apiAction: 'operationReceipt' }),
 
   'confirmation_request.create': capability({ title: 'Create one AI-planned confirmation request and verify readback', policy: POLICIES.INTERNAL_WRITE, required: ['request'], handler: 'confirmation_create', verification: 'authoritative_readback' }),
   'confirmation_request.create_batch': capability({ title: 'Create multiple AI-planned schedule groups and verify all readbacks', policy: POLICIES.INTERNAL_WRITE, required: ['requests'], handler: 'confirmation_create_batch', verification: 'authoritative_readback' }),
@@ -89,8 +92,38 @@ const CAPABILITIES = Object.freeze({
   'customer.send_equipment_risk_guidance': capability({ title: 'Send equipment risk guidance', policy: POLICIES.CUSTOMER_SEND, required: ['payload'], apiAction: 'equipmentRiskSend' })
 });
 
+// Only routes with an automatic target-and-outcome verifier belong here. A
+// merely successful read is never enough to authorize retrying or completing
+// an uncertain write.
+const RECONCILIATION_ROUTES = Object.freeze({
+  'payment.update_method': Object.freeze({
+    readers: Object.freeze(['finance.lookup']),
+    sheets: Object.freeze(['거래내역']),
+    target: Object.freeze({ source: 'tid', aliases: Object.freeze(['tid', 'tradeId', '거래ID']) }),
+    expected: Object.freeze([
+      Object.freeze({ source: 'method', aliases: Object.freeze(['method', 'paymentMethod', '결제방법', '결제수단']), normalizer: 'payment_method' })
+    ])
+  }),
+  'contract.update_status': Object.freeze({
+    readers: Object.freeze(['schedule.lookup']),
+    sheets: Object.freeze(['계약마스터']),
+    target: Object.freeze({ source: 'tid', aliases: Object.freeze(['tid', 'tradeId', '거래ID']) }),
+    expected: Object.freeze([
+      Object.freeze({ source: 'status', aliases: Object.freeze(['status', 'contractStatus', '계약상태', '상태']) })
+    ])
+  }),
+  'billing.update_company': Object.freeze({
+    readers: Object.freeze(['finance.lookup']),
+    sheets: Object.freeze(['거래내역']),
+    target: Object.freeze({ source: 'tid', aliases: Object.freeze(['tid', 'tradeId', '거래ID']) }),
+    expected: Object.freeze([
+      Object.freeze({ source: 'billingCompany', aliases: Object.freeze(['billingCompany', '청구업체', '청구회사']) })
+    ])
+  })
+});
+
 function publicCapability(id, spec) {
-  return {
+  const result = {
     id,
     title: spec.title,
     policy: spec.policy,
@@ -98,6 +131,15 @@ function publicCapability(id, spec) {
     optional: [...spec.optional],
     verification: spec.verification
   };
+  const reconciliation = RECONCILIATION_ROUTES[id];
+  const reconciliationCapabilities = [
+    ...(reconciliation?.readers || []),
+    ...(spec.verification === 'authoritative_server_ack' ? ['operation.receipt'] : [])
+  ];
+  if (reconciliationCapabilities.length) {
+    result.reconciliationCapabilities = [...new Set(reconciliationCapabilities)];
+  }
+  return result;
 }
 
 function catalog({ policy } = {}) {
@@ -201,32 +243,66 @@ function apiBase(config) {
   return { url, apiKey };
 }
 
-function buildApiRequest(config, spec, parameters) {
+function buildApiRequest(config, spec, parameters, { operationId = '', capabilityId = '' } = {}) {
   const { url, apiKey } = apiBase(config);
+  const operation = String(operationId || '').trim();
   return {
     method: 'POST',
     url: url.toString(),
     headers: { 'content-type': 'application/json; charset=utf-8' },
-    body: JSON.stringify({ key: apiKey, action: spec.apiAction, ...spec.fixed, ...parameters })
+    body: JSON.stringify({
+      key: apiKey,
+      action: spec.apiAction,
+      ...spec.fixed,
+      ...parameters,
+      ...(operation ? { operationId: operation, capability: capabilityId } : {})
+    })
   };
 }
 
-async function callApi({ config, spec, parameters, fetchImpl, timeoutMs }) {
-  if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
-  const request = buildApiRequest(config, spec, parameters);
-  const response = await fetchImpl(request.url, {
-    method: request.method,
-    headers: request.headers,
-    body: request.body,
-    redirect: 'follow',
-    signal: AbortSignal.timeout(timeoutMs)
-  });
-  if (!response?.ok) throw new Error(`Village capability failed with HTTP ${response?.status ?? 'unknown'}`);
-  const payload = await response.json();
-  if (!payload || payload.error || payload.success === false || payload.status === 'ERROR') {
-    throw new Error(`Village capability failed: ${String(payload?.error || payload?.message || payload?.status || 'empty response')}`);
+function stableJson(value) {
+  if (value === null || value === undefined) return JSON.stringify(value === undefined ? null : value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
   }
-  return payload;
+  return JSON.stringify(value);
+}
+
+function operationRequestDigest(capabilityId, spec, parameters) {
+  return crypto.createHash('sha256').update(stableJson({
+    capability: capabilityId,
+    action: spec.apiAction,
+    parameters: { ...spec.fixed, ...(parameters || {}) }
+  })).digest('hex');
+}
+
+async function callApi({ config, spec, parameters, fetchImpl, timeoutMs, operationId, capabilityId }) {
+  if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
+  let networkStarted = false;
+  try {
+    const request = buildApiRequest(config, spec, parameters, { operationId, capabilityId });
+    networkStarted = true;
+    const response = await fetchImpl(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!response?.ok) throw new Error(`Village capability failed with HTTP ${response?.status ?? 'unknown'}`);
+    const payload = await response.json();
+    if (!payload || payload.error || payload.ok === false || payload.success === false || payload.status === 'ERROR') {
+      throw new Error(`Village capability failed: ${String(payload?.error || payload?.message || payload?.status || 'empty response')}`);
+    }
+    return payload;
+  } catch (error) {
+    if (error && typeof error === 'object') {
+      error.mutationMayHaveOccurred = networkStarted && spec.policy !== POLICIES.READ_ONLY;
+      if (operationId) error.operationId = operationId;
+    }
+    throw error;
+  }
 }
 
 function compactValue(value, depth = 0) {
@@ -292,15 +368,36 @@ async function executeOperation({
   authorization = {},
   fetchImpl = globalThis.fetch,
   timeoutMs = 240_000,
+  operationId = '',
   handlers = {}
 } = {}) {
   const prepared = await prepareOperation({ capability: id, parameters, authorization });
   if (!prepared.ok) return prepared;
   const spec = CAPABILITIES[prepared.capability];
   const availableHandlers = { ...defaultHandlers(), ...handlers };
-  const payload = spec.handler === 'api'
-    ? await callApi({ config, spec, parameters: prepared.parameters, fetchImpl, timeoutMs })
-    : await executeSpecialized({ spec, parameters: prepared.parameters, config, handlers: availableHandlers });
+  const effectiveOperationId = spec.policy !== POLICIES.READ_ONLY && spec.verification === 'authoritative_server_ack'
+    ? String(operationId || `${Math.floor(Date.now() / 1000)}-${crypto.randomUUID()}`)
+    : '';
+  let payload;
+  try {
+    payload = spec.handler === 'api'
+      ? await callApi({
+        config,
+        spec,
+        parameters: prepared.parameters,
+        fetchImpl,
+        timeoutMs,
+        operationId: effectiveOperationId,
+        capabilityId: prepared.capability
+      })
+      : await executeSpecialized({ spec, parameters: prepared.parameters, config, handlers: availableHandlers });
+  } catch (error) {
+    if (error && typeof error === 'object' && error.mutationMayHaveOccurred === undefined) {
+      error.mutationMayHaveOccurred = spec.policy !== POLICIES.READ_ONLY && spec.handler !== 'api';
+      if (effectiveOperationId) error.operationId = effectiveOperationId;
+    }
+    throw error;
+  }
 
   if (spec.verification === 'unverified_server_result') {
     return {
@@ -324,6 +421,10 @@ async function executeOperation({
     policy: spec.policy,
     executionCount: 1,
     verification: spec.verification,
+    verified: payload?.ok !== false,
+    readback: spec.verification === 'authoritative_readback',
+    writeAcknowledged: spec.verification === 'authoritative_server_ack',
+    ...(effectiveOperationId ? { operationId: effectiveOperationId } : {}),
     result: boundPayload(payload)
   };
 }
@@ -349,6 +450,89 @@ function parseInput(text) {
   return JSON.parse(String(text || '').replace(/^\uFEFF/, ''));
 }
 
+function comparable(value, normalizer = '') {
+  let text = String(value ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (normalizer === 'payment_method') {
+    const methods = new Map([
+      ['card', 'card'], ['creditcard', 'card'], ['카드', 'card'], ['카드결제', 'card'], ['신용카드', 'card'],
+      ['cash', 'cash'], ['현금', 'cash'],
+      ['transfer', 'transfer'], ['banktransfer', 'transfer'], ['계좌이체', 'transfer'], ['이체', 'transfer']
+    ]);
+    text = methods.get(text) || text;
+  }
+  return text;
+}
+
+function collectRows(value, output = [], depth = 0, inheritedSheet = '') {
+  if (depth > 8 || value === null || value === undefined) return output;
+  if (Array.isArray(value)) {
+    for (const item of value) collectRows(item, output, depth + 1, inheritedSheet);
+    return output;
+  }
+  if (typeof value !== 'object') return output;
+  const sheet = String(value.sheet || inheritedSheet || '');
+  if (Array.isArray(value.headers) && Array.isArray(value.results)) {
+    for (const row of value.results) {
+      if (!Array.isArray(row)) continue;
+      output.push({
+        sheet,
+        row: Object.fromEntries(value.headers.map((header, index) => [String(header), row[index]]))
+      });
+    }
+  } else if (sheet) {
+    output.push({ sheet, row: value });
+  }
+  for (const item of Object.values(value)) collectRows(item, output, depth + 1, sheet);
+  return output;
+}
+
+function fieldFromAliases(row, aliases) {
+  const wanted = new Set(aliases.map((alias) => comparable(alias)));
+  for (const [key, value] of Object.entries(row || {})) {
+    if (wanted.has(comparable(key))) return { present: true, value };
+  }
+  return { present: false, value: undefined };
+}
+
+function evaluateReconciliation(route, originalParameters, readParameters, result) {
+  const original = normalizeObject(originalParameters, 'originalParameters');
+  const read = normalizeObject(readParameters, 'parameters');
+  const target = original[route.target.source];
+  if (!hasValue(target)) throw new Error(`Reconciliation requires original parameter: ${route.target.source}`);
+  if (comparable(read.query) !== comparable(target)) {
+    throw new Error('Reconciliation query must exactly match the original write target');
+  }
+  const expected = route.expected.map((field) => {
+    if (!hasValue(original[field.source])) {
+      throw new Error(`Reconciliation requires original parameter: ${field.source}`);
+    }
+    return { ...field, value: original[field.source] };
+  });
+  const authoritativeSheets = new Set(route.sheets || []);
+  const matchingRows = collectRows(result).filter((entry) => {
+    if (!authoritativeSheets.has(entry.sheet)) return false;
+    const observed = fieldFromAliases(entry.row, route.target.aliases);
+    return observed.present && comparable(observed.value) === comparable(target);
+  });
+  if (!matchingRows.length) {
+    return { outcome: 'indeterminate', reason: 'target_not_returned', matchingRows: 0 };
+  }
+  const observations = matchingRows.map((entry) => expected.map((field) => {
+    const observed = fieldFromAliases(entry.row, field.aliases);
+    return {
+      present: observed.present,
+      matches: observed.present && comparable(observed.value, field.normalizer) === comparable(field.value, field.normalizer)
+    };
+  }));
+  if (observations.some((row) => row.every((field) => field.present && field.matches))) {
+    return { outcome: 'already_applied', reason: 'target_and_expected_values_match', matchingRows: matchingRows.length };
+  }
+  if (observations.some((row) => row.every((field) => field.present))) {
+    return { outcome: 'not_applied', reason: 'target_found_with_different_expected_values', matchingRows: matchingRows.length };
+  }
+  return { outcome: 'indeterminate', reason: 'expected_fields_not_returned', matchingRows: matchingRows.length };
+}
+
 async function runBroker(input, { config, promotionHandlers = {}, fetchImpl = globalThis.fetch, handlers = {} } = {}) {
   const request = normalizeObject(input, 'input');
   const phase = String(request.phase || '').trim();
@@ -364,26 +548,170 @@ async function runBroker(input, { config, promotionHandlers = {}, fetchImpl = gl
   if (phase === 'confirm_registration') {
     return (promotionHandlers.confirmRegistration || confirmRegistration)(request);
   }
+  if (phase === 'rollback_promotion') {
+    assertAuthorization({ policy: POLICIES.SYSTEM_ADMIN }, request.authorization);
+    return (promotionHandlers.rollbackPromotion || rollbackPromotion)(request);
+  }
   if (phase === 'reconcile') {
-    const spec = CAPABILITIES[String(request.capability || '').trim()];
-    if (!spec || spec.policy !== POLICIES.READ_ONLY) {
-      throw new Error('phase=reconcile accepts only a registered read_only capability');
+    const originalCapability = String(request.originalCapability || '').trim();
+    const readCapability = String(request.capability || '').trim();
+    const originalSpec = CAPABILITIES[originalCapability];
+    const spec = CAPABILITIES[readCapability];
+    const route = RECONCILIATION_ROUTES[originalCapability];
+    const receiptReconciliation = (
+      originalSpec?.verification === 'authoritative_server_ack' &&
+      readCapability === 'operation.receipt'
+    );
+    if (!originalSpec || originalSpec.policy === POLICIES.READ_ONLY) {
+      throw new Error('phase=reconcile requires the original registered write capability');
+    }
+    if (
+      !spec ||
+      spec.policy !== POLICIES.READ_ONLY ||
+      (!receiptReconciliation && !route?.readers.includes(readCapability))
+    ) {
+      throw new Error(`${readCapability || '[missing]'} is not an authoritative reconciliation path for ${originalCapability}`);
     }
     const runtimeConfig = config || parseEnv(fs.readFileSync(request.envFile || DEFAULT_ENV_FILE, 'utf8'));
+    if (receiptReconciliation) {
+      const operationId = String(request.originalOperationId || '').trim();
+      if (!operationId || String(request.parameters?.operationId || '').trim() !== operationId) {
+        throw new Error('Operation-receipt reconciliation requires the exact original operationId');
+      }
+      const result = await executeOperation({
+        ...request,
+        parameters: { operationId },
+        config: runtimeConfig,
+        authorization: {},
+        fetchImpl,
+        handlers
+      });
+      const receipt = result.result && typeof result.result === 'object' ? result.result : {};
+      if (
+        String(receipt.operationId || '') !== operationId ||
+        (receipt.found !== false && (
+          String(receipt.capability || '') !== originalCapability ||
+          String(receipt.requestDigest || '') !== operationRequestDigest(originalCapability, originalSpec, request.originalParameters)
+        ))
+      ) {
+        return {
+          ...result,
+          ok: false,
+          status: 'RECONCILIATION_INDETERMINATE',
+          reconciliation: false,
+          originalCapability,
+          reconciliationCapability: readCapability,
+          reconciliationOutcome: 'indeterminate',
+          reconciliationReason: 'receipt_identity_mismatch'
+        };
+      }
+      const outcome = receipt.found === false && receipt.status === 'not_found' && receipt.retrySafe === true
+        ? 'not_applied'
+        : receipt.status === 'applied'
+          ? 'already_applied'
+          : 'indeterminate';
+      if (outcome === 'indeterminate') {
+        return {
+          ...result,
+          ok: false,
+          status: 'RECONCILIATION_INDETERMINATE',
+          reconciliation: false,
+          originalCapability,
+          reconciliationCapability: readCapability,
+          reconciliationOutcome: outcome,
+          reconciliationReason: `operation_receipt_${String(receipt.status || 'unknown')}`
+        };
+      }
+      return {
+        ...result,
+        reconciliation: true,
+        originalCapability,
+        reconciliationCapability: readCapability,
+        reconciliationOutcome: outcome,
+        reconciliationReason: `operation_receipt_${String(receipt.status || 'unknown')}`
+      };
+    }
     const result = await executeOperation({ ...request, config: runtimeConfig, authorization: {}, fetchImpl, handlers });
-    return { ...result, reconciliation: true };
+    const evaluation = evaluateReconciliation(
+      route,
+      request.originalParameters,
+      request.parameters || {},
+      result.result
+    );
+    if (evaluation.outcome === 'indeterminate') {
+      return {
+        ...result,
+        ok: false,
+        status: 'RECONCILIATION_INDETERMINATE',
+        reconciliation: false,
+        originalCapability,
+        reconciliationCapability: readCapability,
+        reconciliationOutcome: evaluation.outcome,
+        reconciliationReason: evaluation.reason
+      };
+    }
+    return {
+      ...result,
+      reconciliation: true,
+      originalCapability,
+      reconciliationCapability: readCapability,
+      reconciliationOutcome: evaluation.outcome,
+      reconciliationReason: evaluation.reason,
+      matchingRows: evaluation.matchingRows
+    };
   }
   if (phase === 'record_learning') return recordLearning(request);
   if (phase === 'complete') return { ok: true, completed: true, capability: String(request.capability || '') };
   if (phase !== 'execute') {
-    throw new Error('phase must be catalog, prepare, validate_candidate, promote, confirm_registration, reconcile, execute, record_learning, or complete');
+    throw new Error('phase must be catalog, prepare, validate_candidate, promote, confirm_registration, rollback_promotion, reconcile, execute, record_learning, or complete');
   }
-  const runtimeConfig = config || parseEnv(fs.readFileSync(request.envFile || DEFAULT_ENV_FILE, 'utf8'));
-  return executeOperation({ ...request, config: runtimeConfig, fetchImpl, handlers });
+  let runtimeConfig;
+  try {
+    runtimeConfig = config || parseEnv(fs.readFileSync(request.envFile || DEFAULT_ENV_FILE, 'utf8'));
+    const prepared = await prepareOperation(request);
+    if (!prepared.ok) return prepared;
+  } catch (error) {
+    return {
+      ok: false,
+      status: 'REQUEST_REJECTED',
+      capability: String(request.capability || '').trim(),
+      mutationMayHaveOccurred: false,
+      retrySafe: true,
+      retryAllowed: true,
+      error: String(error?.message || error).slice(0, 2000)
+    };
+  }
+  try {
+    return await executeOperation({ ...request, config: runtimeConfig, fetchImpl, handlers });
+  } catch (error) {
+    const capabilityId = String(request.capability || '').trim();
+    const spec = CAPABILITIES[capabilityId];
+    const readOnly = spec?.policy === POLICIES.READ_ONLY;
+    const mutationMayHaveOccurred = error?.mutationMayHaveOccurred === true;
+    const rejectedBeforeMutation = !readOnly && !mutationMayHaveOccurred;
+    return {
+      ok: false,
+      status: readOnly ? 'READ_FAILED' : rejectedBeforeMutation ? 'REQUEST_REJECTED' : 'WRITE_OUTCOME_UNCERTAIN',
+      capability: capabilityId,
+      policy: spec?.policy || 'unknown',
+      mutationMayHaveOccurred,
+      retrySafe: readOnly || rejectedBeforeMutation,
+      retryAllowed: readOnly || rejectedBeforeMutation,
+      ...(error?.operationId || request.operationId ? { operationId: String(error?.operationId || request.operationId) } : {}),
+      ...(!readOnly && !rejectedBeforeMutation ? {
+        reconciliationCapabilities: RECONCILIATION_ROUTES[capabilityId]?.readers || ['operation.receipt']
+      } : {}),
+      error: String(error?.message || error).slice(0, 2000)
+    };
+  }
 }
 
 async function main() {
   const input = parseInput(fs.readFileSync(0, 'utf8'));
+  if (String(input.phase || '') === 'execute') {
+    const policy = CAPABILITIES[String(input.capability || '')]?.policy || 'unknown';
+    process.stderr.write(`VILLAGE_EXECUTION_POLICY:${policy}\n`);
+  }
   const result = await runBroker(input);
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result?.ok === false && result?.status !== 'CAPABILITY_GAP') process.exitCode = 2;
@@ -396,6 +724,7 @@ module.exports = {
   buildApiRequest,
   catalog,
   executeOperation,
+  operationRequestDigest,
   prepareOperation,
   recordLearning,
   runBroker,

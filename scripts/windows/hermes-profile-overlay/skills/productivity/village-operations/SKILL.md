@@ -1,7 +1,7 @@
 ---
 name: village-operations
 description: "AI-first Village operating brain: reason fully over owner requests, then use the typed village_operation fast path or automatically learn, test, register, and resume a missing capability."
-version: 2.0.0
+version: 2.1.0
 author: Village
 license: private
 platforms: [windows]
@@ -41,8 +41,8 @@ Continue automatically:
 3. Implement the smallest reusable typed capability and authoritative readback in the canonical main development worktree; never a one-off customer-specific shortcut.
 4. Add focused tests, including ambiguity, no-retry-after-uncertain-write, approval, and readback failure cases.
 5. Call `phase=validate_candidate` with the declared runtime, GAS, and focused test files. This is the only test path during discovery; it runs in a network-isolated process.
-6. After explicit system-admin approval, call `phase=promote` with the validation receipt. The bounded promoter checks remote GAS drift, deploys from `main`, registers the capability, and atomically installs the runtime. Never deploy or copy into the live runtime through shell, browser, or arbitrary code tools.
-7. Call `phase=confirm_registration`. Continue only when both the installed runtime catalog and live GAS catalog contain the capability. Then record the learning with `phase=record_learning` and, when useful, a focused learned reference.
+6. After explicit system-admin approval, call `phase=promote` with the validation receipt. The bounded promoter first persists the backup and recovery receipt, then claims one active generation, checks remote GAS drift, deploys from `main`, registers the capability, and atomically installs the runtime. Never deploy, copy into the live runtime, or use `skill_manage` through the discovery lane. If promotion reports recovery required, roll back the reported active capability and receipt before editing or promoting again; after rollback, resume the preserved original capability. A confirmed deployment becomes the source baseline for the next learned capability, so repeated self-improvement does not depend on `HEAD` immediately catching up.
+7. Call `phase=confirm_registration`. Continue only when the installed runtime hash, the exact promoted GAS generation hash, and both catalogs agree. Then record the learning with `phase=record_learning` and, when useful, a focused learned reference.
 8. Call `phase=prepare` again with the preserved original parameters, then `phase=execute` once and finish the **original** task in the same ongoing request.
 
 The first encounter may take longer because real learning is occurring. Every later encounter must use the registered fast path. Self-improvement remains enabled; it is made reusable and test-backed rather than removed.
@@ -62,8 +62,9 @@ For discovery only, the complete inherited Mac playbook is preserved at `referen
 
 - Prefer trade ID, request ID, schedule ID, phone, exact customer plus date, or another stable identifier.
 - If lookup produces multiple plausible targets, report the compact candidates and ask for only the missing discriminator.
+- Before network execution, persist the exact operation envelope, capability policy, and operation ID. This state survives session end, session reset, gateway restart, and process loss: an interrupted read returns to the safe read lane, while an interrupted write returns only as `uncertain_write` and must be reconciled before completion or retry.
 - Never retry a write automatically after an uncertain response.
-- After an uncertain write, use `phase=reconcile` with a read-only capability. Complete from the readback or retry the same write only with non-empty authoritative `reconciliationEvidence` and fresh approval using `retryAfterReconciliationApproved=true`.
-- A write is complete only when its capability's declared readback succeeds.
+- After an uncertain write, use `phase=reconcile` only with the original write capability's catalog-declared authoritative reader and exact original target. Generic acknowledged writes use `operation.receipt`; its operation ID is generated and preserved before network access, and the server records `in_progress` before mutation. A receipt with outcome `already_applied` may complete the request; only `not_applied` may authorize one retry. `indeterminate` authorizes neither. Retrying also requires the fresh one-time `reconciliationId`, its original capability, exact original parameters, and fresh approval using `retryAfterReconciliationApproved=true`.
+- A write is complete only through its capability's declared proof: authoritative readback when available, or a synchronous authoritative server acknowledgement backed by the durable operation receipt where the catalog explicitly declares that contract. A timeout or transport error after a write remains uncertain until that receipt or a capability-specific reader resolves it.
 - If external state makes completion impossible, report the concrete blocker and retained learning. A missing implementation alone is not a blocker; use the self-improvement lane.
 - Keep normal post-task learning. Store reusable business discoveries in focused references; keep the root skill compact.
