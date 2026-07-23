@@ -47,13 +47,36 @@ A confirmation request from owner-provided text or an image uses the **same reas
 - Resolve customer wording with broad catalog searches across both `세트마스터` and `장비마스터`, relevant preserved references, equipment knowledge, and visible context. A zero-result exact search is only a failed probe, never proof that the owner must supply the master spelling.
 - Try shorter distinctive tokens, spacing/case/transliteration variants, bundle-to-quantity normalization, and the full catalog before asking. Ask only when the remaining candidates are materially different models and the source does not distinguish them.
 - Verified examples from the successful quote path include `24-70 GM2` → `소니 GM 24-70mm II`, `70-200 GM2` → `소니 GM 70-200mm II`, `HBM 1/4 사각` → `Hollywood Blackmagic 1/4 사각`, `메가F22s4` → `OSEE MEGA22S4`, `RS3 Pro` → `로닌 RS3 프로`, and `파보튜브 II 30X 2KIT` → `파보튜브 II 30X` quantity 2.
-- After AI has built the complete exact-name plan, use `scripts/windows/village-confirm-request.js` only as the bounded mutation/readback layer. Use `create-batch` for automatically split schedules so every group is catalog-preflighted before the first write.
+- After AI has built the complete exact-name plan, use `$HERMES_HOME/scripts/village/village-confirm-request.js` only as the bounded mutation/readback layer. Use `create-batch` for automatically split schedules so every group is catalog-preflighted before the first write.
+- Before creating, do one authoritative lookup for the same customer/phone and interval. If one unregistered existing partial `RQ-...` is found, pass its ID plus the complete AI-planned payload to the runner's `update` command. The runner performs one `updateRequest` and full readback. Do not fall back to ad-hoc Python, raw GAS calls, source-code archaeology, or another insert. Use the runner's `--help` output instead of reading its source to discover commands.
 - A successful new alias or workflow lesson may be retained through Hermes's normal self-improvement path after the user-facing operation. Do not disable learning to save latency.
+
+### Fast authoritative live lookup
+
+For ordinary live facts, resolve the record with the existing bounded read-only runner before opening source files or constructing raw GAS URLs:
+
+```bash
+node.exe "$HERMES_HOME/scripts/village/village-live-query.js" lookup --domain schedule --query 'customer, phone, trade ID, or date'
+```
+
+Choose one domain: `inventory`, `schedule`, `customer`, `finance`, or `documents`. The runner searches that domain's authoritative sheets concurrently and handles Korean URL encoding. Use `schedule` first for reservation lookup, cancellation targeting, confirmation-request duplicate checks, and registered-trade verification. The returned rows are evidence for the AI to interpret; this route does not replace reasoning, and it performs no mutation.
+
+If the authoritative lookup still leaves no unique mutation target, send the missing ID/date question as a normal Slack reply and end the turn. Do not call `clarify` for these Slack business operations: it creates a thread-bound waiter, while the owner commonly continues with a new top-level message that cannot resolve that waiter.
 
 For current-month aggregate revenue, use the existing read-only project wrapper rather than browser/OAuth fallback:
 
 ```bash
-node 'C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-live-read.js'
+node.exe "$HERMES_HOME/scripts/village/village-live-read.js"
 ```
 
 For every other intent, select the relevant preserved reference, then use the named GAS/API/Supabase action and verification route documented there. Generic Google Workspace OAuth and Computer Use are not prerequisites while a project route exists.
+
+### Registered-trade date changes
+
+Keep the AI responsible for understanding the owner's natural-language instruction and selecting the unique customer/old date/new interval. For the execution layer, omit `startTime` and `endTime` to preserve the registered times and call only:
+
+```bash
+printf '%s' '{"name":"customer","currentDate":"YYYY-MM-DD","newStartDate":"YYYY-MM-DD","newEndDate":"YYYY-MM-DD","allowConflicts":false}' | node.exe "$HERMES_HOME/scripts/village/village-trade-date-change.js" change
+```
+
+The command performs preflight, one locked mutation across 계약마스터/스케줄상세/거래내역, contract regeneration, and authoritative readback. It does not send a customer message. If it returns `CONFLICT`, show the structured equipment/requested/available evidence and stop. Set `allowConflicts:true` only when the owner's original instruction explicitly accepts those conflicts, or after the owner explicitly approves the reported conflicts. Do not use a generic sheet write, raw GAS/curl, browser, Computer Use, or source-code archaeology for this workflow. If resolution is ambiguous, ask for the missing identifier rather than finding an alternate write path.

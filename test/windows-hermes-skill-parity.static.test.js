@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -35,6 +36,18 @@ function readSkillNames(skillsRoot) {
     .map((source) => /^name:\s*(.+)$/m.exec(source)?.[1]?.trim())
     .filter(Boolean)
     .sort();
+}
+
+function directoryDigest(directory) {
+  const hash = crypto.createHash('sha256');
+  const files = fs.readdirSync(directory, { recursive: true })
+    .filter((entry) => fs.statSync(path.join(directory, entry)).isFile())
+    .sort();
+  for (const relative of files) {
+    hash.update(relative.replaceAll('\\', '/'));
+    hash.update(fs.readFileSync(path.join(directory, relative)));
+  }
+  return hash.digest('hex');
 }
 
 test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA profile-scoped', { skip: process.platform !== 'win32' }, () => {
@@ -94,6 +107,28 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
       assert.equal(report.ok, true);
     }
 
+    const transactionRoots = [
+      path.join(profileHome, 'scripts', 'village'),
+      path.join(profileHome, 'plugins', 'village-runtime'),
+      path.join(profileHome, 'skills')
+    ];
+    const beforeInjectedFailure = transactionRoots.map(directoryDigest);
+    const failureCommand = `${command} -TestFailAfterInstallStep plugin`;
+    const failed = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', failureCommand],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, VILLAGE_SYNC_TEST_MODE: '1' }
+      }
+    );
+    assert.notEqual(failed.status, 0, 'the injected post-plugin failure must abort the install');
+    assert.deepEqual(
+      transactionRoots.map(directoryDigest),
+      beforeInjectedFailure,
+      'runtime, plugin, and skills must all roll back as one transaction'
+    );
+
     assert.deepEqual(readSkillNames(path.join(profileHome, 'skills')), [
       'computer-use',
       'productivity-integrations',
@@ -114,11 +149,18 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
     assert.match(operations, /^name:\s*village-operations$/m);
     assert.match(
       operations,
-      /^description:\s*"Primary Village action route for requested business operations:/m
+      /^description:\s*"AI-first Village operating brain:/m
     );
     assert.match(operations, /^platforms:\s*\[windows\]$/m);
-    assert.match(operations, /Windows execution adapter/i);
-    assert.match(operations, /Existing reservation equipment additions/i);
+    assert.match(operations, /village_operation/);
+    assert.match(operations, /CAPABILITY_GAP/);
+    assert.match(operations, /finish the \*\*original\*\* task/i);
+    assert.doesNotMatch(operations, /Existing reservation equipment additions/i);
+    const macOperatingMemory = fs.readFileSync(
+      path.join(operationsRoot, 'references', 'mac-full-operating-memory.md'),
+      'utf8'
+    );
+    assert.match(macOperatingMemory, /Existing reservation equipment additions/i);
     assert.equal(fs.existsSync(path.join(operationsRoot, 'references', 'schedule.md')), true);
     assert.equal(fs.existsSync(path.join(operationsRoot, 'references', 'payments.md')), true);
     assert.equal(
@@ -139,7 +181,7 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
     assert.match(brain, /^name:\s*village-brain-first$/m);
     assert.match(
       brain,
-      /^description:\s*"Primary Village business intelligence route for every business question:/m
+      /^description:\s*"Use for Village business analysis, policy, prioritization, historical context, or a decision rather than a direct system operation\."/m
     );
     assert.match(brain, /^platforms:\s*\[windows\]$/m);
     assert.match(brain, /Customer lookup/i);
@@ -151,6 +193,30 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
     assert.match(router, /^name:\s*village-runtime-router$/m);
     assert.match(router, /^platforms:\s*\[windows\]$/m);
     assert.ok(Buffer.byteLength(router, 'utf8') <= 8_000);
+
+    const runtimeScriptsRoot = path.join(profileHome, 'scripts', 'village');
+    for (const runner of [
+      'village-live-read.js',
+      'village-live-query.js',
+      'village-confirm-request.js',
+      'village-trade-date-change.js',
+      'village-capability-promote.js',
+      'village-operation-broker.js'
+    ]) {
+      assert.equal(fs.existsSync(path.join(runtimeScriptsRoot, runner)), true, `${runner} must be installed outside the repo`);
+    }
+    assert.equal(
+      fs.existsSync(path.join(profileHome, 'plugins', 'village-runtime', '__init__.py')),
+      true,
+      'the AI capability and self-improvement coordinator must be installed'
+    );
+    const boundedDateReference = fs.readFileSync(path.join(
+      operationsRoot,
+      'references',
+      'registered-trade-date-change-remove-item.md'
+    ), 'utf8');
+    assert.match(boundedDateReference, /village-trade-date-change\.js/);
+    assert.doesNotMatch(boundedDateReference, /sheet-qualified A1|sheet\s*=\s*확인요청/i);
 
     const confirmRequestRoot = path.join(
       profileHome,
@@ -238,6 +304,9 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
     const report = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
     assert.equal(report.ok, true);
     assert.equal(report.scope, 'worker-profile');
+    const runtimeScriptsRoot = path.join(tempRoot, 'windows-home', 'scripts', 'village');
+    assert.equal(fs.existsSync(path.join(runtimeScriptsRoot, 'village-trade-date-change.js')), true);
+    assert.equal(fs.existsSync(path.join(workerProfile, 'scripts', 'village', 'village-trade-date-change.js')), false);
     const names = readSkillNames(path.join(workerProfile, 'skills'));
     for (const required of [
       'computer-use',

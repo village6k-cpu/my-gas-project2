@@ -22,12 +22,86 @@
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const API_KEY = "village2026";
 
+// Machine-readable operating surface for Hermes. The model owns semantic
+// planning; this catalog prevents source parsing to rediscover a known action.
+// Generic sheet writes and arbitrary runFunction calls are not business capabilities.
+function getVillageOperationCapabilities_() {
+  return {
+    success: true,
+    version: 1,
+    aiRole: "semantic_planner",
+    executionRole: "typed_capability_broker",
+    liveSourceDiscoveryAllowed: false,
+    developmentDiscoveryAllowed: true,
+    missingCapabilityLifecycle: "discover_validate_promote_confirm_resume",
+    capabilities: [
+      { id: "inventory.lookup", action: "search", policy: "read_only" },
+      { id: "schedule.lookup", action: "search", policy: "read_only" },
+      { id: "customer.lookup", action: "search", policy: "read_only" },
+      { id: "finance.lookup", action: "search", policy: "read_only" },
+      { id: "documents.lookup", action: "search", policy: "read_only" },
+      { id: "schedule.timeline", action: "timeline", policy: "read_only" },
+      { id: "operations.daily", action: "operations", policy: "read_only" },
+      { id: "dashboard.search", action: "dashboardSearch", policy: "read_only" },
+      { id: "contract.extras", action: "dashboardContractExtras", policy: "read_only" },
+      { id: "schedule.trade_candidates", action: "tradeCandidates", policy: "read_only" },
+      { id: "payment.metadata", action: "paymentMeta", policy: "read_only" },
+      { id: "confirmation_request.list", action: "list", policy: "read_only" },
+      { id: "confirmation_request.scan", action: "scan", policy: "read_only" },
+      { id: "confirmation_request.create", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback" },
+      { id: "confirmation_request.create_batch", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback" },
+      { id: "confirmation_request.update", action: "updateRequest", policy: "internal_write", verification: "authoritative_readback" },
+      { id: "schedule.change_dates", action: "scheduleChangeDates", policy: "internal_write", verification: "authoritative_readback" },
+      { id: "schedule.update_time", action: "updateTime", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "schedule.update_status", action: "updateStatus", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "schedule.toggle_setup", action: "toggleSetup", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "schedule.toggle_return", action: "toggleReturn", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "schedule.toggle_item", action: "toggleItem", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "equipment.check_update", action: "updateEquipmentCheck", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "equipment.add", action: "addEquip", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "equipment.add_batch", action: "addEquips", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "equipment.record_onsite_addon", action: "recordOnsiteAddon", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "equipment.remove", action: "removeEquip", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "equipment.update_quantity", action: "updateEquipQty", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "equipment.update_name", action: "updateEquipName", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "contract.update_status", action: "updateContractStatus", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "contract.regenerate", action: "regenerateContract", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "payment.update_method", action: "updatePayment", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "billing.update_company", action: "updateBillingCompany", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "proof.update_field", action: "updateTradeProof", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "dashboard.save_notes", action: "saveDashboardNotes", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "confirmation_request.confirm", action: "확인", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "confirmation_request.hold", action: "보류", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "confirmation_request.reject", action: "거절", policy: "internal_write", verification: "unverified_server_result" },
+      { id: "confirmation_request.register", action: "등록", policy: "final_registration", verification: "unverified_server_result" },
+      { id: "customer.send_estimate", action: "sendEstimate", policy: "customer_send", verification: "unverified_server_result" },
+      { id: "customer.send_statement", action: "sendStatement", policy: "customer_send", verification: "unverified_server_result" },
+      { id: "customer.send_payment_link", action: "sendPayAppPaymentLink", policy: "customer_send", verification: "unverified_server_result" },
+      { id: "customer.issue_proof", action: "issueProof", policy: "customer_send", verification: "unverified_server_result" },
+      { id: "customer.send_equipment_risk_guidance", action: "equipmentRiskSend", policy: "customer_send", verification: "unverified_server_result" }
+    ]
+  };
+}
+
 // 쓰기 허용 시트 화이트리스트
 // 스케줄상세는 반출 불변 기준선/가용성/계약서 부작용을 함께 처리해야 하므로
 // 범용 setValue API로 쓰지 못한다. dashboardAdd/Remove/Update 전용 액션만 사용한다.
 const WRITABLE_SHEETS = ["확인요청", "신규장비 추가", "실사 기록"];
 function isWritableSheet(sheetName) {
   return WRITABLE_SHEETS.indexOf(sheetName) !== -1;
+}
+
+// A sheet-qualified A1 range must name the same allowlisted sheet. Without this
+// check, sheet="확인요청" plus range="'계약마스터'!E2:H2" escapes the whitelist.
+function isRangeBoundToSheet_(sheetName, range) {
+  var text = String(range || '').trim();
+  var bang = text.indexOf('!');
+  if (bang < 0) return true;
+  var qualifier = text.slice(0, bang).trim();
+  if (qualifier.charAt(0) === "'" && qualifier.charAt(qualifier.length - 1) === "'") {
+    qualifier = qualifier.slice(1, -1).replace(/''/g, "'");
+  }
+  return qualifier === String(sheetName || '').trim();
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -145,6 +219,9 @@ function handleRequest(e) {
 
       // ━━━ 시트 범용 API ━━━
 
+      case "capabilities":
+        return jsonResponse(getVillageOperationCapabilities_());
+
       case "sheets":
         return jsonResponse(getSheetList());
 
@@ -161,6 +238,7 @@ function handleRequest(e) {
       case "write": {
         var wSheet = postBody.sheet;
         if (!isWritableSheet(wSheet)) return jsonResponse({ error: "쓰기 허용되지 않은 시트: " + wSheet });
+        if (!isRangeBoundToSheet_(wSheet, postBody.range)) return jsonResponse({ error: "range sheet must match the allowlisted sheet" });
         return jsonResponse(writeSheet(wSheet, postBody.range, postBody.values));
       }
 
@@ -173,7 +251,9 @@ function handleRequest(e) {
       case "update": {
         var uSheet = params.sheet || postBody.sheet;
         if (!isWritableSheet(uSheet)) return jsonResponse({ error: "쓰기 허용되지 않은 시트: " + uSheet });
-        return jsonResponse(updateCell(uSheet, params.cell || postBody.cell, params.value !== undefined ? params.value : postBody.value));
+        var uCell = params.cell || postBody.cell;
+        if (!isRangeBoundToSheet_(uSheet, uCell)) return jsonResponse({ error: "cell sheet must match the allowlisted sheet" });
+        return jsonResponse(updateCell(uSheet, uCell, params.value !== undefined ? params.value : postBody.value));
       }
 
       case "equipmentMasterSync": {
@@ -222,6 +302,13 @@ function handleRequest(e) {
         var rowIndices = params.rowIndices || postBody.rowIndices || null;
         if (!row || !newStart || !newEnd) return jsonResponse({ success: false, message: "row, start, end 필수" });
         return jsonResponse(updateScheduleTime(row, newStart, newEnd, rowIndices));
+      }
+
+      case "scheduleChangeDates": {
+        if (!e.postData) return jsonResponse({ success: false, error: "scheduleChangeDates requires POST" });
+        var dateChangeArgs = postBody.args || {};
+        if (typeof dateChangeArgs === "string") dateChangeArgs = JSON.parse(dateChangeArgs);
+        return jsonResponse(changeRegisteredTradeDates(dateChangeArgs));
       }
 
       case "updateStatus": {
@@ -671,20 +758,7 @@ function handleRequest(e) {
       default:
         return jsonResponse({
           error: "알 수 없는 action: " + action,
-          available: {
-            시트API: ["sheets", "info", "read", "write", "append", "update", "search", "run"],
-            스케줄API: ["list", "scan", "확인", "등록", "보류", "거절", "발송승인"]
-          },
-          usage: {
-            read: "GET ?key=...&action=read&sheet=시트명&range=A1:E10&limit=100",
-            write: "POST {key, action:'write', sheet, range, values}",
-            append: "POST {key, action:'append', sheet, values}",
-            update: "GET ?key=...&action=update&sheet=시트명&cell=A1&value=값",
-            search: "GET ?key=...&action=search&sheet=시트명&col=D&query=FX3",
-            list: "GET ?key=...&action=list (확인요청 대기 목록)",
-            scan: "GET ?key=...&action=scan (미처리 건 전체 스캔)",
-            "확인/등록/보류/거절/발송승인": "POST {key, action:'확인', reqID:'RQ-...'}"
-          }
+          available: getVillageOperationCapabilities_()
         });
     }
 
@@ -1018,6 +1092,9 @@ function writeSheet(sheetName, range, values) {
   if (!sheetName || !range || !values) {
     return { error: "sheet, range, values 모두 필요합니다" };
   }
+  if (!isRangeBoundToSheet_(sheetName, range)) {
+    return { error: "range sheet must match the allowlisted sheet" };
+  }
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(sheetName);
@@ -1050,6 +1127,9 @@ function appendRows(sheetName, values) {
 }
 
 function updateCell(sheetName, cell, value) {
+  if (!isRangeBoundToSheet_(sheetName, cell)) {
+    return { error: "cell sheet must match the allowlisted sheet" };
+  }
   if (!sheetName || !cell) {
     return { error: "sheet, cell 파라미터가 필요합니다" };
   }

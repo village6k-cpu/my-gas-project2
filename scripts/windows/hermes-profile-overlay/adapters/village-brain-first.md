@@ -56,7 +56,7 @@ back to browser authentication. The existing aggregate-revenue wrapper is one
 such route, not a special-purpose replacement for the rest of the system:
 
 ```bash
-node 'C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-live-read.js'
+node.exe "$HERMES_HOME/scripts/village/village-live-read.js"
 ```
 
 For other live facts, use the project API/CSV/Supabase routes described by `village-operations`. Generic Google Workspace OAuth, Computer Use, Chrome history/cookies, and a user-supplied Sheet link are not prerequisites while a project route exists.

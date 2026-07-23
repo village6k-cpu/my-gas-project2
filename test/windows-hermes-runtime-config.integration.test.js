@@ -43,7 +43,7 @@ test('active Windows Hermes keeps the Mac model budget and Slack display contrac
   assert.doesNotMatch(display, /^\s{2}platform_overrides:\s*$/m);
 });
 
-test('Windows gateway is pinned to the validated Mac runtime and remains cut over to Mac', {
+test('Windows gateway is pinned to the validated Mac-parity runtime and enabled on AX2', {
   skip: process.platform !== 'win32'
 }, () => {
   const home = path.join(process.env.LOCALAPPDATA || '', 'hermes');
@@ -54,5 +54,9 @@ test('Windows gateway is pinned to the validated Mac runtime and remains cut ove
   assert.match(vbs, new RegExp(runtime.replace(/\\/g, '\\\\'), 'i'));
   assert.match(cmd, /\.windows-gateway-disabled/i);
   assert.match(vbs, /\.windows-gateway-disabled/i);
-  assert.equal(fs.existsSync(path.join(home, '.windows-gateway-disabled')), true);
+  assert.equal(
+    fs.existsSync(path.join(home, '.windows-gateway-disabled')),
+    false,
+    'AX2 live operation must not retain the Windows gateway disable marker'
+  );
 });

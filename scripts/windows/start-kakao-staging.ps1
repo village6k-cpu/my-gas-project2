@@ -126,6 +126,7 @@ try {
     & $profileOverlayScriptPath `
         -ProfileHome $workerProfileHome `
         -MacHermesHome $resolvedHermesHome `
+        -RuntimeHome $resolvedHermesHome `
         -ProfileScoped `
         -Confirm:$false | Out-Null
 
