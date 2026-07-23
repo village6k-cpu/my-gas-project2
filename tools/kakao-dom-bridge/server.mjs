@@ -823,13 +823,20 @@ function shouldEscalateCompletedWorkerSkip(job = {}, workerPayload = {}) {
     || /not opened|not found|not visible|chat_row_not_found|preview/.test(chatStatus);
 }
 
+export function semanticPreviewIdentity(value = '') {
+  return cleanPreviewText(value)
+    .replace(/^(\S+)\s+\d+\s+/, '$1 ')
+    .trim();
+}
+
 function buildStableJobId(roomKey, events = []) {
-  const identities = events
-    .map((event) => event.eventHash || sha256(JSON.stringify({
-      reason: event.reason || '',
-      previewText: event.previewText || '',
-      unreadCount: event.unreadCount ?? null
-    })))
+  // Mutation/backstop scans attach a fresh event hash and the unread badge may
+  // disappear while the same customer message is being processed. Neither is a
+  // new business turn. Key the durable job by the visible semantic preview so a
+  // completed message cannot launch Hermes again and time out minutes later.
+  const identities = [...new Set(events
+    .map((event) => semanticPreviewIdentity(event.previewText || ''))
+    .filter(Boolean))]
     .sort();
   return `dom-${sha256(`${roomKey}:${identities.join('|')}`).slice(0, 16)}`;
 }

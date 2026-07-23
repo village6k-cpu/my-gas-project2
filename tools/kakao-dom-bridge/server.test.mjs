@@ -75,6 +75,14 @@ test('bridge queue replaces pending same-room work and cleans conversation tabs 
   assert.match(source, /cleanupIdleKakaoConversationTabs\('worker_finished', \{ allowQueued: true \}\)/);
 });
 
+test('stable job identity ignores a disappearing Kakao unread badge for the same message', async () => {
+  const { semanticPreviewIdentity } = await import('./server.mjs');
+  assert.equal(
+    semanticPreviewIdentity('중요 김명선 2 여쭤볼라했는데 전원이 꺼져있어서 카톡으로 남겨드립니다! 오후 4:17'),
+    semanticPreviewIdentity('중요 김명선 여쭤볼라했는데 전원이 꺼져있어서 카톡으로 남겨드립니다! 오후 4:17')
+  );
+});
+
 test('CORS preflight permits Chrome private-network access to the loopback bridge', () => {
   assert.equal(buildCorsHeaders()['access-control-allow-private-network'], 'true');
 });
