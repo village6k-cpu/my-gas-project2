@@ -2784,23 +2784,21 @@ function assertDashboardReturnComplete_(tid, props) {
   recordedBaselineItems.forEach(function(item) {
     baselineById[String(item.schedule_id || '').trim()] = item;
   });
-  var identityChanged = recordedBaselineItems.filter(function(baseline) {
+  // 예약 장비명·수량은 반출 후에도 수정할 수 있다. 반납 검수는 현재 예약값이 아니라
+  // 반출 순간 Supabase에 고정한 실제 품목명·taken_qty를 계속 기준으로 삼는다.
+  // 다만 기준선 행 자체가 삭제되거나 기준선 없는 행이 끼어드는 구조 변경은 차단한다.
+  var baselineStructureChanged = recordedBaselineItems.filter(function(baseline) {
     var baselineId = String(baseline.schedule_id || '').trim();
     var current = currentById[baselineId];
-    if (!current) return true;
-    var currentQty = Number(String(current.qty || 1).replace(/[^0-9.]/g, '')) || 1;
-    return currentQty !== Number(baseline.taken_qty || 0) ||
-      String(current.name || '').trim() !== String(baseline.name || '').trim() ||
-      String(current.setName || '').trim() !== String(baseline.set_name || '').trim() ||
-      !!current.isHeader !== !!baseline.is_set_header;
+    return !current;
   }).concat(currentCheckable.filter(function(current) {
     return !baselineById[String(current.scheduleId || '').trim()];
   }));
-  if (identityChanged.length) {
+  if (baselineStructureChanged.length) {
     return {
-      error: '반납완료 차단: 반출 기준선과 달라진/삭제·추가된 품목 ' + identityChanged.length + '건 — ' +
-        identityChanged.slice(0, 5).map(function(eq) { return eq.name || eq.scheduleId; }).join(', '),
-      identityChanged: identityChanged
+      error: '반납완료 차단: 반출 기준선에서 삭제되었거나 기준선 없는 품목 ' + baselineStructureChanged.length + '건 — ' +
+        baselineStructureChanged.slice(0, 5).map(function(eq) { return eq.name || eq.scheduleId; }).join(', '),
+      identityChanged: baselineStructureChanged
     };
   }
   var incomplete = checkable.filter(function(eq) {
@@ -7068,10 +7066,6 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
     var setSheet = ss.getSheetByName("세트마스터");
     if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
     if (!equipSheet) return { error: "장비마스터 없음" };
-    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
-      return { error: "반출 시작 후에는 예약 수량을 바꿀 수 없습니다. 반납 수량에서 정상/파손/분실로 기록해주세요." };
-    }
-
     var lastRow = sched.getLastRow();
     var targetRows = findDashboardRowsByValue_(sched, 1, lastRow, scheduleId);
     if (targetRows.length === 0) return { error: "스케줄ID '" + scheduleId + "' 못 찾음" };
@@ -7221,10 +7215,6 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
     var equipSheet = ss.getSheetByName("장비마스터");
     if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
     if (!equipSheet) return { error: "장비마스터 없음" };
-    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
-      return { error: "반출 시작 후에는 장비명을 바꿀 수 없습니다. 잘못 반출된 품목은 반납 메모와 수량으로 기록해주세요." };
-    }
-
     var newName = resolveEquipmentName_(requestedName, ss);
     var lastRow = sched.getLastRow();
     var targetRows = findDashboardRowsByValue_(sched, 1, lastRow, scheduleId);

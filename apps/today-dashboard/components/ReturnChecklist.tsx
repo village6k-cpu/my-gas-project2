@@ -144,7 +144,7 @@ function ReturnRow({ t, e, setBadge = false, setTone = false }: { t: Trade; e: E
         <div className="space-y-2 bg-paper/70 py-2.5">
           <div className="rounded-lg bg-line/20 px-2.5 py-1.5 text-[12px] text-ink-mute">
             반출 기준 <span className="font-bold text-ink">{e.name} · {expected}개</span>
-            <span className="ml-1">(반출 후 장비명·예약 수량 수정 불가)</span>
+            <span className="ml-1">(반출 당시 실제 수량 기준)</span>
             {corrected && <div className="mt-1 font-bold text-warn-fg">Slack 확인 실제값: {actualName} · {actualExpected}개</div>}
           </div>
           <div className="flex items-center gap-2 text-[12.5px]">

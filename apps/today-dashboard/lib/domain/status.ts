@@ -65,7 +65,7 @@ export function phaseForDate(t: Trade, date: string): "checkout" | "checkin" | "
   return "none";
 }
 
-/** GAS/Supabase의 반출 기준선과 동일한 잠금 판정을 UI·저장 경로가 공유한다. */
+/** 반출 당시 실제 포함 품목 기록은 반납 검증을 위해 고정한다. 예약 장비명·수량 편집에는 쓰지 않는다. */
 export function isCheckoutBaselineLocked(t: Trade): boolean {
   return (
     t.setupDone ||

@@ -33,24 +33,14 @@ assert(
 );
 assert(
   /export function isCheckoutBaselineLocked\(t: Trade\)/.test(status) &&
-    /t\.contractStatus === "반출"/.test(status) &&
-    /Number\(item\.takenQty \|\| 0\) > 0/.test(status),
-  'one shared policy must treat durable quantities and checkout contract status as a locked checkout baseline'
+    !tradeActions.includes('isCheckoutBaselineLocked'),
+  'checkout completion may preserve the actual handover record but must not lock reservation editing'
 );
 assert(
-  /const baselineLocked = isCheckoutBaselineLocked\(t\)/.test(checklist) &&
-    /baselineLocked \? \([\s\S]*반출 기준선 원본 보존[\s\S]*\) : \([\s\S]*EquipmentNameCombobox/.test(checklist),
-  'checkout rows must replace name/quantity editors with a read-only explanation after the baseline is locked'
-);
-assert(
-  /disabled=\{baselineLocked\}[\s\S]*setItemCheckout/.test(checklist) ||
-    /setItemCheckout[\s\S]{0,500}disabled=\{baselineLocked\}/.test(checklist),
-  'checkout inclusion controls must not offer an operation that the backend guarantees will reject'
-);
-assert(
-  /isCheckoutBaselineLocked\(trade\)/.test(tradeActions) &&
-    /isCheckoutBaselineLocked\(currentTrade\)/.test(store),
-  'all edit entry points must use the same checkout-baseline lock policy'
+  !checklist.includes('반출 기준선 원본 보존') &&
+    !tradeActions.includes('반출 후 수정 잠김') &&
+    /function CheckoutRow[\s\S]*EquipmentNameCombobox[\s\S]*queueItemQty/.test(checklist),
+  'checkout rows and the reservation editor must keep name and quantity editing available after checkout'
 );
 assert(
   /export function clearToast\(\)/.test(store) &&
@@ -115,6 +105,11 @@ assert(
 assert(
   /function dashboardUpdateEquipmentName\(tid, scheduleId, equipName, options\)/.test(checkAvailability),
   'GAS backend must implement dashboardUpdateEquipmentName'
+);
+assert(
+  !/function dashboardUpdateEquipmentQty[\s\S]{0,2600}isDashboardTradeCheckoutStarted_/.test(checkAvailability) &&
+    !/function dashboardUpdateEquipmentName[\s\S]{0,2600}isDashboardTradeCheckoutStarted_/.test(checkAvailability),
+  'GAS must allow registered equipment quantity and name edits after checkout'
 );
 assert(
   /sched\.getRange\(targetRow, 4\)\.setValue\(newName\)/.test(checkAvailability) &&

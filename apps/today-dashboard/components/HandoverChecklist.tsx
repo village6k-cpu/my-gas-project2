@@ -192,7 +192,7 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         </span>
 
         {baselineLocked ? (
-          <span className="shrink-0 rounded-md bg-line/30 px-1.5 py-1 text-[11px] font-bold text-ink-faint">고정</span>
+          <span className="shrink-0 rounded-md bg-line/30 px-1.5 py-1 text-[11px] font-bold text-ink-faint">반출기록</span>
         ) : e.onsite ? (
           <button onClick={() => removeItem(t.tradeId, e.scheduleId)} className="tap shrink-0 px-1 text-ink-faint">✕</button>
         ) : (
@@ -222,24 +222,15 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
 
       {open && (
         <div className="space-y-2 pb-2.5 pl-9">
-          {baselineLocked ? (
-            <div className="rounded-lg bg-paper px-2.5 py-2 text-[12px] font-semibold leading-snug text-ink-mute ring-1 ring-line">
-              반출 기준선 원본 보존 · 사후 확인된 실제값은 Slack 정정으로 별도 표시합니다. 추가로 나간 장비는 아래 ‘현장 추가’로 기록하세요.
-              {corrected && <div className="mt-1 text-warn-fg">예약 기록: {e.name} · {e.takenQty ?? e.qty}개 / 실제: {actualName} · {actualQty}개</div>}
-            </div>
-          ) : (
-            <>
-              <div className="block text-[12px] font-semibold text-ink-mute">
-                장비명
-                <EquipmentNameCombobox value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />
-              </div>
-              <div className="flex items-center gap-2 text-[12px] text-ink-mute">
-                예약 수량
-                {/* 낙관적 반영 — 탭 즉시 표시가 바뀌고 원장 확정은 디바운스 후 1회만 */}
-                <Stepper value={e.qty} min={1} onChange={(v) => queueItemQty(t.tradeId, e.scheduleId, v)} />
-              </div>
-            </>
-          )}
+          <div className="block text-[12px] font-semibold text-ink-mute">
+            장비명
+            <EquipmentNameCombobox value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />
+          </div>
+          <div className="flex items-center gap-2 text-[12px] text-ink-mute">
+            예약 수량
+            {/* 낙관적 반영 — 탭 즉시 표시가 바뀌고 원장 확정은 디바운스 후 1회만 */}
+            <Stepper value={e.qty} min={1} onChange={(v) => queueItemQty(t.tradeId, e.scheduleId, v)} />
+          </div>
           {checkinMemo && checkinMemo !== checkoutMemo && (
             <div className="flex items-start gap-1.5 rounded-md bg-warn-bg px-2 py-1 text-[12px] font-semibold leading-snug text-warn-fg ring-1 ring-warn-ring">
               <MemoTag phase="checkin" className="mt-[1px]" />

@@ -1114,7 +1114,7 @@ export function setItemCheckout(tradeId: string, scheduleId: string, next: Check
   const currentTrade = state.trades.find((t) => t.tradeId === tradeId);
   const baselineStarted = !!currentTrade && isCheckoutBaselineLocked(currentTrade);
   if (baselineStarted) {
-    set({ toast: { id: ++toastSeq, text: "⚠️ 반출 기준선이 고정되어 품목 포함 여부를 바꿀 수 없습니다", kind: "error" } });
+    set({ toast: { id: ++toastSeq, text: "⚠️ 반출 당시 실제 포함 품목 기록은 바꿀 수 없습니다", kind: "error" } });
     return;
   }
   let final: CheckoutState | undefined;

@@ -2,7 +2,6 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import type { EquipmentItem, Trade } from "@/lib/domain/types";
-import { isCheckoutBaselineLocked } from "@/lib/domain/status";
 import { authFetch } from "@/lib/data/authFetch";
 import { deleteTradeRemote } from "@/lib/data/remote";
 import {
@@ -174,8 +173,6 @@ function TradeEditSheet({ trade, onClose }: { trade: Trade; onClose: () => void 
     onClose();
   }
 
-  const equipmentLocked = isCheckoutBaselineLocked(trade);
-
   return (
     <div className="fixed inset-0 z-[80] flex items-end justify-center bg-black/45 sm:items-center" onClick={onClose}>
       <div className="animate-pop max-h-[92vh] w-full max-w-xl overflow-y-auto rounded-t-2xl bg-white p-4 pb-8 shadow-pop sm:rounded-2xl" onClick={(event) => event.stopPropagation()}>
@@ -197,13 +194,10 @@ function TradeEditSheet({ trade, onClose }: { trade: Trade; onClose: () => void 
         </div>
 
         <section className="mt-5 border-t border-line pt-4">
-          <div className="flex items-baseline justify-between gap-2">
-            <h3 className="text-[14px] font-extrabold text-ink">장비명·예약 수량</h3>
-            {equipmentLocked && <span className="text-[11px] font-bold text-attention-fg">반출 후 수정 잠김</span>}
-          </div>
+          <h3 className="text-[14px] font-extrabold text-ink">장비명·예약 수량</h3>
           <div className="mt-2 space-y-2">
             {trade.equipments.map((item) => (
-              <EquipmentEditRow key={item.scheduleId} tradeId={trade.tradeId} item={item} locked={equipmentLocked || !!item.synthetic} />
+              <EquipmentEditRow key={item.scheduleId} tradeId={trade.tradeId} item={item} locked={!!item.synthetic} />
             ))}
           </div>
         </section>
