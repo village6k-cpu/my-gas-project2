@@ -73,30 +73,19 @@ test('live root Hermes has the canonical Mac skill packages and scoped RPA profi
   assert.equal(fs.readFileSync(path.join(hermesHome, '.no-bundled-skills'), 'utf8').trim(), 'mac-parity-curated');
 });
 
-test('live root Hermes channel prompt uses the Windows Brain without a write exception', { skip: !runLiveChecks }, () => {
+test('live root Hermes keeps Mac-style model freedom without injected runtime routing', { skip: !runLiveChecks }, () => {
   const config = fs.readFileSync(path.join(hermesHome, 'config.yaml'), 'utf8');
-  assert.equal(
-    /C:[\\/]Village[\\/]VILLAGE_Brain[\\/]Ops[\\/]brain-context-latest\.md/.test(config),
-    true,
-    'channel prompt must reference the promoted Windows Brain context'
-  );
+  assert.match(config, /default:\s*gpt-5\.6-terra/);
+  assert.match(config, /reasoning_effort:\s*xhigh/);
+  assert.match(config, /gateway_wall_timeout:\s*1800/);
+  assert.match(config, /hard_stop_enabled:\s*false/);
   assert.equal(
     /\$HOME\/village-ops|owner-journal-remote\.jsonl|\bappend\b/i.test(config),
     false,
     'channel prompt must not retain the Mac path or a Brain write exception'
   );
-  assert.match(config, /village-live-read\.js/);
-  assert.match(config, /Google Workspace|Computer Use/i);
-  assert.match(config, /channel_skill_bindings:/);
-  assert.match(config, /id:\s*C0B6ZJZ2XU3[\s\S]{0,160}village-runtime-router/);
-  assert.match(config, /C0B6ZJZ2XU3:[\s\S]{0,1600}VILLAGE_WINDOWS_RUNTIME_ROUTER_V1/);
-  assert.match(config, /VILLAGE_WINDOWS_RUNTIME_ROUTER_V1[\s\S]{0,1600}village-live-query\.js/);
-  assert.match(config, /New 확인요청[\s\S]{0,700}same full AI reasoning/i);
-  assert.match(config, /different return times[\s\S]{0,240}split/i);
-  assert.match(config, /create-batch/i);
-  assert.doesNotMatch(config, /load village-confirm-request only/i);
-  assert.doesNotMatch(config, /Resolve aliases once/i);
-  assert.doesNotMatch(config, /Do not run raw GAS fetch loops or post-task self-improvement/i);
+  assert.doesNotMatch(config, /VILLAGE_WINDOWS_RUNTIME_ROUTER_V1/);
+  assert.doesNotMatch(config, /id:\s*C0B6ZJZ2XU3[\s\S]{0,160}village-runtime-router/);
 });
 
 test('live confirmation routing preserves AI judgment and uses the runner only for verified writes', { skip: !runLiveChecks }, () => {

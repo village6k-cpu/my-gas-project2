@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install intelligence-preserving Village Slack routing without exposing secrets."""
+"""Restore Mac-style AI-first Hermes Slack behavior without exposing secrets."""
 
 from __future__ import annotations
 
@@ -19,45 +19,39 @@ ROUTER_SKILL = "village-runtime-router"
 RUNTIME_CWD = r"C:\Village\my-gas-project2-worktrees\ax2-hermes-final"
 ROUTING_PROMPT_START = "[VILLAGE_WINDOWS_RUNTIME_ROUTER_V1]"
 ROUTING_PROMPT_END = "[/VILLAGE_WINDOWS_RUNTIME_ROUTER_V1]"
-ROUTING_PROMPT = f"""{ROUTING_PROMPT_START}
-Windows Village routing override for every turn, including an existing session:
-- Current Village fact: start with the most relevant read-only lookup:
-  node 'C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-live-query.js' lookup --domain <inventory|schedule|customer|finance|documents> --query '<identifier>'
-  Use additional focused queries, relevant skills, and source evidence whenever the first result is incomplete. Routing is a navigation optimization, never a reduction in AI reasoning or tool access needed for correctness.
-- Decision, policy, or history: read C:/Village/VILLAGE_Brain/Ops/brain-context-latest.md directly. Load village-brain-first only when a complex protocol is actually required.
-- New 확인요청 creation from owner text/screenshot: load village-operations and use the same full AI reasoning as the successful screenshot-quote path. Resolve aliases with broad catalog/master searches and context; a failed raw exact search is not ambiguity. If equipment groups have different return times, split them automatically into the minimum number of requests. Use C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-confirm-request.js only for final bounded mutation/readback, with create-batch for multiple groups. Do not disable normal self-improvement for speed.
-- Other requested internal action only: load village-operations once, perform the action, and verify live readback.
-This block supersedes older per-channel discovery and path instructions. Do not send a customer-facing message without separate approval.
-{ROUTING_PROMPT_END}"""
-ROUTER_CHANNELS = CommentedMap(
-    {
-        "C03F11EU0RE": "inventory",
-        "C0B6WAR7R7H": "settlement",
-        "C0B6ZJZ2XU3": "general-group",
-        "C0B769B394K": "schedule",
-        "C0B7AQN01BQ": "other-inquiries",
-        "C0B7CLP4KDY": "documents",
-        "C0BB07SM3EH": "business-heyvilly",
-    }
-)
+ROUTER_CHANNELS = {
+    "C03F11EU0RE": "inventory",
+    "C0B6WAR7R7H": "settlement",
+    "C0B6ZJZ2XU3": "general-group",
+    "C0B769B394K": "schedule",
+    "C0B7AQN01BQ": "other-inquiries",
+    "C0B7CLP4KDY": "documents",
+    "C0BB07SM3EH": "business-heyvilly",
+}
 
 
-def desired_bindings(existing: object) -> CommentedSeq:
-    managed = set(ROUTER_CHANNELS)
+def remove_managed_bindings(existing: object) -> CommentedSeq:
+    """Remove only our forced router while preserving every other binding."""
     preserved = CommentedSeq()
-    if isinstance(existing, list):
-        for entry in existing:
-            if not isinstance(entry, dict) or str(entry.get("id", "")) not in managed:
-                preserved.append(entry)
-    for channel_id, label in ROUTER_CHANNELS.items():
-        item = CommentedMap({"id": channel_id, "skills": CommentedSeq([ROUTER_SKILL])})
-        item.yaml_add_eol_comment(label, key="id")
-        preserved.append(item)
+    if not isinstance(existing, list):
+        return preserved
+    for entry in existing:
+        if not isinstance(entry, dict) or str(entry.get("id", "")) not in ROUTER_CHANNELS:
+            preserved.append(entry)
+            continue
+        skills = entry.get("skills")
+        if not isinstance(skills, list):
+            preserved.append(entry)
+            continue
+        remaining = CommentedSeq(skill for skill in skills if str(skill) != ROUTER_SKILL)
+        if remaining:
+            entry["skills"] = remaining
+            preserved.append(entry)
     return preserved
 
 
-def desired_channel_prompt(existing: object) -> str:
-    """Preserve user-owned instructions and replace only our managed block."""
+def remove_managed_prompt(existing: object) -> str:
+    """Remove only managed prompt blocks, retaining user-owned instructions."""
     prompt = str(existing or "")
     while True:
         start = prompt.find(ROUTING_PROMPT_START)
@@ -68,45 +62,45 @@ def desired_channel_prompt(existing: object) -> str:
             prompt = prompt[:start]
             break
         prompt = prompt[:start] + prompt[end + len(ROUTING_PROMPT_END) :]
-    prompt = prompt.strip()
-    return f"{prompt}\n\n{ROUTING_PROMPT}" if prompt else ROUTING_PROMPT
+    return prompt.strip()
 
 
-def prompts_are_configured(prompts: object) -> bool:
+def prompts_are_clean(prompts: object) -> bool:
+    if prompts is None:
+        return True
     if not isinstance(prompts, dict):
         return False
-    for channel_id in ROUTER_CHANNELS:
-        prompt = str(prompts.get(channel_id, ""))
-        if (
-            prompt.count(ROUTING_PROMPT_START) != 1
-            or prompt.count(ROUTING_PROMPT_END) != 1
-            or "village-live-query.js" not in prompt
-            or "village-confirm-request.js" not in prompt
-            or "village-confirm-request" not in prompt
-            or "same full AI reasoning" not in prompt
-            or "create-batch" not in prompt
-            or "load village-operations" not in prompt
-            or "existing session" not in prompt
-        ):
-            return False
-    return True
+    return all(
+        ROUTING_PROMPT_START not in str(prompt) and ROUTING_PROMPT_END not in str(prompt)
+        for prompt in prompts.values()
+    )
 
 
 def is_configured(config: object) -> bool:
     if not isinstance(config, dict) or not isinstance(config.get("slack"), dict):
         return False
     bindings = config["slack"].get("channel_skill_bindings")
-    if not isinstance(bindings, list):
-        return False
-    actual = {
-        str(entry.get("id")): list(entry.get("skills", []))
+    bindings = bindings if isinstance(bindings, list) else []
+    has_managed_router = any(
+        isinstance(entry, dict)
+        and str(entry.get("id", "")) in ROUTER_CHANNELS
+        and ROUTER_SKILL in [str(skill) for skill in entry.get("skills", [])]
         for entry in bindings
-        if isinstance(entry, dict) and str(entry.get("id", "")) in ROUTER_CHANNELS
-    }
+    )
+    model = config.get("model")
+    agent = config.get("agent")
+    guardrails = config.get("tool_loop_guardrails")
     terminal = config.get("terminal")
     return (
-        actual == {channel_id: [ROUTER_SKILL] for channel_id in ROUTER_CHANNELS}
-        and prompts_are_configured(config["slack"].get("channel_prompts"))
+        isinstance(model, dict)
+        and str(model.get("default", "")) == "gpt-5.6-terra"
+        and isinstance(agent, dict)
+        and str(agent.get("reasoning_effort", "")) == "xhigh"
+        and agent.get("gateway_wall_timeout") == 1800
+        and isinstance(guardrails, dict)
+        and guardrails.get("hard_stop_enabled") is False
+        and not has_managed_router
+        and prompts_are_clean(config["slack"].get("channel_prompts"))
         and isinstance(terminal, dict)
         and str(terminal.get("cwd", "")) == RUNTIME_CWD
     )
@@ -126,7 +120,7 @@ def load_config(path: Path, yaml: YAML) -> CommentedMap:
 
 def atomic_write(path: Path, config: CommentedMap, yaml: YAML) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.village-routing.", suffix=".tmp", dir=path.parent
+        prefix=f".{path.name}.mac-parity.", suffix=".tmp", dir=path.parent
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
@@ -155,32 +149,50 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(config_path, yaml)
     configured = is_configured(config)
 
+    result = {"ok": configured, "mode": "mac_style_ai_first", "channels": len(ROUTER_CHANNELS)}
     if args.check:
-        print(json.dumps({"ok": configured, "router": ROUTER_SKILL, "channels": len(ROUTER_CHANNELS)}))
+        print(json.dumps(result))
         return 0 if configured else 2
     if configured:
-        print(json.dumps({"ok": True, "changed": False, "router": ROUTER_SKILL, "channels": len(ROUTER_CHANNELS)}))
+        print(json.dumps({**result, "changed": False}))
         return 0
 
-    backup_path = config_path.with_name(f"{config_path.name}.before-village-routing.backup")
+    backup_path = config_path.with_name(f"{config_path.name}.before-mac-parity.backup")
     if not backup_path.exists():
         shutil.copy2(config_path, backup_path)
-    config["slack"]["channel_skill_bindings"] = desired_bindings(
-        config["slack"].get("channel_skill_bindings")
-    )
+
+    for key in ("model", "agent", "tool_loop_guardrails"):
+        if key not in config or not isinstance(config[key], dict):
+            config[key] = CommentedMap()
+    config["model"]["default"] = "gpt-5.6-terra"
+    config["agent"]["reasoning_effort"] = "xhigh"
+    config["agent"]["gateway_wall_timeout"] = 1800
+    config["tool_loop_guardrails"]["hard_stop_enabled"] = False
+
+    cleaned_bindings = remove_managed_bindings(config["slack"].get("channel_skill_bindings"))
+    if cleaned_bindings:
+        config["slack"]["channel_skill_bindings"] = cleaned_bindings
+    else:
+        config["slack"].pop("channel_skill_bindings", None)
+
     prompts = config["slack"].get("channel_prompts")
-    if prompts is None:
-        prompts = CommentedMap()
-        config["slack"]["channel_prompts"] = prompts
-    elif not isinstance(prompts, dict):
+    if prompts is not None and not isinstance(prompts, dict):
         raise ValueError("slack.channel_prompts must be a mapping when present")
-    for channel_id in ROUTER_CHANNELS:
-        prompts[channel_id] = desired_channel_prompt(prompts.get(channel_id))
+    if isinstance(prompts, dict):
+        for channel_id in list(prompts):
+            cleaned = remove_managed_prompt(prompts[channel_id])
+            if cleaned:
+                prompts[channel_id] = cleaned
+            else:
+                prompts.pop(channel_id, None)
+        if not prompts:
+            config["slack"].pop("channel_prompts", None)
+
     config["terminal"]["cwd"] = RUNTIME_CWD
     atomic_write(config_path, config, yaml)
 
     verified = is_configured(load_config(config_path, yaml))
-    print(json.dumps({"ok": verified, "changed": True, "router": ROUTER_SKILL, "channels": len(ROUTER_CHANNELS)}))
+    print(json.dumps({"ok": verified, "changed": True, "mode": "mac_style_ai_first", "channels": len(ROUTER_CHANNELS)}))
     return 0 if verified else 1
 
 

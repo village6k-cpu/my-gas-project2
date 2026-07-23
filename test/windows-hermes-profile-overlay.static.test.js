@@ -126,7 +126,7 @@ test('confirmation-request runner is execution-only and preserves full AI reason
   assert.doesNotMatch(source, /curl .*script\.google/i);
 });
 
-test('offline routing configuration binds the compact router across Village business surfaces', () => {
+test('offline routing configuration restores Mac-style AI-first Slack behavior', () => {
   const source = fs.readFileSync(routingConfigScriptPath, 'utf8');
   for (const channelId of [
     'C03F11EU0RE', // inventory
@@ -139,20 +139,17 @@ test('offline routing configuration binds the compact router across Village busi
   ]) {
     assert.match(source, new RegExp(channelId));
   }
-  assert.match(source, /village-runtime-router/);
+  assert.match(source, /gpt-5\.6-terra/);
+  assert.match(source, /reasoning_effort[\s\S]{0,120}xhigh/i);
+  assert.match(source, /gateway_wall_timeout[\s\S]{0,120}1800/i);
+  assert.match(source, /hard_stop_enabled[\s\S]{0,120}False/i);
   assert.match(source, /channel_skill_bindings/);
   assert.match(source, /channel_prompts/);
   assert.match(source, /VILLAGE_WINDOWS_RUNTIME_ROUTER_V1/);
-  assert.match(source, /village-live-query\.js/);
-  assert.match(source, /village-confirm-request\.js/);
-  assert.match(source, /village-confirm-request/);
-  assert.match(source, /New 확인요청[\s\S]{0,500}village-operations/i);
-  assert.match(source, /different return[\s\S]{0,220}split/i);
-  assert.match(source, /AI[\s\S]{0,260}(?:reason|judg)/i);
-  assert.doesNotMatch(source, /load village-confirm-request only/i);
-  assert.doesNotMatch(source, /Resolve aliases once/i);
-  assert.doesNotMatch(source, /post-task self-improvement/i);
-  assert.match(source, /existing session/i);
+  assert.match(source, /remove_managed_bindings/);
+  assert.match(source, /remove_managed_prompt/);
+  assert.doesNotMatch(source, /desired_bindings/);
+  assert.doesNotMatch(source, /desired_channel_prompt/);
   assert.match(source, /C:\\Village\\my-gas-project2-worktrees\\ax2-hermes-final/);
   assert.match(source, /terminal/);
   assert.match(source, /cwd/);
