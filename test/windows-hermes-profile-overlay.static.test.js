@@ -65,6 +65,8 @@ test('Windows adapters preserve canonical routing and scope safety flags correct
   assert.match(operations, /confirmation request[\s\S]{0,300}same reasoning/i);
   assert.match(operations, /different return[\s\S]{0,220}split/i);
   assert.match(operations, /broad[\s\S]{0,220}catalog/i);
+  assert.match(operations, /existing partial[\s\S]{0,500}\bupdate\b/i);
+  assert.match(operations, /do not fall back[\s\S]{0,220}(?:ad-hoc|raw)/i);
   assert.match(rpa, /profile/i);
   assert.match(rpa, /does not define the authorization policy/i);
   assert.match(rpa, /Do not load this profile-scoped skill into ordinary Slack business questions/i);
@@ -114,6 +116,10 @@ test('confirmation-request runner is execution-only and preserves full AI reason
   assert.match(source, /^platforms:\s*\[windows\]$/m);
   assert.match(source, /village-confirm-request\.js/);
   assert.match(source, /create-batch/i);
+  assert.match(source, /\bupdate\b/i);
+  assert.match(source, /existing partial/i);
+  assert.match(source, /--help/i);
+  assert.match(source, /do not fall back[\s\S]{0,220}(?:ad-hoc|raw)/i);
   assert.match(source, /execution|mutation/i);
   assert.match(source, /AI[\s\S]{0,220}reason/i);
   assert.match(source, /different return[\s\S]{0,220}split/i);

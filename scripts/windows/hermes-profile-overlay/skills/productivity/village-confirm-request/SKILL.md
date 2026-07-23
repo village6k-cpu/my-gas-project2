@@ -1,7 +1,7 @@
 ---
 name: village-confirm-request
 description: "Bounded execution and readback layer for Village confirmation-request plans produced with full AI reasoning in village-operations, including multi-schedule batches."
-version: 1.1.0
+version: 1.2.0
 author: Village
 license: private
 platforms: [windows]
@@ -31,7 +31,9 @@ Hermes terminal is Git Bash, but `node` is a native Windows executable; always p
 
 ## Execution
 
-For one planned schedule, use `create`. For multiple AI-planned schedule groups, use `create-batch` in one command:
+Run `node 'C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-confirm-request.js' --help` for the compact command list. Do not inspect the runner source merely to discover its CLI.
+
+For one new planned schedule, use `create`. For multiple AI-planned schedule groups, use `create-batch` in one command:
 
 ```bash
 python - <<'PY' | node 'C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-confirm-request.js' create-batch
@@ -51,10 +53,20 @@ printf '%s' '{"반출일":"2026-07-23","반출시간":"05:00","반납일":"2026-
 
 Treat the result as complete only when every item contains `verified:true`, a valid `RQ-...` ID, and readback rows for all intended top-level items. Report all IDs, schedule groups, equipment/quantities, availability, and any warning concisely.
 
+### Existing partial request
+
+If authoritative lookup finds one unregistered existing partial request for the same customer and interval, use `update` with a wrapper containing the verified request ID and the complete AI-planned request:
+
+```json
+{"reqID":"RQ-260723-003","request":{"반출일":"2026-07-26","반출시간":"20:00","반납일":"2026-07-28","반납시간":"20:00","예약자명":"이재민","연락처":"010-7432-3925","장비":[{"이름":"석자 그리드","수량":1},{"이름":"석자 플로피","수량":1},{"이름":"NANLUX Evoke 1200B","수량":1}]}}
+```
+
+Pipe that JSON to the fixed runner with the `update` command. It catalog-preflights the complete plan, calls `updateRequest` once, and verifies the entire request group by readback. Do not fall back to ad-hoc Python, raw GAS calls, source-code archaeology, or a second insert when this bounded route applies.
+
 ## Hard limits
 
 - Exactly one `insertAndCheckRequest` attempt per AI-planned schedule group. The runner never retries a write.
-- Never call `updateRequest`, `updateRequestItem`, `excludeEquipFromRequest`, or a second insert to repair an uncertain interpretation. Resolve the whole payload before create.
+- Never call `updateRequest` directly. Use the bounded `update` command only for one already-verified existing partial request after resolving the whole payload. Never call `updateRequestItem`, `excludeEquipFromRequest`, or a second insert to repair an uncertain interpretation.
 - A missing/failed readback is an uncertain write outcome. In a batch, report already completed RQ IDs and never retry them automatically.
 - This route cannot send an 알림톡/customer-facing message and cannot perform final reservation registration. Those require a separate explicit owner approval and the broader `village-operations` route.
 - Normal Hermes self-improvement may retain a verified alias or reusable workflow lesson after the user-facing operation. Learning must not be disabled as a speed optimization.

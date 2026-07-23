@@ -54,6 +54,23 @@ function buildInsertRequest(config, request) {
   return { method: 'GET', url: url.toString() };
 }
 
+function normalizeRequestId(value) {
+  const reqID = requiredText(value, 'reqID', 40);
+  if (!/^RQ-\d{6}-\d{3,}$/.test(reqID)) throw new Error('reqID must use RQ-YYMMDD-NNN format');
+  return reqID;
+}
+
+function buildUpdateRequest(config, reqID, request) {
+  const url = baseUrl(config);
+  url.searchParams.set('action', 'run');
+  url.searchParams.set('func', 'updateRequest');
+  url.searchParams.set('args', JSON.stringify({ reqID: normalizeRequestId(reqID), ...request }));
+  if (url.toString().length > 16_000) {
+    throw new Error('Confirmation-request payload is too large for the bounded GET route');
+  }
+  return { method: 'GET', url: url.toString() };
+}
+
 async function fetchJson(fetchImpl, request, timeoutMs, label) {
   const response = await fetchImpl(request.url, {
     method: request.method,
@@ -237,6 +254,43 @@ async function createConfirmationRequest({
   });
 }
 
+async function updateConfirmationRequest({
+  config,
+  reqID,
+  request,
+  fetchImpl = globalThis.fetch,
+  readTimeoutMs = 30_000,
+  writeTimeoutMs = 180_000
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
+  const normalizedReqID = normalizeRequestId(reqID);
+  const normalized = normalizeConfirmationRequest(request);
+  await preflightCatalog({
+    config,
+    requests: [normalized],
+    fetchImpl,
+    timeoutMs: readTimeoutMs
+  });
+  const updatePayload = await fetchJson(
+    fetchImpl,
+    buildUpdateRequest(config, normalizedReqID, normalized),
+    writeTimeoutMs,
+    'Confirmation-request update'
+  );
+  if (updatePayload.success !== true) {
+    throw new Error(`Confirmation-request update failed for ${normalizedReqID}`);
+  }
+  const readbackPayload = await fetchJson(
+    fetchImpl,
+    buildSearchRequest(config, { sheet: '확인요청', query: normalizedReqID }),
+    readTimeoutMs,
+    'Confirmation-request readback'
+  );
+  const rows = summarizeReadback(readbackPayload, normalizedReqID);
+  verifyIntendedReadback(rows, normalized, normalizedReqID);
+  return { ok: true, reqID: normalizedReqID, updated: true, verified: true, rows };
+}
+
 async function preflightCatalog({ config, requests, fetchImpl, timeoutMs }) {
   const catalog = await Promise.all(requests.flatMap((request) => (
     request.장비.map((item) => searchCatalog({
@@ -338,8 +392,11 @@ async function createConfirmationRequests({
 
 function parseCliArgs(args) {
   const command = args[0];
-  if (command !== 'resolve' && command !== 'create' && command !== 'create-batch') {
-    throw new Error('Command must be resolve, create, or create-batch');
+  if (command === '--help' || command === '-h' || command === 'help') {
+    return { command: 'help', envFile: DEFAULT_ENV_FILE, inputFile: null };
+  }
+  if (command !== 'resolve' && command !== 'create' && command !== 'create-batch' && command !== 'update') {
+    throw new Error('Command must be resolve, create, create-batch, or update');
   }
   const options = { command, envFile: DEFAULT_ENV_FILE, inputFile: null };
   for (let index = 1; index < args.length; index += 1) {
@@ -361,6 +418,10 @@ function parseJsonInput(source) {
 
 async function main() {
   const options = parseCliArgs(process.argv.slice(2));
+  if (options.command === 'help') {
+    process.stdout.write('Usage: village-confirm-request.js <resolve|create|create-batch|update> [--input-file PATH] [--env-file PATH]\n');
+    return;
+  }
   const config = parseEnv(fs.readFileSync(options.envFile, 'utf8'));
   const input = parseJsonInput(fs.readFileSync(options.inputFile || 0, 'utf8'));
   let result;
@@ -371,6 +432,12 @@ async function main() {
       config,
       requests: Array.isArray(input) ? input : input.requests
     });
+  } else if (options.command === 'update') {
+    result = await updateConfirmationRequest({
+      config,
+      reqID: input.reqID,
+      request: input.request || input
+    });
   } else {
     result = await createConfirmationRequest({ config, request: input.request || input });
   }
@@ -379,9 +446,11 @@ async function main() {
 
 module.exports = {
   buildInsertRequest,
+  buildUpdateRequest,
   buildSearchRequest,
   createConfirmationRequest,
   createConfirmationRequests,
+  updateConfirmationRequest,
   normalizeConfirmationRequest,
   parseCliArgs,
   parseJsonInput,

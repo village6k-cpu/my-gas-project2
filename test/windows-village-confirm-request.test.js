@@ -6,6 +6,7 @@ const test = require('node:test');
 const {
   createConfirmationRequest,
   createConfirmationRequests,
+  updateConfirmationRequest,
   parseCliArgs,
   parseJsonInput,
   resolveEquipment
@@ -41,6 +42,67 @@ test('Windows UTF-8 BOM input is accepted at the CLI boundary', () => {
 
 test('the CLI exposes an explicit batch command for AI-planned schedule splits', () => {
   assert.equal(parseCliArgs(['create-batch']).command, 'create-batch');
+});
+
+test('the CLI exposes help and a bounded update command for an existing partial request', () => {
+  assert.equal(parseCliArgs(['--help']).command, 'help');
+  assert.equal(parseCliArgs(['update']).command, 'update');
+});
+
+test('update replaces one existing partial request and verifies the complete readback', async () => {
+  const calls = [];
+  const request = requestFixture();
+  const fetchImpl = async (url, options) => {
+    const parsed = new URL(url);
+    const action = parsed.searchParams.get('action');
+    const func = parsed.searchParams.get('func');
+    const sheet = parsed.searchParams.get('sheet');
+    calls.push({ action, func, sheet, options });
+
+    if (action === 'search' && sheet === '목록') {
+      const query = parsed.searchParams.get('query');
+      return response({ count: 1, results: [{ row: 2, data: [query] }] });
+    }
+    if (action === 'run' && func === 'updateRequest') {
+      const payload = JSON.parse(parsed.searchParams.get('args'));
+      assert.equal(payload.reqID, 'RQ-260723-003');
+      assert.deepEqual(payload.장비, request.장비);
+      return response({ success: true, function: 'updateRequest', result: { reqID: payload.reqID } });
+    }
+    if (action === 'search' && sheet === '확인요청') {
+      return response({
+        count: 2,
+        results: request.장비.map((item, index) => ({
+          row: 10 + index,
+          data: index === 0
+            ? ['RQ-260723-003', request.반출일, request.반출시간, request.반납일, request.반납시간,
+              item.이름, item.수량, '', '가능', '', request.예약자명]
+            : ['RQ-260723-003', '', '', '', '', item.이름, item.수량, '', '가능', '']
+        }))
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  const result = await updateConfirmationRequest({
+    config,
+    reqID: 'RQ-260723-003',
+    request,
+    fetchImpl,
+    readTimeoutMs: 1_000,
+    writeTimeoutMs: 2_000
+  });
+
+  assert.equal(result.reqID, 'RQ-260723-003');
+  assert.equal(result.updated, true);
+  assert.equal(result.verified, true);
+  assert.deepEqual(calls.map(({ action, func, sheet }) => ({ action, func, sheet })), [
+    { action: 'search', func: null, sheet: '목록' },
+    { action: 'search', func: null, sheet: '목록' },
+    { action: 'run', func: 'updateRequest', sheet: null },
+    { action: 'search', func: null, sheet: '확인요청' }
+  ]);
+  assert.ok(calls.every((call) => call.options.signal));
 });
 
 test('equipment aliases are resolved concurrently in one process without exposing credentials', async () => {
