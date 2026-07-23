@@ -19,6 +19,8 @@ export interface RentalScheduleItemRow {
   name?: string | null;
   qty?: number | null;
   taken_qty?: number | null;
+  actual_name?: string | null;
+  actual_taken_qty?: number | null;
   is_set_header?: boolean | null;
   is_component?: boolean | null;
   off_catalog?: boolean | null;
@@ -60,6 +62,8 @@ export interface RentalSnapshotException {
     raw_name: string | null;
     booked_qty: number | null;
     taken_qty: number | null;
+    actual_name: string | null;
+    actual_taken_qty: number | null;
     checkout_state: string | null;
     is_component: boolean;
   };
@@ -117,6 +121,7 @@ function reportedQuantity(
   row: RentalScheduleItemRow,
   checkoutState: string,
 ): number {
+  if (isPostgresInteger(row.actual_taken_qty)) return row.actual_taken_qty;
   if (isPostgresInteger(row.taken_qty)) return row.taken_qty;
   if (checkoutState === "taken" && isPostgresInteger(row.qty)) return row.qty;
   return 0;
@@ -129,6 +134,8 @@ function sourceReference(row: RentalScheduleItemRow) {
     raw_name: typeof row.name === "string" ? row.name : null,
     booked_qty: typeof row.qty === "number" ? row.qty : null,
     taken_qty: typeof row.taken_qty === "number" ? row.taken_qty : null,
+    actual_name: typeof row.actual_name === "string" ? row.actual_name : null,
+    actual_taken_qty: typeof row.actual_taken_qty === "number" ? row.actual_taken_qty : null,
     checkout_state:
       typeof row.checkout_state === "string" ? row.checkout_state : null,
     is_component: row.is_component === true,
@@ -207,28 +214,32 @@ export function buildRentalSnapshot(
 
     const checkoutState = normalizeRentalName(row.checkout_state);
     if (checkoutState === "excluded") continue;
+    const effectiveTakenQuantity = row.actual_taken_qty ?? row.taken_qty;
+    if (row.actual_taken_qty === 0) continue;
     const hasPositiveTakenQuantity =
-      typeof row.taken_qty === "number" && row.taken_qty > 0;
+      typeof effectiveTakenQuantity === "number" && effectiveTakenQuantity > 0;
     if (checkoutState !== "taken" && !hasPositiveTakenQuantity) continue;
 
     const rawName =
-      typeof row.name === "string" && row.name.trim() ? row.name.trim() : MISSING_NAME;
+      typeof row.actual_name === "string" && row.actual_name.trim()
+        ? row.actual_name.trim()
+        : typeof row.name === "string" && row.name.trim() ? row.name.trim() : MISSING_NAME;
     const normalizedName = normalizeRentalName(rawName) || normalizeRentalName(MISSING_NAME);
     const candidates = [...(nameIndex.get(normalizedName) ?? new Set<string>())].sort(
       compareText,
     );
     const bookedQuantityValid =
       isPostgresInteger(row.qty) && row.qty > 0;
-    const hasTakenQuantity = row.taken_qty !== null && row.taken_qty !== undefined;
+    const hasTakenQuantity = effectiveTakenQuantity !== null && effectiveTakenQuantity !== undefined;
     const takenQuantityValid =
       !hasTakenQuantity ||
-      (isPostgresInteger(row.taken_qty) &&
-        row.taken_qty > 0 &&
+      (isPostgresInteger(effectiveTakenQuantity) &&
+        effectiveTakenQuantity > 0 &&
         bookedQuantityValid &&
-        row.taken_qty <= row.qty!);
+        effectiveTakenQuantity <= row.qty!);
 
     let exceptionReason: RentalSnapshotExceptionReason | null = null;
-    if (checkoutState === "taken" && hasTakenQuantity && row.taken_qty === 0) {
+    if (checkoutState === "taken" && hasTakenQuantity && effectiveTakenQuantity === 0) {
       exceptionReason = "conflicting_checkout_evidence";
     } else if (!bookedQuantityValid || !takenQuantityValid) {
       exceptionReason = "invalid_quantity";
@@ -256,7 +267,7 @@ export function buildRentalSnapshot(
     }
 
     const equipmentId = candidates[0];
-    const quantity = hasTakenQuantity ? (row.taken_qty as number) : (row.qty as number);
+    const quantity = hasTakenQuantity ? (effectiveTakenQuantity as number) : (row.qty as number);
     const current = totals.get(equipmentId) ?? { quantity: 0, refs: [] };
     current.quantity += quantity;
     current.refs.push({

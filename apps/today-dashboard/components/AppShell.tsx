@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useState, type ComponentType } from "react";
 import { SideRail } from "@/components/SideRail";
 import { BottomTabBar } from "@/components/BottomTabBar";
 import type { NavKey } from "@/components/navConfig";
@@ -49,6 +49,21 @@ const DojangView = dynamic(() => import("@/components/DojangView").then((mod) =>
   loading: () => <PaneLoading label="훈련소" />,
 });
 
+// keep-mounted pane 래퍼 — React.memo로 active가 안 바뀐 숨김 pane의 재조정(reconcile)을 건너뛴다.
+// 언마운트는 하지 않는다: 뷰 내부 상태 보존·전환 즉시성이 keep-mount의 의도.
+// passActive면 뷰에 active prop을 내려 숨김 상태에서 폴링을 멈추게 한다(후속조치·운영판).
+const Pane = memo(function Pane({
+  active,
+  view: View,
+  passActive = false,
+}: {
+  active: boolean;
+  view: ComponentType<{ active?: boolean }>;
+  passActive?: boolean;
+}) {
+  return <div className={active ? "" : "hidden"}>{passActive ? <View active={active} /> : <View />}</div>;
+});
+
 // PC(lg+): 좌측 레일(4섹션) + 가운데 선택 섹션 + 우측 오늘일정 고정(좁은 컬럼이라 더 잘 보임).
 // 모바일(<lg): 하단 탭바 5섹션 + 단일 콘텐츠(오늘일정 포함). 방문한 뷰는 mount 유지 → 전환 즉시.
 function useIsLg() {
@@ -91,24 +106,20 @@ export function AppShell({ initial = "today" }: { initial?: NavKey }) {
   }, [view, active]);
 
   // 오늘일정 메인 pane은 모바일 전용(PC는 우측 고정). 나머지는 keep-mounted.
-  const pane = (key: NavKey, node: ReactNode) =>
-    visited.has(key) ? (
-      <div key={key} className={active === key ? "" : "hidden"}>
-        {node}
-      </div>
-    ) : null;
+  const pane = (key: NavKey, view: ComponentType<{ active?: boolean }>, passActive = false) =>
+    visited.has(key) ? <Pane key={key} active={active === key} view={view} passActive={passActive} /> : null;
 
   return (
     <div className="lg:flex lg:h-screen lg:overflow-hidden">
       <SideRail view={mainView} onNav={handleNav} />
       <main className="relative flex-1 lg:min-h-0 lg:overflow-y-auto">
-        {!isLg && pane("today", <TodayView />)}
-        {pane("schedule", <ScheduleView />)}
-        {pane("follow", <FollowUpView />)}
-        {pane("operations", <OperationsView />)}
-        {pane("confirm", <ConfirmView />)}
-        {pane("inventory", <InventoryView />)}
-        {pane("dojang", <DojangView />)}
+        {!isLg && pane("today", TodayView)}
+        {pane("schedule", ScheduleView)}
+        {pane("follow", FollowUpView, true)}
+        {pane("operations", OperationsView, true)}
+        {pane("confirm", ConfirmView)}
+        {pane("inventory", InventoryView)}
+        {pane("dojang", DojangView)}
       </main>
       {isLg && (
         <aside className="hidden w-[400px] shrink-0 overflow-y-auto border-l border-line/60 lg:block xl:w-[440px]">

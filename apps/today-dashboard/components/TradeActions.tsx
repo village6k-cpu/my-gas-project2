@@ -6,7 +6,9 @@ import { authFetch } from "@/lib/data/authFetch";
 import { deleteTradeRemote } from "@/lib/data/remote";
 import {
   cancelTrade,
+  DISCOUNT_TYPE_OPTIONS,
   removeTradeLocally,
+  setDiscountType,
   setItemName,
   setItemQty,
   updateTradeDetails,
@@ -88,6 +90,9 @@ export function TradeActions({
     ? "tap flex-1 rounded-lg px-2 py-2 text-[12px] font-extrabold ring-1"
     : "tap flex-1 rounded-xl px-3 py-2.5 text-[13px] font-extrabold ring-1";
 
+  // 할인유형은 반납완료·취소 전까지 카드에서 바로 바꿀 수 있다 — 금액·계약서는 자동 재생성
+  const discountLocked = trade.returnDone || trade.contractStatus === "반납완료" || trade.contractStatus === "취소";
+
   return (
     <>
       <div className="flex w-full gap-2" aria-label="예약 관리">
@@ -100,6 +105,31 @@ export function TradeActions({
         <button type="button" onClick={handleDelete} disabled={cancelling || deleting} className={`${buttonBase} bg-attention-bg text-attention-fg ring-attention-ring disabled:opacity-50`}>
           {deleting ? "삭제 중…" : "완전삭제"}
         </button>
+      </div>
+      <div className="mt-2 flex items-center gap-2" aria-label="할인유형">
+        <span className="shrink-0 text-[12px] font-bold text-ink-mute">할인유형</span>
+        <select
+          value={trade.discountType || ""}
+          onChange={(e) => {
+            const next = e.target.value;
+            if (!next) return;
+            void setDiscountType(trade.tradeId, next);
+          }}
+          disabled={discountLocked}
+          className="tap h-9 min-w-0 flex-1 rounded-lg bg-white px-2 text-[12.5px] font-bold text-ink ring-1 ring-line/70 outline-none focus:ring-brand-400 disabled:opacity-50"
+        >
+          <option value="" disabled>
+            선택 안 됨
+          </option>
+          {DISCOUNT_TYPE_OPTIONS.map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
+          ))}
+        </select>
+        {trade.contractRegenPending && (
+          <span className="shrink-0 animate-pulse rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-bold text-brand-700">계약서 갱신 중…</span>
+        )}
       </div>
       {editing && <TradeEditSheet trade={trade} onClose={() => setEditing(false)} />}
     </>
@@ -143,8 +173,6 @@ function TradeEditSheet({ trade, onClose }: { trade: Trade; onClose: () => void 
     onClose();
   }
 
-  const equipmentLocked = trade.setupDone || trade.returnDone || trade.equipments.some((item) => Number(item.takenQty || 0) > 0);
-
   return (
     <div className="fixed inset-0 z-[80] flex items-end justify-center bg-black/45 sm:items-center" onClick={onClose}>
       <div className="animate-pop max-h-[92vh] w-full max-w-xl overflow-y-auto rounded-t-2xl bg-white p-4 pb-8 shadow-pop sm:rounded-2xl" onClick={(event) => event.stopPropagation()}>
@@ -166,13 +194,10 @@ function TradeEditSheet({ trade, onClose }: { trade: Trade; onClose: () => void 
         </div>
 
         <section className="mt-5 border-t border-line pt-4">
-          <div className="flex items-baseline justify-between gap-2">
-            <h3 className="text-[14px] font-extrabold text-ink">장비명·예약 수량</h3>
-            {equipmentLocked && <span className="text-[11px] font-bold text-attention-fg">반출 후 수정 잠김</span>}
-          </div>
+          <h3 className="text-[14px] font-extrabold text-ink">장비명·예약 수량</h3>
           <div className="mt-2 space-y-2">
             {trade.equipments.map((item) => (
-              <EquipmentEditRow key={item.scheduleId} tradeId={trade.tradeId} item={item} locked={equipmentLocked || !!item.synthetic} />
+              <EquipmentEditRow key={item.scheduleId} tradeId={trade.tradeId} item={item} locked={!!item.synthetic} />
             ))}
           </div>
         </section>

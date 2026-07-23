@@ -3,23 +3,25 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { EquipmentItem, Phase, Settlement, Trade } from "@/lib/domain/types";
-import { groupBySet, handoverSummary, realDeviceHeaders, singleControllableSetItem } from "@/lib/domain/status";
+import { groupBySet, handoverSummary, isCheckoutBaselineLocked, realDeviceHeaders, singleControllableSetItem } from "@/lib/domain/status";
 import { categoryOf, coarseGroup } from "@/lib/domain/catalog";
 import { searchEquipmentCatalog, useEquipmentCatalog, type EquipmentCatalogItem } from "@/lib/data/equipmentCatalog";
 import { SetBox, LooseList } from "./SetBox";
 import {
   addOnsiteItems,
+  clearToast,
+  queueItemQty,
   removeItem,
   setItemCheckout,
   setItemName,
   setItemMemo,
-  setItemQty,
   setOnsiteSettlement,
   setPhaseNote,
   type OnsiteEntry,
 } from "@/lib/data/store";
 import { Check, Plus } from "./icons";
 import { MemoTag, itemMemoEntries } from "./MemoTag";
+import { equipmentActualName, equipmentActualTakenQty, hasEquipmentActualCorrection } from "@/lib/domain/equipmentActual";
 import { ReturnChecklist } from "./ReturnChecklist";
 
 const MEDIA_RE = /배터리|CFexpress|SD카드|미디어/;
@@ -157,16 +159,21 @@ function rowTint(e: EquipmentItem, excluded: boolean): string {
 function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean; setTone?: boolean }) {
   const taken = e.checkoutState === "taken";
   const excluded = e.checkoutState === "excluded";
-  const partial = e.takenQty != null && e.takenQty !== e.qty;
+  const actualName = equipmentActualName(e);
+  const actualQty = equipmentActualTakenQty(e);
+  const corrected = hasEquipmentActualCorrection(e);
+  const partial = actualQty !== e.qty;
   const memos = itemMemoEntries(e);
   const checkoutMemo = String(e.memoCheckout || "").trim();
   const checkinMemo = String(e.memoCheckin || "").trim();
+  const baselineLocked = isCheckoutBaselineLocked(t);
   return (
     <li className={`px-3 ${setTone ? "bg-brand-50" : rowTint(e, excluded)}`}>
       <div className="flex items-center gap-2.5 py-2.5">
         {setBadge && <span className="shrink-0 rounded-md bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">세트</span>}
         <button
           onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "taken")}
+          disabled={baselineLocked}
           className={`tap flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 ${
             taken ? "border-brand-600 bg-brand-600 text-white" : excluded ? "border-attention-ring bg-white text-attention-fg" : "border-line bg-white text-transparent"
           }`}
@@ -175,12 +182,13 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         </button>
 
         <button onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-          <span className={`truncate text-[14px] ${excluded ? "text-ink-faint line-through" : setTone ? "font-extrabold text-brand-700" : taken ? "text-ink" : "text-ink-soft"}`}>{e.name}</span>
+          <span className={`truncate text-[14px] ${excluded ? "text-ink-faint line-through" : setTone ? "font-extrabold text-brand-700" : taken ? "text-ink" : "text-ink-soft"}`}>{actualName}</span>
           {e.offCatalog && <span className="shrink-0 rounded bg-line/40 px-1 text-[10px] font-semibold text-ink-faint">자유입력</span>}
+          {corrected && <span className="shrink-0 rounded bg-warn-bg px-1 text-[10px] font-bold text-warn-fg ring-1 ring-warn-ring">Slack 정정</span>}
         </button>
 
         <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[12px] font-semibold tabular-nums ${e.emphasize ? "bg-warn-bg text-warn-fg ring-1 ring-warn-ring" : "text-ink-mute"}`}>
-          {partial ? `${e.takenQty}/${e.qty}` : `×${e.qty}`}
+          {partial ? `${actualQty}/${e.qty}` : `×${e.qty}`}
         </span>
 
         {e.onsite ? (
@@ -218,7 +226,8 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
           </div>
           <div className="flex items-center gap-2 text-[12px] text-ink-mute">
             예약 수량
-            <Stepper value={e.qty} min={1} onChange={(v) => setItemQty(t.tradeId, e.scheduleId, v)} />
+            {/* 낙관적 반영 — 탭 즉시 표시가 바뀌고 원장 확정은 디바운스 후 1회만 */}
+            <Stepper value={e.qty} min={1} onChange={(v) => queueItemQty(t.tradeId, e.scheduleId, v)} />
           </div>
           {checkinMemo && checkinMemo !== checkoutMemo && (
             <div className="flex items-start gap-1.5 rounded-md bg-warn-bg px-2 py-1 text-[12px] font-semibold leading-snug text-warn-fg ring-1 ring-warn-ring">
@@ -251,6 +260,7 @@ function OnsiteCombobox({ tradeId, onClose }: { tradeId: string; onClose: () => 
   const submit = async () => {
     const name = picked ? picked.name : q.trim();
     if (!name || submitting) return;
+    clearToast();
     let entries: OnsiteEntry[];
     if (isSet && picked) {
       entries = [

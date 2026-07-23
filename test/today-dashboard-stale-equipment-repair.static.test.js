@@ -46,8 +46,9 @@ assert(
 );
 assert(
   syncSource.includes('export async function repairDashboardDateDetails') &&
-    /action=dashboard&date=\$\{date\}&nocache=1/.test(syncSource),
-  'date repair must bypass GAS dashboard cache so manual sheet deletes are read from the source sheet'
+    /const fresh = opts\?\.fresh \?\? true/.test(syncSource) &&
+    /action=dashboard&date=\$\{date\}\$\{fresh \? "&nocache=1" : ""\}/.test(syncSource),
+  'date repair must bypass GAS dashboard cache by default so manual sheet deletes are read from the source sheet (light background polls may opt into cached reads)'
 );
 assert(
   /fetchDashboardSearchItemsForTradeIds\(missingSheetBackedTradeIds\(current, items\)\)/.test(syncSource) &&
@@ -55,7 +56,7 @@ assert(
   'date repair must confirm missing sheet-backed rows through full trade search detail before pruning Supabase'
 );
 assert(
-  /export async function pollSheetChangesNow\(\): Promise<void>[\s\S]*state\.date && await repairDayDetails\(state\.date, mutationSeqAtPoll\)/.test(storeSource),
+  /export async function pollSheetChangesNow\(opts\?: \{ mode\?: "light" \| "full"; resetBackoff\?: boolean \}\): Promise<void>[\s\S]*state\.date && await repairDayDetails\(state\.date, mutationSeqAtPoll, \{ fresh: mode === "full" \}\)/.test(storeSource),
   'sheet polling must repair the open date details so manual sheet deletes disappear without a full reload'
 );
 assert(
@@ -70,7 +71,8 @@ assert(
   'store loadDay path must trigger date-level dashboard repair for stale partial equipment caches'
 );
 assert(
-  /const changed = await repairDashboardSearchResults\(state\.trades, q\)/.test(storeSource) &&
+  /repairDashboardSearchResults\(state\.trades, q\)/.test(storeSource) &&
+    /await applyDashboardRepairs\(changed, mutationSeqAtSearch\)/.test(storeSource) &&
     /for \(const t of changed\) persistTrade\(t, \{ pruneMissingSheetBacked: shouldPruneMissingSheetBacked\(t\) \}\)\.catch\(\(\) => \{\}\)/.test(storeSource),
   'search repair must update local state and prune stale Supabase schedule_items after authoritative GAS confirmation'
 );

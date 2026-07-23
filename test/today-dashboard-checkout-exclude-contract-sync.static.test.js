@@ -20,8 +20,8 @@ assert.match(
 
 assert.match(
   store,
-  /function removeEquipmentAndRegenerateContract\(tradeId:\s*string,\s*item:\s*EquipmentItem\)[\s\S]*gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*true/,
-  'app removal must ask GAS to delete 스케줄상세 and regenerate the contract immediately'
+  /function removeEquipmentAndRegenerateContract\(tradeId:\s*string,\s*item:\s*EquipmentItem\)[\s\S]*contractRegenPending:\s*true[\s\S]*gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*false/,
+  'app removal must ask GAS to delete 스케줄상세 and queue contract regeneration via the background worker (contractRegenPending badge → polling merge)'
 );
 assert.match(
   store,

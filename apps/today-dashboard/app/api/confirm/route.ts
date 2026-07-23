@@ -24,15 +24,33 @@ async function callGas(params: Record<string, string>): Promise<NextResponse> {
   qs.set("key", GAS_KEY);
   const r = await fetch(`${GAS_URL}?${qs.toString()}`, { redirect: "follow", signal: AbortSignal.timeout(110_000) });
   const body = await r.text();
-  return new NextResponse(body, { headers: { "content-type": "application/json" } });
+  // 업스트림 상태 그대로 전파 — 200으로 마스킹하면 클라이언트 에러 분기가 죽고
+  // GET(list)의 res.ok 캐시 가드도 항상 참이 되어 에러 본문이 12초 캐시된다.
+  return new NextResponse(body, { status: r.status, headers: { "content-type": "application/json" } });
+}
+
+// GAS가 200 상태로 HTML 에러 페이지나 {error:...}를 반환하는 경우까지 캐시에서 걸러낸다
+function isCacheableListBody(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return !!parsed && typeof parsed === "object" && !("error" in (parsed as Record<string, unknown>));
+  } catch {
+    return false;
+  }
 }
 
 // 목록 (action=list, scan)
 export async function GET(req: NextRequest) {
   if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
   const action = req.nextUrl.searchParams.get("action") || "list";
-  if (action !== "list" && action !== "scan") return NextResponse.json({ error: "미허용 action" }, { status: 400 });
+  if (action !== "list" && action !== "scan" && action !== "card") return NextResponse.json({ error: "미허용 action" }, { status: 400 });
   try {
+    if (action === "card") {
+      // 단일 카드 갱신 — 편집 큐 저장 후 그 카드만 새로 그린다(전체 목록 재조회 회피)
+      const reqID = req.nextUrl.searchParams.get("reqID") || "";
+      if (!reqID) return NextResponse.json({ error: "reqID 필수" }, { status: 400 });
+      return await callGas({ action, reqID });
+    }
     if (action === "list") {
       const hit = listCache.get("list");
       if (hit && Date.now() - hit.at < LIST_TTL) {
@@ -40,7 +58,8 @@ export async function GET(req: NextRequest) {
       }
       const res = await callGas({ action });
       const body = await res.clone().text();
-      if (res.ok) listCache.set("list", { at: Date.now(), body });
+      // 성공 + 정상 JSON 본문만 캐시 — 에러 본문이 12초간 재배포되지 않게
+      if (res.ok && isCacheableListBody(body)) listCache.set("list", { at: Date.now(), body });
       return res;
     }
     return await callGas({ action });

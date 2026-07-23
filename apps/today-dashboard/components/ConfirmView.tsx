@@ -76,6 +76,26 @@ function writeConfirmListCache(items: Req[]) {
   }
 }
 
+/** 요청의 특정 품목(장비명+비고의 n번째)을 로컬에서 즉시 갱신 — 시트 반영은 편집 큐가 뒤에서 한다 */
+function patchReqItem(
+  req: Req,
+  target: { 장비명: string; 비고: string; 순번: number },
+  changes: Partial<Equip>,
+): Req {
+  let seen = 0;
+  const nextItems = (req.장비목록 || []).map((e) => {
+    if (e.장비명 === target.장비명 && String(e.비고 || "") === target.비고) {
+      if (seen === target.순번) {
+        seen++;
+        return { ...e, ...changes };
+      }
+      seen++;
+    }
+    return e;
+  });
+  return { ...req, 장비목록: nextItems };
+}
+
 function resultTone(r?: string): "ok" | "warn" | "fail" | "unknown" | "set" | "none" {
   if (!r) return "none";
   if (r === "세트") return "set";
@@ -237,9 +257,27 @@ export function ConfirmView() {
     load();
   }, [load]);
 
+  // 편집 큐 상태 — reqID별 직렬 쓰기 체인과 진행 중 편집 수(applyCardPatch 가드용)
+  const editChainsRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  const pendingEditCountsRef = useRef<Map<string, number>>(new Map());
+  const cardRefreshTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const [savingReqIDs, setSavingReqIDs] = useState<Set<string>>(() => new Set());
+
+  // 액션 응답에 실려온 갱신 카드로 그 카드만 즉시 교체한다 — 전체 목록 재조회(수 초)를 기다리지 않는다.
+  // card가 null이면 목록에서 빠진 것(거절/등록완료) → 즉시 제거.
+  const applyCardPatch = useCallback((reqID: string, card: Req | null | undefined) => {
+    // 편집 큐가 아직 저장 중이면 서버 카드가 로컬 최신 편집을 되덮지 않게 건너뛴다
+    if (pendingEditCountsRef.current.get(reqID)) return;
+    setItems((prev) => {
+      const next = card ? prev.map((it) => (it.reqID === reqID ? card : it)) : prev.filter((it) => it.reqID !== reqID);
+      writeConfirmListCache(next);
+      return next;
+    });
+  }, []);
+
   // 액션 실행 (확인/등록/보류/거절) — POST /api/confirm
   const doAction = useCallback(
-    async (action: string, reqID: string): Promise<boolean> => {
+    async (action: string, reqID: string): Promise<Record<string, unknown> | null> => {
       setReqBusy(reqID, true);
       setError("");
       try {
@@ -251,10 +289,10 @@ export function ConfirmView() {
         const json = await res.json().catch(() => ({}));
         const ok = json.status === "OK" || json.success;
         if (!res.ok || !ok) throw new Error(json.message || json.error || `${action} 실패`);
-        return true;
+        return json;
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
-        return false;
+        return null;
       } finally {
         setReqBusy(reqID, false);
       }
@@ -274,12 +312,93 @@ export function ConfirmView() {
     return true;
   }, []);
 
+  // ── 편집 큐: 시트처럼 즉시 편집 ──────────────────────────────
+  // 편집은 화면에 즉시 반영하고(에디터 즉시 닫힘), 시트 쓰기(GAS 3~4초 + 품목 재확인)는
+  // reqID별 직렬 큐가 뒤에서 처리한다. 저장이 끝나면 그 카드만 서버 기준으로 갱신한다.
+  // 예전엔 품목 하나 저장마다 GAS 왕복 + 전체 목록 재조회를 기다려 시트가 더 빨랐다.
+  const refreshCard = useCallback(async (reqID: string) => {
+    try {
+      const res = await authFetch(`/api/confirm?action=card&reqID=${encodeURIComponent(reqID)}`);
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json.status === "OK" && "card" in json) applyCardPatch(reqID, (json.card as Req | null) ?? null);
+    } catch {
+      /* 다음 목록 갱신이 수렴시킨다 */
+    }
+  }, [applyCardPatch]);
+
+  const scheduleCardRefresh = useCallback((reqID: string, delay = 600) => {
+    const timers = cardRefreshTimersRef.current;
+    const existing = timers.get(reqID);
+    if (existing) clearTimeout(existing);
+    timers.set(reqID, setTimeout(() => {
+      timers.delete(reqID);
+      void refreshCard(reqID);
+    }, delay));
+  }, [refreshCard]);
+
+  const queueRequestEdit = useCallback(
+    (reqID: string, func: string, args: Record<string, unknown>, localPatch?: (req: Req) => Req): Promise<boolean> => {
+      if (localPatch) {
+        setItems((prev) => {
+          const next = prev.map((it) => (it.reqID === reqID ? localPatch(it) : it));
+          writeConfirmListCache(next);
+          return next;
+        });
+      }
+      const counts = pendingEditCountsRef.current;
+      counts.set(reqID, (counts.get(reqID) ?? 0) + 1);
+      setSavingReqIDs((prev) => new Set(prev).add(reqID));
+      const chains = editChainsRef.current;
+      const chain = (chains.get(reqID) ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(async (): Promise<boolean> => {
+          try {
+            await runFunc(func, args);
+            return true;
+          } catch (e) {
+            setError(`${reqID} 변경 저장 실패 — ${e instanceof Error ? e.message : String(e)}`);
+            scheduleCardRefresh(reqID, 100); // 실패 시 서버 기준으로 즉시 되돌려 보여준다
+            return false;
+          }
+        })
+        .finally(() => {
+          const left = (counts.get(reqID) ?? 1) - 1;
+          if (left <= 0) {
+            counts.delete(reqID);
+            setSavingReqIDs((prev) => {
+              const n = new Set(prev);
+              n.delete(reqID);
+              return n;
+            });
+            scheduleCardRefresh(reqID);
+          } else {
+            counts.set(reqID, left);
+          }
+        });
+      chains.set(reqID, chain);
+      return chain;
+    },
+    [runFunc, scheduleCardRefresh],
+  );
+
+  /** 확인/등록/삭제 같은 액션 전에 이 요청의 대기 중 편집을 모두 시트에 반영한다 */
+  const drainRequestEdits = useCallback(async (reqID: string) => {
+    for (;;) {
+      const chain = editChainsRef.current.get(reqID);
+      if (!chain) return;
+      await chain.catch(() => undefined);
+      if (editChainsRef.current.get(reqID) === chain) return;
+    }
+  }, []);
+
+
   // 선택 등록: 제외 장비 보류 처리 후 등록
   const registerSelectedNow = useCallback(
     async (req: Req, excludedItems: ExcludedConfirmItem[]) => {
       setReqBusy(req.reqID, true);
       setError("");
       try {
+        await drainRequestEdits(req.reqID); // 편집 큐 반영 후 등록
         for (const excluded of excludedItems) {
           await runFunc("updateRequestItem", {
             reqID: req.reqID,
@@ -297,7 +416,7 @@ export function ConfirmView() {
         const json = await res.json().catch(() => ({}));
         const ok = json.status === "OK" || json.success === true;
         if (!res.ok || !ok) throw new Error(json.message || json.error || "등록 대기열 등록 실패");
-        await load();
+        void load(); // 대기열 상태 반영은 백그라운드로 — 카드 스피너를 목록 재조회에 묶지 않는다
         setTimeout(() => void load(), 3_000);
         setTimeout(() => {
           void load();
@@ -321,7 +440,7 @@ export function ConfirmView() {
         setReqBusy(req.reqID, false);
       }
     },
-    [runFunc, load, setReqBusy],
+    [drainRequestEdits, runFunc, load, setReqBusy],
   );
 
   const registerSelected = useCallback(
@@ -347,32 +466,72 @@ export function ConfirmView() {
 
   const act = useCallback(
     async (action: string, reqID: string) => {
-      const ok = await doAction(action, reqID);
-      if (ok) setTimeout(load, 600);
+      await drainRequestEdits(reqID); // 대기 중 편집을 시트에 먼저 반영해야 확인/등록이 최신 내용으로 돈다
+      const json = await doAction(action, reqID);
+      if (!json) return;
+      if ("card" in json) {
+        // 응답의 카드로 즉시 반영 — 전체 재조회는 백그라운드 수렴용으로만
+        applyCardPatch(reqID, (json.card as Req | null) ?? null);
+        setTimeout(() => void load(), 2_500);
+      } else {
+        setTimeout(load, 600);
+      }
     },
-    [doAction, load],
+    [drainRequestEdits, doAction, applyCardPatch, load],
   );
 
   // 확인요청 삭제 — 확인요청 시트의 해당 reqID 행만 지운다(등록된 예약 자체는 건드리지 않음).
+  // 카드는 즉시 사라지고(낙관), 서버 삭제 실패 시에만 되살린다.
   const deleteReq = useCallback(
     async (reqID: string) => {
-      setReqBusy(reqID, true);
+      let removed: Req | undefined;
+      setItems((prev) => {
+        removed = prev.find((it) => it.reqID === reqID);
+        const next = prev.filter((it) => it.reqID !== reqID);
+        writeConfirmListCache(next);
+        return next;
+      });
       setError("");
       try {
+        await drainRequestEdits(reqID); // 대기 편집이 삭제된 행을 상대로 실패하지 않게 먼저 비운다
         await runFunc("deleteRequest", { reqID });
-        await load();
+        setTimeout(() => void load(), 2_500);
       } catch (e) {
+        if (removed) {
+          const restore = removed;
+          setItems((prev) => (prev.some((it) => it.reqID === reqID) ? prev : [restore, ...prev]));
+        }
         setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setReqBusy(reqID, false);
       }
     },
-    [runFunc, load, setReqBusy],
+    [drainRequestEdits, runFunc, load],
   );
 
-  const handleKakaoRequestCreated = useCallback(async () => {
-    await load();
+  // '저장 후 바로 등록' — 편집 큐 반영이 끝난 뒤 등록 대기열에 넣는다
+  const startRegisterAsync = useCallback(
+    async (reqID: string): Promise<void> => {
+      const res = await authFetch("/api/confirm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "registerAsync", reqID }),
+      });
+      const json = await res.json().catch(() => ({}));
+      const ok = json.status === "OK" || json.success === true;
+      if (!res.ok || !ok) throw new Error(json.message || json.error || "바로 등록 실패");
+      void load();
+      setTimeout(() => void load(), 3_000);
+      setTimeout(() => {
+        void load();
+        void pollSheetChangesNow();
+      }, 15_000);
+    },
+    [load],
+  );
+
+  const handleKakaoRequestCreated = useCallback(() => {
+    // 모달은 즉시 닫고 목록은 뒤에서 갱신한다 (예전엔 수 초 재조회를 기다린 뒤 닫혔음)
     setShowKakaoInput(false);
+    void load();
   }, [load]);
 
   const cards = useMemo(
@@ -382,16 +541,16 @@ export function ConfirmView() {
           key={req.reqID}
           req={req}
           busy={busyReqIDs.has(req.reqID)}
+          savingEdits={savingReqIDs.has(req.reqID)}
           queueIndex={queuedRegisterIDs.indexOf(req.reqID)}
           onAct={act}
           onRegisterSelected={registerSelected}
           onDelete={deleteReq}
           onEdit={() => setEdit(req)}
-          onItemSaved={load}
-          runFunc={runFunc}
+          onQueueEdit={queueRequestEdit}
         />
       )),
-    [items, busyReqIDs, queuedRegisterIDs, act, registerSelected, deleteReq, load, runFunc],
+    [items, busyReqIDs, savingReqIDs, queuedRegisterIDs, act, registerSelected, deleteReq, queueRequestEdit],
   );
 
   return (
@@ -437,11 +596,8 @@ export function ConfirmView() {
         <EditPanel
           req={edit}
           onClose={() => setEdit(null)}
-          onSaved={async () => {
-            setEdit(null);
-            await load();
-          }}
-          runFunc={runFunc}
+          queueEdit={queueRequestEdit}
+          onRegisterAsync={startRegisterAsync}
           setError={setError}
         />
       )}
@@ -463,17 +619,17 @@ export function ConfirmView() {
 }
 
 function ConfirmCard({
-  req, busy, queueIndex, onAct, onRegisterSelected, onDelete, onEdit, onItemSaved, runFunc,
+  req, busy, savingEdits, queueIndex, onAct, onRegisterSelected, onDelete, onEdit, onQueueEdit,
 }: {
   req: Req;
   busy: boolean;
+  savingEdits: boolean;
   queueIndex: number;
   onAct: (action: string, reqID: string) => void;
   onRegisterSelected: (req: Req, excludedItems: ExcludedConfirmItem[]) => void;
   onDelete: (reqID: string) => void;
   onEdit: () => void;
-  onItemSaved: () => void | Promise<void>;
-  runFunc: (func: string, args: Record<string, unknown>) => Promise<boolean>;
+  onQueueEdit: (reqID: string, func: string, args: Record<string, unknown>, localPatch?: (req: Req) => Req) => Promise<boolean>;
 }) {
   // 같은 장비명이 여러 행일 때 정확한 행을 지정하기 위한 동명 순번 (시트 행 순서 = 장비목록 순서)
   const itemOrdinal = useCallback((row: ConfirmEquipmentRow) => {
@@ -544,6 +700,7 @@ function ConfirmCard({
             <div className="flex items-center gap-2">
               <span className="text-[15px] font-extrabold text-ink">{req.예약자명 || "예약자 미상"}</span>
               <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${chipCls}`}>{status || "대기"}</span>
+              {savingEdits && <span className="animate-pulse rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-bold text-brand-700">저장 중…</span>}
               {isQueued && <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-bold text-brand-700">앱 대기 {queueIndex + 1}</span>}
             </div>
             <div className="mt-0.5 text-[11.5px] text-ink-faint">
@@ -639,14 +796,19 @@ function ConfirmCard({
                     )}
                     {isEditingRow ? (
                       <InlineItemEditor
-                        req={req}
                         item={editableItem}
                         onCancel={() => setEditingRowKey(null)}
-                        onSaved={async () => {
+                        queueSave={(args, changes) => {
+                          // 에디터는 즉시 닫히고, 시트 저장·재확인은 편집 큐가 뒤에서 처리한다
                           setEditingRowKey(null);
-                          await onItemSaved();
+                          const target = { 장비명: editableItem.장비명, 비고: String(editableItem.비고 || ""), 순번: editableItem.순번 || 0 };
+                          void onQueueEdit(
+                            req.reqID,
+                            "updateRequestItem",
+                            { reqID: req.reqID, ...target, ...args },
+                            (r) => patchReqItem(r, target, changes),
+                          );
                         }}
-                        runFunc={runFunc}
                       />
                     ) : (
                       <>
@@ -737,9 +899,13 @@ function Btn({ children, onClick, primary, ghost, disabled }: { children: ReactN
 
 // 수정 패널 (바텀시트)
 function EditPanel({
-  req, onClose, onSaved, runFunc, setError,
+  req, onClose, queueEdit, onRegisterAsync, setError,
 }: {
-  req: Req; onClose: () => void; onSaved: () => void; runFunc: (func: string, args: Record<string, unknown>) => Promise<boolean>; setError: (s: string) => void;
+  req: Req;
+  onClose: () => void;
+  queueEdit: (reqID: string, func: string, args: Record<string, unknown>, localPatch?: (req: Req) => Req) => Promise<boolean>;
+  onRegisterAsync: (reqID: string) => Promise<void>;
+  setError: (s: string) => void;
 }) {
   const splitDT = (s?: string) => {
     const [d, t] = String(s || "").split(" ");
@@ -764,46 +930,56 @@ function EditPanel({
       .filter((r) => r.role !== "set-component")
       .map((r) => ({ 이름: r.장비명, 수량: String(r.수량 || 1) })),
   );
-  const [saving, setSaving] = useState(false);
   const catalog = useEquipmentCatalog();
 
   const setEq = (i: number, k: "이름" | "수량", v: string) => setEquips((prev) => prev.map((e, j) => (j === i ? { ...e, [k]: v } : e)));
   const addEq = () => setEquips((prev) => [...prev, { 이름: "", 수량: "1" }]);
   const delEq = (i: number) => setEquips((prev) => prev.filter((_, j) => j !== i));
 
-  const save = async (opts?: { skipCheckAndRegister?: boolean }) => {
-    setSaving(true);
+  // 저장은 패널을 즉시 닫고 편집 큐가 뒤에서 처리한다 — 시트 반영·재확인(수 초~수십 초)을
+  // 모달 안에서 기다리지 않는다. 카드에는 '저장 중…' 칩과 ⏳ 결과가 표시되고 완료 시 갱신된다.
+  const save = (opts?: { skipCheckAndRegister?: boolean }) => {
+    const skip = !!opts?.skipCheckAndRegister;
     setError("");
-    try {
-      const args: Record<string, unknown> = {
-        reqID: req.reqID,
-        예약자명: name,
-        연락처: phone,
-        할인유형: discount,
-        반출일: outD,
-        반출시간: outT,
-        반납일: retD,
-        반납시간: retT,
-        장비: equips.filter((e) => e.이름.trim()).map((e) => ({ 이름: e.이름.trim(), 수량: e.수량 })),
-      };
-      if (opts?.skipCheckAndRegister) args.skipCheck = true; // 가용확인 생략(등록 시 자동 처리)
-      await runFunc("updateRequest", args);
-      if (opts?.skipCheckAndRegister) {
-        // 저장 후 곧바로 등록 대기열에 넣는다 — 확인 단계를 건너뛴다.
-        const res = await authFetch("/api/confirm", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ action: "registerAsync", reqID: req.reqID }),
-        });
-        const json = await res.json().catch(() => ({}));
-        const ok = json.status === "OK" || json.success === true;
-        if (!res.ok || !ok) throw new Error(json.message || json.error || "바로 등록 실패");
-      }
-      onSaved();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
+    const cleanEquips = equips.filter((e) => e.이름.trim());
+    const args: Record<string, unknown> = {
+      reqID: req.reqID,
+      예약자명: name,
+      연락처: phone,
+      할인유형: discount,
+      반출일: outD,
+      반출시간: outT,
+      반납일: retD,
+      반납시간: retT,
+      장비: cleanEquips.map((e) => ({ 이름: e.이름.trim(), 수량: e.수량 })),
+    };
+    if (skip) args.skipCheck = true; // 가용확인 생략(등록 시 자동 처리)
+    const localPatch = (r: Req): Req => ({
+      ...r,
+      예약자명: name,
+      연락처: phone,
+      할인유형: discount,
+      업체명: discount,
+      반출일: outD,
+      반출시간: outT,
+      반납일: retD,
+      반납시간: retT,
+      장비목록: cleanEquips.map((e) => ({
+        장비명: e.이름.trim(),
+        수량: Number(e.수량) || 1,
+        결과: "⏳",
+        상세: skip ? "등록 시 자동 확인" : "재확인 중",
+        비고: "",
+        제외: false,
+      })),
+    });
+    onClose();
+    const queued = queueEdit(req.reqID, "updateRequest", args, localPatch);
+    if (skip) {
+      void queued.then((ok) => {
+        if (!ok) return; // 저장 실패 — 에러는 큐가 이미 표시했고, 등록은 진행하지 않는다
+        return onRegisterAsync(req.reqID);
+      }).catch((e) => setError(e instanceof Error ? e.message : String(e)));
     }
   };
 
@@ -849,11 +1025,11 @@ function EditPanel({
             <p className="mt-1.5 text-[11px] text-ink-faint">‘재확인’은 장비를 다시 입력하고 가용성을 확인합니다. 재고를 이미 아는 장비는 ‘바로 등록’으로 확인을 건너뛰세요.</p>
           </div>
           <div className="mt-1 grid grid-cols-2 gap-2">
-            <button disabled={saving} onClick={() => save()} className="tap rounded-xl bg-white py-3 text-[13.5px] font-extrabold text-ink-soft ring-1 ring-line disabled:opacity-50">
-              {saving ? "저장 중…" : "저장 + 재확인"}
+            <button onClick={() => save()} className="tap rounded-xl bg-white py-3 text-[13.5px] font-extrabold text-ink-soft ring-1 ring-line">
+              저장 + 재확인
             </button>
-            <button disabled={saving} onClick={() => { if (confirm("가용성 확인을 건너뛰고 저장한 뒤 바로 등록할까요?\n(세트 전개·날짜 검증은 등록 과정에서 자동 처리됩니다)")) void save({ skipCheckAndRegister: true }); }} className="tap rounded-xl bg-brand-600 py-3 text-[13.5px] font-extrabold text-white disabled:opacity-50">
-              {saving ? "처리 중…" : "저장 후 바로 등록"}
+            <button onClick={() => { if (confirm("가용성 확인을 건너뛰고 저장한 뒤 바로 등록할까요?\n(세트 전개·날짜 검증은 등록 과정에서 자동 처리됩니다)")) save({ skipCheckAndRegister: true }); }} className="tap rounded-xl bg-brand-600 py-3 text-[13.5px] font-extrabold text-white">
+              저장 후 바로 등록
             </button>
           </div>
         </div>
@@ -887,35 +1063,24 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 /** 품목 행 내부 편집 — 화면을 덮지 않고 시트처럼 해당 행에서 바로 수정한다. */
 function InlineItemEditor({
-  req, item, onCancel, onSaved, runFunc,
+  item, onCancel, queueSave,
 }: {
-  req: Req; item: Equip; onCancel: () => void; onSaved: () => void; runFunc: (func: string, args: Record<string, unknown>) => Promise<boolean>;
+  item: Equip; onCancel: () => void; queueSave: (args: Record<string, unknown>, changes: Partial<Equip>) => void;
 }) {
   const [name, setName] = useState(item.장비명);
   const [qty, setQty] = useState(String(item.수량 || 1));
-  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const catalog = useEquipmentCatalog();
 
-  const call = async (args: Record<string, unknown>) => {
-    setBusy(true);
-    setErr("");
-    try {
-      await runFunc("updateRequestItem", { reqID: req.reqID, 장비명: item.장비명, 비고: String(item.비고 || ""), 순번: item.순번 || 0, ...args });
-      await onSaved();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-      setBusy(false);
-    }
-  };
-
+  // 저장은 즉시 완료된 것처럼 동작한다 — 시트 반영·품목 재확인은 편집 큐가 뒤에서 처리하고
+  // 카드에 '저장 중…' 칩이 떠 있는 동안 결과(⏳)가 서버 기준으로 갱신된다.
   const save = () => {
     const q = Number(qty);
     if (!name.trim() || !Number.isFinite(q) || q < 1) {
       setErr("이름과 1 이상의 수량을 입력하세요");
       return;
     }
-    void call({ 새이름: name.trim(), 수량: q });
+    queueSave({ 새이름: name.trim(), 수량: q }, { 장비명: name.trim(), 수량: q, 결과: "⏳", 상세: "재확인 중" });
   };
 
   return (
@@ -932,18 +1097,18 @@ function InlineItemEditor({
       </div>
       {err && <p className="mt-1 text-[12px] font-bold text-attention-fg">{err}</p>}
       <div className="mt-2 flex flex-wrap gap-1.5">
-        <button disabled={busy} onClick={save} className="tap min-h-8 flex-[2] rounded-lg bg-brand-600 px-2 text-[12px] font-extrabold text-white disabled:opacity-50">
-          {busy ? "처리 중..." : "저장 + 이 품목만 재확인"}
+        <button onClick={save} className="tap min-h-8 flex-[2] rounded-lg bg-brand-600 px-2 text-[12px] font-extrabold text-white">
+          저장 + 이 품목만 재확인
         </button>
-        <button disabled={busy} onClick={onCancel} className="tap min-h-8 flex-1 rounded-lg bg-white px-2 text-[12px] font-extrabold text-ink-soft ring-1 ring-line disabled:opacity-50">
+        <button onClick={onCancel} className="tap min-h-8 flex-1 rounded-lg bg-white px-2 text-[12px] font-extrabold text-ink-soft ring-1 ring-line">
           취소
         </button>
         {item.제외 ? (
-          <button disabled={busy} onClick={() => void call({ 제외: false })} className="tap min-h-8 flex-1 rounded-lg bg-paper px-2 text-[12px] font-extrabold text-ink-soft ring-1 ring-line disabled:opacity-50">
+          <button onClick={() => queueSave({ 제외: false }, { 제외: false })} className="tap min-h-8 flex-1 rounded-lg bg-paper px-2 text-[12px] font-extrabold text-ink-soft ring-1 ring-line">
             제외 해제 (다시 등록 대상에 포함)
           </button>
         ) : (
-          <button disabled={busy} onClick={() => void call({ 제외: true })} className="tap min-h-8 flex-1 rounded-lg bg-attention-bg px-2 text-[12px] font-extrabold text-attention-fg disabled:opacity-50">
+          <button onClick={() => queueSave({ 제외: true }, { 제외: true })} className="tap min-h-8 flex-1 rounded-lg bg-attention-bg px-2 text-[12px] font-extrabold text-attention-fg">
             이 품목 제외
           </button>
         )}

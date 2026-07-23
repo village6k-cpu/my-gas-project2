@@ -192,7 +192,10 @@ function handleRequest(e) {
       case "run":
         var runParams = Object.assign({}, params);
         if (postBody.args) runParams.args = postBody.args;
-        return jsonResponse(runFunction(params.func || postBody.func, runParams));
+        var runFuncName = String(params.func || postBody.func || "");
+        // 확인요청을 바꾸는 run 함수들은 목록 캐시를 무효화한다
+        if (/Request|deleteTrade|recoverPending/i.test(runFuncName)) invalidateConfirmListCache_();
+        return jsonResponse(runFunction(runFuncName, runParams));
 
       case "timeline": {
         var skipTimelineCache = (params.nocache === '1' || params.nocache === 'true' ||
@@ -239,13 +242,16 @@ function handleRequest(e) {
       case "registerAsync": {
         var reqID = params.reqID || postBody.reqID;
         if (!reqID) return jsonResponse({ success: false, error: "reqID 필수" });
+        invalidateConfirmListCache_(); // 대기열 상태(O열)가 바뀐다
         return jsonResponse(scheduleRegister(reqID));
       }
 
       case "dashboard":
-        // nocache=1 이면 캐시 우회 (새로고침 버튼용)
+        // nocache=1 이면 캐시 우회 (새로고침 버튼용). profile=1 이면 단계별 소요시간 포함(성능 진단용).
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
-        return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache, {}));
+        return jsonResponse(getDashboardData(params.date || postBody.date || null, skipCache, {
+          profile: params.profile || postBody.profile
+        }));
 
       case "radar":
         // 재방문 레이더 — 읽기 전용 집계 (계약마스터/스케줄상세). PII 포함이라 key 인증 뒤에서만.
@@ -328,7 +334,9 @@ function handleRequest(e) {
       case "toggleReturn":
         return jsonResponse(toggleReturnDone(
           params.tid || postBody.tid,
-          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
+          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1),
+          // force=1: 미확인 품목이 있어도 작업자가 확인하고 완료 처리(강제 차단 대신 사람이 결정)
+          { force: (params.force === '1' || params.force === 'true' || postBody.force === true || postBody.force === '1' || postBody.force === 1) }
         ));
 
       case "toggleItem":
@@ -337,6 +345,14 @@ function handleRequest(e) {
           params.phase || postBody.phase,
           (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
         ));
+
+      case "updateTradeDiscount": {
+        // 등록된 거래의 할인유형 변경 (계약마스터 K열) — 금액·계약서는 재생성 워커가 반영
+        return jsonResponse(updateTradeDiscountType(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.discountType || postBody.discountType || params.할인유형 || postBody.할인유형
+        ));
+      }
 
       case "updateEquipmentCheck":
         return jsonResponse(updateEquipmentCheck(
@@ -407,6 +423,7 @@ function handleRequest(e) {
             rawNames: params.rawNames || postBody.rawNames || params.raw_names || postBody.raw_names,
             settlementStatus: params.settlementStatus || postBody.settlementStatus || params.settlement_status || postBody.settlement_status,
             actorName: params.actorName || postBody.actorName || params.actor_name || postBody.actor_name,
+            idempotencyKey: params.idempotencyKey || postBody.idempotencyKey || params.idempotency_key || postBody.idempotency_key,
             directRegenerate:
               params.directRegenerate || postBody.directRegenerate ||
               params.regenerateNow || postBody.regenerateNow
@@ -425,6 +442,13 @@ function handleRequest(e) {
           }
         ));
 
+      case "repairDuplicateScheduleRows":
+        return jsonResponse(repairDashboardDuplicateScheduleRows(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.pairs || postBody.pairs,
+          { dryRun: params.dryRun !== undefined ? params.dryRun : postBody.dryRun }
+        ));
+
       case "updateEquipQty":
         return jsonResponse(dashboardUpdateEquipmentQty(
           params.tid || postBody.tid,
@@ -438,7 +462,11 @@ function handleRequest(e) {
           params.tid || postBody.tid,
           params.scheduleId || postBody.scheduleId,
           params.equipName || postBody.equipName || params.name || postBody.name,
-          { dryRun: params.dryRun || postBody.dryRun }
+          {
+            dryRun: params.dryRun || postBody.dryRun,
+            exactName: params.exactName || postBody.exactName,
+            skipAvailability: params.skipAvailability || postBody.skipAvailability
+          }
         ));
 
       case "tradeCandidates":
@@ -603,6 +631,10 @@ function handleRequest(e) {
       case "list":
         return doListPending();
 
+      case "card":
+        // 단일 확인요청 카드 — 편집 큐가 저장 후 그 카드만 갱신할 때 사용(전체 목록 재구축 회피)
+        return doConfirmCard(params.reqID || postBody.reqID);
+
       case "scan":
         return doScanAll();
 
@@ -670,11 +702,46 @@ function handleRequest(e) {
  * 대기 중인 확인요청 목록 반환
  * GET ?key=...&action=list
  */
+// 확인요청 목록 캐시 — GAS 재구축(시트 읽기+그룹핑)을 요청마다 반복하지 않는다.
+// 확인요청을 바꾸는 모든 경로(doScheduleAction/run 함수들/registerAsync/시트 직접 편집)가 무효화한다.
+var CONFIRM_LIST_CACHE_KEY_ = 'confirmList_v1';
+function invalidateConfirmListCache_() {
+  try { CacheService.getScriptCache().remove(CONFIRM_LIST_CACHE_KEY_); } catch (e) {}
+}
+
 function doListPending() {
+  var listCache = null;
+  try {
+    listCache = CacheService.getScriptCache();
+    var cachedList = listCache.get(CONFIRM_LIST_CACHE_KEY_);
+    if (cachedList) {
+      return ContentService.createTextOutput(cachedList).setMimeType(ContentService.MimeType.JSON);
+    }
+  } catch (listCacheErr) { listCache = null; }
+
+  const items = buildConfirmPendingItems_(null);
+  const payload = { status: "OK", count: items.length, items: items };
+  if (listCache) {
+    try { listCache.put(CONFIRM_LIST_CACHE_KEY_, JSON.stringify(payload), 60); } catch (putErr) {}
+  }
+  return jsonResponse(payload);
+}
+
+/** 단일 확인요청 카드 조회 — card:null이면 목록에서 빠진 것(등록완료/거절/삭제). */
+function doConfirmCard(reqID) {
+  reqID = String(reqID || '').trim();
+  if (!reqID) return jsonResponse({ status: "ERROR", message: "reqID 필수" });
+  var card = null;
+  try { card = buildConfirmPendingItems_(reqID)[0] || null; } catch (cardErr) {}
+  return jsonResponse({ status: "OK", reqID: reqID, card: card });
+}
+
+/** 확인요청 대기 목록 구성. onlyReqID를 주면 그 그룹만(액션 응답의 카드 갱신용). */
+function buildConfirmPendingItems_(onlyReqID) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("확인요청");
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return jsonResponse({ status: "OK", count: 0, items: [] });
+  if (lastRow < 2) return [];
 
   const data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
 
@@ -699,6 +766,7 @@ function doListPending() {
   for (let i = 0; i < data.length; i++) {
     const reqID = data[i][0];
     if (!reqID) continue;
+    if (onlyReqID && reqID !== onlyReqID) continue;
 
     if (!groupMap[reqID]) {
       groupMap[reqID] = { firstIdx: i, items: [], isCompleted: false };
@@ -755,7 +823,7 @@ function doListPending() {
     });
   }
 
-  return jsonResponse({ status: "OK", count: pending.length, items: pending });
+  return pending;
 }
 
 /**
@@ -816,10 +884,21 @@ function doScheduleAction(action, reqID) {
     return jsonResponse({ status: "ERROR", message: "요청ID를 찾을 수 없음: " + reqID });
   }
 
+  // 액션은 목록을 바꾼다 — 캐시를 비우고, 갱신된 카드를 응답에 실어
+  // 앱이 전체 목록 재조회(수 초) 없이 그 카드만 즉시 교체하게 한다.
+  function confirmActionResponse_(action, extra) {
+    invalidateConfirmListCache_();
+    var card = null;
+    try { card = buildConfirmPendingItems_(reqID)[0] || null; } catch (cardErr) {}
+    var payload = { status: "OK", action: action, reqID: reqID, card: card };
+    if (extra) Object.keys(extra).forEach(function(k) { payload[k] = extra[k]; });
+    return jsonResponse(payload);
+  }
+
   switch (action) {
     case "확인":
       processByReqID(sheet, targetRow);
-      return jsonResponse({ status: "OK", action: "확인", reqID: reqID });
+      return confirmActionResponse_("확인");
 
     case "등록":
       try {
@@ -827,23 +906,24 @@ function doScheduleAction(action, reqID) {
       } catch (regErr) {
         sheet.getRange(targetRow, 15).setValue("❌ 등록 실패: " + regErr.message);
         sheet.getRange(targetRow, 14).clearContent();
+        invalidateConfirmListCache_();
         return jsonResponse({ status: "ERROR", action: "등록", reqID: reqID, message: regErr.message });
       }
       // 등록 후 O열 상태 읽어서 반환
       var regStatus = sheet.getRange(targetRow, 15).getDisplayValue();
-      return jsonResponse({ status: "OK", action: "등록", reqID: reqID, message: regStatus });
+      return confirmActionResponse_("등록", { message: regStatus });
 
     case "보류":
       holdByReqID(sheet, allData, reqID);
-      return jsonResponse({ status: "OK", action: "보류", reqID: reqID });
+      return confirmActionResponse_("보류");
 
     case "거절":
       rejectByReqID(sheet, allData, reqID);
-      return jsonResponse({ status: "OK", action: "거절", reqID: reqID });
+      return confirmActionResponse_("거절");
 
     case "발송승인":
       sendAvailAlimtalk(sheet, targetRow);
-      return jsonResponse({ status: "OK", action: "발송승인", reqID: reqID });
+      return confirmActionResponse_("발송승인");
 
     default:
       return jsonResponse({ status: "ERROR", message: "알 수 없는 action: " + action });
@@ -1074,6 +1154,7 @@ function runFunction(funcName, params) {
     "markOverdueReturnContracts",
     "inspectContractCancelRecovery",
     "restoreCancelledContractsByIds",
+    "backfillDashboardCheckoutBaselineMarkers",
     "setupDiscountColumns",
     "inspectContractTemplateDiscounts",
     "setupContractTemplate",
@@ -1231,6 +1312,12 @@ function runFunction(funcName, params) {
       var ids = args.ids || args.tradeIds || args;
       var result = restoreCancelledContractsByIds(ids, args.dryRun);
       return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "backfillDashboardCheckoutBaselineMarkers") {
+      var markerArgs = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var markerTradeIds = Array.isArray(markerArgs) ? markerArgs : (markerArgs && markerArgs.tradeIds) || [];
+      var markerResult = backfillDashboardCheckoutBaselineMarkers(markerTradeIds);
+      return { success: !markerResult.error, function: funcName, result: markerResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "diagEquipmentRiskBackendConfig") {
       var result = diagEquipmentRiskBackendConfig();

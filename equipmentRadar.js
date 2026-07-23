@@ -23,6 +23,18 @@ function getEquipmentProfitRadar(params) {
   params = params || {};
   var limit = Math.min(parseInt(params.limit, 10) || 60, 200);
   var windowDays = Math.min(parseInt(params.windowDays, 10) || 90, 730);
+
+  // ── 결과 캐시: 5년치 풀스캔이 무겁고 이력은 천천히 변함 → 10분 TTL (nocache=1로 우회)
+  var skipCache = (params.nocache === '1' || params.nocache === 1);
+  var cache = CacheService.getScriptCache();
+  var cacheKey = 'equipRadar_v1_' + windowDays + '_' + limit;
+  if (!skipCache) {
+    var cached = cache.get(cacheKey);
+    if (cached) {
+      try { return JSON.parse(cached); } catch (e) {}
+    }
+  }
+
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var em = ss.getSheetByName('장비마스터');
   var sd = ss.getSheetByName('스케줄상세');
@@ -71,15 +83,15 @@ function getEquipmentProfitRadar(params) {
   var unbilled = {};   // 청구단위인데 단가 0 → 청구누락 후보
   var totalRevenue = 0;
 
-  var sr = sd.getRange(2, 1, sd.getLastRow() - 1, 13).getValues();
+  var sr = sd.getRange(2, 3, sd.getLastRow() - 1, 10).getValues(); // C..L (실사용 열: C,D,E,F,H,L)
   for (var r = 0; r < sr.length; r++) {
-    var setName = String(sr[r][2] || '').trim();  // C 세트명
-    var gear = String(sr[r][3] || '').trim();     // D 장비명
+    var setName = String(sr[r][0] || '').trim();  // C 세트명
+    var gear = String(sr[r][1] || '').trim();     // D 장비명
     if (!gear) continue;
-    var qty = Number(sr[r][4]) || 1;
-    var outD = toDate(sr[r][5]);                   // F 반출일
-    var retD = toDate(sr[r][7]);                   // H 반납일
-    var price = Number(sr[r][11]) || 0;            // L 단가
+    var qty = Number(sr[r][2]) || 1;               // E 수량
+    var outD = toDate(sr[r][3]);                   // F 반출일
+    var retD = toDate(sr[r][5]);                   // H 반납일
+    var price = Number(sr[r][9]) || 0;             // L 단가
     if (!outD) continue;
     var outMs = outD.getTime();
     var inWindow = outMs >= windowStart;
@@ -162,7 +174,7 @@ function getEquipmentProfitRadar(params) {
     return (b.masterPrice > 0 ? 1 : 0) - (a.masterPrice > 0 ? 1 : 0) || b.count - a.count;
   });
 
-  return {
+  var result = {
     ok: true,
     generatedAt: now.toISOString(),
     today: fmt(nowMs),
@@ -178,4 +190,8 @@ function getEquipmentProfitRadar(params) {
     idle: idle.slice(0, limit),
     unbilled: unbilledArr.slice(0, 40)
   };
+
+  // 캐시 저장 — 100KB 초과 등 실패해도 응답은 정상 반환
+  try { cache.put(cacheKey, JSON.stringify(result), 600); } catch (cacheErr) {}
+  return result;
 }

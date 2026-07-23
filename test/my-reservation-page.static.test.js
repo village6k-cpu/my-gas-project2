@@ -120,7 +120,8 @@ assert(
   'the /api/my route and page must be read-only (no POST)'
 );
 assert(
-  /gasGet\(\{ action: "myPage", token \}\)/.test(estimateRoute) &&
+  /getMyPageResponse\(token\)/.test(estimateRoute) &&
+    estimateRoute.includes('@/lib/server/myPageData') &&
     /action", "previewQuote"/.test(estimateRoute) &&
     /rejectNonQuotePdfUrl/.test(estimateRoute) &&
     !/isGoogleSheetPdfExportUrl/.test(estimateRoute) &&
@@ -204,8 +205,9 @@ assert(
   'register-complete alimtalk must include the my-page link, skip without a template, and dedupe per trade'
 );
 assert(
-  /try \{\s*sendRegisterCompleteAlimtalk_\(거래ID, 예약자명, 연락처, 반출일, 반출시간, 반납일, 반납시간\);\s*\} catch/.test(backend),
-  'registerByReqID must call the alimtalk inside try/catch so registration never fails on send errors'
+  /try \{\s*sendRegisterCompleteAlimtalk_\([\s\S]{0,400}\);\s*\} catch/.test(backend) &&
+    /regLock\.releaseLock\(\);[\s\S]{0,400}sendRegisterCompleteAlimtalk_\(/.test(backend),
+  'registerByReqID must call the alimtalk inside try/catch AND after releaseLock (외부 HTTP를 전역 락 밖에서) so registration never fails or blocks on send errors'
 );
 assert(
   backend.includes('팝빌 승인 템플릿과 글자 단위 동일') &&

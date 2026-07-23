@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 두 맥 오갈 때 작업 종료 시 실행
-# 원격 확인 → GAS 백업 → clasp push → clasp deploy → git commit → git push
+# 원격 확인 → GAS 백업 → clasp push → clasp deploy → git commit → git push → 헤이빌리 배포
 # 인자: $1 = 커밋 메시지 (생략 시 프롬프트)
 
 set -euo pipefail
@@ -10,6 +10,8 @@ BRANCH="$(git branch --show-current)"
 DEPLOY_ID="AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT"
 SCRIPT_ID="$(node -e "console.log(require('./.clasp.json').scriptId)")"
 BACKUP_DIR="$HOME/gas-project-backups"
+VERCEL_ORG_ID="team_c5g0hY4e26h7Aha85tslGSRr"
+VERCEL_TODAY_PROJECT_ID="prj_saeOBufXl2hCBDurWbd4wWCQLYqF"
 
 echo "▶ 현재 브랜치: $BRANCH"
 echo ""
@@ -111,6 +113,24 @@ echo "▶ git commit + push..."
 git add -A
 git commit -m "$MSG"
 git push origin "$BRANCH"
+echo ""
+
+# 9. 실제 직원용 헤이빌리 프로젝트 배포
+# 저장소 루트의 .vercel 링크는 별도 정적 프로젝트를 가리키므로 프로젝트 ID를 명시한다.
+VERCEL_BIN="${VERCEL_BIN:-$(command -v vercel || true)}"
+if [[ -z "$VERCEL_BIN" && -x "$HOME/.hermes/node/bin/vercel" ]]; then
+  VERCEL_BIN="$HOME/.hermes/node/bin/vercel"
+fi
+if [[ -z "$VERCEL_BIN" ]]; then
+  echo "❌ Vercel CLI를 찾지 못해 헤이빌리 운영 배포를 확인할 수 없습니다."
+  echo "→ Vercel CLI 설치·로그인 후 VERCEL_BIN=/경로/vercel ./scripts/endwork.sh 를 다시 실행하세요."
+  exit 5
+fi
+
+echo "▶ 헤이빌리 Vercel 운영 배포..."
+VERCEL_ORG_ID="$VERCEL_ORG_ID" \
+VERCEL_PROJECT_ID="$VERCEL_TODAY_PROJECT_ID" \
+  "$VERCEL_BIN" --prod --yes
 echo ""
 
 echo "✅ 완료. 다른 맥에서는 ./scripts/startwork.sh 실행."

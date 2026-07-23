@@ -31,6 +31,6 @@ assert.match(
 
 assert.match(
   backend,
-  /function toggleItemCheck[\s\S]{0,1200}LockService\.getScriptLock\(\)[\s\S]{0,500}waitLock/,
-  '반납 체크 해제는 거래 완료와 같은 ScriptLock을 사용해야 한다'
+  /function toggleItemCheck[\s\S]{0,7500}LockService\.getScriptLock\(\)[\s\S]{0,500}waitLock[\s\S]{0,2500}invalidateDashboardReturnInspectionForTrade_/,
+  '반납 체크 해제는 거래 완료와 같은 ScriptLock을 잡은 뒤에 증거 삭제/계약 재오픈 변이를 수행해야 한다'
 );

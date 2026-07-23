@@ -1202,12 +1202,20 @@ async function doCharge(m) {
     return showError('결제 실패', e.message || '결제가 취소되었습니다.', { retry: false });
   }
 
+  showPaymentFinalizing(payment);
+
   try {
     await rememberReceiptRecord(trade, payment);
   } catch (e) {
     historyWarning = true;
     console.error('[village] 결제 기록 저장 실패(카드는 승인됨):', e);
   }
+
+  showSuccess(payment, {
+    trade: trade,
+    historyWarning: historyWarning,
+    syncPending: true
+  });
 
   // 카드 승인 성공 → 시트 '입금완료' 반영
   try {
@@ -1236,6 +1244,8 @@ async function doManualCharge(amount) {
     return showError('결제 실패', e.message || '결제가 취소되었습니다.', { retryManual: true });
   }
 
+  showPaymentFinalizing(payment);
+
   try {
     await rememberReceiptRecord(buildManualReceiptRecord(amount, payment), payment);
   } catch (e) {
@@ -1246,6 +1256,17 @@ async function doManualCharge(amount) {
 }
 
 // 6) 결과 화면
+var showPaymentFinalizing = safe(function (payment) {
+  sdk.template.renderResultPage({
+    type: 'image',
+    status: 'success',
+    title: '카드 승인이 완료됐어요',
+    description: won(payment.amount) + ' · 영수증을 준비하고 있어요.',
+    timerMs: 0,
+    buttons: []
+  });
+});
+
 var showSuccess = safe(function (payment, opts) {
   opts = opts || {};
   var buttons = [];
@@ -1263,19 +1284,39 @@ var showSuccess = safe(function (payment, opts) {
         try {
           await printOfficialPaymentReceipt(payment.paymentKey);
         } catch (e) {
+          if (opts.syncPending) {
+            try {
+              if (sdk.template.openToast) {
+                sdk.template.openToast({ message: '영수증 출력에 실패했어요. 장부 반영 후 다시 시도해주세요.' });
+              }
+            } catch (_) {}
+            return;
+          }
           return showError('영수증 출력 실패', e.message || '프린터 연결을 확인해주세요.', {});
+        }
+        if (opts.syncPending) {
+          try {
+            if (sdk.template.openToast) sdk.template.openToast({ message: '영수증을 출력했어요.' });
+          } catch (_) {}
+          return;
         }
         return showPrintResult('영수증을 출력했어요', '카드 영수증 출력 요청이 완료됐어요.');
       }
     });
   }
-  buttons.push({ label: '확인', onClick: function () { returnToIdle(); }, closeOnClick: true });
+  if (!opts.syncPending) {
+    buttons.push({
+      label: '확인',
+      onClick: function () { returnToIdle(); },
+      closeOnClick: true
+    });
+  }
   sdk.template.renderResultPage({
     type: 'image',
     status: 'success',
     title: opts.historyWarning ? '결제 승인은 완료됐어요' : '결제가 완료되었어요',
     description: descriptions.join(' · '),
-    timerMs: opts.historyWarning ? 0 : 5000,
+    timerMs: opts.historyWarning || opts.syncPending ? 0 : 5000,
     onTimeout: function () { returnToIdle(); },
     buttons: buttons,
   });

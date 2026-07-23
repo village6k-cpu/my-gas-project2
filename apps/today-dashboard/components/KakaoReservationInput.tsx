@@ -2,7 +2,7 @@
 
 import { useMemo, useState, type ClipboardEvent, type DragEvent, type ReactNode } from "react";
 import { authFetch } from "@/lib/data/authFetch";
-import { searchEquipmentCatalog, useEquipmentCatalog } from "@/lib/data/equipmentCatalog";
+import { retryEquipmentCatalog, searchEquipmentCatalog, useEquipmentCatalog } from "@/lib/data/equipmentCatalog";
 import { Camera, Check, Plus, Send } from "@/components/icons";
 
 type EquipmentDraft = {
@@ -427,7 +427,14 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
                     />
                   </label>
                   {catalog.loading && <span className="text-[12px] font-semibold text-ink-faint">장비목록 불러오는 중</span>}
-                  {catalog.error && <span className="text-[12px] font-semibold text-warn-fg">장비목록 오류: {catalog.error}</span>}
+                  {catalog.error && (
+                    <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-warn-fg">
+                      장비목록 오류: {catalog.error}
+                      <button type="button" onClick={() => void retryEquipmentCatalog()} className="tap rounded-md bg-warn-bg px-1.5 py-0.5 text-[11px] font-bold text-warn-fg ring-1 ring-warn-ring">
+                        다시 불러오기
+                      </button>
+                    </span>
+                  )}
                 </div>
                 {image && (
                   <div className="mt-2 flex items-center gap-2 rounded-xl bg-white p-2 ring-1 ring-line/80">

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAuthedRequest as requireUser } from "@/lib/server/authCache";
-import { dedupeFollowUpItems, duplicateFollowUpIdsForItem, shouldHideLowValueActiveItem, summarize } from "@/lib/followups/logic";
+import { dedupeFollowUpItems, duplicateFollowUpIdsForItem, duplicateFollowUpIdsForItems, shouldHideLowValueActiveItem, summarize } from "@/lib/followups/logic";
 
 // 후속조치(카톡 AI봇) 보드 API — ai_follow_up_items(public 스키마).
 // 로그인 게이트(사용자 토큰 검증, 공유 authCache) + DB는 service-role(서버 전용, 브라우저 노출 없음).
@@ -12,11 +12,18 @@ const TABLE = process.env.SUPABASE_FOLLOW_UP_TABLE || "ai_follow_up_items";
 const FIELDS =
   "id,follow_up_key,job_id,room_key,customer_name,type,priority,status,title,summary,recommended_action,suggested_reply_draft,evidence,blocking_reason,due_hint,decision_classification,decision_confidence,created_at,updated_at,completed_at";
 
+// 중복 판정(dashboardSemanticKeys/isLowInformationDiagnosticItem)이 실제로 읽는 필드만 —
+// suggested_reply_draft 등 큰 텍스트 컬럼을 후보 500건 조회에서 뺀다.
+// ⚠️ evidence는 combinedFollowUpText가 의미키 계산에 사용하므로 제외 금지.
+const DEDUPE_FIELDS = "id,follow_up_key,room_key,customer_name,type,title,summary,recommended_action,evidence";
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 async function supaFetch(pathAndQuery: string, init: RequestInit = {}): Promise<any> {
   const key = SERVICE_KEY || ANON!;
   const res = await fetch(`${SUPA_URL}/rest/v1/${pathAndQuery}`, {
     ...init,
+    // Supabase REST가 매달릴 때 라우트가 무한 대기하지 않게 상한 — 초과 시 기존 catch가 500으로 전달
+    signal: AbortSignal.timeout(15_000),
     headers: { apikey: key, authorization: `Bearer ${key}`, "content-type": "application/json", ...(init.headers || {}) },
   });
   const txt = await res.text();
@@ -67,15 +74,13 @@ export async function PATCH(req: NextRequest) {
       // 벌크(다중선택·섹션 일괄완료)도 각 항목의 "의미상 중복" 행까지 함께 상태 변경한다.
       // GET은 dedupeFollowUpItems로 대표 1건만 보여주므로, 벌크에서 대표 id만 닫으면
       // 숨어있던 중복 행이 다음 폴링에 '되살아나' 같은 업무를 두 번 처리하게 된다(단건 경로와 통일).
-      const cands = await supaFetch(`${TABLE}?select=${FIELDS}&status=not.in.(done,dismissed)&limit=500&order=created_at.desc`);
+      const cands = await supaFetch(`${TABLE}?select=${DEDUPE_FIELDS}&status=not.in.(done,dismissed)&limit=500&order=created_at.desc`);
       const candList: any[] = Array.isArray(cands) ? cands : [];
       const byId = new Map<string, any>(candList.map((c: any) => [String(c.id), c]));
       const target = new Set<string>(ids);
-      for (const oneId of ids) {
-        const cur = byId.get(oneId);
-        if (!cur) continue;
-        for (const dup of duplicateFollowUpIdsForItem(cur, candList)) target.add(dup);
-      }
+      // 배치 버전 — id마다 후보 전체의 의미키를 재계산하던 O(ids×후보)를 O(ids+후보)로 낮춘다
+      const currents = ids.map((oneId) => byId.get(oneId)).filter(Boolean);
+      for (const dup of duplicateFollowUpIdsForItems(currents, candList)) target.add(String(dup));
       const finalIds = Array.from(target).slice(0, 500);
       const rows = await supaFetch(`${TABLE}?id=in.(${finalIds.map(encodeURIComponent).join(",")})`, {
         method: "PATCH",
@@ -84,10 +89,13 @@ export async function PATCH(req: NextRequest) {
       });
       return NextResponse.json({ ok: true, items: Array.isArray(rows) ? rows : [], updatedIds: finalIds, updatedCount: Array.isArray(rows) ? rows.length : 0 });
     }
-    const cur = await supaFetch(`${TABLE}?select=${FIELDS}&id=eq.${encodeURIComponent(id)}`);
+    // 두 읽기는 서로 독립 — 병렬로 줄여 상태 변경 1건의 순차 REST 3왕복을 2왕복 시간으로 단축
+    const [cur, cands] = await Promise.all([
+      supaFetch(`${TABLE}?select=${FIELDS}&id=eq.${encodeURIComponent(id)}`),
+      supaFetch(`${TABLE}?select=${DEDUPE_FIELDS}&status=not.in.(done,dismissed)&limit=500&order=created_at.desc`),
+    ]);
     const current = Array.isArray(cur) ? cur[0] : null;
     if (!current) return NextResponse.json({ error: "not found" }, { status: 404 });
-    const cands = await supaFetch(`${TABLE}?select=${FIELDS}&status=not.in.(done,dismissed)&limit=500&order=created_at.desc`);
     const dupIds = duplicateFollowUpIdsForItem(current, cands);
     if (!dupIds.includes(id)) dupIds.push(id);
     const row = await supaFetch(`${TABLE}?id=in.(${dupIds.map(encodeURIComponent).join(",")})`, {

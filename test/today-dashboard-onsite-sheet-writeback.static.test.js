@@ -43,8 +43,8 @@ assert(
   'on-site additions must set rawNames=true so free-input names are not fuzzy-matched into the wrong catalog item'
 );
 assert(
-  /gasMutation\("onsiteAddon",\s*\{[\s\S]*directRegenerate:\s*true/.test(store),
-  'on-site additions must request immediate contract regeneration so the app amount and contract link do not stay stale'
+  /gasMutation\("onsiteAddon",\s*\{[\s\S]*directRegenerate:\s*false/.test(store),
+  'on-site additions delegate contract regeneration to the background worker (freshness via contractRegenPending badge + polling merge)'
 );
 assert(
   /export async function addOnsiteItems\([\s\S]*const mutationResult = unwrapContractMutation\(res\)[\s\S]*amount: amount \?\? t\.amount[\s\S]*contractUrl: url \|\| t\.contractUrl \|\| null[\s\S]*contractRegenPending: !!mutationResult\.contractRegenPending && !url/.test(store),
@@ -66,8 +66,8 @@ assert(
 // 시트에 기록된 현장추가도 실 scheduleID라 삭제 시 스케줄상세 행도 제거되어야 함
 assert(
   /if \(item && isSheetBackedScheduleId\(tradeId,\s*scheduleId\)\) \{[\s\S]*removeEquipmentAndRegenerateContract\(tradeId,\s*item\)/.test(store) &&
-    /gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*true/.test(store),
-  'removeItem must delete real-id rows (incl. sheet-recorded on-site) from 스케줄상세 and refresh contract data'
+    /gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*false/.test(store),
+  'removeItem must delete real-id rows (incl. sheet-recorded on-site) from 스케줄상세 and queue contract regeneration via the background worker'
 );
 
 // 시트 재동기화 후에도 현장추가는 '현장 추가' 구획에 묶이도록 onsite 보존
@@ -90,7 +90,7 @@ assert(
   'dashboardRecordOnsiteAddon must pass rawNames and directRegenerate through to dashboardAddEquipments'
 );
 assert(
-  /function dashboardRecordOnsiteAddon[\s\S]{0,1000}forceZeroPrice:\s*!isPaid/.test(logic) &&
+  /function dashboardRecordOnsiteAddon[\s\S]{0,3000}dashboardAddEquipments\(tid, entries, \{[\s\S]{0,300}forceZeroPrice:\s*!isPaid/.test(logic) &&
     /price:\s*forceZeroPrice \? 0 :/.test(logic),
   'free/unsettled on-site additions must still enter the physical schedule but carry zero price'
 );

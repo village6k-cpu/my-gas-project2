@@ -101,43 +101,6 @@ export function buildSeed(today: string): { trades: Trade[]; notes: HandoverNote
       riskWarnings: [],
     },
 
-    // ── 반납 (오늘 들어옴) ───────────────────────────────────────
-    {
-      tradeId: "260606-014",
-      customerName: "최민지",
-      customerPhone: "010-5512-9087",
-      company: "감성필름",
-      checkoutAt: at(addDays(today, -2), 10, 0),
-      returnAt: at(today, 10, 0),
-      contractStatus: "반출",
-      setupDone: true,
-      setupDoneAt: at(addDays(today, -2), 10, 5),
-      returnDone: false,
-      paymentMethod: "계좌이체",
-      depositStatus: "입금완료",
-      amount: 340000,
-      contractUrl: "https://example.com/c14",
-      equipments: [
-        item("소니 FX6 바디세트", 1, { isSetHeader: true, setName: "소니 FX6 바디세트", checkoutState: "taken" }),
-        item("소니 FX6 바디", 1, { isComponent: true, setName: "소니 FX6 바디세트", checkoutState: "taken" }),
-        item("V마운트 배터리", 2, { isComponent: true, setName: "소니 FX6 바디세트", emphasize: true, checkoutState: "taken" }),
-        item("탐론 28-75mm G2", 1, { checkoutState: "taken" }),
-        item("SDI 연선 5m", 5, { checkoutState: "taken" }),
-        item("SDI 연선 5m", 3, { onsite: true, settlement: "유상", checkoutState: "taken" }),
-        item("중계선 20m", 5, { checkoutState: "taken" }),
-        item("매직암 11인치", 3, { checkoutState: "taken" }),
-        item("V마운트 배터리", 1, { onsite: true, settlement: "무상", checkoutState: "taken" }),
-        item("소니 NP-FZ100 배터리", 6, { emphasize: true, checkoutState: "taken" }),
-      ],
-      returnCounts: {
-        "SDI 연선 5m": { good: 7, damaged: 0, lost: 0 },
-        "매직암 11인치": { good: 3, damaged: 0, lost: 0 },
-      },
-      photos: [{ id: "p3", phase: "checkout", swatch: "#3b82f6", label: "반출" }],
-      riskWarnings: [
-        { id: "r2", phase: "checkin", equipmentName: "소니 FX6 바디", riskLevel: "high", customerMessage: "센서 오염 빈발 기종 — 반납 시 센서 확인", guidanceState: "대상없음" },
-      ],
-    },
     {
       // 반납 파손 시연
       tradeId: "260605-009",
@@ -167,28 +130,6 @@ export function buildSeed(today: string): { trades: Trade[]; notes: HandoverNote
       riskWarnings: [],
     },
 
-    // ── 확인필요: 미반납 경과 ────────────────────────────────────
-    {
-      tradeId: "260604-021",
-      customerName: "한지우",
-      customerPhone: "010-1184-7762",
-      checkoutAt: at(addDays(today, -4), 9, 0),
-      returnAt: at(yest, 18, 0),
-      contractStatus: "반출",
-      setupDone: true,
-      returnDone: false,
-      paymentMethod: "계좌이체",
-      depositStatus: "입금완료",
-      amount: 410000,
-      contractUrl: "https://example.com/c21",
-      equipments: [
-        item("소니 FX6 바디", 1, { checkoutState: "taken" }),
-        item("소니 GM 50mm F1.2", 1, { checkoutState: "taken" }),
-      ],
-      photos: [],
-      riskWarnings: [],
-    },
-
     // ── 반출+반납 같은 날 (당일 대여) ────────────────────────────
     {
       tradeId: "260608-004",
@@ -214,8 +155,6 @@ export function buildSeed(today: string): { trades: Trade[]; notes: HandoverNote
   ];
 
   const notes: HandoverNote[] = [
-    { id: "n1", body: "FX6(260606-014) 반납 시 센서 클리닝 키트로 점검 — 오염 잦음" },
-    { id: "n2", body: "한지우님(260604-021) 미반납 — 오전에 연락 한 번 더" },
     { id: "n3", body: "CFexpress 카드 재고 2장뿐. 반납 들어오면 바로 포맷" },
   ];
 

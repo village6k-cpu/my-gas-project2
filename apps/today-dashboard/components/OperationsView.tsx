@@ -72,7 +72,8 @@ function writeOpsCache(data: Ops) {
   }
 }
 
-export function OperationsView() {
+// active: AppShell keep-mounted pane에서 현재 보이는 pane인지 — 숨김 상태에선 폴링을 멈춘다.
+export function OperationsView({ active = true }: { active?: boolean }) {
   // 마지막 성공 응답을 즉시 렌더(stale-while-revalidate) — 예전엔 진입/새로고침마다
   // 빈 '불러오는 중…' 화면으로 GAS 콜드스타트(2.6s)를 통째로 기다렸다.
   const [data, setData] = useState<Ops | null>(() => readOpsCache());
@@ -100,6 +101,8 @@ export function OperationsView() {
   }, []);
 
   useEffect(() => {
+    // 숨김 pane(keep-mounted)에서는 폴링을 걸지 않는다 — active로 돌아오는 순간 즉시 1회 로드.
+    if (!active) return;
     load();
     // 백그라운드 탭에서는 폴링하지 않는다(배터리·불필요 GAS 왕복 방지). 포커스 복귀 시 즉시 1회.
     const tick = () => {
@@ -115,7 +118,7 @@ export function OperationsView() {
       clearInterval(t);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [load]);
+  }, [load, active]);
 
   const s = data?.summary || {};
   const conflicts = (data?.inventoryAlerts || []).filter((a) => a.severity === "conflict");

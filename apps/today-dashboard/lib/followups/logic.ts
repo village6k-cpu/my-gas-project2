@@ -284,6 +284,41 @@ export function duplicateFollowUpIdsForItem(current, candidates) {
   return Array.from(new Set(ids));
 }
 
+// 벌크(다중선택·섹션 일괄완료)용 — duplicateFollowUpIdsForItem을 선택 id마다 부르면
+// 후보 500건의 의미키를 id 수만큼(O(ids×후보)) 재계산해 이벤트 루프를 수백 ms 점유한다.
+// 여기서는 후보별 의미키/고객명/저정보 진단여부를 1회씩만 계산해 역색인 두 개
+// (a) 의미키→id 집합, (b) 고객명→진단행 id 집합을 만들고 O(ids+후보)로 조회한다.
+// (b)를 빠뜨리면 같은 고객의 저정보 진단 행이 함께 닫히지 않아 GET dedupe에 숨었던
+// 중복 행이 다음 폴링에 되살아나므로 두 매칭 경로를 모두 보존한다.
+export function duplicateFollowUpIdsForItems(currents, candidates) {
+  const keyIndex = new Map();
+  const diagnosticIdsByCustomer = new Map();
+  for (const item of Array.isArray(candidates) ? candidates : []) {
+    if (!item?.id) continue;
+    for (const key of dashboardSemanticKeys(item || {})) {
+      const set = keyIndex.get(key) || new Set();
+      set.add(item.id);
+      keyIndex.set(key, set);
+    }
+    if (isLowInformationDiagnosticItem(item)) {
+      const customer = normalizeCustomerForTask(item.customer_name);
+      const set = diagnosticIdsByCustomer.get(customer) || new Set();
+      set.add(item.id);
+      diagnosticIdsByCustomer.set(customer, set);
+    }
+  }
+  const ids = new Set();
+  for (const current of Array.isArray(currents) ? currents : []) {
+    for (const key of dashboardSemanticKeys(current || {})) {
+      const matched = keyIndex.get(key);
+      if (matched) for (const id of matched) ids.add(id);
+    }
+    const diagnostics = diagnosticIdsByCustomer.get(normalizeCustomerForTask(current?.customer_name));
+    if (diagnostics) for (const id of diagnostics) ids.add(id);
+  }
+  return Array.from(ids);
+}
+
 export function shouldHideLowValueActiveItem(item) {
   if (item?.status && ['done', 'dismissed'].includes(item.status)) return false;
   if (item?.type !== 'completed_log') return false;

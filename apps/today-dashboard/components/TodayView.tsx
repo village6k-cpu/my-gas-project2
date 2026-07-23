@@ -251,6 +251,8 @@ export function TodayView() {
           </div>
         )}
 
+        {/* ScheduleCard는 React.memo — 내려주는 props는 원시값(date/tab/saving/defaultOpen)과
+            스토어의 안정 참조(trade)만 유지할 것. 렌더마다 새로 만든 객체/콜백을 내려주면 memo가 무력화된다. */}
         {searching
           ? searchGroups.map(([group, events]) => (
               <div key={group} className="space-y-2.5">

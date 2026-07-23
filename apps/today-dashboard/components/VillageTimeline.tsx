@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { Trade } from "@/lib/domain/types";
@@ -18,7 +18,9 @@ const HEAD_H = 52;
 const REV_H = 50;
 const WEEKDAY = ["일", "월", "화", "수", "목", "금", "토"];
 
-export function VillageTimeline({
+// React.memo: 스토어 emit 중 trades 참조가 안 바뀌는 갱신(저장 토스트 등)에는
+// 수백 개 막대 트리를 다시 조정하지 않는다. props는 전부 참조 안정(ScheduleView useMemo/상태).
+export const VillageTimeline = memo(function VillageTimeline({
   items,
   trades,
   mode,
@@ -237,60 +239,97 @@ export function VillageTimeline({
   const gridBg = `repeating-linear-gradient(to right, transparent 0 ${colW - 1}px, rgba(0,0,0,0.05) ${colW - 1}px ${colW}px), repeating-linear-gradient(to bottom, transparent 0 ${ROW_H - 1}px, rgba(0,0,0,0.04) ${ROW_H - 1}px ${ROW_H}px)`;
   const selectedTrade = sel ? trades.find((trade) => trade.tradeId === sel.tradeId) : undefined;
 
-  const rows: React.ReactNode[] = [];
-  for (const g of groups) {
-    const isCol = collapsed[g.key];
-    // 세트별 모드의 그룹 키 = 장비명 → 원장 보유수량 배지 (고객별/상태별 키는 장비가 아니라 제외)
-    const ledger = mode === "set" ? ledgerStockFor(ledgerStocks, g.key) : null;
-    rows.push(
-      <div key={"g_" + g.key} className="relative flex items-center" style={{ height: ROW_H, width: totalW }}>
-        {/* 모바일: 헤더 폭을 화면 안으로 제한하고 장비명만 말줄임 — 보유/정비 배지가 항상 보이게 */}
-        <button onClick={() => setCollapsed((c) => ({ ...c, [g.key]: !c[g.key] }))} className="tap sticky left-0 z-10 flex h-full max-w-[calc(100dvw-8px)] items-center gap-1.5 bg-white/95 pl-3 pr-4 backdrop-blur">
-          <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-ink-mute transition-transform ${isCol ? "" : "rotate-90"}`} />
-          <span className="min-w-0 truncate text-[13px] font-bold text-ink">{g.key}</span>
-          <span className="shrink-0 rounded-full bg-line/40 px-1.5 text-[11px] font-semibold text-ink-mute">{g.items.length}</span>
-          {ledger && <StockBadge ledger={ledger} />}
-        </button>
-      </div>,
-    );
-    if (isCol) continue;
-    for (const it of g.items) {
-      const s = Math.max(0, daysBetween(rangeStartMs, it.startMs));
-      const e2 = Math.min(days - 1, daysBetween(rangeStartMs, it.endMs));
-      const span = Math.max(1, e2 - s + 1);
-      const clipL = it.startMs < rangeStartMs;
-      const clipR = it.endMs > rangeEndMs;
-      const sc = statusBar(it.statusKey);
-      const conf = conflicts.has(it.id);
-      const unit = unitBadge(it);
-      rows.push(
-        <div key={it.id} className="relative" style={{ height: ROW_H, width: totalW }}>
-          <button
-            onPointerDown={(ev) => onDown(ev, it)}
-            onPointerMove={onMove}
-            onPointerUp={() => onUp(it)}
-            onContextMenu={(ev) => onCtx(ev, it)}
-            className={`tl-bar group absolute flex items-center gap-1 overflow-hidden rounded-[5px] px-2 text-[11px] font-semibold shadow-sm ${sc.bar} ${sc.strike ? "line-through" : ""} ${conf ? "conflict" : ""}`}
-            style={{ left: s * colW + 2, width: span * colW - 4, top: 6, height: BAR_H, touchAction: "none", cursor: "grab" }}
-            title={`${it.label} · ${it.custName}`}
-          >
-            {!clipL && (
-              <span onPointerDown={(ev) => rsDown(ev, it, "start")} className="absolute left-0 top-0 z-10 h-full w-2 cursor-col-resize bg-black/10 opacity-0 group-hover:opacity-100" style={{ touchAction: "none" }} />
-            )}
-            {clipL && <span className="shrink-0">◀</span>}
-            {unit && <span className="shrink-0 rounded bg-white/40 px-1 text-[10px] font-extrabold tabular-nums">{unit}</span>}
-            <span className="truncate">
-              {it.label} · {it.custName}
-            </span>
-            {clipR && <span className="ml-auto shrink-0">▶</span>}
-            {!clipR && (
-              <span onPointerDown={(ev) => rsDown(ev, it, "end")} className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize bg-black/10 opacity-0 group-hover:opacity-100" style={{ touchAction: "none" }} />
-            )}
+  // 행(그룹 헤더 + 예약 막대)은 수백 노드라 매 렌더 재구성이 비싸다 — 입력이 바뀔 때만 재생성.
+  // 캡처되는 핸들러(onDown/onMove/onUp/onCtx/rsDown)는 렌더마다 새로 만들어지지만
+  // 동작이 colW(아래 deps에 포함)와 안정 참조(ref·setState·import 함수)에만 의존하므로
+  // 이전 렌더의 핸들러 인스턴스를 재사용해도 동작이 같다(stale 클로저 없음).
+  const rows = useMemo(() => {
+    const out: React.ReactNode[] = [];
+    for (const g of groups) {
+      const isCol = collapsed[g.key];
+      // 세트별 모드의 그룹 키 = 장비명 → 원장 보유수량 배지 (고객별/상태별 키는 장비가 아니라 제외)
+      const ledger = mode === "set" ? ledgerStockFor(ledgerStocks, g.key) : null;
+      out.push(
+        <div key={"g_" + g.key} className="relative flex items-center" style={{ height: ROW_H, width: totalW }}>
+          {/* 모바일: 헤더 폭을 화면 안으로 제한하고 장비명만 말줄임 — 보유/정비 배지가 항상 보이게 */}
+          <button onClick={() => setCollapsed((c) => ({ ...c, [g.key]: !c[g.key] }))} className="tap sticky left-0 z-10 flex h-full max-w-[calc(100dvw-8px)] items-center gap-1.5 bg-white/95 pl-3 pr-4 backdrop-blur">
+            <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-ink-mute transition-transform ${isCol ? "" : "rotate-90"}`} />
+            <span className="min-w-0 truncate text-[13px] font-bold text-ink">{g.key}</span>
+            <span className="shrink-0 rounded-full bg-line/40 px-1.5 text-[11px] font-semibold text-ink-mute">{g.items.length}</span>
+            {ledger && <StockBadge ledger={ledger} />}
           </button>
         </div>,
       );
+      if (isCol) continue;
+      for (const it of g.items) {
+        const s = Math.max(0, daysBetween(rangeStartMs, it.startMs));
+        const e2 = Math.min(days - 1, daysBetween(rangeStartMs, it.endMs));
+        const span = Math.max(1, e2 - s + 1);
+        const clipL = it.startMs < rangeStartMs;
+        const clipR = it.endMs > rangeEndMs;
+        const sc = statusBar(it.statusKey);
+        const conf = conflicts.has(it.id);
+        const unit = unitBadge(it);
+        out.push(
+          <div key={it.id} className="relative" style={{ height: ROW_H, width: totalW }}>
+            <button
+              onPointerDown={(ev) => onDown(ev, it)}
+              onPointerMove={onMove}
+              onPointerUp={() => onUp(it)}
+              onContextMenu={(ev) => onCtx(ev, it)}
+              className={`tl-bar group absolute flex items-center gap-1 overflow-hidden rounded-[5px] px-2 text-[11px] font-semibold shadow-sm ${sc.bar} ${sc.strike ? "line-through" : ""} ${conf ? "conflict" : ""}`}
+              style={{ left: s * colW + 2, width: span * colW - 4, top: 6, height: BAR_H, touchAction: "none", cursor: "grab" }}
+              title={`${it.label} · ${it.custName}`}
+            >
+              {!clipL && (
+                <span onPointerDown={(ev) => rsDown(ev, it, "start")} className="absolute left-0 top-0 z-10 h-full w-2 cursor-col-resize bg-black/10 opacity-0 group-hover:opacity-100" style={{ touchAction: "none" }} />
+              )}
+              {clipL && <span className="shrink-0">◀</span>}
+              {unit && <span className="shrink-0 rounded bg-white/40 px-1 text-[10px] font-extrabold tabular-nums">{unit}</span>}
+              <span className="truncate">
+                {it.label} · {it.custName}
+              </span>
+              {clipR && <span className="ml-auto shrink-0">▶</span>}
+              {!clipR && (
+                <span onPointerDown={(ev) => rsDown(ev, it, "end")} className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize bg-black/10 opacity-0 group-hover:opacity-100" style={{ touchAction: "none" }} />
+              )}
+            </button>
+          </div>,
+        );
+      }
     }
-  }
+    return out;
+    // 주의: 핸들러는 의도적으로 deps에서 제외(위 설명). 위치 계산 입력은 전부 포함할 것.
+  }, [groups, collapsed, mode, ledgerStocks, conflicts, colW, totalW, days, rangeStartMs, rangeEndMs]);
+
+  // 날짜 셀(헤더/주말·오늘 배경 줄무늬)도 emit마다 재생성하지 않는다.
+  const headerCells = useMemo(
+    () =>
+      dates.map((ms, i) => {
+        const dt = new Date(ms);
+        const dow = dt.getDay();
+        const isToday = ms === todayMs;
+        const weekend = dow === 0 || dow === 6;
+        return (
+          <div key={ms} style={{ width: colW }} className={`flex shrink-0 flex-col items-center justify-center ${isToday ? "bg-brand-50" : weekend ? "bg-paper/70" : ""}`}>
+            {(dt.getDate() === 1 || i === 0) && <span className="text-[9.5px] font-bold text-ink-faint">{dt.getMonth() + 1}월</span>}
+            <span className={`text-[13px] font-bold ${isToday ? "text-brand-600" : dow === 0 ? "text-attention-fg" : dow === 6 ? "text-checkout-fg" : "text-ink"}`}>{dt.getDate()}</span>
+            {colW >= 60 && <span className="text-[9.5px] text-ink-faint">{WEEKDAY[dow]}</span>}
+          </div>
+        );
+      }),
+    [dates, colW, todayMs],
+  );
+  const dayStripes = useMemo(
+    () =>
+      dates.map((ms, i) => {
+        const dow = new Date(ms).getDay();
+        const isToday = ms === todayMs;
+        if (!isToday && dow !== 0 && dow !== 6) return null;
+        return <div key={ms} className={`absolute top-0 bottom-0 ${isToday ? "bg-brand-50/60" : "bg-paper/60"}`} style={{ left: i * colW, width: colW }} />;
+      }),
+    [dates, colW, todayMs],
+  );
 
   return (
     <div className="relative overflow-hidden rounded-xl2 bg-white shadow-card ring-1 ring-line/70">
@@ -298,30 +337,13 @@ export function VillageTimeline({
         <div style={{ width: totalW, position: "relative" }}>
           {/* 날짜 헤더 */}
           <div className="sticky top-0 z-30 flex border-b border-line bg-white/95 backdrop-blur" style={{ height: HEAD_H }}>
-            {dates.map((ms, i) => {
-              const dt = new Date(ms);
-              const dow = dt.getDay();
-              const isToday = ms === todayMs;
-              const weekend = dow === 0 || dow === 6;
-              return (
-                <div key={ms} style={{ width: colW }} className={`flex shrink-0 flex-col items-center justify-center ${isToday ? "bg-brand-50" : weekend ? "bg-paper/70" : ""}`}>
-                  {(dt.getDate() === 1 || i === 0) && <span className="text-[9.5px] font-bold text-ink-faint">{dt.getMonth() + 1}월</span>}
-                  <span className={`text-[13px] font-bold ${isToday ? "text-brand-600" : dow === 0 ? "text-attention-fg" : dow === 6 ? "text-checkout-fg" : "text-ink"}`}>{dt.getDate()}</span>
-                  {colW >= 60 && <span className="text-[9.5px] text-ink-faint">{WEEKDAY[dow]}</span>}
-                </div>
-              );
-            })}
+            {headerCells}
           </div>
 
           {/* 본문 */}
           <div className="relative">
             <div className="absolute inset-0" style={{ backgroundImage: gridBg }} />
-            {dates.map((ms, i) => {
-              const dow = new Date(ms).getDay();
-              const isToday = ms === todayMs;
-              if (!isToday && dow !== 0 && dow !== 6) return null;
-              return <div key={ms} className={`absolute top-0 bottom-0 ${isToday ? "bg-brand-50/60" : "bg-paper/60"}`} style={{ left: i * colW, width: colW }} />;
-            })}
+            {dayStripes}
             {todayOff >= 0 && todayOff < days && (
               <div className="absolute top-0 bottom-0 z-20" style={{ left: todayOff * colW + Math.round(colW / 2) - 1, width: 2, background: "#D04A2E" }}>
                 <span className="absolute left-1/2 -translate-x-1/2 rounded-b bg-brand-600 px-1 text-[9px] font-bold text-white">오늘</span>
@@ -379,7 +401,7 @@ export function VillageTimeline({
       )}
     </div>
   );
-}
+});
 
 function MenuItem({ children, onClick, danger }: { children: React.ReactNode; onClick: () => void; danger?: boolean }) {
   return (

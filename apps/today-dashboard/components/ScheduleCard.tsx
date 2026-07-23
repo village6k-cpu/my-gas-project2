@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type { TabKey, Trade } from "@/lib/domain/types";
 import { isCancelledTrade, phaseForDate, returnCompletionBlockers, setupProgress, timeLabel } from "@/lib/domain/status";
 import { ensureTradePhotos, toggleReturn, toggleSetup } from "@/lib/data/store";
@@ -32,7 +32,10 @@ function displayPhase(t: Trade, date: string, tab: TabKey): "checkout" | "checki
   return new Date(t.checkoutAt) <= new Date(`${date}T23:59:59`) ? "checkin" : "checkout";
 }
 
-export function ScheduleCard({
+// React.memo: 스토어 emit(저장 토스트·savingTrades 깜빡임 등)마다 그날의 카드 수십 장이
+// 통째로 재렌더되는 것을 막는다. props가 전부 원시값 + 스토어의 안정 참조(trade)라
+// 기본 얕은 비교로 충분하다 — mutateTrade는 변경된 거래만 새 참조로 만든다.
+export const ScheduleCard = memo(function ScheduleCard({
   trade,
   date,
   tab,
@@ -68,7 +71,19 @@ export function ScheduleCard({
     }
     if (returnBlockers.length > 0) setOpen(true);
     const result = await toggleReturn(trade.tradeId);
-    if (!result.ok) setOpen(true);
+    if (result.ok) return;
+    setOpen(true);
+    // 미확인/초과는 강제 차단하지 않는다 — 작업자가 내용을 보고 결정한다(소프트 가드).
+    // 카드는 완료 전까지 계속 살아있고, 미확인 내역은 returnCounts 기록으로 남는다.
+    if (result.blockers.length > 0) {
+      const missing = result.blockers.reduce((sum, b) => sum + b.missing, 0);
+      const over = result.blockers.reduce((sum, b) => sum + b.over, 0);
+      const detail = [missing > 0 ? `미확인 ${missing}개` : "", over > 0 ? `초과 ${over}개` : ""].filter(Boolean).join(", ");
+      const confirmed = window.confirm(`${detail} 상태입니다.\n품목 확인 없이 반납완료 처리할까요?\n(미확인 내역은 기록으로 남습니다)`);
+      if (!confirmed) return;
+      const forced = await toggleReturn(trade.tradeId, { force: true });
+      if (!forced.ok) setOpen(true);
+    }
   }
 
   // 완료되면 상세 자동 접힘 (처리됨 느낌)
@@ -162,7 +177,7 @@ export function ScheduleCard({
             <Check className="h-3.5 w-3.5" />
           </span>
           {isCheckout
-            ? saving ? "반출 처리 중…" : done ? "반출 완료됨" : "반출 완료"
+            ? saving ? done ? "반출 완료됨 · 저장 확인 중…" : "반출 처리 중…" : done ? "반출 완료됨" : "반출 완료"
             : saving ? "반납 처리 중…"
             : invalidClosedReturn ? "잘못 닫힌 카드 다시 열기"
             : done ? "반납 완료됨"
@@ -215,7 +230,7 @@ export function ScheduleCard({
       {customerOpen && <CustomerSheet name={trade.customerName} phone={trade.customerPhone} onClose={() => setCustomerOpen(false)} />}
     </div>
   );
-}
+});
 
 function CollapsedMemoPreview({ trade, onOpen }: { trade: Trade; onOpen: () => void }) {
   const notes: { phase: "checkout" | "checkin"; text: string }[] = [

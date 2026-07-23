@@ -39,7 +39,7 @@ assert(
 assert(
   checklist.includes('반출 기준') &&
     checklist.includes('e.name} · {expected}개') &&
-    checklist.includes('반출 후 장비명·예약 수량 수정 불가') &&
+    checklist.includes('반출 당시 실제 수량 기준') &&
     !checklist.includes('EquipmentNameCombobox') &&
     !checklist.includes('setItemQty(t.tradeId'),
   'return details must display the immutable checkout identity and must not edit its equipment name or booked quantity'

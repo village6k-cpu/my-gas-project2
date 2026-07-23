@@ -1,4 +1,4 @@
-import { createClient, type User } from "@supabase/supabase-js";
+import { createClient, isAuthRetryableFetchError, type User } from "@supabase/supabase-js";
 import type { NextRequest } from "next/server";
 
 // 로그인 검증(Bearer JWT)용 공유 헬퍼. 예전엔 /api/operations·/api/confirm·/api/gas가
@@ -7,6 +7,10 @@ import type { NextRequest } from "next/server";
 // → token→검증결과를 60초 인메모리 캐시해 반복 검증을 제거한다.
 const TTL = 60_000;
 const MAX_CACHE_SIZE = 300;
+// GoTrue 검증 응답 상한 — 초과는 일시 장애로 취급(캐시하지 않음)
+const AUTH_TIMEOUT_MS = 3_000;
+// 일시 장애 동안 최근 긍정 캐시를 대신 쓰는 허용 한도(stale-while-error)
+const STALE_MAX_MS = 10 * 60_000;
 const cache = new Map<string, { user: User | null; at: number }>();
 type AuthClient = ReturnType<typeof createClient>;
 let authClient: AuthClient | null = null;
@@ -57,8 +61,37 @@ export async function getAuthedUser(req: NextRequest): Promise<User | null> {
   const hit = cache.get(token);
   if (hit && now - hit.at < TTL) return hit.user;
 
-  const { data, error } = await client.auth.getUser(token);
-  const user = error ? null : data.user;
+  let user: User | null = null;
+  let transient = false; // 네트워크성 실패(캐시 금지) 여부
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const { data, error } = await Promise.race([
+      client.auth.getUser(token),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("GoTrue 검증 시간 초과")), AUTH_TIMEOUT_MS);
+      }),
+    ]);
+    if (error) {
+      // supabase-js는 네트워크 실패를 throw하지 않고 AuthRetryableFetchError로 반환한다.
+      // 일시 장애(fetch 예외·5xx·상태 미상)를 '토큰 무효'로 60초 캐시하면 앱 전체가 401로 고정되므로
+      // 확정 무효 토큰(401류, status 있는 4xx)만 null 캐시 대상으로 남긴다.
+      transient = isAuthRetryableFetchError(error) || !error.status || error.status >= 500;
+    } else {
+      user = data.user;
+    }
+  } catch {
+    transient = true; // 타임아웃·예상 밖 throw도 일시 장애로 취급
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+
+  if (transient) {
+    // 일시 장애: 결과를 캐시하지 않고, 최근(10분 내) 긍정 캐시가 있으면 그대로 사용해
+    // 로그인된 직원이 업스트림 순단 한 번에 401로 튕기지 않게 한다.
+    if (hit?.user && now - hit.at < STALE_MAX_MS) return hit.user;
+    return null;
+  }
+
   cache.set(token, { user, at: now });
 
   if (cache.size > MAX_CACHE_SIZE) pruneCache(now);

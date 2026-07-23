@@ -37,6 +37,7 @@ function checkoutBaselineHarness(existingItems) {
   const context = {
     SUPA_CFG_: () => ({ url: 'test' }),
     supaGetCheckoutBaselineState_: () => ({ ok: true, started: existingItems.length > 0, items: existingItems }),
+    markDashboardCheckoutBaselineStarted_: () => {},
     supaUpsert_: (_cfg, table, rows, conflict) => {
       writes.push({ table, rows, conflict });
       return true;

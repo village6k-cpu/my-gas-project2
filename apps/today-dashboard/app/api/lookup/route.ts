@@ -71,6 +71,22 @@ function makeServiceClient() {
   });
 }
 
+// 요청마다 createClient를 새로 만들지 않도록 모듈 레벨 재사용
+let serviceClient: ReturnType<typeof makeServiceClient> = null;
+function getServiceClient() {
+  if (!serviceClient) serviceClient = makeServiceClient();
+  return serviceClient;
+}
+
+// 전화번호 조회 결과 상한 (영수증 라우트의 readLimit 패턴)
+const LOOKUP_LIMIT = readLimit("TOSS_FRONT_LOOKUP_LIMIT", 200);
+
+function readLimit(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(Math.floor(parsed), 5000);
+}
+
 // ── 응답 타입 ─────────────────────────────────────────────────────
 interface LookupMatch {
   tradeId: string;
@@ -109,7 +125,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
 
   // 3) Supabase 클라이언트 확인
-  const sb = makeServiceClient();
+  const sb = getServiceClient();
   if (!sb) {
     return lookupJson(
       { error: "Supabase 환경변수(SUPABASE_SERVICE_ROLE_KEY 또는 NEXT_PUBLIC_SUPABASE_ANON_KEY) 미설정" },
@@ -119,9 +135,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   try {
     // 4) 거래 조회
-    // ⚠️ 미결제 판정은 JS에서 — PostgREST .neq("deposit_status","입금완료")는
+    // ⚠️ 미결제 판정의 NULL 의미론 주의 — PostgREST .neq("deposit_status","입금완료") 단독은
     //    deposit_status=NULL 행을 제외해버림(SQL상 NULL<>'입금완료'=UNKNOWN).
     //    실데이터 다수가 deposit_status NULL(미기록)이고 이건 "미결제"로 봐야 함.
+    //    → 전화번호 경로는 or(neq,is.null) 조합으로 서버 필터, 거래ID 경로는 아래 JS 필터가 처리.
     const baseSelect = sb
       .from("trades")
       .select("trade_id, customer_name, customer_phone, amount, checkout_at, deposit_status, contract_status")
@@ -144,12 +161,23 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       if (error) throw error;
       rows = (data ?? []) as Row[];
     } else {
-      // 전화번호: 전체 로드 후 끝 8자리로 매칭
-      // (PostgREST에서 함수 기반 필터가 없어 클라이언트 필터링)
-      // TODO: 데이터가 수천 건 이상이면 DB FUNCTION 또는 generated column 고려
-      const { data, error } = await baseSelect;
-      if (error) throw error;
+      // 전화번호: 서버측 끝자리 매칭 + limit
+      // (구 방식의 전량 다운로드+JS 필터는 데이터 증가에 비례해 느려지고,
+      //  PostgREST max-rows(기본 1000)에 걸리면 오래된 미결제 건이 조용히 누락됐다)
+      // 저장 형식이 제각각(01012345678 / 010-1234-5678 / +82 10-1234-5678 등)이라
+      // 어떤 표기에서도 연속으로 남는 '끝 4자리' ilike로 서버에서 좁힌 뒤,
+      // 최종 확정은 기존과 동일하게 하이픈 제거 끝 8자리 비교로 한다 — 응답 형태 불변.
       const needle = normalizePhoneLast8(rawPhone);
+      if (!needle) return lookupJson({ matches: [] });
+      const tail = needle.slice(-4);
+      const { data, error } = await baseSelect
+        .ilike("customer_phone", `%${tail}%`)
+        // 미결제(입금완료 아님 — NULL 포함) 필터를 서버로 옮겨 limit이 미결제 건에만 적용되게 한다.
+        // ⚠️ .neq 단독은 deposit_status=NULL 행을 제외하므로(or is.null 필수) 금지.
+        .or("deposit_status.neq.입금완료,deposit_status.is.null")
+        .neq("contract_status", "취소") // contract_status는 not null (schema.sql)
+        .limit(LOOKUP_LIMIT);
+      if (error) throw error;
       rows = ((data ?? []) as Row[]).filter(
         (t) => t.customer_phone && normalizePhoneLast8(t.customer_phone) === needle
       );

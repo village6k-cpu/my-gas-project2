@@ -12,6 +12,23 @@ export class InventoryAuditServiceUnavailableError extends Error {
   }
 }
 
+function createServiceClient(url: string, serviceRoleKey: string) {
+  return createClient(url, serviceRoleKey, {
+    db: { schema: "village" },
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
+}
+
+// 요청마다 새 클라이언트를 만들지 않도록 모듈 스코프에 재사용 (authCache.ts와 같은 패턴).
+// env 값이 바뀌면 재생성한다. env 검증(fail-closed)은 캐시와 무관하게 매 호출 실행.
+let cachedClient: ReturnType<typeof createServiceClient> | null = null;
+let cachedUrl: string | null = null;
+let cachedKey: string | null = null;
+
 /** 서버 라우트 전용. service-role이 없을 때 anon 키로 낮춰 실행하지 않는다. */
 export function getInventoryAuditServiceClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
@@ -23,12 +40,10 @@ export function getInventoryAuditServiceClient() {
     throw new InventoryAuditServiceUnavailableError(missing);
   }
 
-  return createClient(url, serviceRoleKey, {
-    db: { schema: "village" },
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-      detectSessionInUrl: false,
-    },
-  });
+  if (!cachedClient || cachedUrl !== url || cachedKey !== serviceRoleKey) {
+    cachedClient = createServiceClient(url, serviceRoleKey);
+    cachedUrl = url;
+    cachedKey = serviceRoleKey;
+  }
+  return cachedClient;
 }

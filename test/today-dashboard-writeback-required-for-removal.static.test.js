@@ -17,7 +17,7 @@ assert.match(
 
 assert.match(
   store,
-  /import \{ gasMutation, gasRead, gasWrite, writeBackDisabledReason, writeBackEnabled \} from "\.\/writeback"/,
+  /import \{[^}]*gasMutation[^}]*gasRead[^}]*gasWrite[^}]*writeBackDisabledReason[^}]*writeBackEnabled[^}]*\} from "\.\/writeback"/,
   'store must import the disabled reason so failed 원장 writes are visible'
 );
 

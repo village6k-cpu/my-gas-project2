@@ -2,6 +2,16 @@
 
 import type { EquipmentItem, ReturnCount, Trade, TabKey, Phase } from "./types";
 
+function equipmentActualName(item: EquipmentItem): string {
+  return String(item.actualName || item.name || "").trim();
+}
+
+function equipmentActualTakenQty(item: EquipmentItem): number {
+  const value = item.actualTakenQty ?? item.takenQty ?? item.qty;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+}
+
 const WEEKDAY = ["일", "월", "화", "수", "목", "금", "토"];
 
 export function ymd(d: Date): string {
@@ -55,6 +65,17 @@ export function phaseForDate(t: Trade, date: string): "checkout" | "checkin" | "
   return "none";
 }
 
+/** 반출 당시 실제 포함 품목 기록은 반납 검증을 위해 고정한다. 예약 장비명·수량 편집에는 쓰지 않는다. */
+export function isCheckoutBaselineLocked(t: Trade): boolean {
+  return (
+    t.setupDone ||
+    t.returnDone ||
+    t.contractStatus === "반출" ||
+    t.contractStatus === "반납완료" ||
+    t.equipments.some((item) => Number(item.takenQty || 0) > 0)
+  );
+}
+
 // ── 반납: 품목 종류별 합산 ──────────────────────────────────────
 export interface AggReturn {
   name: string;
@@ -78,8 +99,8 @@ export function rcOf(t: Trade, scheduleId: string): ReturnCount {
  *  (세트 대표행 = 실제 메인 장비면 포함, 단순 번들 라벨이면 제외) */
 export function aggregateReturns(t: Trade): AggReturn[] {
   return checkableItems(t, "checkin").map((e) => {
-    const qty = e.takenQty ?? e.qty;
-    return { name: e.name, scheduleId: e.scheduleId, category: e.category, expected: qty, onsiteQty: e.onsite ? qty : 0, count: rcOf(t, e.scheduleId) };
+    const qty = equipmentActualTakenQty(e);
+    return { name: equipmentActualName(e), scheduleId: e.scheduleId, category: e.category, expected: qty, onsiteQty: e.onsite ? qty : 0, count: rcOf(t, e.scheduleId) };
   });
 }
 
@@ -193,7 +214,9 @@ function flatGroupCheckable(list: EquipmentItem[]): EquipmentItem[] {
 /** 체크리스트에 인터랙티브(체크/제외/메모) 행으로 노출되는 품목들 — 진행도 카운트의 단일 소스.
  *  반납은 반출에서 제외된 품목(안 나간 것)은 받을 게 없으므로 뺀다. */
 export function checkableItems(t: Trade, phase: "checkout" | "checkin"): EquipmentItem[] {
-  const pool = phase === "checkin" ? t.equipments.filter((e) => e.checkoutState !== "excluded") : t.equipments;
+  const pool = phase === "checkin"
+    ? t.equipments.filter((e) => e.checkoutState !== "excluded" && equipmentActualTakenQty(e) > 0)
+    : t.equipments;
   const booked = pool.filter((e) => !e.onsite);
   const onsite = pool.filter((e) => e.onsite);
   return [...flatGroupCheckable(booked), ...flatGroupCheckable(onsite)];
@@ -223,7 +246,7 @@ export function returnCompletionBlockers(t: Trade): ReturnCompletionBlocker[] {
   // taken_qty 도입 전 완료된 레거시 거래에는 불변 반출 기준선이 없다. 예약 qty를
   // 사후 기준선처럼 소급 적용하면 과거 완료 카드 수백 건이 확인필요로 부활한다.
   // 기준선이 한 행이라도 시작된 거래(김동민 사고 건 및 향후 반출)만 새 차단을 적용한다.
-  if (!checkableItems(t, "checkin").some((e) => Number(e.takenQty ?? 0) > 0)) return [];
+  if (!checkableItems(t, "checkin").some((e) => Number(e.takenQty ?? 0) > 0 || e.actualTakenQty != null)) return [];
   return aggregateReturns(t)
     .map((a) => {
       const accounted = a.count.good + a.count.damaged + a.count.lost;
@@ -243,7 +266,7 @@ export function returnBadge(t: Trade): string | null {
   const aggs = aggregateReturns(t);
   if (aggs.some((a) => a.count.lost > 0)) return "분실";
   if (aggs.some((a) => a.count.damaged > 0)) return "파손";
-  if (aggs.some((a) => missingOf(a) > 0 && (a.count.good + a.count.damaged + a.count.lost) > 0)) return "미반납";
+  if (aggs.some((a) => missingOf(a) > 0 && ((a.count.good + a.count.damaged + a.count.lost) > 0 || Number(a.count.reportedMissing || 0) > 0))) return "미반납";
   return null;
 }
 

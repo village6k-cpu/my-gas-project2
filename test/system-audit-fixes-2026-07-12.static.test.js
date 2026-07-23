@@ -43,7 +43,7 @@ assert(
 
 // #32 — 합침(merge) 등록도 계약서를 재생성해야 한다.
 assert(
-  /if \(mergeMode && mergeTargetTID\) \{\s*\n\s*try \{ scheduleContractRegen\(mergeTargetTID\); \} catch/.test(backend),
+  /if \(mergeMode && mergeTargetTID && mergeSchedulePlan\.writeSourceIndexes\.length > 0\) \{\s*\n\s*try \{ scheduleContractRegen\(mergeTargetTID\); \} catch/.test(backend),
   '#32 mergeMode registration must call scheduleContractRegen so merged equipment appears on the contract'
 );
 

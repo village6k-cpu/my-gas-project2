@@ -123,7 +123,9 @@ function useWide(): boolean {
   return wide;
 }
 
-export function FollowUpView() {
+// active: AppShell keep-mounted pane에서 현재 보이는 pane인지 — 숨김 상태에선 폴링을 멈춘다.
+// (내부의 '열린 업무' 목록 변수명 active와 구분하기 위해 paneActive로 받는다)
+export function FollowUpView({ active: paneActive = true }: { active?: boolean }) {
   const [data, setData] = useState<Payload | null>(null);
   const [status, setStatus] = useState("active");
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -152,10 +154,24 @@ export function FollowUpView() {
   }, []);
 
   useEffect(() => {
+    // 숨김 pane(keep-mounted)에서는 폴링을 걸지 않는다 — active로 돌아오는 순간 즉시 1회 로드.
+    if (!paneActive) return;
     load(status);
-    const t = setInterval(() => load(status), 30000);
-    return () => clearInterval(t);
-  }, [status, load]);
+    // 백그라운드 탭에서도 폴링하지 않는다(배터리·불필요 요청 방지). 포커스 복귀 시 즉시 1회.
+    const tick = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      load(status);
+    };
+    const t = setInterval(tick, 30000);
+    const onVisible = () => {
+      if (typeof document !== "undefined" && !document.hidden) load(status);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [status, load, paneActive]);
 
   const items = useMemo(() => (Array.isArray(data?.items) ? data!.items! : []), [data]);
   const active = useMemo(() => items.filter((x) => !CLOSED.has(x.status || "")).slice().sort(sortByPriorityThenNew), [items]);

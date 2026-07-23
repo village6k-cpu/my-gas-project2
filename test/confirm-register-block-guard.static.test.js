@@ -25,6 +25,7 @@ function row(reqID, result, opts) {
   const r = new Array(18).fill('');
   r[0] = reqID;
   r[8] = result;
+  r[13] = opts.action || '';
   r[14] = opts.status || '';
   r[16] = opts.setTag || '';
   return r;
@@ -59,13 +60,23 @@ assert.strictEqual(
   '최상위 품목의 모델 선택 필요는 반드시 등록을 막아야 한다'
 );
 
+// 3-1) 헤이빌리의 '바로 등록'은 사장님이 모델/재고 경고까지 확인한 최종 승인이다.
+//      구체 모델을 고르지 않은 품목은 그 이름 그대로 스케줄에 등록되어야 한다.
+assert.strictEqual(
+  getBlockingRegisterIssue_([
+    row('R1', '⚠️ 모델 선택 필요'),
+  ], 'R1', true),
+  '',
+  '바로 등록 승인은 최상위 품목의 모델 선택 경고도 통과시켜야 한다'
+);
+
 // 4) 날짜 오류는 여전히 막는다.
 assert.strictEqual(
   getBlockingRegisterIssue_([
     row('R1', '❌ 날짜/시간 필요'),
-  ], 'R1'),
+  ], 'R1', true),
   '날짜/시간 필요',
-  '날짜 오류는 반드시 등록을 막아야 한다'
+  '바로 등록이어도 날짜 오류는 반드시 등록을 막아야 한다'
 );
 
 // 5) 제외/거절/보류 행은 (모델 선택 필요여도) 막지 않는다.
@@ -127,6 +138,25 @@ assert(
 assert(
   guard2[0].indexOf('행상태 === "제외"') < guard2[0].indexOf('findEquipment(장비명'),
   '제외/거절/보류 스킵은 findEquipment 판정보다 앞에 있어야 한다'
+);
+
+// ── Fix D: registerAsync('바로 등록')의 승인은 시트에 남아 비동기 트리거까지
+//    전달되어야 하며, 그 승인이 있으면 카테고리 모델 강제 검사를 건너뛰어야 한다.
+const directApproval = backend.match(/function requestHasDirectRegisterApproval_\(data, reqID\) \{[\s\S]*?\n\}/);
+assert(directApproval, '바로 등록 승인을 비동기 트리거까지 전달할 시트 마커 판독 함수가 필요하다');
+const requestHasDirectRegisterApproval_ = eval('(' + directApproval[0] + ')');
+assert.strictEqual(
+  requestHasDirectRegisterApproval_([row('R1', '', { action: '바로등록' })], 'R1'),
+  true,
+  'N열 바로등록 마커를 최종 승인으로 인식해야 한다'
+);
+assert(
+  /function scheduleRegister\(reqID\)[\s\S]*?getRange\(targetRow, 14\)\.setValue\("바로등록"\)[\s\S]*?markRegisterQueued_/.test(backend),
+  'scheduleRegister는 대기상태를 표시하기 전에 바로 등록 승인을 N열에 남겨야 한다'
+);
+assert(
+  /if \(directRegisterApproved\) continue;/.test(guard2[0]),
+  '바로 등록 승인이 있으면 카테고리 모델 미선택 검사를 건너뛰어야 한다'
 );
 
 console.log('confirm register block guard static checks passed');

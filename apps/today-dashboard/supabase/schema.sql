@@ -48,6 +48,9 @@ create table if not exists village.schedule_items (
   name             text not null,
   qty              int not null default 1,
   taken_qty        int,
+  actual_name      text,
+  actual_taken_qty int check (actual_taken_qty is null or actual_taken_qty >= 0),
+  actual_source    jsonb,
   set_name         text,
   is_set_header    boolean not null default false,
   is_component     boolean not null default false,
@@ -61,10 +64,12 @@ create table if not exists village.schedule_items (
   end_shift_days   int not null default 0,
   memo_checkout    text,
   memo_checkin     text,
+  removed_at       timestamptz,
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now()
 );
 create index if not exists sched_trade_idx on village.schedule_items (trade_id);
+create index if not exists sched_active_trade_idx on village.schedule_items (trade_id, sort, schedule_id) where removed_at is null;
 
 -- ── 인수인계 메모(전역 포스트잇) ───────────────────────────────
 create table if not exists village.handover_notes (
@@ -144,6 +149,36 @@ alter table village.checkout_baseline_audit enable row level security;
 revoke all on village.checkout_baseline_audit from anon, authenticated;
 grant select on village.checkout_baseline_audit to service_role;
 
+-- ── Slack 단톡방 → 기존 거래 카드 동기화 내부 원장 ─────────────
+-- 직원이 보는 별도 보드가 아니다. 같은 메시지의 중복 적용과 스레드 정정 이력을 막기 위한 서버 전용 로그다.
+create table if not exists village.slack_ops_events (
+  channel_id        text not null,
+  message_ts        text not null,
+  thread_ts         text not null,
+  source_hash       text not null,
+  phase_hint        text,
+  customer_hint     text,
+  trade_id_hint     text,
+  permalink         text,
+  raw_context       jsonb not null default '{}'::jsonb,
+  status            text not null default 'pending'
+                    check (status in ('pending','applying','applied','needs_context','ignored','error')),
+  matched_trade_id  text references village.trades(trade_id) on delete set null,
+  applied_plan      jsonb,
+  applied_at        timestamptz,
+  last_error        text,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now(),
+  primary key (channel_id, message_ts)
+);
+create index if not exists slack_ops_status_idx on village.slack_ops_events (status, updated_at);
+drop trigger if exists trg_slack_ops_touch on village.slack_ops_events;
+create trigger trg_slack_ops_touch before update on village.slack_ops_events
+for each row execute function village.touch_updated_at();
+alter table village.slack_ops_events enable row level security;
+revoke all on village.slack_ops_events from anon, authenticated;
+grant select, insert, update on village.slack_ops_events to service_role;
+
 -- ── RLS (프로토타입: anon 전체 허용) ───────────────────────────
 alter table village.trades         enable row level security;
 alter table village.schedule_items enable row level security;
@@ -169,3 +204,6 @@ exception when others then null; end $$;
 grant usage on schema village to anon, authenticated;
 grant all on all tables in schema village to anon, authenticated;
 alter default privileges in schema village grant all on tables to anon, authenticated;
+-- slack_ops_events는 직원 UI용 보드가 아니라 서버 내부 중복방지 로그다.
+revoke all on village.slack_ops_events from anon, authenticated;
+grant select, insert, update on village.slack_ops_events to service_role;

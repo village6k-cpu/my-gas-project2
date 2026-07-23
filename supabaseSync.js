@@ -122,10 +122,104 @@ function supaCancelTrade_(tid) {
 }
 
 /**
+ * 반출 기준선 행은 감사용으로 보존하되 현재 예약/반납 목록에서는 제외한다.
+ * 모든 대상 행에 removed_at이 기록된 경우에만 성공한다.
+ */
+function supaMarkScheduleItemsRemoved_(tid, scheduleIds) {
+  tid = String(tid || '').trim();
+  scheduleIds = (scheduleIds || []).map(function(id) { return String(id || '').trim(); }).filter(Boolean);
+  if (!tid || !scheduleIds.length) return { ok: false, error: '거래ID/스케줄ID 없음' };
+  var cfg = SUPA_CFG_();
+  var token = supaToken_(cfg);
+  if (!token) return { ok: false, error: '봇 토큰 없음' };
+  var headers = {
+    apikey: cfg.apikey,
+    Authorization: 'Bearer ' + token,
+    'Content-Profile': 'village',
+    'Accept-Profile': 'village',
+    Prefer: 'return=representation'
+  };
+  var removedAt = new Date().toISOString();
+  for (var i = 0; i < scheduleIds.length; i++) {
+    var scheduleId = scheduleIds[i];
+    var url = cfg.url + '/rest/v1/schedule_items'
+      + '?trade_id=eq.' + encodeURIComponent(tid)
+      + '&schedule_id=eq.' + encodeURIComponent(scheduleId);
+    var response = UrlFetchApp.fetch(url, {
+      method: 'patch',
+      contentType: 'application/json',
+      headers: headers,
+      payload: JSON.stringify({ removed_at: removedAt }),
+      muteHttpExceptions: true
+    });
+    var code = response.getResponseCode();
+    var rows = [];
+    try { rows = JSON.parse(response.getContentText() || '[]'); } catch (parseErr) {}
+    if (code >= 300 || !Array.isArray(rows) || rows.length !== 1) {
+      return { ok: false, error: 'Supabase 품목 제외 실패 ' + scheduleId + ' (' + code + ')' };
+    }
+  }
+  return { ok: true, removedAt: removedAt, scheduleIds: scheduleIds };
+}
+
+/**
+ * 반출완료 서버 권한 저장. 브라우저 전체 upsert와 분리해 다른 탭/기기의 오래된
+ * 스냅샷이 setup_done을 되돌리지 못하게 한다. 행 없음도 성공으로 간주하지 않는다.
+ */
+function supaSetTradeSetupDone_(tid, done, doneAt) {
+  tid = String(tid || '').trim();
+  if (!tid) return { ok: false, error: '거래ID 없음' };
+  try {
+    var cfg = SUPA_CFG_();
+    var token = supaToken_(cfg);
+    if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음' };
+    var res = UrlFetchApp.fetch(
+      cfg.url + '/rest/v1/trades?trade_id=eq.' + encodeURIComponent(tid) + '&select=trade_id',
+      {
+        method: 'patch',
+        contentType: 'application/json',
+        headers: {
+          apikey: cfg.apikey,
+          Authorization: 'Bearer ' + token,
+          'Content-Profile': 'village',
+          'Accept-Profile': 'village',
+          Prefer: 'return=representation'
+        },
+        payload: JSON.stringify({
+          setup_done: done === true,
+          setup_done_at: done === true ? String(doneAt || '') : null
+        }),
+        muteHttpExceptions: true
+      }
+    );
+    var code = res.getResponseCode();
+    if (code >= 300) {
+      return { ok: false, error: 'Supabase 반출완료 저장 실패 (' + code + ')' };
+    }
+    var rows = JSON.parse(res.getContentText() || '[]');
+    if (!rows || !rows.length) return { ok: false, error: 'Supabase 거래 행 없음: ' + tid };
+    return { ok: true, tradeId: tid };
+  } catch (err) {
+    return { ok: false, error: 'Supabase 반출완료 저장 오류: ' + (err && err.message ? err.message : String(err)) };
+  }
+}
+
+/**
  * 반납완료 서버 검증용 상세 수량 조회.
  * 브라우저가 보낸 boolean을 신뢰하지 않고, 먼저 내구 저장된 village.trades.return_counts를
  * GAS가 봇 세션으로 직접 읽는다. 조회 실패/행 없음은 완료 허용이 아니라 명시적 실패다.
  */
+function supaActualTakenQty_(item) {
+  if (item && item.actual_taken_qty !== null && item.actual_taken_qty !== undefined && item.actual_taken_qty !== '') {
+    return Math.max(0, Number(item.actual_taken_qty) || 0);
+  }
+  return Math.max(0, Number(item && item.taken_qty || 0));
+}
+
+function supaActualItemName_(item) {
+  return String(item && item.actual_name || item && item.name || '').trim();
+}
+
 function supaGetTradeReturnCounts_(tid) {
   tid = String(tid || '').trim();
   if (!tid) return { ok: false, error: '거래ID 없음', returnCounts: {} };
@@ -155,7 +249,7 @@ function supaGetTradeReturnCounts_(tid) {
     var counts = rows[0].return_counts;
     if (!counts || typeof counts !== 'object' || Array.isArray(counts)) counts = {};
     var itemRes = UrlFetchApp.fetch(
-      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,set_name,is_set_header,is_component,checkout_state,onsite'
+      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,is_component,checkout_state,onsite,removed_at'
         + '&trade_id=eq.' + encodeURIComponent(tid) + '&order=sort.asc',
       {
         method: 'get',
@@ -171,7 +265,7 @@ function supaGetTradeReturnCounts_(tid) {
     if (itemCode >= 300) {
       return { ok: false, error: 'Supabase 반출 기준선 조회 실패 (' + itemCode + ')', returnCounts: {}, scheduleItems: [] };
     }
-    var scheduleItems = JSON.parse(itemRes.getContentText() || '[]');
+    var scheduleItems = (JSON.parse(itemRes.getContentText() || '[]') || []).filter(function(item) { return !item.removed_at; });
     return { ok: true, returnCounts: counts, scheduleItems: scheduleItems || [] };
   } catch (err) {
     return {
@@ -192,7 +286,7 @@ function supaGetCheckoutBaselineState_(tid) {
     var token = supaToken_(cfg);
     if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음', started: false, items: [] };
     var res = UrlFetchApp.fetch(
-      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,set_name,is_set_header,is_component,checkout_state,onsite'
+      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,is_component,checkout_state,onsite,removed_at'
         + '&trade_id=eq.' + encodeURIComponent(tid) + '&taken_qty=gt.0&order=sort.asc',
       {
         method: 'get',
@@ -208,7 +302,7 @@ function supaGetCheckoutBaselineState_(tid) {
     if (code >= 300) {
       return { ok: false, error: 'Supabase 반출 기준선 조회 실패 (' + code + ')', started: false, items: [] };
     }
-    var items = JSON.parse(res.getContentText() || '[]') || [];
+    var items = (JSON.parse(res.getContentText() || '[]') || []).filter(function(item) { return !item.removed_at; });
     return { ok: true, started: items.length > 0, items: items };
   } catch (err) {
     return {
@@ -287,8 +381,15 @@ function supaCaptureCheckoutBaseline_(tid, equipments, exactExisting) {
         return { ok: false, error: '이미 고정된 반출 기준선과 현재 품목이 다릅니다: ' + row.schedule_id };
       }
     }
-    if (!newRows.length) return { ok: true, count: rows.length, reused: true };
+    if (!newRows.length) {
+      markDashboardCheckoutBaselineStarted_(tid);
+      return { ok: true, count: rows.length, reused: true };
+    }
+    // DB에 기준선이 생겼는데 로컬 보호 표식만 없는 중간 상태를 만들지 않는다.
+    // 표식을 먼저 확보하고, DB 저장 실패 때만 표식을 되돌린다(실패-폐쇄).
+    markDashboardCheckoutBaselineStarted_(tid);
     if (!supaUpsert_(cfg, 'schedule_items', newRows, 'schedule_id')) {
+      clearDashboardCheckoutBaselineStarted_(tid);
       return { ok: false, error: 'Supabase 반출 기준선 저장 실패' };
     }
     return { ok: true, count: rows.length, added: newRows.length };
@@ -310,7 +411,8 @@ function supaMarkTradeDirty_(tid) {
     var p = PropertiesService.getScriptProperties();
     var dirty = {};
     try { dirty = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
-    dirty[tid] = 1;
+    // 타임스탬프 값 — flushDirtyToSupabase가 업서트 중 새로 dirty가 된 거래를 구분해 보존한다
+    dirty[tid] = Date.now();
     p.setProperty('SUPA_DIRTY', JSON.stringify(dirty));
   } catch (err) {
     // 동기화 마킹 실패가 본 작업을 막으면 안 됨
@@ -326,12 +428,26 @@ function flushDirtyToSupabase() {
   try { dirty = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
   var tids = Object.keys(dirty);
   if (!tids.length) return;
-  // 동시성: 잠금
+  // dirty 마크 스냅샷 — 업서트 동안 새로 dirty가 된 거래는 지우지 않고 다음 분에 재동기화
+  var snapshot = {};
+  for (var s = 0; s < tids.length; s++) snapshot[tids[s]] = dirty[tids[s]];
+
+  // ★ 잠금은 시트 읽기(빌드) 동안만 쥔다. HTTP 업서트(수 초)까지 잠금 안에서 돌리면
+  //   1분마다 반납완료·품목체크 같은 인터랙티브 쓰기와 경합해 버튼이 실패한다.
+  var built = null;
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return;
   try {
-    var built = buildSupabaseTrades_(tids);
-    var ok = true;
+    built = buildSupabaseTrades_(tids);
+  } catch (buildErr) {
+    Logger.log('flushDirty 빌드 오류: ' + buildErr);
+    return;
+  } finally {
+    lock.releaseLock();
+  }
+
+  var ok = true;
+  try {
     if (built.trades.length) {
       if (!supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id')) ok = false;
       if (built.items.length) {
@@ -349,22 +465,24 @@ function flushDirtyToSupabase() {
         }
       }
     }
-    // ★ 성공한 경우에만 dirty에서 제거. 실패(Supabase 장애·봇 토큰 만료·스키마 오류)면
-    //    dirty를 유지해 다음 1분 트리거가 재시도한다. 예전엔 실패해도 무조건 지워서
-    //    그 분(minute)의 변경분이 영구 유실 → 앱이 낡은 반출/반납 데이터를 표시했다.
-    if (ok) {
-      var after = {};
-      try { after = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
-      for (var i = 0; i < tids.length; i++) delete after[tids[i]];
-      p.setProperty('SUPA_DIRTY', JSON.stringify(after));
-      Logger.log('Supabase push: ' + built.trades.length + '건');
-    } else {
-      Logger.log('Supabase push 일부 실패 → dirty 유지(재시도 예정): ' + tids.length + '건');
-    }
   } catch (err) {
     Logger.log('flushDirty 오류: ' + err);
-  } finally {
-    lock.releaseLock();
+    return;
+  }
+  // ★ 성공한 경우에만 dirty에서 제거. 실패(Supabase 장애·봇 토큰 만료·스키마 오류)면
+  //    dirty를 유지해 다음 1분 트리거가 재시도한다. 예전엔 실패해도 무조건 지워서
+  //    그 분(minute)의 변경분이 영구 유실 → 앱이 낡은 반출/반납 데이터를 표시했다.
+  //    업서트 중 다시 dirty가 된 거래(마크 값이 달라짐)도 보존한다.
+  if (ok) {
+    var after = {};
+    try { after = JSON.parse(p.getProperty('SUPA_DIRTY') || '{}'); } catch (x) {}
+    for (var i = 0; i < tids.length; i++) {
+      if (after[tids[i]] === snapshot[tids[i]]) delete after[tids[i]];
+    }
+    p.setProperty('SUPA_DIRTY', JSON.stringify(after));
+    Logger.log('Supabase push: ' + built.trades.length + '건');
+  } else {
+    Logger.log('Supabase push 일부 실패 → dirty 유지(재시도 예정): ' + tids.length + '건');
   }
 }
 
@@ -397,7 +515,9 @@ function buildSupabaseTrades_(tids) {
   var detail = {}; // tid -> dashboard item
   for (var dk in dateSet) {
     var dd;
-    try { dd = getDashboardData(dk, true, {}); } catch (x) { continue; }
+    // skipCache=false: 편집 경로가 변경 시 대시보드 캐시를 선별 무효화하므로 웜 캐시 재사용이 안전.
+    // 강제 재구축(true)은 매분 플러시마다 날짜당 2~6초 전체 리빌드로 트리거 쿼터를 소모했다.
+    try { dd = getDashboardData(dk, false, {}); } catch (x) { continue; }
     (dd.checkout || []).concat(dd.checkin || []).forEach(function (t) {
       if (want[t.tradeId] && !detail[t.tradeId]) detail[t.tradeId] = t;
     });
@@ -448,8 +568,6 @@ function buildSupabaseTrades_(tids) {
       checkout_at: startISO,
       return_at: endISO,
       contract_status: d.contractStatus || m.status || '예약',
-      setup_done: !!d.setupDone,
-      setup_done_at: d.setupDoneAt || null,
       return_done: !!d.returnDone,
       return_done_at: d.returnDoneAt || null,
       contract_url: d.contractUrl || null,
@@ -654,7 +772,7 @@ function auditScriptProperties() {
   Object.keys(cat).sort(function (a, b) { return cat[b] - cat[a]; }).forEach(function (pre) {
     if (cat[pre] > 1) Logger.log('  ' + pre + ' : ' + cat[pre] + '개');
   });
-  var config = keys.filter(function (k) { return !/^(itemCheck|setupDone|setupDoneAt)_/.test(k); });
+  var config = keys.filter(function (k) { return !/^(itemCheck|setupDone|setupDoneAt|checkoutBaselineStarted)_/.test(k); });
   Logger.log('── 설정/기타(보존해야 함) ' + config.length + '개 ──');
   Logger.log('  ' + config.join('\n  '));
 }
@@ -671,7 +789,7 @@ function cleanupOldTradeProps(cutoffYYMMDD, dryRun) {
   var all = p.getProperties();
   var toDelete = [];
   Object.keys(all).forEach(function (k) {
-    var m = k.match(/^(?:itemCheck|setupDone|setupDoneAt)_(\d{6})-/);
+    var m = k.match(/^(?:itemCheck|setupDone|setupDoneAt|checkoutBaselineStarted)_(\d{6})-/);
     if (m && m[1] < cutoffYYMMDD) toDelete.push(k);
   });
   Logger.log((dryRun ? '[미리보기] ' : '[실제삭제] ') + cutoffYYMMDD + ' 이전 거래 속성 ' + toDelete.length + '개');
