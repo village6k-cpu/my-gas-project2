@@ -191,9 +191,7 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
           {partial ? `${actualQty}/${e.qty}` : `×${e.qty}`}
         </span>
 
-        {baselineLocked ? (
-          <span className="shrink-0 rounded-md bg-line/30 px-1.5 py-1 text-[11px] font-bold text-ink-faint">반출기록</span>
-        ) : e.onsite ? (
+        {e.onsite ? (
           <button onClick={() => removeItem(t.tradeId, e.scheduleId)} className="tap shrink-0 px-1 text-ink-faint">✕</button>
         ) : (
           <button onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "excluded")} className={`tap shrink-0 rounded-md px-1.5 py-1 text-[11.5px] font-bold ${excluded ? "bg-attention-fg text-white" : "text-ink-faint ring-1 ring-line"}`}>제외</button>

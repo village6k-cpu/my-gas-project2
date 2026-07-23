@@ -2757,8 +2757,14 @@ function assertDashboardReturnComplete_(tid, props) {
   }
   // 반출 순간 taken_qty가 고정된 Supabase 행이 불변 기준선이다. 현재 시트 qty/name을
   // 기준으로 삼으면 6→5 수정이나 행 삭제 뒤 5/5로 닫는 사고가 재발한다.
+  var currentScheduleIds = {};
+  currentCheckable.forEach(function(eq) {
+    currentScheduleIds[String(eq.scheduleId || '').trim()] = true;
+  });
   var recordedBaselineItems = (durable.scheduleItems || []).filter(function(item) {
-    return item.checkout_state !== 'excluded' && Number(item.taken_qty || 0) > 0;
+    return item.checkout_state !== 'excluded' &&
+      Number(item.taken_qty || 0) > 0 &&
+      !!currentScheduleIds[String(item.schedule_id || '').trim()];
   });
   var checkable = recordedBaselineItems.filter(function(item) {
     return supaActualTakenQty_(item) > 0;
@@ -2778,25 +2784,19 @@ function assertDashboardReturnComplete_(tid, props) {
     return { error: '반납완료 차단: 반출 순간의 불변 수량 기준선(taken_qty)이 없습니다: ' + tid };
   }
 
-  var currentById = {};
-  currentCheckable.forEach(function(eq) { currentById[String(eq.scheduleId || '').trim()] = eq; });
   var baselineById = {};
   recordedBaselineItems.forEach(function(item) {
     baselineById[String(item.schedule_id || '').trim()] = item;
   });
   // 예약 장비명·수량은 반출 후에도 수정할 수 있다. 반납 검수는 현재 예약값이 아니라
   // 반출 순간 Supabase에 고정한 실제 품목명·taken_qty를 계속 기준으로 삼는다.
-  // 다만 기준선 행 자체가 삭제되거나 기준선 없는 행이 끼어드는 구조 변경은 차단한다.
-  var baselineStructureChanged = recordedBaselineItems.filter(function(baseline) {
-    var baselineId = String(baseline.schedule_id || '').trim();
-    var current = currentById[baselineId];
-    return !current;
-  }).concat(currentCheckable.filter(function(current) {
+    // 삭제된 예약 품목은 현재 반납 대상에서도 제외한다. 기준선 없는 새 행만 차단한다.
+  var baselineStructureChanged = currentCheckable.filter(function(current) {
     return !baselineById[String(current.scheduleId || '').trim()];
-  }));
+  });
   if (baselineStructureChanged.length) {
     return {
-      error: '반납완료 차단: 반출 기준선에서 삭제되었거나 기준선 없는 품목 ' + baselineStructureChanged.length + '건 — ' +
+      error: '반납완료 차단: 반출 기준선 없는 품목 ' + baselineStructureChanged.length + '건 — ' +
         baselineStructureChanged.slice(0, 5).map(function(eq) { return eq.name || eq.scheduleId; }).join(', '),
       identityChanged: baselineStructureChanged
     };
@@ -7501,10 +7501,6 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
     if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
-    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
-      return { error: "반출 시작 후에는 품목을 삭제할 수 없습니다. 반납 수량에서 분실/미확인으로 기록해주세요." };
-    }
-
     var lastRow = sched.getLastRow();
     var data = sched.getRange(2, 1, lastRow - 1, 4).getValues();
     var rowsToDelete = [];
@@ -11343,11 +11339,6 @@ function removeEquipmentFromContract(sheet, row) {
     sheet.getRange(row, 14).clearContent();
     return;
   }
-  if (isDashboardTradeCheckoutStarted_(ss, 거래ID)) {
-    sheet.getRange(row, 15).setValue("❌ 반출 시작 후 품목 삭제 금지 — 반납 수량에 분실/미확인으로 기록");
-    sheet.getRange(row, 14).clearContent();
-    return;
-  }
   supaMarkTradeDirty_(거래ID); // 스크립트 쓰기 — Supabase 동기화 표시
   try { invalidateDashboardCacheForTrade_(거래ID); } catch (cacheErr) {} // 영향 날짜 캐시 무효화
 
@@ -11362,8 +11353,16 @@ function removeEquipmentFromContract(sheet, row) {
   const schedData = schedSheet.getRange(2, 1, schedLastRow - 1, 4).getValues();
   // B열(index 1)=거래ID, D열(index 3)=장비명
   let deletedCount = 0;
+  let deletedScheduleId = "";
   for (let i = schedData.length - 1; i >= 0; i--) {
     if (schedData[i][1] === 거래ID && schedData[i][3] === 장비명) {
+      deletedScheduleId = String(schedData[i][0] || "").trim();
+      const invalidated = invalidateDashboardReturnInspectionForTrade_(거래ID, deletedScheduleId ? [deletedScheduleId] : [], '스케줄 품목 삭제');
+      if (invalidated && invalidated.error) {
+        sheet.getRange(row, 15).setValue("❌ 삭제 전 반납 검수 초기화 실패: " + invalidated.error);
+        sheet.getRange(row, 14).clearContent();
+        return;
+      }
       schedSheet.deleteRow(i + 2);
       deletedCount++;
       break; // 1행만 삭제

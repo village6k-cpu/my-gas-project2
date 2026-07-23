@@ -43,6 +43,12 @@ assert(
   'checkout rows and the reservation editor must keep name and quantity editing available after checkout'
 );
 assert(
+  /disabled=\{baselineLocked\}/.test(checklist) &&
+    /baselineStarted && next !== "excluded"/.test(store) &&
+    /setItemCheckout\(t\.tradeId, e\.scheduleId, "excluded"\)/.test(checklist),
+  'checkout facts stay fixed while deleting an item remains available after checkout'
+);
+assert(
   /export function clearToast\(\)/.test(store) &&
     /function showTransientError\([\s\S]{0,420}setTimeout[\s\S]{0,220}toast: null/.test(store) &&
     /setItemName[\s\S]*showTransientError\(`⚠️ 장비명 변경 실패/.test(store) &&

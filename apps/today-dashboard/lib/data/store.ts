@@ -1113,7 +1113,7 @@ async function commitItemCheckWrite(tradeId: string, scheduleId: string, key: st
 export function setItemCheckout(tradeId: string, scheduleId: string, next: CheckoutState) {
   const currentTrade = state.trades.find((t) => t.tradeId === tradeId);
   const baselineStarted = !!currentTrade && isCheckoutBaselineLocked(currentTrade);
-  if (baselineStarted) {
+  if (baselineStarted && next !== "excluded") {
     set({ toast: { id: ++toastSeq, text: "⚠️ 반출 당시 실제 포함 품목 기록은 바꿀 수 없습니다", kind: "error" } });
     return;
   }
