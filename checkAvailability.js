@@ -8625,6 +8625,9 @@ function _insertAndCheckRequest(req) {
   var reqID = prefix + "-" + String(maxNum + 1).padStart(3, "0");
 
   var replacedGroups = _findReplaceableConfirmRequestGroups_(sheet, reqForDedupe, requestedEquipItems);
+  if (req.preserveExistingRequests && replacedGroups.length > 0) {
+    throw new Error('같은 고객/기간의 기존 확인요청이 있어 교체하지 않고 중단합니다: ' + replacedGroups.map(function(group) { return group.reqID; }).join(', '));
+  }
   var replacedReqIDs = replacedGroups.map(function(group) { return group.reqID; });
   var replacedRows = 0;
   if (replacedGroups.length > 0) {
@@ -9070,19 +9073,28 @@ function deleteTrade(tradeId) {
     throw new Error("거래ID를 찾을 수 없음: " + tid);
   }
 
-  // 3) 개고생2.0 거래내역 행도 있으면 삭제 (취소 로직과 동일 — best-effort)
+  // 3) 개고생2.0 거래내역 행도 있으면 삭제 (취소 로직과 동일)
+  var ledger = { ok: true, skipped: true, deletedRows: 0 };
   try {
     var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
     if (개고생URL) {
+      ledger.skipped = false;
       var 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
-      if (거래시트 && 거래시트.getLastRow() >= 2) {
+      if (!거래시트) throw new Error("거래내역 시트 없음");
+      if (거래시트.getLastRow() >= 2) {
         var ids = 거래시트.getRange(2, 5, 거래시트.getLastRow() - 1, 1).getValues(); // E열 거래ID
         for (var k = ids.length - 1; k >= 0; k--) {
-          if (String(ids[k][0]).trim() === tid) 거래시트.deleteRow(k + 2);
+          if (String(ids[k][0]).trim() === tid) {
+            거래시트.deleteRow(k + 2);
+            ledger.deletedRows++;
+          }
         }
       }
     }
-  } catch (kErr) { Logger.log("개고생 거래내역 삭제 실패(계속): " + kErr.message); }
+  } catch (kErr) {
+    ledger = { ok: false, error: kErr.message, deletedRows: ledger.deletedRows || 0 };
+    Logger.log("개고생 거래내역 삭제 실패(계속): " + kErr.message);
+  }
 
   // 4) 계약서 파일 휴지통 (있으면)
   var trashed = 0;
@@ -9096,7 +9108,7 @@ function deleteTrade(tradeId) {
   try { invalidateDashboardCacheForTrade_(tid); } catch (c1) {}
   try { invalidateTimelineCache(); } catch (c2) {}
 
-  return { status: "OK", tradeId: tid, deletedContract: deletedContract, deletedSchedule: deletedSched, trashedFiles: trashed, supabase: supa };
+  return { status: "OK", tradeId: tid, deletedContract: deletedContract, deletedSchedule: deletedSched, ledger: ledger, trashedFiles: trashed, supabase: supa };
 }
 
 
@@ -10578,12 +10590,493 @@ function planMergedScheduleRows_(allData, reqID, mergeTargetTID, existingSchedul
   };
 }
 
-function registerByReqID(sheet, triggerRow) {
+function _scheduleCloneDateTime_(combined, dateValue, timeValue, label) {
+  var dateText = String(dateValue || '').trim();
+  var timeText = String(timeValue || '').trim();
+  var combinedText = String(combined || '').trim();
+  if (combinedText) {
+    var match = combinedText.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}:\d{2})$/);
+    if (!match) throw new Error(label + ' 형식은 YYYY-MM-DD HH:mm 이어야 합니다');
+    dateText = match[1];
+    timeText = match[2];
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateText) || !/^\d{1,2}:\d{2}$/.test(timeText)) {
+    throw new Error(label + ' 날짜/시간이 필요합니다');
+  }
+  timeText = timeText.replace(/^(\d):/, '0$1:');
+
+  var dateParts = dateText.split('-').map(Number);
+  var timeParts = timeText.split(':').map(Number);
+  var year = dateParts[0], month = dateParts[1], day = dateParts[2];
+  var hour = timeParts[0], minute = timeParts[1];
+  var maxDay = month >= 1 && month <= 12 ? new Date(Date.UTC(year, month, 0)).getUTCDate() : 0;
+  if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > maxDay ||
+      hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    throw new Error(label + ' 날짜/시간이 올바르지 않습니다');
+  }
+
+  var parsed = parseDT(dateText, timeText);
+  if (!parsed || isNaN(parsed.getTime()) ||
+      Utilities.formatDate(parsed, 'Asia/Seoul', 'yyyy-MM-dd HH:mm') !== dateText + ' ' + timeText) {
+    throw new Error(label + ' 날짜/시간이 올바르지 않습니다');
+  }
+  return { date: dateText, time: timeText, parsed: parsed };
+}
+
+function _scheduleCloneItemSignature_(items) {
+  return (items || []).map(function(item) {
+    return String(item.name || '').trim() + '\u0001' + String(Number(item.qty) || 1);
+  }).sort().join('\u0002');
+}
+
+function buildScheduleCloneSourceFingerprint_(sourceRows, contractRow) {
+  var canonical = JSON.stringify({
+    contract: [contractRow[0], contractRow[1], contractRow[2], contractRow[4], contractRow[5], contractRow[6], contractRow[7], contractRow[9], contractRow[10]],
+    rows: sourceRows.map(function(row) {
+      return [row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11], row[12]];
+    })
+  });
+  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, canonical, Utilities.Charset.UTF_8);
+  return Utilities.base64EncodeWebSafe(digest).replace(/=+$/g, '');
+}
+
+function _getScheduleCloneSource_(ss, sourceTradeId) {
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  var contractSheet = ss.getSheetByName('계약마스터');
+  if (!schedSheet || !contractSheet) throw new Error('스케줄상세/계약마스터 시트가 없습니다');
+
+  var sourceRows = [];
+  if (schedSheet.getLastRow() >= 2) {
+    sourceRows = schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 13).getDisplayValues().filter(function(row) {
+      return String(row[1] || '').trim() === sourceTradeId && String(row[9] || '').trim() !== '취소';
+    });
+  }
+  if (!sourceRows.length) throw new Error('복제 원본 스케줄을 찾을 수 없습니다: ' + sourceTradeId);
+
+  var contractMatches = [];
+  if (contractSheet.getLastRow() >= 2) {
+    contractMatches = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 12).getDisplayValues().filter(function(row) {
+      return String(row[0] || '').trim() === sourceTradeId;
+    });
+  }
+  if (contractMatches.length !== 1) throw new Error('복제 원본 계약이 정확히 1건이어야 합니다: ' + sourceTradeId);
+  var contractRow = contractMatches[0];
+  if (String(contractRow[9] || '').trim() === '취소') throw new Error('취소된 계약은 복제할 수 없습니다: ' + sourceTradeId);
+
+  var customerName = String(contractRow[1] || '').trim();
+  var phone = String(contractRow[2] || '').trim();
+  if (!customerName || !_confirmRequestPhoneKey_(phone)) throw new Error('원본 계약의 예약자명/연락처가 올바르지 않습니다');
+
+  var topItems = sourceRows.filter(function(row) {
+    return String(row[2] || '').trim() && String(row[2] || '').trim() === String(row[3] || '').trim();
+  }).map(function(row) {
+    return { name: String(row[2]).trim(), qty: Number(row[4]) || 1 };
+  });
+  if (!topItems.length) throw new Error('원본 스케줄의 최상위 장비를 찾을 수 없습니다');
+
+  return {
+    tradeId: sourceTradeId,
+    rows: sourceRows,
+    contractRow: contractRow,
+    customerName: customerName,
+    phone: phone,
+    discountType: String(contractRow[10] || '').trim() || '일반',
+    topItems: topItems,
+    itemSignature: _scheduleCloneItemSignature_(topItems),
+    fingerprint: buildScheduleCloneSourceFingerprint_(sourceRows, contractRow)
+  };
+}
+
+function _findScheduleCloneTargetCandidates_(ss, source, targetStart, targetEnd) {
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  var contractSheet = ss.getSheetByName('계약마스터');
+  var contractByTid = {};
+  if (contractSheet && contractSheet.getLastRow() >= 2) {
+    contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 12).getDisplayValues().forEach(function(row) {
+      contractByTid[String(row[0] || '').trim()] = row;
+    });
+  }
+
+  var grouped = {};
+  if (schedSheet && schedSheet.getLastRow() >= 2) {
+    schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 13).getDisplayValues().forEach(function(row) {
+      var tid = String(row[1] || '').trim();
+      if (!tid || tid === source.tradeId || String(row[9] || '').trim() === '취소') return;
+      if (!grouped[tid]) grouped[tid] = [];
+      grouped[tid].push(row);
+    });
+  }
+
+  var sourcePhoneKey = _confirmRequestPhoneKey_(source.phone);
+  var sourceSignature = buildScheduleCloneComparableSignature_(source.rows);
+  return Object.keys(grouped).map(function(tid) {
+    var contract = contractByTid[tid];
+    if (!contract || String(contract[9] || '').trim() === '취소') return null;
+    if (String(contract[1] || '').trim() !== source.customerName) return null;
+    if (_confirmRequestPhoneKey_(contract[2]) !== sourcePhoneKey) return null;
+    if (String(contract[4] || '').trim() !== targetStart.date || String(contract[5] || '').trim() !== targetStart.time) return null;
+    if (String(contract[6] || '').trim() !== targetEnd.date || String(contract[7] || '').trim() !== targetEnd.time) return null;
+
+    var rows = grouped[tid];
+    var allRowsMatchWindow = rows.every(function(row) {
+      return String(row[5] || '').trim() === targetStart.date &&
+        String(row[6] || '').trim() === targetStart.time &&
+        String(row[7] || '').trim() === targetEnd.date &&
+        String(row[8] || '').trim() === targetEnd.time;
+    });
+    return {
+      tradeId: tid,
+      exact: allRowsMatchWindow && buildScheduleCloneComparableSignature_(rows) === sourceSignature,
+      rowCount: rows.length
+    };
+  }).filter(function(candidate) { return candidate; }).sort(function(a, b) {
+    return a.tradeId.localeCompare(b.tradeId);
+  });
+}
+
+function _scheduleCloneNumber_(value, fallback) {
+  var text = String(value == null ? '' : value).replace(/,/g, '').trim();
+  if (text === '') return fallback;
+  var numberValue = Number(text);
+  return isNaN(numberValue) ? fallback : numberValue;
+}
+
+function buildScheduleCloneComparableSignature_(rows) {
+  return JSON.stringify((rows || []).map(function(row) {
+    return [
+      String(row[2] || '').trim(),
+      String(row[3] || '').trim(),
+      _scheduleCloneNumber_(row[4], 1),
+      String(row[10] || '').trim(),
+      _scheduleCloneNumber_(row[11], 0),
+      String(row[12] || '').trim()
+    ];
+  }));
+}
+
+function _scheduleNoCustomerSendKey_(tradeId) {
+  return 'NO_CUSTOMER_SEND_' + String(tradeId || '').trim();
+}
+
+function isScheduleCustomerSendSuppressed_(tradeId) {
+  var tid = String(tradeId || '').trim();
+  if (!tid) return false;
+  return PropertiesService.getScriptProperties().getProperty(_scheduleNoCustomerSendKey_(tid)) === '1';
+}
+
+function setScheduleCustomerSendSuppressed_(tradeId) {
+  var tid = String(tradeId || '').trim();
+  if (!tid) throw new Error('무발송 거래ID가 필요합니다');
+  PropertiesService.getScriptProperties().setProperty(_scheduleNoCustomerSendKey_(tid), '1');
+}
+
+function clearScheduleCustomerSendSuppressed_(tradeId) {
+  var tid = String(tradeId || '').trim();
+  if (!tid) return;
+  PropertiesService.getScriptProperties().deleteProperty(_scheduleNoCustomerSendKey_(tid));
+}
+
+function replaceClonedScheduleRowsExactly_(ss, source, targetTradeId, targetStart, targetEnd) {
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  if (!schedSheet) throw new Error('스케줄상세 시트가 없습니다');
+
+  var targetSheetRows = [];
+  if (schedSheet.getLastRow() >= 2) {
+    schedSheet.getRange(2, 1, schedSheet.getLastRow() - 1, 2).getDisplayValues().forEach(function(row, index) {
+      if (String(row[1] || '').trim() === targetTradeId) targetSheetRows.push(index + 2);
+    });
+  }
+  if (!targetSheetRows.length) throw new Error('등록된 대상 스케줄 행을 찾을 수 없습니다: ' + targetTradeId);
+
+  targetSheetRows.sort(function(a, b) { return b - a; }).forEach(function(sheetRow) {
+    schedSheet.deleteRow(sheetRow);
+  });
+
+  var startRow = schedSheet.getLastRow() + 1;
+  var neededRows = source.rows.length;
+  if (startRow + neededRows - 1 > schedSheet.getMaxRows()) {
+    schedSheet.insertRowsAfter(schedSheet.getMaxRows(), startRow + neededRows - 1 - schedSheet.getMaxRows());
+  }
+  var values = source.rows.map(function(row, index) {
+    return [
+      targetTradeId + '-' + String(index + 1).padStart(2, '0'),
+      targetTradeId,
+      String(row[2] || '').trim(),
+      String(row[3] || '').trim(),
+      _scheduleCloneNumber_(row[4], 1),
+      targetStart.date,
+      targetStart.time,
+      targetEnd.date,
+      targetEnd.time,
+      '대기',
+      String(row[10] || ''),
+      _scheduleCloneNumber_(row[11], 0),
+      source.customerName
+    ];
+  });
+  schedSheet.getRange(startRow, 1, values.length, 13).setValues(values);
+  schedSheet.getRange(startRow, 5, values.length, 1).setNumberFormat('#,##0');
+  schedSheet.getRange(startRow, 6, values.length, 4).setNumberFormat('@');
+  schedSheet.getRange(startRow, 12, values.length, 1).setNumberFormat('#,##0');
+  SpreadsheetApp.flush();
+  formatScheduleSheet(schedSheet);
+  try { scheduleContractRegen(targetTradeId); } catch (regenErr) {}
+  try { supaMarkTradeDirty_(targetTradeId); } catch (dirtyErr) {}
+  try { invalidateDashboardCache([targetStart.date, targetEnd.date]); } catch (cacheErr) {}
+  try { invalidateTimelineCache(); } catch (timelineErr) {}
+
+  return schedSheet.getRange(startRow, 1, values.length, 13).getDisplayValues();
+}
+
+function _getConfirmRequestCloneTopItems_(sheet, reqID) {
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  return sheet.getRange(2, 1, sheet.getLastRow() - 1, 18).getDisplayValues().filter(function(row) {
+    if (String(row[0] || '').trim() !== reqID) return false;
+    var resultType = String(row[8] || '').trim();
+    var memo = String(row[16] || '').trim();
+    return resultType === '세트' || memo.indexOf('[세트]') !== 0;
+  }).map(function(row) {
+    return { name: String(row[5] || '').trim(), qty: Number(row[6]) || 1 };
+  }).filter(function(item) { return item.name; });
+}
+
+function _scheduleCloneTradeExists_(ss, tradeId) {
+  var tid = String(tradeId || '').trim();
+  if (!tid) return false;
+  var contractSheet = ss.getSheetByName('계약마스터');
+  if (contractSheet && contractSheet.getLastRow() >= 2) {
+    var contractIds = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 1).getDisplayValues();
+    for (var ci = 0; ci < contractIds.length; ci++) {
+      if (String(contractIds[ci][0] || '').trim() === tid) return true;
+    }
+  }
+  var schedSheet = ss.getSheetByName('스케줄상세');
+  if (schedSheet && schedSheet.getLastRow() >= 2) {
+    var scheduleIds = schedSheet.getRange(2, 2, schedSheet.getLastRow() - 1, 1).getDisplayValues();
+    for (var si = 0; si < scheduleIds.length; si++) {
+      if (String(scheduleIds[si][0] || '').trim() === tid) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 등록된 스케줄의 최상위 장비/수량을 다른 기간에 원자적으로 복제한다.
+ * dry-run에서 받은 expectedSourceFingerprint가 live 실행 직전에도 같아야 하며,
+ * 고객 알림톡 payload를 생성하지 않는 registerByReqID 옵션만 사용한다.
+ */
+function cloneRegisteredScheduleNoSend(args) {
+  args = args || {};
+  var sourceTradeId = String(args.sourceTradeId || args.tradeId || '').trim();
+  if (!sourceTradeId) throw new Error('sourceTradeId가 필요합니다');
+  var targetStart = _scheduleCloneDateTime_(args.targetStart, args.targetStartDate, args.targetStartTime, 'targetStart');
+  var targetEnd = _scheduleCloneDateTime_(args.targetEnd, args.targetEndDate, args.targetEndTime, 'targetEnd');
+  if (targetEnd.parsed <= targetStart.parsed) throw new Error('targetEnd는 targetStart보다 뒤여야 합니다');
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var source = _getScheduleCloneSource_(ss, sourceTradeId);
+  var targetCandidates = _findScheduleCloneTargetCandidates_(ss, source, targetStart, targetEnd);
+  if (targetCandidates.length > 1) {
+    throw new Error('대상 기간에 같은 고객 일정이 여러 건 존재합니다: ' + targetCandidates.map(function(candidate) { return candidate.tradeId; }).join(', '));
+  }
+  var targetCandidate = targetCandidates[0] || null;
+  var exactDuplicateTradeId = targetCandidate && targetCandidate.exact ? targetCandidate.tradeId : '';
+  var conflictingTradeId = targetCandidate && !targetCandidate.exact ? targetCandidate.tradeId : '';
+
+  var dryRun = args.dryRun === true || args.dryRun === 1 || String(args.dryRun || '').toLowerCase() === 'true';
+  var preflight = {
+    success: true,
+    dryRun: true,
+    sourceTradeId: sourceTradeId,
+    sourceFingerprint: source.fingerprint,
+    sourceRowCount: source.rows.length,
+    customerName: source.customerName,
+    targetStart: targetStart.date + ' ' + targetStart.time,
+    targetEnd: targetEnd.date + ' ' + targetEnd.time,
+    topItems: source.topItems,
+    targetDuplicateTradeId: exactDuplicateTradeId,
+    targetConflictTradeId: conflictingTradeId
+  };
+  if (dryRun) return preflight;
+
+  var expectedSourceFingerprint = String(args.expectedSourceFingerprint || '').trim();
+  if (!expectedSourceFingerprint) throw new Error('dry-run의 expectedSourceFingerprint가 필요합니다');
+  if (expectedSourceFingerprint !== source.fingerprint) throw new Error('원본 스케줄이 dry-run 이후 변경되어 복제를 중단했습니다');
+  if (conflictingTradeId) {
+    throw new Error('대상 기간에 다른 장비 구성의 기존 일정이 있어 합침/덮어쓰기를 중단했습니다: ' + conflictingTradeId);
+  }
+  if (exactDuplicateTradeId) {
+    setScheduleCustomerSendSuppressed_(exactDuplicateTradeId);
+    return {
+      success: true,
+      duplicate: true,
+      sourceTradeId: sourceTradeId,
+      tradeId: exactDuplicateTradeId,
+      customerSendSuppressed: true,
+      customerSendFlagPresent: true,
+      message: '대상 기간에 동일한 복제 스케줄이 이미 있습니다'
+    };
+  }
+
+  // mutation 직전 원본과 대상 기간을 모두 다시 읽어 동시 편집/신규 일정 생성을 차단한다.
+  source = _getScheduleCloneSource_(ss, sourceTradeId);
+  if (expectedSourceFingerprint !== source.fingerprint) throw new Error('원본 스케줄이 실행 직전 변경되어 복제를 중단했습니다');
+  targetCandidates = _findScheduleCloneTargetCandidates_(ss, source, targetStart, targetEnd);
+  if (targetCandidates.length) {
+    throw new Error('dry-run 이후 대상 기간에 일정이 생겨 복제를 중단했습니다: ' + targetCandidates.map(function(candidate) { return candidate.tradeId; }).join(', '));
+  }
+
+  var confirmSheet = ss.getSheetByName('확인요청');
+  if (!confirmSheet) throw new Error('확인요청 시트가 없습니다');
+  var createdReqID = '';
+  var ownsCreatedRequest = false;
+  var registeredTradeId = '';
+  var ownsRegisteredTrade = false;
+  var registrationOptions = { suppressCustomerSend: true, forbidMerge: true };
+  var preexistingTradeIds = {};
+  var contractSheetBefore = ss.getSheetByName('계약마스터');
+  if (contractSheetBefore && contractSheetBefore.getLastRow() >= 2) {
+    contractSheetBefore.getRange(2, 1, contractSheetBefore.getLastRow() - 1, 1).getDisplayValues().forEach(function(row) {
+      var tid = String(row[0] || '').trim();
+      if (tid) preexistingTradeIds[tid] = true;
+    });
+  }
+
+  try {
+    var insertResult = insertAndCheckRequest({
+      반출일: targetStart.date,
+      반출시간: targetStart.time,
+      반납일: targetEnd.date,
+      반납시간: targetEnd.time,
+      장비: source.topItems.map(function(item) { return { 이름: item.name, 수량: item.qty }; }),
+      예약자명: source.customerName,
+      연락처: source.phone,
+      할인유형: source.discountType,
+      비고: '',
+      추가요청: '',
+      preserveExistingRequests: true
+    });
+    var resultReqID = String(insertResult && insertResult.reqID || '').trim();
+    if (!resultReqID) throw new Error('복제 확인요청 생성 결과에 reqID가 없습니다');
+    if (insertResult.duplicate) throw new Error('대상과 동일한 미등록 확인요청이 이미 있습니다: ' + resultReqID);
+    createdReqID = resultReqID;
+    ownsCreatedRequest = true;
+
+    var requestItems = _getConfirmRequestCloneTopItems_(confirmSheet, createdReqID);
+    if (_scheduleCloneItemSignature_(requestItems) !== source.itemSignature) {
+      throw new Error('확인요청 장비가 원본 최상위 장비/수량과 달라 복제를 중단했습니다');
+    }
+
+    var triggerRow = findConfirmRequestRowByReqID_(confirmSheet, createdReqID);
+    if (triggerRow < 2) throw new Error('생성된 확인요청 행을 찾을 수 없습니다: ' + createdReqID);
+    registerByReqID(confirmSheet, triggerRow, registrationOptions);
+
+    var requestRows = confirmSheet.getRange(2, 1, Math.max(1, confirmSheet.getLastRow() - 1), 18).getDisplayValues().filter(function(row) {
+      return String(row[0] || '').trim() === createdReqID;
+    });
+    for (var i = 0; i < requestRows.length; i++) {
+      if (String(requestRows[i][15] || '').trim()) {
+        registeredTradeId = String(requestRows[i][15]).trim();
+        break;
+      }
+    }
+    if (!registeredTradeId) {
+      var registrationStatus = requestRows.length ? String(requestRows[0][14] || '').trim() : '확인요청 행 없음';
+      throw new Error('무발송 등록이 완료되지 않았습니다: ' + registrationStatus);
+    }
+    if (!registrationOptions.createdTradeId || registrationOptions.createdTradeId !== registeredTradeId) {
+      throw new Error('새 거래ID 소유권 검증 실패: ' + registeredTradeId);
+    }
+    if (preexistingTradeIds[registeredTradeId]) {
+      throw new Error('기존 거래를 새 복제 거래로 오인해 중단했습니다: ' + registeredTradeId);
+    }
+    ownsRegisteredTrade = true;
+    if (!isScheduleCustomerSendSuppressed_(registeredTradeId)) {
+      throw new Error('새 거래의 영구 무발송 플래그가 설정되지 않았습니다');
+    }
+
+    var targetRowsAfter = replaceClonedScheduleRowsExactly_(ss, source, registeredTradeId, targetStart, targetEnd);
+    if (buildScheduleCloneComparableSignature_(targetRowsAfter) !== buildScheduleCloneComparableSignature_(source.rows)) {
+      throw new Error('복제 후 스케줄상세 전체 행이 원본과 일치하지 않습니다');
+    }
+
+    var sourceAfter = _getScheduleCloneSource_(ss, sourceTradeId);
+    if (sourceAfter.fingerprint !== expectedSourceFingerprint) {
+      throw new Error('복제 중 원본 스케줄이 변경되었습니다');
+    }
+    var finalCandidates = _findScheduleCloneTargetCandidates_(ss, sourceAfter, targetStart, targetEnd);
+    if (finalCandidates.length !== 1 || !finalCandidates[0].exact || finalCandidates[0].tradeId !== registeredTradeId) {
+      throw new Error('복제 후 대상 스케줄 검증 실패: ' + finalCandidates.map(function(candidate) { return candidate.tradeId + (candidate.exact ? '(exact)' : '(conflict)'); }).join(', '));
+    }
+
+    var sentFlag = PropertiesService.getScriptProperties().getProperty('REG_ALIM_SENT_' + registeredTradeId);
+    if (sentFlag) throw new Error('무발송 검증 실패: 등록 알림톡 발송 플래그가 존재합니다');
+    if (!isScheduleCustomerSendSuppressed_(registeredTradeId)) throw new Error('무발송 검증 실패: 영구 무발송 플래그가 없습니다');
+
+    deleteRequest(createdReqID);
+    ownsCreatedRequest = false;
+    return {
+      success: true,
+      sourceTradeId: sourceTradeId,
+      tradeId: registeredTradeId,
+      sourceFingerprint: sourceAfter.fingerprint,
+      sourceRowCount: sourceAfter.rows.length,
+      targetRowCount: targetRowsAfter.length,
+      targetStart: targetStart.date + ' ' + targetStart.time,
+      targetEnd: targetEnd.date + ' ' + targetEnd.time,
+      topItems: sourceAfter.topItems,
+      confirmRequestCleaned: true,
+      customerSendSuppressed: true,
+      customerSendFlagPresent: true
+    };
+  } catch (err) {
+    var rollbackErrors = [];
+    var rollbackTradeId = '';
+    if (registrationOptions.createdTradeId && !preexistingTradeIds[registrationOptions.createdTradeId]) {
+      rollbackTradeId = registrationOptions.createdTradeId;
+    } else if (ownsRegisteredTrade && registeredTradeId && !preexistingTradeIds[registeredTradeId]) {
+      rollbackTradeId = registeredTradeId;
+    }
+
+    if (rollbackTradeId && _scheduleCloneTradeExists_(ss, rollbackTradeId)) {
+      try {
+        var rollbackResult = deleteTrade(rollbackTradeId);
+        if (rollbackResult.ledger && rollbackResult.ledger.ok === false) {
+          rollbackErrors.push('거래원장 롤백 실패: ' + rollbackResult.ledger.error);
+        }
+        if (rollbackResult.supabase && rollbackResult.supabase.ok === false) {
+          rollbackErrors.push('Supabase 롤백 실패: ' + rollbackResult.supabase.error);
+        }
+      } catch (tradeCleanupErr) {
+        rollbackErrors.push('거래 롤백 실패: ' + tradeCleanupErr.message);
+      }
+    }
+    if (rollbackTradeId && rollbackErrors.length === 0) {
+      try { clearScheduleCustomerSendSuppressed_(rollbackTradeId); } catch (flagCleanupErr) {}
+      try { PropertiesService.getScriptProperties().deleteProperty('contractEditTS_' + rollbackTradeId); } catch (regenCleanupErr) {}
+    }
+    if (ownsCreatedRequest && createdReqID) {
+      try { deleteRequest(createdReqID); } catch (requestCleanupErr) {
+        if (String(requestCleanupErr.message || '').indexOf('찾을 수 없음') < 0) {
+          rollbackErrors.push('확인요청 정리 실패: ' + requestCleanupErr.message);
+        }
+      }
+    }
+    if (rollbackErrors.length) {
+      throw new Error(err.message + ' / ' + rollbackErrors.join(' / '));
+    }
+    throw err;
+  }
+}
+
+function registerByReqID(sheet, triggerRow, options) {
+  options = options || {};
   var _regPerfT0 = Date.now(); // 계측: 총시간/락대기/알림톡/큐 소진 (perfLog_로 기록)
   // ── 전체 등록 프로세스 직렬화 (동시 실행 방지) ──
   var regLock = LockService.getScriptLock();
   if (!regLock.tryLock(30000)) {
     var pendingReqID = String(sheet.getRange(triggerRow, 1).getValue() || "").trim();
+    if (options.suppressCustomerSend) throw new Error("무발송 등록 잠금 획득 실패 — 아무 변경 없이 다시 시도해야 합니다");
     markRegisterQueued_(sheet, triggerRow);
     enqueuePendingRegister_(pendingReqID, 30000);
     return;
@@ -10863,6 +11356,9 @@ function registerByReqID(sheet, triggerRow) {
       }
       if (mergeTargetTID) mergeMode = true;
     }
+    if (options.forbidMerge && mergeMode) {
+      throw new Error('무발송 복제 대상 기간에 기존 거래가 생겨 합침을 중단했습니다: ' + mergeTargetTID);
+    }
     // 합침 요청에는 기존 품목이 섞여 다시 들어오는 경우가 있다. 새 품목만 쓰도록
     // 현재 거래의 C/D/E(세트/장비/수량)와 정확히 같은 행을 multiset으로 한 번씩 제외한다.
     var mergeSchedulePlan = planMergedScheduleRows_(
@@ -10923,6 +11419,11 @@ function registerByReqID(sheet, triggerRow) {
       거래ID = mergeTargetTID;
     } else {
       거래ID = `${prefix거래}-${String(maxNum + 1).padStart(3, "0")}`;
+    }
+    if (options.suppressCustomerSend) {
+      if (mergeMode) throw new Error('무발송 등록은 기존 거래 합침을 허용하지 않습니다');
+      options.createdTradeId = 거래ID;
+      setScheduleCustomerSendSuppressed_(거래ID);
     }
 
   // ── 회차 계산 (24시간=1회차, 3시간 이내 초과는 같은 회차) ──
@@ -11130,10 +11631,12 @@ function registerByReqID(sheet, triggerRow) {
   // ── 등록완료 알림톡 + 내 예약 링크 (거래당 1회, 실패해도 등록은 진행) ──
   // POPBILL_TPL_REGISTER 템플릿 미설정 시 자동 스킵 (기존처럼 코워크 카톡 발송으로 운영 가능)
   // 팝빌 토큰+발송+캐시예열은 외부 HTTP 2~3회 — 전역 락 해제 직후(finally)로 미룬다
-  _postRegisterAlimtalk = {
-    거래ID: 거래ID, 예약자명: 예약자명, 연락처: 연락처,
-    반출일: 반출일, 반출시간: 반출시간, 반납일: 반납일, 반납시간: 반납시간
-  };
+  if (!options.suppressCustomerSend) {
+    _postRegisterAlimtalk = {
+      거래ID: 거래ID, 예약자명: 예약자명, 연락처: 연락처,
+      반출일: 반출일, 반출시간: 반출시간, 반납일: 반납일, 반납시간: 반납시간
+    };
+  }
 
   // dashboard/timeline 캐시 즉시 무효화 → 새로고침 안 해도 다음 fetch는 fresh
   try { invalidateDashboardCache([반출일, 반납일]); } catch (e) {}
@@ -11159,11 +11662,13 @@ function registerByReqID(sheet, triggerRow) {
       _postRegisterAlimtalk = null;
     }
     var _drainT0 = Date.now();
-    try {
-      processRegistrationQueue_(sheet);
-    } catch (queueErr) {
-      Logger.log("등록대기 자동 처리 실패: " + queueErr.message);
-      try { ensurePendingRegisterTrigger_(30000); } catch (triggerErr) {}
+    if (!options.skipQueueDrain && !options.suppressCustomerSend) {
+      try {
+        processRegistrationQueue_(sheet);
+      } catch (queueErr) {
+        Logger.log("등록대기 자동 처리 실패: " + queueErr.message);
+        try { ensurePendingRegisterTrigger_(30000); } catch (triggerErr) {}
+      }
     }
     _regPerf.queueDrainMs = Date.now() - _drainT0;
     _regPerf.totalMs = Date.now() - _regPerfT0;
@@ -12296,6 +12801,7 @@ function _alimtalkAccepted_(res) {
  */
 function sendRegisterCompleteAlimtalk_(거래ID, 예약자명, 연락처, 반출일, 반출시간, 반납일, 반납시간) {
   var props = PropertiesService.getScriptProperties();
+  if (isScheduleCustomerSendSuppressed_(거래ID)) return { skipped: '거래 무발송 설정' };
   var tpl = props.getProperty('POPBILL_TPL_REGISTER');
   if (!tpl) return { skipped: '템플릿 미설정' };
   if (!연락처 || !예약자명) return { skipped: '고객 정보 없음' };
@@ -12802,6 +13308,35 @@ function markGuideAlimtalkSent(args) {
   return { success: true, kind: kind, marked: marked };
 }
 
+function unmarkGuideAlimtalkSent(args) {
+  args = args || {};
+  var rawIds = args.tradeIds || args.tids || args.ids || args.tradeId || args.tid || args.id || '';
+  var ids = Array.isArray(rawIds)
+    ? rawIds
+    : String(rawIds || '').split(/[,\s]+/);
+  var kind = String(args.kind || args.종류 || 'all').trim();
+  var prefixes = kind === '반출' ? ['out_'] : (kind === '반납' ? ['in_'] : ['out_', 'in_']);
+  var props = PropertiesService.getScriptProperties();
+  var sentData = _getGuideSentData_(props);
+  var removed = [];
+
+  ids.forEach(function(id) {
+    id = String(id || '').trim();
+    if (!id) return;
+    prefixes.forEach(function(prefix) {
+      var key = prefix + id;
+      if (Object.prototype.hasOwnProperty.call(sentData, key)) {
+        delete sentData[key];
+        removed.push({ tid: id, flag: key });
+      }
+    });
+  });
+  if (!ids.filter(function(id) { return String(id || '').trim(); }).length) return { error: 'tradeIds 필요' };
+
+  props.setProperty('GUIDE_SENT_V2', JSON.stringify(sentData));
+  return { success: true, kind: kind, removed: removed };
+}
+
 /**
  * 30분마다 실행 — 반출/반납 안내톡 발송 시점 체크
  *
@@ -12878,6 +13413,10 @@ function checkGuideAlimtalk() {
     var info = tradeInfo[tid];
     var cust = contractMap[tid];
     if (!cust || !cust.name || !cust.tel) return;
+    if (isScheduleCustomerSendSuppressed_(tid)) {
+      results.skipped.push('거래 무발송 설정 ' + tid + ' ' + cust.name);
+      return;
+    }
 
     // 취소/이미 반납 완료된 계약에는 안내 불필요 ("반납일이 다가와" 오발송 방지)
     if (/취소|완료/.test(cust.status)) return;

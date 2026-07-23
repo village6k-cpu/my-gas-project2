@@ -246,6 +246,18 @@ function handleRequest(e) {
         return jsonResponse(scheduleRegister(reqID));
       }
 
+      case "cloneScheduleNoSend": {
+        var rawCloneArgs = postBody.args || params.args || postBody;
+        var cloneArgs = typeof rawCloneArgs === "string" ? JSON.parse(rawCloneArgs) : rawCloneArgs;
+        cloneArgs = cloneArgs || {};
+        var cloneDryRun = cloneArgs.dryRun === true || cloneArgs.dryRun === 1 || String(cloneArgs.dryRun || "").toLowerCase() === "true";
+        if (!cloneDryRun && !(e && e.postData && e.postData.contents)) {
+          throw new Error("cloneScheduleNoSend 실제 실행은 JSON POST만 허용됩니다");
+        }
+        invalidateConfirmListCache_();
+        return jsonResponse(cloneRegisteredScheduleNoSend(cloneArgs));
+      }
+
       case "dashboard":
         // nocache=1 이면 캐시 우회 (새로고침 버튼용). profile=1 이면 단계별 소요시간 포함(성능 진단용).
         var skipCache = (params.nocache === '1' || postBody.nocache === 1 || postBody.nocache === '1');
@@ -1174,7 +1186,8 @@ function runFunction(funcName, params) {
     "testRegisterAlimtalk",
     "testGuideAlimtalk",
     "diagGuideAlimtalkSchedule",
-    "markGuideAlimtalkSent"
+    "markGuideAlimtalkSent",
+    "unmarkGuideAlimtalkSent"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -1273,6 +1286,14 @@ function runFunction(funcName, params) {
       }
       var mgResult = markGuideAlimtalkSent(mgArgs || {});
       return { success: !mgResult.error, function: funcName, result: mgResult, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "unmarkGuideAlimtalkSent") {
+      var ugArgs = params.args;
+      if (typeof ugArgs === "string") {
+        try { ugArgs = JSON.parse(ugArgs); } catch (ugErr) { ugArgs = { tradeIds: ugArgs }; }
+      }
+      var ugResult = unmarkGuideAlimtalkSent(ugArgs || {});
+      return { success: !ugResult.error, function: funcName, result: ugResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "setupMyPage") {
       var setupArgs = params.args;
