@@ -37,7 +37,11 @@ assert(server.includes('rawContextHasVisionEvidence') && server.includes('raw_co
 assert(server.includes('applied_plan: previous?.applied_plan ?? null') && server.includes('applied_at: previous?.applied_at ?? null'), 'corrected events must retain the prior applied audit until replacement succeeds');
 assert(server.includes('event: { ...storedEvent, applied_plan: null }'), 'the prior applied plan must stay internal and never steer the corrected-event model prompt');
 assert(server.includes('previousAppliedNoteTexts') && server.includes('removePreviousAppliedNoteBlocks'), 'corrected events must replace their prior operational note without exposing Slack identifiers');
-assert(server.includes('actual_name') && server.includes('actual_taken_qty') && server.includes('actual_source'), 'confirmed Slack corrections must use an audited overlay instead of rewriting baseline identity');
+assert(server.includes('actual_name') && server.includes('actual_taken_qty') && server.includes('actual_source'), 'confirmed Slack corrections must retain an audited actual-state record');
+assert(server.includes('syncCorrectionNamesToSchedule(plan, true)') && server.includes('syncCorrectionNamesToSchedule(plan, false)'), 'Slack name corrections must dry-run and then write through to schedule detail');
+assert(server.includes('exactName: true') && server.includes('skipAvailability: true'), 'confirmed same-grade Slack replacements must preserve free-text names without catalog availability rejection');
+assert(sheetApi.includes('exactName:') && sheetApi.includes('skipAvailability:'), 'sheet API must forward exact Slack replacement options');
+assert(gas.includes('var newName = exactName ? requestedName : resolveEquipmentName_'), 'GAS must preserve confirmed off-catalog Slack names verbatim');
 assert(remote.includes('delete row.actual_name') && remote.includes('delete row.actual_taken_qty'), 'stale browsers must not erase server-owned correction overlays');
 assert(migration.includes('revoke all on village.slack_ops_events from anon, authenticated'), 'internal sync ledger must not become another employee-visible board');
 assert(gas.includes('slackOpsOnsiteIdempotency_v1') && gas.includes('duplicate: true'), 'GAS onsite additions must be idempotent across retries');

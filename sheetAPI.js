@@ -462,7 +462,11 @@ function handleRequest(e) {
           params.tid || postBody.tid,
           params.scheduleId || postBody.scheduleId,
           params.equipName || postBody.equipName || params.name || postBody.name,
-          { dryRun: params.dryRun || postBody.dryRun }
+          {
+            dryRun: params.dryRun || postBody.dryRun,
+            exactName: params.exactName || postBody.exactName,
+            skipAvailability: params.skipAvailability || postBody.skipAvailability
+          }
         ));
 
       case "tradeCandidates":

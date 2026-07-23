@@ -7202,6 +7202,8 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
 
   options = options || {};
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
+  var exactName = options.exactName === true || options.exactName === 1 || options.exactName === "1" || options.exactName === "true";
+  var skipAvailability = options.skipAvailability === true || options.skipAvailability === 1 || options.skipAvailability === "1" || options.skipAvailability === "true";
 
   var lock = null;
   if (!dryRun) {
@@ -7215,7 +7217,8 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
     var equipSheet = ss.getSheetByName("장비마스터");
     if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
     if (!equipSheet) return { error: "장비마스터 없음" };
-    var newName = resolveEquipmentName_(requestedName, ss);
+    // 사람이 확정한 Slack 동급 대체명은 마스터에 없어도 원문 그대로 저장한다.
+    var newName = exactName ? requestedName : resolveEquipmentName_(requestedName, ss);
     var lastRow = sched.getLastRow();
     var targetRows = findDashboardRowsByValue_(sched, 1, lastRow, scheduleId);
     if (targetRows.length === 0) return { error: "스케줄ID '" + scheduleId + "' 못 찾음" };
@@ -7235,7 +7238,7 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
     var endDT = parseDT(display[7], display[8]);
     if (!startDT || !endDT) return { error: "반출/반납 일시를 읽지 못했습니다" };
 
-    var availability = checkAvailabilityForAddCached_(
+    var availability = skipAvailability ? { ok: true, warnings: [] } : checkAvailabilityForAddCached_(
       [{ name: newName, qty: qty }],
       startDT,
       endDT,

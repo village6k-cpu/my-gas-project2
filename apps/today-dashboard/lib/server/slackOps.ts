@@ -639,6 +639,25 @@ async function executeOnsiteActions(plan: SlackOpsApplyPlan) {
   return results;
 }
 
+async function syncCorrectionNamesToSchedule(plan: SlackOpsApplyPlan, dryRun: boolean) {
+  const results: Array<Record<string, unknown>> = [];
+  for (const action of plan.actions ?? []) {
+    if (action.type !== "item_correction" || action.actualName == null) continue;
+    const result = await gasPost({
+      action: "updateEquipName",
+      tid: plan.tradeId,
+      scheduleId: action.scheduleId,
+      equipName: action.actualName,
+      exactName: true,
+      skipAvailability: true,
+      dryRun,
+    }) as Record<string, unknown>;
+    if (result?.error) throw new Error(cleanText(result.error, 1_000));
+    results.push(result);
+  }
+  return results;
+}
+
 export async function applySlackOpsPlan(value: unknown, execute: boolean) {
   const plan = sanitizePlan(value);
   const db = getInventoryAuditServiceClient();
@@ -657,6 +676,7 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
   const { trade, items } = await loadTradeAndItems(plan.tradeId);
   validateActions(plan, items, event);
   const onsitePreview = await previewOnsiteActions(plan);
+  const correctionPreview = await syncCorrectionNamesToSchedule(plan, true);
   const preview = {
     tradeId: plan.tradeId,
     customerName: trade.customer_name,
@@ -664,6 +684,7 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
     summary: plan.summary,
     actions: plan.actions ?? [],
     onsitePreview,
+    correctionPreview,
   };
   if (!execute) return { ok: true, dryRun: true, preview };
 
@@ -675,6 +696,8 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
 
   try {
     const onsiteResults = await executeOnsiteActions(plan);
+    // 원본 시트와 문서 재생성 예약이 성공한 뒤에만 앱의 Slack 정정 이력을 확정한다.
+    const correctionResults = await syncCorrectionNamesToSchedule(plan, false);
     const correctionSource = {
       kind: "slack", channelId: event.channel_id, messageTs: event.message_ts,
       permalink: event.permalink || undefined, correctedAt: new Date().toISOString(),
@@ -722,7 +745,7 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
       applied_at: new Date().toISOString(), last_error: null,
     }).eq("channel_id", plan.channelId).eq("message_ts", plan.messageTs).eq("source_hash", plan.sourceHash);
     if (completed.error) throw completed.error;
-    return { ok: true, dryRun: false, preview, onsiteResults };
+    return { ok: true, dryRun: false, preview, onsiteResults, correctionResults };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await db.from("slack_ops_events").update({ status: "error", last_error: message.slice(0, 2_000) })

@@ -249,7 +249,7 @@ function supaGetTradeReturnCounts_(tid) {
     var counts = rows[0].return_counts;
     if (!counts || typeof counts !== 'object' || Array.isArray(counts)) counts = {};
     var itemRes = UrlFetchApp.fetch(
-      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,is_component,checkout_state,onsite'
+      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,is_component,checkout_state,onsite,removed_at'
         + '&trade_id=eq.' + encodeURIComponent(tid) + '&order=sort.asc',
       {
         method: 'get',
@@ -265,7 +265,7 @@ function supaGetTradeReturnCounts_(tid) {
     if (itemCode >= 300) {
       return { ok: false, error: 'Supabase 반출 기준선 조회 실패 (' + itemCode + ')', returnCounts: {}, scheduleItems: [] };
     }
-    var scheduleItems = JSON.parse(itemRes.getContentText() || '[]');
+    var scheduleItems = (JSON.parse(itemRes.getContentText() || '[]') || []).filter(function(item) { return !item.removed_at; });
     return { ok: true, returnCounts: counts, scheduleItems: scheduleItems || [] };
   } catch (err) {
     return {
@@ -286,7 +286,7 @@ function supaGetCheckoutBaselineState_(tid) {
     var token = supaToken_(cfg);
     if (!token) return { ok: false, error: 'Supabase 봇 토큰 없음', started: false, items: [] };
     var res = UrlFetchApp.fetch(
-      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,is_component,checkout_state,onsite'
+      cfg.url + '/rest/v1/schedule_items?select=schedule_id,name,qty,taken_qty,actual_name,actual_taken_qty,set_name,is_set_header,is_component,checkout_state,onsite,removed_at'
         + '&trade_id=eq.' + encodeURIComponent(tid) + '&taken_qty=gt.0&order=sort.asc',
       {
         method: 'get',
@@ -302,7 +302,7 @@ function supaGetCheckoutBaselineState_(tid) {
     if (code >= 300) {
       return { ok: false, error: 'Supabase 반출 기준선 조회 실패 (' + code + ')', started: false, items: [] };
     }
-    var items = JSON.parse(res.getContentText() || '[]') || [];
+    var items = (JSON.parse(res.getContentText() || '[]') || []).filter(function(item) { return !item.removed_at; });
     return { ok: true, started: items.length > 0, items: items };
   } catch (err) {
     return {
