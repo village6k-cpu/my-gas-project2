@@ -88,7 +88,7 @@ async function attachScheduleItems(sb: any, tradeRows: any[]): Promise<Trade[]> 
         "schedule_items",
         "*",
         [{ column: "trade_id" }, { column: "sort" }, { column: "schedule_id" }],
-        (q) => q.in("trade_id", chunk)
+        (q) => q.in("trade_id", chunk).is("removed_at", null)
       )
     )
   );

@@ -122,6 +122,47 @@ function supaCancelTrade_(tid) {
 }
 
 /**
+ * 반출 기준선 행은 감사용으로 보존하되 현재 예약/반납 목록에서는 제외한다.
+ * 모든 대상 행에 removed_at이 기록된 경우에만 성공한다.
+ */
+function supaMarkScheduleItemsRemoved_(tid, scheduleIds) {
+  tid = String(tid || '').trim();
+  scheduleIds = (scheduleIds || []).map(function(id) { return String(id || '').trim(); }).filter(Boolean);
+  if (!tid || !scheduleIds.length) return { ok: false, error: '거래ID/스케줄ID 없음' };
+  var cfg = SUPA_CFG_();
+  var token = supaToken_(cfg);
+  if (!token) return { ok: false, error: '봇 토큰 없음' };
+  var headers = {
+    apikey: cfg.apikey,
+    Authorization: 'Bearer ' + token,
+    'Content-Profile': 'village',
+    'Accept-Profile': 'village',
+    Prefer: 'return=representation'
+  };
+  var removedAt = new Date().toISOString();
+  for (var i = 0; i < scheduleIds.length; i++) {
+    var scheduleId = scheduleIds[i];
+    var url = cfg.url + '/rest/v1/schedule_items'
+      + '?trade_id=eq.' + encodeURIComponent(tid)
+      + '&schedule_id=eq.' + encodeURIComponent(scheduleId);
+    var response = UrlFetchApp.fetch(url, {
+      method: 'patch',
+      contentType: 'application/json',
+      headers: headers,
+      payload: JSON.stringify({ removed_at: removedAt }),
+      muteHttpExceptions: true
+    });
+    var code = response.getResponseCode();
+    var rows = [];
+    try { rows = JSON.parse(response.getContentText() || '[]'); } catch (parseErr) {}
+    if (code >= 300 || !Array.isArray(rows) || rows.length !== 1) {
+      return { ok: false, error: 'Supabase 품목 제외 실패 ' + scheduleId + ' (' + code + ')' };
+    }
+  }
+  return { ok: true, removedAt: removedAt, scheduleIds: scheduleIds };
+}
+
+/**
  * 반출완료 서버 권한 저장. 브라우저 전체 upsert와 분리해 다른 탭/기기의 오래된
  * 스냅샷이 setup_done을 되돌리지 못하게 한다. 행 없음도 성공으로 간주하지 않는다.
  */

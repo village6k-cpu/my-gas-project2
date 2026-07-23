@@ -64,10 +64,12 @@ create table if not exists village.schedule_items (
   end_shift_days   int not null default 0,
   memo_checkout    text,
   memo_checkin     text,
+  removed_at       timestamptz,
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now()
 );
 create index if not exists sched_trade_idx on village.schedule_items (trade_id);
+create index if not exists sched_active_trade_idx on village.schedule_items (trade_id, sort, schedule_id) where removed_at is null;
 
 -- ── 인수인계 메모(전역 포스트잇) ───────────────────────────────
 create table if not exists village.handover_notes (

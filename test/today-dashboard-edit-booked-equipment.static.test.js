@@ -12,10 +12,19 @@ const status = read('apps/today-dashboard/lib/domain/status.ts');
 const gasRoute = read('apps/today-dashboard/app/api/gas/route.ts');
 const sheetApi = read('sheetAPI.js');
 const checkAvailability = read('checkAvailability.js');
+const remote = read('apps/today-dashboard/lib/data/remote.ts');
+const mappers = read('apps/today-dashboard/lib/data/mappers.ts');
+const migration = read('apps/today-dashboard/supabase/migrations/20260723033000_schedule_item_removed_at.sql');
 
 assert(
   checklist.includes('SetSingleList'),
   'single set equipment must keep the set-header tinted container instead of falling back to a plain loose list'
+);
+assert(
+  migration.includes('add column if not exists removed_at timestamptz') &&
+    /q\.in\("trade_id", chunk\)\.is\("removed_at", null\)/.test(remote) &&
+    !mappers.includes('removed_at'),
+  'removed checkout baseline rows must stay auditable without reappearing in live equipment lists'
 );
 assert(
   /function CheckoutRow\([\s\S]*setTone = false/.test(checklist),

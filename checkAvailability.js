@@ -7580,6 +7580,13 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
     );
     if (removeInvalidated && removeInvalidated.error) return removeInvalidated;
 
+    var removalProjection = typeof supaMarkScheduleItemsRemoved_ === 'function'
+      ? supaMarkScheduleItemsRemoved_(tid, removedScheduleIds)
+      : { ok: false, error: 'Supabase 품목 제외 함수 없음' };
+    if (!removalProjection || !removalProjection.ok) {
+      return { error: '품목 삭제 상태 저장 실패 — 시트 행은 유지했습니다: ' + String(removalProjection && removalProjection.error || '저장 실패') };
+    }
+
     deleteDashboardRowsDescending_(sched, rowsToDelete);
     var contractResult = null;
     var contractRegenPending = true;
@@ -11360,6 +11367,14 @@ function removeEquipmentFromContract(sheet, row) {
       const invalidated = invalidateDashboardReturnInspectionForTrade_(거래ID, deletedScheduleId ? [deletedScheduleId] : [], '스케줄 품목 삭제');
       if (invalidated && invalidated.error) {
         sheet.getRange(row, 15).setValue("❌ 삭제 전 반납 검수 초기화 실패: " + invalidated.error);
+        sheet.getRange(row, 14).clearContent();
+        return;
+      }
+      const removalProjection = typeof supaMarkScheduleItemsRemoved_ === 'function'
+        ? supaMarkScheduleItemsRemoved_(거래ID, deletedScheduleId ? [deletedScheduleId] : [])
+        : { ok: false, error: 'Supabase 품목 제외 함수 없음' };
+      if (!removalProjection || !removalProjection.ok) {
+        sheet.getRange(row, 15).setValue("❌ 삭제 상태 저장 실패 — 시트 행 유지: " + String(removalProjection && removalProjection.error || '저장 실패'));
         sheet.getRange(row, 14).clearContent();
         return;
       }
