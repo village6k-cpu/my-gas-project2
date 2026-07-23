@@ -11,6 +11,7 @@ const __dirname = path.dirname(__filename);
 const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec';
 const DEFAULT_SHEET_API_KEY = 'village2026';
 const VILLAGE_SHEET_ID = '17cl0YlZYA6j9hlTqPFIe5J0UdjuLcfxZyQfKGF00Ksk';
+const VILLAGE_OPS_SHEET_ID = '1ssb6EyuRRCU04Zf4UAtdbpYYkWcseGqnhWVONdrqol8';
 const DEFAULT_KAKAO_CHANNEL_MANAGER_URL = 'https://business.kakao.com/_xhPMls/chats?t_src=business_partnercenter&t_ch=lnb&t_obj=%EB%82%B4%EC%B1%84%ED%8C%85_%ED%81%B4%EB%A6%AD';
 const DEFAULT_KAKAO_REMOTE_DEBUGGING_PORT = '9223';
 const DEFAULT_SLACK_CHANNELS = {
@@ -124,6 +125,118 @@ function buildGvizUrl(sheet, tq) {
   url.searchParams.set('sheet', sheet);
   url.searchParams.set('tq', tq);
   return url.toString();
+}
+
+function buildOpsGvizUrl(sheet, tq, sheetId = VILLAGE_OPS_SHEET_ID) {
+  const url = new URL(`https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq`);
+  url.searchParams.set('tqx', 'out:json');
+  url.searchParams.set('sheet', sheet);
+  url.searchParams.set('tq', tq);
+  return url.toString();
+}
+
+function parseGvizResponse(textBody = '') {
+  const raw = String(textBody || '').trim();
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end < start) throw new Error('Invalid GViz response');
+  return JSON.parse(raw.slice(start, end + 1));
+}
+
+export function normalizeCustomerDbPhoneKey(value = '') {
+  let digits = text(value).replace(/\D/g, '');
+  if (digits.startsWith('82') && digits.length >= 11) digits = `0${digits.slice(2)}`;
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+export function normalizeCustomerDbDiscountType(value = '') {
+  const normalized = text(value).normalize('NFKC').replace(/\s+/g, '').trim();
+  if (!normalized) return '';
+  if (normalized === '일반') return '일반';
+  if (/단골/.test(normalized)) return '단골';
+  if (/제휴/.test(normalized)) return '제휴';
+  if (/학생|재학|학번|학사|대학|고등|중학/.test(normalized)) return '학생';
+  if (/사업자|개인사업자|프리랜서|프리|개사프|자영|1인|소상공/.test(normalized)) return '개인사업자/프리랜서';
+  return '';
+}
+
+function pickBestCustomerDbDiscount(matches = []) {
+  const rank = { '일반': 1, '개인사업자/프리랜서': 2, '학생': 3, '제휴': 4, '단골': 5 };
+  return matches.reduce((best, match) => {
+    const discountType = normalizeCustomerDbDiscountType(match.discount);
+    if (!discountType) return best;
+    if (!best.discountType || (rank[discountType] || 0) > (rank[best.discountType] || 0)) {
+      return { discountType, source: match.source, matchedBy: match.matchedBy, rawDiscount: match.discount };
+    }
+    return best;
+  }, { discountType: '', source: '', matchedBy: '', rawDiscount: '' });
+}
+
+export async function lookupCustomerDbDiscountForRequest({ customerName = '', phone = '' } = {}, config = {}, options = {}) {
+  const fetchImpl = options.fetchImpl || config.fetchImpl || fetch;
+  const sheetId = config.villageOpsSheetId || process.env.VILLAGE_OPS_SHEET_ID || VILLAGE_OPS_SHEET_ID;
+  const nameKey = text(customerName).trim();
+  const phoneKey = normalizeCustomerDbPhoneKey(phone);
+  if (!nameKey && !phoneKey) return { matched: false, discountType: '', reason: 'missing_customer_identity', matches: [] };
+
+  const url = options.url || buildOpsGvizUrl('고객DB', 'SELECT A,B,I', sheetId);
+  const response = await fetchImpl(url, {
+    signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(options.timeoutMs || config.customerDbTimeoutMs || 20000) : undefined
+  });
+  const textBody = await response.text();
+  if (!response.ok) throw new Error(`Customer DB lookup failed HTTP ${response.status}: ${textBody.slice(0, 300)}`);
+  const parsed = parseGvizResponse(textBody);
+  const rows = Array.isArray(parsed?.table?.rows) ? parsed.table.rows : [];
+  const mapped = rows.map((row) => {
+    const cells = Array.isArray(row?.c) ? row.c : [];
+    return {
+      phone: text(cells[0]?.v).trim(),
+      name: text(cells[1]?.v).trim(),
+      discount: text(cells[2]?.v).trim(),
+      source: 'village2_customer_db_gviz'
+    };
+  });
+  const phoneMatches = phoneKey
+    ? mapped.filter((row) => normalizeCustomerDbPhoneKey(row.phone) === phoneKey).map((row) => ({ ...row, matchedBy: 'phone' }))
+    : [];
+  const nameMatches = nameKey
+    ? mapped.filter((row) => row.name === nameKey).map((row) => ({ ...row, matchedBy: 'name' }))
+    : [];
+  const matches = phoneMatches.length ? phoneMatches : nameMatches;
+  const distinctPhones = Array.from(new Set(matches.map((row) => normalizeCustomerDbPhoneKey(row.phone)).filter(Boolean)));
+  const ambiguous = !phoneKey && distinctPhones.length > 1;
+  const best = pickBestCustomerDbDiscount(matches);
+  return {
+    matched: matches.length > 0,
+    ambiguous,
+    discountType: ambiguous ? '' : best.discountType,
+    rawDiscount: ambiguous ? '' : best.rawDiscount,
+    matchedBy: ambiguous ? 'ambiguous_name' : (best.matchedBy || (phoneMatches.length ? 'phone' : (nameMatches.length ? 'name' : ''))),
+    source: best.source || (matches[0]?.source || ''),
+    matchCount: matches.length,
+    distinctPhoneCount: distinctPhones.length,
+    matches: matches.slice(0, 5).map((row) => ({ name: row.name, phone: row.phone, discount: row.discount, matchedBy: row.matchedBy }))
+  };
+}
+
+export async function enrichSheetPayloadWithCustomerDbDiscount(config = {}, sheetPayload = null, options = {}) {
+  if (!sheetPayload?.args) return { payload: sheetPayload, lookup: { matched: false, reason: 'missing_sheet_payload' } };
+  const args = sheetPayload.args;
+  const lookup = await lookupCustomerDbDiscountForRequest({
+    customerName: args.예약자명,
+    phone: args.연락처
+  }, config, options);
+  if (!lookup.discountType) return { payload: sheetPayload, lookup };
+  return {
+    payload: {
+      ...sheetPayload,
+      args: {
+        ...args,
+        할인유형: lookup.discountType
+      }
+    },
+    lookup
+  };
 }
 
 async function fetchReadOnlyJson(url, { fetchImpl = fetch, timeoutMs = 30000 } = {}) {
@@ -304,6 +417,12 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
         col: 1,
         query: '{AI_ENCODED_SEARCH_QUERY}'
       }),
+      equipment_master_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
+        action: 'search',
+        sheet: '장비마스터',
+        col: 1,
+        query: '{AI_ENCODED_SEARCH_QUERY}'
+      }),
       request_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
         action: 'search',
         sheet: '확인요청',
@@ -313,15 +432,16 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
       contract_master_recent_gviz: buildGvizUrl('계약마스터', "SELECT A,B,E,G,J WHERE J='예약' ORDER BY A DESC LIMIT 80"),
       schedule_detail_by_trade_id_gviz_template: buildGvizUrl('스케줄상세', "SELECT B,C,D,E,F,H WHERE B='{AI_TRADE_ID}' LIMIT 50"),
       request_recent_gviz: buildGvizUrl('확인요청', "SELECT K,B,F WHERE K!='' ORDER BY A DESC LIMIT 50"),
-      request_recent_with_results_gviz: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE A!='' ORDER BY A DESC LIMIT 80"),
-      request_by_req_id_gviz_template: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE A='{AI_REQ_ID}' LIMIT 30"),
-      request_by_customer_gviz_template: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,Q,R WHERE K='{AI_CUSTOMER_NAME}' ORDER BY A DESC LIMIT 30"),
+      request_recent_with_results_gviz: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,N,O,P,Q,R WHERE A!='' ORDER BY A DESC LIMIT 80"),
+      request_by_req_id_gviz_template: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,N,O,P,Q,R WHERE A='{AI_REQ_ID}' LIMIT 30"),
+      request_by_customer_gviz_template: buildGvizUrl('확인요청', "SELECT A,B,C,D,E,F,G,I,J,K,L,M,N,O,P,Q,R WHERE K='{AI_CUSTOMER_NAME}' ORDER BY A DESC LIMIT 30"),
       customer_db_by_name_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
         action: 'search',
         sheet: '고객DB',
         col: 2,
         query: '{AI_CUSTOMER_NAME}'
       }),
+      village2_customer_db_discount_gviz: buildOpsGvizUrl('고객DB', 'SELECT A,B,I'),
       contract_by_trade_id_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
         action: 'search',
         sheet: '계약마스터',
@@ -335,7 +455,7 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
         query: '{AI_TRADE_ID}'
       })
     },
-    note: 'These URLs are read-only lookup aids. 확인요청 columns: A=reqID, B-E period, F equipment, G qty, I result, J detail, K customer, L phone, M discount, Q memo, R extra. 계약마스터 columns include A tradeID, B customer, C phone, E-H period, J status, K discount. 고객DB columns: A phone, B customer name, C affiliation, I loyalty/partner flag when present. AI must decide what to query and how to interpret results. Do not use write/run/register/send actions.'
+    note: 'These URLs are read-only lookup aids. 확인요청 columns: A=reqID, B-E period, F equipment, G qty, I result, J detail, K customer, L phone, M discount, N register command, O register status, P tradeID, Q memo, R extra. 계약마스터 columns include A tradeID, B customer, C phone, E-H period, J status, K discount. 고객DB columns: A phone, B customer name, C affiliation when present, I discount/segment when present; village2_customer_db_discount_gviz is the authoritative discount lookup and outranks Kakao text. AI must decide what to query and how to interpret results. Do not use write/run/register/send actions.'
   };
 }
 
@@ -402,15 +522,17 @@ export function buildHermesPrompt(job, options = {}) {
   return `AI-first Kakao rental-shop worker task.
 
 CRITICAL RULES:
-- AI-first: 코드는 queue/claim/API plumbing만 맡는다.
+- This is AI-first. 코드의 역할은 queue/claim/API 호출 같은 plumbing뿐이다.
 - 코드가 고객 의도, 예약 여부, 날짜/시간/장비를 최종 판단하면 안 된다. 코드 판단 금지: AI가 화면과 맥락을 보고 판단하고, 코드는 queue/claim/API write만 수행한다.
+- Outer code will validate your typed decision but will never infer names/dates/equipment, merge a different equipment list, synthesize reply prose, choose attachments, bypass RAG, or reroute follow-ups from keywords. If a required field is incomplete, Hermes is asked to repair it.
 - 카카오 Channel Manager Chrome 화면을 computer_use로 직접 확인하고, 화면에서 보이는 대화 맥락을 우선한다.
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
-- Use at most 10 tool calls total and 5 UI navigation actions. Batch read-only GAS lookups into one terminal call. On reaching either budget, return the best grounded FINAL_JSON with lower confidence or human review; do not keep exploring.
+- No artificial low tool/UI cap: continue until evidence is sufficient or the global timeout. Batch read-only lookups only when query breadth/detail are preserved; avoid repeats.
+- Once sufficient, return FINAL_JSON immediately. Tool/API failures are evidence gaps: encode uncertainty in confidence/reason/follow-up; never substitute an apology or progress report.
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때만 간단한 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
-- 자동발송 후보: FAQ/절차/수령·반납/단순 후속/예약 접수/연락처 우선 요청. 재고·예약 확정은 원칙 금지지만, 직전 직원이 “가능/예약 가능”이라고 했고 최신 고객이 “그럼 이렇게 부탁/진행/예약해주세요”처럼 수락한 경우만 짧은 확정 답변 auto_send 후보로 둔다. 가격/결제/환불/파손/세금은 draft_only/task.
+- 자동발송 후보: FAQ/절차/수령·반납/단순 후속/예약 접수/연락처 요청. 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능. 가격/환불/파손/세금 draft_only. 입금 알림은 완료 단정 없이 접수 ACK만 auto_send.
 - 예약 확정, 재고 가능 단정, 가격 확정은 화면/시트 근거 없이 단정하지 않는다. 하지만 고객이 예약형식에 맞게 정보를 준 경우 확인요청 시트 입력은 적극 수행한다.
-- Google Sheets 입력은 API로 한다.
+- Google Sheets 입력은 API로 가능하다. 어떤 값을 넣을지는 AI가 판단하되, 예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다.
 
 CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 최근 1시간 내 새 메시지 후보라도 반드시 채팅방을 열고, 화면에서 보이는 메시지 + 가능하면 최근 24시간 맥락을 확인한다.
@@ -418,6 +540,7 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - read-catchup/backstop job일 수 있다. 마지막 버블이 "네네/감사합니다/견적서 부탁"이어도 같은 최근 고객 턴 앞쪽 예약형식 메시지가 있으면 확인요청/계약/스케줄 등록 여부를 확인한다.
 - 확인요청에 이미 RQ가 있으면 중복 입력 금지. 단, 그 RQ가 자동화가 만든 것이라고 추정하거나 보고하지 마라. 수동 입력일 수 있다.
 - 확인요청에 이미 RQ가 있으면 중복 입력은 금지하되, 반드시 그 RQ의 I열(결과)과 J열(상세)을 읽어서 가용확인 결과 기준으로 follow_up_items.summary/recommended_action/suggested_reply_draft를 만든다. 사람에게 "RQ 결과를 검토하라"고만 떠넘기지 마라.
+- L열 연락처 공란/O열 등록상태 "연락처 입력 필요": "연락처 즉시 요청 → 연락처 입력 → 가용 재확인 → 등록".
 - 기존 RQ 결과가 비어 있거나 읽히지 않으면 "가용확인 결과 없음/재확인 필요"로 보고한다. 결과가 ✅ 가용일 때만 고객 답변 초안에 예약 가능하다고 쓴다. ⚠️/❌/가용0/결과없음이면 가능 단정 금지.
 - 예약/가격/FAQ/무시를 AI가 분류한다. 미리보기 텍스트만으로 예약·가격·FAQ를 확정하지 않는다.
 - 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/처리판 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
@@ -441,20 +564,22 @@ SENDER AND TURN-TAKING POLICY:
 
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
+- 장비별로 세트마스터와 장비마스터 read-only 검색을 모두 활용한다. 이미지/대화에 적힌 모든 장비를 빠짐없이 하나씩 매칭한 뒤 sheet_row_candidate.equipment에 최종 전체 목록을 넣는다.
 - 예약 메시지에 명시된 예약자명/연락처는 프로필명보다 우선한다.
 - RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
-- 정규화가 애매해도 확인요청 입력은 막지 않는다. 실패 시 원문을 쓰고 Q/R에는 원문/추론/가용확인 후 안내를 넣지 않는다.
+- 정규화가 애매해도 확인요청 입력은 막지 않는다. 실패 시 원문을 item에 넣고, Q/R에는 원문/추론/가용확인 후 안내 등 내부 설명을 넣지 않는다.
 - 약어/속어는 검색 키워드 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. AI는 가능한 한 장비명을 추론/정규화해야 하며, 원문 그대로 쓰는 것은 정규화 실패 시 fallback이다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
-- 할인유형은 학생 / 개인사업자/프리랜서 / 일반 중 하나만 쓴다. 단골 또는 제휴는 절대 쓰지 말고 일반으로 둔다. 단골/제휴 여부는 GAS/고객DB가 판단한다.
-- 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리; 없거나 동명이인이면 should_write_to_sheet=false, 가능하면 auto_send로 "예약 등록이 불가능해서 연락처부터" 짧게 요청한다. 연락처가 재고/가용/가격보다 우선이다.
+- 할인유형: 고객DB I열이 카톡보다 우선. DB 값(학생/개인사업자/프리랜서/단골/제휴/일반)이 있으면 sheet_row_candidate.discount_type에 그대로 쓰고, 없을 때만 카톡에서 학생/개사프/일반 추론.
+- 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리한다. 없거나 동명이인이어도 확인요청 생성은 막지 말고 sheet_row_candidate.phone=""로 둔다. 연락처는 등록 단계 필수라 follow_up/답장에서는 연락처 요청을 남긴다.
 - 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
-- 예약형식이면 확인요청 입력이 기본이다. 불확실한 장비명/중복확인은 입력 차단 사유가 아니라 follow_up/evidence 대상이다. F열 item은 best 장비명으로 넣고, Q/R에는 AI 설명을 넣지 않는다. 연락처는 필수다.
+- 예약형식이면 확인요청 입력이 기본이다. 불확실한 장비명/중복확인/연락처 없음은 입력 차단 사유가 아니라 follow_up/evidence 대상이다. F열 item은 best 장비명으로 넣고, Q/R에는 AI 설명을 넣지 않는다. 연락처는 있으면 넣고 없으면 L열 공란으로 둔다.
 - memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
-- 확인요청 반출/반납시간은 정시 HH:00만 쓴다. 고객이 12:30처럼 분 단위로 말해도 12:00으로 내림 입력한다.
+- 확인요청 API는 고객이 말한 분 단위 시간을 HH:MM으로 그대로 받을 수 있다. Hermes는 화면과 대화에서 확인한 시간을 보존하고, outer code는 절대로 분을 버리거나 반올림하지 않는다. 시간이 실제로 모호할 때만 확인 질문/후속조치를 만든다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
 - read-catchup에서 기존 RQ를 발견한 경우에도 확인요청 I/J 결과를 읽은 뒤, 그 결과가 ✅/⚠️/❌/미확인 중 무엇인지 후속카드에 명시한다.
+- 기존 RQ를 발견하면 정확한 ID를 existing_confirm_request_ids 배열에 넣는다. 이유/요약 문장에만 쓰지 마라. 외부 코드는 prose에서 RQ를 추출하지 않는다.
 
 JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
@@ -472,22 +597,22 @@ TASK:
 2. Use terminal CUA only when DevTools evidence is insufficient/mismatched and allowed; read/navigation only (list_windows/get_window_state/page get_text/query_dom). Never use CUA to write Sheets or send Kakao.
 3. If using CUA output, print only filtered context around hints/customer, max 2000 chars.
 4. If BROWSER NAVIGATION RESULT says opened_target_chat with hint_matched=true, start from its live conversation_evidence and do not re-open the chat list.
-4. Use computer_use read-only capture only if needed. The worker forces capture mode="ax" and max_elements=80 for speed; do not request image/vision capture in the autonomous worker. If AX text is insufficient after navigation attempts, return unclear instead of escalating to screenshot capture.
+4. Start with DOM/AX; if insufficient or clipped, use read-only image/vision capture on the already-open automation Kakao target. Never type or send as part of evidence capture.
 5. Use JOB EVIDENCE navigation_hints only to find/open the target Kakao chat. This is navigation evidence, not business classification evidence.
-6. If the currently open conversation title/messages do not match the navigation_hints/preview_text, do not type into the visible Kakao search box in autonomous worker mode. Use already-open conversation evidence, visible chat-list rows, or supplied DevTools navigation evidence only; if the target room is not visible/open, return unclear instead of searching. never type into the message compose box and never send.
+6. If the target conversation is not already open/visible, use the supplied read-only DevTools chat-list search first and CUA/vision navigation fallback when allowed. Searching the chat list is allowed evidence navigation; never type into the message compose box and never send during evidence capture. Return unclear only after those read-only discovery paths fail.
 7. Read visible conversation content and recent context; separate staff/outbound vs customer/inbound before classifying. Merge consecutive customer bubbles in the latest customer turn; do not treat staff/outbound messages as customer requests.
 8. If RAG is useful, call it only after reading Kakao. Embed visible Kakao context in the question. Never use RAG for inventory, booking, mutations, duplicates, or to override CURRENT_CONFIRMED_POLICY.
 9. RAG interpretation: high/retrieved can support policy FAQ draft/auto_send when not covered by CURRENT_CONFIRMED_POLICY; low is tone/procedure hint; no_match/empty/error means ignore; ownerReview=true means review; knowledgeSource=general is not firm village policy.
 9-1. For FAQ/procedure/policy/components auto_send, use CURRENT_CONFIRMED_POLICY first, otherwise call RAG and fill rag_usage. Outer worker verifies current-policy match or high-confidence retrieved support. Never use RAG for current stock/booking/schedule truth.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 10-1. Doc types은 서류 생성/발송/발행만. 확인요청/예약/가용/스케줄/파손/반납/정산은 견적서 단어가 섞여도 doc 아님; primary item에 합친다.
-11. For reservation-format requests, prefer should_write_to_sheet=true only after phone is available from Kakao or a unique 고객DB match. If phone is missing, search 고객DB by customer name first. If no unique DB phone is found, set should_write_to_sheet=false and make the immediate reply ask for contact first because reservation registration is impossible without contact. Missing equipment/duplicate lookup goes to memo/extra_request, but missing phone with no DB match is blocking. Set false also for non-reservation, unopened/mismatched chat, unclear sender order, or obvious duplicate/already-registered booking. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered with a phone from Kakao/DB; otherwise no write.
+11. For reservation-format requests, missing phone is NOT a sheet-write blocker. Search 고객DB by name; if a unique DB phone is found, use it, otherwise leave sheet_row_candidate.phone="" and still write 확인요청. discount_type: 고객DB I열 outranks Kakao; use DB 학생/개인사업자/프리랜서/단골/제휴/일반 when present, otherwise infer from Kakao. Missing equipment/duplicate lookup/phone goes to follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or obvious duplicate/already-registered booking. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; phone may still be blank.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
-11-2. For multiple equipment items, put each item into sheet_row_candidate.equipment as a separate object. Do not concatenate multiple equipment names into one item string. One equipment object becomes one 확인요청 row under the same GAS-generated request ID.
-11-3. sheet_row_candidate date/time must be API-safe: YYYY-MM-DD HH:MM. Resolve 오늘/내일 from Kakao date context. 6월6일 24시 => 2026-06-07 00:00. If context unavailable, don't write; make human review.
+11-2. Multiple/revised equipment: sheet_row_candidate.equipment must be separate top-level objects for the final whole list, never concatenated or delta-only. Each object = one 확인요청 row. Set sheet_row_candidate.plan_complete=true only after you have reconciled the complete final equipment plan; outer code will not repair a delta.
+11-3. sheet_row_candidate date/time must be API-safe: YYYY-MM-DD and HH:MM, including minute-level times such as 16:30. Preserve the customer's explicit minutes. Resolve 오늘/내일 and 24시 yourself from Kakao date context. 6월6일 24시 => 2026-06-07 00:00. If context is unavailable, set should_write_to_sheet=false; outer code will never floor or round it.
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
-12. Create at most one follow_up_item per latest customer message cluster. Do not split one customer turn into separate reply_needed/schedule_check/damage_repair/completed_log cards. Choose the single primary type and put the rest as a concise checklist inside recommended_action/evidence.
-13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for simple, high-confidence replies that are safe to send now under the kill-switch policy. Otherwise use draft_only or no_reply.
+12. Create at most one follow_up_item per latest customer message cluster. Do not split one customer turn into separate reply_needed/schedule_check/damage_repair/completed_log cards. Choose the single primary type, an explicit route (schedule/document/settlement/inventory/other), and a concise stable taskKey for this unresolved business task; outer code never scans prose to change or merge it. Put secondary work as a concise checklist inside recommended_action/evidence.
+13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for simple, high-confidence replies that are safe to send now under the kill-switch policy. For auto_send, explicitly choose safetyClass, grounding, requiresRag, attachmentKeys, and alreadyDelivered. Text alone can never grant an auto-send or attachment. Otherwise use draft_only or no_reply.
 14. Return only the final machine-readable JSON below.
 
 FINAL OUTPUT FORMAT:
@@ -510,7 +635,7 @@ The JSON schema:
     "return_time": string | null,
     "quantity": number | string | null,
     "price": string | null,
-    "discount_type": "학생" | "개인사업자/프리랜서" | "일반" | null,
+    "discount_type": "학생" | "개인사업자/프리랜서" | "단골" | "제휴" | "일반" | null,
     "confirmed": boolean,
     "already_registered": boolean
   },
@@ -528,10 +653,13 @@ The JSON schema:
   "latest_customer_message_cluster": string,
   "latest_staff_message": string | null,
   "visible_messages_used": [{ "sender": string, "message": string, "time": string | null }],
+  "existing_confirm_request_ids": ["RQ-YYMMDD-NNN"],
   "rag_usage": { "used": boolean, "required_for_auto_send": boolean, "question": string | null, "logId": string | null, "confidence": string | null, "knowledgeSource": string | null, "usedSources": array, "applied_to_reply": boolean, "reason": string },
   "follow_up_items": [
     {
       "type": "reply_needed" | "quote_send" | "tax_invoice" | "schedule_check" | "reservation_review" | "price_review" | "payment_check" | "contract_document" | "return_extension" | "damage_repair" | "sheet_duplicate_check" | "completed_log",
+      "route": "schedule" | "document" | "settlement" | "inventory" | "other",
+      "taskKey": string,
       "priority": "urgent" | "high" | "normal" | "low",
       "status": "open" | "done" | "dismissed",
       "title": string,
@@ -545,6 +673,7 @@ The JSON schema:
     }
   ],
   "sheet_row_candidate": {
+    "plan_complete": boolean,
     "customer_name": string,
     "equipment": [{ "item": string, "quantity": number | string | "" }],
     "start_date": string,
@@ -552,7 +681,7 @@ The JSON schema:
     "pickup_time": string,
     "return_time": string,
     "phone": string,
-    "discount_type": "학생" | "개인사업자/프리랜서" | "일반" | "",
+    "discount_type": "학생" | "개인사업자/프리랜서" | "단골" | "제휴" | "일반" | "",
     "memo": string,
     "extra_request": string
   },
@@ -563,7 +692,12 @@ The JSON schema:
     "text": string,
     "confidence": "high" | "medium" | "low" | "no_match",
     "reason": string,
-    "shouldCreateTask": boolean
+    "shouldCreateTask": boolean,
+    "safetyClass": "simple_ack" | "contact_request" | "reservation_intake_ack" | "payment_receipt_ack" | "document_handoff" | "current_policy_answer" | "rag_grounded_answer" | "authoritative_availability_answer" | "staff_confirmed_reservation_acceptance" | "live_quote_link_guidance" | "sensitive_commitment" | "no_send",
+    "grounding": "visible_conversation" | "current_confirmed_policy" | "retrieved_rag" | "authoritative_sheet" | "staff_confirmation" | "none",
+    "requiresRag": boolean,
+    "attachmentKeys": ["village_bankbook_copy" | "village_business_registration"],
+    "alreadyDelivered": boolean
   }
 }`;
 }
@@ -608,7 +742,185 @@ function text(value) {
   return value === null || value === undefined ? '' : String(value);
 }
 
-const CUSTOMER_DOCUMENT_DEFAULT_REPLY = '요청하신 통장 사본과 사업자등록증 전달드립니다.';
+const AI_REPLY_SAFETY_CLASSES = new Set([
+  'simple_ack',
+  'contact_request',
+  'reservation_intake_ack',
+  'payment_receipt_ack',
+  'document_handoff',
+  'current_policy_answer',
+  'rag_grounded_answer',
+  'authoritative_availability_answer',
+  'staff_confirmed_reservation_acceptance',
+  'live_quote_link_guidance',
+  'sensitive_commitment',
+  'no_send'
+]);
+
+const AI_REPLY_GROUNDING_CLASSES = new Set([
+  'visible_conversation',
+  'current_confirmed_policy',
+  'retrieved_rag',
+  'authoritative_sheet',
+  'staff_confirmation',
+  'none'
+]);
+
+const AI_FOLLOW_UP_ROUTES = new Set(['schedule', 'document', 'settlement', 'inventory', 'other']);
+const AI_FOLLOW_UP_TYPES = new Set(['reply_needed', 'quote_send', 'tax_invoice', 'schedule_check', 'reservation_review', 'price_review', 'payment_check', 'contract_document', 'return_extension', 'damage_repair', 'sheet_duplicate_check', 'completed_log']);
+const AI_FOLLOW_UP_PRIORITIES = new Set(['urgent', 'high', 'normal', 'low']);
+const AI_FOLLOW_UP_STATUSES = new Set(['open', 'done', 'dismissed']);
+const HERMES_WORKER_TOOLSETS = 'terminal,file,web,skills,memory,session_search,computer_use,vision';
+const CONFIRM_REQUEST_DISCOUNT_TYPES = new Set(['학생', '개인사업자/프리랜서', '단골', '제휴', '일반']);
+const CUSTOMER_DOCUMENT_ATTACHMENT_KEYS = new Set([
+  'village_bankbook_copy',
+  'village_business_registration'
+]);
+
+function isStrictIsoDate(value = '') {
+  const raw = text(value).trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!match) return false;
+  const date = new Date(`${raw}T00:00:00.000Z`);
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === raw;
+}
+
+function isStrictConfirmRequestTime(value = '') {
+  return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(text(value).trim());
+}
+
+function decisionReply(decision = {}) {
+  return decision?.reply_decision && typeof decision.reply_decision === 'object'
+    ? decision.reply_decision
+    : {};
+}
+
+function replySafetyClass(decision = {}) {
+  const reply = decisionReply(decision);
+  return text(reply.safetyClass || reply.safety_class).trim();
+}
+
+function replyGrounding(decision = {}) {
+  const reply = decisionReply(decision);
+  return text(reply.grounding).trim();
+}
+
+function replyRequiresRag(decision = {}) {
+  const reply = decisionReply(decision);
+  return reply.requiresRag ?? reply.requires_rag;
+}
+
+function replyAttachmentKeys(decision = {}) {
+  const reply = decisionReply(decision);
+  const values = reply.attachmentKeys || reply.attachment_keys;
+  return Array.isArray(values) ? values.map((value) => text(value).trim()).filter(Boolean) : [];
+}
+
+function replyAlreadyDelivered(decision = {}) {
+  const reply = decisionReply(decision);
+  return reply.alreadyDelivered ?? reply.already_delivered;
+}
+
+export function validateAiDecisionContract(decision = {}) {
+  const errors = [];
+  if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
+    return { valid: false, errors: ['decision must be an object'] };
+  }
+
+  if (decision.should_write_to_sheet === true) {
+    const row = decision.sheet_row_candidate && typeof decision.sheet_row_candidate === 'object'
+      ? decision.sheet_row_candidate
+      : {};
+    if (row.plan_complete !== true) errors.push('sheet_row_candidate.plan_complete must be true');
+    if (!isStrictIsoDate(row.start_date)) errors.push('sheet_row_candidate.start_date must be YYYY-MM-DD');
+    if (!isStrictIsoDate(row.end_date)) errors.push('sheet_row_candidate.end_date must be YYYY-MM-DD');
+    if (!isStrictConfirmRequestTime(row.pickup_time)) errors.push('sheet_row_candidate.pickup_time must be HH:MM');
+    if (!isStrictConfirmRequestTime(row.return_time)) errors.push('sheet_row_candidate.return_time must be HH:MM');
+    if (!text(row.customer_name).trim()) errors.push('sheet_row_candidate.customer_name is required');
+    if (!CONFIRM_REQUEST_DISCOUNT_TYPES.has(text(row.discount_type).trim())) {
+      errors.push('sheet_row_candidate.discount_type must be an explicit allowed value');
+    }
+    if (!Array.isArray(row.equipment) || !row.equipment.length) {
+      errors.push('sheet_row_candidate.equipment must contain the complete AI equipment plan');
+    } else {
+      row.equipment.forEach((item, index) => {
+        if (!item || typeof item !== 'object' || !text(item.item).trim()) {
+          errors.push(`sheet_row_candidate.equipment[${index}].item is required`);
+        }
+        const quantity = Number(item?.quantity);
+        if (!Number.isFinite(quantity) || quantity <= 0) {
+          errors.push(`sheet_row_candidate.equipment[${index}].quantity must be positive`);
+        }
+      });
+    }
+  }
+
+  const reply = decisionReply(decision);
+  const replyMode = text(reply.replyMode || reply.reply_mode).trim();
+  if (replyMode === 'auto_send') {
+    const safetyClass = replySafetyClass(decision);
+    const grounding = replyGrounding(decision);
+    if (!AI_REPLY_SAFETY_CLASSES.has(safetyClass)) errors.push('reply_decision.safetyClass must be an explicit allowed value');
+    if (safetyClass === 'sensitive_commitment' || safetyClass === 'no_send') {
+      errors.push(`reply_decision.safetyClass ${safetyClass} cannot use auto_send`);
+    }
+    if (!AI_REPLY_GROUNDING_CLASSES.has(grounding) || grounding === 'none') {
+      errors.push('reply_decision.grounding must be an explicit evidence source');
+    }
+    if (typeof replyRequiresRag(decision) !== 'boolean') {
+      errors.push('reply_decision.requiresRag must be boolean');
+    }
+    if (!text(reply.text).trim()) errors.push('reply_decision.text is required for auto_send');
+    if (safetyClass === 'document_handoff') {
+      const keys = replyAttachmentKeys(decision);
+      if (!keys.length || keys.some((key) => !CUSTOMER_DOCUMENT_ATTACHMENT_KEYS.has(key))) {
+        errors.push('reply_decision.attachmentKeys must contain allowlisted document keys');
+      }
+      if (typeof replyAlreadyDelivered(decision) !== 'boolean') {
+        errors.push('reply_decision.alreadyDelivered must be boolean for document_handoff');
+      }
+    }
+  }
+
+  const followUps = Array.isArray(decision.follow_up_items) ? decision.follow_up_items : [];
+  followUps.forEach((item, index) => {
+    if (!AI_FOLLOW_UP_TYPES.has(text(item?.type).trim())) {
+      errors.push(`follow_up_items[${index}].type must be an explicit allowed value`);
+    }
+    const route = text(item?.route || item?.follow_up_route).trim();
+    if (!AI_FOLLOW_UP_ROUTES.has(route)) {
+      errors.push(`follow_up_items[${index}].route must be an explicit allowed value`);
+    }
+    if (!text(item?.taskKey || item?.task_key).trim()) {
+      errors.push(`follow_up_items[${index}].taskKey is required`);
+    }
+    if (!AI_FOLLOW_UP_PRIORITIES.has(text(item?.priority).trim())) {
+      errors.push(`follow_up_items[${index}].priority must be an explicit allowed value`);
+    }
+    if (!AI_FOLLOW_UP_STATUSES.has(text(item?.status).trim())) {
+      errors.push(`follow_up_items[${index}].status must be an explicit allowed value`);
+    }
+    if (!text(item?.title).trim()) errors.push(`follow_up_items[${index}].title is required`);
+    if (!text(item?.customer_name || item?.customerName).trim()) {
+      errors.push(`follow_up_items[${index}].customer_name is required`);
+    }
+    if (!text(item?.summary).trim()) errors.push(`follow_up_items[${index}].summary is required`);
+  });
+
+  if (decision.existing_confirm_request_ids !== undefined) {
+    if (!Array.isArray(decision.existing_confirm_request_ids)) {
+      errors.push('existing_confirm_request_ids must be an array');
+    } else {
+      decision.existing_confirm_request_ids.forEach((id, index) => {
+        if (!/^RQ-\d{6}-\d{3}$/i.test(text(id).trim())) {
+          errors.push(`existing_confirm_request_ids[${index}] must be RQ-YYMMDD-NNN`);
+        }
+      });
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
 
 export function normalizeKakaoAttachmentPaths(value = []) {
   const rawItems = Array.isArray(value)
@@ -633,65 +945,15 @@ export function defaultCustomerDocumentAssetPaths(env = process.env) {
   ]);
 }
 
-function customerDocumentRequestEvidenceText(decision = {}) {
-  if (typeof decision === 'string') return decision.normalize('NFKC');
-  // Only the latest customer turn may trigger the standard document send.
-  // Older visible history is useful for context, but using it as a trigger
-  // caused duplicates when a later customer message was just "감사합니다" or
-  // a separate 세금계산서 request after the documents had already been sent.
-  return text(decision?.latest_customer_message_cluster).normalize('NFKC');
-}
-
-function hasDocumentSendVerbNear(pattern, body = '') {
-  const requestVerbs = '(?:보내|전달|공유|첨부|부탁|요청|주세요|주시면|주실|주실수|있을까요|있나요)';
-  return new RegExp(`${pattern}.{0,35}${requestVerbs}`).test(body)
-    || new RegExp(`${requestVerbs}.{0,35}${pattern}`).test(body);
-}
-
-function isDirectCustomerDocumentAssetRequestText(value = '') {
-  const body = text(value).normalize('NFKC').replace(/\s+/g, ' ').trim();
-  if (!body) return false;
-  const bankPattern = '(?:통장\\s*사본|계좌\\s*사본|입금\\s*계좌|은행\\s*계좌|계좌정보)';
-  const businessPattern = '(?:사업자\\s*등록증|사업자등록증)';
-  const asksBank = hasDocumentSendVerbNear(bankPattern, body);
-  const asksBusiness = hasDocumentSendVerbNear(businessPattern, body);
-  if (asksBank) return true;
-  if (!asksBusiness) return false;
-
-  // A bare "사업자등록증" inside a tax-invoice turn often means the customer is
-  // sending *their* registration PDF for 세금계산서. Do not answer that by sending
-  // Village's documents unless the customer clearly asks for Village/our docs.
-  const clearlyVillageOwned = /(빌리지|귀사|업체|렌탈샵|사업장|빌리지렌탈샵|우리|저희).{0,20}(?:사업자|등록증)|(?:사업자|등록증).{0,20}(빌리지|귀사|업체|렌탈샵|사업장|빌리지렌탈샵|우리|저희)/.test(body);
-  const taxInvoiceContext = /(세금\s*계산서|계산서|전자세금|발급|발행|이메일|메일|@|\.pdf|pdf)/i.test(body);
-  return clearlyVillageOwned || !taxInvoiceContext;
-}
-
-function isKakaoStaffSenderLabel(value = '') {
-  return /(빌리지|김준영|최재형|운영자|상담원|매니저)/.test(text(value));
-}
-
-function isCustomerDocumentDeliveryMessage(value = '') {
-  const body = text(value).normalize('NFKC');
-  return /요청하신\s*(?:통장\s*사본|계좌\s*사본).*사업자\s*등록증.*(?:전달|보내)드립니다/.test(body)
-    || /요청하신.*사업자\s*등록증.*(?:통장\s*사본|계좌\s*사본).*(?:전달|보내)드립니다/.test(body);
-}
-
 export function customerDocumentAssetsAlreadySent(decision = {}) {
-  const messages = Array.isArray(decision?.visible_messages_used) ? decision.visible_messages_used : [];
-  let lastRequestIndex = -1;
-  messages.forEach((message, index) => {
-    if (isKakaoStaffSenderLabel(message?.sender)) return;
-    if (isDirectCustomerDocumentAssetRequestText(message?.message)) lastRequestIndex = index;
-  });
-  if (lastRequestIndex < 0) return false;
-  return messages.slice(lastRequestIndex + 1).some((message) => (
-    isKakaoStaffSenderLabel(message?.sender)
-    && isCustomerDocumentDeliveryMessage(message?.message)
-  ));
+  return replyAlreadyDelivered(decision) === true;
 }
 
 export function isCustomerDocumentAssetRequest(decision = {}) {
-  return isDirectCustomerDocumentAssetRequestText(customerDocumentRequestEvidenceText(decision));
+  const keys = replyAttachmentKeys(decision);
+  return replySafetyClass(decision) === 'document_handoff'
+    && keys.length > 0
+    && keys.every((key) => CUSTOMER_DOCUMENT_ATTACHMENT_KEYS.has(key));
 }
 
 export function customerDocumentAssetPathsForDecision(decision = {}, config = {}) {
@@ -700,14 +962,28 @@ export function customerDocumentAssetPathsForDecision(decision = {}, config = {}
   const paths = normalizeKakaoAttachmentPaths(configured).length
     ? normalizeKakaoAttachmentPaths(configured)
     : defaultCustomerDocumentAssetPaths();
-  return paths;
+  const configuredByKey = {
+    village_bankbook_copy: paths[0],
+    village_business_registration: paths[1]
+  };
+  return replyAttachmentKeys(decision)
+    .map((key) => configuredByKey[key])
+    .filter(Boolean);
 }
 
 export function canAutoSendCustomerDocumentAssets(decision = {}, config = {}) {
   if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
-  const classification = text(decision?.classification).trim();
-  if (classification && classification !== 'faq') return { allowed: false, reason: 'classification_not_customer_document_faq' };
-  if (!isCustomerDocumentAssetRequest(decision)) return { allowed: false, reason: 'not_latest_customer_document_request' };
+  const reply = decisionReply(decision);
+  const replyMode = text(reply.replyMode || reply.reply_mode).trim();
+  const confidence = text(reply.confidence || decision.confidence).trim();
+  const replyText = text(reply.text).trim();
+  const grounding = replyGrounding(decision);
+  if (!isCustomerDocumentAssetRequest(decision)) return { allowed: false, reason: 'document_handoff_not_ai_planned' };
+  if (replyMode !== 'auto_send') return { allowed: false, reason: `replyMode_${replyMode || 'missing'}` };
+  if (confidence !== 'high') return { allowed: false, reason: `confidence_${confidence || 'missing'}` };
+  if (!replyText) return { allowed: false, reason: 'reply_text_missing' };
+  if (!AI_REPLY_GROUNDING_CLASSES.has(grounding) || grounding === 'none') return { allowed: false, reason: 'reply_grounding_missing' };
+  if (replyRequiresRag(decision) !== false) return { allowed: false, reason: 'document_handoff_requires_rag_must_be_false' };
   if (customerDocumentAssetsAlreadySent(decision)) return { allowed: false, reason: 'customer_document_assets_already_sent' };
   const killSwitch = text(decision.kill_switch_observed).trim();
   if (killSwitch === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
@@ -722,11 +998,13 @@ export function canAutoSendCustomerDocumentAssets(decision = {}, config = {}) {
   if (missing.length) return { allowed: false, reason: 'customer_document_asset_file_missing', missing, attachmentPaths };
   return {
     allowed: true,
-    reason: 'standard_customer_document_assets',
-    text: CUSTOMER_DOCUMENT_DEFAULT_REPLY,
+    reason: 'document_handoff',
+    text: replyText,
     replyMode: 'auto_send',
     confidence: 'high',
-    attachmentPaths
+    attachmentPaths,
+    safetyClass: 'document_handoff',
+    grounding
   };
 }
 
@@ -760,92 +1038,16 @@ function hasRequiredSheetSafetyChecks(decision) {
   return REQUIRED_SHEET_SAFETY_CHECKS.every((key) => checks[key] === true);
 }
 
-function normalizeEquipmentIdentityText(value = '') {
-  return text(value)
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/alpha\s*(?:seven|7)|알파\s*세븐/g, ' 소니 a7s3 ')
-    .replace(/solid\s*(?:com)?/g, ' 솔리드컴 ')
-    .replace(/sigma/g, ' 시그마 ')
-    .replace(/sony/g, ' 소니 ')
-    .replace(/body/g, ' 바디 ')
-    .replace(/set/g, ' 세트 ')
-    .replace(/art/g, ' 아트 ')
-    .replace(/2470\s*gm\s*(?:2|ii)/g, ' 24-70 gm ii ')
-    .replace(/70200\s*gm\s*(?:2|ii)/g, ' 70-200 gm ii ')
-    .replace(/[^0-9a-z가-힣/-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function equipmentIdentityAnchors(value = '') {
-  const normalized = normalizeEquipmentIdentityText(value);
-  const anchors = new Set();
-  const generic = new Set(['세트', '풀세트', '바디', '바디세트', '렌즈', '장비', '카메라', '개', '대', '수량']);
-  for (const token of normalized.split(/[\s/]+/)) {
-    if (!token || generic.has(token)) continue;
-    if (/^\d+(?:개|대)$/.test(token)) continue;
-    if (/^[a-z]*\d+[a-z0-9]*$/.test(token) || /^\d{1,3}-\d{1,3}(?:mm)?$/.test(token)) {
-      anchors.add(token.replace(/mm$/, ''));
-      continue;
-    }
-    if (/^[a-z]{2,}$/.test(token) || /^[가-힣]{2,}$/.test(token)) anchors.add(token);
-  }
-  return anchors;
-}
-
-function isGroundedEquipmentRewrite(raw = '', proposed = '') {
-  const rawText = normalizeEquipmentIdentityText(raw);
-  const proposedText = normalizeEquipmentIdentityText(proposed);
-  if (!rawText || !proposedText) return true;
-  const rawCompact = rawText.replace(/\s+/g, '');
-  const proposedCompact = proposedText.replace(/\s+/g, '');
-  if (Math.min(rawCompact.length, proposedCompact.length) >= 4
-    && (rawCompact.includes(proposedCompact) || proposedCompact.includes(rawCompact))) return true;
-  const rawAnchors = equipmentIdentityAnchors(raw);
-  if (!rawAnchors.size) return true;
-  const proposedAnchors = equipmentIdentityAnchors(proposed);
-  const rawModels = [...rawAnchors].filter((anchor) => /\d/.test(anchor));
-  if (rawModels.length && !rawModels.some((anchor) => proposedAnchors.has(anchor))) return false;
-  const brandAnchors = ['소니', '시그마', '솔리드컴', '홀리랜드', '캐논', '니콘', '어퓨쳐', 'dji', '로닌', '자이스', '슈나이더'];
-  const rawBrands = brandAnchors.filter((anchor) => rawText.includes(anchor));
-  if (rawBrands.length && !rawBrands.some((anchor) => proposedText.includes(anchor))) return false;
-  return [...rawAnchors].some((anchor) => proposedAnchors.has(anchor));
-}
-
 function normalizeSheetEquipmentItems(decision = {}) {
   const row = decision.sheet_row_candidate || {};
-  const rawItems = Array.isArray(row.equipment) ? row.equipment
-    : Array.isArray(row.items) ? row.items
-      : Array.isArray(row.장비) ? row.장비
-        : [];
-  const fromCandidate = rawItems.map((item) => ({
-    item: text(item.item || item.name || item.이름 || item.equipment || item.raw_text),
-    quantity: item.quantity ?? item.qty ?? item.수량 ?? ''
+  if (!Array.isArray(row.equipment)) return [];
+  // sheet_row_candidate is Hermes's final, complete plan. The worker must not
+  // guess that another field is more complete or replace exact master names
+  // with raw customer wording.
+  return row.equipment.map((item) => ({
+    item: text(item?.item).trim(),
+    quantity: item?.quantity
   }));
-  const reservationSource = Array.isArray(decision.reservation_inquiry?.equipment_requested)
-    ? decision.reservation_inquiry.equipment_requested
-    : [];
-  const fromReservation = reservationSource
-    .map((item) => ({
-      item: text(item.exact_name_from_set_master || item.normalized_guess || item.raw_text),
-      rawItem: text(item.raw_text),
-      quantity: item.quantity ?? item.qty ?? item.수량 ?? ''
-    }));
-  const items = (fromCandidate.length ? fromCandidate : fromReservation)
-    .map((item, index) => {
-      const proposed = text(item.item).trim();
-      const rawItem = text(reservationSource[index]?.raw_text || item.rawItem).trim();
-      return {
-        item: rawItem && proposed && !isGroundedEquipmentRewrite(rawItem, proposed) ? rawItem : proposed,
-        quantity: item.quantity === null || item.quantity === undefined || item.quantity === '' ? 1 : item.quantity
-      };
-    })
-    .filter((item) => item.item);
-  if (items.length) return items;
-  const fallbackItem = text(row.item || row.장비명 || row.equipment_name).trim();
-  if (!fallbackItem) return [];
-  return [{ item: fallbackItem, quantity: row.quantity ?? row.qty ?? row.수량 ?? 1 }];
 }
 
 export function normalizeConfirmRequestTimeForSheet(value = '') {
@@ -853,12 +1055,14 @@ export function normalizeConfirmRequestTimeForSheet(value = '') {
   if (!raw) return '';
   let match = raw.match(/Date\(\d{4},\s*\d{1,2},\s*\d{1,2},\s*(\d{1,2}),\s*(\d{1,2})/);
   if (!match) match = raw.match(/\b(\d{1,2}):(\d{2})\b/);
-  if (!match) match = raw.match(/\b(\d{1,2})\s*시(?:\s*\d{1,2}\s*분)?/);
+  if (!match) match = raw.match(/\b(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?/);
   if (!match) return raw;
   const hour = Number(match[1]);
+  const minute = Number(match[2] || 0);
   if (!Number.isFinite(hour) || hour < 0 || hour > 24) return raw;
-  if (hour === 24) return '00:00';
-  return `${String(hour).padStart(2, '0')}:00`;
+  if (!Number.isFinite(minute) || minute < 0 || minute > 59) return raw;
+  if (hour === 24) return minute === 0 ? '00:00' : raw;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
 function kstDateParts(now = new Date()) {
@@ -906,65 +1110,6 @@ export function normalizeConfirmRequestDateForSheet(value = '', { now = new Date
   return raw;
 }
 
-function parseConfirmRequestTimeForSheet(value = '') {
-  const raw = text(value).normalize('NFKC').trim();
-  const normalized = normalizeConfirmRequestTimeForSheet(raw);
-  const rawMatch = raw.match(/\b(\d{1,2})(?::\d{2}|\s*시)/);
-  const normalizedMatch = normalized.match(/^(\d{2}):(\d{2})$/);
-  const rawHour = rawMatch ? Number(rawMatch[1]) : null;
-  const minutes = normalizedMatch ? Number(normalizedMatch[1]) * 60 + Number(normalizedMatch[2]) : null;
-  return { raw, normalized, rawHour, minutes, isEndOfDay24: rawHour === 24 };
-}
-
-function normalizeConfirmRequestDateTimeFields(row = {}, decision = {}, options = {}) {
-  const startDate = normalizeConfirmRequestDateForSheet(row.start_date || decision.reservation_inquiry?.rental_start, options);
-  let endDate = normalizeConfirmRequestDateForSheet(row.end_date || decision.reservation_inquiry?.rental_end, options);
-  const pickup = parseConfirmRequestTimeForSheet(row.pickup_time || decision.reservation_inquiry?.pickup_time);
-  const ret = parseConfirmRequestTimeForSheet(row.return_time || decision.reservation_inquiry?.return_time);
-
-  if (ret.isEndOfDay24 && endDate) {
-    endDate = addDaysToYmd(endDate, 1);
-  } else if (startDate && endDate && startDate === endDate && pickup.minutes !== null && ret.minutes !== null && ret.minutes < pickup.minutes) {
-    // Kakao customers often say same-day overnight windows casually. Prevent GAS/date-range rejection.
-    endDate = addDaysToYmd(endDate, 1);
-  }
-
-  return {
-    startDate,
-    pickupTime: pickup.normalized,
-    endDate,
-    returnTime: ret.normalized
-  };
-}
-
-function hasUsableConfirmRequestPhone(value = '') {
-  const raw = text(value).trim();
-  if (!raw) return false;
-  // 연락처는 GAS/시트 등록 단계의 구조적 필수값이다. 카카오 닉네임만으로 RQ를 만들면
-  // 같은 실제 고객을 나중에 본명/연락처로 다시 입력하게 되어 중복이 생긴다.
-  return raw.replace(/[^0-9]/g, '').length >= 7;
-}
-
-function formatConfirmRequestPhone(value = '') {
-  const digits = text(value).replace(/[^0-9]/g, '');
-  if (digits.length === 11) return `${digits.slice(0, 3)}-${digits.slice(3, 7)}-${digits.slice(7)}`;
-  if (digits.length === 10) return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
-  return text(value).trim();
-}
-
-function extractExplicitBookingIdentity(decision = {}) {
-  const cluster = text(decision.latest_customer_message_cluster).normalize('NFKC');
-  if (!cluster) return { name: '', phone: '' };
-  const phoneMatch = cluster.match(/(?:^|[^0-9])(01[016789])[-.\s]?(\d{3,4})[-.\s]?(\d{4})(?!\d)/);
-  const phone = phoneMatch ? formatConfirmRequestPhone(`${phoneMatch[1]}${phoneMatch[2]}${phoneMatch[3]}`) : '';
-  let name = '';
-  const labeled = cluster.match(/(?:예약자(?:명)?|성함|이름)\s*[:：-]?\s*([가-힣A-Za-z][가-힣A-Za-z0-9 .]{1,19}?)(?=\s*[\/|,]\s*01|\s+01)/);
-  const paired = cluster.match(/(?:^|\s)([가-힣]{2,8})\s*[\/|,]\s*01[016789]/);
-  if (labeled) name = labeled[1].trim();
-  else if (paired) name = paired[1].trim();
-  return { name, phone };
-}
-
 const CONFIRM_REQUEST_INTERNAL_NOTE_PATTERN = /(?:카카오|원문|고객\s*메시지|메시지에서|예약형식|가용\s*확인|가용확인|확인요청|계약마스터|스케줄상세|고객DB|중복|정규화|세트마스터|장비마스터|모델\s*선택|미등록|AI|자동화|worker|reason|evidence|follow[_\s-]*up|후속|검토\s*필요|안내\s*필요|고객에게|답변|시트|등록\s*대상|작성\s*필요)/i;
 
 function sanitizeConfirmRequestFreeText(value = '', { maxLength = 180 } = {}) {
@@ -989,26 +1134,24 @@ function sanitizeConfirmRequestFreeText(value = '', { maxLength = 180 } = {}) {
 export function buildSheetAppendPayload(decision, options = {}) {
   if (!decision || decision.should_write_to_sheet !== true) return null;
   if (!hasRequiredSheetSafetyChecks(decision)) return null;
+  const validation = validateAiDecisionContract(decision);
+  if (!validation.valid) return null;
   const row = decision.sheet_row_candidate || {};
   const equipment = normalizeSheetEquipmentItems(decision);
   if (!equipment.length) return null;
-  const explicitIdentity = extractExplicitBookingIdentity(decision);
-  const phone = explicitIdentity.phone || text(row.phone || decision.customer?.phone).trim();
-  if (!hasUsableConfirmRequestPhone(phone)) return null;
   const memo = sanitizeConfirmRequestFreeText(row.memo || '', { maxLength: 180 });
   const extra = sanitizeConfirmRequestFreeText(row.extra_request || '', { maxLength: 180 });
-  const dateTime = normalizeConfirmRequestDateTimeFields(row, decision, options);
   const args = {
-    반출일: dateTime.startDate,
-    반출시간: dateTime.pickupTime,
-    반납일: dateTime.endDate,
-    반납시간: dateTime.returnTime,
-    예약자명: explicitIdentity.name || text(row.customer_name || decision.customer?.name),
-    연락처: phone,
-    할인유형: text(row.discount_type || decision.reservation_inquiry?.discount_type || '일반') || '일반',
+    반출일: text(row.start_date).trim(),
+    반출시간: text(row.pickup_time).trim(),
+    반납일: text(row.end_date).trim(),
+    반납시간: text(row.return_time).trim(),
+    예약자명: text(row.customer_name).trim(),
+    연락처: text(row.phone).trim(),
+    할인유형: text(row.discount_type).trim(),
     비고: memo,
     추가요청: extra,
-    장비: equipment.map((item) => ({ 이름: item.item, 수량: item.quantity || 1 }))
+    장비: equipment.map((item) => ({ 이름: item.item, 수량: item.quantity }))
   };
   return {
     key: options.apiKey || DEFAULT_SHEET_API_KEY,
@@ -1050,37 +1193,6 @@ function conversationCustomerKey(value) {
   return firstKoreanName || withoutStatus || normalized;
 }
 
-function extractSemanticAnchors(value) {
-  const input = text(value).normalize('NFKC');
-  const anchors = [];
-  const amountMatches = input.match(/\d+(?:\.\d+)?\s*(?:만원|원)/g) || [];
-  anchors.push(...amountMatches.map((v) => v.replace(/\s+/g, '')));
-  if (/(반납|다음\s*회차|메모리|배터리|픽업|라오와|장비\s*반납|확인\s*후\s*가져다|가져다\s*드리)/.test(input)) {
-    anchors.push('operations_update');
-  }
-  const keywordGroups = [
-    ['payment_docs', /(결제|계약|견적|정산|서류|거래명세|세금계산|계산서)/],
-    ['discount_policy', /(학생\s*할인|학생할인|할인율|몇\s*프로|몇\s*퍼센트|할인)/],
-    ['reservation_review', /(예약|반출|반납|대여|촬영|일정)/],
-    ['damage_repair', /(미반납|누락|분실|파손|손상|수리|고장|회수|경고\s*메시지|배터리)/],
-    ['payment_check', /(입금|결제|미수|환불)/]
-  ];
-  for (const [label, regex] of keywordGroups) {
-    if (regex.test(input)) anchors.push(label);
-  }
-  if (!anchors.includes('discount_policy') && !anchors.includes('operations_update') && /(위치|주소|어디|찾아가|오시는\s*길)/.test(input)) anchors.push('location_faq');
-  if (anchors.includes('operations_update')) {
-    return [...new Set(anchors.filter((anchor) => !['payment_docs', 'reservation_review', 'location_faq', 'damage_repair'].includes(anchor)))].slice(0, 8);
-  }
-  if (anchors.includes('discount_policy')) {
-    return [...new Set(anchors.filter((anchor) => !['payment_docs', 'reservation_review', 'location_faq'].includes(anchor)))].slice(0, 8);
-  }
-  if (anchors.includes('damage_repair')) {
-    return [...new Set(anchors.filter((anchor) => !['payment_docs', 'reservation_review'].includes(anchor)))].slice(0, 8);
-  }
-  return [...new Set(anchors)].slice(0, 8);
-}
-
 function extractConcreteAnchors(value) {
   const input = text(value).normalize('NFKC');
   return [
@@ -1120,86 +1232,102 @@ function followUpCombinedText(row = {}) {
 const DOCUMENT_FOLLOW_UP_TYPES = new Set(['contract_document', 'quote_send', 'tax_invoice']);
 const SCHEDULE_FOLLOW_UP_TYPES = new Set(['reservation_review', 'schedule_check', 'sheet_duplicate_check']);
 const SETTLEMENT_FOLLOW_UP_TYPES = new Set(['payment_check']);
-const OPERATIONAL_NON_DOCUMENT_TYPES = new Set(['damage_repair', 'return_extension', 'completed_log']);
 
-function hasScheduleFollowUpSignal(combined = '') {
-  return /(확인요청|가용확인|예약\s*(?:가능|진행|요청|의사|접수|확정|후보)|예약자|스케줄|일정|반출|반납|대여|렌탈|장비\s*예약|입력\s*필요)/.test(combined);
+function explicitFollowUpRoute(row = {}) {
+  const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+  const explicit = text(
+    row.route
+    || row.follow_up_route
+    || payload.follow_up_route
+    || payload.route
+  ).trim();
+  if (AI_FOLLOW_UP_ROUTES.has(explicit)) return explicit;
+  const type = text(row.type || row.follow_up_type).trim();
+  if (SCHEDULE_FOLLOW_UP_TYPES.has(type) || type === 'return_extension') return 'schedule';
+  if (DOCUMENT_FOLLOW_UP_TYPES.has(type)) return 'document';
+  if (SETTLEMENT_FOLLOW_UP_TYPES.has(type)) return 'settlement';
+  if (type === 'damage_repair') return 'inventory';
+  return 'other';
 }
 
-function hasReservationFollowUpSignal(combined = '') {
-  return /(확인요청|가용확인|예약\s*(?:가능|진행|요청|의사|접수|확정|후보)|장비\s*예약|대여\s*가능|렌탈\s*가능|대여\s*할\s*수|대여\s*할수|렌탈\s*할\s*수)/.test(combined);
-}
-
-function hasSettlementFollowUpSignal(combined = '') {
-  return /(입금|결제|카드|정산|환불|미수)/.test(combined);
-}
-
-function hasDamageFollowUpSignal(combined = '') {
-  return /(미반납|누락|분실|파손|손상|수리|고장|회수|경고\s*메시지|배터리)/.test(combined);
-}
-
-function hasDocumentRequestSignal(combined = '') {
-  const docNoun = '(?:세금계산서|현금영수증|계산서|견적서|거래명세서?|계약서|증빙|영수증|서류|사업자등록증|사업자\s*등록증|통장\s*사본)';
-  const docAction = '(?:발송|전송|보내|보내줘|전달|작성|생성|발행|발급|요청|준비|받(?:을|고|아)?|필요|확인)';
-  return new RegExp(`${docNoun}.{0,24}${docAction}|${docAction}.{0,24}${docNoun}`).test(combined);
+function explicitFollowUpTaskKey(row = {}) {
+  const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+  return normalizeKeyPart(
+    row.taskKey
+    || row.task_key
+    || row.follow_up_task_key
+    || payload.follow_up_task_key
+    || payload.taskKey
+    || payload.task_key,
+    120
+  );
 }
 
 function isReservationFollowUpTopic(row = {}, combined = followUpCombinedText(row)) {
+  void combined;
   const type = String(row.type || row.follow_up_type || '');
-  if (type === 'reservation_review') return true;
-  if (!['reply_needed', 'schedule_check', 'completed_log'].includes(type)) return false;
-  return hasReservationFollowUpSignal(combined);
+  return explicitFollowUpRoute(row) === 'schedule' || SCHEDULE_FOLLOW_UP_TYPES.has(type);
 }
 
 function stableFollowUpType(row = {}, combined = followUpCombinedText(row)) {
-  return isReservationFollowUpTopic(row, combined) ? 'reservation_review' : normalizeKeyPart(row.type, 60);
+  void combined;
+  return normalizeKeyPart(row.type, 60);
 }
 
 function stableFollowUpAnchors(row = {}, combined = followUpCombinedText(row)) {
+  const taskKey = explicitFollowUpTaskKey(row);
+  if (taskKey && taskKey !== 'unknown') return [taskKey];
   if (isReservationFollowUpTopic(row, combined)) {
     return [...new Set([...extractDateConcreteAnchors(combined), 'reservation_review'])];
   }
-  return extractSemanticAnchors(combined);
+  return extractConcreteAnchors(combined);
 }
 
 export function buildFollowUpSemanticKey(row = {}) {
   const customer = normalizeCustomerForTask(row.customer_name || row.customerName);
   const type = normalizeKeyPart(row.type, 60);
+  const taskKey = explicitFollowUpTaskKey(row);
+  if (taskKey && taskKey !== 'unknown') {
+    return ['semantic', customer, explicitFollowUpRoute(row), type, taskKey]
+      .map((v) => normalizeKeyPart(v, 120))
+      .join(':');
+  }
   const combined = followUpCombinedText(row);
   const concreteAnchors = extractConcreteAnchors(combined);
-  const topicAnchors = extractSemanticAnchors(combined);
-  if (!concreteAnchors.length && !topicAnchors.length) {
+  if (!concreteAnchors.length) {
     return `exact:${normalizeKeyPart(row.follow_up_key || row.id || row.title || '', 200)}`;
   }
-  return ['semantic', customer, type, ...new Set(concreteAnchors), ...new Set(topicAnchors)]
+  return ['semantic', customer, explicitFollowUpRoute(row), type, ...new Set(concreteAnchors)]
     .map((v) => normalizeKeyPart(v, 120))
     .join(':');
 }
 
 export function buildFollowUpTopicKey(row = {}) {
   const customer = normalizeCustomerForTask(row.customer_name || row.customerName);
-  const combined = followUpCombinedText(row);
-  const concreteAnchors = extractConcreteAnchors(combined);
-  const topicAnchors = extractSemanticAnchors(combined);
-  if (isReservationFollowUpTopic(row, combined)) {
-    return ['topic', customer, 'reservation_review', ...new Set(extractDateConcreteAnchors(combined))]
+  const taskKey = explicitFollowUpTaskKey(row);
+  if (taskKey && taskKey !== 'unknown') {
+    return ['topic', customer, explicitFollowUpRoute(row), taskKey]
       .map((v) => normalizeKeyPart(v, 120))
       .join(':');
   }
-  const topicPriority = ['operations_update', 'discount_policy', 'location_faq', 'damage_repair', 'payment_check', 'payment_docs', 'reservation_review'];
-  const topic = topicPriority.find((value) => topicAnchors.includes(value));
-  if (!topic) return buildFollowUpSemanticKey(row);
-  const parts = ['topic', customer, topic];
-  if (topic === 'reservation_review' || topic === 'payment_docs' || topic === 'payment_check') {
-    parts.push(...new Set(concreteAnchors));
-  }
+  const combined = followUpCombinedText(row);
+  const concreteAnchors = extractConcreteAnchors(combined);
+  const route = explicitFollowUpRoute(row);
+  const type = normalizeKeyPart(row.type, 60);
+  if (!concreteAnchors.length) return buildFollowUpSemanticKey(row);
+  const parts = ['topic', customer, route, type, ...new Set(concreteAnchors)];
   return parts.map((v) => normalizeKeyPart(v, 120)).join(':');
 }
 
 export function mergeFollowUpRowsByTopic(rows = []) {
   const groups = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
-    const key = buildFollowUpTopicKey(row);
+    const taskKey = explicitFollowUpTaskKey(row);
+    const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+    const declaredRoute = text(row.route || row.follow_up_route || payload.follow_up_route || payload.route).trim();
+    const key = taskKey && taskKey !== 'unknown' && AI_FOLLOW_UP_ROUTES.has(declaredRoute)
+      ? ['ai-topic', normalizeCustomerForTask(row.customer_name || row.customerName), declaredRoute, taskKey].join(':')
+      : Symbol('untyped-follow-up');
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
@@ -1239,14 +1367,8 @@ function priorityRank(value) {
 }
 
 function routeRankForMerge(row = {}) {
-  const type = String(row.type || '');
-  const combined = followUpCombinedText(row);
-  if (SCHEDULE_FOLLOW_UP_TYPES.has(type) || isReservationFollowUpTopic(row, combined)) return 0;
-  if (type === 'damage_repair' || type === 'return_extension') return 1;
-  if (DOCUMENT_FOLLOW_UP_TYPES.has(type) || isDocumentFollowUpTopic(type, combined)) return 2;
-  if (SETTLEMENT_FOLLOW_UP_TYPES.has(type) || hasSettlementFollowUpSignal(combined)) return 3;
-  if (type === 'reply_needed') return 4;
-  return 5;
+  const ranks = { schedule: 0, inventory: 1, document: 2, settlement: 3, other: 4 };
+  return ranks[explicitFollowUpRoute(row)] ?? 5;
 }
 
 function mergeFollowUpRowGroup(items = []) {
@@ -1335,9 +1457,9 @@ function mergeFollowUpRowsByConversation(rows = []) {
   return [...passthrough, ...merged];
 }
 
-function buildStableFollowUpKey({ roomKey, customerName, type, title, summary, recommendedAction, evidence }) {
+function buildStableFollowUpKey({ roomKey, customerName, type, route, taskKey, title, summary, recommendedAction, evidence }) {
   const combined = [title, summary, recommendedAction, Array.isArray(evidence) ? evidence.join(' ') : ''].join(' ');
-  const rowForKey = { customer_name: customerName, type, title, summary, recommended_action: recommendedAction, evidence };
+  const rowForKey = { customer_name: customerName, type, route, taskKey, title, summary, recommended_action: recommendedAction, evidence };
   const anchors = stableFollowUpAnchors(rowForKey, combined);
   const base = [
     normalizeKeyPart(roomKey, 120),
@@ -1352,28 +1474,12 @@ function buildStableFollowUpKey({ roomKey, customerName, type, title, summary, r
   return base.join(':');
 }
 
-function shouldSuppressFollowUpItem(decision, item) {
-  const reason = text(decision?.reason).toLowerCase();
-  const blockingReason = text(item?.blocking_reason || item?.blockingReason).toLowerCase();
-  const title = text(item?.title);
-  const opened = decision?.safety_checks?.kakao_conversation_opened === true;
-  const noVisibleConversation = !opened && (
-    /matching kakao conversation not visible|chat_row_not_found|대화방을.*확인하지 못|대화방을.*열어.*확인하지 못/.test(reason)
-    || /matching kakao conversation not visible|chat_row_not_found|대화방.*수동 확인/.test(blockingReason)
-    || /Kakao 대화방 수동 확인 필요/.test(title)
-  );
-  return noVisibleConversation;
-}
-
 export function buildFollowUpRows(decision, job = {}) {
   const items = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
   const rawJobId = text(job.id || job.jobId || '');
   const jobId = isUuid(rawJobId) ? rawJobId : null;
   const roomKey = text(job.room_key || job.roomKey || job.payload?.roomKey || '').slice(0, 240);
   const fallbackCustomer = text(decision?.customer?.name || job.customer_name || '');
-  const allowedTypes = new Set(['reply_needed', 'quote_send', 'tax_invoice', 'schedule_check', 'reservation_review', 'price_review', 'payment_check', 'contract_document', 'return_extension', 'damage_repair', 'sheet_duplicate_check', 'completed_log']);
-  const allowedPriorities = new Set(['urgent', 'high', 'normal', 'low']);
-  const allowedStatuses = new Set(['open', 'done', 'dismissed']);
   const conversationSnapshot = {
     latest_customer_message_cluster: text(decision?.latest_customer_message_cluster).slice(0, 1500),
     latest_staff_message: text(decision?.latest_staff_message).slice(0, 1000),
@@ -1401,19 +1507,21 @@ export function buildFollowUpRows(decision, job = {}) {
   };
   return items
     .filter((item) => item && typeof item === 'object')
-    .filter((item) => !shouldSuppressFollowUpItem(decision, item))
     .map((item) => {
-      const type = allowedTypes.has(String(item.type)) ? String(item.type) : 'reply_needed';
-      const priority = allowedPriorities.has(String(item.priority)) ? String(item.priority) : 'normal';
-      const status = allowedStatuses.has(String(item.status)) ? String(item.status) : 'open';
-      const title = text(item.title).slice(0, 240) || `${type} follow-up`;
+      const type = text(item.type).trim();
+      const requestedRoute = text(item.route || item.follow_up_route).trim();
+      const route = requestedRoute;
+      const taskKey = text(item.taskKey || item.task_key).trim();
+      const priority = text(item.priority).trim();
+      const status = text(item.status).trim();
+      const title = text(item.title).slice(0, 240);
       const customerName = text(item.customer_name || item.customerName || fallbackCustomer).slice(0, 120);
       const summary = text(item.summary).slice(0, 3000);
       const recommendedAction = text(item.recommended_action || item.recommendedAction).slice(0, 3000);
       const suggestedReplyDraft = text(item.suggested_reply_draft || item.suggestedReplyDraft).slice(0, 3000);
       const evidence = Array.isArray(item.evidence) ? item.evidence.map((v) => text(v)).filter(Boolean).slice(0, 12) : [];
       return {
-        follow_up_key: buildStableFollowUpKey({ roomKey, customerName, type, title, summary, recommendedAction, evidence }),
+        follow_up_key: buildStableFollowUpKey({ roomKey, customerName, type, route, title, summary, recommendedAction, evidence, taskKey }),
         source: 'kakao_ai_worker',
         job_id: jobId,
         room_key: roomKey,
@@ -1432,6 +1540,8 @@ export function buildFollowUpRows(decision, job = {}) {
         decision_confidence: text(decision?.confidence).slice(0, 80),
         payload: {
           ...item,
+          follow_up_route: route,
+          follow_up_task_key: taskKey || null,
           ...conversationSnapshot
         }
       };
@@ -1456,7 +1566,7 @@ export async function upsertFollowUpRows(config, rows) {
   const taskRows = filterAutomationAuditFollowUpRows(rows);
   if (!taskRows.length) return { inserted: 0, rows: [], skippedAutomationAudit: rows.length };
   const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
-  const mergedRows = mergeFollowUpRowsByTopic(mergeFollowUpRowsByConversation(taskRows));
+  const mergedRows = mergeFollowUpRowsByTopic(taskRows);
   const filteredRows = await filterFollowUpRowsWithClosedHistory(config, mergedRows);
   if (!filteredRows.length) return { inserted: 0, rows: [], skippedClosed: rows.length };
   const activeMergeResult = await mergeFollowUpRowsWithActiveHistory(config, filteredRows);
@@ -1924,40 +2034,8 @@ function slackTypeLabel(type = '') {
   return labels[type] || type || '후속처리';
 }
 
-function isDocumentFollowUpTopic(type = '', combined = '') {
-  if (DOCUMENT_FOLLOW_UP_TYPES.has(type)) return true;
-  // 서류발송 채널은 순수 서류요청만. 구조화 타입이 예약/정산/파손/반납/완료기록이면
-  // 본문에 "견적서" 같은 단어가 섞여도 내부 근거/후속 메모로 보고 문서 라우팅을 막는다.
-  if (SCHEDULE_FOLLOW_UP_TYPES.has(type) || SETTLEMENT_FOLLOW_UP_TYPES.has(type) || OPERATIONAL_NON_DOCUMENT_TYPES.has(type)) return false;
-  if (hasDamageFollowUpSignal(combined)) return false;
-  return hasDocumentRequestSignal(combined);
-}
-
-function isKakaoTargetMismatchDiagnostic(row = {}, combined = followUpCombinedText(row)) {
-  const type = String(row.type || '');
-  if (!['reply_needed', 'completed_log'].includes(type)) return false;
-  return /(대상\s*카카오\s*대화\s*(?:확인\s*불가|불일치)|현재\s*열린\s*카카오\s*대화.*(?:보이지\s*않|불일치)|잡\s*프리뷰.*현재\s*열린\s*카카오\s*대화)/.test(combined);
-}
-
 export function routeFollowUpToSlack(row = {}, config = {}) {
-  const type = String(row.type || '');
-  const combined = followUpCombinedText(row);
-  let route = 'other';
-  if (!isKakaoTargetMismatchDiagnostic(row, combined)) {
-    if (SCHEDULE_FOLLOW_UP_TYPES.has(type)) route = 'schedule';
-    else if (SETTLEMENT_FOLLOW_UP_TYPES.has(type)) route = 'settlement';
-    else if (type === 'damage_repair') route = 'inventory';
-    else if (type === 'return_extension') route = 'schedule';
-    else if (type === 'completed_log') {
-      if (hasScheduleFollowUpSignal(combined)) route = 'schedule';
-      else if (hasSettlementFollowUpSignal(combined)) route = 'settlement';
-      else if (hasDamageFollowUpSignal(combined)) route = 'inventory';
-    } else if (DOCUMENT_FOLLOW_UP_TYPES.has(type)) route = 'document';
-    else if (hasDamageFollowUpSignal(combined)) route = 'inventory';
-    else if (isDocumentFollowUpTopic(type, combined)) route = 'document';
-    else if (isReservationFollowUpTopic(row, combined)) route = 'schedule';
-    else if (hasSettlementFollowUpSignal(combined)) route = 'settlement';
-  }
+  const route = explicitFollowUpRoute(row);
   const channels = {
     ...DEFAULT_SLACK_CHANNELS,
     ...(config.slackChannels || {})
@@ -2616,7 +2694,20 @@ async function mergeFollowUpRowsWithActiveHistory(config, rows) {
   const activeById = new Map(scopedActiveRows.map((row) => [row.id, row]));
 
   for (const row of rows) {
-    const match = [...activeById.values()].find((active) => sameConversationBundle(active, row));
+    const match = [...activeById.values()].find((active) => {
+      if (!sameConversationBundle(active, row)) return false;
+      const activeTaskKey = explicitFollowUpTaskKey(active);
+      const rowTaskKey = explicitFollowUpTaskKey(row);
+      if (!activeTaskKey || activeTaskKey === 'unknown' || !rowTaskKey || rowTaskKey === 'unknown') return false;
+      const activePayload = active?.payload && typeof active.payload === 'object' ? active.payload : {};
+      const rowPayload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+      const activeRoute = text(active.route || active.follow_up_route || activePayload.follow_up_route || activePayload.route).trim();
+      const rowRoute = text(row.route || row.follow_up_route || rowPayload.follow_up_route || rowPayload.route).trim();
+      return AI_FOLLOW_UP_ROUTES.has(activeRoute)
+        && AI_FOLLOW_UP_ROUTES.has(rowRoute)
+        && activeRoute === rowRoute
+        && activeTaskKey === rowTaskKey;
+    });
     if (!match?.id) {
       rowsToInsert.push(row);
       continue;
@@ -2837,6 +2928,42 @@ export async function appendToSheet(config, payload) {
   return data;
 }
 
+export async function ensureConfirmRequestDiscountApplied(config = {}, sheetResult = null, sheetPayload = null, customerDbLookup = null) {
+  const discountType = normalizeCustomerDbDiscountType(customerDbLookup?.discountType || sheetPayload?.args?.할인유형 || '');
+  if (!discountType) return { skipped: true, reason: 'missing_discount_type' };
+  if (!sheetResult || sheetResult.success !== true) return { skipped: true, reason: 'sheet_insert_not_successful' };
+  if (sheetResult.duplicate === true) return { skipped: true, reason: 'duplicate_request_not_patched' };
+  const reqID = extractSheetRequestId(sheetResult);
+  if (!reqID) return { skipped: true, reason: 'missing_req_id' };
+
+  const fetchImpl = config.fetchImpl || fetch;
+  const searchUrl = buildGasReadUrl(config.gasApiUrl || DEFAULT_GAS_API_URL, config.sheetApiKey || DEFAULT_SHEET_API_KEY, {
+    action: 'search',
+    sheet: '확인요청',
+    col: 'A',
+    query: reqID
+  });
+  const searchData = await fetchReadOnlyJson(searchUrl, { fetchImpl, timeoutMs: 30000 });
+  const first = (Array.isArray(searchData?.results) ? searchData.results : [])
+    .find((entry) => String(entry?.data?.[0] || '').trim().toUpperCase() === reqID.toUpperCase());
+  const row = Number(first?.row || 0);
+  if (!row) return { skipped: true, reason: 'req_row_not_found', reqID };
+  const current = normalizeCustomerDbDiscountType(first?.data?.[12] || '') || '일반';
+  if (current === discountType) return { skipped: true, reason: 'already_applied', reqID, row, discountType };
+
+  const updateUrl = buildGasReadUrl(config.gasApiUrl || DEFAULT_GAS_API_URL, config.sheetApiKey || DEFAULT_SHEET_API_KEY, {
+    action: 'update',
+    sheet: '확인요청',
+    cell: `M${row}`,
+    value: discountType
+  });
+  const updateData = await fetchReadOnlyJson(updateUrl, { fetchImpl, timeoutMs: 30000 });
+  if (updateData?.error || updateData?.success === false) {
+    throw new Error(`Confirm request discount patch rejected: ${JSON.stringify(updateData).slice(0, 500)}`);
+  }
+  return { updated: true, reqID, row, before: current, discountType, data: updateData };
+}
+
 function classifyGasSheetError(message) {
   const value = text(message);
   if (/중복 요청|이미 예약 등록|duplicate/i.test(value)) return 'duplicate_request';
@@ -2920,7 +3047,11 @@ export function extractConfirmRequestIds(value = '') {
 export function classifyAvailabilityRows(rows = []) {
   const decisiveRows = rows.filter((row) => {
     const result = text(row.result).trim();
-    return result && !/^세트$/i.test(result);
+    const detail = text(row.detail).trim();
+    const combined = `${result} ${detail}`.normalize('NFKC');
+    if (/(?:기본\s*구성|세트\s*동봉품|개별\s*재고\s*미관리)/i.test(combined)) return false;
+    if (/^세트$/i.test(result) && !/(?:✅|❌|⚠️|가용\s*\d|사용\s*중|부족|불가)/.test(detail)) return false;
+    return Boolean(result);
   });
   if (!decisiveRows.length) return 'unknown';
   const combined = decisiveRows.map((row) => `${row.result} ${row.detail}`).join(' ').normalize('NFKC');
@@ -2951,21 +3082,16 @@ export function buildSheetAvailabilityReport(sheetResult = null, sheetPayload = 
   const lines = formatAvailabilityResultLines(rows);
   const headline = lines.length ? lines.join(' / ') : '가용확인 결과 없음';
   const reqLabel = reqID ? `확인요청 ${reqID}` : '확인요청';
-  const equipmentLabel = sheetPayloadEquipmentLabel(sheetPayload);
   const duplicateNote = sheetResult?.duplicate ? '기존 중복 RQ에서 읽은 결과입니다. ' : '';
   const summary = `${duplicateNote}${reqLabel} 가용확인 결과: ${headline}`;
 
   let recommendedAction = `${reqLabel} 결과가 비어 있거나 판독되지 않았습니다. 같은 조건으로 가용확인을 다시 실행하거나 시트 I/J열을 확인한 뒤 고객에게 안내하세요.`;
-  let suggestedReplyDraft = '감독님, 확인 후 바로 안내드리겠습니다.';
   if (status === 'available') {
     recommendedAction = `${reqLabel} 결과가 가용입니다. 고객에게 가능 안내 후 예약 진행 여부를 확인하세요.`;
-    suggestedReplyDraft = `확인해보니${equipmentLabel ? ` ${equipmentLabel}` : ''} 해당 일정 예약 가능하십니다. 예약 진행 원하시면 말씀해주세요!`;
   } else if (status === 'warning') {
     recommendedAction = `${reqLabel} 결과에 경고가 있습니다. 상세 결과를 기준으로 부족/겹침/모델 선택 필요 여부를 확인하고, 가능 단정 없이 대안 또는 추가확인을 안내하세요.`;
-    suggestedReplyDraft = '확인해보니 해당 일정은 일부 장비 확인이 필요합니다. 가능한 구성 확인해서 바로 안내드리겠습니다.';
   } else if (status === 'unavailable') {
     recommendedAction = `${reqLabel} 결과가 가용 불가 또는 가용0입니다. 고객에게 가능하다고 안내하지 말고 대체 일정/대체 장비를 확인하세요.`;
-    suggestedReplyDraft = '확인해보니 요청하신 일정은 현재 바로 확정 안내가 어렵습니다. 대체 일정이나 대체 장비를 확인해서 안내드리겠습니다.';
   }
 
   return {
@@ -2975,12 +3101,195 @@ export function buildSheetAvailabilityReport(sheetResult = null, sheetPayload = 
     lines,
     summary,
     recommendedAction,
-    suggestedReplyDraft,
+    // Facts and safety actions are deterministic; customer-facing prose belongs to Hermes.
+    suggestedReplyDraft: '',
     payload: {
       reqID,
       status,
       duplicate: sheetResult?.duplicate === true,
       results: rows
+    }
+  };
+}
+
+export function buildHermesPostActionPrompt({
+  job = {},
+  initialDecision = {},
+  sheetResult = null,
+  sheetPayload = null
+} = {}) {
+  const report = buildSheetAvailabilityReport(sheetResult, sheetPayload);
+  if (!report) throw new Error('A concrete sheet availability result is required for post-action reasoning');
+
+  return `POST-ACTION HERMES AI REASONING PASS
+
+The first Hermes pass understood the Kakao conversation and the outer worker executed the requested 확인요청 read/write. The authoritative result is now available. Interpret it as an AI agent and produce the final customer reply decision and operational follow-up.
+
+BOUNDARY:
+- The outer code may transport, validate, execute, and verify structured decisions. It must not author customer-facing prose or mechanically infer business meaning from keywords.
+- You own the semantic interpretation of the complete result rows, the appropriate response, tone, priority, route, and stable taskKey.
+- Do not write to Sheets, send Kakao, click UI, or mutate anything in this pass. Set "should_write_to_sheet": false. The outer worker alone executes a later approved auto_send.
+- Preserve the initial decision's verified customer identity, visible Kakao evidence, sender order, and safety_checks unless the authoritative result directly changes a conclusion.
+- Do not claim that a booking is confirmed or completed. A 가용 result proves availability only.
+- For an unequivocal available result, you may choose replyMode="auto_send" only with safetyClass="authoritative_availability_answer", grounding="authoritative_sheet", requiresRag=false, high confidence, and wording limited to the verified availability plus the next question.
+- For warning, unavailable, unknown, contradictory, or incomplete results, use draft_only or no_reply and create an explicit schedule follow-up. Do not soften the facts into a false availability claim.
+- Use exact equipment names and all result rows. Do not drop an item, merge different items, or substitute a catalog guess.
+
+Return a complete decision object, not a patch. Print FINAL_JSON and exactly one fenced JSON object shaped like this:
+{
+  "should_write_to_sheet": false,
+  "reason": string,
+  "confidence": "low" | "medium" | "high",
+  "classification": "reservation" | "price" | "faq" | "ignore" | "already_answered" | "unclear",
+  "kill_switch_observed": "active" | "paused" | "price_paused" | "not_checked",
+  "customer": { "name": string, "source": string, "chat_status": string | null },
+  "safety_checks": {
+    "kakao_conversation_opened": boolean,
+    "did_not_classify_from_preview_only": boolean,
+    "latest_customer_message_after_last_staff_reply": boolean
+  },
+  "visible_messages_used": [{ "sender": string, "message": string, "time": string | null }],
+  "follow_up_items": [{
+    "type": "reply_needed" | "schedule_check" | "reservation_review" | "sheet_duplicate_check" | "completed_log",
+    "route": "schedule" | "other",
+    "taskKey": string,
+    "priority": "urgent" | "high" | "normal" | "low",
+    "status": "open" | "done" | "dismissed",
+    "title": string,
+    "customer_name": string,
+    "summary": string,
+    "recommended_action": string,
+    "suggested_reply_draft": string,
+    "evidence": [string],
+    "blocking_reason": string | null,
+    "due_hint": "now" | "today" | "tomorrow" | "this_week" | null
+  }],
+  "sheet_row_candidate": {},
+  "suggested_human_review_action": string,
+  "suggested_reply_draft": string,
+  "reply_decision": {
+    "replyMode": "auto_send" | "draft_only" | "no_reply",
+    "text": string,
+    "confidence": "high" | "medium" | "low" | "no_match",
+    "reason": string,
+    "shouldCreateTask": boolean,
+    "safetyClass": "authoritative_availability_answer" | "sensitive_commitment" | "no_send",
+    "grounding": "authoritative_sheet" | "visible_conversation" | "none",
+    "requiresRag": false,
+    "attachmentKeys": [],
+    "alreadyDelivered": false
+  }
+}
+
+JOB CONTEXT:
+${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
+
+INITIAL HERMES DECISION:
+${JSON.stringify(initialDecision, null, 2)}
+
+EXECUTED SHEET REQUEST:
+${JSON.stringify(sheetPayload?.args || null, null, 2)}
+
+AUTHORITATIVE SHEET RESULT:
+${JSON.stringify({
+    reqID: report.reqID,
+    status: report.status,
+    duplicate: report.payload.duplicate,
+    results: report.rows
+  }, null, 2)}
+
+Interpret those facts now. End with FINAL_JSON and one valid JSON object only.`;
+}
+
+export function validateAiPostActionDecisionContract(decision = {}, report = {}) {
+  const base = validateAiDecisionContract(decision);
+  const errors = [...(base.errors || [])];
+  if (decision?.should_write_to_sheet !== false) {
+    errors.push('post-action should_write_to_sheet must be false');
+  }
+
+  const reply = decisionReply(decision);
+  const mode = text(reply.replyMode || reply.reply_mode).trim();
+  const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
+  if (mode !== 'auto_send' && !followUps.some((item) => text(item?.route || item?.follow_up_route).trim() === 'schedule')) {
+    errors.push('post-action non-auto-send result requires an explicit schedule follow-up');
+  }
+  if (mode === 'auto_send') {
+    const safetyClass = replySafetyClass(decision);
+    const grounding = replyGrounding(decision);
+    const status = text(report?.status || report?.payload?.status).trim();
+    if (safetyClass !== 'authoritative_availability_answer') {
+      errors.push('post-action auto_send requires authoritative_availability_answer');
+    }
+    if (status !== 'available') {
+      errors.push('post-action auto_send requires an available authoritative result');
+    }
+    if (grounding !== 'authoritative_sheet') {
+      errors.push('post-action auto_send requires authoritative_sheet grounding');
+    }
+    if (replyRequiresRag(decision) !== false) {
+      errors.push('post-action availability answer requires requiresRag=false');
+    }
+    const replyText = text(reply.text).normalize('NFKC');
+    if (/(예약|대여)\s*(?:확정|완료)|(?:확정|예약)\s*(?:됐|되었습니다|완료)/.test(replyText)) {
+      errors.push('post-action availability answer must not claim booking confirmation');
+    }
+    if (decision?.safety_checks?.kakao_conversation_opened !== true
+      || decision?.safety_checks?.did_not_classify_from_preview_only !== true
+      || decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) {
+      errors.push('post-action auto_send requires preserved verified Kakao safety checks');
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+export async function runHermesPostActionDecision({
+  config = {},
+  job = {},
+  initialDecision = {},
+  sheetResult = null,
+  sheetPayload = null
+} = {}, options = {}) {
+  const report = buildSheetAvailabilityReport(sheetResult, sheetPayload);
+  if (!report) {
+    return { skipped: true, reason: 'no_authoritative_sheet_result', decision: initialDecision, report: null };
+  }
+  const prompt = buildHermesPostActionPrompt({ job, initialDecision, sheetResult, sheetPayload });
+  const hermesResult = await runHermesDecision(prompt, config, {
+    runHermesImpl: options.runHermesImpl,
+    validateDecisionImpl: (candidate) => validateAiPostActionDecisionContract(candidate, report)
+  });
+  return {
+    ...hermesResult,
+    skipped: false,
+    prompt,
+    report,
+    decision: {
+      ...hermesResult.decision,
+      post_action_reconciled: true,
+      authoritative_sheet_result: report.payload
+    }
+  };
+}
+
+export function suppressDecisionForUnreconciledSheetResult(decision = {}, report = {}) {
+  return {
+    ...decision,
+    post_action_reconciled: false,
+    authoritative_sheet_result: report?.payload || null,
+    suggested_reply_draft: '',
+    reply_decision: {
+      ...decisionReply(decision),
+      replyMode: 'no_reply',
+      text: '',
+      confidence: 'no_match',
+      reason: 'Authoritative sheet result arrived but the required post-action Hermes reasoning did not complete.',
+      shouldCreateTask: true,
+      safetyClass: 'no_send',
+      grounding: 'authoritative_sheet',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: false
     }
   };
 }
@@ -3007,11 +3316,12 @@ function mapConfirmRequestSearchDataToSheetResult(data = {}, reqID = '') {
 }
 
 export async function fetchExistingConfirmRequestResultForDecision(config = {}, decision = {}, followUpRows = []) {
-  const reqIDs = extractConfirmRequestIds({
-    reason: decision?.reason,
-    follow_up_items: decision?.follow_up_items,
-    followUpRows
-  });
+  void followUpRows;
+  const reqIDs = Array.from(new Set(
+    (Array.isArray(decision?.existing_confirm_request_ids) ? decision.existing_confirm_request_ids : [])
+      .map((id) => text(id).trim().toUpperCase())
+      .filter((id) => /^RQ-\d{6}-\d{3}$/.test(id))
+  ));
   if (!reqIDs.length) return null;
 
   const fetchImpl = config.fetchImpl || fetch;
@@ -3043,12 +3353,7 @@ export async function fetchExistingConfirmRequestResultForDecision(config = {}, 
 }
 
 function isAvailabilityResultRelevantRow(row = {}) {
-  const combined = followUpCombinedText(row);
-  const type = String(row.type || '');
-  return type === 'reservation_review'
-    || type === 'schedule_check'
-    || type === 'sheet_duplicate_check'
-    || (type === 'reply_needed' && /(예약|가용|가능|대여|렌탈|반출|반납)/.test(combined));
+  return explicitFollowUpRoute(row) === 'schedule';
 }
 
 function buildAvailabilityResultFollowUpRow(decision = {}, job = {}, sheetPayload = null, report) {
@@ -3068,6 +3373,7 @@ function buildAvailabilityResultFollowUpRow(decision = {}, job = {}, sheetPayloa
       roomKey,
       customerName,
       type: 'reservation_review',
+      route: 'schedule',
       title,
       summary: report.summary,
       recommendedAction: report.recommendedAction,
@@ -3090,6 +3396,7 @@ function buildAvailabilityResultFollowUpRow(decision = {}, job = {}, sheetPayloa
     decision_classification: text(decision?.classification || 'reservation'),
     decision_confidence: text(decision?.confidence || 'medium'),
     payload: {
+      follow_up_route: 'schedule',
       sheet_availability: report.payload,
       sheet_request: sheetPayload?.args || null
     }
@@ -3100,7 +3407,9 @@ export function enrichFollowUpRowsWithSheetAvailability(rows = [], sheetResult =
   const report = buildSheetAvailabilityReport(sheetResult, sheetPayload);
   if (!report) return rows;
   const sourceRows = Array.isArray(rows) ? rows : [];
+  const aiReconciled = decision?.post_action_reconciled === true;
   if (!sourceRows.length) {
+    if (aiReconciled) return [];
     return [buildAvailabilityResultFollowUpRow(decision, job, sheetPayload, report)];
   }
   let enrichedAny = false;
@@ -3115,20 +3424,29 @@ export function enrichFollowUpRowsWithSheetAvailability(rows = [], sheetResult =
     const alreadyHasResult = new RegExp(report.reqID || '가용확인 결과').test(`${row.summary} ${row.recommended_action}`);
     return {
       ...row,
-      type: 'reservation_review',
-      priority: report.status === 'available' && row.priority !== 'urgent' ? (row.priority || 'high') : 'urgent',
-      summary: alreadyHasResult ? row.summary : [row.summary, report.summary].map(text).filter(Boolean).join('\n'),
-      recommended_action: report.recommendedAction,
-      suggested_reply_draft: report.suggestedReplyDraft || row.suggested_reply_draft,
+      priority: aiReconciled
+        ? row.priority
+        : (report.status === 'available' && row.priority !== 'urgent' ? (row.priority || 'high') : 'urgent'),
+      summary: aiReconciled || alreadyHasResult
+        ? row.summary
+        : [row.summary, report.summary].map(text).filter(Boolean).join('\n'),
+      recommended_action: aiReconciled ? row.recommended_action : report.recommendedAction,
+      // The authoritative result arrived after the original AI turn. Never retain stale
+      // prose or synthesize a replacement in code; a post-action Hermes pass owns it.
+      suggested_reply_draft: aiReconciled ? row.suggested_reply_draft : '',
       evidence,
-      blocking_reason: report.status === 'available' ? row.blocking_reason : (row.blocking_reason || report.recommendedAction),
+      blocking_reason: aiReconciled
+        ? row.blocking_reason
+        : (report.status === 'available' ? row.blocking_reason : (row.blocking_reason || report.recommendedAction)),
       payload: {
         ...(row.payload && typeof row.payload === 'object' ? row.payload : {}),
+        follow_up_route: 'schedule',
         sheet_availability: report.payload
       }
     };
   });
   if (enrichedAny) return enrichedRows;
+  if (aiReconciled) return enrichedRows;
   return [...enrichedRows, buildAvailabilityResultFollowUpRow(decision, job, sheetPayload, report)];
 }
 
@@ -3168,17 +3486,16 @@ export function buildSheetFailureFollowUpRows(decision, job = {}, sheetResult = 
     title: isNoContact ? `${customerName} 연락처 요청 필요` : `${customerName} 확인요청 시트 입력 확인 필요`,
     summary: `GAS가 확인요청 입력을 거절했습니다: ${error}`,
     recommended_action: isNoContact
-      ? '고객에게 연락처를 먼저 요청하세요. 연락처가 확인되기 전에는 확인요청/예약 등록을 진행하지 마세요.'
+      ? '확인요청은 연락처 없이도 생성되어야 합니다. 운영 GAS 배포 상태를 확인하고, 고객에게는 등록 전 필요한 연락처를 요청하세요.'
       : '날짜/시간/장비명/드롭다운 값을 확인한 뒤 확인요청을 수동 수정하거나 고객에게 필요한 정보를 다시 확인하세요.',
-    suggested_reply_draft: isNoContact
-      ? '감독님, 예약 등록은 연락처가 있어야 가능해서 먼저 연락처 부탁드립니다. 연락처 확인되면 바로 이어서 확인 도와드리겠습니다.'
-      : '감독님, 확인 후 바로 안내드리겠습니다.',
+    suggested_reply_draft: '',
     evidence: [requestSummary, error].filter(Boolean).slice(0, 12),
     blocking_reason: error,
     due_hint: 'now',
     decision_classification: 'sheet_write_rejected',
     decision_confidence: 'blocked',
     payload: {
+      follow_up_route: 'schedule',
       sheet_error_type: sheetResult.error_type,
       sheet_error: error,
       sheet_request: sheetPayload?.args || null,
@@ -3190,7 +3507,7 @@ export function buildSheetFailureFollowUpRows(decision, job = {}, sheetResult = 
 export function buildHermesArgs(prompt, config = {}) {
   const args = [];
   if (config.hermesProfile) args.push('--profile', config.hermesProfile);
-  args.push('chat', '--yolo', '-Q', '-t', 'terminal,computer_use,vision', '-q', prompt);
+  args.push('chat', '--yolo', '-Q', '-t', HERMES_WORKER_TOOLSETS, '-q', prompt);
   return args;
 }
 
@@ -3616,8 +3933,29 @@ end run
 `.trim();
 }
 
-export async function closeKakaoConversationWindow(windowInfo = {}, { timeoutMs = 10000, spawnImpl = spawn } = {}) {
-  if (process.platform !== 'darwin') return { status: 'skipped_non_macos' };
+export async function closeKakaoConversationWindow(windowInfo = {}, {
+  timeoutMs = 10000,
+  spawnImpl = spawn,
+  platform = process.platform,
+  cuaDriverCommand = 'cua-driver'
+} = {}) {
+  if (platform === 'win32') {
+    const title = text(windowInfo.title).trim();
+    const pid = Number(windowInfo.pid);
+    const windowId = Number(windowInfo.window_id);
+    if (!title.includes(' - 빌리지 - 카카오비즈니스')) return { status: 'skipped_not_kakao_conversation_window' };
+    if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(windowId) || windowId <= 0) {
+      return { status: 'skipped_missing_kakao_conversation_window_id' };
+    }
+    await spawnText(cuaDriverCommand, [
+      'call',
+      'press_key',
+      JSON.stringify({ pid, window_id: windowId, key: 'f4', modifiers: ['alt'] }),
+      '--compact'
+    ], { timeoutMs, spawnImpl });
+    return { status: 'closed_conversation_window' };
+  }
+  if (platform !== 'darwin') return { status: 'skipped_non_macos' };
   const title = text(windowInfo.title).trim();
   if (!title || !title.includes(' - 빌리지 - 카카오비즈니스')) return { status: 'skipped_not_kakao_conversation_window' };
   const customerHint = title.split(' - 빌리지 - 카카오비즈니스')[0].replace(/^\(\d+\)\s*/, '').trim();
@@ -3772,18 +4110,50 @@ export async function checkKakaoCuaFallbackAllowed({
   }
 }
 
-export function pickKakaoMainListWindow(windows = []) {
-  const candidates = windows.filter((w) =>
-    String(w.app_name || '').includes('Chrome') &&
-    String(w.title || '').includes('카카오비즈니스 파트너센터') &&
-    !String(w.title || '').includes(' - 빌리지 - ')
-  );
+function isVillageAutomationChromeWindowTitle(title = '') {
+  const value = String(title || '');
+  return value.includes('🤖 자동화 크롬');
+}
+
+function isVillageStaffChromeWindowTitle(title = '') {
+  const value = String(title || '');
+  return value.includes('💁🏻 직원용 크롬') || value.includes('직원용 크롬');
+}
+
+function isVillageStaffChromeWindowState(state = {}) {
+  const value = `${state?.title || ''}\n${state?.window_title || ''}\n${state?.tree_markdown || ''}`;
+  return isVillageStaffChromeWindowTitle(value);
+}
+
+function isVillageAutomationChromeWindowState(state = {}) {
+  const value = `${state?.title || ''}\n${state?.window_title || ''}\n${state?.tree_markdown || ''}`;
+  return isVillageAutomationChromeWindowTitle(value);
+}
+
+function rankKakaoMainListWindows(windows = []) {
+  const candidates = windows.filter((w) => {
+    const title = String(w.title || '');
+    return String(w.app_name || '').includes('Chrome') &&
+      title.includes('카카오비즈니스 파트너센터') &&
+      !title.includes(' - 빌리지 - ') &&
+      !isVillageStaffChromeWindowTitle(title);
+  });
   candidates.sort((a, b) => {
-    const aScore = (a.is_on_screen ? 1000 : 0) + ((a.bounds?.width || 0) * (a.bounds?.height || 0));
-    const bScore = (b.is_on_screen ? 1000 : 0) + ((b.bounds?.width || 0) * (b.bounds?.height || 0));
+    const aTitle = String(a.title || '');
+    const bTitle = String(b.title || '');
+    const aScore = (isVillageAutomationChromeWindowTitle(aTitle) ? 100000 : 0) +
+      (a.is_on_screen ? 1000 : 0) +
+      ((a.bounds?.width || 0) * (a.bounds?.height || 0));
+    const bScore = (isVillageAutomationChromeWindowTitle(bTitle) ? 100000 : 0) +
+      (b.is_on_screen ? 1000 : 0) +
+      ((b.bounds?.width || 0) * (b.bounds?.height || 0));
     return bScore - aScore;
   });
-  return candidates[0] || null;
+  return candidates;
+}
+
+export function pickKakaoMainListWindow(windows = []) {
+  return rankKakaoMainListWindows(windows)[0] || null;
 }
 
 export function findChatRowElementIndex(treeMarkdown = '', hints = []) {
@@ -3899,15 +4269,25 @@ async function captureKakaoConversationEvidenceFromWindow(conversationWindow, hi
   }
 }
 
-export function pickKakaoConversationWindow(windows = [], hints = []) {
+function rankKakaoConversationWindows(windows = [], hints = []) {
   const candidates = windows.filter((w) => {
     const title = String(w.title || '');
     return String(w.app_name || '').includes('Chrome') &&
       title.includes(' - 빌리지 - 카카오비즈니스') &&
-      hints.some((hint) => title.includes(hint));
+      hints.some((hint) => title.includes(hint)) &&
+      !isVillageStaffChromeWindowTitle(title);
   });
-  candidates.sort((a, b) => Number(b.is_on_screen) - Number(a.is_on_screen));
-  return candidates[0] || null;
+  candidates.sort((a, b) => {
+    const aTitle = String(a.title || '');
+    const bTitle = String(b.title || '');
+    return Number(isVillageAutomationChromeWindowTitle(bTitle)) - Number(isVillageAutomationChromeWindowTitle(aTitle)) ||
+      Number(b.is_on_screen) - Number(a.is_on_screen);
+  });
+  return candidates;
+}
+
+export function pickKakaoConversationWindow(windows = [], hints = []) {
+  return rankKakaoConversationWindows(windows, hints)[0] || null;
 }
 
 export function pickKakaoConversationTarget(targets = [], hints = []) {
@@ -4132,91 +4512,79 @@ export async function openKakaoTargetChatViaDevtools(job, {
   };
 }
 
-function isStaffConfirmedReservationAcceptance(decision = {}, replyText = '') {
-  const classification = String(decision.classification || '').trim();
-  if (!['reservation', 'reservation_request', 'already_answered'].includes(classification)) return false;
-  const messages = Array.isArray(decision.visible_messages_used) ? decision.visible_messages_used : [];
-  let latestCustomerIndex = -1;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (!isStaffSenderLabel(messages[index]?.sender) && text(messages[index]?.message).trim()) {
-      latestCustomerIndex = index;
-      break;
-    }
-  }
-  if (latestCustomerIndex < 0) return false;
-  const latestCustomer = text(messages[latestCustomerIndex]?.message || decision.latest_customer_message_cluster).normalize('NFKC');
-  const priorStaff = [...messages.slice(0, latestCustomerIndex)].reverse()
-    .find((message) => isStaffSenderLabel(message?.sender) && text(message?.message).trim());
-  const staffText = text(priorStaff?.message || decision.latest_staff_message).normalize('NFKC');
-  const reply = text(replyText || decision.reply_decision?.text || decision.suggested_reply_draft).normalize('NFKC');
-  const customerAccepted = /(그럼|그러면|네|넵|예|좋습니다|이렇게|대로|부탁|진행|예약|확정|해주세요|해주세|할게요|하겠습니다)/.test(latestCustomer);
-  const staffConfirmed = /(가능|됩니다|돼요|진행\s*가능|예약\s*가능|확인.*가능|문제\s*없|해드릴게요|해드리겠습니다)/.test(staffText)
-    && !/(불가|어렵|안\s*되|안되|부족|확인\s*필요|대안)/.test(staffText);
-  const replyConfirms = /(확정|예약|진행|잡아|해드렸|해두)/.test(reply)
-    && !/(금액|입금|계좌|환불|파손|분실|결제\s*취소)/.test(reply);
-  return customerAccepted && staffConfirmed && replyConfirms;
-}
-
-function isContactFirstReservationReply(value = '') {
-  const input = text(value).normalize('NFKC').replace(/\s+/g, ' ').trim();
-  if (!/(연락처|전화번호|휴대폰|핸드폰)/.test(input)) return false;
-  if (!/(예약\s*(?:등록|접수|진행)|예약하려면|예약을\s*위해)/.test(input)) return false;
-  if (!/(필요|부탁|알려|남겨|확인|있어야|없으면|불가|불가능|어렵)/.test(input)) return false;
-  const withoutContactPolicy = input
-    .replace(/예약\s*(?:등록|접수|진행)은?\s*연락처가?\s*(?:있어야|필요해서|필요해|필수라서)?\s*가능(?:합니다|해요|하세요|하십니다)?/g, '')
-    .replace(/연락처가?\s*(?:없으면|없을 경우)\s*예약\s*(?:등록|접수|진행)[^.!?。\n]*(?:불가|불가능|어렵|안\s*되|안되)/g, '');
-  return !/(재고\s*가능|대여\s*가능|예약\s*가능(?:합니다|해요|하세요|하십니다)?|예약\s*확정|확정|[0-9,]+\s*(?:원|만원)|입금|계좌|환불|파손|분실)/i.test(withoutContactPolicy);
-}
-
-function isLiveQuoteRecheckInfoReply(value = '', decision = {}) {
-  const reply = text(value).normalize('NFKC').replace(/\s+/g, ' ').trim();
-  if (!reply) return false;
-  if (!/(내\s*예약\s*링크|예약\s*링크|처음\s*보내드린\s*링크|최초\s*.*링크|기존\s*.*링크)/.test(reply)) return false;
-  if (!/(최신\s*견적서|견적서.*최신|수정.*견적|변경.*견적|장비.*수정|일정.*수정)/.test(reply)) return false;
-  if (/(예약\s*확정|재고\s*가능|대여\s*가능|가능\s*합니다|[0-9,]+\s*(?:원|만원)|입금|계좌|환불|파손|분실)/.test(reply)) return false;
-
-  const latest = text(decision.latest_customer_message_cluster).normalize('NFKC');
-  const visible = Array.isArray(decision.visible_messages_used)
-    ? decision.visible_messages_used.map((message) => text(message?.message)).join(' ')
-    : '';
-  const requestText = `${latest} ${visible}`.normalize('NFKC');
-  if (!/(견적서|견적|금액|가격)/.test(requestText)) return false;
-  if (!/(다시|새로|수정|변경|업데이트|재요청|재발송|또|한번|한 번|확인)/.test(requestText)) return false;
-  return true;
-}
-
 export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
-  const reply = decision.reply_decision && typeof decision.reply_decision === 'object' ? decision.reply_decision : {};
+  const reply = decisionReply(decision);
   const mode = String(reply.replyMode || reply.reply_mode || '').trim();
   const confidence = String(reply.confidence || decision.confidence || '').trim();
   const textValue = text(reply.text || decision.suggested_reply_draft).trim();
   const killSwitch = String(decision.kill_switch_observed || '').trim();
   const classification = String(decision.classification || '').trim();
-  const staffConfirmedAcceptance = isStaffConfirmedReservationAcceptance(decision, textValue);
-  const contactFirstReservationReply = isContactFirstReservationReply(textValue);
-  const liveQuoteRecheckInfoReply = isLiveQuoteRecheckInfoReply(textValue, decision);
+  const safetyClass = replySafetyClass(decision);
+  const grounding = replyGrounding(decision);
+  const requiresRag = replyRequiresRag(decision);
   const priceLikeClassifications = new Set(['price', 'price_review', 'quote_send']);
+  const allowedSafetyClasses = new Set([
+    'simple_ack',
+    'contact_request',
+    'reservation_intake_ack',
+    'payment_receipt_ack',
+    'current_policy_answer',
+    'rag_grounded_answer',
+    'authoritative_availability_answer',
+    'staff_confirmed_reservation_acceptance',
+    'live_quote_link_guidance'
+  ]);
   if (killSwitch === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
   if (killSwitch === 'price_paused' && priceLikeClassifications.has(classification)) return { allowed: false, reason: 'kill_switch_price_paused' };
   if (killSwitch !== 'active' && killSwitch !== 'price_paused') return { allowed: false, reason: `kill_switch_${killSwitch || 'unknown'}` };
   if (mode !== 'auto_send') return { allowed: false, reason: `replyMode_${mode || 'missing'}` };
   if (confidence !== 'high') return { allowed: false, reason: `confidence_${confidence || 'missing'}` };
+  if (!safetyClass) return { allowed: false, reason: 'reply_safety_class_missing' };
+  if (!allowedSafetyClasses.has(safetyClass)) return { allowed: false, reason: `reply_safety_class_${safetyClass}_not_auto_sendable` };
+  if (!AI_REPLY_GROUNDING_CLASSES.has(grounding) || grounding === 'none') return { allowed: false, reason: 'reply_grounding_missing' };
+  if (typeof requiresRag !== 'boolean') return { allowed: false, reason: 'reply_requires_rag_missing' };
+  if (safetyClass === 'current_policy_answer' && grounding !== 'current_confirmed_policy') {
+    return { allowed: false, reason: 'current_policy_grounding_mismatch' };
+  }
+  if (safetyClass === 'rag_grounded_answer' && (grounding !== 'retrieved_rag' || requiresRag !== true)) {
+    return { allowed: false, reason: 'rag_grounding_mismatch' };
+  }
+  if (safetyClass === 'authoritative_availability_answer') {
+    const authoritativeStatus = text(decision?.authoritative_sheet_result?.status).trim();
+    if (grounding !== 'authoritative_sheet' || authoritativeStatus !== 'available' || requiresRag !== false) {
+      return { allowed: false, reason: 'authoritative_availability_grounding_mismatch' };
+    }
+    if (/(예약|대여)\s*(?:확정|완료)|(?:확정|예약)\s*(?:됐|되었습니다|완료)|환불|파손|분실|[0-9,]+\s*(?:원|만원)|입금|계좌|금액/.test(textValue)) {
+      return { allowed: false, reason: 'authoritative_availability_contains_unverified_commitment' };
+    }
+  }
   if (!textValue || textValue.length < 5) return { allowed: false, reason: 'reply_text_too_short' };
   if (textValue.length > 1000) return { allowed: false, reason: 'reply_text_too_long' };
   if (decision?.safety_checks?.kakao_conversation_opened !== true) return { allowed: false, reason: 'conversation_not_opened' };
   if (decision?.safety_checks?.did_not_classify_from_preview_only !== true) return { allowed: false, reason: 'preview_only' };
   if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) return { allowed: false, reason: 'latest_turn_not_customer' };
-  const blockedClassifications = new Set(['price', 'reservation_review', 'payment', 'payment_check', 'schedule_check', 'damage_repair']);
-  if (blockedClassifications.has(classification)) return { allowed: false, reason: `classification_${classification}_requires_review` };
   if (decision.owner_review_required === true || decision.ownerReviewRequired === true) return { allowed: false, reason: 'owner_review_required' };
   const sensitiveCommitmentPattern = /(refund|환불|분실|파손|손상|결제\s*취소|예약\s*확정|재고\s*가능|가능\s*확정|(?:대여|예약)?\s*가능(?:합니다|하세요|하십니다|해요|함)?|확정|[0-9,]+\s*(?:원|만원)|입금|계좌|금액)/i;
-  if (sensitiveCommitmentPattern.test(textValue) && !staffConfirmedAcceptance && !contactFirstReservationReply && !liveQuoteRecheckInfoReply) return { allowed: false, reason: 'sensitive_commitment_text' };
-  if (classification === 'reservation' || classification === 'reservation_request') {
-    const safeOperationalAck = /(확인|접수|공유|전달|참고|검토|방문|수령|반납|재학증명|서류|파일|연락처|전화번호|휴대폰|핸드폰|네|넵|감사)/.test(textValue);
-    if (!safeOperationalAck && !staffConfirmedAcceptance) return { allowed: false, reason: `classification_${classification}_requires_review` };
+  if (sensitiveCommitmentPattern.test(textValue)) {
+    const explicitSensitiveAllowance = new Set([
+      'payment_receipt_ack',
+      'authoritative_availability_answer',
+      'staff_confirmed_reservation_acceptance',
+      'live_quote_link_guidance'
+    ]);
+    if (!explicitSensitiveAllowance.has(safetyClass)) return { allowed: false, reason: 'sensitive_commitment_text' };
+    if (safetyClass === 'payment_receipt_ack' && /(입금|결제).{0,16}(?:확인\s*(?:완료|됐|되었습니다)|완료)|(?:확인\s*(?:완료|됐|되었습니다)|완료).{0,16}(?:입금|결제)/.test(textValue)) {
+      return { allowed: false, reason: 'payment_ack_claims_completed_verification' };
+    }
+    if (safetyClass === 'staff_confirmed_reservation_acceptance' && /(환불|파손|분실|[0-9,]+\s*(?:원|만원)|입금|계좌|금액)/.test(textValue)) {
+      return { allowed: false, reason: 'reservation_acceptance_contains_unrelated_commitment' };
+    }
+    if (safetyClass === 'live_quote_link_guidance' && /(재고\s*가능|대여\s*가능|예약\s*확정|[0-9,]+\s*(?:원|만원)|입금|계좌)/.test(textValue)) {
+      return { allowed: false, reason: 'quote_link_guidance_contains_commitment' };
+    }
   }
-  return { allowed: true, reason: staffConfirmedAcceptance ? 'staff_confirmed_reservation_acceptance' : contactFirstReservationReply ? 'contact_first_reservation_reply' : liveQuoteRecheckInfoReply ? 'live_quote_recheck_info' : 'allowed', text: textValue, replyMode: mode, confidence };
+  return { allowed: true, reason: safetyClass, text: textValue, replyMode: mode, confidence, safetyClass, grounding };
 }
 
 function isStaffSenderLabel(value = '') {
@@ -4365,27 +4733,16 @@ export function currentConfirmedPolicyAutoReplySupport(decision = {}, replyText 
 }
 
 export function autoReplyRequiresRagSupport(decision = {}, replyText = '') {
-  if (isCustomerDocumentAssetRequest(decision)) {
-    return { required: false, reason: 'standard_customer_document_assets' };
+  void replyText;
+  const safetyClass = replySafetyClass(decision);
+  const requiresRag = replyRequiresRag(decision);
+  if (!safetyClass) return { required: true, reason: 'reply_safety_class_missing' };
+  if (safetyClass === 'current_policy_answer') return { required: true, reason: 'current_policy_answer' };
+  if (safetyClass === 'rag_grounded_answer' || requiresRag === true) {
+    return { required: true, reason: safetyClass === 'rag_grounded_answer' ? 'rag_grounded_answer' : 'ai_requires_rag' };
   }
-  if (isLiveQuoteRecheckInfoReply(replyText || decision.reply_decision?.text || decision.suggested_reply_draft, decision)) {
-    return { required: false, reason: 'live_quote_recheck_info' };
-  }
-  const classification = String(decision.classification || '').trim();
-  const mutablePolicy = mutablePolicyAutoReplyRisk(decision, replyText);
-  if (mutablePolicy.mutable) {
-    return { required: true, reason: mutablePolicy.reason, mutablePolicy: true };
-  }
-  if (classification === 'faq') return { required: true, reason: 'classification_faq' };
-  const combined = [
-    decision.latest_customer_message_cluster,
-    replyText,
-    decision.suggested_reply_draft
-  ].map(text).join(' ').normalize('NFKC');
-  if (/(주소|위치|오시는\s*길|영업\s*시간|운영\s*시간|방문\s*(?:수령|절차|방법)?|수령\s*(?:절차|방법)?|반납\s*(?:절차|방법)?|픽업|주차|신분증|재학증명|학생\s*할인|할인율|보증금|구성품?|포함\s*(?:사항|여부)?|절차|방법|홈페이지|인스타|전화|연락처)/.test(combined)) {
-    return { required: true, reason: 'policy_or_procedure_terms' };
-  }
-  return { required: false, reason: 'not_policy_or_faq_auto_reply' };
+  if (requiresRag !== false) return { required: true, reason: 'reply_requires_rag_missing' };
+  return { required: false, reason: safetyClass };
 }
 
 export function buildAutoReplyRagQuestion({ decision = {}, job = {}, replyText = '' } = {}) {
@@ -4415,12 +4772,23 @@ export function buildAutoReplyRagQuestion({ decision = {}, job = {}, replyText =
 export async function evaluateAutoReplyRagSupport({ config = {}, decision = {}, job = {}, replyText = '', askImpl = askVillageAi } = {}) {
   const requirement = autoReplyRequiresRagSupport(decision, replyText);
   if (!requirement.required) return { required: false, allowed: true, reason: requirement.reason };
-  const currentPolicy = currentConfirmedPolicyAutoReplySupport(decision, replyText);
-  if (currentPolicy.applicable) {
+  const currentPolicy = requirement.reason === 'current_policy_answer'
+    ? currentConfirmedPolicyAutoReplySupport(decision, replyText)
+    : null;
+  if (currentPolicy?.applicable) {
     return {
       required: true,
       allowed: currentPolicy.allowed,
       reason: currentPolicy.allowed ? 'current_confirmed_policy_match' : 'current_policy_mismatch_requires_review',
+      requirement,
+      currentPolicy
+    };
+  }
+  if (requirement.reason === 'current_policy_answer') {
+    return {
+      required: true,
+      allowed: false,
+      reason: 'current_policy_not_authoritatively_verified',
       requirement,
       currentPolicy
     };
@@ -4638,6 +5006,39 @@ async function listCuaWindows({ cuaDriverCommand, timeoutMs, spawnImpl }) {
     maxBuffer: 3_000_000
   });
   return JSON.parse(windowsText).windows || [];
+}
+
+async function verifyKakaoAutomationCuaWindow(win, { cuaDriverCommand, timeoutMs, spawnImpl, maxElements = 700 } = {}) {
+  if (!win?.pid || !win?.window_id) return { ok: false, reason: 'missing_window' };
+  try {
+    const state = await getKakaoWindowState({ win, cuaDriverCommand, timeoutMs, spawnImpl, maxElements });
+    if (isVillageStaffChromeWindowState(state)) {
+      return { ok: false, reason: 'staff_chrome_profile_rejected', win, state };
+    }
+    return {
+      ok: true,
+      win,
+      state,
+      automationProfileVerified: isVillageAutomationChromeWindowState(state)
+    };
+  } catch (error) {
+    return { ok: false, reason: 'window_state_unavailable', error: error.message.slice(0, 500), win };
+  }
+}
+
+async function pickVerifiedKakaoAutomationCuaWindow(candidates = [], options = {}) {
+  let fallback = null;
+  const rejected = [];
+  for (const win of candidates) {
+    const verified = await verifyKakaoAutomationCuaWindow(win, options);
+    if (!verified.ok) {
+      rejected.push({ window_id: win?.window_id, pid: win?.pid, title: win?.title || '', reason: verified.reason });
+      continue;
+    }
+    if (verified.automationProfileVerified) return { ...verified, rejected };
+    if (!fallback) fallback = verified;
+  }
+  return fallback ? { ...fallback, rejected } : { ok: false, reason: 'no_non_staff_kakao_window', rejected };
 }
 
 function pickMacOpenPanelWindow(windows = [], chromePid) {
@@ -4918,7 +5319,56 @@ function hasNonCurrentKakaoDateLabel(value = '', now = new Date()) {
   return labels.some((label) => label.month !== current.month || label.day !== current.day);
 }
 
-export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWindowMinutes = 20 } = {}) {
+function dayOfYearForMonthDay(month, day, year) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (!Number.isFinite(date.getTime())) return null;
+  return Math.floor((date.getTime() - Date.UTC(year, 0, 1)) / 86400000) + 1;
+}
+
+function hasStaleKakaoDateLabel(value = '', now = new Date()) {
+  const labels = parseKakaoKoreanMonthDayLabels(value);
+  if (!labels.length) return false;
+  const current = kstClockParts(now);
+  const year = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Seoul', year: 'numeric' }).format(now));
+  const currentOrdinal = dayOfYearForMonthDay(current.month, current.day, year);
+  if (!currentOrdinal) return hasNonCurrentKakaoDateLabel(value, now);
+  return labels.some((label) => {
+    const labelOrdinal = dayOfYearForMonthDay(label.month, label.day, year);
+    if (!labelOrdinal) return false;
+    const diffDays = labelOrdinal - currentOrdinal;
+    // Past Kakao list date labels are stale. Far-future labels around Jan/Dec are
+    // normally previous-year history, not future rental dates.
+    return diffDays < 0 || diffDays > 180;
+  });
+}
+
+function parseIsoDate(value) {
+  const raw = text(value).trim();
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) return null;
+  const date = new Date(ms);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function freshestJobEventDate(job = {}, events = []) {
+  const candidates = [
+    job.lastEventAt,
+    job.detectedAt,
+    job.detected_at,
+    job.receivedAt,
+    job.firstEventAt,
+    job.payload?.lastEventAt,
+    job.payload?.detectedAt,
+    job.payload?.receivedAt,
+    job.payload?.firstEventAt,
+    ...events.flatMap((event) => [event?.lastEventAt, event?.detectedAt, event?.receivedAt, event?.firstEventAt, event?.raw?.detectedAt, event?.raw?.receivedAt])
+  ].map(parseIsoDate).filter(Boolean);
+  if (!candidates.length) return null;
+  return candidates.sort((a, b) => b.getTime() - a.getTime())[0];
+}
+
+export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWindowMinutes = 20, eventFreshnessMinutes = 60 } = {}) {
   const preview = text(job.preview_text || job.previewText || job.payload?.previewText || '');
   const events = Array.isArray(job.events) ? job.events : (Array.isArray(job.payload?.events) ? job.payload.events : []);
   const reasons = events.map((event) => String(event?.reason || '')).filter(Boolean);
@@ -4930,16 +5380,20 @@ export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWind
   const hasTopRowChanged = reasons.includes('top_row_changed');
   const hasUnreadBackstop = reasons.includes('top_rows_backstop') && hasUnread;
   if (!hasTopRowChanged && !hasUnreadBackstop) return { eligible: false, reason: 'not_top_row_live_event' };
-  if (hasNonCurrentKakaoDateLabel(preview, now)) return { eligible: false, reason: 'preview_has_old_date' };
-  if (/\d{4}\.\d{1,2}\.\d{1,2}/.test(preview)) return { eligible: false, reason: 'preview_has_absolute_date' };
-  if (hasUnread) return { eligible: true, reason: 'top_row_unread' };
-  const ageMinutes = minutesSinceKakaoPreviewClock(preview, now);
-  if (ageMinutes === null) {
-    if (parseKakaoKoreanMonthDayLabels(preview).length) return { eligible: true, reason: 'top_row_current_date_label' };
-    return { eligible: false, reason: 'preview_not_live_time_format' };
+  const eventDate = freshestJobEventDate(job, events);
+  const eventAgeMinutes = eventDate ? ((now.getTime() - eventDate.getTime()) / 60000) : null;
+  const referenceNow = eventDate && eventAgeMinutes >= -1 && eventAgeMinutes <= eventFreshnessMinutes ? eventDate : now;
+  const ageMinutes = minutesSinceKakaoPreviewClock(preview, referenceNow);
+  if (ageMinutes !== null) {
+    if (ageMinutes < -1 || ageMinutes > liveWindowMinutes) return { eligible: false, reason: 'top_row_time_outside_live_window' };
+    if (hasStaleKakaoDateLabel(preview, referenceNow)) return { eligible: false, reason: 'preview_has_old_date' };
+    return { eligible: true, reason: hasUnread ? 'top_row_unread' : 'top_row_live_time_format' };
   }
-  if (ageMinutes < -1 || ageMinutes > liveWindowMinutes) return { eligible: false, reason: 'top_row_time_outside_live_window' };
-  return { eligible: true, reason: 'top_row_live_time_format' };
+  if (/\d{4}\.\d{1,2}\.\d{1,2}/.test(preview)) return { eligible: false, reason: 'preview_has_absolute_date' };
+  if (hasNonCurrentKakaoDateLabel(preview, referenceNow)) return { eligible: false, reason: 'preview_has_old_date' };
+  if (hasUnread) return { eligible: true, reason: 'top_row_unread' };
+  if (parseKakaoKoreanMonthDayLabels(preview).length) return { eligible: true, reason: 'top_row_current_date_label' };
+  return { eligible: false, reason: 'preview_not_live_time_format' };
 }
 
 async function maybeAutoSendReply({ config, decision, job, navigationContext }) {
@@ -5035,12 +5489,21 @@ export async function openKakaoTargetChatFromList(job, {
   }
   const windowsText = await spawnText(cuaDriverCommand, ['call', 'list_windows', '--compact'], { timeoutMs, spawnImpl });
   const windows = JSON.parse(windowsText).windows || [];
-  const existingConversationWindow = pickKakaoConversationWindow(windows, hints);
-  if (existingConversationWindow && existingConversationWindow.is_on_screen !== false) {
-    const conversationEvidence = await captureKakaoConversationEvidenceFromWindow(existingConversationWindow, hints, {
-      timeoutMs,
-      spawnImpl,
-      cuaDriverCommand
+  const existingConversationCandidates = rankKakaoConversationWindows(windows, hints);
+  const visibleExistingConversationCandidates = existingConversationCandidates.filter((w) => w.is_on_screen !== false);
+  const offscreenExistingConversationWindow = existingConversationCandidates.find((w) => w.is_on_screen === false) || null;
+  const verifiedConversation = await pickVerifiedKakaoAutomationCuaWindow(visibleExistingConversationCandidates, {
+    cuaDriverCommand,
+    timeoutMs,
+    spawnImpl,
+    maxElements: 700
+  });
+  const existingConversationWindow = verifiedConversation.ok ? verifiedConversation.win : null;
+  if (existingConversationWindow) {
+    const conversationEvidence = extractKakaoConversationEvidence(verifiedConversation.state?.tree_markdown || '', {
+      title: existingConversationWindow.title || verifiedConversation.state?.title || verifiedConversation.state?.window_title || '',
+      hints,
+      maxItems: 80
     });
     return {
       status: 'opened_target_chat',
@@ -5053,22 +5516,26 @@ export async function openKakaoTargetChatFromList(job, {
       conversation_evidence: conversationEvidence
     };
   }
-  if (existingConversationWindow?.is_on_screen === false) {
+  if (offscreenExistingConversationWindow) {
     const devtoolsExisting = await openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch }).catch(() => null);
     if (devtoolsExisting?.status === 'opened_target_chat') return devtoolsExisting;
   }
-  const win = pickKakaoMainListWindow(windows);
+  const verifiedMain = await pickVerifiedKakaoAutomationCuaWindow(rankKakaoMainListWindows(windows), {
+    cuaDriverCommand,
+    timeoutMs,
+    spawnImpl,
+    maxElements: 700
+  });
+  const win = verifiedMain.ok ? verifiedMain.win : null;
   if (!win) {
     return openKakaoTargetChatViaDevtools(job, { timeoutMs, cdpBaseUrl, fetchImpl, evaluateImpl, allowSearch }).catch((error) => ({
       status: 'main_list_window_not_found',
       hints,
+      rejected_cua_windows: verifiedMain.rejected || [],
       devtoolsFallbackError: error.message.slice(0, 500)
     }));
   }
-  const stateText = await spawnText(cuaDriverCommand, [
-    'call', 'get_window_state', JSON.stringify({ pid: win.pid, window_id: win.window_id, max_elements: 700 }), '--compact'
-  ], { timeoutMs, spawnImpl });
-  const state = JSON.parse(stateText);
+  const state = verifiedMain.state;
   let elementIndex = findChatRowElementIndex(state.tree_markdown || '', hints);
   let searchResult = null;
   if (!elementIndex && allowSearch) {
@@ -5117,7 +5584,13 @@ export async function openKakaoTargetChatFromList(job, {
   try {
     const windowsAfterClickText = await spawnText(cuaDriverCommand, ['call', 'list_windows', '--compact'], { timeoutMs, spawnImpl });
     const windowsAfterClick = JSON.parse(windowsAfterClickText).windows || [];
-    conversationWindow = pickKakaoConversationWindow(windowsAfterClick, hints);
+    const verifiedAfterClick = await pickVerifiedKakaoAutomationCuaWindow(rankKakaoConversationWindows(windowsAfterClick, hints), {
+      cuaDriverCommand,
+      timeoutMs,
+      spawnImpl,
+      maxElements: 900
+    });
+    conversationWindow = verifiedAfterClick.ok ? verifiedAfterClick.win : null;
     if (!conversationWindow) {
       return {
         status: 'conversation_window_not_found_after_click',
@@ -5126,6 +5599,7 @@ export async function openKakaoTargetChatFromList(job, {
         window_id: win.window_id,
         conversation_window: null,
         element_index: elementIndex,
+        rejected_cua_windows: verifiedAfterClick.rejected || [],
         conversation_evidence: {
           source: 'live_kakao_ax_after_navigation',
           hint_matched: false,
@@ -5134,10 +5608,10 @@ export async function openKakaoTargetChatFromList(job, {
         }
       };
     }
-    conversationEvidence = await captureKakaoConversationEvidenceFromWindow(conversationWindow, hints, {
-      timeoutMs,
-      spawnImpl,
-      cuaDriverCommand
+    conversationEvidence = extractKakaoConversationEvidence(verifiedAfterClick.state?.tree_markdown || '', {
+      title: conversationWindow.title || verifiedAfterClick.state?.title || verifiedAfterClick.state?.window_title || '',
+      hints,
+      maxItems: 80
     });
   } catch (error) {
     conversationEvidence = { source: 'live_kakao_ax_after_navigation', error: error.message.slice(0, 300) };
@@ -5176,6 +5650,7 @@ function terminateChildTree(child, signal = 'SIGTERM') {
 export function runHermes(prompt, config, options = {}) {
   const spawnImpl = options.spawnImpl || spawn;
   const killTree = options.killTree || ((pid) => terminateChildTree({ pid }, 'SIGTERM'));
+  const baseEnv = options.baseEnv || process.env;
   const timeoutMs = Number(config.hermesTimeoutMs || 180000);
   return new Promise((resolve, reject) => {
     const child = spawnImpl(config.hermesCommand, buildHermesArgs(prompt, config), {
@@ -5183,10 +5658,9 @@ export function runHermes(prompt, config, options = {}) {
       cwd: path.resolve(__dirname, '../..'),
       detached: true,
       env: {
-        ...process.env,
-        HERMES_COMPUTER_USE_DEFAULT_CAPTURE_MODE: process.env.HERMES_COMPUTER_USE_DEFAULT_CAPTURE_MODE || 'ax',
-        HERMES_COMPUTER_USE_FORCE_CAPTURE_MODE: process.env.HERMES_COMPUTER_USE_FORCE_CAPTURE_MODE || 'ax',
-        HERMES_COMPUTER_USE_DEFAULT_MAX_ELEMENTS: process.env.HERMES_COMPUTER_USE_DEFAULT_MAX_ELEMENTS || '80'
+        ...baseEnv,
+        PYTHONUTF8: '1',
+        PYTHONIOENCODING: 'utf-8'
       }
     });
     let stdout = '';
@@ -5213,12 +5687,106 @@ export function runHermes(prompt, config, options = {}) {
   });
 }
 
+export function buildHermesFinalJsonRecoveryPrompt(originalPrompt, context = {}) {
+  const validationErrors = Array.isArray(context.validationErrors) ? context.validationErrors : [];
+  const priorDecision = context.priorDecision && typeof context.priorDecision === 'object'
+    ? JSON.stringify(context.priorDecision, null, 2)
+    : '';
+  const contractContext = validationErrors.length
+    ? `\nPRIOR DECISION CONTRACT VALIDATION ERRORS:\n${validationErrors.map((error) => `- ${error}`).join('\n')}\n\nPRIOR DECISION:\n${priorDecision}\n\nRepair the semantic decision yourself from the original evidence. Do not let outer code infer, default, merge, or rewrite business meaning.\n`
+    : '';
+  return `RECOVERY PASS: the prior attempt did not produce valid FINAL_JSON.
+
+- Do the full reasoning required by the original task; do not guess or use a reduced mechanical shortcut.
+- Reuse already available evidence and make any additional read-only checks needed for a grounded decision.
+- Return FINAL_JSON even when a tool or API failed. Encode the gap in confidence, reason, and follow-up fields.
+- Do not substitute an apology, progress report, or plain-text explanation for the required JSON object.
+- Do not write to Sheets or send Kakao from this Hermes pass; the outer worker owns approved mutations.
+${contractContext}
+
+ORIGINAL FULL TASK:
+${String(originalPrompt || '')}
+
+END ORIGINAL FULL TASK.
+RECOVERY OUTPUT OVERRIDE: Regardless of any earlier wording or failure, finish with FINAL_JSON and one valid JSON object only.`;
+}
+
+function hermesDecisionFailureKind(error, output = '') {
+  const message = String(error?.message || '');
+  if (/timed out|timeout/i.test(message)) return 'timeout';
+  if (/exited|spawn|ENOENT/i.test(message)) return 'process_error';
+  if (String(output || '').includes('OpenAI-compatible API call')) return 'api_error_output';
+  return 'invalid_output';
+}
+
+export async function runHermesDecision(prompt, config, options = {}) {
+  const runHermesImpl = options.runHermesImpl || runHermes;
+  const validateDecisionImpl = options.validateDecisionImpl || validateAiDecisionContract;
+  const configuredTimeout = Number(config.hermesTimeoutMs || 240000);
+  const totalTimeout = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? configuredTimeout
+    : 240000;
+  const usableTimeout = Math.max(60000, totalTimeout - 30000);
+  const recoveryTimeout = Math.min(120000, Math.max(45000, Math.floor(usableTimeout * 0.28)));
+  const firstTimeout = Math.max(30000, usableTimeout - recoveryTimeout);
+
+  let firstOutput = '';
+  let firstError = null;
+  let firstDecision = null;
+  let firstValidationErrors = [];
+  try {
+    firstOutput = await runHermesImpl(prompt, { ...config, hermesTimeoutMs: firstTimeout });
+    firstDecision = extractJsonObject(firstOutput);
+    const validation = validateDecisionImpl(firstDecision);
+    if (!validation?.valid) {
+      firstValidationErrors = Array.isArray(validation?.errors) ? validation.errors : ['decision contract validation failed'];
+      const error = new Error(`Hermes decision contract validation failed: ${firstValidationErrors.join('; ')}`);
+      error.validationErrors = firstValidationErrors;
+      throw error;
+    }
+    return { decision: firstDecision, hermesOutput: firstOutput, attempts: 1, recovered: false };
+  } catch (error) {
+    firstError = error;
+  }
+
+  const recoveryPrompt = buildHermesFinalJsonRecoveryPrompt(prompt, {
+    validationErrors: firstValidationErrors,
+    priorDecision: firstDecision
+  });
+  let recoveryOutput = '';
+  try {
+    recoveryOutput = await runHermesImpl(recoveryPrompt, { ...config, hermesTimeoutMs: recoveryTimeout });
+    const decision = extractJsonObject(recoveryOutput);
+    const validation = validateDecisionImpl(decision);
+    if (!validation?.valid) {
+      throw new Error(`Hermes decision contract validation failed: ${(validation?.errors || []).join('; ')}`);
+    }
+    return { decision, hermesOutput: recoveryOutput, attempts: 2, recovered: true };
+  } catch (recoveryError) {
+    const firstKind = hermesDecisionFailureKind(firstError, firstOutput);
+    const recoveryKind = hermesDecisionFailureKind(recoveryError, recoveryOutput);
+    throw new Error(`Hermes decision failed after 2 attempts (${firstKind}; ${recoveryKind})`);
+  }
+}
+
 async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
   let navigationContext = null;
+  let kakaoTabEnsureResult = null;
   const result = {};
   try {
     if (!dryRun && config.ensureKakaoTab) {
-      await ensureKakaoChannelManagerTab({ url: config.kakaoChannelManagerUrl });
+      try {
+        kakaoTabEnsureResult = await ensureKakaoChannelManagerTab({ url: config.kakaoChannelManagerUrl });
+      } catch (error) {
+        // A transient AppleScript/Chrome tab-index failure must not discard the job:
+        // CUA navigation below can use a currently open Channel Manager list or an
+        // already-open customer room without focusing or creating a tab.
+        kakaoTabEnsureResult = {
+          status: 'tab_ensure_failed_nonfatal',
+          error: error.message.slice(0, 500)
+        };
+        console.warn(`[ai-worker] Kakao tab ensure failed; continuing with deterministic navigation: ${kakaoTabEnsureResult.error}`);
+      }
       if (config.openTargetChat) {
         navigationContext = await openKakaoTargetChatFromList(job, {
           cuaDriverCommand: config.cuaDriverCommand,
@@ -5229,6 +5797,9 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
           status: 'navigation_failed',
           reason: error.message.slice(0, 500)
         }));
+        if (kakaoTabEnsureResult?.status === 'tab_ensure_failed_nonfatal') {
+          navigationContext = { ...navigationContext, tab_ensure: kakaoTabEnsureResult };
+        }
       }
     }
     const lookupContext = await buildReadOnlyLookupContext(config, job);
@@ -5241,15 +5812,97 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
 
     let decision;
     let hermesOutput = '';
+    let hermesAttempts = 0;
+    let hermesRecovered = false;
     if (fakeDecisionPath) {
       decision = JSON.parse(fs.readFileSync(fakeDecisionPath, 'utf8'));
     } else {
-      hermesOutput = await runHermes(prompt, config);
-      decision = extractJsonObject(hermesOutput);
+      const hermesDecision = await runHermesDecision(prompt, config);
+      hermesOutput = hermesDecision.hermesOutput;
+      decision = hermesDecision.decision;
+      hermesAttempts = hermesDecision.attempts;
+      hermesRecovered = hermesDecision.recovered;
     }
 
-    const sheetPayload = buildSheetAppendPayload(decision, { apiKey: config.sheetApiKey });
+    let sheetPayload = buildSheetAppendPayload(decision, { apiKey: config.sheetApiKey });
+    let customerDbDiscountLookup = null;
+    if (sheetPayload) {
+      try {
+        const enriched = await enrichSheetPayloadWithCustomerDbDiscount(config, sheetPayload);
+        sheetPayload = enriched.payload;
+        customerDbDiscountLookup = enriched.lookup;
+        if (customerDbDiscountLookup?.discountType) {
+          decision = {
+            ...decision,
+            sheet_row_candidate: {
+              ...(decision.sheet_row_candidate || {}),
+              discount_type: customerDbDiscountLookup.discountType
+            }
+          };
+        }
+      } catch (error) {
+        customerDbDiscountLookup = { matched: false, error: error.message.slice(0, 500) };
+      }
+    }
     const sheetResult = await appendToSheet(config, sheetPayload);
+    let discountPatchResult = null;
+    if (sheetPayload && customerDbDiscountLookup?.discountType) {
+      try {
+        discountPatchResult = await ensureConfirmRequestDiscountApplied(config, sheetResult, sheetPayload, customerDbDiscountLookup);
+      } catch (error) {
+        discountPatchResult = { updated: false, error: error.message.slice(0, 500) };
+      }
+    }
+    const initialFollowUpRows = [
+      ...buildFollowUpRows(decision, job),
+      ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)
+    ];
+    const existingRequestResult = sheetResult
+      ? null
+      : await fetchExistingConfirmRequestResultForDecision(config, decision, initialFollowUpRows);
+    const authoritativeSheetResult = sheetResult?.success === false
+      ? null
+      : (sheetResult || existingRequestResult);
+    const availabilityReport = buildSheetAvailabilityReport(authoritativeSheetResult, sheetPayload);
+    let postActionResult = null;
+    let postActionOutputTail = '';
+    if (availabilityReport) {
+      if (fakeDecisionPath) {
+        decision = suppressDecisionForUnreconciledSheetResult(decision, availabilityReport);
+        postActionResult = {
+          skipped: true,
+          reason: 'fake_decision_path_has_no_post_action_ai',
+          report: availabilityReport.payload
+        };
+      } else {
+        try {
+          const reconciliation = await runHermesPostActionDecision({
+            config,
+            job,
+            initialDecision: decision,
+            sheetResult: authoritativeSheetResult,
+            sheetPayload
+          });
+          decision = reconciliation.decision;
+          hermesAttempts += Number(reconciliation.attempts || 0);
+          hermesRecovered = hermesRecovered || reconciliation.recovered === true;
+          postActionOutputTail = text(reconciliation.hermesOutput).slice(-4000);
+          postActionResult = {
+            skipped: false,
+            attempts: reconciliation.attempts,
+            recovered: reconciliation.recovered,
+            report: availabilityReport.payload
+          };
+        } catch (error) {
+          decision = suppressDecisionForUnreconciledSheetResult(decision, availabilityReport);
+          postActionResult = {
+            skipped: false,
+            error: error.message.slice(0, 1000),
+            report: availabilityReport.payload
+          };
+        }
+      }
+    }
     const autoReplyResult = sheetResult?.success === false
       ? (sheetResult.error_type === 'no_contact'
           ? await maybeAutoSendReply({ config, decision, job, navigationContext })
@@ -5259,12 +5912,9 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
       ...buildFollowUpRows(decision, job),
       ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)
     ];
-    const existingRequestResult = sheetResult
-      ? null
-      : await fetchExistingConfirmRequestResultForDecision(config, decision, baseFollowUpRows);
     const availabilityAwareRows = enrichFollowUpRowsWithSheetAvailability(
       baseFollowUpRows,
-      sheetResult || existingRequestResult,
+      authoritativeSheetResult,
       sheetPayload,
       decision,
       job
@@ -5283,12 +5933,12 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     const slackDeliveryResult = config.followUpRowsEnabled === false
       ? { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] }
       : await deliverSlackFollowUpRows(config, followUpResult.rows || []);
-    Object.assign(result, { status: 'ai_completed', decision, sheetResult, existingRequestResult, followUpResult, slackDeliveryResult, autoReplyResult, hermesOutputTail: hermesOutput.slice(-4000) });
+    Object.assign(result, { status: 'ai_completed', decision, sheetResult, customerDbDiscountLookup, discountPatchResult, existingRequestResult, postActionResult, followUpResult, slackDeliveryResult, autoReplyResult, hermesAttempts, hermesRecovered, hermesOutputTail: hermesOutput.slice(-4000), postActionOutputTail });
     return result;
 	  } finally {
 	    if (!dryRun && navigationContext?.conversation_window) {
 	      try {
-	        result.closeResult = await closeKakaoConversationWindow(navigationContext.conversation_window);
+	        result.closeResult = await closeKakaoConversationWindow(navigationContext.conversation_window, { cuaDriverCommand: config.cuaDriverCommand });
 	        if (result.closeResult?.status && result.closeResult.status !== 'closed_conversation_window') {
 	          console.warn(`[ai-worker] Kakao conversation cleanup: ${result.closeResult.status}`);
 	        }

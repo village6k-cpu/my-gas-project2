@@ -89,16 +89,34 @@
 
   function nearestChatRow(el) {
     if (!el || !(el instanceof Element)) return null;
-    const structuralRow = el.closest('[role="listitem"], [role="row"], li');
-    if (structuralRow) return structuralRow;
-    return el.closest([
-      '[class*="chat"]',
-      '[class*="Chat"]',
-      '[class*="talk"]',
-      '[class*="Talk"]',
-      '[class*="room"]',
-      '[class*="Room"]'
-    ].join(','));
+    const virtualizedRow = el.closest('.ReactVirtualized__List.list_board > .ReactVirtualized__Grid__innerScrollContainer > li');
+    if (virtualizedRow?.querySelector?.('a.link_chat .txt_name')) return virtualizedRow;
+    const structuralRow = el.closest('[role="listitem"], li');
+    return structuralRow?.querySelector?.('a.link_chat .txt_name') ? structuralRow : null;
+  }
+
+  function extractStableChatId(row) {
+    const checkboxId = row?.querySelector?.('input[id^="chat-select-"]')?.id || '';
+    const checkboxMatch = /^chat-select-(.+)$/.exec(checkboxId);
+    if (checkboxMatch?.[1]) return normalizeText(checkboxMatch[1]);
+
+    const explicit = row?.getAttribute?.('data-chat-id')
+      || row?.getAttribute?.('data-room-id')
+      || row?.getAttribute?.('data-id')
+      || '';
+    return normalizeText(explicit);
+  }
+
+  function extractCustomerName(row) {
+    return normalizeText(row?.querySelector?.('.txt_name')?.textContent || '');
+  }
+
+  function extractMessagePreview(row) {
+    return normalizeText(row?.querySelector?.('.txt_info')?.textContent || '');
+  }
+
+  function extractDisplayTime(row) {
+    return normalizeText(row?.querySelector?.('.txt_date')?.textContent || '');
   }
 
   function isPageContainerLike(row, rowText) {
@@ -146,27 +164,41 @@
     return null;
   }
 
+  function extractRowUnreadCount(row, rowText = '') {
+    const badgeText = normalizeText(row?.querySelector?.('.num_round')?.textContent || '');
+    if (/^[1-9]\d?$/.test(badgeText)) {
+      const count = Number(badgeText);
+      if (count > 0 && count <= 99) return count;
+    }
+    return extractUnreadCount(rowText);
+  }
+
   function hasUnreadSignal(el, text) {
+    const row = nearestChatRow(el) || el;
+    if (extractRowUnreadCount(row, text) > 0) return true;
     const attrs = [
       el.getAttribute?.('aria-label'),
-      el.getAttribute?.('title'),
-      el.getAttribute?.('class')
+      el.getAttribute?.('title')
     ].filter(Boolean).join(' ');
-    const haystack = `${text || ''} ${attrs}`;
-    return /안읽|읽지 않은|새 메시지|unread|badge|Badge/i.test(haystack);
+    // Kakao uses generic `Badge` classes for several visual elements, including
+    // regular/old chat rows. Treating every class containing "badge" as unread
+    // turned the periodic backstop into a full-chat-list reprocessor.
+    if (/안읽|읽지 않은|새 메시지|unread/i.test(`${text || ''} ${attrs}`)) return true;
+
+    const className = String(el.getAttribute?.('class') || '');
+    return /(?:^|[\s_-])(?:unread|new-message)(?:$|[\s_-])/i.test(className);
   }
 
   function buildRoomKey(row, text) {
-    const explicit = row?.getAttribute?.('data-id')
-      || row?.getAttribute?.('data-chat-id')
-      || row?.getAttribute?.('data-room-id')
-      || row?.id;
-    if (explicit) return `attr:${explicit}`;
+    const chatId = extractStableChatId(row);
+    if (chatId) return `chat:${chatId}`;
 
-    const rect = row?.getBoundingClientRect?.();
-    const spatialHint = rect ? `${Math.round(rect.top / 10)}:${Math.round(rect.left / 10)}` : 'unknown';
-    const textHint = normalizeText(text).slice(0, 80);
-    return `dom:${spatialHint}:${hashText(textHint)}`;
+    const customerName = extractCustomerName(row);
+    if (customerName) return `customer:${hashText(customerName)}`;
+
+    // Fail closed to a non-spatial fallback. Coordinates and full preview text
+    // change whenever the virtualized list reorders or a customer writes again.
+    return `unknown:${hashText(normalizeText(text).slice(0, 80))}`;
   }
 
   function canonicalTopRowText(text) {
@@ -180,10 +212,11 @@
     const rowText = normalizeText(row?.innerText || row?.textContent || changedText || '');
     const isTopRowEvent = reason === 'top_row_changed' || reason === 'top_rows_backstop';
     const topRowText = canonicalTopRowText(rowText);
-    const roomKey = isTopRowEvent
-      ? `toprow:${hashText(topRowText).slice(0, 16)}`
-      : buildRoomKey(row, rowText);
-    const unreadCount = extractUnreadCount(rowText);
+    const roomKey = buildRoomKey(row, rowText);
+    const customerName = extractCustomerName(row);
+    const messagePreview = extractMessagePreview(row);
+    const displayTime = extractDisplayTime(row);
+    const unreadCount = extractRowUnreadCount(row, rowText);
     const unreadSignal = hasUnreadSignal(row, rowText);
     const signature = isTopRowEvent
       ? hashText(`kakao-chat-toprow:${roomKey}:${topRowText}:${reason}`)
@@ -197,8 +230,11 @@
       url: location.href,
       title: document.title,
       roomKey,
+      customerName,
       eventHash: signature,
       previewText: rowText,
+      messagePreview,
+      displayTime,
       unreadCount,
       unreadSignal,
       pageVisibility: document.visibilityState,
@@ -215,12 +251,12 @@
     STATE.lastSignatureAt.set(event.eventHash, now);
 
     try {
-      await fetch(STATE.config.bridgeUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(event),
-        keepalive: true
+      const result = await chrome.runtime.sendMessage({
+        type: 'village_kakao_bridge_event',
+        bridgeUrl: STATE.config.bridgeUrl,
+        event
       });
+      if (!result?.ok) throw new Error(`bridge returned ${result?.status || 0}`);
       log('event sent', event.reason, event.roomKey, event.previewText);
     } catch (err) {
       console.warn('[Village Kakao Watcher] bridge post failed:', err?.message || err);
@@ -228,11 +264,13 @@
   }
 
   function inspectElement(el, reason) {
+    if (!isKakaoMainChatListPage()) return;
     if (!isVisible(el)) return;
     const text = normalizeText(el.innerText || el.textContent || '');
     if (!text) return;
 
-    const row = nearestChatRow(el) || el;
+    const row = nearestChatRow(el);
+    if (!row) return;
     const rowText = normalizeText(row.innerText || row.textContent || text);
     if (!rowText) return;
     if (isPageContainerLike(row, rowText)) return;
@@ -247,42 +285,26 @@
   }
 
   function scanInitialUnread() {
-    const candidates = Array.from(document.querySelectorAll([
-      '[aria-label*="안읽"]',
-      '[aria-label*="읽지"]',
-      '[aria-label*="새 메시지"]',
-      '[class*="badge"]',
-      '[class*="Badge"]',
-      '[class*="unread"]',
-      '[class*="Unread"]',
-      '[role="listitem"]',
-      'li'
-    ].join(','))).slice(0, 250);
-
-    for (const el of candidates) {
-      const text = normalizeText(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
-      if (hasUnreadSignal(el, text)) inspectElement(el, 'initial_scan');
+    for (const { row, text } of chatRowCandidates().slice(0, 250)) {
+      if (hasUnreadSignal(row, text)) inspectElement(row, 'initial_scan');
     }
   }
 
   function chatRowCandidates() {
     const seenRows = new Set();
     return Array.from(document.querySelectorAll([
-      '[role="listitem"]',
-      '[role="row"]',
-      'li',
-      '[class*="chat"]',
-      '[class*="Chat"]',
-      '[class*="room"]',
-      '[class*="Room"]'
+      '.ReactVirtualized__List.list_board > .ReactVirtualized__Grid__innerScrollContainer > li',
+      '[role="grid"].list_board > .ReactVirtualized__Grid__innerScrollContainer > li'
     ].join(',')))
       .filter(isVisible)
       .map((el) => {
-        const row = nearestChatRow(el) || el;
+        const row = nearestChatRow(el);
+        if (!row) return null;
         const text = normalizeText(row.innerText || row.textContent || el.innerText || el.textContent || '');
         const rect = row.getBoundingClientRect?.();
         return { row, text, top: rect ? rect.top : Number.POSITIVE_INFINITY, left: rect ? rect.left : Number.POSITIVE_INFINITY };
       })
+      .filter(Boolean)
       .filter(({ row }) => {
         if (seenRows.has(row)) return false;
         seenRows.add(row);
@@ -301,15 +323,17 @@
     const rows = [];
     for (const item of chatRowCandidates().sort((a, b) => (a.top - b.top) || (a.left - b.left))) {
       const canonicalText = canonicalTopRowText(item.text);
-      const key = canonicalText;
+      const roomKey = buildRoomKey(item.row, item.text);
+      const key = roomKey;
       if (seen.has(key)) continue;
       seen.add(key);
       rows.push({
         row: item.row,
+        roomKey,
         top: Math.round(item.top),
         left: Math.round(item.left),
         text: item.text,
-        signature: hashText(canonicalText)
+        signature: hashText(`${roomKey}:${canonicalText}`)
       });
       if (rows.length >= limit) break;
     }
@@ -352,6 +376,9 @@
           if (posted >= STATE.config.deepBackstopMaxRows) break;
           if (seen.has(row.signature)) continue;
           seen.add(row.signature);
+          // A deep scan is only a recovery path for genuinely unread rows. Do
+          // not emit every historical chat row just because it is visible.
+          if (!hasUnreadSignal(row.row, row.text) && !extractUnreadCount(row.text)) continue;
           posted += 1;
           postEvent(createEvent(row.row, 'top_rows_backstop', row.text));
         }
@@ -425,7 +452,9 @@
       if (signature === STATE.lastTopRowsSignature && !backstopDue) return;
       const changed = signature === STATE.lastTopRowsSignature ? [] : changedRows(previousRows, currentRows);
       const unreadBackstop = currentRows.filter((row) => hasUnreadSignal(row.row, row.text));
-      const readBackstop = backstopDue ? currentRows : [];
+      // The bridge already handles live row changes. Periodically re-posting
+      // every read row caused stale conversations to be classified as new.
+      const readBackstop = [];
       const toPost = [];
       const seen = new Set();
       for (const row of [...changed, ...unreadBackstop, ...readBackstop].slice(0, STATE.config.topRowsPostLimit || 30)) {
@@ -532,18 +561,18 @@
     STATE.urlWatchTimer = window.setInterval(() => {
       if (STATE.lastUrl === location.href) return;
       STATE.lastUrl = location.href;
-      if (isKakaoChatManagerPage()) {
+      if (isKakaoMainChatListPage()) {
         startWatcher();
       } else if (STATE.started) {
-        stopWatcher('left_chat_manager_page');
+        stopWatcher('left_main_chat_list_page');
       }
     }, 1000);
   }
 
   function startWatcher() {
     if (STATE.started || !STATE.config.enabled) return;
-    if (!isKakaoChatManagerPage()) {
-      log('not a Kakao chat manager page', location.href);
+    if (!isKakaoMainChatListPage()) {
+      log('not the Kakao main chat list page', location.href);
       return;
     }
     STATE.started = true;

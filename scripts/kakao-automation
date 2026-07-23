@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIDGE_DIR="$ROOT_DIR/tools/kakao-dom-bridge"
 WORKER_CMD="$ROOT_DIR/tools/ai-browser-worker/run.sh"
 CHROME_SCRIPT="$BRIDGE_DIR/open-automation-chrome.sh"
+LOGIN_RECOVERY_SCRIPT="$BRIDGE_DIR/automation-login-recover.py"
 RUNTIME_DIR="${VILLAGE_KAKAO_RUNTIME_DIR:-$HOME/.village-kakao-automation}"
 PID_FILE="$RUNTIME_DIR/bridge.pid"
 LOG_FILE="$RUNTIME_DIR/bridge.log"
@@ -208,6 +209,14 @@ APPLESCRIPT
     | grep -v grep >/dev/null
 }
 
+automation_profile_chat_ok() {
+  if [[ -x "$LOGIN_RECOVERY_SCRIPT" && -x "${CUA_DRIVER_COMMAND:-}" ]]; then
+    python3 "$LOGIN_RECOVERY_SCRIPT" --status-only --json >/dev/null 2>&1
+    return
+  fi
+  chrome_automation_profile_has_kakao_url
+}
+
 chrome_devtools_url() {
   printf 'http://127.0.0.1:%s' "$KAKAO_REMOTE_DEBUGGING_PORT"
 }
@@ -225,6 +234,16 @@ chrome_devtools_open_url() {
   encoded_url="$(urlencode "$1")"
   curl -sS --max-time 2 -X PUT "$(chrome_devtools_url)/json/new?${encoded_url}" >/dev/null \
     || curl -sS --max-time 2 "$(chrome_devtools_url)/json/new?${encoded_url}" >/dev/null
+}
+
+open_chrome_profile() {
+  local action="${1:-open}"
+  if "$CHROME_SCRIPT" "$KAKAO_MANAGER_URL" >/dev/null; then
+    return 0
+  fi
+  echo "WARNING: failed to ${action} Chrome profile: $VILLAGE_KAKAO_CHROME_DIR / $VILLAGE_KAKAO_CHROME_PROFILE_DIRECTORY" >&2
+  echo "         Kakao bridge remains running; repair Google Chrome separately." >&2
+  return 1
 }
 
 chrome_devtools_has_chat_tab() {
@@ -428,6 +447,37 @@ launch_bridge() {
   return 1
 }
 
+launch_bridge_direct() {
+  write_launch_agent
+  /usr/bin/perl -MPOSIX=setsid - "$RUNNER_FILE" "$LOG_FILE" <<'PERL' >"$PID_FILE"
+use strict;
+use warnings;
+use POSIX qw(setsid);
+
+my ($runner_file, $log_file) = @ARGV;
+defined(my $pid = fork) or die "fork: $!\n";
+if ($pid) {
+  print "$pid\n";
+  exit 0;
+}
+chdir "/Users/village6k/my-gas-project2" or die "chdir: $!\n";
+setsid() or die "setsid: $!\n";
+open STDIN, '<', '/dev/null' or die "stdin: $!\n";
+open STDOUT, '>>', $log_file or die "stdout: $!\n";
+open STDERR, '>&', \*STDOUT or die "stderr: $!\n";
+exec '/bin/bash', $runner_file;
+die "exec: $!\n";
+PERL
+  for _ in {1..40}; do
+    if health >/dev/null 2>&1; then
+      bridge_pid >"$PID_FILE"
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
 cmd_start() {
   load_env
   "$ROOT_DIR/scripts/patch-hermes-village-followup-slack"
@@ -439,9 +489,14 @@ cmd_start() {
     if launch_bridge; then
       echo "started bridge pid $(cat "$PID_FILE")"
     else
-      echo "failed to start bridge via launchctl" >&2
-      echo "log: $LOG_FILE" >&2
-      exit 1
+      echo "launchctl bridge start failed; trying direct daemon fallback" >&2
+      if launch_bridge_direct; then
+        echo "started bridge pid $(cat "$PID_FILE") via direct daemon fallback"
+      else
+        echo "failed to start bridge via launchctl or direct daemon fallback" >&2
+        echo "log: $LOG_FILE" >&2
+        exit 1
+      fi
     fi
     echo "log: $LOG_FILE"
   fi
@@ -453,18 +508,21 @@ cmd_start() {
       else
         echo "automation Chrome profile is missing DevTools port ${KAKAO_REMOTE_DEBUGGING_PORT}; relaunching profile"
         stop_automation_chrome_profile
-        "$CHROME_SCRIPT" "$KAKAO_MANAGER_URL" >/dev/null
-        echo "relaunched isolated Chrome profile with DevTools: $(chrome_devtools_url)"
+        if open_chrome_profile "relaunch"; then
+          echo "relaunched isolated Chrome profile with DevTools: $(chrome_devtools_url)"
+        fi
       fi
     fi
     if chrome_devtools_ready && ! chrome_devtools_has_chat_tab; then
       chrome_devtools_open_url "$KAKAO_MANAGER_URL" || true
       echo "opened Kakao chat URL in automation Chrome profile"
-    elif ! chrome_automation_profile_has_kakao_url; then
-      if chrome_devtools_ready; then
+    elif ! automation_profile_chat_ok; then
+      if [[ -x "$LOGIN_RECOVERY_SCRIPT" ]]; then
+        python3 "$LOGIN_RECOVERY_SCRIPT" --status-only --open-if-missing --json >/dev/null || true
+      elif chrome_devtools_ready; then
         chrome_devtools_open_url "$KAKAO_MANAGER_URL" || true
       else
-        "$CHROME_SCRIPT" "$KAKAO_MANAGER_URL" >/dev/null
+        open_chrome_profile "open" || true
       fi
       echo "opened Kakao URL in automation Chrome profile"
     fi
@@ -474,8 +532,9 @@ cmd_start() {
       chrome_devtools_activate_chat_tab || true
     fi
   else
-    "$CHROME_SCRIPT" "$KAKAO_MANAGER_URL" >/dev/null
-    echo "opened Chrome profile: $VILLAGE_KAKAO_CHROME_DIR / $VILLAGE_KAKAO_CHROME_PROFILE_DIRECTORY"
+    if open_chrome_profile "open"; then
+      echo "opened Chrome profile: $VILLAGE_KAKAO_CHROME_DIR / $VILLAGE_KAKAO_CHROME_PROFILE_DIRECTORY"
+    fi
   fi
   sleep 1
   if [[ -x "$BRIDGE_DIR/inject-watcher-cdp.py" ]] && chrome_devtools_ready; then
@@ -587,8 +646,13 @@ cmd_status() {
   else
     echo "  process: not running"
   fi
+  if automation_profile_chat_ok; then
+    echo "  automation profile Kakao chat: verified (CUA/profile-aware)"
+  else
+    echo "  automation profile Kakao chat: not verified"
+  fi
   if chrome_automation_profile_has_kakao_url; then
-    echo "  kakao launch url: present"
+    echo "  kakao launch url: present (AppleScript diagnostic)"
   else
     echo "  kakao launch url: not detected"
   fi
@@ -672,6 +736,15 @@ cmd_recover() {
   post_bridge_json "/maintenance/recover" "${1:-900}"
 }
 
+cmd_recover_login() {
+  load_env
+  if [[ ! -x "$LOGIN_RECOVERY_SCRIPT" ]]; then
+    echo "login recovery script missing: $LOGIN_RECOVERY_SCRIPT" >&2
+    return 1
+  fi
+  python3 "$LOGIN_RECOVERY_SCRIPT" --recover-login --json
+}
+
 cmd_cleanup_tabs() {
   load_env
   post_bridge_json "/maintenance/cleanup-tabs" 10
@@ -702,6 +775,7 @@ Usage:
   scripts/kakao-automation status    Show bridge health and Kakao tabs
   scripts/kakao-automation logs [N]  Show bridge log tail
   scripts/kakao-automation recover   Run Supabase ready/error job recovery sweep now
+  scripts/kakao-automation recover-login  Reopen 🤖 automation Chrome and click 1Password/passkey login recovery
   scripts/kakao-automation cleanup-tabs Close stale individual Kakao chat tabs now
   scripts/kakao-automation slack-backstop [--write] [args]  Scan Slack and backfill follow-up board
   scripts/kakao-automation check     Run regression checks
@@ -725,6 +799,7 @@ case "${1:-status}" in
   status) cmd_status ;;
   logs) cmd_logs "${2:-120}" ;;
   recover) cmd_recover "${2:-900}" ;;
+  recover-login) cmd_recover_login ;;
   cleanup-tabs) cmd_cleanup_tabs ;;
   slack-backstop) shift; cmd_slack_backstop "$@" ;;
   check) cmd_check ;;

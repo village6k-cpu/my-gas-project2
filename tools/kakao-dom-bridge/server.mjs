@@ -1,9 +1,11 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
+import dns from 'node:dns';
+import { spawn, spawnSync } from 'node:child_process';
+import { deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
 
 function loadSelectedEnvFile(filePath, keys = []) {
   const allowed = new Set(keys);
@@ -23,6 +25,11 @@ function loadSelectedEnvFile(filePath, keys = []) {
 }
 
 loadSelectedEnvFile(path.resolve(process.env.HOME || '', '.hermes/.env'), ['SLACK_BOT_TOKEN']);
+
+function readBooleanEnvironment(value, defaultValue = false) {
+  if (value === undefined || value === null || String(value).trim() === '') return defaultValue;
+  return ['1', 'true'].includes(String(value).trim().toLowerCase());
+}
 
 const CONFIG = {
   port: Number(process.env.PORT || 8787),
@@ -50,15 +57,91 @@ const CONFIG = {
   supabaseRecoveryLookbackHours: Number(process.env.SUPABASE_RECOVERY_LOOKBACK_HOURS || 36),
   supabaseRecoveryErrorRetryMs: Number(process.env.SUPABASE_RECOVERY_ERROR_RETRY_MS || 900_000),
   supabaseRecoveryMaxAttempts: Number(process.env.SUPABASE_RECOVERY_MAX_ATTEMPTS || 2),
-  slackActionPollEnabled: process.env.SLACK_ACTION_POLL_ENABLED !== 'false',
+  slackActionPollEnabled: readBooleanEnvironment(process.env.SLACK_ACTION_POLL_ENABLED, true),
   slackActionPollIntervalMs: Number(process.env.SLACK_ACTION_POLL_INTERVAL_MS || 10_000),
   slackBotToken: process.env.SLACK_BOT_TOKEN || '',
+  followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
+  slackCardDeliveryEnabled: process.env.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1',
+  slackChannels: {
+    schedule: process.env.SLACK_CHANNEL_SCHEDULE_AGENT || '스케쥴-agent',
+    document: process.env.SLACK_CHANNEL_DOCUMENT_AGENT || '서류발송-agent',
+    settlement: process.env.SLACK_CHANNEL_SETTLEMENT_AGENT || '정산-agent',
+    inventory: process.env.SLACK_CHANNEL_INVENTORY_AGENT || '재고관리-agent',
+    other: process.env.SLACK_CHANNEL_OTHER_AGENT || '기타문의'
+  },
   manualSendDedupeWindowMs: Number(process.env.MANUAL_SEND_DEDUPE_WINDOW_MS || 10 * 60_000),
   kakaoDevtoolsUrl: (process.env.KAKAO_DEVTOOLS_URL || process.env.KAKAO_CDP_HTTP_URL || process.env.KAKAO_CDP_URL || '').replace(/\/+$/, ''),
   kakaoRemoteDebuggingPort: process.env.KAKAO_REMOTE_DEBUGGING_PORT || process.env.VILLAGE_KAKAO_REMOTE_DEBUGGING_PORT || '9223',
-  kakaoTabCleanupEnabled: process.env.KAKAO_TAB_CLEANUP_ENABLED !== 'false',
-  kakaoTabCleanupIntervalMs: Number(process.env.KAKAO_TAB_CLEANUP_INTERVAL_MS || 120_000)
+  kakaoTabCleanupEnabled: readBooleanEnvironment(process.env.KAKAO_TAB_CLEANUP_ENABLED, true),
+  kakaoTabCleanupIntervalMs: Number(process.env.KAKAO_TAB_CLEANUP_INTERVAL_MS || 120_000),
+  // The extension can emit a full DOM payload for every mutation. Keep queue
+  // diagnostics bounded so observability cannot consume the host disk and
+  // starve the watcher that it is meant to protect.
+  queueLogMaxBytes: Math.max(1 * 1024 * 1024, Number(process.env.QUEUE_LOG_MAX_BYTES || 32 * 1024 * 1024)),
+  queueLogArchiveCount: Math.max(1, Number(process.env.QUEUE_LOG_ARCHIVE_COUNT || 10)),
+  dnsFallbackServers: String(process.env.DNS_FALLBACK_SERVERS || '168.126.63.1,168.126.63.2,1.1.1.1')
+    .split(',')
+    .map((server) => server.trim())
+    .filter(Boolean)
 };
+
+const dnsFallbackResolver = new dns.Resolver();
+if (CONFIG.dnsFallbackServers.length) {
+  dnsFallbackResolver.setServers(CONFIG.dnsFallbackServers);
+}
+
+function lookupWithDnsFallback(hostname, options, callback) {
+  dns.lookup(hostname, options, (lookupError, address, family) => {
+    if (!lookupError) {
+      callback(null, address, family);
+      return;
+    }
+    dnsFallbackResolver.resolve4(hostname, (resolveError, addresses) => {
+      if (resolveError || !addresses?.length) {
+        callback(lookupError);
+        return;
+      }
+      if (options?.all) {
+        callback(null, addresses.map((resolvedAddress) => ({ address: resolvedAddress, family: 4 })));
+        return;
+      }
+      callback(null, addresses[0], 4);
+    });
+  });
+}
+
+async function fetchWithDnsFallback(endpoint, init = {}) {
+  const url = new URL(endpoint);
+  if (!['http:', 'https:'].includes(url.protocol) || ['127.0.0.1', 'localhost'].includes(url.hostname)) {
+    return fetch(endpoint, init);
+  }
+  const transport = url.protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = transport.request(url, {
+      method: init.method || 'GET',
+      headers: init.headers || {},
+      lookup: lookupWithDnsFallback
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          text: async () => body
+        });
+      });
+    });
+    req.on('error', reject);
+    if (init.signal) {
+      if (init.signal.aborted) req.destroy(init.signal.reason);
+      init.signal.addEventListener('abort', () => req.destroy(init.signal.reason), { once: true });
+    }
+    if (init.body) req.write(init.body);
+    req.end();
+  });
+}
 
 const state = {
   startedAt: new Date().toISOString(),
@@ -98,14 +181,19 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function json(res, status, payload) {
-  const body = JSON.stringify(payload, null, 2);
-  res.writeHead(status, {
+export function buildCorsHeaders() {
+  return {
     'content-type': 'application/json; charset=utf-8',
     'access-control-allow-origin': '*',
     'access-control-allow-methods': 'GET,POST,OPTIONS',
-    'access-control-allow-headers': 'content-type'
-  });
+    'access-control-allow-headers': 'content-type',
+    'access-control-allow-private-network': 'true'
+  };
+}
+
+function json(res, status, payload) {
+  const body = JSON.stringify(payload, null, 2);
+  res.writeHead(status, buildCorsHeaders());
   res.end(body);
 }
 
@@ -142,10 +230,13 @@ function inferKakaoUnreadCountFromPreview(text = '') {
   return count;
 }
 
-function normalizeEvent(raw) {
+export function normalizeEvent(raw = {}) {
   const source = String(raw.source || 'kakao_channel_manager_dom');
   const roomKey = String(raw.roomKey || raw.room_key || raw.roomHint || raw.previewText || 'unknown-room');
   const previewText = String(raw.previewText || raw.preview_text || '').slice(0, 500);
+  const customerName = String(raw.customerName || raw.customer_name || '').slice(0, 120);
+  const messagePreview = String(raw.messagePreview || raw.message_preview || '').slice(0, 500);
+  const displayTime = String(raw.displayTime || raw.display_time || '').slice(0, 80);
   const detectedAt = String(raw.detectedAt || raw.detected_at || nowIso());
   const eventHash = String(raw.eventHash || raw.event_hash || sha256(JSON.stringify({ source, roomKey, previewText, detectedAt })));
   const unreadCount = raw.unreadCount ?? raw.unread_count ?? inferKakaoUnreadCountFromPreview(previewText);
@@ -161,6 +252,9 @@ function normalizeEvent(raw) {
     roomKey,
     eventHash,
     previewText,
+    customerName,
+    messagePreview,
+    displayTime,
     unreadCount,
     pageVisibility: raw.pageVisibility || raw.page_visibility || null,
     raw
@@ -211,6 +305,17 @@ function normalizePreviewForGrouping(text) {
   return `room-label:${label.slice(0, 80)}`;
 }
 
+export function roomKeyForDebounce(event = {}) {
+  const supplied = String(event.roomKey || event.room_key || '').trim();
+  if (/^(?:chat|attr):/.test(supplied)) return supplied;
+
+  const customerName = String(event.customerName || event.customer_name || '').trim();
+  if (customerName) return `customer:${sha256(customerName).slice(0, 16)}`;
+
+  const groupingText = normalizePreviewForGrouping(event.previewText || event.preview_text || '');
+  return groupingText ? `preview:${sha256(groupingText).slice(0, 16)}` : (supplied || 'unknown-room');
+}
+
 function cleanPreviewText(text) {
   return String(text || '')
     .normalize('NFKC')
@@ -220,52 +325,12 @@ function cleanPreviewText(text) {
     .trim();
 }
 
-function isStaffOrOutboundPreview(text) {
-  const preview = cleanPreviewText(text);
-  if (!preview) return true;
-  return /(빌리지님|김준영님|최재형님|운영자|상담원|매니저)님?이?\s*보냄|보낸 메시지 가이드/.test(preview)
-    || /요청하신\s*(?:통장\s*사본|계좌\s*사본).*사업자\s*등록증.*(?:전달|보내)드립니다/.test(preview)
-    || /요청하신.*사업자\s*등록증.*(?:통장\s*사본|계좌\s*사본).*(?:전달|보내)드립니다/.test(preview)
-    || /^저장하기(?:\s|$)/.test(preview)
-    || /알림톡\/친구톡 메시지는 관리자센터에서 확인할 수 없습니다/.test(preview);
-}
-
-function hasActionableBusinessSignal(text) {
-  const preview = cleanPreviewText(text);
-  return /(예약|신청|가능|문의|대여|렌탈|반출|반납|변경|추가|취소|연장|가격|비용|견적|얼마|요금|세금계산|계산서|거래명세|입금|결제|환불|위치|주소|영업|운영|절차|방법|파손|분실|누락|고장|수리|장비|카메라|렌즈|조명|배터리|충전기|삼각대|짐벌|마이크|송수신기|FX3|FX6|FX9|A7S3|A7M4|로닌|어퓨처|어퓨쳐|소니|DJI|SDR|V마운트|브이마운트)/i.test(preview);
-}
-
-function isLowValueTerminalPreview(text) {
-  const preview = cleanPreviewText(text);
-  if (!preview) return true;
-  if (isStaffOrOutboundPreview(preview)) return true;
-  const withoutClock = preview
-    .replace(/\b\d+\b/g, ' ')
-    .replace(/(?:오전|오후)\s*\d{1,2}:?\d{2}/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (/^(?:네|넵|예|옙|알겠습니다|확인했습니다|감사합니다|감사 합니다|고맙습니다|넵 감사합니다|네 감사합니다|네 알겠습니다)[!.~\s]*$/.test(withoutClock)) return true;
-  if (/(반납\s*완료|반납완료|반납완려|반납\s*했습니다|반납했습니다|잘\s*썼|잘썼|보냈습니다|입금했습니다|입금완료|확인\s*감사)/.test(preview) && !hasActionableBusinessSignal(preview.replace(/반납|입금|확인/g, ''))) return true;
-  if (/^(?:[^ ]+\s+)?(?:네|넵)\s*(?:가능합니다|가능하십니다|잡아드리겠습니다|잡아드릴게요|준비해놓을게요|문제없습니다|확인해보겠습니다|무인반납입니다)/.test(withoutClock)) return true;
-  return false;
-}
-
-function isThanksOnlyTerminalPreview(text) {
-  const preview = cleanPreviewText(text);
-  if (!preview) return true;
-  const withoutClock = preview
-    .replace(/\b\d+\b/g, ' ')
-    .replace(/(?:오전|오후)\s*\d{1,2}:?\d{2}/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return /^(?:[가-힣A-Za-z0-9_.-]{1,24}\s+)?(?:감사합니다|감사\s*합니다|감사|고맙습니다|고마워요|넵\s*감사합니다|네\s*감사합니다)[!.~ㅠㅜ\s]*$/.test(withoutClock);
-}
-
-function shouldSkipWorkerForPreview(event = {}) {
-  const preview = event.previewText || '';
-  if (isStaffOrOutboundPreview(preview)) return 'staff_or_outbound_preview';
-  if (isThanksOnlyTerminalPreview(preview)) return 'thanks_only_terminal_preview';
-  if (isLowValueTerminalPreview(preview) && !hasUnreadCount(event)) return 'low_value_terminal_preview';
+export function shouldSkipWorkerForPreview(event = {}) {
+  // Preview text is not authoritative conversation context. A trailing thanks,
+  // an apparent outbound marker, or a short payment/return acknowledgement can
+  // follow an unresolved request. Structural noise is filtered separately;
+  // every real message preview must reach Hermes for semantic judgment.
+  void event;
   return '';
 }
 
@@ -371,15 +436,17 @@ function daysSinceDatedPreview(text, now = new Date()) {
   return dayNumber(today.year, today.month, today.day) - dayNumber(date.year, date.month, date.day);
 }
 
-function hasUnreadCount(event = {}) {
-  if (event.raw?.unreadSignal === true || event.unreadSignal === true) return true;
+export function hasUnreadCount(event = {}) {
   const inferred = inferKakaoUnreadCountFromPreview(event.previewText || event.raw?.previewText || '');
   const count = Number(event.unreadCount ?? event.unread_count ?? event.raw?.unreadCount ?? event.raw?.unread_count ?? inferred ?? 0);
-  if (!Number.isFinite(count) || count <= 0) return false;
-  if (event.reason === 'top_rows_backstop' || event.reason === 'top_row_changed') return true;
+  if (Number.isFinite(count) && count > 0) return true;
+
+  // `unreadSignal` historically came from a broad DOM class match (`Badge`).
+  // A boolean detached from a visible unread count is not trustworthy enough to
+  // let a periodic top-row scan create a worker job or a human-review card.
+  // Keep an explicit textual unread label as the safe fallback.
   const preview = String(event.previewText || '');
-  const explicitlyUnread = /안읽|읽지\s*않은|새\s*메시지|unread/i.test(preview);
-  return explicitlyUnread;
+  return /안읽|읽지\s*않은|새\s*메시지|unread/i.test(preview);
 }
 
 function hasDatedPreview(text) {
@@ -414,7 +481,7 @@ function isLiveTopRowPreview(text, now = new Date()) {
     && ageMinutes <= CONFIG.topRowLiveWindowMinutes;
 }
 
-function shouldQueueTopRowEvent(event) {
+export function shouldQueueTopRowEvent(event) {
   if (isActionChromePreview(event.previewText)) return false;
   if (hasUnreadCount(event)) return !hasDatedPreview(event.previewText) || isRecentDatedPreview(event.previewText);
   if (event.reason === 'top_rows_backstop') return false;
@@ -452,9 +519,76 @@ function isActionChromePreview(text) {
   return false;
 }
 
+function compactQueueAuditText(value, maxLength = 1200) {
+  const text = String(value || '').trim();
+  return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 1))}…` : text;
+}
+
+function compactQueueAuditRecord(filename, object = {}) {
+  // Queue files are audit/status streams, not the source of truth: the full
+  // normalized event is already persisted in Supabase. Logging raw extension
+  // DOM snapshots here used tens of GB per day and eventually made the bridge
+  // unreliable. Keep the fields consumed by the watchdog and short evidence.
+  const base = {
+    at: object.at || '',
+    receivedAt: object.receivedAt || '',
+    detectedAt: object.detectedAt || '',
+    status: object.status || '',
+    reason: object.reason || '',
+    jobId: object.jobId || '',
+    roomKey: object.roomKey || object.room_key || '',
+    customerName: object.customerName || object.customer_name || '',
+    previewText: compactQueueAuditText(object.previewText || object.preview_text || '', 600)
+  };
+  if (filename === 'worker-results.ndjson') {
+    const result = object.result || {};
+    return {
+      ...base,
+      result: {
+        code: result.code ?? null,
+        signal: result.signal || null,
+        timedOut: result.timedOut === true,
+        stdoutTail: compactQueueAuditText(result.stdout, 1600),
+        stderrTail: compactQueueAuditText(result.stderr, 1600)
+      }
+    };
+  }
+  if (filename === 'errors.ndjson') {
+    return {
+      ...base,
+      type: object.type || '',
+      message: compactQueueAuditText(object.message || object.error || '', 1600)
+    };
+  }
+  return base;
+}
+
+function rotateQueueLogIfNeeded(filename, incomingBytes) {
+  const filePath = path.join(CONFIG.queueDir, filename);
+  try {
+    const stat = fs.statSync(filePath);
+    if (stat.size + incomingBytes <= CONFIG.queueLogMaxBytes) return;
+    const archivePath = `${filePath}.${Date.now()}.${process.pid}`;
+    fs.renameSync(filePath, archivePath);
+    const prefix = `${filename}.`;
+    const archives = fs.readdirSync(CONFIG.queueDir)
+      .filter((entry) => entry.startsWith(prefix))
+      .map((entry) => ({ entry, mtimeMs: fs.statSync(path.join(CONFIG.queueDir, entry)).mtimeMs }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    archives.slice(CONFIG.queueLogArchiveCount).forEach(({ entry }) => {
+      try { fs.unlinkSync(path.join(CONFIG.queueDir, entry)); } catch (_) {}
+    });
+  } catch (error) {
+    if (error?.code !== 'ENOENT') console.warn(`[kakao-dom-bridge] queue log rotation failed for ${filename}: ${error.message}`);
+  }
+}
+
 function appendNdjson(filename, object) {
   ensureQueueDir();
-  fs.appendFileSync(path.join(CONFIG.queueDir, filename), `${JSON.stringify(object)}\n`, 'utf8');
+  const record = compactQueueAuditRecord(filename, object);
+  const line = `${JSON.stringify(record)}\n`;
+  rotateQueueLogIfNeeded(filename, Buffer.byteLength(line));
+  fs.appendFileSync(path.join(CONFIG.queueDir, filename), line, 'utf8');
 }
 
 function supabaseConfigured() {
@@ -482,7 +616,7 @@ function supabaseHeaders(prefer = '') {
 async function supabaseFetchWithTimeout(endpoint, init = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CONFIG.supabaseTimeoutMs);
-  const response = await fetch(endpoint, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+  const response = await fetchWithDnsFallback(endpoint, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
   const text = await response.text().catch(() => '');
   let data = null;
   if (text) {
@@ -671,6 +805,24 @@ function buildWorkerResultPatch(job, workerResult) {
   };
 }
 
+function shouldEscalateCompletedWorkerSkip(job = {}, workerPayload = {}) {
+  const decision = workerPayload.decision || {};
+  const followUpResult = workerPayload.followUpResult || workerPayload.follow_up_result || {};
+  const sheetResult = workerPayload.sheetResult || workerPayload.sheet_result || null;
+  const insertedFollowUps = Number(followUpResult.inserted || 0);
+  if (insertedFollowUps > 0 || (Array.isArray(followUpResult.rows) && followUpResult.rows.length > 0)) return false;
+  if (decision.should_write_to_sheet === true || sheetResult?.success === true) return false;
+
+  const reason = String(decision.reason || '').toLowerCase();
+  const chatStatus = String(decision.customer?.chat_status || '').toLowerCase();
+
+  // A completed worker can still silently drop a real reservation when the Kakao
+  // room could not be opened and the worker correctly refuses preview-only
+  // classification. Those cases must become a human-review card, not disappear.
+  return /matching kakao conversation not|not opened|not visible|chat[_ -]?row[_ -]?not[_ -]?found|preview only|preview-only/.test(reason)
+    || /not opened|not found|not visible|chat_row_not_found|preview/.test(chatStatus);
+}
+
 function buildStableJobId(roomKey, events = []) {
   const identities = events
     .map((event) => event.eventHash || sha256(JSON.stringify({
@@ -699,6 +851,9 @@ function buildAiFirstJob(roomKey, roomState) {
     lastEventAt: roomState.lastAt,
     eventCount: events.length,
     previewText: latest.previewText || '',
+    customerName: latest.customerName || latest.customer_name || latest.raw?.customerName || latest.raw?.customer_name || '',
+    messagePreview: latest.messagePreview || latest.message_preview || latest.raw?.messagePreview || latest.raw?.message_preview || '',
+    displayTime: latest.displayTime || latest.display_time || latest.raw?.displayTime || latest.raw?.display_time || '',
     unreadCount: unreadCounts.length ? Math.max(...unreadCounts) : null,
     events,
     instructions: [
@@ -757,20 +912,17 @@ function followUpConfig() {
   return {
     supabaseUrl: CONFIG.supabaseUrl,
     serviceRoleKey: CONFIG.supabaseServiceRoleKey,
-    followUpTable: CONFIG.followUpTable
+    followUpTable: CONFIG.followUpTable,
+    slackFollowUpEnabled: CONFIG.slackCardDeliveryEnabled,
+    slackThreadFollowUpsEnabled: process.env.SLACK_FOLLOW_UP_THREAD_REPLIES !== '0',
+    slackBotToken: CONFIG.slackBotToken,
+    slackChannels: CONFIG.slackChannels
   };
 }
 
 async function createWorkerFailureFollowUp(job = {}, error = new Error('worker failed'), context = {}) {
   if (!supabaseConfigured()) return { skipped: true, reason: 'supabase_not_configured' };
   const preview = previewForJob(job);
-  if (isLowValueTerminalPreview(preview) || isStaffOrOutboundPreview(preview)) {
-    return {
-      skipped: true,
-      reason: 'non_actionable_failure_preview',
-      previewText: cleanPreviewText(preview).slice(0, 240)
-    };
-  }
   const customerName = customerNameForJob(job);
   const jobId = String(job.jobId || job.eventHash || job.id || 'unknown-job');
   const roomKey = String(job.roomKey || job.room_key || '').slice(0, 240);
@@ -807,11 +959,48 @@ async function createWorkerFailureFollowUp(job = {}, error = new Error('worker f
       recovery_context: context
     }
   };
-  return upsertFollowUpRows(followUpConfig(), [row]);
+  const upsertResult = await upsertFollowUpRows(followUpConfig(), [row]);
+  if (CONFIG.slackCardDeliveryEnabled && upsertResult?.rows?.length) {
+    try {
+      const slackDeliveryResult = await deliverSlackFollowUpRows(followUpConfig(), upsertResult.rows);
+      return { ...upsertResult, slackDeliveryResult };
+    } catch (deliveryError) {
+      appendNdjson('errors.ndjson', {
+        at: nowIso(),
+        type: 'worker_failure_followup_slack_delivery',
+        message: deliveryError.message,
+        jobId
+      });
+      return { ...upsertResult, slackDeliveryError: deliveryError.message };
+    }
+  }
+  return upsertResult;
+}
+
+export function shouldDetachWorkerProcess(platform = process.platform) {
+  return platform !== 'win32';
+}
+
+export function buildWorkerTreeKillInvocation(pid, signal = 'SIGTERM', platform = process.platform) {
+  if (platform !== 'win32') return null;
+  const args = ['/PID', String(pid), '/T'];
+  if (signal === 'SIGKILL') args.push('/F');
+  return {
+    command: 'taskkill.exe',
+    args,
+    options: { shell: false, stdio: 'ignore', windowsHide: true }
+  };
 }
 
 function killProcessTree(child, signal = 'SIGTERM') {
   if (!child?.pid) return;
+  const windowsKill = buildWorkerTreeKillInvocation(child.pid, signal);
+  if (windowsKill) {
+    try {
+      const result = spawnSync(windowsKill.command, windowsKill.args, windowsKill.options);
+      if (!result.error) return;
+    } catch {}
+  }
   try {
     process.kill(-child.pid, signal);
   } catch {
@@ -835,7 +1024,7 @@ function runWorker(job) {
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: process.env,
-      detached: true
+      detached: shouldDetachWorkerProcess()
     });
 
     let stdout = '';
@@ -872,8 +1061,27 @@ function runWorker(job) {
 }
 
 let workerChain = Promise.resolve();
+const queuedWorkerSlotsByRoom = new Map();
 const manualSendInFlight = new Map();
 const manualSendRecent = new Map();
+
+export function mergeQueuedRoomJobs(previous = {}, latest = {}) {
+  const seen = new Set();
+  const events = [];
+  for (const event of [...(previous.events || []), ...(latest.events || [])]) {
+    const identity = event?.eventHash || sha256(JSON.stringify(event || {}));
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    events.push(event);
+  }
+  return {
+    ...previous,
+    ...latest,
+    firstEventAt: previous.firstEventAt || latest.firstEventAt,
+    eventCount: events.length,
+    events
+  };
+}
 
 function normalizeManualSendDedupeText(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -938,32 +1146,73 @@ function enqueueWorker(job) {
     console.info('[dom-bridge] worker skipped local duplicate job', jobId, job.roomKey || '');
     return Promise.resolve(result);
   }
+
+  const roomKey = String(job?.roomKey || '');
+  const existingSlot = roomKey ? queuedWorkerSlotsByRoom.get(roomKey) : null;
+  if (existingSlot && !existingSlot.started) {
+    const supersededJob = existingSlot.job;
+    const supersededJobId = String(supersededJob?.jobId || '');
+    if (supersededJobId) state.activeWorkerJobIds.delete(supersededJobId);
+    existingSlot.external?.resolve({
+      skipped: true,
+      reason: 'superseded_by_newer_room_event',
+      jobId: supersededJobId,
+      supersededBy: jobId
+    });
+    existingSlot.job = mergeQueuedRoomJobs(supersededJob, job);
+    if (jobId) state.activeWorkerJobIds.add(jobId);
+    appendNdjson('worker-coalesced.ndjson', {
+      at: nowIso(),
+      roomKey,
+      supersededJobId,
+      replacementJobId: jobId,
+      eventCount: existingSlot.job.eventCount
+    });
+    return new Promise((resolve, reject) => {
+      existingSlot.external = { resolve, reject };
+    });
+  }
+
   if (jobId) state.activeWorkerJobIds.add(jobId);
+  const slot = { job, roomKey, started: false, external: null };
+  const externalPromise = new Promise((resolve, reject) => {
+    slot.external = { resolve, reject };
+  });
+  if (roomKey) queuedWorkerSlotsByRoom.set(roomKey, slot);
   state.workerQueueLength += 1;
   const run = async () => {
+    slot.started = true;
+    if (roomKey && queuedWorkerSlotsByRoom.get(roomKey) === slot) queuedWorkerSlotsByRoom.delete(roomKey);
+    const queuedJob = slot.job;
+    const queuedJobId = String(queuedJob?.jobId || '');
     state.workerQueueLength = Math.max(0, state.workerQueueLength - 1);
     state.workerRunning = true;
-    state.currentJobId = job.jobId;
+    state.currentJobId = queuedJob.jobId;
     state.workerStartedAt = nowIso();
-    console.info('[dom-bridge] worker start', job.jobId, 'queued:', state.workerQueueLength);
+    console.info('[dom-bridge] worker start', queuedJob.jobId, 'queued:', state.workerQueueLength);
     try {
-      const result = await runWorker(job);
+      const result = await runWorker(queuedJob);
       state.lastWorkerError = null;
       return result;
     } catch (error) {
-      state.lastWorkerError = { at: nowIso(), jobId: job.jobId, message: error.message.slice(0, 1000) };
+      state.lastWorkerError = { at: nowIso(), jobId: queuedJob.jobId, message: error.message.slice(0, 1000) };
       throw error;
     } finally {
-      if (jobId) state.activeWorkerJobIds.delete(jobId);
+      if (queuedJobId) state.activeWorkerJobIds.delete(queuedJobId);
       state.workerRunning = false;
       state.currentJobId = null;
       state.workerStartedAt = null;
-      console.info('[dom-bridge] worker done', job.jobId, 'queued:', state.workerQueueLength);
+      console.info('[dom-bridge] worker done', queuedJob.jobId, 'queued:', state.workerQueueLength);
+      await cleanupIdleKakaoConversationTabs('worker_finished', { allowQueued: true });
     }
   };
-  const queued = workerChain.then(run, run);
-  workerChain = queued.catch(() => {});
-  return queued;
+  const execution = workerChain.then(run, run);
+  workerChain = execution.catch(() => {});
+  execution.then(
+    (result) => slot.external?.resolve(result),
+    (error) => slot.external?.reject(error)
+  );
+  return externalPromise;
 }
 
 function enqueueManualSend(payload) {
@@ -1170,7 +1419,7 @@ function buildResolvedSlackFollowUpMessage(row = {}, resolution = {}) {
 
 async function slackApi(method, payload = {}) {
   if (!CONFIG.slackBotToken) throw new Error('Missing SLACK_BOT_TOKEN');
-  const response = await fetch(`https://slack.com/api/${method}`, {
+  const response = await fetchWithDnsFallback(`https://slack.com/api/${method}`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${CONFIG.slackBotToken}`,
@@ -1388,6 +1637,20 @@ async function runSlackActionPoll(reason = 'interval') {
 async function runWorkerAndRecord(job, context = {}) {
   try {
     const workerResult = await enqueueWorker(job);
+    if (workerResult?.skipped && workerResult?.reason === 'superseded_by_newer_room_event') {
+      await updateSupabaseEventByHash(job.jobId, {
+        status: 'superseded_by_newer_room_event',
+        completed_at: nowIso(),
+        payload: {
+          ...job,
+          ai_worker_result: workerResult
+        }
+      }).catch((error) => {
+        state.failedSupabaseWrites += 1;
+        appendNdjson('errors.ndjson', { at: nowIso(), type: 'superseded_job_update', message: error.message, jobId: job.jobId });
+      });
+      return { ok: true, skipped: true, workerResult };
+    }
     if (workerResult?.skipped && workerResult?.reason === 'local_duplicate_job_active') {
       return { ok: true, skipped: true, workerResult };
     }
@@ -1397,6 +1660,22 @@ async function runWorkerAndRecord(job, context = {}) {
       state.failedSupabaseWrites += 1;
       appendNdjson('errors.ndjson', { at: nowIso(), type: 'supabase_job_update', message: error.message, jobId: job.jobId });
       console.warn('[dom-bridge] supabase job update failed:', error.message);
+    }
+
+    const workerPayload = parseWorkerStdoutJson(workerResult);
+    if (workerPayload && shouldEscalateCompletedWorkerSkip(job, workerPayload)) {
+      try {
+        const decisionReason = String(workerPayload.decision?.reason || 'worker completed without sheet/follow-up').slice(0, 500);
+        const completionFollowUp = await createWorkerFailureFollowUp(job, new Error(`worker completed without human-review card: ${decisionReason}`), {
+          ...context,
+          completed_skip: true,
+          completed_at: nowIso()
+        });
+        appendNdjson('worker-completion-followups.ndjson', { at: nowIso(), jobId: job.jobId, result: completionFollowUp });
+      } catch (followUpError) {
+        state.failedSupabaseWrites += 1;
+        appendNdjson('errors.ndjson', { at: nowIso(), type: 'worker_completion_followup', message: followUpError.message, jobId: job.jobId });
+      }
     }
     return { ok: true, workerResult };
   } catch (error) {
@@ -1498,13 +1777,20 @@ function shouldRecoverSupabaseRow(row = {}) {
   return ['ready_for_ai_worker', 'ai_decision_ready_no_sheet_write'].includes(status);
 }
 
-function shouldSkipSupabaseRowAsLowValue(row = {}) {
+export function shouldSkipSupabaseRowAsLowValue(row = {}) {
+  const payload = objectPayload(row.payload);
+  const raw = objectPayload(payload.raw);
   const event = {
-    previewText: row.preview_text || objectPayload(row.payload).previewText || '',
-    unreadCount: row.unread_count ?? objectPayload(row.payload).unreadCount ?? null,
-    unreadSignal: objectPayload(row.payload).unreadSignal
+    reason: row.reason || payload.reason || raw.reason || '',
+    previewText: row.preview_text || payload.previewText || raw.previewText || '',
+    unreadCount: row.unread_count ?? payload.unreadCount ?? raw.unreadCount ?? null,
+    unreadSignal: payload.unreadSignal ?? raw.unreadSignal,
+    raw
   };
-  return shouldSkipWorkerForPreview(event);
+  // Historical backstop rows may have been stored before the Badge/unread fix.
+  // Do not replay a row that would now be rejected at ingress.
+  if (event.reason === 'top_rows_backstop' && !hasUnreadCount(event)) return 'untrusted_backstop_row';
+  return '';
 }
 
 async function markSupabaseRowSkippedLowValue(row, reason) {
@@ -1633,6 +1919,16 @@ async function runSupabaseRecoverySweep(reason = 'interval') {
     result.scanned = rows.length;
     for (const row of rows) {
       if (result.replayed >= CONFIG.supabaseRecoveryBatchSize) break;
+      const lowValueReason = shouldSkipSupabaseRowAsLowValue(row);
+      if (lowValueReason) {
+        try {
+          await markSupabaseRowSkippedLowValue(row, lowValueReason);
+          result.skipped += 1;
+        } catch (error) {
+          result.errors.push({ row: row.id || row.event_hash, message: error.message });
+        }
+        continue;
+      }
       if (shouldEscalateExhaustedSupabaseRow(row)) {
         try {
           const job = buildJobFromSupabaseRow(row, recoveryAttemptCount(row));
@@ -1649,16 +1945,6 @@ async function runSupabaseRecoverySweep(reason = 'interval') {
       }
       if (!shouldRecoverSupabaseRow(row)) {
         result.skipped += 1;
-        continue;
-      }
-      const lowValueReason = shouldSkipSupabaseRowAsLowValue(row);
-      if (lowValueReason) {
-        try {
-          await markSupabaseRowSkippedLowValue(row, lowValueReason);
-          result.skipped += 1;
-        } catch (error) {
-          result.errors.push({ row: row.id || row.event_hash, message: error.message });
-        }
         continue;
       }
       const attempt = recoveryAttemptCount(row) + 1;
@@ -1692,7 +1978,7 @@ async function runSupabaseRecoverySweep(reason = 'interval') {
 
 function scheduleDebouncedJob(event) {
   const groupingText = normalizePreviewForGrouping(event.previewText);
-  const roomKey = groupingText ? `preview:${sha256(groupingText).slice(0, 16)}` : (event.roomKey || 'unknown-room');
+  const roomKey = roomKeyForDebounce(event);
   const groupedEvent = {
     ...event,
     originalRoomKey: event.roomKey,
@@ -1768,9 +2054,11 @@ async function closeDevtoolsTab(tabId) {
   }
 }
 
-async function cleanupIdleKakaoConversationTabs(reason = 'interval') {
+async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueued = false } = {}) {
   if (!CONFIG.kakaoTabCleanupEnabled) return { skipped: true };
-  if (state.workerRunning || state.workerQueueLength > 0 || state.rooms.size > 0) return { skipped: true, reason: 'worker_or_debounce_active' };
+  if (state.workerRunning || (!allowQueued && (state.workerQueueLength > 0 || state.rooms.size > 0))) {
+    return { skipped: true, reason: 'worker_or_debounce_active' };
+  }
   if (state.tabCleanupRunning) return { skipped: true, reason: 'already_running' };
   state.tabCleanupRunning = true;
   const result = { at: nowIso(), reason, closed: 0, targets: [], errors: [] };
@@ -1921,6 +2209,10 @@ const server = http.createServer(async (req, res) => {
           supabaseRecoveryMaxAttempts: CONFIG.supabaseRecoveryMaxAttempts,
           slackActionPollEnabled: CONFIG.slackActionPollEnabled,
           slackActionPollIntervalMs: CONFIG.slackActionPollIntervalMs,
+          followUpRowsEnabled: CONFIG.followUpRowsEnabled,
+          slackCardDeliveryEnabled: CONFIG.slackCardDeliveryEnabled,
+          slackBotTokenPresent: Boolean(CONFIG.slackBotToken),
+          slackChannels: CONFIG.slackChannels,
           kakaoTabCleanupEnabled: CONFIG.kakaoTabCleanupEnabled,
           kakaoTabCleanupIntervalMs: CONFIG.kakaoTabCleanupIntervalMs,
           processInitialScan: CONFIG.processInitialScan,
@@ -2010,22 +2302,24 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-ensureQueueDir();
-server.listen(CONFIG.port, '127.0.0.1', () => {
-  console.info(`[dom-bridge] listening on http://127.0.0.1:${CONFIG.port}`);
-  console.info(`[dom-bridge] queue dir: ${CONFIG.queueDir}`);
-  console.info(`[dom-bridge] supabase: ${CONFIG.supabaseUrl && CONFIG.supabaseTable ? 'enabled' : 'disabled'}`);
-  console.info(`[dom-bridge] worker: ${CONFIG.workerCommand ? CONFIG.workerCommand : 'disabled'}`);
-  if (CONFIG.supabaseRecoveryEnabled) {
-    setTimeout(() => runSupabaseRecoverySweep('startup'), 5000).unref?.();
-    setInterval(() => runSupabaseRecoverySweep('interval'), CONFIG.supabaseRecoveryIntervalMs).unref?.();
-  }
-  if (CONFIG.slackActionPollEnabled) {
-    setTimeout(() => runSlackActionPoll('startup'), 7000).unref?.();
-    setInterval(() => runSlackActionPoll('interval'), CONFIG.slackActionPollIntervalMs).unref?.();
-  }
-  if (CONFIG.kakaoTabCleanupEnabled) {
-    setTimeout(() => cleanupIdleKakaoConversationTabs('startup'), 10_000).unref?.();
-    setInterval(() => cleanupIdleKakaoConversationTabs('interval'), CONFIG.kakaoTabCleanupIntervalMs).unref?.();
-  }
-});
+if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
+  ensureQueueDir();
+  server.listen(CONFIG.port, '127.0.0.1', () => {
+    console.info(`[dom-bridge] listening on http://127.0.0.1:${CONFIG.port}`);
+    console.info(`[dom-bridge] queue dir: ${CONFIG.queueDir}`);
+    console.info(`[dom-bridge] supabase: ${CONFIG.supabaseUrl && CONFIG.supabaseTable ? 'enabled' : 'disabled'}`);
+    console.info(`[dom-bridge] worker: ${CONFIG.workerCommand ? CONFIG.workerCommand : 'disabled'}`);
+    if (CONFIG.supabaseRecoveryEnabled) {
+      setTimeout(() => runSupabaseRecoverySweep('startup'), 5000).unref?.();
+      setInterval(() => runSupabaseRecoverySweep('interval'), CONFIG.supabaseRecoveryIntervalMs).unref?.();
+    }
+    if (CONFIG.slackActionPollEnabled) {
+      setTimeout(() => runSlackActionPoll('startup'), 7000).unref?.();
+      setInterval(() => runSlackActionPoll('interval'), CONFIG.slackActionPollIntervalMs).unref?.();
+    }
+    if (CONFIG.kakaoTabCleanupEnabled) {
+      setTimeout(() => cleanupIdleKakaoConversationTabs('startup'), 10_000).unref?.();
+      setInterval(() => cleanupIdleKakaoConversationTabs('interval'), CONFIG.kakaoTabCleanupIntervalMs).unref?.();
+    }
+  });
+}

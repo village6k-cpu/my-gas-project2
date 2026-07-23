@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
 import struct
@@ -145,12 +146,15 @@ def load_pages(port: int) -> list[dict[str, Any]]:
 
 def choose_kakao_page(pages: list[dict[str, Any]]) -> dict[str, Any]:
     for page in pages:
-        url = page.get("url", "")
-        if page.get("type") == "page" and "business.kakao.com" in url and "/chats" in url:
-            return page
-    for page in pages:
-        url = page.get("url", "")
-        if page.get("type") == "page" and "center-pf.kakao.com" in url and "chats" in url:
+        if page.get("type") != "page":
+            continue
+        parsed = urlparse(page.get("url", ""))
+        is_kakao_host = parsed.hostname in {"business.kakao.com", "center-pf.kakao.com"}
+        is_main_list = bool(
+            re.fullmatch(r"/_[^/]+/chats/?", parsed.path)
+            or re.fullmatch(r"/_chats/?", parsed.path)
+        )
+        if is_kakao_host and is_main_list:
             return page
     raise RuntimeError("No Kakao chat-list page found in automation Chrome DevTools")
 
@@ -160,6 +164,7 @@ def build_injection(content_js: str) -> str:
 (() => {
   const existing = globalThis.chrome && typeof globalThis.chrome === 'object' ? globalThis.chrome : {};
   const storage = existing.storage && typeof existing.storage === 'object' ? existing.storage : {};
+  const runtime = existing.runtime && typeof existing.runtime === 'object' ? existing.runtime : {};
   if (!storage.sync) {
     storage.sync = { get(defaults, callback) { callback({ ...(defaults || {}) }); } };
   } else if (!storage.sync.get) {
@@ -170,7 +175,26 @@ def build_injection(content_js: str) -> str:
   } else if (!storage.onChanged.addListener) {
     storage.onChanged.addListener = function() {};
   }
+  if (!runtime.sendMessage) {
+    runtime.sendMessage = async function(message) {
+      try {
+        const url = new URL(String(message?.bridgeUrl || ''));
+        if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(url.hostname) || url.pathname !== '/events') {
+          return { ok: false, status: 0, error: 'bridge_url_not_allowed' };
+        }
+        const response = await fetch(url.toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(message?.event || {})
+        });
+        return { ok: response.ok, status: response.status };
+      } catch (error) {
+        return { ok: false, status: 0, error: String(error?.message || error) };
+      }
+    };
+  }
   existing.storage = storage;
+  existing.runtime = runtime;
   globalThis.chrome = existing;
 })();
 """

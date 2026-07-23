@@ -14,6 +14,10 @@ import {
   buildSheetFailureFollowUpRows,
   buildSheetAvailabilityReport,
   enrichFollowUpRowsWithSheetAvailability,
+  buildHermesPostActionPrompt,
+  validateAiPostActionDecisionContract,
+  runHermesPostActionDecision,
+  suppressDecisionForUnreconciledSheetResult,
   fetchExistingConfirmRequestResultForDecision,
   extractConfirmRequestIds,
   mapDecisionToStatusPatch,
@@ -71,12 +75,103 @@ import {
   sendKakaoMessageViaChrome,
   sendKakaoMessageViaDevtools,
   runHermes,
+  buildHermesFinalJsonRecoveryPrompt,
+  runHermesDecision,
+  validateAiDecisionContract,
   appendToSheet,
+  normalizeCustomerDbDiscountType,
+  lookupCustomerDbDiscountForRequest,
+  enrichSheetPayloadWithCustomerDbDiscount,
+  ensureConfirmRequestDiscountApplied,
   normalizeConfirmRequestDateForSheet,
   buildCloseKakaoConversationWindowAppleScript,
   closeKakaoConversationWindow,
   closeKakaoConversationTargetViaDevtools
 } from './worker.mjs';
+
+function completeSheetDecision(overrides = {}) {
+  const base = {
+    should_write_to_sheet: true,
+    classification: 'reservation',
+    confidence: 'high',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    sheet_row_candidate: {
+      plan_complete: true,
+      start_date: '2026-07-24',
+      pickup_time: '09:00',
+      end_date: '2026-07-25',
+      return_time: '18:00',
+      equipment: [{ item: '소니 FX3 바디세트', quantity: 1 }],
+      customer_name: '홍길동',
+      phone: '010-1111-2222',
+      discount_type: '일반',
+      memo: '',
+      extra_request: ''
+    }
+  };
+  return {
+    ...base,
+    ...overrides,
+    safety_checks: { ...base.safety_checks, ...(overrides.safety_checks || {}) },
+    sheet_row_candidate: { ...base.sheet_row_candidate, ...(overrides.sheet_row_candidate || {}) }
+  };
+}
+
+function completePostActionDecision(overrides = {}) {
+  const base = {
+    should_write_to_sheet: false,
+    classification: 'reservation',
+    confidence: 'high',
+    reason: '확인요청의 실제 가용 결과를 반영함',
+    kill_switch_observed: 'active',
+    customer: { name: '홍길동', source: 'Kakao Channel Manager', chat_status: 'open' },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    visible_messages_used: [{ sender: '홍길동', message: '예약 가능할까요?', time: '오후 1:00' }],
+    follow_up_items: [{
+      type: 'reservation_review',
+      route: 'schedule',
+      taskKey: 'rq_260724_001_availability',
+      priority: 'high',
+      status: 'open',
+      title: '홍길동 예약 가용 결과',
+      customer_name: '홍길동',
+      summary: '확인요청 결과 해당 장비가 가용입니다.',
+      recommended_action: '고객 의사를 확인해 예약을 진행합니다.',
+      suggested_reply_draft: '확인해보니 요청하신 일정에 장비 대여가 가능합니다. 예약 진행해드릴까요?',
+      evidence: ['RQ-260724-001 ✅ 가용1'],
+      blocking_reason: null,
+      due_hint: 'now'
+    }],
+    suggested_reply_draft: '확인해보니 요청하신 일정에 장비 대여가 가능합니다. 예약 진행해드릴까요?',
+    reply_decision: {
+      replyMode: 'auto_send',
+      text: '확인해보니 요청하신 일정에 장비 대여가 가능합니다. 예약 진행해드릴까요?',
+      confidence: 'high',
+      reason: '실제 확인요청 결과가 가용임',
+      shouldCreateTask: true,
+      safetyClass: 'authoritative_availability_answer',
+      grounding: 'authoritative_sheet',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: false
+    }
+  };
+  return {
+    ...base,
+    ...overrides,
+    customer: { ...base.customer, ...(overrides.customer || {}) },
+    safety_checks: { ...base.safety_checks, ...(overrides.safety_checks || {}) },
+    reply_decision: { ...base.reply_decision, ...(overrides.reply_decision || {}) }
+  };
+}
 
 test('buildHermesPrompt keeps code as plumbing and requires AI-visible Kakao verification', () => {
   const job = {
@@ -96,11 +191,38 @@ test('buildHermesPrompt keeps code as plumbing and requires AI-visible Kakao ver
   assert.match(prompt, /job-1/);
 });
 
-test('buildHermesPrompt caps total tool calls and batches read-only lookups', () => {
+test('buildHermesPrompt preserves reasoning depth instead of imposing a low tool budget', () => {
   const prompt = buildHermesPrompt({ id: 'job-tool-budget', preview_text: '예약 문의' });
-  assert.match(prompt, /at most 10 tool calls total/i);
-  assert.match(prompt, /Batch.*read-only GAS lookups.*one terminal call/i);
-  assert.match(prompt, /reaching.*budget.*FINAL_JSON/i);
+  assert.doesNotMatch(prompt, /at most 10 tool calls total/i);
+  assert.doesNotMatch(prompt, /5 UI navigation actions/i);
+  assert.match(prompt, /No artificial low tool\/UI cap/i);
+  assert.match(prompt, /continue until evidence is sufficient.*global timeout/is);
+  assert.match(prompt, /Batch read-only lookups only when query breadth\/detail are preserved/is);
+});
+
+test('buildHermesPrompt preserves customer minute-level times without a mechanical whole-hour restriction', () => {
+  const prompt = buildHermesPrompt({ id: 'job-minute-time', preview_text: '12시 30분 반출 요청' });
+  assert.doesNotMatch(prompt, /12:30[^\n]{0,80}12:00[^\n]{0,40}내림/);
+  assert.doesNotMatch(prompt, /whole-hour|HH:00/i);
+  assert.match(prompt, /minute-level times/is);
+  assert.match(prompt, /HH:MM/);
+  assert.match(prompt, /outer code.*never floor or round/is);
+});
+
+test('buildHermesPrompt allows read-only vision when DOM or AX evidence is insufficient', () => {
+  const prompt = buildHermesPrompt({ id: 'job-vision-fallback', preview_text: '사진 속 장비 문의' });
+  assert.doesNotMatch(prompt, /do not request image\/vision capture/i);
+  assert.doesNotMatch(prompt, /forces capture mode="ax".*max_elements=80/i);
+  assert.match(prompt, /read-only image\/vision capture/i);
+  assert.match(prompt, /already-open automation Kakao target/i);
+  assert.match(prompt, /Never type or send as part of evidence capture/i);
+});
+
+test('buildHermesPrompt always finalizes structured output after evidence or tool failure', () => {
+  const prompt = buildHermesPrompt({ id: 'job-finalize', preview_text: '예약 확인' });
+  assert.match(prompt, /Once sufficient, return FINAL_JSON immediately/i);
+  assert.match(prompt, /Tool\/API failures are evidence gaps/i);
+  assert.match(prompt, /encode uncertainty in confidence\/reason\/follow-up/i);
 });
 
 test('buildCompactJobForPrompt strips bulky raw payload while preserving latest evidence', () => {
@@ -149,7 +271,7 @@ test('buildHermesPrompt uses compact job evidence instead of embedding full raw 
   assert.match(prompt, /JOB EVIDENCE FROM SUPABASE/);
   assert.doesNotMatch(prompt, /JOB FROM SUPABASE/);
   assert.equal(prompt.includes('x'.repeat(1000)), false);
-  assert.ok(prompt.length < 15000, `prompt too large: ${prompt.length}`);
+  assert.ok(prompt.length < 18000, `prompt too large: ${prompt.length}`);
 });
 
 test('buildHermesPrompt uses navigation hints without letting code judge business meaning', () => {
@@ -254,13 +376,13 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   assert.match(prompt, /정규화가 애매해도.*확인요청 입력은 막지 않는다/s);
   assert.match(prompt, /Q\/R에는 원문\/추론\/가용확인 후 안내/s);
   assert.match(prompt, /FX3.*A7S3.*FX6/s);
-  assert.match(prompt, /할인유형.*학생.*개인사업자\/프리랜서.*일반/s);
-  assert.match(prompt, /단골.*일반/s);
+  assert.match(prompt, /할인유형: 고객DB I열이 카톡보다 우선/s);
+  assert.match(prompt, /학생.*개인사업자\/프리랜서.*단골.*제휴.*일반/s);
   assert.match(prompt, /계약마스터.*스케줄상세.*확인요청/s);
   assert.match(prompt, /예약형식.*should_write_to_sheet=true/s);
   assert.match(prompt, /불확실한 장비명.*입력 차단 사유가 아니라/s);
-  assert.match(prompt, /연락처.*고객DB.*should_write_to_sheet=false/s);
-  assert.match(prompt, /예약 등록이 불가능해서 연락처부터/s);
+  assert.match(prompt, /연락처.*고객DB.*확인요청 생성은 막지 말고/s);
+  assert.match(prompt, /missing phone is NOT a sheet-write blocker/s);
 });
 
 test('buildHermesPrompt treats read catch-up rows as possible missed reservations', () => {
@@ -287,6 +409,61 @@ test('buildGasReadUrl creates read-only GAS URLs with encoded parameters', () =>
   );
 });
 
+test('customer DB discount normalization supports Village 2.0 segment values', () => {
+  assert.equal(normalizeCustomerDbDiscountType('학생30%'), '학생');
+  assert.equal(normalizeCustomerDbDiscountType('개인사업자/프리랜서20%'), '개인사업자/프리랜서');
+  assert.equal(normalizeCustomerDbDiscountType('단골10%'), '단골');
+  assert.equal(normalizeCustomerDbDiscountType('제휴업체20%'), '제휴');
+  assert.equal(normalizeCustomerDbDiscountType(''), '');
+});
+
+test('enrichSheetPayloadWithCustomerDbDiscount overrides Kakao/general discount from Village 2.0 DB', async () => {
+  const gviz = '/*O_o*/\ngoogle.visualization.Query.setResponse({"table":{"rows":['
+    + '{"c":[{"v":"010-1111-2222"},{"v":"김학생"},{"v":"학생30%"}]},'
+    + '{"c":[{"v":"010-3333-4444"},{"v":"박단골"},{"v":"단골10%"}]}'
+    + ']}});';
+  const fetchImpl = async () => ({ ok: true, status: 200, text: async () => gviz });
+  const payload = {
+    action: 'run',
+    func: 'insertAndCheckRequest',
+    args: {
+      예약자명: '박단골',
+      연락처: '010-3333-4444',
+      할인유형: '일반',
+      장비: [{ 이름: 'FX3', 수량: 1 }]
+    }
+  };
+
+  const result = await enrichSheetPayloadWithCustomerDbDiscount({ fetchImpl }, payload);
+
+  assert.equal(result.lookup.discountType, '단골');
+  assert.equal(result.lookup.matchedBy, 'phone');
+  assert.equal(result.payload.args.할인유형, '단골');
+});
+
+test('ensureConfirmRequestDiscountApplied patches M column when GAS normalized DB discount away', async () => {
+  const requests = [];
+  const fetchImpl = async (url) => {
+    requests.push(String(url));
+    if (String(url).includes('action=search')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ results: [{ row: 12, data: ['RQ-260710-001', '', '', '', '', 'FX3', '1', '', '', '', '박단골', '010-3333-4444', '일반'] }] }) };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, sheet: '확인요청', cell: 'M12', value: '단골' }) };
+  };
+
+  const result = await ensureConfirmRequestDiscountApplied(
+    { gasApiUrl: 'https://script.example/exec', sheetApiKey: 'secret', fetchImpl },
+    { success: true, reqID: 'RQ-260710-001', duplicate: false },
+    { args: { 할인유형: '단골' } },
+    { discountType: '단골' }
+  );
+
+  assert.equal(result.updated, true);
+  assert.match(requests[1], /action=update/);
+  assert.match(requests[1], /cell=M12/);
+  assert.match(requests[1], /value=%EB%8B%A8%EA%B3%A8/);
+});
+
 test('buildReadOnlyLookupContext fetches kill switch and exposes read-only lookup templates', async () => {
   const requested = [];
   const fetchImpl = async (url) => {
@@ -311,8 +488,10 @@ test('buildReadOnlyLookupContext fetches kill switch and exposes read-only looku
   assert.match(context.lookup_urls.set_master_search_template, /action=search/);
   assert.match(context.lookup_urls.customer_db_by_name_search_template, /sheet=%EA%B3%A0%EA%B0%9DDB/);
   assert.match(context.lookup_urls.customer_db_by_name_search_template, /col=2/);
-  assert.match(context.lookup_urls.request_recent_with_results_gviz, /SELECT\+A%2CB%2CC%2CD%2CE%2CF%2CG%2CI%2CJ%2CK/);
+  assert.match(context.lookup_urls.village2_customer_db_discount_gviz, /SELECT\+A%2CB%2CI/);
+  assert.match(context.lookup_urls.request_recent_with_results_gviz, /SELECT\+A%2CB%2CC%2CD%2CE%2CF%2CG%2CI%2CJ%2CK%2CL%2CM%2CN%2CO%2CP%2CQ%2CR/);
   assert.match(context.lookup_urls.request_by_req_id_gviz_template, /AI_REQ_ID/);
+  assert.match(context.lookup_urls.request_by_req_id_gviz_template, /N%2CO%2CP/);
   assert.match(context.lookup_urls.contract_master_recent_gviz, /%EA%B3%84%EC%95%BD%EB%A7%88%EC%8A%A4%ED%84%B0/);
 });
 
@@ -347,15 +526,25 @@ test('buildHermesPrompt requires existing RQ availability result before follow-u
   const prompt = buildHermesPrompt({ id: 'job-rq', preview_text: '최재원 AX-700 가능 문의' });
 
   assert.match(prompt, /확인요청에 이미 RQ.*I열\(결과\).*J열\(상세\)/s);
+  assert.match(prompt, /L열 연락처.*O열 등록상태.*연락처 입력 필요/s);
+  assert.match(prompt, /연락처 즉시 요청 → 연락처 입력 → 가용 재확인 → 등록/);
   assert.match(prompt, /사람에게 "RQ 결과를 검토하라"고만 떠넘기지 마라/);
   assert.match(prompt, /결과가 ✅ 가용일 때만.*예약 가능/s);
   assert.match(prompt, /follow-up must report the availability result itself/s);
 });
 
-test('buildHermesArgs preserves AI computer_use and bypasses approval with yolo', () => {
+test('buildHermesArgs preserves the full read and learning tool surface instead of a speed-only subset', () => {
   const args = buildHermesArgs('prompt text');
-  assert.deepEqual(args.slice(0, 8), ['chat', '--yolo', '-Q', '-t', 'terminal,computer_use,vision', '-q', 'prompt text']);
-  assert.ok(args.includes('terminal,computer_use,vision'));
+  assert.deepEqual(args.slice(0, 8), [
+    'chat',
+    '--yolo',
+    '-Q',
+    '-t',
+    'terminal,file,web,skills,memory,session_search,computer_use,vision',
+    '-q',
+    'prompt text'
+  ]);
+  assert.ok(args.includes('terminal,file,web,skills,memory,session_search,computer_use,vision'));
   assert.ok(args.includes('--yolo'));
 });
 
@@ -460,7 +649,7 @@ test('ensureKakaoChannelManagerTabViaDevtools reuses automation profile tab with
   assert.deepEqual(requests.map((request) => request.method), ['GET']);
 });
 
-test('ensureKakaoChannelManagerTab invokes osascript with target chat URL when CDP is not configured', async () => {
+test('ensureKakaoChannelManagerTab invokes osascript with target chat URL when CDP is not configured', { skip: process.platform !== 'darwin' }, async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
@@ -497,6 +686,15 @@ test('pickKakaoMainListWindow avoids individual Kakao chat popup windows', () =>
   assert.equal(win.pid, 2);
 });
 
+test('pickKakaoMainListWindow prefers automation Chrome and excludes staff Chrome', () => {
+  const win = pickKakaoMainListWindow([
+    { app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터 - Chrome - BILL. (💁🏻 직원용 크롬)', is_on_screen: true, bounds: { width: 1600, height: 1200 }, pid: 1, window_id: 10 },
+    { app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터 - Chrome - 수이 (🤖 자동화 크롬)', is_on_screen: false, bounds: { width: 800, height: 600 }, pid: 2, window_id: 20 }
+  ]);
+  assert.equal(win.pid, 2);
+  assert.equal(win.window_id, 20);
+});
+
 test('pickKakaoConversationWindow selects individual Kakao popup matching navigation hint', () => {
   const win = pickKakaoConversationWindow([
     { app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터', pid: 1, window_id: 10 },
@@ -504,6 +702,15 @@ test('pickKakaoConversationWindow selects individual Kakao popup matching naviga
   ], ['박재인']);
   assert.equal(win.pid, 3);
   assert.equal(win.window_id, 30);
+});
+
+test('pickKakaoConversationWindow excludes staff Chrome popups and prefers automation Chrome', () => {
+  const win = pickKakaoConversationWindow([
+    { app_name: 'Google Chrome', title: '박재인 - 빌리지 - 카카오비즈니스 파트너센터 - Chrome - BILL. (💁🏻 직원용 크롬)', is_on_screen: true, pid: 1, window_id: 10 },
+    { app_name: 'Google Chrome', title: '박재인 - 빌리지 - 카카오비즈니스 파트너센터 - Chrome - 수이 (🤖 자동화 크롬)', is_on_screen: false, pid: 2, window_id: 20 }
+  ], ['박재인']);
+  assert.equal(win.pid, 2);
+  assert.equal(win.window_id, 20);
 });
 
 test('pickKakaoConversationTarget selects DevTools customer chat target by hint', () => {
@@ -598,6 +805,58 @@ test('openKakaoTargetChatFromList clicks matching AXLink row only for navigation
   assert.equal(result.element_index, 171);
   assert.equal(result.conversation_window.window_id, 80);
   assert.ok(calls.some((c) => c.args.includes('click')));
+});
+
+test('openKakaoTargetChatFromList rejects staff-profile Kakao windows before clicking/searching', async () => {
+  const calls = [];
+  let listCalls = 0;
+  const spawnImpl = (cmd, args) => {
+    calls.push({ cmd, args });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (args.includes('list_windows')) {
+        listCalls += 1;
+        const windows = listCalls === 1
+          ? [
+              { app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터', is_on_screen: true, bounds: { width: 1280, height: 1050 }, pid: 7, window_id: 70 },
+              { app_name: 'Google Chrome', title: '카카오비즈니스 파트너센터', is_on_screen: true, bounds: { width: 1280, height: 1050 }, pid: 7, window_id: 71 }
+            ]
+          : [
+              { app_name: 'Google Chrome', title: '김자동 - 빌리지 - 카카오비즈니스 파트너센터', is_on_screen: true, pid: 7, window_id: 80 },
+              { app_name: 'Google Chrome', title: '김자동 - 빌리지 - 카카오비즈니스 파트너센터', is_on_screen: true, pid: 7, window_id: 81 }
+            ];
+        child.stdout.write(JSON.stringify({ windows }));
+        child.emit('close', 0);
+      } else if (args.includes('get_window_state')) {
+        const payload = JSON.parse(args[args.findIndex((arg) => String(arg).startsWith('{'))]);
+        const treeByWindow = {
+          70: 'AXWindow "카카오비즈니스 파트너센터 - Chrome - BILL. (💁🏻 직원용 크롬)"\n- [171] AXLink (김자동 문의 오후 8:20)',
+          71: 'AXWindow "카카오비즈니스 파트너센터 - Chrome - 수이 (🤖 자동화 크롬)"\n- [171] AXLink (김자동 문의 오후 8:20)',
+          80: 'AXWindow "김자동 - 빌리지 - 카카오비즈니스 파트너센터 - Chrome - BILL. (💁🏻 직원용 크롬)"\n- [22] AXStaticText = "김자동"',
+          81: 'AXWindow "김자동 - 빌리지 - 카카오비즈니스 파트너센터 - Chrome - 수이 (🤖 자동화 크롬)"\n- [22] AXStaticText = "김자동"\n- [23] AXStaticText = "문의"'
+        };
+        child.stdout.write(JSON.stringify({ tree_markdown: treeByWindow[payload.window_id] || '' }));
+        child.emit('close', 0);
+      } else if (args.includes('click')) {
+        child.stdout.write(JSON.stringify({ ok: true }));
+        child.emit('close', 0);
+      } else {
+        child.stderr.write('unexpected');
+        child.emit('close', 1);
+      }
+    });
+    return child;
+  };
+
+  const result = await openKakaoTargetChatFromList({ customer_name: '김자동', preview_text: '김자동 문의 오후 8:20' }, { spawnImpl });
+  assert.equal(result.status, 'opened_target_chat');
+  assert.equal(result.window_id, 71);
+  assert.equal(result.conversation_window.window_id, 81);
+  const clickCall = calls.find((c) => c.args.includes('click'));
+  assert.ok(clickCall);
+  assert.match(clickCall.args.join(' '), /"window_id":71/);
 });
 
 test('openKakaoTargetChatFromList uses an already-open matching conversation before searching the list', async () => {
@@ -905,7 +1164,7 @@ test('runHermes returns stdout before timeout when Hermes exits normally', async
   assert.equal(await resultPromise, 'FINAL_JSON\n```json\n{}\n```');
 });
 
-test('runHermes defaults nested computer_use capture to AX text mode to avoid huge screenshot payloads', async () => {
+test('runHermes does not force AX-only capture or truncate computer_use evidence', async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
@@ -916,14 +1175,166 @@ test('runHermes defaults nested computer_use capture to AX text mode to avoid hu
     return child;
   };
 
+  const resultPromise = runHermes(
+    'prompt text',
+    { hermesCommand: 'fake-hermes', hermesTimeoutMs: 1000 },
+    { spawnImpl, baseEnv: { PATH: 'test-path' } }
+  );
+  child.stdout.write('OK');
+  child.emit('close', 0);
+
+  assert.equal(await resultPromise, 'OK');
+  assert.equal(seenOptions.env.PATH, 'test-path');
+  assert.equal(seenOptions.env.HERMES_COMPUTER_USE_DEFAULT_CAPTURE_MODE, undefined);
+  assert.equal(seenOptions.env.HERMES_COMPUTER_USE_FORCE_CAPTURE_MODE, undefined);
+  assert.equal(seenOptions.env.HERMES_COMPUTER_USE_DEFAULT_MAX_ELEMENTS, undefined);
+});
+
+test('runHermes forces UTF-8 for nested Python subprocess output on Windows', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.pid = 12347;
+  let seenOptions;
+  const spawnImpl = (_command, _args, options) => {
+    seenOptions = options;
+    return child;
+  };
+
   const resultPromise = runHermes('prompt text', { hermesCommand: 'fake-hermes', hermesTimeoutMs: 1000 }, { spawnImpl });
   child.stdout.write('OK');
   child.emit('close', 0);
 
   assert.equal(await resultPromise, 'OK');
-  assert.equal(seenOptions.env.HERMES_COMPUTER_USE_DEFAULT_CAPTURE_MODE, 'ax');
-  assert.equal(seenOptions.env.HERMES_COMPUTER_USE_FORCE_CAPTURE_MODE, 'ax');
-  assert.equal(seenOptions.env.HERMES_COMPUTER_USE_DEFAULT_MAX_ELEMENTS, '80');
+  assert.equal(seenOptions.env.PYTHONUTF8, '1');
+  assert.equal(seenOptions.env.PYTHONIOENCODING, 'utf-8');
+});
+
+test('buildHermesFinalJsonRecoveryPrompt preserves the full task and mandates structured completion', () => {
+  const recovery = buildHermesFinalJsonRecoveryPrompt('ORIGINAL FULL TASK');
+  assert.match(recovery, /RECOVERY PASS/i);
+  assert.match(recovery, /ORIGINAL FULL TASK/);
+  assert.match(recovery, /Do the full reasoning/i);
+  assert.match(recovery, /Return FINAL_JSON even when a tool or API failed/i);
+  assert.match(recovery, /Do not substitute an apology, progress report, or plain-text explanation/i);
+  assert.match(recovery, /RECOVERY OUTPUT OVERRIDE:[\s\S]*finish with FINAL_JSON and one valid JSON object only/i);
+});
+
+test('runHermesDecision retries one invalid completion without reducing reasoning to a low call cap', async () => {
+  const validOutput = `FINAL_JSON\n\`\`\`json\n{"classification":"reservation_inquiry","should_write_to_sheet":false}\n\`\`\``;
+  const outputs = ['I could not finish the task.', validOutput];
+  const calls = [];
+  const runHermesImpl = async (prompt, config) => {
+    calls.push({ prompt, config });
+    return outputs.shift();
+  };
+
+  const result = await runHermesDecision(
+    'ORIGINAL TASK',
+    { hermesCommand: 'fake-hermes', hermesTimeoutMs: 420000 },
+    { runHermesImpl }
+  );
+
+  assert.equal(result.attempts, 2);
+  assert.equal(result.recovered, true);
+  assert.equal(result.decision.classification, 'reservation_inquiry');
+  assert.equal(result.hermesOutput, validOutput);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].prompt, 'ORIGINAL TASK');
+  assert.match(calls[1].prompt, /RECOVERY PASS/);
+  assert.match(calls[1].prompt, /ORIGINAL TASK/);
+  assert.doesNotMatch(calls[1].prompt, /at most 10 tool calls/i);
+  assert.ok(calls[0].config.hermesTimeoutMs > calls[1].config.hermesTimeoutMs);
+  assert.ok(calls[1].config.hermesTimeoutMs >= 45000);
+  assert.ok(calls[0].config.hermesTimeoutMs + calls[1].config.hermesTimeoutMs <= 405000);
+});
+
+test('runHermesDecision does not retry a valid first completion', async () => {
+  let calls = 0;
+  const result = await runHermesDecision(
+    'ORIGINAL TASK',
+    { hermesCommand: 'fake-hermes', hermesTimeoutMs: 420000 },
+    {
+      runHermesImpl: async () => {
+        calls += 1;
+        return 'FINAL_JSON\n{"classification":"faq","should_write_to_sheet":false}';
+      }
+    }
+  );
+  assert.equal(calls, 1);
+  assert.equal(result.attempts, 1);
+  assert.equal(result.recovered, false);
+  assert.equal(result.decision.classification, 'faq');
+});
+
+test('runHermesDecision asks Hermes to repair a semantically incomplete action contract', async () => {
+  const invalid = {
+    should_write_to_sheet: true,
+    classification: 'reservation',
+    sheet_row_candidate: {
+      equipment: [{ item: 'FX3', quantity: 1 }]
+    }
+  };
+  const repaired = completeSheetDecision();
+  const outputs = [
+    `FINAL_JSON\n${JSON.stringify(invalid)}`,
+    `FINAL_JSON\n${JSON.stringify(repaired)}`
+  ];
+  const prompts = [];
+
+  const result = await runHermesDecision('ORIGINAL TASK', {
+    hermesCommand: 'fake-hermes',
+    hermesTimeoutMs: 420000
+  }, {
+    runHermesImpl: async (prompt) => {
+      prompts.push(prompt);
+      return outputs.shift();
+    }
+  });
+
+  assert.equal(result.attempts, 2);
+  assert.equal(result.recovered, true);
+  assert.equal(result.decision.sheet_row_candidate.plan_complete, true);
+  assert.match(prompts[1], /decision contract validation/i);
+  assert.match(prompts[1], /sheet_row_candidate\.plan_complete/);
+  assert.match(prompts[1], /PRIOR DECISION/);
+});
+
+test('validateAiDecisionContract rejects missing AI semantics instead of reconstructing them in code', () => {
+  const invalid = completeSheetDecision({
+    sheet_row_candidate: {
+      plan_complete: false,
+      start_date: '내일',
+      pickup_time: '12시 30분',
+      discount_type: ''
+    },
+    follow_up_items: [{
+      type: 'not_a_real_type',
+      route: 'not_a_real_route',
+      taskKey: '',
+      priority: 'someday',
+      status: 'maybe',
+      title: '',
+      customer_name: '',
+      summary: ''
+    }]
+  });
+
+  const validation = validateAiDecisionContract(invalid);
+
+  assert.equal(validation.valid, false);
+  assert.ok(validation.errors.includes('sheet_row_candidate.plan_complete must be true'));
+  assert.ok(validation.errors.some((error) => error.includes('start_date')));
+  assert.ok(validation.errors.some((error) => error.includes('pickup_time')));
+  assert.ok(validation.errors.some((error) => error.includes('discount_type')));
+  assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].type')));
+  assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].route')));
+  assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].taskKey')));
+  assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].priority')));
+  assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].status')));
+  assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].title')));
+  assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].customer_name')));
+  assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].summary')));
 });
 
 test('extractJsonObject reads fenced FINAL_JSON object', () => {
@@ -1005,8 +1416,15 @@ test('buildSheetAppendPayload allows staff-confirmed unregistered reservations w
       no_auto_reply_sent: true
     },
     sheet_row_candidate: {
+      plan_complete: true,
       customer_name: '문치호',
       phone: '010-1111-2222',
+      start_date: '2026-06-06',
+      pickup_time: '09:00',
+      end_date: '2026-06-07',
+      return_time: '18:00',
+      discount_type: '일반',
+      equipment: [{ item: '소니 FX3 바디세트', quantity: 1 }],
       memo: '재형님 카톡 확정 후 시트 미입력'
     }
   };
@@ -1027,7 +1445,7 @@ test('buildSheetAppendPayload returns null when AI says not to write', () => {
   assert.equal(buildSheetAppendPayload(decision, { apiKey: 'k' }), null);
 });
 
-test('buildSheetAppendPayload refuses confirmation-request writes without a usable phone', () => {
+test('buildSheetAppendPayload allows confirmation-request writes without a phone', () => {
   const decision = {
     should_write_to_sheet: true,
     safety_checks: {
@@ -1042,6 +1460,7 @@ test('buildSheetAppendPayload refuses confirmation-request writes without a usab
     },
     customer: { name: '찬승' },
     sheet_row_candidate: {
+      plan_complete: true,
       start_date: '2026-06-27',
       pickup_time: '23:00',
       end_date: '2026-06-29',
@@ -1049,11 +1468,16 @@ test('buildSheetAppendPayload refuses confirmation-request writes without a usab
       equipment: [{ item: '소니 BURANO 베이직세트', quantity: 1 }],
       customer_name: '찬승',
       phone: '',
+      discount_type: '일반',
       memo: '카카오 닉네임만 있고 예약자명/연락처 없음'
     }
   };
 
-  assert.equal(buildSheetAppendPayload(decision, { apiKey: 'k' }), null);
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'k' });
+  assert.equal(payload.func, 'insertAndCheckRequest');
+  assert.equal(payload.args.예약자명, '찬승');
+  assert.equal(payload.args.연락처, '');
+  assert.deepEqual(payload.args.장비, [{ 이름: '소니 BURANO 베이직세트', 수량: 1 }]);
 });
 
 test('buildSheetAppendPayload maps AI-decided fields into insertAndCheckRequest payload', () => {
@@ -1070,6 +1494,7 @@ test('buildSheetAppendPayload maps AI-decided fields into insertAndCheckRequest 
       no_auto_reply_sent: true
     },
     sheet_row_candidate: {
+      plan_complete: true,
       start_date: '2026-06-01',
       pickup_time: '10:00',
       end_date: '2026-06-02',
@@ -1109,117 +1534,38 @@ test('buildSheetAppendPayload maps AI-decided fields into insertAndCheckRequest 
   assert.equal(JSON.stringify(payload).includes('AI-'), false);
 });
 
-test('buildSheetAppendPayload rejects an AI equipment rewrite unrelated to the customer raw text', () => {
-  const decision = {
-    should_write_to_sheet: true,
-    safety_checks: {
-      kakao_conversation_opened: true,
-      did_not_classify_from_preview_only: true,
-      latest_customer_message_after_last_staff_reply: true
-    },
+test('buildSheetAppendPayload preserves the complete AI equipment plan and never replaces it from another field', () => {
+  const decision = completeSheetDecision({
     reservation_inquiry: {
       equipment_requested: [
-        { raw_text: '시그마 아트 18-35', normalized_guess: 'H&Y VND-CPL 67-82mm 가변 ND', quantity: 1 }
+        { raw_text: 'FX3', normalized_guess: '소니 FX3 바디세트', quantity: 2 },
+        { raw_text: '2470', normalized_guess: '소니 GM 24-70mm II', quantity: 2 }
       ]
     },
     sheet_row_candidate: {
-      start_date: '2026-07-15',
-      pickup_time: '10:00',
-      end_date: '2026-07-16',
-      return_time: '10:00',
-      customer_name: '원영상',
-      phone: '010-6687-1945',
-      equipment: [{ item: 'H&Y VND-CPL 67-82mm 가변 ND', quantity: 1 }]
+      equipment: [{ item: '셔틀러에이스 M (75볼)', quantity: 1 }]
     }
-  };
-
-  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
-  assert.deepEqual(payload.args.장비, [{ 이름: '시그마 아트 18-35', 수량: 1 }]);
-});
-
-test('buildSheetAppendPayload rejects a same-brand rewrite to a different lens model', () => {
-  const decision = {
-    should_write_to_sheet: true,
-    safety_checks: {
-      kakao_conversation_opened: true,
-      did_not_classify_from_preview_only: true,
-      latest_customer_message_after_last_staff_reply: true
-    },
-    reservation_inquiry: {
-      equipment_requested: [
-        { raw_text: '시그마 아트 18-35', normalized_guess: '시그마 아트 50-100mm', quantity: 1 }
-      ]
-    },
-    sheet_row_candidate: {
-      start_date: '2026-07-15', pickup_time: '10:00', end_date: '2026-07-16', return_time: '10:00',
-      customer_name: '원영상', phone: '010-6687-1945',
-      equipment: [{ item: '시그마 아트 50-100mm', quantity: 1 }]
-    }
-  };
-
-  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
-  assert.deepEqual(payload.args.장비, [{ 이름: '시그마 아트 18-35', 수량: 1 }]);
-});
-
-test('buildSheetAppendPayload prefers an explicitly written booking identity over the Kakao profile', () => {
-  const decision = {
-    should_write_to_sheet: true,
-    latest_customer_message_cluster: '예약자 원영상/010-6687-1945로 부탁드립니다.',
-    safety_checks: {
-      kakao_conversation_opened: true,
-      did_not_classify_from_preview_only: true,
-      latest_customer_message_after_last_staff_reply: true
-    },
-    reservation_inquiry: {
-      equipment_requested: [{ raw_text: 'FX3', normalized_guess: '소니 FX3 바디세트', quantity: 1 }]
-    },
-    customer: { name: '설용수' },
-    sheet_row_candidate: {
-      start_date: '2026-07-15', pickup_time: '22:00', end_date: '2026-07-16', return_time: '22:00',
-      customer_name: '설용수', phone: '', equipment: [{ item: '소니 FX3 바디세트', quantity: 1 }]
-    }
-  };
-
-  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
-  assert.equal(payload.args.예약자명, '원영상');
-  assert.equal(payload.args.연락처, '010-6687-1945');
-});
-
-test('buildSheetAppendPayload keeps a grounded canonical alias rewrite', () => {
-  const decision = {
-    should_write_to_sheet: true,
-    safety_checks: {
-      kakao_conversation_opened: true,
-      did_not_classify_from_preview_only: true,
-      latest_customer_message_after_last_staff_reply: true
-    },
-    reservation_inquiry: {
-      equipment_requested: [
-        { raw_text: 'solid 4s', exact_name_from_set_master: '홀리랜드 솔리드컴 4S', quantity: 1 }
-      ]
-    },
-    sheet_row_candidate: {
-      start_date: '2026-07-15',
-      pickup_time: '10:00',
-      end_date: '2026-07-16',
-      return_time: '10:00',
-      customer_name: '원영상',
-      phone: '010-6687-1945',
-      equipment: [{ item: '홀리랜드 솔리드컴 4S', quantity: 1 }]
-    }
-  };
-
-  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
-  assert.deepEqual(payload.args.장비, [{ 이름: '홀리랜드 솔리드컴 4S', 수량: 1 }]);
-});
-
-test('buildHermesPrompt prioritizes explicit booking identity and keeps RAG out of extraction', () => {
-  const prompt = buildHermesPrompt({ id: 'identity-guard', preview_text: '예약자 원영상 010-6687-1945' }, {
-    ragContext: buildReadOnlyRagContext({ villageAiUrl: 'https://village-ai.example' })
   });
 
-  assert.match(prompt, /예약 메시지에 명시된 예약자명.*프로필명보다 우선/s);
-  assert.match(prompt, /RAG.*장비명 정규화.*예약자명.*연락처.*사용 금지/s);
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+
+  assert.deepEqual(payload.args.장비, [{ 이름: '셔틀러에이스 M (75볼)', 수량: 1 }]);
+});
+
+test('buildSheetAppendPayload never re-extracts customer identity from raw Kakao text', () => {
+  const decision = completeSheetDecision({
+    latest_customer_message_cluster: '예약자명 김기계 / 010-9999-8888',
+    customer: { name: '카카오프로필' },
+    sheet_row_candidate: {
+      customer_name: 'AI가 맥락으로 확정한 예약자',
+      phone: '010-1234-5678'
+    }
+  });
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+
+  assert.equal(payload.args.예약자명, 'AI가 맥락으로 확정한 예약자');
+  assert.equal(payload.args.연락처, '010-1234-5678');
 });
 
 test('buildSheetAppendPayload does not leak AI reasons or review actions into confirmation request memo fields', () => {
@@ -1238,6 +1584,7 @@ test('buildSheetAppendPayload does not leak AI reasons or review actions into co
       no_auto_reply_sent: true
     },
     sheet_row_candidate: {
+      plan_complete: true,
       start_date: '2026-06-01',
       pickup_time: '10:00',
       end_date: '2026-06-02',
@@ -1245,6 +1592,7 @@ test('buildSheetAppendPayload does not leak AI reasons or review actions into co
       equipment: [{ item: '소니 FX3 바디세트', quantity: 1 }],
       customer_name: '홍길동',
       phone: '010-0000-0000',
+      discount_type: '일반',
       memo: '카카오 예약형식 메시지에서 접수. 고객 원문 장비명: FX3',
       extra_request: '가용확인 후 고객 안내 필요'
     }
@@ -1256,7 +1604,7 @@ test('buildSheetAppendPayload does not leak AI reasons or review actions into co
   assert.equal(payload.args.추가요청, '');
 });
 
-test('buildSheetAppendPayload floors minute-level confirm request times to whole hours', () => {
+test('buildSheetAppendPayload preserves valid minute-level times selected by Hermes', () => {
   const decision = {
     should_write_to_sheet: true,
     safety_checks: {
@@ -1270,24 +1618,26 @@ test('buildSheetAppendPayload floors minute-level confirm request times to whole
       no_auto_reply_sent: true
     },
     sheet_row_candidate: {
+      plan_complete: true,
       start_date: '2026-06-01',
       pickup_time: '12:30',
       end_date: '2026-06-02',
       return_time: '18:45',
       equipment: [{ item: '소니 FX3 바디세트', quantity: 1 }],
       customer_name: '홍길동',
-      phone: '010-2222-3333'
+      phone: '010-2222-3333',
+      discount_type: '일반'
     }
   };
 
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
 
-  assert.equal(normalizeConfirmRequestTimeForSheet('7시30분'), '07:00');
-  assert.equal(payload.args.반출시간, '12:00');
-  assert.equal(payload.args.반납시간, '18:00');
+  assert.equal(normalizeConfirmRequestTimeForSheet('7시30분'), '07:30');
+  assert.equal(payload.args.반출시간, '12:30');
+  assert.equal(payload.args.반납시간, '18:45');
 });
 
-test('buildSheetAppendPayload normalizes relative/korean dates and 24시 to API-safe range', () => {
+test('buildSheetAppendPayload rejects relative dates and 24시 so Hermes must resolve the range', () => {
   const now = new Date('2026-06-06T07:54:00+09:00');
   const decision = {
     should_write_to_sheet: true,
@@ -1316,10 +1666,7 @@ test('buildSheetAppendPayload normalizes relative/korean dates and 24시 to API-
 
   assert.equal(normalizeConfirmRequestDateForSheet('오늘', { now }), '2026-06-06');
   assert.equal(normalizeConfirmRequestTimeForSheet('24시'), '00:00');
-  assert.equal(payload.args.반출일, '2026-06-06');
-  assert.equal(payload.args.반출시간, '10:00');
-  assert.equal(payload.args.반납일, '2026-06-07');
-  assert.equal(payload.args.반납시간, '00:00');
+  assert.equal(payload, null);
 });
 
 test('buildSheetAppendPayload allows reservation-format writes when non-blocking checks are incomplete', () => {
@@ -1335,7 +1682,18 @@ test('buildSheetAppendPayload allows reservation-format writes when non-blocking
       latest_customer_message_after_last_staff_reply: true,
       no_auto_reply_sent: false
     },
-    sheet_row_candidate: { item: 'FX6', customer_name: '홍길동', phone: '010-4444-5555', memo: '장비명/중복 검증 필요' }
+    sheet_row_candidate: {
+      plan_complete: true,
+      start_date: '2026-06-01',
+      pickup_time: '10:00',
+      end_date: '2026-06-02',
+      return_time: '18:00',
+      equipment: [{ item: 'FX6', quantity: 1 }],
+      customer_name: '홍길동',
+      phone: '010-4444-5555',
+      discount_type: '일반',
+      memo: '장비명/중복 검증 필요'
+    }
   };
 
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
@@ -1346,7 +1704,53 @@ test('buildSheetAppendPayload allows reservation-format writes when non-blocking
   assert.equal(payload.args.비고, '');
 });
 
-test('buildSheetAppendPayload falls back to reservation equipment array instead of joining items into one row', () => {
+test('buildSheetAppendPayload trusts an exact set-master name over the customer request phrase', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    customer: { name: '테스트고객' },
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      confirmed: true,
+      already_registered: false,
+      rental_start: '2026-07-16',
+      pickup_time: '14:00',
+      rental_end: '2026-07-17',
+      return_time: '14:00',
+      discount_type: '단골',
+      equipment_requested: [
+        {
+          raw_text: '셔틀러 에이스 한대 추가',
+          normalized_guess: '셔틀러에이스 M (75볼)',
+          exact_name_from_set_master: '셔틀러에이스 M (75볼)',
+          quantity: 1
+        }
+      ]
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      exact_equipment_name_verified_from_set_master: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    sheet_row_candidate: {
+      plan_complete: true,
+      customer_name: '테스트고객',
+      phone: '010-0000-0000',
+      start_date: '2026-07-16',
+      pickup_time: '14:00',
+      end_date: '2026-07-17',
+      return_time: '14:00',
+      discount_type: '단골',
+      equipment: [{ item: '셔틀러에이스 M (75볼)', quantity: 1 }]
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+
+  assert.deepEqual(payload.args.장비, [{ 이름: '셔틀러에이스 M (75볼)', 수량: 1 }]);
+});
+
+test('buildSheetAppendPayload refuses to reconstruct a missing AI equipment plan from reservation fields', () => {
   const decision = {
     should_write_to_sheet: true,
     safety_checks: {
@@ -1376,10 +1780,47 @@ test('buildSheetAppendPayload falls back to reservation equipment array instead 
   };
 
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  assert.equal(payload, null);
+});
+
+test('buildSheetAppendPayload never swaps in a reservation list when AI marks a candidate plan complete', () => {
+  const decision = {
+    should_write_to_sheet: true,
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    customer: { name: '전찬영' },
+    reservation_inquiry: {
+      rental_start: '2026-06-23',
+      rental_end: '2026-06-23',
+      pickup_time: '11:00',
+      return_time: '17:00',
+      discount_type: '개인사업자/프리랜서',
+      equipment_requested: [
+        { raw_text: 'a7s3 2대', exact_name_from_set_master: '소니 A7S3 바디세트', quantity: 2 },
+        { raw_text: '셔틀러에이스 3대', normalized_guess: '셔틀러에이스 M (75볼)', quantity: 3 },
+        { raw_text: 'dji 무선마이크 1대', exact_name_from_set_master: 'DJI 마이크 미니2', quantity: 1 },
+        { raw_text: '70-200 렌즈 2구', exact_name_from_set_master: '소니 GM 70-200mm II', quantity: 2 }
+      ]
+    },
+    sheet_row_candidate: {
+      plan_complete: true,
+      customer_name: '전찬영',
+      phone: '010-6317-4066',
+      start_date: '2026-06-23',
+      pickup_time: '11:00',
+      end_date: '2026-06-23',
+      return_time: '17:00',
+      discount_type: '개인사업자/프리랜서',
+      equipment: [{ item: '셔틀러에이스 M (75볼)', quantity: 1 }]
+    }
+  };
+
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
   assert.deepEqual(payload.args.장비, [
-    { 이름: '셔틀러 에이스', 수량: 2 },
-    { 이름: '소니 A7S3 바디세트', 수량: 2 },
-    { 이름: '소니 GM 24-70mm II', 수량: 2 }
+    { 이름: '셔틀러에이스 M (75볼)', 수량: 1 }
   ]);
 });
 
@@ -1515,7 +1956,7 @@ test('buildSheetAvailabilityReport turns GAS results into availability-based act
   assert.equal(report.status, 'available');
   assert.match(report.summary, /기존 중복 RQ/);
   assert.match(report.recommendedAction, /결과가 가용/);
-  assert.match(report.suggestedReplyDraft, /예약 가능하십니다/);
+  assert.equal(report.suggestedReplyDraft, '', 'deterministic sheet code must not author customer-facing prose');
 
   const blocked = buildSheetAvailabilityReport({
     reqID: 'RQ-260531-004',
@@ -1531,7 +1972,118 @@ test('buildSheetAvailabilityReport turns GAS results into availability-based act
 
   assert.equal(blocked.status, 'unavailable');
   assert.match(blocked.recommendedAction, /가능하다고 안내하지 말고/);
-  assert.doesNotMatch(blocked.suggestedReplyDraft, /예약 가능하십니다|예약 가능/);
+  assert.equal(blocked.suggestedReplyDraft, '', 'unavailable results also require a fresh Hermes decision');
+
+  const setAvailable = buildSheetAvailabilityReport({
+    reqID: 'RQ-260723-001',
+    results: [
+      { 장비명: '아마란 F21C', 수량: '1', 결과: '세트', 상세: '✅ 본체 가용3 (보유3)' },
+      { 장비명: '패널 / 발라스터 / 연장라인 / AC라인 / 프레임대', 수량: '1', 결과: 'ℹ️ 기본구성', 상세: '세트 동봉품(개별 재고 미관리)' },
+      { 장비명: '루버 / 실크1 / 실크2', 수량: '1', 결과: 'ℹ️ 기본구성', 상세: '세트 동봉품(개별 재고 미관리)' },
+      { 장비명: 'C스탠드', 수량: '1', 결과: '✅ 가용15', 상세: '보유20, 최대동시5' },
+      { 장비명: 'V마운트 배터리', 수량: '1', 결과: '✅ 가용44', 상세: '보유56, 최대동시12' }
+    ]
+  });
+  assert.equal(setAvailable.status, 'available', '동봉품 정보행은 세트 전체 가용 판정을 unknown으로 만들면 안 된다');
+
+  const setUnavailable = buildSheetAvailabilityReport({
+    reqID: 'RQ-260723-002',
+    results: [
+      { 장비명: '아마란 F21C', 수량: '1', 결과: '세트', 상세: '❌ 본체 가용0 (보유3, 사용중3)' },
+      { 장비명: '패널 / 발라스터 / 연장라인 / AC라인 / 프레임대', 수량: '1', 결과: 'ℹ️ 기본구성', 상세: '세트 동봉품(개별 재고 미관리)' }
+    ]
+  });
+  assert.equal(setUnavailable.status, 'unavailable', '세트 헤더의 본체 불가 근거는 무시하면 안 된다');
+});
+
+test('buildHermesPostActionPrompt delegates result interpretation and reply prose to Hermes', () => {
+  const prompt = buildHermesPostActionPrompt({
+    job: { id: 'job-post-action', room_key: 'preview:hong', preview_text: '예약 가능할까요?' },
+    initialDecision: completeSheetDecision(),
+    sheetResult: {
+      reqID: 'RQ-260724-001',
+      results: [{ 장비명: '소니 FX3 바디세트', 수량: '1', 결과: '✅ 가용1', 상세: '예약 가능' }]
+    },
+    sheetPayload: {
+      args: { 예약자명: '홍길동', 장비: [{ 이름: '소니 FX3 바디세트', 수량: 1 }] }
+    }
+  });
+
+  assert.match(prompt, /POST-ACTION HERMES AI REASONING PASS/i);
+  assert.match(prompt, /RQ-260724-001/);
+  assert.match(prompt, /소니 FX3 바디세트/);
+  assert.match(prompt, /outer code.*must not author customer-facing prose/is);
+  assert.match(prompt, /"should_write_to_sheet": false/);
+  assert.match(prompt, /authoritative_availability_answer/);
+  assert.match(prompt, /FINAL_JSON/);
+});
+
+test('validateAiPostActionDecisionContract prevents code-side or unsafe availability shortcuts', () => {
+  const availableReport = {
+    status: 'available',
+    payload: { reqID: 'RQ-260724-001', status: 'available', results: [{ result: '✅ 가용1' }] }
+  };
+  assert.equal(validateAiPostActionDecisionContract(completePostActionDecision(), availableReport).valid, true);
+
+  const rewritesSheet = completePostActionDecision({ should_write_to_sheet: true });
+  const rewriteValidation = validateAiPostActionDecisionContract(rewritesSheet, availableReport);
+  assert.equal(rewriteValidation.valid, false);
+  assert.ok(rewriteValidation.errors.some((error) => error.includes('should_write_to_sheet must be false')));
+
+  const unavailableAutoSend = validateAiPostActionDecisionContract(
+    completePostActionDecision(),
+    { status: 'unavailable', payload: { status: 'unavailable', results: [{ result: '가용0' }] } }
+  );
+  assert.equal(unavailableAutoSend.valid, false);
+  assert.ok(unavailableAutoSend.errors.some((error) => error.includes('available authoritative result')));
+
+  const claimsConfirmed = validateAiPostActionDecisionContract(
+    completePostActionDecision({ reply_decision: { text: '예약 확정되었습니다.' } }),
+    availableReport
+  );
+  assert.equal(claimsConfirmed.valid, false);
+  assert.ok(claimsConfirmed.errors.some((error) => error.includes('booking confirmation')));
+});
+
+test('runHermesPostActionDecision returns a typed AI reconciliation over authoritative sheet facts', async () => {
+  const outputs = [`FINAL_JSON\n\`\`\`json\n${JSON.stringify(completePostActionDecision())}\n\`\`\``];
+  const prompts = [];
+  const result = await runHermesPostActionDecision({
+    config: { hermesCommand: 'fake-hermes', hermesTimeoutMs: 240000 },
+    job: { id: 'job-post-action', room_key: 'preview:hong' },
+    initialDecision: completeSheetDecision(),
+    sheetResult: {
+      reqID: 'RQ-260724-001',
+      results: [{ 장비명: '소니 FX3 바디세트', 수량: '1', 결과: '✅ 가용1', 상세: '예약 가능' }]
+    },
+    sheetPayload: { args: { 예약자명: '홍길동', 장비: [{ 이름: '소니 FX3 바디세트', 수량: 1 }] } }
+  }, {
+    runHermesImpl: async (prompt) => {
+      prompts.push(prompt);
+      return outputs.shift();
+    }
+  });
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.attempts, 1);
+  assert.equal(result.decision.post_action_reconciled, true);
+  assert.equal(result.decision.authoritative_sheet_result.status, 'available');
+  assert.equal(result.decision.reply_decision.safetyClass, 'authoritative_availability_answer');
+  assert.match(prompts[0], /RQ-260724-001/);
+});
+
+test('suppressDecisionForUnreconciledSheetResult fails closed instead of sending stale AI prose', () => {
+  const decision = suppressDecisionForUnreconciledSheetResult(
+    completePostActionDecision(),
+    { payload: { reqID: 'RQ-260724-001', status: 'available', results: [{ result: '✅ 가용1' }] } }
+  );
+
+  assert.equal(decision.post_action_reconciled, false);
+  assert.equal(decision.authoritative_sheet_result.status, 'available');
+  assert.equal(decision.suggested_reply_draft, '');
+  assert.equal(decision.reply_decision.replyMode, 'no_reply');
+  assert.equal(decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }).allowed, false);
 });
 
 test('fetchExistingConfirmRequestResultForDecision reads RQ result rows from 확인요청 search', async () => {
@@ -1557,7 +2109,8 @@ test('fetchExistingConfirmRequestResultForDecision reads RQ result rows from 확
       };
     }
   }, {
-    reason: '기존 RQ 발견으로 중복 입력 방지: RQ-260531-003'
+    reason: '기존 RQ 발견으로 중복 입력 방지: RQ-260531-003',
+    existing_confirm_request_ids: ['RQ-260531-003']
   }, []);
 
   assert.equal(requested[0].searchParams.get('action'), 'search');
@@ -1571,6 +2124,24 @@ test('fetchExistingConfirmRequestResultForDecision reads RQ result rows from 확
   ]);
 });
 
+test('fetchExistingConfirmRequestResultForDecision never infers RQ ids from prose', async () => {
+  let fetches = 0;
+  const result = await fetchExistingConfirmRequestResultForDecision({
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'secret',
+    fetchImpl: async () => {
+      fetches += 1;
+      throw new Error('must not fetch');
+    }
+  }, {
+    reason: '기존 RQ-260531-003 발견',
+    follow_up_items: [{ summary: 'RQ-260531-003 결과 확인' }]
+  }, []);
+
+  assert.equal(result, null);
+  assert.equal(fetches, 0);
+});
+
 test('enrichFollowUpRowsWithSheetAvailability replaces inspect-RQ card with result-based report', () => {
   const rows = buildFollowUpRows({
     classification: 'reservation',
@@ -1578,6 +2149,7 @@ test('enrichFollowUpRowsWithSheetAvailability replaces inspect-RQ card with resu
     customer: { name: '최재원' },
     follow_up_items: [{
       type: 'sheet_duplicate_check',
+      route: 'schedule',
       priority: 'urgent',
       status: 'open',
       title: '최재원 AX-700 예약 가능 문의 응답 필요',
@@ -1613,11 +2185,12 @@ test('enrichFollowUpRowsWithSheetAvailability replaces inspect-RQ card with resu
   });
 
   assert.equal(enriched.length, 1);
-  assert.equal(enriched[0].type, 'reservation_review');
+  assert.equal(enriched[0].type, 'sheet_duplicate_check');
+  assert.equal(enriched[0].payload.follow_up_route, 'schedule');
   assert.match(enriched[0].summary, /RQ-260531-003/);
   assert.match(enriched[0].recommended_action, /가능하다고 안내하지 말고/);
   assert.match(enriched[0].evidence.join('\n'), /⚠️ 겹침\(가용0\)/);
-  assert.doesNotMatch(enriched[0].suggested_reply_draft, /예약 가능하십니다|예약 가능/);
+  assert.equal(enriched[0].suggested_reply_draft, '', 'stale AI prose must be cleared after authoritative availability changes');
 });
 
 test('enrichFollowUpRowsWithSheetAvailability handles duplicate RQ result without sheet payload', () => {
@@ -1637,6 +2210,32 @@ test('enrichFollowUpRowsWithSheetAvailability handles duplicate RQ result withou
   assert.match(enriched[0].summary, /RQ-260601-001/);
   assert.match(enriched[0].evidence.join('\n'), /✅ 가용1/);
   assert.equal(enriched[0].payload.sheet_request, null);
+  assert.equal(enriched[0].suggested_reply_draft, '', 'programmatic availability rows must not synthesize replies');
+});
+
+test('enrichFollowUpRowsWithSheetAvailability preserves post-action Hermes semantics while attaching facts', () => {
+  const postDecision = {
+    ...completePostActionDecision({
+      follow_up_items: [{
+        ...completePostActionDecision().follow_up_items[0],
+        recommended_action: 'Hermes가 전체 결과를 보고 예약 진행 의사를 물으라고 판단했습니다.',
+        suggested_reply_draft: '요청하신 전체 장비가 가능합니다. 이 일정으로 예약 진행해드릴까요?'
+      }]
+    }),
+    post_action_reconciled: true,
+    authoritative_sheet_result: { status: 'available' }
+  };
+  const rows = buildFollowUpRows(postDecision, { id: 'job-post', room_key: 'preview:hong' });
+  const enriched = enrichFollowUpRowsWithSheetAvailability(rows, {
+    reqID: 'RQ-260724-001',
+    results: [{ 장비명: '소니 FX3 바디세트', 수량: '1', 결과: '✅ 가용1', 상세: '예약 가능' }]
+  }, null, postDecision, { id: 'job-post', room_key: 'preview:hong' });
+
+  assert.equal(enriched.length, 1);
+  assert.equal(enriched[0].recommended_action, 'Hermes가 전체 결과를 보고 예약 진행 의사를 물으라고 판단했습니다.');
+  assert.equal(enriched[0].suggested_reply_draft, '요청하신 전체 장비가 가능합니다. 이 일정으로 예약 진행해드릴까요?');
+  assert.equal(enriched[0].payload.sheet_availability.status, 'available');
+  assert.match(enriched[0].evidence.join('\n'), /✅ 가용1/);
 });
 
 test('extractConfirmRequestIds finds unique RQ ids in AI decisions and rows', () => {
@@ -1677,6 +2276,7 @@ test('buildSheetFailureFollowUpRows creates actionable cards for validation erro
   assert.equal(rows[0].decision_classification, 'sheet_write_rejected');
   assert.match(rows[0].summary, /GAS가 확인요청 입력을 거절/);
   assert.match(rows[0].evidence.join('\n'), /2026-04-31/);
+  assert.equal(rows[0].suggested_reply_draft, '', 'deterministic failure plumbing must not author customer prose');
 
   assert.deepEqual(buildSheetFailureFollowUpRows(decision, job, {
     success: false,
@@ -1696,9 +2296,12 @@ test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', (
     ],
     follow_up_items: [{
       type: 'quote_send',
+      route: 'document',
+      taskKey: 'fx3_quote_send',
       priority: 'high',
       status: 'open',
       title: 'FX3 견적서 발송',
+      customer_name: '홍길동',
       summary: '고객이 FX3 견적서를 요청함',
       recommended_action: '스케줄과 가격 확인 후 견적서 발송',
       suggested_reply_draft: '감독님, 확인 후 견적서 보내드리겠습니다.',
@@ -1727,6 +2330,19 @@ test('routeFollowUpToSlack maps follow-up types to the agent channels', () => {
   assert.deepEqual(routeFollowUpToSlack({ type: 'damage_repair' }), { route: 'inventory', channel: '재고관리-agent' });
 });
 
+test('routeFollowUpToSlack follows the explicit Hermes route and never scans prose to change it', () => {
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'reply_needed',
+    summary: '견적서와 세금계산서라는 단어가 있지만 일반 문의입니다.',
+    payload: { follow_up_route: 'other' }
+  }), { route: 'other', channel: '기타문의' });
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'reply_needed',
+    summary: '문서라는 단어가 반복됩니다. 견적서 견적서.',
+    payload: { follow_up_route: 'schedule' }
+  }), { route: 'schedule', channel: '스케쥴-agent' });
+});
+
 test('routeFollowUpToSlack keeps operational follow-ups out of document channel despite document words', () => {
   assert.deepEqual(routeFollowUpToSlack({
     type: 'damage_repair',
@@ -1737,13 +2353,15 @@ test('routeFollowUpToSlack keeps operational follow-ups out of document channel 
   assert.deepEqual(routeFollowUpToSlack({
     type: 'completed_log',
     title: '박정우 6/10 예약 확정 건 확인요청 입력 필요',
-    summary: '확인요청 입력 후 처리 완료 기록'
+    summary: '확인요청 입력 후 처리 완료 기록',
+    payload: { follow_up_route: 'schedule' }
   }), { route: 'schedule', channel: '스케쥴-agent' });
 
   assert.deepEqual(routeFollowUpToSlack({
     type: 'completed_log',
     title: '이기욱 파손 건 및 견적서 확인 후속',
-    summary: '파손 확인 후 완료 기록'
+    summary: '파손 확인 후 완료 기록',
+    payload: { follow_up_route: 'inventory' }
   }), { route: 'inventory', channel: '재고관리-agent' });
 
   assert.deepEqual(routeFollowUpToSlack({
@@ -1753,19 +2371,31 @@ test('routeFollowUpToSlack keeps operational follow-ups out of document channel 
   }), { route: 'other', channel: '기타문의' });
 });
 
-test('routeFollowUpToSlack routes explicit document requests from generic cards to document channel', () => {
+test('routeFollowUpToSlack routes an AI-explicit document card to the document channel', () => {
   assert.deepEqual(routeFollowUpToSlack({
     type: 'reply_needed',
     title: '하현준 사업자등록증·통장사본 전달 요청',
-    summary: '고객이 사업자등록증과 통장사본 전달을 요청했습니다.'
+    summary: '고객이 사업자등록증과 통장사본 전달을 요청했습니다.',
+    payload: { follow_up_route: 'document' }
   }), { route: 'document', channel: '서류발송-agent' });
 });
 
-test('routeFollowUpToSlack sends reservation-like reply cards to schedule agent', () => {
+test('routeFollowUpToSlack sends an AI-explicit reservation reply card to schedule agent', () => {
   assert.deepEqual(routeFollowUpToSlack({
     type: 'reply_needed',
     title: '이기욱 예약 후보 확인 필요',
-    summary: '고객이 6/3~6/4 장비 예약 진행을 요청했습니다.'
+    summary: '고객이 6/3~6/4 장비 예약 진행을 요청했습니다.',
+    payload: { follow_up_route: 'schedule' }
+  }), { route: 'schedule', channel: '스케쥴-agent' });
+});
+
+test('routeFollowUpToSlack keeps 확인요청 누락 recovery cards in schedule agent', () => {
+  assert.deepEqual(routeFollowUpToSlack({
+    type: 'reply_needed',
+    title: 'ᄀ김준우 1 넵 그럼 예약부탁드립니다 자동 처리 확인 필요',
+    summary: "채팅목록에는 '넵 그럼 예약부탁드립니다'가 보이나 실제 채팅방 맥락을 열어 확인하지 못했습니다.",
+    recommended_action: '카카오 채팅방을 직접 열어 원문을 확인하고, 확인요청/계약마스터에 이미 처리됐는지 대조하세요. 누락이면 확인요청 입력 또는 답변을 처리하세요.',
+    payload: { follow_up_route: 'schedule' }
   }), { route: 'schedule', channel: '스케쥴-agent' });
 });
 
@@ -2217,7 +2847,8 @@ test('deliverSlackFollowUpRows posts same-conversation follow-ups as thread repl
     priority: 'normal',
     title: '박정우 6/10 예약 확정 건 확인요청 입력 필요',
     customer_name: '박정우',
-    summary: '확인요청 입력 후속'
+    summary: '확인요청 입력 후속',
+    payload: { follow_up_route: 'schedule', follow_up_task_key: 'reservation_2026_06_10' }
   }]);
 
   assert.equal(result.results[0].ok, true);
@@ -2280,7 +2911,7 @@ test('deliverSlackFollowUpRows updates an existing delivered Slack card instead 
   assert.ok(!requests.some((r) => r.url.includes('chat.postMessage')));
 });
 
-test('upsertFollowUpRows merges same conversation into an active row instead of inserting a duplicate', async () => {
+test('upsertFollowUpRows preserves distinct Hermes tasks in the same conversation', async () => {
   const requests = [];
   const existing = {
     id: 'existing-1',
@@ -2294,7 +2925,11 @@ test('upsertFollowUpRows merges same conversation into an active row instead of 
     summary: '고객이 계약서 파일 발송을 요청했습니다.',
     recommended_action: '계약서를 확인하세요.',
     evidence: ['최신 고객 메시지: 계약서 보내주세요'],
-    payload: { slack_delivery: { status: 'delivered', channel_id: 'C123DOC', message_ts: '171111.000100' } }
+    payload: {
+      follow_up_route: 'document',
+      follow_up_task_key: 'payment_documents',
+      slack_delivery: { status: 'delivered', channel_id: 'C123DOC', message_ts: '171111.000100' }
+    }
   };
   const config = {
     supabaseUrl: 'https://supabase.example',
@@ -2308,9 +2943,9 @@ test('upsertFollowUpRows merges same conversation into an active row instead of 
       if (String(url).includes('status=not.in.(done,dismissed)')) {
         return { ok: true, status: 200, text: async () => JSON.stringify([existing]) };
       }
-      if (init.method === 'PATCH') {
-        const patch = JSON.parse(init.body);
-        return { ok: true, status: 200, text: async () => JSON.stringify([{ ...existing, ...patch }]) };
+      if (init.method === 'POST') {
+        const rows = JSON.parse(init.body);
+        return { ok: true, status: 201, text: async () => JSON.stringify(rows.map((row, index) => ({ id: `new-${index}`, ...row }))) };
       }
       throw new Error(`unexpected request ${init.method || 'GET'} ${url}`);
     }
@@ -2327,14 +2962,18 @@ test('upsertFollowUpRows merges same conversation into an active row instead of 
     summary: '고객이 V마운트는 카드결제하겠다고 전달했습니다.',
     recommended_action: '카드결제 상태를 확인하세요.',
     evidence: ['카카오 최신 고객 메시지: 사장님 V마운트는 카드결제할게용'],
-    payload: { latest_customer_message_cluster: '사장님 V마운트는 카드결제할게용' }
+    payload: {
+      follow_up_route: 'settlement',
+      follow_up_task_key: 'v_mount_card_payment',
+      latest_customer_message_cluster: '사장님 V마운트는 카드결제할게용'
+    }
   }]);
 
-  assert.equal(result.mergedActive, 1);
-  assert.equal(result.rows[0].id, 'existing-1');
-  assert.equal(result.rows[0].type, 'contract_document');
-  assert.match(result.rows[0].summary, /카드결제/);
-  assert.ok(!requests.some((r) => r.init?.method === 'POST'));
+  assert.equal(result.mergedActive, 0);
+  assert.equal(result.rows[0].id, 'new-0');
+  assert.equal(result.rows[0].type, 'payment_check');
+  assert.ok(requests.some((r) => r.init?.method === 'POST'));
+  assert.ok(!requests.some((r) => r.init?.method === 'PATCH'));
 });
 
 test('upsertFollowUpRows merges same room when customer name has message or company suffix', async () => {
@@ -2351,7 +2990,7 @@ test('upsertFollowUpRows merges same room when customer name has message or comp
     summary: '기존 RQ 입력 완료',
     recommended_action: 'RQ를 확인하세요.',
     evidence: ['기존 메시지'],
-    payload: {}
+    payload: { follow_up_route: 'schedule', follow_up_task_key: 'reservation_2026_06_03' }
   };
   const config = {
     supabaseUrl: 'https://supabase.example',
@@ -2383,7 +3022,8 @@ test('upsertFollowUpRows merges same room when customer name has message or comp
     title: '이기욱 INSIDE FILM 예약 가용 확인 결과',
     summary: '고객이 6/3~6/4 장비 예약 진행을 요청했습니다.',
     recommended_action: '기존 RQ와 대조하세요.',
-    evidence: ['최신 고객 메시지: 넵 그럴게 부탁드리겠습니다 !']
+    evidence: ['최신 고객 메시지: 넵 그럴게 부탁드리겠습니다 !'],
+    payload: { follow_up_route: 'schedule', follow_up_task_key: 'reservation_2026_06_03' }
   }]);
 
   assert.equal(result.mergedActive, 1);
@@ -2411,6 +3051,8 @@ test('buildFollowUpRows keeps local DOM job ids out of UUID job_id column', () =
     customer: { name: '한이솔' },
     follow_up_items: [{
       type: 'contract_document',
+      route: 'document',
+      taskKey: 'payment_documents_370000',
       title: '거래명세서 발급 요청',
       summary: '고객이 거래명세서 금액을 알려줌'
     }]
@@ -2421,7 +3063,7 @@ test('buildFollowUpRows keeps local DOM job ids out of UUID job_id column', () =
   assert.match(rows[0].follow_up_key, /^preview:21d6b164a492d90e:한이솔:contract_document:/);
 });
 
-test('buildFollowUpRows suppresses no-match manual-confirmation noise cards', () => {
+test('buildFollowUpRows preserves Hermes follow-ups even when conversation discovery failed', () => {
   const rows = buildFollowUpRows({
     classification: 'unclear',
     confidence: 'high',
@@ -2432,6 +3074,10 @@ test('buildFollowUpRows suppresses no-match manual-confirmation noise cards', ()
     customer: { name: 'hellodesk' },
     follow_up_items: [{
       type: 'reply_needed',
+      route: 'other',
+      taskKey: 'manual_chat_discovery',
+      priority: 'high',
+      status: 'open',
       title: 'Kakao 대화방 수동 확인 필요',
       customer_name: 'hellodesk',
       summary: '작업 증거의 navigation hint는 hellodesk였으나 Kakao Channel Manager 현재 채팅 목록/검색에서 해당 대화방을 확인하지 못했습니다.',
@@ -2440,7 +3086,8 @@ test('buildFollowUpRows suppresses no-match manual-confirmation noise cards', ()
     }]
   }, { jobId: 'dom-no-match', roomKey: 'preview:03e2dc74d0122490' });
 
-  assert.deepEqual(rows, []);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].payload.follow_up_task_key, 'manual_chat_discovery');
 });
 
 test('buildFollowUpRows uses a stable semantic key for same customer task across repeated jobs', () => {
@@ -2450,6 +3097,8 @@ test('buildFollowUpRows uses a stable semantic key for same customer task across
     customer: { name: '정시온' },
     follow_up_items: [{
       type: 'contract_document',
+      route: 'document',
+      taskKey: 'payment_documents_370000',
       priority: 'high',
       title: '정시온 고객 37만원 결제 서류 준비',
       summary: '고객이 오늘 37만원 결제 관련 서류 수령 가능 여부를 문의했습니다.',
@@ -2463,6 +3112,8 @@ test('buildFollowUpRows uses a stable semantic key for same customer task across
     customer: { name: '정시온' },
     follow_up_items: [{
       type: 'contract_document',
+      route: 'document',
+      taskKey: 'payment_documents_370000',
       priority: 'high',
       title: '정시온 37만원 결제 서류 전달 요청',
       summary: '고객이 전화로 안내받았던 37만원 결제 관련 서류를 요청했습니다. 이전 대화상 계약서 PDF 맥락이 있습니다.',
@@ -2475,13 +3126,15 @@ test('buildFollowUpRows uses a stable semantic key for same customer task across
   assert.match(first[0].follow_up_key, /^preview:jung-si-on:정시온:contract_document:/);
 });
 
-test('buildFollowUpRows uses topic anchors for repeated FAQ follow-ups without amounts or dates', () => {
+test('buildFollowUpRows uses the AI taskKey for repeated FAQ follow-ups without amounts or dates', () => {
   const first = buildFollowUpRows({
     classification: 'price',
     confidence: 'high',
     customer: { name: '최재형' },
     follow_up_items: [{
       type: 'price_review',
+      route: 'other',
+      taskKey: 'student_discount_policy',
       title: '학생 할인율 문의 답변 검토',
       summary: '고객이 학생 할인율이 몇 퍼센트인지 문의했습니다.'
     }]
@@ -2492,6 +3145,8 @@ test('buildFollowUpRows uses topic anchors for repeated FAQ follow-ups without a
     customer: { name: '최재형' },
     follow_up_items: [{
       type: 'price_review',
+      route: 'other',
+      taskKey: 'student_discount_policy',
       title: '최재형님 학생할인 비율 문의 확인',
       summary: '고객이 학생할인이 몇 프로인지 문의했습니다.'
     }]
@@ -2509,11 +3164,15 @@ test('filterFollowUpRowsAgainstClosedHistory suppresses already dismissed topic 
     follow_up_items: [
       {
         type: 'price_review',
+        route: 'other',
+        taskKey: 'student_discount_policy',
         title: '최재형님 학생 할인율 문의 답변 확인',
         summary: '고객이 위치 안내를 받은 뒤 학생 할인율이 몇 프로인지 문의했습니다.'
       },
       {
         type: 'reply_needed',
+        route: 'other',
+        taskKey: 'student_discount_policy',
         title: '최재형 고객 할인 문의 답장 필요',
         summary: '최신 고객 메시지가 직원 답변 이후 발생한 할인 문의입니다.'
       }
@@ -2522,6 +3181,7 @@ test('filterFollowUpRowsAgainstClosedHistory suppresses already dismissed topic 
   const history = [{
     customer_name: '최재형',
     type: 'reply_needed',
+    payload: { follow_up_route: 'other', follow_up_task_key: 'student_discount_policy' },
     status: 'dismissed',
     title: '학생 할인 문의 답장 필요',
     summary: '직원 답변 이후 고객이 새 할인 문의를 남겼습니다.'
@@ -2531,7 +3191,7 @@ test('filterFollowUpRowsAgainstClosedHistory suppresses already dismissed topic 
   assert.deepEqual(filterFollowUpRowsAgainstClosedHistory(rows, history), []);
 });
 
-test('mergeFollowUpRowsByTopic keeps one card for one operational customer update', () => {
+test('mergeFollowUpRowsByTopic preserves distinct AI-declared operational tasks', () => {
   const rows = buildFollowUpRows({
     classification: 'reservation',
     confidence: 'medium',
@@ -2539,6 +3199,8 @@ test('mergeFollowUpRowsByTopic keeps one card for one operational customer updat
     follow_up_items: [
       {
         type: 'reply_needed',
+        route: 'other',
+        taskKey: 'return_ack',
         title: '반납 및 다음 회차 메모 확인 답장',
         summary: '고객의 반납 완료 및 다음 회차 일정 공유에 대해 짧은 확인 답장이 유용합니다.',
         recommended_action: '확인 답장을 보내세요.',
@@ -2546,12 +3208,16 @@ test('mergeFollowUpRowsByTopic keeps one card for one operational customer updat
       },
       {
         type: 'damage_repair',
+        route: 'inventory',
+        taskKey: 'sony_battery_warning',
         title: '경고 메시지 뜬 소니 배터리 확인 필요',
         summary: '고객이 애플박스 위에 둔 소니 배터리가 경고 메시지 발생 배터리라고 설명했습니다.',
         recommended_action: '배터리 상태를 확인하세요.'
       },
       {
         type: 'schedule_check',
+        route: 'schedule',
+        taskKey: 'next_rental_2026_06_01',
         title: '다음 회차 6/1-6/2 및 5/31 밤 픽업 메모 확인',
         summary: '고객이 다음 회차 일정과 픽업 예정 시간을 전달했습니다.',
         recommended_action: '다음 회차 일정을 확인하세요.'
@@ -2561,10 +3227,7 @@ test('mergeFollowUpRowsByTopic keeps one card for one operational customer updat
 
   const merged = mergeFollowUpRowsByTopic(rows);
   assert.equal(rows.length, 3);
-  assert.equal(merged.length, 1);
-  assert.match(merged[0].recommended_action, /배터리 상태/);
-  assert.match(merged[0].recommended_action, /다음 회차 일정/);
-  assert.equal(merged[0].suggested_reply_draft, '확인했습니다. 체크해두겠습니다.');
+  assert.equal(merged.length, 3);
 });
 
 test('buildFollowUpRows keeps one stable key for one reservation split by secondary topics', () => {
@@ -2574,6 +3237,8 @@ test('buildFollowUpRows keeps one stable key for one reservation split by second
     customer: { name: '홍지수' },
     follow_up_items: [{
       type: 'reservation_review',
+      route: 'schedule',
+      taskKey: 'reservation_2026_06_06_burano_movi',
       priority: 'high',
       title: '홍지수님 6/6-6/7 브라노 풀세트 및 모비 문의 확인',
       summary: '고객이 6월 6-7일 브라노 풀세트 대여 가능 여부, 비학생 학생가 가능 여부, 모비 보유 여부를 문의함.',
@@ -2586,6 +3251,8 @@ test('buildFollowUpRows keeps one stable key for one reservation split by second
     customer: { name: '홍지수' },
     follow_up_items: [{
       type: 'reservation_review',
+      route: 'schedule',
+      taskKey: 'reservation_2026_06_06_burano_movi',
       priority: 'high',
       title: '홍지수님 6/6-6/7 브라노 풀세트 + 모비 대여 가능 여부 및 학생가 문의',
       summary: '고객이 2026년 6월 6-7일 브라노 풀세트 대여 가능 여부와 비학생 학생가 적용 가능 여부를 문의했습니다.',
@@ -2597,7 +3264,7 @@ test('buildFollowUpRows keeps one stable key for one reservation split by second
   assert.match(discount[0].follow_up_key, /reservation_review/);
 });
 
-test('buildFollowUpTopicKey collapses equipment availability split across schedule and reply cards', () => {
+test('buildFollowUpTopicKey merges only when Hermes gives both cards the same route and taskKey', () => {
   const rows = buildFollowUpRows({
     classification: 'faq',
     confidence: 'medium',
@@ -2605,11 +3272,15 @@ test('buildFollowUpTopicKey collapses equipment availability split across schedu
     follow_up_items: [
       {
         type: 'schedule_check',
+        route: 'schedule',
+        taskKey: 'intercom_availability',
         title: '인터컴 대여 가능 여부 배터리 상태 확인',
         summary: '고객이 인터콤 대여 가능 여부를 문의했고, 직원이 복귀 후 배터리 상태 확인이 필요하다고 답변한 상태입니다.'
       },
       {
         type: 'reply_needed',
+        route: 'schedule',
+        taskKey: 'intercom_availability',
         title: '인터콤 대여 가능 여부 문의 답변',
         summary: '고객이 인터콤도 대여 가능한지 문의했습니다.'
       }
@@ -2617,7 +3288,7 @@ test('buildFollowUpTopicKey collapses equipment availability split across schedu
   }, { jobId: 'dom-lee', roomKey: 'preview:lee' });
 
   const merged = mergeFollowUpRowsByTopic(rows);
-  assert.equal(rows[0].follow_up_key, rows[1].follow_up_key);
+  assert.notEqual(rows[0].follow_up_key, rows[1].follow_up_key);
   assert.equal(merged.length, 1);
   assert.equal(merged[0].type, 'schedule_check');
 });
@@ -2628,6 +3299,7 @@ test('mergeFollowUpRowsByTopic normalizes customer aliases with issue suffixes',
       follow_up_key: 'a',
       customer_name: '한시우',
       type: 'damage_repair',
+      payload: { follow_up_route: 'inventory', follow_up_task_key: 'missing_damaged_60x' },
       priority: 'normal',
       title: '한시우 미반납/파손 관련 반납 예정 확인',
       summary: '고객이 미반납 물품을 확인 후 가져다 드리겠다고 답변함.'
@@ -2636,6 +3308,7 @@ test('mergeFollowUpRowsByTopic normalizes customer aliases with issue suffixes',
       follow_up_key: 'b',
       customer_name: '한시우/60x 파손',
       type: 'damage_repair',
+      payload: { follow_up_route: 'inventory', follow_up_task_key: 'missing_damaged_60x' },
       priority: 'normal',
       title: '한시우 미반납/파손 관련 반납 확인 필요',
       summary: '고객이 미반납/확인 대상 물품을 확인 후 가져다 드리겠다고 답변함.'
@@ -2645,7 +3318,7 @@ test('mergeFollowUpRowsByTopic normalizes customer aliases with issue suffixes',
   assert.equal(mergeFollowUpRowsByTopic(rows).length, 1);
 });
 
-test('closeKakaoConversationWindow targets only the opened Kakao customer popup', async () => {
+test('closeKakaoConversationWindow targets only the opened Kakao customer popup', { skip: process.platform !== 'darwin' }, async () => {
   const script = buildCloseKakaoConversationWindowAppleScript();
   assert.match(script, /close window w/);
   assert.match(script, / - 빌리지 - 카카오비즈니스/);
@@ -2672,6 +3345,39 @@ test('closeKakaoConversationWindow targets only the opened Kakao customer popup'
   assert.equal(args[3], '정시온');
 });
 
+test('closeKakaoConversationWindow closes only the supplied Windows customer popup through CUA', async () => {
+  const calls = [];
+  const spawnImpl = (cmd, args) => {
+    calls.push({ cmd, args });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      child.stdout.write(JSON.stringify({ ok: true }));
+      child.emit('close', 0);
+    });
+    return child;
+  };
+
+  const result = await closeKakaoConversationWindow({
+    pid: 8123,
+    window_id: 4567,
+    title: '정시온 - 빌리지 - 카카오비즈니스 파트너센터'
+  }, { platform: 'win32', cuaDriverCommand: 'cua-driver', spawnImpl, timeoutMs: 1000 });
+
+  assert.deepEqual(result, { status: 'closed_conversation_window' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'cua-driver');
+  assert.equal(calls[0].args[0], 'call');
+  assert.equal(calls[0].args[1], 'press_key');
+  assert.deepEqual(JSON.parse(calls[0].args[2]), {
+    pid: 8123,
+    window_id: 4567,
+    key: 'f4',
+    modifiers: ['alt']
+  });
+});
+
 test('closeKakaoConversationTargetViaDevtools closes only the target id', async () => {
   let requestedUrl = '';
   const result = await closeKakaoConversationTargetViaDevtools({ id: 'target-1' }, {
@@ -2694,7 +3400,10 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
     reply_decision: {
       replyMode: 'auto_send',
       confidence: 'high',
-      text: '네, 확인 후 안내드리겠습니다.'
+      text: '네, 확인 후 안내드리겠습니다.',
+      safetyClass: 'simple_ack',
+      grounding: 'visible_conversation',
+      requiresRag: false
     },
     safety_checks: {
       kakao_conversation_opened: true,
@@ -2706,16 +3415,32 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   assert.equal(canAutoSendCustomerAnswer(baseDecision, { autoSendEnabled: false }).allowed, false);
   assert.deepEqual(canAutoSendCustomerAnswer(baseDecision, { autoSendEnabled: true }), {
     allowed: true,
-    reason: 'allowed',
+    reason: 'simple_ack',
     text: '네, 확인 후 안내드리겠습니다.',
     replyMode: 'auto_send',
-    confidence: 'high'
+    confidence: 'high',
+    safetyClass: 'simple_ack',
+    grounding: 'visible_conversation'
   });
+  const authoritativeAvailability = {
+    ...completePostActionDecision(),
+    post_action_reconciled: true,
+    authoritative_sheet_result: { status: 'available', reqID: 'RQ-260724-001' }
+  };
+  assert.equal(canAutoSendCustomerAnswer(authoritativeAvailability, { autoSendEnabled: true }).allowed, true);
+  assert.equal(canAutoSendCustomerAnswer({
+    ...authoritativeAvailability,
+    authoritative_sheet_result: { status: 'unavailable', reqID: 'RQ-260724-001' }
+  }, { autoSendEnabled: true }).reason, 'authoritative_availability_grounding_mismatch');
+  assert.equal(canAutoSendCustomerAnswer({
+    ...authoritativeAvailability,
+    reply_decision: { ...authoritativeAvailability.reply_decision, text: '예약 확정되었습니다.' }
+  }, { autoSendEnabled: true }).reason, 'authoritative_availability_contains_unverified_commitment');
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, reply_decision: { ...baseDecision.reply_decision, replyMode: 'draft_only' } }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, confidence: 'medium', reply_decision: { ...baseDecision.reply_decision, confidence: 'medium' } }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, suggested_reply_draft: '예약 확정됐습니다', reply_decision: { ...baseDecision.reply_decision, text: '예약 확정됐습니다' } }, { autoSendEnabled: true }).allowed, false);
-  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price' }, { autoSendEnabled: true }).allowed, false);
-  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'reservation_review' }, { autoSendEnabled: true }).allowed, false);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price' }, { autoSendEnabled: true }).allowed, true);
+  assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'reservation_review' }, { autoSendEnabled: true }).allowed, true);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'reservation' }, { autoSendEnabled: true }).allowed, true);
   assert.equal(canAutoSendCustomerAnswer({
     ...baseDecision,
@@ -2739,17 +3464,135 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
     ],
     reply_decision: {
       ...baseDecision.reply_decision,
-      text: '네 감독님, 말씀 주신 구성으로 예약 확정해드렸습니다.'
+      text: '네 감독님, 말씀 주신 구성으로 예약 확정해드렸습니다.',
+      safetyClass: 'staff_confirmed_reservation_acceptance',
+      grounding: 'staff_confirmation'
     }
   }, { autoSendEnabled: true }), {
     allowed: true,
     reason: 'staff_confirmed_reservation_acceptance',
     text: '네 감독님, 말씀 주신 구성으로 예약 확정해드렸습니다.',
     replyMode: 'auto_send',
-    confidence: 'high'
+    confidence: 'high',
+    safetyClass: 'staff_confirmed_reservation_acceptance',
+    grounding: 'staff_confirmation'
   });
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'faq', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).allowed, true);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
+});
+
+test('reply prose cannot grant auto-send without an explicit Hermes safety and grounding class', () => {
+  const base = {
+    classification: 'reservation',
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '네, 문의 내용 확인 후 안내드리겠습니다.'
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    }
+  };
+
+  assert.equal(canAutoSendCustomerAnswer(base, { autoSendEnabled: true }).reason, 'reply_safety_class_missing');
+  assert.deepEqual(canAutoSendCustomerAnswer({
+    ...base,
+    reply_decision: {
+      ...base.reply_decision,
+      safetyClass: 'simple_ack',
+      grounding: 'visible_conversation',
+      requiresRag: false
+    }
+  }, { autoSendEnabled: true }), {
+    allowed: true,
+    reason: 'simple_ack',
+    text: '네, 문의 내용 확인 후 안내드리겠습니다.',
+    replyMode: 'auto_send',
+    confidence: 'high',
+    safetyClass: 'simple_ack',
+    grounding: 'visible_conversation'
+  });
+});
+
+test('safe payment receipt acknowledgements can auto-send without confirming payment', () => {
+  const decision = {
+    classification: 'payment_check',
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    latest_customer_message_cluster: '김경은 이름으로 입금 했습니다. 확인 부탁드립니다!',
+    visible_messages_used: [
+      { sender: '민경', message: '김경은 이름으로 입금 했습니다. 확인 부탁드립니다!', time: '오후 4:14' }
+    ],
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '네, 입금 내역 확인해보겠습니다!',
+      safetyClass: 'payment_receipt_ack',
+      grounding: 'visible_conversation',
+      requiresRag: false
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    }
+  };
+
+  assert.deepEqual(canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }), {
+    allowed: true,
+    reason: 'payment_receipt_ack',
+    text: '네, 입금 내역 확인해보겠습니다!',
+    replyMode: 'auto_send',
+    confidence: 'high',
+    safetyClass: 'payment_receipt_ack',
+    grounding: 'visible_conversation'
+  });
+  assert.deepEqual(autoReplyRequiresRagSupport(decision, decision.reply_decision.text), {
+    required: false,
+    reason: 'payment_receipt_ack'
+  });
+  assert.equal(canAutoSendCustomerAnswer({
+    ...decision,
+    reply_decision: { ...decision.reply_decision, text: '네, 입금 확인 완료됐습니다!' }
+  }, { autoSendEnabled: true }).allowed, false);
+});
+
+test('staff-confirmed reservation acceptance skips mutable-policy RAG gate', () => {
+  const decision = {
+    classification: 'reservation',
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    latest_customer_message_cluster: '넵! 예약잡아주시면 감사드리겠습니다~',
+    latest_staff_message: '넵, 감독님 가능하십니다! 예약 잡아드릴까요?',
+    visible_messages_used: [
+      { sender: '성치훈', message: '성치훈 / 010-4772-4055 / 개인사업자 / 7월 1일 07:00 ~ 7월 2일 07:00', time: '오후 3:48' },
+      { sender: '빌리지님', message: '넵, 감독님 가능하십니다! 예약 잡아드릴까요?', time: '오후 4:00' },
+      { sender: '성치훈', message: '넵! 예약잡아주시면 감사드리겠습니다~', time: '오후 4:01' }
+    ],
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '넵 감독님, 예약 잡아드렸습니다!',
+      safetyClass: 'staff_confirmed_reservation_acceptance',
+      grounding: 'staff_confirmation',
+      requiresRag: false
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    }
+  };
+
+  assert.equal(canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }).reason, 'staff_confirmed_reservation_acceptance');
+  assert.deepEqual(autoReplyRequiresRagSupport(decision, decision.reply_decision.text), {
+    required: false,
+    reason: 'staff_confirmed_reservation_acceptance'
+  });
 });
 
 test('live quote re-request guidance can auto-send without treating it as a new quote task', () => {
@@ -2762,7 +3605,14 @@ test('live quote re-request guidance can auto-send without treating it as a new 
     visible_messages_used: [
       { sender: '고객', message: '장비 수정했는데 견적서 다시 보내주실 수 있나요?', time: '오후 2:00' }
     ],
-    reply_decision: { replyMode: 'auto_send', confidence: 'high', text: reply },
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: reply,
+      safetyClass: 'live_quote_link_guidance',
+      grounding: 'current_confirmed_policy',
+      requiresRag: false
+    },
     safety_checks: {
       kakao_conversation_opened: true,
       did_not_classify_from_preview_only: true,
@@ -2772,24 +3622,58 @@ test('live quote re-request guidance can auto-send without treating it as a new 
 
   assert.deepEqual(canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }), {
     allowed: true,
-    reason: 'live_quote_recheck_info',
+    reason: 'live_quote_link_guidance',
     text: reply,
     replyMode: 'auto_send',
-    confidence: 'high'
+    confidence: 'high',
+    safetyClass: 'live_quote_link_guidance',
+    grounding: 'current_confirmed_policy'
   });
   assert.deepEqual(autoReplyRequiresRagSupport(decision, reply), {
     required: false,
-    reason: 'live_quote_recheck_info'
+    reason: 'live_quote_link_guidance'
   });
 });
 
 test('autoReplyRequiresRagSupport skips RAG for pre-approved bankbook/business-registration file handoff', () => {
   assert.deepEqual(autoReplyRequiresRagSupport({
     classification: 'faq',
-    latest_customer_message_cluster: '통장 사본이랑 사업자등록증 보내주세요'
+    latest_customer_message_cluster: '통장 사본이랑 사업자등록증 보내주세요',
+    reply_decision: {
+      safetyClass: 'document_handoff',
+      grounding: 'visible_conversation',
+      requiresRag: false,
+      attachmentKeys: ['village_bankbook_copy', 'village_business_registration'],
+      alreadyDelivered: false
+    }
   }, '요청하신 통장 사본과 사업자등록증 전달드립니다.'), {
     required: false,
-    reason: 'standard_customer_document_assets'
+    reason: 'document_handoff'
+  });
+});
+
+test('RAG requirement comes from Hermes grounding metadata, not keywords or classification', () => {
+  assert.deepEqual(autoReplyRequiresRagSupport({
+    classification: 'faq',
+    reply_decision: {
+      safetyClass: 'simple_ack',
+      grounding: 'visible_conversation',
+      requiresRag: false
+    }
+  }, '주소를 확인해 보겠습니다.'), {
+    required: false,
+    reason: 'simple_ack'
+  });
+  assert.deepEqual(autoReplyRequiresRagSupport({
+    classification: 'reservation',
+    reply_decision: {
+      safetyClass: 'rag_grounded_answer',
+      grounding: 'retrieved_rag',
+      requiresRag: true
+    }
+  }, '확인된 안내입니다.'), {
+    required: true,
+    reason: 'rag_grounded_answer'
   });
 });
 
@@ -2811,7 +3695,7 @@ test('standard document auto-send only triggers from latest customer request, no
   };
 
   assert.equal(isCustomerDocumentAssetRequest(decision), false);
-  assert.equal(canAutoSendCustomerDocumentAssets(decision, { autoSendEnabled: true }).reason, 'not_latest_customer_document_request');
+  assert.equal(canAutoSendCustomerDocumentAssets(decision, { autoSendEnabled: true }).reason, 'document_handoff_not_ai_planned');
 });
 
 test('standard document auto-send is blocked after a staff document delivery message', () => {
@@ -2827,7 +3711,17 @@ test('standard document auto-send is blocked after a staff document delivery mes
     visible_messages_used: [
       { sender: '김예지', message: '사업자등록증이랑 통장 사본 부탁드립니다' },
       { sender: '빌리지님', message: '요청하신 통장 사본과 사업자등록증 전달드립니다.' }
-    ]
+    ],
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '요청하신 서류를 전달드립니다.',
+      safetyClass: 'document_handoff',
+      grounding: 'visible_conversation',
+      requiresRag: false,
+      attachmentKeys: ['village_bankbook_copy', 'village_business_registration'],
+      alreadyDelivered: true
+    }
   };
 
   assert.equal(customerDocumentAssetsAlreadySent(decision), true);
@@ -2855,10 +3749,17 @@ test('standard document auto-send does not treat customer tax-invoice business-r
   };
 
   assert.equal(isCustomerDocumentAssetRequest(decision), false);
-  assert.equal(canAutoSendCustomerDocumentAssets(decision, { autoSendEnabled: true }).reason, 'classification_not_customer_document_faq');
+  assert.equal(canAutoSendCustomerDocumentAssets(decision, { autoSendEnabled: true }).reason, 'document_handoff_not_ai_planned');
 });
 
-test('standard document auto-send allows explicit Village bankbook/business-registration request in latest turn', () => {
+test('standard document auto-send allows explicit Village bankbook/business-registration request in latest turn', (t) => {
+  const assetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'village-document-assets-'));
+  const assetPaths = [
+    path.join(assetDir, 'bankbook.jpeg'),
+    path.join(assetDir, 'business-registration.jpeg')
+  ];
+  for (const assetPath of assetPaths) fs.writeFileSync(assetPath, 'fixture');
+  t.after(() => fs.rmSync(assetDir, { recursive: true, force: true }));
   const decision = {
     classification: 'faq',
     kill_switch_observed: 'active',
@@ -2870,31 +3771,98 @@ test('standard document auto-send allows explicit Village bankbook/business-regi
     },
     visible_messages_used: [
       { sender: '김예지', message: '빌리지렌탈샵의 사업자 / 통장사본도 부탁드립니다' }
-    ]
+    ],
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '요청하신 통장 사본과 사업자등록증 전달드립니다.',
+      safetyClass: 'document_handoff',
+      grounding: 'visible_conversation',
+      requiresRag: false,
+      attachmentKeys: ['village_bankbook_copy', 'village_business_registration'],
+      alreadyDelivered: false
+    }
   };
 
   assert.equal(isCustomerDocumentAssetRequest(decision), true);
   assert.equal(canAutoSendCustomerDocumentAssets(decision, {
     autoSendEnabled: true,
-    customerDocumentAssetPaths: [
-      '/Users/village6k/.hermes/village-documents/customer-request-docs/village_woori_bankbook_copy.jpeg',
-      '/Users/village6k/.hermes/village-documents/customer-request-docs/village_business_registration_certificate.jpeg'
-    ]
-  }).reason, 'standard_customer_document_assets');
+    customerDocumentAssetPaths: assetPaths
+  }).reason, 'document_handoff');
+});
+
+test('document attachments require explicit Hermes attachment intent and never trigger from prose alone', (t) => {
+  const assetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'village-document-plan-'));
+  const assetPaths = [path.join(assetDir, 'bankbook.jpeg'), path.join(assetDir, 'business.jpeg')];
+  for (const assetPath of assetPaths) fs.writeFileSync(assetPath, 'fixture');
+  t.after(() => fs.rmSync(assetDir, { recursive: true, force: true }));
+
+  const proseOnly = {
+    classification: 'faq',
+    kill_switch_observed: 'active',
+    latest_customer_message_cluster: '통장 사본과 사업자등록증 보내주세요',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    }
+  };
+  assert.equal(isCustomerDocumentAssetRequest(proseOnly), false);
+  assert.equal(canAutoSendCustomerDocumentAssets(proseOnly, {
+    autoSendEnabled: true,
+    customerDocumentAssetPaths: assetPaths
+  }).allowed, false);
+
+  const planned = {
+    ...proseOnly,
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '요청하신 두 서류를 전달드립니다.',
+      safetyClass: 'document_handoff',
+      grounding: 'visible_conversation',
+      requiresRag: false,
+      attachmentKeys: ['village_bankbook_copy', 'village_business_registration'],
+      alreadyDelivered: false
+    }
+  };
+  assert.equal(isCustomerDocumentAssetRequest(planned), true);
+  assert.deepEqual(canAutoSendCustomerDocumentAssets(planned, {
+    autoSendEnabled: true,
+    customerDocumentAssetPaths: assetPaths
+  }), {
+    allowed: true,
+    reason: 'document_handoff',
+    text: '요청하신 두 서류를 전달드립니다.',
+    replyMode: 'auto_send',
+    confidence: 'high',
+    attachmentPaths: assetPaths.map((assetPath) => path.resolve(assetPath)),
+    safetyClass: 'document_handoff',
+    grounding: 'visible_conversation'
+  });
 });
 
 test('autoReplyRequiresRagSupport marks FAQ and policy/procedure replies for RAG verification', () => {
-  assert.deepEqual(autoReplyRequiresRagSupport({ classification: 'faq' }, '네, 주소 안내드릴게요.'), {
+  assert.deepEqual(autoReplyRequiresRagSupport({
+    classification: 'faq',
+    reply_decision: { safetyClass: 'current_policy_answer', grounding: 'current_confirmed_policy', requiresRag: false }
+  }, '네, 주소 안내드릴게요.'), {
     required: true,
-    reason: 'classification_faq'
+    reason: 'current_policy_answer'
   });
-  assert.deepEqual(autoReplyRequiresRagSupport({ classification: 'reservation' }, '네, 확인했습니다.'), {
+  assert.deepEqual(autoReplyRequiresRagSupport({
+    classification: 'reservation',
+    reply_decision: { safetyClass: 'simple_ack', grounding: 'visible_conversation', requiresRag: false }
+  }, '네, 확인했습니다.'), {
     required: false,
-    reason: 'not_policy_or_faq_auto_reply'
+    reason: 'simple_ack'
   });
-  assert.deepEqual(autoReplyRequiresRagSupport({ classification: 'reservation' }, '방문 수령 절차 안내드리겠습니다.'), {
+  assert.deepEqual(autoReplyRequiresRagSupport({
+    classification: 'reservation',
+    reply_decision: { safetyClass: 'current_policy_answer', grounding: 'current_confirmed_policy', requiresRag: false }
+  }, '방문 수령 절차 안내드리겠습니다.'), {
     required: true,
-    reason: 'policy_or_procedure_terms'
+    reason: 'current_policy_answer'
   });
 });
 
@@ -2907,11 +3875,11 @@ test('autoReplyRequiresRagSupport marks mutable policy FAQ for current-policy or
   });
   assert.deepEqual(autoReplyRequiresRagSupport({
     classification: 'faq',
-    latest_customer_message_cluster: '비학생인데 학생가 적용 가능한가요?'
+    latest_customer_message_cluster: '비학생인데 학생가 적용 가능한가요?',
+    reply_decision: { safetyClass: 'current_policy_answer', grounding: 'current_confirmed_policy', requiresRag: false }
   }, '학생가는 적용 어렵습니다.'), {
     required: true,
-    reason: 'mutable_policy_terms',
-    mutablePolicy: true
+    reason: 'current_policy_answer'
   });
 });
 
@@ -2984,7 +3952,8 @@ test('evaluateAutoReplyRagSupport allows owner-confirmed current policy FAQ with
     decision: {
       classification: 'faq',
       customer: { name: '최필립' },
-      latest_customer_message_cluster: '안녕하세요. 영업시간이 어떻게 되나요?'
+      latest_customer_message_cluster: '안녕하세요. 영업시간이 어떻게 되나요?',
+      reply_decision: { safetyClass: 'current_policy_answer', grounding: 'current_confirmed_policy', requiresRag: false }
     },
     replyText: '안녕하세요! 빌리지는 24시간 운영합니다.',
     askImpl: async () => {
@@ -3005,7 +3974,8 @@ test('evaluateAutoReplyRagSupport requires high-confidence retrieved RAG for FAQ
     decision: {
       classification: 'faq',
       customer: { name: '홍길동' },
-      latest_customer_message_cluster: '위치가 어디인가요?'
+      latest_customer_message_cluster: '위치가 어디인가요?',
+      reply_decision: { safetyClass: 'rag_grounded_answer', grounding: 'retrieved_rag', requiresRag: true }
     },
     job: { preview_text: '홍길동 위치가 어디인가요? 오후 2:30' },
     replyText: '빌리지는 서울 마포구 동교로 23길 32, 2층입니다.'
@@ -3040,7 +4010,8 @@ test('evaluateAutoReplyRagSupport allows owner-confirmed current policy auto-sen
     decision: {
       classification: 'faq',
       customer: { name: '최재형' },
-      latest_customer_message_cluster: '학생 할인은 몇 프로예요?'
+      latest_customer_message_cluster: '학생 할인은 몇 프로예요?',
+      reply_decision: { safetyClass: 'current_policy_answer', grounding: 'current_confirmed_policy', requiresRag: false }
     },
     replyText: '학생 할인은 30%입니다.',
     askImpl: async () => {
@@ -3066,7 +4037,8 @@ test('evaluateAutoReplyRagSupport blocks current policy mismatch and uses RAG fo
     decision: {
       classification: 'faq',
       customer: { name: '최재형' },
-      latest_customer_message_cluster: '학생 할인은 몇 프로예요?'
+      latest_customer_message_cluster: '학생 할인은 몇 프로예요?',
+      reply_decision: { safetyClass: 'current_policy_answer', grounding: 'current_confirmed_policy', requiresRag: false }
     },
     replyText: '학생 할인은 40%입니다.',
     askImpl: async () => {
@@ -3079,7 +4051,8 @@ test('evaluateAutoReplyRagSupport blocks current policy mismatch and uses RAG fo
     decision: {
       classification: 'faq',
       customer: { name: '홍길동' },
-      latest_customer_message_cluster: '보증금 있나요?'
+      latest_customer_message_cluster: '보증금 있나요?',
+      reply_decision: { safetyClass: 'rag_grounded_answer', grounding: 'retrieved_rag', requiresRag: true }
     },
     replyText: '보증금 안내드리겠습니다.',
     askImpl: async () => {
@@ -3108,6 +4081,29 @@ test('isAutoSendEligibleLiveJob allows unread same-day rows and blocks dated/bac
     preview_text: '중요 홍길동 네 감사합니다 오후 3:45',
     events: [{ reason: 'top_row_changed' }]
   }, { now }), {
+    eligible: true,
+    reason: 'top_row_live_time_format'
+  });
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    preview_text: '중요 김찬위 차가 많이 막혀서 좀 늦을거 같습니다! 죄송합니다 오후 4:28',
+    detectedAt: '2026-06-29T07:41:48.086Z',
+    events: [{ reason: 'top_row_changed' }]
+  }, { now: new Date('2026-06-29T07:49:35.920Z') }), {
+    eligible: true,
+    reason: 'top_row_live_time_format'
+  });
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    preview_text: '중요 김찬위 차가 많이 막혀서 좀 늦을거 같습니다! 죄송합니다 오후 4:28',
+    detectedAt: '2026-06-29T06:41:48.086Z',
+    events: [{ reason: 'top_row_changed' }]
+  }, { now: new Date('2026-06-29T07:49:35.920Z') }), {
+    eligible: false,
+    reason: 'top_row_time_outside_live_window'
+  });
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    preview_text: '중요 성치훈 성치훈 / 개인사업자 / 7월 1일 07:00 ~ 7월 2일 07:00 감사합니다! 오후 3:48',
+    events: [{ reason: 'top_row_changed' }]
+  }, { now: new Date('2026-06-29T06:50:00.000Z') }), {
     eligible: true,
     reason: 'top_row_live_time_format'
   });
@@ -3243,7 +4239,7 @@ test('findKakaoMessageInputElementIndex uses Kakao input form context instead of
   assert.equal(findKakaoSendButtonElementIndex(tree), 695);
 });
 
-test('sendKakaoMessageViaChrome clicks send button and verifies sent bubble', async () => {
+test('sendKakaoMessageViaChrome clicks send button and verifies sent bubble', { skip: process.platform !== 'darwin' }, async () => {
   const calls = [];
   let stateCalls = 0;
   const spawnImpl = (cmd, args) => {
@@ -3354,7 +4350,7 @@ test('sendKakaoMessageViaDevtools attaches local files through Chrome DevTools a
   assert.equal(evalExpressions.some((expression) => expression.includes('kakaoSendPendingAttachments')), true);
 });
 
-test('sendKakaoMessageViaChrome reactivates target window and retries disabled send button', async () => {
+test('sendKakaoMessageViaChrome reactivates target window and retries disabled send button', { skip: process.platform !== 'darwin' }, async () => {
   const calls = [];
   let stateCalls = 0;
   let clickCalls = 0;

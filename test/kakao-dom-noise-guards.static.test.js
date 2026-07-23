@@ -30,8 +30,26 @@ assert.match(
 
 assert.match(
   content,
-  /const structuralRow = el\.closest\('\[role="listitem"\], \[role="row"\], li'\)/,
-  'Kakao watcher must prefer whole chat row containers over nested message text fragments'
+  /\.ReactVirtualized__List\.list_board > \.ReactVirtualized__Grid__innerScrollContainer > li/,
+  'Kakao watcher must anchor discovery to real virtualized chat-list rows'
+);
+
+assert.doesNotMatch(
+  content,
+  /const structuralRow = el\.closest\('[^']*\[role="row"\]/,
+  'Kakao watcher must not mistake the whole virtualized row container for one customer chat'
+);
+
+assert.match(
+  content,
+  /input\[id\^="chat-select-"\]/,
+  'Kakao watcher must use the stable chat id exposed by the real list row'
+);
+
+assert.match(
+  content,
+  /customerName,/,
+  'Kakao watcher must pass structured customer identity to Hermes'
 );
 
 assert.match(
@@ -100,10 +118,10 @@ assert.match(
   'Bridge must detect unread rows explicitly'
 );
 
-assert.match(
+assert.doesNotMatch(
   bridge,
   /event\.raw\?\.unreadSignal === true \|\| event\.unreadSignal === true/,
-  'Bridge must prefer explicit unread signals over parsed date or time numbers'
+  'Bridge must not promote broad Badge-only unread signals without a visible unread count'
 );
 
 assert.match(
@@ -126,8 +144,14 @@ assert.match(
 
 assert.match(
   bridge,
-  /event\.reason === 'top_rows_backstop' \|\| event\.reason === 'top_row_changed'\) return true;/,
-  'Bridge must queue unread top-row/backstop events even when unreadSignal is absent'
+  /if \(event\.reason === 'top_rows_backstop'\) return false;/,
+  'Bridge must not queue a generic read backstop row without a visible unread count'
+);
+
+assert.match(
+  bridge,
+  /return event\.reason === 'top_row_changed'\s*&& isLiveTopRowPreview\(event\.previewText\);/,
+  'Bridge may queue only a genuinely live top-row change when an unread count is absent'
 );
 
 assert.match(
@@ -247,25 +271,49 @@ assert.match(
 assert.match(
   bridge,
   /function shouldSkipWorkerForPreview\(event = \{\}\)/,
-  'Bridge must keep obvious staff/outbound and terminal thanks rows out of the worker queue'
+  'Bridge must expose the semantic prefilter boundary explicitly'
 );
 
-assert.match(
+assert.doesNotMatch(
   bridge,
   /function isThanksOnlyTerminalPreview\(text\)/,
-  'Bridge must skip thanks-only unread rows without spending a live AI worker run'
+  'Bridge must not replace Hermes judgment with a thanks-only text heuristic'
 );
 
 assert.match(
   bridge,
-  /ignored-low-value-events\.ndjson/,
-  'Bridge must record low-value ignored rows for auditability'
+  /void event;\s*return '';/,
+  'Every structurally valid message preview must reach Hermes for semantic judgment'
 );
 
-assert.match(
+assert.doesNotMatch(
+  bridge,
+  /네\|넵\|네네\|넵넵[\s\S]*변경해\\s\*드리겠습니다/,
+  'Bridge must not classify staff/customer intent from preview keywords before Hermes opens the room'
+);
+
+assert.doesNotMatch(
   bridge,
   /non_actionable_failure_preview/,
-  'Bridge must not create urgent failure cards for non-actionable timeout previews'
+  'Bridge must not suppress a failed AI read based on preview semantics'
+);
+
+assert.match(
+  bridge,
+  /function roomKeyForDebounce\(event = \{\}\)/,
+  'Bridge must preserve stable Kakao chat identity through debounce grouping'
+);
+
+assert.match(
+  bridge,
+  /const queuedWorkerSlotsByRoom = new Map\(\)/,
+  'Bridge must coalesce queued reads for the same room instead of starving Hermes with duplicates'
+);
+
+assert.match(
+  bridge,
+  /superseded_by_newer_room_event/,
+  'Bridge must audit same-room jobs superseded by a newer full-room AI read'
 );
 
 assert.match(
@@ -349,19 +397,25 @@ assert.match(
 assert.match(
   content,
   /topRowsBackstopIntervalMs: 60000/,
-  'Watcher must periodically re-emit visible recent rows so manually-read stable chats are inspected'
+  'Watcher must periodically re-check visible rows for explicit unread signals'
 );
 
 assert.match(
   content,
   /signature === STATE\.lastTopRowsSignature && !backstopDue/,
-  'Watcher must not skip the periodic backstop just because the visible chat list is unchanged'
+  'Watcher must not skip the explicit-unread backstop just because the visible chat list is unchanged'
 );
 
 assert.match(
   content,
-  /const readBackstop = backstopDue \? currentRows : \[\];/,
-  'Watcher must include read visible rows in bounded periodic catch-up scans'
+  /const unreadBackstop = currentRows\.filter\(\(row\) => hasUnreadSignal\(row\.row, row\.text\)\);/,
+  'Watcher backstop must retain only rows with an explicit unread signal'
+);
+
+assert.match(
+  content,
+  /const readBackstop = \[\];/,
+  'Watcher must not periodically re-post every read row as a new customer event'
 );
 
 assert.match(
@@ -402,8 +456,14 @@ assert.match(
 
 assert.match(
   bridge,
-  /function cleanupIdleKakaoConversationTabs\(reason = 'interval'\)/,
+  /function cleanupIdleKakaoConversationTabs\(reason = 'interval', \{ allowQueued = false \} = \{\}\)/,
   'Bridge must clean up individual Kakao conversation tabs when the worker is idle'
+);
+
+assert.match(
+  bridge,
+  /cleanupIdleKakaoConversationTabs\('worker_finished', \{ allowQueued: true \}\)/,
+  'Bridge must close worker-opened conversation tabs even when another AI read is queued'
 );
 
 assert.match(

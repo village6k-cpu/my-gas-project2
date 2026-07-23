@@ -13,11 +13,28 @@ test('Slack follow-up agent-card delivery is opt-in only', () => {
   assert.match(worker, /스케쥴-agent/);
   assert.match(worker, /서류발송-agent/);
   assert.match(worker, /정산-agent/);
+  assert.match(worker, /재고관리-agent/);
   assert.match(worker, /기타문의/);
   assert.match(worker, /routeFollowUpToSlack/);
   assert.match(worker, /chat\.postMessage/);
   assert.match(worker, /SLACK_AGENT_CARD_DELIVERY_ENABLED/);
   assert.doesNotMatch(worker, /slackFollowUpEnabled:\s*process\.env\.SLACK_FOLLOW_UP_ENABLED\s*===\s*'1'/);
+});
+
+test('Bridge health exposes follow-up row and Slack card delivery gates', () => {
+  assert.match(bridge, /followUpRowsEnabled:\s*process\.env\.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0'/);
+  assert.match(bridge, /slackCardDeliveryEnabled:\s*process\.env\.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1'/);
+  assert.match(bridge, /slackBotTokenPresent:\s*Boolean\(CONFIG\.slackBotToken\)/);
+  assert.match(bridge, /slackChannels:\s*CONFIG\.slackChannels/);
+});
+
+test('Bridge failure follow-ups are delivered to Slack, not only inserted into Supabase', () => {
+  assert.match(bridge, /import \{ deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows \}/);
+  assert.match(bridge, /slackFollowUpEnabled:\s*CONFIG\.slackCardDeliveryEnabled/);
+  assert.match(bridge, /slackBotToken:\s*CONFIG\.slackBotToken/);
+  assert.match(bridge, /const upsertResult = await upsertFollowUpRows\(followUpConfig\(\), \[row\]\)/);
+  assert.match(bridge, /deliverSlackFollowUpRows\(followUpConfig\(\), upsertResult\.rows\)/);
+  assert.match(bridge, /worker_failure_followup_slack_delivery/);
 });
 
 test('Live worker loads Hermes Slack token before delivering follow-up cards', () => {
