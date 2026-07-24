@@ -2709,6 +2709,30 @@ function getDashboardReturnCheckableItems_(equipments) {
   return out;
 }
 
+/** taken_qty 도입일 이전 거래만 반납 시점의 1회 기준선 복구를 허용한다. */
+function isDashboardLegacyCheckoutBaselineTrade_(tid) {
+  tid = String(tid || '').trim();
+  return /^\d{6}-\d{3}$/.test(tid) && tid.substring(0, 6) <= '260714';
+}
+
+function dashboardReturnIncompleteItems_(items, returnCounts) {
+  return (items || []).filter(function(eq) {
+    var expected = Number(String(eq.qty || 1).replace(/[^0-9.]/g, '')) || 1;
+    var count = returnCounts && returnCounts[eq.scheduleId] || {};
+    var accounted = Number(count.good || 0) + Number(count.damaged || 0) + Number(count.lost || 0);
+    return accounted !== expected;
+  }).map(function(eq) {
+    var count = returnCounts && returnCounts[eq.scheduleId] || {};
+    var accounted = Number(count.good || 0) + Number(count.damaged || 0) + Number(count.lost || 0);
+    return {
+      scheduleId: eq.scheduleId,
+      name: eq.name,
+      expected: Number(String(eq.qty || 1).replace(/[^0-9.]/g, '')) || 1,
+      accounted: accounted
+    };
+  });
+}
+
 /**
  * 서버 최종 방어선: 모든 실제 품목에 명시적 반납 체크가 있어야 계약을 닫는다.
  * 클라이언트 화면을 우회한 호출과 레거시 화면에도 동일하게 적용된다.
@@ -2761,7 +2785,51 @@ function assertDashboardReturnComplete_(tid, props) {
   currentCheckable.forEach(function(eq) {
     currentScheduleIds[String(eq.scheduleId || '').trim()] = true;
   });
-  var recordedBaselineItems = (durable.scheduleItems || []).filter(function(item) {
+  var allRecordedBaselineItems = (durable.scheduleItems || []).filter(function(item) {
+    return item.checkout_state !== 'excluded' && Number(item.taken_qty || 0) > 0;
+  });
+  var recordedBaselineItems = allRecordedBaselineItems.filter(function(item) {
+    return !!currentScheduleIds[String(item.schedule_id || '').trim()];
+  });
+
+  // taken_qty 도입 전 거래는 반출완료를 누르지 않은 채 운영된 건이 있다. 미래 거래나
+  // 일부 기준선만 깨진 거래에는 이 복구를 절대 적용하지 않는다. 구형 거래이면서 기준선이
+  // 완전히 0건이고, 직원이 현재 모든 실제 품목의 정상/파손/분실 수량을 맞춘 경우에만
+  // 그 확인값을 1회 기준선으로 고정한다.
+  if (!allRecordedBaselineItems.length && isDashboardLegacyCheckoutBaselineTrade_(tid)) {
+    var legacyIncomplete = dashboardReturnIncompleteItems_(currentCheckable, durable.returnCounts);
+    if (legacyIncomplete.length) {
+      return {
+        error: '반납완료 차단: 미확인 품목 ' + legacyIncomplete.length + '건 — ' +
+          legacyIncomplete.slice(0, 5).map(function(eq) { return eq.name; }).join(', '),
+        incomplete: legacyIncomplete
+      };
+    }
+    var legacyBaseline = typeof supaCaptureCheckoutBaseline_ === 'function'
+      ? supaCaptureCheckoutBaseline_(tid, currentCheckable, true)
+      : { ok: false, error: 'Supabase 반출 기준선 함수 없음' };
+    if (!legacyBaseline || !legacyBaseline.ok) {
+      return {
+        error: '반납완료 차단: 레거시 반출 기준선 복구 실패 — ' +
+          String(legacyBaseline && legacyBaseline.error || '저장 실패')
+      };
+    }
+    durable = supaGetTradeReturnCounts_(tid);
+    if (!durable || !durable.ok) {
+      return {
+        error: '반납완료 차단: 복구한 반출 기준선을 다시 확인하지 못했습니다 — ' +
+          String(durable && durable.error || '조회 실패')
+      };
+    }
+    allRecordedBaselineItems = (durable.scheduleItems || []).filter(function(item) {
+      return item.checkout_state !== 'excluded' && Number(item.taken_qty || 0) > 0;
+    });
+    recordedBaselineItems = allRecordedBaselineItems.filter(function(item) {
+      return !!currentScheduleIds[String(item.schedule_id || '').trim()];
+    });
+  }
+
+  recordedBaselineItems = recordedBaselineItems.filter(function(item) {
     return item.checkout_state !== 'excluded' &&
       Number(item.taken_qty || 0) > 0 &&
       !!currentScheduleIds[String(item.schedule_id || '').trim()];
@@ -2801,21 +2869,7 @@ function assertDashboardReturnComplete_(tid, props) {
       identityChanged: baselineStructureChanged
     };
   }
-  var incomplete = checkable.filter(function(eq) {
-    var expected = Number(String(eq.qty || 1).replace(/[^0-9.]/g, '')) || 1;
-    var count = durable.returnCounts && durable.returnCounts[eq.scheduleId] || {};
-    var accounted = Number(count.good || 0) + Number(count.damaged || 0) + Number(count.lost || 0);
-    return accounted !== expected;
-  }).map(function(eq) {
-    var count = durable.returnCounts && durable.returnCounts[eq.scheduleId] || {};
-    var accounted = Number(count.good || 0) + Number(count.damaged || 0) + Number(count.lost || 0);
-    return {
-      scheduleId: eq.scheduleId,
-      name: eq.name,
-      expected: Number(String(eq.qty || 1).replace(/[^0-9.]/g, '')) || 1,
-      accounted: accounted
-    };
-  });
+  var incomplete = dashboardReturnIncompleteItems_(checkable, durable.returnCounts);
 
   if (incomplete.length) {
     return {
