@@ -9657,6 +9657,11 @@ function _availabilityEquipNameKey_(value) {
   return normalized.replace(/[^0-9a-z가-힣]/gi, "");
 }
 
+/**
+ * 세트마스터의 고객용 이름과 장비마스터 이름이 제조사 접두어만 다른 경우
+ * (예: 아마란 F21C ↔ 어퓨쳐 아마란 F21C) 유일한 본체를 찾는다.
+ * 모호한 부분 일치는 사용하지 않는다.
+ */
 function findEquipmentForSetHeader_(name, equipSheet) {
   var exact = findEquipment(name, equipSheet);
   if (exact) return { name: String(name || "").trim(), total: exact.total, 단가: exact.단가 };
@@ -10058,6 +10063,10 @@ function expandSetRows(sheet, setRow, reqID, components, qty) {
   }
 }
 
+/**
+ * 세트마스터 B열에 여러 동봉품을 한 셀로 적은 행을 판별한다.
+ * 실제 재고 두 종일 수 있는 짧은 숫자 목록(예: 18-35 / 50-100)은 보수적으로 제외한다.
+ */
 function _isCompositeSetAccessoryManifest_(name) {
   var value = String(name || "").trim();
   if (!value) return false;
