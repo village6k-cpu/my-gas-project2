@@ -32,6 +32,14 @@ type ConfirmEquipmentRow = Equip & {
   groupName?: string;
   componentCount?: number;
 };
+type EditableConfirmEquipment = {
+  이름: string;
+  수량: string;
+  비고: string;
+  결과: string;
+  제외: boolean;
+  role: ConfirmEquipmentRole;
+};
 type ExcludedConfirmItem = { 장비명: string; 비고: string; 순번: number };
 type Req = {
   reqID: string;
@@ -923,17 +931,23 @@ function EditPanel({
   const [outT, setOutT] = useState(req.반출시간 || out.t);
   const [retD, setRetD] = useState(ret.d);
   const [retT, setRetT] = useState(req.반납시간 || ret.t);
-  // 세트는 세트명(헤더)으로 보존하고 구성품은 제외 — 저장 시 GAS가 세트를 다시 전개하므로
-  // 구성품을 단품으로 보내면 세트 구조·세트 단가가 소실된다
-  const [equips, setEquips] = useState<{ 이름: string; 수량: string }[]>(
+  // 현재 선택된 세트 구성품까지 그대로 편집·보존한다. 대표 세트명만 다시 보내 GAS에서
+  // 재전개하면 작업자가 골라 둔 구체 모델이 세트마스터 기본값으로 되돌아간다.
+  const [equips, setEquips] = useState<EditableConfirmEquipment[]>(
     buildConfirmEquipmentRows(req.장비목록 || [])
-      .filter((r) => r.role !== "set-component")
-      .map((r) => ({ 이름: r.장비명, 수량: String(r.수량 || 1) })),
+      .map((r) => ({
+        이름: r.장비명,
+        수량: String(r.수량 || 1),
+        비고: String(r.비고 || ""),
+        결과: String(r.결과 || ""),
+        제외: !!r.제외,
+        role: r.role,
+      })),
   );
   const catalog = useEquipmentCatalog();
 
   const setEq = (i: number, k: "이름" | "수량", v: string) => setEquips((prev) => prev.map((e, j) => (j === i ? { ...e, [k]: v } : e)));
-  const addEq = () => setEquips((prev) => [...prev, { 이름: "", 수량: "1" }]);
+  const addEq = () => setEquips((prev) => [...prev, { 이름: "", 수량: "1", 비고: "", 결과: "", 제외: false, role: "single" }]);
   const delEq = (i: number) => setEquips((prev) => prev.filter((_, j) => j !== i));
 
   // 저장은 패널을 즉시 닫고 편집 큐가 뒤에서 처리한다 — 시트 반영·재확인(수 초~수십 초)을
@@ -951,7 +965,13 @@ function EditPanel({
       반출시간: outT,
       반납일: retD,
       반납시간: retT,
-      장비: cleanEquips.map((e) => ({ 이름: e.이름.trim(), 수량: e.수량 })),
+      장비: cleanEquips.map((e) => ({
+        이름: e.이름.trim(),
+        수량: e.수량,
+        비고: e.비고,
+        결과: e.결과 === "세트" ? "세트" : "",
+        제외: e.제외,
+      })),
     };
     if (skip) args.skipCheck = true; // 가용확인 생략(등록 시 자동 처리)
     const localPatch = (r: Req): Req => ({
@@ -967,10 +987,10 @@ function EditPanel({
       장비목록: cleanEquips.map((e) => ({
         장비명: e.이름.trim(),
         수량: Number(e.수량) || 1,
-        결과: "⏳",
+        결과: e.결과 === "세트" ? "세트" : "⏳",
         상세: skip ? "등록 시 자동 확인" : "재확인 중",
-        비고: "",
-        제외: false,
+        비고: e.비고,
+        제외: e.제외,
       })),
     });
     onClose();
@@ -1014,7 +1034,9 @@ function EditPanel({
             </div>
             <div className="space-y-1.5">
               {equips.map((e, i) => (
-                <div key={i} className="flex items-center gap-1.5">
+                <div key={i} className={`flex items-center gap-1.5 ${e.role === "set-component" ? "pl-4" : ""}`}>
+                  {e.role === "set-component" && <span className="shrink-0 text-[13px] text-brand-500">↳</span>}
+                  {e.role === "set-header" && <span className="shrink-0 rounded bg-brand-50 px-1.5 py-1 text-[10px] font-extrabold text-brand-700">세트</span>}
                   <EquipNameInput value={e.이름} onChange={(v) => setEq(i, "이름", v)} names={catalog.names} placeholder="장비명" />
                   {/* 수량칸은 고정폭. 인라인 style로 .inp의 width:100%를 덮어써야 장비명칸이 0으로 찌그러지지 않는다. */}
                   <input value={e.수량} onChange={(ev) => setEq(i, "수량", ev.target.value)} className="inp text-center" style={{ width: "3.25rem", flex: "0 0 3.25rem" }} inputMode="numeric" aria-label="수량" />

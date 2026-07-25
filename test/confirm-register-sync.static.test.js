@@ -309,7 +309,7 @@ assert(
 );
 console.log('audit-round-9 checks OK');
 
-// ── 감사 10차: 확인요청 편집이 세트 구조를 파괴하지 않도록 ──
+// ── 감사 10차: 확인요청 편집이 세트 구조·선택 구성품을 모두 보존하도록 ──
 assert(
   read('sheetAPI.js').includes('비고: String(data[i][16] || "")'),
   'list API must expose the Q-column set-component marker'
@@ -317,8 +317,9 @@ assert(
 const confirmView10 = read('apps/today-dashboard/components/ConfirmView.tsx');
 assert(
   confirmView10.includes('markedComponent') &&
-    /buildConfirmEquipmentRows\(req\.장비목록 \|\| \[\]\)[\s\S]{0,200}role !== "set-component"/.test(confirmView10),
-  'edit modal must keep sets as set-name rows and drop components (GAS re-expands), with marker-based roles'
+    /buildConfirmEquipmentRows\(req\.장비목록 \|\| \[\]\)[\s\S]{0,260}\.map\(\(r\) => \(\{[\s\S]{0,220}비고: String\(r\.비고/.test(confirmView10) &&
+    !/buildConfirmEquipmentRows\(req\.장비목록 \|\| \[\]\)[\s\S]{0,200}role !== "set-component"/.test(confirmView10),
+  'edit modal must keep both set headers and the exact selected components, with marker-based roles'
 );
 console.log('audit-round-10 checks OK');
 

@@ -30,7 +30,8 @@ assert(
 assert(
   /var 할인유형 = req\.할인유형 !== undefined \? req\.할인유형 : origFirst\[12\];/.test(backend) &&
     /var 비고 = req\.비고 !== undefined \? req\.비고 : origFirst\[16\];/.test(backend) &&
-    /j === 0 \? 할인유형 : "", "", "", "",\s*\n\s*j === 0 \? 비고 : "",/.test(backend),
+    /var itemNote = items\[j\]\.비고 !== undefined[\s\S]{0,140}\(j === 0 \? 비고 : ""\);/.test(backend) &&
+    /j === 0 \? 할인유형 : "", "", itemStatus, "",\s*\n\s*itemNote,/.test(backend),
   '#10 updateRequest must preserve 할인유형(M idx12) and 비고(Q idx16) instead of blanking them'
 );
 

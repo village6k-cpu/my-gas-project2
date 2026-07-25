@@ -9001,15 +9001,23 @@ function updateRequest(req) {
 
     for (var j = 0; j < items.length; j++) {
       var row = startRow + j;
+      // 수정창은 현재 선택된 세트 구성품을 모두 보낸다. I열의 세트 헤더와 Q열의
+      // "[세트]..." 소속 마커를 같이 복원해야 재확인·등록 때 구성품이 단품으로
+      // 풀리거나 세트마스터 기본 구성으로 되돌아가지 않는다.
+      var itemResult = String(items[j].결과 || "").trim() === "세트" ? "세트" : "";
+      var itemNote = items[j].비고 !== undefined
+        ? String(items[j].비고 || "")
+        : (j === 0 ? 비고 : "");
+      var itemStatus = items[j].제외 === true ? "제외" : "";
       var rowData = [
         req.reqID,
         j === 0 ? 반출일 : "", j === 0 ? 반출시간 : "",
         j === 0 ? 반납일 : "", j === 0 ? 반납시간 : "",
         items[j].이름, items[j].수량 || 1,
-        "", "", "",
+        "", itemResult, "",
         j === 0 ? 예약자명 : "", j === 0 ? 연락처 : "",
-        j === 0 ? 할인유형 : "", "", "", "",
-        j === 0 ? 비고 : "",
+        j === 0 ? 할인유형 : "", "", itemStatus, "",
+        itemNote,
         j === 0 ? 추가요청 : ""
       ];
       // 날짜/시간(B~E)은 텍스트로 고정 — 시트 타임존이 Asia/Seoul과 다르면
