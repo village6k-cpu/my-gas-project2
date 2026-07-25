@@ -1096,10 +1096,17 @@ function InlineItemEditor({
 
   // 저장은 즉시 완료된 것처럼 동작한다 — 시트 반영·품목 재확인은 편집 큐가 뒤에서 처리하고
   // 카드에 '저장 중…' 칩이 떠 있는 동안 결과(⏳)가 서버 기준으로 갱신된다.
-  const save = () => {
+  const save = (skipCheck = false) => {
     const q = Number(qty);
     if (!name.trim() || !Number.isFinite(q) || q < 1) {
       setErr("이름과 1 이상의 수량을 입력하세요");
+      return;
+    }
+    if (skipCheck) {
+      queueSave(
+        { 새이름: name.trim(), 수량: q, skipCheck: true },
+        { 장비명: name.trim(), 수량: q, 결과: "", 상세: "가용확인 생략" },
+      );
       return;
     }
     queueSave({ 새이름: name.trim(), 수량: q }, { 장비명: name.trim(), 수량: q, 결과: "⏳", 상세: "재확인 중" });
@@ -1119,8 +1126,11 @@ function InlineItemEditor({
       </div>
       {err && <p className="mt-1 text-[12px] font-bold text-attention-fg">{err}</p>}
       <div className="mt-2 flex flex-wrap gap-1.5">
-        <button onClick={save} className="tap min-h-8 flex-[2] rounded-lg bg-brand-600 px-2 text-[12px] font-extrabold text-white">
+        <button onClick={() => save()} className="tap min-h-8 flex-[2] rounded-lg bg-brand-600 px-2 text-[12px] font-extrabold text-white">
           저장 + 이 품목만 재확인
+        </button>
+        <button onClick={() => save(true)} className="tap min-h-8 flex-[2] rounded-lg bg-brand-50 px-2 text-[12px] font-extrabold text-brand-700 ring-1 ring-brand-200">
+          가용확인 없이 저장
         </button>
         <button onClick={onCancel} className="tap min-h-8 flex-1 rounded-lg bg-white px-2 text-[12px] font-extrabold text-ink-soft ring-1 ring-line">
           취소

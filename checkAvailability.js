@@ -8868,7 +8868,7 @@ function normalizeConfirmRequestDates() {
 /**
  * 확인요청 품목 한 행만 수정 — 이름/수량 변경 시 그 행만 가용성 재확인, 제외 토글 지원.
  * 오늘 대시보드의 품목 단위 편집과 같은 UX를 확인요청 단계에 제공한다.
- * req: { reqID, 장비명, 비고?, 순번?, 새이름?, 수량?, 제외?: true|false }
+ * req: { reqID, 장비명, 비고?, 순번?, 새이름?, 수량?, 제외?: true|false, skipCheck?: true }
  *  - 비고/순번: 같은 장비명이 여러 행일 때 정확한 행 지정 (비고=Q열 세트마커, 순번=동명 n번째)
  *  - 제외 마커는 "보류"가 아닌 "제외" — registerByReqID 재등록 리셋이 보류는 지우기 때문
  * 세트 구성품(Q열 "[세트]..." 행)도 동일하게 동작한다.
@@ -8918,16 +8918,24 @@ function updateRequestItem(req) {
 
   var reChecked = false;
   if (changed) {
-    // 이 행의 결과만 비우면 processByReqID가 결과 없는 행만 재확인 (다른 품목 결과 보존,
-    // 세트명으로 바꾼 경우 펼침/고아 구성품 정리도 기존 로직이 처리)
+    // 이름/수량이 바뀌었는데 이전 가용 결과를 남기면 거짓 정보가 되므로 I/J는 항상 초기화한다.
     sheet.getRange(target, 9, 1, 2).clearContent(); // I:결과, J:상세
-    SpreadsheetApp.flush();
-    processByReqID(sheet, target);
-    reChecked = true;
+    if (req.skipCheck === true) {
+      // 작업자가 재고를 이미 아는 경우 저장만 한다. I열은 비워 두어 이후 확인/등록 경로가
+      // 필요할 때 새 값으로 판정할 수 있게 하고, J열에 현재 상태만 설명한다.
+      sheet.getRange(target, 10).setValue("가용확인 생략");
+      SpreadsheetApp.flush();
+    } else {
+      SpreadsheetApp.flush();
+      // 결과 없는 이 행만 재확인한다. 다른 품목 결과는 보존하고, 세트명 변경 시
+      // 펼침/고아 구성품 정리는 기존 processByReqID가 처리한다.
+      processByReqID(sheet, target);
+      reChecked = true;
+    }
   } else {
     SpreadsheetApp.flush();
   }
-  return { status: "OK", row: target, reChecked: reChecked };
+  return { status: "OK", row: target, reChecked: reChecked, skippedCheck: changed && req.skipCheck === true };
 }
 
 

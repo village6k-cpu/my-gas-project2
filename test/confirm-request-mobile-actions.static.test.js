@@ -63,8 +63,9 @@ assert(
   /function InlineItemEditor/.test(view) &&
     /runFunc\("updateRequestItem"/.test(view) &&
     /저장 \+ 이 품목만 재확인/.test(view) &&
+    /가용확인 없이 저장/.test(view) &&
     /제외 해제 \(다시 등록 대상에 포함\)/.test(view),
-  'inline equipment editing must preserve the same single-row update and exclude controls as the old item sheet'
+  'inline equipment editing must support recheck, save-without-check, cancel, and exclude controls'
 );
 
 assert(
