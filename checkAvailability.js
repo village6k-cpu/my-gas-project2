@@ -2715,6 +2715,22 @@ function isDashboardLegacyCheckoutBaselineTrade_(tid) {
   return /^\d{6}-\d{3}$/.test(tid) && tid.substring(0, 6) <= '260714';
 }
 
+/**
+ * 기준선이 통째로 누락된 거래의 안전한 1회 복구 조건.
+ * 구형 거래는 기존 정책을 유지하고, 신규 거래는 반출완료 시각과 모든 현재 실제 품목의
+ * 명시적 반출 체크가 함께 남아 있을 때만 복구한다. 일부 기준선이 남은 거래에는 호출하지 않는다.
+ */
+function canDashboardRecoverMissingCheckoutBaseline_(tid, props, currentCheckable) {
+  if (isDashboardLegacyCheckoutBaselineTrade_(tid)) return true;
+  if (getDashboardPropertyValue_(props, 'setupDone_' + tid) !== '1') return false;
+  if (!String(getDashboardPropertyValue_(props, 'setupDoneAt_' + tid) || '').trim()) return false;
+  if (!currentCheckable || !currentCheckable.length) return false;
+  return currentCheckable.every(function(eq) {
+    var scheduleId = String(eq.scheduleId || '').trim();
+    return !!scheduleId && getDashboardPropertyValue_(props, 'itemCheck_' + scheduleId + '_checkout') === '1';
+  });
+}
+
 function dashboardReturnIncompleteItems_(items, returnCounts) {
   return (items || []).filter(function(eq) {
     var expected = Number(String(eq.qty || 1).replace(/[^0-9.]/g, '')) || 1;
@@ -2792,26 +2808,26 @@ function assertDashboardReturnComplete_(tid, props) {
     return !!currentScheduleIds[String(item.schedule_id || '').trim()];
   });
 
-  // taken_qty 도입 전 거래는 반출완료를 누르지 않은 채 운영된 건이 있다. 미래 거래나
-  // 일부 기준선만 깨진 거래에는 이 복구를 절대 적용하지 않는다. 구형 거래이면서 기준선이
-  // 완전히 0건이고, 직원이 현재 모든 실제 품목의 정상/파손/분실 수량을 맞춘 경우에만
-  // 그 확인값을 1회 기준선으로 고정한다.
-  if (!allRecordedBaselineItems.length && isDashboardLegacyCheckoutBaselineTrade_(tid)) {
-    var legacyIncomplete = dashboardReturnIncompleteItems_(currentCheckable, durable.returnCounts);
-    if (legacyIncomplete.length) {
+  // 기준선이 완전히 0건인 경우에만 복구한다. 구형 거래이거나, 신규 거래라도 반출완료 시각과
+  // 모든 실제 품목의 명시적 반출 체크가 남아 있고 반납 수량까지 정확히 맞아야 한다.
+  // 일부 기준선만 깨진 거래는 이 분기에 들어오지 않아 계속 실패-폐쇄한다.
+  if (!allRecordedBaselineItems.length &&
+      canDashboardRecoverMissingCheckoutBaseline_(tid, props, currentCheckable)) {
+    var recoveryIncomplete = dashboardReturnIncompleteItems_(currentCheckable, durable.returnCounts);
+    if (recoveryIncomplete.length) {
       return {
-        error: '반납완료 차단: 미확인 품목 ' + legacyIncomplete.length + '건 — ' +
-          legacyIncomplete.slice(0, 5).map(function(eq) { return eq.name; }).join(', '),
-        incomplete: legacyIncomplete
+        error: '반납완료 차단: 미확인 품목 ' + recoveryIncomplete.length + '건 — ' +
+          recoveryIncomplete.slice(0, 5).map(function(eq) { return eq.name; }).join(', '),
+        incomplete: recoveryIncomplete
       };
     }
-    var legacyBaseline = typeof supaCaptureCheckoutBaseline_ === 'function'
+    var recoveredBaseline = typeof supaCaptureCheckoutBaseline_ === 'function'
       ? supaCaptureCheckoutBaseline_(tid, currentCheckable, true)
       : { ok: false, error: 'Supabase 반출 기준선 함수 없음' };
-    if (!legacyBaseline || !legacyBaseline.ok) {
+    if (!recoveredBaseline || !recoveredBaseline.ok) {
       return {
-        error: '반납완료 차단: 레거시 반출 기준선 복구 실패 — ' +
-          String(legacyBaseline && legacyBaseline.error || '저장 실패')
+        error: '반납완료 차단: 반출 기준선 복구 실패 — ' +
+          String(recoveredBaseline && recoveredBaseline.error || '저장 실패')
       };
     }
     durable = supaGetTradeReturnCounts_(tid);

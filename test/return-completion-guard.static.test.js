@@ -104,9 +104,22 @@ test('기준선 도입 전 거래는 전 품목 수량 확인 뒤에만 기준�
   assert.match(gas, /260714/);
   assert.match(
     gas,
-    /function assertDashboardReturnComplete_[\s\S]{0,7000}legacyIncomplete[\s\S]{0,2200}supaCaptureCheckoutBaseline_/
+    /function assertDashboardReturnComplete_[\s\S]{0,7000}recoveryIncomplete[\s\S]{0,2200}supaCaptureCheckoutBaseline_/
   );
-  assert.match(gas, /레거시 반출 기준선 복구 실패/);
+  assert.match(gas, /반출 기준선 복구 실패/);
+});
+
+test('신규 거래도 반출완료와 전 품목 반출 체크가 증명되면 누락 기준선을 복구한다', () => {
+  const gas = read('checkAvailability.js');
+  assert.match(gas, /function canDashboardRecoverMissingCheckoutBaseline_/);
+  assert.match(
+    gas,
+    /canDashboardRecoverMissingCheckoutBaseline_[\s\S]{0,1800}setupDone_[\s\S]{0,1800}itemCheck_[\s\S]{0,1200}_checkout/
+  );
+  assert.match(
+    gas,
+    /function assertDashboardReturnComplete_[\s\S]{0,7000}canDashboardRecoverMissingCheckoutBaseline_[\s\S]{0,2400}supaCaptureCheckoutBaseline_/
+  );
 });
 
 test('반출 뒤에도 예약 장비명·수량 수정과 품목 삭제를 허용하고 범용 쓰기는 보호한다', () => {
