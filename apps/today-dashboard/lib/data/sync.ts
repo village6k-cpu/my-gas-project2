@@ -295,6 +295,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
     customerName: it.name || base.customerName,
     customerPhone: it.tel || base.customerPhone,
     company: it.company || base.company,
+    discountType: it.discountType || base.discountType,
     contractStatus: it.contractStatus || base.contractStatus,
     setupDone: !!it.setupDone,
     returnDone: !!it.returnDone,

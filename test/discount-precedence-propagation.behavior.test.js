@@ -10,6 +10,10 @@ const kakaoInput = fs.readFileSync(
   path.resolve(__dirname, '..', 'apps', 'today-dashboard', 'components', 'KakaoReservationInput.tsx'),
   'utf8'
 );
+const dashboardSync = fs.readFileSync(
+  path.resolve(__dirname, '..', 'apps', 'today-dashboard', 'lib', 'data', 'sync.ts'),
+  'utf8'
+);
 
 function extractFunction(source, name) {
   const start = source.indexOf(`function ${name}(`);
@@ -65,4 +69,5 @@ test('confirmed discount reaches dashboard data and Supabase trade rows', () => 
   assert.match(dashboard, /discountType:\s*cust\.discountType\s*\|\|\s*''/);
   assert.match(buildSupabase, /discountType:\s*String\(mRows\[mi\]\[10\]/);
   assert.match(buildSupabase, /discount_type:\s*d\.discountType\s*\|\|\s*m\.discountType\s*\|\|\s*null/);
+  assert.match(dashboardSync, /discountType:\s*it\.discountType\s*\|\|\s*base\.discountType/);
 });
