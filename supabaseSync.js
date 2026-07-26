@@ -523,13 +523,13 @@ function buildSupabaseTrades_(tids) {
     });
   }
 
-  // 계약마스터 폴백/취소 판정용 — tid -> {name, status, startISO, endISO}
+  // 계약마스터 폴백/취소 판정용 — tid -> {name, status, discountType, startISO, endISO}
   var master = {};
   try {
     var mSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
     if (mSheet && mSheet.getLastRow() >= 2) {
-      var mRows = mSheet.getRange(2, 1, mSheet.getLastRow() - 1, 10).getValues();
-      var mDisp = mSheet.getRange(2, 1, mSheet.getLastRow() - 1, 10).getDisplayValues();
+      var mRows = mSheet.getRange(2, 1, mSheet.getLastRow() - 1, 11).getValues();
+      var mDisp = mSheet.getRange(2, 1, mSheet.getLastRow() - 1, 11).getDisplayValues();
       for (var mi = 0; mi < mRows.length; mi++) {
         var mTid = String(mRows[mi][0]).trim();
         if (!mTid || !want[mTid]) continue;
@@ -538,6 +538,7 @@ function buildSupabaseTrades_(tids) {
         master[mTid] = {
           name: String(mRows[mi][1] || '').trim(),
           status: String(mRows[mi][9] || '').trim(),      // J: 계약상태
+          discountType: String(mRows[mi][10] || '').trim(), // K: 할인유형
           startISO: mStart ? mStart.toISOString() : null,
           endISO: mEnd ? mEnd.toISOString() : null
         };
@@ -557,6 +558,7 @@ function buildSupabaseTrades_(tids) {
       var skeleton = { trade_id: tid2, checkout_at: startISO, return_at: endISO };
       if (m.name) skeleton.customer_name = m.name;
       if (m.status) skeleton.contract_status = m.status;
+      if (m.discountType) skeleton.discount_type = m.discountType;
       trades.push(skeleton);
       continue;
     }
@@ -568,6 +570,7 @@ function buildSupabaseTrades_(tids) {
       checkout_at: startISO,
       return_at: endISO,
       contract_status: d.contractStatus || m.status || '예약',
+      discount_type: d.discountType || m.discountType || null,
       return_done: !!d.returnDone,
       return_done_at: d.returnDoneAt || null,
       contract_url: d.contractUrl || null,

@@ -998,6 +998,7 @@ function getDashboardData(targetDate, skipCache, options) {
       name: cust.name || tid,
       tel: cust.tel || '',
       company: cust.company || '',
+      discountType: cust.discountType || '',
       status: g.상태,
       contractStatus: cust.contractStatus || '',
       setupDone: setupDone,
@@ -2275,7 +2276,7 @@ function getDashboardContractMapForIds_(contractSheet, tradeIds) {
       var tid = String(row[0] || '').trim();
       if (wanted[tid]) rowsToRead.push(idx + 2);
     });
-    var rows = readDashboardScheduleRowsDisplay_(contractSheet, rowsToRead, 10);
+    var rows = readDashboardScheduleRowsDisplay_(contractSheet, rowsToRead, 11);
     rows.forEach(function(row) {
       var tid = String(row[0] || '').trim();
       if (!wanted[tid]) return;
@@ -2283,7 +2284,8 @@ function getDashboardContractMapForIds_(contractSheet, tradeIds) {
         name: row[1] || '',
         tel: row[2] || '',
         company: row[3] || '',
-        contractStatus: row[9] || ''
+        contractStatus: row[9] || '',
+        discountType: row[10] || ''
       };
     });
   } catch (err) {}
@@ -8236,8 +8238,7 @@ function autoGenerateReqID(sheet, row) {
 
 /**
  * 파서가 보낸 할인유형 값을 확인요청 M열 드롭다운 값(일반/학생/개인사업자/프리랜서/단골/제휴)으로 정규화.
- * - 빈값/미매칭 → "일반"
- * - 단골/제휴 → 파서가 넣지 말아야 하지만, 실수로 넣었으면 "일반"으로 대체 (단골/제휴는 고객DB 매칭 전용)
+ * - 빈값/미매칭 → 빈 문자열 (고객DB 폴백 여부를 구분하기 위함)
  * - "학생" 포함 → "학생"
  * - "사업자" / "프리랜서" / "프리" / "개사프" → "개인사업자/프리랜서"
  */
@@ -8257,6 +8258,13 @@ function _normalizeDiscountTypeOrBlank_(v) {
 
 function _normalizeDiscountType(v) {
   return _normalizeDiscountTypeOrBlank_(v) || "일반";
+}
+
+/** 카톡에 할인 근거가 있으면 최우선, 없을 때만 고객DB, 둘 다 없으면 일반. */
+function _resolveConfirmRequestDiscount_(chatDiscount, customerDbDiscount) {
+  return _normalizeDiscountTypeOrBlank_(chatDiscount)
+    || _normalizeDiscountTypeOrBlank_(customerDbDiscount)
+    || "일반";
 }
 
 function _confirmRequestCustomerDbSheets_(ss) {
@@ -8430,7 +8438,8 @@ function _confirmRequestPhoneKey_(v) {
 /**
  * 예약 등록 시 개고생2.0 고객DB에 적용할 최소 변경을 결정한다.
  * A=연락처, B=성함, I=할인유형. 연락처가 있으면 이름이 같아도 연락처로만 식별한다.
- * 기존 할인유형은 확정값으로 간주해 덮어쓰지 않고, 빈 I열만 현재 예약 값으로 채운다.
+ * 확인요청에서 확정된 값이 고객DB와 다르면 I열을 갱신한다.
+ * 확인요청 값은 카톡 판정이 고객DB보다 우선하므로, 새 대화 근거가 다음 예약의 기본값이 된다.
  */
 function _planCustomerDbRegistrationWrite_(customerRows, customerName, phone, discountType) {
   var rows = customerRows || [];
@@ -8457,6 +8466,9 @@ function _planCustomerDbRegistrationWrite_(customerRows, customerName, phone, di
 
   if (matchedIndex >= 0) {
     var existingDiscount = String((rows[matchedIndex] && rows[matchedIndex][8]) || "").trim();
+    if (confirmedDiscount && _normalizeDiscountTypeOrBlank_(existingDiscount) !== confirmedDiscount) {
+      return { action: "update-discount", sheetRow: matchedIndex + 2, discount: confirmedDiscount };
+    }
     if (existingDiscount) {
       return { action: "keep-existing", sheetRow: matchedIndex + 2, discount: existingDiscount };
     }
@@ -8678,7 +8690,7 @@ function _collectConfirmRequestResultsByReqID_(sheet, reqID) {
  *   반출일, 반출시간, 반납일, 반납시간,
  *   장비: [{이름, 수량}],
  *   예약자명?, 연락처?,
- *   할인유형? (일반|학생|개인사업자/프리랜서|단골|제휴; 빌리지2.0 고객DB I열 값이 있으면 이 값보다 우선),
+ *   할인유형? (일반|학생|개인사업자/프리랜서|단골|제휴; 카톡에 값이 있으면 고객DB보다 우선),
  *   추가요청?
  * }
  * 구버전 호환: req.업체명 이 오면 req.할인유형으로 간주 (코워크 파서 마이그레이션 전 임시 fallback)
@@ -8720,10 +8732,10 @@ function _insertAndCheckRequest(req) {
   }).filter(function(item) { return item && item.name; });
   var requestedEquipNames = requestedEquipItems.map(function(item) { return item.name; });
 
-  // 연락처/할인유형은 카톡보다 빌리지 2.0/개고생2.0 고객DB를 우선한다.
+  // 연락처는 고객DB로 보강하고, 할인유형은 카톡 판정을 최우선으로 적용한다.
   // - 연락처 미입력: 고객DB 이름 매칭이 정확히 1개일 때만 보강
   // - 그래도 연락처가 없으면 L열 공란으로 확인요청은 생성한다. 등록 단계에서만 연락처가 필요하다.
-  // - 할인유형: 고객DB I열(학생/개인사업자/단골/제휴/일반)이 있으면 파서/카톡 값보다 우선
+  // - 할인유형: 카톡에 명시/판정값이 있으면 우선, 없을 때만 고객DB I열, 둘 다 없으면 일반
   var resolvedPhone = req.연락처 || "";
   var reqPhoneKey = _confirmRequestPhoneKey_(resolvedPhone);
   var customerDbMatches = _findConfirmRequestCustomerDbMatches_(ss, req.예약자명, resolvedPhone);
@@ -8753,7 +8765,7 @@ function _insertAndCheckRequest(req) {
   var dbDiscount = (!resolvedPhone && phoneLookupMatches.length > 1)
     ? ""
     : _bestConfirmRequestCustomerDbDiscount_(trustedMatches);
-  var resolvedDiscount = dbDiscount || _normalizeDiscountType(req.할인유형 || req.업체명);
+  var resolvedDiscount = _resolveConfirmRequestDiscount_(req.할인유형 || req.업체명, dbDiscount);
   var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone, 할인유형: resolvedDiscount });
 
   // ── 중복 체크: 같은 예약자명/연락처 + 반출·반납창 + 같은 최상위 장비/수량 ──
@@ -8861,7 +8873,7 @@ function _insertAndCheckRequest(req) {
       "",                       // J: 상세
       i === 0 ? (req.예약자명 || "") : "",// K: 예약자명 (첫 행만)
       i === 0 ? resolvedPhone : "",       // L: 연락처 (첫 행만, 고객DB 자동조회)
-      i === 0 ? resolvedDiscount : "",  // M: 할인유형 (첫 행만, 고객DB I열 우선)
+      i === 0 ? resolvedDiscount : "",  // M: 할인유형 (첫 행만, 카톡 우선 → 고객DB 폴백)
       "",                       // N: 등록
       "",                       // O: 등록상태
       "",                       // P: 거래ID
@@ -11277,6 +11289,9 @@ function registerByReqID(sheet, triggerRow) {
           if (고객쓰기계획.discount) {
             고객DB시트.getRange(고객newRow, 9).setValue(고객쓰기계획.discount);
           }
+        }
+        if (고객쓰기계획.action === "update-discount" || 고객쓰기계획.action === "append") {
+          try { CacheService.getScriptCache().remove("customerDiscountMap_v1"); } catch (cacheErr) {}
         }
       }
     } catch (dbErr) {
@@ -14069,7 +14084,7 @@ function parseWithClaude(text, imageBase64, imageMediaType) {
   var apiKey = PropertiesService.getScriptProperties().getProperty("ANTHROPIC_API_KEY");
   if (!apiKey) return { error: "ANTHROPIC_API_KEY가 스크립트 속성에 설정되지 않았습니다" };
 
-  var systemPrompt = "너는 카메라 렌탈샵 '빌리지'의 예약 문의 파서야. 카카오톡 메시지나 채팅 캡쳐 이미지를 받아서 예약 정보를 JSON으로 추출해.\n\n반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없이):\n{\n  \"예약자명\": \"이름 또는 빈 문자열\",\n  \"연락처\": \"010-XXXX-XXXX 형식 또는 빈 문자열\",\n  \"반출일\": \"YYYY-MM-DD 또는 빈 문자열\",\n  \"반출시간\": \"HH:MM 또는 빈 문자열 (기본 10:00)\",\n  \"반납일\": \"YYYY-MM-DD 또는 빈 문자열\",\n  \"반납시간\": \"HH:MM 또는 빈 문자열 (기본 18:00)\",\n  \"할인유형\": \"일반|학생|개인사업자/프리랜서\",\n  \"장비\": [{\"이름\": \"정확한 장비명\", \"수량\": 1}],\n  \"비고\": \"추가 메모\"\n}\n\n장비명 변환 규칙:\n- FX3, fx3 → 소니 FX3 (풀세트/바디세트/바디 구분은 고객 표현 그대로)\n- A7S3, a7s III → 소니 A7S3\n- 코모도, komodo → 레드 코모도\n- 부라노, burano → 부라노\n- A7M4 → 소니 A7M4\n- 70-200 GM2 → 소니 GM 70-200mm II\n- 24-70 GM2 → 소니 GM 24-70mm II\n- 600X → 어퓨쳐 600X\n- V마운트 배터리 → V마운트 배터리\n- C대, 시대 → C스탠드\n- 장비명은 최대한 정확하게, 모호하면 원문 그대로\n\n할인유형:\n- 학생/대학/졸작/과제 → \"학생\"\n- 프리랜서/사업자/크리에이터 → \"개인사업자/프리랜서\"\n- 그 외 → \"일반\"\n\n날짜:\n- 상대 날짜(내일, 모레 등)는 오늘 기준으로 계산. 오늘: " + Utilities.formatDate(new Date(), "Asia/Seoul", "yyyy-MM-dd") + "\n- 시간 미언급 시: 반출 10:00, 반납 18:00\n\n이미지인 경우 채팅 내용을 읽어서 동일하게 파싱해.";
+  var systemPrompt = "너는 카메라 렌탈샵 '빌리지'의 예약 문의 파서야. 카카오톡 메시지나 채팅 캡쳐 이미지를 받아서 예약 정보를 JSON으로 추출해.\n\n반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없이):\n{\n  \"예약자명\": \"이름 또는 빈 문자열\",\n  \"연락처\": \"010-XXXX-XXXX 형식 또는 빈 문자열\",\n  \"반출일\": \"YYYY-MM-DD 또는 빈 문자열\",\n  \"반출시간\": \"HH:MM 또는 빈 문자열 (기본 10:00)\",\n  \"반납일\": \"YYYY-MM-DD 또는 빈 문자열\",\n  \"반납시간\": \"HH:MM 또는 빈 문자열 (기본 18:00)\",\n  \"할인유형\": \"일반|학생|개인사업자/프리랜서 또는 빈 문자열\",\n  \"장비\": [{\"이름\": \"정확한 장비명\", \"수량\": 1}],\n  \"비고\": \"추가 메모\"\n}\n\n장비명 변환 규칙:\n- FX3, fx3 → 소니 FX3 (풀세트/바디세트/바디 구분은 고객 표현 그대로)\n- A7S3, a7s III → 소니 A7S3\n- 코모도, komodo → 레드 코모도\n- 부라노, burano → 부라노\n- A7M4 → 소니 A7M4\n- 70-200 GM2 → 소니 GM 70-200mm II\n- 24-70 GM2 → 소니 GM 24-70mm II\n- 600X → 어퓨쳐 600X\n- V마운트 배터리 → V마운트 배터리\n- C대, 시대 → C스탠드\n- 장비명은 최대한 정확하게, 모호하면 원문 그대로\n\n할인유형:\n- 학생/대학/졸작/과제 → \"학생\"\n- 프리랜서/사업자/크리에이터 → \"개인사업자/프리랜서\"\n- 고객이 일반 할인을 명시한 경우에만 → \"일반\"\n- 할인 언급이 없으면 반드시 \"\"\n\n날짜:\n- 상대 날짜(내일, 모레 등)는 오늘 기준으로 계산. 오늘: " + Utilities.formatDate(new Date(), "Asia/Seoul", "yyyy-MM-dd") + "\n- 시간 미언급 시: 반출 10:00, 반납 18:00\n\n이미지인 경우 채팅 내용을 읽어서 동일하게 파싱해.";
 
   var messages = [];
   var content = [];
