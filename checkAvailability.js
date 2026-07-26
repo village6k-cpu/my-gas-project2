@@ -2718,12 +2718,24 @@ function isDashboardLegacyCheckoutBaselineTrade_(tid) {
 }
 
 /**
+ * taken_qty 배포 뒤 신규 누락 복구가 배포되기 전까지 생긴 전환기 거래.
+ * 이 구간은 앱의 반출완료/품목체크 속성이 함께 유실된 건이 있어 날짜를 닫아 한정한다.
+ */
+function isDashboardCheckoutBaselineMigrationGapTrade_(tid) {
+  tid = String(tid || '').trim();
+  if (!/^\d{6}-\d{3}$/.test(tid)) return false;
+  var tradeDate = tid.substring(0, 6);
+  return tradeDate > '260714' && tradeDate <= '260726';
+}
+
+/**
  * 기준선이 통째로 누락된 거래의 안전한 1회 복구 조건.
  * 구형 거래는 기존 정책을 유지하고, 신규 거래는 반출완료 시각과 모든 현재 실제 품목의
  * 명시적 반출 체크가 함께 남아 있을 때만 복구한다. 일부 기준선이 남은 거래에는 호출하지 않는다.
  */
 function canDashboardRecoverMissingCheckoutBaseline_(tid, props, currentCheckable) {
-  if (isDashboardLegacyCheckoutBaselineTrade_(tid)) return true;
+  if (isDashboardLegacyCheckoutBaselineTrade_(tid) ||
+      isDashboardCheckoutBaselineMigrationGapTrade_(tid)) return true;
   if (getDashboardPropertyValue_(props, 'setupDone_' + tid) !== '1') return false;
   if (!String(getDashboardPropertyValue_(props, 'setupDoneAt_' + tid) || '').trim()) return false;
   if (!currentCheckable || !currentCheckable.length) return false;
