@@ -3021,6 +3021,9 @@ function toggleReturnDone(tid, done, options) {
         props.deleteProperty(key);
         props.deleteProperty(atKey);
       }
+      // 앱 버튼은 뒤에서 Supabase를 즉시 저장하지만, 시트·직접 GAS·재시도 경로도 같은
+      // 최종 상태로 수렴해야 한다. dirty 트리거가 거래/반납완료 상태를 다시 밀도록 표시한다.
+      try { supaMarkTradeDirty_(tid); } catch (dirtyErr) {}
       invalidateDashboardCache();
       return {
         tid: tid,

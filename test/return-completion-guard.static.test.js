@@ -122,6 +122,14 @@ test('신규 거래도 반출완료와 전 품목 반출 체크가 증명되면 
   );
 });
 
+test('반납완료는 앱 버튼 외 GAS 경로에서도 Supabase 동기화 대상으로 남긴다', () => {
+  const gas = read('checkAvailability.js');
+  assert.match(
+    gas,
+    /function toggleReturnDone[\s\S]{0,6500}supaMarkTradeDirty_\(tid\)[\s\S]{0,500}invalidateDashboardCache/
+  );
+});
+
 test('반출 뒤에도 예약 장비명·수량 수정과 품목 삭제를 허용하고 범용 쓰기는 보호한다', () => {
   const gas = read('checkAvailability.js');
   const api = read('sheetAPI.js');
