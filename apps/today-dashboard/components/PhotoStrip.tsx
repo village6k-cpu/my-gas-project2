@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Phase, PhotoMeta } from "@/lib/domain/types";
 import {
+  deleteTradePhoto,
   discardTradePhotoUpload,
   getPhotoPreview,
   refreshTradePhotos,
@@ -21,8 +22,21 @@ function photoSrc(photo: PhotoMeta): string | undefined {
   return photo.thumbnailUrl || photo.url || getPhotoPreview(photo.queueId);
 }
 
-function PhotoTile({ tradeId, photo }: { tradeId: string; photo: PhotoMeta }) {
+function PhotoTile({ tradeId, photo, onError }: { tradeId: string; photo: PhotoMeta; onError: (message: string) => void }) {
   const src = photoSrc(photo);
+  const [deleting, setDeleting] = useState(false);
+
+  const deleteSavedPhoto = async () => {
+    if (!window.confirm(`${phaseTitle(photo.phase)} 사진을 삭제할까요?\n삭제한 사진은 목록에서 제거됩니다.`)) return;
+    setDeleting(true);
+    onError("");
+    try {
+      await deleteTradePhoto(tradeId, photo);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "사진 삭제에 실패했습니다");
+      setDeleting(false);
+    }
+  };
 
   // 업로드 대기/실패 타일 — 서버 URL이 아직 없으므로 로컬 미리보기 위에 상태를 덧씌운다
   if (photo.status) {
@@ -64,9 +78,20 @@ function PhotoTile({ tradeId, photo }: { tradeId: string; photo: PhotoMeta }) {
 
   if (src) {
     return (
-      <a href={photo.url || src} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-xl bg-paper ring-1 ring-line">
-        <img src={src} alt={photo.label} className="aspect-square w-full object-cover" loading="lazy" />
-      </a>
+      <div className="relative overflow-hidden rounded-xl bg-paper ring-1 ring-line">
+        <a href={photo.url || src} target="_blank" rel="noreferrer" className="block">
+          <img src={src} alt={photo.label} className="aspect-square w-full object-cover" loading="lazy" />
+        </a>
+        <button
+          type="button"
+          onClick={deleteSavedPhoto}
+          disabled={deleting}
+          className="tap absolute right-1.5 top-1.5 rounded-md bg-black/65 px-2 py-1 text-[10px] font-bold text-white shadow-sm disabled:opacity-60"
+          aria-label={`${phaseTitle(photo.phase)} 사진 삭제`}
+        >
+          {deleting ? "삭제 중…" : "삭제"}
+        </button>
+      </div>
     );
   }
   return (
@@ -205,7 +230,7 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
                   {ps.length ? (
                     <div className="grid grid-cols-3 gap-2">
                       {ps.map((p) => (
-                        <PhotoTile key={p.id} tradeId={tradeId} photo={p} />
+                        <PhotoTile key={p.id} tradeId={tradeId} photo={p} onError={setError} />
                       ))}
                     </div>
                   ) : (

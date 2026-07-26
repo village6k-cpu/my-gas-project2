@@ -76,7 +76,7 @@ assert.match(strip, /discardTradePhotoUpload\(/, 'failed tiles must be discardab
 
 // ── GAS: 업로드 경로에서 전역 락/불필요 왕복 제거 + 멱등성 ───────────
 
-const gasUpload = backend.match(/function uploadDashboardPhoto\(tid, phase, fileName, mimeType, data, memo, clientKey\) \{[\s\S]*?\n\}\n\nfunction invalidateDashboardPhotoCache_/);
+const gasUpload = backend.match(/function uploadDashboardPhoto\(tid, phase, fileName, mimeType, data, memo, clientKey\) \{[\s\S]*?\n\}\n\n\/\*\* 반출\/반납 사진 1장 삭제/);
 assert.ok(gasUpload, 'uploadDashboardPhoto must accept clientKey');
 assert.doesNotMatch(
   gasUpload[0],

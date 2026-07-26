@@ -33,7 +33,7 @@ function pruneCache(now: number): void {
 // 쓰기의 영향을 받는 화면 데이터(dashboard/timeline 등)만 비우고, 사진 업로드일 때만 사진 캐시도 비운다.
 const VOLATILE_ACTION_RE = /(^|&)action=(dashboard|dashboardSearch|dashboardContractExtras|dashboardEquipNames|timeline|operations|scan|search|read|list|info)(&|$)/;
 function invalidateCacheForWrite(action: string): void {
-  const photoWrite = action === "uploadDashboardPhoto";
+  const photoWrite = action === "uploadDashboardPhoto" || action === "deleteDashboardPhoto";
   for (const key of cache.keys()) {
     if (VOLATILE_ACTION_RE.test(key) || (photoWrite && key.includes("dashboardPhoto"))) cache.delete(key);
   }
@@ -90,6 +90,7 @@ const WRITE_ACTIONS = new Set([
   "removeEquip",
   "onsiteAddon",
   "uploadDashboardPhoto",
+  "deleteDashboardPhoto",
   "updateTrade",
   "updateContractStatus",
   "updateTradeDiscount",

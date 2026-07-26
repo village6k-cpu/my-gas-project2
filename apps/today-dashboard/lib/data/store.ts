@@ -2027,6 +2027,28 @@ export function discardTradePhotoUpload(tradeId: string, queueId: string): void 
   void discardPhotoUpload(queueId);
 }
 
+/** 서버에 저장된 사진 1장만 삭제한다. GAS 성공 전에는 타일을 제거하지 않는다. */
+export async function deleteTradePhoto(tradeId: string, photo: PhotoMeta): Promise<void> {
+  if (!writeBackEnabled) throw new Error(writeBackDisabledReason);
+  if (photo.status || photo.queueId) throw new Error("전송 중인 사진은 전송이 끝난 뒤 삭제해 주세요");
+  if (photo.phase !== "checkout" && photo.phase !== "checkin") throw new Error("반출/반납 사진만 삭제할 수 있습니다");
+  if (!photo.fileId && !photo.sheetValue) throw new Error("삭제할 사진의 저장 정보를 찾지 못했습니다");
+
+  const res = await gasMutation("deleteDashboardPhoto", {
+    tid: tradeId,
+    phase: photo.phase,
+    fileId: photo.fileId || "",
+    row: photo.row || 0,
+    sheetValue: photo.sheetValue || "",
+  });
+  if (res?.skipped) throw new Error("사진 삭제 쓰기 경로가 비활성화되어 있습니다");
+
+  const key = photoKey(photo);
+  mutateTrade(tradeId, (t) => ({ ...t, photos: t.photos.filter((p) => photoKey(p) !== key) }));
+  loadedPhotoTrades.add(tradeId);
+  flashSave(tradeId);
+}
+
 function sendQueuedPhoto_(job: PhotoUploadJob): Promise<unknown> {
   return gasMutation("uploadDashboardPhoto", {
     tid: job.tradeId,

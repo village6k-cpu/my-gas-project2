@@ -623,6 +623,15 @@ function handleRequest(e) {
           params.clientKey || postBody.clientKey
         ));
 
+      case "deleteDashboardPhoto":
+        return jsonResponse(deleteDashboardPhoto(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.phase || postBody.phase,
+          params.fileId || postBody.fileId,
+          params.row || postBody.row,
+          params.sheetValue || postBody.sheetValue
+        ));
+
       case "paymentMeta":
         return jsonResponse(inspectTradePaymentColumn());
 

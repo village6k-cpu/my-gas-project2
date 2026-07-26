@@ -4818,6 +4818,102 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo, client
   }
 }
 
+/** 반출/반납 사진 1장 삭제. 시트 기록을 먼저 제거하고 Drive 파일은 복구 가능한 휴지통으로 보낸다. */
+function deleteDashboardPhoto(tid, phase, fileId, rowHint, sheetValue) {
+  tid = normalizeEquipmentCheckTradeId_(String(tid || '').trim());
+  phase = normalizeDashboardPhotoPhase_(phase);
+  fileId = String(fileId || '').trim();
+  sheetValue = String(sheetValue || '').trim();
+  rowHint = Number(rowHint || 0);
+  if (!tid) return { error: 'tid 필요' };
+  if (phase !== 'checkout' && phase !== 'checkin') return { error: 'phase는 checkout/checkin만 허용' };
+  if (!fileId && !sheetValue) return { error: 'fileId 또는 sheetValue 필요' };
+
+  var lock = LockService.getScriptLock();
+  var locked = false;
+  try {
+    lock.waitLock(10000);
+    locked = true;
+    var sheet = getDashboardPhotoSheet_(true);
+    var schema = getDashboardPhotoSchema_(sheet);
+    var targetPhotoCol = getDashboardPhotoWriteCol_(schema, phase);
+    if (!schema.tradeIdCol || !targetPhotoCol) return { error: '반출반납 사진 시트 열 구성을 확인할 수 없습니다' };
+
+    var candidateRows = [];
+    if (rowHint >= 2 && rowHint <= sheet.getLastRow()) candidateRows.push(rowHint);
+    if (sheet.getLastRow() >= 2) {
+      var ids = sheet.getRange(2, schema.tradeIdCol, sheet.getLastRow() - 1, 1).getDisplayValues();
+      ids.forEach(function(row, index) {
+        var rowNum = index + 2;
+        if (candidateRows.indexOf(rowNum) >= 0) return;
+        if (normalizeEquipmentCheckTradeId_(String(row[0] || '').trim()) === tid) candidateRows.push(rowNum);
+      });
+    }
+
+    var matched = null;
+    for (var i = 0; i < candidateRows.length; i++) {
+      var rowNum = candidateRows[i];
+      var row = sheet.getRange(rowNum, 1, 1, Math.max(sheet.getLastColumn(), schema.maxCol || 1)).getDisplayValues()[0];
+      if (normalizeEquipmentCheckTradeId_(String(row[schema.tradeIdCol - 1] || '').trim()) !== tid) continue;
+      if (schema.phaseCol && targetPhotoCol === schema.photoCol &&
+          normalizeDashboardPhotoPhase_(row[schema.phaseCol - 1]) !== phase) continue;
+
+      var values = splitDashboardPhotoValues_(row[targetPhotoCol - 1]);
+      var rowFileId = schema.fileIdCol ? String(row[schema.fileIdCol - 1] || '').trim() : '';
+      var matchIndex = -1;
+      for (var v = 0; v < values.length; v++) {
+        var valueFileId = extractDriveFileId_(values[v]);
+        if (!valueFileId && rowFileId && values.length === 1) valueFileId = rowFileId;
+        if ((fileId && valueFileId === fileId) || (sheetValue && values[v] === sheetValue)) {
+          matchIndex = v;
+          break;
+        }
+      }
+      if (matchIndex < 0) continue;
+      if (matched) return { error: '삭제할 사진이 여러 행에서 발견되어 중단했습니다' };
+      matched = { row: rowNum, values: values, index: matchIndex, rowFileId: rowFileId };
+    }
+    if (!matched) return { error: '삭제할 사진 기록을 찾지 못했습니다' };
+
+    var remaining = matched.values.slice();
+    if (remaining.length) remaining.splice(matched.index, 1);
+    sheet.getRange(matched.row, targetPhotoCol).setValue(remaining.join('\n'));
+
+    var photoCols = [schema.photoCol, schema.checkoutPhotoCol, schema.checkinPhotoCol]
+      .filter(function(col, index, all) { return !!col && all.indexOf(col) === index; });
+    var hasOtherPhoto = photoCols.some(function(col) {
+      return String(sheet.getRange(matched.row, col).getDisplayValue() || '').trim() !== '';
+    });
+    if (!hasOtherPhoto) sheet.deleteRow(matched.row);
+
+    var trashed = false;
+    var trashWarning = '';
+    if (fileId) {
+      try {
+        DriveApp.getFileById(fileId).setTrashed(true);
+        trashed = true;
+      } catch (trashErr) {
+        trashWarning = '시트 기록은 삭제됐지만 Drive 휴지통 이동 실패: ' + trashErr.message;
+      }
+    }
+    invalidateDashboardPhotoCache_();
+    invalidateDashboardCache();
+    return {
+      success: true,
+      tid: tid,
+      phase: phase,
+      fileId: fileId,
+      deletedRow: !hasOtherPhoto,
+      trashed: trashed,
+      warning: trashWarning
+    };
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err) };
+  } finally {
+    if (locked) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
 function invalidateDashboardPhotoCache_() {
   try {
     CacheService.getScriptCache().remove(DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_);

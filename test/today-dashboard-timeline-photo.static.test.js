@@ -58,6 +58,12 @@ assert.match(
 
 assert.match(
   route,
+  /WRITE_ACTIONS[\s\S]{0,420}"deleteDashboardPhoto"/,
+  'Next GAS proxy must allow dashboard photo deletion'
+);
+
+assert.match(
+  route,
   /export async function POST\(req: NextRequest\)/,
   'Next GAS proxy must expose POST for large base64 photo uploads'
 );
@@ -105,6 +111,12 @@ assert.match(
 );
 
 assert.match(
+  store,
+  /export async function deleteTradePhoto\(tradeId: string, photo: PhotoMeta\)[\s\S]{0,900}gasMutation\("deleteDashboardPhoto"/,
+  'photo deletion must be confirmed by GAS before removing the local tile'
+);
+
+assert.match(
   photoStrip,
   /export function PhotoStrip\(\{ tradeId, photos \}: \{ tradeId: string; photos: PhotoMeta\[\] \}\)/,
   'PhotoStrip must know which trade it uploads photos for'
@@ -127,6 +139,19 @@ assert.match(
   photoStrip,
   /uploadTradePhoto\(tradeId, nextPhase, file\)/,
   'PhotoStrip must upload selected photos'
+);
+
+assert.match(
+  photoStrip,
+  /window\.confirm[\s\S]{0,600}deleteTradePhoto\(tradeId, photo\)/,
+  'saved photo tiles must confirm and delete the exact server photo'
+);
+
+const gasBackend = read('checkAvailability.js');
+assert.match(
+  gasBackend,
+  /function deleteDashboardPhoto\([\s\S]{0,4200}setTrashed\(true\)/,
+  'GAS must remove the sheet record and move the exact Drive photo to trash'
 );
 
 assert.match(
