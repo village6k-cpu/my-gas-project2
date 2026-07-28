@@ -64,6 +64,7 @@ export const ScheduleCard = memo(function ScheduleCard({
   const overdue = !trade.returnDone && new Date(trade.returnAt) < new Date(`${date}T00:00:00`);
 
   async function handleDoneToggle() {
+    if (saving) return;
     if (isCheckout) {
       const result = await toggleSetup(trade.tradeId);
       if (!result.ok) setOpen(true);
@@ -155,7 +156,7 @@ export const ScheduleCard = memo(function ScheduleCard({
 
       {/* 등록된 예약의 관리 진입점은 접힌 카드에서도 항상 보인다. */}
       <div className="px-4 pl-5 pt-3">
-        <TradeActions trade={trade} compact />
+        <TradeActions trade={trade} compact busy={!!saving} />
       </div>
 
       {/* 진행 + 토글 */}
@@ -163,9 +164,9 @@ export const ScheduleCard = memo(function ScheduleCard({
         <button
           type="button"
           onClick={handleDoneToggle}
-          disabled={saving}
+          disabled={!!saving}
           aria-busy={saving}
-          className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 disabled:cursor-wait disabled:opacity-80 ${
+          className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 disabled:cursor-wait disabled:opacity-70 ${
             done
               ? "bg-checkin-bg text-checkin-fg ring-checkin-ring"
               : isCheckout

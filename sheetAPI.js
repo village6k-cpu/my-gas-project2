@@ -328,7 +328,8 @@ function handleRequest(e) {
       case "toggleSetup":
         return jsonResponse(toggleSetupDone(
           params.tid || postBody.tid,
-          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
+          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1),
+          { mutationId: params.mutationId || postBody.mutationId || '' }
         ));
 
       case "toggleReturn":
@@ -336,14 +337,37 @@ function handleRequest(e) {
           params.tid || postBody.tid,
           (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1),
           // force=1: 미확인 품목이 있어도 작업자가 확인하고 완료 처리(강제 차단 대신 사람이 결정)
-          { force: (params.force === '1' || params.force === 'true' || postBody.force === true || postBody.force === '1' || postBody.force === 1) }
+          {
+            force: (params.force === '1' || params.force === 'true' || postBody.force === true || postBody.force === '1' || postBody.force === 1),
+            mutationId: params.mutationId || postBody.mutationId || '',
+            enforceExpectedReturnDoneAt: (
+              params.enforceExpectedReturnDoneAt === '1' || params.enforceExpectedReturnDoneAt === 'true' ||
+              postBody.enforceExpectedReturnDoneAt === true || postBody.enforceExpectedReturnDoneAt === '1' ||
+              postBody.enforceExpectedReturnDoneAt === 1
+            ),
+            expectedReturnDoneAt: params.expectedReturnDoneAt !== undefined
+              ? params.expectedReturnDoneAt
+              : (postBody.expectedReturnDoneAt || '')
+          }
         ));
 
       case "toggleItem":
         return jsonResponse(toggleItemCheck(
           params.scheduleId || postBody.scheduleId,
           params.phase || postBody.phase,
-          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1)
+          (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1),
+          { mutationId: params.mutationId || postBody.mutationId || '' }
+        ));
+
+      case "toggleItems":
+        return jsonResponse(toggleItemChecksBatch(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.items || postBody.items || params.entries || postBody.entries
+        ));
+
+      case "repairTradeProjection":
+        return jsonResponse(repairDashboardTradeProjection_(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
       case "updateTradeDiscount": {
@@ -436,6 +460,7 @@ function handleRequest(e) {
           params.equipName || postBody.equipName,
           params.scheduleId || postBody.scheduleId,
           {
+            mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '',
             directRegenerate:
               params.directRegenerate || postBody.directRegenerate ||
               params.regenerateNow || postBody.regenerateNow
@@ -510,6 +535,7 @@ function handleRequest(e) {
           params.equipName || postBody.equipName,
           params.scheduleId || postBody.scheduleId,
           {
+            mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '',
             directRegenerate:
               params.directRegenerate || postBody.directRegenerate ||
               params.regenerateNow || postBody.regenerateNow
@@ -540,22 +566,26 @@ function handleRequest(e) {
         return jsonResponse(updateTradeProofField(
           params.tid || postBody.tid || params.tradeId || postBody.tradeId,
           params.field || postBody.field,
-          params.value !== undefined ? params.value : postBody.value
+          params.value !== undefined ? params.value : postBody.value,
+          { mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '' }
         ));
 
       case "sendEstimate":
         return jsonResponse(requestTradeEstimate(
-          params.tid || postBody.tid || params.tradeId || postBody.tradeId
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          { mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '' }
         ));
 
       case "sendStatement":
         return jsonResponse(requestTradeStatement(
-          params.tid || postBody.tid || params.tradeId || postBody.tradeId
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          { mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '' }
         ));
 
       case "sendPayAppPaymentLink":
         return jsonResponse(requestPayAppPaymentLink(
-          params.tid || postBody.tid || params.tradeId || postBody.tradeId
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          { mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '' }
         ));
 
       case "sendPayAppTestPaymentLink":

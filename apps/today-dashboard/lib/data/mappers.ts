@@ -135,7 +135,9 @@ export function tradeFromRow(r: any, items: EquipmentItem[]): Trade {
     estimateSent: !!r.estimate_sent,
     noteCheckout: r.note_checkout ?? undefined,
     noteCheckin: r.note_checkin ?? undefined,
-    photos: (r.photos ?? []) as PhotoMeta[],
+    // 반출반납 사진 시트(GAS)가 유일 정본이다. 과거 Supabase trades.photos 복제값은
+    // 삭제 뒤 realtime에서 사진을 되살릴 수 있으므로 읽지 않는다.
+    photos: [] as PhotoMeta[],
     riskWarnings: (r.risk_warnings ?? []) as RiskWarning[],
     returnCounts: (r.return_counts ?? {}) as Record<string, ReturnCount>,
     equipments: items,

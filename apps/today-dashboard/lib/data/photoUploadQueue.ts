@@ -158,10 +158,9 @@ async function processQueue(): Promise<void> {
           nextAttemptAt.set(job.queueId, Date.now() + delay);
           await idbWrite(job);
         } else {
-          // 영구 실패: IndexedDB에 수 MB 페이로드를 남기지 않는다(앱 시작마다 재전송 폭주 방지).
-          // 메모리에는 남겨서 실패 타일의 수동 재시도(retryPhotoUpload)가 이번 세션에선 계속 동작한다
-          // — 수동 재시도가 attempts=0으로 되돌리며 다시 idbWrite한다.
-          await idbDelete(job.queueId);
+          // 자동 재시도만 멈춘다. 촬영 증빙 원본은 작업자가 성공/폐기를 선택할 때까지
+          // IndexedDB에 보존해 앱 종료·새로고침 뒤에도 실패 타일과 수동 재시도를 복원한다.
+          await idbWrite(job);
         }
         handlers.onFailure(job, message, willRetry);
       }
@@ -189,14 +188,7 @@ export async function resumePhotoUploads(): Promise<PhotoUploadJob[]> {
   const stored = await idbReadAll();
   for (const job of stored) {
     if (jobs.has(job.queueId)) continue;
-    // 이전 세션에서 이미 소진(영구 실패)된 잡은 attempts=0 리셋 대상에서 제외하고 정리한다
-    // — 예전엔 매 시작마다 부활시켜 수 MB 페이로드를 최대 5회씩 재전송했다.
-    if (job.attempts >= MAX_ATTEMPTS) {
-      void idbDelete(job.queueId);
-      continue;
-    }
-    job.attempts = 0;
-    job.lastError = undefined;
+    // 소진된 잡은 자동 전송하지 않고 그대로 복원한다. attempts<MAX인 중단 작업만 이어간다.
     jobs.set(job.queueId, job);
   }
   void processQueue();

@@ -76,6 +76,7 @@ const WRITE_ACTIONS = new Set([
   "toggleSetup",
   "toggleReturn",
   "toggleItem",
+  "toggleItems",
   "updatePayment",
   "updateTradeProof",
   "updateBillingCompany",
@@ -94,6 +95,7 @@ const WRITE_ACTIONS = new Set([
   "updateTrade",
   "updateContractStatus",
   "updateTradeDiscount",
+  "repairTradeProjection",
 ]);
 
 const STAFF_RUN_FUNCTIONS = new Set(["getMyPageLink"]);

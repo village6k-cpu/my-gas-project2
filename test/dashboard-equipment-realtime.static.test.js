@@ -25,8 +25,18 @@ assert.match(
 );
 assert.match(
   batchAddBody[0],
-  /var contractRegenPending = true[\s\S]*contractRegenPending = false[\s\S]*contractRegenPending:\s*contractRegenPending/,
-  'dashboardAddEquipments must clear pending after direct regeneration and keep pending when fallback regeneration is queued'
+  /var contractRegenQueued = false[\s\S]*scheduleContractRegenUnderLock_\(tid\)[\s\S]*contractRegenQueued = true[\s\S]*contractRegenPending:\s*contractRegenPending/,
+  'dashboardAddEquipments must commit only the durable regeneration marker before returning pending state'
+);
+assert.match(
+  batchAddBody[0],
+  /finally[\s\S]*if \(lock\)[\s\S]*lock\.releaseLock\(\)[\s\S]*if \(contractRegenQueued\) ensureContractRegenTrigger_\(\)/,
+  'dashboardAddEquipments must wake the regeneration worker only after releasing its mutation lock'
+);
+assert.doesNotMatch(
+  batchAddBody[0],
+  /deleteAndRegenerateContract/,
+  'dashboardAddEquipments must not hold the card mutation lock during Drive contract regeneration'
 );
 assert.match(
   batchAddBody[0],
@@ -127,14 +137,23 @@ assert.match(
   'GAS dashboard page must inline cached equipment names when available'
 );
 
+const ensureRegenBody = code.slice(
+  code.indexOf('function ensureContractRegenTrigger_'),
+  code.indexOf('\nfunction scheduleContractRegen(', code.indexOf('function ensureContractRegenTrigger_')),
+);
 assert.match(
-  code,
-  /CONTRACT_REGEN_TRIGGER_PROP_[\s\S]{0,900}hasRecentScheduledTrigger[\s\S]{0,260}ScriptApp\.getProjectTriggers\(\)/,
-  'contract regen scheduling must skip trigger-list scans when a recent regen trigger is already scheduled'
+  ensureRegenBody,
+  /hasRecentScheduledTrigger[\s\S]*if \(!hasRecentScheduledTrigger\)/,
+  'contract regen scheduling must reuse a recent scheduled trigger'
+);
+assert.ok(
+  ensureRegenBody.indexOf("ScriptApp.newTrigger('regenPendingContracts')") <
+    ensureRegenBody.indexOf('ScriptApp.deleteTrigger(t)'),
+  'contract regen scheduling must create its replacement before deleting stale one-shot triggers'
 );
 assert.match(
   code,
-  /function scheduleContractRegen\(거래ID\)[\s\S]*invalidateDashboardTradeExtraCache_\(\[거래ID\]\)/,
+  /function scheduleContractRegenUnderLock_\(거래ID\)[\s\S]*invalidateDashboardTradeExtraCache_\(\[거래ID\]\)[\s\S]*function scheduleContractRegen\(거래ID\) \{\s*scheduleContractRegenUnderLock_\(거래ID\);\s*ensureContractRegenTrigger_\(\);/,
   'contract regen scheduling must invalidate cached contract links immediately'
 );
 
@@ -178,8 +197,18 @@ assert.match(
 );
 assert.match(
   removeBackendBody[0],
-  /var contractRegenPending = true[\s\S]*contractRegenPending = false[\s\S]*catch \(regenErr\)[\s\S]*scheduleContractRegen\(tid\)[\s\S]*contractRegenPending:\s*contractRegenPending/,
-  'dashboardRemoveEquipment must clear pending after direct regeneration and keep pending when fallback regeneration is queued'
+  /var contractRegenQueued = false[\s\S]*scheduleContractRegenUnderLock_\(tid\)[\s\S]*contractRegenQueued = true[\s\S]*contractRegenPending:\s*contractRegenPending/,
+  'permitted pre-checkout removal must return quickly after marking durable contract regeneration'
+);
+assert.match(
+  removeBackendBody[0],
+  /finally[\s\S]*lock\.releaseLock\(\)[\s\S]*if \(contractRegenQueued\) ensureContractRegenTrigger_\(\)/,
+  'equipment removal must wake the regeneration worker after releasing its mutation lock'
+);
+assert.doesNotMatch(
+  removeBackendBody[0],
+  /deleteAndRegenerateContract/,
+  'dashboardRemoveEquipment must not run Drive contract regeneration under its mutation lock'
 );
 assert.doesNotMatch(
   removeBackendBody[0],

@@ -17,8 +17,13 @@ assert.match(
 
 assert.match(
   store,
-  /import \{[^}]*gasMutation[^}]*gasRead[^}]*gasWrite[^}]*writeBackDisabledReason[^}]*writeBackEnabled[^}]*\} from "\.\/writeback"/,
+  /import \{[^}]*gasMutation[^}]*gasRead[^}]*writeBackDisabledReason[^}]*writeBackEnabled[^}]*\} from "\.\/writeback"/,
   'store must import the disabled reason so failed 원장 writes are visible'
+);
+assert.doesNotMatch(
+  store,
+  /\bgasWrite\(/,
+  '원장 상태 변경을 fire-and-forget으로 보내면 화면과 시트가 조용히 갈라질 수 있다'
 );
 
 assert.match(

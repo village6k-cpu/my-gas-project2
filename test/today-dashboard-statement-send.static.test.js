@@ -12,7 +12,7 @@ const store = read('apps/today-dashboard/lib/data/store.ts');
 const paymentControls = read('apps/today-dashboard/components/PaymentControls.tsx');
 
 assert(
-  /function requestTradeStatement\(tid\)[\s\S]{0,160}callVillageOpsApi_\("sendStatement", tid\)/.test(checkAvailability),
+  /function requestTradeStatement\(tid,\s*options\)[\s\S]{0,180}callVillageOpsApi_\("sendStatement", tid, options \|\| \{\}\)/.test(checkAvailability),
   'GAS bridge must expose registered-trade statement sending through Village 2.0'
 );
 
@@ -28,8 +28,8 @@ assert(
 
 assert(
   /export async function sendStatement\(tradeId: string\)/.test(store) &&
-    /gasMutation\("sendStatement", \{ tid: tradeId \}\)/.test(store),
-  'today-dashboard store must expose a result-returning sendStatement mutation'
+    /gasMutation\("sendStatement",\s*\{[\s\S]{0,180}tid:\s*tradeId,[\s\S]{0,180}mutationId:\s*createLedgerMutationId\("statement-send"\)/.test(store),
+  'today-dashboard store must expose an idempotency-keyed result-returning sendStatement mutation'
 );
 
 assert(

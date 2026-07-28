@@ -35,6 +35,8 @@ function toggleHarness(gasRequest) {
     writeBackEnabled: true,
     writeBackDisabledReason: "",
     toastSeq: 0,
+    activeTradeTransitions: new Set(),
+    pendingRemoveEquipmentTrades: new Set(),
     Error,
     queuedSetupRetries: [],
     console: { error() {} },
@@ -43,12 +45,25 @@ function toggleHarness(gasRequest) {
       context.state.savingTrades[tradeId] = true;
       return 1;
     },
-    finishTradeSave(tradeId) { delete context.state.savingTrades[tradeId]; },
+    beginTradeTransition(tradeId) {
+      context.activeTradeTransitions.add(tradeId);
+      return context.beginTradeSave(tradeId);
+    },
+    finishTradeSave(tradeId) {
+      context.activeTradeTransitions.delete(tradeId);
+      delete context.state.savingTrades[tradeId];
+    },
     mutateTrade(tradeId, fn) {
       context.state.trades = context.state.trades.map((row) => row.tradeId === tradeId ? fn(row) : row);
     },
     isGasOutcomeUnknownError(error) { return error?.outcomeUnknown === true; },
     queueSetupOutcomeRetry(...args) { context.queuedSetupRetries.push(args); },
+    putCompletionMutationOutbox() {},
+    acknowledgeCompletionMutationOutbox() {},
+    requireCompletionMutationResult_(res) { return res; },
+    flushItemCheckWritesForTrade() { return Promise.resolve(); },
+    flushQueuedItemQtyForTrade() { return Promise.resolve(); },
+    createLedgerMutationId() { return "setup:test-mutation"; },
     gasMutation() { return gasRequest.promise; },
   };
   vm.runInNewContext(`${source}\nthis.toggleSetup = toggleSetup;`, context);
@@ -79,10 +94,13 @@ test("반출완료 상태는 GAS만 쓰고 브라우저 전체 저장은 완료 
   const remote = read("lib/data/remote.ts");
   const supa = fs.readFileSync(path.resolve(appRoot, "../..", "supabaseSync.js"), "utf8");
   const persist = sourceFunction(remote, "export async function persistTrade", "\n/** 반납 체크의 빠른 경로");
+  const structure = sourceFunction(remote, "function tradeStructureRow", "\nfunction scheduleStructureRow");
   const periodic = sourceFunction(supa, "function buildSupabaseTrades_", "\n/** payload 키 구성이 같은 행끼리");
-  assert.match(persist, /delete tradeRow\.setup_done/);
-  assert.match(persist, /delete tradeRow\.setup_done_at/);
-  assert.match(persist, /upsert\(tradeRow/);
+  assert.match(persist, /upsert\(tradeRow, \{[\s\S]*ignoreDuplicates: true/,
+    "신규 행은 완전한 최초 상태로 만들되 기존 행은 덮지 않아야 한다");
+  assert.match(structure, /delete row\.setup_done/);
+  assert.match(structure, /delete row\.setup_done_at/);
+  assert.match(structure, /delete row\.return_done/);
   assert.doesNotMatch(periodic, /setup_done(?:_at)?:/, "주기 전체 동기화도 서버 권한 완료 필드를 덮어쓰면 안 된다");
 });
 
@@ -92,7 +110,7 @@ test("실행 상태 전이: 느린 GAS 중 즉시 완료되고 성공 후 유지
   const pending = harness.toggleSetup("T-1");
   assert.equal(harness.state.trades[0].setupDone, true);
   assert.equal(harness.state.savingTrades["T-1"], true);
-  gas.resolve({ setupDoneAt: "2026-07-16T10:00:00+09:00" });
+  gas.resolve({ setupDone: true, setupDoneAt: "2026-07-16T10:00:00+09:00" });
   assert.equal((await pending).ok, true);
   assert.equal(harness.state.trades[0].setupDone, true);
   assert.equal(harness.state.trades[0].setupDoneAt, "2026-07-16T10:00:00+09:00");
@@ -135,7 +153,7 @@ test("실행 상태 전이: 저장 중 같은 카드를 다시 눌러 중복 요
   const second = await harness.toggleSetup("T-1");
   assert.equal(second.ok, false);
   assert.equal(second.error, "반출 상태 변경이 이미 진행 중입니다");
-  gas.resolve({ setupDoneAt: "2026-07-16T10:00:00+09:00" });
+  gas.resolve({ setupDone: true, setupDoneAt: "2026-07-16T10:00:00+09:00" });
   await first;
 });
 
@@ -149,10 +167,10 @@ test("결과 미확정 진입 뒤에는 서버 확정값 없이 롤백하지 않
   const store = read("lib/data/store.ts");
   const writeback = read("lib/data/writeback.ts");
   const retry = sourceFunction(store, "function queueSetupOutcomeRetry", "\nfunction mutateTrade");
-  assert.match(retry, /await gasMutation\("toggleSetup", \{ tid: tradeId, done \}\)/);
+  assert.match(retry, /await gasMutation\("toggleSetup", \{ tid: tradeId, done, mutationId \}\)/);
   assert.match(retry, /await fetchSetupCompletion\(tradeId\)/);
   assert.match(retry, /confirmed\.done === done[\s\S]*finishTradeSave/);
-  assert.match(retry, /queueSetupOutcomeRetry\(tradeId, done, optimisticDoneAt, saveId, attempt \+ 1\)/);
+  assert.match(retry, /queueSetupOutcomeRetry\(tradeId, done, optimisticDoneAt, saveId, mutationId, attempt \+ 1\)/);
   // 이전 값으로의 맹목적 롤백 금지 — 수렴은 서버 확정값(confirmed.done)으로만 한다
   assert.doesNotMatch(retry, /setupDone: previousDone/);
   assert.match(retry, /setupDone: confirmed\.done/, "상한 도달 시 서버 확정값으로 수렴해야 한다");

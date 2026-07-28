@@ -71,6 +71,7 @@ export function isCheckoutBaselineLocked(t: Trade): boolean {
     t.setupDone ||
     t.returnDone ||
     t.contractStatus === "반출" ||
+    String(t.contractStatus) === "반출중" ||
     t.contractStatus === "반납완료" ||
     t.equipments.some((item) => Number(item.takenQty || 0) > 0)
   );

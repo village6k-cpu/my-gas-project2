@@ -30,13 +30,19 @@ assert(
   'store must expose an async requestProofIssue mutation'
 );
 assert(
-  /gasMutation\("updateTradeProof", \{ tid: tradeId, field: "issueStatus", value: "발행요청" \}\)/.test(store),
-  'requestProofIssue must route through the GAS 발행요청 path, not direct 발행완료 writes'
+  /gasMutation\("updateTradeProof",\s*\{[\s\S]{0,220}tid:\s*tradeId,[\s\S]{0,220}field:\s*"issueStatus",[\s\S]{0,220}value:\s*"발행요청",[\s\S]{0,220}mutationId:\s*createLedgerMutationId\("proof-issue"\)/.test(store),
+  'requestProofIssue must route through an idempotency-keyed GAS 발행요청 path, not direct 발행완료 writes'
 );
 assert(
   /issueStatus: result\.issueStatus \|\| "발행완료"/.test(store) &&
-    /issueStatus: "전송실패"/.test(store),
-  'requestProofIssue must reflect success and failure statuses back into the card'
+    /issueStatus: previous\.issueStatus/.test(store) &&
+    store.includes('거래내역 확인 전에는 다시 발행하지 마세요'),
+  'requestProofIssue must only mark confirmed success and retain the prior status when the outcome is unknown'
+);
+assert(
+  /function isPositiveExternalActionResult_/.test(store) &&
+    /result\.success === true \|\| String\(result\.status \|\| ""\)\.trim\(\)\.toUpperCase\(\) === "OK"/.test(store),
+  'external sends must require explicit positive success evidence'
 );
 
 console.log('today-dashboard proof issue request static checks passed');

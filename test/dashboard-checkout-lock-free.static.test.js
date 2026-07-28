@@ -10,20 +10,27 @@ const store = read('apps/today-dashboard/lib/data/store.ts');
 const remote = read('apps/today-dashboard/lib/data/remote.ts');
 const card = read('apps/today-dashboard/components/ScheduleCard.tsx');
 
-const toggleSetupDone = backend.match(/function toggleSetupDone\(tid, done\) \{[\s\S]*?\n\}/);
-assert.ok(toggleSetupDone, 'toggleSetupDone must exist');
+const setupStart = backend.indexOf('function toggleSetupDone(tid, done, options)');
+const setupEnd = backend.indexOf('\nfunction normalizeDashboardReturnSetKey_', setupStart);
+assert.ok(setupStart >= 0 && setupEnd > setupStart, 'toggleSetupDone must exist');
+const toggleSetupDone = backend.slice(setupStart, setupEnd);
 assert.doesNotMatch(
-  toggleSetupDone[0],
-  /LockService\.getScriptLock\(\)|\.waitLock\(/,
+  toggleSetupDone,
+  /\.waitLock\(/,
   '반출 완료는 장기 전역 ScriptLock 대기 때문에 막히면 안 된다'
 );
 assert.match(
-  toggleSetupDone[0],
+  toggleSetupDone,
+  /transitionLock\.tryLock\(1000\)[\s\S]*transitionLock\.releaseLock\(\)[\s\S]*supaCaptureCheckoutBaseline_/,
+  '품목 체크와 기준선 시작 경계만 짧게 잠그고 외부 기준선 저장 전에 즉시 풀어야 한다'
+);
+assert.match(
+  toggleSetupDone,
   /supaCaptureCheckoutBaseline_\(tid, checkable, true\)/,
   '반출 완료 전 Supabase 불변 기준선 저장은 계속 필수다'
 );
 assert.match(
-  toggleSetupDone[0],
+  toggleSetupDone,
   /props\.setProperties\(completed, false\)/,
   '기준선 저장 성공 뒤에만 반출 완료 속성을 확정해야 한다'
 );
@@ -32,12 +39,12 @@ const toggleSetup = store.match(/export async function toggleSetup\(tradeId: str
 assert.ok(toggleSetup, 'toggleSetup must exist');
 assert.match(
   toggleSetup[0],
-  /const saveId = beginTradeSave\(tradeId\);[\s\S]*?mutateTrade\(tradeId[\s\S]*?setupDone:\s*done[\s\S]*?false\);[\s\S]*?await gasMutation\("toggleSetup"/,
+  /const saveId = beginTradeTransition\(tradeId\);[\s\S]*?mutateTrade\(tradeId[\s\S]*?setupDone:\s*done[\s\S]*?false\);[\s\S]*?await gasMutation\("toggleSetup"/,
   '카드는 GAS 응답 전에 즉시 완료 상태가 되어야 한다'
 );
 assert.match(
   toggleSetup[0],
-  /if \(state\.savingTrades\[tradeId\]\)[\s\S]*?return \{ ok: false, error \};/,
+  /if \(activeTradeTransitions\.has\(tradeId\) \|\| pendingRemoveEquipmentTrades\.has\(tradeId\)\)[\s\S]*?return \{ ok: false, error \};/,
   '빠른 연속 클릭이 들어와도 같은 거래의 반출완료 요청은 한 번만 실행해야 한다'
 );
 assert.match(
@@ -47,12 +54,12 @@ assert.match(
 );
 assert.match(
   toggleSetup[0],
-  /if \(isGasOutcomeUnknownError\(e\)\)[\s\S]*queueSetupOutcomeRetry\(tradeId[\s\S]*return \{ ok: true, warning \}/,
+  /if \(setupRequestStarted && isGasOutcomeUnknownError\(e\)\)[\s\S]*queueSetupOutcomeRetry\(tradeId[\s\S]*return \{ ok: true, warning \}/,
   'GAS 응답만 유실된 결과 미확정은 완료 표시를 유지하고 같은 상태를 재시도해야 한다'
 );
 assert.match(
   toggleSetup[0],
-  /if \(isGasOutcomeUnknownError\(e\)\)[\s\S]*return \{ ok: true, warning \}[\s\S]*setupDone:\s*previousDone[\s\S]*반출 상태 변경 실패/,
+  /if \(setupRequestStarted && isGasOutcomeUnknownError\(e\)\)[\s\S]*return \{ ok: true, warning \}[\s\S]*setupDone:\s*previousDone[\s\S]*반출 상태 변경 실패/,
   '확정 실패일 때만 즉시 완료 상태를 되돌려야 한다'
 );
 assert.doesNotMatch(
@@ -62,14 +69,24 @@ assert.doesNotMatch(
 );
 assert.match(
   remote,
-  /const tradeRow = tradeToRow\(trade\)[\s\S]*delete tradeRow\.setup_done;[\s\S]*delete tradeRow\.setup_done_at;[\s\S]*upsert\(tradeRow/,
-  '브라우저 전체 저장은 서버 권한 반출완료 필드를 덮어쓰면 안 된다'
+  /const tradeRow = tradeToRow\(trade\)[\s\S]*upsert\(tradeRow, \{[\s\S]*ignoreDuplicates: true/,
+  '신규 거래는 전체 초기 상태로 추가하되 기존 행은 덮지 않아야 한다'
+);
+assert.match(
+  remote,
+  /function tradeStructureRow[\s\S]*delete row\.setup_done;[\s\S]*delete row\.setup_done_at;/,
+  '기존 행의 서버 권한 반출완료는 구조 저장이 덮어쓰면 안 된다'
 );
 
 assert.match(
+  store,
+  /activeTradeTransitions\.has\(tradeId\)/,
+  '일반 수량 저장과 완료 전환을 구분하고 완료 전환 자체만 중복 차단해야 한다'
+);
+assert.doesNotMatch(
   card,
   /disabled=\{saving\}/,
-  '반출완료 저장 중에는 같은 버튼을 다시 눌러 중복 요청할 수 없어야 한다'
+  '수량 저장 중에도 완료 버튼은 장벽을 기다리며 눌릴 수 있어야 한다'
 );
 assert.match(
   card,
@@ -83,7 +100,7 @@ assert.match(
   '반출완료는 대상 거래의 스케줄 행만 찾는 헬퍼를 사용해야 한다'
 );
 assert.match(
-  toggleSetupDone[0],
+  toggleSetupDone,
   /getDashboardRowsByTradeId_\(sched, tid\)[\s\S]*?getDashboardSearchGroupsForIds_\(sched, \[tid\], rowsByTid\)/,
   '반출완료 기준선 생성 때 스케줄상세 전체 12열을 읽지 않아야 한다'
 );

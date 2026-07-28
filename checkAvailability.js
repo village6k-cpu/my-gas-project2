@@ -967,7 +967,10 @@ function getDashboardData(targetDate, skipCache, options) {
     var checkInfo = getEquipmentCheckForTrade_(equipmentChecks, tid);
 
     // 모든 행 표시 (세트 대표 + 구성품 + 단품). 각 행에 체크 상태 + isSet 라벨 부여.
-    var setupDoneForTrade = props['setupDone_' + tid] === '1';
+    var contractStatusForTrade = String(cust.contractStatus || '').trim();
+    var setupDoneForTrade = props['setupDone_' + tid] === '1' ||
+      contractStatusForTrade === '반출' || contractStatusForTrade === '반출중' ||
+      contractStatusForTrade === '반납완료';
     var displayEquip = g.equipments.map(function(eq) {
       var checkoutChecked = props['itemCheck_' + eq.scheduleId + '_checkout'] === '1';
       return {
@@ -987,8 +990,8 @@ function getDashboardData(targetDate, skipCache, options) {
       };
     });
 
-    var isContractReturned = String(cust.contractStatus || '').trim() === '반납완료';
-    var setupDone = props['setupDone_' + tid] === '1';
+    var isContractReturned = contractStatusForTrade === '반납완료';
+    var setupDone = setupDoneForTrade;
     var returnDone = props['returnDone_' + tid] === '1' || isContractReturned;
     var setupDoneAt = props['setupDoneAt_' + tid] || '';
     var returnDoneAt = props['returnDoneAt_' + tid] || '';
@@ -2590,16 +2593,736 @@ function invalidateDashboardCache(extraDates) {
  * @param {boolean} done true=완료, false=미완료
  * @returns {Object} { tid, setupDone }
  */
-function toggleSetupDone(tid, done) {
+var DASHBOARD_SETUP_CLOSING_LEASE_MS_ = 7 * 60 * 1000;
+// 브라우저의 최악 GAS timeout + 결과미확정 재시도(최대 약 10분)보다 길어야 한다.
+// 너무 짧으면 옛 mutationId가 만료된 뒤 새 변경으로 재등록되어 최신 상태를 되돌린다.
+var DASHBOARD_MUTATION_LOG_TTL_MS_ = 30 * 60 * 1000;
+var DASHBOARD_MUTATION_LOG_PREFIX_ = 'dashboardMutationLog_v2_';
+// Apps Script 1회 실행 상한(최대 약 6분)보다 길게 유지해 HTTP가 느려도 다른 변이가 끼지 않는다.
+var DASHBOARD_MUTATION_LEASE_MS_ = 7 * 60 * 1000;
+
+function readDashboardMutationLease_(props, key) {
+  var raw = String(props.getProperty(key) || '');
+  if (!raw) return null;
+  try {
+    var lease = JSON.parse(raw);
+    if (!lease || typeof lease !== 'object') return null;
+    lease.at = Number(lease.at || 0);
+    return lease;
+  } catch (err) {
+    return null;
+  }
+}
+
+function activeDashboardMutationLease_(props, key) {
+  var lease = readDashboardMutationLease_(props, key);
+  if (!lease) {
+    if (props.getProperty(key)) props.deleteProperty(key);
+    return null;
+  }
+  if (!lease.at || Date.now() - lease.at >= DASHBOARD_MUTATION_LEASE_MS_) {
+    props.deleteProperty(key);
+    return null;
+  }
+  return lease;
+}
+
+function clearDashboardMutationLease_(props, key, token) {
+  var lease = readDashboardMutationLease_(props, key);
+  if (!lease || !token || String(lease.token || '') === String(token)) props.deleteProperty(key);
+}
+
+/** 같은 거래에서 권한 상태 HTTP 전이가 진행 중이면 충돌 변이를 짧게 재시도시킨다. */
+function dashboardTradeMutationLeaseError_(props, tid, ownKind, ownToken) {
+  props = props || PropertiesService.getScriptProperties();
+  tid = String(tid || '').trim();
+  if (!tid) return null;
+  var setupClosing = String(props.getProperty('setupClosing_' + tid) || '');
+  var setupClosingAt = Number(setupClosing.split('|')[0]) || 0;
+  if (setupClosing && Date.now() - setupClosingAt >= DASHBOARD_SETUP_CLOSING_LEASE_MS_) {
+    props.deleteProperty('setupClosing_' + tid);
+    setupClosing = '';
+  }
+  if (setupClosing && ownKind !== 'setup') {
+    return { error: '같은 거래의 반출 상태를 처리 중입니다.', code: 'BUSY', retryable: true };
+  }
+  var itemLease = activeDashboardMutationLease_(props, 'checkoutItemMutation_' + tid);
+  if (itemLease && !(ownKind === 'checkoutItem' && String(itemLease.token || '') === String(ownToken || ''))) {
+    return { error: '같은 거래의 품목 반출 체크를 저장 중입니다.', code: 'BUSY', retryable: true };
+  }
+  var returnLease = activeDashboardMutationLease_(props, 'returnMutation_' + tid);
+  if (returnLease && !(ownKind === 'return' && String(returnLease.token || '') === String(ownToken || ''))) {
+    return { error: '같은 거래의 반납 상태를 처리 중입니다.', code: 'BUSY', retryable: true };
+  }
+  var auxiliaryLease = activeDashboardMutationLease_(props, 'dashboardAuxMutation_' + tid);
+  if (auxiliaryLease && !(ownKind === 'aux' && String(auxiliaryLease.token || '') === String(ownToken || ''))) {
+    return { error: '같은 거래의 결제·증빙 변경을 처리 중입니다.', code: 'BUSY', retryable: true };
+  }
+  // 구조 투영은 Sheet 변경을 막는 권한 전이가 아니라 revision 큐로 합쳐지는 비동기 복제다.
+  // Supabase 장애/backoff 동안 이 lease로 카드 전체를 막으면 최대 수분짜리 새 병목이 된다.
+  // worker가 실제 반납 권한 HTTP를 수행하는 짧은 구간에만 직접 충돌하는 명령을 제한한다.
+  // backoff/대기 큐 자체는 blocker가 아니므로 Supabase 장애가 카드 전체 병목으로 번지지 않는다.
+  var returnProjectionLease = activeDashboardReturnProjectionLease_(props, tid);
+  if (returnProjectionLease &&
+      (ownKind === 'return' || ownKind === 'checkinItem' || ownKind === 'contractStatus')) {
+    return { error: '같은 거래의 반납 상태를 저장 중입니다.', code: 'BUSY', retryable: true };
+  }
+  return null;
+}
+
+var DASHBOARD_STRUCTURE_QUEUE_PREFIX_ = 'dashboardStructureQueue_v1_';
+var DASHBOARD_STRUCTURE_TRIGGER_PROP_ = 'dashboardStructureQueueTrigger_v1';
+var DASHBOARD_STRUCTURE_MAX_ATTEMPTS_ = 8;
+var DASHBOARD_RETURN_PROJECTION_LEASE_PREFIX_ = 'dashboardReturnProjectionInFlight_';
+var DASHBOARD_RETURN_PROJECTION_LEASE_MS_ = 3 * 60 * 1000;
+
+function activeDashboardReturnProjectionLease_(props, tid) {
+  var key = DASHBOARD_RETURN_PROJECTION_LEASE_PREFIX_ + String(tid || '').trim();
+  var lease = readDashboardMutationLease_(props, key);
+  if (!lease) return null;
+  if (!lease.at || Date.now() - lease.at >= DASHBOARD_RETURN_PROJECTION_LEASE_MS_) {
+    props.deleteProperty(key);
+    return null;
+  }
+  return lease;
+}
+
+function clearDashboardReturnProjectionLease_(props, tid, token, revision) {
+  var key = DASHBOARD_RETURN_PROJECTION_LEASE_PREFIX_ + String(tid || '').trim();
+  var lease = readDashboardMutationLease_(props, key);
+  if (!lease) return;
+  if (String(lease.token || '') === String(token || '') &&
+      Number(lease.revision || 0) === Number(revision || 0)) props.deleteProperty(key);
+}
+
+function mergeDashboardStructureItems_(current, incoming) {
+  var byId = {};
+  (current || []).concat(incoming || []).forEach(function(item) {
+    var id = String(item && (item.scheduleId || item.schedule_id) || '').trim();
+    if (!id) return;
+    byId[id] = {
+      scheduleId: id,
+      name: String(item.name || '').trim(),
+      qty: Number(item.qty || 0) || 1,
+      setName: String(item.setName || item.set_name || '').trim(),
+      isHeader: !!(item.isHeader || item.is_header),
+      isComponent: !!(item.isComponent || item.is_component),
+      onsite: !!item.onsite
+    };
+  });
+  return Object.keys(byId).map(function(id) { return byId[id]; });
+}
+
+/** 느린 Supabase 구조 투영을 거래별 내구 큐에 합친다. 호출부는 ScriptLock 안이어도 HTTP를 하지 않는다. */
+function scheduleDashboardStructureProjection_(tid, patch) {
+  var queueLock = LockService.getScriptLock();
+  var acquiredQueueLock = false;
+  var token = '';
+  try {
+    acquiredQueueLock = queueLock.tryLock(3000);
+    if (!acquiredQueueLock) throw new Error('장비 상태 동기화 큐가 잠겨 있습니다. 잠시 후 다시 시도해주세요.');
+    token = scheduleDashboardStructureProjectionUnderLock_(tid, patch);
+  } finally {
+    if (acquiredQueueLock) try { queueLock.releaseLock(); } catch (queueReleaseErr) {}
+  }
+  ensureDashboardStructureProjectionTrigger_();
+  return token;
+}
+
+/** 호출자가 이미 ScriptLock을 가진 경우의 원자적 queue merge. */
+function scheduleDashboardStructureProjectionUnderLock_(tid, patch) {
+  tid = String(tid || '').trim();
+  if (!tid) return '';
+  patch = patch || {};
+  var props = PropertiesService.getScriptProperties();
+  var leaseKey = 'dashboardStructureMutation_' + tid;
+  var queueKey = DASHBOARD_STRUCTURE_QUEUE_PREFIX_ + tid;
+  var lease = activeDashboardMutationLease_(props, leaseKey);
+  var task = {};
+  try { task = JSON.parse(props.getProperty(queueKey) || '{}'); } catch (parseErr) { task = {}; }
+  // lease TTL이 지나도 내구 큐 자체의 token/작업은 버리지 않는다. 새 사용자 변경은
+  // 기존 실패 작업에 revision으로 합쳐져 삭제/추가 투영이 영구 유실되지 않는다.
+  var token = String(task && task.token || '') ||
+    (lease && String(lease.token || '')) || (String(Date.now()) + ':' + String(Math.random()).slice(2));
+  if (!task || !task.token) task = { token: token, tradeId: tid, attempts: 0 };
+  if (patch.returnState) task.returnState = patch.returnState;
+  if (patch.syncStructure) task.syncStructure = true;
+  if (patch.clearReturnCountIds) {
+    var countIds = (task.clearReturnCountIds || []).concat(patch.clearReturnCountIds || []).map(function(id) {
+      return String(id || '').trim();
+    }).filter(Boolean);
+    task.clearReturnCountIds = countIds.filter(function(id, idx) { return countIds.indexOf(id) === idx; });
+  }
+  if (patch.removeScheduleIds) {
+    var ids = (task.removeScheduleIds || []).concat(patch.removeScheduleIds || []).map(function(id) {
+      return String(id || '').trim();
+    }).filter(Boolean);
+    task.removeScheduleIds = ids.filter(function(id, idx) { return ids.indexOf(id) === idx; });
+  }
+  if (patch.baselineItems) task.baselineItems = mergeDashboardStructureItems_(task.baselineItems, patch.baselineItems);
+  if (patch.baselineExact === true) task.baselineExact = true;
+  if (patch.baselineAllowEmptyRecovery === true) task.baselineAllowEmptyRecovery = true;
+  task.revision = Number(task.revision || 0) + 1;
+  task.at = Date.now();
+  task.nextAt = task.at;
+  task.attempts = 0;
+  task.failed = false;
+  delete task.lastError;
+  props.setProperty(leaseKey, JSON.stringify({ token: token, at: task.at }));
+  props.setProperty(queueKey, JSON.stringify(task));
+  try { supaMarkTradeDirty_(tid); } catch (dirtyErr) {}
+  return token;
+}
+
+/** 직접 반납 CAS가 성공하면 더 오래된 비동기 returnState를 같은 잠금 안에서 폐기한다. */
+function acknowledgeDashboardReturnProjection_(props, tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return false;
+  var queueKey = DASHBOARD_STRUCTURE_QUEUE_PREFIX_ + tid;
+  var task = null;
+  try { task = JSON.parse(props.getProperty(queueKey) || '{}'); } catch (parseErr) {}
+  if (!task || !task.returnState) return false;
+  delete task.returnState;
+  delete task.clearReturnCountIds;
+  delete task.lastError;
+  task.failed = false;
+  task.attempts = 0;
+  task.revision = Number(task.revision || 0) + 1;
+  task.at = Date.now();
+  task.nextAt = task.at;
+  var hasWork = !!task.syncStructure ||
+    !!(task.baselineItems && task.baselineItems.length) ||
+    !!(task.removeScheduleIds && task.removeScheduleIds.length);
+  if (!hasWork) {
+    props.deleteProperty(queueKey);
+    clearDashboardMutationLease_(props, 'dashboardStructureMutation_' + tid, String(task.token || ''));
+    return false;
+  }
+  props.setProperty(queueKey, JSON.stringify(task));
+  props.setProperty('dashboardStructureMutation_' + tid, JSON.stringify({ token: task.token, at: task.at }));
+  return true;
+}
+
+function ensureDashboardStructureProjectionTrigger_(delayMs) {
+  var props = PropertiesService.getScriptProperties();
+  var now = Date.now();
+  var delay = Math.max(1000, Number(delayMs || 1000));
+  var targetAt = now + delay;
+  var scheduledAt = Number(props.getProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_) || 0);
+  var existingTriggers = [];
+  try {
+    existingTriggers = ScriptApp.getProjectTriggers().filter(function(trigger) {
+      return trigger.getHandlerFunction() === 'flushDashboardStructureProjectionQueue_';
+    });
+  } catch (triggerListErr) {}
+  if (existingTriggers.length && scheduledAt > now && scheduledAt <= targetAt + 1000) return;
+  try {
+    // 새 watchdog을 먼저 성공시킨 뒤 예전 트리거를 정리한다. create 실패 시
+    // 이미 예약된 트리거까지 지워 큐를 고아로 만드는 창을 없앰다.
+    var newTrigger = ScriptApp.newTrigger('flushDashboardStructureProjectionQueue_').timeBased().after(delay).create();
+    props.setProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_, String(targetAt));
+    var newTriggerId = '';
+    try { newTriggerId = String(newTrigger.getUniqueId() || ''); } catch (newTriggerIdErr) {}
+    existingTriggers.forEach(function(trigger) {
+      var triggerId = '';
+      try { triggerId = String(trigger.getUniqueId() || ''); } catch (triggerIdErr) {}
+      if (!newTriggerId || triggerId !== newTriggerId) {
+        try { ScriptApp.deleteTrigger(trigger); } catch (oldTriggerDeleteErr) {}
+      }
+    });
+  } catch (triggerErr) {
+    if (!existingTriggers.length) props.deleteProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_);
+    Logger.log('장비 상태 투영 트리거 예약 실패: ' + triggerErr.message);
+  }
+}
+
+/** 거래별 큐의 외부 HTTP는 전역 ScriptLock 밖에서 실행하고 성공 확인 뒤에만 lease를 지운다. */
+function flushDashboardStructureProjectionQueue_() {
+  var props = PropertiesService.getScriptProperties();
+  try {
+    ScriptApp.getProjectTriggers().forEach(function(trigger) {
+      if (trigger.getHandlerFunction() === 'flushDashboardStructureProjectionQueue_') ScriptApp.deleteTrigger(trigger);
+    });
+  } catch (triggerCleanupErr) {}
+  props.deleteProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_);
+  var all = props.getProperties();
+  var allQueueKeys = Object.keys(all).filter(function(key) {
+    return key.indexOf(DASHBOARD_STRUCTURE_QUEUE_PREFIX_) === 0;
+  });
+  var keys = allQueueKeys.slice(0, 20);
+  var pending = allQueueKeys.length > keys.length;
+  var nextDelay = 5 * 60 * 1000;
+  // 이번 실행에서 처리하지 못한 overflow가 있으면 다음 묶음을 즉시 이어서 처리한다.
+  if (pending) nextDelay = 1000;
+  // 외부 호출 중 GAS hard-timeout이 나도 큐가 고아가 되지 않도록 먼저 watchdog을 건다.
+  if (keys.length) ensureDashboardStructureProjectionTrigger_(60 * 1000);
+  keys.forEach(function(queueKey) {
+    var task = null;
+    try { task = JSON.parse(all[queueKey] || '{}'); } catch (parseErr) {}
+    var tid = String(task && task.tradeId || queueKey.substring(DASHBOARD_STRUCTURE_QUEUE_PREFIX_.length)).trim();
+    var token = String(task && task.token || '');
+    var revision = Number(task && task.revision || 0);
+    if (!task || !tid || !token) { props.deleteProperty(queueKey); return; }
+    var waitMs = Number(task.nextAt || 0) - Date.now();
+    if (waitMs > 0) {
+      pending = true;
+      nextDelay = Math.min(nextDelay, waitMs);
+      return;
+    }
+    // 반복 실패도 장기 backoff로 계속 수렴한다. failed는 이전 버전이 남긴 진단값일 수 있다.
+    // 큐는 시트 쓰기 임계구역 안에서 등록될 수 있다. barrier 안에서 snapshot revision을
+    // 다시 확인한 뒤, 느린 시트 빌드/HTTP 자체는 전역 잠금 밖에서 수행한다.
+    var barrier = LockService.getScriptLock();
+    var barrierLocked = false;
+    var returnProjectionClaimed = false;
+    try { barrierLocked = barrier.tryLock(1000); } catch (barrierErr) {}
+    if (!barrierLocked) {
+      pending = true;
+      nextDelay = Math.min(nextDelay, 1000);
+      return;
+    }
+    try {
+      var latestTask = null;
+      try { latestTask = JSON.parse(props.getProperty(queueKey) || '{}'); } catch (latestTaskErr) {}
+      if (!latestTask || String(latestTask.token || '') !== token || Number(latestTask.revision || 0) !== revision) {
+        pending = true;
+        nextDelay = Math.min(nextDelay, 1000);
+        return;
+      }
+    } finally {
+      try { barrier.releaseLock(); } catch (barrierReleaseErr) {}
+    }
+    var ok = true;
+    try {
+      // ScriptProperties 하나만으로 반출 여부를 판정하면 속성 유실 시 완료 거래를
+      // 신규 거래로 오인해 taken_qty 없는 행을 INSERT할 수 있다. 계약/스케줄과
+      // Supabase 권한 상태·불변 기준선 중 하나라도 시작을 가리키면 잠근다.
+      var ssForProjection = SpreadsheetApp.getActiveSpreadsheet();
+      var localCheckoutStarted = isDashboardTradeCheckoutStarted_(ssForProjection, tid);
+      var durableCheckout = (task.syncStructure || (task.baselineItems && task.baselineItems.length)) &&
+        typeof supaGetCheckoutBaselineState_ === 'function'
+        ? supaGetCheckoutBaselineState_(tid)
+        : { ok: true, started: false, items: [] };
+      if (!durableCheckout || !durableCheckout.ok) ok = false;
+      var checkoutStarted = localCheckoutStarted || !!(durableCheckout && durableCheckout.started);
+      // 반출 후 새 품목은 구조보다 불변 기준선을 먼저 insert한다.
+      // 기준선 실패 후 구조만 생기는 불완전 행을 원천 차단한다.
+      if (task.baselineItems && task.baselineItems.length) {
+        // 완료 거래의 기준선이 전부 없어진 경우 현재 시트를 과거 반출 상태로
+        // 임의 승격시키지 않는다. 레거시/전환기 또는 setupDoneAt+전품목 명시적
+        // checkout 증거가 모두 남은 경우만 빈 기준선 복구를 허용한다.
+        if (task.baselineExact === true && task.baselineAllowEmptyRecovery !== true) {
+          var existingBaseline = durableCheckout;
+          if (!existingBaseline || !existingBaseline.ok || !(existingBaseline.items || []).length) ok = false;
+        }
+        var baseline = typeof supaCaptureCheckoutBaseline_ === 'function'
+          ? (ok ? supaCaptureCheckoutBaseline_(tid, task.baselineItems, task.baselineExact === true) : { ok: false })
+          : { ok: false, error: 'Supabase 반출 기준선 함수 없음' };
+        if (!baseline || !baseline.ok) ok = false;
+        else checkoutStarted = true;
+      }
+      if (ok && task.syncStructure) {
+        var cfg = SUPA_CFG_();
+        var built = buildSupabaseTrades_([tid]);
+        if (built.trades && built.trades.length && !supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id')) ok = false;
+        if (ok && built.items && built.items.length) {
+          var structureOk = checkoutStarted
+            ? supaPatchExistingScheduleItems_(cfg, built.items)
+            : supaUpsertGrouped_(cfg, 'schedule_items', built.items, 'schedule_id');
+          if (!structureOk) ok = false;
+        }
+      }
+      if (task.returnState) {
+        var rs = task.returnState;
+        var returnCounts = rs.returnCounts || null;
+        if (!rs.done && task.clearReturnCountIds && task.clearReturnCountIds.length) {
+          var countsState = supaGetTradeReturnCounts_(tid);
+          if (!countsState || !countsState.ok) ok = false;
+          else {
+            returnCounts = {};
+            var currentCounts = countsState.returnCounts || {};
+            Object.keys(currentCounts).forEach(function(id) { returnCounts[id] = currentCounts[id]; });
+            task.clearReturnCountIds.forEach(function(id) { delete returnCounts[id]; });
+          }
+        }
+        // 구조/기준선 HTTP가 길어진 뒤에도 직전 revision을 다시 확인한다. 실제 반납
+        // PATCH 구간만 claim해 대기/backoff가 사용자의 다른 카드 입력을 막지 않게 한다.
+        if (ok) {
+          var returnClaimLock = LockService.getScriptLock();
+          var returnClaimLocked = false;
+          try { returnClaimLocked = returnClaimLock.tryLock(1000); } catch (returnClaimErr) {}
+          if (!returnClaimLocked) {
+            pending = true;
+            nextDelay = Math.min(nextDelay, 1000);
+            return;
+          }
+          try {
+            var claimTask = null;
+            try { claimTask = JSON.parse(props.getProperty(queueKey) || '{}'); } catch (claimTaskErr) {}
+            if (!claimTask || String(claimTask.token || '') !== token || Number(claimTask.revision || 0) !== revision ||
+                activeDashboardMutationLease_(props, 'returnMutation_' + tid) ||
+                activeDashboardReturnProjectionLease_(props, tid)) {
+              pending = true;
+              nextDelay = Math.min(nextDelay, 1000);
+              return;
+            }
+            props.setProperty(DASHBOARD_RETURN_PROJECTION_LEASE_PREFIX_ + tid, JSON.stringify({
+              token: token,
+              revision: revision,
+              at: Date.now()
+            }));
+            returnProjectionClaimed = true;
+          } finally {
+            try { returnClaimLock.releaseLock(); } catch (returnClaimReleaseErr) {}
+          }
+        }
+        var returnSaved = typeof supaSetTradeReturnDone_ === 'function'
+          ? (ok ? supaSetTradeReturnDone_(tid, !!rs.done, rs.doneAt || null, rs.status || '반출', returnCounts, false) : { ok: false })
+          : { ok: false, error: 'Supabase 반납 상태 저장 함수 없음' };
+        if (returnProjectionClaimed) {
+          clearDashboardReturnProjectionLease_(props, tid, token, revision);
+          returnProjectionClaimed = false;
+        }
+        if (!returnSaved || !returnSaved.ok) ok = false;
+      }
+      if (ok && task.removeScheduleIds && task.removeScheduleIds.length) {
+        var removed = typeof supaMarkScheduleItemsRemoved_ === 'function'
+          ? supaMarkScheduleItemsRemoved_(tid, task.removeScheduleIds)
+          : { ok: false, error: 'Supabase 품목 제외 함수 없음' };
+        if (!removed || !removed.ok) ok = false;
+      }
+    } catch (projectionErr) {
+      ok = false;
+      Logger.log('장비 상태 투영 실패(' + tid + '): ' + projectionErr.message);
+    }
+
+    var commitLock = LockService.getScriptLock();
+    var commitLocked = false;
+    try {
+      commitLocked = commitLock.tryLock(1000);
+      if (!commitLocked) {
+        if (returnProjectionClaimed) clearDashboardReturnProjectionLease_(props, tid, token, revision);
+        pending = true;
+        return;
+      }
+      var currentRaw = String(props.getProperty(queueKey) || '');
+      var current = null;
+      try { current = JSON.parse(currentRaw || '{}'); } catch (currentErr) {}
+      if (!current || String(current.token || '') !== token || Number(current.revision || 0) !== revision) {
+        clearDashboardReturnProjectionLease_(props, tid, token, revision);
+        pending = true;
+        nextDelay = Math.min(nextDelay, 1000);
+        return;
+      }
+      if (ok) {
+        props.deleteProperty(queueKey);
+        clearDashboardMutationLease_(props, 'dashboardStructureMutation_' + tid, token);
+      } else {
+        current.attempts = Number(current.attempts || 0) + 1;
+        current.at = Date.now();
+        if (current.attempts >= DASHBOARD_STRUCTURE_MAX_ATTEMPTS_) {
+          current.failed = false;
+          current.degraded = true;
+          current.lastError = '외부 저장 반복 실패 — 30분 뒤 자동 재시도';
+          current.nextAt = current.at + 30 * 60 * 1000;
+          nextDelay = Math.min(nextDelay, 30 * 60 * 1000);
+          pending = true;
+          // 일반 장비 편집은 이 큐에 막히지 않는다. lease는 진단용으로만 지우고
+          // queue token과 작업 payload는 다음 자동/사용자 재시도까지 그대로 보존한다.
+          clearDashboardMutationLease_(props, 'dashboardStructureMutation_' + tid, token);
+          Logger.log('장비 상태 투영 반복 실패(자동 재시도): ' + tid + ' / ' + current.lastError);
+        } else {
+          var backoff = Math.min(5 * 60 * 1000, 5000 * Math.pow(2, Math.min(current.attempts - 1, 6)));
+          current.nextAt = current.at + backoff;
+          nextDelay = Math.min(nextDelay, backoff);
+          pending = true;
+        }
+        props.setProperty(queueKey, JSON.stringify(current));
+        if (!current.degraded) {
+          props.setProperty('dashboardStructureMutation_' + tid, JSON.stringify({ token: token, at: current.at }));
+        }
+      }
+    } finally {
+      if (commitLocked) {
+        if (returnProjectionClaimed) clearDashboardReturnProjectionLease_(props, tid, token, revision);
+        try { commitLock.releaseLock(); } catch (releaseErr) {}
+      }
+    }
+  });
+  if (pending) ensureDashboardStructureProjectionTrigger_(nextDelay);
+  else {
+    props.deleteProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_);
+    try {
+      ScriptApp.getProjectTriggers().forEach(function(trigger) {
+        if (trigger.getHandlerFunction() === 'flushDashboardStructureProjectionQueue_') ScriptApp.deleteTrigger(trigger);
+      });
+    } catch (cleanupErr) {}
+  }
+}
+
+/** 앱 자동 복구용. 반출 후에는 현재 시트 품목을 기존 불변 기준선과 정확히
+ * 교차 검증한 뒤만 누락 행을 복구한다. 외부 HTTP는 내구 큐 worker가 잠금 밖에서 수행한다. */
+function repairDashboardTradeProjection_(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { error: '거래ID 필수' };
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sched = ss.getSheetByName('스케줄상세');
+  if (!sched) return { error: '스케줄상세 시트 없음' };
+  var rowsByTid = getDashboardRowsByTradeId_(sched, tid);
+  if (!rowsByTid[tid] || !rowsByTid[tid].length) return { error: '복구할 스케줄 행 없음: ' + tid };
+  var groups = getDashboardSearchGroupsForIds_(sched, [tid], rowsByTid);
+  var group = groups[tid];
+  var props = PropertiesService.getScriptProperties();
+  var localCheckoutStarted = isDashboardTradeCheckoutStarted_(ss, tid);
+  var durableCheckout = typeof supaGetCheckoutBaselineState_ === 'function'
+    ? supaGetCheckoutBaselineState_(tid)
+    : { ok: false, error: 'Supabase 반출 상태 조회 함수 없음', started: false, items: [] };
+  if (!durableCheckout || !durableCheckout.ok) {
+    return { error: '장비 복구 안전 상태를 확인하지 못했습니다: ' + String(durableCheckout && durableCheckout.error || '조회 실패') };
+  }
+  var checkoutStarted = localCheckoutStarted || !!durableCheckout.started;
+  var baselineItems = checkoutStarted
+    ? getDashboardReturnCheckableItems_(group && group.equipments || [])
+    : [];
+  if (checkoutStarted && !baselineItems.length) {
+    return { error: '반출 기준선을 검증할 품목이 없습니다: ' + tid };
+  }
+  var existingBaselineItems = durableCheckout.items || [];
+  var allowEmptyRecovery = checkoutStarted && !existingBaselineItems.length &&
+    canDashboardRecoverMissingCheckoutBaseline_(tid, props, baselineItems);
+  if (checkoutStarted && !existingBaselineItems.length && !allowEmptyRecovery) {
+    return { error: '반출 기준선이 없어 자동 복구를 중단했습니다: ' + tid };
+  }
+  if (checkoutStarted && existingBaselineItems.length) {
+    var currentIds = baselineItems.map(function(item) { return String(item.scheduleId || '').trim(); }).filter(Boolean).sort();
+    var baselineIds = existingBaselineItems.map(function(item) { return String(item.schedule_id || '').trim(); }).filter(Boolean).sort();
+    if (currentIds.join('|') !== baselineIds.join('|')) {
+      return { error: '현재 품목과 반출 기준선이 달라 자동 복구를 중단했습니다: ' + tid };
+    }
+  }
+
+  var lock = LockService.getScriptLock();
+  var locked = false;
+  var projectionQueued = false;
+  try {
+    locked = lock.tryLock(1000);
+    if (!locked) return { error: '다른 거래 변경 처리 중입니다.', code: 'BUSY', retryable: true };
+    var blocked = dashboardTradeMutationLeaseError_(props, tid, 'structure', '');
+    if (blocked) return blocked;
+    var token = scheduleDashboardStructureProjectionUnderLock_(tid, {
+      syncStructure: true,
+      baselineItems: baselineItems,
+      baselineExact: checkoutStarted,
+      baselineAllowEmptyRecovery: allowEmptyRecovery
+    });
+    projectionQueued = true;
+    return { success: true, tradeId: tid, projectionPending: true, token: token };
+  } finally {
+    if (locked) try { lock.releaseLock(); } catch (releaseErr) {}
+    if (projectionQueued) ensureDashboardStructureProjectionTrigger_();
+  }
+}
+
+function normalizeDashboardMutationId_(value) {
+  var id = String(value || '').trim();
+  if (!id) return '';
+  if (id.length > 120 || !/^[A-Za-z0-9_.:-]+$/.test(id)) return '';
+  return id;
+}
+
+function dashboardMutationLogKey_(tid, scope) {
+  var input = String(scope || '');
+  var hash = 2166136261;
+  for (var i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return DASHBOARD_MUTATION_LOG_PREFIX_ + String(tid || '').trim() + '_' + (hash >>> 0).toString(36);
+}
+
+function readDashboardMutationLog_(props, tid, scope) {
+  var raw = props.getProperty(dashboardMutationLogKey_(tid, scope));
+  if (!raw) return [];
+  try {
+    var parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+/** 거래/품목별로 나눈 idempotency log의 빈 키를 주기적으로 제거해 Properties quota를 지킨다. */
+function cleanupExpiredDashboardMutationLogs_(props) {
+  try {
+    var cache = CacheService.getScriptCache();
+    if (cache.get('dashboardMutationCleanup_v2')) return;
+    cache.put('dashboardMutationCleanup_v2', '1', 300);
+    var all = props.getProperties();
+    var now = Date.now();
+    Object.keys(all).forEach(function(key) {
+      if (key.indexOf(DASHBOARD_MUTATION_LOG_PREFIX_) !== 0) return;
+      var log = [];
+      try { log = JSON.parse(all[key] || '[]'); } catch (err) {}
+      if (!Array.isArray(log)) log = [];
+      var fresh = log.filter(function(entry) {
+        return entry && now - Number(entry.at || 0) < DASHBOARD_MUTATION_LOG_TTL_MS_;
+      });
+      if (!fresh.length) props.deleteProperty(key);
+      else if (fresh.length !== log.length) props.setProperty(key, JSON.stringify(fresh));
+    });
+  } catch (cleanupErr) {}
+}
+
+/** 반드시 ScriptLock 안에서 호출. committed 중복과 더 최신 mutation 뒤의 stale retry는 skip한다. */
+function beginDashboardMutation_(props, tid, mutationId, scope, target) {
+  mutationId = normalizeDashboardMutationId_(mutationId);
+  if (!mutationId) return { legacy: true, skip: false };
+  cleanupExpiredDashboardMutationLogs_(props);
+  var now = Date.now();
+  var log = readDashboardMutationLog_(props, tid, scope).filter(function(entry) {
+    return entry && now - Number(entry.at || 0) < DASHBOARD_MUTATION_LOG_TTL_MS_;
+  });
+  var found = -1;
+  for (var i = 0; i < log.length; i++) {
+    if (String(log[i].id || '') === mutationId) { found = i; break; }
+  }
+  if (found >= 0) {
+    var entry = log[found];
+    if (String(entry.target || '') !== String(target || '')) {
+      return { error: '같은 mutationId가 다른 변경에 사용되었습니다.' };
+    }
+    var laterSameScope = log.length > found + 1 ? log[log.length - 1] : null;
+    var hasLater = !!laterSameScope;
+    return {
+      duplicate: true,
+      skip: entry.state === 'committed' || hasLater,
+      pendingLater: hasLater && laterSameScope.state !== 'committed'
+    };
+  }
+  log.push({ id: mutationId, target: String(target || ''), state: 'pending', at: now });
+  var serialized = JSON.stringify(log);
+  if (serialized.length > 8000) return { error: '같은 항목을 너무 빠르게 반복 변경했습니다. 잠시 후 다시 시도해주세요.' };
+  props.setProperty(dashboardMutationLogKey_(tid, scope), serialized);
+  return { duplicate: false, skip: false };
+}
+
+/** 반드시 ScriptLock 안에서 호출. */
+function commitDashboardMutation_(props, tid, mutationId, scope) {
+  mutationId = normalizeDashboardMutationId_(mutationId);
+  if (!mutationId) return;
+  var log = readDashboardMutationLog_(props, tid, scope);
+  for (var i = 0; i < log.length; i++) {
+    if (String(log[i].id || '') === mutationId) {
+      log[i].state = 'committed';
+      log[i].at = Date.now();
+      props.setProperty(dashboardMutationLogKey_(tid, scope), JSON.stringify(log));
+      return;
+    }
+  }
+}
+
+function dashboardSetupCanonicalResult_(tid, props) {
+  var done = props.getProperty('setupDone_' + tid) === '1';
+  var doneAt = done ? String(props.getProperty('setupDoneAt_' + tid) || '') : '';
+  return { tid: tid, setupDone: done, setupDoneAt: doneAt, doneAt: doneAt, deduped: true };
+}
+
+function dashboardReturnCanonicalResult_(tid, props) {
+  var done = props.getProperty('returnDone_' + tid) === '1';
+  var doneAt = done ? String(props.getProperty('returnDoneAt_' + tid) || '') : '';
+  var status = done ? '반납완료' : '반출';
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('계약마스터');
+    var contract = getDashboardContractMapForIds_(sheet, [tid])[tid];
+    if (contract && contract.contractStatus) status = String(contract.contractStatus);
+  } catch (err) {}
+  return {
+    tid: tid,
+    returnDone: done,
+    returnDoneAt: doneAt,
+    doneAt: doneAt,
+    contractStatus: status,
+    deduped: true
+  };
+}
+
+function toggleSetupDone(tid, done, options) {
   if (!tid) return { error: "tid 필요" };
   tid = String(tid).trim();
   var key = 'setupDone_' + tid;
   var atKey = 'setupDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
-  var previousDoneProp = props.getProperty(key);
-  var previousDoneAtProp = props.getProperty(atKey);
+  var previousDoneProp = null;
+  var previousDoneAtProp = null;
   var isDone = done === true || done === "true" || done === "1" || done === 1;
+  var mutationId = normalizeDashboardMutationId_(options && options.mutationId);
+  var closingKey = 'setupClosing_' + tid;
+  var setupLeaseKey = 'setupMutation_' + tid;
+  var closingMarked = false;
+  var closingToken = '';
+  var preserveClosingLease = false;
   try {
+    // 완료/재오픈 모두 같은 거래 lease를 사용한다. 오래 걸리는 기준선 HTTP는 전역 잠금 밖에서
+    // 실행하되 다른 기기의 품목 체크와 반대 전환은 lease에서 즉시 BUSY로 물러난다.
+    var transitionLock = LockService.getScriptLock();
+    var transitionLocked = false;
+    try {
+      transitionLocked = transitionLock.tryLock(1000);
+      if (!transitionLocked) {
+        return { error: '다른 반출 변경 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+      }
+      var existingClosing = String(props.getProperty(closingKey) || '');
+      var existingClosingAt = Number(existingClosing.split('|')[0]) || 0;
+      var existingSetupLease = activeDashboardMutationLease_(props, setupLeaseKey);
+      var sameSetupLease = !!(
+        existingSetupLease && mutationId &&
+        String(existingSetupLease.mutationId || '') === mutationId &&
+        String(existingSetupLease.target || '') === (isDone ? '1' : '0')
+      );
+      if (existingClosing && Date.now() - existingClosingAt < DASHBOARD_SETUP_CLOSING_LEASE_MS_ && !sameSetupLease) {
+        return { error: '같은 거래의 반출 상태를 처리 중입니다.', code: 'BUSY', retryable: true };
+      }
+      if (existingClosing && !sameSetupLease) props.deleteProperty(closingKey);
+      var pendingItemCheckout = activeDashboardMutationLease_(props, 'checkoutItemMutation_' + tid);
+      if (pendingItemCheckout) {
+        return { error: '같은 거래의 품목 반출 체크를 저장 중입니다.', code: 'BUSY', retryable: true };
+      }
+      var pendingReturn = activeDashboardMutationLease_(props, 'returnMutation_' + tid);
+      if (pendingReturn) {
+        return { error: '같은 거래의 반납 상태를 처리 중입니다.', code: 'BUSY', retryable: true };
+      }
+      var mutation = beginDashboardMutation_(props, tid, mutationId, 'setup', isDone ? '1' : '0');
+      if (mutation.error) return { error: mutation.error };
+      if (mutation.skip) {
+        if (mutation.pendingLater) {
+          return { error: '더 최신 반출 변경을 처리 중입니다.', code: 'BUSY', retryable: true };
+        }
+        return dashboardSetupCanonicalResult_(tid, props);
+      }
+      if (sameSetupLease) {
+        closingToken = String(existingSetupLease.token || existingClosing || '');
+        previousDoneProp = Object.prototype.hasOwnProperty.call(existingSetupLease, 'previousDoneProp')
+          ? existingSetupLease.previousDoneProp : null;
+        previousDoneAtProp = Object.prototype.hasOwnProperty.call(existingSetupLease, 'previousDoneAtProp')
+          ? existingSetupLease.previousDoneAtProp : null;
+      } else {
+        previousDoneProp = props.getProperty(key);
+        previousDoneAtProp = props.getProperty(atKey);
+        closingToken = String(Date.now()) + '|' + (mutationId || String(Math.random()).slice(2));
+        props.setProperty(setupLeaseKey, JSON.stringify({
+          token: closingToken,
+          mutationId: mutationId,
+          target: isDone ? '1' : '0',
+          previousDoneProp: previousDoneProp,
+          previousDoneAtProp: previousDoneAtProp,
+          at: Date.now()
+        }));
+      }
+      props.setProperty(closingKey, closingToken);
+      closingMarked = true;
+    } finally {
+      if (transitionLocked) try { transitionLock.releaseLock(); } catch (transitionReleaseErr) {}
+    }
     var doneAt = "";
     if (isDone) {
       var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2630,6 +3353,15 @@ function toggleSetupDone(tid, done) {
         ? supaSetTradeSetupDone_(tid, true, doneAt)
         : { ok: false, error: 'Supabase 반출완료 저장 함수 없음' };
       if (!setupSaved || !setupSaved.ok) {
+        if (setupSaved && setupSaved.outcomeUnknown) {
+          preserveClosingLease = true;
+          return {
+            error: '반출완료 저장 결과를 다시 확인 중입니다: ' + String(setupSaved.error || ''),
+            code: 'OUTCOME_UNKNOWN',
+            retryable: true,
+            outcomeUnknown: true
+          };
+        }
         props.deleteProperty(key);
         props.deleteProperty(atKey);
         var restoredDone = {};
@@ -2646,6 +3378,15 @@ function toggleSetupDone(tid, done) {
         ? supaSetTradeSetupDone_(tid, false, null)
         : { ok: false, error: 'Supabase 반출완료 저장 함수 없음' };
       if (!setupCleared || !setupCleared.ok) {
+        if (setupCleared && setupCleared.outcomeUnknown) {
+          preserveClosingLease = true;
+          return {
+            error: '반출완료 해제 결과를 다시 확인 중입니다: ' + String(setupCleared.error || ''),
+            code: 'OUTCOME_UNKNOWN',
+            retryable: true,
+            outcomeUnknown: true
+          };
+        }
         var restoredOpen = {};
         if (previousDoneProp !== null) restoredOpen[key] = previousDoneProp;
         if (previousDoneAtProp !== null) restoredOpen[atKey] = previousDoneAtProp;
@@ -2653,10 +3394,34 @@ function toggleSetupDone(tid, done) {
         return { error: '반출완료 해제 차단: 앱 완료 상태를 저장하지 못했습니다 — ' + String(setupCleared && setupCleared.error || '저장 실패') };
       }
     }
+    var setupCommitLock = LockService.getScriptLock();
+    var setupCommitLocked = false;
+    try {
+      setupCommitLocked = setupCommitLock.tryLock(1000);
+      if (setupCommitLocked) {
+        commitDashboardMutation_(props, tid, mutationId, 'setup');
+        clearDashboardMutationLease_(props, setupLeaseKey, closingToken);
+      }
+    } catch (setupMutationCommitErr) {
+      Logger.log('반출 mutation 완료표시 실패(정본 유지): ' + setupMutationCommitErr.message);
+    } finally {
+      if (setupCommitLocked) try { setupCommitLock.releaseLock(); } catch (setupCommitReleaseErr) {}
+    }
+    if (!setupCommitLocked) {
+      preserveClosingLease = true;
+      return { error: '반출완료 최종 반영 대기 중입니다.', code: 'BUSY', retryable: true };
+    }
     invalidateDashboardCache();
     return { tid: tid, setupDone: isDone, setupDoneAt: doneAt, doneAt: doneAt };
   } catch (err) {
     return { error: err && err.message ? err.message : String(err) };
+  } finally {
+    if (closingMarked && !preserveClosingLease) {
+      try {
+        if (props.getProperty(closingKey) === closingToken) props.deleteProperty(closingKey);
+        clearDashboardMutationLease_(props, setupLeaseKey, closingToken);
+      } catch (closingClearErr) {}
+    }
   }
 }
 
@@ -2816,11 +3581,11 @@ function assertDashboardReturnComplete_(tid, props) {
     currentScheduleIds[String(eq.scheduleId || '').trim()] = true;
   });
   var allRecordedBaselineItems = (durable.scheduleItems || []).filter(function(item) {
-    return item.checkout_state !== 'excluded' && Number(item.taken_qty || 0) > 0;
+    return Number(item.taken_qty || 0) > 0;
   });
-  var recordedBaselineItems = allRecordedBaselineItems.filter(function(item) {
-    return !!currentScheduleIds[String(item.schedule_id || '').trim()];
-  });
+  // taken_qty 기준선은 시트 행 삭제/checkout_state=excluded보다 우선한다. 예전
+  // 클라이언트가 품목을 제외했어도 실제 반출된 물건의 반납 의무는 사라지지 않는다.
+  var recordedBaselineItems = allRecordedBaselineItems.slice();
 
   // 기준선이 완전히 0건인 경우에만 복구한다. 구형 거래이거나, 신규 거래라도 반출완료 시각과
   // 모든 실제 품목의 명시적 반출 체크가 남아 있고 반납 수량까지 정확히 맞아야 한다.
@@ -2852,17 +3617,13 @@ function assertDashboardReturnComplete_(tid, props) {
       };
     }
     allRecordedBaselineItems = (durable.scheduleItems || []).filter(function(item) {
-      return item.checkout_state !== 'excluded' && Number(item.taken_qty || 0) > 0;
+      return Number(item.taken_qty || 0) > 0;
     });
-    recordedBaselineItems = allRecordedBaselineItems.filter(function(item) {
-      return !!currentScheduleIds[String(item.schedule_id || '').trim()];
-    });
+    recordedBaselineItems = allRecordedBaselineItems.slice();
   }
 
   recordedBaselineItems = recordedBaselineItems.filter(function(item) {
-    return item.checkout_state !== 'excluded' &&
-      Number(item.taken_qty || 0) > 0 &&
-      !!currentScheduleIds[String(item.schedule_id || '').trim()];
+    return Number(item.taken_qty || 0) > 0;
   });
   var checkable = recordedBaselineItems.filter(function(item) {
     return supaActualTakenQty_(item) > 0;
@@ -2888,7 +3649,8 @@ function assertDashboardReturnComplete_(tid, props) {
   });
   // 예약 장비명·수량은 반출 후에도 수정할 수 있다. 반납 검수는 현재 예약값이 아니라
   // 반출 순간 Supabase에 고정한 실제 품목명·taken_qty를 계속 기준으로 삼는다.
-    // 삭제된 예약 품목은 현재 반납 대상에서도 제외한다. 기준선 없는 새 행만 차단한다.
+  // 현재 시트에 새로 생긴 기준선 없는 행은 차단하되, 사라진 기준선 행은 위에서 계속
+  // 반납 대상으로 유지한다.
   var baselineStructureChanged = currentCheckable.filter(function(current) {
     return !baselineById[String(current.scheduleId || '').trim()];
   });
@@ -2915,10 +3677,11 @@ function assertDashboardReturnComplete_(tid, props) {
       tid, eq.qty, eq.name, eq.setName, eq.isHeader
     );
   });
-  props.setProperties(completedProofs, false);
   return {
     success: true,
     checkedCount: checkable.length,
+    returnCountsSnapshot: durable.returnCounts || {},
+    completedProofs: completedProofs,
     // toggleReturnDone이 반출 체크 키 정리에 재사용 — 같은 그룹 스캔을 두 번 하지 않는다
     scheduleIds: (group.equipments || []).map(function(eq) { return String(eq.scheduleId || '').trim(); }).filter(Boolean)
   };
@@ -2939,31 +3702,47 @@ function invalidateDashboardReturnInspectionForTrade_(tid, scheduleIds, reason) 
     });
 
     var shouldReopen = props.getProperty('returnDone_' + tid) === '1';
+    var currentContractStatus = '';
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var contractSheet = ss.getSheetByName('계약마스터');
     if (contractSheet && contractSheet.getLastRow() >= 2) {
       var rows = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 10).getDisplayValues();
       for (var i = 0; i < rows.length; i++) {
         if (String(rows[i][0] || '').trim() !== tid) continue;
-        if (String(rows[i][9] || '').trim() === '반납완료') shouldReopen = true;
+        currentContractStatus = String(rows[i][9] || '').trim();
+        if (currentContractStatus === '반납완료') shouldReopen = true;
         break;
       }
     }
 
     var reopenedStatus = '';
+    var reopenedResult = null;
     if (shouldReopen) {
-      var reopened = setDashboardReturnContractStatus_(tid, false, props);
-      if (reopened && reopened.error) return reopened;
-      reopenedStatus = String(reopened && reopened.status || '').trim();
+      reopenedResult = setDashboardReturnContractStatus_(tid, false, props);
+      if (reopenedResult && reopenedResult.error) return reopenedResult;
+      reopenedStatus = String(reopenedResult && reopenedResult.status || '').trim();
     }
     props.deleteProperty('returnDone_' + tid);
     props.deleteProperty('returnDoneAt_' + tid);
+    // Supabase HTTP는 호출자의 전역 ScriptLock 밖에 있는 거래별 내구 큐가 맡는다.
+    // 응답이 끊겨도 큐/revision이 남아 재시도되고, 다른 장비 편집은 같은 큐에 합쳐진다.
+    scheduleDashboardStructureProjectionUnderLock_(tid, {
+      syncStructure: true,
+      clearReturnCountIds: scheduleIds || [],
+      returnState: {
+        done: false,
+        doneAt: null,
+        status: reopenedStatus || currentContractStatus || '예약',
+        returnCounts: null
+      }
+    });
     invalidateDashboardCache();
     return {
       success: true,
       tradeId: tid,
       reopened: shouldReopen,
       contractStatus: reopenedStatus,
+      projectionPending: true,
       reason: String(reason || '')
     };
   } catch (err) {
@@ -2981,6 +3760,14 @@ function toggleReturnDone(tid, done, options) {
   var atKey = 'returnDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
+  var mutationId = normalizeDashboardMutationId_(options && options.mutationId);
+  var enforceExpectedReturnDoneAt = !isDone && !!(options && (
+    options.enforceExpectedReturnDoneAt === true ||
+    options.enforceExpectedReturnDoneAt === 1 ||
+    options.enforceExpectedReturnDoneAt === '1' ||
+    options.enforceExpectedReturnDoneAt === 'true'
+  ));
+  var expectedReturnDoneAt = String(options && options.expectedReturnDoneAt || '').trim();
   // force: 완료 검증을 건너뛰고 작업자 판단으로 종결한다(확인 다이얼로그 뒤에만 전달됨).
   // 카드는 반납완료 전까지 계속 살아있고 미확인 내역은 returnCounts에 그대로 남으므로,
   // 강제 차단 대신 사람이 결정하는 소프트 가드가 운영 정책이다.
@@ -2991,8 +3778,9 @@ function toggleReturnDone(tid, done, options) {
   // 계약서 재생성 워커 등 긴 잠금과 겹칠 때 5초 대기가 항상 져서
   // 반납완료 버튼이 계속 실패했다. 잠금 안에는 시트 상태 기록과 속성 쓰기만 남긴다.
   var cleanupSids = [];
+  var completionCheck = null;
   if (isDone && !force) {
-    var completionCheck = assertDashboardReturnComplete_(tid, props);
+    completionCheck = assertDashboardReturnComplete_(tid, props);
     if (completionCheck && completionCheck.error) return completionCheck;
     cleanupSids = (completionCheck && completionCheck.scheduleIds) || [];
   }
@@ -3003,65 +3791,217 @@ function toggleReturnDone(tid, done, options) {
     try { cleanupSids = listDashboardCheckoutItemCheckSids_(tid); } catch (sidErr) { cleanupSids = []; }
   }
 
+  var returnLeaseKey = 'returnMutation_' + tid;
+  var returnLeaseToken = '';
+  var returnLease = null;
   var lock = LockService.getScriptLock();
   var lockAcquired = false;
   try {
-    lock.waitLock(20000);
-    lockAcquired = true;
+    lockAcquired = lock.tryLock(1000);
+    if (!lockAcquired) {
+      return {
+        error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.',
+        code: 'BUSY',
+        retryable: true
+      };
+    }
   } catch (lockErr) {
-    return { error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.' };
+    return {
+      error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.',
+      code: 'BUSY',
+      retryable: true
+    };
   }
 
   try {
-    var previousDone = props.getProperty(key);
-    var previousDoneAt = props.getProperty(atKey);
-    var contractResult = setDashboardReturnContractStatus_(tid, isDone, props, { skipCompletionCheck: isDone });
-    if (contractResult && contractResult.error) return contractResult;
+    var existingReturnLease = activeDashboardMutationLease_(props, returnLeaseKey);
+    if (existingReturnLease) {
+      var sameReturnLease = mutationId &&
+        String(existingReturnLease.mutationId || '') === mutationId &&
+        String(existingReturnLease.target || '') === (isDone ? '1' : '0');
+      if (!sameReturnLease) {
+        return { error: '같은 거래의 반납 상태를 처리 중입니다.', code: 'BUSY', retryable: true };
+      }
+      returnLeaseToken = String(existingReturnLease.token || '');
+      returnLease = existingReturnLease;
+    }
+    var returnLeaseBlock = dashboardTradeMutationLeaseError_(props, tid, 'return', returnLeaseToken);
+    if (returnLeaseBlock) return returnLeaseBlock;
 
-    try {
-      var doneAt = "";
+    var mutation = beginDashboardMutation_(props, tid, mutationId, 'return', isDone ? '1' : '0');
+    if (mutation.error) return { error: mutation.error };
+    if (mutation.skip) {
+      if (mutation.pendingLater) {
+        return { error: '더 최신 반납 변경을 처리 중입니다.', code: 'BUSY', retryable: true };
+      }
+      return dashboardReturnCanonicalResult_(tid, props);
+    }
+
+    // 완료 화면에서 시작한 수량 정정만 재오픈할 수 있다. A의 재오픈 응답이 유실된 뒤
+    // B가 새로 반납완료한 경우, A의 outbox 재시도가 B의 더 최신 완료를 되돌리지 못하도록
+    // 관찰한 완료시각을 같은 ScriptLock 안에서 CAS한다. 같은 mutation lease의 응답 재확인은
+    // 이미 이 CAS를 통과한 자기 작업이므로 그대로 이어간다.
+    if (!returnLease && enforceExpectedReturnDoneAt) {
+      var currentReturnDone = props.getProperty(key) === '1';
+      var currentReturnDoneAt = String(props.getProperty(atKey) || '').trim();
+      if (!currentReturnDone || !dashboardDoneAtMatches_(currentReturnDoneAt, expectedReturnDoneAt)) {
+        var changedCanonical = dashboardReturnCanonicalResult_(tid, props);
+        var canonicalStillDone = changedCanonical.returnDone === true ||
+          String(changedCanonical.contractStatus || '') === '반납완료';
+        // 이 요청은 CAS 거절로 아무 상태도 바꾸지 않았지만 pending log를 그대로 두면,
+        // 앞선 직원의 완료 mutation 재확인이 이 항목을 pendingLater로 보고 TTL 동안 막힌다.
+        // no-op committed로 마감해 양쪽 요청이 최신 canonical로 즉시 수렴하게 한다.
+        try {
+          commitDashboardMutation_(props, tid, mutationId, 'return');
+        } catch (rejectCommitErr) {
+          return {
+            error: '오래된 반납 재오픈 요청 정리 중입니다. 잠시 후 다시 시도해주세요.',
+            code: 'BUSY',
+            retryable: true
+          };
+        }
+        changedCanonical.returnDone = canonicalStillDone;
+        changedCanonical.expectedReturnDoneAtMismatch = true;
+        changedCanonical.expectedReturnDoneAt = expectedReturnDoneAt;
+        changedCanonical.code = 'RETURN_COMPLETION_CHANGED';
+        changedCanonical.conflict = canonicalStillDone;
+        changedCanonical.rejectedMutationCommitted = true;
+        return changedCanonical;
+      }
+    }
+
+    if (!returnLease) {
+      var previousDone = props.getProperty(key);
+      var previousDoneAt = props.getProperty(atKey);
+      var contractResult = setDashboardReturnContractStatus_(tid, isDone, props, { skipCompletionCheck: isDone });
+      if (contractResult && contractResult.error) return contractResult;
+      var doneAt = isDone ? formatDashboardDoneAt_(new Date()) : "";
       if (isDone) {
-        doneAt = formatDashboardDoneAt_(new Date());
         props.setProperty(key, '1');
         props.setProperty(atKey, doneAt);
-        // quota 정리는 완료 커밋의 필수 조건이 아니다. 실패해도 체크 증거를 보존한 채 로그만 남긴다.
-        // 대상 스케줄ID는 잠금 밖에서 미리 조회했으므로 여기선 속성 삭제만 한다.
+      } else {
+        props.deleteProperty(key);
+        props.deleteProperty(atKey);
+      }
+      returnLeaseToken = (mutationId || String(Math.random()).slice(2)) + ':return:' + Date.now();
+      returnLease = {
+        token: returnLeaseToken,
+        mutationId: mutationId,
+        target: isDone ? '1' : '0',
+        at: Date.now(),
+        doneAt: doneAt,
+        previousDone: previousDone,
+        previousDoneAt: previousDoneAt,
+        contractResult: {
+          success: !!contractResult.success,
+          tradeId: contractResult.tradeId,
+          row: contractResult.row,
+          previousStatus: contractResult.previousStatus || '',
+          previousPrevStatus: contractResult.previousPrevStatus == null ? null : contractResult.previousPrevStatus,
+          status: contractResult.status
+        }
+      };
+      props.setProperty(returnLeaseKey, JSON.stringify(returnLease));
+    }
+  } finally {
+    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+
+  var returnSaved = typeof supaSetTradeReturnDone_ === 'function'
+    ? supaSetTradeReturnDone_(
+        tid,
+        isDone,
+        String(returnLease.doneAt || ''),
+        returnLease.contractResult && returnLease.contractResult.status,
+        completionCheck && completionCheck.returnCountsSnapshot,
+        force
+      )
+    : { ok: false, error: 'Supabase 반납 상태 저장 함수 없음' };
+
+  if (!returnSaved || !returnSaved.ok) {
+    if (returnSaved && returnSaved.outcomeUnknown) {
+      return {
+        error: '반납 상태 저장 결과를 다시 확인 중입니다: ' + String(returnSaved.error || ''),
+        code: 'OUTCOME_UNKNOWN',
+        retryable: true,
+        outcomeUnknown: true
+      };
+    }
+    var rollbackLock = LockService.getScriptLock();
+    var rollbackLocked = false;
+    try {
+      rollbackLocked = rollbackLock.tryLock(2000);
+      if (!rollbackLocked) {
+        return { error: '반납 실패 원상복구 대기 중입니다.', code: 'BUSY', retryable: true };
+      }
+      var rollbackLease = activeDashboardMutationLease_(props, returnLeaseKey);
+      if (rollbackLease && String(rollbackLease.token || '') === returnLeaseToken) {
+        if (rollbackLease.previousDone === null || rollbackLease.previousDone === undefined) props.deleteProperty(key);
+        else props.setProperty(key, rollbackLease.previousDone);
+        if (rollbackLease.previousDoneAt === null || rollbackLease.previousDoneAt === undefined) props.deleteProperty(atKey);
+        else props.setProperty(atKey, rollbackLease.previousDoneAt);
+        rollbackDashboardReturnContractStatus_(rollbackLease.contractResult, props);
+        clearDashboardMutationLease_(props, returnLeaseKey, returnLeaseToken);
+      }
+    } catch (rollbackErr) {
+      return { error: '반납 상태 저장 및 원상복구 실패: ' + rollbackErr.message };
+    } finally {
+      if (rollbackLocked) try { rollbackLock.releaseLock(); } catch (rollbackReleaseErr) {}
+    }
+    invalidateDashboardCache();
+    return { error: '반납 상태 저장 실패(원상복구): ' + String(returnSaved && returnSaved.error || '저장 실패') };
+  }
+
+  var commitLock = LockService.getScriptLock();
+  var commitLocked = false;
+  var projectionNeedsTrigger = false;
+  try {
+    commitLocked = commitLock.tryLock(2000);
+    if (!commitLocked) {
+      return { error: '반납 상태 최종 반영 대기 중입니다.', code: 'BUSY', retryable: true };
+    }
+    var commitLease = activeDashboardMutationLease_(props, returnLeaseKey);
+    if (!commitLease || String(commitLease.token || '') !== returnLeaseToken) {
+      return { error: '반납 상태 최종 반영 순서가 바뀌었습니다.', code: 'BUSY', retryable: true };
+    }
+      // 레거시 이진 체크 증거는 CAS 완료가 성공한 뒤에만 남긴다.
+      if (isDone && completionCheck && completionCheck.completedProofs) {
+        try { props.setProperties(completionCheck.completedProofs, false); } catch (proofErr) {
+          Logger.log('반납 완료 증거 보조 저장 실패(완료 유지): ' + proofErr.message);
+        }
+      }
+      // quota 정리는 완료 CAS 뒤의 보조 정리다. CAS가 실패하면 반출 체크 증거를 보존한다.
+      if (isDone) {
         try {
           cleanupSids.forEach(function(sid) { props.deleteProperty('itemCheck_' + sid + '_checkout'); });
         } catch (cleanupErr) {
           Logger.log('반출 체크 정리 실패(완료 유지): ' + cleanupErr.message);
         }
-      } else {
-        props.deleteProperty(key);
-        props.deleteProperty(atKey);
       }
-      // 앱 버튼은 뒤에서 Supabase를 즉시 저장하지만, 시트·직접 GAS·재시도 경로도 같은
-      // 최종 상태로 수렴해야 한다. dirty 트리거가 거래/반납완료 상태를 다시 밀도록 표시한다.
+      try { commitDashboardMutation_(props, tid, mutationId, 'return'); } catch (mutationCommitErr) {
+        // 정본은 이미 Sheet+Supabase에 확정됐다. pending 로그를 남기면 같은 ID 재시도가
+        // 최신 mutation 유무를 보고 안전하게 재적용/skip하므로 완료 자체는 되돌리지 않는다.
+        Logger.log('반납 mutation 완료표시 실패(정본 유지): ' + mutationCommitErr.message);
+      }
+      // 이 직접 CAS가 현재 정본이다. 이전 구조 큐에 남은 returnState가 뒤늦게
+      // 완료/재오픈을 되돌리지 못하도록 동일 ScriptLock 안에서 제거한다.
+      projectionNeedsTrigger = acknowledgeDashboardReturnProjection_(props, tid);
+      clearDashboardMutationLease_(props, returnLeaseKey, returnLeaseToken);
+      // GAS가 Sheet와 Supabase를 함께 확정했고, dirty 동기화는 추가 수렴 안전망으로만 남긴다.
       try { supaMarkTradeDirty_(tid); } catch (dirtyErr) {}
       invalidateDashboardCache();
       return {
         tid: tid,
         returnDone: isDone,
-        returnDoneAt: doneAt,
-        doneAt: doneAt,
-        contractStatus: contractResult.status,
-        previousContractStatus: contractResult.previousStatus || '',
-        row: contractResult.row
+        returnDoneAt: String(returnLease.doneAt || ''),
+        doneAt: String(returnLease.doneAt || ''),
+        contractStatus: returnLease.contractResult.status,
+        previousContractStatus: returnLease.contractResult.previousStatus || '',
+        row: returnLease.contractResult.row
       };
-    } catch (postErr) {
-      // 속성 저장이 실패했는데 J열만 반납완료로 남지 않도록 보상 트랜잭션을 수행한다.
-      try {
-        if (previousDone === null) props.deleteProperty(key); else props.setProperty(key, previousDone);
-        if (previousDoneAt === null) props.deleteProperty(atKey); else props.setProperty(atKey, previousDoneAt);
-      } catch (restorePropErr) {}
-      try { rollbackDashboardReturnContractStatus_(contractResult, props); } catch (rollbackErr) {
-        return { error: '반납 상태 저장 및 원상복구 실패: ' + rollbackErr.message };
-      }
-      invalidateDashboardCache();
-      return { error: '반납 상태 저장 실패(원상복구): ' + (postErr && postErr.message ? postErr.message : String(postErr)) };
-    }
   } finally {
-    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
+    if (commitLocked) try { commitLock.releaseLock(); } catch (commitReleaseErr) {}
+    if (projectionNeedsTrigger) ensureDashboardStructureProjectionTrigger_();
   }
 }
 
@@ -3086,7 +4026,31 @@ function clearDashboardCheckoutItemChecks_(tid, props) {
 }
 
 function formatDashboardDoneAt_(date) {
-  return Utilities.formatDate(date || new Date(), "Asia/Seoul", "yyyy-MM-dd HH:mm:ss");
+  return (date || new Date()).toISOString();
+}
+
+function dashboardDoneAtEpoch_(value) {
+  var text = String(value || '').trim();
+  if (!text) return 0;
+  var legacy = text.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+  if (legacy) {
+    return Date.UTC(
+      Number(legacy[1]), Number(legacy[2]) - 1, Number(legacy[3]),
+      Number(legacy[4]) - 9, Number(legacy[5]), Number(legacy[6]),
+      Number((legacy[7] || '0').padEnd(3, '0'))
+    );
+  }
+  var parsed = new Date(text).getTime();
+  return isNaN(parsed) ? 0 : parsed;
+}
+
+function dashboardDoneAtMatches_(currentValue, expectedValue) {
+  var current = String(currentValue || '').trim();
+  var expected = String(expectedValue || '').trim();
+  if (current === expected) return true;
+  var currentMs = dashboardDoneAtEpoch_(current);
+  var expectedMs = dashboardDoneAtEpoch_(expected);
+  return currentMs > 0 && expectedMs > 0 && currentMs === expectedMs;
 }
 
 function setDashboardReturnContractStatus_(tid, isDone, props, options) {
@@ -3135,7 +4099,8 @@ function setDashboardReturnContractStatus_(tid, isDone, props, options) {
         row: row,
         previousStatus: currentStatus,
         previousPrevStatus: previousPrevStatus,
-        status: nextStatus
+        status: nextStatus,
+        completionCheck: typeof completionCheck !== 'undefined' ? completionCheck : null
       };
     } catch (statusErr) {
       // J열만 닫힌 채 API가 실패로 끝나는 부분 커밋을 되돌린다.
@@ -3459,6 +4424,7 @@ function restoreCancelledContractsByIds(ids, dryRun) {
     sheet.getRange(target.row, 10).setValue('취소');
     cancelContract(ss, target.tradeId, target.row);
   });
+  if (targets.length) ensureCancelledTradeCleanupTrigger_(1000);
   invalidateDashboardCache();
   try { invalidateTimelineCache(); } catch (e) {}
 
@@ -3531,12 +4497,174 @@ function getDashboardScheduleInspectionToken_(scheduleId) {
 }
 
 /**
+ * 여러 반출 품목 체크를 거래 단위 한 요청으로 확정한다.
+ * 각 품목 mutationId는 그대로 유지해 응답 유실 재시도와 마지막 클릭 우선 규칙을 보존한다.
+ */
+function toggleItemChecksBatch(tid, entries) {
+  tid = String(tid || '').trim();
+  if (!tid) return { error: 'tid 필수' };
+  if (typeof entries === 'string') {
+    try { entries = JSON.parse(entries); } catch (parseErr) { return { error: 'items JSON 파싱 실패' }; }
+  }
+  if (!Array.isArray(entries) || !entries.length) return { error: 'items 필수' };
+  if (entries.length > 100) return { error: '한 번에 최대 100개 품목만 변경할 수 있습니다.' };
+
+  // 같은 150ms 묶음 안에서 같은 품목을 두 번 눌렀으면 마지막 목표만 서버로 보낸다.
+  var bySchedule = {};
+  var order = [];
+  for (var i = 0; i < entries.length; i++) {
+    var raw = entries[i] || {};
+    var scheduleId = String(raw.scheduleId || raw.schedule_id || '').trim();
+    if (!scheduleId) return { error: 'scheduleId 필수' };
+    var prefix = scheduleId.match(/^(\d{6}-\d{3})-/);
+    if (!prefix || prefix[1] !== tid) {
+      return { error: '다른 거래의 품목이 섞였습니다: ' + scheduleId };
+    }
+    if (!Object.prototype.hasOwnProperty.call(bySchedule, scheduleId)) order.push(scheduleId);
+    bySchedule[scheduleId] = {
+      scheduleId: scheduleId,
+      done: raw.done === true || raw.done === 'true' || raw.done === '1' || raw.done === 1,
+      mutationId: normalizeDashboardMutationId_(raw.mutationId || raw.mutation_id || '')
+    };
+  }
+  var items = order.map(function(id) { return bySchedule[id]; });
+  var props = PropertiesService.getScriptProperties();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+    return { error: '반출 체크 변경 차단: 이미 반출 기준선이 고정된 거래입니다.' };
+  }
+
+  var fingerprint = items.map(function(item) {
+    return item.scheduleId + ':' + (item.done ? '1' : '0') + ':' + item.mutationId;
+  }).join('|');
+  var leaseKey = 'checkoutItemMutation_' + tid;
+  var leaseToken = '';
+  var pending = [];
+  var resultsById = {};
+  var lock = LockService.getScriptLock();
+  var locked = false;
+  try {
+    locked = lock.tryLock(1000);
+    if (!locked) return { error: '다른 반출 변경 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+    var existing = activeDashboardMutationLease_(props, leaseKey);
+    if (existing) {
+      if (String(existing.fingerprint || '') !== fingerprint) {
+        return { error: '같은 거래의 다른 품목 체크를 저장 중입니다.', code: 'BUSY', retryable: true };
+      }
+      leaseToken = String(existing.token || '');
+    }
+    var blocked = dashboardTradeMutationLeaseError_(props, tid, 'checkoutItem', leaseToken);
+    if (blocked) return blocked;
+    if (
+      props.getProperty('setupDone_' + tid) === '1' ||
+      props.getProperty('checkoutBaselineStarted_' + tid) === '1'
+    ) {
+      return { error: '반출 체크 변경 차단: 이미 반출 기준선이 고정된 거래입니다.' };
+    }
+
+    items.forEach(function(item) {
+      if (resultsById.__error) return;
+      var scope = 'item:checkout:' + item.scheduleId;
+      var mutation = beginDashboardMutation_(props, tid, item.mutationId, scope, item.done ? '1' : '0');
+      if (mutation.error) {
+        resultsById.__error = mutation.error;
+        return;
+      }
+      if (mutation.skip) {
+        resultsById[item.scheduleId] = {
+          scheduleId: item.scheduleId,
+          checked: props.getProperty('itemCheck_' + item.scheduleId + '_checkout') === '1',
+          ok: true,
+          deduped: true,
+          superseded: !!mutation.pendingLater
+        };
+      } else {
+        pending.push(item);
+      }
+    });
+    if (resultsById.__error) return { error: resultsById.__error };
+    if (!pending.length) {
+      return { success: true, tradeId: tid, results: items.map(function(item) { return resultsById[item.scheduleId]; }), deduped: true };
+    }
+    if (!leaseToken) leaseToken = 'batch:' + Date.now() + ':' + String(Math.random()).slice(2);
+    props.setProperty(leaseKey, JSON.stringify({
+      token: leaseToken,
+      mutationId: items[0].mutationId || '',
+      fingerprint: fingerprint,
+      kind: 'batch',
+      at: Date.now()
+    }));
+  } finally {
+    if (locked) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+
+  var saved = typeof supaSetScheduleItemCheckoutStatesBatch_ === 'function'
+    ? supaSetScheduleItemCheckoutStatesBatch_(tid, pending)
+    : { ok: false, results: pending.map(function(item) {
+        return { scheduleId: item.scheduleId, checked: item.done, ok: false, outcomeUnknown: true, error: 'Supabase 품목 체크 배치 저장 함수 없음' };
+      }) };
+  var savedById = {};
+  (saved.results || []).forEach(function(result) { savedById[String(result.scheduleId || '')] = result; });
+
+  var commitLock = LockService.getScriptLock();
+  var commitLocked = false;
+  try {
+    commitLocked = commitLock.tryLock(2000);
+    if (!commitLocked) {
+      return { error: '품목 체크 최종 반영 대기 중입니다.', code: 'BUSY', retryable: true, outcomeUnknown: true };
+    }
+    var currentLease = activeDashboardMutationLease_(props, leaseKey);
+    if (currentLease && String(currentLease.token || '') !== leaseToken) {
+      return { error: '더 최신 품목 체크를 처리 중입니다.', code: 'BUSY', retryable: true };
+    }
+    pending.forEach(function(item) {
+      var result = savedById[item.scheduleId] || {
+        scheduleId: item.scheduleId,
+        checked: item.done,
+        ok: false,
+        outcomeUnknown: true,
+        error: 'Supabase 배치 결과 누락'
+      };
+      if (result.ok) {
+        // 동일 요청이 겹쳐 끝났거나 그 사이 더 최신 클릭이 들어온 경우, 최신 log가 있으면
+        // 이 오래된 응답은 속성 정본을 되돌리지 않는다.
+        var finalMutation = beginDashboardMutation_(
+          props, tid, item.mutationId, 'item:checkout:' + item.scheduleId, item.done ? '1' : '0'
+        );
+        if (finalMutation.pendingLater) {
+          result.checked = props.getProperty('itemCheck_' + item.scheduleId + '_checkout') === '1';
+          result.superseded = true;
+        } else {
+          var propertyKey = 'itemCheck_' + item.scheduleId + '_checkout';
+          if (item.done) props.setProperty(propertyKey, '1');
+          else props.deleteProperty(propertyKey);
+          try { commitDashboardMutation_(props, tid, item.mutationId, 'item:checkout:' + item.scheduleId); } catch (commitErr) {}
+          result.checked = item.done;
+        }
+      }
+      resultsById[item.scheduleId] = result;
+    });
+    clearDashboardMutationLease_(props, leaseKey, leaseToken);
+  } finally {
+    if (commitLocked) try { commitLock.releaseLock(); } catch (commitReleaseErr) {}
+  }
+
+  var finalResults = items.map(function(item) { return resultsById[item.scheduleId]; });
+  return {
+    success: finalResults.every(function(result) { return result && result.ok; }),
+    tradeId: tid,
+    results: finalResults,
+    retryable: finalResults.some(function(result) { return result && result.outcomeUnknown; })
+  };
+}
+
+/**
  * 개별 장비 행 체크 토글 (Dashboard 체크리스트).
  * @param {string} scheduleId — 스케줄상세 A열 ID (e.g., "260423-001-01")
  * @param {string} phase — "checkout" or "checkin"
  * @param {boolean} done
  */
-function toggleItemCheck(scheduleId, phase, done) {
+function toggleItemCheck(scheduleId, phase, done, options) {
   if (!scheduleId || !phase) return { error: "scheduleId/phase 필수" };
   if (phase !== 'checkout' && phase !== 'checkin') return { error: "phase는 checkout/checkin" };
   scheduleId = String(scheduleId).trim();
@@ -3545,6 +4673,7 @@ function toggleItemCheck(scheduleId, phase, done) {
   var checkinQtyKey = 'itemCheckQty_' + scheduleId + '_checkin'; // 레거시 정리용
   var props = PropertiesService.getScriptProperties();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
+  var mutationId = normalizeDashboardMutationId_(options && options.mutationId);
 
   // ── 검증 단계: 전부 읽기 전용이라 전역 잠금 밖에서 수행한다 ──
   // 예전엔 행 조회 + Supabase HTTP 왕복까지 잠금 안에서 돌아 체크 1번의 잠금 점유가
@@ -3561,8 +4690,39 @@ function toggleItemCheck(scheduleId, phase, done) {
       context = getDashboardScheduleInspectionContext_(scheduleId);
       checkoutTid = context && context.tradeId || '';
     }
+    if (!checkoutTid) return { error: '반출 체크 실패: 현재 스케줄 행을 찾을 수 없습니다: ' + scheduleId };
   } else {
     context = getDashboardScheduleInspectionContext_(scheduleId);
+  }
+  var preflightTid = phase === 'checkout' ? checkoutTid : (context && context.tradeId || '');
+  // checkout은 아래 lease 획득과 mutation 등록을 같은 짧은 임계구역에서 처리한다.
+  // 먼저 log만 append하면 lease 소유자와 후속 요청이 서로 pendingLater/BUSY로 막힌다.
+  if (mutationId && preflightTid && phase !== 'checkout') {
+    var itemPreflightLock = LockService.getScriptLock();
+    var itemPreflightLocked = false;
+    try {
+      itemPreflightLocked = itemPreflightLock.tryLock(1000);
+      if (!itemPreflightLocked) {
+        return { error: '다른 품목 변경 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+      }
+      var itemScope = 'item:' + phase + ':' + scheduleId;
+      var itemPreflight = beginDashboardMutation_(props, preflightTid, mutationId, itemScope, isDone ? '1' : '0');
+      if (itemPreflight.error) return { error: itemPreflight.error };
+      if (itemPreflight.skip) {
+        if (itemPreflight.pendingLater) {
+          return { error: '더 최신 품목 체크를 처리 중입니다.', code: 'BUSY', retryable: true };
+        }
+        return {
+          scheduleId: scheduleId,
+          phase: phase,
+          checked: phase === 'checkout' ? props.getProperty(key) === '1' : !!props.getProperty(key),
+          tradeId: preflightTid,
+          deduped: true
+        };
+      }
+    } finally {
+      if (itemPreflightLocked) try { itemPreflightLock.releaseLock(); } catch (itemPreflightReleaseErr) {}
+    }
   }
   if (phase === 'checkout' && checkoutTid) {
     // 로컬 마커 우선: 반출이 시작된 흔적(setupDone/기준선 표식/계약상태)이 없으면
@@ -3625,24 +4785,154 @@ function toggleItemCheck(scheduleId, phase, done) {
     }
   }
 
-  // ── 변이 단계: 속성 쓰기와 증거 무효화만 잠금 안에서 짧게 처리한다 ──
-  // 클라이언트는 파이어-앤-포겟 + 백오프 재시도라 대기 20초가 사용자를 막지 않는다.
+  // checkout은 scheduleId별 고유 속성키 한 칸만 바꾸며, 같은 거래 요청 순서는 클라이언트
+  // 명령열이 보장한다. 전역 잠금에는 lease 등록/최종 커밋만 두고 Supabase HTTP는 밖에서 실행한다.
+  if (phase === 'checkout') {
+    var checkoutLeaseKey = 'checkoutItemMutation_' + checkoutTid;
+    var checkoutLeaseToken = '';
+    var checkoutMutationLock = LockService.getScriptLock();
+    var checkoutMutationLocked = false;
+    try {
+      checkoutMutationLocked = checkoutMutationLock.tryLock(1000);
+      if (!checkoutMutationLocked) {
+        return { error: '다른 반출 변경 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+      }
+      var existingCheckoutLease = activeDashboardMutationLease_(props, checkoutLeaseKey);
+      if (existingCheckoutLease) {
+        var sameCheckoutLease = mutationId &&
+          String(existingCheckoutLease.mutationId || '') === mutationId &&
+          String(existingCheckoutLease.scheduleId || '') === scheduleId &&
+          String(existingCheckoutLease.target || '') === (isDone ? '1' : '0');
+        if (!sameCheckoutLease) {
+          return { error: '같은 거래의 다른 품목 체크를 저장 중입니다.', code: 'BUSY', retryable: true };
+        }
+        checkoutLeaseToken = String(existingCheckoutLease.token || '');
+      }
+      var checkoutLeaseBlock = dashboardTradeMutationLeaseError_(
+        props, checkoutTid, 'checkoutItem', checkoutLeaseToken
+      );
+      if (checkoutLeaseBlock) return checkoutLeaseBlock;
+      if (
+        props.getProperty('setupDone_' + checkoutTid) === '1' ||
+        props.getProperty('checkoutBaselineStarted_' + checkoutTid) === '1'
+      ) {
+        return { error: '반출 체크 변경 차단: 이미 고정된 반출 기준선입니다: ' + scheduleId };
+      }
+      var checkoutMutation = beginDashboardMutation_(
+        props, checkoutTid, mutationId, 'item:checkout:' + scheduleId, isDone ? '1' : '0'
+      );
+      if (checkoutMutation.error) return { error: checkoutMutation.error };
+      if (checkoutMutation.skip) {
+        if (checkoutMutation.pendingLater) {
+          return { error: '더 최신 품목 체크를 처리 중입니다.', code: 'BUSY', retryable: true };
+        }
+        return {
+          scheduleId: scheduleId,
+          phase: phase,
+          checked: props.getProperty(key) === '1',
+          tradeId: checkoutTid,
+          deduped: true
+        };
+      }
+      if (!checkoutLeaseToken) {
+        checkoutLeaseToken = (mutationId || String(Math.random()).slice(2)) + ':' + scheduleId + ':' + Date.now();
+      }
+      props.setProperty(checkoutLeaseKey, JSON.stringify({
+        token: checkoutLeaseToken,
+        mutationId: mutationId,
+        scheduleId: scheduleId,
+        target: isDone ? '1' : '0',
+        at: Date.now()
+      }));
+    } finally {
+      if (checkoutMutationLocked) try { checkoutMutationLock.releaseLock(); } catch (checkoutReleaseErr) {}
+    }
+
+    var checkoutSaved = typeof supaSetScheduleItemCheckoutState_ === 'function'
+      ? supaSetScheduleItemCheckoutState_(checkoutTid, scheduleId, isDone)
+      : { ok: false, error: 'Supabase 품목 체크 저장 함수 없음' };
+    if (!checkoutSaved || !checkoutSaved.ok) {
+      if (!(checkoutSaved && checkoutSaved.outcomeUnknown)) {
+        var checkoutCleanupLock = LockService.getScriptLock();
+        var checkoutCleanupLocked = false;
+        try {
+          checkoutCleanupLocked = checkoutCleanupLock.tryLock(1000);
+          if (checkoutCleanupLocked) clearDashboardMutationLease_(props, checkoutLeaseKey, checkoutLeaseToken);
+        } finally {
+          if (checkoutCleanupLocked) try { checkoutCleanupLock.releaseLock(); } catch (checkoutCleanupReleaseErr) {}
+        }
+      }
+      return {
+        error: '반출 체크 저장 실패: ' + String(checkoutSaved && checkoutSaved.error || '저장 실패'),
+        code: checkoutSaved && checkoutSaved.outcomeUnknown ? 'OUTCOME_UNKNOWN' : 'MUTATION_FAILED',
+        retryable: !!(checkoutSaved && checkoutSaved.outcomeUnknown),
+        outcomeUnknown: !!(checkoutSaved && checkoutSaved.outcomeUnknown)
+      };
+    }
+
+    var checkoutCommitLock = LockService.getScriptLock();
+    var checkoutCommitLocked = false;
+    try {
+      checkoutCommitLocked = checkoutCommitLock.tryLock(2000);
+      if (!checkoutCommitLocked) {
+        return { error: '품목 체크 최종 반영 대기 중입니다.', code: 'BUSY', retryable: true };
+      }
+      var finalCheckoutLease = activeDashboardMutationLease_(props, checkoutLeaseKey);
+      if (!finalCheckoutLease || String(finalCheckoutLease.token || '') !== checkoutLeaseToken) {
+        return { error: '품목 체크 최종 반영 순서가 바뀌었습니다.', code: 'BUSY', retryable: true };
+      }
+      if (isDone) props.setProperty(key, '1');
+      else props.deleteProperty(key);
+      try { commitDashboardMutation_(props, checkoutTid, mutationId, 'item:checkout:' + scheduleId); } catch (mutationCommitErr) {
+        Logger.log('품목 체크 mutation 완료표시 실패(정본 유지): ' + mutationCommitErr.message);
+      }
+      clearDashboardMutationLease_(props, checkoutLeaseKey, checkoutLeaseToken);
+      return { scheduleId: scheduleId, phase: phase, checked: isDone, tradeId: checkoutTid || '' };
+    } finally {
+      if (checkoutCommitLocked) try { checkoutCommitLock.releaseLock(); } catch (checkoutCommitReleaseErr) {}
+    }
+  }
+
+  // ── checkin 증거 무효화는 계약 재오픈과 묶여야 하므로 짧은 busy 잠금만 사용 ──
   var lock = LockService.getScriptLock();
   var lockAcquired = false;
+  var checkinProjectionQueued = false;
   try {
-    lock.waitLock(20000);
-    lockAcquired = true;
+    lockAcquired = lock.tryLock(1000);
+    if (!lockAcquired) {
+      return {
+        error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.',
+        code: 'BUSY',
+        retryable: true
+      };
+    }
 
+    var mutationTid = context && context.tradeId || '';
+    if (!mutationTid) return { error: '반납 체크 실패: 거래ID를 확인할 수 없습니다: ' + scheduleId };
+    var checkinLeaseBlock = dashboardTradeMutationLeaseError_(props, mutationTid, 'checkinItem', '');
+    if (checkinLeaseBlock) return checkinLeaseBlock;
+    var checkinMutation = beginDashboardMutation_(
+      props, mutationTid, mutationId, 'item:checkin:' + scheduleId, isDone ? '1' : '0'
+    );
+    if (checkinMutation.error) return { error: checkinMutation.error };
+    if (checkinMutation.skip) {
+      if (checkinMutation.pendingLater) {
+        return { error: '더 최신 반납 체크를 처리 중입니다.', code: 'BUSY', retryable: true };
+      }
+      return {
+        scheduleId: scheduleId,
+        phase: phase,
+        checked: !!props.getProperty(key),
+        tradeId: mutationTid,
+        deduped: true
+      };
+    }
     var invalidated = null;
     if (isDone) {
-      if (phase === 'checkin') {
-        props.setProperty(key, context.token);
-        props.deleteProperty(checkinQtyKey);
-        props.deleteProperty('itemCheckProof_' + scheduleId + '_checkin');
-      } else {
-        props.setProperty(key, '1');
-      }
-    } else if (phase === 'checkin') {
+      props.setProperty(key, context.token);
+      props.deleteProperty(checkinQtyKey);
+      props.deleteProperty('itemCheckProof_' + scheduleId + '_checkin');
+    } else {
       var proofTradeId = context && context.tradeId
         ? context.tradeId
         : dashboardReturnInspectionTradeId_(props.getProperty(key));
@@ -3654,8 +4944,10 @@ function toggleItemCheck(scheduleId, phase, done) {
         proofTradeId, [scheduleId], '반납 수량 미완료 전환'
       );
       if (invalidated && invalidated.error) return invalidated;
-    } else {
-      props.deleteProperty(key);
+      checkinProjectionQueued = !!(invalidated && invalidated.projectionPending);
+    }
+    try { commitDashboardMutation_(props, mutationTid, mutationId, 'item:checkin:' + scheduleId); } catch (mutationCommitErr2) {
+      Logger.log('반납 체크 mutation 완료표시 실패(정본 유지): ' + mutationCommitErr2.message);
     }
     invalidateDashboardCache();
     return {
@@ -3666,9 +4958,14 @@ function toggleItemCheck(scheduleId, phase, done) {
       reopened: !!(invalidated && invalidated.reopened)
     };
   } catch (err) {
-    return { error: err && err.message ? err.message : String(err) };
+    return {
+      error: err && err.message ? err.message : String(err),
+      code: /lock/i.test(String(err && err.message || err)) ? 'BUSY' : 'MUTATION_FAILED',
+      retryable: /lock/i.test(String(err && err.message || err))
+    };
   } finally {
     if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
+    if (checkinProjectionQueued) ensureDashboardStructureProjectionTrigger_();
   }
 }
 
@@ -3828,7 +5125,11 @@ function updateEquipmentCheck(scheduleId, tradeId, label, field, value) {
   var lock = LockService.getScriptLock();
   // 타임아웃 시 락 없이 진행하면 안 된다 — find-or-append가 중복 행을 만들 수 있음.
   // 다른 쓰기 함수들과 동일하게 에러 반환 → 클라이언트(gasMutationRetrying)가 재시도.
-  try { lock.waitLock(10000); } catch (lockErr) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+  try {
+    if (!lock.tryLock(1000)) return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+  } catch (lockErr) {
+    return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+  }
 
   try {
     var sheet = getEquipmentCheckSheet_(true);
@@ -3896,13 +5197,17 @@ function dashboardUpdateTradeDetails(tradeId, input) {
   var lock = LockService.getScriptLock();
   var lockAcquired = false;
   try {
-    lock.waitLock(10000);
-    lockAcquired = true;
+    lockAcquired = lock.tryLock(1000);
+    if (!lockAcquired) {
+      return { error: '다른 예약 변경 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+    }
   } catch (lockErr) {
-    return { error: '다른 예약 변경 처리 중입니다. 잠시 후 다시 시도해주세요.' };
+    return { error: '다른 예약 변경 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
   }
 
   try {
+    var editLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tradeId, 'tradeEdit', '');
+    if (editLeaseBlock) return editLeaseBlock;
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var contractSheet = ss.getSheetByName('계약마스터');
     if (!contractSheet || contractSheet.getLastRow() < 2) return { error: '계약마스터 시트 없음' };
@@ -3934,6 +5239,13 @@ function dashboardUpdateTradeDetails(tradeId, input) {
       }
     }
 
+    // 원장 시트의 원자 커밋은 여기까지다. 외부 Spreadsheet/계약서/캐시 작업은
+    // 다른 거래의 카드 클릭을 막지 않도록 전역 잠금을 먼저 놓고 수행한다.
+    if (lockAcquired) {
+      try { lock.releaseLock(); } catch (earlyReleaseErr) {}
+      lockAcquired = false;
+    }
+
     // 개고생2.0 거래내역의 알려진 고정 열(B 예약자명, F 연락처)도 같은 거래ID(E) 기준으로 갱신.
     try {
       var ledgerUrl = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
@@ -3952,14 +5264,11 @@ function dashboardUpdateTradeDetails(tradeId, input) {
       Logger.log('거래 편집 → 개고생2.0 고객정보 전파 실패(계속): ' + ledgerErr.message);
     }
 
-    var contractResult = null;
-    var contractRegenPending = false;
+    var contractRegenPending = true;
     try {
-      contractResult = deleteAndRegenerateContract(ss, tradeId);
-    } catch (contractErr) {
       scheduleContractRegen(tradeId);
-      contractRegenPending = true;
-      Logger.log('거래 편집 → 계약서 즉시 재생성 실패, 예약 전환: ' + contractErr.message);
+    } catch (contractErr) {
+      Logger.log('거래 편집 → 계약서 재생성 예약 실패: ' + contractErr.message);
     }
 
     supaMarkTradeDirty_(tradeId);
@@ -3974,8 +5283,7 @@ function dashboardUpdateTradeDetails(tradeId, input) {
       checkoutAt: checkoutDate + 'T' + checkoutTime + ':00+09:00',
       returnAt: returnDate + 'T' + returnTime + ':00+09:00',
       scheduleRows: scheduleRows,
-      contractUrl: contractResult && (contractResult.url || contractResult.contractUrl) || '',
-      finalAmount: contractResult && contractResult.finalAmount,
+      contractUrl: '',
       contractRegenPending: contractRegenPending
     };
   } catch (err) {
@@ -4001,14 +5309,18 @@ function updateTradeDiscountType(tid, discountType) {
   var lock = LockService.getScriptLock();
   var lockAcquired = false;
   try {
-    lock.waitLock(20000);
-    lockAcquired = true;
+    lockAcquired = lock.tryLock(1000);
+    if (!lockAcquired) {
+      return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+    }
   } catch (lockErr) {
-    return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도해주세요.' };
+    return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
   }
 
   var changed = false;
   try {
+    var discountLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tid, 'discount', '');
+    if (discountLeaseBlock) return discountLeaseBlock;
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = ss.getSheetByName('계약마스터');
     if (!sheet || sheet.getLastRow() < 2) return { error: "계약마스터 시트 없음" };
@@ -4049,14 +5361,20 @@ function updateDashboardContractStatus(tradeId, status) {
 
   var lock = LockService.getScriptLock();
   var lockAcquired = false;
+  var structureProjectionQueued = false;
+  var cancelCleanupQueued = false;
   try {
-    lock.waitLock(20000);
-    lockAcquired = true;
+    lockAcquired = lock.tryLock(1000);
+    if (!lockAcquired) {
+      return { error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+    }
   } catch (lockErr) {
-    return { error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.' };
+    return { error: '다른 반납 변경 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
   }
 
   try {
+    var statusLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tradeId, 'contractStatus', '');
+    if (statusLeaseBlock) return statusLeaseBlock;
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = ss.getSheetByName('계약마스터');
     if (!sheet || sheet.getLastRow() < 2) return { error: "계약마스터 시트 없음" };
@@ -4070,6 +5388,9 @@ function updateDashboardContractStatus(tradeId, status) {
         if (status === "반납완료" && currentStatus === "취소") {
           return { error: "취소 처리된 계약은 반납완료로 바꿀 수 없습니다: " + tradeId };
         }
+        if (status === "취소" && isDashboardTradeCheckoutStarted_(ss, tradeId)) {
+          return { error: "이미 반출된 거래는 취소할 수 없습니다. 반납 절차로 마감해주세요: " + tradeId };
+        }
         if (status === "반납완료") {
           var closeProps = PropertiesService.getScriptProperties();
           var previousDone = closeProps.getProperty('returnDone_' + tradeId);
@@ -4080,6 +5401,15 @@ function updateDashboardContractStatus(tradeId, status) {
             var doneAt = formatDashboardDoneAt_(new Date());
             closeProps.setProperty('returnDone_' + tradeId, '1');
             closeProps.setProperty('returnDoneAt_' + tradeId, doneAt);
+            scheduleDashboardStructureProjectionUnderLock_(tradeId, {
+              returnState: {
+                done: true,
+                doneAt: doneAt,
+                status: status,
+                returnCounts: contractResult.completionCheck && contractResult.completionCheck.returnCountsSnapshot
+              }
+            });
+            structureProjectionQueued = true;
             try { clearDashboardCheckoutItemChecks_(tradeId, closeProps); } catch (cleanupErr) {
               Logger.log('반출 체크 정리 실패(완료 유지): ' + cleanupErr.message);
             }
@@ -4107,6 +5437,7 @@ function updateDashboardContractStatus(tradeId, status) {
           cancelProps.deleteProperty('returnDoneAt_' + tradeId);
           cancelProps.deleteProperty('returnPrevContractStatus_' + tradeId);
           cancelContract(ss, tradeId, row);
+          cancelCleanupQueued = true;
           invalidateDashboardCache();
           return { success: true, tradeId: tradeId, status: status, row: row, cancelled: true };
         }
@@ -4121,6 +5452,10 @@ function updateDashboardContractStatus(tradeId, status) {
           props.deleteProperty('returnPrevContractStatus_' + tradeId);
           sheet.getRange(row, 10).setValue(status); // J열: 계약상태
           applyContractMasterStatusRowStyle_(sheet, row, status);
+          scheduleDashboardStructureProjectionUnderLock_(tradeId, {
+            returnState: { done: false, doneAt: null, status: status, returnCounts: null }
+          });
+          structureProjectionQueued = true;
           invalidateDashboardCache();
           return { success: true, tradeId: tradeId, status: status, row: row };
         } catch (statusErr) {
@@ -4140,6 +5475,8 @@ function updateDashboardContractStatus(tradeId, status) {
     return { error: err.message };
   } finally {
     if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
+    if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
+    if (cancelCleanupQueued) ensureCancelledTradeCleanupTrigger_(1000);
   }
 }
 
@@ -4751,6 +6088,64 @@ function getDashboardPhotoSheet_(required) {
   return sheet;
 }
 
+var DASHBOARD_PHOTO_UPLOAD_CLAIM_PREFIX_ = 'dashboardPhotoUpload_v2_';
+var DASHBOARD_PHOTO_UPLOAD_CLAIM_MS_ = 7 * 60 * 1000;
+
+function dashboardPhotoUploadClaimKey_(clientKey) {
+  var clean = String(clientKey || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
+  return clean ? DASHBOARD_PHOTO_UPLOAD_CLAIM_PREFIX_ + clean : '';
+}
+
+function cleanupDashboardPhotoUploadClaims_(props) {
+  try {
+    var cache = CacheService.getScriptCache();
+    if (cache.get('dashboardPhotoUploadCleanup_v2')) return;
+    cache.put('dashboardPhotoUploadCleanup_v2', '1', 3600);
+    var all = props.getProperties();
+    var now = Date.now();
+    Object.keys(all).forEach(function(key) {
+      if (key.indexOf(DASHBOARD_PHOTO_UPLOAD_CLAIM_PREFIX_) !== 0) return;
+      var claim = null;
+      try { claim = JSON.parse(all[key] || ''); } catch (err) {}
+      if (!claim || !claim.at || now - Number(claim.at) > 24 * 60 * 60 * 1000) props.deleteProperty(key);
+    });
+  } catch (cleanupErr) {}
+}
+
+function findDashboardPhotoUploadRow_(sheet, schema, state, targetPhotoCol) {
+  if (!sheet || !state || sheet.getLastRow() < 2) return 0;
+  var width = Math.max(sheet.getLastColumn(), schema.maxCol || 1);
+  var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, width).getDisplayValues();
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    if (normalizeEquipmentCheckTradeId_(String(row[schema.tradeIdCol - 1] || '').trim()) !== state.tid) continue;
+    if (schema.keyCol && state.photoId && String(row[schema.keyCol - 1] || '').trim() === state.photoId) return i + 2;
+    if (schema.fileIdCol && state.fileId && String(row[schema.fileIdCol - 1] || '').trim() === state.fileId) return i + 2;
+    if (state.relativePath && String(row[targetPhotoCol - 1] || '').trim() === state.relativePath) return i + 2;
+  }
+  return 0;
+}
+
+function dashboardPhotoUploadResult_(state, row) {
+  var fileId = String(state.fileId || '').trim();
+  return {
+    success: true,
+    tid: state.tid,
+    phase: state.phase,
+    deduped: !!state.recovered,
+    photo: {
+      phase: state.phase,
+      url: state.url || ('https://drive.google.com/file/d/' + fileId + '/view?usp=drivesdk'),
+      thumbnailUrl: state.thumb || ('https://drive.google.com/thumbnail?id=' + encodeURIComponent(fileId) + '&sz=w640'),
+      fileId: fileId,
+      sheetValue: state.relativePath || '',
+      uploadedAt: state.uploadedAt || '',
+      memo: String(state.memo || ''),
+      row: Number(row || state.row || 0)
+    }
+  };
+}
+
 function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo, clientKey) {
   tid = normalizeEquipmentCheckTradeId_(String(tid || '').trim());
   phase = normalizeDashboardPhotoPhase_(phase);
@@ -4758,40 +6153,91 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo, client
   if (phase !== 'checkout' && phase !== 'checkin') return { error: "phase는 checkout/checkin만 허용" };
   if (!data) return { error: "사진 데이터 필요" };
 
-  // 앱 업로드 큐가 재시도해도 같은 사진이 두 번 저장되지 않도록 clientKey로 멱등 처리
-  var dedupKey = '';
-  if (clientKey) {
-    dedupKey = 'dashboard_photo_upload_' + String(clientKey).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
+  // CacheService 조회만으로는 동시에 시작한 재시도 2개가 모두 miss가 되어 Drive 파일과
+  // 시트 행을 중복 생성한다. ScriptProperties claim으로 pending/file/done 단계를 내구 기록한다.
+  var dedupKey = clientKey ? 'dashboard_photo_upload_' + String(clientKey).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80) : '';
+  var claimKey = dashboardPhotoUploadClaimKey_(clientKey);
+  var claimScope = tid + '|' + phase;
+  var props = PropertiesService.getScriptProperties();
+  var claimState = null;
+  if (claimKey) {
+    var claimLock = LockService.getScriptLock();
+    var claimLocked = false;
     try {
-      var dedupCached = CacheService.getScriptCache().get(dedupKey);
-      if (dedupCached) return JSON.parse(dedupCached);
-    } catch (dedupErr) {}
+      claimLocked = claimLock.tryLock(1500);
+      if (!claimLocked) return { error: '사진 업로드 접수 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+      cleanupDashboardPhotoUploadClaims_(props);
+      try { claimState = JSON.parse(props.getProperty(claimKey) || 'null'); } catch (claimParseErr) { claimState = null; }
+      if (claimState && String(claimState.scope || '') !== claimScope) {
+        return { error: '같은 사진 요청키가 다른 거래에 사용되었습니다.' };
+      }
+      if (claimState && claimState.state === 'done' && claimState.result) return claimState.result;
+      if (
+        claimState && claimState.state === 'pending' && !claimState.retryReady &&
+        Date.now() - Number(claimState.at || 0) < DASHBOARD_PHOTO_UPLOAD_CLAIM_MS_
+      ) {
+        return { error: '같은 사진을 업로드 중입니다.', code: 'BUSY', retryable: true };
+      }
+      claimState = claimState || {};
+      claimState.scope = claimScope;
+      claimState.tid = tid;
+      claimState.phase = phase;
+      claimState.state = claimState.fileId ? 'file' : 'pending';
+      claimState.at = Date.now();
+      claimState.retryReady = false;
+      props.setProperty(claimKey, JSON.stringify(claimState));
+    } finally {
+      if (claimLocked) try { claimLock.releaseLock(); } catch (claimReleaseErr) {}
+    }
   }
 
   try {
     var sheet = getDashboardPhotoSheet_(true);
     var schema = getDashboardPhotoSchema_(sheet);
     var targetPhotoCol = getDashboardPhotoWriteCol_(schema, phase);
-    if (!schema.tradeIdCol) return { error: "반출반납 사진 시트에서 거래ID 열을 찾지 못했습니다" };
-    if (!targetPhotoCol) return { error: "반출반납 사진 시트에서 사진 URL 열을 찾지 못했습니다" };
+    if (!schema.tradeIdCol) throw new Error("반출반납 사진 시트에서 거래ID 열을 찾지 못했습니다");
+    if (!targetPhotoCol) throw new Error("반출반납 사진 시트에서 사진 URL 열을 찾지 못했습니다");
     if (!schema.phaseCol && targetPhotoCol === schema.photoCol) {
-      return { error: "공통 사진 열을 쓰려면 구분/사진구분 열이 필요합니다" };
+      throw new Error("공통 사진 열을 쓰려면 구분/사진구분 열이 필요합니다");
     }
 
-    var upload = normalizeDashboardUploadData_(data, mimeType);
-    var photoId = makeDashboardPhotoId_();
-    var safeName = makeDashboardPhotoFileName_(photoId, fileName, upload.mimeType);
-    var relativePath = DASHBOARD_PHOTO_APPSHEET_FOLDER_NAME_ + "/" + safeName;
-    var blob = Utilities.newBlob(Utilities.base64Decode(upload.base64), upload.mimeType, safeName);
-    var folder = getDashboardPhotoStorageFolder_();
-    var file = folder.createFile(blob);
-    try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (shareErr) {}
-
-    var fileId = file.getId();
+    var photoId = String(claimState && claimState.photoId || '') || makeDashboardPhotoId_();
+    var fileId = String(claimState && claimState.fileId || '');
+    var recoveredExistingFile = !!fileId;
+    var relativePath = String(claimState && claimState.relativePath || '');
+    var thumb = String(claimState && claimState.thumb || '');
+    var now = String(claimState && claimState.uploadedAt || '');
+    if (!fileId) {
+      var upload = normalizeDashboardUploadData_(data, mimeType);
+      var safeName = makeDashboardPhotoFileName_(photoId, fileName, upload.mimeType);
+      relativePath = DASHBOARD_PHOTO_APPSHEET_FOLDER_NAME_ + "/" + safeName;
+      var blob = Utilities.newBlob(Utilities.base64Decode(upload.base64), upload.mimeType, safeName);
+      var folder = getDashboardPhotoStorageFolder_();
+      var file = folder.createFile(blob);
+      try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (shareErr) {}
+      fileId = file.getId();
+      thumb = "https://drive.google.com/thumbnail?id=" + encodeURIComponent(fileId) + "&sz=w640";
+      now = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss');
+      if (claimKey) {
+        claimState.photoId = photoId;
+        claimState.fileId = fileId;
+        claimState.relativePath = relativePath;
+        claimState.thumb = thumb;
+        claimState.uploadedAt = now;
+        claimState.memo = String(memo || '').trim();
+        claimState.state = 'file';
+        try {
+          props.setProperty(claimKey, JSON.stringify(claimState));
+        } catch (claimFileErr) {
+          try { file.setTrashed(true); } catch (trashErr) {}
+          throw claimFileErr;
+        }
+      }
+    }
     // Drive 추가 왕복(getUrl) 대신 fileId로 URL을 직접 구성해 업로드 응답을 빠르게 한다
     var url = "https://drive.google.com/file/d/" + fileId + "/view?usp=drivesdk";
-    var thumb = "https://drive.google.com/thumbnail?id=" + encodeURIComponent(fileId) + "&sz=w640";
-    var now = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss');
+    if (!thumb) thumb = "https://drive.google.com/thumbnail?id=" + encodeURIComponent(fileId) + "&sz=w640";
+    if (!now) now = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss');
     var width = Math.max(sheet.getLastColumn(), schema.maxCol || 1);
     var row = [];
     for (var i = 0; i < width; i++) row.push('');
@@ -4805,30 +6251,64 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo, client
     if (schema.uploadedAtCol) row[schema.uploadedAtCol - 1] = now;
     if (schema.memoCol) row[schema.memoCol - 1] = String(memo || '').trim();
 
-    sheet.appendRow(row);
+    var appendedRow = 0;
+    var appendLock = LockService.getScriptLock();
+    var appendLocked = false;
+    try {
+      appendLocked = appendLock.tryLock(2000);
+      if (!appendLocked) throw new Error('사진 기록 저장 중입니다. 잠시 후 다시 시도해주세요.');
+      appendedRow = findDashboardPhotoUploadRow_(sheet, schema, {
+        tid: tid, photoId: photoId, fileId: fileId, relativePath: relativePath
+      }, targetPhotoCol);
+      if (!appendedRow) {
+        appendedRow = sheet.getLastRow() + 1;
+        sheet.getRange(appendedRow, 1, 1, row.length).setValues([row]);
+      }
+    } finally {
+      if (appendLocked) try { appendLock.releaseLock(); } catch (appendReleaseErr) {}
+    }
     invalidateDashboardPhotoCache_();
     invalidateDashboardCache();
 
-    var result = {
-      success: true,
-      tid: tid,
-      phase: phase,
-      photo: {
-        phase: phase,
-        url: url,
-        thumbnailUrl: thumb,
-        fileId: fileId,
-        sheetValue: relativePath,
-        uploadedAt: now,
-        memo: String(memo || '').trim()
-      }
-    };
+    claimState = claimState || {};
+    claimState.tid = tid;
+    claimState.phase = phase;
+    claimState.photoId = photoId;
+    claimState.fileId = fileId;
+    claimState.relativePath = relativePath;
+    claimState.thumb = thumb;
+    claimState.url = url;
+    claimState.uploadedAt = now;
+    claimState.memo = String(memo || '').trim();
+    claimState.row = appendedRow;
+    claimState.recovered = recoveredExistingFile;
+    var result = dashboardPhotoUploadResult_(claimState, appendedRow);
     if (dedupKey) {
       try { CacheService.getScriptCache().put(dedupKey, JSON.stringify(result), 21600); } catch (dedupPutErr) {}
     }
+    if (claimKey) {
+      claimState.state = 'done';
+      claimState.at = Date.now();
+      claimState.retryReady = false;
+      claimState.result = result;
+      try { props.setProperty(claimKey, JSON.stringify(claimState)); } catch (claimDoneErr) {}
+    }
     return result;
   } catch (err) {
-    return { error: err.message };
+    if (claimKey) {
+      try {
+        claimState = claimState || {};
+        claimState.scope = claimScope;
+        claimState.tid = tid;
+        claimState.phase = phase;
+        claimState.state = claimState.fileId ? 'file' : 'pending';
+        claimState.retryReady = true;
+        claimState.at = Date.now();
+        claimState.lastError = err && err.message ? err.message : String(err);
+        props.setProperty(claimKey, JSON.stringify(claimState));
+      } catch (claimErrorPersistErr) {}
+    }
+    return { error: err && err.message ? err.message : String(err), retryable: true };
   }
 }
 
@@ -4845,9 +6325,12 @@ function deleteDashboardPhoto(tid, phase, fileId, rowHint, sheetValue) {
 
   var lock = LockService.getScriptLock();
   var locked = false;
+  var deleteResult = null;
   try {
-    lock.waitLock(10000);
-    locked = true;
+    locked = lock.tryLock(1500);
+    if (!locked) {
+      return { error: '다른 저장 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+    }
     var sheet = getDashboardPhotoSheet_(true);
     var schema = getDashboardPhotoSchema_(sheet);
     var targetPhotoCol = getDashboardPhotoWriteCol_(schema, phase);
@@ -4887,45 +6370,60 @@ function deleteDashboardPhoto(tid, phase, fileId, rowHint, sheetValue) {
       if (matched) return { error: '삭제할 사진이 여러 행에서 발견되어 중단했습니다' };
       matched = { row: rowNum, values: values, index: matchIndex, rowFileId: rowFileId };
     }
-    if (!matched) return { error: '삭제할 사진 기록을 찾지 못했습니다' };
+    if (!matched) {
+      // 응답 유실 뒤 같은 삭제를 재시도하는 것은 이미 목표 상태다. 오류로 돌리면
+      // 다른 탭에 ghost 사진이 영구 잔류하므로 멱등 성공으로 확인한다.
+      deleteResult = {
+        success: true,
+        deduped: true,
+        tid: tid,
+        phase: phase,
+        fileId: fileId,
+        deletedRow: false,
+        trashed: false,
+        warning: ''
+      };
+    } else {
+      var remaining = matched.values.slice();
+      if (remaining.length) remaining.splice(matched.index, 1);
+      sheet.getRange(matched.row, targetPhotoCol).setValue(remaining.join('\n'));
 
-    var remaining = matched.values.slice();
-    if (remaining.length) remaining.splice(matched.index, 1);
-    sheet.getRange(matched.row, targetPhotoCol).setValue(remaining.join('\n'));
+      var photoCols = [schema.photoCol, schema.checkoutPhotoCol, schema.checkinPhotoCol]
+        .filter(function(col, index, all) { return !!col && all.indexOf(col) === index; });
+      var hasOtherPhoto = photoCols.some(function(col) {
+        return String(sheet.getRange(matched.row, col).getDisplayValue() || '').trim() !== '';
+      });
+      if (!hasOtherPhoto) sheet.deleteRow(matched.row);
 
-    var photoCols = [schema.photoCol, schema.checkoutPhotoCol, schema.checkinPhotoCol]
-      .filter(function(col, index, all) { return !!col && all.indexOf(col) === index; });
-    var hasOtherPhoto = photoCols.some(function(col) {
-      return String(sheet.getRange(matched.row, col).getDisplayValue() || '').trim() !== '';
-    });
-    if (!hasOtherPhoto) sheet.deleteRow(matched.row);
-
-    var trashed = false;
-    var trashWarning = '';
-    if (fileId) {
-      try {
-        DriveApp.getFileById(fileId).setTrashed(true);
-        trashed = true;
-      } catch (trashErr) {
-        trashWarning = '시트 기록은 삭제됐지만 Drive 휴지통 이동 실패: ' + trashErr.message;
-      }
+      deleteResult = {
+        success: true,
+        tid: tid,
+        phase: phase,
+        fileId: fileId,
+        deletedRow: !hasOtherPhoto,
+        trashed: false,
+        warning: ''
+      };
     }
-    invalidateDashboardPhotoCache_();
-    invalidateDashboardCache();
-    return {
-      success: true,
-      tid: tid,
-      phase: phase,
-      fileId: fileId,
-      deletedRow: !hasOtherPhoto,
-      trashed: trashed,
-      warning: trashWarning
-    };
   } catch (err) {
     return { error: err && err.message ? err.message : String(err) };
   } finally {
     if (locked) try { lock.releaseLock(); } catch (releaseErr) {}
   }
+
+  // Drive API는 수초 걸릴 수 있다. 시트 원자적 삭제만 짧은 잠금에서 끝내고,
+  // 복구 가능한 휴지통 이동은 잠금 밖에서 해 다른 거래 버튼을 막지 않는다.
+  if (deleteResult && fileId) {
+    try {
+      DriveApp.getFileById(fileId).setTrashed(true);
+      deleteResult.trashed = true;
+    } catch (trashErr) {
+      deleteResult.warning = '시트 기록은 삭제됐지만 Drive 휴지통 이동 실패: ' + trashErr.message;
+    }
+  }
+  invalidateDashboardPhotoCache_();
+  invalidateDashboardCache();
+  return deleteResult || { error: '삭제 결과를 확인하지 못했습니다' };
 }
 
 function invalidateDashboardPhotoCache_() {
@@ -5395,6 +6893,115 @@ function _findHeaderCol_(headers, candidates) {
 /**
  * 오늘일정 웹앱에서 결제수단을 빌리지2.0 거래내역 J열에 저장한다.
  */
+function claimDashboardAuxMutation_(tid, kind) {
+  tid = String(tid || '').trim();
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  try {
+    acquired = lock.tryLock(1000);
+    if (!acquired) return { error: '다른 원장 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
+    var props = PropertiesService.getScriptProperties();
+    var blocked = dashboardTradeMutationLeaseError_(props, tid, 'aux', '');
+    if (blocked) return blocked;
+    var key = 'dashboardAuxMutation_' + tid;
+    var token = String(kind || 'aux') + ':' + Utilities.getUuid();
+    props.setProperty(key, JSON.stringify({ token: token, kind: String(kind || 'aux'), at: Date.now() }));
+    return { success: true, tid: tid, key: key, token: token };
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err), code: 'BUSY', retryable: true };
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+function releaseDashboardAuxMutation_(claim) {
+  if (!claim || !claim.key || !claim.token) return;
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  try {
+    acquired = lock.tryLock(1000);
+    var props = PropertiesService.getScriptProperties();
+    if (!acquired) {
+      // 이 token이 살아 있는 동안 새 claim은 들어올 수 없으므로, 전역 락 경합 시에도
+      // 자기 키만 비교 삭제해 같은 거래가 TTL 7분 동안 잠기는 일을 막는다.
+      clearDashboardMutationLease_(props, claim.key, claim.token);
+      return;
+    }
+    clearDashboardMutationLease_(props, claim.key, claim.token);
+  } catch (err) {
+    // hard-timeout/잠금 경합이면 7분 lease TTL 뒤 자동 해제된다. 다른 거래는 영향 없음.
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+var DASHBOARD_EXTERNAL_ACTION_RECENT_MS_ = 60 * 1000;
+
+function dashboardExternalActionKey_(prefix, action, tid) {
+  return String(prefix || '') + String(action || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 40) + '_' +
+    String(tid || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
+}
+
+/** 외부 문자/발행은 set이 아니라 실제 부작용이다. 같은 거래·액션을 짧은 거래별 lease와
+ * 최근 성공 tombstone으로 막고, 느린 UrlFetch 동안 전역 ScriptLock은 놓는다. */
+function claimDashboardExternalAction_(action, tid, mutationId) {
+  tid = String(tid || '').trim();
+  action = String(action || '').trim();
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  try {
+    acquired = lock.tryLock(1000);
+    if (!acquired) return { error: '다른 원장 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
+    var props = PropertiesService.getScriptProperties();
+    var recentKey = dashboardExternalActionKey_('dashboardExternalRecent_', action, tid);
+    var recent = null;
+    try { recent = JSON.parse(props.getProperty(recentKey) || 'null'); } catch (recentErr) {}
+    if (recent && Date.now() - Number(recent.at || 0) < DASHBOARD_EXTERNAL_ACTION_RECENT_MS_) {
+      return {
+        error: '같은 발송 요청이 최근 이미 완료됐습니다. 고객 수신/거래내역을 먼저 확인하세요.',
+        code: 'DUPLICATE_RECENT',
+        duplicate: true,
+        recentAt: Number(recent.at || 0)
+      };
+    }
+    var blocked = dashboardTradeMutationLeaseError_(props, tid, 'aux', '');
+    if (blocked) return blocked;
+    var key = 'dashboardAuxMutation_' + tid;
+    var token = normalizeDashboardMutationId_(mutationId) || (action + ':' + Utilities.getUuid());
+    props.setProperty(key, JSON.stringify({ token: token, kind: 'external:' + action, at: Date.now() }));
+    return { success: true, action: action, tid: tid, key: key, recentKey: recentKey, token: token };
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err), code: 'BUSY', retryable: true };
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+function finishDashboardExternalAction_(claim, success) {
+  if (!claim || !claim.key || !claim.token) return;
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  try {
+    acquired = lock.tryLock(1000);
+    var props = PropertiesService.getScriptProperties();
+    if (!acquired) {
+      if (success && claim.recentKey) {
+        props.setProperty(claim.recentKey, JSON.stringify({ at: Date.now(), mutationId: claim.token }));
+      }
+      clearDashboardMutationLease_(props, claim.key, claim.token);
+      return;
+    }
+    if (success && claim.recentKey) {
+      props.setProperty(claim.recentKey, JSON.stringify({ at: Date.now(), mutationId: claim.token }));
+    }
+    clearDashboardMutationLease_(props, claim.key, claim.token);
+  } catch (err) {
+    // 성공 tombstone/lease는 보조 안전장치다. upstream idempotencyKey도 함께 전달한다.
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
 function updateTradePaymentMethod(tid, method) {
   if (!tid) return { error: "tid 필요" };
   tid = String(tid).trim();
@@ -5402,10 +7009,17 @@ function updateTradePaymentMethod(tid, method) {
   var allowed = [""].concat(getTradePaymentOptions_());
   if (allowed.indexOf(method) < 0) return { error: "허용되지 않은 결제수단: " + method };
 
+  // 외부 거래내역 openByUrl/전체 ID 스캔은 느리다. 전역 ScriptLock은 claim 순간에만
+  // 잡고, I/O 동안에는 거래별 lease만 유지해 다른 카드의 반출·반납을 막지 않는다.
+  var paymentClaim = claimDashboardAuxMutation_(tid, 'payment');
+  if (paymentClaim && paymentClaim.error) return paymentClaim;
+
+  try {
   var props = PropertiesService.getScriptProperties();
 
   var wroteSheet = false;
   var warning = "";
+  var sideEffects = null;
   try {
     var 개고생URL = props.getProperty("개고생2_URL");
     if (개고생URL) {
@@ -5419,7 +7033,7 @@ function updateTradePaymentMethod(tid, method) {
         for (var i = 0; i < ids.length; i++) {
           if (String(ids[i][0] || '').trim() === tid) {
             거래시트.getRange(i + 2, paymentCol).setValue(method);
-            var sideEffects = applyTradePaymentSideEffects_(거래시트, i + 2, method);
+            sideEffects = applyTradePaymentSideEffects_(거래시트, i + 2, method);
             wroteSheet = true;
             break;
           }
@@ -5443,6 +7057,9 @@ function updateTradePaymentMethod(tid, method) {
     onEditTriggered: false,
     note: "스크립트 setValue/API 변경은 대상 거래내역 시트의 onEdit 트리거를 실행하지 않으므로, 확인된 카드결제 후속값은 API에서 직접 반영합니다."
   };
+  } finally {
+    releaseDashboardAuxMutation_(paymentClaim);
+  }
 }
 
 function applyTradePaymentSideEffects_(sheet, row, method) {
@@ -5493,10 +7110,8 @@ function updateTradeBillingCompany(tid, billingCompany) {
 
   if (!tid) return { error: "tid 필요" };
 
-  var lock = LockService.getScriptLock();
-  // 타임아웃 시 락 없이 진행하면 안 된다 — find-or-append가 중복 행을 만들 수 있음.
-  // 다른 쓰기 함수들과 동일하게 에러 반환 → 클라이언트(gasMutationRetrying)가 재시도.
-  try { lock.waitLock(10000); } catch (lockErr) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+  var billingClaim = claimDashboardAuxMutation_(tid, 'billingCompany');
+  if (billingClaim && billingClaim.error) return billingClaim;
 
   try {
     var 거래시트 = getVillageTradeSheet_();
@@ -5526,11 +7141,11 @@ function updateTradeBillingCompany(tid, billingCompany) {
   } catch (err) {
     return { error: err.message };
   } finally {
-    try { lock.releaseLock(); } catch (releaseErr) {}
+    releaseDashboardAuxMutation_(billingClaim);
   }
 }
 
-function updateTradeProofField(tid, field, value) {
+function updateTradeProofField(tid, field, value, options) {
   tid = String(tid || '').trim();
   field = String(field || '').trim();
   value = String(value || '').trim();
@@ -5541,13 +7156,11 @@ function updateTradeProofField(tid, field, value) {
   }
 
   if (field === "issueStatus" && value === "발행요청") {
-    return requestTradeProofIssue(tid);
+    return requestTradeProofIssue(tid, options || {});
   }
 
-  var lock = LockService.getScriptLock();
-  // 타임아웃 시 락 없이 진행하면 안 된다 — find-or-append가 중복 행을 만들 수 있음.
-  // 다른 쓰기 함수들과 동일하게 에러 반환 → 클라이언트(gasMutationRetrying)가 재시도.
-  try { lock.waitLock(10000); } catch (lockErr) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+  var proofClaim = claimDashboardAuxMutation_(tid, 'proof:' + field);
+  if (proofClaim && proofClaim.error) return proofClaim;
 
   try {
     var 거래시트 = getVillageTradeSheet_();
@@ -5579,47 +7192,60 @@ function updateTradeProofField(tid, field, value) {
   } catch (err) {
     return { error: err.message };
   } finally {
-    try { lock.releaseLock(); } catch (releaseErr) {}
+    releaseDashboardAuxMutation_(proofClaim);
   }
 }
 
-function requestTradeEstimate(tid) {
-  return callVillageOpsApi_("sendEstimate", tid);
+function requestTradeEstimate(tid, options) {
+  return callVillageOpsApi_("sendEstimate", tid, options || {});
 }
 
-function requestTradeStatement(tid) {
-  return callVillageOpsApi_("sendStatement", tid);
+function requestTradeStatement(tid, options) {
+  return callVillageOpsApi_("sendStatement", tid, options || {});
 }
 
-function requestPayAppPaymentLink(tid) {
+function requestPayAppPaymentLink(tid, options) {
   tid = String(tid || '').trim();
   if (!tid) return { error: 'tid 필요' };
 
   var request = buildPayAppPaymentRequest_(tid);
   if (request.error) return request;
 
-  var result = sendPayAppPaymentRequest_(request);
-  if (result.error) return result;
+  var payClaim = claimDashboardExternalAction_(
+    'sendPayAppPaymentLink',
+    tid,
+    options && (options.mutationId || options.mutation_id || options.idempotencyKey)
+  );
+  if (payClaim && payClaim.error) return payClaim;
+  var payConfirmed = false;
 
-  rememberPayAppPaymentRequest_(tid, {
-    tid: tid,
-    mulNo: result.mulNo,
-    payurl: result.payurl,
-    amount: request.amount,
-    phone: request.phone,
-    customerName: request.customerName,
-    requestedAt: Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss')
-  });
+  try {
+    var result = sendPayAppPaymentRequest_(request);
+    if (result.error) return result;
 
-  return {
-    success: true,
-    tid: tid,
-    mulNo: result.mulNo,
-    payurl: result.payurl,
-    amount: request.amount,
-    phoneMasked: result.phoneMasked,
-    message: '결제링크 발송 완료: ' + request.customerName + ' / ' + formatWon_(request.amount) + ' / ' + maskPhoneForDisplay_(request.phone)
-  };
+    rememberPayAppPaymentRequest_(tid, {
+      tid: tid,
+      mulNo: result.mulNo,
+      payurl: result.payurl,
+      amount: request.amount,
+      phone: request.phone,
+      customerName: request.customerName,
+      requestedAt: Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss')
+    });
+
+    payConfirmed = true;
+    return {
+      success: true,
+      tid: tid,
+      mulNo: result.mulNo,
+      payurl: result.payurl,
+      amount: request.amount,
+      phoneMasked: result.phoneMasked,
+      message: '결제링크 발송 완료: ' + request.customerName + ' / ' + formatWon_(request.amount) + ' / ' + maskPhoneForDisplay_(request.phone)
+    };
+  } finally {
+    finishDashboardExternalAction_(payClaim, payConfirmed);
+  }
 }
 
 function requestPayAppTestPaymentLink(args) {
@@ -5887,10 +7513,10 @@ function rememberPayAppTestPaymentRequest_(testId, info) {
   } catch (err) {}
 }
 
-function requestTradeProofIssue(tid) {
+function requestTradeProofIssue(tid, options) {
   var ready = validateTradeProofIssueReady_(tid);
   if (ready && ready.error) return ready;
-  var result = callVillageOpsApi_("issueProof", tid);
+  var result = callVillageOpsApi_("issueProof", tid, options || {});
   if (result && typeof result === "object" && !result.error) {
     result.billingCompany = ready.billingCompany;
     result.proofType = ready.proofType;
@@ -5930,15 +7556,27 @@ function callVillageOpsApi_(action, tid) {
   tid = String(tid || '').trim();
   if (!tid) return { error: "tid 필요" };
 
+  var extraPayload = arguments.length > 2 ? arguments[2] : null;
+  var externalClaim = claimDashboardExternalAction_(
+    action,
+    tid,
+    extraPayload && (extraPayload.mutationId || extraPayload.mutation_id || extraPayload.idempotencyKey)
+  );
+  if (externalClaim && externalClaim.error) return externalClaim;
+  var externalConfirmed = false;
+
   try {
     var props = PropertiesService.getScriptProperties();
     var url = getVillageOpsApiUrl_(props);
     var payload = {
       action: action,
       id: tid,
-      key: getVillageOpsApiKey_(props)
+      key: getVillageOpsApiKey_(props),
+      idempotencyKey: String(
+        extraPayload && (extraPayload.idempotencyKey || extraPayload.mutationId || extraPayload.mutation_id) ||
+        externalClaim.token
+      )
     };
-    var extraPayload = arguments.length > 2 ? arguments[2] : null;
     if (extraPayload && typeof extraPayload === "object") {
       Object.keys(extraPayload).forEach(function(key) {
         if (extraPayload[key] !== undefined) payload[key] = extraPayload[key];
@@ -5961,11 +7599,17 @@ function callVillageOpsApi_(action, tid) {
       return { error: "빌리지2.0 HTTP " + res.getResponseCode() + ": " + (data.error || text) };
     }
     if (data.error) return data;
+    if (!(data.success === true || String(data.status || '').trim().toUpperCase() === 'OK')) {
+      return { error: '빌리지2.0이 발송 성공을 명시적으로 확인하지 않았습니다.' };
+    }
+    externalConfirmed = true;
     invalidateDashboardTradeExtraCache_([tid]);
     invalidateDashboardCache();
     return data;
   } catch (err) {
     return { error: err.message };
+  } finally {
+    finishDashboardExternalAction_(externalClaim, externalConfirmed);
   }
 }
 
@@ -6752,7 +8396,11 @@ function repairDashboardDuplicateScheduleRows(tid, pairs, options) {
   var lock = null;
   if (execute) {
     lock = LockService.getScriptLock();
-    try { lock.waitLock(10000); } catch (lockErr) { return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.' }; }
+    try {
+      if (!lock.tryLock(1000)) return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
+    } catch (lockErr) {
+      return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
+    }
   }
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -6908,6 +8556,9 @@ function dashboardAddEquipments(tid, entries, options) {
   rawNames = !(rawNames === false || rawNames === 0 || rawNames === "0" || rawNames === "false");
   var forceZeroPrice = options.forceZeroPrice === true || options.forceZeroPrice === 1 ||
     options.forceZeroPrice === "1" || options.forceZeroPrice === "true";
+  var lockAlreadyHeld = options.lockAlreadyHeld === true;
+  var structureProjectionQueued = false;
+  var contractRegenQueued = false;
   var profileStart = Date.now();
   var profileMarks = [];
   function markProfile_(step) {
@@ -6922,12 +8573,20 @@ function dashboardAddEquipments(tid, entries, options) {
   }
 
   var lock = null;
-  if (!dryRun) {
+  if (!dryRun && !lockAlreadyHeld) {
     lock = LockService.getScriptLock();
-    try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+    try {
+      if (!lock.tryLock(1000)) return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+    } catch (e) {
+      return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+    }
   }
 
   try {
+    if (!dryRun) {
+      var addLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tid, 'equipmentAdd', '');
+      if (addLeaseBlock) return addLeaseBlock;
+    }
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
     var equipSheet = ss.getSheetByName("장비마스터");
@@ -7076,6 +8735,18 @@ function dashboardAddEquipments(tid, entries, options) {
       tid, addedScheduleIds, '스케줄 품목 추가'
     );
     if (addInvalidated && addInvalidated.error) return attachProfile_(addInvalidated);
+    structureProjectionQueued = !!(addInvalidated && addInvalidated.projectionPending);
+
+    // 현장추가 멱등 요청은 실제 append 직전에 발급 ID와 행 지문을 먼저 기록한다.
+    // 실행이 setValues 뒤 hard-timeout되어도 재시도가 시트 정본으로 성공을 확정할 수 있다.
+    if (options.idempotencyReservation && options.idempotencyReservation.hash) {
+      reserveDashboardOnsiteRowsUnderLock_(
+        String(options.idempotencyReservation.hash || ''),
+        tid,
+        String(options.idempotencyReservation.fingerprint || ''),
+        newRows
+      );
+    }
 
     var insertRow = lastTidRow + 1;
     var hadFollowingRow = insertRow <= lastRow;
@@ -7095,44 +8766,16 @@ function dashboardAddEquipments(tid, entries, options) {
           isHeader: !setName || setName === name, isComponent: !!setName && setName !== name, onsite: true
         };
       }));
-      var baselineSaved = supaCaptureCheckoutBaseline_(tid, addedBaselineItems);
-      if (!baselineSaved || !baselineSaved.ok) {
-        var rollbackError = '';
-        try {
-          var insertedRows = [];
-          for (var rb = 0; rb < newRows.length; rb++) insertedRows.push(insertRow + rb);
-          deleteDashboardRowsDescending_(sched, insertedRows);
-        } catch (rollbackErr) {
-          rollbackError = ' / 시트 롤백도 실패하여 수동 확인 필요: ' + String(rollbackErr && rollbackErr.message || rollbackErr);
-        }
-        invalidateDashboardCacheForTrade_(tid);
-        return attachProfile_({
-          error: '현장 추가 반출 기준선 저장 실패 — 추가 행을 완료 처리하지 않았습니다: ' +
-            String(baselineSaved && baselineSaved.error || '저장 실패') + rollbackError
-        });
-      }
+      scheduleDashboardStructureProjectionUnderLock_(tid, { baselineItems: addedBaselineItems });
+      structureProjectionQueued = true;
     }
     var contractResult = null;
     var contractRegenPending = true;
     var contractRegenError = "";
-    if (directRegenerate) {
-      try {
-        contractResult = deleteAndRegenerateContract(ss, tid);
-        contractRegenPending = false;
-        try {
-          if (typeof clearDirectContractRegenPending_ !== "undefined") {
-            clearDirectContractRegenPending_(tid);
-          } else {
-            PropertiesService.getScriptProperties().deleteProperty("contractEditTS_" + tid);
-          }
-        } catch (clearErr) {}
-      } catch (regenErr) {
-        contractRegenError = regenErr && regenErr.message ? regenErr.message : String(regenErr);
-        scheduleContractRegen(tid);
-      }
-    } else {
-      scheduleContractRegen(tid);
-    }
+    // 계약서/Drive 작업은 항상 디바운스 워커에서 처리한다. directRegenerate 레거시 입력도
+    // 카드 요청의 전역 잠금을 오래 점유하지 않도록 비동기화한다.
+    scheduleContractRegenUnderLock_(tid);
+    contractRegenQueued = true;
     try { invalidateDashboardCache(); } catch (eCache) {}
     try { invalidateTimelineCache(); } catch (eTimeline) {}
     markProfile_('schedule_contract_regen');
@@ -7160,41 +8803,284 @@ function dashboardAddEquipments(tid, entries, options) {
     if (lock) {
       try { lock.releaseLock(); } catch (e) {}
     }
+    // lockAlreadyHeld 경로(현장추가)는 바깥 함수가 자기 잠금을 푼 뒤 worker를 깨운다.
+    if (!lockAlreadyHeld) {
+      if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
+      if (contractRegenQueued) ensureContractRegenTrigger_();
+    }
   }
+}
+
+var DASHBOARD_ONSITE_IDEM_PROP_ = 'slackOpsOnsiteIdempotency_v1';
+var DASHBOARD_ONSITE_PENDING_TTL_MS_ = 2 * 60 * 1000;
+
+function dashboardOnsiteRequestFingerprint_(tid, entries, options) {
+  var normalized = normalizeDashboardAddEntries_(entries).map(function(entry) {
+    return { name: String(entry.name || '').trim(), qty: Number(entry.qty || 0) || 1 };
+  });
+  var payload = JSON.stringify({
+    tid: String(tid || '').trim(),
+    entries: normalized,
+    settlementStatus: String(options && options.settlementStatus || 'pending').trim(),
+    rawNames: !(options && (options.rawNames === false || options.rawNames === 0 || options.rawNames === '0'))
+  });
+  return Utilities.base64EncodeWebSafe(
+    Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, payload)
+  ).replace(/=+$/g, '').slice(0, 24);
+}
+
+/** 호출자는 ScriptLock을 보유해야 한다. append 직전 확정된 ID/내용을 복구 증거로 남긴다. */
+function reserveDashboardOnsiteRowsUnderLock_(idempotencyHash, tid, fingerprint, newRows) {
+  if (!idempotencyHash) return;
+  var props = PropertiesService.getScriptProperties();
+  var rows = [];
+  try { rows = JSON.parse(props.getProperty(DASHBOARD_ONSITE_IDEM_PROP_) || '[]'); } catch (parseErr) {}
+  if (!Array.isArray(rows)) rows = [];
+  var claim = rows.filter(function(row) { return row && row.k === idempotencyHash; })[0];
+  if (!claim || claim.state !== 'pending' || claim.tid !== tid || claim.f !== fingerprint) {
+    throw new Error('현장추가 중복방지 예약 상태가 바뀌었습니다');
+  }
+  claim.scheduleIds = (newRows || []).map(function(row) { return String(row[0] || '').trim(); }).filter(Boolean);
+  claim.reservedRows = (newRows || []).map(function(row) {
+    var setName = String(row[2] || '').trim();
+    var name = String(row[3] || '').trim();
+    return {
+      scheduleId: String(row[0] || '').trim(),
+      setName: setName,
+      name: name,
+      qty: Number(row[4] || 0) || 1,
+      isHeader: !setName || setName === name,
+      isComponent: !!setName && setName !== name
+    };
+  });
+  claim.at = Date.now();
+  props.setProperty(DASHBOARD_ONSITE_IDEM_PROP_, JSON.stringify(rows.slice(-60)));
+}
+
+/** stale pending의 예약 행을 정본 시트와 대조한다. */
+function inspectDashboardOnsiteReservation_(tid, reservedRows) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('스케줄상세');
+  var result = { all: false, none: true, matchingRows: [], mismatch: false, items: [] };
+  if (!sheet || !reservedRows || !reservedRows.length || sheet.getLastRow() < 2) return result;
+  var wanted = {};
+  reservedRows.forEach(function(row) { wanted[String(row.scheduleId || '').trim()] = row; });
+  var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).getValues();
+  values.forEach(function(row, index) {
+    var sid = String(row[0] || '').trim();
+    var expected = wanted[sid];
+    if (!expected) return;
+    result.none = false;
+    var matches = String(row[1] || '').trim() === tid &&
+      String(row[2] || '').trim() === String(expected.setName || '').trim() &&
+      String(row[3] || '').trim() === String(expected.name || '').trim() &&
+      (Number(row[4] || 0) || 1) === (Number(expected.qty || 0) || 1);
+    if (!matches) result.mismatch = true;
+    else {
+      result.matchingRows.push(index + 2);
+      result.items.push(expected);
+    }
+  });
+  result.all = !result.mismatch && result.matchingRows.length === reservedRows.length;
+  return result;
 }
 
 function dashboardRecordOnsiteAddon(tid, entries, options) {
   options = options || {};
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
   var idempotencyKey = String(options.idempotencyKey || '').trim();
-  var idemProp = 'slackOpsOnsiteIdempotency_v1';
+  var idemProp = DASHBOARD_ONSITE_IDEM_PROP_;
   var idemHash = '';
   var idemRows = [];
-  if (!dryRun && idempotencyKey) {
-    try {
+  var idemLock = null;
+  var idemClaimed = false;
+  var addResult = null;
+  var onsiteFingerprint = dashboardOnsiteRequestFingerprint_(tid, entries, options);
+  var onsiteStructureQueued = false;
+  var onsiteContractQueued = false;
+  var onsiteLogAlreadyDone = false;
+  var onsiteLogEvent = null;
+  try {
+    onsiteMutationWork: {
+    if (!dryRun && idempotencyKey) {
+      idemLock = LockService.getScriptLock();
+      try {
+        if (!idemLock.tryLock(1000)) {
+          return { error: '다른 현장추가를 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+        }
+      } catch (idemLockErr) {
+        return { error: '다른 현장추가를 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'BUSY', retryable: true };
+      }
       idemHash = Utilities.base64EncodeWebSafe(
         Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idempotencyKey)
       ).replace(/=+$/g, '').slice(0, 24);
       idemRows = JSON.parse(PropertiesService.getScriptProperties().getProperty(idemProp) || '[]');
       if (!Array.isArray(idemRows)) idemRows = [];
-      if (idemRows.some(function(row) { return row && row.k === idemHash; })) {
-        return { success: true, duplicate: true, idempotencyKey: idemHash, message: '이미 반영된 Slack 현장추가' };
+      var existingIdem = idemRows.filter(function(row) { return row && row.k === idemHash; })[0];
+      if (existingIdem) {
+        if (existingIdem.state !== 'done') {
+          if ((existingIdem.tid && existingIdem.tid !== String(tid || '').trim()) ||
+              (existingIdem.f && existingIdem.f !== onsiteFingerprint)) {
+            return { error: '같은 현장추가 중복방지 키에 다른 요청 내용이 들어왔습니다.' };
+          }
+          var pendingAge = Date.now() - Number(existingIdem.at || 0);
+          var reservedRows = Array.isArray(existingIdem.reservedRows) ? existingIdem.reservedRows : [];
+          if (reservedRows.length) {
+            var reservation = inspectDashboardOnsiteReservation_(String(tid || '').trim(), reservedRows);
+            if (reservation.mismatch) {
+              return { error: '현장추가 예약 ID가 다른 장비 행과 충돌했습니다. 자동 재실행을 중단합니다.' };
+            }
+            if (reservation.all) {
+              existingIdem.state = 'done';
+              existingIdem.at = Date.now();
+              existingIdem.scheduleIds = reservedRows.map(function(row) { return String(row.scheduleId || '').trim(); }).filter(Boolean);
+              PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
+
+              var recoveredSs = SpreadsheetApp.getActiveSpreadsheet();
+              var recoveredBaseline = getDashboardReturnCheckableItems_(reservedRows.map(function(row) {
+                return {
+                  scheduleId: String(row.scheduleId || '').trim(),
+                  name: String(row.name || '').trim(),
+                  qty: Number(row.qty || 0) || 1,
+                  setName: String(row.setName || '').trim(),
+                  isHeader: !!row.isHeader,
+                  isComponent: !!row.isComponent,
+                  onsite: true
+                };
+              }));
+              scheduleDashboardStructureProjectionUnderLock_(String(tid || '').trim(),
+                isDashboardTradeCheckoutStarted_(recoveredSs, tid)
+                  ? { syncStructure: true, baselineItems: recoveredBaseline }
+                  : { syncStructure: true }
+              );
+              scheduleContractRegenUnderLock_(String(tid || '').trim());
+              onsiteStructureQueued = true;
+              onsiteContractQueued = true;
+              addResult = {
+                success: true,
+                duplicate: true,
+                recovered: true,
+                idempotencyKey: idemHash,
+                addedScheduleIds: existingIdem.scheduleIds,
+                addedItems: reservation.items,
+                message: '이미 반영된 현장추가를 시트에서 복구 확인함'
+              };
+              onsiteLogAlreadyDone = existingIdem.logged === true;
+              onsiteLogEvent = existingIdem.logEvent || null;
+              break onsiteMutationWork;
+            }
+            if (!reservation.none && pendingAge >= DASHBOARD_ONSITE_PENDING_TTL_MS_) {
+              // range setValues는 원자적이지만, 비정상 부분행이 남았을 경우에도 우리가
+              // 예약한 ID+내용과 정확히 일치하는 행만 되돌리고 안전하게 다시 실행한다.
+              deleteDashboardRowsDescending_(
+                SpreadsheetApp.getActiveSpreadsheet().getSheetByName('스케줄상세'),
+                reservation.matchingRows.sort(function(a, b) { return b - a; })
+              );
+            } else if (!reservation.none || pendingAge < DASHBOARD_ONSITE_PENDING_TTL_MS_) {
+              return {
+                error: '현장추가 이전 요청의 결과를 확인 중입니다. 잠시 후 다시 시도해주세요.',
+                code: 'OUTCOME_UNKNOWN',
+                retryable: true,
+                outcomeUnknown: true
+              };
+            }
+          } else if (pendingAge < DASHBOARD_ONSITE_PENDING_TTL_MS_) {
+            return {
+              error: '현장추가 이전 요청의 결과를 확인 중입니다. 잠시 후 다시 시도해주세요.',
+              code: 'OUTCOME_UNKNOWN',
+              retryable: true,
+              outcomeUnknown: true
+            };
+          }
+          // 오래된 pending이고 예약행이 하나도 없으면 append 전 종료된 실행이다.
+          // 정확한 partial 행을 위에서 정리한 경우도 같은 키로 새 예약을 시작한다.
+          idemRows = idemRows.filter(function(row) { return !(row && row.k === idemHash); });
+          existingIdem = null;
+        }
+        if (existingIdem) {
+          addResult = {
+            success: true,
+            duplicate: true,
+            idempotencyKey: idemHash,
+            addedScheduleIds: existingIdem.scheduleIds || [],
+            addedItems: existingIdem.reservedRows || existingIdem.items || [],
+            message: '이미 반영된 현장추가'
+          };
+          onsiteLogAlreadyDone = existingIdem.logged === true;
+          onsiteLogEvent = existingIdem.logEvent || null;
+          break onsiteMutationWork;
+        }
       }
-    } catch (idemReadErr) {
-      // 중복방지 저장소를 읽지 못하면 자동 현장추가를 진행하지 않는다.
-      return { error: 'Slack 현장추가 중복방지 상태를 읽지 못했습니다: ' + String(idemReadErr && idemReadErr.message || idemReadErr) };
+      // append와 같은 ScriptLock 임계구역에서 먼저 claim한다. GAS 응답 유실 뒤 같은
+      // 요청이 겹쳐도 두 실행이 모두 '키 없음'을 보고 순차 append할 수 없다.
+      idemRows.push({
+        k: idemHash,
+        state: 'pending',
+        at: Date.now(),
+        tid: String(tid || '').trim(),
+        f: onsiteFingerprint
+      });
+      PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
+      idemClaimed = true;
     }
+    var settlementStatus = String(options.settlementStatus || 'pending').trim();
+    var isPaid = settlementStatus === '유상' || settlementStatus.toLowerCase() === 'paid';
+    addResult = dashboardAddEquipments(tid, entries, {
+      dryRun: options.dryRun,
+      rawNames: options.rawNames,
+      directRegenerate: options.directRegenerate || options.regenerateNow,
+      forceZeroPrice: !isPaid,
+      lockAlreadyHeld: !!idemLock,
+      idempotencyReservation: idemHash ? { hash: idemHash, fingerprint: onsiteFingerprint } : null
+    });
+    if (!addResult || addResult.error) {
+      if (idemClaimed) {
+        idemRows = idemRows.filter(function(row) { return !(row && row.k === idemHash); });
+        PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
+      }
+      return addResult;
+    }
+    if (addResult.dryRun) return addResult;
+    onsiteStructureQueued = !!idemLock;
+    onsiteContractQueued = !!idemLock;
+    if (idemClaimed) {
+      var completedScheduleIds = (addResult.addedItems || []).map(function(item) {
+        return String(item && item.scheduleId || '').trim();
+      }).filter(Boolean);
+      idemRows.forEach(function(row) {
+        if (row && row.k === idemHash) {
+          row.state = 'done';
+          row.at = Date.now();
+          row.scheduleIds = completedScheduleIds;
+          row.items = addResult.addedItems || [];
+          if (row.logged !== true) row.logged = false;
+        }
+      });
+      PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
+      addResult.idempotencyKey = idemHash;
+    }
+    }
+  } catch (idemReadErr) {
+    if (addResult && addResult.success) {
+      addResult.idempotencyWarning = '중복방지 완료표시 확인 필요: ' +
+        String(idemReadErr && idemReadErr.message || idemReadErr);
+      return addResult;
+    }
+    return { error: '현장추가 중복방지 처리 실패: ' + String(idemReadErr && idemReadErr.message || idemReadErr) };
+  } finally {
+    if (idemLock) try { idemLock.releaseLock(); } catch (idemReleaseErr) {}
+    if (onsiteStructureQueued) ensureDashboardStructureProjectionTrigger_();
+    if (onsiteContractQueued) ensureContractRegenTrigger_();
   }
+
   var settlementStatus = String(options.settlementStatus || 'pending').trim();
-  var isPaid = settlementStatus === '유상' || settlementStatus.toLowerCase() === 'paid';
-  var addResult = dashboardAddEquipments(tid, entries, {
-    dryRun: options.dryRun,
-    rawNames: options.rawNames,
-    directRegenerate: options.directRegenerate || options.regenerateNow,
-    forceZeroPrice: !isPaid
-  });
-  if (!addResult || addResult.error) return addResult;
-  if (addResult.dryRun) return addResult;
+
+  if (onsiteLogAlreadyDone) {
+    addResult.onsiteAddonLogged = true;
+    addResult.onsiteAddonEvent = onsiteLogEvent;
+    addResult.message = addResult.duplicate ? '이미 반영된 현장 추가 기록 확인됨' : '현장 추가 반출 기록 완료';
+    return addResult;
+  }
 
   var payload = {
     transactionId: String(tid || '').trim(),
@@ -7202,27 +9088,51 @@ function dashboardRecordOnsiteAddon(tid, entries, options) {
     items: addResult.requestedItems || addResult.addedItems || [],
     settlementStatus: settlementStatus,
     source: 'schedule_button',
-    actorName: options.actorName || '오늘 일정 웹앱'
+    actorName: options.actorName || '오늘 일정 웹앱',
+    // 외부 백엔드도 같은 키로 upsert/dedupe할 수 있게 전달한다. GAS가 응답을 잃어
+    // rows_done 상태에서 재시도해도 동일 현장추가 이벤트가 두 번 생기지 않는다.
+    idempotencyKey: idemHash || idempotencyKey,
+    requestHash: onsiteFingerprint
   };
   var logResult = recordOnsiteAddonBackend_(payload);
   addResult.onsiteAddonLogged = !!(logResult && (logResult.ok || logResult.success));
   addResult.onsiteAddonEvent = logResult && (logResult.event || logResult.data || null);
-  if (!addResult.onsiteAddonLogged) {
-    addResult.onsiteAddonWarning = (logResult && (logResult.error || logResult.reason)) || 'onsite_addon_log_failed';
-  }
-  addResult.message = addResult.onsiteAddonLogged
-    ? '현장 추가 반출 기록 완료'
-    : '장비는 추가됐지만 현장 추가 반출 기록 저장은 확인 필요';
-  if (idemHash) {
+  if (addResult.onsiteAddonLogged && idemHash) {
+    var loggedLock = LockService.getScriptLock();
+    var loggedLocked = false;
     try {
-      idemRows.push({ k: idemHash, at: Date.now() });
-      PropertiesService.getScriptProperties().setProperty(idemProp, JSON.stringify(idemRows.slice(-60)));
-      addResult.idempotencyKey = idemHash;
-    } catch (idemWriteErr) {
-      // 장비 추가 자체는 이미 성공했다. 호출부가 재시도해 중복시키지 않도록 성공과 경고를 함께 반환한다.
-      addResult.idempotencyWarning = '중복방지 표식 저장 실패: ' + String(idemWriteErr && idemWriteErr.message || idemWriteErr);
+      loggedLocked = loggedLock.tryLock(1500);
+      if (loggedLocked) {
+        var loggedProps = PropertiesService.getScriptProperties();
+        var loggedRows = [];
+        try { loggedRows = JSON.parse(loggedProps.getProperty(idemProp) || '[]'); } catch (loggedParseErr) {}
+        if (!Array.isArray(loggedRows)) loggedRows = [];
+        loggedRows.forEach(function(row) {
+          if (row && row.k === idemHash) {
+            row.logged = true;
+            row.loggedAt = Date.now();
+          }
+        });
+        loggedProps.setProperty(idemProp, JSON.stringify(loggedRows.slice(-60)));
+      }
+    } finally {
+      if (loggedLocked) try { loggedLock.releaseLock(); } catch (loggedReleaseErr) {}
     }
   }
+  if (!addResult.onsiteAddonLogged) {
+    addResult.onsiteAddonWarning = (logResult && (logResult.error || logResult.reason)) || 'onsite_addon_log_failed';
+    return {
+      error: '장비는 추가됐고 현장 추가 기록을 자동 재확인 중입니다: ' + addResult.onsiteAddonWarning,
+      code: 'OUTCOME_UNKNOWN',
+      retryable: true,
+      outcomeUnknown: true,
+      duplicate: !!addResult.duplicate,
+      addedScheduleIds: addResult.addedScheduleIds || (addResult.addedItems || []).map(function(item) {
+        return String(item && item.scheduleId || '').trim();
+      }).filter(Boolean)
+    };
+  }
+  addResult.message = '현장 추가 반출 기록 완료';
   return addResult;
 }
 
@@ -7235,14 +9145,24 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
 
   options = options || {};
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
+  var structureProjectionQueued = false;
+  var contractRegenQueued = false;
 
   var lock = null;
   if (!dryRun) {
     lock = LockService.getScriptLock();
-    try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+    try {
+      if (!lock.tryLock(1000)) return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+    } catch (e) {
+      return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+    }
   }
 
   try {
+    if (!dryRun) {
+      var qtyLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tid, 'equipmentQty', '');
+      if (qtyLeaseBlock) return qtyLeaseBlock;
+    }
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
     var equipSheet = ss.getSheetByName("장비마스터");
@@ -7341,10 +9261,12 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
         '장비 수량 변경'
       );
       if (invalidated && invalidated.error) return invalidated;
+      structureProjectionQueued = !!(invalidated && invalidated.projectionPending);
       updates.forEach(function(update) {
         sched.getRange(update.row, 5).setValue(update.newQty).setNumberFormat("#,##0");
       });
-      scheduleContractRegen(tid);
+      scheduleContractRegenUnderLock_(tid);
+      contractRegenQueued = true;
       try { invalidateDashboardCache(); } catch (eCache) {}
       try { invalidateTimelineCache(); } catch (eTimeline) {}
     }
@@ -7373,6 +9295,8 @@ function dashboardUpdateEquipmentQty(tid, scheduleId, qty, options) {
     if (lock) {
       try { lock.releaseLock(); } catch (e) {}
     }
+    if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
+    if (contractRegenQueued) ensureContractRegenTrigger_();
   }
 }
 
@@ -7387,14 +9311,24 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
   var exactName = options.exactName === true || options.exactName === 1 || options.exactName === "1" || options.exactName === "true";
   var skipAvailability = options.skipAvailability === true || options.skipAvailability === 1 || options.skipAvailability === "1" || options.skipAvailability === "true";
+  var structureProjectionQueued = false;
+  var contractRegenQueued = false;
 
   var lock = null;
   if (!dryRun) {
     lock = LockService.getScriptLock();
-    try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+    try {
+      if (!lock.tryLock(1000)) return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+    } catch (e) {
+      return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+    }
   }
 
   try {
+    if (!dryRun) {
+      var nameLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tid, 'equipmentName', '');
+      if (nameLeaseBlock) return nameLeaseBlock;
+    }
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
     var equipSheet = ss.getSheetByName("장비마스터");
@@ -7465,13 +9399,15 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
         '장비명 또는 세트 구성 변경'
       );
       if (invalidated && invalidated.error) return invalidated;
+      structureProjectionQueued = !!(invalidated && invalidated.projectionPending);
       sched.getRange(targetRow, 4).setValue(newName);
       if (setName === oldName) sched.getRange(targetRow, 3).setValue(newName);
       updatedItems.forEach(function(item) {
         if (item.field === 'setName') sched.getRange(item.row, 3).setValue(newName);
       });
 
-      scheduleContractRegen(tid);
+      scheduleContractRegenUnderLock_(tid);
+      contractRegenQueued = true;
       try { invalidateDashboardCache(); } catch (eCache) {}
       try { invalidateTimelineCache(); } catch (eTimeline) {}
     }
@@ -7493,6 +9429,8 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
     if (lock) {
       try { lock.releaseLock(); } catch (e) {}
     }
+    if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
+    if (contractRegenQueued) ensureContractRegenTrigger_();
   }
 }
 
@@ -7507,9 +9445,17 @@ function dashboardAddEquipment(tid, equipName, qty) {
   equipName = String(equipName).trim();
 
   var lock = LockService.getScriptLock();
-  try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+  var structureProjectionQueued = false;
+  var contractRegenQueued = false;
+  try {
+    if (!lock.tryLock(1000)) return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+  } catch (e) {
+    return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+  }
 
   try {
+    var legacyAddLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tid, 'equipmentAdd', '');
+    if (legacyAddLeaseBlock) return legacyAddLeaseBlock;
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
     var equipSheet = ss.getSheetByName("장비마스터");
@@ -7588,6 +9534,7 @@ function dashboardAddEquipment(tid, equipName, qty) {
       tid, addedScheduleIds, '스케줄 품목 추가'
     );
     if (addInvalidated && addInvalidated.error) return addInvalidated;
+    structureProjectionQueued = !!(addInvalidated && addInvalidated.projectionPending);
 
     // 같은 거래ID의 마지막 행 찾기 → 바로 아래에 삽입
     var lastTidRow = -1;
@@ -7622,26 +9569,13 @@ function dashboardAddEquipment(tid, equipName, qty) {
           isHeader: !setName || setName === name, isComponent: !!setName && setName !== name, onsite: true
         };
       }));
-      var baselineSaved = supaCaptureCheckoutBaseline_(tid, addedBaselineItems);
-      if (!baselineSaved || !baselineSaved.ok) {
-        var rollbackError = '';
-        try {
-          var insertedRows = [];
-          for (var rb = 0; rb < newRows.length; rb++) insertedRows.push(insertRow + rb);
-          deleteDashboardRowsDescending_(sched, insertedRows);
-        } catch (rollbackErr) {
-          rollbackError = ' / 시트 롤백도 실패하여 수동 확인 필요: ' + String(rollbackErr && rollbackErr.message || rollbackErr);
-        }
-        invalidateDashboardCacheForTrade_(tid);
-        return {
-          error: '추가 반출 기준선 저장 실패 — 추가 행을 완료 처리하지 않았습니다: ' +
-            String(baselineSaved && baselineSaved.error || '저장 실패') + rollbackError
-        };
-      }
+      scheduleDashboardStructureProjectionUnderLock_(tid, { baselineItems: addedBaselineItems });
+      structureProjectionQueued = true;
     }
 
     try { formatScheduleSheet(sched); } catch (e) {}
-    scheduleContractRegen(tid);
+    scheduleContractRegenUnderLock_(tid);
+    contractRegenQueued = true;
     return {
 	      success: true,
 	      availabilityChecked: true,
@@ -7654,6 +9588,8 @@ function dashboardAddEquipment(tid, equipName, qty) {
     };
   } finally {
     try { lock.releaseLock(); } catch (e) {}
+    if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
+    if (contractRegenQueued) ensureContractRegenTrigger_();
   }
 }
 
@@ -7670,6 +9606,9 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
   equipName = String(equipName || "").trim();
   scheduleId = String(scheduleId || "").trim();
   options = options || {};
+  var mutationId = normalizeDashboardMutationId_(options.mutationId);
+  var removeRequestKey = scheduleId ? 'schedule:' + scheduleId : 'name:' + equipName;
+  var removeMutationScope = 'equipmentRemove:' + removeRequestKey;
   var directRegenerate =
     options.directRegenerate === true ||
     options.directRegenerate === 1 ||
@@ -7681,14 +9620,21 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
     options.regenerateNow === "true";
 
   var lock = LockService.getScriptLock();
-  try { lock.waitLock(10000); } catch (e) { return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요." }; }
+  var structureProjectionQueued = false;
+  var contractRegenQueued = false;
+  try {
+    if (!lock.tryLock(1000)) return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+  } catch (e) {
+    return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
+  }
 
   try {
+    var removeProps = PropertiesService.getScriptProperties();
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
-    if (!sched || sched.getLastRow() < 2) return { error: "스케줄상세 비어있음" };
+    if (!sched) return { error: "스케줄상세 비어있음" };
     var lastRow = sched.getLastRow();
-    var data = sched.getRange(2, 1, lastRow - 1, 4).getValues();
+    var data = lastRow >= 2 ? sched.getRange(2, 1, lastRow - 1, 4).getValues() : [];
     var rowsToDelete = [];
 
     if (scheduleId) {
@@ -7699,34 +9645,34 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
           break;
         }
       }
-      if (targetIdx < 0) return { error: "해당 스케줄 행 없음" };
+      if (targetIdx >= 0) {
+        var targetRow = targetIdx + 2;
+        var targetSetName = String(data[targetIdx][2] || "").trim();
+        var targetEquipName = String(data[targetIdx][3] || "").trim();
+        var isComponent = !!targetSetName && targetSetName !== targetEquipName;
 
-      var targetRow = targetIdx + 2;
-      var targetSetName = String(data[targetIdx][2] || "").trim();
-      var targetEquipName = String(data[targetIdx][3] || "").trim();
-      var isComponent = !!targetSetName && targetSetName !== targetEquipName;
-
-      if (isComponent) {
-        rowsToDelete.push(targetRow);
-      } else {
-        var setKey = targetSetName || targetEquipName;
-        var hasComponents = false;
-        for (var cidx = 0; cidx < data.length; cidx++) {
-          if (String(data[cidx][1] || "").trim() !== tid) continue;
-          var cSet = String(data[cidx][2] || "").trim();
-          var cEquip = String(data[cidx][3] || "").trim();
-          if (cSet === setKey && cEquip && cEquip !== setKey) {
-            hasComponents = true;
-            break;
+        if (isComponent) {
+          rowsToDelete.push(targetRow);
+        } else {
+          var setKey = targetSetName || targetEquipName;
+          var hasComponents = false;
+          for (var cidx = 0; cidx < data.length; cidx++) {
+            if (String(data[cidx][1] || "").trim() !== tid) continue;
+            var cSet = String(data[cidx][2] || "").trim();
+            var cEquip = String(data[cidx][3] || "").trim();
+            if (cSet === setKey && cEquip && cEquip !== setKey) {
+              hasComponents = true;
+              break;
+            }
           }
-        }
 
-        for (var i = data.length - 1; i >= 0; i--) {
-          if (String(data[i][1] || "").trim() !== tid) continue;
-          var rowNum = i + 2;
-          var rowSetName = String(data[i][2] || "").trim();
-          if (rowNum === targetRow || (hasComponents && rowSetName === setKey)) {
-            rowsToDelete.push(rowNum);
+          for (var i = data.length - 1; i >= 0; i--) {
+            if (String(data[i][1] || "").trim() !== tid) continue;
+            var rowNum = i + 2;
+            var rowSetName = String(data[i][2] || "").trim();
+            if (rowNum === targetRow || (hasComponents && rowSetName === setKey)) {
+              rowsToDelete.push(rowNum);
+            }
           }
         }
       }
@@ -7740,7 +9686,92 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
         }
       }
     }
-    if (rowsToDelete.length === 0) return { error: "해당 장비 행 없음" };
+
+    // 시트 삭제가 끝난 직후 GAS 응답만 유실되면 재시도 시 대상 행은 이미 없다.
+    // mutation log에 먼저 남긴 삭제 대상 snapshot이 있는 동일 요청만 성공으로 복구한다.
+    // mutationId가 없거나 처음부터 대상이 없던 요청은 기존처럼 terminal error다.
+    if (rowsToDelete.length === 0) {
+      var absentError = lastRow < 2 ? "스케줄상세 비어있음" : (scheduleId ? "해당 스케줄 행 없음" : "해당 장비 행 없음");
+      if (!mutationId) return { error: absentError };
+      cleanupExpiredDashboardMutationLogs_(removeProps);
+      var removeLog = readDashboardMutationLog_(removeProps, tid, removeMutationScope);
+      var removeEntry = null;
+      for (var li = 0; li < removeLog.length; li++) {
+        if (String(removeLog[li] && removeLog[li].id || '') === mutationId) {
+          removeEntry = removeLog[li];
+          break;
+        }
+      }
+      // 두 직원이 같은 품목을 거의 동시에 다른 mutationId로 제외할 수 있다. 먼저 끝난
+      // 요청의 tombstone이 같은 scope/대상을 증명하면 두 번째 요청도 already-removed 성공이다.
+      // 여기서 '행 없음'을 반환하면 두 번째 브라우저가 이미 삭제된 품목을 되살린다.
+      if (!removeEntry) {
+        for (var tombIdx = removeLog.length - 1; tombIdx >= 0; tombIdx--) {
+          var candidate = removeLog[tombIdx];
+          var candidateTarget = null;
+          try { candidateTarget = JSON.parse(String(candidate && candidate.target || '') || 'null'); } catch (candidateErr) {}
+          if (candidateTarget && String(candidateTarget.requestKey || '') === removeRequestKey &&
+              (candidateTarget.removedScheduleIds || []).length) {
+            removeEntry = candidate;
+            break;
+          }
+        }
+      }
+      if (!removeEntry) return { error: absentError };
+
+      var storedRemoveTarget = String(removeEntry.target || '');
+      var removeCheckpoint = null;
+      try { removeCheckpoint = JSON.parse(storedRemoveTarget || 'null'); } catch (checkpointErr) {}
+      if (!removeCheckpoint || String(removeCheckpoint.requestKey || '') !== removeRequestKey) {
+        return { error: '같은 mutationId가 다른 삭제 대상에 사용되었습니다.' };
+      }
+      var recoveredMutation = beginDashboardMutation_(
+        removeProps, tid, mutationId, removeMutationScope, storedRemoveTarget
+      );
+      if (recoveredMutation.error) return { error: recoveredMutation.error };
+      if (recoveredMutation.pendingLater) {
+        return { error: '더 최신 장비 삭제를 처리 중입니다.', code: 'BUSY', retryable: true };
+      }
+
+      var recoveredScheduleIds = (removeCheckpoint.removedScheduleIds || []).map(function(id) {
+        return String(id || '').trim();
+      }).filter(Boolean);
+      if (!recoveredScheduleIds.length) return { error: absentError };
+      scheduleDashboardStructureProjectionUnderLock_(tid, {
+        syncStructure: true,
+        removeScheduleIds: recoveredScheduleIds
+      });
+      structureProjectionQueued = true;
+      scheduleContractRegenUnderLock_(tid);
+      contractRegenQueued = true;
+      try { invalidateDashboardCache(); } catch (eRecoveredCache) {}
+      try { invalidateTimelineCache(); } catch (eRecoveredTimeline) {}
+      commitDashboardMutation_(removeProps, tid, mutationId, removeMutationScope);
+      return {
+        success: true,
+        deduped: true,
+        recovered: true,
+        alreadyRemoved: String(removeEntry.id || '') !== mutationId,
+        contractRegenPending: true,
+        contractRegenError: "",
+        url: "",
+        contractUrl: "",
+        fileId: "",
+        finalAmount: null,
+        amount: null,
+        removedRows: recoveredScheduleIds.length,
+        removedScheduleIds: recoveredScheduleIds,
+        removedEquipments: removeCheckpoint.removedEquipments || [],
+        equipName: equipName,
+        scheduleId: scheduleId
+      };
+    }
+
+    var removeLeaseBlock = dashboardTradeMutationLeaseError_(removeProps, tid, 'equipmentRemove', '');
+    if (removeLeaseBlock) return removeLeaseBlock;
+    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+      return { error: "이미 반출된 품목은 삭제할 수 없습니다. 반납 의무와 기준선을 보존해야 합니다." };
+    }
 
     var seenRows = {};
     rowsToDelete = rowsToDelete.filter(function(r) {
@@ -7760,43 +9791,39 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
         name: String(source[3] || "").trim()
       };
     });
+    var removeMutationTarget = JSON.stringify({
+      requestKey: removeRequestKey,
+      removedScheduleIds: removedScheduleIds,
+      removedEquipments: removedEquipments
+    });
+    var removeMutation = beginDashboardMutation_(
+      removeProps, tid, mutationId, removeMutationScope, removeMutationTarget
+    );
+    if (removeMutation.error) return { error: removeMutation.error };
+    if (removeMutation.skip) {
+      if (removeMutation.pendingLater) {
+        return { error: '더 최신 장비 삭제를 처리 중입니다.', code: 'BUSY', retryable: true };
+      }
+      return { error: '완료된 삭제 요청의 대상 행이 다시 존재합니다.', code: 'STATE_CONFLICT' };
+    }
 
     var removeInvalidated = invalidateDashboardReturnInspectionForTrade_(
       tid, removedScheduleIds, '스케줄 품목 삭제'
     );
     if (removeInvalidated && removeInvalidated.error) return removeInvalidated;
-
-    var removalProjection = typeof supaMarkScheduleItemsRemoved_ === 'function'
-      ? supaMarkScheduleItemsRemoved_(tid, removedScheduleIds)
-      : { ok: false, error: 'Supabase 품목 제외 함수 없음' };
-    if (!removalProjection || !removalProjection.ok) {
-      return { error: '품목 삭제 상태 저장 실패 — 시트 행은 유지했습니다: ' + String(removalProjection && removalProjection.error || '저장 실패') };
-    }
+    structureProjectionQueued = !!(removeInvalidated && removeInvalidated.projectionPending);
 
     deleteDashboardRowsDescending_(sched, rowsToDelete);
+    scheduleDashboardStructureProjectionUnderLock_(tid, { removeScheduleIds: removedScheduleIds });
+    structureProjectionQueued = true;
     var contractResult = null;
     var contractRegenPending = true;
     var contractRegenError = "";
-    if (directRegenerate) {
-      try {
-        contractResult = deleteAndRegenerateContract(ss, tid);
-        contractRegenPending = false;
-        try {
-          if (typeof clearDirectContractRegenPending_ !== "undefined") {
-            clearDirectContractRegenPending_(tid);
-          } else {
-            PropertiesService.getScriptProperties().deleteProperty("contractEditTS_" + tid);
-          }
-        } catch (clearErr) {}
-      } catch (regenErr) {
-        contractRegenError = regenErr && regenErr.message ? regenErr.message : String(regenErr);
-        scheduleContractRegen(tid);
-      }
-    } else {
-      scheduleContractRegen(tid);
-    }
+    scheduleContractRegenUnderLock_(tid);
+    contractRegenQueued = true;
     try { invalidateDashboardCache(); } catch (eCache) {}
     try { invalidateTimelineCache(); } catch (eTimeline) {}
+    commitDashboardMutation_(removeProps, tid, mutationId, removeMutationScope);
     return {
       success: true,
       contractRegenPending: contractRegenPending,
@@ -7814,6 +9841,8 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
     };
   } finally {
     try { lock.releaseLock(); } catch (e) {}
+    if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
+    if (contractRegenQueued) ensureContractRegenTrigger_();
   }
 }
 
@@ -8708,7 +10737,10 @@ function _collectConfirmRequestResultsByReqID_(sheet, reqID) {
  * 구버전 호환: req.업체명 이 오면 req.할인유형으로 간주 (코워크 파서 마이그레이션 전 임시 fallback)
  */
 function insertAndCheckRequest(req) {
-  var insertLock = LockService.getScriptLock();
+  // 확인요청 행 삽입/세트 전개는 길지만 대시보드 카드 원장과 쓰기 대상이 다르다.
+  // 전역 ScriptLock을 30초씩 잡으면 한 확인요청 때문에 전 직원의 반출/반납 카드가
+  // BUSY로 실패하므로, 동일 실행 사용자(웹앱/설치형 트리거 소유자) 전용 락으로 분리한다.
+  var insertLock = LockService.getUserLock();
   try {
     insertLock.waitLock(30000);
   } catch (e) {
@@ -9253,7 +11285,15 @@ function deleteRequest(reqID) {
 function deleteTrade(tradeId) {
   var tid = String(tradeId || "").trim();
   if (!tid) throw new Error("tradeId 필수");
+  var deleteLock = LockService.getScriptLock();
+  var deleteLocked = false;
+  try {
+  deleteLock.waitLock(10000);
+  deleteLocked = true;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+    throw new Error("이미 반출된 거래는 완전삭제할 수 없습니다. 반납 기준선과 감사 기록을 보존해야 합니다: " + tid);
+  }
 
   // 1) 스케줄상세 행 삭제 (B열 = 거래ID) — 아래부터
   var deletedSched = 0;
@@ -9306,6 +11346,9 @@ function deleteTrade(tradeId) {
   try { invalidateTimelineCache(); } catch (c2) {}
 
   return { status: "OK", tradeId: tid, deletedContract: deletedContract, deletedSchedule: deletedSched, trashedFiles: trashed, supabase: supa };
+  } finally {
+    if (deleteLocked) try { deleteLock.releaseLock(); } catch (deleteReleaseErr) {}
+  }
 }
 
 
@@ -9317,8 +11360,9 @@ function deleteTrade(tradeId) {
  * 특정 행의 요청ID를 기준으로 같은 ID의 모든 행을 일괄 확인
  */
 function processByReqID(sheet, triggerRow) {
-  // ── 중복 실행 방지 락 ──
-  var lock = LockService.getScriptLock();
+  // 확인요청 전개끼리만 직렬화한다. 대시보드 카드의 짧은 ScriptLock 임계구역과
+  // 분리해 가용확인 전체 시트 스캔/행 삽입이 현장 반출·반납을 막지 않게 한다.
+  var lock = LockService.getUserLock();
   try {
     lock.waitLock(30000);
   } catch (e) {
@@ -11503,6 +13547,16 @@ function checkModificationItem(sheet, row) {
  * N열 "추가" → 스케줄상세에 장비 1행 추가 + 계약서 재생성
  */
 function addEquipmentToContract(sheet, row) {
+  var modificationLock = LockService.getScriptLock();
+  var modificationLocked = false;
+  var contractRegenQueued = false;
+  try { modificationLocked = modificationLock.tryLock(3000); } catch (lockErr) {}
+  if (!modificationLocked) {
+    sheet.getRange(row, 15).setValue("⏳ 다른 장비 변경 처리 중입니다. 잠시 후 다시 시도해주세요.");
+    sheet.getRange(row, 14).clearContent();
+    return;
+  }
+  try {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const schedSheet = ss.getSheetByName("스케줄상세");
   const equipSheet = ss.getSheetByName("장비마스터");
@@ -11520,6 +13574,12 @@ function addEquipmentToContract(sheet, row) {
   }
   if (isDashboardTradeCheckoutStarted_(ss, 거래ID)) {
     sheet.getRange(row, 15).setValue("❌ 반출 후 추가는 헤이빌리의 현장 추가를 사용하세요");
+    sheet.getRange(row, 14).clearContent();
+    return;
+  }
+  const addLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), 거래ID, 'equipmentAdd', '');
+  if (addLeaseBlock) {
+    sheet.getRange(row, 15).setValue("⏳ " + addLeaseBlock.error);
     sheet.getRange(row, 14).clearContent();
     return;
   }
@@ -11590,23 +13650,18 @@ function addEquipmentToContract(sheet, row) {
 
   formatScheduleSheet(schedSheet);
 
-  sheet.getRange(row, 15).setValue("⏳ 계약서 재생성 중...");
-
-  // 기존 계약서 삭제 후 재생성
-  try {
-    const result = deleteAndRegenerateContract(ss, 거래ID);
-    if (가용경고) {
-      sheet.getRange(row, 15).setValue("⚠️ 추가완료 (경고: " + 가용경고 + ") + 계약서 재생성");
-      sheet.getRange(row, 15).setBackground("#FFEB9C");
-    } else {
-      sheet.getRange(row, 15).setValue("✅ 추가완료 + 계약서 재생성");
-      sheet.getRange(row, 15).setBackground("#C6EFCE");
-    }
-  } catch (err) {
-    var errMsg = "✅ 추가완료 (계약서 재생성 실패: " + err.message + ")";
-    if (가용경고) errMsg = "⚠️ 추가완료 (경고: " + 가용경고 + ", 계약서 실패: " + err.message + ")";
-    sheet.getRange(row, 15).setValue(errMsg);
+  scheduleContractRegenUnderLock_(거래ID);
+  contractRegenQueued = true;
+  if (가용경고) {
+    sheet.getRange(row, 15).setValue("⚠️ 추가완료 (경고: " + 가용경고 + ") · 계약서 재생성 예약");
     sheet.getRange(row, 15).setBackground("#FFEB9C");
+  } else {
+    sheet.getRange(row, 15).setValue("✅ 추가완료 · 계약서 재생성 예약");
+    sheet.getRange(row, 15).setBackground("#C6EFCE");
+  }
+  } finally {
+    try { modificationLock.releaseLock(); } catch (releaseErr) {}
+    if (contractRegenQueued) ensureContractRegenTrigger_();
   }
 }
 
@@ -11615,6 +13670,17 @@ function addEquipmentToContract(sheet, row) {
  * N열 "삭제" → 스케줄상세에서 해당 장비 행 제거 + 계약서 재생성
  */
 function removeEquipmentFromContract(sheet, row) {
+  var modificationLock = LockService.getScriptLock();
+  var modificationLocked = false;
+  var structureProjectionQueued = false;
+  var contractRegenQueued = false;
+  try { modificationLocked = modificationLock.tryLock(3000); } catch (lockErr) {}
+  if (!modificationLocked) {
+    sheet.getRange(row, 15).setValue("⏳ 다른 장비 변경 처리 중입니다. 잠시 후 다시 시도해주세요.");
+    sheet.getRange(row, 14).clearContent();
+    return;
+  }
+  try {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const schedSheet = ss.getSheetByName("스케줄상세");
 
@@ -11623,6 +13689,17 @@ function removeEquipmentFromContract(sheet, row) {
 
   if (!거래ID || !장비명) {
     sheet.getRange(row, 15).setValue("❌ 거래ID 또는 장비명 없음");
+    sheet.getRange(row, 14).clearContent();
+    return;
+  }
+  if (isDashboardTradeCheckoutStarted_(ss, 거래ID)) {
+    sheet.getRange(row, 15).setValue("❌ 이미 반출된 품목은 삭제할 수 없습니다. 반납 기준선을 보존합니다.");
+    sheet.getRange(row, 14).clearContent();
+    return;
+  }
+  const removeLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), 거래ID, 'equipmentRemove', '');
+  if (removeLeaseBlock) {
+    sheet.getRange(row, 15).setValue("⏳ " + removeLeaseBlock.error);
     sheet.getRange(row, 14).clearContent();
     return;
   }
@@ -11650,15 +13727,11 @@ function removeEquipmentFromContract(sheet, row) {
         sheet.getRange(row, 14).clearContent();
         return;
       }
-      const removalProjection = typeof supaMarkScheduleItemsRemoved_ === 'function'
-        ? supaMarkScheduleItemsRemoved_(거래ID, deletedScheduleId ? [deletedScheduleId] : [])
-        : { ok: false, error: 'Supabase 품목 제외 함수 없음' };
-      if (!removalProjection || !removalProjection.ok) {
-        sheet.getRange(row, 15).setValue("❌ 삭제 상태 저장 실패 — 시트 행 유지: " + String(removalProjection && removalProjection.error || '저장 실패'));
-        sheet.getRange(row, 14).clearContent();
-        return;
-      }
       schedSheet.deleteRow(i + 2);
+      scheduleDashboardStructureProjectionUnderLock_(거래ID, {
+        removeScheduleIds: deletedScheduleId ? [deletedScheduleId] : []
+      });
+      structureProjectionQueued = true;
       deletedCount++;
       break; // 1행만 삭제
     }
@@ -11672,16 +13745,14 @@ function removeEquipmentFromContract(sheet, row) {
 
   formatScheduleSheet(schedSheet);
 
-  sheet.getRange(row, 15).setValue("⏳ 계약서 재생성 중...");
-
-  // 기존 계약서 삭제 후 재생성
-  try {
-    const result = deleteAndRegenerateContract(ss, 거래ID);
-    sheet.getRange(row, 15).setValue("✅ 삭제완료 + 계약서 재생성");
-    sheet.getRange(row, 15).setBackground("#C6EFCE");
-  } catch (err) {
-    sheet.getRange(row, 15).setValue("✅ 삭제완료 (계약서 재생성 실패: " + err.message + ")");
-    sheet.getRange(row, 15).setBackground("#FFEB9C");
+  scheduleContractRegenUnderLock_(거래ID);
+  contractRegenQueued = true;
+  sheet.getRange(row, 15).setValue("✅ 삭제완료 · 계약서 재생성 예약");
+  sheet.getRange(row, 15).setBackground("#C6EFCE");
+  } finally {
+    try { modificationLock.releaseLock(); } catch (releaseErr) {}
+    if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
+    if (contractRegenQueued) ensureContractRegenTrigger_();
   }
 }
 
@@ -14038,6 +16109,7 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
 
   var lock = LockService.getScriptLock();
   var lockAcquired = false;
+  var statusProjectionQueued = false;
   try {
     lock.waitLock(10000);
     lockAcquired = true;
@@ -14045,11 +16117,19 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
     // 취소 경계를 넘는 변경은 화면 검색에서 행이 사라지기 전에 기존 증거와 완료 상태를
     // 같은 잠금 안에서 무효화한다. 실패하면 상태 자체를 바꾸지 않는다.
     var changedByTrade = {};
+    var guardedTrades = {};
     rows.forEach(function(ri) {
       var values = sheet.getRange(ri, 1, 1, 10).getDisplayValues()[0];
       var scheduleId = String(values[0] || '').trim();
       var tradeId = String(values[1] || '').trim();
       var oldStatus = String(values[9] || '').trim();
+      if (tradeId && !guardedTrades[tradeId]) {
+        var scheduleStatusLeaseBlock = dashboardTradeMutationLeaseError_(
+          PropertiesService.getScriptProperties(), tradeId, 'scheduleStatus', ''
+        );
+        if (scheduleStatusLeaseBlock) throw new Error(scheduleStatusLeaseBlock.error);
+        guardedTrades[tradeId] = true;
+      }
       if (!tradeId || (oldStatus !== '취소' && newStatus !== '취소')) return;
       if (!changedByTrade[tradeId]) changedByTrade[tradeId] = [];
       if (scheduleId && changedByTrade[tradeId].indexOf(scheduleId) < 0) changedByTrade[tradeId].push(scheduleId);
@@ -14059,6 +16139,7 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
         tradeId, changedByTrade[tradeId], '스케줄상세 취소 상태 변경'
       );
       if (invalidated && invalidated.error) throw new Error(invalidated.error);
+      statusProjectionQueued = statusProjectionQueued || !!(invalidated && invalidated.projectionPending);
     });
 
     rows.forEach(function(ri) {
@@ -14073,6 +16154,7 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
     return { success: false, error: err.message, message: '상태 변경 실패: ' + err.message };
   } finally {
     if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
+    if (statusProjectionQueued) ensureDashboardStructureProjectionTrigger_();
   }
 }
 

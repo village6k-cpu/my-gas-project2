@@ -4,6 +4,11 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const backend = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
+const toggleItemCheckStart = backend.indexOf('function toggleItemCheck');
+const toggleItemCheckEnd = backend.indexOf('\nfunction getEquipmentCheckMap_', toggleItemCheckStart);
+const toggleItemCheck = backend.slice(toggleItemCheckStart, toggleItemCheckEnd);
+
+assert.ok(toggleItemCheckStart >= 0 && toggleItemCheckEnd > toggleItemCheckStart, 'toggleItemCheck 함수 구간을 찾아야 한다');
 
 assert.match(
   backend,
@@ -24,13 +29,13 @@ assert.match(
 );
 
 assert.match(
-  backend,
-  /function toggleItemCheck[\s\S]{0,7500}else if \(phase === 'checkin'\)[\s\S]{0,1800}invalidateDashboardReturnInspectionForTrade_/,
+  toggleItemCheck,
+  /if \(phase === 'checkout'\)[\s\S]*return \{[\s\S]*invalidateDashboardReturnInspectionForTrade_/,
   '반납 화면에서 직원이 체크를 직접 해제하면 증거 삭제와 계약 재오픈을 같은 경로로 처리해야 한다'
 );
 
 assert.match(
-  backend,
-  /function toggleItemCheck[\s\S]{0,7500}LockService\.getScriptLock\(\)[\s\S]{0,500}waitLock[\s\S]{0,2500}invalidateDashboardReturnInspectionForTrade_/,
-  '반납 체크 해제는 거래 완료와 같은 ScriptLock을 잡은 뒤에 증거 삭제/계약 재오픈 변이를 수행해야 한다'
+  toggleItemCheck,
+  /LockService\.getScriptLock\(\)[\s\S]*tryLock\(1000\)[\s\S]*retryable:\s*true[\s\S]*invalidateDashboardReturnInspectionForTrade_/,
+  '반납 체크 해제는 짧은 ScriptLock을 잡고, 경합 시 재시도 가능한 busy 응답을 반환해야 한다'
 );

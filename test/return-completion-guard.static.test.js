@@ -8,9 +8,15 @@ const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 
 test('앱 저장 계층이 미완료 수량을 검사한 뒤에만 반납완료를 요청한다', () => {
   const store = read('apps/today-dashboard/lib/data/store.ts');
-  assert.match(store, /toggleReturn[\s\S]{0,1200}returnCompletionBlockers/);
-  assert.match(store, /returnCompletionBlockers[\s\S]{0,500}return[\s\S]{0,1200}gasMutation(?:Retrying)?\("toggleReturn"/);
-  assert.match(store, /flushReturnCountsPersist\(tradeId\)[\s\S]{0,1400}gasMutation\("toggleReturn"/);
+  const start = store.indexOf('export async function toggleReturn');
+  const end = store.indexOf('\n/** 응답 유실된 반납완료', start);
+  const fn = store.slice(start, end);
+  assert.ok(start >= 0 && end > start, 'toggleReturn 함수 구간을 찾아야 한다');
+  const blockerAt = fn.indexOf('returnCompletionBlockers(current)');
+  const itemQtyDrainAt = fn.indexOf('flushQueuedItemQtyForTrade(tradeId)');
+  const returnCountDrainAt = fn.indexOf('flushReturnCountsPersist(tradeId)');
+  const gasAt = fn.indexOf('gasMutationRetrying("toggleReturn"');
+  assert.ok(blockerAt >= 0 && itemQtyDrainAt > blockerAt && returnCountDrainAt > itemQtyDrainAt && gasAt > returnCountDrainAt);
   assert.match(store, /persistInFlight/);
   assert.match(store, /returnCountPersistInFlight/);
 });
@@ -78,10 +84,13 @@ test('반출 체크 누락을 반납 완료로 자동 추정하지 않는다', (
 
 test('반납 체크는 당시 거래·장비·세트·수량 증거가 현재 행과 같을 때만 유효하다', () => {
   const gas = read('checkAvailability.js');
+  const toggleStart = gas.indexOf('function toggleItemCheck');
+  const toggleEnd = gas.indexOf('\nfunction getEquipmentCheckMap_', toggleStart);
+  const toggle = gas.slice(toggleStart, toggleEnd);
   assert.match(gas, /function dashboardReturnInspectionToken_[\s\S]{0,1600}tradeId[\s\S]{0,1600}equipName[\s\S]{0,1600}setName/);
   assert.match(gas, /['"]v2\|['"]/);
   assert.match(gas, /function getDashboardCheckinItemDefault_[\s\S]{0,1600}checkinProof/);
-  assert.match(gas, /function toggleItemCheck[\s\S]{0,6500}props\.setProperty\(key, context\.token\)/);
+  assert.match(toggle, /props\.setProperty\(key, context\.token\)/);
   assert.doesNotMatch(gas, /props\.setProperty\(['"]itemCheckProof_/);
 });
 
@@ -124,23 +133,31 @@ test('신규 거래도 반출완료와 전 품목 반출 체크가 증명되면 
 
 test('반납완료는 앱 버튼 외 GAS 경로에서도 Supabase 동기화 대상으로 남긴다', () => {
   const gas = read('checkAvailability.js');
-  assert.match(
-    gas,
-    /function toggleReturnDone[\s\S]{0,6500}supaMarkTradeDirty_\(tid\)[\s\S]{0,500}invalidateDashboardCache/
-  );
+  const start = gas.indexOf('function toggleReturnDone');
+  const end = gas.indexOf('\nfunction listDashboardCheckoutItemCheckSids_', start);
+  const fn = gas.slice(start, end);
+  assert.match(fn, /supaSetTradeReturnDone_\(/);
+  assert.match(fn, /supaMarkTradeDirty_\(tid\)/);
+  assert.match(fn, /invalidateDashboardCache/);
 });
 
-test('반출 뒤에도 예약 장비명·수량 수정과 품목 삭제를 허용하고 범용 쓰기는 보호한다', () => {
+test('반출 뒤에도 예약 장비명·수량 수정은 허용하되 품목 삭제와 범용 쓰기는 차단한다', () => {
   const gas = read('checkAvailability.js');
   const api = read('sheetAPI.js');
   const store = read('apps/today-dashboard/lib/data/store.ts');
   assert.doesNotMatch(gas, /function dashboardUpdateEquipmentQty[\s\S]{0,2600}isDashboardTradeCheckoutStarted_/);
   assert.doesNotMatch(gas, /function dashboardUpdateEquipmentName[\s\S]{0,2600}isDashboardTradeCheckoutStarted_/);
   assert.match(gas, /function addEquipmentToContract[\s\S]{0,1600}isDashboardTradeCheckoutStarted_/);
-  assert.doesNotMatch(gas, /function removeEquipmentFromContract[\s\S]{0,1600}isDashboardTradeCheckoutStarted_/);
+  assert.match(gas, /function removeEquipmentFromContract[\s\S]{0,1800}isDashboardTradeCheckoutStarted_\(ss, 거래ID\)[\s\S]{0,300}이미 반출된 품목은 삭제할 수 없습니다/);
+  const removeMany = gas.slice(
+    gas.indexOf('function dashboardRemoveEquipment'),
+    gas.indexOf('\n/** "yyyy-MM-dd"', gas.indexOf('function dashboardRemoveEquipment')),
+  );
+  assert.match(removeMany, /isDashboardTradeCheckoutStarted_\(ss, tid\)[\s\S]{0,300}이미 반출된 품목은 삭제할 수 없습니다/);
   assert.doesNotMatch(api, /WRITABLE_SHEETS\s*=\s*\[[^\]]*["']스케줄상세["']/);
   assert.doesNotMatch(store, /takenQty:\s*e\.takenQty\s*!=\s*null\s*\?\s*Math\.min/);
   assert.match(store, /takenQty:\s*e\.takenQty/);
+  assert.match(store, /const baselineStarted = !!currentTrade && isCheckoutBaselineLocked\(currentTrade\)[\s\S]{0,650}if \(baselineStarted\)[\s\S]{0,500}return;/);
 });
 
 test('직접 행 clear/delete는 고아 반납 증거를 찾아 재오픈하고 구조 삭제 트리거를 설치한다', () => {
@@ -159,17 +176,18 @@ test('반출 기준선 행은 시트에서 사라져도 Supabase prune/delete가
   assert.match(supa, /taken_qty=is\.null/);
   assert.match(remote, /select\(["']schedule_id,taken_qty["']\)/);
   assert.match(remote, /!\(Number\(row\.taken_qty\)\s*>\s*0\)/);
-  assert.match(remote, /delete row\.taken_qty/);
+  assert.match(remote, /const insertRows = checkoutLocked[\s\S]*Number\(row\.taken_qty\) > 0/);
+  assert.match(remote, /repairTradeProjection/);
   assert.match(remote, /deleteScheduleItem[\s\S]{0,1800}\.is\(["']taken_qty["'], null\)/);
 });
 
 test('반납 증거 해제는 완료 토글과 같은 잠금 안에서 계약을 재오픈한다', () => {
   const gas = read('checkAvailability.js');
-  const start = gas.indexOf('function toggleItemCheck');
-  const end = gas.indexOf('\nfunction ', start + 20);
+  const start = gas.indexOf('function toggleItemCheck(scheduleId');
+  const end = gas.indexOf('\nfunction getEquipmentCheckMap_', start);
   const fn = gas.slice(start, end);
   assert.match(fn, /LockService\.getScriptLock/);
-  assert.match(fn, /waitLock/);
+  assert.match(fn, /tryLock\(1000\)/);
   assert.match(fn, /invalidateDashboardReturnInspectionForTrade_/);
   assert.match(fn, /반납 수량 미완료 전환/);
 });
@@ -199,7 +217,7 @@ test('반출완료는 화면에 즉시 반영하되 불변 기준선은 GAS 성�
   assert.match(gas, /supaCaptureCheckoutBaseline_\(tid, checkable, true\)/);
   assert.match(gas, /supaSetTradeSetupDone_\(tid, true, doneAt\)[\s\S]{0,500}if \(!setupSaved \|\| !setupSaved\.ok\)/);
   assert.match(supa, /function supaSetTradeSetupDone_[\s\S]{0,1800}Prefer: 'return=representation'[\s\S]{0,300}setup_done: done === true/);
-  assert.match(remote, /delete tradeRow\.setup_done;[\s\S]{0,120}delete tradeRow\.setup_done_at;/);
+  assert.match(remote, /function tradeStructureRow[\s\S]{0,500}delete row\.setup_done;[\s\S]{0,120}delete row\.setup_done_at;/);
   const periodicStart = supa.indexOf('function buildSupabaseTrades_');
   const periodicEnd = supa.indexOf('/** payload 키 구성이 같은 행끼리', periodicStart);
   assert.doesNotMatch(supa.slice(periodicStart, periodicEnd), /setup_done(?:_at)?:/);
@@ -250,41 +268,60 @@ test('상세 반납 수량은 부분 저장하고 품목마다 GAS 완료 증거
   const start = store.indexOf('export async function setReturnCount');
   const end = store.indexOf('\n// ── 결제', start);
   const fn = store.slice(start, end);
-  assert.match(fn, /scheduleReturnCountsPersist\(tradeId\)/);
+  assert.match(fn, /scheduleReturnCountsPersist\(tradeId, scheduleId, durablePatch\)/);
   assert.match(fn, /await flushReturnCountsPersist\(tradeId\)/);
   assert.doesNotMatch(fn, /flushTradePersist\(/);
   assert.doesNotMatch(fn, /gasMutation\(["']toggleItem["']/);
-  assert.match(fn, /writeback === false[\s\S]{0,300}returnDone[\s\S]{0,500}gasMutation\("toggleReturn"/);
+  assert.match(fn, /wasReturnComplete[\s\S]*reopenReturnForCountMutation\([\s\S]{0,220}tradeId,[\s\S]{0,220}reopenMutationId[\s\S]*scheduleReturnCountsPersist\(tradeId, scheduleId, durablePatch\)/);
 });
 
-test('품목 추가와 삭제는 기존 완료를 재오픈하고 반출 뒤에도 삭제할 수 있다', () => {
+test('품목 추가는 완료를 재오픈해 기준선에 합치고, 삭제는 반출 전에만 허용한다', () => {
   const gas = read('checkAvailability.js');
   const store = read('apps/today-dashboard/lib/data/store.ts');
   assert.match(gas, /function dashboardAddEquipments[\s\S]{0,10000}invalidateDashboardReturnInspectionForTrade_[\s\S]{0,500}스케줄 품목 추가/);
   assert.match(gas, /function dashboardAddEquipment[\s\S]{0,9000}invalidateDashboardReturnInspectionForTrade_[\s\S]{0,500}스케줄 품목 추가/);
-  assert.doesNotMatch(gas, /function dashboardRemoveEquipment[\s\S]{0,1800}isDashboardTradeCheckoutStarted_/);
-  assert.doesNotMatch(gas, /반출 시작 후에는 품목을 삭제할 수 없습니다/);
-  assert.match(gas, /function dashboardRemoveEquipment[\s\S]{0,5000}invalidateDashboardReturnInspectionForTrade_/);
+  const removeMany = gas.slice(
+    gas.indexOf('function dashboardRemoveEquipment'),
+    gas.indexOf('\n/** "yyyy-MM-dd"', gas.indexOf('function dashboardRemoveEquipment')),
+  );
+  const removeOne = gas.slice(
+    gas.indexOf('function removeEquipmentFromContract'),
+    gas.indexOf('\n/**', gas.indexOf('function removeEquipmentFromContract') + 20),
+  );
+  assert.match(removeMany, /isDashboardTradeCheckoutStarted_\(ss, tid\)[\s\S]*이미 반출된 품목은 삭제할 수 없습니다/);
+  assert.match(removeOne, /isDashboardTradeCheckoutStarted_\(ss, 거래ID\)[\s\S]*이미 반출된 품목은 삭제할 수 없습니다/);
+  assert.ok(removeMany.indexOf('isDashboardTradeCheckoutStarted_(ss, tid)') < removeMany.indexOf('deleteDashboardRowsDescending_'));
+  assert.ok(removeOne.indexOf('isDashboardTradeCheckoutStarted_(ss, 거래ID)') < removeOne.indexOf('schedSheet.deleteRow'));
+  assert.match(removeMany, /invalidateDashboardReturnInspectionForTrade_/);
   assert.match(gas, /function removeEquipmentFromContract[\s\S]{0,3000}invalidateDashboardReturnInspectionForTrade_/);
-  assert.match(gas, /function dashboardRemoveEquipment[\s\S]{0,6500}supaMarkScheduleItemsRemoved_[\s\S]{0,500}deleteDashboardRowsDescending_/);
-  assert.match(gas, /function removeEquipmentFromContract[\s\S]{0,3500}supaMarkScheduleItemsRemoved_[\s\S]{0,500}deleteRow/);
+  assert.match(removeMany, /deleteDashboardRowsDescending_[\s\S]*scheduleDashboardStructureProjectionUnderLock_\(tid, \{ removeScheduleIds: removedScheduleIds \}\)/);
+  assert.match(removeOne, /deleteRow[\s\S]*scheduleDashboardStructureProjectionUnderLock_\(거래ID, \{[\s\S]*removeScheduleIds:/);
   const addMany = gas.slice(gas.indexOf('function dashboardAddEquipments'), gas.indexOf('\nfunction recordOnsiteAddonBackend_', gas.indexOf('function dashboardAddEquipments')));
   const addOne = gas.slice(gas.indexOf('function dashboardAddEquipment'), gas.indexOf('\nfunction dashboardRemoveEquipment', gas.indexOf('function dashboardAddEquipment')));
-  assert.match(addMany, /deleteDashboardRowsDescending_[\s\S]{0,900}현장 추가 반출 기준선 저장 실패/);
-  assert.match(addOne, /deleteDashboardRowsDescending_[\s\S]{0,900}추가 반출 기준선 저장 실패/);
+  assert.match(addMany, /scheduleDashboardStructureProjectionUnderLock_\(tid, \{ baselineItems: addedBaselineItems \}\)/);
+  assert.match(addOne, /scheduleDashboardStructureProjectionUnderLock_\(tid, \{ baselineItems: addedBaselineItems \}\)/);
+  assert.match(store, /if \(baselineStarted\)[\s\S]{0,500}next === "excluded"[\s\S]{0,220}return;/);
   const onsiteStart = store.indexOf('export async function addOnsiteItems');
   const onsiteEnd = store.indexOf('\nexport function setOnsiteSettlement', onsiteStart);
   const onsite = store.slice(onsiteStart, onsiteEnd);
   assert.doesNotMatch(onsite, /settlement\s*!==\s*["']유상["']/);
   assert.match(onsite, /if \(!isSupabase\)[\s\S]{0,200}addOnsiteItemsLocal/);
   assert.match(onsite, /if \(!writeBackEnabled\)[\s\S]{0,180}throw new Error/);
-  assert.match(gas, /function dashboardRecordOnsiteAddon[\s\S]{0,2000}forceZeroPrice:\s*!isPaid/);
+  const onsiteGas = gas.slice(
+    gas.indexOf('function dashboardRecordOnsiteAddon'),
+    gas.indexOf('\nfunction dashboardUpdateEquipmentQty', gas.indexOf('function dashboardRecordOnsiteAddon')),
+  );
+  assert.match(onsiteGas, /forceZeroPrice:\s*!isPaid/);
 });
 
 test('GAS 완료 API의 후속 저장 실패는 계약상태를 보상 복구하고 중복 완료는 이전상태를 덮지 않는다', () => {
   const gas = read('checkAvailability.js');
+  const toggleStart = gas.indexOf('function toggleReturnDone');
+  const toggleEnd = gas.indexOf('\nfunction listDashboardCheckoutItemCheckSids_', toggleStart);
+  const statusStart = gas.indexOf('function updateDashboardContractStatus');
+  const statusEnd = gas.indexOf('\nfunction getEquipmentCheckSpreadsheet_', statusStart);
   assert.match(gas, /function rollbackDashboardReturnContractStatus_/);
-  assert.match(gas, /function toggleReturnDone[\s\S]{0,5000}rollbackDashboardReturnContractStatus_/);
-  assert.match(gas, /function updateDashboardContractStatus[\s\S]{0,6500}rollbackDashboardReturnContractStatus_/);
+  assert.match(gas.slice(toggleStart, toggleEnd), /rollbackDashboardReturnContractStatus_/);
+  assert.match(gas.slice(statusStart, statusEnd), /rollbackDashboardReturnContractStatus_/);
   assert.match(gas, /currentStatus\s*&&\s*currentStatus\s*!==\s*['"]반납완료['"]/);
 });

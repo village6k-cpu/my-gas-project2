@@ -148,10 +148,22 @@ assert.match(
 );
 
 const gasBackend = read('checkAvailability.js');
+const gasDeletePhoto = gasBackend.slice(
+  gasBackend.indexOf('function deleteDashboardPhoto'),
+  gasBackend.indexOf('\nfunction invalidateDashboardPhotoCache_', gasBackend.indexOf('function deleteDashboardPhoto')),
+);
+assert.ok(
+  gasDeletePhoto.includes("sheet.getRange(matched.row, targetPhotoCol).setValue(remaining.join('\\n'))"),
+  'GAS must remove the selected photo value from the sheet row',
+);
 assert.match(
-  gasBackend,
-  /function deleteDashboardPhoto\([\s\S]{0,4200}setTrashed\(true\)/,
+  gasDeletePhoto,
+  /DriveApp\.getFileById\(fileId\)\.setTrashed\(true\)/,
   'GAS must remove the sheet record and move the exact Drive photo to trash'
+);
+assert.ok(
+  gasDeletePhoto.indexOf('lock.releaseLock()') < gasDeletePhoto.indexOf('DriveApp.getFileById(fileId).setTrashed(true)'),
+  'slow Drive trashing must happen after the short sheet-delete lock is released',
 );
 
 assert.match(

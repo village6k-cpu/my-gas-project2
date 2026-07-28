@@ -13,7 +13,7 @@ test('반납 수량 체크는 거래 전체 저장이나 품목별 GAS 호출 �
   const fn = store.slice(start, end);
 
   assert.ok(start >= 0 && end > start, 'setReturnCount 구현을 찾을 수 있어야 한다');
-  assert.match(fn, /scheduleReturnCountsPersist\(tradeId\)/);
+  assert.match(fn, /scheduleReturnCountsPersist\(tradeId, scheduleId, durablePatch\)/);
   assert.match(fn, /await flushReturnCountsPersist\(tradeId\)/);
   assert.doesNotMatch(fn, /flushTradePersist\(/);
   assert.doesNotMatch(fn, /gasMutation\(["']toggleItem["']/);
@@ -53,5 +53,11 @@ test('최종 반납완료 검증은 내구 수량을 신뢰하고 품목 증거�
   assert.doesNotMatch(fn, /getDashboardCheckinItemDefault_/);
   assert.match(fn, /dashboardReturnIncompleteItems_/);
   assert.match(gas, /function dashboardReturnIncompleteItems_[\s\S]{0,1000}accounted\s*!==\s*expected/);
-  assert.match(fn, /props\.setProperties\(completedProofs,\s*false\)/);
+  assert.match(fn, /completedProofs[\s\S]*returnCountsSnapshot[\s\S]*completedProofs:\s*completedProofs/);
+  const toggleStart = gas.indexOf('function toggleReturnDone');
+  const toggleEnd = gas.indexOf('\nfunction listDashboardCheckoutItemCheckSids_', toggleStart);
+  const toggle = gas.slice(toggleStart, toggleEnd);
+  const casAt = toggle.indexOf('supaSetTradeReturnDone_');
+  const proofAt = toggle.indexOf('props.setProperties(completionCheck.completedProofs, false)');
+  assert.ok(casAt >= 0 && proofAt > casAt, '레거시 품목 증거는 Supabase 완료 CAS가 성공한 뒤에만 기록해야 한다');
 });

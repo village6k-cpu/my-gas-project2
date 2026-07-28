@@ -23,10 +23,63 @@ assert.match(
   '취소 status update should clear return-complete script state'
 );
 
+const manualStatusEditBody = code.slice(
+  code.indexOf('function handleContractMasterStatusEdit_'),
+  code.indexOf('\nfunction ', code.indexOf('function handleContractMasterStatusEdit_') + 20),
+);
+assert.match(
+  manualStatusEditBody,
+  /status\s*===\s*['"]취소['"][\s\S]*isDashboardTradeCheckoutStarted_\(ss,\s*tradeId\)[\s\S]*if \(checkoutStarted\)[\s\S]*return;/,
+  'manual 계약마스터 J열 취소 edits must reject cancellation once checkout has started',
+);
+assert.match(
+  manualStatusEditBody,
+  /deleteProperty\(['"]returnDone_['"]\s*\+\s*tradeId\)[\s\S]*deleteProperty\(['"]returnPrevContractStatus_['"]\s*\+\s*tradeId\)[\s\S]*cancelContract\(ss,\s*tradeId,\s*row\)[\s\S]*ensureCancelledTradeCleanupTrigger_\(1000\)/,
+  'allowed manual cancellations must clear return state, commit local cancellation, and wake durable cleanup',
+);
+
+const cancelBody = code.slice(
+  code.indexOf('function cancelContract'),
+  code.indexOf('function setupInstallableTrigger'),
+);
+assert.match(
+  cancelBody,
+  /scheduleCancelledTradeCleanup_\(거래ID\)/,
+  'cancelContract should queue external cleanup after applying local sheet changes',
+);
+assert.doesNotMatch(
+  cancelBody,
+  /supaCancelTrade_|SpreadsheetApp\.openByUrl|DriveApp\.|trashCancelledContractFiles_/,
+  'cancelContract must not hold the caller ScriptLock across Supabase, external ledger, or Drive I/O',
+);
+
+const cleanupIo = code.slice(
+  code.indexOf('function runCancelledTradeCleanupOutsideLock_'),
+  code.indexOf('function finishCancelledTradeCleanup_'),
+);
+assert.match(cleanupIo, /supaCancelTrade_\(거래ID\)/, 'outside-lock worker must cancel Supabase occupancy');
+assert.match(cleanupIo, /deleteCancelledTradeFromExternalLedger_\(거래ID\)/, 'outside-lock worker must clean external ledger');
+assert.match(cleanupIo, /trashCancelledContractFiles_\(거래ID\)/, 'outside-lock worker must trash contract files');
+assert.doesNotMatch(cleanupIo, /LockService\.getScriptLock/, 'external cleanup steps must not acquire the global lock');
 assert.match(
   code,
-  /status\s*===\s*['"]취소['"][\s\S]{0,500}deleteProperty\(['"]returnDone_['"]\s*\+\s*tradeId\)[\s\S]{0,220}cancelContract\(ss,\s*tradeId,\s*row\)/,
-  'manual 계약마스터 J열 취소 edits should clear return state and use cancelContract()'
+  /CANCEL_CLEANUP_MAX_ATTEMPTS_\s*=\s*5[\s\S]*Math\.min\(5 \* 60 \* 1000, 15000 \* Math\.pow/,
+  'external cleanup queue needs bounded exponential retry',
+);
+const cancelTriggerBody = code.slice(
+  code.indexOf('function scheduleCancelledTradeCleanupTriggerUnderLock_'),
+  code.indexOf('\nfunction ensureCancelledTradeCleanupTrigger_', code.indexOf('function scheduleCancelledTradeCleanupTriggerUnderLock_')),
+);
+assert.match(cancelTriggerBody, /currentAt > Date\.now\(\) && currentAt <= desiredAt \+ 1000/);
+assert.ok(
+  cancelTriggerBody.indexOf('ScriptApp.newTrigger(CANCEL_CLEANUP_HANDLER_)') <
+    cancelTriggerBody.indexOf('existing.forEach(function(t)'),
+  'cancel cleanup must create a replacement before removing older triggers',
+);
+assert.match(
+  code,
+  /CANCEL_CLEANUP_HANDLER_\s*=\s*['"]processCancelledTradeCleanup['"][\s\S]*function processCancelledTradeCleanup\(\)/,
+  'the queued cleanup must use a public GAS time-trigger handler',
 );
 
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {

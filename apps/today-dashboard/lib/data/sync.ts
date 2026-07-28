@@ -120,7 +120,7 @@ export async function syncTimelineToSupabase(opts?: { fromDays?: number; toDays?
   let n = 0;
   for (const t of trades) {
     const ex = existingMap.get(t.tradeId);
-    await persistTrade(ex ? mergeTimelineTradeSnapshot(ex, t) : t);
+    await persistTrade(ex ? mergeTimelineTradeSnapshot(ex, t) : t, { updateExistingStructure: true });
     n++;
     if (n % 10 === 0) log(`  …${n}/${trades.length}`);
   }
@@ -356,7 +356,7 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
       log(`  ${batch[idx]}: 누적 ${n}건`);
     });
   }
-  for (const t of pending.values()) await persistTrade(t);
+  for (const t of pending.values()) await persistTrade(t, { updateExistingStructure: true });
   log(`대시보드 상세 ${n}건 반영 (윈도우 밖 ${skipped}건 스킵)`);
   return n;
 }

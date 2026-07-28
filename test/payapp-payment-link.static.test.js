@@ -25,7 +25,7 @@ assert(
 );
 
 assert(
-  /function requestPayAppPaymentLink\(tid\)/.test(ca) &&
+  /function requestPayAppPaymentLink\(tid,\s*options\)/.test(ca) &&
     /function requestPayAppTestPaymentLink\(args\)/.test(ca) &&
     /function setupPayAppUserId\(userid\)/.test(ca) &&
     /function setupPayAppPaymentTypes\(openpaytype\)/.test(ca) &&
@@ -80,8 +80,8 @@ assert(
 
 assert(
   /export async function sendPayAppPaymentLink\(tradeId: string\)/.test(store) &&
-    /gasMutation\("sendPayAppPaymentLink",\s*\{ tid: tradeId \}\)/.test(store),
-  'Next store must expose a PayApp payment-link mutation'
+    /gasMutation\("sendPayAppPaymentLink",\s*\{[\s\S]{0,180}tid:\s*tradeId,[\s\S]{0,180}mutationId:\s*createLedgerMutationId\("payment-link-send"\)/.test(store),
+  'Next store must expose an idempotency-keyed PayApp payment-link mutation'
 );
 
 assert(

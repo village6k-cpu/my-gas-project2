@@ -165,9 +165,14 @@ console.log('settlement-amount & billing-company checks OK');
 
 // ── 감사 1차 수정분 회귀 가드 ──
 const supaSync2 = read('supabaseSync.js');
+const dirtyBuildStart = supaSync2.indexOf('function buildSupabaseTrades_');
+const dirtyBuildEnd = supaSync2.indexOf('/** payload 키 구성이 같은 행끼리', dirtyBuildStart);
+const dirtyBuild = supaSync2.slice(dirtyBuildStart, dirtyBuildEnd);
 assert(
-  supaSync2.includes('supaUpsertGrouped_') && /skeleton/.test(supaSync2) && supaSync2.includes("wm.status || '취소'"),
-  'flush must use grouped partial upserts, never overwrite ops fields with defaults, and propagate cancellations'
+  supaSync2.includes('supaUpsertGrouped_') && /skeleton/.test(dirtyBuild) &&
+    !/contract_status\s*:/.test(dirtyBuild) &&
+    /function supaCancelTrade_[\s\S]*contract_status:\s*'취소'/.test(supaSync2),
+  'flush must use grouped partial upserts without overwriting authoritative status fields, while cancellations use their direct patch'
 );
 assert(
   read('Code.js').includes('supaMarkTradeDirty_(거래ID); // 취소'),
@@ -206,9 +211,9 @@ assert(
 const storeTs2 = read('apps/today-dashboard/lib/data/store.ts');
 assert(
   /removeItem[\s\S]{0,900}removeEquipmentAndRegenerateContract/.test(storeTs2) &&
-    /gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*false/.test(storeTs2) &&
+    /async function commitRemoveEquipmentMutation_[\s\S]*gasMutationRetrying\("removeEquip",\s*\{[\s\S]*mutationId:\s*entry\.mutationId[\s\S]*directRegenerate:\s*false/.test(storeTs2) &&
     read('apps/today-dashboard/app/api/gas/route.ts').includes('"removeEquip"'),
-  'removing a sheet-derived item must delete 스케줄상세 via removeEquip and queue contract regeneration via the background worker'
+  'removing a sheet-derived item must durably delete 스케줄상세 via removeEquip and queue contract regeneration via the background worker'
 );
 console.log('audit-round-2 checks OK');
 
@@ -258,8 +263,11 @@ assert(
   'flush must skip payment fields on extras failure and never write the app-only payment_warning flag'
 );
 const storeTs4 = read('apps/today-dashboard/lib/data/store.ts');
+const toggleReturnStart = storeTs4.indexOf('export async function toggleReturn');
+const toggleReturnEnd = storeTs4.indexOf('\n/** 응답 유실된 반납완료', toggleReturnStart);
+const toggleReturnFn = storeTs4.slice(toggleReturnStart, toggleReturnEnd);
 assert(
-  /gasMutation(?:Retrying)?\("toggleReturn"[\s\S]{0,400}contractStatus: res\.contractStatus/.test(storeTs4),
+  /gasMutationRetrying\("toggleReturn"[\s\S]*contractStatus:\s*res\.contractStatus\s*\|\|\s*contractStatus/.test(toggleReturnFn),
   'toggleReturn off must apply the contract status restored by GAS'
 );
 assert(
@@ -534,21 +542,44 @@ console.log('alimtalk-reliability checks OK');
 // ── 계약서 재생성 디바운스: 좀비 트리거 고착 방지 (실제 15일 대기열 고아화 발생) ──
 {
   const code = read('Code.js');
-  const sched = code.slice(code.indexOf('function scheduleContractRegen'), code.indexOf('function regenPendingContracts'));
+  const sched = code.slice(code.indexOf('function scheduleContractRegen'), code.indexOf('function regenPendingContracts()'));
   assert(
     !/var exists = ScriptApp\.getProjectTriggers\(\)\.some/.test(sched) &&
       /deleteTrigger\(t\)/.test(sched) && /newTrigger\('regenPendingContracts'\)/.test(sched),
     'scheduleContractRegen must delete possibly-consumed one-shot triggers and always create a fresh one when stale (fired one-shots stay listed → "exists" check orphans the queue)'
   );
-  const regen = code.slice(code.indexOf('function regenPendingContracts'), code.indexOf('function regenPendingContracts') + 1600);
+  const regen = code.slice(code.indexOf('function regenPendingContracts()'), code.indexOf('var TEMPLATE_SYNC_EDIT_TS_PROP_'));
   assert(
-    /waitLock\(10000\);[\s\S]{0,120}catch \(lockErr\) \{[\s\S]{0,120}stillPending = true;[\s\S]{0,80}break;/.test(code) &&
-      /if \(stillPending\) \{[\s\S]{0,120}newTrigger\('regenPendingContracts'\)/.test(code),
+    /function claimPendingContractRegen_[\s\S]*waitLock\(10000\)[\s\S]*busy: true/.test(code) &&
+      /if \(claim\.busy\) \{[\s\S]{0,220}stillPending = true;[\s\S]{0,220}break;/.test(regen) &&
+      /if \(stillPending\) \{[\s\S]*newTrigger\('regenPendingContracts'\)/.test(regen),
     'lock-timeout path must reschedule a retry trigger — silent return orphans the queue (observed: 10s lock wait → bail)'
   );
   assert(
-    /BUDGET_MS/.test(regen) && /stillPending = true; break;/.test(regen),
+    /BUDGET_MS/.test(regen) &&
+      /Date\.now\(\) - startedAt > BUDGET_MS[\s\S]{0,220}stillPending = true;[\s\S]{0,220}break;/.test(regen),
     'regen loop must stop before the 6-min execution cap and reschedule (20-item backlog hit the cap)'
+  );
+  const claim = code.slice(
+    code.indexOf('function claimPendingContractRegen_'),
+    code.indexOf('function finishPendingContractRegen_')
+  );
+  assert(
+    claim.indexOf('armContractRegenWatchdogUnderLock_') < claim.indexOf('props.setProperty(claimKey') &&
+      /CONTRACT_REGEN_WATCHDOG_HANDLER_\s*=\s*'regenPendingContractsWatchdog'/.test(code) &&
+      /function regenPendingContractsWatchdog\(\)/.test(code) &&
+      regen.indexOf('armContractRegenRunWatchdog_') < regen.indexOf('ScriptApp.getProjectTriggers()'),
+    'regen claim must arm a public watchdog before recording ownership so GAS hard-timeout cannot orphan the queue'
+  );
+  const finish = code.slice(
+    code.indexOf('function finishPendingContractRegen_'),
+    code.indexOf('function regenPendingContractsWatchdog')
+  );
+  assert(
+    /if \(outcome && outcome\.success\)[\s\S]*deleteProperty\(claim\.editKey\)/.test(finish) &&
+      /CONTRACT_REGEN_MAX_ATTEMPTS_/.test(finish) &&
+      /Math\.pow\(2, retry\.attempts - 1\)/.test(finish),
+    'regen failures must preserve editTS and use bounded exponential retry; only success may clear the edit queue'
   );
 }
 console.log('contract-regen-stuck-queue checks OK');

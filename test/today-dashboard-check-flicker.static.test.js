@@ -19,16 +19,17 @@ assert(
   'remote fetch/poll results must be gated before applying to the visible store'
 );
 assert(
-  /function mutateTrade\([\s\S]*markLocalMutation\(\)[\s\S]*set\(\{ trades \}\)/.test(storeSource),
-  'trade mutations must mark a local mutation before applying optimistic checked state'
+  /function mutateTrade\([\s\S]*markLocalMutation\(tradeId\)[\s\S]*set\(\{ trades \}\)/.test(storeSource),
+  'trade mutations must mark that trade before applying optimistic checked state'
 );
 assert(
-  /async function flushRealtimeChanges\(\)[\s\S]*const mutationSeqAtFlush = localMutationSeq[\s\S]*fetchAllTrades\(\), fetchNotes\(\)[\s\S]*if \(!canApplyRemoteSnapshot\(mutationSeqAtFlush\)\) \{[\s\S]*requeueRealtimeChanges\(ids, notesChanged, true\)[\s\S]*set\(\{ trades: mergedTrades, notes \}\)/.test(storeSource),
-  'realtime flush must re-check local mutation sequence before overwriting the store (and requeue instead of drop)'
+  /async function flushRealtimeChanges\(\)[\s\S]*const blockedIds[\s\S]*const safeIds[\s\S]*versionAtFetch\[id\] = tradeMutationSeq\[id\][\s\S]*staleIds[\s\S]*realtimeTradeIds\.add\(id\)/.test(storeSource),
+  'realtime flush must isolate busy trades and requeue only stale trade snapshots'
 );
 assert(
-  /const mutationSeqAtPoll = localMutationSeq[\s\S]*pollTimelineChanges\(\s*state\.trades[\s\S]*if \(!canApplyRemoteSnapshot\(mutationSeqAtPoll\)\) return;[\s\S]*set\(\{ trades: mergeTradeChanges\(state\.trades, changed\) \}\)/.test(storeSource),
-  'timeline polling must not apply stale results if a checkbox changed while the poll request was in flight'
+  /function hasTradeSyncPending\(tradeId: string\)[\s\S]*pendingPersistTrades\.has\(tradeId\) \|\| hasTradePending\(tradeId\)/.test(storeSource) &&
+    /const versionAtPoll = \{ \.\.\.tradeMutationSeq \}[\s\S]*pollTimelineChanges\(\s*state\.trades[\s\S]*!hasTradeSyncPending\(trade\.tradeId\)[\s\S]*tradeMutationSeq\[trade\.tradeId\][\s\S]*mergeTradeChanges\(state\.trades, applicable\)/.test(storeSource),
+  'timeline polling must gate each trade on both user writes and pending convergence writes, then reject in-flight stale versions'
 );
 assert(
   storeSource.includes('const pendingPersistTrades = new Set<string>()') &&

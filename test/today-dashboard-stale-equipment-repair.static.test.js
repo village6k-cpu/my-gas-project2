@@ -72,9 +72,14 @@ assert(
 );
 assert(
   /repairDashboardSearchResults\(state\.trades, q\)/.test(storeSource) &&
-    /await applyDashboardRepairs\(changed, mutationSeqAtSearch\)/.test(storeSource) &&
-    /for \(const t of changed\) persistTrade\(t, \{ pruneMissingSheetBacked: shouldPruneMissingSheetBacked\(t\) \}\)\.catch\(\(\) => \{\}\)/.test(storeSource),
-  'search repair must update local state and prune stale Supabase schedule_items after authoritative GAS confirmation'
+    /await applyDashboardRepairs\(changed, mutationSeqAtSearch, versionsAtSearch\)/.test(storeSource) &&
+    /function applyDashboardRepairs[\s\S]*!hasTradeSyncPending\(trade\.tradeId\)[\s\S]*tradeMutationSeq\[trade\.tradeId\][\s\S]*enqueueTradePersist\(t\.tradeId, t\)/.test(storeSource) &&
+    /function enqueueTradePersist[\s\S]*isCheckoutBaselineLocked\(latest\)[\s\S]*gasMutation\("repairTradeProjection", \{ tid: tradeId \}\)[\s\S]*else \{[\s\S]*persistTrade\(latest\)/.test(storeSource),
+  'search repair must gate each trade against pending writes/version drift and route completed-trade convergence through the safe GAS projection queue'
+);
+assert(
+  !/function applyDashboardRepairs[\s\S]*pruneMissingSheetBacked: true/.test(storeSource),
+  'an old browser keep-set must never directly prune another operator\'s newer schedule rows'
 );
 assert(
   /export async function persistTrade\(trade: Trade, options: PersistTradeOptions = \{\}\)/.test(remoteSource) &&

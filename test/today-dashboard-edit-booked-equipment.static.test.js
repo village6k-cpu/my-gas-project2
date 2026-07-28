@@ -14,17 +14,19 @@ const sheetApi = read('sheetAPI.js');
 const checkAvailability = read('checkAvailability.js');
 const remote = read('apps/today-dashboard/lib/data/remote.ts');
 const mappers = read('apps/today-dashboard/lib/data/mappers.ts');
-const migration = read('apps/today-dashboard/supabase/migrations/20260723033000_schedule_item_removed_at.sql');
+const removeStart = checkAvailability.indexOf('function dashboardRemoveEquipment');
+const removeEnd = checkAvailability.indexOf('\n/** "yyyy-MM-dd"', removeStart);
+const removeEquipmentBackend = checkAvailability.slice(removeStart, removeEnd);
 
 assert(
   checklist.includes('SetSingleList'),
   'single set equipment must keep the set-header tinted container instead of falling back to a plain loose list'
 );
 assert(
-  migration.includes('add column if not exists removed_at timestamptz') &&
-    /q\.in\("trade_id", chunk\)\.is\("removed_at", null\)/.test(remote) &&
-    !mappers.includes('removed_at'),
-  'removed checkout baseline rows must stay auditable without reappearing in live equipment lists'
+  /export function isCheckoutBaselineLocked\(t: Trade\)/.test(status) &&
+    /const baselineStarted = !!currentTrade && isCheckoutBaselineLocked\(currentTrade\)/.test(store) &&
+    /if \(baselineStarted\)[\s\S]{0,500}이미 반출된 품목은 제외할 수 없습니다[\s\S]{0,220}return;/.test(store),
+  '반출 기준선 행은 숨김 삭제로 우회하지 않고, 앱에서 삭제 자체를 fail-closed로 차단해야 한다'
 );
 assert(
   /function CheckoutRow\([\s\S]*setTone = false/.test(checklist),
@@ -42,8 +44,9 @@ assert(
 );
 assert(
   /export function isCheckoutBaselineLocked\(t: Trade\)/.test(status) &&
-    !tradeActions.includes('isCheckoutBaselineLocked'),
-  'checkout completion may preserve the actual handover record but must not lock reservation editing'
+    /const destructiveLocked = isCheckoutBaselineLocked\(trade\)/.test(tradeActions) &&
+    /disabled=\{busy \|\| cancelling \|\| deleting \|\| destructiveLocked\}/.test(tradeActions),
+  'checkout completion must preserve the handover record by locking destructive trade actions'
 );
 assert(
   !checklist.includes('반출 기준선 원본 보존') &&
@@ -53,9 +56,9 @@ assert(
 );
 assert(
   /disabled=\{baselineLocked\}/.test(checklist) &&
-    /baselineStarted && next !== "excluded"/.test(store) &&
-    /setItemCheckout\(t\.tradeId, e\.scheduleId, "excluded"\)/.test(checklist),
-  'checkout facts stay fixed while deleting an item remains available after checkout'
+    /if \(baselineStarted\)[\s\S]{0,500}next === "excluded"[\s\S]{0,220}return;/.test(store) &&
+    /isDashboardTradeCheckoutStarted_\(ss, tid\)[\s\S]{0,300}이미 반출된 품목은 삭제할 수 없습니다/.test(removeEquipmentBackend),
+  'checkout facts and deletion both stay fixed after checkout, with matching client and GAS guards'
 );
 assert(
   /export function clearToast\(\)/.test(store) &&

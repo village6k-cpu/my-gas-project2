@@ -14,14 +14,23 @@ const setItemCheckout = store.match(/export function setItemCheckout\([\s\S]*?\n
 assert.ok(setItemCheckout, 'setItemCheckout must exist before setItemName');
 assert.match(
   setItemCheckout[0],
+  /const baselineStarted = !!currentTrade && isCheckoutBaselineLocked\(currentTrade\)[\s\S]*if \(baselineStarted\)[\s\S]*next === "excluded"[\s\S]*이미 반출된 품목은 제외할 수 없습니다[\s\S]*return;/,
+  'checkout 기준선이 시작된 뒤에는 제외 클릭이 어떤 로컬 상태도 바꾸기 전에 차단되어야 한다'
+);
+assert.ok(
+  setItemCheckout[0].indexOf('if (baselineStarted)') < setItemCheckout[0].indexOf('mutateTrade(tradeId'),
+  'checkout baseline guard must run before optimistic mutation',
+);
+assert.match(
+  setItemCheckout[0],
   /final === "excluded"[\s\S]*removeEquipmentAndRegenerateContract\(tradeId,\s*targetItem\)/,
-  'checkout 제외 must use the same 원장 삭제 + 계약서 갱신 path, not Supabase-only state'
+  '반출 전 제외만 원장 삭제 + 계약서 갱신 경로를 사용해야 한다'
 );
 
 assert.match(
   store,
-  /function removeEquipmentAndRegenerateContract\(tradeId:\s*string,\s*item:\s*EquipmentItem\)[\s\S]*contractRegenPending:\s*true[\s\S]*gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*false/,
-  'app removal must ask GAS to delete 스케줄상세 and queue contract regeneration via the background worker (contractRegenPending badge → polling merge)'
+  /async function commitRemoveEquipmentMutation_[\s\S]*gasMutationRetrying\("removeEquip",\s*\{[\s\S]*mutationId:\s*entry\.mutationId[\s\S]*directRegenerate:\s*false[\s\S]*function removeEquipmentAndRegenerateContract[\s\S]*putRemoveEquipmentOutbox_\(entry\)[\s\S]*contractRegenPending:\s*true/,
+  'app removal must durably ask GAS to delete 스케줄상세 and queue contract regeneration via the background worker (contractRegenPending badge → polling merge)'
 );
 assert.match(
   store,
@@ -30,8 +39,8 @@ assert.match(
 );
 assert.match(
   store,
-  /restoreRemovedItem\(tradeId,\s*item,[\s\S]*장비 제외\/계약서 갱신 실패/,
-  'failed exclude write-back must restore the item instead of silently lying to the operator'
+  /if \(originalItem && !canonicalAlreadyMissing\)[\s\S]*restoreRemovedItem\(entry\.tradeId,\s*originalItem,\s*"장비 제외 실패:/,
+  'terminal exclude failure must restore the original item instead of silently lying to the operator'
 );
 
 assert.match(
@@ -39,15 +48,30 @@ assert.match(
   /case "removeEquip":[\s\S]*dashboardRemoveEquipment\([\s\S]*directRegenerate:[\s\S]*params\.directRegenerate/,
   'sheetAPI removeEquip must forward the directRegenerate option'
 );
+const removeBody = backend.match(/function dashboardRemoveEquipment[\s\S]*?\n}\n\n\n\/\*\* "yyyy-MM-dd"/)?.[0] ?? '';
 assert.match(
-  backend,
-  /function dashboardRemoveEquipment\(tid,\s*equipName,\s*scheduleId,\s*options\)[\s\S]*directRegenerate[\s\S]*deleteAndRegenerateContract\(ss,\s*tid\)/,
-  'dashboardRemoveEquipment must support direct contract regeneration after deletion'
+  removeBody,
+  /isDashboardTradeCheckoutStarted_\(ss,\s*tid\)[\s\S]*이미 반출된 품목은 삭제할 수 없습니다/,
+  'GAS must independently reject removal after checkout so stale clients cannot bypass the baseline policy'
+);
+assert.ok(
+  removeBody.indexOf('isDashboardTradeCheckoutStarted_(ss, tid)') < removeBody.indexOf('deleteDashboardRowsDescending_'),
+  'GAS checkout guard must run before any schedule row deletion',
+);
+assert.doesNotMatch(
+  removeBody,
+  /deleteAndRegenerateContract/,
+  'equipment removal must not block every card on synchronous Drive work'
+);
+assert.match(
+  removeBody,
+  /scheduleContractRegenUnderLock_\(tid\)[\s\S]*contractRegenQueued = true[\s\S]*if \(contractRegenQueued\) ensureContractRegenTrigger_\(\)/,
+  'permitted pre-checkout removal must mark durable regeneration under lock and wake the worker after unlock',
 );
 assert.match(
   backend,
-  /url:\s*contractResult && contractResult\.url[\s\S]*finalAmount:\s*contractResult && contractResult\.finalAmount[\s\S]*removedScheduleIds:/,
-  'removeEquip response must include new contract URL, final amount, and removed schedule ids'
+  /contractRegenPending:\s*contractRegenPending[\s\S]*removedScheduleIds:/,
+  'removeEquip response must expose pending regeneration and the exact removed schedule ids'
 );
 
 assert.match(

@@ -27,7 +27,7 @@ export default function SeedPage() {
       for (const t of trades) {
         // 실데이터와 구분되도록 거래ID에 DEMO- 접두. 나중에 필터/정리가 쉬워진다.
         const demoTrade = t.tradeId.startsWith("DEMO-") ? t : { ...t, tradeId: `DEMO-${t.tradeId}` };
-        await persistTrade(demoTrade);
+        await persistTrade(demoTrade, { updateExistingStructure: true });
         add(`✓ ${demoTrade.tradeId} ${t.customerName} (품목 ${t.equipments.length})`);
       }
       await persistNotes(notes);

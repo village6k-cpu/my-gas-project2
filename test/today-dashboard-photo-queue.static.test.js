@@ -74,15 +74,24 @@ assert.match(strip, /재시도/, 'failed tiles must offer a retry action');
 assert.match(strip, /retryTradePhotoUpload\(/, 'retry must go through the queue');
 assert.match(strip, /discardTradePhotoUpload\(/, 'failed tiles must be discardable');
 
-// ── GAS: 업로드 경로에서 전역 락/불필요 왕복 제거 + 멱등성 ───────────
+// ── GAS: 짧은 durable claim + 잠금 밖 Drive I/O + 멱등성 ───────────
 
 const gasUpload = backend.match(/function uploadDashboardPhoto\(tid, phase, fileName, mimeType, data, memo, clientKey\) \{[\s\S]*?\n\}\n\n\/\*\* 반출\/반납 사진 1장 삭제/);
 assert.ok(gasUpload, 'uploadDashboardPhoto must accept clientKey');
-assert.doesNotMatch(
+assert.match(
   gasUpload[0],
-  /LockService/,
-  'uploadDashboardPhoto must not take the global script lock (added up to +10s and its failure was ignored anyway)'
+  /dashboardPhotoUploadClaimKey_\(clientKey\)[\s\S]*claimLock\.tryLock\(1500\)[\s\S]*claimLock\.releaseLock\(\)/,
+  'uploadDashboardPhoto must serialize only the short durable-claim decision'
 );
+assert.ok(
+  gasUpload[0].indexOf('claimLock.releaseLock()') < gasUpload[0].indexOf('folder.createFile(blob)'),
+  'Drive upload must start only after the durable-claim lock is released',
+);
+assert.ok(
+  gasUpload[0].indexOf('folder.createFile(blob)') < gasUpload[0].indexOf('appendLock.tryLock(2000)'),
+  'Drive upload must not run while the short sheet-append lock is held',
+);
+assert.doesNotMatch(gasUpload[0], /waitLock\(/, 'photo upload must never wait on the global lock for a long critical section');
 assert.doesNotMatch(
   gasUpload[0],
   /file\.getUrl\(\)/,
@@ -90,13 +99,28 @@ assert.doesNotMatch(
 );
 assert.match(
   gasUpload[0],
-  /dashboard_photo_upload_[\s\S]*CacheService\.getScriptCache\(\)\.get\(dedupKey\)/,
-  'uploadDashboardPhoto must return the cached result for a repeated clientKey (idempotent retries)'
+  /claimState && claimState\.state === 'done' && claimState\.result[\s\S]*return claimState\.result/,
+  'a repeated clientKey must return the durable completed result even after cache expiry'
+);
+assert.match(
+  gasUpload[0],
+  /var fileId = String\(claimState && claimState\.fileId \|\| ''\)[\s\S]*if \(!fileId\)[\s\S]*folder\.createFile\(blob\)[\s\S]*claimState\.state = 'file'/,
+  'a retry after Drive creation must reuse the claimed file instead of uploading a duplicate'
+);
+assert.match(
+  gasUpload[0],
+  /claimState\.state = claimState\.fileId \? 'file' : 'pending'[\s\S]*claimState\.retryReady = true/,
+  'failed uploads must leave a durable retry-ready pending/file claim'
+);
+assert.match(
+  gasUpload[0],
+  /claimState\.state = 'done'[\s\S]*claimState\.result = result[\s\S]*props\.setProperty\(claimKey, JSON\.stringify\(claimState\)\)/,
+  'successful uploads must persist the final result in the durable claim'
 );
 assert.match(
   gasUpload[0],
   /CacheService\.getScriptCache\(\)\.put\(dedupKey,\s*JSON\.stringify\(result\),\s*21600\)/,
-  'uploadDashboardPhoto must cache the success result for retry dedup'
+  'CacheService remains a secondary fast-path hint for successful retries'
 );
 assert.match(
   api,
