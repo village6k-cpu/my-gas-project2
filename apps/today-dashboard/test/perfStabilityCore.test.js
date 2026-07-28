@@ -87,6 +87,29 @@ test("백그라운드 폴링은 light 모드(좁은 윈도우·캐시 허용)로
   assert.match(sync, /fresh \? "&nocache=1" : ""/, "백그라운드 repair는 캐시를 우회하지 않아야 한다");
 });
 
+test("앱 시작·realtime·폴링은 전체 60일 미완성 거래를 GAS로 훑지 않고 현재 날짜만 보정한다", () => {
+  const store = read("lib/data/store.ts");
+  assert.doesNotMatch(
+    store,
+    /repairDashboardDetailsForIncompleteTrades|repairEmptyEquipmentTrades/,
+    "화면 진입 때 전체 운영 윈도우를 날짜별로 조회하는 복구 경로를 호출하면 안 된다",
+  );
+  const load = section(store, "async function loadRemoteOnce", "\nfunction loadRemote");
+  assert.match(load, /repairDayDetails\(state\.date[^)]*\{ fresh: false \}/, "첫 로드는 현재 날짜 1회만 캐시 허용 보정해야 한다");
+  const poll = section(store, "export async function pollSheetChangesNow", "\n/** 같은 거래의 전체행 upsert를");
+  assert.match(poll, /repairDayDetails\(state\.date/, "폴링도 현재 날짜만 보정해야 한다");
+});
+
+test("첫 원격 로드 중에는 빈 일정이 아니라 명시적인 로딩 상태를 보여준다", () => {
+  const store = read("lib/data/store.ts");
+  const today = read("components/TodayView.tsx");
+  assert.match(store, /type RemoteStatus = "loading" \| "ready" \| "error"/);
+  assert.match(store, /remoteStatus:\s*RemoteStatus/);
+  assert.match(store, /remoteStatus:\s*"ready"/, "원격 스냅샷 반영과 함께 준비 상태가 되어야 한다");
+  assert.match(today, /data\.remoteStatus === "loading"[\s\S]*일정 불러오는 중/);
+  assert.match(today, /data\.remoteStatus === "error"[\s\S]*일정을 불러오지 못했습니다/);
+});
+
 test("useDashboard는 토스트만 바뀐 emit에 새 스냅샷을 만들지 않는다", () => {
   const store = read("lib/data/store.ts");
   const hook = section(store, "let dashSnapshot", "export function useToast");
@@ -123,7 +146,7 @@ test("시각적 저장 토스트는 실제 거래 잠금을 해제하지 않고,
   assert.match(lifecycle, /if \(tokens\.size === 0\)/, "다른 작업 토큰이 남아 있으면 카드 잠금을 유지해야 한다");
 });
 
-test("같은 거래의 모든 GAS 명령은 한 명령열에서 호출 순서대로 실행되고 다른 거래는 병렬이다", () => {
+test("모든 카드 GAS 원장 명령은 브라우저 탭 전체에서 한 줄로 보내 서버 전역 잠금과 맞춘다", () => {
   const writeback = read("lib/data/writeback.ts");
   assert.match(writeback, /const gasMutationTails = new Map<string, Promise<void>>\(\)/);
   assert.match(writeback, /function mutationTradeKey/);
@@ -132,6 +155,37 @@ test("같은 거래의 모든 GAS 명령은 한 명령열에서 호출 순서대
   const enqueue = section(writeback, "function enqueueGasMutation", "\nasync function executeGasMutation");
   assert.match(enqueue, /previous[\s\S]*\.then\(task\)/, "앞 명령 완료 뒤 다음 명령을 시작해야 한다");
   assert.match(enqueue, /gasMutationTails\.set\(tradeKey, tail\)/);
+  assert.match(enqueue, /navigator\.locks\.request/, "같은 브라우저의 여러 탭도 Web Lock으로 한 줄에 세워야 한다");
+  assert.match(writeback, /jitterRetryDelay/, "여러 직원 기기가 같은 시각에 재시도하지 않게 지터가 있어야 한다");
+});
+
+test("사용자 대기형 변이는 하위·상위 재시도를 중첩하지 않는다", () => {
+  const store = read("lib/data/store.ts");
+  const retry = section(store, "async function gasMutationRetrying", "\nfunction queueItemCheckWrite");
+  assert.match(retry, /return gasMutation\(action, params\)/);
+  assert.doesNotMatch(retry, /for \(|setTimeout|delays/, "writeback의 bounded retry 위에 다시 재시도 루프를 쌓으면 안 된다");
+});
+
+test("반납 수량 자동 재시도는 저장 스피너와 다른 카드 동작을 영구 점유하지 않는다", () => {
+  const store = read("lib/data/store.ts");
+  const arm = section(store, "function armReturnCountsPersist", "\nfunction scheduleReturnCountsPersist");
+  assert.match(
+    arm,
+    /finishReturnCountSaves\(tradeId, "error", "⚠️ 반납 수량 저장 지연 — 자동 재시도 중"\)[\s\S]*scheduleReturnCountsRetry_\(tradeId\)/,
+    "실패한 사용자 저장 토큰을 끝낸 뒤 백그라운드 재시도로 넘겨야 한다",
+  );
+  const active = section(store, "export function isTradeMutationActive", "\nfunction finishTradeSave");
+  assert.match(active, /activeTradeTransitions\.has\(tradeId\)[\s\S]*pendingRemoveEquipmentTrades\.has\(tradeId\)/);
+  assert.doesNotMatch(active, /hasTradePending/, "백그라운드 수량·체크 재시도가 카드 전체를 막으면 안 된다");
+});
+
+test("재시작 시 보존된 저장 작업은 한꺼번에 0ms 재생하지 않고 순차적으로 복구한다", () => {
+  const store = read("lib/data/store.ts");
+  const replay = section(store, "function replayDurableMutationOutboxes", "\nlet durableMutationOnlineResumeRegistered");
+  assert.match(store, /const DURABLE_REPLAY_START_MS = 1_500/);
+  assert.match(replay, /nextDurableReplayDelay_/);
+  assert.doesNotMatch(replay, /armItemCheckBatch\(tradeId, 0\)/);
+  assert.doesNotMatch(replay, /commitQueuedItemQty[\s\S]{0,140}\}, 0\)/);
 });
 
 test("반출완료는 품목 체크와 수량 debounce의 최신 목표를 모두 drain한 뒤 실행한다", () => {

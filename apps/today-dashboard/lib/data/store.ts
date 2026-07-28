@@ -48,18 +48,28 @@ import {
   retryPhotoUpload,
   type PhotoUploadJob,
 } from "./photoUploadQueue";
-import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardDetailsForIncompleteTrades, repairDashboardSearchResults, resetRepairBackoff } from "./sync";
+import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardSearchResults, resetRepairBackoff } from "./sync";
+
+type RemoteStatus = "loading" | "ready" | "error";
 
 interface State {
   date: string;
   trades: Trade[];
   notes: HandoverNote[];
   savingTrades: Record<string, boolean>;
+  remoteStatus: RemoteStatus;
   toast: { id: number; text: string; kind: "saving" | "saved" | "error" } | null;
 }
 
 const cache: Record<string, { trades: Trade[]; notes: HandoverNote[] }> = {};
-let state: State = { date: "", trades: [], notes: [], savingTrades: {}, toast: null };
+let state: State = {
+  date: "",
+  trades: [],
+  notes: [],
+  savingTrades: {},
+  remoteStatus: isSupabase ? "loading" : "ready",
+  toast: null,
+};
 const listeners = new Set<() => void>();
 let toastSeq = 0;
 
@@ -213,20 +223,6 @@ function mergeTradeChanges(base: Trade[], changed: Trade[]): Trade[] {
   return attachResumedPhotoTiles_(merged);
 }
 
-async function repairEmptyEquipmentTrades(base = state.trades, mutationSeqAtStart = localMutationSeq): Promise<boolean> {
-  const versionsAtStart = Object.fromEntries(base.map((trade) => [trade.tradeId, tradeMutationSeq[trade.tradeId] ?? 0]));
-  const changed = await repairDashboardDetailsForIncompleteTrades(base);
-  if (!changed.length) return false;
-  const applicable = changed.filter((trade) =>
-    !hasTradeSyncPending(trade.tradeId) &&
-    (tradeMutationSeq[trade.tradeId] ?? 0) === (versionsAtStart[trade.tradeId] ?? 0),
-  );
-  if (!applicable.length) return false;
-  set({ trades: mergeTradeChanges(state.trades, applicable) });
-  for (const t of applicable) void enqueueTradePersist(t.tradeId, t).catch(() => {});
-  return true;
-}
-
 async function applyDashboardRepairs(
   changed: Trade[],
   _mutationSeqAtStart: number,
@@ -363,7 +359,7 @@ async function flushRealtimeChanges(): Promise<void> {
       const notesSafe = !notesPersistPending && notesMutationSeq === notesVersionAtFetch;
       if (!notesSafe) realtimeNotesChanged = true;
       set(notesSafe ? { trades: mergedTrades, notes } : { trades: mergedTrades });
-      await repairEmptyEquipmentTrades(mergedTrades, mutationSeqAtFlush);
+      if (state.date) await repairDayDetails(state.date, mutationSeqAtFlush, { fresh: false });
       return;
     }
     const [changed, notes] = await Promise.all([
@@ -394,16 +390,20 @@ async function flushRealtimeChanges(): Promise<void> {
 }
 
 async function loadRemoteOnce(): Promise<void> {
+  let loadedThisAttempt = false;
   try {
     const [trades, notes] = await Promise.all([fetchAllTrades(), fetchNotes()]);
     const mergedTrades = preservePhotosInSnapshot(trades);
     remoteLoaded = true;
-    set({ trades: mergedTrades, notes });
-    replayDurableMutationOutboxes();
-    await repairEmptyEquipmentTrades(state.trades);
-    if (state.date) await repairDayDetails(state.date);
+    loadedThisAttempt = true;
+    set({ trades: mergedTrades, notes, remoteStatus: "ready" });
   } catch (e) {
     console.error("[supabase] load 실패", e);
+    set({ remoteStatus: "error" });
+  }
+  if (loadedThisAttempt) {
+    replayDurableMutationOutboxes();
+    if (state.date) await repairDayDetails(state.date, localMutationSeq, { fresh: false });
   }
   if (!subscribed) {
     subscribed = true;
@@ -432,6 +432,7 @@ async function loadRemoteOnce(): Promise<void> {
 
 function loadRemote(): Promise<void> {
   if (remoteLoadPromise) return remoteLoadPromise;
+  if (!remoteLoaded && state.remoteStatus !== "loading") set({ remoteStatus: "loading" });
   const task = loadRemoteOnce();
   remoteLoadPromise = task;
   const clear = () => {
@@ -455,7 +456,6 @@ export async function pollSheetChangesNow(opts?: { mode?: "light" | "full"; rese
   const versionAtPoll = { ...tradeMutationSeq };
   pollInFlight = true;
   try {
-    if (await repairEmptyEquipmentTrades(state.trades, mutationSeqAtPoll)) return;
     if (state.date && await repairDayDetails(state.date, mutationSeqAtPoll, { fresh: mode === "full" })) return;
     const changed = await pollTimelineChanges(
       state.trades,
@@ -1074,7 +1074,11 @@ function armReturnCountsPersist(tradeId: string, delay: number): void {
         finishReturnCountSaves(tradeId, "error", "⚠️ 다른 직원의 반납완료가 먼저 반영됐습니다");
         return;
       }
-      set({ toast: { id: ++toastSeq, text: "⚠️ 반납 수량 저장 실패 — 네트워크를 확인하고 다시 시도해주세요", kind: "error" } });
+      const hadVisibleSave = (returnCountSaveTokens[tradeId]?.length ?? 0) > 0;
+      finishReturnCountSaves(tradeId, "error", "⚠️ 반납 수량 저장 지연 — 자동 재시도 중");
+      if (!hadVisibleSave) {
+        set({ toast: { id: ++toastSeq, text: "⚠️ 반납 수량 저장 지연 — 자동 재시도 중", kind: "error" } });
+      }
       scheduleReturnCountsRetry_(tradeId);
     });
   }, delay);
@@ -1175,7 +1179,7 @@ export function loadDay(date: string) {
   }
   if (state.date === date && state.trades.length) return;
   const d = dayData(date);
-  state = { date, trades: d.trades, notes: d.notes, savingTrades: {}, toast: null };
+  state = { date, trades: d.trades, notes: d.notes, savingTrades: {}, remoteStatus: "ready", toast: null };
   emit();
 }
 
@@ -1333,9 +1337,10 @@ function beginTradeTransition(tradeId: string): number {
   return id;
 }
 
-/** 카드/타임라인의 서로 다른 UI 진입점도 같은 거래의 원장 작업 중에는 새 명령을 시작하지 않는다. */
+/** 완료 전환·장비 제외처럼 순서가 뒤집히면 위험한 짧은 구간만 카드 명령을 막는다.
+ * 수량/품목의 백그라운드 재시도는 정본 수렴 blocker로만 남고 카드 전체를 영구 잠그지 않는다. */
 export function isTradeMutationActive(tradeId: string): boolean {
-  return activeTradeTransitions.has(tradeId) || hasTradePending(tradeId);
+  return activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId);
 }
 
 function finishTradeSave(tradeId: string, id: number, kind: "saved" | "error", text: string) {
@@ -1743,14 +1748,15 @@ async function replayRemoveEquipmentMutation_(entry: RemoveEquipmentOutboxEntry)
   await commitRemoveEquipmentMutation_(latest, saveId);
 }
 
-function replayRemoveEquipmentOutbox_(): void {
+function replayRemoveEquipmentOutbox_(initialDelay = 0): void {
   if (typeof window === "undefined" || !isSupabase || !writeBackEnabled) return;
   const merged = new Map<string, RemoveEquipmentOutboxEntry>(removeEquipmentOutboxMemory);
   Object.entries(readRemoveEquipmentOutbox_()).forEach(([key, entry]) => merged.set(key, entry));
+  let index = 0;
   merged.forEach((entry) => {
     removeEquipmentOutboxMemory.set(removeEquipmentOutboxKey_(entry.tradeId, entry.scheduleId), entry);
     pendingRemoveEquipmentTrades.add(entry.tradeId);
-    scheduleRemoveEquipmentReplay_(entry, 0);
+    scheduleRemoveEquipmentReplay_(entry, initialDelay + index++ * 350);
   });
 }
 
@@ -2234,16 +2240,8 @@ function isRetryableLedgerError(error: unknown): boolean {
 async function gasMutationRetrying(
   action: string,
   params: Record<string, string | number | boolean>,
-  delays: number[] = [2_000, 5_000],
 ): Promise<any> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await gasMutation(action, params);
-    } catch (error) {
-      if (attempt >= delays.length || !isRetryableLedgerError(error)) throw error;
-      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
-    }
-  }
+  return gasMutation(action, params);
 }
 
 function queueItemCheckWrite(tradeId: string, scheduleId: string, done: boolean, previousDone: boolean): void {
@@ -3015,14 +3013,20 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
   }
 }
 
-function replayCompletionMutationOutboxes_(): void {
+function replayCompletionMutationOutboxes_(initialDelay = 0): void {
   if (typeof window === "undefined" || !isSupabase || !writeBackEnabled) return;
-  Object.values(readCompletionMutationOutbox()).forEach((entry) => {
-    scheduleCompletionMutationReplay_(entry.kind, entry.tradeId, 0);
+  Object.values(readCompletionMutationOutbox()).forEach((entry, index) => {
+    scheduleCompletionMutationReplay_(entry.kind, entry.tradeId, initialDelay + index * 350);
   });
 }
 
 let durableMutationOutboxesReplayed = false;
+const DURABLE_REPLAY_START_MS = 1_500;
+
+function nextDurableReplayDelay_(index: number): number {
+  // 여러 탭/기기가 동시에 다시 켜져도 같은 millisecond에 GAS를 두드리지 않는다.
+  return DURABLE_REPLAY_START_MS + index * 350 + Math.round(Math.random() * 250);
+}
 
 /** 새로고침/모바일 종료 전에 서버에 못 간 최종 목표값을 원격 로드 뒤 정확히 한 번 재생한다. */
 function replayDurableMutationOutboxes(): void {
@@ -3036,6 +3040,8 @@ function replayDurableMutationOutboxes(): void {
   const qtyKeysToArm: Array<{ tradeId: string; scheduleId: string; key: string }> = [];
   const itemCheckTradesToArm = new Set<string>();
   const discardedReturnTradeIds = new Set<string>();
+  let replayIndex = 0;
+  const nextReplayDelay = () => nextDurableReplayDelay_(replayIndex++);
   let changed = false;
 
   Object.entries(returnOutbox).forEach(([tradeId, entry]) => {
@@ -3110,19 +3116,21 @@ function replayDurableMutationOutboxes(): void {
       },
     });
   }
-  returnTradesToArm.forEach((tradeId) => resumeDurableReturnCountOutbox_(tradeId));
-  itemCheckTradesToArm.forEach((tradeId) => armItemCheckBatch(tradeId, 0));
+  returnTradesToArm.forEach((tradeId) => {
+    window.setTimeout(() => resumeDurableReturnCountOutbox_(tradeId), nextReplayDelay());
+  });
+  itemCheckTradesToArm.forEach((tradeId) => armItemCheckBatch(tradeId, nextReplayDelay()));
   qtyKeysToArm.forEach(({ tradeId, scheduleId, key }) => {
     if (qtyCommitTimers[key]) clearTimeout(qtyCommitTimers[key]);
     qtyCommitTimers[key] = setTimeout(() => {
       delete qtyCommitTimers[key];
       void commitQueuedItemQty(tradeId, scheduleId, key);
-    }, 0);
+    }, nextReplayDelay());
   });
   // 완료 버튼도 사용자 의도를 영구 보존한다. 위 품목/수량 outbox를 먼저 arm해 완료가
   // 마지막 품목 저장을 앞질러 기준선을 고정하지 않게 한다.
-  replayCompletionMutationOutboxes_();
-  replayRemoveEquipmentOutbox_();
+  replayCompletionMutationOutboxes_(nextReplayDelay());
+  replayRemoveEquipmentOutbox_(nextReplayDelay());
 }
 
 let durableMutationOnlineResumeRegistered = false;
@@ -4509,25 +4517,34 @@ export function deleteNote(id: string) {
 
 // ── 훅 ─────────────────────────────────────────────────────────
 // 토스트만 바뀐 emit에 데이터 뷰 전체가 재렌더되지 않도록, useDashboard는
-// date/trades/notes/savingTrades가 실제로 바뀔 때만 새 스냅샷 객체를 만든다.
-let dashSnapshot: DashboardDay & { savingTrades: Record<string, boolean> } = {
+// date/trades/notes/savingTrades/remoteStatus가 실제로 바뀔 때만 새 스냅샷 객체를 만든다.
+type DashboardSnapshot = DashboardDay & { savingTrades: Record<string, boolean>; remoteStatus: RemoteStatus };
+let dashSnapshot: DashboardSnapshot = {
   date: state.date,
   trades: state.trades,
   notes: state.notes,
   savingTrades: state.savingTrades,
+  remoteStatus: state.remoteStatus,
 };
 function getDashSnapshot() {
   if (
     dashSnapshot.date !== state.date ||
     dashSnapshot.trades !== state.trades ||
     dashSnapshot.notes !== state.notes ||
-    dashSnapshot.savingTrades !== state.savingTrades
+    dashSnapshot.savingTrades !== state.savingTrades ||
+    dashSnapshot.remoteStatus !== state.remoteStatus
   ) {
-    dashSnapshot = { date: state.date, trades: state.trades, notes: state.notes, savingTrades: state.savingTrades };
+    dashSnapshot = {
+      date: state.date,
+      trades: state.trades,
+      notes: state.notes,
+      savingTrades: state.savingTrades,
+      remoteStatus: state.remoteStatus,
+    };
   }
   return dashSnapshot;
 }
-export function useDashboard(): DashboardDay & { savingTrades: Record<string, boolean> } {
+export function useDashboard(): DashboardSnapshot {
   return useSyncExternalStore(subscribe, getDashSnapshot, getDashSnapshot);
 }
 export function useToast() {

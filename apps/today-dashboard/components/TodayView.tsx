@@ -110,6 +110,24 @@ export function TodayView() {
   if (!date) {
     return <div className="flex h-screen items-center justify-center text-ink-faint">불러오는 중…</div>;
   }
+  if (data.remoteStatus === "loading") {
+    return <div className="flex h-screen items-center justify-center text-ink-faint">일정 불러오는 중…</div>;
+  }
+  if (data.remoteStatus === "error") {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-3 px-6 text-center text-ink-mute">
+        <div className="font-bold text-ink">일정을 불러오지 못했습니다</div>
+        <div className="text-[13px]">네트워크를 확인한 뒤 다시 시도해주세요.</div>
+        <button
+          type="button"
+          onClick={() => loadDay(date)}
+          className="tap rounded-xl bg-brand-600 px-4 py-2 text-[13px] font-bold text-white"
+        >
+          다시 시도
+        </button>
+      </div>
+    );
+  }
 
   const isToday = date === ymd(new Date());
 

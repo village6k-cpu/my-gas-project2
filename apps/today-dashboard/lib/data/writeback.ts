@@ -29,11 +29,16 @@ export function isGasOutcomeUnknownError(error: unknown): boolean {
   return error instanceof GasMutationError && error.outcomeUnknown;
 }
 
-// GAS/Sheets는 전역 잠금을 공유한다. 같은 거래 명령이 브라우저에서 동시에 출발하면
-// 사용자의 클릭 순서가 아니라 서버 잠금 획득 순서가 최종 상태가 된다. 거래별 tail에
-// 연결해 한 거래의 명령은 반드시 호출 순서대로, 서로 다른 거래는 독립적으로 실행한다.
+// GAS/Sheets는 전역 잠금을 공유한다. 거래별 tail로 같은 거래의 클릭 순서를 보존하고,
+// Web Lock으로 같은 브라우저의 다른 거래·다른 탭까지 서버 전역 잠금과 같은 한 줄에 세운다.
 const gasMutationTails = new Map<string, Promise<void>>();
 const GAS_BUSY_RETRY_DELAYS_MS = [300, 800, 1_600, 3_200];
+const GAS_LEDGER_WEB_LOCK = "heybilly:gas-ledger-mutations:v1";
+
+function jitterRetryDelay(baseMs: number): number {
+  // 여러 직원 기기가 같은 BUSY 응답 뒤 같은 시각에 재충돌하는 동기 재시도를 흩뜨린다.
+  return Math.max(100, Math.round(baseMs * (0.75 + Math.random() * 0.5)));
+}
 
 function mutationTradeKey(action: string, params: Record<string, GasParam>): string | null {
   // 사진 전송은 수십 초 걸릴 수 있고 원장 상태 순서와 무관하다. 사진 lane 때문에 같은 카드의
@@ -43,11 +48,19 @@ function mutationTradeKey(action: string, params: Record<string, GasParam>): str
   if (direct) return direct;
   const scheduleId = String(params.scheduleId ?? "").trim();
   const match = scheduleId.match(/^(\d{6}-\d{3})-/);
-  return match ? match[1] : null;
+  return match ? match[1] : `action:${action}`;
 }
 
-function enqueueGasMutation<T>(tradeKey: string | null, task: () => Promise<T>): Promise<T> {
-  if (!tradeKey) return task();
+function enqueueGasMutation<T>(tradeKey: string | null, rawTask: () => Promise<T>): Promise<T> {
+  if (!tradeKey) return rawTask();
+  const task = async (): Promise<T> => {
+    if (typeof navigator !== "undefined" && navigator.locks?.request) {
+      // GAS는 ScriptLock 하나를 공유한다. 같은 브라우저의 여러 탭도 원장 쓰기를 한 줄로 보내
+      // 앱 스스로 BUSY를 만들지 않게 한다. 다른 브라우저/기기는 아래 지터 재시도로 충돌을 흩는다.
+      return await navigator.locks.request(GAS_LEDGER_WEB_LOCK, { mode: "exclusive" }, async () => rawTask());
+    }
+    return await rawTask();
+  };
   const previous = gasMutationTails.get(tradeKey) ?? Promise.resolve();
   const run = previous.then(task);
   // tail은 항상 resolve시켜 앞 명령 실패가 다음 명령까지 영구 차단하지 않게 한다.
@@ -103,7 +116,7 @@ async function executeGasMutation(action: string, params: Record<string, GasPara
       const retryable = res.retryable === true || res.code === "BUSY";
       const outcomeUnknown = res.outcomeUnknown === true || res.code === "OUTCOME_UNKNOWN";
       if (retryable && attempt < GAS_BUSY_RETRY_DELAYS_MS.length) {
-        await new Promise((resolve) => setTimeout(resolve, GAS_BUSY_RETRY_DELAYS_MS[attempt]));
+        await new Promise((resolve) => setTimeout(resolve, jitterRetryDelay(GAS_BUSY_RETRY_DELAYS_MS[attempt])));
         continue;
       }
       throw new GasMutationError(String(res.error), outcomeUnknown, retryable);
