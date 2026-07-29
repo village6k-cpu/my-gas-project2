@@ -224,6 +224,13 @@ function handleRequest(e) {
         return jsonResponse(updateScheduleTime(row, newStart, newEnd, rowIndices));
       }
 
+      case "scheduleChangeDates": {
+        if (!e.postData) return jsonResponse({ success: false, error: "scheduleChangeDates requires POST" });
+        var dateChangeArgs = postBody.args || {};
+        if (typeof dateChangeArgs === "string") dateChangeArgs = JSON.parse(dateChangeArgs);
+        return jsonResponse(changeRegisteredTradeDates(dateChangeArgs));
+      }
+
       case "updateStatus": {
         var row = Number(params.row || postBody.row);
         var newStatus = params.status || postBody.status;
