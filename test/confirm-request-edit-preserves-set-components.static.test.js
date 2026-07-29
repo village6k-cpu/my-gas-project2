@@ -18,7 +18,8 @@ assert(
 );
 
 assert(
-  /장비: cleanEquips\.map\(\(e\) => \(\{[\s\S]{0,240}비고: e\.비고[\s\S]{0,120}결과: e\.결과/.test(view),
+  /const normalizedEquipment = cleanEquips\.map\(\(e\) => \(\{[\s\S]{0,240}비고: e\.비고[\s\S]{0,240}결과: isUnchangedSetHeader\(e\)/.test(view) &&
+    /if \(equipmentChanged\) args\.장비 = normalizedEquipment/.test(view),
   "수정 저장 payload는 세트 구성품 소속 비고와 세트 헤더 결과를 함께 보내야 한다",
 );
 

@@ -39,6 +39,7 @@ type EditableConfirmEquipment = {
   결과: string;
   제외: boolean;
   role: ConfirmEquipmentRole;
+  originalSetHeaderName?: string;
 };
 type ExcludedConfirmItem = { 장비명: string; 비고: string; 순번: number };
 type Req = {
@@ -942,9 +943,25 @@ function EditPanel({
         결과: String(r.결과 || ""),
         제외: !!r.제외,
         role: r.role,
+        originalSetHeaderName: r.role === "set-header" ? r.장비명.trim() : undefined,
       })),
   );
+  const originalEquipmentSignature = useMemo(
+    () => JSON.stringify(
+      buildConfirmEquipmentRows(req.장비목록 || []).map((r) => ({
+        이름: r.장비명.trim(),
+        수량: Number(r.수량) || 1,
+        비고: String(r.비고 || ""),
+        결과: r.role === "set-header" ? "세트" : "",
+        제외: !!r.제외,
+      })),
+    ),
+    [req.장비목록],
+  );
   const catalog = useEquipmentCatalog();
+  const isUnchangedSetHeader = (equipment: EditableConfirmEquipment) =>
+    equipment.role === "set-header" &&
+    equipment.이름.trim() === String(equipment.originalSetHeaderName || "").trim();
 
   const setEq = (i: number, k: "이름" | "수량", v: string) => setEquips((prev) => prev.map((e, j) => (j === i ? { ...e, [k]: v } : e)));
   const addEq = () => setEquips((prev) => [...prev, { 이름: "", 수량: "1", 비고: "", 결과: "", 제외: false, role: "single" }]);
@@ -956,6 +973,21 @@ function EditPanel({
     const skip = !!opts?.skipCheckAndRegister;
     setError("");
     const cleanEquips = equips.filter((e) => e.이름.trim());
+    if (!cleanEquips.length) {
+      setError("장비를 1개 이상 입력해주세요.");
+      return;
+    }
+    const normalizedEquipment = cleanEquips.map((e) => ({
+      이름: e.이름.trim(),
+      수량: Number(e.수량) || 1,
+      비고: e.비고,
+      // 기존 세트 대표명의 이름을 바꾸면 더 이상 같은 세트 헤더가 아니다.
+      // 플래그를 비워 GAS가 새 이름을 세트마스터/장비마스터 기준으로 다시 판정하게 한다.
+      결과: isUnchangedSetHeader(e) ? "세트" : "",
+      제외: e.제외,
+    }));
+    const equipmentChanged = JSON.stringify(normalizedEquipment) !== originalEquipmentSignature;
+    const scheduleChanged = outD !== out.d || outT !== (req.반출시간 || out.t) || retD !== ret.d || retT !== (req.반납시간 || ret.t);
     const args: Record<string, unknown> = {
       reqID: req.reqID,
       예약자명: name,
@@ -965,14 +997,10 @@ function EditPanel({
       반출시간: outT,
       반납일: retD,
       반납시간: retT,
-      장비: cleanEquips.map((e) => ({
-        이름: e.이름.trim(),
-        수량: e.수량,
-        비고: e.비고,
-        결과: e.결과 === "세트" ? "세트" : "",
-        제외: e.제외,
-      })),
     };
+    // 고객정보/할인만 바뀐 저장에 20~30개 장비 전체를 다시 보내면 GAS가 모든 행을
+    // 재작성·재확인한다. 장비가 실제로 달라졌을 때만 목록을 보낸다.
+    if (equipmentChanged) args.장비 = normalizedEquipment;
     if (skip) args.skipCheck = true; // 가용확인 생략(등록 시 자동 처리)
     const localPatch = (r: Req): Req => ({
       ...r,
@@ -984,14 +1012,16 @@ function EditPanel({
       반출시간: outT,
       반납일: retD,
       반납시간: retT,
-      장비목록: cleanEquips.map((e) => ({
-        장비명: e.이름.trim(),
-        수량: Number(e.수량) || 1,
-        결과: e.결과 === "세트" ? "세트" : "⏳",
-        상세: skip ? "등록 시 자동 확인" : "재확인 중",
-        비고: e.비고,
-        제외: e.제외,
-      })),
+      장비목록: equipmentChanged || scheduleChanged
+        ? normalizedEquipment.map((e) => ({
+            장비명: e.이름,
+            수량: e.수량,
+            결과: e.결과 === "세트" ? "세트" : skip ? "" : "⏳",
+            상세: skip ? "등록 시 자동 확인" : "재확인 중",
+            비고: e.비고,
+            제외: e.제외,
+          }))
+        : r.장비목록,
     });
     onClose();
     const queued = queueEdit(req.reqID, "updateRequest", args, localPatch);
@@ -1036,7 +1066,7 @@ function EditPanel({
               {equips.map((e, i) => (
                 <div key={i} className={`flex items-center gap-1.5 ${e.role === "set-component" ? "pl-4" : ""}`}>
                   {e.role === "set-component" && <span className="shrink-0 text-[13px] text-brand-500">↳</span>}
-                  {e.role === "set-header" && <span className="shrink-0 rounded bg-brand-50 px-1.5 py-1 text-[10px] font-extrabold text-brand-700">세트</span>}
+                  {isUnchangedSetHeader(e) && <span className="shrink-0 rounded bg-brand-50 px-1.5 py-1 text-[10px] font-extrabold text-brand-700">세트</span>}
                   <EquipNameInput value={e.이름} onChange={(v) => setEq(i, "이름", v)} names={catalog.names} placeholder="장비명" />
                   {/* 수량칸은 고정폭. 인라인 style로 .inp의 width:100%를 덮어써야 장비명칸이 0으로 찌그러지지 않는다. */}
                   <input value={e.수량} onChange={(ev) => setEq(i, "수량", ev.target.value)} className="inp text-center" style={{ width: "3.25rem", flex: "0 0 3.25rem" }} inputMode="numeric" aria-label="수량" />

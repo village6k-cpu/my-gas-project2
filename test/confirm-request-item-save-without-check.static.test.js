@@ -15,12 +15,17 @@ assert(
   "품목 인라인 편집기에 가용확인 없이 이름·수량만 저장하는 버튼이 필요하다",
 );
 
-const updateItem = gas.slice(gas.indexOf("function updateRequestItem(req)"), gas.indexOf("\n\nfunction updateRequest(req)"));
+const updateItem = gas.slice(
+  gas.indexOf("function updateRequestItem(req)"),
+  gas.indexOf("function _normalizeConfirmRequestEquipmentForUpdate_"),
+);
 assert(
   /if \(req\.skipCheck === true\)/.test(updateItem) &&
     /setValue\("가용확인 생략"\)/.test(updateItem) &&
-    /else \{[\s\S]{0,180}processByReqID\(sheet, target\)/.test(updateItem),
-  "GAS는 skipCheck 저장 시 이전 결과를 지우고 가용확인 호출만 생략해야 한다",
+    /else \{[\s\S]{0,300}needsRecheck = true/.test(updateItem) &&
+    /if \(mutationLocked\) mutationLock\.releaseLock\(\)/.test(updateItem) &&
+    /if \(needsRecheck\) processByReqID\(sheet, req\.reqID\)/.test(updateItem),
+  "GAS는 skipCheck 저장 시 이전 결과를 지우고, 일반 저장은 잠금 해제 후 reqID로 재확인해야 한다",
 );
 
 console.log("confirm request item save without availability check passed");

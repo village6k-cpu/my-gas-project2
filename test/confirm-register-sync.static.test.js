@@ -719,8 +719,10 @@ console.log('guide-alimtalk-schedule-diagnostics checks OK');
   assert(
     /function updateRequestItem\(req\)/.test(ca) &&
       /getRange\(target, 9, 1, 2\)\.clearContent\(\)/.test(ca) &&
-      /processByReqID\(sheet, target\)/.test(ca),
-    'updateRequestItem must clear only the edited row result then reuse processByReqID (preserves other rows)'
+      /needsRecheck = true/.test(ca) &&
+      /if \(mutationLocked\) mutationLock\.releaseLock\(\)/.test(ca) &&
+      /if \(needsRecheck\) processByReqID\(sheet, req\.reqID\)/.test(ca),
+    'updateRequestItem must clear only the edited row result, release its mutation lock, then recheck by reqID'
   );
   // 행 단위 제외는 "보류"가 아닌 "제외" — registerByReqID 재등록 리셋이 보류를 지워서
   // 제외 품목이 그대로 등록되던 P1 (기존 선택등록 경로도 동일 버그였음)
@@ -776,8 +778,11 @@ console.log('request-item-edit checks OK');
     'doListPending must restore as-typed date/time using the SPREADSHEET timezone, never Asia/Seoul datetime'
   );
   assert(
-    (ca.match(/getRange\(row, 2, 1, 4\)\.setNumberFormat\("@"\)/g) || []).length >= 2,
-    'request rows must force B~E to text on write (insert + updateRequest re-entry) so sheets never auto-convert'
+    /getRange\(row, 2, 1, 4\)\.setNumberFormat\("@"\)/.test(ca) &&
+      /getRange\(targetRows\[0\], 2, items\.length, 4\)\.setNumberFormat\("@"\)/.test(ca) &&
+      /getRange\(startRow, 2, items\.length, 4\)\.setNumberFormat\("@"\)/.test(ca) &&
+      /getRange\(firstRow, 2, 1, 4\)\.setNumberFormat\("@"\)/.test(ca),
+    'request rows must force B~E to text on insert, in-place edit, row-count replacement, and metadata-only date edit'
   );
   assert(
     /function normalizeConfirmRequestDates\(\)/.test(ca) && api.includes('"normalizeConfirmRequestDates"'),

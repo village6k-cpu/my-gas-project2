@@ -10981,9 +10981,28 @@ function _insertAndCheckRequest(req) {
 /**
  * 확인요청에서 특정 장비 행을 보류 처리 (등록 전 제외용)
  */
+function _assertConfirmRequestEditableRows_(targetRows, data) {
+  for (var i = 0; i < targetRows.length; i++) {
+    var row = data[targetRows[i] - 2] || [];
+    var command = String(row[13] || "").trim(); // N: 등록 명령/승인
+    var status = String(row[14] || "").trim();  // O: 등록 상태
+    var tradeId = String(row[15] || "").trim(); // P: 생성된 거래ID
+    if (/^(?:등록|바로등록)$/.test(command) ||
+        /등록\s*(?:대기|처리|완료)|개고생2\.0|계약서/.test(status) ||
+        tradeId) {
+      throw new Error("등록 처리 중이거나 완료된 확인요청은 수정할 수 없습니다.");
+    }
+  }
+}
+
 function excludeEquipFromRequest(req) {
   if (!req.reqID || !req.제외장비 || req.제외장비.length === 0) return { status: "OK", excluded: 0 };
 
+  var mutationLock = LockService.getUserLock();
+  var mutationLocked = false;
+  try {
+  mutationLock.waitLock(10000);
+  mutationLocked = true;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("확인요청");
   var lastRow = sheet.getLastRow();
@@ -10991,6 +11010,12 @@ function excludeEquipFromRequest(req) {
 
   var data = sheet.getRange(2, 1, lastRow - 1, 17).getValues();
   var excluded = 0;
+  var targetRows = [];
+
+  for (var rowIndex = 0; rowIndex < data.length; rowIndex++) {
+    if (String(data[rowIndex][0]).trim() === req.reqID) targetRows.push(rowIndex + 2);
+  }
+  _assertConfirmRequestEditableRows_(targetRows, data);
 
   for (var i = 0; i < data.length; i++) {
     if (String(data[i][0]).trim() !== req.reqID) continue;
@@ -11005,6 +11030,9 @@ function excludeEquipFromRequest(req) {
   }
   SpreadsheetApp.flush();
   return { status: "OK", excluded: excluded };
+  } finally {
+    if (mutationLocked) mutationLock.releaseLock();
+  }
 }
 
 /**
@@ -11047,8 +11075,16 @@ function normalizeConfirmRequestDates() {
 function updateRequestItem(req) {
   if (!req || !req.reqID || !req.장비명) throw new Error("reqID와 장비명 필수");
 
+  var mutationLock = LockService.getUserLock();
+  var mutationLocked = false;
+  var sheet = null;
+  var needsRecheck = false;
+  var result = null;
+  try {
+  mutationLock.waitLock(10000);
+  mutationLocked = true;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName("확인요청");
+  sheet = ss.getSheetByName("확인요청");
   if (!sheet) throw new Error("확인요청 시트 없음");
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) throw new Error("데이터 없음");
@@ -11060,12 +11096,18 @@ function updateRequestItem(req) {
   var target = -1;
   for (var i = 0; i < data.length; i++) {
     if (String(data[i][0]).trim() !== String(req.reqID).trim()) continue;
+    // 같은 요청의 등록 상태까지 확인해야 품목 저장이 등록대기/거래ID를 되돌리지 않는다.
     if (String(data[i][5] || "").trim() !== String(req.장비명).trim()) continue;
     if (wantTag !== null && String(data[i][16] || "").trim() !== wantTag) continue;
     if (seen === ordinal) { target = i + 2; break; }
     seen++;
   }
   if (target < 0) throw new Error("품목을 찾을 수 없음: " + req.장비명);
+  var requestRows = [];
+  for (var requestIndex = 0; requestIndex < data.length; requestIndex++) {
+    if (String(data[requestIndex][0] || "").trim() === String(req.reqID).trim()) requestRows.push(requestIndex + 2);
+  }
+  _assertConfirmRequestEditableRows_(requestRows, data);
 
   var changed = false;
   var 새이름 = req.새이름 !== undefined && req.새이름 !== null ? String(req.새이름).trim() : "";
@@ -11087,7 +11129,6 @@ function updateRequestItem(req) {
     sheet.getRange(target, 15).clearContent();
   }
 
-  var reChecked = false;
   if (changed) {
     // 이름/수량이 바뀌었는데 이전 가용 결과를 남기면 거짓 정보가 되므로 I/J는 항상 초기화한다.
     sheet.getRange(target, 9, 1, 2).clearContent(); // I:결과, J:상세
@@ -11098,19 +11139,150 @@ function updateRequestItem(req) {
       SpreadsheetApp.flush();
     } else {
       SpreadsheetApp.flush();
-      // 결과 없는 이 행만 재확인한다. 다른 품목 결과는 보존하고, 세트명 변경 시
-      // 펼침/고아 구성품 정리는 기존 processByReqID가 처리한다.
-      processByReqID(sheet, target);
-      reChecked = true;
+      // 느린 가용확인은 짧은 시트 쓰기 잠금 밖에서 reqID를 다시 찾아 실행한다.
+      needsRecheck = true;
     }
   } else {
     SpreadsheetApp.flush();
   }
-  return { status: "OK", row: target, reChecked: reChecked, skippedCheck: changed && req.skipCheck === true };
+  result = { status: "OK", row: target, reChecked: needsRecheck, skippedCheck: changed && req.skipCheck === true };
+  } finally {
+    if (mutationLocked) mutationLock.releaseLock();
+  }
+  if (needsRecheck) processByReqID(sheet, req.reqID);
+  return result;
 }
 
 
-function updateRequest(req) {
+/**
+ * 행 수가 같은 확인요청 수정은 제자리에서 한 번에 쓴다.
+ * 예전 구현은 30개 품목이면 deleteRow 30회 + setValues 30회 뒤 전체 재확인을 돌려
+ * 저장 한 번이 수십 초까지 늘어났다. 기존 결과는 그대로 두고 이름/수량/세트소속 또는
+ * 대여기간이 바뀐 행만 I/J를 비워 processByReqID가 그 행만 다시 계산하게 한다.
+ */
+function _normalizeConfirmRequestEquipmentForUpdate_(items, targetRows, data) {
+  var existingSetNames = {};
+  for (var i = 0; i < targetRows.length; i++) {
+    var oldRow = data[targetRows[i] - 2] || [];
+    if (String(oldRow[8] || "").trim() === "세트") {
+      existingSetNames[String(oldRow[5] || "").trim()] = true;
+    }
+  }
+  var alignedRows = (items || []).length === targetRows.length;
+  return (items || []).map(function(item, index) {
+    var normalized = {};
+    Object.keys(item || {}).forEach(function(key) { normalized[key] = item[key]; });
+    var itemName = String(normalized.이름 || "").trim();
+    // 이전 세트 대표명과 이름이 달라졌는데 클라이언트가 오래된 "세트" 플래그를
+    // 보내면 단품 가용확인을 건너뛴다. 같은 이름의 기존 헤더만 보존한다.
+    if (String(normalized.결과 || "").trim() === "세트") {
+      var alignedOldRow = alignedRows ? (data[targetRows[index] - 2] || []) : [];
+      var sameAlignedSetHeader = alignedRows &&
+        String(alignedOldRow[8] || "").trim() === "세트" &&
+        String(alignedOldRow[5] || "").trim() === itemName;
+      if (!(sameAlignedSetHeader || (!alignedRows && existingSetNames[itemName]))) {
+        normalized.결과 = "";
+      }
+    }
+    return normalized;
+  });
+}
+
+function _updateConfirmRequestRowsInPlace_(sheet, targetRows, data, req, items) {
+  if (!items || items.length === 0 || targetRows.length !== items.length) return null;
+  for (var ci = 1; ci < targetRows.length; ci++) {
+    if (targetRows[ci] !== targetRows[0] + ci) return null;
+  }
+
+  var firstExisting = data[targetRows[0] - 2];
+  var outDate = req.반출일 !== undefined ? req.반출일 : firstExisting[1];
+  var outTime = req.반출시간 !== undefined ? req.반출시간 : firstExisting[2];
+  var returnDate = req.반납일 !== undefined ? req.반납일 : firstExisting[3];
+  var returnTime = req.반납시간 !== undefined ? req.반납시간 : firstExisting[4];
+  var customerName = req.예약자명 !== undefined ? req.예약자명 : firstExisting[10];
+  var phone = req.연락처 !== undefined ? req.연락처 : firstExisting[11];
+  var discount = req.할인유형 !== undefined ? req.할인유형 : firstExisting[12];
+  var note = req.비고 !== undefined ? req.비고 : firstExisting[16];
+  var extraRequest = req.추가요청 !== undefined ? _sanitizeConfirmRequestFreeText_(req.추가요청, 180) : firstExisting[17];
+
+  var scheduleChanged =
+    _confirmRequestDateKey_(firstExisting[1]) !== _confirmRequestDateKey_(outDate) ||
+    _confirmRequestTimeKey_(firstExisting[2]) !== _confirmRequestTimeKey_(outTime) ||
+    _confirmRequestDateKey_(firstExisting[3]) !== _confirmRequestDateKey_(returnDate) ||
+    _confirmRequestTimeKey_(firstExisting[4]) !== _confirmRequestTimeKey_(returnTime);
+  var metadataChanged =
+    String(firstExisting[10] || "") !== String(customerName || "") ||
+    String(firstExisting[11] || "") !== String(phone || "") ||
+    String(firstExisting[12] || "") !== String(discount || "") ||
+    String(firstExisting[17] || "") !== String(extraRequest || "");
+
+  var writeRows = [];
+  var exclusionWrites = [];
+  var availabilityChangedCount = 0;
+  var anyItemChanged = false;
+  for (var i = 0; i < items.length; i++) {
+    var oldRow = data[targetRows[i] - 2];
+    var itemName = String(items[i].이름 || "").trim();
+    var itemQty = Number(items[i].수량) || 1;
+    var itemResult = String(items[i].결과 || "").trim() === "세트" ? "세트" : "";
+    var itemNote = items[i].비고 !== undefined
+      ? String(items[i].비고 || "")
+      : (i === 0 ? String(note || "") : String(oldRow[16] || ""));
+    var itemExcluded = items[i].제외 === true;
+    var oldResult = String(oldRow[8] || "");
+    var oldStatus = String(oldRow[14] || "");
+    var oldIsSet = oldResult.trim() === "세트";
+    var availabilityChanged = scheduleChanged ||
+      String(oldRow[5] || "").trim() !== itemName ||
+      Number(oldRow[6] || 1) !== itemQty ||
+      String(oldRow[16] || "") !== itemNote ||
+      oldIsSet !== (itemResult === "세트");
+    var exclusionChanged = (oldStatus.trim() === "제외") !== itemExcluded;
+    if (availabilityChanged) availabilityChangedCount++;
+    if (availabilityChanged || exclusionChanged) anyItemChanged = true;
+    if (exclusionChanged) exclusionWrites.push({ row: targetRows[i], value: itemExcluded ? "제외" : "" });
+
+    var preservedResult = availabilityChanged ? itemResult : oldResult;
+    var preservedDetail = availabilityChanged
+      ? (req.skipCheck === true ? "가용확인 생략" : "")
+      : oldRow[9];
+    var nextStatus = itemExcluded ? "제외" : (oldStatus.trim() === "제외" ? "" : oldStatus);
+    writeRows.push([
+      req.reqID,
+      i === 0 ? outDate : "", i === 0 ? outTime : "",
+      i === 0 ? returnDate : "", i === 0 ? returnTime : "",
+      itemName, itemQty,
+      oldRow[7], preservedResult, preservedDetail,
+      i === 0 ? customerName : "", i === 0 ? phone : "",
+      i === 0 ? discount : "", oldRow[13], nextStatus, oldRow[15],
+      itemNote,
+      i === 0 ? extraRequest : ""
+    ]);
+  }
+
+  if (scheduleChanged || metadataChanged || anyItemChanged) {
+    sheet.getRange(targetRows[0], 2, items.length, 4).setNumberFormat("@");
+    // 등록 워커가 소유하는 N/O/P는 절대 스냅샷으로 덮지 않는다. 편집 데이터 A:M과
+    // 비고/추가요청 Q:R만 일괄 기록하고, O열은 제외 토글이 실제로 바뀐 행만 쓴다.
+    sheet.getRange(targetRows[0], 1, items.length, 13).setValues(writeRows.map(function(row) { return row.slice(0, 13); }));
+    sheet.getRange(targetRows[0], 17, items.length, 2).setValues(writeRows.map(function(row) { return row.slice(16, 18); }));
+    exclusionWrites.forEach(function(entry) { sheet.getRange(entry.row, 15).setValue(entry.value); });
+    sheet.getRange(targetRows[0], 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
+    if (items.length > 1) {
+      sheet.getRange(targetRows[0] + 1, 1, items.length - 1, 18).setFontWeight("normal").setBackground(null);
+    }
+  }
+
+  return {
+    firstRow: targetRows[0],
+    recheck: availabilityChangedCount > 0 && req.skipCheck !== true,
+    scheduleChanged: scheduleChanged,
+    availabilityChanged: availabilityChangedCount,
+    changed: scheduleChanged || metadataChanged || anyItemChanged
+  };
+}
+
+function _updateRequestUnderLock_(req) {
   if (!req.reqID) throw new Error("reqID 필수");
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -11128,14 +11300,39 @@ function updateRequest(req) {
     }
   }
   if (targetRows.length === 0) throw new Error("요청ID를 찾을 수 없음: " + req.reqID);
+  _assertConfirmRequestEditableRows_(targetRows, data);
 
   var firstRow = targetRows[0];
 
   // 장비 목록 변경이 있으면: 기존 행 삭제 후 재입력
   if (req.장비 && req.장비.length > 0) {
-    // 기존 행 삭제 (아래부터 삭제해야 행 번호 안 꼬임)
-    for (var d = targetRows.length - 1; d >= 0; d--) {
-      sheet.deleteRow(targetRows[d]);
+    var items = _normalizeConfirmRequestEquipmentForUpdate_(req.장비, targetRows, data);
+    var inPlace = _updateConfirmRequestRowsInPlace_(sheet, targetRows, data, req, items);
+    if (inPlace) {
+      return {
+        reqID: req.reqID,
+        action: "수정",
+        items: items.length,
+        recheck: inPlace.recheck,
+        skippedCheck: inPlace.availabilityChanged > 0 && req.skipCheck === true,
+        inPlace: true,
+        changed: inPlace.changed,
+        changedAvailabilityRows: inPlace.availabilityChanged
+      };
+    }
+
+    // 행 수가 달라진 경우에도 연속 요청 묶음은 한 번에 삭제한다. 30행을 deleteRow
+    // 30회 호출하면 시트 전체 행 이동도 30번 발생한다.
+    var contiguousTargetRows = true;
+    for (var d = 1; d < targetRows.length; d++) {
+      if (targetRows[d] !== targetRows[0] + d) { contiguousTargetRows = false; break; }
+    }
+    if (contiguousTargetRows) {
+      sheet.deleteRows(targetRows[0], targetRows.length);
+    } else {
+      for (var deleteIndex = targetRows.length - 1; deleteIndex >= 0; deleteIndex--) {
+        sheet.deleteRow(targetRows[deleteIndex]);
+      }
     }
     SpreadsheetApp.flush();
 
@@ -11153,8 +11350,6 @@ function updateRequest(req) {
     var 할인유형 = req.할인유형 !== undefined ? req.할인유형 : origFirst[12];
     var 비고 = req.비고 !== undefined ? req.비고 : origFirst[16];
     var 추가요청 = req.추가요청 !== undefined ? req.추가요청 : origFirst[17];
-
-    var items = req.장비;
 
     // 삭제 후 삽입 시작 행 찾기 — items.length개의 "연속" 빈 행이 필요.
     // (_insertAndCheckRequest와 동일한 이유: 중간 갭에 연속 삽입하면 아래 활성 요청을 덮어씀)
@@ -11178,8 +11373,8 @@ function updateRequest(req) {
       startRow = 2;
     }
 
+    var replacementRows = [];
     for (var j = 0; j < items.length; j++) {
-      var row = startRow + j;
       // 수정창은 현재 선택된 세트 구성품을 모두 보낸다. I열의 세트 헤더와 Q열의
       // "[세트]..." 소속 마커를 같이 복원해야 재확인·등록 때 구성품이 단품으로
       // 풀리거나 세트마스터 기본 구성으로 되돌아가지 않는다.
@@ -11188,7 +11383,7 @@ function updateRequest(req) {
         ? String(items[j].비고 || "")
         : (j === 0 ? 비고 : "");
       var itemStatus = items[j].제외 === true ? "제외" : "";
-      var rowData = [
+      replacementRows.push([
         req.reqID,
         j === 0 ? 반출일 : "", j === 0 ? 반출시간 : "",
         j === 0 ? 반납일 : "", j === 0 ? 반납시간 : "",
@@ -11198,11 +11393,14 @@ function updateRequest(req) {
         j === 0 ? 할인유형 : "", "", itemStatus, "",
         itemNote,
         j === 0 ? 추가요청 : ""
-      ];
-      // 날짜/시간(B~E)은 텍스트로 고정 — 시트 타임존이 Asia/Seoul과 다르면
-    // 자동 변환된 직렬값이 읽기 시 16:00/1899-LMT 쓰레기가 되므로 원천 차단
-    sheet.getRange(row, 2, 1, 4).setNumberFormat("@");
-    sheet.getRange(row, 1, 1, 18).setValues([rowData]);
+      ]);
+    }
+    // 날짜/시간(B~E)은 텍스트로 고정하고 전체 요청을 한 번에 쓴다.
+    sheet.getRange(startRow, 2, items.length, 4).setNumberFormat("@");
+    sheet.getRange(startRow, 1, items.length, 18).setValues(replacementRows);
+    sheet.getRange(startRow, 1, 1, 18).setFontWeight("bold").setBackground("#E8F0FE");
+    if (items.length > 1) {
+      sheet.getRange(startRow + 1, 1, items.length - 1, 18).setFontWeight("normal").setBackground(null);
     }
     SpreadsheetApp.flush();
 
@@ -11215,35 +11413,81 @@ function updateRequest(req) {
     // 가용확인 재실행
     sheet.getRange(startRow, 8).setValue("확인");
     SpreadsheetApp.flush();
-    processByReqID(sheet, startRow);
 
     return { reqID: req.reqID, action: "수정", items: items.length, recheck: true };
   }
 
-  // 장비 변경 없이 날짜/시간/예약자명/연락처만 수정
+  // 장비 변경 없이 날짜/시간/예약자명/연락처만 수정. 전달됐다는 이유만으로 변경으로
+  // 취급하면 수정창이 항상 날짜 재확인을 돌린다. 실제 값이 달라진 셀만 한 번에 저장한다.
   var changed = [];
-  if (req.반출일) { sheet.getRange(firstRow, 2).setValue(req.반출일); changed.push("반출일"); }
-  if (req.반출시간 !== undefined) { sheet.getRange(firstRow, 3).setValue(req.반출시간); changed.push("반출시간"); }
-  if (req.반납일) { sheet.getRange(firstRow, 4).setValue(req.반납일); changed.push("반납일"); }
-  if (req.반납시간 !== undefined) { sheet.getRange(firstRow, 5).setValue(req.반납시간); changed.push("반납시간"); }
-  if (req.예약자명 !== undefined) { sheet.getRange(firstRow, 11).setValue(req.예약자명); changed.push("예약자명"); }
-  if (req.연락처 !== undefined) { sheet.getRange(firstRow, 12).setValue(req.연락처); changed.push("연락처"); }
-  if (req.할인유형 !== undefined) { sheet.getRange(firstRow, 13).setValue(req.할인유형); changed.push("할인유형"); }  // M열
-  if (req.추가요청 !== undefined) { sheet.getRange(firstRow, 18).setValue(_sanitizeConfirmRequestFreeText_(req.추가요청, 180)); changed.push("추가요청"); }
+  var firstValues = data[firstRow - 2].slice(0, 18);
+  function updateFieldIfChanged_(index, label, incoming, keyFn) {
+    if (incoming === undefined) return;
+    var current = firstValues[index];
+    var normalize = keyFn || function(v) { return String(v === null || v === undefined ? "" : v); };
+    if (normalize(current) === normalize(incoming)) return;
+    firstValues[index] = incoming;
+    changed.push(label);
+  }
+  updateFieldIfChanged_(1, "반출일", req.반출일, _confirmRequestDateKey_);
+  updateFieldIfChanged_(2, "반출시간", req.반출시간, _confirmRequestTimeKey_);
+  updateFieldIfChanged_(3, "반납일", req.반납일, _confirmRequestDateKey_);
+  updateFieldIfChanged_(4, "반납시간", req.반납시간, _confirmRequestTimeKey_);
+  updateFieldIfChanged_(10, "예약자명", req.예약자명);
+  updateFieldIfChanged_(11, "연락처", req.연락처);
+  updateFieldIfChanged_(12, "할인유형", req.할인유형); // M열
+  if (req.추가요청 !== undefined) {
+    updateFieldIfChanged_(17, "추가요청", _sanitizeConfirmRequestFreeText_(req.추가요청, 180));
+  }
 
-  // 날짜/시간 변경 시 가용확인 재실행
+  if (changed.length > 0) {
+    var dateChanged = changed.some(function(c) { return ["반출일","반출시간","반납일","반납시간"].includes(c); });
+    if (dateChanged) {
+      sheet.getRange(firstRow, 2, 1, 4).setNumberFormat("@");
+      sheet.getRange(firstRow, 2, 1, 4).setValues([[firstValues[1], firstValues[2], firstValues[3], firstValues[4]]]);
+    }
+    if (changed.some(function(c) { return ["예약자명","연락처","할인유형"].includes(c); })) {
+      sheet.getRange(firstRow, 11, 1, 3).setValues([[firstValues[10], firstValues[11], firstValues[12]]]);
+    }
+    if (changed.indexOf("추가요청") >= 0) sheet.getRange(firstRow, 18).setValue(firstValues[17]);
+  }
+
+  // 날짜/시간이 실제로 변경된 경우에만 가용확인 재실행
   var needRecheck = changed.some(function(c) { return ["반출일","반출시간","반납일","반납시간"].includes(c); });
   if (needRecheck) {
-    // 결과 초기화
+    // 결과 초기화 — 요청 행을 한 줄씩 지우지 않고 RangeList 한 번으로 처리한다.
+    var resultRanges = [];
     for (var t = 0; t < targetRows.length; t++) {
-      sheet.getRange(targetRows[t], 9, 1, 2).setValues([["", ""]]);
+      resultRanges.push("I" + targetRows[t] + ":J" + targetRows[t]);
     }
+    if (resultRanges.length) sheet.getRangeList(resultRanges).clearContent();
     sheet.getRange(firstRow, 8).setValue("확인");
-    SpreadsheetApp.flush();
-    processByReqID(sheet, firstRow);
   }
 
   return { reqID: req.reqID, action: "수정", changed: changed, recheck: needRecheck };
+}
+
+function updateRequest(req) {
+  if (!req || !req.reqID) throw new Error("reqID 필수");
+
+  // 확인요청 입력/세트전개가 사용하는 전용 UserLock과 같은 락을 써서 행 번호가
+  // 서로 밀리지 않게 한다. 반출·반납 카드의 ScriptLock과는 분리한다.
+  var mutationLock = LockService.getUserLock();
+  var mutationLocked = false;
+  var result;
+  try {
+    mutationLock.waitLock(10000);
+    mutationLocked = true;
+    result = _updateRequestUnderLock_(req);
+  } finally {
+    if (mutationLocked) mutationLock.releaseLock();
+  }
+
+  if (result && result.recheck) {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("확인요청");
+    processByReqID(sheet, req.reqID);
+  }
+  return result;
 }
 
 
@@ -11253,6 +11497,11 @@ function updateRequest(req) {
 function deleteRequest(reqID) {
   if (!reqID) throw new Error("reqID 필수");
 
+  var mutationLock = LockService.getUserLock();
+  var mutationLocked = false;
+  try {
+  mutationLock.waitLock(10000);
+  mutationLocked = true;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("확인요청");
   if (!sheet) throw new Error("확인요청 시트 없음");
@@ -11260,7 +11509,7 @@ function deleteRequest(reqID) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) throw new Error("데이터 없음");
 
-  var data = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  var data = sheet.getRange(2, 1, lastRow - 1, 16).getValues();
   var targetRows = [];
   for (var i = 0; i < data.length; i++) {
     if (String(data[i][0]).trim() === reqID) {
@@ -11268,6 +11517,7 @@ function deleteRequest(reqID) {
     }
   }
   if (targetRows.length === 0) throw new Error("요청ID를 찾을 수 없음: " + reqID);
+  _assertConfirmRequestEditableRows_(targetRows, data);
 
   // 아래부터 삭제
   for (var d = targetRows.length - 1; d >= 0; d--) {
@@ -11275,6 +11525,9 @@ function deleteRequest(reqID) {
   }
 
   return { reqID: reqID, action: "삭제", deletedRows: targetRows.length };
+  } finally {
+    if (mutationLocked) mutationLock.releaseLock();
+  }
 }
 
 /**
@@ -11359,18 +11612,34 @@ function deleteTrade(tradeId) {
 /**
  * 특정 행의 요청ID를 기준으로 같은 ID의 모든 행을 일괄 확인
  */
-function processByReqID(sheet, triggerRow) {
+function processByReqID(sheet, triggerRowOrReqID) {
   // 확인요청 전개끼리만 직렬화한다. 대시보드 카드의 짧은 ScriptLock 임계구역과
   // 분리해 가용확인 전체 시트 스캔/행 삽입이 현장 반출·반납을 막지 않게 한다.
   var lock = LockService.getUserLock();
   try {
     lock.waitLock(30000);
   } catch (e) {
-    sheet.getRange(triggerRow, 9).setValue("⏳ 확인대기");
-    return;
+    if (typeof triggerRowOrReqID === "number") {
+      sheet.getRange(triggerRowOrReqID, 9).setValue("⏳ 확인대기");
+    }
+    throw new Error("가용확인 대기시간을 초과했습니다. 저장 내용은 유지되며 다시 시도해야 합니다.");
   }
 
   try {
+  var triggerRow = triggerRowOrReqID;
+  if (typeof triggerRowOrReqID === "string") {
+    var targetReqID = String(triggerRowOrReqID).trim();
+    var lastRow = sheet.getLastRow();
+    var ids = lastRow >= 2 ? sheet.getRange(2, 1, lastRow - 1, 1).getValues() : [];
+    triggerRow = -1;
+    for (var i = 0; i < ids.length; i++) {
+      if (String(ids[i][0] || "").trim() === targetReqID) {
+        triggerRow = i + 2;
+        break;
+      }
+    }
+    if (triggerRow < 2) throw new Error("가용확인 요청ID를 찾을 수 없음: " + targetReqID);
+  }
   return _processByReqID(sheet, triggerRow);
   } finally {
     lock.releaseLock();
@@ -12677,6 +12946,11 @@ function recoverPendingRegistrations() {
  * @param {string} reqID - 요청 ID (RQ-YYMMDD-NNN)
  */
 function scheduleRegister(reqID) {
+  var confirmLock = LockService.getUserLock();
+  var confirmLocked = false;
+  try {
+  confirmLock.waitLock(10000);
+  confirmLocked = true;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("확인요청");
   if (!sheet) return { success: false, error: "확인요청 시트 없음" };
@@ -12698,6 +12972,11 @@ function scheduleRegister(reqID) {
 
   // O열에 큐 상태 표시 + 재시도 트리거 보장
   markRegisterQueued_(sheet, targetRow);
+  } finally {
+    if (confirmLocked) confirmLock.releaseLock();
+  }
+
+  // 큐 속성은 ScriptLock을 쓰므로 UserLock 해제 뒤 실행해 락 순서 역전을 막는다.
   enqueuePendingRegister_(reqID, 1000);
 
   return { success: true, message: "등록이 백그라운드에서 시작됩니다. 1~3분 후 완료됩니다.", reqID: reqID };
@@ -16255,7 +16534,6 @@ function parseWithClaude(text, imageBase64, imageMediaType) {
     return { error: "API 호출 실패: " + fetchErr.message };
   }
 }
-
 function changeRegisteredTradeDates(args) {
   args = args || {};
   var allowedKeys = {
