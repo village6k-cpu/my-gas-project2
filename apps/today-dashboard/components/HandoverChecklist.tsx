@@ -192,9 +192,17 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         </span>
 
         {e.onsite ? (
-          <button onClick={() => removeItem(t.tradeId, e.scheduleId)} className="tap shrink-0 px-1 text-ink-faint">✕</button>
+          <button
+            onClick={() => removeItem(t.tradeId, e.scheduleId)}
+            disabled={baselineLocked}
+            className="tap shrink-0 px-1 text-ink-faint disabled:pointer-events-none disabled:opacity-40"
+          >✕</button>
         ) : (
-          <button onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "excluded")} className={`tap shrink-0 rounded-md px-1.5 py-1 text-[11.5px] font-bold ${excluded ? "bg-attention-fg text-white" : "text-ink-faint ring-1 ring-line"}`}>제외</button>
+          <button
+            onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "excluded")}
+            disabled={baselineLocked}
+            className={`tap shrink-0 rounded-md px-1.5 py-1 text-[11.5px] font-bold disabled:pointer-events-none disabled:opacity-40 ${excluded ? "bg-attention-fg text-white" : "text-ink-faint ring-1 ring-line"}`}
+          >제외</button>
         )}
       </div>
 

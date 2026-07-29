@@ -2564,7 +2564,8 @@ async function flushItemCheckWritesForTrade(tradeId: string): Promise<void> {
 // ── 품목별 반출/반납 상태 ───────────────────────────────────────
 export function setItemCheckout(tradeId: string, scheduleId: string, next: CheckoutState) {
   if (activeTradeTransitions.has(tradeId)) {
-    showTransientError("⚠️ 완료 상태를 확정 중입니다. 저장이 끝난 뒤 품목을 다시 눌러주세요");
+    // 반출완료는 화면에 즉시 반영되고 품목 버튼도 같은 렌더에서 잠긴다. 렌더 직전의
+    // 오래된 클릭 이벤트가 도착해도 다른 화면까지 덮는 전역 오류 토스트는 띄우지 않는다.
     return;
   }
   const currentTrade = state.trades.find((t) => t.tradeId === tradeId);

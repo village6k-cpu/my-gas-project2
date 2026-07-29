@@ -134,6 +134,22 @@ test("품목 체크 원장 쓰기는 재시도 큐를 거친다 (잠금 경합 �
   assert.match(queue, /reconcileItemCheckCanonical/, "최종 실패의 낙관 상태는 품목 정본으로 자동 복구해야 한다");
 });
 
+test("반출완료 직후 품목 버튼은 조용히 잠기고 완료 확정 경고를 전역 토스트로 띄우지 않는다", () => {
+  const store = read("lib/data/store.ts");
+  const checklist = read("components/HandoverChecklist.tsx");
+  const checkout = section(store, "export function setItemCheckout", "\nexport async function setItemName");
+  assert.match(
+    checklist,
+    /onClick=\{\(\) => setItemCheckout\(t\.tradeId, e\.scheduleId, "excluded"\)\}[\s\S]{0,180}disabled=\{baselineLocked\}/,
+    "반출완료가 즉시 표시된 뒤에는 제외 버튼도 체크 버튼과 똑같이 잠겨야 한다",
+  );
+  assert.doesNotMatch(
+    checkout,
+    /완료 상태를 확정 중입니다\. 저장이 끝난 뒤 품목을 다시 눌러주세요/,
+    "이미 잠긴 품목 클릭을 전역 빨간 토스트로 다시 알리면 다른 화면까지 방해한다",
+  );
+});
+
 test("시각적 저장 토스트는 실제 거래 잠금을 해제하지 않고, 실제 잠금은 토큰별로 끝난다", () => {
   const store = read("lib/data/store.ts");
   const flash = section(store, "function flashSave", "\nfunction showTransientError");
