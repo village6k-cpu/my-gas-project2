@@ -207,10 +207,11 @@ test('수량·반납 상세은 네트워크 실패에도 사용자 목표를 보
     '재오픈 일시 실패도 현재 세션에서 자동 재개해야 한다');
 
   const checkout = section(store, 'export function setItemCheckout', '\nexport async function setItemName');
-  const excludeGuardAt = checkout.indexOf('plannedFinal === "excluded" && (hasTradePending(tradeId)');
-  const optimisticAt = checkout.indexOf('mutateTrade(tradeId');
-  assert.ok(excludeGuardAt >= 0 && optimisticAt > excludeGuardAt,
-    '앞선 체크가 남은 상태의 제외는 로컬 excluded 선반영 전에 막아야 한다');
+  assert.doesNotMatch(checkout, /plannedFinal[\s\S]*hasTradePending/,
+    '앞선 저장이 있다는 이유로 장비 제외 클릭을 버리고 다시 누르게 하면 안 된다');
+  const remove = section(store, 'function removeEquipmentAndRegenerateContract', '\nfunction isSheetBackedScheduleId');
+  assert.match(remove, /putRemoveEquipmentOutbox_\(entry\)[\s\S]*equipments\.filter/,
+    '장비 제외는 의도를 내구 기록한 뒤 화면에서 즉시 제거하고 거래별 원장 큐로 수렴해야 한다');
 });
 
 test('오래된 오프라인 반납수량은 다른 직원의 최신 반납완료를 자동 재오픈하지 않는다', () => {

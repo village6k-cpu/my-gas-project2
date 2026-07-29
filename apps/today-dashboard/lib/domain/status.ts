@@ -431,7 +431,7 @@ export function cardDone(t: Trade, date: string, tab: TabKey): boolean {
   const p = phaseForDate(t, date);
   if (p === "checkout") return t.setupDone;
   if (p === "checkin") return t.returnDone && returnCompletionBlockers(t).length === 0;
-  if (p === "both") return t.setupDone && t.returnDone && returnCompletionBlockers(t).length === 0;
+  if (p === "both") return t.returnDone && returnCompletionBlockers(t).length === 0;
   return t.returnDone && returnCompletionBlockers(t).length === 0;
 }
 

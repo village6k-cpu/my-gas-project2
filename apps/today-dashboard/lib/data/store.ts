@@ -1443,7 +1443,80 @@ function mapItem(t: Trade, scheduleId: string, fn: (e: Trade["equipments"][numbe
   return { ...t, equipments: t.equipments.map((e) => (e.scheduleId === scheduleId ? fn(e) : e)) };
 }
 
-const itemMetadataPatchTargets: Record<string, Record<string, string | number | boolean | null> | undefined> = {};
+type ItemMetadataPatch = Record<string, string | number | boolean | null>;
+type ItemMetadataOutboxEntry = {
+  tradeId: string;
+  scheduleId: string;
+  patch: ItemMetadataPatch;
+  createdAt: number;
+};
+type ItemMetadataOutbox = Record<string, ItemMetadataOutboxEntry>;
+
+const ITEM_METADATA_OUTBOX_KEY = "heybilly:item-metadata-outbox:v1";
+
+function readItemMetadataOutbox_(): ItemMetadataOutbox {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(ITEM_METADATA_OUTBOX_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const outbox: ItemMetadataOutbox = {};
+    for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const entry = raw as Partial<ItemMetadataOutboxEntry>;
+      const tradeId = String(entry.tradeId || "").trim();
+      const scheduleId = String(entry.scheduleId || "").trim();
+      const patch = entry.patch && typeof entry.patch === "object" && !Array.isArray(entry.patch)
+        ? entry.patch as ItemMetadataPatch
+        : {};
+      if (!tradeId || !scheduleId || !Object.keys(patch).length) continue;
+      outbox[key] = { tradeId, scheduleId, patch, createdAt: Math.max(0, Number(entry.createdAt) || 0) };
+    }
+    return outbox;
+  } catch {
+    return {};
+  }
+}
+
+function writeItemMetadataOutbox_(outbox: ItemMetadataOutbox): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (Object.keys(outbox).length) window.localStorage.setItem(ITEM_METADATA_OUTBOX_KEY, JSON.stringify(outbox));
+    else window.localStorage.removeItem(ITEM_METADATA_OUTBOX_KEY);
+  } catch {
+    // localStorage가 막혀도 현재 온라인 저장 경로는 계속 동작한다.
+  }
+}
+
+function putItemMetadataOutboxPatch_(tradeId: string, scheduleId: string, patch: ItemMetadataPatch): void {
+  if (!Object.keys(patch).length) return;
+  const key = `${tradeId}|${scheduleId}`;
+  const outbox = readItemMetadataOutbox_();
+  const previous = outbox[key];
+  outbox[key] = {
+    tradeId,
+    scheduleId,
+    patch: { ...(previous?.patch ?? {}), ...patch },
+    createdAt: previous?.createdAt || Date.now(),
+  };
+  writeItemMetadataOutbox_(outbox);
+}
+
+/** 전송 중 더 최신 입력이 들어왔으면 성공한 필드만 제거하고 최신 목표값은 보존한다. */
+function acknowledgeItemMetadataOutboxPatch_(tradeId: string, scheduleId: string, saved: ItemMetadataPatch): void {
+  const key = `${tradeId}|${scheduleId}`;
+  const outbox = readItemMetadataOutbox_();
+  const current = outbox[key];
+  if (!current) return;
+  const remaining = { ...current.patch };
+  for (const [field, value] of Object.entries(saved)) {
+    if (Object.is(remaining[field], value)) delete remaining[field];
+  }
+  if (Object.keys(remaining).length) outbox[key] = { ...current, patch: remaining };
+  else delete outbox[key];
+  writeItemMetadataOutbox_(outbox);
+}
+
+const itemMetadataPatchTargets: Record<string, ItemMetadataPatch | undefined> = {};
 const itemMetadataPatchInFlight: Record<string, Promise<void> | undefined> = {};
 const itemMetadataPatchRetryTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
 const itemMetadataPatchRetryAttempts: Record<string, number | undefined> = {};
@@ -1457,11 +1530,12 @@ function hasItemMetadataPatchPending_(tradeId: string, scheduleId: string): bool
 function queueItemMetadataPatch(
   tradeId: string,
   scheduleId: string,
-  patch: Record<string, string | number | boolean | null>,
+  patch: ItemMetadataPatch,
 ): void {
   if (!isSupabase) return;
   const key = `${tradeId}|${scheduleId}`;
   const isNewUserPatch = Object.keys(patch).length > 0;
+  if (isNewUserPatch) putItemMetadataOutboxPatch_(tradeId, scheduleId, patch);
   itemMetadataPatchTargets[key] = { ...(itemMetadataPatchTargets[key] ?? {}), ...patch };
   if (isNewUserPatch) itemMetadataPatchRetryAttempts[key] = 0;
   if (itemMetadataPatchRetryTimers[key]) {
@@ -1475,11 +1549,13 @@ function queueItemMetadataPatch(
       delete itemMetadataPatchTargets[key];
       try {
         await persistScheduleItemPatch(tradeId, scheduleId, target);
+        acknowledgeItemMetadataOutboxPatch_(tradeId, scheduleId, target);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (/품목 저장 대상이 없습니다/.test(message)) {
           // 다른 직원의 장비 제외가 먼저 끝난 terminal 상태다. 삭제된 행 patch를 영구
           // 재시도하면 그 거래의 realtime 수렴과 다음 카드 동작이 끝없이 막힌다.
+          acknowledgeItemMetadataOutboxPatch_(tradeId, scheduleId, target);
           delete itemMetadataPatchTargets[key];
           delete itemMetadataPatchRetryAttempts[key];
           showTransientError("⚠️ 이미 제외된 품목의 보조 입력은 저장하지 않았습니다");
@@ -1508,6 +1584,18 @@ function queueItemMetadataPatch(
       } else delete itemMetadataPatchRetryAttempts[key];
     }
     maybeResumeRealtimeFlush();
+  });
+}
+
+function replayItemMetadataOutbox_(initialDelay = 0): void {
+  if (typeof window === "undefined" || !isSupabase) return;
+  Object.values(readItemMetadataOutbox_()).forEach((entry, index) => {
+    const key = `${entry.tradeId}|${entry.scheduleId}`;
+    itemMetadataPatchTargets[key] = { ...entry.patch, ...(itemMetadataPatchTargets[key] ?? {}) };
+    window.setTimeout(
+      () => queueItemMetadataPatch(entry.tradeId, entry.scheduleId, {}),
+      initialDelay + index * 120,
+    );
   });
 }
 
@@ -1761,7 +1849,7 @@ function replayRemoveEquipmentOutbox_(initialDelay = 0): void {
 }
 
 function removeEquipmentAndRegenerateContract(tradeId: string, item: EquipmentItem) {
-  if (activeTradeTransitions.has(tradeId) || hasTradePending(tradeId) || hasItemMetadataPatchPending_(tradeId, item.scheduleId)) {
+  if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) {
     showTransientError("⚠️ 이 거래의 다른 변경을 저장 중입니다. 잠시 후 다시 시도해주세요");
     return;
   }
@@ -1990,7 +2078,12 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
   if (!current) return { ok: false, blockers: [], error: "거래를 찾을 수 없습니다" };
 
   const on = !current.returnDone;
-  const force = !!opts?.force;
+  // 반출완료를 누르지 못했거나 과거 데이터라 taken_qty 기준선이 없는 거래도 현장에서
+  // 바로 반납완료할 수 있어야 한다. 기준선이 있는 정상 거래의 수량 검증은 그대로 유지한다.
+  const hasCheckoutBaseline = current.equipments.some(
+    (item) => Number(item.takenQty ?? 0) > 0 || item.actualTakenQty != null,
+  );
+  const force = !!opts?.force || (on && !hasCheckoutBaseline);
   const blockers = on && !force ? returnCompletionBlockers(current) : [];
   if (blockers.length > 0) {
     // 강제 차단하지 않는다 — 호출부(카드)가 미확인 내역을 보여주고 작업자 확인 후
@@ -2486,14 +2579,6 @@ export function setItemCheckout(tradeId: string, scheduleId: string, next: Check
         kind: "error",
       },
     });
-    return;
-  }
-  const currentItem = currentTrade?.equipments.find((item) => item.scheduleId === scheduleId);
-  const plannedFinal = currentItem?.checkoutState === next ? "pending" : next;
-  if (plannedFinal === "excluded" && (hasTradePending(tradeId) || hasItemMetadataPatchPending_(tradeId, scheduleId))) {
-    // 제외는 스케줄 행 삭제까지 하나의 원장 명령이다. 앞선 체크/수량 저장이 남아 있으면
-    // 로컬만 excluded로 바꾸지 않고, 그 명령이 끝난 뒤 다시 누르게 한다.
-    showTransientError("⚠️ 이 거래의 앞선 품목 변경을 저장 중입니다. 저장 후 다시 제외해주세요");
     return;
   }
   let final: CheckoutState | undefined;
@@ -3129,6 +3214,7 @@ function replayDurableMutationOutboxes(): void {
   });
   // 완료 버튼도 사용자 의도를 영구 보존한다. 위 품목/수량 outbox를 먼저 arm해 완료가
   // 마지막 품목 저장을 앞질러 기준선을 고정하지 않게 한다.
+  replayItemMetadataOutbox_(nextReplayDelay());
   replayCompletionMutationOutboxes_(nextReplayDelay());
   replayRemoveEquipmentOutbox_(nextReplayDelay());
 }
@@ -3174,6 +3260,8 @@ function ensureDurableMutationOnlineResume_(): void {
       if (separator > 0) itemCheckTrades.add(key.slice(0, separator));
     });
     itemCheckTrades.forEach((tradeId) => armItemCheckBatch(tradeId, 0));
+
+    replayItemMetadataOutbox_();
 
     Object.keys(completionMutationReplayTimers).forEach((key) => {
       clearTimeout(completionMutationReplayTimers[key]);

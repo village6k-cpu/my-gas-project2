@@ -146,7 +146,7 @@ test("시각적 저장 토스트는 실제 거래 잠금을 해제하지 않고,
   assert.match(lifecycle, /if \(tokens\.size === 0\)/, "다른 작업 토큰이 남아 있으면 카드 잠금을 유지해야 한다");
 });
 
-test("모든 카드 GAS 원장 명령은 브라우저 탭 전체에서 한 줄로 보내 서버 전역 잠금과 맞춘다", () => {
+test("같은 거래 GAS 원장 명령만 순서대로 보내고 다른 거래는 서로 막지 않는다", () => {
   const writeback = read("lib/data/writeback.ts");
   assert.match(writeback, /const gasMutationTails = new Map<string, Promise<void>>\(\)/);
   assert.match(writeback, /function mutationTradeKey/);
@@ -155,8 +155,48 @@ test("모든 카드 GAS 원장 명령은 브라우저 탭 전체에서 한 줄�
   const enqueue = section(writeback, "function enqueueGasMutation", "\nasync function executeGasMutation");
   assert.match(enqueue, /previous[\s\S]*\.then\(task\)/, "앞 명령 완료 뒤 다음 명령을 시작해야 한다");
   assert.match(enqueue, /gasMutationTails\.set\(tradeKey, tail\)/);
-  assert.match(enqueue, /navigator\.locks\.request/, "같은 브라우저의 여러 탭도 Web Lock으로 한 줄에 세워야 한다");
+  assert.doesNotMatch(
+    enqueue,
+    /navigator\.locks\.request|GAS_LEDGER_WEB_LOCK/,
+    "느린 거래 하나가 다른 카드·다른 탭의 저장까지 브라우저에서 막으면 안 된다",
+  );
   assert.match(writeback, /jitterRetryDelay/, "여러 직원 기기가 같은 시각에 재시도하지 않게 지터가 있어야 한다");
+});
+
+test("반출을 누르지 않은 거래도 반납 탭과 같은 날 전체 탭에서 바로 반납 처리할 수 있다", () => {
+  const store = read("lib/data/store.ts");
+  const card = read("components/ScheduleCard.tsx");
+  const status = read("lib/domain/status.ts");
+  const ret = section(store, "export async function toggleReturn", "\n/** 응답 유실된 반납완료");
+  assert.match(ret, /const hasCheckoutBaseline =/);
+  assert.match(ret, /force = !!opts\?\.force \|\| \(on && !hasCheckoutBaseline\)/,
+    "반출 기준선이 없는 거래는 작업자 반납 의도를 서버 force 경로로 보내야 한다");
+  assert.match(card, /if \(p === "both"\) return "checkin"/,
+    "같은 날 반출·반납 건의 전체 탭은 setupDone 없이 반납 단계여야 한다");
+  assert.match(status, /if \(p === "both"\) return t\.returnDone && returnCompletionBlockers\(t\)\.length === 0/,
+    "같은 날 카드 완료 여부도 반출완료와 결합하면 안 된다");
+});
+
+test("장비 제외는 앞선 품목 저장 때문에 클릭을 버리지 않고 거래별 원장 큐에 이어 붙인다", () => {
+  const store = read("lib/data/store.ts");
+  const checkout = section(store, "export function setItemCheckout", "\nexport async function setItemName");
+  const remove = section(store, "function removeEquipmentAndRegenerateContract", "\nfunction isSheetBackedScheduleId");
+  assert.doesNotMatch(checkout, /plannedFinal[\s\S]*hasTradePending/, "앞선 저장이 있다는 이유로 제외 클릭을 버리면 안 된다");
+  assert.doesNotMatch(remove, /hasTradePending\(tradeId\)|hasItemMetadataPatchPending_/, "제외 명령은 앞선 거래별 쓰기 뒤에 자동으로 이어져야 한다");
+  assert.match(remove, /putRemoveEquipmentOutbox_\(entry\)[\s\S]*equipments\.filter/,
+    "제외 의도를 먼저 영구 보존하고 화면에서 즉시 제거해야 한다");
+});
+
+test("품목 특이사항은 로컬 영구 outbox에 먼저 남기고 성공 확인 뒤에만 지운다", () => {
+  const store = read("lib/data/store.ts");
+  const metadata = section(store, "const ITEM_METADATA_OUTBOX_KEY", "\nfunction unwrapContractMutation");
+  assert.match(metadata, /localStorage\.setItem\(ITEM_METADATA_OUTBOX_KEY/);
+  assert.match(metadata, /putItemMetadataOutboxPatch_/);
+  assert.match(metadata, /await persistScheduleItemPatch[\s\S]*acknowledgeItemMetadataOutboxPatch_/,
+    "Supabase 성공 전에는 특이사항 outbox를 지우면 안 된다");
+  const replay = section(store, "function replayDurableMutationOutboxes", "\nlet durableMutationOnlineResumeRegistered");
+  assert.match(replay, /replayItemMetadataOutbox_/,
+    "새로고침·앱 재시작 뒤에도 미전송 특이사항을 자동 복구해야 한다");
 });
 
 test("사용자 대기형 변이는 하위·상위 재시도를 중첩하지 않는다", () => {

@@ -29,11 +29,11 @@ export function isGasOutcomeUnknownError(error: unknown): boolean {
   return error instanceof GasMutationError && error.outcomeUnknown;
 }
 
-// GAS/Sheets는 전역 잠금을 공유한다. 거래별 tail로 같은 거래의 클릭 순서를 보존하고,
-// Web Lock으로 같은 브라우저의 다른 거래·다른 탭까지 서버 전역 잠금과 같은 한 줄에 세운다.
+// 같은 거래의 클릭 순서만 거래별 tail로 보존한다. 서로 다른 거래까지 브라우저 전역
+// Web Lock으로 묶으면 느린 계약 작업 하나가 모든 카드·탭의 완료/메모를 막는다.
+// 서버의 짧은 ScriptLock 경합은 아래 bounded jitter retry가 흡수한다.
 const gasMutationTails = new Map<string, Promise<void>>();
 const GAS_BUSY_RETRY_DELAYS_MS = [300, 800, 1_600, 3_200];
-const GAS_LEDGER_WEB_LOCK = "heybilly:gas-ledger-mutations:v1";
 
 function jitterRetryDelay(baseMs: number): number {
   // 여러 직원 기기가 같은 BUSY 응답 뒤 같은 시각에 재충돌하는 동기 재시도를 흩뜨린다.
@@ -51,16 +51,8 @@ function mutationTradeKey(action: string, params: Record<string, GasParam>): str
   return match ? match[1] : `action:${action}`;
 }
 
-function enqueueGasMutation<T>(tradeKey: string | null, rawTask: () => Promise<T>): Promise<T> {
-  if (!tradeKey) return rawTask();
-  const task = async (): Promise<T> => {
-    if (typeof navigator !== "undefined" && navigator.locks?.request) {
-      // GAS는 ScriptLock 하나를 공유한다. 같은 브라우저의 여러 탭도 원장 쓰기를 한 줄로 보내
-      // 앱 스스로 BUSY를 만들지 않게 한다. 다른 브라우저/기기는 아래 지터 재시도로 충돌을 흩는다.
-      return await navigator.locks.request(GAS_LEDGER_WEB_LOCK, { mode: "exclusive" }, async () => rawTask());
-    }
-    return await rawTask();
-  };
+function enqueueGasMutation<T>(tradeKey: string | null, task: () => Promise<T>): Promise<T> {
+  if (!tradeKey) return task();
   const previous = gasMutationTails.get(tradeKey) ?? Promise.resolve();
   const run = previous.then(task);
   // tail은 항상 resolve시켜 앞 명령 실패가 다음 명령까지 영구 차단하지 않게 한다.

@@ -27,7 +27,9 @@ function displayPhase(t: Trade, date: string, tab: TabKey): "checkout" | "checki
   const p = phaseForDate(t, date);
   if (p === "checkout") return "checkout";
   if (p === "checkin") return "checkin";
-  if (p === "both") return t.setupDone ? "checkin" : "checkout";
+  // 같은 날 반출·반납 건도 전체 탭에서는 반납 카드로 다룬다. 반출 처리가 필요하면
+  // 반출 탭에서 할 수 있고, 반출완료 여부가 반납완료 진입 조건이 되어서는 안 된다.
+  if (p === "both") return "checkin";
   // 당일 반출/반납이 아님(다일 대여·지연 반납 등): 이미 나갔으면 반납 단계로
   return new Date(t.checkoutAt) <= new Date(`${date}T23:59:59`) ? "checkin" : "checkout";
 }
@@ -124,7 +126,7 @@ export const ScheduleCard = memo(function ScheduleCard({
                 {overdue && <span className="rounded-md bg-attention-fg px-1.5 py-0.5 text-[11px] font-bold text-white">반납 지연</span>}
               </>
             )}
-            {saving && <span className="text-[11px] font-medium text-brand-600">저장 중…</span>}
+            {saving && <span className="text-[11px] font-medium text-brand-600">백그라운드 동기화</span>}
           </div>
           <div className="mt-0.5 flex items-center gap-1.5 text-[14px]">
             <button
@@ -178,10 +180,10 @@ export const ScheduleCard = memo(function ScheduleCard({
             <Check className="h-3.5 w-3.5" />
           </span>
           {isCheckout
-            ? saving ? done ? "반출 완료됨 · 저장 확인 중…" : "반출 처리 중…" : done ? "반출 완료됨" : "반출 완료"
-            : saving ? "반납 처리 중…"
-            : invalidClosedReturn ? "잘못 닫힌 카드 다시 열기"
+            ? done ? "반출 완료됨" : saving ? "상태 변경 중…" : "반출 완료"
             : done ? "반납 완료됨"
+            : saving ? "상태 변경 중…"
+            : invalidClosedReturn ? "잘못 닫힌 카드 다시 열기"
             : returnBlockers.length ? "수량 확인 후 반납완료" : "반납 완료"}
         </button>
         <button
