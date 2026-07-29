@@ -14,6 +14,16 @@ function equipmentActualTakenQty(item: Trade["equipments"][number]): number {
   return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
 }
 
+function timelineSetKey(value?: string | null): string {
+  return String(value ?? "").normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function isTimelineSetComponent(item: Trade["equipments"][number]): boolean {
+  if (item.isComponent) return true;
+  const setKey = timelineSetKey(item.setName);
+  return !!setKey && setKey !== timelineSetKey(item.name);
+}
+
 export type GroupMode = "set" | "customer" | "status";
 export type StatusKey = "대기" | "반출중" | "반납완료" | "취소" | "기타";
 
@@ -82,7 +92,9 @@ export function buildItems(trades: Trade[]): TLItem[] {
   for (const t of trades) {
     if (t.contractStatus === "취소") continue; // 취소 거래는 점유/충돌 계산에서 제외
     for (const e of t.equipments) {
-      if (e.isComponent) continue; // 세트 구성품은 세트 막대에 포함
+      // 오래된 Supabase 행은 setName/name 구조는 맞아도 isComponent=false일 수 있다.
+      // 구성품은 세트 대표 막대에 포함되므로 별도 장비 막대로 만들지 않는다.
+      if (isTimelineSetComponent(e)) continue;
       if (e.checkoutState === "excluded") continue;
       const co = new Date(t.checkoutAt).getTime() + (e.startShiftDays ?? 0) * DAY;
       const ro = new Date(t.returnAt).getTime() + (e.endShiftDays ?? 0) * DAY;

@@ -55,6 +55,16 @@ export function dedupeOnsiteItems(items: EquipmentItem[]): EquipmentItem[] {
   return out;
 }
 
+function scheduleSetKey(value: unknown): string {
+  return String(value ?? "").normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+export function isSetComponentRow(setName: unknown, name: unknown, explicitComponent?: boolean): boolean {
+  if (explicitComponent) return true;
+  const setKey = scheduleSetKey(setName);
+  return !!setKey && setKey !== scheduleSetKey(name);
+}
+
 export function itemFromRow(r: any): EquipmentItem {
   return {
     scheduleId: r.onsite ? canonicalOnsiteScheduleId(r.schedule_id, r.trade_id) : r.schedule_id,
@@ -66,7 +76,9 @@ export function itemFromRow(r: any): EquipmentItem {
     actualSource: r.actual_source ?? undefined,
     setName: r.set_name ?? undefined,
     isSetHeader: r.is_set_header || undefined,
-    isComponent: r.is_component || undefined,
+    // 과거 동기화 데이터는 C/D 구조는 맞아도 is_component=false로 저장된 행이 있다.
+    // 스케줄상세의 정본 규칙(C 세트명 !== D 장비명)을 함께 써야 구성품이 단독 장비로 부활하지 않는다.
+    isComponent: isSetComponentRow(r.set_name, r.name, r.is_component) || undefined,
     emphasize: r.emphasize || undefined,
     category: r.category ?? undefined,
     offCatalog: r.off_catalog || undefined,
@@ -95,7 +107,7 @@ export function itemToRow(e: EquipmentItem, tradeId: string, sort: number): any 
     actual_source: e.actualSource ?? null,
     set_name: e.setName ?? null,
     is_set_header: !!e.isSetHeader,
-    is_component: !!e.isComponent,
+    is_component: isSetComponentRow(e.setName, e.name, e.isComponent),
     emphasize: !!e.emphasize,
     category: e.category ?? null,
     off_catalog: !!e.offCatalog,
