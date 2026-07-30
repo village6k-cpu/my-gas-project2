@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { memo, useCallback, useEffect, useState, type ComponentType } from "react";
 import { SideRail } from "@/components/SideRail";
 import { BottomTabBar } from "@/components/BottomTabBar";
+import { PhotoQueueBadge } from "@/components/PhotoQueueBadge";
 import type { NavKey } from "@/components/navConfig";
 
 function PaneLoading({ label }: { label: string }) {
@@ -127,6 +128,8 @@ export function AppShell({ initial = "today" }: { initial?: NavKey }) {
         </aside>
       )}
       <BottomTabBar view={view} onNav={handleNav} />
+      {/* 사진 업로드 전역 배지 — 실패 잡이 화면 윈도우 밖 거래여도 어느 탭에서든 보인다 */}
+      <PhotoQueueBadge />
     </div>
   );
 }

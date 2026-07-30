@@ -10086,6 +10086,10 @@ function handleScheduleEdit(e) {
       // API에서 이미 등록 처리한 경우 onEdit 이중 호출 방지
       var oVal = sheet.getRange(row, 15).getValue();
       if (String(oVal).indexOf("등록완료") >= 0) return;
+      // 다중 시트 쓰기 도중 하드킬돼도 복구 스윕이 집을 수 있게, 실행 전에
+      // 내구 마커(등록대기)와 백업 트리거를 먼저 남긴다 (scheduleRegister와 동일 원칙).
+      markRegisterQueued_(sheet, row);
+      try { enqueuePendingRegister_(String(sheet.getRange(row, 1).getValue() || "").trim(), 30000); } catch (queueErr) {}
       registerByReqID(sheet, row);
     } else if (val === "추가") {
       addEquipmentToContract(sheet, row);
@@ -10100,6 +10104,12 @@ function handleScheduleEdit(e) {
       sheet.getRange(row, 15).setValue('보류');
       sheet.getRange(row, 15).setBackground('#FFEB9C');
     }
+  }
+
+  // 시트 직접 편집도 확인요청 목록/카드 상태를 바꾼다 — API 경로처럼 60초 목록 캐시를
+  // 즉시 비워 헤이빌리 확인요청 화면이 낡은 O열 상태를 최대 1분 더 보여주지 않게 한다.
+  if (col === 8 || col === 14) {
+    if (typeof invalidateConfirmListCache_ === "function") invalidateConfirmListCache_();
   }
 }
 
@@ -15258,7 +15268,11 @@ function autoClearRequests() {
       orphanContacts++;
     }
   }
-  if (cleared > 0 || orphanContacts > 0) SpreadsheetApp.flush();
+  if (cleared > 0 || orphanContacts > 0) {
+    SpreadsheetApp.flush();
+    // 자동 정리로 목록 구성이 바뀌었다 — 60초 목록 캐시 무효화
+    if (typeof invalidateConfirmListCache_ === "function") invalidateConfirmListCache_();
+  }
   return { cleared: cleared, requests: doneReqIDs.size, orphanContacts: orphanContacts };
 }
 

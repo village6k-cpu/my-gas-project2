@@ -37,6 +37,34 @@ const RETRY_DELAYS_MS = [3_000, 8_000, 20_000, 60_000];
 let handlers: PhotoUploadHandlers | null = null;
 const jobs = new Map<string, PhotoUploadJob>();
 const nextAttemptAt = new Map<string, number>();
+
+// 큐 변화(추가/성공/실패/재시도/폐기/부활)를 UI 배지에 알린다 — 거래가 화면 윈도우
+// 밖으로 나가도 실패 잡이 보이도록 전역 요약을 구독할 수 있게 한다.
+const queueChangeListeners = new Set<() => void>();
+function notifyQueueChange(): void {
+  queueChangeListeners.forEach((listener) => {
+    try { listener(); } catch { /* listener 오류가 큐를 멈추면 안 된다 */ }
+  });
+}
+export function onPhotoQueueChange(listener: () => void): () => void {
+  queueChangeListeners.add(listener);
+  return () => queueChangeListeners.delete(listener);
+}
+export function listPhotoUploadJobs(): PhotoUploadJob[] {
+  return Array.from(jobs.values()).sort((a, b) => a.createdAt - b.createdAt);
+}
+export function isPhotoUploadJobFailed(job: PhotoUploadJob): boolean {
+  return job.permanent === true || job.attempts >= MAX_ATTEMPTS;
+}
+export function snapshotPhotoQueueSummary(): { uploading: number; failed: number } {
+  let uploading = 0;
+  let failed = 0;
+  for (const job of jobs.values()) {
+    if (isPhotoUploadJobFailed(job)) failed += 1;
+    else uploading += 1;
+  }
+  return { uploading, failed };
+}
 let processing = false;
 let wakeTimer: ReturnType<typeof setTimeout> | null = null;
 /** 현재 예약된 wake 타이머의 발화 시각 — 더 이른 재시도가 들어오면 선점(clearTimeout) 판단용 */
@@ -155,6 +183,7 @@ async function processQueue(): Promise<void> {
         nextAttemptAt.delete(job.queueId);
         await idbDelete(job.queueId);
         handlers.onSuccess(job, response);
+        notifyQueueChange();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const permanent = Boolean((error as { permanent?: boolean } | null)?.permanent);
@@ -165,6 +194,7 @@ async function processQueue(): Promise<void> {
           nextAttemptAt.set(job.queueId, Date.now() + 60_000);
           await idbWrite(job);
           handlers.onFailure(job, message, true);
+          notifyQueueChange();
           continue;
         }
         if (permanent) job.permanent = true;
@@ -181,6 +211,7 @@ async function processQueue(): Promise<void> {
           await idbWrite(job);
         }
         handlers.onFailure(job, message, willRetry);
+        notifyQueueChange();
       }
     }
   } finally {
@@ -198,6 +229,7 @@ export function configurePhotoUploadQueue(next: PhotoUploadHandlers): void {
 export async function enqueuePhotoUpload(job: PhotoUploadJob): Promise<void> {
   jobs.set(job.queueId, job);
   await idbWrite(job);
+  notifyQueueChange();
   void processQueue();
 }
 
@@ -216,6 +248,7 @@ export async function resumePhotoUploads(): Promise<PhotoUploadJob[]> {
     }
     jobs.set(job.queueId, job);
   }
+  notifyQueueChange();
   void processQueue();
   return Array.from(jobs.values());
 }
@@ -227,6 +260,7 @@ export function retryPhotoUpload(queueId: string): void {
   job.lastError = undefined;
   nextAttemptAt.delete(queueId);
   void idbWrite(job);
+  notifyQueueChange();
   void processQueue();
 }
 
@@ -234,6 +268,7 @@ export async function discardPhotoUpload(queueId: string): Promise<void> {
   jobs.delete(queueId);
   nextAttemptAt.delete(queueId);
   await idbDelete(queueId);
+  notifyQueueChange();
 }
 
 export function pendingPhotoUploadCount(): number {
@@ -254,6 +289,7 @@ if (typeof window !== "undefined") {
       }
       nextAttemptAt.set(job.queueId, now);
     }
+    notifyQueueChange();
     void processQueue();
   });
 }

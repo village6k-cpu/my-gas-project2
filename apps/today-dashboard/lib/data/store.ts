@@ -17,7 +17,7 @@ import type {
 } from "../domain/types";
 import { equipmentActualTakenQty } from "../domain/equipmentActual";
 import { buildSeed } from "./seed";
-import { isSupabase } from "../supabase/client";
+import { isSupabase, supabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
 import { isCheckoutBaselineLocked, returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
 import {
@@ -44,8 +44,12 @@ import {
   configurePhotoUploadQueue,
   discardPhotoUpload,
   enqueuePhotoUpload,
+  isPhotoUploadJobFailed,
+  listPhotoUploadJobs,
+  onPhotoQueueChange,
   resumePhotoUploads,
   retryPhotoUpload,
+  snapshotPhotoQueueSummary,
   type PhotoUploadJob,
 } from "./photoUploadQueue";
 import { pollTimelineChanges, repairDashboardDateDetails, repairDashboardSearchResults, resetRepairBackoff } from "./sync";
@@ -59,6 +63,8 @@ interface State {
   savingTrades: Record<string, boolean>;
   remoteStatus: RemoteStatus;
   toast: { id: number; text: string; kind: "saving" | "saved" | "error" } | null;
+  /** 사진 업로드 큐 전역 요약 — 화면 윈도우 밖 거래의 실패 잡도 배지로 보이게 한다 */
+  photoQueueSummary: { uploading: number; failed: number };
 }
 
 const cache: Record<string, { trades: Trade[]; notes: HandoverNote[] }> = {};
@@ -69,6 +75,7 @@ let state: State = {
   savingTrades: {},
   remoteStatus: isSupabase ? "loading" : "ready",
   toast: null,
+  photoQueueSummary: { uploading: 0, failed: 0 },
 };
 const listeners = new Set<() => void>();
 let toastSeq = 0;
@@ -550,6 +557,67 @@ function enqueueTradePersist(tradeId: string, fallback: Trade): Promise<Trade> {
   return task;
 }
 
+// ── 거래 특이사항(note_*) 내구 outbox ───────────────────────────
+// 노트는 450ms 디바운스 후 Supabase에 저장되는데, 전송 전 새로고침/탭 회수로 조용히
+// 유실됐다(품목 메모의 ITEM_METADATA_OUTBOX와 비대칭). 최신 목표를 localStorage에
+// 남겨 재시작 시 재적용한다. 오래된 목표가 다른 직원의 새 노트를 덮지 않도록 60분
+// TTL을 두고, persist 성공 시에만 ACK한다.
+const TRADE_NOTE_OUTBOX_KEY = "heybilly:trade-note-outbox:v1";
+const TRADE_NOTE_OUTBOX_TTL_MS = 60 * 60 * 1000;
+type TradeNoteOutboxEntry = { note_checkout?: string | null; note_checkin?: string | null; at: number };
+
+function readTradeNoteOutbox_(): Record<string, TradeNoteOutboxEntry> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TRADE_NOTE_OUTBOX_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const now = Date.now();
+    const fresh: Record<string, TradeNoteOutboxEntry> = {};
+    for (const [tradeId, raw] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const entry = raw as TradeNoteOutboxEntry;
+      if (!Number(entry.at) || now - Number(entry.at) >= TRADE_NOTE_OUTBOX_TTL_MS) continue;
+      if (!("note_checkout" in entry) && !("note_checkin" in entry)) continue;
+      fresh[tradeId] = entry;
+    }
+    return fresh;
+  } catch {
+    return {};
+  }
+}
+
+function writeTradeNoteOutbox_(outbox: Record<string, TradeNoteOutboxEntry>): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (Object.keys(outbox).length) window.localStorage.setItem(TRADE_NOTE_OUTBOX_KEY, JSON.stringify(outbox));
+    else window.localStorage.removeItem(TRADE_NOTE_OUTBOX_KEY);
+  } catch { /* private mode: 메모리 재시도는 계속 동작 */ }
+}
+
+function putTradeNoteOutboxPatch_(tradeId: string, fields: Omit<TradeNoteOutboxEntry, "at">): void {
+  if (!Object.keys(fields).length) return;
+  const outbox = readTradeNoteOutbox_();
+  outbox[tradeId] = { ...(outbox[tradeId] ?? { at: 0 }), ...fields, at: Date.now() };
+  writeTradeNoteOutbox_(outbox);
+}
+
+/** persist 성공한 patch의 노트 값과 outbox 목표가 같을 때만 지운다(전송 중 새 입력 보존). */
+function acknowledgeTradeNoteOutbox_(tradeId: string, patch: Record<string, unknown>): void {
+  if (!("note_checkout" in patch) && !("note_checkin" in patch)) return;
+  const outbox = readTradeNoteOutbox_();
+  const entry = outbox[tradeId];
+  if (!entry) return;
+  const next: TradeNoteOutboxEntry = { ...entry };
+  (["note_checkout", "note_checkin"] as const).forEach((field) => {
+    if (field in patch && field in next && (next[field] ?? null) === ((patch[field] as string | null) ?? null)) {
+      delete next[field];
+    }
+  });
+  if (!("note_checkout" in next) && !("note_checkin" in next)) delete outbox[tradeId];
+  else outbox[tradeId] = next;
+  writeTradeNoteOutbox_(outbox);
+}
+
 function tradeFieldPatch(before: Trade | undefined, after: Trade): Record<string, string | number | boolean | null> {
   if (!before) return {};
   const patch: Record<string, string | number | boolean | null> = {};
@@ -585,6 +653,7 @@ function enqueueTradeFieldPersist(tradeId: string, fallback: Trade): Promise<Tra
         tradeFieldPersistTargets[tradeId] = {};
         try {
           await persistTradeFieldPatch(tradeId, patch);
+          acknowledgeTradeNoteOutbox_(tradeId, patch);
         } catch (error) {
           tradeFieldPersistTargets[tradeId] = { ...patch, ...(tradeFieldPersistTargets[tradeId] ?? {}) };
           throw error;
@@ -629,6 +698,11 @@ function schedulePersistTrade(trade: Trade, before?: Trade) {
   const patch = tradeFieldPatch(before, trade);
   if (!Object.keys(patch).length) return;
   tradeFieldPersistTargets[tradeId] = { ...(tradeFieldPersistTargets[tradeId] ?? {}), ...patch };
+  // 특이사항은 전송 전 새로고침에도 살아남게 내구 outbox에 목표를 남긴다
+  const noteFields: Omit<TradeNoteOutboxEntry, "at"> = {};
+  if ("note_checkout" in patch) noteFields.note_checkout = (patch.note_checkout as string | null) ?? null;
+  if ("note_checkin" in patch) noteFields.note_checkin = (patch.note_checkin as string | null) ?? null;
+  if (Object.keys(noteFields).length) putTradeNoteOutboxPatch_(tradeId, noteFields);
   if (tradeFieldPersistRetryTimers[tradeId]) {
     clearTimeout(tradeFieldPersistRetryTimers[tradeId]);
     delete tradeFieldPersistRetryTimers[tradeId];
@@ -1222,7 +1296,15 @@ export function loadDay(date: string) {
   }
   if (state.date === date && state.trades.length) return;
   const d = dayData(date);
-  state = { date, trades: d.trades, notes: d.notes, savingTrades: {}, remoteStatus: "ready", toast: null };
+  state = {
+    date,
+    trades: d.trades,
+    notes: d.notes,
+    savingTrades: {},
+    remoteStatus: "ready",
+    toast: null,
+    photoQueueSummary: state.photoQueueSummary,
+  };
   emit();
 }
 
@@ -3220,9 +3302,11 @@ function replayDurableMutationOutboxes(): void {
   const returnOutbox = readReturnCountOutbox();
   const qtyOutbox = readQtyOutbox();
   const itemCheckOutbox = readItemCheckOutbox();
+  const noteOutbox = readTradeNoteOutbox_();
   const returnTradesToArm = new Set<string>();
   const qtyKeysToArm: Array<{ tradeId: string; scheduleId: string; key: string }> = [];
   const itemCheckTradesToArm = new Set<string>();
+  const noteTradesToArm = new Set<string>();
   const discardedReturnTradeIds = new Set<string>();
   let replayIndex = 0;
   const nextReplayDelay = () => nextDurableReplayDelay_(replayIndex++);
@@ -3275,6 +3359,32 @@ function replayDurableMutationOutboxes(): void {
       changed = true;
     }
 
+    const noteEntry = noteOutbox[trade.tradeId];
+    if (noteEntry) {
+      // 전송 전 새로고침으로 유실된 특이사항 목표를 재적용하고 persist를 재무장한다.
+      // 서버가 이미 같은 값이면(다른 탭이 저장 완료) 조용히 ACK만 한다.
+      const notePatch: Record<string, string | null> = {};
+      if ("note_checkout" in noteEntry && (nextTrade.noteCheckout ?? null) !== (noteEntry.note_checkout ?? null)) {
+        notePatch.note_checkout = noteEntry.note_checkout ?? null;
+      }
+      if ("note_checkin" in noteEntry && (nextTrade.noteCheckin ?? null) !== (noteEntry.note_checkin ?? null)) {
+        notePatch.note_checkin = noteEntry.note_checkin ?? null;
+      }
+      if (Object.keys(notePatch).length) {
+        nextTrade = {
+          ...nextTrade,
+          ...("note_checkout" in notePatch ? { noteCheckout: notePatch.note_checkout ?? undefined } : {}),
+          ...("note_checkin" in notePatch ? { noteCheckin: notePatch.note_checkin ?? undefined } : {}),
+        };
+        tradeFieldPersistTargets[trade.tradeId] = { ...(tradeFieldPersistTargets[trade.tradeId] ?? {}), ...notePatch };
+        pendingPersistTrades.add(trade.tradeId);
+        noteTradesToArm.add(trade.tradeId);
+        changed = true;
+      } else {
+        acknowledgeTradeNoteOutbox_(trade.tradeId, noteEntry as unknown as Record<string, unknown>);
+      }
+    }
+
     for (const [key, entry] of Object.entries(itemCheckOutbox)) {
       if (entry.tradeId !== trade.tradeId || !key.startsWith(`${trade.tradeId}|`)) continue;
       const item = nextTrade.equipments.find((candidate) => candidate.scheduleId === entry.scheduleId);
@@ -3313,6 +3423,12 @@ function replayDurableMutationOutboxes(): void {
     window.setTimeout(() => resumeDurableReturnCountOutbox_(tradeId), nextReplayDelay());
   });
   itemCheckTradesToArm.forEach((tradeId) => armItemCheckBatch(tradeId, nextReplayDelay()));
+  noteTradesToArm.forEach((tradeId) => {
+    window.setTimeout(() => {
+      const latest = state.trades.find((t) => t.tradeId === tradeId);
+      if (latest) void enqueueTradeFieldPersist(tradeId, latest).catch(() => {});
+    }, nextReplayDelay());
+  });
   qtyKeysToArm.forEach(({ tradeId, scheduleId, key }) => {
     if (qtyCommitTimers[key]) clearTimeout(qtyCommitTimers[key]);
     qtyCommitTimers[key] = setTimeout(() => {
@@ -4536,6 +4652,68 @@ export async function refreshTradePhotos(tradeId: string): Promise<void> {
   await loadTradePhotosBatch_([tradeId], true);
 }
 
+// ── 사진 변경 브로드캐스트 (기기 간 수렴) ───────────────────────
+// 다른 기기/탭은 loadedPhotoTrades 캐시 때문에 삭제·업로드된 사진을 모달 재오픈까지
+// 계속 보여줬다. 스키마 변경 없이 Supabase broadcast 채널로 수렴 신호를 보낸다.
+// 신호 유실은 치명적이지 않다(모달 재오픈 시 기존 경로로 수렴) — best-effort.
+const PHOTO_SYNC_CHANNEL = "photo-sync";
+let photoSyncChannel: ReturnType<NonNullable<typeof supabase>["channel"]> | null = null;
+
+function ensurePhotoSyncChannel_(): typeof photoSyncChannel {
+  if (!supabase || typeof window === "undefined") return null;
+  if (photoSyncChannel) return photoSyncChannel;
+  photoSyncChannel = supabase
+    .channel(PHOTO_SYNC_CHANNEL, { config: { broadcast: { self: false } } })
+    .on("broadcast", { event: "photo-change" }, (message) => {
+      const tradeId = String((message.payload as { tradeId?: string } | undefined)?.tradeId || "").trim();
+      if (!tradeId) return;
+      // 다음 열람 때 강제 재조회되도록 캐시를 비우고, 이미 로드된 거래면 즉시 수렴한다
+      const wasLoaded = loadedPhotoTrades.delete(tradeId);
+      if (wasLoaded && state.trades.some((t) => t.tradeId === tradeId)) {
+        void loadTradePhotosBatch_([tradeId], true).catch(() => {});
+      }
+    })
+    .subscribe();
+  return photoSyncChannel;
+}
+
+function broadcastPhotoChange_(tradeId: string): void {
+  try {
+    const channel = ensurePhotoSyncChannel_();
+    if (!channel) return;
+    void Promise.resolve(channel.send({ type: "broadcast", event: "photo-change", payload: { tradeId } })).catch(() => {});
+  } catch { /* 브로드캐스트 실패는 무해 — 수신 측은 모달 재오픈 시 수렴 */ }
+}
+
+// ── 사진 큐 전역 요약/목록 (배지 UI용) ─────────────────────────
+export function usePhotoQueueSummary(): { uploading: number; failed: number } {
+  return useSyncExternalStore(subscribe, () => state.photoQueueSummary, () => state.photoQueueSummary);
+}
+
+export type FailedPhotoJobView = {
+  queueId: string;
+  tradeId: string;
+  phase: Phase;
+  createdAt: number;
+  attempts: number;
+  lastError?: string;
+  permanent?: boolean;
+};
+
+export function listFailedPhotoJobs(): FailedPhotoJobView[] {
+  return listPhotoUploadJobs()
+    .filter((job) => isPhotoUploadJobFailed(job))
+    .map((job) => ({
+      queueId: job.queueId,
+      tradeId: job.tradeId,
+      phase: job.phase,
+      createdAt: job.createdAt,
+      attempts: job.attempts,
+      lastError: job.lastError,
+      permanent: job.permanent,
+    }));
+}
+
 // 업로드 대기 타일의 미리보기(data URL)는 Supabase 저장/동기화에 실리지 않도록 메모리에만 둔다.
 const localPhotoPreviews = new Map<string, string>();
 const resumedPhotoJobs = new Map<string, PhotoUploadJob>();
@@ -4643,7 +4821,10 @@ export async function deleteTradePhoto(tradeId: string, photo: PhotoMeta): Promi
       const stillExists = state.trades
         .find((trade) => trade.tradeId === tradeId)
         ?.photos.some((candidate) => photoKey(candidate) === photoKey(photo));
-      if (!stillExists) return;
+      if (!stillExists) {
+        broadcastPhotoChange_(tradeId); // 서버 삭제는 완료된 상태 — 타 기기도 수렴시킨다
+        return;
+      }
     } catch {
       // 원래 삭제 오류가 더 정확하므로 아래에서 다시 던진다.
     }
@@ -4655,6 +4836,8 @@ export async function deleteTradePhoto(tradeId: string, photo: PhotoMeta): Promi
   mutateTrade(tradeId, (t) => ({ ...t, photos: t.photos.filter((p) => photoKey(p) !== key) }));
   loadedPhotoTrades.add(tradeId);
   flashSave(tradeId);
+  // 다른 기기/탭의 유령 사진(모달 재오픈 전까지 잔존)을 즉시 수렴시킨다
+  broadcastPhotoChange_(tradeId);
 }
 
 function sendQueuedPhoto_(job: PhotoUploadJob): Promise<unknown> {
@@ -4686,6 +4869,8 @@ if (typeof window !== "undefined") {
         photos: mergePhotos(t.photos.filter((p) => p.queueId !== job.queueId), [photo]),
       }));
       flashSave(job.tradeId);
+      // 다른 기기/탭이 이 거래의 사진 캐시를 무효화하고 즉시 수렴하게 알린다
+      broadcastPhotoChange_(job.tradeId);
     },
     onFailure: (job, message, willRetry) => {
       if (willRetry) return;
@@ -4698,6 +4883,11 @@ if (typeof window !== "undefined") {
     },
   });
   void resumePhotoUploads().then(restorePhotoUploadTiles_);
+  // 큐 변화를 전역 배지 상태로 반영 (실패 잡이 화면 윈도우 밖 거래여도 보이게)
+  onPhotoQueueChange(() => set({ photoQueueSummary: snapshotPhotoQueueSummary() }));
+  set({ photoQueueSummary: snapshotPhotoQueueSummary() });
+  // 사진 변경 브로드캐스트 수신 채널 구독 (다른 기기의 업로드/삭제 즉시 수렴)
+  if (isSupabase) ensurePhotoSyncChannel_();
 }
 
 // ── 인수인계 메모 ──────────────────────────────────────────────
