@@ -145,10 +145,10 @@ assert(
   'the my-page document button must open only the quote PDF route'
 );
 
-// ── 앱: /my만 공개, 페이지는 서버 렌더링 + 서버 전용 데이터 헬퍼만 사용 ──
+// ── 앱: 고객용 /my와 공개 장비 사용법만 로그인 우회, 예약 페이지는 빠른 클라이언트 조회 ──
 assert(
-  authGate.includes('PUBLIC_PATHS') && authGate.includes('"/my"') && !authGate.includes('"/availability"'),
-  'AuthGate must allow only the /my public path'
+  authGate.includes('PUBLIC_PATHS') && authGate.includes('"/my"') && authGate.includes('"/guides"') && !authGate.includes('"/availability"'),
+  'AuthGate must allow only the intended customer-facing /my and /guides paths'
 );
 assert(
   !page.includes('"use client"') &&
