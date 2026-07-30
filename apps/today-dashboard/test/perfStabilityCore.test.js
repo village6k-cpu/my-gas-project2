@@ -155,7 +155,7 @@ test("시각적 저장 토스트는 실제 거래 잠금을 해제하지 않고,
   const flash = section(store, "function flashSave", "\nfunction showTransientError");
   assert.doesNotMatch(flash, /set\(\{\s*savingTrades|delete\s+\w+\[tradeId\]/, "420ms 시각 효과가 실제 저장 잠금을 바꾸면 안 된다");
 
-  const lifecycle = section(store, "const activeTradeSaveTokens", "\n/** 응답만 유실된 쓰기는");
+  const lifecycle = section(store, "const activeTradeSaveTokens", "\nfunction mutateTrade");
   assert.match(lifecycle, /Map<string, Set<number>>/, "거래별 실제 작업 토큰을 보관해야 한다");
   assert.match(lifecycle, /tokens\.add\(id\)/, "시작한 작업 자신의 토큰을 추가해야 한다");
   assert.match(lifecycle, /tokens\.delete\(id\)/, "끝난 작업 자신의 토큰만 제거해야 한다");
@@ -183,7 +183,7 @@ test("반출을 누르지 않은 거래도 반납 탭과 같은 날 전체 탭�
   const store = read("lib/data/store.ts");
   const card = read("components/ScheduleCard.tsx");
   const status = read("lib/domain/status.ts");
-  const ret = section(store, "export async function toggleReturn", "\n/** 응답 유실된 반납완료");
+  const ret = section(store, "export async function toggleReturn", "\n// ── 품목 체크 원장 쓰기 신뢰화");
   assert.match(ret, /const hasCheckoutBaseline =/);
   // 기준선 없는 거래는 조용한 자동 force가 아니라 작업자 확인(다이얼로그) 뒤 force로 보낸다.
   // 자동 force는 서버의 모든 반납 검증을 우회해 수량 검수 없이 거래가 닫히는 사고를 냈다.
@@ -252,14 +252,15 @@ test("재시작 시 보존된 저장 작업은 한꺼번에 0ms 재생하지 않
 
 test("반출완료는 품목 체크와 수량 debounce의 최신 목표를 모두 drain한 뒤 실행한다", () => {
   const store = read("lib/data/store.ts");
-  const setup = section(store, "export async function toggleSetup", "export type ToggleReturnResult");
-  const itemBarrierAt = setup.indexOf("flushItemCheckWritesForTrade(tradeId)");
-  const qtyBarrierAt = setup.indexOf("flushQueuedItemQtyForTrade(tradeId)");
-  const setupGasAt = setup.indexOf('gasMutation("toggleSetup"');
+  // 장벽은 이제 백그라운드 확정 엔진(replay)에 있다 — 클릭 경로는 아무것도 기다리지 않는다
+  const replay = section(store, "async function replayCompletionMutationEntry_", "\nfunction replayCompletionMutationOutboxes_");
+  const itemBarrierAt = replay.indexOf("flushItemCheckWritesForTrade(latest.tradeId)");
+  const qtyBarrierAt = replay.indexOf("flushQueuedItemQtyForTrade(latest.tradeId)");
+  const setupGasAt = replay.indexOf('gasMutation("toggleSetup"');
   assert.ok(itemBarrierAt >= 0 && qtyBarrierAt >= 0, "품목 체크와 수량 저장 장벽이 모두 있어야 한다");
   assert.ok(setupGasAt > itemBarrierAt && setupGasAt > qtyBarrierAt, "기준선 고정은 두 장벽 뒤에만 실행해야 한다");
-  assert.match(setup, /setupRequestStarted = true;[\s\S]*gasMutation\("toggleSetup"/, "실제 완료 요청이 출발했는지 구분해야 한다");
-  assert.match(setup, /setupRequestStarted && isGasOutcomeUnknownError\(e\)/, "선행 drain 실패를 완료 응답 유실로 오인하면 안 된다");
+  const setup = section(store, "export async function toggleSetup", "export type ToggleReturnResult");
+  assert.doesNotMatch(setup, /await gasMutation|await flush/, "클릭 경로는 서버 왕복·flush를 기다리지 않는다 (즉시 확정 UX)");
   assert.match(store, /itemCheckTerminalErrors/, "품목 원장 저장 실패를 완료 장벽이 삼키면 안 된다");
   assert.match(store, /qtyCommitFailures/, "수량 원장 저장 실패를 완료 장벽이 삼키면 안 된다");
 });
@@ -323,7 +324,13 @@ test("반납 행 연타는 항목별 병합 큐로 모으고 완료 직전에만
   assert.match(count, /await flushReturnCountsPersist\(tradeId\)/);
 
   const ret = section(store, "export async function toggleReturn", "\n// ── 품목 체크 원장 쓰기 신뢰화");
-  assert.match(ret, /await flushReturnCountsPersist\(tradeId\)/, "반납완료 전에 모든 수량 패치를 drain해야 한다");
+  // 수량 drain은 백그라운드 확정 엔진이 GAS 전송 직전에 수행한다 (클릭 경로는 즉시 반환)
+  const replayDrain = section(store, "async function replayCompletionMutationEntry_", "\nfunction replayCompletionMutationOutboxes_");
+  assert.match(replayDrain, /await flushReturnCountsPersist\(latest\.tradeId\)/, "반납완료 확정 전에 모든 수량 패치를 drain해야 한다");
+  assert.ok(
+    replayDrain.indexOf("flushReturnCountsPersist(latest.tradeId)") < replayDrain.indexOf('gasMutation("toggleReturn"'),
+    "drain이 GAS 확정보다 먼저여야 한다"
+  );
   assert.doesNotMatch(ret, /persistReturnCompletion/, "반납완료는 GAS가 Supabase까지 한 번에 써야 한다");
   assert.match(ret, /mutationId/);
   assert.doesNotMatch(ret, /flushTradePersist\(tradeId\)/, "완료 뒤 stale 전체 거래 저장을 다시 보내면 안 된다");
@@ -335,7 +342,8 @@ test("반납/품목의 응답 유실 재시도는 서버 mutation log에서 최�
   const store = read("lib/data/store.ts");
   const gas = fs.readFileSync(path.resolve(appRoot, "../..", "checkAvailability.js"), "utf8");
   assert.match(store, /createLedgerMutationId\("return"\)/);
-  assert.match(store, /queueReturnOutcomeRetry\([\s\S]*mutationId/);
+  assert.match(store, /gasMutation\("toggleReturn", \{[\s\S]{0,200}mutationId: latest\.mutationId/,
+    "응답 유실 재확정은 같은 mutationId로 재전송해 서버 로그가 최신 동작을 보존한다");
   assert.match(gas, /function beginDashboardMutation_/);
   assert.match(gas, /entry\.state === 'committed' \|\| hasLater/);
   assert.match(gas, /DASHBOARD_MUTATION_LOG_PREFIX_/);
@@ -351,10 +359,13 @@ test("거래 A 저장 중에도 realtime 거래 B는 분리 적용한다", () =>
   assert.match(flush, /safeIds/);
   assert.match(flush, /blockedIds\.forEach\(\(id\) => realtimeTradeIds\.add\(id\)\)/);
   assert.match(flush, /tradeMutationSeq\[id\]/, "요청 전후 거래별 세대로 stale 응답을 걸러야 한다");
-  const pending = section(store, "function hasPendingPersist", "\nfunction canApplyRemoteSnapshot");
-  assert.doesNotMatch(pending, /pendingReturnProjectionTrades/, "브라우저 반납 projection 큐는 제거되어야 한다");
-  assert.match(pending, /itemCheckInFlight/, "전체 수렴은 진행 중 품목 체크를 덮으면 안 된다");
-  assert.match(pending, /qtyCommitInFlight/, "전체 수렴은 진행 중 수량 변경을 덮으면 안 된다");
+  // 전역 게이트(hasPendingPersist/canApplyRemoteSnapshot)는 호출부 없는 죽은 코드라 제거.
+  // 진행 중 품목 체크/수량 커밋은 beginTradeSave(savingTrades)로 거래별 게이트에 잡힌다.
+  const perTrade = section(store, "function hasTradePendingExcludingRemove_", "\n/** 원격 snapshot이");
+  assert.doesNotMatch(store, /pendingReturnProjectionTrades/, "브라우저 반납 projection 큐는 제거되어야 한다");
+  assert.match(perTrade, /savingTrades\[tradeId\]/, "진행 중 커밋(품목 체크·수량)은 savingTrades로 게이트된다");
+  assert.match(perTrade, /itemCheckTargets/, "대기 중 품목 체크 목표도 게이트된다");
+  assert.match(perTrade, /qtyCommitTargets/, "대기 중 수량 목표도 게이트된다");
 });
 
 test("GAS checkout 품목 체크는 HTTP를 잠금 밖에서 처리하고, 배치 경로도 짧게 커밋한다", () => {
@@ -462,8 +473,16 @@ test("반납완료는 잠금 경합을 재시도로 흡수하고 중복 탭을 �
     /if \(activeTradeTransitions\.has\(tradeId\) \|\| pendingRemoveEquipmentTrades\.has\(tradeId\)\)/,
     "같은 완료 전환과 아직 확정되지 않은 장비 제외 뒤의 순서 역전을 막아야 한다",
   );
-  assert.match(ret, /beginTradeTransition\(tradeId\)/, "재시도 동안 완료 전환과 저장 스피너를 유지해야 한다");
-  assert.match(ret, /gasMutationRetrying\("toggleReturn"/, "잠금 경합은 재시도로 흡수해야 한다");
+  // 잠금 경합(BUSY)은 writeback 인라인 지터 + 확정 엔진 백오프가 흡수한다 — 카드 잠금 없이
+  assert.doesNotMatch(ret, /beginTradeTransition/, "완료 클릭이 카드를 서버 왕복 동안 잠그면 안 된다 (즉시 확정 UX)");
+  const writeback = read("lib/data/writeback.ts");
+  assert.match(writeback, /GAS_BUSY_RETRY_DELAYS_MS/, "BUSY는 전송 계층 지터 재시도가 1차 흡수");
+  const replay = section(store, "async function replayCompletionMutationEntry_", "\nfunction replayCompletionMutationOutboxes_");
+  assert.match(replay, /isRetryableLedgerError\(error\)/, "재시도 가능 오류는 백오프로 이어간다");
+  // 중복 탭: 전송 중이면 재예약, 최신 목표(mutationId)가 이긴다
+  assert.match(replay, /completionMutationReplayInFlight\.has\(key\)[\s\S]{0,220}scheduleCompletionMutationReplay_/,
+    "전송 중 재진입은 유실 없이 재예약해야 한다");
+  assert.match(replay, /remaining\.mutationId !== latest\.mutationId/, "전송 중 바뀐 최신 목표를 이어서 확정해야 한다");
   assert.match(store, /gasMutationRetrying\("updateContractStatus"/, "취소도 같은 재시도를 써야 한다");
   assert.match(store, /gasMutationRetrying\("updateTrade"/, "예약 편집도 같은 재시도를 써야 한다");
 });
@@ -472,13 +491,15 @@ test("반납완료 버튼은 즉시 반응한다 (낙관 표시 + 백그라운�
   const store = read("lib/data/store.ts");
   const ret = section(store, "export async function toggleReturn", "\n// ── 품목 체크 원장 쓰기 신뢰화");
   const optimisticAt = ret.indexOf("returnDone: on");
-  const gasAt = ret.indexOf('gasMutationRetrying("toggleReturn"');
-  assert.ok(optimisticAt >= 0 && gasAt > optimisticAt, "완료 표시가 GAS 왕복보다 먼저여야 한다");
+  const scheduleAt = ret.indexOf('scheduleCompletionMutationReplay_("return", tradeId, 0)');
+  assert.ok(optimisticAt >= 0 && scheduleAt > optimisticAt, "완료 표시가 백그라운드 확정 예약보다 먼저여야 한다");
+  assert.doesNotMatch(ret, /await gasMutation/, "클릭 경로는 GAS 왕복을 기다리지 않는다");
   // 낙관 반영은 GAS 확정 전 원격 저장 금지(persist=false)
   assert.match(ret, /contractStatus: on \? "반납완료" : "반출",\s*\}\), false\)/, "낙관 반영은 persist=false여야 한다");
-  // 응답 유실은 롤백하지 않고 멱등 재시도로 확정한다 (반출완료와 동일 패턴)
-  assert.match(ret, /isGasOutcomeUnknownError\(e\)[\s\S]*queueReturnOutcomeRetry/, "결과 미확정은 재확인 큐로 넘긴다");
-  assert.match(ret, /RETURN_OUTCOME_MAX_ATTEMPTS/, "재확인은 상한이 있어야 한다");
+  // 확정·응답 유실·거절 처리 전부 백그라운드 엔진이 담당한다
+  const replay = section(store, "async function replayCompletionMutationEntry_", "\nfunction replayCompletionMutationOutboxes_");
+  assert.match(replay, /requireCompletionMutationResult_\(res, latest\.kind === "setup" \? "setupDone" : "returnDone"\)/);
+  assert.match(replay, /reconcileCompletionMutationCanonical_/, "명확한 거절은 정본 재조회로 수렴한다");
 });
 
 test("반납완료 미확인은 강제 차단이 아니라 작업자 확인 후 통과다 (소프트 가드)", () => {
@@ -486,9 +507,10 @@ test("반납완료 미확인은 강제 차단이 아니라 작업자 확인 후 
   const ret = section(store, "export async function toggleReturn", "\n// ── 품목 체크 원장 쓰기 신뢰화");
   assert.match(ret, /opts\?: \{ force\?: boolean \}/, "force 옵션이 있어야 한다");
   assert.match(ret, /on && !force \? returnCompletionBlockers/, "force면 미확인 차단을 건너뛴다");
-  assert.match(ret, /force \? \{ force: 1 \} : \{\}/, "force가 GAS까지 전달돼야 한다");
+  const replay = section(store, "async function replayCompletionMutationEntry_", "\nfunction replayCompletionMutationOutboxes_");
+  assert.match(replay, /latest\.force \? \{ force: 1 \} : \{\}/, "force가 GAS까지 전달돼야 한다");
   // 반납 상세 수량은 force여도 완료 전에 먼저 내구 저장한다(기록 보존)
-  assert.match(ret, /flushReturnCountsPersist\(tradeId\)/, "미확인 내역 기록은 유지돼야 한다");
+  assert.match(replay, /flushReturnCountsPersist\(latest\.tradeId\)/, "미확인 내역 기록은 유지돼야 한다");
 
   const card = read("components/ScheduleCard.tsx");
   assert.match(card, /window\.confirm/, "작업자 확인 다이얼로그를 거쳐야 한다");

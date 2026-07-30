@@ -14,8 +14,11 @@ assert(
   storeSource.includes('function markLocalMutation'),
   'mutations must be explicitly marked before optimistic state is written'
 );
+// 전역 스냅샷 게이트(canApplyRemoteSnapshot)는 호출부 없는 죽은 코드라 제거됐다.
+// 실제 게이트는 거래별 세대(versionAtFetch/tradeMutationSeq)와 hasTradeSyncPending이 담당한다.
 assert(
-  storeSource.includes('function canApplyRemoteSnapshot'),
+  storeSource.includes('versionAtFetch[id] = tradeMutationSeq[id]') &&
+    storeSource.includes('function hasTradeSyncPending'),
   'remote fetch/poll results must be gated before applying to the visible store'
 );
 assert(

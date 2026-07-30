@@ -284,11 +284,12 @@ assert(
   'flush must skip payment fields on extras failure and never write the app-only payment_warning flag'
 );
 const storeTs4 = read('apps/today-dashboard/lib/data/store.ts');
-const toggleReturnStart = storeTs4.indexOf('export async function toggleReturn');
-const toggleReturnEnd = storeTs4.indexOf('\n/** 응답 유실된 반납완료', toggleReturnStart);
-const toggleReturnFn = storeTs4.slice(toggleReturnStart, toggleReturnEnd);
+// 완료 확정은 백그라운드 엔진으로 이동 — off 해제 시 GAS가 복원한 계약상태를 적용한다
+const replayStart = storeTs4.indexOf('async function replayCompletionMutationEntry_');
+const replayEnd = storeTs4.indexOf('\nfunction replayCompletionMutationOutboxes_', replayStart);
+const replayFn = storeTs4.slice(replayStart, replayEnd);
 assert(
-  /gasMutationRetrying\("toggleReturn"[\s\S]*contractStatus:\s*res\.contractStatus\s*\|\|\s*contractStatus/.test(toggleReturnFn),
+  /gasMutation\("toggleReturn"[\s\S]*contractStatus: String\(res\?\.contractStatus \|\| \(confirmedDone \? "반납완료" : "반출"\)\)/.test(replayFn),
   'toggleReturn off must apply the contract status restored by GAS'
 );
 assert(

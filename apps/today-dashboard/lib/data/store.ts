@@ -115,7 +115,6 @@ const tradeFieldPersistTargets: Record<string, Record<string, string | number | 
 const tradeFieldPersistRetryTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
 const tradeFieldPersistRetryAttempts: Record<string, number | undefined> = {};
 const pendingPersistTrades = new Set<string>();
-const setupOutcomeRetryTimers: Record<string, number | undefined> = {};
 const returnCountPersistTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
 const returnCountPersistInFlight: Record<string, Promise<Trade> | undefined> = {};
 type ReturnCountPatch = Partial<ReturnCount> | null;
@@ -180,32 +179,9 @@ function hasTradePendingExcludingRemove_(tradeId: string): boolean {
 /** 원격 snapshot이 로컬 보조필드 저장을 덮지 않게 하는 수렴용 blocker.
  * 사용자 명령 blocker와 분리해 메모/결제 보조 PATCH 재시도가 카드 전체를 막지 않는다. */
 function hasTradeSyncPending(tradeId: string): boolean {
-  return pendingPersistTrades.has(tradeId) || hasTradePending(tradeId);
+  return pendingPersistTrades.has(tradeId) || hasTradePending(tradeId) || completionOutboxPending.has(tradeId);
 }
 
-function hasPendingPersist(): boolean {
-  return (
-    pendingPersistTrades.size > 0 ||
-    pendingReturnCountTrades.size > 0 ||
-    notesPersistPending ||
-    Object.keys(state.savingTrades).length > 0 ||
-    Object.keys(itemCheckTargets).length > 0 ||
-    Object.keys(itemCheckInFlight).length > 0 ||
-    Object.keys(itemCheckRetryTimers).length > 0 ||
-    Object.keys(qtyCommitTargets).length > 0 ||
-    Object.keys(qtyCommitInFlight).length > 0 ||
-    Object.keys(qtyCommitTimers).length > 0 ||
-    pendingRemoveEquipmentTrades.size > 0 ||
-    Object.keys(itemMetadataPatchTargets).length > 0 ||
-    Object.keys(itemMetadataPatchInFlight).length > 0 ||
-    Object.keys(itemMetadataPatchRetryTimers).length > 0 ||
-    Object.keys(tradeFieldPersistRetryTimers).length > 0
-  );
-}
-
-function canApplyRemoteSnapshot(mutationSeqAtStart: number): boolean {
-  return !hasPendingPersist() && mutationSeqAtStart === localMutationSeq;
-}
 
 function preserveTradePhotos(next: Trade, previous?: Trade): Trade {
   const existing = previous?.photos ?? [];
@@ -1022,7 +998,17 @@ function discardAllReturnCountTargets_(tradeId: string): void {
 
 /** 다른 기기에서 확정한 반납완료보다 오래된 오프라인 수량은 자동 재오픈 권한이 없다.
  * 완료 화면을 실제로 본 뒤 시작한 새 입력만 동일 완료 시각에 한해 재오픈할 수 있다. */
+/** 반납완료가 낙관 표시만 됐고 서버 확정 전인지 — 이 창에서는 거래를 '아직 열림'으로
+ * 취급해야 한다. 완료 취급하면 수량 정정이 재오픈 CAS(조작된 doneAt)로 가서 실패하고,
+ * 확정 전 대기 중이던 수량 패치까지 폐기된다. */
+function hasPendingReturnCompletionClose_(tradeId: string): boolean {
+  const entry = readCompletionMutationOutbox()[completionMutationOutboxEntryKey("return", tradeId)];
+  return !!entry && entry.target === true;
+}
+
 function isReturnCountOutboxSupersededByCompletion_(entry: ReturnCountOutboxEntry, trade: Trade): boolean {
+  // 확정 전 낙관 close는 close가 아니다 — 대기 패치를 폐기하면 확정 flush가 빈손이 된다
+  if (hasPendingReturnCompletionClose_(trade.tradeId)) return false;
   if (!(trade.returnDone || trade.contractStatus === "반납완료")) return false;
   const currentDoneAt = String(trade.returnDoneAt || "").trim();
   const completedAtMs = currentDoneAt ? Date.parse(currentDoneAt) : 0;
@@ -1395,11 +1381,21 @@ type CompletionMutationOutboxEntry = {
 };
 
 const COMPLETION_MUTATION_OUTBOX_KEY = "heybilly:completion-mutation-outbox:v1";
+// 확정 대기 중인 거래 — 스냅샷/realtime이 낙관 완료 표시를 옛 서버값으로 덮지 않게 하는
+// 수렴 게이트. 이 탭이 소유한 전송(put/startup 채택)에서만 추가되고 ACK에서 제거된다.
+// (localStorage 재동기화로 다른 탭의 항목을 들여오면, 그 탭이 ACK했을 때 이 탭의
+//  게이트가 영영 안 풀려 해당 거래의 realtime 수렴이 고착된다.)
+const completionOutboxPending = new Set<string>();
+// setItem 실패(사파리 프라이빗/쿼터) 시에도 전송이 유실되지 않도록 하는 탭 메모리 미러.
+// 확정 전송의 유일한 경로가 outbox 재독이므로, 저장 실패가 곧 무전송이 되면 안 된다.
+const completionOutboxMemory = new Map<string, CompletionMutationOutboxEntry>();
 // 서버 멱등 로그(30분)보다 먼저 재생을 끝낸다. 그 뒤에는 같은 옛 목표를 새 명령으로
 // 되살리지 않고 정본 재조회만 수행한다.
 const COMPLETION_MUTATION_OUTBOX_TTL_MS = 25 * 60 * 1000;
 const completionMutationReplayTimers: Record<string, number | undefined> = {};
 const completionMutationReplayInFlight = new Set<string>();
+// 선행 저장 대기(2초 defer 루프)로 30초 넘게 못 보낸 완료는 한 번만 지연 안내를 띄운다
+const completionDeferralToastShown = new Set<string>();
 
 function completionMutationOutboxEntryKey(kind: CompletionMutationKind, tradeId: string): string {
   return `${kind}|${tradeId}`;
@@ -1430,9 +1426,14 @@ function readCompletionMutationOutbox(): Record<string, CompletionMutationOutbox
         attempts: Math.max(0, Number(entry.attempts || 0) || 0),
       };
     }
+    // 저장 실패로 storage에 못 남은 이 탭의 전송 목표를 병합한다 (메모리 미러가 우선권 없음 —
+    // 같은 키는 storage 최신값 유지, storage에 없는 키만 보충)
+    for (const [key, entry] of completionOutboxMemory) {
+      if (!safe[key]) safe[key] = entry;
+    }
     return safe;
   } catch {
-    return {};
+    return Object.fromEntries(completionOutboxMemory);
   }
 }
 
@@ -1448,9 +1449,12 @@ function writeCompletionMutationOutbox(outbox: Record<string, CompletionMutation
 }
 
 function putCompletionMutationOutbox(entry: CompletionMutationOutboxEntry): void {
+  const key = completionMutationOutboxEntryKey(entry.kind, entry.tradeId);
+  completionOutboxMemory.set(key, entry);
   const outbox = readCompletionMutationOutbox();
-  outbox[completionMutationOutboxEntryKey(entry.kind, entry.tradeId)] = entry;
+  outbox[key] = entry;
   writeCompletionMutationOutbox(outbox);
+  completionOutboxPending.add(entry.tradeId);
 }
 
 function acknowledgeCompletionMutationOutbox(
@@ -1462,7 +1466,10 @@ function acknowledgeCompletionMutationOutbox(
   const outbox = readCompletionMutationOutbox();
   if (!outbox[key] || outbox[key].mutationId !== mutationId) return;
   delete outbox[key];
+  completionOutboxMemory.delete(key);
+  completionDeferralToastShown.delete(key);
   writeCompletionMutationOutbox(outbox);
+  if (!Object.values(outbox).some((e) => e.tradeId === tradeId)) completionOutboxPending.delete(tradeId);
   if (completionMutationReplayTimers[key]) clearTimeout(completionMutationReplayTimers[key]);
   delete completionMutationReplayTimers[key];
 }
@@ -1472,6 +1479,7 @@ function updateCompletionMutationOutboxAttempts(entry: CompletionMutationOutboxE
   const outbox = readCompletionMutationOutbox();
   if (!outbox[key] || outbox[key].mutationId !== entry.mutationId) return;
   outbox[key] = { ...outbox[key], attempts };
+  if (completionOutboxMemory.get(key)?.mutationId === entry.mutationId) completionOutboxMemory.set(key, outbox[key]);
   writeCompletionMutationOutbox(outbox);
 }
 
@@ -1531,65 +1539,6 @@ function finishTradeSave(tradeId: string, id: number, kind: "saved" | "error", t
   }, kind === "error" ? 4_000 : 1_100);
 }
 
-/** 응답만 유실된 쓰기는 실패로 단정하지 않고 같은 목표 상태를 멱등 재시도한다.
- *  단, 무한 재시도는 savingTrades 락을 계속 쥐어 앱 전체 동기화를 막으므로
- *  상한(약 1.5분) 후 서버 확정값으로 수렴하고 락을 푼다. */
-const SETUP_OUTCOME_MAX_ATTEMPTS = 12;
-
-function queueSetupOutcomeRetry(
-  tradeId: string,
-  done: boolean,
-  optimisticDoneAt: string | null,
-  saveId: number,
-  mutationId: string,
-  attempt = 1,
-): void {
-  if (typeof window === "undefined") return;
-  if (setupOutcomeRetryTimers[tradeId]) window.clearTimeout(setupOutcomeRetryTimers[tradeId]);
-  const delay = Math.min(800 * (2 ** (attempt - 1)), 10_000);
-  setupOutcomeRetryTimers[tradeId] = window.setTimeout(async () => {
-    delete setupOutcomeRetryTimers[tradeId];
-    try {
-      const res = await gasMutation("toggleSetup", { tid: tradeId, done, mutationId });
-      requireCompletionMutationResult_(res, "setupDone");
-      const confirmedDone = typeof res?.setupDone === "boolean" ? res.setupDone : done;
-      const doneAt = confirmedDone ? String(res?.setupDoneAt || res?.doneAt || optimisticDoneAt) : null;
-      mutateTrade(tradeId, (t) => ({ ...t, setupDone: confirmedDone, setupDoneAt: doneAt }), false);
-      acknowledgeCompletionMutationOutbox("setup", tradeId, mutationId);
-      finishTradeSave(tradeId, saveId, "saved", "저장됨");
-    } catch (error) {
-      // 최초 요청의 응답을 잃은 뒤에는 재시도 오류만으로 최초 미커밋을 증명할 수 없다.
-      // Supabase 권한 필드가 목표값이면 완료하고, 아니면 같은 멱등 요청을 계속 재확인한다.
-      try {
-        const confirmed = await fetchSetupCompletion(tradeId);
-        if (confirmed.done === done) {
-          mutateTrade(tradeId, (t) => ({ ...t, setupDone: done, setupDoneAt: confirmed.doneAt }), false);
-          acknowledgeCompletionMutationOutbox("setup", tradeId, mutationId);
-          finishTradeSave(tradeId, saveId, "saved", "저장됨");
-          return;
-        }
-        if (attempt >= SETUP_OUTCOME_MAX_ATTEMPTS) {
-          // 원장이 끝내 목표값을 확정하지 않음 — 서버 확정값으로 되돌리고 재시도 가능하게 락 해제
-          mutateTrade(tradeId, (t) => ({ ...t, setupDone: confirmed.done, setupDoneAt: confirmed.doneAt }), false);
-          acknowledgeCompletionMutationOutbox("setup", tradeId, mutationId);
-          finishTradeSave(tradeId, saveId, "error", "⚠️ 반출완료가 원장에 확정되지 않았습니다 — 다시 시도해주세요");
-          return;
-        }
-      } catch (confirmError) {
-        console.error("[supabase] 반출완료 결과 재확인 실패:", confirmError);
-        if (attempt >= SETUP_OUTCOME_MAX_ATTEMPTS) {
-          // 확인조차 불가(장기 오프라인 등) — 카드 잠금은 풀되 영구 outbox는 남겨
-          // 온라인 복귀/새로고침 뒤 같은 mutationId로 이어서 확정한다.
-          finishTradeSave(tradeId, saveId, "error", "⚠️ 반출완료 결과를 확인하지 못했습니다 — 자동 재확인 중");
-          scheduleCompletionMutationReplay_("setup", tradeId, 30_000);
-          return;
-        }
-      }
-      console.error("[write-back] 반출완료 결과 미확정 재시도:", error);
-      queueSetupOutcomeRetry(tradeId, done, optimisticDoneAt, saveId, mutationId, attempt + 1);
-    }
-  }, delay);
-}
 
 function mutateTrade(tradeId: string, fn: (t: Trade) => Trade, persist = true) {
   markLocalMutation(tradeId);
@@ -2171,18 +2120,19 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
   const current = state.trades.find((t) => t.tradeId === tradeId);
   if (!current) return { ok: false, error: "거래를 찾을 수 없습니다" };
   const done = !current.setupDone;
-  const previousDone = current.setupDone;
-  const previousDoneAt = current.setupDoneAt ?? null;
   if (isSupabase && !writeBackEnabled) {
     const error = `반출 상태 변경 실패: ${writeBackDisabledReason}`;
     set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
     return { ok: false, error };
   }
 
-  const saveId = beginTradeTransition(tradeId);
+  // ── 즉시 확정 UX ──
+  // 클릭 즉시 완료 상태를 확정 표시하고 카드를 잠그지 않는다. 서버 확정은 내구 outbox +
+  // 백그라운드 replay가 보장하며(멱등 mutationId·서버 lease·정본 재조회·유실 시 재시작 복구),
+  // 원장이 명확히 거절한 경우에만 소리 나게 되돌린다. '저장 중' 잠금을 서버 왕복(3~10초)
+  // 동안 유지하던 이전 방식이 "예전엔 즉시였는데 느려졌다" 민원의 원인이었다.
   const mutationId = createLedgerMutationId("setup");
   const optimisticDoneAt = done ? new Date().toISOString() : null;
-  let setupRequestStarted = false;
   putCompletionMutationOutbox({
     kind: "setup",
     tradeId,
@@ -2192,52 +2142,10 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
     createdAt: Date.now(),
     attempts: 0,
   });
-  // 버튼은 즉시 완료 상태로 바꾼다. persist=false라 GAS 기준선보다 먼저 원격 저장되지는 않는다.
   mutateTrade(tradeId, (t) => ({ ...t, setupDone: done, setupDoneAt: optimisticDoneAt }), false);
-  try {
-    if (done) {
-      // 품목 체크·수량 스테퍼의 debounce/latest-target을 모두 먼저 확정한다. 사용자가 마지막
-      // 품목을 누른 직후 완료를 눌러도 기준선 고정 명령이 앞질러 갈 수 없다.
-      await Promise.all([
-        flushItemCheckWritesForTrade(tradeId),
-        flushQueuedItemQtyForTrade(tradeId),
-      ]);
-    }
-    // 화면은 즉시 반응하지만, 내구 상태는 GAS가 기준선과 Supabase 완료값을 함께 확정한다.
-    setupRequestStarted = true;
-    const res = await gasMutation("toggleSetup", { tid: tradeId, done, mutationId });
-    requireCompletionMutationResult_(res, "setupDone");
-    const confirmedDone = typeof res?.setupDone === "boolean" ? res.setupDone : done;
-    const doneAt = confirmedDone ? String(res?.setupDoneAt || res?.doneAt || optimisticDoneAt) : null;
-    mutateTrade(tradeId, (t) => ({ ...t, setupDone: confirmedDone, setupDoneAt: doneAt }), false);
-    acknowledgeCompletionMutationOutbox("setup", tradeId, mutationId);
-    finishTradeSave(tradeId, saveId, "saved", "저장됨");
-    return { ok: true };
-  } catch (e) {
-    const detail = e instanceof Error ? e.message : String(e);
-    console.error("[write-back] toggleSetup 실패:", e);
-    if (setupRequestStarted && isGasOutcomeUnknownError(e)) {
-      // GAS가 저장을 끝낸 뒤 응답만 40초 제한에 걸릴 수 있다. 결과 미확정은 완료 표시와
-      // 저장 중 보호를 유지한 채 같은 목표 상태를 재시도하고, 절대 즉시 롤백하지 않는다.
-      const warning = `반출완료는 표시됐고 서버 응답을 다시 확인 중입니다 — ${detail}`;
-      set({ toast: { id: saveId, text: `⚠️ ${warning}`, kind: "saving" } });
-      queueSetupOutcomeRetry(tradeId, done, optimisticDoneAt, saveId, mutationId);
-      return { ok: true, warning };
-    }
-    if (setupRequestStarted && isRetryableLedgerError(e)) {
-      // 잠금/lease 경합(BUSY)이 인라인 재시도 한도를 넘긴 경우 — 실패가 아니라 지연이다.
-      // 낙관 표시와 outbox를 유지하고 내구 재생으로 넘긴다. (기존: 즉시 롤백 →
-      // 몇 초 뒤 완료 표시가 풀려 직원이 이미 자리를 뜬 경우 기록이 사라졌다.)
-      finishTradeSave(tradeId, saveId, "error", "⚠️ 반출완료 저장 지연 — 자동 재시도 중");
-      scheduleCompletionMutationReplay_("setup", tradeId, 3_000);
-      return { ok: true, warning: detail };
-    }
-    // GAS는 기준선과 Supabase 완료값을 모두 저장해야 성공을 반환하므로, 실패 때만 되돌린다.
-    acknowledgeCompletionMutationOutbox("setup", tradeId, mutationId);
-    mutateTrade(tradeId, (t) => ({ ...t, setupDone: previousDone, setupDoneAt: previousDoneAt }), false);
-    finishTradeSave(tradeId, saveId, "error", `⚠️ 반출 상태 변경 실패 — ${detail}`);
-    return { ok: false, error: detail };
-  }
+  flashSave(tradeId);
+  scheduleCompletionMutationReplay_("setup", tradeId, 0);
+  return { ok: true };
 }
 export type ToggleReturnResult =
   | { ok: true; blockers: []; warning?: string }
@@ -2259,8 +2167,6 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
   const on = !current.returnDone;
   // 반출완료를 누르지 못했거나 과거 데이터라 taken_qty 기준선이 없는 거래도 현장에서
   // 반납완료할 수 있어야 한다 — 단, 조용한 자동 우회가 아니라 작업자 확인을 거친다.
-  // (과거: 기준선 없음 → 확인 다이얼로그 없이 force 자동 전송 → 서버의 모든 반납
-  //  검증이 우회되어 수량 검수 없이 거래가 닫혔다.)
   const hasCheckoutBaseline = current.equipments.some(
     (item) => Number(item.takenQty ?? 0) > 0 || item.actualTakenQty != null,
   );
@@ -2284,24 +2190,17 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
     return { ok: false, blockers, error };
   }
 
-  // 실데이터에서는 원장(GAS)이 먼저 성공해야 앱/Supabase도 완료 상태로 바꾼다.
-  // 원장 쓰기가 꺼져 있을 때 로컬만 닫히는 조용한 불일치를 만들지 않는다.
   if (isSupabase && !writeBackEnabled) {
     const error = `반납 상태 변경 실패: ${writeBackDisabledReason}`;
     set({ toast: { id: ++toastSeq, text: `⚠️ ${error}`, kind: "error" } });
     return { ok: false, blockers: [], error };
   }
 
-  // 잠금 경합 재시도 동안 저장 중 스피너를 유지하고 중복 탭을 막는다.
-  const saveId = beginTradeTransition(tradeId);
+  // ── 즉시 확정 UX (반출완료와 동일 계약) ──
+  // 로컬 검증(기준선·미확인 수량)은 위에서 즉시 끝났다. 상세 수량 flush와 서버 검증·확정은
+  // 내구 outbox + 백그라운드 replay가 담당하고, 원장 거절 시에만 소리 나게 되돌린다.
   const mutationId = createLedgerMutationId("return");
-  const previous = {
-    returnDone: current.returnDone,
-    returnDoneAt: current.returnDoneAt ?? null,
-    contractStatus: current.contractStatus,
-  };
   const optimisticReturnDoneAt = on ? new Date().toISOString() : null;
-  let returnRequestStarted = false;
   putCompletionMutationOutbox({
     kind: "return",
     tradeId,
@@ -2313,149 +2212,18 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
     createdAt: Date.now(),
     attempts: 0,
   });
-  // 버튼은 즉시 완료 상태로 바뀐다(반출완료와 같은 낙관 패턴). 원장 확정은 뒤에서 진행하고,
-  // 명확한 거절일 때만 되돌린다. persist=false — GAS 확정 전에 원격 저장하지 않는다.
   mutateTrade(tradeId, (t) => ({
     ...t,
     returnDone: on,
     returnDoneAt: optimisticReturnDoneAt,
     contractStatus: on ? "반납완료" : "반출",
   }), false);
-  try {
-    // 장비 수량 스테퍼의 350ms target이 반납완료 뒤늦게 실행되어 완료 거래를 다시 여는
-    // 순서 역전을 막는다. transition guard가 이 drain 이후 새 수량 입력도 차단한다.
-    if (isSupabase) await flushQueuedItemQtyForTrade(tradeId);
-    // 품목별 정상/파손/분실 상세가 먼저 내구 저장되어야 한다. 이것이 실패한 상태에서
-    // 거래를 닫으면 GAS의 이진 체크만 남아 상세 사실이 사라질 수 있으므로 완료 전에 저장한다.
-    if (on && isSupabase) {
-      const persisted = await flushReturnCountsPersist(tradeId);
-      if (!force) {
-        const refreshedBlockers = returnCompletionBlockers(persisted);
-        if (refreshedBlockers.length > 0) {
-          const missing = refreshedBlockers.reduce((sum, b) => sum + b.missing, 0);
-          const over = refreshedBlockers.reduce((sum, b) => sum + b.over, 0);
-          const detail = missing > 0 ? `미확인 ${missing}개` : `초과 ${over}개`;
-          const error = `반납 미확인 품목 — ${detail}`;
-          mutateTrade(tradeId, (t) =>
-            t.contractStatus === "취소" || t.returnDone !== on ? t : { ...t, ...previous },
-          false);
-          acknowledgeCompletionMutationOutbox("return", tradeId, mutationId);
-          finishTradeSave(tradeId, saveId, "error", `⚠️ ${error}`);
-          return { ok: false, blockers: refreshedBlockers, error };
-        }
-      }
-    }
-    // 계약서 재생성 워커 등과의 잠금 경합은 짧은 재시도로 흡수한다(확정 거절은 즉시 실패).
-    returnRequestStarted = true;
-    const res = await gasMutationRetrying("toggleReturn", {
-      tid: tradeId,
-      done: on,
-      mutationId,
-      ...(force ? { force: 1 } : {}),
-      // 기준선 없음을 근거로 한 force는 서버가 Supabase 정본을 재검증한다(낡은 화면 방지)
-      ...(force && !hasCheckoutBaseline ? { autoForce: 1 } : {}),
-    });
-    requireCompletionMutationResult_(res, "returnDone");
-    const confirmedDone = typeof res?.returnDone === "boolean" ? res.returnDone : on;
-    const contractStatus = String(res?.contractStatus || (confirmedDone ? "반납완료" : "반출")) as Trade["contractStatus"];
-    const doneAt = confirmedDone ? String(res?.returnDoneAt || res?.doneAt || optimisticReturnDoneAt || "") : null;
-    mutateTrade(tradeId, (t) => ({
-      ...t,
-      returnDone: confirmedDone,
-      returnDoneAt: doneAt,
-      contractStatus: res.contractStatus || contractStatus,
-    }), false);
-    acknowledgeCompletionMutationOutbox("return", tradeId, mutationId);
-    finishTradeSave(
-      tradeId,
-      saveId,
-      "saved",
-      confirmedDone ? (force ? "반납완료 처리됨 — 미확인 내역은 기록에 남아있어요" : "반납완료 저장됨") : "저장됨",
-    );
-    return { ok: true, blockers: [] };
-  } catch (e) {
-    const error = e instanceof Error ? e.message : String(e);
-    console.error("[write-back] toggleReturn 실패:", e);
-    if (returnRequestStarted && isGasOutcomeUnknownError(e)) {
-      // 응답만 유실됐을 수 있다 — 표시를 되돌리지 않고 같은 목표 상태를 백그라운드 재확인한다.
-      set({ toast: { id: saveId, text: "⚠️ 반납완료는 표시됐고 서버 응답을 다시 확인 중입니다", kind: "saving" } });
-      queueReturnOutcomeRetry(tradeId, on, force, optimisticReturnDoneAt, saveId, mutationId, 1, force && !hasCheckoutBaseline);
-      return { ok: true, blockers: [] };
-    }
-    if (returnRequestStarted && isRetryableLedgerError(e)) {
-      // 잠금/lease 경합(BUSY)이 인라인 재시도 한도를 넘긴 경우 — 실패가 아니라 지연이다.
-      // 낙관 표시와 outbox를 유지하고 내구 재생으로 넘긴다. (기존: 즉시 롤백 →
-      // 완료된 줄 알고 자리를 뜬 직원의 반납 기록이 사라졌다.)
-      finishTradeSave(tradeId, saveId, "error", "⚠️ 반납완료 저장 지연 — 자동 재시도 중");
-      scheduleCompletionMutationReplay_("return", tradeId, 3_000);
-      return { ok: true, blockers: [] };
-    }
-    // 명확한 거절 — 즉시 표시를 원래 상태로 되돌린다.
-    acknowledgeCompletionMutationOutbox("return", tradeId, mutationId);
-    mutateTrade(tradeId, (t) =>
-      t.contractStatus === "취소" || t.returnDone !== on ? t : { ...t, ...previous },
-    false);
-    finishTradeSave(tradeId, saveId, "error", `⚠️ 반납 상태 변경 실패 — ${error}`);
-    return { ok: false, blockers: [], error };
-  }
+  flashSave(tradeId);
+  scheduleCompletionMutationReplay_("return", tradeId, 0);
+  return { ok: true, blockers: [] };
 }
 
-/** 응답 유실된 반납완료를 멱등 재시도로 확정한다(반출완료 queueSetupOutcomeRetry와 동일 패턴). */
-const RETURN_OUTCOME_MAX_ATTEMPTS = 8;
-const returnOutcomeRetryTimers: Record<string, number | undefined> = {};
-
-function queueReturnOutcomeRetry(
-  tradeId: string,
-  on: boolean,
-  force: boolean,
-  optimisticDoneAt: string | null,
-  saveId: number,
-  mutationId: string,
-  attempt = 1,
-  autoForce = false,
-): void {
-  if (typeof window === "undefined") return;
-  if (returnOutcomeRetryTimers[tradeId]) window.clearTimeout(returnOutcomeRetryTimers[tradeId]);
-  const delay = Math.min(1_000 * 2 ** (attempt - 1), 15_000);
-  returnOutcomeRetryTimers[tradeId] = window.setTimeout(async () => {
-    delete returnOutcomeRetryTimers[tradeId];
-    try {
-      const res = await gasMutation("toggleReturn", {
-        tid: tradeId,
-        done: on,
-        mutationId,
-        ...(force ? { force: 1 } : {}),
-        ...(force && autoForce ? { autoForce: 1 } : {}),
-      });
-      requireCompletionMutationResult_(res, "returnDone");
-      const confirmedDone = typeof res?.returnDone === "boolean" ? res.returnDone : on;
-      const contractStatus = String(res?.contractStatus || (confirmedDone ? "반납완료" : "반출")) as Trade["contractStatus"];
-      const doneAt = confirmedDone ? String(res?.returnDoneAt || res?.doneAt || optimisticDoneAt || "") : null;
-      mutateTrade(tradeId, (t) => ({ ...t, returnDone: confirmedDone, returnDoneAt: doneAt, contractStatus }), false);
-      acknowledgeCompletionMutationOutbox("return", tradeId, mutationId);
-      finishTradeSave(tradeId, saveId, "saved", confirmedDone ? "반납완료 저장됨" : "저장됨");
-    } catch (error) {
-      if (attempt < RETURN_OUTCOME_MAX_ATTEMPTS && isRetryableLedgerError(error)) {
-        queueReturnOutcomeRetry(tradeId, on, force, optimisticDoneAt, saveId, mutationId, attempt + 1, autoForce);
-        return;
-      }
-      console.error("[write-back] 반납완료 결과 미확정:", error);
-      if (!isRetryableLedgerError(error)) {
-        // 명확한 거절만 outbox에서 제거한다. 원격 정본을 다시 읽어 낙관 표시도 수렴시킨다.
-        acknowledgeCompletionMutationOutbox("return", tradeId, mutationId);
-        finishTradeSave(tradeId, saveId, "error", "⚠️ 반납완료가 원장에서 거절됐습니다 — 최신 상태를 불러옵니다");
-        void reconcileCompletionMutationCanonical_(tradeId);
-        return;
-      }
-      // 최초 요청이 커밋된 뒤 응답만 유실됐을 가능성이 끝까지 남는다. 이전 로컬 값으로
-      // 맹목 롤백하지 않고 영구 outbox로 같은 ID를 계속 재확인한다.
-      finishTradeSave(tradeId, saveId, "error", "⚠️ 반납완료 원장 응답을 확인하지 못했습니다 — 자동 재확인 중");
-      scheduleCompletionMutationReplay_("return", tradeId, 30_000);
-    }
-  }, delay);
-}
-
-// ── 품목 체크 원장 쓰기 신뢰화 ──────────────────────────────────
+// ── 품목 체크 원장 쓰기 신뢰화 ──// ── 품목 체크 원장 쓰기 신뢰화 ──────────────────────────────────
 // toggleItem은 파이어-앤-포겟이라 제외/현장추가(계약서 재생성)의 긴 GAS 잠금과 겹치면
 // Lock timeout으로 죽고, 재시도가 없어 시트가 앱과 조용히 어긋났다.
 // 품목 단위 목표 상태(최신 승자)로 직렬화하고 일시 오류만 백오프 재시도한다.
@@ -3126,7 +2894,7 @@ async function commitQueuedItemQty(tradeId: string, scheduleId: string, key: str
       finishTradeSave(tradeId, saveId, "error", `⚠️ 수량 변경 실패 — ${error}`);
       acknowledgeQtyOutboxTarget(key, target);
       delete qtyCommitRetryAttempts[key];
-      // own in-flight 때문에 전역 hasPendingPersist()는 항상 true다. 해당 품목만 정본으로
+      // 자신의 in-flight가 전역 pending으로 잡히는 구조였다. 해당 품목만 정본으로
       // 직접 되돌리고, 응답 미확정이면 백그라운드 재조회 동안만 완료 전환을 막는다.
       const reconciled = await reconcileItemQtyCanonical(tradeId, scheduleId, key);
       if (!reconciled && qtyCommitTargets[key] === undefined) {
@@ -3223,21 +2991,54 @@ function scheduleCompletionMutationReplay_(
   }, delay);
 }
 
+function completionKindLabel_(kind: CompletionMutationKind): string {
+  return kind === "setup" ? "반출완료" : "반납완료";
+}
+
+function completionTradeLabel_(tradeId: string): string {
+  const trade = state.trades.find((t) => t.tradeId === tradeId);
+  return trade?.customerName ? `${trade.customerName}(${tradeId})` : tradeId;
+}
+
+/** 완료 확정의 단일 엔진. 클릭 경로는 낙관 표시+outbox만 남기고 즉시 반환하며,
+ * 이 함수가 선행 저장(품목 체크·수량·반납 상세) → GAS 확정 → ACK까지 백그라운드로
+ * 책임진다. 카드는 잠그지 않는다 — 같은 거래의 GAS 명령 순서는 writeback 거래별
+ * tail이, 중복 전송은 mutationId 멱등이, 스냅샷 덮어쓰기는 completionOutboxPending
+ * 게이트가 각각 보장한다. 원장이 명확히 거절한 경우에만 소리 나게 되돌린다. */
 async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEntry): Promise<void> {
   const key = completionMutationOutboxEntryKey(entry.kind, entry.tradeId);
   const latest = readCompletionMutationOutbox()[key];
-  if (!latest || latest.mutationId !== entry.mutationId || completionMutationReplayInFlight.has(key)) return;
+  if (!latest || latest.mutationId !== entry.mutationId) {
+    // 다른 탭이 ACK했거나 새 목표로 대체됨 — 이 거래의 수렴 게이트가 고착되지 않게 정리
+    if (!latest && !Object.values(readCompletionMutationOutbox()).some((e) => e.tradeId === entry.tradeId)) {
+      completionOutboxPending.delete(entry.tradeId);
+    }
+    return;
+  }
+  if (completionMutationReplayInFlight.has(key)) {
+    // 전송 중 — 최신 목표가 유실되지 않게 뒤로 재예약한다
+    scheduleCompletionMutationReplay_(latest.kind, latest.tradeId, 1_500);
+    return;
+  }
 
   if (Date.now() - latest.createdAt >= COMPLETION_MUTATION_OUTBOX_TTL_MS) {
     // 30분 서버 멱등 로그가 사라지기 전에 옛 명령을 폐기하고 정본만 읽는다. 이 경계 뒤
     // 재전송은 다른 직원이 만든 최신 상태를 과거 목표로 되돌릴 수 있다.
     acknowledgeCompletionMutationOutbox(latest.kind, latest.tradeId, latest.mutationId);
     await reconcileCompletionMutationCanonical_(latest.tradeId);
-    showTransientError(`⚠️ ${latest.kind === "setup" ? "반출" : "반납"}완료 자동 확인 시간이 지나 최신 원장 상태를 불러왔습니다`);
+    showTransientError(
+      `⚠️ ${completionTradeLabel_(latest.tradeId)} ${completionKindLabel_(latest.kind)} 자동 확인 시간(25분)이 지나 최신 원장 상태로 되돌립니다 — 상태를 확인해주세요`,
+      8_000,
+    );
     return;
   }
 
   if (activeTradeTransitions.has(latest.tradeId) || hasTradePending(latest.tradeId)) {
+    // 앞선 저장(품목 체크·수량·반납 상세)이 끝나야 보낸다. 30초 넘게 밀리면 한 번만 알린다.
+    if (Date.now() - latest.createdAt > 30_000 && !completionDeferralToastShown.has(key)) {
+      completionDeferralToastShown.add(key);
+      showTransientError(`⚠️ ${completionKindLabel_(latest.kind)} 저장 지연 — 앞선 저장을 마치는 대로 자동 확정합니다`, 4_000);
+    }
     scheduleCompletionMutationReplay_(latest.kind, latest.tradeId, 2_000);
     return;
   }
@@ -3253,8 +3054,8 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
     return;
   }
 
-  const saveId = beginTradeTransition(latest.tradeId);
   completionMutationReplayInFlight.add(key);
+  // 목표 상태 재표시 — 새로고침/스냅샷이 흔들었어도 사용자 의도를 유지한다
   if (latest.kind === "setup") {
     mutateTrade(latest.tradeId, (trade) => ({
       ...trade,
@@ -3271,6 +3072,33 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
   }
 
   try {
+    // 선행 저장 — 서버 검증이 최신 정본을 보도록 부속 저장을 먼저 확정한다.
+    if (isSupabase && latest.target) {
+      if (latest.kind === "setup") {
+        // 마지막 품목 체크/수량 직후의 완료 탭에도 기준선 고정이 앞질러 가지 않게 한다
+        await Promise.all([
+          flushItemCheckWritesForTrade(latest.tradeId),
+          flushQueuedItemQtyForTrade(latest.tradeId),
+        ]);
+      } else {
+        await flushQueuedItemQtyForTrade(latest.tradeId);
+        // 품목별 정상/파손/분실 상세가 먼저 내구 저장되어야 이진 체크만 남는 유실이 없다
+        const persisted = await flushReturnCountsPersist(latest.tradeId);
+        if (!latest.force) {
+          const refreshed = returnCompletionBlockers(persisted);
+          if (refreshed.length > 0) {
+            const missing = refreshed.reduce((sum, b) => sum + b.missing, 0);
+            const over = refreshed.reduce((sum, b) => sum + b.over, 0);
+            const detail = missing > 0 ? `미확인 ${missing}개` : `초과 ${over}개`;
+            acknowledgeCompletionMutationOutbox(latest.kind, latest.tradeId, latest.mutationId);
+            showTransientError(`⚠️ ${completionTradeLabel_(latest.tradeId)} 반납완료 취소됨 — ${detail}`, 7_000);
+            await reconcileCompletionMutationCanonical_(latest.tradeId);
+            return;
+          }
+        }
+      }
+    }
+
     const res = latest.kind === "setup"
       ? await gasMutation("toggleSetup", {
           tid: latest.tradeId,
@@ -3285,6 +3113,11 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
           // 기준선 없음 근거의 force는 재생에서도 서버 정본 재검증을 거친다
           ...(latest.force && latest.autoForce ? { autoForce: 1 } : {}),
         });
+    if (res?.skipped) {
+      // 시드 모드/원장 쓰기 비활성 — 로컬 확정으로 종료 (재시도 루프 방지)
+      acknowledgeCompletionMutationOutbox(latest.kind, latest.tradeId, latest.mutationId);
+      return;
+    }
     requireCompletionMutationResult_(res, latest.kind === "setup" ? "setupDone" : "returnDone");
     if (latest.kind === "setup") {
       const confirmedDone = typeof res?.setupDone === "boolean" ? res.setupDone : latest.target;
@@ -3305,17 +3138,38 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
       }), false);
     }
     acknowledgeCompletionMutationOutbox(latest.kind, latest.tradeId, latest.mutationId);
-    finishTradeSave(latest.tradeId, saveId, "saved", latest.kind === "setup" ? "반출완료 저장됨" : "반납완료 저장됨");
+    flashSave(latest.tradeId);
   } catch (error) {
     if (!isRetryableLedgerError(error)) {
+      // 원장의 명확한 거절 — 정본을 다시 읽어 표시를 수렴시키고 크게 알린다
+      // (카드가 화면 밖일 수 있어 거래 라벨을 토스트에 포함)
+      const message = error instanceof Error ? error.message : String(error);
       acknowledgeCompletionMutationOutbox(latest.kind, latest.tradeId, latest.mutationId);
-      finishTradeSave(latest.tradeId, saveId, "error", `⚠️ ${latest.kind === "setup" ? "반출" : "반납"}완료가 원장에서 거절됐습니다`);
+      showTransientError(
+        `⚠️ ${completionTradeLabel_(latest.tradeId)} ${completionKindLabel_(latest.kind)} 거절됨 — ${message}`,
+        8_000,
+      );
       await reconcileCompletionMutationCanonical_(latest.tradeId);
       return;
     }
+    // 응답 유실/경합 — 정본(Supabase)이 이미 목표와 같으면 재전송 없이 수렴한다
+    if (latest.kind === "setup") {
+      try {
+        const confirmed = await fetchSetupCompletion(latest.tradeId);
+        if (confirmed.done === latest.target) {
+          mutateTrade(latest.tradeId, (trade) => ({ ...trade, setupDone: latest.target, setupDoneAt: confirmed.doneAt }), false);
+          acknowledgeCompletionMutationOutbox(latest.kind, latest.tradeId, latest.mutationId);
+          flashSave(latest.tradeId);
+          return;
+        }
+      } catch { /* 정본 확인 실패 — 백오프 재시도로 계속 */ }
+    }
     const attempts = latest.attempts + 1;
     updateCompletionMutationOutboxAttempts(latest, attempts);
-    finishTradeSave(latest.tradeId, saveId, "error", `⚠️ ${latest.kind === "setup" ? "반출" : "반납"}완료 저장 지연 — 자동 재시도 중`);
+    // 지연 안내는 첫 실패에만 — 백오프마다 토스트 쌍이 반복되는 churn을 막는다
+    if (attempts === 1) {
+      showTransientError(`⚠️ ${completionKindLabel_(latest.kind)} 저장 지연 — 자동 재시도 중`, 3_000);
+    }
     scheduleCompletionMutationReplay_(
       latest.kind,
       latest.tradeId,
@@ -3323,12 +3177,20 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
     );
   } finally {
     completionMutationReplayInFlight.delete(key);
+    // 전송 중 사용자가 목표를 바꿨다면(새 mutationId) 곧바로 이어서 확정한다
+    const remaining = readCompletionMutationOutbox()[key];
+    if (remaining && remaining.mutationId !== latest.mutationId) {
+      scheduleCompletionMutationReplay_(latest.kind, latest.tradeId, 200);
+    }
   }
 }
 
 function replayCompletionMutationOutboxes_(initialDelay = 0): void {
   if (typeof window === "undefined" || !isSupabase || !writeBackEnabled) return;
-  Object.values(readCompletionMutationOutbox()).forEach((entry, index) => {
+  Object.entries(readCompletionMutationOutbox()).forEach(([key, entry], index) => {
+    // 이전 세션의 미확정 목표를 이 탭이 채택한다 (메모리 미러 + 수렴 게이트)
+    completionOutboxMemory.set(key, entry);
+    completionOutboxPending.add(entry.tradeId);
     scheduleCompletionMutationReplay_(entry.kind, entry.tradeId, initialDelay + index * 350);
   });
 }
@@ -3925,7 +3787,10 @@ export async function setReturnCount(tradeId: string, scheduleId: string, patch:
   const wasIn = expected > 0 && previousCount.good + previousCount.damaged + previousCount.lost === expected;
   const isIn = expected > 0 && nextCount.good + nextCount.damaged + nextCount.lost === expected;
   if (wasIn !== isIn) writeback = isIn;
-  const wasReturnComplete = !!before && (before.returnDone || before.contractStatus === "반납완료");
+  // 낙관 close(서버 확정 전)는 완료로 취급하지 않는다 — 일반 큐로 넣으면 확정 flush가
+  // 마지막 순간의 정정까지 포함해 닫고, 정정으로 미확인이 생기면 확정이 취소·알림된다.
+  const wasReturnComplete = !!before && (before.returnDone || before.contractStatus === "반납완료") &&
+    !hasPendingReturnCompletionClose_(tradeId);
   const reopenMutationId = wasReturnComplete ? createLedgerMutationId("return-reopen") : "";
   // 완료 화면에서 시작한 명시적 새 편집은 이전 오프라인 잔여 큐와 섞지 않는다. 이 입력의
   // 완료 시각을 outbox에 남겨, 재시작 후에도 같은 완료에 대한 편집만 재오픈하도록 한다.

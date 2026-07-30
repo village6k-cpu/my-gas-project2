@@ -61,8 +61,8 @@ test("autoForce는 재시도·재생 경로에도 전파되어 서버 기준선 
   const store = read("lib/data/store.ts");
   assert.match(store, /autoForce\?: boolean/, "완료 outbox 엔트리에 autoForce가 있어야 한다");
   assert.match(store, /autoForce: force && !hasCheckoutBaseline/, "outbox 기록 시 autoForce 저장");
-  assert.match(store, /latest\.force && latest\.autoForce \? \{ autoForce: 1 \}/, "재생 경로 전파");
-  assert.match(store, /force && autoForce \? \{ autoForce: 1 \}/, "결과 재확인 경로 전파");
+  // 확정은 이제 단일 replay 엔진 — 그 경로가 autoForce를 항상 전파한다
+  assert.match(store, /latest\.force && latest\.autoForce \? \{ autoForce: 1 \}/, "확정 엔진 전파");
 });
 
 test("사진 큐: online 부활도 네트워크 원인 게이트를 지키고, 오프라인 wake는 공회전하지 않는다", () => {

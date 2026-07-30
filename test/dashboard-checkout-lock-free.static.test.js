@@ -37,31 +37,29 @@ assert.match(
 
 const toggleSetup = store.match(/export async function toggleSetup\(tradeId: string\): Promise<ToggleSetupResult> \{[\s\S]*?\n\}/);
 assert.ok(toggleSetup, 'toggleSetup must exist');
+// 즉시 확정 UX: 클릭 경로는 낙관 표시+내구 outbox+백그라운드 확정 예약만 하고 즉시 반환한다.
+// 서버 왕복(3~10초) 동안 카드를 잠그던 beginTradeTransition/await gasMutation은 제거됐다.
 assert.match(
   toggleSetup[0],
-  /const saveId = beginTradeTransition\(tradeId\);[\s\S]*?mutateTrade\(tradeId[\s\S]*?setupDone:\s*done[\s\S]*?false\);[\s\S]*?await gasMutation\("toggleSetup"/,
+  /mutateTrade\(tradeId[\s\S]*?setupDone:\s*done[\s\S]*?false\);[\s\S]*?scheduleCompletionMutationReplay_\("setup", tradeId, 0\)/,
   '카드는 GAS 응답 전에 즉시 완료 상태가 되어야 한다'
+);
+assert.doesNotMatch(
+  toggleSetup[0],
+  /beginTradeTransition|await gasMutation/,
+  '클릭 경로가 카드를 잠그거나 서버를 기다리면 안 된다 (즉시 확정 UX)'
 );
 assert.match(
   toggleSetup[0],
   /if \(activeTradeTransitions\.has\(tradeId\) \|\| pendingRemoveEquipmentTrades\.has\(tradeId\)\)[\s\S]*?return \{ ok: false, error \};/,
-  '빠른 연속 클릭이 들어와도 같은 거래의 반출완료 요청은 한 번만 실행해야 한다'
+  '전환 위험 구간(편집/취소/제외)과의 순서 역전은 계속 막아야 한다'
 );
-assert.match(
-  toggleSetup[0],
-  /finishTradeSave\(tradeId, saveId, "saved", "저장됨"\)/,
-  '원장과 앱 저장이 모두 성공하면 저장 완료를 표시해야 한다'
-);
-assert.match(
-  toggleSetup[0],
-  /if \(setupRequestStarted && isGasOutcomeUnknownError\(e\)\)[\s\S]*queueSetupOutcomeRetry\(tradeId[\s\S]*return \{ ok: true, warning \}/,
-  'GAS 응답만 유실된 결과 미확정은 완료 표시를 유지하고 같은 상태를 재시도해야 한다'
-);
-assert.match(
-  toggleSetup[0],
-  /if \(setupRequestStarted && isGasOutcomeUnknownError\(e\)\)[\s\S]*return \{ ok: true, warning \}[\s\S]*setupDone:\s*previousDone[\s\S]*반출 상태 변경 실패/,
-  '확정 실패일 때만 즉시 완료 상태를 되돌려야 한다'
-);
+// 확정·응답 유실 재확인·거절 롤백은 백그라운드 엔진이 담당한다
+const confirmEngine = store.match(/async function replayCompletionMutationEntry_[\s\S]*?\nfunction replayCompletionMutationOutboxes_/);
+assert.ok(confirmEngine, '백그라운드 확정 엔진이 있어야 한다');
+assert.match(confirmEngine[0], /gasMutation\("toggleSetup"/, '확정 엔진이 GAS 반출완료를 전송한다');
+assert.match(confirmEngine[0], /fetchSetupCompletion\(latest\.tradeId\)/, '응답 유실은 정본 재확인으로 수렴한다');
+assert.match(confirmEngine[0], /reconcileCompletionMutationCanonical_/, '명확한 거절만 정본 재조회로 되돌린다');
 assert.doesNotMatch(
   toggleSetup[0],
   /flushTradePersist\(tradeId\)/,

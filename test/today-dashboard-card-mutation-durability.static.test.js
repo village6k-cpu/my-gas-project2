@@ -15,20 +15,22 @@ function section(start, end) {
 }
 
 const setup = section("export async function toggleSetup", "\nexport type ToggleReturnResult");
-const checkin = section("export async function toggleReturn", "\n/** 응답 유실된 반납완료");
+const checkin = section("export async function toggleReturn", "\n// ── 품목 체크 원장 쓰기 신뢰화");
 const durableReplay = section("async function replayCompletionMutationEntry_", "\nlet durableMutationOutboxesReplayed");
 const resumeCounts = section("function resumeDurableReturnCountOutbox_", "\n/** 반납 수량은 바뀐");
 const countPersist = section("function enqueueReturnCountsPersist", "\nfunction scheduleReturnCountsRetry_");
 const remove = section("function removeEquipmentAndRegenerateContract", "\nfunction isSheetBackedScheduleId");
 
 assert.match(store, /COMPLETION_MUTATION_OUTBOX_KEY\s*=\s*"heybilly:completion-mutation-outbox:v1"/);
+// 즉시 확정 UX: 클릭 경로는 outbox 기록 → 낙관 표시 → 백그라운드 확정 예약 순서다.
+// GAS 전송은 확정 엔진(replay)만 수행하므로 의도는 항상 전송 전에 내구 기록된다.
 assert.ok(
-  setup.indexOf("putCompletionMutationOutbox") < setup.indexOf('gasMutation("toggleSetup"'),
-  "반출완료 의도는 GAS 호출 전에 영구 outbox에 기록해야 한다",
+  setup.indexOf("putCompletionMutationOutbox") < setup.indexOf('scheduleCompletionMutationReplay_("setup"'),
+  "반출완료 의도는 확정 예약 전에 영구 outbox에 기록해야 한다",
 );
 assert.ok(
-  checkin.indexOf("putCompletionMutationOutbox") < checkin.indexOf('gasMutationRetrying("toggleReturn"'),
-  "반납완료 의도는 GAS 호출 전에 영구 outbox에 기록해야 한다",
+  checkin.indexOf("putCompletionMutationOutbox") < checkin.indexOf('scheduleCompletionMutationReplay_("return"'),
+  "반납완료 의도는 확정 예약 전에 영구 outbox에 기록해야 한다",
 );
 assert.match(durableReplay, /mutationId:\s*latest\.mutationId/);
 assert.match(durableReplay, /COMPLETION_MUTATION_OUTBOX_TTL_MS/);

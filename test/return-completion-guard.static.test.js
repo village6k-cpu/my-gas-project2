@@ -8,15 +8,22 @@ const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 
 test('앱 저장 계층이 미완료 수량을 검사한 뒤에만 반납완료를 요청한다', () => {
   const store = read('apps/today-dashboard/lib/data/store.ts');
+  // 클릭 경로는 로컬 blocker 검사 후 즉시 반환하고, drain→GAS 순서는 확정 엔진이 지킨다
   const start = store.indexOf('export async function toggleReturn');
-  const end = store.indexOf('\n/** 응답 유실된 반납완료', start);
+  const end = store.indexOf('\n// ── 품목 체크 원장 쓰기 신뢰화', start);
   const fn = store.slice(start, end);
   assert.ok(start >= 0 && end > start, 'toggleReturn 함수 구간을 찾아야 한다');
-  const blockerAt = fn.indexOf('returnCompletionBlockers(current)');
-  const itemQtyDrainAt = fn.indexOf('flushQueuedItemQtyForTrade(tradeId)');
-  const returnCountDrainAt = fn.indexOf('flushReturnCountsPersist(tradeId)');
-  const gasAt = fn.indexOf('gasMutationRetrying("toggleReturn"');
-  assert.ok(blockerAt >= 0 && itemQtyDrainAt > blockerAt && returnCountDrainAt > itemQtyDrainAt && gasAt > returnCountDrainAt);
+  assert.ok(fn.indexOf('returnCompletionBlockers(current)') >= 0, '클릭 즉시 로컬 미확인 수량 검사');
+  const replayStart = store.indexOf('async function replayCompletionMutationEntry_');
+  const replayEnd = store.indexOf('\nfunction replayCompletionMutationOutboxes_', replayStart);
+  const replay = store.slice(replayStart, replayEnd);
+  const itemQtyDrainAt = replay.indexOf('flushQueuedItemQtyForTrade(latest.tradeId)');
+  const returnCountDrainAt = replay.indexOf('flushReturnCountsPersist(latest.tradeId)');
+  const gasAt = replay.indexOf('gasMutation("toggleReturn"');
+  assert.ok(itemQtyDrainAt >= 0 && returnCountDrainAt > itemQtyDrainAt && gasAt > returnCountDrainAt,
+    '확정 엔진은 수량→반납상세 drain 뒤에만 GAS 반납완료를 보낸다');
+  // drain 뒤 재검증: 다른 기기의 미확인 수량이 늘었으면 확정을 중단하고 크게 알린다
+  assert.match(replay, /returnCompletionBlockers\(persisted\)/);
   assert.match(store, /persistInFlight/);
   assert.match(store, /returnCountPersistInFlight/);
 });
@@ -210,9 +217,10 @@ test('반출완료는 화면에 즉시 반영하되 불변 기준선은 GAS 성�
   const toggleEnd = store.indexOf('\nexport type ToggleReturnResult', toggleStart);
   const toggle = store.slice(toggleStart, toggleEnd);
   const optimisticMutation = toggle.indexOf('mutateTrade(tradeId');
-  const gasMutation = toggle.indexOf('await gasMutation("toggleSetup"');
-  assert.ok(optimisticMutation >= 0 && optimisticMutation < gasMutation);
-  assert.match(toggle.slice(optimisticMutation, gasMutation), /setupDone: done[\s\S]*, false\)/);
+  const confirmScheduleAt = toggle.indexOf('scheduleCompletionMutationReplay_("setup"');
+  assert.ok(optimisticMutation >= 0 && optimisticMutation < confirmScheduleAt,
+    '낙관 표시가 백그라운드 확정 예약보다 먼저다 (클릭 경로는 GAS를 기다리지 않음)');
+  assert.match(toggle.slice(optimisticMutation, confirmScheduleAt), /setupDone: done[\s\S]*, false\)/);
   assert.doesNotMatch(toggle, /flushTradePersist\(tradeId\)/);
   assert.match(gas, /supaCaptureCheckoutBaseline_\(tid, checkable, true\)/);
   assert.match(gas, /supaSetTradeSetupDone_\(tid, true, doneAt\)[\s\S]{0,500}if \(!setupSaved \|\| !setupSaved\.ok\)/);

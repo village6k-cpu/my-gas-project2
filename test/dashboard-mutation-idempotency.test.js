@@ -77,20 +77,22 @@ test('GAS만 완료/품목 권한 필드를 쓰고 주기 snapshot은 제외한�
 
 test('완료 전환은 debounce 수량을 drain하고 옛 스테퍼 응답은 최신 표시를 덮지 않는다', () => {
   const store = read('apps/today-dashboard/lib/data/store.ts');
-  const setup = section(store, 'export async function toggleSetup', 'export type ToggleReturnResult');
-  const returned = section(store, 'export async function toggleReturn', '/** 응답 유실된 반납완료');
+  // 즉시 확정 UX: drain은 백그라운드 확정 엔진이 GAS 전송 직전에 수행한다
+  const replay = section(store, 'async function replayCompletionMutationEntry_', '\nfunction replayCompletionMutationOutboxes_');
   const qty = section(store, 'async function commitQueuedItemQty', '/** 수량 스테퍼의 350ms debounce');
-  assert.match(setup, /flushQueuedItemQtyForTrade\(tradeId\)/);
-  assert.match(returned, /flushQueuedItemQtyForTrade\(tradeId\)/);
+  assert.match(replay, /flushQueuedItemQtyForTrade\(latest\.tradeId\)/, '완료 확정 전 수량 debounce를 drain해야 한다');
+  assert.ok(
+    replay.indexOf('flushQueuedItemQtyForTrade(latest.tradeId)') < replay.indexOf('gasMutation("toggleSetup"'),
+    'drain이 GAS 확정보다 먼저여야 한다',
+  );
   assert.match(qty, /if \(qtyCommitTargets\[key\] !== undefined\)[\s\S]*return;/);
   assert.ok(
     qty.indexOf('if (qtyCommitTargets[key] !== undefined)') < qty.indexOf('applyEquipQtyResult'),
     'old qty response must be discarded before local apply',
   );
-  assert.match(returned, /let returnRequestStarted = false/);
-  assert.match(returned, /returnRequestStarted = true;[\s\S]*gasMutationRetrying\("toggleReturn"/);
-  assert.match(returned, /if \(returnRequestStarted && isGasOutcomeUnknownError\(e\)\)/,
-    '수량 drain 응답만 유실됐을 때 실제로 보내지 않은 반납완료를 재시도하면 안 된다');
+  // drain 실패(재시도 가능)는 확정 엔진 백오프로 이어지고, GAS 미전송을 성공으로 오인하지 않는다
+  assert.match(replay, /isRetryableLedgerError\(error\)/);
+  assert.match(replay, /requireCompletionMutationResult_/, 'GAS 확정 응답 스키마 없이는 성공 처리하지 않는다');
 });
 
 test('반출 후 누락 품목은 브라우저가 기준선 없이 insert하지 않는다', () => {
@@ -225,7 +227,11 @@ test('오래된 오프라인 반납수량은 다른 직원의 최신 반납완�
     'function isReturnCountOutboxSupersededByCompletion_(entry, trade)',
   );
   const context = { Date, String };
-  vm.runInNewContext(`${source}\nthis.isSuperseded = isReturnCountOutboxSupersededByCompletion_;`, context);
+  // 확정 대기 창(낙관 close)에서는 superseded 아님 — 하니스 기본값은 '확정 대기 없음'
+  vm.runInNewContext(
+    `this.hasPendingReturnCompletionClose_ = () => false;\n${source}\nthis.isSuperseded = isReturnCountOutboxSupersededByCompletion_;`,
+    context
+  );
 
   const doneAt = '2026-07-28T12:00:00.000Z';
   const completed = { returnDone: true, contractStatus: '반납완료', returnDoneAt: doneAt };
