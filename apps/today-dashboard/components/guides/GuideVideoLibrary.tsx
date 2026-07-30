@@ -11,6 +11,8 @@ interface GuideApiResponse {
   error?: string;
 }
 
+const PUBLIC_GUIDES_URL = "https://www.village6k.co.kr/guide";
+
 function GuideCard({ guide }: { guide: GuideVideo }) {
   const [open, setOpen] = useState(false);
   return (
@@ -87,7 +89,7 @@ export function GuideVideoLibrary({ mode = "library", equipmentNames = [] }: { m
     if (!response || !response.success || !response.configured) return null;
     if (visibleGuides.length === 0) {
       return (
-        <a href="/guides" className="tap mt-4 block rounded-[8px] border border-line bg-white px-4 py-3 text-center text-[13px] font-black text-brand-700 shadow-sm">
+        <a href={PUBLIC_GUIDES_URL} target="_blank" rel="noopener noreferrer" className="tap mt-4 block rounded-[8px] border border-line bg-white px-4 py-3 text-center text-[13px] font-black text-brand-700 shadow-sm">
           장비 사용법 영상 검색
         </a>
       );
@@ -99,7 +101,7 @@ export function GuideVideoLibrary({ mode = "library", equipmentNames = [] }: { m
             <h2 className="text-[16px] font-black text-ink">대여 전 꼭 확인하세요</h2>
             <p className="mt-1 text-[12.5px] font-semibold leading-relaxed text-ink-mute">예약 장비의 파손·분실이 잦은 부분만 골랐습니다.</p>
           </div>
-          <a href="/guides" className="shrink-0 text-[12px] font-black text-brand-700">전체 검색</a>
+          <a href={PUBLIC_GUIDES_URL} target="_blank" rel="noopener noreferrer" className="shrink-0 text-[12px] font-black text-brand-700">홈페이지 검색</a>
         </div>
         <div className="space-y-3">
           {visibleGuides.map((guide) => <GuideCard key={guide.id} guide={guide} />)}
