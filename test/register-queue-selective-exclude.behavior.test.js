@@ -71,3 +71,14 @@ test('최상위 미등록 장비(❓)는 바로등록 승인 없이는 등록을
   // 제외 행 면제
   assert.equal(ctx.getBlockingRegisterIssue_([mk('❓ 미등록 장비', { status: '제외' })], 'RQ-1'), '');
 });
+
+test('등록 복구 모드는 O열 추론이 아니라 명시 fromQueue 플래그로만 켜진다', () => {
+  const registerBody = extractFunction(backend, 'registerByReqID');
+  assert.match(registerBody, /startedFromRegisterQueue = registerOptions\.fromQueue === true/,
+    'O열 등록대기 추론은 onEdit pre-mark 때문에 신규 중복을 조용히 완료 처리한다');
+  assert.doesNotMatch(registerBody, /startedFromRegisterQueue = requestHasRecoverableRegisterStatus_/,
+    '옛 O열 추론이 부활하면 안 된다');
+  // 큐 드레인 경로는 복구 모드를 명시한다
+  assert.match(backend, /registerByReqID\(sheet, qRow, \{ fromQueue: true \}\)/);
+  assert.match(backend, /registerByReqID\(sheet, pendingRow, \{ fromQueue: true \}\)/);
+});

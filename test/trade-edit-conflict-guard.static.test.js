@@ -33,6 +33,15 @@ assert(/input\.expected/.test(updateFn), '서버가 expected 스냅샷을 받아
 assert(/CONFLICT/.test(updateFn), '스냅샷 불일치 시 CONFLICT로 거부해야 한다');
 // 전화번호는 포맷 차이가 흔하므로 숫자 정규화 비교
 assert(/replace\(\/\\D\/g,\s*''\)/.test(updateFn), '연락처는 숫자 정규화 후 비교해야 한다');
+// 날짜/시간은 행마다 표시형식이 다르다(앱: "2026-07-02"/"16:00", 수동: "2026-07-02 16:00:00",
+// 레거시: "2026. 7. 2") — 문자열 그대로 비교하면 같은 값에도 CONFLICT 오탐이 난다
+assert(/dateKeyOf/.test(updateFn) && /timeKeyOf/.test(updateFn),
+  '날짜/시간은 형식 무관 키로 정규화 후 비교해야 한다 (오탐 방지)');
+assert(/반출일',\s*expected\.checkoutDate,\s*currentRow\[3\],\s*dateKeyOf/.test(updateFn),
+  '반출일 비교가 정규화 키를 사용해야 한다');
+// 레거시 행의 시간 공란은 동시 수정의 증거가 아니다 — parseDT 기본값(09:00)과 비교하면 항상 오탐
+assert(/check\[0\] !== '예약자명' && check\[3\]\(check\[2\]\) === ''/.test(updateFn),
+  '현재 셀 공란은 비교를 건너뛰어야 한다 (오탐 방지)');
 
 assert(/case "updateTrade":[\s\S]{0,900}expected/.test(api), 'updateTrade 라우트가 expected를 전달해야 한다');
 assert(/expected:\s*JSON\.stringify/.test(tradeActions) || /expected:\s*JSON\.stringify/.test(store),

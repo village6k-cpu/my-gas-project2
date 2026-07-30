@@ -593,7 +593,8 @@
               original.start = item.start;
               original.end   = item.end;
             } else {
-              showToast('변경 실패: ' + res.message);
+              // 새 updateScheduleTime 응답은 error 필드를 쓴다 (BUSY/STALE_ROWS 안내 포함)
+              showToast('변경 실패: ' + (res.error || res.message || ''));
               items.update({ id: id, start: original.start, end: original.end });
             }
           })

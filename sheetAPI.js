@@ -907,7 +907,8 @@ function doScanAll() {
     }
 
     if (registerVal === "등록" && registerStatus !== "등록완료") {
-      registerByReqID(sheet, row);
+      // 멈춘 큐 행 재처리면 복구 모드(중복 시 기존 거래로 완료), 신규면 중복 경고 유지
+      registerByReqID(sheet, row, { fromQueue: isRegisterQueueStatus_(registerStatus) });
       processed++;
     }
   }
@@ -957,7 +958,8 @@ function doScheduleAction(action, reqID) {
 
     case "등록":
       try {
-        registerByReqID(sheet, targetRow);
+        var preRegisterStatus = String(sheet.getRange(targetRow, 15).getDisplayValue() || "");
+        registerByReqID(sheet, targetRow, { fromQueue: isRegisterQueueStatus_(preRegisterStatus) });
       } catch (regErr) {
         sheet.getRange(targetRow, 15).setValue("❌ 등록 실패: " + regErr.message);
         sheet.getRange(targetRow, 14).clearContent();

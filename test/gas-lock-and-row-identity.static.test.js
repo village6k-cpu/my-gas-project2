@@ -57,5 +57,7 @@ assert(/var tidParam = item\.거래ID[\s\S]{0,300}action=updateTime[\s\S]{0,300}
   'docs 타임라인이 updateTime에 거래ID를 보내야 한다');
 assert(/updateScheduleTime\(original\.rowIndex,\s*item\.start,\s*item\.end,\s*riJSON,\s*original\.거래ID/.test(gasTimeline),
   'GAS 타임라인도 updateScheduleTime에 거래ID를 보내야 한다');
+assert(/res\.error \|\| res\.message/.test(gasTimeline),
+  'BUSY/STALE_ROWS 안내(error 필드)가 undefined로 표시되면 안 된다');
 
 console.log('# gas lock scope & row identity checks passed');

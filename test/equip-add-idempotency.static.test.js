@@ -31,6 +31,12 @@ assert(/commitDashboardMutation_\(addProps,\s*tid,\s*addMutationId,\s*'addEquip'
   'append 확정 후 멱등 마커를 커밋해야 한다');
 assert(/dashboardAddRecent_/.test(addFn),
   '짧은 창의 동일 내용 재클릭도 지문 기반으로 걸러야 한다');
+// 지문 dedupe는 멱등 수단이 없는 레거시 호출에만 — onsiteAddon(자체 예약 멱등)과
+// mutationId 요청까지 지문으로 막으면 의도한 동일 내용 재추가가 hollow 성공으로 삼켜진다
+assert(/var legacyAddDedupe = !addMutationId && !options\.idempotencyReservation && !lockAlreadyHeld;/.test(addFn),
+  '지문 dedupe는 레거시 경로에만 적용해야 한다');
+assert(/if \(legacyAddDedupe\) \{[\s\S]{0,200}dashboardAddRecent_/.test(addFn),
+  '지문 조회가 legacyAddDedupe 게이트 안에 있어야 한다');
 // pending 중복은 재실행(중복 행 위험) 대신 BUSY로 물러난다
 assert(/addMutation\.duplicate[\s\S]{0,400}retryable:\s*true/.test(addFn),
   'pending 중복은 fail-closed(BUSY 재시도)여야 한다');

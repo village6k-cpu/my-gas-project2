@@ -150,7 +150,10 @@ function scheduleWake(): void {
   const pending = Array.from(jobs.values()).filter((job) => job.attempts < MAX_ATTEMPTS);
   if (!pending.length) return;
   const soonest = Math.min(...pending.map((job) => nextAttemptAt.get(job.queueId) ?? 0));
-  const delay = Math.max(250, soonest - Date.now());
+  // 오프라인이면 processQueue가 즉시 break하므로 250ms 타이머는 4Hz 공회전이 된다.
+  // online 이벤트가 복귀 즉시 재개하므로 폴백 wake는 60초면 충분하다.
+  const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+  const delay = Math.max(offline ? 60_000 : 250, soonest - Date.now());
   const at = Date.now() + delay;
   // 더 이른 재시도가 필요한 잡이 생기면 기존 타이머를 선점하고 짧은 지연으로 재예약한다.
   // (예전엔 기존 타이머가 있으면 무조건 반환 → 새 실패 잡의 재시도가 최대 60초까지 밀렸다)
@@ -277,12 +280,14 @@ export function pendingPhotoUploadCount(): number {
 
 if (typeof window !== "undefined") {
   window.addEventListener("online", () => {
-    // 오프라인 동안 소진된 잡을 되살린다 (서버 clientKey 멱등 — 재전송 안전).
-    // 서버가 영구 거절한 잡(permanent)은 부활 대상에서 제외한다.
+    // 온라인 복귀: 대기 잡은 즉시 재개하고, 네트워크 원인으로 소진된 잡만 부활한다
+    // (재시작 부활과 같은 게이트 — 서버가 5회 실거절한 잡을 매 복귀마다 재전송하면 안 된다).
+    // 서버가 영구 거절한 잡(permanent)은 항상 제외. 재전송은 clientKey 멱등이라 안전.
     const now = Date.now();
     for (const job of jobs.values()) {
       if (job.permanent) continue;
       if (job.attempts >= MAX_ATTEMPTS) {
+        if (!NETWORK_ERROR_RE.test(String(job.lastError || ""))) continue;
         job.attempts = 0;
         job.lastError = undefined;
         void idbWrite(job);

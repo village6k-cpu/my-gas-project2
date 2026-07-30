@@ -42,6 +42,12 @@ assert(/tradeLedgerSyncPending_v1_/.test(backend) && /function drainPendingTrade
 const regenWorker = extractFunction(codeJs, 'regenPendingContracts');
 assert(/linkUpdate/.test(regenWorker) && /success !== true/.test(regenWorker),
   '재생성 워커는 linkUpdate.success를 검증해 실패 시 재시도 큐에 남겨야 한다');
+// '거래ID를 찾을 수 없음'은 영구 조건 — 단순 재시도는 30분마다 계약서 파일을 만들고
+// 버리는 무한 루프가 된다. 행 복구 1회 → 취소/완전삭제 거래는 큐 종료로 분류해야 한다.
+assert(/거래ID를 찾을 수 없음/.test(regenWorker) && /ensureRegisteredTradeLedgerRow_/.test(regenWorker),
+  '원장 행 부재는 복구 프리미티브로 1회 복구 후 재기록해야 한다');
+assert(/skippedCancelled|manualRepairNeeded/.test(regenWorker),
+  '취소·완전삭제 거래는 무한 재시도 대신 큐를 비워야 한다');
 
 // 3) 금액(I열) readback
 const linkFn = extractFunction(contract, 'updateContractLink');

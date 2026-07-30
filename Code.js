@@ -1710,6 +1710,35 @@ function regenPendingContracts() {
       // 뒤이므로, 성공 처리하면 원장 링크가 조용히 빈 채 남는다. 실패로 던지면 기존
       // bounded-retry 큐가 링크 기록까지 포함해 재시도한다.
       var regenLinkUpdate = regenResult && regenResult.linkUpdate;
+      if ((!regenLinkUpdate || regenLinkUpdate.success !== true) &&
+          /거래ID를 찾을 수 없음/.test(String((regenLinkUpdate && regenLinkUpdate.error) || ''))) {
+        // 원장 행 자체가 없는 영구 조건 — 단순 재시도는 30분마다 계약서 파일을
+        // 만들고 휴지통에 버리는 무한 루프가 된다. 취소 거래는 행 부재가 정상이므로
+        // 링크 생략, 등록 거래는 검증된 프리미티브로 행을 복구해 1회 재기록,
+        // 계약마스터에도 없는 거래(완전삭제)는 큐를 비우고 수동 확인 대상으로 남긴다.
+        var regenContractStatus = '';
+        try {
+          var regenContract = getDashboardContractMapForIds_(ss.getSheetByName('계약마스터'), [거래ID])[거래ID];
+          regenContractStatus = String((regenContract && regenContract.contractStatus) || '');
+        } catch (statusErr) {}
+        if (regenContractStatus === '취소') {
+          Logger.log('취소 거래 — 거래내역 행 없음이 정상이라 링크 기록 생략: ' + 거래ID);
+          regenLinkUpdate = { success: true, skippedCancelled: true };
+        } else {
+          try {
+            ensureRegisteredTradeLedgerRow_(거래ID, { dryRun: false });
+            regenLinkUpdate = updateContractLink(거래ID, regenResult.url, regenResult.finalAmount, {});
+          } catch (relinkErr) {
+            var relinkMsg = relinkErr && relinkErr.message ? relinkErr.message : String(relinkErr);
+            if (/계약마스터에서 거래ID를 찾지 못했습니다|거래ID 중복/.test(relinkMsg)) {
+              Logger.log('계약서 링크 기록 불가 — 수동 확인 필요, 재시도 중단: ' + 거래ID + ' / ' + relinkMsg);
+              regenLinkUpdate = { success: true, manualRepairNeeded: true };
+            } else {
+              regenLinkUpdate = { success: false, error: relinkMsg };
+            }
+          }
+        }
+      }
       if (!regenLinkUpdate || regenLinkUpdate.success !== true) {
         throw new Error('거래내역 계약서 링크 기록 실패: ' + String((regenLinkUpdate && regenLinkUpdate.error) || '결과 없음'));
       }

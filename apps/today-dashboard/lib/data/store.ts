@@ -221,16 +221,22 @@ function preserveTradePhotos(next: Trade, previous?: Trade): Trade {
 // 남기고 모든 스냅샷 적용 경로에서 걸러낸다.
 const EXCLUDED_ITEM_TOMBSTONE_KEY = "heybilly:excluded-item-tombstones:v1";
 const EXCLUDED_ITEM_TOMBSTONE_TTL_MS = 10 * 60 * 1000;
+type ExcludedItemTombstone = { at: number; name?: string };
 
-function readExcludedItemTombstones_(): Record<string, number> {
+function readExcludedItemTombstones_(): Record<string, ExcludedItemTombstone> {
   if (typeof window === "undefined") return {};
   try {
     const parsed = JSON.parse(window.localStorage.getItem(EXCLUDED_ITEM_TOMBSTONE_KEY) || "{}");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const now = Date.now();
-    const fresh: Record<string, number> = {};
-    for (const [key, at] of Object.entries(parsed as Record<string, unknown>)) {
-      if (Number(at) && now - Number(at) < EXCLUDED_ITEM_TOMBSTONE_TTL_MS) fresh[key] = Number(at);
+    const fresh: Record<string, ExcludedItemTombstone> = {};
+    for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
+      // 구버전 값(숫자)도 수용
+      const entry: ExcludedItemTombstone =
+        typeof raw === "number" ? { at: raw } : ((raw ?? {}) as ExcludedItemTombstone);
+      if (Number(entry.at) && now - Number(entry.at) < EXCLUDED_ITEM_TOMBSTONE_TTL_MS) {
+        fresh[key] = { at: Number(entry.at), name: entry.name ? String(entry.name) : undefined };
+      }
     }
     return fresh;
   } catch {
@@ -238,18 +244,50 @@ function readExcludedItemTombstones_(): Record<string, number> {
   }
 }
 
-function recordExcludedItemTombstone_(tradeId: string, scheduleId: string): void {
+function writeExcludedItemTombstones_(tombstones: Record<string, ExcludedItemTombstone>): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (Object.keys(tombstones).length) window.localStorage.setItem(EXCLUDED_ITEM_TOMBSTONE_KEY, JSON.stringify(tombstones));
+    else window.localStorage.removeItem(EXCLUDED_ITEM_TOMBSTONE_KEY);
+  } catch { /* noop */ }
+}
+
+function recordExcludedItemTombstone_(tradeId: string, scheduleId: string, equipName?: string): void {
   if (typeof window === "undefined") return;
   try {
     const tombstones = readExcludedItemTombstones_();
-    tombstones[`${tradeId}|${scheduleId}`] = Date.now();
-    window.localStorage.setItem(EXCLUDED_ITEM_TOMBSTONE_KEY, JSON.stringify(tombstones));
+    tombstones[`${tradeId}|${scheduleId}`] = { at: Date.now(), name: equipName ? String(equipName) : undefined };
+    writeExcludedItemTombstones_(tombstones);
   } catch { /* private mode: realtime 좀비는 워커 투영 후 자연 수렴 */ }
 }
 
-function dropRecentlyExcludedItems_(trade: Trade, tombstones: Record<string, number>): Trade {
+/** 추가가 확정한 스케줄ID의 tombstone을 해제한다 — GAS가 제외로 빈 번호를 재사용하면
+ * 새 장비가 tombstone에 걸려 10분간 숨는 회귀를 막는다. */
+function clearExcludedItemTombstones_(tradeId: string, scheduleIds: string[]): void {
+  if (typeof window === "undefined" || !scheduleIds.length) return;
+  try {
+    const tombstones = readExcludedItemTombstones_();
+    let changed = false;
+    scheduleIds.forEach((scheduleId) => {
+      const key = `${tradeId}|${String(scheduleId || "").trim()}`;
+      if (tombstones[key]) {
+        delete tombstones[key];
+        changed = true;
+      }
+    });
+    if (changed) writeExcludedItemTombstones_(tombstones);
+  } catch { /* noop */ }
+}
+
+function dropRecentlyExcludedItems_(trade: Trade, tombstones: Record<string, ExcludedItemTombstone>): Trade {
   if (!Object.keys(tombstones).length) return trade;
-  const filtered = trade.equipments.filter((item) => !tombstones[`${trade.tradeId}|${item.scheduleId}`]);
+  const filtered = trade.equipments.filter((item) => {
+    const tomb = tombstones[`${trade.tradeId}|${item.scheduleId}`];
+    if (!tomb) return true;
+    // 이름이 다르면 제외했던 그 품목이 아니라 번호를 재사용한 새 장비다 — 숨기지 않는다
+    if (tomb.name && String(item.name || "").trim() !== String(tomb.name).trim()) return true;
+    return false;
+  });
   return filtered.length === trade.equipments.length ? trade : { ...trade, equipments: filtered };
 }
 
@@ -1349,6 +1387,8 @@ type CompletionMutationOutboxEntry = {
   target: boolean;
   mutationId: string;
   force?: boolean;
+  /** 기준선 없음 확인을 근거로 한 force — 재전송에서도 서버가 정본 기준선을 재검증하게 한다 */
+  autoForce?: boolean;
   optimisticDoneAt: string | null;
   createdAt: number;
   attempts: number;
@@ -1384,6 +1424,7 @@ function readCompletionMutationOutbox(): Record<string, CompletionMutationOutbox
         target: entry.target,
         mutationId,
         force: !!entry.force,
+        autoForce: !!entry.autoForce,
         optimisticDoneAt: entry.optimisticDoneAt ? String(entry.optimisticDoneAt) : null,
         createdAt: Number(entry.createdAt || 0) || Date.now(),
         attempts: Math.max(0, Number(entry.attempts || 0) || 0),
@@ -1906,7 +1947,8 @@ async function commitRemoveEquipmentMutation_(
     applyContractMutationResult(entry.tradeId, res, [entry.scheduleId]);
     acknowledgeRemoveEquipmentOutbox_(entry);
     // removed_at 투영이 늦는 동안 realtime 에코/새로고침이 이 품목을 되살리지 않게 한다
-    recordExcludedItemTombstone_(entry.tradeId, entry.scheduleId);
+    // (장비명을 함께 기록 — 번호가 재사용된 다른 장비는 숨기지 않는다)
+    recordExcludedItemTombstone_(entry.tradeId, entry.scheduleId, entry.equipName);
     finishTradeSave(entry.tradeId, saveId, "saved", "장비 제외 저장됨");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -2266,6 +2308,7 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
     target: on,
     mutationId,
     force,
+    autoForce: force && !hasCheckoutBaseline,
     optimisticDoneAt: optimisticReturnDoneAt,
     createdAt: Date.now(),
     attempts: 0,
@@ -2336,7 +2379,7 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
     if (returnRequestStarted && isGasOutcomeUnknownError(e)) {
       // 응답만 유실됐을 수 있다 — 표시를 되돌리지 않고 같은 목표 상태를 백그라운드 재확인한다.
       set({ toast: { id: saveId, text: "⚠️ 반납완료는 표시됐고 서버 응답을 다시 확인 중입니다", kind: "saving" } });
-      queueReturnOutcomeRetry(tradeId, on, force, optimisticReturnDoneAt, saveId, mutationId);
+      queueReturnOutcomeRetry(tradeId, on, force, optimisticReturnDoneAt, saveId, mutationId, 1, force && !hasCheckoutBaseline);
       return { ok: true, blockers: [] };
     }
     if (returnRequestStarted && isRetryableLedgerError(e)) {
@@ -2369,6 +2412,7 @@ function queueReturnOutcomeRetry(
   saveId: number,
   mutationId: string,
   attempt = 1,
+  autoForce = false,
 ): void {
   if (typeof window === "undefined") return;
   if (returnOutcomeRetryTimers[tradeId]) window.clearTimeout(returnOutcomeRetryTimers[tradeId]);
@@ -2381,6 +2425,7 @@ function queueReturnOutcomeRetry(
         done: on,
         mutationId,
         ...(force ? { force: 1 } : {}),
+        ...(force && autoForce ? { autoForce: 1 } : {}),
       });
       requireCompletionMutationResult_(res, "returnDone");
       const confirmedDone = typeof res?.returnDone === "boolean" ? res.returnDone : on;
@@ -2391,7 +2436,7 @@ function queueReturnOutcomeRetry(
       finishTradeSave(tradeId, saveId, "saved", confirmedDone ? "반납완료 저장됨" : "저장됨");
     } catch (error) {
       if (attempt < RETURN_OUTCOME_MAX_ATTEMPTS && isRetryableLedgerError(error)) {
-        queueReturnOutcomeRetry(tradeId, on, force, optimisticDoneAt, saveId, mutationId, attempt + 1);
+        queueReturnOutcomeRetry(tradeId, on, force, optimisticDoneAt, saveId, mutationId, attempt + 1, autoForce);
         return;
       }
       console.error("[write-back] 반납완료 결과 미확정:", error);
@@ -3237,6 +3282,8 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
           done: latest.target,
           mutationId: latest.mutationId,
           ...(latest.force ? { force: 1 } : {}),
+          // 기준선 없음 근거의 force는 재생에서도 서버 정본 재검증을 거친다
+          ...(latest.force && latest.autoForce ? { autoForce: 1 } : {}),
         });
     requireCompletionMutationResult_(res, latest.kind === "setup" ? "setupDone" : "returnDone");
     if (latest.kind === "setup") {
@@ -3698,6 +3745,9 @@ function applyGasOnsiteItems_(
   options?: { amount?: number | null; contractUrl?: string; contractRegenPending?: boolean },
 ): void {
   const ids = new Set(items.map((item) => item.scheduleId));
+  // GAS가 제외로 빈 스케줄 번호를 재사용했을 수 있다 — 확정된 추가 품목은 제외
+  // tombstone에서 즉시 해제해 스냅샷 병합이 새 장비를 숨기지 않게 한다
+  clearExcludedItemTombstones_(tradeId, Array.from(ids));
   mutateTrade(tradeId, (trade) => ({
     ...trade,
     equipments: [...trade.equipments.filter((item) => !ids.has(item.scheduleId)), ...items],

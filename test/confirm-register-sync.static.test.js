@@ -52,7 +52,7 @@ assert(
 );
 assert(
   /if \(REGISTER_QUEUE_PROCESSING_\) return;/.test(backend) &&
-    /try \{\s*registerByReqID\(sheet, pendingRow\);[\s\S]{0,260}catch \(e\) \{[\s\S]{0,160}등록 실패/.test(backend),
+    /try \{\s*registerByReqID\(sheet, pendingRow, \{ fromQueue: true \}\);[\s\S]{0,260}catch \(e\) \{[\s\S]{0,160}등록 실패/.test(backend),
   'processRegistrationQueue_ must prevent nested drains and isolate each reqID failure so later registrations keep moving'
 );
 assert(
@@ -60,7 +60,9 @@ assert(
   'registerByReqID must drain 등록대기 in finally so validation returns and exceptions do not strand later requests (releaseLock 뒤 락 밖 알림톡 블록을 사이에 허용)'
 );
 assert(
-  /const startedFromRegisterQueue = requestHasRecoverableRegisterStatus_\(allData, reqID\);/.test(backend) &&
+  // 복구 모드는 큐 드레인의 명시 플래그로만 — O열 추론은 onEdit pre-mark와 결합해
+  // 신규 요청의 진짜 중복을 경고 없이 완료 처리하는 회귀를 만든다
+  /const startedFromRegisterQueue = registerOptions\.fromQueue === true;/.test(backend) &&
     /function getRequestExistingTradeID_\(data, reqID\)/.test(backend) &&
     /function finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, tradeID\)/.test(backend) &&
     /if \(startedFromRegisterQueue && completedTradeID\) \{[\s\S]{0,180}finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, completedTradeID\);/.test(backend) &&

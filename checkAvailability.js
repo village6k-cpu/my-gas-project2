@@ -5298,18 +5298,39 @@ function dashboardUpdateTradeDetails(tradeId, input) {
       var currentRow = contractSheet.getRange(row, 2, 1, 7).getDisplayValues()[0];
       var digitsOnly = function(v) { return String(v || '').replace(/\D/g, '').slice(-10); };
       var trimmed = function(v) { return String(v || '').trim(); };
+      // 날짜/시간은 표시형식이 행마다 다를 수 있다(앱 기록: "2026-07-02"/"16:00",
+      // 수동 편집: "2026-07-02 16:00:00", 레거시: "2026. 7. 2"). 문자열 그대로 비교하면
+      // 값이 같아도 CONFLICT 오탐이 나므로 형식 무관 키로 정규화해 비교한다.
+      var dateKeyOf = function(v) {
+        var s = String(v || '').trim();
+        var m = s.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+        return m ? m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2) : s;
+      };
+      var timeKeyOf = function(v) {
+        var s = String(v || '').trim();
+        var isPm = /오후|\bPM\b/i.test(s);
+        var m = s.match(/(\d{1,2}):(\d{2})/);
+        if (!m) return s;
+        var hour = parseInt(m[1], 10);
+        if (isPm && hour < 12) hour += 12;
+        return ('0' + hour).slice(-2) + ':' + m[2];
+      };
       var conflictChecks = [
         ['예약자명', expected.customerName, currentRow[0], trimmed],
         ['연락처', expected.customerPhone, currentRow[1], digitsOnly],
         ['업체명', expected.company, currentRow[2], trimmed],
-        ['반출일', expected.checkoutDate, currentRow[3], trimmed],
-        ['반출시간', expected.checkoutTime, currentRow[4], trimmed],
-        ['반납일', expected.returnDate, currentRow[5], trimmed],
-        ['반납시간', expected.returnTime, currentRow[6], trimmed]
+        ['반출일', expected.checkoutDate, currentRow[3], dateKeyOf],
+        ['반출시간', expected.checkoutTime, currentRow[4], timeKeyOf],
+        ['반납일', expected.returnDate, currentRow[5], dateKeyOf],
+        ['반납시간', expected.returnTime, currentRow[6], timeKeyOf]
       ];
       for (var ci = 0; ci < conflictChecks.length; ci++) {
         var check = conflictChecks[ci];
         if (check[1] === undefined || check[1] === null) continue;
+        // 현재 셀이 비어 있으면(레거시 행의 시간 공란 등) 동시 수정의 증거가 아니라
+        // 원래 비어 있던 값이다 — 클라이언트 기본값(parseDT 09:00 등)과 비교하면
+        // 항상 오탐 CONFLICT가 나므로 비교를 건너뛴다 (예약자명은 필수라 예외).
+        if (check[0] !== '예약자명' && check[3](check[2]) === '') continue;
         if (check[3](check[1]) !== check[3](check[2])) {
           return {
             error: '다른 기기에서 먼저 수정된 예약입니다 (' + check[0] + ' 변경됨). 새로고침 후 다시 편집하세요.',
@@ -8698,10 +8719,14 @@ function dashboardAddEquipments(tid, entries, options) {
       var addLeaseBlock = dashboardTradeMutationLeaseError_(addProps, tid, 'equipmentAdd', '');
       if (addLeaseBlock) return addLeaseBlock;
 
-      // 멱등 가드: 응답 유실 뒤 같은 mutationId 재시도와, 짧은 창(30초)의 동일 내용
-      // 재클릭이 같은 장비 행을 두 번 append하지 않게 한다 (onsiteAddon 외 경로 보호).
+      // 멱등 가드: 응답 유실 뒤 같은 mutationId 재시도가 같은 장비 행을 두 번 append하지
+      // 않게 한다. 지문(fingerprint) 기반 30초 dedupe는 멱등 수단이 전혀 없는 레거시
+      // 호출(구버전 캐시 페이지)에만 적용한다 — mutationId가 있는 요청과 onsiteAddon
+      // (자체 예약 멱등 보유)까지 지문으로 막으면, 의도한 동일 내용 재추가(같은 장비
+      // 하나 더)가 품목 없는 hollow duplicate 성공으로 삼켜져 시트 행이 누락된다.
       addFingerprint = dashboardOnsiteRequestFingerprint_(tid, addEntries, {});
       addMutationId = normalizeDashboardMutationId_(options.mutationId);
+      var legacyAddDedupe = !addMutationId && !options.idempotencyReservation && !lockAlreadyHeld;
       if (addMutationId) {
         var addMutation = beginDashboardMutation_(addProps, tid, addMutationId, 'addEquip', addFingerprint);
         if (addMutation.error) return attachProfile_({ error: addMutation.error });
@@ -8714,16 +8739,18 @@ function dashboardAddEquipments(tid, entries, options) {
           return attachProfile_({ error: '같은 추가 요청을 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true });
         }
       }
-      try {
-        if (CacheService.getScriptCache().get('dashboardAddRecent_' + addFingerprint)) {
-          return attachProfile_({
-            success: true,
-            duplicate: true,
-            tid: tid,
-            message: '방금 동일한 추가가 완료되었습니다 (중복 방지). 의도한 반복 추가라면 잠시 후 다시 시도하세요.'
-          });
-        }
-      } catch (recentReadErr) {}
+      if (legacyAddDedupe) {
+        try {
+          if (CacheService.getScriptCache().get('dashboardAddRecent_' + addFingerprint)) {
+            return attachProfile_({
+              success: true,
+              duplicate: true,
+              tid: tid,
+              message: '방금 동일한 추가가 완료되었습니다 (중복 방지). 의도한 반복 추가라면 잠시 후 다시 시도하세요.'
+            });
+          }
+        } catch (recentReadErr) {}
+      }
     }
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
@@ -8894,7 +8921,11 @@ function dashboardAddEquipments(tid, entries, options) {
     sched.getRange(insertRow, 1, newRows.length, 13).setValues(newRows);
     // append 확정 직후 멱등 마커 커밋 — 이후 재시도는 중복 성공으로 dedupe된다.
     if (addMutationId) commitDashboardMutation_(addProps, tid, addMutationId, 'addEquip');
-    try { CacheService.getScriptCache().put('dashboardAddRecent_' + addFingerprint, '1', 30); } catch (recentWriteErr) {}
+    // 지문 tombstone은 레거시(멱등 수단 없는) 호출에만 남긴다 — onsite/mutationId 경로의
+    // 의도적 동일 내용 재추가를 30초간 삼키면 안 된다.
+    if (legacyAddDedupe) {
+      try { CacheService.getScriptCache().put('dashboardAddRecent_' + addFingerprint, '1', 30); } catch (recentWriteErr) {}
+    }
     markProfile_('write_new_rows');
     applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidRow, hadFollowingRow);
     markProfile_('format_new_rows');
@@ -10090,7 +10121,7 @@ function handleScheduleEdit(e) {
       // 내구 마커(등록대기)와 백업 트리거를 먼저 남긴다 (scheduleRegister와 동일 원칙).
       markRegisterQueued_(sheet, row);
       try { enqueuePendingRegister_(String(sheet.getRange(row, 1).getValue() || "").trim(), 30000); } catch (queueErr) {}
-      registerByReqID(sheet, row);
+      registerByReqID(sheet, row, { fromQueue: false });
     } else if (val === "추가") {
       addEquipmentToContract(sheet, row);
     } else if (val === "삭제") {
@@ -13543,7 +13574,7 @@ function _runPendingRegister() {
     var qRow = findConfirmRequestRowByReqID_(sheet, pendingReqID);
     if (qRow < 0) continue;
     try {
-      registerByReqID(sheet, qRow);
+      registerByReqID(sheet, qRow, { fromQueue: true });
     } catch (e) {
       sheet.getRange(qRow, 15).setValue("❌ 등록 실패: " + e.message);
     }
@@ -13631,7 +13662,8 @@ function planMergedScheduleRows_(allData, reqID, mergeTargetTID, existingSchedul
   };
 }
 
-function registerByReqID(sheet, triggerRow) {
+function registerByReqID(sheet, triggerRow, registerOptions) {
+  registerOptions = registerOptions || {};
   var _regPerfT0 = Date.now(); // 계측: 총시간/락대기/알림톡/큐 소진 (perfLog_로 기록)
   // ── 전체 등록 프로세스 직렬화 (동시 실행 방지) ──
   var regLock = LockService.getScriptLock();
@@ -13658,7 +13690,11 @@ function registerByReqID(sheet, triggerRow) {
   for (var di = 0; di < allData.length; di++) { allData[di][2] = regDisplayData[di][2]; allData[di][4] = regDisplayData[di][4]; allData[di][11] = regDisplayData[di][11]; }
   const triggerIdx = triggerRow - 2;
   const reqID = allData[triggerIdx][0];
-  const startedFromRegisterQueue = requestHasRecoverableRegisterStatus_(allData, reqID);
+  // 복구 모드는 큐 드레인 재진입(fromQueue) 여부로만 판정한다. O열 '등록대기'로 추론하면
+  // onEdit 직전의 내구 pre-mark 때문에 모든 수동 등록이 복구로 오인되어, 신규 요청의
+  // 진짜 중복이 '⚠️ 중복' 경고 없이 기존 거래로 조용히 완료 처리된다. 직접 호출 경로는
+  // 호출부가 사전 O열 상태로 fromQueue를 결정한다(멈춘 큐 재등록 시나리오 보존).
+  const startedFromRegisterQueue = registerOptions.fromQueue === true;
 
   if (!reqID) {
     sheet.getRange(triggerRow, 15).setValue("❌ 요청ID 없음");
@@ -13735,9 +13771,18 @@ function registerByReqID(sheet, triggerRow) {
 
   // ── 할인유형 미확정(M열 공란) → 등록 시점 고객DB I열 폴백 ──
   // 카톡 값이 없을 때만 고객DB를 쓴다. 폴백 실패는 공란 유지(계약마스터 기록 시 '일반').
+  // 동명이인 방어(_insertAndCheckRequest와 동일 원칙): 요청 연락처가 고객DB의 어떤
+  // 행과도 일치하지 않으면 이름만 같은 매칭은 타인이다 — 타인의 단골/제휴 할인을
+  // 신규 고객에게 붙이지 않는다.
   if (!할인유형) {
     try {
       var _discountFallbackMatches = _findConfirmRequestCustomerDbMatches_(ss, 예약자명, 연락처);
+      var _fallbackPhoneKey = _confirmRequestPhoneKey_(연락처);
+      if (_fallbackPhoneKey) {
+        _discountFallbackMatches = (_discountFallbackMatches || []).filter(function(m) {
+          return m.phoneKey && m.phoneKey === _fallbackPhoneKey;
+        });
+      }
       할인유형 = _bestConfirmRequestCustomerDbDiscount_(_discountFallbackMatches) || "";
     } catch (discountFallbackErr) {}
   }
@@ -14239,7 +14284,7 @@ function processRegistrationQueue_(sheet) {
 
       // 등록 실행. 한 건 실패가 뒤 요청 등록을 막지 않도록 reqID 단위로 격리한다.
       try {
-        registerByReqID(sheet, pendingRow);
+        registerByReqID(sheet, pendingRow, { fromQueue: true });
       } catch (e) {
         sheet.getRange(pendingRow, 15).setValue("❌ 등록 실패: " + e.message);
         sheet.getRange(pendingRow, 14).clearContent();
@@ -15204,7 +15249,9 @@ function manualRegister() {
     SpreadsheetApp.getUi().alert("등록할 행을 선택하세요.");
     return;
   }
-  registerByReqID(sheet, row);
+  // 멈춘 큐 행(등록대기)을 수동 재실행하는 경우에만 복구 모드로 이어간다
+  var manualPreStatus = String(sheet.getRange(row, 15).getDisplayValue() || "");
+  registerByReqID(sheet, row, { fromQueue: isRegisterQueueStatus_(manualPreStatus) });
 }
 
 

@@ -89,3 +89,12 @@ test('고객DB 저장 실패는 pending 속성으로 남겨 재시도한다', ()
   assert.match(backend, /customerDbPending_v1_/, '고객DB 실패 pending 마커 필요');
   assert.match(backend, /function drainPendingCustomerDbWrites_\(/, 'pending 고객DB 드레인 함수 필요');
 });
+
+test('등록 시 고객DB 할인 폴백은 연락처 불일치 동명이인을 신뢰하지 않는다', () => {
+  const registerBody = extractFunction(backend, 'registerByReqID');
+  assert.match(
+    registerBody,
+    /_fallbackPhoneKey[\s\S]{0,400}m\.phoneKey && m\.phoneKey === _fallbackPhoneKey/,
+    '연락처가 있는데 고객DB와 불일치하면 이름만 같은 매칭의 할인(단골 등)을 쓰면 안 된다'
+  );
+});
