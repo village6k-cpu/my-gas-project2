@@ -26,7 +26,7 @@ assert(
   'repair must no longer be limited to empty-equipment trades'
 );
 assert(
-  storeSource.includes('repairDashboardDetailsForIncompleteTrades'),
+  storeSource.includes('repairDashboardDateDetails') && storeSource.includes('repairDayDetails('),
   'store load/poll path must repair missing contract links from dashboard detail data'
 );
 

@@ -1180,6 +1180,7 @@ function runFunction(funcName, params) {
     "normalizeConfirmRequestDates",
     "recoverPendingRegistrations",
     "recoverPartiallyRegisteredRequests",
+    "repairMissingTradeLedgerRow",
     "autoClearRequests",
     "setupAutoClearTrigger",
     "deleteRequest",
@@ -1335,6 +1336,11 @@ function runFunction(funcName, params) {
       var extraText = (args && typeof args === "object") ? (args.extraText || args.추가요청 || args.note || args.memo) : undefined;
       var result = regenerateContractById(tradeId, extraText);
       return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "repairMissingTradeLedgerRow") {
+      var repairArgs = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
+      var repairResult = repairMissingTradeLedgerRow(repairArgs || {});
+      return { success: !!repairResult.success, function: funcName, result: repairResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "extendRegisteredTrade") {
       var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;

@@ -24,7 +24,7 @@ assert.doesNotMatch(
 
 assert.match(
   source,
-  /const finalAmount\s*=\s*readContractAmount_\(ws,\s*paymentRefs\.finalAmountCell\)[\s\S]*updateContractLink\(거래ID,\s*newUrl,\s*finalAmount\)/,
+  /const finalAmount\s*=\s*readContractAmount_\(ws,\s*paymentRefs\.finalAmountCell\)[\s\S]*updateContractLink\(거래ID,\s*newUrl,\s*finalAmount,\s*\{[\s\S]*strict:/,
   'contract generation must pass the final contract amount to the linked trade row updater'
 );
 
@@ -60,7 +60,7 @@ assert.match(
 
 assert.match(
   source,
-  /function updateContractLink\(거래ID,\s*contractUrl,\s*finalAmount\)[\s\S]*setTradeAmountValue_\(거래시트\.getRange\(i \+ 2,\s*9\),\s*finalAmount\)/,
+  /function updateContractLink\(거래ID,\s*contractUrl,\s*finalAmount,\s*options\)[\s\S]*const matchedRow\s*=\s*i \+ 2[\s\S]*setTradeAmountValue_\(거래시트\.getRange\(matchedRow,\s*9\),\s*finalAmount\)/,
   'updateContractLink must sync the final contract amount into 거래내역 I열'
 );
 

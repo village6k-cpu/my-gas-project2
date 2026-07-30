@@ -1,5 +1,6 @@
 # Git worktrees (clasp가 중복 파일 감지하는 것 방지)
 .claude/worktrees/**
+.worktrees/**
 
 # Agent/tool scratch files (GAS 업로드 금지)
 .superpowers/**

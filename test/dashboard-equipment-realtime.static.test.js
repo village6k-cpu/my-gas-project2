@@ -174,7 +174,7 @@ assert.match(
 );
 assert.match(
   generateContract,
-  /function regenerateContractById\(거래ID,\s*추가요청\)[\s\S]*deleteAndRegenerateContract\(ss,\s*거래ID,\s*extraText\)[\s\S]*clearDirectContractRegenPending_\(거래ID\)/,
+  /function regenerateContractById\(거래ID,\s*추가요청,\s*options\)[\s\S]*deleteAndRegenerateContract\(ss,\s*거래ID,\s*extraText,\s*options\)[\s\S]*clearDirectContractRegenPending_\(거래ID\)/,
   'regenerateContractById must prevent the fallback trigger from regenerating the same contract again after immediate regeneration succeeds'
 );
 assert.match(

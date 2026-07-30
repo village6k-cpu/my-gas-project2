@@ -12752,8 +12752,203 @@ function getRequestExistingTradeID_(data, reqID) {
   return best;
 }
 
+/**
+ * 개고생2.0 거래내역의 기준 행을 거래ID로 보장한다.
+ * A/B/E/F만 생성·복구하고 계약서·입금자·정산값(C/D/G 이후)은 절대 덮어쓰지 않는다.
+ */
+function ensureTradeLedgerRowOnSheet_(ledgerSheet, fields, options) {
+  options = options || {};
+  fields = fields || {};
+  if (!ledgerSheet) throw new Error("거래내역 시트가 없습니다");
+
+  var tradeId = String(fields.tradeId || "").trim();
+  var customerName = String(fields.customerName || "").trim();
+  var phone = String(fields.phone || "").trim();
+  var startDate = fields.startDate;
+  if (!/^\d{6}-\d{3}$/.test(tradeId)) throw new Error("거래ID 형식 오류: " + tradeId);
+  if (!customerName) throw new Error("거래내역 예약자명이 비어 있습니다: " + tradeId);
+  if (!startDate) throw new Error("거래내역 반출일이 비어 있습니다: " + tradeId);
+  if (!phone) throw new Error("거래내역 연락처가 비어 있습니다: " + tradeId);
+
+  function dateKey_(value) {
+    if (Object.prototype.toString.call(value) === "[object Date]" && !isNaN(value.getTime())) {
+      if (typeof Utilities !== "undefined") return Utilities.formatDate(value, "Asia/Seoul", "yyyy-MM-dd");
+      return value.getFullYear() + "-" + ("0" + (value.getMonth() + 1)).slice(-2) + "-" + ("0" + value.getDate()).slice(-2);
+    }
+    var s = String(value == null ? "" : value).trim();
+    var m = s.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+    if (m) return m[1] + "-" + ("0" + m[2]).slice(-2) + "-" + ("0" + m[3]).slice(-2);
+    return s;
+  }
+  function phoneKey_(value) {
+    var digits = String(value == null ? "" : value).replace(/\D/g, "");
+    return digits.length > 10 ? digits.slice(-10) : digits;
+  }
+
+  var lastRow = Math.max(1, ledgerSheet.getLastRow());
+  var matchedRows = [];
+  if (lastRow >= 2) {
+    var ids = ledgerSheet.getRange(2, 5, lastRow - 1, 1).getDisplayValues();
+    for (var i = 0; i < ids.length; i++) {
+      if (String(ids[i][0] || "").trim() === tradeId) matchedRows.push(i + 2);
+    }
+  }
+  if (matchedRows.length > 1) {
+    throw new Error("거래내역 거래ID 중복(" + matchedRows.join(",") + "): " + tradeId);
+  }
+
+  var created = matchedRows.length === 0;
+  var targetRow = matchedRows.length ? matchedRows[0] : 2;
+  if (created && lastRow >= 2) {
+    var identityRows = ledgerSheet.getRange(2, 1, lastRow - 1, 5).getValues();
+    for (var ri = identityRows.length - 1; ri >= 0; ri--) {
+      if (identityRows[ri][0] !== "" || identityRows[ri][4] !== "") {
+        targetRow = ri + 3;
+        break;
+      }
+    }
+  }
+  if (options.dryRun === true) {
+    return {
+      success: true,
+      dryRun: true,
+      created: created,
+      row: targetRow,
+      tradeId: tradeId,
+      customerName: customerName,
+      startDate: dateKey_(startDate)
+    };
+  }
+
+  if (created && typeof ledgerSheet.getMaxRows === "function" && targetRow > ledgerSheet.getMaxRows()) {
+    ledgerSheet.insertRowsAfter(ledgerSheet.getMaxRows(), targetRow - ledgerSheet.getMaxRows());
+  }
+
+  var rowValues = ledgerSheet.getRange(targetRow, 1, 1, 6).getValues()[0];
+  while (rowValues.length < 6) rowValues.push("");
+  rowValues[0] = startDate;
+  rowValues[1] = customerName;
+  rowValues[4] = tradeId;
+  rowValues[5] = phone;
+  ledgerSheet.getRange(targetRow, 6).setNumberFormat("@");
+  ledgerSheet.getRange(targetRow, 1, 1, 6).setValues([rowValues]);
+  SpreadsheetApp.flush();
+
+  var saved = ledgerSheet.getRange(targetRow, 1, 1, 6).getDisplayValues()[0];
+  if (String(saved[4] || "").trim() !== tradeId
+      || String(saved[1] || "").trim() !== customerName
+      || phoneKey_(saved[5]) !== phoneKey_(phone)
+      || dateKey_(saved[0]) !== dateKey_(startDate)) {
+    throw new Error("거래내역 저장 후 읽기검증 실패: " + tradeId + " (행 " + targetRow + ")");
+  }
+
+  return {
+    success: true,
+    dryRun: false,
+    created: created,
+    row: targetRow,
+    tradeId: tradeId,
+    customerName: customerName,
+    startDate: dateKey_(startDate)
+  };
+}
+
+function openTradeLedgerContext_() {
+  var ledgerUrl = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  if (!ledgerUrl) throw new Error("개고생2_URL 미설정");
+  var ledgerSpreadsheet = SpreadsheetApp.openByUrl(ledgerUrl);
+  var ledgerSheet = ledgerSpreadsheet.getSheetByName("거래내역");
+  if (!ledgerSheet) throw new Error("거래내역 시트 없음");
+  return { spreadsheet: ledgerSpreadsheet, sheet: ledgerSheet };
+}
+
+function getRegisteredTradeLedgerFields_(tradeId) {
+  tradeId = String(tradeId || "").trim();
+  if (!/^\d{6}-\d{3}$/.test(tradeId)) throw new Error("거래ID 형식 오류: " + tradeId);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var contractSheet = ss.getSheetByName("계약마스터");
+  if (!contractSheet || contractSheet.getLastRow() < 2) throw new Error("계약마스터 시트 없음");
+  var contractRange = contractSheet.getRange(2, 1, contractSheet.getLastRow() - 1, 8);
+  var rawRows = contractRange.getValues();
+  var displayRows = contractRange.getDisplayValues();
+  var matchIndexes = [];
+  for (var i = 0; i < displayRows.length; i++) {
+    if (String(displayRows[i][0] || "").trim() === tradeId) matchIndexes.push(i);
+  }
+  if (matchIndexes.length === 0) throw new Error("계약마스터에서 거래ID를 찾지 못했습니다: " + tradeId);
+  if (matchIndexes.length > 1) throw new Error("계약마스터 거래ID 중복: " + tradeId);
+  var matchIndex = matchIndexes[0];
+  return {
+    tradeId: tradeId,
+    customerName: String(displayRows[matchIndex][1] || "").trim(),
+    phone: String(displayRows[matchIndex][2] || "").trim(),
+    startDate: rawRows[matchIndex][4] || String(displayRows[matchIndex][4] || "").trim()
+  };
+}
+
+function ensureRegisteredTradeLedgerRow_(tradeId, options) {
+  var fields = getRegisteredTradeLedgerFields_(tradeId);
+  var ledgerContext = openTradeLedgerContext_();
+  return ensureTradeLedgerRowOnSheet_(ledgerContext.sheet, fields, options || {});
+}
+
+/** 운영 복구 API. 기본은 dry-run이며 정확한 거래ID 한 건만 다룬다. */
+function repairMissingTradeLedgerRow(args) {
+  args = args || {};
+  if (typeof args === "string") args = { tradeId: args };
+  var allowedKeys = { tradeId: true, 거래ID: true, dryRun: true, regenerateContract: true };
+  Object.keys(args).forEach(function(key) {
+    if (!allowedKeys[key]) throw new Error("허용되지 않은 복구 인자: " + key);
+  });
+  var tradeId = String(args.tradeId || args.거래ID || "").trim();
+  var dryRun = args.dryRun !== false;
+  var ledgerResult = ensureRegisteredTradeLedgerRow_(tradeId, { dryRun: dryRun });
+  var contractResult = null;
+  if (!dryRun && args.regenerateContract === true) {
+    contractResult = regenerateContractById(tradeId, undefined, { strictLedgerLink: true });
+  }
+  if (!dryRun) {
+    try { supaMarkTradeDirty_(tradeId); } catch (dirtyErr) {}
+    try { invalidateDashboardTradeExtraCache_([tradeId]); } catch (extraCacheErr) {}
+    try { invalidateDashboardCacheForTrade_(tradeId); } catch (cacheErr) {}
+    try { invalidateTimelineCache(); } catch (timelineErr) {}
+  }
+  return {
+    success: true,
+    dryRun: dryRun,
+    ledger: ledgerResult,
+    contractRegenerated: !!contractResult,
+    contract: contractResult
+  };
+}
+
+function markRequestLedgerPending_(sheet, allData, reqID, tradeID) {
+  for (var i = 0; i < allData.length; i++) {
+    if (allData[i][0] !== reqID) continue;
+    if (allData[i][14] === "거절" || allData[i][14] === "보류" || allData[i][14] === "제외") continue;
+    var row = i + 2;
+    sheet.getRange(row, 14).setValue("등록");
+    sheet.getRange(row, 15).setValue("등록대기");
+    sheet.getRange(row, 16).setValue(tradeID);
+    sheet.getRange(row, 15, 1, 2).setBackground("#E8F0FE");
+  }
+}
+
 function finalizeQueuedRequestFromExistingTrade_(sheet, allData, reqID, tradeID) {
   if (!tradeID) return false;
+  try {
+    ensureRegisteredTradeLedgerRow_(tradeID, { dryRun: false });
+  } catch (ledgerErr) {
+    markRequestLedgerPending_(sheet, allData, reqID, tradeID);
+    enqueuePendingRegister_(reqID, 30000);
+    Logger.log("거래내역 미확인으로 등록완료 보류: " + reqID + " / " + ledgerErr.message);
+    return false;
+  }
+  try {
+    if (PropertiesService.getScriptProperties().getProperty("CONTRACT_TEMPLATE_ID")) {
+      scheduleContractRegen(tradeID);
+    }
+  } catch (regenErr) {}
   markRequestRegistered_(sheet, allData, reqID, tradeID, "등록완료");
   try { supaMarkTradeDirty_(tradeID); } catch (dirtyErr) {}
   try { invalidateDashboardCacheForTrade_(tradeID); } catch (cacheErr) {}
@@ -12763,6 +12958,7 @@ function finalizeQueuedRequestFromExistingTrade_(sheet, allData, reqID, tradeID)
 
 function recoverPartiallyRegisteredRequests_(sheet) {
   var fixed = [];
+  var failures = [];
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return { fixed: 0, reqIDs: [] };
   var data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();
@@ -12779,8 +12975,9 @@ function recoverPartiallyRegisteredRequests_(sheet) {
     var tid = reqTradeIDs[rid] || getRequestExistingTradeID_(data, rid);
     if (!tid) continue;
     if (finalizeQueuedRequestFromExistingTrade_(sheet, data, rid, tid)) fixed.push(rid);
+    else failures.push({ reqID: rid, tradeId: tid, error: "거래내역 확인 실패 — 등록대기 유지" });
   }
-  return { fixed: fixed.length, reqIDs: fixed };
+  return { fixed: fixed.length, reqIDs: fixed, failures: failures };
 }
 
 function recoverPartiallyRegisteredRequests() {
@@ -13290,10 +13487,7 @@ function registerByReqID(sheet, triggerRow) {
     var dupTid = checkDuplicateRequest(ss, 예약자명, dupDate, dupEquips, 연락처);
     if (dupTid) {
       if (startedFromRegisterQueue) {
-        markRequestRegistered_(sheet, allData, reqID, dupTid, "등록완료");
-        try { supaMarkTradeDirty_(dupTid); } catch (dirtyErr) {}
-        try { invalidateDashboardCache([반출일str || dupDate, 반납일str || dupDate]); } catch (cacheErr) {}
-        try { invalidateTimelineCache(); } catch (timelineErr) {}
+        finalizeQueuedRequestFromExistingTrade_(sheet, allData, reqID, dupTid);
         return;
       }
       sheet.getRange(triggerRow, 15).setValue("⚠️ 중복: 동일 건이 이미 등록됨 (거래ID: " + dupTid + ")");
@@ -13581,33 +13775,31 @@ function registerByReqID(sheet, triggerRow) {
   // ── 스케줄상세 가독성 포맷팅 ──
   formatScheduleSheet(schedSheet);
 
-    if (!mergeMode) {
-  // ── 개고생2.0 거래내역 입력 ──
+  // ── 개고생2.0 거래내역 보장 ──
+  // 신규/합침/재시도 모두 같은 경로를 타며 저장 후 읽기검증이 끝나기 전에는 등록완료로 바꾸지 않는다.
   sheet.getRange(triggerRow, 15).setValue("⏳ 개고생2.0 입력 중...");
+  var ledgerContext;
   try {
-    const 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
-    if (!개고생URL) throw new Error("개고생2_URL 미설정");
-    const 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
-    const 거래시트 = 개고생SS.getSheetByName("거래내역");
-    if (!거래시트) throw new Error("거래내역 시트 없음");
-    const _aCol = 거래시트.getRange(2, 1, Math.max(1, 거래시트.getLastRow() - 1), 1).getValues();
-    let 거래newRow = 2;
-    for (let ri = _aCol.length - 1; ri >= 0; ri--) {
-      if (_aCol[ri][0] !== "" && _aCol[ri][0] != null) { 거래newRow = ri + 3; break; }
-    }
-    // 2026-04-23 컬럼 재배치 반영:
-    //   A(1)=날짜, B(2)=예약자명, C(3)=계약서링크, D(4)=입금자명,
-    //   E(5)=거래ID, F(6)=연락처
-    거래시트.getRange(거래newRow, 1).setValue(반출일);           // A: 날짜
-    거래시트.getRange(거래newRow, 2).setValue(예약자명);         // B: 예약자명
-    거래시트.getRange(거래newRow, 5).setValue(거래ID);           // E: 거래ID (구 D=4)
-    거래시트.getRange(거래newRow, 6).setNumberFormat("@").setValue(String(연락처 || ""));  // F: 연락처 (구 E=5)
-    sheet.getRange(triggerRow, 15).setValue("✅ 개고생2.0 입력완료 (행" + 거래newRow + ")");
+    ledgerContext = openTradeLedgerContext_();
+    var ledgerWrite = ensureTradeLedgerRowOnSheet_(ledgerContext.sheet, {
+      tradeId: 거래ID,
+      startDate: 반출일,
+      customerName: 예약자명,
+      phone: 연락처
+    }, { dryRun: false });
+    sheet.getRange(triggerRow, 15).setValue("✅ 개고생2.0 확인완료 (행" + ledgerWrite.row + ")");
+  } catch (ledgerErr) {
+    markRequestLedgerPending_(sheet, allData, reqID, 거래ID);
+    enqueuePendingRegister_(reqID, 30000);
+    Logger.log("거래내역 저장 실패(등록대기 유지): " + reqID + " / " + ledgerErr.message);
+    return;
+  }
 
+    if (!mergeMode) {
     // ── 개고생2.0 고객DB에 신규고객 저장 + 빈 할인유형 자동 확정 ──
     // 고객DB 구조: A=연락처(예약자ID), B=성함, I=할인유형
     try {
-      var 고객DB시트 = 개고생SS.getSheetByName("고객DB");
+      var 고객DB시트 = ledgerContext.spreadsheet.getSheetByName("고객DB");
       if (고객DB시트 && 연락처 && 예약자명) {
         var 고객lastRow = 고객DB시트.getLastRow();
         var 고객data = [];
@@ -13632,11 +13824,7 @@ function registerByReqID(sheet, triggerRow) {
     } catch (dbErr) {
       Logger.log("고객DB 저장 실패 (계속 진행): " + dbErr.message);
     }
-  } catch (err) {
-    sheet.getRange(triggerRow, 15).setValue("❌ 개고생2.0 실패: " + err.message);
-  }
-
-    } // end !mergeMode (skip 개고생2.0 + 계약서)
+    } // end !mergeMode customer DB
 
   // 합침 등록(mergeMode): 기존 거래에 장비만 추가하고 위 계약서 생성 블록을 건너뛰므로,
   // 기존 계약서를 재생성해 추가 장비·금액을 반영한다(디바운스 재생성이라 안전).
@@ -13645,16 +13833,8 @@ function registerByReqID(sheet, triggerRow) {
     try { scheduleContractRegen(mergeTargetTID); } catch (mergeRegenErr) {}
   }
 
-  // ── 확인요청에 등록 결과 표시 ──
-  for (let i = 0; i < allData.length; i++) {
-    if (allData[i][0] !== reqID) continue;
-      if (allData[i][14] === '거절' || allData[i][14] === '보류' || allData[i][14] === '제외') continue;  // 거절/보류/제외 스킵
-    const row = i + 2;
-    sheet.getRange(row, 14).setValue("등록");      // N열: 등록
-      sheet.getRange(row, 15).setValue(mergeMode ? "등록완료(합침)" : "등록완료");   // O열: 등록상태
-    sheet.getRange(row, 16).setValue(거래ID);       // P열: 거래ID
-    sheet.getRange(row, 15, 1, 2).setBackground("#C6EFCE");
-  }
+  // ── 거래내역 읽기검증을 통과한 뒤에만 확인요청을 완료 처리 ──
+  markRequestRegistered_(sheet, allData, reqID, 거래ID, mergeMode ? "등록완료(합침)" : "등록완료");
 
   // ── 신규 등록 계약서 생성: 합침 등록(위)과 동일한 디바운스 워커로 위임 ──
   // 인라인 생성(Drive 복사+전체 유효성 해제, 3~8초)을 락 홀드에서 제거.

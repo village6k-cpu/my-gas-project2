@@ -64,7 +64,7 @@ assert(
     /function getRequestExistingTradeID_\(data, reqID\)/.test(backend) &&
     /function finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, tradeID\)/.test(backend) &&
     /if \(startedFromRegisterQueue && completedTradeID\) \{[\s\S]{0,180}finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, completedTradeID\);/.test(backend) &&
-    /if \(startedFromRegisterQueue\) \{[\s\S]{0,220}markRequestRegistered_\(sheet, allData, reqID, dupTid, "등록완료"\);/.test(backend),
+    /if \(startedFromRegisterQueue\) \{[\s\S]{0,220}finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, dupTid\);/.test(backend),
   'a retry that already created schedule/contract rows must finalize 확인요청 with the existing 거래ID instead of leaving a duplicate/already-registered warning'
 );
 assert(
@@ -89,6 +89,25 @@ assert(
     /function recoverPartiallyRegisteredRequests\(\)/.test(backend) &&
     /function recoverPendingRegistrations\(\)[\s\S]{0,900}recoverPartiallyRegisteredRequests_\(sheet\);[\s\S]{0,1200}processRegistrationQueue_\(sheet\);/.test(backend),
   'there must be callable repair functions that finalize partially registered rows and drain already-stuck 등록대기 rows'
+);
+assert(
+  /function finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, tradeID\) \{[\s\S]{0,500}ensureRegisteredTradeLedgerRow_\(tradeID, \{ dryRun: false \}\);[\s\S]{0,500}markRequestRegistered_\(/.test(backend),
+  'partial registration recovery must verify or create the external 거래내역 row before marking 확인요청 complete'
+);
+const registerBody = backend.slice(
+  backend.indexOf('function registerByReqID('),
+  backend.indexOf('function processRegistrationQueue_('),
+);
+const ledgerEnsureAt = registerBody.indexOf('ensureTradeLedgerRowOnSheet_(ledgerContext.sheet');
+const sharedCompleteAt = registerBody.indexOf('markRequestRegistered_(sheet, allData, reqID, 거래ID');
+assert(
+  ledgerEnsureAt >= 0 && sharedCompleteAt > ledgerEnsureAt,
+  'normal and merge registration must both ensure 거래내역 before the shared completion marker'
+);
+assert(
+  api.includes('"repairMissingTradeLedgerRow"') &&
+    /if \(funcName === "repairMissingTradeLedgerRow"\)/.test(api),
+  'the live repair action must be explicitly allowlisted and receive structured arguments'
 );
 
 // ── 앱: 등록 직후 90초 폴링을 기다리지 않고 신규 거래 즉시 반영 ──
