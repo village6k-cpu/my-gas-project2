@@ -86,7 +86,8 @@ function createContractFromMenu() {
  * @param {string} 거래ID
  * @returns {Object} { fileName, url, fileId }
  */
-function generateContractFile(ss, 거래ID, 추가요청) {
+function generateContractFile(ss, 거래ID, 추가요청, options) {
+  options = options || {};
   const props = PropertiesService.getScriptProperties();
 
   // ── 설정값 가져오기 ──
@@ -385,9 +386,17 @@ function generateContractFile(ss, 거래ID, 추가요청) {
   }
 
   // ── 개고생2.0 거래내역 C열 계약서 링크 + I열 최종 금액 입력 ──
-  updateContractLink(거래ID, newUrl, finalAmount);
+  const linkUpdate = updateContractLink(거래ID, newUrl, finalAmount, {
+    strict: options.strictLedgerLink === true
+  });
 
-  return { fileName: fileName, url: newUrl, fileId: newFileId, finalAmount: finalAmount };
+  return {
+    fileName: fileName,
+    url: newUrl,
+    fileId: newFileId,
+    finalAmount: finalAmount,
+    linkUpdate: linkUpdate
+  };
 }
 
 // 컬럼 번호 → 문자 (1→A, 2→B ...). 배치 IO 수식 생성용.
@@ -848,42 +857,58 @@ function isContractItemEndRow_(rowValues) {
 // 개고생2.0 거래내역 C열 계약서 링크 + I열 최종 금액 입력
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function updateContractLink(거래ID, contractUrl, finalAmount) {
+function updateContractLink(거래ID, contractUrl, finalAmount, options) {
+  options = options || {};
+  const strict = options.strict === true;
   try {
+    if (!String(contractUrl || "").trim()) throw new Error("계약서 URL이 비어 있음");
     const props = PropertiesService.getScriptProperties();
     const 개고생URL = props.getProperty("개고생2_URL");
-    if (!개고생URL) return;
+    if (!개고생URL) throw new Error("개고생2_URL 속성이 없음");
 
     const 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
     const 거래시트 = 개고생SS.getSheetByName("거래내역");
-    if (!거래시트) return;
+    if (!거래시트) throw new Error("거래내역 시트가 없음");
 
     const lastRow = 거래시트.getLastRow();
-    if (lastRow < 2) return;
+    if (lastRow < 2) throw new Error("거래내역 데이터가 없음");
 
     // 2026-04-23 컬럼 재배치 반영: 거래ID D(4) → E(5), 계약서링크 M(13) → C(3)
     // I(9)=실 결제금액. 계약서 재생성 후 결제링크/정산 기준과 계약서 H47을 맞춘다.
     const ids = 거래시트.getRange(2, 5, lastRow - 1, 1).getValues();
+    const matchedRows = [];
     for (let i = 0; i < ids.length; i++) {
-      if (ids[i][0] === 거래ID) {
+      if (String(ids[i][0] || "").trim() === String(거래ID || "").trim()) {
+        const matchedRow = i + 2;
+        matchedRows.push(matchedRow);
         // C열(3)에 계약서 링크 입력
-        거래시트.getRange(i + 2, 3).setValue(contractUrl);
-        if (finalAmount && !isNaN(Number(finalAmount))) {
-          setTradeAmountValue_(거래시트.getRange(i + 2, 9), finalAmount);
+        거래시트.getRange(matchedRow, 3).setValue(contractUrl);
+        if (finalAmount !== undefined && finalAmount !== null && finalAmount !== "" && !isNaN(Number(finalAmount))) {
+          setTradeAmountValue_(거래시트.getRange(matchedRow, 9), finalAmount);
         }
-        try { if (typeof invalidateDashboardTradeExtraCache_ !== 'undefined') invalidateDashboardTradeExtraCache_([거래ID]); } catch (cacheErr) {}
-        try { if (typeof touchDashboardSearchCacheVersion_ !== 'undefined') touchDashboardSearchCacheVersion_(); } catch (searchErr) {}
-        try { if (typeof invalidateDashboardCache !== 'undefined') invalidateDashboardCache(); } catch (dashErr) {}
-        try { if (typeof invalidateTimelineCache !== 'undefined') invalidateTimelineCache(); } catch (timeErr) {}
-        try { if (typeof supaMarkTradeDirty_ !== 'undefined') supaMarkTradeDirty_(거래ID); } catch (markErr) {}
-        Logger.log("개고생2.0 거래내역 C열 링크/I열 금액 입력 완료: " + 거래ID + " / " + finalAmount);
-        return;
       }
     }
+    if (matchedRows.length === 0) throw new Error("거래ID를 찾을 수 없음: " + 거래ID);
 
-    Logger.log("개고생2.0에서 거래ID를 찾을 수 없음: " + 거래ID);
+    SpreadsheetApp.flush();
+    const mismatchedRows = matchedRows.filter(function(rowNum) {
+      return String(거래시트.getRange(rowNum, 3).getValue() || "").trim() !== String(contractUrl).trim();
+    });
+    if (mismatchedRows.length > 0) {
+      throw new Error("계약서 링크 readback 불일치 행: " + mismatchedRows.join(","));
+    }
+
+    try { if (typeof invalidateDashboardTradeExtraCache_ !== 'undefined') invalidateDashboardTradeExtraCache_([거래ID]); } catch (cacheErr) {}
+    try { if (typeof touchDashboardSearchCacheVersion_ !== 'undefined') touchDashboardSearchCacheVersion_(); } catch (searchErr) {}
+    try { if (typeof invalidateDashboardCache !== 'undefined') invalidateDashboardCache(); } catch (dashErr) {}
+    try { if (typeof invalidateTimelineCache !== 'undefined') invalidateTimelineCache(); } catch (timeErr) {}
+    try { if (typeof supaMarkTradeDirty_ !== 'undefined') supaMarkTradeDirty_(거래ID); } catch (markErr) {}
+    Logger.log("개고생2.0 거래내역 C열 링크/I열 금액 입력 완료: " + 거래ID + " / " + finalAmount);
+    return { success: true, rows: matchedRows.length, rowNumbers: matchedRows, url: contractUrl };
   } catch (err) {
     Logger.log("개고생2.0 계약서 링크 입력 실패: " + err.message);
+    if (strict) throw new Error("거래내역 계약서 링크 갱신 실패: " + err.message);
+    return { success: false, rows: 0, url: String(contractUrl || ""), error: err.message };
   }
 }
 
@@ -1049,7 +1074,7 @@ function trashContractFilesForTrade_(거래ID) {
   return trashed;
 }
 
-function deleteAndRegenerateContract(ss, 거래ID, 추가요청) {
+function deleteAndRegenerateContract(ss, 거래ID, 추가요청, options) {
   const props = PropertiesService.getScriptProperties();
 
   // 기존 파일 휴지통으로 이동
@@ -1074,16 +1099,23 @@ function deleteAndRegenerateContract(ss, 거래ID, 추가요청) {
   } catch (err) { Logger.log("M열 초기화 실패: " + err.message); }
 
   var extraText = 추가요청 !== undefined ? 추가요청 : getAdditionalRequestTextByTradeId_(ss, 거래ID);
-  return generateContractFile(ss, 거래ID, extraText);
+  return generateContractFile(ss, 거래ID, extraText, options);
 }
 
-function regenerateContractById(거래ID, 추가요청) {
+function regenerateContractById(거래ID, 추가요청, options) {
   거래ID = String(거래ID || "").trim();
   if (!거래ID) return { error: "거래ID 필수" };
+  options = options || {};
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const extraText = 추가요청 !== undefined ? String(추가요청 || "") : getAdditionalRequestTextByTradeId_(ss, 거래ID);
-  const result = deleteAndRegenerateContract(ss, 거래ID, extraText);
+  const result = deleteAndRegenerateContract(ss, 거래ID, extraText, options);
+  if (options.strictLedgerLink === true && (!result || !result.fileId || !result.url)) {
+    throw new Error("계약서 재생성 결과의 fileId와 url은 strict 모드에서 필수입니다");
+  }
+  if (options.strictLedgerLink === true && (!result.linkUpdate || result.linkUpdate.success !== true)) {
+    throw new Error("계약서 재생성 후 거래내역 링크 검증 실패");
+  }
   clearDirectContractRegenPending_(거래ID);
   const summary = result && result.fileId ? getGeneratedContractSummary_(result.fileId) : {};
   return {
@@ -1093,6 +1125,7 @@ function regenerateContractById(거래ID, 추가요청) {
     fileId: result && result.fileId ? result.fileId : "",
     finalAmount: result && result.finalAmount ? result.finalAmount : null,
     amount: result && result.finalAmount ? result.finalAmount : null,
+    linkUpdate: result && result.linkUpdate ? result.linkUpdate : null,
     extraRequestFound: !!extraText,
     summary: summary
   };

@@ -14040,6 +14040,52 @@ function removeEquipmentFromContract(sheet, row) {
  * N열 "날짜변경" → 계약마스터 + 스케줄상세 + 개고생2.0 날짜 일괄 수정 + 계약서 재생성
  * B~E열에 새 날짜/시간 입력 필요
  */
+function planRegisteredTradeInventory_(targetScheduleRows, equipmentExactMap, setNamesWithComponents) {
+  var itemMap = {};
+  var availabilityWarnings = [];
+  var unresolvedInventory = [];
+
+  (targetScheduleRows || []).forEach(function(entry) {
+    var scheduleRow = entry.values || [];
+    var setName = String(scheduleRow[2] || '').trim();
+    var itemName = String(scheduleRow[3] || '').trim();
+    var itemQty = Number(scheduleRow[4]) || 1;
+    if (!itemName) {
+      unresolvedInventory.push('row ' + entry.rowNumber + ': 장비명 없음');
+      return;
+    }
+
+    var isSetComponent = !!setName && setName !== itemName;
+    var isSetItem = !!setName && setName === itemName;
+    var isSetHeader = isSetItem && !!setNamesWithComponents[setName];
+    if (isSetHeader) {
+      var headerWarning = itemName + ': 세트 헤더(구성품으로 가용성 계산)';
+      if (availabilityWarnings.indexOf(headerWarning) < 0) availabilityWarnings.push(headerWarning);
+      return;
+    }
+
+    if (!equipmentExactMap[itemName]) {
+      // 이미 등록된 세트 구성품 중 케이블·리더기·컨트롤러 같은 비재고/레거시 명칭은
+      // 장비마스터 단품이 아니다. 날짜만 옮길 때 이름을 바꾸거나 전체 변경을 막지 않고,
+      // 기존 Mac 연장 경로처럼 재고 계산에서만 제외한다.
+      if (isSetComponent || isSetItem) {
+        var componentWarning = itemName + ': 비재고/레거시 세트 품목(가용성 계산 제외)';
+        if (availabilityWarnings.indexOf(componentWarning) < 0) availabilityWarnings.push(componentWarning);
+        return;
+      }
+      unresolvedInventory.push('row ' + entry.rowNumber + ': ' + itemName);
+      return;
+    }
+    itemMap[itemName] = (itemMap[itemName] || 0) + itemQty;
+  });
+
+  return {
+    itemMap: itemMap,
+    availabilityWarnings: availabilityWarnings,
+    unresolvedInventory: unresolvedInventory
+  };
+}
+
 /**
  * 확정된 기존 거래의 반납일시만 안전하게 연장한다.
  *
@@ -16747,30 +16793,13 @@ function changeRegisteredTradeDates(args) {
       }
     });
 
-    var unresolvedInventory = [];
-    targetScheduleRows.forEach(function(entry) {
-      var scheduleRow = entry.values;
-      var setName = String(scheduleRow[2] || '').trim();
-      var itemName = String(scheduleRow[3] || '').trim();
-      var itemQty = Number(scheduleRow[4]) || 1;
-      if (!itemName) {
-        unresolvedInventory.push('row ' + entry.rowNumber + ': 장비명 없음');
-        return;
-      }
-      var isSetHeader = !!setName && setName === itemName && !!setNamesWithComponents[setName];
-      if (isSetHeader) {
-        if (availabilityWarnings.indexOf(itemName + ': 세트 헤더(구성품으로 가용성 계산)') < 0) {
-          availabilityWarnings.push(itemName + ': 세트 헤더(구성품으로 가용성 계산)');
-        }
-        return;
-      }
-      if (!equipmentExactMap[itemName]) {
-        unresolvedInventory.push('row ' + entry.rowNumber + ': ' + itemName);
-        return;
-      }
-      itemMap[itemName] = (itemMap[itemName] || 0) + itemQty;
-    });
-    if (unresolvedInventory.length > 0) {
+    var inventoryPlan = planRegisteredTradeInventory_(
+      targetScheduleRows, equipmentExactMap, setNamesWithComponents
+    );
+    itemMap = inventoryPlan.itemMap;
+    availabilityWarnings = inventoryPlan.availabilityWarnings;
+    var unresolvedInventory = inventoryPlan.unresolvedInventory;
+        if (unresolvedInventory.length > 0) {
       throw new Error('UNRESOLVED_INVENTORY: ' + unresolvedInventory.join(', '));
     }
     if (Object.keys(itemMap).length === 0) {
