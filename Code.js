@@ -1705,7 +1705,14 @@ function regenPendingContracts() {
     try {
       // 중요: Drive 복사/휴지통, 외부 거래내역 갱신을 포함한 실제 재생성은 잠금 밖이다.
       var regenT0 = Date.now();
-      deleteAndRegenerateContract(ss, 거래ID);
+      var regenResult = deleteAndRegenerateContract(ss, 거래ID);
+      // 링크 재기록 실패는 재생성 실패다 — 이 함수는 이미 옛 링크(거래내역 C열)를 비운
+      // 뒤이므로, 성공 처리하면 원장 링크가 조용히 빈 채 남는다. 실패로 던지면 기존
+      // bounded-retry 큐가 링크 기록까지 포함해 재시도한다.
+      var regenLinkUpdate = regenResult && regenResult.linkUpdate;
+      if (!regenLinkUpdate || regenLinkUpdate.success !== true) {
+        throw new Error('거래내역 계약서 링크 기록 실패: ' + String((regenLinkUpdate && regenLinkUpdate.error) || '결과 없음'));
+      }
       regenSucceeded = true;
       try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
       try { invalidateDashboardCache(); } catch (e1) {}

@@ -160,6 +160,21 @@ function TradeEditSheet({ trade, onClose }: { trade: Trade; onClose: () => void 
   const [company, setCompany] = useState(trade.company || "");
   const [checkoutAt, setCheckoutAt] = useState(() => localDateTime(trade.checkoutAt));
   const [returnAt, setReturnAt] = useState(() => localDateTime(trade.returnAt));
+  // 편집 시작 시점 스냅샷 — 다른 직원이 그 사이 수정했으면 서버가 CONFLICT로 거부해
+  // 낡은 모달의 통째 저장이 남의 수정을 되돌리는 일을 막는다.
+  const [baseline] = useState(() => {
+    const co = localDateTime(trade.checkoutAt);
+    const re = localDateTime(trade.returnAt);
+    return {
+      customerName: trade.customerName,
+      customerPhone: trade.customerPhone || "",
+      company: trade.company || "",
+      checkoutDate: co.slice(0, 10),
+      checkoutTime: co.slice(11, 16),
+      returnDate: re.slice(0, 10),
+      returnTime: re.slice(11, 16),
+    };
+  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -182,6 +197,7 @@ function TradeEditSheet({ trade, onClose }: { trade: Trade; onClose: () => void 
       checkoutTime: checkoutAt.slice(11, 16),
       returnDate: returnAt.slice(0, 10),
       returnTime: returnAt.slice(11, 16),
+      expected: JSON.stringify(baseline),
     });
     setSaving(false);
     if (!result.ok) {

@@ -5247,8 +5247,11 @@ function setAddEquipModalMode(mode) {
 }
 
 function postAddEquipBatch(tid, entries) {
+  // mutationId: 응답 유실 뒤 재클릭이 같은 장비 행을 두 번 추가하지 않게 하는 멱등 키
+  var addMutationId = 'add-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
   return fetch(API_URL + '?key=village2026&action=addEquips&tid=' + encodeURIComponent(tid)
     + '&entries=' + encodeURIComponent(JSON.stringify(entries))
+    + '&mutationId=' + encodeURIComponent(addMutationId)
     + '&directRegenerate=true')
     .then(function(r) { return r.json(); })
     .then(function(res) {

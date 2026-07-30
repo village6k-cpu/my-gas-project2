@@ -220,8 +220,10 @@ function handleRequest(e) {
         var newStart = params.start || postBody.start;
         var newEnd   = params.end   || postBody.end;
         var rowIndices = params.rowIndices || postBody.rowIndices || null;
+        // tid: 화면이 캡처한 행 번호가 밀렸을 때 다른 거래를 덮어쓰지 않게 하는 재검증 키
+        var updateTimeTid = params.tid || postBody.tid || "";
         if (!row || !newStart || !newEnd) return jsonResponse({ success: false, message: "row, start, end 필수" });
-        return jsonResponse(updateScheduleTime(row, newStart, newEnd, rowIndices));
+        return jsonResponse(updateScheduleTime(row, newStart, newEnd, rowIndices, updateTimeTid));
       }
 
       case "scheduleChangeDates": {
@@ -235,8 +237,9 @@ function handleRequest(e) {
         var row = Number(params.row || postBody.row);
         var newStatus = params.status || postBody.status;
         var rowIndices = params.rowIndices || postBody.rowIndices || null;
+        var updateStatusTid = params.tid || postBody.tid || "";
         if (!row || !newStatus) return jsonResponse({ success: false, message: "row, status 필수" });
-        return jsonResponse(updateScheduleStatus(row, newStatus, rowIndices));
+        return jsonResponse(updateScheduleStatus(row, newStatus, rowIndices, updateStatusTid));
       }
 
       case "aiParse": {
@@ -404,7 +407,9 @@ function handleRequest(e) {
             checkoutDate: params.checkoutDate || postBody.checkoutDate,
             checkoutTime: params.checkoutTime || postBody.checkoutTime,
             returnDate: params.returnDate || postBody.returnDate,
-            returnTime: params.returnTime || postBody.returnTime
+            returnTime: params.returnTime || postBody.returnTime,
+            // 편집 시작 시점 스냅샷(JSON) — 다른 직원의 선행 수정을 덮어쓰지 않는 CAS 키
+            expected: params.expected !== undefined ? params.expected : postBody.expected
           }
         ));
 
@@ -424,6 +429,7 @@ function handleRequest(e) {
           {
             dryRun: params.dryRun || postBody.dryRun,
             profile: params.profile || postBody.profile,
+            mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '',
             directRegenerate:
               params.directRegenerate || postBody.directRegenerate ||
               params.regenerateNow || postBody.regenerateNow
@@ -438,6 +444,7 @@ function handleRequest(e) {
           {
             dryRun: params.dryRun || postBody.dryRun,
             profile: params.profile || postBody.profile,
+            mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '',
             directRegenerate:
               params.directRegenerate || postBody.directRegenerate ||
               params.regenerateNow || postBody.regenerateNow
@@ -517,6 +524,7 @@ function handleRequest(e) {
           {
             dryRun: params.dryRun || postBody.dryRun,
             profile: params.profile || postBody.profile,
+            mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '',
             directRegenerate:
               params.directRegenerate || postBody.directRegenerate ||
               params.regenerateNow || postBody.regenerateNow
@@ -530,6 +538,7 @@ function handleRequest(e) {
           {
             dryRun: params.dryRun || postBody.dryRun,
             profile: params.profile || postBody.profile,
+            mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '',
             directRegenerate:
               params.directRegenerate || postBody.directRegenerate ||
               params.regenerateNow || postBody.regenerateNow

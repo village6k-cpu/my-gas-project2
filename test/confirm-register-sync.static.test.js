@@ -91,7 +91,7 @@ assert(
   'there must be callable repair functions that finalize partially registered rows and drain already-stuck 등록대기 rows'
 );
 assert(
-  /function finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, tradeID\) \{[\s\S]{0,500}ensureRegisteredTradeLedgerRow_\(tradeID, \{ dryRun: false \}\);[\s\S]{0,500}markRequestRegistered_\(/.test(backend),
+  /function finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, tradeID\) \{[\s\S]{0,500}ensureRegisteredTradeLedgerRow_\(tradeID, \{ dryRun: false \}\);[\s\S]{0,900}markRequestRegistered_\(/.test(backend),
   'partial registration recovery must verify or create the external 거래내역 row before marking 확인요청 complete'
 );
 const registerBody = backend.slice(
@@ -299,7 +299,7 @@ console.log('audit-round-5 checks OK');
 // ── 감사 6차: 드래그 날짜 텍스트 포맷·다중행 dirty ──
 const backend6 = read('checkAvailability.js');
 assert(
-  /updateScheduleTime[\s\S]{0,1200}setNumberFormat\("@"\)\.setValue\(startDateStr\)/.test(backend6),
+  /updateScheduleTime[\s\S]{0,2600}setNumberFormat\("@"\)\.setValue\(startDateStr\)/.test(backend6),
   'timeline drag must write dates as text-formatted strings like registration does'
 );
 assert(

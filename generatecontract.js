@@ -897,6 +897,15 @@ function updateContractLink(거래ID, contractUrl, finalAmount, options) {
     if (mismatchedRows.length > 0) {
       throw new Error("계약서 링크 readback 불일치 행: " + mismatchedRows.join(","));
     }
+    // I열 금액 readback — 링크만 검증하면 금액 쓰기 실패(보호범위/수식 충돌)가 조용히 남는다
+    if (finalAmount !== undefined && finalAmount !== null && finalAmount !== "" && !isNaN(Number(finalAmount))) {
+      const amountMismatch = matchedRows.filter(function(rowNum) {
+        return Number(거래시트.getRange(rowNum, 9).getValue() || 0) !== Number(finalAmount);
+      });
+      if (amountMismatch.length > 0) {
+        throw new Error("금액 readback 불일치 행(I열): " + amountMismatch.join(","));
+      }
+    }
 
     try { if (typeof invalidateDashboardTradeExtraCache_ !== 'undefined') invalidateDashboardTradeExtraCache_([거래ID]); } catch (cacheErr) {}
     try { if (typeof touchDashboardSearchCacheVersion_ !== 'undefined') touchDashboardSearchCacheVersion_(); } catch (searchErr) {}

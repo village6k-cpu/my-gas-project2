@@ -54,7 +54,10 @@ test("사진 큐: 자동 재시도 소진 뒤에도 증빙 원본과 실패 타�
   assert.doesNotMatch(failBlock, /idbDelete\(job\.queueId\)/, "전송 실패만으로 촬영 증빙을 삭제하면 안 된다");
   const resume = sourceBlock(q, "export async function resumePhotoUploads", "export function retryPhotoUpload");
   assert.match(resume, /jobs\.set\(job\.queueId, job\)/, "재시작 때 소진 잡도 메모리 큐에 복원한다");
-  assert.doesNotMatch(resume, /job\.attempts = 0/, "재시작만으로 자동 재시도 횟수를 초기화하면 안 된다");
+  // 부활은 조건부여야 한다: 네트워크 원인 소진 + 비영구 잡만. (무조건 초기화는 서버가
+  // 영구 거절한 잡까지 무한 재전송하고, 부활 자체가 없으면 오프라인 한 번으로 굳는다)
+  assert.match(resume, /!job\.permanent && job\.attempts >= MAX_ATTEMPTS && NETWORK_ERROR_RE\.test/,
+    "네트워크 원인으로 소진된 비영구 잡만 재시작 시 부활한다");
   assert.match(store, /resumePhotoUploads\(\)\.then\(restorePhotoUploadTiles_\)/, "복원 잡을 카드 실패 타일로 연결해야 한다");
   assert.match(store, /localPhotoPreviews\.set\(job\.queueId, job\.data\)/, "수동 재시도용 미리보기도 복원해야 한다");
   const retry = sourceBlock(q, "export function retryPhotoUpload", "export async function discardPhotoUpload");

@@ -346,7 +346,9 @@ test('사진·현장추가는 응답 유실과 비동기 투영 지연을 정상
   assert.match(photoRead, /dashboardPhotoReadError_\(raw\)/);
   assert.ok(photoRead.indexOf('dashboardPhotoReadError_(raw)') < photoRead.indexOf('loadedPhotoTrades.add'),
     '경고/오류 응답을 빈 정본으로 확정하면 삭제되지 않은 사진까지 사라질 수 있다');
-  assert.match(photoQueue, /소진된 잡은 자동 전송하지 않고 그대로 복원/);
+  // 네트워크 원인 소진 잡만 조건부 부활하고, 영구 거절·원인 불명 잡은 수동 재시도용으로 보존
+  assert.match(photoQueue, /수동 재시도용으로 그대로 복원/);
+  assert.match(photoQueue, /!job\.permanent && job\.attempts >= MAX_ATTEMPTS && NETWORK_ERROR_RE\.test/);
   assert.doesNotMatch(photoQueue, /attempts >= MAX_ATTEMPTS[\s\S]{0,300}idbDelete/,
     '자동 재시도 소진이 증빙 원본을 삭제하면 안 된다');
 

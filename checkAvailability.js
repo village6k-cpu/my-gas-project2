@@ -764,7 +764,7 @@ function invalidateTimelineCache() {
  * 타임라인 드래그로 일정 변경 시 스케줄상세 시트 업데이트
  * rowIndex: 대표 행 번호, rowIndices: 같은 세트의 전체 행 (JSON string 가능)
  */
-function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
+function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices, expectedTradeId) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName('스케줄상세');
   if (!sheet) return { success: false, message: '스케줄상세 시트 없음' };
@@ -781,30 +781,60 @@ function updateScheduleTime(rowIndex, newStart, newEnd, rowIndices) {
   } else {
     rows = [rowIndex];
   }
+  rows = rows.map(Number).filter(function(r) { return r >= 2; });
+  if (!rows.length) return { success: false, message: '변경할 스케줄 행 없음' };
 
-  // 등록부(F~I 텍스트 포맷 "yyyy-MM-dd" 문자열)와 동일하게 기록 —
-  // Date 객체를 쓰면 표시 포맷이 달라져 displayValue 완전일치 기반 대시보드/검색 매칭에서 누락됨
-  var startDateStr = Utilities.formatDate(startDate, 'Asia/Seoul', 'yyyy-MM-dd');
-  var endDateStr = Utilities.formatDate(endDate, 'Asia/Seoul', 'yyyy-MM-dd');
-  rows.forEach(function(r) {
-    sheet.getRange(r, 6).setNumberFormat("@").setValue(startDateStr); // F: 반출일
-    sheet.getRange(r, 7).setNumberFormat("@").setValue(startTime);    // G: 반출시간
-    sheet.getRange(r, 8).setNumberFormat("@").setValue(endDateStr);   // H: 반납일
-    sheet.getRange(r, 9).setNumberFormat("@").setValue(endTime);      // I: 반납시간
-  });
-
-  var queuedContractRegens = [];
+  // 등록/합침/삭제가 중간에 행을 밀어넣거나 지우면 화면이 캡처한 행 번호는
+  // 다른 거래를 가리킨다. 락 안에서 각 행의 거래ID(B열)를 재검증해
+  // 남의 거래 날짜를 덮어쓰는 사고를 막는다.
+  var lock = LockService.getScriptLock();
+  var lockAcquired = false;
   try {
-    queuedContractRegens = queueScheduleDetailContractRegensForRows_(sheet, rows);
-  } catch (eRegen) {
-    Logger.log("타임라인 일정 변경 → 계약서 재생성 예약 실패: " + eRegen.message);
-  }
-  supaMarkScheduleRowsDirty_(sheet, rows); // 스크립트 쓰기 — Supabase 동기화 표시
-  // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh (드래그된 날짜 포함)
-  try { invalidateDashboardCache([newStart, newEnd]); } catch (e) {}
-  try { invalidateTimelineCache(); } catch (e2) {}
+    try { lockAcquired = lock.tryLock(5000); } catch (lockErr) {}
+    if (!lockAcquired) {
+      return { success: false, error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
+    }
 
-  return { success: true, contractRegenPending: true, contractRegenTradeIds: queuedContractRegens };
+    expectedTradeId = String(expectedTradeId || '').trim();
+    if (expectedTradeId) {
+      for (var vi = 0; vi < rows.length; vi++) {
+        var actualTid = String(sheet.getRange(rows[vi], 2).getDisplayValue() || '').trim();
+        if (actualTid !== expectedTradeId) {
+          return {
+            success: false,
+            error: '화면 정보가 오래되어 행이 어긋났습니다 (' + rows[vi] + '행: ' + (actualTid || '빈 행') + '). 새로고침 후 다시 시도하세요.',
+            code: 'STALE_ROWS'
+          };
+        }
+      }
+    }
+
+    // 등록부(F~I 텍스트 포맷 "yyyy-MM-dd" 문자열)와 동일하게 기록 —
+    // Date 객체를 쓰면 표시 포맷이 달라져 displayValue 완전일치 기반 대시보드/검색 매칭에서 누락됨
+    var startDateStr = Utilities.formatDate(startDate, 'Asia/Seoul', 'yyyy-MM-dd');
+    var endDateStr = Utilities.formatDate(endDate, 'Asia/Seoul', 'yyyy-MM-dd');
+    rows.forEach(function(r) {
+      sheet.getRange(r, 6).setNumberFormat("@").setValue(startDateStr); // F: 반출일
+      sheet.getRange(r, 7).setNumberFormat("@").setValue(startTime);    // G: 반출시간
+      sheet.getRange(r, 8).setNumberFormat("@").setValue(endDateStr);   // H: 반납일
+      sheet.getRange(r, 9).setNumberFormat("@").setValue(endTime);      // I: 반납시간
+    });
+
+    var queuedContractRegens = [];
+    try {
+      queuedContractRegens = queueScheduleDetailContractRegensForRows_(sheet, rows);
+    } catch (eRegen) {
+      Logger.log("타임라인 일정 변경 → 계약서 재생성 예약 실패: " + eRegen.message);
+    }
+    supaMarkScheduleRowsDirty_(sheet, rows); // 스크립트 쓰기 — Supabase 동기화 표시
+    // dashboard 캐시 즉시 무효화 → 다음 진입 시 fresh (드래그된 날짜 포함)
+    try { invalidateDashboardCache([newStart, newEnd]); } catch (e) {}
+    try { invalidateTimelineCache(); } catch (e2) {}
+
+    return { success: true, contractRegenPending: true, contractRegenTradeIds: queuedContractRegens };
+  } finally {
+    if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
 }
 
 
@@ -3088,9 +3118,17 @@ function repairDashboardTradeProjection_(tid) {
     return { error: '반출 기준선을 검증할 품목이 없습니다: ' + tid };
   }
   var existingBaselineItems = durableCheckout.items || [];
+  // 이미 반납완료된 거래(레거시 흐름으로 닫힘)는 오늘 시트값으로 기준선을 새로 만들면
+  // 닫힌 카드가 '확인필요'로 되살아난다. 복구하지 않고 그대로 둔다.
+  var tradeAlreadyCompleted = durableCheckout.returnDone === true ||
+    String(durableCheckout.contractStatus || '').trim() === '반납완료';
   var allowEmptyRecovery = checkoutStarted && !existingBaselineItems.length &&
+    !tradeAlreadyCompleted &&
     canDashboardRecoverMissingCheckoutBaseline_(tid, props, baselineItems);
   if (checkoutStarted && !existingBaselineItems.length && !allowEmptyRecovery) {
+    if (tradeAlreadyCompleted) {
+      return { success: true, tradeId: tid, skipped: true, reason: '이미 반납완료된 거래 — 기준선 재생성 생략' };
+    }
     return { error: '반출 기준선이 없어 자동 복구를 중단했습니다: ' + tid };
   }
   if (checkoutStarted && existingBaselineItems.length) {
@@ -3640,6 +3678,17 @@ function assertDashboardReturnComplete_(tid, props) {
     };
   });
   if (!checkable.length) {
+    if (recordedBaselineItems.length) {
+      // 기준선은 있으나 모든 품목이 actual_taken_qty=0으로 정정된 거래 — 실제 반출이
+      // 없었다는 명시적 증거이므로 반납 의무가 없다. 하드 차단하면 영영 닫을 수 없다.
+      return {
+        success: true,
+        checkedCount: 0,
+        returnCountsSnapshot: durable.returnCounts || {},
+        completedProofs: {},
+        scheduleIds: (group.equipments || []).map(function(eq) { return String(eq.scheduleId || '').trim(); }).filter(Boolean)
+      };
+    }
     return { error: '반납완료 차단: 반출 순간의 불변 수량 기준선(taken_qty)이 없습니다: ' + tid };
   }
 
@@ -3772,6 +3821,9 @@ function toggleReturnDone(tid, done, options) {
   // 카드는 반납완료 전까지 계속 살아있고 미확인 내역은 returnCounts에 그대로 남으므로,
   // 강제 차단 대신 사람이 결정하는 소프트 가드가 운영 정책이다.
   var force = !!(options && (options.force === true || options.force === 1 || options.force === '1' || options.force === 'true'));
+  // autoForce: '반출 기준선 없음'을 근거로 확인받은 강제 종결. 클라이언트 화면이 낡아
+  // 실제로는 정본(Supabase) 기준선이 있는 경우 검증 우회를 거부한다.
+  var autoForce = !!(options && (options.autoForce === true || options.autoForce === 1 || options.autoForce === '1' || options.autoForce === 'true'));
 
   // ── 검증·준비 단계: 읽기 전용이므로 전역 잠금 밖에서 수행한다 ──
   // 완료 검증(스케줄상세 전체 스캔 + Supabase 상세수량 HTTP)이 잠금 안에 있으면
@@ -3779,13 +3831,30 @@ function toggleReturnDone(tid, done, options) {
   // 반납완료 버튼이 계속 실패했다. 잠금 안에는 시트 상태 기록과 속성 쓰기만 남긴다.
   var cleanupSids = [];
   var completionCheck = null;
+  if (isDone && force && autoForce) {
+    var authorityBaseline = typeof supaGetCheckoutBaselineState_ === 'function'
+      ? supaGetCheckoutBaselineState_(tid)
+      : { ok: false, items: [] };
+    if (authorityBaseline && authorityBaseline.ok && authorityBaseline.items && authorityBaseline.items.length > 0) {
+      return {
+        error: '반출 기준선이 서버에 있습니다 — 화면을 새로고침한 뒤 품목 확인 후 반납완료해주세요.',
+        code: 'STALE_BASELINE'
+      };
+    }
+  }
   if (isDone && !force) {
     completionCheck = assertDashboardReturnComplete_(tid, props);
     if (completionCheck && completionCheck.error) return completionCheck;
     cleanupSids = (completionCheck && completionCheck.scheduleIds) || [];
   }
   if (isDone && force) {
-    Logger.log('반납완료 강제 처리(작업자 확인): ' + tid);
+    Logger.log('반납완료 강제 처리(작업자 확인): ' + tid + (autoForce ? ' [기준선 없음 확인]' : ''));
+    // 강제 종결은 나중에 감사할 수 있게 내구 마커를 남긴다 (성공/실패와 무관하게 시도 기록).
+    try {
+      props.setProperty('returnForced_v1_' + tid, JSON.stringify({
+        at: Date.now(), mutationId: mutationId || '', autoForce: autoForce
+      }));
+    } catch (forcedMarkErr) {}
   }
   if (isDone && !cleanupSids.length) {
     try { cleanupSids = listDashboardCheckoutItemCheckSids_(tid); } catch (sidErr) { cleanupSids = []; }
@@ -5122,14 +5191,13 @@ function updateEquipmentCheck(scheduleId, tradeId, label, field, value) {
   if (field !== 'returnStatus' && field !== 'memo') return { error: "field는 returnStatus/memo만 허용" };
   if (value.length > 500) value = value.slice(0, 500);
 
-  var lock = LockService.getScriptLock();
-  // 타임아웃 시 락 없이 진행하면 안 된다 — find-or-append가 중복 행을 만들 수 있음.
-  // 다른 쓰기 함수들과 동일하게 에러 반환 → 클라이언트(gasMutationRetrying)가 재시도.
-  try {
-    if (!lock.tryLock(1000)) return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
-  } catch (lockErr) {
-    return { error: "다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.", code: "BUSY", retryable: true };
-  }
+  // 전역 ScriptLock을 외부 스프레드시트 openByUrl(1~3초) 동안 쥐면 다른 카드의
+  // 반출/반납/체크 저장까지 전부 BUSY로 튕긴다. 짧은 락으로 거래별 lease만 claim하고
+  // (claimDashboardAuxMutation_ 내부), 느린 open/스캔/쓰기는 락 밖에서 수행한다.
+  // 같은 거래의 중복 find-or-append는 lease가 막고, 서로 다른 거래의 동시 신규 행은
+  // 원자적 appendRow로 충돌하지 않는다.
+  var claim = claimDashboardAuxMutation_(tradeId, 'equipmentCheck');
+  if (claim.error) return claim;
 
   try {
     var sheet = getEquipmentCheckSheet_(true);
@@ -5137,13 +5205,13 @@ function updateEquipmentCheck(scheduleId, tradeId, label, field, value) {
     var rowNum = findEquipmentCheckRow_(sheet, schema, tradeId);
 
     if (!rowNum) {
-      rowNum = sheet.getLastRow() + 1;
       var seed = [];
       var width = Math.max(sheet.getLastColumn(), 4, schema.statusCol, schema.memoCol, schema.keyCol || 0, schema.labelCol || 0);
       for (var i = 0; i < width; i++) seed.push('');
       if (schema.keyCol) seed[schema.keyCol - 1] = tradeId;
       if (schema.labelCol) seed[schema.labelCol - 1] = label;
-      sheet.getRange(rowNum, 1, 1, seed.length).setValues([seed]);
+      sheet.appendRow(seed);
+      rowNum = findEquipmentCheckRow_(sheet, schema, tradeId) || sheet.getLastRow();
     } else {
       if (schema.keyCol) sheet.getRange(rowNum, schema.keyCol).setValue(tradeId);
       if (schema.labelCol && label) sheet.getRange(rowNum, schema.labelCol).setValue(label);
@@ -5164,7 +5232,7 @@ function updateEquipmentCheck(scheduleId, tradeId, label, field, value) {
   } catch (err) {
     return { error: err.message };
   } finally {
-    try { lock.releaseLock(); } catch (releaseErr) {}
+    releaseDashboardAuxMutation_(claim);
   }
 }
 
@@ -5219,6 +5287,37 @@ function dashboardUpdateTradeDetails(tradeId, input) {
     if (!row) return { error: '계약마스터에서 거래ID를 찾지 못했습니다' };
     var currentStatus = String(contractSheet.getRange(row, 10).getDisplayValue() || '').trim();
     if (currentStatus === '취소') return { error: '취소된 예약은 편집할 수 없습니다' };
+
+    // CAS: 클라이언트가 편집을 시작할 때 본 값(expected)과 현재 원장이 다르면
+    // 다른 직원이 먼저 수정한 것이다. 통째 덮어쓰기(B:H)가 그 수정을 조용히
+    // 되돌리므로 CONFLICT로 거부하고 새로고침을 안내한다. expected 미전달(구 클라이언트)은
+    // 기존 동작 유지.
+    var expected = null;
+    try { expected = input.expected ? JSON.parse(String(input.expected)) : null; } catch (expParseErr) { expected = null; }
+    if (expected && typeof expected === 'object') {
+      var currentRow = contractSheet.getRange(row, 2, 1, 7).getDisplayValues()[0];
+      var digitsOnly = function(v) { return String(v || '').replace(/\D/g, '').slice(-10); };
+      var trimmed = function(v) { return String(v || '').trim(); };
+      var conflictChecks = [
+        ['예약자명', expected.customerName, currentRow[0], trimmed],
+        ['연락처', expected.customerPhone, currentRow[1], digitsOnly],
+        ['업체명', expected.company, currentRow[2], trimmed],
+        ['반출일', expected.checkoutDate, currentRow[3], trimmed],
+        ['반출시간', expected.checkoutTime, currentRow[4], trimmed],
+        ['반납일', expected.returnDate, currentRow[5], trimmed],
+        ['반납시간', expected.returnTime, currentRow[6], trimmed]
+      ];
+      for (var ci = 0; ci < conflictChecks.length; ci++) {
+        var check = conflictChecks[ci];
+        if (check[1] === undefined || check[1] === null) continue;
+        if (check[3](check[1]) !== check[3](check[2])) {
+          return {
+            error: '다른 기기에서 먼저 수정된 예약입니다 (' + check[0] + ' 변경됨). 새로고침 후 다시 편집하세요.',
+            code: 'CONFLICT'
+          };
+        }
+      }
+    }
 
     // B:H = 예약자명, 연락처, 업체명, 반출일, 반출시간, 반납일, 반납시간.
     contractSheet.getRange(row, 2, 1, 7).setValues([[
@@ -5946,6 +6045,8 @@ function buildDashboardPhotoEntry_(raw, phase, context) {
     url: url,
     thumbnailUrl: thumbnailUrl,
     fileId: fileId,
+    // 셀 원문 — fileId 해석이 실패한 사진도 삭제 API가 sheetValue 완전일치로 찾을 수 있게 한다
+    sheetValue: String(raw || '').trim(),
     uploadedAt: context.uploadedAt || '',
     memo: context.memo || '',
     row: context.row || 0
@@ -5991,7 +6092,8 @@ function resolveDashboardPhotoFileId_(value, fileIndex) {
   } catch (driveErr) {}
 
   try {
-    CacheService.getScriptCache().put(cacheKey, fileId || '-', 21600);
+    // 해석 실패 음성 캐시는 짧게(10분) — 일시적 Drive 오류가 6시간 동안 삭제 불능으로 굳지 않게
+    CacheService.getScriptCache().put(cacheKey, fileId || '-', fileId ? 21600 : 600);
   } catch (cachePutErr) {}
   return fileId;
 }
@@ -6005,6 +6107,7 @@ function getDashboardPhotoFileIndex_() {
   } catch (cacheErr) {}
 
   var index = {};
+  var indexComplete = true;
   try {
     var folder = getDashboardPhotoStorageFolder_();
     var files = folder.getFiles();
@@ -6012,10 +6115,14 @@ function getDashboardPhotoFileIndex_() {
       var file = files.next();
       index[file.getName()] = file.getId();
     }
-  } catch (err) {}
+  } catch (err) {
+    // 순회 중 오류 — 부분/빈 인덱스를 6시간 캐시하면 그동안 사진 fileId 해석과
+    // 삭제가 전부 막힌다. 이번 요청에만 쓰고 캐시하지 않는다.
+    indexComplete = false;
+  }
 
   try {
-    if (cache) cache.put(DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_, JSON.stringify(index), 21600);
+    if (cache && indexComplete) cache.put(DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_, JSON.stringify(index), 21600);
   } catch (cachePutErr) {}
   return index;
 }
@@ -8582,10 +8689,41 @@ function dashboardAddEquipments(tid, entries, options) {
     }
   }
 
+  var addProps = null;
+  var addMutationId = '';
+  var addFingerprint = '';
   try {
     if (!dryRun) {
-      var addLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tid, 'equipmentAdd', '');
+      addProps = PropertiesService.getScriptProperties();
+      var addLeaseBlock = dashboardTradeMutationLeaseError_(addProps, tid, 'equipmentAdd', '');
       if (addLeaseBlock) return addLeaseBlock;
+
+      // 멱등 가드: 응답 유실 뒤 같은 mutationId 재시도와, 짧은 창(30초)의 동일 내용
+      // 재클릭이 같은 장비 행을 두 번 append하지 않게 한다 (onsiteAddon 외 경로 보호).
+      addFingerprint = dashboardOnsiteRequestFingerprint_(tid, addEntries, {});
+      addMutationId = normalizeDashboardMutationId_(options.mutationId);
+      if (addMutationId) {
+        var addMutation = beginDashboardMutation_(addProps, tid, addMutationId, 'addEquip', addFingerprint);
+        if (addMutation.error) return attachProfile_({ error: addMutation.error });
+        if (addMutation.skip) {
+          return attachProfile_({ success: true, duplicate: true, tid: tid, message: '같은 추가 요청이 이미 반영되었습니다 (중복 방지)' });
+        }
+        if (addMutation.duplicate) {
+          // 같은 mutationId가 아직 pending — 첫 실행이 어디까지 갔는지 판별할 수 없다.
+          // 중복 행을 만드는 것보다 재시도 대기가 안전하다 (fail-closed).
+          return attachProfile_({ error: '같은 추가 요청을 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true });
+        }
+      }
+      try {
+        if (CacheService.getScriptCache().get('dashboardAddRecent_' + addFingerprint)) {
+          return attachProfile_({
+            success: true,
+            duplicate: true,
+            tid: tid,
+            message: '방금 동일한 추가가 완료되었습니다 (중복 방지). 의도한 반복 추가라면 잠시 후 다시 시도하세요.'
+          });
+        }
+      } catch (recentReadErr) {}
     }
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sched = ss.getSheetByName("스케줄상세");
@@ -8754,6 +8892,9 @@ function dashboardAddEquipments(tid, entries, options) {
       sched.insertRowsAfter(insertRow - 1, newRows.length);
     }
     sched.getRange(insertRow, 1, newRows.length, 13).setValues(newRows);
+    // append 확정 직후 멱등 마커 커밋 — 이후 재시도는 중복 성공으로 dedupe된다.
+    if (addMutationId) commitDashboardMutation_(addProps, tid, addMutationId, 'addEquip');
+    try { CacheService.getScriptCache().put('dashboardAddRecent_' + addFingerprint, '1', 30); } catch (recentWriteErr) {}
     markProfile_('write_new_rows');
     applyDashboardAddRowFormats_(sched, tid, insertRow, newRows.length, lastTidRow, hadFollowingRow);
     markProfile_('format_new_rows');
@@ -10302,10 +10443,17 @@ function _normalizeDiscountType(v) {
 }
 
 /** 카톡에 할인 근거가 있으면 최우선, 없을 때만 고객DB, 둘 다 없으면 일반. */
-function _resolveConfirmRequestDiscount_(chatDiscount, customerDbDiscount) {
+/** 카톡 우선 → 고객DB 폴백. 둘 다 없으면 공란을 유지한다(일반을 물질화하지 않음).
+ * 공란 M열은 등록 시점에 고객DB를 다시 조회해 확정하므로, 확인요청이 며칠 묵는 동안
+ * 고객DB가 단골/학생으로 바뀌어도 '일반'이 그 값을 덮어쓰는 사고가 생기지 않는다. */
+function _resolveConfirmRequestDiscountOrBlank_(chatDiscount, customerDbDiscount) {
   return _normalizeDiscountTypeOrBlank_(chatDiscount)
     || _normalizeDiscountTypeOrBlank_(customerDbDiscount)
-    || "일반";
+    || "";
+}
+
+function _resolveConfirmRequestDiscount_(chatDiscount, customerDbDiscount) {
+  return _resolveConfirmRequestDiscountOrBlank_(chatDiscount, customerDbDiscount) || "일반";
 }
 
 function _confirmRequestCustomerDbSheets_(ss) {
@@ -10507,7 +10655,13 @@ function _planCustomerDbRegistrationWrite_(customerRows, customerName, phone, di
 
   if (matchedIndex >= 0) {
     var existingDiscount = String((rows[matchedIndex] && rows[matchedIndex][8]) || "").trim();
-    if (confirmedDiscount && _normalizeDiscountTypeOrBlank_(existingDiscount) !== confirmedDiscount) {
+    var existingNormalized = _normalizeDiscountTypeOrBlank_(existingDiscount);
+    // '일반'은 과거 자동 폴백으로 물질화됐을 수 있어, 단골/제휴/학생 같은 강한 값을
+    // 조용히 '일반'으로 강등하지 않는다 (진짜 강등은 고객DB에서 수동으로).
+    if (confirmedDiscount === "일반" && existingNormalized && existingNormalized !== "일반") {
+      return { action: "keep-existing", sheetRow: matchedIndex + 2, discount: existingDiscount };
+    }
+    if (confirmedDiscount && existingNormalized !== confirmedDiscount) {
       return { action: "update-discount", sheetRow: matchedIndex + 2, discount: confirmedDiscount };
     }
     if (existingDiscount) {
@@ -10520,6 +10674,126 @@ function _planCustomerDbRegistrationWrite_(customerRows, customerName, phone, di
   }
 
   return { action: "append", discount: confirmedDiscount };
+}
+
+/** 합침/재시도 등록에서 확정 할인유형을 기존 계약마스터 K열에 반영한다.
+ * '일반'으로의 강등은 과거 자동 폴백으로 물질화된 값일 수 있어 건너뛴다
+ * (진짜 강등은 대시보드 updateTradeDiscount로 수동 변경). */
+function _updateContractDiscountIfDiffers_(contractSheet, tradeId, discountType) {
+  var normalized = _normalizeDiscountTypeOrBlank_(discountType);
+  if (!normalized || !contractSheet) return false;
+  var lastRow = contractSheet.getLastRow();
+  if (lastRow < 2) return false;
+  var ids = contractSheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0] || "").trim() !== String(tradeId || "").trim()) continue;
+    var row = i + 2;
+    var current = _normalizeDiscountTypeOrBlank_(contractSheet.getRange(row, 11).getValue());
+    if (current === normalized) return false;
+    if (normalized === "일반" && current && current !== "일반") return false;
+    contractSheet.getRange(row, 11).setValue(normalized);
+    return true;
+  }
+  return false;
+}
+
+/** 고객DB(A=연락처, B=성함, I=할인유형)에 등록 확정값을 반영한다. 신규·합침·재시도 공용. */
+function _applyCustomerDbRegistrationWrite_(고객DB시트, 예약자명, 연락처, 할인유형) {
+  if (!고객DB시트 || !연락처 || !예약자명) return { action: "skip" };
+  var 고객lastRow = 고객DB시트.getLastRow();
+  var 고객data = [];
+  if (고객lastRow >= 2) {
+    고객data = 고객DB시트.getRange(2, 1, 고객lastRow - 1, 9).getValues();
+  }
+  var 고객쓰기계획 = _planCustomerDbRegistrationWrite_(고객data, 예약자명, 연락처, 할인유형);
+  if (고객쓰기계획.action === "update-discount") {
+    고객DB시트.getRange(고객쓰기계획.sheetRow, 9).setValue(고객쓰기계획.discount);
+  } else if (고객쓰기계획.action === "append") {
+    var 고객newRow = 고객lastRow + 1;
+    고객DB시트.getRange(고객newRow, 1).setNumberFormat("@").setValue(String(연락처));
+    고객DB시트.getRange(고객newRow, 2).setValue(예약자명);
+    if (고객쓰기계획.discount) {
+      고객DB시트.getRange(고객newRow, 9).setValue(고객쓰기계획.discount);
+    }
+  }
+  if (고객쓰기계획.action === "update-discount" || 고객쓰기계획.action === "append") {
+    try { CacheService.getScriptCache().remove("customerDiscountMap_v1"); } catch (cacheErr) {}
+  }
+  return 고객쓰기계획;
+}
+
+// 고객DB 쓰기 실패는 조용히 버리지 않고 pending 속성으로 남겨 rescue 주기에 재시도한다.
+var CUSTOMER_DB_PENDING_PREFIX_ = 'customerDbPending_v1_';
+
+function _queueCustomerDbPendingWrite_(tradeId, 예약자명, 연락처, 할인유형, reason) {
+  try {
+    PropertiesService.getScriptProperties().setProperty(
+      CUSTOMER_DB_PENDING_PREFIX_ + String(tradeId || 연락처 || ''),
+      JSON.stringify({
+        name: String(예약자명 || ''), phone: String(연락처 || ''),
+        discount: String(할인유형 || ''), at: Date.now(), reason: String(reason || '')
+      })
+    );
+  } catch (e) {}
+}
+
+function drainPendingCustomerDbWrites_() {
+  var props;
+  try { props = PropertiesService.getScriptProperties(); } catch (e) { return 0; }
+  var keys;
+  try { keys = props.getKeys(); } catch (e) { return 0; }
+  var drained = 0;
+  for (var i = 0; i < keys.length && drained < 5; i++) {
+    if (keys[i].indexOf(CUSTOMER_DB_PENDING_PREFIX_) !== 0) continue;
+    var payload = null;
+    try { payload = JSON.parse(props.getProperty(keys[i]) || 'null'); } catch (e) {}
+    if (!payload || !payload.phone || !payload.name) { props.deleteProperty(keys[i]); continue; }
+    // 7일 넘게 실패한 항목은 폐기 (운영자가 고객DB에서 직접 처리)
+    if (Number(payload.at || 0) && Date.now() - Number(payload.at) > 7 * 24 * 60 * 60 * 1000) {
+      props.deleteProperty(keys[i]);
+      continue;
+    }
+    try {
+      var ledgerContext = openTradeLedgerContext_();
+      _applyCustomerDbRegistrationWrite_(
+        ledgerContext.spreadsheet.getSheetByName("고객DB"),
+        payload.name, payload.phone, _normalizeDiscountTypeOrBlank_(payload.discount)
+      );
+      props.deleteProperty(keys[i]);
+      drained++;
+    } catch (e) {
+      break; // 외부 시트가 계속 실패하면 다음 rescue 주기에 재시도
+    }
+  }
+  return drained;
+}
+
+/** 재시도 완료·합침 경로에서 확인요청 M열 확정 할인을 계약마스터 K·고객DB I에 반영. */
+function _reconcileRegisteredDiscount_(allData, reqID, tradeID) {
+  var 예약자명 = "", 연락처 = "", 할인유형 = "";
+  for (var i = 0; i < allData.length; i++) {
+    if (allData[i][0] !== reqID) continue;
+    if (!예약자명 && allData[i][10]) 예약자명 = String(allData[i][10]).trim();
+    if (!연락처 && allData[i][11]) 연락처 = String(allData[i][11]).trim();
+    if (!할인유형 && allData[i][12]) 할인유형 = String(allData[i][12]).trim();
+  }
+  var normalized = _normalizeDiscountTypeOrBlank_(할인유형);
+  if (normalized) {
+    try {
+      var contractSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("계약마스터");
+      _updateContractDiscountIfDiffers_(contractSheet, tradeID, normalized);
+    } catch (contractErr) {}
+  }
+  if (예약자명 && 연락처) {
+    try {
+      var ledgerContext = openTradeLedgerContext_();
+      _applyCustomerDbRegistrationWrite_(
+        ledgerContext.spreadsheet.getSheetByName("고객DB"), 예약자명, 연락처, normalized
+      );
+    } catch (dbErr) {
+      _queueCustomerDbPendingWrite_(tradeID, 예약자명, 연락처, normalized, dbErr && dbErr.message);
+    }
+  }
 }
 
 function _confirmRequestEquipKey_(v) {
@@ -10809,7 +11083,7 @@ function _insertAndCheckRequest(req) {
   var dbDiscount = (!resolvedPhone && phoneLookupMatches.length > 1)
     ? ""
     : _bestConfirmRequestCustomerDbDiscount_(trustedMatches);
-  var resolvedDiscount = _resolveConfirmRequestDiscount_(req.할인유형 || req.업체명, dbDiscount);
+  var resolvedDiscount = _resolveConfirmRequestDiscountOrBlank_(req.할인유형 || req.업체명, dbDiscount);
   var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone, 할인유형: resolvedDiscount });
 
   // ── 중복 체크: 같은 예약자명/연락처 + 반출·반납창 + 같은 최상위 장비/수량 ──
@@ -11800,12 +12074,20 @@ function _processByReqID(sheet, triggerRow) {
       sheet.getRange(ri.row, 8).setValue("확인");
     }
 
-    // 세트인지 확인 → 구성품이 아직 없는 경우만 펼침
+    // 세트인지 확인 → 이 헤더의 구성품이 아직 없는 경우만 펼침.
+    // 판정은 위치 기반: 전개된 구성품은 항상 헤더 바로 아래에 삽입되므로,
+    // 헤더 바로 아래 행이 이 세트의 구성품이면 이미 전개된 헤더다.
+    // (전역 존재 여부로 판정하면 같은 세트를 두 번째 헤더로 추가했을 때
+    //  두 번째 세트의 구성품이 영영 전개되지 않아 재고 점유가 누락된다.)
     const setComponents = getSetComponents(ri.장비명, setSheet);
     if (setComponents.length > 0) {
-      // 이미 이 세트의 구성품이 존재하는지 확인
-      var hasExisting = reqRows.some(function(rr) { return rr.qTag === "[세트]" + ri.장비명; });
-      if (!hasExisting) {
+      var nextReqRow = reqRows[r + 1];
+      var alreadyExpanded = !!(
+        nextReqRow &&
+        nextReqRow.row === ri.row + 1 &&
+        nextReqRow.qTag === "[세트]" + ri.장비명
+      );
+      if (!alreadyExpanded) {
         expandSetRows(sheet, ri.row, triggerReqID, setComponents, ri.수량);
         expandedRows = true;
       } else {
@@ -12669,9 +12951,13 @@ function getSetComponents(name, setSheet) {
 function normalizeRegisterQueueStatus_(status) {
   var s = String(status || "").trim();
   if (!s) return "";
-  s = s.replace(/^[⏳⌛]\s*/, "").replace(/[.。…]+$/g, "").replace(/\s+/g, " ");
+  s = s.replace(/^[⏳⌛✅]\s*/, "").replace(/[.。…]+$/g, "").replace(/\s+/g, " ");
   if (/^등록\s*대기/.test(s) || s === "등록대기") return "등록대기";
   if (/^등록\s*처리\s*중/.test(s) || /^등록\s*처리중/.test(s)) return "등록대기";
+  // 외부 거래내역 쓰기 도중 하드킬되면 이 중간 마커에서 멈춘다. 복구 스윕이 집도록
+  // 등록대기로 정규화한다 — 재진입은 중복 감지 → finalize(멱등 ledger ensure)로 안전.
+  if (/^개고생\s*2\.0\s*입력\s*중/.test(s)) return "등록대기";
+  if (/^개고생\s*2\.0\s*확인\s*완료/.test(s)) return "등록대기";
   return String(status || "").trim();
 }
 
@@ -12944,6 +13230,9 @@ function finalizeQueuedRequestFromExistingTrade_(sheet, allData, reqID, tradeID)
     Logger.log("거래내역 미확인으로 등록완료 보류: " + reqID + " / " + ledgerErr.message);
     return false;
   }
+  // 첫 시도가 고객DB/할인 반영 전에 죽었을 수 있으므로, 완료 확정 전에 M열 확정값을
+  // 계약마스터 K·고객DB I에 재반영한다 (멱등 — 이미 같으면 no-op).
+  try { _reconcileRegisteredDiscount_(allData, reqID, tradeID); } catch (discountReconcileErr) {}
   try {
     if (PropertiesService.getScriptProperties().getProperty("CONTRACT_TEMPLATE_ID")) {
       scheduleContractRegen(tradeID);
@@ -13002,6 +13291,9 @@ function getBlockingRegisterIssue_(data, reqID) {
     var result = String(data[i][8] || "").trim();
     if (/^❌\s*날짜/.test(result)) return result.replace(/^❌\s*/, "");
     if (!directRegisterApproved && /^⚠️?\s*모델 선택/.test(result)) return result.replace(/^⚠️?\s*/, "");
+    // 최상위 미등록 장비(오타 등)는 단가 0으로 조용히 등록되는 사고를 막는다.
+    // 바로등록은 사장 최종 승인이므로 통과 (세트 구성품은 위 [세트] 태그에서 이미 면제).
+    if (!directRegisterApproved && /^❓\s*미등록/.test(result)) return result.replace(/^❓\s*/, "") + " — F열 장비명 확인 후 다시 등록";
   }
   return "";
 }
@@ -13155,10 +13447,23 @@ function scheduleRegister(reqID) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return { success: false, error: "데이터 없음" };
 
-  var allData = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  // O열(15열)까지 함께 읽는다 — 선택 등록에서 '제외'된 첫 행에 등록대기 마커를
+  // 덮어쓰면 사장이 명시적으로 뺀 품목이 그대로 등록되는 사고가 난다.
+  var allData = sheet.getRange(2, 1, lastRow - 1, 15).getValues();
   var targetRow = -1;
+  var excludedOnlyRow = -1;
   for (var i = 0; i < allData.length; i++) {
-    if (allData[i][0] === reqID) { targetRow = i + 2; break; }
+    if (allData[i][0] !== reqID) continue;
+    var rowStatus = String(allData[i][14] || "").trim();
+    if (rowStatus === "제외" || rowStatus === "거절" || rowStatus === "보류") {
+      if (excludedOnlyRow < 0) excludedOnlyRow = i + 2;
+      continue;
+    }
+    targetRow = i + 2;
+    break;
+  }
+  if (targetRow < 0 && excludedOnlyRow >= 0) {
+    return { success: false, error: "등록할 품목이 없습니다 (전 행 제외/거절/보류): " + reqID };
   }
   if (targetRow < 0) return { success: false, error: "요청ID를 찾을 수 없음: " + reqID };
 
@@ -13416,6 +13721,15 @@ function registerByReqID(sheet, triggerRow) {
     sheet.getRange(triggerRow, 15).setValue("❌ 연락처 입력 필요");
     sheet.getRange(triggerRow, 14).clearContent();
     return;
+  }
+
+  // ── 할인유형 미확정(M열 공란) → 등록 시점 고객DB I열 폴백 ──
+  // 카톡 값이 없을 때만 고객DB를 쓴다. 폴백 실패는 공란 유지(계약마스터 기록 시 '일반').
+  if (!할인유형) {
+    try {
+      var _discountFallbackMatches = _findConfirmRequestCustomerDbMatches_(ss, 예약자명, 연락처);
+      할인유형 = _bestConfirmRequestCustomerDbDiscount_(_discountFallbackMatches) || "";
+    } catch (discountFallbackErr) {}
   }
 
   // ── 이미 등록된 건인지 확인 (거절/보류된 건은 재등록 허용) ──
@@ -13679,6 +13993,10 @@ function registerByReqID(sheet, triggerRow) {
     반출일str, 반출시간str, 반납일str, 반납시간str,
     회차, "예약", 할인유형 || "일반", ""
   ]]);
+    } else if (mergeTargetTID) {
+      // 합침 등록: 카톡 확정 할인유형이 기존 거래와 다르면 K열을 갱신해
+      // 이후 계약서 재생성·대시보드·Supabase가 같은 값을 보게 한다.
+      try { _updateContractDiscountIfDiffers_(contractSheet, mergeTargetTID, 할인유형); } catch (mergeDiscountErr) {}
     }
 
 
@@ -13795,36 +14113,17 @@ function registerByReqID(sheet, triggerRow) {
     return;
   }
 
-    if (!mergeMode) {
-    // ── 개고생2.0 고객DB에 신규고객 저장 + 빈 할인유형 자동 확정 ──
-    // 고객DB 구조: A=연락처(예약자ID), B=성함, I=할인유형
+    // ── 개고생2.0 고객DB에 고객/할인유형 반영 (신규·합침 공통) ──
+    // 합침 등록에서도 카톡 확정 할인·수정된 연락처가 고객DB에 남아야 다음 예약이 정확하다.
     try {
-      var 고객DB시트 = ledgerContext.spreadsheet.getSheetByName("고객DB");
-      if (고객DB시트 && 연락처 && 예약자명) {
-        var 고객lastRow = 고객DB시트.getLastRow();
-        var 고객data = [];
-        if (고객lastRow >= 2) {
-          고객data = 고객DB시트.getRange(2, 1, 고객lastRow - 1, 9).getValues();
-        }
-        var 고객쓰기계획 = _planCustomerDbRegistrationWrite_(고객data, 예약자명, 연락처, 할인유형);
-        if (고객쓰기계획.action === "update-discount") {
-          고객DB시트.getRange(고객쓰기계획.sheetRow, 9).setValue(고객쓰기계획.discount);
-        } else if (고객쓰기계획.action === "append") {
-          var 고객newRow = 고객lastRow + 1;
-          고객DB시트.getRange(고객newRow, 1).setNumberFormat("@").setValue(String(연락처));
-          고객DB시트.getRange(고객newRow, 2).setValue(예약자명);
-          if (고객쓰기계획.discount) {
-            고객DB시트.getRange(고객newRow, 9).setValue(고객쓰기계획.discount);
-          }
-        }
-        if (고객쓰기계획.action === "update-discount" || 고객쓰기계획.action === "append") {
-          try { CacheService.getScriptCache().remove("customerDiscountMap_v1"); } catch (cacheErr) {}
-        }
-      }
+      _applyCustomerDbRegistrationWrite_(
+        ledgerContext.spreadsheet.getSheetByName("고객DB"), 예약자명, 연락처, 할인유형
+      );
     } catch (dbErr) {
-      Logger.log("고객DB 저장 실패 (계속 진행): " + dbErr.message);
+      // 실패는 pending 속성으로 남겨 rescue 주기에 재시도 (등록 자체는 계속)
+      _queueCustomerDbPendingWrite_(거래ID, 예약자명, 연락처, 할인유형, dbErr && dbErr.message);
+      Logger.log("고객DB 저장 실패 (pending 큐 등록): " + dbErr.message);
     }
-    } // end !mergeMode customer DB
 
   // 합침 등록(mergeMode): 기존 거래에 장비만 추가하고 위 계약서 생성 블록을 건너뛰므로,
   // 기존 계약서를 재생성해 추가 장비·금액을 반영한다(디바운스 재생성이라 안전).
@@ -14097,15 +14396,30 @@ function addEquipmentToContract(sheet, row) {
   const setSheet = ss.getSheetByName("세트마스터");
   const 단가 = findSetPrice(장비명, setSheet);
 
-  const newRow = schedLastRow + 1;
-  schedSheet.getRange(newRow, 1, 1, 13).setValues([[
+  // 세트면 등록 경로(registerByReqID)와 동일하게 헤더+구성품을 함께 기록한다.
+  // 헤더 1행만 쓰면 구성품 재고 점유·반출 체크리스트가 누락돼 이중 배정이 난다.
+  const 세트구성품 = getSetComponents(장비명, setSheet);
+  const rowsToWrite = [];
+  var nextSchedNum = newSchedNum;
+  rowsToWrite.push([
     schedID, 거래ID, 장비명, 장비명, 수량,
     반출일str, 반출시간str, 반납일str, 반납시간str,
     "대기", "", 단가, 예약자명_add
-  ]]);
-  schedSheet.getRange(newRow, 5).setNumberFormat("#,##0");
-  schedSheet.getRange(newRow, 12).setNumberFormat("#,##0");
-  schedSheet.getRange(newRow, 6, 1, 4).setNumberFormat("@");
+  ]);
+  세트구성품.forEach(function(comp) {
+    nextSchedNum++;
+    rowsToWrite.push([
+      `${거래ID}-${String(nextSchedNum).padStart(2, "0")}`, 거래ID, 장비명, comp.name,
+      (Number(comp.qty) || 1) * (Number(수량) || 1),
+      반출일str, 반출시간str, 반납일str, 반납시간str,
+      "대기", "", 0, 예약자명_add
+    ]);
+  });
+  const newRow = schedLastRow + 1;
+  schedSheet.getRange(newRow, 1, rowsToWrite.length, 13).setValues(rowsToWrite);
+  schedSheet.getRange(newRow, 5, rowsToWrite.length, 1).setNumberFormat("#,##0");
+  schedSheet.getRange(newRow, 12, rowsToWrite.length, 1).setNumberFormat("#,##0");
+  schedSheet.getRange(newRow, 6, rowsToWrite.length, 4).setNumberFormat("@");
 
   formatScheduleSheet(schedSheet);
 
@@ -14174,26 +14488,63 @@ function removeEquipmentFromContract(sheet, row) {
 
   // 해당 거래ID + 장비명 매칭 행 찾아서 삭제 (뒤에서부터 삭제해야 행 번호 안 밀림)
   const schedData = schedSheet.getRange(2, 1, schedLastRow - 1, 4).getValues();
-  // B열(index 1)=거래ID, D열(index 3)=장비명
-  let deletedCount = 0;
-  let deletedScheduleId = "";
-  for (let i = schedData.length - 1; i >= 0; i--) {
-    if (schedData[i][1] === 거래ID && schedData[i][3] === 장비명) {
-      deletedScheduleId = String(schedData[i][0] || "").trim();
-      const invalidated = invalidateDashboardReturnInspectionForTrade_(거래ID, deletedScheduleId ? [deletedScheduleId] : [], '스케줄 품목 삭제');
-      if (invalidated && invalidated.error) {
-        sheet.getRange(row, 15).setValue("❌ 삭제 전 반납 검수 초기화 실패: " + invalidated.error);
-        sheet.getRange(row, 14).clearContent();
-        return;
-      }
-      schedSheet.deleteRow(i + 2);
-      scheduleDashboardStructureProjectionUnderLock_(거래ID, {
-        removeScheduleIds: deletedScheduleId ? [deletedScheduleId] : []
-      });
-      structureProjectionQueued = true;
-      deletedCount++;
-      break; // 1행만 삭제
+  // B열(index 1)=거래ID, C열(index 2)=세트명, D열(index 3)=장비명
+  // 삭제 대상이 세트 헤더(C==D==장비명)면 구성품(C==세트명, D≠세트명)도 함께 지운다.
+  // 헤더만 지우면 구성품이 고아로 남아 가용성 계산에서 재고를 계속 점유한다.
+  var headerIdx = -1;
+  var headerCount = 0;
+  for (let i = 0; i < schedData.length; i++) {
+    if (schedData[i][1] !== 거래ID) continue;
+    if (schedData[i][3] === 장비명 && schedData[i][2] === 장비명) {
+      headerCount++;
+      if (headerIdx < 0) headerIdx = i;
     }
+  }
+  var rowsToDelete = []; // schedData 기준 0-based 인덱스
+  var orphanWarning = "";
+  if (headerIdx >= 0) {
+    rowsToDelete.push(headerIdx);
+    if (headerCount === 1) {
+      for (let i = 0; i < schedData.length; i++) {
+        if (schedData[i][1] === 거래ID && schedData[i][2] === 장비명 && schedData[i][3] !== 장비명) {
+          rowsToDelete.push(i);
+        }
+      }
+    } else {
+      // 동일 세트 헤더가 복수면 어느 구성품이 어느 헤더 소속인지 구분할 수 없다.
+      // 헤더 1개만 지우고 구성품은 남긴다(남은 헤더가 계속 사용).
+      orphanWarning = " (동일 세트 헤더 " + headerCount + "개 — 구성품은 유지)";
+    }
+  } else {
+    for (let i = 0; i < schedData.length; i++) {
+      if (schedData[i][1] === 거래ID && schedData[i][3] === 장비명) {
+        rowsToDelete.push(i);
+        break; // 개별 품목은 1행만 삭제
+      }
+    }
+  }
+
+  let deletedCount = 0;
+  const deletedScheduleIds = [];
+  if (rowsToDelete.length > 0) {
+    rowsToDelete.forEach(function(i) {
+      var sid = String(schedData[i][0] || "").trim();
+      if (sid) deletedScheduleIds.push(sid);
+    });
+    const invalidated = invalidateDashboardReturnInspectionForTrade_(거래ID, deletedScheduleIds, '스케줄 품목 삭제');
+    if (invalidated && invalidated.error) {
+      sheet.getRange(row, 15).setValue("❌ 삭제 전 반납 검수 초기화 실패: " + invalidated.error);
+      sheet.getRange(row, 14).clearContent();
+      return;
+    }
+    rowsToDelete.sort((a, b) => b - a).forEach(function(i) {
+      schedSheet.deleteRow(i + 2);
+    });
+    scheduleDashboardStructureProjectionUnderLock_(거래ID, {
+      removeScheduleIds: deletedScheduleIds
+    });
+    structureProjectionQueued = true;
+    deletedCount = rowsToDelete.length;
   }
 
   if (deletedCount === 0) {
@@ -14206,7 +14557,7 @@ function removeEquipmentFromContract(sheet, row) {
 
   scheduleContractRegenUnderLock_(거래ID);
   contractRegenQueued = true;
-  sheet.getRange(row, 15).setValue("✅ 삭제완료 · 계약서 재생성 예약");
+  sheet.getRange(row, 15).setValue("✅ 삭제완료 (" + deletedCount + "행)" + orphanWarning + " · 계약서 재생성 예약");
   sheet.getRange(row, 15).setBackground("#C6EFCE");
   } finally {
     try { modificationLock.releaseLock(); } catch (releaseErr) {}
@@ -14523,20 +14874,16 @@ function changeDatesForContract(sheet, row) {
     }
   });
 
-  // 4. 개고생2.0 거래내역 A열(반출일) 업데이트
-  // 2026-04-23 컬럼 재배치: 거래ID D(4) → E(5). A열(반출일)은 위치 안 바뀜.
+  // 4. 개고생2.0 거래내역 A열(반출일) 업데이트 — readback이 있는 공용 프리미티브 사용.
+  // (과거: 빈 catch의 best-effort 단발 쓰기 → 실패가 조용히 사라져 개고생 정산/아침보고의
+  //  반출일이 계약마스터와 영구히 어긋났다. 실패는 상태로 보여주고 pending으로 재시도한다.)
+  var ledgerDateWarning = "";
   try {
-    const 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
-    if (개고생URL) {
-      const 거래시트 = SpreadsheetApp.openByUrl(개고생URL).getSheetByName("거래내역");
-      if (거래시트) {
-        const ids = 거래시트.getRange(2, 5, Math.max(1, 거래시트.getLastRow() - 1), 1).getValues().flat();
-        for (let i = 0; i < ids.length; i++) {
-          if (ids[i] === 거래ID) { 거래시트.getRange(i + 2, 1).setValue(새반출일Raw); break; }
-        }
-      }
-    }
-  } catch (err) { }
+    ensureRegisteredTradeLedgerRow_(거래ID, { dryRun: false });
+  } catch (ledgerDateErr) {
+    ledgerDateWarning = " | ⚠️ 거래내역 반출일 미반영(자동 재시도 예약): " + ledgerDateErr.message;
+    queuePendingTradeLedgerSync_(거래ID, ledgerDateErr && ledgerDateErr.message);
+  }
 
   // 5. 기존 계약서 삭제 후 재생성
   sheet.getRange(row, 15).setValue("⏳ 계약서 재생성 중...");
@@ -14555,7 +14902,52 @@ function changeDatesForContract(sheet, row) {
     if (불가목록.length > 0) statusMsg += " | ❌ 불가: " + 불가목록.join(", ");
     sheet.getRange(row, 15).setBackground("#FFEB9C");
   }
+  if (ledgerDateWarning) {
+    statusMsg += ledgerDateWarning;
+    sheet.getRange(row, 15).setBackground("#FFEB9C");
+  }
   sheet.getRange(row, 15).setValue(statusMsg);
+}
+
+// ── 거래내역(개고생2.0) 동기화 실패 재시도 큐 ─────────────────────
+// 날짜변경 등에서 외부 원장 쓰기가 실패하면 조용히 버리지 않고 pending 속성으로 남긴다.
+// rescue 주기(분 단위)가 ensureRegisteredTradeLedgerRow_(readback 포함)로 재시도한다.
+var TRADE_LEDGER_SYNC_PENDING_PREFIX_ = 'tradeLedgerSyncPending_v1_';
+
+function queuePendingTradeLedgerSync_(tradeId, reason) {
+  try {
+    PropertiesService.getScriptProperties().setProperty(
+      TRADE_LEDGER_SYNC_PENDING_PREFIX_ + String(tradeId || ''),
+      JSON.stringify({ at: Date.now(), reason: String(reason || '') })
+    );
+  } catch (e) {}
+}
+
+function drainPendingTradeLedgerSyncs_() {
+  var props;
+  try { props = PropertiesService.getScriptProperties(); } catch (e) { return 0; }
+  var keys;
+  try { keys = props.getKeys(); } catch (e) { return 0; }
+  var drained = 0;
+  for (var i = 0; i < keys.length && drained < 5; i++) {
+    if (keys[i].indexOf(TRADE_LEDGER_SYNC_PENDING_PREFIX_) !== 0) continue;
+    var tradeId = keys[i].substring(TRADE_LEDGER_SYNC_PENDING_PREFIX_.length);
+    var payload = null;
+    try { payload = JSON.parse(props.getProperty(keys[i]) || 'null'); } catch (e) {}
+    // 7일 넘게 실패한 항목은 폐기 (운영자가 repairMissingTradeLedgerRow로 직접 처리)
+    if (payload && Number(payload.at || 0) && Date.now() - Number(payload.at) > 7 * 24 * 60 * 60 * 1000) {
+      props.deleteProperty(keys[i]);
+      continue;
+    }
+    try {
+      ensureRegisteredTradeLedgerRow_(tradeId, { dryRun: false });
+      props.deleteProperty(keys[i]);
+      drained++;
+    } catch (e) {
+      break; // 외부 시트가 계속 실패하면 다음 rescue 주기에 재시도
+    }
+  }
+  return drained;
 }
 
 
@@ -16592,7 +16984,7 @@ function supaMarkScheduleRowsDirty_(sheet, rows) {
   } catch (e) {}
 }
 
-function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
+function updateScheduleStatus(rowIndex, newStatus, rowIndices, expectedTradeId) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName('스케줄상세');
   if (!sheet) return { success: false, message: '스케줄상세 시트 없음' };
@@ -16618,6 +17010,22 @@ function updateScheduleStatus(rowIndex, newStatus, rowIndices) {
   try {
     lock.waitLock(10000);
     lockAcquired = true;
+
+    // 화면이 캡처한 행 번호가 등록/합침/삭제로 밀렸으면 다른 거래를 덮어쓴다.
+    // 쓰기 전에 각 행의 거래ID(B열)를 재검증한다.
+    expectedTradeId = String(expectedTradeId || '').trim();
+    if (expectedTradeId) {
+      for (var vi = 0; vi < rows.length; vi++) {
+        var actualTid = String(sheet.getRange(rows[vi], 2).getDisplayValue() || '').trim();
+        if (actualTid !== expectedTradeId) {
+          return {
+            success: false,
+            error: '화면 정보가 오래되어 행이 어긋났습니다 (' + rows[vi] + '행: ' + (actualTid || '빈 행') + '). 새로고침 후 다시 시도하세요.',
+            code: 'STALE_ROWS'
+          };
+        }
+      }
+    }
 
     // 취소 경계를 넘는 변경은 화면 검색에서 행이 사라지기 전에 기존 증거와 완료 상태를
     // 같은 잠금 안에서 무효화한다. 실패하면 상태 자체를 바꾸지 않는다.

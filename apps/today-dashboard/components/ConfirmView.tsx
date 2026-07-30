@@ -156,7 +156,11 @@ function isConfirmRequestWorkingStatus(status?: string) {
 
 function canEditConfirmRequest(status?: string) {
   const s = normalizeRegisterStatus(status);
-  if (!s || s === "대기" || s === "AI_REVIEW" || s === "등록대기") return true;
+  // '등록대기'는 서버가 등록을 처리 중인 상태 — GAS가 모든 편집을 거부하므로
+  // 편집 UI를 열면 낙관 반영 후 100% 롤백된다('저장했는데 사라짐' 민원의 원인).
+  // 재등록 버튼 노출은 actionable(queuedStatus)이 별도로 담당한다.
+  if (s === "등록대기") return false;
+  if (!s || s === "대기" || s === "AI_REVIEW") return true;
   if (isConfirmRequestTerminalStatus(s) || isConfirmRequestWorkingStatus(s)) return false;
   return true;
 }
@@ -649,7 +653,10 @@ function ConfirmCard({
   const equipmentRows = useMemo(() => buildConfirmEquipmentRows(equips), [equips]);
   const status = normalizeRegisterStatus(req.등록상태);
   const queuedStatus = status === "등록대기";
-  const actionable = queuedStatus || canEditConfirmRequest(status);
+  // editable: 편집 UI(✎ 수정·품목 인라인 편집) 노출 — 서버 편집 게이트와 일치.
+  // actionable: 등록/보류/거절 버튼 노출 — 등록대기 카드도 멈춘 큐 재등록을 위해 유지.
+  const editable = canEditConfirmRequest(status);
+  const actionable = queuedStatus || editable;
   const hasResult = equips.some((e) => e.결과 && e.결과 !== "");
   // 체크 상태: 기본 = 가용0/❌ 아닌 것만 체크
   const defaultCheckedKeys = useMemo(
@@ -720,7 +727,7 @@ function ConfirmCard({
           </div>
           {!busy && !isQueued && (
             <div className="flex shrink-0 items-center gap-1.5">
-              {actionable && (
+              {editable && (
                 <button onClick={onEdit} className="tap rounded-lg bg-paper ring-1 ring-line/60 px-2.5 py-1.5 text-[12px] font-bold text-ink-soft">✎ 수정</button>
               )}
               <button
@@ -756,7 +763,7 @@ function ConfirmCard({
             const isSetComponent = row.role === "set-component";
             const sel = !isSetHeader && checked.has(row.rowKey);
             const editableItem = { ...row, 순번: itemOrdinal(row) };
-            const canEditItem = actionable && !busy && !isQueued;
+            const canEditItem = editable && !busy && !isQueued;
             const canOpenRow = canEditItem && !isSetHeader;
             const isEditingRow = editingRowKey === row.rowKey;
             const rowOpensInlineEdit = canOpenRow && !isEditingRow;
@@ -798,7 +805,7 @@ function ConfirmCard({
                   </>
                 ) : (
                   <>
-                    {actionable && hasResult && !row.제외 && !busy && !isQueued ? (
+                    {editable && hasResult && !row.제외 && !busy && !isQueued ? (
                       <input type="checkbox" checked={sel} onClick={(e) => e.stopPropagation()} onChange={() => toggle(row.rowKey)} className="mt-0.5 h-[16px] w-[16px] shrink-0 accent-brand-600" aria-label="등록 선택" />
                     ) : (
                       <span className="mt-0.5 w-[16px] shrink-0" aria-hidden />

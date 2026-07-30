@@ -842,6 +842,14 @@ function rescueDashboardAsyncWorkerTriggers_() {
     if (typeof ensureCancelledTradeCleanupTrigger_ === 'function' && keys.some(function(key) {
       return key.indexOf('cancelCleanup_v1_') === 0;
     })) ensureCancelledTradeCleanupTrigger_(1000);
+    // 등록 시 고객DB 쓰기 실패분 재시도 (checkAvailability.js drainPendingCustomerDbWrites_)
+    if (typeof drainPendingCustomerDbWrites_ === 'function' && keys.some(function(key) {
+      return key.indexOf('customerDbPending_v1_') === 0;
+    })) drainPendingCustomerDbWrites_();
+    // 날짜변경 등에서 실패한 거래내역(개고생2.0) 동기화 재시도
+    if (typeof drainPendingTradeLedgerSyncs_ === 'function' && keys.some(function(key) {
+      return key.indexOf('tradeLedgerSyncPending_v1_') === 0;
+    })) drainPendingTradeLedgerSyncs_();
   } catch (rescueErr) {
     Logger.log('비동기 worker rescue 보류: ' + rescueErr);
   }
@@ -914,6 +922,41 @@ function supaGetCheckoutAuthorityStates_(tids) {
   }
 }
 
+/** trades.note_checkin은 앱이 정본이다(remote.ts tradeStructureRow 선언).
+ * 시트 실사기록의 returnMemo는 비어 있는 노트를 시드할 때만 채우고, 앱이 이미 쓴
+ * 값은 덮어쓰지 않는다. 현재값 조회가 실패하면 보수적으로 노트를 보내지 않는다. */
+function supaDropOverwritingNotes_(cfg, tradeRows) {
+  var withNotes = (tradeRows || []).filter(function(row) {
+    return row && Object.prototype.hasOwnProperty.call(row, 'note_checkin');
+  });
+  if (!withNotes.length) return;
+  try {
+    var token = supaToken_(cfg);
+    if (!token) throw new Error('봇 토큰 없음');
+    var idList = withNotes.map(function(row) { return String(row.trade_id || '').trim(); }).filter(Boolean);
+    var res = UrlFetchApp.fetch(
+      cfg.url + '/rest/v1/trades?select=trade_id,note_checkin&trade_id=in.('
+        + encodeURIComponent(idList.join(',')) + ')',
+      {
+        method: 'get',
+        headers: { apikey: cfg.apikey, Authorization: 'Bearer ' + token, 'Accept-Profile': 'village' },
+        muteHttpExceptions: true
+      }
+    );
+    if (res.getResponseCode() >= 300) throw new Error('노트 조회 실패 ' + res.getResponseCode());
+    var existing = {};
+    (JSON.parse(res.getContentText() || '[]') || []).forEach(function(row) {
+      existing[String(row.trade_id || '').trim()] = String(row.note_checkin || '').trim();
+    });
+    withNotes.forEach(function(row) {
+      if (existing[String(row.trade_id || '').trim()]) delete row.note_checkin;
+    });
+  } catch (noteErr) {
+    // 조회 불가 — 앱 노트 보호를 우선해 이번 주기에는 노트를 보내지 않는다
+    withNotes.forEach(function(row) { delete row.note_checkin; });
+  }
+}
+
 /** 1분 트리거 — dirty 거래들을 빌드해 Supabase upsert 후 클리어. */
 function flushDirtyToSupabase() {
   // Supabase 환경설정 장애가 있어도 구조/계약/취소 durable queue 트리거는 살려야 한다.
@@ -960,6 +1003,8 @@ function flushDirtyToSupabase() {
   var ok = true;
   try {
     if (built.trades.length) {
+      // note_checkin은 앱이 정본 — 앱이 쓴 노트를 시트 returnMemo가 덮어쓰지 않게 한다
+      supaDropOverwritingNotes_(cfg, built.trades);
       if (!supaUpsertGrouped_(cfg, 'trades', built.trades, 'trade_id')) ok = false;
       if (built.items.length) {
         // 반출 전 품목은 누락 행을 생성해도 되지만, 반출 후에는 taken_qty 기준선 없는
@@ -988,7 +1033,12 @@ function flushDirtyToSupabase() {
             propSnapshot['returnDone_' + builtTid] === '1' ||
             propSnapshot['checkoutBaselineStarted_' + builtTid] === '1';
           if (checkoutStarted) patchItems.push(builtItem);
-          else insertItems.push(builtItem);
+          else {
+            // 반출 전 존재의 정본은 시트다. 제외→추가로 스케줄ID가 재사용될 때 이전
+            // 제외의 removed_at tombstone이 merge-duplicates로 승계되면 새 장비가
+            // 앱에서 영영 안 보인다. 시트에 현존하는 행은 tombstone을 명시적으로 해제.
+            insertItems.push(Object.assign({}, builtItem, { removed_at: null }));
+          }
         }
         if (insertItems.length && !supaUpsertGrouped_(cfg, 'schedule_items', insertItems, 'schedule_id')) ok = false;
         if (patchItems.length && !supaPatchExistingScheduleItems_(cfg, patchItems)) ok = false;

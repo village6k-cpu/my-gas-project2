@@ -185,8 +185,14 @@ test("반출을 누르지 않은 거래도 반납 탭과 같은 날 전체 탭�
   const status = read("lib/domain/status.ts");
   const ret = section(store, "export async function toggleReturn", "\n/** 응답 유실된 반납완료");
   assert.match(ret, /const hasCheckoutBaseline =/);
-  assert.match(ret, /force = !!opts\?\.force \|\| \(on && !hasCheckoutBaseline\)/,
-    "반출 기준선이 없는 거래는 작업자 반납 의도를 서버 force 경로로 보내야 한다");
+  // 기준선 없는 거래는 조용한 자동 force가 아니라 작업자 확인(다이얼로그) 뒤 force로 보낸다.
+  // 자동 force는 서버의 모든 반납 검증을 우회해 수량 검수 없이 거래가 닫히는 사고를 냈다.
+  assert.match(ret, /needsBaselineConfirm: true/,
+    "반출 기준선이 없는 거래는 작업자 확인을 요구해야 한다");
+  assert.doesNotMatch(ret, /force = !!opts\?\.force \|\| \(on && !hasCheckoutBaseline\)/,
+    "확인 없는 자동 force가 부활하면 안 된다");
+  assert.match(card, /needsBaselineConfirm[\s\S]{0,500}toggleReturn\(trade\.tradeId, \{ force: true \}\)/,
+    "카드는 확인 다이얼로그 뒤 force 경로로 반납 의도를 보낸다");
   assert.match(card, /if \(p === "both"\) return "checkin"/,
     "같은 날 반출·반납 건의 전체 탭은 setupDone 없이 반납 단계여야 한다");
   assert.match(status, /if \(p === "both"\) return t\.returnDone && returnCompletionBlockers\(t\)\.length === 0/,

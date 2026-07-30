@@ -57,6 +57,8 @@ function toggleHarness(gasRequest) {
       context.state.trades = context.state.trades.map((row) => row.tradeId === tradeId ? fn(row) : row);
     },
     isGasOutcomeUnknownError(error) { return error?.outcomeUnknown === true; },
+    isRetryableLedgerError(error) { return error?.outcomeUnknown === true || error?.retryable === true; },
+    scheduleCompletionMutationReplay_() {},
     queueSetupOutcomeRetry(...args) { context.queuedSetupRetries.push(args); },
     putCompletionMutationOutbox() {},
     acknowledgeCompletionMutationOutbox() {},

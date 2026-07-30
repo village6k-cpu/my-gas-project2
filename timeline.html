@@ -601,7 +601,7 @@
             showToast('오류: ' + err.message);
             items.update({ id: id, start: original.start, end: original.end });
           })
-          .updateScheduleTime(original.rowIndex, item.start, item.end, riJSON);
+          .updateScheduleTime(original.rowIndex, item.start, item.end, riJSON, original.거래ID || '');
       });
     });
   }

@@ -207,19 +207,62 @@ function preserveTradePhotos(next: Trade, previous?: Trade): Trade {
   return { ...next, photos: mergePhotos(existing, next.photos) };
 }
 
+// ── 제외 확정 직후 좀비 부활 방지 ───────────────────────────────
+// 제외 성공(GAS 시트 행 삭제) 뒤 Supabase removed_at 투영은 시간 트리거 워커가 맡아
+// 수 초~수 분(백오프 시 최대 30분) 늦을 수 있다. 그 사이 realtime 에코/새로고침
+// 스냅샷이 제외 품목을 체크리스트에 되살리지 않도록, ACK 시점에 단기 tombstone을
+// 남기고 모든 스냅샷 적용 경로에서 걸러낸다.
+const EXCLUDED_ITEM_TOMBSTONE_KEY = "heybilly:excluded-item-tombstones:v1";
+const EXCLUDED_ITEM_TOMBSTONE_TTL_MS = 10 * 60 * 1000;
+
+function readExcludedItemTombstones_(): Record<string, number> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(EXCLUDED_ITEM_TOMBSTONE_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const now = Date.now();
+    const fresh: Record<string, number> = {};
+    for (const [key, at] of Object.entries(parsed as Record<string, unknown>)) {
+      if (Number(at) && now - Number(at) < EXCLUDED_ITEM_TOMBSTONE_TTL_MS) fresh[key] = Number(at);
+    }
+    return fresh;
+  } catch {
+    return {};
+  }
+}
+
+function recordExcludedItemTombstone_(tradeId: string, scheduleId: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    const tombstones = readExcludedItemTombstones_();
+    tombstones[`${tradeId}|${scheduleId}`] = Date.now();
+    window.localStorage.setItem(EXCLUDED_ITEM_TOMBSTONE_KEY, JSON.stringify(tombstones));
+  } catch { /* private mode: realtime 좀비는 워커 투영 후 자연 수렴 */ }
+}
+
+function dropRecentlyExcludedItems_(trade: Trade, tombstones: Record<string, number>): Trade {
+  if (!Object.keys(tombstones).length) return trade;
+  const filtered = trade.equipments.filter((item) => !tombstones[`${trade.tradeId}|${item.scheduleId}`]);
+  return filtered.length === trade.equipments.length ? trade : { ...trade, equipments: filtered };
+}
+
 function preservePhotosInSnapshot(next: Trade[], previous = state.trades): Trade[] {
   const previousById = new Map(previous.map((t) => [t.tradeId, t]));
-  return attachResumedPhotoTiles_(next.map((t) => preserveTradePhotos(t, previousById.get(t.tradeId))));
+  const tombstones = readExcludedItemTombstones_();
+  return attachResumedPhotoTiles_(
+    next.map((t) => dropRecentlyExcludedItems_(preserveTradePhotos(t, previousById.get(t.tradeId)), tombstones)),
+  );
 }
 
 function mergeTradeChanges(base: Trade[], changed: Trade[]): Trade[] {
   const baseById = new Map(base.map((t) => [t.tradeId, t]));
   const byId = new Map(changed.map((t) => [t.tradeId, t]));
+  const tombstones = readExcludedItemTombstones_();
   const merged = base.map((t) => {
     const next = byId.get(t.tradeId);
-    return next ? preserveTradePhotos(next, t) : t;
+    return next ? dropRecentlyExcludedItems_(preserveTradePhotos(next, t), tombstones) : t;
   });
-  for (const t of changed) if (!baseById.has(t.tradeId)) merged.push(t);
+  for (const t of changed) if (!baseById.has(t.tradeId)) merged.push(dropRecentlyExcludedItems_(t, tombstones));
   return attachResumedPhotoTiles_(merged);
 }
 
@@ -1780,6 +1823,8 @@ async function commitRemoveEquipmentMutation_(
     }
     applyContractMutationResult(entry.tradeId, res, [entry.scheduleId]);
     acknowledgeRemoveEquipmentOutbox_(entry);
+    // removed_at 투영이 늦는 동안 realtime 에코/새로고침이 이 품목을 되살리지 않게 한다
+    recordExcludedItemTombstone_(entry.tradeId, entry.scheduleId);
     finishTradeSave(entry.tradeId, saveId, "saved", "장비 제외 저장됨");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1905,6 +1950,8 @@ export type TradeDetailsInput = {
   checkoutTime: string;
   returnDate: string;
   returnTime: string;
+  /** 편집 시작 시점 스냅샷(JSON) — 서버 CAS로 다른 직원의 선행 수정 덮어쓰기를 막는다 */
+  expected?: string;
 };
 
 /** 고객정보와 예약 일시는 GAS 원장을 먼저 확정한 뒤 앱/Supabase에 반영한다. */
@@ -2053,6 +2100,14 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
       queueSetupOutcomeRetry(tradeId, done, optimisticDoneAt, saveId, mutationId);
       return { ok: true, warning };
     }
+    if (setupRequestStarted && isRetryableLedgerError(e)) {
+      // 잠금/lease 경합(BUSY)이 인라인 재시도 한도를 넘긴 경우 — 실패가 아니라 지연이다.
+      // 낙관 표시와 outbox를 유지하고 내구 재생으로 넘긴다. (기존: 즉시 롤백 →
+      // 몇 초 뒤 완료 표시가 풀려 직원이 이미 자리를 뜬 경우 기록이 사라졌다.)
+      finishTradeSave(tradeId, saveId, "error", "⚠️ 반출완료 저장 지연 — 자동 재시도 중");
+      scheduleCompletionMutationReplay_("setup", tradeId, 3_000);
+      return { ok: true, warning: detail };
+    }
     // GAS는 기준선과 Supabase 완료값을 모두 저장해야 성공을 반환하므로, 실패 때만 되돌린다.
     acknowledgeCompletionMutationOutbox("setup", tradeId, mutationId);
     mutateTrade(tradeId, (t) => ({ ...t, setupDone: previousDone, setupDoneAt: previousDoneAt }), false);
@@ -2062,7 +2117,7 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
 }
 export type ToggleReturnResult =
   | { ok: true; blockers: []; warning?: string }
-  | { ok: false; blockers: ReturnCompletionBlocker[]; error: string };
+  | { ok: false; blockers: ReturnCompletionBlocker[]; error: string; needsBaselineConfirm?: boolean };
 
 export async function toggleReturn(tradeId: string, opts?: { force?: boolean }): Promise<ToggleReturnResult> {
   if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) {
@@ -2079,11 +2134,21 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
 
   const on = !current.returnDone;
   // 반출완료를 누르지 못했거나 과거 데이터라 taken_qty 기준선이 없는 거래도 현장에서
-  // 바로 반납완료할 수 있어야 한다. 기준선이 있는 정상 거래의 수량 검증은 그대로 유지한다.
+  // 반납완료할 수 있어야 한다 — 단, 조용한 자동 우회가 아니라 작업자 확인을 거친다.
+  // (과거: 기준선 없음 → 확인 다이얼로그 없이 force 자동 전송 → 서버의 모든 반납
+  //  검증이 우회되어 수량 검수 없이 거래가 닫혔다.)
   const hasCheckoutBaseline = current.equipments.some(
     (item) => Number(item.takenQty ?? 0) > 0 || item.actualTakenQty != null,
   );
-  const force = !!opts?.force || (on && !hasCheckoutBaseline);
+  if (on && !hasCheckoutBaseline && !opts?.force) {
+    return {
+      ok: false,
+      blockers: [],
+      error: "반출 기준선(수량 검수 기록)이 없는 거래입니다 — 확인 후 반납완료해주세요",
+      needsBaselineConfirm: true,
+    };
+  }
+  const force = !!opts?.force;
   const blockers = on && !force ? returnCompletionBlockers(current) : [];
   if (blockers.length > 0) {
     // 강제 차단하지 않는다 — 호출부(카드)가 미확인 내역을 보여주고 작업자 확인 후
@@ -2162,6 +2227,8 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
       done: on,
       mutationId,
       ...(force ? { force: 1 } : {}),
+      // 기준선 없음을 근거로 한 force는 서버가 Supabase 정본을 재검증한다(낡은 화면 방지)
+      ...(force && !hasCheckoutBaseline ? { autoForce: 1 } : {}),
     });
     requireCompletionMutationResult_(res, "returnDone");
     const confirmedDone = typeof res?.returnDone === "boolean" ? res.returnDone : on;
@@ -2188,6 +2255,14 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
       // 응답만 유실됐을 수 있다 — 표시를 되돌리지 않고 같은 목표 상태를 백그라운드 재확인한다.
       set({ toast: { id: saveId, text: "⚠️ 반납완료는 표시됐고 서버 응답을 다시 확인 중입니다", kind: "saving" } });
       queueReturnOutcomeRetry(tradeId, on, force, optimisticReturnDoneAt, saveId, mutationId);
+      return { ok: true, blockers: [] };
+    }
+    if (returnRequestStarted && isRetryableLedgerError(e)) {
+      // 잠금/lease 경합(BUSY)이 인라인 재시도 한도를 넘긴 경우 — 실패가 아니라 지연이다.
+      // 낙관 표시와 outbox를 유지하고 내구 재생으로 넘긴다. (기존: 즉시 롤백 →
+      // 완료된 줄 알고 자리를 뜬 직원의 반납 기록이 사라졌다.)
+      finishTradeSave(tradeId, saveId, "error", "⚠️ 반납완료 저장 지연 — 자동 재시도 중");
+      scheduleCompletionMutationReplay_("return", tradeId, 3_000);
       return { ok: true, blockers: [] };
     }
     // 명확한 거절 — 즉시 표시를 원래 상태로 되돌린다.
@@ -2856,6 +2931,15 @@ function armQtyCommitRetry_(tradeId: string, scheduleId: string, key: string): v
 
 async function commitQueuedItemQty(tradeId: string, scheduleId: string, key: string): Promise<void> {
   if (qtyCommitInFlight[key]) return; // 진행 중이면 완료 후 남은 target을 이어서 커밋
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    // 오프라인엔 실패 토스트 쌍을 만들지 않고 조용히 대기 — online 복귀/다음 재시도가 이어간다
+    if (qtyCommitTimers[key]) clearTimeout(qtyCommitTimers[key]);
+    qtyCommitTimers[key] = setTimeout(() => {
+      delete qtyCommitTimers[key];
+      void commitQueuedItemQty(tradeId, scheduleId, key);
+    }, 15_000);
+    return;
+  }
   const target = qtyCommitTargets[key];
   if (target === undefined) return;
   delete qtyCommitTargets[key];
@@ -2979,8 +3063,16 @@ function scheduleItemQtyCanonicalReconcile(
 
 async function reconcileCompletionMutationCanonical_(tradeId: string): Promise<void> {
   try {
+    // fetch 중 들어온 낙관 편집(현장정산·메모 등)을 서버 스냅샷이 되돌리지 않도록
+    // 다른 모든 스냅샷 적용 경로와 같은 mutation-seq 게이트를 적용한다.
+    const seqAtStart = tradeMutationSeq[tradeId] ?? 0;
     const [serverTrade] = await fetchTradesByIds([tradeId]);
     if (!serverTrade || isTradeMutationActive(tradeId)) return;
+    if ((tradeMutationSeq[tradeId] ?? 0) !== seqAtStart || hasTradeSyncPending(tradeId)) {
+      // 그 사이 로컬 변경 발생 — realtime 재조회 경로가 최신 상태로 다시 수렴한다
+      noteRemoteChange({ table: "trades", tradeId });
+      return;
+    }
     set({ trades: mergeTradeChanges(state.trades, [serverTrade]) });
   } catch {
     if (typeof window !== "undefined") {
@@ -3020,6 +3112,12 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
 
   if (activeTradeTransitions.has(latest.tradeId) || hasTradePending(latest.tradeId)) {
     scheduleCompletionMutationReplay_(latest.kind, latest.tradeId, 2_000);
+    return;
+  }
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    // 오프라인엔 시도(=실패 토스트 쌍)를 만들지 않고 조용히 대기한다.
+    // online 이벤트 리스너가 복귀 즉시 재생을 다시 무장한다.
+    scheduleCompletionMutationReplay_(latest.kind, latest.tradeId, 15_000);
     return;
   }
   const current = state.trades.find((trade) => trade.tradeId === latest.tradeId);
@@ -3161,7 +3259,12 @@ function replayDurableMutationOutboxes(): void {
       if (!key.startsWith(`${trade.tradeId}|`)) continue;
       const scheduleId = key.slice(trade.tradeId.length + 1);
       const item = nextTrade.equipments.find((candidate) => candidate.scheduleId === scheduleId);
-      if (!item) continue;
+      if (!item) {
+        // 거래는 로드됐는데 품목이 없다 = 그 사이 제외/삭제됨. 목표를 terminal 처리해
+        // 영구 잔존과 (스케줄ID 재사용 시) 다른 장비로의 옛 목표 재생을 막는다.
+        acknowledgeQtyOutboxTarget(key, Math.max(1, Math.round(Number(rawQty) || 1)));
+        continue;
+      }
       const qty = Math.max(1, Math.round(Number(rawQty) || 1));
       if (qtyConfirmedValues[key] === undefined) qtyConfirmedValues[key] = item.qty;
       qtyCommitTargets[key] = qty;
@@ -3175,7 +3278,11 @@ function replayDurableMutationOutboxes(): void {
     for (const [key, entry] of Object.entries(itemCheckOutbox)) {
       if (entry.tradeId !== trade.tradeId || !key.startsWith(`${trade.tradeId}|`)) continue;
       const item = nextTrade.equipments.find((candidate) => candidate.scheduleId === entry.scheduleId);
-      if (!item) continue;
+      if (!item) {
+        // 제외/삭제된 품목의 체크 목표는 terminal 처리 (영구 잔존·ID 재사용 재생 방지)
+        acknowledgeItemCheckOutboxTarget(key, entry.done, entry.mutationId);
+        continue;
+      }
       if (itemCheckConfirmedValues[key] === undefined) {
         itemCheckConfirmedValues[key] = item.checkoutState === "taken";
       }
@@ -4244,7 +4351,14 @@ function flattenGasPhotos(raw: unknown): PhotoMeta[] {
 function mergePhotos(existing: PhotoMeta[], incoming: PhotoMeta[]): PhotoMeta[] {
   const map = new Map<string, PhotoMeta>();
   for (const photo of existing) map.set(photoKey(photo), photo);
-  for (const photo of incoming) map.set(photoKey(photo), { ...map.get(photoKey(photo)), ...photo });
+  for (const photo of incoming) {
+    const prev = map.get(photoKey(photo));
+    const merged: PhotoMeta = { ...prev, ...photo };
+    // 업로드 응답에만 있는 sheetValue를 조회 응답의 undefined가 지우면, fileId 해석이
+    // 실패한 사진의 삭제 매칭 수단이 사라진다 — 있는 값을 보존한다.
+    if (photo.sheetValue == null && prev?.sheetValue != null) merged.sheetValue = prev.sheetValue;
+    map.set(photoKey(photo), merged);
+  }
   return Array.from(map.values());
 }
 

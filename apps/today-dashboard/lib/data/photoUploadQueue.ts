@@ -16,7 +16,12 @@ export interface PhotoUploadJob {
   createdAt: number;
   attempts: number;
   lastError?: string;
+  /** 서버가 영구 거절한 잡 — 온라인 복귀/재시작 자동 부활 대상에서 제외 */
+  permanent?: boolean;
 }
+
+/** 오프라인/네트워크 원인 실패 판별 — 이런 잡은 온라인 복귀 시 자동 부활한다 */
+const NETWORK_ERROR_RE = /network|fetch|timeout|timed out|호출 실패|응답 확인 실패|유효한 JSON/i;
 
 export interface PhotoUploadHandlers {
   send: (job: PhotoUploadJob) => Promise<unknown>;
@@ -138,6 +143,9 @@ async function processQueue(): Promise<void> {
   processing = true;
   try {
     for (;;) {
+      // 오프라인이면 시도 자체를 하지 않는다. 즉시 실패로 attempts를 태우면 약 91초 만에
+      // 잡이 소진되어(3+8+20+60초) 온라인 복귀 후에도 자동 재개되지 않았다.
+      if (typeof navigator !== "undefined" && navigator.onLine === false) break;
       const ready = readyJobs(Date.now());
       if (!ready.length) break;
       const job = ready[0];
@@ -150,6 +158,16 @@ async function processQueue(): Promise<void> {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const permanent = Boolean((error as { permanent?: boolean } | null)?.permanent);
+        const offlineNow = typeof navigator !== "undefined" && navigator.onLine === false;
+        if (offlineNow && !permanent) {
+          // 전송 도중 연결이 끊긴 경우 — 시도 횟수를 태우지 않고 온라인 복귀를 기다린다
+          job.lastError = message;
+          nextAttemptAt.set(job.queueId, Date.now() + 60_000);
+          await idbWrite(job);
+          handlers.onFailure(job, message, true);
+          continue;
+        }
+        if (permanent) job.permanent = true;
         job.attempts = permanent ? MAX_ATTEMPTS : job.attempts + 1;
         job.lastError = message;
         const willRetry = job.attempts < MAX_ATTEMPTS;
@@ -188,7 +206,14 @@ export async function resumePhotoUploads(): Promise<PhotoUploadJob[]> {
   const stored = await idbReadAll();
   for (const job of stored) {
     if (jobs.has(job.queueId)) continue;
-    // 소진된 잡은 자동 전송하지 않고 그대로 복원한다. attempts<MAX인 중단 작업만 이어간다.
+    // 네트워크 원인으로 소진된 잡은 재시작 시 1회 자동 부활한다 (서버 clientKey 멱등이라
+    // 재전송이 사진을 두 번 만들지 않는다). 서버가 영구 거절한 잡(permanent)과
+    // 원인 불명 잡은 수동 재시도용으로 그대로 복원한다.
+    if (!job.permanent && job.attempts >= MAX_ATTEMPTS && NETWORK_ERROR_RE.test(String(job.lastError || ""))) {
+      job.attempts = 0;
+      job.lastError = undefined;
+      void idbWrite(job);
+    }
     jobs.set(job.queueId, job);
   }
   void processQueue();
@@ -216,5 +241,19 @@ export function pendingPhotoUploadCount(): number {
 }
 
 if (typeof window !== "undefined") {
-  window.addEventListener("online", () => void processQueue());
+  window.addEventListener("online", () => {
+    // 오프라인 동안 소진된 잡을 되살린다 (서버 clientKey 멱등 — 재전송 안전).
+    // 서버가 영구 거절한 잡(permanent)은 부활 대상에서 제외한다.
+    const now = Date.now();
+    for (const job of jobs.values()) {
+      if (job.permanent) continue;
+      if (job.attempts >= MAX_ATTEMPTS) {
+        job.attempts = 0;
+        job.lastError = undefined;
+        void idbWrite(job);
+      }
+      nextAttemptAt.set(job.queueId, now);
+    }
+    void processQueue();
+  });
 }

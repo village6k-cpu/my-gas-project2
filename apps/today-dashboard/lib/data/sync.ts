@@ -305,7 +305,9 @@ function mergeDashboard(base: Trade, it: any): Trade {
     paymentWarning: base.paymentWarning, // 에러 문자열을 경고 플래그로 둔갑시키지 않음
     contractUrl: it.contractUrl || base.contractUrl,
     contractRegenPending: !!it.contractRegenPending,
-    noteCheckin: it.returnMemo || base.noteCheckin,
+    // note_checkin은 앱이 정본(remote.ts tradeStructureRow) — 시트 returnMemo는
+    // 앱 노트가 비어 있을 때만 시드한다. 반대로 두면 GAS 재조회가 방금 쓴 노트를 되돌린다.
+    noteCheckin: base.noteCheckin || it.returnMemo,
     riskWarnings: mergeDashboardCardCautions(base, it),
     returnCounts,
     equipments,

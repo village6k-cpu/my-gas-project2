@@ -26,7 +26,9 @@ assert(
 
 assert(
   /function canEditConfirmRequest\(status\?: string\)/.test(view) &&
-    /if \(!s \|\| s === "대기" \|\| s === "AI_REVIEW" \|\| s === "등록대기"\) return true;/.test(view) &&
+    // 서버가 편집을 무조건 거부하는 '등록대기'는 편집 UI를 열지 않는다 (낙관 반영 후 100% 롤백 방지)
+    /if \(s === "등록대기"\) return false;/.test(view) &&
+    /if \(!s \|\| s === "대기" \|\| s === "AI_REVIEW"\) return true;/.test(view) &&
     /return true;/.test(view),
   'blocking states such as 모델 미선택/등록 불가 must stay editable instead of hiding 수정 controls'
 );

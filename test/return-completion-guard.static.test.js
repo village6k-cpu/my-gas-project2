@@ -293,7 +293,7 @@ test('품목 추가는 완료를 재오픈해 기준선에 합치고, 삭제는 
   assert.ok(removeMany.indexOf('isDashboardTradeCheckoutStarted_(ss, tid)') < removeMany.indexOf('deleteDashboardRowsDescending_'));
   assert.ok(removeOne.indexOf('isDashboardTradeCheckoutStarted_(ss, 거래ID)') < removeOne.indexOf('schedSheet.deleteRow'));
   assert.match(removeMany, /invalidateDashboardReturnInspectionForTrade_/);
-  assert.match(gas, /function removeEquipmentFromContract[\s\S]{0,3000}invalidateDashboardReturnInspectionForTrade_/);
+  assert.match(gas, /function removeEquipmentFromContract[\s\S]{0,4500}invalidateDashboardReturnInspectionForTrade_/);
   assert.match(removeMany, /deleteDashboardRowsDescending_[\s\S]*scheduleDashboardStructureProjectionUnderLock_\(tid, \{ removeScheduleIds: removedScheduleIds \}\)/);
   assert.match(removeOne, /deleteRow[\s\S]*scheduleDashboardStructureProjectionUnderLock_\(거래ID, \{[\s\S]*removeScheduleIds:/);
   const addMany = gas.slice(gas.indexOf('function dashboardAddEquipments'), gas.indexOf('\nfunction recordOnsiteAddonBackend_', gas.indexOf('function dashboardAddEquipments')));

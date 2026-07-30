@@ -76,6 +76,17 @@ export const ScheduleCard = memo(function ScheduleCard({
     const result = await toggleReturn(trade.tradeId);
     if (result.ok) return;
     setOpen(true);
+    // 반출 기준선이 없는 거래(반출완료 미처리·과거 데이터)는 조용히 우회하지 않고
+    // 작업자 확인을 받은 뒤에만 강제 종결한다. 처리 내역은 서버에 기록으로 남는다.
+    if (result.needsBaselineConfirm) {
+      const confirmed = window.confirm(
+        "반출 수량 검수 기록이 없는 거래입니다.\n수량 확인 없이 반납완료 처리할까요?\n(처리 내역은 기록으로 남습니다)",
+      );
+      if (!confirmed) return;
+      const forced = await toggleReturn(trade.tradeId, { force: true });
+      if (!forced.ok) setOpen(true);
+      return;
+    }
     // 미확인/초과는 강제 차단하지 않는다 — 작업자가 내용을 보고 결정한다(소프트 가드).
     // 카드는 완료 전까지 계속 살아있고, 미확인 내역은 returnCounts 기록으로 남는다.
     if (result.blockers.length > 0) {

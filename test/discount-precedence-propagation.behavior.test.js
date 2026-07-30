@@ -36,6 +36,7 @@ function loadResolver() {
   vm.runInContext(
     [
       extractFunction(backend, '_normalizeDiscountTypeOrBlank_'),
+      extractFunction(backend, '_resolveConfirmRequestDiscountOrBlank_'),
       extractFunction(backend, '_resolveConfirmRequestDiscount_'),
       'this.resolveDiscount = _resolveConfirmRequestDiscount_;',
     ].join('\n'),
