@@ -5964,7 +5964,15 @@ function getDashboardContractExtrasByIds_(ids) {
 var DASHBOARD_PHOTO_SHEET_NAME_ = "반출반납 사진";
 var DASHBOARD_PHOTO_FOLDER_NAME_ = "빌리지_반출반납_사진";
 var DASHBOARD_PHOTO_APPSHEET_FOLDER_NAME_ = "반출반납 사진_Images";
-var DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_ = "dashboard_photo_file_index_v1";
+var DASHBOARD_PHOTO_FILE_INDEX_LEGACY_CACHE_KEY_ = "dashboard_photo_file_index_v1";
+var DASHBOARD_PHOTO_FILE_INDEX_CACHE_MANIFEST_KEY_ = "dashboard_photo_file_index_v2_manifest";
+var DASHBOARD_PHOTO_FILE_INDEX_CACHE_CHUNK_PREFIX_ = "dashboard_photo_file_index_v2_cache_";
+var DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_MANIFEST_KEY_ = "dashboard_photo_file_index_v2_property_manifest";
+var DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_CHUNK_PREFIX_ = "dashboard_photo_file_index_v2_property_";
+// CacheService는 키당 100KB, Script Properties는 값당 9KB 제한이다.
+// 사진 파일 1,900개 인덱스를 하나의 값으로 저장하면 실패하므로 작게 나눈다.
+var DASHBOARD_PHOTO_FILE_INDEX_CACHE_CHUNK_ENTRIES_ = 250;
+var DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_CHUNK_CHARS_ = 7000;
 
 function emptyDashboardPhotos_() {
   return { checkout: [], checkin: [], other: [] };
@@ -6179,6 +6187,13 @@ function resolveDashboardPhotoFileId_(value, fileIndex) {
     if (files.hasNext()) fileId = files.next().getId();
   } catch (driveErr) {}
 
+  if (fileId) {
+    if (fileIndex) fileIndex[fileName] = fileId;
+    // AppSheet가 파일을 추가한 경우도 첫 단건 해석 후 내구 인덱스에
+    // 합쳐져, 다음 기기나 6시간 후에 같은 Drive 조회를 반복하지 않는다.
+    rememberDashboardPhotoFileIndexEntry_(fileName, fileId);
+  }
+
   try {
     // 해석 실패 음성 캐시는 짧게(10분) — 일시적 Drive 오류가 6시간 동안 삭제 불능으로 굳지 않게
     CacheService.getScriptCache().put(cacheKey, fileId || '-', fileId ? 21600 : 600);
@@ -6190,9 +6205,18 @@ function getDashboardPhotoFileIndex_() {
   var cache = null;
   try {
     cache = CacheService.getScriptCache();
-    var cached = cache.get(DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_);
-    if (cached) return JSON.parse(cached);
   } catch (cacheErr) {}
+
+  var cached = readDashboardPhotoFileIndexCache_(cache);
+  if (cached) return cached;
+
+  // CacheService의 최대 TTL은 6시간이다. 만료될 때마다 Drive 폴더를
+  // 전체 순회하지 않도록 압축한 인덱스를 Script Properties에 남긴다.
+  var persisted = readDashboardPhotoFileIndexProperties_();
+  if (persisted) {
+    writeDashboardPhotoFileIndexCache_(cache, persisted);
+    return persisted;
+  }
 
   var index = {};
   var indexComplete = true;
@@ -6209,10 +6233,124 @@ function getDashboardPhotoFileIndex_() {
     indexComplete = false;
   }
 
-  try {
-    if (cache && indexComplete) cache.put(DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_, JSON.stringify(index), 21600);
-  } catch (cachePutErr) {}
+  if (indexComplete) {
+    writeDashboardPhotoFileIndexProperties_(index);
+    writeDashboardPhotoFileIndexCache_(cache, index);
+  }
   return index;
+}
+
+function readDashboardPhotoFileIndexCache_(cache) {
+  if (!cache) return null;
+  try {
+    var manifestRaw = cache.get(DASHBOARD_PHOTO_FILE_INDEX_CACHE_MANIFEST_KEY_);
+    if (!manifestRaw) return null;
+    var manifest = JSON.parse(manifestRaw);
+    var chunkCount = Math.max(0, Number(manifest.chunks || 0));
+    if (!chunkCount) return null;
+    var keys = [];
+    for (var i = 0; i < chunkCount; i++) {
+      keys.push(DASHBOARD_PHOTO_FILE_INDEX_CACHE_CHUNK_PREFIX_ + i);
+    }
+    var chunks = cache.getAll(keys);
+    var index = {};
+    for (var j = 0; j < keys.length; j++) {
+      if (!chunks[keys[j]]) return null;
+      var part = JSON.parse(chunks[keys[j]]);
+      Object.keys(part).forEach(function(fileName) { index[fileName] = part[fileName]; });
+    }
+    return index;
+  } catch (err) {
+    return null;
+  }
+}
+
+function writeDashboardPhotoFileIndexCache_(cache, index) {
+  if (!cache || !index) return;
+  try {
+    var names = Object.keys(index);
+    var payload = {};
+    var chunkCount = 0;
+    for (var offset = 0; offset < names.length; offset += DASHBOARD_PHOTO_FILE_INDEX_CACHE_CHUNK_ENTRIES_) {
+      var part = {};
+      names.slice(offset, offset + DASHBOARD_PHOTO_FILE_INDEX_CACHE_CHUNK_ENTRIES_).forEach(function(fileName) {
+        part[fileName] = index[fileName];
+      });
+      payload[DASHBOARD_PHOTO_FILE_INDEX_CACHE_CHUNK_PREFIX_ + chunkCount] = JSON.stringify(part);
+      chunkCount++;
+    }
+    if (!chunkCount) return;
+    cache.putAll(payload, 21600);
+    cache.put(DASHBOARD_PHOTO_FILE_INDEX_CACHE_MANIFEST_KEY_, JSON.stringify({ v: 2, chunks: chunkCount }), 21600);
+    cache.remove(DASHBOARD_PHOTO_FILE_INDEX_LEGACY_CACHE_KEY_);
+  } catch (err) {}
+}
+
+function readDashboardPhotoFileIndexProperties_() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var manifestRaw = props.getProperty(DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_MANIFEST_KEY_);
+    if (!manifestRaw) return null;
+    var manifest = JSON.parse(manifestRaw);
+    var chunkCount = Math.max(0, Number(manifest.chunks || 0));
+    if (!chunkCount) return null;
+    var encoded = '';
+    for (var i = 0; i < chunkCount; i++) {
+      var part = props.getProperty(DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_CHUNK_PREFIX_ + i);
+      if (!part) return null;
+      encoded += part;
+    }
+    var bytes = Utilities.base64DecodeWebSafe(encoded);
+    var json = Utilities.ungzip(Utilities.newBlob(bytes)).getDataAsString('UTF-8');
+    var index = JSON.parse(json);
+    return index && typeof index === 'object' ? index : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function writeDashboardPhotoFileIndexProperties_(index) {
+  if (!index) return;
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var previousCount = 0;
+    try {
+      previousCount = Number(JSON.parse(props.getProperty(DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_MANIFEST_KEY_) || '{}').chunks || 0);
+    } catch (manifestErr) {}
+    var zipped = Utilities.gzip(Utilities.newBlob(JSON.stringify(index), 'application/json'));
+    var encoded = Utilities.base64EncodeWebSafe(zipped.getBytes());
+    var values = {};
+    var chunkCount = 0;
+    for (var offset = 0; offset < encoded.length; offset += DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_CHUNK_CHARS_) {
+      values[DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_CHUNK_PREFIX_ + chunkCount] = encoded.slice(
+        offset,
+        offset + DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_CHUNK_CHARS_
+      );
+      chunkCount++;
+    }
+    if (!chunkCount) return;
+    values[DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_MANIFEST_KEY_] = JSON.stringify({ v: 2, chunks: chunkCount });
+    props.setProperties(values, false);
+    for (var i = chunkCount; i < previousCount; i++) {
+      props.deleteProperty(DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_CHUNK_PREFIX_ + i);
+    }
+  } catch (err) {}
+}
+
+function rememberDashboardPhotoFileIndexEntry_(fileName, fileId) {
+  fileName = String(fileName || '').trim();
+  fileId = String(fileId || '').trim();
+  if (!fileName || !fileId) return;
+  try {
+    var cache = CacheService.getScriptCache();
+    // 기존 완전 인덱스가 있을 때만 추가한다. 없는 상태에서 새 파일 1개만
+    // 저장하면 그 부분 인덱스가 전체 인덱스로 오인될 수 있다.
+    var index = readDashboardPhotoFileIndexCache_(cache) || readDashboardPhotoFileIndexProperties_();
+    if (!index) return;
+    index[fileName] = fileId;
+    writeDashboardPhotoFileIndexProperties_(index);
+    writeDashboardPhotoFileIndexCache_(cache, index);
+  } catch (err) {}
 }
 
 function normalizeDashboardPhotoPhase_(value) {
@@ -6462,6 +6600,7 @@ function uploadDashboardPhoto(tid, phase, fileName, mimeType, data, memo, client
     } finally {
       if (appendLocked) try { appendLock.releaseLock(); } catch (appendReleaseErr) {}
     }
+    rememberDashboardPhotoFileIndexEntry_(String(relativePath || '').split('/').pop(), fileId);
     invalidateDashboardPhotoCache_();
     invalidateDashboardCache();
 
@@ -6623,7 +6762,9 @@ function deleteDashboardPhoto(tid, phase, fileId, rowHint, sheetValue) {
 
 function invalidateDashboardPhotoCache_() {
   try {
-    CacheService.getScriptCache().remove(DASHBOARD_PHOTO_FILE_INDEX_CACHE_KEY_);
+    // v2 인덱스는 업로드 시 증분 반영하므로 전체 무효화하지 않는다.
+    // 예전 단일-키 캐시만 정리한다.
+    CacheService.getScriptCache().remove(DASHBOARD_PHOTO_FILE_INDEX_LEGACY_CACHE_KEY_);
   } catch (err) {}
 }
 

@@ -4464,6 +4464,9 @@ async function loadTradePhotosBatch_(tradeIds: string[], force = false): Promise
       }
       mergeTradePhotosFromGas(photoMap);
       batch.forEach((tradeId) => loadedPhotoTrades.add(tradeId));
+      // mergeTradePhotosFromGas의 emit은 loaded 플래그보다 먼저 발생한다.
+      // 로딩 문구가 즉시 실제 사진 수로 바뀌도록 한 번 더 알린다.
+      emit();
     }
   } finally {
     ids.forEach((id) => loadingPhotoTrades.delete(id));
@@ -4484,6 +4487,15 @@ export function ensureTradePhotos(tradeIds: string[]): void {
       // 다음 카드 마운트나 상세 열기에서 다시 시도한다.
     });
   }, DASHBOARD_PHOTO_BATCH_DELAY_MS);
+}
+
+/** 카드가 '사진 0/0'과 '아직 서버 조회 중'을 구분하게 한다. */
+export function useTradePhotosLoaded(tradeId: string): boolean {
+  return useSyncExternalStore(
+    subscribe,
+    () => loadedPhotoTrades.has(String(tradeId || "").trim()),
+    () => false,
+  );
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
