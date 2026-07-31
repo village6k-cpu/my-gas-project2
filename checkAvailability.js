@@ -13339,9 +13339,8 @@ function getBlockingRegisterIssue_(data, reqID) {
     var result = String(data[i][8] || "").trim();
     if (/^❌\s*날짜/.test(result)) return result.replace(/^❌\s*/, "");
     if (!directRegisterApproved && /^⚠️?\s*모델 선택/.test(result)) return result.replace(/^⚠️?\s*/, "");
-    // 최상위 미등록 장비(오타 등)는 단가 0으로 조용히 등록되는 사고를 막는다.
-    // 바로등록은 사장 최종 승인이므로 통과 (세트 구성품은 위 [세트] 태그에서 이미 면제).
-    if (!directRegisterApproved && /^❓\s*미등록/.test(result)) return result.replace(/^❓\s*/, "") + " — F열 장비명 확인 후 다시 등록";
+    // "❓ 미등록 장비"는 재고 마스터에 없는 자유입력 품목 표시일 뿐이다.
+    // 운영상 일반 등록에서도 허용하므로 등록 차단 조건으로 사용하지 않는다.
   }
   return "";
 }
