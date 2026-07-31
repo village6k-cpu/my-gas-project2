@@ -3295,15 +3295,21 @@ function dashboardCheckoutBaselineFingerprint_(tid, equipments) {
     var scheduleId = String(eq.scheduleId || eq.schedule_id || '').trim();
     var name = String(eq.name || '').trim();
     var qty = Number(eq.qty);
+    var setName = String(eq.setName || eq.set_name || '').trim();
     if (!scheduleId || !name || !isFinite(qty) || Math.floor(qty) !== qty || qty <= 0 || seen[scheduleId]) return '';
     seen[scheduleId] = true;
     canonical.push({
       scheduleId: scheduleId,
       name: name,
       qty: qty,
-      setName: String(eq.setName || eq.set_name || '').trim(),
+      setName: setName,
       isHeader: !!(eq.isHeader || eq.is_set_header),
-      isComponent: !!(eq.isComponent || eq.is_component),
+      // 스케줄상세 검색 행에는 isComponent 필드가 없으므로 C(세트명)와 D(장비명)
+      // 구조로 동일하게 추론한다. 앱 mappers.ts의 stale flag 복구 규칙과 맞춘다.
+      isComponent: !!(
+        eq.isComponent || eq.is_component ||
+        (setName && normalizeDashboardReturnSetKey_(setName) !== normalizeDashboardReturnSetKey_(name))
+      ),
       onsite: !!eq.onsite
     });
   }

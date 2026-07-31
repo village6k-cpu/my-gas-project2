@@ -150,18 +150,27 @@ async function persistSetupCompletionAuthority_(body: Record<string, unknown>): 
     }
   }
 
-  // 구조 필드는 검증에만 쓰고 쓰지 않는다. 행이 검증 직후 사라져도 부분 upsert가
-  // NOT NULL 제약으로 실패하도록 기준선 필드만 보낸다.
-  const baselineRows = items.map((item) => ({
-    schedule_id: checkoutDbScheduleId(tradeId, item.scheduleId),
-    trade_id: tradeId,
-    taken_qty: item.qty,
-    checkout_state: "taken",
-  }));
-  const { error: baselineError } = await client
-    .from("schedule_items")
-    .upsert(baselineRows, { onConflict: "schedule_id" });
-  if (baselineError) throw baselineError;
+  // 구조 필드는 검증에만 쓰고 쓰지 않는다. 부분 upsert는 충돌 판정 전에 NOT NULL
+  // 제약을 검사해 name 등이 없는 정상 기존 행도 거절하므로, 같은 수량끼리 묶어
+  // 검증된 기존 행만 UPDATE한다. 검증 직후 행이 사라지면 반환 행 수로 실패-폐쇄한다.
+  const idsByQty = new Map<number, string[]>();
+  for (const item of items) {
+    const ids = idsByQty.get(item.qty) ?? [];
+    ids.push(checkoutDbScheduleId(tradeId, item.scheduleId));
+    idsByQty.set(item.qty, ids);
+  }
+  for (const [qty, scheduleIds] of idsByQty) {
+    const { data: updated, error: baselineError } = await client
+      .from("schedule_items")
+      .update({ taken_qty: qty, checkout_state: "taken" })
+      .eq("trade_id", tradeId)
+      .in("schedule_id", scheduleIds)
+      .select("schedule_id");
+    if (baselineError) throw baselineError;
+    if ((updated ?? []).length !== scheduleIds.length) {
+      throw new Error("checkout baseline update count mismatch");
+    }
+  }
 
   const { data: readback, error: readbackError } = await client
     .from("schedule_items")

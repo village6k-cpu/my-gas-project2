@@ -247,10 +247,12 @@ test("반출완료는 GAS UrlFetch 한도와 분리된 서버 정본 경로를 �
   assert.match(route, /persistSetupCompletionAuthority_[\s\S]*getInventoryAuditServiceClient\(\)[\s\S]*taken_qty[\s\S]*setup_done/);
   assert.match(route, /\.in\("schedule_id", dbIds\)[\s\S]*checkoutStructureMatches_/,
     "브라우저 payload는 기존 Supabase 장비 구조와 정확히 맞아야 한다");
-  assert.match(route, /const baselineRows[\s\S]*taken_qty: item\.qty[\s\S]*checkout_state: "taken"/);
-  assert.doesNotMatch(sourceFunction(route, "const baselineRows", "const { error: baselineError"),
-    /name:|\n\s+qty:|set_name:|is_set_header:|is_component:|onsite:/,
-    "기준선 저장이 장비 구조를 덮거나 가짜 행을 만들면 안 된다");
+  assert.doesNotMatch(route, /\.upsert\(baselineRows/,
+    "구조 필드가 없는 부분 upsert는 NOT NULL 제약으로 기존 행에도 실패한다");
+  assert.match(route, /const idsByQty = new Map<number, string\[\]>\(\)/);
+  assert.match(route, /\.update\(\{ taken_qty: qty, checkout_state: "taken" \}\)/);
+  assert.match(route, /checkout baseline update count mismatch/,
+    "검증 뒤 행이 사라진 경우 부분 기준선으로 완료되면 안 된다");
   assert.match(route, /action === "toggleSetup"[\s\S]*persistSetupCompletionAuthority_\(body\)[\s\S]*remoteConfirmed[\s\S]*baselineFingerprint/);
   assert.match(route, /반출완료 저장이 지연되어 자동 재시도 중입니다/);
   assert.match(route, /action === "toggleSetup"[\s\S]*GAS confirmation pending[\s\S]*REMOTE_RETRY/,
@@ -266,6 +268,7 @@ test("Vercel과 GAS의 반출 기준선 SHA-256 지문은 품목 순서와 무�
   const end = gas.indexOf("\nfunction toggleSetupDone", start);
   assert.ok(start >= 0 && end > start);
   const context = {
+    normalizeDashboardReturnSetKey_: (value) => String(value ?? "").normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " "),
     Utilities: {
       DigestAlgorithm: { SHA_256: "sha256" },
       Charset: { UTF_8: "utf8" },
@@ -276,8 +279,9 @@ test("Vercel과 GAS의 반출 기준선 SHA-256 지문은 품목 순서와 무�
   };
   vm.runInNewContext(`${gas.slice(start, end)}\nthis.fingerprint = dashboardCheckoutBaselineFingerprint_;`, context);
   const items = [
-    { scheduleId: "260723-006-10", name: "V마운트 배터리", qty: 2, setName: "소니 A7S3 풀세트", isComponent: true },
-    { scheduleId: "260723-006-02", name: "소니 A7S3 바디(케이지)", qty: 1, setName: "소니 A7S3 풀세트", isComponent: true },
+    // GAS 스케줄 검색 응답에는 isComponent가 없으므로 세트명/장비명 구조로 추론해야 한다.
+    { scheduleId: "260723-006-10", name: "V마운트 배터리", qty: 2, setName: "소니 A7S3 풀세트" },
+    { scheduleId: "260723-006-02", name: "소니 A7S3 바디(케이지)", qty: 1, setName: "소니 A7S3 풀세트" },
   ];
   const canonical = items.map((item) => ({
     scheduleId: item.scheduleId,
