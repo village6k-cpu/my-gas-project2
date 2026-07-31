@@ -2924,33 +2924,11 @@ function flushDashboardStructureProjectionQueue_() {
     }
     var ok = true;
     try {
-      // ScriptProperties 하나만으로 반출 여부를 판정하면 속성 유실 시 완료 거래를
-      // 신규 거래로 오인해 taken_qty 없는 행을 INSERT할 수 있다. 계약/스케줄과
-      // Supabase 권한 상태·불변 기준선 중 하나라도 시작을 가리키면 잠근다.
+      // 기준선 기능은 운영 경로에서 제거했다. 예전 큐에 남은 baselineItems는 소비만 하고
+      // 외부 조회/생성을 하지 않는다. 구조 동기화와 반납 상태 작업만 계속 처리한다.
       var ssForProjection = SpreadsheetApp.getActiveSpreadsheet();
       var localCheckoutStarted = isDashboardTradeCheckoutStarted_(ssForProjection, tid);
-      var durableCheckout = (task.syncStructure || (task.baselineItems && task.baselineItems.length)) &&
-        typeof supaGetCheckoutBaselineState_ === 'function'
-        ? supaGetCheckoutBaselineState_(tid)
-        : { ok: true, started: false, items: [] };
-      if (!durableCheckout || !durableCheckout.ok) ok = false;
-      var checkoutStarted = localCheckoutStarted || !!(durableCheckout && durableCheckout.started);
-      // 반출 후 새 품목은 구조보다 불변 기준선을 먼저 insert한다.
-      // 기준선 실패 후 구조만 생기는 불완전 행을 원천 차단한다.
-      if (task.baselineItems && task.baselineItems.length) {
-        // 완료 거래의 기준선이 전부 없어진 경우 현재 시트를 과거 반출 상태로
-        // 임의 승격시키지 않는다. 레거시/전환기 또는 setupDoneAt+전품목 명시적
-        // checkout 증거가 모두 남은 경우만 빈 기준선 복구를 허용한다.
-        if (task.baselineExact === true && task.baselineAllowEmptyRecovery !== true) {
-          var existingBaseline = durableCheckout;
-          if (!existingBaseline || !existingBaseline.ok || !(existingBaseline.items || []).length) ok = false;
-        }
-        var baseline = typeof supaCaptureCheckoutBaseline_ === 'function'
-          ? (ok ? supaCaptureCheckoutBaseline_(tid, task.baselineItems, task.baselineExact === true) : { ok: false })
-          : { ok: false, error: 'Supabase 반출 기준선 함수 없음' };
-        if (!baseline || !baseline.ok) ok = false;
-        else checkoutStarted = true;
-      }
+      var checkoutStarted = localCheckoutStarted;
       if (ok && task.syncStructure) {
         var cfg = SUPA_CFG_();
         var built = buildSupabaseTrades_([tid]);
@@ -3259,10 +3237,36 @@ function commitDashboardMutation_(props, tid, mutationId, scope) {
   }
 }
 
+function dashboardCompletionRevisionKey_(tid, scope) {
+  return 'dashboardCompletionRevision_' + String(scope || '').trim() + '_' + String(tid || '').trim();
+}
+
+function nextDashboardCompletionRevision_(props, tid, scope) {
+  var key = dashboardCompletionRevisionKey_(tid, scope);
+  var previous = Number(props.getProperty(key) || 0);
+  var next = Math.max(Date.now(), isFinite(previous) ? previous + 1 : 1);
+  props.setProperty(key, String(next));
+  return next;
+}
+
+function ensureDashboardCompletionRevision_(props, tid, scope) {
+  var current = Number(props.getProperty(dashboardCompletionRevisionKey_(tid, scope)) || 0);
+  return isFinite(current) && current > 0
+    ? current
+    : nextDashboardCompletionRevision_(props, tid, scope);
+}
+
 function dashboardSetupCanonicalResult_(tid, props) {
   var done = props.getProperty('setupDone_' + tid) === '1';
   var doneAt = done ? String(props.getProperty('setupDoneAt_' + tid) || '') : '';
-  return { tid: tid, setupDone: done, setupDoneAt: doneAt, doneAt: doneAt, deduped: true };
+  return {
+    tid: tid,
+    setupDone: done,
+    setupDoneAt: doneAt,
+    doneAt: doneAt,
+    completionRevision: ensureDashboardCompletionRevision_(props, tid, 'setup'),
+    deduped: true
+  };
 }
 
 function dashboardReturnCanonicalResult_(tid, props) {
@@ -3280,6 +3284,7 @@ function dashboardReturnCanonicalResult_(tid, props) {
     returnDoneAt: doneAt,
     doneAt: doneAt,
     contractStatus: status,
+    completionRevision: ensureDashboardCompletionRevision_(props, tid, 'return'),
     deduped: true
   };
 }
@@ -3333,12 +3338,8 @@ function toggleSetupDone(tid, done, options) {
   var key = 'setupDone_' + tid;
   var atKey = 'setupDoneAt_' + tid;
   var props = PropertiesService.getScriptProperties();
-  var previousDoneProp = null;
-  var previousDoneAtProp = null;
   var isDone = done === true || done === "true" || done === "1" || done === 1;
   var mutationId = normalizeDashboardMutationId_(options && options.mutationId);
-  var remoteConfirmed = !!(options && options.remoteConfirmed === true);
-  var baselineFingerprint = String(options && options.baselineFingerprint || '').trim().toLowerCase();
   var remoteDoneAt = String(options && options.remoteDoneAt || '').trim();
   var closingKey = 'setupClosing_' + tid;
   var setupLeaseKey = 'setupMutation_' + tid;
@@ -3385,20 +3386,12 @@ function toggleSetupDone(tid, done, options) {
       }
       if (sameSetupLease) {
         closingToken = String(existingSetupLease.token || existingClosing || '');
-        previousDoneProp = Object.prototype.hasOwnProperty.call(existingSetupLease, 'previousDoneProp')
-          ? existingSetupLease.previousDoneProp : null;
-        previousDoneAtProp = Object.prototype.hasOwnProperty.call(existingSetupLease, 'previousDoneAtProp')
-          ? existingSetupLease.previousDoneAtProp : null;
       } else {
-        previousDoneProp = props.getProperty(key);
-        previousDoneAtProp = props.getProperty(atKey);
         closingToken = String(Date.now()) + '|' + (mutationId || String(Math.random()).slice(2));
         props.setProperty(setupLeaseKey, JSON.stringify({
           token: closingToken,
           mutationId: mutationId,
           target: isDone ? '1' : '0',
-          previousDoneProp: previousDoneProp,
-          previousDoneAtProp: previousDoneAtProp,
           at: Date.now()
         }));
       }
@@ -3407,98 +3400,22 @@ function toggleSetupDone(tid, done, options) {
     } finally {
       if (transitionLocked) try { transitionLock.releaseLock(); } catch (transitionReleaseErr) {}
     }
+    // 완료 버튼의 정본은 앱 서버가 Supabase에 한 번만 저장한다. GAS는 로컬 표시 상태만
+    // 기록하며 기준선 생성/조회나 추가 UrlFetch를 하지 않는다. 구버전 호출은 다음 주기
+    // 동기화가 수렴시키도록 dirty 표식만 남긴다.
     var doneAt = "";
+    var completionRevision = nextDashboardCompletionRevision_(props, tid, 'setup');
     if (isDone) {
-      var ss = SpreadsheetApp.getActiveSpreadsheet();
-      var sched = ss.getSheetByName('스케줄상세');
-      if (!sched) return { error: '반출 기준선 저장 실패: 스케줄상세 시트 없음' };
-      var rowsByTid = getDashboardRowsByTradeId_(sched, tid);
-      if (!rowsByTid[tid] || !rowsByTid[tid].length) {
-        return { error: '반출 기준선 저장 실패: 해당 거래의 스케줄 행 없음' };
-      }
-      var groups = getDashboardSearchGroupsForIds_(sched, [tid], rowsByTid);
-      var group = groups[tid];
-      var checkable = getDashboardReturnCheckableItems_(group && group.equipments || []);
-      if (remoteConfirmed) {
-        var localFingerprint = dashboardCheckoutBaselineFingerprint_(tid, checkable);
-        if (!localFingerprint || localFingerprint !== baselineFingerprint) {
-          return {
-            error: '반출 장비 목록이 방금 변경되어 자동으로 다시 확인합니다.',
-            code: 'BASELINE_CHANGED',
-            retryable: true
-          };
-        }
-        // Supabase write-once trigger + 전체 readback을 앱 서버가 끝낸 뒤에만 도달한다.
-        // GAS에서는 UrlFetch를 다시 하지 않고 동일 목록의 로컬 영구 표식만 남긴다.
-        markDashboardCheckoutBaselineStarted_(tid);
-      } else {
-        // 구버전 클라이언트 호환. 새 앱은 Vercel 직결 경로를 사용하므로 GAS UrlFetch
-        // 일일 한도와 무관하다. 이 fallback 실패도 내부 예외를 직원 화면에 노출하지 않는다.
-        var baseline = typeof supaCaptureCheckoutBaseline_ === 'function'
-          ? supaCaptureCheckoutBaseline_(tid, checkable, true)
-          : { ok: false, error: 'Supabase 반출 기준선 함수 없음' };
-        if (!baseline || !baseline.ok) {
-          return {
-            error: '반출완료 저장이 지연되어 자동 재시도 중입니다.',
-            code: 'REMOTE_RETRY',
-            retryable: true
-          };
-        }
-      }
       doneAt = remoteDoneAt || formatDashboardDoneAt_(new Date());
       var completed = {};
       completed[key] = '1';
       completed[atKey] = doneAt;
       props.setProperties(completed, false);
-      var setupSaved = remoteConfirmed
-        ? { ok: true, remoteConfirmed: true }
-        : (typeof supaSetTradeSetupDone_ === 'function'
-          ? supaSetTradeSetupDone_(tid, true, doneAt)
-          : { ok: false, error: 'Supabase 반출완료 저장 함수 없음' });
-      if (!setupSaved || !setupSaved.ok) {
-        if (setupSaved && setupSaved.outcomeUnknown) {
-          preserveClosingLease = true;
-          return {
-            error: '반출완료 저장 결과를 다시 확인 중입니다: ' + String(setupSaved.error || ''),
-            code: 'OUTCOME_UNKNOWN',
-            retryable: true,
-            outcomeUnknown: true
-          };
-        }
-        props.deleteProperty(key);
-        props.deleteProperty(atKey);
-        var restoredDone = {};
-        if (previousDoneProp !== null) restoredDone[key] = previousDoneProp;
-        if (previousDoneAtProp !== null) restoredDone[atKey] = previousDoneAtProp;
-        if (Object.keys(restoredDone).length) props.setProperties(restoredDone, false);
-        return { error: '반출완료 차단: 앱 완료 상태를 저장하지 못했습니다 — ' + String(setupSaved && setupSaved.error || '저장 실패') };
-      }
     } else {
-      // 반출완료를 화면에서 다시 열어도 이미 물리적으로 나간 수량 기준선은 지우지 않는다.
       props.deleteProperty(key);
       props.deleteProperty(atKey);
-      var setupCleared = remoteConfirmed
-        ? { ok: true, remoteConfirmed: true }
-        : (typeof supaSetTradeSetupDone_ === 'function'
-          ? supaSetTradeSetupDone_(tid, false, null)
-          : { ok: false, error: 'Supabase 반출완료 저장 함수 없음' });
-      if (!setupCleared || !setupCleared.ok) {
-        if (setupCleared && setupCleared.outcomeUnknown) {
-          preserveClosingLease = true;
-          return {
-            error: '반출완료 해제 결과를 다시 확인 중입니다: ' + String(setupCleared.error || ''),
-            code: 'OUTCOME_UNKNOWN',
-            retryable: true,
-            outcomeUnknown: true
-          };
-        }
-        var restoredOpen = {};
-        if (previousDoneProp !== null) restoredOpen[key] = previousDoneProp;
-        if (previousDoneAtProp !== null) restoredOpen[atKey] = previousDoneAtProp;
-        if (Object.keys(restoredOpen).length) props.setProperties(restoredOpen, false);
-        return { error: '반출완료 해제 차단: 앱 완료 상태를 저장하지 못했습니다 — ' + String(setupCleared && setupCleared.error || '저장 실패') };
-      }
     }
+    try { supaMarkTradeDirty_(tid); } catch (dirtyErr) {}
     var setupCommitLock = LockService.getScriptLock();
     var setupCommitLocked = false;
     try {
@@ -3517,7 +3434,13 @@ function toggleSetupDone(tid, done, options) {
       return { error: '반출완료 최종 반영 대기 중입니다.', code: 'BUSY', retryable: true };
     }
     invalidateDashboardCache();
-    return { tid: tid, setupDone: isDone, setupDoneAt: doneAt, doneAt: doneAt };
+    return {
+      tid: tid,
+      setupDone: isDone,
+      setupDoneAt: doneAt,
+      doneAt: doneAt,
+      completionRevision: completionRevision
+    };
   } catch (err) {
     return { error: err && err.message ? err.message : String(err) };
   } finally {
@@ -3877,6 +3800,7 @@ function toggleReturnDone(tid, done, options) {
   var props = PropertiesService.getScriptProperties();
   var isDone = done === true || done === "true" || done === "1" || done === 1;
   var mutationId = normalizeDashboardMutationId_(options && options.mutationId);
+  var remoteDoneAt = String(options && options.remoteDoneAt || '').trim();
   var enforceExpectedReturnDoneAt = !isDone && !!(options && (
     options.enforceExpectedReturnDoneAt === true ||
     options.enforceExpectedReturnDoneAt === 1 ||
@@ -3888,38 +3812,16 @@ function toggleReturnDone(tid, done, options) {
   // 카드는 반납완료 전까지 계속 살아있고 미확인 내역은 returnCounts에 그대로 남으므로,
   // 강제 차단 대신 사람이 결정하는 소프트 가드가 운영 정책이다.
   var force = !!(options && (options.force === true || options.force === 1 || options.force === '1' || options.force === 'true'));
-  // autoForce: '반출 기준선 없음'을 근거로 확인받은 강제 종결. 클라이언트 화면이 낡아
-  // 실제로는 정본(Supabase) 기준선이 있는 경우 검증 우회를 거부한다.
-  var autoForce = !!(options && (options.autoForce === true || options.autoForce === 1 || options.autoForce === '1' || options.autoForce === 'true'));
 
-  // ── 검증·준비 단계: 읽기 전용이므로 전역 잠금 밖에서 수행한다 ──
-  // 완료 검증(스케줄상세 전체 스캔 + Supabase 상세수량 HTTP)이 잠금 안에 있으면
-  // 계약서 재생성 워커 등 긴 잠금과 겹칠 때 5초 대기가 항상 져서
-  // 반납완료 버튼이 계속 실패했다. 잠금 안에는 시트 상태 기록과 속성 쓰기만 남긴다.
+  // 완료 버튼은 기준선/상세수량 HTTP 검증과 분리한다. 현장에서는 확인 순서가 바뀔 수
+  // 있으므로 버튼 상태를 즉시 저장하고 상세 체크는 독립적인 보조 정보로 유지한다.
   var cleanupSids = [];
-  var completionCheck = null;
-  if (isDone && force && autoForce) {
-    var authorityBaseline = typeof supaGetCheckoutBaselineState_ === 'function'
-      ? supaGetCheckoutBaselineState_(tid)
-      : { ok: false, items: [] };
-    if (authorityBaseline && authorityBaseline.ok && authorityBaseline.items && authorityBaseline.items.length > 0) {
-      return {
-        error: '반출 기준선이 서버에 있습니다 — 화면을 새로고침한 뒤 품목 확인 후 반납완료해주세요.',
-        code: 'STALE_BASELINE'
-      };
-    }
-  }
-  if (isDone && !force) {
-    completionCheck = assertDashboardReturnComplete_(tid, props);
-    if (completionCheck && completionCheck.error) return completionCheck;
-    cleanupSids = (completionCheck && completionCheck.scheduleIds) || [];
-  }
   if (isDone && force) {
-    Logger.log('반납완료 강제 처리(작업자 확인): ' + tid + (autoForce ? ' [기준선 없음 확인]' : ''));
+    Logger.log('반납완료 강제 처리(작업자 확인): ' + tid);
     // 강제 종결은 나중에 감사할 수 있게 내구 마커를 남긴다 (성공/실패와 무관하게 시도 기록).
     try {
       props.setProperty('returnForced_v1_' + tid, JSON.stringify({
-        at: Date.now(), mutationId: mutationId || '', autoForce: autoForce
+        at: Date.now(), mutationId: mutationId || ''
       }));
     } catch (forcedMarkErr) {}
   }
@@ -4011,7 +3913,7 @@ function toggleReturnDone(tid, done, options) {
       var previousDoneAt = props.getProperty(atKey);
       var contractResult = setDashboardReturnContractStatus_(tid, isDone, props, { skipCompletionCheck: isDone });
       if (contractResult && contractResult.error) return contractResult;
-      var doneAt = isDone ? formatDashboardDoneAt_(new Date()) : "";
+      var doneAt = isDone ? (remoteDoneAt || formatDashboardDoneAt_(new Date())) : "";
       if (isDone) {
         props.setProperty(key, '1');
         props.setProperty(atKey, doneAt);
@@ -4025,6 +3927,7 @@ function toggleReturnDone(tid, done, options) {
         mutationId: mutationId,
         target: isDone ? '1' : '0',
         at: Date.now(),
+        completionRevision: nextDashboardCompletionRevision_(props, tid, 'return'),
         doneAt: doneAt,
         previousDone: previousDone,
         previousDoneAt: previousDoneAt,
@@ -4043,50 +3946,9 @@ function toggleReturnDone(tid, done, options) {
     if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
   }
 
-  var returnSaved = typeof supaSetTradeReturnDone_ === 'function'
-    ? supaSetTradeReturnDone_(
-        tid,
-        isDone,
-        String(returnLease.doneAt || ''),
-        returnLease.contractResult && returnLease.contractResult.status,
-        completionCheck && completionCheck.returnCountsSnapshot,
-        force
-      )
-    : { ok: false, error: 'Supabase 반납 상태 저장 함수 없음' };
-
-  if (!returnSaved || !returnSaved.ok) {
-    if (returnSaved && returnSaved.outcomeUnknown) {
-      return {
-        error: '반납 상태 저장 결과를 다시 확인 중입니다: ' + String(returnSaved.error || ''),
-        code: 'OUTCOME_UNKNOWN',
-        retryable: true,
-        outcomeUnknown: true
-      };
-    }
-    var rollbackLock = LockService.getScriptLock();
-    var rollbackLocked = false;
-    try {
-      rollbackLocked = rollbackLock.tryLock(2000);
-      if (!rollbackLocked) {
-        return { error: '반납 실패 원상복구 대기 중입니다.', code: 'BUSY', retryable: true };
-      }
-      var rollbackLease = activeDashboardMutationLease_(props, returnLeaseKey);
-      if (rollbackLease && String(rollbackLease.token || '') === returnLeaseToken) {
-        if (rollbackLease.previousDone === null || rollbackLease.previousDone === undefined) props.deleteProperty(key);
-        else props.setProperty(key, rollbackLease.previousDone);
-        if (rollbackLease.previousDoneAt === null || rollbackLease.previousDoneAt === undefined) props.deleteProperty(atKey);
-        else props.setProperty(atKey, rollbackLease.previousDoneAt);
-        rollbackDashboardReturnContractStatus_(rollbackLease.contractResult, props);
-        clearDashboardMutationLease_(props, returnLeaseKey, returnLeaseToken);
-      }
-    } catch (rollbackErr) {
-      return { error: '반납 상태 저장 및 원상복구 실패: ' + rollbackErr.message };
-    } finally {
-      if (rollbackLocked) try { rollbackLock.releaseLock(); } catch (rollbackReleaseErr) {}
-    }
-    invalidateDashboardCache();
-    return { error: '반납 상태 저장 실패(원상복구): ' + String(returnSaved && returnSaved.error || '저장 실패') };
-  }
+  // 앱 서버가 이 GAS 응답의 canonical 상태를 Supabase에 저장한다. GAS에서는 같은
+  // 상태를 UrlFetch로 중복 저장하지 않는다. 구버전 호출은 dirty 동기화가 수렴시킨다.
+  try { supaMarkTradeDirty_(tid); } catch (dirtyErr) {}
 
   var commitLock = LockService.getScriptLock();
   var commitLocked = false;
@@ -4101,11 +3963,6 @@ function toggleReturnDone(tid, done, options) {
       return { error: '반납 상태 최종 반영 순서가 바뀌었습니다.', code: 'BUSY', retryable: true };
     }
       // 레거시 이진 체크 증거는 CAS 완료가 성공한 뒤에만 남긴다.
-      if (isDone && completionCheck && completionCheck.completedProofs) {
-        try { props.setProperties(completionCheck.completedProofs, false); } catch (proofErr) {
-          Logger.log('반납 완료 증거 보조 저장 실패(완료 유지): ' + proofErr.message);
-        }
-      }
       // quota 정리는 완료 CAS 뒤의 보조 정리다. CAS가 실패하면 반출 체크 증거를 보존한다.
       if (isDone) {
         try {
@@ -4132,6 +3989,7 @@ function toggleReturnDone(tid, done, options) {
         returnDoneAt: String(returnLease.doneAt || ''),
         doneAt: String(returnLease.doneAt || ''),
         contractStatus: returnLease.contractResult.status,
+        completionRevision: Number(returnLease.completionRevision || ensureDashboardCompletionRevision_(props, tid, 'return')),
         previousContractStatus: returnLease.contractResult.previousStatus || '',
         row: returnLease.contractResult.row
       };
@@ -4665,10 +4523,6 @@ function toggleItemChecksBatch(tid, entries) {
   }
   var items = order.map(function(id) { return bySchedule[id]; });
   var props = PropertiesService.getScriptProperties();
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  if (isDashboardTradeCheckoutStarted_(ss, tid)) {
-    return { error: '반출 체크 변경 차단: 이미 반출 기준선이 고정된 거래입니다.' };
-  }
 
   var fingerprint = items.map(function(item) {
     return item.scheduleId + ':' + (item.done ? '1' : '0') + ':' + item.mutationId;
@@ -4691,12 +4545,6 @@ function toggleItemChecksBatch(tid, entries) {
     }
     var blocked = dashboardTradeMutationLeaseError_(props, tid, 'checkoutItem', leaseToken);
     if (blocked) return blocked;
-    if (
-      props.getProperty('setupDone_' + tid) === '1' ||
-      props.getProperty('checkoutBaselineStarted_' + tid) === '1'
-    ) {
-      return { error: '반출 체크 변경 차단: 이미 반출 기준선이 고정된 거래입니다.' };
-    }
 
     items.forEach(function(item) {
       if (resultsById.__error) return;
@@ -4860,25 +4708,6 @@ function toggleItemCheck(scheduleId, phase, done, options) {
       if (itemPreflightLocked) try { itemPreflightLock.releaseLock(); } catch (itemPreflightReleaseErr) {}
     }
   }
-  if (phase === 'checkout' && checkoutTid) {
-    // 로컬 마커 우선: 반출이 시작된 흔적(setupDone/기준선 표식/계약상태)이 없으면
-    // 기준선이 존재할 수 없으므로 HTTP 조회 자체를 생략한다(대부분의 체크가 이 경로).
-    var ssForGuard = SpreadsheetApp.getActiveSpreadsheet();
-    if (isDashboardTradeCheckoutStarted_(ssForGuard, checkoutTid)) {
-      var checkoutBaseline = typeof supaGetCheckoutBaselineState_ === 'function'
-        ? supaGetCheckoutBaselineState_(checkoutTid)
-        : { ok: false, error: '반출 기준선 조회 함수 없음', items: [] };
-      if (!checkoutBaseline || !checkoutBaseline.ok) {
-        return { error: '반출 체크 변경 차단: 불변 기준선을 확인하지 못했습니다 — ' + String(checkoutBaseline && checkoutBaseline.error || '조회 실패') };
-      }
-      var alreadyCaptured = (checkoutBaseline.items || []).some(function(item) {
-        return String(item.schedule_id || '').trim() === scheduleId;
-      });
-      if (alreadyCaptured) {
-        return { error: '반출 체크 변경 차단: 이미 고정된 반출 기준선입니다: ' + scheduleId };
-      }
-    }
-  }
   if (isDone) {
     if (phase === 'checkin') {
       if (!context || !context.token || !context.tradeId) {
@@ -4948,12 +4777,6 @@ function toggleItemCheck(scheduleId, phase, done, options) {
         props, checkoutTid, 'checkoutItem', checkoutLeaseToken
       );
       if (checkoutLeaseBlock) return checkoutLeaseBlock;
-      if (
-        props.getProperty('setupDone_' + checkoutTid) === '1' ||
-        props.getProperty('checkoutBaselineStarted_' + checkoutTid) === '1'
-      ) {
-        return { error: '반출 체크 변경 차단: 이미 고정된 반출 기준선입니다: ' + scheduleId };
-      }
       var checkoutMutation = beginDashboardMutation_(
         props, checkoutTid, mutationId, 'item:checkout:' + scheduleId, isDone ? '1' : '0'
       );
@@ -8817,20 +8640,14 @@ function backfillDashboardCheckoutBaselineMarkers(tradeIds) {
   return { success: true, count: accepted.length, tradeIds: accepted };
 }
 
-/** 반출이 시작된 거래에서는 품목 삭제가 분실/미반납 증거를 지울 수 있으므로 금지한다. */
+/** 완전히 반납된 거래만 구조 변경을 잠근다. 반출 중 수정은 현장 운영상 허용한다. */
 function isDashboardTradeCheckoutStarted_(ss, tid) {
   tid = String(tid || '').trim();
   if (!tid) return false;
   var props = PropertiesService.getScriptProperties();
-  if (
-    props.getProperty('setupDone_' + tid) === '1' ||
-    props.getProperty('returnDone_' + tid) === '1' ||
-    props.getProperty('checkoutBaselineStarted_' + tid) === '1'
-  ) return true;
+  if (props.getProperty('returnDone_' + tid) === '1') return true;
 
-  // 시트 폴백(계약마스터·스케줄상세 검색)은 체크마다 반복하기엔 비싸다 — 5분 캐시.
-  // 반출 시작 전이는 항상 setupDone_/checkoutBaselineStarted_ 속성(위 fast path)을 먼저 남기고,
-  // mark/clear 함수가 아래 캐시를 함께 지우므로 신선도가 어긋나지 않는다.
+  // 과거 거래는 Script Property가 없을 수 있어 계약마스터의 최종 반납 상태만 폴백한다.
   var startedCache = CacheService.getScriptCache();
   var startedCacheKey = 'dashStarted_' + tid;
   var cachedStarted = startedCache.get(startedCacheKey);
@@ -8844,28 +8661,10 @@ function isDashboardTradeCheckoutStarted_(ss, tid) {
     if (masterRowNums.length) {
       var masterRow = master.getRange(masterRowNums[0], 1, 1, 10).getDisplayValues()[0];
       var contractStatus = String(masterRow[9] || '').trim();
-      if (contractStatus === '반출' || contractStatus === '반출중' || contractStatus === '반납완료') startedResult = true;
-    }
-  }
-
-  var sched = !startedResult ? ss.getSheetByName('스케줄상세') : null;
-  if (sched && sched.getLastRow() >= 2) {
-    var schedRowNums = findDashboardRowsByValue_(sched, 2, sched.getLastRow(), tid);
-    if (schedRowNums.length) {
-      var firstSchedRow = schedRowNums[0];
-      var lastSchedRow = schedRowNums[schedRowNums.length - 1];
-      var schedRows = sched.getRange(firstSchedRow, 2, lastSchedRow - firstSchedRow + 1, 9).getDisplayValues();
-      for (var j = 0; j < schedRows.length; j++) {
-        if (String(schedRows[j][0] || '').trim() !== tid) continue;
-        var rowStatus = String(schedRows[j][8] || '').trim();
-        if (rowStatus === '반출중' || rowStatus === '반납완료') { startedResult = true; break; }
-      }
+      if (contractStatus === '반납완료') startedResult = true;
     }
   }
   try { startedCache.put(startedCacheKey, startedResult ? '1' : '0', 300); } catch (cachePutErr) {}
-  // taken_qty 저장 성공 시 함께 남긴 영구 표식이 외부 DB 재조회 없이 물리 반출 사실을 보존한다.
-  // 전역 ScriptLock 안에서 Supabase HTTP를 호출하면 일시 인증 장애가 '반출 시작'으로 둔갑하고
-  // 모든 편집 요청을 수 초씩 붙잡으므로, 편집 가드는 로컬의 권위 신호만 사용한다.
   return startedResult;
 }
 

@@ -57,12 +57,10 @@ test("제외 tombstone: 번호 재사용된 새 장비를 숨기지 않고, 추�
   assert.match(store, /recordExcludedItemTombstone_\(entry\.tradeId, entry\.scheduleId, entry\.equipName\)/);
 });
 
-test("autoForce는 재시도·재생 경로에도 전파되어 서버 기준선 재검증이 유지된다", () => {
+test("반납완료 재시도 경로는 autoForce와 반출 기준선 재검증을 사용하지 않는다", () => {
   const store = read("lib/data/store.ts");
-  assert.match(store, /autoForce\?: boolean/, "완료 outbox 엔트리에 autoForce가 있어야 한다");
-  assert.match(store, /autoForce: force && !hasCheckoutBaseline/, "outbox 기록 시 autoForce 저장");
-  // 확정은 이제 단일 replay 엔진 — 그 경로가 autoForce를 항상 전파한다
-  assert.match(store, /latest\.force && latest\.autoForce \? \{ autoForce: 1 \}/, "확정 엔진 전파");
+  assert.doesNotMatch(store, /autoForce|hasCheckoutBaseline|needsBaselineConfirm/,
+    "기준선 유무가 반납완료 버튼과 재시도 경로를 갈라서는 안 된다");
 });
 
 test("사진 큐: online 부활도 네트워크 원인 게이트를 지키고, 오프라인 wake는 공회전하지 않는다", () => {

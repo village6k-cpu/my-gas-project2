@@ -341,11 +341,6 @@ function handleRequest(e) {
           (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1),
           {
             mutationId: params.mutationId || postBody.mutationId || '',
-            remoteConfirmed: (
-              params.remoteConfirmed === '1' || params.remoteConfirmed === 'true' ||
-              postBody.remoteConfirmed === true || postBody.remoteConfirmed === '1' || postBody.remoteConfirmed === 1
-            ),
-            baselineFingerprint: params.baselineFingerprint || postBody.baselineFingerprint || '',
             remoteDoneAt: params.remoteDoneAt || postBody.remoteDoneAt || ''
           }
         ));
@@ -358,6 +353,7 @@ function handleRequest(e) {
           {
             force: (params.force === '1' || params.force === 'true' || postBody.force === true || postBody.force === '1' || postBody.force === 1),
             mutationId: params.mutationId || postBody.mutationId || '',
+            remoteDoneAt: params.remoteDoneAt || postBody.remoteDoneAt || '',
             enforceExpectedReturnDoneAt: (
               params.enforceExpectedReturnDoneAt === '1' || params.enforceExpectedReturnDoneAt === 'true' ||
               postBody.enforceExpectedReturnDoneAt === true || postBody.enforceExpectedReturnDoneAt === '1' ||

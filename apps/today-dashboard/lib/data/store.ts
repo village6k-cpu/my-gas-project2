@@ -19,7 +19,7 @@ import { equipmentActualTakenQty } from "../domain/equipmentActual";
 import { buildSeed } from "./seed";
 import { isSupabase, supabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
-import { checkableItems, isCheckoutBaselineLocked, returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
+import { isCheckoutBaselineLocked, returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
 import {
   activeWindowStartYmd,
   cancelTradeRemote,
@@ -548,14 +548,9 @@ function enqueueTradePersist(tradeId: string, fallback: Trade): Promise<Trade> {
     .catch(() => fallback)
     .then(async () => {
       const latest = state.trades.find((t) => t.tradeId === tradeId) ?? fallback;
-      // 자동 복구는 누락 행만 채운다. 기존 행을 덮거나 stale keep-set으로 삭제하지 않는다.
-      // 반출 후 품목은 taken_qty 불변 기준선이 필수이므로 브라우저 snapshot으로
-      // 신규 행을 만들지 않고 GAS가 시트·기존 기준선을 검증해 투영한다.
-      if (writeBackEnabled && isCheckoutBaselineLocked(latest)) {
-        await gasMutation("repairTradeProjection", { tid: tradeId });
-      } else {
-        await persistTrade(latest);
-      }
+      // 완료 상태는 전용 경로가 저장하므로 일반 거래 필드만 직접 반영한다. 기준선 복구를
+      // 자동 호출하면 메모·품목 변경까지 GAS UrlFetch 한도에 묶이는 병목이 다시 생긴다.
+      await persistTrade(latest);
       return latest;
     });
   persistInFlight[tradeId] = task;
@@ -1332,19 +1327,15 @@ export function loadDay(date: string) {
 }
 
 function flashSave(tradeId?: string) {
-  // 이 토스트는 즉시 반영 피드백일 뿐 실제 원장 작업 잠금이 아니다. 과거에는 420ms 타이머가
-  // 뒤늦게 시작한 반출/반납완료의 savingTrades까지 지워 연속 탭이 동시에 서버로 나갔다.
+  // 일상적인 품목·메모 입력에는 '저장 중'을 띄우지 않는다. 화면은 이미 즉시 바뀌고
+  // 거래별 원격 큐가 순서를 보존한다. 짧은 완료 표시만 남겨 업무 흐름을 막지 않는다.
   if (tradeId && state.savingTrades[tradeId]) return;
   const id = ++toastSeq;
-  set({ toast: { id, text: "반영 중…", kind: "saving" } });
+  set({ toast: { id, text: "반영됨", kind: "saved" } });
   if (typeof window === "undefined") return;
   window.setTimeout(() => {
-    if (state.toast?.id !== id) return;
-    set({ toast: { id, text: "반영됨", kind: "saved" } });
-    window.setTimeout(() => {
-      if (state.toast?.id === id) set({ toast: null });
-    }, 1100);
-  }, 420);
+    if (state.toast?.id === id) set({ toast: null });
+  }, 650);
 }
 
 function showTransientError(text: string, duration = 4_000) {
@@ -1372,8 +1363,6 @@ type CompletionMutationOutboxEntry = {
   target: boolean;
   mutationId: string;
   force?: boolean;
-  /** 기준선 없음 확인을 근거로 한 force — 재전송에서도 서버가 정본 기준선을 재검증하게 한다 */
-  autoForce?: boolean;
   optimisticDoneAt: string | null;
   createdAt: number;
   attempts: number;
@@ -1394,7 +1383,6 @@ const COMPLETION_MUTATION_OUTBOX_TTL_MS = 25 * 60 * 1000;
 const completionMutationReplayTimers: Record<string, number | undefined> = {};
 const completionMutationReplayInFlight = new Set<string>();
 // 선행 저장 대기(2초 defer 루프)로 30초 넘게 못 보낸 완료는 한 번만 지연 안내를 띄운다
-const completionDeferralToastShown = new Set<string>();
 
 function completionMutationOutboxEntryKey(kind: CompletionMutationKind, tradeId: string): string {
   return `${kind}|${tradeId}`;
@@ -1419,7 +1407,6 @@ function readCompletionMutationOutbox(): Record<string, CompletionMutationOutbox
         target: entry.target,
         mutationId,
         force: !!entry.force,
-        autoForce: !!entry.autoForce,
         optimisticDoneAt: entry.optimisticDoneAt ? String(entry.optimisticDoneAt) : null,
         createdAt: Number(entry.createdAt || 0) || Date.now(),
         attempts: Math.max(0, Number(entry.attempts || 0) || 0),
@@ -1466,7 +1453,6 @@ function acknowledgeCompletionMutationOutbox(
   if (!outbox[key] || outbox[key].mutationId !== mutationId) return;
   delete outbox[key];
   completionOutboxMemory.delete(key);
-  completionDeferralToastShown.delete(key);
   writeCompletionMutationOutbox(outbox);
   if (!Object.values(outbox).some((e) => e.tradeId === tradeId)) completionOutboxPending.delete(tradeId);
   if (completionMutationReplayTimers[key]) clearTimeout(completionMutationReplayTimers[key]);
@@ -2148,7 +2134,7 @@ export async function toggleSetup(tradeId: string): Promise<ToggleSetupResult> {
 }
 export type ToggleReturnResult =
   | { ok: true; blockers: []; warning?: string }
-  | { ok: false; blockers: ReturnCompletionBlocker[]; error: string; needsBaselineConfirm?: boolean };
+  | { ok: false; blockers: ReturnCompletionBlocker[]; error: string };
 
 export async function toggleReturn(tradeId: string, opts?: { force?: boolean }): Promise<ToggleReturnResult> {
   if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) {
@@ -2164,19 +2150,6 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
   if (!current) return { ok: false, blockers: [], error: "거래를 찾을 수 없습니다" };
 
   const on = !current.returnDone;
-  // 반출완료를 누르지 못했거나 과거 데이터라 taken_qty 기준선이 없는 거래도 현장에서
-  // 반납완료할 수 있어야 한다 — 단, 조용한 자동 우회가 아니라 작업자 확인을 거친다.
-  const hasCheckoutBaseline = current.equipments.some(
-    (item) => Number(item.takenQty ?? 0) > 0 || item.actualTakenQty != null,
-  );
-  if (on && !hasCheckoutBaseline && !opts?.force) {
-    return {
-      ok: false,
-      blockers: [],
-      error: "반출 기준선(수량 검수 기록)이 없는 거래입니다 — 확인 후 반납완료해주세요",
-      needsBaselineConfirm: true,
-    };
-  }
   const force = !!opts?.force;
   const blockers = on && !force ? returnCompletionBlockers(current) : [];
   if (blockers.length > 0) {
@@ -2206,7 +2179,6 @@ export async function toggleReturn(tradeId: string, opts?: { force?: boolean }):
     target: on,
     mutationId,
     force,
-    autoForce: force && !hasCheckoutBaseline,
     optimisticDoneAt: optimisticReturnDoneAt,
     createdAt: Date.now(),
     attempts: 0,
@@ -2579,11 +2551,12 @@ export function setItemCheckout(tradeId: string, scheduleId: string, next: Check
   else if (final === "pending") queueItemCheckWrite(tradeId, scheduleId, false, previousCheckoutState === "taken");
   // 원장 쓰기가 꺼져 있으면 제외를 앱 상태로만 숨기지 않는다.
 }
+const itemNameTargets: Record<string, string | undefined> = {};
 export async function setItemName(tradeId: string, scheduleId: string, name: string): Promise<boolean> {
   const clean = name.trim();
   if (!clean) return false;
-  if (activeTradeTransitions.has(tradeId) || hasTradePending(tradeId)) {
-    showTransientError("⚠️ 이 거래의 다른 변경을 저장 중입니다. 잠시 후 다시 시도해주세요");
+  if (pendingRemoveEquipmentTrades.has(tradeId)) {
+    showTransientError("⚠️ 장비 제외가 끝난 뒤 장비명을 바꿔주세요");
     return false;
   }
 
@@ -2592,17 +2565,37 @@ export async function setItemName(tradeId: string, scheduleId: string, name: str
     return false;
   }
 
-  let ledgerCommitted = false;
-  const saveId = isSupabase ? beginTradeTransition(tradeId) : 0;
+  // 입력 즉시 화면을 바꾼다. 서버 명령은 거래별 큐에서 순서대로 처리되므로
+  // 원격 응답을 기다리는 동안 카드 전체를 savingTrades로 잠글 필요가 없다.
+  const itemNameKey = `${tradeId}|${scheduleId}`;
+  itemNameTargets[itemNameKey] = clean;
+  mutateTrade(tradeId, (t) => {
+    const returnCounts = { ...(t.returnCounts ?? {}) };
+    delete returnCounts[scheduleId];
+    return {
+      ...t,
+      equipments: t.equipments.map((e) => e.scheduleId !== scheduleId ? e : ({
+        ...e,
+        name: clean,
+        setName: e.setName && e.setName.trim() === e.name.trim() ? clean : e.setName,
+        category: categoryOf(clean) ?? e.category,
+      })),
+      returnCounts,
+      returnDone: false,
+      returnDoneAt: null,
+      contractStatus: t.contractStatus === "반납완료" ? "반출" : t.contractStatus,
+    };
+  }, false);
+  flashSave(tradeId);
+
   try {
     const res = isSupabase
       ? await gasMutation("updateEquipName", { tid: tradeId, scheduleId, equipName: clean })
       : null;
-    if (res?.unchanged) {
-      if (isSupabase) finishTradeSave(tradeId, saveId, "saved", "변경 없음");
-      return true;
-    }
-    ledgerCommitted = isSupabase;
+    // 같은 입력에서 더 최신 장비명이 이미 들어왔다면 옛 응답을 화면에 다시 칠하지 않는다.
+    if (itemNameTargets[itemNameKey] !== clean) return true;
+    delete itemNameTargets[itemNameKey];
+    if (res?.unchanged || !isSupabase) return true;
     const canonicalName = String(res?.equipName || clean).trim();
     const updates: { scheduleId: string; field?: string; newName?: string }[] =
       res?.updatedItems ?? [{ scheduleId, field: "equipment", newName: canonicalName }];
@@ -2631,23 +2624,15 @@ export async function setItemName(tradeId: string, scheduleId: string, name: str
         contractStatus: t.contractStatus === "반납완료" ? (res?.contractStatus || "반출") : t.contractStatus,
       };
     });
-    if (isSupabase) {
-      await clearReturnCountsPersist(tradeId, [...affectedIds]);
-      await flushTradePersist(tradeId);
-    }
-    if (isSupabase) finishTradeSave(tradeId, saveId, "saved", "장비명 저장됨");
-    else flashSave(tradeId);
+    await clearReturnCountsPersist(tradeId, [...affectedIds]);
+    await flushTradePersist(tradeId);
     return true;
   } catch (e) {
-    const error = e instanceof Error ? e.message : String(e);
-    if (ledgerCommitted) {
-      const latest = state.trades.find((t) => t.tradeId === tradeId);
-      if (latest) schedulePersistTrade(latest);
-      finishTradeSave(tradeId, saveId, "error", `⚠️ 장비명은 원장에 저장됐고 앱 화면 동기화를 재시도 중입니다 — ${error}`);
-      return true;
-    }
-    if (isSupabase) finishTradeSave(tradeId, saveId, "error", `⚠️ 장비명 변경 실패 — ${error}`);
-    else showTransientError(`⚠️ 장비명 변경 실패 — ${error}`);
+    if (itemNameTargets[itemNameKey] !== clean) return true;
+    delete itemNameTargets[itemNameKey];
+    console.error("[write-back] 장비명 변경 실패:", e);
+    showTransientError("⚠️ 장비명 저장에 실패했습니다. 다시 입력해주세요");
+    void reconcileCompletionMutationCanonical_(tradeId);
     return false;
   }
 }
@@ -2679,47 +2664,18 @@ function applyEquipQtyResult(tradeId: string, scheduleId: string, safeQty: numbe
 
 export async function setItemQty(tradeId: string, scheduleId: string, qty: number): Promise<boolean> {
   const safeQty = Math.max(1, Math.round(qty));
-  if (activeTradeTransitions.has(tradeId) || hasTradePending(tradeId)) {
-    showTransientError("⚠️ 이 거래의 다른 변경을 저장 중입니다. 잠시 후 다시 시도해주세요");
+  if (activeTradeTransitions.has(tradeId)) {
+    showTransientError("⚠️ 완료 상태를 확정 중입니다. 끝난 뒤 수량을 바꿔주세요");
     return false;
   }
   if (isSupabase && !writeBackEnabled) {
     set({ toast: { id: ++toastSeq, text: `⚠️ 수량 변경 실패: ${writeBackDisabledReason}`, kind: "error" } });
     return false;
   }
-
-  let ledgerCommitted = false;
-  const saveId = isSupabase ? beginTradeTransition(tradeId) : 0;
-  try {
-    // 세트 헤더 수량 변경 시 GAS가 구성품 수량을 비례 조정하므로 원장을 먼저 확정한다.
-    const res = isSupabase
-      ? await gasMutation("updateEquipQty", { tid: tradeId, scheduleId, qty: safeQty })
-      : null;
-    if (res?.unchanged) {
-      if (isSupabase) finishTradeSave(tradeId, saveId, "saved", "변경 없음");
-      return true;
-    }
-    ledgerCommitted = isSupabase;
-    const affectedIds = applyEquipQtyResult(tradeId, scheduleId, safeQty, res);
-    if (isSupabase) {
-      await clearReturnCountsPersist(tradeId, affectedIds);
-      await flushTradePersist(tradeId);
-    }
-    if (isSupabase) finishTradeSave(tradeId, saveId, "saved", "수량 저장됨");
-    else flashSave(tradeId);
-    return true;
-  } catch (e) {
-    const error = e instanceof Error ? e.message : String(e);
-    if (ledgerCommitted) {
-      const latest = state.trades.find((t) => t.tradeId === tradeId);
-      if (latest) schedulePersistTrade(latest);
-      finishTradeSave(tradeId, saveId, "error", `⚠️ 수량은 원장에 저장됐고 앱 화면 동기화를 재시도 중입니다 — ${error}`);
-      return true;
-    }
-    if (isSupabase) finishTradeSave(tradeId, saveId, "error", `⚠️ 수량 변경 실패 — ${error}`);
-    else set({ toast: { id: ++toastSeq, text: `⚠️ 수량 변경 실패 — ${error}`, kind: "error" } });
-    return false;
-  }
+  // 편집 모달도 스테퍼와 같은 품목별 최신 목표 큐를 쓴다. 화면/행 버튼은 즉시 끝나고,
+  // 내구 outbox가 GAS 원장과 Supabase 투영을 백그라운드에서 직렬 확정한다.
+  queueItemQty(tradeId, scheduleId, safeQty);
+  return true;
 }
 
 // ── 스테퍼용 낙관적 수량 변경 ────────────────────────────────────
@@ -2837,7 +2793,6 @@ async function commitQueuedItemQty(tradeId: string, scheduleId: string, key: str
   const target = qtyCommitTargets[key];
   if (target === undefined) return;
   delete qtyCommitTargets[key];
-  const saveId = beginTradeSave(tradeId);
   const task = (async () => {
     let ledgerCommitted = false;
     try {
@@ -2849,7 +2804,6 @@ async function commitQueuedItemQty(tradeId: string, scheduleId: string, key: str
         // 전송 중 더 최신 스테퍼 값이 들어왔다. 옛 응답을 로컬/DB에 투영해 3→2→3으로
         // 깜빡이지 않고, 바로 뒤의 최신 target 커밋이 최종 Sheet 응답을 적용한다.
         delete qtyCommitFailures[key];
-        finishTradeSave(tradeId, saveId, "saved", "다음 수량 저장 중…");
         return;
       }
       const affectedIds = res?.unchanged ? [] : applyEquipQtyResult(tradeId, scheduleId, target, res);
@@ -2862,7 +2816,7 @@ async function commitQueuedItemQty(tradeId: string, scheduleId: string, key: str
         delete qtyCommitRetryTimers[key];
       }
       delete qtyConfirmedValues[key];
-      finishTradeSave(tradeId, saveId, "saved", "저장됨");
+      flashSave(tradeId);
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
       if (ledgerCommitted) {
@@ -2871,14 +2825,12 @@ async function commitQueuedItemQty(tradeId: string, scheduleId: string, key: str
         const latest = state.trades.find((t) => t.tradeId === tradeId);
         if (latest) schedulePersistTrade(latest);
         console.error("[supabase] 수량 원장 확정 후 앱 투영 재시도:", e);
-        finishTradeSave(tradeId, saveId, "error", "⚠️ 수량은 원장에 저장됐고 앱 화면 동기화를 재시도 중입니다");
         return;
       }
       const terminalError = e instanceof Error ? e : new Error(error);
       console.error("[write-back] 수량 변경 실패:", e);
       if (qtyCommitTargets[key] !== undefined) {
         // 전송 중 더 최신 목표가 들어왔다. set 연산이라 최신 값이 이전 결과를 덮어 정본이 된다.
-        finishTradeSave(tradeId, saveId, "saved", "최신 수량 저장 중…");
         return;
       }
       if (isRetryableLedgerError(e)) {
@@ -2887,10 +2839,9 @@ async function commitQueuedItemQty(tradeId: string, scheduleId: string, key: str
         qtyCommitTargets[key] = target;
         qtyCommitFailures[key] = terminalError;
         armQtyCommitRetry_(tradeId, scheduleId, key);
-        finishTradeSave(tradeId, saveId, "error", `⚠️ 수량 저장 지연 — 자동 재시도 중 (${error})`);
         return;
       }
-      finishTradeSave(tradeId, saveId, "error", `⚠️ 수량 변경 실패 — ${error}`);
+      showTransientError("⚠️ 수량 저장에 실패했습니다. 다시 조정해주세요");
       acknowledgeQtyOutboxTarget(key, target);
       delete qtyCommitRetryAttempts[key];
       // 자신의 in-flight가 전역 pending으로 잡히는 구조였다. 해당 품목만 정본으로
@@ -3025,19 +2976,12 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
     // 재전송은 다른 직원이 만든 최신 상태를 과거 목표로 되돌릴 수 있다.
     acknowledgeCompletionMutationOutbox(latest.kind, latest.tradeId, latest.mutationId);
     await reconcileCompletionMutationCanonical_(latest.tradeId);
-    showTransientError(
-      `⚠️ ${completionTradeLabel_(latest.tradeId)} ${completionKindLabel_(latest.kind)} 자동 확인 시간(25분)이 지나 최신 원장 상태로 되돌립니다 — 상태를 확인해주세요`,
-      8_000,
-    );
+    showTransientError(`⚠️ ${completionKindLabel_(latest.kind)} 저장을 확인하지 못했습니다. 상태를 다시 눌러주세요`, 6_000);
     return;
   }
 
   if (activeTradeTransitions.has(latest.tradeId) || hasTradePending(latest.tradeId)) {
-    // 앞선 저장(품목 체크·수량·반납 상세)이 끝나야 보낸다. 30초 넘게 밀리면 한 번만 알린다.
-    if (Date.now() - latest.createdAt > 30_000 && !completionDeferralToastShown.has(key)) {
-      completionDeferralToastShown.add(key);
-      showTransientError(`⚠️ ${completionKindLabel_(latest.kind)} 저장 지연 — 앞선 저장을 마치는 대로 자동 확정합니다`, 4_000);
-    }
+    // 앞선 품목 저장이 끝나면 조용히 이어서 확정한다. 카드 전체 잠금이나 지연 토스트는 없다.
     scheduleCompletionMutationReplay_(latest.kind, latest.tradeId, 2_000);
     return;
   }
@@ -3098,34 +3042,17 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
       }
     }
 
-    const setupTrade = latest.kind === "setup"
-      ? state.trades.find((trade) => trade.tradeId === latest.tradeId)
-      : undefined;
-    const setupBaselineItems = latest.kind === "setup" && latest.target && setupTrade
-      ? checkableItems(setupTrade, "checkout").map((item) => ({
-          scheduleId: item.scheduleId,
-          name: item.name,
-          qty: item.qty,
-          setName: item.setName ?? "",
-          isHeader: !!item.isSetHeader,
-          isComponent: !!item.isComponent,
-          onsite: !!item.onsite,
-        }))
-      : [];
     const res = latest.kind === "setup"
       ? await gasMutation("toggleSetup", {
           tid: latest.tradeId,
           done: latest.target,
           mutationId: latest.mutationId,
-          ...(latest.target ? { baselineItems: JSON.stringify(setupBaselineItems) } : {}),
         })
       : await gasMutation("toggleReturn", {
           tid: latest.tradeId,
           done: latest.target,
           mutationId: latest.mutationId,
           ...(latest.force ? { force: 1 } : {}),
-          // 기준선 없음 근거의 force는 재생에서도 서버 정본 재검증을 거친다
-          ...(latest.force && latest.autoForce ? { autoForce: 1 } : {}),
         });
     if (res?.skipped) {
       // 시드 모드/원장 쓰기 비활성 — 로컬 확정으로 종료 (재시도 루프 방지)
@@ -3157,24 +3084,18 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
     if (!isRetryableLedgerError(error)) {
       // 원장의 명확한 거절 — 정본을 다시 읽어 표시를 수렴시키고 크게 알린다
       // (카드가 화면 밖일 수 있어 거래 라벨을 토스트에 포함)
-      const message = error instanceof Error ? error.message : String(error);
+      console.error("[completion] 원장 거절:", error);
       acknowledgeCompletionMutationOutbox(latest.kind, latest.tradeId, latest.mutationId);
       showTransientError(
-        `⚠️ ${completionTradeLabel_(latest.tradeId)} ${completionKindLabel_(latest.kind)} 거절됨 — ${message}`,
-        8_000,
+        `⚠️ ${completionTradeLabel_(latest.tradeId)} ${completionKindLabel_(latest.kind)} 저장에 실패했습니다. 다시 눌러주세요`,
+        6_000,
       );
       await reconcileCompletionMutationCanonical_(latest.tradeId);
       return;
     }
-    // 반출완료는 Supabase 기준선과 GAS 로컬 표식이 모두 확정돼야 끝난다. 서버가
-    // Supabase만 저장한 뒤 GAS 응답이 끊긴 경우에도 같은 mutationId로 끝까지 재시도한다.
-    // Supabase setup_done만 보고 ACK하면 두 정본이 갈라져 다음 반납 검증이 다시 꼬인다.
+    // 일시 오류는 같은 mutationId로 조용히 재시도한다. 직원 화면에는 내부 오류를 노출하지 않는다.
     const attempts = latest.attempts + 1;
     updateCompletionMutationOutboxAttempts(latest, attempts);
-    // 지연 안내는 첫 실패에만 — 백오프마다 토스트 쌍이 반복되는 churn을 막는다
-    if (attempts === 1) {
-      showTransientError(`⚠️ ${completionKindLabel_(latest.kind)} 저장 지연 — 자동 재시도 중`, 3_000);
-    }
     scheduleCompletionMutationReplay_(
       latest.kind,
       latest.tradeId,

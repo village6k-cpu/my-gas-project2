@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createHash } from "node:crypto";
 import { isAuthedRequest as isAuthed } from "@/lib/server/authCache";
 import { getInventoryAuditServiceClient } from "@/lib/server/inventoryAuditDb";
 
@@ -11,202 +10,55 @@ const GAS_URL =
   "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
 const GAS_KEY = process.env.GAS_API_KEY ?? "village2026";
 
-type CheckoutBaselineItem = {
-  scheduleId: string;
-  name: string;
-  qty: number;
-  setName: string;
-  isHeader: boolean;
-  isComponent: boolean;
-  onsite: boolean;
-};
-
-function checkoutDoneValue(value: unknown): boolean {
+function completionDoneValue(value: unknown): boolean {
   return value === true || value === 1 || value === "1" || value === "true";
 }
 
-function checkoutDbScheduleId(tradeId: string, scheduleId: string): string {
-  return scheduleId.startsWith(`${tradeId}-`) ? scheduleId : `${tradeId}-${scheduleId}`;
-}
-
-function normalizeCheckoutBaselineItems_(tradeId: string, raw: unknown): CheckoutBaselineItem[] {
-  let values: unknown = raw;
-  if (typeof values === "string") {
-    try { values = JSON.parse(values); } catch { values = []; }
-  }
-  if (!Array.isArray(values) || values.length === 0 || values.length > 200) {
-    throw new Error("invalid checkout baseline items");
-  }
-  const seen = new Set<string>();
-  const items = values.map((entry) => {
-    const item = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
-    const scheduleId = String(item.scheduleId ?? "").trim();
-    const name = String(item.name ?? "").trim();
-    const qty = Number(item.qty);
-    if (!scheduleId || !name || !Number.isInteger(qty) || qty <= 0 || seen.has(scheduleId)) {
-      throw new Error("invalid checkout baseline item");
-    }
-    seen.add(scheduleId);
-    return {
-      scheduleId,
-      name,
-      qty,
-      setName: String(item.setName ?? "").trim(),
-      isHeader: item.isHeader === true,
-      isComponent: item.isComponent === true,
-      onsite: item.onsite === true,
-    };
-  });
-  return items.sort((left, right) => left.scheduleId < right.scheduleId ? -1 : left.scheduleId > right.scheduleId ? 1 : 0);
-}
-
-function checkoutBaselineFingerprint_(tradeId: string, items: CheckoutBaselineItem[]): string {
-  const canonical = items.map((item) => ({
-    scheduleId: item.scheduleId,
-    name: item.name,
-    qty: item.qty,
-    setName: item.setName,
-    isHeader: item.isHeader,
-    isComponent: item.isComponent,
-    onsite: item.onsite,
-  }));
-  return createHash("sha256").update(`${tradeId}\n${JSON.stringify(canonical)}`, "utf8").digest("hex");
-}
-
-function checkoutSetKey_(value: unknown): string {
-  return String(value ?? "").normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function checkoutRowIsComponent_(row: Record<string, unknown>): boolean {
-  if (row.is_component === true) return true;
-  const setKey = checkoutSetKey_(row.set_name);
-  return !!setKey && setKey !== checkoutSetKey_(row.name);
-}
-
-function checkoutBaselineMatches_(item: CheckoutBaselineItem, row: Record<string, unknown>): boolean {
-  return Number(row.taken_qty) === item.qty &&
-    String(row.name ?? "").trim() === item.name &&
-    String(row.set_name ?? "").trim() === item.setName &&
-    (row.is_set_header === true) === item.isHeader &&
-    checkoutRowIsComponent_(row) === item.isComponent &&
-    (row.onsite === true) === item.onsite;
-}
-
-function checkoutStructureMatches_(item: CheckoutBaselineItem, row: Record<string, unknown>): boolean {
-  return Number(row.qty) === item.qty &&
-    String(row.name ?? "").trim() === item.name &&
-    String(row.set_name ?? "").trim() === item.setName &&
-    (row.is_set_header === true) === item.isHeader &&
-    checkoutRowIsComponent_(row) === item.isComponent &&
-    (row.onsite === true) === item.onsite;
-}
-
 /**
- * 반출 기준선/완료의 원격 정본 저장. GAS의 UrlFetch 일일 한도와 분리하기 위해
- * 로그인된 Vercel 서버가 service-role로 직접 저장하고, DB의 write-once trigger와
- * 저장 후 전체 readback으로 기존 기준선 삭제·변조를 모두 실패-폐쇄한다.
+ * 완료 버튼의 원격 정본 저장. 직원 클릭을 반출 수량 기준선 생성과 묶지 않는다.
+ * 로그인된 앱 서버가 거래 완료 상태만 한 번 저장하고, GAS는 시트/속성만 갱신한다.
+ * 따라서 GAS UrlFetch 일일 한도와 무관하며 장비 품목 저장도 이 버튼을 기다리지 않는다.
  */
-async function persistSetupCompletionAuthority_(body: Record<string, unknown>): Promise<{
+async function persistCompletionAuthority_(
+  action: "toggleSetup" | "toggleReturn",
+  body: Record<string, unknown>,
+): Promise<{
+  done: boolean;
   doneAt: string | null;
-  baselineFingerprint: string;
+  revision: number;
+  contractStatus?: string;
 }> {
   const tradeId = String(body.tid ?? "").trim();
   if (!/^\d{6}-\d{3}$/.test(tradeId)) throw new Error("invalid trade id");
-  const done = checkoutDoneValue(body.done);
+  const done = completionDoneValue(body.done);
   const client = getInventoryAuditServiceClient();
-
-  if (!done) {
-    const { data, error } = await client
-      .from("trades")
-      .update({ setup_done: false, setup_done_at: null })
-      .eq("trade_id", tradeId)
-      .select("trade_id")
-      .maybeSingle();
-    if (error || !data) throw error ?? new Error("trade not found");
-    return { doneAt: null, baselineFingerprint: "" };
+  const confirmedDoneAt = String(body.remoteDoneAt ?? body.doneAt ?? "").trim();
+  const doneAt = done ? (confirmedDoneAt || new Date().toISOString()) : null;
+  const confirmedContractStatus = String(body.remoteContractStatus ?? body.contractStatus ?? "").trim();
+  const revision = Number(body.completionRevision);
+  if (!Number.isSafeInteger(revision) || revision <= 0) throw new Error("invalid completion revision");
+  const { data, error } = await client.rpc("apply_trade_completion", {
+    p_trade_id: tradeId,
+    p_kind: action === "toggleSetup" ? "setup" : "return",
+    p_done: done,
+    p_done_at: doneAt,
+    p_contract_status: confirmedContractStatus || (done ? "반납완료" : "반출"),
+    p_revision: revision,
+  });
+  if (error || !data || typeof data !== "object" || Array.isArray(data)) {
+    throw error ?? new Error("completion CAS readback failed");
   }
-
-  const items = normalizeCheckoutBaselineItems_(tradeId, body.baselineItems);
-  const proposed = new Map(items.map((item) => [checkoutDbScheduleId(tradeId, item.scheduleId), item]));
-  const dbIds = [...proposed.keys()];
-  // 브라우저가 보낸 구조를 그대로 upsert하면 stale/조작 payload가 가짜 장비 행을 만들 수
-  // 있다. 현재 원격 정본에 이미 존재하는 동일 행만 기준선 대상으로 허용한다.
-  const { data: currentRows, error: currentRowsError } = await client
-    .from("schedule_items")
-    .select("schedule_id,name,qty,taken_qty,set_name,is_set_header,is_component,onsite,removed_at")
-    .eq("trade_id", tradeId)
-    .in("schedule_id", dbIds);
-  if (currentRowsError) throw currentRowsError;
-  if ((currentRows ?? []).length !== items.length) throw new Error("checkout baseline source count mismatch");
-  for (const row of currentRows ?? []) {
-    const item = proposed.get(String(row.schedule_id ?? "").trim());
-    if (!item || !checkoutStructureMatches_(item, row as Record<string, unknown>)) {
-      throw new Error("checkout baseline source mismatch");
-    }
-    if (row.removed_at && !(Number(row.taken_qty) > 0)) {
-      throw new Error("removed checkout item cannot start baseline");
-    }
+  const saved = data as Record<string, unknown>;
+  const savedRevision = Number(saved.revision);
+  if (typeof saved.done !== "boolean" || !Number.isSafeInteger(savedRevision) || savedRevision < revision) {
+    throw new Error("invalid completion CAS result");
   }
-  const { data: existing, error: existingError } = await client
-    .from("schedule_items")
-    .select("schedule_id,name,taken_qty,set_name,is_set_header,is_component,onsite")
-    .eq("trade_id", tradeId)
-    .gt("taken_qty", 0);
-  if (existingError) throw existingError;
-  for (const row of existing ?? []) {
-    const item = proposed.get(String(row.schedule_id ?? "").trim());
-    if (!item || !checkoutBaselineMatches_(item, row as Record<string, unknown>)) {
-      throw new Error("immutable checkout baseline conflict");
-    }
-  }
-
-  // 구조 필드는 검증에만 쓰고 쓰지 않는다. 부분 upsert는 충돌 판정 전에 NOT NULL
-  // 제약을 검사해 name 등이 없는 정상 기존 행도 거절하므로, 같은 수량끼리 묶어
-  // 검증된 기존 행만 UPDATE한다. 검증 직후 행이 사라지면 반환 행 수로 실패-폐쇄한다.
-  const idsByQty = new Map<number, string[]>();
-  for (const item of items) {
-    const ids = idsByQty.get(item.qty) ?? [];
-    ids.push(checkoutDbScheduleId(tradeId, item.scheduleId));
-    idsByQty.set(item.qty, ids);
-  }
-  for (const [qty, scheduleIds] of idsByQty) {
-    const { data: updated, error: baselineError } = await client
-      .from("schedule_items")
-      .update({ taken_qty: qty, checkout_state: "taken" })
-      .eq("trade_id", tradeId)
-      .in("schedule_id", scheduleIds)
-      .select("schedule_id");
-    if (baselineError) throw baselineError;
-    if ((updated ?? []).length !== scheduleIds.length) {
-      throw new Error("checkout baseline update count mismatch");
-    }
-  }
-
-  const { data: readback, error: readbackError } = await client
-    .from("schedule_items")
-    .select("schedule_id,name,taken_qty,set_name,is_set_header,is_component,onsite")
-    .eq("trade_id", tradeId)
-    .gt("taken_qty", 0);
-  if (readbackError) throw readbackError;
-  if ((readback ?? []).length !== items.length) throw new Error("checkout baseline readback count mismatch");
-  for (const row of readback ?? []) {
-    const item = proposed.get(String(row.schedule_id ?? "").trim());
-    if (!item || !checkoutBaselineMatches_(item, row as Record<string, unknown>)) {
-      throw new Error("checkout baseline readback mismatch");
-    }
-  }
-
-  const doneAt = new Date().toISOString();
-  const { data: saved, error: setupError } = await client
-    .from("trades")
-    .update({ setup_done: true, setup_done_at: doneAt })
-    .eq("trade_id", tradeId)
-    .select("trade_id,setup_done,setup_done_at")
-    .maybeSingle();
-  if (setupError || !saved || saved.setup_done !== true) {
-    throw setupError ?? new Error("setup completion readback failed");
-  }
-  return { doneAt: String(saved.setup_done_at ?? doneAt), baselineFingerprint: checkoutBaselineFingerprint_(tradeId, items) };
+  return {
+    done: saved.done,
+    doneAt: saved.done ? String(saved.doneAt ?? doneAt) : null,
+    revision: savedRevision,
+    ...(action === "toggleReturn" ? { contractStatus: String(saved.contractStatus || (saved.done ? "반납완료" : "반출")) } : {}),
+  };
 }
 
 // 읽기 응답 짧게 캐시(GAS 콜드스타트 완화)
@@ -371,22 +223,8 @@ async function callPost(req: NextRequest) {
     payload[key] = value;
   });
 
-  if (action === "toggleSetup") {
-    try {
-      const authority = await persistSetupCompletionAuthority_(body);
-      body.remoteConfirmed = true;
-      body.baselineFingerprint = authority.baselineFingerprint;
-      if (authority.doneAt) body.remoteDoneAt = authority.doneAt;
-    } catch (error) {
-      // 내부 Supabase/GAS 예외 원문은 직원 화면에 내보내지 않는다. 내구 outbox가 같은
-      // mutationId로 자동 재시도하므로 화면에는 짧은 지연 안내만 전달한다.
-      console.error("[toggleSetup] remote authority pending", error);
-      return NextResponse.json(
-        { error: "반출완료 저장이 지연되어 자동 재시도 중입니다", code: "REMOTE_RETRY", retryable: true },
-        { status: 503 },
-      );
-    }
-  }
+  const completionAction = action === "toggleSetup" || action === "toggleReturn";
+  // 완료 상태 순서는 GAS mutation 원장이 먼저 결정하고, Supabase 저장은 그 응답을 따른다.
   Object.assign(payload, body, { action, key: GAS_KEY });
 
   try {
@@ -397,7 +235,48 @@ async function callPost(req: NextRequest) {
       redirect: "follow",
       signal: AbortSignal.timeout(60_000),
     });
-    const responseBody = await r.text();
+    let responseBody = await r.text();
+    if (completionAction && r.ok) {
+      let confirmed: Record<string, unknown> | null = null;
+      try {
+        const parsed: unknown = JSON.parse(responseBody);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          confirmed = parsed as Record<string, unknown>;
+        }
+      } catch { /* 유효하지 않은 GAS 응답은 브라우저가 기존 규칙대로 재시도한다. */ }
+      const field = action === "toggleSetup" ? "setupDone" : "returnDone";
+      if (confirmed && !confirmed.error && typeof confirmed[field] === "boolean") {
+        try {
+          // GAS가 수락한 canonical 상태만 Supabase에 쓴다. 반대 순서면 두 탭의 오래된
+          // 요청이 늦게 도착해 Supabase만 과거 상태로 되돌리는 분할 성공이 생긴다.
+          const authority = await persistCompletionAuthority_(action as "toggleSetup" | "toggleReturn", {
+            tid: body.tid,
+            done: confirmed[field],
+            completionRevision: confirmed.completionRevision,
+            remoteDoneAt: confirmed[field]
+              ? (confirmed.setupDoneAt ?? confirmed.returnDoneAt ?? confirmed.doneAt ?? "")
+              : "",
+            remoteContractStatus: confirmed.contractStatus ?? "",
+          });
+          // 느린 옛 요청이 CAS에서 기각되면 DB가 돌려준 최신 정본으로 브라우저도 수렴한다.
+          confirmed[field] = authority.done;
+          confirmed.completionRevision = authority.revision;
+          confirmed.doneAt = authority.doneAt ?? "";
+          if (action === "toggleSetup") confirmed.setupDoneAt = authority.doneAt ?? "";
+          else {
+            confirmed.returnDoneAt = authority.doneAt ?? "";
+            confirmed.contractStatus = authority.contractStatus ?? confirmed.contractStatus;
+          }
+          responseBody = JSON.stringify(confirmed);
+        } catch (error) {
+          console.error(`[${action}] remote authority pending`, error);
+          return NextResponse.json(
+            { error: "완료 상태 저장이 지연되어 자동 재시도 중입니다", code: "REMOTE_RETRY", retryable: true },
+            { status: 503 },
+          );
+        }
+      }
+    }
     // 쓰기 후에는 관련 읽기 캐시를 무효화해 직후 dashboard/timeline 재조회가 이전 상태를 받지 않게 한다
     if (isWrite) invalidateCacheForWrite(action);
     return new NextResponse(responseBody, {
@@ -405,10 +284,10 @@ async function callPost(req: NextRequest) {
       headers: { "content-type": "application/json", "x-cache": isWrite ? "POST-WRITE" : "POST" },
     });
   } catch (e) {
-    if (action === "toggleSetup") {
-      console.error("[toggleSetup] GAS confirmation pending", e);
+    if (action === "toggleSetup" || action === "toggleReturn") {
+      console.error(`[${action}] GAS confirmation pending`, e);
       return NextResponse.json(
-        { error: "반출완료 저장이 지연되어 자동 재시도 중입니다", code: "REMOTE_RETRY", retryable: true },
+        { error: "완료 상태 저장이 지연되어 자동 재시도 중입니다", code: "REMOTE_RETRY", retryable: true },
         { status: 503 },
       );
     }
