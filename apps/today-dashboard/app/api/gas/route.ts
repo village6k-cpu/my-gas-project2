@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createHash } from "node:crypto";
 import { isAuthedRequest as isAuthed } from "@/lib/server/authCache";
+import { getInventoryAuditServiceClient } from "@/lib/server/inventoryAuditDb";
 
 export const maxDuration = 60;
 
@@ -8,6 +10,185 @@ const GAS_URL =
   process.env.GAS_API_URL ??
   "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
 const GAS_KEY = process.env.GAS_API_KEY ?? "village2026";
+
+type CheckoutBaselineItem = {
+  scheduleId: string;
+  name: string;
+  qty: number;
+  setName: string;
+  isHeader: boolean;
+  isComponent: boolean;
+  onsite: boolean;
+};
+
+function checkoutDoneValue(value: unknown): boolean {
+  return value === true || value === 1 || value === "1" || value === "true";
+}
+
+function checkoutDbScheduleId(tradeId: string, scheduleId: string): string {
+  return scheduleId.startsWith(`${tradeId}-`) ? scheduleId : `${tradeId}-${scheduleId}`;
+}
+
+function normalizeCheckoutBaselineItems_(tradeId: string, raw: unknown): CheckoutBaselineItem[] {
+  let values: unknown = raw;
+  if (typeof values === "string") {
+    try { values = JSON.parse(values); } catch { values = []; }
+  }
+  if (!Array.isArray(values) || values.length === 0 || values.length > 200) {
+    throw new Error("invalid checkout baseline items");
+  }
+  const seen = new Set<string>();
+  const items = values.map((entry) => {
+    const item = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+    const scheduleId = String(item.scheduleId ?? "").trim();
+    const name = String(item.name ?? "").trim();
+    const qty = Number(item.qty);
+    if (!scheduleId || !name || !Number.isInteger(qty) || qty <= 0 || seen.has(scheduleId)) {
+      throw new Error("invalid checkout baseline item");
+    }
+    seen.add(scheduleId);
+    return {
+      scheduleId,
+      name,
+      qty,
+      setName: String(item.setName ?? "").trim(),
+      isHeader: item.isHeader === true,
+      isComponent: item.isComponent === true,
+      onsite: item.onsite === true,
+    };
+  });
+  return items.sort((left, right) => left.scheduleId < right.scheduleId ? -1 : left.scheduleId > right.scheduleId ? 1 : 0);
+}
+
+function checkoutBaselineFingerprint_(tradeId: string, items: CheckoutBaselineItem[]): string {
+  const canonical = items.map((item) => ({
+    scheduleId: item.scheduleId,
+    name: item.name,
+    qty: item.qty,
+    setName: item.setName,
+    isHeader: item.isHeader,
+    isComponent: item.isComponent,
+    onsite: item.onsite,
+  }));
+  return createHash("sha256").update(`${tradeId}\n${JSON.stringify(canonical)}`, "utf8").digest("hex");
+}
+
+function checkoutBaselineMatches_(item: CheckoutBaselineItem, row: Record<string, unknown>): boolean {
+  return Number(row.taken_qty) === item.qty &&
+    String(row.name ?? "").trim() === item.name &&
+    String(row.set_name ?? "").trim() === item.setName &&
+    (row.is_set_header === true) === item.isHeader &&
+    (row.is_component === true) === item.isComponent &&
+    (row.onsite === true) === item.onsite;
+}
+
+function checkoutStructureMatches_(item: CheckoutBaselineItem, row: Record<string, unknown>): boolean {
+  return Number(row.qty) === item.qty &&
+    String(row.name ?? "").trim() === item.name &&
+    String(row.set_name ?? "").trim() === item.setName &&
+    (row.is_set_header === true) === item.isHeader &&
+    (row.is_component === true) === item.isComponent &&
+    (row.onsite === true) === item.onsite;
+}
+
+/**
+ * 반출 기준선/완료의 원격 정본 저장. GAS의 UrlFetch 일일 한도와 분리하기 위해
+ * 로그인된 Vercel 서버가 service-role로 직접 저장하고, DB의 write-once trigger와
+ * 저장 후 전체 readback으로 기존 기준선 삭제·변조를 모두 실패-폐쇄한다.
+ */
+async function persistSetupCompletionAuthority_(body: Record<string, unknown>): Promise<{
+  doneAt: string | null;
+  baselineFingerprint: string;
+}> {
+  const tradeId = String(body.tid ?? "").trim();
+  if (!/^\d{6}-\d{3}$/.test(tradeId)) throw new Error("invalid trade id");
+  const done = checkoutDoneValue(body.done);
+  const client = getInventoryAuditServiceClient();
+
+  if (!done) {
+    const { data, error } = await client
+      .from("trades")
+      .update({ setup_done: false, setup_done_at: null })
+      .eq("trade_id", tradeId)
+      .select("trade_id")
+      .maybeSingle();
+    if (error || !data) throw error ?? new Error("trade not found");
+    return { doneAt: null, baselineFingerprint: "" };
+  }
+
+  const items = normalizeCheckoutBaselineItems_(tradeId, body.baselineItems);
+  const proposed = new Map(items.map((item) => [checkoutDbScheduleId(tradeId, item.scheduleId), item]));
+  const dbIds = [...proposed.keys()];
+  // 브라우저가 보낸 구조를 그대로 upsert하면 stale/조작 payload가 가짜 장비 행을 만들 수
+  // 있다. 현재 원격 정본에 이미 존재하는 동일 행만 기준선 대상으로 허용한다.
+  const { data: currentRows, error: currentRowsError } = await client
+    .from("schedule_items")
+    .select("schedule_id,name,qty,taken_qty,set_name,is_set_header,is_component,onsite,removed_at")
+    .eq("trade_id", tradeId)
+    .in("schedule_id", dbIds);
+  if (currentRowsError) throw currentRowsError;
+  if ((currentRows ?? []).length !== items.length) throw new Error("checkout baseline source count mismatch");
+  for (const row of currentRows ?? []) {
+    const item = proposed.get(String(row.schedule_id ?? "").trim());
+    if (!item || !checkoutStructureMatches_(item, row as Record<string, unknown>)) {
+      throw new Error("checkout baseline source mismatch");
+    }
+    if (row.removed_at && !(Number(row.taken_qty) > 0)) {
+      throw new Error("removed checkout item cannot start baseline");
+    }
+  }
+  const { data: existing, error: existingError } = await client
+    .from("schedule_items")
+    .select("schedule_id,name,taken_qty,set_name,is_set_header,is_component,onsite")
+    .eq("trade_id", tradeId)
+    .gt("taken_qty", 0);
+  if (existingError) throw existingError;
+  for (const row of existing ?? []) {
+    const item = proposed.get(String(row.schedule_id ?? "").trim());
+    if (!item || !checkoutBaselineMatches_(item, row as Record<string, unknown>)) {
+      throw new Error("immutable checkout baseline conflict");
+    }
+  }
+
+  // 구조 필드는 검증에만 쓰고 쓰지 않는다. 행이 검증 직후 사라져도 부분 upsert가
+  // NOT NULL 제약으로 실패하도록 기준선 필드만 보낸다.
+  const baselineRows = items.map((item) => ({
+    schedule_id: checkoutDbScheduleId(tradeId, item.scheduleId),
+    trade_id: tradeId,
+    taken_qty: item.qty,
+    checkout_state: "taken",
+  }));
+  const { error: baselineError } = await client
+    .from("schedule_items")
+    .upsert(baselineRows, { onConflict: "schedule_id" });
+  if (baselineError) throw baselineError;
+
+  const { data: readback, error: readbackError } = await client
+    .from("schedule_items")
+    .select("schedule_id,name,taken_qty,set_name,is_set_header,is_component,onsite")
+    .eq("trade_id", tradeId)
+    .gt("taken_qty", 0);
+  if (readbackError) throw readbackError;
+  if ((readback ?? []).length !== items.length) throw new Error("checkout baseline readback count mismatch");
+  for (const row of readback ?? []) {
+    const item = proposed.get(String(row.schedule_id ?? "").trim());
+    if (!item || !checkoutBaselineMatches_(item, row as Record<string, unknown>)) {
+      throw new Error("checkout baseline readback mismatch");
+    }
+  }
+
+  const doneAt = new Date().toISOString();
+  const { data: saved, error: setupError } = await client
+    .from("trades")
+    .update({ setup_done: true, setup_done_at: doneAt })
+    .eq("trade_id", tradeId)
+    .select("trade_id,setup_done,setup_done_at")
+    .maybeSingle();
+  if (setupError || !saved || saved.setup_done !== true) {
+    throw setupError ?? new Error("setup completion readback failed");
+  }
+  return { doneAt: String(saved.setup_done_at ?? doneAt), baselineFingerprint: checkoutBaselineFingerprint_(tradeId, items) };
+}
 
 // 읽기 응답 짧게 캐시(GAS 콜드스타트 완화)
 const cache = new Map<string, { at: number; body: string }>();
@@ -170,6 +351,23 @@ async function callPost(req: NextRequest) {
   sp.forEach((value, key) => {
     payload[key] = value;
   });
+
+  if (action === "toggleSetup") {
+    try {
+      const authority = await persistSetupCompletionAuthority_(body);
+      body.remoteConfirmed = true;
+      body.baselineFingerprint = authority.baselineFingerprint;
+      if (authority.doneAt) body.remoteDoneAt = authority.doneAt;
+    } catch (error) {
+      // 내부 Supabase/GAS 예외 원문은 직원 화면에 내보내지 않는다. 내구 outbox가 같은
+      // mutationId로 자동 재시도하므로 화면에는 짧은 지연 안내만 전달한다.
+      console.error("[toggleSetup] remote authority pending", error);
+      return NextResponse.json(
+        { error: "반출완료 저장이 지연되어 자동 재시도 중입니다", code: "REMOTE_RETRY", retryable: true },
+        { status: 503 },
+      );
+    }
+  }
   Object.assign(payload, body, { action, key: GAS_KEY });
 
   try {
@@ -188,6 +386,13 @@ async function callPost(req: NextRequest) {
       headers: { "content-type": "application/json", "x-cache": isWrite ? "POST-WRITE" : "POST" },
     });
   } catch (e) {
+    if (action === "toggleSetup") {
+      console.error("[toggleSetup] GAS confirmation pending", e);
+      return NextResponse.json(
+        { error: "반출완료 저장이 지연되어 자동 재시도 중입니다", code: "REMOTE_RETRY", retryable: true },
+        { status: 503 },
+      );
+    }
     return NextResponse.json({ error: "GAS 호출 실패: " + (e instanceof Error ? e.message : String(e)) }, { status: 502 });
   }
 }

@@ -19,14 +19,13 @@ import { equipmentActualTakenQty } from "../domain/equipmentActual";
 import { buildSeed } from "./seed";
 import { isSupabase, supabase } from "../supabase/client";
 import { categoryOf } from "../domain/catalog";
-import { isCheckoutBaselineLocked, returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
+import { checkableItems, isCheckoutBaselineLocked, returnCompletionBlockers, type ReturnCompletionBlocker } from "../domain/status";
 import {
   activeWindowStartYmd,
   cancelTradeRemote,
   deleteScheduleItem,
   fetchAllTrades,
   fetchNotes,
-  fetchSetupCompletion,
   fetchTradesByIds,
   fetchTradesOverlappingDate,
   persistNotes,
@@ -3099,11 +3098,26 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
       }
     }
 
+    const setupTrade = latest.kind === "setup"
+      ? state.trades.find((trade) => trade.tradeId === latest.tradeId)
+      : undefined;
+    const setupBaselineItems = latest.kind === "setup" && latest.target && setupTrade
+      ? checkableItems(setupTrade, "checkout").map((item) => ({
+          scheduleId: item.scheduleId,
+          name: item.name,
+          qty: item.qty,
+          setName: item.setName ?? "",
+          isHeader: !!item.isSetHeader,
+          isComponent: !!item.isComponent,
+          onsite: !!item.onsite,
+        }))
+      : [];
     const res = latest.kind === "setup"
       ? await gasMutation("toggleSetup", {
           tid: latest.tradeId,
           done: latest.target,
           mutationId: latest.mutationId,
+          ...(latest.target ? { baselineItems: JSON.stringify(setupBaselineItems) } : {}),
         })
       : await gasMutation("toggleReturn", {
           tid: latest.tradeId,
@@ -3152,18 +3166,9 @@ async function replayCompletionMutationEntry_(entry: CompletionMutationOutboxEnt
       await reconcileCompletionMutationCanonical_(latest.tradeId);
       return;
     }
-    // 응답 유실/경합 — 정본(Supabase)이 이미 목표와 같으면 재전송 없이 수렴한다
-    if (latest.kind === "setup") {
-      try {
-        const confirmed = await fetchSetupCompletion(latest.tradeId);
-        if (confirmed.done === latest.target) {
-          mutateTrade(latest.tradeId, (trade) => ({ ...trade, setupDone: latest.target, setupDoneAt: confirmed.doneAt }), false);
-          acknowledgeCompletionMutationOutbox(latest.kind, latest.tradeId, latest.mutationId);
-          flashSave(latest.tradeId);
-          return;
-        }
-      } catch { /* 정본 확인 실패 — 백오프 재시도로 계속 */ }
-    }
+    // 반출완료는 Supabase 기준선과 GAS 로컬 표식이 모두 확정돼야 끝난다. 서버가
+    // Supabase만 저장한 뒤 GAS 응답이 끊긴 경우에도 같은 mutationId로 끝까지 재시도한다.
+    // Supabase setup_done만 보고 ACK하면 두 정본이 갈라져 다음 반납 검증이 다시 꼬인다.
     const attempts = latest.attempts + 1;
     updateCompletionMutationOutboxAttempts(latest, attempts);
     // 지연 안내는 첫 실패에만 — 백오프마다 토스트 쌍이 반복되는 churn을 막는다

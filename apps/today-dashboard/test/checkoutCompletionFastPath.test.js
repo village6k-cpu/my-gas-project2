@@ -8,6 +8,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const crypto = require("node:crypto");
 
 const appRoot = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(appRoot, file), "utf8");
@@ -99,8 +100,9 @@ test("확정 엔진: 성공은 ACK, 거절은 정본 수렴+알림, 지연은 �
   // 명확한 거절: ACK + 거래 라벨 포함 알림 + 정본 재조회로 롤백 수렴
   assert.match(replay, /if \(!isRetryableLedgerError\(error\)\)[\s\S]{0,700}completionTradeLabel_[\s\S]{0,300}reconcileCompletionMutationCanonical_/,
     "거절은 크게 알리고 정본으로 수렴한다");
-  // 응답 유실: 반출은 Supabase 정본 재확인으로 재전송 없이 수렴 가능
-  assert.match(replay, /fetchSetupCompletion\(latest\.tradeId\)/, "정본이 이미 목표면 재전송 없이 수렴");
+  // 응답 유실: Supabase만 저장되고 GAS 표식이 빠지는 분할 완료를 막기 위해 같은 명령 재시도
+  assert.doesNotMatch(replay, /fetchSetupCompletion\(latest\.tradeId\)/, "Supabase 단독 완료를 ACK하면 안 된다");
+  assert.match(replay, /updateCompletionMutationOutboxAttempts\(latest, attempts\)/, "GAS 확인까지 같은 명령을 재시도한다");
   // 재시도 가능: 낙관 유지 + attempts 기록 + 백오프, 지연 토스트는 첫 실패만
   assert.match(replay, /updateCompletionMutationOutboxAttempts\(latest, attempts\)/);
   assert.match(replay, /attempts === 1[\s\S]{0,200}저장 지연/, "백오프마다 토스트 쌍이 반복되면 안 된다");
@@ -119,7 +121,7 @@ test("스냅샷 게이트: 확정 대기 거래는 원격 스냅샷이 낙관 �
     "storage 실패 시에도 메모리 미러로 재생 가능해야 한다");
 });
 
-test("반출완료 상태는 GAS만 쓰고 브라우저 전체 저장은 완료 필드를 제외한다", () => {
+test("반출완료 상태는 전용 완료 경로만 쓰고 브라우저 전체 저장은 완료 필드를 제외한다", () => {
   const remote = read("lib/data/remote.ts");
   const supa = fs.readFileSync(path.resolve(appRoot, "../..", "supabaseSync.js"), "utf8");
   const persist = sourceFunction(remote, "export async function persistTrade", "\n/** 반납 체크의 빠른 경로");
@@ -160,6 +162,7 @@ function replayHarness({ gasImpl, retryable = false }) {
     flushItemCheckWritesForTrade: async () => {},
     flushQueuedItemQtyForTrade: async () => {},
     flushReturnCountsPersist: async () => trade,
+    checkableItems: (currentTrade) => currentTrade.equipments,
     returnCompletionBlockers: () => [],
     gasMutation: gasImpl,
     requireCompletionMutationResult_(res, field) {
@@ -228,4 +231,65 @@ test("확정 엔진 실행: 성공은 서버 확정값 반영 + ACK + 저장 피
   assert.equal(context.state.trades[0].setupDoneAt, "2026-07-30 10:00:05", "서버 확정 시각을 반영한다");
   assert.deepEqual(context.flashes, ["T-1"]);
   assert.equal(context.reconciles.length, 0);
+});
+
+test("반출완료는 GAS UrlFetch 한도와 분리된 서버 정본 경로를 쓰고 내부 오류를 숨긴다", () => {
+  const store = read("lib/data/store.ts");
+  const route = read("app/api/gas/route.ts");
+  const writer = read("lib/data/writeback.ts");
+  const gas = fs.readFileSync(path.resolve(appRoot, "../..", "checkAvailability.js"), "utf8");
+  const sheetApi = fs.readFileSync(path.resolve(appRoot, "../..", "sheetAPI.js"), "utf8");
+  const replay = sourceFunction(store, "async function replayCompletionMutationEntry_", "\nfunction replayCompletionMutationOutboxes_");
+  const toggle = sourceFunction(gas, "function toggleSetupDone", "\nfunction normalizeDashboardReturnSetKey_");
+
+  assert.match(replay, /checkableItems\(setupTrade, "checkout"\)[\s\S]*baselineItems:\s*JSON\.stringify/);
+  assert.match(writer, /action === "toggleSetup"/, "대형 기준선도 URL 길이 제한 없이 항상 POST로 보내야 한다");
+  assert.match(route, /persistSetupCompletionAuthority_[\s\S]*getInventoryAuditServiceClient\(\)[\s\S]*taken_qty[\s\S]*setup_done/);
+  assert.match(route, /\.in\("schedule_id", dbIds\)[\s\S]*checkoutStructureMatches_/,
+    "브라우저 payload는 기존 Supabase 장비 구조와 정확히 맞아야 한다");
+  assert.match(route, /const baselineRows[\s\S]*taken_qty: item\.qty[\s\S]*checkout_state: "taken"/);
+  assert.doesNotMatch(sourceFunction(route, "const baselineRows", "const { error: baselineError"),
+    /name:|\n\s+qty:|set_name:|is_set_header:|is_component:|onsite:/,
+    "기준선 저장이 장비 구조를 덮거나 가짜 행을 만들면 안 된다");
+  assert.match(route, /action === "toggleSetup"[\s\S]*persistSetupCompletionAuthority_\(body\)[\s\S]*remoteConfirmed[\s\S]*baselineFingerprint/);
+  assert.match(route, /반출완료 저장이 지연되어 자동 재시도 중입니다/);
+  assert.match(route, /action === "toggleSetup"[\s\S]*GAS confirmation pending[\s\S]*REMOTE_RETRY/,
+    "Supabase 저장 뒤 GAS 응답이 끊겨도 내부 오류를 노출하지 않고 재시도해야 한다");
+  assert.match(toggle, /remoteConfirmed[\s\S]*dashboardCheckoutBaselineFingerprint_\(tid, checkable\)[\s\S]*baselineFingerprint/);
+  assert.match(toggle, /if \(remoteConfirmed\)[\s\S]*markDashboardCheckoutBaselineStarted_[\s\S]*else \{[\s\S]*supaCaptureCheckoutBaseline_/);
+  assert.match(sheetApi, /case "toggleSetup"[\s\S]*remoteConfirmed[\s\S]*baselineFingerprint/);
+});
+
+test("Vercel과 GAS의 반출 기준선 SHA-256 지문은 품목 순서와 무관하게 같다", () => {
+  const gas = fs.readFileSync(path.resolve(appRoot, "../..", "checkAvailability.js"), "utf8");
+  const start = gas.indexOf("function dashboardCheckoutBaselineFingerprint_");
+  const end = gas.indexOf("\nfunction toggleSetupDone", start);
+  assert.ok(start >= 0 && end > start);
+  const context = {
+    Utilities: {
+      DigestAlgorithm: { SHA_256: "sha256" },
+      Charset: { UTF_8: "utf8" },
+      computeDigest(_algorithm, value) {
+        return Array.from(crypto.createHash("sha256").update(value, "utf8").digest());
+      },
+    },
+  };
+  vm.runInNewContext(`${gas.slice(start, end)}\nthis.fingerprint = dashboardCheckoutBaselineFingerprint_;`, context);
+  const items = [
+    { scheduleId: "260723-006-10", name: "V마운트 배터리", qty: 2, setName: "소니 A7S3 풀세트", isComponent: true },
+    { scheduleId: "260723-006-02", name: "소니 A7S3 바디(케이지)", qty: 1, setName: "소니 A7S3 풀세트", isComponent: true },
+  ];
+  const canonical = items.map((item) => ({
+    scheduleId: item.scheduleId,
+    name: item.name,
+    qty: item.qty,
+    setName: item.setName,
+    isHeader: false,
+    isComponent: true,
+    onsite: false,
+  })).sort((left, right) => left.scheduleId < right.scheduleId ? -1 : left.scheduleId > right.scheduleId ? 1 : 0);
+  const expected = crypto.createHash("sha256")
+    .update(`260723-006\n${JSON.stringify(canonical)}`, "utf8")
+    .digest("hex");
+  assert.equal(context.fingerprint("260723-006", items), expected);
 });

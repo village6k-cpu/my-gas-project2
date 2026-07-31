@@ -54,11 +54,12 @@ assert.match(
   /if \(activeTradeTransitions\.has\(tradeId\) \|\| pendingRemoveEquipmentTrades\.has\(tradeId\)\)[\s\S]*?return \{ ok: false, error \};/,
   '전환 위험 구간(편집/취소/제외)과의 순서 역전은 계속 막아야 한다'
 );
-// 확정·응답 유실 재확인·거절 롤백은 백그라운드 엔진이 담당한다
+// 확정·응답 유실 재시도·거절 롤백은 백그라운드 엔진이 담당한다
 const confirmEngine = store.match(/async function replayCompletionMutationEntry_[\s\S]*?\nfunction replayCompletionMutationOutboxes_/);
 assert.ok(confirmEngine, '백그라운드 확정 엔진이 있어야 한다');
 assert.match(confirmEngine[0], /gasMutation\("toggleSetup"/, '확정 엔진이 GAS 반출완료를 전송한다');
-assert.match(confirmEngine[0], /fetchSetupCompletion\(latest\.tradeId\)/, '응답 유실은 정본 재확인으로 수렴한다');
+assert.doesNotMatch(confirmEngine[0], /fetchSetupCompletion\(latest\.tradeId\)/, 'Supabase만 완료된 상태를 GAS 확정으로 오인하면 안 된다');
+assert.match(confirmEngine[0], /updateCompletionMutationOutboxAttempts\(latest, attempts\)/, '응답 유실은 같은 mutationId로 재시도한다');
 assert.match(confirmEngine[0], /reconcileCompletionMutationCanonical_/, '명확한 거절만 정본 재조회로 되돌린다');
 assert.doesNotMatch(
   toggleSetup[0],

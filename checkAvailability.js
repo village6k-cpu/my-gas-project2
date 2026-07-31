@@ -3284,6 +3284,43 @@ function dashboardReturnCanonicalResult_(tid, props) {
   };
 }
 
+/** Vercel이 Supabase에 확정한 반출 기준선과 현재 스케줄상세 목록의 동일성 증명. */
+function dashboardCheckoutBaselineFingerprint_(tid, equipments) {
+  tid = String(tid || '').trim();
+  if (!tid || !Array.isArray(equipments) || !equipments.length) return '';
+  var seen = {};
+  var canonical = [];
+  for (var i = 0; i < equipments.length; i++) {
+    var eq = equipments[i] || {};
+    var scheduleId = String(eq.scheduleId || eq.schedule_id || '').trim();
+    var name = String(eq.name || '').trim();
+    var qty = Number(eq.qty);
+    if (!scheduleId || !name || !isFinite(qty) || Math.floor(qty) !== qty || qty <= 0 || seen[scheduleId]) return '';
+    seen[scheduleId] = true;
+    canonical.push({
+      scheduleId: scheduleId,
+      name: name,
+      qty: qty,
+      setName: String(eq.setName || eq.set_name || '').trim(),
+      isHeader: !!(eq.isHeader || eq.is_set_header),
+      isComponent: !!(eq.isComponent || eq.is_component),
+      onsite: !!eq.onsite
+    });
+  }
+  canonical.sort(function(left, right) {
+    return left.scheduleId < right.scheduleId ? -1 : (left.scheduleId > right.scheduleId ? 1 : 0);
+  });
+  var bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    tid + '\n' + JSON.stringify(canonical),
+    Utilities.Charset.UTF_8
+  );
+  return bytes.map(function(value) {
+    var unsigned = value < 0 ? value + 256 : value;
+    return ('0' + unsigned.toString(16)).slice(-2);
+  }).join('');
+}
+
 function toggleSetupDone(tid, done, options) {
   if (!tid) return { error: "tid 필요" };
   tid = String(tid).trim();
@@ -3294,6 +3331,9 @@ function toggleSetupDone(tid, done, options) {
   var previousDoneAtProp = null;
   var isDone = done === true || done === "true" || done === "1" || done === 1;
   var mutationId = normalizeDashboardMutationId_(options && options.mutationId);
+  var remoteConfirmed = !!(options && options.remoteConfirmed === true);
+  var baselineFingerprint = String(options && options.baselineFingerprint || '').trim().toLowerCase();
+  var remoteDoneAt = String(options && options.remoteDoneAt || '').trim();
   var closingKey = 'setupClosing_' + tid;
   var setupLeaseKey = 'setupMutation_' + tid;
   var closingMarked = false;
@@ -3373,23 +3413,42 @@ function toggleSetupDone(tid, done, options) {
       var groups = getDashboardSearchGroupsForIds_(sched, [tid], rowsByTid);
       var group = groups[tid];
       var checkable = getDashboardReturnCheckableItems_(group && group.equipments || []);
-      // 기준선 조회/저장은 HTTP를 포함할 수 있다. 전역 ScriptLock 안에서 실행하면
-      // 계약서 재생성·동기화 같은 무관한 작업이 반출 완료를 10초 이상 막는다.
-      // 이 함수는 같은 기준선을 재호출하면 재사용하고, 값이 다르면 실패-폐쇄한다.
-      var baseline = typeof supaCaptureCheckoutBaseline_ === 'function'
-        ? supaCaptureCheckoutBaseline_(tid, checkable, true)
-        : { ok: false, error: 'Supabase 반출 기준선 함수 없음' };
-      if (!baseline || !baseline.ok) {
-        return { error: '반출완료 차단: 불변 수량 기준선을 저장하지 못했습니다 — ' + String(baseline && baseline.error || '저장 실패') };
+      if (remoteConfirmed) {
+        var localFingerprint = dashboardCheckoutBaselineFingerprint_(tid, checkable);
+        if (!localFingerprint || localFingerprint !== baselineFingerprint) {
+          return {
+            error: '반출 장비 목록이 방금 변경되어 자동으로 다시 확인합니다.',
+            code: 'BASELINE_CHANGED',
+            retryable: true
+          };
+        }
+        // Supabase write-once trigger + 전체 readback을 앱 서버가 끝낸 뒤에만 도달한다.
+        // GAS에서는 UrlFetch를 다시 하지 않고 동일 목록의 로컬 영구 표식만 남긴다.
+        markDashboardCheckoutBaselineStarted_(tid);
+      } else {
+        // 구버전 클라이언트 호환. 새 앱은 Vercel 직결 경로를 사용하므로 GAS UrlFetch
+        // 일일 한도와 무관하다. 이 fallback 실패도 내부 예외를 직원 화면에 노출하지 않는다.
+        var baseline = typeof supaCaptureCheckoutBaseline_ === 'function'
+          ? supaCaptureCheckoutBaseline_(tid, checkable, true)
+          : { ok: false, error: 'Supabase 반출 기준선 함수 없음' };
+        if (!baseline || !baseline.ok) {
+          return {
+            error: '반출완료 저장이 지연되어 자동 재시도 중입니다.',
+            code: 'REMOTE_RETRY',
+            retryable: true
+          };
+        }
       }
-      doneAt = formatDashboardDoneAt_(new Date());
+      doneAt = remoteDoneAt || formatDashboardDoneAt_(new Date());
       var completed = {};
       completed[key] = '1';
       completed[atKey] = doneAt;
       props.setProperties(completed, false);
-      var setupSaved = typeof supaSetTradeSetupDone_ === 'function'
-        ? supaSetTradeSetupDone_(tid, true, doneAt)
-        : { ok: false, error: 'Supabase 반출완료 저장 함수 없음' };
+      var setupSaved = remoteConfirmed
+        ? { ok: true, remoteConfirmed: true }
+        : (typeof supaSetTradeSetupDone_ === 'function'
+          ? supaSetTradeSetupDone_(tid, true, doneAt)
+          : { ok: false, error: 'Supabase 반출완료 저장 함수 없음' });
       if (!setupSaved || !setupSaved.ok) {
         if (setupSaved && setupSaved.outcomeUnknown) {
           preserveClosingLease = true;
@@ -3412,9 +3471,11 @@ function toggleSetupDone(tid, done, options) {
       // 반출완료를 화면에서 다시 열어도 이미 물리적으로 나간 수량 기준선은 지우지 않는다.
       props.deleteProperty(key);
       props.deleteProperty(atKey);
-      var setupCleared = typeof supaSetTradeSetupDone_ === 'function'
-        ? supaSetTradeSetupDone_(tid, false, null)
-        : { ok: false, error: 'Supabase 반출완료 저장 함수 없음' };
+      var setupCleared = remoteConfirmed
+        ? { ok: true, remoteConfirmed: true }
+        : (typeof supaSetTradeSetupDone_ === 'function'
+          ? supaSetTradeSetupDone_(tid, false, null)
+          : { ok: false, error: 'Supabase 반출완료 저장 함수 없음' });
       if (!setupCleared || !setupCleared.ok) {
         if (setupCleared && setupCleared.outcomeUnknown) {
           preserveClosingLease = true;

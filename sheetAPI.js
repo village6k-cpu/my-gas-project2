@@ -339,7 +339,15 @@ function handleRequest(e) {
         return jsonResponse(toggleSetupDone(
           params.tid || postBody.tid,
           (params.done === '1' || params.done === 'true' || postBody.done === true || postBody.done === '1' || postBody.done === 1),
-          { mutationId: params.mutationId || postBody.mutationId || '' }
+          {
+            mutationId: params.mutationId || postBody.mutationId || '',
+            remoteConfirmed: (
+              params.remoteConfirmed === '1' || params.remoteConfirmed === 'true' ||
+              postBody.remoteConfirmed === true || postBody.remoteConfirmed === '1' || postBody.remoteConfirmed === 1
+            ),
+            baselineFingerprint: params.baselineFingerprint || postBody.baselineFingerprint || '',
+            remoteDoneAt: params.remoteDoneAt || postBody.remoteDoneAt || ''
+          }
         ));
 
       case "toggleReturn":
