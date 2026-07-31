@@ -233,13 +233,17 @@ export const ScheduleCard = memo(function ScheduleCard({
 
       {/* 상세 */}
       {open && (
-        <div className="px-4 pb-4 pl-5 pt-1">
+        <div className="px-4 pl-5 pt-1">
           <HandoverChecklist trade={trade} phase={phase} />
           <RiskPanel warnings={trade.riskWarnings} phase={phase} equipments={trade.equipments} />
-          <PhotoStrip tradeId={trade.tradeId} photos={trade.photos} />
-          <PaymentControls trade={trade} />
         </div>
       )}
+
+      {/* 사진은 완료 카드가 접혀도 항상 접근할 수 있어야 한다. */}
+      <div className="px-4 pb-4 pl-5">
+        <PhotoStrip tradeId={trade.tradeId} photos={trade.photos} showThumbnails={open} />
+        {open && <PaymentControls trade={trade} />}
+      </div>
 
       {customerOpen && <CustomerSheet name={trade.customerName} phone={trade.customerPhone} onClose={() => setCustomerOpen(false)} />}
     </div>

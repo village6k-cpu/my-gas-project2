@@ -105,7 +105,15 @@ function PhotoTile({ tradeId, photo, onError }: { tradeId: string; photo: PhotoM
   );
 }
 
-export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: PhotoMeta[] }) {
+export function PhotoStrip({
+  tradeId,
+  photos,
+  showThumbnails = true,
+}: {
+  tradeId: string;
+  photos: PhotoMeta[];
+  showThumbnails?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [preparing, setPreparing] = useState<Phase | null>(null);
@@ -230,21 +238,23 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
             반출 {checkout.length} · 반납 {checkin.length}
           </span>
         </button>
-        <div className="flex -space-x-2">
-          {photos.slice(0, 4).map((p) => {
-            const src = photoSrc(p);
-            return src ? (
-              <img key={p.id} src={src} alt={p.label} className="h-7 w-7 rounded-md object-cover ring-2 ring-white" loading="lazy" />
-            ) : (
-              <span
-                key={p.id}
-                className="h-7 w-7 rounded-md ring-2 ring-white"
-                style={{ background: p.swatch }}
-                aria-label={p.label}
-              />
-            );
-          })}
-        </div>
+        {showThumbnails && (
+          <div className="flex -space-x-2">
+            {photos.slice(0, 4).map((p) => {
+              const src = photoSrc(p);
+              return src ? (
+                <img key={p.id} src={src} alt={p.label} className="h-7 w-7 rounded-md object-cover ring-2 ring-white" loading="lazy" />
+              ) : (
+                <span
+                  key={p.id}
+                  className="h-7 w-7 rounded-md ring-2 ring-white"
+                  style={{ background: p.swatch }}
+                  aria-label={p.label}
+                />
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* capture 속성 제거 — 카메라 강제 대신 OS 선택창(카메라/사진 보관함/파일)이 뜨게 해서
