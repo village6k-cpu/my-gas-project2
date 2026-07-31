@@ -74,8 +74,9 @@ assert(
   /repairDashboardSearchResults\(state\.trades, q\)/.test(storeSource) &&
     /await applyDashboardRepairs\(changed, mutationSeqAtSearch, versionsAtSearch\)/.test(storeSource) &&
     /function applyDashboardRepairs[\s\S]*!hasTradeSyncPending\(trade\.tradeId\)[\s\S]*tradeMutationSeq\[trade\.tradeId\][\s\S]*enqueueTradePersist\(t\.tradeId, t\)/.test(storeSource) &&
-    /function enqueueTradePersist[\s\S]*isCheckoutBaselineLocked\(latest\)[\s\S]*gasMutation\("repairTradeProjection", \{ tid: tradeId \}\)[\s\S]*else \{[\s\S]*persistTrade\(latest\)/.test(storeSource),
-  'search repair must gate each trade against pending writes/version drift and route completed-trade convergence through the safe GAS projection queue'
+    /function enqueueTradePersist[\s\S]*await persistTrade\(latest\)/.test(storeSource) &&
+    !/function enqueueTradePersist[\s\S]*gasMutation\("repairTradeProjection"/.test(storeSource),
+  'search repair must gate each trade against pending writes/version drift and persist ordinary fields without reintroducing the completion/baseline GAS bottleneck'
 );
 assert(
   !/function applyDashboardRepairs[\s\S]*pruneMissingSheetBacked: true/.test(storeSource),
