@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { Phase, PhotoMeta } from "@/lib/domain/types";
 import {
   deleteTradePhoto,
@@ -157,42 +158,10 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
     }
   };
 
-  return (
-    <>
-      <div className="mt-3 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          className="tap inline-flex items-center gap-1.5 rounded-lg bg-paper px-2.5 py-1.5 text-[12.5px] font-semibold text-ink-soft ring-1 ring-line/70"
-        >
-          <Camera className="h-4 w-4" />
-          사진
-          <span className="text-ink-faint">
-            반출 {checkout.length} · 반납 {checkin.length}
-          </span>
-        </button>
-        <div className="flex -space-x-2">
-          {photos.slice(0, 4).map((p) => {
-            const src = photoSrc(p);
-            return src ? (
-              <img key={p.id} src={src} alt={p.label} className="h-7 w-7 rounded-md object-cover ring-2 ring-white" loading="lazy" />
-            ) : (
-              <span
-                key={p.id}
-                className="h-7 w-7 rounded-md ring-2 ring-white"
-                style={{ background: p.swatch }}
-                aria-label={p.label}
-              />
-            );
-          })}
-        </div>
-      </div>
-
-      {/* capture 속성 제거 — 카메라 강제 대신 OS 선택창(카메라/사진 보관함/파일)이 뜨게 해서
-          기존에 찍어둔 사진도 올릴 수 있다. */}
-      <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" onChange={onFileChange} />
-
-      {open && (
+  // 카드에는 완료 상태 opacity와 진입 애니메이션이 있어 별도 화면층이 생긴다.
+  // 모달을 카드 안에 두면 타임라인 막대가 위로 뚫고 올라오므로 body에 직접 렌더링한다.
+  const photoModal = open && typeof document !== "undefined"
+    ? createPortal(
         <div
           className="fixed inset-0 z-[120] flex items-end justify-center bg-black/45 px-2 pb-[env(safe-area-inset-bottom)] sm:items-center sm:p-4"
           onClick={() => setOpen(false)}
@@ -242,8 +211,47 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
               );
             })}
           </div>
+        </div>,
+        document.body,
+      )
+    : null;
+
+  return (
+    <>
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="tap inline-flex items-center gap-1.5 rounded-lg bg-paper px-2.5 py-1.5 text-[12.5px] font-semibold text-ink-soft ring-1 ring-line/70"
+        >
+          <Camera className="h-4 w-4" />
+          사진
+          <span className="text-ink-faint">
+            반출 {checkout.length} · 반납 {checkin.length}
+          </span>
+        </button>
+        <div className="flex -space-x-2">
+          {photos.slice(0, 4).map((p) => {
+            const src = photoSrc(p);
+            return src ? (
+              <img key={p.id} src={src} alt={p.label} className="h-7 w-7 rounded-md object-cover ring-2 ring-white" loading="lazy" />
+            ) : (
+              <span
+                key={p.id}
+                className="h-7 w-7 rounded-md ring-2 ring-white"
+                style={{ background: p.swatch }}
+                aria-label={p.label}
+              />
+            );
+          })}
         </div>
-      )}
+      </div>
+
+      {/* capture 속성 제거 — 카메라 강제 대신 OS 선택창(카메라/사진 보관함/파일)이 뜨게 해서
+          기존에 찍어둔 사진도 올릴 수 있다. */}
+      <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" onChange={onFileChange} />
+
+      {photoModal}
     </>
   );
 }
