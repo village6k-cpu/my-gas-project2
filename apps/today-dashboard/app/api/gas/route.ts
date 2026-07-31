@@ -73,12 +73,22 @@ function checkoutBaselineFingerprint_(tradeId: string, items: CheckoutBaselineIt
   return createHash("sha256").update(`${tradeId}\n${JSON.stringify(canonical)}`, "utf8").digest("hex");
 }
 
+function checkoutSetKey_(value: unknown): string {
+  return String(value ?? "").normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function checkoutRowIsComponent_(row: Record<string, unknown>): boolean {
+  if (row.is_component === true) return true;
+  const setKey = checkoutSetKey_(row.set_name);
+  return !!setKey && setKey !== checkoutSetKey_(row.name);
+}
+
 function checkoutBaselineMatches_(item: CheckoutBaselineItem, row: Record<string, unknown>): boolean {
   return Number(row.taken_qty) === item.qty &&
     String(row.name ?? "").trim() === item.name &&
     String(row.set_name ?? "").trim() === item.setName &&
     (row.is_set_header === true) === item.isHeader &&
-    (row.is_component === true) === item.isComponent &&
+    checkoutRowIsComponent_(row) === item.isComponent &&
     (row.onsite === true) === item.onsite;
 }
 
@@ -87,7 +97,7 @@ function checkoutStructureMatches_(item: CheckoutBaselineItem, row: Record<strin
     String(row.name ?? "").trim() === item.name &&
     String(row.set_name ?? "").trim() === item.setName &&
     (row.is_set_header === true) === item.isHeader &&
-    (row.is_component === true) === item.isComponent &&
+    checkoutRowIsComponent_(row) === item.isComponent &&
     (row.onsite === true) === item.onsite;
 }
 

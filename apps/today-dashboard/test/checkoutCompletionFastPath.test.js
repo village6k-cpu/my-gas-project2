@@ -247,6 +247,9 @@ test("반출완료는 GAS UrlFetch 한도와 분리된 서버 정본 경로를 �
   assert.match(route, /persistSetupCompletionAuthority_[\s\S]*getInventoryAuditServiceClient\(\)[\s\S]*taken_qty[\s\S]*setup_done/);
   assert.match(route, /\.in\("schedule_id", dbIds\)[\s\S]*checkoutStructureMatches_/,
     "브라우저 payload는 기존 Supabase 장비 구조와 정확히 맞아야 한다");
+  assert.match(route, /function checkoutRowIsComponent_[\s\S]*set_name[\s\S]*row\.name/,
+    "과거 is_component=false 행도 세트명과 장비명 구조로 동일하게 판정해야 한다");
+  assert.match(route, /checkoutRowIsComponent_\(row\) === item\.isComponent/);
   assert.doesNotMatch(route, /\.upsert\(baselineRows/,
     "구조 필드가 없는 부분 upsert는 NOT NULL 제약으로 기존 행에도 실패한다");
   assert.match(route, /const idsByQty = new Map<number, string\[\]>\(\)/);
