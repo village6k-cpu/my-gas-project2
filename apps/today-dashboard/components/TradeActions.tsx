@@ -267,7 +267,9 @@ function EquipmentEditRow({ tradeId, item, locked }: { tradeId: string; item: Eq
     }
     setSaving(true);
     setMessage("");
-    const nameOk = name.trim() === item.name ? true : await setItemName(tradeId, item.scheduleId, name.trim());
+    const nameOk = name.trim() === item.name
+      ? true
+      : await setItemName(tradeId, item.scheduleId, name.trim(), { exactName: true });
     const qtyOk = nextQty === item.qty ? true : await setItemQty(tradeId, item.scheduleId, nextQty);
     setSaving(false);
     setMessage(nameOk && qtyOk ? "저장됨" : "저장 실패");

@@ -134,19 +134,71 @@ test("품목 체크 원장 쓰기는 재시도 큐를 거친다 (잠금 경합 �
   assert.match(queue, /reconcileItemCheckCanonical/, "최종 실패의 낙관 상태는 품목 정본으로 자동 복구해야 한다");
 });
 
-test("반출완료 직후 품목 버튼은 조용히 잠기고 완료 확정 경고를 전역 토스트로 띄우지 않는다", () => {
+test("반납완료 카드의 품목 버튼은 조용히 잠그고 진행 중 거래의 제외는 허용한다", () => {
   const store = read("lib/data/store.ts");
   const checklist = read("components/HandoverChecklist.tsx");
   const checkout = section(store, "export function setItemCheckout", "\nexport async function setItemName");
   assert.match(
     checklist,
     /onClick=\{\(\) => setItemCheckout\(t\.tradeId, e\.scheduleId, "excluded"\)\}[\s\S]{0,180}disabled=\{baselineLocked\}/,
-    "반출완료가 즉시 표시된 뒤에는 제외 버튼도 체크 버튼과 똑같이 잠겨야 한다",
+    "반납완료 카드만 구조 변경을 잠가야 한다",
   );
   assert.doesNotMatch(
     checkout,
     /완료 상태를 확정 중입니다\. 저장이 끝난 뒤 품목을 다시 눌러주세요/,
     "이미 잠긴 품목 클릭을 전역 빨간 토스트로 다시 알리면 다른 화면까지 방해한다",
+  );
+});
+
+test("자유입력 장비명은 유사 장비로 자동 치환하지 않고 원문 그대로 GAS에 전달한다", () => {
+  const store = read("lib/data/store.ts");
+  const checklist = read("components/HandoverChecklist.tsx");
+  const combo = section(checklist, "function EquipmentNameCombobox", "\nfunction MemoInput");
+  assert.match(combo, /onSave: \(v: string, exactName: boolean\) => void/);
+  assert.match(combo, /saveValue\(item\.name, false\)/, "목록 선택만 장비마스터 정규화를 허용해야 한다");
+  assert.match(combo, /onFreeInput=\{\(\) => saveValue\(q, true\)\}/, "자유입력 버튼은 exactName을 전달해야 한다");
+
+  const rename = section(store, "export async function setItemName", "/** GAS updateEquipQty");
+  assert.match(rename, /options\?: \{ exactName\?: boolean; offCatalog\?: boolean \}/);
+  assert.match(
+    rename,
+    /gasMutation\("updateEquipName", \{ tid: tradeId, scheduleId, equipName: clean, exactName: options\?\.exactName === true \}\)/,
+  );
+});
+
+test("시트에서 이미 사라진 유령 행은 실패로 되살리지 않고 정확한 scheduleId만 정리한다", () => {
+  const store = read("lib/data/store.ts");
+  const remote = read("lib/data/remote.ts");
+  const remove = section(store, "async function commitRemoveEquipmentMutation_", "\nasync function replayRemoveEquipmentMutation_");
+  assert.match(remove, /isMissingScheduleRowError_\(message\)/);
+  assert.match(remove, /await finalizeAlreadyMissingScheduleItem_\(entry\.tradeId, entry\.scheduleId, entry\.equipName\)/);
+  assert.match(remove, /finishTradeSave\(entry\.tradeId, saveId, "saved", "이미 제외된 품목 정리됨"\)/);
+
+  const rename = section(store, "export async function setItemName", "/** GAS updateEquipQty");
+  const missingBranch = section(rename, "if (isMissingScheduleRowError_(message))", "\n    console.error");
+  assert.match(rename, /const originalName = state\.trades[\s\S]*scheduleId[\s\S]*\.name \?\? clean/);
+  assert.match(missingBranch, /await finalizeAlreadyMissingScheduleItem_\(tradeId, scheduleId, originalName\)/);
+  assert.doesNotMatch(missingBranch, /reconcileCompletionMutationCanonical_/);
+
+  const missingMatcher = section(store, "function isMissingScheduleRowError_", "\n}\n\nasync function finalizeAlreadyMissingScheduleItem_");
+  assert.doesNotMatch(missingMatcher, /비어있음|\|행 없음/, "시트 전체 비정상은 개별 stale 행 성공으로 오인하면 안 된다");
+  const finalizer = section(store, "async function finalizeAlreadyMissingScheduleItem_", "\n}\n\nasync function commitRemoveEquipmentMutation_");
+  assert.match(finalizer, /if \(!isSheetBackedScheduleId\(tradeId, scheduleId\)\)[\s\S]*시트 누락 정리 대상이 아닙니다/);
+  assert.ok(
+    finalizer.indexOf("isSheetBackedScheduleId") < finalizer.indexOf("deleteScheduleItem"),
+    "ONS 등 앱 전용 품목은 Supabase 삭제 전에 반드시 차단해야 한다",
+  );
+  assert.match(remote, /deleteScheduleItem[\s\S]*expectedName[\s\S]*\.is\("taken_qty", null\)/);
+  assert.match(remote, /verifyMissingScheduleItemDelete_[\s\S]*반출 기준선이 있는 품목은 삭제할 수 없습니다/);
+  assert.match(remote, /같은 스케줄ID가 다른 장비로 바뀌어 삭제를 중단했습니다/);
+});
+
+test("예약 수정창의 직접 장비명 입력도 유사 장비로 치환하지 않는다", () => {
+  const actions = read("components/TradeActions.tsx");
+  assert.match(
+    actions,
+    /setItemName\(tradeId, item\.scheduleId, name\.trim\(\), \{ exactName: true \}\)/,
+    "카탈로그가 없는 직접 입력창은 언제나 입력 원문을 보존해야 한다",
   );
 });
 

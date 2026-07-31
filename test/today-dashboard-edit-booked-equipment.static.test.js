@@ -39,7 +39,7 @@ assert(
 assert(
   checklist.includes('EquipmentNameCombobox') &&
     checklist.includes('장비명') &&
-    checklist.includes('onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)}'),
+    /onSave=\{\(v, exactName\) => setItemName\(t\.tradeId, e\.scheduleId, v, \{ exactName, offCatalog: exactName \}\)\}/.test(checklist),
   'pre-checkout equipment details must allow editing the registered equipment name with a catalog dropdown'
 );
 assert(
@@ -93,7 +93,7 @@ assert(
 );
 
 assert(
-  /export async function setItemName\(tradeId: string, scheduleId: string, name: string\)/.test(store),
+  /export async function setItemName\([\s\S]{0,180}options\?: \{ exactName\?: boolean; offCatalog\?: boolean \}/.test(store),
   'store must expose fail-closed async setItemName for registered equipment edits'
 );
 assert(
@@ -101,7 +101,7 @@ assert(
   'setItemName must apply the canonical GAS name, matching standalone setName, and category after write success'
 );
 assert(
-  /await gasMutation\("updateEquipName", \{ tid: tradeId, scheduleId, equipName: clean \}\)/.test(store),
+  /await gasMutation\("updateEquipName", \{ tid: tradeId, scheduleId, equipName: clean, exactName: options\?\.exactName === true \}\)/.test(store),
   'setItemName must await GAS so sheet-master failure cannot leave a Supabase-only rename'
 );
 assert(

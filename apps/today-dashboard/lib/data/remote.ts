@@ -419,31 +419,65 @@ export async function cancelTradeRemote(tradeId: string): Promise<void> {
   if (trade.error) throw trade.error;
 }
 
-export async function deleteScheduleItem(tradeId: string, scheduleId: string): Promise<void> {
+export async function deleteScheduleItem(
+  tradeId: string,
+  scheduleId: string,
+  options?: { expectedName?: string },
+): Promise<"deleted" | "already-missing"> {
   const sb = supabase;
-  if (!sb) return;
+  if (!sb) return "already-missing";
   const variants = deleteScheduleItemVariants(tradeId, scheduleId);
   if (variants) {
-    const { data, error } = await sb
+    let deletion = sb
       .from("schedule_items")
       .delete()
       .eq("trade_id", tradeId)
       .is("taken_qty", null)
-      .or(`schedule_id.eq.${variants.canonical},schedule_id.eq.${variants.prefixed},schedule_id.like.${variants.prefixed}__%`)
-      .select("schedule_id");
+      .or(`schedule_id.eq.${variants.canonical},schedule_id.eq.${variants.prefixed},schedule_id.like.${variants.prefixed}__%`);
+    if (options?.expectedName) deletion = deletion.eq("name", options.expectedName);
+    const { data, error } = await deletion.select("schedule_id");
     if (error) throw error;
-    if (!data?.length) throw new Error("반출 기준선이 있거나 삭제할 품목이 없습니다");
-    return;
+    if (data?.length) return "deleted";
+    return verifyMissingScheduleItemDelete_(tradeId, scheduleId, options?.expectedName, variants);
   }
-  const { data, error } = await sb
+  let deletion = sb
     .from("schedule_items")
     .delete()
     .eq("trade_id", tradeId)
     .eq("schedule_id", scheduleId)
-    .is("taken_qty", null)
-    .select("schedule_id");
+    .is("taken_qty", null);
+  if (options?.expectedName) deletion = deletion.eq("name", options.expectedName);
+  const { data, error } = await deletion.select("schedule_id");
   if (error) throw error;
-  if (!data?.length) throw new Error("반출 기준선이 있거나 삭제할 품목이 없습니다");
+  if (data?.length) return "deleted";
+  return verifyMissingScheduleItemDelete_(tradeId, scheduleId, options?.expectedName);
+}
+
+async function verifyMissingScheduleItemDelete_(
+  tradeId: string,
+  scheduleId: string,
+  expectedName?: string,
+  variants?: { canonical: string; prefixed: string },
+): Promise<"already-missing"> {
+  const sb = supabase;
+  if (!sb) return "already-missing";
+  let query = sb
+    .from("schedule_items")
+    .select("schedule_id,name,taken_qty")
+    .eq("trade_id", tradeId);
+  query = variants
+    ? query.or(`schedule_id.eq.${variants.canonical},schedule_id.eq.${variants.prefixed},schedule_id.like.${variants.prefixed}__%`)
+    : query.eq("schedule_id", scheduleId);
+  const { data, error } = await query;
+  if (error) throw error;
+  if (!data?.length) return "already-missing";
+  if (data.some((row: any) => Number(row.taken_qty) > 0)) {
+    throw new Error("반출 기준선이 있는 품목은 삭제할 수 없습니다");
+  }
+  if (expectedName && data.some((row: any) => String(row.name || "").trim() !== expectedName.trim())) {
+    throw new Error("같은 스케줄ID가 다른 장비로 바뀌어 삭제를 중단했습니다");
+  }
+  throw new Error("Supabase 품목 삭제가 확정되지 않았습니다");
 }
 
 function deleteScheduleItemVariants(tradeId: string, scheduleId: string): { canonical: string; prefixed: string } | null {

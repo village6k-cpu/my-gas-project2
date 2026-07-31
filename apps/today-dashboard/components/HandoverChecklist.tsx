@@ -230,7 +230,10 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
         <div className="space-y-2 pb-2.5 pl-9">
           <div className="block text-[12px] font-semibold text-ink-mute">
             장비명
-            <EquipmentNameCombobox value={e.name} onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)} />
+            <EquipmentNameCombobox
+              value={e.name}
+              onSave={(v, exactName) => setItemName(t.tradeId, e.scheduleId, v, { exactName, offCatalog: exactName })}
+            />
           </div>
           <div className="flex items-center gap-2 text-[12px] text-ink-mute">
             예약 수량
@@ -536,7 +539,13 @@ function FloatingCatalogMenu({
   );
 }
 
-function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: string) => void }) {
+function EquipmentNameCombobox({
+  value,
+  onSave,
+}: {
+  value: string;
+  onSave: (v: string, exactName: boolean) => void;
+}) {
   const catalog = useEquipmentCatalog();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [q, setQ] = useState(value);
@@ -557,21 +566,21 @@ function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: s
   const exact = !!exactMatch;
   const showList = focused && q.trim().length > 0 && !selected;
 
-  const saveValue = (nextName: string) => {
+  const saveValue = (nextName: string, exactName: boolean) => {
     const clean = nextName.trim();
     if (!clean) return;
-    if (clean !== value) onSave(clean);
+    if (clean !== value) onSave(clean, exactName);
     setQ(clean);
     setDirty(false);
   };
 
   const select = (item: EquipmentCatalogItem) => {
     setSelected(item);
-    saveValue(item.name);
+    saveValue(item.name, false);
   };
 
   const save = () => {
-    if (dirty) saveValue(q);
+    if (dirty) saveValue(q, !exactMatch);
   };
 
   return (
@@ -615,7 +624,7 @@ function EquipmentNameCombobox({ value, onSave }: { value: string; onSave: (v: s
           <button onClick={() => { setSelected(null); setDirty(true); }} className="ml-auto text-ink-faint">변경</button>
         </div>
       )}
-      <FloatingCatalogMenu open={showList} anchorRef={inputRef} items={matches} exact={exact} query={q} onSelect={select} onFreeInput={() => saveValue(q)} freeLabel="자유입력 저장" />
+      <FloatingCatalogMenu open={showList} anchorRef={inputRef} items={matches} exact={exact} query={q} onSelect={select} onFreeInput={() => saveValue(q, true)} freeLabel="자유입력 저장" />
     </div>
   );
 }
