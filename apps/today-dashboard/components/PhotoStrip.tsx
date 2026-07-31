@@ -10,6 +10,7 @@ import {
   refreshTradePhotos,
   retryTradePhotoUpload,
   uploadTradePhoto,
+  useTradePhotosLoaded,
 } from "@/lib/data/store";
 import { Camera } from "./icons";
 
@@ -120,6 +121,7 @@ export function PhotoStrip({
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const nextPhaseRef = useRef<Phase>("checkout");
+  const photosLoaded = useTradePhotosLoaded(tradeId);
 
   const checkout = photos.filter((p) => p.phase === "checkout");
   const checkin = photos.filter((p) => p.phase === "checkin");
@@ -186,7 +188,7 @@ export function PhotoStrip({
             </div>
 
             {error && <div className="mb-3 rounded-xl bg-attention-bg px-3 py-2 text-[12px] font-semibold text-attention-fg">{error}</div>}
-            {loading && <div className="mb-3 text-[12px] font-semibold text-ink-faint">사진 불러오는 중…</div>}
+            {(loading || !photosLoaded) && <div className="mb-3 text-[12px] font-semibold text-ink-faint">사진 불러오는 중…</div>}
 
             {PHASES.map((phase) => {
               const ps = photos.filter((p) => p.phase === phase);
@@ -235,7 +237,7 @@ export function PhotoStrip({
           <Camera className="h-4 w-4" />
           사진
           <span className="text-ink-faint">
-            반출 {checkout.length} · 반납 {checkin.length}
+            {photosLoaded ? `반출 ${checkout.length} · 반납 ${checkin.length}` : "불러오는 중…"}
           </span>
         </button>
         {showThumbnails && (

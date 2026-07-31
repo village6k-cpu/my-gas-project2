@@ -184,15 +184,10 @@ test("반출을 누르지 않은 거래도 반납 탭과 같은 날 전체 탭�
   const card = read("components/ScheduleCard.tsx");
   const status = read("lib/domain/status.ts");
   const ret = section(store, "export async function toggleReturn", "\n// ── 품목 체크 원장 쓰기 신뢰화");
-  assert.match(ret, /const hasCheckoutBaseline =/);
-  // 기준선 없는 거래는 조용한 자동 force가 아니라 작업자 확인(다이얼로그) 뒤 force로 보낸다.
-  // 자동 force는 서버의 모든 반납 검증을 우회해 수량 검수 없이 거래가 닫히는 사고를 냈다.
-  assert.match(ret, /needsBaselineConfirm: true/,
-    "반출 기준선이 없는 거래는 작업자 확인을 요구해야 한다");
-  assert.doesNotMatch(ret, /force = !!opts\?\.force \|\| \(on && !hasCheckoutBaseline\)/,
-    "확인 없는 자동 force가 부활하면 안 된다");
-  assert.match(card, /needsBaselineConfirm[\s\S]{0,500}toggleReturn\(trade\.tradeId, \{ force: true \}\)/,
-    "카드는 확인 다이얼로그 뒤 force 경로로 반납 의도를 보낸다");
+  assert.doesNotMatch(ret, /hasCheckoutBaseline|needsBaselineConfirm|autoForce/,
+    "반납 버튼이 반출 기준선 존재 여부에 묶이면 안 된다");
+  assert.doesNotMatch(card, /needsBaselineConfirm|반출 수량 검수 기록이 없는 거래/,
+    "기준선 전용 확인 다이얼로그를 다시 만들면 안 된다");
   assert.match(card, /if \(p === "both"\) return "checkin"/,
     "같은 날 반출·반납 건의 전체 탭은 setupDone 없이 반납 단계여야 한다");
   assert.match(status, /if \(p === "both"\) return t\.returnDone && returnCompletionBlockers\(t\)\.length === 0/,
@@ -374,11 +369,10 @@ test("GAS checkout 품목 체크는 HTTP를 잠금 밖에서 처리하고, 배�
   const batch = section(gas, "function toggleItemChecksBatch", "\n/**\n * 개별 장비 행 체크 토글");
   const leaseGuard = section(gas, "function dashboardTradeMutationLeaseError_", "\nvar DASHBOARD_STRUCTURE_QUEUE_PREFIX_");
   const contextAt = fn.indexOf("getDashboardScheduleInspectionContext_(scheduleId)");
-  const baselineAt = fn.indexOf("supaGetCheckoutBaselineState_(checkoutTid)");
   const mutationLockAt = Math.max(fn.indexOf("lock.waitLock("), fn.indexOf("lock.tryLock("));
   assert.ok(contextAt >= 0 && mutationLockAt > contextAt, "행 조회는 잠금 밖(앞)에서 해야 한다");
-  assert.ok(baselineAt >= 0 && mutationLockAt > baselineAt, "Supabase 기준선 HTTP 조회는 잠금 밖(앞)에서 해야 한다");
-  assert.match(fn, /isDashboardTradeCheckoutStarted_\(/, "로컬 마커로 반출 전 거래는 HTTP 조회를 생략해야 한다");
+  assert.doesNotMatch(fn, /supaGetCheckoutBaselineState_|checkoutBaselineStarted_/,
+    "품목 체크가 반출 기준선 HTTP/마커에 의존하면 안 된다");
   // 반출 체크는 스케줄ID 접두어에서 거래ID를 직접 유도 — TextFinder 시트 검색을 생략한다
   assert.match(fn, /scheduleId\.match\(\/\^\(\\d\{6\}-\\d\{3\}\)-\/\)/, "반출 체크는 접두어 fast path를 써야 한다");
   assert.match(fn, /if \(phase === 'checkout'\)[\s\S]*props\.(?:setProperty|deleteProperty)[\s\S]*return \{[\s\S]*checked: isDone/, "checkout은 고유 키만 쓰므로 전역 잠금 전에 끝나야 한다");
@@ -389,7 +383,7 @@ test("GAS checkout 품목 체크는 HTTP를 잠금 밖에서 처리하고, 배�
     "권한 전이 중인 품목·반납 요청과 실제 반납 projection HTTP만 충돌을 막아야 한다");
   assert.doesNotMatch(leaseGuard, /activeDashboardMutationLease_\(props, 'dashboardStructureMutation_'/,
     "구조 동기화 backoff가 카드 전체를 막으면 안 된다");
-  assert.match(fn, /checkoutMutationLock\.tryLock\(1000\)/, "품목 쓰기와 기준선 시작 경계만 짧게 직렬화해야 한다");
+  assert.match(fn, /checkoutMutationLock\.tryLock\(1000\)/, "품목 쓰기 경계만 짧게 직렬화해야 한다");
   const checkoutFastAt = fn.indexOf("if (phase === 'checkout')", fn.indexOf("// ── 변이 단계"));
   const fastLockAt = fn.indexOf("lock.tryLock(");
   assert.ok(checkoutFastAt >= 0 && fastLockAt > checkoutFastAt, "checkout fast path가 잠금보다 앞이어야 한다");
@@ -403,20 +397,16 @@ test("GAS checkout 품목 체크는 HTTP를 잠금 밖에서 처리하고, 배�
 
 test("GAS 전역 잠금: 무거운 작업이 잠금을 통째로 쥐지 않는다", () => {
   const gas = fs.readFileSync(path.resolve(appRoot, "../..", "checkAvailability.js"), "utf8");
-  // toggleReturnDone: 완료 검증(전체 시트 스캔 + Supabase HTTP)은 잠금 앞에서
+  // toggleReturnDone: 완료 버튼은 기준선/상세수량 HTTP와 완전히 분리한다.
   const ret = section(gas, "function toggleReturnDone", "function listDashboardCheckoutItemCheckSids_");
-  const assertAt = ret.indexOf("assertDashboardReturnComplete_(tid, props)");
-  const retLockAt = Math.max(ret.indexOf("lock.waitLock("), ret.indexOf("lock.tryLock("));
-  assert.ok(assertAt >= 0 && retLockAt > assertAt, "반납완료 검증은 잠금 밖(앞)이어야 한다");
+  assert.doesNotMatch(ret, /assertDashboardReturnComplete_|supaGetCheckoutBaselineState_|supaSetTradeReturnDone_/);
   assert.match(ret, /lock\.tryLock\(1000\)/);
   assert.match(ret, /retryable: true/);
   assert.match(ret, /skipCompletionCheck: isDone/, "잠금 안에서 무거운 검증을 반복하지 않아야 한다");
   assert.doesNotMatch(ret, /lock\.waitLock\(20000\)/);
 
   const setup = section(gas, "function toggleSetupDone", "function normalizeDashboardReturnSetKey_");
-  const setupReleaseAt = setup.indexOf("transitionLock.releaseLock()");
-  const baselineAt = setup.indexOf("supaCaptureCheckoutBaseline_");
-  assert.ok(setupReleaseAt >= 0 && baselineAt > setupReleaseAt, "기준선 HTTP 저장은 짧은 경계 잠금을 푼 뒤 실행해야 한다");
+  assert.doesNotMatch(setup, /supaCaptureCheckoutBaseline_|supaSetTradeSetupDone_|dashboardCheckoutBaselineFingerprint_/);
   assert.match(setup, /setupClosing_[\s\S]*tryLock\(1000\)/, "다른 기기의 늦은 품목 체크를 막는 closing 표식이 있어야 한다");
 
   // regenPendingContracts: 잠금은 거래 선점/완료표시에만 쓰고 Drive 재생성은 잠금 밖
@@ -518,7 +508,8 @@ test("반납완료 미확인은 강제 차단이 아니라 작업자 확인 후 
 
   const gas = fs.readFileSync(path.resolve(appRoot, "../..", "checkAvailability.js"), "utf8");
   const gasRet = section(gas, "function toggleReturnDone", "function listDashboardCheckoutItemCheckSids_");
-  assert.match(gasRet, /isDone && !force/, "GAS도 force면 완료 검증을 건너뛴다");
+  assert.doesNotMatch(gasRet, /assertDashboardReturnComplete_|supaGetCheckoutBaselineState_/,
+    "GAS 완료 버튼이 기준선 검증으로 다시 막히면 안 된다");
   assert.match(gasRet, /반납완료 강제 처리/, "강제 처리는 로그로 남긴다");
 });
 

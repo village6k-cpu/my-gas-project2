@@ -106,10 +106,10 @@ assert(
 );
 assert(
   /function applyEquipQtyResult\([\s\S]*const nextQty = byId\.get\(e\.scheduleId\)![\s\S]*takenQty: e\.takenQty/.test(store) &&
-    /setItemQty[\s\S]*await gasMutation\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: safeQty \}\)[\s\S]*applyEquipQtyResult\(/.test(store) &&
+    /export async function setItemQty[\s\S]{0,1200}queueItemQty\(tradeId, scheduleId, safeQty\)[\s\S]{0,120}return true/.test(store) &&
     /commitQueuedItemQty[\s\S]*await gasMutation\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: target \}\)[\s\S]*applyEquipQtyResult\(/.test(store) &&
     !/takenQty: e\.takenQty != null \? Math\.min/.test(store),
-  'qty edits (setItemQty and debounced commitQueuedItemQty) must await updateEquipQty, apply authoritative set-component scaling via applyEquipQtyResult, and never rewrite the checkout baseline'
+  'qty edits must return through the immediate queue, then the debounced commit must apply authoritative set-component scaling without rewriting the checkout baseline'
 );
 
 assert(

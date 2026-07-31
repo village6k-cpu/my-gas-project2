@@ -91,7 +91,7 @@ test("클릭 경로 소스에는 네트워크 대기가 없다 (즉시 확정 �
 });
 
 // ── 백그라운드 확정 엔진: 결과 분기 계약 (정적 단언) ──
-test("확정 엔진: 성공은 ACK, 거절은 정본 수렴+알림, 지연은 백오프(첫 실패만 토스트)", () => {
+test("확정 엔진: 성공은 ACK, 거절은 정본 수렴+알림, 일시 지연은 조용히 백오프", () => {
   const store = read("lib/data/store.ts");
   const replay = sourceFunction(store, "async function replayCompletionMutationEntry_", "\nfunction replayCompletionMutationOutboxes_");
   // 성공: 서버 확정값 반영 후 ACK + 짧은 저장 피드백
@@ -103,9 +103,9 @@ test("확정 엔진: 성공은 ACK, 거절은 정본 수렴+알림, 지연은 �
   // 응답 유실: Supabase만 저장되고 GAS 표식이 빠지는 분할 완료를 막기 위해 같은 명령 재시도
   assert.doesNotMatch(replay, /fetchSetupCompletion\(latest\.tradeId\)/, "Supabase 단독 완료를 ACK하면 안 된다");
   assert.match(replay, /updateCompletionMutationOutboxAttempts\(latest, attempts\)/, "GAS 확인까지 같은 명령을 재시도한다");
-  // 재시도 가능: 낙관 유지 + attempts 기록 + 백오프, 지연 토스트는 첫 실패만
+  // 재시도 가능: 낙관 유지 + attempts 기록 + 백오프. 반복 지연 토스트는 띄우지 않는다.
   assert.match(replay, /updateCompletionMutationOutboxAttempts\(latest, attempts\)/);
-  assert.match(replay, /attempts === 1[\s\S]{0,200}저장 지연/, "백오프마다 토스트 쌍이 반복되면 안 된다");
+  assert.doesNotMatch(replay, /attempts === 1[\s\S]{0,200}저장 지연/, "일시 오류는 화면을 막지 않고 조용히 재시도한다");
   // 카드 잠금 없음
   assert.doesNotMatch(replay, /beginTradeTransition|beginTradeSave/, "확정 엔진도 카드를 잠그지 않는다");
 });
@@ -199,11 +199,11 @@ test("확정 엔진 실행: 명확한 거절은 ACK 후 정본 재조회로 낙�
   assert.equal(context.acks.length, 1, "거절은 outbox를 ACK한다");
   assert.deepEqual(context.reconciles, ["T-1"], "정본 재조회로 수렴한다");
   assert.equal(context.state.trades[0].setupDone, false, "낙관 완료 표시가 서버 상태로 되돌아간다");
-  assert.ok(context.toasts.some((t) => t.includes("김테스트") && t.includes("거절됨")), "거래 라벨과 함께 크게 알린다");
+  assert.ok(context.toasts.some((t) => t.includes("김테스트") && t.includes("저장에 실패")), "거래 라벨과 함께 크게 알린다");
   assert.equal(context.schedules.length, 0, "거절은 재시도하지 않는다");
 });
 
-test("확정 엔진 실행: 재시도 가능 오류는 낙관 유지 + 백오프 재예약, 지연 토스트는 첫 실패만", async () => {
+test("확정 엔진 실행: 재시도 가능 오류는 낙관 유지 + 백오프 재예약하며 토스트를 반복하지 않는다", async () => {
   const { context, entry } = replayHarness({
     gasImpl: async () => { const e = new Error("다른 변경 작업 처리 중"); e.retryable = true; throw e; },
     retryable: true,
@@ -213,11 +213,11 @@ test("확정 엔진 실행: 재시도 가능 오류는 낙관 유지 + 백오프
   assert.equal(context.state.trades[0].setupDone, true, "낙관 완료 표시를 유지한다");
   assert.deepEqual(context.attemptsUpdates, [1]);
   assert.equal(context.schedules.length, 1, "백오프 재예약");
-  assert.equal(context.toasts.filter((t) => t.includes("저장 지연")).length, 1, "첫 실패만 지연 안내");
-  // 두 번째 실패: attempts 2, 추가 지연 토스트 없음
+  assert.equal(context.toasts.filter((t) => t.includes("저장 지연")).length, 0, "일시 오류는 조용히 재시도");
+  // 두 번째 실패: attempts 2, 지연 토스트 없음
   const second = { ...entry, attempts: 1 };
   await context.replayEntry(second);
-  assert.equal(context.toasts.filter((t) => t.includes("저장 지연")).length, 1, "반복 토스트 금지");
+  assert.equal(context.toasts.filter((t) => t.includes("저장 지연")).length, 0, "반복 토스트 금지");
 });
 
 test("확정 엔진 실행: 성공은 서버 확정값 반영 + ACK + 저장 피드백", async () => {
@@ -242,27 +242,19 @@ test("반출완료는 GAS UrlFetch 한도와 분리된 서버 정본 경로를 �
   const replay = sourceFunction(store, "async function replayCompletionMutationEntry_", "\nfunction replayCompletionMutationOutboxes_");
   const toggle = sourceFunction(gas, "function toggleSetupDone", "\nfunction normalizeDashboardReturnSetKey_");
 
-  assert.match(replay, /checkableItems\(setupTrade, "checkout"\)[\s\S]*baselineItems:\s*JSON\.stringify/);
+  assert.doesNotMatch(replay, /baselineItems|baselineFingerprint|checkableItems\(setupTrade/, "기준선 payload를 만들지 않는다");
   assert.match(writer, /action === "toggleSetup"/, "대형 기준선도 URL 길이 제한 없이 항상 POST로 보내야 한다");
-  assert.match(route, /persistSetupCompletionAuthority_[\s\S]*getInventoryAuditServiceClient\(\)[\s\S]*taken_qty[\s\S]*setup_done/);
-  assert.match(route, /\.in\("schedule_id", dbIds\)[\s\S]*checkoutStructureMatches_/,
-    "브라우저 payload는 기존 Supabase 장비 구조와 정확히 맞아야 한다");
-  assert.match(route, /function checkoutRowIsComponent_[\s\S]*set_name[\s\S]*row\.name/,
-    "과거 is_component=false 행도 세트명과 장비명 구조로 동일하게 판정해야 한다");
-  assert.match(route, /checkoutRowIsComponent_\(row\) === item\.isComponent/);
-  assert.doesNotMatch(route, /\.upsert\(baselineRows/,
-    "구조 필드가 없는 부분 upsert는 NOT NULL 제약으로 기존 행에도 실패한다");
-  assert.match(route, /const idsByQty = new Map<number, string\[\]>\(\)/);
-  assert.match(route, /\.update\(\{ taken_qty: qty, checkout_state: "taken" \}\)/);
-  assert.match(route, /checkout baseline update count mismatch/,
-    "검증 뒤 행이 사라진 경우 부분 기준선으로 완료되면 안 된다");
-  assert.match(route, /action === "toggleSetup"[\s\S]*persistSetupCompletionAuthority_\(body\)[\s\S]*remoteConfirmed[\s\S]*baselineFingerprint/);
-  assert.match(route, /반출완료 저장이 지연되어 자동 재시도 중입니다/);
+  assert.match(route, /persistCompletionAuthority_[\s\S]*getInventoryAuditServiceClient\(\)[\s\S]*apply_trade_completion/);
+  assert.match(route, /p_revision: revision/, "완료 상태 저장은 GAS의 단조 revision을 DB CAS에 전달해야 한다");
+  assert.doesNotMatch(route, /taken_qty|CheckoutBaselineItem|checkoutBaselineFingerprint_/);
+  assert.match(route, /action === "toggleSetup" \|\| action === "toggleReturn"/);
+  assert.match(route, /await fetch\(GAS_URL[\s\S]*await persistCompletionAuthority_/,
+    "GAS가 canonical 상태를 정한 뒤 Supabase에 저장해야 오래된 요청이 정본을 되돌리지 않는다");
+  assert.match(route, /완료 상태 저장이 지연되어 자동 재시도 중입니다/);
   assert.match(route, /action === "toggleSetup"[\s\S]*GAS confirmation pending[\s\S]*REMOTE_RETRY/,
     "Supabase 저장 뒤 GAS 응답이 끊겨도 내부 오류를 노출하지 않고 재시도해야 한다");
-  assert.match(toggle, /remoteConfirmed[\s\S]*dashboardCheckoutBaselineFingerprint_\(tid, checkable\)[\s\S]*baselineFingerprint/);
-  assert.match(toggle, /if \(remoteConfirmed\)[\s\S]*markDashboardCheckoutBaselineStarted_[\s\S]*else \{[\s\S]*supaCaptureCheckoutBaseline_/);
-  assert.match(sheetApi, /case "toggleSetup"[\s\S]*remoteConfirmed[\s\S]*baselineFingerprint/);
+  assert.doesNotMatch(toggle, /dashboardCheckoutBaselineFingerprint_|supaCaptureCheckoutBaseline_|supaSetTradeSetupDone_/);
+  assert.doesNotMatch(sheetApi, /case "toggleSetup"[\s\S]*baselineFingerprint/);
 });
 
 test("Vercel과 GAS의 반출 기준선 SHA-256 지문은 품목 순서와 무관하게 같다", () => {

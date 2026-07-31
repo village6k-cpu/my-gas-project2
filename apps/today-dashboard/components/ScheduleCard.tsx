@@ -57,7 +57,6 @@ export const ScheduleCard = memo(function ScheduleCard({
   const phase = displayPhase(trade, date, tab);
   const isCheckout = phase === "checkout";
   const returnBlockers = isCheckout ? [] : returnCompletionBlockers(trade);
-  const invalidClosedReturn = !isCheckout && trade.returnDone && returnBlockers.length > 0;
   const done = isCheckout ? trade.setupDone : trade.returnDone && returnBlockers.length === 0;
   const doneAt = isCheckout ? trade.setupDoneAt : trade.returnDoneAt;
   const prog = setupProgress(trade, phase);
@@ -76,17 +75,6 @@ export const ScheduleCard = memo(function ScheduleCard({
     const result = await toggleReturn(trade.tradeId);
     if (result.ok) return;
     setOpen(true);
-    // 반출 기준선이 없는 거래(반출완료 미처리·과거 데이터)는 조용히 우회하지 않고
-    // 작업자 확인을 받은 뒤에만 강제 종결한다. 처리 내역은 서버에 기록으로 남는다.
-    if (result.needsBaselineConfirm) {
-      const confirmed = window.confirm(
-        "반출 수량 검수 기록이 없는 거래입니다.\n수량 확인 없이 반납완료 처리할까요?\n(처리 내역은 기록으로 남습니다)",
-      );
-      if (!confirmed) return;
-      const forced = await toggleReturn(trade.tradeId, { force: true });
-      if (!forced.ok) setOpen(true);
-      return;
-    }
     // 미확인/초과는 강제 차단하지 않는다 — 작업자가 내용을 보고 결정한다(소프트 가드).
     // 카드는 완료 전까지 계속 살아있고, 미확인 내역은 returnCounts 기록으로 남는다.
     if (result.blockers.length > 0) {
@@ -194,7 +182,6 @@ export const ScheduleCard = memo(function ScheduleCard({
             ? done ? "반출 완료됨" : saving ? "상태 변경 중…" : "반출 완료"
             : done ? "반납 완료됨"
             : saving ? "상태 변경 중…"
-            : invalidClosedReturn ? "잘못 닫힌 카드 다시 열기"
             : returnBlockers.length ? "수량 확인 후 반납완료" : "반납 완료"}
         </button>
         <button
@@ -215,7 +202,7 @@ export const ScheduleCard = memo(function ScheduleCard({
           className="tap mx-4 ml-5 mt-2.5 block w-[calc(100%-2.25rem)] rounded-xl bg-attention-bg px-3 py-2.5 text-left ring-1 ring-attention-ring"
         >
           <span className="block text-[12px] font-extrabold text-attention-fg">
-            🚨 {invalidClosedReturn ? "반납완료 데이터 불일치 — 카드 재개방 필요" : "반납완료 차단 — 수량 확인 필요"}
+            🚨 반납 수량 확인 필요
           </span>
           <span className="mt-1 block text-[12px] font-semibold leading-relaxed text-attention-fg">
             {returnBlockers.slice(0, 3).map((b) => (

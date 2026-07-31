@@ -21,18 +21,18 @@ assert.doesNotMatch(
 );
 assert.match(
   toggleSetupDone,
-  /transitionLock\.tryLock\(1000\)[\s\S]*transitionLock\.releaseLock\(\)[\s\S]*supaCaptureCheckoutBaseline_/,
-  '품목 체크와 기준선 시작 경계만 짧게 잠그고 외부 기준선 저장 전에 즉시 풀어야 한다'
+  /transitionLock\.tryLock\(1000\)[\s\S]*transitionLock\.releaseLock\(\)/,
+  '품목 체크와 완료 전환 순서만 짧게 잠그고 즉시 풀어야 한다'
+);
+assert.doesNotMatch(
+  toggleSetupDone,
+  /supaCaptureCheckoutBaseline_|supaGetCheckoutBaselineState_|dashboardCheckoutBaselineFingerprint_/,
+  '반출완료 클릭 경로가 기준선 HTTP 저장·조회에 다시 묶이면 안 된다'
 );
 assert.match(
   toggleSetupDone,
-  /supaCaptureCheckoutBaseline_\(tid, checkable, true\)/,
-  '반출 완료 전 Supabase 불변 기준선 저장은 계속 필수다'
-);
-assert.match(
-  toggleSetupDone,
-  /props\.setProperties\(completed, false\)/,
-  '기준선 저장 성공 뒤에만 반출 완료 속성을 확정해야 한다'
+  /nextDashboardCompletionRevision_\(props, tid, 'setup'\)[\s\S]*props\.setProperties\(completed, false\)/,
+  '반출 완료 상태는 단조 revision과 함께 로컬 정본에 확정해야 한다'
 );
 
 const toggleSetup = store.match(/export async function toggleSetup\(tradeId: string\): Promise<ToggleSetupResult> \{[\s\S]*?\n\}/);
@@ -103,15 +103,10 @@ assert.match(
   '원격 확인은 카드 완료 상태와 분리된 보조 정보로만 보여야 한다'
 );
 
-assert.match(
-  backend,
-  /function getDashboardRowsByTradeId_\(schedSheet, tid\)/,
-  '반출완료는 대상 거래의 스케줄 행만 찾는 헬퍼를 사용해야 한다'
-);
-assert.match(
+assert.doesNotMatch(
   toggleSetupDone,
-  /getDashboardRowsByTradeId_\(sched, tid\)[\s\S]*?getDashboardSearchGroupsForIds_\(sched, \[tid\], rowsByTid\)/,
-  '반출완료 기준선 생성 때 스케줄상세 전체 12열을 읽지 않아야 한다'
+  /getDashboardRowsByTradeId_|getDashboardSearchGroupsForIds_|getSheetByName\('스케줄상세'\)/,
+  '반출완료는 기준선 생성을 위해 스케줄상세를 읽지 않아야 한다'
 );
 
 console.log('dashboard checkout lock-free static checks passed');

@@ -138,13 +138,17 @@ test('신규 거래도 반출완료와 전 품목 반출 체크가 증명되면 
   );
 });
 
-test('반납완료는 앱 버튼 외 GAS 경로에서도 Supabase 동기화 대상으로 남긴다', () => {
+test('반납완료 GAS 경로는 완료 상태만 확정하고 Supabase HTTP 저장을 중복 실행하지 않는다', () => {
   const gas = read('checkAvailability.js');
   const start = gas.indexOf('function toggleReturnDone');
   const end = gas.indexOf('\nfunction listDashboardCheckoutItemCheckSids_', start);
   const fn = gas.slice(start, end);
-  assert.match(fn, /supaSetTradeReturnDone_\(/);
+  assert.doesNotMatch(fn, /supaSetTradeReturnDone_\(/);
+  assert.doesNotMatch(fn, /supaGetCheckoutBaselineState_\(/);
+  assert.doesNotMatch(fn, /assertDashboardReturnComplete_\(/);
   assert.match(fn, /supaMarkTradeDirty_\(tid\)/);
+  assert.match(fn, /completionRevision:\s*nextDashboardCompletionRevision_/);
+  assert.match(fn, /completionRevision:\s*Number\(returnLease\.completionRevision/);
   assert.match(fn, /invalidateDashboardCache/);
 });
 
@@ -208,11 +212,14 @@ test('API나 시트에서 수량·장비명·세트·거래 귀속을 바꾸면 
   assert.match(code, /스케줄상세[\s\S]{0,1800}col\s*<=\s*5[\s\S]{0,1800}editEndCol\s*>=\s*1[\s\S]{0,2200}invalidateDashboardReturnInspectionForTrade_/);
 });
 
-test('반출완료는 화면에 즉시 반영하되 불변 기준선은 GAS 성공 뒤에만 저장하고 기존 기준선을 덮어쓰지 않는다', () => {
+test('반출완료는 화면에 즉시 반영하고 기준선 HTTP 없이 완료 revision만 원격 정본에 저장한다', () => {
   const gas = read('checkAvailability.js');
-  const supa = read('supabaseSync.js');
+  const route = read('apps/today-dashboard/app/api/gas/route.ts');
   const remote = read('apps/today-dashboard/lib/data/remote.ts');
   const store = read('apps/today-dashboard/lib/data/store.ts');
+  const gasStart = gas.indexOf('function toggleSetupDone');
+  const gasEnd = gas.indexOf('\nfunction normalizeDashboardReturnSetKey_', gasStart);
+  const gasToggle = gas.slice(gasStart, gasEnd);
   const toggleStart = store.indexOf('export async function toggleSetup');
   const toggleEnd = store.indexOf('\nexport type ToggleReturnResult', toggleStart);
   const toggle = store.slice(toggleStart, toggleEnd);
@@ -222,17 +229,14 @@ test('반출완료는 화면에 즉시 반영하되 불변 기준선은 GAS 성�
     '낙관 표시가 백그라운드 확정 예약보다 먼저다 (클릭 경로는 GAS를 기다리지 않음)');
   assert.match(toggle.slice(optimisticMutation, confirmScheduleAt), /setupDone: done[\s\S]*, false\)/);
   assert.doesNotMatch(toggle, /flushTradePersist\(tradeId\)/);
-  assert.match(gas, /supaCaptureCheckoutBaseline_\(tid, checkable, true\)/);
-  assert.match(gas, /supaSetTradeSetupDone_\(tid, true, doneAt\)[\s\S]{0,500}if \(!setupSaved \|\| !setupSaved\.ok\)/);
-  assert.match(supa, /function supaSetTradeSetupDone_[\s\S]{0,1800}Prefer: 'return=representation'[\s\S]{0,300}setup_done: done === true/);
+  assert.doesNotMatch(gasToggle, /supaCaptureCheckoutBaseline_|supaGetCheckoutBaselineState_|supaSetTradeSetupDone_/);
+  assert.match(gasToggle, /completionRevision\s*=\s*nextDashboardCompletionRevision_/);
+  assert.match(gasToggle, /supaMarkTradeDirty_\(tid\)/);
+  assert.match(gasToggle, /completionRevision:\s*completionRevision/);
+  assert.match(route, /client\.rpc\(["']apply_trade_completion["']/);
+  assert.match(route, /completionRevision:\s*confirmed\.completionRevision/);
+  assert.match(route, /p_revision:\s*revision/);
   assert.match(remote, /function tradeStructureRow[\s\S]{0,500}delete row\.setup_done;[\s\S]{0,120}delete row\.setup_done_at;/);
-  const periodicStart = supa.indexOf('function buildSupabaseTrades_');
-  const periodicEnd = supa.indexOf('/** payload 키 구성이 같은 행끼리', periodicStart);
-  assert.doesNotMatch(supa.slice(periodicStart, periodicEnd), /setup_done(?:_at)?:/);
-  assert.match(supa, /function supaGetCheckoutBaselineState_/);
-  assert.match(supa, /if \(!same\)[\s\S]{0,220}이미 고정된 반출 기준선/);
-  assert.match(supa, /if \(!newRows\.length\) \{[\s\S]{0,180}markDashboardCheckoutBaselineStarted_\(tid\)[\s\S]{0,180}reused: true/);
-  assert.match(gas, /function toggleItemCheck[\s\S]{0,2600}phase === ['"]checkout['"][\s\S]{0,1200}이미 고정된 반출 기준선/);
 });
 
 test('DB도 기준 수량과 장비 정체성·반출 포함 여부를 write-once로 강제한다', () => {
@@ -322,14 +326,20 @@ test('품목 추가는 완료를 재오픈해 기준선에 합치고, 삭제는 
   assert.match(onsiteGas, /forceZeroPrice:\s*!isPaid/);
 });
 
-test('GAS 완료 API의 후속 저장 실패는 계약상태를 보상 복구하고 중복 완료는 이전상태를 덮지 않는다', () => {
+test('GAS 완료 API는 로컬 정본과 revision을 확정하고 앱 서버 CAS가 Supabase 순서를 보장한다', () => {
   const gas = read('checkAvailability.js');
+  const route = read('apps/today-dashboard/app/api/gas/route.ts');
   const toggleStart = gas.indexOf('function toggleReturnDone');
   const toggleEnd = gas.indexOf('\nfunction listDashboardCheckoutItemCheckSids_', toggleStart);
-  const statusStart = gas.indexOf('function updateDashboardContractStatus');
-  const statusEnd = gas.indexOf('\nfunction getEquipmentCheckSpreadsheet_', statusStart);
-  assert.match(gas, /function rollbackDashboardReturnContractStatus_/);
-  assert.match(gas.slice(toggleStart, toggleEnd), /rollbackDashboardReturnContractStatus_/);
-  assert.match(gas.slice(statusStart, statusEnd), /rollbackDashboardReturnContractStatus_/);
-  assert.match(gas, /currentStatus\s*&&\s*currentStatus\s*!==\s*['"]반납완료['"]/);
+  const toggle = gas.slice(toggleStart, toggleEnd);
+  assert.doesNotMatch(toggle, /supaSetTradeReturnDone_|rollbackDashboardReturnContractStatus_/);
+  assert.match(toggle, /setDashboardReturnContractStatus_\(tid, isDone/);
+  assert.match(toggle, /completionRevision:\s*nextDashboardCompletionRevision_/);
+  assert.match(toggle, /commitDashboardMutation_\(props, tid, mutationId, ['"]return['"]\)/);
+  assert.match(toggle, /supaMarkTradeDirty_\(tid\)/);
+  const fetchAt = route.indexOf('const r = await fetch(GAS_URL');
+  const persistAt = route.indexOf('const authority = await persistCompletionAuthority_', fetchAt);
+  assert.ok(fetchAt >= 0 && persistAt > fetchAt, 'GAS가 수락한 순서 뒤에만 Supabase CAS를 적용한다');
+  assert.match(route, /p_revision:\s*revision/);
+  assert.match(route, /savedRevision\s*<\s*revision/);
 });

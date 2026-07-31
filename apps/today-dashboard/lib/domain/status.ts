@@ -65,16 +65,9 @@ export function phaseForDate(t: Trade, date: string): "checkout" | "checkin" | "
   return "none";
 }
 
-/** 반출 당시 실제 포함 품목 기록은 반납 검증을 위해 고정한다. 예약 장비명·수량 편집에는 쓰지 않는다. */
+/** 반납완료로 완전히 마감된 카드만 구조 변경을 잠근다. 반출완료/반출중에는 계속 편집 가능하다. */
 export function isCheckoutBaselineLocked(t: Trade): boolean {
-  return (
-    t.setupDone ||
-    t.returnDone ||
-    t.contractStatus === "반출" ||
-    String(t.contractStatus) === "반출중" ||
-    t.contractStatus === "반납완료" ||
-    t.equipments.some((item) => Number(item.takenQty || 0) > 0)
-  );
+  return t.returnDone || t.contractStatus === "반납완료";
 }
 
 // ── 반납: 품목 종류별 합산 ──────────────────────────────────────
@@ -244,6 +237,8 @@ export interface ReturnCompletionBlocker {
  * 정상/파손/분실 중 어느 상태든 합계가 실제 반출 수량과 정확히 같아야 한다.
  */
 export function returnCompletionBlockers(t: Trade): ReturnCompletionBlocker[] {
+  // 완료가 확정된 카드는 과거 상세 수량을 다시 해석해 '잘못 닫힌 카드'로 부활시키지 않는다.
+  if (t.returnDone) return [];
   // taken_qty 도입 전 완료된 레거시 거래에는 불변 반출 기준선이 없다. 예약 qty를
   // 사후 기준선처럼 소급 적용하면 과거 완료 카드 수백 건이 확인필요로 부활한다.
   // 기준선이 한 행이라도 시작된 거래(김동민 사고 건 및 향후 반출)만 새 차단을 적용한다.

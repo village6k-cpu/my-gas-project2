@@ -10,19 +10,23 @@ const sheetApi = read('sheetAPI.js');
 const backend = read('checkAvailability.js');
 const paymentControls = read('apps/today-dashboard/components/PaymentControls.tsx');
 
-const setItemCheckout = store.match(/export function setItemCheckout\([\s\S]*?\n}\nexport async function setItemName/);
-assert.ok(setItemCheckout, 'setItemCheckout must exist before setItemName');
+const setItemCheckoutStart = store.indexOf('export function setItemCheckout');
+const setItemCheckoutEnd = store.indexOf('\nconst itemNameTargets:', setItemCheckoutStart);
+const setItemCheckout = setItemCheckoutStart >= 0 && setItemCheckoutEnd > setItemCheckoutStart
+  ? store.slice(setItemCheckoutStart, setItemCheckoutEnd)
+  : '';
+assert.ok(setItemCheckout, 'setItemCheckout must exist before the item-name queue');
 assert.match(
-  setItemCheckout[0],
+  setItemCheckout,
   /const baselineStarted = !!currentTrade && isCheckoutBaselineLocked\(currentTrade\)[\s\S]*if \(baselineStarted\)[\s\S]*next === "excluded"[\s\S]*이미 반출된 품목은 제외할 수 없습니다[\s\S]*return;/,
   'checkout 기준선이 시작된 뒤에는 제외 클릭이 어떤 로컬 상태도 바꾸기 전에 차단되어야 한다'
 );
 assert.ok(
-  setItemCheckout[0].indexOf('if (baselineStarted)') < setItemCheckout[0].indexOf('mutateTrade(tradeId'),
+  setItemCheckout.indexOf('if (baselineStarted)') < setItemCheckout.indexOf('mutateTrade(tradeId'),
   'checkout baseline guard must run before optimistic mutation',
 );
 assert.match(
-  setItemCheckout[0],
+  setItemCheckout,
   /final === "excluded"[\s\S]*removeEquipmentAndRegenerateContract\(tradeId,\s*targetItem\)/,
   '반출 전 제외만 원장 삭제 + 계약서 갱신 경로를 사용해야 한다'
 );

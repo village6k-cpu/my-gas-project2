@@ -66,7 +66,8 @@ function enqueueGasMutation<T>(tradeKey: string | null, task: () => Promise<T>):
 
 async function executeGasMutation(action: string, params: Record<string, GasParam>): Promise<any> {
   for (let attempt = 0; ; attempt++) {
-    const mustPost = action === "uploadDashboardPhoto" || action === "toggleItems" || action === "toggleSetup" || String(params.data ?? "").length > 8_000;
+    const mustPost = action === "uploadDashboardPhoto" || action === "toggleItems" ||
+      action === "toggleSetup" || action === "toggleReturn" || String(params.data ?? "").length > 8_000;
     let r: Response;
     try {
       r = mustPost

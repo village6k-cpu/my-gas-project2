@@ -118,8 +118,20 @@ assert.match(
 
 assert.match(
   photoStrip,
-  /export function PhotoStrip\(\{ tradeId, photos \}: \{ tradeId: string; photos: PhotoMeta\[\] \}\)/,
+  /export function PhotoStrip\(\{[\s\S]{0,120}tradeId,[\s\S]{0,120}photos,/,
   'PhotoStrip must know which trade it uploads photos for'
+);
+
+assert.match(
+  photoStrip,
+  /const photosLoaded = useTradePhotosLoaded\(tradeId\)/,
+  'PhotoStrip must subscribe to the per-trade photo loading state'
+);
+
+assert.match(
+  photoStrip,
+  /photosLoaded \? `반출 \$\{checkout\.length\} · 반납 \$\{checkin\.length\}` : "불러오는 중…"/,
+  'PhotoStrip must show an honest loading label instead of a false 0/0 count'
 );
 
 // 2026-07-12: 사장 요청으로 카메라 강제(capture="environment")를 제거 —
@@ -192,7 +204,7 @@ assert.match(
 
 assert.match(
   scheduleCard,
-  /<PhotoStrip tradeId=\{trade\.tradeId\} photos=\{trade\.photos\} \/>/,
+  /<PhotoStrip\s+tradeId=\{trade\.tradeId\}\s+photos=\{trade\.photos\}[\s\S]{0,120}\/>/,
   'ScheduleCard must pass tradeId into PhotoStrip'
 );
 
