@@ -52,7 +52,7 @@ test('scheduleRegister는 제외 행을 등록대기로 덮어쓰지 않는다',
   assert.match(body, /제외/, '제외 행 스킵 로직 필요');
 });
 
-test('최상위 미등록 장비(❓)는 바로등록 승인 없이는 등록을 차단한다', () => {
+test('미등록 장비(❓)는 자유입력 품목으로 보고 등록을 차단하지 않는다', () => {
   const ctx = loadContext(['getBlockingRegisterIssue_']);
   const mk = (result, opts = {}) => {
     const row = new Array(18).fill('');
@@ -62,9 +62,9 @@ test('최상위 미등록 장비(❓)는 바로등록 승인 없이는 등록을
     row[16] = opts.tag || '';
     return row;
   };
-  // 최상위 미등록 → 차단
-  assert.match(String(ctx.getBlockingRegisterIssue_([mk('❓ 미등록 장비')], 'RQ-1')), /미등록/);
-  // 바로등록 승인 시 통과 (사장 최종 승인)
+  // 최상위 미등록도 자유입력 품목이므로 일반 등록에서 통과
+  assert.equal(ctx.getBlockingRegisterIssue_([mk('❓ 미등록 장비')], 'RQ-1'), '');
+  // 바로등록 승인에서도 동일하게 통과
   assert.equal(ctx.getBlockingRegisterIssue_([mk('❓ 미등록 장비')], 'RQ-1', true), '');
   // 세트 구성품([세트] 태그)은 기존처럼 면제
   assert.equal(ctx.getBlockingRegisterIssue_([mk('❓ 미등록 장비', { tag: '[세트]조명세트' })], 'RQ-1'), '');
