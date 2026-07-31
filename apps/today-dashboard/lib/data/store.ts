@@ -1854,6 +1854,24 @@ async function reconcileRemovedEquipmentCanonical_(tradeId: string): Promise<voi
   }
 }
 
+function isMissingScheduleRowError_(message: string): boolean {
+  return /해당 스케줄 행 없음|스케줄ID ['"]?.+['"]? 못 찾음/i.test(message);
+}
+
+async function finalizeAlreadyMissingScheduleItem_(tradeId: string, scheduleId: string, equipName: string): Promise<void> {
+  if (!isSheetBackedScheduleId(tradeId, scheduleId)) {
+    throw new Error("앱 전용 현장추가 품목은 시트 누락 정리 대상이 아닙니다");
+  }
+  // GAS 정본에 행이 없더라도 Supabase 쪽 반출 기준선이나 같은 ID의 새 장비가 있으면 숨기지 않는다.
+  // 원래 장비명 + taken_qty IS NULL 조건으로 원격 정리가 확정된 뒤에만 로컬 tombstone을 남긴다.
+  if (isSupabase) await deleteScheduleItem(tradeId, scheduleId, { expectedName: equipName });
+  recordExcludedItemTombstone_(tradeId, scheduleId, equipName);
+  mutateTrade(tradeId, (trade) => ({
+    ...trade,
+    equipments: trade.equipments.filter((item) => item.scheduleId !== scheduleId),
+  }), false);
+}
+
 async function commitRemoveEquipmentMutation_(
   entry: RemoveEquipmentOutboxEntry,
   saveId: number,
@@ -1886,7 +1904,6 @@ async function commitRemoveEquipmentMutation_(
     finishTradeSave(entry.tradeId, saveId, "saved", "장비 제외 저장됨");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error("[write-back] removeEquip 실패:", error);
     if (isRetryableLedgerError(error)) {
       const attempts = entry.attempts + 1;
       const latest = { ...entry, attempts };
@@ -1896,12 +1913,22 @@ async function commitRemoveEquipmentMutation_(
       return;
     }
     acknowledgeRemoveEquipmentOutbox_(entry);
-    const canonicalAlreadyMissing = /행 없음|비어있음|already removed/i.test(message);
-    if (originalItem && !canonicalAlreadyMissing) {
-      restoreRemovedItem(entry.tradeId, originalItem, "장비 제외 실패: " + message);
+    if (isMissingScheduleRowError_(message)) {
+      try {
+        await finalizeAlreadyMissingScheduleItem_(entry.tradeId, entry.scheduleId, entry.equipName);
+        finishTradeSave(entry.tradeId, saveId, "saved", "이미 제외된 품목 정리됨");
+        return;
+      } catch (projectionError) {
+        const projectionMessage = projectionError instanceof Error ? projectionError.message : String(projectionError);
+        if (originalItem) restoreRemovedItem(entry.tradeId, originalItem, "장비 제외 실패: " + projectionMessage);
+        finishTradeSave(entry.tradeId, saveId, "error", `⚠️ 장비 제외 실패 — ${projectionMessage}`);
+        return;
+      }
     }
+    console.error("[write-back] removeEquip 실패:", error);
+    if (originalItem) restoreRemovedItem(entry.tradeId, originalItem, "장비 제외 실패: " + message);
     finishTradeSave(entry.tradeId, saveId, "error", `⚠️ 장비 제외 실패 — ${message}`);
-    if (!originalItem || canonicalAlreadyMissing) await reconcileRemovedEquipmentCanonical_(entry.tradeId);
+    if (!originalItem) await reconcileRemovedEquipmentCanonical_(entry.tradeId);
   } finally {
     removeEquipmentReplayInFlight.delete(key);
   }
@@ -2552,9 +2579,18 @@ export function setItemCheckout(tradeId: string, scheduleId: string, next: Check
   // 원장 쓰기가 꺼져 있으면 제외를 앱 상태로만 숨기지 않는다.
 }
 const itemNameTargets: Record<string, string | undefined> = {};
-export async function setItemName(tradeId: string, scheduleId: string, name: string): Promise<boolean> {
+export async function setItemName(
+  tradeId: string,
+  scheduleId: string,
+  name: string,
+  options?: { exactName?: boolean; offCatalog?: boolean },
+): Promise<boolean> {
   const clean = name.trim();
   if (!clean) return false;
+  const originalName = state.trades
+    .find((trade) => trade.tradeId === tradeId)
+    ?.equipments.find((item) => item.scheduleId === scheduleId)
+    ?.name ?? clean;
   if (pendingRemoveEquipmentTrades.has(tradeId)) {
     showTransientError("⚠️ 장비 제외가 끝난 뒤 장비명을 바꿔주세요");
     return false;
@@ -2579,6 +2615,7 @@ export async function setItemName(tradeId: string, scheduleId: string, name: str
         name: clean,
         setName: e.setName && e.setName.trim() === e.name.trim() ? clean : e.setName,
         category: categoryOf(clean) ?? e.category,
+        offCatalog: options?.offCatalog ?? e.offCatalog,
       })),
       returnCounts,
       returnDone: false,
@@ -2590,7 +2627,7 @@ export async function setItemName(tradeId: string, scheduleId: string, name: str
 
   try {
     const res = isSupabase
-      ? await gasMutation("updateEquipName", { tid: tradeId, scheduleId, equipName: clean })
+      ? await gasMutation("updateEquipName", { tid: tradeId, scheduleId, equipName: clean, exactName: options?.exactName === true })
       : null;
     // 같은 입력에서 더 최신 장비명이 이미 들어왔다면 옛 응답을 화면에 다시 칠하지 않는다.
     if (itemNameTargets[itemNameKey] !== clean) return true;
@@ -2616,6 +2653,7 @@ export async function setItemName(tradeId: string, scheduleId: string, name: str
             name: nextName,
             setName: e.setName && e.setName.trim() === e.name.trim() ? nextName : e.setName,
             category: categoryOf(nextName) ?? e.category,
+            offCatalog: options?.offCatalog ?? e.offCatalog,
           };
         }),
         returnCounts,
@@ -2630,6 +2668,16 @@ export async function setItemName(tradeId: string, scheduleId: string, name: str
   } catch (e) {
     if (itemNameTargets[itemNameKey] !== clean) return true;
     delete itemNameTargets[itemNameKey];
+    const message = e instanceof Error ? e.message : String(e);
+    if (isMissingScheduleRowError_(message)) {
+      try {
+        await finalizeAlreadyMissingScheduleItem_(tradeId, scheduleId, originalName);
+        flashSave(tradeId);
+        return true;
+      } catch (projectionError) {
+        console.error("[write-back] 유령 장비 정리 실패:", projectionError);
+      }
+    }
     console.error("[write-back] 장비명 변경 실패:", e);
     showTransientError("⚠️ 장비명 저장에 실패했습니다. 다시 입력해주세요");
     void reconcileCompletionMutationCanonical_(tradeId);

@@ -43,8 +43,8 @@ assert.match(
 );
 assert.match(
   store,
-  /if \(originalItem && !canonicalAlreadyMissing\)[\s\S]*restoreRemovedItem\(entry\.tradeId,\s*originalItem,\s*"장비 제외 실패:/,
-  'terminal exclude failure must restore the original item instead of silently lying to the operator'
+  /if \(isMissingScheduleRowError_\(message\)\)[\s\S]*await finalizeAlreadyMissingScheduleItem_\(entry\.tradeId, entry\.scheduleId, entry\.equipName\)[\s\S]*return;[\s\S]*if \(originalItem\) restoreRemovedItem\(entry\.tradeId, originalItem, "장비 제외 실패:/,
+  'an already-missing canonical row must converge as removed, while other terminal failures still restore the original item'
 );
 
 assert.match(
