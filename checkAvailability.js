@@ -13668,6 +13668,26 @@ function planMergedScheduleRows_(allData, reqID, mergeTargetTID, existingSchedul
   };
 }
 
+/** 확인요청 합침은 아직 반출 전인 활성 예약에만 허용한다. */
+function isRegisterMergeEligibleContractStatus_(status) {
+  return String(status || '').trim() === '예약';
+}
+
+/** 동일 고객·일정의 기존 활성 예약인지 한 행 단위로 판정한다. */
+function isRegisterMergeCandidate_(scheduleRow, candidateContract, expected) {
+  if (!scheduleRow || !candidateContract || !expected) return false;
+  if (!isRegisterMergeEligibleContractStatus_(candidateContract.status)) return false;
+  if (!String(scheduleRow[1] || '').trim()) return false;
+  if (String(scheduleRow[12] || '').trim() !== String(expected.customerName || '').trim()) return false;
+  if (String(scheduleRow[5] || '').trim() !== String(expected.checkoutDate || '').trim()) return false;
+  if (String(scheduleRow[6] || '').trim() !== String(expected.checkoutTime || '').trim()) return false;
+  if (String(scheduleRow[7] || '').trim() !== String(expected.returnDate || '').trim()) return false;
+  if (String(scheduleRow[8] || '').trim() !== String(expected.returnTime || '').trim()) return false;
+  var requestPhoneKey = String(expected.requestPhoneKey || '').trim();
+  var candidatePhoneKey = String(candidateContract.phone || '').trim();
+  return !!requestPhoneKey && !!candidatePhoneKey && requestPhoneKey === candidatePhoneKey;
+}
+
 function registerByReqID(sheet, triggerRow, registerOptions) {
   registerOptions = registerOptions || {};
   var _regPerfT0 = Date.now(); // 계측: 총시간/락대기/알림톡/큐 소진 (perfLog_로 기록)
@@ -13942,28 +13962,37 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     var mergeTargetScheduleRows = [];
     if (예약자명 && 반출일str && 반납일str) {
       var _mergeRequestPhoneKey = _confirmRequestPhoneKey_(연락처);
-      var _mergePhoneByTid = {};
+      var _mergeContractByTid = {};
       var _mergeContractLastRow = contractSheet.getLastRow();
-      if (_mergeRequestPhoneKey && _mergeContractLastRow >= 2) {
-        contractSheet.getRange(2, 1, _mergeContractLastRow - 1, 3).getDisplayValues().forEach(function(row) {
+      if (_mergeContractLastRow >= 2) {
+        contractSheet.getRange(2, 1, _mergeContractLastRow - 1, 10).getDisplayValues().forEach(function(row) {
           var contractTid = String(row[0] || '').trim();
-          if (contractTid) _mergePhoneByTid[contractTid] = _confirmRequestPhoneKey_(row[2]);
+          if (!contractTid) return;
+          _mergeContractByTid[contractTid] = {
+            phone: _confirmRequestPhoneKey_(row[2]),
+            status: String(row[9] || '').trim()
+          };
         });
       }
       var _sLR = schedSheet.getLastRow();
       if (_sLR >= 2) {
         var _sData = schedSheet.getRange(2, 1, _sLR - 1, 13).getDisplayValues();
+        var _mergeExpected = {
+          customerName: 예약자명,
+          checkoutDate: 반출일str,
+          checkoutTime: 반출시간str,
+          returnDate: 반납일str,
+          returnTime: 반납시간str,
+          requestPhoneKey: _mergeRequestPhoneKey
+        };
         for (var si = 0; si < _sData.length; si++) {
-          if (_sData[si][12] && _sData[si][12].trim() === 예약자명.trim()
-              && _sData[si][5] === 반출일str && _sData[si][6] === 반출시간str
-              && _sData[si][7] === 반납일str && _sData[si][8] === 반납시간str
-              && _sData[si][1]) {
-            var _candidateTid = String(_sData[si][1]).trim();
-            var _candidatePhoneKey = _mergePhoneByTid[_candidateTid] || '';
-            if (!_mergeRequestPhoneKey || !_candidatePhoneKey || _candidatePhoneKey !== _mergeRequestPhoneKey) continue;
-            mergeTargetTID = _candidateTid;
-            break;
-          }
+          var _candidateTid = String(_sData[si][1] || '').trim();
+          var _candidateContract = _mergeContractByTid[_candidateTid];
+          // 취소/반출/반납완료 거래나 계약마스터 없는 고아 스케줄은 앱에서 숨겨질 수 있다.
+          // 여기에 합치면 신규 계약 행을 만들지 않아 예약이 통째로 사라진 것처럼 보인다.
+          if (!isRegisterMergeCandidate_(_sData[si], _candidateContract, _mergeExpected)) continue;
+          mergeTargetTID = _candidateTid;
+          break;
         }
         if (mergeTargetTID) {
           mergeTargetScheduleRows = _sData.filter(function(row) {
