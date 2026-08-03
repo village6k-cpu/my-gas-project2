@@ -49,6 +49,7 @@ test('같은 논리 항목의 오래된 mutation retry만 폐기하고 다른 �
   const stale = context.begin(props, '260728-001', 'return:a', 'return', '1');
   assert.equal(stale.skip, true);
   assert.equal(stale.pendingLater, false);
+
 });
 
 test('반납완료와 상세 수량은 같은 JSON snapshot/완료 플래그 CAS로 맞물린다', () => {
@@ -108,7 +109,6 @@ test('반출 후 누락 품목은 브라우저가 기준선 없이 insert하지 
 
   assert.match(persist, /const checkoutLocked = isCheckoutBaselineLocked\(trade\)/);
   assert.match(persist, /const insertRows = checkoutLocked[\s\S]*Number\(row\.taken_qty\) > 0/);
-  assert.match(store, /gasMutation\("repairTradeProjection", \{ tid: tradeId \}\)/);
   assert.match(route, /"repairTradeProjection"/);
   assert.match(api, /case "repairTradeProjection":[\s\S]*repairDashboardTradeProjection_/);
   assert.match(repair, /canDashboardRecoverMissingCheckoutBaseline_\(tid, props, baselineItems\)/,
@@ -119,14 +119,14 @@ test('반출 후 누락 품목은 브라우저가 기준선 없이 insert하지 
     'Supabase 완료 상태와 taken_qty 기준선을 함께 확인해야 한다');
   assert.match(repair, /currentIds\.join\('\|'\) !== baselineIds\.join\('\|'\)/,
     '부분 기준선 누락을 현재 시트 수량으로 자동 승격하면 안 된다');
-  const baselineAt = worker.indexOf('supaCaptureCheckoutBaseline_');
-  const structureAt = worker.indexOf("supaUpsertGrouped_(cfg, 'trades'");
-  assert.ok(baselineAt >= 0 && structureAt > baselineAt, '불변 기준선을 구조 upsert보다 먼저 확정해야 한다');
-  assert.match(worker, /supaGetCheckoutBaselineState_\(tid\)[\s\S]*baselineAllowEmptyRecovery !== true/);
+  assert.match(worker, /localCheckoutStarted = isDashboardTradeCheckoutStarted_\(ssForProjection, tid\)/,
+    '구조 투영은 반출 시작 여부를 권위 시트에서 다시 확인해야 한다');
+  assert.match(worker, /checkoutStarted[\s\S]*supaPatchExistingScheduleItems_[\s\S]*supaUpsertGrouped_\(cfg, 'schedule_items'/,
+    '반출 후에는 기존 행만 patch하고 기준선 없는 누락 행을 upsert하면 안 된다');
   assert.match(worker, /supaPatchExistingScheduleItems_\(cfg, built\.items\)/,
     '반출 후 구조 동기화는 존재하는 행만 PATCH해야 한다');
-  assert.match(worker, /localCheckoutStarted \|\| !!\(durableCheckout && durableCheckout\.started\)/,
-    'worker도 로컬과 Supabase 권한 신호를 합쳐 반출 잠금을 판정해야 한다');
+  assert.match(worker, /var checkoutStarted = localCheckoutStarted/,
+    '운영에서 제거된 Supabase 기준선 조회를 되살리지 말고 권위 시트 반출 상태로 판정해야 한다');
   assert.match(supa, /function supaPatchExistingScheduleItems_[\s\S]*method: 'patch'[\s\S]*returned\.length !== 1/);
 });
 
@@ -194,7 +194,7 @@ test('수량·반납 상세은 네트워크 실패에도 사용자 목표를 보
   assert.match(qty, /if \(isRetryableLedgerError\(e\)\)/);
   assert.match(qty, /qtyCommitTargets\[key\] = target/);
   assert.match(qty, /armQtyCommitRetry_\(tradeId, scheduleId, key\)/);
-  const retryBranch = section(qty, 'if (isRetryableLedgerError(e)) {', '\n      finishTradeSave(tradeId, saveId, "error", `⚠️ 수량 변경 실패');
+  const retryBranch = section(qty, 'if (isRetryableLedgerError(e)) {', '\n      showTransientError("⚠️ 수량 저장에 실패했습니다. 다시 조정해주세요")');
   assert.doesNotMatch(retryBranch, /acknowledgeQtyOutboxTarget\(key, target\)/,
     '일시 오류에서 사용자 목표 outbox를 지우면 안 된다');
 

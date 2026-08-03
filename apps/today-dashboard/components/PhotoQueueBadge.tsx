@@ -26,6 +26,8 @@ export function PhotoQueueBadge() {
   const summary = usePhotoQueueSummary();
   const [open, setOpen] = useState(false);
   const [jobs, setJobs] = useState<FailedPhotoJobView[]>([]);
+  const [busyQueueId, setBusyQueueId] = useState("");
+  const [error, setError] = useState("");
 
   if (!summary.failed && !summary.uploading) return null;
 
@@ -35,6 +37,33 @@ export function PhotoQueueBadge() {
   };
 
   const refresh = () => setJobs(listFailedPhotoJobs());
+
+  const retryJob = async (job: FailedPhotoJobView) => {
+    setBusyQueueId(job.queueId);
+    setError("");
+    try {
+      await retryTradePhotoUpload(job.tradeId, job.queueId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "사진 재시도에 실패했습니다");
+    } finally {
+      setBusyQueueId("");
+      refresh();
+    }
+  };
+
+  const discardJob = async (job: FailedPhotoJobView) => {
+    if (!window.confirm("이 사진 원본을 폐기할까요?\n폐기하면 이 기기에서 복구할 수 없습니다.")) return;
+    setBusyQueueId(job.queueId);
+    setError("");
+    try {
+      await discardTradePhotoUpload(job.tradeId, job.queueId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "사진 임시 보관본을 폐기하지 못했습니다");
+    } finally {
+      setBusyQueueId("");
+      refresh();
+    }
+  };
 
   return (
     <>
@@ -69,6 +98,12 @@ export function PhotoQueueBadge() {
               </button>
             </div>
 
+            {error && (
+              <div className="mt-3 rounded-xl bg-attention-bg px-3 py-2 text-[12px] font-semibold text-attention-fg">
+                {error}
+              </div>
+            )}
+
             <div className="mt-3 space-y-2">
               {jobs.length === 0 && (
                 <div className="rounded-lg bg-paper/70 px-3 py-4 text-center text-[12.5px] text-ink-mute">
@@ -97,26 +132,20 @@ export function PhotoQueueBadge() {
                       {!job.permanent && (
                         <button
                           type="button"
-                          onClick={() => {
-                            retryTradePhotoUpload(job.tradeId, job.queueId);
-                            refresh();
-                          }}
+                          onClick={() => { void retryJob(job); }}
+                          disabled={busyQueueId === job.queueId}
                           className="tap rounded-lg bg-brand-50 px-2.5 py-1.5 text-[12px] font-bold text-brand-700 ring-1 ring-brand-200"
                         >
-                          재시도
+                          {busyQueueId === job.queueId ? "처리 중…" : "재시도"}
                         </button>
                       )}
                       <button
                         type="button"
-                        onClick={() => {
-                          if (window.confirm("이 사진 원본을 폐기할까요?\n폐기하면 이 기기에서 복구할 수 없습니다.")) {
-                            discardTradePhotoUpload(job.tradeId, job.queueId);
-                            refresh();
-                          }
-                        }}
+                        onClick={() => { void discardJob(job); }}
+                        disabled={busyQueueId === job.queueId}
                         className="tap rounded-lg bg-attention-bg px-2.5 py-1.5 text-[12px] font-bold text-attention-fg ring-1 ring-attention-ring"
                       >
-                        폐기
+                        {busyQueueId === job.queueId ? "처리 중…" : "폐기"}
                       </button>
                     </div>
                   </div>

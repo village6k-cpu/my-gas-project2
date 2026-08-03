@@ -171,6 +171,7 @@ function hasTradePendingExcludingRemove_(tradeId: string): boolean {
     pendingReturnCountTrades.has(tradeId) ||
     !!state.savingTrades[tradeId] ||
     Object.keys(itemCheckTargets).some((key) => key.startsWith(`${tradeId}|`)) ||
+    Object.keys(itemNameMutationIds).some((key) => key.startsWith(`${tradeId}|`) && itemNameMutationIds[key] !== undefined) ||
     Object.keys(qtyCommitTargets).some((key) => key.startsWith(`${tradeId}|`))
   );
 }
@@ -2578,7 +2579,92 @@ export function setItemCheckout(tradeId: string, scheduleId: string, next: Check
   else if (final === "pending") queueItemCheckWrite(tradeId, scheduleId, false, previousCheckoutState === "taken");
   // 원장 쓰기가 꺼져 있으면 제외를 앱 상태로만 숨기지 않는다.
 }
+type ItemNameOutboxEntry = {
+  tradeId: string;
+  scheduleId: string;
+  name: string;
+  exactName: boolean;
+  offCatalog?: boolean;
+  originalName: string;
+  previousNames: string[];
+  mutationId: string;
+  createdAt: number;
+};
+
 const itemNameTargets: Record<string, string | undefined> = {};
+const itemNameMutationIds: Record<string, string | undefined> = {};
+const itemNameCommitTargets: Record<string, ItemNameOutboxEntry | undefined> = {};
+const itemNameCommitInFlight: Record<string, Promise<void> | undefined> = {};
+const itemNameCommitTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
+const itemNameCommitRetryTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
+const itemNameCommitRetryAttempts: Record<string, number | undefined> = {};
+const itemNameCommitFailures: Record<string, Error | undefined> = {};
+const itemNameExpectedPreviousNames: Record<string, string[] | undefined> = {};
+const ITEM_NAME_COMMIT_RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
+const ITEM_NAME_OUTBOX_KEY = "heybilly:item-name-outbox:v1";
+
+function readItemNameOutbox(): Record<string, ItemNameOutboxEntry> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(ITEM_NAME_OUTBOX_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const valid: Record<string, ItemNameOutboxEntry> = {};
+    for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
+      const entry = raw as Partial<ItemNameOutboxEntry> | null;
+      if (!entry || !entry.tradeId || !entry.scheduleId || !entry.name || !entry.mutationId) continue;
+      valid[key] = {
+        tradeId: String(entry.tradeId),
+        scheduleId: String(entry.scheduleId),
+        name: String(entry.name),
+        exactName: entry.exactName === true,
+        offCatalog: entry.offCatalog == null ? undefined : entry.offCatalog === true,
+        originalName: String(entry.originalName || entry.name),
+        previousNames: Array.from(new Set(
+          (Array.isArray(entry.previousNames) ? entry.previousNames : [entry.originalName || entry.name])
+            .map((name) => String(name || "").trim())
+            .filter(Boolean),
+        )).slice(-12),
+        mutationId: String(entry.mutationId),
+        createdAt: Number(entry.createdAt) || Date.now(),
+      };
+    }
+    return valid;
+  } catch {
+    return {};
+  }
+}
+
+function putItemNameOutboxTarget(key: string, entry: ItemNameOutboxEntry): boolean {
+  if (typeof window === "undefined") return false;
+  const outbox = readItemNameOutbox();
+  outbox[key] = entry;
+  try {
+    window.localStorage.setItem(ITEM_NAME_OUTBOX_KEY, JSON.stringify(outbox));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acknowledgeItemNameOutboxTarget(key: string, mutationId: string): void {
+  if (typeof window === "undefined") return;
+  const outbox = readItemNameOutbox();
+  if (outbox[key]?.mutationId !== mutationId) return;
+  delete outbox[key];
+  try {
+    if (Object.keys(outbox).length) window.localStorage.setItem(ITEM_NAME_OUTBOX_KEY, JSON.stringify(outbox));
+    else window.localStorage.removeItem(ITEM_NAME_OUTBOX_KEY);
+  } catch { /* noop */ }
+}
+
+function armItemNameCommit_(tradeId: string, scheduleId: string, key: string, delay = 0): void {
+  if (itemNameCommitTimers[key]) clearTimeout(itemNameCommitTimers[key]);
+  itemNameCommitTimers[key] = setTimeout(() => {
+    delete itemNameCommitTimers[key];
+    void commitQueuedItemName(tradeId, scheduleId, key);
+  }, delay);
+}
+
 export async function setItemName(
   tradeId: string,
   scheduleId: string,
@@ -2604,7 +2690,31 @@ export async function setItemName(
   // 입력 즉시 화면을 바꾼다. 서버 명령은 거래별 큐에서 순서대로 처리되므로
   // 원격 응답을 기다리는 동안 카드 전체를 savingTrades로 잠글 필요가 없다.
   const itemNameKey = `${tradeId}|${scheduleId}`;
+  const previousNames = Array.from(new Set([
+    ...(itemNameExpectedPreviousNames[itemNameKey] ?? []),
+    originalName,
+  ].map((name) => String(name || "").trim()).filter(Boolean))).slice(-12);
+  const entry: ItemNameOutboxEntry = {
+    tradeId,
+    scheduleId,
+    name: clean,
+    exactName: options?.exactName === true,
+    offCatalog: options?.offCatalog,
+    originalName,
+    previousNames,
+    mutationId: createLedgerMutationId("name"),
+    createdAt: Date.now(),
+  };
   itemNameTargets[itemNameKey] = clean;
+  itemNameMutationIds[itemNameKey] = entry.mutationId;
+  itemNameCommitTargets[itemNameKey] = entry;
+  itemNameExpectedPreviousNames[itemNameKey] = Array.from(new Set([...previousNames, clean])).slice(-12);
+  itemNameCommitRetryAttempts[itemNameKey] = 0;
+  delete itemNameCommitFailures[itemNameKey];
+  if (itemNameCommitRetryTimers[itemNameKey]) {
+    clearTimeout(itemNameCommitRetryTimers[itemNameKey]);
+    delete itemNameCommitRetryTimers[itemNameKey];
+  }
   mutateTrade(tradeId, (t) => {
     const returnCounts = { ...(t.returnCounts ?? {}) };
     delete returnCounts[scheduleId];
@@ -2623,65 +2733,201 @@ export async function setItemName(
       contractStatus: t.contractStatus === "반납완료" ? "반출" : t.contractStatus,
     };
   }, false);
-  flashSave(tradeId);
 
-  try {
-    const res = isSupabase
-      ? await gasMutation("updateEquipName", { tid: tradeId, scheduleId, equipName: clean, exactName: options?.exactName === true })
-      : null;
-    // 같은 입력에서 더 최신 장비명이 이미 들어왔다면 옛 응답을 화면에 다시 칠하지 않는다.
-    if (itemNameTargets[itemNameKey] !== clean) return true;
+  if (!isSupabase) {
+    delete itemNameCommitTargets[itemNameKey];
     delete itemNameTargets[itemNameKey];
-    if (res?.unchanged || !isSupabase) return true;
-    const canonicalName = String(res?.equipName || clean).trim();
-    const updates: { scheduleId: string; field?: string; newName?: string }[] =
-      res?.updatedItems ?? [{ scheduleId, field: "equipment", newName: canonicalName }];
-    const affectedIds = new Set(updates.map((item) => item.scheduleId).filter(Boolean));
-    affectedIds.add(scheduleId);
-    mutateTrade(tradeId, (t) => {
-      const returnCounts = { ...(t.returnCounts ?? {}) };
-      affectedIds.forEach((id) => delete returnCounts[id]);
-      return {
-        ...t,
-        equipments: t.equipments.map((e) => {
-          const update = updates.find((item) => item.scheduleId === e.scheduleId);
-          if (!update) return e;
-          const nextName = String(update.newName || canonicalName).trim();
-          if (update.field === "setName") return { ...e, setName: nextName };
-          return {
-            ...e,
-            name: nextName,
-            setName: e.setName && e.setName.trim() === e.name.trim() ? nextName : e.setName,
-            category: categoryOf(nextName) ?? e.category,
-            offCatalog: options?.offCatalog ?? e.offCatalog,
-          };
-        }),
-        returnCounts,
-        returnDone: false,
-        returnDoneAt: null,
-        contractStatus: t.contractStatus === "반납완료" ? (res?.contractStatus || "반출") : t.contractStatus,
-      };
-    });
-    await clearReturnCountsPersist(tradeId, [...affectedIds]);
-    await flushTradePersist(tradeId);
+    delete itemNameMutationIds[itemNameKey];
+    delete itemNameExpectedPreviousNames[itemNameKey];
+    flashSave(tradeId);
     return true;
-  } catch (e) {
-    if (itemNameTargets[itemNameKey] !== clean) return true;
-    delete itemNameTargets[itemNameKey];
-    const message = e instanceof Error ? e.message : String(e);
-    if (isMissingScheduleRowError_(message)) {
-      try {
-        await finalizeAlreadyMissingScheduleItem_(tradeId, scheduleId, originalName);
-        flashSave(tradeId);
-        return true;
-      } catch (projectionError) {
-        console.error("[write-back] 유령 장비 정리 실패:", projectionError);
-      }
-    }
-    console.error("[write-back] 장비명 변경 실패:", e);
-    showTransientError("⚠️ 장비명 저장에 실패했습니다. 다시 입력해주세요");
-    void reconcileCompletionMutationCanonical_(tradeId);
+  }
+
+  const durable = putItemNameOutboxTarget(itemNameKey, entry);
+  if (durable) {
+    flashSave(tradeId);
+    armItemNameCommit_(tradeId, scheduleId, itemNameKey);
+    return true;
+  }
+
+  // localStorage가 막힌 환경에서는 새로고침 후 재생을 약속할 수 없다. 이 드문 경우만
+  // 서버 ACK를 직접 기다려 조용한 유실을 막고, 실패하면 사용자가 즉시 알 수 있게 한다.
+  showTransientError("⚠️ 기기 임시저장 실패로 서버 저장을 직접 확인합니다");
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    itemNameCommitFailures[itemNameKey] = new Error("오프라인이며 기기 임시저장을 사용할 수 없습니다");
     return false;
+  }
+  await commitQueuedItemName(tradeId, scheduleId, itemNameKey);
+  return !itemNameCommitFailures[itemNameKey];
+}
+
+function applyEquipNameResult(
+  tradeId: string,
+  scheduleId: string,
+  target: ItemNameOutboxEntry,
+  res: any,
+): string[] {
+  const canonicalName = String(res?.equipName || target.name).trim();
+  const updates: { scheduleId: string; field?: string; newName?: string }[] =
+    res?.updatedItems ?? [{ scheduleId, field: "equipment", newName: canonicalName }];
+  const affectedIds = new Set(updates.map((item) => item.scheduleId).filter(Boolean));
+  affectedIds.add(scheduleId);
+  mutateTrade(tradeId, (t) => {
+    const returnCounts = { ...(t.returnCounts ?? {}) };
+    affectedIds.forEach((id) => delete returnCounts[id]);
+    return {
+      ...t,
+      equipments: t.equipments.map((e) => {
+        const update = updates.find((item) => item.scheduleId === e.scheduleId);
+        if (!update) return e;
+        const nextName = String(update.newName || canonicalName).trim();
+        if (update.field === "setName") return { ...e, setName: nextName };
+        return {
+          ...e,
+          name: nextName,
+          setName: e.setName && e.setName.trim() === e.name.trim() ? nextName : e.setName,
+          category: categoryOf(nextName) ?? e.category,
+          offCatalog: res?.stale === true ? e.offCatalog : (target.offCatalog ?? e.offCatalog),
+        };
+      }),
+      returnCounts,
+      returnDone: false,
+      returnDoneAt: null,
+      contractStatus: t.contractStatus === "반납완료" ? (res?.contractStatus || "반출") : t.contractStatus,
+    };
+  });
+  return [...affectedIds];
+}
+
+function armItemNameCommitRetry_(tradeId: string, scheduleId: string, key: string): void {
+  if (itemNameCommitRetryTimers[key]) clearTimeout(itemNameCommitRetryTimers[key]);
+  const attempt = itemNameCommitRetryAttempts[key] ?? 0;
+  itemNameCommitRetryAttempts[key] = attempt + 1;
+  const delay = ITEM_NAME_COMMIT_RETRY_DELAYS_MS[Math.min(attempt, ITEM_NAME_COMMIT_RETRY_DELAYS_MS.length - 1)] ?? 30_000;
+  itemNameCommitRetryTimers[key] = setTimeout(() => {
+    delete itemNameCommitRetryTimers[key];
+    delete itemNameCommitFailures[key];
+    void commitQueuedItemName(tradeId, scheduleId, key);
+  }, delay);
+}
+
+async function commitQueuedItemName(tradeId: string, scheduleId: string, key: string): Promise<void> {
+  if (itemNameCommitInFlight[key]) return;
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    armItemNameCommit_(tradeId, scheduleId, key, 15_000);
+    return;
+  }
+  const target = itemNameCommitTargets[key];
+  if (!target) return;
+  delete itemNameCommitTargets[key];
+  const task = (async () => {
+    let ledgerCommitted = false;
+    try {
+      const res = await gasMutation("updateEquipName", {
+        tid: tradeId,
+        scheduleId,
+        equipName: target.name,
+        exactName: target.exactName,
+        mutationId: target.mutationId,
+        previousNames: JSON.stringify(target.previousNames),
+      });
+      ledgerCommitted = true;
+      acknowledgeItemNameOutboxTarget(key, target.mutationId);
+      const confirmedName = String(res?.equipName || target.name).trim();
+      const confirmedPreviousNames = Array.from(new Set([
+        ...(itemNameExpectedPreviousNames[key] ?? target.previousNames),
+        confirmedName,
+      ].filter(Boolean))).slice(-12);
+      itemNameExpectedPreviousNames[key] = confirmedPreviousNames;
+      const newerTarget = itemNameCommitTargets[key];
+      if (newerTarget && newerTarget.mutationId !== target.mutationId) {
+        newerTarget.previousNames = confirmedPreviousNames;
+        putItemNameOutboxTarget(key, newerTarget);
+      }
+      // 같은 입력에서 더 최신 장비명이 이미 들어왔다면 옛 응답을 화면에 다시 칠하지 않는다.
+      if (itemNameMutationIds[key] !== target.mutationId || itemNameTargets[key] !== target.name) return;
+      const affectedIds = applyEquipNameResult(tradeId, scheduleId, target, res);
+      if (res?.stale === true) {
+        delete itemNameTargets[key];
+        delete itemNameMutationIds[key];
+        delete itemNameExpectedPreviousNames[key];
+        delete itemNameCommitFailures[key];
+        delete itemNameCommitRetryAttempts[key];
+        if (itemNameCommitRetryTimers[key]) {
+          clearTimeout(itemNameCommitRetryTimers[key]);
+          delete itemNameCommitRetryTimers[key];
+        }
+        showTransientError("⚠️ 다른 기기의 최신 장비명을 유지했습니다");
+        await reconcileCompletionMutationCanonical_(tradeId);
+        return;
+      }
+      await clearReturnCountsPersist(tradeId, affectedIds);
+      await flushTradePersist(tradeId);
+      delete itemNameTargets[key];
+      delete itemNameMutationIds[key];
+      delete itemNameExpectedPreviousNames[key];
+      delete itemNameCommitFailures[key];
+      delete itemNameCommitRetryAttempts[key];
+      if (itemNameCommitRetryTimers[key]) {
+        clearTimeout(itemNameCommitRetryTimers[key]);
+        delete itemNameCommitRetryTimers[key];
+      }
+      flashSave(tradeId);
+    } catch (e) {
+      if (ledgerCommitted) {
+        delete itemNameCommitFailures[key];
+        if (itemNameMutationIds[key] === target.mutationId) {
+          delete itemNameTargets[key];
+          delete itemNameMutationIds[key];
+          delete itemNameExpectedPreviousNames[key];
+        }
+        const latest = state.trades.find((t) => t.tradeId === tradeId);
+        if (latest) schedulePersistTrade(latest);
+        console.error("[supabase] 장비명 원장 확정 후 앱 투영 재시도:", e);
+        return;
+      }
+      if (itemNameMutationIds[key] !== target.mutationId || itemNameTargets[key] !== target.name) return;
+      const message = e instanceof Error ? e.message : String(e);
+      if (isMissingScheduleRowError_(message)) {
+        try {
+          await finalizeAlreadyMissingScheduleItem_(tradeId, scheduleId, target.originalName);
+          acknowledgeItemNameOutboxTarget(key, target.mutationId);
+          delete itemNameTargets[key];
+          delete itemNameMutationIds[key];
+          delete itemNameExpectedPreviousNames[key];
+          delete itemNameCommitFailures[key];
+          flashSave(tradeId);
+          return;
+        } catch (projectionError) {
+          console.error("[write-back] 유령 장비 정리 실패:", projectionError);
+        }
+      }
+      console.error("[write-back] 장비명 변경 실패:", e);
+      const terminalError = e instanceof Error ? e : new Error(message);
+      if (isRetryableLedgerError(e)) {
+        itemNameCommitTargets[key] = target;
+        itemNameCommitFailures[key] = terminalError;
+        armItemNameCommitRetry_(tradeId, scheduleId, key);
+        return;
+      }
+      acknowledgeItemNameOutboxTarget(key, target.mutationId);
+      delete itemNameTargets[key];
+      delete itemNameMutationIds[key];
+      delete itemNameExpectedPreviousNames[key];
+      itemNameCommitFailures[key] = terminalError;
+      delete itemNameCommitRetryAttempts[key];
+      showTransientError("⚠️ 장비명 저장에 실패했습니다. 다시 입력해주세요");
+      void reconcileCompletionMutationCanonical_(tradeId);
+    }
+  })();
+  itemNameCommitInFlight[key] = task;
+  try {
+    await task;
+  } finally {
+    if (itemNameCommitInFlight[key] === task) delete itemNameCommitInFlight[key];
+    if (itemNameCommitTargets[key] && !itemNameCommitRetryTimers[key]) {
+      void commitQueuedItemName(tradeId, scheduleId, key);
+    }
   }
 }
 /** GAS updateEquipQty 응답(updatedItems, 세트 비례 조정 포함)을 로컬 상태에 정본 반영한다. */
@@ -3183,10 +3429,12 @@ function replayDurableMutationOutboxes(): void {
   durableMutationOutboxesReplayed = true;
   ensureDurableMutationOnlineResume_();
   const returnOutbox = readReturnCountOutbox();
+  const itemNameOutbox = readItemNameOutbox();
   const qtyOutbox = readQtyOutbox();
   const itemCheckOutbox = readItemCheckOutbox();
   const noteOutbox = readTradeNoteOutbox_();
   const returnTradesToArm = new Set<string>();
+  const itemNameKeysToArm: Array<{ tradeId: string; scheduleId: string; key: string }> = [];
   const qtyKeysToArm: Array<{ tradeId: string; scheduleId: string; key: string }> = [];
   const itemCheckTradesToArm = new Set<string>();
   const noteTradesToArm = new Set<string>();
@@ -3219,6 +3467,39 @@ function replayDurableMutationOutboxes(): void {
       }
       nextTrade = { ...nextTrade, returnCounts };
       returnTradesToArm.add(trade.tradeId);
+      changed = true;
+    }
+
+    for (const [key, entry] of Object.entries(itemNameOutbox)) {
+      if (entry.tradeId !== trade.tradeId || !key.startsWith(`${trade.tradeId}|`)) continue;
+      const item = nextTrade.equipments.find((candidate) => candidate.scheduleId === entry.scheduleId);
+      if (!item) {
+        acknowledgeItemNameOutboxTarget(key, entry.mutationId);
+        continue;
+      }
+      itemNameTargets[key] = entry.name;
+      itemNameMutationIds[key] = entry.mutationId;
+      itemNameCommitTargets[key] = entry;
+      itemNameExpectedPreviousNames[key] = Array.from(new Set([...entry.previousNames, entry.name])).slice(-12);
+      itemNameCommitRetryAttempts[key] = 0;
+      delete itemNameCommitFailures[key];
+      const returnCounts = { ...(nextTrade.returnCounts ?? {}) };
+      delete returnCounts[entry.scheduleId];
+      nextTrade = {
+        ...nextTrade,
+        equipments: nextTrade.equipments.map((candidate) => candidate.scheduleId !== entry.scheduleId ? candidate : ({
+          ...candidate,
+          name: entry.name,
+          setName: candidate.setName && candidate.setName.trim() === candidate.name.trim() ? entry.name : candidate.setName,
+          category: categoryOf(entry.name) ?? candidate.category,
+          offCatalog: entry.offCatalog ?? candidate.offCatalog,
+        })),
+        returnCounts,
+        returnDone: false,
+        returnDoneAt: null,
+        contractStatus: nextTrade.contractStatus === "반납완료" ? "반출" : nextTrade.contractStatus,
+      };
+      itemNameKeysToArm.push({ tradeId: trade.tradeId, scheduleId: entry.scheduleId, key });
       changed = true;
     }
 
@@ -3312,6 +3593,9 @@ function replayDurableMutationOutboxes(): void {
       if (latest) void enqueueTradeFieldPersist(tradeId, latest).catch(() => {});
     }, nextReplayDelay());
   });
+  itemNameKeysToArm.forEach(({ tradeId, scheduleId, key }) => {
+    armItemNameCommit_(tradeId, scheduleId, key, nextReplayDelay());
+  });
   qtyKeysToArm.forEach(({ tradeId, scheduleId, key }) => {
     if (qtyCommitTimers[key]) clearTimeout(qtyCommitTimers[key]);
     qtyCommitTimers[key] = setTimeout(() => {
@@ -3347,6 +3631,16 @@ function ensureDurableMutationOnlineResume_(): void {
     });
 
     const qtyKeys = Object.keys(qtyCommitTargets).filter((key) => qtyCommitTargets[key] !== undefined);
+    const itemNameKeys = Object.keys(itemNameCommitTargets).filter((key) => itemNameCommitTargets[key] !== undefined);
+    itemNameKeys.forEach((key) => {
+      if (itemNameCommitRetryTimers[key]) clearTimeout(itemNameCommitRetryTimers[key]);
+      delete itemNameCommitRetryTimers[key];
+      delete itemNameCommitFailures[key];
+      itemNameCommitRetryAttempts[key] = 0;
+      const entry = itemNameCommitTargets[key];
+      if (entry) void commitQueuedItemName(entry.tradeId, entry.scheduleId, key);
+    });
+
     qtyKeys.forEach((key) => {
       if (qtyCommitRetryTimers[key]) clearTimeout(qtyCommitRetryTimers[key]);
       delete qtyCommitRetryTimers[key];
@@ -4656,7 +4950,8 @@ export function getPhotoPreview(queueId: string | undefined): string | undefined
   return queueId ? localPhotoPreviews.get(queueId) : undefined;
 }
 
-// 사진은 압축 즉시 화면에 반영하고, 실제 전송은 photoUploadQueue가 뒤에서 처리한다(실패 시 재시도).
+// 사진은 기기 내구 보존을 확인한 직후 화면에 반영하고,
+// 실제 전송은 photoUploadQueue가 뒤에서 처리한다(실패 시 재시도).
 export async function uploadTradePhoto(tradeId: string, phase: Phase, file: File): Promise<void> {
   if (!writeBackEnabled) throw new Error(writeBackDisabledReason);
   const upload = await prepareDashboardPhotoUpload_(file);
@@ -4670,8 +4965,7 @@ export async function uploadTradePhoto(tradeId: string, phase: Phase, file: File
     status: "uploading",
     queueId,
   };
-  mutateTrade(tradeId, (t) => ({ ...t, photos: mergePhotos(t.photos, [optimistic]) }));
-  await enqueuePhotoUpload({
+  const enqueueResult = await enqueuePhotoUpload({
     queueId,
     tradeId,
     phase,
@@ -4681,21 +4975,25 @@ export async function uploadTradePhoto(tradeId: string, phase: Phase, file: File
     createdAt: Date.now(),
     attempts: 0,
   });
+  // IndexedDB가 막힌 드문 환경은 위 호출에서 서버 ACK까지 확인했다.
+  // 이미 onSuccess가 서버 사진을 그렸으므로 임시 타일을 다시 추가하지 않는다.
+  if (enqueueResult === "completed") return;
+  mutateTrade(tradeId, (t) => ({ ...t, photos: mergePhotos(t.photos, [optimistic]) }));
 }
 
-export function retryTradePhotoUpload(tradeId: string, queueId: string): void {
+export async function retryTradePhotoUpload(tradeId: string, queueId: string): Promise<void> {
   mutateTrade(tradeId, (t) => ({
     ...t,
     photos: t.photos.map((p) => (p.queueId === queueId ? { ...p, status: "uploading" as const } : p)),
   }));
-  retryPhotoUpload(queueId);
+  await retryPhotoUpload(queueId);
 }
 
-export function discardTradePhotoUpload(tradeId: string, queueId: string): void {
+export async function discardTradePhotoUpload(tradeId: string, queueId: string): Promise<void> {
+  await discardPhotoUpload(queueId);
   localPhotoPreviews.delete(queueId);
   resumedPhotoJobs.delete(queueId);
   mutateTrade(tradeId, (t) => ({ ...t, photos: t.photos.filter((p) => p.queueId !== queueId) }));
-  void discardPhotoUpload(queueId);
 }
 
 /** 서버에 저장된 사진 1장만 삭제한다. GAS 성공 전에는 타일을 제거하지 않는다. */
@@ -4753,6 +5051,13 @@ function sendQueuedPhoto_(job: PhotoUploadJob): Promise<unknown> {
     if (res?.skipped) {
       throw Object.assign(new Error("사진 업로드 쓰기 경로가 비활성화되어 있습니다"), { permanent: true });
     }
+    const payload = (res?.result && typeof res.result === "object") ? res.result : res;
+    const photo = payload?.photo;
+    if (payload?.success !== true || !photo?.fileId || !photo?.sheetValue) {
+      // HTTP 200/빈 JSON도 GAS 실행이 끝났는지는 알 수 없다. 원본 큐를 지우지 않고
+      // 같은 clientKey로 재확인해야 Drive/시트 부분 성공을 사진 유실로 오인하지 않는다.
+      throw new GasMutationError("사진 저장 완료 메타데이터를 확인하지 못했습니다", true, true);
+    }
     return res;
   });
 }
@@ -4777,9 +5082,19 @@ if (typeof window !== "undefined") {
       if (willRetry) return;
       mutateTrade(job.tradeId, (t) => ({
         ...t,
-        photos: t.photos.map((p) =>
-          p.queueId === job.queueId ? { ...p, status: "failed" as const, memo: message } : p
-        ),
+        photos: t.photos.some((p) => p.queueId === job.queueId)
+          ? t.photos.map((p) =>
+              p.queueId === job.queueId ? { ...p, status: "failed" as const, memo: message } : p
+            )
+          : mergePhotos(t.photos, [{
+              id: job.queueId,
+              phase: job.phase,
+              swatch: photoSwatch(job.phase),
+              label: `${photoLabel(job.phase)} 전송 실패`,
+              status: "failed" as const,
+              queueId: job.queueId,
+              memo: message,
+            }]),
       }));
     },
   });

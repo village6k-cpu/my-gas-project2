@@ -33,10 +33,13 @@ const DB_NAME = "village-photo-uploads";
 const DB_STORE = "jobs";
 const MAX_ATTEMPTS = 5;
 const RETRY_DELAYS_MS = [3_000, 8_000, 20_000, 60_000];
+const TRANSIENT_RETRY_MS = 60_000;
 
 let handlers: PhotoUploadHandlers | null = null;
 const jobs = new Map<string, PhotoUploadJob>();
 const nextAttemptAt = new Map<string, number>();
+const directSendJobs = new Set<string>();
+const durableJobs = new Set<string>();
 
 // 큐 변화(추가/성공/실패/재시도/폐기/부활)를 UI 배지에 알린다 — 거래가 화면 윈도우
 // 밖으로 나가도 실패 잡이 보이도록 전역 요약을 구독할 수 있게 한다.
@@ -89,38 +92,40 @@ function openDb(): Promise<IDBDatabase | null> {
   });
 }
 
-async function idbWrite(job: PhotoUploadJob): Promise<void> {
+async function idbWrite(job: PhotoUploadJob): Promise<boolean> {
   const db = await openDb();
-  if (!db) return;
-  await new Promise<void>((resolve) => {
+  if (!db) return false;
+  const written = await new Promise<boolean>((resolve) => {
     try {
       const tx = db.transaction(DB_STORE, "readwrite");
       tx.objectStore(DB_STORE).put(job);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-      tx.onabort = () => resolve();
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
     } catch {
-      resolve();
+      resolve(false);
     }
   });
   db.close();
+  return written;
 }
 
-async function idbDelete(queueId: string): Promise<void> {
+async function idbDelete(queueId: string): Promise<boolean> {
   const db = await openDb();
-  if (!db) return;
-  await new Promise<void>((resolve) => {
+  if (!db) return false;
+  const deleted = await new Promise<boolean>((resolve) => {
     try {
       const tx = db.transaction(DB_STORE, "readwrite");
       tx.objectStore(DB_STORE).delete(queueId);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-      tx.onabort = () => resolve();
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
     } catch {
-      resolve();
+      resolve(false);
     }
   });
   db.close();
+  return deleted;
 }
 
 async function idbReadAll(): Promise<PhotoUploadJob[]> {
@@ -142,12 +147,12 @@ async function idbReadAll(): Promise<PhotoUploadJob[]> {
 
 function readyJobs(now: number): PhotoUploadJob[] {
   return Array.from(jobs.values())
-    .filter((job) => job.attempts < MAX_ATTEMPTS && (nextAttemptAt.get(job.queueId) ?? 0) <= now)
+    .filter((job) => !directSendJobs.has(job.queueId) && job.attempts < MAX_ATTEMPTS && (nextAttemptAt.get(job.queueId) ?? 0) <= now)
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 
 function scheduleWake(): void {
-  const pending = Array.from(jobs.values()).filter((job) => job.attempts < MAX_ATTEMPTS);
+  const pending = Array.from(jobs.values()).filter((job) => !directSendJobs.has(job.queueId) && job.attempts < MAX_ATTEMPTS);
   if (!pending.length) return;
   const soonest = Math.min(...pending.map((job) => nextAttemptAt.get(job.queueId) ?? 0));
   // 오프라인이면 processQueue가 즉시 break하므로 250ms 타이머는 4Hz 공회전이 된다.
@@ -182,19 +187,32 @@ async function processQueue(): Promise<void> {
       const job = ready[0];
       try {
         const response = await handlers.send(job);
+        // 성공 UI 반영까지 끝나기 전에 원본을 지우면 handler 예외 한 번으로 사진이 유실된다.
+        handlers.onSuccess(job, response);
+        const deleted = await idbDelete(job.queueId);
         jobs.delete(job.queueId);
         nextAttemptAt.delete(job.queueId);
-        await idbDelete(job.queueId);
-        handlers.onSuccess(job, response);
+        if (deleted) durableJobs.delete(job.queueId);
+        if (deleted === false) {
+          // 서버 clientKey 멱등성으로 다음 앱 시작의 잔존 잡 재생은 안전하다.
+          console.error("[photo-queue] 서버 저장 후 IndexedDB 작업 삭제 실패:", job.queueId);
+        }
         notifyQueueChange();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const permanent = Boolean((error as { permanent?: boolean } | null)?.permanent);
+        const detail = error as { permanent?: boolean; retryable?: boolean; outcomeUnknown?: boolean } | null;
+        const permanent = Boolean(detail?.permanent);
+        const transient = !permanent && (
+          detail?.retryable === true ||
+          detail?.outcomeUnknown === true ||
+          NETWORK_ERROR_RE.test(message)
+        );
         const offlineNow = typeof navigator !== "undefined" && navigator.onLine === false;
-        if (offlineNow && !permanent) {
-          // 전송 도중 연결이 끊긴 경우 — 시도 횟수를 태우지 않고 온라인 복귀를 기다린다
+        if ((offlineNow && !permanent) || transient) {
+          // BUSY·응답유실·네트워크 순단은 서버의 7분 durable claim보다 먼저
+          // 시도 횟수를 소모하지 않는다. 같은 clientKey와 원본을 보존한 채 다시 확인한다.
           job.lastError = message;
-          nextAttemptAt.set(job.queueId, Date.now() + 60_000);
+          nextAttemptAt.set(job.queueId, Date.now() + TRANSIENT_RETRY_MS);
           await idbWrite(job);
           handlers.onFailure(job, message, true);
           notifyQueueChange();
@@ -229,11 +247,46 @@ export function configurePhotoUploadQueue(next: PhotoUploadHandlers): void {
   void processQueue();
 }
 
-export async function enqueuePhotoUpload(job: PhotoUploadJob): Promise<void> {
+async function sendPhotoWithoutDurableStorage_(job: PhotoUploadJob): Promise<void> {
+  const activeHandlers = handlers;
+  if (!activeHandlers) {
+    jobs.delete(job.queueId);
+    directSendJobs.delete(job.queueId);
+    throw new Error("사진 임시 저장소를 열 수 없어 업로드를 시작하지 못했습니다");
+  }
+  try {
+    const response = await activeHandlers.send(job);
+    activeHandlers.onSuccess(job, response);
+    jobs.delete(job.queueId);
+    nextAttemptAt.delete(job.queueId);
+    directSendJobs.delete(job.queueId);
+    notifyQueueChange();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    job.attempts = MAX_ATTEMPTS;
+    job.lastError = `기기 임시 보관 실패 · 서버 저장 미확인: ${detail}`;
+    activeHandlers.onFailure(job, job.lastError, false);
+    notifyQueueChange();
+    throw new Error("기기에 사진을 임시 보관할 수 없고 서버 저장도 확인하지 못했습니다. 실패 타일에서 다시 시도해 주세요.");
+  }
+}
+
+export async function enqueuePhotoUpload(job: PhotoUploadJob): Promise<"queued" | "completed"> {
+  const persisted = await idbWrite(job);
   jobs.set(job.queueId, job);
-  await idbWrite(job);
   notifyQueueChange();
-  void processQueue();
+  if (!persisted) {
+    // Safari private mode·저장공간 부족처럼 IndexedDB가 막힌 경우에는 앱 종료 후
+    // 사라지는 백그라운드 잡으로 속이지 않고, 이 호출에서 서버 확정까지 직접 기다린다.
+    directSendJobs.add(job.queueId);
+    await sendPhotoWithoutDurableStorage_(job);
+    return "completed";
+  }
+  durableJobs.add(job.queueId);
+  // 호출자가 내구 보존 확인 후 로컬 타일을 먼저 그릴 수 있게
+  // 네트워크 전송은 다음 타이머 턴에서 시작한다.
+  setTimeout(() => { void processQueue(); }, 0);
+  return "queued";
 }
 
 /** 앱 재시작 시 IndexedDB에 남은 작업을 복원해 마저 올린다. */
@@ -250,27 +303,43 @@ export async function resumePhotoUploads(): Promise<PhotoUploadJob[]> {
       void idbWrite(job);
     }
     jobs.set(job.queueId, job);
+    durableJobs.add(job.queueId);
   }
   notifyQueueChange();
   void processQueue();
   return Array.from(jobs.values());
 }
 
-export function retryPhotoUpload(queueId: string): void {
+export async function retryPhotoUpload(queueId: string): Promise<void> {
   const job = jobs.get(queueId);
   if (!job) return;
   job.attempts = 0;
+  job.permanent = false;
   job.lastError = undefined;
   nextAttemptAt.delete(queueId);
-  void idbWrite(job);
   notifyQueueChange();
+  const persisted = await idbWrite(job);
+  if (!persisted) {
+    directSendJobs.add(job.queueId);
+    await sendPhotoWithoutDurableStorage_(job);
+    return;
+  }
+  durableJobs.add(job.queueId);
+  directSendJobs.delete(job.queueId);
   void processQueue();
 }
 
 export async function discardPhotoUpload(queueId: string): Promise<void> {
+  if (durableJobs.has(queueId)) {
+    const deleted = await idbDelete(queueId);
+    if (!deleted) {
+      throw new Error("사진 임시 보관본을 삭제하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+    }
+    durableJobs.delete(queueId);
+  }
   jobs.delete(queueId);
   nextAttemptAt.delete(queueId);
-  await idbDelete(queueId);
+  directSendJobs.delete(queueId);
   notifyQueueChange();
 }
 

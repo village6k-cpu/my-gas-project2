@@ -27,6 +27,7 @@ function photoSrc(photo: PhotoMeta): string | undefined {
 function PhotoTile({ tradeId, photo, onError }: { tradeId: string; photo: PhotoMeta; onError: (message: string) => void }) {
   const src = photoSrc(photo);
   const [deleting, setDeleting] = useState(false);
+  const [recovering, setRecovering] = useState(false);
 
   const deleteSavedPhoto = async () => {
     if (!window.confirm(`${phaseTitle(photo.phase)} 사진을 삭제할까요?\n삭제한 사진은 목록에서 제거됩니다.`)) return;
@@ -37,6 +38,29 @@ function PhotoTile({ tradeId, photo, onError }: { tradeId: string; photo: PhotoM
     } catch (err) {
       onError(err instanceof Error ? err.message : "사진 삭제에 실패했습니다");
       setDeleting(false);
+    }
+  };
+
+  const retryFailedPhoto = async () => {
+    setRecovering(true);
+    onError("");
+    try {
+      await retryTradePhotoUpload(tradeId, photo.queueId || "");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "사진 재시도에 실패했습니다");
+    } finally {
+      setRecovering(false);
+    }
+  };
+
+  const discardFailedPhoto = async () => {
+    setRecovering(true);
+    onError("");
+    try {
+      await discardTradePhotoUpload(tradeId, photo.queueId || "");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "사진 임시 보관본을 삭제하지 못했습니다");
+      setRecovering(false);
     }
   };
 
@@ -59,14 +83,16 @@ function PhotoTile({ tradeId, photo, onError }: { tradeId: string; photo: PhotoM
             <div className="flex gap-1">
               <button
                 type="button"
-                onClick={() => retryTradePhotoUpload(tradeId, photo.queueId || "")}
+                onClick={retryFailedPhoto}
+                disabled={recovering}
                 className="tap rounded-md bg-white px-2 py-1 text-[10px] font-bold text-ink"
               >
-                재시도
+                {recovering ? "처리 중…" : "재시도"}
               </button>
               <button
                 type="button"
-                onClick={() => discardTradePhotoUpload(tradeId, photo.queueId || "")}
+                onClick={discardFailedPhoto}
+                disabled={recovering}
                 className="tap rounded-md bg-white/25 px-2 py-1 text-[10px] font-bold text-white"
               >
                 삭제

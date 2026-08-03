@@ -7683,6 +7683,34 @@ function requestTradeProofIssue(tid, options) {
   return result;
 }
 
+/** Windows/Hermes 운영 화면에서 입력한 세금계산서 필드를 빌리지2.0에 그대로 전달한다. */
+function requestDirectTaxInvoice(tid, postBody, params) {
+  tid = String(tid || '').trim();
+  if (!tid) return { error: "tid 필요" };
+
+  var input = {};
+  [postBody || {}, params || {}].forEach(function(source) {
+    Object.keys(source).forEach(function(key) {
+      if (source[key] !== undefined) input[key] = source[key];
+    });
+  });
+
+  // 인증/action/거래ID는 callVillageOpsApi_가 넣고, 재무 앱이 허용한 typed field만 전달한다.
+  var payload = {};
+  payload.amount = input.amount;
+  payload.invoiceeCorpNum = input.invoiceeCorpNum;
+  payload.invoiceeCorpName = input.invoiceeCorpName;
+  payload.invoiceeCEOName = input.invoiceeCEOName;
+  payload.invoiceeEmail = input.invoiceeEmail;
+  payload.invoiceeAddr = input.invoiceeAddr;
+  payload.invoiceeBizType = input.invoiceeBizType;
+  payload.invoiceeBizClass = input.invoiceeBizClass;
+  payload.paymentMethod = input.paymentMethod;
+  payload.depositStatus = input.depositStatus;
+  payload.mutationId = input.mutationId || input.mutation_id || input.idempotencyKey;
+  return callVillageOpsApi_("issueTaxInvoice", tid, payload);
+}
+
 function validateTradeProofIssueReady_(tid) {
   tid = String(tid || '').trim();
   if (!tid) return { error: "tid 필요" };
@@ -9490,8 +9518,23 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
   var dryRun = options.dryRun === true || options.dryRun === 1 || options.dryRun === "1" || options.dryRun === "true";
   var exactName = options.exactName === true || options.exactName === 1 || options.exactName === "1" || options.exactName === "true";
   var skipAvailability = options.skipAvailability === true || options.skipAvailability === 1 || options.skipAvailability === "1" || options.skipAvailability === "true";
+  var mutationId = String(options.mutationId || options.mutation_id || '').trim();
+  var previousNamesInput = options.previousNames;
+  if (typeof previousNamesInput === 'string') {
+    try { previousNamesInput = JSON.parse(previousNamesInput); } catch (previousNamesParseErr) {
+      previousNamesInput = [previousNamesInput];
+    }
+  }
+  if (!Array.isArray(previousNamesInput)) previousNamesInput = [];
+  var previousNames = previousNamesInput.map(function(name) {
+    return String(name || '').trim();
+  }).filter(function(name, index, list) {
+    return !!name && list.indexOf(name) === index;
+  }).slice(-12);
   var structureProjectionQueued = false;
   var contractRegenQueued = false;
+  var nameMutationProps = null;
+  var nameMutationScope = 'equipmentName:' + scheduleId;
 
   var lock = null;
   if (!dryRun) {
@@ -9528,7 +9571,49 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
     var oldName = String(row[3] || "").trim();
     var qty = Number(row[4]) || 1;
     if (!oldName) return { error: "기존 장비명이 비어있습니다" };
-    if (oldName === newName) return { success: true, unchanged: true, equipName: newName, message: "변경 없음" };
+    if (!dryRun && mutationId) {
+      nameMutationProps = PropertiesService.getScriptProperties();
+      var nameMutation = beginDashboardMutation_(
+        nameMutationProps,
+        tid,
+        mutationId,
+        nameMutationScope,
+        scheduleId + '|' + newName
+      );
+      if (nameMutation.error) return { error: nameMutation.error };
+      if (nameMutation.skip) {
+        return {
+          success: true,
+          duplicate: true,
+          stale: nameMutation.stale === true,
+          unchanged: true,
+          scheduleId: scheduleId,
+          equipName: oldName,
+          updatedItems: [{ scheduleId: scheduleId, field: 'equipment', newName: oldName }],
+          message: "이미 처리되었거나 더 최신 장비명 변경이 있습니다"
+        };
+      }
+    }
+    if (!dryRun && mutationId && previousNames.length && oldName !== newName && previousNames.indexOf(oldName) === -1) {
+      if (nameMutationProps) {
+        commitDashboardMutation_(nameMutationProps, tid, mutationId, nameMutationScope);
+      }
+      return {
+        success: true,
+        stale: true,
+        unchanged: true,
+        scheduleId: scheduleId,
+        equipName: oldName,
+        updatedItems: [{ scheduleId: scheduleId, field: 'equipment', newName: oldName }],
+        message: "더 최신 장비명이 있어 오프라인 변경을 적용하지 않았습니다"
+      };
+    }
+    if (oldName === newName) {
+      if (!dryRun && mutationId && nameMutationProps) {
+        commitDashboardMutation_(nameMutationProps, tid, mutationId, nameMutationScope);
+      }
+      return { success: true, unchanged: true, equipName: newName, message: "변경 없음" };
+    }
 
     var startDT = parseDT(display[5], display[6]);
     var endDT = parseDT(display[7], display[8]);
@@ -9589,6 +9674,9 @@ function dashboardUpdateEquipmentName(tid, scheduleId, equipName, options) {
       contractRegenQueued = true;
       try { invalidateDashboardCache(); } catch (eCache) {}
       try { invalidateTimelineCache(); } catch (eTimeline) {}
+      if (mutationId && nameMutationProps) {
+        commitDashboardMutation_(nameMutationProps, tid, mutationId, nameMutationScope);
+      }
     }
 
     return {
