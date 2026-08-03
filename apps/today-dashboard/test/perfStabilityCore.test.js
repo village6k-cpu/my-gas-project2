@@ -162,7 +162,7 @@ test("자유입력 장비명은 유사 장비로 자동 치환하지 않고 원�
   assert.match(rename, /options\?: \{ exactName\?: boolean; offCatalog\?: boolean \}/);
   assert.match(
     rename,
-    /gasMutation\("updateEquipName", \{ tid: tradeId, scheduleId, equipName: clean, exactName: options\?\.exactName === true \}\)/,
+    /gasMutation\("updateEquipName", \{[\s\S]*equipName: target\.name[\s\S]*exactName: target\.exactName[\s\S]*mutationId: target\.mutationId/,
   );
 });
 
@@ -175,9 +175,9 @@ test("시트에서 이미 사라진 유령 행은 실패로 되살리지 않고 
   assert.match(remove, /finishTradeSave\(entry\.tradeId, saveId, "saved", "이미 제외된 품목 정리됨"\)/);
 
   const rename = section(store, "export async function setItemName", "/** GAS updateEquipQty");
-  const missingBranch = section(rename, "if (isMissingScheduleRowError_(message))", "\n    console.error");
+  const missingBranch = section(rename, "if (isMissingScheduleRowError_(message))", "\n      console.error(\"[write-back] 장비명 변경 실패:");
   assert.match(rename, /const originalName = state\.trades[\s\S]*scheduleId[\s\S]*\.name \?\? clean/);
-  assert.match(missingBranch, /await finalizeAlreadyMissingScheduleItem_\(tradeId, scheduleId, originalName\)/);
+  assert.match(missingBranch, /await finalizeAlreadyMissingScheduleItem_\(tradeId, scheduleId, target\.originalName\)/);
   assert.doesNotMatch(missingBranch, /reconcileCompletionMutationCanonical_/);
 
   const missingMatcher = section(store, "function isMissingScheduleRowError_", "\n}\n\nasync function finalizeAlreadyMissingScheduleItem_");

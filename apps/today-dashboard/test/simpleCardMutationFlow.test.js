@@ -60,7 +60,10 @@ test("반납완료는 반출 기준선과 무관하고 서버 직결 확정 뒤 
 test("품목 수량과 장비명 저장은 카드 전체 savingTrades를 잠그지 않는다", () => {
   const name = section(store, "export async function setItemName", "/** GAS updateEquipQty");
   assert.doesNotMatch(name, /beginTradeTransition|beginTradeSave|hasTradePending/);
-  assert.match(name, /itemNameTargets\[itemNameKey\] !== clean/, "연속 장비명 입력에서 옛 응답이 최신 화면을 덮으면 안 된다");
+  assert.match(name, /itemNameMutationIds\[key\] !== target\.mutationId \|\| itemNameTargets\[key\] !== target\.name/,
+    "연속 장비명 입력에서 이름이 같아도 옛 mutation 응답이 최신 화면을 덮으면 안 된다");
+  assert.match(name, /putItemNameOutboxTarget[\s\S]*armItemNameCommit_[\s\S]*return true/,
+    "장비명은 내구 outbox 접수 직후 UI 호출을 끝내야 한다");
 
   const qty = section(store, "async function commitQueuedItemQty", "async function reconcileItemQtyCanonical");
   assert.doesNotMatch(qty, /beginTradeSave|finishTradeSave/);

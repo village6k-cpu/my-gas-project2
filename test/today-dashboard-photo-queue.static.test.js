@@ -26,8 +26,8 @@ assert.doesNotMatch(
 );
 assert.match(
   uploadBody[0],
-  /mergePhotos\(t\.photos,\s*\[optimistic\]\)[\s\S]*enqueuePhotoUpload\(/,
-  'uploadTradePhoto must show the optimistic tile before enqueueing the background upload'
+  /await enqueuePhotoUpload\([\s\S]*if \(enqueueResult === "completed"\) return;[\s\S]*mergePhotos\(t\.photos,\s*\[optimistic\]\)/,
+  'uploadTradePhoto must show the optimistic tile only after durable local enqueue succeeds'
 );
 assert.match(
   uploadBody[0],

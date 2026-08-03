@@ -97,12 +97,13 @@ assert(
   'store must expose fail-closed async setItemName for registered equipment edits'
 );
 assert(
-  /setItemName[\s\S]*await gasMutation\("updateEquipName"[\s\S]*name: nextName[\s\S]*setName:[\s\S]*category: categoryOf\(nextName\)/.test(store),
-  'setItemName must apply the canonical GAS name, matching standalone setName, and category after write success'
+  /setItemName[\s\S]*putItemNameOutboxTarget[\s\S]*commitQueuedItemName[\s\S]*await gasMutation\("updateEquipName"/.test(store) &&
+    /function applyEquipNameResult[\s\S]*name: nextName[\s\S]*category: categoryOf\(nextName\)/.test(store),
+  'setItemName must durably queue first, then apply the canonical GAS name and category after background ACK'
 );
 assert(
-  /await gasMutation\("updateEquipName", \{ tid: tradeId, scheduleId, equipName: clean, exactName: options\?\.exactName === true \}\)/.test(store),
-  'setItemName must await GAS so sheet-master failure cannot leave a Supabase-only rename'
+  /ITEM_NAME_OUTBOX_KEY[\s\S]*putItemNameOutboxTarget[\s\S]*return true;[\s\S]*await gasMutation\("updateEquipName"[\s\S]*mutationId: target\.mutationId/.test(store),
+  'setItemName must return after durable intake and use a mutationId-backed GAS commit instead of a Supabase-only rename'
 );
 assert(
   /function applyEquipQtyResult\([\s\S]*const nextQty = byId\.get\(e\.scheduleId\)![\s\S]*takenQty: e\.takenQty/.test(store) &&
