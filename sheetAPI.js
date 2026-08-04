@@ -2276,8 +2276,8 @@ function cloneScheduleNoSend_(input) {
   }
 
   var customerName = String(input.customerName || '').trim();
-  if (!customerName) return { success: false, status: 'INVALID_SOURCE', error: 'customerName is required' };
   var sourceTradeId = String(input.sourceTradeId || '').trim();
+  if (!customerName && !sourceTradeId) return { success: false, status: 'INVALID_SOURCE', error: 'customerName or sourceTradeId is required' };
   if (sourceTradeId && !/^\d{6}-\d{3}$/.test(sourceTradeId)) {
     return { success: false, status: 'INVALID_SOURCE', error: 'sourceTradeId is invalid' };
   }
