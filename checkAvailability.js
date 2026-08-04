@@ -3190,9 +3190,12 @@ function cleanupExpiredDashboardMutationLogs_(props) {
 }
 
 /** 반드시 ScriptLock 안에서 호출. committed 중복과 더 최신 mutation 뒤의 stale retry는 skip한다. */
-function beginDashboardMutation_(props, tid, mutationId, scope, target) {
+function beginDashboardMutation_(props, tid, mutationId, scope, target, clientCreatedAt, clientInstanceId, clientSequence) {
   mutationId = normalizeDashboardMutationId_(mutationId);
   if (!mutationId) return { legacy: true, skip: false };
+  clientCreatedAt = Math.max(0, Number(clientCreatedAt) || 0);
+  clientInstanceId = String(clientInstanceId || '').trim().slice(0, 120);
+  clientSequence = Math.max(0, Number(clientSequence) || 0);
   cleanupExpiredDashboardMutationLogs_(props);
   var now = Date.now();
   var log = readDashboardMutationLog_(props, tid, scope).filter(function(entry) {
@@ -3215,11 +3218,27 @@ function beginDashboardMutation_(props, tid, mutationId, scope, target) {
       pendingLater: hasLater && laterSameScope.state !== 'committed'
     };
   }
-  log.push({ id: mutationId, target: String(target || ''), state: 'pending', at: now });
+  var previousEntry = log.length ? log[log.length - 1] : null;
+  log.push({
+    id: mutationId,
+    target: String(target || ''),
+    state: 'pending',
+    at: now,
+    clientAt: clientCreatedAt,
+    clientId: clientInstanceId,
+    clientSeq: clientSequence
+  });
   var serialized = JSON.stringify(log);
   if (serialized.length > 8000) return { error: '같은 항목을 너무 빠르게 반복 변경했습니다. 잠시 후 다시 시도해주세요.' };
   props.setProperty(dashboardMutationLogKey_(tid, scope), serialized);
-  return { duplicate: false, skip: false };
+  return {
+    duplicate: false,
+    skip: false,
+    previousTarget: previousEntry ? String(previousEntry.target || '') : '',
+    previousClientAt: previousEntry ? Math.max(0, Number(previousEntry.clientAt) || 0) : 0,
+    previousClientId: previousEntry ? String(previousEntry.clientId || '') : '',
+    previousClientSeq: previousEntry ? Math.max(0, Number(previousEntry.clientSeq) || 0) : 0
+  };
 }
 
 /** 반드시 ScriptLock 안에서 호출. */
@@ -5305,12 +5324,126 @@ function dashboardUpdateTradeDetails(tradeId, input) {
 
 // 확인요청 M열 드롭다운과 동일한 허용값 — 등록된 거래의 계약마스터 K열(할인유형) 변경용
 var DASHBOARD_DISCOUNT_TYPES_ = { "일반": true, "학생": true, "개인사업자/프리랜서": true, "단골": true, "제휴": true };
+var DASHBOARD_DISCOUNT_REVISION_PREFIX_ = 'dashboardDiscountRevision_v1_';
+
+function dashboardDiscountRevisionKey_(tid) {
+  return DASHBOARD_DISCOUNT_REVISION_PREFIX_ + String(tid || '').trim();
+}
+
+function getDashboardDiscountRevision_(props, tid) {
+  return Math.max(0, Number((props || PropertiesService.getScriptProperties()).getProperty(
+    dashboardDiscountRevisionKey_(tid)
+  )) || 0);
+}
+
+/** 반드시 ScriptLock 안에서 호출. 기기 시계가 아니라 GAS 서버가 발급한 단조 revision이다. */
+function nextDashboardDiscountRevision_(props, tid) {
+  var previous = getDashboardDiscountRevision_(props, tid);
+  var next = Math.max(Date.now(), previous + 1);
+  props.setProperty(dashboardDiscountRevisionKey_(tid), String(next));
+  return next;
+}
+
+/** 반드시 ScriptLock 안에서 호출. K열을 쓰기 전에 후속 작업의 내구 표식과 mutation
+ * commit을 먼저 확정해, Properties quota 오류 뒤 K열만 바뀌는 부분 커밋을 막는다. */
+function prepareDashboardDiscountWrite_(props, tid, mutationId) {
+  var now = Date.now();
+  var serverRevision = Math.max(now, getDashboardDiscountRevision_(props, tid) + 1);
+  var dirtyKey = typeof supaDirtyPropertyKey_ === 'function'
+    ? supaDirtyPropertyKey_(tid)
+    : 'SUPA_DIRTY_v2_' + tid;
+  var durableMarkers = {};
+  durableMarkers[dashboardDiscountRevisionKey_(tid)] = String(serverRevision);
+  durableMarkers['contractEditTS_' + tid] = String(now);
+  durableMarkers[dirtyKey] = String(now) + ':' + String(Math.random()).slice(2);
+  props.setProperties(durableMarkers, false);
+  commitDashboardMutation_(props, tid, mutationId, 'discount');
+  return serverRevision;
+}
+
+/** projection 영수증 확인용 읽기 전용 정본. dirty 표식이 사라지고 Supabase 값까지
+ * 계약마스터 K열과 같을 때만 projectionReady=true를 돌려준다. */
+function getTradeDiscountState(tid) {
+  tid = String(tid || '').trim();
+  if (!tid) return { error: '거래ID 필수' };
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName('계약마스터');
+    var props = PropertiesService.getScriptProperties();
+    var projection = typeof supaReadAuthorityRow_ === 'function'
+      ? supaReadAuthorityRow_(null, null, 'trades', { trade_id: tid }, 'trade_id,discount_type,contract_regen_pending')
+      : { ok: false };
+    var projectedDiscountType = projection.ok
+      ? String((projection.row || {}).discount_type || '').trim()
+      : '';
+    var lock = LockService.getScriptLock();
+    var lockAcquired = false;
+    try {
+      lockAcquired = lock.tryLock(1000);
+      if (!lockAcquired) {
+        return { error: '할인유형 정본 확인이 지연되고 있습니다.', code: 'BUSY', retryable: true };
+      }
+      if (!sheet || sheet.getLastRow() < 2) return { error: '계약마스터 시트 없음' };
+      var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues();
+      var row = -1;
+      for (var i = 0; i < ids.length; i++) {
+        if (String(ids[i][0] || '').trim() === tid) { row = i + 2; break; }
+      }
+      if (row < 0) return { error: '거래를 찾을 수 없음: ' + tid };
+
+      // K열·revision·dirty를 같은 짧은 잠금 안에서 읽어 서로 다른 변경 시점이
+      // 한 응답에 섞이지 않게 한다. Supabase HTTP는 잠금 전에 끝냈다.
+      var discountType = String(sheet.getRange(row, 11).getDisplayValue() || '').trim();
+      var serverRevision = getDashboardDiscountRevision_(props, tid);
+      var dirtyKey = typeof supaDirtyPropertyKey_ === 'function'
+        ? supaDirtyPropertyKey_(tid)
+        : 'SUPA_DIRTY_v2_' + tid;
+      var dirty = !!props.getProperty(dirtyKey);
+      return {
+        success: true,
+        tradeId: tid,
+        discountType: discountType,
+        serverRevision: serverRevision,
+        projectionReady: !dirty && !!projection.ok && projectedDiscountType === discountType,
+        projectedDiscountType: projectedDiscountType,
+        projectedContractRegenPending: projection.ok ? !!(projection.row || {}).contract_regen_pending : true,
+        projectionPending: dirty || !projection.ok || projectedDiscountType !== discountType
+      };
+    } finally {
+      if (lockAcquired) try { lock.releaseLock(); } catch (releaseErr) {}
+    }
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err) };
+  }
+}
 
 /** 등록된 거래의 할인유형(계약마스터 K열) 변경 — 금액·계약서는 재생성 워커가 반영한다.
  *  이 거래 1건에만 적용되며 고객DB(빌리지2.0 I열) 기본값은 바꾸지 않는다. */
-function updateTradeDiscountType(tid, discountType) {
+function updateTradeDiscountType(tid, discountType, options) {
   tid = String(tid || '').trim();
   discountType = String(discountType || '').trim();
+  options = options && typeof options === 'object' ? options : {};
+  var mutationId = normalizeDashboardMutationId_(options.mutationId || options.mutation_id || '');
+  var mutationCreatedAt = Math.max(0, Number(options.mutationCreatedAt || options.mutation_created_at) || 0);
+  var clientInstanceId = String(options.clientInstanceId || options.client_instance_id || '').trim().slice(0, 120);
+  var clientSequence = Math.max(0, Number(options.clientSequence || options.client_sequence) || 0);
+  var previousDiscountTypes = [];
+  var rawPreviousDiscountTypes = options.previousDiscountTypes;
+  if (typeof rawPreviousDiscountTypes === 'string') {
+    try { rawPreviousDiscountTypes = JSON.parse(rawPreviousDiscountTypes || '[]'); } catch (parsePreviousErr) {
+      rawPreviousDiscountTypes = [rawPreviousDiscountTypes];
+    }
+  }
+  if (Array.isArray(rawPreviousDiscountTypes)) {
+    rawPreviousDiscountTypes.forEach(function(value) {
+      var clean = String(value == null ? '' : value).trim();
+      if (previousDiscountTypes.indexOf(clean) === -1) previousDiscountTypes.push(clean);
+    });
+  }
+  if (options.previousDiscountType !== undefined && options.previousDiscountType !== null) {
+    var singlePrevious = String(options.previousDiscountType == null ? '' : options.previousDiscountType).trim();
+    if (previousDiscountTypes.indexOf(singlePrevious) === -1) previousDiscountTypes.push(singlePrevious);
+  }
   if (!tid) return { error: "거래ID 필수" };
   if (!DASHBOARD_DISCOUNT_TYPES_[discountType]) {
     return { error: "할인유형은 일반/학생/개인사업자·프리랜서/단골/제휴만 허용" };
@@ -5329,7 +5462,8 @@ function updateTradeDiscountType(tid, discountType) {
 
   var changed = false;
   try {
-    var discountLeaseBlock = dashboardTradeMutationLeaseError_(PropertiesService.getScriptProperties(), tid, 'discount', '');
+    var props = PropertiesService.getScriptProperties();
+    var discountLeaseBlock = dashboardTradeMutationLeaseError_(props, tid, 'discount', '');
     if (discountLeaseBlock) return discountLeaseBlock;
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = ss.getSheetByName('계약마스터');
@@ -5343,9 +5477,59 @@ function updateTradeDiscountType(tid, discountType) {
     if (row < 0) return { error: "거래를 찾을 수 없음: " + tid };
 
     var current = String(sheet.getRange(row, 11).getDisplayValue() || '').trim(); // K열
-    if (current === discountType) {
-      return { success: true, tradeId: tid, discountType: discountType, unchanged: true, contractRegenPending: false };
+    var serverRevision = getDashboardDiscountRevision_(props, tid);
+    var mutation = beginDashboardMutation_(
+      props, tid, mutationId, 'discount', discountType, mutationCreatedAt, clientInstanceId, clientSequence
+    );
+    if (mutation.error) return { error: mutation.error };
+    if (mutation.skip) {
+      return {
+        success: true,
+        tradeId: tid,
+        discountType: current,
+        duplicate: true,
+        stale: current !== discountType,
+        superseded: !!mutation.pendingLater,
+        unchanged: current === discountType,
+        contractRegenPending: !!mutation.pendingLater,
+        serverRevision: serverRevision
+      };
     }
+
+    // wall-clock은 기기마다 다르므로 순서 판정에 쓰지 않는다. 같은 앱 인스턴스에서만
+    // 단조 sequence를 비교하고, 다른 기기/재시작은 사용자가 본 previous 값으로 CAS한다.
+    var previousLogMatchesCurrent = !!mutationId && !!mutation.previousTarget && mutation.previousTarget === current;
+    var hasComparableClientOrder = previousLogMatchesCurrent && !!clientInstanceId &&
+      clientInstanceId === mutation.previousClientId && clientSequence > 0 && mutation.previousClientSeq > 0;
+    var staleByClientOrder = hasComparableClientOrder && clientSequence < mutation.previousClientSeq;
+    var newerByClientOrder = hasComparableClientOrder && clientSequence >= mutation.previousClientSeq;
+    var matchesExpectedPrevious = previousDiscountTypes.indexOf(current) !== -1;
+    if (mutationId && current !== discountType && (staleByClientOrder || (!newerByClientOrder && previousDiscountTypes.length && !matchesExpectedPrevious))) {
+      commitDashboardMutation_(props, tid, mutationId, 'discount');
+      return {
+        success: true,
+        tradeId: tid,
+        discountType: current,
+        stale: true,
+        unchanged: true,
+        contractRegenPending: false,
+        serverRevision: serverRevision
+      };
+    }
+    if (current === discountType) {
+      commitDashboardMutation_(props, tid, mutationId, 'discount');
+      return {
+        success: true,
+        tradeId: tid,
+        discountType: discountType,
+        unchanged: true,
+        contractRegenPending: false,
+        serverRevision: serverRevision
+      };
+    }
+    // quota/Properties 오류는 원장을 건드리기 전에 끝낸다. 이 표식들이 모두 확정된
+    // 뒤에만 K열을 써서 계약서·Supabase 투영 없는 부분 커밋을 만들지 않는다.
+    serverRevision = prepareDashboardDiscountWrite_(props, tid, mutationId);
     sheet.getRange(row, 11).setValue(discountType);
     changed = true;
   } catch (err) {
@@ -5358,7 +5542,13 @@ function updateTradeDiscountType(tid, discountType) {
   try { scheduleContractRegen(tid); } catch (regenErr) {}
   try { supaMarkTradeDirty_(tid); } catch (dirtyErr) {}
   try { invalidateDashboardCacheForTrade_(tid); } catch (cacheErr) {}
-  return { success: true, tradeId: tid, discountType: discountType, contractRegenPending: changed };
+  return {
+    success: true,
+    tradeId: tid,
+    discountType: discountType,
+    contractRegenPending: changed,
+    serverRevision: serverRevision
+  };
 }
 
 function updateDashboardContractStatus(tradeId, status) {

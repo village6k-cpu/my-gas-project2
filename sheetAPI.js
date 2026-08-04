@@ -686,11 +686,26 @@ function handleRequestCore_(e) {
           params.tid || postBody.tid || params.tradeId || postBody.tradeId
         ));
 
+      case "getTradeDiscountState":
+        return jsonResponse(getTradeDiscountState(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId
+        ));
+
       case "updateTradeDiscount": {
         // 등록된 거래의 할인유형 변경 (계약마스터 K열) — 금액·계약서는 재생성 워커가 반영
         return jsonResponse(updateTradeDiscountType(
           params.tid || postBody.tid || params.tradeId || postBody.tradeId,
-          params.discountType || postBody.discountType || params.할인유형 || postBody.할인유형
+          params.discountType || postBody.discountType || params.할인유형 || postBody.할인유형,
+          {
+            mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || '',
+            mutationCreatedAt: params.mutationCreatedAt || postBody.mutationCreatedAt || params.mutation_created_at || postBody.mutation_created_at || 0,
+            previousDiscountType: params.previousDiscountType !== undefined
+              ? params.previousDiscountType
+              : postBody.previousDiscountType,
+            previousDiscountTypes: params.previousDiscountTypes || postBody.previousDiscountTypes || '[]',
+            clientInstanceId: params.clientInstanceId || postBody.clientInstanceId || params.client_instance_id || postBody.client_instance_id || '',
+            clientSequence: params.clientSequence || postBody.clientSequence || params.client_sequence || postBody.client_sequence || 0
+          }
         ));
       }
 

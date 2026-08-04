@@ -2,6 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
+const ts = require("typescript");
 
 // 성능/안정성 전면 점검(2026-07)의 코어 데이터 계층 수정 회귀 방지.
 // 핵심 불변식: realtime 변경은 전량 refetch가 아니라 바뀐 거래만 재조회하고,
@@ -9,6 +11,7 @@ const path = require("node:path");
 
 const appRoot = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(appRoot, file), "utf8");
+const readRepo = (file) => fs.readFileSync(path.join(appRoot, "../..", file), "utf8");
 
 function section(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
@@ -610,6 +613,10 @@ test("거래 카드에서 할인유형 변경 — 낙관 반영 + 계약서 재�
   const gas = fs.readFileSync(path.resolve(appRoot, "../..", "checkAvailability.js"), "utf8");
   const fn = section(gas, "function updateTradeDiscountType", "\nfunction updateDashboardContractStatus");
   assert.match(fn, /getRange\(row, 11\)\.setValue\(discountType\)/, "계약마스터 K열을 갱신해야 한다");
+  assert.ok(
+    fn.indexOf("prepareDashboardDiscountWrite_(props, tid, mutationId)") < fn.indexOf("getRange(row, 11).setValue(discountType)"),
+    "revision·dirty·계약서 큐·mutation commit을 K열보다 먼저 내구화해야 한다",
+  );
   const releaseAt = fn.indexOf("lock.releaseLock()");
   const regenAt = fn.indexOf("scheduleContractRegen(tid)");
   assert.ok(releaseAt >= 0 && regenAt > releaseAt, "재생성 예약은 잠금 밖에서 해야 한다");
@@ -623,13 +630,444 @@ test("거래 카드에서 할인유형 변경 — 낙관 반영 + 계약서 재�
   const store = read("lib/data/store.ts");
   const action = section(store, "export async function setDiscountType", "\nexport async function sendEstimate");
   const optimisticAt = action.indexOf("discountType, contractRegenPending: true");
-  const gasAt = action.indexOf('gasMutationRetrying("updateTradeDiscount"');
-  assert.ok(optimisticAt >= 0 && gasAt > optimisticAt, "화면 반영이 GAS 왕복보다 먼저여야 한다");
-  assert.match(action, /mutateTrade\(tradeId, \(t\) => \(\{ \.\.\.t, \.\.\.previous \}\), false\)/, "실패 시 되돌려야 한다");
+  const queueAt = action.indexOf("queueDiscountTypePersist(");
+  assert.ok(optimisticAt >= 0 && queueAt > optimisticAt, "화면 반영 뒤 백그라운드 큐에 저장 목표를 넘겨야 한다");
+  assert.doesNotMatch(
+    action,
+    /beginTrade(?:Save|Transition)|await\s+gasMutationRetrying|await\s+flushTradePersist/,
+    "할인유형 선택은 카드 savingTrades나 원격 왕복을 기다리면 안 된다",
+  );
+  assert.match(store, /const DISCOUNT_TYPE_OUTBOX_KEY = "heybilly:discount-type-outbox:v1"/, "새로고침 전에도 할인 변경 목표를 보존해야 한다");
+  const discountQueue = section(store, "function queueDiscountTypePersist", "\n/** 등록된 거래의 할인유형 변경");
+  assert.match(discountQueue, /gasMutationRetrying\("updateTradeDiscount"/, "백그라운드 큐가 계약마스터 원장을 갱신해야 한다");
+  assert.match(discountQueue, /mutationId:\s*entry\.mutationId/, "응답 유실 재시도가 최신 할인을 덮지 않도록 mutationId를 보내야 한다");
+  assert.match(discountQueue, /clientInstanceId:\s*entry\.clientInstanceId/, "기기 시계 대신 같은 앱 인스턴스 순서를 보내야 한다");
+  assert.match(discountQueue, /clientSequence:\s*entry\.clientSequence/, "같은 앱 인스턴스의 단조 sequence를 보내야 한다");
+  assert.match(discountQueue, /phase:\s*"projection_pending"/, "GAS 확정 뒤에는 원장을 재호출하지 않는 투영 영수증으로 전환해야 한다");
+  assert.doesNotMatch(discountQueue, /schedulePersistTrade\(|flushTradePersist\(/, "Supabase 지연이 원장 재호출·거래 전체 저장잠금으로 번지면 안 된다");
+
+  const syncGate = section(store, "function hasTradeSyncPending", "\n\n");
+  assert.doesNotMatch(syncGate, /discountTypeOutboxPending/, "할인 투영 지연이 금액·계약서 URL 등 거래 전체 realtime을 막으면 안 된다");
+  const merge = section(store, "function mergeTradeChanges", "\n\nasync function applyDashboardRepairs");
+  assert.match(merge, /applyDiscountTypeOutboxOverlay_/, "원격 snapshot에서는 할인 필드만 목표값으로 보호해야 한다");
+  assert.match(merge, /const discountOutbox = readDiscountTypeOutbox_\(\)/, "snapshot마다 outbox는 한 번만 읽어야 한다");
+  const tradePatch = section(store, "function tradeFieldPatch", "\n\nfunction enqueueTradeFieldPersist");
+  assert.doesNotMatch(tradePatch, /"discount_type"/, "일반 필드 PATCH가 낙관 할인값을 Supabase에 재주입하면 안 된다");
+  assert.match(store, /gasMutationRetrying\("getTradeDiscountState"/, "투영 완료는 GAS 정본과 dirty 상태로 확인해야 한다");
+
+  const apiDiscount = section(readRepo("sheetAPI.js"), 'case "updateTradeDiscount"', '\n      case "updateEquipmentCheck"');
+  const gasDiscount = section(readRepo("checkAvailability.js"), "function updateTradeDiscountType", "\nfunction updateDashboardContractStatus");
+  assert.match(apiDiscount, /mutationId/, "API가 할인 mutationId를 GAS 함수에 전달해야 한다");
+  assert.match(apiDiscount, /previousDiscountType/, "오프라인 옛 선택 판별용 이전값을 전달해야 한다");
+  assert.match(apiDiscount, /clientInstanceId/, "API가 동일 클라이언트 식별자를 전달해야 한다");
+  assert.match(gasDiscount, /beginDashboardMutation_/, "서버가 할인 변경 순서를 mutation log로 보장해야 한다");
+  assert.match(gasDiscount, /commitDashboardMutation_/, "변경·unchanged 모두 서버 mutation을 확정해야 한다");
+  assert.doesNotMatch(gasDiscount, /mutationCreatedAt\s*[<>]=?\s*mutation\.previousClientAt/, "기기 wall-clock으로 최신성을 판정하면 안 된다");
 
   const actions = read("components/TradeActions.tsx");
   assert.match(actions, /DISCOUNT_TYPE_OPTIONS\.map/, "카드에 할인유형 셀렉터가 있어야 한다");
   assert.match(actions, /discountLocked/, "반납완료·취소 후에는 잠가야 한다");
+});
+
+class MemoryLocalStorage {
+  constructor() { this.values = new Map(); }
+  getItem(key) { return this.values.has(key) ? this.values.get(key) : null; }
+  setItem(key, value) { this.values.set(key, String(value)); }
+  removeItem(key) {
+    const beforeRemove = this.beforeRemove;
+    this.beforeRemove = null;
+    if (beforeRemove) beforeRemove();
+    this.values.delete(key);
+  }
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+function discountOutboxHarness(localStorage, gasHandler) {
+  const store = read("lib/data/store.ts");
+  const source = section(store, "export const DISCOUNT_TYPE_OPTIONS", "\nexport async function sendEstimate")
+    .replace(/^export /gm, "");
+  const runnable = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const timers = new Map();
+  const gasCalls = [];
+  let nextTimer = 1;
+  let mutationSeq = 0;
+  const setTimeoutFake = (fn, delay) => {
+    const id = nextTimer++;
+    timers.set(id, { fn, delay });
+    return id;
+  };
+  const context = {
+    window: { localStorage, setTimeout: setTimeoutFake },
+    setTimeout: setTimeoutFake,
+    clearTimeout(id) { timers.delete(id); },
+    state: {
+      trades: [{ tradeId: "T-1", discountType: "일반", contractRegenPending: false }],
+      savingTrades: {},
+      toast: null,
+    },
+    isSupabase: true,
+    writeBackEnabled: true,
+    writeBackDisabledReason: "disabled",
+    activeTradeTransitions: new Set(),
+    pendingRemoveEquipmentTrades: new Set(),
+    mutateTrade(tradeId, mutate) {
+      context.state.trades = context.state.trades.map((trade) => trade.tradeId === tradeId ? mutate(trade) : trade);
+    },
+    flashSave() {},
+    showTransientError() {},
+    createLedgerMutationId(scope) { mutationSeq++; return `${scope}:m${mutationSeq}`; },
+    async gasMutationRetrying(action, params) {
+      gasCalls.push({ action, params });
+      if (gasHandler) return gasHandler(action, params, gasCalls.length);
+      if (action === "getTradeDiscountState") {
+        return {
+          success: true,
+          discountType: context.state.trades[0].discountType,
+          serverRevision: 100,
+          projectionReady: true,
+          projectedContractRegenPending: false,
+        };
+      }
+      return { success: true, discountType: params.discountType, serverRevision: 100 };
+    },
+    isRetryableLedgerError(error) { return !!error?.retryable; },
+    async pollSheetChangesNow() {},
+    maybeResumeRealtimeFlush() {},
+    console: { error() {} },
+  };
+  vm.runInNewContext(`${runnable}\nthis.discountApi = {
+    read: readDiscountTypeOutbox_,
+    put: putDiscountTypeOutbox_,
+    ack: acknowledgeDiscountTypeOutbox_,
+    overlay: applyDiscountTypeOutboxOverlay_,
+    verify: verifyDiscountTypeProjection_,
+    queue: queueDiscountTypePersist,
+    setDiscountType,
+    inFlight: (tradeId) => discountTypePersistInFlight[tradeId],
+  };`, context);
+  return { ...context.discountApi, state: context.state, context, gasCalls, timers };
+}
+
+function discountEntry(overrides = {}) {
+  return {
+    tradeId: "T-1",
+    discountType: "학생",
+    previousDiscountType: "일반",
+    previousDiscountTypes: ["일반"],
+    previousContractRegenPending: false,
+    mutationId: "discount:m1",
+    clientInstanceId: "discount-client:a",
+    clientSequence: 1,
+    createdAt: 100,
+    attempts: 0,
+    phase: "ledger_pending",
+    ...overrides,
+  };
+}
+
+test("할인 outbox는 다른 탭 ACK 뒤 오래된 메모리 항목을 부활시키지 않는다", () => {
+  const sharedStorage = new MemoryLocalStorage();
+  const tabA = discountOutboxHarness(sharedStorage);
+  const tabB = discountOutboxHarness(sharedStorage);
+  tabA.put(discountEntry());
+  const latest = discountEntry({ discountType: "단골", mutationId: "discount:m2", createdAt: 200 });
+  // A가 m1을 ACK하려고 읽은 직후 B가 m2를 쓰는 최악의 read-modify-write 경합.
+  sharedStorage.beforeRemove = () => tabB.put(latest);
+  assert.equal(tabA.ack("T-1", "discount:m1"), true);
+  assert.equal(tabB.read()["T-1"].mutationId, "discount:m2", "B가 소유한 미확정 목표는 ACK 경합 뒤 복구돼야 한다");
+  assert.equal(tabA.read()["T-1"].mutationId, "discount:m2");
+  assert.equal(tabB.ack("T-1", "discount:m2"), true);
+  assert.equal(tabA.read()["T-1"], undefined, "storage의 키 없음이 authoritative ACK여야 한다");
+  tabA.queue("T-1");
+  assert.equal(tabA.gasCalls.length, 0, "ACK된 옛 메모리 목표를 GAS로 다시 보내면 안 된다");
+});
+
+test("최신 탭이 ACK한 뒤 느린 탭의 미완료 응답도 옛 mutation을 부활시키지 않는다", () => {
+  const sharedStorage = new MemoryLocalStorage();
+  const slowTab = discountOutboxHarness(sharedStorage);
+  const latestTab = discountOutboxHarness(sharedStorage);
+  slowTab.put(discountEntry());
+  const latest = discountEntry({
+    discountType: "제휴",
+    mutationId: "discount:m2",
+    clientInstanceId: "discount-client:b",
+    createdAt: 200,
+  });
+  latestTab.put(latest);
+  assert.equal(latestTab.ack("T-1", "discount:m2"), true);
+  assert.equal(slowTab.read()["T-1"], undefined, "공유 ACK high-watermark가 느린 탭 m1을 폐기해야 한다");
+  assert.equal(slowTab.put({ ...discountEntry(), phase: "projection_pending" }), false, "늦은 m1 성공 응답도 복구되면 안 된다");
+  assert.equal(slowTab.read()["T-1"], undefined);
+});
+
+test("기기 시계가 뒤로 보정돼도 새 할인 선택은 영구 ACK보다 큰 로컬 순번을 쓴다", async () => {
+  const pendingGas = deferred();
+  const harness = discountOutboxHarness(new MemoryLocalStorage(), () => pendingGas.promise);
+  const futureAckAt = Date.now() + 86_400_000;
+  const acknowledged = discountEntry({ mutationId: "discount:future-ack", createdAt: futureAckAt });
+  assert.equal(harness.put(acknowledged), true);
+  assert.equal(harness.ack("T-1", acknowledged.mutationId), true);
+
+  assert.equal(await harness.setDiscountType("T-1", "제휴"), true);
+  const queued = harness.read()["T-1"];
+  assert.ok(queued, "시계가 ACK보다 느려도 새 선택을 큐에 남겨야 한다");
+  assert.ok(queued.createdAt > futureAckAt, "새 선택 순번은 ACK high-watermark보다 커야 한다");
+
+  const inFlight = harness.inFlight("T-1");
+  pendingGas.resolve({ success: true, discountType: "제휴", serverRevision: 101 });
+  await inFlight;
+});
+
+test("할인 투영은 문자열 일치가 아니라 GAS revision과 dirty 해제로 ACK한다", async () => {
+  let projection = {
+    success: true,
+    discountType: "단골",
+    serverRevision: 10,
+    projectionReady: false,
+    projectedContractRegenPending: true,
+  };
+  const harness = discountOutboxHarness(new MemoryLocalStorage(), (action, params) => {
+    if (action === "getTradeDiscountState") return projection;
+    return { success: true, discountType: params.discountType, serverRevision: 10 };
+  });
+  const receipt = discountEntry({ discountType: "단골", phase: "projection_pending", serverRevision: 10 });
+  harness.put(receipt);
+  const overlaid = harness.overlay({
+    tradeId: "T-1",
+    discountType: "일반",
+    amount: 777000,
+    contractUrl: "https://example.test/new-contract",
+    contractRegenPending: false,
+    equipments: [],
+  });
+  assert.equal(overlaid.discountType, "단골");
+  assert.equal(overlaid.amount, 777000);
+  assert.equal(overlaid.contractUrl, "https://example.test/new-contract");
+  assert.equal(overlaid.contractRegenPending, true);
+
+  const coincidentalMatch = harness.overlay({ ...overlaid, discountType: "단골", contractRegenPending: false });
+  await harness.verify(receipt);
+  assert.equal(coincidentalMatch.contractRegenPending, true, "dirty 중 같은 문자열 snapshot을 새 mutation 투영으로 오인하면 안 된다");
+  assert.equal(harness.read()["T-1"].mutationId, receipt.mutationId);
+
+  projection = { ...projection, projectionReady: true, projectedContractRegenPending: false };
+  await harness.verify(receipt);
+  assert.equal(harness.read()["T-1"], undefined, "투영 확인 뒤 영수증을 ACK해야 한다");
+  assert.equal(harness.context.state.trades[0].contractRegenPending, false);
+});
+
+test("더 최신 GAS revision은 옛 projection 영수증을 폐기하고 최신 할인으로 수렴한다", async () => {
+  const harness = discountOutboxHarness(new MemoryLocalStorage(), (action, params) => {
+    if (action === "getTradeDiscountState") {
+      return {
+        success: true,
+        discountType: "제휴",
+        serverRevision: 11,
+        projectionReady: true,
+        projectedContractRegenPending: true,
+      };
+    }
+    return { success: true, discountType: params.discountType, serverRevision: 10 };
+  });
+  const receipt = discountEntry({ discountType: "단골", phase: "projection_pending", serverRevision: 10 });
+  harness.put(receipt);
+  harness.context.state.trades[0].discountType = "단골";
+  const overlaid = harness.overlay({ ...harness.context.state.trades[0], discountType: "제휴" });
+  assert.equal(overlaid.discountType, "단골", "정본 확인 전에는 낙관 선택을 유지한다");
+  await harness.verify(receipt);
+  assert.equal(harness.read()["T-1"], undefined);
+  assert.equal(harness.context.state.trades[0].discountType, "제휴", "최신 GAS 정본으로 즉시 수렴해야 한다");
+});
+
+test("GAS 할인 정본 조회는 dirty worker 성공 전에는 같은 문자열도 투영 완료로 보지 않는다", () => {
+  const gas = readRepo("checkAvailability.js");
+  const source = section(gas, "function getTradeDiscountState", "\n\n/** 등록된 거래의 할인유형");
+  let canonical = "학생";
+  let projected = "학생";
+  let dirty = true;
+  let lockHeld = false;
+  const range = { getDisplayValue: () => {
+    assert.equal(lockHeld, true, "K열은 ScriptLock 안에서 읽어야 한다");
+    return canonical;
+  } };
+  const sheet = {
+    getLastRow: () => {
+      assert.equal(lockHeld, true, "거래 행 탐색도 ScriptLock 안에서 해야 한다");
+      return 2;
+    },
+    getRange(row, col) {
+      if (row === 2 && col === 1) return { getDisplayValues: () => [["T-1"]] };
+      return range;
+    },
+  };
+  const context = {
+    SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSheetByName: () => sheet }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: () => {
+      assert.equal(lockHeld, true, "dirty 표식은 K열·revision과 같은 잠금에서 읽어야 한다");
+      return dirty ? "dirty-token" : "";
+    } }) },
+    LockService: { getScriptLock: () => ({
+      tryLock() { lockHeld = true; return true; },
+      releaseLock() { lockHeld = false; },
+    }) },
+    getDashboardDiscountRevision_: () => {
+      assert.equal(lockHeld, true, "revision은 K열과 같은 잠금에서 읽어야 한다");
+      return 10;
+    },
+    supaDirtyPropertyKey_: () => "SUPA_DIRTY_v2_T-1",
+    supaReadAuthorityRow_: () => ({
+      ok: true,
+      row: { discount_type: projected, contract_regen_pending: true },
+    }),
+  };
+  vm.runInNewContext(`${source}\nthis.getTradeDiscountState = getTradeDiscountState;`, context);
+
+  assert.equal(context.getTradeDiscountState("T-1").projectionReady, false, "dirty 표식이 있으면 아직 투영 중이다");
+  dirty = false;
+  assert.equal(context.getTradeDiscountState("T-1").projectionReady, true);
+  canonical = "제휴";
+  assert.equal(context.getTradeDiscountState("T-1").projectionReady, false, "Supabase 값이 정본과 다르면 완료가 아니다");
+  assert.equal(context.getTradeDiscountState("T-1").discountType, "제휴");
+});
+
+test("할인 선택은 GAS가 미완료여도 즉시 반환하고 원장 성공 뒤 GAS를 재호출하지 않는다", async () => {
+  const pendingGas = deferred();
+  const harness = discountOutboxHarness(new MemoryLocalStorage(), () => pendingGas.promise);
+  const changed = await harness.setDiscountType("T-1", "학생");
+  assert.equal(changed, true);
+  assert.equal(harness.context.state.trades[0].discountType, "학생");
+  assert.equal(harness.context.state.savingTrades["T-1"], undefined, "카드를 저장중으로 잠그면 안 된다");
+  assert.equal(harness.gasCalls.length, 1);
+  assert.match(harness.gasCalls[0].params.mutationId, /^discount:/);
+
+  const inFlight = harness.inFlight("T-1");
+  pendingGas.resolve({ success: true, discountType: "학생", contractRegenPending: true, serverRevision: 10 });
+  await inFlight;
+  assert.equal(harness.read()["T-1"].phase, "projection_pending");
+  harness.queue("T-1");
+  assert.equal(harness.gasCalls.length, 1, "projection_pending은 GAS 원장을 다시 호출하면 안 된다");
+});
+
+test("GAS 할인 저장은 unchanged도 commit하고 오래된 오프라인 선택은 현재 K열을 보존한다", () => {
+  const gas = readRepo("checkAvailability.js");
+  const source = section(gas, "function prepareDashboardDiscountWrite_", "\nfunction updateDashboardContractStatus");
+  let current = "단골";
+  let setCalls = 0;
+  let commits = 0;
+  let serverRevision = 1000;
+  let mutationResult = { duplicate: false, skip: false, previousTarget: "", previousClientAt: 0 };
+  const props = { setProperties() {} };
+  const range = {
+    getDisplayValue() { return current; },
+    setValue(value) { current = value; setCalls++; },
+  };
+  const sheet = {
+    getLastRow() { return 2; },
+    getRange(row, col) {
+      if (row === 2 && col === 1) return { getDisplayValues: () => [["T-1"]] };
+      return range;
+    },
+  };
+  const context = {
+    DASHBOARD_DISCOUNT_TYPES_: { "일반": true, "학생": true, "개인사업자/프리랜서": true, "단골": true, "제휴": true },
+    normalizeDashboardMutationId_: (value) => String(value || ""),
+    LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
+    PropertiesService: { getScriptProperties: () => props },
+    dashboardTradeMutationLeaseError_: () => null,
+    dashboardDiscountRevisionKey_: (tid) => `dashboardDiscountRevision_v1_${tid}`,
+    supaDirtyPropertyKey_: (tid) => `SUPA_DIRTY_v2_${tid}`,
+    getDashboardDiscountRevision_: () => serverRevision,
+    nextDashboardDiscountRevision_: () => ++serverRevision,
+    SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSheetByName: () => sheet }) },
+    beginDashboardMutation_: () => mutationResult,
+    commitDashboardMutation_: () => { commits++; },
+    scheduleContractRegen() {},
+    supaMarkTradeDirty_() {},
+    invalidateDashboardCacheForTrade_() {},
+  };
+  vm.runInNewContext(`${source}\nthis.updateTradeDiscountType = updateTradeDiscountType;`, context);
+
+  const stale = context.updateTradeDiscountType("T-1", "학생", {
+    mutationId: "discount:old",
+    mutationCreatedAt: 100,
+    previousDiscountTypes: JSON.stringify(["일반"]),
+  });
+  assert.equal(stale.stale, true);
+  assert.equal(stale.discountType, "단골");
+  assert.equal(setCalls, 0);
+  assert.equal(commits, 1, "stale mutation도 commit해 같은 재시도를 종결해야 한다");
+
+  current = "단골";
+  const unchanged = context.updateTradeDiscountType("T-1", "단골", {
+    mutationId: "discount:same",
+    previousDiscountTypes: JSON.stringify(["단골"]),
+  });
+  assert.equal(unchanged.unchanged, true);
+  assert.equal(commits, 2, "unchanged 경로도 pending mutation log를 남기면 안 된다");
+
+  mutationResult = {
+    duplicate: false,
+    skip: false,
+    previousTarget: "단골",
+    previousClientAt: 9999999999999,
+    previousClientId: "fast-clock-device",
+    previousClientSeq: 99,
+  };
+  const newer = context.updateTradeDiscountType("T-1", "제휴", {
+    mutationId: "discount:new-device",
+    mutationCreatedAt: 1,
+    clientInstanceId: "normal-clock-device",
+    clientSequence: 1,
+    previousDiscountTypes: JSON.stringify(["단골"]),
+  });
+  assert.equal(newer.success, true);
+  assert.equal(current, "제휴", "다른 기기의 느린 시계가 실제 최신 선택을 거절하면 안 된다");
+  assert.equal(setCalls, 1);
+  assert.equal(commits, 3);
+
+  mutationResult = {
+    duplicate: false,
+    skip: false,
+    previousTarget: "제휴",
+    previousClientId: "same-client",
+    previousClientSeq: 3,
+  };
+  const sameClientStale = context.updateTradeDiscountType("T-1", "학생", {
+    mutationId: "discount:same-client-old",
+    mutationCreatedAt: 9999999999999,
+    clientInstanceId: "same-client",
+    clientSequence: 2,
+    previousDiscountTypes: JSON.stringify(["제휴"]),
+  });
+  assert.equal(sameClientStale.stale, true, "같은 앱 인스턴스의 작은 sequence는 시계와 무관하게 거절해야 한다");
+  assert.equal(current, "제휴");
+  assert.equal(setCalls, 1);
+  assert.equal(commits, 4);
+
+  current = "일반";
+  const legacy = context.updateTradeDiscountType("T-1", "학생");
+  assert.equal(legacy.success, true, "이전 앱 버전의 mutationId 없는 요청도 배포 전환 중 계속 동작해야 한다");
+  assert.equal(current, "학생");
+
+  const writesBeforeQuotaFailure = setCalls;
+  current = "일반";
+  props.setProperties = () => { throw new Error("properties quota exceeded"); };
+  mutationResult = { duplicate: false, skip: false, previousTarget: "학생" };
+  const quotaFailure = context.updateTradeDiscountType("T-1", "제휴", {
+    mutationId: "discount:quota-failure",
+    previousDiscountTypes: JSON.stringify(["일반"]),
+  });
+  assert.match(quotaFailure.error, /quota exceeded/);
+  assert.equal(current, "일반", "내구 표식 실패 뒤 K열만 바뀌는 부분 커밋이 없어야 한다");
+  assert.equal(setCalls, writesBeforeQuotaFailure, "Properties 준비 실패 시 K열 쓰기를 시도하면 안 된다");
 });
 
 test("스테퍼 수량 변경은 낙관 반영 + 디바운스 + 직렬 커밋이다", () => {
