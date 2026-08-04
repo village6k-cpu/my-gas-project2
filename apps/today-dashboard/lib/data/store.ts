@@ -270,8 +270,13 @@ function dropRecentlyExcludedItems_(trade: Trade, tombstones: Record<string, Exc
 function preservePhotosInSnapshot(next: Trade[], previous = state.trades): Trade[] {
   const previousById = new Map(previous.map((t) => [t.tradeId, t]));
   const tombstones = readExcludedItemTombstones_();
+  const discountOutbox = readDiscountTypeOutbox_();
   return attachResumedPhotoTiles_(
-    next.map((t) => dropRecentlyExcludedItems_(preserveTradePhotos(t, previousById.get(t.tradeId)), tombstones)),
+    next.map((t) => applyDiscountTypeOutboxOverlay_(
+      dropRecentlyExcludedItems_(preserveTradePhotos(t, previousById.get(t.tradeId)), tombstones),
+      previousById.get(t.tradeId),
+      discountOutbox,
+    )),
   );
 }
 
@@ -279,11 +284,18 @@ function mergeTradeChanges(base: Trade[], changed: Trade[]): Trade[] {
   const baseById = new Map(base.map((t) => [t.tradeId, t]));
   const byId = new Map(changed.map((t) => [t.tradeId, t]));
   const tombstones = readExcludedItemTombstones_();
+  const discountOutbox = readDiscountTypeOutbox_();
   const merged = base.map((t) => {
     const next = byId.get(t.tradeId);
-    return next ? dropRecentlyExcludedItems_(preserveTradePhotos(next, t), tombstones) : t;
+    return next
+      ? applyDiscountTypeOutboxOverlay_(dropRecentlyExcludedItems_(preserveTradePhotos(next, t), tombstones), t, discountOutbox)
+      : t;
   });
-  for (const t of changed) if (!baseById.has(t.tradeId)) merged.push(dropRecentlyExcludedItems_(t, tombstones));
+  for (const t of changed) {
+    if (!baseById.has(t.tradeId)) {
+      merged.push(applyDiscountTypeOutboxOverlay_(dropRecentlyExcludedItems_(t, tombstones), undefined, discountOutbox));
+    }
+  }
   return attachResumedPhotoTiles_(merged);
 }
 
@@ -638,7 +650,8 @@ function tradeFieldPatch(before: Trade | undefined, after: Trade): Record<string
   add(before.company !== after.company, "company", after.company ?? null);
   add(before.checkoutAt !== after.checkoutAt, "checkout_at", after.checkoutAt);
   add(before.returnAt !== after.returnAt, "return_at", after.returnAt);
-  add(before.discountType !== after.discountType, "discount_type", after.discountType ?? null);
+  // 할인유형은 GAS 계약마스터 + dirty worker가 단일 writer다. 일반 필드 PATCH가
+  // projection_pending의 낙관값을 Supabase에 되써서 최신 원장을 역행시키면 안 된다.
   add(before.paymentMethod !== after.paymentMethod, "payment_method", after.paymentMethod ?? null);
   add(before.paymentWarning !== after.paymentWarning, "payment_warning", !!after.paymentWarning);
   add(before.depositStatus !== after.depositStatus, "deposit_status", after.depositStatus ?? null);
@@ -3608,6 +3621,7 @@ function replayDurableMutationOutboxes(): void {
   replayItemMetadataOutbox_(nextReplayDelay());
   replayCompletionMutationOutboxes_(nextReplayDelay());
   replayRemoveEquipmentOutbox_(nextReplayDelay());
+  replayDiscountTypeOutboxes_(nextReplayDelay());
 }
 
 let durableMutationOnlineResumeRegistered = false;
@@ -3675,6 +3689,7 @@ function ensureDurableMutationOnlineResume_(): void {
       delete removeEquipmentReplayTimers[key];
     });
     replayRemoveEquipmentOutbox_();
+    replayDiscountTypeOutboxes_();
   });
 }
 
@@ -4355,50 +4370,489 @@ export async function setBillingCompany(tradeId: string, billingCompany: string)
 // 확인요청 M열·계약마스터 K열과 동일한 허용값 — 카드의 할인유형 셀렉터가 사용
 export const DISCOUNT_TYPE_OPTIONS = ["일반", "학생", "개인사업자/프리랜서", "단골", "제휴"];
 
-/** 등록된 거래의 할인유형 변경 — 화면 즉시 반영, 원장(계약마스터 K열)과 계약서·금액
- *  재생성은 뒤에서 진행된다(재생성 완료 시 폴링 merge가 새 금액·계약서 링크를 가져옴). */
-export async function setDiscountType(tradeId: string, discountType: string): Promise<boolean> {
-  if (activeTradeTransitions.has(tradeId) || hasTradePending(tradeId)) {
-    showTransientError("⚠️ 이 거래의 다른 변경을 저장 중입니다. 잠시 후 다시 시도해주세요");
+type DiscountTypeOutboxEntry = {
+  tradeId: string;
+  discountType: string;
+  previousDiscountType?: string;
+  previousDiscountTypes: string[];
+  previousContractRegenPending: boolean;
+  mutationId: string;
+  clientInstanceId: string;
+  clientSequence: number;
+  createdAt: number;
+  attempts: number;
+  phase: "ledger_pending" | "projection_pending";
+  serverRevision?: number;
+};
+
+const DISCOUNT_TYPE_OUTBOX_KEY = "heybilly:discount-type-outbox:v1";
+const DISCOUNT_TYPE_ACK_KEY = "heybilly:discount-type-outbox-acks:v1";
+type DiscountTypeOutboxAck = { mutationId: string; createdAt: number; acknowledgedAt: number };
+const discountTypeOutboxMemory = new Map<string, DiscountTypeOutboxEntry>();
+const discountTypeOutboxMemoryOnly = new Set<string>();
+const discountTypeOutboxOwned = new Map<string, string>();
+const discountTypeOutboxAckMemory = new Map<string, DiscountTypeOutboxAck>();
+const discountTypePersistTargets: Record<string, DiscountTypeOutboxEntry | undefined> = {};
+const discountTypePersistInFlight: Record<string, Promise<void> | undefined> = {};
+const discountTypePersistRetryTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
+const discountTypeProjectionTimers: Record<string, number[] | undefined> = {};
+const discountTypeProjectionChecksInFlight: Record<string, Promise<void> | undefined> = {};
+const discountTypeClientInstanceId = createLedgerMutationId("discount-client");
+let discountTypeClientSequence = 0;
+
+function readDiscountTypeOutboxAcks_(): Record<string, DiscountTypeOutboxAck> {
+  if (typeof window === "undefined") return Object.fromEntries(discountTypeOutboxAckMemory);
+  try {
+    const acks: Record<string, DiscountTypeOutboxAck> = {};
+    const parsed = JSON.parse(window.localStorage.getItem(DISCOUNT_TYPE_ACK_KEY) || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const [tradeId, raw] of Object.entries(parsed as Record<string, unknown>)) {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+        const ack = raw as Partial<DiscountTypeOutboxAck>;
+        const mutationId = String(ack.mutationId || "").trim();
+        const createdAt = Math.max(0, Number(ack.createdAt) || 0);
+        if (!tradeId || !mutationId || !createdAt) continue;
+        acks[tradeId] = {
+          mutationId,
+          createdAt,
+          acknowledgedAt: Math.max(createdAt, Number(ack.acknowledgedAt) || 0),
+        };
+      }
+    }
+    for (const [tradeId, memoryAck] of discountTypeOutboxAckMemory) {
+      if (!acks[tradeId] || memoryAck.createdAt > acks[tradeId].createdAt) acks[tradeId] = memoryAck;
+    }
+    Object.entries(acks).forEach(([tradeId, ack]) => discountTypeOutboxAckMemory.set(tradeId, ack));
+    return acks;
+  } catch {
+    return Object.fromEntries(discountTypeOutboxAckMemory);
+  }
+}
+
+function writeDiscountTypeOutboxAcks_(acks: Record<string, DiscountTypeOutboxAck>): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    window.localStorage.setItem(DISCOUNT_TYPE_ACK_KEY, JSON.stringify(acks));
+    return true;
+  } catch {
     return false;
   }
-  const current = state.trades.find((t) => t.tradeId === tradeId);
+}
+
+/** ACK를 outbox 삭제보다 먼저 공유한다. 느린 탭은 이 high-watermark보다 오래된 메모리를 복구할 수 없다. */
+function recordDiscountTypeOutboxAck_(entry: DiscountTypeOutboxEntry): boolean {
+  const acks = readDiscountTypeOutboxAcks_();
+  const current = acks[entry.tradeId];
+  const ack: DiscountTypeOutboxAck = {
+    mutationId: entry.mutationId,
+    createdAt: entry.createdAt,
+    acknowledgedAt: Date.now(),
+  };
+  if (!current || entry.createdAt >= current.createdAt) acks[entry.tradeId] = ack;
+  discountTypeOutboxAckMemory.set(entry.tradeId, acks[entry.tradeId]);
+  return writeDiscountTypeOutboxAcks_(acks);
+}
+
+function readDiscountTypeOutbox_(): Record<string, DiscountTypeOutboxEntry> {
+  if (typeof window === "undefined") return Object.fromEntries(discountTypeOutboxMemory);
+  try {
+    const outbox: Record<string, DiscountTypeOutboxEntry> = {};
+    const acks = readDiscountTypeOutboxAcks_();
+    let storageNeedsRewrite = false;
+    const parsed = JSON.parse(window.localStorage.getItem(DISCOUNT_TYPE_OUTBOX_KEY) || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const raw of Object.values(parsed as Record<string, unknown>)) {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+        const entry = raw as Partial<DiscountTypeOutboxEntry>;
+        const tradeId = String(entry.tradeId || "").trim();
+        const discountType = String(entry.discountType || "").trim();
+        const mutationId = String(entry.mutationId || "").trim();
+        if (!tradeId || !mutationId || !DISCOUNT_TYPE_OPTIONS.includes(discountType)) continue;
+        const createdAt = Math.max(0, Number(entry.createdAt) || 0);
+        if (acks[tradeId] && acks[tradeId].createdAt >= createdAt) {
+          storageNeedsRewrite = true;
+          continue;
+        }
+        outbox[tradeId] = {
+          tradeId,
+          discountType,
+          previousDiscountType: entry.previousDiscountType == null ? undefined : String(entry.previousDiscountType),
+          previousDiscountTypes: Array.isArray(entry.previousDiscountTypes)
+            ? entry.previousDiscountTypes.map((value) => String(value ?? "")).slice(-8)
+            : [String(entry.previousDiscountType ?? "")],
+          previousContractRegenPending: !!entry.previousContractRegenPending,
+          mutationId,
+          clientInstanceId: String(entry.clientInstanceId || "").trim(),
+          clientSequence: Math.max(0, Number(entry.clientSequence) || 0),
+          createdAt,
+          attempts: Math.max(0, Number(entry.attempts) || 0),
+          phase: entry.phase === "projection_pending" ? "projection_pending" : "ledger_pending",
+          serverRevision: Math.max(0, Number(entry.serverRevision) || 0) || undefined,
+        };
+      }
+    }
+
+    // localStorage를 정상적으로 읽었다면 그 내용(키가 없다는 사실까지)이 탭 간 정본이다.
+    // 단, 이 탭에서 setItem 자체가 실패해 memory-only로 표시한 항목만 fallback한다.
+    const repairStorageIds: string[] = [];
+    for (const [tradeId, memoryEntry] of discountTypeOutboxMemory) {
+      const stored = outbox[tradeId];
+      const acknowledged = acks[tradeId] && acks[tradeId].createdAt >= memoryEntry.createdAt;
+      if (acknowledged) {
+        discountTypeOutboxMemory.delete(tradeId);
+        discountTypeOutboxMemoryOnly.delete(tradeId);
+        if (discountTypeOutboxOwned.get(tradeId) === memoryEntry.mutationId) discountTypeOutboxOwned.delete(tradeId);
+        continue;
+      }
+      const locallyOwned = discountTypeOutboxOwned.get(tradeId) === memoryEntry.mutationId;
+      if (discountTypeOutboxMemoryOnly.has(tradeId) || locallyOwned) {
+        if (!stored || memoryEntry.createdAt > stored.createdAt) outbox[tradeId] = memoryEntry;
+        if (!stored) repairStorageIds.push(tradeId);
+        if (stored) {
+          discountTypeOutboxMemoryOnly.delete(tradeId);
+          if (stored.mutationId !== memoryEntry.mutationId && stored.createdAt >= memoryEntry.createdAt) {
+            discountTypeOutboxOwned.delete(tradeId);
+          }
+        }
+      } else if (!stored) {
+        discountTypeOutboxMemory.delete(tradeId);
+      }
+    }
+    Object.entries(outbox).forEach(([tradeId, entry]) => discountTypeOutboxMemory.set(tradeId, entry));
+    if ((repairStorageIds.length || storageNeedsRewrite) && !writeDiscountTypeOutbox_(outbox)) {
+      repairStorageIds.forEach((tradeId) => discountTypeOutboxMemoryOnly.add(tradeId));
+    }
+    return outbox;
+  } catch {
+    // storage 접근/파싱 자체가 실패한 경우에만 현재 탭 메모리를 fallback으로 쓴다.
+    return Object.fromEntries(discountTypeOutboxMemory);
+  }
+}
+
+function writeDiscountTypeOutbox_(outbox: Record<string, DiscountTypeOutboxEntry>): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    if (Object.keys(outbox).length) window.localStorage.setItem(DISCOUNT_TYPE_OUTBOX_KEY, JSON.stringify(outbox));
+    else window.localStorage.removeItem(DISCOUNT_TYPE_OUTBOX_KEY);
+    return true;
+  } catch {
+    return false; // private mode/quota에서도 현재 탭 메모리 큐는 계속 동작
+  }
+}
+
+function putDiscountTypeOutbox_(entry: DiscountTypeOutboxEntry): boolean {
+  const outbox = readDiscountTypeOutbox_();
+  const acknowledged = readDiscountTypeOutboxAcks_()[entry.tradeId];
+  if (acknowledged && acknowledged.createdAt >= entry.createdAt) return false;
+  const current = outbox[entry.tradeId];
+  if (current && current.mutationId !== entry.mutationId && current.createdAt >= entry.createdAt) {
+    discountTypeOutboxMemory.set(entry.tradeId, current);
+    return false;
+  }
+  outbox[entry.tradeId] = entry;
+  discountTypeOutboxMemory.set(entry.tradeId, entry);
+  discountTypeOutboxOwned.set(entry.tradeId, entry.mutationId);
+  if (writeDiscountTypeOutbox_(outbox)) discountTypeOutboxMemoryOnly.delete(entry.tradeId);
+  else discountTypeOutboxMemoryOnly.add(entry.tradeId);
+  return true;
+}
+
+function acknowledgeDiscountTypeOutbox_(tradeId: string, mutationId: string): boolean {
+  const outbox = readDiscountTypeOutbox_();
+  const current = outbox[tradeId];
+  if (!current || current.mutationId !== mutationId) return false;
+  const memoryOnly = discountTypeOutboxMemoryOnly.has(tradeId);
+  if (!recordDiscountTypeOutboxAck_(current) && !memoryOnly) return false;
+  delete outbox[tradeId];
+  if (discountTypeOutboxOwned.get(tradeId) === mutationId) discountTypeOutboxOwned.delete(tradeId);
+  if (discountTypeOutboxMemory.get(tradeId)?.mutationId === mutationId) discountTypeOutboxMemory.delete(tradeId);
+  discountTypeOutboxMemoryOnly.delete(tradeId);
+  writeDiscountTypeOutbox_(outbox);
+  const timers = discountTypeProjectionTimers[tradeId] ?? [];
+  timers.forEach((timer) => clearTimeout(timer));
+  delete discountTypeProjectionTimers[tradeId];
+  return true;
+}
+
+/** 기기 시계가 뒤로 보정돼도 공유 ACK보다 반드시 큰 로컬 순번을 만든다. */
+function nextDiscountTypeOutboxCreatedAt_(tradeId: string, current?: DiscountTypeOutboxEntry): number {
+  const acknowledged = readDiscountTypeOutboxAcks_()[tradeId];
+  const remembered = discountTypeOutboxMemory.get(tradeId);
+  return Math.max(
+    Date.now(),
+    (current?.createdAt ?? 0) + 1,
+    (remembered?.createdAt ?? 0) + 1,
+    (acknowledged?.createdAt ?? 0) + 1,
+  );
+}
+
+/** GAS 정본과 dirty worker의 Supabase 투영을 따로 확인한다. 문자열 일치만으로 ACK하면
+ * 변경 전부터 우연히 같은 값이던 오래된 snapshot을 새 mutation 투영으로 오인할 수 있다. */
+async function verifyDiscountTypeProjection_(entry: DiscountTypeOutboxEntry): Promise<void> {
+  const existing = discountTypeProjectionChecksInFlight[entry.tradeId];
+  if (existing) return existing;
+  const task = (async () => {
+    try {
+      const raw = await gasMutationRetrying("getTradeDiscountState", { tid: entry.tradeId, nocache: 1 });
+      const res = raw?.result || raw || {};
+      const current = readDiscountTypeOutbox_()[entry.tradeId];
+      if (current?.mutationId !== entry.mutationId || current.phase !== "projection_pending") return;
+      if (res.success !== true || !Object.prototype.hasOwnProperty.call(res, "discountType")) return;
+
+      const canonicalDiscountType = String(res.discountType || "").trim();
+      const canonicalRevision = Math.max(0, Number(res.serverRevision) || 0);
+      const receiptRevision = Math.max(0, Number(current.serverRevision) || 0);
+      const superseded = canonicalDiscountType !== current.discountType || (
+        receiptRevision > 0 && canonicalRevision > receiptRevision
+      );
+      if (superseded) {
+        if (!acknowledgeDiscountTypeOutbox_(entry.tradeId, entry.mutationId)) return;
+        const latest = state.trades.find((trade) => trade.tradeId === entry.tradeId);
+        if (latest?.discountType === current.discountType) {
+          mutateTrade(entry.tradeId, (trade) => ({
+            ...trade,
+            discountType: canonicalDiscountType,
+            contractRegenPending: res.projectedContractRegenPending !== undefined
+              ? !!res.projectedContractRegenPending
+              : true,
+          }), false);
+        }
+        showTransientError("⚠️ 다른 직원의 최신 할인유형을 반영했습니다");
+        return;
+      }
+
+      const revisionConfirmed = receiptRevision === 0 || canonicalRevision >= receiptRevision;
+      if (revisionConfirmed && res.projectionReady === true) {
+        if (!acknowledgeDiscountTypeOutbox_(entry.tradeId, entry.mutationId)) return;
+        const latest = state.trades.find((trade) => trade.tradeId === entry.tradeId);
+        if (latest?.discountType === current.discountType) {
+          mutateTrade(entry.tradeId, (trade) => ({
+            ...trade,
+            discountType: canonicalDiscountType,
+            contractRegenPending: !!res.projectedContractRegenPending,
+          }), false);
+        }
+      }
+    } catch {
+      // 원장은 이미 성공했다. 확인 실패는 다음 snapshot/예약 확인에서 조용히 재시도한다.
+    }
+  })();
+  discountTypeProjectionChecksInFlight[entry.tradeId] = task;
+  void task.finally(() => {
+    if (discountTypeProjectionChecksInFlight[entry.tradeId] === task) {
+      delete discountTypeProjectionChecksInFlight[entry.tradeId];
+    }
+  });
+  return task;
+}
+
+/** Supabase가 원장 dirty worker를 따라올 때까지 할인 필드만 보호한다. 다른 필드는 즉시 수렴한다. */
+function applyDiscountTypeOutboxOverlay_(
+  next: Trade,
+  _previous?: Trade,
+  outbox = readDiscountTypeOutbox_(),
+): Trade {
+  const entry = outbox[next.tradeId];
+  if (!entry) return next;
+  if (entry.phase === "projection_pending") void verifyDiscountTypeProjection_(entry);
+  if ((next.discountType || "") === entry.discountType) return { ...next, contractRegenPending: true };
+  return { ...next, discountType: entry.discountType, contractRegenPending: true };
+}
+
+function scheduleDiscountTypeProjectionChecks_(entry: DiscountTypeOutboxEntry): void {
+  if (typeof window === "undefined") return;
+  (discountTypeProjectionTimers[entry.tradeId] ?? []).forEach((timer) => clearTimeout(timer));
+  const verify = () => void verifyDiscountTypeProjection_(entry);
+  discountTypeProjectionTimers[entry.tradeId] = [
+    window.setTimeout(verify, 2_000),
+    window.setTimeout(verify, 12_000),
+    window.setTimeout(() => {
+      void verifyDiscountTypeProjection_(entry).finally(() => {
+        const current = readDiscountTypeOutbox_()[entry.tradeId];
+        if (current?.mutationId !== entry.mutationId || current.phase !== "projection_pending") return;
+        showTransientError("⚠️ 할인유형은 원장에 반영됐고 앱 화면 동기화를 계속 확인 중입니다");
+      });
+    }, 60_000),
+  ];
+}
+
+function replayDiscountTypeOutboxes_(initialDelay = 0): void {
+  if (typeof window === "undefined" || !isSupabase || !writeBackEnabled) return;
+  Object.values(readDiscountTypeOutbox_()).forEach((entry, index) => {
+    discountTypeOutboxMemory.set(entry.tradeId, entry);
+    const current = state.trades.find((trade) => trade.tradeId === entry.tradeId);
+    if (current && current.discountType !== entry.discountType) {
+      mutateTrade(entry.tradeId, (trade) => ({ ...trade, discountType: entry.discountType, contractRegenPending: true }), false);
+    }
+    if (entry.phase === "projection_pending") {
+      window.setTimeout(() => scheduleDiscountTypeProjectionChecks_(entry), initialDelay + index * 120);
+    } else {
+      discountTypePersistTargets[entry.tradeId] = entry;
+      window.setTimeout(() => queueDiscountTypePersist(entry.tradeId), initialDelay + index * 120);
+    }
+  });
+}
+
+/** 최신 할인 목표만 거래별로 직렬 확정한다. 이 함수는 UI savingTrades를 건드리지 않는다. */
+function queueDiscountTypePersist(tradeId: string): void {
+  if (!isSupabase) return;
+  if (discountTypePersistRetryTimers[tradeId]) {
+    clearTimeout(discountTypePersistRetryTimers[tradeId]);
+    delete discountTypePersistRetryTimers[tradeId];
+  }
+  if (!discountTypePersistTargets[tradeId]) {
+    const stored = readDiscountTypeOutbox_()[tradeId];
+    if (stored?.phase === "projection_pending") {
+      scheduleDiscountTypeProjectionChecks_(stored);
+      return;
+    }
+    if (stored) discountTypePersistTargets[tradeId] = stored;
+  }
+  if (!discountTypePersistTargets[tradeId]) return;
+  if (discountTypePersistInFlight[tradeId]) return;
+
+  const task = (async () => {
+    while (discountTypePersistTargets[tradeId]) {
+      const entry = discountTypePersistTargets[tradeId]!;
+      delete discountTypePersistTargets[tradeId];
+      try {
+        if (!writeBackEnabled) throw new Error(writeBackDisabledReason);
+        const raw = await gasMutationRetrying("updateTradeDiscount", {
+          tid: tradeId,
+          discountType: entry.discountType,
+          previousDiscountType: entry.previousDiscountType ?? "",
+          previousDiscountTypes: JSON.stringify(entry.previousDiscountTypes),
+          mutationId: entry.mutationId,
+          mutationCreatedAt: entry.createdAt,
+          clientInstanceId: entry.clientInstanceId,
+          clientSequence: entry.clientSequence,
+        });
+        const res = raw?.result || raw || {};
+        if (res?.skipped) throw new Error(writeBackDisabledReason);
+        if (res.success !== true || !Object.prototype.hasOwnProperty.call(res, "discountType")) {
+          throw new Error(String(res.error || "할인유형 원장 저장을 확인하지 못했습니다"));
+        }
+
+        // 전송 중 사용자가 다시 골랐으면 옛 응답으로 최신 선택을 덮지 않는다.
+        if (readDiscountTypeOutbox_()[tradeId]?.mutationId !== entry.mutationId) continue;
+        const canonicalDiscountType = String(res.discountType || "").trim();
+        if (canonicalDiscountType !== entry.discountType) {
+          if (!acknowledgeDiscountTypeOutbox_(tradeId, entry.mutationId)) continue;
+          const latest = state.trades.find((trade) => trade.tradeId === tradeId);
+          if (latest?.discountType === entry.discountType) {
+            mutateTrade(tradeId, (trade) => ({ ...trade, discountType: canonicalDiscountType }), false);
+          }
+          showTransientError("⚠️ 다른 직원의 최신 할인유형을 반영했습니다");
+          continue;
+        }
+
+        // 원장은 확정됐다. 이후 Supabase/계약서 투영 지연은 GAS dirty worker가 담당하며,
+        // 이 영수증은 할인 필드만 보호한다. 원장 요청은 절대 다시 보내지 않는다.
+        const receipt: DiscountTypeOutboxEntry = {
+          ...entry,
+          phase: "projection_pending",
+          attempts: 0,
+          serverRevision: Math.max(0, Number(res.serverRevision) || 0) || undefined,
+        };
+        if (putDiscountTypeOutbox_(receipt)) scheduleDiscountTypeProjectionChecks_(receipt);
+      } catch (error) {
+        const current = readDiscountTypeOutbox_()[tradeId];
+        if (!current || current.mutationId !== entry.mutationId) continue;
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isRetryableLedgerError(error)) {
+          if (!acknowledgeDiscountTypeOutbox_(tradeId, entry.mutationId)) continue;
+          const latest = state.trades.find((trade) => trade.tradeId === tradeId);
+          if (latest?.discountType === entry.discountType) {
+            mutateTrade(tradeId, (trade) => ({
+              ...trade,
+              discountType: entry.previousDiscountType,
+              contractRegenPending: entry.previousContractRegenPending,
+            }), false);
+          }
+          showTransientError(`⚠️ 할인유형 변경 실패 — ${message}`);
+          continue;
+        }
+
+        const retry = { ...entry, attempts: entry.attempts + 1 };
+        if (!putDiscountTypeOutbox_(retry)) continue;
+        discountTypePersistTargets[tradeId] = retry;
+        if (retry.attempts === 1) {
+          showTransientError("⚠️ 할인유형 저장이 지연되어 자동 재시도 중입니다");
+        }
+        const delay = Math.min(30_000, 1_000 * 2 ** Math.min(retry.attempts - 1, 5));
+        discountTypePersistRetryTimers[tradeId] = setTimeout(() => {
+          delete discountTypePersistRetryTimers[tradeId];
+          queueDiscountTypePersist(tradeId);
+        }, delay);
+        break;
+      }
+    }
+  })();
+  discountTypePersistInFlight[tradeId] = task;
+  void task.finally(() => {
+    if (discountTypePersistInFlight[tradeId] === task) delete discountTypePersistInFlight[tradeId];
+    if (discountTypePersistTargets[tradeId] && !discountTypePersistRetryTimers[tradeId]) queueDiscountTypePersist(tradeId);
+    maybeResumeRealtimeFlush();
+  });
+}
+
+/** 등록된 거래의 할인유형 변경 — 선택 즉시 끝내고, 원장·Supabase·계약서 수렴은 내구 큐가 뒤에서 처리한다. */
+export async function setDiscountType(tradeId: string, discountType: string): Promise<boolean> {
+  if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) {
+    showTransientError("⚠️ 이 거래의 상태 전환을 저장 중입니다. 완료 후 다시 시도해주세요");
+    return false;
+  }
+  const current = state.trades.find((trade) => trade.tradeId === tradeId);
   if (!current) return false;
   if ((current.discountType || "") === discountType) return true;
+  if (!DISCOUNT_TYPE_OPTIONS.includes(discountType)) {
+    showTransientError("⚠️ 지원하지 않는 할인유형입니다");
+    return false;
+  }
   if (isSupabase && !writeBackEnabled) {
     showTransientError(`⚠️ 할인유형 변경 실패: ${writeBackDisabledReason}`);
     return false;
   }
-  const previous = { discountType: current.discountType, contractRegenPending: current.contractRegenPending };
-  mutateTrade(tradeId, (t) => ({ ...t, discountType, contractRegenPending: true }), false);
-  const saveId = isSupabase ? beginTradeTransition(tradeId) : 0;
-  if (!isSupabase) flashSave(tradeId);
-  if (!isSupabase) return true;
-  let ledgerCommitted = false;
-  try {
-    const res = await gasMutationRetrying("updateTradeDiscount", { tid: tradeId, discountType });
-    if (res?.skipped) throw new Error(writeBackDisabledReason);
-    ledgerCommitted = true;
-    if (res?.unchanged) mutateTrade(tradeId, (t) => ({ ...t, contractRegenPending: previous.contractRegenPending }), false);
-    const latest = state.trades.find((t) => t.tradeId === tradeId);
-    if (latest) schedulePersistTrade(latest, current);
-    await flushTradePersist(tradeId);
-    // 재생성 워커가 새 계약서·금액을 만들면 폴링이 contractUrlChanged/amountFix로 수렴시킨다
-    if (typeof window !== "undefined") {
-      window.setTimeout(() => void pollSheetChangesNow({ mode: "light", resetBackoff: false }), 12_000);
-    }
-    finishTradeSave(tradeId, saveId, "saved", "할인유형 저장됨");
-    return true;
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    if (ledgerCommitted) {
-      finishTradeSave(tradeId, saveId, "error", "⚠️ 원장에는 반영됐고 앱 동기화를 자동 재시도 중입니다");
+
+  if (isSupabase) {
+    const existing = readDiscountTypeOutbox_()[tradeId];
+    const previousDiscountTypes = Array.from(new Set([
+      ...(existing?.previousDiscountTypes ?? []),
+      existing?.previousDiscountType ?? "",
+      existing?.discountType ?? "",
+      current.discountType ?? "",
+    ].map((value) => String(value)))).slice(-8);
+    const entry: DiscountTypeOutboxEntry = {
+      tradeId,
+      discountType,
+      previousDiscountType: current.discountType,
+      previousDiscountTypes,
+      previousContractRegenPending: !!current.contractRegenPending,
+      mutationId: createLedgerMutationId("discount"),
+      clientInstanceId: discountTypeClientInstanceId,
+      clientSequence: ++discountTypeClientSequence,
+      createdAt: nextDiscountTypeOutboxCreatedAt_(tradeId, existing),
+      attempts: 0,
+      phase: "ledger_pending",
+    };
+    if (!putDiscountTypeOutbox_(entry)) {
+      const latestEntry = readDiscountTypeOutbox_()[tradeId];
+      if (latestEntry) {
+        mutateTrade(tradeId, (trade) => ({ ...trade, discountType: latestEntry.discountType, contractRegenPending: true }), false);
+        if (latestEntry.phase === "ledger_pending") {
+          discountTypePersistTargets[tradeId] = latestEntry;
+          queueDiscountTypePersist(tradeId);
+        } else scheduleDiscountTypeProjectionChecks_(latestEntry);
+      }
+      flashSave(tradeId);
       return true;
     }
-    mutateTrade(tradeId, (t) => ({ ...t, ...previous }), false);
-    finishTradeSave(tradeId, saveId, "error", `⚠️ 할인유형 변경 실패 — ${message}`);
-    return false;
+    discountTypePersistTargets[tradeId] = entry;
   }
+  mutateTrade(tradeId, (trade) => ({ ...trade, discountType, contractRegenPending: true }), false);
+  flashSave(tradeId);
+  if (isSupabase) queueDiscountTypePersist(tradeId);
+  return true;
 }
 
 export async function sendEstimate(tradeId: string): Promise<boolean> {
