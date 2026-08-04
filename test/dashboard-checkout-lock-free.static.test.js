@@ -89,18 +89,13 @@ assert.doesNotMatch(
 );
 assert.match(
   card,
-  /done\s*\?\s*"반출 완료됨"\s*:\s*saving\s*\?\s*"상태 변경 중…"/,
+  /done\s*\?\s*"반출 완료됨"\s*:\s*"반출 완료"/,
   '클릭 직후 반출완료 상태를 최우선으로 표시해야 한다'
 );
 assert.doesNotMatch(
   card,
-  /반출 완료됨 · 저장 확인 중|반출 처리 중|저장 중…/,
+  /\bsaving\b|백그라운드 동기화|상태 변경 중|반출 완료됨 · 저장 확인 중|반출 처리 중|저장 중…/,
   '느린 원격 확인이 사용자의 완료 처리를 계속 저장 중처럼 보이게 하면 안 된다'
-);
-assert.match(
-  card,
-  /saving[\s\S]{0,160}백그라운드 동기화/,
-  '원격 확인은 카드 완료 상태와 분리된 보조 정보로만 보여야 한다'
 );
 
 assert.doesNotMatch(

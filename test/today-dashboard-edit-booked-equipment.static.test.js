@@ -45,8 +45,14 @@ assert(
 assert(
   /export function isCheckoutBaselineLocked\(t: Trade\)/.test(status) &&
     /const destructiveLocked = isCheckoutBaselineLocked\(trade\)/.test(tradeActions) &&
-    /disabled=\{busy \|\| cancelling \|\| deleting \|\| destructiveLocked\}/.test(tradeActions),
+    /disabled=\{cancelling \|\| deleting \|\| destructiveLocked\}/.test(tradeActions) &&
+    !/\bbusy\b/.test(tradeActions),
   'checkout completion must preserve the handover record by locking destructive trade actions'
+);
+assert(
+  /export function isTradeDestructiveActionBlocked[\s\S]*hasTradePending\(tradeId\)/.test(store) &&
+    (tradeActions.match(/isTradeDestructiveActionBlocked\(trade\.tradeId\)/g) || []).length === 2,
+  'permanent deletion must recheck pending ledger writes without restoring whole-card busy'
 );
 assert(
   !checklist.includes('반출 기준선 원본 보존') &&
