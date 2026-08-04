@@ -52,6 +52,70 @@ assert.match(
 
 assert.match(
   route,
+  /import \{ revalidateTag, unstable_cache \} from "next\/cache"[\s\S]*import \{ createHash \} from "node:crypto"[\s\S]*const PERSISTENT_PHOTO_CACHE_TAG = "dashboard-photos-v1"/,
+  'authenticated photo reads must use the shared Next data cache rather than only an instance-local Map'
+);
+
+assert.match(
+  route,
+  /unstable_cache\([\s\S]*revalidate:\s*30[\s\S]*tags:\s*\[PERSISTENT_PHOTO_CACHE_TAG\]/,
+  'shared photo metadata must revalidate in the background every 30 seconds'
+);
+
+assert.match(
+  route,
+  /function isCacheablePhotoBody[\s\S]*result\.photosByTrade[\s\S]*request\.tradeIds\.every[\s\S]*validPhotoBucket_/,
+  'persistent photo reads must reject nested warnings, errors, and missing requested trades'
+);
+
+assert.match(
+  route,
+  /createHash\("sha256"\)\.update\(queryString\)\.digest\("hex"\)[\s\S]*\["gas-photo-read-v2", queryFingerprint\]/,
+  'the persistent cache key must contain only a fingerprint, never the GAS key or trade IDs'
+);
+
+assert.doesNotMatch(
+  route,
+  /unstable_cache\([\s\S]{0,900}async \(url: string\)|readPersistentlyCachedPhotoResponse\(url\)/,
+  'sensitive upstream URLs must never be passed as unstable_cache invocation arguments'
+);
+
+assert.match(
+  route,
+  /photoWrite[\s\S]*revalidateTag\(PERSISTENT_PHOTO_CACHE_TAG\)/,
+  'successful photo changes must invalidate every serverless instance photo cache'
+);
+
+assert.match(
+  route,
+  /\.finally\(\(\) => \{[\s\S]*if \(photoWrite\) invalidateCacheForWrite\(action\)[\s\S]*finally \{[\s\S]*if \(photoWrite\) invalidateCacheForWrite\(action\)/,
+  'GET and POST photo writes must invalidate shared cache even when only the response is lost'
+);
+
+assert.match(
+  route,
+  /const photoRead = isPhotoReadAction\(action\)[\s\S]*if \(!isWrite && !noCache && !photoRead\)[\s\S]*if \(!isWrite && !noCache && photoRead\)/,
+  'photo reads must bypass the instance-local Map so cross-instance invalidation cannot be skipped'
+);
+
+const persistentPhotoBranch = route.slice(
+  route.indexOf('if (!isWrite && !noCache && photoRead)'),
+  route.indexOf('\n  return fetch(url', route.indexOf('if (!isWrite && !noCache && photoRead)')),
+);
+assert.doesNotMatch(
+  persistentPhotoBranch,
+  /cache\.get\(|cache\.set\(/,
+  'the persistent photo branch must not read or repopulate an instance-local stale cache'
+);
+
+assert.doesNotMatch(
+  route,
+  /s-maxage|stale-while-revalidate/i,
+  'authenticated photo metadata must not be exposed through a public CDN cache header'
+);
+
+assert.match(
+  route,
   /WRITE_ACTIONS[\s\S]{0,360}"uploadDashboardPhoto"/,
   'Next GAS proxy must allow dashboard photo uploads'
 );
@@ -100,6 +164,54 @@ assert.match(
 
 assert.match(
   store,
+  /const PHOTO_LOAD_FRESH_MS\s*=\s*30_000[\s\S]*const photoLoadStates = new Map[\s\S]*const photoLoadPromises = new Map/,
+  'photo loading must track freshness and share the same in-flight request per trade'
+);
+
+assert.match(
+  store,
+  /async function loadTradePhotosBatch_[\s\S]*successfulPhotoMap[\s\S]*failedTradeIds/,
+  'one bad trade must not discard successful photos for the rest of its batch'
+);
+
+assert.match(
+  store,
+  /for \(let i = 0; i < ids\.length; i \+= DASHBOARD_PHOTO_BATCH_SIZE\)[\s\S]*mergeTradePhotosFromGas\(successfulPhotoMap\)[\s\S]*emit\(\)/,
+  'each completed photo chunk must render immediately instead of waiting for every later GAS roundtrip'
+);
+
+assert.match(
+  store,
+  /const pending = photoLoadPromises\.get\(id\)[\s\S]*joined\.add\(pending\)/,
+  'card preload and modal open must join an existing request instead of racing a duplicate'
+);
+
+assert.match(
+  store,
+  /photoLoadPromiseGenerations[\s\S]*pendingIsFreshEnough[\s\S]*>= requiredGeneration[\s\S]*force && !pendingIsFreshEnough[\s\S]*loadTradePhotosBatch_\(forceAfterIds, true, forceAfterGenerations\)/,
+  'a forced refresh must follow any in-flight read that predates its causal generation'
+);
+
+assert.match(
+  store,
+  /requestGenerations[\s\S]*photoLoadGeneration_\(tradeId\) !== requestGenerations\.get\(tradeId\)[\s\S]*continue/,
+  'a photo list read started before an upload or delete must not overwrite the newer local truth'
+);
+
+assert.match(
+  store,
+  /event: "photo-change"[\s\S]*state\.trades\.some\(\(t\) => t\.tradeId === tradeId\)[\s\S]*loadTradePhotosBatch_\(\[tradeId\], true\)/,
+  'every visible trade must causally refresh on a remote photo change, including initial loading and error states'
+);
+
+assert.match(
+  store,
+  /force \? \{ nocache: "1" \} : \{\}/,
+  'explicit photo retry and broadcast refresh must bypass stale proxy cache'
+);
+
+assert.match(
+  store,
   /export async function uploadTradePhoto\(tradeId: string, phase: Phase, file: File\)/,
   'store must expose a real photo upload action'
 );
@@ -124,14 +236,14 @@ assert.match(
 
 assert.match(
   photoStrip,
-  /const photosLoaded = useTradePhotosLoaded\(tradeId\)/,
-  'PhotoStrip must subscribe to the per-trade photo loading state'
+  /const photoLoad = useTradePhotoLoadState\(tradeId\)[\s\S]{0,100}const photosLoaded = photoLoad\.loaded/,
+  'PhotoStrip must subscribe to the full per-trade photo loading state'
 );
 
 assert.match(
   photoStrip,
-  /photosLoaded \? `반출 \$\{checkout\.length\} · 반납 \$\{checkin\.length\}` : "불러오는 중…"/,
-  'PhotoStrip must show an honest loading label instead of a false 0/0 count'
+  /photosLoaded[\s\S]{0,180}`반출 \$\{checkout\.length\} · 반납 \$\{checkin\.length\}`[\s\S]{0,180}photoLoad\.error[\s\S]{0,100}"불러오기 실패"/,
+  'PhotoStrip must distinguish ready, loading, and failed photo reads'
 );
 
 // 2026-07-12: 사장 요청으로 카메라 강제(capture="environment")를 제거 —
@@ -180,8 +292,23 @@ assert.ok(
 
 assert.match(
   photoStrip,
-  /refreshTradePhotos\(tradeId\)/,
-  'PhotoStrip must load already saved photos when opened'
+  /ensureTradePhotos\(\[tradeId\]\)[\s\S]*retryPhotoLoad[\s\S]*refreshTradePhotos\(tradeId\)/,
+  'PhotoStrip must reuse fresh preloaded photos and reserve forced reads for explicit retry'
+);
+
+const photoOpenEffect = photoStrip.slice(
+  photoStrip.indexOf('useEffect(() => {\n    if (!open) return;'),
+  photoStrip.indexOf('\n  }, [open, tradeId]);', photoStrip.indexOf('useEffect(() => {\n    if (!open) return;')),
+);
+assert.match(
+  photoOpenEffect,
+  /ensureTradePhotos\(\[tradeId\]\)/,
+  'opening the modal must only freshness-check the already batched photo state'
+);
+assert.doesNotMatch(
+  photoOpenEffect,
+  /setLoading\(true\)|refreshTradePhotos\(tradeId\)/,
+  'opening a preloaded modal must not block on another 3-5 second GAS read'
 );
 
 assert.match(

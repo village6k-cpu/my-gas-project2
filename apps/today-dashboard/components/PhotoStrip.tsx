@@ -6,11 +6,12 @@ import type { Phase, PhotoMeta } from "@/lib/domain/types";
 import {
   deleteTradePhoto,
   discardTradePhotoUpload,
+  ensureTradePhotos,
   getPhotoPreview,
   refreshTradePhotos,
   retryTradePhotoUpload,
   uploadTradePhoto,
-  useTradePhotosLoaded,
+  useTradePhotoLoadState,
 } from "@/lib/data/store";
 import { Camera } from "./icons";
 
@@ -142,32 +143,36 @@ export function PhotoStrip({
   showThumbnails?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [retryingLoad, setRetryingLoad] = useState(false);
   const [preparing, setPreparing] = useState<Phase | null>(null);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const nextPhaseRef = useRef<Phase>("checkout");
-  const photosLoaded = useTradePhotosLoaded(tradeId);
+  const photoLoad = useTradePhotoLoadState(tradeId);
+  const photosLoaded = photoLoad.loaded;
 
   const checkout = photos.filter((p) => p.phase === "checkout");
   const checkin = photos.filter((p) => p.phase === "checkin");
 
   useEffect(() => {
     if (!open) return;
-    let alive = true;
-    setLoading(true);
     setError("");
-    refreshTradePhotos(tradeId)
-      .catch((err) => {
-        if (alive) setError(err instanceof Error ? err.message : "사진을 불러오지 못했습니다");
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
+    // ScheduleCard가 이미 batch preload한 사진은 즉시 쓴다. 30초 freshness가 지난
+    // 경우에만 store가 백그라운드 재검증하고, 기존 사진을 가리는 spinner는 띄우지 않는다.
+    ensureTradePhotos([tradeId]);
   }, [open, tradeId]);
+
+  const retryPhotoLoad = async () => {
+    setRetryingLoad(true);
+    setError("");
+    try {
+      await refreshTradePhotos(tradeId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "사진을 불러오지 못했습니다");
+    } finally {
+      setRetryingLoad(false);
+    }
+  };
 
   const pickPhoto = (phase: Phase) => {
     nextPhaseRef.current = phase;
@@ -213,8 +218,22 @@ export function PhotoStrip({
               <button onClick={() => setOpen(false)} className="tap rounded-lg px-2 py-1 text-ink-mute">닫기</button>
             </div>
 
-            {error && <div className="mb-3 rounded-xl bg-attention-bg px-3 py-2 text-[12px] font-semibold text-attention-fg">{error}</div>}
-            {(loading || !photosLoaded) && <div className="mb-3 text-[12px] font-semibold text-ink-faint">사진 불러오는 중…</div>}
+            {(error || photoLoad.error) && (
+              <div className="mb-3 flex items-center justify-between gap-3 rounded-xl bg-attention-bg px-3 py-2 text-[12px] font-semibold text-attention-fg">
+                <span>{error || photoLoad.error}</span>
+                <button
+                  type="button"
+                  onClick={retryPhotoLoad}
+                  disabled={retryingLoad || photoLoad.loading}
+                  className="tap shrink-0 rounded-lg bg-white/80 px-2 py-1 font-bold disabled:opacity-50"
+                >
+                  {retryingLoad ? "재시도 중…" : "다시 불러오기"}
+                </button>
+              </div>
+            )}
+            {photoLoad.loading && !photosLoaded && (
+              <div className="mb-3 text-[12px] font-semibold text-ink-faint">사진 불러오는 중…</div>
+            )}
 
             {PHASES.map((phase) => {
               const ps = photos.filter((p) => p.phase === phase);
@@ -263,7 +282,11 @@ export function PhotoStrip({
           <Camera className="h-4 w-4" />
           사진
           <span className="text-ink-faint">
-            {photosLoaded ? `반출 ${checkout.length} · 반납 ${checkin.length}` : "불러오는 중…"}
+            {photosLoaded
+              ? `반출 ${checkout.length} · 반납 ${checkin.length}`
+              : photoLoad.error
+                ? "불러오기 실패"
+                : "불러오는 중…"}
           </span>
         </button>
         {showThumbnails && (
