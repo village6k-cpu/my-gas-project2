@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const ts = require("typescript");
 
 const appRoot = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(appRoot, file), "utf8");
@@ -19,7 +20,9 @@ test("쓰기 액션 후 관련 읽기 캐시만 선별 무효화한다 (GET·POS
   const callGet = sourceFunction(route, "async function callGet", "\nasync function callPost");
   const callPost = sourceFunction(route, "async function callPost", "\nexport async function GET");
   assert.match(callGet, /if \(isWrite\) \{[\s\S]*?invalidateCacheForWrite\(action\)/, "GET 쓰기 경로에서 관련 캐시를 비워야 한다");
-  assert.match(callPost, /if \(isWrite\) invalidateCacheForWrite\(action\)/, "POST 쓰기 경로에서 관련 캐시를 비워야 한다");
+  assert.match(callPost, /if \(isWrite && !photoWrite\) invalidateCacheForWrite\(action\)/, "POST 일반 쓰기 경로에서 관련 캐시를 비워야 한다");
+  assert.match(callPost, /finally \{[\s\S]*if \(photoWrite\) invalidateCacheForWrite\(action\)/,
+    "POST 사진 쓰기는 응답 유실 때도 공유 캐시를 비워야 한다");
   // 전체 clear는 연속 쓰기 중 사진/카탈로그 캐시까지 전멸시키므로 금지
   assert.doesNotMatch(callGet, /cache\.clear\(\)/, "쓰기마다 캐시 전체 clear 금지 (선별 무효화)");
   assert.doesNotMatch(callPost, /cache\.clear\(\)/, "쓰기마다 캐시 전체 clear 금지 (선별 무효화)");
@@ -46,7 +49,8 @@ test("nocache=1 요청은 프록시 캐시를 우회하되 GAS로는 파라미�
   const route = read("app/api/gas/route.ts");
   const callGet = sourceFunction(route, "async function callGet", "\nasync function callPost");
   assert.match(callGet, /sp\.get\("nocache"\)/, "nocache 파라미터를 해석해야 한다");
-  assert.match(callGet, /if \(!isWrite && !noCache\)/, "nocache면 캐시 조회를 건너뛰어야 한다");
+  assert.match(callGet, /if \(!isWrite && !noCache && !photoRead\)/, "nocache면 인스턴스 캐시 조회를 건너뛰어야 한다");
+  assert.match(callGet, /if \(!isWrite && !noCache && photoRead\)/, "nocache면 공유 사진 캐시도 건너뛰어야 한다");
   assert.match(callGet, /r\.ok && !noCache && isCacheableBody\(body\)/, "nocache면 응답도 캐시하지 않아야 한다");
   // qs는 sp 전체 복사라 nocache가 GAS로 전달됨 — 삭제 코드가 없어야 한다
   assert.doesNotMatch(callGet, /qs\.delete\("nocache"\)/, "GAS 자체 CacheService 우회용 nocache는 전달을 유지한다");
@@ -63,7 +67,7 @@ test("에러 응답은 캐시하지 않고 업스트림 상태를 전파한다",
 
 test("isCacheableBody: 정상 JSON만 캐시 대상 — {error:...}·HTML은 제외", () => {
   const route = read("app/api/gas/route.ts");
-  const source = sourceFunction(route, "function isCacheableBody", "\n// 읽기 액션 화이트리스트")
+  const source = sourceFunction(route, "function isCacheableBody", "\nfunction requestedPhotoTradeIds_")
     .replace(/\(body: string\): boolean/, "(body)")
     .replace(/const parsed: unknown =/, "const parsed =");
   const context = {};
@@ -71,6 +75,51 @@ test("isCacheableBody: 정상 JSON만 캐시 대상 — {error:...}·HTML은 제
   assert.equal(context.isCacheableBody(JSON.stringify({ trades: [] })), true);
   assert.equal(context.isCacheableBody(JSON.stringify({ error: "쿼터 초과", stack: "..." })), false);
   assert.equal(context.isCacheableBody("<html><body>Error</body></html>"), false);
+});
+
+test("사진 공유 캐시는 요청 거래가 모두 있고 nested warning/error가 없는 정본만 저장한다", () => {
+  const route = read("app/api/gas/route.ts");
+  const requestedIds = sourceFunction(route, "function requestedPhotoTradeIds_", "\nfunction validPhotoBucket_");
+  const validBucket = sourceFunction(route, "function validPhotoBucket_", "\n// 사진 GAS는");
+  const cacheablePhoto = sourceFunction(route, "function isCacheablePhotoBody", "\n// 읽기 액션 화이트리스트");
+  const runnable = ts.transpileModule(`${requestedIds}\n${validBucket}\n${cacheablePhoto}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const context = { URLSearchParams };
+  vm.runInNewContext(`${runnable}\nthis.isCacheablePhotoBody = isCacheablePhotoBody;`, context);
+
+  const singleQuery = new URLSearchParams({ action: "dashboardPhotos", tid: "260804-001" }).toString();
+  assert.equal(context.isCacheablePhotoBody(JSON.stringify({
+    success: true,
+    tid: "260804-001",
+    photos: { checkout: [], checkin: [], other: [] },
+  }), singleQuery), true);
+  assert.equal(context.isCacheablePhotoBody(JSON.stringify({
+    success: true,
+    tid: "260804-001",
+    photos: { checkout: [], checkin: [], other: [], warning: "시트 조회 실패" },
+  }), singleQuery), false);
+
+  const batchQuery = new URLSearchParams({
+    action: "dashboardPhotosBatch",
+    tids: JSON.stringify(["260804-001", "260804-002"]),
+  }).toString();
+  const goodBucket = { checkout: [], checkin: [], other: [] };
+  assert.equal(context.isCacheablePhotoBody(JSON.stringify({
+    success: true,
+    photosByTrade: { "260804-001": goodBucket, "260804-002": goodBucket },
+  }), batchQuery), true);
+  assert.equal(context.isCacheablePhotoBody(JSON.stringify({
+    success: true,
+    photosByTrade: { "260804-001": goodBucket },
+  }), batchQuery), false, "요청 거래 하나라도 누락되면 캐시하면 안 된다");
+  assert.equal(context.isCacheablePhotoBody(JSON.stringify({
+    success: true,
+    photosByTrade: {
+      "260804-001": goodBucket,
+      "260804-002": { ...goodBucket, error: "Drive 조회 실패" },
+    },
+  }), batchQuery), false);
 });
 
 test("읽기 캐시에 상한과 만료 스윕이 있어 무한 성장하지 않는다", () => {

@@ -4663,8 +4663,20 @@ function mergePhotos(existing: PhotoMeta[], incoming: PhotoMeta[]): PhotoMeta[] 
 
 const DASHBOARD_PHOTO_BATCH_DELAY_MS = 80;
 const DASHBOARD_PHOTO_BATCH_SIZE = 35;
+const PHOTO_LOAD_FRESH_MS = 30_000;
+export type TradePhotoLoadState = {
+  loaded: boolean;
+  loading: boolean;
+  error: string;
+  loadedAt: number;
+};
+const EMPTY_PHOTO_LOAD_STATE: TradePhotoLoadState = Object.freeze({ loaded: false, loading: false, error: "", loadedAt: 0 });
+const photoLoadStates = new Map<string, TradePhotoLoadState>();
+const photoLoadPromises = new Map<string, Promise<void>>();
+const photoLoadPromiseForces = new Map<string, boolean>();
+const photoLoadPromiseGenerations = new Map<string, number>();
+const photoLoadGenerations = new Map<string, number>();
 const loadedPhotoTrades = new Set<string>();
-const loadingPhotoTrades = new Set<string>();
 const queuedPhotoTrades = new Set<string>();
 let photoBatchTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -4677,6 +4689,38 @@ function extractGasPhotoMap(res: any, tradeIds: string[]): Record<string, unknow
   if (body.photosByTrade && typeof body.photosByTrade === "object") return body.photosByTrade as Record<string, unknown>;
   if (tradeIds.length === 1) return { [tradeIds[0]]: body.photos ?? res?.photos };
   return {};
+}
+
+function tradePhotoLoadState_(tradeId: string): TradePhotoLoadState {
+  return photoLoadStates.get(String(tradeId || "").trim()) ?? EMPTY_PHOTO_LOAD_STATE;
+}
+
+function setTradePhotoLoadState_(tradeId: string, patch: Partial<TradePhotoLoadState>): void {
+  const id = String(tradeId || "").trim();
+  if (!id) return;
+  photoLoadStates.set(id, { ...tradePhotoLoadState_(id), ...patch });
+}
+
+function photoLoadIsFresh_(tradeId: string, now = Date.now()): boolean {
+  const current = tradePhotoLoadState_(tradeId);
+  return current.loaded && current.loadedAt > 0 && now - current.loadedAt < PHOTO_LOAD_FRESH_MS;
+}
+
+function photoLoadGeneration_(tradeId: string): number {
+  return photoLoadGenerations.get(tradeId) ?? 0;
+}
+
+function invalidateTradePhotoReads_(tradeId: string): number {
+  const next = photoLoadGeneration_(tradeId) + 1;
+  photoLoadGenerations.set(tradeId, next);
+  return next;
+}
+
+function markTradePhotosCurrent_(tradeId: string): void {
+  // 업로드·삭제 성공 전에 시작된 느린 목록 응답이 새 로컬 정본을 되돌리지 못하게 한다.
+  invalidateTradePhotoReads_(tradeId);
+  loadedPhotoTrades.add(tradeId);
+  setTradePhotoLoadState_(tradeId, { loaded: true, loading: false, error: "", loadedAt: Date.now() });
 }
 
 function dashboardPhotoReadError_(raw: unknown): string {
@@ -4702,43 +4746,138 @@ function mergeTradePhotosFromGas(photoMap: Map<string, PhotoMeta[]>): void {
   set({ trades });
 }
 
-async function loadTradePhotosBatch_(tradeIds: string[], force = false): Promise<void> {
-  const ids = normalizeTradeIds(tradeIds).filter((id) => !loadingPhotoTrades.has(id) && (force || !loadedPhotoTrades.has(id)));
-  if (!ids.length) return;
+async function loadTradePhotosBatch_(
+  tradeIds: string[],
+  force = false,
+  inheritedForceGenerations?: Map<string, number>,
+): Promise<void> {
+  const now = Date.now();
+  const ids: string[] = [];
+  const joined = new Set<Promise<void>>();
+  const forceAfterIds: string[] = [];
+  const forceAfterPromises = new Set<Promise<void>>();
+  const forceAfterGenerations = new Map<string, number>();
 
-  ids.forEach((id) => loadingPhotoTrades.add(id));
-  try {
-    for (let i = 0; i < ids.length; i += DASHBOARD_PHOTO_BATCH_SIZE) {
-      const batch = ids.slice(i, i + DASHBOARD_PHOTO_BATCH_SIZE);
-      const res =
-        batch.length === 1
-          ? await gasRead("dashboardPhotos", { tid: batch[0] })
-          : await gasRead("dashboardPhotosBatch", { tids: JSON.stringify(batch) });
-      const rawMap = extractGasPhotoMap(res, batch);
-      const photoMap = new Map<string, PhotoMeta[]>();
-      for (const tradeId of batch) {
-        if (!Object.prototype.hasOwnProperty.call(rawMap, tradeId)) {
-          throw new Error(`사진 정본 응답에서 거래가 누락됐습니다: ${tradeId}`);
-        }
-        const raw = rawMap[tradeId];
-        const readError = dashboardPhotoReadError_(raw);
-        if (readError) throw new Error(readError);
-        photoMap.set(tradeId, flattenGasPhotos(raw));
+  for (const id of normalizeTradeIds(tradeIds)) {
+    const requiredGeneration = force
+      ? (inheritedForceGenerations?.get(id) ?? invalidateTradePhotoReads_(id))
+      : 0;
+    const pending = photoLoadPromises.get(id);
+    if (pending) {
+      const pendingIsFreshEnough = photoLoadPromiseForces.get(id) === true
+        && (photoLoadPromiseGenerations.get(id) ?? -1) >= requiredGeneration;
+      if (force && !pendingIsFreshEnough) {
+        // 이번 강제 호출보다 먼저 시작된 요청은 force 여부와 관계없이 믿지 않는다.
+        // 종료 뒤 nocache=1을 이어 붙이고, 동시 호출은 더 최신 generation 요청에 합류한다.
+        forceAfterIds.push(id);
+        forceAfterPromises.add(pending);
+        forceAfterGenerations.set(id, requiredGeneration);
+      } else {
+        joined.add(pending);
       }
-      mergeTradePhotosFromGas(photoMap);
-      batch.forEach((tradeId) => loadedPhotoTrades.add(tradeId));
-      // mergeTradePhotosFromGas의 emit은 loaded 플래그보다 먼저 발생한다.
-      // 로딩 문구가 즉시 실제 사진 수로 바뀌도록 한 번 더 알린다.
-      emit();
+      continue;
     }
-  } finally {
-    ids.forEach((id) => loadingPhotoTrades.delete(id));
+    if (!force && photoLoadIsFresh_(id, now)) continue;
+    ids.push(id);
   }
+
+  if (ids.length) {
+    ids.forEach((id) => setTradePhotoLoadState_(id, { loading: true, error: "" }));
+    emit();
+
+    const requestGenerations = new Map(ids.map((id) => [id, photoLoadGeneration_(id)]));
+    let request: Promise<void>;
+    request = (async () => {
+      const failedTradeIds = new Map<string, string>();
+
+      for (let i = 0; i < ids.length; i += DASHBOARD_PHOTO_BATCH_SIZE) {
+        const batch = ids.slice(i, i + DASHBOARD_PHOTO_BATCH_SIZE);
+        const successfulPhotoMap = new Map<string, PhotoMeta[]>();
+        const batchFailedTradeIds = new Map<string, string>();
+        try {
+          const freshParams: Record<string, string> = force ? { nocache: "1" } : {};
+          const res =
+            batch.length === 1
+              ? await gasRead("dashboardPhotos", { tid: batch[0], ...freshParams })
+              : await gasRead("dashboardPhotosBatch", { tids: JSON.stringify(batch), ...freshParams });
+          const rawMap = extractGasPhotoMap(res, batch);
+          for (const tradeId of batch) {
+            // 쓰기/강제 새로고침 뒤 도착한 과거 응답은 사진 목록에 절대 합치지 않는다.
+            if (photoLoadGeneration_(tradeId) !== requestGenerations.get(tradeId)) continue;
+            if (!Object.prototype.hasOwnProperty.call(rawMap, tradeId)) {
+              batchFailedTradeIds.set(tradeId, "사진 정본 응답에서 거래가 누락됐습니다");
+              continue;
+            }
+            const raw = rawMap[tradeId];
+            const readError = dashboardPhotoReadError_(raw);
+            if (readError) {
+              batchFailedTradeIds.set(tradeId, readError);
+              continue;
+            }
+            successfulPhotoMap.set(tradeId, flattenGasPhotos(raw));
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "사진을 불러오지 못했습니다";
+          batch.forEach((tradeId) => {
+            if (photoLoadGeneration_(tradeId) === requestGenerations.get(tradeId)) {
+              batchFailedTradeIds.set(tradeId, message);
+            }
+          });
+        }
+
+        const loadedAt = Date.now();
+        successfulPhotoMap.forEach((_photos, tradeId) => {
+          loadedPhotoTrades.add(tradeId);
+          setTradePhotoLoadState_(tradeId, { loaded: true, loading: false, error: "", loadedAt });
+        });
+        batchFailedTradeIds.forEach((message, tradeId) => {
+          failedTradeIds.set(tradeId, message);
+          setTradePhotoLoadState_(tradeId, { loading: false, error: message });
+        });
+        mergeTradePhotosFromGas(successfulPhotoMap);
+        // 뒤 chunk를 기다리지 않고 완료된 카드부터 사진/ready/error를 즉시 표시한다.
+        emit();
+      }
+
+      if (failedTradeIds.size) {
+        throw new Error(failedTradeIds.values().next().value || "사진을 불러오지 못했습니다");
+      }
+    })().finally(() => {
+      let changed = false;
+      ids.forEach((id) => {
+        if (photoLoadPromises.get(id) === request) {
+          photoLoadPromises.delete(id);
+          photoLoadPromiseForces.delete(id);
+          photoLoadPromiseGenerations.delete(id);
+        }
+        const current = tradePhotoLoadState_(id);
+        if (current.loading && photoLoadGeneration_(id) === requestGenerations.get(id)) {
+          setTradePhotoLoadState_(id, { loading: false, error: current.error || "사진을 불러오지 못했습니다" });
+          changed = true;
+        }
+      });
+      if (changed) emit();
+    });
+    ids.forEach((id) => {
+      photoLoadPromises.set(id, request);
+      photoLoadPromiseForces.set(id, force);
+      photoLoadPromiseGenerations.set(id, requestGenerations.get(id) ?? 0);
+    });
+    joined.add(request);
+  }
+
+  if (forceAfterIds.length) {
+    const forceAfter = Promise.all(Array.from(forceAfterPromises, (pending) => pending.catch(() => undefined)))
+      .then(() => loadTradePhotosBatch_(forceAfterIds, true, forceAfterGenerations));
+    joined.add(forceAfter);
+  }
+
+  if (joined.size) await Promise.all(joined);
 }
 
 export function ensureTradePhotos(tradeIds: string[]): void {
   for (const tradeId of normalizeTradeIds(tradeIds)) {
-    if (loadedPhotoTrades.has(tradeId) || loadingPhotoTrades.has(tradeId)) continue;
+    if (queuedPhotoTrades.has(tradeId) || photoLoadPromises.has(tradeId) || photoLoadIsFresh_(tradeId)) continue;
     queuedPhotoTrades.add(tradeId);
   }
   if (!queuedPhotoTrades.size || photoBatchTimer) return;
@@ -4754,10 +4893,20 @@ export function ensureTradePhotos(tradeIds: string[]): void {
 
 /** 카드가 '사진 0/0'과 '아직 서버 조회 중'을 구분하게 한다. */
 export function useTradePhotosLoaded(tradeId: string): boolean {
+  const id = String(tradeId || "").trim();
   return useSyncExternalStore(
     subscribe,
-    () => loadedPhotoTrades.has(String(tradeId || "").trim()),
+    () => tradePhotoLoadState_(id).loaded,
     () => false,
+  );
+}
+
+export function useTradePhotoLoadState(tradeId: string): TradePhotoLoadState {
+  const id = String(tradeId || "").trim();
+  return useSyncExternalStore(
+    subscribe,
+    () => tradePhotoLoadState_(id),
+    () => EMPTY_PHOTO_LOAD_STATE,
   );
 }
 
@@ -4848,9 +4997,8 @@ export async function refreshTradePhotos(tradeId: string): Promise<void> {
 }
 
 // ── 사진 변경 브로드캐스트 (기기 간 수렴) ───────────────────────
-// 다른 기기/탭은 loadedPhotoTrades 캐시 때문에 삭제·업로드된 사진을 모달 재오픈까지
-// 계속 보여줬다. 스키마 변경 없이 Supabase broadcast 채널로 수렴 신호를 보낸다.
-// 신호 유실은 치명적이지 않다(모달 재오픈 시 기존 경로로 수렴) — best-effort.
+// 다른 기기/탭의 ready 캐시를 즉시 만료시키고 정본을 다시 받는다.
+// 신호가 유실돼도 30초 freshness 만료 뒤 모달 진입에서 백그라운드 재검증한다.
 const PHOTO_SYNC_CHANNEL = "photo-sync";
 let photoSyncChannel: ReturnType<NonNullable<typeof supabase>["channel"]> | null = null;
 
@@ -4862,9 +5010,12 @@ function ensurePhotoSyncChannel_(): typeof photoSyncChannel {
     .on("broadcast", { event: "photo-change" }, (message) => {
       const tradeId = String((message.payload as { tradeId?: string } | undefined)?.tradeId || "").trim();
       if (!tradeId) return;
-      // 다음 열람 때 강제 재조회되도록 캐시를 비우고, 이미 로드된 거래면 즉시 수렴한다
-      const wasLoaded = loadedPhotoTrades.delete(tradeId);
-      if (wasLoaded && state.trades.some((t) => t.tradeId === tradeId)) {
+      loadedPhotoTrades.delete(tradeId);
+      setTradePhotoLoadState_(tradeId, { loadedAt: 0, error: "" });
+      emit();
+      // 최초 로딩 중·직전 실패 상태도 신호를 놓치면 옛 사진을 fresh로 확정할 수 있다.
+      // 화면에 있는 거래는 항상 generation 보장 force로 최신 정본에 수렴시킨다.
+      if (state.trades.some((t) => t.tradeId === tradeId)) {
         void loadTradePhotosBatch_([tradeId], true).catch(() => {});
       }
     })
@@ -5032,8 +5183,8 @@ export async function deleteTradePhoto(tradeId: string, photo: PhotoMeta): Promi
   if (res?.skipped) throw new Error("사진 삭제 쓰기 경로가 비활성화되어 있습니다");
 
   const key = photoKey(photo);
+  markTradePhotosCurrent_(tradeId);
   mutateTrade(tradeId, (t) => ({ ...t, photos: t.photos.filter((p) => photoKey(p) !== key) }));
-  loadedPhotoTrades.add(tradeId);
   flashSave(tradeId);
   // 다른 기기/탭의 유령 사진(모달 재오픈 전까지 잔존)을 즉시 수렴시킨다
   broadcastPhotoChange_(tradeId);
@@ -5070,6 +5221,7 @@ if (typeof window !== "undefined") {
       resumedPhotoJobs.delete(job.queueId);
       const raw = (res ?? {}) as { photo?: unknown; result?: { photo?: unknown } };
       const photo = normalizeGasPhoto(raw.photo || raw.result?.photo, job.phase, 0);
+      markTradePhotosCurrent_(job.tradeId);
       mutateTrade(job.tradeId, (t) => ({
         ...t,
         photos: mergePhotos(t.photos.filter((p) => p.queueId !== job.queueId), [photo]),
