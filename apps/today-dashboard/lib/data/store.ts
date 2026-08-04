@@ -61,7 +61,7 @@ interface State {
   notes: HandoverNote[];
   savingTrades: Record<string, boolean>;
   remoteStatus: RemoteStatus;
-  toast: { id: number; text: string; kind: "saving" | "saved" | "error" } | null;
+  toast: { id: number; text: string; kind: "saved" | "error" } | null;
   /** 사진 업로드 큐 전역 요약 — 화면 윈도우 밖 거래의 실패 잡도 배지로 보이게 한다 */
   photoQueueSummary: { uploading: number; failed: number };
 }
@@ -1340,10 +1340,9 @@ export function loadDay(date: string) {
   emit();
 }
 
-function flashSave(tradeId?: string) {
+function flashSave(_tradeId?: string) {
   // 일상적인 품목·메모 입력에는 '저장 중'을 띄우지 않는다. 화면은 이미 즉시 바뀌고
   // 거래별 원격 큐가 순서를 보존한다. 짧은 완료 표시만 남겨 업무 흐름을 막지 않는다.
-  if (tradeId && state.savingTrades[tradeId]) return;
   const id = ++toastSeq;
   set({ toast: { id, text: "반영됨", kind: "saved" } });
   if (typeof window === "undefined") return;
@@ -1365,7 +1364,7 @@ export function clearToast() {
   if (state.toast) set({ toast: null });
 }
 
-/** 원장 확정이 필요한 작업은 완료 전까지 저장 중 상태를 유지한다. */
+/** 원격 snapshot 수렴용 내부 토큰. 사용자 화면의 busy/로딩 상태로 노출하지 않는다. */
 const activeTradeSaveTokens = new Map<string, Set<number>>();
 const activeTradeTransitions = new Set<string>();
 const tradeTransitionSaveIds = new Set<number>();
@@ -1499,7 +1498,7 @@ function beginTradeSave(tradeId: string): number {
   const tokens = activeTradeSaveTokens.get(tradeId) ?? new Set<number>();
   tokens.add(id);
   activeTradeSaveTokens.set(tradeId, tokens);
-  set({ savingTrades: { ...state.savingTrades, [tradeId]: true }, toast: { id, text: "저장 중…", kind: "saving" } });
+  set({ savingTrades: { ...state.savingTrades, [tradeId]: true } });
   return id;
 }
 
@@ -1508,6 +1507,12 @@ function beginTradeTransition(tradeId: string): number {
   const id = beginTradeSave(tradeId);
   tradeTransitionSaveIds.add(id);
   return id;
+}
+
+/** 완전삭제처럼 되돌릴 수 없는 명령 직전에만 모든 미확정 원장 쓰기를 확인한다.
+ * 일반 편집/할인은 이 가드를 쓰지 않아 카드 전체 busy로 되돌아가지 않는다. */
+export function isTradeDestructiveActionBlocked(tradeId: string): boolean {
+  return activeTradeTransitions.has(tradeId) || hasTradePending(tradeId);
 }
 
 /** 완료 전환·장비 제외처럼 순서가 뒤집히면 위험한 짧은 구간만 카드 명령을 막는다.
@@ -1527,7 +1532,7 @@ function finishTradeSave(tradeId: string, id: number, kind: "saved" | "error", t
     delete saving[tradeId];
     set({ savingTrades: saving, toast: { id, text, kind } });
   } else {
-    // 먼저 끝난 작업이 뒤에 남은 작업의 spinner/잠금을 해제하거나 성공 토스트로 덮지 않는다.
+    // 먼저 끝난 작업이 뒤에 남은 내부 수렴 토큰을 해제하지 않는다.
     set({ savingTrades: saving });
   }
   maybeResumeRealtimeFlush();
@@ -5731,14 +5736,13 @@ export function deleteNote(id: string) {
 }
 
 // ── 훅 ─────────────────────────────────────────────────────────
-// 토스트만 바뀐 emit에 데이터 뷰 전체가 재렌더되지 않도록, useDashboard는
-// date/trades/notes/savingTrades/remoteStatus가 실제로 바뀔 때만 새 스냅샷 객체를 만든다.
-type DashboardSnapshot = DashboardDay & { savingTrades: Record<string, boolean>; remoteStatus: RemoteStatus };
+// 토스트·내부 동기화 토큰만 바뀐 emit에 데이터 뷰 전체가 재렌더되지 않도록,
+// useDashboard는 실제 화면 데이터와 원격 상태만 공개한다.
+type DashboardSnapshot = DashboardDay & { remoteStatus: RemoteStatus };
 let dashSnapshot: DashboardSnapshot = {
   date: state.date,
   trades: state.trades,
   notes: state.notes,
-  savingTrades: state.savingTrades,
   remoteStatus: state.remoteStatus,
 };
 function getDashSnapshot() {
@@ -5746,14 +5750,12 @@ function getDashSnapshot() {
     dashSnapshot.date !== state.date ||
     dashSnapshot.trades !== state.trades ||
     dashSnapshot.notes !== state.notes ||
-    dashSnapshot.savingTrades !== state.savingTrades ||
     dashSnapshot.remoteStatus !== state.remoteStatus
   ) {
     dashSnapshot = {
       date: state.date,
       trades: state.trades,
       notes: state.notes,
-      savingTrades: state.savingTrades,
       remoteStatus: state.remoteStatus,
     };
   }

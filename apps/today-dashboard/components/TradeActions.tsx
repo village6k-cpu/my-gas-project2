@@ -8,6 +8,7 @@ import { isCheckoutBaselineLocked } from "@/lib/domain/status";
 import {
   cancelTrade,
   DISCOUNT_TYPE_OPTIONS,
+  isTradeDestructiveActionBlocked,
   isTradeMutationActive,
   removeTradeLocally,
   setDiscountType,
@@ -37,12 +38,10 @@ export function TradeActions({
   trade,
   onRemoved,
   compact = false,
-  busy = false,
 }: {
   trade: Trade;
   onRemoved?: () => void;
   compact?: boolean;
-  busy?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -50,7 +49,7 @@ export function TradeActions({
   const destructiveLocked = isCheckoutBaselineLocked(trade);
 
   async function handleCancel() {
-    if (busy || isTradeMutationActive(trade.tradeId)) return;
+    if (isTradeMutationActive(trade.tradeId)) return;
     if (destructiveLocked) {
       window.alert("이미 반출된 거래는 취소할 수 없습니다. 반납 절차로 마감해주세요.");
       return;
@@ -68,7 +67,7 @@ export function TradeActions({
   }
 
   async function handleDelete() {
-    if (busy || isTradeMutationActive(trade.tradeId)) {
+    if (isTradeDestructiveActionBlocked(trade.tradeId)) {
       window.alert("이 거래의 다른 변경을 저장 중입니다. 잠시 후 다시 시도해주세요.");
       return;
     }
@@ -83,6 +82,11 @@ export function TradeActions({
     if (typed == null) return;
     if (typed.trim() !== trade.tradeId) {
       window.alert("거래ID가 일치하지 않아 삭제를 취소했습니다.");
+      return;
+    }
+    // 확인창이 열린 사이 다른 저장이 시작될 수 있으므로 실제 삭제 호출 직전에 재검사한다.
+    if (isTradeDestructiveActionBlocked(trade.tradeId)) {
+      window.alert("이 거래의 다른 변경을 저장 중입니다. 저장이 끝난 뒤 다시 삭제해주세요.");
       return;
     }
     setDeleting(true);
@@ -114,13 +118,13 @@ export function TradeActions({
   return (
     <>
       <div className="flex w-full gap-2" aria-label="예약 관리">
-        <button type="button" onClick={() => setEditing(true)} disabled={busy} className={`${buttonBase} bg-brand-50 text-brand-700 ring-brand-200 disabled:opacity-50`}>
+        <button type="button" onClick={() => setEditing(true)} disabled={cancelling || deleting} className={`${buttonBase} bg-brand-50 text-brand-700 ring-brand-200 disabled:opacity-50`}>
           ✎ 편집
         </button>
-        <button type="button" onClick={handleCancel} disabled={busy || cancelling || deleting || destructiveLocked} title={destructiveLocked ? "반출된 거래는 취소할 수 없습니다" : undefined} className={`${buttonBase} bg-warn-bg text-warn-fg ring-warn-ring disabled:opacity-50`}>
+        <button type="button" onClick={handleCancel} disabled={cancelling || deleting || destructiveLocked} title={destructiveLocked ? "반출된 거래는 취소할 수 없습니다" : undefined} className={`${buttonBase} bg-warn-bg text-warn-fg ring-warn-ring disabled:opacity-50`}>
           {cancelling ? "취소 중…" : "취소"}
         </button>
-        <button type="button" onClick={handleDelete} disabled={busy || cancelling || deleting || destructiveLocked} title={destructiveLocked ? "반출 기준선이 있어 완전삭제할 수 없습니다" : undefined} className={`${buttonBase} bg-attention-bg text-attention-fg ring-attention-ring disabled:opacity-50`}>
+        <button type="button" onClick={handleDelete} disabled={cancelling || deleting || destructiveLocked} title={destructiveLocked ? "반출 기준선이 있어 완전삭제할 수 없습니다" : undefined} className={`${buttonBase} bg-attention-bg text-attention-fg ring-attention-ring disabled:opacity-50`}>
           {deleting ? "삭제 중…" : "완전삭제"}
         </button>
       </div>
@@ -133,7 +137,7 @@ export function TradeActions({
             if (!next) return;
             void setDiscountType(trade.tradeId, next);
           }}
-          disabled={busy || discountLocked}
+          disabled={discountLocked || cancelling || deleting}
           className="tap h-9 min-w-0 flex-1 rounded-lg bg-white px-2 text-[12.5px] font-bold text-ink ring-1 ring-line/70 outline-none focus:ring-brand-400 disabled:opacity-50"
         >
           <option value="" disabled>

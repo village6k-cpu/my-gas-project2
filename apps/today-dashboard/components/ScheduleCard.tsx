@@ -34,20 +34,18 @@ function displayPhase(t: Trade, date: string, tab: TabKey): "checkout" | "checki
   return new Date(t.checkoutAt) <= new Date(`${date}T23:59:59`) ? "checkin" : "checkout";
 }
 
-// React.memo: 스토어 emit(저장 토스트·savingTrades 깜빡임 등)마다 그날의 카드 수십 장이
+// React.memo: 스토어 emit(저장 토스트·내부 동기화 등)마다 그날의 카드 수십 장이
 // 통째로 재렌더되는 것을 막는다. props가 전부 원시값 + 스토어의 안정 참조(trade)라
 // 기본 얕은 비교로 충분하다 — mutateTrade는 변경된 거래만 새 참조로 만든다.
 export const ScheduleCard = memo(function ScheduleCard({
   trade,
   date,
   tab,
-  saving,
   defaultOpen = false,
 }: {
   trade: Trade;
   date: string;
   tab: TabKey;
-  saving?: boolean;
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -65,7 +63,6 @@ export const ScheduleCard = memo(function ScheduleCard({
   const overdue = !trade.returnDone && new Date(trade.returnAt) < new Date(`${date}T00:00:00`);
 
   async function handleDoneToggle() {
-    if (saving) return;
     if (isCheckout) {
       const result = await toggleSetup(trade.tradeId);
       if (!result.ok) setOpen(true);
@@ -125,7 +122,6 @@ export const ScheduleCard = memo(function ScheduleCard({
                 {overdue && <span className="rounded-md bg-attention-fg px-1.5 py-0.5 text-[11px] font-bold text-white">반납 지연</span>}
               </>
             )}
-            {saving && <span className="text-[11px] font-medium text-brand-600">백그라운드 동기화</span>}
           </div>
           <div className="mt-0.5 flex items-center gap-1.5 text-[14px]">
             <button
@@ -157,7 +153,7 @@ export const ScheduleCard = memo(function ScheduleCard({
 
       {/* 등록된 예약의 관리 진입점은 접힌 카드에서도 항상 보인다. */}
       <div className="px-4 pl-5 pt-3">
-        <TradeActions trade={trade} compact busy={!!saving} />
+        <TradeActions trade={trade} compact />
       </div>
 
       {/* 진행 + 토글 */}
@@ -165,8 +161,6 @@ export const ScheduleCard = memo(function ScheduleCard({
         <button
           type="button"
           onClick={handleDoneToggle}
-          disabled={!!saving}
-          aria-busy={saving}
           className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 disabled:cursor-wait disabled:opacity-70 ${
             done
               ? "bg-checkin-bg text-checkin-fg ring-checkin-ring"
@@ -179,9 +173,8 @@ export const ScheduleCard = memo(function ScheduleCard({
             <Check className="h-3.5 w-3.5" />
           </span>
           {isCheckout
-            ? done ? "반출 완료됨" : saving ? "상태 변경 중…" : "반출 완료"
+            ? done ? "반출 완료됨" : "반출 완료"
             : done ? "반납 완료됨"
-            : saving ? "상태 변경 중…"
             : returnBlockers.length ? "수량 확인 후 반납완료" : "반납 완료"}
         </button>
         <button
