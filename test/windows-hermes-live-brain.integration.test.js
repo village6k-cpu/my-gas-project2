@@ -7,6 +7,13 @@ const test = require('node:test');
 const hermesHome = process.env.VILLAGE_LIVE_HERMES_HOME;
 const runLiveChecks = process.platform === 'win32' && Boolean(hermesHome);
 
+// 모델 기대값은 scripts/windows/hermes-model-contract.json 단일 소스를 따른다.
+const modelContract = JSON.parse(fs.readFileSync(
+  path.join(__dirname, '..', 'scripts', 'windows', 'hermes-model-contract.json'),
+  'utf8'
+));
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const expectedRootSkills = [
   'village-runtime-router',
   'village-brain-first',
@@ -75,8 +82,9 @@ test('live root Hermes has the canonical Mac skill packages and scoped RPA profi
 
 test('live root Hermes keeps Mac-style model freedom without injected runtime routing', { skip: !runLiveChecks }, () => {
   const config = fs.readFileSync(path.join(hermesHome, 'config.yaml'), 'utf8');
-  assert.match(config, /default:\s*gpt-5\.6-terra/);
-  assert.match(config, /reasoning_effort:\s*xhigh/);
+  assert.match(config, new RegExp(`default:\\s*${escapeRegExp(modelContract.root.model)}`));
+  assert.match(config, new RegExp(`provider:\\s*${escapeRegExp(modelContract.root.provider)}`));
+  assert.match(config, new RegExp(`reasoning_effort:\\s*${escapeRegExp(modelContract.root.reasoning_effort)}`));
   assert.match(config, /gateway_wall_timeout:\s*1800/);
   assert.match(config, /hard_stop_enabled:\s*false/);
   assert.equal(

@@ -1,0 +1,13 @@
+{
+  "_comment": "헤르메스 모델/프로바이더 단일 소스. 모델을 바꿀 때는 이 파일만 수정한 뒤 configure-hermes-village-routing.py를 재실행하고 브리지를 재시작한다. provider와 model은 항상 짝으로 바뀌므로 혼합 상태(예: provider=grok + model=gpt-5.6-terra)가 생기지 않는다. root=슬랙 게이트웨이(헤이빌리), kakaoworker=카카오 워커 프로필.",
+  "root": {
+    "provider": "openai-codex",
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "xhigh"
+  },
+  "kakaoworker": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "max_turns": 90
+  }
+}
