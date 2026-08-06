@@ -1,9 +1,21 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, execFile } from 'node:child_process';
+import { spawn, spawnSync, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  inquiryConversationKey,
+  actionFamilyForFollowUp,
+  businessObjectKeyForFollowUp,
+  followUpTaskIdentity,
+  customerClusterHash,
+  renderedMessageHash
+} from './follow-up-policy.mjs';
+import {
+  buildFollowUpCaseLifecycle,
+  mergeFollowUpCaseLifecycle
+} from './follow-up-case-lifecycle.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,6 +33,14 @@ const DEFAULT_SLACK_CHANNELS = {
   inventory: '재고관리-agent',
   other: '기타문의'
 };
+
+export function buildSlackRoutingConfig(environment = process.env) {
+  return {
+    twoChannelRoutingEnabled: String(environment.SLACK_TWO_CHANNEL_ROUTING_ENABLED || '') === '1',
+    slackInquiryChannel: String(environment.SLACK_CHANNEL_KAKAO_INQUIRY || '').trim(),
+    slackFollowUpChannel: String(environment.SLACK_CHANNEL_FOLLOW_UP || '').trim()
+  };
+}
 
 export function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return false;
@@ -305,7 +325,8 @@ export async function askVillageAi(questionOrPayload, config = {}, options = {})
     : { userRole: 'customer', ...questionOrPayload };
   if (!payload.question || typeof payload.question !== 'string') throw new Error('RAG question is required');
   const headers = { 'Content-Type': 'application/json' };
-  if (config.villageAiKakaoSkillSecret) headers['x-kakao-skill-secret'] = config.villageAiKakaoSkillSecret;
+  if (config.askApiSecret) headers['x-ask-api-secret'] = config.askApiSecret;
+  else if (config.villageAiKakaoSkillSecret) headers['x-kakao-skill-secret'] = config.villageAiKakaoSkillSecret;
   const fetchImpl = options.fetchImpl || fetch;
   const response = await fetchImpl(`${villageAiUrl}/api/ask`, {
     method: 'POST',
@@ -373,9 +394,11 @@ export function buildReadOnlyRagContext(config = {}) {
           output_schema: ['text', 'confidence', 'ownerReview', 'knowledgeSource', 'usedSources', 'topSimilarity', 'logId', 'error'],
           env: {
             village_ai_url: 'VILLAGE_AI_URL',
-            secret_env: config.villageAiKakaoSkillSecret ? 'VILLAGE_AI_KAKAO_SKILL_SECRET' : null
+            secret_env: config.askApiSecret
+              ? 'ASK_API_SECRET'
+              : (config.villageAiKakaoSkillSecret ? 'VILLAGE_AI_KAKAO_SKILL_SECRET' : null)
           },
-          secret_policy: 'Do not print API keys or shared secrets. The helper sends x-kakao-skill-secret internally when configured.'
+          secret_policy: 'Do not print API keys or shared secrets. The helper sends the configured ask or Kakao auth header internally.'
         }
       : null,
     unavailable_reason: enabled ? null : 'VILLAGE_AI_URL is not configured in the worker environment.',
@@ -527,7 +550,7 @@ CRITICAL RULES:
 - Outer code will validate your typed decision but will never infer names/dates/equipment, merge a different equipment list, synthesize reply prose, choose attachments, bypass RAG, or reroute follow-ups from keywords. If a required field is incomplete, Hermes is asked to repair it.
 - 카카오 Channel Manager Chrome 화면을 computer_use로 직접 확인하고, 화면에서 보이는 대화 맥락을 우선한다.
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
-- No artificial low tool/UI cap: continue until evidence is sufficient or the global timeout. Batch read-only lookups only when query breadth/detail are preserved; avoid repeats.
+- Use the bounded tool budget deliberately: batch independent read-only checks, avoid repeats, and finish FINAL_JSON before exhausting the turn budget or global timeout. Batch read-only lookups only when query breadth/detail are preserved.
 - Once sufficient, return FINAL_JSON immediately. Tool/API failures are evidence gaps: encode uncertainty in confidence/reason/follow-up; never substitute an apology or progress report.
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때만 간단한 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
 - 자동발송 후보: FAQ/절차/수령·반납/단순 후속/예약 접수/연락처 요청. 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능. 가격/환불/파손/세금 draft_only. 입금 알림은 완료 단정 없이 접수 ACK만 auto_send.
@@ -564,7 +587,8 @@ SENDER AND TURN-TAKING POLICY:
 
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
-- 장비별로 세트마스터와 장비마스터 read-only 검색을 모두 활용한다. 이미지/대화에 적힌 모든 장비를 빠짐없이 하나씩 매칭한 뒤 sheet_row_candidate.equipment에 최종 전체 목록을 넣는다.
+- 세트/장비마스터를 조회한다. 신규 예약은 equipment_write_mode="full_plan"+전체 목록, 기존 예약/RQ 추가는 "additions_only"+이번 추가·증가분만. Do not repeat existing equipment.
+- 세트 옵션은 set_component_selections로만 지정: 600X 젬볼 => 어퓨쳐 600X/소프트박스/젬볼 90. Never add set options as top-level equipment.
 - 예약 메시지에 명시된 예약자명/연락처는 프로필명보다 우선한다.
 - RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
 - 정규화가 애매해도 확인요청 입력은 막지 않는다. 실패 시 원문을 item에 넣고, Q/R에는 원문/추론/가용확인 후 안내 등 내부 설명을 넣지 않는다.
@@ -578,6 +602,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
 - 확인요청 API는 고객이 말한 분 단위 시간을 HH:MM으로 그대로 받을 수 있다. Hermes는 화면과 대화에서 확인한 시간을 보존하고, outer code는 절대로 분을 버리거나 반올림하지 않는다. 시간이 실제로 모호할 때만 확인 질문/후속조치를 만든다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
+- 직원의 예약 답변(예: "예약 잡아드리겠습니다", "확정했습니다") 자체는 기존 RQ나 시트 등록의 증거가 아니다. 확인요청/계약/스케줄의 authoritative read와 정확한 existing_confirm_request_ids가 없으면 예약 건을 already_answered로 끝내지 마라.
 - read-catchup에서 기존 RQ를 발견한 경우에도 확인요청 I/J 결과를 읽은 뒤, 그 결과가 ✅/⚠️/❌/미확인 중 무엇인지 후속카드에 명시한다.
 - 기존 RQ를 발견하면 정확한 ID를 existing_confirm_request_ids 배열에 넣는다. 이유/요약 문장에만 쓰지 마라. 외부 코드는 prose에서 RQ를 추출하지 않는다.
 
@@ -606,12 +631,13 @@ TASK:
 9-1. For FAQ/procedure/policy/components auto_send, use CURRENT_CONFIRMED_POLICY first, otherwise call RAG and fill rag_usage. Outer worker verifies current-policy match or high-confidence retrieved support. Never use RAG for current stock/booking/schedule truth.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 10-1. Doc types은 서류 생성/발송/발행만. 확인요청/예약/가용/스케줄/파손/반납/정산은 견적서 단어가 섞여도 doc 아님; primary item에 합친다.
-11. For reservation-format requests, missing phone is NOT a sheet-write blocker. Search 고객DB by name; if a unique DB phone is found, use it, otherwise leave sheet_row_candidate.phone="" and still write 확인요청. discount_type: 고객DB I열 outranks Kakao; use DB 학생/개인사업자/프리랜서/단골/제휴/일반 when present, otherwise infer from Kakao. Missing equipment/duplicate lookup/phone goes to follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or obvious duplicate/already-registered booking. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; phone may still be blank.
+11. For reservation-format requests, missing phone is NOT a sheet-write blocker. Search 고객DB by name; if a unique DB phone is found, use it, otherwise leave sheet_row_candidate.phone="" and still write 확인요청. discount_type: 고객DB I열 outranks Kakao; use DB 학생/개인사업자/프리랜서/단골/제휴/일반 when present, otherwise infer from Kakao. Missing equipment/duplicate lookup/phone goes to follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or an unchanged duplicate. An existing booking with newly added or increased equipment is not a duplicate: write only that delta with equipment_write_mode="additions_only". If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; phone may still be blank.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
-11-2. Multiple/revised equipment: sheet_row_candidate.equipment must be separate top-level objects for the final whole list, never concatenated or delta-only. Each object = one 확인요청 row. Set sheet_row_candidate.plan_complete=true only after you have reconciled the complete final equipment plan; outer code will not repair a delta.
+11-2. Multiple/revised equipment: each equipment entry must be a separate top-level object. For a new unregistered booking use equipment_write_mode="full_plan" and the complete final plan. For an already registered booking or an existing RQ use equipment_write_mode="additions_only" and include only equipment newly added or quantity newly increased in the latest customer turn; never repeat the existing schedule/RQ equipment. Set plan_complete=true only after reconciling the correct write set for that mode. If the delta cannot be determined safely, set should_write_to_sheet=false and create one review follow-up instead of re-inserting the full plan.
 11-3. sheet_row_candidate date/time must be API-safe: YYYY-MM-DD and HH:MM, including minute-level times such as 16:30. Preserve the customer's explicit minutes. Resolve 오늘/내일 and 24시 yourself from Kakao date context. 6월6일 24시 => 2026-06-07 00:00. If context is unavailable, set should_write_to_sheet=false; outer code will never floor or round it.
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
-12. Create at most one follow_up_item per latest customer message cluster. Do not split one customer turn into separate reply_needed/schedule_check/damage_repair/completed_log cards. Choose the single primary type, an explicit route (schedule/document/settlement/inventory/other), and a concise stable taskKey for this unresolved business task; outer code never scans prose to change or merge it. Put secondary work as a concise checklist inside recommended_action/evidence.
+12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
+12-1. For real-world mutations set requiresHumanAction=true, allowed actionFamily, stable businessKey; otherwise false, "none", "".
 13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for simple, high-confidence replies that are safe to send now under the kill-switch policy. For auto_send, explicitly choose safetyClass, grounding, requiresRag, attachmentKeys, and alreadyDelivered. Text alone can never grant an auto-send or attachment. Otherwise use draft_only or no_reply.
 14. Return only the final machine-readable JSON below.
 
@@ -660,6 +686,9 @@ The JSON schema:
       "type": "reply_needed" | "quote_send" | "tax_invoice" | "schedule_check" | "reservation_review" | "price_review" | "payment_check" | "contract_document" | "return_extension" | "damage_repair" | "sheet_duplicate_check" | "completed_log",
       "route": "schedule" | "document" | "settlement" | "inventory" | "other",
       "taskKey": string,
+      "requiresHumanAction": boolean,
+      "actionFamily": "invoice_issue" | "reservation_change" | "payment_reconcile" | "inventory_check" | "document_approval" | "none",
+      "businessKey": string,
       "priority": "urgent" | "high" | "normal" | "low",
       "status": "open" | "done" | "dismissed",
       "title": string,
@@ -674,8 +703,10 @@ The JSON schema:
   ],
   "sheet_row_candidate": {
     "plan_complete": boolean,
+    "equipment_write_mode": "full_plan" | "additions_only",
     "customer_name": string,
     "equipment": [{ "item": string, "quantity": number | string | "" }],
+    "set_component_selections": [{ "set_item": string, "component_item": string, "selected_item": string }],
     "start_date": string,
     "end_date": string,
     "pickup_time": string,
@@ -770,6 +801,7 @@ const AI_FOLLOW_UP_ROUTES = new Set(['schedule', 'document', 'settlement', 'inve
 const AI_FOLLOW_UP_TYPES = new Set(['reply_needed', 'quote_send', 'tax_invoice', 'schedule_check', 'reservation_review', 'price_review', 'payment_check', 'contract_document', 'return_extension', 'damage_repair', 'sheet_duplicate_check', 'completed_log']);
 const AI_FOLLOW_UP_PRIORITIES = new Set(['urgent', 'high', 'normal', 'low']);
 const AI_FOLLOW_UP_STATUSES = new Set(['open', 'done', 'dismissed']);
+const AI_MANUAL_ACTION_FAMILIES = new Set(['invoice_issue', 'reservation_change', 'payment_reconcile', 'inventory_check', 'document_approval']);
 const HERMES_WORKER_TOOLSETS = 'terminal,file,web,skills,memory,session_search,computer_use,vision';
 const CONFIRM_REQUEST_DISCOUNT_TYPES = new Set(['학생', '개인사업자/프리랜서', '단골', '제휴', '일반']);
 const CUSTOMER_DOCUMENT_ATTACHMENT_KEYS = new Set([
@@ -840,8 +872,25 @@ export function validateAiDecisionContract(decision = {}) {
     if (!CONFIRM_REQUEST_DISCOUNT_TYPES.has(text(row.discount_type).trim())) {
       errors.push('sheet_row_candidate.discount_type must be an explicit allowed value');
     }
+    const equipmentWriteMode = text(row.equipment_write_mode).trim() || 'full_plan';
+    if (!['full_plan', 'additions_only'].includes(equipmentWriteMode)) {
+      errors.push('sheet_row_candidate.equipment_write_mode must be full_plan or additions_only');
+    }
+    const inquiry = decision.reservation_inquiry && typeof decision.reservation_inquiry === 'object'
+      ? decision.reservation_inquiry
+      : {};
+    const existingIds = Array.isArray(decision.existing_confirm_request_ids)
+      ? decision.existing_confirm_request_ids.map((value) => text(value).trim()).filter(Boolean)
+      : [];
+    const hasExistingBookingEvidence = inquiry.already_registered === true || existingIds.length > 0;
+    if (hasExistingBookingEvidence && equipmentWriteMode !== 'additions_only') {
+      errors.push('existing booking equipment writes must use additions_only and must not repeat existing equipment');
+    }
+    if (!hasExistingBookingEvidence && equipmentWriteMode === 'additions_only') {
+      errors.push('additions_only requires an existing registered booking or existing_confirm_request_ids');
+    }
     if (!Array.isArray(row.equipment) || !row.equipment.length) {
-      errors.push('sheet_row_candidate.equipment must contain the complete AI equipment plan');
+      errors.push('sheet_row_candidate.equipment must contain the AI-planned write set');
     } else {
       row.equipment.forEach((item, index) => {
         if (!item || typeof item !== 'object' || !text(item.item).trim()) {
@@ -852,6 +901,64 @@ export function validateAiDecisionContract(decision = {}) {
           errors.push(`sheet_row_candidate.equipment[${index}].quantity must be positive`);
         }
       });
+    }
+    const equipmentNames = Array.isArray(row.equipment)
+      ? row.equipment.map((item) => text(item?.item).trim()).filter(Boolean)
+      : [];
+    const selections = Array.isArray(row.set_component_selections) ? row.set_component_selections : [];
+    selections.forEach((selection, index) => {
+      const setItem = text(selection?.set_item).trim();
+      const componentItem = text(selection?.component_item).trim();
+      const selectedItem = text(selection?.selected_item).trim();
+      if (!setItem || !componentItem || !selectedItem) {
+        errors.push(`sheet_row_candidate.set_component_selections[${index}] requires set_item, component_item, and selected_item`);
+        return;
+      }
+      if (!equipmentNames.includes(setItem)) {
+        errors.push(`sheet_row_candidate.set_component_selections[${index}].set_item must exist in top-level equipment`);
+      }
+      const selectedKey = normalizeKeyPart(selectedItem, 120).replace(/[^0-9a-z가-힣]/g, '');
+      const repeatedTopLevel = equipmentNames.some((name) => {
+        if (name === setItem) return false;
+        const nameKey = normalizeKeyPart(name, 120).replace(/[^0-9a-z가-힣]/g, '');
+        return nameKey.length >= 2 && selectedKey.length >= 2
+          && (nameKey === selectedKey || nameKey.includes(selectedKey) || selectedKey.includes(nameKey));
+      });
+      if (repeatedTopLevel) {
+        errors.push(`sheet_row_candidate.set_component_selections[${index}].selected_item must not also be top-level equipment`);
+      }
+    });
+  }
+
+  if (text(decision.classification).trim() === 'already_answered') {
+    const inquiry = decision.reservation_inquiry && typeof decision.reservation_inquiry === 'object'
+      ? decision.reservation_inquiry
+      : {};
+    if (typeof inquiry.is_reservation_inquiry !== 'boolean') {
+      errors.push('reservation_inquiry.is_reservation_inquiry must be boolean for already_answered');
+    } else if (inquiry.is_reservation_inquiry === true) {
+      const existingIds = Array.isArray(decision.existing_confirm_request_ids)
+        ? decision.existing_confirm_request_ids.map((value) => text(value).trim()).filter(Boolean)
+        : [];
+      if (inquiry.already_registered === true) {
+        if (!existingIds.length) {
+          errors.push('existing_confirm_request_ids is required for an already-registered already_answered reservation');
+        }
+      } else {
+        const followUps = Array.isArray(decision.follow_up_items) ? decision.follow_up_items : [];
+        const reply = decisionReply(decision);
+        const preservedAsActionableFollowUp = followUps.some((item) => (
+          text(item?.type).trim() === 'reservation_review'
+          && text(item?.route).trim() === 'schedule'
+          && text(item?.status).trim() === 'open'
+          && text(item?.taskKey).trim()
+        ))
+          && text(reply.replyMode || reply.reply_mode).trim() === 'no_reply'
+          && reply.shouldCreateTask === true;
+        if (!preservedAsActionableFollowUp) {
+          errors.push('an unregistered already_answered reservation requires an actionable schedule follow-up');
+        }
+      }
     }
   }
 
@@ -905,6 +1012,21 @@ export function validateAiDecisionContract(decision = {}) {
       errors.push(`follow_up_items[${index}].customer_name is required`);
     }
     if (!text(item?.summary).trim()) errors.push(`follow_up_items[${index}].summary is required`);
+    const requiresHumanAction = item?.requiresHumanAction ?? item?.requires_human_action;
+    const actionFamily = text(item?.actionFamily || item?.action_family).trim();
+    const businessKey = text(item?.businessKey || item?.business_key).trim();
+    if (requiresHumanAction !== undefined && typeof requiresHumanAction !== 'boolean') {
+      errors.push(`follow_up_items[${index}].requiresHumanAction must be boolean`);
+    }
+    if (requiresHumanAction === true) {
+      if (!AI_MANUAL_ACTION_FAMILIES.has(actionFamily)) {
+        errors.push(`follow_up_items[${index}].actionFamily must be an explicit manual action`);
+      }
+      if (!businessKey) errors.push(`follow_up_items[${index}].businessKey is required for manual work`);
+    }
+    if (requiresHumanAction === false && actionFamily && actionFamily !== 'none') {
+      errors.push(`follow_up_items[${index}].actionFamily must be none when requiresHumanAction is false`);
+    }
   });
 
   if (decision.existing_confirm_request_ids !== undefined) {
@@ -1041,9 +1163,9 @@ function hasRequiredSheetSafetyChecks(decision) {
 function normalizeSheetEquipmentItems(decision = {}) {
   const row = decision.sheet_row_candidate || {};
   if (!Array.isArray(row.equipment)) return [];
-  // sheet_row_candidate is Hermes's final, complete plan. The worker must not
-  // guess that another field is more complete or replace exact master names
-  // with raw customer wording.
+  // Hermes explicitly chooses full_plan for a new booking or additions_only
+  // for an existing booking. The worker preserves that exact write set and
+  // never reconstructs or repeats equipment from another field.
   return row.equipment.map((item) => ({
     item: text(item?.item).trim(),
     quantity: item?.quantity
@@ -1153,11 +1275,19 @@ export function buildSheetAppendPayload(decision, options = {}) {
     추가요청: extra,
     장비: equipment.map((item) => ({ 이름: item.item, 수량: item.quantity }))
   };
+  const setComponentSelections = (Array.isArray(row.set_component_selections) ? row.set_component_selections : [])
+    .map((selection) => ({
+      setItem: text(selection?.set_item).trim(),
+      componentItem: text(selection?.component_item).trim(),
+      selectedItem: text(selection?.selected_item).trim()
+    }))
+    .filter((selection) => selection.setItem && selection.componentItem && selection.selectedItem);
   return {
     key: options.apiKey || DEFAULT_SHEET_API_KEY,
     action: 'run',
     func: 'insertAndCheckRequest',
-    args
+    args,
+    setComponentSelections
   };
 }
 
@@ -1320,18 +1450,26 @@ export function buildFollowUpTopicKey(row = {}) {
 }
 
 export function mergeFollowUpRowsByTopic(rows = []) {
-  const groups = new Map();
+  const groups = [];
   for (const row of Array.isArray(rows) ? rows : []) {
-    const taskKey = explicitFollowUpTaskKey(row);
-    const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
-    const declaredRoute = text(row.route || row.follow_up_route || payload.follow_up_route || payload.route).trim();
-    const key = taskKey && taskKey !== 'unknown' && AI_FOLLOW_UP_ROUTES.has(declaredRoute)
-      ? ['ai-topic', normalizeCustomerForTask(row.customer_name || row.customerName), declaredRoute, taskKey].join(':')
-      : Symbol('untyped-follow-up');
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(row);
+    const matchingIndexes = [];
+    for (let index = 0; index < groups.length; index += 1) {
+      if (groups[index].some((existing) => sameFollowUpCardIdentity(existing, row))) {
+        matchingIndexes.push(index);
+      }
+    }
+    if (!matchingIndexes.length) {
+      groups.push([row]);
+      continue;
+    }
+    const target = groups[matchingIndexes[0]];
+    target.push(row);
+    for (let index = matchingIndexes.length - 1; index >= 1; index -= 1) {
+      target.push(...groups[matchingIndexes[index]]);
+      groups.splice(matchingIndexes[index], 1);
+    }
   }
-  return [...groups.values()].map((items) => {
+  return groups.map((items) => {
     if (items.length === 1) return items[0];
     const sorted = items.slice().sort((a, b) => {
       const priority = { urgent: 0, high: 1, normal: 2, low: 3 };
@@ -1542,6 +1680,9 @@ export function buildFollowUpRows(decision, job = {}) {
           ...item,
           follow_up_route: route,
           follow_up_task_key: taskKey || null,
+          requires_human_action: item.requiresHumanAction === true || item.requires_human_action === true,
+          action_family: text(item.actionFamily || item.action_family).trim() || 'none',
+          business_key: text(item.businessKey || item.business_key).trim(),
           ...conversationSnapshot
         }
       };
@@ -1605,6 +1746,25 @@ function escapeSlackText(value = '') {
 function truncateSlackText(value = '', max = 2800) {
   const clean = escapeSlackText(value).trim();
   return clean.length > max ? `${clean.slice(0, Math.max(0, max - 1))}…` : clean;
+}
+
+function truncateSlackPlainText(value = '', max = 2800) {
+  const clean = text(value).trim();
+  return clean.length > max ? `${clean.slice(0, Math.max(0, max - 1))}…` : clean;
+}
+
+function truncateSlackFallbackText(value = '', max = 2800) {
+  const clean = text(value).trim();
+  const escaped = escapeSlackText(clean);
+  if (escaped.length <= max) return escaped;
+  const limit = Math.max(0, max - 1);
+  let result = '';
+  for (const character of clean) {
+    const escapedCharacter = escapeSlackText(character);
+    if (result.length + escapedCharacter.length > limit) break;
+    result += escapedCharacter;
+  }
+  return `${result}…`;
 }
 
 function codeBlockForSlack(value = '', max = 2400) {
@@ -2018,6 +2178,7 @@ export async function enrichFollowUpRowWithOperationalCalculations(config = {}, 
 
 function slackTypeLabel(type = '') {
   const labels = {
+    customer_inquiry: '카카오톡 문의',
     reply_needed: '답변 필요',
     quote_send: '견적서 발송',
     tax_invoice: '세금계산서/증빙',
@@ -2035,6 +2196,24 @@ function slackTypeLabel(type = '') {
 }
 
 export function routeFollowUpToSlack(row = {}, config = {}) {
+  const cardKind = row?.payload?.card_kind;
+  if (cardKind === 'follow_up_case') {
+    const owner = text(row?.payload?.owner_channel) === 'follow_up' ? 'follow_up' : 'inquiry';
+    const channel = owner === 'follow_up' ? config.slackFollowUpChannel : config.slackInquiryChannel;
+    if (!text(channel).trim()) throw new Error(`Missing Slack ${owner === 'follow_up' ? 'follow-up' : 'inquiry'} channel`);
+    return { route: owner, channel };
+  }
+  if (config.twoChannelRoutingEnabled === true) {
+    if (cardKind === 'inquiry_case') {
+      if (!text(config.slackInquiryChannel).trim()) throw new Error('Missing Slack inquiry channel');
+      return { route: 'inquiry', channel: config.slackInquiryChannel };
+    }
+    if (cardKind === 'follow_up_task') {
+      if (!text(config.slackFollowUpChannel).trim()) throw new Error('Missing Slack follow-up channel');
+      return { route: 'follow_up', channel: config.slackFollowUpChannel };
+    }
+    throw new Error(`Unsupported two-channel card kind: ${cardKind || 'missing'}`);
+  }
   const route = explicitFollowUpRoute(row);
   const channels = {
     ...DEFAULT_SLACK_CHANNELS,
@@ -2257,14 +2436,340 @@ function formatSlackEquipmentPeriodBlock(row = {}, { includeEquipment = true } =
   const lines = [];
   if (includeEquipment && equipment) lines.push(`장비: ${equipment}`);
   if (period) lines.push(`기간: ${period}`);
-  const latest = latestCustomerChatText(row);
-  if (!lines.length && latest && /(예약|가용|가능|대여|렌탈|반출|반납|촬영|일정)/.test(latest)) {
-    lines.push(`요청 원문: ${latest}`);
-  }
   return lines.map((line) => truncateSlackText(line, 320)).join('\n');
 }
 
+export function buildInquiryCaseRow(decision = {}, job = {}, sourceRows = []) {
+  const rows = (Array.isArray(sourceRows) ? sourceRows : []).filter(Boolean);
+  const roomKey = text(job.room_key || job.roomKey || job.payload?.roomKey || rows[0]?.room_key).slice(0, 240);
+  const customerName = text(
+    decision?.customer?.name
+    || job.customer_name
+    || rows.find((row) => text(row?.customer_name).trim())?.customer_name
+  ).slice(0, 120);
+  if (!roomKey || !customerName) return null;
+
+  const summaries = rows.map((row) => text(row.summary).trim()).filter(Boolean);
+  const actions = rows.map((row) => text(row.recommended_action).trim()).filter(Boolean);
+  const drafts = [
+    ...rows.map((row) => text(row.suggested_reply_draft).trim()),
+    text(decision?.reply_decision?.text).trim(),
+    text(decision?.suggested_reply_draft).trim()
+  ].filter(Boolean);
+  const evidence = rows.flatMap((row) => Array.isArray(row.evidence) ? row.evidence.map(text).filter(Boolean) : []);
+  const latestCluster = text(decision.latest_customer_message_cluster || job.previewText || job.preview_text).slice(0, 3000);
+  const conversationKey = inquiryConversationKey({ room_key: roomKey, customer_name: customerName });
+  const priorityOrder = { urgent: 0, high: 1, normal: 2, low: 3 };
+  const priority = rows.reduce((best, row) => (
+    (priorityOrder[row.priority] ?? 2) < (priorityOrder[best] ?? 2) ? row.priority : best
+  ), 'normal');
+
+  return {
+    follow_up_key: conversationKey,
+    source: 'kakao_ai_worker',
+    job_id: isUuid(text(job.id || job.jobId)) ? text(job.id || job.jobId) : null,
+    room_key: roomKey,
+    customer_name: customerName,
+    type: 'customer_inquiry',
+    priority,
+    status: 'open',
+    title: `${customerName} 카카오톡 문의`,
+    summary: latestCluster || summaries[0] || text(decision.reason).slice(0, 3000),
+    recommended_action: Array.from(new Set(actions)).slice(0, 3).join('\n'),
+    suggested_reply_draft: drafts[0] || '',
+    evidence: Array.from(new Set(evidence)).slice(0, 12),
+    blocking_reason: null,
+    due_hint: rows.map((row) => row.due_hint).find(Boolean) || null,
+    decision_classification: text(decision.classification).slice(0, 80),
+    decision_confidence: text(decision.confidence).slice(0, 80),
+    payload: {
+      card_kind: 'inquiry_case',
+      case_id: randomUUID(),
+      inquiry_conversation_key: conversationKey,
+      latest_customer_message_cluster: latestCluster,
+      latest_staff_message: text(decision.latest_staff_message).slice(0, 1000),
+      business_tags: Array.from(new Set(rows.map((row) => text(row.type)).filter(Boolean))),
+      source_follow_up_keys: rows.map((row) => text(row.follow_up_key)).filter(Boolean)
+    }
+  };
+}
+
+export function buildCanonicalFollowUpCases(decision = {}, job = {}, rows = []) {
+  const sourceRows = (Array.isArray(rows) ? rows : []).filter(Boolean);
+  const inquiryBase = buildInquiryCaseRow(decision, job, sourceRows);
+  if (!inquiryBase) return [];
+  const replyDecision = decision?.reply_decision && typeof decision.reply_decision === 'object'
+    ? decision.reply_decision
+    : {};
+  const replyMode = text(
+    replyDecision.replyMode
+    || replyDecision.reply_mode
+    || decision.reply_intent
+  ).trim().toLowerCase().replace(/-/g, '_');
+  const explicitReplyRequired = decision.reply_required === true
+    || decision.requires_reply === true
+    || replyDecision.reply_required === true
+    || replyDecision.requiresReply === true
+    || replyDecision.requires_reply === true
+    || sourceRows.some((row) => (
+      row?.reply_required === true
+      || row?.requires_reply === true
+      || row?.payload?.reply_required === true
+      || row?.payload?.requires_reply === true
+      || text(row?.type).trim() === 'reply_needed'
+    ));
+  const requiresReply = ['auto_send', 'draft_only', 'reply_required', 'required'].includes(replyMode)
+    || (replyMode !== 'no_reply' && explicitReplyRequired);
+  const replyIntent = replyMode || (explicitReplyRequired ? 'reply_required' : 'no_reply');
+  const coreFacts = Array.from(new Set(sourceRows.flatMap((row) => (
+    Array.isArray(row?.evidence) ? row.evidence.map((value) => text(value).trim()).filter(Boolean) : []
+  )))).slice(0, 2);
+  const lifecycle = buildFollowUpCaseLifecycle({
+    conversationKey: inquiryBase.payload.inquiry_conversation_key,
+    requestGroupKey: text(decision.request_group_key || job.payload?.request_group_key),
+    rows: sourceRows.map((row) => ({
+      ...row,
+      payload: {
+        ...(row.payload || {}),
+        action_family: actionFamilyForFollowUp(row),
+        business_object_key: businessObjectKeyForFollowUp(row)
+      }
+    })),
+    requiresReply
+  });
+  return [{
+    ...inquiryBase,
+    type: lifecycle.owner_channel === 'follow_up' ? 'follow_up_case' : 'customer_inquiry',
+    follow_up_key: lifecycle.case_key,
+    payload: {
+      ...inquiryBase.payload,
+      card_kind: 'follow_up_case',
+      ...lifecycle,
+      reply_intent: replyIntent,
+      ai_judgment: text(decision.reason || replyDecision.reason || inquiryBase.recommended_action || inquiryBase.summary).slice(0, 1000),
+      core_facts: coreFacts
+    }
+  }];
+}
+
+export async function upsertFollowUpCaseRows(config = {}, rows = []) {
+  const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
+  const result = { rows: [], inserted: 0, updated: 0 };
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const inserted = await supabaseFetch(config, `${table}?on_conflict=follow_up_key`, {
+      method: 'POST',
+      headers: supabaseHeaders(config, 'resolution=ignore-duplicates,return=representation'),
+      body: JSON.stringify([row])
+    });
+    const insertedRow = Array.isArray(inserted) ? inserted[0] : inserted;
+    if (insertedRow?.id) {
+      result.rows.push(insertedRow);
+      result.inserted += 1;
+      continue;
+    }
+
+    let existingRows = await supabaseFetch(config, [
+      `${table}?select=*`,
+      `follow_up_key=eq.${encodeURIComponent(row.follow_up_key)}`,
+      'limit=1'
+    ].join('&'), { headers: supabaseHeaders(config) });
+    let existing = Array.isArray(existingRows) ? existingRows[0] : null;
+    if (!existing?.id) throw new Error(`atomic follow-up case conflict could not be read: ${row.follow_up_key}`);
+    if (['done', 'dismissed'].includes(text(existing.status))) {
+      result.rows.push(existing);
+      continue;
+    }
+
+    let patchedRow = null;
+    for (let attempt = 0; attempt < 3 && existing?.id; attempt += 1) {
+      const lifecycle = mergeFollowUpCaseLifecycle(existing.payload || {}, row.payload || {}, {
+        existingContent: existing,
+        incomingContent: row
+      });
+      const payload = {
+        ...lifecycle,
+        case_id: existing.payload?.case_id || row.payload?.case_id || randomUUID()
+      };
+      const patch = { ...row, payload };
+      delete patch.id;
+      const expectedStateVersion = Number(existing.payload?.state_version || 1);
+      const patched = await supabaseFetch(config, [
+        `${table}?id=eq.${encodeURIComponent(existing.id)}`,
+        `payload->>state_version=eq.${expectedStateVersion}`
+      ].join('&'), {
+        method: 'PATCH',
+        headers: supabaseHeaders(config, 'return=representation'),
+        body: JSON.stringify(patch)
+      });
+      patchedRow = Array.isArray(patched) ? patched[0] : patched;
+      if (patchedRow?.id) break;
+      existingRows = await supabaseFetch(config, [
+        `${table}?select=*`,
+        `follow_up_key=eq.${encodeURIComponent(row.follow_up_key)}`,
+        'limit=1'
+      ].join('&'), { headers: supabaseHeaders(config) });
+      existing = Array.isArray(existingRows) ? existingRows[0] : null;
+    }
+    if (!patchedRow?.id) throw new Error(`follow-up case merge conflict did not converge: ${row.follow_up_key}`);
+    result.rows.push(patchedRow);
+    result.updated += 1;
+  }
+  return result;
+}
+
+export function splitInquiryAndManualFollowUps(decision = {}, job = {}, rows = []) {
+  const sourceRows = (Array.isArray(rows) ? rows : []).filter(Boolean);
+  const inquiry = buildInquiryCaseRow(decision, job, sourceRows);
+  const tasks = sourceRows.map((row) => {
+    const actionFamily = actionFamilyForFollowUp(row);
+    if (!actionFamily) return null;
+    return {
+      ...row,
+      payload: {
+        ...(row.payload && typeof row.payload === 'object' ? row.payload : {}),
+        card_kind: 'follow_up_task',
+        requires_human_action: true,
+        action_family: actionFamily,
+        business_object_key: businessObjectKeyForFollowUp(row)
+      }
+    };
+  }).filter(Boolean);
+  return { inquiry, tasks };
+}
+
+export async function upsertInquiryCaseRow(config = {}, row = {}) {
+  if (!row?.room_key || !row?.customer_name) return { row: null, inserted: false, updated: false };
+  const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
+  const query = [
+    'select=*',
+    'type=eq.customer_inquiry',
+    `room_key=eq.${encodeURIComponent(row.room_key)}`,
+    'status=not.in.(done,dismissed)',
+    'order=updated_at.desc',
+    'limit=50'
+  ].join('&');
+  const candidates = await supabaseFetch(config, `${table}?${query}`, {
+    headers: supabaseHeaders(config)
+  });
+  const identity = inquiryConversationKey(row);
+  const existing = (Array.isArray(candidates) ? candidates : [])
+    .find((candidate) => inquiryConversationKey(candidate) === identity);
+
+  if (existing?.id) {
+    const existingPayload = existing.payload && typeof existing.payload === 'object' ? existing.payload : {};
+    const incomingPayload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+    const patch = {
+      ...row,
+      follow_up_key: existing.follow_up_key || row.follow_up_key,
+      status: 'open',
+      payload: {
+        ...existingPayload,
+        ...incomingPayload,
+        case_id: existingPayload.case_id || incomingPayload.case_id || randomUUID(),
+        ...(existingPayload.slack_delivery ? { slack_delivery: existingPayload.slack_delivery } : {})
+      }
+    };
+    delete patch.id;
+    const updatedRows = await supabaseFetch(config, `${table}?id=eq.${encodeURIComponent(existing.id)}`, {
+      method: 'PATCH',
+      headers: supabaseHeaders(config, 'return=representation'),
+      body: JSON.stringify(patch)
+    });
+    return { row: Array.isArray(updatedRows) ? updatedRows[0] : updatedRows, inserted: false, updated: true };
+  }
+
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+  const insertRow = {
+    ...row,
+    payload: { ...payload, case_id: payload.case_id || randomUUID(), card_kind: 'inquiry_case' }
+  };
+  const insertedRows = await supabaseFetch(config, table, {
+    method: 'POST',
+    headers: supabaseHeaders(config, 'return=representation'),
+    body: JSON.stringify([insertRow])
+  });
+  return { row: Array.isArray(insertedRows) ? insertedRows[0] : insertedRows, inserted: true, updated: false };
+}
+
+export async function upsertManualFollowUpRows(config = {}, rows = [], caseId = '') {
+  const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
+  const results = [];
+  let inserted = 0;
+  let updated = 0;
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+    const linked = {
+      ...row,
+      status: 'open',
+      payload: { ...payload, card_kind: 'follow_up_task', case_id: caseId }
+    };
+    const followUpKey = followUpTaskIdentity(linked, caseId);
+    if (!followUpKey) continue;
+    linked.follow_up_key = followUpKey;
+    const existingRows = await supabaseFetch(config, `${table}?select=*&follow_up_key=eq.${encodeURIComponent(followUpKey)}&status=not.in.(done,dismissed)&limit=1`, {
+      headers: supabaseHeaders(config)
+    });
+    const existing = Array.isArray(existingRows) ? existingRows[0] : null;
+    if (existing?.id) {
+      const existingPayload = existing.payload && typeof existing.payload === 'object' ? existing.payload : {};
+      linked.payload = {
+        ...existingPayload,
+        ...linked.payload,
+        ...(existingPayload.slack_delivery ? { slack_delivery: existingPayload.slack_delivery } : {})
+      };
+      const patched = await supabaseFetch(config, `${table}?id=eq.${encodeURIComponent(existing.id)}`, {
+        method: 'PATCH',
+        headers: supabaseHeaders(config, 'return=representation'),
+        body: JSON.stringify(linked)
+      });
+      results.push(Array.isArray(patched) ? patched[0] : patched);
+      updated += 1;
+    } else {
+      const posted = await supabaseFetch(config, table, {
+        method: 'POST',
+        headers: supabaseHeaders(config, 'return=representation'),
+        body: JSON.stringify([linked])
+      });
+      results.push(Array.isArray(posted) ? posted[0] : posted);
+      inserted += 1;
+    }
+  }
+  return { rows: results.filter(Boolean), inserted, updated };
+}
+
+function followUpDeliverySlotKey(row = {}) {
+  const customer = conversationCustomerKey(row.customer_name || row.customerName);
+  const room = normalizeKeyPart(row.room_key || row.roomKey, 120);
+  const route = explicitFollowUpRoute(row);
+  const type = stableFollowUpType(row);
+  if (!customer || customer === 'unknown' || !room || room === 'unknown') return '';
+  if (!AI_FOLLOW_UP_ROUTES.has(route) || !type || type === 'unknown') return '';
+  return ['delivery', room, customer, route, type].join(':');
+}
+
+function followUpAiTopicIdentity(row = {}) {
+  const customer = conversationCustomerKey(row.customer_name || row.customerName);
+  const room = normalizeKeyPart(row.room_key || row.roomKey, 120);
+  const route = explicitFollowUpRoute(row);
+  const taskKey = explicitFollowUpTaskKey(row);
+  if (!customer || customer === 'unknown') return '';
+  if (!AI_FOLLOW_UP_ROUTES.has(route) || !taskKey || taskKey === 'unknown') return '';
+  return ['ai-topic', room === 'unknown' ? '' : room, customer, route, taskKey].join(':');
+}
+
+function sameFollowUpCardIdentity(left = {}, right = {}) {
+  const leftSlot = followUpDeliverySlotKey(left);
+  const rightSlot = followUpDeliverySlotKey(right);
+  if (leftSlot && leftSlot === rightSlot) return true;
+  const leftTopic = followUpAiTopicIdentity(left);
+  const rightTopic = followUpAiTopicIdentity(right);
+  return Boolean(leftTopic && leftTopic === rightTopic);
+}
+
 function conciseSlackActionLine(row = {}) {
+  if (isSlackFailureCard(row)) {
+    return '카카오에서 고객명과 마지막 요청을 확인하고 처리 여부 결정';
+  }
   const calc = row.payload?.operational_calculation;
   if (calc?.unresolved?.length) return `미확인 항목 확인: ${calc.unresolved.slice(0, 2).join(', ')}`;
   if (calc?.lines?.length) return '계산 금액 대조 후 파일 발송';
@@ -2302,6 +2807,7 @@ function priorityLabelForSlack(priority = '') {
 }
 
 function formatSlackProblemBlock(row = {}) {
+  if (isSlackFailureCard(row)) return '카카오 자동 처리가 완료되지 않아 사람 확인이 필요합니다.';
   const availability = row.payload?.sheet_availability;
   if (availability) {
     const lines = [];
@@ -2312,31 +2818,48 @@ function formatSlackProblemBlock(row = {}) {
     else lines.push('가용확인 결과 판독이 필요합니다.');
     return lines.join('\n');
   }
-  const customerAsk = latestCustomerChatText(row);
   const summaryLines = splitReadableClauses(row.summary || row.title, 3)
     .map(cleanSlackBriefText)
     .filter((line) => line && !/^(카카오 화면|확인요청 조회|세트마스터 조회|계약마스터|스케줄상세)/.test(line));
   const lines = [];
-  if (customerAsk) lines.push(`고객 요청: ${customerAsk}`);
   for (const line of summaryLines) {
-    if (!lines.some((existing) => existing.includes(line) || line.includes(existing.replace(/^고객 요청:\s*/, '')))) {
+    if (!lines.some((existing) => existing.includes(line) || line.includes(existing))) {
       lines.push(line);
     }
   }
   return lines.slice(0, 4).map((line) => truncateSlackText(line, 360)).join('\n');
 }
 
+function isSlackFailureCard(row = {}) {
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+  const technical = `${row.summary || ''} ${row.blocking_reason || ''}`;
+  return Boolean(payload.failure_kind)
+    || /worker exited|Hermes decision|file:\/\/\/|at async\s|Error:\s/i.test(technical);
+}
+
+function safeSlackCustomerName(row = {}) {
+  const customer = text(row.customer_name || '').replace(/\s+/g, ' ').trim();
+  if (!customer) return '고객명 확인 필요';
+  const looksLikeMessage = customer.length > 24
+    || /[.!?]/.test(customer)
+    || /(감사합니다|접수했습니다|바꿔\s*드리겠습니다|안내\s*드리겠습니다|처리해\s*드렸습니다)/.test(customer);
+  return looksLikeMessage ? '고객명 확인 필요' : customer;
+}
+
 function formatSlackCardTitle(row = {}, typeLabel = '') {
-  const customer = text(row.customer_name || '').trim();
-  return (customer || typeLabel || cleanSlackBriefText(row.title || '') || '후속처리').slice(0, 150);
+  const customer = safeSlackCustomerName(row);
+  const task = typeLabel || cleanSlackBriefText(row.title || '') || '후속처리';
+  return `${customer} · ${task}`.slice(0, 150);
 }
 
 function formatSlackBriefSummary(row = {}, { typeLabel = '', priorityLabel = '' } = {}) {
   const availabilityLines = formatSlackAvailabilityBriefLines(row);
   const equipmentPeriod = formatSlackEquipmentPeriodBlock(row, { includeEquipment: availabilityLines.length <= 1 });
   const action = conciseSlackActionLine(row);
+  // The task type is already in the card header. Repeating it here makes both
+  // the card and the mobile notification harder to scan.
   const statusLines = [
-    [typeLabel || slackTypeLabel(row.type), priorityLabel || priorityLabelForSlack(row.priority)].filter(Boolean).join(' · '),
+    priorityLabel || priorityLabelForSlack(row.priority),
     availabilityLines[0] || ''
   ].filter(Boolean);
   const detailLines = [
@@ -2344,10 +2867,10 @@ function formatSlackBriefSummary(row = {}, { typeLabel = '', priorityLabel = '' 
     ...availabilityLines.slice(1, 5).map((line) => `결과: ${line}`)
   ].filter(Boolean);
   const sections = [
-    statusLines.length ? `⚠️ 분류/상태\n${statusLines.join('\n')}` : '',
-    `🧩 문제\n${formatSlackProblemBlock(row) || truncateSlackText(row.summary || row.title, 240)}`,
+    statusLines.length ? `⚠️ 현재 상태\n${statusLines.join('\n')}` : '',
+    `🧩 처리 내용\n${formatSlackProblemBlock(row) || '내용 확인 필요'}`,
     detailLines.length ? `🎒 장비 / 📅 기간\n${detailLines.join('\n')}` : '',
-    action ? `➡️ 다음\n${truncateSlackText(action, 360)}` : ''
+    action ? `➡️ 내가 할 일\n${truncateSlackText(action, 360)}` : ''
   ];
   return sections.filter(Boolean).join('\n\n');
 }
@@ -2365,25 +2888,348 @@ function formatSlackRecentChat(row = {}) {
     : [];
   const displayMessages = messages.length ? messages : evidenceChatMessages(row);
   const lines = displayMessages
+    .filter((message) => slackSpeakerLabel(message?.sender) === '고객')
     .map((message) => {
       const body = cleanSlackChatText(message?.message).replace(/\n+/g, ' / ');
       if (!body) return '';
-      return `• ${slackSpeakerLabel(message?.sender)}: ${truncateSlackText(body, 240)}`;
+      return truncateSlackText(body, 320);
     })
     .filter(Boolean)
-    .slice(-3);
-  if (lines.length) return lines.join('\n\n');
+    .slice(-1);
+  if (lines.length) return lines[0];
   const latest = cleanSlackChatText(payload.latest_customer_message_cluster || '');
-  if (latest) return `• 고객: ${truncateSlackText(latest, 320)}`;
+  if (latest) return truncateSlackText(latest, 320);
   return '';
 }
 
-export function buildSlackFollowUpMessage(row = {}, options = {}) {
+function slackNotificationAction(row = {}) {
+  if (isSlackFailureCard(row)) return '카카오에서 고객명과 마지막 요청을 확인하고 처리 여부 결정';
+  if (row.payload?.sheet_availability || row.payload?.operational_calculation) return conciseSlackActionLine(row);
+  const explicit = cleanSlackBriefText(row.recommended_action || '');
+  return truncateSlackText(explicit || conciseSlackActionLine(row) || '처리 내용 확인', 140);
+}
+
+function slackNotificationTypeLabel(type = '') {
+  const labels = {
+    reply_needed: '답변',
+    quote_send: '견적',
+    tax_invoice: '세무증빙',
+    schedule_check: '일정',
+    reservation_review: '예약',
+    price_review: '가격',
+    payment_check: '결제',
+    contract_document: '서류',
+    return_extension: '반납변경',
+    damage_repair: '파손수리',
+    sheet_duplicate_check: '시트확인',
+    completed_log: '완료'
+  };
+  return labels[type] || '확인';
+}
+
+function compactSlackNotificationAction(row = {}) {
+  const action = slackNotificationAction(row);
+  if (isSlackFailureCard(row)) return '고객·요청 확인';
+  if (/가용|예약\s*가능|가능\s*여부/.test(action)) return '장비 가용 확인 후 안내';
+  if (/입금|결제/.test(action)) return '입금·결제 확인';
+  if (/견적/.test(action)) return '견적 확인 후 처리';
+  if (/세금계산서|증빙/.test(action)) return '증빙 확인 후 처리';
+  if (/반납|연장/.test(action)) return '반납·변경 확인';
+  if (/파손|수리/.test(action)) return '파손·수리 확인';
+  if (/발송|전송/.test(action)) return '발송 여부 확인';
+  return truncateSlackText(action, 18);
+}
+
+const MANUAL_ACTION_PRESENTATION = {
+  invoice_issue: { label: '세금계산서', fallback: '세금계산서를 발행하세요.' },
+  reservation_change: { label: '예약 변경', fallback: '예약 일정 또는 장비를 변경하세요.' },
+  payment_reconcile: { label: '입금·결제 확인', fallback: '정산 내역에서 결제를 확인하세요.' },
+  inventory_check: { label: '장비 확인', fallback: '재고 또는 호환 여부를 확인하세요.' },
+  document_approval: { label: '견적·서류 확인', fallback: '문서 내용과 발송 여부를 확인하세요.' }
+};
+
+function taskObjectLabel(row = {}) {
+  const rawDeclared = text(row.payload?.business_object_key || row.business_object_key).normalize('NFKC').trim();
+  const businessWrapped = /^business:/i.test(rawDeclared);
+  const declared = businessWrapped ? rawDeclared.replace(/^business:/i, '') : rawDeclared;
+  const declaredObject = declared.match(/^(trade|request|equipment|task):([0-9a-z가-힣._/-]{1,80})$/i);
+  if (declaredObject) {
+    const [, kind, identifier] = declaredObject;
+    const labels = { trade: '', request: '요청 ', equipment: '장비 ', task: '업무 ' };
+    return `${labels[kind.toLowerCase()]}${identifier}`;
+  }
+  if (businessWrapped && /^[0-9a-z가-힣._/-]{1,80}$/i.test(declared)) return `업무 ${declared}`;
+  const tradeId = [declared, row.title, row.summary].join(' ').match(/\b\d{6}-\d{3}\b/)?.[0];
+  const customer = text(row.customer_name || '').trim() ? safeSlackCustomerName(row) : '';
+  return tradeId || customer || '업무 대상 확인';
+}
+
+function essentialSlackFacts(row = {}, { exclude = () => false } = {}) {
+  const internal = /(?:file:\/\/|[A-Z]:\\|\.mjs:\d+|stack trace|worker exited|Agent 호출|Hermes decision|RQ 내부)/i;
+  const candidates = [
+    ...(Array.isArray(row.evidence) ? row.evidence : []),
+    ...(Array.isArray(row.payload?.operational_calculation?.lines) ? row.payload.operational_calculation.lines : [])
+  ];
+  return Array.from(new Set(candidates
+    .filter((value) => !exclude(value))
+    .map((value) => cleanSlackBriefText(value))
+    .filter((value) => value && !internal.test(value))))
+    .slice(0, 2)
+    .map((value) => truncateSlackText(value, 120));
+}
+
+function normalizeInquiryMessageEquivalent(value = '', row = {}) {
+  let normalized = cleanSlackChatText(value).normalize('NFKC');
+  normalized = normalized
+    .replace(/^카카오\s*(?:화면|최신)?\s*[:\-]?\s*/i, '')
+    .replace(/^(?:최신\s*)?고객\s*(?:메시지|요청|문의)?(?:이|은|는)?\s*[:\-]?\s*/i, '')
+    .trim();
+  const customer = cleanSlackChatText(row.customer_name || '').normalize('NFKC');
+  if (customer && normalized.startsWith(customer)) {
+    const remainder = normalized.slice(customer.length);
+    if (/^\s*[:\-]\s*/.test(remainder)) normalized = remainder.replace(/^\s*[:\-]\s*/, '');
+  }
+  return normalized
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function essentialInquiryFacts(row = {}, latestMessage = '') {
+  const latest = normalizeInquiryMessageEquivalent(latestMessage, row);
+  return essentialSlackFacts(row, {
+    exclude: (value) => Boolean(latest) && normalizeInquiryMessageEquivalent(value, row) === latest
+  });
+}
+
+function inquiryDraftDisplay(value = '', max = 700) {
+  const eventualText = text(value).trim();
+  if (!eventualText) return { text: '', complete: false };
+  const twoLineText = eventualText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .join('\n');
+  const safeText = twoLineText.replace(/```/g, "'''");
+  const displayedText = safeText.length > max
+    ? `${safeText.slice(0, Math.max(0, max - 1))}…`
+    : safeText;
+  return { text: displayedText, complete: displayedText === eventualText };
+}
+
+export function buildSlackManualTaskMessage(row = {}, options = {}) {
+  const route = options.route || routeFollowUpToSlack(row, options.config || {});
+  const family = actionFamilyForFollowUp(row);
+  const presentation = MANUAL_ACTION_PRESENTATION[family] || { label: '업무 확인', fallback: '업무 내용 확인 필요' };
+  const action = truncateSlackText(cleanSlackBriefText(row.recommended_action) || presentation.fallback, 180);
+  const facts = essentialSlackFacts(row).slice(0, 2);
+  const objectLabel = taskObjectLabel(row);
+  const customerLabel = safeSlackCustomerName(row);
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: truncateSlackPlainText(`${presentation.label} · ${objectLabel}`, 150), emoji: true } },
+    {
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `*고객* ${truncateSlackText(customerLabel, 50)}  ·  *대상* ${truncateSlackText(objectLabel, 80)}` }]
+    },
+    { type: 'section', text: { type: 'mrkdwn', text: `*내가 할 일*\n${action}` } }
+  ];
+  if (facts.length) {
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: facts.join('  ·  ') }] });
+  }
+  blocks.push({
+    type: 'actions',
+    elements: [
+      { type: 'button', text: { type: 'plain_text', text: '진행중' }, action_id: 'village_followup_status_in_progress', value: String(row.id || '') },
+      { type: 'button', text: { type: 'plain_text', text: '완료' }, action_id: 'village_followup_status_done', value: String(row.id || '') },
+      { type: 'button', text: { type: 'plain_text', text: '무시' }, style: 'danger', action_id: 'village_followup_status_dismissed', value: String(row.id || '') }
+    ]
+  });
+  return {
+    channel: route.channel,
+    text: truncateSlackFallbackText(`${presentation.label} · ${objectLabel} 처리 필요`, 40),
+    blocks
+  };
+}
+
+function inquiryLabel(row = {}) {
+  const tag = Array.isArray(row.payload?.business_tags)
+    ? row.payload.business_tags.map((value) => text(value).trim()).find(Boolean)
+    : '';
+  return slackTypeLabel(tag || row.decision_classification || row.type || 'customer_inquiry');
+}
+
+function firstSlackSentence(value = '') {
+  const normalized = cleanSlackBriefText(value).replace(/\s+/g, ' ').trim();
+  const sentence = normalized.match(/^.*?(?:[.!?。]|$)/)?.[0] || '';
+  return truncateSlackText(sentence, 160);
+}
+
+function inquiryActionElements(row, draft, config = {}, { failure = false, directSendAllowed = false } = {}) {
+  const elements = failure
+    ? []
+    : directSendAllowed
+      ? [
+        { type: 'button', text: { type: 'plain_text', text: '답변 전송' }, style: 'primary', action_id: 'village_followup_send', value: String(row.id || '') },
+        { type: 'button', text: { type: 'plain_text', text: '수정' }, action_id: 'village_followup_edit_send', value: String(row.id || '') }
+      ]
+      : [{ type: 'button', text: { type: 'plain_text', text: draft ? '수정' : '답변 작성' }, action_id: 'village_followup_edit_send', value: String(row.id || '') }];
+  const channel = text(config.slackFollowUpChannel).trim();
+  if (channel) {
+    elements.push({
+      type: 'button',
+      text: { type: 'plain_text', text: '후속업무로' },
+      action_id: 'village_followup_open_manual_channel',
+      value: String(row.id || ''),
+      url: `https://slack.com/app_redirect?channel=${encodeURIComponent(channel)}`
+    });
+  }
+  return elements;
+}
+
+export function buildSlackInquiryMessage(row = {}, options = {}) {
+  const route = options.route || routeFollowUpToSlack(row, options.config || {});
+  const failure = isSlackFailureCard(row);
+  const rawLatest = text(row.payload?.latest_customer_message_cluster || row.summary).trim();
+  const latest = truncateSlackText(rawLatest, 700);
+  const judgment = firstSlackSentence(row.recommended_action) || '답변 판단 필요';
+  const rawDraft = failure ? '' : text(row.suggested_reply_draft).trim();
+  const draftDisplay = inquiryDraftDisplay(rawDraft);
+  const directSendAllowed = Boolean(rawDraft) && draftDisplay.complete && draftDisplay.text === rawDraft;
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: truncateSlackPlainText(`${safeSlackCustomerName(row)} · ${inquiryLabel(row)}`, 150), emoji: true } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*고객*\n${latest || '최신 고객 메시지 확인 필요'}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*AI 판단*\n${judgment}` } }
+  ];
+  const facts = essentialInquiryFacts(row, rawLatest).slice(0, 2);
+  if (facts.length) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: facts.join('  ·  ') }] });
+  if (draftDisplay.text) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*답변 초안*\n${codeBlockForSlack(draftDisplay.text, 700)}` } });
+  const actions = inquiryActionElements(row, draftDisplay.text, options.config || {}, { failure, directSendAllowed });
+  if (actions.length) blocks.push({ type: 'actions', elements: actions });
+  return {
+    channel: route.channel,
+    text: truncateSlackFallbackText(`${safeSlackCustomerName(row)} · ${inquiryLabel(row)} · ${rawLatest || '확인 필요'}`, 40),
+    blocks
+  };
+}
+
+function followUpCaseActionValue(row = {}) {
+  return JSON.stringify({ id: String(row.id || ''), state_version: Number(row.payload?.state_version || 0) });
+}
+
+function buildInternalActionCaseMessage({ row = {}, channel = '', steps = [], current, currentIndex = -1 } = {}) {
+  const hasCurrent = Boolean(current);
+  const progress = steps.length
+    ? `${hasCurrent ? currentIndex + 1 : steps.length}/${steps.length}`
+    : '0/0';
+  const lateWork = text(row.payload?.owner_channel) === 'inquiry';
+  const action = truncateSlackText(cleanSlackBriefText(current?.action || row.recommended_action) || '현재 후속 업무를 확인하세요.', 700);
+  const blocks = [
+    {
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: truncateSlackPlainText(`${lateWork ? '후속업무 발생 · ' : ''}${safeSlackCustomerName(row)} · 내부 처리 ${progress}`, 150),
+        emoji: true
+      }
+    },
+    { type: 'section', text: { type: 'mrkdwn', text: `*현재 할 일 (${progress})*\n${action}` } }
+  ];
+  const facts = essentialSlackFacts(row).slice(0, 2);
+  if (facts.length) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: facts.join('  ·  ') }] });
+  blocks.push({
+    type: 'actions',
+    elements: [
+      { type: 'button', text: { type: 'plain_text', text: '진행중' }, action_id: 'village_followup_status_in_progress', value: followUpCaseActionValue(row) },
+      { type: 'button', text: { type: 'plain_text', text: '단계 완료' }, style: 'primary', action_id: 'village_followup_step_done', value: followUpCaseActionValue(row) },
+      { type: 'button', text: { type: 'plain_text', text: '무시' }, style: 'danger', action_id: 'village_followup_status_dismissed', value: followUpCaseActionValue(row) }
+    ]
+  });
+  return {
+    channel,
+    text: truncateSlackFallbackText(`${lateWork ? '후속업무 발생 · ' : ''}${safeSlackCustomerName(row)} · 내부 처리 ${progress}`, 40),
+    blocks
+  };
+}
+
+function buildCustomerReplyCaseMessage({ row = {}, channel = '' } = {}) {
+  const rawDraft = text(row.suggested_reply_draft).trim();
+  const draftDisplay = inquiryDraftDisplay(rawDraft);
+  const latestCustomerRequest = truncateSlackText(
+    text(row.payload?.latest_customer_message_cluster || row.summary).trim() || '최신 고객 요청을 확인해 주세요.',
+    700
+  );
+  const judgment = truncateSlackText(
+    text(row.payload?.ai_judgment || row.recommended_action).trim() || '고객 답변이 필요합니다.',
+    700
+  );
+  const coreFacts = (Array.isArray(row.payload?.core_facts) && row.payload.core_facts.length
+    ? row.payload.core_facts
+    : essentialSlackFacts(row))
+    .map((value) => truncateSlackText(text(value).trim(), 240))
+    .filter(Boolean)
+    .slice(0, 2);
+  const completedWork = (Array.isArray(row.payload?.steps) ? row.payload.steps : [])
+    .filter((step) => step?.status === 'done')
+    .map((step) => truncateSlackText(cleanSlackBriefText(step.action || step.step_key), 300))
+    .filter(Boolean);
+  const blocks = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: truncateSlackPlainText(`${safeSlackCustomerName(row)} · 고객 답변`, 150), emoji: true }
+    },
+    { type: 'section', text: { type: 'mrkdwn', text: `*최신 고객 요청*\n${latestCustomerRequest}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*AI 판단*\n${judgment}` } }
+  ];
+  if (coreFacts.length) {
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: coreFacts.join('  ·  ') }] });
+  }
+  if (completedWork.length) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*완료한 업무*\n${completedWork.map((item) => `• ${item}`).join('\n')}` } });
+  }
+  if (draftDisplay.text) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*답변 초안*\n${codeBlockForSlack(draftDisplay.text, 700)}` } });
+  } else {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*답변 초안*\n답변 내용을 작성해 주세요.' } });
+  }
+  const actions = [];
+  if (rawDraft && draftDisplay.complete && draftDisplay.text === rawDraft) {
+    actions.push({ type: 'button', text: { type: 'plain_text', text: '답변 전송' }, style: 'primary', action_id: 'village_followup_send', value: followUpCaseActionValue(row) });
+  }
+  actions.push(
+    { type: 'button', text: { type: 'plain_text', text: rawDraft ? '수정' : '답변 작성' }, action_id: 'village_followup_edit_send', value: followUpCaseActionValue(row) },
+    { type: 'button', text: { type: 'plain_text', text: '답변 불필요' }, action_id: 'village_followup_reply_not_needed', value: followUpCaseActionValue(row) }
+  );
+  blocks.push({ type: 'actions', elements: actions });
+  return {
+    channel,
+    text: truncateSlackFallbackText(`${safeSlackCustomerName(row)} · 고객 답변 필요`, 40),
+    blocks
+  };
+}
+
+export function buildSlackFollowUpCaseMessage(row = {}, options = {}) {
+  const owner = text(row.payload?.owner_channel) === 'follow_up' ? 'follow_up' : 'inquiry';
+  const channel = owner === 'follow_up'
+    ? text(options.config?.slackFollowUpChannel)
+    : text(options.config?.slackInquiryChannel);
+  const phase = text(row.payload?.phase);
+  if (phase === 'internal_action') {
+    const steps = Array.isArray(row.payload?.steps) ? row.payload.steps : [];
+    const currentIndex = steps.findIndex((step) => step.status === 'pending');
+    const current = steps[currentIndex];
+    return buildInternalActionCaseMessage({ row, channel, steps, current, currentIndex });
+  }
+  return buildCustomerReplyCaseMessage({ row, channel });
+}
+
+function buildLegacySlackFollowUpMessage(row = {}, options = {}) {
   const route = options.route || routeFollowUpToSlack(row, options.config || {});
   const typeLabel = slackTypeLabel(row.type);
   const priorityLabel = priorityLabelForSlack(row.priority);
   const title = formatSlackCardTitle(row, typeLabel);
-  const draft = text(row.suggested_reply_draft || '').trim();
+  const failureCard = isSlackFailureCard(row);
+  const draft = failureCard ? '' : text(row.suggested_reply_draft || '').trim();
   const calculationBlock = formatSlackCalculationBlock(row);
   const recentChatBlock = formatSlackRecentChat(row);
   const blocks = [
@@ -2396,7 +3242,7 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*처리 요약*\n${formatSlackBriefSummary(row, { typeLabel, priorityLabel })}` } });
   }
   if (recentChatBlock) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 최근 대화*\n${recentChatBlock}` } });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 고객 요청*\n${recentChatBlock}` } });
   }
   if (calculationBlock) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🧮 계산*\n${truncateSlackText(calculationBlock, 1200)}` } });
@@ -2405,18 +3251,35 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 답변 초안*\n${codeBlockForSlack(draft, 1800)}` } });
   }
   const actionElements = [
-    { type: 'button', text: { type: 'plain_text', text: '전송' }, style: 'primary', action_id: 'village_followup_send', value: String(row.id || '') },
-    { type: 'button', text: { type: 'plain_text', text: '수정 후 전송' }, action_id: 'village_followup_edit_send', value: String(row.id || '') },
+    ...(draft ? [
+      { type: 'button', text: { type: 'plain_text', text: '전송' }, style: 'primary', action_id: 'village_followup_send', value: String(row.id || '') },
+      { type: 'button', text: { type: 'plain_text', text: '수정 후 전송' }, action_id: 'village_followup_edit_send', value: String(row.id || '') }
+    ] : []),
     { type: 'button', text: { type: 'plain_text', text: '진행중' }, action_id: 'village_followup_status_in_progress', value: String(row.id || '') },
     { type: 'button', text: { type: 'plain_text', text: '완료' }, action_id: 'village_followup_status_done', value: String(row.id || '') },
     { type: 'button', text: { type: 'plain_text', text: '무시' }, style: 'danger', action_id: 'village_followup_status_dismissed', value: String(row.id || '') }
   ];
   blocks.push({ type: 'actions', elements: actionElements.slice(0, 5) });
-  return {
-    channel: route.channel,
-    text: `[${typeLabel}] ${row.customer_name || ''} ${row.title || ''}`.trim(),
-    blocks
-  };
+  const fallbackText = truncateSlackText(
+    `${safeSlackCustomerName(row)} · ${slackNotificationTypeLabel(row.type)} · ${compactSlackNotificationAction(row)}`,
+    40
+  );
+  return { channel: route.channel, text: fallbackText, blocks };
+}
+
+export function buildSlackFollowUpMessage(row = {}, options = {}) {
+  const route = options.route || routeFollowUpToSlack(row, options.config || {});
+  const cardKind = text(row.payload?.card_kind).trim();
+  if (cardKind === 'follow_up_case') {
+    return buildSlackFollowUpCaseMessage(row, { ...options, route });
+  }
+  if (cardKind === 'inquiry_case' || route.route === 'inquiry') {
+    return buildSlackInquiryMessage(row, { ...options, route });
+  }
+  if (cardKind === 'follow_up_task' || route.route === 'follow_up') {
+    return buildSlackManualTaskMessage(row, { ...options, route });
+  }
+  return buildLegacySlackFollowUpMessage(row, { ...options, route });
 }
 
 async function slackApi(config = {}, method, payload = {}, { httpMethod = 'POST' } = {}) {
@@ -2480,6 +3343,16 @@ export async function resolveSlackChannelId(channelNameOrId = '', config = {}) {
   throw new Error(`Slack channel not found: ${raw}`);
 }
 
+export async function preflightTwoChannelSlackRouting(config = {}) {
+  if (config.twoChannelRoutingEnabled !== true) return { ok: true, skipped: true };
+  if (config._twoChannelSlackPreflight?.ok === true) return config._twoChannelSlackPreflight;
+  const inquiryChannelId = await resolveSlackChannelId(config.slackInquiryChannel, config);
+  const followUpChannelId = await resolveSlackChannelId(config.slackFollowUpChannel, config);
+  const result = { ok: true, inquiryChannelId, followUpChannelId };
+  config._twoChannelSlackPreflight = result;
+  return result;
+}
+
 async function mergeFollowUpPayload(config, rowId, payloadPatch = {}, extraPatch = {}) {
   if (!rowId) return null;
   const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
@@ -2500,6 +3373,77 @@ async function mergeFollowUpPayload(config, rowId, payloadPatch = {}, extraPatch
     })
   });
   return Array.isArray(rows) ? rows[0] : rows;
+}
+
+async function mergeFollowUpSlackDelivery(config, rowId, deliveryPatch = {}, extraPatch = {}) {
+  if (!rowId) return null;
+  const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
+  const currentRows = await supabaseFetch(config, `${table}?select=payload&id=eq.${encodeURIComponent(rowId)}&limit=1`, {
+    headers: supabaseHeaders(config)
+  });
+  const current = Array.isArray(currentRows) ? currentRows[0] : null;
+  const currentPayload = current?.payload && typeof current.payload === 'object' ? current.payload : {};
+  const currentDelivery = currentPayload.slack_delivery && typeof currentPayload.slack_delivery === 'object'
+    ? currentPayload.slack_delivery
+    : {};
+  const rows = await supabaseFetch(config, `${table}?id=eq.${encodeURIComponent(rowId)}`, {
+    method: 'PATCH',
+    headers: supabaseHeaders(config, 'return=representation'),
+    body: JSON.stringify({
+      ...extraPatch,
+      payload: {
+        ...currentPayload,
+        slack_delivery: { ...currentDelivery, ...deliveryPatch }
+      }
+    })
+  });
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
+export async function claimInitialSlackDelivery({
+  row = {},
+  channelId = '',
+  channelName = '',
+  claimId = randomUUID(),
+  claimedAt = new Date().toISOString(),
+  persist
+} = {}) {
+  const existingDelivery = row?.payload?.slack_delivery && typeof row.payload.slack_delivery === 'object'
+    ? row.payload.slack_delivery
+    : {};
+  if (existingDelivery.initial_claim_id) {
+    return { ok: false, reason: 'initial_delivery_reconciliation_required', row, delivery: existingDelivery };
+  }
+  const delivery = {
+    ...existingDelivery,
+    status: 'initial_post_claimed',
+    initial_claim_id: String(claimId),
+    initial_claimed_at: claimedAt,
+    channel_name: channelName || existingDelivery.channel_name || null,
+    channel_id: channelId || existingDelivery.channel_id || null,
+    reconciliation_required: true,
+    reconciliation_stage: 'before_chat_post_message',
+    error: null
+  };
+  const updatedRows = await persist({ row, delivery });
+  if (!Array.isArray(updatedRows) || updatedRows.length !== 1) {
+    return { ok: false, reason: 'initial_delivery_claim_conflict', row: null, delivery: null };
+  }
+  return { ok: true, row: updatedRows[0], delivery };
+}
+
+async function persistInitialSlackDeliveryClaim(config, row, delivery) {
+  const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
+  const currentPayload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+  const rows = await supabaseFetch(config, [
+    `${table}?id=eq.${encodeURIComponent(row.id)}`,
+    'payload->slack_delivery->>initial_claim_id=is.null'
+  ].join('&'), {
+    method: 'PATCH',
+    headers: supabaseHeaders(config, 'return=representation'),
+    body: JSON.stringify({ payload: { ...currentPayload, slack_delivery: delivery } })
+  });
+  return Array.isArray(rows) ? rows : [];
 }
 
 async function findSlackThreadParentForRow(config = {}, row = {}, route = {}, channelId = '') {
@@ -2547,8 +3491,8 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
   const message = buildSlackFollowUpMessage(enrichedRow, { route, config });
 
   const existingDelivery = enrichedRow.payload?.slack_delivery || {};
-  const existingTs = row.slack_message_ts || existingDelivery.message_ts;
-  const existingChannelId = row.slack_channel_id || existingDelivery.channel_id;
+  const existingTs = row.slack_message_ts || existingDelivery.message_ts || existingDelivery.recovery_message_ts;
+  const existingChannelId = row.slack_channel_id || existingDelivery.channel_id || existingDelivery.recovery_channel_id;
   if (
     existingTs
     || row.slack_delivery_status === 'delivered'
@@ -2556,6 +3500,13 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
   ) {
     if (!existingTs) return { skipped: true, reason: 'already_delivered_missing_ts', rowId: row.id };
     const channelId = existingChannelId || await resolveSlackChannelId(existingDelivery.channel_name || route.channel, config);
+    const renderedContentHash = renderedMessageHash(message);
+    const isInquiryCase = enrichedRow?.payload?.card_kind === 'inquiry_case';
+    const latestCustomerCluster = text(enrichedRow?.payload?.latest_customer_message_cluster)
+      .normalize('NFKC')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const latestCustomerClusterHash = customerClusterHash(latestCustomerCluster);
     const updatedMessage = await slackApi(config, 'chat.update', {
       channel: channelId,
       ts: existingTs,
@@ -2564,6 +3515,9 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
       unfurl_links: false,
       unfurl_media: false
     });
+    const storedCustomerClusterHash = isInquiryCase && latestCustomerClusterHash
+      ? latestCustomerClusterHash
+      : existingDelivery.last_broadcast_customer_cluster_hash || null;
     const updated = await mergeFollowUpPayload(config, row.id, {
       operational_calculation: enrichedRow.payload?.operational_calculation || null,
       slack_delivery: {
@@ -2571,9 +3525,15 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
         status: 'delivered',
         channel_name: existingDelivery.channel_name || route.channel,
         channel_id: updatedMessage.channel || channelId,
-        message_ts: existingTs,
+        message_ts: updatedMessage.ts || existingTs,
         thread_ts: existingDelivery.thread_ts || existingTs,
         refreshed_at: new Date().toISOString(),
+        last_rendered_content_hash: renderedContentHash,
+        last_broadcast_customer_cluster_hash: storedCustomerClusterHash,
+        update_pending: false,
+        update_error: null,
+        reconciliation_required: false,
+        reconciliation_stage: null,
         error: null
       }
     }, {
@@ -2581,10 +3541,20 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
       recommended_action: enrichedRow.recommended_action,
       evidence: enrichedRow.evidence
     });
-    return { ok: true, updatedSlack: true, rowId: row.id, route, channelId, ts: existingTs, updated };
+    return { ok: true, updatedSlack: true, customerUpdateNotified: false, rowId: row.id, route, channelId, ts: updatedMessage.ts || existingTs, updated };
   }
 
   const channelId = await resolveSlackChannelId(route.channel, config);
+  const claim = await claimInitialSlackDelivery({
+    row: enrichedRow,
+    channelId,
+    channelName: route.channel,
+    persist: ({ delivery }) => persistInitialSlackDeliveryClaim(config, enrichedRow, delivery)
+  });
+  if (!claim.ok) {
+    return { ok: false, skipped: true, reason: claim.reason, rowId: row.id };
+  }
+  const claimedRow = claim.row;
   const threadParent = await findSlackThreadParentForRow(config, enrichedRow, route, channelId);
   const postPayload = {
     channel: channelId,
@@ -2597,24 +3567,65 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
     postPayload.thread_ts = threadParent.threadTs;
     postPayload.reply_broadcast = false;
   }
-  const posted = await slackApi(config, 'chat.postMessage', postPayload);
-  const updated = await mergeFollowUpPayload(config, row.id, {
-    slack_delivery: {
-      status: 'delivered',
-      channel_name: route.channel,
-      channel_id: posted.channel || channelId,
-      message_ts: posted.ts || null,
-      thread_ts: threadParent?.threadTs || posted.message?.thread_ts || posted.ts || null,
-      is_thread_reply: Boolean(threadParent?.threadTs),
-      parent_follow_up_id: threadParent?.rowId || null,
-      delivered_at: new Date().toISOString(),
-      error: null
-    }
-  }, {
-    summary: enrichedRow.summary,
-    recommended_action: enrichedRow.recommended_action,
-    evidence: enrichedRow.evidence
-  });
+  let posted;
+  try {
+    posted = await slackApi(config, 'chat.postMessage', postPayload);
+  } catch (error) {
+    const recovery = {
+      status: 'reconciliation_required',
+      reconciliation_required: true,
+      reconciliation_stage: 'chat_post_message_ambiguous',
+      attempted_at: new Date().toISOString(),
+      error: error.message.slice(0, 1000)
+    };
+    try { await mergeFollowUpSlackDelivery(config, row.id, recovery); } catch {}
+    error.slackDeliveryRecovery = recovery;
+    throw error;
+  }
+  const initialCustomerClusterHash = enrichedRow?.payload?.card_kind === 'inquiry_case'
+    ? customerClusterHash(enrichedRow?.payload?.latest_customer_message_cluster)
+    : '';
+  let updated;
+  try {
+    updated = await mergeFollowUpPayload(config, row.id, {
+      slack_delivery: {
+        ...(claimedRow.payload?.slack_delivery || claim.delivery),
+        status: 'delivered',
+        channel_name: route.channel,
+        channel_id: posted.channel || channelId,
+        message_ts: posted.ts || null,
+        thread_ts: threadParent?.threadTs || posted.message?.thread_ts || posted.ts || null,
+        is_thread_reply: Boolean(threadParent?.threadTs),
+        parent_follow_up_id: threadParent?.rowId || null,
+        delivered_at: new Date().toISOString(),
+        last_rendered_content_hash: renderedMessageHash(message),
+        reconciliation_required: false,
+        reconciliation_stage: null,
+        ...(initialCustomerClusterHash
+          ? { last_broadcast_customer_cluster_hash: initialCustomerClusterHash }
+          : {}),
+        error: null
+      }
+    }, {
+      summary: enrichedRow.summary,
+      recommended_action: enrichedRow.recommended_action,
+      evidence: enrichedRow.evidence
+    });
+  } catch (error) {
+    const recovery = {
+      status: 'reconciliation_required',
+      reconciliation_required: true,
+      reconciliation_stage: 'post_succeeded_metadata_failed',
+      recovery_channel_id: posted.channel || channelId,
+      recovery_message_ts: posted.ts || null,
+      recovery_thread_ts: threadParent?.threadTs || posted.message?.thread_ts || posted.ts || null,
+      attempted_at: new Date().toISOString(),
+      error: error.message.slice(0, 1000)
+    };
+    try { await mergeFollowUpSlackDelivery(config, row.id, recovery); } catch {}
+    error.slackDeliveryRecovery = recovery;
+    throw error;
+  }
   return { ok: true, rowId: row.id, route, channelId, ts: posted.ts, threadTs: threadParent?.threadTs || posted.message?.thread_ts || posted.ts, updated };
 }
 
@@ -2623,22 +3634,34 @@ export async function deliverSlackFollowUpRows(config = {}, rows = []) {
   if (!rows.length) return { skipped: true, reason: 'no_rows', results: [] };
   const deliverableRows = filterAutomationAuditFollowUpRows(rows);
   if (!deliverableRows.length) return { skipped: true, reason: 'automation_audit_rows', results: [] };
+  let deliveryConfig = config;
+  if (config.twoChannelRoutingEnabled === true) {
+    try {
+      const preflight = await preflightTwoChannelSlackRouting(config);
+      deliveryConfig = {
+        ...config,
+        slackInquiryChannel: preflight.inquiryChannelId,
+        slackFollowUpChannel: preflight.followUpChannelId
+      };
+    } catch (error) {
+      return { skipped: true, reason: 'two_channel_preflight_failed', error: error.message, results: [] };
+    }
+  }
   const results = [];
   for (const row of deliverableRows) {
     try {
-      results.push(await postSlackFollowUpRow(config, row));
+      results.push(await postSlackFollowUpRow(deliveryConfig, row));
     } catch (error) {
       const rowId = row?.id || null;
       results.push({ ok: false, rowId, error: error.message });
       try {
         if (rowId) {
-          await mergeFollowUpPayload(config, rowId, {
-            slack_delivery: {
-              status: 'error',
+            await mergeFollowUpSlackDelivery(deliveryConfig, rowId, {
+              ...(error.slackDeliveryRecovery || {}),
+              ...(!error.slackDeliveryRecovery ? { status: 'error' } : {}),
               error: error.message.slice(0, 1000),
               attempted_at: new Date().toISOString()
-            }
-          });
+            });
         }
       } catch {}
     }
@@ -2691,23 +3714,15 @@ async function mergeFollowUpRowsWithActiveHistory(config, rows) {
 
   const rowsToInsert = [];
   const updatedRows = [];
-  const activeById = new Map(scopedActiveRows.map((row) => [row.id, row]));
+  const deliveredFirst = scopedActiveRows.slice().sort((a, b) => {
+    const aDelivered = a?.payload?.slack_delivery?.status === 'delivered' ? 0 : 1;
+    const bDelivered = b?.payload?.slack_delivery?.status === 'delivered' ? 0 : 1;
+    return aDelivered - bDelivered;
+  });
+  const activeById = new Map(deliveredFirst.map((row) => [row.id, row]));
 
   for (const row of rows) {
-    const match = [...activeById.values()].find((active) => {
-      if (!sameConversationBundle(active, row)) return false;
-      const activeTaskKey = explicitFollowUpTaskKey(active);
-      const rowTaskKey = explicitFollowUpTaskKey(row);
-      if (!activeTaskKey || activeTaskKey === 'unknown' || !rowTaskKey || rowTaskKey === 'unknown') return false;
-      const activePayload = active?.payload && typeof active.payload === 'object' ? active.payload : {};
-      const rowPayload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
-      const activeRoute = text(active.route || active.follow_up_route || activePayload.follow_up_route || activePayload.route).trim();
-      const rowRoute = text(row.route || row.follow_up_route || rowPayload.follow_up_route || rowPayload.route).trim();
-      return AI_FOLLOW_UP_ROUTES.has(activeRoute)
-        && AI_FOLLOW_UP_ROUTES.has(rowRoute)
-        && activeRoute === rowRoute
-        && activeTaskKey === rowTaskKey;
-    });
+    const match = [...activeById.values()].find((active) => sameFollowUpCardIdentity(active, row));
     if (!match?.id) {
       rowsToInsert.push(row);
       continue;
@@ -2725,7 +3740,12 @@ async function mergeFollowUpRowsWithActiveHistory(config, rows) {
       evidence: merged.evidence,
       blocking_reason: merged.blocking_reason || null,
       due_hint: merged.due_hint || null,
-      payload: merged.payload
+      payload: {
+        ...merged.payload,
+        ...(match.payload?.slack_delivery
+          ? { slack_delivery: match.payload.slack_delivery }
+          : {})
+      }
     };
     const patched = await supabaseFetch(config, `${table}?id=eq.${encodeURIComponent(match.id)}`, {
       method: 'PATCH',
@@ -2773,16 +3793,30 @@ function supabaseHeaders(config, prefer = '') {
   return headers;
 }
 
+export function hermesDecisionTimeoutFromEnv(environment = process.env) {
+  const configured = Number(environment.HERMES_WORKER_TIMEOUT_MS || 240000);
+  return Number.isFinite(configured) && configured > 0 ? configured : 240000;
+}
+
 function requireConfig() {
   const config = {
+    ...buildSlackRoutingConfig(process.env),
     supabaseUrl: process.env.SUPABASE_URL || '',
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
     table: process.env.SUPABASE_TABLE || 'ai_processing_events',
     gasApiUrl: process.env.GAS_API_URL || DEFAULT_GAS_API_URL,
     sheetApiKey: process.env.SHEET_API_KEY || DEFAULT_SHEET_API_KEY,
     hermesCommand: resolveHermesCommand(process.env.HERMES_WORKER_COMMAND || 'hermes'),
+    hermesPythonModule: process.env.HERMES_WORKER_COMMAND_MODE === 'python_module',
     hermesProfile: process.env.HERMES_WORKER_PROFILE || '',
-    hermesTimeoutMs: Number(process.env.HERMES_WORKER_TIMEOUT_MS || process.env.WORKER_TIMEOUT_MS || '240000'),
+    // WORKER_TIMEOUT_MS belongs to the outer bridge lifecycle. Inheriting its
+    // longer timeout here let a single Hermes decision monopolize the serial
+    // Kakao worker for more than six minutes on Windows.
+    hermesTimeoutMs: hermesDecisionTimeoutFromEnv(process.env),
+    hermesMaxTurns: Number(process.env.HERMES_WORKER_MAX_TURNS || '90'),
+    bridgeUrl: process.env.KAKAO_DOM_BRIDGE_URL || `http://127.0.0.1:${process.env.PORT || 8787}`,
+    freshnessPollMs: Math.max(250, Number(process.env.KAKAO_JOB_FRESHNESS_POLL_MS || 1000) || 1000),
+    jobLogPath: process.env.KAKAO_JOB_LOG_PATH || path.resolve(__dirname, '../kakao-dom-bridge/queue/jobs.ndjson'),
     ensureKakaoTab: process.env.KAKAO_WORKER_ENSURE_TAB !== '0',
     kakaoChannelManagerUrl: process.env.KAKAO_CHANNEL_MANAGER_URL || DEFAULT_KAKAO_CHANNEL_MANAGER_URL,
     openTargetChat: process.env.KAKAO_WORKER_OPEN_TARGET_CHAT !== '0',
@@ -2791,7 +3825,8 @@ function requireConfig() {
     workerControlMode: normalizeKakaoWorkerControlMode(process.env.KAKAO_WORKER_CONTROL_MODE),
     cuaMinIdleSeconds: Math.max(0, numberFromEnv(process.env.KAKAO_CUA_MIN_IDLE_SECONDS, 0)),
     villageAiUrl: process.env.VILLAGE_AI_URL || '',
-    villageAiKakaoSkillSecret: process.env.VILLAGE_AI_KAKAO_SKILL_SECRET || process.env.KAKAO_SKILL_SECRET || '',
+    askApiSecret: process.env.ASK_API_SECRET || '',
+    villageAiKakaoSkillSecret: process.env.VILLAGE_AI_KAKAO_SKILL_SECRET || '',
     ragTimeoutMs: Number(process.env.VILLAGE_AI_RAG_TIMEOUT_MS || 30000) || 30000,
     followUpTable: process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items',
     followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
@@ -2805,6 +3840,7 @@ function requireConfig() {
     slackFollowUpEnabled: process.env.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1',
     slackThreadFollowUpsEnabled: process.env.SLACK_FOLLOW_UP_THREAD_REPLIES !== '0',
     slackBotToken: process.env.SLACK_BOT_TOKEN || '',
+    slackMentionUserIds: String(process.env.SLACK_CARD_MENTION_USER_IDS || '').split(/[\s,]+/).filter(Boolean),
     slackChannels: {
       schedule: process.env.SLACK_CHANNEL_SCHEDULE_AGENT || DEFAULT_SLACK_CHANNELS.schedule,
       document: process.env.SLACK_CHANNEL_DOCUMENT_AGENT || DEFAULT_SLACK_CHANNELS.document,
@@ -2909,7 +3945,7 @@ export async function appendToSheet(config, payload) {
     };
   }
   if (payload.action === 'run' && payload.func === 'insertAndCheckRequest') {
-    return {
+    const normalizedResult = {
       ...data,
       success: true,
       duplicate: data?.duplicate === true,
@@ -2924,6 +3960,70 @@ export async function appendToSheet(config, payload) {
       },
       data
     };
+    const selections = Array.isArray(payload.setComponentSelections) ? payload.setComponentSelections : [];
+    if (!selections.length || normalizedResult.duplicate === true || !normalizedResult.reqID) {
+      return normalizedResult;
+    }
+
+    const selectionUpdates = [];
+    for (const selection of selections) {
+      const updateUrl = new URL(config.gasApiUrl);
+      updateUrl.searchParams.set('key', config.sheetApiKey);
+      updateUrl.searchParams.set('action', 'run');
+      updateUrl.searchParams.set('func', 'updateRequestItem');
+      updateUrl.searchParams.set('args', JSON.stringify({
+        reqID: normalizedResult.reqID,
+        장비명: selection.componentItem,
+        비고: `[세트]${selection.setItem}`,
+        새이름: selection.selectedItem
+      }));
+      try {
+        const updateResponse = await fetchImpl(updateUrl);
+        const updateBody = await updateResponse.text();
+        let updateData;
+        try { updateData = JSON.parse(updateBody); } catch { updateData = { raw: updateBody }; }
+        if (!updateResponse.ok || updateData?.error || updateData?.success === false) {
+          throw new Error(text(updateData?.error || updateData?.message || updateData?.raw || `HTTP ${updateResponse.status}`));
+        }
+        selectionUpdates.push({ ...selection, success: true, data: updateData });
+      } catch (error) {
+        return {
+          ...normalizedResult,
+          success: false,
+          partial_success: true,
+          error_type: 'set_component_selection_failed',
+          error: `Set component selection failed after request insert: ${error.message}`,
+          selectionUpdates: [...selectionUpdates, { ...selection, success: false, error: error.message }]
+        };
+      }
+    }
+
+    try {
+      const searchData = await fetchReadOnlyJson(buildGasReadUrl(config.gasApiUrl, config.sheetApiKey, {
+        action: 'search',
+        sheet: '확인요청',
+        col: 'A',
+        query: normalizedResult.reqID
+      }), { fetchImpl, timeoutMs: 30000 });
+      const refreshedRows = (Array.isArray(searchData?.results) ? searchData.results : [])
+        .map((entry) => Array.isArray(entry?.data) ? entry.data : [])
+        .filter((row) => text(row[0]).trim() === normalizedResult.reqID)
+        .map((row) => ({ 장비명: row[5], 수량: row[6], 결과: row[8], 상세: row[9] }));
+      return {
+        ...normalizedResult,
+        results: normalizeAvailabilityResultRows({ results: refreshedRows }),
+        selectionUpdates
+      };
+    } catch (error) {
+      return {
+        ...normalizedResult,
+        success: false,
+        partial_success: true,
+        error_type: 'set_component_selection_readback_failed',
+        error: `Set component selection readback failed after update: ${error.message}`,
+        selectionUpdates
+      };
+    }
   }
   return data;
 }
@@ -3257,7 +4357,8 @@ export async function runHermesPostActionDecision({
   const prompt = buildHermesPostActionPrompt({ job, initialDecision, sheetResult, sheetPayload });
   const hermesResult = await runHermesDecision(prompt, config, {
     runHermesImpl: options.runHermesImpl,
-    validateDecisionImpl: (candidate) => validateAiPostActionDecisionContract(candidate, report)
+    validateDecisionImpl: (candidate) => validateAiPostActionDecisionContract(candidate, report),
+    signal: options.signal
   });
   return {
     ...hermesResult,
@@ -3507,7 +4608,9 @@ export function buildSheetFailureFollowUpRows(decision, job = {}, sheetResult = 
 export function buildHermesArgs(prompt, config = {}) {
   const args = [];
   if (config.hermesProfile) args.push('--profile', config.hermesProfile);
-  args.push('chat', '--yolo', '-Q', '-t', HERMES_WORKER_TOOLSETS, '-q', prompt);
+  const configuredMaxTurns = Number(config.hermesMaxTurns || 90);
+  const maxTurns = Math.min(90, Math.max(4, Number.isFinite(configuredMaxTurns) ? Math.floor(configuredMaxTurns) : 90));
+  args.push('chat', '--yolo', '--max-turns', String(maxTurns), '-Q', '-t', HERMES_WORKER_TOOLSETS, '-q', prompt);
   return args;
 }
 
@@ -3559,7 +4662,7 @@ end run
 function isKakaoMainListTarget(target = {}) {
   const targetUrl = String(target.url || '');
   const targetTitle = String(target.title || '');
-  const isChatListUrl = /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats(?:[?#]|$)/.test(targetUrl);
+  const isChatListUrl = /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats\/?(?:[?#]|$)/.test(targetUrl);
   const isMainTitle = targetTitle === '카카오비즈니스 파트너센터';
   const isConversationPopup = targetTitle.includes(' - 빌리지 - 카카오비즈니스');
   return target.type === 'page' && !isConversationPopup && (isChatListUrl || isMainTitle);
@@ -3585,9 +4688,10 @@ async function devtoolsFetchJson(baseUrl, pathname, options = {}) {
   return body ? JSON.parse(body) : null;
 }
 
-function timeoutPromise(ms, message) {
+export function timeoutPromise(ms, message) {
   return new Promise((_, reject) => {
-    setTimeout(() => reject(new Error(message)), ms);
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    timer.unref?.();
   });
 }
 
@@ -3992,6 +5096,9 @@ export async function closeKakaoConversationTargetViaDevtools(targetInfo = {}, {
   fetchImpl = fetch
 } = {}) {
   if (!targetInfo?.id || !cdpBaseUrl) return { status: 'skipped_missing_devtools_target' };
+  if (targetInfo.close_safe === false) {
+    return { status: 'skipped_unsafe_main_target', targetId: targetInfo.id };
+  }
   const body = await devtoolsFetchTextWithFallbackMethod(cdpBaseUrl, `/json/close/${encodeURIComponent(targetInfo.id)}`, { fetchImpl, timeoutMs });
   return { status: 'closed_conversation_target', targetId: targetInfo.id, body: String(body || '').slice(0, 200) };
 }
@@ -4290,22 +5397,42 @@ export function pickKakaoConversationWindow(windows = [], hints = []) {
   return rankKakaoConversationWindows(windows, hints)[0] || null;
 }
 
-export function pickKakaoConversationTarget(targets = [], hints = []) {
+function extractKakaoRoomIds(job = {}) {
+  const values = [job?.room_key, job?.roomKey, job?.room_id, job?.roomId]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  return [...new Set(values.flatMap((value) => {
+    const direct = value.match(/(?:^|:)\s*(\d+)$/);
+    const fromUrl = value.match(/\/chats\/(\d+)(?:[/?#]|$)/);
+    return [direct?.[1], fromUrl?.[1]].filter(Boolean);
+  }))];
+}
+
+export function pickKakaoConversationTarget(targets = [], hints = [], roomIds = []) {
   const safeHints = hints.map((hint) => String(hint || '').trim()).filter(Boolean);
+  const safeRoomIds = roomIds.map((value) => String(value || '').trim()).filter(Boolean);
   const candidates = (Array.isArray(targets) ? targets : []).filter((target) => {
     const title = String(target?.title || '');
     const url = String(target?.url || '');
+    const roomId = url.match(/\/chats\/(\d+)(?:[/?#]|$)/)?.[1] || '';
+    const roomExact = safeRoomIds.includes(roomId);
     return target?.type === 'page' &&
       /^https:\/\/(business|center-pf)\.kakao\.com\/_[^/]+\/chats\/\d+/.test(url) &&
-      title.includes(' - 빌리지 - 카카오비즈니스') &&
-      (!safeHints.length || safeHints.some((hint) => title.includes(hint)));
+      (roomExact || (
+        title.includes(' - 빌리지 - 카카오비즈니스') &&
+        ((!safeRoomIds.length && !safeHints.length) || safeHints.some((hint) => title.includes(hint)))
+      ));
   });
   candidates.sort((a, b) => {
     const aTitle = String(a.title || '');
     const bTitle = String(b.title || '');
+    const aRoomId = String(a?.url || '').match(/\/chats\/(\d+)(?:[/?#]|$)/)?.[1] || '';
+    const bRoomId = String(b?.url || '').match(/\/chats\/(\d+)(?:[/?#]|$)/)?.[1] || '';
+    const aRoomExact = safeRoomIds.includes(aRoomId) ? 1 : 0;
+    const bRoomExact = safeRoomIds.includes(bRoomId) ? 1 : 0;
     const aExact = safeHints.some((hint) => aTitle.startsWith(`${hint} -`)) ? 1 : 0;
     const bExact = safeHints.some((hint) => bTitle.startsWith(`${hint} -`)) ? 1 : 0;
-    return bExact - aExact;
+    return bRoomExact - aRoomExact || bExact - aExact;
   });
   return candidates[0] || null;
 }
@@ -4421,11 +5548,12 @@ export async function openKakaoTargetChatViaDevtools(job, {
   allowSearch = process.env.KAKAO_WORKER_SEARCH_TARGET_CHAT !== '0'
 } = {}) {
   const hints = extractNavigationHints(job);
+  const roomIds = extractKakaoRoomIds(job);
   if (!hints.length) return { status: 'no_navigation_hints' };
   if (!cdpBaseUrl) return { status: 'devtools_unavailable', reason: 'missing_cdp_base_url', hints };
   const targets = await devtoolsFetchJson(cdpBaseUrl, '/json/list', { fetchImpl, timeoutMs });
   const targetList = Array.isArray(targets) ? targets : [];
-  const existingConversationTarget = pickKakaoConversationTarget(targetList, hints);
+  const existingConversationTarget = pickKakaoConversationTarget(targetList, hints, roomIds);
   if (existingConversationTarget) {
     const dom = await evaluateImpl(existingConversationTarget, buildKakaoConversationTextExpression(), { timeoutMs });
     return {
@@ -4465,7 +5593,7 @@ export async function openKakaoTargetChatViaDevtools(job, {
     };
   }
   const targetsAfterOpen = await devtoolsFetchJson(cdpBaseUrl, '/json/list', { fetchImpl, timeoutMs });
-  const conversationTarget = pickKakaoConversationTarget(Array.isArray(targetsAfterOpen) ? targetsAfterOpen : [], hints);
+  const conversationTarget = pickKakaoConversationTarget(Array.isArray(targetsAfterOpen) ? targetsAfterOpen : [], hints, roomIds);
   if (!conversationTarget) {
     return {
       status: 'conversation_target_not_found_after_devtools_click',
@@ -4496,7 +5624,8 @@ export async function openKakaoTargetChatViaDevtools(job, {
       id: conversationTarget.id,
       title: conversationTarget.title || dom?.title || '',
       url: conversationTarget.url || dom?.href || '',
-      webSocketDebuggerUrl: conversationTarget.webSocketDebuggerUrl
+      webSocketDebuggerUrl: conversationTarget.webSocketDebuggerUrl,
+      close_safe: conversationTarget.id !== mainTarget.id
     },
     search: {
       searched: Boolean(allowSearch),
@@ -4510,6 +5639,65 @@ export async function openKakaoTargetChatViaDevtools(job, {
       hints
     })
   };
+}
+
+function canonicalTerminalAcknowledgementText(value = '') {
+  return text(value)
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s,.!~♡♥]+/g, '')
+    .trim();
+}
+
+export function classifyConservativeTerminalAcknowledgement(job = {}, navigationContext = {}) {
+  const events = Array.isArray(job.events) ? job.events : [];
+  const reasons = new Set(events.map((event) => String(event?.reason || '')));
+  const isLiveEvent = reasons.has('mutation') || reasons.has('top_row_changed');
+  if (!isLiveEvent || reasons.has('startup_catchup') || job.replayedFromSupabase === true || job.recoverySource) {
+    return { matched: false, reason: 'not_trusted_live_event' };
+  }
+  const evidence = navigationContext?.conversation_evidence || {};
+  if (navigationContext?.status !== 'opened_target_chat' || evidence.hint_matched !== true) {
+    return { matched: false, reason: 'conversation_not_verified' };
+  }
+
+  const customerName = text(
+    job.customerName || job.customer_name || job.senderName || job.sender_name || job.payload?.customerName
+  ).replace(/\s+/g, ' ').trim();
+  if (!customerName) return { matched: false, reason: 'customer_name_missing' };
+  let preview = text(job.previewText || job.preview_text || job.payload?.previewText)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^중요\s+/, '');
+  if (!preview.startsWith(customerName)) return { matched: false, reason: 'preview_customer_mismatch' };
+  preview = preview.slice(customerName.length)
+    .replace(/^\s*\d+\s+/, '')
+    .replace(/\s+(?:오전|오후)\s*\d{1,2}:\d{2}\s*$/, '')
+    .trim();
+  if (!preview || /[?？0-9]/.test(preview) || preview.length > 32) {
+    return { matched: false, reason: 'not_terminal_acknowledgement' };
+  }
+
+  const canonical = canonicalTerminalAcknowledgementText(preview);
+  const allowed = new Set([
+    '네', '넵', '넹', '예', '네네',
+    '감사합니다', '감사드립니다', '감사해요', '고맙습니다',
+    '네감사합니다', '네감사드립니다', '네감사해요', '네고맙습니다',
+    '알겠습니다', '네알겠습니다', '확인했습니다', '네확인했습니다'
+  ]);
+  if (!allowed.has(canonical)) return { matched: false, reason: 'not_terminal_acknowledgement' };
+
+  const visibleTail = Array.isArray(evidence.visible_static_text_tail) ? evidence.visible_static_text_tail : [];
+  const operationalContext = visibleTail.slice(-30).join(' ');
+  if (/(?:\bRQ-\d|예약|확정|견적|세금계산서|입금|결제|대여|반납|거래\s*ID|장비|FX\d|A7[A-Z0-9]*|GM\s*\d|\d{1,2}\s*월\s*\d{1,2}\s*일)/i.test(operationalContext)) {
+    return { matched: false, reason: 'operational_context_requires_reconciliation' };
+  }
+  const observedInConversation = visibleTail.some((line) => {
+    const visible = canonicalTerminalAcknowledgementText(line);
+    return visible === canonical || visible.endsWith(canonical);
+  });
+  if (!observedInConversation) return { matched: false, reason: 'acknowledgement_not_visible' };
+  return { matched: true, reason: 'verified_terminal_customer_acknowledgement' };
 }
 
 export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
@@ -5369,6 +6557,11 @@ function freshestJobEventDate(job = {}, events = []) {
 }
 
 export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWindowMinutes = 20, eventFreshnessMinutes = 60 } = {}) {
+  const replayedFromSupabase = job.replayedFromSupabase === true
+    || job.payload?.replayedFromSupabase === true
+    || job.recoverySource === 'supabase_recovery_sweeper'
+    || job.payload?.recoverySource === 'supabase_recovery_sweeper';
+  if (replayedFromSupabase) return { eligible: false, reason: 'supabase_recovery_never_auto_sends' };
   const preview = text(job.preview_text || job.previewText || job.payload?.previewText || '');
   const events = Array.isArray(job.events) ? job.events : (Array.isArray(job.payload?.events) ? job.payload.events : []);
   const reasons = events.map((event) => String(event?.reason || '')).filter(Boolean);
@@ -5377,6 +6570,7 @@ export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWind
     ...events.map((event) => Number(event?.unread_count ?? event?.unreadCount ?? event?.raw?.unreadCount ?? event?.raw?.unread_count ?? 0))
   ];
   const hasUnread = unreadCounts.some((count) => Number.isFinite(count) && count > 0);
+  if (reasons.includes('startup_catchup')) return { eligible: false, reason: 'startup_catchup_never_auto_sends' };
   const hasTopRowChanged = reasons.includes('top_row_changed');
   const hasUnreadBackstop = reasons.includes('top_rows_backstop') && hasUnread;
   if (!hasTopRowChanged && !hasUnreadBackstop) return { eligible: false, reason: 'not_top_row_live_event' };
@@ -5638,10 +6832,28 @@ export async function openKakaoTargetChatFromList(job, {
   };
 }
 
-function terminateChildTree(child, signal = 'SIGTERM') {
+export function shouldDetachHermesProcess(platform = process.platform) {
+  return platform !== 'win32';
+}
+
+export function terminateChildTree(child, signal = 'SIGTERM', options = {}) {
   if (!child?.pid) return;
+  const platform = options.platform || process.platform;
+  const spawnSyncImpl = options.spawnSyncImpl || spawnSync;
+  const processKillImpl = options.processKillImpl || process.kill.bind(process);
+  if (platform === 'win32') {
+    try {
+      const result = spawnSyncImpl('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore'
+      });
+      if (!result?.error && result?.status === 0) return;
+    } catch {}
+    try { child.kill(signal); } catch {}
+    return;
+  }
   try {
-    process.kill(-child.pid, signal);
+    processKillImpl(-child.pid, signal);
   } catch {
     try { child.kill(signal); } catch {}
   }
@@ -5650,19 +6862,37 @@ function terminateChildTree(child, signal = 'SIGTERM') {
 export function runHermes(prompt, config, options = {}) {
   const spawnImpl = options.spawnImpl || spawn;
   const killTree = options.killTree || ((pid) => terminateChildTree({ pid }, 'SIGTERM'));
+  const acceptOutput = typeof options.acceptOutput === 'function' ? options.acceptOutput : null;
   const baseEnv = options.baseEnv || process.env;
   const timeoutMs = Number(config.hermesTimeoutMs || 180000);
   return new Promise((resolve, reject) => {
-    const child = spawnImpl(config.hermesCommand, buildHermesArgs(prompt, config), {
-      stdio: ['ignore', 'pipe', 'pipe'],
+    const hermesArgs = buildHermesArgs(prompt, config);
+    const platform = options.platform || process.platform;
+    const useWindowsStdinTransport = platform === 'win32' && config.hermesPythonModule === true;
+    const queryIndex = hermesArgs.lastIndexOf('-q');
+    const stdinPayload = useWindowsStdinTransport
+      ? { argv: hermesArgs.slice(0, queryIndex), query: prompt }
+      : null;
+    const commandArgs = useWindowsStdinTransport
+      ? [path.resolve(__dirname, 'hermes-stdin-runner.py')]
+      : (config.hermesPythonModule ? ['-m', 'hermes_cli.main', ...hermesArgs] : hermesArgs);
+    const child = spawnImpl(config.hermesCommand, commandArgs, {
+      stdio: [useWindowsStdinTransport ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       cwd: path.resolve(__dirname, '../..'),
-      detached: true,
+      // On Windows the bridge must be able to terminate the complete worker
+      // tree. A detached Hermes recovery pass survives the outer timeout and
+      // accumulates as an orphaned Python process, delaying every later job.
+      detached: shouldDetachHermesProcess(options.platform),
       env: {
         ...baseEnv,
         PYTHONUTF8: '1',
         PYTHONIOENCODING: 'utf-8'
       }
     });
+    if (useWindowsStdinTransport) {
+      child.stdin?.on?.('error', () => {});
+      child.stdin?.end(JSON.stringify(stdinPayload));
+    }
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -5670,6 +6900,7 @@ export function runHermes(prompt, config, options = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener('abort', abortHandler);
       fn(value);
     };
     const timer = setTimeout(() => {
@@ -5677,7 +6908,24 @@ export function runHermes(prompt, config, options = {}) {
       finish(reject, new Error(message));
       try { killTree(child.pid); } catch {}
     }, timeoutMs);
-    child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
+    const abortHandler = () => {
+      const reason = options.signal?.reason instanceof Error
+        ? options.signal.reason
+        : new Error(String(options.signal?.reason || 'superseded_by_newer_room_event'));
+      finish(reject, reason);
+      try { killTree(child.pid); } catch {}
+    };
+    options.signal?.addEventListener('abort', abortHandler, { once: true });
+    if (options.signal?.aborted) abortHandler();
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk.toString();
+      if (!acceptOutput || settled) return;
+      let accepted = false;
+      try { accepted = acceptOutput(stdout) === true; } catch {}
+      if (!accepted) return;
+      finish(resolve, stdout);
+      try { killTree(child.pid); } catch {}
+    });
     child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
     child.on('error', (error) => finish(reject, error));
     child.on('close', (code, signal) => {
@@ -5692,23 +6940,26 @@ export function buildHermesFinalJsonRecoveryPrompt(originalPrompt, context = {})
   const priorDecision = context.priorDecision && typeof context.priorDecision === 'object'
     ? JSON.stringify(context.priorDecision, null, 2)
     : '';
-  const contractContext = validationErrors.length
-    ? `\nPRIOR DECISION CONTRACT VALIDATION ERRORS:\n${validationErrors.map((error) => `- ${error}`).join('\n')}\n\nPRIOR DECISION:\n${priorDecision}\n\nRepair the semantic decision yourself from the original evidence. Do not let outer code infer, default, merge, or rewrite business meaning.\n`
+  const validationContext = validationErrors.length
+    ? `\nPRIOR DECISION CONTRACT VALIDATION ERRORS:\n${validationErrors.map((error) => `- ${error}`).join('\n')}\n`
     : '';
-  return `RECOVERY PASS: the prior attempt did not produce valid FINAL_JSON.
+  const render = (decisionContext = '') => `RECOVERY PASS: the prior attempt did not produce valid FINAL_JSON.
 
 - Do the full reasoning required by the original task; do not guess or use a reduced mechanical shortcut.
 - Reuse already available evidence and make any additional read-only checks needed for a grounded decision.
+- When a prior decision is present, preserve all valid fields and repair only the listed contract errors unless new evidence directly contradicts them. Do not repeat completed lookups.
 - Return FINAL_JSON even when a tool or API failed. Encode the gap in confidence, reason, and follow-up fields.
 - Do not substitute an apology, progress report, or plain-text explanation for the required JSON object.
 - Do not write to Sheets or send Kakao from this Hermes pass; the outer worker owns approved mutations.
-${contractContext}
+${validationContext}${decisionContext}${validationErrors.length ? '\nRepair the semantic decision yourself from the original evidence. Do not let outer code infer, default, merge, or rewrite business meaning.\n' : ''}
 
 ORIGINAL FULL TASK:
 ${String(originalPrompt || '')}
 
 END ORIGINAL FULL TASK.
 RECOVERY OUTPUT OVERRIDE: Regardless of any earlier wording or failure, finish with FINAL_JSON and one valid JSON object only.`;
+  const priorContext = priorDecision ? `\nPRIOR DECISION:\n${priorDecision}\n` : '';
+  return render(priorContext);
 }
 
 function hermesDecisionFailureKind(error, output = '') {
@@ -5719,23 +6970,57 @@ function hermesDecisionFailureKind(error, output = '') {
   return 'invalid_output';
 }
 
+export function describeHermesDecisionFailure(error, output = '') {
+  const message = String(error?.message || '');
+  const renderedOutput = String(output || '');
+  const rawErrorCode = String(error?.code || '').trim();
+  const errorCode = /^[A-Z0-9_]{2,32}$/.test(rawErrorCode) ? rawErrorCode : '';
+  const exitMatch = message.match(/Hermes exited\s+(-?\d+)/i);
+  const statusMatch = message.match(/(?:HTTP(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*([45]\d\d)\b/i)
+    || message.match(/\b(401|403|408|409|429|500|502|503|504)\b/);
+  const signals = [];
+  if (/rate[ _-]*limit|too many requests|\b429\b/i.test(message)) signals.push('rate_limited');
+  if (/no inference provider configured|provider[^\r\n]{0,80}(?:missing|unavailable|not configured)/i.test(message)) signals.push('provider_unavailable');
+  if (/authentication|unauthori[sz]ed|invalid[^\r\n]{0,40}(?:api|token|credential)|\b401\b/i.test(message)) signals.push('authentication_failed');
+  if (/access denied|permission denied|forbidden|\b403\b/i.test(message)) signals.push('permission_denied');
+  if (/context[^\r\n]{0,40}(?:limit|length|window)|too many tokens/i.test(message)) signals.push('context_limit');
+  if (/connection|network|ECONN|ENET|DNS/i.test(message)) signals.push('network_error');
+  if (['EINVAL', 'E2BIG', 'ENAMETOOLONG'].includes(errorCode)) signals.push('spawn_invalid_argument');
+  if (renderedOutput.includes('OpenAI-compatible API call')) signals.push('api_error_output');
+  return {
+    kind: hermesDecisionFailureKind(error, renderedOutput),
+    ...(errorCode ? { errorCode } : {}),
+    ...(exitMatch ? { exitCode: Number(exitMatch[1]) } : {}),
+    ...(statusMatch ? { httpStatus: Number(statusMatch[1]) } : {}),
+    signals: [...new Set(signals)],
+    outputChars: renderedOutput.length,
+    hasFinalJson: renderedOutput.includes('FINAL_JSON')
+  };
+}
+
 export async function runHermesDecision(prompt, config, options = {}) {
   const runHermesImpl = options.runHermesImpl || runHermes;
   const validateDecisionImpl = options.validateDecisionImpl || validateAiDecisionContract;
+  const nowImpl = options.nowImpl || Date.now;
   const configuredTimeout = Number(config.hermesTimeoutMs || 240000);
   const totalTimeout = Number.isFinite(configuredTimeout) && configuredTimeout > 0
     ? configuredTimeout
     : 240000;
   const usableTimeout = Math.max(60000, totalTimeout - 30000);
-  const recoveryTimeout = Math.min(120000, Math.max(45000, Math.floor(usableTimeout * 0.28)));
-  const firstTimeout = Math.max(30000, usableTimeout - recoveryTimeout);
+  const reservedRecoveryTimeout = Math.min(120000, Math.max(45000, Math.floor(usableTimeout * 0.28)));
+  const firstTimeout = Math.max(30000, usableTimeout - reservedRecoveryTimeout);
+  const startedAt = nowImpl();
+  const acceptValidDecisionOutput = (output) => {
+    const decision = extractJsonObject(output);
+    return validateDecisionImpl(decision)?.valid === true;
+  };
 
   let firstOutput = '';
   let firstError = null;
   let firstDecision = null;
   let firstValidationErrors = [];
   try {
-    firstOutput = await runHermesImpl(prompt, { ...config, hermesTimeoutMs: firstTimeout });
+    firstOutput = await runHermesImpl(prompt, { ...config, hermesTimeoutMs: firstTimeout }, { acceptOutput: acceptValidDecisionOutput, signal: options.signal });
     firstDecision = extractJsonObject(firstOutput);
     const validation = validateDecisionImpl(firstDecision);
     if (!validation?.valid) {
@@ -5749,13 +7034,34 @@ export async function runHermesDecision(prompt, config, options = {}) {
     firstError = error;
   }
 
+  if (/superseded_by_newer_room_event/.test(String(firstError?.message || firstError || ''))) {
+    throw firstError;
+  }
+
+  const elapsedAfterFirst = Math.max(0, Number(nowImpl()) - Number(startedAt));
+  const recoveryTimeout = Math.floor(usableTimeout - elapsedAfterFirst);
+  if (recoveryTimeout < 45000) {
+    const firstDiagnostic = {
+      ...describeHermesDecisionFailure(firstError, firstOutput),
+      validationErrorCount: firstValidationErrors.length
+    };
+    throw new Error(`Hermes decision left insufficient recovery budget; durable bridge recovery required diagnostics=${JSON.stringify({ first: firstDiagnostic, elapsedMs: elapsedAfterFirst })}`);
+  }
+
   const recoveryPrompt = buildHermesFinalJsonRecoveryPrompt(prompt, {
     validationErrors: firstValidationErrors,
     priorDecision: firstDecision
   });
+  const configuredRecoveryTurns = Number(config.hermesMaxTurns || 12);
+  const recoveryMaxTurns = Math.min(6, Math.max(4,
+    Number.isFinite(configuredRecoveryTurns) ? Math.floor(configuredRecoveryTurns) : 12));
   let recoveryOutput = '';
   try {
-    recoveryOutput = await runHermesImpl(recoveryPrompt, { ...config, hermesTimeoutMs: recoveryTimeout });
+    recoveryOutput = await runHermesImpl(recoveryPrompt, {
+      ...config,
+      hermesTimeoutMs: recoveryTimeout,
+      hermesMaxTurns: recoveryMaxTurns
+    }, { acceptOutput: acceptValidDecisionOutput, signal: options.signal });
     const decision = extractJsonObject(recoveryOutput);
     const validation = validateDecisionImpl(decision);
     if (!validation?.valid) {
@@ -5765,14 +7071,147 @@ export async function runHermesDecision(prompt, config, options = {}) {
   } catch (recoveryError) {
     const firstKind = hermesDecisionFailureKind(firstError, firstOutput);
     const recoveryKind = hermesDecisionFailureKind(recoveryError, recoveryOutput);
-    throw new Error(`Hermes decision failed after 2 attempts (${firstKind}; ${recoveryKind})`);
+    const diagnostics = {
+      first: {
+        ...describeHermesDecisionFailure(firstError, firstOutput),
+        validationErrorCount: firstValidationErrors.length
+      },
+      recovery: describeHermesDecisionFailure(recoveryError, recoveryOutput),
+      elapsedBeforeRecoveryMs: elapsedAfterFirst,
+      recoveryTimeoutMs: recoveryTimeout
+    };
+    throw new Error(`Hermes decision failed after 2 attempts (${firstKind}; ${recoveryKind}) diagnostics=${JSON.stringify(diagnostics)}`);
   }
+}
+
+export function createWorkerTimingRecorder(now = Date.now) {
+  const startedAt = now();
+  let stageStartedAt = startedAt;
+  const stages = {};
+  return {
+    mark(name) {
+      const current = now();
+      stages[`${name}Ms`] = current - stageStartedAt;
+      stageStartedAt = current;
+    },
+    snapshot() {
+      return { ...stages, totalMs: now() - startedAt };
+    }
+  };
+}
+
+export async function isJobSupersededByJobLog({
+  jobLogPath = '',
+  roomKey = '',
+  jobId = '',
+  detectedAt = '',
+  maxBytes = 1024 * 1024
+} = {}) {
+  const baseTime = Date.parse(String(detectedAt || ''));
+  if (!jobLogPath || !roomKey || !jobId || !Number.isFinite(baseTime)) return false;
+  let handle;
+  try {
+    handle = await fs.promises.open(jobLogPath, 'r');
+    const stat = await handle.stat();
+    const length = Math.min(Number(maxBytes) || 1024 * 1024, stat.size);
+    if (!length) return false;
+    const start = Math.max(0, stat.size - length);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, start);
+    const lines = buffer.toString('utf8').split(/\r?\n/);
+    if (start > 0) lines.shift();
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index].trim();
+      if (!line) continue;
+      let candidate;
+      try { candidate = JSON.parse(line); } catch { continue; }
+      if (String(candidate.roomKey || '') !== String(roomKey)) continue;
+      const candidateTime = Date.parse(String(candidate.detectedAt || candidate.lastEventAt || ''));
+      if (!Number.isFinite(candidateTime) || candidateTime <= baseTime) continue;
+      if (String(candidate.jobId || '') && String(candidate.jobId) !== String(jobId)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+export function createJobFreshnessGuard({
+  bridgeUrl = '',
+  roomKey = '',
+  roomRevision = 0,
+  jobLogPath = '',
+  jobId = '',
+  detectedAt = '',
+  pollIntervalMs = 1000,
+  fetchImpl = fetch
+} = {}) {
+  const controller = new AbortController();
+  const bridgeEnabled = Boolean(String(bridgeUrl || '').trim() && String(roomKey || '').trim() && Number(roomRevision) > 0);
+  const logEnabled = Boolean(String(jobLogPath || '').trim() && String(roomKey || '').trim() && String(jobId || '').trim() && detectedAt);
+  const enabled = bridgeEnabled || logEnabled;
+  let checking = false;
+  const checkNow = async () => {
+    if (!enabled || checking || controller.signal.aborted) return { skipped: !enabled };
+    checking = true;
+    try {
+      let result = null;
+      if (bridgeEnabled) {
+        try {
+          const endpoint = new URL('/worker/freshness', bridgeUrl);
+          endpoint.searchParams.set('roomKey', String(roomKey));
+          endpoint.searchParams.set('revision', String(Number(roomRevision)));
+          const response = await fetchImpl(endpoint.toString());
+          if (response?.ok) result = await response.json();
+        } catch {}
+      }
+      if (result?.superseded !== true && logEnabled) {
+        const superseded = await isJobSupersededByJobLog({ jobLogPath, roomKey, jobId, detectedAt });
+        if (superseded) result = { ok: true, superseded: true, source: 'job_log' };
+      }
+      if (result?.superseded === true && !controller.signal.aborted) {
+        controller.abort(new Error(`superseded_by_newer_room_event:${Number(result.latestRevision || 0)}`));
+      }
+      return result || { ok: true, superseded: false };
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error).slice(0, 300) };
+    } finally {
+      checking = false;
+    }
+  };
+  const timer = enabled
+    ? setInterval(() => { void checkNow(); }, Math.max(250, Number(pollIntervalMs || 1000)))
+    : null;
+  timer?.unref?.();
+  return {
+    signal: controller.signal,
+    checkNow,
+    throwIfSuperseded() {
+      if (controller.signal.aborted) throw controller.signal.reason;
+    },
+    stop() {
+      if (timer) clearInterval(timer);
+    }
+  };
 }
 
 async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
   let navigationContext = null;
   let kakaoTabEnsureResult = null;
   const result = {};
+  const timings = createWorkerTimingRecorder();
+  const freshnessGuard = createJobFreshnessGuard({
+    bridgeUrl: config.bridgeUrl,
+    roomKey: job.roomKey || job.room_key || '',
+    roomRevision: job.roomRevision || job.room_revision || 0,
+    jobLogPath: config.jobLogPath,
+    jobId: job.jobId || job.id || '',
+    detectedAt: job.detectedAt || job.detected_at || job.lastEventAt || '',
+    pollIntervalMs: config.freshnessPollMs,
+    fetchImpl: config.fetchImpl || fetch
+  });
   try {
     if (!dryRun && config.ensureKakaoTab) {
       try {
@@ -5802,8 +7241,23 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
         }
       }
     }
+    timings.mark('navigation');
+    const terminalAcknowledgement = classifyConservativeTerminalAcknowledgement(job, navigationContext);
+    if (!dryRun && terminalAcknowledgement.matched) {
+      Object.assign(result, {
+        status: 'ai_skipped_terminal_acknowledgement',
+        terminalAcknowledgement,
+        followUpResult: { inserted: 0, skipped: true, reason: 'terminal_acknowledgement_no_action', rows: [] },
+        slackDeliveryResult: { skipped: true, reason: 'terminal_acknowledgement_no_card', results: [] },
+        autoReplyResult: { attempted: false, sent: false, reason: 'terminal_acknowledgement_no_reply' }
+      });
+      return result;
+    }
     const lookupContext = await buildReadOnlyLookupContext(config, job);
     const ragContext = buildReadOnlyRagContext(config);
+    timings.mark('lookup');
+    await freshnessGuard.checkNow();
+    freshnessGuard.throwIfSuperseded();
     const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext });
     if (dryRun) {
       Object.assign(result, { status: 'dry_run', job: summarizeJob(job), lookupContext, ragContext, prompt });
@@ -5817,11 +7271,23 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     if (fakeDecisionPath) {
       decision = JSON.parse(fs.readFileSync(fakeDecisionPath, 'utf8'));
     } else {
-      const hermesDecision = await runHermesDecision(prompt, config);
+      const hermesDecision = await runHermesDecision(prompt, config, { signal: freshnessGuard.signal });
       hermesOutput = hermesDecision.hermesOutput;
       decision = hermesDecision.decision;
       hermesAttempts = hermesDecision.attempts;
       hermesRecovered = hermesDecision.recovered;
+    }
+    timings.mark('hermes');
+    await freshnessGuard.checkNow();
+    freshnessGuard.throwIfSuperseded();
+
+    // grok-4.5 sometimes omits kill_switch_observed from FINAL_JSON even though
+    // the worker already read the switch authoritatively from the 설정 sheet.
+    // Backfill from our own read so the fail-closed auto-send gates judge the
+    // real switch state instead of a missing echo. A failed read stays
+    // 'not_checked' and still blocks sending.
+    if (!String(decision?.kill_switch_observed || '').trim() && lookupContext?.kill_switch?.status) {
+      decision.kill_switch_observed = lookupContext.kill_switch.status;
     }
 
     let sheetPayload = buildSheetAppendPayload(decision, { apiKey: config.sheetApiKey });
@@ -5882,7 +7348,7 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
             initialDecision: decision,
             sheetResult: authoritativeSheetResult,
             sheetPayload
-          });
+          }, { signal: freshnessGuard.signal });
           decision = reconciliation.decision;
           hermesAttempts += Number(reconciliation.attempts || 0);
           hermesRecovered = hermesRecovered || reconciliation.recovered === true;
@@ -5903,11 +7369,17 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
         }
       }
     }
+    timings.mark('sheetAndReconciliation');
+    await freshnessGuard.checkNow();
+    freshnessGuard.throwIfSuperseded();
     const autoReplyResult = sheetResult?.success === false
       ? (sheetResult.error_type === 'no_contact'
           ? await maybeAutoSendReply({ config, decision, job, navigationContext })
           : { attempted: false, sent: false, reason: 'sheet_write_rejected_no_auto_send', sheetErrorType: sheetResult.error_type })
       : await maybeAutoSendReply({ config, decision, job, navigationContext });
+    timings.mark('autoReply');
+    await freshnessGuard.checkNow();
+    freshnessGuard.throwIfSuperseded();
     const baseFollowUpRows = [
       ...buildFollowUpRows(decision, job),
       ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)
@@ -5920,9 +7392,19 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
       job
     );
     const followUpRows = filterFollowUpRowsAfterAutoReply(availabilityAwareRows, autoReplyResult);
+    const caseRows = buildCanonicalFollowUpCases(decision, job, followUpRows);
     let followUpResult;
+    let inquiryResult = null;
+    let manualTaskResult = null;
     if (config.followUpRowsEnabled === false) {
-      followUpResult = { inserted: 0, skipped: true, reason: 'kakao_follow_up_rows_disabled', rows: followUpRows };
+      followUpResult = { inserted: 0, skipped: true, reason: 'kakao_follow_up_rows_disabled', rows: caseRows };
+    } else if (config.twoChannelRoutingEnabled === true) {
+      try {
+        const caseResult = await upsertFollowUpCaseRows(config, caseRows);
+        followUpResult = { ...caseResult, rows: caseResult.rows };
+      } catch (error) {
+        followUpResult = { inserted: 0, error: error.message, rows: [] };
+      }
     } else {
       try {
         followUpResult = await upsertFollowUpRows(config, followUpRows);
@@ -5933,9 +7415,17 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     const slackDeliveryResult = config.followUpRowsEnabled === false
       ? { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] }
       : await deliverSlackFollowUpRows(config, followUpResult.rows || []);
-    Object.assign(result, { status: 'ai_completed', decision, sheetResult, customerDbDiscountLookup, discountPatchResult, existingRequestResult, postActionResult, followUpResult, slackDeliveryResult, autoReplyResult, hermesAttempts, hermesRecovered, hermesOutputTail: hermesOutput.slice(-4000), postActionOutputTail });
+    timings.mark('followUp');
+    Object.assign(result, { status: 'ai_completed', decision, sheetResult, customerDbDiscountLookup, discountPatchResult, existingRequestResult, postActionResult, followUpResult, inquiryResult, manualTaskResult, slackDeliveryResult, autoReplyResult, hermesAttempts, hermesRecovered, hermesOutputTail: hermesOutput.slice(-4000), postActionOutputTail });
     return result;
+	  } catch (error) {
+	    if (/superseded_by_newer_room_event/.test(String(error?.message || error || ''))) {
+	      Object.assign(result, { status: 'superseded_by_newer_room_event', superseded: true });
+	      return result;
+	    }
+	    throw error;
 	  } finally {
+	    freshnessGuard.stop();
 	    if (!dryRun && navigationContext?.conversation_window) {
 	      try {
 	        result.closeResult = await closeKakaoConversationWindow(navigationContext.conversation_window, { cuaDriverCommand: config.cuaDriverCommand });
@@ -5954,6 +7444,8 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
 	        console.warn(`[ai-worker] Kakao DevTools conversation cleanup failed: ${error.message}`);
 	      }
 	    }
+	    timings.mark('cleanup');
+	    result.timings = timings.snapshot();
 	  }
 }
 
@@ -5974,12 +7466,14 @@ async function readStdinJson() {
 }
 
 export async function processRagLookup(stdinPayload, options = {}) {
+  if (process.env.HERMES_HOME) loadEnvFile(path.resolve(process.env.HERMES_HOME, '.env'));
   loadEnvFile(path.resolve(process.env.HOME || '', '.hermes/.env'));
   loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
   loadEnvFile(path.resolve(__dirname, '.env'));
   const config = {
     villageAiUrl: process.env.VILLAGE_AI_URL || '',
-    villageAiKakaoSkillSecret: process.env.VILLAGE_AI_KAKAO_SKILL_SECRET || process.env.KAKAO_SKILL_SECRET || '',
+    askApiSecret: process.env.ASK_API_SECRET || '',
+    villageAiKakaoSkillSecret: process.env.VILLAGE_AI_KAKAO_SKILL_SECRET || '',
     ragTimeoutMs: Number(process.env.VILLAGE_AI_RAG_TIMEOUT_MS || 30000) || 30000
   };
   return askVillageAi(stdinPayload, config, options);
@@ -6191,12 +7685,27 @@ async function main() {
             claim: !args.noClaim,
             fakeDecisionPath: args.fakeDecisionPath
           });
-  console.log(JSON.stringify(result, null, 2));
+  await new Promise((resolvePromise, rejectPromise) => {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`, (error) => {
+      if (error) rejectPromise(error);
+      else resolvePromise();
+    });
+  });
+}
+
+export async function runCli(mainImpl = main, {
+  exitImpl = (code) => process.exit(code),
+  errorWriter = (message) => console.error(message)
+} = {}) {
+  try {
+    await mainImpl();
+    exitImpl(0);
+  } catch (error) {
+    errorWriter(error?.stack || error?.message || String(error));
+    exitImpl(1);
+  }
 }
 
 if (process.argv[1] === __filename) {
-  main().catch((error) => {
-    console.error(error.stack || error.message);
-    process.exit(1);
-  });
+  void runCli();
 }
