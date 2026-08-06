@@ -7,20 +7,11 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$MacHermesHome = 'C:\Village\MacMiniMirror\restored\.hermes',
 
-    [string]$RuntimeHome = '',
-
-    [ValidateSet('', 'runtime', 'plugin', 'skills', 'metadata')]
-    [string]$TestFailAfterInstallStep = '',
-
     [switch]$ProfileScoped
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-if ($TestFailAfterInstallStep -and $env:VILLAGE_SYNC_TEST_MODE -ne '1') {
-    throw 'TestFailAfterInstallStep is available only when VILLAGE_SYNC_TEST_MODE=1.'
-}
 
 $excludedDirectoryNames = @(
     '.git', '.github', '.hub', '.archive', '.venv', 'venv', 'node_modules',
@@ -46,9 +37,6 @@ $retiredSkillNames = @(
     'rpa-automation-operations-windows'
 )
 $overlaySkillsRoot = Join-Path $PSScriptRoot 'hermes-profile-overlay\skills'
-$overlayPluginsRoot = Join-Path $PSScriptRoot 'hermes-profile-overlay\plugins'
-$compactOperationsSkill = Join-Path $overlaySkillsRoot 'productivity\village-operations\SKILL.md'
-$dateChangeReferenceOverride = Join-Path $overlaySkillsRoot 'productivity\village-operations\references\registered-trade-date-change-remove-item.md'
 $encoding = New-Object System.Text.UTF8Encoding($false)
 
 function Convert-ToExtendedPath {
@@ -299,8 +287,7 @@ function Copy-PreservedLearningState {
         [Parameter(Mandatory = $true)][string]$StagingRoot,
         [Parameter(Mandatory = $true)][hashtable]$CanonicalHashes,
         [Parameter(Mandatory = $true)][hashtable]$PreviousCanonicalHashes,
-        [Parameter(Mandatory = $true)][string[]]$RetiredNames,
-        [string[]]$ForcedCanonicalRelativePaths = @()
+        [Parameter(Mandatory = $true)][string[]]$RetiredNames
     )
 
     $preservedFiles = New-Object System.Collections.ArrayList
@@ -329,9 +316,6 @@ function Copy-PreservedLearningState {
         $preservedPackage = $false
         foreach ($file in @(Get-ChildItem -LiteralPath $package.directory -File -Recurse -ErrorAction Stop)) {
             $relative = $file.FullName.Substring($activeResolved.Length).TrimStart('\').Replace('\', '/')
-            if ($ForcedCanonicalRelativePaths -contains $relative) {
-                continue
-            }
             $activeHash = Get-FileSha256 -Path $file.FullName
             $canonicalExists = $CanonicalHashes.ContainsKey($relative)
             $previousExists = $PreviousCanonicalHashes.ContainsKey($relative)
@@ -507,41 +491,11 @@ function Set-AiFirstProfileIdentity {
 
 $resolvedProfileHome = (Resolve-Path -LiteralPath $ProfileHome -ErrorAction Stop).Path
 $resolvedMacHermesHome = (Resolve-Path -LiteralPath $MacHermesHome -ErrorAction Stop).Path
-if ([string]::IsNullOrWhiteSpace($RuntimeHome)) {
-    if ($ProfileScoped.IsPresent) {
-        $profilesRoot = Split-Path -Parent $resolvedProfileHome
-        $resolvedRuntimeHome = Split-Path -Parent $profilesRoot
-    }
-    else {
-        $resolvedRuntimeHome = $resolvedProfileHome
-    }
-}
-else {
-    $resolvedRuntimeHome = (Resolve-Path -LiteralPath $RuntimeHome -ErrorAction Stop).Path
-}
 $macSkillsRoot = (Resolve-Path -LiteralPath (Join-Path $resolvedMacHermesHome 'skills') -ErrorAction Stop).Path
 $adapterRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'hermes-profile-overlay\adapters') -ErrorAction Stop).Path
 $packages = @(Get-ActiveSkillPackages -SkillsRoot $macSkillsRoot)
 
 $operationId = [Guid]::NewGuid().ToString('N')
-$runtimeRunnerNames = @(
-    'village-live-read.js',
-    'village-live-query.js',
-    'village-confirm-request.js',
-    'village-trade-date-change.js',
-    'village-network-isolation-preload.js',
-    'village-capability-promote.js',
-    'village-operation-broker.js'
-)
-$runtimeScriptsDestination = Join-Path $resolvedRuntimeHome 'scripts\village'
-$runtimeScriptsParent = Split-Path -Parent $runtimeScriptsDestination
-$runtimeScriptsStaging = Join-Path $runtimeScriptsParent ('.village.{0}.tmp' -f $operationId)
-$runtimeScriptsPrevious = Join-Path $runtimeScriptsParent ('.village.{0}.bak' -f $operationId)
-$runtimePluginSource = Join-Path $overlayPluginsRoot 'village-runtime'
-$runtimePluginDestination = Join-Path $resolvedRuntimeHome 'plugins\village-runtime'
-$runtimePluginParent = Split-Path -Parent $runtimePluginDestination
-$runtimePluginStaging = Join-Path $runtimePluginParent ('.village-runtime.{0}.tmp' -f $operationId)
-$runtimePluginPrevious = Join-Path $runtimePluginParent ('.village-runtime.{0}.bak' -f $operationId)
 $skillsRoot = Join-Path $resolvedProfileHome 'skills'
 $parityStatePath = Join-Path $resolvedProfileHome '.village-skill-parity-state.json'
 $stagingRoot = Join-Path $resolvedProfileHome ('.skills.parity.{0}.tmp' -f $operationId)
@@ -554,30 +508,8 @@ $rpaPrevious = Join-Path $rpaParent ('.rpa.{0}.bak' -f $operationId)
 $copiedNames = New-Object System.Collections.ArrayList
 $canonicalHashes = @{}
 $preservation = [pscustomobject]@{ files = @(); skills = @() }
-$installTransactionCommitted = $false
-$installTransactionStarted = $false
 
 try {
-    [void](New-Item -ItemType Directory -Path $runtimeScriptsStaging -Force -ErrorAction Stop)
-    foreach ($runnerName in $runtimeRunnerNames) {
-        $runnerSource = Join-Path $PSScriptRoot $runnerName
-        if (-not (Test-Path -LiteralPath $runnerSource -PathType Leaf)) {
-            throw "Bounded Village runtime runner is missing '$runnerSource'."
-        }
-        [IO.File]::Copy(
-            (Convert-ToExtendedPath -Path $runnerSource),
-            (Convert-ToExtendedPath -Path (Join-Path $runtimeScriptsStaging $runnerName)),
-            $true
-        )
-    }
-
-    if (-not (Test-Path -LiteralPath (Join-Path $runtimePluginSource 'plugin.yaml') -PathType Leaf) -or
-        -not (Test-Path -LiteralPath (Join-Path $runtimePluginSource '__init__.py') -PathType Leaf)) {
-        throw "Village runtime plugin is incomplete at '$runtimePluginSource'."
-    }
-    Copy-SkillPackage -Source $runtimePluginSource -Destination $runtimePluginStaging
-    Assert-PackageCopy -Source $runtimePluginSource -Destination $runtimePluginStaging
-
     [void](New-Item -ItemType Directory -Path $stagingRoot -Force -ErrorAction Stop)
     foreach ($package in $packages) {
         if ($rootExcludedSkills -contains $package.name) {
@@ -602,37 +534,12 @@ try {
             source = Join-Path $macSkillsRoot 'village\village-brain-first'
             destination = Join-Path $stagingRoot 'village\village-brain-first'
             adapter = Join-Path $adapterRoot 'village-brain-first.md'
-            description = 'Use for Village business analysis, policy, prioritization, historical context, or a decision rather than a direct system operation.'
+            description = 'Primary Village business intelligence route for every business question: load compiled Brain first, then use live project APIs for reservations, revenue, inventory, receivables, payments, tax, equipment, customers, and operations.'
         }
     )) {
         Copy-SkillPackage -Source $port.source -Destination $port.destination
-        if ($port.name -eq 'village-operations') {
-            $fullMemoryDestination = Join-Path $port.destination 'references\mac-full-operating-memory.md'
-            [void][IO.Directory]::CreateDirectory((Convert-ToExtendedPath -Path (Split-Path -Parent $fullMemoryDestination)))
-            [IO.File]::Copy(
-                (Convert-ToExtendedPath -Path (Join-Path $port.source 'SKILL.md')),
-                (Convert-ToExtendedPath -Path $fullMemoryDestination),
-                $true
-            )
-            [IO.File]::Copy(
-                (Convert-ToExtendedPath -Path $compactOperationsSkill),
-                (Convert-ToExtendedPath -Path (Join-Path $port.destination 'SKILL.md')),
-                $true
-            )
-        }
-        else {
-            Add-WindowsAdapter -SkillFile (Join-Path $port.destination 'SKILL.md') -AdapterFile $port.adapter -Description $port.description
-        }
+        Add-WindowsAdapter -SkillFile (Join-Path $port.destination 'SKILL.md') -AdapterFile $port.adapter -Description $port.description
         Assert-PackageCopy -Source $port.source -Destination $port.destination -IgnoreRootSkill
-        if ($port.name -eq 'village-operations') {
-            $referenceDestination = Join-Path $port.destination 'references\registered-trade-date-change-remove-item.md'
-            [void][IO.Directory]::CreateDirectory((Convert-ToExtendedPath -Path (Split-Path -Parent $referenceDestination)))
-            [IO.File]::Copy(
-                (Convert-ToExtendedPath -Path $dateChangeReferenceOverride),
-                (Convert-ToExtendedPath -Path $referenceDestination),
-                $true
-            )
-        }
         [void]$copiedNames.Add($port.name)
     }
 
@@ -667,12 +574,7 @@ try {
         -StagingRoot $stagingRoot `
         -CanonicalHashes $canonicalHashes `
         -PreviousCanonicalHashes $previousCanonicalHashes `
-        -RetiredNames $retiredSkillNames `
-        -ForcedCanonicalRelativePaths @(
-            'productivity/village-operations/SKILL.md',
-            'productivity/village-operations/references/mac-full-operating-memory.md',
-            'productivity/village-operations/references/registered-trade-date-change-remove-item.md'
-        )
+        -RetiredNames $retiredSkillNames
 
     $rootNames = @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot | ForEach-Object { $_.name })
     if (@($rootNames | Select-Object -Unique).Count -ne $rootNames.Count) {
@@ -692,137 +594,31 @@ try {
         }
     }
 
-    $installTargets = @(
-        [pscustomobject]@{
-            step = 'runtime'
-            destination = $runtimeScriptsDestination
-            staging = $runtimeScriptsStaging
-            previous = $runtimeScriptsPrevious
-            parent = $runtimeScriptsParent
-            description = 'Install bounded Village runtime runners outside the repository'
-        },
-        [pscustomobject]@{
-            step = 'plugin'
-            destination = $runtimePluginDestination
-            staging = $runtimePluginStaging
-            previous = $runtimePluginPrevious
-            parent = $runtimePluginParent
-            description = 'Install the Village capability and learning plugin'
-        },
-        [pscustomobject]@{
-            step = 'skills'
-            destination = $skillsRoot
-            staging = $stagingRoot
-            previous = $previousRoot
-            parent = $resolvedProfileHome
-            description = 'Replace the active Hermes skill tree with the Mac parity build'
+    if ($PSCmdlet.ShouldProcess($skillsRoot, 'Atomically replace the active Hermes skill tree with Mac parity build')) {
+        if (Test-Path -LiteralPath $skillsRoot) {
+            [IO.Directory]::Move($skillsRoot, $previousRoot)
         }
-    )
-    $installApproved = @($installTargets | ForEach-Object {
-        $PSCmdlet.ShouldProcess($_.destination, $_.description)
-    })
-
-    if (@($installApproved | Where-Object { -not $_ }).Count -eq 0) {
-        $installTransactionStarted = $true
-        $completedSwaps = New-Object System.Collections.ArrayList
-        $metadataPaths = New-Object System.Collections.ArrayList
-        [void]$metadataPaths.Add((Join-Path $resolvedProfileHome '.no-bundled-skills'))
-        [void]$metadataPaths.Add($parityStatePath)
-        if ($ProfileScoped.IsPresent) {
-            [void]$metadataPaths.Add((Join-Path $resolvedProfileHome 'profile.yaml'))
-        }
-        $metadataSnapshots = @{}
-        foreach ($metadataPath in $metadataPaths) {
-            $metadataSnapshots[$metadataPath] = if (Test-Path -LiteralPath $metadataPath -PathType Leaf) {
-                [pscustomobject]@{ existed = $true; bytes = [IO.File]::ReadAllBytes($metadataPath) }
-            }
-            else {
-                [pscustomobject]@{ existed = $false; bytes = $null }
-            }
-        }
-
         try {
-            foreach ($target in $installTargets) {
-                [void](New-Item -ItemType Directory -Path $target.parent -Force -ErrorAction Stop)
-                $previousExisted = Test-Path -LiteralPath $target.destination
-                if ($previousExisted) {
-                    [IO.Directory]::Move($target.destination, $target.previous)
-                }
-                try {
-                    [IO.Directory]::Move($target.staging, $target.destination)
-                }
-                catch {
-                    if ($previousExisted -and (Test-Path -LiteralPath $target.previous) -and -not (Test-Path -LiteralPath $target.destination)) {
-                        [IO.Directory]::Move($target.previous, $target.destination)
-                    }
-                    throw
-                }
-                [void]$completedSwaps.Add([pscustomobject]@{
-                    destination = $target.destination
-                    previous = $target.previous
-                    previousExisted = $previousExisted
-                })
-                if ($TestFailAfterInstallStep -eq $target.step) {
-                    throw "Injected sync failure after $($target.step) swap."
-                }
-            }
-
-            [IO.File]::WriteAllText(
-                (Join-Path $resolvedProfileHome '.no-bundled-skills'),
-                "mac-parity-curated`n",
-                $encoding
-            )
-            if ($ProfileScoped.IsPresent) {
-                Set-AiFirstProfileIdentity -ProfileRoot $resolvedProfileHome
-            }
-            Write-CanonicalHashState -StatePath $parityStatePath -CanonicalHashes $canonicalHashes
-            if ($TestFailAfterInstallStep -eq 'metadata') {
-                throw 'Injected sync failure after metadata write.'
-            }
-
-            foreach ($requiredPath in @(
-                (Join-Path $runtimeScriptsDestination 'village-operation-broker.js'),
-                (Join-Path $runtimeScriptsDestination 'village-capability-promote.js'),
-                (Join-Path $runtimeScriptsDestination 'village-network-isolation-preload.js'),
-                (Join-Path $runtimePluginDestination 'plugin.yaml'),
-                (Join-Path $runtimePluginDestination '__init__.py'),
-                (Join-Path $skillsRoot 'productivity\village-operations\SKILL.md'),
-                (Join-Path $skillsRoot 'village\village-runtime-router\SKILL.md'),
-                $parityStatePath
-            )) {
-                if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-                    throw "Post-install verification is missing '$requiredPath'."
-                }
-            }
-            $installTransactionCommitted = $true
+            [IO.Directory]::Move($stagingRoot, $skillsRoot)
         }
         catch {
-            for ($index = $completedSwaps.Count - 1; $index -ge 0; $index--) {
-                $swap = $completedSwaps[$index]
-                if (Test-Path -LiteralPath $swap.destination) {
-                    Remove-DirectoryTree -Path $swap.destination
-                }
-                if ($swap.previousExisted -and (Test-Path -LiteralPath $swap.previous)) {
-                    [IO.Directory]::Move($swap.previous, $swap.destination)
-                }
-            }
-            foreach ($metadataPath in $metadataPaths) {
-                $snapshot = $metadataSnapshots[$metadataPath]
-                if ($snapshot.existed) {
-                    [IO.File]::WriteAllBytes($metadataPath, $snapshot.bytes)
-                }
-                elseif (Test-Path -LiteralPath $metadataPath -PathType Leaf) {
-                    [IO.File]::Delete($metadataPath)
-                }
+            if ((Test-Path -LiteralPath $previousRoot) -and -not (Test-Path -LiteralPath $skillsRoot)) {
+                [IO.Directory]::Move($previousRoot, $skillsRoot)
             }
             throw
         }
-
-        foreach ($target in $installTargets) {
-            if (Test-Path -LiteralPath $target.previous) {
-                Remove-DirectoryTree -Path $target.previous
-            }
+        if (Test-Path -LiteralPath $previousRoot) {
+            Remove-DirectoryTree -Path $previousRoot
         }
+        [IO.File]::WriteAllText(
+            (Join-Path $resolvedProfileHome '.no-bundled-skills'),
+            "mac-parity-curated`n",
+            $encoding
+        )
+        if ($ProfileScoped.IsPresent) {
+            Set-AiFirstProfileIdentity -ProfileRoot $resolvedProfileHome
+        }
+        Write-CanonicalHashState -StatePath $parityStatePath -CanonicalHashes $canonicalHashes
     }
 
     if (-not $ProfileScoped.IsPresent -and (Test-Path -LiteralPath (Join-Path $rpaSource 'SKILL.md') -PathType Leaf)) {
@@ -868,37 +664,12 @@ try {
         copied        = @($copiedNames).Count
         preservedSkills = @($preservation.skills)
         preservedFiles = @($preservation.files).Count
-        runtimeScripts = $runtimeRunnerNames
-        runtimePlugin  = 'village-runtime'
-        runtimeHome    = $resolvedRuntimeHome
         canonical     = @('village-brain-first', 'village-operations', 'village-runtime-router', 'village-confirm-request')
         profileScoped = @('rpa-automation-operations')
         excluded      = $rootExcludedSkills
     } | ConvertTo-Json -Depth 4 -Compress
 }
 finally {
-    if (Test-Path -LiteralPath $runtimeScriptsStaging) {
-        Remove-DirectoryTree -Path $runtimeScriptsStaging
-    }
-    if (Test-Path -LiteralPath $runtimeScriptsPrevious) {
-        if (-not (Test-Path -LiteralPath $runtimeScriptsDestination)) {
-            [IO.Directory]::Move($runtimeScriptsPrevious, $runtimeScriptsDestination)
-        }
-        elseif (Test-Path -LiteralPath $runtimeScriptsPrevious) {
-            Remove-DirectoryTree -Path $runtimeScriptsPrevious
-        }
-    }
-    if (Test-Path -LiteralPath $runtimePluginStaging) {
-        Remove-DirectoryTree -Path $runtimePluginStaging
-    }
-    if (Test-Path -LiteralPath $runtimePluginPrevious) {
-        if (-not (Test-Path -LiteralPath $runtimePluginDestination)) {
-            [IO.Directory]::Move($runtimePluginPrevious, $runtimePluginDestination)
-        }
-        elseif (Test-Path -LiteralPath $runtimePluginPrevious) {
-            Remove-DirectoryTree -Path $runtimePluginPrevious
-        }
-    }
     if (Test-Path -LiteralPath $stagingRoot) {
         Remove-DirectoryTree -Path $stagingRoot
     }
