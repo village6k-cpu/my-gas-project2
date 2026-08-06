@@ -3553,6 +3553,30 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
     const storedCustomerClusterHash = isInquiryCase && latestCustomerClusterHash
       ? latestCustomerClusterHash
       : existingDelivery.last_broadcast_customer_cluster_hash || null;
+    let customerUpdateNotified = false;
+    const previousBroadcastHash = text(existingDelivery.last_broadcast_customer_cluster_hash || '').trim();
+    const previousContentHash = text(existingDelivery.last_rendered_content_hash || '').trim();
+    if (
+      isInquiryCase
+      && latestCustomerClusterHash
+      && previousBroadcastHash
+      && latestCustomerClusterHash !== previousBroadcastHash
+      && renderedContentHash !== previousContentHash
+    ) {
+      try {
+        await slackApi(config, 'chat.postMessage', {
+          channel: channelId,
+          thread_ts: existingDelivery.thread_ts || existingTs,
+          reply_broadcast: true,
+          text: `🔔 ${text(enrichedRow.customer_name || row.customer_name || '고객')} 카드가 새 고객 메시지로 갱신되었습니다. 위 카드 내용을 확인해 주세요.`,
+          unfurl_links: false,
+          unfurl_media: false
+        });
+        customerUpdateNotified = true;
+      } catch (notifyError) {
+        void notifyError;
+      }
+    }
     const updated = await mergeFollowUpPayload(config, row.id, {
       operational_calculation: enrichedRow.payload?.operational_calculation || null,
       slack_delivery: {
@@ -3576,7 +3600,7 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
       recommended_action: enrichedRow.recommended_action,
       evidence: enrichedRow.evidence
     });
-    return { ok: true, updatedSlack: true, customerUpdateNotified: false, rowId: row.id, route, channelId, ts: updatedMessage.ts || existingTs, updated };
+    return { ok: true, updatedSlack: true, customerUpdateNotified, rowId: row.id, route, channelId, ts: updatedMessage.ts || existingTs, updated };
   }
 
   const channelId = await resolveSlackChannelId(route.channel, config);
@@ -3600,7 +3624,9 @@ export async function postSlackFollowUpRow(config = {}, row = {}) {
   };
   if (threadParent?.threadTs) {
     postPayload.thread_ts = threadParent.threadTs;
-    postPayload.reply_broadcast = false;
+    // Broadcast threaded cards to the channel: a new actionable card buried in an
+    // old thread is invisible at channel level (2026-08-07 새벽 카드 실종 사건).
+    postPayload.reply_broadcast = true;
   }
   let posted;
   try {

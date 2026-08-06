@@ -4687,17 +4687,22 @@ test('reprocessing the same customer cluster does not broadcast', async () => {
   assert.equal(requests.some((r) => r.url.includes('chat.postMessage')), false);
 });
 
-test('a new customer cluster silently updates the existing inquiry card and both hashes', async () => {
+test('a new customer cluster updates the inquiry card AND broadcasts a channel-visible bell', async () => {
   const cluster = '이쪽으로 현금영수증 해주시면 감사하겠습니다.';
   const { requests, config, row } = inquiryRefreshHarness({
     last_rendered_content_hash: 'old-render',
     last_broadcast_customer_cluster_hash: customerClusterHash('이전 메시지')
   }, cluster);
 
-  await deliverSlackFollowUpRows(config, [row]);
+  const result = await deliverSlackFollowUpRows(config, [row]);
 
   assert.equal(requests.filter((request) => request.url.includes('chat.update')).length, 1);
-  assert.equal(requests.some((request) => request.url.includes('chat.postMessage')), false);
+  const bells = requests.filter((request) => request.url.includes('chat.postMessage'));
+  assert.equal(bells.length, 1);
+  const bellBody = JSON.parse(bells[0].init.body);
+  assert.equal(bellBody.reply_broadcast, true);
+  assert.ok(String(bellBody.text).includes('갱신'));
+  assert.equal(result.results[0].customerUpdateNotified, true);
   const patch = requests.find((request) => request.url.includes('supabase.example') && request.init?.method === 'PATCH');
   const stored = JSON.parse(patch.init.body).payload.slack_delivery;
   assert.match(stored.last_rendered_content_hash, /^[a-f0-9]{64}$/);

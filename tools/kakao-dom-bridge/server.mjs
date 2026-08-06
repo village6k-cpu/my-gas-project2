@@ -5,7 +5,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
 import { spawn, spawnSync } from 'node:child_process';
-import { deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
+import { buildSlackFollowUpMessage, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
+import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-browser-worker/follow-up-case-lifecycle.mjs';
 
 function loadSelectedEnvFile(filePath, keys = []) {
   const allowed = new Set(keys);
@@ -1341,6 +1342,27 @@ async function mergeFollowUpPayloadById(row, payloadPatch = {}, extraPatch = {})
   });
 }
 
+async function patchFollowUpCaseRowByStateVersion(row, expectedStateVersion, payloadPatch = {}, extraPatch = {}) {
+  if (!supabaseConfigured() || !row?.id || !Number.isInteger(expectedStateVersion)) return [];
+  const currentPayload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+  const url = new URL(supabaseFollowUpEndpoint());
+  url.searchParams.set('id', `eq.${row.id}`);
+  url.searchParams.set('payload->>state_version', `eq.${expectedStateVersion}`);
+  const { response, text, data } = await supabaseFetchWithTimeout(url.toString(), {
+    method: 'PATCH',
+    headers: supabaseHeaders('return=representation'),
+    body: JSON.stringify({
+      ...extraPatch,
+      payload: {
+        ...currentPayload,
+        ...payloadPatch
+      }
+    })
+  });
+  if (!response.ok) throw new Error(`Supabase follow-up compare-and-swap failed: ${response.status} ${text}`);
+  return Array.isArray(data) ? data : [];
+}
+
 function slackStatusFromActionId(actionId = '') {
   const match = String(actionId || '').match(/^village_followup_status_(.+)$/);
   if (!match) return '';
@@ -1348,6 +1370,24 @@ function slackStatusFromActionId(actionId = '') {
   return ['open', 'in_progress', 'waiting_customer', 'waiting_internal', 'done', 'dismissed'].includes(status)
     ? status
     : '';
+}
+
+export function decodeSlackFollowUpActionValue(value) {
+  const raw = typeof value === 'string' ? value.trim() : value;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const id = String(raw.id || '').trim();
+    if (!id) throw new Error('canonical Slack action value requires id');
+    if (!Number.isInteger(raw.state_version)) throw new Error('canonical Slack action value requires an integer state_version');
+    return { id, stateVersion: raw.state_version, canonical: true };
+  }
+  const stringValue = String(raw || '').trim();
+  if (!stringValue) throw new Error('followUpId is required');
+  if (stringValue.startsWith('{')) {
+    let parsed;
+    try { parsed = JSON.parse(stringValue); } catch { throw new Error('canonical Slack action value must be valid JSON'); }
+    return decodeSlackFollowUpActionValue(parsed);
+  }
+  return { id: stringValue, stateVersion: null, canonical: false };
 }
 
 function slackEscape(value = '') {
@@ -1397,6 +1437,20 @@ function slackMessageRefForAction(row = {}, resolution = {}) {
   };
 }
 
+export function canonicalSlackMessageRef(row = {}, { channelId = '', messageTs = '' } = {}) {
+  const delivery = row?.payload?.slack_delivery && typeof row.payload.slack_delivery === 'object'
+    ? row.payload.slack_delivery
+    : {};
+  const channel = String(delivery.channel_id || '').trim();
+  const ts = String(delivery.message_ts || '').trim();
+  if (!channel || !ts) throw new Error('canonical case is missing stored Slack delivery identity');
+  const suppliedChannel = String(channelId || '').trim();
+  const suppliedTs = String(messageTs || '').trim();
+  if (suppliedChannel && suppliedChannel !== channel) throw new Error('Slack action channel identity mismatch');
+  if (suppliedTs && suppliedTs !== ts) throw new Error('Slack action timestamp identity mismatch');
+  return { channel, ts };
+}
+
 function buildResolvedSlackFollowUpMessage(row = {}, resolution = {}) {
   const { icon, label, detail } = slackResolutionLabel(resolution);
   const customer = truncateSlack(row.customer_name || '고객명 미확인', 80);
@@ -1441,6 +1495,42 @@ async function slackApi(method, payload = {}) {
   return data;
 }
 
+async function updateSlackFollowUpCaseCard(row = {}, { resolution = null } = {}) {
+  const { channel, ts } = canonicalSlackMessageRef(row);
+  const phase = String(row?.payload?.phase || '');
+  const pendingSend = row?.payload?.slack_action?.type === 'send'
+    && row?.payload?.slack_action?.status === 'pending';
+  const effectiveResolution = resolution || (pendingSend
+    ? { kind: 'send_pending' }
+    : phase === 'completed'
+      ? { kind: 'status', status: 'done' }
+      : phase === 'dismissed' ? { kind: 'status', status: 'dismissed' } : null);
+  const message = effectiveResolution
+    ? buildResolvedSlackFollowUpMessage(row, effectiveResolution)
+    : buildSlackFollowUpMessage(row, { config: followUpConfig() });
+  const result = await slackApi('chat.update', {
+    channel,
+    ts,
+    text: message.text,
+    blocks: message.blocks
+  });
+  return { ok: true, channel, ts, result };
+}
+
+async function tryUpdateSlackFollowUpCaseCard(row = {}, action = {}) {
+  try {
+    return await updateSlackFollowUpCaseCard(row, action);
+  } catch (error) {
+    appendNdjson('errors.ndjson', {
+      at: nowIso(),
+      type: 'slack_case_card_update',
+      followUpId: row?.id || null,
+      message: error.message
+    });
+    return { ok: false, error: error.message };
+  }
+}
+
 async function replaceSlackFollowUpCard(row = {}, resolution = {}) {
   const ref = slackMessageRefForAction(row, resolution);
   if (!ref.channel || !ref.ts) return { skipped: true, reason: 'missing_slack_message_ref' };
@@ -1468,25 +1558,181 @@ async function tryReplaceSlackFollowUpCard(row = {}, resolution = {}) {
   }
 }
 
+export async function applyFollowUpCaseActionWithCompareAndSwap({
+  row = {},
+  actionId = '',
+  expectedStateVersion,
+  requestedAt = nowIso(),
+  persist,
+  deliver,
+  persistDelivery
+} = {}) {
+  const transition = applyFollowUpCaseAction(row.payload, actionId, { expectedStateVersion });
+  const existingDelivery = row?.payload?.slack_delivery && typeof row.payload.slack_delivery === 'object'
+    ? row.payload.slack_delivery
+    : {};
+  transition.payload.slack_delivery = {
+    ...existingDelivery,
+    update_pending: true,
+    update_status: 'pending',
+    update_state_version: transition.payload.state_version,
+    update_requested_at: requestedAt,
+    update_error: null
+  };
+  const updatedRows = await persist({ row, expectedStateVersion, transition });
+  if (!Array.isArray(updatedRows) || updatedRows.length !== 1) {
+    return { ok: false, reason: 'case_transition_conflict', status: transition.rowStatus, updated: null };
+  }
+  let updated = updatedRows[0];
+  const delivery = typeof deliver === 'function' ? await deliver(updated, transition) : null;
+  if (delivery?.ok === false) {
+    const failedDelivery = {
+      ...(updated.payload?.slack_delivery || transition.payload.slack_delivery),
+      update_pending: true,
+      update_status: 'error',
+      update_attempted_at: nowIso(),
+      update_error: String(delivery.error || delivery.reason || 'Slack case update failed').slice(0, 1000)
+    };
+    try {
+      if (typeof persistDelivery === 'function') updated = await persistDelivery({ row: updated, delivery: failedDelivery }) || updated;
+    } catch {}
+    return { ok: false, reason: 'slack_case_update_failed', status: transition.rowStatus, updated, delivery };
+  }
+  if (delivery?.ok === true) {
+    const completedDelivery = {
+      ...(updated.payload?.slack_delivery || transition.payload.slack_delivery),
+      update_pending: false,
+      update_status: 'delivered',
+      update_attempted_at: nowIso(),
+      update_error: null
+    };
+    if (typeof persistDelivery === 'function') updated = await persistDelivery({ row: updated, delivery: completedDelivery }) || updated;
+  }
+  return { ok: true, status: transition.rowStatus, updated, delivery };
+}
+
+export async function retryPendingSlackFollowUpCaseUpdate({ row = {}, deliver, persistDelivery } = {}) {
+  const deliveryState = row?.payload?.slack_delivery && typeof row.payload.slack_delivery === 'object'
+    ? row.payload.slack_delivery
+    : {};
+  if (deliveryState.update_pending !== true) {
+    return { ok: false, skipped: true, reason: 'no_pending_slack_case_update', updated: row };
+  }
+  const ref = canonicalSlackMessageRef(row);
+  const delivery = await deliver(row, ref);
+  const nextDelivery = {
+    ...deliveryState,
+    update_pending: delivery?.ok !== true,
+    update_status: delivery?.ok === true ? 'delivered' : 'error',
+    update_attempted_at: nowIso(),
+    update_error: delivery?.ok === true ? null : String(delivery?.error || delivery?.reason || 'Slack case update failed').slice(0, 1000)
+  };
+  let updated = row;
+  if (typeof persistDelivery === 'function') updated = await persistDelivery({ row, delivery: nextDelivery }) || row;
+  return delivery?.ok === true
+    ? { ok: true, updated, delivery }
+    : { ok: false, reason: 'slack_case_update_failed', updated, delivery };
+}
+
+export async function retrySlackFollowUpCaseUpdateById(id = '') {
+  const row = await fetchFollowUpRowById(String(id || '').trim());
+  if (!row) throw new Error(`follow-up item not found: ${id}`);
+  if (row.payload?.card_kind !== 'follow_up_case') throw new Error('Slack case update retry requires follow_up_case');
+  return retryPendingSlackFollowUpCaseUpdate({
+    row,
+    deliver: (candidate) => tryUpdateSlackFollowUpCaseCard(candidate),
+    persistDelivery: ({ row: candidate, delivery }) => mergeFollowUpPayloadById(candidate, { slack_delivery: delivery })
+  });
+}
+
 async function applySlackFollowUpActionRequest(body = {}) {
   const actionId = String(body.action_id || body.actionId || body.action || '').trim();
-  const followUpId = String(body.followUpId || body.follow_up_id || body.value || body.id || '').trim();
   if (!actionId) throw new Error('action_id is required');
-  if (!followUpId) throw new Error('followUpId is required');
+  const rawFollowUpValue = body.value ?? body.followUpId ?? body.follow_up_id ?? body.id;
+  const decodedValue = decodeSlackFollowUpActionValue(rawFollowUpValue);
+  const followUpId = decodedValue.id;
+  const suppliedStateVersion = body.state_version ?? body.stateVersion;
+  if (decodedValue.canonical && suppliedStateVersion !== undefined && Number(suppliedStateVersion) !== decodedValue.stateVersion) {
+    throw new Error('canonical Slack action state version mismatch');
+  }
+  const expectedStateVersion = decodedValue.canonical
+    ? decodedValue.stateVersion
+    : (Number.isInteger(Number(suppliedStateVersion)) ? Number(suppliedStateVersion) : null);
   const row = await fetchFollowUpRowById(followUpId);
   if (!row) throw new Error(`follow-up item not found: ${followUpId}`);
 
   const requestedAt = nowIso();
   const requestedBy = String(body.user_id || body.userId || body.user_name || body.userName || '').trim();
+  const isCanonicalCase = row.payload?.card_kind === 'follow_up_case';
+  const suppliedMessageRef = {
+    channelId: body.channel_id || body.channelId || '',
+    messageTs: body.message_ts || body.messageTs || ''
+  };
+  const canonicalRef = isCanonicalCase ? canonicalSlackMessageRef(row, suppliedMessageRef) : null;
   const baseSlackAction = {
     action_id: actionId,
     requested_at: requestedAt,
     requested_by: requestedBy || null,
-    channel_id: body.channel_id || body.channelId || null,
-    message_ts: body.message_ts || body.messageTs || null,
+    channel_id: canonicalRef?.channel || suppliedMessageRef.channelId || null,
+    message_ts: canonicalRef?.ts || suppliedMessageRef.messageTs || null,
     source: 'slack_socket',
     error: null
   };
+
+  if (isCanonicalCase) {
+    if (!Number.isInteger(expectedStateVersion)) throw new Error('canonical case action requires an integer state_version');
+    validateFollowUpCaseAction(row.payload, actionId, { expectedStateVersion });
+    if (actionId === 'village_followup_edit_send') {
+      return { ok: true, kind: 'edit', followUpId, status: row.status, updated: row };
+    }
+    const targetStatus = slackStatusFromActionId(actionId);
+    const sendAction = ['village_followup_send', 'village_followup_edit_send_submit'].includes(actionId);
+    const draftOverride = String(body.draftOverride || body.draft_override || '').trim();
+    if (sendAction && !String(draftOverride || row.payload?.slack_draft_override || row.suggested_reply_draft || '').trim()) {
+      throw new Error('canonical customer reply send requires a non-empty draft');
+    }
+    const actionType = sendAction ? 'send' : targetStatus ? 'status' : 'case_transition';
+    const actionStatus = sendAction ? 'pending' : 'done';
+    const resolution = sendAction
+      ? { kind: 'send_pending', requestedBy, requestedAt }
+      : actionId === 'village_followup_status_dismissed'
+        ? { kind: 'status', status: 'dismissed', requestedBy, requestedAt }
+        : actionId === 'village_followup_reply_not_needed'
+          ? { kind: 'status', status: 'done', requestedBy, requestedAt }
+          : null;
+    const transitionResult = await applyFollowUpCaseActionWithCompareAndSwap({
+      row,
+      actionId,
+      expectedStateVersion,
+      requestedAt,
+      persist: ({ transition }) => patchFollowUpCaseRowByStateVersion(row, expectedStateVersion, {
+        ...transition.payload,
+        ...(draftOverride ? { slack_draft_override: draftOverride } : {}),
+        slack_action: {
+          ...baseSlackAction,
+          type: actionType,
+          status: actionStatus,
+          ...(targetStatus ? { target_status: targetStatus } : {}),
+          ...(actionStatus === 'done' ? { handled_at: requestedAt } : {})
+        }
+      }, { status: transition.rowStatus }),
+      deliver: (updated) => tryUpdateSlackFollowUpCaseCard(updated, { resolution }),
+      persistDelivery: ({ row: updated, delivery }) => mergeFollowUpPayloadById(updated, { slack_delivery: delivery })
+    });
+    if (!transitionResult.ok) {
+      return {
+        ok: false,
+        kind: actionType,
+        followUpId,
+        status: transitionResult.status,
+        updated: transitionResult.updated,
+        delivery: transitionResult.delivery || { ok: false, skipped: true, reason: transitionResult.reason },
+        reason: transitionResult.reason
+      };
+    }
+    appendNdjson('slack-actions.ndjson', { at: requestedAt, action: actionId, followUpId, status: transitionResult.status, requestedBy });
+    return { ok: true, kind: actionType, followUpId, status: transitionResult.status, updated: transitionResult.updated, delivery: transitionResult.delivery };
+  }
 
   const targetStatus = slackStatusFromActionId(actionId);
   if (targetStatus) {
@@ -1776,9 +2022,12 @@ function rowAgeMs(row = {}, fieldOrder = ['updated_at', 'completed_at', 'created
 
 function shouldRecoverSupabaseRow(row = {}) {
   const status = String(row.status || '');
+  // The attempt cap must hold for EVERY recoverable status: a failed replay can
+  // leave the row in ready/processing states too, and an uncapped status turns
+  // one failing job into a worker-monopolizing retry loop.
+  if (recoveryAttemptCount(row) >= CONFIG.supabaseRecoveryMaxAttempts) return false;
   if (status === 'processing_by_ai_worker') return isDuplicateProcessingStale(row);
   if (status === 'ai_worker_error') {
-    if (recoveryAttemptCount(row) >= CONFIG.supabaseRecoveryMaxAttempts) return false;
     return rowAgeMs(row) >= CONFIG.supabaseRecoveryErrorRetryMs;
   }
   return ['ready_for_ai_worker', 'ai_decision_ready_no_sheet_write'].includes(status);
@@ -1818,7 +2067,8 @@ async function markSupabaseRowSkippedLowValue(row, reason) {
 }
 
 function shouldEscalateExhaustedSupabaseRow(row = {}) {
-  return row.status === 'ai_worker_error'
+  const status = String(row.status || '');
+  return ['ai_worker_error', 'ready_for_ai_worker', 'ai_decision_ready_no_sheet_write', 'processing_by_ai_worker'].includes(status)
     && recoveryAttemptCount(row) >= CONFIG.supabaseRecoveryMaxAttempts
     && !recoveryEscalated(row);
 }
@@ -1848,7 +2098,17 @@ function buildJobFromSupabaseRow(row = {}, attempt = 0) {
     events: Array.isArray(payload.events) ? payload.events : [],
     replayedFromSupabase: true,
     recoveryAttempt: attempt,
-    recoverySource: 'supabase_recovery_sweeper'
+    recoverySource: 'supabase_recovery_sweeper',
+    // Carry the incremented counter on the job itself: failure paths rewrite the
+    // Supabase payload from this object, and a stale/absent bridge_recovery here
+    // resets the attempt count and turns one poison job into an endless retry
+    // loop (2026-08-07 새벽 김동효 건 9회 재시도).
+    bridge_recovery: {
+      ...objectPayload(payload.bridge_recovery),
+      attempts: attempt,
+      last_replayed_at: nowIso(),
+      last_replay_reason: 'supabase_recovery_sweeper'
+    }
   };
 }
 
@@ -2295,6 +2555,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/maintenance/slack-actions') {
       const result = await runSlackActionPoll('manual');
       return json(res, 200, { ok: !result.errors?.length, result });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/maintenance/slack-case-update') {
+      const body = await readJsonBody(req);
+      const id = String(body.id || body.followUpId || body.follow_up_id || '').trim();
+      if (!id) return json(res, 400, { ok: false, error: 'id is required' });
+      const result = await retrySlackFollowUpCaseUpdateById(id);
+      return json(res, result.ok ? 200 : 502, result);
     }
 
     if (req.method === 'POST' && url.pathname === '/maintenance/cleanup-tabs') {
