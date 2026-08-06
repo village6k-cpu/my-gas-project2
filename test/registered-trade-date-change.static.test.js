@@ -25,8 +25,8 @@ test('generic writes cannot escape their allowlisted sheet through an A1 qualifi
 test('date mutation validates under a lock before writing all authoritative layers', () => {
   const start = availability.indexOf('function changeRegisteredTradeDates');
   assert.ok(start >= 0, 'bounded date-change function must exist');
-  const end = availability.indexOf('function extendRegisteredTrade', start);
-  assert.ok(end > start, 'bounded date-change function must have a stable boundary');
+  const nextTopLevel = availability.indexOf('\nfunction ', start + 1);
+  const end = nextTopLevel > start ? nextTopLevel : availability.length;
   const body = availability.slice(start, end);
 
   assert.match(body, /LockService\.getScriptLock\(\)/);
