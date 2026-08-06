@@ -185,8 +185,8 @@ export function PaymentControls({ trade }: { trade: Trade }) {
       {open && (
         <div className="mt-2.5 space-y-2">
           <Select label="결제수단" options={withCurrentOption(options.paymentOptions, trade.paymentMethod)} value={trade.paymentMethod} onChange={(v) => setPaymentMethod(trade.tradeId, v)} />
-          <Select label="입금상태" options={withCurrentOption(options.depositStatusOptions, trade.depositStatus)} value={trade.depositStatus} onChange={(v) => setDepositStatus(trade.tradeId, v)} danger={isBad(trade.depositStatus)} />
-          <Select label="증빙" options={withCurrentOption(options.proofTypeOptions, trade.proofType)} value={trade.proofType} onChange={(v) => setProofType(trade.tradeId, v)} />
+          <Select label="입금상태" options={withCurrentOption(options.depositStatusOptions, trade.depositStatus)} value={trade.depositStatus} onChange={(v) => { void setDepositStatus(trade.tradeId, v); }} danger={isBad(trade.depositStatus)} />
+          <Select label="증빙" options={withCurrentOption(options.proofTypeOptions, trade.proofType)} value={trade.proofType} onChange={(v) => { void setProofType(trade.tradeId, v); }} />
 
           {/* 세금계산서일 때만 발행처·발행상태 */}
           {isTax && (
@@ -194,7 +194,7 @@ export function PaymentControls({ trade }: { trade: Trade }) {
               <BillingCompanyCombobox
                 value={trade.billingCompany ?? ""}
                 options={options.billingCompanyOptions}
-                onSave={(v) => setBillingCompany(trade.tradeId, v)}
+                onSave={async (v) => { await setBillingCompany(trade.tradeId, v); }}
               />
               <div className="flex items-center gap-2">
                 <span className="w-12 shrink-0 text-[12px] font-semibold text-ink-mute">발행상태</span>
@@ -298,8 +298,8 @@ export function PaymentControls({ trade }: { trade: Trade }) {
           trade={trade}
           onClose={() => setConfirming(false)}
           onConfirm={() => {
-            sendEstimate(trade.tradeId);
             setConfirming(false);
+            void sendEstimate(trade.tradeId);
           }}
         />
       )}

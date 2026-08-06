@@ -120,7 +120,7 @@ export async function syncTimelineToSupabase(opts?: { fromDays?: number; toDays?
   let n = 0;
   for (const t of trades) {
     const ex = existingMap.get(t.tradeId);
-    await persistTrade(ex ? mergeTimelineTradeSnapshot(ex, t) : t);
+    await persistTrade(ex ? mergeTimelineTradeSnapshot(ex, t) : t, { updateExistingStructure: true });
     n++;
     if (n % 10 === 0) log(`  …${n}/${trades.length}`);
   }
@@ -295,6 +295,7 @@ function mergeDashboard(base: Trade, it: any): Trade {
     customerName: it.name || base.customerName,
     customerPhone: it.tel || base.customerPhone,
     company: it.company || base.company,
+    discountType: it.discountType || base.discountType,
     contractStatus: it.contractStatus || base.contractStatus,
     setupDone: !!it.setupDone,
     returnDone: !!it.returnDone,
@@ -304,7 +305,9 @@ function mergeDashboard(base: Trade, it: any): Trade {
     paymentWarning: base.paymentWarning, // 에러 문자열을 경고 플래그로 둔갑시키지 않음
     contractUrl: it.contractUrl || base.contractUrl,
     contractRegenPending: !!it.contractRegenPending,
-    noteCheckin: it.returnMemo || base.noteCheckin,
+    // note_checkin은 앱이 정본(remote.ts tradeStructureRow) — 시트 returnMemo는
+    // 앱 노트가 비어 있을 때만 시드한다. 반대로 두면 GAS 재조회가 방금 쓴 노트를 되돌린다.
+    noteCheckin: base.noteCheckin || it.returnMemo,
     riskWarnings: mergeDashboardCardCautions(base, it),
     returnCounts,
     equipments,
@@ -355,7 +358,7 @@ export async function syncDashboardToSupabase(opts?: { fromDays?: number; toDays
       log(`  ${batch[idx]}: 누적 ${n}건`);
     });
   }
-  for (const t of pending.values()) await persistTrade(t);
+  for (const t of pending.values()) await persistTrade(t, { updateExistingStructure: true });
   log(`대시보드 상세 ${n}건 반영 (윈도우 밖 ${skipped}건 스킵)`);
   return n;
 }

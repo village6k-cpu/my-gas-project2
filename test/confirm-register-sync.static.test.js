@@ -52,7 +52,7 @@ assert(
 );
 assert(
   /if \(REGISTER_QUEUE_PROCESSING_\) return;/.test(backend) &&
-    /try \{\s*registerByReqID\(sheet, pendingRow\);[\s\S]{0,260}catch \(e\) \{[\s\S]{0,160}등록 실패/.test(backend),
+    /try \{\s*registerByReqID\(sheet, pendingRow, \{ fromQueue: true \}\);[\s\S]{0,260}catch \(e\) \{[\s\S]{0,160}등록 실패/.test(backend),
   'processRegistrationQueue_ must prevent nested drains and isolate each reqID failure so later registrations keep moving'
 );
 assert(
@@ -60,11 +60,13 @@ assert(
   'registerByReqID must drain 등록대기 in finally so validation returns and exceptions do not strand later requests (releaseLock 뒤 락 밖 알림톡 블록을 사이에 허용)'
 );
 assert(
-  /const startedFromRegisterQueue = requestHasRecoverableRegisterStatus_\(allData, reqID\);/.test(backend) &&
+  // 복구 모드는 큐 드레인의 명시 플래그로만 — O열 추론은 onEdit pre-mark와 결합해
+  // 신규 요청의 진짜 중복을 경고 없이 완료 처리하는 회귀를 만든다
+  /const startedFromRegisterQueue = registerOptions\.fromQueue === true;/.test(backend) &&
     /function getRequestExistingTradeID_\(data, reqID\)/.test(backend) &&
     /function finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, tradeID\)/.test(backend) &&
     /if \(startedFromRegisterQueue && completedTradeID\) \{[\s\S]{0,180}finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, completedTradeID\);/.test(backend) &&
-    /if \(startedFromRegisterQueue\) \{[\s\S]{0,220}markRequestRegistered_\(sheet, allData, reqID, dupTid, "등록완료"\);/.test(backend),
+    /if \(startedFromRegisterQueue\) \{[\s\S]{0,220}finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, dupTid\);/.test(backend),
   'a retry that already created schedule/contract rows must finalize 확인요청 with the existing 거래ID instead of leaving a duplicate/already-registered warning'
 );
 assert(
@@ -89,6 +91,25 @@ assert(
     /function recoverPartiallyRegisteredRequests\(\)/.test(backend) &&
     /function recoverPendingRegistrations\(\)[\s\S]{0,900}recoverPartiallyRegisteredRequests_\(sheet\);[\s\S]{0,1200}processRegistrationQueue_\(sheet\);/.test(backend),
   'there must be callable repair functions that finalize partially registered rows and drain already-stuck 등록대기 rows'
+);
+assert(
+  /function finalizeQueuedRequestFromExistingTrade_\(sheet, allData, reqID, tradeID\) \{[\s\S]{0,500}ensureRegisteredTradeLedgerRow_\(tradeID, \{ dryRun: false \}\);[\s\S]{0,900}markRequestRegistered_\(/.test(backend),
+  'partial registration recovery must verify or create the external 거래내역 row before marking 확인요청 complete'
+);
+const registerBody = backend.slice(
+  backend.indexOf('function registerByReqID('),
+  backend.indexOf('function processRegistrationQueue_('),
+);
+const ledgerEnsureAt = registerBody.indexOf('ensureTradeLedgerRowOnSheet_(ledgerContext.sheet');
+const sharedCompleteAt = registerBody.indexOf('markRequestRegistered_(sheet, allData, reqID, 거래ID');
+assert(
+  ledgerEnsureAt >= 0 && sharedCompleteAt > ledgerEnsureAt,
+  'normal and merge registration must both ensure 거래내역 before the shared completion marker'
+);
+assert(
+  api.includes('"repairMissingTradeLedgerRow"') &&
+    /if \(funcName === "repairMissingTradeLedgerRow"\)/.test(api),
+  'the live repair action must be explicitly allowlisted and receive structured arguments'
 );
 
 // ── 앱: 등록 직후 90초 폴링을 기다리지 않고 신규 거래 즉시 반영 ──
@@ -165,9 +186,14 @@ console.log('settlement-amount & billing-company checks OK');
 
 // ── 감사 1차 수정분 회귀 가드 ──
 const supaSync2 = read('supabaseSync.js');
+const dirtyBuildStart = supaSync2.indexOf('function buildSupabaseTrades_');
+const dirtyBuildEnd = supaSync2.indexOf('/** payload 키 구성이 같은 행끼리', dirtyBuildStart);
+const dirtyBuild = supaSync2.slice(dirtyBuildStart, dirtyBuildEnd);
 assert(
-  supaSync2.includes('supaUpsertGrouped_') && /skeleton/.test(supaSync2) && supaSync2.includes("wm.status || '취소'"),
-  'flush must use grouped partial upserts, never overwrite ops fields with defaults, and propagate cancellations'
+  supaSync2.includes('supaUpsertGrouped_') && /skeleton/.test(dirtyBuild) &&
+    !/contract_status\s*:/.test(dirtyBuild) &&
+    /function supaCancelTrade_[\s\S]*contract_status:\s*'취소'/.test(supaSync2),
+  'flush must use grouped partial upserts without overwriting authoritative status fields, while cancellations use their direct patch'
 );
 assert(
   read('Code.js').includes('supaMarkTradeDirty_(거래ID); // 취소'),
@@ -206,9 +232,9 @@ assert(
 const storeTs2 = read('apps/today-dashboard/lib/data/store.ts');
 assert(
   /removeItem[\s\S]{0,900}removeEquipmentAndRegenerateContract/.test(storeTs2) &&
-    /gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*false/.test(storeTs2) &&
+    /async function commitRemoveEquipmentMutation_[\s\S]*gasMutationRetrying\("removeEquip",\s*\{[\s\S]*mutationId:\s*entry\.mutationId[\s\S]*directRegenerate:\s*false/.test(storeTs2) &&
     read('apps/today-dashboard/app/api/gas/route.ts').includes('"removeEquip"'),
-  'removing a sheet-derived item must delete 스케줄상세 via removeEquip and queue contract regeneration via the background worker'
+  'removing a sheet-derived item must durably delete 스케줄상세 via removeEquip and queue contract regeneration via the background worker'
 );
 console.log('audit-round-2 checks OK');
 
@@ -258,8 +284,12 @@ assert(
   'flush must skip payment fields on extras failure and never write the app-only payment_warning flag'
 );
 const storeTs4 = read('apps/today-dashboard/lib/data/store.ts');
+// 완료 확정은 백그라운드 엔진으로 이동 — off 해제 시 GAS가 복원한 계약상태를 적용한다
+const replayStart = storeTs4.indexOf('async function replayCompletionMutationEntry_');
+const replayEnd = storeTs4.indexOf('\nfunction replayCompletionMutationOutboxes_', replayStart);
+const replayFn = storeTs4.slice(replayStart, replayEnd);
 assert(
-  /gasMutation(?:Retrying)?\("toggleReturn"[\s\S]{0,400}contractStatus: res\.contractStatus/.test(storeTs4),
+  /gasMutation\("toggleReturn"[\s\S]*contractStatus: String\(res\?\.contractStatus \|\| \(confirmedDone \? "반납완료" : "반출"\)\)/.test(replayFn),
   'toggleReturn off must apply the contract status restored by GAS'
 );
 assert(
@@ -272,7 +302,7 @@ console.log('audit-round-5 checks OK');
 // ── 감사 6차: 드래그 날짜 텍스트 포맷·다중행 dirty ──
 const backend6 = read('checkAvailability.js');
 assert(
-  /updateScheduleTime[\s\S]{0,1200}setNumberFormat\("@"\)\.setValue\(startDateStr\)/.test(backend6),
+  /updateScheduleTime[\s\S]{0,2600}setNumberFormat\("@"\)\.setValue\(startDateStr\)/.test(backend6),
   'timeline drag must write dates as text-formatted strings like registration does'
 );
 assert(
@@ -309,7 +339,7 @@ assert(
 );
 console.log('audit-round-9 checks OK');
 
-// ── 감사 10차: 확인요청 편집이 세트 구조를 파괴하지 않도록 ──
+// ── 감사 10차: 확인요청 편집이 세트 구조·선택 구성품을 모두 보존하도록 ──
 assert(
   read('sheetAPI.js').includes('비고: String(data[i][16] || "")'),
   'list API must expose the Q-column set-component marker'
@@ -317,8 +347,9 @@ assert(
 const confirmView10 = read('apps/today-dashboard/components/ConfirmView.tsx');
 assert(
   confirmView10.includes('markedComponent') &&
-    /buildConfirmEquipmentRows\(req\.장비목록 \|\| \[\]\)[\s\S]{0,200}role !== "set-component"/.test(confirmView10),
-  'edit modal must keep sets as set-name rows and drop components (GAS re-expands), with marker-based roles'
+    /buildConfirmEquipmentRows\(req\.장비목록 \|\| \[\]\)[\s\S]{0,260}\.map\(\(r\) => \(\{[\s\S]{0,220}비고: String\(r\.비고/.test(confirmView10) &&
+    !/buildConfirmEquipmentRows\(req\.장비목록 \|\| \[\]\)[\s\S]{0,200}role !== "set-component"/.test(confirmView10),
+  'edit modal must keep both set headers and the exact selected components, with marker-based roles'
 );
 console.log('audit-round-10 checks OK');
 
@@ -533,21 +564,44 @@ console.log('alimtalk-reliability checks OK');
 // ── 계약서 재생성 디바운스: 좀비 트리거 고착 방지 (실제 15일 대기열 고아화 발생) ──
 {
   const code = read('Code.js');
-  const sched = code.slice(code.indexOf('function scheduleContractRegen'), code.indexOf('function regenPendingContracts'));
+  const sched = code.slice(code.indexOf('function scheduleContractRegen'), code.indexOf('function regenPendingContracts()'));
   assert(
     !/var exists = ScriptApp\.getProjectTriggers\(\)\.some/.test(sched) &&
       /deleteTrigger\(t\)/.test(sched) && /newTrigger\('regenPendingContracts'\)/.test(sched),
     'scheduleContractRegen must delete possibly-consumed one-shot triggers and always create a fresh one when stale (fired one-shots stay listed → "exists" check orphans the queue)'
   );
-  const regen = code.slice(code.indexOf('function regenPendingContracts'), code.indexOf('function regenPendingContracts') + 1600);
+  const regen = code.slice(code.indexOf('function regenPendingContracts()'), code.indexOf('var TEMPLATE_SYNC_EDIT_TS_PROP_'));
   assert(
-    /waitLock\(10000\);[\s\S]{0,120}catch \(lockErr\) \{[\s\S]{0,120}stillPending = true;[\s\S]{0,80}break;/.test(code) &&
-      /if \(stillPending\) \{[\s\S]{0,120}newTrigger\('regenPendingContracts'\)/.test(code),
+    /function claimPendingContractRegen_[\s\S]*waitLock\(10000\)[\s\S]*busy: true/.test(code) &&
+      /if \(claim\.busy\) \{[\s\S]{0,220}stillPending = true;[\s\S]{0,220}break;/.test(regen) &&
+      /if \(stillPending\) \{[\s\S]*newTrigger\('regenPendingContracts'\)/.test(regen),
     'lock-timeout path must reschedule a retry trigger — silent return orphans the queue (observed: 10s lock wait → bail)'
   );
   assert(
-    /BUDGET_MS/.test(regen) && /stillPending = true; break;/.test(regen),
+    /BUDGET_MS/.test(regen) &&
+      /Date\.now\(\) - startedAt > BUDGET_MS[\s\S]{0,220}stillPending = true;[\s\S]{0,220}break;/.test(regen),
     'regen loop must stop before the 6-min execution cap and reschedule (20-item backlog hit the cap)'
+  );
+  const claim = code.slice(
+    code.indexOf('function claimPendingContractRegen_'),
+    code.indexOf('function finishPendingContractRegen_')
+  );
+  assert(
+    claim.indexOf('armContractRegenWatchdogUnderLock_') < claim.indexOf('props.setProperty(claimKey') &&
+      /CONTRACT_REGEN_WATCHDOG_HANDLER_\s*=\s*'regenPendingContractsWatchdog'/.test(code) &&
+      /function regenPendingContractsWatchdog\(\)/.test(code) &&
+      regen.indexOf('armContractRegenRunWatchdog_') < regen.indexOf('ScriptApp.getProjectTriggers()'),
+    'regen claim must arm a public watchdog before recording ownership so GAS hard-timeout cannot orphan the queue'
+  );
+  const finish = code.slice(
+    code.indexOf('function finishPendingContractRegen_'),
+    code.indexOf('function regenPendingContractsWatchdog')
+  );
+  assert(
+    /if \(outcome && outcome\.success\)[\s\S]*deleteProperty\(claim\.editKey\)/.test(finish) &&
+      /CONTRACT_REGEN_MAX_ATTEMPTS_/.test(finish) &&
+      /Math\.pow\(2, retry\.attempts - 1\)/.test(finish),
+    'regen failures must preserve editTS and use bounded exponential retry; only success may clear the edit queue'
   );
 }
 console.log('contract-regen-stuck-queue checks OK');
@@ -687,8 +741,10 @@ console.log('guide-alimtalk-schedule-diagnostics checks OK');
   assert(
     /function updateRequestItem\(req\)/.test(ca) &&
       /getRange\(target, 9, 1, 2\)\.clearContent\(\)/.test(ca) &&
-      /processByReqID\(sheet, target\)/.test(ca),
-    'updateRequestItem must clear only the edited row result then reuse processByReqID (preserves other rows)'
+      /needsRecheck = true/.test(ca) &&
+      /if \(mutationLocked\) mutationLock\.releaseLock\(\)/.test(ca) &&
+      /if \(needsRecheck\) processByReqID\(sheet, req\.reqID\)/.test(ca),
+    'updateRequestItem must clear only the edited row result, release its mutation lock, then recheck by reqID'
   );
   // 행 단위 제외는 "보류"가 아닌 "제외" — registerByReqID 재등록 리셋이 보류를 지워서
   // 제외 품목이 그대로 등록되던 P1 (기존 선택등록 경로도 동일 버그였음)
@@ -744,8 +800,11 @@ console.log('request-item-edit checks OK');
     'doListPending must restore as-typed date/time using the SPREADSHEET timezone, never Asia/Seoul datetime'
   );
   assert(
-    (ca.match(/getRange\(row, 2, 1, 4\)\.setNumberFormat\("@"\)/g) || []).length >= 2,
-    'request rows must force B~E to text on write (insert + updateRequest re-entry) so sheets never auto-convert'
+    /getRange\(row, 2, 1, 4\)\.setNumberFormat\("@"\)/.test(ca) &&
+      /getRange\(targetRows\[0\], 2, items\.length, 4\)\.setNumberFormat\("@"\)/.test(ca) &&
+      /getRange\(startRow, 2, items\.length, 4\)\.setNumberFormat\("@"\)/.test(ca) &&
+      /getRange\(firstRow, 2, 1, 4\)\.setNumberFormat\("@"\)/.test(ca),
+    'request rows must force B~E to text on insert, in-place edit, row-count replacement, and metadata-only date edit'
   );
   assert(
     /function normalizeConfirmRequestDates\(\)/.test(ca) && api.includes('"normalizeConfirmRequestDates"'),

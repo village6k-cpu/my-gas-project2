@@ -141,7 +141,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
 
   const [customerName, setCustomerName] = useState("");
   const [phone, setPhone] = useState("");
-  const [discount, setDiscount] = useState<(typeof DISCOUNTS)[number]>("일반");
+  const [discount, setDiscount] = useState<(typeof DISCOUNTS)[number] | "">("");
   const [outDate, setOutDate] = useState(todayValue());
   const [outTime, setOutTime] = useState("10:00");
   const [returnDate, setReturnDate] = useState(todayValue());
@@ -195,7 +195,7 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
   const applyParsedPayload = (payload: ParsedPayload) => {
     setCustomerName(payload.예약자명 || "");
     setPhone(payload.연락처 || "");
-    setDiscount(DISCOUNTS.includes(payload.할인유형 as (typeof DISCOUNTS)[number]) ? (payload.할인유형 as (typeof DISCOUNTS)[number]) : "일반");
+    setDiscount(DISCOUNTS.includes(payload.할인유형 as (typeof DISCOUNTS)[number]) ? (payload.할인유형 as (typeof DISCOUNTS)[number]) : "");
     setOutDate(payload.반출일 || "");
     setOutTime(payload.반출시간 || "10:00");
     setReturnDate(payload.반납일 || payload.반출일 || "");
@@ -457,7 +457,8 @@ export function KakaoReservationInput({ onRequestCreated }: { onRequestCreated: 
                 <EntryField label="예약자명"><input value={customerName} onChange={(event) => setCustomerName(event.target.value)} className="entry-input" /></EntryField>
                 <EntryField label="연락처"><input value={phone} onChange={(event) => setPhone(event.target.value)} className="entry-input" placeholder="010-0000-0000" /></EntryField>
                 <EntryField label="할인유형">
-                  <select value={discount} onChange={(event) => setDiscount(event.target.value as (typeof DISCOUNTS)[number])} className="entry-input">
+                  <select value={discount} onChange={(event) => setDiscount(event.target.value as (typeof DISCOUNTS)[number] | "")} className="entry-input">
+                    <option value="">고객DB 자동</option>
                     {DISCOUNTS.map((item) => <option key={item} value={item}>{item}</option>)}
                   </select>
                 </EntryField>

@@ -55,7 +55,7 @@ assert.match(
 [
   /function updateTradePaymentMethod\(tid,\s*method\)[\s\S]*invalidateDashboardTradeExtraCache_\(\[tid\]\)[\s\S]*invalidateDashboardCache\(\)/,
   /function updateTradeBillingCompany\(tid,\s*billingCompany\)[\s\S]*invalidateDashboardTradeExtraCache_\(\[tid\]\)[\s\S]*invalidateDashboardCache\(\)/,
-  /function updateTradeProofField\(tid,\s*field,\s*value\)[\s\S]*invalidateDashboardTradeExtraCache_\(\[tid\]\)[\s\S]*invalidateDashboardCache\(\)/,
+  /function updateTradeProofField\(tid,\s*field,\s*value,\s*options\)[\s\S]*invalidateDashboardTradeExtraCache_\(\[tid\]\)[\s\S]*invalidateDashboardCache\(\)/,
   /function callVillageOpsApi_\(action,\s*tid\)[\s\S]*invalidateDashboardTradeExtraCache_\(\[tid\]\)[\s\S]*invalidateDashboardCache\(\)/
 ].forEach((pattern) => {
   assert.match(

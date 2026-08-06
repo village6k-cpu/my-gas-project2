@@ -1,13 +1,17 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { Phase, PhotoMeta } from "@/lib/domain/types";
 import {
+  deleteTradePhoto,
   discardTradePhotoUpload,
+  ensureTradePhotos,
   getPhotoPreview,
   refreshTradePhotos,
   retryTradePhotoUpload,
   uploadTradePhoto,
+  useTradePhotoLoadState,
 } from "@/lib/data/store";
 import { Camera } from "./icons";
 
@@ -21,8 +25,45 @@ function photoSrc(photo: PhotoMeta): string | undefined {
   return photo.thumbnailUrl || photo.url || getPhotoPreview(photo.queueId);
 }
 
-function PhotoTile({ tradeId, photo }: { tradeId: string; photo: PhotoMeta }) {
+function PhotoTile({ tradeId, photo, onError }: { tradeId: string; photo: PhotoMeta; onError: (message: string) => void }) {
   const src = photoSrc(photo);
+  const [deleting, setDeleting] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+
+  const deleteSavedPhoto = async () => {
+    if (!window.confirm(`${phaseTitle(photo.phase)} 사진을 삭제할까요?\n삭제한 사진은 목록에서 제거됩니다.`)) return;
+    setDeleting(true);
+    onError("");
+    try {
+      await deleteTradePhoto(tradeId, photo);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "사진 삭제에 실패했습니다");
+      setDeleting(false);
+    }
+  };
+
+  const retryFailedPhoto = async () => {
+    setRecovering(true);
+    onError("");
+    try {
+      await retryTradePhotoUpload(tradeId, photo.queueId || "");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "사진 재시도에 실패했습니다");
+    } finally {
+      setRecovering(false);
+    }
+  };
+
+  const discardFailedPhoto = async () => {
+    setRecovering(true);
+    onError("");
+    try {
+      await discardTradePhotoUpload(tradeId, photo.queueId || "");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "사진 임시 보관본을 삭제하지 못했습니다");
+      setRecovering(false);
+    }
+  };
 
   // 업로드 대기/실패 타일 — 서버 URL이 아직 없으므로 로컬 미리보기 위에 상태를 덧씌운다
   if (photo.status) {
@@ -43,14 +84,16 @@ function PhotoTile({ tradeId, photo }: { tradeId: string; photo: PhotoMeta }) {
             <div className="flex gap-1">
               <button
                 type="button"
-                onClick={() => retryTradePhotoUpload(tradeId, photo.queueId || "")}
+                onClick={retryFailedPhoto}
+                disabled={recovering}
                 className="tap rounded-md bg-white px-2 py-1 text-[10px] font-bold text-ink"
               >
-                재시도
+                {recovering ? "처리 중…" : "재시도"}
               </button>
               <button
                 type="button"
-                onClick={() => discardTradePhotoUpload(tradeId, photo.queueId || "")}
+                onClick={discardFailedPhoto}
+                disabled={recovering}
                 className="tap rounded-md bg-white/25 px-2 py-1 text-[10px] font-bold text-white"
               >
                 삭제
@@ -64,9 +107,20 @@ function PhotoTile({ tradeId, photo }: { tradeId: string; photo: PhotoMeta }) {
 
   if (src) {
     return (
-      <a href={photo.url || src} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-xl bg-paper ring-1 ring-line">
-        <img src={src} alt={photo.label} className="aspect-square w-full object-cover" loading="lazy" />
-      </a>
+      <div className="relative overflow-hidden rounded-xl bg-paper ring-1 ring-line">
+        <a href={photo.url || src} target="_blank" rel="noreferrer" className="block">
+          <img src={src} alt={photo.label} className="aspect-square w-full object-cover" loading="lazy" />
+        </a>
+        <button
+          type="button"
+          onClick={deleteSavedPhoto}
+          disabled={deleting}
+          className="tap absolute right-1.5 top-1.5 rounded-md bg-black/65 px-2 py-1 text-[10px] font-bold text-white shadow-sm disabled:opacity-60"
+          aria-label={`${phaseTitle(photo.phase)} 사진 삭제`}
+        >
+          {deleting ? "삭제 중…" : "삭제"}
+        </button>
+      </div>
     );
   }
   return (
@@ -79,33 +133,46 @@ function PhotoTile({ tradeId, photo }: { tradeId: string; photo: PhotoMeta }) {
   );
 }
 
-export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: PhotoMeta[] }) {
+export function PhotoStrip({
+  tradeId,
+  photos,
+  showThumbnails = true,
+}: {
+  tradeId: string;
+  photos: PhotoMeta[];
+  showThumbnails?: boolean;
+}) {
   const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [retryingLoad, setRetryingLoad] = useState(false);
   const [preparing, setPreparing] = useState<Phase | null>(null);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const nextPhaseRef = useRef<Phase>("checkout");
+  const photoLoad = useTradePhotoLoadState(tradeId);
+  const photosLoaded = photoLoad.loaded;
 
   const checkout = photos.filter((p) => p.phase === "checkout");
   const checkin = photos.filter((p) => p.phase === "checkin");
 
   useEffect(() => {
     if (!open) return;
-    let alive = true;
-    setLoading(true);
     setError("");
-    refreshTradePhotos(tradeId)
-      .catch((err) => {
-        if (alive) setError(err instanceof Error ? err.message : "사진을 불러오지 못했습니다");
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
+    // ScheduleCard가 이미 batch preload한 사진은 즉시 쓴다. 30초 freshness가 지난
+    // 경우에만 store가 백그라운드 재검증하고, 기존 사진을 가리는 spinner는 띄우지 않는다.
+    ensureTradePhotos([tradeId]);
   }, [open, tradeId]);
+
+  const retryPhotoLoad = async () => {
+    setRetryingLoad(true);
+    setError("");
+    try {
+      await refreshTradePhotos(tradeId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "사진을 불러오지 못했습니다");
+    } finally {
+      setRetryingLoad(false);
+    }
+  };
 
   const pickPhoto = (phase: Phase) => {
     nextPhaseRef.current = phase;
@@ -132,42 +199,10 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
     }
   };
 
-  return (
-    <>
-      <div className="mt-3 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          className="tap inline-flex items-center gap-1.5 rounded-lg bg-paper px-2.5 py-1.5 text-[12.5px] font-semibold text-ink-soft ring-1 ring-line/70"
-        >
-          <Camera className="h-4 w-4" />
-          사진
-          <span className="text-ink-faint">
-            반출 {checkout.length} · 반납 {checkin.length}
-          </span>
-        </button>
-        <div className="flex -space-x-2">
-          {photos.slice(0, 4).map((p) => {
-            const src = photoSrc(p);
-            return src ? (
-              <img key={p.id} src={src} alt={p.label} className="h-7 w-7 rounded-md object-cover ring-2 ring-white" loading="lazy" />
-            ) : (
-              <span
-                key={p.id}
-                className="h-7 w-7 rounded-md ring-2 ring-white"
-                style={{ background: p.swatch }}
-                aria-label={p.label}
-              />
-            );
-          })}
-        </div>
-      </div>
-
-      {/* capture 속성 제거 — 카메라 강제 대신 OS 선택창(카메라/사진 보관함/파일)이 뜨게 해서
-          기존에 찍어둔 사진도 올릴 수 있다. */}
-      <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" onChange={onFileChange} />
-
-      {open && (
+  // 카드에는 완료 상태 opacity와 진입 애니메이션이 있어 별도 화면층이 생긴다.
+  // 모달을 카드 안에 두면 타임라인 막대가 위로 뚫고 올라오므로 body에 직접 렌더링한다.
+  const photoModal = open && typeof document !== "undefined"
+    ? createPortal(
         <div
           className="fixed inset-0 z-[120] flex items-end justify-center bg-black/45 px-2 pb-[env(safe-area-inset-bottom)] sm:items-center sm:p-4"
           onClick={() => setOpen(false)}
@@ -183,8 +218,22 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
               <button onClick={() => setOpen(false)} className="tap rounded-lg px-2 py-1 text-ink-mute">닫기</button>
             </div>
 
-            {error && <div className="mb-3 rounded-xl bg-attention-bg px-3 py-2 text-[12px] font-semibold text-attention-fg">{error}</div>}
-            {loading && <div className="mb-3 text-[12px] font-semibold text-ink-faint">사진 불러오는 중…</div>}
+            {(error || photoLoad.error) && (
+              <div className="mb-3 flex items-center justify-between gap-3 rounded-xl bg-attention-bg px-3 py-2 text-[12px] font-semibold text-attention-fg">
+                <span>{error || photoLoad.error}</span>
+                <button
+                  type="button"
+                  onClick={retryPhotoLoad}
+                  disabled={retryingLoad || photoLoad.loading}
+                  className="tap shrink-0 rounded-lg bg-white/80 px-2 py-1 font-bold disabled:opacity-50"
+                >
+                  {retryingLoad ? "재시도 중…" : "다시 불러오기"}
+                </button>
+              </div>
+            )}
+            {photoLoad.loading && !photosLoaded && (
+              <div className="mb-3 text-[12px] font-semibold text-ink-faint">사진 불러오는 중…</div>
+            )}
 
             {PHASES.map((phase) => {
               const ps = photos.filter((p) => p.phase === phase);
@@ -205,7 +254,7 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
                   {ps.length ? (
                     <div className="grid grid-cols-3 gap-2">
                       {ps.map((p) => (
-                        <PhotoTile key={p.id} tradeId={tradeId} photo={p} />
+                        <PhotoTile key={p.id} tradeId={tradeId} photo={p} onError={setError} />
                       ))}
                     </div>
                   ) : (
@@ -217,8 +266,53 @@ export function PhotoStrip({ tradeId, photos }: { tradeId: string; photos: Photo
               );
             })}
           </div>
-        </div>
-      )}
+        </div>,
+        document.body,
+      )
+    : null;
+
+  return (
+    <>
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="tap inline-flex items-center gap-1.5 rounded-lg bg-paper px-2.5 py-1.5 text-[12.5px] font-semibold text-ink-soft ring-1 ring-line/70"
+        >
+          <Camera className="h-4 w-4" />
+          사진
+          <span className="text-ink-faint">
+            {photosLoaded
+              ? `반출 ${checkout.length} · 반납 ${checkin.length}`
+              : photoLoad.error
+                ? "불러오기 실패"
+                : "불러오는 중…"}
+          </span>
+        </button>
+        {showThumbnails && (
+          <div className="flex -space-x-2">
+            {photos.slice(0, 4).map((p) => {
+              const src = photoSrc(p);
+              return src ? (
+                <img key={p.id} src={src} alt={p.label} className="h-7 w-7 rounded-md object-cover ring-2 ring-white" loading="lazy" />
+              ) : (
+                <span
+                  key={p.id}
+                  className="h-7 w-7 rounded-md ring-2 ring-white"
+                  style={{ background: p.swatch }}
+                  aria-label={p.label}
+                />
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* capture 속성 제거 — 카메라 강제 대신 OS 선택창(카메라/사진 보관함/파일)이 뜨게 해서
+          기존에 찍어둔 사진도 올릴 수 있다. */}
+      <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" onChange={onFileChange} />
+
+      {photoModal}
     </>
   );
 }

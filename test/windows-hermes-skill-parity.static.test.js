@@ -9,6 +9,16 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const syncScript = path.join(root, 'scripts', 'windows', 'sync-hermes-profile-overlay.ps1');
 
+// 워커 프로필 모델 픽스처/기대값은 hermes-model-contract.json 단일 소스에서 만든다.
+const modelContract = JSON.parse(fs.readFileSync(
+  path.join(root, 'scripts', 'windows', 'hermes-model-contract.json'),
+  'utf8'
+));
+const workerContract = modelContract.kakaoworker;
+const workerConfigYaml = `model:\n  default: ${workerContract.model}\n`
+  + `agent:\n  reasoning_effort: ${workerContract.reasoning_effort}\n  max_turns: ${workerContract.max_turns}\n`;
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 function writeSkill(hermesHome, relativeDirectory, name, {
   platforms,
   body = `# ${name}\n\nPreserved Mac capability.\n`,
@@ -289,7 +299,7 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
     );
     fs.writeFileSync(
       path.join(workerProfile, 'config.yaml'),
-      'model:\n  default: gpt-5.6-sol\nagent:\n  reasoning_effort: high\n  max_turns: 90\n',
+      workerConfigYaml,
       'utf8'
     );
 
@@ -332,9 +342,9 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
     assert.match(identity, /Full Hermes AI reasoning/i);
     assert.doesNotMatch(identity, /not deep interactive reasoning/i);
     const config = fs.readFileSync(path.join(workerProfile, 'config.yaml'), 'utf8');
-    assert.match(config, /^\s{2}default:\s*gpt-5\.6-sol\s*$/m);
-    assert.match(config, /^\s{2}reasoning_effort:\s*high\s*$/m);
-    assert.match(config, /^\s{2}max_turns:\s*90\s*$/m);
+    assert.match(config, new RegExp(`^\\s{2}default:\\s*${escapeRegExp(workerContract.model)}\\s*$`, 'm'));
+    assert.match(config, new RegExp(`^\\s{2}reasoning_effort:\\s*${escapeRegExp(workerContract.reasoning_effort)}\\s*$`, 'm'));
+    assert.match(config, new RegExp(`^\\s{2}max_turns:\\s*${escapeRegExp(workerContract.max_turns)}\\s*$`, 'm'));
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -369,7 +379,7 @@ test('profile-scoped sync preserves Hermes self-improvement across repeated star
     );
     fs.writeFileSync(
       path.join(workerProfile, 'config.yaml'),
-      'model:\n  default: gpt-5.6-sol\nagent:\n  reasoning_effort: high\n  max_turns: 90\n',
+      workerConfigYaml,
       'utf8'
     );
 

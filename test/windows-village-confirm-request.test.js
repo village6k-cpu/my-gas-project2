@@ -7,7 +7,8 @@ const {
   createConfirmationRequest,
   createConfirmationRequests,
   updateConfirmationRequest,
-  getCliHelpText,
+  normalizeConfirmationRequest,
+  reconcileConfirmationRequest,
   parseCliArgs,
   parseJsonInput,
   resolveEquipment
@@ -48,22 +49,6 @@ test('the CLI exposes an explicit batch command for AI-planned schedule splits',
 test('the CLI exposes help and a bounded update command for an existing partial request', () => {
   assert.equal(parseCliArgs(['--help']).command, 'help');
   assert.equal(parseCliArgs(['update']).command, 'update');
-});
-
-test('CLI help documents the exact JSON envelope for every command', () => {
-  assert.equal(typeof getCliHelpText, 'function');
-  const help = getCliHelpText();
-  assert.match(help, /resolve\s+\{\"queries\":\[\"equipment term\"\]\}/);
-  assert.match(help, /create\s+\{\"request\":\{\.\.\.\}\}|create\s+\{\.\.\.request fields\.\.\.\}/);
-  assert.match(help, /create-batch\s+\{\"requests\":\[\{\.\.\.\}\]\}/);
-  assert.match(help, /update\s+\{\"reqID\":\"RQ-YYMMDD-NNN\",\"request\":\{\.\.\.\}\}/);
-});
-
-test('resolve validation reports the exact envelope instead of forcing schema guesses', async () => {
-  await assert.rejects(
-    () => resolveEquipment({ config, queries: undefined }),
-    /resolve input must be \{\"queries\":\[\"equipment term\"\]\}/
-  );
 });
 
 test('update replaces one existing partial request and verifies the complete readback', async () => {
@@ -373,6 +358,166 @@ test('missing readback is an error and is never followed by a second insert', as
     /readback verification failed/i
   );
   assert.equal(insertCalls, 1);
+});
+
+test('English alias fields (customerName, pickupDate, items, ...) are mapped to the canonical Korean schema', () => {
+  const normalized = normalizeConfirmationRequest({
+    pickupDate: '2026-07-23',
+    pickupTime: '5:00',
+    returnDate: '2026.07.23',
+    returnTime: '14:00:00',
+    customerName: '테스트 고객',
+    phone: '010-1234-5678',
+    items: [
+      { name: '어퓨처 600C', quantity: '2' },
+      { 이름: '고독스 라이트돔 90', qty: 1 }
+    ]
+  });
+
+  assert.deepEqual(normalized, {
+    반출일: '2026-07-23',
+    반출시간: '05:00',
+    반납일: '2026-07-23',
+    반납시간: '14:00',
+    예약자명: '테스트 고객',
+    연락처: '010-1234-5678',
+    장비: [
+      { 이름: '어퓨처 600C', 수량: 2 },
+      { 이름: '고독스 라이트돔 90', 수량: 1 }
+    ]
+  });
+});
+
+test('conflicting alias and canonical values fail loudly instead of silently picking one', () => {
+  assert.throws(
+    () => normalizeConfirmationRequest(requestFixture({ customerName: '다른 사람' })),
+    /conflicting values for 예약자명/i
+  );
+});
+
+test('an unknown field error teaches the full allowed schema in one round trip', () => {
+  assert.throws(
+    () => normalizeConfirmationRequest(requestFixture({ customerSend: true })),
+    (error) => {
+      assert.match(error.message, /unsupported or forbidden field/i);
+      assert.match(error.message, /반출일, 반출시간, 반납일, 반납시간, 예약자명, 연락처, 할인유형, 업체명, 장비, 비고, 추가요청/);
+      return true;
+    }
+  );
+});
+
+test('ambiguous dates and times are still rejected', () => {
+  assert.throws(() => normalizeConfirmationRequest(requestFixture({ 반출일: '26-07-23' })), /반출일 must use YYYY-MM-DD/);
+  assert.throws(() => normalizeConfirmationRequest(requestFixture({ 반출시간: '25:00' })), /반출시간 must use HH:MM/);
+});
+
+test('a failure after a successful insert is marked as an uncertain write with the created reqID', async () => {
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.searchParams.get('sheet') === '목록') {
+      const query = parsed.searchParams.get('query');
+      return response({ count: 1, results: [{ row: 2, data: [query] }] });
+    }
+    if (parsed.searchParams.get('action') === 'run') {
+      return response({ success: true, reqID: 'RQ-260722-999', results: [] });
+    }
+    return response({}, { ok: false, status: 500 });
+  };
+
+  await assert.rejects(
+    () => createConfirmationRequest({ config, request: requestFixture(), fetchImpl }),
+    (error) => {
+      assert.equal(error.uncertainWrite, true);
+      assert.equal(error.reqID, 'RQ-260722-999');
+      assert.equal(error.stage, 'insert_readback');
+      return true;
+    }
+  );
+});
+
+test('a pre-insert failure is not marked as an uncertain write', async () => {
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.searchParams.get('sheet') === '목록') {
+      return response({ count: 0, results: [] });
+    }
+    throw new Error('mutation must not run');
+  };
+
+  await assert.rejects(
+    () => createConfirmationRequest({ config, request: requestFixture(), fetchImpl }),
+    (error) => {
+      assert.notEqual(error.uncertainWrite, true);
+      return true;
+    }
+  );
+});
+
+test('reconcile by reqID reads the sheet without writing and reports found rows', async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    calls.push({ action: parsed.searchParams.get('action'), col: parsed.searchParams.get('col') });
+    assert.equal(parsed.searchParams.get('action'), 'search');
+    assert.equal(parsed.searchParams.get('sheet'), '확인요청');
+    return response({
+      count: 1,
+      results: [{
+        row: 10,
+        data: ['RQ-260722-999', '2026-07-23', '05:00', '2026-07-23', '14:00', '어퓨처 600C', 2, '', '가용', '', '테스트 고객']
+      }]
+    });
+  };
+
+  const result = await reconcileConfirmationRequest({ config, query: { reqID: 'RQ-260722-999' }, fetchImpl });
+  assert.equal(result.found, true);
+  assert.equal(result.readOnly, true);
+  assert.equal(result.rows.length, 1);
+  assert.equal(calls.every((call) => call.action === 'search'), true, 'reconcile must never mutate');
+});
+
+test('reconcile by reqID reports found:false instead of throwing when nothing landed', async () => {
+  const fetchImpl = async () => response({ count: 0, results: [] });
+  const result = await reconcileConfirmationRequest({ config, query: { reqID: 'RQ-260722-999' }, fetchImpl });
+  assert.equal(result.found, false);
+  assert.deepEqual(result.rows, []);
+});
+
+test('reconcile by requester and pickup date groups matching confirmation requests', async () => {
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    assert.equal(parsed.searchParams.get('action'), 'search');
+    if (parsed.searchParams.get('col') === 'K') {
+      return response({
+        count: 2,
+        results: [
+          { row: 10, data: ['RQ-260722-998', '2026-07-22', '05:00', '', '', '어퓨처 600C', 1, '', '', '', '테스트 고객'] },
+          { row: 12, data: ['RQ-260722-999', '2026-07-23', '05:00', '', '', '어퓨처 600C', 2, '', '', '', '테스트 고객'] }
+        ]
+      });
+    }
+    const reqID = parsed.searchParams.get('query');
+    return response({
+      count: 1,
+      results: [{
+        row: 12,
+        data: [reqID, '2026-07-23', '05:00', '2026-07-23', '14:00', '어퓨처 600C', 2, '', '가용', '', '테스트 고객']
+      }]
+    });
+  };
+
+  const result = await reconcileConfirmationRequest({
+    config,
+    query: { customerName: '테스트 고객', pickupDate: '2026-07-23' },
+    fetchImpl
+  });
+  assert.equal(result.found, true);
+  assert.deepEqual(result.groups.map((group) => group.reqID), ['RQ-260722-999']);
+  assert.equal(result.groups[0].requester, '테스트 고객');
+});
+
+test('the CLI exposes the read-only reconcile command', () => {
+  assert.equal(parseCliArgs(['reconcile']).command, 'reconcile');
 });
 
 test('a nonempty but mismatched readback fails closed without retrying the insert', async () => {

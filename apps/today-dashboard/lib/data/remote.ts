@@ -3,6 +3,7 @@ import { supabase } from "../supabase/client";
 import type { HandoverNote, ReturnCount, Trade } from "../domain/types";
 import { canonicalOnsiteScheduleId, dedupeOnsiteItems, isSheetBackedScheduleId, itemFromRow, itemToRow, noteToRow, tradeFromRow, tradeToRow } from "./mappers";
 import { normalizeItems } from "../domain/catalog";
+import { isCheckoutBaselineLocked } from "../domain/status";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -20,6 +21,8 @@ type SupabaseOrder = {
 
 type PersistTradeOptions = {
   pruneMissingSheetBacked?: boolean;
+  /** 수동 시트 동기화처럼 입력이 최신 원장임이 보장될 때만 기존 구조 열을 갱신한다. */
+  updateExistingStructure?: boolean;
 };
 
 function activeWindowCutoffISO(): string {
@@ -58,13 +61,6 @@ function uniqueScheduleRows(trade: Trade): any[] {
   // 시트뿐 아니라 Supabase에도 쓰면 유령 행이 생기고 체크/제외가 엉뚱하게 기록됨 → 영속화 제외.
   return trade.equipments.filter((e) => !e.synthetic).map((e, i) => {
     const row = itemToRow(e, trade.tradeId, i);
-    // taken_qty는 반출 순간의 불변 기준선이다. GAS의 toggleSetupDone만 기록하며,
-    // 브라우저의 오래된 스냅샷(null/옛 수량)이 직후 upsert로 기준선을 지우거나 줄이면 안 된다.
-    delete row.taken_qty;
-    // 실제값 overlay도 Slack 서버 동기화만 쓴다. 열어둔 오래된 브라우저가 null로 지우지 못하게 한다.
-    delete row.actual_name;
-    delete row.actual_taken_qty;
-    delete row.actual_source;
     const baseId = row.schedule_id;
     const seen = seenScheduleIds.get(baseId) ?? 0;
     seenScheduleIds.set(baseId, seen + 1);
@@ -88,12 +84,21 @@ async function attachScheduleItems(sb: any, tradeRows: any[]): Promise<Trade[]> 
         "schedule_items",
         "*",
         [{ column: "trade_id" }, { column: "sort" }, { column: "schedule_id" }],
-        (q) => q.in("trade_id", chunk).is("removed_at", null)
+        (q) => q.in("trade_id", chunk)
       )
     )
   );
   const byTrade = new Map<string, any[]>();
-  for (const it of itemPages.flat()) (byTrade.get(it.trade_id) ?? byTrade.set(it.trade_id, []).get(it.trade_id)!).push(it);
+  for (const raw of itemPages.flat()) {
+    // removed_at은 예약 목록 제외 표식이지만 taken_qty>0은 실제 반출 기준선이다.
+    // 과거 버전에서 반출 뒤 제외된 행도 taken 상태로 되살려 반납 체크리스트에서
+    // 사라지지 않게 한다.
+    if (raw.removed_at && !(Number(raw.taken_qty) > 0)) continue;
+    const it = raw.removed_at && Number(raw.taken_qty) > 0
+      ? { ...raw, checkout_state: "taken" }
+      : raw;
+    (byTrade.get(it.trade_id) ?? byTrade.set(it.trade_id, []).get(it.trade_id)!).push(it);
+  }
   return tradeRows.map((r: any) => tradeFromRow(r, dedupeOnsiteItems(normalizeItems((byTrade.get(r.trade_id) ?? []).map(itemFromRow)))));
 }
 
@@ -187,7 +192,50 @@ async function pruneMissingSheetBackedItems(sb: any, tradeId: string, rows: any[
     .in("schedule_id", staleIds);
 }
 
-/** 거래 1건 + 현재 가진 품목들을 저장. 기본 저장은 부분 스냅샷 보호를 위해 누락 품목을 삭제하지 않는다. */
+function tradeStructureRow(trade: Trade): any {
+  const row = tradeToRow(trade);
+  // 아래 열은 카드별 전용 writer 또는 앱 사용자가 소유한다. 시트 복구 snapshot이 덮지 않는다.
+  delete row.contract_status;
+  delete row.setup_done;
+  delete row.setup_done_at;
+  delete row.return_done;
+  delete row.return_done_at;
+  delete row.return_counts;
+  delete row.payment_method;
+  delete row.payment_warning;
+  delete row.deposit_status;
+  delete row.proof_type;
+  delete row.issue_status;
+  delete row.billing_company;
+  delete row.estimate_sent;
+  delete row.note_checkout;
+  delete row.note_checkin;
+  delete row.photos;
+  delete row.contract_regen_pending;
+  return row;
+}
+
+function scheduleStructureRow(row: any): any {
+  const structural = { ...row };
+  // 반출/반납 상태와 앱 메타데이터는 항목별 PATCH writer가 소유한다.
+  delete structural.taken_qty;
+  delete structural.actual_name;
+  delete structural.actual_taken_qty;
+  delete structural.actual_source;
+  delete structural.checkout_state;
+  delete structural.settlement;
+  delete structural.start_shift_days;
+  delete structural.end_shift_days;
+  delete structural.memo_checkout;
+  delete structural.memo_checkin;
+  return structural;
+}
+
+/**
+ * 시트/복구 snapshot을 저장한다.
+ * - 누락 행은 전체 값으로 insert하되 기존 행은 ignore하여 오래된 snapshot의 역행을 막는다.
+ * - 기존 구조 갱신은 명시적인 수동 동기화만 허용하며, 상태/메모 열은 항상 제외한다.
+ */
 export async function persistTrade(trade: Trade, options: PersistTradeOptions = {}): Promise<void> {
   const sb = supabase;
   if (!sb) return;
@@ -195,35 +243,156 @@ export async function persistTrade(trade: Trade, options: PersistTradeOptions = 
   // 오류를 그냥 무시하면 반출/반납 체크·결제상태가 유실됐는데도 화면엔 '저장됨'으로 뜬다.
   // error를 확인해 throw → schedulePersistTrade의 catch가 사용자에게 실패를 알리도록 한다.
   const tradeRow = tradeToRow(trade);
-  // 반출완료는 GAS가 기준선과 함께 확정하는 서버 권한 필드다. 브라우저의 오래된 전체
-  // 스냅샷이 다른 탭/기기에서 뒤늦게 upsert되어 완료값을 false로 되돌리지 못하게 한다.
-  delete tradeRow.setup_done;
-  delete tradeRow.setup_done_at;
-  const { error: tradeErr } = await sb.from("trades").upsert(tradeRow, { onConflict: "trade_id" });
+  // 신규 행에는 현재 원장 상태 전체가 필요하다. ignoreDuplicates가 기존 행 충돌을 무시하므로
+  // 오래된 snapshot은 기존 완료/반납 상태를 덮지 않고, 누락 거래만 정확한 상태로 생성한다.
+  const { error: tradeErr } = await sb.from("trades").upsert(tradeRow, {
+    onConflict: "trade_id",
+    ignoreDuplicates: true,
+  });
   if (tradeErr) throw tradeErr;
+
+  if (options.updateExistingStructure) {
+    const { error: structureErr } = await sb
+      .from("trades")
+      .upsert(tradeStructureRow(trade), { onConflict: "trade_id" });
+    if (structureErr) throw structureErr;
+  }
+
   const rows = uniqueScheduleRows(trade);
-  if (rows.length) {
-    const { error: itemErr } = await sb.from("schedule_items").upsert(rows, { onConflict: "schedule_id" });
-    if (itemErr) throw itemErr;
+  // 반출 후 누락 행은 taken_qty 불변 기준선이 확인된 행만 복구한다.
+  // 기준선 없는 dashboard snapshot은 GAS의 repairTradeProjection이 시트·기존 기준선을
+  // 검증한 뒤 추가한다. 여기서 null taken_qty로 insert하면 반납 검증이 무력화된다.
+  const checkoutLocked = isCheckoutBaselineLocked(trade) || rows.some((row) => Number(row.taken_qty) > 0);
+  const insertRows = checkoutLocked
+    ? rows.filter((row) => Number(row.taken_qty) > 0)
+    : rows;
+  if (insertRows.length) {
+    // 먼저 누락 행만 생성한다. 기존 행의 checkout/memo/settlement 등은 절대 건드리지 않는다.
+    const { error: insertItemsErr } = await sb
+      .from("schedule_items")
+      .upsert(insertRows, { onConflict: "schedule_id", ignoreDuplicates: true });
+    if (insertItemsErr) throw insertItemsErr;
+    // 반출 후 구조 투영은 DB에 없는 행을 기준선 없이 INSERT하지 않도록
+    // GAS의 existing-only 구조 writer가 담당한다.
+    if (options.updateExistingStructure && !checkoutLocked) {
+      const { error: structureItemsErr } = await sb
+        .from("schedule_items")
+        .upsert(rows.map(scheduleStructureRow), { onConflict: "schedule_id" });
+      if (structureItemsErr) throw structureItemsErr;
+    }
   }
   if (options.pruneMissingSheetBacked) await pruneMissingSheetBackedItems(sb, trade.tradeId, rows);
 }
 
-/** 반납 체크의 빠른 경로. 거래/품목 전체 upsert 대신 JSON 한 필드만 갱신한다. */
-export async function persistReturnCounts(
+function scheduleItemDbId(tradeId: string, scheduleId: string): string {
+  const appScheduleId = canonicalOnsiteScheduleId(scheduleId, tradeId);
+  return appScheduleId.startsWith(`${tradeId}-`) ? appScheduleId : `${tradeId}-${appScheduleId}`;
+}
+
+/** 메모·정산·타임라인 보정처럼 앱만 소유하는 품목 필드는 해당 열만 갱신한다. */
+export async function persistScheduleItemPatch(
   tradeId: string,
-  returnCounts: Record<string, ReturnCount>,
+  scheduleId: string,
+  patch: Record<string, string | number | boolean | null>,
 ): Promise<void> {
   const sb = supabase;
-  if (!sb) return;
+  if (!sb || !Object.keys(patch).length) return;
+  const dbScheduleId = scheduleItemDbId(tradeId, scheduleId);
+  const { data, error } = await sb
+    .from("schedule_items")
+    .update(patch)
+    .eq("trade_id", tradeId)
+    .eq("schedule_id", dbScheduleId)
+    .select("schedule_id")
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error(`품목 저장 대상이 없습니다: ${scheduleId}`);
+}
+
+/** 카드에서 실제로 바꾼 거래 열만 저장한다. 다른 직원의 무관한 최신 필드는 건드리지 않는다. */
+export async function persistTradeFieldPatch(
+  tradeId: string,
+  patch: Record<string, string | number | boolean | null>,
+): Promise<void> {
+  const sb = supabase;
+  if (!sb || !Object.keys(patch).length) return;
   const { data, error } = await sb
     .from("trades")
-    .update({ return_counts: returnCounts })
+    .update(patch)
     .eq("trade_id", tradeId)
     .select("trade_id")
     .maybeSingle();
   if (error) throw error;
-  if (!data) throw new Error(`반납 수량 저장 대상 거래가 없습니다: ${tradeId}`);
+  if (!data) throw new Error(`거래 저장 대상이 없습니다: ${tradeId}`);
+}
+
+const RETURN_COUNT_CAS_ATTEMPTS = 8;
+
+/** 완료된 거래를 오래된 화면이 수정하려는 충돌. 호출부는 GAS 정본을 먼저 재오픈한다. */
+export class ReturnCompletionConflictError extends Error {
+  constructor(tradeId: string) {
+    super(`반납완료 거래를 먼저 다시 열어야 합니다: ${tradeId}`);
+    this.name = "ReturnCompletionConflictError";
+  }
+}
+
+/** 반납 체크의 빠른 경로: 호출자가 바꾼 scheduleId 묶음만 jsonb CAS 병합한다.
+ * 한 직원이 빠르게 10줄을 눌러도
+ * 1개 batch가 되고, 다른 직원이 먼저 저장했으면 그 JSON을 다시 읽어 내 batch만 합친다.
+ */
+export async function persistReturnCounts(
+  tradeId: string,
+  returnCountsPatch: Record<string, Partial<ReturnCount> | null>,
+): Promise<void> {
+  const sb = supabase;
+  if (!sb) return;
+  if (!Object.keys(returnCountsPatch).length) return;
+  for (let attempt = 0; attempt < RETURN_COUNT_CAS_ATTEMPTS; attempt++) {
+    const { data: currentRow, error: readError } = await sb
+      .from("trades")
+      .select("trade_id,return_counts,return_done")
+      .eq("trade_id", tradeId)
+      .maybeSingle();
+    if (readError) throw readError;
+    if (!currentRow) throw new Error(`반납 수량 저장 대상 거래가 없습니다: ${tradeId}`);
+    if (currentRow.return_done === true) throw new ReturnCompletionConflictError(tradeId);
+
+    const currentRaw = currentRow.return_counts;
+    const current = currentRaw && typeof currentRaw === "object" && !Array.isArray(currentRaw)
+      ? currentRaw as Record<string, ReturnCount>
+      : {};
+    const next: Record<string, ReturnCount> = { ...current };
+    for (const [scheduleId, count] of Object.entries(returnCountsPatch)) {
+      if (count == null) delete next[scheduleId];
+      else {
+        const currentCount = current[scheduleId] ?? { good: 0, damaged: 0, lost: 0 };
+        next[scheduleId] = { ...currentCount, ...count };
+      }
+    }
+    let update = sb
+      .from("trades")
+      .update({ return_counts: next })
+      .eq("trade_id", tradeId);
+    update = currentRaw == null
+      ? update.is("return_counts", null)
+      : update.filter("return_counts", "eq", JSON.stringify(currentRaw));
+    update = update.or("return_done.is.null,return_done.eq.false");
+    const { data: updated, error: updateError } = await update
+      .select("trade_id")
+      .maybeSingle();
+    if (updateError) throw updateError;
+    if (updated) return;
+  }
+  throw new Error(`반납 수량 동시 저장 충돌이 계속됩니다: ${tradeId}`);
+}
+
+/** 단일 품목 호출도 같은 batch CAS 경로를 사용한다. */
+export async function persistReturnCountPatch(
+  tradeId: string,
+  scheduleId: string,
+  count: ReturnCount,
+): Promise<void> {
+  return persistReturnCounts(tradeId, { [scheduleId]: count });
 }
 
 // 거래 완전 삭제 — Supabase의 schedule_items(자식) + trades(부모)를 로그인 세션으로 제거.
@@ -250,31 +419,65 @@ export async function cancelTradeRemote(tradeId: string): Promise<void> {
   if (trade.error) throw trade.error;
 }
 
-export async function deleteScheduleItem(tradeId: string, scheduleId: string): Promise<void> {
+export async function deleteScheduleItem(
+  tradeId: string,
+  scheduleId: string,
+  options?: { expectedName?: string },
+): Promise<"deleted" | "already-missing"> {
   const sb = supabase;
-  if (!sb) return;
+  if (!sb) return "already-missing";
   const variants = deleteScheduleItemVariants(tradeId, scheduleId);
   if (variants) {
-    const { data, error } = await sb
+    let deletion = sb
       .from("schedule_items")
       .delete()
       .eq("trade_id", tradeId)
       .is("taken_qty", null)
-      .or(`schedule_id.eq.${variants.canonical},schedule_id.eq.${variants.prefixed},schedule_id.like.${variants.prefixed}__%`)
-      .select("schedule_id");
+      .or(`schedule_id.eq.${variants.canonical},schedule_id.eq.${variants.prefixed},schedule_id.like.${variants.prefixed}__%`);
+    if (options?.expectedName) deletion = deletion.eq("name", options.expectedName);
+    const { data, error } = await deletion.select("schedule_id");
     if (error) throw error;
-    if (!data?.length) throw new Error("반출 기준선이 있거나 삭제할 품목이 없습니다");
-    return;
+    if (data?.length) return "deleted";
+    return verifyMissingScheduleItemDelete_(tradeId, scheduleId, options?.expectedName, variants);
   }
-  const { data, error } = await sb
+  let deletion = sb
     .from("schedule_items")
     .delete()
     .eq("trade_id", tradeId)
     .eq("schedule_id", scheduleId)
-    .is("taken_qty", null)
-    .select("schedule_id");
+    .is("taken_qty", null);
+  if (options?.expectedName) deletion = deletion.eq("name", options.expectedName);
+  const { data, error } = await deletion.select("schedule_id");
   if (error) throw error;
-  if (!data?.length) throw new Error("반출 기준선이 있거나 삭제할 품목이 없습니다");
+  if (data?.length) return "deleted";
+  return verifyMissingScheduleItemDelete_(tradeId, scheduleId, options?.expectedName);
+}
+
+async function verifyMissingScheduleItemDelete_(
+  tradeId: string,
+  scheduleId: string,
+  expectedName?: string,
+  variants?: { canonical: string; prefixed: string },
+): Promise<"already-missing"> {
+  const sb = supabase;
+  if (!sb) return "already-missing";
+  let query = sb
+    .from("schedule_items")
+    .select("schedule_id,name,taken_qty")
+    .eq("trade_id", tradeId);
+  query = variants
+    ? query.or(`schedule_id.eq.${variants.canonical},schedule_id.eq.${variants.prefixed},schedule_id.like.${variants.prefixed}__%`)
+    : query.eq("schedule_id", scheduleId);
+  const { data, error } = await query;
+  if (error) throw error;
+  if (!data?.length) return "already-missing";
+  if (data.some((row: any) => Number(row.taken_qty) > 0)) {
+    throw new Error("반출 기준선이 있는 품목은 삭제할 수 없습니다");
+  }
+  if (expectedName && data.some((row: any) => String(row.name || "").trim() !== expectedName.trim())) {
+    throw new Error("같은 스케줄ID가 다른 장비로 바뀌어 삭제를 중단했습니다");
+  }
+  throw new Error("Supabase 품목 삭제가 확정되지 않았습니다");
 }
 
 function deleteScheduleItemVariants(tradeId: string, scheduleId: string): { canonical: string; prefixed: string } | null {

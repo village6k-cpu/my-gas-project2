@@ -4,9 +4,12 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { EquipmentItem, Trade } from "@/lib/domain/types";
 import { authFetch } from "@/lib/data/authFetch";
 import { deleteTradeRemote } from "@/lib/data/remote";
+import { isCheckoutBaselineLocked } from "@/lib/domain/status";
 import {
   cancelTrade,
   DISCOUNT_TYPE_OPTIONS,
+  isTradeDestructiveActionBlocked,
+  isTradeMutationActive,
   removeTradeLocally,
   setDiscountType,
   setItemName,
@@ -43,8 +46,14 @@ export function TradeActions({
   const [editing, setEditing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const destructiveLocked = isCheckoutBaselineLocked(trade);
 
   async function handleCancel() {
+    if (isTradeMutationActive(trade.tradeId)) return;
+    if (destructiveLocked) {
+      window.alert("이미 반출된 거래는 취소할 수 없습니다. 반납 절차로 마감해주세요.");
+      return;
+    }
     if (!window.confirm(`'${trade.customerName}' 예약을 취소할까요?\n\n계약 기록은 남고 스케줄 점유와 계약서 파일은 정리됩니다.`)) return;
     setCancelling(true);
     const result = await cancelTrade(trade.tradeId);
@@ -58,6 +67,14 @@ export function TradeActions({
   }
 
   async function handleDelete() {
+    if (isTradeDestructiveActionBlocked(trade.tradeId)) {
+      window.alert("이 거래의 다른 변경을 저장 중입니다. 잠시 후 다시 시도해주세요.");
+      return;
+    }
+    if (destructiveLocked) {
+      window.alert("이미 반출된 거래는 완전삭제할 수 없습니다. 반납 기준선과 감사 기록을 보존해야 합니다.");
+      return;
+    }
     const typed = window.prompt(
       `⚠️ 이 거래를 완전삭제하려면 거래ID를 그대로 입력하세요.\n\n${trade.customerName} · ${trade.tradeId}\n계약·스케줄·앱 기록이 영구 삭제됩니다.`,
       "",
@@ -65,6 +82,11 @@ export function TradeActions({
     if (typed == null) return;
     if (typed.trim() !== trade.tradeId) {
       window.alert("거래ID가 일치하지 않아 삭제를 취소했습니다.");
+      return;
+    }
+    // 확인창이 열린 사이 다른 저장이 시작될 수 있으므로 실제 삭제 호출 직전에 재검사한다.
+    if (isTradeDestructiveActionBlocked(trade.tradeId)) {
+      window.alert("이 거래의 다른 변경을 저장 중입니다. 저장이 끝난 뒤 다시 삭제해주세요.");
       return;
     }
     setDeleting(true);
@@ -96,13 +118,13 @@ export function TradeActions({
   return (
     <>
       <div className="flex w-full gap-2" aria-label="예약 관리">
-        <button type="button" onClick={() => setEditing(true)} className={`${buttonBase} bg-brand-50 text-brand-700 ring-brand-200`}>
+        <button type="button" onClick={() => setEditing(true)} disabled={cancelling || deleting} className={`${buttonBase} bg-brand-50 text-brand-700 ring-brand-200 disabled:opacity-50`}>
           ✎ 편집
         </button>
-        <button type="button" onClick={handleCancel} disabled={cancelling || deleting} className={`${buttonBase} bg-warn-bg text-warn-fg ring-warn-ring disabled:opacity-50`}>
+        <button type="button" onClick={handleCancel} disabled={cancelling || deleting || destructiveLocked} title={destructiveLocked ? "반출된 거래는 취소할 수 없습니다" : undefined} className={`${buttonBase} bg-warn-bg text-warn-fg ring-warn-ring disabled:opacity-50`}>
           {cancelling ? "취소 중…" : "취소"}
         </button>
-        <button type="button" onClick={handleDelete} disabled={cancelling || deleting} className={`${buttonBase} bg-attention-bg text-attention-fg ring-attention-ring disabled:opacity-50`}>
+        <button type="button" onClick={handleDelete} disabled={cancelling || deleting || destructiveLocked} title={destructiveLocked ? "반출 기준선이 있어 완전삭제할 수 없습니다" : undefined} className={`${buttonBase} bg-attention-bg text-attention-fg ring-attention-ring disabled:opacity-50`}>
           {deleting ? "삭제 중…" : "완전삭제"}
         </button>
       </div>
@@ -115,7 +137,7 @@ export function TradeActions({
             if (!next) return;
             void setDiscountType(trade.tradeId, next);
           }}
-          disabled={discountLocked}
+          disabled={discountLocked || cancelling || deleting}
           className="tap h-9 min-w-0 flex-1 rounded-lg bg-white px-2 text-[12.5px] font-bold text-ink ring-1 ring-line/70 outline-none focus:ring-brand-400 disabled:opacity-50"
         >
           <option value="" disabled>
@@ -142,6 +164,21 @@ function TradeEditSheet({ trade, onClose }: { trade: Trade; onClose: () => void 
   const [company, setCompany] = useState(trade.company || "");
   const [checkoutAt, setCheckoutAt] = useState(() => localDateTime(trade.checkoutAt));
   const [returnAt, setReturnAt] = useState(() => localDateTime(trade.returnAt));
+  // 편집 시작 시점 스냅샷 — 다른 직원이 그 사이 수정했으면 서버가 CONFLICT로 거부해
+  // 낡은 모달의 통째 저장이 남의 수정을 되돌리는 일을 막는다.
+  const [baseline] = useState(() => {
+    const co = localDateTime(trade.checkoutAt);
+    const re = localDateTime(trade.returnAt);
+    return {
+      customerName: trade.customerName,
+      customerPhone: trade.customerPhone || "",
+      company: trade.company || "",
+      checkoutDate: co.slice(0, 10),
+      checkoutTime: co.slice(11, 16),
+      returnDate: re.slice(0, 10),
+      returnTime: re.slice(11, 16),
+    };
+  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -164,6 +201,7 @@ function TradeEditSheet({ trade, onClose }: { trade: Trade; onClose: () => void 
       checkoutTime: checkoutAt.slice(11, 16),
       returnDate: returnAt.slice(0, 10),
       returnTime: returnAt.slice(11, 16),
+      expected: JSON.stringify(baseline),
     });
     setSaving(false);
     if (!result.ok) {
@@ -233,7 +271,9 @@ function EquipmentEditRow({ tradeId, item, locked }: { tradeId: string; item: Eq
     }
     setSaving(true);
     setMessage("");
-    const nameOk = name.trim() === item.name ? true : await setItemName(tradeId, item.scheduleId, name.trim());
+    const nameOk = name.trim() === item.name
+      ? true
+      : await setItemName(tradeId, item.scheduleId, name.trim(), { exactName: true });
     const qtyOk = nextQty === item.qty ? true : await setItemQty(tradeId, item.scheduleId, nextQty);
     setSaving(false);
     setMessage(nameOk && qtyOk ? "저장됨" : "저장 실패");

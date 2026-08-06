@@ -27,11 +27,11 @@ assert(
 );
 
 assert(
-  storeSource.includes('repairDashboardDetailsForIncompleteTrades'),
+  storeSource.includes('repairDashboardDateDetails'),
   'store load/poll path must call dashboard-detail repair so users do not wait on a manual seed sync'
 );
 assert(
-  storeSource.includes('await repairEmptyEquipmentTrades'),
+  storeSource.includes('await repairDayDetails'),
   'store must run an immediate empty-equipment repair after remote load and during polling'
 );
 

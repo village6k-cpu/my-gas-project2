@@ -16,13 +16,38 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 
 ROUTER_SKILL = "village-runtime-router"
-RUNTIME_PLUGIN = "village-runtime"
-# Keep the Slack runtime outside the development repository.  Starting inside
-# it injects the repo's AGENTS.md into every business request and makes ordinary
-# operations follow developer-only confirmation and workflow rules.
-RUNTIME_CWD = r"C:\Village"
+RUNTIME_CWD = r"C:\Village\my-gas-project2-worktrees\ax2-hermes-final"
 ROUTING_PROMPT_START = "[VILLAGE_WINDOWS_RUNTIME_ROUTER_V1]"
 ROUTING_PROMPT_END = "[/VILLAGE_WINDOWS_RUNTIME_ROUTER_V1]"
+
+# 모델/프로바이더 단일 소스: hermes-model-contract.json.
+# 파일이 없으면 검증된 기본값(gpt-5.6-terra / openai-codex / xhigh)으로 동작한다.
+# 모델 교체는 계약 파일 수정 → 이 스크립트 재실행. default와 provider를 항상 함께
+# 기록해 provider만 남고 model만 되돌아가는 혼합 상태를 구조적으로 차단한다.
+MODEL_CONTRACT_PATH = Path(__file__).with_name("hermes-model-contract.json")
+DEFAULT_ROOT_MODEL_CONTRACT = {
+    "provider": "openai-codex",
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "xhigh",
+}
+
+
+def load_root_model_contract() -> dict:
+    contract = dict(DEFAULT_ROOT_MODEL_CONTRACT)
+    try:
+        raw = json.loads(MODEL_CONTRACT_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return contract
+    root = raw.get("root") if isinstance(raw, dict) else None
+    if not isinstance(root, dict):
+        raise ValueError("hermes-model-contract.json must contain a root mapping")
+    for key in ("provider", "model", "reasoning_effort"):
+        value = str(root.get(key, "")).strip()
+        if not value:
+            raise ValueError(f"hermes-model-contract.json root.{key} must be a non-empty string")
+        contract[key] = value
+    return contract
+
 ROUTER_CHANNELS = {
     "C03F11EU0RE": "inventory",
     "C0B6WAR7R7H": "settlement",
@@ -80,9 +105,10 @@ def prompts_are_clean(prompts: object) -> bool:
     )
 
 
-def is_configured(config: object) -> bool:
+def is_configured(config: object, contract: dict | None = None) -> bool:
     if not isinstance(config, dict) or not isinstance(config.get("slack"), dict):
         return False
+    contract = contract or load_root_model_contract()
     bindings = config["slack"].get("channel_skill_bindings")
     bindings = bindings if isinstance(bindings, list) else []
     has_managed_router = any(
@@ -95,24 +121,19 @@ def is_configured(config: object) -> bool:
     agent = config.get("agent")
     guardrails = config.get("tool_loop_guardrails")
     terminal = config.get("terminal")
-    plugins = config.get("plugins")
-    enabled_plugins = plugins.get("enabled") if isinstance(plugins, dict) else None
     return (
         isinstance(model, dict)
-        and str(model.get("default", "")) == "gpt-5.6-terra"
+        and str(model.get("default", "")) == contract["model"]
+        and str(model.get("provider", "")) == contract["provider"]
         and isinstance(agent, dict)
-        and str(agent.get("reasoning_effort", "")) == "xhigh"
-        and agent.get("gateway_timeout") == 1800
+        and str(agent.get("reasoning_effort", "")) == contract["reasoning_effort"]
         and agent.get("gateway_wall_timeout") == 1800
-        and agent.get("clarify_timeout") == 600
         and isinstance(guardrails, dict)
         and guardrails.get("hard_stop_enabled") is False
         and not has_managed_router
         and prompts_are_clean(config["slack"].get("channel_prompts"))
         and isinstance(terminal, dict)
         and str(terminal.get("cwd", "")) == RUNTIME_CWD
-        and isinstance(enabled_plugins, list)
-        and RUNTIME_PLUGIN in [str(name) for name in enabled_plugins]
     )
 
 
@@ -156,10 +177,17 @@ def main(argv: list[str] | None = None) -> int:
     yaml.preserve_quotes = True
     yaml.width = 4096
     config_path = args.config.resolve(strict=True)
+    contract = load_root_model_contract()
     config = load_config(config_path, yaml)
-    configured = is_configured(config)
+    configured = is_configured(config, contract)
 
-    result = {"ok": configured, "mode": "mac_style_ai_first", "channels": len(ROUTER_CHANNELS)}
+    result = {
+        "ok": configured,
+        "mode": "mac_style_ai_first",
+        "channels": len(ROUTER_CHANNELS),
+        "model": contract["model"],
+        "provider": contract["provider"],
+    }
     if args.check:
         print(json.dumps(result))
         return 0 if configured else 2
@@ -171,21 +199,14 @@ def main(argv: list[str] | None = None) -> int:
     if not backup_path.exists():
         shutil.copy2(config_path, backup_path)
 
-    for key in ("model", "agent", "tool_loop_guardrails", "plugins"):
+    for key in ("model", "agent", "tool_loop_guardrails"):
         if key not in config or not isinstance(config[key], dict):
             config[key] = CommentedMap()
-    config["model"]["default"] = "gpt-5.6-terra"
-    config["agent"]["reasoning_effort"] = "xhigh"
-    config["agent"]["gateway_timeout"] = 1800
+    config["model"]["default"] = contract["model"]
+    config["model"]["provider"] = contract["provider"]
+    config["agent"]["reasoning_effort"] = contract["reasoning_effort"]
     config["agent"]["gateway_wall_timeout"] = 1800
-    config["agent"]["clarify_timeout"] = 600
     config["tool_loop_guardrails"]["hard_stop_enabled"] = False
-    enabled_plugins = config["plugins"].get("enabled")
-    if not isinstance(enabled_plugins, list):
-        enabled_plugins = CommentedSeq()
-        config["plugins"]["enabled"] = enabled_plugins
-    if RUNTIME_PLUGIN not in [str(name) for name in enabled_plugins]:
-        enabled_plugins.append(RUNTIME_PLUGIN)
 
     cleaned_bindings = remove_managed_bindings(config["slack"].get("channel_skill_bindings"))
     if cleaned_bindings:
@@ -209,8 +230,15 @@ def main(argv: list[str] | None = None) -> int:
     config["terminal"]["cwd"] = RUNTIME_CWD
     atomic_write(config_path, config, yaml)
 
-    verified = is_configured(load_config(config_path, yaml))
-    print(json.dumps({"ok": verified, "changed": True, "mode": "mac_style_ai_first", "channels": len(ROUTER_CHANNELS)}))
+    verified = is_configured(load_config(config_path, yaml), contract)
+    print(json.dumps({
+        "ok": verified,
+        "changed": True,
+        "mode": "mac_style_ai_first",
+        "channels": len(ROUTER_CHANNELS),
+        "model": contract["model"],
+        "provider": contract["provider"],
+    }))
     return 0 if verified else 1
 
 

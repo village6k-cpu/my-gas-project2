@@ -30,7 +30,8 @@ assert(
 assert(
   /var 할인유형 = req\.할인유형 !== undefined \? req\.할인유형 : origFirst\[12\];/.test(backend) &&
     /var 비고 = req\.비고 !== undefined \? req\.비고 : origFirst\[16\];/.test(backend) &&
-    /j === 0 \? 할인유형 : "", "", "", "",\s*\n\s*j === 0 \? 비고 : "",/.test(backend),
+    /var itemNote = items\[j\]\.비고 !== undefined[\s\S]{0,140}\(j === 0 \? 비고 : ""\);/.test(backend) &&
+    /j === 0 \? 할인유형 : "", "", itemStatus, "",\s*\n\s*itemNote,/.test(backend),
   '#10 updateRequest must preserve 할인유형(M idx12) and 비고(Q idx16) instead of blanking them'
 );
 
@@ -54,14 +55,15 @@ assert(
   '#33 addEquipmentToContract must derive newSchedNum from max suffix, not the count of existing rows'
 );
 
-// #36 — cancelContract는 계약서 Drive 파일을 정리해야 한다(공용 헬퍼 사용).
+// #36 — cancelContract는 계약서 Drive 파일 정리를 재시도 가능한 외부 워커에 맡겨야 한다.
 assert(
   /function trashContractFilesForTrade_\(거래ID\)/.test(contract),
   '#36 shared trashContractFilesForTrade_ helper must exist in generatecontract.js'
 );
 assert(
-  /trashContractFilesForTrade_\(거래ID\)/.test(code),
-  '#36 cancelContract must trash the trade\'s contract files on cancel'
+  /function runCancelledTradeCleanupOutsideLock_\(state\)[\s\S]*trashCancelledContractFiles_\(거래ID\)/.test(code) &&
+    /function cancelContract\(ss, 거래ID, contractRow\)[\s\S]*scheduleCancelledTradeCleanup_\(거래ID\)/.test(code),
+  '#36 cancelContract must queue strict Drive cleanup in the retryable outside-lock worker'
 );
 
 // #56 — 확인요청 보호에서 R열(추가요청)이 편집 가능해야 한다.
@@ -70,17 +72,22 @@ assert(
   '#56 protectSheets must leave 확인요청 R열(추가요청) editable (M2:R, not M2:Q)'
 );
 
-// #14/#30 — Supabase flush는 성공했을 때만 dirty를 지운다.
+// #14/#30 — Supabase flush는 성공했고 같은 거래의 dirty 버전이 그대로일 때만 지운다.
+const flushDirtyBody = supa.slice(
+  supa.indexOf('function flushDirtyToSupabase'),
+  supa.indexOf('\n/** 거래ID 배열', supa.indexOf('function flushDirtyToSupabase')),
+);
 assert(
-  /if \(ok\) \{[\s\S]*?p\.setProperty\('SUPA_DIRTY', JSON\.stringify\(after\)\);/.test(supa) &&
+  /if \(ok\) \{[\s\S]*if \(p\.getProperty\(dirtyKey\) === snapshot\[dirtyKey\]\) p\.deleteProperty\(dirtyKey\)/.test(flushDirtyBody) &&
     /function supaUpsert_\(cfg, table, rows, conflict\) \{[\s\S]*?return true;\s*\n\}/.test(supa),
-  '#14/#30 flushDirtyToSupabase must clear dirty only when upsert succeeded; supaUpsert_ must return a boolean'
+  '#14/#30 flushDirtyToSupabase must clear only the successfully uploaded, unchanged per-trade dirty marker; supaUpsert_ must return a boolean'
 );
 
-// #31 — 시트에서 삭제된 스케줄 행을 Supabase에서도 제거(단, keepIds 비면 절대 삭제 금지).
+// #31 — stale keep-set 정리는 반출 기준선을 지우지 않으며, 주기 flush가 이를 호출하지 않는다.
 assert(
-  /function supaDeleteStaleItems_\(cfg, tradeId, keepIds\) \{\s*\n\s*if \(!tradeId \|\| !keepIds \|\| !keepIds\.length\) return true;/.test(supa),
-  '#31 supaDeleteStaleItems_ must exist and never delete when keepIds is empty'
+  /function supaDeleteStaleItems_\(cfg, tradeId, keepIds\) \{\s*\n\s*if \(!tradeId \|\| !keepIds \|\| !keepIds\.length\) return true;[\s\S]{0,900}taken_qty=is\.null/.test(supa) &&
+    !/supaDeleteStaleItems_\(/.test(flushDirtyBody),
+  '#31 stale cleanup must fail closed on an empty keep-set, preserve taken_qty baselines, and stay out of periodic snapshot flushes'
 );
 
 // #38 — 확인요청 관리 화면은 고객 입력을 escHtml로 이스케이프해야 한다(루트 + docs).

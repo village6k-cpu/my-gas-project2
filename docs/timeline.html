@@ -1855,8 +1855,10 @@ function onBarPointerDown(e) {
       origEndTime.getHours(), origEndTime.getMinutes(), origEndTime.getSeconds()).toISOString();
 
     var riParam = item.rowIndices ? "&rowIndices=" + encodeURIComponent(JSON.stringify(item.rowIndices)) : "";
+    // tid 전달: 행 번호가 밀렸으면 서버가 STALE_ROWS로 거부해 다른 거래를 덮어쓰지 않는다
+    var tidParam = item.거래ID ? "&tid=" + encodeURIComponent(item.거래ID) : "";
     fetch(API_URL + "?key=village2026&action=updateTime&row=" + item.rowIndex +
-      "&start=" + encodeURIComponent(startISO) + "&end=" + encodeURIComponent(endISO) + riParam)
+      "&start=" + encodeURIComponent(startISO) + "&end=" + encodeURIComponent(endISO) + riParam + tidParam)
       .then(function(r) { return r.json(); })
       .then(function(res) {
         if (res && res.success) {
@@ -2257,8 +2259,11 @@ function setScheduleAddBusy(isBusy, label) {
 }
 
 function postScheduleEquip(txID, entry) {
+  // mutationId: 응답 유실 뒤 재클릭이 같은 장비 행을 두 번 추가하지 않게 하는 멱등 키
+  var addMutationId = "add-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
   return fetch(API_URL + "?key=village2026&action=scheduleAddEquip&tid=" + encodeURIComponent(txID)
-    + "&equipName=" + encodeURIComponent(entry.name) + "&qty=" + encodeURIComponent(entry.qty))
+    + "&equipName=" + encodeURIComponent(entry.name) + "&qty=" + encodeURIComponent(entry.qty)
+    + "&mutationId=" + encodeURIComponent(addMutationId))
     .then(function(r) { return r.json(); })
     .then(function(res) {
       if (res.error) throw new Error(res.error);

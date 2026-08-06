@@ -27,8 +27,8 @@ function LoginWordmark() {
   );
 }
 
-// 고객용 공개 경로 — 직원 로그인 없이 접근 (토큰으로 본인 예약만 보는 화면)
-const PUBLIC_PATHS = ["/my"];
+// 고객용 공개 경로 — /my는 토큰으로 본인 예약만, /guides는 공개 사용법 영상만 조회.
+const PUBLIC_PATHS = ["/my", "/guides"];
 
 // 로그인 게이트: 세션 없으면 로그인 폼, 있으면 앱. (시드 모드면 통과)
 export function AuthGate({ children }: { children: React.ReactNode }) {

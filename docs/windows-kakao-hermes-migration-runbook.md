@@ -115,3 +115,15 @@ Abort cutover and begin Rollback on any of these conditions:
 - any unexpected external send.
 
 Do not continue forward after an abort condition, even if a later check appears healthy.
+
+## Production operation (post-cutover)
+
+The rules above govern the migration window, where a scheduled task must never enable a write path because the Mac still owns production. Once cutover step 4 is complete and Windows is the **only** Kakao owner, permanently manual operation becomes its own failure mode: any reboot, crash, or logoff silently kills the pipeline until a human notices. Post-cutover, always-on operation is the supported posture:
+
+1. Confirm cutover finished: Mac bridge/watchdog/backstop disabled, `status-kakao-staging.ps1` healthy after a manual `start-kakao-staging.ps1 ... -EnableWrites` run, no duplicate delivery.
+2. Switch the environment file to production values: `SUPABASE_TABLE=ai_processing_events`, `SUPABASE_FOLLOW_UP_TABLE=ai_follow_up_items`, `AI_WORKER_LIVE=1`, `AI_WORKER_DRY_RUN=0`, `VILLAGE_WINDOWS_WRITES_ENABLED` is stamped by the lifecycle itself. Keep `AI_WORKER_AUTO_SEND=0` until automatic customer sending has its own approval (cutover step 7), then set it to `1`.
+3. Register the enabled tasks: `register-kakao-production-tasks.ps1 -EnvFile ... -ChromePath ... -NodePath ... [-HermesPath ... -IncludeGateway] -ConfirmProductionOwnership`. This creates `Village-Kakao-Production-Start` (at logon, write-enabled) and `Village-Kakao-Production-Watchdog` (default every 5 minutes). The `-ConfirmProductionOwnership` switch is the recorded operator approval; the script refuses to run without it.
+4. The watchdog is read-only while the runtime is healthy. When an owned component's record, process, or port is dead it runs the ownership-validated `stop-kakao-staging.ps1` and then `start-kakao-staging.ps1 -EnableWrites`. A live PID whose executable or command marker does not match the ownership record still aborts the automatic path and requires a human — the watchdog never terminates a process it cannot prove it owns. Its log is `%LOCALAPPDATA%\Village\kakao-staging\watchdog.log`.
+5. The disabled staging tasks may remain registered for later isolated testing; they never start anything on their own.
+
+Model changes (root gateway or `kakaoworker` profile) are made only through `scripts/windows/hermes-model-contract.json`, then `configure-hermes-village-routing.py --config %LOCALAPPDATA%\hermes\config.yaml`, then updating the worker profile `config.yaml` to the same contract values, then a runtime restart. The provider and model are written together from the contract, so a provider switch can never leave a mixed provider/model state.

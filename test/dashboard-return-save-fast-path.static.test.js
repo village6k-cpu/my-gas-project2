@@ -13,7 +13,7 @@ test('반납 수량 체크는 거래 전체 저장이나 품목별 GAS 호출 �
   const fn = store.slice(start, end);
 
   assert.ok(start >= 0 && end > start, 'setReturnCount 구현을 찾을 수 있어야 한다');
-  assert.match(fn, /scheduleReturnCountsPersist\(tradeId\)/);
+  assert.match(fn, /scheduleReturnCountsPersist\(tradeId, scheduleId, durablePatch\)/);
   assert.match(fn, /await flushReturnCountsPersist\(tradeId\)/);
   assert.doesNotMatch(fn, /flushTradePersist\(/);
   assert.doesNotMatch(fn, /gasMutation\(["']toggleItem["']/);
@@ -43,14 +43,15 @@ test('반납 부분 저장은 다른 거래 저장과 같은 직렬 큐를 사�
   assert.match(fn, /returnCountPersistInFlight\[tradeId\] = task/);
 });
 
-test('최종 반납완료 검증은 내구 수량을 신뢰하고 품목 증거를 한 번에 기록한다', () => {
+test('반납완료는 기준선·수량 HTTP 검증 없이 완료 상태만 빠르게 확정한다', () => {
   const gas = read('checkAvailability.js');
-  const start = gas.indexOf('function assertDashboardReturnComplete_');
-  const end = gas.indexOf('\n/** 수량 정정 시', start);
-  const fn = gas.slice(start, end);
+  const toggleStart = gas.indexOf('function toggleReturnDone');
+  const toggleEnd = gas.indexOf('\nfunction listDashboardCheckoutItemCheckSids_', toggleStart);
+  const toggle = gas.slice(toggleStart, toggleEnd);
 
-  assert.ok(start >= 0 && end > start, '서버 최종 반납 검증을 찾을 수 있어야 한다');
-  assert.doesNotMatch(fn, /getDashboardCheckinItemDefault_/);
-  assert.match(fn, /accounted\s*!==\s*expected/);
-  assert.match(fn, /props\.setProperties\(completedProofs,\s*false\)/);
+  assert.ok(toggleStart >= 0 && toggleEnd > toggleStart, '반납완료 구현을 찾을 수 있어야 한다');
+  assert.doesNotMatch(toggle, /assertDashboardReturnComplete_|supaGetCheckoutBaselineState_|supaSetTradeReturnDone_/);
+  assert.doesNotMatch(toggle, /completedProofs|returnCountsSnapshot/);
+  assert.match(toggle, /nextDashboardCompletionRevision_\(props, tid, 'return'\)/);
+  assert.match(toggle, /supaMarkTradeDirty_\(tid\)/);
 });

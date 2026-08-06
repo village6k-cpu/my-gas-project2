@@ -10,51 +10,57 @@ const store = read('apps/today-dashboard/lib/data/store.ts');
 const remote = read('apps/today-dashboard/lib/data/remote.ts');
 const card = read('apps/today-dashboard/components/ScheduleCard.tsx');
 
-const toggleSetupDone = backend.match(/function toggleSetupDone\(tid, done\) \{[\s\S]*?\n\}/);
-assert.ok(toggleSetupDone, 'toggleSetupDone must exist');
+const setupStart = backend.indexOf('function toggleSetupDone(tid, done, options)');
+const setupEnd = backend.indexOf('\nfunction normalizeDashboardReturnSetKey_', setupStart);
+assert.ok(setupStart >= 0 && setupEnd > setupStart, 'toggleSetupDone must exist');
+const toggleSetupDone = backend.slice(setupStart, setupEnd);
 assert.doesNotMatch(
-  toggleSetupDone[0],
-  /LockService\.getScriptLock\(\)|\.waitLock\(/,
+  toggleSetupDone,
+  /\.waitLock\(/,
   '반출 완료는 장기 전역 ScriptLock 대기 때문에 막히면 안 된다'
 );
 assert.match(
-  toggleSetupDone[0],
-  /supaCaptureCheckoutBaseline_\(tid, checkable, true\)/,
-  '반출 완료 전 Supabase 불변 기준선 저장은 계속 필수다'
+  toggleSetupDone,
+  /transitionLock\.tryLock\(1000\)[\s\S]*transitionLock\.releaseLock\(\)/,
+  '품목 체크와 완료 전환 순서만 짧게 잠그고 즉시 풀어야 한다'
+);
+assert.doesNotMatch(
+  toggleSetupDone,
+  /supaCaptureCheckoutBaseline_|supaGetCheckoutBaselineState_|dashboardCheckoutBaselineFingerprint_/,
+  '반출완료 클릭 경로가 기준선 HTTP 저장·조회에 다시 묶이면 안 된다'
 );
 assert.match(
-  toggleSetupDone[0],
-  /props\.setProperties\(completed, false\)/,
-  '기준선 저장 성공 뒤에만 반출 완료 속성을 확정해야 한다'
+  toggleSetupDone,
+  /nextDashboardCompletionRevision_\(props, tid, 'setup'\)[\s\S]*props\.setProperties\(completed, false\)/,
+  '반출 완료 상태는 단조 revision과 함께 로컬 정본에 확정해야 한다'
 );
 
 const toggleSetup = store.match(/export async function toggleSetup\(tradeId: string\): Promise<ToggleSetupResult> \{[\s\S]*?\n\}/);
 assert.ok(toggleSetup, 'toggleSetup must exist');
+// 즉시 확정 UX: 클릭 경로는 낙관 표시+내구 outbox+백그라운드 확정 예약만 하고 즉시 반환한다.
+// 서버 왕복(3~10초) 동안 카드를 잠그던 beginTradeTransition/await gasMutation은 제거됐다.
 assert.match(
   toggleSetup[0],
-  /const saveId = beginTradeSave\(tradeId\);[\s\S]*?mutateTrade\(tradeId[\s\S]*?setupDone:\s*done[\s\S]*?false\);[\s\S]*?await gasMutation\("toggleSetup"/,
+  /mutateTrade\(tradeId[\s\S]*?setupDone:\s*done[\s\S]*?false\);[\s\S]*?scheduleCompletionMutationReplay_\("setup", tradeId, 0\)/,
   '카드는 GAS 응답 전에 즉시 완료 상태가 되어야 한다'
 );
-assert.match(
+assert.doesNotMatch(
   toggleSetup[0],
-  /if \(state\.savingTrades\[tradeId\]\)[\s\S]*?return \{ ok: false, error \};/,
-  '빠른 연속 클릭이 들어와도 같은 거래의 반출완료 요청은 한 번만 실행해야 한다'
+  /beginTradeTransition|await gasMutation/,
+  '클릭 경로가 카드를 잠그거나 서버를 기다리면 안 된다 (즉시 확정 UX)'
 );
 assert.match(
   toggleSetup[0],
-  /finishTradeSave\(tradeId, saveId, "saved", "저장됨"\)/,
-  '원장과 앱 저장이 모두 성공하면 저장 완료를 표시해야 한다'
+  /if \(activeTradeTransitions\.has\(tradeId\) \|\| pendingRemoveEquipmentTrades\.has\(tradeId\)\)[\s\S]*?return \{ ok: false, error \};/,
+  '전환 위험 구간(편집/취소/제외)과의 순서 역전은 계속 막아야 한다'
 );
-assert.match(
-  toggleSetup[0],
-  /if \(isGasOutcomeUnknownError\(e\)\)[\s\S]*queueSetupOutcomeRetry\(tradeId[\s\S]*return \{ ok: true, warning \}/,
-  'GAS 응답만 유실된 결과 미확정은 완료 표시를 유지하고 같은 상태를 재시도해야 한다'
-);
-assert.match(
-  toggleSetup[0],
-  /if \(isGasOutcomeUnknownError\(e\)\)[\s\S]*return \{ ok: true, warning \}[\s\S]*setupDone:\s*previousDone[\s\S]*반출 상태 변경 실패/,
-  '확정 실패일 때만 즉시 완료 상태를 되돌려야 한다'
-);
+// 확정·응답 유실 재시도·거절 롤백은 백그라운드 엔진이 담당한다
+const confirmEngine = store.match(/async function replayCompletionMutationEntry_[\s\S]*?\nfunction replayCompletionMutationOutboxes_/);
+assert.ok(confirmEngine, '백그라운드 확정 엔진이 있어야 한다');
+assert.match(confirmEngine[0], /gasMutation\("toggleSetup"/, '확정 엔진이 GAS 반출완료를 전송한다');
+assert.doesNotMatch(confirmEngine[0], /fetchSetupCompletion\(latest\.tradeId\)/, 'Supabase만 완료된 상태를 GAS 확정으로 오인하면 안 된다');
+assert.match(confirmEngine[0], /updateCompletionMutationOutboxAttempts\(latest, attempts\)/, '응답 유실은 같은 mutationId로 재시도한다');
+assert.match(confirmEngine[0], /reconcileCompletionMutationCanonical_/, '명확한 거절만 정본 재조회로 되돌린다');
 assert.doesNotMatch(
   toggleSetup[0],
   /flushTradePersist\(tradeId\)/,
@@ -62,30 +68,40 @@ assert.doesNotMatch(
 );
 assert.match(
   remote,
-  /const tradeRow = tradeToRow\(trade\)[\s\S]*delete tradeRow\.setup_done;[\s\S]*delete tradeRow\.setup_done_at;[\s\S]*upsert\(tradeRow/,
-  '브라우저 전체 저장은 서버 권한 반출완료 필드를 덮어쓰면 안 된다'
+  /const tradeRow = tradeToRow\(trade\)[\s\S]*upsert\(tradeRow, \{[\s\S]*ignoreDuplicates: true/,
+  '신규 거래는 전체 초기 상태로 추가하되 기존 행은 덮지 않아야 한다'
+);
+assert.match(
+  remote,
+  /function tradeStructureRow[\s\S]*delete row\.setup_done;[\s\S]*delete row\.setup_done_at;/,
+  '기존 행의 서버 권한 반출완료는 구조 저장이 덮어쓰면 안 된다'
 );
 
 assert.match(
+  store,
+  /activeTradeTransitions\.has\(tradeId\)/,
+  '일반 수량 저장과 완료 전환을 구분하고 완료 전환 자체만 중복 차단해야 한다'
+);
+assert.doesNotMatch(
   card,
   /disabled=\{saving\}/,
-  '반출완료 저장 중에는 같은 버튼을 다시 눌러 중복 요청할 수 없어야 한다'
+  '수량 저장 중에도 완료 버튼은 장벽을 기다리며 눌릴 수 있어야 한다'
 );
 assert.match(
   card,
-  /saving\s*\?\s*done\s*\?\s*"반출 완료됨 · 저장 확인 중…"\s*:\s*"반출 처리 중…"/,
-  '클릭 직후 완료를 표시하고 응답이 늦으면 저장 확인 중 상태를 유지해야 한다'
+  /done\s*\?\s*"반출 완료됨"\s*:\s*"반출 완료"/,
+  '클릭 직후 반출완료 상태를 최우선으로 표시해야 한다'
+);
+assert.doesNotMatch(
+  card,
+  /\bsaving\b|백그라운드 동기화|상태 변경 중|반출 완료됨 · 저장 확인 중|반출 처리 중|저장 중…/,
+  '느린 원격 확인이 사용자의 완료 처리를 계속 저장 중처럼 보이게 하면 안 된다'
 );
 
-assert.match(
-  backend,
-  /function getDashboardRowsByTradeId_\(schedSheet, tid\)/,
-  '반출완료는 대상 거래의 스케줄 행만 찾는 헬퍼를 사용해야 한다'
-);
-assert.match(
-  toggleSetupDone[0],
-  /getDashboardRowsByTradeId_\(sched, tid\)[\s\S]*?getDashboardSearchGroupsForIds_\(sched, \[tid\], rowsByTid\)/,
-  '반출완료 기준선 생성 때 스케줄상세 전체 12열을 읽지 않아야 한다'
+assert.doesNotMatch(
+  toggleSetupDone,
+  /getDashboardRowsByTradeId_|getDashboardSearchGroupsForIds_|getSheetByName\('스케줄상세'\)/,
+  '반출완료는 기준선 생성을 위해 스케줄상세를 읽지 않아야 한다'
 );
 
 console.log('dashboard checkout lock-free static checks passed');

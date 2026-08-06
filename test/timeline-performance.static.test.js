@@ -209,16 +209,26 @@ assert.match(
   'timeline schedule row cache must normalize date/time values before JSON caching'
 );
 
+const dashboardAddBody = backend.slice(
+  backend.indexOf('function dashboardAddEquipments'),
+  backend.indexOf('\nvar DASHBOARD_ONSITE_IDEM_PROP_', backend.indexOf('function dashboardAddEquipments')),
+);
+assert.match(dashboardAddBody, /scheduleContractRegenUnderLock_\(tid\)/);
 assert.match(
-  backend,
-  /function dashboardAddEquipments\([\s\S]*scheduleContractRegen\(tid\)[\s\S]{0,180}invalidateTimelineCache\(\)/,
-  'timeline schedule row cache must be invalidated after dashboard equipment additions'
+  dashboardAddBody,
+  /invalidateTimelineCache\(\)/,
+  'timeline schedule row cache must be invalidated after dashboard equipment additions while durable contract regeneration stays queued'
 );
 
+const dashboardRemoveBody = backend.slice(
+  backend.indexOf('function dashboardRemoveEquipment'),
+  backend.indexOf('\n\/\*\* "yyyy-MM-dd"', backend.indexOf('function dashboardRemoveEquipment')),
+);
+assert.match(dashboardRemoveBody, /scheduleContractRegenUnderLock_\(tid\)/);
 assert.match(
-  backend,
-  /function dashboardRemoveEquipment\([\s\S]*scheduleContractRegen\(tid\)[\s\S]{0,180}invalidateTimelineCache\(\)/,
-  'timeline schedule row cache must be invalidated after dashboard equipment removals'
+  dashboardRemoveBody,
+  /invalidateTimelineCache\(\)/,
+  'timeline schedule row cache must be invalidated after permitted pre-checkout equipment removals while regeneration stays queued'
 );
 
 assert.match(

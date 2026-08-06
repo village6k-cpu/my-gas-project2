@@ -14,17 +14,19 @@ const sheetApi = read('sheetAPI.js');
 const checkAvailability = read('checkAvailability.js');
 const remote = read('apps/today-dashboard/lib/data/remote.ts');
 const mappers = read('apps/today-dashboard/lib/data/mappers.ts');
-const migration = read('apps/today-dashboard/supabase/migrations/20260723033000_schedule_item_removed_at.sql');
+const removeStart = checkAvailability.indexOf('function dashboardRemoveEquipment');
+const removeEnd = checkAvailability.indexOf('\n/** "yyyy-MM-dd"', removeStart);
+const removeEquipmentBackend = checkAvailability.slice(removeStart, removeEnd);
 
 assert(
   checklist.includes('SetSingleList'),
   'single set equipment must keep the set-header tinted container instead of falling back to a plain loose list'
 );
 assert(
-  migration.includes('add column if not exists removed_at timestamptz') &&
-    /q\.in\("trade_id", chunk\)\.is\("removed_at", null\)/.test(remote) &&
-    !mappers.includes('removed_at'),
-  'removed checkout baseline rows must stay auditable without reappearing in live equipment lists'
+  /export function isCheckoutBaselineLocked\(t: Trade\)/.test(status) &&
+    /const baselineStarted = !!currentTrade && isCheckoutBaselineLocked\(currentTrade\)/.test(store) &&
+    /if \(baselineStarted\)[\s\S]{0,500}이미 반출된 품목은 제외할 수 없습니다[\s\S]{0,220}return;/.test(store),
+  '반출 기준선 행은 숨김 삭제로 우회하지 않고, 앱에서 삭제 자체를 fail-closed로 차단해야 한다'
 );
 assert(
   /function CheckoutRow\([\s\S]*setTone = false/.test(checklist),
@@ -37,13 +39,20 @@ assert(
 assert(
   checklist.includes('EquipmentNameCombobox') &&
     checklist.includes('장비명') &&
-    checklist.includes('onSave={(v) => setItemName(t.tradeId, e.scheduleId, v)}'),
+    /onSave=\{\(v, exactName\) => setItemName\(t\.tradeId, e\.scheduleId, v, \{ exactName, offCatalog: exactName \}\)\}/.test(checklist),
   'pre-checkout equipment details must allow editing the registered equipment name with a catalog dropdown'
 );
 assert(
   /export function isCheckoutBaselineLocked\(t: Trade\)/.test(status) &&
-    !tradeActions.includes('isCheckoutBaselineLocked'),
-  'checkout completion may preserve the actual handover record but must not lock reservation editing'
+    /const destructiveLocked = isCheckoutBaselineLocked\(trade\)/.test(tradeActions) &&
+    /disabled=\{cancelling \|\| deleting \|\| destructiveLocked\}/.test(tradeActions) &&
+    !/\bbusy\b/.test(tradeActions),
+  'checkout completion must preserve the handover record by locking destructive trade actions'
+);
+assert(
+  /export function isTradeDestructiveActionBlocked[\s\S]*hasTradePending\(tradeId\)/.test(store) &&
+    (tradeActions.match(/isTradeDestructiveActionBlocked\(trade\.tradeId\)/g) || []).length === 2,
+  'permanent deletion must recheck pending ledger writes without restoring whole-card busy'
 );
 assert(
   !checklist.includes('반출 기준선 원본 보존') &&
@@ -53,9 +62,9 @@ assert(
 );
 assert(
   /disabled=\{baselineLocked\}/.test(checklist) &&
-    /baselineStarted && next !== "excluded"/.test(store) &&
-    /setItemCheckout\(t\.tradeId, e\.scheduleId, "excluded"\)/.test(checklist),
-  'checkout facts stay fixed while deleting an item remains available after checkout'
+    /if \(baselineStarted\)[\s\S]{0,500}next === "excluded"[\s\S]{0,220}return;/.test(store) &&
+    /isDashboardTradeCheckoutStarted_\(ss, tid\)[\s\S]{0,300}이미 반출된 품목은 삭제할 수 없습니다/.test(removeEquipmentBackend),
+  'checkout facts and deletion both stay fixed after checkout, with matching client and GAS guards'
 );
 assert(
   /export function clearToast\(\)/.test(store) &&
@@ -90,23 +99,24 @@ assert(
 );
 
 assert(
-  /export async function setItemName\(tradeId: string, scheduleId: string, name: string\)/.test(store),
+  /export async function setItemName\([\s\S]{0,180}options\?: \{ exactName\?: boolean; offCatalog\?: boolean \}/.test(store),
   'store must expose fail-closed async setItemName for registered equipment edits'
 );
 assert(
-  /setItemName[\s\S]*await gasMutation\("updateEquipName"[\s\S]*name: nextName[\s\S]*setName:[\s\S]*category: categoryOf\(nextName\)/.test(store),
-  'setItemName must apply the canonical GAS name, matching standalone setName, and category after write success'
+  /setItemName[\s\S]*putItemNameOutboxTarget[\s\S]*commitQueuedItemName[\s\S]*await gasMutation\("updateEquipName"/.test(store) &&
+    /function applyEquipNameResult[\s\S]*name: nextName[\s\S]*category: categoryOf\(nextName\)/.test(store),
+  'setItemName must durably queue first, then apply the canonical GAS name and category after background ACK'
 );
 assert(
-  /await gasMutation\("updateEquipName", \{ tid: tradeId, scheduleId, equipName: clean \}\)/.test(store),
-  'setItemName must await GAS so sheet-master failure cannot leave a Supabase-only rename'
+  /ITEM_NAME_OUTBOX_KEY[\s\S]*putItemNameOutboxTarget[\s\S]*return true;[\s\S]*await gasMutation\("updateEquipName"[\s\S]*mutationId: target\.mutationId/.test(store),
+  'setItemName must return after durable intake and use a mutationId-backed GAS commit instead of a Supabase-only rename'
 );
 assert(
   /function applyEquipQtyResult\([\s\S]*const nextQty = byId\.get\(e\.scheduleId\)![\s\S]*takenQty: e\.takenQty/.test(store) &&
-    /setItemQty[\s\S]*await gasMutation\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: safeQty \}\)[\s\S]*applyEquipQtyResult\(/.test(store) &&
+    /export async function setItemQty[\s\S]{0,1200}queueItemQty\(tradeId, scheduleId, safeQty\)[\s\S]{0,120}return true/.test(store) &&
     /commitQueuedItemQty[\s\S]*await gasMutation\("updateEquipQty", \{ tid: tradeId, scheduleId, qty: target \}\)[\s\S]*applyEquipQtyResult\(/.test(store) &&
     !/takenQty: e\.takenQty != null \? Math\.min/.test(store),
-  'qty edits (setItemQty and debounced commitQueuedItemQty) must await updateEquipQty, apply authoritative set-component scaling via applyEquipQtyResult, and never rewrite the checkout baseline'
+  'qty edits must return through the immediate queue, then the debounced commit must apply authoritative set-component scaling without rewriting the checkout baseline'
 );
 
 assert(

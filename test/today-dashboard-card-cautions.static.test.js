@@ -37,7 +37,7 @@ const cautionRoute = read('apps/today-dashboard/app/api/cautions/route.ts');
   'riskWarnings: mergeDashboardCardCautions(base, it)',
   'const pending = new Map<string, Trade>()',
   'pending.set(tid, mergeDashboard(base, it))',
-  'for (const t of pending.values()) await persistTrade(t)',
+  'for (const t of pending.values()) await persistTrade(t, { updateExistingStructure: true })',
   'const cautionsChanged = hasDashboardCardCautionChange(base, it)',
 ].forEach((contract) => {
   assert.ok(sync.includes(contract), `sync must route dashboard card cautions through the cache: ${contract}`);

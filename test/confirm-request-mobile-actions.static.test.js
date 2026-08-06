@@ -26,7 +26,9 @@ assert(
 
 assert(
   /function canEditConfirmRequest\(status\?: string\)/.test(view) &&
-    /if \(!s \|\| s === "대기" \|\| s === "AI_REVIEW" \|\| s === "등록대기"\) return true;/.test(view) &&
+    // 서버가 편집을 무조건 거부하는 '등록대기'는 편집 UI를 열지 않는다 (낙관 반영 후 100% 롤백 방지)
+    /if \(s === "등록대기"\) return false;/.test(view) &&
+    /if \(!s \|\| s === "대기" \|\| s === "AI_REVIEW"\) return true;/.test(view) &&
     /return true;/.test(view),
   'blocking states such as 모델 미선택/등록 불가 must stay editable instead of hiding 수정 controls'
 );
@@ -63,8 +65,9 @@ assert(
   /function InlineItemEditor/.test(view) &&
     /runFunc\("updateRequestItem"/.test(view) &&
     /저장 \+ 이 품목만 재확인/.test(view) &&
+    /가용확인 없이 저장/.test(view) &&
     /제외 해제 \(다시 등록 대상에 포함\)/.test(view),
-  'inline equipment editing must preserve the same single-row update and exclude controls as the old item sheet'
+  'inline equipment editing must support recheck, save-without-check, cancel, and exclude controls'
 );
 
 assert(

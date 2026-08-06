@@ -47,6 +47,21 @@ function checkoutBaselineHarness(existingItems) {
   return { capture: context.capture, writes };
 }
 
+function missingBaselineRecoveryHarness() {
+  const source = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
+  const start = source.indexOf('function isDashboardLegacyCheckoutBaselineTrade_');
+  const end = source.indexOf('\nfunction dashboardReturnIncompleteItems_', start);
+  assert.ok(start >= 0 && end > start, 'missing-baseline recovery source must be extractable');
+  const context = {
+    getDashboardPropertyValue_: (props, key) => props[key] ?? null,
+  };
+  vm.runInNewContext(
+    `${source.slice(start, end)}\nthis.canRecover = canDashboardRecoverMissingCheckoutBaseline_;`,
+    context,
+  );
+  return context.canRecover;
+}
+
 function trade(returnCounts, equipments) {
   return {
     tradeId: '260710-003',
@@ -74,6 +89,33 @@ test('불변 반출 기준선 도입 전의 닫힌 카드는 소급해서 확인
   assert.deepEqual(status.returnCompletionBlockers(legacy), []);
   assert.equal(status.attentionReason(legacy, '2026-07-14'), null);
   assert.equal(status.cardDone(legacy, '2026-07-14', 'checkin'), true);
+});
+
+test('기준선 배포 전환기 거래는 반출 체크 속성이 유실돼도 정확한 반납 수량으로 1회 복구 후보가 된다', () => {
+  const canRecover = missingBaselineRecoveryHarness();
+  const currentItems = [
+    { scheduleId: '260720-004-02' },
+    { scheduleId: '260720-004-03' },
+  ];
+
+  assert.equal(canRecover('260720-004', {}, currentItems), true);
+  assert.equal(canRecover('260727-001', {}, currentItems), false);
+});
+
+test('전환기 이후 신규 거래는 기존처럼 반출완료 시각과 전 품목 반출 체크가 있어야 복구한다', () => {
+  const canRecover = missingBaselineRecoveryHarness();
+  const currentItems = [
+    { scheduleId: 'NEW-01' },
+    { scheduleId: 'NEW-02' },
+  ];
+  const props = {
+    'setupDone_260727-001': '1',
+    'setupDoneAt_260727-001': '2026-07-27 09:00:00',
+    'itemCheck_NEW-01_checkout': '1',
+    'itemCheck_NEW-02_checkout': '1',
+  };
+
+  assert.equal(canRecover('260727-001', props, currentItems), true);
 });
 
 test('반출 6개 중 5개만 확인하면 SDI 롱라인 1개 미확인으로 완료를 차단한다', () => {

@@ -70,13 +70,23 @@ test('registration accepts every supported confirmed discount type', () => {
   }
 });
 
-test('registration never overwrites an existing customer DB discount', () => {
+test('registration overwrites a stale customer DB discount with the confirmed reservation value', () => {
   const plan = loadPlanner();
   const rows = [customerRow('010-1111-2222', '기존고객', '단골')];
 
   assert.deepEqual(
     plain(plan(rows, '기존고객', '010-1111-2222', '학생')),
-    { action: 'keep-existing', sheetRow: 2, discount: '단골' }
+    { action: 'update-discount', sheetRow: 2, discount: '학생' }
+  );
+});
+
+test('registration keeps the customer DB untouched when the confirmed value is already current', () => {
+  const plan = loadPlanner();
+  const rows = [customerRow('010-1111-2222', '기존고객', '학생')];
+
+  assert.deepEqual(
+    plain(plan(rows, '기존고객', '010-1111-2222', '학생')),
+    { action: 'keep-existing', sheetRow: 2, discount: '학생' }
   );
 });
 

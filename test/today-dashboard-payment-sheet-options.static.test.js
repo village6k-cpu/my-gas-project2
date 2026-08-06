@@ -83,8 +83,8 @@ assert.match(
 
 assert.match(
   store,
-  /export async function setPaymentMethod\(tradeId: string, method: string\)[\s\S]*gasMutation\("updatePayment",\s*\{ tid: tradeId, method \}\)/,
-  'setPaymentMethod must await updatePayment so card-payment side effects can be applied locally'
+  /export async function setPaymentMethod\(tradeId: string, method: string\)[\s\S]*await gasMutationRetrying\("updatePayment",\s*\{ tid: tradeId, method \}\)[\s\S]*result\.success !== true \|\| result\.wroteSheet !== true/,
+  'setPaymentMethod must retry transient writes and require an acknowledged sheet write before accepting card-payment side effects'
 );
 
 assert.match(
@@ -95,8 +95,8 @@ assert.match(
 
 assert.match(
   store,
-  /export async function setBillingCompany\(tradeId: string,\s*billingCompany: string\)[\s\S]*gasMutation\("updateBillingCompany",\s*\{ tid: tradeId,\s*billingCompany \}\)/,
-  'setBillingCompany must await updateBillingCompany so GAS validation errors are not silently ignored'
+  /export async function setBillingCompany\(tradeId: string,\s*billingCompany: string\)[\s\S]*await gasMutationRetrying\("updateBillingCompany",\s*\{ tid: tradeId,\s*billingCompany \}\)[\s\S]*hasOwnProperty\.call\(result, "billingCompany"\)/,
+  'setBillingCompany must retry transient writes and require an acknowledged canonical value'
 );
 
 console.log('today-dashboard payment sheet option parity checks passed');

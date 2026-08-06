@@ -36,7 +36,7 @@ assert.match(
 
 assert.match(
   source,
-  /const setComponents = getSetComponents\(ri\.장비명,\s*setSheet\);[\s\S]{0,220}if \(!hasExisting\) \{[\s\S]{0,120}expandSetRows\(sheet,\s*ri\.row,\s*triggerReqID,\s*setComponents,\s*ri\.수량\);[\s\S]{0,80}expandedRows = true;/,
+  /const setComponents = getSetComponents\(ri\.장비명,\s*setSheet\);[\s\S]{0,450}if \(!alreadyExpanded\) \{[\s\S]{0,120}expandSetRows\(sheet,\s*ri\.row,\s*triggerReqID,\s*setComponents,\s*ri\.수량\);[\s\S]{0,80}expandedRows = true;/,
   'manual recheck must still use the normal set expansion path when a pending set row has no existing components'
 );
 

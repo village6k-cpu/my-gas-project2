@@ -1,7 +1,7 @@
 ---
 name: village-confirm-request
-description: "Bounded execution and readback layer for Village confirmation-request plans produced with full AI reasoning in village-operations, including multi-schedule batches."
-version: 1.2.0
+description: "Bounded execution and readback layer for Village confirmation-request plans produced with full AI reasoning in village-operations, including multi-schedule batches and uncertain-write reconcile."
+version: 1.3.0
 author: Village
 license: private
 platforms: [windows]
@@ -18,7 +18,7 @@ The reasoning layer may inspect the full image/text, preserved operations refere
 
 ## Fixed runner
 
-`$HERMES_HOME/scripts/village/village-confirm-request.js`
+`C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-confirm-request.js`
 
 Hermes terminal is Git Bash, but `node` is a native Windows executable; always pass the `C:/Village/...` path above.
 
@@ -31,12 +31,12 @@ Hermes terminal is Git Bash, but `node` is a native Windows executable; always p
 
 ## Execution
 
-Run `node.exe "$HERMES_HOME/scripts/village/village-confirm-request.js" --help` for the compact command list. Do not inspect the runner source merely to discover its CLI.
+Run `node 'C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-confirm-request.js' --help` for the compact command list. Do not inspect the runner source merely to discover its CLI.
 
 For one new planned schedule, use `create`. For multiple AI-planned schedule groups, use `create-batch` in one command:
 
 ```bash
-python.exe - <<'PY' | node.exe "$HERMES_HOME/scripts/village/village-confirm-request.js" create-batch
+python - <<'PY' | node 'C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-confirm-request.js' create-batch
 import json
 print(json.dumps({"requests":[
   {"반출일":"2026-07-31","반출시간":"06:00","반납일":"2026-08-02","반납시간":"06:00","예약자명":"예약자","장비":[{"이름":"소니 FX3 풀세트","수량":2}]},
@@ -48,10 +48,24 @@ PY
 The batch command catalog-preflights every group before the first write, inserts each planned group once, and readbacks each resulting `RQ-...` ID. For a single group the payload remains:
 
 ```bash
-printf '%s' '{"반출일":"2026-07-23","반출시간":"05:00","반납일":"2026-07-23","반납시간":"14:00","예약자명":"예약자","장비":[{"이름":"정확한 카탈로그명","수량":1}]}' | node.exe "$HERMES_HOME/scripts/village/village-confirm-request.js" create
+printf '%s' '{"반출일":"2026-07-23","반출시간":"05:00","반납일":"2026-07-23","반납시간":"14:00","예약자명":"예약자","장비":[{"이름":"정확한 카탈로그명","수량":1}]}' | node 'C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-confirm-request.js' create
 ```
 
 Treat the result as complete only when every item contains `verified:true`, a valid `RQ-...` ID, and readback rows for all intended top-level items. Report all IDs, schedule groups, equipment/quantities, availability, and any warning concisely.
+
+### Payload schema
+
+Canonical field names are Korean: `반출일`/`반납일` (`YYYY-MM-DD`), `반출시간`/`반납시간` (`HH:MM`), `예약자명`, `장비` (`[{"이름","수량"}]`), optional `연락처`, `할인유형`, `업체명`, `비고`, `추가요청`. The runner also auto-maps unambiguous English aliases (`customerName`→`예약자명`, `phone`→`연락처`, `pickupDate`→`반출일`, `returnDate`→`반납일`, `items`→`장비`, item `name`/`quantity`) and pads one-digit hours/months, so prefer the Korean names but never hand-repair an alias error. A schema violation error message lists the full allowed field set — correct the payload from that message in one step.
+
+### Uncertain write → reconcile, never re-insert
+
+If the runner exits with `uncertainWrite:true` (insert or update succeeded but readback failed or did not verify), the write may have landed. The failure JSON includes the created `reqID` when known and, for batches, `completedReqIDs`. Resolve it with the bounded read-only command:
+
+```bash
+printf '%s' '{"reqID":"RQ-260723-003"}' | node 'C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-confirm-request.js' reconcile
+```
+
+Without a reqID, reconcile by requester: `{"예약자명":"이름","반출일":"YYYY-MM-DD"}`. `found:true` with matching rows means the write landed — report it as created and continue; `found:false` means it did not land — one fresh `create` for that group is then safe. Reconcile performs zero mutations.
 
 ### Existing partial request
 
@@ -67,7 +81,7 @@ Pipe that JSON to the fixed runner with the `update` command. It catalog-preflig
 
 - Exactly one `insertAndCheckRequest` attempt per AI-planned schedule group. The runner never retries a write.
 - Never call `updateRequest` directly. Use the bounded `update` command only for one already-verified existing partial request after resolving the whole payload. Never call `updateRequestItem`, `excludeEquipFromRequest`, or a second insert to repair an uncertain interpretation.
-- A missing/failed readback is an uncertain write outcome. In a batch, report already completed RQ IDs and never retry them automatically.
+- A missing/failed readback is an uncertain write outcome: run the read-only `reconcile` command first and act on its evidence. In a batch, report already completed RQ IDs and never retry them automatically.
 - This route cannot send an 알림톡/customer-facing message and cannot perform final reservation registration. Those require a separate explicit owner approval and the broader `village-operations` route.
 - Normal Hermes self-improvement may retain a verified alias or reusable workflow lesson after the user-facing operation. Learning must not be disabled as a speed optimization.
 - Never print credentials, environment files, or the API key.

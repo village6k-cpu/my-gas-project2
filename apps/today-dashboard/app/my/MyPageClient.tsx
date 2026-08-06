@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import { GuideVideoLibrary } from "@/components/guides/GuideVideoLibrary";
 
 interface ReqItem {
   name: string;
@@ -133,6 +134,11 @@ function MyPageContent({ data, token, refreshing }: { data: MyPageData; token: s
   const trade = data.trade;
   const request = data.request;
   const estimateUrl = token ? `/api/my/estimate?t=${encodeURIComponent(token)}` : "";
+  const guideEquipmentNames = Array.from(new Set(
+    trade
+      ? trade.items.flatMap((item) => [item.name, item.setName]).filter(Boolean)
+      : (request?.items ?? []).map((item) => item.name).filter(Boolean),
+  ));
 
   return (
     <>
@@ -204,6 +210,8 @@ function MyPageContent({ data, token, refreshing }: { data: MyPageData; token: s
           </ul>
         </section>
       ) : null}
+
+      <GuideVideoLibrary mode="reservation" equipmentNames={guideEquipmentNames} />
 
       {/* ── 견적서 PDF ── */}
       {trade && estimateUrl && (

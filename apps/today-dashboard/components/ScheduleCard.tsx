@@ -27,25 +27,25 @@ function displayPhase(t: Trade, date: string, tab: TabKey): "checkout" | "checki
   const p = phaseForDate(t, date);
   if (p === "checkout") return "checkout";
   if (p === "checkin") return "checkin";
-  if (p === "both") return t.setupDone ? "checkin" : "checkout";
+  // 같은 날 반출·반납 건도 전체 탭에서는 반납 카드로 다룬다. 반출 처리가 필요하면
+  // 반출 탭에서 할 수 있고, 반출완료 여부가 반납완료 진입 조건이 되어서는 안 된다.
+  if (p === "both") return "checkin";
   // 당일 반출/반납이 아님(다일 대여·지연 반납 등): 이미 나갔으면 반납 단계로
   return new Date(t.checkoutAt) <= new Date(`${date}T23:59:59`) ? "checkin" : "checkout";
 }
 
-// React.memo: 스토어 emit(저장 토스트·savingTrades 깜빡임 등)마다 그날의 카드 수십 장이
+// React.memo: 스토어 emit(저장 토스트·내부 동기화 등)마다 그날의 카드 수십 장이
 // 통째로 재렌더되는 것을 막는다. props가 전부 원시값 + 스토어의 안정 참조(trade)라
 // 기본 얕은 비교로 충분하다 — mutateTrade는 변경된 거래만 새 참조로 만든다.
 export const ScheduleCard = memo(function ScheduleCard({
   trade,
   date,
   tab,
-  saving,
   defaultOpen = false,
 }: {
   trade: Trade;
   date: string;
   tab: TabKey;
-  saving?: boolean;
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -55,7 +55,6 @@ export const ScheduleCard = memo(function ScheduleCard({
   const phase = displayPhase(trade, date, tab);
   const isCheckout = phase === "checkout";
   const returnBlockers = isCheckout ? [] : returnCompletionBlockers(trade);
-  const invalidClosedReturn = !isCheckout && trade.returnDone && returnBlockers.length > 0;
   const done = isCheckout ? trade.setupDone : trade.returnDone && returnBlockers.length === 0;
   const doneAt = isCheckout ? trade.setupDoneAt : trade.returnDoneAt;
   const prog = setupProgress(trade, phase);
@@ -123,7 +122,6 @@ export const ScheduleCard = memo(function ScheduleCard({
                 {overdue && <span className="rounded-md bg-attention-fg px-1.5 py-0.5 text-[11px] font-bold text-white">반납 지연</span>}
               </>
             )}
-            {saving && <span className="text-[11px] font-medium text-brand-600">저장 중…</span>}
           </div>
           <div className="mt-0.5 flex items-center gap-1.5 text-[14px]">
             <button
@@ -163,9 +161,7 @@ export const ScheduleCard = memo(function ScheduleCard({
         <button
           type="button"
           onClick={handleDoneToggle}
-          disabled={saving}
-          aria-busy={saving}
-          className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 disabled:cursor-wait disabled:opacity-80 ${
+          className={`tap flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-[14px] font-bold ring-1 disabled:cursor-wait disabled:opacity-70 ${
             done
               ? "bg-checkin-bg text-checkin-fg ring-checkin-ring"
               : isCheckout
@@ -177,9 +173,7 @@ export const ScheduleCard = memo(function ScheduleCard({
             <Check className="h-3.5 w-3.5" />
           </span>
           {isCheckout
-            ? saving ? done ? "반출 완료됨 · 저장 확인 중…" : "반출 처리 중…" : done ? "반출 완료됨" : "반출 완료"
-            : saving ? "반납 처리 중…"
-            : invalidClosedReturn ? "잘못 닫힌 카드 다시 열기"
+            ? done ? "반출 완료됨" : "반출 완료"
             : done ? "반납 완료됨"
             : returnBlockers.length ? "수량 확인 후 반납완료" : "반납 완료"}
         </button>
@@ -201,7 +195,7 @@ export const ScheduleCard = memo(function ScheduleCard({
           className="tap mx-4 ml-5 mt-2.5 block w-[calc(100%-2.25rem)] rounded-xl bg-attention-bg px-3 py-2.5 text-left ring-1 ring-attention-ring"
         >
           <span className="block text-[12px] font-extrabold text-attention-fg">
-            🚨 {invalidClosedReturn ? "반납완료 데이터 불일치 — 카드 재개방 필요" : "반납완료 차단 — 수량 확인 필요"}
+            🚨 반납 수량 확인 필요
           </span>
           <span className="mt-1 block text-[12px] font-semibold leading-relaxed text-attention-fg">
             {returnBlockers.slice(0, 3).map((b) => (
@@ -219,13 +213,17 @@ export const ScheduleCard = memo(function ScheduleCard({
 
       {/* 상세 */}
       {open && (
-        <div className="px-4 pb-4 pl-5 pt-1">
+        <div className="px-4 pl-5 pt-1">
           <HandoverChecklist trade={trade} phase={phase} />
           <RiskPanel warnings={trade.riskWarnings} phase={phase} equipments={trade.equipments} />
-          <PhotoStrip tradeId={trade.tradeId} photos={trade.photos} />
-          <PaymentControls trade={trade} />
         </div>
       )}
+
+      {/* 사진은 완료 카드가 접혀도 항상 접근할 수 있어야 한다. */}
+      <div className="px-4 pb-4 pl-5">
+        <PhotoStrip tradeId={trade.tradeId} photos={trade.photos} showThumbnails={open} />
+        {open && <PaymentControls trade={trade} />}
+      </div>
 
       {customerOpen && <CustomerSheet name={trade.customerName} phone={trade.customerPhone} onClose={() => setCustomerOpen(false)} />}
     </div>

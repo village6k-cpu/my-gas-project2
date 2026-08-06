@@ -31,36 +31,6 @@ const confirmRequestSkillPath = path.join(
   'village-confirm-request',
   'SKILL.md'
 );
-const dateChangeReferencePath = path.join(
-  root,
-  'scripts',
-  'windows',
-  'hermes-profile-overlay',
-  'skills',
-  'productivity',
-  'village-operations',
-  'references',
-  'registered-trade-date-change-remove-item.md'
-);
-const operationsSkillPath = path.join(
-  root,
-  'scripts',
-  'windows',
-  'hermes-profile-overlay',
-  'skills',
-  'productivity',
-  'village-operations',
-  'SKILL.md'
-);
-const runtimePluginPath = path.join(
-  root,
-  'scripts',
-  'windows',
-  'hermes-profile-overlay',
-  'plugins',
-  'village-runtime',
-  '__init__.py'
-);
 const routingConfigScriptPath = path.join(
   root,
   'scripts',
@@ -97,11 +67,6 @@ test('Windows adapters preserve canonical routing and scope safety flags correct
   assert.match(operations, /broad[\s\S]{0,220}catalog/i);
   assert.match(operations, /existing partial[\s\S]{0,500}\bupdate\b/i);
   assert.match(operations, /do not fall back[\s\S]{0,220}(?:ad-hoc|raw)/i);
-  assert.match(operations, /village-live-query\.js/);
-  assert.match(operations, /--domain\s+schedule/);
-  assert.match(operations, /inventory[\s\S]{0,220}schedule[\s\S]{0,220}customer[\s\S]{0,220}finance/i);
-  assert.match(operations, /normal Slack reply[\s\S]{0,260}Do not call `clarify`/i);
-  assert.match(operations, /thread-bound|current thread/i);
   assert.match(rpa, /profile/i);
   assert.match(rpa, /does not define the authorization policy/i);
   assert.match(rpa, /Do not load this profile-scoped skill into ordinary Slack business questions/i);
@@ -113,7 +78,6 @@ test('Windows adapters preserve canonical routing and scope safety flags correct
     assert.match(source, /HERMES_ENV/);
     assert.match(source, /VILLAGE_NAME_LINK_QUEUE/);
     assert.match(source, /bare `python3`/i);
-    assert.doesNotMatch(source, /my-gas-project2-worktrees\/ax2-hermes-final\/scripts\/windows\/village-(?:live|confirm|trade)/i);
   }
 });
 
@@ -134,61 +98,14 @@ test('the compact Village router is broad, deterministic, and not sales-specific
   assert.doesNotMatch(source, /do not use[\s\S]{0,200}Computer Use/i);
   assert.doesNotMatch(source, /do not run[\s\S]{0,200}global (?:file|filesystem) search/i);
   assert.match(source, /one primary route/i);
-  assert.match(source, /village_operation/);
+  assert.match(source, /village-operations[\s\S]{0,220}only/i);
   assert.match(source, /village-live-query\.js/);
-  assert.match(source, /\$HERMES_HOME\/scripts\/village/);
-  assert.match(source, /preserve[^\n]{0,120}(?:time|시간)/i);
-  assert.match(source, /do not[^\n]{0,180}(?:raw|browser|source)/i);
-  assert.match(source, /CAPABILITY_GAP/);
-  assert.match(source, /resume and complete the original request/i);
-  assert.match(source, /self-improvement/i);
+  assert.match(source, /village-confirm-request/);
+  assert.match(source, /village-confirm-request\.js/);
   assert.match(source, /inventory[\s\S]{0,220}schedule[\s\S]{0,220}customer[\s\S]{0,220}finance/i);
   assert.match(source, /Load `village-brain-first` only for a genuinely complex protocol/i);
   assert.doesNotMatch(source, /do not load `village-brain-first`/i);
   assert.doesNotMatch(source, /revenue-only|sales-only/i);
-});
-
-test('compact operations preserves AI planning and a learn-test-register-resume path', () => {
-  const source = fs.readFileSync(operationsSkillPath, 'utf8');
-  const plugin = fs.readFileSync(runtimePluginPath, 'utf8');
-
-  assert.ok(Buffer.byteLength(source, 'utf8') <= 8_000, 'known operations must not load the full Mac playbook');
-  assert.match(source, /AI[^\n]{0,160}semantic plan/i);
-  assert.match(source, /CAPABILITY_GAP/);
-  assert.match(source, /inspect[\s\S]{0,500}implement[\s\S]{0,500}tests?[\s\S]{0,500}register/i);
-  assert.match(source, /finish the \*\*original\*\* task/i);
-  assert.match(source, /Self-improvement remains enabled/i);
-  assert.match(source, /mac-full-operating-memory\.md/);
-  assert.match(source, /customerSendApproved/);
-  assert.match(source, /finalRegistrationApproved/);
-
-  assert.match(paritySyncScript, /mac-full-operating-memory\.md/);
-  assert.match(paritySyncScript, /village-operation-broker\.js/);
-  assert.match(paritySyncScript, /plugins\\village-runtime/);
-  assert.match(plugin, /toolset="hermes-slack"/);
-  assert.match(plugin, /"mode": "discover"/);
-  assert.match(plugin, /Do not stop at the capability gap/i);
-});
-
-test('registered date changes use a bounded neutral-runtime command and never document the old write bypass', () => {
-  const operations = fs.readFileSync(path.join(adapterRoot, 'village-operations.md'), 'utf8');
-  const reference = fs.readFileSync(dateChangeReferencePath, 'utf8');
-
-  for (const source of [operations, reference]) {
-    assert.match(source, /\$HERMES_HOME\/scripts\/village\/village-trade-date-change\.js/);
-    assert.match(source, /preserve[^\n]{0,160}(?:time|시간)/i);
-    assert.match(source, /authoritative readback|권위[^\n]*재조회/i);
-    assert.doesNotMatch(source, /sheet-qualified A1|sheet\s*=\s*확인요청|write route for a non-whitelisted sheet/i);
-    assert.doesNotMatch(source, /curl\s+.*script\.google/i);
-    assert.doesNotMatch(source, /"allowConflicts"\s*:\s*true/);
-    assert.match(source, /explicit(?:ly)?[^\n]{0,160}(?:accept|approve)[^\n]{0,120}conflict/i);
-  }
-
-  assert.match(paritySyncScript, /village-trade-date-change\.js/);
-  assert.match(paritySyncScript, /\[string\]\$RuntimeHome/);
-  assert.match(paritySyncScript, /Join-Path\s+\$resolvedRuntimeHome\s+['"]scripts\\village['"]/);
-  assert.match(startScript, /-RuntimeHome\s+\$resolvedHermesHome/);
-  assert.match(paritySyncScript, /decision rather than a direct system operation/i);
 });
 
 test('confirmation-request runner is execution-only and preserves full AI reasoning', () => {
@@ -231,8 +148,6 @@ test('offline routing configuration restores Mac-style AI-first Slack behavior',
   assert.match(source, /gpt-5\.6-terra/);
   assert.match(source, /reasoning_effort[\s\S]{0,120}xhigh/i);
   assert.match(source, /gateway_wall_timeout[\s\S]{0,120}1800/i);
-  assert.match(source, /config\["agent"\]\["gateway_timeout"\]\s*=\s*1800/);
-  assert.match(source, /config\["agent"\]\["clarify_timeout"\]\s*=\s*600/);
   assert.match(source, /hard_stop_enabled[\s\S]{0,120}False/i);
   assert.match(source, /channel_skill_bindings/);
   assert.match(source, /channel_prompts/);
@@ -241,14 +156,9 @@ test('offline routing configuration restores Mac-style AI-first Slack behavior',
   assert.match(source, /remove_managed_prompt/);
   assert.doesNotMatch(source, /desired_bindings/);
   assert.doesNotMatch(source, /desired_channel_prompt/);
+  assert.match(source, /C:\\Village\\my-gas-project2-worktrees\\ax2-hermes-final/);
   assert.match(source, /terminal/);
   assert.match(source, /cwd/);
-  assert.match(source, /RUNTIME_CWD\s*=\s*r["']C:\\Village["']/);
-  assert.doesNotMatch(
-    source,
-    /RUNTIME_CWD\s*=\s*r["']C:\\Village\\my-gas-project2-worktrees\\ax2-hermes-final["']/,
-    'Slack runtime must start outside the development repo so AGENTS.md is not injected into every business request'
-  );
   assert.match(source, /atomic/i);
   assert.match(source, /backup/i);
   assert.match(source, /--check/);

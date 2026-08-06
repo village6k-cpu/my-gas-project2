@@ -44,9 +44,9 @@ function makeContractSheet(rows) {
 }
 
 const contractSheet = makeContractSheet([
-  ['260521-001', '김가영', '010-1111-1111', '빌리지', '', '', '', '', '', '예약'],
-  ['260521-002', '이도현', '010-2222-2222', '외부팀', '', '', '', '', '', '반출'],
-  ['260521-003', '박서준', '010-3333-3333', '제작사', '', '', '', '', '', '반납완료']
+  ['260521-001', '김가영', '010-1111-1111', '빌리지', '', '', '', '', '', '예약', '학생'],
+  ['260521-002', '이도현', '010-2222-2222', '외부팀', '', '', '', '', '', '반출', '일반'],
+  ['260521-003', '박서준', '010-3333-3333', '제작사', '', '', '', '', '', '반납완료', '단골']
 ]);
 
 const contractMap = gasContext.getDashboardContractMapForIds_(contractSheet, ['260521-001', '260521-003']);
@@ -58,13 +58,15 @@ assert.deepStrictEqual(
       name: '김가영',
       tel: '010-1111-1111',
       company: '빌리지',
-      contractStatus: '예약'
+      contractStatus: '예약',
+      discountType: '학생'
     },
     '260521-003': {
       name: '박서준',
       tel: '010-3333-3333',
       company: '제작사',
-      contractStatus: '반납완료'
+      contractStatus: '반납완료',
+      discountType: '단골'
     }
   },
   'contract map must still return the selected trade metadata'
@@ -83,8 +85,8 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   contractSheet.calls.slice(1),
   [
-    { row: 2, col: 1, numRows: 1, numCols: 10 },
-    { row: 4, col: 1, numRows: 1, numCols: 10 }
+    { row: 2, col: 1, numRows: 1, numCols: 11 },
+    { row: 4, col: 1, numRows: 1, numCols: 11 }
   ],
   'contract map should read only the matched dashboard contract rows'
 );

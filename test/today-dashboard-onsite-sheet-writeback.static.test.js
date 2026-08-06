@@ -47,7 +47,8 @@ assert(
   'on-site additions delegate contract regeneration to the background worker (freshness via contractRegenPending badge + polling merge)'
 );
 assert(
-  /export async function addOnsiteItems\([\s\S]*const mutationResult = unwrapContractMutation\(res\)[\s\S]*amount: amount \?\? t\.amount[\s\S]*contractUrl: url \|\| t\.contractUrl \|\| null[\s\S]*contractRegenPending: !!mutationResult\.contractRegenPending && !url/.test(store),
+  /function applyGasOnsiteItems_[\s\S]*amount: options\?\.amount \?\? trade\.amount[\s\S]*contractUrl: options\?\.contractUrl \|\| trade\.contractUrl \|\| null/.test(store) &&
+    /export async function addOnsiteItems\([\s\S]*const mutationResult = unwrapContractMutation\(res\)[\s\S]*applyGasOnsiteItems_\(tradeId, newItems, \{[\s\S]*amount,[\s\S]*contractUrl: url,[\s\S]*contractRegenPending: !!mutationResult\.contractRegenPending && !url/.test(store),
   'addOnsiteItems must apply returned finalAmount/contractUrl to the local trade after sheet write-back'
 );
 assert(
@@ -55,7 +56,9 @@ assert(
   'only set headers/standalone items are sent — backend re-expands set components from 세트마스터'
 );
 assert(
-  /out\.addedItems/.test(store) && /a\.scheduleId/.test(store),
+  /const added = \(out\.addedItems \?\? \[\]\) as GasOnsiteItem\[\]/.test(store) &&
+    /const newItems = mapGasOnsiteItems_\(added, entries, settlement\)/.test(store) &&
+    /function mapGasOnsiteItems_[\s\S]*scheduleId: String\(item\.scheduleId \?\? ""\)\.trim\(\)/.test(store),
   'addOnsiteItems must reconcile the real sheet scheduleId returned by the backend (no leftover ONS- ids)'
 );
 assert(
@@ -66,8 +69,8 @@ assert(
 // 시트에 기록된 현장추가도 실 scheduleID라 삭제 시 스케줄상세 행도 제거되어야 함
 assert(
   /if \(item && isSheetBackedScheduleId\(tradeId,\s*scheduleId\)\) \{[\s\S]*removeEquipmentAndRegenerateContract\(tradeId,\s*item\)/.test(store) &&
-    /gasMutation\("removeEquip",\s*\{[\s\S]*directRegenerate:\s*false/.test(store),
-  'removeItem must delete real-id rows (incl. sheet-recorded on-site) from 스케줄상세 and queue contract regeneration via the background worker'
+    /gasMutationRetrying\("removeEquip",\s*\{[\s\S]*mutationId:\s*entry\.mutationId[\s\S]*directRegenerate:\s*false/.test(store),
+  'removeItem must durably delete real-id rows (incl. sheet-recorded on-site) from 스케줄상세 and queue contract regeneration via the background worker'
 );
 
 // 시트 재동기화 후에도 현장추가는 '현장 추가' 구획에 묶이도록 onsite 보존
@@ -86,11 +89,21 @@ assert(
   'rawNames must skip 목록/장비마스터 fuzzy matching so free-input names are kept verbatim'
 );
 assert(
-  /dashboardRecordOnsiteAddon\(tid, entries, options\)[\s\S]*dashboardAddEquipments\(tid, entries, \{[\s\S]*rawNames: options\.rawNames[\s\S]*directRegenerate: options\.directRegenerate \|\| options\.regenerateNow/.test(logic),
+  (() => {
+    const fn = logic.slice(
+      logic.indexOf('function dashboardRecordOnsiteAddon'),
+      logic.indexOf('\nfunction dashboardUpdateEquipmentQty', logic.indexOf('function dashboardRecordOnsiteAddon')),
+    );
+    return /dashboardAddEquipments\(tid, entries, \{[\s\S]*rawNames: options\.rawNames[\s\S]*directRegenerate: options\.directRegenerate \|\| options\.regenerateNow/.test(fn);
+  })(),
   'dashboardRecordOnsiteAddon must pass rawNames and directRegenerate through to dashboardAddEquipments'
 );
+const onsiteBackendFn = logic.slice(
+  logic.indexOf('function dashboardRecordOnsiteAddon'),
+  logic.indexOf('\nfunction dashboardUpdateEquipmentQty', logic.indexOf('function dashboardRecordOnsiteAddon')),
+);
 assert(
-  /function dashboardRecordOnsiteAddon[\s\S]{0,3000}dashboardAddEquipments\(tid, entries, \{[\s\S]{0,300}forceZeroPrice:\s*!isPaid/.test(logic) &&
+  /var isPaid = settlementStatus === '유상'[\s\S]*dashboardAddEquipments\(tid, entries, \{[\s\S]*forceZeroPrice:\s*!isPaid/.test(onsiteBackendFn) &&
     /price:\s*forceZeroPrice \? 0 :/.test(logic),
   'free/unsettled on-site additions must still enter the physical schedule but carry zero price'
 );
@@ -103,8 +116,8 @@ assert(
   'sheetAPI onsiteAddon case must forward directRegenerate from the request'
 );
 assert(
-  /function dashboardAddEquipments\(tid,\s*entries,\s*options\)[\s\S]*var directRegenerate[\s\S]*deleteAndRegenerateContract\(ss,\s*tid\)[\s\S]*finalAmount: contractResult && contractResult\.finalAmount/.test(logic),
-  'dashboardAddEquipments must return the regenerated contract URL and finalAmount when directRegenerate is requested'
+  /function dashboardAddEquipments\(tid,\s*entries,\s*options\)[\s\S]*scheduleContractRegenUnderLock_\(tid\)[\s\S]*contractRegenQueued = true[\s\S]*contractRegenPending:\s*contractRegenPending/.test(logic),
+  'dashboardAddEquipments must mark durable contract regeneration under lock and return pending state immediately'
 );
 
 ['dashboard.html', 'docs/dashboard.html'].forEach((file) => {

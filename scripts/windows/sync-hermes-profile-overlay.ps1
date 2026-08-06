@@ -413,6 +413,34 @@ function Write-CanonicalHashState {
     )
 }
 
+function Get-HermesWorkerModelContract {
+    # 모델/프로바이더 단일 소스: scripts/windows/hermes-model-contract.json (kakaoworker 항목).
+    # 파일이 없으면 검증된 기본값(gpt-5.6-sol, reasoning_effort high, max_turns 90)을 쓴다.
+    # 모델 교체는 계약 파일 수정으로만 하고, 이 스크립트는 계약과 프로필의 일치만 검증한다.
+    $contract = [pscustomobject]@{
+        model = 'gpt-5.6-sol'
+        reasoning_effort = 'high'
+        max_turns = 90
+    }
+    $contractPath = Join-Path $PSScriptRoot 'hermes-model-contract.json'
+    if (Test-Path -LiteralPath $contractPath -PathType Leaf) {
+        $parsed = Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        $worker = $parsed.kakaoworker
+        if ($null -eq $worker -or [string]::IsNullOrWhiteSpace([string]$worker.model)) {
+            throw 'hermes-model-contract.json kakaoworker.model must be a non-empty string.'
+        }
+        $contract.model = ([string]$worker.model).Trim()
+        if (-not [string]::IsNullOrWhiteSpace([string]$worker.reasoning_effort)) {
+            $contract.reasoning_effort = ([string]$worker.reasoning_effort).Trim()
+        }
+        $contractTurns = 0
+        if ([int]::TryParse([string]$worker.max_turns, [ref]$contractTurns) -and $contractTurns -ge 1) {
+            $contract.max_turns = $contractTurns
+        }
+    }
+    return $contract
+}
+
 function Assert-AiFirstProfileConfig {
     param([Parameter(Mandatory = $true)][string]$ProfileRoot)
 
@@ -422,25 +450,27 @@ function Assert-AiFirstProfileConfig {
     }
 
     $config = [IO.File]::ReadAllText($configPath, [Text.Encoding]::UTF8)
-    # AI-first invariant: model default gpt-5.6-sol, agent reasoning_effort high, agent max_turns 90.
+    $contract = Get-HermesWorkerModelContract
+    # AI-first invariant: 모델/추론강도는 계약 값과 일치, max_turns는 계약 최소값 이상.
+    # 계약과 다르면 조용히 되돌리지 않고 명시적으로 실패시켜 혼합 상태를 막는다.
     $requiredSettings = @(
         [pscustomobject]@{
             name = 'model.default'
-            pattern = '(?m)^\s{2}default:\s*["'']?gpt-5\.6-sol["'']?\s*(?:#.*)?$'
+            pattern = '(?m)^\s{2}default:\s*["'']?' + [regex]::Escape([string]$contract.model) + '["'']?\s*(?:#.*)?$'
         },
         [pscustomobject]@{
             name = 'agent.reasoning_effort'
-            pattern = '(?m)^\s{2}reasoning_effort:\s*["'']?high["'']?\s*(?:#.*)?$'
-        },
-        [pscustomobject]@{
-            name = 'agent.max_turns'
-            pattern = '(?m)^\s{2}max_turns:\s*90\s*(?:#.*)?$'
+            pattern = '(?m)^\s{2}reasoning_effort:\s*["'']?' + [regex]::Escape([string]$contract.reasoning_effort) + '["'']?\s*(?:#.*)?$'
         }
     )
     foreach ($setting in $requiredSettings) {
         if (-not [regex]::IsMatch($config, $setting.pattern)) {
-            throw "AI-first worker profile invariant failed for '$($setting.name)'."
+            throw "AI-first worker profile invariant failed for '$($setting.name)'. Expected the value from scripts/windows/hermes-model-contract.json; edit that contract (not this script) to change models, then update the profile config to match."
         }
+    }
+    $turnsMatch = [regex]::Match($config, '(?m)^\s{2}max_turns:\s*(\d+)\s*(?:#.*)?$')
+    if (-not $turnsMatch.Success -or [int]$turnsMatch.Groups[1].Value -lt [int]$contract.max_turns) {
+        throw "AI-first worker profile invariant failed for 'agent.max_turns'. It must be present and at least $($contract.max_turns); raising it is allowed, capping below the contract is not."
     }
 }
 

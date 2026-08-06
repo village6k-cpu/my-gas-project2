@@ -7,8 +7,8 @@ cd "$(dirname "$0")/.."
 
 BRANCH="$(git branch --show-current)"
 SCRIPT_ID="$(node -e "console.log(require('./.clasp.json').scriptId)")"
-TMPDIR="$(mktemp -d /tmp/gas-synccheck.XXXXXX)"
-cleanup() { rm -rf "$TMPDIR"; }
+SYNC_TMP_DIR="$(mktemp -d /tmp/gas-synccheck.XXXXXX)"
+cleanup() { rm -rf "$SYNC_TMP_DIR"; }
 trap cleanup EXIT
 
 echo "=========================================="
@@ -44,11 +44,11 @@ echo ""
 # 3. GAS와의 차이 (읽기 전용)
 echo "[3] GAS 동기화 (읽기 전용)"
 (
-  cp .clasp.json "$TMPDIR/.clasp.json"
-  cd "$TMPDIR" || exit 1
+  cp .clasp.json "$SYNC_TMP_DIR/.clasp.json"
+  cd "$SYNC_TMP_DIR" || exit 1
   clasp pull >/dev/null 2>&1
 )
-GAS_FILE_LIST="$(find "$TMPDIR" -maxdepth 1 -type f ! -name '.clasp.json' -exec basename {} \; | sort)"
+GAS_FILE_LIST="$(find "$SYNC_TMP_DIR" -maxdepth 1 -type f ! -name '.clasp.json' -exec basename {} \; | sort)"
 
 if [[ -z "$GAS_FILE_LIST" ]]; then
   echo "  ❌ GAS 파일을 가져오지 못했습니다."
@@ -59,7 +59,7 @@ else
     if [[ ! -f "$f" ]]; then
       echo "  ❌ 로컬에 없음: $f"
       DIFF_COUNT=$((DIFF_COUNT + 1))
-    elif ! diff -q "$TMPDIR/$f" "$f" >/dev/null; then
+    elif ! diff -q "$SYNC_TMP_DIR/$f" "$f" >/dev/null; then
       echo "  ⚠️  내용 다름: $f"
       DIFF_COUNT=$((DIFF_COUNT + 1))
     fi

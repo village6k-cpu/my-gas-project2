@@ -516,10 +516,20 @@ function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
 
   if (status === "취소") {
     if (tradeId) {
+      var checkoutStarted = previousStatus === '반출' || previousStatus === '반출중' || previousStatus === '반납완료';
+      if (!checkoutStarted && typeof isDashboardTradeCheckoutStarted_ === 'function') {
+        checkoutStarted = isDashboardTradeCheckoutStarted_(ss, tradeId);
+      }
+      if (checkoutStarted) {
+        sheet.getRange(row, 10).setValue(previousStatus || '반출');
+        try { ss.toast('이미 반출된 거래는 취소할 수 없습니다. 반납 절차로 마감해주세요.', '취소 차단', 6); } catch (toastErr) {}
+        return;
+      }
       var cancelProps = PropertiesService.getScriptProperties();
       cancelProps.deleteProperty('returnDone_' + tradeId);
       cancelProps.deleteProperty('returnPrevContractStatus_' + tradeId);
       cancelContract(ss, tradeId, row);
+      ensureCancelledTradeCleanupTrigger_(1000);
     }
     return;
   }
@@ -538,6 +548,7 @@ function handleContractMasterStatusEdit_(ss, sheet, row, rawStatus, oldStatus) {
       restoreProps.deleteProperty('returnPrevContractStatus_' + tradeId);
       sheet.getRange(row, 10).setValue("취소");
       cancelContract(ss, tradeId, row);
+      ensureCancelledTradeCleanupTrigger_(1000);
       return;
     }
 
@@ -1341,29 +1352,299 @@ function resyncAllContractDates() {
  */
 var CONTRACT_REGEN_TRIGGER_PROP_ = 'contractRegenTriggerScheduledAt_v1';
 var CONTRACT_REGEN_TRIGGER_STALE_MS_ = 10 * 60 * 1000;
+var CONTRACT_REGEN_CLAIM_PREFIX_ = 'contractRegenClaim_v1_';
+var CONTRACT_REGEN_CLAIM_LEASE_MS_ = 7 * 60 * 1000;
+var CONTRACT_REGEN_RETRY_PREFIX_ = 'contractRegenRetry_v1_';
+var CONTRACT_REGEN_MAX_ATTEMPTS_ = 5;
+var CONTRACT_REGEN_WATCHDOG_PROP_ = 'contractRegenWatchdogAt_v1';
+var CONTRACT_REGEN_WATCHDOG_HANDLER_ = 'regenPendingContractsWatchdog';
 
-function scheduleContractRegen(거래ID) {
+/** 임계구역에서도 안전한 계약서 queue 표식. ScriptApp I/O는 하지 않는다. */
+function scheduleContractRegenUnderLock_(거래ID) {
   var props = PropertiesService.getScriptProperties();
   var now = Date.now();
   props.setProperty('contractEditTS_' + 거래ID, String(now));
   try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
 
-  var scheduledAt = Number(props.getProperty(CONTRACT_REGEN_TRIGGER_PROP_) || 0);
-  var hasRecentScheduledTrigger = scheduledAt && (now - scheduledAt < CONTRACT_REGEN_TRIGGER_STALE_MS_);
-  if (!hasRecentScheduledTrigger) {
-    // 주의: GAS 일회성 트리거는 발화 후에도 목록에 남는다. 스테일 상태에서 목록에
-    // 보이는 트리거는 소진된 좀비일 가능성이 높음 — "있으니 안 만들기"로 두면
-    // 대기열이 영구 고아화됨(실제 15일 고착 발생). 지우고 새로 건다.
-    ScriptApp.getProjectTriggers().forEach(function(t) {
-      if (t.getHandlerFunction() === 'regenPendingContracts') ScriptApp.deleteTrigger(t);
-    });
-    ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
-    props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(now));
-  }
-
   // 거래 변경이 있었으니 dashboard/timeline 캐시도 즉시 무효화 → 다음 fetch는 fresh
   try { invalidateDashboardCache(); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
+}
+
+/** queue 표식 뒤 one-shot 트리거를 보장한다. 전역 ScriptLock 밖에서만 호출한다. */
+function ensureContractRegenTrigger_() {
+  var props = PropertiesService.getScriptProperties();
+  var now = Date.now();
+  try {
+    var scheduledAt = Number(props.getProperty(CONTRACT_REGEN_TRIGGER_PROP_) || 0);
+    var hasRecentScheduledTrigger = scheduledAt && (now - scheduledAt < CONTRACT_REGEN_TRIGGER_STALE_MS_);
+    if (!hasRecentScheduledTrigger) {
+      // 주의: GAS 일회성 트리거는 발화 후에도 목록에 남는다. 새 트리거 생성이 성공한
+      // 뒤에만 좀비를 정리해 create 실패 때 실행 경로가 0개가 되지 않게 한다.
+      var replacement = ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
+      ScriptApp.getProjectTriggers().forEach(function(t) {
+        if (t.getHandlerFunction() === 'regenPendingContracts' && t.getUniqueId() !== replacement.getUniqueId()) {
+          try { ScriptApp.deleteTrigger(t); } catch (deleteErr) {}
+        }
+      });
+      props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(now));
+    }
+  } catch (triggerErr) {
+    // 원장 커밋은 이미 끝났다. 트리거 quota/API 오류가 성공 응답을 뒤집지 않게 하고,
+    // 매분 rescueDashboardAsyncWorkerTriggers_가 다시 깨운다.
+    props.deleteProperty(CONTRACT_REGEN_TRIGGER_PROP_);
+    Logger.log('계약서 재생성 트리거 예약 실패(큐 보존): ' +
+      (triggerErr && triggerErr.message ? triggerErr.message : String(triggerErr)));
+  }
+}
+
+function scheduleContractRegen(거래ID) {
+  scheduleContractRegenUnderLock_(거래ID);
+  ensureContractRegenTrigger_();
+}
+
+function parseContractRegenRetry_(raw) {
+  var retry = null;
+  try { retry = JSON.parse(raw || 'null'); } catch (parseErr) {}
+  if (!retry || typeof retry !== 'object') retry = {};
+  retry.status = String(retry.status || 'pending');
+  retry.attempts = Number(retry.attempts || 0);
+  retry.nextAt = Number(retry.nextAt || 0);
+  return retry;
+}
+
+/** 호출자는 ScriptLock을 보유해야 한다. active claim의 가장 이른 만료 시각에 watchdog 1개만 둔다. */
+function armContractRegenWatchdogUnderLock_(props, fireAt) {
+  var desiredAt = Math.max(Date.now() + 1000, Number(fireAt || 0));
+  var currentAt = Number(props.getProperty(CONTRACT_REGEN_WATCHDOG_PROP_) || 0);
+  if (currentAt > Date.now() && currentAt <= desiredAt + 1000) return;
+
+  // 새 watchdog을 먼저 만든 뒤 이전 것들을 치운다. delete→create 사이 강제종료로
+  // 복구 트리거가 0개가 되는 창을 만들지 않는다.
+  var replacement = ScriptApp.newTrigger(CONTRACT_REGEN_WATCHDOG_HANDLER_)
+    .timeBased()
+    .after(Math.max(1000, desiredAt - Date.now()))
+    .create();
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (
+      t.getHandlerFunction() === CONTRACT_REGEN_WATCHDOG_HANDLER_ &&
+      t.getUniqueId() !== replacement.getUniqueId()
+    ) {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+  props.setProperty(CONTRACT_REGEN_WATCHDOG_PROP_, String(desiredAt));
+}
+
+/** 호출자는 ScriptLock을 보유해야 한다. 남은 claim에 맞춰 watchdog을 재계획한다. */
+function refreshContractRegenWatchdogUnderLock_(props) {
+  var all = props.getProperties();
+  var earliestAt = Infinity;
+  Object.keys(all).forEach(function(key) {
+    if (key.indexOf(CONTRACT_REGEN_CLAIM_PREFIX_) !== 0) return;
+    var 거래ID = key.substring(CONTRACT_REGEN_CLAIM_PREFIX_.length);
+    if (!all['contractEditTS_' + 거래ID]) {
+      props.deleteProperty(key);
+      return;
+    }
+    var claim = null;
+    try { claim = JSON.parse(all[key] || 'null'); } catch (parseErr) {}
+    if (!claim) return;
+    earliestAt = Math.min(earliestAt, Number(claim.leaseUntil || Date.now() + 1000));
+  });
+
+  if (isFinite(earliestAt)) {
+    armContractRegenWatchdogUnderLock_(props, earliestAt);
+    return;
+  }
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === CONTRACT_REGEN_WATCHDOG_HANDLER_) ScriptApp.deleteTrigger(t);
+  });
+  props.deleteProperty(CONTRACT_REGEN_WATCHDOG_PROP_);
+}
+
+function armContractRegenRunWatchdog_(props) {
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  try {
+    lock.waitLock(10000);
+    acquired = true;
+    armContractRegenWatchdogUnderLock_(props, Date.now() + CONTRACT_REGEN_CLAIM_LEASE_MS_);
+    return true;
+  } catch (lockErr) {
+    return false;
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+function clearContractRegenWatchdogIfIdle_(props) {
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  try {
+    lock.waitLock(10000);
+    acquired = true;
+    refreshContractRegenWatchdogUnderLock_(props);
+  } catch (lockErr) {
+    // 기존 watchdog을 남겨두는 쪽이 고아화보다 안전하다.
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+/**
+ * 재생성 1건의 소유권만 짧게 선점한다.
+ * 계약서/Drive/외부 원장 I/O는 이 함수가 잠금을 푼 뒤 실행해야 한다.
+ */
+function claimPendingContractRegen_(props, editKey, stableMs) {
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  try {
+    lock.waitLock(10000);
+    acquired = true;
+
+    var freshRaw = props.getProperty(editKey);
+    var freshTs = Number(freshRaw || 0);
+    if (!freshTs) {
+      props.deleteProperty(CONTRACT_REGEN_CLAIM_PREFIX_ + editKey.substring('contractEditTS_'.length));
+      return { claimed: false };
+    }
+    if (Date.now() - freshTs < stableMs) {
+      return { claimed: false, pending: true, nextAt: freshTs + stableMs };
+    }
+
+    var 거래ID = editKey.substring('contractEditTS_'.length);
+    // 재시도 상태는 편집 버전별 키다. 이전 재생성 실패가 끝나는 찰나 새 편집이
+    // 들어와도 옛 실패 횟수/failed 상태가 새 버전을 막지 않는다.
+    var retryKey = CONTRACT_REGEN_RETRY_PREFIX_ + 거래ID + '_' + String(freshRaw);
+    var retry = parseContractRegenRetry_(props.getProperty(retryKey));
+    if (retry.nextAt > Date.now()) {
+      return { claimed: false, pending: true, nextAt: retry.nextAt };
+    }
+
+    var claimKey = CONTRACT_REGEN_CLAIM_PREFIX_ + 거래ID;
+    var existing = null;
+    try { existing = JSON.parse(props.getProperty(claimKey) || 'null'); } catch (parseErr) {}
+    if (existing && Number(existing.leaseUntil || 0) > Date.now()) {
+      return { claimed: false, pending: true, nextAt: Number(existing.leaseUntil) };
+    }
+
+    var token = Utilities.getUuid();
+    var claim = {
+      claimed: true,
+      tradeId: 거래ID,
+      editKey: editKey,
+      claimedRaw: String(freshRaw),
+      claimKey: claimKey,
+      retryKey: retryKey,
+      token: token,
+      leaseUntil: Date.now() + CONTRACT_REGEN_CLAIM_LEASE_MS_
+    };
+    // GAS hard-timeout은 finally를 실행하지 않을 수 있다. 외부 Drive 작업 전에 lease
+    // 만료 watchdog을 먼저 남긴 뒤 claim을 기록해 editTS+claim 고아 상태를 막는다.
+    armContractRegenWatchdogUnderLock_(props, claim.leaseUntil);
+    props.setProperty(claimKey, JSON.stringify({
+      token: token,
+      claimedRaw: claim.claimedRaw,
+      leaseUntil: claim.leaseUntil
+    }));
+    return claim;
+  } catch (lockErr) {
+    return { claimed: false, busy: true, pending: true, nextAt: Date.now() + 3000, error: lockErr };
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+/**
+ * 선점한 편집 버전만 완료 처리한다. 성공한 동일 버전만 editTS를 지우고,
+ * 실패한 버전은 bounded backoff로 재시도한다.
+ */
+function finishPendingContractRegen_(props, claim, outcome) {
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  try {
+    lock.waitLock(10000);
+    acquired = true;
+
+    var currentClaim = null;
+    try { currentClaim = JSON.parse(props.getProperty(claim.claimKey) || 'null'); } catch (parseErr) {}
+    if (!currentClaim || currentClaim.token !== claim.token) {
+      return { pending: true, nextAt: Number(currentClaim && currentClaim.leaseUntil || claim.leaseUntil) };
+    }
+
+    var currentRaw = String(props.getProperty(claim.editKey) || '');
+    props.deleteProperty(claim.claimKey);
+
+    // 작업 중 새 편집이 들어왔으면 이전 결과/실패가 새 버전의 큐 상태를 덮지 않는다.
+    if (currentRaw !== claim.claimedRaw) {
+      return {
+        pending: !!currentRaw,
+        nextAt: currentRaw ? Number(currentRaw) + 2800 : 0
+      };
+    }
+
+    if (outcome && outcome.success) {
+      props.deleteProperty(claim.editKey);
+      props.deleteProperty(claim.retryKey);
+      return { success: true };
+    }
+
+    var retry = parseContractRegenRetry_(props.getProperty(claim.retryKey));
+    retry.attempts += 1;
+    retry.lastError = String(outcome && outcome.error || '계약서 재생성 실패').slice(0, 1000);
+    retry.lastFailedAt = Date.now();
+    if (retry.attempts >= CONTRACT_REGEN_MAX_ATTEMPTS_) {
+      // transient Drive/GAS 장애가 길어도 계약서 큐를 영구 중지하지 않는다.
+      // 사용자 카드 작업은 막지 않고 30분 저빈도 재시도로 계속 수렴한다.
+      retry.status = 'degraded';
+      retry.nextAt = Date.now() + 30 * 60 * 1000;
+      props.setProperty(claim.retryKey, JSON.stringify(retry));
+      return { pending: true, degraded: true, nextAt: retry.nextAt, attempts: retry.attempts };
+    }
+
+    retry.status = 'pending';
+    retry.nextAt = Date.now() + Math.min(5 * 60 * 1000, 15000 * Math.pow(2, retry.attempts - 1));
+    props.setProperty(claim.retryKey, JSON.stringify(retry));
+    return { pending: true, nextAt: retry.nextAt, attempts: retry.attempts };
+  } catch (lockErr) {
+    return { pending: true, nextAt: Number(claim.leaseUntil || Date.now() + 3000) };
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+}
+
+/**
+ * hard-timeout 복구용 공개 time-trigger handler.
+ * watchdog 자체 정리/상태 확인만 잠그고 실제 계약서 재생성은 잠금을 푼 뒤 호출한다.
+ */
+function regenPendingContractsWatchdog() {
+  var props = PropertiesService.getScriptProperties();
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  var hasWork = false;
+  try {
+    lock.waitLock(10000);
+    acquired = true;
+    ScriptApp.getProjectTriggers().forEach(function(t) {
+      if (t.getHandlerFunction() === CONTRACT_REGEN_WATCHDOG_HANDLER_) ScriptApp.deleteTrigger(t);
+    });
+    props.deleteProperty(CONTRACT_REGEN_WATCHDOG_PROP_);
+    var all = props.getProperties();
+    hasWork = Object.keys(all).some(function(key) {
+      return key.indexOf(CONTRACT_REGEN_CLAIM_PREFIX_) === 0 || key.indexOf('contractEditTS_') === 0;
+    });
+  } catch (lockErr) {
+    try {
+      ScriptApp.newTrigger(CONTRACT_REGEN_WATCHDOG_HANDLER_).timeBased().after(5000).create();
+      props.setProperty(CONTRACT_REGEN_WATCHDOG_PROP_, String(Date.now() + 5000));
+    } catch (triggerErr) {}
+    return;
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+  }
+
+  if (hasWork) regenPendingContracts();
 }
 
 /**
@@ -1373,6 +1654,13 @@ function scheduleContractRegen(거래ID) {
 function regenPendingContracts() {
   var STABLE_MS = 2800;
   var props = PropertiesService.getScriptProperties();
+  // 현재 one-shot을 정리하기 전에 실행 전체를 덮는 watchdog부터 만든다.
+  // claim 사이/트리거 정리 직후 hard-timeout도 편집 큐를 고아로 만들 수 없다.
+  if (!armContractRegenRunWatchdog_(props)) {
+    ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
+    props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
+    return;
+  }
   // 자기 자신(트리거) 먼저 삭제 — 재예약은 마지막에 결정. 트리거 정리는 잠금이 필요 없다.
   ScriptApp.getProjectTriggers().forEach(function(t) {
     if (t.getHandlerFunction() === 'regenPendingContracts') {
@@ -1382,60 +1670,130 @@ function regenPendingContracts() {
   props.deleteProperty(CONTRACT_REGEN_TRIGGER_PROP_);
 
   var all = props.getProperties();
-  var now = Date.now();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var stillPending = false;
+  var nextRunAt = Infinity;
   var BUDGET_MS = 4 * 60 * 1000; // 6분 실행 한도 전에 끊고 재예약 (대량 적체 대비)
   var startedAt = Date.now();
-  var lock = LockService.getScriptLock();
 
   for (var key in all) {
     if (!key.startsWith('contractEditTS_')) continue;
-    if (Date.now() - startedAt > BUDGET_MS) { stillPending = true; break; }
-    var 거래ID = key.substring('contractEditTS_'.length);
-
-    // 타임스탬프 재조회 — 루프 중 onEdit이 새로 썼을 수 있음
-    var freshTs = Number(props.getProperty(key));
-    if (!freshTs) continue;
-
-    var age = now - freshTs;
-    if (age < STABLE_MS) { stillPending = true; continue; }
-
-    // ★ 잠금은 거래 1건 재생성 동안만 쥔다. 예전엔 실행 전체(최대 4분)를 통째로 쥐어
-    //   반납완료·품목체크 같은 인터랙티브 쓰기가 5~20초 대기로는 항상 졌다.
-    //   1건마다 풀고(사이 250ms) 버튼 클릭이 끼어들 틈을 보장한다.
-    var acquired = false;
-    try {
-      lock.waitLock(10000);
-      acquired = true;
-    } catch (lockErr) {
+    if (Date.now() - startedAt > BUDGET_MS) {
       stillPending = true;
-      break; // 잠금이 오래 막혀 있으면 이번 실행은 접고 3초 뒤 재시도
+      nextRunAt = Math.min(nextRunAt, Date.now() + 3000);
+      break;
     }
-    try {
-      try {
-        var regenT0 = Date.now();
-        deleteAndRegenerateContract(ss, 거래ID);
-        try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
-        try { invalidateDashboardCache(); } catch (e1) {}
-        try { invalidateTimelineCache(); } catch (e2) {}
-        try { supaMarkTradeDirty_(거래ID); } catch (eMark) {} // 새 계약서 링크 → Supabase/앱 전파
-        Logger.log("계약서 재생성 완료(디바운스): " + 거래ID);
-        try { perfLog_("contractRegen", { reqID: 거래ID, totalMs: Date.now() - regenT0 }); } catch (ePerf) {}
-      } catch (err) {
-        try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e3) {}
-        Logger.log("계약서 재생성 실패: " + 거래ID + " - " + err.message);
+
+    // 전역 잠금은 "이 거래를 내가 처리한다"는 선점에만 쓴다.
+    var claim = claimPendingContractRegen_(props, key, STABLE_MS);
+    if (claim.busy) {
+      stillPending = true;
+      nextRunAt = Math.min(nextRunAt, Number(claim.nextAt || Date.now() + 3000));
+      break;
+    }
+    if (!claim.claimed) {
+      if (claim.pending) {
+        stillPending = true;
+        nextRunAt = Math.min(nextRunAt, Number(claim.nextAt || Date.now() + 3000));
       }
-      props.deleteProperty(key);
+      continue;
+    }
+
+    var 거래ID = claim.tradeId;
+    var regenSucceeded = false;
+    var regenErrorMessage = "";
+    try {
+      // 중요: Drive 복사/휴지통, 외부 거래내역 갱신을 포함한 실제 재생성은 잠금 밖이다.
+      var regenT0 = Date.now();
+      var regenResult = deleteAndRegenerateContract(ss, 거래ID);
+      // 링크 재기록 실패는 재생성 실패다 — 이 함수는 이미 옛 링크(거래내역 C열)를 비운
+      // 뒤이므로, 성공 처리하면 원장 링크가 조용히 빈 채 남는다. 실패로 던지면 기존
+      // bounded-retry 큐가 링크 기록까지 포함해 재시도한다.
+      var regenLinkUpdate = regenResult && regenResult.linkUpdate;
+      if ((!regenLinkUpdate || regenLinkUpdate.success !== true) &&
+          /거래ID를 찾을 수 없음/.test(String((regenLinkUpdate && regenLinkUpdate.error) || ''))) {
+        // 원장 행 자체가 없는 영구 조건 — 단순 재시도는 30분마다 계약서 파일을
+        // 만들고 휴지통에 버리는 무한 루프가 된다. 취소 거래는 행 부재가 정상이므로
+        // 링크 생략, 등록 거래는 검증된 프리미티브로 행을 복구해 1회 재기록,
+        // 계약마스터에도 없는 거래(완전삭제)는 큐를 비우고 수동 확인 대상으로 남긴다.
+        var regenContractStatus = '';
+        try {
+          var regenContract = getDashboardContractMapForIds_(ss.getSheetByName('계약마스터'), [거래ID])[거래ID];
+          regenContractStatus = String((regenContract && regenContract.contractStatus) || '');
+        } catch (statusErr) {}
+        if (regenContractStatus === '취소') {
+          Logger.log('취소 거래 — 거래내역 행 없음이 정상이라 링크 기록 생략: ' + 거래ID);
+          regenLinkUpdate = { success: true, skippedCancelled: true };
+        } else {
+          try {
+            ensureRegisteredTradeLedgerRow_(거래ID, { dryRun: false });
+            regenLinkUpdate = updateContractLink(거래ID, regenResult.url, regenResult.finalAmount, {});
+          } catch (relinkErr) {
+            var relinkMsg = relinkErr && relinkErr.message ? relinkErr.message : String(relinkErr);
+            if (/계약마스터에서 거래ID를 찾지 못했습니다|거래ID 중복/.test(relinkMsg)) {
+              Logger.log('계약서 링크 기록 불가 — 수동 확인 필요, 재시도 중단: ' + 거래ID + ' / ' + relinkMsg);
+              regenLinkUpdate = { success: true, manualRepairNeeded: true };
+            } else {
+              regenLinkUpdate = { success: false, error: relinkMsg };
+            }
+          }
+        }
+      }
+      if (!regenLinkUpdate || regenLinkUpdate.success !== true) {
+        throw new Error('거래내역 계약서 링크 기록 실패: ' + String((regenLinkUpdate && regenLinkUpdate.error) || '결과 없음'));
+      }
+      regenSucceeded = true;
+      try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
+      try { invalidateDashboardCache(); } catch (e1) {}
+      try { invalidateTimelineCache(); } catch (e2) {}
+      try { supaMarkTradeDirty_(거래ID); } catch (eMark) {} // 새 계약서 링크 → Supabase/앱 전파
+      Logger.log("계약서 재생성 완료(디바운스): " + 거래ID);
+      try { perfLog_("contractRegen", { reqID: 거래ID, totalMs: Date.now() - regenT0 }); } catch (ePerf) {}
+    } catch (err) {
+      regenErrorMessage = err && err.message ? err.message : String(err);
+      try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e3) {}
+      Logger.log("계약서 재생성 실패: " + 거래ID + " - " + regenErrorMessage);
     } finally {
-      if (acquired) try { lock.releaseLock(); } catch (relErr) {}
+      var finishResult = finishPendingContractRegen_(props, claim, {
+        success: regenSucceeded,
+        error: regenErrorMessage
+      });
+      if (finishResult && finishResult.pending) {
+        stillPending = true;
+        nextRunAt = Math.min(nextRunAt, Number(finishResult.nextAt || Date.now() + 3000));
+        if (finishResult.degraded) {
+          Logger.log("계약서 재생성 반복 실패(30분 뒤 자동 재시도): " + 거래ID);
+        }
+      }
     }
     Utilities.sleep(250);
   }
 
+  // 루프 스냅샷 뒤에 추가되었거나, 재생성 도중 다시 편집된 거래도 놓치지 않는다.
+  var remaining = props.getProperties();
+  for (var remainingKey in remaining) {
+    if (remainingKey.startsWith('contractEditTS_')) {
+      var remainingTradeId = remainingKey.substring('contractEditTS_'.length);
+      var remainingRetry = parseContractRegenRetry_(
+        remaining[CONTRACT_REGEN_RETRY_PREFIX_ + remainingTradeId + '_' + String(remaining[remainingKey] || '')]
+      );
+      stillPending = true;
+      nextRunAt = Math.min(
+        nextRunAt,
+        Number(remainingRetry.nextAt || Number(remaining[remainingKey] || 0) + STABLE_MS || Date.now() + 3000)
+      );
+    }
+  }
+
   if (stillPending) {
-    ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
-    props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
+    var scheduledAt = Number(props.getProperty(CONTRACT_REGEN_TRIGGER_PROP_) || 0);
+    if (!scheduledAt || Date.now() - scheduledAt >= CONTRACT_REGEN_TRIGGER_STALE_MS_) {
+      var nextDelayMs = isFinite(nextRunAt) ? Math.max(1000, nextRunAt - Date.now()) : 3000;
+      ScriptApp.newTrigger('regenPendingContracts').timeBased().after(nextDelayMs).create();
+      props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
+    }
+  } else {
+    clearContractRegenWatchdogIfIdle_(props);
   }
 }
 
@@ -1498,10 +1856,332 @@ function syncTemplateMasterDebounced() {
   }
 }
 
+var CANCEL_CLEANUP_ITEM_PREFIX_ = 'cancelCleanup_v1_';
+var CANCEL_CLEANUP_TRIGGER_PROP_ = 'cancelCleanupTriggerAt_v1';
+var CANCEL_CLEANUP_HANDLER_ = 'processCancelledTradeCleanup';
+var CANCEL_CLEANUP_MAX_ATTEMPTS_ = 5;
+var CANCEL_CLEANUP_LEASE_MS_ = 7 * 60 * 1000;
+
+function cancelledTradeCleanupKey_(거래ID) {
+  return CANCEL_CLEANUP_ITEM_PREFIX_ + String(거래ID || '').trim();
+}
+
+function parseCancelledTradeCleanup_(raw, 거래ID) {
+  var state = null;
+  try { state = JSON.parse(raw || 'null'); } catch (parseErr) {}
+  if (!state || typeof state !== 'object') state = {};
+  state.tradeId = String(state.tradeId || 거래ID || '').trim();
+  state.status = String(state.status || 'pending');
+  state.attempts = Number(state.attempts || 0);
+  state.nextAt = Number(state.nextAt || 0);
+  state.leaseUntil = Number(state.leaseUntil || 0);
+  state.completed = state.completed && typeof state.completed === 'object' ? state.completed : {};
+  return state;
+}
+
+/** 호출자는 ScriptLock을 보유해야 한다. */
+function clearCancelledTradeCleanupTriggersUnderLock_(props) {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === CANCEL_CLEANUP_HANDLER_) ScriptApp.deleteTrigger(t);
+  });
+  props.deleteProperty(CANCEL_CLEANUP_TRIGGER_PROP_);
+}
+
+/** 더 이른 트리거가 이미 있으면 그대로 둔다. create 성공 뒤에만 기존 트리거를 정리한다. */
+function scheduleCancelledTradeCleanupTriggerUnderLock_(props, delayMs) {
+  var safeDelay = Math.max(1000, Number(delayMs || 0));
+  var desiredAt = Date.now() + safeDelay;
+  var currentAt = Number(props.getProperty(CANCEL_CLEANUP_TRIGGER_PROP_) || 0);
+  if (currentAt > Date.now() && currentAt <= desiredAt + 1000) return;
+  try {
+    var existing = ScriptApp.getProjectTriggers().filter(function(t) {
+      return t.getHandlerFunction() === CANCEL_CLEANUP_HANDLER_;
+    });
+    var replacement = ScriptApp.newTrigger(CANCEL_CLEANUP_HANDLER_).timeBased().after(safeDelay).create();
+    props.setProperty(CANCEL_CLEANUP_TRIGGER_PROP_, String(desiredAt));
+    var replacementId = '';
+    try { replacementId = String(replacement.getUniqueId() || ''); } catch (replacementIdErr) {}
+    existing.forEach(function(t) {
+      var id = '';
+      try { id = String(t.getUniqueId() || ''); } catch (idErr) {}
+      if (!replacementId || id !== replacementId) try { ScriptApp.deleteTrigger(t); } catch (deleteErr) {}
+    });
+  } catch (triggerErr) {
+    props.deleteProperty(CANCEL_CLEANUP_TRIGGER_PROP_);
+    Logger.log('취소 외부 정리 트리거 예약 실패(큐 보존): ' +
+      (triggerErr && triggerErr.message ? triggerErr.message : String(triggerErr)));
+  }
+}
+
+function ensureCancelledTradeCleanupTrigger_(delayMs) {
+  scheduleCancelledTradeCleanupTriggerUnderLock_(PropertiesService.getScriptProperties(), delayMs || 1000);
+}
+
 /**
- * 계약 취소: 스케줄상세 삭제 + 개고생2.0 거래내역 삭제
+ * 취소 외부 정리를 거래ID별 durable queue에 넣는다.
+ * cancelContract 호출자는 이미 ScriptLock을 보유하므로 별도 중첩 잠금을 잡지 않는다.
+ */
+function scheduleCancelledTradeCleanup_(거래ID) {
+  거래ID = String(거래ID || '').trim();
+  if (!거래ID) return;
+
+  var props = PropertiesService.getScriptProperties();
+  var key = cancelledTradeCleanupKey_(거래ID);
+  var state = parseCancelledTradeCleanup_(props.getProperty(key), 거래ID);
+  if (state.status !== 'running') {
+    if (state.status === 'failed') state.attempts = 0;
+    state.status = 'pending';
+    state.nextAt = Date.now();
+    state.leaseUntil = 0;
+    state.token = '';
+  }
+  state.queuedAt = Date.now();
+  props.setProperty(key, JSON.stringify(state));
+}
+
+/** 호출자는 ScriptLock을 보유해야 한다. */
+function nextCancelledTradeCleanupUnderLock_(props) {
+  var all = props.getProperties();
+  var now = Date.now();
+  var due = null;
+  var earliestAt = Infinity;
+
+  Object.keys(all).forEach(function(key) {
+    if (key.indexOf(CANCEL_CLEANUP_ITEM_PREFIX_) !== 0) return;
+    var 거래ID = key.substring(CANCEL_CLEANUP_ITEM_PREFIX_.length);
+    var state = parseCancelledTradeCleanup_(all[key], 거래ID);
+    if (!state.tradeId || state.status === 'failed') return;
+
+    var availableAt = state.status === 'running' && state.leaseUntil > now
+      ? state.leaseUntil
+      : Number(state.nextAt || 0);
+    if (availableAt > now) {
+      if (availableAt < earliestAt) earliestAt = availableAt;
+      return;
+    }
+    if (!due || availableAt < due.availableAt) {
+      due = { key: key, state: state, availableAt: availableAt };
+    }
+  });
+
+  return { due: due, earliestAt: earliestAt };
+}
+
+/** 외부 I/O 전에 짧은 잠금 안에서 정확히 한 거래만 선점한다. */
+function claimCancelledTradeCleanup_() {
+  var props = PropertiesService.getScriptProperties();
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  var ensureDelay = 0;
+  try {
+    lock.waitLock(10000);
+    acquired = true;
+    props.deleteProperty(CANCEL_CLEANUP_TRIGGER_PROP_);
+
+    var next = nextCancelledTradeCleanupUnderLock_(props);
+    if (!next.due) {
+      if (isFinite(next.earliestAt)) {
+        ensureDelay = Math.max(1000, next.earliestAt - Date.now());
+      }
+      return null;
+    }
+
+    var state = next.due.state;
+    if (state.attempts >= CANCEL_CLEANUP_MAX_ATTEMPTS_) {
+      state.status = 'degraded';
+      state.failedAt = Date.now();
+      state.nextAt = Date.now() + 30 * 60 * 1000;
+      state.attempts = 0;
+      props.setProperty(next.due.key, JSON.stringify(state));
+      ensureDelay = 30 * 60 * 1000;
+      return null;
+    }
+
+    state.status = 'running';
+    state.attempts += 1;
+    state.token = Utilities.getUuid();
+    state.leaseUntil = Date.now() + CANCEL_CLEANUP_LEASE_MS_;
+    props.setProperty(next.due.key, JSON.stringify(state));
+
+    // 실행이 강제 종료돼도 lease 만료 뒤 다시 집어갈 watchdog.
+    ensureDelay = CANCEL_CLEANUP_LEASE_MS_ + 1000;
+    return { key: next.due.key, state: state, token: state.token };
+  } catch (lockErr) {
+    // 발화된 one-shot은 다시 실행되지 않는다. 잠금 경합만으로 큐가 고아가 되지 않게
+    // 새 트리거를 하나 남긴다. 다음 정상 실행이 좀비/중복 트리거를 전부 정리한다.
+    ensureDelay = 5000;
+    Logger.log("취소 외부 정리 선점 실패(재시도): " + (lockErr && lockErr.message ? lockErr.message : String(lockErr)));
+    return null;
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+    if (ensureDelay) ensureCancelledTradeCleanupTrigger_(ensureDelay);
+  }
+}
+
+function deleteCancelledTradeFromExternalLedger_(거래ID) {
+  var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+  if (!개고생URL) return 0;
+
+  var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
+  var 거래시트 = 개고생SS.getSheetByName("거래내역");
+  if (!거래시트 || 거래시트.getLastRow() < 2) return 0;
+
+  // 2026-04-23 컬럼 재배치: 거래ID D(4) → E(5)
+  var ids = 거래시트.getRange(2, 5, 거래시트.getLastRow() - 1, 1).getValues();
+  var delRows = [];
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]).trim() === 거래ID) delRows.push(i + 2);
+  }
+  for (var b = delRows.length - 1; b >= 0; b--) {
+    var blockEnd = delRows[b];
+    while (b - 1 >= 0 && delRows[b - 1] === delRows[b] - 1) b--;
+    거래시트.deleteRows(delRows[b], blockEnd - delRows[b] + 1);
+  }
+  return delRows.length;
+}
+
+/**
+ * 취소 워커용 strict Drive 정리. 공용 helper는 오류를 삼키므로 여기서는 throw시켜
+ * durable queue가 실제로 재시도할 수 있게 한다.
+ */
+function trashCancelledContractFiles_(거래ID) {
+  var props = PropertiesService.getScriptProperties();
+  var folderId = props.getProperty("CONTRACT_FOLDER_ID");
+  var fileName = "계약서_" + 거래ID + "_";
+  var iter = folderId
+    ? DriveApp.getFolderById(folderId).getFiles()
+    : DriveApp.searchFiles("title contains '" + fileName + "'");
+  var trashed = 0;
+  while (iter.hasNext()) {
+    var file = iter.next();
+    if (file.getName().indexOf(fileName) !== 0) continue;
+    file.setTrashed(true);
+    trashed++;
+  }
+  return trashed;
+}
+
+/** 이 함수 전체는 ScriptLock 밖에서 실행된다. 각 단계는 반복 호출해도 같은 결과다. */
+function runCancelledTradeCleanupOutsideLock_(state) {
+  var 거래ID = state.tradeId;
+  var errors = [];
+
+  if (!state.completed.supabase) {
+    try {
+      var supaCancel = supaCancelTrade_(거래ID);
+      if (!supaCancel || !supaCancel.ok) {
+        throw new Error(supaCancel && supaCancel.error ? supaCancel.error : '응답 실패');
+      }
+      state.completed.supabase = true;
+    } catch (supaErr) {
+      errors.push('Supabase: ' + (supaErr && supaErr.message ? supaErr.message : String(supaErr)));
+    }
+  }
+
+  if (!state.completed.externalLedger) {
+    try {
+      deleteCancelledTradeFromExternalLedger_(거래ID);
+      state.completed.externalLedger = true;
+    } catch (ledgerErr) {
+      errors.push('개고생2.0: ' + (ledgerErr && ledgerErr.message ? ledgerErr.message : String(ledgerErr)));
+    }
+  }
+
+  if (!state.completed.drive) {
+    try {
+      trashCancelledContractFiles_(거래ID);
+      state.completed.drive = true;
+    } catch (driveErr) {
+      errors.push('Drive: ' + (driveErr && driveErr.message ? driveErr.message : String(driveErr)));
+    }
+  }
+
+  return { success: errors.length === 0, errors: errors, state: state };
+}
+
+/** 결과 기록과 다음 트리거 계획만 짧은 잠금 안에서 수행한다. */
+function finishCancelledTradeCleanup_(claim, result) {
+  var props = PropertiesService.getScriptProperties();
+  var lock = LockService.getScriptLock();
+  var acquired = false;
+  var ensureDelay = 0;
+  var cleanupIdleTriggers = false;
+  try {
+    lock.waitLock(10000);
+    acquired = true;
+    var current = parseCancelledTradeCleanup_(props.getProperty(claim.key), claim.state.tradeId);
+    if (current.token === claim.token) {
+      if (result.success) {
+        props.deleteProperty(claim.key);
+      } else {
+        current.completed = result.state.completed;
+        current.lastError = result.errors.join(' | ').slice(0, 1000);
+        current.leaseUntil = 0;
+        current.token = '';
+        if (current.attempts >= CANCEL_CLEANUP_MAX_ATTEMPTS_) {
+          current.status = 'degraded';
+          current.failedAt = Date.now();
+          current.attempts = 0;
+          current.nextAt = Date.now() + 30 * 60 * 1000;
+        } else {
+          current.status = 'pending';
+          current.nextAt = Date.now() + Math.min(5 * 60 * 1000, 15000 * Math.pow(2, current.attempts - 1));
+        }
+        props.setProperty(claim.key, JSON.stringify(current));
+      }
+    }
+
+    props.deleteProperty(CANCEL_CLEANUP_TRIGGER_PROP_);
+    var next = nextCancelledTradeCleanupUnderLock_(props);
+    if (next.due) {
+      ensureDelay = 1000;
+    } else if (isFinite(next.earliestAt)) {
+      ensureDelay = Math.max(1000, next.earliestAt - Date.now());
+    } else {
+      cleanupIdleTriggers = true;
+    }
+  } finally {
+    if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+    if (ensureDelay) ensureCancelledTradeCleanupTrigger_(ensureDelay);
+    else if (cleanupIdleTriggers) {
+      try { clearCancelledTradeCleanupTriggersUnderLock_(props); } catch (cleanupErr) {}
+    }
+  }
+}
+
+/**
+ * 취소 외부 정리 one-shot worker.
+ * 선점/완료 기록 때만 ScriptLock을 잡고 Supabase·외부 시트·Drive I/O는 잠금 밖에서 한다.
+ */
+function processCancelledTradeCleanup() {
+  var claim = claimCancelledTradeCleanup_();
+  if (!claim) return;
+
+  var result;
+  try {
+    result = runCancelledTradeCleanupOutsideLock_(claim.state);
+  } catch (err) {
+    result = {
+      success: false,
+      errors: [err && err.message ? err.message : String(err)],
+      state: claim.state
+    };
+  }
+  finishCancelledTradeCleanup_(claim, result);
+  Logger.log(
+    (result.success ? "취소 외부 정리 완료: " : "취소 외부 정리 재시도 예약: ") +
+    claim.state.tradeId
+  );
+}
+
+/**
+ * 계약 취소: 로컬 시트/스타일/캐시는 즉시 반영하고 외부 정리는 durable queue로 넘긴다.
+ * 호출자는 ScriptLock을 보유해야 한다.
  */
 function cancelContract(ss, 거래ID, contractRow) {
+  if (typeof isDashboardTradeCheckoutStarted_ === 'function' && isDashboardTradeCheckoutStarted_(ss, 거래ID)) {
+    throw new Error('이미 반출된 거래는 취소할 수 없습니다. 반납 기준선을 보존해야 합니다: ' + 거래ID);
+  }
   var contractSheet = ss.getSheetByName("계약마스터");
   supaMarkTradeDirty_(거래ID); // 취소도 Supabase로 — timeline에서 사라져도 계약마스터 상태로 반영됨
 
@@ -1521,59 +2201,20 @@ function cancelContract(ss, 거래ID, contractRow) {
     Logger.log("스케줄상세 삭제: " + delRows.length + "행 (" + 거래ID + ")");
   }
 
-  // 앱은 Supabase를 직접 읽는다. 1분 동기화를 기다리지 않고 점유 행 제거 + 취소 상태 보존.
-  try {
-    var supaCancel = supaCancelTrade_(거래ID);
-    if (!supaCancel || !supaCancel.ok) Logger.log("Supabase 취소 동기화 실패(재시도 예정): " + 거래ID);
-  } catch (supaCancelErr) {
-    Logger.log("Supabase 취소 동기화 오류(재시도 예정): " + supaCancelErr.message);
-  }
+  // Supabase/외부 원장/Drive는 버튼 응답을 막지 않도록 잠금 밖 one-shot worker에서 처리.
+  scheduleCancelledTradeCleanup_(거래ID);
 
-  // 2. 개고생2.0 거래내역에서 해당 거래ID 행 삭제
-  try {
-    var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
-    if (개고생URL) {
-      var 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
-      var 거래시트 = 개고생SS.getSheetByName("거래내역");
-      if (거래시트 && 거래시트.getLastRow() >= 2) {
-        // 2026-04-23 컬럼 재배치: 거래ID D(4) → E(5)
-        var ids = 거래시트.getRange(2, 5, 거래시트.getLastRow() - 1, 1).getValues();
-        var 거래delRows = [];
-        for (var j = 0; j < ids.length; j++) {
-          if (String(ids[j][0]).trim() === 거래ID) 거래delRows.push(j + 2);
-        }
-        // 연속 블록 단위, 아래부터 삭제 — 위 블록 행번호가 안 밀림
-        for (var g = 거래delRows.length - 1; g >= 0; g--) {
-          var gEnd = 거래delRows[g];
-          while (g - 1 >= 0 && 거래delRows[g - 1] === 거래delRows[g] - 1) g--;
-          거래시트.deleteRows(거래delRows[g], gEnd - 거래delRows[g] + 1);
-          Logger.log("개고생2.0 거래내역 삭제: 행 " + 거래delRows[g] + (gEnd > 거래delRows[g] ? "~" + gEnd : "") + " (" + 거래ID + ")");
-        }
-      }
-    }
-  } catch (err) {
-    Logger.log("개고생2.0 거래내역 삭제 실패: " + err.message);
-  }
-
-  // 2.5 Drive 계약서 파일 휴지통 이동 (취소 건마다 고아 파일이 쌓이던 문제)
-  try {
-    var trashedCount = trashContractFilesForTrade_(거래ID);
-    if (trashedCount) Logger.log("취소 계약서 파일 정리: " + trashedCount + "개 (" + 거래ID + ")");
-  } catch (trashErr) {
-    Logger.log("취소 계약서 파일 정리 실패 (계속 진행): " + trashErr.message);
-  }
-
-  // 3. 계약마스터 행 전체를 취소 스타일로 (연빨강 배경 + 취소선 + 어두운 글자)
+  // 2. 계약마스터 행 전체를 취소 스타일로 (연빨강 배경 + 취소선 + 어두운 글자)
   var rowRange = contractSheet.getRange(contractRow, 1, 1, 11);  // A:K
   rowRange.setBackground("#FFC7CE");
   rowRange.setFontColor("#9C0006");
   rowRange.setFontLine("line-through");
 
-  // 4. dashboard/timeline 캐시 무효화 (취소된 거래의 반출/반납 날짜 포함)
+  // 3. dashboard/timeline 캐시 무효화 (취소된 거래의 반출/반납 날짜 포함)
   try { invalidateDashboardCacheForTrade_(거래ID); } catch (e) {}
   try { invalidateTimelineCache(); } catch (e2) {}
 
-  Logger.log("계약 취소 완료: " + 거래ID);
+  Logger.log("계약 취소 로컬 반영 완료(외부 정리 예약): " + 거래ID);
 }
 
 /**
