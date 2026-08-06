@@ -406,6 +406,19 @@ export function buildReadOnlyRagContext(config = {}) {
   };
 }
 
+export function buildBrainContext(config = {}, { existsImpl = fs.existsSync } = {}) {
+  const contextPath = text(config.brainContextPath).trim();
+  const customerProfilesPath = text(config.brainCustomerProfilesPath).trim();
+  const contextAvailable = Boolean(contextPath) && existsImpl(contextPath);
+  const profilesAvailable = Boolean(customerProfilesPath) && existsImpl(customerProfilesPath);
+  if (!contextAvailable && !profilesAvailable) return null;
+  return {
+    enabled: true,
+    contextPath: contextAvailable ? contextPath : null,
+    customerProfilesPath: profilesAvailable ? customerProfilesPath : null
+  };
+}
+
 export async function buildReadOnlyLookupContext(config, job = {}, options = {}) {
   const gasApiUrl = config.gasApiUrl || DEFAULT_GAS_API_URL;
   const sheetApiKey = config.sheetApiKey || DEFAULT_SHEET_API_KEY;
@@ -542,6 +555,9 @@ export function buildHermesPrompt(job, options = {}) {
   const currentConfirmedPolicyText = options.ragContext
     ? `\nCURRENT_CONFIRMED_POLICY: 주소=서울 마포구 동교로 23길 32, 2층, 지도=https://naver.me/5mIWTFQ1, 영업=24시간. 절차=장비명+기간→가용확인→방문수령→반납, 필수=장비명/수량/반출일시/반납일시/예약자명/연락처. 할인=학생 30%, 개인사업자/프리랜서 20%, 단골=개사프20%+10%, 제휴=개사프20%+20%. 장기=2일10%,3~5일20%,6~9일35%,10~14일40%,15~19일45%,20일+50%. 계산=할인 곱셈, 24시간 1일, +6시간 동일, 6시간 초과 +1일, VAT=할인후*1.1 10원 올림.\n`
     : '';
+  const brainContextText = options.brainContext?.enabled
+    ? `\nG-BRAIN OWNER CONTEXT (read-only, advisory):\n${options.brainContext.contextPath ? `- 사장 판단 기준·운영 해석 문서(file 도구로 read-only 열람): ${options.brainContext.contextPath}\n` : ''}${options.brainContext.customerProfilesPath ? `- 고객 프로필 JSONL(1인 1줄: name/segment/누적방문/미수금/사고이력/이탈주의): ${options.brainContext.customerProfilesPath} — 파일이 크니 전체를 읽지 말고 현재 고객명이 포함된 줄만 찾아 읽어라.\n` : ''}- 단골/VIP 여부, 미수금, 과거 사고이력, 사장 응대 기준을 파악해 사장처럼 응대하는 데 쓴다. 프로필의 segment는 참고용이며 할인유형은 여전히 고객DB I열이 우선한다.\n- advisory다: 재고/예약/가격/정책의 근거가 아니다. CURRENT_CONFIRMED_POLICY와 시트/화면이 항상 우선하며, brain 파일을 auto_send grounding으로 선언할 수 없다.\n`
+    : '';
   return `AI-first Kakao rental-shop worker task.
 
 CRITICAL RULES:
@@ -611,7 +627,7 @@ JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
 ${currentConfirmedPolicyText}
 ${navigationContextText}
-${lookupContextText}${ragContextText}
+${lookupContextText}${ragContextText}${brainContextText}
 SHEETS TOOL AVAILABLE VIA GAS API:
 - URL: ${gasApiUrl}
 - Target sheet for reservation inquiry candidates: 확인요청
@@ -3832,6 +3848,8 @@ function requireConfig() {
     askApiSecret: process.env.ASK_API_SECRET || '',
     villageAiKakaoSkillSecret: process.env.VILLAGE_AI_KAKAO_SKILL_SECRET || '',
     ragTimeoutMs: Number(process.env.VILLAGE_AI_RAG_TIMEOUT_MS || 30000) || 30000,
+    brainContextPath: process.env.VILLAGE_BRAIN_CONTEXT_PATH || 'C:\\Village\\VILLAGE_Brain\\Ops\\brain-context-latest.md',
+    brainCustomerProfilesPath: process.env.VILLAGE_BRAIN_CUSTOMER_PROFILES_PATH || 'C:\\Village\\VILLAGE_Brain\\Ops\\customer-profiles.jsonl',
     followUpTable: process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items',
     followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
     autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
@@ -7259,12 +7277,13 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     }
     const lookupContext = await buildReadOnlyLookupContext(config, job);
     const ragContext = buildReadOnlyRagContext(config);
+    const brainContext = buildBrainContext(config);
     timings.mark('lookup');
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
-    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext });
+    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext, brainContext });
     if (dryRun) {
-      Object.assign(result, { status: 'dry_run', job: summarizeJob(job), lookupContext, ragContext, prompt });
+      Object.assign(result, { status: 'dry_run', job: summarizeJob(job), lookupContext, ragContext, brainContext, prompt });
       return result;
     }
 

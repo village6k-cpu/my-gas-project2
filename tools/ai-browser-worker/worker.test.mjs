@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { customerClusterHash } from './follow-up-policy.mjs';
 
 import {
+  buildBrainContext,
   buildHermesPrompt,
   extractJsonObject,
   buildSheetAppendPayload,
@@ -5613,6 +5614,37 @@ test('buildHermesPrompt scopes auto-send by grounding, not topic whitelist', () 
   assert.ok(prompt.includes('파손·분실 배상 다툼, 환불 분쟁, 법적 문제'));
   assert.ok(prompt.includes('grounding="authoritative_sheet"'));
   assert.ok(prompt.includes('price_paused면 가격 자동발송 금지'));
+});
+
+test('buildBrainContext exposes G-BRAIN files only when present on disk', () => {
+  const config = { brainContextPath: 'C:\\brain\\ctx.md', brainCustomerProfilesPath: 'C:\\brain\\profiles.jsonl' };
+  assert.deepEqual(buildBrainContext(config, { existsImpl: () => true }), {
+    enabled: true,
+    contextPath: 'C:\\brain\\ctx.md',
+    customerProfilesPath: 'C:\\brain\\profiles.jsonl'
+  });
+  assert.equal(buildBrainContext(config, { existsImpl: () => false }), null);
+  const onlyContext = buildBrainContext(config, { existsImpl: (candidate) => candidate === 'C:\\brain\\ctx.md' });
+  assert.equal(onlyContext.contextPath, 'C:\\brain\\ctx.md');
+  assert.equal(onlyContext.customerProfilesPath, null);
+  assert.equal(buildBrainContext({}, { existsImpl: () => true }), null);
+});
+
+test('buildHermesPrompt wires G-BRAIN owner context as advisory read-only knowledge', () => {
+  const prompt = buildHermesPrompt({ id: 'job-brain', preview_text: '단골 문의' }, {
+    brainContext: {
+      enabled: true,
+      contextPath: 'C:\\Village\\VILLAGE_Brain\\Ops\\brain-context-latest.md',
+      customerProfilesPath: 'C:\\Village\\VILLAGE_Brain\\Ops\\customer-profiles.jsonl'
+    }
+  });
+  assert.ok(prompt.includes('G-BRAIN OWNER CONTEXT'));
+  assert.ok(prompt.includes('brain-context-latest.md'));
+  assert.ok(prompt.includes('customer-profiles.jsonl'));
+  assert.ok(prompt.includes('할인유형은 여전히 고객DB I열이 우선'));
+  assert.ok(prompt.includes('auto_send grounding으로 선언할 수 없다'));
+  const withoutBrain = buildHermesPrompt({ id: 'job-brain-none', preview_text: '문의' });
+  assert.equal(withoutBrain.includes('G-BRAIN OWNER CONTEXT'), false);
 });
 
 test('closeKakaoConversationTargetViaDevtools never closes the sole main tab after same-target navigation', async () => {
