@@ -129,7 +129,15 @@ assert.match(source, /var mergeSchedulePlan = planMergedScheduleRows_\(/);
 assert.match(source, /var neededRows = mergeSchedulePlan\.writeSourceIndexes\.length/);
 assert.match(source, /mergeSchedulePlan\.writeSourceIndexes\.forEach\(function\(sourceIndex\)/);
 assert.match(source, /var _mergeRequestPhoneKey = _confirmRequestPhoneKey_\(연락처\)/);
-assert.match(source, /if \(!_mergeRequestPhoneKey \|\| !_candidatePhoneKey \|\| _candidatePhoneKey !== _mergeRequestPhoneKey\) continue/);
+// 인라인 continue 가드는 isRegisterMergeCandidate_ 술어로 리팩터링됐다. 계약은 동일:
+// 요청·후보 양쪽에 전화키가 있고 정확히 일치할 때만 기존 거래에 합칠 수 있다.
+assert.match(source, /if \(!isRegisterMergeCandidate_\(_sData\[si\], _candidateContract, _mergeExpected\)\) continue/);
+const mergeCandidateSource = extractFunction('isRegisterMergeCandidate_');
+assert.match(
+  mergeCandidateSource,
+  /return !!requestPhoneKey && !!candidatePhoneKey && requestPhoneKey === candidatePhoneKey/,
+  'merge candidacy must still require an exact phone-key match on both sides'
+);
 const repairSource = extractFunction('repairDashboardDuplicateScheduleRows');
 assert.match(source, /supaMarkTradeDirty_\(tid\)/);
 assert.match(repairSource, /scheduleContractRegen\(tid\)/, 'duplicate-row repair must regenerate the affected contract');
