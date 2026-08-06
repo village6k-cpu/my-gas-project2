@@ -875,6 +875,21 @@ export function validateAiDecisionContract(decision = {}) {
   if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
     return { valid: false, errors: ['decision must be an object'] };
   }
+  const hasDecisionSemantics = Boolean(
+    text(decision.classification).trim()
+    || typeof decision.should_write_to_sheet === 'boolean'
+    || (decision.reply_decision && typeof decision.reply_decision === 'object')
+    || (Array.isArray(decision.follow_up_items) && decision.follow_up_items.length)
+  );
+  if (!hasDecisionSemantics) {
+    const providerError = text(decision.error || decision.error_description).trim();
+    return {
+      valid: false,
+      errors: [providerError
+        ? `decision is a provider/tool error payload, not an AI decision: ${providerError.slice(0, 200)}`
+        : 'decision is empty: no classification, reply_decision, follow_up_items, or should_write_to_sheet']
+    };
+  }
 
   if (decision.should_write_to_sheet === true) {
     const row = decision.sheet_row_candidate && typeof decision.sheet_row_candidate === 'object'

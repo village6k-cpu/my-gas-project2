@@ -5607,6 +5607,26 @@ test('validateAiDecisionContract allows sheet-grounded sensitive_commitment auto
   assert.ok(noSend.errors.some((entry) => entry.includes('no_send cannot use auto_send')));
 });
 
+test('validateAiDecisionContract fails provider error payloads instead of treating them as decisions', () => {
+  const authError = validateAiDecisionContract({
+    error: 'invalid_grant',
+    error_description: 'Refresh token has been revoked',
+    kill_switch_observed: 'active'
+  });
+  assert.equal(authError.valid, false);
+  assert.ok(authError.errors.some((entry) => entry.includes('provider/tool error payload')));
+  assert.ok(authError.errors.some((entry) => entry.includes('invalid_grant')));
+  const empty = validateAiDecisionContract({});
+  assert.equal(empty.valid, false);
+  assert.ok(empty.errors.some((entry) => entry.includes('decision is empty')));
+  const legitimateNoOp = validateAiDecisionContract({
+    should_write_to_sheet: false,
+    classification: 'ignore',
+    reason: '광고 메시지'
+  });
+  assert.equal(legitimateNoOp.valid, true);
+});
+
 test('buildHermesPrompt scopes auto-send by grounding, not topic whitelist', () => {
   const prompt = buildHermesPrompt({ id: 'job-owner-mode', preview_text: '가격 문의' }, { gasApiUrl: 'https://example.test/exec' });
   assert.ok(prompt.includes('자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다'));
