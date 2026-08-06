@@ -126,7 +126,6 @@ try {
     & $profileOverlayScriptPath `
         -ProfileHome $workerProfileHome `
         -MacHermesHome $resolvedHermesHome `
-        -RuntimeHome $resolvedHermesHome `
         -ProfileScoped `
         -Confirm:$false | Out-Null
 
@@ -166,6 +165,10 @@ try {
         (ConvertTo-WindowsCommandLineArgument -Value "--remote-debugging-port=$devToolsPort"),
         (ConvertTo-WindowsCommandLineArgument -Value '--no-first-run'),
         (ConvertTo-WindowsCommandLineArgument -Value '--start-minimized'),
+        # 최신 Chromium은 공개 사이트(카카오 페이지)에서 127.0.0.1(브리지)로의 요청을
+        # Local Network Access 권한으로 막는다. 자동화 전용 프로필이므로 이 검사를 끄지
+        # 않으면 감시자 이벤트가 브리지에 도달하지 못해 파이프라인이 조용히 죽는다.
+        (ConvertTo-WindowsCommandLineArgument -Value '--disable-features=LocalNetworkAccessChecks,PrivateNetworkAccessChecks,PrivateNetworkAccessSendPreflights'),
         (ConvertTo-WindowsCommandLineArgument -Value $chromeProfileArgument),
         (ConvertTo-WindowsCommandLineArgument -Value $extensionArgument),
         (ConvertTo-WindowsCommandLineArgument -Value $loadExtensionArgument),
@@ -212,6 +215,26 @@ try {
             throw 'Owned bridge did not make its localhost port ready.'
         }
         Start-Sleep -Milliseconds 250
+    }
+
+    # 이 머신의 Chromium 빌드는 --load-extension을 조용히 무시한다 (프로필 확장 등록 0개로 확인).
+    # 확장 인자는 이를 지원하는 빌드용으로 유지하되, 감시자는 CDP 주입으로 보장한다.
+    # 주입이 없으면 chrome/bridge가 떠 있어도 DOM 이벤트가 0건이라 파이프라인이 조용히 죽는다.
+    $watcherInjectorPath = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'tools\kakao-dom-bridge\inject-watcher-cdp.py') -ErrorAction Stop).Path
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $pythonCommand) {
+        Write-Warning 'python not found; Kakao watcher CDP injection skipped - the DOM watcher will not run.'
+    }
+    else {
+        $watcherInjected = $false
+        foreach ($injectionAttempt in 1..3) {
+            & $pythonCommand.Source $watcherInjectorPath --port $devToolsPort --wait 20 | Out-Null
+            if ($LASTEXITCODE -eq 0) { $watcherInjected = $true; break }
+            Start-Sleep -Seconds 5
+        }
+        if (-not $watcherInjected) {
+            Write-Warning 'Kakao watcher CDP injection failed after 3 attempts - the DOM watcher is not running.'
+        }
     }
 
     if ($IncludeGateway) {
