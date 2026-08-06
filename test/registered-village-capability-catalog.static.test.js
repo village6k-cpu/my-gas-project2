@@ -64,7 +64,7 @@ test('GAS operation receipts make a repeated Hermes mutation idempotent', () => 
     },
     PropertiesService: { getScriptProperties: () => properties },
     LockService: {
-      getScriptLock: () => ({ waitLock() {}, releaseLock() {} })
+      getScriptLock: () => ({ waitLock() {}, tryLock() { return true; }, releaseLock() {} })
     },
     ContentService: {
       MimeType: { JSON: 'json' },
