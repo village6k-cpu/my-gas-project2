@@ -290,9 +290,56 @@
     }
   }
 
+  // 2026-08-06 kakao deploy moved the chat console inside open shadow roots, so
+  // document-level queries and a document-only observer stopped seeing the list.
+  // Walk every open shadow root (briefly cached) so scanning and observing work
+  // in both the old flat layout and the new shadow-DOM layout.
+  function allDomRoots(limit = 400) {
+    const now = Date.now();
+    if (STATE.domRootsCache && now - STATE.domRootsCache.at < 5000) return STATE.domRootsCache.roots;
+    const roots = [document];
+    const queue = [document];
+    while (queue.length && roots.length < limit) {
+      const root = queue.shift();
+      let all = [];
+      try { all = root.querySelectorAll('*'); } catch (err) { continue; }
+      for (const el of all) {
+        if (el.shadowRoot) { roots.push(el.shadowRoot); queue.push(el.shadowRoot); }
+      }
+    }
+    STATE.domRootsCache = { at: now, roots };
+    observeDiscoveredRoots(roots);
+    return roots;
+  }
+
+  function deepQuerySelectorAll(selector) {
+    const out = [];
+    for (const root of allDomRoots()) {
+      try { out.push(...root.querySelectorAll(selector)); } catch (err) {}
+    }
+    return out;
+  }
+
+  function observeDiscoveredRoots(roots) {
+    if (!STATE.observer) return;
+    if (!STATE.observedRoots) STATE.observedRoots = new WeakSet();
+    for (const root of roots) {
+      if (root === document || STATE.observedRoots.has(root)) continue;
+      try {
+        STATE.observer.observe(root, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['class', 'aria-label', 'title']
+        });
+        STATE.observedRoots.add(root);
+      } catch (err) {}
+    }
+  }
+
   function chatRowCandidates() {
     const seenRows = new Set();
-    return Array.from(document.querySelectorAll([
+    return Array.from(deepQuerySelectorAll([
       '.ReactVirtualized__List.list_board > .ReactVirtualized__Grid__innerScrollContainer > li',
       '[role="grid"].list_board > .ReactVirtualized__Grid__innerScrollContainer > li'
     ].join(',')))
@@ -347,7 +394,7 @@
   function chatListScrollContainer() {
     const candidates = [
       document.scrollingElement,
-      ...Array.from(document.querySelectorAll('main, section, [role="main"], [role="list"], div, ul'))
+      ...deepQuerySelectorAll('main, section, [role="main"], [role="list"], div, ul')
     ].filter(Boolean)
       .filter((el) => el.scrollHeight > el.clientHeight + 80 && isVisible(el));
 
@@ -506,6 +553,13 @@
       attributes: true,
       attributeFilter: ['class', 'aria-label', 'title']
     });
+
+    // Shadow-root mutations never reach a document-level observer, so attach to
+    // every open shadow root as well; allDomRoots() re-attaches to roots that
+    // appear later via observeDiscoveredRoots.
+    STATE.observedRoots = new WeakSet();
+    STATE.domRootsCache = null;
+    observeDiscoveredRoots(allDomRoots());
 
     log('observer started');
   }
