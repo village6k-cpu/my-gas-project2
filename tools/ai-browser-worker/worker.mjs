@@ -552,8 +552,9 @@ CRITICAL RULES:
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use the bounded tool budget deliberately: batch independent read-only checks, avoid repeats, and finish FINAL_JSON before exhausting the turn budget or global timeout. Batch read-only lookups only when query breadth/detail are preserved.
 - Once sufficient, return FINAL_JSON immediately. Tool/API failures are evidence gaps: encode uncertainty in confidence/reason/follow-up; never substitute an apology or progress report.
-- 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때만 간단한 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
-- 자동발송 후보: FAQ/절차/수령·반납/단순 후속/예약 접수/연락처 요청. 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능. 가격/환불/파손/세금 draft_only. 입금 알림은 완료 단정 없이 접수 ACK만 auto_send.
+- 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때 근거가 확보된 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
+- 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 가격·환불정책·파손규정·세금 안내를 포함해 어떤 주제든 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능.
+- 예외(항상 사장 확인): 실제 분쟁 상황 — 파손·분실 배상 다툼, 환불 분쟁, 법적 문제 제기, 강한 항의 — 은 근거가 있어도 auto_send 금지. draft_only + owner_review_required=true로 올린다.
 - 예약 확정, 재고 가능 단정, 가격 확정은 화면/시트 근거 없이 단정하지 않는다. 하지만 고객이 예약형식에 맞게 정보를 준 경우 확인요청 시트 입력은 적극 수행한다.
 - Google Sheets 입력은 API로 가능하다. 어떤 값을 넣을지는 AI가 판단하되, 예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다.
 
@@ -568,7 +569,7 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 예약/가격/FAQ/무시를 AI가 분류한다. 미리보기 텍스트만으로 예약·가격·FAQ를 확정하지 않는다.
 - 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/처리판 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
 - CURRENT_CONFIRMED_POLICY가 최신 FAQ/정책 기준이다. RAG가 충돌하면 현재 정책으로 고치고, 없는 정책 FAQ는 high/retrieved RAG로 보강하거나 draft_only/follow_up.
-- 가격 문의는 세트마스터 단가, 고객할인, 장기할인으로 초안/follow_up을 만든다. price_paused면 가격 자동발송 금지.
+- 가격 문의는 세트마스터 단가, 고객할인(고객DB I열 우선), 장기할인으로 직접 계산해 답한다. 단가를 시트에서 실제 조회했고 금액 산식대로 계산했으면 safetyClass="sensitive_commitment" + grounding="authoritative_sheet"로 auto_send 가능. 조회/계산 근거가 불완전하면 초안/follow_up. price_paused면 가격 자동발송 금지.
 - 서류(계약서/견적서/세금계산서/거래명세서)는 계산 생략 금지. 거래ID는 계약마스터+스케줄상세 대표/단품 L열 단가로 수량×일수×단가 계산; RQ는 확인요청 결과+세트마스터 단가로 부분계산하고 미등록/단가불명은 "미계산/확인 필요"로 표시한다.
 -반복견적=내예약 견적 안내
 - 금액 산식: 24시간=1일, +6시간 동일, 초과 +1일; 정가×고객/제휴/단골 할인×장기할인×VAT1.1, 10원 올림.
@@ -638,7 +639,7 @@ TASK:
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
 12-1. For real-world mutations set requiresHumanAction=true, allowed actionFamily, stable businessKey; otherwise false, "none", "".
-13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for simple, high-confidence replies that are safe to send now under the kill-switch policy. For auto_send, explicitly choose safetyClass, grounding, requiresRag, attachmentKeys, and alreadyDelivered. Text alone can never grant an auto-send or attachment. Otherwise use draft_only or no_reply.
+13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for grounded, high-confidence replies safe to send under the kill-switch policy — any topic qualifies when grounded. For auto_send, explicitly choose safetyClass, grounding, requiresRag, attachmentKeys, alreadyDelivered. Text alone can never grant an auto-send or attachment. Class guide: 시트 조회·계산 근거의 약속형 답변(가격 견적 등)은 sensitive_commitment+grounding="authoritative_sheet"로만 auto_send; 정책 근거는 current_policy_answer, RAG 근거는 rag_grounded_answer(requiresRag=true). 근거 없는 약속/분쟁은 draft_only. Otherwise use draft_only or no_reply.
 14. Return only the final machine-readable JSON below.
 
 FINAL OUTPUT FORMAT:
@@ -968,8 +969,11 @@ export function validateAiDecisionContract(decision = {}) {
     const safetyClass = replySafetyClass(decision);
     const grounding = replyGrounding(decision);
     if (!AI_REPLY_SAFETY_CLASSES.has(safetyClass)) errors.push('reply_decision.safetyClass must be an explicit allowed value');
-    if (safetyClass === 'sensitive_commitment' || safetyClass === 'no_send') {
-      errors.push(`reply_decision.safetyClass ${safetyClass} cannot use auto_send`);
+    if (safetyClass === 'no_send') {
+      errors.push('reply_decision.safetyClass no_send cannot use auto_send');
+    }
+    if (safetyClass === 'sensitive_commitment' && grounding !== 'authoritative_sheet') {
+      errors.push('reply_decision.safetyClass sensitive_commitment requires authoritative_sheet grounding for auto_send');
     }
     if (!AI_REPLY_GROUNDING_CLASSES.has(grounding) || grounding === 'none') {
       errors.push('reply_decision.grounding must be an explicit evidence source');
@@ -5712,24 +5716,15 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   const grounding = replyGrounding(decision);
   const requiresRag = replyRequiresRag(decision);
   const priceLikeClassifications = new Set(['price', 'price_review', 'quote_send']);
-  const allowedSafetyClasses = new Set([
-    'simple_ack',
-    'contact_request',
-    'reservation_intake_ack',
-    'payment_receipt_ack',
-    'current_policy_answer',
-    'rag_grounded_answer',
-    'authoritative_availability_answer',
-    'staff_confirmed_reservation_acceptance',
-    'live_quote_link_guidance'
-  ]);
   if (killSwitch === 'paused') return { allowed: false, reason: 'kill_switch_paused' };
   if (killSwitch === 'price_paused' && priceLikeClassifications.has(classification)) return { allowed: false, reason: 'kill_switch_price_paused' };
   if (killSwitch !== 'active' && killSwitch !== 'price_paused') return { allowed: false, reason: `kill_switch_${killSwitch || 'unknown'}` };
   if (mode !== 'auto_send') return { allowed: false, reason: `replyMode_${mode || 'missing'}` };
   if (confidence !== 'high') return { allowed: false, reason: `confidence_${confidence || 'missing'}` };
   if (!safetyClass) return { allowed: false, reason: 'reply_safety_class_missing' };
-  if (!allowedSafetyClasses.has(safetyClass)) return { allowed: false, reason: `reply_safety_class_${safetyClass}_not_auto_sendable` };
+  if (!AI_REPLY_SAFETY_CLASSES.has(safetyClass) || safetyClass === 'no_send' || safetyClass === 'document_handoff') {
+    return { allowed: false, reason: `reply_safety_class_${safetyClass}_not_auto_sendable` };
+  }
   if (!AI_REPLY_GROUNDING_CLASSES.has(grounding) || grounding === 'none') return { allowed: false, reason: 'reply_grounding_missing' };
   if (typeof requiresRag !== 'boolean') return { allowed: false, reason: 'reply_requires_rag_missing' };
   if (safetyClass === 'current_policy_answer' && grounding !== 'current_confirmed_policy') {
@@ -5747,6 +5742,9 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
       return { allowed: false, reason: 'authoritative_availability_contains_unverified_commitment' };
     }
   }
+  if (safetyClass === 'sensitive_commitment' && grounding !== 'authoritative_sheet') {
+    return { allowed: false, reason: 'sensitive_commitment_grounding_mismatch' };
+  }
   if (!textValue || textValue.length < 5) return { allowed: false, reason: 'reply_text_too_short' };
   if (textValue.length > 1000) return { allowed: false, reason: 'reply_text_too_long' };
   if (decision?.safety_checks?.kakao_conversation_opened !== true) return { allowed: false, reason: 'conversation_not_opened' };
@@ -5759,9 +5757,15 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
       'payment_receipt_ack',
       'authoritative_availability_answer',
       'staff_confirmed_reservation_acceptance',
-      'live_quote_link_guidance'
+      'live_quote_link_guidance',
+      'current_policy_answer',
+      'rag_grounded_answer',
+      'sensitive_commitment'
     ]);
     if (!explicitSensitiveAllowance.has(safetyClass)) return { allowed: false, reason: 'sensitive_commitment_text' };
+    if (safetyClass === 'sensitive_commitment' && /(예약|대여)\s*(?:확정|완료)|(?:확정|예약)\s*(?:됐|되었습니다|완료)/.test(textValue)) {
+      return { allowed: false, reason: 'sensitive_commitment_contains_reservation_confirmation' };
+    }
     if (safetyClass === 'payment_receipt_ack' && /(입금|결제).{0,16}(?:확인\s*(?:완료|됐|되었습니다)|완료)|(?:확인\s*(?:완료|됐|되었습니다)|완료).{0,16}(?:입금|결제)/.test(textValue)) {
       return { allowed: false, reason: 'payment_ack_claims_completed_verification' };
     }

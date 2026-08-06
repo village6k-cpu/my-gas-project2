@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { spawnSync } from 'node:child_process';
+import { customerClusterHash } from './follow-up-policy.mjs';
 
 import {
   buildHermesPrompt,
@@ -25,8 +27,10 @@ import {
   buildReadOnlyRagContext,
   parseVillageAiSse,
   askVillageAi,
+  processRagLookup,
   buildReadOnlyLookupContext,
   buildHermesArgs,
+  hermesDecisionTimeoutFromEnv,
   resolveHermesCommand,
   resolveCuaDriverCommand,
   normalizeKakaoWorkerControlMode,
@@ -43,6 +47,7 @@ import {
   findChatRowElementIndex,
   findKakaoChatSearchInputElementIndex,
   extractKakaoConversationEvidence,
+  classifyConservativeTerminalAcknowledgement,
   openKakaoTargetChatViaDevtools,
   openKakaoTargetChatFromList,
   extractNavigationHints,
@@ -64,19 +69,36 @@ import {
   filterFollowUpRowsAgainstClosedHistory,
   mergeFollowUpRowsByTopic,
   upsertFollowUpRows,
+  buildInquiryCaseRow,
+  buildCanonicalFollowUpCases,
+  upsertFollowUpCaseRows,
+  upsertInquiryCaseRow,
+  upsertManualFollowUpRows,
   routeFollowUpToSlack,
+  buildSlackRoutingConfig,
+  preflightTwoChannelSlackRouting,
   enrichFollowUpRowWithOperationalCalculations,
   buildSlackFollowUpMessage,
+  buildSlackFollowUpCaseMessage,
+  buildSlackManualTaskMessage,
+  buildSlackInquiryMessage,
   resolveSlackChannelId,
+  claimInitialSlackDelivery,
   deliverSlackFollowUpRows,
   findKakaoMessageInputElementIndex,
   findKakaoSendButtonElementIndex,
   kakaoConversationContainsMessage,
   sendKakaoMessageViaChrome,
   sendKakaoMessageViaDevtools,
+  shouldDetachHermesProcess,
+  terminateChildTree,
   runHermes,
+  createJobFreshnessGuard,
+  isJobSupersededByJobLog,
   buildHermesFinalJsonRecoveryPrompt,
+  describeHermesDecisionFailure,
   runHermesDecision,
+  createWorkerTimingRecorder,
   validateAiDecisionContract,
   appendToSheet,
   normalizeCustomerDbDiscountType,
@@ -86,8 +108,504 @@ import {
   normalizeConfirmRequestDateForSheet,
   buildCloseKakaoConversationWindowAppleScript,
   closeKakaoConversationWindow,
-  closeKakaoConversationTargetViaDevtools
+  closeKakaoConversationTargetViaDevtools,
+  runCli
 } from './worker.mjs';
+
+test('buildCanonicalFollowUpCases suppresses inquiry duplication when human work exists', () => {
+  const cases = buildCanonicalFollowUpCases(
+    { customer: { name: 'Kim' }, latest_customer_message_cluster: 'Please send my payment receipt.', reply_decision: { text: 'We will confirm and update you.' } },
+    { id: '00000000-0000-4000-8000-000000000001', room_key: 'chat:4979' },
+    [{ room_key: 'chat:4979', customer_name: 'Kim', recommended_action: 'Reconcile payment', payload: { requires_human_action: true, action_family: 'payment_reconcile', business_key: 'trade:260729-001' } }]
+  );
+
+  assert.equal(cases.length, 1);
+  assert.equal(cases[0].payload.card_kind, 'follow_up_case');
+  assert.equal(cases[0].payload.owner_channel, 'follow_up');
+  assert.equal(cases[0].payload.steps.length, 1);
+  assert.notEqual(cases[0].type, 'customer_inquiry');
+});
+
+test('buildCanonicalFollowUpCases creates one inquiry case for reply-only work', () => {
+  const cases = buildCanonicalFollowUpCases(
+    { customer: { name: 'Park' }, latest_customer_message_cluster: 'Is it available?', reply_decision: { text: 'Yes, it is available.' } },
+    { room_key: 'chat:a' },
+    [{ room_key: 'chat:a', customer_name: 'Park', type: 'reply_needed', suggested_reply_draft: 'Yes, it is available.' }]
+  );
+
+  assert.equal(cases.length, 1);
+  assert.equal(cases[0].payload.owner_channel, 'inquiry');
+  assert.equal(cases[0].payload.phase, 'customer_reply');
+});
+
+test('draft_only intent requires a customer reply even when no usable draft exists', () => {
+  const [followUpCase] = buildCanonicalFollowUpCases(
+    {
+      customer: { name: 'Lee' },
+      latest_customer_message_cluster: 'Please issue the invoice and let me know.',
+      reason: 'Invoice work must finish before replying.',
+      reply_decision: { replyMode: 'draft_only', text: '' }
+    },
+    { room_key: 'chat:no-draft' },
+    [{
+      room_key: 'chat:no-draft', customer_name: 'Lee', recommended_action: 'Issue the invoice.',
+      evidence: ['trade 260804-001'],
+      payload: { requires_human_action: true, action_family: 'invoice_issue', business_key: 'trade:260804-001' }
+    }]
+  );
+
+  assert.equal(followUpCase.suggested_reply_draft, '');
+  assert.equal(followUpCase.payload.requires_reply, true);
+  assert.equal(followUpCase.payload.reply_intent, 'draft_only');
+  assert.equal(followUpCase.payload.latest_customer_message_cluster, 'Please issue the invoice and let me know.');
+  assert.equal(followUpCase.payload.ai_judgment, 'Invoice work must finish before replying.');
+  assert.deepEqual(followUpCase.payload.core_facts, ['trade 260804-001']);
+});
+
+test('explicit reply-required decision advances an internal case to reply without relying on draft text', () => {
+  const [followUpCase] = buildCanonicalFollowUpCases(
+    { customer: { name: 'Lee' }, reply_decision: { reply_required: true, text: '' } },
+    { room_key: 'chat:reply-required' },
+    [{
+      room_key: 'chat:reply-required', customer_name: 'Lee', recommended_action: 'Finish internal work.',
+      payload: { requires_human_action: true, action_family: 'document_approval', business_key: 'trade:2' }
+    }]
+  );
+
+  assert.equal(followUpCase.payload.requires_reply, true);
+  assert.equal(followUpCase.payload.reply_intent, 'reply_required');
+});
+
+test('upsertFollowUpCaseRows atomically insert-ignores then keeps incoming content and immutable delivery identity', async () => {
+  const requests = [];
+  const existing = {
+    id: 'inquiry-existing',
+    room_key: 'chat:4979',
+    customer_name: 'Kim',
+    type: 'customer_inquiry',
+    status: 'open',
+    summary: 'old customer request',
+    recommended_action: 'old judgment',
+    suggested_reply_draft: 'old draft',
+    evidence: ['old fact'],
+    payload: {
+      card_kind: 'follow_up_case',
+      case_id: 'case-existing',
+      case_key: 'case:stable',
+      owner_channel: 'inquiry',
+      phase: 'customer_reply',
+      state_version: 1,
+      requires_reply: false,
+      latest_customer_message_cluster: 'old customer request',
+      ai_judgment: 'old judgment',
+      core_facts: ['old fact'],
+      steps: [{ step_key: 'done-step', action_family: 'document_approval', action: 'old completed action', status: 'done' }],
+      slack_delivery: { status: 'delivered', channel_id: 'CINQUIRY', message_ts: '100.1' }
+    }
+  };
+  const config = {
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+      fetchImpl: async (url, init = {}) => {
+        requests.push({ url: String(url), init });
+        const body = init.body ? JSON.parse(init.body) : null;
+        const data = init.method === 'POST'
+          ? []
+          : init.method === 'PATCH'
+            ? [{ ...existing, ...body }]
+            : [existing];
+        return { ok: true, status: 200, text: async () => JSON.stringify(data) };
+      }
+  };
+
+  const result = await upsertFollowUpCaseRows(config, [{
+    follow_up_key: 'case:stable', room_key: 'chat:4979', customer_name: 'Kim', type: 'follow_up_case', status: 'open',
+    summary: 'new customer request', recommended_action: 'new judgment', suggested_reply_draft: 'new draft', evidence: ['new fact'],
+    payload: {
+      card_kind: 'follow_up_case', case_id: 'temporary', case_key: 'case:stable', owner_channel: 'follow_up',
+      phase: 'internal_action', requires_reply: true,
+      latest_customer_message_cluster: 'new customer request', ai_judgment: 'new judgment', core_facts: ['new fact'],
+      steps: [
+        { step_key: 'done-step', action_family: 'document_approval', action: 'updated completed action', status: 'pending' },
+        { step_key: 'payment:trade:260729-001', action_family: 'payment_reconcile', business_object_key: 'trade:260729-001', action: 'Confirm payment', status: 'pending' }
+      ]
+    }
+  }]);
+
+  const patchRequest = requests.find((request) => request.init.method === 'PATCH');
+  assert.ok(patchRequest.url.includes('id=eq.inquiry-existing'));
+  const postRequest = requests.find((request) => request.init.method === 'POST');
+  assert.match(postRequest.url, /on_conflict=follow_up_key/);
+  assert.match(String(postRequest.init.headers.prefer), /resolution=ignore-duplicates/);
+  assert.equal(result.rows[0].payload.case_id, 'case-existing');
+  assert.equal(result.rows[0].payload.owner_channel, 'inquiry');
+  assert.equal(result.rows[0].payload.phase, 'internal_action');
+  assert.equal(result.rows[0].summary, 'new customer request');
+  assert.equal(result.rows[0].recommended_action, 'new judgment');
+  assert.equal(result.rows[0].suggested_reply_draft, 'new draft');
+  assert.deepEqual(result.rows[0].evidence, ['new fact']);
+  assert.equal(result.rows[0].payload.latest_customer_message_cluster, 'new customer request');
+  assert.equal(result.rows[0].payload.ai_judgment, 'new judgment');
+  assert.equal(result.rows[0].payload.steps[0].status, 'done');
+  assert.equal(result.rows[0].payload.state_version, 2);
+  assert.equal(result.rows[0].payload.slack_delivery.channel_id, 'CINQUIRY');
+  assert.equal(result.rows[0].payload.slack_delivery.message_ts, '100.1');
+});
+
+test('concurrent canonical case creation converges through the existing follow_up_key unique constraint', async () => {
+  const requests = [];
+  let stored = null;
+  const config = {
+    supabaseUrl: 'https://supabase.example', serviceRoleKey: 'service-role', followUpTable: 'ai_follow_up_items',
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      const body = init.body ? JSON.parse(init.body) : null;
+      if (init.method === 'POST') {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (!stored) {
+          stored = { id: 'case-winner', ...body[0] };
+          return { ok: true, status: 201, text: async () => JSON.stringify([stored]) };
+        }
+        return { ok: true, status: 201, text: async () => JSON.stringify([]) };
+      }
+      if (init.method === 'PATCH') {
+        stored = { ...stored, ...body };
+        return { ok: true, status: 200, text: async () => JSON.stringify([stored]) };
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify(stored ? [stored] : []) };
+    }
+  };
+  const row = {
+    follow_up_key: 'case:atomic', room_key: 'chat:atomic', customer_name: 'Kim', type: 'follow_up_case', status: 'open',
+    payload: { card_kind: 'follow_up_case', case_id: 'logical-case', case_key: 'case:atomic', owner_channel: 'follow_up', phase: 'internal_action', state_version: 1, requires_reply: false, steps: [{ step_key: 'one', status: 'pending' }] }
+  };
+
+  const results = await Promise.all([
+    upsertFollowUpCaseRows(config, [structuredClone(row)]),
+    upsertFollowUpCaseRows(config, [structuredClone(row)])
+  ]);
+
+  assert.deepEqual(results.map((result) => result.rows[0].id), ['case-winner', 'case-winner']);
+  assert.equal(requests.filter((request) => request.init.method === 'POST').length, 2);
+  assert.equal(requests.some((request) => request.url.includes('room_key=eq.')), false);
+});
+
+test('upsertInquiryCaseRow creates a new case when no open case exists', async () => {
+  const requests = [];
+  const config = {
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      if (init.method === 'POST') {
+        const rows = JSON.parse(init.body);
+        return { ok: true, status: 201, text: async () => JSON.stringify([{ id: 'inquiry-new', ...rows[0] }]) };
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify([]) };
+    }
+  };
+
+  const result = await upsertInquiryCaseRow(config, {
+    room_key: 'chat:4979', customer_name: '윤영준', type: 'customer_inquiry', status: 'open',
+    summary: '완료 후 새 문의', payload: { card_kind: 'inquiry_case' }
+  });
+
+  assert.equal(requests.filter((request) => request.init.method === 'POST').length, 1);
+  assert.equal(result.inserted, true);
+  assert.match(result.row.payload.case_id, /^[0-9a-f-]{36}$/i);
+});
+
+test('upsertManualFollowUpRows patches the same action and business object', async () => {
+  const requests = [];
+  const existing = {
+    id: 'task-existing',
+    follow_up_key: 'follow-up:case-1:business:trade:260729-001:invoice_issue',
+    status: 'open',
+    payload: {
+      card_kind: 'follow_up_task', case_id: 'case-1', action_family: 'invoice_issue',
+      slack_delivery: { status: 'delivered', channel_id: 'CFOLLOW', message_ts: '200.1' }
+    }
+  };
+  const config = {
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      const body = init.body ? JSON.parse(init.body) : null;
+      const data = init.method === 'PATCH' ? [{ ...existing, ...body }] : [existing];
+      return { ok: true, status: 200, text: async () => JSON.stringify(data) };
+    }
+  };
+  const incoming = {
+    room_key: 'chat:4979', customer_name: '윤영준', type: 'tax_invoice', status: 'open',
+    summary: '260729-001 세금계산서 발행',
+    payload: {
+      card_kind: 'follow_up_task', requires_human_action: true,
+      action_family: 'invoice_issue', business_key: 'trade:260729-001'
+    }
+  };
+
+  const result = await upsertManualFollowUpRows(config, [incoming], 'case-1');
+
+  assert.equal(requests.some((request) => request.init.method === 'POST'), false);
+  assert.equal(requests.filter((request) => request.init.method === 'PATCH').length, 1);
+  assert.equal(result.rows[0].payload.slack_delivery.message_ts, '200.1');
+});
+
+test('validateAiDecisionContract rejects incomplete manual action metadata', () => {
+  const decision = completeSheetDecision({
+    follow_up_items: [{
+      type: 'tax_invoice',
+      route: 'document',
+      taskKey: 'invoice',
+      priority: 'high',
+      status: 'open',
+      title: '세금계산서 발행',
+      customer_name: '윤영준',
+      summary: '발행 필요',
+      requiresHumanAction: true,
+      actionFamily: 'none',
+      businessKey: ''
+    }]
+  });
+
+  const result = validateAiDecisionContract(decision);
+
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((error) => error.includes('actionFamily')));
+  assert.ok(result.errors.some((error) => error.includes('businessKey')));
+});
+
+test('validateAiDecisionContract accepts inquiry-only reservation review', () => {
+  const decision = completeSheetDecision({
+    follow_up_items: [{
+      type: 'reservation_review',
+      route: 'schedule',
+      taskKey: 'availability',
+      priority: 'normal',
+      status: 'open',
+      title: '예약 가능 결과 안내',
+      customer_name: '윤영준',
+      summary: '가용 결과를 고객에게 안내',
+      requiresHumanAction: false,
+      actionFamily: 'none',
+      businessKey: ''
+    }]
+  });
+
+  assert.equal(validateAiDecisionContract(decision).valid, true);
+});
+
+test('two-channel routing sends inquiry cases only to 카카오톡문의', () => {
+  const route = routeFollowUpToSlack({
+    type: 'customer_inquiry', payload: { card_kind: 'inquiry_case' }
+  }, {
+    twoChannelRoutingEnabled: true,
+    slackInquiryChannel: '카카오톡문의',
+    slackFollowUpChannel: '후속업무'
+  });
+  assert.equal(route.channel, '카카오톡문의');
+});
+
+test('two-channel routing sends manual tasks only to 후속업무', () => {
+  const route = routeFollowUpToSlack({
+    type: 'tax_invoice', payload: { card_kind: 'follow_up_task' }
+  }, {
+    twoChannelRoutingEnabled: true,
+    slackInquiryChannel: '카카오톡문의',
+    slackFollowUpChannel: '후속업무'
+  });
+  assert.equal(route.channel, '후속업무');
+});
+
+test('canonical fixed-channel delivery ignores absent or disabled two-channel feature flags', () => {
+  for (const twoChannelRoutingEnabled of [undefined, false]) {
+    const config = {
+      ...(twoChannelRoutingEnabled === undefined ? {} : { twoChannelRoutingEnabled }),
+      slackInquiryChannel: 'INQUIRY',
+      slackFollowUpChannel: 'FOLLOW_UP',
+      slackChannels: { other: '기타문의' }
+    };
+    for (const [owner_channel, expectedChannel] of [['inquiry', 'INQUIRY'], ['follow_up', 'FOLLOW_UP']]) {
+      const row = {
+        id: `canonical-${owner_channel}`,
+        type: 'reply_needed',
+        customer_name: '김영준',
+        payload: { card_kind: 'follow_up_case', owner_channel, phase: 'customer_reply', state_version: 1, steps: [] }
+      };
+      const route = routeFollowUpToSlack(row, config);
+      const message = buildSlackFollowUpMessage(row, { config });
+
+      assert.deepEqual(route, { route: owner_channel, channel: expectedChannel });
+      assert.equal(message.channel, route.channel);
+    }
+  }
+});
+
+test('buildSlackRoutingConfig maps the exact two-channel environment contract', () => {
+  assert.deepEqual(buildSlackRoutingConfig({
+    SLACK_TWO_CHANNEL_ROUTING_ENABLED: '1',
+    SLACK_CHANNEL_KAKAO_INQUIRY: '카카오톡문의',
+    SLACK_CHANNEL_FOLLOW_UP: '후속업무'
+  }), {
+    twoChannelRoutingEnabled: true,
+    slackInquiryChannel: '카카오톡문의',
+    slackFollowUpChannel: '후속업무'
+  });
+});
+
+test('two-channel preflight fails before posting when a destination is missing', async () => {
+  const requests = [];
+  const config = {
+    twoChannelRoutingEnabled: true,
+    slackBotToken: 'xoxb-test',
+    slackInquiryChannel: '카카오톡문의',
+    slackFollowUpChannel: '후속업무',
+    slackFetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          channels: [{ id: 'CINQUIRY', name: '카카오톡문의' }],
+          response_metadata: { next_cursor: '' }
+        })
+      };
+    }
+  };
+
+  await assert.rejects(() => preflightTwoChannelSlackRouting(config), /후속업무/);
+  assert.equal(requests.some((request) => /chat\.(?:postMessage|update)/.test(request.url)), false);
+});
+
+test('two-channel delivery batch fails closed before Slack or Supabase writes', async () => {
+  const slackRequests = [];
+  const supabaseRequests = [];
+  const result = await deliverSlackFollowUpRows({
+    slackFollowUpEnabled: true,
+    twoChannelRoutingEnabled: true,
+    slackBotToken: 'xoxb-test',
+    slackInquiryChannel: '카카오톡문의',
+    slackFollowUpChannel: '후속업무',
+    slackFetchImpl: async (url, init = {}) => {
+      slackRequests.push({ url: String(url), init });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          channels: [{ id: 'CINQUIRY', name: '카카오톡문의' }],
+          response_metadata: { next_cursor: '' }
+        })
+      };
+    },
+    fetchImpl: async (url, init = {}) => {
+      supabaseRequests.push({ url: String(url), init });
+      throw new Error('Supabase must not be reached when routing preflight fails');
+    }
+  }, [{
+    id: 'inquiry-1',
+    room_key: 'chat:a',
+    type: 'customer_inquiry',
+    status: 'open',
+    customer_name: '윤영준',
+    summary: '현금영수증 요청',
+    payload: { card_kind: 'inquiry_case', case_id: 'case-1' }
+  }]);
+
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, 'two_channel_preflight_failed');
+  assert.deepEqual(result.results, []);
+  assert.equal(slackRequests.some((request) => /chat\.(?:postMessage|update)/.test(request.url)), false);
+  assert.equal(supabaseRequests.length, 0);
+});
+
+test('Hermes decision timeout is not inherited from the longer outer bridge timeout', () => {
+  assert.equal(hermesDecisionTimeoutFromEnv({ WORKER_TIMEOUT_MS: '540000' }), 240000);
+  assert.equal(hermesDecisionTimeoutFromEnv({
+    WORKER_TIMEOUT_MS: '540000',
+    HERMES_WORKER_TIMEOUT_MS: '300000'
+  }), 300000);
+  assert.equal(hermesDecisionTimeoutFromEnv({ HERMES_WORKER_TIMEOUT_MS: 'invalid' }), 240000);
+});
+
+test('only a proven non-operational terminal acknowledgement closes before the heavy Hermes path', () => {
+  const liveAck = {
+    previewText: '중요 정인서 네 감사합니다 ! 오후 7:26',
+    customerName: '정인서',
+    events: [{ reason: 'mutation' }, { reason: 'top_row_changed' }]
+  };
+  const navigation = {
+    status: 'opened_target_chat',
+    conversation_evidence: {
+      hint_matched: true,
+      visible_static_text_tail: ['빌리지님', '안내드린 내용 확인 부탁드립니다', '정인서', '네 감사합니다 !']
+    }
+  };
+
+  assert.equal(classifyConservativeTerminalAcknowledgement(liveAck, navigation).matched, true);
+  assert.equal(classifyConservativeTerminalAcknowledgement(liveAck, {
+    ...navigation,
+    conversation_evidence: {
+      hint_matched: true,
+      visible_static_text_tail: ['FX3 8월 5일 예약', '빌리지님', '네, 확정 해드렸습니다', '정인서', '네 감사합니다 !']
+    }
+  }).matched, false);
+  assert.equal(classifyConservativeTerminalAcknowledgement({
+    ...liveAck,
+    previewText: '중요 정인서 네 견적서도 부탁드립니다 오후 7:26'
+  }, navigation).matched, false);
+  assert.equal(classifyConservativeTerminalAcknowledgement(liveAck, {
+    ...navigation,
+    conversation_evidence: { hint_matched: true, visible_static_text_tail: [] }
+  }).matched, false);
+  assert.equal(classifyConservativeTerminalAcknowledgement({
+    ...liveAck,
+    events: [{ reason: 'startup_catchup' }]
+  }, navigation).matched, false);
+});
+
+test('completed worker does not stay alive for an obsolete DevTools timeout', () => {
+  const script = `
+    import { timeoutPromise } from './worker.mjs';
+    timeoutPromise(5000, 'obsolete timeout').catch(() => {});
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1')),
+    timeout: 1000,
+    encoding: 'utf8'
+  });
+
+  assert.equal(result.error?.code, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('worker CLI exits explicitly after a successful result despite lingering library handles', async () => {
+  let exitCode = null;
+  await runCli(async () => {}, {
+    exitImpl(code) { exitCode = code; },
+    errorWriter() { assert.fail('success path must not write an error'); }
+  });
+  assert.equal(exitCode, 0);
+});
+
+test('createWorkerTimingRecorder records named stages and total elapsed time', () => {
+  const ticks = [1000, 1125, 1500, 1800];
+  const timings = createWorkerTimingRecorder(() => ticks.shift());
+
+  timings.mark('navigation');
+  timings.mark('hermes');
+
+  assert.deepEqual(timings.snapshot(), {
+    navigationMs: 125,
+    hermesMs: 375,
+    totalMs: 800
+  });
+});
 
 function completeSheetDecision(overrides = {}) {
   const base = {
@@ -191,12 +709,11 @@ test('buildHermesPrompt keeps code as plumbing and requires AI-visible Kakao ver
   assert.match(prompt, /job-1/);
 });
 
-test('buildHermesPrompt preserves reasoning depth instead of imposing a low tool budget', () => {
+test('buildHermesPrompt bounds routine work before the global timeout without sacrificing evidence', () => {
   const prompt = buildHermesPrompt({ id: 'job-tool-budget', preview_text: '예약 문의' });
-  assert.doesNotMatch(prompt, /at most 10 tool calls total/i);
-  assert.doesNotMatch(prompt, /5 UI navigation actions/i);
-  assert.match(prompt, /No artificial low tool\/UI cap/i);
-  assert.match(prompt, /continue until evidence is sufficient.*global timeout/is);
+  assert.doesNotMatch(prompt, /No artificial low tool\/UI cap/i);
+  assert.match(prompt, /bounded tool budget/i);
+  assert.match(prompt, /finish FINAL_JSON before exhausting/i);
   assert.match(prompt, /Batch read-only lookups only when query breadth\/detail are preserved/is);
 });
 
@@ -271,7 +788,7 @@ test('buildHermesPrompt uses compact job evidence instead of embedding full raw 
   assert.match(prompt, /JOB EVIDENCE FROM SUPABASE/);
   assert.doesNotMatch(prompt, /JOB FROM SUPABASE/);
   assert.equal(prompt.includes('x'.repeat(1000)), false);
-  assert.ok(prompt.length < 18000, `prompt too large: ${prompt.length}`);
+  assert.ok(prompt.length < 19000, `prompt too large: ${prompt.length}`);
 });
 
 test('buildHermesPrompt uses navigation hints without letting code judge business meaning', () => {
@@ -285,12 +802,12 @@ test('buildHermesPrompt uses navigation hints without letting code judge busines
 });
 
 test('buildHermesPrompt exposes village-ai RAG only as optional read-only reference memory', () => {
-  const ragContext = buildReadOnlyRagContext({ villageAiUrl: 'https://village-ai.example', villageAiKakaoSkillSecret: 'secret-value' });
+  const ragContext = buildReadOnlyRagContext({ villageAiUrl: 'https://village-ai.example', askApiSecret: 'secret-value' });
   assert.equal(ragContext.enabled, true);
   assert.equal(ragContext.provider, 'village-ai');
   assert.equal(ragContext.tool.command, 'node tools/ai-browser-worker/worker.mjs --rag-lookup');
   assert.equal(ragContext.tool.env.village_ai_url, 'VILLAGE_AI_URL');
-  assert.equal(ragContext.tool.env.secret_env, 'VILLAGE_AI_KAKAO_SKILL_SECRET');
+  assert.equal(ragContext.tool.env.secret_env, 'ASK_API_SECRET');
   assert.equal(JSON.stringify(ragContext).includes('secret-value'), false);
   const prompt = buildHermesPrompt({ id: 'job-rag', preview_text: '중요 홍길동 FX3 가격 문의' }, { ragContext });
   assert.match(prompt, /READ-ONLY VILLAGE-AI RAG TOOL/);
@@ -311,6 +828,15 @@ test('buildReadOnlyRagContext disables gracefully when VILLAGE_AI_URL is absent'
   assert.equal(ragContext.enabled, false);
   assert.equal(ragContext.tool, null);
   assert.match(ragContext.unavailable_reason, /VILLAGE_AI_URL/);
+});
+
+test('buildReadOnlyRagContext reports the Kakao fallback secret contract without exposing it', () => {
+  const ragContext = buildReadOnlyRagContext({
+    villageAiUrl: 'https://village-ai.example',
+    villageAiKakaoSkillSecret: 'kakao-secret-value'
+  });
+  assert.equal(ragContext.tool.env.secret_env, 'VILLAGE_AI_KAKAO_SKILL_SECRET');
+  assert.equal(JSON.stringify(ragContext).includes('kakao-secret-value'), false);
 });
 
 test('parseVillageAiSse accumulates text and meta events from village-ai ask stream', () => {
@@ -334,12 +860,12 @@ test('parseVillageAiSse accumulates text and meta events from village-ai ask str
   assert.equal(parsed.done, true);
 });
 
-test('askVillageAi posts to /api/ask and returns parsed SSE without exposing secret', async () => {
+test('askVillageAi uses the /api/ask x-ask-api-secret contract without exposing secret', async () => {
   let captured;
   const responseBody = 'data: {"type":"text","text":"참고 답변"}\n\ndata: {"type":"meta","confidence":"low","knowledgeSource":"general","logId":"log-2"}\n\ndata: {"type":"done"}\n\n';
   const result = await askVillageAi({ question: '카카오 맥락 포함 질문', userRole: 'customer' }, {
     villageAiUrl: 'https://village-ai.example/',
-    villageAiKakaoSkillSecret: 'secret-value'
+    askApiSecret: 'secret-value'
   }, {
     fetchImpl: async (url, options) => {
       captured = { url, options };
@@ -348,12 +874,105 @@ test('askVillageAi posts to /api/ask and returns parsed SSE without exposing sec
   });
   assert.equal(captured.url, 'https://village-ai.example/api/ask');
   assert.equal(captured.options.method, 'POST');
-  assert.equal(captured.options.headers['x-kakao-skill-secret'], 'secret-value');
+  assert.equal(captured.options.headers['x-ask-api-secret'], 'secret-value');
+  assert.equal(captured.options.headers['x-kakao-skill-secret'], undefined);
   assert.equal(JSON.parse(captured.options.body).question, '카카오 맥락 포함 질문');
   assert.equal(result.text, '참고 답변');
   assert.equal(result.confidence, 'low');
   assert.equal(result.knowledgeSource, 'general');
   assert.equal(JSON.stringify(result).includes('secret-value'), false);
+});
+
+test('askVillageAi falls back to the configured Kakao skill secret contract', async () => {
+  let captured;
+  await askVillageAi({ question: 'historical policy question', userRole: 'customer' }, {
+    villageAiUrl: 'https://village-ai.example/',
+    villageAiKakaoSkillSecret: 'kakao-secret-value'
+  }, {
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return { ok: true, status: 200, text: async () => 'data: {"type":"done"}\n\n' };
+    }
+  });
+  assert.equal(captured.options.headers['x-ask-api-secret'], undefined);
+  assert.equal(captured.options.headers['x-kakao-skill-secret'], 'kakao-secret-value');
+});
+
+test('processRagLookup loads the ask contract from HERMES_HOME without exposing it', async () => {
+  const hermesHome = fs.mkdtempSync(path.join(os.tmpdir(), 'village-hermes-rag-'));
+  const previous = {
+    hermesHome: process.env.HERMES_HOME,
+    villageAiUrl: process.env.VILLAGE_AI_URL,
+    askApiSecret: process.env.ASK_API_SECRET
+  };
+  fs.writeFileSync(path.join(hermesHome, '.env'), [
+    'VILLAGE_AI_URL=https://village-ai.example',
+    'ASK_API_SECRET=secret-value'
+  ].join('\n'));
+  process.env.HERMES_HOME = hermesHome;
+  delete process.env.VILLAGE_AI_URL;
+  delete process.env.ASK_API_SECRET;
+
+  let captured;
+  try {
+    const result = await processRagLookup({ question: 'historical policy question' }, {
+      fetchImpl: async (url, options) => {
+        captured = { url, options };
+        return { ok: true, status: 200, text: async () => 'data: {"type":"done"}\n\n' };
+      }
+    });
+    assert.equal(captured.url, 'https://village-ai.example/api/ask');
+    assert.equal(captured.options.headers['x-ask-api-secret'], 'secret-value');
+    assert.equal(JSON.stringify(result).includes('secret-value'), false);
+  } finally {
+    if (previous.hermesHome === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = previous.hermesHome;
+    if (previous.villageAiUrl === undefined) delete process.env.VILLAGE_AI_URL;
+    else process.env.VILLAGE_AI_URL = previous.villageAiUrl;
+    if (previous.askApiSecret === undefined) delete process.env.ASK_API_SECRET;
+    else process.env.ASK_API_SECRET = previous.askApiSecret;
+    fs.rmSync(hermesHome, { recursive: true, force: true });
+  }
+});
+
+test('processRagLookup loads the Kakao fallback contract from HERMES_HOME', async () => {
+  const hermesHome = fs.mkdtempSync(path.join(os.tmpdir(), 'village-hermes-rag-kakao-'));
+  const previous = {
+    hermesHome: process.env.HERMES_HOME,
+    villageAiUrl: process.env.VILLAGE_AI_URL,
+    askApiSecret: process.env.ASK_API_SECRET,
+    kakaoSecret: process.env.VILLAGE_AI_KAKAO_SKILL_SECRET
+  };
+  fs.writeFileSync(path.join(hermesHome, '.env'), [
+    'VILLAGE_AI_URL=https://village-ai.example',
+    'VILLAGE_AI_KAKAO_SKILL_SECRET=kakao-secret-value'
+  ].join('\n'));
+  process.env.HERMES_HOME = hermesHome;
+  delete process.env.VILLAGE_AI_URL;
+  delete process.env.ASK_API_SECRET;
+  delete process.env.VILLAGE_AI_KAKAO_SKILL_SECRET;
+
+  let captured;
+  try {
+    await processRagLookup({ question: 'historical policy question' }, {
+      fetchImpl: async (url, options) => {
+        captured = { url, options };
+        return { ok: true, status: 200, text: async () => 'data: {"type":"done"}\n\n' };
+      }
+    });
+    assert.equal(captured.options.headers['x-ask-api-secret'], undefined);
+    assert.equal(captured.options.headers['x-kakao-skill-secret'], 'kakao-secret-value');
+  } finally {
+    if (previous.hermesHome === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = previous.hermesHome;
+    if (previous.villageAiUrl === undefined) delete process.env.VILLAGE_AI_URL;
+    else process.env.VILLAGE_AI_URL = previous.villageAiUrl;
+    if (previous.askApiSecret === undefined) delete process.env.ASK_API_SECRET;
+    else process.env.ASK_API_SECRET = previous.askApiSecret;
+    if (previous.kakaoSecret === undefined) delete process.env.VILLAGE_AI_KAKAO_SKILL_SECRET;
+    else process.env.VILLAGE_AI_KAKAO_SKILL_SECRET = previous.kakaoSecret;
+    fs.rmSync(hermesHome, { recursive: true, force: true });
+  }
 });
 
 test('buildHermesPrompt imports Claude Coworker policy while allowing aggressive reply drafting', () => {
@@ -393,6 +1012,7 @@ test('buildHermesPrompt treats read catch-up rows as possible missed reservation
   assert.match(prompt, /예약형식 메시지가 있으면.*확인요청\/계약\/스케줄 등록 여부를 확인/s);
   assert.match(prompt, /자동화가 만든 것이라고 추정하거나 보고하지 마라/s);
   assert.match(prompt, /기존 RQ 발견으로 중복 입력 방지/s);
+  assert.match(prompt, /직원의 예약 답변.*기존 RQ.*증거가 아니다/s);
 });
 
 test('buildGasReadUrl creates read-only GAS URLs with encoded parameters', () => {
@@ -533,11 +1153,13 @@ test('buildHermesPrompt requires existing RQ availability result before follow-u
   assert.match(prompt, /follow-up must report the availability result itself/s);
 });
 
-test('buildHermesArgs preserves the full read and learning tool surface instead of a speed-only subset', () => {
+test('buildHermesArgs preserves the Mac-parity reasoning budget and full read and learning tool surface', () => {
   const args = buildHermesArgs('prompt text');
-  assert.deepEqual(args.slice(0, 8), [
+  assert.deepEqual(args.slice(0, 10), [
     'chat',
     '--yolo',
+    '--max-turns',
+    '90',
     '-Q',
     '-t',
     'terminal,file,web,skills,memory,session_search,computer_use,vision',
@@ -546,6 +1168,8 @@ test('buildHermesArgs preserves the full read and learning tool surface instead 
   ]);
   assert.ok(args.includes('terminal,file,web,skills,memory,session_search,computer_use,vision'));
   assert.ok(args.includes('--yolo'));
+  assert.ok(buildHermesArgs('prompt text', { hermesMaxTurns: 18 }).includes('18'));
+  assert.ok(buildHermesArgs('prompt text', { hermesMaxTurns: 90 }).includes('90'));
 });
 
 test('resolveHermesCommand finds hermes in launchctl-safe fallback dirs', () => {
@@ -719,6 +1343,61 @@ test('pickKakaoConversationTarget selects DevTools customer chat target by hint'
     { type: 'page', title: '박재인 - 빌리지 - 카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats/123', id: 'chat' }
   ], ['박재인']);
   assert.equal(target.id, 'chat');
+});
+
+test('pickKakaoMainListTarget accepts the Kakao chat-list trailing slash', () => {
+  const target = pickKakaoMainListTarget([
+    { type: 'page', title: 'Kakao channel manager', url: 'https://business.kakao.com/_xhPMls/chats/', id: 'only-tab' }
+  ]);
+  assert.equal(target?.id, 'only-tab');
+});
+
+test('same-target Kakao navigation is marked unsafe to close', async () => {
+  let listCalls = 0;
+  const fetchImpl = async () => {
+    listCalls += 1;
+    const targets = listCalls === 1
+      ? [{ type: 'page', id: 'only-tab', title: 'Kakao channel manager', url: 'https://business.kakao.com/_xhPMls/chats/', webSocketDebuggerUrl: 'ws://only-tab' }]
+      : [{ type: 'page', id: 'only-tab', title: 'Customer - Kakao', url: 'https://business.kakao.com/_xhPMls/chats/123', webSocketDebuggerUrl: 'ws://only-tab' }];
+    return { ok: true, status: 200, text: async () => JSON.stringify(targets) };
+  };
+  const result = await openKakaoTargetChatViaDevtools({
+    room_key: 'chat:123', customer_name: 'Customer', preview_text: 'Customer reservation request'
+  }, {
+    cdpBaseUrl: 'http://127.0.0.1:9223',
+    fetchImpl,
+    evaluateImpl: async (target) => target.url.endsWith('/chats/')
+      ? { ok: true, status: 'clicked_chat_row_via_devtools', searchTerm: 'Customer', tried: ['Customer'] }
+      : { title: target.title, href: target.url, text: 'Customer reservation request' }
+  });
+
+  assert.equal(result.status, 'opened_target_chat');
+  assert.equal(result.conversation_target.id, 'only-tab');
+  assert.equal(result.conversation_target.close_safe, false);
+});
+
+test('openKakaoTargetChatViaDevtools selects the exact room target when the popup title omits the customer hint', async () => {
+  const targets = [
+    { type: 'page', id: 'list', title: '카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats', webSocketDebuggerUrl: 'ws://list' },
+    { type: 'page', id: 'chat', title: '카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats/4977448429395319', webSocketDebuggerUrl: 'ws://chat' }
+  ];
+  const fetchImpl = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(targets) });
+  const evaluateImpl = async (target) => ({
+    title: target.title,
+    href: target.url,
+    text: '채팅방\n한강희\n죄송합니다 사장님 감사드립니다\n채팅 메시지 입력 폼'
+  });
+
+  const result = await openKakaoTargetChatViaDevtools({
+    room_key: 'chat:4977448429395319',
+    customer_name: '한강희',
+    preview_text: '한강희 죄송합니다 사장님 감사드립니다'
+  }, { cdpBaseUrl: 'http://127.0.0.1:9223', fetchImpl, evaluateImpl });
+
+  assert.equal(result.status, 'opened_target_chat');
+  assert.equal(result.already_open, true);
+  assert.equal(result.conversation_target.id, 'chat');
+  assert.equal(result.conversation_evidence.hint_matched, true);
 });
 
 test('findChatRowElementIndex finds AXLink row from navigation hint', () => {
@@ -1150,6 +1829,110 @@ test('runHermes rejects quickly and terminates child process tree on timeout', a
   assert.equal(killedPid, 12345);
 });
 
+test('runHermes aborts and terminates a stale same-room decision before timeout', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.pid = 12355;
+  let killedPid = null;
+  const controller = new AbortController();
+  const resultPromise = runHermes(
+    'prompt text',
+    { hermesCommand: 'fake-hermes', hermesTimeoutMs: 25 },
+    {
+      spawnImpl: () => child,
+      killTree(pid) { killedPid = pid; },
+      signal: controller.signal
+    }
+  );
+
+  controller.abort(new Error('superseded_by_newer_room_event'));
+
+  await assert.rejects(resultPromise, /superseded_by_newer_room_event/);
+  assert.equal(killedPid, 12355);
+});
+
+test('job freshness guard aborts when the bridge reports a newer room revision', async () => {
+  const guard = createJobFreshnessGuard({
+    bridgeUrl: 'http://127.0.0.1:8787',
+    roomKey: 'chat:test-room',
+    roomRevision: 4,
+    pollIntervalMs: 60_000,
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return { ok: true, superseded: true, latestRevision: 5 };
+      }
+    })
+  });
+
+  await guard.checkNow();
+
+  assert.equal(guard.signal.aborted, true);
+  assert.match(String(guard.signal.reason?.message || guard.signal.reason), /superseded_by_newer_room_event/);
+  guard.stop();
+});
+
+test('job log fallback detects a newer accepted job for the same room', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'village-job-freshness-'));
+  const jobLogPath = path.join(dir, 'jobs.ndjson');
+  fs.writeFileSync(jobLogPath, [
+    JSON.stringify({ detectedAt: '2026-07-31T08:00:00.000Z', roomKey: 'chat:test-room', jobId: 'old-job' }),
+    JSON.stringify({ detectedAt: '2026-07-31T08:01:00.000Z', roomKey: 'chat:other-room', jobId: 'other-job' }),
+    JSON.stringify({ detectedAt: '2026-07-31T08:02:00.000Z', roomKey: 'chat:test-room', jobId: 'old-job' }),
+    JSON.stringify({ detectedAt: '2026-07-31T08:03:00.000Z', roomKey: 'chat:test-room', jobId: 'new-job' })
+  ].join('\n'));
+
+  assert.equal(await isJobSupersededByJobLog({
+    jobLogPath,
+    roomKey: 'chat:test-room',
+    jobId: 'old-job',
+    detectedAt: '2026-07-31T08:00:00.000Z'
+  }), true);
+  assert.equal(await isJobSupersededByJobLog({
+    jobLogPath,
+    roomKey: 'chat:test-room',
+    jobId: 'new-job',
+    detectedAt: '2026-07-31T08:03:00.000Z'
+  }), false);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('Windows Hermes stays inside the worker process tree so outer timeouts cannot orphan recovery agents', () => {
+  assert.equal(shouldDetachHermesProcess('win32'), false);
+  assert.equal(shouldDetachHermesProcess('linux'), true);
+});
+
+test('terminateChildTree uses Windows taskkill for the exact Hermes process tree', () => {
+  const calls = [];
+  let fallbackKilled = false;
+  const child = {
+    pid: 43210,
+    kill() {
+      fallbackKilled = true;
+    }
+  };
+
+  terminateChildTree(child, 'SIGTERM', {
+    platform: 'win32',
+    spawnSyncImpl(command, args, options) {
+      calls.push({ command, args, options });
+      return { status: 0, error: null };
+    },
+    processKillImpl() {
+      throw new Error('POSIX process groups are unavailable on Windows');
+    }
+  });
+
+  assert.deepEqual(calls, [{
+    command: 'taskkill.exe',
+    args: ['/PID', '43210', '/T', '/F'],
+    options: { windowsHide: true, stdio: 'ignore' }
+  }]);
+  assert.equal(fallbackKilled, false);
+});
+
 test('runHermes returns stdout before timeout when Hermes exits normally', async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
@@ -1162,6 +1945,68 @@ test('runHermes returns stdout before timeout when Hermes exits normally', async
   child.emit('close', 0);
 
   assert.equal(await resultPromise, 'FINAL_JSON\n```json\n{}\n```');
+});
+
+test('runHermes returns a complete accepted decision without waiting for a hung CLI process to close', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.pid = 12349;
+  let killedPid = null;
+  const output = 'FINAL_JSON\n{"classification":"faq","should_write_to_sheet":false}';
+
+  const resultPromise = runHermes(
+    'prompt text',
+    { hermesCommand: 'fake-hermes', hermesTimeoutMs: 1000 },
+    {
+      spawnImpl: () => child,
+      killTree(pid) { killedPid = pid; },
+      acceptOutput(value) { return value === output; }
+    }
+  );
+  child.stdout.write(output);
+
+  assert.equal(await resultPromise, output);
+  assert.equal(killedPid, 12349);
+});
+
+test('runHermes can invoke the Windows canonical Python module without the hanging console launcher', async () => {
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.pid = 12348;
+  let seenCommand = null;
+  let seenArgs = null;
+  let stdinPayload = '';
+  child.stdin.on('data', (chunk) => { stdinPayload += chunk.toString(); });
+  const spawnImpl = (command, args) => {
+    seenCommand = command;
+    seenArgs = args;
+    return child;
+  };
+
+  const resultPromise = runHermes(
+    'prompt text',
+    {
+      hermesCommand: 'C:\\Hermes\\venv\\Scripts\\python.exe',
+      hermesPythonModule: true,
+      hermesProfile: 'kakaoworker',
+      hermesTimeoutMs: 1000
+    },
+    { spawnImpl, platform: 'win32' }
+  );
+  child.stdout.write('OK');
+  child.emit('close', 0);
+
+  assert.equal(await resultPromise, 'OK');
+  assert.equal(seenCommand, 'C:\\Hermes\\venv\\Scripts\\python.exe');
+  assert.equal(seenArgs.length, 1);
+  assert.match(seenArgs[0], /hermes-stdin-runner\.py$/);
+  assert.doesNotMatch(seenArgs.join(' '), /prompt text/);
+  const payload = JSON.parse(stdinPayload);
+  assert.deepEqual(payload.argv.slice(0, 4), ['--profile', 'kakaoworker', 'chat', '--yolo']);
+  assert.equal(payload.query, 'prompt text');
 });
 
 test('runHermes does not force AX-only capture or truncate computer_use evidence', async () => {
@@ -1220,7 +2065,21 @@ test('buildHermesFinalJsonRecoveryPrompt preserves the full task and mandates st
   assert.match(recovery, /RECOVERY OUTPUT OVERRIDE:[\s\S]*finish with FINAL_JSON and one valid JSON object only/i);
 });
 
-test('runHermesDecision retries one invalid completion without reducing reasoning to a low call cap', async () => {
+test('recovery prompt preserves a bulky prior decision now that Windows uses stdin transport', () => {
+  const originalPrompt = `ORIGINAL:${'x'.repeat(26_000)}`;
+  const recovery = buildHermesFinalJsonRecoveryPrompt(originalPrompt, {
+    validationErrors: ['reply_decision.text is required'],
+    priorDecision: { reason: 'y'.repeat(7_000) }
+  });
+
+  assert.ok(recovery.length > 30_000, `recovery prompt was only ${recovery.length} characters`);
+  assert.doesNotMatch(recovery, /prior decision omitted/i);
+  assert.match(recovery, /reply_decision\.text is required/);
+  assert.match(recovery, /ORIGINAL:/);
+  assert.match(recovery, /y{100}/);
+});
+
+test('runHermesDecision gives a fast invalid completion the unused wall-clock budget for recovery', async () => {
   const validOutput = `FINAL_JSON\n\`\`\`json\n{"classification":"reservation_inquiry","should_write_to_sheet":false}\n\`\`\``;
   const outputs = ['I could not finish the task.', validOutput];
   const calls = [];
@@ -1232,7 +2091,13 @@ test('runHermesDecision retries one invalid completion without reducing reasonin
   const result = await runHermesDecision(
     'ORIGINAL TASK',
     { hermesCommand: 'fake-hermes', hermesTimeoutMs: 420000 },
-    { runHermesImpl }
+    {
+      runHermesImpl,
+      nowImpl: (() => {
+        const values = [1_000, 101_000];
+        return () => values.shift() ?? 101_000;
+      })()
+    }
   );
 
   assert.equal(result.attempts, 2);
@@ -1243,10 +2108,37 @@ test('runHermesDecision retries one invalid completion without reducing reasonin
   assert.equal(calls[0].prompt, 'ORIGINAL TASK');
   assert.match(calls[1].prompt, /RECOVERY PASS/);
   assert.match(calls[1].prompt, /ORIGINAL TASK/);
+  assert.match(calls[1].prompt, /preserve all valid fields and repair only/i);
   assert.doesNotMatch(calls[1].prompt, /at most 10 tool calls/i);
-  assert.ok(calls[0].config.hermesTimeoutMs > calls[1].config.hermesTimeoutMs);
-  assert.ok(calls[1].config.hermesTimeoutMs >= 45000);
-  assert.ok(calls[0].config.hermesTimeoutMs + calls[1].config.hermesTimeoutMs <= 405000);
+  assert.equal(calls[0].config.hermesTimeoutMs, 280800);
+  assert.equal(calls[1].config.hermesTimeoutMs, 290000);
+  assert.equal(calls[1].config.hermesMaxTurns, 6);
+  assert.ok(100000 + calls[1].config.hermesTimeoutMs <= 390000);
+});
+
+test('Hermes failure diagnostics expose actionable signals without output or secret text', () => {
+  const diagnostic = describeHermesDecisionFailure(
+    new Error('Hermes exited 1: HTTP 429 rate limit for sk-sensitive-value'),
+    'customer-private-output'
+  );
+  const rendered = JSON.stringify(diagnostic);
+
+  assert.equal(diagnostic.kind, 'process_error');
+  assert.equal(diagnostic.exitCode, 1);
+  assert.equal(diagnostic.httpStatus, 429);
+  assert.deepEqual(diagnostic.signals, ['rate_limited']);
+  assert.equal(diagnostic.outputChars, 'customer-private-output'.length);
+  assert.doesNotMatch(rendered, /sensitive-value|customer-private-output/);
+});
+
+test('Hermes failure diagnostics retain a safe Windows spawn error code', () => {
+  const error = new Error('spawn EINVAL');
+  error.code = 'EINVAL';
+  const diagnostic = describeHermesDecisionFailure(error, '');
+
+  assert.equal(diagnostic.kind, 'process_error');
+  assert.equal(diagnostic.errorCode, 'EINVAL');
+  assert.deepEqual(diagnostic.signals, ['spawn_invalid_argument']);
 });
 
 test('runHermesDecision does not retry a valid first completion', async () => {
@@ -1264,6 +2156,29 @@ test('runHermesDecision does not retry a valid first completion', async () => {
   assert.equal(calls, 1);
   assert.equal(result.attempts, 1);
   assert.equal(result.recovered, false);
+  assert.equal(result.decision.classification, 'faq');
+});
+
+test('runHermesDecision uses its reserved recovery budget after a read-only first-attempt timeout', async () => {
+  const calls = [];
+  const validOutput = 'FINAL_JSON\n{"classification":"faq","should_write_to_sheet":false}';
+  const result = await runHermesDecision('ORIGINAL TASK', { hermesTimeoutMs: 420000 }, {
+    runHermesImpl: async (prompt, config) => {
+      calls.push({ prompt, config });
+      if (calls.length === 1) throw new Error('Hermes timed out');
+      return validOutput;
+    },
+    nowImpl: (() => {
+      const values = [1_000, 281_000];
+      return () => values.shift() ?? 281_000;
+    })()
+  });
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].prompt, /RECOVERY PASS/);
+  assert.equal(calls[1].config.hermesTimeoutMs, 110000);
+  assert.equal(result.attempts, 2);
+  assert.equal(result.recovered, true);
   assert.equal(result.decision.classification, 'faq');
 });
 
@@ -1337,6 +2252,68 @@ test('validateAiDecisionContract rejects missing AI semantics instead of reconst
   assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].summary')));
 });
 
+test('already_answered unregistered reservation stays valid when an actionable schedule follow-up preserves the work', () => {
+  const preservedUnregistered = validateAiDecisionContract({
+    should_write_to_sheet: false,
+    classification: 'already_answered',
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    existing_confirm_request_ids: [],
+    follow_up_items: [{
+      type: 'reservation_review',
+      route: 'schedule',
+      taskKey: 'reservation:customer:2026-07-31:item',
+      priority: 'urgent',
+      status: 'open',
+      title: 'Unregistered staff-confirmed reservation review',
+      customer_name: 'Customer',
+      summary: 'Staff answered, but no request, contract, or schedule record exists.',
+      recommended_action: 'Resolve the missing time and exact equipment, then create the confirmation request.',
+      suggested_reply_draft: '',
+      evidence: ['No authoritative registration record was found.'],
+      blocking_reason: 'Exact time and equipment model remain unresolved.',
+      due_hint: 'now'
+    }],
+    reply_decision: {
+      replyMode: 'no_reply',
+      text: '',
+      confidence: 'high',
+      reason: 'Staff already replied; preserve the missing registration as an internal follow-up.',
+      shouldCreateTask: true,
+      safetyClass: 'no_send',
+      grounding: 'visible_conversation',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: true
+    }
+  });
+  const silentlyDropped = validateAiDecisionContract({
+    should_write_to_sheet: false,
+    classification: 'already_answered',
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    existing_confirm_request_ids: [],
+    follow_up_items: [],
+    reply_decision: {
+      replyMode: 'no_reply',
+      shouldCreateTask: false,
+      safetyClass: 'no_send',
+      grounding: 'visible_conversation',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: true
+    }
+  });
+  const nonReservation = validateAiDecisionContract({
+    should_write_to_sheet: false,
+    classification: 'already_answered',
+    reservation_inquiry: { is_reservation_inquiry: false }
+  });
+
+  assert.equal(preservedUnregistered.valid, true);
+  assert.equal(silentlyDropped.valid, false);
+  assert.ok(silentlyDropped.errors.some((error) => error.includes('actionable schedule follow-up')));
+  assert.equal(nonReservation.valid, true);
+});
+
 test('extractJsonObject reads fenced FINAL_JSON object', () => {
   const text = `설명\n\nFINAL_JSON\n\`\`\`json\n{"should_write_to_sheet":false,"reason":"테스트"}\n\`\`\``;
   assert.deepEqual(extractJsonObject(text), {
@@ -1369,6 +2346,171 @@ test('buildHermesPrompt requires sender separation and customer turn clustering'
   assert.match(prompt, /conversation_turns/);
 });
 
+test('buildHermesPrompt requires additions-only equipment for an existing booking', () => {
+  const prompt = buildHermesPrompt({ id: 'job-addon', preview_text: '기존 예약에 렌즈 하나 추가해주세요' });
+  assert.match(prompt, /equipment_write_mode/);
+  assert.match(prompt, /additions_only/);
+  assert.match(prompt, /do not repeat existing equipment/i);
+  assert.match(prompt, /existing booking with newly added or increased equipment is not a duplicate/i);
+  assert.doesNotMatch(prompt, /never concatenated or delta-only/i);
+});
+
+test('buildHermesPrompt treats a requested set option as a component selection, not separate equipment', () => {
+  const prompt = buildHermesPrompt({ id: 'job-set-option', preview_text: '600X는 젬볼로 부탁드립니다' });
+  assert.match(prompt, /set_component_selections/);
+  assert.match(prompt, /600X.*젬볼.*소프트박스.*젬볼 90/s);
+  assert.match(prompt, /never add.*top-level equipment/i);
+});
+
+test('existing booking writes reject a repeated full plan and accept only the added equipment', () => {
+  const repeated = completeSheetDecision({
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: true
+    },
+    sheet_row_candidate: {
+      equipment_write_mode: 'full_plan',
+      equipment: [
+        { item: '소니 FX3 바디세트', quantity: 1 },
+        { item: '소니 GM 24-70mm II', quantity: 1 }
+      ]
+    }
+  });
+  const addition = completeSheetDecision({
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: true
+    },
+    sheet_row_candidate: {
+      equipment_write_mode: 'additions_only',
+      equipment: [{ item: '소니 GM 24-70mm II', quantity: 1 }]
+    }
+  });
+
+  const repeatedValidation = validateAiDecisionContract(repeated);
+  assert.equal(repeatedValidation.valid, false);
+  assert.ok(repeatedValidation.errors.some((error) => error.includes('additions_only')));
+  assert.equal(validateAiDecisionContract(addition).valid, true);
+
+  const payload = buildSheetAppendPayload(addition, { apiKey: 'secret' });
+  assert.deepEqual(payload.args.장비, [{ 이름: '소니 GM 24-70mm II', 수량: 1 }]);
+});
+
+test('set component choice is not written as another top-level equipment item', () => {
+  const decision = completeSheetDecision({
+    sheet_row_candidate: {
+      equipment: [{ item: '어퓨쳐 600X', quantity: 2 }],
+      set_component_selections: [{
+        set_item: '어퓨쳐 600X',
+        component_item: '소프트박스',
+        selected_item: '젬볼 90'
+      }]
+    }
+  });
+
+  const validation = validateAiDecisionContract(decision);
+  assert.equal(validation.valid, true);
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  assert.deepEqual(payload.args.장비, [{ 이름: '어퓨쳐 600X', 수량: 2 }]);
+  assert.deepEqual(payload.setComponentSelections, [{
+    setItem: '어퓨쳐 600X',
+    componentItem: '소프트박스',
+    selectedItem: '젬볼 90'
+  }]);
+});
+
+test('set component choice is rejected when it is also repeated as top-level equipment', () => {
+  const decision = completeSheetDecision({
+    sheet_row_candidate: {
+      equipment: [
+        { item: '어퓨쳐 600X', quantity: 2 },
+        { item: '젬볼', quantity: 2 }
+      ],
+      set_component_selections: [{
+        set_item: '어퓨쳐 600X',
+        component_item: '소프트박스',
+        selected_item: '젬볼 90'
+      }]
+    }
+  });
+
+  const validation = validateAiDecisionContract(decision);
+  assert.equal(validation.valid, false);
+  assert.ok(validation.errors.some((error) => error.includes('must not also be top-level equipment')));
+  assert.equal(buildSheetAppendPayload(decision, { apiKey: 'secret' }), null);
+});
+
+test('appendToSheet applies an exact set component selection and returns refreshed availability', async () => {
+  const payload = {
+    key: 'secret',
+    action: 'run',
+    func: 'insertAndCheckRequest',
+    args: {
+      반출일: '2026-07-30',
+      반출시간: '19:00',
+      반납일: '2026-07-31',
+      반납시간: '19:00',
+      예약자명: '테스트고객',
+      장비: [{ 이름: '어퓨쳐 600X', 수량: 2 }]
+    },
+    setComponentSelections: [{
+      setItem: '어퓨쳐 600X',
+      componentItem: '소프트박스',
+      selectedItem: '젬볼 90'
+    }]
+  };
+  const calls = [];
+  const fetchImpl = async (url) => {
+    const parsed = new URL(String(url));
+    calls.push(parsed);
+    if (parsed.searchParams.get('func') === 'insertAndCheckRequest') {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          success: true,
+          reqID: 'RQ-260729-999',
+          results: [{ 장비명: '소프트박스', 수량: 2, 결과: '⚠️ 모델 선택 필요', 상세: 'F열 선택 필요' }]
+        })
+      };
+    }
+    if (parsed.searchParams.get('func') === 'updateRequestItem') {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ status: 'OK', reChecked: true }) };
+    }
+    if (parsed.searchParams.get('action') === 'search') {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          results: [{ data: ['RQ-260729-999', '', '', '', '', '젬볼 90', 2, '확인', '✅ 가용2', '예약 가능', '', '', '', '', '', '', '[세트]어퓨쳐 600X'] }]
+        })
+      };
+    }
+    throw new Error(`unexpected URL ${parsed}`);
+  };
+
+  const result = await appendToSheet({
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'secret',
+    fetchImpl
+  }, payload);
+
+  assert.equal(calls.length, 3);
+  const updateArgs = JSON.parse(calls[1].searchParams.get('args'));
+  assert.deepEqual(updateArgs, {
+    reqID: 'RQ-260729-999',
+    장비명: '소프트박스',
+    비고: '[세트]어퓨쳐 600X',
+    새이름: '젬볼 90'
+  });
+  assert.deepEqual(result.results, [{
+    equipment: '젬볼 90',
+    quantity: '2',
+    result: '✅ 가용2',
+    detail: '예약 가능'
+  }]);
+});
+
 test('buildSheetAppendPayload refuses writes when latest actionable message is not customer after staff reply', () => {
   const decision = {
     should_write_to_sheet: true,
@@ -1390,7 +2532,7 @@ test('buildSheetAppendPayload refuses writes when latest actionable message is n
 test('buildSheetAppendPayload allows staff-confirmed unregistered reservations without a new customer turn', () => {
   const decision = {
     should_write_to_sheet: true,
-    classification: 'already_answered',
+    classification: 'reservation',
     customer: { name: '문치호' },
     reservation_inquiry: {
       is_reservation_inquiry: true,
@@ -2464,11 +3606,11 @@ test('buildSlackFollowUpMessage includes action buttons and deduplicated automat
   assert.match(JSON.stringify(message.blocks), /village_followup_edit_send/);
   assert.match(JSON.stringify(message.blocks), /village_followup_status_done/);
   assert.match(JSON.stringify(message.blocks), /처리 요약/);
-  assert.match(JSON.stringify(message.blocks), /⚠️ 분류\/상태/);
-  assert.match(JSON.stringify(message.blocks), /🧩 문제/);
+  assert.match(JSON.stringify(message.blocks), /⚠️ 현재 상태/);
+  assert.match(JSON.stringify(message.blocks), /🧩 처리 내용/);
   assert.match(JSON.stringify(message.blocks), /🎒 장비 \/ 📅 기간/);
-  assert.match(JSON.stringify(message.blocks), /➡️ 다음/);
-  assert.match(JSON.stringify(message.blocks), /최근 대화/);
+  assert.match(JSON.stringify(message.blocks), /➡️ 내가 할 일/);
+  assert.match(JSON.stringify(message.blocks), /고객 요청/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /근거/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /추천 조치/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /라우팅/);
@@ -2484,6 +3626,458 @@ test('buildSlackFollowUpMessage includes action buttons and deduplicated automat
   assert.doesNotMatch(JSON.stringify(message.blocks), /현재 초안으로 카카오 발송 요청/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /대시보드/);
   assert.doesNotMatch(JSON.stringify(message.blocks), /\\n  /);
+});
+
+test('manual task card leads with one concrete action and never mentions or sends to a customer', () => {
+  const message = buildSlackManualTaskMessage({
+    id: 'manual-1',
+    type: 'tax_invoice',
+    customer_name: '윤영준',
+    title: '260729-001 세금계산서 발행',
+    summary: '고객이 사업자번호 2973501207로 세금계산서를 요청했습니다.',
+    recommended_action: '사업자번호 2973501207로 세금계산서를 발행하세요.',
+    suggested_reply_draft: '발행해드리겠습니다.',
+    evidence: ['거래 260729-001 · VAT 포함 84,700원', '오늘 15시 방문 예정', 'Agent 호출 17회'],
+    payload: {
+      card_kind: 'follow_up_task',
+      requires_human_action: true,
+      action_family: 'invoice_issue',
+      business_object_key: 'trade:260729-001'
+    }
+  }, {
+    route: { route: 'follow_up', channel: 'C0BMNJY7H8D' },
+    config: { slackMentionUserIds: ['U03EB8L0QDR'] }
+  });
+
+  const rendered = JSON.stringify(message.blocks);
+  const sections = message.blocks.filter((block) => block.type === 'section');
+  const metadata = message.blocks.find((block) => block.type === 'context');
+  assert.equal(message.channel, 'C0BMNJY7H8D');
+  assert.match(metadata.elements[0].text, /고객.*윤영준/);
+  assert.match(metadata.elements[0].text, /대상.*260729-001/);
+  assert.match(sections[0].text.text, /내가 할 일/);
+  assert.match(sections[0].text.text, /2973501207로 세금계산서를 발행하세요/);
+  assert.match(rendered, /세금계산서/);
+  assert.match(rendered, /84,700원/);
+  assert.match(rendered, /village_followup_status_in_progress/);
+  assert.match(rendered, /village_followup_status_done/);
+  assert.match(rendered, /village_followup_status_dismissed/);
+  assert.doesNotMatch(rendered, /발행해드리겠습니다|village_followup_send|village_followup_edit_send/);
+  assert.doesNotMatch(rendered, /처리 요약|현재 상태|처리 내용|권장 조치|Agent 호출/);
+  assert.doesNotMatch(rendered, /<@U03EB8L0QDR>/);
+  assert.doesNotMatch(message.text, /<@U03EB8L0QDR>/);
+  assert.ok(message.text.length <= 40);
+});
+
+test('manual task card escapes action and fact text exactly once', () => {
+  const message = buildSlackManualTaskMessage({
+    id: 'manual-escape-1',
+    recommended_action: 'Review A & B <today>',
+    evidence: ['Fact A & B <today>'],
+    payload: {
+      requires_human_action: true,
+      action_family: 'invoice_issue'
+    }
+  }, {
+    route: { route: 'follow_up', channel: 'C0BMNJY7H8D' }
+  });
+
+  const rendered = JSON.stringify(message.blocks);
+  assert.match(rendered, /Review A &amp; B &lt;today&gt;/);
+  assert.match(rendered, /Fact A &amp; B &lt;today&gt;/);
+  assert.doesNotMatch(rendered, /&amp;amp;|&amp;lt;|&amp;gt;/);
+});
+
+test('manual task card uses 업무 대상 확인 when no business object or customer is available', () => {
+  const message = buildSlackManualTaskMessage({}, {
+    route: { route: 'follow_up', channel: 'C0BMNJY7H8D' }
+  });
+
+  assert.equal(message.blocks[0].text.text, '업무 확인 · 업무 대상 확인');
+  assert.match(message.text, /업무 대상 확인/);
+});
+
+test('manual task card preserves safe non-trade business object targets', () => {
+  const cases = [
+    ['request:RQ-260804-001', '요청 RQ-260804-001'],
+    ['equipment:sony-fx3', '장비 sony-fx3'],
+    ['task:quote-review', '업무 quote-review']
+  ];
+
+  for (const [businessObjectKey, expectedTarget] of cases) {
+    const message = buildSlackManualTaskMessage({
+      id: `manual-${businessObjectKey}`,
+      customer_name: '윤영준',
+      recommended_action: '대상을 확인하세요.',
+      payload: {
+        requires_human_action: true,
+        action_family: 'inventory_check',
+        business_object_key: businessObjectKey
+      }
+    }, { route: { route: 'follow_up', channel: 'C0BMNJY7H8D' } });
+
+    const metadata = message.blocks.find((block) => block.type === 'context');
+    assert.match(message.blocks[0].text.text, new RegExp(expectedTarget));
+    assert.match(metadata.elements[0].text, new RegExp(expectedTarget));
+    assert.match(message.text, new RegExp(expectedTarget));
+  }
+});
+
+test('manual task plain-text header keeps customer ampersands readable while fallback escapes them', () => {
+  const message = buildSlackManualTaskMessage({
+    id: 'manual-plain-text-customer',
+    customer_name: 'A & B',
+    recommended_action: '업무를 확인하세요.',
+    payload: { requires_human_action: true, action_family: 'document_approval' }
+  }, { route: { route: 'follow_up', channel: 'C0BMNJY7H8D' } });
+
+  assert.match(message.blocks[0].text.text, /A & B/);
+  assert.match(message.text, /A &amp; B/);
+  assert.doesNotMatch(message.blocks[0].text.text, /&amp;/);
+  assert.doesNotMatch(message.text, /&amp;amp;/);
+});
+
+test('manual task fallback escapes customer-derived Slack mentions without changing its plain-text header', () => {
+  const message = buildSlackManualTaskMessage({
+    customer_name: '<@U03EB8L0QDR>',
+    payload: { requires_human_action: true, action_family: 'document_approval' }
+  }, { route: { route: 'follow_up', channel: 'C0BMNJY7H8D' } });
+
+  assert.match(message.blocks[0].text.text, /<@U03EB8L0QDR>/);
+  assert.doesNotMatch(message.blocks[0].text.text, /&lt;/);
+  assert.doesNotMatch(message.text, /<@/);
+  assert.match(message.text, /&lt;@U03EB8L0QDR&gt;/);
+  assert.doesNotMatch(message.text, /&amp;amp;|&amp;lt;|&amp;gt;/);
+  assert.ok(message.text.length <= 40);
+});
+
+test('inquiry card shows the latest customer cluster once and only exposes a visible safe draft', () => {
+  const latest = '오늘 입금확인증 보내주시면 감사하겠습니다.';
+  const draft = '입금확인증 요청을 확인해 접수하겠습니다.';
+  const message = buildSlackInquiryMessage({
+    id: 'inquiry-1', type: 'customer_inquiry', customer_name: '김영준',
+    summary: latest,
+    recommended_action: '직원 처리가 필요한 요청입니다. 다음 문장은 표시하지 않습니다.',
+    suggested_reply_draft: draft,
+    evidence: ['거래 260729-001 · VAT 포함 84,700원', 'worker.mjs:5800'],
+    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: latest }
+  }, {
+    route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' },
+    config: { slackFollowUpChannel: 'C0BMNJY7H8D', slackMentionUserIds: ['U03EB8L0QDR'] }
+  });
+
+  const rendered = JSON.stringify(message.blocks);
+  assert.equal((rendered.match(/오늘 입금확인증 보내주시면 감사하겠습니다\./g) || []).length, 1);
+  assert.match(rendered, /AI 판단/);
+  assert.match(rendered, /직원 처리가 필요한 요청입니다\./);
+  assert.match(rendered, /입금확인증 요청을 확인해 접수하겠습니다\./);
+  assert.match(rendered, /village_followup_send/);
+  assert.match(rendered, /village_followup_edit_send/);
+  assert.match(rendered, /village_followup_open_manual_channel/);
+  assert.match(rendered, /slack\.com\/app_redirect\?channel=C0BMNJY7H8D/);
+  assert.doesNotMatch(rendered, /worker\.mjs|처리 요약|<@U03EB8L0QDR>/);
+  assert.equal(message.channel, 'C0BMRVDP2Q2');
+  assert.ok(message.text.length <= 40);
+});
+
+test('inquiry fallback escapes latest-message Slack mentions without changing its plain-text header', () => {
+  const message = buildSlackInquiryMessage({
+    customer_name: '고객',
+    payload: {
+      card_kind: 'inquiry_case',
+      latest_customer_message_cluster: '<@U03EB8L0QDR> 확인 부탁드립니다.'
+    }
+  }, { route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' } });
+
+  assert.match(message.blocks[0].text.text, /고객/);
+  assert.doesNotMatch(message.blocks[0].text.text, /&amp;/);
+  assert.doesNotMatch(message.text, /<@/);
+  assert.match(message.text, /&lt;@U03EB8L0QDR&gt;/);
+  assert.doesNotMatch(message.text, /&amp;amp;|&amp;lt;|&amp;gt;/);
+  assert.ok(message.text.length <= 40);
+});
+
+test('inquiry card hides direct send for missing, failed, and incomplete drafts', () => {
+  const ordinary = buildSlackInquiryMessage({
+    id: 'inquiry-empty', customer_name: '김정희', recommended_action: '답변 검토가 필요',
+    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '일정 확인 부탁드립니다.' }
+  }, { route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' } });
+  const failure = buildSlackInquiryMessage({
+    id: 'inquiry-failure', customer_name: '고객명 확인 필요', suggested_reply_draft: '잠시만 기다려주세요.',
+    payload: { card_kind: 'inquiry_case', failure_kind: 'worker_error', latest_customer_message_cluster: '확인 필요' }
+  }, {
+    route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' },
+    config: { slackFollowUpChannel: 'C0BMNJY7H8D' }
+  });
+  const longDraft = buildSlackInquiryMessage({
+    id: 'inquiry-long', customer_name: '박정수',
+    suggested_reply_draft: '첫째 줄\n둘째 줄\n보이면 안 되는 셋째 줄',
+    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '확인 부탁드립니다.' }
+  }, { route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' } });
+
+  assert.match(JSON.stringify(ordinary.blocks), /답변 작성/);
+  assert.doesNotMatch(JSON.stringify(ordinary.blocks), /village_followup_send/);
+  assert.doesNotMatch(JSON.stringify(failure.blocks), /잠시만 기다려주세요\.|village_followup_send|village_followup_edit_send/);
+  const failureActions = failure.blocks.find((block) => block.type === 'actions');
+  assert.ok(failureActions, 'configured failure inquiry must retain manual-channel navigation');
+  assert.deepEqual(
+    failureActions.elements.map((element) => element.action_id),
+    ['village_followup_open_manual_channel']
+  );
+  const renderedLongDraft = JSON.stringify(longDraft.blocks);
+  assert.match(renderedLongDraft, /첫째 줄/);
+  assert.match(renderedLongDraft, /둘째 줄/);
+  assert.doesNotMatch(renderedLongDraft, /보이면 안 되는 셋째 줄/);
+  assert.doesNotMatch(renderedLongDraft, /village_followup_send/);
+  assert.match(renderedLongDraft, /village_followup_edit_send/);
+});
+
+test('inquiry card suppresses direct send when display truncates or replaces the eventual draft', () => {
+  const overLimitDraft = '가'.repeat(701);
+  const fencedDraft = '확인 문구 ``` 내부 표시';
+  const overLimit = buildSlackInquiryMessage({
+    id: 'inquiry-over-limit', customer_name: '박정수', suggested_reply_draft: overLimitDraft,
+    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '확인 부탁드립니다.' }
+  }, { route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' } });
+  const fenced = buildSlackInquiryMessage({
+    id: 'inquiry-fenced', customer_name: '박정수', suggested_reply_draft: fencedDraft,
+    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '확인 부탁드립니다.' }
+  }, { route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' } });
+
+  for (const message of [overLimit, fenced]) {
+    const rendered = JSON.stringify(message.blocks);
+    assert.doesNotMatch(rendered, /village_followup_send/);
+    assert.match(rendered, /village_followup_edit_send/);
+  }
+  assert.doesNotMatch(JSON.stringify(overLimit.blocks), new RegExp(overLimitDraft));
+  assert.match(JSON.stringify(fenced.blocks), /확인 문구 ''' 내부 표시/);
+});
+
+test('production inquiry constructor does not repeat latest sender-prefixed customer evidence', () => {
+  const latest = '현금영수증 부탁드립니다.';
+  const row = buildInquiryCaseRow({
+    customer: { name: 'A & B' },
+    latest_customer_message_cluster: latest,
+    recommended_action: '직원 처리가 필요합니다.'
+  }, { room_key: 'chat:inquiry-evidence' }, [{
+    customer_name: 'A & B',
+    recommended_action: '직원 처리가 필요합니다.',
+    evidence: [`고객: ${latest}`, `A & B: ${latest}`, '거래 260804-001 · 84,700원']
+  }]);
+
+  const message = buildSlackInquiryMessage(row, {
+    route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' }
+  });
+  const rendered = JSON.stringify(message.blocks);
+
+  assert.equal((rendered.match(/현금영수증 부탁드립니다\./g) || []).length, 1);
+  assert.match(rendered, /거래 260804-001 · 84,700원/);
+  assert.match(message.blocks[0].text.text, /A & B/);
+  assert.doesNotMatch(message.blocks[0].text.text, /&amp;/);
+  assert.match(message.text, /A &amp; B/);
+  assert.doesNotMatch(message.text, /&amp;amp;/);
+});
+
+test('buildSlackFollowUpMessage delegates two-channel cards and ignores configured mentions', () => {
+  const inquiry = buildSlackFollowUpMessage({
+    id: 'inquiry-1', customer_name: '윤영준', type: 'customer_inquiry',
+    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '현금영수증 부탁드립니다.' }
+  }, {
+    route: { route: 'inquiry', channel: 'CINQUIRY' },
+    config: { slackMentionUserIds: ['U03EB8L0QDR'] }
+  });
+  const manual = buildSlackFollowUpMessage({
+    id: 'manual-1', customer_name: '윤영준', type: 'tax_invoice', recommended_action: '세금계산서를 발행하세요.',
+    payload: { card_kind: 'follow_up_task', requires_human_action: true, action_family: 'invoice_issue' }
+  }, {
+    route: { route: 'follow_up', channel: 'CFOLLOWUP' },
+    config: { slackMentionUserIds: ['U03EB8L0QDR'] }
+  });
+
+  assert.match(JSON.stringify(inquiry.blocks), /AI 판단/);
+  assert.match(JSON.stringify(manual.blocks), /내가 할 일/);
+  assert.doesNotMatch(JSON.stringify({ inquiry, manual }), /<@U03EB8L0QDR>/);
+});
+
+test('follow-up case renders the current internal step without reply controls', () => {
+  const row = {
+    id: 'case-1', customer_name: '김영준', suggested_reply_draft: '완료되었습니다.',
+    payload: {
+      card_kind: 'follow_up_case', owner_channel: 'follow_up', phase: 'internal_action', state_version: 7,
+      steps: [
+        { step_key: 'invoice', action_family: 'invoice_issue', action: '세금계산서를 발행하세요.', status: 'pending' },
+        { step_key: 'reply', action_family: 'reservation_change', action: '예약을 수정하세요.', status: 'pending' }
+      ]
+    }
+  };
+  const message = buildSlackFollowUpCaseMessage(row, { config: { slackFollowUpChannel: '후속업무', slackInquiryChannel: '카카오톡문의' } });
+  const rendered = JSON.stringify(message);
+  const actions = message.blocks.find((block) => block.type === 'actions').elements;
+
+  assert.equal(message.channel, '후속업무');
+  assert.match(rendered, /1\/2/);
+  assert.match(rendered, /세금계산서를 발행하세요/);
+  assert.match(rendered, /village_followup_step_done/);
+  assert.doesNotMatch(rendered, /village_followup_send|village_followup_edit_send/);
+  assert.deepEqual(JSON.parse(actions.find((element) => element.action_id === 'village_followup_step_done').value), { id: 'case-1', state_version: 7 });
+  assert.doesNotMatch(rendered, /<@/);
+});
+
+test('follow-up case renders reply controls after internal steps complete', () => {
+  const row = {
+    id: 'case-1', customer_name: '김영준', suggested_reply_draft: '발행이 완료되었습니다.',
+    payload: {
+      card_kind: 'follow_up_case', owner_channel: 'follow_up', phase: 'customer_reply', state_version: 8,
+      steps: [{ step_key: 'invoice', action_family: 'invoice_issue', action: '발행', status: 'done' }]
+    }
+  };
+  const message = buildSlackFollowUpCaseMessage(row, { config: { slackFollowUpChannel: '후속업무', slackInquiryChannel: '카카오톡문의' } });
+  const rendered = JSON.stringify(message);
+  const actions = message.blocks.find((block) => block.type === 'actions').elements;
+
+  assert.equal(message.channel, '후속업무');
+  assert.match(rendered, /village_followup_send/);
+  assert.match(rendered, /village_followup_reply_not_needed/);
+  assert.doesNotMatch(rendered, /village_followup_status_done/);
+  assert.deepEqual(JSON.parse(actions.find((element) => element.action_id === 'village_followup_reply_not_needed').value), { id: 'case-1', state_version: 8 });
+  assert.doesNotMatch(rendered, /<@/);
+});
+
+test('every canonical card button carries the case id and state version', () => {
+  const config = { slackFollowUpChannel: '후속업무', slackInquiryChannel: '카카오톡문의' };
+  const internal = buildSlackFollowUpCaseMessage({
+    id: 'case-buttons', customer_name: 'Kim',
+    payload: {
+      card_kind: 'follow_up_case', owner_channel: 'follow_up', phase: 'internal_action', state_version: 11,
+      steps: [{ step_key: 'one', action: 'Do work', status: 'pending' }]
+    }
+  }, { config });
+  const reply = buildSlackFollowUpCaseMessage({
+    id: 'case-buttons', customer_name: 'Kim', suggested_reply_draft: 'Reply now.',
+    payload: {
+      card_kind: 'follow_up_case', owner_channel: 'follow_up', phase: 'customer_reply', state_version: 11,
+      steps: [{ step_key: 'one', action: 'Do work', status: 'done' }]
+    }
+  }, { config });
+  const buttons = [...internal.blocks, ...reply.blocks]
+    .filter((block) => block.type === 'actions')
+    .flatMap((block) => block.elements);
+
+  assert.deepEqual(buttons.map((button) => button.action_id).sort(), [
+    'village_followup_edit_send',
+    'village_followup_reply_not_needed',
+    'village_followup_send',
+    'village_followup_status_dismissed',
+    'village_followup_status_in_progress',
+    'village_followup_step_done'
+  ]);
+  for (const button of buttons) {
+    assert.deepEqual(JSON.parse(button.value), { id: 'case-buttons', state_version: 11 });
+  }
+});
+
+test('reply phase without a draft renders request judgment facts completed work and a write button', () => {
+  const message = buildSlackFollowUpCaseMessage({
+    id: 'case-no-draft', customer_name: 'Lee', suggested_reply_draft: '',
+    recommended_action: 'Issue the invoice before replying.', evidence: ['trade 260804-001'],
+    payload: {
+      card_kind: 'follow_up_case', owner_channel: 'follow_up', phase: 'customer_reply', state_version: 4,
+      latest_customer_message_cluster: 'Please issue the invoice and let me know.',
+      ai_judgment: 'Invoice completed; a customer reply is still required.',
+      core_facts: ['invoice 260804-001', 'issued today'],
+      steps: [{ step_key: 'invoice', action: 'Issue invoice 260804-001', status: 'done' }]
+    }
+  }, { config: { slackFollowUpChannel: '후속업무', slackInquiryChannel: '카카오톡문의' } });
+  const rendered = JSON.stringify(message);
+
+  assert.match(rendered, /Please issue the invoice and let me know/);
+  assert.match(rendered, /Invoice completed; a customer reply is still required/);
+  assert.match(rendered, /invoice 260804-001/);
+  assert.match(rendered, /Issue invoice 260804-001/);
+  assert.match(rendered, /답변 작성/);
+  assert.doesNotMatch(rendered, /"text":"수정"/);
+  assert.doesNotMatch(rendered, /village_followup_send/);
+});
+
+test('follow-up case keeps late internal work on the original inquiry-channel card', () => {
+  const row = {
+    id: 'case-late', customer_name: '홍길동',
+    payload: {
+      card_kind: 'follow_up_case', owner_channel: 'inquiry', phase: 'internal_action', state_version: 2,
+      steps: [{ step_key: 'invoice', action_family: 'invoice_issue', action: '세금계산서를 발행하세요.', status: 'pending' }]
+    }
+  };
+  const message = buildSlackFollowUpCaseMessage(row, { config: { slackFollowUpChannel: '후속업무', slackInquiryChannel: '카카오톡문의' } });
+
+  assert.equal(message.channel, '카카오톡문의');
+  assert.match(JSON.stringify(message.blocks), /후속업무 발생/);
+});
+
+test('reply-only case stays in the inquiry channel without automatic mentions', () => {
+  const row = {
+    id: 'case-reply', customer_name: '홍길동', suggested_reply_draft: '확인 후 안내드리겠습니다.',
+    payload: { card_kind: 'follow_up_case', owner_channel: 'inquiry', phase: 'customer_reply', state_version: 3, steps: [] }
+  };
+  const message = buildSlackFollowUpMessage(row, {
+    config: { twoChannelRoutingEnabled: true, slackFollowUpChannel: '후속업무', slackInquiryChannel: '카카오톡문의', slackMentionUserIds: ['U123'] }
+  });
+  const rendered = JSON.stringify(message);
+
+  assert.equal(message.channel, '카카오톡문의');
+  assert.match(rendered, /village_followup_send|village_followup_edit_send/);
+  assert.match(rendered, /village_followup_reply_not_needed/);
+  assert.doesNotMatch(rendered, /<@/);
+  assert.doesNotMatch(message.text, /<@/);
+});
+
+test('Slack follow-up notification names the customer, business task, and next action without staff message replay', () => {
+  const message = buildSlackFollowUpMessage({
+    id: 'follow-mobile-1',
+    type: 'reservation_review',
+    priority: 'urgent',
+    customer_name: '홍길동',
+    title: '홍길동 예약 변경 확인',
+    summary: '예약 장비 변경 요청을 확인해야 합니다.',
+    recommended_action: '변경 장비의 가용성을 확인하고 고객에게 결과 안내',
+    suggested_reply_draft: '변경 가능 여부 확인 후 안내드리겠습니다.',
+    payload: {
+      visible_messages_used: [
+        { sender: '홍길동', message: 'FX3를 다른 기체로 바꿀 수 있을까요?', time: '오전 8:00' },
+        { sender: '빌리지님', message: '네네 바꿔드리겠습니다.', time: '오전 8:01' }
+      ]
+    }
+  }, {
+    config: { slackMentionUserIds: ['U03EB8L0QDR'] }
+  });
+  const blocks = JSON.stringify(message.blocks);
+
+  assert.equal(message.text, '홍길동 · 예약 · 장비 가용 확인 후 안내');
+  assert.doesNotMatch(message.text, /<@U03EB8L0QDR>/);
+  assert.ok(message.text.length <= 40);
+  assert.equal((blocks.match(/FX3를 다른 기체로 바꿀 수 있을까요\?/g) || []).length, 1);
+  assert.doesNotMatch(blocks, /네네 바꿔드리겠습니다/);
+  assert.match(blocks, /고객 요청/);
+  assert.match(blocks, /내가 할 일/);
+});
+
+test('Slack failure card hides internal errors and does not offer a customer send button', () => {
+  const message = buildSlackFollowUpMessage({
+    id: 'follow-failure-1',
+    type: 'reply_needed',
+    priority: 'urgent',
+    customer_name: '고객명 확인 필요',
+    title: '카카오 자동처리 확인 필요',
+    summary: 'worker exited 1: Error: Hermes decision failed after 2 attempts at file:///worker.mjs:5800',
+    recommended_action: '카카오에서 고객명과 마지막 요청을 확인하고 처리 여부 결정',
+    suggested_reply_draft: '감독님, 확인 후 바로 안내드리겠습니다.',
+    payload: { failure_kind: 'worker_error' }
+  });
+  const rendered = JSON.stringify(message);
+
+  assert.doesNotMatch(rendered, /worker exited|Hermes decision|file:\/\/\//);
+  assert.doesNotMatch(rendered, /감독님, 확인 후 바로 안내드리겠습니다/);
+  assert.doesNotMatch(rendered, /village_followup_send|village_followup_edit_send/);
+  assert.match(rendered, /카카오에서 고객명과 마지막 요청을 확인하고 처리 여부 결정/);
 });
 
 test('buildSlackFollowUpMessage keeps warning availability cards actionable', () => {
@@ -2788,8 +4382,151 @@ test('deliverSlackFollowUpRows posts new rows once and writes delivery metadata'
   assert.equal(result.skipped, false);
   assert.equal(result.results[0].ok, true);
   assert.ok(requests.some((r) => r.url.includes('chat.postMessage')));
-  const patch = requests.find((r) => r.url.includes('supabase.example') && r.init?.method === 'PATCH');
+  const patch = requests.find((r) => {
+    if (!r.url.includes('supabase.example') || r.init?.method !== 'PATCH') return false;
+    return Boolean(JSON.parse(r.init.body).payload?.slack_delivery?.message_ts);
+  });
   assert.equal(JSON.parse(patch.init.body).payload.slack_delivery.message_ts, '171111.000100');
+});
+
+function followUpCaseDeliveryHarness({ failUpdate = false } = {}) {
+  const requests = [];
+  const delivery = { status: 'delivered', channel_id: 'CFOLLOW', message_ts: '200.1' };
+  const config = {
+    slackFollowUpEnabled: true,
+    slackBotToken: 'xoxb-test',
+    slackFollowUpChannel: 'CFOLLOW',
+    slackInquiryChannel: 'CINQUIRY',
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    slackFetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      if (failUpdate && String(url).includes('chat.update')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ ok: false, error: 'update_failed' }) };
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, channel: 'CFOLLOW', ts: '200.1' }) };
+    },
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      const body = init.body ? JSON.parse(init.body) : null;
+      const data = init.method === 'PATCH'
+        ? [{ id: 'case-1', payload: body.payload }]
+        : [{ payload: { slack_delivery: delivery } }];
+      return { ok: true, status: 200, text: async () => JSON.stringify(data) };
+    }
+  };
+  const row = {
+    id: 'case-1', status: 'in_progress', customer_name: '?ㅼ쁺중', suggested_reply_draft: '?꾨즺되었습니다.',
+    payload: {
+      card_kind: 'follow_up_case', owner_channel: 'follow_up', phase: 'customer_reply', steps: [],
+      slack_delivery: delivery
+    }
+  };
+  return { requests, config, row };
+}
+
+test('follow-up case lifecycle updates the original Slack message without posting a replacement', async () => {
+  const { requests, config, row } = followUpCaseDeliveryHarness();
+  await deliverSlackFollowUpRows(config, [row]);
+  assert.equal(requests.filter((request) => request.url.includes('chat.update')).length, 1);
+  assert.equal(requests.some((request) => request.url.includes('chat.postMessage')), false);
+});
+
+test('failed chat.update never falls back to chat.postMessage', async () => {
+  const { requests, config, row } = followUpCaseDeliveryHarness({ failUpdate: true });
+  const result = await deliverSlackFollowUpRows(config, [row]);
+  assert.equal(result.results[0].ok, false);
+  assert.equal(requests.some((request) => request.url.includes('chat.postMessage')), false);
+  const patch = requests.find((request) => request.url.includes('supabase.example') && request.init?.method === 'PATCH');
+  const delivery = JSON.parse(patch.init.body).payload.slack_delivery;
+  assert.equal(delivery.channel_id, 'CFOLLOW');
+  assert.equal(delivery.message_ts, '200.1');
+});
+
+test('concurrent initial delivery claims allow only one processor to own chat.postMessage', async () => {
+  let persisted = {
+    id: 'case-claim',
+    payload: { card_kind: 'follow_up_case', state_version: 1 }
+  };
+  const persist = async ({ delivery }) => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (persisted.payload.slack_delivery?.initial_claim_id) return [];
+    persisted = { ...persisted, payload: { ...persisted.payload, slack_delivery: delivery } };
+    return [persisted];
+  };
+
+  const claims = await Promise.all([
+    claimInitialSlackDelivery({ row: persisted, channelId: 'C1', channelName: '후속업무', claimId: 'claim-a', claimedAt: '2026-08-04T00:00:00.000Z', persist }),
+    claimInitialSlackDelivery({ row: persisted, channelId: 'C1', channelName: '후속업무', claimId: 'claim-b', claimedAt: '2026-08-04T00:00:00.000Z', persist })
+  ]);
+
+  assert.equal(claims.filter((claim) => claim.ok).length, 1);
+  assert.equal(claims.filter((claim) => claim.reason === 'initial_delivery_claim_conflict').length, 1);
+  assert.match(persisted.payload.slack_delivery.initial_claim_id, /^claim-[ab]$/);
+  assert.equal(persisted.payload.slack_delivery.reconciliation_required, true);
+});
+
+test('post success followed by metadata failure is recovered by update and never posts twice', async () => {
+  const requests = [];
+  let failDeliveredMetadataOnce = true;
+  let stored = {
+    id: 'case-ambiguous', status: 'open', type: 'follow_up_case', customer_name: 'Kim', suggested_reply_draft: 'Reply.',
+    payload: {
+      card_kind: 'follow_up_case', owner_channel: 'follow_up', phase: 'customer_reply', state_version: 1,
+      requires_reply: true, steps: []
+    }
+  };
+  const config = {
+    slackFollowUpEnabled: true,
+    slackThreadFollowUpsEnabled: false,
+    slackBotToken: 'xoxb-test',
+    slackFollowUpChannel: 'CFOLLOW',
+    slackInquiryChannel: 'CINQUIRY',
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    slackFetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      if (String(url).includes('chat.postMessage')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, channel: 'CFOLLOW', ts: '300.1' }) };
+      }
+      if (String(url).includes('chat.update')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, channel: 'CFOLLOW', ts: '300.1' }) };
+      }
+      throw new Error(`unexpected Slack request: ${url}`);
+    },
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      const body = init.body ? JSON.parse(init.body) : null;
+      if (init.method === 'PATCH') {
+        const nextDelivery = body?.payload?.slack_delivery;
+        if (nextDelivery?.status === 'initial_post_claimed' && stored.payload.slack_delivery?.initial_claim_id) {
+          return { ok: true, status: 200, text: async () => JSON.stringify([]) };
+        }
+        if (nextDelivery?.status === 'delivered' && failDeliveredMetadataOnce) {
+          failDeliveredMetadataOnce = false;
+          return { ok: false, status: 500, text: async () => 'metadata write failed' };
+        }
+        stored = { ...stored, ...body, payload: { ...stored.payload, ...(body.payload || {}) } };
+        return { ok: true, status: 200, text: async () => JSON.stringify([stored]) };
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify([{ id: stored.id, payload: stored.payload }]) };
+    }
+  };
+
+  const first = await deliverSlackFollowUpRows(config, [stored]);
+  assert.equal(first.results[0].ok, false);
+  assert.equal(requests.filter((request) => request.url.includes('chat.postMessage')).length, 1);
+  assert.equal(stored.payload.slack_delivery.reconciliation_required, true);
+  assert.equal(stored.payload.slack_delivery.recovery_message_ts, '300.1');
+
+  const second = await deliverSlackFollowUpRows(config, [stored]);
+  assert.equal(second.results[0].ok, true);
+  assert.equal(requests.filter((request) => request.url.includes('chat.postMessage')).length, 1);
+  assert.equal(requests.filter((request) => request.url.includes('chat.update')).length, 1);
+  assert.equal(stored.payload.slack_delivery.status, 'delivered');
+  assert.equal(stored.payload.slack_delivery.message_ts, '300.1');
 });
 
 test('deliverSlackFollowUpRows posts same-conversation follow-ups as thread replies when enabled', async () => {
@@ -2855,61 +4592,156 @@ test('deliverSlackFollowUpRows posts same-conversation follow-ups as thread repl
   const post = requests.find((r) => r.url.includes('chat.postMessage'));
   const body = JSON.parse(post.init.body);
   assert.equal(body.thread_ts, '171111.000100');
-  const patch = requests.find((r) => r.url.includes('supabase.example') && r.init?.method === 'PATCH');
+  const patch = requests.find((r) => {
+    if (!r.url.includes('supabase.example') || r.init?.method !== 'PATCH') return false;
+    return Boolean(JSON.parse(r.init.body).payload?.slack_delivery?.message_ts);
+  });
   const payload = JSON.parse(patch.init.body).payload.slack_delivery;
   assert.equal(payload.is_thread_reply, true);
   assert.equal(payload.parent_follow_up_id, 'parent-1');
 });
 
-test('deliverSlackFollowUpRows updates an existing delivered Slack card instead of reposting', async () => {
+function inquiryRefreshHarness(deliveryPatch = {}, cluster = '새 고객 메시지') {
   const requests = [];
+  const delivery = {
+    status: 'delivered',
+    channel_id: 'CINQUIRY',
+    message_ts: '171111.000100',
+    thread_ts: '171111.000100',
+    ...deliveryPatch
+  };
   const config = {
     slackFollowUpEnabled: true,
     slackBotToken: 'xoxb-test',
     supabaseUrl: 'https://supabase.example',
     serviceRoleKey: 'service-role',
     followUpTable: 'ai_follow_up_items',
-    slackFetchImpl: async (url, init) => {
+    slackFetchImpl: async (url, init = {}) => {
       requests.push({ url: String(url), init });
       return {
         ok: true,
         status: 200,
-        text: async () => JSON.stringify({ ok: true, channel: 'C123DOC', ts: '171111.000100' })
+        text: async () => JSON.stringify({ ok: true, channel: 'CINQUIRY', ts: '171111.000100' })
       };
     },
-    fetchImpl: async (url, init) => {
+    fetchImpl: async (url, init = {}) => {
       requests.push({ url: String(url), init });
+      const body = init.body ? JSON.parse(init.body) : null;
       return {
         ok: true,
         status: 200,
         text: async () => init?.method === 'PATCH'
-          ? JSON.stringify([{ id: 'follow-1', payload: { slack_delivery: { status: 'delivered', refreshed_at: 'now' } } }])
-          : JSON.stringify([{ payload: { slack_delivery: { status: 'delivered', channel_id: 'C123DOC', message_ts: '171111.000100' } } }])
+          ? JSON.stringify([{ id: 'inquiry-1', payload: body.payload }])
+          : JSON.stringify([{ payload: { slack_delivery: delivery } }])
       };
     }
   };
-
-  const result = await deliverSlackFollowUpRows(config, [{
-    id: 'follow-1',
-    type: 'contract_document',
+  const row = {
+    id: 'inquiry-1',
+    room_key: 'chat:a',
+    type: 'customer_inquiry',
     status: 'open',
-    priority: 'high',
-    title: '서류 발송',
-    customer_name: '홍길동',
-    summary: '요약',
+    priority: 'normal',
+    title: '윤영준 카카오톡 문의',
+    customer_name: '윤영준',
+    summary: cluster,
+    suggested_reply_draft: '확인했습니다.',
     payload: {
-      slack_delivery: {
-        status: 'delivered',
-        channel_id: 'C123DOC',
-        message_ts: '171111.000100'
-      }
+      card_kind: 'inquiry_case',
+      case_id: 'case-1',
+      latest_customer_message_cluster: cluster,
+      slack_delivery: delivery
     }
-  }]);
+  };
+  return { requests, config, row };
+}
+
+test('legacy delivered inquiry seeds content hashes without a broadcast', async () => {
+  const { requests, config, row } = inquiryRefreshHarness();
+
+  const result = await deliverSlackFollowUpRows(config, [row]);
 
   assert.equal(result.results[0].updatedSlack, true);
   assert.ok(requests.some((r) => r.url.includes('chat.update')));
-  assert.ok(!requests.some((r) => r.url.includes('chat.postMessage')));
+  assert.equal(requests.some((r) => r.url.includes('chat.postMessage')), false);
+  const patch = requests.find((r) => {
+    if (!r.url.includes('supabase.example') || r.init?.method !== 'PATCH') return false;
+    return Boolean(JSON.parse(r.init.body).payload?.slack_delivery?.message_ts);
+  });
+  const stored = JSON.parse(patch.init.body).payload.slack_delivery;
+  assert.match(stored.last_rendered_content_hash, /^[a-f0-9]{64}$/);
+  assert.match(stored.last_broadcast_customer_cluster_hash, /^[a-f0-9]{64}$/);
 });
+
+test('reprocessing the same customer cluster does not broadcast', async () => {
+  const cluster = '현금영수증 부탁드립니다';
+  const { requests, config, row } = inquiryRefreshHarness({
+    last_rendered_content_hash: 'old-render',
+    last_broadcast_customer_cluster_hash: customerClusterHash(cluster)
+  }, cluster);
+
+  await deliverSlackFollowUpRows(config, [row]);
+
+  assert.ok(requests.some((r) => r.url.includes('chat.update')));
+  assert.equal(requests.some((r) => r.url.includes('chat.postMessage')), false);
+});
+
+test('a new customer cluster silently updates the existing inquiry card and both hashes', async () => {
+  const cluster = '이쪽으로 현금영수증 해주시면 감사하겠습니다.';
+  const { requests, config, row } = inquiryRefreshHarness({
+    last_rendered_content_hash: 'old-render',
+    last_broadcast_customer_cluster_hash: customerClusterHash('이전 메시지')
+  }, cluster);
+
+  await deliverSlackFollowUpRows(config, [row]);
+
+  assert.equal(requests.filter((request) => request.url.includes('chat.update')).length, 1);
+  assert.equal(requests.some((request) => request.url.includes('chat.postMessage')), false);
+  const patch = requests.find((request) => request.url.includes('supabase.example') && request.init?.method === 'PATCH');
+  const stored = JSON.parse(patch.init.body).payload.slack_delivery;
+  assert.match(stored.last_rendered_content_hash, /^[a-f0-9]{64}$/);
+  assert.equal(stored.last_broadcast_customer_cluster_hash, customerClusterHash(cluster));
+});
+
+test('a newly delivered inquiry stores initial content hashes without an extra broadcast', async () => {
+  const requests = [];
+  const config = {
+    slackFollowUpEnabled: true,
+    slackBotToken: 'xoxb-test',
+    slackChannels: { other: 'CINQUIRY' },
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    slackFetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, channel: 'CINQUIRY', ts: '200.1' }) };
+    },
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      const body = init.body ? JSON.parse(init.body) : null;
+      const data = init.method === 'PATCH'
+        ? [{ id: 'new-inquiry', payload: body.payload }]
+        : [{ payload: {} }];
+      return { ok: true, status: 200, text: async () => JSON.stringify(data) };
+    }
+  };
+  const row = {
+    id: 'new-inquiry', room_key: 'chat:a', customer_name: '윤영준', type: 'customer_inquiry', status: 'open',
+    summary: '첫 문의', payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '첫 문의' }
+  };
+
+  await deliverSlackFollowUpRows(config, [row]);
+
+  assert.equal(requests.filter((request) => request.url.includes('chat.postMessage')).length, 1);
+  const patch = requests.find((request) => {
+    if (!request.url.includes('supabase.example') || request.init.method !== 'PATCH') return false;
+    return Boolean(JSON.parse(request.init.body).payload?.slack_delivery?.last_rendered_content_hash);
+  });
+  const stored = JSON.parse(patch.init.body).payload.slack_delivery;
+  assert.match(stored.last_rendered_content_hash, /^[a-f0-9]{64}$/);
+  assert.equal(stored.last_broadcast_customer_cluster_hash, customerClusterHash('첫 문의'));
+});
+
 
 test('upsertFollowUpRows preserves distinct Hermes tasks in the same conversation', async () => {
   const requests = [];
@@ -2974,6 +4806,194 @@ test('upsertFollowUpRows preserves distinct Hermes tasks in the same conversatio
   assert.equal(result.rows[0].type, 'payment_check');
   assert.ok(requests.some((r) => r.init?.method === 'POST'));
   assert.ok(!requests.some((r) => r.init?.method === 'PATCH'));
+});
+
+test('upsertFollowUpRows reuses one delivered card when Hermes changes the task key for the same active task', async () => {
+  const requests = [];
+  const existing = {
+    id: 'existing-delivered-card',
+    follow_up_key: 'chat:duplicate:customer:schedule_check:first-key',
+    room_key: 'chat:duplicate',
+    customer_name: '중복고객',
+    type: 'schedule_check',
+    status: 'open',
+    priority: 'normal',
+    title: '예약 확인',
+    summary: '기존 예약 확인 카드',
+    recommended_action: '예약을 확인하세요.',
+    evidence: ['기존 증거'],
+    payload: {
+      follow_up_route: 'schedule',
+      follow_up_task_key: 'reservation:customer:20260731',
+      slack_delivery: {
+        status: 'delivered',
+        channel_id: 'C123SCHEDULE',
+        message_ts: '171111.000100'
+      }
+    }
+  };
+  const config = {
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      if (String(url).includes('status=in.(done,dismissed)')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([]) };
+      }
+      if (String(url).includes('status=not.in.(done,dismissed)')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([existing]) };
+      }
+      if (init.method === 'PATCH') {
+        const patch = JSON.parse(init.body);
+        return { ok: true, status: 200, text: async () => JSON.stringify([{ ...existing, ...patch }]) };
+      }
+      if (init.method === 'POST') {
+        return { ok: true, status: 201, text: async () => JSON.stringify([{ id: 'duplicate-card' }]) };
+      }
+      throw new Error(`unexpected request ${init.method || 'GET'} ${url}`);
+    }
+  };
+
+  const result = await upsertFollowUpRows(config, [{
+    follow_up_key: 'chat:duplicate:customer:schedule_check:second-key',
+    room_key: 'chat:duplicate',
+    customer_name: '중복고객',
+    type: 'schedule_check',
+    status: 'open',
+    priority: 'urgent',
+    title: '예약 재확인',
+    summary: '같은 예약을 다시 확인한 결과',
+    recommended_action: '최신 결과만 확인하세요.',
+    evidence: ['최신 증거'],
+    payload: {
+      follow_up_route: 'schedule',
+      follow_up_task_key: 'schedule-rq-260728-001-review'
+    }
+  }]);
+
+  assert.equal(result.mergedActive, 1);
+  assert.equal(result.rows[0].id, 'existing-delivered-card');
+  assert.equal(result.rows[0].payload.slack_delivery.message_ts, '171111.000100');
+  assert.ok(requests.some((request) => request.init?.method === 'PATCH'));
+  assert.ok(!requests.some((request) => request.init?.method === 'POST'));
+});
+
+test('upsertFollowUpRows inserts one card for task-key variants produced in the same batch', async () => {
+  const requests = [];
+  const config = {
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      if (String(url).includes('status=in.(done,dismissed)')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([]) };
+      }
+      if (String(url).includes('status=not.in.(done,dismissed)')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([]) };
+      }
+      if (init.method === 'POST') {
+        const rows = JSON.parse(init.body);
+        return { ok: true, status: 201, text: async () => JSON.stringify(rows.map((row) => ({ id: 'one-card', ...row }))) };
+      }
+      throw new Error(`unexpected request ${init.method || 'GET'} ${url}`);
+    }
+  };
+  const common = {
+    room_key: 'chat:same-batch',
+    customer_name: '배치고객',
+    type: 'reservation_review',
+    status: 'open',
+    priority: 'high',
+    recommended_action: '예약을 확인하세요.',
+    payload: { follow_up_route: 'schedule' }
+  };
+
+  const result = await upsertFollowUpRows(config, [{
+    ...common,
+    follow_up_key: 'same-batch:first',
+    title: '예약 구성 확인',
+    summary: '첫 번째 표현',
+    payload: { ...common.payload, follow_up_task_key: 'reservation:first-key' }
+  }, {
+    ...common,
+    follow_up_key: 'same-batch:second',
+    title: '예약 장비 재확인',
+    summary: '같은 업무의 두 번째 표현',
+    payload: { ...common.payload, follow_up_task_key: 'schedule:second-key' }
+  }]);
+
+  const post = requests.find((request) => request.init?.method === 'POST');
+  assert.equal(JSON.parse(post.init.body).length, 1);
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.merged, 1);
+});
+
+test('upsertFollowUpRows prefers the already delivered card over a newer undelivered duplicate', async () => {
+  const requests = [];
+  const common = {
+    room_key: 'chat:prefer-delivered',
+    customer_name: '전달고객',
+    type: 'schedule_check',
+    status: 'open',
+    priority: 'high',
+    payload: { follow_up_route: 'schedule' }
+  };
+  const undelivered = {
+    ...common,
+    id: 'newer-undelivered-row',
+    updated_at: '2026-07-28T01:00:00.000Z',
+    payload: { ...common.payload, follow_up_task_key: 'newer-key' }
+  };
+  const delivered = {
+    ...common,
+    id: 'older-delivered-card',
+    updated_at: '2026-07-28T00:00:00.000Z',
+    payload: {
+      ...common.payload,
+      follow_up_task_key: 'older-key',
+      slack_delivery: {
+        status: 'delivered',
+        channel_id: 'C123SCHEDULE',
+        message_ts: '171111.000200'
+      }
+    }
+  };
+  const config = {
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    fetchImpl: async (url, init = {}) => {
+      requests.push({ url: String(url), init });
+      if (String(url).includes('status=in.(done,dismissed)')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([]) };
+      }
+      if (String(url).includes('status=not.in.(done,dismissed)')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([undelivered, delivered]) };
+      }
+      if (init.method === 'PATCH') {
+        const patch = JSON.parse(init.body);
+        const target = String(url).includes('older-delivered-card') ? delivered : undelivered;
+        return { ok: true, status: 200, text: async () => JSON.stringify([{ ...target, ...patch }]) };
+      }
+      throw new Error(`unexpected request ${init.method || 'GET'} ${url}`);
+    }
+  };
+
+  const result = await upsertFollowUpRows(config, [{
+    ...common,
+    follow_up_key: 'prefer-delivered:third-key',
+    title: '같은 일정 재확인',
+    summary: '기존 카드에서 갱신해야 하는 내용',
+    recommended_action: '기존 카드만 확인하세요.',
+    evidence: ['새 증거'],
+    payload: { ...common.payload, follow_up_task_key: 'third-key' }
+  }]);
+
+  assert.equal(result.rows[0].id, 'older-delivered-card');
+  assert.equal(result.rows[0].payload.slack_delivery.message_ts, '171111.000200');
+  assert.ok(requests.some((request) => request.init?.method === 'PATCH' && String(request.url).includes('older-delivered-card')));
 });
 
 test('upsertFollowUpRows merges same room when customer name has message or company suffix', async () => {
@@ -3479,6 +5499,134 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   });
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'faq', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).allowed, true);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
+});
+
+test('canAutoSendCustomerAnswer gates by grounding instead of topic category', () => {
+  const baseDecision = {
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '네, 확인 후 안내드리겠습니다.',
+      safetyClass: 'simple_ack',
+      grounding: 'visible_conversation',
+      requiresRag: false
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    }
+  };
+  const groundedPriceQuote = {
+    ...baseDecision,
+    classification: 'price',
+    reply_decision: {
+      ...baseDecision.reply_decision,
+      text: 'FX3 2일 대여 기준 정가에서 학생할인 30%와 장기할인 10%를 적용해 총 110,000원입니다. VAT 포함 금액입니다.',
+      safetyClass: 'sensitive_commitment',
+      grounding: 'authoritative_sheet',
+      requiresRag: false
+    }
+  };
+  const priceGate = canAutoSendCustomerAnswer(groundedPriceQuote, { autoSendEnabled: true });
+  assert.equal(priceGate.allowed, true);
+  assert.equal(priceGate.safetyClass, 'sensitive_commitment');
+  assert.equal(canAutoSendCustomerAnswer({ ...groundedPriceQuote, kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
+  assert.equal(canAutoSendCustomerAnswer({
+    ...groundedPriceQuote,
+    reply_decision: { ...groundedPriceQuote.reply_decision, grounding: 'visible_conversation' }
+  }, { autoSendEnabled: true }).reason, 'sensitive_commitment_grounding_mismatch');
+  assert.equal(canAutoSendCustomerAnswer({
+    ...groundedPriceQuote,
+    reply_decision: { ...groundedPriceQuote.reply_decision, grounding: 'none' }
+  }, { autoSendEnabled: true }).reason, 'reply_grounding_missing');
+  assert.equal(canAutoSendCustomerAnswer({
+    ...groundedPriceQuote,
+    reply_decision: { ...groundedPriceQuote.reply_decision, text: '총 110,000원이고 예약 확정됐습니다.' }
+  }, { autoSendEnabled: true }).reason, 'sensitive_commitment_contains_reservation_confirmation');
+  assert.equal(canAutoSendCustomerAnswer({
+    ...baseDecision,
+    classification: 'faq',
+    reply_decision: {
+      ...baseDecision.reply_decision,
+      text: '환불 규정은 대여 시작 전날까지 취소하시면 전액 환불입니다.',
+      safetyClass: 'current_policy_answer',
+      grounding: 'current_confirmed_policy',
+      requiresRag: false
+    }
+  }, { autoSendEnabled: true }).allowed, true);
+  assert.equal(canAutoSendCustomerAnswer({
+    ...baseDecision,
+    classification: 'faq',
+    reply_decision: {
+      ...baseDecision.reply_decision,
+      text: '파손 시 수리비는 실비 기준으로 청구되고 있습니다.',
+      safetyClass: 'rag_grounded_answer',
+      grounding: 'retrieved_rag',
+      requiresRag: true
+    }
+  }, { autoSendEnabled: true }).allowed, true);
+  assert.equal(canAutoSendCustomerAnswer({
+    ...baseDecision,
+    reply_decision: { ...baseDecision.reply_decision, safetyClass: 'no_send' }
+  }, { autoSendEnabled: true }).reason, 'reply_safety_class_no_send_not_auto_sendable');
+  assert.equal(canAutoSendCustomerAnswer({
+    ...baseDecision,
+    reply_decision: { ...baseDecision.reply_decision, safetyClass: 'document_handoff' }
+  }, { autoSendEnabled: true }).reason, 'reply_safety_class_document_handoff_not_auto_sendable');
+});
+
+test('validateAiDecisionContract allows sheet-grounded sensitive_commitment auto_send and rejects ungrounded', () => {
+  const buildDecision = (grounding) => ({
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '총 110,000원입니다.',
+      safetyClass: 'sensitive_commitment',
+      grounding,
+      requiresRag: false
+    }
+  });
+  const grounded = validateAiDecisionContract(buildDecision('authoritative_sheet'));
+  assert.ok(!grounded.errors.some((entry) => entry.includes('sensitive_commitment')));
+  const ungrounded = validateAiDecisionContract(buildDecision('visible_conversation'));
+  assert.ok(ungrounded.errors.some((entry) => entry.includes('sensitive_commitment requires authoritative_sheet grounding')));
+  const noSend = validateAiDecisionContract({
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '안내드립니다.',
+      safetyClass: 'no_send',
+      grounding: 'visible_conversation',
+      requiresRag: false
+    }
+  });
+  assert.ok(noSend.errors.some((entry) => entry.includes('no_send cannot use auto_send')));
+});
+
+test('buildHermesPrompt scopes auto-send by grounding, not topic whitelist', () => {
+  const prompt = buildHermesPrompt({ id: 'job-owner-mode', preview_text: '가격 문의' }, { gasApiUrl: 'https://example.test/exec' });
+  assert.ok(prompt.includes('자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다'));
+  assert.ok(!prompt.includes('가격/환불/파손/세금 draft_only'));
+  assert.ok(prompt.includes('파손·분실 배상 다툼, 환불 분쟁, 법적 문제'));
+  assert.ok(prompt.includes('grounding="authoritative_sheet"'));
+  assert.ok(prompt.includes('price_paused면 가격 자동발송 금지'));
+});
+
+test('closeKakaoConversationTargetViaDevtools never closes the sole main tab after same-target navigation', async () => {
+  let fetchCalls = 0;
+  const result = await closeKakaoConversationTargetViaDevtools({ id: 'only-tab', close_safe: false }, {
+    cdpBaseUrl: 'http://127.0.0.1:9223',
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error('must not close');
+    }
+  });
+
+  assert.deepEqual(result, { status: 'skipped_unsafe_main_target', targetId: 'only-tab' });
+  assert.equal(fetchCalls, 0);
 });
 
 test('reply prose cannot grant auto-send without an explicit Hermes safety and grounding class', () => {
@@ -4077,6 +6225,22 @@ test('evaluateAutoReplyRagSupport blocks current policy mismatch and uses RAG fo
 
 test('isAutoSendEligibleLiveJob allows unread same-day rows and blocks dated/backfill rows from auto-send', () => {
   const now = new Date('2026-06-02T06:50:00.000Z'); // 2026-06-02 15:50 KST
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    replayedFromSupabase: true,
+    preview_text: '중요 홍길동 1 네 감사합니다 오후 3:45',
+    unread_count: 1,
+    events: [{ reason: 'top_row_changed', unreadCount: 1 }]
+  }, { now }), {
+    eligible: false,
+    reason: 'supabase_recovery_never_auto_sends'
+  });
+  assert.deepEqual(isAutoSendEligibleLiveJob({
+    preview_text: 'recent booking preview',
+    events: [{ reason: 'startup_catchup' }]
+  }, { now }), {
+    eligible: false,
+    reason: 'startup_catchup_never_auto_sends'
+  });
   assert.deepEqual(isAutoSendEligibleLiveJob({
     preview_text: '중요 홍길동 네 감사합니다 오후 3:45',
     events: [{ reason: 'top_row_changed' }]
