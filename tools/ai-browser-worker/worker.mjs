@@ -7050,6 +7050,9 @@ export function describeHermesDecisionFailure(error, output = '') {
   if (/connection|network|ECONN|ENET|DNS/i.test(message)) signals.push('network_error');
   if (['EINVAL', 'E2BIG', 'ENAMETOOLONG'].includes(errorCode)) signals.push('spawn_invalid_argument');
   if (renderedOutput.includes('OpenAI-compatible API call')) signals.push('api_error_output');
+  const validationErrors = Array.isArray(error?.validationErrors)
+    ? error.validationErrors.slice(0, 3).map((entry) => String(entry).slice(0, 200))
+    : [];
   return {
     kind: hermesDecisionFailureKind(error, renderedOutput),
     ...(errorCode ? { errorCode } : {}),
@@ -7057,7 +7060,8 @@ export function describeHermesDecisionFailure(error, output = '') {
     ...(statusMatch ? { httpStatus: Number(statusMatch[1]) } : {}),
     signals: [...new Set(signals)],
     outputChars: renderedOutput.length,
-    hasFinalJson: renderedOutput.includes('FINAL_JSON')
+    hasFinalJson: renderedOutput.includes('FINAL_JSON'),
+    ...(validationErrors.length ? { validationErrors } : {})
   };
 }
 

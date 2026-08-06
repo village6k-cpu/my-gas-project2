@@ -169,6 +169,12 @@ try {
         # Local Network Access 권한으로 막는다. 자동화 전용 프로필이므로 이 검사를 끄지
         # 않으면 감시자 이벤트가 브리지에 도달하지 못해 파이프라인이 조용히 죽는다.
         (ConvertTo-WindowsCommandLineArgument -Value '--disable-features=LocalNetworkAccessChecks,PrivateNetworkAccessChecks,PrivateNetworkAccessSendPreflights'),
+        # 최소화/백그라운드 탭은 Chromium이 타이머·렌더링을 절전 처리해서 카카오 채팅
+        # 목록이 밤새 갱신되지 않는 동결이 발생한다(2026-08-07 새벽 감지 전멸 사건).
+        # 하트비트는 살아있어도 화면이 얼어 새 메시지가 DOM에 안 들어오므로 반드시 끈다.
+        (ConvertTo-WindowsCommandLineArgument -Value '--disable-background-timer-throttling'),
+        (ConvertTo-WindowsCommandLineArgument -Value '--disable-backgrounding-occluded-windows'),
+        (ConvertTo-WindowsCommandLineArgument -Value '--disable-renderer-backgrounding'),
         (ConvertTo-WindowsCommandLineArgument -Value $chromeProfileArgument),
         (ConvertTo-WindowsCommandLineArgument -Value $extensionArgument),
         (ConvertTo-WindowsCommandLineArgument -Value $loadExtensionArgument),
