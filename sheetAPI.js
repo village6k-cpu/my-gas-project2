@@ -23,7 +23,35 @@
 const API_KEY = "village2026";
 
 // Hermes가 소스 파싱 없이 사용할 수 있는 typed operating surface.
+// 확인요청 쓰기 계열은 requestSchema를 함께 광고한다 — 스키마를 API가 알려주지 않으면
+// 계획 모델이 필드명을 추측(customerName 등)하다 실패하는 근본 원인이 된다.
+function getConfirmationRequestSchema_() {
+  return {
+    fieldLanguage: "korean",
+    required: ["반출일", "반출시간", "반납일", "반납시간", "예약자명", "장비"],
+    optional: ["연락처", "할인유형", "업체명", "비고", "추가요청"],
+    formats: {
+      반출일: "YYYY-MM-DD",
+      반출시간: "HH:MM (두 자리, 예: 07:00)",
+      반납일: "YYYY-MM-DD",
+      반납시간: "HH:MM (두 자리, 예: 22:00)",
+      장비: "[{\"이름\": \"목록 시트의 정확한 장비명\", \"수량\": 1}]"
+    },
+    example: {
+      반출일: "2026-08-07",
+      반출시간: "10:00",
+      반납일: "2026-08-08",
+      반납시간: "10:00",
+      예약자명: "홍길동",
+      연락처: "010-1234-5678",
+      장비: [{ 이름: "소니 A7S3 바디세트", 수량: 1 }]
+    },
+    notes: "필드명은 한글 정본을 사용. 영문 별칭(customerName/phone/pickupDate 등)은 Windows 러너(village-confirm-request.js)에서만 자동 매핑되며, GAS API 직접 호출 시에는 한글 필드만 허용."
+  };
+}
+
 function getVillageOperationCapabilities_() {
+  var confirmationRequestSchema = getConfirmationRequestSchema_();
   return {
     success: true,
     version: 2,
@@ -56,9 +84,9 @@ function getVillageOperationCapabilities_() {
       { id: "confirmation_request.list", action: "list", policy: "read_only" },
       { id: "confirmation_request.scan", action: "scan", policy: "read_only" },
       { id: "operation.receipt", action: "operationReceipt", policy: "read_only", verification: "authoritative_read" },
-      { id: "confirmation_request.create", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback" },
-      { id: "confirmation_request.create_batch", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback" },
-      { id: "confirmation_request.update", action: "updateRequest", policy: "internal_write", verification: "authoritative_readback" },
+      { id: "confirmation_request.create", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema },
+      { id: "confirmation_request.create_batch", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema },
+      { id: "confirmation_request.update", action: "updateRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema, updateNote: "reqID(RQ-YYMMDD-NNN) 필수 + requestSchema의 필드를 함께 전달. 전체 요청을 항상 완전한 형태로 보낼 것" },
       { id: "schedule.change_dates", action: "scheduleChangeDates", policy: "internal_write", verification: "authoritative_readback" },
       { id: "schedule.clone_registered_no_send", action: "cloneScheduleNoSend", policy: "internal_write", verification: "authoritative_readback" },
       { id: "schedule.update_time", action: "updateTime", policy: "internal_write", verification: "authoritative_server_ack" },
