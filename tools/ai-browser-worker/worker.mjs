@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -79,7 +80,7 @@ function isExecutable(filePath) {
 
 export function resolveHermesCommand(command = 'hermes', env = process.env) {
   if (String(command).includes('/')) return command;
-  const home = env.HOME || process.env.HOME || '';
+  const home = env.HOME || process.env.HOME || process.env.USERPROFILE || os.homedir() || '';
   const dirs = [
     ...(env.PATH || '').split(path.delimiter).filter(Boolean),
     home ? path.join(home, '.local/bin') : '',
@@ -96,7 +97,7 @@ export function resolveHermesCommand(command = 'hermes', env = process.env) {
 export function resolveCuaDriverCommand(command = 'cua-driver', env = process.env) {
   if (!command) return '';
   if (String(command).includes('/')) return isExecutable(command) ? command : '';
-  const home = env.HOME || process.env.HOME || '';
+  const home = env.HOME || process.env.HOME || process.env.USERPROFILE || os.homedir() || '';
   const dirs = [
     ...(env.PATH || '').split(path.delimiter).filter(Boolean),
     home ? path.join(home, '.local/bin') : '',
@@ -1083,7 +1084,7 @@ export function normalizeKakaoAttachmentPaths(value = []) {
   const rawItems = Array.isArray(value)
     ? value
     : text(value).split(/[\n,]/);
-  const home = process.env.HOME || '';
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir() || '';
   return rawItems
     .map((item) => text(item).trim())
     .filter(Boolean)
@@ -1092,7 +1093,7 @@ export function normalizeKakaoAttachmentPaths(value = []) {
 }
 
 export function defaultCustomerDocumentAssetPaths(env = process.env) {
-  const home = env.HOME || process.env.HOME || '';
+  const home = env.HOME || process.env.HOME || process.env.USERPROFILE || os.homedir() || '';
   const baseDir = env.VILLAGE_CUSTOMER_DOCUMENT_ASSET_DIR
     || (home ? path.join(home, '.hermes/village-documents/customer-request-docs') : '');
   if (!baseDir) return [];
@@ -4886,9 +4887,29 @@ async function devtoolsCdpCallOnTarget(target, method, params = {}, {
 function buildKakaoRevealFileInputExpression() {
   return `(${async function kakaoRevealFileInput() {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    const existing = [...document.querySelectorAll('input[type="file"]')];
+    // Kakao 2026-08-06 deploy: attach controls live behind shadow roots/iframe.
+    const deepQueryAll = (selector) => {
+      const out = [];
+      const visitDoc = (doc) => {
+        if (!doc) return;
+        const roots = [doc];
+        const walk = (node) => {
+          for (const el of node.querySelectorAll('*')) {
+            if (el.shadowRoot) { roots.push(el.shadowRoot); walk(el.shadowRoot); }
+          }
+        };
+        try { walk(doc); } catch (walkError) { void walkError; }
+        for (const root of roots) { try { out.push(...root.querySelectorAll(selector)); } catch (queryError) { void queryError; } }
+        for (const frame of doc.querySelectorAll('iframe')) {
+          try { if (frame.contentDocument) visitDoc(frame.contentDocument); } catch (frameError) { void frameError; }
+        }
+      };
+      visitDoc(document);
+      return out;
+    };
+    const existing = deepQueryAll('input[type="file"]');
     if (existing.length) return { inputCount: existing.length, clicked: false, window_title: document.title };
-    const candidates = [...document.querySelectorAll('button, a, label, [role="button"]')];
+    const candidates = deepQueryAll('button, a, label, [role="button"]');
     const uploadButton = candidates.find((element) => {
       const value = [
         element.innerText,
@@ -4905,7 +4926,7 @@ function buildKakaoRevealFileInputExpression() {
     uploadButton.click?.();
     await sleep(300);
     return {
-      inputCount: document.querySelectorAll('input[type="file"]').length,
+      inputCount: deepQueryAll('input[type="file"]').length,
       clicked: true,
       window_title: document.title
     };
@@ -4915,7 +4936,27 @@ function buildKakaoRevealFileInputExpression() {
 function buildKakaoSendPendingAttachmentsExpression(expectedCount = 0) {
   return `(${async function kakaoSendPendingAttachments(count) {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    const inputs = [...document.querySelectorAll('input[type="file"]')];
+    // Kakao 2026-08-06 deploy: attach controls live behind shadow roots/iframe.
+    const deepQueryAll = (selector) => {
+      const out = [];
+      const visitDoc = (doc) => {
+        if (!doc) return;
+        const roots = [doc];
+        const walk = (node) => {
+          for (const el of node.querySelectorAll('*')) {
+            if (el.shadowRoot) { roots.push(el.shadowRoot); walk(el.shadowRoot); }
+          }
+        };
+        try { walk(doc); } catch (walkError) { void walkError; }
+        for (const root of roots) { try { out.push(...root.querySelectorAll(selector)); } catch (queryError) { void queryError; } }
+        for (const frame of doc.querySelectorAll('iframe')) {
+          try { if (frame.contentDocument) visitDoc(frame.contentDocument); } catch (frameError) { void frameError; }
+        }
+      };
+      visitDoc(document);
+      return out;
+    };
+    const inputs = deepQueryAll('input[type="file"]');
     const selectedFileCount = inputs.reduce((sum, input) => sum + (input.files?.length || 0), 0);
     for (const input of inputs) {
       if (input.files?.length) {
@@ -4924,7 +4965,7 @@ function buildKakaoSendPendingAttachmentsExpression(expectedCount = 0) {
       }
     }
     await sleep(700);
-    const buttons = [...document.querySelectorAll('button')].filter((button) => !button.disabled && button.getAttribute('aria-disabled') !== 'true');
+    const buttons = deepQueryAll('button').filter((button) => !button.disabled && button.getAttribute('aria-disabled') !== 'true');
     const sendButton = [...buttons].reverse().find((button) => (button.innerText || button.textContent || '').trim() === '전송')
       || [...buttons].reverse().find((button) => String(button.className || '').includes('btn_submit'));
     if (sendButton) {
@@ -4964,7 +5005,20 @@ export async function attachKakaoFilesViaDevtools(target, attachmentPaths = [], 
     const rootNodeId = doc?.root?.nodeId;
     if (!rootNodeId) return 0;
     const query = await cdpCallImpl(target, 'DOM.querySelector', { nodeId: rootNodeId, selector: 'input[type="file"]' }, { timeoutMs });
-    return Number(query?.nodeId || 0);
+    if (Number(query?.nodeId || 0)) return Number(query.nodeId);
+    // DOM.querySelector does not cross shadow boundaries even on a pierced tree;
+    // DOM.performSearch does (Kakao 2026-08-06 shadow-root deploy).
+    try {
+      const search = await cdpCallImpl(target, 'DOM.performSearch', { query: 'input[type="file"]', includeUserAgentShadowDOM: true }, { timeoutMs });
+      if (search?.searchId && Number(search?.resultCount || 0) > 0) {
+        const results = await cdpCallImpl(target, 'DOM.getSearchResults', { searchId: search.searchId, fromIndex: 0, toIndex: 1 }, { timeoutMs });
+        await cdpCallImpl(target, 'DOM.discardSearchResults', { searchId: search.searchId }, { timeoutMs }).catch(() => {});
+        return Number(results?.nodeIds?.[0] || 0);
+      }
+    } catch (searchError) {
+      void searchError;
+    }
+    return 0;
   };
 
   let nodeId = await findFileInput();
@@ -7638,7 +7692,7 @@ async function readStdinJson() {
 
 export async function processRagLookup(stdinPayload, options = {}) {
   if (process.env.HERMES_HOME) loadEnvFile(path.resolve(process.env.HERMES_HOME, '.env'));
-  loadEnvFile(path.resolve(process.env.HOME || '', '.hermes/.env'));
+  loadEnvFile(path.resolve(process.env.HOME || process.env.USERPROFILE || os.homedir() || '', '.hermes/.env'));
   loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
   loadEnvFile(path.resolve(__dirname, '.env'));
   const config = {
@@ -7651,7 +7705,7 @@ export async function processRagLookup(stdinPayload, options = {}) {
 }
 
 export async function processProvidedJob(stdinJob, { dryRun = false, fakeDecisionPath = '' } = {}) {
-  loadEnvFile(path.resolve(process.env.HOME || '', '.hermes/.env'));
+  loadEnvFile(path.resolve(process.env.HOME || process.env.USERPROFILE || os.homedir() || '', '.hermes/.env'));
   loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
   loadEnvFile(path.resolve(__dirname, '.env'));
   const config = requireConfig();
@@ -7659,7 +7713,7 @@ export async function processProvidedJob(stdinJob, { dryRun = false, fakeDecisio
 }
 
 export async function processManualSend({ customerName = '', roomTitle = '', text: replyText = '', followUpId = '', attachmentPaths = [], customerDocumentAssets = false } = {}) {
-  loadEnvFile(path.resolve(process.env.HOME || '', '.hermes/.env'));
+  loadEnvFile(path.resolve(process.env.HOME || process.env.USERPROFILE || os.homedir() || '', '.hermes/.env'));
   loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
   loadEnvFile(path.resolve(__dirname, '.env'));
   const config = requireConfig();
@@ -7782,7 +7836,7 @@ export async function processManualSend({ customerName = '', roomTitle = '', tex
 }
 
 export async function processOneJob({ dryRun = false, claim = true, fakeDecisionPath = '' } = {}) {
-  loadEnvFile(path.resolve(process.env.HOME || '', '.hermes/.env'));
+  loadEnvFile(path.resolve(process.env.HOME || process.env.USERPROFILE || os.homedir() || '', '.hermes/.env'));
   loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
   loadEnvFile(path.resolve(__dirname, '.env'));
   const config = requireConfig();

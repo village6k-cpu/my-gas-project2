@@ -1,4 +1,5 @@
 import http from 'node:http';
+import os from 'node:os';
 import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,7 +26,7 @@ function loadSelectedEnvFile(filePath, keys = []) {
   }
 }
 
-loadSelectedEnvFile(path.resolve(process.env.HOME || '', '.hermes/.env'), ['SLACK_BOT_TOKEN']);
+loadSelectedEnvFile(path.resolve(process.env.HOME || process.env.USERPROFILE || os.homedir() || '', '.hermes/.env'), ['SLACK_BOT_TOKEN']);
 
 function readBooleanEnvironment(value, defaultValue = false) {
   if (value === undefined || value === null || String(value).trim() === '') return defaultValue;
@@ -1006,8 +1007,17 @@ function killProcessTree(child, signal = 'SIGTERM') {
   if (windowsKill) {
     try {
       const result = spawnSync(windowsKill.command, windowsKill.args, windowsKill.options);
-      if (!result.error) return;
+      // taskkill without /F exits non-zero for console apps ("can only be
+      // terminated forcefully") — treating that as success made the graceful
+      // pass a silent no-op. Only trust exit status 0.
+      if (!result.error && result.status === 0) return;
     } catch {}
+  }
+  if (process.platform === 'win32') {
+    // POSIX group kill (-pid) throws on Windows and would orphan the real
+    // worker behind the cmd.exe shell wrapper; kill the direct child instead.
+    try { child.kill(signal); } catch {}
+    return;
   }
   try {
     process.kill(-child.pid, signal);

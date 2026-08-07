@@ -99,7 +99,7 @@ function Import-DotEnvFile {
     $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
     $lineNumber = 0
 
-    foreach ($line in Get-Content -LiteralPath $resolvedPath -ErrorAction Stop) {
+    foreach ($line in Get-Content -LiteralPath $resolvedPath -Encoding UTF8 -ErrorAction Stop) {
         $lineNumber += 1
         $trimmed = $line.Trim()
         if ($trimmed.Length -eq 0 -or $trimmed.StartsWith('#')) {
@@ -267,7 +267,7 @@ function Read-OwnedProcessRecord {
         return $null
     }
 
-    return Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    return Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
 }
 
 function Test-OwnedProcessRecord {
