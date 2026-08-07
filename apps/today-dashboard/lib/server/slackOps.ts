@@ -110,7 +110,13 @@ type ItemRow = {
   checkout_state: string;
   memo_checkout: string | null;
   memo_checkin: string | null;
+  removed_at: string | null;
 };
+
+/** 앱(remote.ts attachScheduleItems)이 예약에서 빠졌다고 보는 행. Slack 파이프라인도 같은 눈으로 봐야 한다. */
+function isRemovedFromReservation(item: ItemRow): boolean {
+  return !!item.removed_at && !(Number(item.taken_qty) > 0);
+}
 
 type Candidate = {
   source: "heybilli";
@@ -309,7 +315,7 @@ async function loadCandidateRows(events: SlackOpsIncomingEvent[]): Promise<{ tra
     for (let from = 0; ; from += 1_000) {
       const { data: page, error: itemError } = await db
         .from("schedule_items")
-        .select("schedule_id,trade_id,name,qty,taken_qty,actual_name,actual_taken_qty,actual_source,set_name,is_set_header,is_component,onsite,settlement,checkout_state,memo_checkout,memo_checkin")
+        .select("schedule_id,trade_id,name,qty,taken_qty,actual_name,actual_taken_qty,actual_source,set_name,is_set_header,is_component,onsite,settlement,checkout_state,memo_checkout,memo_checkin,removed_at")
         .in("trade_id", chunk)
         .order("sort", { ascending: true })
         .range(from, from + 999);
@@ -335,7 +341,9 @@ function candidateFromTrade(trade: TradeRow, items: ItemRow[], score: number): C
     noteCheckout: trade.note_checkout,
     noteCheckin: trade.note_checkin,
     returnCounts: trade.return_counts ?? {},
-    items: items.filter((item) => item.trade_id === trade.trade_id).map((item) => ({
+    // 예약에서 이미 빠진 품목은 후보에서 지운다. 유령 행을 초안 모델에 보여주면
+    // 같은 계열 장비가 둘로 보여 "BP 필터 제외" 같은 지시가 엉뚱한 행까지 0으로 만든다.
+    items: items.filter((item) => item.trade_id === trade.trade_id && !isRemovedFromReservation(item)).map((item) => ({
       scheduleId: item.schedule_id,
       name: item.name,
       qty: item.qty,
@@ -557,13 +565,14 @@ async function loadTradeAndItems(tradeId: string): Promise<{ trade: TradeRow; it
   if (error) throw error;
   if (!trade) throw new Error(`헤이빌리에 존재하는 거래 카드가 아닙니다: ${tradeId}`);
   const { data: items, error: itemError } = await db.from("schedule_items")
-    .select("schedule_id,trade_id,name,qty,taken_qty,actual_name,actual_taken_qty,actual_source,set_name,is_set_header,is_component,onsite,settlement,checkout_state,memo_checkout,memo_checkin")
+    .select("schedule_id,trade_id,name,qty,taken_qty,actual_name,actual_taken_qty,actual_source,set_name,is_set_header,is_component,onsite,settlement,checkout_state,memo_checkout,memo_checkin,removed_at")
     .eq("trade_id", tradeId).order("sort", { ascending: true });
   if (itemError) throw itemError;
   return { trade: trade as TradeRow, items: (items ?? []) as ItemRow[] };
 }
 
-function validateActions(plan: SlackOpsApplyPlan, items: ItemRow[], event: StoredEvent) {
+/** 순수 검증기 — DB 없이 단위 테스트한다. 하나라도 걸리면 계획 전체가 사람 확인으로 넘어간다. */
+export function validateActions(plan: SlackOpsApplyPlan, items: ItemRow[], event: StoredEvent) {
   const byId = new Map(items.map((item) => [item.schedule_id, item]));
   const plannedTakenQty = new Map<string, number>();
   const slackContext = [event.raw_context?.root?.text, ...(event.raw_context?.replies ?? []).map((reply) => reply.text)]
@@ -579,6 +588,11 @@ function validateActions(plan: SlackOpsApplyPlan, items: ItemRow[], event: Store
     }
     const item = byId.get(action.scheduleId);
     if (!item) throw new Error(`거래에 없는 scheduleId: ${action.scheduleId}`);
+    // 이미 예약에서 빠진 행을 다시 정정하려 든다는 건 초안이 낡은/어긋난 스냅샷 위에서 만들어졌다는 뜻.
+    // 계획 전체를 막아 사람 확인으로 보낸다(같은 계획의 다른 행까지 잘못 적용되는 걸 끊는다).
+    if (isRemovedFromReservation(item)) {
+      throw new Error(`이미 예약에서 제외된 품목은 정정할 수 없습니다: ${action.scheduleId}`);
+    }
     if (action.type === "item_correction" && action.actualTakenQty != null && action.actualTakenQty > item.qty) {
       throw new Error(`실반출 수량이 예약 수량보다 큽니다. 추가분은 onsite_add로 기록하세요: ${action.scheduleId}`);
     }

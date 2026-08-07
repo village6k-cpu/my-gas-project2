@@ -25,7 +25,7 @@ function isTimelineSetComponent(item: Trade["equipments"][number]): boolean {
 }
 
 export type GroupMode = "set" | "customer" | "status";
-export type StatusKey = "대기" | "반출중" | "반납완료" | "취소" | "기타";
+export type StatusKey = "대기" | "반출중" | "반납완료" | "취소" | "제외" | "기타";
 
 export interface TLItem {
   id: string;
@@ -37,6 +37,8 @@ export interface TLItem {
   status: string;
   statusKey: StatusKey;
   qty: number;
+  /** 실반출 0 또는 checkout_state=excluded — 막대는 남기되 재고 점유에서 뺀다. */
+  excluded?: boolean;
   unitIndex?: number;
   unitCount?: number;
   stock: number;
@@ -82,6 +84,9 @@ export function statusBar(k: StatusKey): { bar: string; strike?: boolean } {
       return { bar: "bg-[#DBE7D5] text-[#44703E]" };
     case "취소":
       return { bar: "bg-[#EAE8E3] text-[#8B877E]", strike: true };
+    case "제외":
+      // 예약에는 남아 있지만 실제로는 안 나간 품목. 취소(회색)와 구분되는 웜 베이지 + 취소선.
+      return { bar: "bg-[#EFE2D8] text-[#8A6A55]", strike: true };
     default:
       return { bar: "bg-[#E8E1ED] text-[#6F5990]" };
   }
@@ -95,13 +100,16 @@ export function buildItems(trades: Trade[]): TLItem[] {
       // 오래된 Supabase 행은 setName/name 구조는 맞아도 isComponent=false일 수 있다.
       // 구성품은 세트 대표 막대에 포함되므로 별도 장비 막대로 만들지 않는다.
       if (isTimelineSetComponent(e)) continue;
-      if (e.checkoutState === "excluded") continue;
       const co = new Date(t.checkoutAt).getTime() + (e.startShiftDays ?? 0) * DAY;
       const ro = new Date(t.returnAt).getTime() + (e.endShiftDays ?? 0) * DAY;
       const rawQty = equipmentActualTakenQty(e);
-      if (rawQty <= 0) continue;
+      // 예약에 남아 있는 품목을 화면에서 지우지 않는다. 실반출 0/제외는 "제외" 막대로 보인다.
+      // 조용히 continue 하면 시트에는 있는 품목이 스케줄에서 흔적 없이 사라져(잘못된 정정 포함)
+      // 사장이 눈으로 잡을 방법이 없다. 재고 점유에서만 뺀다.
+      const excluded = e.checkoutState === "excluded" || rawQty <= 0;
       const actualName = equipmentActualName(e);
-      const unitCount = Math.max(1, Math.floor(Number.isFinite(rawQty) ? rawQty : 1));
+      if (!actualName) continue;
+      const unitCount = excluded ? 1 : Math.max(1, Math.floor(Number.isFinite(rawQty) ? rawQty : 1));
       for (let unitIndex = 1; unitIndex <= unitCount; unitIndex += 1) {
         out.push({
           id: `${t.tradeId}__${e.scheduleId}__u${unitIndex}`,
@@ -110,9 +118,10 @@ export function buildItems(trades: Trade[]): TLItem[] {
           contractUrl: t.contractUrl,
           label: actualName,
           custName: t.customerName,
-          status: t.contractStatus,
-          statusKey: statusKeyOf(t.contractStatus),
-          qty: 1,
+          status: excluded ? "제외" : t.contractStatus,
+          statusKey: excluded ? "제외" : statusKeyOf(t.contractStatus),
+          qty: excluded ? 0 : 1,
+          excluded: excluded || undefined,
           unitIndex,
           unitCount,
           stock: catalogStockOf(actualName) ?? stockOf(e.category), // 장비마스터 실재고 우선 — 하드코딩 추정치는 폴백
@@ -180,6 +189,7 @@ export function computeConflicts(items: TLItem[]): Set<string> {
   const byEquip = new Map<string, TLItem[]>();
   for (const it of items) {
     if (it.statusKey === "취소") continue;
+    if (it.excluded) continue; // 실제로 안 나간 품목은 재고를 점유하지 않는다
     (byEquip.get(it.label) ?? byEquip.set(it.label, []).get(it.label)!).push(it);
   }
   for (const list of byEquip.values()) {
