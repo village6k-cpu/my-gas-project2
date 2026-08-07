@@ -5548,8 +5548,40 @@ function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = [], { allow
   return `(${async function kakaoSearchAndOpen(searchTermsArg, hintsArg, allowSearchArg) {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-    const input = document.querySelector('input[placeholder*="채팅방 이름"], input[name="keyword"], input.tf_g');
-    const button = document.querySelector('button.btn_search, button[type="submit"]');
+    // Kakao's 2026-08-06 deploy moved the chat console behind open shadow roots and
+    // a same-origin iframe; plain document queries only see the wrapper chrome.
+    const collectDocs = () => {
+      const docs = [];
+      const visitDoc = (doc) => {
+        if (!doc) return;
+        docs.push(doc);
+        for (const frame of doc.querySelectorAll('iframe')) {
+          try { if (frame.contentDocument) visitDoc(frame.contentDocument); } catch (frameError) { void frameError; }
+        }
+      };
+      visitDoc(document);
+      return docs;
+    };
+    const allRoots = () => {
+      const roots = [];
+      for (const doc of collectDocs()) {
+        roots.push(doc);
+        const walk = (node) => {
+          for (const el of node.querySelectorAll('*')) {
+            if (el.shadowRoot) { roots.push(el.shadowRoot); walk(el.shadowRoot); }
+          }
+        };
+        try { walk(doc); } catch (walkError) { void walkError; }
+      }
+      return roots;
+    };
+    const deepQueryAll = (selector) => {
+      const out = [];
+      for (const root of allRoots()) { try { out.push(...root.querySelectorAll(selector)); } catch (queryError) { void queryError; } }
+      return out;
+    };
+    const input = deepQueryAll('input[placeholder*="채팅방 이름"], input[name="keyword"], input.tf_g')[0] || null;
+    const button = deepQueryAll('button.btn_search, button[type="submit"]')[0] || null;
     const setInputValue = (element, value) => {
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
       if (setter) setter.call(element, value);
@@ -5559,7 +5591,7 @@ function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = [], { allow
     };
     const findRow = (terms) => {
       const safeTerms = terms.map(normalize).filter(Boolean);
-      return [...document.querySelectorAll('a.link_chat, a, [role="link"]')]
+      return deepQueryAll('a.link_chat, a, [role="link"]')
         .find((row) => {
           const text = normalize(row.innerText || row.textContent || '');
           return text && safeTerms.some((term) => text.includes(term));
@@ -5600,7 +5632,34 @@ function buildKakaoSearchAndOpenExpression(searchTerms = [], hints = [], { allow
 }
 
 function buildKakaoConversationTextExpression() {
-  return `(() => ({ title: document.title, href: location.href, text: document.body?.innerText || '' }))()`;
+  // Must pierce shadow roots + same-origin iframes (Kakao 2026-08-06 deploy):
+  // a plain body.innerText read returns only wrapper chrome labels.
+  return `(${function kakaoConversationText() {
+    const parts = [];
+    const seen = new Set();
+    const pushText = (value) => {
+      const clean = String(value || '').trim();
+      if (clean && !seen.has(clean)) { seen.add(clean); parts.push(clean); }
+    };
+    const visitDoc = (doc) => {
+      if (!doc) return;
+      if (doc.body) pushText(doc.body.innerText);
+      const walk = (node) => {
+        for (const el of node.querySelectorAll('*')) {
+          if (el.shadowRoot) {
+            for (const child of el.shadowRoot.children) pushText(child.innerText);
+            walk(el.shadowRoot);
+          }
+        }
+      };
+      try { walk(doc); } catch (walkError) { void walkError; }
+      for (const frame of doc.querySelectorAll('iframe')) {
+        try { if (frame.contentDocument) visitDoc(frame.contentDocument); } catch (frameError) { void frameError; }
+      }
+    };
+    visitDoc(document);
+    return { title: document.title, href: location.href, text: parts.join('\n') };
+  }.toString()})()`;
 }
 
 export async function openKakaoTargetChatViaDevtools(job, {
@@ -6122,7 +6181,51 @@ export function kakaoConversationContainsMessage(treeMarkdown = '', message = ''
 function buildKakaoSendMessageExpression(textToSend = '') {
   return `(${async function kakaoSendMessage(message) {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    const textarea = document.querySelector('textarea[placeholder*="메시지"], textarea.tf_g, textarea');
+    // Kakao's 2026-08-06 deploy: compose box/buttons/conversation live behind open
+    // shadow roots and a same-origin iframe. Plain document queries broke every send.
+    const collectDocs = () => {
+      const docs = [];
+      const visitDoc = (doc) => {
+        if (!doc) return;
+        docs.push(doc);
+        for (const frame of doc.querySelectorAll('iframe')) {
+          try { if (frame.contentDocument) visitDoc(frame.contentDocument); } catch (frameError) { void frameError; }
+        }
+      };
+      visitDoc(document);
+      return docs;
+    };
+    const allRoots = () => {
+      const roots = [];
+      for (const doc of collectDocs()) {
+        roots.push(doc);
+        const walk = (node) => {
+          for (const el of node.querySelectorAll('*')) {
+            if (el.shadowRoot) { roots.push(el.shadowRoot); walk(el.shadowRoot); }
+          }
+        };
+        try { walk(doc); } catch (walkError) { void walkError; }
+      }
+      return roots;
+    };
+    const deepQueryAll = (selector) => {
+      const out = [];
+      for (const root of allRoots()) { try { out.push(...root.querySelectorAll(selector)); } catch (queryError) { void queryError; } }
+      return out;
+    };
+    const deepText = () => {
+      const parts = [];
+      for (const doc of collectDocs()) { if (doc.body && doc.body.innerText) parts.push(doc.body.innerText); }
+      for (const root of allRoots()) {
+        if (root.host && root.children) {
+          for (const child of root.children) { if (child.innerText) parts.push(child.innerText); }
+        }
+      }
+      return parts.join(' ');
+    };
+    const textarea = deepQueryAll('textarea[placeholder*="메시지"]')[0]
+      || deepQueryAll('textarea.tf_g')[0]
+      || deepQueryAll('textarea')[0];
     if (!textarea) return { sent: false, reason: 'message_input_not_found', window_title: document.title };
     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
     if (setter) setter.call(textarea, message);
@@ -6131,14 +6234,14 @@ function buildKakaoSendMessageExpression(textToSend = '') {
     textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: message }));
     textarea.dispatchEvent(new Event('change', { bubbles: true }));
     await sleep(150);
-    const buttons = [...document.querySelectorAll('button')];
+    const buttons = deepQueryAll('button');
     const sendButton = buttons.find((button) => (button.innerText || button.textContent || '').trim() === '전송')
       || buttons.find((button) => String(button.className || '').includes('btn_submit'));
     if (!sendButton) return { sent: false, reason: 'send_button_not_found', window_title: document.title };
     sendButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
     sendButton.click();
     await sleep(1200);
-    const bodyText = document.body?.innerText || '';
+    const bodyText = deepText();
     const sent = bodyText.replace(/\s+/g, ' ').includes(String(message).replace(/\s+/g, ' ').trim());
     return {
       sent,
