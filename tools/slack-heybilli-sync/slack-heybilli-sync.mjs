@@ -206,9 +206,16 @@ export function extractTradeIdFromConversation(root, replies = []) {
   return extractTradeId([root?.text, ...replies.map((reply) => reply?.text)].filter(Boolean).join('\n'));
 }
 
+function isGenericCustomerHint(hint) {
+  const value = String(hint || '').trim();
+  return /^헤이빌리/u.test(value)
+    || /^(?:어느|어떤|무슨|누구|고객|감독|대여자|성함|이름|오늘|내일|어제|금일|이번|다음|지난|저번|해당|관련|추가|기타|일부|전체|반출|반납|대여|예약|거래|문의|확인|입금|결제|정산|장비|수량)$/u.test(value)
+    || /^[네넵예응옙]{1,5}$/u.test(value);
+}
+
 export function extractCustomerHint(text) {
   const value = String(text || '').replace(/<@[A-Z0-9]+>/g, ' ').trim();
-  const isGenericHint = (hint) => /^(?:어느|어떤|무슨|누구|고객|감독|대여자|성함|이름)$/u.test(String(hint || '').trim());
+  const isGenericHint = isGenericCustomerHint;
   const labeled = value.match(/(?:^|\n|[-*•]\s*)(?:고객명|고객|대여자|성함)\s*[:：-]\s*([가-힣]{2,5}|[가-힣]{1,2}\s+[가-힣]{1,3})/u)?.[1]?.replace(/\s+/g, '');
   if (labeled && !isGenericHint(labeled)) return labeled;
   const tagged = value.match(/^\s*\[\s*(?:반출|반납)\s*\]\s*([^\n]+)/i)?.[1] || '';
@@ -217,6 +224,11 @@ export function extractCustomerHint(text) {
     .replace(/(?:감독|대표|실장|팀장)?님.*$/u, '')
     .trim();
   if (/^[가-힣A-Za-z0-9][가-힣A-Za-z0-9 ._()]{1,30}$/.test(taggedName) && !/^(장비|미등록|앱|헤이빌리|현장)/.test(taggedName) && !isGenericHint(taggedName)) return taggedName;
+
+  // "조승신 반출건 팬바…", "이한욱 FX9 건", "박호영 반출 사진 건", 리플의 "조승신 건" —
+  // 단톡방에서 사건을 지칭하는 가장 흔한 형태. 선두 이름만 거래 검색 힌트로 쓴다.
+  const caseRef = value.match(/^\s*([가-힣]{2,5})(?:\s*님)?(?:\s+[^\n]{0,40}?)?\s*(?:반출|반납|대여|예약)?\s*건(?:$|[\s.,!?~:)]|입니다|이에요|이요)/mu)?.[1];
+  if (caseRef && !isGenericHint(caseRef)) return caseRef;
 
   // 직원이 앱 등록을 마친 뒤 "헤이빌리의 박 다빈 오늘 반출건 추가"처럼 알려주는 경우.
   // 성과 이름 사이의 공백은 Slack 입력 습관일 뿐이므로 거래 검색용 이름에서는 제거한다.
@@ -243,6 +255,11 @@ export function extractCustomerHintFromConversation(root, replies = []) {
     if (rootPhase !== 'unknown' && replyPhase !== 'unknown' && replyPhase !== rootPhase) continue;
     const replyHint = extractCustomerHint(replies[index]?.text);
     if (replyHint) return replyHint;
+    // 봇의 정보 요청에 "조승신" / "조승신입니다"처럼 이름만 답하는 경우. 동사형 어미로 끝나는
+    // 일반 대답(감사합니다 등)은 이름이 아니다.
+    const bareText = String(replies[index]?.text || '').replace(/<@[A-Z0-9]+>/g, ' ').trim();
+    const bare = bareText.match(/^([가-힣]{2,5})(?:\s*님)?(?:\s*(?:입니다|이에요|이요))?\s*[.!~]?$/u)?.[1];
+    if (bare && !isGenericCustomerHint(bare) && !/(?:합니다|습니다|해요|네요|세요|어요|겠습)$/u.test(bare)) return bare;
     const questioned = String(replies[index]?.text || '').match(/(?:^|\n)\s*([가-힣]{2,5})\s*맞나(?:요)?\??/u)?.[1];
     const answer = String(replies[index + 1]?.text || '').trim();
     if (questioned && /^(?:네|넵|예|응|어|ㅇㅇ|맞아요|맞습니다)(?:\s|[.!]|$)/u.test(answer)) return questioned;
@@ -559,17 +576,35 @@ async function applyCommand(config, args) {
   return result;
 }
 
+export function findExistingAskReply(messages = []) {
+  return (Array.isArray(messages) ? messages : []).find((message) => {
+    const text = String(message?.text || '');
+    return text.includes('[SLACK_HEYBILLI_SYNC]') && text.includes('정보가 조금 더 필요합니다');
+  }) || null;
+}
+
 async function markCommand(config, mode) {
   const body = await readStdinJson();
   const event = body.event || body;
   const reason = String(body.reason || body.question || '').trim();
   if (!reason) throw new Error('reason/question이 비어 있습니다');
   if (mode === 'needs_context') {
-    await postThread(config, event.messageTs, [
-      '🔎 헤이빌리 연결에 정보가 조금 더 필요합니다.',
-      reason,
-      '이 스레드에 거래ID(예: 260721-001)나 정확한 대여자명을 답해주시면 다음 동기화 때 같은 거래 카드에 반영하겠습니다. [SLACK_HEYBILLI_SYNC]',
-    ].join('\n'));
+    // 직원 답글이 달릴 때마다 source_hash가 바뀌어 같은 사건이 다시 pending으로 돌아온다.
+    // 스레드당 정보 요청은 한 번이면 충분하다 — 이미 물어봤으면 서버 상태만 갱신하고 침묵한다.
+    const thread = await slackApi(config, 'conversations.replies', {
+      channel: config.channelId,
+      ts: event.messageTs,
+      limit: 100,
+    }).catch(() => null);
+    if (findExistingAskReply(thread?.messages)) {
+      process.stderr.write('slack-heybilli-sync: 같은 스레드에 이미 정보 요청이 있어 재질문을 생략합니다\n');
+    } else {
+      await postThread(config, event.messageTs, [
+        '🔎 헤이빌리 연결에 정보가 조금 더 필요합니다.',
+        reason,
+        '이 스레드에 거래ID(예: 260721-001)나 정확한 대여자명을 답해주시면 다음 동기화 때 같은 거래 카드에 반영하겠습니다. [SLACK_HEYBILLI_SYNC]',
+      ].join('\n'));
+    }
   }
   return syncApi(config, { mode, event: { messageTs: event.messageTs, sourceHash: event.sourceHash }, reason });
 }

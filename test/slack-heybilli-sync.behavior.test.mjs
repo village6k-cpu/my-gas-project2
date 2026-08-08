@@ -9,6 +9,7 @@ import {
   extractCustomerHint,
   extractCustomerHintFromConversation,
   extractTradeId,
+  findExistingAskReply,
   extractTradeIdFromConversation,
   groupOperationalMessages,
   inferPhase,
@@ -46,6 +47,37 @@ test('untagged missing-app report is still operational', () => {
   assert.equal(extractCustomerHint('헤이빌리의 박 다빈 오늘 반출건 추가해놓음'), '박다빈');
   assert.equal(extractCustomerHint('- 고객명: 장희광\n- 단계: 반납'), '장희광');
   assert.equal(extractCustomerHint('이건 어느 감독님 반납인가요?'), '');
+});
+
+test('case references and bare-name answers resolve the customer identity', () => {
+  assert.equal(extractCustomerHint('조승신 반출건 팬바(삼각대 가방 안 발견)'), '조승신');
+  assert.equal(extractCustomerHint('이한욱 FX9 건 XQD 1장 안 가져가심'), '이한욱');
+  assert.equal(extractCustomerHint('박호영 반출 사진 건'), '박호영');
+  assert.equal(extractCustomerHint('<@U0B66DNKXRU> 조승신 건'), '조승신');
+  assert.equal(extractCustomerHint('오늘 반납 예정 건 있나요?'), '');
+  assert.equal(extractCustomerHint('헤이빌리 등록 안 된 건 확인 부탁드립니다'), '');
+  assert.equal(extractCustomerHintFromConversation(
+    { text: '팬바가 삼각대 가방 안에서 발견됐습니다' },
+    [{ text: '반납때 팬바 없는거 확인했고 당일 cctv확인하기로 했었는데 메모만 남겨뒀었습니다' }, { text: '<@U0B66DNKXRU> 조승신 건' }],
+  ), '조승신');
+  assert.equal(extractCustomerHintFromConversation(
+    { text: '이거 어느 거래인가요?' },
+    [{ text: '감사합니다' }, { text: '조승신입니다' }],
+  ), '조승신');
+});
+
+test('a thread that already carries a sync ask is never asked twice', () => {
+  const asked = [
+    { text: '조승신 반출건 팬바(삼각대 가방 안 발견)' },
+    { text: '🔎 헤이빌리 연결에 정보가 조금 더 필요합니다.\n거래ID를 알려주세요.\n이 스레드에 거래ID(예: 260721-001)나 정확한 대여자명을 답해주시면 다음 동기화 때 같은 거래 카드에 반영하겠습니다. [SLACK_HEYBILLI_SYNC]' },
+    { text: '반납때 팬바 없는거 확인했고' },
+  ];
+  assert.ok(findExistingAskReply(asked));
+  assert.equal(findExistingAskReply([
+    { text: '조승신 반출건 팬바' },
+    { text: '✅ 헤이빌리 자동반영 · 260721-001 · 반출 [SLACK_HEYBILLI_SYNC]' },
+  ]), null);
+  assert.equal(findExistingAskReply([]), null);
 });
 
 test('trade id and thread revision are deterministic', () => {
