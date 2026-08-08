@@ -2226,7 +2226,9 @@ function slackTypeLabel(type = '') {
     return_extension: '반납/연장/변경',
     damage_repair: '파손/수리',
     sheet_duplicate_check: '시트 중복 확인',
-    completed_log: '처리 완료 기록'
+    completed_log: '처리 완료 기록',
+    reservation_review_timeout: '자동처리 시간초과',
+    automation_error_review: '자동처리 오류'
   };
   return labels[type] || type || '후속처리';
 }
@@ -2240,15 +2242,14 @@ export function routeFollowUpToSlack(row = {}, config = {}) {
     return { route: owner, channel };
   }
   if (config.twoChannelRoutingEnabled === true) {
-    if (cardKind === 'inquiry_case') {
-      if (!text(config.slackInquiryChannel).trim()) throw new Error('Missing Slack inquiry channel');
-      return { route: 'inquiry', channel: config.slackInquiryChannel };
-    }
     if (cardKind === 'follow_up_task') {
       if (!text(config.slackFollowUpChannel).trim()) throw new Error('Missing Slack follow-up channel');
       return { route: 'follow_up', channel: config.slackFollowUpChannel };
     }
-    throw new Error(`Unsupported two-channel card kind: ${cardKind || 'missing'}`);
+    // 2채널 운영에서는 inquiry_case뿐 아니라 card_kind 없는 카드(브리지 실패 카드 등)도
+    // 전부 카카오톡문의로 보낸다 — agent 채널은 자동 카드의 목적지가 아니다 (2026-08-08 방침).
+    if (!text(config.slackInquiryChannel).trim()) throw new Error('Missing Slack inquiry channel');
+    return { route: 'inquiry', channel: config.slackInquiryChannel };
   }
   const route = explicitFollowUpRoute(row);
   const channels = {
@@ -3014,30 +3015,6 @@ function essentialSlackFacts(row = {}, { exclude = () => false } = {}) {
     .map((value) => truncateSlackText(value, 120));
 }
 
-function normalizeInquiryMessageEquivalent(value = '', row = {}) {
-  let normalized = cleanSlackChatText(value).normalize('NFKC');
-  normalized = normalized
-    .replace(/^카카오\s*(?:화면|최신)?\s*[:\-]?\s*/i, '')
-    .replace(/^(?:최신\s*)?고객\s*(?:메시지|요청|문의)?(?:이|은|는)?\s*[:\-]?\s*/i, '')
-    .trim();
-  const customer = cleanSlackChatText(row.customer_name || '').normalize('NFKC');
-  if (customer && normalized.startsWith(customer)) {
-    const remainder = normalized.slice(customer.length);
-    if (/^\s*[:\-]\s*/.test(remainder)) normalized = remainder.replace(/^\s*[:\-]\s*/, '');
-  }
-  return normalized
-    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function essentialInquiryFacts(row = {}, latestMessage = '') {
-  const latest = normalizeInquiryMessageEquivalent(latestMessage, row);
-  return essentialSlackFacts(row, {
-    exclude: (value) => Boolean(latest) && normalizeInquiryMessageEquivalent(value, row) === latest
-  });
-}
-
 function inquiryDraftDisplay(value = '', max = 700) {
   const eventualText = text(value).trim();
   if (!eventualText) return { text: '', complete: false };
@@ -3095,56 +3072,46 @@ function inquiryLabel(row = {}) {
   return slackTypeLabel(tag || row.decision_classification || row.type || 'customer_inquiry');
 }
 
-function firstSlackSentence(value = '') {
-  const normalized = cleanSlackBriefText(value).replace(/\s+/g, ' ').trim();
-  const sentence = normalized.match(/^.*?(?:[.!?。]|$)/)?.[0] || '';
-  return truncateSlackText(sentence, 160);
-}
+const INQUIRY_POINTER_TEXT = '카톡 채널 관리자에서 이 고객 채팅방을 확인하세요.';
 
-function inquiryActionElements(row, draft, config = {}, { failure = false, directSendAllowed = false } = {}) {
-  const elements = failure
-    ? []
-    : directSendAllowed
-      ? [
-        { type: 'button', text: { type: 'plain_text', text: '답변 전송' }, style: 'primary', action_id: 'village_followup_send', value: String(row.id || '') },
-        { type: 'button', text: { type: 'plain_text', text: '수정' }, action_id: 'village_followup_edit_send', value: String(row.id || '') }
-      ]
-      : [{ type: 'button', text: { type: 'plain_text', text: draft ? '수정' : '답변 작성' }, action_id: 'village_followup_edit_send', value: String(row.id || '') }];
-  const channel = text(config.slackFollowUpChannel).trim();
-  if (channel) {
-    elements.push({
-      type: 'button',
-      text: { type: 'plain_text', text: '후속업무로' },
-      action_id: 'village_followup_open_manual_channel',
-      value: String(row.id || ''),
-      url: `https://slack.com/app_redirect?channel=${encodeURIComponent(channel)}`
-    });
-  }
-  return elements;
+function kakaoManagerButton(config = {}, value = '') {
+  return {
+    type: 'button',
+    text: { type: 'plain_text', text: '카톡 관리자 열기' },
+    action_id: 'village_followup_open_kakao_manager',
+    value,
+    url: text(config.kakaoChannelManagerUrl).trim() || DEFAULT_KAKAO_CHANNEL_MANAGER_URL
+  };
 }
 
 export function buildSlackInquiryMessage(row = {}, options = {}) {
   const route = options.route || routeFollowUpToSlack(row, options.config || {});
+  const config = options.config || {};
   const failure = isSlackFailureCard(row);
-  const rawLatest = text(row.payload?.latest_customer_message_cluster || row.summary).trim();
-  const latest = truncateSlackText(rawLatest, 700);
-  const judgment = firstSlackSentence(row.recommended_action) || '답변 판단 필요';
   const rawDraft = failure ? '' : text(row.suggested_reply_draft).trim();
   const draftDisplay = inquiryDraftDisplay(rawDraft);
   const directSendAllowed = Boolean(rawDraft) && draftDisplay.complete && draftDisplay.text === rawDraft;
+  const value = String(row.id || '');
   const blocks = [
     { type: 'header', text: { type: 'plain_text', text: truncateSlackPlainText(`${safeSlackCustomerName(row)} · ${inquiryLabel(row)}`, 150), emoji: true } },
-    { type: 'section', text: { type: 'mrkdwn', text: `*고객*\n${latest || '최신 고객 메시지 확인 필요'}` } },
-    { type: 'section', text: { type: 'mrkdwn', text: `*AI 판단*\n${judgment}` } }
+    { type: 'context', elements: [{ type: 'mrkdwn', text: INQUIRY_POINTER_TEXT }] }
   ];
-  const facts = essentialInquiryFacts(row, rawLatest).slice(0, 2);
-  if (facts.length) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: facts.join('  ·  ') }] });
   if (draftDisplay.text) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*답변 초안*\n${codeBlockForSlack(draftDisplay.text, 700)}` } });
-  const actions = inquiryActionElements(row, draftDisplay.text, options.config || {}, { failure, directSendAllowed });
-  if (actions.length) blocks.push({ type: 'actions', elements: actions });
+  const actions = [];
+  if (directSendAllowed) {
+    actions.push({ type: 'button', text: { type: 'plain_text', text: '답변 전송' }, style: 'primary', action_id: 'village_followup_send', value });
+  }
+  if (!failure) {
+    actions.push({ type: 'button', text: { type: 'plain_text', text: draftDisplay.text ? '수정' : '답변 작성' }, action_id: 'village_followup_edit_send', value });
+  }
+  actions.push(
+    { type: 'button', text: { type: 'plain_text', text: '확인함' }, action_id: 'village_followup_status_done', value },
+    kakaoManagerButton(config, value)
+  );
+  blocks.push({ type: 'actions', elements: actions });
   return {
     channel: route.channel,
-    text: truncateSlackFallbackText(`${safeSlackCustomerName(row)} · ${inquiryLabel(row)} · ${rawLatest || '확인 필요'}`, 40),
+    text: truncateSlackFallbackText(`${safeSlackCustomerName(row)} · ${inquiryLabel(row)} · 카톡 확인`, 40),
     blocks
   };
 }
@@ -3188,53 +3155,28 @@ function buildInternalActionCaseMessage({ row = {}, channel = '', steps = [], cu
   };
 }
 
-function buildCustomerReplyCaseMessage({ row = {}, channel = '' } = {}) {
+function buildCustomerReplyCaseMessage({ row = {}, channel = '', config = {} } = {}) {
   const rawDraft = text(row.suggested_reply_draft).trim();
   const draftDisplay = inquiryDraftDisplay(rawDraft);
-  const latestCustomerRequest = truncateSlackText(
-    text(row.payload?.latest_customer_message_cluster || row.summary).trim() || '최신 고객 요청을 확인해 주세요.',
-    700
-  );
-  const judgment = truncateSlackText(
-    text(row.payload?.ai_judgment || row.recommended_action).trim() || '고객 답변이 필요합니다.',
-    700
-  );
-  const coreFacts = (Array.isArray(row.payload?.core_facts) && row.payload.core_facts.length
-    ? row.payload.core_facts
-    : essentialSlackFacts(row))
-    .map((value) => truncateSlackText(text(value).trim(), 240))
-    .filter(Boolean)
-    .slice(0, 2);
-  const completedWork = (Array.isArray(row.payload?.steps) ? row.payload.steps : [])
-    .filter((step) => step?.status === 'done')
-    .map((step) => truncateSlackText(cleanSlackBriefText(step.action || step.step_key), 300))
-    .filter(Boolean);
+  const value = followUpCaseActionValue(row);
   const blocks = [
     {
       type: 'header',
       text: { type: 'plain_text', text: truncateSlackPlainText(`${safeSlackCustomerName(row)} · 고객 답변`, 150), emoji: true }
     },
-    { type: 'section', text: { type: 'mrkdwn', text: `*최신 고객 요청*\n${latestCustomerRequest}` } },
-    { type: 'section', text: { type: 'mrkdwn', text: `*AI 판단*\n${judgment}` } }
+    { type: 'context', elements: [{ type: 'mrkdwn', text: INQUIRY_POINTER_TEXT }] }
   ];
-  if (coreFacts.length) {
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: coreFacts.join('  ·  ') }] });
-  }
-  if (completedWork.length) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*완료한 업무*\n${completedWork.map((item) => `• ${item}`).join('\n')}` } });
-  }
   if (draftDisplay.text) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*답변 초안*\n${codeBlockForSlack(draftDisplay.text, 700)}` } });
-  } else {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*답변 초안*\n답변 내용을 작성해 주세요.' } });
   }
   const actions = [];
   if (rawDraft && draftDisplay.complete && draftDisplay.text === rawDraft) {
-    actions.push({ type: 'button', text: { type: 'plain_text', text: '답변 전송' }, style: 'primary', action_id: 'village_followup_send', value: followUpCaseActionValue(row) });
+    actions.push({ type: 'button', text: { type: 'plain_text', text: '답변 전송' }, style: 'primary', action_id: 'village_followup_send', value });
   }
   actions.push(
-    { type: 'button', text: { type: 'plain_text', text: rawDraft ? '수정' : '답변 작성' }, action_id: 'village_followup_edit_send', value: followUpCaseActionValue(row) },
-    { type: 'button', text: { type: 'plain_text', text: '답변 불필요' }, action_id: 'village_followup_reply_not_needed', value: followUpCaseActionValue(row) }
+    { type: 'button', text: { type: 'plain_text', text: rawDraft ? '수정' : '답변 작성' }, action_id: 'village_followup_edit_send', value },
+    { type: 'button', text: { type: 'plain_text', text: '확인함' }, action_id: 'village_followup_reply_not_needed', value },
+    kakaoManagerButton(config, value)
   );
   blocks.push({ type: 'actions', elements: actions });
   return {
@@ -3256,7 +3198,7 @@ export function buildSlackFollowUpCaseMessage(row = {}, options = {}) {
     const current = steps[currentIndex];
     return buildInternalActionCaseMessage({ row, channel, steps, current, currentIndex });
   }
-  return buildCustomerReplyCaseMessage({ row, channel });
+  return buildCustomerReplyCaseMessage({ row, channel, config: options.config || {} });
 }
 
 function buildLegacySlackFollowUpMessage(row = {}, options = {}) {

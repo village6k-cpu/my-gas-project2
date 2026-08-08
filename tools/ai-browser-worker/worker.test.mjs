@@ -422,6 +422,30 @@ test('two-channel routing sends manual tasks only to 후속업무', () => {
   assert.equal(route.channel, '후속업무');
 });
 
+test('two-channel routing never leaks card-kind-less rows into legacy agent channels', () => {
+  const config = {
+    twoChannelRoutingEnabled: true,
+    slackInquiryChannel: '카카오톡문의',
+    slackFollowUpChannel: '후속업무',
+    slackChannels: { other: '기타문의', schedule: '스케쥴-agent' }
+  };
+  const bridgeFailure = routeFollowUpToSlack({
+    type: 'reply_needed',
+    decision_classification: 'automation_error_review',
+    payload: { failure_kind: 'worker_error' }
+  }, config);
+  assert.deepEqual(bridgeFailure, { route: 'inquiry', channel: '카카오톡문의' });
+
+  const failureCard = buildSlackInquiryMessage({
+    id: 'failure-1', customer_name: '남궁욱', type: 'reply_needed',
+    decision_classification: 'automation_error_review',
+    summary: '자동 처리 중 오류가 발생해 사람 확인으로 전환됐습니다.',
+    payload: { card_kind: 'inquiry_case', failure_kind: 'worker_error' }
+  }, { route: bridgeFailure, config });
+  assert.match(failureCard.blocks[0].text.text, /자동처리 오류/);
+  assert.match(JSON.stringify(failureCard.blocks), /village_followup_open_kakao_manager/);
+});
+
 test('canonical fixed-channel delivery ignores absent or disabled two-channel feature flags', () => {
   for (const twoChannelRoutingEnabled of [undefined, false]) {
     const config = {
@@ -3752,7 +3776,7 @@ test('manual task fallback escapes customer-derived Slack mentions without chang
   assert.ok(message.text.length <= 40);
 });
 
-test('inquiry card shows the latest customer cluster once and only exposes a visible safe draft', () => {
+test('inquiry card is a minimal Kakao pointer that still exposes a visible safe draft', () => {
   const latest = '오늘 입금확인증 보내주시면 감사하겠습니다.';
   const draft = '입금확인증 요청을 확인해 접수하겠습니다.';
   const message = buildSlackInquiryMessage({
@@ -3768,20 +3792,22 @@ test('inquiry card shows the latest customer cluster once and only exposes a vis
   });
 
   const rendered = JSON.stringify(message.blocks);
-  assert.equal((rendered.match(/오늘 입금확인증 보내주시면 감사하겠습니다\./g) || []).length, 1);
-  assert.match(rendered, /AI 판단/);
-  assert.match(rendered, /직원 처리가 필요한 요청입니다\./);
+  assert.match(rendered, /카톡 채널 관리자에서 이 고객 채팅방을 확인하세요\./);
+  assert.doesNotMatch(rendered, /오늘 입금확인증 보내주시면 감사하겠습니다\./);
+  assert.doesNotMatch(rendered, /AI 판단|직원 처리가 필요한 요청입니다|거래 260729-001/);
   assert.match(rendered, /입금확인증 요청을 확인해 접수하겠습니다\./);
   assert.match(rendered, /village_followup_send/);
   assert.match(rendered, /village_followup_edit_send/);
-  assert.match(rendered, /village_followup_open_manual_channel/);
-  assert.match(rendered, /slack\.com\/app_redirect\?channel=C0BMNJY7H8D/);
+  assert.match(rendered, /village_followup_status_done/);
+  assert.match(rendered, /village_followup_open_kakao_manager/);
+  assert.match(rendered, /business\.kakao\.com/);
+  assert.doesNotMatch(rendered, /village_followup_open_manual_channel/);
   assert.doesNotMatch(rendered, /worker\.mjs|처리 요약|<@U03EB8L0QDR>/);
   assert.equal(message.channel, 'C0BMRVDP2Q2');
   assert.ok(message.text.length <= 40);
 });
 
-test('inquiry fallback escapes latest-message Slack mentions without changing its plain-text header', () => {
+test('inquiry fallback never replays the latest customer message or raw mentions', () => {
   const message = buildSlackInquiryMessage({
     customer_name: '고객',
     payload: {
@@ -3792,9 +3818,8 @@ test('inquiry fallback escapes latest-message Slack mentions without changing it
 
   assert.match(message.blocks[0].text.text, /고객/);
   assert.doesNotMatch(message.blocks[0].text.text, /&amp;/);
-  assert.doesNotMatch(message.text, /<@/);
-  assert.match(message.text, /&lt;@U03EB8L0QDR&gt;/);
-  assert.doesNotMatch(message.text, /&amp;amp;|&amp;lt;|&amp;gt;/);
+  assert.doesNotMatch(message.text, /<@|U03EB8L0QDR|확인 부탁드립니다/);
+  assert.match(message.text, /카톡 확인/);
   assert.ok(message.text.length <= 40);
 });
 
@@ -3820,10 +3845,10 @@ test('inquiry card hides direct send for missing, failed, and incomplete drafts'
   assert.doesNotMatch(JSON.stringify(ordinary.blocks), /village_followup_send/);
   assert.doesNotMatch(JSON.stringify(failure.blocks), /잠시만 기다려주세요\.|village_followup_send|village_followup_edit_send/);
   const failureActions = failure.blocks.find((block) => block.type === 'actions');
-  assert.ok(failureActions, 'configured failure inquiry must retain manual-channel navigation');
+  assert.ok(failureActions, 'failure inquiry must keep acknowledge and Kakao-manager navigation');
   assert.deepEqual(
     failureActions.elements.map((element) => element.action_id),
-    ['village_followup_open_manual_channel']
+    ['village_followup_status_done', 'village_followup_open_kakao_manager']
   );
   const renderedLongDraft = JSON.stringify(longDraft.blocks);
   assert.match(renderedLongDraft, /첫째 줄/);
@@ -3854,7 +3879,7 @@ test('inquiry card suppresses direct send when display truncates or replaces the
   assert.match(JSON.stringify(fenced.blocks), /확인 문구 ''' 내부 표시/);
 });
 
-test('production inquiry constructor does not repeat latest sender-prefixed customer evidence', () => {
+test('production inquiry constructor never replays customer text or evidence on the minimal card', () => {
   const latest = '현금영수증 부탁드립니다.';
   const row = buildInquiryCaseRow({
     customer: { name: 'A & B' },
@@ -3871,8 +3896,8 @@ test('production inquiry constructor does not repeat latest sender-prefixed cust
   });
   const rendered = JSON.stringify(message.blocks);
 
-  assert.equal((rendered.match(/현금영수증 부탁드립니다\./g) || []).length, 1);
-  assert.match(rendered, /거래 260804-001 · 84,700원/);
+  assert.doesNotMatch(rendered, /현금영수증 부탁드립니다\.|거래 260804-001/);
+  assert.match(rendered, /카톡 채널 관리자에서 이 고객 채팅방을 확인하세요\./);
   assert.match(message.blocks[0].text.text, /A & B/);
   assert.doesNotMatch(message.blocks[0].text.text, /&amp;/);
   assert.match(message.text, /A &amp; B/);
@@ -3895,7 +3920,7 @@ test('buildSlackFollowUpMessage delegates two-channel cards and ignores configur
     config: { slackMentionUserIds: ['U03EB8L0QDR'] }
   });
 
-  assert.match(JSON.stringify(inquiry.blocks), /AI 판단/);
+  assert.match(JSON.stringify(inquiry.blocks), /카톡 채널 관리자에서 이 고객 채팅방을 확인하세요\./);
   assert.match(JSON.stringify(manual.blocks), /내가 할 일/);
   assert.doesNotMatch(JSON.stringify({ inquiry, manual }), /<@U03EB8L0QDR>/);
 });
@@ -3966,6 +3991,7 @@ test('every canonical card button carries the case id and state version', () => 
 
   assert.deepEqual(buttons.map((button) => button.action_id).sort(), [
     'village_followup_edit_send',
+    'village_followup_open_kakao_manager',
     'village_followup_reply_not_needed',
     'village_followup_send',
     'village_followup_status_dismissed',
@@ -3977,7 +4003,7 @@ test('every canonical card button carries the case id and state version', () => 
   }
 });
 
-test('reply phase without a draft renders request judgment facts completed work and a write button', () => {
+test('reply phase without a draft stays a minimal Kakao pointer with a write button', () => {
   const message = buildSlackFollowUpCaseMessage({
     id: 'case-no-draft', customer_name: 'Lee', suggested_reply_draft: '',
     recommended_action: 'Issue the invoice before replying.', evidence: ['trade 260804-001'],
@@ -3991,11 +4017,12 @@ test('reply phase without a draft renders request judgment facts completed work 
   }, { config: { slackFollowUpChannel: '후속업무', slackInquiryChannel: '카카오톡문의' } });
   const rendered = JSON.stringify(message);
 
-  assert.match(rendered, /Please issue the invoice and let me know/);
-  assert.match(rendered, /Invoice completed; a customer reply is still required/);
-  assert.match(rendered, /invoice 260804-001/);
-  assert.match(rendered, /Issue invoice 260804-001/);
+  assert.doesNotMatch(rendered, /Please issue the invoice and let me know/);
+  assert.doesNotMatch(rendered, /Invoice completed; a customer reply is still required/);
+  assert.doesNotMatch(rendered, /invoice 260804-001|Issue invoice 260804-001/);
+  assert.match(rendered, /카톡 채널 관리자에서 이 고객 채팅방을 확인하세요\./);
   assert.match(rendered, /답변 작성/);
+  assert.match(rendered, /village_followup_open_kakao_manager/);
   assert.doesNotMatch(rendered, /"text":"수정"/);
   assert.doesNotMatch(rendered, /village_followup_send/);
 });

@@ -29,12 +29,19 @@ test('Bridge health exposes follow-up row and Slack card delivery gates', () => 
 });
 
 test('Bridge failure follow-ups are delivered to Slack, not only inserted into Supabase', () => {
-  assert.match(bridge, /import \{ deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows \}/);
+  assert.match(bridge, /import \{ buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows \}/);
   assert.match(bridge, /slackFollowUpEnabled:\s*CONFIG\.slackCardDeliveryEnabled/);
   assert.match(bridge, /slackBotToken:\s*CONFIG\.slackBotToken/);
   assert.match(bridge, /const upsertResult = await upsertFollowUpRows\(followUpConfig\(\), \[row\]\)/);
   assert.match(bridge, /deliverSlackFollowUpRows\(followUpConfig\(\), upsertResult\.rows\)/);
   assert.match(bridge, /worker_failure_followup_slack_delivery/);
+});
+
+test('Bridge card delivery honours two-channel routing and tags failure rows as inquiry cards', () => {
+  const configBlock = bridge.match(/function followUpConfig\(\)[\s\S]*?\n\}/)?.[0] || '';
+  assert.match(configBlock, /\.\.\.buildSlackRoutingConfig\(process\.env\)/);
+  const failureRow = bridge.match(/async function createWorkerFailureFollowUp[\s\S]*?const upsertResult/)?.[0] || '';
+  assert.match(failureRow, /card_kind:\s*'inquiry_case'/);
 });
 
 test('Live worker loads Hermes Slack token before delivering follow-up cards', () => {
@@ -71,7 +78,7 @@ test('Local bridge polls Slack send requests and uses the existing manual-send p
 });
 
 test('Local bridge replaces Slack follow-up cards after button actions', () => {
-  assert.match(bridge, /loadSelectedEnvFile\(path\.resolve\(process\.env\.HOME \|\| '', '\.hermes\/\.env'\), \['SLACK_BOT_TOKEN'\]\)/);
+  assert.match(bridge, /loadSelectedEnvFile\(path\.resolve\(process\.env\.HOME \|\| process\.env\.USERPROFILE \|\| os\.homedir\(\) \|\| '', '\.hermes\/\.env'\), \['SLACK_BOT_TOKEN'\]\)/);
   assert.match(bridge, /buildResolvedSlackFollowUpMessage/);
   assert.match(bridge, /replaceSlackFollowUpCard/);
   assert.match(bridge, /chat\.update/);

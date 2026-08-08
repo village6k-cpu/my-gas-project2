@@ -6,7 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
 import { spawn, spawnSync } from 'node:child_process';
-import { buildSlackFollowUpMessage, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
+import { buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
 import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-browser-worker/follow-up-case-lifecycle.mjs';
 
 function loadSelectedEnvFile(filePath, keys = []) {
@@ -918,14 +918,18 @@ function previewForJob(job = {}) {
 }
 
 function followUpConfig() {
+  // buildSlackRoutingConfig가 빠지면 브리지 발송 카드가 2채널 라우팅을 무시하고
+  // 레거시 agent 채널로 새어 나간다 (2026-08-08 기타문의/스케쥴-agent 유출 원인).
   return {
+    ...buildSlackRoutingConfig(process.env),
     supabaseUrl: CONFIG.supabaseUrl,
     serviceRoleKey: CONFIG.supabaseServiceRoleKey,
     followUpTable: CONFIG.followUpTable,
     slackFollowUpEnabled: CONFIG.slackCardDeliveryEnabled,
     slackThreadFollowUpsEnabled: process.env.SLACK_FOLLOW_UP_THREAD_REPLIES !== '0',
     slackBotToken: CONFIG.slackBotToken,
-    slackChannels: CONFIG.slackChannels
+    slackChannels: CONFIG.slackChannels,
+    kakaoChannelManagerUrl: process.env.KAKAO_CHANNEL_MANAGER_URL || ''
   };
 }
 
@@ -960,6 +964,7 @@ async function createWorkerFailureFollowUp(job = {}, error = new Error('worker f
     decision_classification: humanFailureClass,
     decision_confidence: 'blocked',
     payload: {
+      card_kind: 'inquiry_case',
       failure_kind: failureKind,
       job_id: jobId,
       room_key: roomKey,
