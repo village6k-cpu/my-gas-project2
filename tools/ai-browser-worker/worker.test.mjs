@@ -446,6 +446,16 @@ test('two-channel routing never leaks card-kind-less rows into legacy agent chan
   assert.match(JSON.stringify(failureCard.blocks), /village_followup_open_kakao_manager/);
 });
 
+test('buildCanonicalFollowUpCases stamps whether the AI actually auto-replied', () => {
+  const decision = { customer: { name: '박민호' }, latest_customer_message_cluster: '9/12 A7S3 가능할까요?' };
+  const job = { room_key: 'chat:auto-reply-stamp' };
+  const sent = buildCanonicalFollowUpCases(decision, job, [], { autoReplySent: true });
+  const notSent = buildCanonicalFollowUpCases(decision, job, []);
+
+  assert.equal(sent[0].payload.auto_reply_sent, true);
+  assert.equal(notSent[0].payload.auto_reply_sent, false);
+});
+
 test('canonical fixed-channel delivery ignores absent or disabled two-channel feature flags', () => {
   for (const twoChannelRoutingEnabled of [undefined, false]) {
     const config = {
@@ -3776,35 +3786,45 @@ test('manual task fallback escapes customer-derived Slack mentions without chang
   assert.ok(message.text.length <= 40);
 });
 
-test('inquiry card is a minimal Kakao pointer that still exposes a visible safe draft', () => {
+test('inquiry card is a minimal Kakao pointer with an auto-reply check only', () => {
   const latest = '오늘 입금확인증 보내주시면 감사하겠습니다.';
   const draft = '입금확인증 요청을 확인해 접수하겠습니다.';
-  const message = buildSlackInquiryMessage({
+  const base = {
     id: 'inquiry-1', type: 'customer_inquiry', customer_name: '김영준',
     summary: latest,
     recommended_action: '직원 처리가 필요한 요청입니다. 다음 문장은 표시하지 않습니다.',
     suggested_reply_draft: draft,
-    evidence: ['거래 260729-001 · VAT 포함 84,700원', 'worker.mjs:5800'],
-    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: latest }
-  }, {
+    evidence: ['거래 260729-001 · VAT 포함 84,700원', 'worker.mjs:5800']
+  };
+  const options = {
     route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' },
     config: { slackFollowUpChannel: 'C0BMNJY7H8D', slackMentionUserIds: ['U03EB8L0QDR'] }
-  });
+  };
+  const unanswered = buildSlackInquiryMessage({
+    ...base,
+    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: latest }
+  }, options);
+  const autoReplied = buildSlackInquiryMessage({
+    ...base,
+    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: latest, auto_reply_sent: true }
+  }, options);
 
-  const rendered = JSON.stringify(message.blocks);
-  assert.match(rendered, /카톡 채널 관리자에서 이 고객 채팅방을 확인하세요\./);
+  const rendered = JSON.stringify(unanswered.blocks);
+  assert.match(rendered, /카톡 채널 관리자에서 확인하세요/);
+  assert.match(rendered, /📩 AI 응답 없음/);
+  assert.match(JSON.stringify(autoReplied.blocks), /✅ AI 자동응답 보냄/);
   assert.doesNotMatch(rendered, /오늘 입금확인증 보내주시면 감사하겠습니다\./);
   assert.doesNotMatch(rendered, /AI 판단|직원 처리가 필요한 요청입니다|거래 260729-001/);
-  assert.match(rendered, /입금확인증 요청을 확인해 접수하겠습니다\./);
-  assert.match(rendered, /village_followup_send/);
-  assert.match(rendered, /village_followup_edit_send/);
+  assert.doesNotMatch(rendered, /입금확인증 요청을 확인해 접수하겠습니다\./);
+  assert.doesNotMatch(rendered, /village_followup_send|village_followup_edit_send|답변 초안|답변 작성/);
   assert.match(rendered, /village_followup_status_done/);
   assert.match(rendered, /village_followup_open_kakao_manager/);
   assert.match(rendered, /business\.kakao\.com/);
   assert.doesNotMatch(rendered, /village_followup_open_manual_channel/);
   assert.doesNotMatch(rendered, /worker\.mjs|처리 요약|<@U03EB8L0QDR>/);
-  assert.equal(message.channel, 'C0BMRVDP2Q2');
-  assert.ok(message.text.length <= 40);
+  assert.equal(unanswered.channel, 'C0BMRVDP2Q2');
+  assert.match(autoReplied.text, /AI 응답됨/);
+  assert.ok(unanswered.text.length <= 40);
 });
 
 test('inquiry fallback never replays the latest customer message or raw mentions', () => {
@@ -3823,60 +3843,33 @@ test('inquiry fallback never replays the latest customer message or raw mentions
   assert.ok(message.text.length <= 40);
 });
 
-test('inquiry card hides direct send for missing, failed, and incomplete drafts', () => {
-  const ordinary = buildSlackInquiryMessage({
-    id: 'inquiry-empty', customer_name: '김정희', recommended_action: '답변 검토가 필요',
-    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '일정 확인 부탁드립니다.' }
-  }, { route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' } });
-  const failure = buildSlackInquiryMessage({
-    id: 'inquiry-failure', customer_name: '고객명 확인 필요', suggested_reply_draft: '잠시만 기다려주세요.',
-    payload: { card_kind: 'inquiry_case', failure_kind: 'worker_error', latest_customer_message_cluster: '확인 필요' }
-  }, {
-    route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' },
-    config: { slackFollowUpChannel: 'C0BMNJY7H8D' }
-  });
-  const longDraft = buildSlackInquiryMessage({
-    id: 'inquiry-long', customer_name: '박정수',
-    suggested_reply_draft: '첫째 줄\n둘째 줄\n보이면 안 되는 셋째 줄',
-    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '확인 부탁드립니다.' }
-  }, { route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' } });
-
-  assert.match(JSON.stringify(ordinary.blocks), /답변 작성/);
-  assert.doesNotMatch(JSON.stringify(ordinary.blocks), /village_followup_send/);
-  assert.doesNotMatch(JSON.stringify(failure.blocks), /잠시만 기다려주세요\.|village_followup_send|village_followup_edit_send/);
-  const failureActions = failure.blocks.find((block) => block.type === 'actions');
-  assert.ok(failureActions, 'failure inquiry must keep acknowledge and Kakao-manager navigation');
-  assert.deepEqual(
-    failureActions.elements.map((element) => element.action_id),
-    ['village_followup_status_done', 'village_followup_open_kakao_manager']
-  );
-  const renderedLongDraft = JSON.stringify(longDraft.blocks);
-  assert.match(renderedLongDraft, /첫째 줄/);
-  assert.match(renderedLongDraft, /둘째 줄/);
-  assert.doesNotMatch(renderedLongDraft, /보이면 안 되는 셋째 줄/);
-  assert.doesNotMatch(renderedLongDraft, /village_followup_send/);
-  assert.match(renderedLongDraft, /village_followup_edit_send/);
-});
-
-test('inquiry card suppresses direct send when display truncates or replaces the eventual draft', () => {
-  const overLimitDraft = '가'.repeat(701);
-  const fencedDraft = '확인 문구 ``` 내부 표시';
-  const overLimit = buildSlackInquiryMessage({
-    id: 'inquiry-over-limit', customer_name: '박정수', suggested_reply_draft: overLimitDraft,
-    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '확인 부탁드립니다.' }
-  }, { route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' } });
-  const fenced = buildSlackInquiryMessage({
-    id: 'inquiry-fenced', customer_name: '박정수', suggested_reply_draft: fencedDraft,
-    payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '확인 부탁드립니다.' }
-  }, { route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' } });
-
-  for (const message of [overLimit, fenced]) {
+test('inquiry cards never render drafts or reply controls regardless of draft shape', () => {
+  const rows = [
+    {
+      id: 'inquiry-empty', customer_name: '김정희', recommended_action: '답변 검토가 필요',
+      payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '일정 확인 부탁드립니다.' }
+    },
+    {
+      id: 'inquiry-failure', customer_name: '고객명 확인 필요', suggested_reply_draft: '잠시만 기다려주세요.',
+      payload: { card_kind: 'inquiry_case', failure_kind: 'worker_error', latest_customer_message_cluster: '확인 필요' }
+    },
+    {
+      id: 'inquiry-long', customer_name: '박정수',
+      suggested_reply_draft: '첫째 줄\n둘째 줄\n보이면 안 되는 셋째 줄',
+      payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '확인 부탁드립니다.' }
+    }
+  ];
+  for (const row of rows) {
+    const message = buildSlackInquiryMessage(row, { route: { route: 'inquiry', channel: 'C0BMRVDP2Q2' } });
     const rendered = JSON.stringify(message.blocks);
-    assert.doesNotMatch(rendered, /village_followup_send/);
-    assert.match(rendered, /village_followup_edit_send/);
+    assert.doesNotMatch(rendered, /잠시만 기다려주세요|첫째 줄|둘째 줄|보이면 안 되는 셋째 줄/);
+    assert.doesNotMatch(rendered, /village_followup_send|village_followup_edit_send|답변 초안|답변 작성/);
+    const actions = message.blocks.find((block) => block.type === 'actions');
+    assert.deepEqual(
+      actions.elements.map((element) => element.action_id),
+      ['village_followup_status_done', 'village_followup_open_kakao_manager']
+    );
   }
-  assert.doesNotMatch(JSON.stringify(overLimit.blocks), new RegExp(overLimitDraft));
-  assert.match(JSON.stringify(fenced.blocks), /확인 문구 ''' 내부 표시/);
 });
 
 test('production inquiry constructor never replays customer text or evidence on the minimal card', () => {
@@ -3897,7 +3890,7 @@ test('production inquiry constructor never replays customer text or evidence on 
   const rendered = JSON.stringify(message.blocks);
 
   assert.doesNotMatch(rendered, /현금영수증 부탁드립니다\.|거래 260804-001/);
-  assert.match(rendered, /카톡 채널 관리자에서 이 고객 채팅방을 확인하세요\./);
+  assert.match(rendered, /카톡 채널 관리자에서 확인하세요/);
   assert.match(message.blocks[0].text.text, /A & B/);
   assert.doesNotMatch(message.blocks[0].text.text, /&amp;/);
   assert.match(message.text, /A &amp; B/);
@@ -3920,7 +3913,7 @@ test('buildSlackFollowUpMessage delegates two-channel cards and ignores configur
     config: { slackMentionUserIds: ['U03EB8L0QDR'] }
   });
 
-  assert.match(JSON.stringify(inquiry.blocks), /카톡 채널 관리자에서 이 고객 채팅방을 확인하세요\./);
+  assert.match(JSON.stringify(inquiry.blocks), /카톡 채널 관리자에서 확인하세요/);
   assert.match(JSON.stringify(manual.blocks), /내가 할 일/);
   assert.doesNotMatch(JSON.stringify({ inquiry, manual }), /<@U03EB8L0QDR>/);
 });
@@ -3949,7 +3942,7 @@ test('follow-up case renders the current internal step without reply controls', 
   assert.doesNotMatch(rendered, /<@/);
 });
 
-test('follow-up case renders reply controls after internal steps complete', () => {
+test('follow-up case becomes a minimal Kakao pointer after internal steps complete', () => {
   const row = {
     id: 'case-1', customer_name: '김영준', suggested_reply_draft: '발행이 완료되었습니다.',
     payload: {
@@ -3962,8 +3955,10 @@ test('follow-up case renders reply controls after internal steps complete', () =
   const actions = message.blocks.find((block) => block.type === 'actions').elements;
 
   assert.equal(message.channel, '후속업무');
-  assert.match(rendered, /village_followup_send/);
+  assert.match(rendered, /카톡 채널 관리자에서 확인하세요/);
+  assert.doesNotMatch(rendered, /발행이 완료되었습니다|village_followup_send|village_followup_edit_send|답변 초안/);
   assert.match(rendered, /village_followup_reply_not_needed/);
+  assert.match(rendered, /village_followup_open_kakao_manager/);
   assert.doesNotMatch(rendered, /village_followup_status_done/);
   assert.deepEqual(JSON.parse(actions.find((element) => element.action_id === 'village_followup_reply_not_needed').value), { id: 'case-1', state_version: 8 });
   assert.doesNotMatch(rendered, /<@/);
@@ -3990,10 +3985,8 @@ test('every canonical card button carries the case id and state version', () => 
     .flatMap((block) => block.elements);
 
   assert.deepEqual(buttons.map((button) => button.action_id).sort(), [
-    'village_followup_edit_send',
     'village_followup_open_kakao_manager',
     'village_followup_reply_not_needed',
-    'village_followup_send',
     'village_followup_status_dismissed',
     'village_followup_status_in_progress',
     'village_followup_step_done'
@@ -4003,7 +3996,7 @@ test('every canonical card button carries the case id and state version', () => 
   }
 });
 
-test('reply phase without a draft stays a minimal Kakao pointer with a write button', () => {
+test('reply phase without a draft stays a minimal Kakao pointer', () => {
   const message = buildSlackFollowUpCaseMessage({
     id: 'case-no-draft', customer_name: 'Lee', suggested_reply_draft: '',
     recommended_action: 'Issue the invoice before replying.', evidence: ['trade 260804-001'],
@@ -4020,11 +4013,11 @@ test('reply phase without a draft stays a minimal Kakao pointer with a write but
   assert.doesNotMatch(rendered, /Please issue the invoice and let me know/);
   assert.doesNotMatch(rendered, /Invoice completed; a customer reply is still required/);
   assert.doesNotMatch(rendered, /invoice 260804-001|Issue invoice 260804-001/);
-  assert.match(rendered, /카톡 채널 관리자에서 이 고객 채팅방을 확인하세요\./);
-  assert.match(rendered, /답변 작성/);
+  assert.match(rendered, /카톡 채널 관리자에서 확인하세요/);
+  assert.match(rendered, /📩 AI 응답 없음/);
   assert.match(rendered, /village_followup_open_kakao_manager/);
-  assert.doesNotMatch(rendered, /"text":"수정"/);
-  assert.doesNotMatch(rendered, /village_followup_send/);
+  assert.doesNotMatch(rendered, /답변 작성|"text":"수정"/);
+  assert.doesNotMatch(rendered, /village_followup_send|village_followup_edit_send/);
 });
 
 test('follow-up case keeps late internal work on the original inquiry-channel card', () => {
@@ -4052,8 +4045,9 @@ test('reply-only case stays in the inquiry channel without automatic mentions', 
   const rendered = JSON.stringify(message);
 
   assert.equal(message.channel, '카카오톡문의');
-  assert.match(rendered, /village_followup_send|village_followup_edit_send/);
+  assert.doesNotMatch(rendered, /확인 후 안내드리겠습니다|village_followup_send|village_followup_edit_send/);
   assert.match(rendered, /village_followup_reply_not_needed/);
+  assert.match(rendered, /village_followup_open_kakao_manager/);
   assert.doesNotMatch(rendered, /<@/);
   assert.doesNotMatch(message.text, /<@/);
 });
