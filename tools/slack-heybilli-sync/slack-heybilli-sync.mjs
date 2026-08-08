@@ -209,14 +209,14 @@ export function extractTradeIdFromConversation(root, replies = []) {
 function isGenericCustomerHint(hint) {
   const value = String(hint || '').trim();
   return /^헤이빌리/u.test(value)
-    || /^(?:어느|어떤|무슨|누구|고객|감독|대여자|성함|이름|오늘|내일|어제|금일|이번|다음|지난|저번|해당|관련|추가|기타|일부|전체|반출|반납|대여|예약|거래|문의|확인|입금|결제|정산|장비|수량)$/u.test(value)
+    || /^(?:어느|어떤|무슨|누구|고객|감독|대여자|성함|이름|오늘|내일|어제|금일|이번|다음|지난|저번|며칠|며칠전|몇일|몇일전|방금|아까|그저께|엊그제|해당|관련|추가|기타|일부|전체|반출|반납|대여|예약|거래|문의|확인|입금|결제|정산|장비|수량)$/u.test(value)
     || /^[네넵예응옙]{1,5}$/u.test(value);
 }
 
 export function extractCustomerHint(text) {
   const value = String(text || '').replace(/<@[A-Z0-9]+>/g, ' ').trim();
   const isGenericHint = isGenericCustomerHint;
-  const labeled = value.match(/(?:^|\n|[-*•]\s*)(?:고객명|고객|대여자|성함)\s*[:：-]\s*([가-힣]{2,5}|[가-힣]{1,2}\s+[가-힣]{1,3})/u)?.[1]?.replace(/\s+/g, '');
+  const labeled = value.match(/(?:^|\n|[-*•]\s*)(?:고객명|고객|대여자명|대여자|예약자명|예약자|성함)\s*[:：-]\s*([가-힣]{2,5}|[가-힣]{1,2}\s+[가-힣]{1,3})/u)?.[1]?.replace(/\s+/g, '');
   if (labeled && !isGenericHint(labeled)) return labeled;
   const tagged = value.match(/^\s*\[\s*(?:반출|반납)\s*\]\s*([^\n]+)/i)?.[1] || '';
   const taggedName = tagged
@@ -225,10 +225,16 @@ export function extractCustomerHint(text) {
     .trim();
   if (/^[가-힣A-Za-z0-9][가-힣A-Za-z0-9 ._()]{1,30}$/.test(taggedName) && !/^(장비|미등록|앱|헤이빌리|현장)/.test(taggedName) && !isGenericHint(taggedName)) return taggedName;
 
-  // "조승신 반출건 팬바…", "이한욱 FX9 건", "박호영 반출 사진 건", 리플의 "조승신 건" —
-  // 단톡방에서 사건을 지칭하는 가장 흔한 형태. 선두 이름만 거래 검색 힌트로 쓴다.
-  const caseRef = value.match(/^\s*([가-힣]{2,5})(?:\s*님)?(?:\s+[^\n]{0,40}?)?\s*(?:반출|반납|대여|예약)?\s*건(?:$|[\s.,!?~:)]|입니다|이에요|이요)/mu)?.[1];
-  if (caseRef && !isGenericHint(caseRef)) return caseRef;
+  // "조승신 반출건 팬바…", "며칠전 조승 신 반출건…", "이한욱 FX9 건", 리플의 "조승신 건" —
+  // 단톡방에서 사건을 지칭하는 가장 흔한 형태. 선두 시간 부사는 건너뛰고 이름만 힌트로 쓴다.
+  const caseRefPattern = /^\s*(?:(?:며칠|몇\s*일)\s*전에?\s+|(?:방금|아까|조금\s*전|그저께|엊그제|오늘|어제|금일|내일)\s+)?([가-힣]{1,2}\s+[가-힣]{1,3}|[가-힣]{2,5})(?:\s*님)?(?:\s+[^\n]{0,40}?)?\s*(?:반출|반납|대여|예약)?\s*건(?:$|[\s.,!?~:)]|입니다|이에요|이요)/gmu;
+  for (const match of value.matchAll(caseRefPattern)) {
+    // "반납 예정"처럼 일반 명사 두 개가 띄어쓴 이름(조승 신)으로 오인되지 않게
+    // 구성 단어 각각도 일반어 필터를 통과해야 한다.
+    const parts = String(match[1] || '').trim().split(/\s+/);
+    const caseRef = parts.join('');
+    if (caseRef && !isGenericHint(caseRef) && !parts.some((part) => isGenericHint(part))) return caseRef;
+  }
 
   // 직원이 앱 등록을 마친 뒤 "헤이빌리의 박 다빈 오늘 반출건 추가"처럼 알려주는 경우.
   // 성과 이름 사이의 공백은 Slack 입력 습관일 뿐이므로 거래 검색용 이름에서는 제거한다.

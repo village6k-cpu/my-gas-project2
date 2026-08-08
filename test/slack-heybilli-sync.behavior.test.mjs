@@ -51,6 +51,12 @@ test('untagged missing-app report is still operational', () => {
 
 test('case references and bare-name answers resolve the customer identity', () => {
   assert.equal(extractCustomerHint('조승신 반출건 팬바(삼각대 가방 안 발견)'), '조승신');
+  assert.equal(
+    extractCustomerHint('며칠전 조승 신 반출건 팬바 없었던 거 삼각대 가방 안에서 발견 됐습니다. 절대 제발 이렇게 두지좀 마세요. 왜 그러세요 진짜'),
+    '조승신',
+  );
+  assert.equal(extractCustomerHint('대여자명: 조승신  찾아봐 거래내역 1개밖에 없을 거야'), '조승신');
+  assert.equal(extractCustomerHint('며칠전 반납 건 있나요?'), '');
   assert.equal(extractCustomerHint('이한욱 FX9 건 XQD 1장 안 가져가심'), '이한욱');
   assert.equal(extractCustomerHint('박호영 반출 사진 건'), '박호영');
   assert.equal(extractCustomerHint('<@U0B66DNKXRU> 조승신 건'), '조승신');
