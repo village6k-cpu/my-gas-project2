@@ -1626,6 +1626,30 @@ function claimPendingContractRegen_(props, editKey, stableMs) {
 }
 
 /**
+ * 계약마스터 A열을 직접 읽어 거래 행이 정말로 없는지 확인한다.
+ * 재생성 실패 메시지만 믿고 큐를 종결하면, 조회 실패/등록 경합 같은 일시 상황을
+ * 영구 삭제로 오판해 정상 계약서 갱신을 잃는다. 확신이 없으면 false(=재시도 유지).
+ */
+function isTradeMissingFromContractMaster_(ss, 거래ID) {
+  var tid = String(거래ID || '').trim();
+  if (!tid) return false;
+  try {
+    var cm = (ss || SpreadsheetApp.getActiveSpreadsheet()).getSheetByName('계약마스터');
+    if (!cm) return false;
+    var lastRow = cm.getLastRow();
+    if (lastRow < 2) return false;
+    var ids = cm.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var i = 0; i < ids.length; i++) {
+      if (String(ids[i][0] || '').trim() === tid) return false;
+    }
+    return true;
+  } catch (lookupErr) {
+    Logger.log('계약마스터 부재 확인 실패(재시도 유지): ' + tid + ' - ' + lookupErr);
+    return false;
+  }
+}
+
+/**
  * 선점한 편집 버전만 완료 처리한다. 성공한 동일 버전만 editTS를 지우고,
  * 실패한 버전은 bounded backoff로 재시도한다.
  */
@@ -1657,6 +1681,14 @@ function finishPendingContractRegen_(props, claim, outcome) {
       props.deleteProperty(claim.editKey);
       props.deleteProperty(claim.retryKey);
       return { success: true };
+    }
+
+    // 재시도로 풀릴 수 없는 영구 조건은 큐에서 내린다. bounded backoff는 일시 장애용이고,
+    // degraded(30분)조차 영구 조건에는 "영원히"와 같다.
+    if (outcome && outcome.permanentlyGone) {
+      props.deleteProperty(claim.editKey);
+      props.deleteProperty(claim.retryKey);
+      return { success: false, permanentlyGone: true };
     }
 
     var retry = parseContractRegenRetry_(props.getProperty(claim.retryKey));
@@ -1783,6 +1815,7 @@ function regenPendingContracts() {
 
     var 거래ID = claim.tradeId;
     var regenSucceeded = false;
+    var regenPermanentlyGone = false;
     var regenErrorMessage = "";
     try {
       // 중요: Drive 복사/휴지통, 외부 거래내역 갱신을 포함한 실제 재생성은 잠금 밖이다.
@@ -1834,10 +1867,20 @@ function regenPendingContracts() {
     } catch (err) {
       regenErrorMessage = err && err.message ? err.message : String(err);
       try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e3) {}
+      // 계약마스터에 행 자체가 없는 건 재시도로 절대 안 풀리는 영구 조건이다(완전삭제된 거래).
+      // 일시 오류로 취급하면 30분마다 영원히 재시도하며 큐가 0이 되지 않고, 카드가 남아
+      // 있는 경우 "계약서 갱신중"에서 영영 못 빠져나온다. 단, 등록 도중의 일시적 부재를
+      // 영구로 오판하지 않도록 실제로 없는지 한 번 더 확인한 뒤에만 종결한다.
+      if (/계약마스터에서 찾을 수 없습니다/.test(regenErrorMessage) &&
+          isTradeMissingFromContractMaster_(ss, 거래ID)) {
+        regenPermanentlyGone = true;
+        Logger.log("계약마스터에 없는 거래 — 재생성 큐에서 종결(수동 확인 대상): " + 거래ID);
+      }
       Logger.log("계약서 재생성 실패: " + 거래ID + " - " + regenErrorMessage);
     } finally {
       var finishResult = finishPendingContractRegen_(props, claim, {
         success: regenSucceeded,
+        permanentlyGone: regenPermanentlyGone,
         error: regenErrorMessage
       });
       if (finishResult && finishResult.pending) {

@@ -204,6 +204,31 @@ test('모든 one-shot 스케줄러가 공용 프리미티브를 쓴다 (직접 n
   }
 });
 
+// 두 번째 근본 원인: 영구 조건을 일시 오류로 취급해 큐가 절대 비지 않던 문제.
+// 260809-001은 계약마스터에서 완전삭제된 거래인데 30분마다 영원히 재시도됐다.
+test('계약마스터에 없는 거래는 재시도를 끊고 큐에서 종결한다', () => {
+  const code = read('Code.js');
+  const finish = section(code, 'function finishPendingContractRegen_', '\n/**');
+  assert.match(finish, /outcome\.permanentlyGone[\s\S]{0,200}deleteProperty\(claim\.editKey\)/,
+    '영구 조건은 editTS를 지워 큐를 종결해야 한다 — degraded(30분)조차 영구 조건엔 "영원히"와 같다');
+
+  const regen = section(code, 'function regenPendingContracts()', '\n// ─────');
+  assert.match(regen, /계약마스터에서 찾을 수 없습니다\/\.test\(regenErrorMessage\)/);
+  assert.match(regen, /isTradeMissingFromContractMaster_\(ss, 거래ID\)/,
+    '에러 문자열만 믿지 말고 실제 부재를 한 번 더 확인해야 한다');
+  assert.match(regen, /permanentlyGone: regenPermanentlyGone/);
+});
+
+test('계약마스터 부재 확인은 불확실하면 재시도를 유지한다', () => {
+  const code = read('Code.js');
+  const lookup = section(code, 'function isTradeMissingFromContractMaster_', '\n/**');
+  assert.match(lookup, /catch \(lookupErr\)[\s\S]{0,220}return false;/,
+    '조회 실패를 "없음"으로 오판하면 정상 거래의 계약서 갱신을 영구히 잃는다');
+  assert.match(lookup, /if \(!tid\) return false;/);
+  assert.match(lookup, /if \(!cm\) return false;/);
+  assert.match(lookup, /if \(lastRow < 2\) return false;/);
+});
+
 test('one-shot 핸들러 목록에 반복 트리거가 섞이지 않았다', () => {
   const list = section(read('Code.js'), 'var ONE_SHOT_TRIGGER_HANDLERS_', '];');
   for (const recurring of ['flushDirtyToSupabase', 'warmDashboardCache', 'onEditInstallable',
