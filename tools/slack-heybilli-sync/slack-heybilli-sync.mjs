@@ -425,6 +425,13 @@ function eventFromRecord(config, record, visionByMessage = new Map()) {
   };
 }
 
+export function collectBotThreadReplies(threadMessages = [], botUserId = '') {
+  return (Array.isArray(threadMessages) ? threadMessages : [])
+    .filter((reply) => String(reply?.user || '') === botUserId || Boolean(reply?.bot_id))
+    .map((reply) => ({ ts: String(reply.ts || ''), text: String(reply.text || '').slice(0, 600) }))
+    .slice(-5);
+}
+
 async function buildEventRecords(config) {
   const auth = await slackApi(config, 'auth.test');
   const botUserId = String(auth.user_id || '');
@@ -450,7 +457,16 @@ async function buildEventRecords(config) {
     }))).slice(0, MAX_VISION_IMAGES_PER_EVENT);
     const permalink = await slackApi(config, 'chat.getPermalink', { channel: config.channelId, message_ts: message.ts })
       .then((data) => String(data.permalink || '')).catch(() => '');
-    const record = { baseReplies, baseRoot, contextualMessages, group, images, message, permalink };
+    const record = {
+      baseReplies,
+      baseRoot,
+      botReplies: collectBotThreadReplies(threadMessages, botUserId),
+      contextualMessages,
+      group,
+      images,
+      message,
+      permalink
+    };
     return { ...record, event: eventFromRecord(config, record) };
   });
   return records
@@ -516,6 +532,7 @@ function hermesPrompt(result, config) {
       ? `초기 이관 기준 시각은 Slack ts ${config.backfillCutoffTs}입니다. 이보다 오래된 사건은 확실한 건만 적용하고, 불명확하면 과거 질문을 새로 만들지 말고 ignore하세요. 이 시각 이후 사건은 정보가 부족하면 같은 Slack 스레드에 ask하세요.`
       : '',
     '각 이벤트의 전체 스레드에서 최신 직원 답변을 우선해 사실을 추출하고, 후보 거래·품목과 대조하세요.',
+    'bot_thread_replies는 헤이빌리(봇)가 이미 이 스레드에 남긴 답글입니다. 이미 반영/적용 완료를 공지했거나 후보 카드가 요구 상태와 일치해 정정할 차이가 없으면 apply하지 말고 ignore로 종료하세요. 같은 사실의 재적용·재공지는 금지입니다.',
     '명시되지 않은 결제 상태나 분실을 추측하지 마세요. 미반납은 lost가 아닙니다.',
     '카드 summary는 누가·무엇이·어떻게 달라졌는지만 한두 문장, 500자 이내로 쓰세요. Slack 링크·메시지 ID·원문 시각·처리과정 설명은 넣지 마세요.',
     '',
@@ -538,6 +555,13 @@ async function scanCommand(config, args) {
     return !record?.images.length || enriched.readyTs.has(ts);
   });
   result.scanned = records.length;
+  // 대화형 헤이빌리(멘션)가 이미 처리·공지한 스레드를 에이전트가 알아볼 수 있게,
+  // 정체성 해시에는 넣지 않는 봇 답글을 pending 이벤트에 참고용으로만 붙인다.
+  for (const entry of result.pending || []) {
+    const ts = eventTsFromPending(entry);
+    const record = records.find((candidate) => candidate.event.messageTs === ts);
+    if (record?.botReplies?.length) entry.bot_thread_replies = record.botReplies;
+  }
   if (args.has('--hermes')) return hermesPrompt(result, config);
   return result;
 }

@@ -607,12 +607,21 @@ export function validateActions(plan: SlackOpsApplyPlan, items: ItemRow[], event
   }
 }
 
+/**
+ * source_hash를 키에 넣으면 답글로 해시가 바뀐 뒤 재실행될 때 GAS가 새 요청으로 보고
+ * 같은 품목을 이중 추가할 수 있다. 스레드+품목 내용 기준으로 고정한다.
+ */
+function onsiteIdempotencyKey(plan: SlackOpsApplyPlan, action: OnsiteAddAction, index: number): string {
+  const content = action.items.map((item) => `${item.name}x${item.qty}`).join(",");
+  return `${plan.channelId}:${plan.messageTs}:onsite:${index}:${content}`.slice(0, 480);
+}
+
 async function previewOnsiteActions(plan: SlackOpsApplyPlan) {
   const previews = [];
   let onsiteIndex = 0;
   for (const action of plan.actions ?? []) {
     if (action.type !== "onsite_add") continue;
-    const idempotencyKey = `${plan.channelId}:${plan.messageTs}:${plan.sourceHash}:onsite:${onsiteIndex++}`;
+    const idempotencyKey = onsiteIdempotencyKey(plan, action, onsiteIndex++);
     const result = await gasPost({
       action: "onsiteAddon",
       tid: plan.tradeId,
@@ -635,7 +644,7 @@ async function executeOnsiteActions(plan: SlackOpsApplyPlan) {
   let onsiteIndex = 0;
   for (const action of plan.actions ?? []) {
     if (action.type !== "onsite_add") continue;
-    const idempotencyKey = `${plan.channelId}:${plan.messageTs}:${plan.sourceHash}:onsite:${onsiteIndex++}`;
+    const idempotencyKey = onsiteIdempotencyKey(plan, action, onsiteIndex++);
     const result = await gasPost({
       action: "onsiteAddon",
       tid: plan.tradeId,
@@ -672,6 +681,19 @@ async function syncCorrectionNamesToSchedule(plan: SlackOpsApplyPlan, dryRun: bo
   return results;
 }
 
+/**
+ * 직원 답글로 source_hash가 바뀌면 applied 사건도 pending으로 돌아온다. 그때 요약 문구만
+ * 다시 쓴 동일 계획을 실행하면 같은 일을 반복하고 완료 공지를 재도배하므로, 거래·단계·action이
+ * 같으면 상태와 무관하게 중복으로 판정한다 (summary 문구 차이는 무시).
+ */
+export function isSameApplyContent(appliedPlan: unknown, plan: SlackOpsApplyPlan): boolean {
+  if (!appliedPlan || typeof appliedPlan !== "object") return false;
+  const prior = appliedPlan as Record<string, unknown>;
+  return prior.tradeId === plan.tradeId
+    && prior.phase === plan.phase
+    && JSON.stringify(prior.actions ?? []) === JSON.stringify(plan.actions ?? []);
+}
+
 export async function applySlackOpsPlan(value: unknown, execute: boolean) {
   const plan = sanitizePlan(value);
   const db = getInventoryAuditServiceClient();
@@ -681,7 +703,11 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
   if (!data) throw new Error("먼저 scan을 실행해야 합니다");
   const event = data as StoredEvent;
   if (event.source_hash !== plan.sourceHash) throw new Error("Slack 스레드가 바뀌었습니다. 다시 scan해 주세요");
-  if (event.status === "applied" && JSON.stringify(event.applied_plan) === JSON.stringify(plan)) {
+  if (isSameApplyContent(event.applied_plan, plan)) {
+    if (execute && event.status !== "applied") {
+      await db.from("slack_ops_events").update({ status: "applied", last_error: null })
+        .eq("channel_id", plan.channelId).eq("message_ts", plan.messageTs).eq("source_hash", plan.sourceHash);
+    }
     return { ok: true, duplicate: true, execute, tradeId: plan.tradeId };
   }
 
