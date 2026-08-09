@@ -1861,7 +1861,8 @@ function regenPendingContracts() {
       try { invalidateDashboardTradeExtraCache_([거래ID]); } catch (e0) {}
       try { invalidateDashboardCache(); } catch (e1) {}
       try { invalidateTimelineCache(); } catch (e2) {}
-      try { supaMarkTradeDirty_(거래ID); } catch (eMark) {} // 새 계약서 링크 → Supabase/앱 전파
+      // Supabase 전파(supaMarkTradeDirty_)는 여기서 하지 않는다 — 아래 finally에서
+      // 큐 키가 실제로 지워진 뒤에 한다. 이유는 finally 주석 참고.
       Logger.log("계약서 재생성 완료(디바운스): " + 거래ID);
       try { perfLog_("contractRegen", { reqID: 거래ID, totalMs: Date.now() - regenT0 }); } catch (ePerf) {}
     } catch (err) {
@@ -1889,6 +1890,14 @@ function regenPendingContracts() {
         if (finishResult.degraded) {
           Logger.log("계약서 재생성 반복 실패(30분 뒤 자동 재시도): " + 거래ID);
         }
+      }
+      // 큐 키(contractEditTS_)가 실제로 지워진 뒤에만 Supabase 전파를 예약한다.
+      // 앱의 contract_regen_pending은 GAS push로만 바뀌는 래치이고, 그 값은 큐 키
+      // 존재 여부로 계산된다. 키 삭제 전에 dirty를 찍으면 매분 도는
+      // flushDirtyToSupabase가 그 틈에 pending=true를 밀어넣고, 이후 dirty 마킹이
+      // 다시는 없어 카드가 "계약서 갱신중"에 영구히 굳는다(6월 건까지 13개 관측).
+      if (finishResult && (finishResult.success || finishResult.permanentlyGone)) {
+        try { supaMarkTradeDirty_(거래ID); } catch (eMark) {}
       }
     }
     Utilities.sleep(250);

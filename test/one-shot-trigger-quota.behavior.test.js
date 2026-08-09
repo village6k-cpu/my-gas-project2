@@ -229,6 +229,37 @@ test('계약마스터 부재 확인은 불확실하면 재시도를 유지한다
   assert.match(lookup, /if \(lastRow < 2\) return false;/);
 });
 
+// 세 번째 근본 원인: 큐 키 삭제 전에 dirty를 찍어 매분 도는 flush가 pending=true를
+// 밀어넣고, 이후 마킹이 없어 앱 카드가 영구히 "계약서 갱신중"으로 굳던 경쟁 상태
+// (race condition = 두 작업이 동시에 돌며 서로를 덮는 것). 6월 건까지 13개 관측.
+test('Supabase 전파는 큐 키가 지워진 뒤에만 예약한다', () => {
+  const code = read('Code.js');
+  const regen = section(code, 'function regenPendingContracts()', '\n// ─────');
+
+  const finishAt = regen.indexOf('finishPendingContractRegen_(props, claim');
+  const markAt = regen.indexOf('supaMarkTradeDirty_(거래ID)');
+  assert.ok(finishAt >= 0 && markAt > finishAt,
+    'dirty 마킹이 큐 키 삭제보다 먼저면 flushDirtyToSupabase가 그 틈에 pending=true를 굳힌다');
+
+  assert.match(regen, /finishResult && \(finishResult\.success \|\| finishResult\.permanentlyGone\)[\s\S]{0,120}supaMarkTradeDirty_/,
+    '큐에서 실제로 내려간 경우에만 전파해야 한다 — 재시도 중인 건은 pending이 맞다');
+
+  // 주석 언급은 허용하고 실제 호출만 잡는다.
+  const successBlock = regen.slice(regen.indexOf('regenSucceeded = true;'), finishAt);
+  const stripComments = (s) => s.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  assert.ok(!/supaMarkTradeDirty_\(/.test(stripComments(successBlock)),
+    '성공 블록(큐 키가 아직 살아 있는 시점)에서 전파를 찍으면 안 된다');
+});
+
+test('직접 재생성 경로는 큐 키를 지운 뒤 전파한다', () => {
+  const gen = read('generatecontract.js');
+  const clear = section(gen, 'function clearDirectContractRegenPending_', '\n}');
+  const deleteAt = clear.indexOf("deleteProperty('contractEditTS_'");
+  const markAt = clear.indexOf('supaMarkTradeDirty_');
+  assert.ok(deleteAt >= 0 && markAt > deleteAt,
+    'regenPendingContracts와 같은 순서 불변식을 지켜야 한다');
+});
+
 test('one-shot 핸들러 목록에 반복 트리거가 섞이지 않았다', () => {
   const list = section(read('Code.js'), 'var ONE_SHOT_TRIGGER_HANDLERS_', '];');
   for (const recurring of ['flushDirtyToSupabase', 'warmDashboardCache', 'onEditInstallable',
