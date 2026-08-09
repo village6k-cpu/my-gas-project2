@@ -260,6 +260,68 @@ test('직접 재생성 경로는 큐 키를 지운 뒤 전파한다', () => {
     'regenPendingContracts와 같은 순서 불변식을 지켜야 한다');
 });
 
+// 네 번째 원인(경합의 진원지): 전역 ScriptLock을 쥔 채 ScriptApp 트리거 I/O(수 초)를
+// 하면 onEdit·대시보드 변경·Supabase flush가 waitLock(10초)에서 줄줄이 실패한다.
+// 그 잠금 실패가 트리거 누수 경로를 때려 20개 쿼터 사고로 번졌다.
+test('...UnderLock_ 함수 안에서는 ScriptApp을 건드리지 않는다', () => {
+  const code = read('Code.js');
+  const offenders = [];
+  const lines = code.split('\n');
+  let current = null;
+  let depth = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const start = line.match(/^function (\w*UnderLock_)\(/);
+    if (start) { current = start[1]; depth = 0; }
+    if (!current) continue;
+    depth += (line.match(/\{/g) || []).length - (line.match(/\}/g) || []).length;
+    if (/ScriptApp\./.test(line)) offenders.push(`${current} (Code.js:${i + 1}): ${line.trim()}`);
+    if (depth <= 0 && line.trim() === '}') current = null;
+  }
+  assert.deepEqual(offenders, [],
+    '잠금 구간에서 트리거 I/O를 하면 전역 잠금이 수 초간 묶여 다른 실행이 waitLock에서 실패한다');
+});
+
+test('watchdog은 잠금 안에서 계획만 세우고 잠금 밖에서 실행한다', () => {
+  const code = read('Code.js');
+  const plan = section(code, 'function planContractRegenWatchdogUnderLock_', '\n/**');
+  assert.doesNotMatch(plan, /ScriptApp\./, '계획 단계는 props만 만져야 한다');
+  assert.match(plan, /props\.setProperty\(CONTRACT_REGEN_WATCHDOG_PROP_/);
+
+  // claim 경로: 잠금 해제 뒤에 commit이 오고, 그 commit은 호출자가 Drive 작업을
+  // 시작하기 전(= 함수 return 전)에 끝나야 한다.
+  const claim = section(code, 'function claimPendingContractRegen_', '\n/**');
+  assert.match(claim, /watchdogPlan = planContractRegenWatchdogUnderLock_/);
+  const releaseAt = claim.indexOf('lock.releaseLock()');
+  const commitAt = claim.indexOf('commitContractRegenWatchdogPlan_');
+  assert.ok(releaseAt >= 0 && commitAt > releaseAt,
+    '트리거 I/O는 releaseLock 뒤에 와야 한다');
+  assert.ok(claim.slice(claim.indexOf('} finally {')).includes('commitContractRegenWatchdogPlan_'),
+    'commit은 finally 안이라 어느 return 경로로 나가도 실행된다');
+});
+
+test('취소 정리 트리거 헬퍼는 이름이 잠금 상태를 정직하게 말한다', () => {
+  const code = read('Code.js');
+  // 이름이 UnderLock_인데 실제로는 잠금 밖에서 호출되면, 다음 사람이 잠금 안에서
+  // 부르도록 유도한다 — 이번 사고가 정확히 그 함정에서 나왔다.
+  assert.ok(!/function scheduleCancelledTradeCleanupTriggerUnderLock_/.test(code));
+  assert.ok(!/function clearCancelledTradeCleanupTriggersUnderLock_/.test(code));
+  assert.match(code, /function scheduleCancelledTradeCleanupTriggerOutsideLock_/);
+  assert.match(code, /function clearCancelledTradeCleanupTriggersOutsideLock_/);
+
+  // 호출부는 전부 releaseLock 뒤(finally)여야 한다.
+  for (const fn of ['claimNextCancelledTradeCleanup_', 'processCancelledTradeCleanup']) {
+    const at = code.indexOf(`function ${fn}`);
+    if (at < 0) continue;
+    const body = code.slice(at, code.indexOf('\nfunction ', at + 10));
+    const releaseAt = body.indexOf('lock.releaseLock()');
+    const ensureAt = body.indexOf('ensureCancelledTradeCleanupTrigger_');
+    if (ensureAt >= 0) {
+      assert.ok(releaseAt >= 0 && ensureAt > releaseAt, `${fn}: 트리거 예약이 잠금 안에 있으면 안 된다`);
+    }
+  }
+});
+
 test('one-shot 핸들러 목록에 반복 트리거가 섞이지 않았다', () => {
   const list = section(read('Code.js'), 'var ONE_SHOT_TRIGGER_HANDLERS_', '];');
   for (const recurring of ['flushDirtyToSupabase', 'warmDashboardCache', 'onEditInstallable',

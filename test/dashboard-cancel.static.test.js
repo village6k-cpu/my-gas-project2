@@ -67,8 +67,8 @@ assert.match(
   'external cleanup queue needs bounded exponential retry',
 );
 const cancelTriggerBody = code.slice(
-  code.indexOf('function scheduleCancelledTradeCleanupTriggerUnderLock_'),
-  code.indexOf('\nfunction ensureCancelledTradeCleanupTrigger_', code.indexOf('function scheduleCancelledTradeCleanupTriggerUnderLock_')),
+  code.indexOf('function scheduleCancelledTradeCleanupTriggerOutsideLock_'),
+  code.indexOf('\nfunction ensureCancelledTradeCleanupTrigger_', code.indexOf('function scheduleCancelledTradeCleanupTriggerOutsideLock_')),
 );
 assert.match(cancelTriggerBody, /currentAt > Date\.now\(\) && currentAt <= desiredAt \+ 1000/);
 // 트리거 교체는 공용 프리미티브(replaceOneShotTrigger_)가 담당한다. 그 안에서

@@ -1493,20 +1493,45 @@ function parseContractRegenRetry_(raw) {
   return retry;
 }
 
-/** 호출자는 ScriptLock을 보유해야 한다. active claim의 가장 이른 만료 시각에 watchdog 1개만 둔다. */
-function armContractRegenWatchdogUnderLock_(props, fireAt) {
+/**
+ * 잠금 안에서는 ScriptProperties만 만진다 — 트리거 I/O는 계획만 세워 돌려준다.
+ *
+ * 전역 ScriptLock은 onEdit·대시보드 변경·Supabase flush가 함께 쓰는 자원이다.
+ * ScriptApp 트리거 목록/생성/삭제는 수 초가 걸리는 외부 I/O라, 잠금을 쥔 채로 하면
+ * 다른 실행이 waitLock(10초)에서 줄줄이 실패한다. 그 잠금 실패가 트리거 누수 경로를
+ * 때려 20개 쿼터 사고(계약서 갱신중 무한)로 번졌다.
+ *
+ * 반환한 계획은 반드시 잠금을 놓은 뒤 commitContractRegenWatchdogPlan_로 실행한다.
+ * 이미 충분히 이른 watchdog이 있으면 null — 흔한 경로에서는 트리거 I/O가 아예 없다.
+ */
+function planContractRegenWatchdogUnderLock_(props, fireAt) {
   var desiredAt = Math.max(Date.now() + 1000, Number(fireAt || 0));
   var currentAt = Number(props.getProperty(CONTRACT_REGEN_WATCHDOG_PROP_) || 0);
-  if (currentAt > Date.now() && currentAt <= desiredAt + 1000) return;
-
-  // 항상 1개로 수렴시킨다. delete→create 사이 강제종료로 복구 트리거가 0개가 되는
-  // 창을 만들지 않으면서, 중복이 쌓여 쿼터를 먹는 것도 막는다.
-  replaceOneShotTrigger_(CONTRACT_REGEN_WATCHDOG_HANDLER_, desiredAt - Date.now());
+  if (currentAt > Date.now() && currentAt <= desiredAt + 1000) return null;
   props.setProperty(CONTRACT_REGEN_WATCHDOG_PROP_, String(desiredAt));
+  return { arm: desiredAt };
 }
 
-/** 호출자는 ScriptLock을 보유해야 한다. 남은 claim에 맞춰 watchdog을 재계획한다. */
-function refreshContractRegenWatchdogUnderLock_(props) {
+/** 전역 ScriptLock을 놓은 뒤에만 호출한다. */
+function commitContractRegenWatchdogPlan_(props, plan) {
+  if (!plan) return;
+  try {
+    if (plan.clear) {
+      pruneOneShotTriggers_(CONTRACT_REGEN_WATCHDOG_HANDLER_, 0);
+      return;
+    }
+    // 항상 1개로 수렴시킨다. 중복이 쌓여 쿼터를 먹는 것도, 0개가 되는 창도 없다.
+    replaceOneShotTrigger_(CONTRACT_REGEN_WATCHDOG_HANDLER_, plan.arm - Date.now());
+  } catch (triggerErr) {
+    // 예약 표식을 지워 다음 기회에 다시 시도하게 한다. 큐는 그대로 남고 매분 도는
+    // rescueDashboardAsyncWorkerTriggers_가 다시 깨운다.
+    if (plan.arm) props.deleteProperty(CONTRACT_REGEN_WATCHDOG_PROP_);
+    Logger.log('watchdog 예약 실패(큐 보존): ' + triggerErr);
+  }
+}
+
+/** 호출자는 ScriptLock을 보유해야 한다. 남은 claim에 맞춰 watchdog 계획만 세운다. */
+function planContractRegenWatchdogRefreshUnderLock_(props) {
   var all = props.getProperties();
   var earliestAt = Infinity;
   Object.keys(all).forEach(function(key) {
@@ -1522,43 +1547,42 @@ function refreshContractRegenWatchdogUnderLock_(props) {
     earliestAt = Math.min(earliestAt, Number(claim.leaseUntil || Date.now() + 1000));
   });
 
-  if (isFinite(earliestAt)) {
-    armContractRegenWatchdogUnderLock_(props, earliestAt);
-    return;
-  }
-  ScriptApp.getProjectTriggers().forEach(function(t) {
-    if (t.getHandlerFunction() === CONTRACT_REGEN_WATCHDOG_HANDLER_) ScriptApp.deleteTrigger(t);
-  });
+  if (isFinite(earliestAt)) return planContractRegenWatchdogUnderLock_(props, earliestAt);
   props.deleteProperty(CONTRACT_REGEN_WATCHDOG_PROP_);
+  return { clear: true };
 }
 
 function armContractRegenRunWatchdog_(props) {
   var lock = LockService.getScriptLock();
   var acquired = false;
+  var plan = null;
   try {
     lock.waitLock(10000);
     acquired = true;
-    armContractRegenWatchdogUnderLock_(props, Date.now() + CONTRACT_REGEN_CLAIM_LEASE_MS_);
-    return true;
+    plan = planContractRegenWatchdogUnderLock_(props, Date.now() + CONTRACT_REGEN_CLAIM_LEASE_MS_);
   } catch (lockErr) {
     return false;
   } finally {
     if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
   }
+  commitContractRegenWatchdogPlan_(props, plan); // 잠금 밖에서 트리거 I/O
+  return true;
 }
 
 function clearContractRegenWatchdogIfIdle_(props) {
   var lock = LockService.getScriptLock();
   var acquired = false;
+  var plan = null;
   try {
     lock.waitLock(10000);
     acquired = true;
-    refreshContractRegenWatchdogUnderLock_(props);
+    plan = planContractRegenWatchdogRefreshUnderLock_(props);
   } catch (lockErr) {
-    // 기존 watchdog을 남겨두는 쪽이 고아화보다 안전하다.
+    return; // 기존 watchdog을 남겨두는 쪽이 고아화보다 안전하다.
   } finally {
     if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
   }
+  commitContractRegenWatchdogPlan_(props, plan); // 잠금 밖에서 트리거 I/O
 }
 
 /**
@@ -1568,6 +1592,7 @@ function clearContractRegenWatchdogIfIdle_(props) {
 function claimPendingContractRegen_(props, editKey, stableMs) {
   var lock = LockService.getScriptLock();
   var acquired = false;
+  var watchdogPlan = null;
   try {
     lock.waitLock(10000);
     acquired = true;
@@ -1609,9 +1634,11 @@ function claimPendingContractRegen_(props, editKey, stableMs) {
       token: token,
       leaseUntil: Date.now() + CONTRACT_REGEN_CLAIM_LEASE_MS_
     };
-    // GAS hard-timeout은 finally를 실행하지 않을 수 있다. 외부 Drive 작업 전에 lease
-    // 만료 watchdog을 먼저 남긴 뒤 claim을 기록해 editTS+claim 고아 상태를 막는다.
-    armContractRegenWatchdogUnderLock_(props, claim.leaseUntil);
+    // GAS hard-timeout은 finally를 실행하지 않을 수 있다. lease 만료 watchdog을 먼저
+    // 계획해 editTS+claim 고아 상태를 막는다. 실제 트리거 생성은 잠금을 놓은 직후,
+    // 즉 호출자가 Drive 작업을 시작하기 전에 finally에서 끝난다.
+    // (이 실행 전체를 덮는 watchdog은 regenPendingContracts 진입부에서 이미 걸려 있다.)
+    watchdogPlan = planContractRegenWatchdogUnderLock_(props, claim.leaseUntil);
     props.setProperty(claimKey, JSON.stringify({
       token: token,
       claimedRaw: claim.claimedRaw,
@@ -1622,6 +1649,8 @@ function claimPendingContractRegen_(props, editKey, stableMs) {
     return { claimed: false, busy: true, pending: true, nextAt: Date.now() + 3000, error: lockErr };
   } finally {
     if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
+    // 잠금 해제 뒤에 트리거 I/O. return 값이 호출자에게 가기 전에 완료된다.
+    commitContractRegenWatchdogPlan_(props, watchdogPlan);
   }
 }
 
@@ -2025,16 +2054,21 @@ function parseCancelledTradeCleanup_(raw, 거래ID) {
   return state;
 }
 
-/** 호출자는 ScriptLock을 보유해야 한다. */
-function clearCancelledTradeCleanupTriggersUnderLock_(props) {
-  ScriptApp.getProjectTriggers().forEach(function(t) {
-    if (t.getHandlerFunction() === CANCEL_CLEANUP_HANDLER_) ScriptApp.deleteTrigger(t);
-  });
+/**
+ * 전역 ScriptLock을 놓은 뒤에만 호출한다(호출부는 전부 finally의 releaseLock 이후).
+ * ScriptApp 트리거 I/O는 수 초가 걸리는 외부 왕복이라 잠금 안에서 하면 onEdit·
+ * 대시보드 변경·Supabase flush가 waitLock에서 줄줄이 실패한다.
+ */
+function clearCancelledTradeCleanupTriggersOutsideLock_(props) {
+  pruneOneShotTriggers_(CANCEL_CLEANUP_HANDLER_, 0);
   props.deleteProperty(CANCEL_CLEANUP_TRIGGER_PROP_);
 }
 
-/** 더 이른 트리거가 이미 있으면 그대로 둔다. create 성공 뒤에만 기존 트리거를 정리한다. */
-function scheduleCancelledTradeCleanupTriggerUnderLock_(props, delayMs) {
+/**
+ * 더 이른 트리거가 이미 있으면 그대로 둔다.
+ * 위와 같은 이유로 전역 ScriptLock 밖에서만 호출한다.
+ */
+function scheduleCancelledTradeCleanupTriggerOutsideLock_(props, delayMs) {
   var safeDelay = Math.max(1000, Number(delayMs || 0));
   var desiredAt = Date.now() + safeDelay;
   var currentAt = Number(props.getProperty(CANCEL_CLEANUP_TRIGGER_PROP_) || 0);
@@ -2050,7 +2084,7 @@ function scheduleCancelledTradeCleanupTriggerUnderLock_(props, delayMs) {
 }
 
 function ensureCancelledTradeCleanupTrigger_(delayMs) {
-  scheduleCancelledTradeCleanupTriggerUnderLock_(PropertiesService.getScriptProperties(), delayMs || 1000);
+  scheduleCancelledTradeCleanupTriggerOutsideLock_(PropertiesService.getScriptProperties(), delayMs || 1000);
 }
 
 /**
@@ -2280,7 +2314,7 @@ function finishCancelledTradeCleanup_(claim, result) {
     if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
     if (ensureDelay) ensureCancelledTradeCleanupTrigger_(ensureDelay);
     else if (cleanupIdleTriggers) {
-      try { clearCancelledTradeCleanupTriggersUnderLock_(props); } catch (cleanupErr) {}
+      try { clearCancelledTradeCleanupTriggersOutsideLock_(props); } catch (cleanupErr) {}
     }
   }
 }
