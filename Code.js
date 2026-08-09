@@ -1359,6 +1359,93 @@ var CONTRACT_REGEN_MAX_ATTEMPTS_ = 5;
 var CONTRACT_REGEN_WATCHDOG_PROP_ = 'contractRegenWatchdogAt_v1';
 var CONTRACT_REGEN_WATCHDOG_HANDLER_ = 'regenPendingContractsWatchdog';
 
+// ─────────────────────────────────────────────────────────────
+// one-shot 트리거 상한 관리
+//
+// GAS는 스크립트/사용자당 트리거 20개가 상한이다. 일회성 트리거는 발화한 뒤에도
+// 목록에 남기 때문에, 만들기만 하고 안 지우는 경로가 하나라도 있으면 개수가 단조증가해
+// 결국 쿼터를 먹는다. 그 순간 프로젝트의 모든 one-shot 스케줄러가 동시에 죽는다 —
+// 복구 경로조차 트리거를 만들어야 해서 스스로 빠져나오지 못한다.
+//
+// 실제 사고(2026-08): regenPendingContracts 좀비 10개 + watchdog 4개가 쿼터를 채워
+// 계약서 재생성 큐 28건이 최대 31시간 동안 멈췄고, 앱 카드가 "계약서 갱신중"에서
+// 영구히 못 빠져나왔다. 아래 프리미티브가 그 두 조건을 모두 끊는다:
+//   (1) 교체 시 같은 핸들러 중복을 항상 1개로 수렴시킨다 → 단조증가 없음
+//   (2) create가 쿼터로 실패하면 one-shot 좀비를 정리하고 1회 재시도 → 자가복구
+// ─────────────────────────────────────────────────────────────
+
+/** 이 프로젝트의 일회성(one-shot) 트리거 핸들러. 반복 트리거는 넣지 않는다. */
+var ONE_SHOT_TRIGGER_HANDLERS_ = [
+  'regenPendingContracts',
+  'regenPendingContractsWatchdog',
+  'syncTemplateMasterDebounced',
+  'processCancelledTradeCleanup',
+  'flushDashboardStructureProjectionQueue_',
+  '_runPendingRegister'
+];
+
+function isTriggerQuotaError_(err) {
+  var message = String((err && err.message) || err || '');
+  return /트리거가 너무 많|too many triggers|Trigger.*maximum|한도를 초과/i.test(message);
+}
+
+/** 같은 핸들러의 트리거를 keep개만 남기고 지운다. 지운 개수를 돌려준다. */
+function pruneOneShotTriggers_(handler, keep, skipUniqueId) {
+  var kept = Math.max(0, Number(keep || 0));
+  var removed = 0;
+  var all = [];
+  try { all = ScriptApp.getProjectTriggers(); } catch (listErr) { return 0; }
+  for (var i = 0; i < all.length; i++) {
+    var t = all[i];
+    var id = '';
+    try { id = String(t.getUniqueId() || ''); } catch (idErr) {}
+    if (skipUniqueId && id === skipUniqueId) continue;
+    var name = '';
+    try { name = t.getHandlerFunction(); } catch (nameErr) { continue; }
+    if (name !== handler) continue;
+    if (kept > 0) { kept -= 1; continue; }
+    try { ScriptApp.deleteTrigger(t); removed += 1; } catch (deleteErr) {}
+  }
+  return removed;
+}
+
+/** 쿼터 소진 복구용 — 모든 one-shot 핸들러를 1개씩으로 줄인다. */
+function pruneAllOneShotTriggers_(exceptHandler) {
+  var removed = 0;
+  for (var i = 0; i < ONE_SHOT_TRIGGER_HANDLERS_.length; i++) {
+    var handler = ONE_SHOT_TRIGGER_HANDLERS_[i];
+    // 지금 만들려는 핸들러는 0개까지 비운다. 어차피 바로 새로 만든다.
+    removed += pruneOneShotTriggers_(handler, handler === exceptHandler ? 0 : 1);
+  }
+  return removed;
+}
+
+/**
+ * one-shot 트리거를 "정확히 1개"로 교체한다. 모든 one-shot 예약은 이 함수만 쓴다.
+ *
+ * 순서가 중요하다: 중복을 1개로 줄여 실행 경로를 남긴 채 새것을 만들고, 성공한 뒤에
+ * 남은 옛것을 지운다. create가 쿼터로 실패하면 one-shot 좀비 전체를 정리하고 한 번만
+ * 재시도한다. 그래도 실패하면 던진다 — 호출자가 큐를 보존하고 매분 도는 반복 트리거
+ * (flushDirtyToSupabase → rescueDashboardAsyncWorkerTriggers_)가 다시 깨운다.
+ */
+function replaceOneShotTrigger_(handler, delayMs) {
+  var delay = Math.max(1000, Number(delayMs || 0));
+  pruneOneShotTriggers_(handler, 1);
+  var replacement = null;
+  try {
+    replacement = ScriptApp.newTrigger(handler).timeBased().after(delay).create();
+  } catch (createErr) {
+    if (!isTriggerQuotaError_(createErr)) throw createErr;
+    var pruned = pruneAllOneShotTriggers_(handler);
+    Logger.log('트리거 쿼터 소진 — one-shot 좀비 ' + pruned + '개 정리 후 재시도: ' + handler);
+    replacement = ScriptApp.newTrigger(handler).timeBased().after(delay).create();
+  }
+  var replacementId = '';
+  try { replacementId = String(replacement.getUniqueId() || ''); } catch (idErr) {}
+  pruneOneShotTriggers_(handler, 0, replacementId);
+  return replacement;
+}
+
 /** 임계구역에서도 안전한 계약서 queue 표식. ScriptApp I/O는 하지 않는다. */
 function scheduleContractRegenUnderLock_(거래ID) {
   var props = PropertiesService.getScriptProperties();
@@ -1379,14 +1466,7 @@ function ensureContractRegenTrigger_() {
     var scheduledAt = Number(props.getProperty(CONTRACT_REGEN_TRIGGER_PROP_) || 0);
     var hasRecentScheduledTrigger = scheduledAt && (now - scheduledAt < CONTRACT_REGEN_TRIGGER_STALE_MS_);
     if (!hasRecentScheduledTrigger) {
-      // 주의: GAS 일회성 트리거는 발화 후에도 목록에 남는다. 새 트리거 생성이 성공한
-      // 뒤에만 좀비를 정리해 create 실패 때 실행 경로가 0개가 되지 않게 한다.
-      var replacement = ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
-      ScriptApp.getProjectTriggers().forEach(function(t) {
-        if (t.getHandlerFunction() === 'regenPendingContracts' && t.getUniqueId() !== replacement.getUniqueId()) {
-          try { ScriptApp.deleteTrigger(t); } catch (deleteErr) {}
-        }
-      });
+      replaceOneShotTrigger_('regenPendingContracts', 3000);
       props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(now));
     }
   } catch (triggerErr) {
@@ -1419,20 +1499,9 @@ function armContractRegenWatchdogUnderLock_(props, fireAt) {
   var currentAt = Number(props.getProperty(CONTRACT_REGEN_WATCHDOG_PROP_) || 0);
   if (currentAt > Date.now() && currentAt <= desiredAt + 1000) return;
 
-  // 새 watchdog을 먼저 만든 뒤 이전 것들을 치운다. delete→create 사이 강제종료로
-  // 복구 트리거가 0개가 되는 창을 만들지 않는다.
-  var replacement = ScriptApp.newTrigger(CONTRACT_REGEN_WATCHDOG_HANDLER_)
-    .timeBased()
-    .after(Math.max(1000, desiredAt - Date.now()))
-    .create();
-  ScriptApp.getProjectTriggers().forEach(function(t) {
-    if (
-      t.getHandlerFunction() === CONTRACT_REGEN_WATCHDOG_HANDLER_ &&
-      t.getUniqueId() !== replacement.getUniqueId()
-    ) {
-      ScriptApp.deleteTrigger(t);
-    }
-  });
+  // 항상 1개로 수렴시킨다. delete→create 사이 강제종료로 복구 트리거가 0개가 되는
+  // 창을 만들지 않으면서, 중복이 쌓여 쿼터를 먹는 것도 막는다.
+  replaceOneShotTrigger_(CONTRACT_REGEN_WATCHDOG_HANDLER_, desiredAt - Date.now());
   props.setProperty(CONTRACT_REGEN_WATCHDOG_PROP_, String(desiredAt));
 }
 
@@ -1635,10 +1704,15 @@ function regenPendingContractsWatchdog() {
       return key.indexOf(CONTRACT_REGEN_CLAIM_PREFIX_) === 0 || key.indexOf('contractEditTS_') === 0;
     });
   } catch (lockErr) {
+    // 잠금 실패마다 새 트리거를 "추가"하면 개수가 단조증가해 결국 20개 쿼터를 먹는다.
+    // 항상 1개로 교체한다.
     try {
-      ScriptApp.newTrigger(CONTRACT_REGEN_WATCHDOG_HANDLER_).timeBased().after(5000).create();
+      replaceOneShotTrigger_(CONTRACT_REGEN_WATCHDOG_HANDLER_, 5000);
       props.setProperty(CONTRACT_REGEN_WATCHDOG_PROP_, String(Date.now() + 5000));
-    } catch (triggerErr) {}
+    } catch (triggerErr) {
+      props.deleteProperty(CONTRACT_REGEN_WATCHDOG_PROP_);
+      Logger.log('watchdog 재예약 실패(큐 보존): ' + triggerErr);
+    }
     return;
   } finally {
     if (acquired) try { lock.releaseLock(); } catch (releaseErr) {}
@@ -1657,8 +1731,16 @@ function regenPendingContracts() {
   // 현재 one-shot을 정리하기 전에 실행 전체를 덮는 watchdog부터 만든다.
   // claim 사이/트리거 정리 직후 hard-timeout도 편집 큐를 고아로 만들 수 없다.
   if (!armContractRegenRunWatchdog_(props)) {
-    ScriptApp.newTrigger('regenPendingContracts').timeBased().after(3000).create();
-    props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
+    // 여기가 원래 누수의 진원지다. 이 실행 자체가 발화한 one-shot 트리거인데(목록에 남는다)
+    // 잠금 실패마다 새 트리거를 "추가"만 해서 개수가 1씩 늘었다. 쿼터 20개를 채우자
+    // 프로젝트의 모든 one-shot 스케줄러가 동시에 죽었다. 항상 1개로 교체한다.
+    try {
+      replaceOneShotTrigger_('regenPendingContracts', 3000);
+      props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
+    } catch (triggerErr) {
+      props.deleteProperty(CONTRACT_REGEN_TRIGGER_PROP_);
+      Logger.log('계약서 재생성 재예약 실패(큐 보존): ' + triggerErr);
+    }
     return;
   }
   // 자기 자신(트리거) 먼저 삭제 — 재예약은 마지막에 결정. 트리거 정리는 잠금이 필요 없다.
@@ -1789,8 +1871,15 @@ function regenPendingContracts() {
     var scheduledAt = Number(props.getProperty(CONTRACT_REGEN_TRIGGER_PROP_) || 0);
     if (!scheduledAt || Date.now() - scheduledAt >= CONTRACT_REGEN_TRIGGER_STALE_MS_) {
       var nextDelayMs = isFinite(nextRunAt) ? Math.max(1000, nextRunAt - Date.now()) : 3000;
-      ScriptApp.newTrigger('regenPendingContracts').timeBased().after(nextDelayMs).create();
-      props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
+      // 재예약 실패가 이번 실행의 성공(이미 커밋된 재생성)을 되돌리면 안 된다.
+      // 큐는 그대로 남고 매분 도는 rescueDashboardAsyncWorkerTriggers_가 다시 깨운다.
+      try {
+        replaceOneShotTrigger_('regenPendingContracts', nextDelayMs);
+        props.setProperty(CONTRACT_REGEN_TRIGGER_PROP_, String(Date.now()));
+      } catch (triggerErr) {
+        props.deleteProperty(CONTRACT_REGEN_TRIGGER_PROP_);
+        Logger.log('계약서 재생성 후속 예약 실패(큐 보존): ' + triggerErr);
+      }
     }
   } else {
     clearContractRegenWatchdogIfIdle_(props);
@@ -1814,13 +1903,13 @@ function scheduleTemplateMasterSync_() {
   var scheduledAt = Number(props.getProperty(TEMPLATE_SYNC_TRIGGER_PROP_) || 0);
   var hasRecent = scheduledAt && (now - scheduledAt < TEMPLATE_SYNC_TRIGGER_STALE_MS_);
   if (!hasRecent) {
-    var exists = ScriptApp.getProjectTriggers().some(function (t) {
-      return t.getHandlerFunction() === 'syncTemplateMasterDebounced';
-    });
-    if (!exists) {
-      ScriptApp.newTrigger('syncTemplateMasterDebounced').timeBased().after(8000).create();
+    try {
+      replaceOneShotTrigger_('syncTemplateMasterDebounced', 8000);
+      props.setProperty(TEMPLATE_SYNC_TRIGGER_PROP_, String(now));
+    } catch (triggerErr) {
+      props.deleteProperty(TEMPLATE_SYNC_TRIGGER_PROP_);
+      Logger.log('템플릿 동기화 트리거 예약 실패(큐 보존): ' + triggerErr);
     }
-    props.setProperty(TEMPLATE_SYNC_TRIGGER_PROP_, String(now));
   }
 }
 
@@ -1848,8 +1937,13 @@ function syncTemplateMasterDebounced() {
       }
     } else {
       // 아직 편집 중 → 다시 예약
-      ScriptApp.newTrigger('syncTemplateMasterDebounced').timeBased().after(8000).create();
-      props.setProperty(TEMPLATE_SYNC_TRIGGER_PROP_, String(Date.now()));
+      try {
+        replaceOneShotTrigger_('syncTemplateMasterDebounced', 8000);
+        props.setProperty(TEMPLATE_SYNC_TRIGGER_PROP_, String(Date.now()));
+      } catch (triggerErr) {
+        props.deleteProperty(TEMPLATE_SYNC_TRIGGER_PROP_);
+        Logger.log('템플릿 동기화 재예약 실패(큐 보존): ' + triggerErr);
+      }
     }
   } finally {
     lock.releaseLock();
@@ -1894,18 +1988,8 @@ function scheduleCancelledTradeCleanupTriggerUnderLock_(props, delayMs) {
   var currentAt = Number(props.getProperty(CANCEL_CLEANUP_TRIGGER_PROP_) || 0);
   if (currentAt > Date.now() && currentAt <= desiredAt + 1000) return;
   try {
-    var existing = ScriptApp.getProjectTriggers().filter(function(t) {
-      return t.getHandlerFunction() === CANCEL_CLEANUP_HANDLER_;
-    });
-    var replacement = ScriptApp.newTrigger(CANCEL_CLEANUP_HANDLER_).timeBased().after(safeDelay).create();
+    replaceOneShotTrigger_(CANCEL_CLEANUP_HANDLER_, safeDelay);
     props.setProperty(CANCEL_CLEANUP_TRIGGER_PROP_, String(desiredAt));
-    var replacementId = '';
-    try { replacementId = String(replacement.getUniqueId() || ''); } catch (replacementIdErr) {}
-    existing.forEach(function(t) {
-      var id = '';
-      try { id = String(t.getUniqueId() || ''); } catch (idErr) {}
-      if (!replacementId || id !== replacementId) try { ScriptApp.deleteTrigger(t); } catch (deleteErr) {}
-    });
   } catch (triggerErr) {
     props.deleteProperty(CANCEL_CLEANUP_TRIGGER_PROP_);
     Logger.log('취소 외부 정리 트리거 예약 실패(큐 보존): ' +

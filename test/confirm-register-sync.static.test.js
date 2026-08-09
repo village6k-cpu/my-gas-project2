@@ -567,15 +567,19 @@ console.log('alimtalk-reliability checks OK');
   const sched = code.slice(code.indexOf('function scheduleContractRegen'), code.indexOf('function regenPendingContracts()'));
   assert(
     !/var exists = ScriptApp\.getProjectTriggers\(\)\.some/.test(sched) &&
-      /deleteTrigger\(t\)/.test(sched) && /newTrigger\('regenPendingContracts'\)/.test(sched),
-    'scheduleContractRegen must delete possibly-consumed one-shot triggers and always create a fresh one when stale (fired one-shots stay listed → "exists" check orphans the queue)'
+      /replaceOneShotTrigger_\('regenPendingContracts'/.test(sched),
+    'scheduleContractRegen must replace via the bounded one-shot primitive: fired one-shots stay listed, so an "exists" check orphans the queue (15일 고아화 사고) while create-without-prune leaks triggers to the 20개 쿼터 (계약서 갱신중 무한 사고)'
   );
   const regen = code.slice(code.indexOf('function regenPendingContracts()'), code.indexOf('var TEMPLATE_SYNC_EDIT_TS_PROP_'));
   assert(
     /function claimPendingContractRegen_[\s\S]*waitLock\(10000\)[\s\S]*busy: true/.test(code) &&
       /if \(claim\.busy\) \{[\s\S]{0,220}stillPending = true;[\s\S]{0,220}break;/.test(regen) &&
-      /if \(stillPending\) \{[\s\S]*newTrigger\('regenPendingContracts'\)/.test(regen),
+      /if \(stillPending\) \{[\s\S]*replaceOneShotTrigger_\('regenPendingContracts'/.test(regen),
     'lock-timeout path must reschedule a retry trigger — silent return orphans the queue (observed: 10s lock wait → bail)'
+  );
+  assert(
+    !/ScriptApp\.newTrigger\('regenPendingContracts'\)/.test(regen),
+    'regenPendingContracts must never create its own trigger inline: this run IS a fired one-shot that stays listed, so create-without-prune added +1 per lock timeout until the 20개 쿼터 froze every queue'
   );
   assert(
     /BUDGET_MS/.test(regen) &&

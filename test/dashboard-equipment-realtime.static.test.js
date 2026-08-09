@@ -147,9 +147,8 @@ assert.match(
   'contract regen scheduling must reuse a recent scheduled trigger'
 );
 assert.ok(
-  ensureRegenBody.indexOf("ScriptApp.newTrigger('regenPendingContracts')") <
-    ensureRegenBody.indexOf('ScriptApp.deleteTrigger(t)'),
-  'contract regen scheduling must create its replacement before deleting stale one-shot triggers'
+  ensureRegenBody.includes("replaceOneShotTrigger_('regenPendingContracts'"),
+  'contract regen scheduling must go through the bounded one-shot primitive — inline create/delete either orphans the queue (delete-first) or leaks triggers until the 20-trigger quota kills every queue (create-only)'
 );
 assert.match(
   code,

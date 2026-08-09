@@ -145,9 +145,12 @@ test('느린 구조 투영 lease는 카드 입력을 막지 않고 큐 merge만 
 test('구조 투영 watchdog은 새 트리거 성공 후에만 예전 트리거를 지운다', () => {
   const gas = read('checkAvailability.js');
   const ensure = section(gas, 'function ensureDashboardStructureProjectionTrigger_', '\n/** 거래별 큐의 외부 HTTP');
-  const createAt = ensure.indexOf("ScriptApp.newTrigger('flushDashboardStructureProjectionQueue_')");
-  const deleteAt = ensure.indexOf('ScriptApp.deleteTrigger(trigger)');
-  assert.ok(createAt >= 0 && deleteAt > createAt, 'create 실패가 기존 watchdog을 없애면 안 된다');
+  // 순서 보장은 공용 프리미티브가 한다: 1개 남긴 채 create → 성공 뒤 잔여 삭제.
+  // 인라인으로 "create 먼저"만 지키면 개수가 단조증가해 20개 쿼터를 먹는다.
+  assert.ok(
+    ensure.includes("replaceOneShotTrigger_('flushDashboardStructureProjectionQueue_'"),
+    'create 실패가 기존 watchdog을 없애면 안 되고, 중복이 쌓여 쿼터를 먹어도 안 된다',
+  );
   assert.match(ensure, /if \(!existingTriggers\.length\) props\.deleteProperty/);
 });
 

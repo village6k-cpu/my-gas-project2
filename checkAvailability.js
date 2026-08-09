@@ -2847,19 +2847,10 @@ function ensureDashboardStructureProjectionTrigger_(delayMs) {
   } catch (triggerListErr) {}
   if (existingTriggers.length && scheduledAt > now && scheduledAt <= targetAt + 1000) return;
   try {
-    // 새 watchdog을 먼저 성공시킨 뒤 예전 트리거를 정리한다. create 실패 시
-    // 이미 예약된 트리거까지 지워 큐를 고아로 만드는 창을 없앰다.
-    var newTrigger = ScriptApp.newTrigger('flushDashboardStructureProjectionQueue_').timeBased().after(delay).create();
+    // 항상 1개로 수렴시킨다(Code.js replaceOneShotTrigger_). 중복이 쌓이면 프로젝트
+    // 트리거 20개 상한을 먹어 모든 one-shot 큐가 동시에 죽는다.
+    replaceOneShotTrigger_('flushDashboardStructureProjectionQueue_', delay);
     props.setProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_, String(targetAt));
-    var newTriggerId = '';
-    try { newTriggerId = String(newTrigger.getUniqueId() || ''); } catch (newTriggerIdErr) {}
-    existingTriggers.forEach(function(trigger) {
-      var triggerId = '';
-      try { triggerId = String(trigger.getUniqueId() || ''); } catch (triggerIdErr) {}
-      if (!newTriggerId || triggerId !== newTriggerId) {
-        try { ScriptApp.deleteTrigger(trigger); } catch (oldTriggerDeleteErr) {}
-      }
-    });
   } catch (triggerErr) {
     if (!existingTriggers.length) props.deleteProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_);
     Logger.log('장비 상태 투영 트리거 예약 실패: ' + triggerErr.message);

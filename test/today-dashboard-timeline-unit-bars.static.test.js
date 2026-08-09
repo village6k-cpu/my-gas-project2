@@ -17,11 +17,19 @@ assert(
 );
 
 assert(
-  /const unitCount = Math\.max\(1, Math\.floor\(Number\.isFinite\(rawQty\) \? rawQty : 1\)\)/.test(timelineDomain) &&
+  /Math\.max\(1, Math\.floor\(Number\.isFinite\(rawQty\) \? rawQty : 1\)\)/.test(timelineDomain) &&
     /for \(let unitIndex = 1; unitIndex <= unitCount; unitIndex \+= 1\)/.test(timelineDomain) &&
     /id: `\$\{t\.tradeId\}__\$\{e\.scheduleId\}__u\$\{unitIndex\}`/.test(timelineDomain) &&
-    /qty: 1/.test(timelineDomain),
+    /qty: excluded \? 0 : 1/.test(timelineDomain),
   'buildItems must expand a qty-2 schedule row into two separate visual bars with unique ids'
+);
+
+// 실반출 0/제외 품목은 막대 1개만, 점유는 0으로. 화면에서 지우면 시트에 있는 품목이
+// 흔적 없이 사라져 잘못된 Slack 정정을 눈으로 잡을 수 없다(260803-003 정세미 사고).
+assert(
+  /const unitCount = excluded \? 1 : Math\.max\(1,/.test(timelineDomain) &&
+    /if \(it\.excluded\) continue;/.test(timelineDomain),
+  'excluded items must stay visible as one zero-occupancy bar and skip stock conflict math'
 );
 
 assert(
