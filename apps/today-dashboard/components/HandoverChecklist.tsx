@@ -12,6 +12,7 @@ import {
   clearToast,
   queueItemQty,
   removeItem,
+  removeItems,
   setItemCheckout,
   setItemName,
   setItemMemo,
@@ -38,11 +39,35 @@ function SetSingleList({ children }: { children: ReactNode }) {
 export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [adding, setAdding] = useState(false);
+  // 여러 품목 한 번에 제외 — 한 배치로 묶여 GAS 왕복 1회로 끝난다.
+  const [selecting, setSelecting] = useState(false);
+  const [picked, setPicked] = useState<string[]>([]);
   const summary = handoverSummary(trade, phase);
   const toggle = (id: string) => setExpanded((m) => ({ ...m, [id]: !m[id] }));
 
   const booked = trade.equipments.filter((e) => !e.onsite);
   const onsite = trade.equipments.filter((e) => e.onsite);
+  const baselineLocked = isCheckoutBaselineLocked(trade);
+  const pickedSet = new Set(picked);
+  const togglePick = (id: string) =>
+    setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const exitSelect = () => { setSelecting(false); setPicked([]); };
+  const applyBulkExclude = () => {
+    const ids = picked.filter((id) => trade.equipments.some((e) => e.scheduleId === id));
+    if (!ids.length) { exitSelect(); return; }
+    if (!confirm(`선택한 ${ids.length}개 품목을 제외할까요?`)) return;
+    for (const id of ids) {
+      const item = trade.equipments.find((e) => e.scheduleId === id);
+      if (!item) continue;
+      // 현장추가는 행 자체를 지우고, 예약분은 '제외' 상태로 바꾼다. 둘 다 같은 배치에 합류한다.
+      if (item.onsite) removeItem(trade.tradeId, id);
+      else setItemCheckout(trade.tradeId, id, "excluded");
+    }
+    exitSelect();
+  };
+
+  const selectableCount = trade.equipments.filter((e) => e.checkoutState !== "excluded").length;
 
   return (
     <div className="mt-1.5">
@@ -51,6 +76,33 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
           {summary.map((s, i) => (
             <span key={i} className="rounded-md bg-line/40 px-2 py-0.5 text-[11.5px] font-semibold text-ink-soft">{s}</span>
           ))}
+        </div>
+      )}
+
+      {phase === "checkout" && !baselineLocked && selectableCount > 1 && (
+        <div className="mb-1.5 flex items-center gap-1.5">
+          {selecting ? (
+            <>
+              <button
+                onClick={applyBulkExclude}
+                disabled={!picked.length}
+                className="tap rounded-lg bg-attention-fg px-2.5 py-1.5 text-[12px] font-extrabold text-white disabled:opacity-40"
+              >
+                선택 {picked.length}개 제외
+              </button>
+              <button onClick={exitSelect} className="tap rounded-lg px-2.5 py-1.5 text-[12px] font-bold text-ink-mute ring-1 ring-line">
+                취소
+              </button>
+              <span className="text-[11.5px] text-ink-faint">품목을 눌러 선택하세요</span>
+            </>
+          ) : (
+            <button
+              onClick={() => setSelecting(true)}
+              className="tap rounded-lg px-2.5 py-1.5 text-[12px] font-bold text-ink-soft ring-1 ring-line"
+            >
+              여러 개 제외
+            </button>
+          )}
         </div>
       )}
 
@@ -65,25 +117,25 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
               return g.setName ? (
                 singleSetItem ? (
                   <SetSingleList key={g.key}>
-                    <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge setTone />
+                    <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} selecting={selecting} picked={pickedSet.has(singleSetItem.scheduleId)} onPick={() => togglePick(singleSetItem.scheduleId)} setBadge setTone />
                   </SetSingleList>
                 ) : (
                   <SetBox
                     key={g.key}
                     name={g.setName}
                     headerRow={realDeviceHeaders(g).map((header) => (
-                      <CheckoutRow key={header.scheduleId} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} setBadge setTone />
+                      <CheckoutRow key={header.scheduleId} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} selecting={selecting} picked={pickedSet.has(header.scheduleId)} onPick={() => togglePick(header.scheduleId)} setBadge setTone />
                     ))}
                   >
                     {g.rows.map((e) => (
-                      <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                      <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} selecting={selecting} picked={pickedSet.has(e.scheduleId)} onPick={() => togglePick(e.scheduleId)} />
                     ))}
                   </SetBox>
                 )
               ) : (
                 <LooseList key={g.key}>
                   {g.rows.map((e) => (
-                    <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                    <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} selecting={selecting} picked={pickedSet.has(e.scheduleId)} onPick={() => togglePick(e.scheduleId)} />
                   ))}
                 </LooseList>
               );
@@ -103,29 +155,32 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                   return g.setName ? (
                     singleSetItem ? (
                       <SetSingleList key={g.key}>
-                        <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} setBadge setTone />
+                        <CheckoutRow key={singleSetItem.scheduleId} t={trade} e={singleSetItem} open={!!expanded[singleSetItem.scheduleId]} onToggle={() => toggle(singleSetItem.scheduleId)} selecting={selecting} picked={pickedSet.has(singleSetItem.scheduleId)} onPick={() => togglePick(singleSetItem.scheduleId)} setBadge setTone />
                       </SetSingleList>
                     ) : (
                       <SetBox
                         key={g.key}
                         name={g.setName}
                         onRemove={() => {
-                          g.headers.forEach((header) => removeItem(trade.tradeId, header.scheduleId));
-                          g.rows.forEach((r) => removeItem(trade.tradeId, r.scheduleId));
+                          // 예전엔 removeItem을 N번 불러 첫 건만 반영되고 나머지가 버려졌다.
+                          removeItems(trade.tradeId, [
+                            ...g.headers.map((header) => header.scheduleId),
+                            ...g.rows.map((r) => r.scheduleId),
+                          ]);
                         }}
                         headerRow={realDeviceHeaders(g).map((header) => (
-                          <CheckoutRow key={header.scheduleId} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} setBadge setTone />
+                          <CheckoutRow key={header.scheduleId} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} selecting={selecting} picked={pickedSet.has(header.scheduleId)} onPick={() => togglePick(header.scheduleId)} setBadge setTone />
                         ))}
                       >
                         {g.rows.map((e) => (
-                          <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                          <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} selecting={selecting} picked={pickedSet.has(e.scheduleId)} onPick={() => togglePick(e.scheduleId)} />
                         ))}
                       </SetBox>
                     )
                   ) : (
                     <LooseList key={g.key}>
                       {g.rows.map((e) => (
-                        <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} />
+                        <CheckoutRow key={e.scheduleId} t={trade} e={e} open={!!expanded[e.scheduleId]} onToggle={() => toggle(e.scheduleId)} selecting={selecting} picked={pickedSet.has(e.scheduleId)} onPick={() => togglePick(e.scheduleId)} />
                       ))}
                     </LooseList>
                   );
@@ -156,7 +211,7 @@ function rowTint(e: EquipmentItem, excluded: boolean): string {
   return "";
 }
 
-function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; setBadge?: boolean; setTone?: boolean }) {
+function CheckoutRow({ t, e, open, onToggle, selecting = false, picked = false, onPick, setBadge = false, setTone = false }: { t: Trade; e: EquipmentItem; open: boolean; onToggle: () => void; selecting?: boolean; picked?: boolean; onPick?: () => void; setBadge?: boolean; setTone?: boolean }) {
   const taken = e.checkoutState === "taken";
   const excluded = e.checkoutState === "excluded";
   const actualName = equipmentActualName(e);
@@ -171,17 +226,31 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
     <li className={`px-3 ${setTone ? "bg-brand-50" : rowTint(e, excluded)}`}>
       <div className="flex items-center gap-2.5 py-2.5">
         {setBadge && <span className="shrink-0 rounded-md bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">세트</span>}
-        <button
-          onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "taken")}
-          disabled={baselineLocked}
-          className={`tap flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 ${
-            taken ? "border-brand-600 bg-brand-600 text-white" : excluded ? "border-attention-ring bg-white text-attention-fg" : "border-line bg-white text-transparent"
-          }`}
-        >
-          {excluded ? <span className="text-[13px] font-black">✕</span> : <Check className="h-3.5 w-3.5" />}
-        </button>
+        {selecting ? (
+          <input
+            type="checkbox"
+            checked={picked}
+            disabled={excluded}
+            onChange={() => onPick?.()}
+            aria-label={`${actualName} 제외 선택`}
+            className="h-[18px] w-[18px] shrink-0 accent-attention-fg disabled:opacity-40"
+          />
+        ) : (
+          <button
+            onClick={() => setItemCheckout(t.tradeId, e.scheduleId, "taken")}
+            disabled={baselineLocked}
+            className={`tap flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 ${
+              taken ? "border-brand-600 bg-brand-600 text-white" : excluded ? "border-attention-ring bg-white text-attention-fg" : "border-line bg-white text-transparent"
+            }`}
+          >
+            {excluded ? <span className="text-[13px] font-black">✕</span> : <Check className="h-3.5 w-3.5" />}
+          </button>
+        )}
 
-        <button onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+        <button
+          onClick={() => (selecting ? (!excluded && onPick?.()) : onToggle())}
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+        >
           <span className={`truncate text-[14px] ${excluded ? "text-ink-faint line-through" : setTone ? "font-extrabold text-brand-700" : taken ? "text-ink" : "text-ink-soft"}`}>{actualName}</span>
           {e.offCatalog && <span className="shrink-0 rounded bg-line/40 px-1 text-[10px] font-semibold text-ink-faint">자유입력</span>}
           {corrected && <span className="shrink-0 rounded bg-warn-bg px-1 text-[10px] font-bold text-warn-fg ring-1 ring-warn-ring">Slack 정정</span>}
@@ -191,7 +260,8 @@ function CheckoutRow({ t, e, open, onToggle, setBadge = false, setTone = false }
           {partial ? `${actualQty}/${e.qty}` : `×${e.qty}`}
         </span>
 
-        {e.onsite ? (
+        {/* 선택 모드에서는 개별 제외 버튼을 숨긴다 — 한 번에 처리할 목록을 고르는 중이다. */}
+        {selecting ? null : e.onsite ? (
           <button
             onClick={() => removeItem(t.tradeId, e.scheduleId)}
             disabled={baselineLocked}

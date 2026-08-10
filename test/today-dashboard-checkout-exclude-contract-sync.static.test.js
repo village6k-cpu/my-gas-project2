@@ -52,7 +52,14 @@ assert.match(
   /case "removeEquip":[\s\S]*dashboardRemoveEquipment\([\s\S]*directRegenerate:[\s\S]*params\.directRegenerate/,
   'sheetAPI removeEquip must forward the directRegenerate option'
 );
-const removeBody = backend.match(/function dashboardRemoveEquipment[\s\S]*?\n}\n\n\n\/\*\* "yyyy-MM-dd"/)?.[0] ?? '';
+const removeBody = backend.match(/function dashboardRemoveEquipment\([\s\S]*?\n}\n\n\n\/\*\*\n \* 여러 품목을 한 번의 왕복/)?.[0] ?? '';
+// 일괄 제외도 같은 반출 기준선 정책을 독립적으로 강제해야 한다(우회 경로가 되면 안 된다).
+const removeBatchBody = backend.match(/function dashboardRemoveEquipmentBatch[\s\S]*?\n}\n\n\/\*\* "yyyy-MM-dd"/)?.[0] ?? '';
+assert.match(
+  removeBatchBody,
+  /isDashboardTradeCheckoutStarted_\(ss, tid\)[\s\S]*이미 반출된 품목은 삭제할 수 없습니다/,
+  'batch removal must enforce the same post-checkout baseline policy'
+);
 assert.match(
   removeBody,
   /isDashboardTradeCheckoutStarted_\(ss,\s*tid\)[\s\S]*이미 반출된 품목은 삭제할 수 없습니다/,

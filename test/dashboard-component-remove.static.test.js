@@ -13,10 +13,13 @@ assert(
   'sheetAPI.js must pass scheduleId to removeEquip'
 );
 
+// 행 선택 규칙은 resolveDashboardRemovalRows_로 분리됐다(단일/배치 제외가 공유).
 [
   'function dashboardRemoveEquipment(tid, equipName, scheduleId, options)',
+  'function resolveDashboardRemovalRows_(data, tid, scheduleId, equipName)',
+  'rowsToDelete = resolveDashboardRemovalRows_(data, tid, scheduleId, equipName)',
   'if (isComponent) {',
-  'rowsToDelete.push(targetRow);',
+  'rows.push(targetRow);',
   'hasComponents && rowSetName === setKey'
 ].forEach((contract) => {
   assert(

@@ -378,7 +378,8 @@ test('장비 삭제는 응답 유실 뒤 같은 mutationId로 수렴하고 legac
   const gas = read('checkAvailability.js');
   const api = read('sheetAPI.js');
   const helpers = section(gas, 'function normalizeDashboardMutationId_', '\nfunction dashboardSetupCanonicalResult_');
-  const remove = section(gas, 'function dashboardRemoveEquipment', '\n/** "yyyy-MM-dd"');
+  // 행 선택 규칙(resolveDashboardRemovalRows_)이 함께 들어가야 VM에서 실행된다.
+  const remove = section(gas, 'function resolveDashboardRemovalRows_', '\n/** "yyyy-MM-dd"');
   const removeApi = section(api, 'case "removeEquip":', '\n      case "repairDuplicateScheduleRows":');
   assert.match(removeApi, /mutationId:\s*params\.mutationId \|\| postBody\.mutationId/,
     'removeEquip API must forward the client mutation identity');

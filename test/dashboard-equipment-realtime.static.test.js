@@ -187,8 +187,9 @@ assert.match(
   'sheetAPI must expose dashboardContractExtras for contract pending reconciliation'
 );
 
-const removeBackendBody = backend.match(/function dashboardRemoveEquipment\([\s\S]*?\n}\n\n\n\/\*\* "yyyy-MM-dd"/);
-assert.ok(removeBackendBody, 'dashboardRemoveEquipment must exist before parseDT');
+// 배치 제외(dashboardRemoveEquipmentBatch)가 단건과 parseDT 사이에 들어왔다.
+const removeBackendBody = backend.match(/function dashboardRemoveEquipment\([\s\S]*?\n}\n\n\n\/\*\*\n \* 여러 품목을 한 번의 왕복/);
+assert.ok(removeBackendBody, 'dashboardRemoveEquipment must exist before the batch variant');
 assert.match(
   removeBackendBody[0],
   /deleteDashboardRowsDescending_\(sched,\s*rowsToDelete\)/,

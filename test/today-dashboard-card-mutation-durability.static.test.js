@@ -19,7 +19,7 @@ const checkin = section("export async function toggleReturn", "\n// ── 품�
 const durableReplay = section("async function replayCompletionMutationEntry_", "\nlet durableMutationOutboxesReplayed");
 const resumeCounts = section("function resumeDurableReturnCountOutbox_", "\n/** 반납 수량은 바뀐");
 const countPersist = section("function enqueueReturnCountsPersist", "\nfunction scheduleReturnCountsRetry_");
-const remove = section("function removeEquipmentAndRegenerateContract", "\nfunction isSheetBackedScheduleId");
+const remove = section("function removeEquipmentAndRegenerateContract", "\n\/** 여러 품목을 한 번에");
 
 assert.match(store, /COMPLETION_MUTATION_OUTBOX_KEY\s*=\s*"heybilly:completion-mutation-outbox:v1"/);
 // 즉시 확정 UX: 클릭 경로는 outbox 기록 → 낙관 표시 → 백그라운드 확정 예약 순서다.
@@ -62,8 +62,10 @@ assert.match(countPersist, /ReturnCompletionConflictError[\s\S]*discardAllReturn
 assert.match(store, /REMOVE_EQUIPMENT_OUTBOX_KEY\s*=\s*"heybilly:remove-equipment-outbox:v1"/);
 assert.match(store, /function hasTradePending\(tradeId: string\)[\s\S]*pendingRemoveEquipmentTrades\.has\(tradeId\)/);
 assert.match(store, /function hasTradeSyncPending[\s\S]*hasTradePending\(tradeId\)/);
+// 제외는 배치로 나간다(armRemoveEquipmentBatch). 의도 저장이 먼저라는 계약은 그대로다.
 assert.ok(
-  remove.indexOf("putRemoveEquipmentOutbox_") < remove.indexOf("commitRemoveEquipmentMutation_"),
+  remove.indexOf("putRemoveEquipmentOutbox_") >= 0 &&
+    remove.indexOf("putRemoveEquipmentOutbox_") < remove.indexOf("armRemoveEquipmentBatch"),
   "장비 제외 의도와 mutationId는 원장 호출 전에 영구 저장해야 한다",
 );
 assert.match(store, /gasMutationRetrying\("removeEquip"[\s\S]*mutationId:\s*entry\.mutationId/);

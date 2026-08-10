@@ -147,6 +147,9 @@ type ContractMutationPayload = {
   contractRegenPending?: boolean;
   removedScheduleIds?: unknown;
   removedEquipments?: unknown;
+  /** removeEquips 배치의 품목별 결과 — 일부만 이미 빠진 경우를 구분한다. */
+  results?: unknown;
+  allAlreadyRemoved?: boolean;
 };
 
 function markLocalMutation(tradeId?: string) {
@@ -1891,6 +1894,116 @@ async function finalizeAlreadyMissingScheduleItem_(tradeId: string, scheduleId: 
   }), false);
 }
 
+// 제외는 GAS 왕복 1회(실측 2.5~3.5초)가 통째로 비용이라 품목마다 보내면 N배가 된다.
+// 짧게 모아 한 번에 보낸다 — 세트 제외처럼 즉시 N번 호출되는 경로가 1회 왕복이 된다.
+const REMOVE_EQUIPMENT_BATCH_DEBOUNCE_MS = 150;
+const removeEquipmentBatchTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
+const removeEquipmentBatchInFlight: Record<string, Promise<void> | undefined> = {};
+const removeEquipmentOriginals = new Map<string, EquipmentItem>();
+
+function armRemoveEquipmentBatch(tradeId: string, delay = REMOVE_EQUIPMENT_BATCH_DEBOUNCE_MS): void {
+  if (removeEquipmentBatchTimers[tradeId]) clearTimeout(removeEquipmentBatchTimers[tradeId]);
+  removeEquipmentBatchTimers[tradeId] = setTimeout(() => {
+    delete removeEquipmentBatchTimers[tradeId];
+    void commitRemoveEquipmentBatch_(tradeId);
+  }, delay);
+}
+
+function pendingRemoveEquipmentEntries_(tradeId: string): RemoveEquipmentOutboxEntry[] {
+  const outbox = readRemoveEquipmentOutbox_();
+  const merged = new Map<string, RemoveEquipmentOutboxEntry>();
+  for (const entry of Object.values(outbox)) {
+    if (entry.tradeId === tradeId) merged.set(removeEquipmentOutboxKey_(entry.tradeId, entry.scheduleId), entry);
+  }
+  for (const entry of removeEquipmentOutboxMemory.values()) {
+    if (entry.tradeId === tradeId) merged.set(removeEquipmentOutboxKey_(entry.tradeId, entry.scheduleId), entry);
+  }
+  return Array.from(merged.values()).filter(
+    (entry) => !removeEquipmentReplayInFlight.has(removeEquipmentOutboxKey_(entry.tradeId, entry.scheduleId)),
+  );
+}
+
+async function commitRemoveEquipmentBatch_(tradeId: string): Promise<void> {
+  const existing = removeEquipmentBatchInFlight[tradeId];
+  if (existing) return existing;
+
+  // 완료 전환처럼 순서가 뒤집히면 위험한 구간에는 양보한다. 단 절대 버리지 않고
+  // 다시 예약한다 — 예전엔 여기서 return 해버려 클릭이 통째로 사라졌다.
+  if (activeTradeTransitions.has(tradeId)) {
+    armRemoveEquipmentBatch(tradeId, 400);
+    return;
+  }
+
+  const entries = pendingRemoveEquipmentEntries_(tradeId);
+  if (!entries.length) return;
+
+  const task = (async () => {
+    const keys = entries.map((entry) => removeEquipmentOutboxKey_(entry.tradeId, entry.scheduleId));
+    keys.forEach((key) => removeEquipmentReplayInFlight.add(key));
+    const saveId = beginTradeSave(tradeId);
+    try {
+      const res = await gasMutationRetrying("removeEquips", {
+        tid: tradeId,
+        items: JSON.stringify(entries.map((entry) => ({
+          scheduleId: entry.scheduleId,
+          equipName: entry.equipName,
+        }))),
+        mutationId: entries.map((entry) => entry.mutationId).join("+").slice(0, 200),
+      });
+      const confirmed = unwrapContractMutation(res);
+      if (confirmed.success !== true) {
+        throw new GasMutationError("GAS 장비 일괄 제외 확정 응답이 없습니다", true, true);
+      }
+      const perItem = new Map<string, any>();
+      for (const row of Array.isArray(confirmed.results) ? confirmed.results : []) {
+        perItem.set(String(row?.scheduleId || "").trim(), row);
+      }
+      applyContractMutationResult(tradeId, res, entries.map((entry) => entry.scheduleId));
+      for (const entry of entries) {
+        const row = perItem.get(entry.scheduleId);
+        // results가 없는 옛 서버 응답도 success면 확정으로 본다(배포 경계 호환).
+        if (row && row.success === false) continue;
+        acknowledgeRemoveEquipmentOutbox_(entry);
+        recordExcludedItemTombstone_(entry.tradeId, entry.scheduleId, entry.equipName);
+        removeEquipmentOriginals.delete(removeEquipmentOutboxKey_(entry.tradeId, entry.scheduleId));
+      }
+      finishTradeSave(tradeId, saveId, "saved", entries.length > 1 ? `장비 ${entries.length}개 제외 저장됨` : "장비 제외 저장됨");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isRetryableLedgerError(error)) {
+        let maxAttempts = 0;
+        for (const entry of entries) {
+          const attempts = entry.attempts + 1;
+          maxAttempts = Math.max(maxAttempts, attempts);
+          putRemoveEquipmentOutbox_({ ...entry, attempts });
+        }
+        finishTradeSave(tradeId, saveId, "error", "⚠️ 장비 제외 저장 지연 — 자동 재확인 중");
+        keys.forEach((key) => removeEquipmentReplayInFlight.delete(key));
+        armRemoveEquipmentBatch(tradeId, Math.min(2_000 * 2 ** Math.min(maxAttempts, 4), 30_000));
+        return;
+      }
+      // 되돌릴 수 없는 실패 — 화면에서 지웠던 품목을 되살려 사실과 맞춘다.
+      for (const entry of entries) {
+        const key = removeEquipmentOutboxKey_(entry.tradeId, entry.scheduleId);
+        acknowledgeRemoveEquipmentOutbox_(entry);
+        const original = removeEquipmentOriginals.get(key);
+        removeEquipmentOriginals.delete(key);
+        if (original) restoreRemovedItem(entry.tradeId, original, "장비 제외 실패: " + message);
+      }
+      console.error("[write-back] removeEquips 실패:", error);
+      finishTradeSave(tradeId, saveId, "error", `⚠️ 장비 제외 실패 — ${message}`);
+      await reconcileRemovedEquipmentCanonical_(tradeId);
+    } finally {
+      keys.forEach((key) => removeEquipmentReplayInFlight.delete(key));
+      delete removeEquipmentBatchInFlight[tradeId];
+      // 배치가 도는 동안 새로 눌린 제외가 있으면 이어서 처리한다.
+      if (pendingRemoveEquipmentEntries_(tradeId).length) armRemoveEquipmentBatch(tradeId);
+    }
+  })();
+  removeEquipmentBatchInFlight[tradeId] = task;
+  return task;
+}
+
 async function commitRemoveEquipmentMutation_(
   entry: RemoveEquipmentOutboxEntry,
   saveId: number,
@@ -1976,13 +2089,13 @@ async function replayRemoveEquipmentMutation_(entry: RemoveEquipmentOutboxEntry)
     scheduleRemoveEquipmentReplay_(latest, 10_000);
     return;
   }
-  const saveId = beginTradeTransition(latest.tradeId);
   mutateTrade(latest.tradeId, (candidate) => ({
     ...candidate,
     equipments: candidate.equipments.filter((item) => item.scheduleId !== latest.scheduleId),
     contractRegenPending: true,
   }), false);
-  await commitRemoveEquipmentMutation_(latest, saveId);
+  // 재시도도 배치로 합류시킨다 — 같은 거래에 밀린 제외가 여러 건이면 왕복 1회로 끝난다.
+  armRemoveEquipmentBatch(latest.tradeId, 0);
 }
 
 function replayRemoveEquipmentOutbox_(initialDelay = 0): void {
@@ -1997,13 +2110,17 @@ function replayRemoveEquipmentOutbox_(initialDelay = 0): void {
   });
 }
 
+/**
+ * 제외 의도를 내구 저장하고 화면에서 즉시 뺀 뒤, 짧게 모아 한 번에 서버로 보낸다.
+ *
+ * 예전엔 진행 중인 제외가 있으면 다음 클릭을 토스트만 띄우고 버렸다. 세트 제외처럼
+ * removeItem을 N번 호출하는 경로에서는 첫 건만 반영되고 나머지가 조용히 사라졌고,
+ * 사장이 같은 버튼을 3초 간격으로 여러 번 눌러야 했다. 이제 절대 버리지 않는다.
+ */
 function removeEquipmentAndRegenerateContract(tradeId: string, item: EquipmentItem) {
-  if (activeTradeTransitions.has(tradeId) || pendingRemoveEquipmentTrades.has(tradeId)) {
-    showTransientError("⚠️ 이 거래의 다른 변경을 저장 중입니다. 잠시 후 다시 시도해주세요");
-    return;
-  }
-  const saveId = beginTradeTransition(tradeId);
   const scheduleId = item.scheduleId;
+  const key = removeEquipmentOutboxKey_(tradeId, scheduleId);
+  if (removeEquipmentOutboxMemory.has(key)) return; // 같은 품목 중복 클릭
   const entry: RemoveEquipmentOutboxEntry = {
     tradeId,
     scheduleId,
@@ -2012,6 +2129,8 @@ function removeEquipmentAndRegenerateContract(tradeId: string, item: EquipmentIt
     createdAt: Date.now(),
     attempts: 0,
   };
+  // 실패 시 되살릴 원본을 보관한다(배치 실패는 항목별로 복구해야 한다).
+  removeEquipmentOriginals.set(key, item);
   putRemoveEquipmentOutbox_(entry);
   mutateTrade(tradeId, (t) => ({
     ...t,
@@ -2023,7 +2142,19 @@ function removeEquipmentAndRegenerateContract(tradeId: string, item: EquipmentIt
   // 계약서 재생성은 백그라운드 워커(디바운스)에 맡긴다 — 인라인 재생성은 GAS 잠금을
   // 수 초~수십 초 쥐어 다른 체크/버튼을 실패시키고 제외 응답 자체도 느리게 했다.
   // 새 링크는 contractRegenPending 배지 → 폴링 merge로 곧 반영된다.
-  void commitRemoveEquipmentMutation_(entry, saveId, item);
+  armRemoveEquipmentBatch(tradeId);
+}
+
+/** 여러 품목을 한 번에 제외한다(다중선택). 내부적으로 한 배치 = GAS 왕복 1회. */
+export function removeItems(tradeId: string, scheduleIds: string[]): void {
+  const unique = Array.from(new Set(scheduleIds.map((id) => String(id || "").trim()).filter(Boolean)));
+  if (!unique.length) return;
+  const trade = state.trades.find((t) => t.tradeId === tradeId);
+  if (trade && isCheckoutBaselineLocked(trade)) {
+    showTransientError("⚠️ 이미 반출된 품목은 삭제할 수 없습니다. 반납 처리 후 기록을 보존해주세요");
+    return;
+  }
+  for (const scheduleId of unique) removeItem(tradeId, scheduleId);
 }
 
 function isSheetBackedScheduleId(tradeId: string, scheduleId: string): boolean {
