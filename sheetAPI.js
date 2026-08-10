@@ -100,6 +100,7 @@ function getVillageOperationCapabilities_() {
       { id: "equipment.add_batch", action: "addEquips", policy: "internal_write", verification: "authoritative_server_ack" },
       { id: "equipment.record_onsite_addon", action: "recordOnsiteAddon", policy: "internal_write", verification: "authoritative_server_ack" },
       { id: "equipment.remove", action: "removeEquip", policy: "internal_write", verification: "authoritative_server_ack" },
+      { id: "equipment.remove_batch", action: "removeEquips", policy: "internal_write", verification: "authoritative_server_ack" },
       { id: "equipment.update_quantity", action: "updateEquipQty", policy: "internal_write", verification: "authoritative_server_ack" },
       { id: "equipment.update_name", action: "updateEquipName", policy: "internal_write", verification: "authoritative_server_ack" },
       { id: "contract.update_status", action: "updateContractStatus", policy: "internal_write", verification: "authoritative_server_ack" },
@@ -827,6 +828,16 @@ function handleRequestCore_(e) {
             directRegenerate:
               params.directRegenerate || postBody.directRegenerate ||
               params.regenerateNow || postBody.regenerateNow
+          }
+        ));
+
+      case "removeEquips":
+      case "removeEquipBatch":
+        return jsonResponse(dashboardRemoveEquipmentBatch(
+          params.tid || postBody.tid || params.tradeId || postBody.tradeId,
+          params.items || postBody.items || params.entries || postBody.entries,
+          {
+            mutationId: params.mutationId || postBody.mutationId || params.mutation_id || postBody.mutation_id || ''
           }
         ));
 

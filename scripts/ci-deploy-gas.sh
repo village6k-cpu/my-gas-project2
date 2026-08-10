@@ -61,7 +61,14 @@ echo "▶ GAS 백업: gas-backup/gas-remote-before-push-$TS.tar.gz"
 
 # 3. push + deploy (기존 웹앱 URL 유지)
 echo "▶ clasp push..."
-clasp push -f
-echo "▶ clasp deploy..."
-clasp deploy -i "$DEPLOY_ID" -d "$DESC"
+PUSH_OUT="$(clasp push -f 2>&1)"
+echo "$PUSH_OUT"
+# Apps Script는 버전 200개만 보존하고 API로 삭제할 수 없다. 변경이 없는데도 배포하면
+# 버전만 태우다 한도에 걸려 모든 배포가 막힌다(2026-08 실제 발생, CI가 200개 중 73개 차지).
+if grep -qi "already up to date" <<<"$PUSH_OUT"; then
+  echo "▶ clasp deploy 생략 — GAS 코드 변경 없음 (버전 한도 200 보호)"
+else
+  echo "▶ clasp deploy..."
+  clasp deploy -i "$DEPLOY_ID" -d "$DESC"
+fi
 echo "✅ GAS 배포 완료: $DESC"

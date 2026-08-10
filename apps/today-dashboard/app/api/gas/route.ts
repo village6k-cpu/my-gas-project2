@@ -263,6 +263,7 @@ const WRITE_ACTIONS = new Set([
   "updateEquipQty",
   "updateEquipName",
   "removeEquip",
+  "removeEquips",
   "onsiteAddon",
   "uploadDashboardPhoto",
   "deleteDashboardPhoto",

@@ -67,14 +67,17 @@ assert.match(
   'external cleanup queue needs bounded exponential retry',
 );
 const cancelTriggerBody = code.slice(
-  code.indexOf('function scheduleCancelledTradeCleanupTriggerUnderLock_'),
-  code.indexOf('\nfunction ensureCancelledTradeCleanupTrigger_', code.indexOf('function scheduleCancelledTradeCleanupTriggerUnderLock_')),
+  code.indexOf('function scheduleCancelledTradeCleanupTriggerOutsideLock_'),
+  code.indexOf('\nfunction ensureCancelledTradeCleanupTrigger_', code.indexOf('function scheduleCancelledTradeCleanupTriggerOutsideLock_')),
 );
 assert.match(cancelTriggerBody, /currentAt > Date\.now\(\) && currentAt <= desiredAt \+ 1000/);
+// 트리거 교체는 공용 프리미티브(replaceOneShotTrigger_)가 담당한다. 그 안에서
+// "1개 남긴 채 create → 성공 뒤 잔여 삭제" 순서를 지키므로 실행 경로가 0개가 되지 않고,
+// 동시에 개수가 1로 수렴해 20개 쿼터를 먹지 않는다.
+// 순서 불변식 자체는 test/one-shot-trigger-quota.behavior.test.js가 행위로 검증한다.
 assert.ok(
-  cancelTriggerBody.indexOf('ScriptApp.newTrigger(CANCEL_CLEANUP_HANDLER_)') <
-    cancelTriggerBody.indexOf('existing.forEach(function(t)'),
-  'cancel cleanup must create a replacement before removing older triggers',
+  cancelTriggerBody.includes("replaceOneShotTrigger_(CANCEL_CLEANUP_HANDLER_"),
+  'cancel cleanup must schedule through the bounded one-shot trigger primitive',
 );
 assert.match(
   code,

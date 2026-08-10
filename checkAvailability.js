@@ -2847,19 +2847,10 @@ function ensureDashboardStructureProjectionTrigger_(delayMs) {
   } catch (triggerListErr) {}
   if (existingTriggers.length && scheduledAt > now && scheduledAt <= targetAt + 1000) return;
   try {
-    // 새 watchdog을 먼저 성공시킨 뒤 예전 트리거를 정리한다. create 실패 시
-    // 이미 예약된 트리거까지 지워 큐를 고아로 만드는 창을 없앰다.
-    var newTrigger = ScriptApp.newTrigger('flushDashboardStructureProjectionQueue_').timeBased().after(delay).create();
+    // 항상 1개로 수렴시킨다(Code.js replaceOneShotTrigger_). 중복이 쌓이면 프로젝트
+    // 트리거 20개 상한을 먹어 모든 one-shot 큐가 동시에 죽는다.
+    replaceOneShotTrigger_('flushDashboardStructureProjectionQueue_', delay);
     props.setProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_, String(targetAt));
-    var newTriggerId = '';
-    try { newTriggerId = String(newTrigger.getUniqueId() || ''); } catch (newTriggerIdErr) {}
-    existingTriggers.forEach(function(trigger) {
-      var triggerId = '';
-      try { triggerId = String(trigger.getUniqueId() || ''); } catch (triggerIdErr) {}
-      if (!newTriggerId || triggerId !== newTriggerId) {
-        try { ScriptApp.deleteTrigger(trigger); } catch (oldTriggerDeleteErr) {}
-      }
-    });
   } catch (triggerErr) {
     if (!existingTriggers.length) props.deleteProperty(DASHBOARD_STRUCTURE_TRIGGER_PROP_);
     Logger.log('장비 상태 투영 트리거 예약 실패: ' + triggerErr.message);
@@ -10057,6 +10048,64 @@ function dashboardAddEquipment(tid, equipName, qty) {
  * - 세트 구성품이면 해당 구성품 행만 삭제한다.
  * - scheduleId가 없으면 기존 호환 경로로 장비명/세트명 일치 행을 삭제한다.
  */
+/**
+ * 스케줄상세 스냅샷에서 삭제 대상 행 번호를 고른다. 시트를 건드리지 않는 순수 함수라
+ * 단일 제외와 배치 제외가 같은 규칙을 공유한다(둘이 갈라지면 세트 구성품 처리가 어긋난다).
+ * 세트 헤더를 지목하면 그 세트의 구성품 행까지 함께 고른다.
+ */
+function resolveDashboardRemovalRows_(data, tid, scheduleId, equipName) {
+  var rows = [];
+  tid = String(tid || '').trim();
+  scheduleId = String(scheduleId || '').trim();
+  equipName = String(equipName || '').trim();
+
+  if (scheduleId) {
+    var targetIdx = -1;
+    for (var t = 0; t < data.length; t++) {
+      if (String(data[t][0] || "").trim() === scheduleId && String(data[t][1] || "").trim() === tid) {
+        targetIdx = t;
+        break;
+      }
+    }
+    if (targetIdx < 0) return rows;
+    var targetRow = targetIdx + 2;
+    var targetSetName = String(data[targetIdx][2] || "").trim();
+    var targetEquipName = String(data[targetIdx][3] || "").trim();
+    var isComponent = !!targetSetName && targetSetName !== targetEquipName;
+
+    if (isComponent) {
+      rows.push(targetRow);
+      return rows;
+    }
+    var setKey = targetSetName || targetEquipName;
+    var hasComponents = false;
+    for (var cidx = 0; cidx < data.length; cidx++) {
+      if (String(data[cidx][1] || "").trim() !== tid) continue;
+      var cSet = String(data[cidx][2] || "").trim();
+      var cEquip = String(data[cidx][3] || "").trim();
+      if (cSet === setKey && cEquip && cEquip !== setKey) {
+        hasComponents = true;
+        break;
+      }
+    }
+    for (var i = data.length - 1; i >= 0; i--) {
+      if (String(data[i][1] || "").trim() !== tid) continue;
+      var rowNum = i + 2;
+      var rowSetName = String(data[i][2] || "").trim();
+      if (rowNum === targetRow || (hasComponents && rowSetName === setKey)) rows.push(rowNum);
+    }
+    return rows;
+  }
+
+  for (var j = data.length - 1; j >= 0; j--) {
+    if (String(data[j][1]).trim() !== tid) continue;
+    var c = String(data[j][2] || "").trim();
+    var d = String(data[j][3] || "").trim();
+    if (c === equipName || d === equipName) rows.push(j + 2);
+  }
+  return rows;
+}
+
 function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
   if (!tid || (!equipName && !scheduleId)) return { error: "tid와 장비명 또는 스케줄ID 필수" };
   tid = String(tid).trim();
@@ -10094,55 +10143,7 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
     var data = lastRow >= 2 ? sched.getRange(2, 1, lastRow - 1, 4).getValues() : [];
     var rowsToDelete = [];
 
-    if (scheduleId) {
-      var targetIdx = -1;
-      for (var t = 0; t < data.length; t++) {
-        if (String(data[t][0] || "").trim() === scheduleId && String(data[t][1] || "").trim() === tid) {
-          targetIdx = t;
-          break;
-        }
-      }
-      if (targetIdx >= 0) {
-        var targetRow = targetIdx + 2;
-        var targetSetName = String(data[targetIdx][2] || "").trim();
-        var targetEquipName = String(data[targetIdx][3] || "").trim();
-        var isComponent = !!targetSetName && targetSetName !== targetEquipName;
-
-        if (isComponent) {
-          rowsToDelete.push(targetRow);
-        } else {
-          var setKey = targetSetName || targetEquipName;
-          var hasComponents = false;
-          for (var cidx = 0; cidx < data.length; cidx++) {
-            if (String(data[cidx][1] || "").trim() !== tid) continue;
-            var cSet = String(data[cidx][2] || "").trim();
-            var cEquip = String(data[cidx][3] || "").trim();
-            if (cSet === setKey && cEquip && cEquip !== setKey) {
-              hasComponents = true;
-              break;
-            }
-          }
-
-          for (var i = data.length - 1; i >= 0; i--) {
-            if (String(data[i][1] || "").trim() !== tid) continue;
-            var rowNum = i + 2;
-            var rowSetName = String(data[i][2] || "").trim();
-            if (rowNum === targetRow || (hasComponents && rowSetName === setKey)) {
-              rowsToDelete.push(rowNum);
-            }
-          }
-        }
-      }
-    } else {
-      for (var i = data.length - 1; i >= 0; i--) {
-        if (String(data[i][1]).trim() !== tid) continue;
-        var c = String(data[i][2] || "").trim();
-        var d = String(data[i][3] || "").trim();
-        if (c === equipName || d === equipName) {
-          rowsToDelete.push(i + 2);
-        }
-      }
-    }
+    rowsToDelete = resolveDashboardRemovalRows_(data, tid, scheduleId, equipName);
 
     // 시트 삭제가 끝난 직후 GAS 응답만 유실되면 재시도 시 대상 행은 이미 없다.
     // mutation log에 먼저 남긴 삭제 대상 snapshot이 있는 동일 요청만 성공으로 복구한다.
@@ -10303,6 +10304,172 @@ function dashboardRemoveEquipment(tid, equipName, scheduleId, options) {
   }
 }
 
+
+/**
+ * 여러 품목을 한 번의 왕복·한 번의 잠금으로 제외한다.
+ *
+ * 단건 removeEquip은 GAS 웹앱 왕복(실측 2.5~3.5초)이 그대로 비용이라, 5개를 빼려면
+ * 15초 넘게 걸리고 그 동안 앱이 같은 거래의 다른 변경을 전부 막았다. 행 선택 규칙은
+ * resolveDashboardRemovalRows_로 단건과 공유하고, 시트 삭제·구조 투영·계약서 재생성
+ * 예약은 배치 전체에 대해 딱 한 번씩만 수행한다.
+ */
+function dashboardRemoveEquipmentBatch(tid, entries, options) {
+  tid = String(tid || '').trim();
+  if (!tid) return { error: 'tid 필수' };
+  if (typeof entries === 'string') {
+    try { entries = JSON.parse(entries); } catch (parseErr) { return { error: 'items JSON 파싱 실패' }; }
+  }
+  if (!Array.isArray(entries) || !entries.length) return { error: 'items 필수' };
+  if (entries.length > 100) return { error: '한 번에 최대 100개 품목만 제외할 수 있습니다.' };
+  options = options || {};
+
+  // 같은 묶음에 같은 품목이 두 번 들어와도 한 번만 처리한다.
+  var bySchedule = {};
+  var order = [];
+  for (var i = 0; i < entries.length; i++) {
+    var raw = entries[i] || {};
+    var sid = String(raw.scheduleId || raw.schedule_id || '').trim();
+    var ename = String(raw.equipName || raw.equip_name || '').trim();
+    if (!sid && !ename) return { error: 'scheduleId 또는 장비명 필수' };
+    if (sid) {
+      var prefix = sid.match(/^(\d{6}-\d{3})-/);
+      if (!prefix || prefix[1] !== tid) return { error: '다른 거래의 품목이 섞였습니다: ' + sid };
+    }
+    var key = sid ? 'schedule:' + sid : 'name:' + ename;
+    if (!Object.prototype.hasOwnProperty.call(bySchedule, key)) order.push(key);
+    bySchedule[key] = { requestKey: key, scheduleId: sid, equipName: ename };
+  }
+  var items = order.map(function(k) { return bySchedule[k]; });
+
+  var mutationId = normalizeDashboardMutationId_(options.mutationId);
+  var batchScope = 'equipmentRemoveBatch:' + order.join(',');
+
+  var lock = LockService.getScriptLock();
+  var structureProjectionQueued = false;
+  var contractRegenQueued = false;
+  try {
+    if (!lock.tryLock(1000)) return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
+  } catch (lockErr) {
+    return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
+  }
+
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sched = ss.getSheetByName('스케줄상세');
+    if (!sched) return { error: '스케줄상세 비어있음' };
+    var lastRow = sched.getLastRow();
+    var data = lastRow >= 2 ? sched.getRange(2, 1, lastRow - 1, 4).getValues() : [];
+
+    // 스냅샷 하나에서 전 품목의 대상 행을 먼저 고른다. 중간에 지우면 행 번호가 밀린다.
+    var rowSet = {};
+    var perItem = [];
+    for (var k = 0; k < items.length; k++) {
+      var rows = resolveDashboardRemovalRows_(data, tid, items[k].scheduleId, items[k].equipName);
+      for (var r = 0; r < rows.length; r++) rowSet[rows[r]] = true;
+      perItem.push({
+        requestKey: items[k].requestKey,
+        scheduleId: items[k].scheduleId,
+        equipName: items[k].equipName,
+        // 대상이 없으면 이미 빠진 품목이다. 배치 전체를 실패시키지 않고 개별로 알린다.
+        alreadyRemoved: rows.length === 0,
+        rows: rows
+      });
+    }
+
+    var rowsToDelete = Object.keys(rowSet).map(Number).sort(function(a, b) { return b - a; });
+    var removedScheduleIds = rowsToDelete.map(function(row) {
+      return String((data[row - 2] && data[row - 2][0]) || '').trim();
+    }).filter(Boolean);
+    var removedEquipments = rowsToDelete.map(function(row) {
+      var source = data[row - 2] || [];
+      return {
+        scheduleId: String(source[0] || '').trim(),
+        setName: String(source[2] || '').trim(),
+        name: String(source[3] || '').trim()
+      };
+    });
+
+    // 실제로 지울 게 없으면 시트를 건드리지 않고 개별 결과만 돌려준다(재시도 수렴).
+    if (!rowsToDelete.length) {
+      return {
+        success: true,
+        allAlreadyRemoved: true,
+        contractRegenPending: false,
+        removedRows: 0,
+        removedScheduleIds: [],
+        removedEquipments: [],
+        results: perItem.map(function(item) {
+          return {
+            requestKey: item.requestKey,
+            scheduleId: item.scheduleId,
+            equipName: item.equipName,
+            success: true,
+            alreadyRemoved: true,
+            removedScheduleIds: []
+          };
+        })
+      };
+    }
+
+    var leaseBlock = dashboardTradeMutationLeaseError_(props, tid, 'equipmentRemove', '');
+    if (leaseBlock) return leaseBlock;
+    if (isDashboardTradeCheckoutStarted_(ss, tid)) {
+      return { error: '이미 반출된 품목은 삭제할 수 없습니다. 반납 의무와 기준선을 보존해야 합니다.' };
+    }
+
+    // 응답만 유실된 재시도를 같은 mutationId로 수렴시킨다(단건 경로와 같은 계약).
+    var mutationTarget = JSON.stringify({
+      requestKey: batchScope,
+      removedScheduleIds: removedScheduleIds,
+      removedEquipments: removedEquipments
+    });
+    var mutation = beginDashboardMutation_(props, tid, mutationId, batchScope, mutationTarget);
+    if (mutation.error) return { error: mutation.error };
+    if (mutation.skip) {
+      if (mutation.pendingLater) return { error: '더 최신 장비 삭제를 처리 중입니다.', code: 'BUSY', retryable: true };
+      return { error: '완료된 삭제 요청의 대상 행이 다시 존재합니다.', code: 'STATE_CONFLICT' };
+    }
+
+    var invalidated = invalidateDashboardReturnInspectionForTrade_(tid, removedScheduleIds, '스케줄 품목 일괄 삭제');
+    if (invalidated && invalidated.error) return invalidated;
+    structureProjectionQueued = !!(invalidated && invalidated.projectionPending);
+
+    deleteDashboardRowsDescending_(sched, rowsToDelete);
+    scheduleDashboardStructureProjectionUnderLock_(tid, { removeScheduleIds: removedScheduleIds });
+    structureProjectionQueued = true;
+    scheduleContractRegenUnderLock_(tid);
+    contractRegenQueued = true;
+    try { invalidateDashboardCache(); } catch (eCache) {}
+    try { invalidateTimelineCache(); } catch (eTimeline) {}
+    commitDashboardMutation_(props, tid, mutationId, batchScope);
+
+    return {
+      success: true,
+      contractRegenPending: true,
+      contractRegenError: '',
+      removedRows: rowsToDelete.length,
+      removedScheduleIds: removedScheduleIds,
+      removedEquipments: removedEquipments,
+      results: perItem.map(function(item) {
+        return {
+          requestKey: item.requestKey,
+          scheduleId: item.scheduleId,
+          equipName: item.equipName,
+          success: true,
+          alreadyRemoved: item.alreadyRemoved,
+          removedScheduleIds: item.rows.map(function(row) {
+            return String((data[row - 2] && data[row - 2][0]) || '').trim();
+          }).filter(Boolean)
+        };
+      })
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (releaseErr) {}
+    if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
+    if (contractRegenQueued) ensureContractRegenTrigger_();
+  }
+}
 
 /** "yyyy-MM-dd" + "HH:mm" → Date */
 function parseDT(dateVal, timeVal) {

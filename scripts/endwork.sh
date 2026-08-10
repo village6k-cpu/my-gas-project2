@@ -100,13 +100,30 @@ echo "▶ GAS 백업 완료: $BACKUP_DIR/gas-remote-before-push-$TS.tar.gz"
 # 6. clasp push (GAS에 코드 반영)
 echo ""
 echo "▶ clasp push..."
-clasp push -f
+PUSH_OUT="$(clasp push -f 2>&1)"
+echo "$PUSH_OUT"
 echo ""
 
 # 7. clasp deploy (기존 웹앱 URL 유지)
-echo "▶ clasp deploy..."
-clasp deploy -i "$DEPLOY_ID" -d "$MSG"
-echo ""
+# Apps Script는 프로젝트당 버전 200개가 상한이고 삭제가 안 된다. 앱(Next.js)만 고친
+# 배포까지 매번 버전을 태우면 결국 한도에 걸려 모든 배포가 막힌다(2026-08 실제 발생).
+# GAS 코드가 그대로면 배포할 것도 없으므로 건너뛴다.
+if grep -qi "already up to date" <<<"$PUSH_OUT"; then
+  echo "▶ clasp deploy 생략 — GAS 코드 변경 없음 (버전 한도 200 보호)"
+  echo ""
+else
+  echo "▶ clasp deploy..."
+  # 배포 실패(버전 200 한도 등)가 git push·Vercel 배포까지 막으면 수정이 통째로 묶인다.
+  # 코드는 이미 GAS HEAD에 push됐으므로(시간 트리거는 HEAD로 실행) 경고만 남기고 진행한다.
+  if ! clasp deploy -i "$DEPLOY_ID" -d "$MSG"; then
+    echo ""
+    echo "⚠️ clasp deploy 실패 — 웹앱(doGet/doPost)은 이전 버전으로 남습니다."
+    echo "   시간 트리거는 HEAD 코드로 실행되므로 flush/재생성 워커는 새 코드가 반영됩니다."
+    echo "   버전 200 한도라면: GAS 편집기 → 프로젝트 기록에서 오래된 버전을 삭제한 뒤"
+    echo "   ./scripts/endwork.sh 를 다시 실행하세요."
+  fi
+  echo ""
+fi
 
 # 8. git commit + push
 echo "▶ git commit + push..."

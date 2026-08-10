@@ -12,6 +12,7 @@ import {
   clearToast,
   queueItemQty,
   removeItem,
+  removeItems,
   setItemCheckout,
   setItemName,
   setItemMemo,
@@ -43,7 +44,6 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
 
   const booked = trade.equipments.filter((e) => !e.onsite);
   const onsite = trade.equipments.filter((e) => e.onsite);
-
   return (
     <div className="mt-1.5">
       {summary.length > 0 && (
@@ -110,8 +110,11 @@ export function HandoverChecklist({ trade, phase }: { trade: Trade; phase: Phase
                         key={g.key}
                         name={g.setName}
                         onRemove={() => {
-                          g.headers.forEach((header) => removeItem(trade.tradeId, header.scheduleId));
-                          g.rows.forEach((r) => removeItem(trade.tradeId, r.scheduleId));
+                          // 예전엔 removeItem을 N번 불러 첫 건만 반영되고 나머지가 버려졌다.
+                          removeItems(trade.tradeId, [
+                            ...g.headers.map((header) => header.scheduleId),
+                            ...g.rows.map((r) => r.scheduleId),
+                          ]);
                         }}
                         headerRow={realDeviceHeaders(g).map((header) => (
                           <CheckoutRow key={header.scheduleId} t={trade} e={header} open={!!expanded[header.scheduleId]} onToggle={() => toggle(header.scheduleId)} setBadge setTone />

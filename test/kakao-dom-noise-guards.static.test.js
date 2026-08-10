@@ -376,17 +376,63 @@ assert.match(
   'Bridge must treat previous-evening clock previews as recent overnight catch-up rows'
 );
 
+// Hermes 결정 타임아웃은 바깥 브리지 수명(WORKER_TIMEOUT_MS)을 상속하면 안 된다.
+// 상속하던 시절 Hermes 결정 1건이 직렬 카카오 워커를 6분 넘게 독점했다.
+// 동작 검증은 tools/ai-browser-worker/worker.test.mjs가 담당하고,
+// 여기서는 상속이 되살아나지 않는지만 못 박는다.
 assert.match(
   worker,
-  /HERMES_WORKER_TIMEOUT_MS \|\| process\.env\.WORKER_TIMEOUT_MS \|\| '240000'/,
-  'AI worker Hermes timeout must inherit the launcher worker timeout'
+  /export function hermesDecisionTimeoutFromEnv\(environment = process\.env\)/,
+  'Hermes timeout must stay an isolated, unit-testable resolver'
 );
+assert.match(
+  worker,
+  /hermesTimeoutMs: hermesDecisionTimeoutFromEnv\(process\.env\)/,
+  'AI worker must resolve its Hermes timeout through that resolver'
+);
+{
+  const from = worker.indexOf('export function hermesDecisionTimeoutFromEnv');
+  const to = worker.indexOf('function requireConfig()', from);
+  assert.ok(from >= 0 && to > from, 'Hermes timeout resolver body must be locatable');
+  assert.doesNotMatch(
+    worker.slice(from, to),
+    /(?<!HERMES_)WORKER_TIMEOUT_MS/,
+    'Hermes timeout resolver must never read the outer bridge WORKER_TIMEOUT_MS'
+  );
+}
 
-assert.match(
-  worker,
-  /\^https:\\\/\\\/\(business\|center-pf\)\\\.kakao\\\.com\\\/_\[\^\/\]\+\\\/chats\(\?:\[\?#\]\|\$\)/,
-  'AI worker DevTools tab targeting must not treat individual customer conversation URLs as the main chat list'
-);
+// 진짜 지켜야 할 불변식: 런처가 주는 Hermes 타임아웃이 바깥 브리지 타임아웃보다 짧아야
+// 결정 1건이 직렬 워커를 독점하지 못한다. 두 값이 역전되면 그 사고가 그대로 재현된다.
+{
+  const contract = read('scripts/windows/KakaoLive.Common.psm1');
+  const numberOf = (key) => {
+    const hit = contract.match(new RegExp(`${key}\\s*=\\s*'(\\d+)'`));
+    assert.ok(hit, `launcher contract must define ${key}`);
+    return Number(hit[1]);
+  };
+  assert.ok(
+    numberOf('HERMES_WORKER_TIMEOUT_MS') < numberOf('WORKER_TIMEOUT_MS'),
+    'HERMES_WORKER_TIMEOUT_MS must stay below WORKER_TIMEOUT_MS so one Hermes decision cannot monopolize the serial Kakao worker'
+  );
+}
+
+// 정규식 리터럴을 그대로 문자열 대조하면 사소한 수정(끝 슬래시 허용 등)마다 깨지면서
+// 정작 보호가 살아 있는지는 알려주지 않는다. 코드에서 정규식을 꺼내 실제 URL로 검증한다.
+{
+  const hit = worker.match(/const isChatListUrl = (\/\^https:[^\n]+?\/)\.test\(targetUrl\);/);
+  assert.ok(hit, 'AI worker must keep an explicit chat-list URL matcher for DevTools tab targeting');
+  const source = hit[1].replace(/^\//, '').replace(/\/$/, '');
+  const isChatListUrl = new RegExp(source);
+  for (const host of ['business', 'center-pf']) {
+    assert.ok(isChatListUrl.test(`https://${host}.kakao.com/_xhPMls/chats`), `${host} chat list must match`);
+    assert.ok(isChatListUrl.test(`https://${host}.kakao.com/_xhPMls/chats?t_src=x`), `${host} chat list with query must match`);
+    assert.ok(
+      !isChatListUrl.test(`https://${host}.kakao.com/_xhPMls/chats/123456`),
+      'AI worker DevTools tab targeting must not treat individual customer conversation URLs as the main chat list'
+    );
+  }
+  assert.ok(!isChatListUrl.test('https://example.com/_xhPMls/chats'), 'unrelated hosts must not match');
+}
 
 assert.match(
   worker,

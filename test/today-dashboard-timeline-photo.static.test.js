@@ -114,9 +114,10 @@ assert.doesNotMatch(
   'authenticated photo metadata must not be exposed through a public CDN cache header'
 );
 
-assert.match(
-  route,
-  /WRITE_ACTIONS[\s\S]{0,360}"uploadDashboardPhoto"/,
+// 문자 수 창으로 재면 목록에 줄이 하나 늘 때마다 깨진다. 멤버십만 본다.
+assert.ok(
+  route.slice(route.indexOf('const WRITE_ACTIONS = new Set(['), route.indexOf(']);', route.indexOf('const WRITE_ACTIONS = new Set([')))
+    .includes('"uploadDashboardPhoto"'),
   'Next GAS proxy must allow dashboard photo uploads'
 );
 
