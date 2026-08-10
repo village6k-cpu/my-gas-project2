@@ -9,6 +9,7 @@ import {
   extractCustomerHint,
   extractCustomerHintFromConversation,
   extractTradeId,
+  findExistingApplyAnnouncement,
   findExistingAskReply,
   extractTradeIdFromConversation,
   groupOperationalMessages,
@@ -70,6 +71,16 @@ test('case references and bare-name answers resolve the customer identity', () =
     { text: '이거 어느 거래인가요?' },
     [{ text: '감사합니다' }, { text: '조승신입니다' }],
   ), '조승신');
+});
+
+test('a thread announces a trade application only once, whichever agent spoke first', () => {
+  const syncPost = { text: '✅ 헤이빌리 자동반영 · 260806-010 · 반출\n이동교 8/9 반출 확인.\n원문과 처리 이력은 내부 동기화 기록에 보존했습니다. [SLACK_HEYBILLI_SYNC]' };
+  const interactivePost = { text: '✅ 이동교 8/9 반출 반영 완료\n거래ID 260806-010 · 08:00→08/10 08:00\n\n스케줄 정정 ...' };
+  assert.ok(findExistingApplyAnnouncement([syncPost], '260806-010'));
+  assert.ok(findExistingApplyAnnouncement([interactivePost], '260806-010'));
+  assert.equal(findExistingApplyAnnouncement([syncPost], '260809-003'), null);
+  assert.equal(findExistingApplyAnnouncement([{ text: '260806-010 반납 언제쯤 되나요?' }], '260806-010'), null);
+  assert.equal(findExistingApplyAnnouncement([], '260806-010'), null);
 });
 
 test('a thread that already carries a sync ask is never asked twice', () => {

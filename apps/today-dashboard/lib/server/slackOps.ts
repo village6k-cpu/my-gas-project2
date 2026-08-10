@@ -715,6 +715,26 @@ export async function applySlackOpsPlan(value: unknown, execute: boolean) {
 
   const { trade, items } = await loadTradeAndItems(plan.tradeId);
   validateActions(plan, items, event);
+
+  // 요약만 다시 쓴 actions 없는 재적용은 isSameApplyContent를 통과한다(2026-08-09 이동교
+  // 3번째 공지). 카드 메모에 실제로 더해지는 내용이 없으면 실행·공지 없이 중복으로 끝낸다.
+  if ((plan.actions ?? []).length === 0) {
+    const noteField = plan.phase === "checkout" ? "note_checkout" : "note_checkin";
+    const currentNote = cleanText(noteField === "note_checkout" ? trade.note_checkout : trade.note_checkin, 20_000)
+      .replace(/\r\n/g, "\n");
+    const nextNote = upsertNoteBlock(currentNote, event, plan.summary);
+    if (nextNote === currentNote) {
+      if (execute) {
+        await db.from("slack_ops_events").update({
+          status: "applied", matched_trade_id: plan.tradeId,
+          applied_plan: event.applied_plan ?? plan,
+          applied_at: event.applied_at ?? new Date().toISOString(), last_error: null,
+        }).eq("channel_id", plan.channelId).eq("message_ts", plan.messageTs).eq("source_hash", plan.sourceHash);
+      }
+      return { ok: true, duplicate: true, changed: false, execute, tradeId: plan.tradeId };
+    }
+  }
+
   const onsitePreview = await previewOnsiteActions(plan);
   const correctionPreview = await syncCorrectionNamesToSchedule(plan, true);
   const preview = {

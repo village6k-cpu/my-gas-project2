@@ -583,13 +583,33 @@ async function postThread(config, threadTs, text) {
   });
 }
 
+export function findExistingApplyAnnouncement(messages = [], tradeId = '') {
+  const id = String(tradeId || '').trim();
+  if (!id) return null;
+  return (Array.isArray(messages) ? messages : []).find((message) => {
+    const text = String(message?.text || '');
+    return text.includes(id) && (text.includes('[SLACK_HEYBILLI_SYNC]') || /반영\s*완료|자동반영|적용\s*완료/u.test(text));
+  }) || null;
+}
+
 async function applyCommand(config, args) {
   const plan = await readStdinJson();
   const requestedWrite = args.has('--write');
   const execute = requestedWrite && config.writeEnabled;
   if (requestedWrite && !config.writeEnabled) throw new Error('SLACK_HEYBILLI_WRITE_ENABLED=1이 아니어서 live 쓰기를 차단했습니다');
   const result = await syncApi(config, { mode: 'apply', plan, execute });
-  if (execute && !result.duplicate) {
+  if (execute && !result.duplicate && result.changed !== false) {
+    // 대화형 헤이빌리든 이 동기화든, 같은 스레드에 같은 거래의 반영 공지는 한 번이면 된다.
+    // 후속 적용은 데이터에만 반영하고 공지는 반복하지 않는다 (2026-08-09 이동교 3중 공지 재발 방지).
+    const thread = await slackApi(config, 'conversations.replies', {
+      channel: config.channelId,
+      ts: plan.messageTs,
+      limit: 100,
+    }).catch(() => null);
+    if (findExistingApplyAnnouncement(thread?.messages, plan.tradeId)) {
+      process.stderr.write('slack-heybilli-sync: 같은 스레드에 이미 이 거래의 반영 공지가 있어 재공지를 생략합니다\n');
+      return result;
+    }
     const actionLines = (plan.actions || []).map((action) => {
       if (action.type === 'onsite_add') return `현장추가 ${action.items.map((item) => `${item.name}×${item.qty}`).join(', ')}`;
       if (action.type === 'item_correction') return `실반출 정정 ${action.scheduleId}`;
