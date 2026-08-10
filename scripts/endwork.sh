@@ -113,7 +113,15 @@ if grep -qi "already up to date" <<<"$PUSH_OUT"; then
   echo ""
 else
   echo "▶ clasp deploy..."
-  clasp deploy -i "$DEPLOY_ID" -d "$MSG"
+  # 배포 실패(버전 200 한도 등)가 git push·Vercel 배포까지 막으면 수정이 통째로 묶인다.
+  # 코드는 이미 GAS HEAD에 push됐으므로(시간 트리거는 HEAD로 실행) 경고만 남기고 진행한다.
+  if ! clasp deploy -i "$DEPLOY_ID" -d "$MSG"; then
+    echo ""
+    echo "⚠️ clasp deploy 실패 — 웹앱(doGet/doPost)은 이전 버전으로 남습니다."
+    echo "   시간 트리거는 HEAD 코드로 실행되므로 flush/재생성 워커는 새 코드가 반영됩니다."
+    echo "   버전 200 한도라면: GAS 편집기 → 프로젝트 기록에서 오래된 버전을 삭제한 뒤"
+    echo "   ./scripts/endwork.sh 를 다시 실행하세요."
+  fi
   echo ""
 fi
 

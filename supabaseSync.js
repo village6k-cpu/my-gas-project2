@@ -1136,6 +1136,73 @@ function buildSupabaseTrades_(tids) {
     }
   } catch (mErr) {}
 
+  // 3) 품목: 스케줄상세 정본에서 직접 읽는다 — dashboard 캐시가 아니라.
+  // 캐시에서 뽑던 시절, 등록 직후 flush가 반출일의 옛(stale) 캐시를 읽으면 detail이
+  // 누락돼 골격만 올라갔고, 그 push가 "성공"이라 dirty 키가 소진돼 영원히 재시도되지
+  // 않았다. 결과: 앱에 품목 0건 유령 거래 → 스케줄 화면·검색에서 통째로 안 보임
+  // (2026-08-10 실제 사고: 당일 신규 등록 8건 중 4건). 정본에서 읽으면 캐시 신선도와
+  // 등록-flush 타이밍이 결과에 영향을 주지 못한다.
+  var sheetItems = {}; // tid -> [{scheduleId, name, qty, setName, isHeader}]
+  try {
+    var sSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('스케줄상세');
+    if (sSheet && sSheet.getLastRow() >= 2) {
+      var sRows = sSheet.getRange(2, 1, sSheet.getLastRow() - 1, 5).getValues();
+      for (var si = 0; si < sRows.length; si++) {
+        var sTid = String(sRows[si][1] || '').trim();
+        if (!want[sTid]) continue;
+        var sSet = String(sRows[si][2] || '').trim();
+        var sName = String(sRows[si][3] || '').trim();
+        if (!sName) continue;
+        (sheetItems[sTid] = sheetItems[sTid] || []).push({
+          scheduleId: String(sRows[si][0] || '').trim(),
+          name: sName,
+          qty: Number(sRows[si][4]) || 1,
+          setName: sSet,
+          // dashboard displayEquip과 같은 규칙: 단품 또는 세트 대표행
+          isHeader: sSet === '' || sSet === sName
+        });
+      }
+    }
+  } catch (sheetErr) {
+    // 시트 읽기 실패는 아래 detail 폴백이 감당한다. 여기서 던지면 flush 전체가 죽는다.
+  }
+
+  function buildItemsForTrade_(tid, d) {
+    var eqs = sheetItems[tid];
+    if (eqs && eqs.length) {
+      // category는 부가 정보 — detail(dashboard)이 있으면 이름으로 보강, 없으면 null
+      var catMap = {};
+      if (d) (d.equipments || []).forEach(function (de) { if (de.category) catMap[de.name] = de.category; });
+      return eqs.map(function (eq, k) {
+        return {
+          schedule_id: eq.scheduleId,
+          trade_id: tid,
+          sort: k,
+          name: eq.name,
+          qty: eq.qty,
+          set_name: eq.setName || null,
+          is_set_header: eq.isHeader,
+          is_component: !!eq.setName && !eq.isHeader,
+          category: catMap[eq.name] || null
+        };
+      });
+    }
+    // 시트 읽기 실패 시에만 dashboard detail로 폴백
+    return (d && d.equipments || []).map(function (e2, k) {
+      return {
+        schedule_id: e2.scheduleId,
+        trade_id: tid,
+        sort: k,
+        name: e2.name,
+        qty: Number(e2.qty) || 1,
+        set_name: e2.setName || null,
+        is_set_header: !!e2.isHeader,
+        is_component: !!e2.isComponent,
+        category: e2.category || null
+      };
+    });
+  }
+
   var trades = [], items = [];
   for (var tid2 in dates) {
     var d = detail[tid2] || null;
@@ -1144,11 +1211,13 @@ function buildSupabaseTrades_(tids) {
     var endISO = new Date(dates[tid2].end).toISOString();
 
     if (!d) {
-      // 상세 조회 실패/누락 — 운영 필드를 기본값으로 덮어쓰지 않도록 골격만 부분 upsert
+      // 상세 조회 실패/누락 — 운영 필드를 기본값으로 덮어쓰지 않도록 골격만 부분 upsert.
+      // 품목은 정본에서 이미 확보했으므로 detail 유무와 무관하게 함께 올린다.
       var skeleton = { trade_id: tid2, checkout_at: startISO, return_at: endISO };
       if (m.name) skeleton.customer_name = m.name;
       if (m.discountType) skeleton.discount_type = m.discountType;
       trades.push(skeleton);
+      items = items.concat(buildItemsForTrade_(tid2, null));
       continue;
     }
 
@@ -1179,24 +1248,11 @@ function buildSupabaseTrades_(tids) {
     if (d.returnMemo) row.note_checkin = d.returnMemo; // 앱 입력 메모를 null로 지우지 않음
     trades.push(row);
 
-    var eqs = d.equipments || [];
-    for (var k = 0; k < eqs.length; k++) {
-      var e2 = eqs[k];
-      var item = {
-        schedule_id: e2.scheduleId,
-        trade_id: tid2,
-        sort: k,
-        name: e2.name,
-        qty: Number(e2.qty) || 1,
-        set_name: e2.setName || null,
-        is_set_header: !!e2.isHeader,
-        is_component: !!e2.isComponent,
-        category: e2.category || null
-      };
-      // checkout_state는 toggleItemCheck의 GAS+Supabase 단일 writer만 쓴다. 1분 dirty
-      // worker의 오래된 snapshot이 최신 체크/해제를 되돌리지 않도록 여기서는 항상 제외한다.
-      items.push(item);
-    }
+    // checkout_state는 toggleItemCheck의 GAS+Supabase 단일 writer만 쓴다. 1분 dirty
+    // worker의 오래된 snapshot이 최신 체크/해제를 되돌리지 않도록 여기서는 항상 제외한다.
+    // 품목 목록 자체는 스케줄상세 정본 기준 — stale dashboard 캐시가 품목을 누락/과잉
+    // 시키지 못한다.
+    items = items.concat(buildItemsForTrade_(tid2, d));
   }
 
   // 취소/과거 등 timeline에 더는 없는 거래 — 계약마스터 기준으로 상태 반영 (조용한 유실 방지)
