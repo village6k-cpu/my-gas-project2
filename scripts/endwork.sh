@@ -100,13 +100,22 @@ echo "▶ GAS 백업 완료: $BACKUP_DIR/gas-remote-before-push-$TS.tar.gz"
 # 6. clasp push (GAS에 코드 반영)
 echo ""
 echo "▶ clasp push..."
-clasp push -f
+PUSH_OUT="$(clasp push -f 2>&1)"
+echo "$PUSH_OUT"
 echo ""
 
 # 7. clasp deploy (기존 웹앱 URL 유지)
-echo "▶ clasp deploy..."
-clasp deploy -i "$DEPLOY_ID" -d "$MSG"
-echo ""
+# Apps Script는 프로젝트당 버전 200개가 상한이고 삭제가 안 된다. 앱(Next.js)만 고친
+# 배포까지 매번 버전을 태우면 결국 한도에 걸려 모든 배포가 막힌다(2026-08 실제 발생).
+# GAS 코드가 그대로면 배포할 것도 없으므로 건너뛴다.
+if grep -qi "already up to date" <<<"$PUSH_OUT"; then
+  echo "▶ clasp deploy 생략 — GAS 코드 변경 없음 (버전 한도 200 보호)"
+  echo ""
+else
+  echo "▶ clasp deploy..."
+  clasp deploy -i "$DEPLOY_ID" -d "$MSG"
+  echo ""
+fi
 
 # 8. git commit + push
 echo "▶ git commit + push..."
