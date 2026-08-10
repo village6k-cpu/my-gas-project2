@@ -105,26 +105,52 @@ test("세트 제외는 removeItem N번이 아니라 한 번의 배치로 나간�
   assert.match(view, /removeItems\(trade\.tradeId, \[[\s\S]{0,200}g\.headers\.map[\s\S]{0,200}g\.rows\.map/);
 });
 
-test("다중선택 제외 UI가 있고 반출 이후에는 뜨지 않는다", () => {
+test("선택 모드·체크박스·확인창이 없다 (연타로 처리)", () => {
   const view = read("components/HandoverChecklist.tsx");
-  assert.match(view, /여러 개 제외/);
-  assert.match(view, /선택 \{picked\.length\}개 제외/);
-  assert.match(
-    view,
-    /phase === "checkout" && !baselineLocked && selectableCount > 1/,
-    "이미 반출된 거래나 품목 1개짜리에 일괄 제외를 노출하면 안 된다",
-  );
-  // 선택 모드에서는 개별 제외 버튼을 숨겨 오조작을 막는다.
-  assert.match(view, /\{selecting \? null : e\.onsite \?/);
-  assert.match(view, /disabled=\{excluded\}/, "이미 제외된 품목은 다시 고를 수 없어야 한다");
+  // 모드 진입 → 체크 → 스크롤 back → 네이티브 confirm 은 탭이 너무 많았다.
+  // 제외가 배치로 묶이므로 그냥 연타하면 왕복 1회로 나간다.
+  assert.doesNotMatch(view, /여러 개 제외/, "모드 진입 버튼이 남아 있으면 안 된다");
+  assert.doesNotMatch(view, /선택 \{picked\.length\}개 제외/);
+  assert.doesNotMatch(view, /applyBulkExclude/);
+  assert.doesNotMatch(view, /confirm\(`선택한/, "제외에 네이티브 확인창을 띄우지 않는다");
+  assert.match(view, /onClick=\{\(\) => setItemCheckout\(t\.tradeId, e\.scheduleId, "excluded"\)\}/,
+    "줄마다 있는 제외 버튼이 유일한 진입점이다");
 });
 
-test("일괄 제외는 예약분과 현장추가를 각각 맞는 경로로 보낸다", () => {
-  const view = read("components/HandoverChecklist.tsx");
-  const apply = section(view, "const applyBulkExclude", "\n  const selectableCount");
-  assert.match(apply, /if \(item\.onsite\) removeItem\(trade\.tradeId, id\);/);
-  assert.match(apply, /else setItemCheckout\(trade\.tradeId, id, "excluded"\);/);
-  assert.match(apply, /confirm\(/, "여러 건을 한 번에 지우기 전에는 확인을 받아야 한다");
+test("제외하면 되돌리기 토스트가 뜬다", () => {
+  const store = read("lib/data/store.ts");
+  const remove = section(store, "function removeEquipmentAndRegenerateContract", "\n/** 여러 품목을 한 번에");
+  assert.match(remove, /개 제외됨/);
+  assert.match(remove, /label: "되돌리기"/);
+  assert.match(remove, /undoStagedRemoveEquipment_\(tradeId, staged\)/);
+  // 연타분을 누적해서 한 토스트로 보여준다.
+  assert.match(remove, /pendingRemoveEquipmentEntries_\(tradeId\)/);
+});
+
+test("되돌리기는 전송 전 취소라 서버 보정이 필요 없다", () => {
+  const store = read("lib/data/store.ts");
+  const undo = section(store, "function undoStagedRemoveEquipment_", "\nfunction pendingRemoveEquipmentEntries_");
+  assert.match(undo, /clearTimeout\(removeEquipmentBatchTimers\[tradeId\]\)/, "예약된 전송을 취소해야 한다");
+  assert.match(undo, /if \(removeEquipmentReplayInFlight\.has\(key\)\) continue/,
+    "이미 전송이 시작된 건은 되돌리면 서버와 어긋난다");
+  assert.match(undo, /restoreRemovedItem\(tradeId, item/);
+  assert.doesNotMatch(undo, /gasMutation/, "전송 전 취소이므로 보정 호출이 없어야 한다");
+});
+
+test("되돌리기 창이 다른 명령을 지연시키지 않는다", () => {
+  const store = read("lib/data/store.ts");
+  const begin = section(store, "function beginTradeTransition", "\n/** 완전삭제처럼");
+  assert.match(begin, /flushRemoveEquipmentBatch_\(tradeId\)/,
+    "완료 전환 전에 대기 중인 제외를 먼저 보내야 창만큼 밀리지 않는다");
+  const flush = section(store, "function flushRemoveEquipmentBatch_", "\n/**");
+  assert.match(flush, /clearTimeout[\s\S]*commitRemoveEquipmentBatch_\(tradeId\)/);
+});
+
+test("토스트는 액션이 있을 때만 클릭을 받는다", () => {
+  const toast = read("components/Toast.tsx");
+  assert.match(toast, /toast\.action \? "" : "pointer-events-none "/,
+    "항상 클릭을 받으면 토스트가 화면 조작을 가린다");
+  assert.match(toast, /onClick=\{toast\.action\.run\}/);
 });
 
 test("removeItems는 반출 기준선이 잡힌 거래를 막는다", () => {

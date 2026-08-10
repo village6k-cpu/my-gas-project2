@@ -61,7 +61,8 @@ interface State {
   notes: HandoverNote[];
   savingTrades: Record<string, boolean>;
   remoteStatus: RemoteStatus;
-  toast: { id: number; text: string; kind: "saved" | "error" } | null;
+  // action이 있으면 토스트가 눌리는 버튼을 하나 띄운다(제외 되돌리기 등).
+  toast: { id: number; text: string; kind: "saved" | "error"; action?: { label: string; run: () => void } } | null;
   /** 사진 업로드 큐 전역 요약 — 화면 윈도우 밖 거래의 실패 잡도 배지로 보이게 한다 */
   photoQueueSummary: { uploading: number; failed: number };
 }
@@ -1506,6 +1507,8 @@ function beginTradeSave(tradeId: string): number {
 }
 
 function beginTradeTransition(tradeId: string): number {
+  // 되돌리기 창이 열린 제외가 있으면 먼저 보낸다. 안 그러면 완료 전환이 그 창만큼 밀린다.
+  flushRemoveEquipmentBatch_(tradeId);
   activeTradeTransitions.add(tradeId);
   const id = beginTradeSave(tradeId);
   tradeTransitionSaveIds.add(id);
@@ -1895,8 +1898,11 @@ async function finalizeAlreadyMissingScheduleItem_(tradeId: string, scheduleId: 
 }
 
 // 제외는 GAS 왕복 1회(실측 2.5~3.5초)가 통째로 비용이라 품목마다 보내면 N배가 된다.
-// 짧게 모아 한 번에 보낸다 — 세트 제외처럼 즉시 N번 호출되는 경로가 1회 왕복이 된다.
-const REMOVE_EQUIPMENT_BATCH_DEBOUNCE_MS = 150;
+// 모아서 한 번에 보낸다 — 연타로 여러 개를 빼도 왕복은 1회다.
+//
+// 이 대기 시간은 되돌리기 창이기도 하다. 전송 전에 취소하므로 오탭이 시트에 아예
+// 나가지 않는다(서버 보정 불필요). 다른 거래 명령이 들어오면 즉시 flush 한다.
+const REMOVE_EQUIPMENT_BATCH_DEBOUNCE_MS = 3_000;
 const removeEquipmentBatchTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
 const removeEquipmentBatchInFlight: Record<string, Promise<void> | undefined> = {};
 const removeEquipmentOriginals = new Map<string, EquipmentItem>();
@@ -1907,6 +1913,47 @@ function armRemoveEquipmentBatch(tradeId: string, delay = REMOVE_EQUIPMENT_BATCH
     delete removeEquipmentBatchTimers[tradeId];
     void commitRemoveEquipmentBatch_(tradeId);
   }, delay);
+}
+
+/** 되돌리기 창이 열려 있는(아직 안 보낸) 제외를 즉시 보낸다. 다른 명령 직전에 호출한다. */
+function flushRemoveEquipmentBatch_(tradeId: string): void {
+  if (!removeEquipmentBatchTimers[tradeId]) return;
+  clearTimeout(removeEquipmentBatchTimers[tradeId]);
+  delete removeEquipmentBatchTimers[tradeId];
+  void commitRemoveEquipmentBatch_(tradeId);
+}
+
+/**
+ * 방금 누른 제외를 전송 전에 취소한다. 서버에는 아무것도 안 갔으므로 보정도 필요 없다.
+ * 되돌린 품목은 카드에 원래 자리로 돌아온다.
+ */
+function undoStagedRemoveEquipment_(tradeId: string, keys: string[]): void {
+  if (removeEquipmentBatchTimers[tradeId]) {
+    clearTimeout(removeEquipmentBatchTimers[tradeId]);
+    delete removeEquipmentBatchTimers[tradeId];
+  }
+  const outbox = readRemoveEquipmentOutbox_();
+  const restored: EquipmentItem[] = [];
+  for (const key of keys) {
+    // 이미 전송이 시작된 건은 되돌리지 않는다(서버 상태와 어긋난다).
+    if (removeEquipmentReplayInFlight.has(key)) continue;
+    const entry = outbox[key] || removeEquipmentOutboxMemory.get(key);
+    if (!entry) continue;
+    delete outbox[key];
+    removeEquipmentOutboxMemory.delete(key);
+    const original = removeEquipmentOriginals.get(key);
+    removeEquipmentOriginals.delete(key);
+    if (original) restored.push(original);
+  }
+  writeRemoveEquipmentOutbox_(outbox);
+  if (!Object.values(outbox).some((e) => e.tradeId === tradeId) &&
+      !Array.from(removeEquipmentOutboxMemory.values()).some((e) => e.tradeId === tradeId)) {
+    pendingRemoveEquipmentTrades.delete(tradeId);
+  }
+  for (const item of restored) restoreRemovedItem(tradeId, item, "");
+  set({ toast: { id: ++toastSeq, text: restored.length ? `${restored.length}개 되돌림` : "되돌릴 항목이 없습니다", kind: "saved" } });
+  // 되돌린 뒤에도 남은 제외가 있으면 그건 그대로 나간다.
+  if (pendingRemoveEquipmentEntries_(tradeId).length) armRemoveEquipmentBatch(tradeId);
 }
 
 function pendingRemoveEquipmentEntries_(tradeId: string): RemoveEquipmentOutboxEntry[] {
@@ -2137,12 +2184,23 @@ function removeEquipmentAndRegenerateContract(tradeId: string, item: EquipmentIt
     equipments: t.equipments.filter((e) => e.scheduleId !== scheduleId),
     contractRegenPending: true,
   }), false);
-  flashSave(tradeId);
-
   // 계약서 재생성은 백그라운드 워커(디바운스)에 맡긴다 — 인라인 재생성은 GAS 잠금을
   // 수 초~수십 초 쥐어 다른 체크/버튼을 실패시키고 제외 응답 자체도 느리게 했다.
   // 새 링크는 contractRegenPending 배지 → 폴링 merge로 곧 반영된다.
   armRemoveEquipmentBatch(tradeId);
+
+  // 연타로 여러 개를 빼면 토스트 하나에 누적해서 보여준다("3개 제외됨 · 되돌리기").
+  const staged = pendingRemoveEquipmentEntries_(tradeId)
+    .map((e) => removeEquipmentOutboxKey_(e.tradeId, e.scheduleId))
+    .filter((k) => !removeEquipmentReplayInFlight.has(k));
+  set({
+    toast: {
+      id: ++toastSeq,
+      text: `${staged.length}개 제외됨`,
+      kind: "saved",
+      action: { label: "되돌리기", run: () => undoStagedRemoveEquipment_(tradeId, staged) },
+    },
+  });
 }
 
 /** 여러 품목을 한 번에 제외한다(다중선택). 내부적으로 한 배치 = GAS 왕복 1회. */
