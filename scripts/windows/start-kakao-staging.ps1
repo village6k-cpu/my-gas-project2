@@ -175,11 +175,6 @@ try {
         (ConvertTo-WindowsCommandLineArgument -Value '--disable-background-timer-throttling'),
         (ConvertTo-WindowsCommandLineArgument -Value '--disable-backgrounding-occluded-windows'),
         (ConvertTo-WindowsCommandLineArgument -Value '--disable-renderer-backgrounding'),
-        # Chromium은 접근성 트리를 UIA 클라이언트가 처음 질의할 때 켠다(콜드스타트 ~0.5초,
-        # 평시 실측). 머신이 과부하일 땐 이 콜드스타트가 CUA 드라이버의 4초 타임아웃을 넘겨
-        # "UIA provider unresponsive"가 된다 (2026-08-11 저녁 실측). 트리를 상시 켜서 CUA가
-        # 부하 중에도 응답하게 한다. 대가는 카카오 페이지의 상시 a11y 계산(소폭 CPU/RAM).
-        (ConvertTo-WindowsCommandLineArgument -Value '--force-renderer-accessibility'),
         (ConvertTo-WindowsCommandLineArgument -Value $chromeProfileArgument),
         (ConvertTo-WindowsCommandLineArgument -Value $extensionArgument),
         (ConvertTo-WindowsCommandLineArgument -Value $loadExtensionArgument),
