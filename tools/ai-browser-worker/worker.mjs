@@ -551,6 +551,7 @@ export function buildHermesPrompt(job, options = {}) {
     ? `\nBROWSER NAVIGATION RESULT:\n${JSON.stringify(options.navigationContext, null, 2)}\n\nThis was deterministic UI navigation and live AX text capture only. If status is opened_target_chat and conversation_evidence.hint_matched is true, treat conversation_evidence.visible_static_text_tail as current Kakao screen evidence to inspect first; do not spend extra actions re-opening the chat list unless the evidence is insufficient or mismatched. Do not treat the navigation step itself as business classification evidence; the AI must still judge from the visible Kakao evidence.\n`
     : '';
   const recentBotSendsText = options.recentBotSends || '';
+  const correctionsText = options.corrections || '';
   const ragContextText = options.ragContext
     ? `\nREAD-ONLY VILLAGE-AI RAG TOOL:\n${options.ragContext.enabled ? 'enabled' : 'disabled'}; command: node tools/ai-browser-worker/worker.mjs --rag-lookup; input: {question,userRole:"customer",context?}; output: {text,confidence,ownerReview,knowledgeSource,usedSources,topSimilarity,logId,error}.\nUse as long-term reference memory after Kakao; put visible Kakao context in the question string itself. RAG must not replace current Kakao screen evidence or Sheets/GAS, and never covers inventory, booking, mutations, or duplicates. CURRENT_CONFIRMED_POLICY wins over older RAG conflicts. Uncovered policy FAQ: high/retrieved RAG may support auto_send; low/no_match/error ignore; ownerReview=true review. RAG 답변을 그대로 복붙하지 말고 현재 Kakao 대화와 합성한다.\n`
     : '';
@@ -632,7 +633,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
 ${currentConfirmedPolicyText}
-${navigationContextText}${recentBotSendsText}
+${navigationContextText}${recentBotSendsText}${correctionsText}
 ${lookupContextText}${ragContextText}${brainContextText}
 SHEETS TOOL AVAILABLE VIA GAS API:
 - URL: ${gasApiUrl}
@@ -3818,6 +3819,10 @@ function requireConfig() {
     followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
     autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
     autoSendLogPath: process.env.AI_WORKER_AUTO_SEND_LOG || path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson'),
+    // 응대 교정 원장 — 야간 채굴기(mine-kakao-corrections.mjs)가 사장 수동응대 사례를 적재하고
+    // 워커가 매 판단마다 읽는다. G-BRAIN(사업 참모용)과 의도적으로 분리된 카카오 전용 학습면.
+    correctionsPath: process.env.KAKAO_CORRECTIONS_PATH
+      || (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Village', 'kakao-corrections', 'corrections-latest.md') : ''),
     autoSendTimeoutMs: Number(process.env.AI_WORKER_AUTO_SEND_TIMEOUT_MS || 20000) || 20000,
     requireAutomationChromeProfile: process.env.KAKAO_REQUIRE_AUTOMATION_CHROME_PROFILE === '1',
     customerDocumentAssetPaths: normalizeKakaoAttachmentPaths(process.env.VILLAGE_CUSTOMER_DOCUMENT_ATTACHMENT_PATHS).length
@@ -5894,7 +5899,7 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
   return { allowed: true, reason: safetyClass, text: textValue, replyMode: mode, confidence, safetyClass, grounding };
 }
 
-function isStaffSenderLabel(value = '') {
+export function isStaffSenderLabel(value = '') {
   return /(빌리지|김준영|최재형|직원|운영자|상담원|매니저|village)/i.test(text(value));
 }
 
@@ -6578,7 +6583,7 @@ function logAutoReply(config, entry) {
   fs.appendFileSync(config.autoSendLogPath, `${line}\n`);
 }
 
-function normalizeAutoReplyText(value = '') {
+export function normalizeAutoReplyText(value = '') {
   return text(value).replace(/\s+/g, ' ').trim();
 }
 
@@ -6624,6 +6629,22 @@ export function buildRecentBotSendsPromptText(config, job = {}, { limit = 5, win
     }
     if (!sends.length) return '';
     return `\nRECENT_BOT_SENDS (자동응대 봇이 이 방/고객에게 최근 48시간 내 실제 발송한 메시지, 최신이 마지막):\n${sends.slice(-limit).join('\n')}\n`;
+  } catch {
+    return '';
+  }
+}
+
+// 응대 교정 원장(사장 수동응대 사례) 프롬프트 블록. 원장 파일은 야간 채굴기가 쓰고 사장이
+// 직접 편집/삭제할 수 있는 마크다운이다. 최신 사례가 파일 앞쪽이므로 앞에서 자른다.
+// G-BRAIN과 분리된 카카오 전용이며 advisory가 아니라 응대 방식 지시로 주입된다.
+export function buildCorrectionsPromptText(config, { maxChars = 1500 } = {}) {
+  try {
+    const filePath = config?.correctionsPath;
+    if (!filePath || !fs.existsSync(filePath)) return '';
+    const raw = fs.readFileSync(filePath, 'utf8').trim();
+    if (!raw) return '';
+    const clipped = raw.length > maxChars ? `${raw.slice(0, maxChars)}…` : raw;
+    return `\nVILLAGE_CORRECTIONS (사장 수동응대에서 채굴한 교정 원장 — 응대 방식·말투·판단은 이 사례를 따르되, 사실/가격/정책이 충돌하면 CURRENT_CONFIRMED_POLICY와 시트가 우선):\n${clipped}\n`;
   } catch {
     return '';
   }
@@ -7483,7 +7504,8 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
     const recentBotSends = buildRecentBotSendsPromptText(config, job);
-    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext, brainContext, recentBotSends });
+    const corrections = buildCorrectionsPromptText(config);
+    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext, brainContext, recentBotSends, corrections });
     if (dryRun) {
       Object.assign(result, { status: 'dry_run', job: summarizeJob(job), lookupContext, ragContext, brainContext, prompt });
       return result;
