@@ -518,6 +518,10 @@ function isActionChromePreview(text) {
   if (exactNoise.has(preview)) return true;
   if (/^(?:hellodesk\s+)?저장하기\s+(오전|오후)\s*\d{1,2}:?\d{2}$/.test(preview)) return true;
   if (/채널추가 요청 메시지|친구추가 요청 메시지|메시지 꾸미기|쿠폰 첨부|기본 메시지로 설정/.test(preview)) return true;
+  // 알림톡/브랜드메시지 발송 지점에 파트너센터가 렌더링하는 placeholder. 이게 방의 마지막
+  // 메시지라는 건 '고객이 아니라 알림톡이 마지막'이라는 뜻이므로 상담 감지 대상이 아니다
+  // (2026-08-11 사례A: 이 placeholder가 실 답장처럼 수집·오인되는 오염 확인).
+  if (preview.includes('알림톡/브랜드메시지는 관리자센터에서 확인할 수 없어요')) return true;
   return false;
 }
 

@@ -550,11 +550,12 @@ export function buildHermesPrompt(job, options = {}) {
   const navigationContextText = options.navigationContext
     ? `\nBROWSER NAVIGATION RESULT:\n${JSON.stringify(options.navigationContext, null, 2)}\n\nThis was deterministic UI navigation and live AX text capture only. If status is opened_target_chat and conversation_evidence.hint_matched is true, treat conversation_evidence.visible_static_text_tail as current Kakao screen evidence to inspect first; do not spend extra actions re-opening the chat list unless the evidence is insufficient or mismatched. Do not treat the navigation step itself as business classification evidence; the AI must still judge from the visible Kakao evidence.\n`
     : '';
+  const recentBotSendsText = options.recentBotSends || '';
   const ragContextText = options.ragContext
     ? `\nREAD-ONLY VILLAGE-AI RAG TOOL:\n${options.ragContext.enabled ? 'enabled' : 'disabled'}; command: node tools/ai-browser-worker/worker.mjs --rag-lookup; input: {question,userRole:"customer",context?}; output: {text,confidence,ownerReview,knowledgeSource,usedSources,topSimilarity,logId,error}.\nUse as long-term reference memory after Kakao; put visible Kakao context in the question string itself. RAG must not replace current Kakao screen evidence or Sheets/GAS, and never covers inventory, booking, mutations, or duplicates. CURRENT_CONFIRMED_POLICY wins over older RAG conflicts. Uncovered policy FAQ: high/retrieved RAG may support auto_send; low/no_match/error ignore; ownerReview=true review. RAG 답변을 그대로 복붙하지 말고 현재 Kakao 대화와 합성한다.\n`
     : '';
   const currentConfirmedPolicyText = options.ragContext
-    ? `\nCURRENT_CONFIRMED_POLICY: 주소=서울 마포구 동교로 23길 32, 2층, 지도=https://naver.me/5mIWTFQ1, 영업=24시간. 절차=장비명+기간→가용확인→방문수령→반납, 필수=장비명/수량/반출일시/반납일시/예약자명/연락처. 할인=학생 30%, 개인사업자/프리랜서 20%, 단골=개사프20%+10%, 제휴=개사프20%+20%. 장기=2일10%,3~5일20%,6~9일35%,10~14일40%,15~19일45%,20일+50%. 계산=할인 곱셈, 24시간 1일, +6시간 동일, 6시간 초과 +1일, VAT=할인후*1.1 10원 올림.\n`
+    ? `\nCURRENT_CONFIRMED_POLICY: 주소=서울 마포구 동교로 23길 32 엠페로빌딩 2층, 지도=https://naver.me/FCAutZta, 영업=24시간. 절차=장비명+기간→가용확인→방문수령→반납, 필수=장비명/수량/반출일시/반납일시/예약자명/연락처. 할인=학생 30%, 개인사업자/프리랜서 20%, 단골=개사프20%+10%, 제휴=개사프20%+20%. 장기=2일10%,3~5일20%,6~9일35%,10~14일40%,15~19일45%,20일+50%. 계산=할인 곱셈, 24시간 1일, +6시간 동일, 6시간 초과 +1일, VAT=할인후*1.1 10원 올림.\n`
     : '';
   const brainContextText = options.brainContext?.enabled
     ? `\nG-BRAIN OWNER CONTEXT (read-only, advisory):\n${options.brainContext.contextPath ? `- 사장 판단 기준·운영 해석 문서(file 도구로 read-only 열람): ${options.brainContext.contextPath}\n` : ''}${options.brainContext.customerProfilesPath ? `- 고객 프로필 JSONL(1인 1줄: name/segment/누적방문/미수금/사고이력/이탈주의): ${options.brainContext.customerProfilesPath} — 파일이 크니 전체를 읽지 말고 현재 고객명이 포함된 줄만 찾아 읽어라.\n` : ''}- 단골/VIP 여부, 미수금, 과거 사고이력, 사장 응대 기준을 파악해 사장처럼 응대하는 데 쓴다. 프로필의 segment는 참고용이며 할인유형은 여전히 고객DB I열이 우선한다.\n- advisory다: 재고/예약/가격/정책의 근거가 아니다. CURRENT_CONFIRMED_POLICY와 시트/화면이 항상 우선하며, brain 파일을 auto_send grounding으로 선언할 수 없다.\n`
@@ -602,6 +603,10 @@ SENDER AND TURN-TAKING POLICY:
 - If newest meaningful message is staff/outbound, no new reply. Exception: staff-confirmed-unregistered case = customer reservation + staff confirmation + not found in contract/schedule/request; then set should_write_to_sheet=true, reservation_inquiry.confirmed=true, already_registered=false, replyMode=no_reply, no_auto_reply_sent=true.
 - Customers often split one thought across several bubbles. Merge consecutive customer/inbound messages within the same recent turn before classification, e.g. "안녕하세요" + "27일날" + "fx3 가능한가요?" = one reservation/availability question.
 - For Sheets append, safety_checks.latest_customer_message_after_last_staff_reply must be true except for the staff-confirmed-unregistered case above. If sender order is unclear, set it false and should_write_to_sheet=false.
+- RECENT_BOT_SENDS에 없는 빌리지측 버블은 사장(사람)의 수동 응대다. 사장이 다룬 주제는 재답변·재확인 금지(no_reply), 사장 안내와 모순 금지.
+- 고객이 전화/오프라인으로 해결됐다고 말하면("전화로 안내받았습니다", "직원분께 확인 받았습니다", "이미 수령했습니다") 재확인 질문을 만들지 마라. 남은 실질 질문에만 답한다.
+- RECENT_BOT_SENDS와 같은 내용의 재발송 금지. 이미 물어본 질문은 반복 말고 no_reply 또는 후속카드로 넘겨라.
+- "알림톡/브랜드메시지는 관리자센터에서 확인할 수 없어요"는 카카오 파트너센터의 알림톡 발송 표시 placeholder다. 실제 답장이 아니므로 근거로 삼지 마라.
 
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
@@ -627,7 +632,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
 ${currentConfirmedPolicyText}
-${navigationContextText}
+${navigationContextText}${recentBotSendsText}
 ${lookupContextText}${ragContextText}${brainContextText}
 SHEETS TOOL AVAILABLE VIA GAS API:
 - URL: ${gasApiUrl}
@@ -5471,6 +5476,16 @@ export function pickKakaoConversationTarget(targets = [], hints = [], roomIds = 
   return candidates[0] || null;
 }
 
+// 카카오 파트너센터가 알림톡/브랜드메시지 발송 지점마다 채팅창에 렌더링하는 placeholder UI 문장.
+// 실제 발화가 아닌데 evidence에 들어가면 '빌리지님의 답장'으로 오염된다 (2026-08-11 사례A 진단:
+// 최소 6개 고객 스레드 evidence에 이 문장이 실제 답장처럼 수집돼 있었다). 시각이 붙는 변형이
+// 있으므로 정확 일치가 아니라 포함 매치로 거른다.
+const KAKAO_UI_PLACEHOLDER_FRAGMENTS = ['알림톡/브랜드메시지는 관리자센터에서 확인할 수 없어요'];
+
+export function isKakaoUiPlaceholderLine(value = '') {
+  return KAKAO_UI_PLACEHOLDER_FRAGMENTS.some((fragment) => String(value || '').includes(fragment));
+}
+
 export function extractKakaoConversationEvidence(treeMarkdown = '', { title = '', hints = [], maxItems = 80 } = {}) {
   const skipExact = new Set([
     '채팅방 레이어', '친구', '채팅 메시지 입력 폼', '보낸 메시지 가이드', '여기까지 읽었습니다.',
@@ -5481,7 +5496,7 @@ export function extractKakaoConversationEvidence(treeMarkdown = '', { title = ''
   let match;
   while ((match = regex.exec(String(treeMarkdown)))) {
     let value = match[1].replace(/\\n/g, ' ').trim();
-    if (!value || skipExact.has(value)) continue;
+    if (!value || skipExact.has(value) || isKakaoUiPlaceholderLine(value)) continue;
     if (value.length > 500) value = `${value.slice(0, 500)}…`;
     values.push(value);
   }
@@ -5502,7 +5517,8 @@ function extractKakaoConversationEvidenceFromText(bodyText = '', { title = '', h
     .split(/\n+/)
     .map((value) => value.replace(/\s+/g, ' ').trim())
     .filter(Boolean)
-    .filter((value) => !['채팅방 레이어', '친구', '채팅 메시지 입력 폼', '보낸 메시지 가이드', '전송'].includes(value));
+    .filter((value) => !['채팅방 레이어', '친구', '채팅 메시지 입력 폼', '보낸 메시지 가이드', '전송'].includes(value))
+    .filter((value) => !isKakaoUiPlaceholderLine(value));
   const tail = values.slice(-maxItems);
   const hintMatched = hints.some((hint) => String(title).includes(hint) || tail.some((value) => value.includes(hint)));
   return {
@@ -5778,7 +5794,17 @@ export function classifyConservativeTerminalAcknowledgement(job = {}, navigation
     '네감사합니다', '네감사드립니다', '네감사해요', '네고맙습니다',
     '알겠습니다', '네알겠습니다', '확인했습니다', '네확인했습니다'
   ]);
-  if (!allowed.has(canonical)) return { matched: false, reason: 'not_terminal_acknowledgement' };
+  // 오프라인/전화 해결 보고도 종결 신호다 (2026-08-11 사례B: "직원분께 확인 받았습니다"류를
+  // 인식 못 해 재확인 루프 발생). 접미 매치이되 숫자·물음표·길이·운영맥락 가드는 그대로 적용되므로
+  // 실질 질문이 섞인 메시지는 여전히 Hermes 판단으로 넘어간다. '감사합니다'류 일반 접미는 오탐
+  // 위험(질문+감사 조합)이 커서 추가하지 않는다.
+  const resolvedSuffixes = [
+    '해결됐습니다', '해결되었습니다', '해결됐어요', '해결되었어요',
+    '안내받았습니다', '안내받았어요', '확인받았습니다', '확인받았어요',
+    '처리됐습니다', '처리되었습니다', '잘받았습니다', '잘수령했습니다'
+  ];
+  const isOfflineResolved = resolvedSuffixes.some((suffix) => canonical.endsWith(suffix));
+  if (!allowed.has(canonical) && !isOfflineResolved) return { matched: false, reason: 'not_terminal_acknowledgement' };
 
   const visibleTail = Array.isArray(evidence.visible_static_text_tail) ? evidence.visible_static_text_tail : [];
   const operationalContext = visibleTail.slice(-30).join(' ');
@@ -6567,14 +6593,64 @@ export function buildAutoReplyDedupeKey({ decision = {}, job = {}, replyText = '
   return [stableRoomKey || customer, customerMessage, reply].filter(Boolean).join('|').slice(0, 500);
 }
 
-export function hasRecentSentAutoReply(config, dedupeKey, { now = new Date(), windowMs = 30 * 60 * 1000 } = {}) {
+// 이 방/고객에게 봇이 최근 실제 발송한 메시지 목록을 프롬프트 블록으로 만든다.
+// 목적 (2026-08-11 사례A/B 진단): (1) 화면의 빌리지측 버블 중 이 목록에 없는 것 = 사장(사람)의
+// 수동 응대임을 모델이 판별할 수 있게 하고, (2) 봇이 이미 보낸 질문/안내를 반복 발송하지 않게
+// 자기 발송 이력을 자각시킨다. 실패는 조용히 빈 문자열로 강등 — 프롬프트 빌드를 막지 않는다.
+export function buildRecentBotSendsPromptText(config, job = {}, { limit = 5, windowMs = 48 * 60 * 60 * 1000, now = new Date(), maxLines = 3000 } = {}) {
+  try {
+    if (!config?.autoSendLogPath || !fs.existsSync(config.autoSendLogPath)) return '';
+    const roomKey = normalizeAutoReplyText(job.room_key || job.roomKey || job.payload?.roomKey || '');
+    const customer = normalizeAutoReplyText(
+      job.customerName || job.customer_name || job.senderName || job.sender_name || job.payload?.customerName || ''
+    );
+    if (!roomKey && !customer) return '';
+    const lines = fs.readFileSync(config.autoSendLogPath, 'utf8').trim().split('\n').filter(Boolean).slice(-maxLines);
+    const sends = [];
+    for (const line of lines) {
+      let entry;
+      try { entry = JSON.parse(line); } catch { continue; }
+      if (entry?.result?.sent !== true) continue;
+      const sentAt = new Date(entry.at);
+      if (!Number.isFinite(sentAt.getTime()) || now.getTime() - sentAt.getTime() > windowMs) continue;
+      const entryRoom = normalizeAutoReplyText(String(entry.dedupeKey || '').split('|')[0] || '');
+      const entryCustomer = normalizeAutoReplyText(entry.customer || '');
+      const matched = (roomKey && entryRoom && entryRoom === roomKey)
+        || (customer && entryCustomer && entryCustomer === customer);
+      if (!matched) continue;
+      const sentText = normalizeAutoReplyText(entry?.result?.text || '');
+      if (!sentText) continue;
+      sends.push(`- [${entry.at}] ${sentText.slice(0, 200)}`);
+    }
+    if (!sends.length) return '';
+    return `\nRECENT_BOT_SENDS (자동응대 봇이 이 방/고객에게 최근 48시간 내 실제 발송한 메시지, 최신이 마지막):\n${sends.slice(-limit).join('\n')}\n`;
+  } catch {
+    return '';
+  }
+}
+
+// 방(또는 고객) + 답장 문구만의 보조 중복키. buildAutoReplyDedupeKey는 '최신 고객 메시지'를
+// 포함하므로 고객이 아무 새 말(다른 주제·종결 인사)을 하면 키가 바뀌어 동일 문구 재발송을 못
+// 막는다 (2026-08-11 사례B 재확인 루프). 이 키는 고객 발화와 무관하게 같은 방에 같은 문구가
+// 반복 발송되는 것을 장시간 창으로 차단하기 위한 것.
+export function buildRoomReplyDedupeKey({ decision = {}, job = {}, replyText = '' } = {}) {
+  const stableRoomKey = normalizeAutoReplyText(job.room_key || job.roomKey || job.payload?.roomKey || '');
+  const customer = normalizeAutoReplyText(decision?.customer?.name || decision?.customer_name || '');
+  const reply = normalizeAutoReplyText(replyText || decision?.reply_decision?.text || decision?.suggested_reply_draft || '');
+  if (!reply) return '';
+  return [stableRoomKey || customer, reply].filter(Boolean).join('|').slice(0, 500);
+}
+
+export function hasRecentSentAutoReply(config, dedupeKey, { now = new Date(), windowMs = 30 * 60 * 1000, keyField = 'dedupeKey', maxLines = 3000 } = {}) {
   if (!dedupeKey || !config?.autoSendLogPath || !fs.existsSync(config.autoSendLogPath)) return false;
-  const lines = fs.readFileSync(config.autoSendLogPath, 'utf8').trim().split('\n').filter(Boolean).slice(-300);
+  // 기존 slice(-300)은 게이트 차단 로그까지 같은 파일에 쌓여 바쁜 날 발송 기록이 창 밖으로
+  // 밀렸다 — 시간 창이 유효하려면 꼬리를 충분히 봐야 한다.
+  const lines = fs.readFileSync(config.autoSendLogPath, 'utf8').trim().split('\n').filter(Boolean).slice(-maxLines);
   for (const line of lines) {
     let entry;
     try { entry = JSON.parse(line); } catch { continue; }
     if (entry?.result?.sent !== true) continue;
-    if (entry?.dedupeKey !== dedupeKey) continue;
+    if (entry?.[keyField] !== dedupeKey) continue;
     const sentAt = new Date(entry.at);
     if (Number.isFinite(sentAt.getTime()) && now.getTime() - sentAt.getTime() <= windowMs) return true;
   }
@@ -6747,6 +6823,12 @@ async function maybeAutoSendReply({ config, decision, job, navigationContext }) 
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', dedupeKey });
     return result;
   }
+  const roomReplyKey = buildRoomReplyDedupeKey({ decision, job, replyText: gate.text });
+  if (roomReplyKey && hasRecentSentAutoReply(config, roomReplyKey, { windowMs: 24 * 60 * 60 * 1000, keyField: 'roomReplyKey' })) {
+    const result = { attempted: false, sent: false, gate: { allowed: false, reason: 'duplicate_room_reply_text_24h' } };
+    logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', dedupeKey, roomReplyKey });
+    return result;
+  }
   const ragSupport = await evaluateAutoReplyRagSupport({ config, decision, job, replyText: gate.text });
   if (ragSupport.required && !ragSupport.allowed) {
     const result = {
@@ -6780,7 +6862,7 @@ async function maybeAutoSendReply({ config, decision, job, navigationContext }) 
     sendResult = { sent: false, reason: 'send_error', error: error.message.slice(0, 500) };
   }
   const result = { attempted: true, sent: Boolean(sendResult.sent), gate, sendResult, text: gate.text, ragSupport };
-  logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [], dedupeKey, ragSupport });
+  logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [], dedupeKey, roomReplyKey, ragSupport });
   return result;
 }
 
@@ -7400,7 +7482,8 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     timings.mark('lookup');
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
-    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext, brainContext });
+    const recentBotSends = buildRecentBotSendsPromptText(config, job);
+    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext, brainContext, recentBotSends });
     if (dryRun) {
       Object.assign(result, { status: 'dry_run', job: summarizeJob(job), lookupContext, ragContext, brainContext, prompt });
       return result;

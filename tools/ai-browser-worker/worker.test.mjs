@@ -65,7 +65,10 @@ import {
   evaluateAutoReplyRagSupport,
   isAutoSendEligibleLiveJob,
   buildAutoReplyDedupeKey,
+  buildRoomReplyDedupeKey,
   hasRecentSentAutoReply,
+  buildRecentBotSendsPromptText,
+  isKakaoUiPlaceholderLine,
   filterFollowUpRowsAfterAutoReply,
   filterFollowUpRowsAgainstClosedHistory,
   mergeFollowUpRowsByTopic,
@@ -823,7 +826,9 @@ test('buildHermesPrompt uses compact job evidence instead of embedding full raw 
   assert.match(prompt, /JOB EVIDENCE FROM SUPABASE/);
   assert.doesNotMatch(prompt, /JOB FROM SUPABASE/);
   assert.equal(prompt.includes('x'.repeat(1000)), false);
-  assert.ok(prompt.length < 19000, `prompt too large: ${prompt.length}`);
+  // 2026-08-11: RECENT_BOT_SENDS/사장 수동응대 정책 추가로 기본 프롬프트가 ~19.0KB로 성장.
+  // payload 미포함 검증은 위의 x.repeat(1000) assert가 담당하므로 상한은 여유를 두고 20000.
+  assert.ok(prompt.length < 20000, `prompt too large: ${prompt.length}`);
 });
 
 test('buildHermesPrompt uses navigation hints without letting code judge business meaning', () => {
@@ -6730,4 +6735,115 @@ test('mapDecisionToStatusPatch routes write and no-write decisions to review sta
     status: 'ai_skipped_needs_review',
     error_message: '정보부족'
   });
+});
+
+test('kakao partner-center alimtalk placeholder is filtered out of conversation evidence', () => {
+  const tree = `
+- [11] AXStaticText = "김세원"
+- [20] AXStaticText = "입금 완료했습니다"
+- [21] AXStaticText = "보낸 메시지 가이드"
+- [22] AXStaticText = "알림톡/브랜드메시지는 관리자센터에서 확인할 수 없어요."
+- [23] AXStaticText = "알림톡/브랜드메시지는 관리자센터에서 확인할 수 없어요. 오전 10:32"
+- [30] AXStaticText = "따로 전화해서 안내받았습니다"
+`;
+  const evidence = extractKakaoConversationEvidence(tree, { title: '김세원 - 빌리지', hints: ['김세원'], maxItems: 10 });
+  assert.deepEqual(evidence.visible_static_text_tail, ['김세원', '입금 완료했습니다', '따로 전화해서 안내받았습니다']);
+  assert.equal(isKakaoUiPlaceholderLine('알림톡/브랜드메시지는 관리자센터에서 확인할 수 없어요. 오후 08:54'), true);
+  assert.equal(isKakaoUiPlaceholderLine('입금 확인했습니다'), false);
+});
+
+test('room reply dedupe key ignores the latest customer message so nagging loops collapse to one key', () => {
+  const replyText = '반납 날짜와 시간을 한 번만 다시 알려주세요!';
+  const first = buildRoomReplyDedupeKey({
+    job: { room_key: 'chat:12345', preview_text: '임선 반출 변경 요청 오전 3:35' },
+    decision: { customer: { name: '임선' } },
+    replyText
+  });
+  const second = buildRoomReplyDedupeKey({
+    job: { room_key: 'chat:12345', preview_text: '임선 아까 직원분께 확인 받았습니다 오전 4:08' },
+    decision: { customer: { name: '임선' } },
+    replyText
+  });
+  assert.equal(first, second);
+  assert.equal(first.startsWith('chat:12345|'), true);
+  assert.equal(buildRoomReplyDedupeKey({ job: { room_key: 'chat:12345' }, decision: {}, replyText: '' }), '');
+});
+
+test('hasRecentSentAutoReply supports the roomReplyKey field with a long window', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmp-room-replies-'));
+  const logPath = path.join(tmpDir, 'auto-replies.ndjson');
+  const now = new Date('2026-08-11T12:00:00.000Z');
+  const roomKey = 'chat:12345|반납 날짜와 시간을 한 번만 다시 알려주세요!';
+  const lines = [
+    JSON.stringify({ at: '2026-08-11T02:00:00.000Z', dedupeKey: 'x|y|z', roomReplyKey: roomKey, result: { sent: true } }),
+    JSON.stringify({ at: '2026-08-09T02:00:00.000Z', dedupeKey: 'a|b|c', roomReplyKey: roomKey, result: { sent: true } })
+  ];
+  fs.writeFileSync(logPath, lines.join(String.fromCharCode(10)));
+
+  assert.equal(hasRecentSentAutoReply({ autoSendLogPath: logPath }, roomKey, { now, windowMs: 24 * 60 * 60 * 1000, keyField: 'roomReplyKey' }), true);
+  assert.equal(hasRecentSentAutoReply({ autoSendLogPath: logPath }, roomKey, { now: new Date('2026-08-13T12:00:00.000Z'), windowMs: 24 * 60 * 60 * 1000, keyField: 'roomReplyKey' }), false);
+  assert.equal(hasRecentSentAutoReply({ autoSendLogPath: logPath }, 'chat:12345|다른 답장', { now, windowMs: 24 * 60 * 60 * 1000, keyField: 'roomReplyKey' }), false);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('offline resolution reports count as terminal acknowledgements under the conservative guards', () => {
+  const liveResolved = {
+    previewText: '중요 임선 아 그부분 이야기해서 해결됐습니다 오전 9:44',
+    customerName: '임선',
+    events: [{ reason: 'mutation' }, { reason: 'top_row_changed' }]
+  };
+  const navigation = {
+    status: 'opened_target_chat',
+    conversation_evidence: {
+      hint_matched: true,
+      visible_static_text_tail: ['빌리지님', '전화로 안내드렸습니다', '임선', '아 그부분 이야기해서 해결됐습니다']
+    }
+  };
+  assert.equal(classifyConservativeTerminalAcknowledgement(liveResolved, navigation).matched, true);
+
+  // 운영 맥락(예약/입금/장비 등)이 화면에 남아 있으면 여전히 Hermes 판단으로 넘긴다.
+  assert.equal(classifyConservativeTerminalAcknowledgement(liveResolved, {
+    ...navigation,
+    conversation_evidence: {
+      hint_matched: true,
+      visible_static_text_tail: ['빌리지님', '입금 확인 후 처리하겠습니다', '임선', '아 그부분 이야기해서 해결됐습니다']
+    }
+  }).matched, false);
+
+  // 물음표가 있으면 실질 질문이므로 종결로 처리하지 않는다.
+  assert.equal(classifyConservativeTerminalAcknowledgement({
+    ...liveResolved,
+    previewText: '중요 임선 해결됐을까요? 오전 9:45'
+  }, navigation).matched, false);
+});
+
+test('buildRecentBotSendsPromptText lists only fresh sends for the same room or customer', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmp-recent-sends-'));
+  const logPath = path.join(tmpDir, 'auto-replies.ndjson');
+  const now = new Date('2026-08-11T12:00:00.000Z');
+  const lines = [
+    JSON.stringify({ at: '2026-08-11T03:43:00.000Z', customer: '임선', dedupeKey: 'chat:12345|반출 변경|반납 일시를 알려주세요', result: { sent: true, text: '반납 날짜와 시간을 한 번만 다시 알려주세요!' } }),
+    JSON.stringify({ at: '2026-08-05T03:43:00.000Z', customer: '임선', dedupeKey: 'chat:12345|옛 메시지|옛 답장', result: { sent: true, text: '48시간 밖의 옛 발송' } }),
+    JSON.stringify({ at: '2026-08-11T04:00:00.000Z', customer: '박수정', dedupeKey: 'chat:99999|다른 방|다른 답장', result: { sent: true, text: '다른 방 발송' } }),
+    JSON.stringify({ at: '2026-08-11T04:10:00.000Z', customer: '임선', dedupeKey: 'chat:12345|차단|차단', result: { sent: false, text: '차단된 시도' } })
+  ];
+  fs.writeFileSync(logPath, lines.join(String.fromCharCode(10)));
+
+  const block = buildRecentBotSendsPromptText({ autoSendLogPath: logPath }, { room_key: 'chat:12345', customerName: '임선' }, { now });
+  assert.match(block, /RECENT_BOT_SENDS/);
+  assert.match(block, /반납 날짜와 시간을 한 번만 다시 알려주세요!/);
+  assert.doesNotMatch(block, /옛 발송/);
+  assert.doesNotMatch(block, /다른 방 발송/);
+  assert.doesNotMatch(block, /차단된 시도/);
+  assert.equal(buildRecentBotSendsPromptText({ autoSendLogPath: logPath }, {}, { now }), '');
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('buildHermesPrompt embeds the recent bot sends block and the owner-manual policy lines', () => {
+  const sendsBlock = ['', 'RECENT_BOT_SENDS (자동응대 봇이 이 방/고객에게 최근 48시간 내 실제 발송한 메시지, 최신이 마지막):', '- [2026-08-11T03:43:00.000Z] 반납 날짜와 시간을 한 번만 다시 알려주세요!', ''].join(String.fromCharCode(10));
+  const prompt = buildHermesPrompt({ id: 'job-1' }, { recentBotSends: sendsBlock });
+  assert.match(prompt, /RECENT_BOT_SENDS/);
+  assert.match(prompt, /사장\(사람\)의 수동 응대/);
+  assert.match(prompt, /재확인 질문을 만들지 마라/);
+  assert.match(prompt, /알림톡\/브랜드메시지는 관리자센터에서 확인할 수 없어요/);
 });
