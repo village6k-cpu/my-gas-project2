@@ -203,7 +203,19 @@ try {
     }
 
     $bridgeCommandLine = ConvertTo-WindowsCommandLineArgument -Value $bridgeScriptPath
-    $bridgeProcess = Start-Process -FilePath $NodePath -ArgumentList $bridgeCommandLine -WorkingDirectory $bridgeDirectory -PassThru -ErrorAction Stop
+    # 브리지 stdout/stderr를 파일로 남긴다. 이게 없으면 브리지가 죽어도 유서가 0바이트다
+    # (2026-08-11 사망 원인 추적 불가 실측). Start-Process 리다이렉트는 시작마다 덮어쓰므로
+    # 직전 세대 로그를 .prev로 한 세대 보존해 사망 직후 재기동돼도 증거가 남게 한다.
+    $bridgeLogRoot = Get-KakaoStagingRoot
+    foreach ($stream in @('out', 'err')) {
+        $cur = Join-Path $bridgeLogRoot ("bridge.{0}.log" -f $stream)
+        if (Test-Path -LiteralPath $cur) {
+            Move-Item -LiteralPath $cur -Destination (Join-Path $bridgeLogRoot ("bridge.{0}.prev.log" -f $stream)) -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $bridgeProcess = Start-Process -FilePath $NodePath -ArgumentList $bridgeCommandLine -WorkingDirectory $bridgeDirectory -PassThru -ErrorAction Stop `
+        -RedirectStandardOutput (Join-Path $bridgeLogRoot 'bridge.out.log') `
+        -RedirectStandardError (Join-Path $bridgeLogRoot 'bridge.err.log')
     $bridgeStarted = [pscustomobject]@{
         Name           = 'bridge'
         Process        = $bridgeProcess

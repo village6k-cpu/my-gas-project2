@@ -597,6 +597,23 @@ function appendNdjson(filename, object) {
   fs.appendFileSync(path.join(CONFIG.queueDir, filename), line, 'utf8');
 }
 
+// Node 22+는 unhandledRejection 기본 동작이 프로세스 즉시 종료다. 이 브리지는 Supabase/Slack/
+// CDP fetch 루프 덩어리라 자원 압박·네트워크 순단 시 abort 에러가 폭풍치는데, catch 밖의 거부
+// 하나로 상주 브리지가 통째로 죽으면 안 된다 (2026-08-11 20:05 실측: abort 폭풍 10분 뒤 기록
+// 없이 사망 → 워치독 치유 지연과 겹쳐 장시간 장애). 거부는 기록하고 계속 살고, 동기 예외는
+// 기록 후 종료해 워치독이 깨끗한 상태로 재기동하게 한다.
+process.on('unhandledRejection', (reason) => {
+  try {
+    appendNdjson('errors.ndjson', { at: nowIso(), type: 'process_unhandled_rejection', message: String(reason?.stack || reason).slice(0, 2000) });
+  } catch {}
+});
+process.on('uncaughtException', (error) => {
+  try {
+    appendNdjson('errors.ndjson', { at: nowIso(), type: 'process_uncaught_exception', message: String(error?.stack || error).slice(0, 2000) });
+  } catch {}
+  process.exit(1);
+});
+
 function supabaseConfigured() {
   return Boolean(CONFIG.supabaseUrl && CONFIG.supabaseServiceRoleKey && CONFIG.supabaseTable);
 }

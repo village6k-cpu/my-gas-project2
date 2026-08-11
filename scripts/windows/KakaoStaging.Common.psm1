@@ -341,7 +341,16 @@ function Stop-OwnedProcess {
     }
 
     if (-not (Test-OwnedProcessRecord -Record $record)) {
-        throw "Ownership validation failed for '$Name'; refusing to stop the recorded PID."
+        # 기록된 PID 자리에 실행파일/커맨드마커가 다른 프로세스가 있다 = 원본은 이미 죽었고
+        # OS가 PID를 재사용한 것. 이때 전체 치유를 throw로 거부하면 워치독이 "manual
+        # intervention required"로 웨징된다 (2026-08-11 실측: 에이전트의 프로세스 스폰 폭풍
+        # 중 브리지 PID 재사용 → 자가치유 5~9분 지연). 낯선 프로세스는 절대 건드리지 않고
+        # stale 기록만 걷어내 치유가 계속되게 한다.
+        if (-not $PSCmdlet.ShouldProcess("stale ownership record for reused PID $pidValue ($Name)", 'Remove stale ownership record')) {
+            return $false
+        }
+        Remove-Item -LiteralPath (Get-OwnedProcessRecordPath -Name $Name) -Force -ErrorAction Stop
+        return $true
     }
 
     if (-not $PSCmdlet.ShouldProcess("PID $pidValue ($Name)", 'Stop owned staging process')) {
