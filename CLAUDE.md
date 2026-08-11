@@ -178,6 +178,7 @@ GAS 기준 변경분이 있으면 GitHub에 반영하도록 멈추고 안내함.
 - `scripts/synccheck.sh`는 읽기 전용 진단이며, 로컬 파일을 덮어쓰지 않는다.
 
 ### 주의사항
+- **헤르메스 게이트웨이 재시작은 반드시 `scripts/windows/restart-hermes-gateway.ps1` 경유.** 에이전트 셸(클로드/코덱스)에서 raw `hermes gateway restart` 금지 — 셸의 Redirection Guard가 새 게이트웨이에 유전돼 skills 정션에서 448 장애 발생 (2026-08-11 실측). 래퍼는 정지 후 예약작업(`Hermes_Gateway`/`Hermes_Gateway_Kakaoworker`)으로 재점화해 어느 셸에서 불러도 안전. `Village-Hermes-Gateway-Lineage-Watchdog`가 30분마다 오염/사망을 자동 치유한다.
 - doGet/doPost는 sheetAPI.js에만 정의
 - onOpen은 checkAvailability.js에만 정의
 - .clasp.json의 scriptId로 GAS 프로젝트 식별
