@@ -3,7 +3,7 @@
   "root": {
     "provider": "openai-codex",
     "model": "gpt-5.6-terra",
-    "reasoning_effort": "max"
+    "reasoning_effort": "xhigh"
   },
   "kakaoworker": {
     "model": "gpt-5.6-sol",
