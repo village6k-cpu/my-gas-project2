@@ -21,14 +21,14 @@ ROUTING_PROMPT_START = "[VILLAGE_WINDOWS_RUNTIME_ROUTER_V1]"
 ROUTING_PROMPT_END = "[/VILLAGE_WINDOWS_RUNTIME_ROUTER_V1]"
 
 # 모델/프로바이더 단일 소스: hermes-model-contract.json.
-# 파일이 없으면 검증된 기본값(gpt-5.6-terra / openai-codex / xhigh)으로 동작한다.
+# 파일이 없으면 확정 기본값(gpt-5.6-sol / openai-codex / max, 2026-08-11 사장님 승인)으로 동작한다.
 # 모델 교체는 계약 파일 수정 → 이 스크립트 재실행. default와 provider를 항상 함께
 # 기록해 provider만 남고 model만 되돌아가는 혼합 상태를 구조적으로 차단한다.
 MODEL_CONTRACT_PATH = Path(__file__).with_name("hermes-model-contract.json")
 DEFAULT_ROOT_MODEL_CONTRACT = {
     "provider": "openai-codex",
-    "model": "gpt-5.6-terra",
-    "reasoning_effort": "xhigh",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "max",
 }
 
 
