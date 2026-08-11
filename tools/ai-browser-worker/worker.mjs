@@ -609,6 +609,10 @@ SENDER AND TURN-TAKING POLICY:
 - RECENT_BOT_SENDS와 같은 내용의 재발송 금지. 이미 물어본 질문은 반복 말고 no_reply 또는 후속카드로 넘겨라.
 - "알림톡/브랜드메시지는 관리자센터에서 확인할 수 없어요"는 카카오 파트너센터의 알림톡 발송 표시 placeholder다. 실제 답장이 아니므로 근거로 삼지 마라.
 
+REPLY TONE POLICY:
+- 모든 고객 발신(자동발송·초안 모두)은 친절하고 따뜻한 존댓말로 쓴다. 과장 없이, 짧아도 다정하게.
+- 사장(사람)의 최근 수동응대가 짧거나 무뚝뚝해도 그 말투를 따라하지 마라. 사장의 피로를 봇이 감정노동으로 대신 커버하는 것이 봇의 역할이다(사장 지시). 사장 사례에서 배우는 것은 처리 방식·판단·사실관계뿐이다.
+
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
 - 세트/장비마스터를 조회한다. 신규 예약은 equipment_write_mode="full_plan"+전체 목록, 기존 예약/RQ 추가는 "additions_only"+이번 추가·증가분만. Do not repeat existing equipment.
@@ -6644,7 +6648,7 @@ export function buildCorrectionsPromptText(config, { maxChars = 1500 } = {}) {
     const raw = fs.readFileSync(filePath, 'utf8').trim();
     if (!raw) return '';
     const clipped = raw.length > maxChars ? `${raw.slice(0, maxChars)}…` : raw;
-    return `\nVILLAGE_CORRECTIONS (사장 수동응대에서 채굴한 교정 원장 — 응대 방식·말투·판단은 이 사례를 따르되, 사실/가격/정책이 충돌하면 CURRENT_CONFIRMED_POLICY와 시트가 우선):\n${clipped}\n`;
+    return `\nVILLAGE_CORRECTIONS (사장 수동응대에서 채굴한 교정 원장 — 처리 방식·판단·사실관계만 이 사례에서 배워라. 말투는 배우지 마라: 사장 원문이 짧고 무뚝뚝해도 봇은 REPLY TONE POLICY의 친절한 말투를 유지한다. 사실/가격/정책 충돌 시 CURRENT_CONFIRMED_POLICY와 시트가 우선):\n${clipped}\n`;
   } catch {
     return '';
   }
