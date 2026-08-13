@@ -43,10 +43,10 @@ assert.match(
   'photo lookup must reuse the chunked script cache before scanning Drive'
 );
 
-assert.match(
+assert.doesNotMatch(
   fileIndexBody[0],
   /readDashboardPhotoFileIndexProperties_\(\)/,
-  'photo lookup must keep a durable compressed index after the six-hour cache expires'
+  'photo index must not consume the shared 500KB Script Properties store'
 );
 
 assert.match(
@@ -55,10 +55,10 @@ assert.match(
   'the Drive filename index must be split across cache entries below the 100KB per-key limit'
 );
 
-assert.match(
+assert.doesNotMatch(
   fileIndexBody[0],
   /Utilities\.gzip\([\s\S]*DASHBOARD_PHOTO_FILE_INDEX_PROPERTY_CHUNK_PREFIX_/,
-  'the durable filename index must be compressed and split below the 9KB property limit'
+  'photo index must not be persisted as property chunks that grow with every Drive file'
 );
 
 assert.doesNotMatch(
@@ -70,7 +70,21 @@ assert.doesNotMatch(
 assert.match(
   backend,
   /if \(fileId\) \{[\s\S]{0,320}rememberDashboardPhotoFileIndexEntry_\(fileName, fileId\)/,
-  'photos added outside this web app must join the durable index after their first fallback lookup'
+  'photos added outside this web app must join the six-hour cache after their first fallback lookup'
+);
+
+assert.match(
+  backend,
+  /function cleanupRetiredDashboardPhotoIndexProperties_\(props\)[\s\S]{0,700}DASHBOARD_RETIRED_PHOTO_PROPERTY_CHUNK_PREFIX_[\s\S]{0,300}deleteProperty/,
+  'the next dashboard mutation must reclaim retired photo-index property chunks'
+);
+
+const itemBatchBody = backend.match(/function toggleItemChecksBatch\([\s\S]*?\n}\n\n\/\*\*\n \* 개별 장비 행 체크 토글/);
+assert.ok(itemBatchBody, 'toggleItemChecksBatch must exist before toggleItemCheck');
+assert.match(
+  itemBatchBody[0],
+  /cleanupRetiredDashboardPhotoIndexProperties_\(props\)[\s\S]*beginDashboardMutation_/,
+  'quota recovery must run before a checkout mutation writes its durable log'
 );
 
 console.log('dashboard photo performance static checks passed');

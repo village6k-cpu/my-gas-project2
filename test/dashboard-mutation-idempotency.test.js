@@ -14,6 +14,43 @@ function section(source, start, end) {
   return source.slice(from, to);
 }
 
+test('폐기된 사진 인덱스만 제거하고 운영 설정·반출 상태 속성은 보존한다', () => {
+  const gas = read('checkAvailability.js');
+  const source = section(
+    gas,
+    'var DASHBOARD_SETUP_CLOSING_LEASE_MS_',
+    '\nfunction readDashboardMutationLease_',
+  );
+  const values = new Map([
+    ['dashboard_photo_file_index_v2_property_manifest', '{"v":2,"chunks":2}'],
+    ['dashboard_photo_file_index_v2_property_0', 'large-photo-index-part-0'],
+    ['dashboard_photo_file_index_v2_property_1', 'large-photo-index-part-1'],
+    ['SUPABASE_URL', 'preserve-config'],
+    ['itemCheck_260813-001-01_checkout', '1'],
+  ]);
+  const props = {
+    getKeys: () => Array.from(values.keys()),
+    deleteProperty: (key) => values.delete(key),
+  };
+  let cleanupMarked = false;
+  const context = {
+    CacheService: {
+      getScriptCache: () => ({
+        get: () => null,
+        put(key) { if (key === 'dashboardRetiredPhotoPropertyCleanup_v1') cleanupMarked = true; },
+      }),
+    },
+  };
+  vm.runInNewContext(`${source}\nthis.cleanup = cleanupRetiredDashboardPhotoIndexProperties_;`, context);
+
+  assert.equal(context.cleanup(props), 3);
+  assert.equal(cleanupMarked, true);
+  assert.equal(values.has('dashboard_photo_file_index_v2_property_manifest'), false);
+  assert.equal(values.has('dashboard_photo_file_index_v2_property_0'), false);
+  assert.equal(values.get('SUPABASE_URL'), 'preserve-config');
+  assert.equal(values.get('itemCheck_260813-001-01_checkout'), '1');
+});
+
 test('같은 논리 항목의 오래된 mutation retry만 폐기하고 다른 품목은 보존한다', () => {
   const gas = read('checkAvailability.js');
   const source = section(
