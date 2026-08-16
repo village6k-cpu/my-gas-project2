@@ -15,12 +15,12 @@ const modelContract = JSON.parse(fs.readFileSync(
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const expectedRootSkills = [
-  'village-runtime-router',
-  'village-brain-first',
+  'village-history-evidence',
   'village-operations',
   'productivity-integrations'
 ];
 const forbiddenRootSkills = [
+  'village-runtime-router',
   'village-operations-windows',
   'rpa-automation-operations-windows',
   'google-workspace'
@@ -57,10 +57,9 @@ test('live root Hermes has the no-send Village Brain environment', { skip: !runL
   assert.ok(fs.statSync(brainContext).size > 0, 'compiled Brain context must exist and be non-empty');
 });
 
-test('live root Hermes has the canonical Mac skill packages and scoped RPA profile', { skip: !runLiveChecks }, () => {
+test('live root Hermes has the canonical native skill packages and scoped RPA profile', { skip: !runLiveChecks }, () => {
   const paths = new Map([
     ['village-brain-first', path.join(hermesHome, 'skills', 'village', 'village-brain-first', 'SKILL.md')],
-    ['village-runtime-router', path.join(hermesHome, 'skills', 'village', 'village-runtime-router', 'SKILL.md')],
     ['village-operations', path.join(hermesHome, 'skills', 'productivity', 'village-operations', 'SKILL.md')],
     ['productivity-integrations', path.join(hermesHome, 'skills', 'productivity', 'productivity-integrations', 'SKILL.md')]
   ]);
@@ -70,8 +69,14 @@ test('live root Hermes has the canonical Mac skill packages and scoped RPA profi
   for (const name of ['village-brain-first', 'village-operations']) {
     const content = fs.readFileSync(paths.get(name), 'utf8');
     assert.match(content, /platforms:\s*\[windows\]/i);
-    assert.match(content, /<!-- WINDOWS_EXECUTION_ADAPTER -->/);
+    assert.doesNotMatch(content, /<!-- WINDOWS_EXECUTION_ADAPTER -->/);
+    assert.doesNotMatch(content, /\bvillage_operation\b/i);
   }
+  assert.equal(
+    fs.existsSync(path.join(hermesHome, 'skills', 'village', 'village-runtime-router', 'SKILL.md')),
+    false,
+    'the retired execution router must stay absent from the live root'
+  );
   assert.equal(
     fs.existsSync(path.join(hermesHome, 'profiles', 'kakaoworker', 'skills', 'devops', 'rpa-automation-operations', 'SKILL.md')),
     true,
@@ -96,11 +101,7 @@ test('live root Hermes keeps Mac-style model freedom without injected runtime ro
   assert.doesNotMatch(config, /id:\s*C0B6ZJZ2XU3[\s\S]{0,160}village-runtime-router/);
 });
 
-test('live confirmation routing preserves AI judgment and uses the runner only for verified writes', { skip: !runLiveChecks }, () => {
-  const router = fs.readFileSync(
-    path.join(hermesHome, 'skills', 'village', 'village-runtime-router', 'SKILL.md'),
-    'utf8'
-  );
+test('live confirmation path preserves AI judgment and uses the runner only for verified writes', { skip: !runLiveChecks }, () => {
   const operations = fs.readFileSync(
     path.join(hermesHome, 'skills', 'productivity', 'village-operations', 'SKILL.md'),
     'utf8'
@@ -110,13 +111,16 @@ test('live confirmation routing preserves AI judgment and uses the runner only f
     'utf8'
   );
 
-  assert.match(router, /same full AI reasoning used by screenshot quotes/i);
-  assert.match(router, /failed exact-string probe[\s\S]{0,180}not a reason to ask/i);
-  assert.match(router, /different return dates\/times[\s\S]{0,220}split/i);
-  assert.match(operations, /confirmation request[\s\S]{0,300}same reasoning quality/i);
-  assert.match(operations, /Do not disable learning to save latency/i);
+  assert.equal(
+    fs.existsSync(path.join(hermesHome, 'skills', 'village', 'village-runtime-router', 'SKILL.md')),
+    false
+  );
+  assert.match(operations, /Hermes interprets the request and chooses[\s\S]{0,180}Deterministic code validates and executes/i);
+  assert.match(operations, /Split[\s\S]{0,180}different pickup or return times/i);
+  assert.match(operations, /focused `village-confirm-request` skill only after reasoning/i);
   assert.match(runnerSkill, /execution\/mutation boundary, not a substitute for AI reasoning/i);
   assert.match(runnerSkill, /create-batch/i);
+  assert.match(runnerSkill, /Learning must not be disabled as a speed optimization/i);
   assert.doesNotMatch(runnerSkill, /Do not load `village-operations`/i);
   assert.doesNotMatch(runnerSkill, /Do not run self-improvement/i);
 });
