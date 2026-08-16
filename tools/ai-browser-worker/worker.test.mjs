@@ -741,6 +741,8 @@ test('buildHermesPrompt keeps code as plumbing and requires AI-visible Kakao ver
 
   assert.match(prompt, /AI-first/);
   assert.match(prompt, /카카오.*화면.*직접/s);
+  assert.match(prompt, /DevTools\/CDP.*bridge API/is);
+  assert.doesNotMatch(prompt, /computer_use/i);
   assert.match(prompt, /코드.*판단.*금지/s);
   assert.match(prompt, /Google Sheets.*API/s);
   assert.match(prompt, /FINAL_JSON/);
@@ -1193,7 +1195,7 @@ test('buildHermesPrompt requires existing RQ availability result before follow-u
   assert.match(prompt, /follow-up must report the availability result itself/s);
 });
 
-test('buildHermesArgs preserves the Mac-parity reasoning budget and full read and learning tool surface', () => {
+test('buildHermesArgs preserves the Mac-parity reasoning budget without exposing computer_use', () => {
   const args = buildHermesArgs('prompt text');
   assert.deepEqual(args.slice(0, 10), [
     'chat',
@@ -1202,11 +1204,12 @@ test('buildHermesArgs preserves the Mac-parity reasoning budget and full read an
     '90',
     '-Q',
     '-t',
-    'terminal,file,web,skills,memory,session_search,computer_use,vision',
+    'terminal,file,web,skills,memory,session_search,vision',
     '-q',
     'prompt text'
   ]);
-  assert.ok(args.includes('terminal,file,web,skills,memory,session_search,computer_use,vision'));
+  assert.ok(args.includes('terminal,file,web,skills,memory,session_search,vision'));
+  assert.equal(args.join(' ').includes('computer_use'), false);
   assert.ok(args.includes('--yolo'));
   assert.ok(buildHermesArgs('prompt text', { hermesMaxTurns: 18 }).includes('18'));
   assert.ok(buildHermesArgs('prompt text', { hermesMaxTurns: 90 }).includes('90'));
@@ -2352,6 +2355,50 @@ test('already_answered unregistered reservation stays valid when an actionable s
   assert.equal(silentlyDropped.valid, false);
   assert.ok(silentlyDropped.errors.some((error) => error.includes('actionable schedule follow-up')));
   assert.equal(nonReservation.valid, true);
+});
+
+test('already_answered registered reservation accepts authoritative contract and schedule evidence without an RQ id', () => {
+  const registeredWithoutRequest = validateAiDecisionContract({
+    should_write_to_sheet: false,
+    classification: 'already_answered',
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: true
+    },
+    safety_checks: {
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true
+    },
+    existing_confirm_request_ids: [],
+    follow_up_items: [],
+    reply_decision: {
+      replyMode: 'no_reply',
+      shouldCreateTask: false,
+      safetyClass: 'no_send',
+      grounding: 'authoritative_sheet',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: true
+    }
+  });
+  const staffClaimWithoutSheetEvidence = validateAiDecisionContract({
+    should_write_to_sheet: false,
+    classification: 'already_answered',
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: true
+    },
+    safety_checks: {
+      duplicate_checked_contract_master: false,
+      duplicate_checked_schedule_detail: false
+    },
+    existing_confirm_request_ids: []
+  });
+
+  assert.equal(registeredWithoutRequest.valid, true);
+  assert.equal(staffClaimWithoutSheetEvidence.valid, false);
+  assert.ok(staffClaimWithoutSheetEvidence.errors.some((error) => error.includes('authoritative contract and schedule checks')));
 });
 
 test('extractJsonObject reads fenced FINAL_JSON object', () => {
@@ -3902,7 +3949,7 @@ test('production inquiry constructor never replays customer text or evidence on 
   assert.doesNotMatch(message.text, /&amp;amp;/);
 });
 
-test('buildSlackFollowUpMessage delegates two-channel cards and ignores configured mentions', () => {
+test('buildSlackFollowUpMessage delegates two-channel cards and honors configured mentions', () => {
   const inquiry = buildSlackFollowUpMessage({
     id: 'inquiry-1', customer_name: '윤영준', type: 'customer_inquiry',
     payload: { card_kind: 'inquiry_case', latest_customer_message_cluster: '현금영수증 부탁드립니다.' }
@@ -3920,7 +3967,10 @@ test('buildSlackFollowUpMessage delegates two-channel cards and ignores configur
 
   assert.match(JSON.stringify(inquiry.blocks), /카톡 채널 관리자에서 확인하세요/);
   assert.match(JSON.stringify(manual.blocks), /내가 할 일/);
-  assert.doesNotMatch(JSON.stringify({ inquiry, manual }), /<@U03EB8L0QDR>/);
+  assert.match(JSON.stringify(inquiry.blocks), /<@U03EB8L0QDR>/);
+  assert.match(inquiry.text, /<@U03EB8L0QDR>/);
+  assert.match(JSON.stringify(manual.blocks), /<@U03EB8L0QDR>/);
+  assert.match(manual.text, /<@U03EB8L0QDR>/);
 });
 
 test('follow-up case renders the current internal step without reply controls', () => {
@@ -4039,7 +4089,7 @@ test('follow-up case keeps late internal work on the original inquiry-channel ca
   assert.match(JSON.stringify(message.blocks), /후속업무 발생/);
 });
 
-test('reply-only case stays in the inquiry channel without automatic mentions', () => {
+test('reply-only case stays in the inquiry channel and honors configured mentions', () => {
   const row = {
     id: 'case-reply', customer_name: '홍길동', suggested_reply_draft: '확인 후 안내드리겠습니다.',
     payload: { card_kind: 'follow_up_case', owner_channel: 'inquiry', phase: 'customer_reply', state_version: 3, steps: [] }
@@ -4053,11 +4103,11 @@ test('reply-only case stays in the inquiry channel without automatic mentions', 
   assert.doesNotMatch(rendered, /확인 후 안내드리겠습니다|village_followup_send|village_followup_edit_send/);
   assert.match(rendered, /village_followup_reply_not_needed/);
   assert.match(rendered, /village_followup_open_kakao_manager/);
-  assert.doesNotMatch(rendered, /<@/);
-  assert.doesNotMatch(message.text, /<@/);
+  assert.match(rendered, /<@U123>/);
+  assert.match(message.text, /<@U123>/);
 });
 
-test('Slack follow-up notification names the customer, business task, and next action without staff message replay', () => {
+test('Slack follow-up notification mentions the owner and names the task without staff message replay', () => {
   const message = buildSlackFollowUpMessage({
     id: 'follow-mobile-1',
     type: 'reservation_review',
@@ -4078,8 +4128,8 @@ test('Slack follow-up notification names the customer, business task, and next a
   });
   const blocks = JSON.stringify(message.blocks);
 
-  assert.equal(message.text, '홍길동 · 예약 · 장비 가용 확인 후 안내');
-  assert.doesNotMatch(message.text, /<@U03EB8L0QDR>/);
+  assert.equal(message.text, '<@U03EB8L0QDR> 홍길동 · 예약 · 장비 가용 확인 후 안내');
+  assert.match(blocks, /<@U03EB8L0QDR>/);
   assert.ok(message.text.length <= 40);
   assert.equal((blocks.match(/FX3를 다른 기체로 바꿀 수 있을까요\?/g) || []).length, 1);
   assert.doesNotMatch(blocks, /네네 바꿔드리겠습니다/);
@@ -5667,7 +5717,7 @@ test('buildHermesPrompt scopes auto-send by grounding, not topic whitelist', () 
   assert.ok(prompt.includes('price_paused면 가격 자동발송 금지'));
 });
 
-test('buildBrainContext exposes G-BRAIN files only when present on disk', () => {
+test('buildBrainContext exposes Village Brain files only when present on disk', () => {
   const config = { brainContextPath: 'C:\\brain\\ctx.md', brainCustomerProfilesPath: 'C:\\brain\\profiles.jsonl' };
   assert.deepEqual(buildBrainContext(config, { existsImpl: () => true }), {
     enabled: true,
@@ -5681,7 +5731,7 @@ test('buildBrainContext exposes G-BRAIN files only when present on disk', () => 
   assert.equal(buildBrainContext({}, { existsImpl: () => true }), null);
 });
 
-test('buildHermesPrompt wires G-BRAIN owner context as advisory read-only knowledge', () => {
+test('buildHermesPrompt wires Village Brain owner context as advisory read-only knowledge', () => {
   const prompt = buildHermesPrompt({ id: 'job-brain', preview_text: '단골 문의' }, {
     brainContext: {
       enabled: true,
@@ -5689,13 +5739,14 @@ test('buildHermesPrompt wires G-BRAIN owner context as advisory read-only knowle
       customerProfilesPath: 'C:\\Village\\VILLAGE_Brain\\Ops\\customer-profiles.jsonl'
     }
   });
-  assert.ok(prompt.includes('G-BRAIN OWNER CONTEXT'));
+  assert.ok(prompt.includes('VILLAGE BRAIN OWNER CONTEXT'));
+  assert.equal(prompt.includes('G-BRAIN OWNER CONTEXT'), false);
   assert.ok(prompt.includes('brain-context-latest.md'));
   assert.ok(prompt.includes('customer-profiles.jsonl'));
   assert.ok(prompt.includes('할인유형은 여전히 고객DB I열이 우선'));
   assert.ok(prompt.includes('auto_send grounding으로 선언할 수 없다'));
   const withoutBrain = buildHermesPrompt({ id: 'job-brain-none', preview_text: '문의' });
-  assert.equal(withoutBrain.includes('G-BRAIN OWNER CONTEXT'), false);
+  assert.equal(withoutBrain.includes('VILLAGE BRAIN OWNER CONTEXT'), false);
 });
 
 test('closeKakaoConversationTargetViaDevtools never closes the sole main tab after same-target navigation', async () => {

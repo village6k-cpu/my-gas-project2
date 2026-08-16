@@ -14,8 +14,9 @@ const modelContract = JSON.parse(fs.readFileSync(
   'utf8'
 ));
 const workerContract = modelContract.kakaoworker;
-const workerConfigYaml = `model:\n  default: ${workerContract.model}\n`
-  + `agent:\n  reasoning_effort: ${workerContract.reasoning_effort}\n  max_turns: ${workerContract.max_turns}\n`;
+const workerConfigYaml = `model:\n  default: ${workerContract.model}\n  provider: ${workerContract.provider}\n`
+  + `agent:\n  reasoning_effort: ${workerContract.reasoning_effort}\n  max_turns: ${workerContract.max_turns}\n`
+  + `  disabled_toolsets:\n${workerContract.disabled_toolsets.map((name) => `  - ${name}\n`).join('')}`;
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function writeSkill(hermesHome, relativeDirectory, name, {
@@ -108,10 +109,9 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
       'computer-use',
       'productivity-integrations',
       'software-development-workflows',
-      'village-brain-first',
       'village-confirm-request',
-      'village-operations',
-      'village-runtime-router'
+      'village-history-evidence',
+      'village-operations'
     ]);
     assert.equal(
       fs.readFileSync(path.join(profileHome, '.no-bundled-skills'), 'utf8').trim(),
@@ -121,14 +121,36 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
 
     const operationsRoot = path.join(profileHome, 'skills', 'productivity', 'village-operations');
     const operations = fs.readFileSync(path.join(operationsRoot, 'SKILL.md'), 'utf8');
+    const canonicalWindowsOperations = fs.readFileSync(path.join(
+      root,
+      'scripts',
+      'windows',
+      'hermes-profile-overlay',
+      'skills',
+      'productivity',
+      'village-operations',
+      'SKILL.md'
+    ), 'utf8');
+    assert.equal(
+      operations,
+      canonicalWindowsOperations,
+      'the live profile must use the full verified Windows operations entrypoint, not rebuild a stale Mac copy plus adapter'
+    );
     assert.match(operations, /^name:\s*village-operations$/m);
     assert.match(
       operations,
-      /^description:\s*"Primary Village action route for requested business operations:/m
+      /^description:\s*Use when staff requests Village operational work\.$/m
     );
     assert.match(operations, /^platforms:\s*\[windows\]$/m);
-    assert.match(operations, /Windows execution adapter/i);
-    assert.match(operations, /Existing reservation equipment additions/i);
+    assert.ok(operations.split(/\r?\n/).length <= 210);
+    assert.match(operations, /Interpret before execution/i);
+    assert.match(operations, /Shared execution contract/i);
+    assert.doesNotMatch(operations, /WINDOWS_EXECUTION_ADAPTER/);
+    assert.equal(
+      fs.existsSync(path.join(operationsRoot, 'references', 'mac-full-operating-memory.md')),
+      false,
+      'the full operational playbook must remain the entrypoint, not be hidden behind a duplicate reference layer'
+    );
     assert.equal(fs.existsSync(path.join(operationsRoot, 'references', 'schedule.md')), true);
     assert.equal(fs.existsSync(path.join(operationsRoot, 'references', 'payments.md')), true);
     assert.equal(
@@ -146,21 +168,19 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
 
     const brainRoot = path.join(profileHome, 'skills', 'village', 'village-brain-first');
     const brain = fs.readFileSync(path.join(brainRoot, 'SKILL.md'), 'utf8');
-    assert.match(brain, /^name:\s*village-brain-first$/m);
+    assert.match(brain, /^name:\s*village-history-evidence$/m);
     assert.match(
       brain,
-      /^description:\s*"Primary Village business intelligence route for every business question:/m
+      /^description:\s*Only for explicit Village history; never current operations\.$/m
     );
     assert.match(brain, /^platforms:\s*\[windows\]$/m);
-    assert.match(brain, /Customer lookup/i);
-    assert.match(brain, /explicitly asks[\s\S]{0,300}village-operations/i);
+    assert.match(brain, /Current facts/i);
+    assert.match(brain, /Gary Tan's G-Brain is a separate optional system/i);
+    assert.doesNotMatch(brain, /every business question/i);
     assert.equal(fs.existsSync(path.join(brainRoot, 'references', 'finance.md')), true);
 
     const routerRoot = path.join(profileHome, 'skills', 'village', 'village-runtime-router');
-    const router = fs.readFileSync(path.join(routerRoot, 'SKILL.md'), 'utf8');
-    assert.match(router, /^name:\s*village-runtime-router$/m);
-    assert.match(router, /^platforms:\s*\[windows\]$/m);
-    assert.ok(Buffer.byteLength(router, 'utf8') <= 8_000);
+    assert.equal(fs.existsSync(routerRoot), false, 'the retired execution router must not be installed');
 
     const confirmRequestRoot = path.join(
       profileHome,
@@ -252,15 +272,14 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
     for (const required of [
       'computer-use',
       'productivity-integrations',
-      'village-brain-first',
+      'village-history-evidence',
       'village-confirm-request',
       'village-operations',
-      'village-runtime-router',
       'rpa-automation-operations'
     ]) {
       assert.equal(names.includes(required), true, `${required} must be active in the worker profile`);
     }
-    for (const retired of ['village-operations-windows', 'rpa-automation-operations-windows']) {
+    for (const retired of ['village-brain-first', 'village-operations-windows', 'rpa-automation-operations-windows']) {
       assert.equal(names.includes(retired), false, `${retired} must be removed from the worker profile`);
     }
     assert.equal(fs.existsSync(path.join(workerProfile, 'skills', '000-windows')), false);
@@ -274,8 +293,10 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
     assert.doesNotMatch(identity, /not deep interactive reasoning/i);
     const config = fs.readFileSync(path.join(workerProfile, 'config.yaml'), 'utf8');
     assert.match(config, new RegExp(`^\\s{2}default:\\s*${escapeRegExp(workerContract.model)}\\s*$`, 'm'));
+    assert.match(config, new RegExp(`^\\s{2}provider:\\s*${escapeRegExp(workerContract.provider)}\\s*$`, 'm'));
     assert.match(config, new RegExp(`^\\s{2}reasoning_effort:\\s*${escapeRegExp(workerContract.reasoning_effort)}\\s*$`, 'm'));
     assert.match(config, new RegExp(`^\\s{2}max_turns:\\s*${escapeRegExp(workerContract.max_turns)}\\s*$`, 'm'));
+    assert.match(config, /^\s{2}disabled_toolsets:\s*$[\s\S]*?^\s{2}-\s*computer_use\s*$/m);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -322,8 +343,8 @@ test('profile-scoped sync preserves Hermes self-improvement across repeated star
     );
     assert.equal(first.status, 0, first.stderr || first.stdout);
 
-    const routerPath = path.join(workerProfile, 'skills', 'village', 'village-runtime-router', 'SKILL.md');
-    fs.appendFileSync(routerPath, '\n## Learned rule\n\nSELF_IMPROVED_RULE_MUST_SURVIVE\n', 'utf8');
+    const operationsPath = path.join(workerProfile, 'skills', 'productivity', 'village-operations', 'SKILL.md');
+    fs.appendFileSync(operationsPath, '\n## Learned rule\n\nSELF_IMPROVED_RULE_MUST_SURVIVE\n', 'utf8');
     writeSkill(workerProfile, path.join('learned', 'customer-alias-memory'), 'customer-alias-memory', {
       platforms: ['windows'],
       body: '# Customer Alias Memory\n\nAGENT_CREATED_SKILL_MUST_SURVIVE\n'
@@ -331,7 +352,7 @@ test('profile-scoped sync preserves Hermes self-improvement across repeated star
     fs.writeFileSync(
       path.join(workerProfile, 'skills', '.usage.json'),
       JSON.stringify({
-        'village-runtime-router': { patch_count: 1, last_patched_at: new Date().toISOString() },
+        'village-operations': { patch_count: 1, last_patched_at: new Date().toISOString() },
         'customer-alias-memory': { created_by: 'agent', patch_count: 0 }
       }, null, 2),
       'utf8'
@@ -344,13 +365,13 @@ test('profile-scoped sync preserves Hermes self-improvement across repeated star
     );
     assert.equal(second.status, 0, second.stderr || second.stdout);
 
-    assert.match(fs.readFileSync(routerPath, 'utf8'), /SELF_IMPROVED_RULE_MUST_SURVIVE/);
+    assert.match(fs.readFileSync(operationsPath, 'utf8'), /SELF_IMPROVED_RULE_MUST_SURVIVE/);
     assert.match(
       fs.readFileSync(path.join(workerProfile, 'skills', 'learned', 'customer-alias-memory', 'SKILL.md'), 'utf8'),
       /AGENT_CREATED_SKILL_MUST_SURVIVE/
     );
     const usage = JSON.parse(fs.readFileSync(path.join(workerProfile, 'skills', '.usage.json'), 'utf8'));
-    assert.equal(usage['village-runtime-router'].patch_count, 1);
+    assert.equal(usage['village-operations'].patch_count, 1);
     assert.equal(usage['customer-alias-memory'].created_by, 'agent');
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });

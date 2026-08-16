@@ -1,3 +1,14 @@
+<#
+.SYNOPSIS
+Explicit Hermes skill migration and recovery import.
+
+.DESCRIPTION
+This command is not part of normal gateway, Kakao worker, bridge, restart, or
+watchdog startup. It stages and atomically replaces a selected profile's skill
+tree, so an operator must first create a verified backup and review the emitted
+preservation/conflict report. Run it only for a manual migration or explicit
+recovery; the live profile owns its native learning between imports.
+#>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
 param(
     [Parameter(Mandatory = $true)]
@@ -25,6 +36,7 @@ $rootExcludedSkills = @(
     'obliteratus',
     'village-operations',
     'village-brain-first',
+    'village-history-evidence',
     'village-runtime-router',
     'village-confirm-request'
 )
@@ -34,8 +46,13 @@ $retiredSkillNames = @(
     'obliteratus',
     'google-workspace',
     'village-operations-windows',
-    'rpa-automation-operations-windows'
+    'rpa-automation-operations-windows',
+    'village-brain-first',
+    'village-runtime-router'
 )
+$skillNameAliases = @{
+    'village-brain-first' = 'village-history-evidence'
+}
 $overlaySkillsRoot = Join-Path $PSScriptRoot 'hermes-profile-overlay\skills'
 $encoding = New-Object System.Text.UTF8Encoding($false)
 
@@ -347,7 +364,13 @@ function Copy-PreservedLearningState {
         }
     }
 
-    foreach ($stateFile in @('.usage.json', '.suppressed.json', '.suppressed_skills.json')) {
+    foreach ($stateFile in @(
+        '.usage.json',
+        '.suppressed.json',
+        '.suppressed_skills.json',
+        '.curator_state',
+        '.curator_suppressed'
+    )) {
         $source = Join-Path $activeResolved $stateFile
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             continue
@@ -373,6 +396,316 @@ function Copy-PreservedLearningState {
         files = @($preservedFiles | Select-Object -Unique)
         skills = @($preservedSkills | Select-Object -Unique)
     }
+}
+
+function Read-JsonMetadata {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+    try {
+        return [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8) |
+            ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Cannot read Hermes metadata '$Path': $($_.Exception.Message)"
+    }
+}
+
+function Get-MetadataPropertyValue {
+    param(
+        $Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+    return $property.Value
+}
+
+function Convert-MetadataObjectToMap {
+    param($Object)
+
+    $result = @{}
+    if ($null -eq $Object) {
+        return $result
+    }
+    foreach ($property in @($Object.PSObject.Properties)) {
+        $result[[string]$property.Name] = $property.Value
+    }
+    return $result
+}
+
+function Select-MetadataTimestamp {
+    param(
+        $SourceValue,
+        $ActiveValue,
+        [switch]$Earliest
+    )
+
+    $sourceText = [string]$SourceValue
+    $activeText = [string]$ActiveValue
+    if ([string]::IsNullOrWhiteSpace($sourceText)) {
+        return $(if ([string]::IsNullOrWhiteSpace($activeText)) { $null } else { $activeText })
+    }
+    if ([string]::IsNullOrWhiteSpace($activeText)) {
+        return $sourceText
+    }
+
+    $sourceDate = [DateTimeOffset]::MinValue
+    $activeDate = [DateTimeOffset]::MinValue
+    $sourceValid = [DateTimeOffset]::TryParse($sourceText, [ref]$sourceDate)
+    $activeValid = [DateTimeOffset]::TryParse($activeText, [ref]$activeDate)
+    if (-not $sourceValid -or -not $activeValid) {
+        return $activeText
+    }
+    if ($Earliest.IsPresent) {
+        return $(if ($sourceDate -le $activeDate) { $sourceText } else { $activeText })
+    }
+    return $(if ($sourceDate -ge $activeDate) { $sourceText } else { $activeText })
+}
+
+function Merge-UsageRecord {
+    param(
+        [Parameter(Mandatory = $true)]$SourceRecord,
+        [Parameter(Mandatory = $true)]$ActiveRecord
+    )
+
+    $merged = [ordered]@{}
+    foreach ($property in @($SourceRecord.PSObject.Properties)) {
+        $merged[[string]$property.Name] = $property.Value
+    }
+    foreach ($property in @($ActiveRecord.PSObject.Properties)) {
+        $merged[[string]$property.Name] = $property.Value
+    }
+
+    foreach ($counter in @('use_count', 'view_count', 'patch_count')) {
+        $sourceCount = 0L
+        $activeCount = 0L
+        [void][Int64]::TryParse([string](Get-MetadataPropertyValue -Object $SourceRecord -Name $counter), [ref]$sourceCount)
+        [void][Int64]::TryParse([string](Get-MetadataPropertyValue -Object $ActiveRecord -Name $counter), [ref]$activeCount)
+        $merged[$counter] = [Math]::Max($sourceCount, $activeCount)
+    }
+
+    $merged['created_at'] = Select-MetadataTimestamp `
+        -SourceValue (Get-MetadataPropertyValue -Object $SourceRecord -Name 'created_at') `
+        -ActiveValue (Get-MetadataPropertyValue -Object $ActiveRecord -Name 'created_at') `
+        -Earliest
+    foreach ($timestamp in @('last_used_at', 'last_viewed_at', 'last_patched_at')) {
+        $merged[$timestamp] = Select-MetadataTimestamp `
+            -SourceValue (Get-MetadataPropertyValue -Object $SourceRecord -Name $timestamp) `
+            -ActiveValue (Get-MetadataPropertyValue -Object $ActiveRecord -Name $timestamp)
+    }
+
+    $sourceCreator = [string](Get-MetadataPropertyValue -Object $SourceRecord -Name 'created_by')
+    $activeCreator = [string](Get-MetadataPropertyValue -Object $ActiveRecord -Name 'created_by')
+    $merged['created_by'] = if (-not [string]::IsNullOrWhiteSpace($activeCreator)) {
+        $activeCreator
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($sourceCreator)) {
+        $sourceCreator
+    }
+    else {
+        $null
+    }
+    $merged['pinned'] = [bool](
+        [bool](Get-MetadataPropertyValue -Object $SourceRecord -Name 'pinned') -or
+        [bool](Get-MetadataPropertyValue -Object $ActiveRecord -Name 'pinned')
+    )
+    if ($null -ne $SourceRecord.PSObject.Properties['agent_created'] -or
+        $null -ne $ActiveRecord.PSObject.Properties['agent_created']) {
+        $merged['agent_created'] = [bool](
+            [bool](Get-MetadataPropertyValue -Object $SourceRecord -Name 'agent_created') -or
+            [bool](Get-MetadataPropertyValue -Object $ActiveRecord -Name 'agent_created')
+        )
+    }
+    return $merged
+}
+
+function Merge-UsageMetadata {
+    param(
+        [string]$SourcePath,
+        [string]$ActivePath,
+        [Parameter(Mandatory = $true)][string]$TargetPath,
+        [hashtable]$NameAliases = @{}
+    )
+
+    $sourceObject = Read-JsonMetadata -Path $SourcePath
+    $activeObject = Read-JsonMetadata -Path $ActivePath
+    if ($null -eq $sourceObject -and $null -eq $activeObject) {
+        return 0
+    }
+
+    $sourceRecords = Convert-MetadataObjectToMap -Object $sourceObject
+    $activeRecords = Convert-MetadataObjectToMap -Object $activeObject
+    $names = @($sourceRecords.Keys + $activeRecords.Keys | Sort-Object -Unique)
+    $mergedRecords = [ordered]@{}
+    foreach ($name in $names) {
+        if ($sourceRecords.ContainsKey($name) -and $activeRecords.ContainsKey($name)) {
+            $mergedRecords[$name] = Merge-UsageRecord `
+                -SourceRecord $sourceRecords[$name] `
+                -ActiveRecord $activeRecords[$name]
+        }
+        elseif ($activeRecords.ContainsKey($name)) {
+            $mergedRecords[$name] = $activeRecords[$name]
+        }
+        else {
+            $mergedRecords[$name] = $sourceRecords[$name]
+        }
+    }
+    foreach ($oldName in @($NameAliases.Keys)) {
+        if (-not $mergedRecords.Contains($oldName)) {
+            continue
+        }
+        $newName = [string]$NameAliases[$oldName]
+        $oldRecord = $mergedRecords[$oldName]
+        if ($mergedRecords.Contains($newName)) {
+            $mergedRecords[$newName] = Merge-UsageRecord `
+                -SourceRecord $oldRecord `
+                -ActiveRecord $mergedRecords[$newName]
+        }
+        else {
+            $mergedRecords[$newName] = $oldRecord
+        }
+        $mergedRecords.Remove($oldName)
+    }
+    [IO.File]::WriteAllText(
+        $TargetPath,
+        ($mergedRecords | ConvertTo-Json -Depth 20),
+        $encoding
+    )
+    return $mergedRecords.Count
+}
+
+function Read-BundledManifestMap {
+    param([string]$Path)
+
+    $entries = @{}
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $entries
+    }
+    foreach ($line in @([IO.File]::ReadAllLines($Path, [Text.Encoding]::UTF8))) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            continue
+        }
+        $name = ($trimmed -split ':', 2)[0].Trim()
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $entries[$name] = $trimmed
+        }
+    }
+    return $entries
+}
+
+function Merge-BundledManifest {
+    param(
+        [string]$SourcePath,
+        [string]$ActivePath,
+        [Parameter(Mandatory = $true)][string]$TargetPath,
+        [Parameter(Mandatory = $true)][string[]]$ActiveNames
+    )
+
+    $sourceExists = -not [string]::IsNullOrWhiteSpace($SourcePath) -and
+        (Test-Path -LiteralPath $SourcePath -PathType Leaf)
+    $activeExists = -not [string]::IsNullOrWhiteSpace($ActivePath) -and
+        (Test-Path -LiteralPath $ActivePath -PathType Leaf)
+    if (-not $sourceExists -and -not $activeExists) {
+        return 0
+    }
+
+    $entries = Read-BundledManifestMap -Path $SourcePath
+    $activeEntries = Read-BundledManifestMap -Path $ActivePath
+    foreach ($name in $activeEntries.Keys) {
+        $entries[$name] = $activeEntries[$name]
+    }
+    $activeSet = @{}
+    foreach ($name in $ActiveNames) {
+        $activeSet[$name] = $true
+    }
+    $lines = @($entries.Keys |
+        Where-Object { $activeSet.ContainsKey($_) } |
+        Sort-Object |
+        ForEach-Object { $entries[$_] })
+    $content = if ($lines.Count -gt 0) { ($lines -join "`n") + "`n" } else { '' }
+    [IO.File]::WriteAllText($TargetPath, $content, $encoding)
+    return $lines.Count
+}
+
+function Merge-HubLockMetadata {
+    param(
+        [string]$SourcePath,
+        [string]$ActivePath,
+        [Parameter(Mandatory = $true)][string]$TargetPath,
+        [Parameter(Mandatory = $true)][string]$StagingRoot,
+        [Parameter(Mandatory = $true)][string[]]$ActiveNames
+    )
+
+    $sourceLock = Read-JsonMetadata -Path $SourcePath
+    $activeLock = Read-JsonMetadata -Path $ActivePath
+    if ($null -eq $sourceLock -and $null -eq $activeLock) {
+        return 0
+    }
+
+    $sourceInstalled = Convert-MetadataObjectToMap -Object (
+        Get-MetadataPropertyValue -Object $sourceLock -Name 'installed'
+    )
+    $activeInstalled = Convert-MetadataObjectToMap -Object (
+        Get-MetadataPropertyValue -Object $activeLock -Name 'installed'
+    )
+    foreach ($name in $activeInstalled.Keys) {
+        $sourceInstalled[$name] = $activeInstalled[$name]
+    }
+
+    $activeSet = @{}
+    foreach ($name in $ActiveNames) {
+        $activeSet[$name] = $true
+    }
+    $filtered = [ordered]@{}
+    $stagingResolved = [IO.Path]::GetFullPath($StagingRoot).TrimEnd('\') + '\'
+    foreach ($name in @($sourceInstalled.Keys | Sort-Object)) {
+        if (-not $activeSet.ContainsKey($name)) {
+            continue
+        }
+        $entry = $sourceInstalled[$name]
+        $installPath = [string](Get-MetadataPropertyValue -Object $entry -Name 'install_path')
+        if ([string]::IsNullOrWhiteSpace($installPath) -or [IO.Path]::IsPathRooted($installPath)) {
+            continue
+        }
+        $installedDirectory = [IO.Path]::GetFullPath((Join-Path $StagingRoot $installPath))
+        if (-not $installedDirectory.StartsWith($stagingResolved, [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath (Join-Path $installedDirectory 'SKILL.md') -PathType Leaf)) {
+            continue
+        }
+        $filtered[$name] = $entry
+    }
+
+    $version = Get-MetadataPropertyValue -Object $activeLock -Name 'version'
+    if ($null -eq $version) {
+        $version = Get-MetadataPropertyValue -Object $sourceLock -Name 'version'
+    }
+    if ($null -eq $version) {
+        $version = 1
+    }
+    $targetDirectory = Split-Path -Parent $TargetPath
+    [void](New-Item -ItemType Directory -Path $targetDirectory -Force -ErrorAction Stop)
+    $lock = [ordered]@{
+        version = $version
+        installed = $filtered
+    }
+    [IO.File]::WriteAllText(
+        $TargetPath,
+        ($lock | ConvertTo-Json -Depth 20),
+        $encoding
+    )
+    return $filtered.Count
 }
 
 function Write-CanonicalHashState {
@@ -402,17 +735,20 @@ function Get-HermesWorkerModelContract {
     # 파일이 없으면 검증된 기본값(gpt-5.6-sol, reasoning_effort high, max_turns 90)을 쓴다.
     # 모델 교체는 계약 파일 수정으로만 하고, 이 스크립트는 계약과 프로필의 일치만 검증한다.
     $contract = [pscustomobject]@{
+        provider = 'openai-codex'
         model = 'gpt-5.6-sol'
         reasoning_effort = 'high'
         max_turns = 90
+        disabled_toolsets = @('computer_use')
     }
     $contractPath = Join-Path $PSScriptRoot 'hermes-model-contract.json'
     if (Test-Path -LiteralPath $contractPath -PathType Leaf) {
         $parsed = Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json -ErrorAction Stop
         $worker = $parsed.kakaoworker
-        if ($null -eq $worker -or [string]::IsNullOrWhiteSpace([string]$worker.model)) {
-            throw 'hermes-model-contract.json kakaoworker.model must be a non-empty string.'
+        if ($null -eq $worker -or [string]::IsNullOrWhiteSpace([string]$worker.model) -or [string]::IsNullOrWhiteSpace([string]$worker.provider)) {
+            throw 'hermes-model-contract.json kakaoworker.model and kakaoworker.provider must be non-empty strings.'
         }
+        $contract.provider = ([string]$worker.provider).Trim()
         $contract.model = ([string]$worker.model).Trim()
         if (-not [string]::IsNullOrWhiteSpace([string]$worker.reasoning_effort)) {
             $contract.reasoning_effort = ([string]$worker.reasoning_effort).Trim()
@@ -421,6 +757,11 @@ function Get-HermesWorkerModelContract {
         if ([int]::TryParse([string]$worker.max_turns, [ref]$contractTurns) -and $contractTurns -ge 1) {
             $contract.max_turns = $contractTurns
         }
+        $disabledToolsets = @($worker.disabled_toolsets | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        if ($disabledToolsets.Count -eq 0) {
+            throw 'hermes-model-contract.json kakaoworker.disabled_toolsets must contain computer_use.'
+        }
+        $contract.disabled_toolsets = $disabledToolsets
     }
     return $contract
 }
@@ -443,6 +784,10 @@ function Assert-AiFirstProfileConfig {
             pattern = '(?m)^\s{2}default:\s*["'']?' + [regex]::Escape([string]$contract.model) + '["'']?\s*(?:#.*)?$'
         },
         [pscustomobject]@{
+            name = 'model.provider'
+            pattern = '(?m)^\s{2}provider:\s*["'']?' + [regex]::Escape([string]$contract.provider) + '["'']?\s*(?:#.*)?$'
+        },
+        [pscustomobject]@{
             name = 'agent.reasoning_effort'
             pattern = '(?m)^\s{2}reasoning_effort:\s*["'']?' + [regex]::Escape([string]$contract.reasoning_effort) + '["'']?\s*(?:#.*)?$'
         }
@@ -455,6 +800,14 @@ function Assert-AiFirstProfileConfig {
     $turnsMatch = [regex]::Match($config, '(?m)^\s{2}max_turns:\s*(\d+)\s*(?:#.*)?$')
     if (-not $turnsMatch.Success -or [int]$turnsMatch.Groups[1].Value -lt [int]$contract.max_turns) {
         throw "AI-first worker profile invariant failed for 'agent.max_turns'. It must be present and at least $($contract.max_turns); raising it is allowed, capping below the contract is not."
+    }
+    foreach ($toolset in @($contract.disabled_toolsets)) {
+        $escapedToolset = [regex]::Escape([string]$toolset)
+        $inlineDisabled = [regex]::IsMatch($config, '(?m)^\s{2}disabled_toolsets:\s*\[[^\r\n]*["'']?' + $escapedToolset + '["'']?[^\r\n]*\]\s*(?:#.*)?$')
+        $blockDisabled = [regex]::IsMatch($config, '(?ms)^\s{2}disabled_toolsets:\s*(?:#.*)?\r?\n(?:(?:\s{2}-[^\r\n]*)\r?\n)*?\s{2}-\s*["'']?' + $escapedToolset + '["'']?\s*(?:#.*)?$')
+        if (-not $inlineDisabled -and -not $blockDisabled) {
+            throw "AI-first worker profile invariant failed for 'agent.disabled_toolsets'. It must include '$toolset'."
+        }
     }
 }
 
@@ -494,6 +847,25 @@ $resolvedMacHermesHome = (Resolve-Path -LiteralPath $MacHermesHome -ErrorAction 
 $macSkillsRoot = (Resolve-Path -LiteralPath (Join-Path $resolvedMacHermesHome 'skills') -ErrorAction Stop).Path
 $adapterRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'hermes-profile-overlay\adapters') -ErrorAction Stop).Path
 $packages = @(Get-ActiveSkillPackages -SkillsRoot $macSkillsRoot)
+$macWorkerSkillsRoot = Join-Path $resolvedMacHermesHome 'profiles\kakaoworker\skills'
+$sourceUsagePath = Join-Path $macSkillsRoot '.usage.json'
+$sourceManifestPath = Join-Path $macSkillsRoot '.bundled_manifest'
+$sourceHubDirectory = Join-Path $macSkillsRoot '.hub'
+if ($ProfileScoped.IsPresent -and (Test-Path -LiteralPath $macWorkerSkillsRoot -PathType Container)) {
+    $workerUsagePath = Join-Path $macWorkerSkillsRoot '.usage.json'
+    if (Test-Path -LiteralPath $workerUsagePath -PathType Leaf) {
+        $sourceUsagePath = $workerUsagePath
+    }
+    $workerManifestPath = Join-Path $macWorkerSkillsRoot '.bundled_manifest'
+    if (Test-Path -LiteralPath $workerManifestPath -PathType Leaf) {
+        $sourceManifestPath = $workerManifestPath
+    }
+    $workerHubDirectory = Join-Path $macWorkerSkillsRoot '.hub'
+    if (Test-Path -LiteralPath $workerHubDirectory -PathType Container) {
+        $sourceHubDirectory = $workerHubDirectory
+    }
+}
+$sourceHubLockPath = Join-Path $sourceHubDirectory 'lock.json'
 
 $operationId = [Guid]::NewGuid().ToString('N')
 $skillsRoot = Join-Path $resolvedProfileHome 'skills'
@@ -508,6 +880,7 @@ $rpaPrevious = Join-Path $rpaParent ('.rpa.{0}.bak' -f $operationId)
 $copiedNames = New-Object System.Collections.ArrayList
 $canonicalHashes = @{}
 $preservation = [pscustomobject]@{ files = @(); skills = @() }
+$metadata = [pscustomobject]@{ bundled = 0; hub = 0; usage = 0 }
 
 try {
     [void](New-Item -ItemType Directory -Path $stagingRoot -Force -ErrorAction Stop)
@@ -526,28 +899,23 @@ try {
             name = 'village-operations'
             source = Join-Path $macSkillsRoot 'productivity\village-operations'
             destination = Join-Path $stagingRoot 'productivity\village-operations'
-            adapter = Join-Path $adapterRoot 'village-operations.md'
-            description = 'Primary Village action route for requested business operations: reservations, schedules, equipment changes, documents, payments, settlement, tax, Slack/Kakao, Google Sheets, and project APIs; always verify live readback.'
+            overlay = Join-Path $overlaySkillsRoot 'productivity\village-operations'
         },
         [pscustomobject]@{
-            name = 'village-brain-first'
+            # Keep the historical folder path for lossless Mac import while the
+            # SKILL.md frontmatter exposes the corrected native catalog name.
+            name = 'village-history-evidence'
             source = Join-Path $macSkillsRoot 'village\village-brain-first'
             destination = Join-Path $stagingRoot 'village\village-brain-first'
-            adapter = Join-Path $adapterRoot 'village-brain-first.md'
-            description = 'Primary Village business intelligence route for every business question: load compiled Brain first, then use live project APIs for reservations, revenue, inventory, receivables, payments, tax, equipment, customers, and operations.'
+            overlay = Join-Path $overlaySkillsRoot 'village\village-brain-first'
         }
     )) {
         Copy-SkillPackage -Source $port.source -Destination $port.destination
-        Add-WindowsAdapter -SkillFile (Join-Path $port.destination 'SKILL.md') -AdapterFile $port.adapter -Description $port.description
         Assert-PackageCopy -Source $port.source -Destination $port.destination -IgnoreRootSkill
+        Copy-SkillPackage -Source $port.overlay -Destination $port.destination
+        Assert-PackageCopy -Source $port.overlay -Destination $port.destination
         [void]$copiedNames.Add($port.name)
     }
-
-    $routerSource = Join-Path $overlaySkillsRoot 'village\village-runtime-router'
-    $routerDestination = Join-Path $stagingRoot 'village\village-runtime-router'
-    Copy-SkillPackage -Source $routerSource -Destination $routerDestination
-    Assert-PackageCopy -Source $routerSource -Destination $routerDestination
-    [void]$copiedNames.Add('village-runtime-router')
 
     $confirmRequestSource = Join-Path $overlaySkillsRoot 'productivity\village-confirm-request'
     $confirmRequestDestination = Join-Path $stagingRoot 'productivity\village-confirm-request'
@@ -569,6 +937,9 @@ try {
 
     $canonicalHashes = Get-FileHashMap -Root $stagingRoot
     $previousCanonicalHashes = Read-PreviousCanonicalHashes -StatePath $parityStatePath
+    if (Test-Path -LiteralPath $sourceHubDirectory -PathType Container) {
+        Copy-SkillPackage -Source $sourceHubDirectory -Destination (Join-Path $stagingRoot '.hub')
+    }
     $preservation = Copy-PreservedLearningState `
         -ActiveRoot $skillsRoot `
         -StagingRoot $stagingRoot `
@@ -577,10 +948,28 @@ try {
         -RetiredNames $retiredSkillNames
 
     $rootNames = @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot | ForEach-Object { $_.name })
+    $metadata = [pscustomobject]@{
+        bundled = Merge-BundledManifest `
+            -SourcePath $sourceManifestPath `
+            -ActivePath (Join-Path $skillsRoot '.bundled_manifest') `
+            -TargetPath (Join-Path $stagingRoot '.bundled_manifest') `
+            -ActiveNames $rootNames
+        hub = Merge-HubLockMetadata `
+            -SourcePath $sourceHubLockPath `
+            -ActivePath (Join-Path $skillsRoot '.hub\lock.json') `
+            -TargetPath (Join-Path $stagingRoot '.hub\lock.json') `
+            -StagingRoot $stagingRoot `
+            -ActiveNames $rootNames
+        usage = Merge-UsageMetadata `
+            -SourcePath $sourceUsagePath `
+            -ActivePath (Join-Path $skillsRoot '.usage.json') `
+            -TargetPath (Join-Path $stagingRoot '.usage.json') `
+            -NameAliases $skillNameAliases
+    }
     if (@($rootNames | Select-Object -Unique).Count -ne $rootNames.Count) {
         throw 'Rebuilt Windows skill tree contains duplicate skill names.'
     }
-    foreach ($required in @('village-brain-first', 'village-operations', 'village-runtime-router', 'village-confirm-request', 'productivity-integrations')) {
+    foreach ($required in @('village-history-evidence', 'village-operations', 'village-confirm-request', 'productivity-integrations')) {
         if ($rootNames -notcontains $required) {
             throw "Rebuilt Windows skill tree is missing '$required'."
         }
@@ -588,7 +977,7 @@ try {
     if ($ProfileScoped.IsPresent -and $rootNames -notcontains 'rpa-automation-operations') {
         throw "Rebuilt worker profile is missing 'rpa-automation-operations'."
     }
-    foreach ($forbidden in @('village-operations-windows', 'rpa-automation-operations-windows', 'google-workspace')) {
+    foreach ($forbidden in @('village-brain-first', 'village-operations-windows', 'rpa-automation-operations-windows', 'google-workspace', 'village-runtime-router')) {
         if ($rootNames -contains $forbidden) {
             throw "Rebuilt Windows skill tree still exposes retired '$forbidden'."
         }
@@ -664,7 +1053,8 @@ try {
         copied        = @($copiedNames).Count
         preservedSkills = @($preservation.skills)
         preservedFiles = @($preservation.files).Count
-        canonical     = @('village-brain-first', 'village-operations', 'village-runtime-router', 'village-confirm-request')
+        metadata      = $metadata
+        canonical     = @('village-history-evidence', 'village-operations', 'village-confirm-request')
         profileScoped = @('rpa-automation-operations')
         excluded      = $rootExcludedSkills
     } | ConvertTo-Json -Depth 4 -Compress

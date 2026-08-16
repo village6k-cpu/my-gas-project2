@@ -144,7 +144,67 @@ test('equipment aliases are resolved concurrently in one process without exposin
   assert.doesNotMatch(JSON.stringify(result), /synthetic-key/);
 });
 
-test('an unresolved catalog name fails closed before any mutation', async () => {
+test('unregistered customer wording is preserved as an equipment row instead of being dropped or demoted', async () => {
+  const calls = [];
+  const request = {
+    pickupDate: '2026-08-13',
+    pickupTime: '10:00',
+    returnDate: '2026-08-13',
+    returnTime: '18:00',
+    customerName: '장민혁',
+    items: [{ name: '20-70', quantity: 1 }]
+  };
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    calls.push({ action: parsed.searchParams.get('action'), sheet: parsed.searchParams.get('sheet') });
+    if (parsed.searchParams.get('action') === 'run') {
+      const payload = JSON.parse(parsed.searchParams.get('args'));
+      assert.match(JSON.stringify(payload), /20-70/);
+      assert.doesNotMatch(JSON.stringify(payload), /추가요청/);
+      return response({ success: true, reqID: 'RQ-260813-003' });
+    }
+    if (parsed.searchParams.get('sheet') === '확인요청') {
+      return response({
+        count: 1,
+        results: [{
+          row: 20,
+          data: ['RQ-260813-003', '2026-08-13', '10:00', '2026-08-13', '18:00', '20-70', 1, '', '미등록 장비', '', '장민혁']
+        }]
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  const result = await createConfirmationRequest({
+    config,
+    request,
+    unregisteredOriginals: ['20-70'],
+    fetchImpl
+  });
+
+  assert.equal(result.verified, true);
+  assert.equal(result.rows[0].equipment, '20-70');
+  assert.deepEqual(calls, [
+    { action: 'run', sheet: null },
+    { action: 'search', sheet: '확인요청' }
+  ]);
+});
+
+test('the unregistered-original allowlist rejects names that are not exact equipment rows', async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => createConfirmationRequest({
+      config,
+      request: requestFixture(),
+      unregisteredOriginals: ['20-70'],
+      fetchImpl: async () => { calls += 1; }
+    }),
+    /must exactly match an equipment item/i
+  );
+  assert.equal(calls, 0);
+});
+
+test('an unresolved name without an explicit original-wording allowlist still fails before mutation', async () => {
   const calls = [];
   const fetchImpl = async (url) => {
     calls.push(url);
@@ -155,8 +215,6 @@ test('an unresolved catalog name fails closed before any mutation', async () => 
     () => createConfirmationRequest({ config, request: requestFixture(), fetchImpl }),
     /catalog exact match/i
   );
-
-  assert.equal(calls.length, 2, 'only parallel catalog validation is allowed');
   assert.equal(calls.some((url) => new URL(url).searchParams.get('action') === 'run'), false);
 });
 

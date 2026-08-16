@@ -5,8 +5,12 @@ const test = require('node:test');
 
 const {
   DOMAIN_SHEETS,
+  buildCatalogRequest,
   buildSearchRequest,
-  lookupVillage
+  lookupVillage,
+  parseArgs,
+  readVillageCatalog,
+  readVillageCatalogs
 } = require('../scripts/windows/village-live-query.js');
 
 const config = {
@@ -95,4 +99,78 @@ test('lookup rejects unknown domains instead of falling back to broad drive sear
     () => lookupVillage({ config, domain: 'everything', query: 'x', fetchImpl: async () => {} }),
     /Unknown Village lookup domain/i
   );
+});
+
+test('catalog read gives the AI the raw set master in one read-only request', async () => {
+  const requests = [];
+  const result = await readVillageCatalog({
+    config,
+    sheet: '세트마스터',
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return {
+        ok: true,
+        json: async () => ({
+          sheet: '세트마스터',
+          rowCount: 2,
+          headers: ['세트명', '구성장비명', '수량', '비고', '대체가능장비', '가용체크(Y/N)', '단가'],
+          data: [
+            ['스몰HD 인디7', 'D탭 / SDI or HDMI *1', 1, '', '', 'Y', 25000],
+            ['넉자 플로피', '', '', '', '', '', 5000]
+          ]
+        })
+      };
+    }
+  });
+
+  assert.equal(requests.length, 1);
+  const requestUrl = new URL(requests[0].url);
+  assert.equal(requests[0].options.method, 'GET');
+  assert.equal(requestUrl.searchParams.get('action'), 'read');
+  assert.equal(requestUrl.searchParams.get('sheet'), '세트마스터');
+  assert.equal(requestUrl.searchParams.get('limit'), '1000');
+  assert.equal(result.ok, true);
+  assert.equal(result.rowCount, 2);
+  assert.deepEqual(result.rows[0], ['스몰HD 인디7', 'D탭 / SDI or HDMI *1', 1, '', '', 'Y', 25000]);
+  assert.doesNotMatch(JSON.stringify(result), /synthetic-key/);
+});
+
+test('catalog CLI selects one raw inventory sheet without requiring an alias query', () => {
+  assert.deepEqual(parseArgs(['catalog', '--sheet', '세트마스터']), {
+    command: 'catalog',
+    envFile: 'C:\\Village\\village-ai\\.env.finance',
+    sheet: '세트마스터'
+  });
+  assert.throws(
+    () => buildCatalogRequest(config, { sheet: '확인요청' }),
+    /not an inventory catalog/i
+  );
+});
+
+test('all-catalog mode starts both raw inventory reads together for one AI reasoning pass', async () => {
+  const requests = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const pending = readVillageCatalogs({
+    config,
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      await gate;
+      const sheet = new URL(url).searchParams.get('sheet');
+      return {
+        ok: true,
+        json: async () => ({ sheet, rowCount: 1, headers: ['이름'], data: [[`${sheet} 항목`]] })
+      };
+    },
+    timeoutMs: 1_000
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 2, 'both master reads must start before either one resolves');
+  release();
+  const result = await pending;
+
+  assert.deepEqual(result.catalogs.map((catalog) => catalog.sheet), ['장비마스터', '세트마스터']);
+  assert.equal(result.rowCount, 2);
+  assert.doesNotMatch(JSON.stringify(result), /synthetic-key/);
 });

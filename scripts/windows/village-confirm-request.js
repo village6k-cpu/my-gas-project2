@@ -298,6 +298,23 @@ function normalizeConfirmationRequest(request) {
   return normalized;
 }
 
+function normalizeUnregisteredOriginals(values, request) {
+  if (values === undefined || values === null) return [];
+  if (!Array.isArray(values) || values.length > MAX_EQUIPMENT) {
+    throw new Error(`unregisteredOriginals must contain 0-${MAX_EQUIPMENT} exact equipment names`);
+  }
+  const equipmentNames = new Set(request.장비.map((item) => item.이름));
+  const normalized = [];
+  for (const value of values) {
+    const name = requiredText(value, 'unregisteredOriginals item', 120);
+    if (!equipmentNames.has(name)) {
+      throw new Error(`unregisteredOriginals must exactly match an equipment item: ${name}`);
+    }
+    if (!normalized.includes(name)) normalized.push(name);
+  }
+  return normalized;
+}
+
 // insert가 성공한 뒤(readback 단계부터)의 실패는 "쓰기가 됐는지 알 수 없는" 상태다.
 // reqID를 잃어버리면 에이전트가 재확인(reconcile)할 방법이 없으므로 에러에 구조화해 남긴다.
 function markUncertainWrite(error, reqID, stage) {
@@ -364,16 +381,19 @@ function verifyIntendedReadback(rows, request, reqID) {
 async function createConfirmationRequest({
   config,
   request,
+  unregisteredOriginals = [],
   fetchImpl = globalThis.fetch,
   readTimeoutMs = 30_000,
   writeTimeoutMs = 180_000
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
   const normalized = normalizeConfirmationRequest(request);
+  const normalizedOriginals = normalizeUnregisteredOriginals(unregisteredOriginals, normalized);
 
   await preflightCatalog({
     config,
     requests: [normalized],
+    unregisteredOriginals: normalizedOriginals,
     fetchImpl,
     timeoutMs: readTimeoutMs
   });
@@ -391,6 +411,7 @@ async function updateConfirmationRequest({
   config,
   reqID,
   request,
+  unregisteredOriginals = [],
   fetchImpl = globalThis.fetch,
   readTimeoutMs = 30_000,
   writeTimeoutMs = 180_000
@@ -398,9 +419,11 @@ async function updateConfirmationRequest({
   if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
   const normalizedReqID = normalizeRequestId(reqID);
   const normalized = normalizeConfirmationRequest(request);
+  const normalizedOriginals = normalizeUnregisteredOriginals(unregisteredOriginals, normalized);
   await preflightCatalog({
     config,
     requests: [normalized],
+    unregisteredOriginals: normalizedOriginals,
     fetchImpl,
     timeoutMs: readTimeoutMs
   });
@@ -428,14 +451,17 @@ async function updateConfirmationRequest({
   }
 }
 
-async function preflightCatalog({ config, requests, fetchImpl, timeoutMs }) {
+async function preflightCatalog({ config, requests, unregisteredOriginals = [], fetchImpl, timeoutMs }) {
+  const preservedOriginals = new Set(unregisteredOriginals);
   const catalog = await Promise.all(requests.flatMap((request) => (
-    request.장비.map((item) => searchCatalog({
+    request.장비
+      .filter((item) => !preservedOriginals.has(item.이름))
+      .map((item) => searchCatalog({
       config,
       query: item.이름,
       fetchImpl,
       timeoutMs
-    }))
+      }))
   )));
   const unresolved = catalog.filter((item) => !item.candidates.includes(item.query));
   if (unresolved.length > 0) {
@@ -598,19 +624,28 @@ async function createConfirmationRequests({
   if (!Array.isArray(requests) || requests.length === 0 || requests.length > MAX_BATCH_REQUESTS) {
     throw new Error(`requests must contain 1-${MAX_BATCH_REQUESTS} AI-planned schedule groups`);
   }
-  const normalized = requests.map((request) => normalizeConfirmationRequest(request));
+  const plans = requests.map((entry) => {
+    const wrapped = entry && typeof entry === 'object' && !Array.isArray(entry) && entry.request;
+    const request = normalizeConfirmationRequest(wrapped ? entry.request : entry);
+    return {
+      request,
+      unregisteredOriginals: normalizeUnregisteredOriginals(wrapped ? entry.unregisteredOriginals : [], request)
+    };
+  });
 
   // Validate every AI-planned group before the first mutation. This keeps an
   // unresolved item in a later return-time group from producing a partial batch.
-  await preflightCatalog({
+  await Promise.all(plans.map((plan) => preflightCatalog({
     config,
-    requests: normalized,
+    requests: [plan.request],
+    unregisteredOriginals: plan.unregisteredOriginals,
     fetchImpl,
     timeoutMs: readTimeoutMs
-  });
+  })));
 
   const created = [];
-  for (const request of normalized) {
+  for (const plan of plans) {
+    const request = plan.request;
     try {
       created.push(await insertAndVerifyConfirmationRequest({
         config,
@@ -622,7 +657,7 @@ async function createConfirmationRequests({
     } catch (error) {
       const completed = created.map((item) => item.reqID).join(', ') || 'none';
       const batchError = new Error(
-        `Confirmation-request batch stopped after ${created.length}/${normalized.length}; `
+        `Confirmation-request batch stopped after ${created.length}/${plans.length}; `
         + `completed request IDs: ${completed}. Do not retry completed groups automatically. ${error.message}`
       );
       batchError.completedReqIDs = created.map((item) => item.reqID);
@@ -688,20 +723,23 @@ async function main() {
   } else if (options.command === 'create-batch') {
     result = await createConfirmationRequests({
       config,
-      requests: (Array.isArray(input) ? input : input.requests || []).map((entry) => (
-        entry && typeof entry === 'object' && !Array.isArray(entry) && entry.request ? entry.request : entry
-      ))
+      requests: Array.isArray(input) ? input : input.requests || []
     });
   } else if (options.command === 'update') {
     result = await updateConfirmationRequest({
       config,
       reqID: input.reqID,
-      request: input.request || input
+      request: input.request || input,
+      unregisteredOriginals: input.unregisteredOriginals || []
     });
   } else if (options.command === 'reconcile') {
     result = await reconcileConfirmationRequest({ config, query: input });
   } else {
-    result = await createConfirmationRequest({ config, request: input.request || input });
+    result = await createConfirmationRequest({
+      config,
+      request: input.request || input,
+      unregisteredOriginals: input.unregisteredOriginals || []
+    });
   }
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }

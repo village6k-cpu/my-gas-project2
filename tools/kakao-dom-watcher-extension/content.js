@@ -2,6 +2,48 @@
   'use strict';
 
   const GLOBAL_KEY = '__villageKakaoWatcherInstance';
+  const WATCHER_VERSION = '2026-08-13-cdp-health-v16';
+  const CDP_BRIDGE_SEND = typeof globalThis.__villageKakaoBridgeSend === 'function'
+    ? globalThis.__villageKakaoBridgeSend
+    : null;
+  const IS_EXTENSION_CONTEXT = Boolean(globalThis.chrome?.runtime?.id && !globalThis.__villageKakaoCdpShim);
+  if (IS_EXTENSION_CONTEXT && document.documentElement?.dataset) {
+    document.documentElement.dataset.villageKakaoExtensionWatcherVersion = WATCHER_VERSION;
+    document.documentElement.dataset.villageKakaoExtensionWatcherStatus = 'loading';
+  }
+  if (IS_EXTENSION_CONTEXT) {
+    window.addEventListener('message', (messageEvent) => {
+      const request = messageEvent?.data;
+      if (messageEvent.source !== window) return;
+      if (request?.type === 'village_kakao_watcher_control' && request?.action === 'prefer_cdp') {
+        STATE.cdpPreferred = true;
+        stopWatcher('cdp_watcher_preferred');
+        return;
+      }
+      if (request?.type !== 'village_kakao_bridge_request') return;
+      if (typeof request.requestId !== 'string' || !request.requestId || request.bridgeUrl !== DEFAULT_CONFIG?.bridgeUrl) return;
+      Promise.resolve(chrome.runtime.sendMessage({
+        type: 'village_kakao_bridge_event',
+        bridgeUrl: request.bridgeUrl,
+        event: request.event || {}
+      })).then((result) => {
+        window.postMessage({ type: 'village_kakao_bridge_response', requestId: request.requestId, result }, location.origin);
+      }).catch(() => {
+        window.postMessage({
+          type: 'village_kakao_bridge_response',
+          requestId: request.requestId,
+          result: { ok: false, status: 0 }
+        }, location.origin);
+      });
+    });
+  }
+  if (!IS_EXTENSION_CONTEXT && typeof window.postMessage === 'function') {
+    window.postMessage({
+      type: 'village_kakao_watcher_control',
+      action: 'prefer_cdp',
+      watcherVersion: WATCHER_VERSION
+    }, location.origin);
+  }
   if (window[GLOBAL_KEY]?.cleanup) window[GLOBAL_KEY].cleanup('replaced_by_new_content_script');
 
   const DEFAULT_CONFIG = {
@@ -35,7 +77,10 @@
     started: false,
     lastTopRowsSignature: null,
     lastTopRowsBackstopAt: 0,
-    deepBackstopRunning: false
+    lastTopRowsScanAt: 0,
+    lastTopRowsCount: 0,
+    deepBackstopRunning: false,
+    cdpPreferred: false
   };
 
   function log(...args) {
@@ -251,7 +296,8 @@
     STATE.lastSignatureAt.set(event.eventHash, now);
 
     try {
-      const result = await chrome.runtime.sendMessage({
+      const sendToBridge = CDP_BRIDGE_SEND || chrome.runtime.sendMessage.bind(chrome.runtime);
+      const result = await sendToBridge({
         type: 'village_kakao_bridge_event',
         bridgeUrl: STATE.config.bridgeUrl,
         event
@@ -384,6 +430,8 @@
       });
       if (rows.length >= limit) break;
     }
+    STATE.lastTopRowsScanAt = Date.now();
+    STATE.lastTopRowsCount = rows.length;
     return rows;
   }
 
@@ -579,6 +627,8 @@
         eventHash: hashText(`heartbeat:${location.href}:${Math.floor(Date.now() / 60000)}`),
         previewText: '',
         unreadCount: null,
+        topRowsCount: STATE.lastTopRowsCount,
+        topRowsScanAgeMs: STATE.lastTopRowsScanAt > 0 ? Math.max(0, Date.now() - STATE.lastTopRowsScanAt) : null,
         pageVisibility: document.visibilityState
       });
     }, 60000);
@@ -603,6 +653,9 @@
     STATE.initialScanTimer = null;
     STATE.deepBackstopRunning = false;
     STATE.started = false;
+    if (IS_EXTENSION_CONTEXT && document.documentElement?.dataset) {
+      document.documentElement.dataset.villageKakaoExtensionWatcherStatus = 'stopped';
+    }
     if (['replaced_by_new_content_script', 'pagehide', 'beforeunload'].includes(reason) && STATE.urlWatchTimer) {
       window.clearInterval(STATE.urlWatchTimer);
       STATE.urlWatchTimer = null;
@@ -624,7 +677,7 @@
   }
 
   function startWatcher() {
-    if (STATE.started || !STATE.config.enabled) return;
+    if (STATE.started || !STATE.config.enabled || STATE.cdpPreferred) return;
     if (!isKakaoMainChatListPage()) {
       log('not the Kakao main chat list page', location.href);
       return;
@@ -634,6 +687,9 @@
     startTopRowPolling();
     startDeepBackstop();
     startHeartbeat();
+    if (IS_EXTENSION_CONTEXT && document.documentElement?.dataset) {
+      document.documentElement.dataset.villageKakaoExtensionWatcherStatus = 'running';
+    }
     STATE.snapshotTimer = window.setTimeout(() => postTopRowsSnapshot('top_rows_snapshot'), 1500);
     postEvent({
       source: 'kakao_channel_manager_dom',
@@ -646,6 +702,8 @@
       eventHash: hashText(`content_script_started:${location.href}:${Date.now()}`),
       previewText: '',
       unreadCount: null,
+      topRowsCount: STATE.lastTopRowsCount,
+      topRowsScanAgeMs: STATE.lastTopRowsScanAt > 0 ? Math.max(0, Date.now() - STATE.lastTopRowsScanAt) : null,
       pageVisibility: document.visibilityState
     });
     STATE.initialScanTimer = window.setTimeout(scanInitialUnread, 3000);
@@ -662,7 +720,7 @@
     startWatcher();
   }
 
-  window[GLOBAL_KEY] = { cleanup: stopWatcher, state: STATE };
+  window[GLOBAL_KEY] = { cleanup: stopWatcher, state: STATE, version: WATCHER_VERSION };
   window.addEventListener('pagehide', () => stopWatcher('pagehide'));
   window.addEventListener('beforeunload', () => stopWatcher('beforeunload'));
 

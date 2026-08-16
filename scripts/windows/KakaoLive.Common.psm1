@@ -15,6 +15,7 @@ function Get-KakaoLiveRuntimeContract {
         SUPABASE_RECOVERY_ENABLED         = '1'
         KAKAO_TAB_CLEANUP_ENABLED         = '1'
         HERMES_WORKER_COMMAND_MODE        = 'python_module'
+        HERMES_HOME                       = (Join-Path $env:LOCALAPPDATA 'hermes')
         DEBOUNCE_MS                       = '15000'
         MAX_WAIT_MS                       = '45000'
         WORKER_SLOW_ALERT_MS              = '30000'
@@ -60,21 +61,60 @@ function Test-KakaoLiveBridgeContract {
     )
 }
 
+function Get-KakaoLiveRuntimeState {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [psobject]$Probe
+    )
+
+    if ($null -eq $Probe) { return 'cdp_unavailable' }
+    if ($Probe.PSObject.Properties.Name -contains 'state') {
+        $state = [string]$Probe.state
+        if (-not [string]::IsNullOrWhiteSpace($state)) { return $state }
+    }
+    if ($Probe.PSObject.Properties.Name -contains 'cdpReady' -and $Probe.cdpReady -ne $true) {
+        return 'cdp_unavailable'
+    }
+    if ($Probe.PSObject.Properties.Name -contains 'authenticated' -and $Probe.authenticated -ne $true) {
+        return 'login_required'
+    }
+    if ($Probe.PSObject.Properties.Name -contains 'watcherReady' -and $Probe.watcherReady -ne $true) {
+        return 'watcher_repair_required'
+    }
+    return 'degraded'
+}
+
+function Test-KakaoLiveRuntimeProbe {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [psobject]$Probe
+    )
+
+    if ($null -eq $Probe) { return $false }
+    return [bool](
+        (Get-KakaoLiveRuntimeState -Probe $Probe) -eq 'healthy' -and
+        $Probe.PSObject.Properties.Name -contains 'cdpReady' -and $Probe.cdpReady -eq $true -and
+        $Probe.PSObject.Properties.Name -contains 'authenticated' -and $Probe.authenticated -eq $true -and
+        $Probe.PSObject.Properties.Name -contains 'watcherReady' -and $Probe.watcherReady -eq $true
+    )
+}
+
 function Test-KakaoLiveHealth {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [psobject]$Health
+        [psobject]$Health,
+
+        [AllowNull()]
+        [psobject]$RuntimeProbe = $null
     )
 
-    $runtimeReady = $Health.PSObject.Properties.Name -contains 'runtime' -and
-        $null -ne $Health.runtime -and
-        $Health.runtime.PSObject.Properties.Name -contains 'state' -and
-        $Health.runtime.PSObject.Properties.Name -contains 'cdpReady' -and
-        $Health.runtime.PSObject.Properties.Name -contains 'watcherReady' -and
-        $Health.runtime.state -eq 'healthy' -and
-        $Health.runtime.cdpReady -eq $true -and
-        $Health.runtime.watcherReady -eq $true
+    if ($null -eq $RuntimeProbe -and $Health.PSObject.Properties.Name -contains 'runtime') {
+        $RuntimeProbe = $Health.runtime
+    }
+    $runtimeReady = Test-KakaoLiveRuntimeProbe -Probe $RuntimeProbe
 
     return [bool]((Test-KakaoLiveBridgeContract -Health $Health) -and $runtimeReady)
 }
@@ -276,6 +316,8 @@ Export-ModuleMember -Function @(
     'Get-KakaoLiveRuntimeContract',
     'Set-KakaoLiveRuntimeEnvironment',
     'Test-KakaoLiveBridgeContract',
+    'Get-KakaoLiveRuntimeState',
+    'Test-KakaoLiveRuntimeProbe',
     'Test-KakaoLiveHealth',
     'Get-KakaoLiveRecoveryAction',
     'Get-KakaoLiveSourceRefreshAction',

@@ -18,6 +18,8 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$NodePath,
 
+    [string]$HermesPythonPath = (Join-Path $env:LOCALAPPDATA 'hermes\hermes-agent\venv\Scripts\python.exe'),
+
     [string]$HermesPath,
 
     [switch]$IncludeGateway,
@@ -41,7 +43,8 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') -ErrorA
 $resolvedEnvFile = (Resolve-Path -LiteralPath $EnvFile -ErrorAction Stop).Path
 $resolvedChromePath = (Resolve-Path -LiteralPath $ChromePath -ErrorAction Stop).Path
 $resolvedNodePath = (Resolve-Path -LiteralPath $NodePath -ErrorAction Stop).Path
-$startScriptPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'start-kakao-staging.ps1') -ErrorAction Stop).Path
+$resolvedHermesPythonPath = (Resolve-Path -LiteralPath $HermesPythonPath -ErrorAction Stop).Path
+$startScriptPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'start-kakao-live.ps1') -ErrorAction Stop).Path
 $watchdogScriptPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'watch-kakao-production.ps1') -ErrorAction Stop).Path
 
 $powerShellExecutable = if ($PSVersionTable.PSEdition -eq 'Core') {
@@ -70,7 +73,9 @@ function New-ProductionArgumentLine {
         '-ChromePath',
         (ConvertTo-WindowsCommandLineArgument -Value $resolvedChromePath),
         '-NodePath',
-        (ConvertTo-WindowsCommandLineArgument -Value $resolvedNodePath)
+        (ConvertTo-WindowsCommandLineArgument -Value $resolvedNodePath),
+        '-HermesPythonPath',
+        (ConvertTo-WindowsCommandLineArgument -Value $resolvedHermesPythonPath)
     )
     if ($IncludeGateway.IsPresent) {
         if ([string]::IsNullOrWhiteSpace($HermesPath)) {
@@ -92,7 +97,7 @@ function New-ProductionArgumentLine {
     return $parts -join ' '
 }
 
-$startArguments = New-ProductionArgumentLine -ScriptPath $startScriptPath -WithEnableWrites $true
+$startArguments = New-ProductionArgumentLine -ScriptPath $startScriptPath -WithEnableWrites $false
 $watchdogArguments = New-ProductionArgumentLine -ScriptPath $watchdogScriptPath -WithEnableWrites $false
 
 $enabledSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew
@@ -105,7 +110,7 @@ $watchdogTrigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Now.AddMinute
 $taskDefinitions = @(
     [pscustomobject]@{
         Name        = 'Village-Kakao-Production-Start'
-        Description = 'Write-enabled Windows Kakao production startup at logon (post-cutover).'
+        Description = 'Write-enabled Windows Kakao startup plus authentication/watcher recovery at logon (post-cutover).'
         Trigger     = $logonTrigger
         Action      = New-ScheduledTaskAction -Execute $powerShellExecutable -Argument $startArguments -WorkingDirectory $repoRoot
     },

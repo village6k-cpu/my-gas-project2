@@ -559,7 +559,7 @@ export function buildHermesPrompt(job, options = {}) {
     ? `\nCURRENT_CONFIRMED_POLICY: 주소=서울 마포구 동교로 23길 32 엠페로빌딩 2층, 지도=https://naver.me/FCAutZta, 영업=24시간. 절차=장비명+기간→가용확인→방문수령→반납, 필수=장비명/수량/반출일시/반납일시/예약자명/연락처. 할인=학생 30%, 개인사업자/프리랜서 20%, 단골=개사프20%+10%, 제휴=개사프20%+20%. 장기=2일10%,3~5일20%,6~9일35%,10~14일40%,15~19일45%,20일+50%. 계산=할인 곱셈, 24시간 1일, +6시간 동일, 6시간 초과 +1일, VAT=할인후*1.1 10원 올림.\n`
     : '';
   const brainContextText = options.brainContext?.enabled
-    ? `\nG-BRAIN OWNER CONTEXT (read-only, advisory):\n${options.brainContext.contextPath ? `- 사장 판단 기준·운영 해석 문서(file 도구로 read-only 열람): ${options.brainContext.contextPath}\n` : ''}${options.brainContext.customerProfilesPath ? `- 고객 프로필 JSONL(1인 1줄: name/segment/누적방문/미수금/사고이력/이탈주의): ${options.brainContext.customerProfilesPath} — 파일이 크니 전체를 읽지 말고 현재 고객명이 포함된 줄만 찾아 읽어라.\n` : ''}- 단골/VIP 여부, 미수금, 과거 사고이력, 사장 응대 기준을 파악해 사장처럼 응대하는 데 쓴다. 프로필의 segment는 참고용이며 할인유형은 여전히 고객DB I열이 우선한다.\n- advisory다: 재고/예약/가격/정책의 근거가 아니다. CURRENT_CONFIRMED_POLICY와 시트/화면이 항상 우선하며, brain 파일을 auto_send grounding으로 선언할 수 없다.\n`
+    ? `\nVILLAGE BRAIN OWNER CONTEXT (read-only, advisory):\n${options.brainContext.contextPath ? `- 사장 판단 기준·운영 해석 문서(file 도구로 read-only 열람): ${options.brainContext.contextPath}\n` : ''}${options.brainContext.customerProfilesPath ? `- 고객 프로필 JSONL(1인 1줄: name/segment/누적방문/미수금/사고이력/이탈주의): ${options.brainContext.customerProfilesPath} — 파일이 크니 전체를 읽지 말고 현재 고객명이 포함된 줄만 찾아 읽어라.\n` : ''}- 단골/VIP 여부, 미수금, 과거 사고이력, 사장 응대 기준을 파악해 사장처럼 응대하는 데 쓴다. 프로필의 segment는 참고용이며 할인유형은 여전히 고객DB I열이 우선한다.\n- 이 블록은 빌리지 자체 VILLAGE_Brain 산출물이다. Garry Tan의 별도 오픈소스 GBrain과 혼동하지 않는다.\n- advisory다: 재고/예약/가격/정책의 근거가 아니다. CURRENT_CONFIRMED_POLICY와 시트/화면이 항상 우선하며, brain 파일을 auto_send grounding으로 선언할 수 없다.\n`
     : '';
   return `AI-first Kakao rental-shop worker task.
 
@@ -567,7 +567,7 @@ CRITICAL RULES:
 - This is AI-first. 코드의 역할은 queue/claim/API 호출 같은 plumbing뿐이다.
 - 코드가 고객 의도, 예약 여부, 날짜/시간/장비를 최종 판단하면 안 된다. 코드 판단 금지: AI가 화면과 맥락을 보고 판단하고, 코드는 queue/claim/API write만 수행한다.
 - Outer code will validate your typed decision but will never infer names/dates/equipment, merge a different equipment list, synthesize reply prose, choose attachments, bypass RAG, or reroute follow-ups from keywords. If a required field is incomplete, Hermes is asked to repair it.
-- 카카오 Channel Manager Chrome 화면을 computer_use로 직접 확인하고, 화면에서 보이는 대화 맥락을 우선한다.
+- 카카오 Channel Manager의 실제 대화 맥락은 outer worker가 제공한 live DevTools/CDP DOM 및 bridge API evidence로 확인하고, 화면에서 확인된 맥락을 우선한다.
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use the bounded tool budget deliberately: batch independent read-only checks, avoid repeats, and finish FINAL_JSON before exhausting the turn budget or global timeout. Batch read-only lookups only when query breadth/detail are preserved.
 - Once sufficient, return FINAL_JSON immediately. Tool/API failures are evidence gaps: encode uncertainty in confidence/reason/follow-up; never substitute an apology or progress report.
@@ -630,7 +630,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
 - 확인요청 API는 고객이 말한 분 단위 시간을 HH:MM으로 그대로 받을 수 있다. Hermes는 화면과 대화에서 확인한 시간을 보존하고, outer code는 절대로 분을 버리거나 반올림하지 않는다. 시간이 실제로 모호할 때만 확인 질문/후속조치를 만든다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
-- 직원의 예약 답변(예: "예약 잡아드리겠습니다", "확정했습니다") 자체는 기존 RQ나 시트 등록의 증거가 아니다. 확인요청/계약/스케줄의 authoritative read와 정확한 existing_confirm_request_ids가 없으면 예약 건을 already_answered로 끝내지 마라.
+- 직원의 예약 답변(예: "예약 잡아드리겠습니다", "확정했습니다") 자체는 기존 RQ나 시트 등록의 증거가 아니다. already_registered=true라면 계약마스터와 스케줄상세 authoritative read를 둘 다 완료하고 해당 safety_checks를 true로 둬라. 기존 RQ만 발견했다면 정확한 existing_confirm_request_ids를 넣고 등록 완료로 가장하지 마라.
 - read-catchup에서 기존 RQ를 발견한 경우에도 확인요청 I/J 결과를 읽은 뒤, 그 결과가 ✅/⚠️/❌/미확인 중 무엇인지 후속카드에 명시한다.
 - 기존 RQ를 발견하면 정확한 ID를 existing_confirm_request_ids 배열에 넣는다. 이유/요약 문장에만 쓰지 마라. 외부 코드는 prose에서 RQ를 추출하지 않는다.
 
@@ -647,12 +647,11 @@ SHEETS TOOL AVAILABLE VIA GAS API:
 
 TASK:
 1. Use supplied BROWSER NAVIGATION RESULT/live DevTools DOM first; it is isolated automation Chrome evidence.
-2. Use terminal CUA only when DevTools evidence is insufficient/mismatched and allowed; read/navigation only (list_windows/get_window_state/page get_text/query_dom). Never use CUA to write Sheets or send Kakao.
-3. If using CUA output, print only filtered context around hints/customer, max 2000 chars.
-4. If BROWSER NAVIGATION RESULT says opened_target_chat with hint_matched=true, start from its live conversation_evidence and do not re-open the chat list.
-4. Start with DOM/AX; if insufficient or clipped, use read-only image/vision capture on the already-open automation Kakao target. Never type or send as part of evidence capture.
+2. DevTools/CDP and the bridge API are the only navigation/control path. No screen-control fallback is available; if live evidence is missing, report the evidence gap instead of opening another control loop.
+3. If BROWSER NAVIGATION RESULT says opened_target_chat with hint_matched=true, start from its live conversation_evidence and do not re-open the chat list.
+4. Start with DOM/AX; if insufficient or clipped, use read-only image/vision capture evidence already supplied for the already-open automation Kakao target. Never type or send as part of evidence capture.
 5. Use JOB EVIDENCE navigation_hints only to find/open the target Kakao chat. This is navigation evidence, not business classification evidence.
-6. If the target conversation is not already open/visible, use the supplied read-only DevTools chat-list search first and CUA/vision navigation fallback when allowed. Searching the chat list is allowed evidence navigation; never type into the message compose box and never send during evidence capture. Return unclear only after those read-only discovery paths fail.
+6. If the target conversation is not already open/visible, rely on the supplied read-only DevTools chat-list search result. Searching the chat list is allowed evidence navigation; never type into the message compose box and never send during evidence capture. Return unclear after those read-only discovery paths fail.
 7. Read visible conversation content and recent context; separate staff/outbound vs customer/inbound before classifying. Merge consecutive customer bubbles in the latest customer turn; do not treat staff/outbound messages as customer requests.
 8. If RAG is useful, call it only after reading Kakao. Embed visible Kakao context in the question. Never use RAG for inventory, booking, mutations, duplicates, or to override CURRENT_CONFIRMED_POLICY.
 9. RAG interpretation: high/retrieved can support policy FAQ draft/auto_send when not covered by CURRENT_CONFIRMED_POLICY; low is tone/procedure hint; no_match/empty/error means ignore; ownerReview=true means review; knowledgeSource=general is not firm village policy.
@@ -830,7 +829,7 @@ const AI_FOLLOW_UP_TYPES = new Set(['reply_needed', 'quote_send', 'tax_invoice',
 const AI_FOLLOW_UP_PRIORITIES = new Set(['urgent', 'high', 'normal', 'low']);
 const AI_FOLLOW_UP_STATUSES = new Set(['open', 'done', 'dismissed']);
 const AI_MANUAL_ACTION_FAMILIES = new Set(['invoice_issue', 'reservation_change', 'payment_reconcile', 'inventory_check', 'document_approval']);
-const HERMES_WORKER_TOOLSETS = 'terminal,file,web,skills,memory,session_search,computer_use,vision';
+const HERMES_WORKER_TOOLSETS = 'terminal,file,web,skills,memory,session_search,vision';
 const CONFIRM_REQUEST_DISCOUNT_TYPES = new Set(['학생', '개인사업자/프리랜서', '단골', '제휴', '일반']);
 const CUSTOMER_DOCUMENT_ATTACHMENT_KEYS = new Set([
   'village_bankbook_copy',
@@ -980,12 +979,13 @@ export function validateAiDecisionContract(decision = {}) {
     if (typeof inquiry.is_reservation_inquiry !== 'boolean') {
       errors.push('reservation_inquiry.is_reservation_inquiry must be boolean for already_answered');
     } else if (inquiry.is_reservation_inquiry === true) {
-      const existingIds = Array.isArray(decision.existing_confirm_request_ids)
-        ? decision.existing_confirm_request_ids.map((value) => text(value).trim()).filter(Boolean)
-        : [];
       if (inquiry.already_registered === true) {
-        if (!existingIds.length) {
-          errors.push('existing_confirm_request_ids is required for an already-registered already_answered reservation');
+        const safetyChecks = decision.safety_checks && typeof decision.safety_checks === 'object'
+          ? decision.safety_checks
+          : {};
+        if (safetyChecks.duplicate_checked_contract_master !== true
+          || safetyChecks.duplicate_checked_schedule_detail !== true) {
+          errors.push('an already-registered already_answered reservation requires authoritative contract and schedule checks');
         }
       } else {
         const followUps = Array.isArray(decision.follow_up_items) ? decision.follow_up_items : [];
@@ -3230,19 +3230,40 @@ function buildLegacySlackFollowUpMessage(row = {}, options = {}) {
   return { channel: route.channel, text: fallbackText, blocks };
 }
 
+function addConfiguredSlackMentions(message = {}, config = {}) {
+  const configured = Array.isArray(config.slackMentionUserIds)
+    ? config.slackMentionUserIds
+    : String(config.slackMentionUserIds || '').split(/[\s,]+/);
+  const userIds = [...new Set(configured
+    .map((value) => text(value).trim())
+    .filter((value) => /^U[A-Z0-9]+$/.test(value)))];
+  if (!userIds.length) return message;
+
+  const mentionText = userIds.map((userId) => `<@${userId}>`).join(' ');
+  const blocks = Array.isArray(message.blocks) ? [...message.blocks] : [];
+  const insertAt = blocks[0]?.type === 'header' ? 1 : 0;
+  blocks.splice(insertAt, 0, { type: 'section', text: { type: 'mrkdwn', text: mentionText } });
+  return {
+    ...message,
+    text: `${mentionText}${message.text ? ` ${message.text}` : ''}`,
+    blocks
+  };
+}
+
 export function buildSlackFollowUpMessage(row = {}, options = {}) {
   const route = options.route || routeFollowUpToSlack(row, options.config || {});
   const cardKind = text(row.payload?.card_kind).trim();
+  let message;
   if (cardKind === 'follow_up_case') {
-    return buildSlackFollowUpCaseMessage(row, { ...options, route });
+    message = buildSlackFollowUpCaseMessage(row, { ...options, route });
+  } else if (cardKind === 'inquiry_case' || route.route === 'inquiry') {
+    message = buildSlackInquiryMessage(row, { ...options, route });
+  } else if (cardKind === 'follow_up_task' || route.route === 'follow_up') {
+    message = buildSlackManualTaskMessage(row, { ...options, route });
+  } else {
+    message = buildLegacySlackFollowUpMessage(row, { ...options, route });
   }
-  if (cardKind === 'inquiry_case' || route.route === 'inquiry') {
-    return buildSlackInquiryMessage(row, { ...options, route });
-  }
-  if (cardKind === 'follow_up_task' || route.route === 'follow_up') {
-    return buildSlackManualTaskMessage(row, { ...options, route });
-  }
-  return buildLegacySlackFollowUpMessage(row, { ...options, route });
+  return addConfiguredSlackMentions(message, options.config || {});
 }
 
 async function slackApi(config = {}, method, payload = {}, { httpMethod = 'POST' } = {}) {
@@ -3824,7 +3845,7 @@ function requireConfig() {
     autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
     autoSendLogPath: process.env.AI_WORKER_AUTO_SEND_LOG || path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson'),
     // 응대 교정 원장 — 야간 채굴기(mine-kakao-corrections.mjs)가 사장 수동응대 사례를 적재하고
-    // 워커가 매 판단마다 읽는다. G-BRAIN(사업 참모용)과 의도적으로 분리된 카카오 전용 학습면.
+    // 워커가 매 판단마다 읽는다. Village Brain(사업 참모용)과 의도적으로 분리된 카카오 전용 학습면.
     correctionsPath: process.env.KAKAO_CORRECTIONS_PATH
       || (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Village', 'kakao-corrections', 'corrections-latest.md') : ''),
     autoSendTimeoutMs: Number(process.env.AI_WORKER_AUTO_SEND_TIMEOUT_MS || 20000) || 20000,
@@ -4932,47 +4953,135 @@ export async function attachKakaoFilesViaDevtools(target, attachmentPaths = [], 
   }
 
   const findFileInput = async () => {
-    const doc = await cdpCallImpl(target, 'DOM.getDocument', { depth: -1, pierce: true }, { timeoutMs });
-    const rootNodeId = doc?.root?.nodeId;
-    if (!rootNodeId) return 0;
-    const query = await cdpCallImpl(target, 'DOM.querySelector', { nodeId: rootNodeId, selector: 'input[type="file"]' }, { timeoutMs });
-    if (Number(query?.nodeId || 0)) return Number(query.nodeId);
-    // DOM.querySelector does not cross shadow boundaries even on a pierced tree;
-    // DOM.performSearch does (Kakao 2026-08-06 shadow-root deploy).
-    try {
-      const search = await cdpCallImpl(target, 'DOM.performSearch', { query: 'input[type="file"]', includeUserAgentShadowDOM: true }, { timeoutMs });
-      if (search?.searchId && Number(search?.resultCount || 0) > 0) {
-        const results = await cdpCallImpl(target, 'DOM.getSearchResults', { searchId: search.searchId, fromIndex: 0, toIndex: 1 }, { timeoutMs });
-        await cdpCallImpl(target, 'DOM.discardSearchResults', { searchId: search.searchId }, { timeoutMs }).catch(() => {});
-        return Number(results?.nodeIds?.[0] || 0);
+      // Prefer DOM.performSearch first: Kakao file inputs often live in shadow roots,
+      // and DOM.querySelector can throw "Could not find node with given id" on pierced trees.
+      try {
+        const search = await cdpCallImpl(target, 'DOM.performSearch', { query: 'input[type="file"]', includeUserAgentShadowDOM: true }, { timeoutMs });
+        if (search?.searchId && Number(search?.resultCount || 0) > 0) {
+          const results = await cdpCallImpl(target, 'DOM.getSearchResults', { searchId: search.searchId, fromIndex: 0, toIndex: Math.min(5, Number(search.resultCount || 1)) }, { timeoutMs });
+          await cdpCallImpl(target, 'DOM.discardSearchResults', { searchId: search.searchId }, { timeoutMs }).catch(() => {});
+          const ids = Array.isArray(results?.nodeIds) ? results.nodeIds : [];
+          for (const rawId of ids) {
+            const nodeId = Number(rawId || 0);
+            if (nodeId) return nodeId;
+          }
+        }
+      } catch (searchError) {
+        void searchError;
       }
-    } catch (searchError) {
-      void searchError;
-    }
-    return 0;
-  };
+      try {
+        const doc = await cdpCallImpl(target, 'DOM.getDocument', { depth: -1, pierce: true }, { timeoutMs });
+        const rootNodeId = doc?.root?.nodeId;
+        if (!rootNodeId) return 0;
+        const query = await cdpCallImpl(target, 'DOM.querySelector', { nodeId: rootNodeId, selector: 'input[type="file"]' }, { timeoutMs });
+        if (Number(query?.nodeId || 0)) return Number(query.nodeId);
+      } catch (queryError) {
+        void queryError;
+      }
+      return 0;
+    };
 
   let nodeId = await findFileInput();
-  if (!nodeId && !revealResult?.clicked) {
-    revealResult = await evaluateImpl(target, buildKakaoRevealFileInputExpression(), { timeoutMs }).catch((error) => ({ error: error.message.slice(0, 500) }));
-    nodeId = await findFileInput();
-  }
-  if (!nodeId) {
-    return { attached: false, reason: 'file_input_not_found', files, revealResult };
-  }
+    if (!nodeId && !revealResult?.clicked) {
+      revealResult = await evaluateImpl(target, buildKakaoRevealFileInputExpression(), { timeoutMs }).catch((error) => ({ error: error.message.slice(0, 500) }));
+      nodeId = await findFileInput();
+    }
 
-  await cdpCallImpl(target, 'DOM.setFileInputFiles', { nodeId, files }, { timeoutMs });
-  const sendResult = await evaluateImpl(target, buildKakaoSendPendingAttachmentsExpression(files.length), { timeoutMs })
-    .catch((error) => ({ sendClicked: false, error: error.message.slice(0, 500) }));
-  const selectedFileCount = Number(sendResult?.selectedFileCount || 0);
-  const attached = selectedFileCount >= files.length && sendResult?.sendClicked !== false;
-  return {
-    attached,
-    reason: attached ? 'files_selected_and_send_clicked' : 'attachment_send_not_verified',
-    files,
-    fileCount: files.length,
-    inputNodeId: nodeId,
-    revealResult,
+    // Fallback: assign File/DataTransfer in-page when CDP cannot resolve a stable nodeId
+    // (observed on Kakao Channel Manager conversation windows with shadow-root inputs).
+    if (!nodeId) {
+      const filePayloads = files.map((filePath) => ({
+        name: path.basename(filePath),
+        type: String(filePath).toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream',
+        base64: fs.readFileSync(filePath).toString('base64')
+      }));
+      const assignResult = await evaluateImpl(target, `(() => {
+        const payloads = ${JSON.stringify(filePayloads)};
+        const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+        if (!inputs.length) {
+          const deep = [];
+          const walk = (root) => {
+            if (!root) return;
+            if (root.querySelectorAll) {
+              root.querySelectorAll('input[type="file"]').forEach((el) => deep.push(el));
+            }
+            const tree = root.querySelectorAll ? root.querySelectorAll('*') : [];
+            tree.forEach((el) => {
+              if (el.shadowRoot) walk(el.shadowRoot);
+            });
+          };
+          walk(document);
+          inputs.push(...deep);
+        }
+        if (!inputs.length) return { ok: false, reason: 'no_file_input_in_page' };
+        const dt = new DataTransfer();
+        for (const item of payloads) {
+          const bin = atob(item.base64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          dt.items.add(new File([bytes], item.name, { type: item.type || 'application/octet-stream' }));
+        }
+        let assigned = 0;
+                let usedInputIndex = -1;
+                // IMPORTANT: assign to exactly ONE file input. Kakao conversation windows
+                // often expose 2+ hidden file inputs; filling all of them double-sends.
+                for (let i = 0; i < inputs.length; i++) {
+                  const input = inputs[i];
+                  try {
+                    input.files = dt.files;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    assigned = 1;
+                    usedInputIndex = i;
+                    break;
+                  } catch (e) {}
+                }
+                return {
+                  ok: assigned > 0,
+                  assigned,
+                  usedInputIndex,
+                  inputCount: inputs.length,
+                  fileCount: payloads.length,
+                  window_title: document.title
+                };
+      })()`, { timeoutMs: Math.max(timeoutMs, 60000) }).catch((error) => ({ ok: false, error: error.message.slice(0, 500) }));
+
+      if (!assignResult?.ok) {
+        return { attached: false, reason: 'file_input_not_found', files, revealResult, assignResult };
+      }
+
+      await new Promise((r) => setTimeout(r, 2500));
+      const sendResult = await evaluateImpl(target, buildKakaoSendPendingAttachmentsExpression(files.length), { timeoutMs })
+        .catch((error) => ({ sendClicked: false, error: error.message.slice(0, 500) }));
+      const selectedFileCount = Number(sendResult?.selectedFileCount || assignResult.fileCount || 0);
+      const attached = selectedFileCount >= files.length && sendResult?.sendClicked !== false;
+      // Kakao sometimes auto-sends file bubbles on change without needing submit.
+      const autoAttached = assignResult.ok && (sendResult?.selectedFileCount > 0 || sendResult?.sendClicked === false);
+      return {
+        attached: attached || Boolean(assignResult.ok),
+        reason: (attached || assignResult.ok) ? 'files_assigned_via_datatransfer' : 'attachment_send_not_verified',
+        files,
+        fileCount: files.length,
+        inputNodeId: 0,
+        revealResult,
+        assignResult,
+        sendResult,
+        autoAttached
+      };
+    }
+
+    await cdpCallImpl(target, 'DOM.setFileInputFiles', { nodeId, files }, { timeoutMs });
+    const sendResult = await evaluateImpl(target, buildKakaoSendPendingAttachmentsExpression(files.length), { timeoutMs })
+      .catch((error) => ({ sendClicked: false, error: error.message.slice(0, 500) }));
+    const selectedFileCount = Number(sendResult?.selectedFileCount || 0);
+    const attached = selectedFileCount >= files.length && sendResult?.sendClicked !== false;
+    return {
+      attached,
+      reason: attached ? 'files_selected_and_send_clicked' : 'attachment_send_not_verified',
+      files,
+      fileCount: files.length,
+      inputNodeId: nodeId,
+      revealResult,
     sendResult
   };
 }
@@ -6640,7 +6749,7 @@ export function buildRecentBotSendsPromptText(config, job = {}, { limit = 5, win
 
 // 응대 교정 원장(사장 수동응대 사례) 프롬프트 블록. 원장 파일은 야간 채굴기가 쓰고 사장이
 // 직접 편집/삭제할 수 있는 마크다운이다. 최신 사례가 파일 앞쪽이므로 앞에서 자른다.
-// G-BRAIN과 분리된 카카오 전용이며 advisory가 아니라 응대 방식 지시로 주입된다.
+// Village Brain과 분리된 카카오 전용이며 advisory가 아니라 응대 방식 지시로 주입된다.
 export function buildCorrectionsPromptText(config, { maxChars = 1500 } = {}) {
   try {
     const filePath = config?.correctionsPath;

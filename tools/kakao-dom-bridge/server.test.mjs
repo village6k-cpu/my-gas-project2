@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
 const {
   buildCorsHeaders,
+  buildHealthConfig,
   buildWorkerTreeKillInvocation,
   hasUnreadCount,
   mergeQueuedRoomJobs,
@@ -15,6 +16,38 @@ const {
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+
+test('health config exposes the live safety contract used by supervised restarts', async () => {
+  assert.deepEqual(buildHealthConfig({
+    workerLive: true,
+    autoSendEnabled: true,
+    workerDryRun: false,
+    windowsWritesEnabled: true,
+    startupCatchupSupported: true
+  }), {
+    workerLive: true,
+    autoSendEnabled: true,
+    workerDryRun: false,
+    windowsWritesEnabled: true,
+    startupCatchupSupported: true
+  });
+
+  const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  assert.match(source, /startupCatchupSupported:\s*true/);
+  assert.doesNotMatch(
+    source,
+    /startupCatchupSupported:\s*process\.env\.PROCESS_INITIAL_SCAN/,
+    'catch-up capability is independent from whether initial-scan events are currently processed'
+  );
+});
+
+test('bridge-created failure cards forward configured Slack mention recipients', async () => {
+  const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /slackMentionUserIds:\s*String\(process\.env\.SLACK_CARD_MENTION_USER_IDS/
+  );
+});
 
 test('stable Kakao chat identity survives normalization and debounce grouping', () => {
   const first = normalizeEvent({

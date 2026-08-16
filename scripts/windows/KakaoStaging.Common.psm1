@@ -510,6 +510,102 @@ function Test-LocalTcpPort {
     }
 }
 
+function Get-OwnedKakaoChromeArguments {
+    [CmdletBinding()]
+    param(
+        [ValidateRange(1, 65535)] [int]$DevToolsPort = 9223,
+        [Parameter(Mandatory = $true)] [string]$ProfilePath,
+        [Parameter(Mandatory = $true)] [string]$ExtensionPath,
+        [Parameter(Mandatory = $true)] [string]$StartUrl
+    )
+
+    return @(
+        '--remote-debugging-address=127.0.0.1',
+        "--remote-debugging-port=$DevToolsPort",
+        '--no-first-run',
+        '--start-minimized',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        "--user-data-dir=$ProfilePath",
+        "--disable-extensions-except=$ExtensionPath",
+        "--load-extension=$ExtensionPath",
+        $StartUrl
+    )
+}
+
+function Start-OwnedKakaoChrome {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$ChromePath,
+        [Parameter(Mandatory = $true)] [string]$ExtensionPath,
+        [ValidateRange(1, 65535)] [int]$DevToolsPort = 9223,
+        [string]$StartUrl = 'https://business.kakao.com/_xhPMls/chats?t_src=business_partnercenter&t_ch=lnb&t_obj=%EB%82%B4%EC%B1%84%ED%8C%85_%ED%81%B4%EB%A6%AD'
+    )
+
+    $resolvedChromePath = (Resolve-Path -LiteralPath $ChromePath -ErrorAction Stop).Path
+    $resolvedExtensionPath = (Resolve-Path -LiteralPath $ExtensionPath -ErrorAction Stop).Path
+    $chromeFile = Get-Item -LiteralPath $resolvedChromePath -ErrorAction Stop
+    $chromeProductName = [string]$chromeFile.VersionInfo.ProductName
+    $chromeFileVersion = $null
+    if (-not [version]::TryParse([string]$chromeFile.VersionInfo.FileVersion, [ref]$chromeFileVersion)) {
+        throw 'ChromePath does not expose a valid browser file version.'
+    }
+    if ($chromeProductName -eq 'Google Chrome' -and $chromeFileVersion.Major -ge 137) {
+        throw 'Google Chrome 137+ blocks command-line extension loading. Use Chrome for Testing or Chromium for the Kakao staging runtime.'
+    }
+    if ($null -ne (Read-OwnedProcessRecord -Name 'chrome')) {
+        throw "An ownership record already exists for 'chrome'; refusing to overwrite it."
+    }
+    if (Test-LocalTcpPort -Port $DevToolsPort) {
+        throw 'The localhost DevTools port is already in use by an unowned process.'
+    }
+
+    Initialize-KakaoStagingRuntimeStorage
+    $chromeProfilePath = Join-Path (Join-Path $env:LOCALAPPDATA 'Village') 'chrome-kakao'
+    [void](New-Item -ItemType Directory -Path $chromeProfilePath -Force -ErrorAction Stop)
+    $chromeProfileArgument = "--user-data-dir=$chromeProfilePath"
+    $chromeArguments = @(Get-OwnedKakaoChromeArguments -DevToolsPort $DevToolsPort `
+        -ProfilePath $chromeProfilePath -ExtensionPath $resolvedExtensionPath -StartUrl $StartUrl | ForEach-Object {
+            ConvertTo-WindowsCommandLineArgument -Value $_
+        })
+    $chromeCommandLine = $chromeArguments -join ' '
+    # Chromium can relaunch itself and normalize --user-data-dir quoting.  Keep
+    # the unique profile path as the ownership marker so the verified browser
+    # remains recognizable across that self-relaunch.
+    $chromeCommandMarker = $chromeProfilePath
+    $chromeProcess = Start-Process -FilePath $resolvedChromePath -ArgumentList $chromeCommandLine -PassThru -ErrorAction Stop
+    $recorded = $false
+    try {
+        Write-OwnedProcessRecord -Name 'chrome' -Process $chromeProcess -ExecutablePath $resolvedChromePath `
+            -CommandMarker $chromeCommandMarker -Port $DevToolsPort
+        $recorded = $true
+        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        while (-not (Test-LocalTcpPort -Port $DevToolsPort)) {
+            if ([DateTime]::UtcNow -ge $deadline -or $chromeProcess.HasExited) {
+                throw 'Owned Chrome did not make its localhost DevTools port ready.'
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        return [pscustomobject]@{
+            Process = $chromeProcess
+            ExecutablePath = $resolvedChromePath
+            CommandMarker = $chromeCommandMarker
+            Port = $DevToolsPort
+        }
+    }
+    catch {
+        if ($recorded) {
+            Stop-OwnedProcess -Name 'chrome' -Confirm:$false | Out-Null
+        }
+        elseif (-not $chromeProcess.HasExited) {
+            Stop-VerifiedProcess -Process $chromeProcess -ExecutablePath $resolvedChromePath `
+                -CommandMarker $chromeCommandMarker -Confirm:$false | Out-Null
+        }
+        throw
+    }
+}
+
 Export-ModuleMember -Function @(
     'ConvertTo-WindowsCommandLineArgument',
     'Import-DotEnvFile',
@@ -523,5 +619,7 @@ Export-ModuleMember -Function @(
     'Stop-OwnedProcess',
     'Stop-VerifiedProcess',
     'Get-DescendantProcessIds',
-    'Test-LocalTcpPort'
+    'Test-LocalTcpPort',
+    'Get-OwnedKakaoChromeArguments',
+    'Start-OwnedKakaoChrome'
 )

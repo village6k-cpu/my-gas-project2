@@ -13,7 +13,7 @@
 #   gateway-service vbs를 그대로 쓴다. 재시작 후 새 PID의 완화 정책을 실측해 검증한다.
 #
 # 사용:
-#   restart-hermes-gateway.ps1                      # root + kakaoworker 모두 재시작
+#   restart-hermes-gateway.ps1                      # 실제 메시징 게이트웨이(root) 재시작
 #   restart-hermes-gateway.ps1 -Target root         # 헤이빌리(슬랙) 게이트웨이만
 #   restart-hermes-gateway.ps1 -Target kakaoworker  # 카카오 워커 게이트웨이만
 #   restart-hermes-gateway.ps1 -HealOnly            # 워치독 모드: 오염/사망 시에만 조치, 건강하면 무음
@@ -91,13 +91,51 @@ function Get-GatewayPidFromFile {
     } catch { return [uint32]0 }
 }
 
+function Get-OfficialGatewayPid {
+    param([string]$PidFile)
+
+    $code = 'from pathlib import Path; from gateway.status import get_running_pid; import sys; pid=get_running_pid(Path(sys.argv[1]), cleanup_stale=False); print(pid or 0)'
+    Push-Location $AgentDir
+    try {
+        $output = & $VenvPython -c $code $PidFile 2>$null | Select-Object -Last 1
+        $officialPid = [uint32]0
+        if ($LASTEXITCODE -eq 0 -and [uint32]::TryParse(([string]$output).Trim(), [ref]$officialPid)) {
+            return $officialPid
+        }
+    }
+    catch {}
+    finally { Pop-Location }
+    return [uint32]0
+}
+
 function Get-ProfileGatewayProcs {
-    param([scriptblock]$Match)
+    param(
+        [scriptblock]$Match,
+        [string]$PidFile
+    )
     $result = @()
+    $seen = @{}
     $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue
     foreach ($p in $procs) {
         $cmd = [string]$p.CommandLine
-        if ($cmd -and (& $Match $cmd)) { $result += $p }
+        if ($cmd -and (& $Match $cmd)) {
+            $result += $p
+            $seen[[uint32]$p.ProcessId] = $true
+        }
+    }
+
+    # Some Windows process lineages deny Win32_Process.CommandLine even to the
+    # watchdog account. In that case, delegate liveness to Hermes' own PID,
+    # runtime-lock, and process-identity validator instead of false-restarting.
+    $officialPid = Get-OfficialGatewayPid -PidFile $PidFile
+    if ($officialPid -ne 0 -and -not $seen.ContainsKey($officialPid)) {
+        $official = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $officialPid) -ErrorAction SilentlyContinue
+        if ($null -ne $official) {
+            $result += $official
+        }
+        elseif ($null -ne (Get-Process -Id $officialPid -ErrorAction SilentlyContinue)) {
+            $result += [pscustomobject]@{ ProcessId = $officialPid; CommandLine = $null }
+        }
     }
     return $result
 }
@@ -105,7 +143,7 @@ function Get-ProfileGatewayProcs {
 function Invoke-OneRestart {
     param([string]$Name, [switch]$HealMode)
     $info  = $Profiles[$Name]
-    $procs = Get-ProfileGatewayProcs -Match $info.Match
+    $procs = @(Get-ProfileGatewayProcs -Match $info.Match -PidFile $info.PidFile)
     $poisoned = @($procs | Where-Object { [VillageMit]::RedirectionTrust([uint32]$_.ProcessId) -eq 1 })
 
     if ($HealMode) {
@@ -126,12 +164,12 @@ function Invoke-OneRestart {
 
         $deadline = (Get-Date).AddSeconds(210)   # restart_drain_timeout 180s + 여유
         while ((Get-Date) -lt $deadline) {
-            $procs = Get-ProfileGatewayProcs -Match $info.Match
+            $procs = @(Get-ProfileGatewayProcs -Match $info.Match -PidFile $info.PidFile)
             if ($procs.Count -eq 0) { break }
             Start-Sleep -Seconds 3
         }
         # graceful 실패분 강제 정리 (수퍼바이저 쌍 포함)
-        $procs = Get-ProfileGatewayProcs -Match $info.Match
+        $procs = @(Get-ProfileGatewayProcs -Match $info.Match -PidFile $info.PidFile)
         foreach ($p in $procs) {
             Write-Log ("{0}: 강제 종료 pid={1}" -f $Name, $p.ProcessId)
             Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
@@ -180,7 +218,7 @@ function Invoke-OneRestart {
 
 # --- 실행 -------------------------------------------------------------------
 $targets = @()
-if ($Target -eq 'all') { $targets = @('root', 'kakaoworker') } else { $targets = @($Target) }
+if ($Target -eq 'all') { $targets = @('root') } else { $targets = @($Target) }
 
 $ok = $true
 foreach ($t in $targets) {

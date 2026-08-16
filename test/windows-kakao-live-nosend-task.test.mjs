@@ -1,0 +1,370 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import test from 'node:test';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const scripts = path.join(root, 'scripts', 'windows');
+
+function psLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function runPowerShell(command) {
+  return spawnSync(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+    { encoding: 'utf8', cwd: root }
+  );
+}
+
+function parseJson(result) {
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout);
+}
+
+test('live/no-send health contract rejects every customer-send or approval-poller state', () => {
+  const modulePath = path.join(scripts, 'KakaoLiveNoSend.Common.psm1');
+  const result = runPowerShell(`
+    Import-Module ${psLiteral(modulePath)} -Force
+    $base = [pscustomobject]@{
+      ok = $true
+      config = [pscustomobject]@{
+        workerLive = $true
+        autoSendEnabled = $false
+        slackCardDeliveryEnabled = $true
+        slackActionPollEnabled = $false
+      }
+    }
+    $autoSend = $base | ConvertTo-Json -Depth 4 | ConvertFrom-Json
+    $autoSend.config.autoSendEnabled = $true
+    $poller = $base | ConvertTo-Json -Depth 4 | ConvertFrom-Json
+    $poller.config.slackActionPollEnabled = $true
+    $noCards = $base | ConvertTo-Json -Depth 4 | ConvertFrom-Json
+    $noCards.config.slackCardDeliveryEnabled = $false
+    [pscustomobject]@{
+      safe = Test-KakaoLiveNoSendHealth -Health $base
+      autoSend = Test-KakaoLiveNoSendHealth -Health $autoSend
+      poller = Test-KakaoLiveNoSendHealth -Health $poller
+      noCards = Test-KakaoLiveNoSendHealth -Health $noCards
+    } | ConvertTo-Json -Compress
+  `);
+
+  assert.deepEqual(parseJson(result), {
+    safe: true,
+    autoSend: false,
+    poller: false,
+    noCards: false
+  });
+});
+
+test('no-send transition permits queued live work only behind an explicit switch and never while a worker runs', () => {
+  const modulePath = path.join(scripts, 'KakaoLiveNoSend.Common.psm1');
+  const result = runPowerShell(`
+    Import-Module ${psLiteral(modulePath)} -Force
+    $queuedLive = [pscustomobject]@{
+      state = [pscustomobject]@{ workerRunning = $false; workerQueueLength = 13 }
+      config = [pscustomobject]@{ autoSendEnabled = $true; slackActionPollEnabled = $true }
+    }
+    $running = $queuedLive | ConvertTo-Json -Depth 4 | ConvertFrom-Json
+    $running.state.workerRunning = $true
+    [pscustomobject]@{
+      normal = Test-KakaoNoSendTransitionAllowed -Health $queuedLive -AllowLiveTransition:$false
+      explicit = Test-KakaoNoSendTransitionAllowed -Health $queuedLive -AllowLiveTransition:$true
+      running = Test-KakaoNoSendTransitionAllowed -Health $running -AllowLiveTransition:$true
+    } | ConvertTo-Json -Compress
+  `);
+
+  assert.deepEqual(parseJson(result), {
+    normal: false,
+    explicit: true,
+    running: false
+  });
+});
+
+test('no-send transition forcibly disables customer send and approval polling', () => {
+  const modulePath = path.join(scripts, 'KakaoLiveNoSend.Common.psm1');
+  const result = runPowerShell(`
+    Import-Module ${psLiteral(modulePath)} -Force
+    $env:AI_WORKER_LIVE = '1'
+    $env:AI_WORKER_AUTO_SEND = '1'
+    $env:AI_WORKER_DRY_RUN = '1'
+    $env:SLACK_ACTION_POLL_ENABLED = '1'
+    $env:SLACK_AGENT_CARD_DELIVERY_ENABLED = '0'
+    $env:VILLAGE_WINDOWS_WRITES_ENABLED = '0'
+    Set-KakaoLiveNoSendEnvironment
+    [pscustomobject]@{
+      workerLive = $env:AI_WORKER_LIVE
+      autoSend = $env:AI_WORKER_AUTO_SEND
+      dryRun = $env:AI_WORKER_DRY_RUN
+      actionPoll = $env:SLACK_ACTION_POLL_ENABLED
+      slackCards = $env:SLACK_AGENT_CARD_DELIVERY_ENABLED
+      windowsWrites = $env:VILLAGE_WINDOWS_WRITES_ENABLED
+    } | ConvertTo-Json -Compress
+  `);
+
+  assert.deepEqual(parseJson(result), {
+    workerLive: '1',
+    autoSend: '0',
+    dryRun: '0',
+    actionPoll: '0',
+    slackCards: '1',
+    windowsWrites: '1'
+  });
+});
+
+test('live/no-send runtime repairs authentication and watcher without enabling full-live', () => {
+  const modulePath = path.join(scripts, 'KakaoLiveNoSend.Common.psm1');
+  const result = runPowerShell(`
+    Import-Module ${psLiteral(modulePath)} -Force
+    [pscustomobject]@{
+      healthy = Get-KakaoLiveNoSendRecoveryAction -RuntimeState 'healthy'
+      login = Get-KakaoLiveNoSendRecoveryAction -RuntimeState 'login_required'
+      watcher = Get-KakaoLiveNoSendRecoveryAction -RuntimeState 'watcher_repair_required'
+      challenge = Get-KakaoLiveNoSendRecoveryAction -RuntimeState 'second_factor_required'
+      degraded = Get-KakaoLiveNoSendRecoveryAction -RuntimeState 'degraded'
+    } | ConvertTo-Json -Compress
+  `);
+
+  assert.deepEqual(parseJson(result), {
+    healthy: 'none',
+    login: 'recover_login',
+    watcher: 'repair_watcher_only',
+    challenge: 'preserve_and_wait',
+    degraded: 'preserve_and_wait'
+  });
+
+  const source = readFileSync(path.join(scripts, 'start-kakao-live-nosend.ps1'), 'utf8');
+  assert.match(source, /Invoke-KakaoLoginRecovery/);
+  assert.match(source, /Repair-KakaoWatcherRuntime/);
+  assert.match(source, /Repair-KakaoWatcherRuntime\s+-Force/);
+  assert.match(source, /autoSendEnabled\s*=\s*\$false/);
+  assert.doesNotMatch(source, /Restart-KakaoBridgeLive/);
+});
+
+test('live/no-send startup plan promotes staging ownership without enabling customer sends', () => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'village-live-task-'));
+  try {
+    const envFile = path.join(temp, 'runtime.env');
+    const chromePath = path.join(temp, 'chrome.exe');
+    const nodePath = path.join(temp, 'node.exe');
+    const hermesPythonPath = path.join(temp, 'python.exe');
+    writeFileSync(envFile, 'AI_WORKER_AUTO_SEND=0\n');
+    writeFileSync(chromePath, 'fixture');
+    writeFileSync(nodePath, 'fixture');
+    writeFileSync(hermesPythonPath, 'fixture');
+
+    const startScript = path.join(scripts, 'start-kakao-live-nosend.ps1');
+    const result = runPowerShell(`& ${psLiteral(startScript)} ` +
+      `-EnvFile ${psLiteral(envFile)} -ChromePath ${psLiteral(chromePath)} ` +
+      `-NodePath ${psLiteral(nodePath)} -HermesPythonPath ${psLiteral(hermesPythonPath)} -PlanOnly`);
+    const plan = parseJson(result);
+
+    assert.deepEqual(plan.runtime, {
+      AI_WORKER_LIVE: '1',
+      AI_WORKER_AUTO_SEND: '0',
+      AI_WORKER_DRY_RUN: '0',
+      SLACK_ACTION_POLL_ENABLED: '0',
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+      VILLAGE_WINDOWS_WRITES_ENABLED: '1',
+      HERMES_WORKER_COMMAND_MODE: 'python_module'
+    });
+    assert.deepEqual(plan.steps, [
+      'accept-already-healthy-live-nosend',
+      'stop-owned-remnants-if-unhealthy',
+      'start-owned-staging-with-writes',
+      'promote-bridge-to-live-nosend',
+      'verify-live-nosend-health'
+    ]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('full-live startup contract enables customer replies, Slack cards, and approval polling', () => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'village-full-live-task-'));
+  try {
+    const envFile = path.join(temp, 'runtime.env');
+    const chromePath = path.join(temp, 'chrome.exe');
+    const nodePath = path.join(temp, 'node.exe');
+    const hermesPythonPath = path.join(temp, 'python.exe');
+    writeFileSync(envFile, 'AI_WORKER_AUTO_SEND=1\n');
+    writeFileSync(chromePath, 'fixture');
+    writeFileSync(nodePath, 'fixture');
+    writeFileSync(hermesPythonPath, 'fixture');
+
+    const modulePath = path.join(scripts, 'KakaoLive.Common.psm1');
+    const health = parseJson(runPowerShell(`
+      Import-Module ${psLiteral(modulePath)} -Force
+      $env:SLACK_ACTION_POLL_ENABLED = '0'
+      $env:WORKER_CATCHUP_TIMEOUT_MS = '75000'
+      $env:HERMES_HOME = 'C:\\Village\\MacMiniMirror\\restored\\.hermes'
+      Set-KakaoLiveRuntimeEnvironment
+      $value = [pscustomobject]@{ ok = $true; runtime = [pscustomobject]@{
+        state = 'healthy'; cdpReady = $true; authenticated = $true; watcherReady = $true
+      }; config = [pscustomobject]@{
+        workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
+        autoSendEnabled = $true; slackCardDeliveryEnabled = $true; slackActionPollEnabled = $true
+        supabaseRecoveryEnabled = $true; kakaoTabCleanupEnabled = $true; startupCatchupSupported = $true
+      }}
+      $legacy = [pscustomobject]@{ ok = $true; config = [pscustomobject]@{
+        workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
+        autoSendEnabled = $true; slackCardDeliveryEnabled = $true; slackActionPollEnabled = $true
+        supabaseRecoveryEnabled = $true; kakaoTabCleanupEnabled = $true
+      }}
+      [pscustomobject]@{
+        contract = [pscustomobject](Get-KakaoLiveRuntimeContract)
+        applied = [pscustomobject]@{
+          actionPoll = $env:SLACK_ACTION_POLL_ENABLED
+          catchupTimeout = $env:WORKER_CATCHUP_TIMEOUT_MS
+          hermesHome = $env:HERMES_HOME
+        }
+        healthy = Test-KakaoLiveHealth -Health $value
+        legacyHealthy = Test-KakaoLiveHealth -Health $legacy
+        cdpDown = Test-KakaoLiveHealth -Health ([pscustomobject]@{
+          ok = $true; runtime = [pscustomobject]@{ state = 'cdp_unavailable'; cdpReady = $false; authenticated = $true; watcherReady = $true }; config = $value.config
+        })
+        watcherDown = Test-KakaoLiveHealth -Health ([pscustomobject]@{
+          ok = $true; runtime = [pscustomobject]@{ state = 'watcher_repair_required'; cdpReady = $true; authenticated = $true; watcherReady = $false }; config = $value.config
+        })
+      } | ConvertTo-Json -Depth 5 -Compress
+    `));
+    assert.equal(health.healthy, true);
+    assert.equal(health.legacyHealthy, false);
+    assert.equal(health.cdpDown, false);
+    assert.equal(health.watcherDown, false);
+    const canonicalHermesHome = path.join(process.env.LOCALAPPDATA, 'hermes');
+    assert.deepEqual(health.applied, {
+      actionPoll: '1',
+      catchupTimeout: '540000',
+      hermesHome: canonicalHermesHome
+    });
+    assert.deepEqual(health.contract, {
+      AI_WORKER_LIVE: '1',
+      AI_WORKER_AUTO_SEND: '1',
+      AI_WORKER_DRY_RUN: '0',
+      SLACK_ACTION_POLL_ENABLED: '1',
+      SLACK_AGENT_CARD_DELIVERY_ENABLED: '1',
+      VILLAGE_WINDOWS_WRITES_ENABLED: '1',
+      SUPABASE_RECOVERY_ENABLED: '1',
+      KAKAO_TAB_CLEANUP_ENABLED: '1',
+      HERMES_WORKER_COMMAND_MODE: 'python_module',
+      HERMES_HOME: canonicalHermesHome,
+      DEBOUNCE_MS: '15000',
+      MAX_WAIT_MS: '45000',
+      WORKER_SLOW_ALERT_MS: '30000',
+      WORKER_TIMEOUT_MS: '540000',
+      WORKER_CATCHUP_TIMEOUT_MS: '540000',
+      HERMES_WORKER_TIMEOUT_MS: '480000',
+      HERMES_WORKER_MAX_TURNS: '12'
+    });
+
+    const startScript = path.join(scripts, 'start-kakao-live.ps1');
+    const startSource = readFileSync(startScript, 'utf8');
+    assert.match(startSource, /Repair-KakaoWatcherRuntime\s+-Force/);
+    const plan = parseJson(runPowerShell(`& ${psLiteral(startScript)} ` +
+      `-EnvFile ${psLiteral(envFile)} -ChromePath ${psLiteral(chromePath)} ` +
+      `-NodePath ${psLiteral(nodePath)} -HermesPythonPath ${psLiteral(hermesPythonPath)} -PlanOnly`));
+    assert.equal(plan.runtime.AI_WORKER_AUTO_SEND, '1');
+    assert.equal(plan.runtime.SLACK_ACTION_POLL_ENABLED, '1');
+    assert.deepEqual(plan.steps, [
+      'accept-already-healthy-live',
+      'classify-kakao-runtime-state',
+      'preserve-authentication-pages',
+      'repair-only-the-failed-layer',
+      'verify-full-live-health'
+    ]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('busy live bridge restarts Chrome only for CDP loss and repairs watcher in place', () => {
+  const modulePath = path.join(scripts, 'KakaoLive.Common.psm1');
+  const result = runPowerShell(`
+    Import-Module ${psLiteral(modulePath)} -Force
+    [pscustomobject]@{
+      cdpDown = Get-KakaoLiveRecoveryAction -BridgeContractHealthy $true -RuntimeState 'cdp_unavailable' -BridgeBusy $true
+      watcherDown = Get-KakaoLiveRecoveryAction -BridgeContractHealthy $true -RuntimeState 'watcher_repair_required' -BridgeBusy $true
+      bridgeBad = Get-KakaoLiveRecoveryAction -BridgeContractHealthy $false -RuntimeState 'healthy' -BridgeBusy $false
+    } | ConvertTo-Json -Compress
+  `);
+
+  assert.deepEqual(parseJson(result), {
+    cdpDown: 'restart_owned_chrome_only',
+    watcherDown: 'repair_watcher_only',
+    bridgeBad: 'restart_full_runtime'
+  });
+});
+
+test('scheduled task plan defaults disabled and requires an explicit enable switch', () => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'village-live-register-'));
+  try {
+    const envFile = path.join(temp, 'runtime.env');
+    const chromePath = path.join(temp, 'chrome.exe');
+    const nodePath = path.join(temp, 'node.exe');
+    const hermesPythonPath = path.join(temp, 'python.exe');
+    writeFileSync(envFile, 'AI_WORKER_AUTO_SEND=0\n');
+    writeFileSync(chromePath, 'fixture');
+    writeFileSync(nodePath, 'fixture');
+    writeFileSync(hermesPythonPath, 'fixture');
+
+    const registerScript = path.join(scripts, 'register-kakao-live-nosend-task.ps1');
+    const base = `& ${psLiteral(registerScript)} -EnvFile ${psLiteral(envFile)} ` +
+      `-ChromePath ${psLiteral(chromePath)} -NodePath ${psLiteral(nodePath)} ` +
+      `-HermesPythonPath ${psLiteral(hermesPythonPath)} -PlanOnly`;
+    const disabled = parseJson(runPowerShell(base));
+    const enabled = parseJson(runPowerShell(`${base} -Enable`));
+
+    assert.equal(disabled.taskName, 'Village-Kakao-Live-NoSend-Start');
+    assert.equal(disabled.enabled, false);
+    assert.equal(enabled.enabled, true);
+    assert.deepEqual(disabled.triggers, ['AtLogOn', 'Every2Minutes']);
+    assert.equal(disabled.selfHealInterval, 'PT2M');
+    assert.equal(disabled.conflictingTask, 'Village-Kakao-Live-Start');
+    assert.equal(disabled.runLevel, 'Limited');
+    assert.match(disabled.actionScript, /start-kakao-live-nosend\.ps1$/i);
+    assert.equal(disabled.autoSendEnabled, false);
+    assert.equal(disabled.hermesCommandMode, 'python_module');
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('full-live scheduled task plan is autosend, bounded, and conflicts with no-send recovery', () => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'village-full-live-register-'));
+  try {
+    const envFile = path.join(temp, 'runtime.env');
+    const chromePath = path.join(temp, 'chrome.exe');
+    const nodePath = path.join(temp, 'node.exe');
+    const hermesPythonPath = path.join(temp, 'python.exe');
+    writeFileSync(envFile, 'AI_WORKER_AUTO_SEND=1\n');
+    writeFileSync(chromePath, 'fixture');
+    writeFileSync(nodePath, 'fixture');
+    writeFileSync(hermesPythonPath, 'fixture');
+
+    const registerScript = path.join(scripts, 'register-kakao-live-task.ps1');
+    const base = `& ${psLiteral(registerScript)} -EnvFile ${psLiteral(envFile)} ` +
+      `-ChromePath ${psLiteral(chromePath)} -NodePath ${psLiteral(nodePath)} ` +
+      `-HermesPythonPath ${psLiteral(hermesPythonPath)} -PlanOnly`;
+    const disabled = parseJson(runPowerShell(base));
+    const enabled = parseJson(runPowerShell(`${base} -Enable`));
+
+    assert.equal(disabled.taskName, 'Village-Kakao-Live-Start');
+    assert.equal(disabled.enabled, false);
+    assert.equal(enabled.enabled, true);
+    assert.deepEqual(disabled.triggers, ['AtLogOn', 'Every2Minutes']);
+    assert.equal(disabled.selfHealInterval, 'PT2M');
+    assert.equal(disabled.executionTimeLimit, 'PT2M');
+    assert.equal(disabled.conflictingTask, 'Village-Kakao-Live-NoSend-Start');
+    assert.equal(disabled.runLevel, 'Limited');
+    assert.match(disabled.actionScript, /start-kakao-live\.ps1$/i);
+    assert.equal(disabled.autoSendEnabled, true);
+    assert.equal(disabled.hermesCommandMode, 'python_module');
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
