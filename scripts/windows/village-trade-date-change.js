@@ -134,6 +134,15 @@ function dateOnly(value) {
   return `${iso[1]}-${String(iso[2]).padStart(2, '0')}-${String(iso[3]).padStart(2, '0')}`;
 }
 
+function calculateRentalRounds(startDate, startTime, endDate, endTime) {
+  const startMs = Date.parse(`${startDate}T${startTime}:00+09:00`);
+  const endMs = Date.parse(`${endDate}T${endTime}:00+09:00`);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    throw new Error('Date change readback verification failed: invalid rental period');
+  }
+  return Math.max(1, Math.ceil(((endMs - startMs) / 3_600_000 - 3) / 24));
+}
+
 function resolveCandidate(payload, { name, currentDate }) {
   const tradeIds = new Set();
   for (const result of Array.isArray(payload?.results) ? payload.results : []) {
@@ -189,6 +198,17 @@ function verifyReadback(payload, expected) {
     || ledger.contractLink !== regeneration.url
   ) {
     throw new Error('Date change readback verification failed: authoritative layers do not match');
+  }
+  const expectedRounds = calculateRentalRounds(
+    expected.newStartDate,
+    startTime,
+    expected.newEndDate,
+    endTime
+  );
+  if (Number(contract.rounds) !== expectedRounds) {
+    throw new Error(
+      `Date change rental rounds readback failed: expected ${expectedRounds}, got ${String(contract.rounds)}`
+    );
   }
 }
 
@@ -302,6 +322,7 @@ module.exports = {
   ALLOWED_INPUT_FIELDS,
   buildCandidateRequest,
   buildChangeRequest,
+  calculateRentalRounds,
   changeTradeDates,
   getCliHelpText,
   normalizeInput,

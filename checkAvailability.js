@@ -17741,14 +17741,15 @@ function changeRegisteredTradeDates(args) {
   }
 
   function readback_(contractSheet, contractRow, scheduleSheet, targetRows, targetSegments, ledgerSheet, ledgerRows) {
-    var contractRange = contractSheet.getRange(contractRow, 5, 1, 4);
+    var contractRange = contractSheet.getRange(contractRow, 5, 1, 5);
     var contractRaw = contractRange.getValues()[0];
     var contractDisplay = contractRange.getDisplayValues()[0];
     var contract = {
       startDate: normalizeDateCell_(contractRaw[0], contractDisplay[0]),
       startTime: normalizeTimeCell_(contractRaw[1], contractDisplay[1]),
       endDate: normalizeDateCell_(contractRaw[2], contractDisplay[2]),
-      endTime: normalizeTimeCell_(contractRaw[3], contractDisplay[3])
+      endTime: normalizeTimeCell_(contractRaw[3], contractDisplay[3]),
+      rounds: Number(contractRaw[4] || contractDisplay[4] || 0)
     };
     var periods = {};
     targetSegments.forEach(function(segment) {
@@ -17840,6 +17841,7 @@ function changeRegisteredTradeDates(args) {
     var startMs = new Date(newStartDate + 'T' + startTime + ':00+09:00').getTime();
     var endMs = new Date(newEndDate + 'T' + endTime + ':00+09:00').getTime();
     if (isNaN(startMs) || isNaN(endMs) || endMs <= startMs) throw new Error('새 반납일시는 새 반출일시 이후여야 합니다');
+    var requestedRounds = calcRentalDays(newStartDate, startTime, newEndDate, endTime);
 
     var scheduleLast = scheduleSheet.getLastRow();
     var scheduleValues = scheduleLast >= 2 ? scheduleSheet.getRange(2, 1, scheduleLast - 1, 13).getValues() : [];
@@ -17955,7 +17957,13 @@ function changeRegisteredTradeDates(args) {
     var plan = {
       tradeId: tradeId,
       previous: { startDate: oldStartDate, startTime: oldStartTime, endDate: oldEndDate, endTime: oldEndTime },
-      requested: { startDate: newStartDate, startTime: startTime, endDate: newEndDate, endTime: endTime },
+      requested: {
+        startDate: newStartDate,
+        startTime: startTime,
+        endDate: newEndDate,
+        endTime: endTime,
+        rounds: requestedRounds
+      },
       matchedScheduleRows: targetRows.length,
       updatedScheduleRows: 0,
       conflicts: conflicts,
@@ -17978,6 +17986,8 @@ function changeRegisteredTradeDates(args) {
     var contractRange = contractSheet.getRange(contractRow, 5, 1, 4);
     var oldContractValues = contractRange.getValues();
     var oldContractFormats = contractRange.getNumberFormats();
+    var contractRoundRange = contractSheet.getRange(contractRow, 9, 1, 1);
+    var oldContractRoundValues = contractRoundRange.getValues();
     var oldSchedule = targetSegments.map(function(segment) {
       var range = scheduleSheet.getRange(segment.start, 6, segment.count, 4);
       return { start: segment.start, count: segment.count, values: range.getValues(), formats: range.getNumberFormats() };
@@ -18000,6 +18010,7 @@ function changeRegisteredTradeDates(args) {
       mutationStarted = true;
       contractRange.setNumberFormats([['yyyy-MM-dd', '@', 'yyyy-MM-dd', '@']]);
       contractRange.setValues([[newStartDate, startTime, newEndDate, endTime]]);
+      contractRoundRange.setValue(requestedRounds);
       targetSegments.forEach(function(segment) {
         var range = scheduleSheet.getRange(segment.start, 6, segment.count, 4);
         var formats = [];
@@ -18033,6 +18044,7 @@ function changeRegisteredTradeDates(args) {
         && readback.contract.startTime === startTime
         && readback.contract.endDate === newEndDate
         && readback.contract.endTime === endTime
+        && readback.contract.rounds === requestedRounds
         && readback.schedule.rows === targetRows.length
         && readback.schedule.periods.length === 1
         && readback.schedule.periods[0] === expectedPeriod
@@ -18060,6 +18072,7 @@ function changeRegisteredTradeDates(args) {
         try {
           contractRange.setNumberFormats(oldContractFormats);
           contractRange.setValues(oldContractValues);
+          contractRoundRange.setValues(oldContractRoundValues);
           oldSchedule.forEach(function(snapshot) {
             var range = scheduleSheet.getRange(snapshot.start, 6, snapshot.count, 4);
             range.setNumberFormats(snapshot.formats);
@@ -18089,6 +18102,7 @@ function changeRegisteredTradeDates(args) {
             && rollbackReadback.contract.startTime === beforeReadback.contract.startTime
             && rollbackReadback.contract.endDate === beforeReadback.contract.endDate
             && rollbackReadback.contract.endTime === beforeReadback.contract.endTime
+            && rollbackReadback.contract.rounds === beforeReadback.contract.rounds
             && rollbackReadback.schedule.rows === beforeReadback.schedule.rows
             && sameStringSet_(rollbackReadback.schedule.periods, beforeReadback.schedule.periods)
             && rollbackReadback.ledger.rows === beforeReadback.ledger.rows

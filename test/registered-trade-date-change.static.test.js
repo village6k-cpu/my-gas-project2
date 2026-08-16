@@ -63,6 +63,20 @@ test('date mutation validates under a lock before writing all authoritative laye
   assert.ok(preflight >= 0 && firstWrite > preflight, 'availability preflight must precede the first write');
 });
 
+test('date mutation updates and rolls back contract rental rounds with the period', () => {
+  const start = availability.indexOf('function changeRegisteredTradeDates');
+  const nextTopLevel = availability.indexOf('\nfunction ', start + 1);
+  const body = availability.slice(start, nextTopLevel > start ? nextTopLevel : availability.length);
+
+  assert.match(body, /calcRentalDays\s*\(\s*newStartDate\s*,\s*startTime\s*,\s*newEndDate\s*,\s*endTime\s*\)/);
+  assert.match(body, /getRange\(contractRow,\s*9,\s*1,\s*1\)/);
+  assert.match(body, /contractRoundRange[\s\S]*setValue\s*\(\s*requestedRounds\s*\)/);
+  assert.match(body, /oldContractRoundValues/);
+  assert.match(body, /contractRoundRange[\s\S]*setValues\s*\(\s*oldContractRoundValues\s*\)/);
+  assert.match(body, /readback\.contract\.rounds\s*===\s*requestedRounds/);
+  assert.match(body, /rollbackReadback\.contract\.rounds\s*===\s*beforeReadback\.contract\.rounds/);
+});
+
 test('contract regeneration can require and report a verified ledger link update', () => {
   assert.match(contractGenerator, /function\s+updateContractLink\([^)]*options/);
   assert.match(contractGenerator, /strictLedgerLink/);

@@ -36,7 +36,7 @@ function verifiedMutation(overrides = {}) {
     },
     readback: {
       contract: {
-        startDate: '2026-07-22', startTime: '20:00', endDate: '2026-07-23', endTime: '23:00'
+        startDate: '2026-07-22', startTime: '20:00', endDate: '2026-07-23', endTime: '23:00', rounds: 1
       },
       schedule: {
         rows: 2,
@@ -223,6 +223,42 @@ test('a mismatched or incomplete server readback fails without retrying the muta
     /readback verification failed/i
   );
   assert.equal(calls, 1, 'an uncertain write result must never be retried automatically');
+});
+
+test('stale contract rental rounds fail readback after a date change', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return response(verifiedMutation({
+      readback: {
+        ...verifiedMutation().readback,
+        contract: {
+          startDate: '2026-07-22',
+          startTime: '20:00',
+          endDate: '2026-07-23',
+          endTime: '23:00',
+          rounds: 9
+        }
+      }
+    }));
+  };
+
+  await assert.rejects(
+    () => changeTradeDates({
+      config,
+      input: {
+        tradeId: '260723-010',
+        newStartDate: '2026-07-22',
+        newEndDate: '2026-07-23',
+        startTime: '20:00',
+        endTime: '23:00'
+      },
+      fetchImpl,
+      timeoutMs: 1_000
+    }),
+    /rental rounds readback/i
+  );
+  assert.equal(calls, 1, 'a stale readback must not retry the date mutation');
 });
 
 test('an availability conflict returns full structured evidence without retry or mutation success', async () => {
