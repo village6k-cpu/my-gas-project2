@@ -1,0 +1,10 @@
+{
+  "captured_at": "2026-08-15",
+  "source_bytes": 108438,
+  "source_sha256": "EFA2FEB3C7176E8BE2DDF4D14321E4D40432C54BFFDD89AB117A975C7DAB8F37",
+  "archive_bytes": 107840,
+  "archive_sha256": "423A6EFA9F50A929F5676D0875321529B50128C0F73761332C50270D5EF6EB72",
+  "newline_normalized": "CRLF to LF",
+  "normalized_text_equal": true,
+  "verified_backup": "native-lifecycle-20260815-114151"
+}

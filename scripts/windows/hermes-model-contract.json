@@ -3,12 +3,13 @@
   "root": {
     "provider": "xai-oauth",
     "model": "grok-4.5",
-    "reasoning_effort": "max"
+    "reasoning_effort": "xhigh"
   },
   "kakaoworker": {
     "provider": "xai-oauth",
     "model": "grok-4.5",
-    "reasoning_effort": "high",
-    "max_turns": 90
+    "reasoning_effort": "xhigh",
+    "max_turns": 90,
+    "disabled_toolsets": ["computer_use"]
   }
 }

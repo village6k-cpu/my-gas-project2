@@ -98,9 +98,13 @@ test('CDP fallback injects into the main list only and can reach the loopback br
     new URL('../tools/kakao-dom-bridge/inject-watcher-cdp.py', import.meta.url),
     'utf8'
   );
+  const shim = await readFile(
+    new URL('../tools/kakao-dom-bridge/watcher-cdp-shim.js', import.meta.url),
+    'utf8'
+  );
 
   assert.match(injector, /re\.fullmatch\(r"\/_\[\^\/\]\+\/chats\/\?", parsed\.path\)/);
-  assert.match(injector, /runtime\.sendMessage/);
-  assert.match(injector, /127\.0\.0\.1.*localhost/);
-  assert.match(injector, /url\.pathname !== '\/events'/);
+  assert.match(shim, /runtime\.sendMessage/);
+  assert.match(shim, /127\.0\.0\.1.*localhost/);
+  assert.match(shim, /url\.pathname !== '\/events'/);
 });

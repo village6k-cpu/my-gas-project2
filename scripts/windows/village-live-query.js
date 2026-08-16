@@ -12,6 +12,7 @@ const DOMAIN_SHEETS = Object.freeze({
 });
 
 const ALLOWED_SHEETS = new Set(Object.values(DOMAIN_SHEETS).flat());
+const CATALOG_SHEETS = new Set(DOMAIN_SHEETS.inventory);
 
 function requiredText(value, name, maxLength = 200) {
   const normalized = String(value ?? '').trim();
@@ -42,6 +43,26 @@ function buildSearchRequest(config, { sheet, query, column } = {}) {
   if (column !== undefined && String(column).trim() !== '') {
     url.searchParams.set('col', requiredText(column, 'column', 80));
   }
+  return { method: 'GET', url: url.toString(), sheet: normalizedSheet };
+}
+
+function buildCatalogRequest(config, { sheet } = {}) {
+  const baseUrl = config?.VILLAGE2_API_URL;
+  const apiKey = config?.VILLAGE2_API_KEY;
+  if (!baseUrl || !apiKey) throw new Error('Village live-query configuration is incomplete');
+
+  const normalizedSheet = requiredText(sheet, 'sheet', 80);
+  if (!CATALOG_SHEETS.has(normalizedSheet)) {
+    throw new Error(`Village live-query sheet is not an inventory catalog: ${normalizedSheet}`);
+  }
+  const url = new URL(baseUrl);
+  if (url.protocol !== 'https:' || url.hostname !== 'script.google.com') {
+    throw new Error('Village live-query endpoint must use https://script.google.com');
+  }
+  url.searchParams.set('key', apiKey);
+  url.searchParams.set('action', 'read');
+  url.searchParams.set('sheet', normalizedSheet);
+  url.searchParams.set('limit', '1000');
   return { method: 'GET', url: url.toString(), sheet: normalizedSheet };
 }
 
@@ -80,34 +101,100 @@ async function lookupVillage({ config, domain, query, column, fetchImpl = global
   };
 }
 
-function parseArgs(args) {
-  if (args[0] !== 'lookup') throw new Error('Only the lookup command is supported');
-  const values = { envFile: DEFAULT_ENV_FILE };
-  const keyByFlag = {
-    '--domain': 'domain',
-    '--query': 'query',
-    '--column': 'column',
-    '--env-file': 'envFile'
+async function readVillageCatalog({
+  config,
+  sheet,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 30_000
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
+  const request = buildCatalogRequest(config, { sheet });
+  const response = await fetchImpl(request.url, {
+    method: request.method,
+    redirect: 'follow',
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  if (!response.ok) throw new Error(`Village catalog read failed for ${request.sheet} with HTTP ${response.status}`);
+  const payload = await response.json();
+  if (!payload || payload.error) throw new Error(`Village catalog read returned an error for ${request.sheet}`);
+  return {
+    ok: true,
+    source: 'Village 2.0 GAS read-only catalog',
+    retrievedAt: new Date().toISOString(),
+    sheet: request.sheet,
+    rowCount: Number.isFinite(Number(payload.rowCount)) ? Number(payload.rowCount) : 0,
+    headers: Array.isArray(payload.headers) ? payload.headers : [],
+    rows: Array.isArray(payload.data) ? payload.data : []
   };
+}
+
+async function readVillageCatalogs({
+  config,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 30_000
+} = {}) {
+  const catalogs = await Promise.all(DOMAIN_SHEETS.inventory.map((sheet) => (
+    readVillageCatalog({ config, sheet, fetchImpl, timeoutMs })
+  )));
+  return {
+    ok: true,
+    source: 'Village 2.0 GAS read-only catalogs',
+    retrievedAt: new Date().toISOString(),
+    rowCount: catalogs.reduce((total, catalog) => total + Number(catalog.rowCount || 0), 0),
+    catalogs
+  };
+}
+
+function parseArgs(args) {
+  const command = args[0];
+  if (command !== 'lookup' && command !== 'catalog') {
+    throw new Error('Only the lookup and catalog commands are supported');
+  }
+  const values = { command, envFile: DEFAULT_ENV_FILE };
+  const keyByFlag = command === 'catalog'
+    ? { '--sheet': 'sheet', '--env-file': 'envFile' }
+    : {
+        '--domain': 'domain',
+        '--query': 'query',
+        '--column': 'column',
+        '--env-file': 'envFile'
+      };
   for (let index = 1; index < args.length; index += 1) {
     const name = args[index];
     const value = args[index + 1];
-    if (!value || !keyByFlag[name]) throw new Error('lookup requires --domain and --query');
+    if (!value || !keyByFlag[name]) throw new Error(`${command} received an invalid or incomplete option`);
     values[keyByFlag[name]] = value;
     index += 1;
   }
-  if (!values.domain || !values.query) throw new Error('lookup requires --domain and --query');
+  if (command === 'catalog' && !values.sheet) throw new Error('catalog requires --sheet');
+  if (command === 'lookup' && (!values.domain || !values.query)) {
+    throw new Error('lookup requires --domain and --query');
+  }
   return values;
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const { command, ...options } = parseArgs(process.argv.slice(2));
   const config = parseEnv(fs.readFileSync(options.envFile, 'utf8'));
-  const result = await lookupVillage({ ...options, config });
+  const result = command === 'catalog'
+    ? (options.sheet === 'all'
+        ? await readVillageCatalogs({ ...options, config })
+        : await readVillageCatalog({ ...options, config }))
+    : await lookupVillage({ ...options, config });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-module.exports = { ALLOWED_SHEETS, DOMAIN_SHEETS, buildSearchRequest, lookupVillage, parseArgs };
+module.exports = {
+  ALLOWED_SHEETS,
+  CATALOG_SHEETS,
+  DOMAIN_SHEETS,
+  buildCatalogRequest,
+  buildSearchRequest,
+  lookupVillage,
+  parseArgs,
+  readVillageCatalog,
+  readVillageCatalogs
+};
 
 if (require.main === module) {
   main().catch((error) => {

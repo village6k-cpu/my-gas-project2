@@ -46,7 +46,7 @@ Keep the scheduled tasks disabled. Run the staging sequence manually in this ord
 1. Validate the configuration with `windows-runtime-config.mjs` and confirm its redacted result is valid.
 2. Start the dedicated Windows Chrome profile. The lifecycle opens only the fixed `https://business.kakao.com/` origin; verify that tab and the local CDP endpoint.
 3. Start the Windows-owned Kakao DOM bridge.
-4. Optionally start the Windows-owned Hermes gateway. Every bridge start first rebuilds the active `kakaoworker` profile from the curated Hermes skill tree, adds the reviewed Village router/confirmation skills and profile-scoped RPA skill, verifies hashes, and enforces the AI-first model/reasoning invariants. This happens even when the gateway is not requested.
+4. Optionally start the Windows-owned Hermes gateway. A normal bridge, gateway, restart, or watchdog start validates the existing `kakaoworker` profile but never imports or replaces its skill tree. The live profile owns its native Hermes learning. Use `sync-hermes-profile-overlay.ps1` only as an explicit migration/recovery command after a verified backup and conflict review.
 5. Run `status-kakao-staging.ps1` and inspect its read-only process, ownership, port, profile, and required-setting-name results.
 
 Safe staging must use a dedicated Supabase data plane. Both `SUPABASE_TABLE` and `SUPABASE_FOLLOW_UP_TABLE` must end in `_windows_staging`. The follow-up table is required even when Slack polling and card delivery are disabled because worker failure handling can write follow-up records. The Windows bridge must not share production queue tables while the Mac owns production. Production table names are accepted only during an approved cutover invocation that explicitly supplies `-EnableWrites`.
@@ -83,7 +83,7 @@ Do not call `start-kakao-staging.ps1` while any ownership records exist; use the
 - Exactly one owner exists for each migrated worker; there are no duplicate workers on Mac and Windows.
 - The dedicated Windows Chrome profile is the expected profile, CDP is reachable locally, and the required Kakao tab and watcher extension are present.
 - The Windows bridge and optional Hermes gateway have matching PID, executable, and command-marker ownership records.
-- Hermes skill discovery and `skill_view` resolve the canonical `village-brain-first`, `village-operations`, `village-runtime-router`, `village-confirm-request`, and `rpa-automation-operations` skills directly from the active worker profile. Retired `*-windows` aliases and the obsolete `000-windows` tree must be absent. The local Brain renderer builds a non-empty leak-checked context without printing its contents.
+- Hermes skill discovery and `skill_view` resolve the canonical `village-brain-first`, `village-operations`, `village-confirm-request`, and profile-owned `rpa-automation-operations` skills directly from the active worker profile. The retired `village-runtime-router`, `*-windows` aliases, and obsolete `000-windows` tree must be absent. The local Brain renderer builds a non-empty leak-checked context without printing its contents.
 - Read-only status reports the expected process state, required setting names, and local port reachability.
 - Queue health is stable: no duplicate claims, unexplained backlog movement, or repeated follow-up actions.
 - BlueBubbles relay health, Messages health, and watch voice relay health remain good on the Mac without a test send.

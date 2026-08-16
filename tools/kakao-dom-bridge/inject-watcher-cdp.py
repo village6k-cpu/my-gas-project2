@@ -26,6 +26,10 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTENT_JS = ROOT / "kakao-dom-watcher-extension" / "content.js"
+DEFAULT_SHIM_JS = ROOT / "kakao-dom-bridge" / "watcher-cdp-shim.js"
+WATCHER_VERSION_RE = re.compile(r"const\s+WATCHER_VERSION\s*=\s*['\"]([^'\"]+)['\"]")
+CHAT_LIST_PATH_RE = re.compile(r"/(?:_[^/]+/chats|_chats)/?")
+CHAT_DETAIL_PATH_RE = re.compile(r"/_[^/]+/chats/[^/]+/?")
 
 
 class CDPWebSocket:
@@ -144,7 +148,67 @@ def load_pages(port: int) -> list[dict[str, Any]]:
         return json.loads(r.read().decode("utf-8"))
 
 
+def is_authenticated_chat_path(path: str) -> bool:
+    return bool(CHAT_LIST_PATH_RE.fullmatch(path) or CHAT_DETAIL_PATH_RE.fullmatch(path))
+
+
+def chat_list_url(value: str) -> str:
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if host not in {"business.kakao.com", "center-pf.kakao.com"}:
+        raise RuntimeError("Kakao chat target host changed")
+    match = re.fullmatch(r"(/_[^/]+/chats)(?:/[^/]+)?/?", parsed.path)
+    if not match:
+        if re.fullmatch(r"/_chats/?", parsed.path):
+            return f"{parsed.scheme}://{parsed.netloc}/_chats"
+        raise RuntimeError("Kakao chat target path changed")
+    return f"{parsed.scheme}://{parsed.netloc}{match.group(1)}"
+
+
+def classify_kakao_targets(pages: list[dict[str, Any]]) -> dict[str, Any]:
+    page_count = 0
+    authenticated = False
+    login_required = False
+    challenge_type: str | None = None
+    for page in pages:
+        if page.get("type") != "page":
+            continue
+        page_count += 1
+        parsed = urlparse(str(page.get("url") or ""))
+        host = (parsed.hostname or "").lower()
+        path = parsed.path.lower()
+        if host in {"business.kakao.com", "center-pf.kakao.com"} and is_authenticated_chat_path(path):
+            authenticated = True
+            continue
+        if host != "accounts.kakao.com":
+            continue
+        if re.search(r"(?:two[-_]?step|two[-_]?factor|otp|verification)", path):
+            challenge_type = "otp"
+        elif "captcha" in path:
+            challenge_type = "captcha"
+        elif re.search(r"(?:device|approve)", path):
+            challenge_type = "device"
+        else:
+            login_required = True
+    state = "degraded"
+    if authenticated:
+        state = "watcher_repair_required"
+    elif challenge_type:
+        state = "second_factor_required"
+    elif login_required:
+        state = "login_required"
+    return {
+        "state": state,
+        "cdpReady": True,
+        "authenticated": authenticated,
+        "watcherReady": False,
+        "targetCount": page_count,
+        "challengeType": challenge_type,
+    }
+
+
 def choose_kakao_page(pages: list[dict[str, Any]]) -> dict[str, Any]:
+    detail_page: dict[str, Any] | None = None
     for page in pages:
         if page.get("type") != "page":
             continue
@@ -156,49 +220,53 @@ def choose_kakao_page(pages: list[dict[str, Any]]) -> dict[str, Any]:
         )
         if is_kakao_host and is_main_list:
             return page
+        if is_kakao_host and CHAT_DETAIL_PATH_RE.fullmatch(parsed.path) and detail_page is None:
+            detail_page = page
+    if detail_page:
+        return detail_page
     raise RuntimeError("No Kakao chat-list page found in automation Chrome DevTools")
 
 
 def build_injection(content_js: str) -> str:
-    shim = r"""
-(() => {
-  const existing = globalThis.chrome && typeof globalThis.chrome === 'object' ? globalThis.chrome : {};
-  const storage = existing.storage && typeof existing.storage === 'object' ? existing.storage : {};
-  const runtime = existing.runtime && typeof existing.runtime === 'object' ? existing.runtime : {};
-  if (!storage.sync) {
-    storage.sync = { get(defaults, callback) { callback({ ...(defaults || {}) }); } };
-  } else if (!storage.sync.get) {
-    storage.sync.get = function(defaults, callback) { callback({ ...(defaults || {}) }); };
-  }
-  if (!storage.onChanged) {
-    storage.onChanged = { addListener() {} };
-  } else if (!storage.onChanged.addListener) {
-    storage.onChanged.addListener = function() {};
-  }
-  if (!runtime.sendMessage) {
-    runtime.sendMessage = async function(message) {
-      try {
-        const url = new URL(String(message?.bridgeUrl || ''));
-        if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(url.hostname) || url.pathname !== '/events') {
-          return { ok: false, status: 0, error: 'bridge_url_not_allowed' };
-        }
-        const response = await fetch(url.toString(), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(message?.event || {})
-        });
-        return { ok: response.ok, status: response.status };
-      } catch (error) {
-        return { ok: false, status: 0, error: String(error?.message || error) };
-      }
-    };
-  }
-  existing.storage = storage;
-  existing.runtime = runtime;
-  globalThis.chrome = existing;
-})();
-"""
+    shim = DEFAULT_SHIM_JS.read_text(encoding="utf-8")
     return shim + "\n" + content_js + "\n//# sourceURL=village-kakao-dom-watcher-cdp-injected.js\n"
+
+
+def extract_watcher_version(content_js: str) -> str:
+    match = WATCHER_VERSION_RE.search(content_js)
+    if not match:
+        raise RuntimeError("content.js WATCHER_VERSION is missing")
+    return match.group(1)
+
+
+def probe_watcher(cdp: CDPWebSocket) -> dict[str, Any] | None:
+    verify = cdp.call("Runtime.evaluate", {
+        "expression": r"(() => { const w = window.__villageKakaoWatcherInstance; const s = w?.state; const eligible = /^(?:\/_?[^/]+)?\/chats\/?$/.test(location.pathname); const scanAt = Number(s?.lastTopRowsScanAt || 0); return ({hasWatcher: !!w, watcherVersion: w?.version || '', started: s?.started ?? false, observer: !!s?.observer, heartbeatTimer: !!s?.heartbeatTimer, topRowPollTimer: !!s?.topRowPollTimer, transportReady: typeof globalThis.__villageKakaoBridgeSend === 'function', pageEligible: eligible, topRowsCount: Number(s?.lastTopRowsCount || 0), topRowsScanAgeMs: scanAt > 0 ? Math.max(0, Date.now() - scanAt) : null, extensionVersion: document.documentElement?.dataset?.villageKakaoExtensionWatcherVersion || '', extensionStatus: document.documentElement?.dataset?.villageKakaoExtensionWatcherStatus || ''}); })()",
+        "awaitPromise": True,
+        "returnByValue": True,
+    })
+    value = verify.get("result", {}).get("result", {}).get("value")
+    return value if isinstance(value, dict) else None
+
+
+def watcher_is_healthy(value: dict[str, Any] | None, expected_extension_version: str | None = None) -> bool:
+    return bool(
+        value
+        and value.get("hasWatcher")
+        and value.get("started")
+        and value.get("observer")
+        and value.get("heartbeatTimer")
+        and value.get("topRowPollTimer")
+        and value.get("transportReady")
+        and value.get("pageEligible")
+        and int(value.get("topRowsCount") or 0) > 0
+        and value.get("topRowsScanAgeMs") is not None
+        and int(value.get("topRowsScanAgeMs") or 0) <= 120_000
+        and (
+            not expected_extension_version
+            or value.get("watcherVersion") == expected_extension_version
+        )
+    )
 
 
 def main() -> int:
@@ -206,20 +274,35 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=int(os.environ.get("KAKAO_REMOTE_DEBUGGING_PORT", "9223")))
     parser.add_argument("--content-js", default=str(DEFAULT_CONTENT_JS))
     parser.add_argument("--wait", type=float, default=10.0, help="seconds to wait for the Kakao tab")
+    parser.add_argument("--probe-only", action="store_true", help="check watcher health without injecting or reloading")
     args = parser.parse_args()
 
     content_path = Path(args.content_js)
     content_js = content_path.read_text(encoding="utf-8")
+    expected_extension_version = extract_watcher_version(content_js)
 
     deadline = time.time() + args.wait
     last_error: Exception | None = None
     page: dict[str, Any] | None = None
+    classification: dict[str, Any] = {
+        "state": "cdp_unavailable",
+        "cdpReady": False,
+        "authenticated": False,
+        "watcherReady": False,
+        "targetCount": 0,
+        "challengeType": None,
+    }
     while time.time() < deadline:
         try:
-            page = choose_kakao_page(load_pages(args.port))
+            pages = load_pages(args.port)
+            classification = classify_kakao_targets(pages)
+            page = choose_kakao_page(pages)
             break
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            if classification["state"] in {"login_required", "second_factor_required"}:
+                print(json.dumps({"ok": False, **classification}, ensure_ascii=False))
+                return 3
             time.sleep(0.5)
     if not page:
         raise RuntimeError(str(last_error) if last_error else "Kakao page not found")
@@ -233,6 +316,33 @@ def main() -> int:
     try:
         cdp.call("Runtime.enable")
         cdp.call("Page.enable")
+        destination = chat_list_url(str(page.get("url") or ""))
+        current = urlparse(str(page.get("url") or ""))
+        if current.path.rstrip("/") != urlparse(destination).path.rstrip("/"):
+            if args.probe_only:
+                print(json.dumps({"ok": False, **classification, "state": "watcher_repair_required", "watcherReady": False}, ensure_ascii=False))
+                return 2
+            navigation = cdp.call("Page.navigate", {"url": destination})
+            if navigation.get("error"):
+                raise RuntimeError("Kakao chat-list navigation failed")
+            navigation_deadline = time.time() + args.wait
+            while time.time() < navigation_deadline:
+                location = cdp.call("Runtime.evaluate", {
+                    "expression": "location.pathname",
+                    "returnByValue": True,
+                })
+                path = location.get("result", {}).get("result", {}).get("value")
+                if isinstance(path, str) and CHAT_LIST_PATH_RE.fullmatch(path):
+                    break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError("Kakao chat-list navigation timed out")
+        if args.probe_only:
+            value = probe_watcher(cdp)
+            healthy = watcher_is_healthy(value, expected_extension_version)
+            state = "healthy" if healthy else "watcher_repair_required"
+            print(json.dumps({"ok": healthy, **classification, "state": state, "watcherReady": healthy, "watcher": value}, ensure_ascii=False))
+            return 0 if healthy else 2
         injection = build_injection(content_js)
         cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": injection})
         result = cdp.call("Runtime.evaluate", {
@@ -242,14 +352,21 @@ def main() -> int:
         })
         if result.get("result", {}).get("exceptionDetails"):
             raise RuntimeError(json.dumps(result["result"]["exceptionDetails"], ensure_ascii=False))
-        verify = cdp.call("Runtime.evaluate", {
-            "expression": "(() => ({hasWatcher: !!window.__villageKakaoWatcherInstance, started: window.__villageKakaoWatcherInstance?.state?.started ?? null, href: location.href, title: document.title, visibility: document.visibilityState}))()",
-            "awaitPromise": True,
-            "returnByValue": True,
-        })
-        value = verify.get("result", {}).get("result", {}).get("value")
-        print(json.dumps({"ok": bool(value and value.get("hasWatcher") and value.get("started")), "pageTitle": page.get("title"), "pageUrl": page.get("url"), "watcher": value}, ensure_ascii=False))
-        return 0 if value and value.get("hasWatcher") and value.get("started") else 2
+        value = probe_watcher(cdp)
+        reloaded = False
+        if not watcher_is_healthy(value, expected_extension_version):
+            reloaded = True
+            cdp.call("Page.reload", {"ignoreCache": True})
+            repair_deadline = time.time() + args.wait
+            while time.time() < repair_deadline:
+                time.sleep(0.25)
+                value = probe_watcher(cdp)
+                if watcher_is_healthy(value, expected_extension_version):
+                    break
+        healthy = watcher_is_healthy(value, expected_extension_version)
+        state = "healthy" if healthy else "watcher_repair_required"
+        print(json.dumps({"ok": healthy, **classification, "state": state, "watcherReady": healthy, "reloaded": reloaded, "watcher": value}, ensure_ascii=False))
+        return 0 if healthy else 2
     finally:
         cdp.close()
 

@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "description": "Fixed anonymous no-send fixtures for comparing legacy and native Village skills.",
+  "responseSchema": {
+    "case_id": "fixture id",
+    "operation": "normalized operation name",
+    "brain_needed": "boolean",
+    "write_or_send": "must be false",
+    "result": "case-specific object",
+    "reason": "short evidence-based explanation"
+  },
+  "cases": [
+    {
+      "id": "simple-unregistered-quote",
+      "prompt": "Prepare a reasoning-only quote preview for anonymous customer U-QUOTE-01. Mock live facts: the customer is not registered; rental is 2026-09-01 09:00 through 2026-09-03 09:00 and the billing period is exactly 2 days; Sony FX3 daily amount is 100000 KRW; Sony 24-70 GM II daily amount is 50000 KRW; the applicable 2-day discount is 10 percent. The requested preview total is the VAT-included total after discount. Do not write, register, or send anything. Calculate the preview total and state the safe status.",
+      "brainExpected": false,
+      "requiredSkills": ["village-operations"],
+      "expected": {
+        "case_id": "simple-unregistered-quote",
+        "operation": "quote_preview",
+        "brain_needed": false,
+        "write_or_send": false,
+        "result": {
+          "customer_registered": false,
+          "billable_days": 2,
+          "discount_percent": 10,
+          "total_krw": 297000,
+          "status": "preview_only"
+        }
+      }
+    },
+    {
+      "id": "registered-quote-correction",
+      "prompt": "Prepare a reasoning-only correction preview for registered mock trade T-MOCK-001. Mock authoritative readback: the current total is 300000 KRW and it includes two identical tripods at 20000 KRW each. The requested correction changes tripod quantity from 2 to 1 and changes nothing else. Do not update the trade, document, sheet, or customer message. Return the corrected preview total and safe status.",
+      "brainExpected": false,
+      "requiredSkills": ["village-operations"],
+      "expected": {
+        "case_id": "registered-quote-correction",
+        "operation": "registered_trade_quote_correction_preview",
+        "brain_needed": false,
+        "write_or_send": false,
+        "result": {
+          "trade_id": "T-MOCK-001",
+          "original_total_krw": 300000,
+          "corrected_total_krw": 280000,
+          "status": "preview_only"
+        }
+      }
+    },
+    {
+      "id": "confirmation-equipment-alias",
+      "prompt": "Normalize a reasoning-only confirmation-request plan from this anonymous text: 'FX삼 한 대, 9월 4일 10시부터 9월 5일 10시까지'. Mock authoritative equipment alias readback says FX삼 maps exactly to Sony FX3. Preserve quantity and dates, but do not create a confirmation row or send a message. Return the canonical equipment name and safe plan status.",
+      "brainExpected": false,
+      "requiredSkills": ["village-operations"],
+      "expected": {
+        "case_id": "confirmation-equipment-alias",
+        "operation": "confirmation_request_plan",
+        "brain_needed": false,
+        "write_or_send": false,
+        "result": {
+          "source_alias": "FX삼",
+          "canonical_equipment": "Sony FX3",
+          "quantity": 1,
+          "status": "plan_only"
+        }
+      }
+    },
+    {
+      "id": "confirmation-split-return-times",
+      "prompt": "Build a reasoning-only confirmation-request plan for two mock items with the same checkout but different returns. Sony FX3 checks out 2026-09-06 09:00 and returns 2026-09-07 18:00. Sony A7S III checks out 2026-09-06 09:00 and returns 2026-09-07 21:00. Do not collapse the returns into one time, write rows, or send anything. Report whether the split must be preserved and how many distinct return times exist.",
+      "brainExpected": false,
+      "requiredSkills": ["village-operations"],
+      "expected": {
+        "case_id": "confirmation-split-return-times",
+        "operation": "confirmation_request_plan",
+        "brain_needed": false,
+        "write_or_send": false,
+        "result": {
+          "preserve_split_returns": true,
+          "distinct_return_times": 2,
+          "status": "plan_only"
+        }
+      }
+    },
+    {
+      "id": "schedule-equipment-addition",
+      "prompt": "Prepare a reasoning-only plan to add Sony 24-70 GM II to existing mock schedule S-MOCK-001. Mock live readback confirms the schedule exists, the exact catalog name exists, and the item is not already attached. No actual schedule write or customer message is authorized. State that duplicate validation and post-write readback would be required, while keeping this run plan-only.",
+      "brainExpected": false,
+      "requiredSkills": ["village-operations"],
+      "expected": {
+        "case_id": "schedule-equipment-addition",
+        "operation": "schedule_equipment_addition_plan",
+        "brain_needed": false,
+        "write_or_send": false,
+        "result": {
+          "schedule_id": "S-MOCK-001",
+          "equipment": "Sony 24-70 GM II",
+          "duplicate_check_required": true,
+          "post_write_readback_required": true,
+          "status": "plan_only"
+        }
+      }
+    },
+    {
+      "id": "return-memo-raw-text",
+      "prompt": "Prepare a reasoning-only return memo/update plan. The customer's exact source expression is '20-70', and the mock catalog does not establish which equipment that expression means. Preserve the original expression instead of guessing or dropping it. Do not update a sheet, memo, return record, or message. Report the raw text, whether it is preserved, and whether an equipment guess is allowed.",
+      "brainExpected": false,
+      "requiredSkills": ["village-operations"],
+      "expected": {
+        "case_id": "return-memo-raw-text",
+        "operation": "return_memo_update_plan",
+        "brain_needed": false,
+        "write_or_send": false,
+        "result": {
+          "raw_text": "20-70",
+          "preserve_raw_text": true,
+          "guess_equipment": false,
+          "status": "plan_only"
+        }
+      }
+    },
+    {
+      "id": "historical-policy-question",
+      "prompt": "Answer a reasoning-only historical policy question: why was Village's 20-day-or-longer discount set to 50 percent? The answer depends on accumulated policy rationale rather than a current reservation. Mock Village Brain evidence says a 2025 policy note balanced long-rental utilization against handling cost and set 50 percent as the approved floor. Do not query or change any live business system and do not invoke Gary Tan's separate G-Brain.",
+      "brainExpected": true,
+      "requiredSkills": ["village-brain-first"],
+      "candidateRequiredSkills": ["village-history-evidence"],
+      "expected": {
+        "case_id": "historical-policy-question",
+        "operation": "historical_policy_answer",
+        "brain_needed": true,
+        "write_or_send": false,
+        "result": {
+          "source": {
+            "$containsAll": ["policy"]
+          },
+          "policy_year": 2025,
+          "discount_percent": 50,
+          "status": "answer_only"
+        }
+      }
+    },
+    {
+      "id": "ordinary-live-state-question",
+      "prompt": "Answer a reasoning-only current-state question from supplied mock live readback. The current schedule record for Sony FX3 on 2026-09-10 says available=false because an active booking overlaps the requested time. This is a current fact, not a historical or policy question. Do not write, reserve, or send anything. Return the availability and identify the live readback as the source.",
+      "brainExpected": false,
+      "requiredSkills": ["village-operations"],
+      "expected": {
+        "case_id": "ordinary-live-state-question",
+        "operation": "live_state_answer",
+        "brain_needed": false,
+        "write_or_send": false,
+        "result": {
+          "equipment": "Sony FX3",
+          "date": "2026-09-10",
+          "available": false,
+          "source": {
+            "$containsAll": ["live", "readback"]
+          },
+          "status": "answer_only"
+        }
+      }
+    }
+  ]
+}

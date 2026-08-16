@@ -17,6 +17,8 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$NodePath,
 
+    [string]$HermesPythonPath = (Join-Path $env:LOCALAPPDATA 'hermes\hermes-agent\venv\Scripts\python.exe'),
+
     [string]$HermesPath,
 
     [switch]$IncludeGateway
@@ -26,9 +28,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'KakaoStaging.Common.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'KakaoLive.Common.psm1') -Force
 
 $stopScriptPath = Join-Path $PSScriptRoot 'stop-kakao-staging.ps1'
 $startScriptPath = Join-Path $PSScriptRoot 'start-kakao-staging.ps1'
+$liveStartScriptPath = Join-Path $PSScriptRoot 'start-kakao-live.ps1'
+$resolvedHermesPythonPath = (Resolve-Path -LiteralPath $HermesPythonPath -ErrorAction Stop).Path
+$watcherInjector = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\tools\kakao-dom-bridge\inject-watcher-cdp.py') -ErrorAction Stop).Path
 
 function Write-WatchdogLog {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -69,6 +75,27 @@ function Get-UnhealthyComponents {
     return $unhealthy
 }
 
+function Get-KakaoDirectProbe {
+    $probeOutput = & $resolvedHermesPythonPath $watcherInjector --port 9223 --wait 3 --probe-only 2>$null
+    try {
+        return (($probeOutput -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop)
+    }
+    catch {
+        return [pscustomobject]@{
+            ok = $false
+            state = 'cdp_unavailable'
+            cdpReady = $false
+            authenticated = $false
+            watcherReady = $false
+        }
+    }
+}
+
+function Invoke-KakaoLiveEvaluator {
+    & $liveStartScriptPath -EnvFile $EnvFile -ChromePath $ChromePath -NodePath $NodePath `
+        -HermesPythonPath $resolvedHermesPythonPath -Confirm:$false | Out-Null
+}
+
 $componentNames = @('chrome', 'bridge')
 if ($IncludeGateway.IsPresent) {
     if ([string]::IsNullOrWhiteSpace($HermesPath)) {
@@ -80,6 +107,14 @@ if ($IncludeGateway.IsPresent) {
 # 빈 배열이 $null로 언롤되는 PowerShell 특성 방어: 파이프로 걸러 항상 배열화한다.
 $unhealthy = @(Get-UnhealthyComponents -Names $componentNames | Where-Object { $_ })
 if ($unhealthy.Count -eq 0) {
+    $runtimeProbe = Get-KakaoDirectProbe
+    if (Test-KakaoLiveRuntimeProbe -Probe $runtimeProbe) { return }
+    if (-not $PSCmdlet.ShouldProcess('Windows Kakao production authentication/watcher', 'Recover only the failed live layer')) {
+        return
+    }
+    Write-WatchdogLog ("runtime probe requires recovery: {0}" -f (Get-KakaoLiveRuntimeState -Probe $runtimeProbe))
+    Invoke-KakaoLiveEvaluator
+    Write-WatchdogLog 'live authentication/watcher evaluation completed'
     return
 }
 
@@ -104,6 +139,7 @@ try {
         EnvFile      = $EnvFile
         ChromePath   = $ChromePath
         NodePath     = $NodePath
+        HermesPythonPath = $resolvedHermesPythonPath
         EnableWrites = $true
         Confirm      = $false
     }
@@ -113,6 +149,8 @@ try {
     }
     & $startScriptPath @startParameters | Out-Null
     Write-WatchdogLog 'write-enabled production start completed'
+    Invoke-KakaoLiveEvaluator
+    Write-WatchdogLog 'post-start authentication/watcher evaluation completed'
 }
 catch {
     Write-WatchdogLog ("write-enabled production start failed: {0}" -f $_.Exception.Message)

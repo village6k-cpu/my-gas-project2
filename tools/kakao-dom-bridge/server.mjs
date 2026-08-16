@@ -47,6 +47,11 @@ const CONFIG = {
   workerCommand: process.env.VILLAGE_AI_WORKER_CMD || '',
   workerLive: process.env.AI_WORKER_LIVE === '1',
   autoSendEnabled: process.env.AI_WORKER_AUTO_SEND === '1',
+  workerDryRun: process.env.AI_WORKER_DRY_RUN === '1',
+  windowsWritesEnabled: process.env.VILLAGE_WINDOWS_WRITES_ENABLED === '1',
+  // Capability flag: recovery/backstop support exists even when startup DOM
+  // initial-scan events are intentionally ignored to prevent duplicate sends.
+  startupCatchupSupported: true,
   topRowLiveWindowMinutes: Number(process.env.TOP_ROW_LIVE_WINDOW_MINUTES || 20),
   readBackstopLookbackHours: Number(process.env.READ_BACKSTOP_LOOKBACK_HOURS || 36),
   readBackstopLookbackDays: Number(process.env.READ_BACKSTOP_LOOKBACK_DAYS || 2),
@@ -86,6 +91,16 @@ const CONFIG = {
     .map((server) => server.trim())
     .filter(Boolean)
 };
+
+export function buildHealthConfig(config = {}) {
+  return {
+    workerLive: Boolean(config.workerLive),
+    autoSendEnabled: Boolean(config.autoSendEnabled),
+    workerDryRun: Boolean(config.workerDryRun),
+    windowsWritesEnabled: Boolean(config.windowsWritesEnabled),
+    startupCatchupSupported: Boolean(config.startupCatchupSupported)
+  };
+}
 
 const dnsFallbackResolver = new dns.Resolver();
 if (CONFIG.dnsFallbackServers.length) {
@@ -950,6 +965,9 @@ function followUpConfig() {
     slackThreadFollowUpsEnabled: process.env.SLACK_FOLLOW_UP_THREAD_REPLIES !== '0',
     slackBotToken: CONFIG.slackBotToken,
     slackChannels: CONFIG.slackChannels,
+    slackMentionUserIds: String(process.env.SLACK_CARD_MENTION_USER_IDS || '')
+      .split(/[\s,]+/)
+      .filter(Boolean),
     kakaoChannelManagerUrl: process.env.KAKAO_CHANNEL_MANAGER_URL || ''
   };
 }
@@ -2500,8 +2518,7 @@ const server = http.createServer(async (req, res) => {
           queueDir: CONFIG.queueDir,
           supabaseEnabled: Boolean(CONFIG.supabaseUrl && CONFIG.supabaseServiceRoleKey && CONFIG.supabaseTable),
           workerEnabled: Boolean(CONFIG.workerCommand),
-          workerLive: CONFIG.workerLive,
-          autoSendEnabled: CONFIG.autoSendEnabled,
+          ...buildHealthConfig(CONFIG),
           workerTimeoutMs: CONFIG.workerTimeoutMs,
           supabaseTimeoutMs: CONFIG.supabaseTimeoutMs,
           supabaseRecoveryEnabled: CONFIG.supabaseRecoveryEnabled,

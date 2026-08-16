@@ -11,6 +11,9 @@ const runbook = read('docs/windows-kakao-hermes-migration-runbook.md');
 const routingConfig = read('scripts/windows/configure-hermes-village-routing.py');
 const overlaySync = read('scripts/windows/sync-hermes-profile-overlay.ps1');
 const contractRaw = read('scripts/windows/hermes-model-contract.json');
+const bridgeRestart = read('scripts/windows/Restart-KakaoBridgeLive.ps1');
+const bridgeRecover = read('scripts/windows/recover-kakao-bridge-only.ps1');
+const registerLive = read('scripts/windows/register-kakao-live-task.ps1');
 
 test('production task registration is an explicit post-cutover approval, not a staging default', () => {
   assert.match(registerProduction, /\[switch\]\$ConfirmProductionOwnership/);
@@ -30,12 +33,26 @@ test('production task registration is an explicit post-cutover approval, not a s
     'production tasks are registered enabled'
   );
   assert.match(registerProduction, /watch-kakao-production\.ps1/);
-  assert.match(registerProduction, /start-kakao-staging\.ps1/);
+  assert.match(registerProduction, /start-kakao-live\.ps1/);
   assert.match(
     registerProduction,
     /['"]-ExecutionPolicy['"]\s*,\s*['"]Bypass['"][\s\S]*?['"]-File['"]/,
     'tasks must bypass a Restricted host policy before invoking the reviewed scripts'
   );
+});
+
+test('every Windows Kakao reboot path uses the complete Hermes venv and passes it explicitly', () => {
+  assert.match(registerProduction, /\[string\]\$HermesPythonPath/);
+  assert.match(registerProduction, /['"]-HermesPythonPath['"]/);
+  assert.match(watchdog, /\[string\]\$HermesPythonPath/);
+  assert.match(watchdog, /HermesPythonPath\s*=\s*\$resolvedHermesPythonPath/);
+
+  for (const source of [registerProduction, watchdog, bridgeRestart, bridgeRecover, registerLive]) {
+    assert.doesNotMatch(source, /hermes-agent[\\/]\.venv[\\/]Scripts[\\/]python\.exe/i);
+  }
+  for (const source of [registerProduction, bridgeRestart, bridgeRecover, registerLive]) {
+    assert.match(source, /hermes-agent[\\/]venv[\\/]Scripts[\\/]python\.exe/i);
+  }
 });
 
 test('the watchdog observes first and only restarts through the ownership-validated lifecycle', () => {
@@ -44,6 +61,9 @@ test('the watchdog observes first and only restarts through the ownership-valida
   assert.match(watchdog, /Test-LocalTcpPort/);
   assert.match(watchdog, /stop-kakao-staging\.ps1/);
   assert.match(watchdog, /start-kakao-staging\.ps1/);
+  assert.match(watchdog, /inject-watcher-cdp\.py/);
+  assert.match(watchdog, /--probe-only/);
+  assert.match(watchdog, /start-kakao-live\.ps1/);
   assert.match(watchdog, /EnableWrites\s*=\s*\$true/);
   assert.doesNotMatch(
     watchdog,
@@ -78,7 +98,7 @@ test('one model contract feeds routing configuration, profile parity, and the te
   const contract = JSON.parse(contractRaw);
   for (const [section, keys] of [
     ['root', ['provider', 'model', 'reasoning_effort']],
-    ['kakaoworker', ['model', 'reasoning_effort', 'max_turns']]
+    ['kakaoworker', ['model', 'reasoning_effort', 'max_turns', 'disabled_toolsets']]
   ]) {
     assert.ok(contract[section], `contract must define ${section}`);
     for (const key of keys) {
@@ -99,6 +119,7 @@ test('one model contract feeds routing configuration, profile parity, and the te
     'the provider must be written together with the model so a switch can never produce a mixed state'
   );
   assert.match(overlaySync, /hermes-model-contract\.json/);
+  assert.match(overlaySync, /disabled_toolsets[\s\S]*computer_use/i);
   assert.match(
     overlaySync,
     /-lt \[int\]\$contract\.max_turns/,

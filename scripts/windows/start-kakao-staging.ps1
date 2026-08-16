@@ -12,6 +12,8 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$NodePath,
 
+    [string]$HermesPythonPath,
+
     [string]$HermesPath,
 
     [switch]$IncludeGateway,
@@ -28,10 +30,10 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') -ErrorA
 $resolvedEnvFile = (Resolve-Path -LiteralPath $EnvFile -ErrorAction Stop).Path
 $ChromePath = (Resolve-Path -LiteralPath $ChromePath -ErrorAction Stop).Path
 $NodePath = (Resolve-Path -LiteralPath $NodePath -ErrorAction Stop).Path
+if (-not [string]::IsNullOrWhiteSpace($HermesPythonPath)) {
+    $HermesPythonPath = (Resolve-Path -LiteralPath $HermesPythonPath -ErrorAction Stop).Path
+}
 $configScriptPath = Join-Path $PSScriptRoot 'windows-runtime-config.mjs'
-$profileOverlayScriptPath = (Resolve-Path -LiteralPath (
-    Join-Path $PSScriptRoot 'sync-hermes-profile-overlay.ps1'
-) -ErrorAction Stop).Path
 
 $extensionPath = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'tools\kakao-dom-watcher-extension') -ErrorAction Stop).Path
 $bridgeDirectory = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'tools\kakao-dom-bridge') -ErrorAction Stop).Path
@@ -108,6 +110,10 @@ try {
     }
 
     Import-DotEnvFile -Path $resolvedEnvFile
+    if (-not [string]::IsNullOrWhiteSpace($HermesPythonPath)) {
+        [Environment]::SetEnvironmentVariable('HERMES_WORKER_COMMAND', $HermesPythonPath, 'Process')
+        [Environment]::SetEnvironmentVariable('HERMES_WORKER_COMMAND_MODE', 'python_module', 'Process')
+    }
     if ($EnableWrites.IsPresent) {
         Set-KakaoStagingSafeEnvironment -EnableWrites
     }
@@ -117,17 +123,16 @@ try {
     [Environment]::SetEnvironmentVariable('VILLAGE_AI_WORKER_CMD', $workerCommand, 'Process')
 
     if ([string]::IsNullOrWhiteSpace($env:HERMES_HOME)) {
-        throw 'HERMES_HOME is required to synchronize the active worker profile.'
+        throw 'HERMES_HOME is required to resolve the active worker profile.'
     }
     $resolvedHermesHome = (Resolve-Path -LiteralPath $env:HERMES_HOME -ErrorAction Stop).Path
     $workerProfileHome = (Resolve-Path -LiteralPath (
         Join-Path (Join-Path $resolvedHermesHome 'profiles') $env:HERMES_WORKER_PROFILE
     ) -ErrorAction Stop).Path
-    & $profileOverlayScriptPath `
-        -ProfileHome $workerProfileHome `
-        -MacHermesHome $resolvedHermesHome `
-        -ProfileScoped `
-        -Confirm:$false | Out-Null
+    # The live profile is the sole owner of its native Hermes skills and
+    # learning metadata. Migration imports are explicit recovery operations;
+    # a normal start must never replace this directory.
+    [void](Resolve-Path -LiteralPath (Join-Path $workerProfileHome 'skills') -ErrorAction Stop)
 
     $devToolsPort = 0
     $bridgePort = 0
@@ -181,7 +186,9 @@ try {
         (ConvertTo-WindowsCommandLineArgument -Value $kakaoStartUrl)
     )
     $chromeCommandLine = $chromeArguments -join ' '
-    $chromeCommandMarker = ConvertTo-WindowsCommandLineArgument -Value $chromeProfileArgument
+    # Chromium can relaunch itself and normalize --user-data-dir quoting.  The
+    # unique profile path is stable while the full argument spelling is not.
+    $chromeCommandMarker = $chromeProfilePath
     $chromeProcess = Start-Process -FilePath $ChromePath -ArgumentList $chromeCommandLine -PassThru -ErrorAction Stop
     $chromeStarted = [pscustomobject]@{
         Name           = 'chrome'
@@ -239,19 +246,25 @@ try {
     # 확장 인자는 이를 지원하는 빌드용으로 유지하되, 감시자는 CDP 주입으로 보장한다.
     # 주입이 없으면 chrome/bridge가 떠 있어도 DOM 이벤트가 0건이라 파이프라인이 조용히 죽는다.
     $watcherInjectorPath = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'tools\kakao-dom-bridge\inject-watcher-cdp.py') -ErrorAction Stop).Path
-    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-    if ($null -eq $pythonCommand) {
+    $watcherPythonPath = $HermesPythonPath
+    if ([string]::IsNullOrWhiteSpace($watcherPythonPath)) {
+        $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+        if ($null -ne $pythonCommand) { $watcherPythonPath = $pythonCommand.Source }
+    }
+    if ([string]::IsNullOrWhiteSpace($watcherPythonPath)) {
         Write-Warning 'python not found; Kakao watcher CDP injection skipped - the DOM watcher will not run.'
     }
     else {
-        $watcherInjected = $false
-        foreach ($injectionAttempt in 1..3) {
-            & $pythonCommand.Source $watcherInjectorPath --port $devToolsPort --wait 20 | Out-Null
-            if ($LASTEXITCODE -eq 0) { $watcherInjected = $true; break }
-            Start-Sleep -Seconds 5
+        $watcherInjectionOutput = & $watcherPythonPath $watcherInjectorPath --port $devToolsPort --wait 45 2>&1
+        $watcherInjectionExitCode = $LASTEXITCODE
+        try {
+            $watcherInjection = ($watcherInjectionOutput -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop
         }
-        if (-not $watcherInjected) {
-            Write-Warning 'Kakao watcher CDP injection failed after 3 attempts - the DOM watcher is not running.'
+        catch {
+            throw 'Watcher injection did not return valid JSON.'
+        }
+        if ($watcherInjectionExitCode -ne 0 -or -not $watcherInjection.ok) {
+            throw 'Watcher injection failed.'
         }
     }
 

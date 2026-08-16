@@ -1,0 +1,203 @@
+{
+  "version": 1,
+  "description": "Fixed anonymous no-send fixtures built through the real Kakao worker prompt.",
+  "cases": [
+    {
+      "id": "kakao-confirmation-complete",
+      "job": {
+        "id": "worker-bench-confirmation",
+        "source": "benchmark",
+        "status": "accepted",
+        "room_key": "benchmark:confirmation",
+        "preview_text": "중요 테스트고객A 소니 FX3 한 대 예약 문의",
+        "unread_count": 1,
+        "detected_at": "2026-08-15T09:00:00.000Z"
+      },
+      "options": {
+        "navigationContext": {
+          "status": "opened_target_chat",
+          "conversation_target": { "id": "benchmark-confirmation", "close_safe": false },
+          "conversation_evidence": {
+            "hint_matched": true,
+            "visible_static_text_tail": [
+              { "speaker_type": "staff", "sender_label": "빌리지님", "message": "안녕하세요! 장비와 일정을 알려주세요.", "time": "17:55" },
+              { "speaker_type": "customer", "sender_label": "테스트고객A", "message": "소니 FX3 한 대를 9월 4일 10시부터 9월 5일 10시까지 예약하고 싶습니다. 예약자는 테스트고객A입니다.", "time": "18:00" }
+            ]
+          },
+          "benchmark_authoritative_readback": {
+            "equipment_catalog_exact_name": "소니 FX3",
+            "contract_master_match": false,
+            "schedule_detail_match": false,
+            "confirmation_request_match": false
+          }
+        },
+        "lookupContext": { "kill_switch": "active", "lookup_urls": {} },
+        "ragContext": { "enabled": false },
+        "brainContext": { "enabled": false }
+      },
+      "brainExpected": false,
+      "requiredSkills": [],
+      "expected": {
+        "should_write_to_sheet": true,
+        "classification": "reservation",
+        "customer": { "name": "테스트고객A" },
+        "safety_checks": {
+          "kakao_conversation_opened": true,
+          "did_not_classify_from_preview_only": true,
+          "latest_customer_message_after_last_staff_reply": true
+        },
+        "sheet_row_candidate": {
+          "plan_complete": true,
+          "equipment_write_mode": "full_plan",
+          "customer_name": "테스트고객A",
+          "start_date": "2026-09-04",
+          "end_date": "2026-09-05",
+          "pickup_time": "10:00",
+          "return_time": "10:00"
+        }
+      }
+    },
+    {
+      "id": "kakao-registered-quote",
+      "job": {
+        "id": "worker-bench-quote",
+        "source": "benchmark",
+        "status": "accepted",
+        "room_key": "benchmark:quote",
+        "preview_text": "중요 테스트고객B 기존 예약 견적서 문의",
+        "unread_count": 1,
+        "detected_at": "2026-08-15T09:05:00.000Z"
+      },
+      "options": {
+        "navigationContext": {
+          "status": "opened_target_chat",
+          "conversation_target": { "id": "benchmark-quote", "close_safe": false },
+          "conversation_evidence": {
+            "hint_matched": true,
+            "visible_static_text_tail": [
+              { "speaker_type": "customer", "sender_label": "테스트고객B", "message": "기존 예약 건 견적서 다시 부탁드립니다.", "time": "18:05" },
+              { "speaker_type": "staff", "sender_label": "빌리지님", "message": "견적서 링크 보내드렸습니다!", "time": "18:06" }
+            ]
+          },
+          "benchmark_authoritative_readback": {
+            "trade_id": "T-MOCK-QUOTE-1",
+            "registered": true,
+            "quote_delivered": true
+          }
+        },
+        "lookupContext": { "kill_switch": "active", "lookup_urls": {} },
+        "ragContext": { "enabled": false },
+        "brainContext": { "enabled": false }
+      },
+      "brainExpected": false,
+      "requiredSkills": [],
+      "expected": {
+        "should_write_to_sheet": false,
+        "classification": "already_answered",
+        "customer": { "name": "테스트고객B" },
+        "safety_checks": {
+          "kakao_conversation_opened": true,
+          "did_not_classify_from_preview_only": true,
+          "latest_customer_message_after_last_staff_reply": false
+        },
+        "reply_decision": { "replyMode": "no_reply" }
+      }
+    },
+    {
+      "id": "kakao-schedule-addition",
+      "job": {
+        "id": "worker-bench-addition",
+        "source": "benchmark",
+        "status": "accepted",
+        "room_key": "benchmark:addition",
+        "preview_text": "중요 테스트고객C 기존 예약 장비 추가",
+        "unread_count": 1,
+        "detected_at": "2026-08-15T09:10:00.000Z"
+      },
+      "options": {
+        "navigationContext": {
+          "status": "opened_target_chat",
+          "conversation_target": { "id": "benchmark-addition", "close_safe": false },
+          "conversation_evidence": {
+            "hint_matched": true,
+            "visible_static_text_tail": [
+              { "speaker_type": "staff", "sender_label": "빌리지님", "message": "기존 예약 확인했습니다.", "time": "18:08" },
+              { "speaker_type": "customer", "sender_label": "테스트고객C", "message": "그 예약에 소니 GM 24-70mm II 한 개만 추가해 주세요.", "time": "18:10" }
+            ]
+          },
+          "benchmark_authoritative_readback": {
+            "trade_id": "T-MOCK-ADD-1",
+            "registered": true,
+            "existing_equipment": ["소니 FX3"],
+            "requested_equipment_exact_name": "소니 GM 24-70mm II",
+            "requested_equipment_already_attached": false,
+            "dates": { "start": "2026-09-06", "end": "2026-09-07", "pickup": "09:00", "return": "18:00" }
+          }
+        },
+        "lookupContext": { "kill_switch": "active", "lookup_urls": {} },
+        "ragContext": { "enabled": false },
+        "brainContext": { "enabled": false }
+      },
+      "brainExpected": false,
+      "requiredSkills": [],
+      "expected": {
+        "should_write_to_sheet": true,
+        "classification": "reservation",
+        "customer": { "name": "테스트고객C" },
+        "sheet_row_candidate": {
+          "plan_complete": true,
+          "equipment_write_mode": "additions_only",
+          "start_date": "2026-09-06",
+          "end_date": "2026-09-07",
+          "pickup_time": "09:00",
+          "return_time": "18:00"
+        }
+      }
+    },
+    {
+      "id": "kakao-current-policy-faq",
+      "job": {
+        "id": "worker-bench-policy",
+        "source": "benchmark",
+        "status": "accepted",
+        "room_key": "benchmark:policy",
+        "preview_text": "중요 테스트고객D 이틀 대여 할인 문의",
+        "unread_count": 1,
+        "detected_at": "2026-08-15T09:15:00.000Z"
+      },
+      "options": {
+        "navigationContext": {
+          "status": "opened_target_chat",
+          "conversation_target": { "id": "benchmark-policy", "close_safe": false },
+          "conversation_evidence": {
+            "hint_matched": true,
+            "visible_static_text_tail": [
+              { "speaker_type": "staff", "sender_label": "빌리지님", "message": "안녕하세요! 무엇을 도와드릴까요?", "time": "18:14" },
+              { "speaker_type": "customer", "sender_label": "테스트고객D", "message": "이틀 대여하면 장기 할인이 몇 퍼센트인가요?", "time": "18:15" }
+            ]
+          },
+          "benchmark_authoritative_readback": { "current_policy": "2일 장기할인 10%" }
+        },
+        "lookupContext": { "kill_switch": "active", "lookup_urls": {} },
+        "ragContext": { "enabled": true },
+        "brainContext": { "enabled": false }
+      },
+      "brainExpected": false,
+      "requiredSkills": [],
+      "expected": {
+        "should_write_to_sheet": false,
+        "classification": "faq",
+        "customer": { "name": "테스트고객D" },
+        "safety_checks": {
+          "kakao_conversation_opened": true,
+          "did_not_classify_from_preview_only": true,
+          "latest_customer_message_after_last_staff_reply": true
+        },
+        "reply_decision": {
+          "safetyClass": "current_policy_answer",
+          "grounding": "current_confirmed_policy"
+        }
+      }
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -11,15 +13,23 @@ const adapterRoot = path.join(
   'hermes-profile-overlay',
   'adapters'
 );
-const routerSkillPath = path.join(
+const operationsSkillRoot = path.join(
+  root,
+  'scripts',
+  'windows',
+  'hermes-profile-overlay',
+  'skills',
+  'productivity',
+  'village-operations'
+);
+const brainSkillRoot = path.join(
   root,
   'scripts',
   'windows',
   'hermes-profile-overlay',
   'skills',
   'village',
-  'village-runtime-router',
-  'SKILL.md'
+  'village-brain-first'
 );
 const confirmRequestSkillPath = path.join(
   root,
@@ -50,62 +60,46 @@ const commonModule = fs.readFileSync(
   'utf8'
 );
 
-test('Windows adapters preserve canonical routing and scope safety flags correctly', () => {
-  const brain = fs.readFileSync(path.join(adapterRoot, 'village-brain-first.md'), 'utf8');
-  const operations = fs.readFileSync(path.join(adapterRoot, 'village-operations.md'), 'utf8');
+test('native Village candidates preserve authority and Windows source boundaries', () => {
+  const brain = fs.readFileSync(path.join(brainSkillRoot, 'SKILL.md'), 'utf8');
+  const operations = fs.readFileSync(path.join(operationsSkillRoot, 'SKILL.md'), 'utf8');
+  const brainWindows = fs.readFileSync(
+    path.join(brainSkillRoot, 'references', 'windows-runtime-and-sources.md'),
+    'utf8'
+  );
+  const operationsWindows = fs.readFileSync(
+    path.join(operationsSkillRoot, 'references', 'windows-runtime-and-sources.md'),
+    'utf8'
+  );
   const rpa = fs.readFileSync(path.join(adapterRoot, 'rpa-automation-operations.md'), 'utf8');
 
-  assert.match(brain, /complete Mac `village-brain-first` protocol/i);
-  assert.match(brain, /explicitly asks[\s\S]{0,240}village-operations/i);
-  assert.match(brain, /not a blanket ban/i);
-  assert.match(operations, /complete Mac `village-operations` playbook/i);
-  assert.match(operations, /explicit owner request/i);
-  assert.match(operations, /Internal write approval does not approve a customer-facing send/i);
-  assert.match(operations, /not be interpreted as a global prohibition/i);
-  assert.match(operations, /confirmation request[\s\S]{0,300}same reasoning/i);
-  assert.match(operations, /different return[\s\S]{0,220}split/i);
-  assert.match(operations, /broad[\s\S]{0,220}catalog/i);
-  assert.match(operations, /existing partial[\s\S]{0,500}\bupdate\b/i);
-  assert.match(operations, /do not fall back[\s\S]{0,220}(?:ad-hoc|raw)/i);
+  assert.match(brain, /^name:\s*village-history-evidence$/m);
+
+  assert.match(brain, /Gary Tan's G-Brain is a separate optional system/i);
+  assert.match(brain, /current reservations[\s\S]{0,300}live system\/API readback/i);
+  assert.match(operations, /current user may authorize internal Village work/i);
+  assert.match(operations, /internal write approval does not (?:approve|authorize) a customer-facing send/i);
+  assert.match(operations, /different equipment groups[\s\S]{0,180}different pickup or return times/i);
+  assert.match(operations, /existing partial request[\s\S]{0,180}update/i);
+  assert.match(operations, /authoritative readback/i);
   assert.match(rpa, /profile/i);
   assert.match(rpa, /does not define the authorization policy/i);
   assert.match(rpa, /Do not load this profile-scoped skill into ordinary Slack business questions/i);
-  assert.match(rpa, /Git Bash/i);
-  assert.match(rpa, /powershell\.exe\s+-NoProfile/i);
-  for (const source of [brain, operations]) {
-    assert.match(source, /VILLAGE_DASHBOARD_ENV/);
-    assert.match(source, /VILLAGE_TAX_ENV/);
-    assert.match(source, /HERMES_ENV/);
-    assert.match(source, /VILLAGE_NAME_LINK_QUEUE/);
-    assert.match(source, /bare `python3`/i);
+  for (const source of [brainWindows, operationsWindows]) {
+    assert.match(source, /C:\/Village/);
+    assert.match(source, /Git Bash/i);
+    assert.match(source, /native[\s\S]{0,160}(?:node|python|powershell)/i);
+    assert.match(source, /live|current/i);
   }
 });
 
-test('the compact Village router is broad, deterministic, and not sales-specific', () => {
-  const source = fs.readFileSync(routerSkillPath, 'utf8');
-
-  assert.ok(Buffer.byteLength(source, 'utf8') <= 8_000, 'router must stay small enough to auto-load');
-  assert.match(source, /^name:\s*village-runtime-router$/m);
-  assert.match(source, /^platforms:\s*\[windows\]$/m);
-  assert.match(source, /reservations[\s\S]{0,240}inventory[\s\S]{0,240}receivables/i);
-  assert.match(source, /read-only business fact/i);
-  assert.match(source, /requested internal action/i);
-  assert.match(source, /RPA health/i);
-  assert.match(source, /unrelated|non-Village/i);
-  assert.match(source, /C:\/Village\/VILLAGE_Brain\/Ops\/brain-context-latest\.md/i);
-  assert.match(source, /Prefer[\s\S]{0,220}canonical[\s\S]{0,220}before slower/i);
-  assert.match(source, /additional tools needed[\s\S]{0,180}instead of stopping early/i);
-  assert.doesNotMatch(source, /do not use[\s\S]{0,200}Computer Use/i);
-  assert.doesNotMatch(source, /do not run[\s\S]{0,200}global (?:file|filesystem) search/i);
-  assert.match(source, /one primary route/i);
-  assert.match(source, /village-operations[\s\S]{0,220}only/i);
-  assert.match(source, /village-live-query\.js/);
-  assert.match(source, /village-confirm-request/);
-  assert.match(source, /village-confirm-request\.js/);
-  assert.match(source, /inventory[\s\S]{0,220}schedule[\s\S]{0,220}customer[\s\S]{0,220}finance/i);
-  assert.match(source, /Load `village-brain-first` only for a genuinely complex protocol/i);
-  assert.doesNotMatch(source, /do not load `village-brain-first`/i);
-  assert.doesNotMatch(source, /revenue-only|sales-only/i);
+test('retired Village routing artifacts are not shipped in the candidate overlay', () => {
+  assert.equal(
+    fs.existsSync(path.join(root, 'scripts', 'windows', 'hermes-profile-overlay', 'skills', 'village', 'village-runtime-router', 'SKILL.md')),
+    false
+  );
+  assert.equal(fs.existsSync(path.join(adapterRoot, 'village-operations.md')), false);
+  assert.equal(fs.existsSync(path.join(adapterRoot, 'village-brain-first.md')), false);
 });
 
 test('confirmation-request runner is execution-only and preserves full AI reasoning', () => {
@@ -132,8 +126,55 @@ test('confirmation-request runner is execution-only and preserves full AI reason
   assert.doesNotMatch(source, /curl .*script\.google/i);
 });
 
-test('offline routing configuration restores Mac-style AI-first Slack behavior', () => {
+test('offline routing configuration applies the current model contract', { skip: process.platform !== 'win32' }, () => {
   const source = fs.readFileSync(routingConfigScriptPath, 'utf8');
+  const contract = JSON.parse(fs.readFileSync(
+    path.join(root, 'scripts', 'windows', 'hermes-model-contract.json'),
+    'utf8'
+  )).root;
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'village-routing-config-'));
+  const configPath = path.join(tempRoot, 'config.yaml');
+
+  fs.writeFileSync(configPath, [
+    'model:',
+    '  default: stale-model',
+    '  provider: stale-provider',
+    'agent:',
+    '  reasoning_effort: low',
+    '  gateway_wall_timeout: 30',
+    'tool_loop_guardrails:',
+    '  hard_stop_enabled: true',
+    'slack:',
+    '  channel_skill_bindings:',
+    '    - id: C03F11EU0RE',
+    '      skills: [village-runtime-router]',
+    'terminal:',
+    '  cwd: C:\\stale',
+    ''
+  ].join('\n'), 'utf8');
+
+  try {
+    const applied = spawnSync(
+      'python.exe',
+      [routingConfigScriptPath, '--config', configPath],
+      { encoding: 'utf8' }
+    );
+    assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+    const result = JSON.parse(applied.stdout.trim());
+    assert.equal(result.model, contract.model);
+    assert.equal(result.provider, contract.provider);
+
+    const checked = spawnSync(
+      'python.exe',
+      [routingConfigScriptPath, '--config', configPath, '--check'],
+      { encoding: 'utf8' }
+    );
+    assert.equal(checked.status, 0, checked.stderr || checked.stdout);
+    assert.equal(JSON.parse(checked.stdout.trim()).ok, true);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+
   for (const channelId of [
     'C03F11EU0RE', // inventory
     'C0B6WAR7R7H', // settlement
@@ -145,8 +186,6 @@ test('offline routing configuration restores Mac-style AI-first Slack behavior',
   ]) {
     assert.match(source, new RegExp(channelId));
   }
-  assert.match(source, /gpt-5\.6-terra/);
-  assert.match(source, /reasoning_effort[\s\S]{0,120}xhigh/i);
   assert.match(source, /gateway_wall_timeout[\s\S]{0,120}1800/i);
   assert.match(source, /hard_stop_enabled[\s\S]{0,120}False/i);
   assert.match(source, /channel_skill_bindings/);
@@ -165,28 +204,19 @@ test('offline routing configuration restores Mac-style AI-first Slack behavior',
   assert.doesNotMatch(source, /SLACK_(?:BOT|APP)_TOKEN|SUPABASE_SERVICE_ROLE_KEY/);
 });
 
-test('Windows adapters match the Git Bash terminal and wrap PowerShell explicitly', () => {
-  for (const name of ['village-brain-first.md', 'village-operations.md']) {
-    const source = fs.readFileSync(path.join(adapterRoot, name), 'utf8');
-    assert.match(source, /C:\\Village/);
+test('Windows support references match the Git Bash and native executable boundary', () => {
+  for (const source of [
+    fs.readFileSync(path.join(brainSkillRoot, 'references', 'windows-runtime-and-sources.md'), 'utf8'),
+    fs.readFileSync(path.join(operationsSkillRoot, 'references', 'windows-runtime-and-sources.md'), 'utf8')
+  ]) {
+    assert.match(source, /C:\/Village/);
     assert.match(source, /Git Bash/i);
-    assert.match(source, /powershell\.exe\s+-NoProfile/i);
-    assert.match(source, /authoritative Windows execution tree[\s\S]{0,160}ax2-hermes-final/i);
-    assert.match(source, /terminal/i);
-    assert.match(source, /search_files/);
-    assert.match(source, /village-live-read\.js/);
-    assert.match(source, /Google Workspace OAuth/i);
-    assert.match(source, /Computer Use/i);
-    assert.match(source, /not prerequisites?|not a prerequisite/i);
-    assert.match(
-      source,
-      /native Windows executables[\s\S]{0,240}C:\/Village/i,
-      `${name} must distinguish shell paths from native executable arguments`
-    );
+    assert.match(source, /native[\s\S]{0,80}(?:node|python|powershell)/i);
+    assert.match(source, /C:\/Village/);
     assert.doesNotMatch(
       source,
       /\b(?:node|python(?:\.exe)?|powershell(?:\.exe)?|cmd(?:\.exe)?|rg(?:\.exe)?)\s+['"]\/c\//i,
-      `${name} must not pass an MSYS /c path to a native Windows executable`
+      'support reference must not pass an MSYS /c path to a native Windows executable'
     );
   }
 });
@@ -200,33 +230,29 @@ test('staging forces the safe Windows Brain path and role defaults', () => {
   );
 });
 
-test('canonical parity sync and Brain preflight both run before gateway start', () => {
-  const syncIndex = startScript.indexOf('sync-hermes-profile-overlay.ps1');
+test('Brain preflight remains before gateway start without importing a skill snapshot', () => {
   const brainPathIndex = startScript.indexOf("'brain-context-latest.md'");
   const brainLengthIndex = startScript.indexOf('$brainContextFile.Length -le 0');
   const gatewayStartIndex = startScript.indexOf('$gatewayProcess = Start-Process');
-  assert.ok(syncIndex >= 0, 'start must reference the parity sync script');
   assert.ok(brainPathIndex >= 0, 'start must preflight the compiled Brain context');
   assert.ok(brainLengthIndex >= 0, 'start must reject an empty Brain context');
   assert.ok(brainPathIndex < gatewayStartIndex, 'Brain preflight must precede gateway launch');
-  assert.ok(syncIndex < gatewayStartIndex, 'parity sync must precede gateway launch');
+  assert.doesNotMatch(
+    startScript,
+    /sync-hermes-profile-overlay\.ps1|-ProfileScoped/,
+    'a normal gateway/worker start must never replace the native Hermes skill tree'
+  );
 });
 
-test('the active worker profile is synchronized before every bridge start, even without a gateway', () => {
+test('the active worker profile owns its learned skills across every bridge start', () => {
   const profileHomeIndex = startScript.indexOf('$workerProfileHome');
-  const syncCallIndex = startScript.indexOf('-ProfileScoped');
   const bridgeStartIndex = startScript.indexOf('$bridgeProcess = Start-Process');
-  const gatewayBlockIndex = startScript.indexOf('if ($IncludeGateway)');
 
   assert.ok(profileHomeIndex >= 0, 'start must resolve the active worker profile');
-  assert.ok(syncCallIndex >= 0, 'start must invoke profile-scoped parity sync');
-  assert.ok(syncCallIndex < bridgeStartIndex, 'profile sync must finish before the worker bridge starts');
-  assert.ok(syncCallIndex < gatewayBlockIndex, 'profile sync must not be gated by IncludeGateway');
+  assert.ok(profileHomeIndex < bridgeStartIndex, 'the worker profile must be resolved before bridge launch');
+  assert.doesNotMatch(startScript, /sync-hermes-profile-overlay\.ps1|-ProfileScoped/);
   assert.match(paritySyncScript, /\[switch\]\$ProfileScoped/);
-  assert.match(paritySyncScript, /Full Hermes AI reasoning/i);
-  assert.match(paritySyncScript, /gpt-5\.6-sol/);
-  assert.match(paritySyncScript, /reasoning_effort[\s\S]{0,160}high/i);
-  assert.match(paritySyncScript, /max_turns[\s\S]{0,160}90/i);
+  assert.match(paritySyncScript, /manual migration|explicit recovery/i);
 });
 
 test('RPA profile deployment keeps a rollback copy until replacement succeeds', () => {
