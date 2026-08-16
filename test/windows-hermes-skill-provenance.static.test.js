@@ -71,6 +71,23 @@ function readManifest(file) {
   return fs.readFileSync(file, 'utf8').trim().split(/\r?\n/).filter(Boolean).sort();
 }
 
+test('Git keeps canonical Hermes skill sources LF-stable on Windows', () => {
+  const canonicalSkillPaths = [
+    'scripts/windows/hermes-profile-overlay/skills/productivity/village-operations/SKILL.md',
+    'scripts/windows/hermes-profile-overlay/skills/village/village-brain-first/SKILL.md'
+  ];
+  const result = spawnSync(
+    'git',
+    ['check-attr', 'eol', '--', ...canonicalSkillPaths],
+    { cwd: root, encoding: 'utf8' }
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  for (const skillPath of canonicalSkillPaths) {
+    assert.match(result.stdout, new RegExp(`${skillPath.replaceAll('/', '[\\\\/]')}: eol: lf`));
+  }
+});
+
 test('sync preserves source ownership and merges usage history without granting curator ownership', { skip: process.platform !== 'win32' }, () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'village-hermes-provenance-'));
   const macHome = path.join(tempRoot, 'mac-home');
