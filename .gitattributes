@@ -1,0 +1,2 @@
+# Hermes skill packages are hash-compared with the live native profiles.
+scripts/windows/hermes-profile-overlay/skills/** text eol=lf
