@@ -45,8 +45,18 @@ assert.match(
 );
 assert.match(
   batchAddBody[0],
-  /var scheduleData\s*=\s*getDashboardAvailabilityScheduleData_\(sched,\s*lastRow,\s*targetEquipmentNames\)/,
-  'dashboardAddEquipments must use cached availability schedule data instead of reading matched rows live'
+  /getDashboardAvailabilityScheduleData_\(sched,\s*lastRow,\s*targetEquipmentNames\)/,
+  'ordinary dashboardAddEquipments calls must keep using cached availability schedule data'
+);
+assert.match(
+  batchAddBody[0],
+  /findDashboardScheduleRowsForEquipments_\([\s\S]{0,160}targetEquipmentNames[\s\S]{0,260}excludeScheduleIdMap/,
+  'the bounded correction projection may read only cached-index rows for the affected equipment names'
+);
+assert.doesNotMatch(
+  batchAddBody[0],
+  /sched\.getRange\(2,\s*1,\s*lastRow - 1,\s*10\)/,
+  'dashboardAddEquipments must not scan the full schedule sheet inside the mutation path'
 );
 assert.match(
   backend,

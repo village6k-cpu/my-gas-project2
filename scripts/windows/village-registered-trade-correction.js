@@ -9,17 +9,32 @@ const ALLOWED_INPUT_FIELDS = new Set([
 const ALLOWED_DATE_FIELDS = new Set([
   'newStartDate', 'newEndDate', 'startTime', 'endTime', 'allowConflicts'
 ]);
-const SCHEDULE_SHEET = '스케줄상세';
-const CONTRACT_SHEET = '계약마스터';
 
 class CorrectionStageError extends Error {
-  constructor(stage, message, { outcomeUnknown = false, appliedStages = [] } = {}) {
+  constructor(stage, message, { outcomeUnknown = false, appliedStages = [], details = null } = {}) {
     super(message);
     this.name = 'CorrectionStageError';
     this.stage = stage;
     this.outcomeUnknown = outcomeUnknown;
     this.appliedStages = appliedStages.slice();
+    this.details = details;
+    this.code = String(details?.code || '');
   }
+}
+
+function correctionFailureDetails(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  return {
+    code: String(payload.code || ''),
+    tradeId: String(payload.tradeId || ''),
+    operationId: String(payload.operationId || ''),
+    attemptedStage: String(payload.attemptedStage || ''),
+    stages: Array.isArray(payload.stages) ? payload.stages.slice() : [],
+    appliedStages: Array.isArray(payload.appliedStages) ? payload.appliedStages.slice() : [],
+    readback: payload.readback ?? null,
+    readbackError: String(payload.readbackError || ''),
+    customerNotificationSent: payload.customerNotificationSent,
+  };
 }
 
 function requiredText(value, name, maxLength = 200) {
@@ -123,9 +138,7 @@ function normalizeCorrectionInput(input) {
     seenScheduleIds.add(scheduleId);
     return {
       scheduleId,
-      expectedName: entry.expectedName === undefined
-        ? undefined
-        : requiredText(entry.expectedName, `remove[${index}].expectedName`, 160)
+      expectedName: requiredText(entry.expectedName, `remove[${index}].expectedName`, 160)
     };
   });
 
@@ -173,16 +186,6 @@ function buildEndpoint(config) {
   return { url, apiKey };
 }
 
-function buildSearchRequest(config, sheet, column, tradeId) {
-  const { url, apiKey } = buildEndpoint(config);
-  url.searchParams.set('key', apiKey);
-  url.searchParams.set('action', 'search');
-  url.searchParams.set('sheet', sheet);
-  url.searchParams.set('col', column);
-  url.searchParams.set('query', tradeId);
-  return { url: url.toString(), method: 'GET' };
-}
-
 function buildPostRequest(config, body) {
   const { url, apiKey } = buildEndpoint(config);
   return {
@@ -191,155 +194,6 @@ function buildPostRequest(config, body) {
     headers: { 'content-type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ key: apiKey, ...body })
   };
-}
-
-function normalizeDateCell(value) {
-  const text = String(value ?? '').trim();
-  const match = text.match(/(\d{4})[-/.]\s*(\d{1,2})[-/.]\s*(\d{1,2})/);
-  if (!match) return '';
-  return `${match[1]}-${String(match[2]).padStart(2, '0')}-${String(match[3]).padStart(2, '0')}`;
-}
-
-function normalizeTimeCell(value) {
-  const text = String(value ?? '').trim();
-  if (/^1899-\d{2}-\d{2}\s/.test(text)) return '';
-  const match = text.match(/(?:^|\s)(\d{1,2}):(\d{2})(?::\d{2})?(?:\s|$)/);
-  return match ? `${String(match[1]).padStart(2, '0')}:${match[2]}` : '';
-}
-
-function numericCell(value) {
-  const number = Number(String(value ?? '').replace(/,/g, '').trim());
-  return Number.isFinite(number) ? number : 0;
-}
-
-function headerIndex(headers, name, stage) {
-  const index = headers.findIndex((header) => String(header ?? '').trim() === name);
-  if (index < 0) throw new CorrectionStageError(stage, `${stage} is missing required column: ${name}`);
-  return index;
-}
-
-function parseAuthoritativePayloads(schedulePayload, contractPayload, tradeId, stage) {
-  if (!schedulePayload || schedulePayload.error || !Array.isArray(schedulePayload.headers)) {
-    throw new CorrectionStageError(stage, `${stage} schedule payload is invalid`);
-  }
-  if (!contractPayload || contractPayload.error || !Array.isArray(contractPayload.headers)) {
-    throw new CorrectionStageError(stage, `${stage} contract payload is invalid`);
-  }
-
-  const sh = schedulePayload.headers;
-  const scheduleIndex = {
-    scheduleId: headerIndex(sh, '스케줄ID', stage),
-    tradeId: headerIndex(sh, '거래ID', stage),
-    setName: headerIndex(sh, '세트명', stage),
-    name: headerIndex(sh, '장비명', stage),
-    qty: headerIndex(sh, '수량', stage),
-    startDate: headerIndex(sh, '반출일', stage),
-    startTime: headerIndex(sh, '반출시간', stage),
-    endDate: headerIndex(sh, '반납일', stage),
-    endTime: headerIndex(sh, '반납시간', stage),
-    unitPrice: headerIndex(sh, '단가', stage)
-  };
-  const scheduleRows = (Array.isArray(schedulePayload.results) ? schedulePayload.results : [])
-    .map((result) => Array.isArray(result?.data) ? result.data : [])
-    .filter((row) => String(row[scheduleIndex.tradeId] ?? '').trim() === tradeId)
-    .map((row) => {
-      const setName = String(row[scheduleIndex.setName] ?? '').trim();
-      const name = String(row[scheduleIndex.name] ?? '').trim();
-      return {
-        scheduleId: String(row[scheduleIndex.scheduleId] ?? '').trim(),
-        setName,
-        name,
-        qty: numericCell(row[scheduleIndex.qty]),
-        startDate: normalizeDateCell(row[scheduleIndex.startDate]),
-        startTime: normalizeTimeCell(row[scheduleIndex.startTime]),
-        endDate: normalizeDateCell(row[scheduleIndex.endDate]),
-        endTime: normalizeTimeCell(row[scheduleIndex.endTime]),
-        unitPrice: numericCell(row[scheduleIndex.unitPrice]),
-        topLevel: !setName || setName === name
-      };
-    });
-  if (scheduleRows.length === 0) {
-    throw new CorrectionStageError(stage, `${stage} found no exact schedule rows for ${tradeId}`);
-  }
-
-  const ch = contractPayload.headers;
-  const contractIndex = {
-    tradeId: headerIndex(ch, '거래ID', stage),
-    startDate: headerIndex(ch, '반출일', stage),
-    startTime: headerIndex(ch, '반출시간', stage),
-    endDate: headerIndex(ch, '반납일', stage),
-    endTime: headerIndex(ch, '반납시간', stage),
-    rounds: headerIndex(ch, '회차', stage)
-  };
-  const contractRows = (Array.isArray(contractPayload.results) ? contractPayload.results : [])
-    .map((result) => Array.isArray(result?.data) ? result.data : [])
-    .filter((row) => String(row[contractIndex.tradeId] ?? '').trim() === tradeId);
-  if (contractRows.length !== 1) {
-    throw new CorrectionStageError(stage, `${stage} requires exactly one contract row for ${tradeId}`);
-  }
-  const row = contractRows[0];
-  const contract = {
-    tradeId,
-    startDate: normalizeDateCell(row[contractIndex.startDate]),
-    startTime: normalizeTimeCell(row[contractIndex.startTime]),
-    endDate: normalizeDateCell(row[contractIndex.endDate]),
-    endTime: normalizeTimeCell(row[contractIndex.endTime]),
-    rounds: numericCell(row[contractIndex.rounds])
-  };
-  return { schedule: { rows: scheduleRows }, contract };
-}
-
-async function readJson(fetchImpl, request, timeoutMs, stage) {
-  let response;
-  try {
-    response = await fetchImpl(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-      redirect: 'follow',
-      signal: AbortSignal.timeout(timeoutMs)
-    });
-  } catch (error) {
-    throw new CorrectionStageError(stage, `${stage} request failed: ${error.message}`);
-  }
-  if (!response?.ok) {
-    throw new CorrectionStageError(stage, `${stage} failed with HTTP ${response?.status ?? 'unknown'}`);
-  }
-  try {
-    return await response.json();
-  } catch (error) {
-    throw new CorrectionStageError(stage, `${stage} returned non-JSON data`);
-  }
-}
-
-async function readAuthoritativeTrade(config, tradeId, fetchImpl, timeoutMs, stage) {
-  const requests = [
-    buildSearchRequest(config, SCHEDULE_SHEET, 'B', tradeId),
-    buildSearchRequest(config, CONTRACT_SHEET, 'A', tradeId)
-  ];
-  const [schedulePayload, contractPayload] = await Promise.all(
-    requests.map((request) => readJson(fetchImpl, request, Math.min(timeoutMs, 30_000), stage))
-  );
-  return parseAuthoritativePayloads(schedulePayload, contractPayload, tradeId, stage);
-}
-
-function verifyRemovalPreflight(baseline, remove) {
-  const byId = new Map(baseline.schedule.rows.map((row) => [row.scheduleId, row]));
-  for (const entry of remove) {
-    const row = byId.get(entry.scheduleId);
-    if (!row) {
-      throw new CorrectionStageError(
-        'preflight',
-        `Removal preflight failed: scheduleId not found: ${entry.scheduleId}`
-      );
-    }
-    if (entry.expectedName && row.name !== entry.expectedName) {
-      throw new CorrectionStageError(
-        'preflight',
-        `Removal preflight failed: expected ${entry.expectedName}, found ${row.name}`
-      );
-    }
-  }
 }
 
 function isExplicitSuccess(payload) {
@@ -384,127 +238,21 @@ async function postAction({ config, fetchImpl, timeoutMs, stage, body, appliedSt
       || String(payload.status || '').trim().toUpperCase() === 'ERROR'
       || !!payload.error
     );
+    const serverAppliedStages = Array.isArray(payload?.appliedStages)
+      ? payload.appliedStages.map((value) => String(value || '').trim()).filter(Boolean)
+      : [];
     throw new CorrectionStageError(
       stage,
       `${stage} ${explicitFailure ? 'failed' : 'outcome is unknown'}: ${String(payload?.error || payload?.message || payload?.status || 'no explicit success')}`,
-      { outcomeUnknown: !explicitFailure, appliedStages }
+      {
+        outcomeUnknown: payload?.outcomeUnknown === true || !explicitFailure,
+        appliedStages: serverAppliedStages.length ? serverAppliedStages : appliedStages,
+        details: correctionFailureDetails(payload),
+      }
     );
   }
   appliedStages.push(stage);
   return payload;
-}
-
-function calculateRentalRounds(startDate, startTime, endDate, endTime) {
-  const startMs = Date.parse(`${startDate}T${startTime}:00+09:00`);
-  const endMs = Date.parse(`${endDate}T${endTime}:00+09:00`);
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
-    throw new Error('Final readback has an invalid rental period');
-  }
-  return Math.max(1, Math.ceil(((endMs - startMs) / 3_600_000 - 3) / 24));
-}
-
-function topLevelQuantities(rows, excludedScheduleIds = new Set()) {
-  const quantities = new Map();
-  for (const row of rows) {
-    if (!row.topLevel || excludedScheduleIds.has(row.scheduleId)) continue;
-    quantities.set(row.name, (quantities.get(row.name) || 0) + Number(row.qty || 0));
-  }
-  return quantities;
-}
-
-function singleSchedulePeriod(rows, stage) {
-  const byKey = new Map();
-  for (const row of rows) {
-    const period = {
-      startDate: row.startDate,
-      startTime: row.startTime,
-      endDate: row.endDate,
-      endTime: row.endTime
-    };
-    const key = [period.startDate, period.startTime, period.endDate, period.endTime].join('|');
-    byKey.set(key, period);
-  }
-  if (byKey.size !== 1) {
-    throw new CorrectionStageError(stage, `${stage} schedule rows do not have one exact period`);
-  }
-  const period = [...byKey.values()][0];
-  if (!period.startDate || !period.startTime || !period.endDate || !period.endTime) {
-    throw new CorrectionStageError(stage, `${stage} schedule period is incomplete`);
-  }
-  return period;
-}
-
-function verifyFinalReadback(baseline, finalState, input) {
-  const finalRows = finalState.schedule.rows;
-  const finalIds = new Set(finalRows.map((row) => row.scheduleId));
-  for (const removal of input.remove) {
-    if (finalIds.has(removal.scheduleId)) {
-      throw new CorrectionStageError('finalReadback', `Final readback still contains removed row: ${removal.scheduleId}`);
-    }
-  }
-
-  const removedIds = new Set(input.remove.map((entry) => entry.scheduleId));
-  const expectedQuantities = topLevelQuantities(baseline.schedule.rows, removedIds);
-  for (const addition of input.add) {
-    expectedQuantities.set(addition.name, (expectedQuantities.get(addition.name) || 0) + addition.qty);
-  }
-  const actualQuantities = topLevelQuantities(finalRows);
-  for (const [name, expectedQty] of expectedQuantities) {
-    if (actualQuantities.get(name) !== expectedQty) {
-      throw new CorrectionStageError(
-        'finalReadback',
-        `Final readback item quantity mismatch for ${name}: expected ${expectedQty}, got ${String(actualQuantities.get(name))}`
-      );
-    }
-  }
-  for (const name of actualQuantities.keys()) {
-    if (!expectedQuantities.has(name)) {
-      throw new CorrectionStageError('finalReadback', `Final readback contains an unexpected item: ${name}`);
-    }
-  }
-
-  const baselinePeriod = singleSchedulePeriod(baseline.schedule.rows, 'baselineReadback');
-  const finalPeriod = singleSchedulePeriod(finalRows, 'finalReadback');
-  const expectedPeriod = input.dateChange
-    ? {
-        startDate: input.dateChange.newStartDate,
-        startTime: input.dateChange.startTime || baselinePeriod.startTime,
-        endDate: input.dateChange.newEndDate,
-        endTime: input.dateChange.endTime || baselinePeriod.endTime
-      }
-    : baselinePeriod;
-  const contract = finalState.contract;
-  if (
-    contract.startDate !== expectedPeriod.startDate
-    || contract.endDate !== expectedPeriod.endDate
-  ) {
-    throw new CorrectionStageError('finalReadback', 'Final readback contract dates do not match the requested period');
-  }
-  const periodKey = [
-    expectedPeriod.startDate,
-    expectedPeriod.startTime,
-    expectedPeriod.endDate,
-    expectedPeriod.endTime
-  ].join('|');
-  const finalPeriodKey = [
-    finalPeriod.startDate, finalPeriod.startTime, finalPeriod.endDate, finalPeriod.endTime
-  ].join('|');
-  if (finalPeriodKey !== periodKey) {
-    throw new CorrectionStageError('finalReadback', 'Final readback schedule period does not match the request');
-  }
-  const expectedRounds = calculateRentalRounds(
-    expectedPeriod.startDate,
-    expectedPeriod.startTime,
-    expectedPeriod.endDate,
-    expectedPeriod.endTime
-  );
-  if (Number(contract.rounds) !== expectedRounds) {
-    throw new CorrectionStageError(
-      'finalReadback',
-      `Final readback rental rounds mismatch: expected ${expectedRounds}, got ${String(contract.rounds)}`
-    );
-  }
-  return finalState;
 }
 
 function mutationId(operationId, stage, index) {
@@ -531,81 +279,52 @@ async function runRegisteredTradeCorrection({
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
   const normalized = normalizeCorrectionInput(input);
-  const baseline = await readAuthoritativeTrade(
-    config, normalized.tradeId, fetchImpl, timeoutMs, 'baselineReadback'
-  );
-  verifyRemovalPreflight(baseline, normalized.remove);
-
   const appliedStages = [];
-  if (normalized.dateChange) {
-    const dateChange = normalized.dateChange;
-    await postAction({
+  const hasCorrection = !!normalized.dateChange || normalized.remove.length > 0 || normalized.add.length > 0;
+  let correctionPayload = null;
+  if (hasCorrection) {
+    const args = {
+      tradeId: normalized.tradeId,
+      operationId: normalized.operationId,
+      ...(normalized.dateChange ? { dateChange: normalized.dateChange } : {}),
+      ...(normalized.remove.length ? { remove: normalized.remove } : {}),
+      ...(normalized.add.length ? { add: normalized.add } : {})
+    };
+    correctionPayload = await postAction({
       config,
       fetchImpl,
       timeoutMs,
-      stage: 'scheduleChangeDates',
+      stage: 'scheduleCorrectRegisteredTrade',
       appliedStages,
-      body: {
-        action: 'scheduleChangeDates',
-        args: {
-          tradeId: normalized.tradeId,
-          newStartDate: dateChange.newStartDate,
-          newEndDate: dateChange.newEndDate,
-          ...(dateChange.startTime
-            ? { startTime: dateChange.startTime, endTime: dateChange.endTime }
-            : {}),
-          allowConflicts: dateChange.allowConflicts,
-          dryRun: false
+      body: { action: 'scheduleCorrectRegisteredTrade', args }
+    });
+    const returnedTradeId = String(correctionPayload.tradeId || '').trim();
+    const returnedOperationId = String(correctionPayload.operationId || '').trim();
+    const validReadback = correctionPayload.readback
+      && correctionPayload.readback.contract
+      && correctionPayload.readback.schedule
+      && correctionPayload.readback.ledger;
+    const validRegeneration = correctionPayload.contractRegeneration
+      && correctionPayload.contractRegeneration.success === true
+      && correctionPayload.contractRegeneration.url
+      && correctionPayload.contractRegeneration.fileId;
+    if (
+      returnedTradeId !== normalized.tradeId
+      || returnedOperationId !== normalized.operationId
+      || !validReadback
+      || !validRegeneration
+      || correctionPayload.customerNotificationSent !== false
+    ) {
+      throw new CorrectionStageError(
+        'scheduleCorrectRegisteredTrade',
+        'scheduleCorrectRegisteredTrade returned incomplete or mismatched authoritative readback',
+        {
+          outcomeUnknown: true,
+          appliedStages,
+          details: correctionFailureDetails(correctionPayload),
         }
-      }
-    });
-  }
-
-  for (let index = 0; index < normalized.remove.length; index += 1) {
-    const removal = normalized.remove[index];
-    await postAction({
-      config,
-      fetchImpl,
-      timeoutMs,
-      stage: 'scheduleRemoveEquip',
-      appliedStages,
-      body: {
-        action: 'scheduleRemoveEquip',
-        tid: normalized.tradeId,
-        scheduleId: removal.scheduleId,
-        mutationId: mutationId(normalized.operationId, 'remove', index),
-        directRegenerate: false
-      }
-    });
-  }
-
-  if (normalized.add.length > 0) {
-    await postAction({
-      config,
-      fetchImpl,
-      timeoutMs,
-      stage: 'scheduleAddEquips',
-      appliedStages,
-      body: {
-        action: 'scheduleAddEquips',
-        tid: normalized.tradeId,
-        entries: normalized.add,
-        mutationId: mutationId(normalized.operationId, 'add'),
-        directRegenerate: false
-      }
-    });
-  }
-
-  let contractRegeneration = null;
-  if (normalized.remove.length > 0 || normalized.add.length > 0) {
-    contractRegeneration = await postAction({
-      config,
-      fetchImpl,
-      timeoutMs,
-      stage: 'regenerateContract',
-      appliedStages,
-      body: { action: 'regenerateContract', tradeId: normalized.tradeId }
-    });
+      );
+    }
   }
 
   let send = { attempted: false, accepted: false };
@@ -634,36 +353,20 @@ async function runRegisteredTradeCorrection({
     send = sendSummary(sendPayload);
   }
 
-  let finalState;
-  try {
-    finalState = await readAuthoritativeTrade(
-      config, normalized.tradeId, fetchImpl, timeoutMs, 'finalReadback'
-    );
-    verifyFinalReadback(baseline, finalState, normalized);
-  } catch (error) {
-    if (error instanceof CorrectionStageError) {
-      error.appliedStages = appliedStages.slice();
-      throw error;
-    }
-    throw new CorrectionStageError('finalReadback', `Final readback failed: ${error.message}`, {
-      appliedStages
-    });
-  }
-
   return {
     ok: true,
     verified: true,
     tradeId: normalized.tradeId,
     appliedStages,
-    contractRegeneration: contractRegeneration
+    contractRegeneration: correctionPayload?.contractRegeneration
       ? {
           success: true,
-          url: String(contractRegeneration.url || contractRegeneration.contractUrl || ''),
-          fileId: String(contractRegeneration.fileId || '')
+          url: String(correctionPayload.contractRegeneration.url || correctionPayload.contractRegeneration.contractUrl || ''),
+          fileId: String(correctionPayload.contractRegeneration.fileId || '')
         }
       : null,
     send,
-    readback: finalState
+    readback: correctionPayload?.readback || null
   };
 }
 
@@ -713,13 +416,10 @@ module.exports = {
   ALLOWED_INPUT_FIELDS,
   CorrectionStageError,
   buildPostRequest,
-  buildSearchRequest,
-  calculateRentalRounds,
   getCliHelpText,
   normalizeCorrectionInput,
   parseCliArgs,
-  runRegisteredTradeCorrection,
-  verifyFinalReadback
+  runRegisteredTradeCorrection
 };
 
 if (require.main === module) {
@@ -729,7 +429,8 @@ if (require.main === module) {
       error: error.message,
       stage: error.stage || '',
       outcomeUnknown: error.outcomeUnknown === true,
-      appliedStages: Array.isArray(error.appliedStages) ? error.appliedStages : []
+      appliedStages: Array.isArray(error.appliedStages) ? error.appliedStages : [],
+      details: error.details || null,
     })}\n`);
     process.exitCode = 1;
   });

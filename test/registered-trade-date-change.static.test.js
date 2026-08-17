@@ -31,6 +31,11 @@ test('date mutation validates under a lock before writing all authoritative laye
 
   assert.match(body, /LockService\.getScriptLock\(\)/);
   assert.match(body, /tryLock\s*\(/);
+  assert.match(
+    body,
+    /if\s*\(!lockAlreadyHeld\)[\s\S]{0,180}tryLock\(30000\)/,
+    'standalone callers retain the established 30 second lock-wait contract',
+  );
   assert.match(body, /allowConflicts/);
   assert.match(body, /dryRun/);
   assert.match(body, /Utilities\.formatDate\([^\n]+['"]UTC['"][^\n]+['"]yyyy-MM-dd['"]\)/);
@@ -50,13 +55,15 @@ test('date mutation validates under a lock before writing all authoritative laye
   assert.match(body, /invalidateTimelineCache/);
   assert.match(body, /readback/);
   assert.match(body, /rollback|롤백/i);
-  assert.match(body, /rollbackRegeneration/);
   assert.match(body, /rollbackReadback/);
   assert.match(body, /rollback verified|rollback 검증 완료/i);
   assert.match(body, /sameRequestedPeriod/);
   assert.match(body, /currentSchedulePeriods/);
   assert.match(body, /ledger[\s\S]{0,500}(?:contractLink|links)/);
   assert.match(body, /customerNotificationSent\s*:\s*false/);
+  assert.match(body, /CHANGED_CONTRACT_REGEN_PENDING/);
+  assert.match(body, /contractRegenPending\s*=\s*true/);
+  assert.doesNotMatch(body, /rollbackRegeneration/, 'sheet rollback must not regenerate Drive files under lock');
 
   const preflight = body.indexOf('conflicts');
   const firstWrite = body.search(/\.setValues?\s*\(/);
@@ -75,6 +82,21 @@ test('date mutation updates and rolls back contract rental rounds with the perio
   assert.match(body, /contractRoundRange[\s\S]*setValues\s*\(\s*oldContractRoundValues\s*\)/);
   assert.match(body, /readback\.contract\.rounds\s*===\s*requestedRounds/);
   assert.match(body, /rollbackReadback\.contract\.rounds\s*===\s*beforeReadback\.contract\.rounds/);
+});
+
+test('date mutation never regenerates a Drive contract while owning the global lock', () => {
+  const start = availability.indexOf('function changeRegisteredTradeDates');
+  const nextTopLevel = availability.indexOf('\nfunction ', start + 1);
+  const body = availability.slice(start, nextTopLevel > start ? nextTopLevel : availability.length);
+
+  assert.match(body, /function changeRegisteredTradeDates\s*\(\s*args\s*,\s*options\s*\)/);
+  assert.match(body, /lockAlreadyHeld/);
+  assert.match(body, /deferContractRegeneration/);
+  assert.match(
+    body,
+    /releaseOwnedLock_\s*\(\s*\)[\s\S]{0,900}regenerateContractById\s*\(/,
+    'Drive/contract regeneration must start only after the owned ScriptLock is released',
+  );
 });
 
 test('contract regeneration can require and report a verified ledger link update', () => {

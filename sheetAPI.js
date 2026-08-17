@@ -88,6 +88,7 @@ function getVillageOperationCapabilities_() {
       { id: "confirmation_request.create_batch", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema },
       { id: "confirmation_request.update", action: "updateRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema, updateNote: "reqID(RQ-YYMMDD-NNN) 필수 + requestSchema의 필드를 함께 전달. 전체 요청을 항상 완전한 형태로 보낼 것" },
       { id: "schedule.change_dates", action: "scheduleChangeDates", policy: "internal_write", verification: "authoritative_readback" },
+      { id: "schedule.correct_registered_trade", action: "scheduleCorrectRegisteredTrade", policy: "internal_write", verification: "authoritative_readback" },
       { id: "schedule.clone_registered_no_send", action: "cloneScheduleNoSend", policy: "internal_write", verification: "authoritative_readback" },
       { id: "schedule.update_time", action: "updateTime", policy: "internal_write", verification: "authoritative_server_ack" },
       { id: "schedule.update_status", action: "updateStatus", policy: "internal_write", verification: "authoritative_server_ack" },
@@ -558,6 +559,13 @@ function handleRequestCore_(e) {
         var dateChangeArgs = postBody.args || {};
         if (typeof dateChangeArgs === "string") dateChangeArgs = JSON.parse(dateChangeArgs);
         return jsonResponse(changeRegisteredTradeDates(dateChangeArgs));
+      }
+
+      case "scheduleCorrectRegisteredTrade": {
+        if (!e.postData) return jsonResponse({ success: false, error: "scheduleCorrectRegisteredTrade requires POST" });
+        var correctionArgs = postBody.args || {};
+        if (typeof correctionArgs === "string") correctionArgs = JSON.parse(correctionArgs);
+        return jsonResponse(correctRegisteredTrade(correctionArgs));
       }
 
       case "cloneScheduleNoSend":

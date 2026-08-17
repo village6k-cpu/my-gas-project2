@@ -17,7 +17,7 @@ function section(source, start, end) {
 // 실측: GAS 웹앱 왕복은 가벼운 함수도 2.5~3.5초. 단건 removeEquip으로 N개를 빼면
 // N배로 늘고, 그 동안 앱이 같은 거래의 다른 변경을 전부 막아 업무가 멈췄다.
 // 배치는 왕복·잠금·계약서 재생성 예약을 각각 1회로 묶는다.
-function harness({ rows: initialRows, checkoutStarted = false }) {
+function harness({ rows: initialRows, checkoutStarted = false, outerLockHeld = false }) {
   const gas = read('checkAvailability.js');
   const helpers = section(gas, 'function normalizeDashboardMutationId_', '\nfunction dashboardSetupCanonicalResult_');
   const body = section(gas, 'function resolveDashboardRemovalRows_', '\n/** "yyyy-MM-dd"');
@@ -31,7 +31,7 @@ function harness({ rows: initialRows, checkoutStarted = false }) {
     getProperties: () => Object.fromEntries(values),
   };
   const calls = { deletes: [], projections: [], regens: [], triggerLockStates: [], lockTries: 0 };
-  let lockHeld = false;
+  let lockHeld = outerLockHeld;
 
   const sheet = {
     getLastRow: () => rows.length + 1,
@@ -199,6 +199,21 @@ test('트리거 예약은 잠금을 놓은 뒤에 한다', () => {
   );
 });
 
+test('composite caller가 잠금을 보유하면 중첩 잠금과 계약서 재생성 예약을 만들지 않는다', () => {
+  const { context, calls, rowsNow } = harness({ rows: ROWS, outerLockHeld: true });
+  const res = context.batch(
+    TRADE,
+    [{ scheduleId: `${TRADE}-04` }],
+    { lockAlreadyHeld: true, deferContractRegeneration: true },
+  );
+
+  assert.equal(res.success, true);
+  assert.equal(calls.lockTries, 0, '바깥 잠금 안에서 ScriptLock을 다시 얻으면 BUSY가 난다');
+  assert.deepEqual(calls.regens, [], 'composite가 잠금 해제 후 한 번 재생성하므로 내부 큐는 없어야 한다');
+  assert.deepEqual(calls.triggerLockStates, [], '바깥 호출자가 잠금을 푼 뒤 트리거를 깨워야 한다');
+  assert.equal(rowsNow().some((row) => row[0] === `${TRADE}-04`), false);
+});
+
 test('입력 한도와 필수값을 지킨다', () => {
   const { context } = harness({ rows: ROWS });
   assert.match(String(context.batch('', [{ scheduleId: `${TRADE}-04` }]).error), /tid 필수/);
@@ -219,4 +234,27 @@ test('API가 배치 액션과 능력 레지스트리를 노출한다', () => {
   assert.match(api, /case "removeEquips":/);
   assert.match(api, /dashboardRemoveEquipmentBatch\(/);
   assert.match(api, /id: "equipment\.remove_batch", action: "removeEquips"/);
+});
+
+test('same-named set instances are bounded by their own header', () => {
+  const duplicateSets = [
+    [`${TRADE}-01`, TRADE, 'FX6 set', 'FX6 set'],
+    [`${TRADE}-02`, TRADE, 'FX6 set', 'FX6 body'],
+    [`${TRADE}-03`, TRADE, 'FX6 set', 'battery'],
+    [`${TRADE}-04`, TRADE, 'FX6 set', 'FX6 set'],
+    [`${TRADE}-05`, TRADE, 'FX6 set', 'FX6 body'],
+    [`${TRADE}-06`, TRADE, 'FX6 set', 'battery'],
+  ];
+  const { context, rowsNow } = harness({ rows: duplicateSets });
+  const result = context.batch(
+    TRADE,
+    [{ scheduleId: `${TRADE}-01` }],
+    { mutationId: 'remove:one-set-instance' },
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.removedRows, 3);
+  assert.deepEqual(rowsNow().map((row) => row[0]), [
+    `${TRADE}-04`, `${TRADE}-05`, `${TRADE}-06`,
+  ]);
 });

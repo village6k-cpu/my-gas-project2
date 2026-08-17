@@ -8866,6 +8866,17 @@ function dashboardAddEquipments(tid, entries, options) {
   var forceZeroPrice = options.forceZeroPrice === true || options.forceZeroPrice === 1 ||
     options.forceZeroPrice === "1" || options.forceZeroPrice === "true";
   var lockAlreadyHeld = options.lockAlreadyHeld === true;
+  var deferContractRegeneration = options.deferContractRegeneration === true;
+  var requireExactCatalog = options.requireExactCatalog === true;
+  var availabilityPreflighted = options.availabilityPreflighted === true && lockAlreadyHeld;
+  var excludeScheduleIds = Array.isArray(options.excludeScheduleIds)
+    ? options.excludeScheduleIds.map(function(id) { return String(id || '').trim(); }).filter(Boolean)
+    : [];
+  var excludeScheduleIdMap = {};
+  excludeScheduleIds.forEach(function(id) { excludeScheduleIdMap[id] = true; });
+  var periodOverride = options.periodOverride && typeof options.periodOverride === 'object'
+    ? options.periodOverride
+    : null;
   var structureProjectionQueued = false;
   var contractRegenQueued = false;
   var profileStart = Date.now();
@@ -8985,6 +8996,24 @@ function dashboardAddEquipments(tid, entries, options) {
     var 반납일 = sourceDisplay[2];
     var 반납시간 = sourceDisplay[3];
     var 예약자명 = sourceDisplay[7];
+    if (periodOverride) {
+      var overrideStartDate = String(periodOverride.startDate || '').trim();
+      var overrideStartTime = String(periodOverride.startTime || '').trim();
+      var overrideEndDate = String(periodOverride.endDate || '').trim();
+      var overrideEndTime = String(periodOverride.endTime || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(overrideStartDate) ||
+          !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(overrideStartTime) ||
+          !/^\d{4}-\d{2}-\d{2}$/.test(overrideEndDate) ||
+          !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(overrideEndTime) ||
+          !parseDT(overrideStartDate, overrideStartTime) || !parseDT(overrideEndDate, overrideEndTime) ||
+          parseDT(overrideEndDate, overrideEndTime).getTime() <= parseDT(overrideStartDate, overrideStartTime).getTime()) {
+        return { error: 'periodOverride 일시 형식이 올바르지 않습니다' };
+      }
+      반출일 = overrideStartDate;
+      반출시간 = overrideStartTime;
+      반납일 = overrideEndDate;
+      반납시간 = overrideEndTime;
+    }
     var startDT = parseDT(반출일, 반출시간);
     var endDT = parseDT(반납일, 반납시간);
     if (!startDT || !endDT) return { error: "거래ID의 반출/반납 일시를 읽지 못했습니다" };
@@ -9011,18 +9040,54 @@ function dashboardAddEquipments(tid, entries, options) {
 
     var equipMeta = buildDashboardEquipmentMeta_(equipSheet);
     markProfile_('equipment_meta');
+    if (requireExactCatalog) {
+      var unknownExactNames = addEntries.map(function(entry) { return entry.name; }).filter(function(name) {
+        return !(setLookup.items && setLookup.items[name]) && !(equipMeta.equipment && equipMeta.equipment[name]);
+      });
+      if (unknownExactNames.length) {
+        return attachProfile_({
+          error: '장비마스터/세트마스터에 없는 정확 장비명입니다: ' + unknownExactNames.join(', '),
+          code: 'UNKNOWN_EQUIPMENT'
+        });
+      }
+    }
     var mergedAvailabilityItems = mergeAvailabilityItems_(availabilityItems);
     var targetEquipmentNames = mergedAvailabilityItems.map(function(item) { return item.name; });
-    var scheduleData = getDashboardAvailabilityScheduleData_(sched, lastRow, targetEquipmentNames);
+    var scheduleData = [];
+    if (!availabilityPreflighted) {
+      // A correction projection must not warm/read the ordinary full schedule map first.
+      // On a cache miss that defeats the point of the targeted path and recreates the
+      // multi-minute scan that this composite operation is intended to remove.
+      if (periodOverride || excludeScheduleIds.length) {
+        var projectedRows = findDashboardScheduleRowsForEquipments_(
+          sched, lastRow, targetEquipmentNames
+        );
+        projectedRows = projectedRows.filter(function(row) {
+          return !excludeScheduleIdMap[String(row[0] || '').trim()];
+        });
+        projectedRows.forEach(function(row) {
+          if (!periodOverride || String(row[1] || '').trim() !== tid) return;
+          row[5] = 반출일;
+          row[6] = 반출시간;
+          row[7] = 반납일;
+          row[8] = 반납시간;
+        });
+        scheduleData = buildDashboardScheduleData_(projectedRows, targetEquipmentNames);
+      } else {
+        scheduleData = getDashboardAvailabilityScheduleData_(sched, lastRow, targetEquipmentNames);
+      }
+    }
     markProfile_('availability_schedule_rows');
     markProfile_('availability_schedule_data');
-    var availability = checkAvailabilityForAddCached_(
-      mergedAvailabilityItems,
-      startDT,
-      endDT,
-      equipMeta,
-      scheduleData
-    );
+    var availability = availabilityPreflighted
+      ? { ok: true, conflicts: [], warnings: [] }
+      : checkAvailabilityForAddCached_(
+          mergedAvailabilityItems,
+          startDT,
+          endDT,
+          equipMeta,
+          scheduleData
+        );
     markProfile_('availability_check');
     if (!availability.ok) {
       return attachProfile_({
@@ -9067,6 +9132,7 @@ function dashboardAddEquipments(tid, entries, options) {
         availabilityChecked: true,
         addedEquipments: addEntries.length,
         addedRows: newRows.length,
+        plannedItems: dashboardAddedItemsFromRows_(newRows),
         addedItems: addEntries.map(function(entry) { return { name: entry.name, qty: entry.qty, quantity: entry.qty }; }),
         requestedItems: addEntries.map(function(entry) { return { name: entry.name, qty: entry.qty, quantity: entry.qty }; }),
         equipmentNames: addEntries.map(function(entry) { return entry.name; }),
@@ -9123,12 +9189,14 @@ function dashboardAddEquipments(tid, entries, options) {
       structureProjectionQueued = true;
     }
     var contractResult = null;
-    var contractRegenPending = true;
+    var contractRegenPending = !deferContractRegeneration;
     var contractRegenError = "";
     // 계약서/Drive 작업은 항상 디바운스 워커에서 처리한다. directRegenerate 레거시 입력도
     // 카드 요청의 전역 잠금을 오래 점유하지 않도록 비동기화한다.
-    scheduleContractRegenUnderLock_(tid);
-    contractRegenQueued = true;
+    if (!deferContractRegeneration) {
+      scheduleContractRegenUnderLock_(tid);
+      contractRegenQueued = true;
+    }
     try { invalidateDashboardCache(); } catch (eCache) {}
     try { invalidateTimelineCache(); } catch (eTimeline) {}
     markProfile_('schedule_contract_regen');
@@ -9137,6 +9205,7 @@ function dashboardAddEquipments(tid, entries, options) {
       success: true,
       availabilityChecked: true,
       contractRegenPending: contractRegenPending,
+      contractRegenerationDeferred: deferContractRegeneration,
       contractRegenError: contractRegenError,
       url: contractResult && contractResult.url ? contractResult.url : "",
       contractUrl: contractResult && contractResult.url ? contractResult.url : "",
@@ -10043,21 +10112,17 @@ function resolveDashboardRemovalRows_(data, tid, scheduleId, equipName) {
       return rows;
     }
     var setKey = targetSetName || targetEquipName;
-    var hasComponents = false;
-    for (var cidx = 0; cidx < data.length; cidx++) {
-      if (String(data[cidx][1] || "").trim() !== tid) continue;
-      var cSet = String(data[cidx][2] || "").trim();
-      var cEquip = String(data[cidx][3] || "").trim();
-      if (cSet === setKey && cEquip && cEquip !== setKey) {
-        hasComponents = true;
-        break;
-      }
-    }
-    for (var i = data.length - 1; i >= 0; i--) {
-      if (String(data[i][1] || "").trim() !== tid) continue;
-      var rowNum = i + 2;
+    rows.push(targetRow);
+    // A set instance is stored as one header followed by its component rows. Stop at
+    // the next top-level row so two independently added copies of the same set do not
+    // get collapsed into one destructive removal.
+    for (var i = targetIdx + 1; i < data.length; i++) {
+      if (String(data[i][1] || "").trim() !== tid) break;
       var rowSetName = String(data[i][2] || "").trim();
-      if (rowNum === targetRow || (hasComponents && rowSetName === setKey)) rows.push(rowNum);
+      var rowEquipName = String(data[i][3] || "").trim();
+      var rowIsComponent = !!rowSetName && rowSetName !== rowEquipName;
+      if (!rowIsComponent || rowSetName !== setKey) break;
+      rows.push(i + 2);
     }
     return rows;
   }
@@ -10287,6 +10352,8 @@ function dashboardRemoveEquipmentBatch(tid, entries, options) {
   if (!Array.isArray(entries) || !entries.length) return { error: 'items 필수' };
   if (entries.length > 100) return { error: '한 번에 최대 100개 품목만 제외할 수 있습니다.' };
   options = options || {};
+  var lockAlreadyHeld = options.lockAlreadyHeld === true;
+  var deferContractRegeneration = options.deferContractRegeneration === true;
 
   // 같은 묶음에 같은 품목이 두 번 들어와도 한 번만 처리한다.
   var bySchedule = {};
@@ -10309,13 +10376,16 @@ function dashboardRemoveEquipmentBatch(tid, entries, options) {
   var mutationId = normalizeDashboardMutationId_(options.mutationId);
   var batchScope = 'equipmentRemoveBatch:' + order.join(',');
 
-  var lock = LockService.getScriptLock();
+  var lock = null;
   var structureProjectionQueued = false;
   var contractRegenQueued = false;
-  try {
-    if (!lock.tryLock(1000)) return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
-  } catch (lockErr) {
-    return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
+  if (!lockAlreadyHeld) {
+    lock = LockService.getScriptLock();
+    try {
+      if (!lock.tryLock(1000)) return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
+    } catch (lockErr) {
+      return { error: '다른 변경 작업 처리 중입니다. 잠시 후 다시 시도하세요.', code: 'BUSY', retryable: true };
+    }
   }
 
   try {
@@ -10403,15 +10473,18 @@ function dashboardRemoveEquipmentBatch(tid, entries, options) {
     deleteDashboardRowsDescending_(sched, rowsToDelete);
     scheduleDashboardStructureProjectionUnderLock_(tid, { removeScheduleIds: removedScheduleIds });
     structureProjectionQueued = true;
-    scheduleContractRegenUnderLock_(tid);
-    contractRegenQueued = true;
+    if (!deferContractRegeneration) {
+      scheduleContractRegenUnderLock_(tid);
+      contractRegenQueued = true;
+    }
     try { invalidateDashboardCache(); } catch (eCache) {}
     try { invalidateTimelineCache(); } catch (eTimeline) {}
     commitDashboardMutation_(props, tid, mutationId, batchScope);
 
     return {
       success: true,
-      contractRegenPending: true,
+      contractRegenPending: !deferContractRegeneration,
+      contractRegenerationDeferred: deferContractRegeneration,
       contractRegenError: '',
       removedRows: rowsToDelete.length,
       removedScheduleIds: removedScheduleIds,
@@ -10430,9 +10503,11 @@ function dashboardRemoveEquipmentBatch(tid, entries, options) {
       })
     };
   } finally {
-    try { lock.releaseLock(); } catch (releaseErr) {}
-    if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
-    if (contractRegenQueued) ensureContractRegenTrigger_();
+    if (lock) try { lock.releaseLock(); } catch (releaseErr) {}
+    if (!lockAlreadyHeld) {
+      if (structureProjectionQueued) ensureDashboardStructureProjectionTrigger_();
+      if (contractRegenQueued) ensureContractRegenTrigger_();
+    }
   }
 }
 
@@ -17677,8 +17752,578 @@ function parseWithClaude(text, imageBase64, imageMediaType) {
     return { error: "API 호출 실패: " + fetchErr.message };
   }
 }
-function changeRegisteredTradeDates(args) {
+function normalizeRegisteredTradeCorrection_(args) {
   args = args || {};
+  var allowed = { tradeId: true, operationId: true, dateChange: true, remove: true, add: true };
+  Object.keys(args).forEach(function(key) {
+    if (!allowed[key]) throw new Error('지원하지 않거나 금지된 등록거래 보정 필드: ' + key);
+  });
+  var tradeId = String(args.tradeId || '').trim();
+  var operationId = String(args.operationId || '').trim();
+  if (!/^\d{6}-\d{3,}$/.test(tradeId)) throw new Error('tradeId는 YYMMDD-NNN 형식이어야 합니다');
+  // Internal stage ids append ':add' or ':remove'; keep the longest derived id
+  // within normalizeDashboardMutationId_'s 120-character boundary.
+  if (operationId.length < 8 || operationId.length > 113 || !/^[A-Za-z0-9_.:-]+$/.test(operationId)) {
+    throw new Error('operationId 형식이 올바르지 않습니다');
+  }
+
+  function validDate_(value, label) {
+    var text = String(value || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) throw new Error(label + '는 yyyy-MM-dd 형식이어야 합니다');
+    var parts = text.split('-').map(Number);
+    var probe = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+    if (Utilities.formatDate(probe, 'UTC', 'yyyy-MM-dd') !== text) throw new Error(label + '가 실제 달력에 없는 날짜입니다');
+    return text;
+  }
+
+  function validTime_(value, label) {
+    var text = String(value || '').trim();
+    if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(text)) throw new Error(label + '은 HH:mm 형식이어야 합니다');
+    return text;
+  }
+
+  var dateChange = null;
+  if (args.dateChange) {
+    if (typeof args.dateChange !== 'object' || Array.isArray(args.dateChange)) throw new Error('dateChange는 객체여야 합니다');
+    var dateAllowed = { newStartDate: true, newEndDate: true, startTime: true, endTime: true, allowConflicts: true };
+    Object.keys(args.dateChange).forEach(function(key) {
+      if (!dateAllowed[key]) throw new Error('지원하지 않는 dateChange 필드: ' + key);
+    });
+    var hasStartTime = args.dateChange.startTime !== undefined;
+    var hasEndTime = args.dateChange.endTime !== undefined;
+    if (hasStartTime !== hasEndTime) throw new Error('startTime과 endTime은 함께 지정해야 합니다');
+    dateChange = {
+      newStartDate: validDate_(args.dateChange.newStartDate, 'newStartDate'),
+      newEndDate: validDate_(args.dateChange.newEndDate, 'newEndDate'),
+      allowConflicts: args.dateChange.allowConflicts === true
+    };
+    if (hasStartTime) {
+      dateChange.startTime = validTime_(args.dateChange.startTime, 'startTime');
+      dateChange.endTime = validTime_(args.dateChange.endTime, 'endTime');
+    }
+  }
+
+  if (args.remove !== undefined && !Array.isArray(args.remove)) throw new Error('remove는 배열이어야 합니다');
+  var remove = Array.isArray(args.remove) ? args.remove : [];
+  if (remove.length > 100) throw new Error('remove는 최대 100개입니다');
+  var removeSeen = {};
+  remove = remove.map(function(entry) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('remove 항목은 객체여야 합니다');
+    Object.keys(entry).forEach(function(key) {
+      if (key !== 'scheduleId' && key !== 'expectedName') throw new Error('지원하지 않는 remove 필드: ' + key);
+    });
+    var scheduleId = String(entry && entry.scheduleId || '').trim();
+    var expectedName = String(entry && entry.expectedName || '').trim();
+    if (!/^\d{6}-\d{3}-\d+$/.test(scheduleId) || scheduleId.indexOf(tradeId + '-') !== 0) {
+      throw new Error('remove scheduleId가 거래ID와 일치하지 않습니다');
+    }
+    if (!expectedName || expectedName.length > 160) throw new Error('remove expectedName 필수');
+    if (removeSeen[scheduleId]) throw new Error('remove scheduleId 중복: ' + scheduleId);
+    removeSeen[scheduleId] = true;
+    return { scheduleId: scheduleId, expectedName: expectedName };
+  });
+
+  if (args.add !== undefined && !Array.isArray(args.add)) throw new Error('add는 배열이어야 합니다');
+  var add = (Array.isArray(args.add) ? args.add : []).map(function(entry) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('add 항목은 객체여야 합니다');
+    Object.keys(entry).forEach(function(key) {
+      if (key !== 'name' && key !== 'qty') throw new Error('지원하지 않는 add 필드: ' + key);
+    });
+    var name = String(entry.name || '').trim();
+    if (!name || name.length > 160) throw new Error('add 장비명 형식이 올바르지 않습니다');
+    if (typeof entry.qty !== 'number' || !Number.isInteger(entry.qty) || entry.qty < 1 || entry.qty > 99) {
+      throw new Error('add qty는 1~99 정수여야 합니다');
+    }
+    return { name: name, qty: entry.qty };
+  });
+  if (add.length > 100) throw new Error('add는 최대 100개입니다');
+  if (!dateChange && !remove.length && !add.length) throw new Error('날짜·제거·추가 중 하나 이상이 필요합니다');
+  return { tradeId: tradeId, operationId: operationId, dateChange: dateChange, remove: remove, add: add };
+}
+
+function registeredTradeCorrectionDate_(raw, display) {
+  if (raw instanceof Date) return Utilities.formatDate(raw, 'Asia/Seoul', 'yyyy-MM-dd');
+  var match = String(display || raw || '').trim().match(/(\d{4})[^\d]+(\d{1,2})[^\d]+(\d{1,2})/);
+  return match ? match[1] + '-' + ('0' + match[2]).slice(-2) + '-' + ('0' + match[3]).slice(-2) : '';
+}
+
+function registeredTradeCorrectionTime_(raw, display) {
+  var match = String(display || '').trim().match(/(\d{1,2}):(\d{2})/);
+  if (match) return ('0' + match[1]).slice(-2) + ':' + match[2];
+  if (raw instanceof Date) return Utilities.formatDate(raw, 'Asia/Seoul', 'HH:mm');
+  match = String(raw || '').match(/(\d{1,2}):(\d{2})/);
+  return match ? ('0' + match[1]).slice(-2) + ':' + match[2] : '';
+}
+
+function readRegisteredTradeCorrectionState_(tradeId, includeLedger) {
+  includeLedger = includeLedger !== false;
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var contractSheet = ss.getSheetByName('계약마스터');
+  var scheduleSheet = ss.getSheetByName('스케줄상세');
+  if (!contractSheet || !scheduleSheet) throw new Error('계약마스터/스케줄상세 중 일부가 없습니다');
+
+  var contractLast = contractSheet.getLastRow();
+  var contractRaw = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 9).getValues() : [];
+  var contractDisplay = contractLast >= 2 ? contractSheet.getRange(2, 1, contractLast - 1, 9).getDisplayValues() : [];
+  var contractMatches = [];
+  for (var ci = 0; ci < contractRaw.length; ci++) {
+    if (String(contractRaw[ci][0] || '').trim() === tradeId) contractMatches.push(ci);
+  }
+  if (contractMatches.length !== 1) throw new Error('계약마스터 거래ID가 정확히 1행이 아닙니다: ' + tradeId);
+  var cidx = contractMatches[0];
+  var contract = {
+    startDate: registeredTradeCorrectionDate_(contractRaw[cidx][4], contractDisplay[cidx][4]),
+    startTime: registeredTradeCorrectionTime_(contractRaw[cidx][5], contractDisplay[cidx][5]),
+    endDate: registeredTradeCorrectionDate_(contractRaw[cidx][6], contractDisplay[cidx][6]),
+    endTime: registeredTradeCorrectionTime_(contractRaw[cidx][7], contractDisplay[cidx][7]),
+    rounds: Number(contractRaw[cidx][8] || contractDisplay[cidx][8] || 0)
+  };
+
+  var scheduleLast = scheduleSheet.getLastRow();
+  var scheduleRaw = scheduleLast >= 2 ? scheduleSheet.getRange(2, 1, scheduleLast - 1, 13).getValues() : [];
+  var scheduleDisplay = scheduleLast >= 2 ? scheduleSheet.getRange(2, 1, scheduleLast - 1, 13).getDisplayValues() : [];
+  var rows = [];
+  var periods = {};
+  var topLevelQuantities = {};
+  for (var si = 0; si < scheduleRaw.length; si++) {
+    if (String(scheduleRaw[si][1] || '').trim() !== tradeId) continue;
+    var setName = String(scheduleDisplay[si][2] || scheduleRaw[si][2] || '').trim();
+    var name = String(scheduleDisplay[si][3] || scheduleRaw[si][3] || '').trim();
+    var qty = Number(scheduleRaw[si][4] || scheduleDisplay[si][4] || 1) || 1;
+    var isComponent = !!setName && setName !== name;
+    var scheduleId = String(scheduleDisplay[si][0] || scheduleRaw[si][0] || '').trim();
+    rows.push({ scheduleId: scheduleId, setName: setName, name: name, qty: qty, isComponent: isComponent });
+    if (!isComponent) topLevelQuantities[name] = (topLevelQuantities[name] || 0) + qty;
+    periods[[
+      registeredTradeCorrectionDate_(scheduleRaw[si][5], scheduleDisplay[si][5]),
+      registeredTradeCorrectionTime_(scheduleRaw[si][6], scheduleDisplay[si][6]),
+      registeredTradeCorrectionDate_(scheduleRaw[si][7], scheduleDisplay[si][7]),
+      registeredTradeCorrectionTime_(scheduleRaw[si][8], scheduleDisplay[si][8])
+    ].join('|')] = true;
+  }
+  if (!rows.length) throw new Error('스케줄상세에 거래ID가 없습니다: ' + tradeId);
+
+  if (!includeLedger) {
+    return {
+      contract: contract,
+      schedule: { rows: rows, periods: Object.keys(periods), topLevelQuantities: topLevelQuantities },
+      ledger: null
+    };
+  }
+
+  var ledgerUrl = PropertiesService.getScriptProperties().getProperty('개고생2_URL');
+  if (!ledgerUrl) throw new Error('개고생2_URL 속성이 없습니다');
+  var ledgerSheet = SpreadsheetApp.openByUrl(ledgerUrl).getSheetByName('거래내역');
+  if (!ledgerSheet || ledgerSheet.getLastRow() < 2) throw new Error('거래내역 원장을 찾을 수 없습니다');
+  var ledgerRaw = ledgerSheet.getRange(2, 1, ledgerSheet.getLastRow() - 1, 5).getValues();
+  var ledgerDisplay = ledgerSheet.getRange(2, 1, ledgerSheet.getLastRow() - 1, 5).getDisplayValues();
+  var ledgerRows = 0;
+  var ledgerDates = {};
+  var ledgerLinks = {};
+  for (var li = 0; li < ledgerRaw.length; li++) {
+    if (String(ledgerRaw[li][4] || '').trim() !== tradeId) continue;
+    ledgerRows++;
+    ledgerDates[registeredTradeCorrectionDate_(ledgerRaw[li][0], ledgerDisplay[li][0])] = true;
+    ledgerLinks[String(ledgerRaw[li][2] || '').trim()] = true;
+  }
+  var dateKeys = Object.keys(ledgerDates);
+  var linkKeys = Object.keys(ledgerLinks);
+  return {
+    contract: contract,
+    schedule: { rows: rows, periods: Object.keys(periods), topLevelQuantities: topLevelQuantities },
+    ledger: {
+      rows: ledgerRows,
+      startDate: dateKeys.length === 1 ? dateKeys[0] : '',
+      dates: dateKeys,
+      contractLink: linkKeys.length === 1 ? linkKeys[0] : '',
+      links: linkKeys
+    }
+  };
+}
+
+function preflightRegisteredTradeRemoval_(state, removals) {
+  var byId = {};
+  var rows = state.schedule.rows || [];
+  var removalData = rows.map(function(row) {
+    var rowTradeId = String(row.scheduleId || '').split('-').slice(0, 2).join('-');
+    return [row.scheduleId, rowTradeId, row.setName, row.name];
+  });
+  rows.forEach(function(row) { byId[row.scheduleId] = row; });
+  var expanded = {};
+  (removals || []).forEach(function(removal) {
+    var row = byId[removal.scheduleId];
+    if (!row) throw new Error('removal preflight: 스케줄ID를 찾을 수 없습니다: ' + removal.scheduleId);
+    if (row.name !== removal.expectedName) {
+      throw new Error('removal preflight: 장비명이 일치하지 않습니다: ' + removal.scheduleId);
+    }
+    var tradeId = String(removal.scheduleId || '').split('-').slice(0, 2).join('-');
+    var expandedRows = resolveDashboardRemovalRows_(removalData, tradeId, removal.scheduleId, '');
+    expandedRows.forEach(function(rowNumber) {
+      var expandedRow = rows[rowNumber - 2];
+      if (expandedRow && expandedRow.scheduleId) expanded[expandedRow.scheduleId] = true;
+    });
+  });
+  return { success: true, scheduleIds: Object.keys(expanded) };
+}
+
+function assertRegisteredTradeCorrectionStage_(stage, result) {
+  if (!result || result.success !== true) {
+    throw new Error(stage + ' 실패: ' + String(result && (result.error || result.message || result.code) || 'unknown'));
+  }
+  return result;
+}
+
+function verifyRegisteredTradeCorrectionState_(baseline, finalState, correction, regeneration, operationResults) {
+  var dateChange = correction.dateChange;
+  var expectedPeriod = dateChange ? {
+    startDate: dateChange.newStartDate,
+    startTime: dateChange.startTime || baseline.contract.startTime,
+    endDate: dateChange.newEndDate,
+    endTime: dateChange.endTime || baseline.contract.endTime
+  } : {
+    startDate: baseline.contract.startDate,
+    startTime: baseline.contract.startTime,
+    endDate: baseline.contract.endDate,
+    endTime: baseline.contract.endTime
+  };
+  var periodKey = [expectedPeriod.startDate, expectedPeriod.startTime, expectedPeriod.endDate, expectedPeriod.endTime].join('|');
+  if (finalState.contract.startDate !== expectedPeriod.startDate ||
+      finalState.contract.startTime !== expectedPeriod.startTime ||
+      finalState.contract.endDate !== expectedPeriod.endDate ||
+      finalState.contract.endTime !== expectedPeriod.endTime ||
+      finalState.schedule.periods.length !== 1 || finalState.schedule.periods[0] !== periodKey) {
+    throw new Error('final readback 날짜/시간 불일치');
+  }
+  var expectedRounds = calcRentalDays(expectedPeriod.startDate, expectedPeriod.startTime, expectedPeriod.endDate, expectedPeriod.endTime);
+  if (Number(finalState.contract.rounds) !== expectedRounds) throw new Error('final readback 회차 불일치');
+
+  var expectedItems = {};
+  Object.keys(baseline.schedule.topLevelQuantities || {}).forEach(function(name) {
+    expectedItems[name] = Number(baseline.schedule.topLevelQuantities[name]) || 0;
+  });
+  var baselineById = {};
+  (baseline.schedule.rows || []).forEach(function(row) { baselineById[row.scheduleId] = row; });
+  correction.remove.forEach(function(removal) {
+    var row = baselineById[removal.scheduleId];
+    if (row && !row.isComponent) {
+      expectedItems[row.name] = Math.max(0, (expectedItems[row.name] || 0) - (Number(row.qty) || 1));
+      if (!expectedItems[row.name]) delete expectedItems[row.name];
+    }
+  });
+  correction.add.forEach(function(entry) {
+    expectedItems[entry.name] = (expectedItems[entry.name] || 0) + entry.qty;
+  });
+  var actualItems = finalState.schedule.topLevelQuantities || {};
+  var expectedNames = Object.keys(expectedItems).sort();
+  var actualNames = Object.keys(actualItems).filter(function(name) { return Number(actualItems[name]) > 0; }).sort();
+  if (JSON.stringify(expectedNames) !== JSON.stringify(actualNames)) throw new Error('final readback 최상위 품목 목록 불일치');
+  expectedNames.forEach(function(name) {
+    if (Number(actualItems[name]) !== Number(expectedItems[name])) throw new Error('final readback 품목 수량 불일치: ' + name);
+  });
+
+  operationResults = operationResults || {};
+  if (operationResults.addPlan || operationResults.removalPlan || operationResults.add || operationResults.remove) {
+    function sortedTextList_(values) {
+      return (values || []).map(function(value) { return String(value || '').trim(); }).filter(Boolean).sort();
+    }
+    function rowIdentityList_(rows) {
+      return (rows || []).map(function(row) {
+        return [
+          String(row.scheduleId || '').trim(),
+          String(row.setName || '').trim(),
+          String(row.name || '').trim(),
+          Number(row.qty || row.quantity) || 1
+        ].join('|');
+      }).sort();
+    }
+    var plannedRemovedIds = sortedTextList_(
+      operationResults.removalPlan && operationResults.removalPlan.scheduleIds
+    );
+    var actualRemovedIds = sortedTextList_(
+      operationResults.remove && operationResults.remove.removedScheduleIds
+    );
+    if (JSON.stringify(plannedRemovedIds) !== JSON.stringify(actualRemovedIds)) {
+      throw new Error('remove result does not match independent preflight plan');
+    }
+    var plannedAddedItems = (operationResults.addPlan && operationResults.addPlan.plannedItems) || [];
+    var actualAddedItems = (operationResults.add && operationResults.add.addedItems) || [];
+    if (JSON.stringify(rowIdentityList_(plannedAddedItems)) !== JSON.stringify(rowIdentityList_(actualAddedItems))) {
+      throw new Error('add result does not match independent preflight plan');
+    }
+    var removedPlannedIdMap = {};
+    plannedRemovedIds.forEach(function(id) { removedPlannedIdMap[id] = true; });
+    var expectedRows = (baseline.schedule.rows || []).filter(function(row) {
+      return !removedPlannedIdMap[String(row.scheduleId || '').trim()];
+    }).map(function(row) {
+      return { scheduleId: row.scheduleId, setName: row.setName, name: row.name, qty: Number(row.qty) || 1 };
+    });
+    plannedAddedItems.forEach(function(row) {
+      expectedRows.push({
+        scheduleId: String(row.scheduleId || '').trim(),
+        setName: String(row.setName || '').trim(),
+        name: String(row.name || '').trim(),
+        qty: Number(row.qty || row.quantity) || 1
+      });
+    });
+
+    function rowMultiset_(rows) {
+      var counts = {};
+      (rows || []).forEach(function(row) {
+        var key = [String(row.setName || '').trim(), String(row.name || '').trim(), Number(row.qty) || 1].join('|');
+        counts[key] = (counts[key] || 0) + 1;
+      });
+      return Object.keys(counts).sort().map(function(key) { return key + '=' + counts[key]; });
+    }
+    var expectedRowMultiset = rowMultiset_(expectedRows);
+    var actualRowMultiset = rowMultiset_(finalState.schedule.rows || []);
+    if (JSON.stringify(expectedRowMultiset) !== JSON.stringify(actualRowMultiset)) {
+      throw new Error('final readback row multiset mismatch');
+    }
+
+    var finalRowsById = {};
+    (finalState.schedule.rows || []).forEach(function(row) {
+      finalRowsById[String(row.scheduleId || '').trim()] = row;
+    });
+    plannedAddedItems.forEach(function(added) {
+      var actualAdded = finalRowsById[String(added.scheduleId || '').trim()];
+      if (!actualAdded || String(actualAdded.setName || '').trim() !== String(added.setName || '').trim() ||
+          String(actualAdded.name || '').trim() !== String(added.name || '').trim() ||
+          (Number(actualAdded.qty) || 1) !== (Number(added.qty || added.quantity) || 1)) {
+        throw new Error('final readback added row identity mismatch: ' + String(added.scheduleId || ''));
+      }
+    });
+  }
+  var finalIds = {};
+  (finalState.schedule.rows || []).forEach(function(row) { finalIds[row.scheduleId] = true; });
+  (((operationResults || {}).removalPlan || {}).scheduleIds || []).forEach(function(scheduleId) {
+    if (finalIds[scheduleId]) throw new Error('final readback 제거 스케줄ID가 남아 있습니다: ' + scheduleId);
+  });
+  if (!regeneration || regeneration.success !== true || !regeneration.url || !regeneration.fileId ||
+      !regeneration.linkUpdate || regeneration.linkUpdate.success !== true) {
+    throw new Error('final readback 계약서 재생성 검증 실패');
+  }
+  if (finalState.ledger.rows < 1 || finalState.ledger.startDate !== expectedPeriod.startDate ||
+      finalState.ledger.links.length !== 1 || finalState.ledger.contractLink !== regeneration.url) {
+    throw new Error('final readback 거래내역 링크/날짜 불일치');
+  }
+  return finalState;
+}
+
+function correctRegisteredTrade(args) {
+  var correction = normalizeRegisteredTradeCorrection_(args);
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(1500)) {
+    return {
+      success: false,
+      code: 'BUSY',
+      retryable: false,
+      error: '다른 변경 작업이 진행 중입니다. 자동 재시도하지 말고 현재 상태를 다시 확인하세요.'
+    };
+  }
+  var stages = [];
+  var lockedBaseline = null;
+  var removalPlan = { success: true, scheduleIds: [] };
+  var addPlan = null;
+  var addResult = null;
+  var removeResult = null;
+  var mutationStarted = false;
+  var attemptedStage = '';
+  var structureChanged = false;
+  var failure = null;
+  try {
+    lockedBaseline = readRegisteredTradeCorrectionState_(correction.tradeId, false);
+    // ScriptLock does not cover the HTTP portions of checkout/return/setup/aux
+    // transitions. Their durable lease is the cross-operation exclusion signal.
+    var correctionLeaseBlock = dashboardTradeMutationLeaseError_(
+      PropertiesService.getScriptProperties(),
+      correction.tradeId,
+      'registeredTradeCorrection',
+      correction.operationId
+    );
+    if (correctionLeaseBlock) {
+      throw new Error(correctionLeaseBlock.error || '같은 거래의 다른 작업을 처리 중입니다.');
+    }
+    removalPlan = preflightRegisteredTradeRemoval_(lockedBaseline, correction.remove);
+    if (correction.remove.length) {
+      var plannedRemovalIds = {};
+      removalPlan.scheduleIds.forEach(function(scheduleId) { plannedRemovalIds[scheduleId] = true; });
+      var remainingScheduleRows = (lockedBaseline.schedule.rows || []).filter(function(row) {
+        return !plannedRemovalIds[String(row.scheduleId || '').trim()];
+      });
+      if (!remainingScheduleRows.length && !correction.add.length) {
+        throw new Error('모든 스케줄 행을 제거만 하는 보정은 허용되지 않습니다. 대체 장비를 함께 지정하세요.');
+      }
+      if (isDashboardTradeCheckoutStarted_(SpreadsheetApp.getActiveSpreadsheet(), correction.tradeId)) {
+        throw new Error('이미 반출된 품목은 삭제할 수 없습니다. 반납 의무와 기준선을 보존해야 합니다.');
+      }
+    }
+    var expectedPeriod = correction.dateChange ? {
+      startDate: correction.dateChange.newStartDate,
+      startTime: correction.dateChange.startTime || lockedBaseline.contract.startTime,
+      endDate: correction.dateChange.newEndDate,
+      endTime: correction.dateChange.endTime || lockedBaseline.contract.endTime
+    } : null;
+    if (correction.add.length) {
+      addPlan = assertRegisteredTradeCorrectionStage_('add preflight', dashboardAddEquipments(
+        correction.tradeId,
+        correction.add,
+        {
+          dryRun: true,
+          rawNames: true,
+          requireExactCatalog: true,
+          periodOverride: expectedPeriod,
+          excludeScheduleIds: removalPlan.scheduleIds
+        }
+      ));
+    }
+    if (correction.dateChange) {
+      var dateArgs = {
+        tradeId: correction.tradeId,
+        newStartDate: correction.dateChange.newStartDate,
+        newEndDate: correction.dateChange.newEndDate,
+        allowConflicts: correction.dateChange.allowConflicts,
+        dryRun: false
+      };
+      if (correction.dateChange.startTime) {
+        dateArgs.startTime = correction.dateChange.startTime;
+        dateArgs.endTime = correction.dateChange.endTime;
+      }
+      mutationStarted = true;
+      attemptedStage = 'scheduleChangeDates';
+      assertRegisteredTradeCorrectionStage_('scheduleChangeDates', changeRegisteredTradeDates(
+        dateArgs,
+        {
+          lockAlreadyHeld: true,
+          deferContractRegeneration: true,
+          excludeScheduleIds: removalPlan.scheduleIds,
+          allowEmptyAvailabilityPlan: correction.add.length > 0
+        }
+      ));
+      stages.push('scheduleChangeDates');
+      attemptedStage = '';
+    }
+    if (correction.add.length) {
+      mutationStarted = true;
+      attemptedStage = 'scheduleAddEquips';
+      addResult = assertRegisteredTradeCorrectionStage_('scheduleAddEquips', dashboardAddEquipments(
+        correction.tradeId,
+        correction.add,
+        {
+          lockAlreadyHeld: true,
+          deferContractRegeneration: true,
+          rawNames: true,
+          requireExactCatalog: true,
+          availabilityPreflighted: true,
+          excludeScheduleIds: removalPlan.scheduleIds,
+          mutationId: correction.operationId + ':add'
+        }
+      ));
+      stages.push('scheduleAddEquips');
+      attemptedStage = '';
+      structureChanged = true;
+    }
+    if (correction.remove.length) {
+      mutationStarted = true;
+      attemptedStage = 'scheduleRemoveEquips';
+      removeResult = assertRegisteredTradeCorrectionStage_('scheduleRemoveEquips', dashboardRemoveEquipmentBatch(
+        correction.tradeId,
+        correction.remove.map(function(entry) { return { scheduleId: entry.scheduleId }; }),
+        {
+          lockAlreadyHeld: true,
+          deferContractRegeneration: true,
+          mutationId: correction.operationId + ':remove'
+        }
+      ));
+      stages.push('scheduleRemoveEquips');
+      attemptedStage = '';
+      structureChanged = true;
+    }
+  } catch (stageError) {
+    failure = stageError;
+  } finally {
+    lock.releaseLock();
+  }
+
+  var shouldWakeStructureProjection = structureChanged;
+  if (!shouldWakeStructureProjection && (correction.add.length || correction.remove.length)) {
+    try {
+      shouldWakeStructureProjection = !!PropertiesService.getScriptProperties().getProperty(
+        DASHBOARD_STRUCTURE_QUEUE_PREFIX_ + correction.tradeId
+      );
+    } catch (structureQueueReadError) {}
+  }
+  if (shouldWakeStructureProjection) ensureDashboardStructureProjectionTrigger_();
+
+  function partialResult_(error) {
+    var partialReadback = null;
+    var readbackError = '';
+    try {
+      SpreadsheetApp.flush();
+      partialReadback = readRegisteredTradeCorrectionState_(correction.tradeId);
+    } catch (partialReadbackError) {
+      readbackError = partialReadbackError.message;
+    }
+    return {
+      success: false,
+      status: 'PARTIAL_STATE',
+      code: 'PARTIAL_STATE',
+      outcomeUnknown: true,
+      tradeId: correction.tradeId,
+      operationId: correction.operationId,
+      appliedStages: stages.slice(),
+      attemptedStage: attemptedStage,
+      error: error && error.message ? error.message : String(error || 'unknown'),
+      readback: partialReadback,
+      readbackError: readbackError,
+      customerNotificationSent: false
+    };
+  }
+
+  if (failure) {
+    if (!mutationStarted) throw failure;
+    return partialResult_(failure);
+  }
+
+  var regeneration = null;
+  attemptedStage = 'regenerateContract';
+  try {
+    regeneration = regenerateContractById(correction.tradeId, undefined, { strictLedgerLink: true });
+    assertRegisteredTradeCorrectionStage_('regenerateContract', regeneration);
+  } catch (regenerationError) {
+    return partialResult_(regenerationError);
+  }
+  stages.push('regenerateContract');
+  attemptedStage = '';
+  var verifiedState = null;
+  try {
+    SpreadsheetApp.flush();
+    var finalState = readRegisteredTradeCorrectionState_(correction.tradeId);
+    verifiedState = verifyRegisteredTradeCorrectionState_(
+      lockedBaseline,
+      finalState,
+      correction,
+      regeneration,
+      { addPlan: addPlan, removalPlan: removalPlan, add: addResult, remove: removeResult }
+    );
+  } catch (verificationError) {
+    attemptedStage = 'finalReadback';
+    return partialResult_(verificationError);
+  }
+  return {
+    success: true,
+    status: 'CORRECTED',
+    tradeId: correction.tradeId,
+    operationId: correction.operationId,
+    stages: stages,
+    contractRegeneration: regeneration,
+    readback: verifiedState,
+    customerNotificationSent: false
+  };
+}
+
+function changeRegisteredTradeDates(args, options) {
+  args = args || {};
+  options = options || {};
   var allowedKeys = {
     tradeId: true, newStartDate: true, newEndDate: true,
     startTime: true, endTime: true, allowConflicts: true, dryRun: true
@@ -17703,9 +18348,32 @@ function changeRegisteredTradeDates(args) {
   if (!/^\d{6}-\d{3,}$/.test(tradeId)) throw new Error('tradeId는 YYMMDD-NNN 형식이어야 합니다');
   var allowConflicts = args.allowConflicts === true || args.allowConflicts === 'true';
   var dryRun = args.dryRun === true || args.dryRun === 'true';
+  var lockAlreadyHeld = options.lockAlreadyHeld === true;
+  var deferContractRegeneration = options.deferContractRegeneration === true;
+  var excludeScheduleIds = Array.isArray(options.excludeScheduleIds)
+    ? options.excludeScheduleIds.map(function(id) { return String(id || '').trim(); }).filter(Boolean)
+    : [];
+  var excludeScheduleIdMap = {};
+  excludeScheduleIds.forEach(function(id) { excludeScheduleIdMap[id] = true; });
+  var allowEmptyAvailabilityPlan = options.allowEmptyAvailabilityPlan === true && lockAlreadyHeld;
+  if (lockAlreadyHeld && !deferContractRegeneration) {
+    throw new Error('바깥 잠금 경로는 계약서 재생성을 연기해야 합니다');
+  }
 
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) throw new Error('다른 일정 변경이 진행 중입니다. 잠시 후 다시 시도하세요');
+  var lock = null;
+  var ownsLock = false;
+  var lockReleased = false;
+  if (!lockAlreadyHeld) {
+    lock = LockService.getScriptLock();
+    if (!lock.tryLock(30000)) throw new Error('다른 일정 변경이 진행 중입니다. 잠시 후 다시 시도하세요');
+    ownsLock = true;
+  }
+
+  function releaseOwnedLock_() {
+    if (!ownsLock || lockReleased || !lock) return;
+    lock.releaseLock();
+    lockReleased = true;
+  }
 
   function normalizeDateCell_(raw, display) {
     if (raw instanceof Date) return Utilities.formatDate(raw, 'Asia/Seoul', 'yyyy-MM-dd');
@@ -17892,8 +18560,11 @@ function changeRegisteredTradeDates(args) {
       }
     });
 
+    var availabilityTargetScheduleRows = targetScheduleRows.filter(function(entry) {
+      return !excludeScheduleIdMap[String(entry && entry.values && entry.values[0] || '').trim()];
+    });
     var inventoryPlan = planRegisteredTradeInventory_(
-      targetScheduleRows, equipmentExactMap, setNamesWithComponents
+      availabilityTargetScheduleRows, equipmentExactMap, setNamesWithComponents
     );
     itemMap = inventoryPlan.itemMap;
     availabilityWarnings = inventoryPlan.availabilityWarnings;
@@ -17901,7 +18572,7 @@ function changeRegisteredTradeDates(args) {
         if (unresolvedInventory.length > 0) {
       throw new Error('UNRESOLVED_INVENTORY: ' + unresolvedInventory.join(', '));
     }
-    if (Object.keys(itemMap).length === 0) {
+    if (Object.keys(itemMap).length === 0 && !allowEmptyAvailabilityPlan) {
       throw new Error('UNRESOLVED_INVENTORY: 가용성을 계산할 장비가 없습니다');
     }
 
@@ -18035,12 +18706,6 @@ function changeRegisteredTradeDates(args) {
       try { invalidateDashboardCache([oldStartDate, oldEndDate, newStartDate, newEndDate]); } catch (cacheErr) {}
       try { invalidateTimelineCache(); } catch (timelineErr) {}
 
-      var regeneration = regenerateContractById(tradeId, undefined, { strictLedgerLink: true });
-      if (!regeneration || regeneration.success !== true || !regeneration.url || !regeneration.fileId
-          || !regeneration.linkUpdate || regeneration.linkUpdate.success !== true) {
-        throw new Error('계약서 재생성 실패: ' + String(regeneration && (regeneration.error || regeneration.message) || 'unknown'));
-      }
-      SpreadsheetApp.flush();
       var readback = readback_(contractSheet, contractRow, scheduleSheet, targetRows, targetSegments, ledgerSheet, ledgerRows);
       var expectedPeriod = [newStartDate, startTime, newEndDate, endTime].join('|');
       var verified = readback.contract.startDate === newStartDate
@@ -18054,10 +18719,10 @@ function changeRegisteredTradeDates(args) {
         && readback.ledger.rows === ledgerRows.length
         && readback.ledger.startDate === newStartDate
         && readback.ledger.links.length === 1
-        && readback.ledger.contractLink === regeneration.url;
+        && readback.ledger.contractLink === beforeReadback.ledger.contractLink;
       if (!verified) throw new Error('권위 데이터 readback 불일치');
 
-      return {
+      var result = {
         success: true,
         status: sameRequestedPeriod ? 'RECONCILED' : (conflicts.length > 0 ? 'CHANGED_WITH_CONFLICTS' : 'CHANGED'),
         tradeId: tradeId,
@@ -18066,10 +18731,54 @@ function changeRegisteredTradeDates(args) {
         updatedScheduleRows: targetRows.length,
         conflicts: conflicts,
         availabilityWarnings: availabilityWarnings,
-        contractRegeneration: regeneration,
+        contractRegeneration: null,
+        contractRegenPending: deferContractRegeneration,
         readback: readback,
         customerNotificationSent: false
       };
+      if (deferContractRegeneration) return result;
+
+      // Drive 복사와 외부 원장 링크 갱신은 전역 잠금의 정본 쓰기 구간이 아니다.
+      // 이 잠금을 잡은 채 실행하면 다른 모든 일정 변경이 BUSY로 밀린다.
+      releaseOwnedLock_();
+      var regeneration = null;
+      try {
+        regeneration = regenerateContractById(tradeId, undefined, { strictLedgerLink: true });
+      } catch (regenerationErr) {
+        regeneration = { success: false, error: regenerationErr.message };
+      }
+      if (!regeneration || regeneration.success !== true || !regeneration.url || !regeneration.fileId
+          || !regeneration.linkUpdate || regeneration.linkUpdate.success !== true) {
+        try { scheduleContractRegen(tradeId); } catch (queueErr) {}
+        result.status = 'CHANGED_CONTRACT_REGEN_PENDING';
+        result.contractRegenPending = true;
+        result.contractRegeneration = regeneration;
+        return result;
+      }
+      var finalReadback = null;
+      try {
+        SpreadsheetApp.flush();
+        finalReadback = readback_(contractSheet, contractRow, scheduleSheet, targetRows, targetSegments, ledgerSheet, ledgerRows);
+      } catch (finalReadbackErr) {
+        try { scheduleContractRegen(tradeId); } catch (readbackQueueErr) {}
+        result.status = 'CHANGED_CONTRACT_REGEN_PENDING';
+        result.contractRegenPending = true;
+        result.contractRegeneration = regeneration;
+        result.contractReadbackError = finalReadbackErr.message;
+        return result;
+      }
+      if (finalReadback.ledger.links.length !== 1 || finalReadback.ledger.contractLink !== regeneration.url) {
+        try { scheduleContractRegen(tradeId); } catch (linkQueueErr) {}
+        result.status = 'CHANGED_CONTRACT_REGEN_PENDING';
+        result.contractRegenPending = true;
+        result.contractRegeneration = regeneration;
+        result.readback = finalReadback;
+        return result;
+      }
+      result.contractRegeneration = regeneration;
+      result.contractRegenPending = false;
+      result.readback = finalReadback;
+      return result;
     } catch (writeErr) {
       if (mutationStarted) {
         try {
@@ -18091,13 +18800,6 @@ function changeRegisteredTradeDates(args) {
           try { supaMarkScheduleRowsDirty_(scheduleSheet, targetRows); } catch (rollbackScheduleErr) {}
           try { invalidateDashboardCache([oldStartDate, oldEndDate, newStartDate, newEndDate]); } catch (rollbackCacheErr) {}
           try { invalidateTimelineCache(); } catch (rollbackTimelineErr) {}
-          var rollbackRegeneration = regenerateContractById(tradeId, undefined, { strictLedgerLink: true });
-          if (!rollbackRegeneration || rollbackRegeneration.success !== true
-              || !rollbackRegeneration.url || !rollbackRegeneration.fileId
-              || !rollbackRegeneration.linkUpdate || rollbackRegeneration.linkUpdate.success !== true) {
-            throw new Error('rollback 계약서 재생성 검증 실패');
-          }
-          SpreadsheetApp.flush();
           var rollbackReadback = readback_(
             contractSheet, contractRow, scheduleSheet, targetRows, targetSegments, ledgerSheet, ledgerRows
           );
@@ -18111,7 +18813,7 @@ function changeRegisteredTradeDates(args) {
             && rollbackReadback.ledger.rows === beforeReadback.ledger.rows
             && sameStringSet_(rollbackReadback.ledger.dates, beforeReadback.ledger.dates)
             && rollbackReadback.ledger.links.length === 1
-            && rollbackReadback.ledger.contractLink === rollbackRegeneration.url;
+            && rollbackReadback.ledger.contractLink === beforeReadback.ledger.contractLink;
           if (!rollbackStateVerified) throw new Error('rollback 권위 데이터 readback 불일치');
         } catch (rollbackErr) {
           throw new Error('날짜변경 실패 후 rollback 검증도 실패했습니다: ' + writeErr.message + ' / ' + rollbackErr.message);
@@ -18120,6 +18822,6 @@ function changeRegisteredTradeDates(args) {
       throw new Error('날짜변경 실패, rollback verified(rollback 검증 완료): ' + writeErr.message);
     }
   } finally {
-    lock.releaseLock();
+    releaseOwnedLock_();
   }
 }
