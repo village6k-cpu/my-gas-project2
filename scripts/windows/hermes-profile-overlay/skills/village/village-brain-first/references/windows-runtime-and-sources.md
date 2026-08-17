@@ -6,9 +6,10 @@
 - Active operational source: `C:/Village/my-gas-project2-worktrees/ax2-hermes-final`
 - Mac mirror: `C:/Village/MacMiniMirror/restored` (historical evidence only)
 
-Hermes terminal uses Git Bash. Use `/c/Village/...` only with shell tools. Pass
-`C:/Village/...` to native `node.exe`, `python.exe`, `powershell.exe`, `cmd.exe`,
-and `rg.exe`.
+Hermes terminal uses Git Bash. Use `/c/Village/...` only with POSIX path
+consumers such as `test`, `cat`, and `ls`. `rg` resolves to Windows `rg.exe`, so
+both spellings must receive `C:/Village/...`. Native `node.exe`, `python.exe`,
+`powershell.exe`, and `cmd.exe` use that form too.
 
 Read the compiled context without printing unrelated private data:
 

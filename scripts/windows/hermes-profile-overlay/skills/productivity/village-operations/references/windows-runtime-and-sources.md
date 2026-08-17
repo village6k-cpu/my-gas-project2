@@ -20,7 +20,9 @@ the worker. Never overwrite one dirty worktree with another.
 
 Hermes terminal uses Git Bash. Shell builtins may use `/c/Village/...`, but
 native Windows executables must receive `C:/Village/...` paths. This includes
-`node.exe`, `python.exe`, `powershell.exe`, `cmd.exe`, and `rg.exe`.
+`node.exe`, `python.exe`, `powershell.exe`, and `cmd.exe`. In this environment
+`rg` resolves to native Windows `rg.exe`, so both spellings must receive
+`C:/Village/...`.
 
 Wrap PowerShell explicitly:
 
