@@ -100,8 +100,9 @@ See [registered trade date and item changes](references/registered-trade-date-ch
 for the bounded correction path.
 
 For one authorized registered-trade correction, have the AI produce explicit JSON
-and run `node scripts/windows/village-registered-trade-correction.js --help`.
-The runner validates and executes the decision; it never interprets business intent.
+and run `node.exe "C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-registered-trade-correction.js" execute --input-file "<absolute-json>"`.
+The runner validates and executes the decision in one bounded request; it never
+interprets business intent.
 
 ## Quotes and documents
 

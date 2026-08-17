@@ -90,6 +90,50 @@ test('Village operations is a compact substantive Hermes umbrella', () => {
   );
 });
 
+test('registered-trade references expose only the atomic correction boundary', () => {
+  const dateReference = fs.readFileSync(
+    path.join(
+      operationsRoot,
+      'references',
+      'registered-trade-date-change-remove-item.md'
+    ),
+    'utf8'
+  );
+  const quoteReference = fs.readFileSync(
+    path.join(
+      operationsRoot,
+      'references',
+      'registered-quote-schedule-item-correction.md'
+    ),
+    'utf8'
+  );
+  const combined = `${dateReference}\n${quoteReference}`;
+
+  assert.match(
+    dateReference,
+    /village-registered-trade-correction\.js" execute --input-file/,
+    'the reference must give Hermes the exact one-call runtime boundary'
+  );
+  assert.match(dateReference, /additions before removals/i);
+  assert.match(dateReference, /Never blindly retry/i);
+  assert.match(quoteReference, /sendEstimate:false/);
+  assert.match(quoteReference, /same one-call registered-trade/i);
+
+  for (const retiredRoute of [
+    /\bremoveEquip\b/,
+    /\baddEquips\b/,
+    /scheduleRemoveEquip&/,
+    /village-trade-date-change\.js/,
+    /action=search/
+  ]) {
+    assert.doesNotMatch(
+      combined,
+      retiredRoute,
+      `registered-trade references must not retain retired multi-call route ${retiredRoute}`
+    );
+  }
+});
+
 test('Village Brain is narrow and never impersonates Gary Tan G-Brain', () => {
   const skill = loadSkill(brainRoot);
   assertNativeEnvelope(skill);
