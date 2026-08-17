@@ -27,6 +27,12 @@ const VILLAGE_SHEET_ID = '17cl0YlZYA6j9hlTqPFIe5J0UdjuLcfxZyQfKGF00Ksk';
 const VILLAGE_OPS_SHEET_ID = '1ssb6EyuRRCU04Zf4UAtdbpYYkWcseGqnhWVONdrqol8';
 const DEFAULT_KAKAO_CHANNEL_MANAGER_URL = 'https://business.kakao.com/_xhPMls/chats?t_src=business_partnercenter&t_ch=lnb&t_obj=%EB%82%B4%EC%B1%84%ED%8C%85_%ED%81%B4%EB%A6%AD';
 const DEFAULT_KAKAO_REMOTE_DEBUGGING_PORT = '9223';
+const HERMES_RAG_ENV_KEYS = [
+  'VILLAGE_AI_URL',
+  'ASK_API_SECRET',
+  'VILLAGE_AI_KAKAO_SKILL_SECRET',
+  'VILLAGE_AI_RAG_TIMEOUT_MS'
+];
 const DEFAULT_SLACK_CHANNELS = {
   schedule: '스케쥴-agent',
   document: '서류발송-agent',
@@ -43,8 +49,9 @@ export function buildSlackRoutingConfig(environment = process.env) {
   };
 }
 
-export function loadEnvFile(filePath) {
+export function loadEnvFile(filePath, allowedKeys = null) {
   if (!fs.existsSync(filePath)) return false;
+  const allowed = allowedKeys ? new Set(allowedKeys) : null;
   const text = fs.readFileSync(filePath, 'utf8');
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -52,6 +59,7 @@ export function loadEnvFile(filePath) {
     const idx = line.indexOf('=');
     if (idx <= 0) continue;
     const key = line.slice(0, idx).trim();
+    if (allowed && !allowed.has(key)) continue;
     let value = line.slice(idx + 1).trim();
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
@@ -3808,7 +3816,10 @@ export function hermesDecisionTimeoutFromEnv(environment = process.env) {
   return Number.isFinite(configured) && configured > 0 ? configured : 240000;
 }
 
-function requireConfig() {
+export function requireConfig() {
+  if (process.env.HERMES_HOME) {
+    loadEnvFile(path.resolve(process.env.HERMES_HOME, '.env'), HERMES_RAG_ENV_KEYS);
+  }
   const config = {
     ...buildSlackRoutingConfig(process.env),
     supabaseUrl: process.env.SUPABASE_URL || '',

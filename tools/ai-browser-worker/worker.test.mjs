@@ -29,6 +29,7 @@ import {
   parseVillageAiSse,
   askVillageAi,
   processRagLookup,
+  requireConfig,
   buildReadOnlyLookupContext,
   buildHermesArgs,
   hermesDecisionTimeoutFromEnv,
@@ -1013,6 +1014,50 @@ test('processRagLookup loads the Kakao fallback contract from HERMES_HOME', asyn
     else process.env.ASK_API_SECRET = previous.askApiSecret;
     if (previous.kakaoSecret === undefined) delete process.env.VILLAGE_AI_KAKAO_SKILL_SECRET;
     else process.env.VILLAGE_AI_KAKAO_SKILL_SECRET = previous.kakaoSecret;
+    fs.rmSync(hermesHome, { recursive: true, force: true });
+  }
+});
+
+test('normal stdin worker config loads only RAG settings from HERMES_HOME', () => {
+  const hermesHome = fs.mkdtempSync(path.join(os.tmpdir(), 'village-hermes-worker-rag-'));
+  const keys = [
+    'HERMES_HOME',
+    'SUPABASE_URL',
+    'SUPABASE_SERVICE_ROLE_KEY',
+    'VILLAGE_AI_URL',
+    'ASK_API_SECRET',
+    'VILLAGE_AI_KAKAO_SKILL_SECRET',
+    'VILLAGE_AI_RAG_TIMEOUT_MS',
+    'UNRELATED_HERMES_SECRET'
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  fs.writeFileSync(path.join(hermesHome, '.env'), [
+    'VILLAGE_AI_URL=https://village-ai.example',
+    'VILLAGE_AI_KAKAO_SKILL_SECRET=kakao-secret-value',
+    'VILLAGE_AI_RAG_TIMEOUT_MS=12345',
+    'UNRELATED_HERMES_SECRET=must-not-load'
+  ].join('\n'));
+  process.env.HERMES_HOME = hermesHome;
+  process.env.SUPABASE_URL = 'https://supabase.example';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-value';
+  delete process.env.VILLAGE_AI_URL;
+  delete process.env.ASK_API_SECRET;
+  delete process.env.VILLAGE_AI_KAKAO_SKILL_SECRET;
+  delete process.env.VILLAGE_AI_RAG_TIMEOUT_MS;
+  delete process.env.UNRELATED_HERMES_SECRET;
+
+  try {
+    const config = requireConfig();
+    assert.equal(config.villageAiUrl, 'https://village-ai.example');
+    assert.equal(config.askApiSecret, '');
+    assert.equal(config.villageAiKakaoSkillSecret, 'kakao-secret-value');
+    assert.equal(config.ragTimeoutMs, 12345);
+    assert.equal(process.env.UNRELATED_HERMES_SECRET, undefined);
+  } finally {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
     fs.rmSync(hermesHome, { recursive: true, force: true });
   }
 });
