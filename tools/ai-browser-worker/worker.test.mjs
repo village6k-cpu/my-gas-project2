@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { spawnSync } from 'node:child_process';
 import { customerClusterHash } from './follow-up-policy.mjs';
+import * as workerModule from './worker.mjs';
 
 import {
   buildBrainContext,
@@ -2402,6 +2403,14 @@ test('already_answered unregistered reservation stays valid when an actionable s
   assert.equal(nonReservation.valid, true);
 });
 
+test('buildHermesPrompt asks for concise human staff tone instead of a fixed warm AI persona', () => {
+  const prompt = buildHermesPrompt({ id: 'tone-contract', preview_text: '가격 알려주세요' });
+
+  assert.doesNotMatch(prompt, /감정노동으로 대신 커버|말투는 항상 친절 모드/);
+  assert.match(prompt, /실제 직원이 카카오톡에서 바로 답하는 듯/);
+  assert.match(prompt, /불필요한 인사·재확인·마무리 문구/);
+});
+
 test('already_answered registered reservation accepts authoritative contract and schedule evidence without an RQ id', () => {
   const registeredWithoutRequest = validateAiDecisionContract({
     should_write_to_sheet: false,
@@ -4332,6 +4341,46 @@ test('enrichFollowUpRowWithOperationalCalculations does not price expanded compo
   assert.deepEqual(row.payload.operational_calculation.unresolved, ['메모리*1 / 배터리*2 / 앞캡 / 렌즈 후드 x1']);
 });
 
+test('contract calculation exposes every zero-priced standalone item instead of presenting a partial total as complete', async () => {
+  const config = {
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'key',
+    fetchImpl: async (url) => {
+      const u = new URL(String(url));
+      const sheet = u.searchParams.get('sheet');
+      const query = u.searchParams.get('query');
+      if (sheet === '계약마스터' && query === '260815-001') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ results: [{ data: ['260815-001', '표영현', '', '', '', '', '', '', 1, '예약', '일반', ''] }] }) };
+      }
+      if (sheet === '스케줄상세' && query === '260815-001') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ results: [
+          { data: ['260815-001-01', '260815-001', '소니 GM 100-400mm', '소니 GM 100-400mm', 1, '2026-08-16', '13:00', '2026-08-16', '23:00', '대기', '', 30000, '표영현'] },
+          { data: ['260815-001-02', '260815-001', '소니 GM 단렌즈(14)', '소니 GM 단렌즈(14)', 1, '2026-08-16', '13:00', '2026-08-16', '23:00', '대기', '', 0, '표영현'] },
+          { data: ['260815-001-03', '260815-001', '사다리', '사다리', 1, '2026-08-16', '13:00', '2026-08-16', '23:00', '대기', '', 0, '표영현'] },
+          { data: ['260815-001-04', '260815-001', '소니 GM 단렌즈(50) 별칭', '소니 GM 단렌즈(50)', 1, '2026-08-16', '13:00', '2026-08-16', '23:00', '대기', '', 0, '표영현'] }
+        ] }) };
+      }
+      throw new Error(`unexpected URL ${url}`);
+    }
+  };
+
+  const row = await enrichFollowUpRowWithOperationalCalculations(config, {
+    id: 'follow-incomplete-price',
+    type: 'price_review',
+    customer_name: '표영현',
+    summary: '거래 260815-001 총 금액 확인',
+    recommended_action: '금액을 확인하세요.',
+    evidence: ['계약마스터 260815-001']
+  });
+
+  assert.deepEqual(row.payload.operational_calculation.unresolved, [
+    '소니 GM 단렌즈(14) x1',
+    '사다리 x1',
+    '소니 GM 단렌즈(50) x1'
+  ]);
+  assert.match(row.recommended_action, /미계산\/확인 필요/);
+});
+
 test('resolveSlackChannelId searches Slack channel names and caches the id', async () => {
   let calls = 0;
   const config = {
@@ -4721,6 +4770,80 @@ test('deliverSlackFollowUpRows posts same-conversation follow-ups as thread repl
   const payload = JSON.parse(patch.init.body).payload.slack_delivery;
   assert.equal(payload.is_thread_reply, true);
   assert.equal(payload.parent_follow_up_id, 'parent-1');
+});
+
+test('urgent equipment incidents are posted at channel level instead of being buried in an old thread', async () => {
+  const requests = [];
+  const config = {
+    slackFollowUpEnabled: true,
+    slackThreadFollowUpsEnabled: true,
+    slackBotToken: 'xoxb-test',
+    supabaseUrl: 'https://supabase.example',
+    serviceRoleKey: 'service-role',
+    followUpTable: 'ai_follow_up_items',
+    slackChannels: { inventory: '재고관리-agent' },
+    slackFetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      if (String(url).includes('conversations.list')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, channels: [{ id: 'CINVENTORY', name: '재고관리-agent' }] })
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, channel: 'CINVENTORY', ts: '171111.000400' })
+      };
+    },
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      const href = String(url);
+      if (href.includes('select=id%2Croom_key') || href.includes('select=id,room_key')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([{
+          id: 'older-incident',
+          room_key: 'kakao:baek',
+          customer_name: '백남준',
+          type: 'damage_repair',
+          status: 'open',
+          payload: { slack_delivery: { status: 'delivered', channel_id: 'CINVENTORY', message_ts: '171111.000100', thread_ts: '171111.000100' } }
+        }]) };
+      }
+      const body = init?.body ? JSON.parse(init.body) : null;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => init?.method === 'PATCH'
+          ? JSON.stringify([{ id: 'urgent-incident', payload: body?.payload || {} }])
+          : JSON.stringify([{ payload: {} }])
+      };
+    }
+  };
+
+  const result = await deliverSlackFollowUpRows(config, [{
+    id: 'urgent-incident',
+    room_key: 'kakao:baek',
+    type: 'damage_repair',
+    status: 'open',
+    priority: 'urgent',
+    title: '백남준 대여 중 렌즈 기스 긴급 확인',
+    customer_name: '백남준',
+    summary: '2470 렌즈에 기스가 보인다고 고객이 알림',
+    recommended_action: '즉시 대화와 장비 상태를 확인하세요.',
+    payload: {
+      incident_safety_alert: true,
+      follow_up_route: 'inventory',
+      requires_human_action: true,
+      action_family: 'inventory_check'
+    }
+  }]);
+
+  assert.equal(result.results[0].ok, true);
+  const post = requests.find((request) => request.url.includes('chat.postMessage'));
+  const body = JSON.parse(post.init.body);
+  assert.equal(body.thread_ts, undefined);
+  assert.equal(body.reply_broadcast, undefined);
 });
 
 function inquiryRefreshHarness(deliveryPatch = {}, cluster = '새 고객 메시지') {
@@ -5628,6 +5751,130 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
 });
 
+function equipmentIncidentDecision(overrides = {}) {
+  return {
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    classification: 'already_answered',
+    customer: { name: '백남준' },
+    latest_customer_message_cluster: '2470렌즈가 살짝 기스가 있는 것 같은데 교체가 어렵다면 그냥 쓰겠습니다.',
+    visible_messages_used: [
+      { sender: '백남준', message: '2470렌즈가 살짝 기스가 있는 것 같은데 지금 변경은 어렵겠죠?', time: '오후 11:31' },
+      { sender: '백남준', message: '기다리기 어려워서 그냥 이거 사용할게요.', time: '오전 12:01' }
+    ],
+    follow_up_items: [{
+      type: 'completed_log',
+      route: 'inventory',
+      taskKey: 'lens_condition_2470',
+      requiresHumanAction: false,
+      actionFamily: 'none',
+      businessKey: '',
+      priority: 'normal',
+      status: 'done',
+      title: '백남준 2470 렌즈 상태 안내',
+      customer_name: '백남준',
+      summary: '고객이 현재 장비를 그대로 사용',
+      recommended_action: '',
+      evidence: ['고객이 렌즈 기스 사진을 보냄']
+    }],
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '2470은 지금 상태 그대로 가져가시면 됩니다.',
+      safetyClass: 'simple_ack',
+      grounding: 'visible_conversation',
+      requiresRag: false
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    ...overrides
+  };
+}
+
+test('equipment incident context cannot be auto-sent as a payment acknowledgement', () => {
+  const decision = equipmentIncidentDecision({
+    classification: 'price',
+    follow_up_items: [{
+      type: 'damage_repair',
+      route: 'inventory',
+      taskKey: 'lens_condition_2470',
+      requiresHumanAction: true,
+      actionFamily: 'inventory_check',
+      businessKey: 'equipment:2470',
+      priority: 'urgent',
+      status: 'open',
+      title: '백남준 2470 렌즈 기스 확인',
+      summary: '고객이 렌즈 기스 사진을 보냄',
+      recommended_action: '즉시 상태 확인'
+    }],
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '결제하시고 오시는 길 확인했습니다. 2470 기스 사진도 봤어요. 여분이 있으면 교체해 드릴게요.',
+      safetyClass: 'payment_receipt_ack',
+      grounding: 'visible_conversation',
+      requiresRag: false
+    }
+  });
+
+  assert.deepEqual(canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }), {
+    allowed: false,
+    reason: 'customer_equipment_incident_requires_human'
+  });
+});
+
+test('equipment incident context cannot be auto-sent as a simple acknowledgement authorizing continued use', () => {
+  assert.deepEqual(canAutoSendCustomerAnswer(equipmentIncidentDecision(), { autoSendEnabled: true }), {
+    allowed: false,
+    reason: 'customer_equipment_incident_requires_human'
+  });
+});
+
+test('equipment incident decisions always produce an urgent human alert even when Hermes marks the work done', () => {
+  const rows = buildFollowUpRows(equipmentIncidentDecision(), {
+    id: 'dom-baek-incident',
+    room_key: 'kakao:baek',
+    customer_name: '백남준'
+  });
+  const alert = rows.find((row) => row.payload?.incident_safety_alert === true);
+
+  assert.ok(alert);
+  assert.equal(alert.type, 'damage_repair');
+  assert.equal(alert.priority, 'urgent');
+  assert.equal(alert.status, 'open');
+  assert.equal(alert.payload.requires_human_action, true);
+});
+
+test('urgent equipment incident Slack cards notify the whole channel and configured owner', () => {
+  const message = buildSlackFollowUpMessage({
+    id: 'urgent-alert-card',
+    type: 'damage_repair',
+    priority: 'urgent',
+    status: 'open',
+    customer_name: '백남준',
+    title: '백남준 대여 중 렌즈 기스 긴급 확인',
+    summary: '2470 렌즈 기스 사진 접수',
+    recommended_action: '즉시 대화와 장비 상태를 확인하세요.',
+    payload: {
+      incident_safety_alert: true,
+      follow_up_route: 'inventory',
+      requires_human_action: true,
+      action_family: 'inventory_check'
+    }
+  }, {
+    config: {
+      slackMentionUserIds: ['UOWNER'],
+      slackChannels: { inventory: '재고관리-agent' }
+    }
+  });
+
+  assert.match(message.text, /<!channel>/);
+  assert.match(message.text, /<@UOWNER>/);
+});
+
 test('canAutoSendCustomerAnswer gates by grounding instead of topic category', () => {
   const baseDecision = {
     confidence: 'high',
@@ -5657,7 +5904,9 @@ test('canAutoSendCustomerAnswer gates by grounding instead of topic category', (
       requiresRag: false
     }
   };
-  const priceGate = canAutoSendCustomerAnswer(groundedPriceQuote, { autoSendEnabled: true });
+  const priceGate = canAutoSendCustomerAnswer(groundedPriceQuote, { autoSendEnabled: true }, {
+    priceVerification: { complete: true, totalVatIncluded: 110000 }
+  });
   assert.equal(priceGate.allowed, true);
   assert.equal(priceGate.safetyClass, 'sensitive_commitment');
   assert.equal(canAutoSendCustomerAnswer({ ...groundedPriceQuote, kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
@@ -5703,6 +5952,128 @@ test('canAutoSendCustomerAnswer gates by grounding instead of topic category', (
     ...baseDecision,
     reply_decision: { ...baseDecision.reply_decision, safetyClass: 'document_handoff' }
   }, { autoSendEnabled: true }).reason, 'reply_safety_class_document_handoff_not_auto_sendable');
+});
+
+test('numeric price commitments require a complete outer sheet calculation and an exact total match', () => {
+  const decision = {
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    classification: 'price',
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '총 결제 금액은 33,000원입니다.',
+      safetyClass: 'sensitive_commitment',
+      grounding: 'authoritative_sheet',
+      requiresRag: false
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    }
+  };
+
+  assert.equal(
+    canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }).reason,
+    'authoritative_price_verification_required'
+  );
+  assert.equal(
+    canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }, {
+      priceVerification: { complete: false, totalVatIncluded: 33000, unresolved: ['단렌즈 x1'] }
+    }).reason,
+    'authoritative_price_verification_incomplete'
+  );
+  assert.equal(
+    canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }, {
+      priceVerification: { complete: true, totalVatIncluded: 55000 }
+    }).reason,
+    'authoritative_price_total_mismatch'
+  );
+  assert.equal(
+    canAutoSendCustomerAnswer(decision, { autoSendEnabled: true }, {
+      priceVerification: { complete: true, totalVatIncluded: 33000 }
+    }).allowed,
+    true
+  );
+});
+
+test('the live auto-send path re-reads the referenced trade and blocks a partial price before Kakao send', async (t) => {
+  assert.equal(typeof workerModule.maybeAutoSendReply, 'function');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmp-price-verification-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const config = {
+    autoSendEnabled: true,
+    autoSendLogPath: path.join(tmpDir, 'auto-replies.ndjson'),
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'key',
+    fetchImpl: async (url) => {
+      const u = new URL(String(url));
+      const sheet = u.searchParams.get('sheet');
+      const query = u.searchParams.get('query');
+      if (sheet === '계약마스터' && query === '260815-001') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ results: [{ data: ['260815-001', '표영현', '', '', '', '', '', '', 1, '예약', '일반', ''] }] }) };
+      }
+      if (sheet === '스케줄상세' && query === '260815-001') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ results: [
+          { data: ['260815-001-01', '260815-001', '소니 GM 100-400mm', '소니 GM 100-400mm', 1, '2026-08-16', '13:00', '2026-08-16', '23:00', '대기', '', 30000, '표영현'] },
+          { data: ['260815-001-02', '260815-001', '소니 GM 단렌즈(14)', '소니 GM 단렌즈(14)', 1, '2026-08-16', '13:00', '2026-08-16', '23:00', '대기', '', 0, '표영현'] },
+          { data: ['260815-001-03', '260815-001', '사다리', '사다리', 1, '2026-08-16', '13:00', '2026-08-16', '23:00', '대기', '', 0, '표영현'] }
+        ] }) };
+      }
+      throw new Error(`unexpected URL ${url}`);
+    }
+  };
+  const decision = {
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    classification: 'price',
+    customer: { name: '표영현' },
+    latest_customer_message_cluster: '어제 예약건 총 금액이 얼마인가요?',
+    follow_up_items: [{
+      type: 'price_review',
+      route: 'settlement',
+      taskKey: 'trade_total_260815_001',
+      requiresHumanAction: false,
+      actionFamily: 'none',
+      businessKey: 'trade:260815-001',
+      priority: 'normal',
+      status: 'done',
+      title: '표영현 예약 금액 안내',
+      summary: '거래 260815-001 총 금액',
+      recommended_action: '',
+      evidence: ['계약마스터 260815-001', '스케줄상세 조회']
+    }],
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '총 결제 금액은 33,000원입니다.',
+      safetyClass: 'sensitive_commitment',
+      grounding: 'authoritative_sheet',
+      requiresRag: false
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    }
+  };
+  const job = {
+    id: 'dom-live-price',
+    room_key: 'kakao:pyo',
+    preview_text: '표영현 금액 문의',
+    unread_count: 1,
+    events: [{ reason: 'top_rows_backstop', unread_count: 1 }]
+  };
+
+  const result = await workerModule.maybeAutoSendReply({ config, decision, job, navigationContext: {} });
+
+  assert.equal(result.attempted, false);
+  assert.equal(result.gate.reason, 'authoritative_price_verification_incomplete');
+  assert.deepEqual(result.priceVerification.unresolved, [
+    '소니 GM 단렌즈(14) x1',
+    '사다리 x1'
+  ]);
 });
 
 test('validateAiDecisionContract allows sheet-grounded sensitive_commitment auto_send and rejects ungrounded', () => {

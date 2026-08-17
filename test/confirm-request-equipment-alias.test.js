@@ -53,3 +53,13 @@ test('an existing near-exact catalog name stays grounded and never jumps categor
 
   assert.equal(match('시그마 아트 18-35', names), '시그마 아트 18-35mm');
 });
+
+test('a generic GM token cannot remap a 14mm prime request to an unrelated zoom lens', () => {
+  const match = loadMatcher();
+  const names = [
+    '소니 GM 100-400mm',
+    '소니 GM 24-70mm II'
+  ];
+
+  assert.equal(match('소니 FE 14mm F1.8 GM', names), '소니 FE 14mm F1.8 GM');
+});

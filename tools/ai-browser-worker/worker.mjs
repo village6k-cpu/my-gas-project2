@@ -580,8 +580,8 @@ CRITICAL RULES:
 - Use the bounded tool budget deliberately: batch independent read-only checks, avoid repeats, and finish FINAL_JSON before exhausting the turn budget or global timeout. Batch read-only lookups only when query breadth/detail are preserved.
 - Once sufficient, return FINAL_JSON immediately. Tool/API failures are evidence gaps: encode uncertainty in confidence/reason/follow-up; never substitute an apology or progress report.
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때 근거가 확보된 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
-- 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 가격·환불정책·파손규정·세금 안내를 포함해 어떤 주제든 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능.
-- 예외(항상 사장 확인): 실제 분쟁 상황 — 파손·분실 배상 다툼, 환불 분쟁, 법적 문제 제기, 강한 항의 — 은 근거가 있어도 auto_send 금지. draft_only + owner_review_required=true로 올린다.
+- 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 일반 가격·환불정책·파손규정·세금 안내는 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능.
+- 예외(항상 사장 확인): 고객이 현재 대여/수령 장비의 기스·흠집·스크래치·파손·고장·작동이상·분실을 알린 실제 사고, 파손·분실 배상 다툼, 환불 분쟁, 법적 문제 제기, 강한 항의는 근거가 있어도 auto_send 금지. 계속 사용/그대로 수령/교체/배상 여부를 임의로 승인하지 말고 draft_only + owner_review_required=true + urgent damage_repair로 올린다.
 - 예약 확정, 재고 가능 단정, 가격 확정은 화면/시트 근거 없이 단정하지 않는다. 하지만 고객이 예약형식에 맞게 정보를 준 경우 확인요청 시트 입력은 적극 수행한다.
 - Google Sheets 입력은 API로 가능하다. 어떤 값을 넣을지는 AI가 판단하되, 예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다.
 
@@ -596,7 +596,7 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 예약/가격/FAQ/무시를 AI가 분류한다. 미리보기 텍스트만으로 예약·가격·FAQ를 확정하지 않는다.
 - 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/처리판 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
 - CURRENT_CONFIRMED_POLICY가 최신 FAQ/정책 기준이다. RAG가 충돌하면 현재 정책으로 고치고, 없는 정책 FAQ는 high/retrieved RAG로 보강하거나 draft_only/follow_up.
-- 가격 문의는 세트마스터 단가, 고객할인(고객DB I열 우선), 장기할인으로 직접 계산해 답한다. 단가를 시트에서 실제 조회했고 금액 산식대로 계산했으면 safetyClass="sensitive_commitment" + grounding="authoritative_sheet"로 auto_send 가능. 조회/계산 근거가 불완전하면 초안/follow_up. price_paused면 가격 자동발송 금지.
+- 가격 문의는 세트마스터 단가, 고객할인(고객DB I열 우선), 장기할인으로 직접 계산해 답한다. 요청된 모든 독립 품목의 단가가 양수로 확인되고 금액 산식대로 계산됐을 때만 safetyClass="sensitive_commitment" + grounding="authoritative_sheet"로 auto_send 가능. 독립 품목의 단가가 0/빈값이거나 조회/계산 근거가 불완전하면 부분합계를 전체 금액처럼 안내하지 말고 초안/follow_up. price_paused면 가격 자동발송 금지.
 - 서류(계약서/견적서/세금계산서/거래명세서)는 계산 생략 금지. 거래ID는 계약마스터+스케줄상세 대표/단품 L열 단가로 수량×일수×단가 계산; RQ는 확인요청 결과+세트마스터 단가로 부분계산하고 미등록/단가불명은 "미계산/확인 필요"로 표시한다.
 -반복견적=내예약 견적 안내
 - 금액 산식: 24시간=1일, +6시간 동일, 초과 +1일; 정가×고객/제휴/단골 할인×장기할인×VAT1.1, 10원 올림.
@@ -618,8 +618,8 @@ SENDER AND TURN-TAKING POLICY:
 - "알림톡/브랜드메시지는 관리자센터에서 확인할 수 없어요"는 카카오 파트너센터의 알림톡 발송 표시 placeholder다. 실제 답장이 아니므로 근거로 삼지 마라.
 
 REPLY TONE POLICY:
-- 모든 고객 발신(자동발송·초안 모두)은 친절하고 따뜻한 존댓말로 쓴다. 과장 없이, 짧아도 다정하게.
-- 사장(사람)의 최근 수동응대가 짧거나 무뚝뚝해도 그 말투를 따라하지 마라. 사장의 피로를 봇이 감정노동으로 대신 커버하는 것이 봇의 역할이다(사장 지시). 사장 사례에서 배우는 것은 처리 방식·판단·사실관계뿐이다.
+- 실제 직원이 카카오톡에서 바로 답하는 듯 짧고 자연스러운 존댓말로 쓴다. 최근 사장/직원 수동응대 사례에서 문장 길이, 호칭, 업무별 표현을 배우되 무례함은 따라하지 않는다.
+- 고객이 물은 것에만 답하고 불필요한 인사·재확인·마무리 문구를 반복하지 않는다. 매번 '편하게 말씀 주세요', '수고 많으셨습니다', '감사합니다' 같은 문구를 덧붙이지 않고, 이모지·느낌표는 대화 맥락에 자연스러울 때만 최소로 쓴다.
 
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
@@ -673,7 +673,7 @@ TASK:
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
 12-1. For real-world mutations set requiresHumanAction=true, allowed actionFamily, stable businessKey; otherwise false, "none", "".
-13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for grounded, high-confidence replies safe to send under the kill-switch policy — any topic qualifies when grounded. For auto_send, explicitly choose safetyClass, grounding, requiresRag, attachmentKeys, alreadyDelivered. Text alone can never grant an auto-send or attachment. Class guide: 시트 조회·계산 근거의 약속형 답변(가격 견적 등)은 sensitive_commitment+grounding="authoritative_sheet"로만 auto_send; 정책 근거는 current_policy_answer, RAG 근거는 rag_grounded_answer(requiresRag=true). 근거 없는 약속/분쟁은 draft_only. Otherwise use draft_only or no_reply.
+13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for grounded, high-confidence replies safe to send under the kill-switch policy. For auto_send, explicitly choose safetyClass, grounding, requiresRag, attachmentKeys, alreadyDelivered. Text alone can never grant an auto-send or attachment. Class guide: 시트 조회·계산 근거의 약속형 답변(가격 견적 등)은 모든 독립 품목의 단가가 확인된 경우에만 sensitive_commitment+grounding="authoritative_sheet"로 auto_send; 정책 근거는 current_policy_answer, RAG 근거는 rag_grounded_answer(requiresRag=true). 현재 대여 장비 사고와 근거 없는 약속/분쟁은 draft_only + owner review. Otherwise use draft_only or no_reply.
 14. Return only the final machine-readable JSON below.
 
 FINAL OUTPUT FORMAT:
@@ -1666,8 +1666,78 @@ function buildStableFollowUpKey({ roomKey, customerName, type, route, taskKey, t
   return base.join(':');
 }
 
+export function customerEquipmentIncidentRisk(decision = {}) {
+  const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
+  if (followUps.some((item) => text(item?.type).trim() === 'damage_repair')) {
+    return { risk: true, reason: 'damage_repair_follow_up' };
+  }
+
+  const visibleMessages = Array.isArray(decision?.visible_messages_used)
+    ? decision.visible_messages_used.map((message) => message?.message)
+    : [];
+  const combined = [
+    decision.latest_customer_message_cluster,
+    decision.latest_staff_message,
+    decision.suggested_reply_draft,
+    decision.reply_decision?.text,
+    ...visibleMessages,
+    ...followUps.flatMap((item) => [item?.title, item?.summary, ...(Array.isArray(item?.evidence) ? item.evidence : [])])
+  ].map(text).join(' ').normalize('NFKC');
+  const hasIncidentCondition = /(기스|흠집|스크래치|찍힘|금\s*(?:감|갔)|파손|손상|깨짐|부러짐|고장|작동\s*(?:안\s*됨|이상)|오작동|침수|분실)/i.test(combined);
+  const hasLiveRentalContext = /(지금|현재|방금|사진|렌즈|카메라|장비|수령|대여|가져가|사용|쓰겠|교체|반납|상태|여분)/i.test(combined);
+  if (hasIncidentCondition && hasLiveRentalContext) {
+    return { risk: true, reason: 'visible_equipment_incident_context' };
+  }
+  return { risk: false, reason: 'no_customer_equipment_incident' };
+}
+
+function normalizeIncidentFollowUpItems(decision = {}, job = {}) {
+  const original = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
+  const incident = customerEquipmentIncidentRisk(decision);
+  if (!incident.risk) return original;
+
+  let markedExisting = false;
+  const normalized = original.map((item) => {
+    if (!item || typeof item !== 'object' || text(item.type).trim() !== 'damage_repair') return item;
+    markedExisting = true;
+    return {
+      ...item,
+      route: 'inventory',
+      requiresHumanAction: true,
+      actionFamily: 'inventory_check',
+      priority: 'urgent',
+      status: 'open',
+      due_hint: 'now',
+      incident_safety_alert: true
+    };
+  });
+  if (markedExisting) return normalized;
+
+  const customerName = text(decision?.customer?.name || job.customer_name || '고객').slice(0, 120);
+  const roomKey = text(job.room_key || job.roomKey || job.payload?.roomKey || customerName).slice(0, 180);
+  return [...normalized, {
+    type: 'damage_repair',
+    route: 'inventory',
+    taskKey: 'customer_equipment_incident_review',
+    requiresHumanAction: true,
+    actionFamily: 'inventory_check',
+    businessKey: `incident:${roomKey}`,
+    priority: 'urgent',
+    status: 'open',
+    title: `${customerName} 대여 장비 이상 긴급 확인`,
+    customer_name: customerName,
+    summary: text(decision.latest_customer_message_cluster).slice(0, 1000) || '고객이 현재 대여/수령 장비의 이상을 알렸습니다.',
+    recommended_action: '즉시 카카오 대화와 장비 상태를 확인하고, 계속 사용·교체·회수 여부를 직접 판단하세요.',
+    suggested_reply_draft: '',
+    evidence: [incident.reason],
+    blocking_reason: '고객 장비 사고는 자동응답으로 결론내릴 수 없음',
+    due_hint: 'now',
+    incident_safety_alert: true
+  }];
+}
+
 export function buildFollowUpRows(decision, job = {}) {
-  const items = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
+  const items = normalizeIncidentFollowUpItems(decision, job);
   const rawJobId = text(job.id || job.jobId || '');
   const jobId = isUuid(rawJobId) ? rawJobId : null;
   const roomKey = text(job.room_key || job.roomKey || job.payload?.roomKey || '').slice(0, 240);
@@ -2071,18 +2141,30 @@ async function buildContractCalculation(config = {}, tradeId = '') {
   if (!contract.length || !schedule.length) return null;
   const first = schedule.find((row) => row[5] && row[7]) || schedule[0];
   const days = calcRentalDaysForQuote(first[5], first[6], first[7], first[8]);
-  const pricedItems = schedule
-    .map((row) => ({
-      name: text(row[3] || row[2]).trim(),
-      qty: parseNumber(row[4], 1) || 1,
-      price: parseNumber(row[11], 0)
-    }))
-    .filter((item) => item.name && item.price > 0);
+  const scheduleItems = schedule.map((row) => ({
+    parentName: text(row[2]).trim(),
+    name: text(row[3] || row[2]).trim(),
+    qty: parseNumber(row[4], 1) || 1,
+    price: parseNumber(row[11], 0)
+  }));
+  const pricedItems = scheduleItems.filter((item) => item.name && item.price > 0);
+  const pricedParentNames = new Set(pricedItems.map((item) => item.parentName).filter(Boolean));
+  // A zero-priced expanded component belongs to its priced parent set. A
+  // zero-priced standalone row is an incomplete billable item and must never be
+  // silently dropped from a customer total.
+  const unresolvedItems = scheduleItems
+    .filter((item) => item.name && item.price <= 0 && (
+      !item.parentName
+      || item.parentName === item.name
+      || !pricedParentNames.has(item.parentName)
+    ))
+    .map((item) => ({ name: item.name, qty: item.qty }));
   const baseAmount = pricedItems.reduce((sum, item) => sum + (item.qty * item.price * days), 0);
   if (!baseAmount) return {
     kind: 'contract',
     tradeId,
     customer: text(contract[1]).trim(),
+    unresolvedItems,
     error: 'priced_schedule_rows_not_found'
   };
   const payment = calculateVillagePayment(baseAmount, days, contract[10] || '일반');
@@ -2095,6 +2177,7 @@ async function buildContractCalculation(config = {}, tradeId = '') {
     discountType: text(contract[10]).trim() || '일반',
     period: `${normalizeDatePart(first[5])} ${normalizeTimePart(first[6])} ~ ${normalizeDatePart(first[7])} ${normalizeTimePart(first[8])}`.replace(/\s+/g, ' ').trim(),
     pricedItems,
+    unresolvedItems,
     payment
   };
 }
@@ -2150,10 +2233,82 @@ async function buildConfirmRequestCalculation(config = {}, reqID = '') {
   };
 }
 
+function priceVerificationReferenceText(decision = {}) {
+  const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
+  return [
+    decision.reason,
+    decision.latest_customer_message_cluster,
+    decision.reply_decision?.text,
+    decision.suggested_reply_draft,
+    JSON.stringify(decision.authoritative_sheet_result || {}),
+    ...followUps.flatMap((item) => [
+      item?.type,
+      item?.taskKey || item?.task_key,
+      item?.businessKey || item?.business_key,
+      item?.title,
+      item?.summary,
+      item?.recommended_action || item?.recommendedAction,
+      ...(Array.isArray(item?.evidence) ? item.evidence : [])
+    ])
+  ].map(text).join(' ').normalize('NFKC');
+}
+
+export async function buildAuthoritativePriceVerification(config = {}, decision = {}) {
+  if (replySafetyClass(decision) !== 'sensitive_commitment') {
+    return { required: false, complete: true, reason: 'not_numeric_price_commitment' };
+  }
+  const referenceText = priceVerificationReferenceText(decision);
+  const tradeIds = extractTradeIdsFromFollowUp({ summary: referenceText });
+  const reqIDs = extractConfirmRequestIds(referenceText);
+  const references = [
+    ...tradeIds.map((id) => ({ kind: 'contract', id })),
+    ...reqIDs.map((id) => ({ kind: 'confirm_request', id }))
+  ];
+  if (references.length !== 1) {
+    return {
+      required: true,
+      complete: false,
+      reason: references.length ? 'price_reference_ambiguous' : 'price_reference_missing',
+      references,
+      calculations: [],
+      unresolved: [],
+      totalVatIncluded: null
+    };
+  }
+
+  const calculations = await Promise.all(references.map(async (reference) => {
+    try {
+      return reference.kind === 'contract'
+        ? await buildContractCalculation(config, reference.id)
+        : await buildConfirmRequestCalculation(config, reference.id);
+    } catch (error) {
+      return { kind: reference.kind, [reference.kind === 'contract' ? 'tradeId' : 'reqID']: reference.id, error: error.message };
+    }
+  }));
+  const availableCalculations = calculations.filter(Boolean);
+  const payload = buildCalculationPayload(availableCalculations);
+  const complete = availableCalculations.length === 1
+    && !availableCalculations[0].error
+    && Boolean(availableCalculations[0].payment)
+    && payload.unresolved.length === 0
+    && Number.isFinite(Number(payload.totalVatIncluded))
+    && Number(payload.totalVatIncluded) > 0;
+  return {
+    required: true,
+    complete,
+    reason: complete ? 'authoritative_price_verified' : 'authoritative_price_incomplete',
+    references,
+    calculations: payload.calculations,
+    unresolved: payload.unresolved,
+    totalVatIncluded: payload.totalVatIncluded
+  };
+}
+
 function formatCalculationLine(calc = {}) {
   if (calc.kind === 'contract') {
-    if (calc.error) return `거래 ${calc.tradeId}: 금액 계산 실패(${calc.error})`;
-    return `거래 ${calc.tradeId}: 정가 ${formatMoney(calc.payment.baseAmount)} → 할인 후 ${formatMoney(calc.payment.discountedAmount)} → VAT 포함 ${formatMoney(calc.payment.finalVatIncluded)} (${calc.payment.days}일, ${discountLabel(calc.payment)})`;
+    const unresolved = (calc.unresolvedItems || []).map((item) => `${item.name} x${item.qty}`).join(', ');
+    if (calc.error) return `거래 ${calc.tradeId}: 금액 계산 실패(${calc.error})${unresolved ? ` / 미계산 ${unresolved}` : ''}`;
+    return `거래 ${calc.tradeId}: 계산 가능 항목 정가 ${formatMoney(calc.payment.baseAmount)} → 할인 후 ${formatMoney(calc.payment.discountedAmount)} → VAT 포함 ${formatMoney(calc.payment.finalVatIncluded)} (${calc.payment.days}일, ${discountLabel(calc.payment)})${unresolved ? ` / 미계산 ${unresolved}` : ''}`;
   }
   if (calc.kind === 'confirm_request') {
     const unresolved = (calc.unresolvedItems || []).map((item) => `${item.name} x${item.qty}`).join(', ');
@@ -3258,6 +3413,37 @@ function addConfiguredSlackMentions(message = {}, config = {}) {
   };
 }
 
+export function isUrgentEquipmentIncidentFollowUp(row = {}) {
+  if (text(row.priority).trim() !== 'urgent') return false;
+  const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+  const businessTags = Array.isArray(payload.business_tags) ? payload.business_tags.map((value) => text(value).trim()) : [];
+  const steps = Array.isArray(payload.steps) ? payload.steps : [];
+  return payload.incident_safety_alert === true
+    || text(row.type).trim() === 'damage_repair'
+    || businessTags.includes('damage_repair')
+    || steps.some((step) => (
+      text(step?.type).trim() === 'damage_repair'
+      || step?.payload?.incident_safety_alert === true
+    ));
+}
+
+function addUrgentIncidentChannelMention(message = {}, row = {}) {
+  if (!isUrgentEquipmentIncidentFollowUp(row)) return message;
+  const mentionText = '<!channel>';
+  if (text(message.text).includes(mentionText)) return message;
+  const blocks = Array.isArray(message.blocks) ? [...message.blocks] : [];
+  const insertAt = blocks[0]?.type === 'header' ? 1 : 0;
+  blocks.splice(insertAt, 0, {
+    type: 'section',
+    text: { type: 'mrkdwn', text: `${mentionText} *긴급 장비 사고 확인 필요*` }
+  });
+  return {
+    ...message,
+    text: `${mentionText}${message.text ? ` ${message.text}` : ''}`,
+    blocks
+  };
+}
+
 export function buildSlackFollowUpMessage(row = {}, options = {}) {
   const route = options.route || routeFollowUpToSlack(row, options.config || {});
   const cardKind = text(row.payload?.card_kind).trim();
@@ -3271,7 +3457,10 @@ export function buildSlackFollowUpMessage(row = {}, options = {}) {
   } else {
     message = buildLegacySlackFollowUpMessage(row, { ...options, route });
   }
-  return addConfiguredSlackMentions(message, options.config || {});
+  return addUrgentIncidentChannelMention(
+    addConfiguredSlackMentions(message, options.config || {}),
+    row
+  );
 }
 
 async function slackApi(config = {}, method, payload = {}, { httpMethod = 'POST' } = {}) {
@@ -3440,6 +3629,7 @@ async function persistInitialSlackDeliveryClaim(config, row, delivery) {
 
 async function findSlackThreadParentForRow(config = {}, row = {}, route = {}, channelId = '') {
   if (config.slackThreadFollowUpsEnabled !== true) return null;
+  if (isUrgentEquipmentIncidentFollowUp(row)) return null;
   const roomKey = text(row.room_key || row.roomKey || '').trim();
   if (!roomKey || !row?.id || !config.supabaseUrl || !config.serviceRoleKey) return null;
   const table = encodeURIComponent(config.followUpTable || 'ai_follow_up_items');
@@ -5948,8 +6138,17 @@ export function classifyConservativeTerminalAcknowledgement(job = {}, navigation
   return { matched: true, reason: 'verified_terminal_customer_acknowledgement' };
 }
 
-export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
+function currencyAmountsInReply(value = '') {
+  return [...text(value).normalize('NFKC').matchAll(/([0-9][0-9,]*)\s*(만)?\s*원/g)]
+    .map((match) => parseNumber(match[1], 0) * (match[2] ? 10000 : 1))
+    .filter((amount) => Number.isFinite(amount) && amount > 0);
+}
+
+export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = {}) {
   if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
+  if (customerEquipmentIncidentRisk(decision).risk) {
+    return { allowed: false, reason: 'customer_equipment_incident_requires_human' };
+  }
   const reply = decisionReply(decision);
   const mode = String(reply.replyMode || reply.reply_mode || '').trim();
   const confidence = String(reply.confidence || decision.confidence || '').trim();
@@ -6018,6 +6217,20 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}) {
     }
     if (safetyClass === 'live_quote_link_guidance' && /(재고\s*가능|대여\s*가능|예약\s*확정|[0-9,]+\s*(?:원|만원)|입금|계좌)/.test(textValue)) {
       return { allowed: false, reason: 'quote_link_guidance_contains_commitment' };
+    }
+  }
+  if (safetyClass === 'sensitive_commitment') {
+    const verification = context?.priceVerification;
+    if (!verification || typeof verification !== 'object') {
+      return { allowed: false, reason: 'authoritative_price_verification_required' };
+    }
+    if (verification.complete !== true || !Number.isFinite(Number(verification.totalVatIncluded))) {
+      return { allowed: false, reason: 'authoritative_price_verification_incomplete' };
+    }
+    const expectedTotal = Number(verification.totalVatIncluded);
+    const replyAmounts = currencyAmountsInReply(textValue);
+    if (expectedTotal <= 0 || !replyAmounts.includes(expectedTotal)) {
+      return { allowed: false, reason: 'authoritative_price_total_mismatch' };
     }
   }
   return { allowed: true, reason: safetyClass, text: textValue, replyMode: mode, confidence, safetyClass, grounding };
@@ -6768,7 +6981,7 @@ export function buildCorrectionsPromptText(config, { maxChars = 1500 } = {}) {
     const raw = fs.readFileSync(filePath, 'utf8').trim();
     if (!raw) return '';
     const clipped = raw.length > maxChars ? `${raw.slice(0, maxChars)}…` : raw;
-    return `\nVILLAGE_CORRECTIONS (사장 수동응대에서 채굴한 교정 원장 — 처리 방식·판단·사실관계만 이 사례에서 배워라. 말투는 배우지 마라: 사장 원문이 짧고 무뚝뚝해도 봇은 REPLY TONE POLICY의 친절한 말투를 유지한다. 사실/가격/정책 충돌 시 CURRENT_CONFIRMED_POLICY와 시트가 우선):\n${clipped}\n`;
+    return `\nVILLAGE_CORRECTIONS (사장/직원 수동응대에서 채굴한 교정 원장 — 처리 방식·판단·사실관계와 함께 실제 직원의 자연스러운 문장 길이·호칭·표현을 배워라. 무례함은 복제하지 말고, 일반적인 AI 친절 문구를 덧붙이지 마라. 사실/가격/정책 충돌 시 CURRENT_CONFIRMED_POLICY와 시트가 우선):\n${clipped}\n`;
   } catch {
     return '';
   }
@@ -6948,7 +7161,7 @@ export function isAutoSendEligibleLiveJob(job = {}, { now = new Date(), liveWind
   return { eligible: false, reason: 'preview_not_live_time_format' };
 }
 
-async function maybeAutoSendReply({ config, decision, job, navigationContext }) {
+export async function maybeAutoSendReply({ config, decision, job, navigationContext }) {
   const liveGate = isAutoSendEligibleLiveJob(job);
   if (!liveGate.eligible) {
     const result = { attempted: false, sent: false, gate: { allowed: false, reason: liveGate.reason } };
@@ -6956,9 +7169,21 @@ async function maybeAutoSendReply({ config, decision, job, navigationContext }) 
     return result;
   }
   const documentGate = canAutoSendCustomerDocumentAssets(decision, config);
-  const gate = documentGate.allowed ? documentGate : canAutoSendCustomerAnswer(decision, config);
+  let priceVerification = null;
+  let gate;
+  if (documentGate.allowed) {
+    gate = documentGate;
+  } else {
+    const preliminaryGate = canAutoSendCustomerAnswer(decision, config);
+    if (preliminaryGate.reason === 'authoritative_price_verification_required') {
+      priceVerification = await buildAuthoritativePriceVerification(config, decision);
+      gate = canAutoSendCustomerAnswer(decision, config, { priceVerification });
+    } else {
+      gate = preliminaryGate;
+    }
+  }
   if (!gate.allowed) {
-    const result = { attempted: false, sent: false, gate };
+    const result = { attempted: false, sent: false, gate, ...(priceVerification ? { priceVerification } : {}) };
     logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '' });
     return result;
   }
@@ -7006,7 +7231,7 @@ async function maybeAutoSendReply({ config, decision, job, navigationContext }) 
   } catch (error) {
     sendResult = { sent: false, reason: 'send_error', error: error.message.slice(0, 500) };
   }
-  const result = { attempted: true, sent: Boolean(sendResult.sent), gate, sendResult, text: gate.text, ragSupport };
+  const result = { attempted: true, sent: Boolean(sendResult.sent), gate, sendResult, text: gate.text, ragSupport, ...(priceVerification ? { priceVerification } : {}) };
   logAutoReply(config, { jobId: job.id || job.jobId || null, result, customer: decision?.customer?.name || '', classification: decision?.classification || '', evidence: decision?.visible_messages_used || [], dedupeKey, roomReplyKey, ragSupport });
   return result;
 }
