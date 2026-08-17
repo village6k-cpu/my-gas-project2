@@ -146,15 +146,15 @@ node --test test/windows-village-registered-trade-correction.test.js test/regist
 
 Run `git diff --check` and inspect the scoped diff for generic writes, customer-send coupling, nested lock acquisition, unbounded retries, and unrelated files.
 
-- [ ] **Step 3: Commit and integrate without touching dirty worktrees**
+- [x] **Step 3: Commit and integrate without touching dirty worktrees**
 
 Commit only the scoped files on the isolated branch. Integrate through a clean deployment worktree based on current `origin/main`; do not reset or clean the user's dirty `main` or live worker worktree.
 
-- [ ] **Step 4: Pull before push and deploy the existing web-app ID**
+- [x] **Step 4: Pull before push and deploy the existing web-app ID (version 697)**
 
 Run `clasp pull`, verify no semantic drift, then `clasp push` and deploy the existing deployment ID with a bounded description. Push the integrated Git commit only after all tests pass.
 
-- [ ] **Step 5: Verify live structure without a customer mutation**
+- [x] **Step 5: Verify live structure without a customer mutation**
 
 Read back the deployed capability/action and use only a synthetic harness or dry-run path. Do not send Slack, Kakao, an estimate, or mutate a real transaction.
 
