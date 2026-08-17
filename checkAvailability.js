@@ -10750,7 +10750,10 @@ function fuzzyMatchEquipName(input, nameList) {
   }
 
   // 4. 핵심 키워드 매칭 (숫자+영문 조합: a7s3, fx3, gm2 등)
-  var inputKeywords = inputLower.match(/[a-z]+\d+[a-z]*\d*|[a-z]{2,}/gi) || [];
+  // GM/FE/II 같은 범용 영문 토큰 하나만 공유한 다른 렌즈로 이동시키지 않는다.
+  // 제품을 식별하는 숫자가 포함된 토큰만 키워드 근거로 인정한다.
+  var inputKeywords = (inputLower.match(/[a-z]+\d+[a-z]*\d*|[a-z]{2,}/gi) || [])
+    .filter(function(keyword) { return /\d/.test(keyword); });
   if (inputKeywords.length > 0) {
     var bestMatch = null;
     var bestScore = 0;
