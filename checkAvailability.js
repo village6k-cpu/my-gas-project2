@@ -10916,6 +10916,15 @@ function fuzzyMatchEquipName(input, nameList) {
   return input;
 }
 
+// AI/typed-runner callers already chose the equipment identity.  Keep the
+// legacy fuzzy helper for human/manual entry, but never let GAS silently
+// replace an explicit AI plan with a different catalog item.
+function _resolveConfirmRequestPlannedEquipmentName_(input, nameList, preservePlannedName) {
+  var cleanInput = String(input || "").trim();
+  if (preservePlannedName === true) return cleanInput;
+  return fuzzyMatchEquipName(cleanInput, nameList);
+}
+
 /**
  * 레벤슈타인 거리 계산
  */
@@ -11702,8 +11711,11 @@ function _insertAndCheckRequest(req) {
     }
   } catch(e) {}
 
+  var preservePlannedNames = req.장비명원문보존 === true;
   var requestedEquipItems = (req.장비 || []).map(function(e) {
-    var matchedName = fuzzyMatchEquipName(String(e.이름 || "").trim(), equipNames);
+    var matchedName = _resolveConfirmRequestPlannedEquipmentName_(
+      e.이름, equipNames, preservePlannedNames
+    );
     if (!matchedName) return null;
     return { name: matchedName, qty: e.수량 || 1 };
   }).filter(function(item) { return item && item.name; });
@@ -11834,7 +11846,9 @@ function _insertAndCheckRequest(req) {
   for (var i = 0; i < items.length; i++) {
     // 장비명 퍼지 매칭
     var inputName = String(items[i].이름 || "").trim();
-    var matchedName = fuzzyMatchEquipName(inputName, equipNames);
+    var matchedName = _resolveConfirmRequestPlannedEquipmentName_(
+      inputName, equipNames, preservePlannedNames
+    );
 
     var row = startRow + i;
     var rowData = [

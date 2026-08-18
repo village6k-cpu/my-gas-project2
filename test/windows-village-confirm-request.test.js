@@ -161,6 +161,7 @@ test('unregistered customer wording is preserved as an equipment row instead of 
       const payload = JSON.parse(parsed.searchParams.get('args'));
       assert.match(JSON.stringify(payload), /20-70/);
       assert.doesNotMatch(JSON.stringify(payload), /추가요청/);
+      assert.equal(payload.장비명원문보존, true);
       return response({ success: true, reqID: 'RQ-260813-003' });
     }
     if (parsed.searchParams.get('sheet') === '확인요청') {

@@ -156,7 +156,7 @@ function buildInsertRequest(config, request) {
   const url = baseUrl(config);
   url.searchParams.set('action', 'run');
   url.searchParams.set('func', 'insertAndCheckRequest');
-  url.searchParams.set('args', JSON.stringify(request));
+  url.searchParams.set('args', JSON.stringify({ ...request, 장비명원문보존: true }));
   if (url.toString().length > 16_000) {
     throw new Error('Confirmation-request payload is too large for the bounded GET route');
   }
@@ -173,7 +173,11 @@ function buildUpdateRequest(config, reqID, request) {
   const url = baseUrl(config);
   url.searchParams.set('action', 'run');
   url.searchParams.set('func', 'updateRequest');
-  url.searchParams.set('args', JSON.stringify({ reqID: normalizeRequestId(reqID), ...request }));
+  url.searchParams.set('args', JSON.stringify({
+    reqID: normalizeRequestId(reqID),
+    ...request,
+    장비명원문보존: true
+  }));
   if (url.toString().length > 16_000) {
     throw new Error('Confirmation-request payload is too large for the bounded GET route');
   }

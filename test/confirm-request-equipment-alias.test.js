@@ -31,6 +31,19 @@ function loadMatcher() {
   return context.match;
 }
 
+function loadConfirmationRequestNameResolver() {
+  const names = [
+    'normalizeEquipAliasForMatch_',
+    'isUnsafeFuzzyEquipInput_',
+    'levenshtein',
+    'fuzzyMatchEquipName',
+    '_resolveConfirmRequestPlannedEquipmentName_'
+  ];
+  const context = {};
+  vm.runInNewContext(`${names.map(extractFunction).join('\n')}\nthis.resolve = _resolveConfirmRequestPlannedEquipmentName_;`, context);
+  return context.resolve;
+}
+
 test('operational English and spoken aliases resolve to the exact set-master names', () => {
   const match = loadMatcher();
   const names = [
@@ -62,4 +75,12 @@ test('a generic GM token cannot remap a 14mm prime request to an unrelated zoom 
   ];
 
   assert.equal(match('소니 FE 14mm F1.8 GM', names), '소니 FE 14mm F1.8 GM');
+});
+
+test('AI-decided confirmation-request names bypass legacy fuzzy remapping', () => {
+  const resolve = loadConfirmationRequestNameResolver();
+  const names = ['홀리랜드 솔리드컴 4S'];
+
+  assert.equal(resolve('solid 4s', names, true), 'solid 4s');
+  assert.equal(resolve('solid 4s', names, false), '홀리랜드 솔리드컴 4S');
 });
