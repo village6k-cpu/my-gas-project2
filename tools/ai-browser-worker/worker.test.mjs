@@ -956,7 +956,7 @@ test('buildHermesPrompt applies the owner-confirmed conservative whole-hour requ
   assert.match(prompt, /반출[^\n]{0,80}내림/);
   assert.match(prompt, /반납[^\n]{0,80}올림/);
   assert.match(prompt, /정시 HH:00/);
-  assert.match(prompt, /27일 24:00[^\n]{0,100}27일 00:00/);
+  assert.match(prompt, /27일 24:00[^\n]{0,120}28일 00:00/);
   assert.doesNotMatch(prompt, /outer code.*never floor or round/is);
 });
 
@@ -3134,7 +3134,7 @@ test('buildSheetAppendPayload floors pickup minutes and ceils return minutes con
   assert.equal(payload.args.반납시간, '19:00');
 });
 
-test('confirmation request normalization keeps Village 24:00 on the written date', () => {
+test('confirmation request normalization rolls Village 24:00 into the next date', () => {
   assert.deepEqual(normalizeConfirmRequestWindowForSheet({
     start_date: '2026-08-26',
     pickup_time: '07:30',
@@ -3143,7 +3143,7 @@ test('confirmation request normalization keeps Village 24:00 on the written date
   }), {
     start_date: '2026-08-26',
     pickup_time: '07:00',
-    end_date: '2026-08-27',
+    end_date: '2026-08-28',
     return_time: '00:00'
   });
 });

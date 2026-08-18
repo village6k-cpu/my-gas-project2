@@ -11627,7 +11627,7 @@ function _confirmRequestTimeParts_(value) {
 
 /**
  * 확인요청의 공통 시간 경계.
- * 반출 분은 내리고, 반납 분은 올리며, Village의 날짜+24:00은 적힌 날짜의 00:00으로 보존한다.
+ * 반출 분은 내리고, 반납 분은 올리며, 날짜+24:00은 다음 날 00:00으로 넘긴다.
  */
 function _normalizeConfirmRequestSchedule_(request) {
   var req = Object.assign({}, request || {});
@@ -11645,6 +11645,7 @@ function _normalizeConfirmRequestSchedule_(request) {
   var returnHour = returned.hour;
   if (returnHour === 24) {
     returnHour = 0;
+    endDate = _confirmRequestAddDays_(endDate, 1);
   } else if (returned.minute > 0) {
     returnHour += 1;
     if (returnHour === 24) {

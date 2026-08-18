@@ -184,7 +184,7 @@ test('confirmation-request skill preserves AI judgment while enforcing the owner
     skill.body,
     /pickup|반출[\s\S]{0,160}(?:floor|내림)[\s\S]{0,220}(?:return|반납)[\s\S]{0,160}(?:ceil|올림)/i
   );
-  assert.match(skill.body, /24:00[\s\S]{0,120}written date|적힌 날짜[\s\S]{0,120}00:00/i);
+  assert.match(skill.body, /24:00[\s\S]{0,180}(?:next day|다음 날)[\s\S]{0,120}00:00/i);
   assert.match(
     skill.body,
     /existing partial request|기존 미등록[\s\S]{0,260}(?:authoritative|권위)[\s\S]{0,260}(?:merge|병합)/i
@@ -196,12 +196,12 @@ test('confirmation-request skill preserves AI judgment while enforcing the owner
     'utf8'
   );
   const top = archive.split(/\r?\n/).slice(0, 45).join('\n');
-  const obsolete24Offset = archive.indexOf('Convert same-day `24시` / `24:00` returns to next-day `00:00`');
-  assert.match(top, /current[\s\S]{0,300}24:00[\s\S]{0,180}(?:written date|적힌 날짜)[\s\S]{0,120}00:00/i);
-  assert.notEqual(obsolete24Offset, -1, 'the old 24:00 rule must remain as historical evidence');
+  const obsolete24Offset = archive.indexOf('keeps the written date and becomes `27일 00:00`');
+  assert.match(top, /current[\s\S]{0,300}24:00[\s\S]{0,180}(?:next day|다음 날)[\s\S]{0,120}00:00/i);
+  assert.notEqual(obsolete24Offset, -1, 'the incorrect written-date rule must remain as marked historical evidence');
   assert.match(
     archive.slice(Math.max(0, obsolete24Offset - 200), obsolete24Offset + 420),
-    /obsolete[\s\S]{0,180}24:00[\s\S]{0,260}(?:written date|적힌 날짜)[\s\S]{0,120}00:00/i
+    /obsolete[\s\S]{0,220}24:00[\s\S]{0,260}(?:written date|적힌 날짜)[\s\S]{0,180}(?:next day|다음 날)/i
   );
 });
 

@@ -19,7 +19,7 @@ assert.deepEqual(
   {
     반출일: '2026-08-26',
     반출시간: '07:00',
-    반납일: '2026-08-27',
+    반납일: '2026-08-28',
     반납시간: '00:00',
     장비: [{ 이름: '소니 FX6 바디세트', 수량: 1 }],
     입력모드: 'full_plan'
@@ -42,14 +42,20 @@ assert.deepEqual(
   }
 );
 
-assert.throws(
-  () => context._normalizeConfirmRequestSchedule_({
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context._normalizeConfirmRequestSchedule_({
     반출일: '2026-06-01',
     반출시간: '12:30',
     반납일: '2026-06-01',
     반납시간: '24:00'
-  }),
-  /반납.*반출.*이후/
+  }))),
+  {
+    반출일: '2026-06-01',
+    반출시간: '12:00',
+    반납일: '2026-06-02',
+    반납시간: '00:00',
+    입력모드: 'full_plan'
+  }
 );
 
 assert.throws(

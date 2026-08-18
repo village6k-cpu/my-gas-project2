@@ -646,7 +646,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
 - 예약형식이면 확인요청 입력이 기본이다. 불확실한 장비명/중복확인/연락처 없음은 입력 차단 사유가 아니라 follow_up/evidence 대상이다. F열 item은 best 장비명으로 넣고, Q/R에는 AI 설명을 넣지 않는다. 연락처는 있으면 넣고 없으면 L열 공란으로 둔다.
 - memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
-- 확인요청은 보수적인 정시 경계만 쓴다. 반출은 해당 시각의 시(hour)로 내림(12:59→12:00), 반납은 다음 시로 올림(18:01→19:00), 정시 HH:00은 그대로 둔다. Village 운영 표기에서 날짜와 함께 적힌 \`27일 24:00\`은 적힌 날짜를 유지한 \`27일 00:00\`으로 정규화한다. 이 결과 반납이 반출 이후가 아니면 추측해서 쓰지 말고 확인 질문/후속조치를 만든다.
+- 확인요청은 보수적인 정시 경계만 쓴다. 반출은 해당 시각의 시(hour)로 내림(12:59→12:00), 반납은 다음 시로 올림(18:01→19:00), 정시 HH:00은 그대로 둔다. 날짜와 함께 적힌 \`27일 24:00\`은 다음 날인 \`28일 00:00\`으로 정규화한다. 이 결과 반납이 반출 이후가 아니면 추측해서 쓰지 말고 확인 질문/후속조치를 만든다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
 - 직원의 예약 답변(예: "예약 잡아드리겠습니다", "확정했습니다") 자체는 기존 RQ나 시트 등록의 증거가 아니다. already_registered=true라면 계약마스터와 스케줄상세 authoritative read를 둘 다 완료하고 해당 safety_checks를 true로 둬라. 기존 RQ만 발견했다면 정확한 existing_confirm_request_ids를 넣고 등록 완료로 가장하지 마라.
 - read-catchup에서 기존 RQ를 발견한 경우에도 확인요청 I/J 결과를 읽은 뒤, 그 결과가 ✅/⚠️/❌/미확인 중 무엇인지 후속카드에 명시한다.
@@ -679,7 +679,7 @@ TASK:
 11. For reservation-format requests, missing phone is NOT a sheet-write blocker. Search 고객DB by name; if a unique DB phone is found, use it, otherwise leave sheet_row_candidate.phone="" and still write 확인요청. discount_type: 고객DB I열 outranks Kakao; use DB 학생/개인사업자/프리랜서/단골/제휴/일반 when present, otherwise infer from Kakao. Missing equipment/duplicate lookup/phone goes to follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or an unchanged duplicate. An existing booking with newly added or increased equipment is not a duplicate: write only that delta with equipment_write_mode="additions_only". If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; phone may still be blank.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
 11-2. Multiple/revised equipment: each equipment entry must be a separate top-level object. For a new unregistered booking use equipment_write_mode="full_plan" and the complete final plan. For an already registered booking or an existing RQ use equipment_write_mode="additions_only" and include only equipment newly added or quantity newly increased in the latest customer turn; never repeat the existing schedule/RQ equipment. Set plan_complete=true only after reconciling the correct write set for that mode. If the delta cannot be determined safely, set should_write_to_sheet=false and create one review follow-up instead of re-inserting the full plan.
-11-3. sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. Village notation \`8월 27일 24:00\` means \`2026-08-27 00:00\`, not August 28. If the normalized return is not later than pickup, set should_write_to_sheet=false and create one review follow-up instead of guessing.
+11-3. sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If the normalized return is not later than pickup, set should_write_to_sheet=false and create one review follow-up instead of guessing.
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
 12-1. For real-world mutations set requiresHumanAction=true, allowed actionFamily, stable businessKey; otherwise false, "none", "".
@@ -1343,8 +1343,8 @@ export function normalizeConfirmRequestWindowForSheet(row = {}) {
   const pickupHour = pickup.hour;
   let returnHour = returned.hour;
   if (returnHour === 24) {
-    // Village uses the written date as the operational date for "27일 24:00".
     returnHour = 0;
+    endDate = addDaysToYmd(endDate, 1);
   } else if (returned.minute > 0) {
     returnHour += 1;
     if (returnHour === 24) {
