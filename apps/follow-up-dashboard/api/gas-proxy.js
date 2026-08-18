@@ -15,10 +15,11 @@ const READ_ACTIONS = new Set([
   'timeline', 'timelineContract',
   'dashboard', 'dashboardSearch', 'dashboardSearchIndex',
   'dashboardContractExtras', 'dashboardEquipNames', 'dashboardNotes',
-  'card', 'list', 'read', 'search', 'scan'
+  'card', 'list', 'read', 'search'
 ]);
 // 쓰기(캐시 안 함, 관련 읽기 캐시 무효화)
 const WRITE_ACTIONS = new Set([
+  'scan',
   'updateTime', 'scheduleAddEquip', 'scheduleRemoveEquip',
   'addEquips', 'removeEquip', 'updateEquipQty', 'updatePayment',
   'saveDashboardNotes', 'aiParse', 'registerAsync', 'update',

@@ -232,7 +232,6 @@ const READ_ACTIONS = new Set([
   "info",
   "sheets",
   "list",
-  "scan",
   "dashboardSearch",
   "dashboardContractExtras",
   "dashboardEquipNames",
@@ -247,6 +246,7 @@ const READ_ACTIONS = new Set([
 ]);
 // 쓰기 액션 화이트리스트 (캐시 안 함). 시트/상태 변경 → 신중.
 const WRITE_ACTIONS = new Set([
+  "scan",
   "toggleSetup",
   "toggleReturn",
   "toggleItem",

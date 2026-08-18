@@ -12,7 +12,7 @@
  * 사용 예시:
  * GET  ?key=village2026&action=read&sheet=확인요청
  * GET  ?key=village2026&action=list
- * GET  ?key=village2026&action=scan
+ * POST ?key=village2026  (body: {action:"scan"})
  * POST ?key=village2026  (body: {action:"확인", reqID:"RQ-..."})
  * POST ?key=village2026  (body: {action:"write", sheet:"...", range:"...", values:[...]})
  */
@@ -82,7 +82,7 @@ function getVillageOperationCapabilities_() {
       { id: "schedule.trade_candidates", action: "tradeCandidates", policy: "read_only" },
       { id: "payment.metadata", action: "paymentMeta", policy: "read_only" },
       { id: "confirmation_request.list", action: "list", policy: "read_only" },
-      { id: "confirmation_request.scan", action: "scan", policy: "read_only" },
+      { id: "confirmation_request.scan", action: "scan", policy: "internal_write", verification: "authoritative_server_ack" },
       { id: "operation.receipt", action: "operationReceipt", policy: "read_only", verification: "authoritative_read" },
       { id: "confirmation_request.create", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema },
       { id: "confirmation_request.create_batch", action: "insertAndCheckRequest", policy: "internal_write", verification: "authoritative_readback", requestSchema: confirmationRequestSchema },
@@ -116,6 +116,7 @@ function getVillageOperationCapabilities_() {
       { id: "confirmation_request.hold", action: "보류", policy: "internal_write", verification: "authoritative_server_ack" },
       { id: "confirmation_request.reject", action: "거절", policy: "internal_write", verification: "authoritative_server_ack" },
       { id: "confirmation_request.register", action: "등록", policy: "final_registration", verification: "authoritative_server_ack" },
+      { id: "customer.send_confirmation", action: "발송승인", policy: "customer_send", verification: "authoritative_server_ack" },
       { id: "customer.send_estimate", action: "sendEstimate", policy: "customer_send", verification: "authoritative_server_ack" },
       { id: "customer.send_statement", action: "sendStatement", policy: "customer_send", verification: "authoritative_server_ack" },
       { id: "customer.send_payment_link", action: "sendPayAppPaymentLink", policy: "customer_send", verification: "authoritative_server_ack" },
@@ -151,6 +152,8 @@ function isRangeBoundToSheet_(sheetName, range) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function doGet(e) {
+  e = e || {};
+  e.villageHttpMethod_ = "GET";
   var params = e.parameter || {};
 
   // ── 페이지 라우팅 ──
@@ -225,7 +228,17 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  e = e || {};
+  e.villageHttpMethod_ = "POST";
   return handleRequest(e);
+}
+
+function requireVillagePost_(e, action) {
+  if (e && e.villageHttpMethod_ === "POST") return null;
+  return jsonResponse({
+    status: "ERROR",
+    error: action + " is a write action and requires POST"
+  }, 405);
 }
 
 function stableVillageOperationJson_(value) {
@@ -1068,8 +1081,11 @@ function handleRequestCore_(e) {
         // 단일 확인요청 카드 — 편집 큐가 저장 후 그 카드만 갱신할 때 사용(전체 목록 재구축 회피)
         return doConfirmCard(params.reqID || postBody.reqID);
 
-      case "scan":
+      case "scan": {
+        var scanMethodError = requireVillagePost_(e, "scan");
+        if (scanMethodError) return scanMethodError;
         return doScanAll();
+      }
 
       case "확인": {
         const reqID = params.reqID || postBody.reqID;
@@ -1112,7 +1128,7 @@ function handleRequestCore_(e) {
             update: "GET ?key=...&action=update&sheet=시트명&cell=A1&value=값",
             search: "GET ?key=...&action=search&sheet=시트명&col=D&query=FX3",
             list: "GET ?key=...&action=list (확인요청 대기 목록)",
-            scan: "GET ?key=...&action=scan (미처리 건 전체 스캔)",
+            scan: "POST {key, action:'scan'} (미처리 건 확인/등록 실행)",
             "확인/등록/보류/거절/발송승인": "POST {key, action:'확인', reqID:'RQ-...'}"
           }
         });
@@ -1258,7 +1274,7 @@ function buildConfirmPendingItems_(onlyReqID) {
 
 /**
  * 미처리 건 전체 스캔 실행
- * GET ?key=...&action=scan
+ * POST {key, action:"scan"}
  */
 function doScanAll() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();

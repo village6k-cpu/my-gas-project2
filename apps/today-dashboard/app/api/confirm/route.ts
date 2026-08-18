@@ -39,11 +39,11 @@ function isCacheableListBody(body: string): boolean {
   }
 }
 
-// 목록 (action=list, scan)
+// 조회는 목록/단일 카드만 허용한다. scan은 확인·등록을 실행하므로 POST 전용이다.
 export async function GET(req: NextRequest) {
   if (!(await requireUser(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
   const action = req.nextUrl.searchParams.get("action") || "list";
-  if (action !== "list" && action !== "scan" && action !== "card") return NextResponse.json({ error: "미허용 action" }, { status: 400 });
+  if (action !== "list" && action !== "card") return NextResponse.json({ error: "미허용 action" }, { status: 400 });
   try {
     if (action === "card") {
       // 단일 카드 갱신 — 편집 큐 저장 후 그 카드만 새로 그린다(전체 목록 재조회 회피)
@@ -80,6 +80,7 @@ export async function POST(req: NextRequest) {
   const action = String((body as { action?: string }).action || "");
   invalidateListCache(); // 어떤 쓰기든 목록이 바뀔 수 있으니 캐시 무효화
   try {
+    if (action === "scan") return await callGas({ action: "scan" });
     if (action === "run") {
       const func = String((body as { func?: string }).func || "");
       if (!FUNCS.has(func)) return NextResponse.json({ error: `미허용 func: ${func}` }, { status: 400 });
