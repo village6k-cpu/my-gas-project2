@@ -9,6 +9,9 @@ const {
   buildWorkerResultAudit,
   buildWorkerTreeKillInvocation,
   compactQueueAuditRecord,
+  buildP0SlackEscalationClaim,
+  buildP0SlackEscalationMessage,
+  p0SlackEscalationDue,
   createKakaoPhaseScheduler,
   registerAcceptedRoomEvent,
   semanticRoomEventIdentity,
@@ -22,6 +25,50 @@ const {
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+
+test('P0 Slack escalation repeats only after the durable interval and stops on closure', () => {
+  const row = {
+    id: 'p0-row',
+    status: 'open',
+    customer_name: '백남준',
+    title: '대여 장비 이상 즉시 확인',
+    payload: {
+      alert_level: 'p0',
+      alert_reason: '대여 중 장비 상태에 즉시 사람 판단 필요',
+      slack_delivery: {
+        status: 'delivered',
+        channel_id: 'CINV',
+        message_ts: '100.1',
+        thread_ts: '100.1',
+        delivered_at: '2026-08-18T00:00:00.000Z'
+      }
+    }
+  };
+  assert.equal(p0SlackEscalationDue(row, { nowMs: Date.parse('2026-08-18T00:02:59.000Z'), repeatMs: 180_000 }).due, false);
+  assert.equal(p0SlackEscalationDue(row, { nowMs: Date.parse('2026-08-18T00:03:00.000Z'), repeatMs: 180_000 }).due, true);
+  assert.equal(p0SlackEscalationDue({ ...row, status: 'done' }, { nowMs: Date.parse('2026-08-18T01:00:00.000Z') }).due, false);
+});
+
+test('P0 Slack escalation claim is durable and produces a deterministic Slack message id', () => {
+  const row = {
+    id: 'p0-row', status: 'open', customer_name: '백남준', title: '즉시 확인',
+    payload: {
+      alert_level: 'p0', alert_reason: '금액 또는 장비 사고',
+      slack_delivery: { status: 'delivered', channel_id: 'CINV', message_ts: '100.1', thread_ts: '100.1', delivered_at: '2026-08-18T00:00:00.000Z' }
+    }
+  };
+  const first = buildP0SlackEscalationClaim(row, { nowMs: Date.parse('2026-08-18T00:03:00.000Z'), repeatMs: 180_000 });
+  const retry = buildP0SlackEscalationClaim(row, { nowMs: Date.parse('2026-08-18T00:03:00.000Z'), repeatMs: 180_000 });
+  assert.equal(first.attempt, 1);
+  assert.equal(first.clientMessageId, retry.clientMessageId);
+  assert.match(first.clientMessageId, /^[0-9a-f-]{36}$/);
+  const message = buildP0SlackEscalationMessage(row, first, { mentionUserIds: ['UOWNER'] });
+  assert.match(message.text, /<!channel>/);
+  assert.match(message.text, /<@UOWNER>/);
+  assert.equal(message.thread_ts, '100.1');
+  assert.equal(message.reply_broadcast, true);
+  assert.equal(message.client_msg_id, first.clientMessageId);
+});
 
 function deferred() {
   let resolve;

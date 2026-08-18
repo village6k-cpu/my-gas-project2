@@ -591,6 +591,7 @@ CRITICAL RULES:
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때 근거가 확보된 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
 - 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 일반 가격·환불정책·파손규정·세금 안내는 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능.
 - 예외(항상 사장 확인): 고객이 현재 대여/수령 장비의 기스·흠집·스크래치·파손·고장·작동이상·분실을 알린 실제 사고, 파손·분실 배상 다툼, 환불 분쟁, 법적 문제 제기, 강한 항의는 근거가 있어도 auto_send 금지. 계속 사용/그대로 수령/교체/배상 여부를 임의로 승인하지 말고 draft_only + owner_review_required=true + urgent damage_repair로 올린다.
+- follow_up_items의 alertLevel은 네 판단이다. 사장을 깨워야 하거나 즉시 확인하지 않으면 고객·금전·장비 피해가 커지는 사건만 "p0"로 하고 구체적인 alertReason을 쓴다. 단순히 priority가 urgent이거나 특정 단어가 있다는 이유만으로 p0로 올리지 않는다. 나머지는 "none"이다.
 - 예약 확정, 재고 가능 단정, 가격 확정은 화면/시트 근거 없이 단정하지 않는다. 하지만 고객이 예약형식에 맞게 정보를 준 경우 확인요청 시트 입력은 적극 수행한다.
 - Google Sheets 입력은 API로 가능하다. 어떤 값을 넣을지는 AI가 판단하되, 예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다.
 
@@ -741,6 +742,8 @@ The JSON schema:
       "recommended_action": string,
       "suggested_reply_draft": string,
       "evidence": [string],
+      "alertLevel": "p0" | "none",
+      "alertReason": string,
       "blocking_reason": string | null,
       "due_hint": "now" | "today" | "tomorrow" | "this_week" | null
     }
@@ -845,6 +848,7 @@ const AI_FOLLOW_UP_ROUTES = new Set(['schedule', 'document', 'settlement', 'inve
 const AI_FOLLOW_UP_TYPES = new Set(['reply_needed', 'quote_send', 'tax_invoice', 'schedule_check', 'reservation_review', 'price_review', 'payment_check', 'contract_document', 'return_extension', 'damage_repair', 'sheet_duplicate_check', 'completed_log']);
 const AI_FOLLOW_UP_PRIORITIES = new Set(['urgent', 'high', 'normal', 'low']);
 const AI_FOLLOW_UP_STATUSES = new Set(['open', 'done', 'dismissed']);
+const AI_ALERT_LEVELS = new Set(['p0', 'none']);
 const AI_MANUAL_ACTION_FAMILIES = new Set(['invoice_issue', 'reservation_change', 'payment_reconcile', 'inventory_check', 'document_approval']);
 const HERMES_WORKER_TOOLSETS = 'terminal,file,web,skills,memory,session_search,vision';
 const CONFIRM_REQUEST_DISCOUNT_TYPES = new Set(['학생', '개인사업자/프리랜서', '단골', '제휴', '일반']);
@@ -1075,6 +1079,14 @@ export function validateAiDecisionContract(decision = {}) {
       errors.push(`follow_up_items[${index}].customer_name is required`);
     }
     if (!text(item?.summary).trim()) errors.push(`follow_up_items[${index}].summary is required`);
+    const alertLevel = text(item?.alertLevel || item?.alert_level).trim();
+    const alertReason = text(item?.alertReason || item?.alert_reason).trim();
+    if (alertLevel && !AI_ALERT_LEVELS.has(alertLevel)) {
+      errors.push(`follow_up_items[${index}].alertLevel must be p0 or none`);
+    }
+    if (alertLevel === 'p0' && !alertReason) {
+      errors.push(`follow_up_items[${index}].alertReason is required for p0`);
+    }
     const requiresHumanAction = item?.requiresHumanAction ?? item?.requires_human_action;
     const actionFamily = text(item?.actionFamily || item?.action_family).trim();
     const businessKey = text(item?.businessKey || item?.business_key).trim();
@@ -1543,6 +1555,7 @@ export function mergeFollowUpRowsByTopic(rows = []) {
     const actions = sorted.map((item) => text(item.recommended_action)).filter(Boolean);
     const drafts = sorted.map((item) => text(item.suggested_reply_draft)).filter(Boolean);
     const evidence = sorted.flatMap((item) => Array.isArray(item.evidence) ? item.evidence.map(text).filter(Boolean) : []);
+    const p0Source = sorted.find((item) => text(item?.payload?.alert_level || item?.payload?.alertLevel).trim() === 'p0');
     primary.summary = summaries[0] || primary.summary;
     primary.recommended_action = actions.length
       ? actions.map((value) => `- ${value.replace(/^\s*-\s*/, '')}`).join('\n')
@@ -1551,6 +1564,10 @@ export function mergeFollowUpRowsByTopic(rows = []) {
     primary.evidence = Array.from(new Set(evidence)).slice(0, 12);
     primary.payload = {
       ...(primary.payload && typeof primary.payload === 'object' ? primary.payload : {}),
+      ...(p0Source ? {
+        alert_level: 'p0',
+        alert_reason: text(p0Source.payload?.alert_reason || p0Source.payload?.alertReason).slice(0, 1000)
+      } : {}),
       merged_follow_up_items: sorted.map((item) => ({
         type: item.type,
         title: item.title,
@@ -1588,6 +1605,7 @@ function mergeFollowUpRowGroup(items = []) {
   const evidence = rows.flatMap((item) => Array.isArray(item.evidence) ? item.evidence.map(text).filter(Boolean) : []);
   const latestPayload = [...rows].reverse().find((item) => item.payload && typeof item.payload === 'object')?.payload || {};
   const primaryPayload = primary.payload && typeof primary.payload === 'object' ? primary.payload : {};
+  const p0Source = rows.find((item) => text(item?.payload?.alert_level || item?.payload?.alertLevel).trim() === 'p0');
 
   primary.priority = rows.reduce((best, item) => (
     priorityRank(item.priority) < priorityRank(best) ? item.priority : best
@@ -1601,6 +1619,10 @@ function mergeFollowUpRowGroup(items = []) {
   primary.payload = {
     ...primaryPayload,
     ...latestPayload,
+    ...(p0Source ? {
+      alert_level: 'p0',
+      alert_reason: text(p0Source.payload?.alert_reason || p0Source.payload?.alertReason).slice(0, 1000)
+    } : {}),
     merged_follow_up_items: rows.map((item) => ({
       id: item.id || null,
       type: item.type,
@@ -1677,79 +1699,35 @@ function buildStableFollowUpKey({ roomKey, customerName, type, route, taskKey, t
 
 export function customerEquipmentIncidentRisk(decision = {}) {
   const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
-  if (followUps.some((item) => text(item?.type).trim() === 'damage_repair')) {
-    return { risk: true, reason: 'damage_repair_follow_up' };
-  }
-
-  const visibleMessages = Array.isArray(decision?.visible_messages_used)
-    ? decision.visible_messages_used.map((message) => message?.message)
-    : [];
-  const combined = [
-    decision.latest_customer_message_cluster,
-    decision.latest_staff_message,
-    decision.suggested_reply_draft,
-    decision.reply_decision?.text,
-    ...visibleMessages,
-    ...followUps.flatMap((item) => [item?.title, item?.summary, ...(Array.isArray(item?.evidence) ? item.evidence : [])])
-  ].map(text).join(' ').normalize('NFKC');
-  const hasIncidentCondition = /(기스|흠집|스크래치|찍힘|금\s*(?:감|갔)|파손|손상|깨짐|부러짐|고장|작동\s*(?:안\s*됨|이상)|오작동|침수|분실)/i.test(combined);
-  const hasLiveRentalContext = /(지금|현재|방금|사진|렌즈|카메라|장비|수령|대여|가져가|사용|쓰겠|교체|반납|상태|여분)/i.test(combined);
-  if (hasIncidentCondition && hasLiveRentalContext) {
-    return { risk: true, reason: 'visible_equipment_incident_context' };
-  }
-  return { risk: false, reason: 'no_customer_equipment_incident' };
+  const p0 = followUps.find((item) => text(item?.alertLevel || item?.alert_level).trim() === 'p0');
+  return p0
+    ? { risk: true, reason: text(p0.alertReason || p0.alert_reason).trim() || 'ai_explicit_p0' }
+    : { risk: false, reason: 'ai_no_explicit_p0' };
 }
 
-function normalizeIncidentFollowUpItems(decision = {}, job = {}) {
+function normalizeP0FollowUpItems(decision = {}) {
   const original = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
-  const incident = customerEquipmentIncidentRisk(decision);
-  if (!incident.risk) return original;
-
-  let markedExisting = false;
-  const normalized = original.map((item) => {
-    if (!item || typeof item !== 'object' || text(item.type).trim() !== 'damage_repair') return item;
-    markedExisting = true;
+  return original.map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    const alertLevel = text(item.alertLevel || item.alert_level).trim() || 'none';
+    if (alertLevel !== 'p0') return { ...item, alertLevel: 'none' };
     return {
       ...item,
-      route: 'inventory',
+      alertLevel: 'p0',
+      alertReason: text(item.alertReason || item.alert_reason).trim(),
       requiresHumanAction: true,
-      actionFamily: 'inventory_check',
       priority: 'urgent',
       status: 'open',
-      due_hint: 'now',
-      incident_safety_alert: true
+      due_hint: 'now'
     };
   });
-  if (markedExisting) return normalized;
-
-  const customerName = text(decision?.customer?.name || job.customer_name || '고객').slice(0, 120);
-  const roomKey = text(job.room_key || job.roomKey || job.payload?.roomKey || customerName).slice(0, 180);
-  return [...normalized, {
-    type: 'damage_repair',
-    route: 'inventory',
-    taskKey: 'customer_equipment_incident_review',
-    requiresHumanAction: true,
-    actionFamily: 'inventory_check',
-    businessKey: `incident:${roomKey}`,
-    priority: 'urgent',
-    status: 'open',
-    title: `${customerName} 대여 장비 이상 긴급 확인`,
-    customer_name: customerName,
-    summary: text(decision.latest_customer_message_cluster).slice(0, 1000) || '고객이 현재 대여/수령 장비의 이상을 알렸습니다.',
-    recommended_action: '즉시 카카오 대화와 장비 상태를 확인하고, 계속 사용·교체·회수 여부를 직접 판단하세요.',
-    suggested_reply_draft: '',
-    evidence: [incident.reason],
-    blocking_reason: '고객 장비 사고는 자동응답으로 결론내릴 수 없음',
-    due_hint: 'now',
-    incident_safety_alert: true
-  }];
 }
 
 export function buildFollowUpRows(decision, job = {}) {
   // Hermes has already inspected the opened conversation and determined turn
   // ownership. Do not reinterpret staff prose as a new customer task here.
   if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply === false) return [];
-  const items = normalizeIncidentFollowUpItems(decision, job);
+  const items = normalizeP0FollowUpItems(decision);
   const rawJobId = text(job.id || job.jobId || '');
   const jobId = isUuid(rawJobId) ? rawJobId : null;
   const roomKey = text(job.room_key || job.roomKey || job.payload?.roomKey || '').slice(0, 240);
@@ -1794,6 +1772,8 @@ export function buildFollowUpRows(decision, job = {}) {
       const recommendedAction = text(item.recommended_action || item.recommendedAction).slice(0, 3000);
       const suggestedReplyDraft = text(item.suggested_reply_draft || item.suggestedReplyDraft).slice(0, 3000);
       const evidence = Array.isArray(item.evidence) ? item.evidence.map((v) => text(v)).filter(Boolean).slice(0, 12) : [];
+      const alertLevel = text(item.alertLevel || item.alert_level).trim() === 'p0' ? 'p0' : 'none';
+      const alertReason = text(item.alertReason || item.alert_reason).slice(0, 1000);
       return {
         follow_up_key: buildStableFollowUpKey({ roomKey, customerName, type, route, title, summary, recommendedAction, evidence, taskKey }),
         source: 'kakao_ai_worker',
@@ -1819,6 +1799,8 @@ export function buildFollowUpRows(decision, job = {}) {
           requires_human_action: item.requiresHumanAction === true || item.requires_human_action === true,
           action_family: text(item.actionFamily || item.action_family).trim() || 'none',
           business_key: text(item.businessKey || item.business_key).trim(),
+          alert_level: alertLevel,
+          alert_reason: alertReason,
           ...conversationSnapshot
         }
       };
@@ -2752,6 +2734,7 @@ export function buildCanonicalFollowUpCases(decision = {}, job = {}, rows = [], 
   const coreFacts = Array.from(new Set(sourceRows.flatMap((row) => (
     Array.isArray(row?.evidence) ? row.evidence.map((value) => text(value).trim()).filter(Boolean) : []
   )))).slice(0, 2);
+  const p0Source = sourceRows.find((row) => text(row?.payload?.alert_level || row?.payload?.alertLevel).trim() === 'p0');
   const lifecycle = buildFollowUpCaseLifecycle({
     conversationKey: inquiryBase.payload.inquiry_conversation_key,
     requestGroupKey: text(decision.request_group_key || job.payload?.request_group_key),
@@ -2776,7 +2759,11 @@ export function buildCanonicalFollowUpCases(decision = {}, job = {}, rows = [], 
       reply_intent: replyIntent,
       auto_reply_sent: options.autoReplySent === true,
       ai_judgment: text(decision.reason || replyDecision.reason || inquiryBase.recommended_action || inquiryBase.summary).slice(0, 1000),
-      core_facts: coreFacts
+      core_facts: coreFacts,
+      ...(p0Source ? {
+        alert_level: 'p0',
+        alert_reason: text(p0Source.payload?.alert_reason || p0Source.payload?.alertReason).slice(0, 1000)
+      } : { alert_level: 'none' })
     }
   }];
 }
@@ -2895,7 +2882,12 @@ export async function upsertInquiryCaseRow(config = {}, row = {}) {
         ...existingPayload,
         ...incomingPayload,
         case_id: existingPayload.case_id || incomingPayload.case_id || randomUUID(),
-        ...(existingPayload.slack_delivery ? { slack_delivery: existingPayload.slack_delivery } : {})
+        ...(existingPayload.slack_delivery ? { slack_delivery: existingPayload.slack_delivery } : {}),
+        ...(existingPayload.critical_delivery ? { critical_delivery: existingPayload.critical_delivery } : {}),
+        ...(text(existingPayload.alert_level).trim() === 'p0' ? {
+          alert_level: 'p0',
+          alert_reason: text(existingPayload.alert_reason).slice(0, 1000)
+        } : {})
       }
     };
     delete patch.id;
@@ -2944,7 +2936,12 @@ export async function upsertManualFollowUpRows(config = {}, rows = [], caseId = 
       linked.payload = {
         ...existingPayload,
         ...linked.payload,
-        ...(existingPayload.slack_delivery ? { slack_delivery: existingPayload.slack_delivery } : {})
+        ...(existingPayload.slack_delivery ? { slack_delivery: existingPayload.slack_delivery } : {}),
+        ...(existingPayload.critical_delivery ? { critical_delivery: existingPayload.critical_delivery } : {}),
+        ...(text(existingPayload.alert_level).trim() === 'p0' ? {
+          alert_level: 'p0',
+          alert_reason: text(existingPayload.alert_reason).slice(0, 1000)
+        } : {})
       };
       const patched = await supabaseFetch(config, `${table}?id=eq.${encodeURIComponent(existing.id)}`, {
         method: 'PATCH',
@@ -3431,18 +3428,13 @@ function addConfiguredSlackMentions(message = {}, config = {}) {
   };
 }
 
-export function isUrgentEquipmentIncidentFollowUp(row = {}) {
-  if (text(row.priority).trim() !== 'urgent') return false;
+export function isP0FollowUp(row = {}) {
   const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
-  const businessTags = Array.isArray(payload.business_tags) ? payload.business_tags.map((value) => text(value).trim()) : [];
-  const steps = Array.isArray(payload.steps) ? payload.steps : [];
-  return payload.incident_safety_alert === true
-    || text(row.type).trim() === 'damage_repair'
-    || businessTags.includes('damage_repair')
-    || steps.some((step) => (
-      text(step?.type).trim() === 'damage_repair'
-      || step?.payload?.incident_safety_alert === true
-    ));
+  return text(payload.alert_level || payload.alertLevel).trim() === 'p0';
+}
+
+export function isUrgentEquipmentIncidentFollowUp(row = {}) {
+  return isP0FollowUp(row);
 }
 
 function addUrgentIncidentChannelMention(message = {}, row = {}) {
@@ -3453,7 +3445,7 @@ function addUrgentIncidentChannelMention(message = {}, row = {}) {
   const insertAt = blocks[0]?.type === 'header' ? 1 : 0;
   blocks.splice(insertAt, 0, {
     type: 'section',
-    text: { type: 'mrkdwn', text: `${mentionText} *긴급 장비 사고 확인 필요*` }
+    text: { type: 'mrkdwn', text: `${mentionText} *P0 즉시 확인 필요*` }
   });
   return {
     ...message,
@@ -4496,6 +4488,8 @@ Return a complete decision object, not a patch. Print FINAL_JSON and exactly one
     "recommended_action": string,
     "suggested_reply_draft": string,
     "evidence": [string],
+    "alertLevel": "p0" | "none",
+    "alertReason": string,
     "blocking_reason": string | null,
     "due_hint": "now" | "today" | "tomorrow" | "this_week" | null
   }],

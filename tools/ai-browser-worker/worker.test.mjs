@@ -86,6 +86,7 @@ import {
   preflightTwoChannelSlackRouting,
   enrichFollowUpRowWithOperationalCalculations,
   buildSlackFollowUpMessage,
+  isP0FollowUp,
   buildSlackFollowUpCaseMessage,
   buildSlackManualTaskMessage,
   buildSlackInquiryMessage,
@@ -5052,7 +5053,8 @@ test('urgent equipment incidents are posted at channel level instead of being bu
     summary: '2470 렌즈에 기스가 보인다고 고객이 알림',
     recommended_action: '즉시 대화와 장비 상태를 확인하세요.',
     payload: {
-      incident_safety_alert: true,
+      alert_level: 'p0',
+      alert_reason: '대여 중 장비 상태에 즉시 사람 판단 필요',
       follow_up_route: 'inventory',
       requires_human_action: true,
       action_family: 'inventory_check'
@@ -5995,7 +5997,9 @@ function equipmentIncidentDecision(overrides = {}) {
       customer_name: '백남준',
       summary: '고객이 현재 장비를 그대로 사용',
       recommended_action: '',
-      evidence: ['고객이 렌즈 기스 사진을 보냄']
+      evidence: ['고객이 렌즈 기스 사진을 보냄'],
+      alertLevel: 'p0',
+      alertReason: '대여 중 장비 이상은 즉시 사람 판단이 필요함'
     }],
     reply_decision: {
       replyMode: 'auto_send',
@@ -6028,7 +6032,9 @@ test('equipment incident context cannot be auto-sent as a payment acknowledgemen
       status: 'open',
       title: '백남준 2470 렌즈 기스 확인',
       summary: '고객이 렌즈 기스 사진을 보냄',
-      recommended_action: '즉시 상태 확인'
+      recommended_action: '즉시 상태 확인',
+      alertLevel: 'p0',
+      alertReason: '대여 중 장비 상태에 즉시 사람 판단 필요'
     }],
     reply_decision: {
       replyMode: 'auto_send',
@@ -6053,16 +6059,16 @@ test('equipment incident context cannot be auto-sent as a simple acknowledgement
   });
 });
 
-test('equipment incident decisions always produce an urgent human alert even when Hermes marks the work done', () => {
+test('an explicit AI p0 decision reopens its own follow-up for urgent human review', () => {
   const rows = buildFollowUpRows(equipmentIncidentDecision(), {
     id: 'dom-baek-incident',
     room_key: 'kakao:baek',
     customer_name: '백남준'
   });
-  const alert = rows.find((row) => row.payload?.incident_safety_alert === true);
+  const alert = rows.find((row) => row.payload?.alert_level === 'p0');
 
   assert.ok(alert);
-  assert.equal(alert.type, 'damage_repair');
+  assert.equal(alert.type, 'completed_log');
   assert.equal(alert.priority, 'urgent');
   assert.equal(alert.status, 'open');
   assert.equal(alert.payload.requires_human_action, true);
@@ -6079,7 +6085,8 @@ test('urgent equipment incident Slack cards notify the whole channel and configu
     summary: '2470 렌즈 기스 사진 접수',
     recommended_action: '즉시 대화와 장비 상태를 확인하세요.',
     payload: {
-      incident_safety_alert: true,
+      alert_level: 'p0',
+      alert_reason: '대여 중 장비 이상',
       follow_up_route: 'inventory',
       requires_human_action: true,
       action_family: 'inventory_check'
@@ -6093,6 +6100,64 @@ test('urgent equipment incident Slack cards notify the whole channel and configu
 
   assert.match(message.text, /<!channel>/);
   assert.match(message.text, /<@UOWNER>/);
+});
+
+test('only the AI explicit p0 field triggers escalation; urgent words and damage type do not', () => {
+  const ordinary = {
+    type: 'damage_repair',
+    priority: 'urgent',
+    title: '파손 긴급 확인',
+    payload: { alert_level: 'none', incident_safety_alert: true }
+  };
+  assert.equal(isP0FollowUp(ordinary), false);
+  assert.doesNotMatch(buildSlackFollowUpMessage(ordinary, { config: {} }).text, /<!channel>/);
+
+  const explicit = {
+    ...ordinary,
+    payload: { alert_level: 'p0', alert_reason: 'AI가 즉시 기상 알림이 필요하다고 판단' }
+  };
+  assert.equal(isP0FollowUp(explicit), true);
+  assert.match(buildSlackFollowUpMessage(explicit, { config: {} }).text, /<!channel>/);
+});
+
+test('follow-up topic merging cannot erase an AI explicit p0 alert', () => {
+  const base = {
+    customer_name: '백남준',
+    room_key: 'kakao:baek',
+    type: 'damage_repair',
+    priority: 'urgent',
+    status: 'open',
+    title: '장비 상태 확인',
+    summary: '같은 장비 상태 건',
+    recommended_action: '확인',
+    evidence: [],
+    payload: { follow_up_route: 'inventory', follow_up_task_key: 'lens-2470', alert_level: 'none' }
+  };
+  const merged = mergeFollowUpRowsByTopic([
+    base,
+    {
+      ...base,
+      payload: {
+        ...base.payload,
+        alert_level: 'p0',
+        alert_reason: '대여 중 장비 상태에 즉시 사람 판단 필요'
+      }
+    }
+  ]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].payload.alert_level, 'p0');
+  assert.equal(merged[0].payload.alert_reason, '대여 중 장비 상태에 즉시 사람 판단 필요');
+});
+
+test('AI decision validation rejects an invalid p0 level and requires a p0 reason', () => {
+  const base = equipmentIncidentDecision();
+  const invalidLevel = structuredClone(base);
+  invalidLevel.follow_up_items[0].alertLevel = 'urgent';
+  assert.ok(validateAiDecisionContract(invalidLevel).errors.some((error) => error.includes('alertLevel')));
+
+  const missingReason = structuredClone(base);
+  missingReason.follow_up_items[0].alertReason = '';
+  assert.ok(validateAiDecisionContract(missingReason).errors.some((error) => error.includes('alertReason')));
 });
 
 test('canAutoSendCustomerAnswer gates by grounding instead of topic category', () => {

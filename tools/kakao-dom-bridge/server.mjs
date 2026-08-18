@@ -75,6 +75,11 @@ const CONFIG = {
   supabaseRecoveryMaxAttempts: Number(process.env.SUPABASE_RECOVERY_MAX_ATTEMPTS || 2),
   slackActionPollEnabled: readBooleanEnvironment(process.env.SLACK_ACTION_POLL_ENABLED, true),
   slackActionPollIntervalMs: Number(process.env.SLACK_ACTION_POLL_INTERVAL_MS || 10_000),
+  p0SlackEscalationEnabled: readBooleanEnvironment(process.env.P0_SLACK_ESCALATION_ENABLED, true),
+  p0SlackEscalationIntervalMs: Math.max(15_000, Number(process.env.P0_SLACK_ESCALATION_INTERVAL_MS || 60_000)),
+  p0SlackEscalationRepeatMs: Math.max(60_000, Number(process.env.P0_SLACK_ESCALATION_REPEAT_MS || 180_000)),
+  p0SlackEscalationClaimTtlMs: Math.max(30_000, Number(process.env.P0_SLACK_ESCALATION_CLAIM_TTL_MS || 120_000)),
+  p0SlackEscalationMaxAttempts: Math.max(1, Number(process.env.P0_SLACK_ESCALATION_MAX_ATTEMPTS || 160)),
   slackBotToken: process.env.SLACK_BOT_TOKEN || '',
   followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
   slackCardDeliveryEnabled: process.env.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1',
@@ -185,6 +190,8 @@ const state = {
   slackActionsHandled: 0,
   slackActionPollRunning: false,
   lastSlackActionPoll: null,
+  p0SlackEscalationRunning: false,
+  lastP0SlackEscalation: null,
   recoverySweepRunning: false,
   lastRecoverySweep: null,
   closedKakaoTabs: 0,
@@ -207,6 +214,84 @@ function sha256(value) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function timestampMs(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function deterministicP0SlackMessageId(rowId, attempt) {
+  const chars = sha256(`village-p0-slack:${String(rowId || '')}:${Number(attempt || 0)}`).slice(0, 32).split('');
+  chars[12] = '5';
+  chars[16] = ['8', '9', 'a', 'b'][Number.parseInt(chars[16], 16) % 4];
+  const hex = chars.join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function p0SlackEscalationDue(row = {}, {
+  nowMs = Date.now(),
+  repeatMs = 180_000,
+  maxAttempts = 160
+} = {}) {
+  const payload = objectPayload(row.payload);
+  if (String(payload.alert_level || payload.alertLevel || '').trim() !== 'p0') {
+    return { due: false, reason: 'not_p0' };
+  }
+  if (['done', 'dismissed'].includes(String(row.status || '').trim())) {
+    return { due: false, reason: 'closed' };
+  }
+  const slackDelivery = objectPayload(payload.slack_delivery);
+  if (slackDelivery.status !== 'delivered' || !(slackDelivery.channel_id && (slackDelivery.thread_ts || slackDelivery.message_ts))) {
+    return { due: false, reason: 'initial_slack_delivery_missing' };
+  }
+  const critical = objectPayload(payload.critical_delivery);
+  const deliveredAttempts = Math.max(0, Number(critical.attempt || 0));
+  if (deliveredAttempts >= maxAttempts) return { due: false, reason: 'max_attempts' };
+  if (critical.status === 'claimed' && timestampMs(critical.claim_expires_at) > nowMs) {
+    return { due: false, reason: 'claimed' };
+  }
+  const explicitNextMs = timestampMs(critical.next_at);
+  const referenceMs = timestampMs(critical.last_sent_at || critical.last_attempt_at || slackDelivery.delivered_at || row.updated_at || row.created_at);
+  const dueAtMs = explicitNextMs || (referenceMs ? referenceMs + repeatMs : nowMs);
+  if (nowMs < dueAtMs) return { due: false, reason: 'interval', dueAtMs };
+  return { due: true, reason: 'due', attempt: deliveredAttempts + 1, dueAtMs };
+}
+
+export function buildP0SlackEscalationClaim(row = {}, options = {}) {
+  const nowMs = Number(options.nowMs ?? Date.now());
+  const due = p0SlackEscalationDue(row, options);
+  if (!due.due) throw new Error(`P0 Slack escalation is not due: ${due.reason}`);
+  const attempt = due.attempt;
+  return {
+    attempt,
+    claimId: `p0:${String(row.id || 'unknown')}:${attempt}`,
+    claimedAt: new Date(nowMs).toISOString(),
+    claimExpiresAt: new Date(nowMs + Number(options.claimTtlMs || 120_000)).toISOString(),
+    clientMessageId: deterministicP0SlackMessageId(row.id, attempt)
+  };
+}
+
+export function buildP0SlackEscalationMessage(row = {}, claim = {}, { mentionUserIds = [] } = {}) {
+  const payload = objectPayload(row.payload);
+  const delivery = objectPayload(payload.slack_delivery);
+  const mentions = Array.from(new Set((Array.isArray(mentionUserIds) ? mentionUserIds : [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)))
+    .map((userId) => `<@${userId}>`);
+  const attention = ['<!channel>', ...mentions].join(' ');
+  const customer = String(row.customer_name || '고객').slice(0, 120);
+  const title = String(row.title || '즉시 확인이 필요한 사건').slice(0, 240);
+  const reason = String(payload.alert_reason || payload.alertReason || 'AI가 P0 즉시 확인으로 판단').slice(0, 1000);
+  return {
+    channel: delivery.channel_id,
+    thread_ts: delivery.thread_ts || delivery.message_ts,
+    reply_broadcast: true,
+    client_msg_id: claim.clientMessageId,
+    text: `${attention} 🚨 P0 미확인 알림 ${claim.attempt}회 · ${customer} · ${title} · ${reason}`,
+    unfurl_links: false,
+    unfurl_media: false
+  };
 }
 
 export function buildCorsHeaders() {
@@ -1625,6 +1710,143 @@ async function mergeFollowUpPayloadById(row, payloadPatch = {}, extraPatch = {})
   });
 }
 
+async function fetchOpenP0FollowUpRows(limit = 50) {
+  if (!supabaseConfigured()) return [];
+  const url = new URL(supabaseFollowUpEndpoint());
+  url.searchParams.set('select', 'id,customer_name,room_key,title,status,payload,created_at,updated_at');
+  url.searchParams.set('status', 'not.in.(done,dismissed)');
+  url.searchParams.set('payload->>alert_level', 'eq.p0');
+  url.searchParams.set('order', 'updated_at.asc');
+  url.searchParams.set('limit', String(Math.max(1, limit)));
+  const { response, text, data } = await supabaseFetchWithTimeout(url.toString(), {
+    method: 'GET',
+    headers: supabaseHeaders()
+  });
+  if (!response.ok) throw new Error(`Supabase P0 follow-up lookup failed: ${response.status} ${text}`);
+  return (Array.isArray(data) ? data : []).filter((row) => (
+    String(row?.payload?.alert_level || row?.payload?.alertLevel || '').trim() === 'p0'
+  ));
+}
+
+async function compareAndSwapP0Delivery(row, criticalDelivery) {
+  if (!supabaseConfigured() || !row?.id || !row?.updated_at) return [];
+  const currentPayload = objectPayload(row.payload);
+  const url = new URL(supabaseFollowUpEndpoint());
+  url.searchParams.set('id', `eq.${row.id}`);
+  url.searchParams.set('updated_at', `eq.${row.updated_at}`);
+  url.searchParams.set('status', 'not.in.(done,dismissed)');
+  const { response, text, data } = await supabaseFetchWithTimeout(url.toString(), {
+    method: 'PATCH',
+    headers: supabaseHeaders('return=representation'),
+    body: JSON.stringify({
+      payload: {
+        ...currentPayload,
+        critical_delivery: criticalDelivery
+      }
+    })
+  });
+  if (!response.ok) throw new Error(`Supabase P0 delivery compare-and-swap failed: ${response.status} ${text}`);
+  return Array.isArray(data) ? data : [];
+}
+
+async function deliverDueP0SlackEscalation(row, nowMs = Date.now()) {
+  const options = {
+    nowMs,
+    repeatMs: CONFIG.p0SlackEscalationRepeatMs,
+    maxAttempts: CONFIG.p0SlackEscalationMaxAttempts,
+    claimTtlMs: CONFIG.p0SlackEscalationClaimTtlMs
+  };
+  const due = p0SlackEscalationDue(row, options);
+  if (!due.due) return { ok: false, skipped: true, reason: due.reason, id: row.id };
+  const claim = buildP0SlackEscalationClaim(row, options);
+  const priorCritical = objectPayload(row?.payload?.critical_delivery);
+  const claimedRows = await compareAndSwapP0Delivery(row, {
+    ...priorCritical,
+    status: 'claimed',
+    claim_attempt: claim.attempt,
+    claim_id: claim.claimId,
+    claimed_at: claim.claimedAt,
+    claim_expires_at: claim.claimExpiresAt,
+    client_message_id: claim.clientMessageId,
+    error: null
+  });
+  if (claimedRows.length !== 1) return { ok: false, skipped: true, reason: 'claim_conflict', id: row.id };
+  const claimedRow = claimedRows[0];
+  const latest = await fetchFollowUpRowById(row.id);
+  if (!latest || ['done', 'dismissed'].includes(String(latest.status || '').trim())) {
+    return { ok: false, skipped: true, reason: 'closed_after_claim', id: row.id };
+  }
+  const activeRow = latest;
+  const message = buildP0SlackEscalationMessage(activeRow, claim, {
+    mentionUserIds: followUpConfig().slackMentionUserIds
+  });
+  try {
+    const posted = await slackApi('chat.postMessage', message);
+    const deliveredAt = nowIso();
+    const finalRows = await compareAndSwapP0Delivery(activeRow, {
+      ...objectPayload(activeRow?.payload?.critical_delivery),
+      status: 'delivered',
+      attempt: claim.attempt,
+      claim_attempt: null,
+      claim_expires_at: null,
+      last_sent_at: deliveredAt,
+      next_at: new Date(Date.parse(deliveredAt) + CONFIG.p0SlackEscalationRepeatMs).toISOString(),
+      client_message_id: claim.clientMessageId,
+      message_ts: posted.ts || null,
+      error: null
+    });
+    return {
+      ok: true,
+      id: row.id,
+      attempt: claim.attempt,
+      messageTs: posted.ts || null,
+      reconciliationRequired: finalRows.length !== 1
+    };
+  } catch (error) {
+    const attemptedAt = nowIso();
+    await compareAndSwapP0Delivery(activeRow, {
+      ...priorCritical,
+      status: 'retry_pending',
+      claim_attempt: claim.attempt,
+      last_attempt_at: attemptedAt,
+      next_at: new Date(Date.parse(attemptedAt) + CONFIG.p0SlackEscalationRepeatMs).toISOString(),
+      client_message_id: claim.clientMessageId,
+      error: String(error.message || error).slice(0, 1000)
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+async function runP0SlackEscalationSweep(reason = 'interval') {
+  if (!CONFIG.p0SlackEscalationEnabled || !supabaseConfigured() || !CONFIG.slackBotToken) {
+    return { skipped: true, reason: 'disabled_or_unconfigured' };
+  }
+  if (state.p0SlackEscalationRunning) return { skipped: true, reason: 'already_running' };
+  state.p0SlackEscalationRunning = true;
+  const result = { startedAt: nowIso(), reason, scanned: 0, delivered: 0, skipped: 0, errors: [] };
+  try {
+    const rows = await fetchOpenP0FollowUpRows(50);
+    result.scanned = rows.length;
+    for (const row of rows) {
+      try {
+        const delivery = await deliverDueP0SlackEscalation(row);
+        if (delivery.ok) result.delivered += 1;
+        else result.skipped += 1;
+      } catch (error) {
+        result.errors.push({ id: row.id, error: String(error.message || error).slice(0, 1000) });
+      }
+    }
+  } catch (error) {
+    result.errors.push({ error: String(error.message || error).slice(0, 1000) });
+    appendNdjson('errors.ndjson', { at: nowIso(), type: 'p0_slack_escalation_sweep', message: error.message });
+  } finally {
+    result.finishedAt = nowIso();
+    state.lastP0SlackEscalation = result;
+    state.p0SlackEscalationRunning = false;
+  }
+  return result;
+}
+
 async function patchFollowUpCaseRowByStateVersion(row, expectedStateVersion, payloadPatch = {}, extraPatch = {}) {
   if (!supabaseConfigured() || !row?.id || !Number.isInteger(expectedStateVersion)) return [];
   const currentPayload = row.payload && typeof row.payload === 'object' ? row.payload : {};
@@ -2768,6 +2990,10 @@ const server = http.createServer(async (req, res) => {
           followUpRowsEnabled: CONFIG.followUpRowsEnabled,
           slackCardDeliveryEnabled: CONFIG.slackCardDeliveryEnabled,
           slackBotTokenPresent: Boolean(CONFIG.slackBotToken),
+          p0SlackEscalationEnabled: CONFIG.p0SlackEscalationEnabled,
+          p0SlackEscalationIntervalMs: CONFIG.p0SlackEscalationIntervalMs,
+          p0SlackEscalationRepeatMs: CONFIG.p0SlackEscalationRepeatMs,
+          p0SlackEscalationMaxAttempts: CONFIG.p0SlackEscalationMaxAttempts,
           slackChannels: CONFIG.slackChannels,
           kakaoTabCleanupEnabled: CONFIG.kakaoTabCleanupEnabled,
           kakaoTabCleanupIntervalMs: CONFIG.kakaoTabCleanupIntervalMs,
@@ -2794,6 +3020,8 @@ const server = http.createServer(async (req, res) => {
           slackActionsHandled: state.slackActionsHandled,
           slackActionPollRunning: state.slackActionPollRunning,
           lastSlackActionPoll: state.lastSlackActionPoll,
+          p0SlackEscalationRunning: state.p0SlackEscalationRunning,
+          lastP0SlackEscalation: state.lastP0SlackEscalation,
           recoverySweepRunning: state.recoverySweepRunning,
           lastRecoverySweep: state.lastRecoverySweep,
           closedKakaoTabs: state.closedKakaoTabs,
@@ -2864,6 +3092,11 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: !result.errors?.length, result });
     }
 
+    if (req.method === 'POST' && url.pathname === '/maintenance/p0-slack-escalation') {
+      const result = await runP0SlackEscalationSweep('manual');
+      return json(res, 200, { ok: !result.errors?.length, result });
+    }
+
     if (req.method === 'POST' && url.pathname === '/maintenance/slack-case-update') {
       const body = await readJsonBody(req);
       const id = String(body.id || body.followUpId || body.follow_up_id || '').trim();
@@ -2898,6 +3131,10 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     if (CONFIG.slackActionPollEnabled) {
       setTimeout(() => runSlackActionPoll('startup'), 7000).unref?.();
       setInterval(() => runSlackActionPoll('interval'), CONFIG.slackActionPollIntervalMs).unref?.();
+    }
+    if (CONFIG.p0SlackEscalationEnabled) {
+      setTimeout(() => runP0SlackEscalationSweep('startup'), 9000).unref?.();
+      setInterval(() => runP0SlackEscalationSweep('interval'), CONFIG.p0SlackEscalationIntervalMs).unref?.();
     }
     if (CONFIG.kakaoTabCleanupEnabled) {
       setTimeout(() => cleanupIdleKakaoConversationTabs('startup'), 10_000).unref?.();

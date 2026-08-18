@@ -114,6 +114,7 @@ test('merge keeps incoming decision content while preserving only case identity 
     requires_reply: false,
     steps: [{ step_key: 'invoice', action: 'old action', status: 'done' }],
     slack_delivery: { status: 'delivered', channel_id: 'C1', message_ts: '10.1' },
+    critical_delivery: { status: 'delivered', attempt: 2, last_sent_at: '2026-08-18T00:00:00.000Z' },
     stale_internal_note: 'must not survive'
   };
   const incoming = {
@@ -137,6 +138,7 @@ test('merge keeps incoming decision content while preserving only case identity 
   assert.equal(merged.case_key, 'case:established');
   assert.equal(merged.owner_channel, 'inquiry');
   assert.deepEqual(merged.slack_delivery, existing.slack_delivery);
+  assert.deepEqual(merged.critical_delivery, existing.critical_delivery);
   assert.equal(merged.latest_customer_message_cluster, 'new customer request');
   assert.equal(merged.ai_judgment, 'new judgment');
   assert.deepEqual(merged.core_facts, ['new fact']);
@@ -144,6 +146,27 @@ test('merge keeps incoming decision content while preserving only case identity 
   assert.deepEqual(merged.steps, [{ step_key: 'invoice', action: 'new action', status: 'done' }]);
   assert.equal(merged.stale_internal_note, undefined);
   assert.equal(merged.state_version, 6);
+});
+
+test('an unacknowledged p0 alert stays active until the case is closed', () => {
+  const existing = {
+    case_key: 'case:p0',
+    state_version: 1,
+    owner_channel: 'follow_up',
+    phase: 'internal_action',
+    requires_reply: false,
+    steps: [{ step_key: 'inspect', action: 'inspect', status: 'pending' }],
+    alert_level: 'p0',
+    alert_reason: '즉시 확인 필요'
+  };
+  const incoming = {
+    ...existing,
+    alert_level: 'none',
+    alert_reason: ''
+  };
+  const merged = mergeFollowUpCaseLifecycle(existing, incoming);
+  assert.equal(merged.alert_level, 'p0');
+  assert.equal(merged.alert_reason, '즉시 확인 필요');
 });
 
 test('canonical send and status actions require the expected phase and version', () => {

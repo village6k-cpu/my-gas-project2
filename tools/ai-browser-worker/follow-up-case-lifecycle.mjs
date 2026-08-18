@@ -73,11 +73,16 @@ export function mergeFollowUpCaseLifecycle(existing = {}, incoming = {}, {
     ...(existing.case_id ? { case_id: existing.case_id } : {}),
     ...(existing.case_key ? { case_key: existing.case_key } : {}),
     ...(existing.slack_delivery ? { slack_delivery: existing.slack_delivery } : {}),
+    ...(existing.critical_delivery ? { critical_delivery: existing.critical_delivery } : {}),
     owner_channel: ownerChannel,
     requires_reply: requiresReply,
     phase,
     steps: mergedSteps
   };
+  if (clean(existing.alert_level) === 'p0') {
+    merged.alert_level = 'p0';
+    merged.alert_reason = clean(existing.alert_reason) || clean(incoming.alert_reason);
+  }
   const before = JSON.stringify(decisionContentSnapshot(existing, existingContent));
   const after = JSON.stringify(decisionContentSnapshot(merged, incomingContent));
   merged.state_version = Number(existing.state_version || 1) + (before === after ? 0 : 1);
