@@ -42,13 +42,17 @@ assert.doesNotMatch(failureMarker, /getRange\([^\n]+,\s*14\)/,
 
 const fetchCalls = [];
 const properties = new Map([
-  ['TRADE_ID_RESERVATION_KEY', 'reservation-secret-0123456789abcdef'],
+  ['POPBILL_SECRET_KEY', 'popbill-secret-for-test'],
   ['VILLAGE_OPS_API_URL', 'https://script.google.com/macros/s/example/exec']
 ]);
 const context = vm.createContext({
   JSON,
   String,
   Error,
+  Utilities: {
+    computeHmacSha256Signature: () => [1, 2, 3],
+    base64EncodeWebSafe: () => 'reservation-secret-0123456789abcdef'
+  },
   PropertiesService: {
     getScriptProperties: () => ({ getProperty: (key) => properties.get(key) || null })
   },
@@ -78,7 +82,7 @@ assert.equal(posted.action, 'reserveTradeId');
 assert.equal(posted.operationId, 'confirm-register:RQ-260818-001');
 assert.equal(posted.key, 'reservation-secret-0123456789abcdef');
 
-properties.set('TRADE_ID_RESERVATION_KEY', '');
+properties.set('POPBILL_SECRET_KEY', '');
 assert.throws(
   () => context.reserveExternalTradeId_({
     reqID: 'RQ-260818-002', customerName: '테스트고객', phone: '010-1234-5678', startDate: '2026-08-20'

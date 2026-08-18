@@ -7963,17 +7963,11 @@ function getVillageOpsApiKey_(props) {
 }
 
 function getTradeIdReservationApiKey_(props) {
-  var key = String(props.getProperty("TRADE_ID_RESERVATION_KEY") || "").trim();
-  if (key.length < 32) throw new Error("거래ID 전용 인증키 미설정");
-  return key;
-}
-
-/** clasp run 전용 설정. sheetAPI run 허용목록에는 노출하지 않는다. */
-function ownerSetTradeIdReservationKey(key) {
-  var normalized = String(key || "").trim();
-  if (!/^[A-Za-z0-9_-]{32,160}$/.test(normalized)) throw new Error("거래ID 전용 인증키 형식 오류");
-  PropertiesService.getScriptProperties().setProperty("TRADE_ID_RESERVATION_KEY", normalized);
-  return { configured: true };
+  var secret = String(props.getProperty("POPBILL_SECRET_KEY") || "").trim();
+  if (secret.length < 16) throw new Error("거래ID 전용 인증키 미설정");
+  return Utilities.base64EncodeWebSafe(
+    Utilities.computeHmacSha256Signature("village-trade-id-reservation-v1", secret)
+  ).replace(/=+$/g, "");
 }
 
 /** 외부 거래원장 자체의 ScriptLock 안에서 신규 거래ID와 기준 행을 먼저 선점한다. */
