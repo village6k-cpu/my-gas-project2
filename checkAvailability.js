@@ -11614,6 +11614,38 @@ function _confirmRequestAddDays_(dateText, days) {
     .toISOString().slice(0, 10);
 }
 
+/**
+ * 당일 확인요청 번호를 영구 예약한다.
+ * 시트 행은 autoClearRequests로 지워지므로 현재 행의 최대값만 보면 이미 사용한
+ * RQ 번호가 재발급된다. Script Properties의 날짜별 상한과 현재 시트 상한 중 큰
+ * 값을 기준으로 다음 번호를 저장한 뒤 반환한다. 호출부의 UserLock 안에서만 쓴다.
+ */
+function _reserveNextConfirmRequestId_(sheet, dateStr) {
+  var dayKey = String(dateStr || "").trim();
+  if (!/^\d{6}$/.test(dayKey)) throw new Error("확인요청 ID 날짜 형식 오류");
+
+  var prefix = "RQ-" + dayKey;
+  var propertyKey = "CONFIRM_REQUEST_SEQUENCE_V1_" + dayKey;
+  var properties = PropertiesService.getScriptProperties();
+  var storedMax = parseInt(properties.getProperty(propertyKey), 10);
+  if (!Number.isFinite(storedMax) || storedMax < 0) storedMax = 0;
+
+  var sheetMax = 0;
+  var idScanLastRow = sheet.getLastRow();
+  if (idScanLastRow >= 2) {
+    sheet.getRange(2, 1, idScanLastRow - 1, 1).getValues().flat().forEach(function(id) {
+      var match = String(id || "").trim().match(/^RQ-(\d{6})-(\d+)$/);
+      if (!match || match[1] !== dayKey) return;
+      var number = parseInt(match[2], 10);
+      if (Number.isFinite(number) && number > sheetMax) sheetMax = number;
+    });
+  }
+
+  var next = Math.max(storedMax, sheetMax) + 1;
+  properties.setProperty(propertyKey, String(next));
+  return prefix + "-" + String(next).padStart(3, "0");
+}
+
 function _confirmRequestTimeParts_(value) {
   var match = String(value || "").trim().match(/^(\d{1,2}):(\d{2})$/);
   if (!match) return null;
@@ -11779,21 +11811,11 @@ function _insertAndCheckRequest(req) {
     }
   }
 
-  // 요청ID는 stale 삭제 전에 스캔해서 번호를 재사용하지 않는다.
+  // 요청ID는 stale/등록완료 행이 삭제된 뒤에도 Script Properties의 날짜별 상한을
+  // 유지하여 이미 사용한 번호를 다시 발급하지 않는다.
   const now = new Date();
   const dateStr = Utilities.formatDate(now, "Asia/Seoul", "yyMMdd");
-  const prefix = "RQ-" + dateStr;
-  var idScanLastRow = sheet.getLastRow();
-  let maxNum = 0;
-  if (idScanLastRow >= 2) {
-    sheet.getRange(2, 1, idScanLastRow - 1, 1).getValues().flat().forEach(function(id) {
-      if (id && id.toString().startsWith(prefix)) {
-        var num = parseInt(id.toString().split("-")[2]);
-        if (num > maxNum) maxNum = num;
-      }
-    });
-  }
-  var reqID = prefix + "-" + String(maxNum + 1).padStart(3, "0");
+  var reqID = _reserveNextConfirmRequestId_(sheet, dateStr);
 
   var replacedGroups = _findReplaceableConfirmRequestGroups_(sheet, reqForDedupe, requestedEquipItems);
   var replacedReqIDs = replacedGroups.map(function(group) { return group.reqID; });

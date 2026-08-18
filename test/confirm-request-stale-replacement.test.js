@@ -176,6 +176,10 @@ assert.strictEqual(
   'same name with explicitly different phone should not block 동명이인'
 );
 
-assert.match(source, /요청ID는 stale 삭제 전에 스캔해서 번호를 재사용하지 않는다/, 'stale replacement must preserve sequential RQ IDs before deletion');
+assert.match(
+  source,
+  /요청ID는 stale\/등록완료 행이 삭제된 뒤에도 Script Properties의 날짜별 상한을[\s\S]*이미 사용한 번호를 다시 발급하지 않는다/,
+  'stale replacement and automatic cleanup must never allow a previously issued RQ ID to be reused'
+);
 
 console.log('confirm request stale replacement behavior checks passed');
