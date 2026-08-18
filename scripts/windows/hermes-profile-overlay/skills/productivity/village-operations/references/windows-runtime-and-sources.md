@@ -4,7 +4,8 @@ Use this reference only when an operation needs an exact Windows path or command
 
 ## Runtime roots
 
-- Active Kakao/Windows source: `C:/Village/my-gas-project2-worktrees/ax2-hermes-final`
+- Active Kakao/Windows source: `C:/Village/runtimes/my-gas-project2-production`
+- Development source: `C:/Village/my-gas-project2` on clean `main`
 - Village Brain vault: `C:/Village/VILLAGE_Brain`
 - Compiled Brain context: `C:/Village/VILLAGE_Brain/Ops/brain-context-latest.md`
 - Brain compiler and business jobs: `C:/Village/village-ai`
@@ -17,9 +18,11 @@ Gary Tan GBrain is an independent, lightweight MCP memory service. It never
 imports, copies, or replaces Village Brain; Village Brain remains the governed
 business-history vault and is consulted only through its own explicit boundary.
 
-The active runtime source can differ from `C:/Village/my-gas-project2`. Confirm
-the scheduled-task action and process command line before diagnosing or changing
-the worker. Never overwrite one dirty worktree with another.
+The production runtime is a clean, reviewed worktree promoted from `main`.
+Confirm its HEAD, the scheduled-task action, and the process command line before
+diagnosing or changing the worker. Historical or dirty worktrees are evidence
+and rollback inputs only; never execute normal operations from them or overwrite
+one worktree with another.
 
 ## Shell boundary
 

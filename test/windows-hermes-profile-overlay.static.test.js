@@ -213,13 +213,38 @@ test('offline routing configuration applies the current model contract', { skip:
   assert.match(source, /remove_managed_prompt/);
   assert.doesNotMatch(source, /desired_bindings/);
   assert.doesNotMatch(source, /desired_channel_prompt/);
-  assert.match(source, /C:\\Village\\my-gas-project2-worktrees\\ax2-hermes-final/);
+  assert.match(source, /C:\\Village\\runtimes\\my-gas-project2-production/);
   assert.match(source, /terminal/);
   assert.match(source, /cwd/);
   assert.match(source, /atomic/i);
   assert.match(source, /backup/i);
   assert.match(source, /--check/);
   assert.doesNotMatch(source, /SLACK_(?:BOT|APP)_TOKEN|SUPABASE_SERVICE_ROLE_KEY/);
+});
+
+test('active Windows contracts never route execution through the dirty AX2 worktree', () => {
+  const activeContracts = [
+    routingConfigScriptPath,
+    path.join(adapterRoot, 'rpa-automation-operations.md'),
+    path.join(brainSkillRoot, 'references', 'windows-runtime-and-sources.md'),
+    path.join(operationsSkillRoot, 'references', 'windows-runtime-and-sources.md'),
+    path.join(operationsSkillRoot, 'references', 'manual-kakao-single-quote-preview.md'),
+    confirmRequestSkillPath
+  ];
+
+  for (const contractPath of activeContracts) {
+    const source = fs.readFileSync(contractPath, 'utf8');
+    assert.doesNotMatch(
+      source,
+      /my-gas-project2-worktrees[\\/]ax2-hermes-final/i,
+      `${path.relative(root, contractPath)} must not route live work through the dirty AX2 tree`
+    );
+    assert.match(
+      source,
+      /C:[\\/]Village[\\/]runtimes[\\/]my-gas-project2-production/i,
+      `${path.relative(root, contractPath)} must use the clean production runtime`
+    );
+  }
 });
 
 test('Windows support references match the Git Bash and native executable boundary', () => {

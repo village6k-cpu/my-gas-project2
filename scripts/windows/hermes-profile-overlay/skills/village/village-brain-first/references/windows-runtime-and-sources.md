@@ -3,7 +3,8 @@
 - Vault: `C:/Village/VILLAGE_Brain`
 - Compiled context: `C:/Village/VILLAGE_Brain/Ops/brain-context-latest.md`
 - Brain compiler: `C:/Village/village-ai`
-- Active operational source: `C:/Village/my-gas-project2-worktrees/ax2-hermes-final`
+- Active operational source: `C:/Village/runtimes/my-gas-project2-production`
+- Development source: `C:/Village/my-gas-project2` on clean `main`
 - Mac mirror: `C:/Village/MacMiniMirror/restored` (historical evidence only)
 
 Hermes terminal uses Git Bash. Use `/c/Village/...` only with POSIX path

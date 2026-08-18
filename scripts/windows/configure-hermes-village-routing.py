@@ -16,7 +16,7 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 
 ROUTER_SKILL = "village-runtime-router"
-RUNTIME_CWD = r"C:\Village\my-gas-project2-worktrees\ax2-hermes-final"
+RUNTIME_CWD = r"C:\Village\runtimes\my-gas-project2-production"
 ROUTING_PROMPT_START = "[VILLAGE_WINDOWS_RUNTIME_ROUTER_V1]"
 ROUTING_PROMPT_END = "[/VILLAGE_WINDOWS_RUNTIME_ROUTER_V1]"
 

@@ -11,7 +11,7 @@ Use when the user provides a Kakao/customer screenshot with a manual rental list
    - requested add-ons from the user's instruction
 2. Match final item names against `세트마스터` column A and use column G prices. Use broad searches only to resolve aliases, then settle on exact `세트마스터` spellings.
    - Start with **one raw catalog read for the whole quote**:
-     `node.exe "C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-live-query.js" catalog --sheet "세트마스터"`
+     `node.exe "C:/Village/runtimes/my-gas-project2-production/scripts/windows/village-live-query.js" catalog --sheet "세트마스터"`
    - Give the returned live rows to the model and let the AI choose the exact names and column-G prices. The runner transports source data only; it must not decide aliases or equipment matches.
    - Do not use `village-confirm-request.js resolve` for manual quote pricing: it searches the `목록` sheet for confirmation-request entry, not the priced `세트마스터`. Do not issue one GAS `action=search` request per alias or retry alias lists serially.
    - Only when a requested line is absent from `세트마스터`, run the same `catalog` command once for `장비마스터` as supporting evidence. Do not query `확인요청`, `계약마스터`, trade candidates, or customer history for a standalone manual preview unless the screenshot/thread actually indicates a pending/registered trade or an approved send needs contact resolution.

@@ -3,7 +3,7 @@
 
 This canonical RPA skill remains scoped to the `kakaoworker` profile. It diagnoses and recovers the dedicated Kakao Chrome, extension heartbeat, loopback bridge, queue, and worker process tree on Windows.
 
-- Runtime: `C:\Village\my-gas-project2-worktrees\ax2-hermes-final`
+- Runtime: `C:\Village\runtimes\my-gas-project2-production`
 - Chrome user-data-dir: `C:\Users\ssper\AppData\Local\Village\chrome-kakao`
 - CDP: `127.0.0.1:9223`
 - DOM bridge: `127.0.0.1:8787`
