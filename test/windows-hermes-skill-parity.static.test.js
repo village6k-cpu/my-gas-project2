@@ -302,7 +302,7 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
   }
 });
 
-test('profile-scoped sync preserves Hermes self-improvement across repeated starts', { skip: process.platform !== 'win32' }, () => {
+test('profile sync protects the owner-managed umbrella while preserving focused agent learning', { skip: process.platform !== 'win32' }, () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'village-hermes-learning-parity-'));
   const macHome = path.join(tempRoot, 'mac-home');
   const workerProfile = path.join(tempRoot, 'windows-home', 'profiles', 'kakaoworker');
@@ -344,6 +344,7 @@ test('profile-scoped sync preserves Hermes self-improvement across repeated star
     assert.equal(first.status, 0, first.stderr || first.stdout);
 
     const operationsPath = path.join(workerProfile, 'skills', 'productivity', 'village-operations', 'SKILL.md');
+    const canonicalOperations = fs.readFileSync(operationsPath, 'utf8');
     fs.appendFileSync(operationsPath, '\n## Learned rule\n\nSELF_IMPROVED_RULE_MUST_SURVIVE\n', 'utf8');
     writeSkill(workerProfile, path.join('learned', 'customer-alias-memory'), 'customer-alias-memory', {
       platforms: ['windows'],
@@ -352,7 +353,13 @@ test('profile-scoped sync preserves Hermes self-improvement across repeated star
     fs.writeFileSync(
       path.join(workerProfile, 'skills', '.usage.json'),
       JSON.stringify({
-        'village-operations': { patch_count: 1, last_patched_at: new Date().toISOString() },
+        'village-operations': {
+          created_by: 'agent',
+          agent_created: true,
+          pinned: false,
+          patch_count: 1,
+          last_patched_at: new Date().toISOString()
+        },
         'customer-alias-memory': { created_by: 'agent', patch_count: 0 }
       }, null, 2),
       'utf8'
@@ -365,13 +372,20 @@ test('profile-scoped sync preserves Hermes self-improvement across repeated star
     );
     assert.equal(second.status, 0, second.stderr || second.stdout);
 
-    assert.match(fs.readFileSync(operationsPath, 'utf8'), /SELF_IMPROVED_RULE_MUST_SURVIVE/);
+    assert.equal(
+      fs.readFileSync(operationsPath, 'utf8'),
+      canonicalOperations,
+      'the owner-managed Village contract must win over autonomous umbrella patches'
+    );
     assert.match(
       fs.readFileSync(path.join(workerProfile, 'skills', 'learned', 'customer-alias-memory', 'SKILL.md'), 'utf8'),
       /AGENT_CREATED_SKILL_MUST_SURVIVE/
     );
     const usage = JSON.parse(fs.readFileSync(path.join(workerProfile, 'skills', '.usage.json'), 'utf8'));
     assert.equal(usage['village-operations'].patch_count, 1);
+    assert.equal(usage['village-operations'].created_by, null);
+    assert.equal(usage['village-operations'].agent_created, false);
+    assert.equal(usage['village-operations'].pinned, true);
     assert.equal(usage['customer-alias-memory'].created_by, 'agent');
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });

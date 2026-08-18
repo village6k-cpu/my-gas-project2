@@ -7,10 +7,13 @@ The runner only validates and executes that already-understood delta.
 
 ## One-call boundary
 
-Write one JSON file and run exactly one correction command:
+Resolve the active runtime root (`<active-runtime-root>`) from
+[Windows runtime and authoritative sources](windows-runtime-and-sources.md).
+Write one JSON file, substitute that documented root, and run exactly one
+correction command:
 
 ```powershell
-node.exe "C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-registered-trade-correction.js" execute --input-file "<absolute-json>"
+node.exe "<active-runtime-root>/scripts/windows/village-registered-trade-correction.js" execute --input-file "<absolute-json>"
 ```
 
 The JSON envelope is:
@@ -18,10 +21,10 @@ The JSON envelope is:
 ```json
 {
   "tradeId": "YYMMDD-NNN",
-  "operationId": "unique-operation-id",
+  "operationId": "8f6c77d1-8828-4a85-bf74-13815d96bf51",
   "dateChange": {
-    "startDate": "YYYY-MM-DD",
-    "endDate": "YYYY-MM-DD"
+    "newStartDate": "YYYY-MM-DD",
+    "newEndDate": "YYYY-MM-DD"
   },
   "remove": [
     { "scheduleId": "exact-schedule-id", "expectedName": "exact current item name" }
@@ -40,6 +43,9 @@ The JSON envelope is:
 - Use the exact `scheduleId` plus `expectedName` for every removal and an exact
   catalog name for every addition. Ask one focused question if identity is
   materially ambiguous.
+- Removing a set representative row removes all components of that exact set
+  instance. Removing a component row removes only that row. Inspect the live
+  schedule hierarchy before the AI selects the exact `scheduleId`.
 - Generate a unique `operationId` for this decision. Never reuse it for a
   different correction.
 - Keep `sendEstimate:false` unless the same instruction explicitly authorizes

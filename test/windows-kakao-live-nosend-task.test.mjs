@@ -209,6 +209,7 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
         autoSendEnabled = $true; slackCardDeliveryEnabled = $true; slackActionPollEnabled = $true
         supabaseRecoveryEnabled = $true; kakaoTabCleanupEnabled = $true; startupCatchupSupported = $true
+        aiDomSplitEnabled = $true; aiDecisionConcurrency = 2
       }}
       $legacy = [pscustomobject]@{ ok = $true; config = [pscustomobject]@{
         workerLive = $true; workerDryRun = $false; windowsWritesEnabled = $true
@@ -259,7 +260,9 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
       WORKER_TIMEOUT_MS: '540000',
       WORKER_CATCHUP_TIMEOUT_MS: '540000',
       HERMES_WORKER_TIMEOUT_MS: '480000',
-      HERMES_WORKER_MAX_TURNS: '12'
+      HERMES_WORKER_MAX_TURNS: '90',
+      KAKAO_AI_DOM_SPLIT_ENABLED: '1',
+      KAKAO_AI_DECISION_CONCURRENCY: '2'
     });
 
     const startScript = path.join(scripts, 'start-kakao-live.ps1');

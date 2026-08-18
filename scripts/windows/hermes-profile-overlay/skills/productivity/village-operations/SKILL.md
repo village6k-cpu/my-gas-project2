@@ -23,6 +23,9 @@ already understood action; it does not replace business judgment.
 - An internal write approval does not authorize a customer-facing send.
 - Kakao, SMS, iMessage, email, or proactive/cross-channel Slack delivery needs
   separate explicit approval for the exact recipient and content.
+- Final registration is the owner-confirmed narrow exception: it includes exactly
+  one registration-complete Alimtalk per trade. Correction, preview, and
+  `sendEstimate` never inherit this authorization.
 - Preview, draft, lookup, calculation, and readback are not final registration
   or delivery.
 - Passwords, 2FA, CAPTCHA, device approval, and account recovery remain with
@@ -99,8 +102,9 @@ repeat a possibly completed write or send.
 See [registered trade date and item changes](references/registered-trade-date-change-remove-item.md)
 for the bounded correction path.
 
-For one authorized registered-trade correction, have the AI produce explicit JSON
-and run `node.exe "C:/Village/my-gas-project2-worktrees/ax2-hermes-final/scripts/windows/village-registered-trade-correction.js" execute --input-file "<absolute-json>"`.
+For one authorized registered-trade correction, resolve the active runtime root
+from [Windows runtime and sources](references/windows-runtime-and-sources.md),
+have the AI produce explicit JSON, and run `node.exe "<active-runtime-root>/scripts/windows/village-registered-trade-correction.js" execute --input-file "<absolute-json>"`.
 The runner validates and executes the decision in one bounded request; it never
 interprets business intent.
 
@@ -175,10 +179,12 @@ for audits and rule-recovery, not routine task execution.
 ## Learn as you work
 
 - Record a reusable correction only after authoritative readback proves it.
-- Patch the narrowest relevant reference; keep this root for stable rules shared
-  by several task families.
-- Create a focused native skill only for a genuinely distinct reusable capability.
+- Do not autonomously patch any file in this owner-managed package, including
+  this root or its references.
+- Record new reusable evidence in a focused agent-managed skill. Move it into
+  this package only through an owner-reviewed promotion.
 - Do not encode one customer's name, one incident's transient state, or a guessed
   workaround as a universal rule.
-- Preserve native usage and curator metadata so Hermes can improve and consolidate
-  the explicitly agent-managed operational skill over time.
+- Keep this owner-managed root pinned to stable cross-task contracts. Preserve
+  native usage and curator metadata for focused agent-managed skills so Hermes
+  can still improve and consolidate reusable capabilities over time.

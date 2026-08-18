@@ -101,6 +101,58 @@ async function lookupVillage({ config, domain, query, column, fetchImpl = global
   };
 }
 
+function normalizeBatchQueries(queries) {
+  if (!Array.isArray(queries) || queries.length < 1 || queries.length > 12) {
+    throw new Error('Village live-query batch requires 1-12 queries');
+  }
+  const seen = new Set();
+  const normalized = [];
+  for (const entry of queries) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error('Each Village live-query batch entry must be an object');
+    }
+    const domain = requiredText(entry.domain, 'domain', 40).toLowerCase();
+    if (!DOMAIN_SHEETS[domain]) throw new Error(`Unknown Village lookup domain: ${domain}`);
+    const query = requiredText(entry.query, 'query');
+    const column = entry.column === undefined || String(entry.column).trim() === ''
+      ? undefined
+      : requiredText(entry.column, 'column', 80);
+    const identity = JSON.stringify([domain, query, column || '']);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    normalized.push({ domain, query, ...(column ? { column } : {}) });
+  }
+  return normalized;
+}
+
+async function lookupVillageBatch({
+  config,
+  queries,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 30_000
+} = {}) {
+  const normalized = normalizeBatchQueries(queries);
+  const results = await Promise.all(normalized.map(async (entry) => {
+    try {
+      return {
+        ...entry,
+        result: await lookupVillage({ ...entry, config, fetchImpl, timeoutMs })
+      };
+    } catch (error) {
+      return {
+        ...entry,
+        result: { ok: false, error: String(error?.message || error).slice(0, 1000) }
+      };
+    }
+  }));
+  return {
+    ok: results.every((entry) => entry.result?.ok === true),
+    source: 'Village 2.0 GAS read-only batch search',
+    retrievedAt: new Date().toISOString(),
+    queries: results
+  };
+}
+
 async function readVillageCatalog({
   config,
   sheet,
@@ -147,11 +199,13 @@ async function readVillageCatalogs({
 
 function parseArgs(args) {
   const command = args[0];
-  if (command !== 'lookup' && command !== 'catalog') {
-    throw new Error('Only the lookup and catalog commands are supported');
+  if (command !== 'lookup' && command !== 'catalog' && command !== 'batch') {
+    throw new Error('Only the lookup, catalog, and batch commands are supported');
   }
   const values = { command, envFile: DEFAULT_ENV_FILE };
-  const keyByFlag = command === 'catalog'
+  const keyByFlag = command === 'batch'
+    ? { '--env-file': 'envFile' }
+    : command === 'catalog'
     ? { '--sheet': 'sheet', '--env-file': 'envFile' }
     : {
         '--domain': 'domain',
@@ -176,7 +230,13 @@ function parseArgs(args) {
 async function main() {
   const { command, ...options } = parseArgs(process.argv.slice(2));
   const config = parseEnv(fs.readFileSync(options.envFile, 'utf8'));
-  const result = command === 'catalog'
+  const result = command === 'batch'
+    ? await lookupVillageBatch({
+        ...options,
+        config,
+        queries: JSON.parse(fs.readFileSync(0, 'utf8')).queries
+      })
+    : command === 'catalog'
     ? (options.sheet === 'all'
         ? await readVillageCatalogs({ ...options, config })
         : await readVillageCatalog({ ...options, config }))
@@ -191,6 +251,8 @@ module.exports = {
   buildCatalogRequest,
   buildSearchRequest,
   lookupVillage,
+  lookupVillageBatch,
+  normalizeBatchQueries,
   parseArgs,
   readVillageCatalog,
   readVillageCatalogs

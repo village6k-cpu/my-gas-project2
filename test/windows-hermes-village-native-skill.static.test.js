@@ -2,6 +2,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const {
+  normalizeCorrectionInput
+} = require('../scripts/windows/village-registered-trade-correction.js');
 
 const root = path.resolve(__dirname, '..');
 const overlayRoot = path.join(root, 'scripts', 'windows', 'hermes-profile-overlay', 'skills');
@@ -83,11 +86,102 @@ test('Village operations is a compact substantive Hermes umbrella', () => {
     /explicit JSON[\s\S]{0,180}AI|AI[\s\S]{0,180}explicit JSON/i,
     'the runner pointer must preserve AI judgment and describe only an execution boundary'
   );
+  assert.match(skill.body, /owner-managed[\s\S]{0,160}(?:root|contract)/i);
+  assert.match(skill.body, /focused[\s\S]{0,180}agent-managed[\s\S]{0,160}(?:skill|learning)/i);
   assert.match(skill.body, /only when[\s\S]{0,120}direct reference/i);
   assert.ok(
     fs.existsSync(path.join(operationsRoot, 'references', 'legacy-village-operations-2026-08-15.md')),
     'the lossless legacy entrypoint archive must remain recoverable outside the auto-loaded root'
   );
+});
+
+test('owner-managed Village operations learning stays outside the pinned package', () => {
+  const skill = loadSkill(operationsRoot);
+  const learning = skill.body.match(/## Learn as you work[\s\S]*$/i)?.[0] || '';
+
+  assert.match(
+    learning,
+    /do not autonomously patch[\s\S]{0,180}owner-managed package[\s\S]{0,180}(?:root|reference)/i,
+    'Hermes must not autonomously patch either the root or references of the owner-managed package'
+  );
+  assert.match(
+    learning,
+    /focused agent-managed skill[\s\S]{0,220}owner-reviewed promotion/i,
+    'new evidence must remain in a focused agent-managed skill until an owner-reviewed promotion'
+  );
+  assert.doesNotMatch(
+    learning,
+    /patch the narrowest relevant reference/i,
+    'the owner-managed package must not retain an autonomous reference-patching instruction'
+  );
+});
+
+test('legacy archive preserves obsolete +6 evidence but makes current +3 unmistakable', () => {
+  const archive = fs.readFileSync(
+    path.join(
+      operationsRoot,
+      'references',
+      'legacy-village-operations-2026-08-15.md'
+    ),
+    'utf8'
+  );
+  const top = archive.split(/\r?\n/).slice(0, 40).join('\n');
+  const obsoleteFormula = 'ceil((hours - 6) / 24)';
+  const obsoleteOffset = archive.indexOf(obsoleteFormula);
+
+  assert.match(top, /historical archive[\s\S]{0,260}(?:do not use|do not execute)/i);
+  assert.match(top, /current[\s\S]{0,160}(?:\+3|hours\s*-\s*3)/i);
+  assert.notEqual(obsoleteOffset, -1, 'the original +6 formula must remain as historical evidence');
+  assert.match(
+    archive.slice(Math.max(0, obsoleteOffset - 320), obsoleteOffset + 420),
+    /obsolete[\s\S]{0,260}ceil\(\(hours\s*-\s*6\)\s*\/\s*24\)[\s\S]{0,260}(?:\+3|hours\s*-\s*3)/i,
+    'the preserved +6 formula must carry an inline obsolete warning and the current +3 rule'
+  );
+});
+
+test('registered-trade command resolves one centrally documented active runtime root', () => {
+  const skill = loadSkill(operationsRoot);
+  const taskReference = fs.readFileSync(
+    path.join(
+      operationsRoot,
+      'references',
+      'registered-trade-date-change-remove-item.md'
+    ),
+    'utf8'
+  );
+  const runtimeReference = fs.readFileSync(
+    path.join(operationsRoot, 'references', 'windows-runtime-and-sources.md'),
+    'utf8'
+  );
+
+  for (const [label, source] of [
+    ['skill', skill.body],
+    ['task reference', taskReference]
+  ]) {
+    assert.doesNotMatch(source, /ax2-hermes-final/i, `${label} must not pin one worktree`);
+    assert.match(source, /active runtime root/i, `${label} must name the active runtime root`);
+    assert.match(
+      source,
+      /windows-runtime-and-sources\.md/i,
+      `${label} must resolve the root through the central runtime reference`
+    );
+    assert.match(
+      source,
+      /<active-runtime-root>\/scripts\/windows\/village-registered-trade-correction\.js/i,
+      `${label} must invoke the bounded runner directly under the resolved root`
+    );
+  }
+
+  assert.match(runtimeReference, /Active Kakao\/Windows source:/i);
+});
+
+test('runtime source map keeps Gary Tan GBrain physically separate from Village Brain', () => {
+  const runtimeReference = fs.readFileSync(
+    path.join(operationsRoot, 'references', 'windows-runtime-and-sources.md'),
+    'utf8'
+  );
+  assert.match(runtimeReference, /Gary Tan GBrain home:\s*`%USERPROFILE%\/\.gbrain`/i);
+  assert.match(runtimeReference, /never\s+(?:imports?|copies?|replaces?)[\s\S]{0,100}Village Brain/i);
 });
 
 test('registered-trade references expose only the atomic correction boundary', () => {
@@ -116,6 +210,11 @@ test('registered-trade references expose only the atomic correction boundary', (
   );
   assert.match(dateReference, /additions before removals/i);
   assert.match(dateReference, /Never blindly retry/i);
+  assert.match(
+    dateReference,
+    /set representative[\s\S]{0,180}all[\s\S]{0,120}components[\s\S]{0,220}component row[\s\S]{0,160}only that row/i,
+    'Hermes must know whether an exact scheduleId removes a whole set or one component'
+  );
   assert.match(quoteReference, /sendEstimate:false/);
   assert.match(quoteReference, /same one-call registered-trade/i);
 
@@ -132,6 +231,63 @@ test('registered-trade references expose only the atomic correction boundary', (
       `registered-trade references must not retain retired multi-call route ${retiredRoute}`
     );
   }
+});
+
+test('registered-trade reference JSON uses the runner date field contract', () => {
+  const source = fs.readFileSync(
+    path.join(
+      operationsRoot,
+      'references',
+      'registered-trade-date-change-remove-item.md'
+    ),
+    'utf8'
+  );
+  const jsonBlock = source.match(/```json\s*([\s\S]*?)```/i);
+  assert.ok(jsonBlock, 'registered-trade reference must include a JSON example');
+  const sample = JSON.parse(jsonBlock[1]);
+
+  sample.tradeId = '260818-001';
+  sample.operationId = '8f6c77d1-8828-4a85-bf74-13815d96bf51';
+  sample.dateChange.newStartDate = '2026-08-18';
+  sample.dateChange.newEndDate = '2026-08-21';
+  sample.remove = [{
+    scheduleId: '260818-001-1',
+    expectedName: 'exact current item name'
+  }];
+
+  assert.doesNotThrow(() => normalizeCorrectionInput(sample));
+});
+
+test('registered-trade reference operationId is accepted by the runner', () => {
+  const source = fs.readFileSync(
+    path.join(
+      operationsRoot,
+      'references',
+      'registered-trade-date-change-remove-item.md'
+    ),
+    'utf8'
+  );
+  const jsonBlock = source.match(/```json\s*([\s\S]*?)```/i);
+  assert.ok(jsonBlock, 'registered-trade reference must include a JSON example');
+  const sample = JSON.parse(jsonBlock[1]);
+
+  assert.doesNotThrow(() => normalizeCorrectionInput({
+    tradeId: '260818-001',
+    operationId: sample.operationId,
+    add: [{ name: 'TEST EXACT', qty: 1 }]
+  }));
+});
+
+test('registered completion Alimtalk is the narrow owner-confirmed send exception', () => {
+  const skill = loadSkill(operationsRoot);
+  assert.match(
+    skill.body,
+    /final registration[\s\S]{0,220}(?:one|once)[\s\S]{0,120}(?:Alimtalk|알림톡)/i
+  );
+  assert.match(
+    skill.body,
+    /(?:correction|preview|sendEstimate)[\s\S]{0,180}(?:does not|never)[\s\S]{0,120}(?:authorize|inherit|apply)/i
+  );
 });
 
 test('Village Brain is narrow and never impersonates Gary Tan G-Brain', () => {

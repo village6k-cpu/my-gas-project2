@@ -6,9 +6,15 @@ process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
 const {
   buildCorsHeaders,
   buildHealthConfig,
+  buildWorkerResultAudit,
   buildWorkerTreeKillInvocation,
+  compactQueueAuditRecord,
+  createKakaoPhaseScheduler,
+  registerAcceptedRoomEvent,
+  semanticRoomEventIdentity,
   hasUnreadCount,
   mergeQueuedRoomJobs,
+  mapWorkerPayloadToSupabaseStatus,
   normalizeEvent,
   roomKeyForDebounce,
   shouldDetachWorkerProcess,
@@ -16,6 +22,137 @@ const {
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+test('slow Hermes decisions release the DOM lane for another room and manual sends', async () => {
+  const firstDecision = deferred();
+  const events = [];
+  let domActive = 0;
+  let maxDomActive = 0;
+  let decisionActive = 0;
+  let maxDecisionActive = 0;
+  const withDomProbe = async (label, value) => {
+    domActive += 1;
+    maxDomActive = Math.max(maxDomActive, domActive);
+    events.push(`${label}:start`);
+    await new Promise((resolve) => setImmediate(resolve));
+    events.push(`${label}:end`);
+    domActive -= 1;
+    return value;
+  };
+  const scheduler = createKakaoPhaseScheduler({
+    decisionConcurrency: 2,
+    capture: async (job) => withDomProbe(`capture:${job.roomKey}`, { job }),
+    decide: async (snapshot) => {
+      decisionActive += 1;
+      maxDecisionActive = Math.max(maxDecisionActive, decisionActive);
+      try {
+        if (snapshot.job.roomKey === 'A') await firstDecision.promise;
+        return { snapshot };
+      } finally {
+        decisionActive -= 1;
+      }
+    },
+    apply: async (prepared) => withDomProbe(`apply:${prepared.snapshot.job.roomKey}`, prepared),
+    finalize: async (applied) => applied,
+    manualSend: async (payload) => withDomProbe('manual', { sent: true, payload })
+  });
+
+  const roomA = scheduler.run({ roomKey: 'A' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const roomB = scheduler.run({ roomKey: 'B' });
+  const manual = scheduler.runManual({ text: 'staff reply' });
+
+  const [roomBResult, manualResult] = await Promise.all([roomB, manual]);
+  assert.equal(roomBResult.snapshot.job.roomKey, 'B');
+  assert.equal(manualResult.sent, true);
+  assert.equal(maxDomActive, 1, 'capture/apply/manual DOM work must stay serial');
+  assert.equal(maxDecisionActive, 2, 'two rooms may think concurrently');
+  assert.ok(!events.includes('apply:A:start'), 'room A is still thinking');
+  assert.equal(typeof roomBResult.phaseTimings.captureQueueMs, 'number');
+  assert.equal(typeof roomBResult.phaseTimings.decisionMs, 'number');
+  assert.equal(typeof roomBResult.phaseTimings.applyMs, 'number');
+  assert.equal(typeof roomBResult.phaseTimings.totalMs, 'number');
+
+  firstDecision.resolve();
+  await roomA;
+});
+
+test('worker result audit keeps phase timings and AI attempt counts without customer payload', () => {
+  const audit = buildWorkerResultAudit({
+    status: 'ai_completed',
+    hermesAttempts: 3,
+    hermesRecovered: true,
+    timings: { lookupMs: 100, hermesMs: 2000, sheetAndReconciliationMs: 500, totalMs: 2600 },
+    phaseTimings: { captureQueueMs: 4, captureMs: 50, decisionQueueMs: 8, decisionMs: 2600, applyQueueMs: 2, applyMs: 30, finalizeMs: 20, totalMs: 2714 },
+    decision: { reason: 'private customer content' },
+    snapshot: { navigation: { conversation_evidence: { visible_static_text_tail: 'private chat' } } }
+  }, 2714);
+  const record = compactQueueAuditRecord('worker-results.ndjson', {
+    at: '2026-08-18T00:00:00.000Z',
+    jobId: 'dom-test',
+    result: { code: 0, signal: null, timedOut: false, stdout: 'private stdout', stderr: '', audit }
+  });
+
+  assert.deepEqual(record.result.audit, audit);
+  assert.equal(record.result.audit.status, 'ai_completed');
+  assert.equal(record.result.audit.phaseTimings.decisionMs, 2600);
+  assert.doesNotMatch(JSON.stringify(record.result.audit), /private|customer|chat/);
+});
+
+test('room revisions ignore unread-badge duplicates and supersede older semantic turns', () => {
+  const versions = new Map();
+  const first = registerAcceptedRoomEvent(versions, 'chat:1', '홍길동 문의 오후 1:00');
+  const duplicate = registerAcceptedRoomEvent(versions, 'chat:1', '홍길동 문의 오후 1:00');
+  const newer = registerAcceptedRoomEvent(versions, 'chat:1', '홍길동 추가 문의 오후 1:01');
+
+  assert.equal(first.revision, 1);
+  assert.equal(duplicate.revision, 1);
+  assert.equal(duplicate.changed, false);
+  assert.equal(newer.revision, 2);
+  assert.equal(newer.changed, true);
+});
+
+test('identical reply text at a later displayed time is a new room revision', () => {
+  const earlier = semanticRoomEventIdentity({ previewText: '홍길동 네', displayTime: '오전 9:10' });
+  const unreadMutation = semanticRoomEventIdentity({ previewText: '홍길동 2 네', displayTime: '오전 9:10' });
+  const later = semanticRoomEventIdentity({ previewText: '홍길동 네', displayTime: '오전 9:25' });
+
+  assert.equal(unreadMutation, earlier);
+  assert.notEqual(later, earlier);
+});
+
+test('a superseded phase result stays superseded in the durable event row', () => {
+  assert.deepEqual(mapWorkerPayloadToSupabaseStatus({
+    status: 'superseded_by_newer_room_event',
+    decision: { should_write_to_sheet: true },
+    sheetResult: { success: true }
+  }), {
+    status: 'superseded_by_newer_room_event',
+    error_message: null
+  });
+});
+
+test('production queue uses the phase scheduler and publishes freshness before durable writes', async () => {
+  const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  assert.match(source, /CONFIG\.aiDomSplitEnabled\s*\?\s*run\(\)\s*:\s*workerChain\.then/);
+  assert.match(source, /getKakaoPhaseScheduler\(\)\.runManual/);
+  assert.match(source, /url\.pathname === '\/worker\/freshness'/);
+  const revisionIndex = source.indexOf('registerAcceptedRoomEvent(state.roomVersions');
+  const supabaseIndex = source.indexOf("await writeSupabaseEvent(event, 'event')", revisionIndex);
+  assert.ok(revisionIndex >= 0 && supabaseIndex > revisionIndex, 'freshness revision must advance before Supabase latency');
+  assert.match(source, /readBooleanEnvironment\(process\.env\.KAKAO_AI_DOM_SPLIT_ENABLED, false\)/);
+  assert.match(source, /getKakaoPhaseScheduler\(\)\.runManual\(\{[\s\S]*?cleanupIdleKakaoConversationTabs\('worker_finished'/);
+});
 
 test('health config exposes the live safety contract used by supervised restarts', async () => {
   assert.deepEqual(buildHealthConfig({

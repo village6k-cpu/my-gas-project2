@@ -131,7 +131,11 @@ function Get-BridgeDescendants {
 }
 
 function Test-InitialHermesDecisionInFlight {
-    param([Parameter(Mandatory = $true)][int]$BridgePid)
+    param(
+        [Parameter(Mandatory = $true)][int]$BridgePid,
+        [Parameter(Mandatory = $true)][string]$JobId,
+        [Parameter(Mandatory = $true)][datetime]$StartedAt
+    )
 
     $descendants = @(Get-BridgeDescendants -BridgePid $BridgePid)
     $postAction = @($descendants | Where-Object {
@@ -140,12 +144,41 @@ function Test-InitialHermesDecisionInFlight {
     })
     if ($postAction.Count -gt 0) { return $false }
 
-    $hermes = @($descendants | Where-Object {
+    $legacyHermes = @($descendants | Where-Object {
         [string]$_.Name -eq 'python.exe' -and
         ([string]$_.CommandLine).Length -gt 2000 -and
         [string]$_.CommandLine -match 'AI-first Kakao rental-shop worker task'
     })
-    return $hermes.Count -gt 0
+    if ($legacyHermes.Count -gt 0) { return $true }
+
+    $safeJobId = ($JobId -replace '[^a-zA-Z0-9._-]', '_')
+    if ($safeJobId.Length -gt 160) { $safeJobId = $safeJobId.Substring(0, 160) }
+    $phasePath = Join-Path $repoRoot "tools\kakao-dom-bridge\queue\worker-phases\$safeJobId.json"
+    if (-not (Test-Path -LiteralPath $phasePath)) { return $false }
+    try { $phase = Get-Content -LiteralPath $phasePath -Raw | ConvertFrom-Json } catch { return $false }
+    if ([string]$phase.schema -ne 'kakao-worker-handoff-phase/v1' -or
+        [string]$phase.jobId -ne $JobId -or
+        [string]$phase.phase -ne 'initial_hermes_in_flight' -or
+        -not [int]$phase.workerPid -or
+        -not [string]$phase.recordedAt -or
+        ([datetime]$phase.recordedAt).ToUniversalTime() -lt $StartedAt.ToUniversalTime()) {
+        return $false
+    }
+
+    $workerPid = [int]$phase.workerPid
+    $worker = @($descendants | Where-Object {
+        [int]$_.ProcessId -eq $workerPid -and
+        [string]$_.Name -eq 'node.exe' -and
+        [string]$_.CommandLine -match 'ai-browser-worker[\\/]worker\.mjs\s+--stdin-job'
+    }) | Select-Object -First 1
+    if ($null -eq $worker) { return $false }
+
+    $stdinHermes = @($descendants | Where-Object {
+        [string]$_.Name -eq 'python.exe' -and
+        [int]$_.ParentProcessId -eq $workerPid -and
+        [string]$_.CommandLine -match 'hermes-stdin-runner\.py'
+    })
+    return $stdinHermes.Count -gt 0
 }
 
 function Test-JobAuditAfterStart {
@@ -217,7 +250,8 @@ if ($workerBusy -and $AllowPreMutationWorkerHandoff.IsPresent) {
     if (Test-JobAuditAfterStart -Filename 'auto-replies.ndjson' -JobId $PreMutationJobId -StartedAt $startedAt) {
         throw 'Pre-mutation handoff found an auto-reply decision for this execution.'
     }
-    if (-not (Test-InitialHermesDecisionInFlight -BridgePid ([int]$record.Pid))) {
+    if (-not (Test-InitialHermesDecisionInFlight -BridgePid ([int]$record.Pid) `
+        -JobId $PreMutationJobId -StartedAt $startedAt)) {
         throw 'Pre-mutation handoff requires the initial Hermes decision subprocess.'
     }
     [void](Get-ProcessingDurableWorkerState -JobId $PreMutationJobId)

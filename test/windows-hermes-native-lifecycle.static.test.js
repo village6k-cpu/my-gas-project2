@@ -73,15 +73,14 @@ test('native lifecycle harness is fail-closed around live Hermes profiles', () =
   assert.match(source, /Remove-Item[^\r\n]*\$resolvedProfileHome/i);
 });
 
-test('native lifecycle harness exercises stock ownership without bulk adoption', () => {
+test('native lifecycle harness preserves owner-managed contracts and focused agent learning', () => {
   const source = readHarness();
 
   assert.match(source, /profile\s+create/i);
   assert.match(source, /--no-skills/i);
   assert.match(source, /village-operations/i);
   assert.match(source, /village-history-evidence/i);
-  assert.match(source, /curator\s+adopt[^\r\n]*village-operations[^\r\n]*--dry-run/i);
-  assert.match(source, /curator\s+adopt[^\r\n]*village-operations/i);
+  assert.doesNotMatch(source, /curator\s+adopt[^\r\n]*village-operations/i);
   assert.doesNotMatch(source, /curator\s+adopt[^\r\n]*village-history-evidence/i);
   assert.match(source, /curator\s+run[^\r\n]*--dry-run[^\r\n]*--consolidate/i);
   assert.match(source, /curator\s+backup[^\r\n]*--reason/i);
@@ -91,6 +90,8 @@ test('native lifecycle harness exercises stock ownership without bulk adoption',
   assert.match(source, /watch-kakao-production\.ps1/i);
   assert.match(source, /skill_manage/i);
   assert.match(source, /skill_view/i);
+  assert.match(source, /native-lifecycle-marker/i);
+  assert.match(source, /village-operations[^\r\n]{0,160}(?:user|owner)-managed/i);
   assert.match(source, /created_by/i);
   assert.match(source, /HERMES_HOME/i);
   assert.match(source, /ToBase64String/i, 'multiline python must survive Windows native argv quoting');

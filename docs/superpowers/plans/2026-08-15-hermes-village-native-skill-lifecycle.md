@@ -362,17 +362,18 @@ node --test test/windows-hermes-native-lifecycle.static.test.js
 
 The script must seed only the candidate operations and Brain skills plus the minimum profile metadata required by Hermes. Reuse authentication/config through read-only references only if the CLI requires it; do not copy secrets into the repository or logs.
 
-- [ ] **Step 3: Adopt only the approved skill**
+- [ ] **Step 3: Keep the umbrella owner-managed and isolate agent learning**
 
 Within the isolated profile, run the equivalent of:
 
 ```powershell
-hermes curator adopt village-operations --dry-run
-hermes curator adopt village-operations
+hermes curator list-unmanaged
 hermes curator run --dry-run --consolidate
 ```
 
-Assert that the candidate set contains `village-operations` and no unrelated unmanaged skills. Keep `village-brain-first` user-managed unless a separate review explicitly approves curator ownership.
+Assert that `village-operations` and Village Brain remain unmanaged, while the
+focused lifecycle marker created through background review is agent-managed.
+Never adopt the owner-managed umbrella or unrelated unmanaged skills.
 
 - [ ] **Step 4: Prove backup, real consolidation, and restore**
 

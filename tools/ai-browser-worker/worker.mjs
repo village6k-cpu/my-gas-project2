@@ -454,6 +454,15 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
       allowed_methods: ['GET'],
       forbidden_actions: ['write', 'append', 'run', 'insertAndCheckRequest', 'updateRequest', 'deleteRequest', '발송승인', '등록', 'send']
     },
+    lookup_tool: {
+      command: 'node.exe scripts/windows/village-live-query.js batch',
+      stdin_schema: {
+        queries: [{ domain: 'schedule | inventory | customer', query: 'AI-selected exact lookup term', column: 'optional column' }]
+      },
+      domains: ['schedule', 'inventory', 'customer'],
+      max_queries: 12,
+      behavior: 'Runs AI-selected read-only searches concurrently, deduplicates identical queries, and preserves each failure as an explicit evidence gap.'
+    },
     lookup_urls: {
       kill_switch_read: killSwitchUrl,
       set_master_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
@@ -545,15 +554,15 @@ export function buildCompactJobForPrompt(job = {}) {
 }
 
 export function buildHermesPrompt(job, options = {}) {
-  const gasApiUrl = options.gasApiUrl || DEFAULT_GAS_API_URL;
   const lookupPromptContext = options.lookupContext
     ? {
         kill_switch: options.lookupContext.kill_switch,
-        lookup_urls: options.lookupContext.lookup_urls
+        lookup_policy: options.lookupContext.lookup_policy,
+        lookup_tool: options.lookupContext.lookup_tool
       }
     : null;
   const lookupContextText = lookupPromptContext
-    ? `\nREAD-ONLY GAS LOOKUP CONTEXT:\n${JSON.stringify(lookupPromptContext, null, 2)}\nUse only GET/read-only URLs above; terminal may use read-only GAS GET only. write/insert/register/send APIs are 금지. AI decides what to query and how to interpret results.\n`
+    ? `\nREAD-ONLY VILLAGE LIVE LOOKUP:\n${JSON.stringify(lookupPromptContext, null, 2)}\nAfter reading the Kakao evidence, the AI chooses all necessary queries and interprets every returned row. Send those queries together in one batch through the read-only wrapper; do not hand-compose raw GAS/curl/PowerShell requests or repeat a successful query. A failed batch item is an evidence gap, not permission to guess or mutate. write/insert/register/send APIs are 금지.\n`
     : '';
   const navigationContextText = options.navigationContext
     ? `\nBROWSER NAVIGATION RESULT:\n${JSON.stringify(options.navigationContext, null, 2)}\n\nThis was deterministic UI navigation and live AX text capture only. If status is opened_target_chat and conversation_evidence.hint_matched is true, treat conversation_evidence.visible_static_text_tail as current Kakao screen evidence to inspect first; do not spend extra actions re-opening the chat list unless the evidence is insufficient or mismatched. Do not treat the navigation step itself as business classification evidence; the AI must still judge from the visible Kakao evidence.\n`
@@ -564,7 +573,7 @@ export function buildHermesPrompt(job, options = {}) {
     ? `\nREAD-ONLY VILLAGE-AI RAG TOOL:\n${options.ragContext.enabled ? 'enabled' : 'disabled'}; command: node tools/ai-browser-worker/worker.mjs --rag-lookup; input: {question,userRole:"customer",context?}; output: {text,confidence,ownerReview,knowledgeSource,usedSources,topSimilarity,logId,error}.\nUse as long-term reference memory after Kakao; put visible Kakao context in the question string itself. RAG must not replace current Kakao screen evidence or Sheets/GAS, and never covers inventory, booking, mutations, or duplicates. CURRENT_CONFIRMED_POLICY wins over older RAG conflicts. Uncovered policy FAQ: high/retrieved RAG may support auto_send; low/no_match/error ignore; ownerReview=true review. RAG 답변을 그대로 복붙하지 말고 현재 Kakao 대화와 합성한다.\n`
     : '';
   const currentConfirmedPolicyText = options.ragContext
-    ? `\nCURRENT_CONFIRMED_POLICY: 주소=서울 마포구 동교로 23길 32 엠페로빌딩 2층, 지도=https://naver.me/FCAutZta, 영업=24시간. 절차=장비명+기간→가용확인→방문수령→반납, 필수=장비명/수량/반출일시/반납일시/예약자명/연락처. 할인=학생 30%, 개인사업자/프리랜서 20%, 단골=개사프20%+10%, 제휴=개사프20%+20%. 장기=2일10%,3~5일20%,6~9일35%,10~14일40%,15~19일45%,20일+50%. 계산=할인 곱셈, 24시간 1일, +6시간 동일, 6시간 초과 +1일, VAT=할인후*1.1 10원 올림.\n`
+    ? `\nCURRENT_CONFIRMED_POLICY: 주소=서울 마포구 동교로 23길 32 엠페로빌딩 2층, 지도=https://naver.me/FCAutZta, 영업=24시간. 절차=장비명+기간→가용확인→방문수령→반납, 필수=장비명/수량/반출일시/반납일시/예약자명/연락처. 할인=학생 30%, 개인사업자/프리랜서 20%, 단골=개사프20%+10%, 제휴=개사프20%+20%. 장기=2일10%,3~5일20%,6~9일35%,10~14일40%,15~19일45%,20일+50%. 계산=할인 곱셈, 24시간 1일, +3시간 동일, 3시간 초과 +1일, VAT=할인후*1.1 10원 올림.\n`
     : '';
   const brainContextText = options.brainContext?.enabled
     ? `\nVILLAGE BRAIN OWNER CONTEXT (read-only, advisory):\n${options.brainContext.contextPath ? `- 사장 판단 기준·운영 해석 문서(file 도구로 read-only 열람): ${options.brainContext.contextPath}\n` : ''}${options.brainContext.customerProfilesPath ? `- 고객 프로필 JSONL(1인 1줄: name/segment/누적방문/미수금/사고이력/이탈주의): ${options.brainContext.customerProfilesPath} — 파일이 크니 전체를 읽지 말고 현재 고객명이 포함된 줄만 찾아 읽어라.\n` : ''}- 단골/VIP 여부, 미수금, 과거 사고이력, 사장 응대 기준을 파악해 사장처럼 응대하는 데 쓴다. 프로필의 segment는 참고용이며 할인유형은 여전히 고객DB I열이 우선한다.\n- 이 블록은 빌리지 자체 VILLAGE_Brain 산출물이다. Garry Tan의 별도 오픈소스 GBrain과 혼동하지 않는다.\n- advisory다: 재고/예약/가격/정책의 근거가 아니다. CURRENT_CONFIRMED_POLICY와 시트/화면이 항상 우선하며, brain 파일을 auto_send grounding으로 선언할 수 없다.\n`
@@ -599,7 +608,7 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 가격 문의는 세트마스터 단가, 고객할인(고객DB I열 우선), 장기할인으로 직접 계산해 답한다. 요청된 모든 독립 품목의 단가가 양수로 확인되고 금액 산식대로 계산됐을 때만 safetyClass="sensitive_commitment" + grounding="authoritative_sheet"로 auto_send 가능. 독립 품목의 단가가 0/빈값이거나 조회/계산 근거가 불완전하면 부분합계를 전체 금액처럼 안내하지 말고 초안/follow_up. price_paused면 가격 자동발송 금지.
 - 서류(계약서/견적서/세금계산서/거래명세서)는 계산 생략 금지. 거래ID는 계약마스터+스케줄상세 대표/단품 L열 단가로 수량×일수×단가 계산; RQ는 확인요청 결과+세트마스터 단가로 부분계산하고 미등록/단가불명은 "미계산/확인 필요"로 표시한다.
 -반복견적=내예약 견적 안내
-- 금액 산식: 24시간=1일, +6시간 동일, 초과 +1일; 정가×고객/제휴/단골 할인×장기할인×VAT1.1, 10원 올림.
+- 금액 산식: 24시간=1일, +3시간 동일, 3시간 초과 +1일; 정가×고객/제휴/단골 할인×장기할인×VAT1.1, 10원 올림.
 - unread/미처리면 오래된 메시지도 검토한다. 날짜만 오래된 backfill/row movement는 자동발송하지 않는다.
 - 유입로그 단서는 evidence에만 보존한다. API 별도 worker 책임이다.
 
@@ -648,7 +657,7 @@ ${currentConfirmedPolicyText}
 ${navigationContextText}${recentBotSendsText}${correctionsText}
 ${lookupContextText}${ragContextText}${brainContextText}
 SHEETS TOOL AVAILABLE VIA GAS API:
-- URL: ${gasApiUrl}
+- The outer worker owns the configured GAS endpoint; Hermes does not need its raw URL or credential.
 - Target sheet for reservation inquiry candidates: 확인요청
 - Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true. Be 적극적: if the latest customer turn is a reservation-format request with enough fields for a review row, set should_write_to_sheet=true.
 - Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write when appropriate.
@@ -1998,12 +2007,12 @@ function parseLocalDateTime(dateValue = '', timeValue = '') {
   ));
 }
 
-function calcRentalDaysForQuote(startDate, startTime, endDate, endTime) {
+export function calcRentalDaysForQuote(startDate, startTime, endDate, endTime) {
   const start = parseLocalDateTime(startDate, startTime);
   const end = parseLocalDateTime(endDate, endTime);
   if (!start || !end || end <= start) return 1;
   const totalHours = (end - start) / (1000 * 60 * 60);
-  return Math.max(1, Math.ceil((totalHours - 6) / 24));
+  return Math.max(1, Math.ceil((totalHours - 3) / 24));
 }
 
 function longTermDiscountRate(days) {
@@ -7790,29 +7799,121 @@ export function createJobFreshnessGuard({
   };
 }
 
-async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
+export function createWorkerHandoffPhaseReporter({
+  config = {},
+  job = {},
+  pid = process.pid,
+  now = () => new Date()
+} = {}) {
+  const jobId = text(job.jobId || job.id).trim();
+  const safeJobId = jobId.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 160);
+  const queueDir = path.dirname(path.resolve(config.jobLogPath || path.resolve(__dirname, '../kakao-dom-bridge/queue/jobs.ndjson')));
+  const stateDir = path.join(queueDir, 'worker-phases');
+  const statePath = safeJobId ? path.join(stateDir, `${safeJobId}.json`) : '';
+  const report = (phase) => {
+    if (!statePath) return null;
+    const payload = {
+      schema: 'kakao-worker-handoff-phase/v1',
+      jobId,
+      workerPid: Number(pid),
+      phase: text(phase).trim(),
+      recordedAt: now().toISOString()
+    };
+    const tempPath = `${statePath}.${Number(pid)}.${randomUUID()}.tmp`;
+    try {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(tempPath, `${JSON.stringify(payload)}\n`, 'utf8');
+      fs.renameSync(tempPath, statePath);
+      return payload;
+    } catch {
+      return null;
+    } finally {
+      try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch {}
+    }
+  };
+  report.statePath = statePath;
+  return report;
+}
+
+function deepFreezeSnapshot(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreezeSnapshot(child);
+  return Object.freeze(value);
+}
+
+function canonicalSnapshotJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalSnapshotJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalSnapshotJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function createImmutableKakaoRoomSnapshot({ job = {}, navigationContext = {}, capturedAt = new Date().toISOString() } = {}) {
+  const evidence = navigationContext?.conversation_evidence || {};
+  const navigation = {
+    status: text(navigationContext?.status).trim(),
+    reason: text(navigationContext?.reason).trim(),
+    via_devtools: navigationContext?.via_devtools === true,
+    already_open: navigationContext?.already_open === true,
+    opened_by_devtools_search: navigationContext?.opened_by_devtools_search === true,
+    search: navigationContext?.search && typeof navigationContext.search === 'object'
+      ? {
+          attempted: navigationContext.search.attempted === true,
+          status: text(navigationContext.search.status).trim(),
+          reason: text(navigationContext.search.reason).trim()
+        }
+      : null,
+    conversation_evidence: {
+      source: text(evidence.source).trim(),
+      title: text(evidence.title).trim(),
+      hint_matched: evidence.hint_matched === true,
+      hints: Array.isArray(evidence.hints) ? evidence.hints.map((value) => text(value).trim()).filter(Boolean).slice(0, 20) : [],
+      visible_static_text_tail: text(evidence.visible_static_text_tail).slice(-20_000),
+      note: text(evidence.note).trim().slice(0, 500)
+    }
+  };
+  const roomKey = text(job.roomKey || job.room_key).trim();
+  const roomRevision = Number(job.roomRevision || job.room_revision || 0);
+  const hashPayload = {
+    roomKey,
+    roomRevision,
+    title: navigation.conversation_evidence.title,
+    hintMatched: navigation.conversation_evidence.hint_matched,
+    visibleText: navigation.conversation_evidence.visible_static_text_tail
+  };
+  const snapshot = {
+    schema: 'kakao-room-snapshot/v1',
+    jobId: text(job.jobId || job.id).trim(),
+    roomKey,
+    roomRevision,
+    capturedAt: text(capturedAt).trim(),
+    evidenceHash: createHash('sha256').update(canonicalSnapshotJson(hashPayload)).digest('hex'),
+    navigation
+  };
+  return deepFreezeSnapshot(snapshot);
+}
+
+async function closeCapturedKakaoNavigation(config, navigationContext) {
+  if (navigationContext?.conversation_window) {
+    return closeKakaoConversationWindow(navigationContext.conversation_window, { cuaDriverCommand: config.cuaDriverCommand });
+  }
+  if (navigationContext?.opened_by_devtools_search && navigationContext?.conversation_target?.id) {
+    return closeKakaoConversationTargetViaDevtools(navigationContext.conversation_target);
+  }
+  return { skipped: true, reason: 'no_owned_conversation_handle' };
+}
+
+export async function captureKakaoRoomSnapshot({ config, job, dryRun = false } = {}) {
   let navigationContext = null;
   let kakaoTabEnsureResult = null;
+  let closeResult = null;
   const result = {};
-  const timings = createWorkerTimingRecorder();
-  const freshnessGuard = createJobFreshnessGuard({
-    bridgeUrl: config.bridgeUrl,
-    roomKey: job.roomKey || job.room_key || '',
-    roomRevision: job.roomRevision || job.room_revision || 0,
-    jobLogPath: config.jobLogPath,
-    jobId: job.jobId || job.id || '',
-    detectedAt: job.detectedAt || job.detected_at || job.lastEventAt || '',
-    pollIntervalMs: config.freshnessPollMs,
-    fetchImpl: config.fetchImpl || fetch
-  });
   try {
     if (!dryRun && config.ensureKakaoTab) {
       try {
         kakaoTabEnsureResult = await ensureKakaoChannelManagerTab({ url: config.kakaoChannelManagerUrl });
       } catch (error) {
-        // A transient AppleScript/Chrome tab-index failure must not discard the job:
-        // CUA navigation below can use a currently open Channel Manager list or an
-        // already-open customer room without focusing or creating a tab.
         kakaoTabEnsureResult = {
           status: 'tab_ensure_failed_nonfatal',
           error: error.message.slice(0, 500)
@@ -7834,18 +7935,56 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
         }
       }
     }
-    timings.mark('navigation');
     const terminalAcknowledgement = classifyConservativeTerminalAcknowledgement(job, navigationContext);
-    if (!dryRun && terminalAcknowledgement.matched) {
-      Object.assign(result, {
-        status: 'ai_skipped_terminal_acknowledgement',
-        terminalAcknowledgement,
-        followUpResult: { inserted: 0, skipped: true, reason: 'terminal_acknowledgement_no_action', rows: [] },
-        slackDeliveryResult: { skipped: true, reason: 'terminal_acknowledgement_no_card', results: [] },
-        autoReplyResult: { attempted: false, sent: false, reason: 'terminal_acknowledgement_no_reply' }
-      });
-      return result;
+    const snapshot = createImmutableKakaoRoomSnapshot({ job, navigationContext });
+    Object.assign(result, { snapshot, terminalAcknowledgement, kakaoTabEnsureResult, closeResult });
+    return result;
+  } finally {
+    if (!dryRun && navigationContext) {
+      try {
+        closeResult = await closeCapturedKakaoNavigation(config, navigationContext);
+      } catch (error) {
+        closeResult = { status: 'cleanup_failed', error: error.message.slice(0, 500) };
+      }
+      result.closeResult = closeResult;
     }
+  }
+}
+
+export async function prepareKakaoDecisionFromSnapshot({
+  config,
+  job,
+  capture,
+  dryRun = false,
+  fakeDecisionPath = '',
+  reportHandoffPhase = () => {}
+} = {}) {
+  const snapshot = capture?.snapshot;
+  if (!snapshot || snapshot.schema !== 'kakao-room-snapshot/v1') throw new Error('immutable Kakao room snapshot is required');
+  const navigationContext = snapshot.navigation;
+  const timings = createWorkerTimingRecorder();
+  if (!dryRun && capture?.terminalAcknowledgement?.matched) {
+    return {
+      status: 'ai_skipped_terminal_acknowledgement',
+      snapshot,
+      terminalAcknowledgement: capture.terminalAcknowledgement,
+      followUpResult: { inserted: 0, skipped: true, reason: 'terminal_acknowledgement_no_action', rows: [] },
+      slackDeliveryResult: { skipped: true, reason: 'terminal_acknowledgement_no_card', results: [] },
+      autoReplyResult: { attempted: false, sent: false, reason: 'terminal_acknowledgement_no_reply' },
+      timings: timings.snapshot()
+    };
+  }
+  const freshnessGuard = createJobFreshnessGuard({
+    bridgeUrl: config.bridgeUrl,
+    roomKey: job.roomKey || job.room_key || '',
+    roomRevision: job.roomRevision || job.room_revision || 0,
+    jobLogPath: config.jobLogPath,
+    jobId: job.jobId || job.id || '',
+    detectedAt: job.detectedAt || job.detected_at || job.lastEventAt || '',
+    pollIntervalMs: config.freshnessPollMs,
+    fetchImpl: config.fetchImpl || fetch
+  });
+  try {
     const lookupContext = await buildReadOnlyLookupContext(config, job);
     const ragContext = buildReadOnlyRagContext(config);
     const brainContext = buildBrainContext(config);
@@ -7856,8 +7995,7 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     const corrections = buildCorrectionsPromptText(config);
     const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext, brainContext, recentBotSends, corrections });
     if (dryRun) {
-      Object.assign(result, { status: 'dry_run', job: summarizeJob(job), lookupContext, ragContext, brainContext, prompt });
-      return result;
+      return { status: 'dry_run', snapshot, job: summarizeJob(job), lookupContext, ragContext, brainContext, prompt, timings: timings.snapshot() };
     }
 
     let decision;
@@ -7867,7 +8005,13 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     if (fakeDecisionPath) {
       decision = JSON.parse(fs.readFileSync(fakeDecisionPath, 'utf8'));
     } else {
-      const hermesDecision = await runHermesDecision(prompt, config, { signal: freshnessGuard.signal });
+      reportHandoffPhase('initial_hermes_in_flight');
+      let hermesDecision;
+      try {
+        hermesDecision = await runHermesDecision(prompt, config, { signal: freshnessGuard.signal });
+      } finally {
+        reportHandoffPhase('initial_hermes_finished');
+      }
       hermesOutput = hermesDecision.hermesOutput;
       decision = hermesDecision.decision;
       hermesAttempts = hermesDecision.attempts;
@@ -7906,6 +8050,7 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
         customerDbDiscountLookup = { matched: false, error: error.message.slice(0, 500) };
       }
     }
+    reportHandoffPhase('sheet_mutation_boundary');
     const sheetResult = await appendToSheet(config, sheetPayload);
     let discountPatchResult = null;
     if (sheetPayload && customerDbDiscountLookup?.discountType) {
@@ -7938,13 +8083,19 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
         };
       } else {
         try {
-          const reconciliation = await runHermesPostActionDecision({
-            config,
-            job,
-            initialDecision: decision,
-            sheetResult: authoritativeSheetResult,
-            sheetPayload
-          }, { signal: freshnessGuard.signal });
+          reportHandoffPhase('post_action_hermes_in_flight');
+          let reconciliation;
+          try {
+            reconciliation = await runHermesPostActionDecision({
+              config,
+              job,
+              initialDecision: decision,
+              sheetResult: authoritativeSheetResult,
+              sheetPayload
+            }, { signal: freshnessGuard.signal });
+          } finally {
+            reportHandoffPhase('post_action_hermes_finished');
+          }
           decision = reconciliation.decision;
           hermesAttempts += Number(reconciliation.attempts || 0);
           hermesRecovered = hermesRecovered || reconciliation.recovered === true;
@@ -7968,14 +8119,6 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
     timings.mark('sheetAndReconciliation');
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
-    const autoReplyResult = sheetResult?.success === false
-      ? (sheetResult.error_type === 'no_contact'
-          ? await maybeAutoSendReply({ config, decision, job, navigationContext })
-          : { attempted: false, sent: false, reason: 'sheet_write_rejected_no_auto_send', sheetErrorType: sheetResult.error_type })
-      : await maybeAutoSendReply({ config, decision, job, navigationContext });
-    timings.mark('autoReply');
-    await freshnessGuard.checkNow();
-    freshnessGuard.throwIfSuperseded();
     const baseFollowUpRows = [
       ...buildFollowUpRows(decision, job),
       ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)
@@ -7987,62 +8130,192 @@ async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
       decision,
       job
     );
-    const followUpRows = filterFollowUpRowsAfterAutoReply(availabilityAwareRows, autoReplyResult);
-    const caseRows = buildCanonicalFollowUpCases(decision, job, followUpRows, { autoReplySent: autoReplyResult?.sent === true });
-    let followUpResult;
-    let inquiryResult = null;
-    let manualTaskResult = null;
-    if (config.followUpRowsEnabled === false) {
-      followUpResult = { inserted: 0, skipped: true, reason: 'kakao_follow_up_rows_disabled', rows: caseRows };
-    } else if (config.twoChannelRoutingEnabled === true) {
-      try {
-        const caseResult = await upsertFollowUpCaseRows(config, caseRows);
-        followUpResult = { ...caseResult, rows: caseResult.rows };
-      } catch (error) {
-        followUpResult = { inserted: 0, error: error.message, rows: [] };
-      }
-    } else {
-      try {
-        followUpResult = await upsertFollowUpRows(config, followUpRows);
-      } catch (error) {
-        followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
-      }
+    return {
+      status: 'ai_prepared',
+      snapshot,
+      decision,
+      sheetResult,
+      sheetPayload,
+      customerDbDiscountLookup,
+      discountPatchResult,
+      existingRequestResult,
+      postActionResult,
+      availabilityAwareRows,
+      hermesAttempts,
+      hermesRecovered,
+      hermesOutputTail: hermesOutput.slice(-4000),
+      postActionOutputTail,
+      timings: timings.snapshot()
+    };
+  } catch (error) {
+    if (/superseded_by_newer_room_event/.test(String(error?.message || error || ''))) {
+      return { status: 'superseded_by_newer_room_event', snapshot, superseded: true, timings: timings.snapshot() };
     }
-    const slackDeliveryResult = config.followUpRowsEnabled === false
-      ? { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] }
-      : await deliverSlackFollowUpRows(config, followUpResult.rows || []);
-    timings.mark('followUp');
-    Object.assign(result, { status: 'ai_completed', decision, sheetResult, customerDbDiscountLookup, discountPatchResult, existingRequestResult, postActionResult, followUpResult, inquiryResult, manualTaskResult, slackDeliveryResult, autoReplyResult, hermesAttempts, hermesRecovered, hermesOutputTail: hermesOutput.slice(-4000), postActionOutputTail });
+    throw error;
+  } finally {
+    freshnessGuard.stop();
+  }
+}
+
+export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun = false, dependencies = {} } = {}) {
+  if (!prepared || !prepared.snapshot) throw new Error('prepared Kakao decision is required');
+  if (dryRun || prepared.status !== 'ai_prepared') {
+    return {
+      prepared,
+      autoReplyResult: prepared.autoReplyResult || { attempted: false, sent: false, reason: prepared.status || 'not_prepared' }
+    };
+  }
+  const freshnessGuard = createJobFreshnessGuard({
+    bridgeUrl: config.bridgeUrl,
+    roomKey: job.roomKey || job.room_key || '',
+    roomRevision: job.roomRevision || job.room_revision || 0,
+    jobLogPath: config.jobLogPath,
+    jobId: job.jobId || job.id || '',
+    detectedAt: job.detectedAt || job.detected_at || job.lastEventAt || '',
+    pollIntervalMs: config.freshnessPollMs,
+    fetchImpl: config.fetchImpl || fetch
+  });
+  let navigationContext = null;
+  let closeResult = null;
+  let result = null;
+  const openTargetChat = dependencies.openTargetChat || openKakaoTargetChatFromList;
+  const sendReply = dependencies.sendReply || maybeAutoSendReply;
+  const closeNavigation = dependencies.closeNavigation || closeCapturedKakaoNavigation;
+  try {
+    await freshnessGuard.checkNow();
+    freshnessGuard.throwIfSuperseded();
+    if (config.openTargetChat) {
+      navigationContext = await openTargetChat(job, {
+        cuaDriverCommand: config.cuaDriverCommand,
+        controlMode: config.workerControlMode,
+        cuaMinIdleSeconds: config.cuaMinIdleSeconds,
+        allowSearch: config.searchTargetChat
+      }).catch((error) => ({ status: 'navigation_failed', reason: error.message.slice(0, 500) }));
+    }
+    const freshSnapshot = createImmutableKakaoRoomSnapshot({ job, navigationContext });
+    if (freshSnapshot.roomRevision !== prepared.snapshot.roomRevision || freshSnapshot.evidenceHash !== prepared.snapshot.evidenceHash) {
+      result = {
+        prepared,
+        freshSnapshot,
+        snapshotChanged: true,
+        autoReplyResult: { attempted: false, sent: false, reason: 'kakao_snapshot_changed_before_send' },
+        closeResult
+      };
+      return result;
+    }
+    await freshnessGuard.checkNow();
+    freshnessGuard.throwIfSuperseded();
+    const autoReplyResult = prepared.sheetResult?.success === false
+      ? (prepared.sheetResult.error_type === 'no_contact'
+          ? await sendReply({ config, decision: prepared.decision, job, navigationContext })
+          : { attempted: false, sent: false, reason: 'sheet_write_rejected_no_auto_send', sheetErrorType: prepared.sheetResult.error_type })
+      : await sendReply({ config, decision: prepared.decision, job, navigationContext });
+    result = { prepared, freshSnapshot, snapshotChanged: false, autoReplyResult, closeResult };
     return result;
-	  } catch (error) {
-	    if (/superseded_by_newer_room_event/.test(String(error?.message || error || ''))) {
-	      Object.assign(result, { status: 'superseded_by_newer_room_event', superseded: true });
-	      return result;
-	    }
-	    throw error;
-	  } finally {
-	    freshnessGuard.stop();
-	    if (!dryRun && navigationContext?.conversation_window) {
-	      try {
-	        result.closeResult = await closeKakaoConversationWindow(navigationContext.conversation_window, { cuaDriverCommand: config.cuaDriverCommand });
-	        if (result.closeResult?.status && result.closeResult.status !== 'closed_conversation_window') {
-	          console.warn(`[ai-worker] Kakao conversation cleanup: ${result.closeResult.status}`);
-	        }
-	      } catch (error) {
-	        result.closeResult = { status: 'cleanup_failed', error: error.message.slice(0, 500) };
-	        console.warn(`[ai-worker] Kakao conversation cleanup failed: ${error.message}`);
-	      }
-	    } else if (!dryRun && navigationContext?.opened_by_devtools_search && navigationContext?.conversation_target?.id) {
-	      try {
-	        result.closeResult = await closeKakaoConversationTargetViaDevtools(navigationContext.conversation_target);
-	      } catch (error) {
-	        result.closeResult = { status: 'devtools_cleanup_failed', error: error.message.slice(0, 500) };
-	        console.warn(`[ai-worker] Kakao DevTools conversation cleanup failed: ${error.message}`);
-	      }
-	    }
-	    timings.mark('cleanup');
-	    result.timings = timings.snapshot();
-	  }
+  } catch (error) {
+    if (/superseded_by_newer_room_event/.test(String(error?.message || error || ''))) {
+      result = {
+        prepared,
+        superseded: true,
+        autoReplyResult: { attempted: false, sent: false, reason: 'superseded_by_newer_room_event' },
+        closeResult
+      };
+      return result;
+    }
+    throw error;
+  } finally {
+    freshnessGuard.stop();
+    if (!dryRun && navigationContext) {
+      try {
+        closeResult = await closeNavigation(config, navigationContext);
+      } catch (error) {
+        closeResult = { status: 'cleanup_failed', error: error.message.slice(0, 500) };
+      }
+      if (result) result.closeResult = closeResult;
+    }
+  }
+}
+
+export async function finalizePreparedKakaoDecision({ config, job, applied } = {}) {
+  const prepared = applied?.prepared;
+  if (!prepared) throw new Error('applied Kakao decision is required');
+  if (prepared.status !== 'ai_prepared') return prepared;
+  const autoReplyResult = applied.autoReplyResult || { attempted: false, sent: false, reason: 'missing_apply_result' };
+  if (applied.superseded === true) {
+    return {
+      ...prepared,
+      status: 'superseded_by_newer_room_event',
+      superseded: true,
+      followUpResult: { inserted: 0, skipped: true, reason: 'superseded_by_newer_room_event', rows: [] },
+      slackDeliveryResult: { skipped: true, reason: 'superseded_by_newer_room_event', results: [] },
+      autoReplyResult
+    };
+  }
+  const followUpRows = filterFollowUpRowsAfterAutoReply(prepared.availabilityAwareRows || [], autoReplyResult);
+  const caseRows = buildCanonicalFollowUpCases(prepared.decision, job, followUpRows, { autoReplySent: autoReplyResult?.sent === true });
+  let followUpResult;
+  if (config.followUpRowsEnabled === false) {
+    followUpResult = { inserted: 0, skipped: true, reason: 'kakao_follow_up_rows_disabled', rows: caseRows };
+  } else if (config.twoChannelRoutingEnabled === true) {
+    try {
+      const caseResult = await upsertFollowUpCaseRows(config, caseRows);
+      followUpResult = { ...caseResult, rows: caseResult.rows };
+    } catch (error) {
+      followUpResult = { inserted: 0, error: error.message, rows: [] };
+    }
+  } else {
+    try {
+      followUpResult = await upsertFollowUpRows(config, followUpRows);
+    } catch (error) {
+      followUpResult = { inserted: 0, error: error.message, rows: followUpRows };
+    }
+  }
+  const slackDeliveryResult = config.followUpRowsEnabled === false
+    ? { skipped: true, reason: 'kakao_follow_up_rows_disabled', results: [] }
+    : await deliverSlackFollowUpRows(config, followUpResult.rows || []);
+  return {
+    ...prepared,
+    status: applied.superseded ? 'superseded_by_newer_room_event' : 'ai_completed',
+    followUpResult,
+    inquiryResult: null,
+    manualTaskResult: null,
+    slackDeliveryResult,
+    autoReplyResult,
+    closeResult: applied.closeResult || null,
+    snapshotChanged: applied.snapshotChanged === true,
+    superseded: applied.superseded === true
+  };
+}
+
+export function loadKakaoWorkerRuntimeConfig() {
+  loadEnvFile(path.resolve(process.env.HOME || process.env.USERPROFILE || os.homedir() || '', '.hermes/.env'));
+  loadEnvFile(path.resolve(__dirname, '../kakao-dom-bridge/.env'));
+  loadEnvFile(path.resolve(__dirname, '.env'));
+  return requireConfig();
+}
+
+async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
+  const reportHandoffPhase = createWorkerHandoffPhaseReporter({ config, job });
+  reportHandoffPhase('capture');
+  try {
+    const capture = await captureKakaoRoomSnapshot({ config, job, dryRun });
+    const prepared = await prepareKakaoDecisionFromSnapshot({
+      config,
+      job,
+      capture,
+      dryRun,
+      fakeDecisionPath,
+      reportHandoffPhase
+    });
+    reportHandoffPhase('dom_apply_pending');
+    const applied = await applyPreparedKakaoDecision({ config, job, prepared, dryRun });
+    const finalized = await finalizePreparedKakaoDecision({ config, job, applied });
+    reportHandoffPhase('complete');
+    return finalized;
+  } catch (error) {
+    reportHandoffPhase('failed');
+    throw error;
+  }
 }
 
 function summarizeJob(job) {

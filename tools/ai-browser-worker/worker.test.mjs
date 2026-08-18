@@ -12,6 +12,7 @@ import * as workerModule from './worker.mjs';
 import {
   buildBrainContext,
   buildHermesPrompt,
+  calcRentalDaysForQuote,
   extractJsonObject,
   buildSheetAppendPayload,
   buildFollowUpRows,
@@ -100,6 +101,9 @@ import {
   terminateChildTree,
   runHermes,
   createJobFreshnessGuard,
+  createImmutableKakaoRoomSnapshot,
+  applyPreparedKakaoDecision,
+  finalizePreparedKakaoDecision,
   isJobSupersededByJobLog,
   buildHermesFinalJsonRecoveryPrompt,
   describeHermesDecisionFailure,
@@ -117,6 +121,134 @@ import {
   closeKakaoConversationTargetViaDevtools,
   runCli
 } from './worker.mjs';
+
+test('Kakao room snapshots are immutable and contain no live DOM handles', () => {
+  const snapshot = createImmutableKakaoRoomSnapshot({
+    job: { jobId: 'job-1', roomKey: 'chat:1', roomRevision: 3, previewText: '새 문의' },
+    capturedAt: '2026-08-18T00:00:00.000Z',
+    navigationContext: {
+      status: 'opened_conversation',
+      already_open: true,
+      conversation_target: { id: 'target-secret', webSocketDebuggerUrl: 'ws://live-handle' },
+      conversation_window: { pid: 1234, window_id: 99, element_index: 44 },
+      search: { attempted: true, query: '고객명', element_index: 88 },
+      conversation_evidence: {
+        source: 'devtools',
+        title: '고객명',
+        hint_matched: true,
+        hints: ['고객명'],
+        visible_static_text_tail: '고객: 문의합니다',
+        note: 'captured'
+      }
+    }
+  });
+
+  assert.equal(snapshot.schema, 'kakao-room-snapshot/v1');
+  assert.equal(snapshot.roomRevision, 3);
+  assert.equal(typeof snapshot.evidenceHash, 'string');
+  assert.equal(snapshot.evidenceHash.length, 64);
+  assert.equal(snapshot.navigation.conversation_evidence.title, '고객명');
+  assert.equal(JSON.stringify(snapshot).includes('target-secret'), false);
+  assert.equal(JSON.stringify(snapshot).includes('ws://'), false);
+  assert.equal(JSON.stringify(snapshot).includes('element_index'), false);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(Object.isFrozen(snapshot.navigation.conversation_evidence), true);
+  assert.throws(() => { snapshot.navigation.status = 'mutated'; }, TypeError);
+});
+
+test('worker handoff phase reporter writes an atomic per-job pre-mutation proof', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'kakao-worker-phase-'));
+  try {
+    const reporter = workerModule.createWorkerHandoffPhaseReporter({
+      config: { jobLogPath: path.join(temp, 'jobs.ndjson') },
+      job: { jobId: 'dom-safe-handoff-1' },
+      pid: 4242,
+      now: () => new Date('2026-08-18T01:00:00.000Z')
+    });
+
+    reporter('initial_hermes_in_flight');
+
+    const state = JSON.parse(fs.readFileSync(reporter.statePath, 'utf8'));
+    assert.equal(state.schema, 'kakao-worker-handoff-phase/v1');
+    assert.equal(state.jobId, 'dom-safe-handoff-1');
+    assert.equal(state.workerPid, 4242);
+    assert.equal(state.phase, 'initial_hermes_in_flight');
+    assert.equal(state.recordedAt, '2026-08-18T01:00:00.000Z');
+    assert.equal(fs.readdirSync(path.dirname(reporter.statePath)).some((name) => name.endsWith('.tmp')), false);
+
+    const blocked = path.join(temp, 'not-a-directory');
+    fs.writeFileSync(blocked, 'x');
+    const unavailableReporter = workerModule.createWorkerHandoffPhaseReporter({
+      config: { jobLogPath: path.join(blocked, 'jobs.ndjson') },
+      job: { jobId: 'dom-safe-handoff-2' }
+    });
+    assert.doesNotThrow(() => unavailableReporter('initial_hermes_in_flight'));
+    assert.equal(unavailableReporter('initial_hermes_in_flight'), null);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('apply phase rechecks the snapshot and passes Hermes prose through without reinterpretation', async () => {
+  const job = {
+    jobId: 'job-apply-1',
+    roomKey: 'chat:apply',
+    roomRevision: 4,
+    detectedAt: '2026-08-18T00:00:00.000Z'
+  };
+  const navigationContext = {
+    status: 'opened_conversation',
+    conversation_evidence: {
+      source: 'devtools',
+      title: '고객명',
+      hint_matched: true,
+      hints: ['고객명'],
+      visible_static_text_tail: '고객: 동일한 최신 문의'
+    }
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, navigationContext });
+  const decision = { reply_decision: { text: 'Hermes가 작성한 원문 그대로' } };
+  let sentDecision = null;
+  const applied = await applyPreparedKakaoDecision({
+    config: { openTargetChat: true, bridgeUrl: '', jobLogPath: '', freshnessPollMs: 1000 },
+    job,
+    prepared: { status: 'ai_prepared', snapshot, decision, sheetResult: null },
+    dependencies: {
+      openTargetChat: async () => navigationContext,
+      sendReply: async ({ decision: incoming }) => {
+        sentDecision = incoming;
+        return { attempted: true, sent: true };
+      },
+      closeNavigation: async () => ({ status: 'closed' })
+    }
+  });
+
+  assert.equal(applied.snapshotChanged, false);
+  assert.equal(applied.autoReplyResult.sent, true);
+  assert.equal(sentDecision, decision, 'plumbing must not rewrite or reconstruct Hermes output');
+});
+
+test('superseded prepared work never creates a stale card or customer reply', async () => {
+  const result = await finalizePreparedKakaoDecision({
+    config: {},
+    job: { roomKey: 'chat:old' },
+    applied: {
+      superseded: true,
+      prepared: {
+        status: 'ai_prepared',
+        snapshot: { schema: 'kakao-room-snapshot/v1' },
+        decision: { should_write_to_sheet: false },
+        availabilityAwareRows: [{ title: 'must not be delivered' }]
+      },
+      autoReplyResult: { attempted: false, sent: false, reason: 'superseded_by_newer_room_event' }
+    }
+  });
+
+  assert.equal(result.status, 'superseded_by_newer_room_event');
+  assert.equal(result.superseded, true);
+  assert.equal(result.followUpResult.skipped, true);
+  assert.deepEqual(result.followUpResult.rows, []);
+});
 
 test('buildCanonicalFollowUpCases suppresses inquiry duplication when human work exists', () => {
   const cases = buildCanonicalFollowUpCases(
@@ -751,6 +883,22 @@ test('buildHermesPrompt keeps code as plumbing and requires AI-visible Kakao ver
   assert.match(prompt, /job-1/);
 });
 
+test('quote calculation and confirmed-policy prompt use the owner-confirmed 3-hour grace', () => {
+  assert.equal(
+    calcRentalDaysForQuote('2026-08-18', '09:00', '2026-08-19', '12:00'),
+    1
+  );
+  assert.equal(
+    calcRentalDaysForQuote('2026-08-18', '09:00', '2026-08-19', '12:01'),
+    2
+  );
+
+  const prompt = buildHermesPrompt({ id: 'job-rental-grace', preview_text: '대여 기간 견적' });
+  assert.match(prompt, /\+3시간 동일/);
+  assert.match(prompt, /3시간 초과 \+1일/);
+  assert.doesNotMatch(prompt, /\+6시간|6시간 초과/);
+});
+
 test('buildHermesPrompt bounds routine work before the global timeout without sacrificing evidence', () => {
   const prompt = buildHermesPrompt({ id: 'job-tool-budget', preview_text: '예약 문의' });
   assert.doesNotMatch(prompt, /No artificial low tool\/UI cap/i);
@@ -1219,15 +1367,29 @@ test('buildReadOnlyLookupContext reads kill switch from GAS header-only read res
   assert.equal(context.kill_switch.status, 'active');
 });
 
-test('buildHermesPrompt injects read-only lookup context and permits terminal only for safe GET lookup', () => {
+test('buildHermesPrompt gives AI one bounded batch read tool without exposing raw GAS URLs', () => {
   const prompt = buildHermesPrompt(
     { id: 'job-4', preview_text: 'FX6' },
-    { lookupContext: { kill_switch: { status: 'active' }, lookup_policy: { mode: 'read_only' } } }
+    {
+      lookupContext: {
+        kill_switch: { status: 'active' },
+        lookup_policy: { mode: 'read_only' },
+        lookup_tool: {
+          command: 'node.exe scripts/windows/village-live-query.js batch',
+          domains: ['schedule', 'inventory', 'customer']
+        },
+        lookup_urls: { unsafe_prompt_leak: 'https://script.google.com/macros/s/example/exec?key=secret' }
+      }
+    }
   );
 
-  assert.match(prompt, /READ-ONLY GAS LOOKUP CONTEXT/);
-  assert.match(prompt, /terminal.*read-only GAS GET/s);
+  assert.match(prompt, /READ-ONLY VILLAGE LIVE LOOKUP/);
+  assert.match(prompt, /village-live-query\.js batch/);
+  assert.match(prompt, /AI.*queries.*interpret/s);
+  assert.match(prompt, /one batch/i);
   assert.match(prompt, /write\/insert\/register\/send APIs.*금지/s);
+  assert.doesNotMatch(prompt, /script\.google\.com\/macros/);
+  assert.doesNotMatch(prompt, /unsafe_prompt_leak|key=secret/);
 });
 
 test('buildHermesPrompt requires existing RQ availability result before follow-up reporting', () => {
