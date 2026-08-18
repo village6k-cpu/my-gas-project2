@@ -556,7 +556,7 @@ function compactQueueAuditText(value, maxLength = 1200) {
   return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 1))}…` : text;
 }
 
-function compactQueueAuditRecord(filename, object = {}) {
+export function compactQueueAuditRecord(filename, object = {}) {
   // Queue files are audit/status streams, not the source of truth: the full
   // normalized event is already persisted in Supabase. Logging raw extension
   // DOM snapshots here used tens of GB per day and eventually made the bridge
@@ -580,6 +580,7 @@ function compactQueueAuditRecord(filename, object = {}) {
         code: result.code ?? null,
         signal: result.signal || null,
         timedOut: result.timedOut === true,
+        ...(result.audit ? { audit: result.audit } : {}),
         stdoutTail: compactQueueAuditText(result.stdout, 1600),
         stderrTail: compactQueueAuditText(result.stderr, 1600)
       }
@@ -965,7 +966,8 @@ export function createKakaoPhaseScheduler({
   apply,
   finalize,
   manualSend,
-  decisionConcurrency = 2
+  decisionConcurrency = 2,
+  now = Date.now
 } = {}) {
   for (const [name, fn] of Object.entries({ capture, decide, apply, finalize, manualSend })) {
     if (typeof fn !== 'function') throw new TypeError(`${name} must be a function`);
@@ -974,10 +976,36 @@ export function createKakaoPhaseScheduler({
   const decisionLane = createBoundedExecutor(decisionConcurrency);
   return {
     async run(job) {
-      const snapshot = await domLane.run(() => capture(job));
-      const prepared = await decisionLane.run(() => decide(snapshot, job));
-      const applied = await domLane.run(() => apply(prepared, job));
-      return finalize(applied, job);
+      const totalStartedAt = now();
+      const phaseTimings = {};
+      const captureQueuedAt = now();
+      const snapshot = await domLane.run(async () => {
+        const startedAt = now();
+        phaseTimings.captureQueueMs = startedAt - captureQueuedAt;
+        try { return await capture(job); }
+        finally { phaseTimings.captureMs = now() - startedAt; }
+      });
+      const decisionQueuedAt = now();
+      const prepared = await decisionLane.run(async () => {
+        const startedAt = now();
+        phaseTimings.decisionQueueMs = startedAt - decisionQueuedAt;
+        try { return await decide(snapshot, job); }
+        finally { phaseTimings.decisionMs = now() - startedAt; }
+      });
+      const applyQueuedAt = now();
+      const applied = await domLane.run(async () => {
+        const startedAt = now();
+        phaseTimings.applyQueueMs = startedAt - applyQueuedAt;
+        try { return await apply(prepared, job); }
+        finally { phaseTimings.applyMs = now() - startedAt; }
+      });
+      const finalizeStartedAt = now();
+      const finalized = await finalize(applied, job);
+      phaseTimings.finalizeMs = now() - finalizeStartedAt;
+      phaseTimings.totalMs = now() - totalStartedAt;
+      return finalized && typeof finalized === 'object'
+        ? { ...finalized, phaseTimings }
+        : { value: finalized, phaseTimings };
     },
     runManual(payload) {
       return domLane.run(() => manualSend(payload));
@@ -985,6 +1013,33 @@ export function createKakaoPhaseScheduler({
     status() {
       return { dom: domLane.status(), decision: decisionLane.status() };
     }
+  };
+}
+
+function pickFiniteTimingFields(value, names) {
+  const result = {};
+  for (const name of names) {
+    const number = Number(value?.[name]);
+    if (Number.isFinite(number) && number >= 0) result[name] = Math.round(number);
+  }
+  return result;
+}
+
+export function buildWorkerResultAudit(payload = {}, elapsedMs = 0) {
+  const status = String(payload?.status || '').trim().slice(0, 80);
+  const hermesAttempts = Math.max(0, Math.floor(Number(payload?.hermesAttempts || 0) || 0));
+  return {
+    status,
+    elapsedMs: Math.max(0, Math.round(Number(elapsedMs) || 0)),
+    hermesAttempts,
+    hermesRecovered: payload?.hermesRecovered === true,
+    timings: pickFiniteTimingFields(payload?.timings, [
+      'lookupMs', 'hermesMs', 'sheetAndReconciliationMs', 'totalMs'
+    ]),
+    phaseTimings: pickFiniteTimingFields(payload?.phaseTimings, [
+      'captureQueueMs', 'captureMs', 'decisionQueueMs', 'decisionMs',
+      'applyQueueMs', 'applyMs', 'finalizeMs', 'totalMs'
+    ])
   };
 }
 
@@ -1265,6 +1320,7 @@ function getKakaoPhaseScheduler() {
 async function runPhasedWorker(job) {
   const startedAt = Date.now();
   const payload = await getKakaoPhaseScheduler().run(job);
+  const elapsedMs = Date.now() - startedAt;
   const result = {
     code: 0,
     signal: null,
@@ -1272,7 +1328,8 @@ async function runPhasedWorker(job) {
     stdout: JSON.stringify(payload),
     stderr: '',
     phased: true,
-    elapsedMs: Date.now() - startedAt
+    elapsedMs,
+    audit: buildWorkerResultAudit(payload, elapsedMs)
   };
   appendNdjson('worker-results.ndjson', { at: nowIso(), jobId: job.jobId, result });
   return result;

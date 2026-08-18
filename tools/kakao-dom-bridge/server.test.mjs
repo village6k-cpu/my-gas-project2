@@ -6,7 +6,9 @@ process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
 const {
   buildCorsHeaders,
   buildHealthConfig,
+  buildWorkerResultAudit,
   buildWorkerTreeKillInvocation,
+  compactQueueAuditRecord,
   createKakaoPhaseScheduler,
   registerAcceptedRoomEvent,
   semanticRoomEventIdentity,
@@ -76,9 +78,35 @@ test('slow Hermes decisions release the DOM lane for another room and manual sen
   assert.equal(maxDomActive, 1, 'capture/apply/manual DOM work must stay serial');
   assert.equal(maxDecisionActive, 2, 'two rooms may think concurrently');
   assert.ok(!events.includes('apply:A:start'), 'room A is still thinking');
+  assert.equal(typeof roomBResult.phaseTimings.captureQueueMs, 'number');
+  assert.equal(typeof roomBResult.phaseTimings.decisionMs, 'number');
+  assert.equal(typeof roomBResult.phaseTimings.applyMs, 'number');
+  assert.equal(typeof roomBResult.phaseTimings.totalMs, 'number');
 
   firstDecision.resolve();
   await roomA;
+});
+
+test('worker result audit keeps phase timings and AI attempt counts without customer payload', () => {
+  const audit = buildWorkerResultAudit({
+    status: 'ai_completed',
+    hermesAttempts: 3,
+    hermesRecovered: true,
+    timings: { lookupMs: 100, hermesMs: 2000, sheetAndReconciliationMs: 500, totalMs: 2600 },
+    phaseTimings: { captureQueueMs: 4, captureMs: 50, decisionQueueMs: 8, decisionMs: 2600, applyQueueMs: 2, applyMs: 30, finalizeMs: 20, totalMs: 2714 },
+    decision: { reason: 'private customer content' },
+    snapshot: { navigation: { conversation_evidence: { visible_static_text_tail: 'private chat' } } }
+  }, 2714);
+  const record = compactQueueAuditRecord('worker-results.ndjson', {
+    at: '2026-08-18T00:00:00.000Z',
+    jobId: 'dom-test',
+    result: { code: 0, signal: null, timedOut: false, stdout: 'private stdout', stderr: '', audit }
+  });
+
+  assert.deepEqual(record.result.audit, audit);
+  assert.equal(record.result.audit.status, 'ai_completed');
+  assert.equal(record.result.audit.phaseTimings.decisionMs, 2600);
+  assert.doesNotMatch(JSON.stringify(record.result.audit), /private|customer|chat/);
 });
 
 test('room revisions ignore unread-badge duplicates and supersede older semantic turns', () => {

@@ -1367,15 +1367,29 @@ test('buildReadOnlyLookupContext reads kill switch from GAS header-only read res
   assert.equal(context.kill_switch.status, 'active');
 });
 
-test('buildHermesPrompt injects read-only lookup context and permits terminal only for safe GET lookup', () => {
+test('buildHermesPrompt gives AI one bounded batch read tool without exposing raw GAS URLs', () => {
   const prompt = buildHermesPrompt(
     { id: 'job-4', preview_text: 'FX6' },
-    { lookupContext: { kill_switch: { status: 'active' }, lookup_policy: { mode: 'read_only' } } }
+    {
+      lookupContext: {
+        kill_switch: { status: 'active' },
+        lookup_policy: { mode: 'read_only' },
+        lookup_tool: {
+          command: 'node.exe scripts/windows/village-live-query.js batch',
+          domains: ['schedule', 'inventory', 'customer']
+        },
+        lookup_urls: { unsafe_prompt_leak: 'https://script.google.com/macros/s/example/exec?key=secret' }
+      }
+    }
   );
 
-  assert.match(prompt, /READ-ONLY GAS LOOKUP CONTEXT/);
-  assert.match(prompt, /terminal.*read-only GAS GET/s);
+  assert.match(prompt, /READ-ONLY VILLAGE LIVE LOOKUP/);
+  assert.match(prompt, /village-live-query\.js batch/);
+  assert.match(prompt, /AI.*queries.*interpret/s);
+  assert.match(prompt, /one batch/i);
   assert.match(prompt, /write\/insert\/register\/send APIs.*금지/s);
+  assert.doesNotMatch(prompt, /script\.google\.com\/macros/);
+  assert.doesNotMatch(prompt, /unsafe_prompt_leak|key=secret/);
 });
 
 test('buildHermesPrompt requires existing RQ availability result before follow-up reporting', () => {

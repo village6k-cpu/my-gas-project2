@@ -8,6 +8,7 @@ const {
   buildCatalogRequest,
   buildSearchRequest,
   lookupVillage,
+  lookupVillageBatch,
   parseArgs,
   readVillageCatalog,
   readVillageCatalogs
@@ -99,6 +100,46 @@ test('lookup rejects unknown domains instead of falling back to broad drive sear
     () => lookupVillage({ config, domain: 'everything', query: 'x', fetchImpl: async () => {} }),
     /Unknown Village lookup domain/i
   );
+});
+
+test('one AI-selected batch runs distinct read-only lookups together and preserves partial failures', async () => {
+  const requests = [];
+  const result = await lookupVillageBatch({
+    config,
+    queries: [
+      { domain: 'schedule', query: 'RQ-260818-001' },
+      { domain: 'inventory', query: 'FX6' },
+      { domain: 'schedule', query: 'RQ-260818-001' },
+      { domain: 'customer', query: '예약자' }
+    ],
+    fetchImpl: async (url) => {
+      requests.push(url);
+      const parsed = new URL(url);
+      const sheet = parsed.searchParams.get('sheet');
+      if (sheet === '고객DB') throw new Error('synthetic customer lookup failure');
+      return {
+        ok: true,
+        json: async () => ({ sheet, headers: ['이름'], count: 1, results: [[sheet]] })
+      };
+    },
+    timeoutMs: 1_000
+  });
+
+  assert.equal(result.ok, false, 'one failed query must remain an explicit evidence gap');
+  assert.equal(result.queries.length, 3, 'identical AI queries must execute once');
+  assert.equal(requests.length, 6, 'schedule(3) + inventory(2) + customer(1) run once each');
+  assert.equal(result.queries[0].result.ok, true);
+  assert.equal(result.queries[2].result.ok, false);
+  assert.match(result.queries[2].result.error, /synthetic customer lookup failure/);
+  assert.doesNotMatch(JSON.stringify(result), /synthetic-key/);
+});
+
+test('batch CLI accepts stdin JSON only and keeps the normal lookup contract intact', () => {
+  assert.deepEqual(parseArgs(['batch']), {
+    command: 'batch',
+    envFile: 'C:\\Village\\village-ai\\.env.finance'
+  });
+  assert.throws(() => parseArgs(['batch', '--domain', 'schedule']), /invalid or incomplete option/i);
 });
 
 test('catalog read gives the AI the raw set master in one read-only request', async () => {

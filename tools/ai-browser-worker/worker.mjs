@@ -454,6 +454,15 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
       allowed_methods: ['GET'],
       forbidden_actions: ['write', 'append', 'run', 'insertAndCheckRequest', 'updateRequest', 'deleteRequest', '발송승인', '등록', 'send']
     },
+    lookup_tool: {
+      command: 'node.exe scripts/windows/village-live-query.js batch',
+      stdin_schema: {
+        queries: [{ domain: 'schedule | inventory | customer', query: 'AI-selected exact lookup term', column: 'optional column' }]
+      },
+      domains: ['schedule', 'inventory', 'customer'],
+      max_queries: 12,
+      behavior: 'Runs AI-selected read-only searches concurrently, deduplicates identical queries, and preserves each failure as an explicit evidence gap.'
+    },
     lookup_urls: {
       kill_switch_read: killSwitchUrl,
       set_master_search_template: buildGasReadUrl(gasApiUrl, sheetApiKey, {
@@ -545,15 +554,15 @@ export function buildCompactJobForPrompt(job = {}) {
 }
 
 export function buildHermesPrompt(job, options = {}) {
-  const gasApiUrl = options.gasApiUrl || DEFAULT_GAS_API_URL;
   const lookupPromptContext = options.lookupContext
     ? {
         kill_switch: options.lookupContext.kill_switch,
-        lookup_urls: options.lookupContext.lookup_urls
+        lookup_policy: options.lookupContext.lookup_policy,
+        lookup_tool: options.lookupContext.lookup_tool
       }
     : null;
   const lookupContextText = lookupPromptContext
-    ? `\nREAD-ONLY GAS LOOKUP CONTEXT:\n${JSON.stringify(lookupPromptContext, null, 2)}\nUse only GET/read-only URLs above; terminal may use read-only GAS GET only. write/insert/register/send APIs are 금지. AI decides what to query and how to interpret results.\n`
+    ? `\nREAD-ONLY VILLAGE LIVE LOOKUP:\n${JSON.stringify(lookupPromptContext, null, 2)}\nAfter reading the Kakao evidence, the AI chooses all necessary queries and interprets every returned row. Send those queries together in one batch through the read-only wrapper; do not hand-compose raw GAS/curl/PowerShell requests or repeat a successful query. A failed batch item is an evidence gap, not permission to guess or mutate. write/insert/register/send APIs are 금지.\n`
     : '';
   const navigationContextText = options.navigationContext
     ? `\nBROWSER NAVIGATION RESULT:\n${JSON.stringify(options.navigationContext, null, 2)}\n\nThis was deterministic UI navigation and live AX text capture only. If status is opened_target_chat and conversation_evidence.hint_matched is true, treat conversation_evidence.visible_static_text_tail as current Kakao screen evidence to inspect first; do not spend extra actions re-opening the chat list unless the evidence is insufficient or mismatched. Do not treat the navigation step itself as business classification evidence; the AI must still judge from the visible Kakao evidence.\n`
@@ -648,7 +657,7 @@ ${currentConfirmedPolicyText}
 ${navigationContextText}${recentBotSendsText}${correctionsText}
 ${lookupContextText}${ragContextText}${brainContextText}
 SHEETS TOOL AVAILABLE VIA GAS API:
-- URL: ${gasApiUrl}
+- The outer worker owns the configured GAS endpoint; Hermes does not need its raw URL or credential.
 - Target sheet for reservation inquiry candidates: 확인요청
 - Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true. Be 적극적: if the latest customer turn is a reservation-format request with enough fields for a review row, set should_write_to_sheet=true.
 - Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write when appropriate.
