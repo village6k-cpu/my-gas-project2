@@ -46,12 +46,13 @@ const properties = new Map([
   ['VILLAGE_OPS_API_URL', 'https://script.google.com/macros/s/example/exec']
 ]);
 const context = vm.createContext({
+  Buffer,
   JSON,
   String,
   Error,
   Utilities: {
-    computeHmacSha256Signature: () => [1, 2, 3],
-    base64EncodeWebSafe: () => 'reservation-secret-0123456789abcdef'
+    computeHmacSha256Signature: (value) => Array.from(Buffer.from(String(value), 'utf8')),
+    base64EncodeWebSafe: (bytes) => Buffer.from(bytes).toString('base64url')
   },
   PropertiesService: {
     getScriptProperties: () => ({ getProperty: (key) => properties.get(key) || null })
@@ -70,6 +71,7 @@ const context = vm.createContext({
 });
 vm.runInContext(extractFunction('getVillageOpsApiUrl_'), context);
 vm.runInContext(extractFunction('getTradeIdReservationApiKey_'), context);
+vm.runInContext(extractFunction('getTradeIdReservationOperationId_'), context);
 vm.runInContext(extractFunction('reserveExternalTradeId_'), context);
 
 const result = context.reserveExternalTradeId_({
@@ -79,8 +81,24 @@ assert.equal(result.tradeId, '260818-007');
 assert.equal(fetchCalls.length, 1);
 const posted = JSON.parse(fetchCalls[0].options.payload);
 assert.equal(posted.action, 'reserveTradeId');
-assert.equal(posted.operationId, 'confirm-register:RQ-260818-001');
-assert.equal(posted.key, 'reservation-secret-0123456789abcdef');
+assert.match(posted.operationId, /^confirm-register:RQ-260818-001:[A-Za-z0-9_-]{16}$/);
+assert.doesNotMatch(posted.operationId, /테스트고객|010-1234-5678/,
+  'the idempotency key must not expose customer PII');
+assert.ok(posted.key, 'the server-only reservation key must be included');
+
+context.reserveExternalTradeId_({
+  reqID: 'RQ-260818-001', customerName: '다른고객', phone: '010-9999-9999', startDate: '2026-08-21'
+});
+const reusedReqIdPayload = JSON.parse(fetchCalls[1].options.payload);
+assert.notEqual(reusedReqIdPayload.operationId, posted.operationId,
+  'a historically reused request ID must not reuse another customer reservation receipt');
+
+context.reserveExternalTradeId_({
+  reqID: 'RQ-260818-001', customerName: '테스트고객', phone: '010-1234-5678', startDate: '2026-08-20'
+});
+const repeatedPayload = JSON.parse(fetchCalls[2].options.payload);
+assert.equal(repeatedPayload.operationId, posted.operationId,
+  'the same request identity must keep a stable idempotency key across retries');
 
 properties.set('POPBILL_SECRET_KEY', '');
 assert.throws(
@@ -90,6 +108,6 @@ assert.throws(
   /전용 인증키 미설정/,
   'the browser-visible default key must never authorize trade ID reservation'
 );
-assert.equal(fetchCalls.length, 1, 'missing secure key must fail before any network call');
+assert.equal(fetchCalls.length, 3, 'missing secure key must fail before any network call');
 
 console.log('register-ledger-reservation-boundary.test.js OK');

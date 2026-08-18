@@ -7970,6 +7970,20 @@ function getTradeIdReservationApiKey_(props) {
   ).replace(/=+$/g, "");
 }
 
+function getTradeIdReservationOperationId_(fields, apiKey) {
+  fields = fields || {};
+  var reqID = String(fields.reqID || "").trim();
+  var customerName = String(fields.customerName || "").trim().replace(/\s+/g, " ");
+  var phoneKey = String(fields.phone || "").replace(/\D/g, "");
+  var startDate = String(fields.startDate || "").trim();
+  var identity = [startDate, customerName, phoneKey].join("\u001f");
+  var digest = Utilities.base64EncodeWebSafe(
+    Utilities.computeHmacSha256Signature(identity, apiKey)
+  ).replace(/=+$/g, "").slice(0, 16);
+  if (digest.length !== 16) throw new Error("거래ID 선점 식별자 생성 실패");
+  return "confirm-register:" + reqID + ":" + digest;
+}
+
 /** 외부 거래원장 자체의 ScriptLock 안에서 신규 거래ID와 기준 행을 먼저 선점한다. */
 function reserveExternalTradeId_(fields) {
   fields = fields || {};
@@ -7984,11 +7998,12 @@ function reserveExternalTradeId_(fields) {
   var props = PropertiesService.getScriptProperties();
   var apiUrl = getVillageOpsApiUrl_(props);
   var apiKey = getTradeIdReservationApiKey_(props);
+  var operationId = getTradeIdReservationOperationId_(fields, apiKey);
   if (!apiUrl) throw new Error("거래ID 선점 API URL 미설정");
   var payload = {
     action: "reserveTradeId",
     key: apiKey,
-    operationId: "confirm-register:" + reqID,
+    operationId: operationId,
     customerName: customerName,
     phone: phone,
     startDate: startDate
