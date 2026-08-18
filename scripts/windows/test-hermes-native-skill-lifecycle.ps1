@@ -329,9 +329,11 @@ $protectedLivePaths = @(
     (Join-Path $hermesRoot 'config.yaml'),
     (Join-Path $hermesRoot 'active_profile'),
     (Join-Path $hermesRoot 'skills\productivity\village-operations\SKILL.md'),
+    (Join-Path $hermesRoot 'skills\productivity\village-capability-development\SKILL.md'),
     (Join-Path $hermesRoot 'skills\village\village-brain-first\SKILL.md'),
     (Join-Path $profilesRoot 'kakaoworker\config.yaml'),
     (Join-Path $profilesRoot 'kakaoworker\skills\productivity\village-operations\SKILL.md'),
+    (Join-Path $profilesRoot 'kakaoworker\skills\productivity\village-capability-development\SKILL.md'),
     (Join-Path $profilesRoot 'kakaoworker\skills\village\village-brain-first\SKILL.md')
 )
 if ($ProfileShape -eq 'kakaoworker') {
@@ -435,8 +437,9 @@ terminal:
 
     $overlaySkillsRoot = Join-Path $repoRoot 'scripts\windows\hermes-profile-overlay\skills'
     $operationsSource = Join-Path $overlaySkillsRoot 'productivity\village-operations'
+    $capabilitySource = Join-Path $overlaySkillsRoot 'productivity\village-capability-development'
     $brainSource = Join-Path $overlaySkillsRoot 'village\village-brain-first'
-    foreach ($requiredSource in @($operationsSource, $brainSource)) {
+    foreach ($requiredSource in @($operationsSource, $capabilitySource, $brainSource)) {
         if (-not (Test-Path -LiteralPath $requiredSource -PathType Container)) {
             throw "Candidate skill package is missing: $requiredSource"
         }
@@ -451,11 +454,15 @@ terminal:
             -Candidate (Join-Path $operationsParent 'village-operations') `
             -ProfileRoot $resolvedProfileHome
         Remove-IsolatedDirectory `
+            -Candidate (Join-Path $operationsParent 'village-capability-development') `
+            -ProfileRoot $resolvedProfileHome
+        Remove-IsolatedDirectory `
             -Candidate (Join-Path $brainParent 'village-brain-first') `
             -ProfileRoot $resolvedProfileHome
     }
     New-Item -ItemType Directory -Path $operationsParent, $brainParent -Force | Out-Null
     Copy-Item -LiteralPath $operationsSource -Destination $operationsParent -Recurse
+    Copy-Item -LiteralPath $capabilitySource -Destination $operationsParent -Recurse
     Copy-Item -LiteralPath $brainSource -Destination $brainParent -Recurse
 
     [Environment]::SetEnvironmentVariable('HERMES_HOME', $resolvedProfileHome, 'Process')
@@ -491,6 +498,9 @@ print(json.dumps({"success": True, "name": "native-lifecycle-marker"}))
     if ($unmanaged -notmatch 'village-operations') {
         throw 'village-operations must remain owner-managed in the isolated lifecycle test.'
     }
+    if ($unmanaged -notmatch 'village-capability-development') {
+        throw 'village-capability-development must remain owner-managed in the isolated lifecycle test.'
+    }
     if ($unmanaged -notmatch 'village-history-evidence') {
         throw 'Village Brain must remain user-managed in the isolated lifecycle test.'
     }
@@ -504,6 +514,15 @@ print(json.dumps({"success": True, "name": "native-lifecycle-marker"}))
         if (($null -ne $creatorProperty -and $creatorProperty.Value -eq 'agent') -or
             ($null -ne $legacyAgentProperty -and $legacyAgentProperty.Value -eq $true)) {
             throw 'village-operations must remain owner-managed, not curator-managed.'
+        }
+    }
+    $capabilityUsageProperty = $usage.PSObject.Properties['village-capability-development']
+    if ($null -ne $capabilityUsageProperty) {
+        $creatorProperty = $capabilityUsageProperty.Value.PSObject.Properties['created_by']
+        $legacyAgentProperty = $capabilityUsageProperty.Value.PSObject.Properties['agent_created']
+        if (($null -ne $creatorProperty -and $creatorProperty.Value -eq 'agent') -or
+            ($null -ne $legacyAgentProperty -and $legacyAgentProperty.Value -eq $true)) {
+            throw 'village-capability-development must remain owner-managed, not curator-managed.'
         }
     }
     if ($usage.'native-lifecycle-marker'.created_by -ne 'agent') {
@@ -583,7 +602,7 @@ print(json.dumps({"success": True, "viewed": True, "patched": True}))
 
     $catalogAfterRestart = Invoke-Hermes skills list
     Write-Utf8NoBom -Path (Join-Path $evidenceRoot 'skills-list-after-restart.txt') -Content $catalogAfterRestart
-    $expectedSkills = @('village-operations', 'village-history-evidence', 'native-lifecycle-marker')
+    $expectedSkills = @('village-operations', 'village-capability-development', 'village-history-evidence', 'native-lifecycle-marker')
     Assert-NativeSkillRediscovery `
         -SkillNames $expectedSkills `
         -Phase 'fresh process restart' `
@@ -641,6 +660,7 @@ print(json.dumps({"success": True, "viewed": True, "patched": True}))
 
     $finalUsage = Get-Content -LiteralPath $usagePath -Raw | ConvertFrom-Json
     $finalBrainUsageProperty = $finalUsage.PSObject.Properties['village-history-evidence']
+    $finalCapabilityUsageProperty = $finalUsage.PSObject.Properties['village-capability-development']
     $report = [ordered]@{
         ok = $true
         profileHome = $resolvedProfileHome
@@ -653,6 +673,7 @@ print(json.dumps({"success": True, "viewed": True, "patched": True}))
         restartMarkerPresentBeforeExplicitRollback = $restartLearningProof.restartMarkerPresent
         explicitRollbackRestoredBaseline = $restartLearningProof.explicitRollbackRestoredBaseline
         operationsCreatedBy = $finalUsage.'village-operations'.created_by
+        capabilityCreatedBy = if ($null -eq $finalCapabilityUsageProperty) { $null } else { $finalCapabilityUsageProperty.Value.created_by }
         brainCreatedBy = if ($null -eq $finalBrainUsageProperty) { $null } else { $finalBrainUsageProperty.Value.created_by }
         markerCreatedBy = $finalUsage.'native-lifecycle-marker'.created_by
         evidenceRoot = $evidenceRoot

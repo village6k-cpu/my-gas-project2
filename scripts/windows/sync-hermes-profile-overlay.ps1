@@ -35,6 +35,7 @@ $rootExcludedSkills = @(
     'minecraft-modpack-server',
     'obliteratus',
     'village-operations',
+    'village-capability-development',
     'village-brain-first',
     'village-history-evidence',
     'village-runtime-router',
@@ -54,7 +55,8 @@ $skillNameAliases = @{
     'village-brain-first' = 'village-history-evidence'
 }
 $ownerManagedSkillNames = @(
-    'village-operations'
+    'village-operations',
+    'village-capability-development'
 )
 $overlaySkillsRoot = Join-Path $PSScriptRoot 'hermes-profile-overlay\skills'
 $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -951,6 +953,12 @@ try {
     Assert-PackageCopy -Source $confirmRequestSource -Destination $confirmRequestDestination
     [void]$copiedNames.Add('village-confirm-request')
 
+    $capabilityDevelopmentSource = Join-Path $overlaySkillsRoot 'productivity\village-capability-development'
+    $capabilityDevelopmentDestination = Join-Path $stagingRoot 'productivity\village-capability-development'
+    Copy-SkillPackage -Source $capabilityDevelopmentSource -Destination $capabilityDevelopmentDestination
+    Assert-PackageCopy -Source $capabilityDevelopmentSource -Destination $capabilityDevelopmentDestination
+    [void]$copiedNames.Add('village-capability-development')
+
     if ($ProfileScoped.IsPresent) {
         if (-not (Test-Path -LiteralPath (Join-Path $rpaSource 'SKILL.md') -PathType Leaf)) {
             throw "Profile-scoped parity source is missing '$rpaSource'."
@@ -999,7 +1007,7 @@ try {
     if (@($rootNames | Select-Object -Unique).Count -ne $rootNames.Count) {
         throw 'Rebuilt Windows skill tree contains duplicate skill names.'
     }
-    foreach ($required in @('village-history-evidence', 'village-operations', 'village-confirm-request', 'productivity-integrations')) {
+    foreach ($required in @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request', 'productivity-integrations')) {
         if ($rootNames -notcontains $required) {
             throw "Rebuilt Windows skill tree is missing '$required'."
         }
@@ -1084,7 +1092,7 @@ try {
         preservedSkills = @($preservation.skills)
         preservedFiles = @($preservation.files).Count
         metadata      = $metadata
-        canonical     = @('village-history-evidence', 'village-operations', 'village-confirm-request')
+        canonical     = @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request')
         profileScoped = @('rpa-automation-operations')
         excluded      = $rootExcludedSkills
     } | ConvertTo-Json -Depth 4 -Compress

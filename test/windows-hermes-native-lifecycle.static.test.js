@@ -79,8 +79,10 @@ test('native lifecycle harness preserves owner-managed contracts and focused age
   assert.match(source, /profile\s+create/i);
   assert.match(source, /--no-skills/i);
   assert.match(source, /village-operations/i);
+  assert.match(source, /village-capability-development/i);
   assert.match(source, /village-history-evidence/i);
   assert.doesNotMatch(source, /curator\s+adopt[^\r\n]*village-operations/i);
+  assert.doesNotMatch(source, /curator\s+adopt[^\r\n]*village-capability-development/i);
   assert.doesNotMatch(source, /curator\s+adopt[^\r\n]*village-history-evidence/i);
   assert.match(source, /curator\s+run[^\r\n]*--dry-run[^\r\n]*--consolidate/i);
   assert.match(source, /curator\s+backup[^\r\n]*--reason/i);

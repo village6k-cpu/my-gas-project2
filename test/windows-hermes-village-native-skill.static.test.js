@@ -9,6 +9,7 @@ const {
 const root = path.resolve(__dirname, '..');
 const overlayRoot = path.join(root, 'scripts', 'windows', 'hermes-profile-overlay', 'skills');
 const operationsRoot = path.join(overlayRoot, 'productivity', 'village-operations');
+const capabilityRoot = path.join(overlayRoot, 'productivity', 'village-capability-development');
 const brainRoot = path.join(overlayRoot, 'village', 'village-brain-first');
 const syncScript = fs.readFileSync(
   path.join(root, 'scripts', 'windows', 'sync-hermes-profile-overlay.ps1'),
@@ -114,6 +115,44 @@ test('owner-managed Village operations learning stays outside the pinned package
     /patch the narrowest relevant reference/i,
     'the owner-managed package must not retain an autonomous reference-patching instruction'
   );
+});
+
+test('Village capability gaps use native Hermes learning without a business-operation broker', () => {
+  const skill = loadSkill(capabilityRoot);
+  assertNativeEnvelope(skill);
+  assert.equal(skill.description, 'Use when a Village operation lacks a safe executable path.');
+  for (const executableResource of ['scripts', 'references', 'assets']) {
+    assert.equal(
+      fs.existsSync(path.join(capabilityRoot, executableResource)),
+      false,
+      `the lifecycle skill must not add a ${executableResource} execution layer`
+    );
+  }
+
+  const phases = [
+    'CAPABILITY_GAP',
+    'discover',
+    'validate_candidate',
+    'promote',
+    'confirm_registration',
+    'record_learning',
+    'resume'
+  ];
+  let previous = -1;
+  for (const phase of phases) {
+    const current = skill.body.indexOf(phase);
+    assert.ok(current > previous, `${phase} must appear in lifecycle order`);
+    previous = current;
+  }
+
+  assert.match(skill.body, /native[\s\S]{0,160}skill_manage/i);
+  assert.match(skill.body, /focused[\s\S]{0,180}agent-managed skill/i);
+  assert.match(skill.body, /original request[\s\S]{0,180}(?:resume|complete)/i);
+  assert.match(skill.body, /discover[\s\S]{0,260}(?:no live|must not)[\s\S]{0,180}(?:write|send|deploy)/i);
+  assert.match(skill.body, /owner[\s-]*reviewed[\s\S]{0,180}promot/i);
+  assert.match(skill.body, /confirm_registration[\s\S]{0,260}(?:live|runtime)[\s\S]{0,120}readback/i);
+  assert.doesNotMatch(skill.source, /\bvillage_operation\b/i);
+  assert.doesNotMatch(skill.source, /\b(?:broker|semantic router|universal executor)\b/i);
 });
 
 test('legacy archive preserves obsolete +6 evidence but makes current +3 unmistakable', () => {

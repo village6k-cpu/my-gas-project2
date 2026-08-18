@@ -102,6 +102,24 @@ test('retired Village routing artifacts are not shipped in the candidate overlay
   assert.equal(fs.existsSync(path.join(adapterRoot, 'village-brain-first.md')), false);
 });
 
+test('native capability learning ships as a focused skill without restoring the retired router', () => {
+  const skillPath = path.join(
+    root,
+    'scripts',
+    'windows',
+    'hermes-profile-overlay',
+    'skills',
+    'productivity',
+    'village-capability-development',
+    'SKILL.md'
+  );
+  assert.equal(fs.existsSync(skillPath), true);
+  assert.match(paritySyncScript, /village-capability-development/);
+  assert.doesNotMatch(paritySyncScript, /village-operation-broker\.js/i);
+  assert.doesNotMatch(paritySyncScript, /village-capability-promote\.js/i);
+  assert.doesNotMatch(paritySyncScript, /plugins[\\/]village-runtime/i);
+});
+
 test('confirmation-request runner is execution-only and preserves full AI reasoning', () => {
   const source = fs.readFileSync(confirmRequestSkillPath, 'utf8');
 

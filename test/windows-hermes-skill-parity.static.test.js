@@ -109,6 +109,7 @@ test('sync rebuilds the Windows root from the curated Mac tree and keeps RPA pro
       'computer-use',
       'productivity-integrations',
       'software-development-workflows',
+      'village-capability-development',
       'village-confirm-request',
       'village-history-evidence',
       'village-operations'
@@ -272,6 +273,7 @@ test('profile-scoped sync replaces obsolete staging skills with the full AI-firs
     for (const required of [
       'computer-use',
       'productivity-integrations',
+      'village-capability-development',
       'village-history-evidence',
       'village-confirm-request',
       'village-operations',
@@ -345,7 +347,16 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
 
     const operationsPath = path.join(workerProfile, 'skills', 'productivity', 'village-operations', 'SKILL.md');
     const canonicalOperations = fs.readFileSync(operationsPath, 'utf8');
+    const capabilityPath = path.join(
+      workerProfile,
+      'skills',
+      'productivity',
+      'village-capability-development',
+      'SKILL.md'
+    );
+    const canonicalCapability = fs.readFileSync(capabilityPath, 'utf8');
     fs.appendFileSync(operationsPath, '\n## Learned rule\n\nSELF_IMPROVED_RULE_MUST_SURVIVE\n', 'utf8');
+    fs.appendFileSync(capabilityPath, '\nAUTONOMOUS_LIFECYCLE_DRIFT_MUST_NOT_SURVIVE\n', 'utf8');
     writeSkill(workerProfile, path.join('learned', 'customer-alias-memory'), 'customer-alias-memory', {
       platforms: ['windows'],
       body: '# Customer Alias Memory\n\nAGENT_CREATED_SKILL_MUST_SURVIVE\n'
@@ -358,6 +369,13 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
           agent_created: true,
           pinned: false,
           patch_count: 1,
+          last_patched_at: new Date().toISOString()
+        },
+        'village-capability-development': {
+          created_by: 'agent',
+          agent_created: true,
+          pinned: false,
+          patch_count: 2,
           last_patched_at: new Date().toISOString()
         },
         'customer-alias-memory': { created_by: 'agent', patch_count: 0 }
@@ -377,6 +395,11 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
       canonicalOperations,
       'the owner-managed Village contract must win over autonomous umbrella patches'
     );
+    assert.equal(
+      fs.readFileSync(capabilityPath, 'utf8'),
+      canonicalCapability,
+      'the native lifecycle contract must win over autonomous lifecycle drift'
+    );
     assert.match(
       fs.readFileSync(path.join(workerProfile, 'skills', 'learned', 'customer-alias-memory', 'SKILL.md'), 'utf8'),
       /AGENT_CREATED_SKILL_MUST_SURVIVE/
@@ -386,6 +409,10 @@ test('profile sync protects the owner-managed umbrella while preserving focused 
     assert.equal(usage['village-operations'].created_by, null);
     assert.equal(usage['village-operations'].agent_created, false);
     assert.equal(usage['village-operations'].pinned, true);
+    assert.equal(usage['village-capability-development'].patch_count, 2);
+    assert.equal(usage['village-capability-development'].created_by, null);
+    assert.equal(usage['village-capability-development'].agent_created, false);
+    assert.equal(usage['village-capability-development'].pinned, true);
     assert.equal(usage['customer-alias-memory'].created_by, 'agent');
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });

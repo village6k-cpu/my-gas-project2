@@ -1,0 +1,4 @@
+interface:
+  display_name: "Village Capability Development"
+  short_description: "Develop missing Village operations safely"
+  default_prompt: "Develop this missing Village operation through the native verified lifecycle, then resume the original request."
