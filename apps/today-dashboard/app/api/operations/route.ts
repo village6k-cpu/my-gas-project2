@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAuthedRequest } from "@/lib/server/authCache";
+import { getVillageGasInternalKey } from "@/lib/server/gasInternalKey.mjs";
 
 // 운영판 API — GAS action=operations 프록시 (로그인 게이트).
 const GAS_URL =
   process.env.GAS_API_URL ??
   "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
-const GAS_KEY = process.env.GAS_API_KEY ?? "village2026";
 
 // 서버 인메모리 캐시(30초). GAS는 operations를 300초 자체 캐시하므로 30초 Next 캐시는 안전하고,
 // 60초 폴링·재진입·하드리프레시가 GAS 콜드스타트(2.6s)를 매번 때리지 않고 캐시 히트로 즉답한다.
@@ -16,7 +16,7 @@ export async function GET(req: NextRequest) {
   if (!(await isAuthedRequest(req))) return NextResponse.json({ error: "인증 필요" }, { status: 401 });
   try {
     const qs = new URLSearchParams(req.nextUrl.searchParams);
-    qs.set("key", GAS_KEY);
+    qs.set("key", getVillageGasInternalKey());
     qs.set("action", "operations");
     const ck = qs.toString();
 

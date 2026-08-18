@@ -108,10 +108,11 @@
 - **목록** — 장비명 자동완성용 마스터 목록
 
 ### API (sheetAPI.js)
-- 인증: `key=village2026` 필수
-- 페이지 라우팅: `?page=timeline|dashboard|manage`
-- Sheet API: sheets, info, read, write, append, update, search, run
-- Schedule API: list, scan, 확인, 등록, 보류, 거절, 발송승인
+- 공개 권한: `village2026`은 토큰 기반 고객 조회와 `목록`·`세트마스터`의 public read/search에만 사용
+- 내부 권한: write/run/scan/등록/보류/거절/발송승인은 인증된 서버 런타임의 internal write credential만 사용하며 브라우저·문서에 노출 금지
+- 기존 `?page=timeline|dashboard|manage`는 인증된 Today Dashboard 화면으로 이동
+- Sheet API: 공개 카탈로그 조회와 내부 운영 API를 principal 기준으로 분리
+- Schedule API: list, scan, 확인, 등록, 보류, 거절, 발송승인 중 운영 기능은 internal principal 전용
 - 데이터 API: timeline, dashboard (date 파라미터 지원)
 - 고객용 API: myPage(조회 전용) — apps/today-dashboard `/my?t=토큰` 페이지가 서버 라우트 `/api/my` 경유로 호출. 변경/연장/취소는 카톡 채널 안내만. 링크 생성은 run&func=getMyPageLink (1회 설정: setupMyPage, Script Properties MYPAGE_BASE_URL·MYPAGE_NOTICE·MYPAGE_KAKAO_URL)
 

@@ -3,6 +3,7 @@ import { revalidateTag, unstable_cache } from "next/cache";
 import { createHash } from "node:crypto";
 import { isAuthedRequest as isAuthed } from "@/lib/server/authCache";
 import { getInventoryAuditServiceClient } from "@/lib/server/inventoryAuditDb";
+import { getVillageGasInternalKey } from "@/lib/server/gasInternalKey.mjs";
 
 export const maxDuration = 60;
 
@@ -10,7 +11,6 @@ export const maxDuration = 60;
 const GAS_URL =
   process.env.GAS_API_URL ??
   "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
-const GAS_KEY = process.env.GAS_API_KEY ?? "village2026";
 
 function completionDoneValue(value: unknown): boolean {
   return value === true || value === 1 || value === "1" || value === "true";
@@ -131,7 +131,7 @@ async function readPersistentlyCachedPhotoResponse(queryString: string): Promise
   const readByFingerprint = unstable_cache(
     async (): Promise<{ body: string; status: number }> => {
       const upstreamQuery = new URLSearchParams(queryString);
-      upstreamQuery.set("key", GAS_KEY);
+      upstreamQuery.set("key", getVillageGasInternalKey());
       const response = await fetch(`${GAS_URL}?${upstreamQuery.toString()}`, {
         redirect: "follow",
         signal: AbortSignal.timeout(40_000),
@@ -295,7 +295,7 @@ async function callGet(req: NextRequest) {
   const noCache = noCacheParam === "1" || noCacheParam === "true";
   const qs = new URLSearchParams(sp);
   const ck = qs.toString();
-  qs.set("key", GAS_KEY);
+  qs.set("key", getVillageGasInternalKey());
   const url = `${GAS_URL}?${qs.toString()}`;
   const photoRead = isPhotoReadAction(action);
   const photoWrite = isPhotoWriteAction(action);
@@ -377,7 +377,7 @@ async function callPost(req: NextRequest) {
   const completionAction = action === "toggleSetup" || action === "toggleReturn";
   const photoWrite = isPhotoWriteAction(action);
   // 완료 상태 순서는 GAS mutation 원장이 먼저 결정하고, Supabase 저장은 그 응답을 따른다.
-  Object.assign(payload, body, { action, key: GAS_KEY });
+  Object.assign(payload, body, { action, key: getVillageGasInternalKey() });
 
   try {
     const r = await fetch(GAS_URL, {

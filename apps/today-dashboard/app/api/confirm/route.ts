@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAuthedRequest as requireUser } from "@/lib/server/authCache";
+import { getVillageGasInternalKey } from "@/lib/server/gasInternalKey.mjs";
 
 // 확인요청 관리 프록시 — GAS Schedule API(list/확인/등록/보류/거절/발송승인 + run/func) 프록시. 로그인 게이트.
 const GAS_URL =
   process.env.GAS_API_URL ??
   "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
-const GAS_KEY = process.env.GAS_API_KEY ?? "village2026";
 
 // 목록(list) 단기 캐시(12초). 등록 직후 3회 재조회(즉시/+3s/+15s) 같은 연속 호출이
 // GAS 콜드스타트를 매번 때리지 않도록. 쓰기 액션(POST) 시 무효화한다.
@@ -21,7 +21,7 @@ export const maxDuration = 120;
 
 async function callGas(params: Record<string, string>): Promise<NextResponse> {
   const qs = new URLSearchParams(params);
-  qs.set("key", GAS_KEY);
+  qs.set("key", getVillageGasInternalKey());
   const r = await fetch(`${GAS_URL}?${qs.toString()}`, { redirect: "follow", signal: AbortSignal.timeout(110_000) });
   const body = await r.text();
   // 업스트림 상태 그대로 전파 — 200으로 마스킹하면 클라이언트 에러 분기가 죽고

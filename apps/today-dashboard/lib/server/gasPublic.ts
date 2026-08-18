@@ -2,10 +2,12 @@
 // API 키는 서버에서만 사용하고, 응답은 각 라우트에서 필요한 필드만 골라 내보낸다.
 // (직원용 /api/gas는 Supabase 로그인 필수 — 공개 라우트는 이 헬퍼로 분리)
 
+import { getVillageGasInternalKey } from "./gasInternalKey.mjs";
+
 const GAS_URL =
   process.env.GAS_API_URL ??
   "https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec";
-const GAS_KEY = process.env.GAS_API_KEY ?? "village2026";
+const VILLAGE_PUBLIC_API_KEY = "village2026";
 
 // GAS가 응답을 물고 있을 때(콜드스타트 폭주·쿼터) 공개 라우트가 플랫폼 함수 타임아웃까지
 // 매달리지 않도록 상한을 둔다 — 직원용 프록시 app/api/gas/route.ts의 GET 40s/POST 60s와 동일.
@@ -24,7 +26,7 @@ function toGasCallError(e: unknown): Error {
 
 export async function gasGet(params: Record<string, string>): Promise<unknown> {
   const qs = new URLSearchParams(params);
-  qs.set("key", GAS_KEY);
+  qs.set("key", VILLAGE_PUBLIC_API_KEY);
   let res: Response;
   try {
     res = await fetch(`${GAS_URL}?${qs.toString()}`, {
@@ -48,7 +50,7 @@ export async function gasPost(body: Record<string, unknown>): Promise<unknown> {
       cache: "no-store",
       // GAS doPost는 text/plain으로 보내야 CORS preflight 없이 통과
       headers: { "content-type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ ...body, key: GAS_KEY }),
+      body: JSON.stringify({ ...body, key: getVillageGasInternalKey() }),
       signal: AbortSignal.timeout(GAS_POST_TIMEOUT_MS),
     });
   } catch (e) {

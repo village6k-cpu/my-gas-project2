@@ -1,3 +1,5 @@
+import { deriveVillageGasInternalKey } from "./gasInternalKey.mjs";
+
 const DEFAULT_PAGE_SIZE = 500;
 const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_LEDGER_ROWS = 100_000;
@@ -137,8 +139,15 @@ export function isInventoryAuditMirrorUuid(value) {
 
 export function getInventoryAuditMirrorConfig(env = process.env) {
   const gasUrl = String(env.GAS_SYNC_URL || "").trim();
-  const gasKey = String(env.GAS_API_KEY || "").trim();
-  if (!gasUrl || !gasKey) {
+  let gasKey = String(env.VILLAGE_GAS_INTERNAL_KEY || "").trim();
+  if (!gasKey) {
+    try {
+      gasKey = deriveVillageGasInternalKey(env.SUPABASE_SERVICE_ROLE_KEY);
+    } catch {
+      throw new InventoryAuditMirrorError("mirror_service_unavailable");
+    }
+  }
+  if (!gasUrl) {
     throw new InventoryAuditMirrorError("mirror_service_unavailable");
   }
   try {
@@ -428,7 +437,7 @@ export async function runInventoryAuditMirror({
   }
   const config = getInventoryAuditMirrorConfig({
     GAS_SYNC_URL: gasUrl,
-    GAS_API_KEY: gasKey,
+    VILLAGE_GAS_INTERNAL_KEY: gasKey,
   });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

@@ -13,7 +13,7 @@ function requireEnv(name) {
 
 function checkToken(req) {
   const configured = process.env.DASHBOARD_TOKEN || '';
-  if (!configured) return true;
+  if (!configured) return false;
   const auth = req.headers.authorization || '';
   const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   const headerToken = req.headers['x-dashboard-token'] || '';
@@ -22,6 +22,9 @@ function checkToken(req) {
 
 export default async function handler(req, res) {
   try {
+    if (!process.env.DASHBOARD_TOKEN) {
+      return json(res, 503, { error: 'dashboard authentication unavailable' });
+    }
     if (!checkToken(req)) return json(res, 401, { error: 'unauthorized' });
     if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
 

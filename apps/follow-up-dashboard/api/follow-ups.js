@@ -28,7 +28,7 @@ function requireEnv(name) {
 
 function checkToken(req) {
   const configured = process.env.DASHBOARD_TOKEN || '';
-  if (!configured) return true;
+  if (!configured) return false;
   const auth = req.headers.authorization || '';
   const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   const headerToken = req.headers['x-dashboard-token'] || '';
@@ -353,6 +353,9 @@ function summarize(items) {
 
 export default async function handler(req, res) {
   try {
+    if (!process.env.DASHBOARD_TOKEN) {
+      return json(res, 503, { error: 'dashboard authentication unavailable' });
+    }
     if (!checkToken(req)) return json(res, 401, { error: 'unauthorized' });
     const table = encodeURIComponent(process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items');
 

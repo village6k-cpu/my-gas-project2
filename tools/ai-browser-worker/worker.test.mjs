@@ -35,6 +35,7 @@ import {
   buildReadOnlyLookupContext,
   buildHermesArgs,
   hermesDecisionTimeoutFromEnv,
+  deriveVillageGasInternalKey,
   resolveHermesCommand,
   resolveCuaDriverCommand,
   normalizeKakaoWorkerControlMode,
@@ -122,6 +123,14 @@ import {
   closeKakaoConversationTargetViaDevtools,
   runCli
 } from './worker.mjs';
+
+test('worker derives the same internal GAS key from its existing service-role secret', () => {
+  const secret = 'service-role-test-secret-123';
+  const derived = deriveVillageGasInternalKey(secret);
+  assert.equal(derived, '-PKxkeZbEpJ49suEszVienz5K7yh2Vgq-f4ddpigOgM');
+  assert.notEqual(derived, secret);
+  assert.throws(() => deriveVillageGasInternalKey('too-short'), /service role/i);
+});
 
 test('Kakao room snapshots are immutable and contain no live DOM handles', () => {
   const snapshot = createImmutableKakaoRoomSnapshot({

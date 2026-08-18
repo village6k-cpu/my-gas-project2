@@ -7,20 +7,50 @@
  * - Claude 에이전트: 시트 읽기/쓰기/검색
  * - 스케줄 관리: 가용확인/등록/보류/거절/목록조회
  *
- * ★ 보안: API_KEY 인증 필수 ★
+ * ★ 보안: public/internal principal 분리 ★
  *
- * 사용 예시:
- * GET  ?key=village2026&action=read&sheet=확인요청
- * GET  ?key=village2026&action=list
- * POST ?key=village2026  (body: {action:"scan"})
- * POST ?key=village2026  (body: {action:"확인", reqID:"RQ-..."})
- * POST ?key=village2026  (body: {action:"write", sheet:"...", range:"...", values:[...]})
+ * 공개 키는 토큰 기반 고객 조회와 목록/세트마스터 read/search만 허용한다.
+ * 모든 운영 read/write/run/scan/등록/발송은 Script Properties의 내부 키를 쓰는
+ * 인증된 서버 런타임만 호출한다. 내부 키는 브라우저나 문서에 기록하지 않는다.
  */
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// ★ API 비밀키 ★
+// ★ API principal ★
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-const API_KEY = "village2026";
+// 공개 고객 조회/비민감 카탈로그용 키. 공개 클라이언트에 노출되는 값이므로
+// 내부 운영 권한으로 절대 승격하지 않는다.
+const VILLAGE_PUBLIC_API_KEY = "village2026";
+const VILLAGE_INTERNAL_API_KEY_PROPERTY = "VILLAGE_API_WRITE_KEY_V1";
+
+function villageApiPrincipal_(key) {
+  key = String(key || "").trim();
+  if (!key) return "";
+  var internalKey = String(
+    PropertiesService.getScriptProperties().getProperty(VILLAGE_INTERNAL_API_KEY_PROPERTY) || ""
+  ).trim();
+  if (internalKey && key === internalKey) return "internal";
+  if (key === VILLAGE_PUBLIC_API_KEY) return "public";
+  return "";
+}
+
+function isVillagePublicApiRequestAllowed_(action, params, postBody) {
+  action = String(action || "").trim();
+  params = params || {};
+  postBody = postBody || {};
+  if (action === "myPage" || action === "myPageEstimate") return true;
+  if (action !== "read" && action !== "search") return false;
+  var sheet = String(params.sheet || postBody.sheet || "").trim();
+  return sheet === "목록" || sheet === "세트마스터";
+}
+
+// Apps Script 실행 API(MYSELF)에서만 호출하는 내부 키 bootstrap.
+// runFunction allowlist에는 등록하지 않으므로 웹 API를 통해서는 실행할 수 없다.
+function configureVillageApiInternalKeyV1(value) {
+  var key = String(value || "").trim();
+  if (!/^[A-Za-z0-9_-]{43}$/.test(key)) throw new Error("invalid internal API key");
+  PropertiesService.getScriptProperties().setProperty(VILLAGE_INTERNAL_API_KEY_PROPERTY, key);
+  return { success: true, configured: true, keyLength: key.length };
+}
 
 // Hermes가 소스 파싱 없이 사용할 수 있는 typed operating surface.
 // 확인요청 쓰기 계열은 requestSchema를 함께 광고한다 — 스키마를 API가 알려주지 않으면
@@ -151,6 +181,15 @@ function isRangeBoundToSheet_(sheetName, range) {
 // 웹앱 엔드포인트 (프로젝트 전체에서 유일)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+function villageLegacyPageUrl_(page) {
+  page = String(page || "").trim();
+  if (page === "dashboard" || page === "timeline") {
+    return "https://today-dashboard-ten.vercel.app/schedule";
+  }
+  if (page === "manage") return "https://today-dashboard-ten.vercel.app/confirm";
+  return "";
+}
+
 function doGet(e) {
   e = e || {};
   e.villageHttpMethod_ = "GET";
@@ -158,69 +197,12 @@ function doGet(e) {
 
   // ── 페이지 라우팅 ──
   if (params.page) {
-    var pageMap = {
-      "timeline": { file: "timelineMobile", title: "빌리지 스케줄" },
-      "dashboard": { file: "dashboard",    title: "빌리지 오늘 일정" },
-      "manage":   { file: "requestManage",  title: "확인요청 관리" }
-    };
-    var pg = pageMap[params.page];
-    if (pg) {
-      var html = HtmlService.createHtmlOutputFromFile(pg.file);
-      var webAppUrl = ScriptApp.getService().getUrl();
-      var content = html.getContent().replace(
-        'var API_URL = "";',
-        'var API_URL = "' + webAppUrl + '";'
+    var replacementUrl = villageLegacyPageUrl_(params.page);
+    if (replacementUrl) {
+      return HtmlService.createHtmlOutput(
+        '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=' + replacementUrl + '">' +
+        '<script>window.location.replace(' + JSON.stringify(replacementUrl) + ');</script>'
       );
-
-      // ── dashboard는 초기 데이터를 HTML에 직접 박아서 fetch 왕복 1회 절약 ──
-      if (params.page === "dashboard") {
-        try {
-          var initialData = getDashboardData(params.date || null, false);
-          content = content.replace(
-            'var INITIAL_DATA = null;',
-            'var INITIAL_DATA = ' + JSON.stringify(initialData) + ';'
-          );
-        } catch (err) {
-          // 데이터 조회 실패해도 페이지는 로드 — 클라이언트가 fetch로 재시도
-          Logger.log("dashboard 초기 데이터 로드 실패: " + err.message);
-        }
-        try {
-          var initialEquipNames = getDashboardEquipNameList_(SpreadsheetApp.getActiveSpreadsheet());
-          content = content.replace(
-            'var INITIAL_EQUIP_NAMES = null;',
-            'var INITIAL_EQUIP_NAMES = ' + JSON.stringify(initialEquipNames) + ';'
-          );
-        } catch (errEquipNames) {
-          // 장비명 목록 실패는 모달 오픈 시 전용 API로 재시도
-        }
-      }
-
-      // ── timeline은 초기 데이터를 HTML에 직접 박아서 첫 API 왕복 1회 절약 ──
-      if (params.page === "timeline") {
-        try {
-          var initialTimelineRange = getInitialTimelineMobileRange_();
-          var initialTimelineData = getTimelineData({
-            from: initialTimelineRange.from,
-            to: initialTimelineRange.to,
-            compact: 2
-          });
-          content = content.replace(
-            'var INITIAL_TIMELINE_DATA = null;',
-            'var INITIAL_TIMELINE_DATA = ' + JSON.stringify(initialTimelineData) + ';'
-          );
-          content = content.replace(
-            'var INITIAL_TIMELINE_KEY = "";',
-            'var INITIAL_TIMELINE_KEY = "' + initialTimelineRange.from + '_' + initialTimelineRange.to + '";'
-          );
-        } catch (errTimeline) {
-          // 데이터 조회 실패해도 페이지는 로드, 클라이언트가 fetch로 재시도
-        }
-      }
-
-      html.setContent(content);
-      html.setTitle(pg.title);
-      html.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
-      return html;
     }
   }
 
@@ -325,7 +307,7 @@ function withVillageOperationReceipt_(e, execute) {
   var operationId = String(body.operationId || "");
   var capabilityId = String(body.capability || "");
   var capability = getVillageOperationCapability_(capabilityId, action);
-  if (key !== API_KEY || !operationId || action === "operationReceipt") return execute();
+  if (villageApiPrincipal_(key) !== "internal" || !operationId || action === "operationReceipt") return execute();
   if (
     !/^[a-f0-9-]{16,80}$/i.test(operationId) ||
     !capability ||
@@ -436,11 +418,11 @@ function handleRequestCore_(e) {
     }
 
     const key = params.key || postBody.key;
-    if (key !== API_KEY) {
+    const principal = villageApiPrincipal_(key);
+    const action = params.action || postBody.action || "";
+    if (!principal || (principal === "public" && !isVillagePublicApiRequestAllowed_(action, params, postBody))) {
       return jsonResponse({ error: "인증 실패. key 파라미터를 확인하세요." }, 403);
     }
-
-    const action = params.action || postBody.action || "";
 
     switch (action) {
 

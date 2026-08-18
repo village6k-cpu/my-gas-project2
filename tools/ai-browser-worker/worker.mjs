@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import {
   inquiryConversationKey,
   actionFamilyForFollowUp,
@@ -4016,17 +4016,30 @@ export function hermesDecisionTimeoutFromEnv(environment = process.env) {
   return Number.isFinite(configured) && configured > 0 ? configured : 240000;
 }
 
+export function deriveVillageGasInternalKey(serviceRoleSecret) {
+  const secret = String(serviceRoleSecret || '').trim();
+  if (secret.length < 16) throw new Error('Supabase service role secret is unavailable');
+  return createHmac('sha256', secret)
+    .update('village-gas-internal-v1', 'utf8')
+    .digest('base64url');
+}
+
 export function requireConfig() {
   if (process.env.HERMES_HOME) {
     loadEnvFile(path.resolve(process.env.HERMES_HOME, '.env'), HERMES_RAG_ENV_KEYS);
   }
+  const supabaseUrl = process.env.SUPABASE_URL || '';
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!supabaseUrl || !serviceRoleKey) {
+    throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Load tools/kakao-dom-bridge/.env first.');
+  }
   const config = {
     ...buildSlackRoutingConfig(process.env),
-    supabaseUrl: process.env.SUPABASE_URL || '',
-    serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+    supabaseUrl,
+    serviceRoleKey,
     table: process.env.SUPABASE_TABLE || 'ai_processing_events',
     gasApiUrl: process.env.GAS_API_URL || DEFAULT_GAS_API_URL,
-    sheetApiKey: process.env.SHEET_API_KEY || DEFAULT_SHEET_API_KEY,
+    sheetApiKey: deriveVillageGasInternalKey(serviceRoleKey),
     hermesCommand: resolveHermesCommand(process.env.HERMES_WORKER_COMMAND || 'hermes'),
     hermesPythonModule: process.env.HERMES_WORKER_COMMAND_MODE === 'python_module',
     hermesProfile: process.env.HERMES_WORKER_PROFILE || '',
@@ -4076,9 +4089,6 @@ export function requireConfig() {
       other: process.env.SLACK_CHANNEL_OTHER_AGENT || DEFAULT_SLACK_CHANNELS.other
     }
   };
-  if (!config.supabaseUrl || !config.serviceRoleKey) {
-    throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Load tools/kakao-dom-bridge/.env first.');
-  }
   return config;
 }
 
