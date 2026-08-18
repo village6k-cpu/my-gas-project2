@@ -63,7 +63,10 @@ fi
 
 while IFS= read -r f; do
   [[ "$f" == ".clasp.json" ]] && continue
-  if [[ ! -f "$TMP_HEAD/$f" ]] || ! diff -q "$TMP_GAS/$f" "$TMP_HEAD/$f" >/dev/null; then
+  # clasp pull and Git checkouts may use different CRLF/LF conventions on
+  # Windows.  Preserve the remote-change guard, but compare the actual text
+  # rather than treating a line-ending-only conversion as remote source drift.
+  if [[ ! -f "$TMP_HEAD/$f" ]] || ! git diff --no-index --quiet --ignore-cr-at-eol -- "$TMP_GAS/$f" "$TMP_HEAD/$f"; then
     echo "  ⚠️  HEAD 이후 GAS에서 바뀐 파일: $f"
     REMOTE_CHANGED=1
   fi

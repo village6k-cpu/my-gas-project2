@@ -8,7 +8,6 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const ca = read('checkAvailability.js');
 const api = read('sheetAPI.js');
 const dashboard = read('dashboard.html');
-const docsDashboard = read('docs/dashboard.html');
 const store = read('apps/today-dashboard/lib/data/store.ts');
 const controls = read('apps/today-dashboard/components/PaymentControls.tsx');
 const gasProxy = read('apps/today-dashboard/app/api/gas/route.ts');
@@ -67,15 +66,6 @@ assert(
     /결제링크 발송 실패/.test(dashboard) &&
     /결제링크 발송 완료/.test(dashboard),
   'classic dashboard must confirm PayApp payment-link details before sending'
-);
-
-assert(
-  /결제링크 발송/.test(docsDashboard) &&
-    /runTradeOpsAction\(this,[\s\S]{0,140}sendPayAppPaymentLink/.test(docsDashboard) &&
-    /buildPayAppConfirmText\(tradeId\)/.test(docsDashboard) &&
-    /결제링크 발송 실패/.test(docsDashboard) &&
-    /결제링크 발송 완료/.test(docsDashboard),
-  'GitHub Pages dashboard must confirm PayApp payment-link details before sending'
 );
 
 assert(

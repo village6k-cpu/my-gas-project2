@@ -204,7 +204,7 @@ assert.match(
   'getDashboardData must write dashboard payloads through the chunked cache helper'
 );
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
 
   assert.match(

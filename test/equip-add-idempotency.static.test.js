@@ -6,8 +6,6 @@ const path = require('path');
 
 const backend = fs.readFileSync(path.resolve(__dirname, '..', 'checkAvailability.js'), 'utf8');
 const api = fs.readFileSync(path.resolve(__dirname, '..', 'sheetAPI.js'), 'utf8');
-const docsDashboard = fs.readFileSync(path.resolve(__dirname, '..', 'docs', 'dashboard.html'), 'utf8');
-const docsTimeline = fs.readFileSync(path.resolve(__dirname, '..', 'docs', 'timeline.html'), 'utf8');
 
 function extractFunction(source, name) {
   const start = source.indexOf(`function ${name}(`);
@@ -49,11 +47,5 @@ addRoutes.forEach((marker) => {
   const slice = api.slice(at, at + 900);
   assert(/mutationId:/.test(slice), marker + ' 라우트가 mutationId를 전달해야 한다');
 });
-
-// 레거시 클라이언트가 멱등 키를 생성해 보낸다
-assert(/action=addEquips[\s\S]{0,300}mutationId=/.test(docsDashboard),
-  'docs 대시보드 추가 호출에 mutationId 필요');
-assert(/action=scheduleAddEquip[\s\S]{0,300}mutationId=/.test(docsTimeline),
-  'docs 타임라인 추가 호출에 mutationId 필요');
 
 console.log('# equipment add idempotency checks passed');

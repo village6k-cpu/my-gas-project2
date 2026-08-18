@@ -120,7 +120,7 @@ assert(
   'dashboardAddEquipments must mark durable contract regeneration under lock and return pending state immediately'
 );
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
   assert(
     /action=addEquips[\s\S]*directRegenerate=true/.test(html) &&

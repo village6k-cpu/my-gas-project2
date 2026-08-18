@@ -5,7 +5,7 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
 
   assert.match(

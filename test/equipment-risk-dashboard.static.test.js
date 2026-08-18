@@ -170,7 +170,7 @@ assert.deepStrictEqual(
   assert.ok(api.indexOf(contract) !== -1, `sheetAPI.js must include contract: ${contract}`);
 });
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
 
   [

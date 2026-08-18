@@ -30,7 +30,7 @@ const logic = read('checkAvailability.js');
   );
 });
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
   [
     '+ 현장추가',

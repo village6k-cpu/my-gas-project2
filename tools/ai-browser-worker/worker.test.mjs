@@ -62,6 +62,8 @@ import {
   isCustomerDocumentAssetRequest,
   customerDocumentAssetsAlreadySent,
   normalizeConfirmRequestTimeForSheet,
+  normalizeConfirmRequestWindowForSheet,
+  mergeAdditionsOnlySheetPayloadWithExistingRequest,
   mutablePolicyAutoReplyRisk,
   currentConfirmedPolicyAutoReplySupport,
   autoReplyRequiresRagSupport,
@@ -949,13 +951,13 @@ test('buildHermesPrompt bounds routine work before the global timeout without sa
   assert.match(prompt, /Batch read-only lookups only when query breadth\/detail are preserved/is);
 });
 
-test('buildHermesPrompt preserves customer minute-level times without a mechanical whole-hour restriction', () => {
+test('buildHermesPrompt applies the owner-confirmed conservative whole-hour request boundary', () => {
   const prompt = buildHermesPrompt({ id: 'job-minute-time', preview_text: '12시 30분 반출 요청' });
-  assert.doesNotMatch(prompt, /12:30[^\n]{0,80}12:00[^\n]{0,40}내림/);
-  assert.doesNotMatch(prompt, /whole-hour|HH:00/i);
-  assert.match(prompt, /minute-level times/is);
-  assert.match(prompt, /HH:MM/);
-  assert.match(prompt, /outer code.*never floor or round/is);
+  assert.match(prompt, /반출[^\n]{0,80}내림/);
+  assert.match(prompt, /반납[^\n]{0,80}올림/);
+  assert.match(prompt, /정시 HH:00/);
+  assert.match(prompt, /27일 24:00[^\n]{0,100}27일 00:00/);
+  assert.doesNotMatch(prompt, /outer code.*never floor or round/is);
 });
 
 test('buildHermesPrompt allows read-only vision when DOM or AX evidence is insufficient', () => {
@@ -3013,6 +3015,7 @@ test('buildSheetAppendPayload maps AI-decided fields into insertAndCheckRequest 
     할인유형: '학생',
     비고: '',
     추가요청: '렌즈 포함',
+    입력모드: 'full_plan',
     장비: [
       { 이름: '소니 FX6 바디세트', 수량: 1 },
       { 이름: '소니 GM 24-70mm II', 수량: 2 }
@@ -3091,7 +3094,7 @@ test('buildSheetAppendPayload does not leak AI reasons or review actions into co
   assert.equal(payload.args.추가요청, '');
 });
 
-test('buildSheetAppendPayload preserves valid minute-level times selected by Hermes', () => {
+test('buildSheetAppendPayload floors pickup minutes and ceils return minutes conservatively', () => {
   const decision = {
     should_write_to_sheet: true,
     safety_checks: {
@@ -3107,9 +3110,9 @@ test('buildSheetAppendPayload preserves valid minute-level times selected by Her
     sheet_row_candidate: {
       plan_complete: true,
       start_date: '2026-06-01',
-      pickup_time: '12:30',
+      pickup_time: '12:59',
       end_date: '2026-06-02',
-      return_time: '18:45',
+      return_time: '18:01',
       equipment: [{ item: '소니 FX3 바디세트', quantity: 1 }],
       customer_name: '홍길동',
       phone: '010-2222-3333',
@@ -3120,11 +3123,39 @@ test('buildSheetAppendPayload preserves valid minute-level times selected by Her
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
 
   assert.equal(normalizeConfirmRequestTimeForSheet('7시30분'), '07:30');
-  assert.equal(payload.args.반출시간, '12:30');
-  assert.equal(payload.args.반납시간, '18:45');
+  assert.equal(payload.args.반출시간, '12:00');
+  assert.equal(payload.args.반납시간, '19:00');
 });
 
-test('buildSheetAppendPayload rejects relative dates and 24시 so Hermes must resolve the range', () => {
+test('confirmation request normalization keeps Village 24:00 on the written date', () => {
+  assert.deepEqual(normalizeConfirmRequestWindowForSheet({
+    start_date: '2026-08-26',
+    pickup_time: '07:30',
+    end_date: '2026-08-27',
+    return_time: '24:00'
+  }), {
+    start_date: '2026-08-26',
+    pickup_time: '07:00',
+    end_date: '2026-08-27',
+    return_time: '00:00'
+  });
+});
+
+test('confirmation request return rounding rolls 23-minute returns into the next date', () => {
+  assert.deepEqual(normalizeConfirmRequestWindowForSheet({
+    start_date: '2026-06-01',
+    pickup_time: '12:30',
+    end_date: '2026-06-02',
+    return_time: '23:01'
+  }), {
+    start_date: '2026-06-01',
+    pickup_time: '12:00',
+    end_date: '2026-06-03',
+    return_time: '00:00'
+  });
+});
+
+test('buildSheetAppendPayload rejects unresolved relative dates while the boundary owns rounding', () => {
   const now = new Date('2026-06-06T07:54:00+09:00');
   const decision = {
     should_write_to_sheet: true,
@@ -3154,6 +3185,72 @@ test('buildSheetAppendPayload rejects relative dates and 24시 so Hermes must re
   assert.equal(normalizeConfirmRequestDateForSheet('오늘', { now }), '2026-06-06');
   assert.equal(normalizeConfirmRequestTimeForSheet('24시'), '00:00');
   assert.equal(payload, null);
+});
+
+test('additions-only pending RQ writes merge the authoritative full plan instead of replacing it', () => {
+  const decision = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260818-005'],
+    reservation_inquiry: { already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: 'additions_only',
+      equipment: [
+        { item: 'C스탠드', quantity: 2 },
+        { item: '로닌 링그립', quantity: 1 }
+      ]
+    }
+  });
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+  const existingRequestResult = {
+    reqID: 'RQ-260818-005',
+    topLevelEquipment: [
+      { 이름: '소니 FX6 바디세트', 수량: 1 },
+      { 이름: 'C스탠드', 수량: 1 }
+    ]
+  };
+
+  const merged = mergeAdditionsOnlySheetPayloadWithExistingRequest(payload, decision, existingRequestResult);
+
+  assert.equal(merged.ok, true);
+  assert.equal(merged.payload.args.입력모드, 'full_plan');
+  assert.deepEqual(merged.payload.args.장비, [
+    { 이름: '소니 FX6 바디세트', 수량: 1 },
+    { 이름: 'C스탠드', 수량: 3 },
+    { 이름: '로닌 링그립', 수량: 1 }
+  ]);
+});
+
+test('additions-only pending RQ writes fail closed without an authoritative full plan', () => {
+  const decision = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260818-005'],
+    reservation_inquiry: { already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: 'additions_only',
+      equipment: [{ item: '로닌 링그립', quantity: 1 }]
+    }
+  });
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+
+  const merged = mergeAdditionsOnlySheetPayloadWithExistingRequest(payload, decision, null);
+
+  assert.equal(merged.ok, false);
+  assert.equal(merged.payload, null);
+});
+
+test('additions-only registered booking keeps the AI delta but crosses GAS as a standalone full plan', () => {
+  const decision = completeSheetDecision({
+    reservation_inquiry: { already_registered: true },
+    sheet_row_candidate: {
+      equipment_write_mode: 'additions_only',
+      equipment: [{ item: '로닌 링그립', quantity: 1 }]
+    }
+  });
+  const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
+
+  const merged = mergeAdditionsOnlySheetPayloadWithExistingRequest(payload, decision, null);
+
+  assert.equal(merged.ok, true);
+  assert.equal(merged.payload.args.입력모드, 'full_plan');
+  assert.deepEqual(merged.payload.args.장비, [{ 이름: '로닌 링그립', 수량: 1 }]);
 });
 
 test('buildSheetAppendPayload allows reservation-format writes when non-blocking checks are incomplete', () => {
@@ -3587,10 +3684,13 @@ test('fetchExistingConfirmRequestResultForDecision reads RQ result rows from 확
           sheet: '확인요청',
           query: 'RQ-260531-003',
           headers: ['요청ID', '반출일', '반출시간', '반납일', '반납시간', '장비or세트명', '수량', '확인', '결과', '상세'],
-          count: 1,
+          count: 2,
           results: [{
             row: 12,
             data: ['RQ-260531-003', '2026-05-30', '23:00', '2026-05-31', '23:00', '소니 캠 AX-700', '1', '', '✅ 가용1', '예약 가능']
+          }, {
+            row: 13,
+            data: ['RQ-260531-003', '', '', '', '', '세트 기본 배터리', '2', '', 'ℹ️ 기본구성', '', '', '', '', '', '', '', '[세트]소니 캠 AX-700']
           }]
         })
       };
@@ -3607,7 +3707,11 @@ test('fetchExistingConfirmRequestResultForDecision reads RQ result rows from 확
   assert.equal(result.reqID, 'RQ-260531-003');
   assert.equal(result.duplicate, true);
   assert.deepEqual(result.results, [
-    { equipment: '소니 캠 AX-700', quantity: '1', result: '✅ 가용1', detail: '예약 가능' }
+    { equipment: '소니 캠 AX-700', quantity: '1', result: '✅ 가용1', detail: '예약 가능' },
+    { equipment: '세트 기본 배터리', quantity: '2', result: 'ℹ️ 기본구성', detail: '' }
+  ]);
+  assert.deepEqual(result.topLevelEquipment, [
+    { 이름: '소니 캠 AX-700', 수량: 1 }
   ]);
 });
 

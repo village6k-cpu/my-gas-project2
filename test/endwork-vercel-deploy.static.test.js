@@ -16,5 +16,9 @@ assert(
   /command -v vercel/.test(script) && /\$HOME\/\.hermes\/node\/bin\/vercel/.test(script),
   'endwork must support both a normal Vercel CLI install and the Hermes-managed binary'
 );
+assert(
+  /git diff --no-index --quiet --ignore-cr-at-eol/.test(script),
+  'endwork must ignore CRLF/LF-only GAS differences while preserving the remote-change guard'
+);
 
 console.log('endwork today-dashboard Vercel deployment checks passed');

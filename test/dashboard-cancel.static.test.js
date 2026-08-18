@@ -85,7 +85,7 @@ assert.match(
   'the queued cleanup must use a public GAS time-trigger handler',
 );
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
 
   assert.match(

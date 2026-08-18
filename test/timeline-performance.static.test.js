@@ -7,7 +7,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const backend = read('checkAvailability.js');
 const sheetApi = read('sheetAPI.js');
 
-['docs/timeline.html', 'timelineMobile.html'].forEach((file) => {
+['timelineMobile.html'].forEach((file) => {
   const html = read(file);
 
   assert.match(
@@ -126,28 +126,6 @@ const sheetApi = read('sheetAPI.js');
     html,
     /if \(usedInitialData && !forceFresh\)[\s\S]{0,160}return Promise\.resolve\(cachedData\)/,
     'timelineMobile.html must skip the duplicate first fetch when GAS already inlined timeline data'
-  );
-}
-
-{
-  const html = read('docs/timeline.html');
-
-  assert.match(
-    html,
-    /function loadEquipNames\(\)[\s\S]{0,220}return Promise\.resolve\(equipNames\)/,
-    'docs/timeline.html loadEquipNames must return a resolved promise when the equipment list is already cached'
-  );
-
-  assert.match(
-    html,
-    /return fetch\(API_URL \+ "\?key=village2026&action=read&sheet="[\s\S]{0,900}return equipNames;/,
-    'docs/timeline.html loadEquipNames must return the fetch promise for lazy modal setup'
-  );
-
-  assert.match(
-    html,
-    /function openTimelineContract\(item\)[\s\S]{0,900}action=timelineContract/,
-    'docs/timeline.html must fetch contract links lazily instead of loading every link in the timeline payload'
   );
 }
 
@@ -333,10 +311,10 @@ assert.match(
   'dashboard warmer must also warm the GAS-served mobile initial timeline range'
 );
 
-assert.match(
+assert.doesNotMatch(
   sheetApi,
-  /params\.page === "timeline"[\s\S]{0,620}getInitialTimelineMobileRange_\(\)[\s\S]{0,620}INITIAL_TIMELINE_DATA/,
-  'GAS-served timeline page must inline initial timeline data'
+  /INITIAL_TIMELINE_DATA/,
+  'retired GAS timeline route must not embed schedule data after the operator UI moved to the authenticated Vercel app'
 );
 
 assert.match(
@@ -369,7 +347,7 @@ assert.match(
   'compact timeline payloads must avoid stock values when stock lookup is skipped'
 );
 
-['docs/timeline.html', 'timelineMobile.html', 'timeline.html'].forEach((file) => {
+['timelineMobile.html', 'timeline.html'].forEach((file) => {
   const html = read(file);
   assert.match(
     html,

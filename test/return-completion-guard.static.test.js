@@ -290,8 +290,10 @@ test('상세 반납 수량은 부분 저장하고 품목마다 GAS 완료 증거
 test('품목 추가는 완료를 재오픈해 기준선에 합치고, 삭제는 반출 전에만 허용한다', () => {
   const gas = read('checkAvailability.js');
   const store = read('apps/today-dashboard/lib/data/store.ts');
-  assert.match(gas, /function dashboardAddEquipments[\s\S]{0,10000}invalidateDashboardReturnInspectionForTrade_[\s\S]{0,500}스케줄 품목 추가/);
-  assert.match(gas, /function dashboardAddEquipment[\s\S]{0,9000}invalidateDashboardReturnInspectionForTrade_[\s\S]{0,500}스케줄 품목 추가/);
+  const addMany = gas.slice(gas.indexOf('function dashboardAddEquipments'), gas.indexOf('\nfunction recordOnsiteAddonBackend_', gas.indexOf('function dashboardAddEquipments')));
+  const addOne = gas.slice(gas.indexOf('function dashboardAddEquipment'), gas.indexOf('\nfunction dashboardRemoveEquipment', gas.indexOf('function dashboardAddEquipment')));
+  assert.match(addMany, /invalidateDashboardReturnInspectionForTrade_[\s\S]{0,500}스케줄 품목 추가/);
+  assert.match(addOne, /invalidateDashboardReturnInspectionForTrade_[\s\S]{0,500}스케줄 품목 추가/);
   const removeMany = gas.slice(
     gas.indexOf('function dashboardRemoveEquipment'),
     gas.indexOf('\n/** "yyyy-MM-dd"', gas.indexOf('function dashboardRemoveEquipment')),
@@ -308,8 +310,6 @@ test('품목 추가는 완료를 재오픈해 기준선에 합치고, 삭제는 
   assert.match(gas, /function removeEquipmentFromContract[\s\S]{0,4500}invalidateDashboardReturnInspectionForTrade_/);
   assert.match(removeMany, /deleteDashboardRowsDescending_[\s\S]*scheduleDashboardStructureProjectionUnderLock_\(tid, \{ removeScheduleIds: removedScheduleIds \}\)/);
   assert.match(removeOne, /deleteRow[\s\S]*scheduleDashboardStructureProjectionUnderLock_\(거래ID, \{[\s\S]*removeScheduleIds:/);
-  const addMany = gas.slice(gas.indexOf('function dashboardAddEquipments'), gas.indexOf('\nfunction recordOnsiteAddonBackend_', gas.indexOf('function dashboardAddEquipments')));
-  const addOne = gas.slice(gas.indexOf('function dashboardAddEquipment'), gas.indexOf('\nfunction dashboardRemoveEquipment', gas.indexOf('function dashboardAddEquipment')));
   assert.match(addMany, /scheduleDashboardStructureProjectionUnderLock_\(tid, \{ baselineItems: addedBaselineItems \}\)/);
   assert.match(addOne, /scheduleDashboardStructureProjectionUnderLock_\(tid, \{ baselineItems: addedBaselineItems \}\)/);
   assert.match(store, /if \(baselineStarted\)[\s\S]{0,500}next === "excluded"[\s\S]{0,220}return;/);

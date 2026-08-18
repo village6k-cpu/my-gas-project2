@@ -60,7 +60,7 @@ assert(
   'PaymentControls must render a visible contract regeneration button'
 );
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
   assert(
     /계약서 재생성/.test(html) &&

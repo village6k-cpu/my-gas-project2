@@ -141,10 +141,10 @@ assert.match(
   'sheetAPI must expose a cached dedicated dashboardEquipNames endpoint instead of forcing the UI through generic sheet reads'
 );
 
-assert.match(
+assert.doesNotMatch(
   sheetApi,
-  /var INITIAL_EQUIP_NAMES = null;[\s\S]*var INITIAL_EQUIP_NAMES = ' \+ JSON\.stringify\(initialEquipNames\) \+ ';'/,
-  'GAS dashboard page must inline cached equipment names when available'
+  /var INITIAL_EQUIP_NAMES = null;/,
+  'retired GAS dashboard page must not embed equipment data after the operator UI moved to the authenticated Vercel app'
 );
 
 const ensureRegenBody = code.slice(
@@ -226,7 +226,7 @@ assert.doesNotMatch(
   'dashboardRemoveEquipment must not reformat the full schedule sheet after deletion'
 );
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
 
   [

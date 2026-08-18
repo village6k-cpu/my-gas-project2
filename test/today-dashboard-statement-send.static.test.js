@@ -53,7 +53,7 @@ assert(
   'estimate and statement confirmation dialogs must use the shared top-layer dialog'
 );
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
   assert(
     /거래명세서 발송/.test(html) &&

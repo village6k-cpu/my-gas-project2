@@ -11586,6 +11586,77 @@ function _collectConfirmRequestResultsByReqID_(sheet, reqID) {
   return results;
 }
 
+function _confirmRequestStrictDate_(value) {
+  var raw = String(value || "").trim();
+  var match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return "";
+  var year = Number(match[1]);
+  var month = Number(match[2]);
+  var day = Number(match[3]);
+  var candidate = new Date(Date.UTC(year, month - 1, day));
+  if (candidate.getUTCFullYear() !== year || candidate.getUTCMonth() !== month - 1 || candidate.getUTCDate() !== day) return "";
+  return raw;
+}
+
+function _confirmRequestAddDays_(dateText, days) {
+  var match = String(dateText || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return "";
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + days))
+    .toISOString().slice(0, 10);
+}
+
+function _confirmRequestTimeParts_(value) {
+  var match = String(value || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  var hour = Number(match[1]);
+  var minute = Number(match[2]);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 24) return null;
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+  if (hour === 24 && minute !== 0) return null;
+  return { hour: hour, minute: minute };
+}
+
+/**
+ * 확인요청의 공통 시간 경계.
+ * 반출 분은 내리고, 반납 분은 올리며, Village의 날짜+24:00은 적힌 날짜의 00:00으로 보존한다.
+ */
+function _normalizeConfirmRequestSchedule_(request) {
+  var req = Object.assign({}, request || {});
+  if (String(req.입력모드 || "").trim() === "additions_only") {
+    throw new Error("추가 장비는 기존 확인요청의 전체 목록과 병합한 뒤 입력해야 합니다.");
+  }
+  var startDate = _confirmRequestStrictDate_(req.반출일);
+  var endDate = _confirmRequestStrictDate_(req.반납일);
+  var pickup = _confirmRequestTimeParts_(req.반출시간);
+  var returned = _confirmRequestTimeParts_(req.반납시간);
+  if (!startDate || !endDate || !pickup || !returned || pickup.hour === 24) {
+    throw new Error("확인요청 반출·반납 일시는 YYYY-MM-DD HH:MM 형식이어야 합니다.");
+  }
+
+  var returnHour = returned.hour;
+  if (returnHour === 24) {
+    returnHour = 0;
+  } else if (returned.minute > 0) {
+    returnHour += 1;
+    if (returnHour === 24) {
+      returnHour = 0;
+      endDate = _confirmRequestAddDays_(endDate, 1);
+    }
+  }
+  req.반출일 = startDate;
+  req.반출시간 = String(pickup.hour).padStart(2, "0") + ":00";
+  req.반납일 = endDate;
+  req.반납시간 = String(returnHour).padStart(2, "0") + ":00";
+  req.입력모드 = "full_plan";
+
+  var startMs = Date.parse(req.반출일 + "T" + req.반출시간 + ":00Z");
+  var endMs = Date.parse(req.반납일 + "T" + req.반납시간 + ":00Z");
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    throw new Error("반납 일시는 반출 일시 이후여야 합니다.");
+  }
+  return req;
+}
+
 /**
  * 확인요청 시트에 데이터 입력 후 가용확인까지 자동 실행
  * @param {Object} req - {
@@ -11616,6 +11687,7 @@ function insertAndCheckRequest(req) {
 }
 
 function _insertAndCheckRequest(req) {
+  req = _normalizeConfirmRequestSchedule_(req);
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("확인요청");
   if (!sheet) throw new Error("확인요청 시트 없음");

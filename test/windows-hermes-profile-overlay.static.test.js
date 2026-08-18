@@ -80,7 +80,7 @@ test('native Village candidates preserve authority and Windows source boundaries
   assert.match(operations, /current user may authorize internal Village work/i);
   assert.match(operations, /internal write approval does not (?:approve|authorize) a customer-facing send/i);
   assert.match(operations, /different equipment groups[\s\S]{0,180}different pickup or return times/i);
-  assert.match(operations, /existing partial request[\s\S]{0,180}update/i);
+  assert.match(operations, /existing partial request[\s\S]{0,300}merge the AI-decided additions[\s\S]{0,180}replace once/i);
   assert.match(operations, /authoritative readback/i);
   assert.match(rpa, /profile/i);
   assert.match(rpa, /does not define the authorization policy/i);

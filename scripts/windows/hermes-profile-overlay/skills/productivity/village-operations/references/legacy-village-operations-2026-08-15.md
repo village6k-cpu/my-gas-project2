@@ -14,7 +14,9 @@ metadata:
 > **HISTORICAL ARCHIVE — DO NOT USE FOR CURRENT OPERATIONS.** This file is
 > retained only as audit and recovery evidence. The current owner-confirmed rental-day
 > rule is +3 hours: `ceil((hours - 3) / 24)` (minimum 1). Any +6-hour formula
-> below is obsolete historical text and must never drive a calculation.
+> below is obsolete historical text and must never drive a calculation. The current
+> confirmation-request time boundary floors pickup minutes and ceils return minutes;
+> `27일 24:00` keeps the written date and becomes `27일 00:00`.
 
 <!-- WINDOWS_EXECUTION_ADAPTER -->
 ## Windows execution adapter
@@ -164,7 +166,7 @@ When the user gives multiple customer names and says to check them then enter `�
    - If the Kakao conversation shows image cards / `저장하기` attachments instead of visible text, inspect/download the attached images and OCR/read them before declaring `장비명 확인 필요`. In Kakao Channel Manager automation Chrome, DevTools can fetch `a.btn_save` image links with page credentials; save them locally and use vision/OCR for the equipment list.
 2. Normalize date/time to API-friendly forms (`YYYY-MM-DD`, `HH:MM`) using current-year context when obvious.
    - Treat Kakao visible date separators/message timestamps as first-class context for relative words like `오늘`, `내일`, `모레`; never pass these strings through to the API.
-   - Convert same-day `24시` / `24:00` returns to next-day `00:00` before calling `insertAndCheckRequest` (e.g. `6월 6일 10시부터 6월 6일 24시까지` → `반출일 2026-06-06 10:00`, `반납일 2026-06-07 00:00`).
+   - **OBSOLETE historical rule:** Convert same-day `24시` / `24:00` returns to next-day `00:00` before calling `insertAndCheckRequest`. Current owner-confirmed behavior keeps the written date: `27일 24:00` → `27일 00:00`.
    - If the computed same-day return time is earlier than pickup time, treat it as an overnight return unless the conversation clearly says otherwise.
    - If relative-date context is genuinely unavailable, do not force an API write; create a human-review follow-up instead.
 3. Use the single `catalog --sheet all` snapshot described above. Match clear items to master names; preserve a concrete unmatched customer string in the equipment row with the exact `unregisteredOriginals` allowlist. Do **not** record AI assumptions, duplicate-check reasoning, or “가용확인 후 안내 필요” in `비고(Q)`/`추가요청(R)`; those fields can flow into contracts/documents. Keep internal reasoning in evidence/follow-up records only.

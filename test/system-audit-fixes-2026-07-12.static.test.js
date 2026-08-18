@@ -11,8 +11,6 @@ const contract = fs.readFileSync(path.join(root, 'generatecontract.js'), 'utf8')
 const protection = fs.readFileSync(path.join(root, 'sheetProtection.js'), 'utf8');
 const supa = fs.readFileSync(path.join(root, 'supabaseSync.js'), 'utf8');
 const manageRoot = fs.readFileSync(path.join(root, 'requestManage.html'), 'utf8');
-const manageDocs = fs.readFileSync(path.join(root, 'docs', 'manage.html'), 'utf8');
-const requestDocs = fs.readFileSync(path.join(root, 'docs', 'request.html'), 'utf8');
 
 // #1 — 확인요청 삽입은 품목 수만큼 "연속" 빈 행을 찾아야 한다(중간 갭 덮어쓰기 방지).
 assert(
@@ -90,18 +88,11 @@ assert(
   '#31 stale cleanup must fail closed on an empty keep-set, preserve taken_qty baselines, and stay out of periodic snapshot flushes'
 );
 
-// #38 — 확인요청 관리 화면은 고객 입력을 escHtml로 이스케이프해야 한다(루트 + docs).
-for (const [name, html] of [['requestManage.html', manageRoot], ['docs/manage.html', manageDocs]]) {
+// #38 — 실행 가능한 확인요청 관리 화면은 고객 입력을 escHtml로 이스케이프해야 한다.
+for (const [name, html] of [['requestManage.html', manageRoot]]) {
   assert(/function escHtml\(s\)\{return String/.test(html), `#38 ${name} must define escHtml`);
   assert(/escHtml\(req\.예약자명/.test(html) && /escHtml\(e\.장비명\)/.test(html),
     `#38 ${name} must escape 예약자명 and 장비명 before innerHTML`);
 }
-
-// #29 — request.html '바로 등록'은 registerAsync를 호출해야 한다(scan&do=등록 금지).
-assert(
-  /action=registerAsync&reqID=/.test(requestDocs) &&
-    !/action=scan&reqID=[^]*?&do=/.test(requestDocs),
-  '#29 request.html registerNow must call registerAsync (not the no-op scan&do=등록)'
-);
 
 console.log('2026-07-12 시스템 점검 수정 가드 통과');

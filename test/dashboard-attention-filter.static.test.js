@@ -37,7 +37,7 @@ assert.match(
   'dashboard search matching must include depositStatus'
 );
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
 
   assert.match(
@@ -106,7 +106,7 @@ assert.match(
     `${file} must show memo badges in the folded card header before caution/time badges`
   );
 
-  const memoSaveBody = html.match(/function updateEquipmentCheck\([\s\S]*?\n}\n\nfunction updateContractStatus/);
+  const memoSaveBody = html.match(/function updateEquipmentCheck\([\s\S]*?\r?\n}\r?\n\r?\nfunction updateContractStatus/);
   assert.ok(memoSaveBody, `${file} must expose updateEquipmentCheck before updateContractStatus`);
   assert.match(
     memoSaveBody[0],

@@ -1,2 +1,24 @@
 # Hermes skill packages are hash-compared with the live native profiles.
+.gitattributes text eol=lf
+.claspignore text eol=lf
+.gitignore text eol=lf
+.vercelignore text eol=lf
 scripts/windows/hermes-profile-overlay/skills/** text eol=lf
+
+# The project is edited on macOS and Windows, while static contracts compare
+# source structure across checkouts. Keep portable text sources byte-stable.
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.sql text eol=lf

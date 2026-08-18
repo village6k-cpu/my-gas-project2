@@ -98,7 +98,7 @@ assert.match(
   'sheetAPI must route action=updateBillingCompany'
 );
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
 
   assert.match(

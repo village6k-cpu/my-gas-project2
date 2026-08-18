@@ -191,8 +191,10 @@ assert(
   'the shared my-page data path must keep short memory and server caches so repeated customer opens avoid slow GAS roundtrips'
 );
 assert(
-  gasHelper.includes('GAS_API_KEY') && gasHelper.includes('rateLimited'),
-  'GAS helper must keep the API key server-side'
+  gasHelper.includes('VILLAGE_PUBLIC_API_KEY') &&
+    gasHelper.includes('getVillageGasInternalKey') &&
+    gasHelper.includes('rateLimited'),
+  'GAS helper must keep public reads and authenticated writes behind the server-side boundary'
 );
 
 // ── 등록완료 알림톡: 내 예약 링크 포함, 미설정 시 스킵, 거래당 1회, 등록 흐름 비차단 ──

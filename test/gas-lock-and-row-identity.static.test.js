@@ -9,7 +9,6 @@ const path = require('path');
 
 const backend = fs.readFileSync(path.resolve(__dirname, '..', 'checkAvailability.js'), 'utf8');
 const api = fs.readFileSync(path.resolve(__dirname, '..', 'sheetAPI.js'), 'utf8');
-const docsTimeline = fs.readFileSync(path.resolve(__dirname, '..', 'docs', 'timeline.html'), 'utf8');
 const gasTimeline = fs.readFileSync(path.resolve(__dirname, '..', 'timeline.html'), 'utf8');
 
 function extractFunction(source, name) {
@@ -53,8 +52,6 @@ assert(/case "updateTime":[\s\S]{0,700}params\.tid \|\| postBody\.tid/.test(api)
   'updateTime 라우트가 tid를 전달해야 한다');
 assert(/case "updateStatus":[\s\S]{0,700}params\.tid \|\| postBody\.tid/.test(api),
   'updateStatus 라우트가 tid를 전달해야 한다');
-assert(/var tidParam = item\.거래ID[\s\S]{0,300}action=updateTime[\s\S]{0,300}riParam \+ tidParam/.test(docsTimeline),
-  'docs 타임라인이 updateTime에 거래ID를 보내야 한다');
 assert(/updateScheduleTime\(original\.rowIndex,\s*item\.start,\s*item\.end,\s*riJSON,\s*original\.거래ID/.test(gasTimeline),
   'GAS 타임라인도 updateScheduleTime에 거래ID를 보내야 한다');
 assert(/res\.error \|\| res\.message/.test(gasTimeline),

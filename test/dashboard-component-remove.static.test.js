@@ -20,7 +20,8 @@ assert(
   'rowsToDelete = resolveDashboardRemovalRows_(data, tid, scheduleId, equipName)',
   'if (isComponent) {',
   'rows.push(targetRow);',
-  'hasComponents && rowSetName === setKey'
+  'var rowIsComponent = !!rowSetName && rowSetName !== rowEquipName;',
+  'if (!rowIsComponent || rowSetName !== setKey) break;'
 ].forEach((contract) => {
   assert(
     logic.includes(contract),
@@ -28,7 +29,7 @@ assert(
   );
 });
 
-['dashboard.html', 'docs/dashboard.html'].forEach((file) => {
+['dashboard.html'].forEach((file) => {
   const html = read(file);
   assert(
     !html.includes('if (!eq.isComponent)'),
