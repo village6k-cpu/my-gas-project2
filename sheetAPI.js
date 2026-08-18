@@ -59,7 +59,7 @@ function getConfirmationRequestSchema_() {
   return {
     fieldLanguage: "korean",
     required: ["반출일", "반출시간", "반납일", "반납시간", "예약자명", "장비"],
-    optional: ["연락처", "할인유형", "업체명", "비고", "추가요청"],
+    optional: ["연락처", "할인유형", "업체명", "비고", "추가요청", "장비명원문보존"],
     formats: {
       반출일: "YYYY-MM-DD",
       반출시간: "HH:MM (두 자리, 예: 07:00)",

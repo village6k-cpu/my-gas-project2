@@ -1409,6 +1409,9 @@ export function buildSheetAppendPayload(decision, options = {}) {
     비고: memo,
     추가요청: extra,
     입력모드: text(row.equipment_write_mode).trim() || 'full_plan',
+    // The AI has already reconciled catalog evidence and any customer wording.
+    // GAS may validate and expand sets, but must not reinterpret this plan.
+    장비명원문보존: true,
     장비: equipment.map((item) => ({ 이름: item.item, 수량: item.quantity }))
   };
   const setComponentSelections = (Array.isArray(row.set_component_selections) ? row.set_component_selections : [])

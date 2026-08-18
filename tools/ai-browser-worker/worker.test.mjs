@@ -3016,6 +3016,7 @@ test('buildSheetAppendPayload maps AI-decided fields into insertAndCheckRequest 
     비고: '',
     추가요청: '렌즈 포함',
     입력모드: 'full_plan',
+    장비명원문보존: true,
     장비: [
       { 이름: '소니 FX6 바디세트', 수량: 1 },
       { 이름: '소니 GM 24-70mm II', 수량: 2 }
@@ -3040,6 +3041,7 @@ test('buildSheetAppendPayload preserves the complete AI equipment plan and never
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
 
   assert.deepEqual(payload.args.장비, [{ 이름: '셔틀러에이스 M (75볼)', 수량: 1 }]);
+  assert.equal(payload.args.장비명원문보존, true);
 });
 
 test('buildSheetAppendPayload never re-extracts customer identity from raw Kakao text', () => {
