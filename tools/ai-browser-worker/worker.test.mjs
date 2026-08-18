@@ -2304,6 +2304,11 @@ test('runHermes can invoke the Windows canonical Python module without the hangi
   assert.equal(payload.query, 'prompt text');
 });
 
+test('the Windows stdin transport helper is versioned beside the worker', () => {
+  const helperPath = new URL('./hermes-stdin-runner.py', import.meta.url);
+  assert.equal(fs.existsSync(helperPath), true, 'runtime promotion must include hermes-stdin-runner.py');
+});
+
 test('runHermes does not force AX-only capture or truncate computer_use evidence', async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
