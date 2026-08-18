@@ -53,6 +53,9 @@ $retiredSkillNames = @(
 $skillNameAliases = @{
     'village-brain-first' = 'village-history-evidence'
 }
+$ownerManagedSkillNames = @(
+    'village-operations'
+)
 $overlaySkillsRoot = Join-Path $PSScriptRoot 'hermes-profile-overlay\skills'
 $encoding = New-Object System.Text.UTF8Encoding($false)
 
@@ -304,7 +307,8 @@ function Copy-PreservedLearningState {
         [Parameter(Mandatory = $true)][string]$StagingRoot,
         [Parameter(Mandatory = $true)][hashtable]$CanonicalHashes,
         [Parameter(Mandatory = $true)][hashtable]$PreviousCanonicalHashes,
-        [Parameter(Mandatory = $true)][string[]]$RetiredNames
+        [Parameter(Mandatory = $true)][string[]]$RetiredNames,
+        [string[]]$OwnerManagedNames = @()
     )
 
     $preservedFiles = New-Object System.Collections.ArrayList
@@ -322,6 +326,9 @@ function Copy-PreservedLearningState {
 
     foreach ($package in @(Get-ActiveSkillPackages -SkillsRoot $activeResolved)) {
         if ($RetiredNames -contains $package.name) {
+            continue
+        }
+        if ($OwnerManagedNames -contains $package.name) {
             continue
         }
         $packageRelative = $package.relative.Replace('\', '/')
@@ -534,12 +541,13 @@ function Merge-UsageMetadata {
         [string]$SourcePath,
         [string]$ActivePath,
         [Parameter(Mandatory = $true)][string]$TargetPath,
-        [hashtable]$NameAliases = @{}
+        [hashtable]$NameAliases = @{},
+        [string[]]$OwnerManagedNames = @()
     )
 
     $sourceObject = Read-JsonMetadata -Path $SourcePath
     $activeObject = Read-JsonMetadata -Path $ActivePath
-    if ($null -eq $sourceObject -and $null -eq $activeObject) {
+    if ($null -eq $sourceObject -and $null -eq $activeObject -and $OwnerManagedNames.Count -eq 0) {
         return 0
     }
 
@@ -575,6 +583,26 @@ function Merge-UsageMetadata {
             $mergedRecords[$newName] = $oldRecord
         }
         $mergedRecords.Remove($oldName)
+    }
+    foreach ($ownerName in $OwnerManagedNames) {
+        $ownerRecord = [ordered]@{}
+        if ($mergedRecords.Contains($ownerName)) {
+            $record = $mergedRecords[$ownerName]
+            if ($record -is [Collections.IDictionary]) {
+                foreach ($key in @($record.Keys)) {
+                    $ownerRecord[[string]$key] = $record[$key]
+                }
+            }
+            else {
+                foreach ($property in @($record.PSObject.Properties)) {
+                    $ownerRecord[[string]$property.Name] = $property.Value
+                }
+            }
+        }
+        $ownerRecord['created_by'] = $null
+        $ownerRecord['agent_created'] = $false
+        $ownerRecord['pinned'] = $true
+        $mergedRecords[$ownerName] = $ownerRecord
     }
     [IO.File]::WriteAllText(
         $TargetPath,
@@ -945,7 +973,8 @@ try {
         -StagingRoot $stagingRoot `
         -CanonicalHashes $canonicalHashes `
         -PreviousCanonicalHashes $previousCanonicalHashes `
-        -RetiredNames $retiredSkillNames
+        -RetiredNames $retiredSkillNames `
+        -OwnerManagedNames $ownerManagedSkillNames
 
     $rootNames = @(Get-ActiveSkillPackages -SkillsRoot $stagingRoot | ForEach-Object { $_.name })
     $metadata = [pscustomobject]@{
@@ -964,7 +993,8 @@ try {
             -SourcePath $sourceUsagePath `
             -ActivePath (Join-Path $skillsRoot '.usage.json') `
             -TargetPath (Join-Path $stagingRoot '.usage.json') `
-            -NameAliases $skillNameAliases
+            -NameAliases $skillNameAliases `
+            -OwnerManagedNames $ownerManagedSkillNames
     }
     if (@($rootNames | Select-Object -Unique).Count -ne $rootNames.Count) {
         throw 'Rebuilt Windows skill tree contains duplicate skill names.'

@@ -7,6 +7,13 @@ import crypto from 'node:crypto';
 import dns from 'node:dns';
 import { spawn, spawnSync } from 'node:child_process';
 import { buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowUpRows, processManualSend, upsertFollowUpRows } from '../ai-browser-worker/worker.mjs';
+import {
+  applyPreparedKakaoDecision,
+  captureKakaoRoomSnapshot,
+  finalizePreparedKakaoDecision,
+  loadKakaoWorkerRuntimeConfig,
+  prepareKakaoDecisionFromSnapshot
+} from '../ai-browser-worker/worker.mjs';
 import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-browser-worker/follow-up-case-lifecycle.mjs';
 
 function loadSelectedEnvFile(filePath, keys = []) {
@@ -56,6 +63,8 @@ const CONFIG = {
   readBackstopLookbackHours: Number(process.env.READ_BACKSTOP_LOOKBACK_HOURS || 36),
   readBackstopLookbackDays: Number(process.env.READ_BACKSTOP_LOOKBACK_DAYS || 2),
   workerTimeoutMs: Number(process.env.WORKER_TIMEOUT_MS || process.env.HERMES_WORKER_TIMEOUT_MS || 240_000),
+  aiDomSplitEnabled: readBooleanEnvironment(process.env.KAKAO_AI_DOM_SPLIT_ENABLED, false),
+  aiDecisionConcurrency: Math.max(1, Number(process.env.KAKAO_AI_DECISION_CONCURRENCY || 2)),
   supabaseTimeoutMs: Number(process.env.SUPABASE_TIMEOUT_MS || 7000),
   followUpTable: process.env.SUPABASE_FOLLOW_UP_TABLE || 'ai_follow_up_items',
   supabaseRecoveryEnabled: process.env.SUPABASE_RECOVERY_ENABLED !== 'false',
@@ -167,6 +176,7 @@ const state = {
   failedSupabaseWrites: 0,
   failedWorkerRuns: 0,
   workerRunning: false,
+  activeWorkerRuns: 0,
   workerQueueLength: 0,
   currentJobId: null,
   workerStartedAt: null,
@@ -181,6 +191,7 @@ const state = {
   tabCleanupRunning: false,
   lastTabCleanup: null,
   rooms: new Map(),
+  roomVersions: new Map(),
   activeWorkerJobIds: new Set(),
   seenGroupingTexts: new Set(),
   lastContentScriptStartedAtMs: 0
@@ -788,7 +799,10 @@ function parseWorkerStdoutJson(workerResult = {}) {
   return null;
 }
 
-function mapWorkerPayloadToSupabaseStatus(workerPayload = {}) {
+export function mapWorkerPayloadToSupabaseStatus(workerPayload = {}) {
+  if (workerPayload.status === 'superseded_by_newer_room_event' || workerPayload.superseded === true) {
+    return { status: 'superseded_by_newer_room_event', error_message: null };
+  }
   const decision = workerPayload.decision || {};
   const sheetResult = workerPayload.sheetResult || workerPayload.sheet_result || {};
   if (decision?.should_write_to_sheet === true && sheetResult?.success === true) {
@@ -867,13 +881,120 @@ export function semanticPreviewIdentity(value = '') {
     .trim();
 }
 
+export function semanticRoomEventIdentity(event = {}) {
+  const preview = semanticPreviewIdentity(event.previewText || event.preview_text || '');
+  const displayTime = String(
+    event.displayTime
+    || event.display_time
+    || event.raw?.displayTime
+    || event.raw?.display_time
+    || ''
+  ).trim();
+  return [preview, displayTime].filter(Boolean).join('\n');
+}
+
+export function registerAcceptedRoomEvent(versions, roomKey, semanticIdentity) {
+  if (!(versions instanceof Map)) throw new TypeError('versions must be a Map');
+  const key = String(roomKey || '').trim();
+  const identity = String(semanticIdentity || '').trim();
+  if (!key || !identity) throw new Error('roomKey and semanticIdentity are required');
+  const previous = versions.get(key) || { revision: 0, semanticIdentity: '' };
+  if (previous.semanticIdentity === identity) {
+    return { roomKey: key, revision: previous.revision, changed: false };
+  }
+  const next = { revision: Number(previous.revision || 0) + 1, semanticIdentity: identity };
+  versions.set(key, next);
+  return { roomKey: key, revision: next.revision, changed: true };
+}
+
+function createSerialExecutor() {
+  let tail = Promise.resolve();
+  let queued = 0;
+  let active = 0;
+  return {
+    run(task) {
+      queued += 1;
+      const execute = async () => {
+        queued = Math.max(0, queued - 1);
+        active += 1;
+        try {
+          return await task();
+        } finally {
+          active = Math.max(0, active - 1);
+        }
+      };
+      const result = tail.then(execute, execute);
+      tail = result.catch(() => {});
+      return result;
+    },
+    status() { return { active, queued }; }
+  };
+}
+
+function createBoundedExecutor(limit = 2) {
+  const concurrency = Math.max(1, Number(limit || 1));
+  const queue = [];
+  let active = 0;
+  const drain = () => {
+    while (active < concurrency && queue.length) {
+      const entry = queue.shift();
+      active += 1;
+      Promise.resolve()
+        .then(entry.task)
+        .then(entry.resolve, entry.reject)
+        .finally(() => {
+          active = Math.max(0, active - 1);
+          drain();
+        });
+    }
+  };
+  return {
+    run(task) {
+      return new Promise((resolve, reject) => {
+        queue.push({ task, resolve, reject });
+        drain();
+      });
+    },
+    status() { return { active, queued: queue.length, concurrency }; }
+  };
+}
+
+export function createKakaoPhaseScheduler({
+  capture,
+  decide,
+  apply,
+  finalize,
+  manualSend,
+  decisionConcurrency = 2
+} = {}) {
+  for (const [name, fn] of Object.entries({ capture, decide, apply, finalize, manualSend })) {
+    if (typeof fn !== 'function') throw new TypeError(`${name} must be a function`);
+  }
+  const domLane = createSerialExecutor();
+  const decisionLane = createBoundedExecutor(decisionConcurrency);
+  return {
+    async run(job) {
+      const snapshot = await domLane.run(() => capture(job));
+      const prepared = await decisionLane.run(() => decide(snapshot, job));
+      const applied = await domLane.run(() => apply(prepared, job));
+      return finalize(applied, job);
+    },
+    runManual(payload) {
+      return domLane.run(() => manualSend(payload));
+    },
+    status() {
+      return { dom: domLane.status(), decision: decisionLane.status() };
+    }
+  };
+}
+
 function buildStableJobId(roomKey, events = []) {
   // Mutation/backstop scans attach a fresh event hash and the unread badge may
   // disappear while the same customer message is being processed. Neither is a
   // new business turn. Key the durable job by the visible semantic preview so a
   // completed message cannot launch Hermes again and time out minutes later.
   const identities = [...new Set(events
-    .map((event) => semanticPreviewIdentity(event.previewText || ''))
+    .map((event) => semanticRoomEventIdentity(event))
     .filter(Boolean))]
     .sort();
   return `dom-${sha256(`${roomKey}:${identities.join('|')}`).slice(0, 16)}`;
@@ -891,6 +1012,7 @@ function buildAiFirstJob(roomKey, roomState) {
     reason: 'kakao_channel_manager_dom_event_debounced',
     status: 'ready_for_ai_worker',
     roomKey,
+    roomRevision: Number(latest.roomRevision || latest.room_revision || 0),
     detectedAt: latest.detectedAt || nowIso(),
     firstEventAt: roomState.firstAt,
     lastEventAt: roomState.lastAt,
@@ -1123,6 +1245,38 @@ function runWorker(job) {
 }
 
 let workerChain = Promise.resolve();
+let kakaoPhaseScheduler = null;
+let kakaoWorkerRuntimeConfig = null;
+
+function getKakaoPhaseScheduler() {
+  if (kakaoPhaseScheduler) return kakaoPhaseScheduler;
+  kakaoWorkerRuntimeConfig = loadKakaoWorkerRuntimeConfig();
+  kakaoPhaseScheduler = createKakaoPhaseScheduler({
+    decisionConcurrency: CONFIG.aiDecisionConcurrency,
+    capture: (job) => captureKakaoRoomSnapshot({ config: kakaoWorkerRuntimeConfig, job }),
+    decide: (capture, job) => prepareKakaoDecisionFromSnapshot({ config: kakaoWorkerRuntimeConfig, job, capture }),
+    apply: (prepared, job) => applyPreparedKakaoDecision({ config: kakaoWorkerRuntimeConfig, job, prepared }),
+    finalize: (applied, job) => finalizePreparedKakaoDecision({ config: kakaoWorkerRuntimeConfig, job, applied }),
+    manualSend: (payload) => (typeof payload?.execute === 'function' ? payload.execute() : processManualSend(payload))
+  });
+  return kakaoPhaseScheduler;
+}
+
+async function runPhasedWorker(job) {
+  const startedAt = Date.now();
+  const payload = await getKakaoPhaseScheduler().run(job);
+  const result = {
+    code: 0,
+    signal: null,
+    timedOut: false,
+    stdout: JSON.stringify(payload),
+    stderr: '',
+    phased: true,
+    elapsedMs: Date.now() - startedAt
+  };
+  appendNdjson('worker-results.ndjson', { at: nowIso(), jobId: job.jobId, result });
+  return result;
+}
 const queuedWorkerSlotsByRoom = new Map();
 const manualSendInFlight = new Map();
 const manualSendRecent = new Map();
@@ -1200,7 +1354,7 @@ function duplicateManualSendResult(result, reason) {
 }
 
 function enqueueWorker(job) {
-  if (!CONFIG.workerCommand) return Promise.resolve({ skipped: true });
+  if (!CONFIG.workerCommand && !CONFIG.aiDomSplitEnabled) return Promise.resolve({ skipped: true });
   const jobId = String(job?.jobId || '');
   if (jobId && state.activeWorkerJobIds.has(jobId)) {
     const result = { skipped: true, reason: 'local_duplicate_job_active', jobId };
@@ -1248,12 +1402,15 @@ function enqueueWorker(job) {
     const queuedJob = slot.job;
     const queuedJobId = String(queuedJob?.jobId || '');
     state.workerQueueLength = Math.max(0, state.workerQueueLength - 1);
-    state.workerRunning = true;
+    state.activeWorkerRuns += 1;
+    state.workerRunning = state.activeWorkerRuns > 0;
     state.currentJobId = queuedJob.jobId;
     state.workerStartedAt = nowIso();
     console.info('[dom-bridge] worker start', queuedJob.jobId, 'queued:', state.workerQueueLength);
     try {
-      const result = await runWorker(queuedJob);
+      const result = CONFIG.aiDomSplitEnabled
+        ? await runPhasedWorker(queuedJob)
+        : await runWorker(queuedJob);
       state.lastWorkerError = null;
       return result;
     } catch (error) {
@@ -1261,15 +1418,24 @@ function enqueueWorker(job) {
       throw error;
     } finally {
       if (queuedJobId) state.activeWorkerJobIds.delete(queuedJobId);
-      state.workerRunning = false;
-      state.currentJobId = null;
-      state.workerStartedAt = null;
+      state.activeWorkerRuns = Math.max(0, state.activeWorkerRuns - 1);
+      state.workerRunning = state.activeWorkerRuns > 0;
+      if (!state.workerRunning) {
+        state.currentJobId = null;
+        state.workerStartedAt = null;
+      }
       console.info('[dom-bridge] worker done', queuedJob.jobId, 'queued:', state.workerQueueLength);
-      await cleanupIdleKakaoConversationTabs('worker_finished', { allowQueued: true });
+      if (CONFIG.aiDomSplitEnabled) {
+        await getKakaoPhaseScheduler().runManual({
+          execute: () => cleanupIdleKakaoConversationTabs('worker_finished', { allowQueued: true })
+        });
+      } else {
+        await cleanupIdleKakaoConversationTabs('worker_finished', { allowQueued: true });
+      }
     }
   };
-  const execution = workerChain.then(run, run);
-  workerChain = execution.catch(() => {});
+  const execution = CONFIG.aiDomSplitEnabled ? run() : workerChain.then(run, run);
+  if (!CONFIG.aiDomSplitEnabled) workerChain = execution.catch(() => {});
   execution.then(
     (result) => slot.external?.resolve(result),
     (error) => slot.external?.reject(error)
@@ -1309,7 +1475,8 @@ function enqueueManualSend(payload) {
   }
 
   const run = async () => {
-    state.workerRunning = true;
+    state.activeWorkerRuns += 1;
+    state.workerRunning = state.activeWorkerRuns > 0;
     state.currentJobId = jobId;
     state.workerStartedAt = nowIso();
     console.info('[dom-bridge] manual send start', jobId, payload.customerName || payload.roomTitle || '');
@@ -1324,20 +1491,25 @@ function enqueueManualSend(payload) {
       appendNdjson('errors.ndjson', { at: nowIso(), type: 'manual_send', message: error.message, dedupeKey, payload: { ...payload, text: '[redacted]' } });
       throw error;
     } finally {
-      state.workerRunning = false;
-      state.currentJobId = null;
-      state.workerStartedAt = null;
+      state.activeWorkerRuns = Math.max(0, state.activeWorkerRuns - 1);
+      state.workerRunning = state.activeWorkerRuns > 0;
+      if (!state.workerRunning) {
+        state.currentJobId = null;
+        state.workerStartedAt = null;
+      }
       console.info('[dom-bridge] manual send done', jobId);
     }
   };
-  const queued = workerChain.then(run, run);
+  const queued = CONFIG.aiDomSplitEnabled
+    ? getKakaoPhaseScheduler().runManual({ execute: run })
+    : workerChain.then(run, run);
   if (dedupeKey) {
     manualSendInFlight.set(dedupeKey, queued);
     queued.finally(() => {
       if (manualSendInFlight.get(dedupeKey) === queued) manualSendInFlight.delete(dedupeKey);
     }).catch(() => {});
   }
-  workerChain = queued.catch(() => {});
+  if (!CONFIG.aiDomSplitEnabled) workerChain = queued.catch(() => {});
   return queued;
 }
 
@@ -2488,6 +2660,11 @@ async function handleEvent(req, res) {
 
   console.info('[dom-bridge] event received', event.roomKey, event.reason, event.previewText.slice(0, 80));
 
+  const acceptedRoomKey = roomKeyForDebounce(event);
+  const acceptedIdentity = semanticRoomEventIdentity(event) || String(event.eventHash || '').trim();
+  const roomVersion = registerAcceptedRoomEvent(state.roomVersions, acceptedRoomKey, acceptedIdentity);
+  event.roomRevision = roomVersion.revision;
+
   try {
     await writeSupabaseEvent(event, 'event');
   } catch (error) {
@@ -2520,6 +2697,8 @@ const server = http.createServer(async (req, res) => {
           workerEnabled: Boolean(CONFIG.workerCommand),
           ...buildHealthConfig(CONFIG),
           workerTimeoutMs: CONFIG.workerTimeoutMs,
+          aiDomSplitEnabled: CONFIG.aiDomSplitEnabled,
+          aiDecisionConcurrency: CONFIG.aiDecisionConcurrency,
           supabaseTimeoutMs: CONFIG.supabaseTimeoutMs,
           supabaseRecoveryEnabled: CONFIG.supabaseRecoveryEnabled,
           supabaseRecoveryIntervalMs: CONFIG.supabaseRecoveryIntervalMs,
@@ -2548,6 +2727,7 @@ const server = http.createServer(async (req, res) => {
           failedSupabaseWrites: state.failedSupabaseWrites,
           failedWorkerRuns: state.failedWorkerRuns,
           workerRunning: state.workerRunning,
+          activeWorkerRuns: state.activeWorkerRuns,
           workerQueueLength: state.workerQueueLength,
           currentJobId: state.currentJobId,
           workerStartedAt: state.workerStartedAt,
@@ -2562,8 +2742,25 @@ const server = http.createServer(async (req, res) => {
           closedKakaoTabs: state.closedKakaoTabs,
           tabCleanupRunning: state.tabCleanupRunning,
           lastTabCleanup: state.lastTabCleanup,
-          openRooms: state.rooms.size
+          openRooms: state.rooms.size,
+          phaseScheduler: kakaoPhaseScheduler?.status?.() || null
         }
+      });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/worker/freshness') {
+      const roomKey = String(url.searchParams.get('roomKey') || '').trim();
+      const requestedRevision = Number(url.searchParams.get('revision') || 0);
+      if (!roomKey || !Number.isFinite(requestedRevision) || requestedRevision <= 0) {
+        return json(res, 400, { ok: false, error: 'roomKey and positive revision are required' });
+      }
+      const latestRevision = Number(state.roomVersions.get(roomKey)?.revision || 0);
+      return json(res, 200, {
+        ok: true,
+        roomKey,
+        requestedRevision,
+        latestRevision,
+        superseded: latestRevision > requestedRevision
       });
     }
 

@@ -11,6 +11,10 @@ metadata:
     created_by: agent
 ---
 
+> **HISTORICAL ARCHIVE — DO NOT USE FOR CURRENT OPERATIONS.** This file is
+> retained only as audit and recovery evidence. The current owner-confirmed rental-day
+> rule is +3 hours: `ceil((hours - 3) / 24)` (minimum 1). Any +6-hour formula
+> below is obsolete historical text and must never drive a calculation.
 
 <!-- WINDOWS_EXECUTION_ADAPTER -->
 ## Windows execution adapter
@@ -408,7 +412,7 @@ Use when the user discusses 결제, 정산, 수금, 입금 확인, 반출 결제
 Use when the user asks to check whether already-registered reservations have wrong amounts, missing charges, duplicated charges, or omitted payment/proof records.
 
 - Compare **three sources**, not one: current `스케줄상세`, generated contract Google Sheet, and Village 2.0 `거래내역`; use `세트마스터` only as current price/name reference.
-- For current-schedule recalculation, bill only positive-`단가` `스케줄상세` rows, apply Village rental-day rule (`ceil((hours - 6) / 24)`, min 1), apply discounts multiplicatively, then VAT/10원 rounding as the contract does.
+- **OBSOLETE HISTORICAL RULE — DO NOT USE.** Original archived text preserved verbatim: “For current-schedule recalculation, bill only positive-`단가` `스케줄상세` rows, apply Village rental-day rule (`ceil((hours - 6) / 24)`, min 1), apply discounts multiplicatively, then VAT/10원 rounding as the contract does.” The current owner-confirmed rule is `ceil((hours - 3) / 24)` (minimum 1).
 - If `스케줄상세` and generated contract differ, do **not** immediately call the contract/ledger wrong. The schedule may have been edited after document generation. Report the exact mismatch and require actual carried-out equipment confirmation before any correction.
 - If a customer/staff says `계약서 금액` and `견적서 금액` differ, compare **the actual generated documents by timestamp**, not just current schedule math. Use Drive search by `거래ID`/customer to find prior quote PDFs/sheets and the contract sheet, export both Google Sheets as CSV, then compare item rows and totals. A common benign cause is: quote was generated/sent first, then a positive-price schedule item was added before contract generation/regeneration. Explain the delta as `item price × discount multiplier × VAT/rounding` when it matches; e.g. a 5,000원 item under 학생30% adds 3,850원 VAT 포함.
 - Generated contract links in `거래내역` can usually be audited via CSV export: extract `/d/{sheetId}/` and fetch `https://docs.google.com/spreadsheets/d/{sheetId}/export?format=csv`; inspect item rows, 합계, discount rows, and `총 결제 금액`. Official quote sheet links found in Drive can be audited the same way.

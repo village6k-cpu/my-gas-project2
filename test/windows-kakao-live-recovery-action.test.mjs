@@ -84,7 +84,7 @@ function combinedLiveHealth(runtimeState, { authenticated = true, watcherReady =
   const command = [
     `$ErrorActionPreference='Stop'`,
     `Import-Module '${escapedPath}' -Force`,
-    `$bridge=[pscustomobject]@{ok=$true; config=[pscustomobject]@{workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$true; slackActionPollEnabled=$true; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true}}`,
+    `$bridge=[pscustomobject]@{ok=$true; config=[pscustomobject]@{workerLive=$true; workerDryRun=$false; windowsWritesEnabled=$true; autoSendEnabled=$true; slackCardDeliveryEnabled=$true; slackActionPollEnabled=$true; supabaseRecoveryEnabled=$true; kakaoTabCleanupEnabled=$true; startupCatchupSupported=$true; aiDomSplitEnabled=$true; aiDecisionConcurrency=2}}`,
     `$probe=[pscustomobject]@{state='${runtimeState.replaceAll("'", "''")}'; cdpReady=$true; authenticated=$${authenticated ? 'true' : 'false'}; watcherReady=$${watcherReady ? 'true' : 'false'}}`,
     `[pscustomobject]@{state=(Get-KakaoLiveRuntimeState -Probe $probe); healthy=(Test-KakaoLiveHealth -Health $bridge -RuntimeProbe $probe)} | ConvertTo-Json -Compress`
   ].join('; ');

@@ -8,9 +8,14 @@ Use this reference only when an operation needs an exact Windows path or command
 - Village Brain vault: `C:/Village/VILLAGE_Brain`
 - Compiled Brain context: `C:/Village/VILLAGE_Brain/Ops/brain-context-latest.md`
 - Brain compiler and business jobs: `C:/Village/village-ai`
+- Gary Tan GBrain home: `%USERPROFILE%/.gbrain`
 - Mac mirror: `C:/Village/MacMiniMirror/restored` (historical input only)
 - Root Hermes home: `%LOCALAPPDATA%/hermes`
 - Kakao worker profile: `%LOCALAPPDATA%/hermes/profiles/kakaoworker`
+
+Gary Tan GBrain is an independent, lightweight MCP memory service. It never
+imports, copies, or replaces Village Brain; Village Brain remains the governed
+business-history vault and is consulted only through its own explicit boundary.
 
 The active runtime source can differ from `C:/Village/my-gas-project2`. Confirm
 the scheduled-task action and process command line before diagnosing or changing

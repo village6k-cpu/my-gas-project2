@@ -22,7 +22,9 @@ function Get-KakaoLiveRuntimeContract {
         WORKER_TIMEOUT_MS                 = '540000'
         WORKER_CATCHUP_TIMEOUT_MS         = '540000'
         HERMES_WORKER_TIMEOUT_MS          = '480000'
-        HERMES_WORKER_MAX_TURNS           = '12'
+        HERMES_WORKER_MAX_TURNS           = '90'
+        KAKAO_AI_DOM_SPLIT_ENABLED        = '1'
+        KAKAO_AI_DECISION_CONCURRENCY     = '2'
     }
 }
 
@@ -45,6 +47,13 @@ function Test-KakaoLiveBridgeContract {
     $startupCatchupSupported = $null -ne $Health.config -and
         $Health.config.PSObject.Properties.Name -contains 'startupCatchupSupported' -and
         $Health.config.startupCatchupSupported -eq $true
+    $aiDomSplitEnabled = $null -ne $Health.config -and
+        $Health.config.PSObject.Properties.Name -contains 'aiDomSplitEnabled' -and
+        $Health.config.aiDomSplitEnabled -eq $true
+    $aiDecisionConcurrency = if (
+        $null -ne $Health.config -and
+        $Health.config.PSObject.Properties.Name -contains 'aiDecisionConcurrency'
+    ) { [int]$Health.config.aiDecisionConcurrency } else { 0 }
 
     return [bool](
         $Health.ok -eq $true -and
@@ -57,6 +66,8 @@ function Test-KakaoLiveBridgeContract {
         $Health.config.slackActionPollEnabled -eq $true -and
         $Health.config.supabaseRecoveryEnabled -eq $true -and
         $Health.config.kakaoTabCleanupEnabled -eq $true -and
+        $aiDomSplitEnabled -and
+        $aiDecisionConcurrency -eq 2 -and
         $startupCatchupSupported
     )
 }

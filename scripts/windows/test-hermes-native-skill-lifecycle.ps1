@@ -487,17 +487,24 @@ print(json.dumps({"success": True, "name": "native-lifecycle-marker"}))
 '@
     Invoke-NativePython -Code $createFixtureCode | Out-Null
 
-    Invoke-Hermes curator adopt village-operations --dry-run | Out-Null
-    Invoke-Hermes curator adopt village-operations | Out-Null
     $unmanaged = Invoke-Hermes curator list-unmanaged
+    if ($unmanaged -notmatch 'village-operations') {
+        throw 'village-operations must remain owner-managed in the isolated lifecycle test.'
+    }
     if ($unmanaged -notmatch 'village-history-evidence') {
         throw 'Village Brain must remain user-managed in the isolated lifecycle test.'
     }
 
     $usagePath = Join-Path $resolvedProfileHome 'skills\.usage.json'
     $usage = Get-Content -LiteralPath $usagePath -Raw | ConvertFrom-Json
-    if ($usage.'village-operations'.created_by -ne 'agent') {
-        throw 'village-operations was not explicitly adopted into curator management.'
+    $operationsUsageProperty = $usage.PSObject.Properties['village-operations']
+    if ($null -ne $operationsUsageProperty) {
+        $creatorProperty = $operationsUsageProperty.Value.PSObject.Properties['created_by']
+        $legacyAgentProperty = $operationsUsageProperty.Value.PSObject.Properties['agent_created']
+        if (($null -ne $creatorProperty -and $creatorProperty.Value -eq 'agent') -or
+            ($null -ne $legacyAgentProperty -and $legacyAgentProperty.Value -eq $true)) {
+            throw 'village-operations must remain owner-managed, not curator-managed.'
+        }
     }
     if ($usage.'native-lifecycle-marker'.created_by -ne 'agent') {
         throw 'The native background-review skill was not marked agent-managed.'

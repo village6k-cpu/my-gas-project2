@@ -152,7 +152,7 @@ test('stop removes only an ownership record whose recorded PID is absent', {
   }
 });
 
-test('stop preserves an ownership record when a live PID fails executable or marker validation', {
+test('stop removes a stale ownership record without touching the unfamiliar live PID', {
   skip: process.platform !== 'win32'
 }, () => {
   const localAppData = fs.mkdtempSync(path.join(os.tmpdir(), 'village-live-mismatch-'));
@@ -173,8 +173,9 @@ test('stop preserves an ownership record when a live PID fails executable or mar
       { LOCALAPPDATA: localAppData }
     );
 
-    assert.notEqual(result.status, 0, 'a live ownership mismatch must be rejected');
-    assert.equal(fs.existsSync(recordPath), true, 'the mismatched live record must be preserved');
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(fs.existsSync(recordPath), false, 'the mismatched stale record must be removed');
+    assert.doesNotThrow(() => process.kill(process.pid, 0), 'the unfamiliar live process must remain alive');
   } finally {
     fs.rmSync(localAppData, { recursive: true, force: true });
   }

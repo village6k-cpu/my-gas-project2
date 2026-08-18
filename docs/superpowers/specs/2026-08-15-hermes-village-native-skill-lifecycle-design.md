@@ -161,11 +161,16 @@ Before cutover, an isolated profile must prove:
 
 Do not bulk-adopt all unmanaged skills.
 
-- **Agent-managed:** learned operational umbrellas and focused operational supplements that Hermes should improve and consolidate.
-- **User-managed:** safety boundaries, profile identity, and stable Brain integration policy.
+- **Agent-managed:** focused operational supplements that Hermes should improve and consolidate.
+- **User-managed:** the stable `village-operations` umbrella, safety boundaries,
+  profile identity, and stable Brain integration policy.
 - **Bundled/hub/external:** upstream-owned packages following normal Hermes protection rules.
 
-`village-operations` is explicitly adopted into curator management after its compact form passes tests. Stable safety boundaries remain duplicated at the appropriate negative runtime gate or user-owned policy boundary so curation cannot remove the only copy of a critical send restriction.
+`village-operations` remains owner-managed and pinned after its compact form passes
+tests. Hermes records genuinely new reusable capabilities in focused agent-managed
+skills; autonomous review must not rewrite the cross-task operating contract.
+Stable safety boundaries remain duplicated at the appropriate negative runtime
+gate or user-owned policy boundary.
 
 ### 5.2 Curator operation
 
