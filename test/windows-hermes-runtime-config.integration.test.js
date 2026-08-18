@@ -51,17 +51,19 @@ test('active Windows Hermes keeps the Mac model budget and Slack display contrac
   assert.doesNotMatch(display, /^\s{2}platform_overrides:\s*$/m);
 });
 
-test('Windows gateway is pinned to the validated Mac-parity runtime and enabled on AX2', {
+test('Windows gateway is pinned to the clean Village Hermes runtime and enabled on AX2', {
   skip: process.platform !== 'win32'
 }, () => {
   const home = path.join(process.env.LOCALAPPDATA || '', 'hermes');
   const cmd = fs.readFileSync(path.join(home, 'gateway-service', 'Hermes_Gateway.cmd'), 'utf8');
   const vbs = fs.readFileSync(path.join(home, 'gateway-service', 'Hermes_Gateway.vbs'), 'utf8');
-  const runtime = String.raw`C:\Village\hermes-agent-worktrees\mac-parity-v22-71252f0`;
+  const runtime = String.raw`C:\Village\hermes-agent-worktrees\village-hermes-clean-runtime`;
   assert.match(cmd, new RegExp(runtime.replace(/\\/g, '\\\\'), 'i'));
   assert.match(vbs, new RegExp(runtime.replace(/\\/g, '\\\\'), 'i'));
-  assert.match(cmd, /\.windows-gateway-disabled/i);
-  assert.match(vbs, /\.windows-gateway-disabled/i);
+  assert.match(cmd, new RegExp(`set "PYTHONPATH=${runtime.replace(/\\/g, '\\\\')}"`, 'i'));
+  assert.match(vbs, new RegExp(`env\\.Item\\("PYTHONPATH"\\) = "${runtime.replace(/\\/g, '\\\\')}"`, 'i'));
+  assert.doesNotMatch(cmd, /%PYTHONPATH%/i);
+  assert.doesNotMatch(vbs, /existing_pp/i);
   assert.equal(
     fs.existsSync(path.join(home, '.windows-gateway-disabled')),
     false,

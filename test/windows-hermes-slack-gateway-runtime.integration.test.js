@@ -11,20 +11,31 @@ test('Windows Heybilli gateway uses the runtime that can load Slack Socket Mode'
   const agentHome = path.join(hermesHome, 'hermes-agent');
   const python = path.join(agentHome, 'venv', 'Scripts', 'python.exe');
   const incompletePython = path.join(agentHome, '.venv', 'Scripts', 'python.exe');
+  const runtimeRoot = String.raw`C:\Village\hermes-agent-worktrees\village-hermes-clean-runtime`;
   const cmd = fs.readFileSync(path.join(hermesHome, 'gateway-service', 'Hermes_Gateway.cmd'), 'utf8');
   const vbs = fs.readFileSync(path.join(hermesHome, 'gateway-service', 'Hermes_Gateway.vbs'), 'utf8');
 
   for (const launcher of [cmd, vbs]) {
     assert.match(launcher, /hermes-agent\\venv\\Scripts\\python\.exe/i);
     assert.doesNotMatch(launcher, /hermes-agent\\\.venv\\Scripts\\python\.exe/i);
+    assert.match(launcher, new RegExp(runtimeRoot.replace(/\\/g, '\\\\'), 'i'));
   }
 
   const probe = spawnSync(python, [
     '-c',
-    'import hermes_cli, aiohttp, slack_sdk; print("slack-runtime-ok")'
-  ], { encoding: 'utf8', cwd: agentHome });
+    'import json, hermes_cli, aiohttp, slack_sdk; from plugins.platforms.slack import adapter; from tools import file_tools; print(json.dumps({"slack": adapter.__file__, "files": file_tools.__file__}))'
+  ], {
+    encoding: 'utf8',
+    cwd: runtimeRoot,
+    env: {
+      ...process.env,
+      PYTHONPATH: [runtimeRoot, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter)
+    }
+  });
   assert.equal(probe.status, 0, probe.stderr || probe.stdout);
-  assert.match(probe.stdout, /slack-runtime-ok/);
+  const loaded = JSON.parse(probe.stdout.trim());
+  assert.equal(path.resolve(loaded.slack).startsWith(path.resolve(runtimeRoot)), true, loaded.slack);
+  assert.equal(path.resolve(loaded.files).startsWith(path.resolve(runtimeRoot)), true, loaded.files);
 
   if (fs.existsSync(incompletePython)) {
     const incompleteProbe = spawnSync(incompletePython, [
