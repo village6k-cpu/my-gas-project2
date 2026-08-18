@@ -276,6 +276,38 @@ test('buildCanonicalFollowUpCases creates one inquiry case for reply-only work',
   assert.equal(cases[0].payload.phase, 'customer_reply');
 });
 
+test('staff outbound as the latest turn never becomes a canonical Slack inquiry card', () => {
+  const decision = {
+    customer: { name: 'Park' },
+    latest_customer_message_cluster: 'The earlier customer question.',
+    latest_staff_message: 'We already answered the customer.',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: false
+    },
+    reply_decision: { replyMode: 'no_reply', text: '' }
+  };
+
+  assert.deepEqual(buildCanonicalFollowUpCases(decision, { room_key: 'chat:staff-latest' }, []), []);
+});
+
+test('staff-latest card suppression preserves an independent sheet failure alert', () => {
+  const decision = {
+    customer: { name: 'Park' },
+    safety_checks: { latest_customer_message_after_last_staff_reply: false }
+  };
+  const rows = [{
+    room_key: 'chat:staff-latest',
+    customer_name: 'Park',
+    type: 'reservation_review',
+    summary: 'GAS rejected the write.',
+    payload: { sheet_error_type: 'sheet_validation', requires_human_action: true }
+  }];
+
+  assert.equal(buildCanonicalFollowUpCases(decision, { room_key: 'chat:staff-latest' }, rows).length, 1);
+});
+
 test('draft_only intent requires a customer reply even when no usable draft exists', () => {
   const [followUpCase] = buildCanonicalFollowUpCases(
     {
@@ -3765,6 +3797,32 @@ test('buildFollowUpRows maps AI-decided follow-up items for remote dashboard', (
   assert.equal(rows[0].payload.latest_customer_message_cluster, '견적서 받을 수 있을까요?');
   assert.equal(rows[0].payload.visible_messages_used[0].message, '견적서 받을 수 있을까요?');
   assert.match(rows[0].follow_up_key, /^room-label:홍길동:홍길동:quote_send:/);
+});
+
+test('buildFollowUpRows drops AI follow-ups when the latest meaningful turn is staff outbound', () => {
+  const rows = buildFollowUpRows({
+    classification: 'faq',
+    confidence: 'high',
+    customer: { name: 'Customer' },
+    latest_customer_message_cluster: 'An earlier customer question.',
+    latest_staff_message: '렌즈 기스 사진까지 확인했고 고객에게 이미 답변했습니다.',
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: false
+    },
+    follow_up_items: [{
+      type: 'reply_needed',
+      route: 'other',
+      taskKey: 'already_answered',
+      priority: 'normal',
+      status: 'open',
+      title: 'Must not become a Slack card',
+      summary: 'The latest message is staff outbound.'
+    }]
+  }, { room_key: 'chat:staff-latest' });
+
+  assert.deepEqual(rows, []);
 });
 
 test('routeFollowUpToSlack maps follow-up types to the agent channels', () => {

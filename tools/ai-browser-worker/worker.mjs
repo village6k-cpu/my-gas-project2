@@ -1746,6 +1746,9 @@ function normalizeIncidentFollowUpItems(decision = {}, job = {}) {
 }
 
 export function buildFollowUpRows(decision, job = {}) {
+  // Hermes has already inspected the opened conversation and determined turn
+  // ownership. Do not reinterpret staff prose as a new customer task here.
+  if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply === false) return [];
   const items = normalizeIncidentFollowUpItems(decision, job);
   const rawJobId = text(job.id || job.jobId || '');
   const jobId = isUuid(rawJobId) ? rawJobId : null;
@@ -2715,6 +2718,12 @@ export function buildInquiryCaseRow(decision = {}, job = {}, sourceRows = []) {
 
 export function buildCanonicalFollowUpCases(decision = {}, job = {}, rows = [], options = {}) {
   const sourceRows = (Array.isArray(rows) ? rows : []).filter(Boolean);
+  // With no independent operational failure row, a staff-latest conversation
+  // is already answered and must not become a customer inquiry Slack card.
+  if (
+    decision?.safety_checks?.latest_customer_message_after_last_staff_reply === false
+    && sourceRows.length === 0
+  ) return [];
   const inquiryBase = buildInquiryCaseRow(decision, job, sourceRows);
   if (!inquiryBase) return [];
   const replyDecision = decision?.reply_decision && typeof decision.reply_decision === 'object'
