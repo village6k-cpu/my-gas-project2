@@ -50,9 +50,8 @@ Windows paths and command boundaries live in
 
 ## Interpret before execution
 
-- Read the whole request and preserve dates, minute-level times, quantities,
-  option groupings, discounts, memo text, and whether the user asked to act or
-  merely preview.
+- Read the whole request and preserve source dates/times, quantities, option
+  groupings, discounts, memo text, and whether the user asked to act or preview.
 - Resolve aliases contextually against the broad equipment/customer sources.
   Do not replace interpretation with a growing keyword table.
 - If one plausible interpretation is materially safer and reversible, proceed
@@ -84,8 +83,13 @@ repeat a possibly completed write or send.
 - Resolve equipment to exact catalog names using broad searches and context.
 - Split into the minimum schedules when different equipment groups have
   different pickup or return times.
-- For an existing partial request, update the matching request instead of
-  silently creating a duplicate.
+- Confirmation-request pickup minutes floor to the hour and return minutes ceil
+  to the hour; exact hours remain unchanged. `27일 24:00` keeps its written date
+  and becomes `27일 00:00`. If the result is not a valid forward interval, stop.
+- For an existing partial request that is unregistered, read back its complete
+  authoritative top-level equipment list, merge the AI-decided additions, then
+  replace once and verify the full list. Never send an additions-only list as a
+  new full request or silently create a duplicate.
 - Treat confirmation-request entry and final registered reservation as separate
   operations with separate readback.
 - Use the focused `village-confirm-request` skill only after reasoning has
