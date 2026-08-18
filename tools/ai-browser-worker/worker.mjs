@@ -7790,6 +7790,42 @@ export function createJobFreshnessGuard({
   };
 }
 
+export function createWorkerHandoffPhaseReporter({
+  config = {},
+  job = {},
+  pid = process.pid,
+  now = () => new Date()
+} = {}) {
+  const jobId = text(job.jobId || job.id).trim();
+  const safeJobId = jobId.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 160);
+  const queueDir = path.dirname(path.resolve(config.jobLogPath || path.resolve(__dirname, '../kakao-dom-bridge/queue/jobs.ndjson')));
+  const stateDir = path.join(queueDir, 'worker-phases');
+  const statePath = safeJobId ? path.join(stateDir, `${safeJobId}.json`) : '';
+  const report = (phase) => {
+    if (!statePath) return null;
+    const payload = {
+      schema: 'kakao-worker-handoff-phase/v1',
+      jobId,
+      workerPid: Number(pid),
+      phase: text(phase).trim(),
+      recordedAt: now().toISOString()
+    };
+    const tempPath = `${statePath}.${Number(pid)}.${randomUUID()}.tmp`;
+    try {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(tempPath, `${JSON.stringify(payload)}\n`, 'utf8');
+      fs.renameSync(tempPath, statePath);
+      return payload;
+    } catch {
+      return null;
+    } finally {
+      try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch {}
+    }
+  };
+  report.statePath = statePath;
+  return report;
+}
+
 function deepFreezeSnapshot(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreezeSnapshot(child);
@@ -7911,7 +7947,8 @@ export async function prepareKakaoDecisionFromSnapshot({
   job,
   capture,
   dryRun = false,
-  fakeDecisionPath = ''
+  fakeDecisionPath = '',
+  reportHandoffPhase = () => {}
 } = {}) {
   const snapshot = capture?.snapshot;
   if (!snapshot || snapshot.schema !== 'kakao-room-snapshot/v1') throw new Error('immutable Kakao room snapshot is required');
@@ -7959,7 +7996,13 @@ export async function prepareKakaoDecisionFromSnapshot({
     if (fakeDecisionPath) {
       decision = JSON.parse(fs.readFileSync(fakeDecisionPath, 'utf8'));
     } else {
-      const hermesDecision = await runHermesDecision(prompt, config, { signal: freshnessGuard.signal });
+      reportHandoffPhase('initial_hermes_in_flight');
+      let hermesDecision;
+      try {
+        hermesDecision = await runHermesDecision(prompt, config, { signal: freshnessGuard.signal });
+      } finally {
+        reportHandoffPhase('initial_hermes_finished');
+      }
       hermesOutput = hermesDecision.hermesOutput;
       decision = hermesDecision.decision;
       hermesAttempts = hermesDecision.attempts;
@@ -7998,6 +8041,7 @@ export async function prepareKakaoDecisionFromSnapshot({
         customerDbDiscountLookup = { matched: false, error: error.message.slice(0, 500) };
       }
     }
+    reportHandoffPhase('sheet_mutation_boundary');
     const sheetResult = await appendToSheet(config, sheetPayload);
     let discountPatchResult = null;
     if (sheetPayload && customerDbDiscountLookup?.discountType) {
@@ -8030,13 +8074,19 @@ export async function prepareKakaoDecisionFromSnapshot({
         };
       } else {
         try {
-          const reconciliation = await runHermesPostActionDecision({
-            config,
-            job,
-            initialDecision: decision,
-            sheetResult: authoritativeSheetResult,
-            sheetPayload
-          }, { signal: freshnessGuard.signal });
+          reportHandoffPhase('post_action_hermes_in_flight');
+          let reconciliation;
+          try {
+            reconciliation = await runHermesPostActionDecision({
+              config,
+              job,
+              initialDecision: decision,
+              sheetResult: authoritativeSheetResult,
+              sheetPayload
+            }, { signal: freshnessGuard.signal });
+          } finally {
+            reportHandoffPhase('post_action_hermes_finished');
+          }
           decision = reconciliation.decision;
           hermesAttempts += Number(reconciliation.attempts || 0);
           hermesRecovered = hermesRecovered || reconciliation.recovered === true;
@@ -8236,10 +8286,27 @@ export function loadKakaoWorkerRuntimeConfig() {
 }
 
 async function runAiAndMaybeWrite({ config, job, dryRun, fakeDecisionPath }) {
-  const capture = await captureKakaoRoomSnapshot({ config, job, dryRun });
-  const prepared = await prepareKakaoDecisionFromSnapshot({ config, job, capture, dryRun, fakeDecisionPath });
-  const applied = await applyPreparedKakaoDecision({ config, job, prepared, dryRun });
-  return finalizePreparedKakaoDecision({ config, job, applied });
+  const reportHandoffPhase = createWorkerHandoffPhaseReporter({ config, job });
+  reportHandoffPhase('capture');
+  try {
+    const capture = await captureKakaoRoomSnapshot({ config, job, dryRun });
+    const prepared = await prepareKakaoDecisionFromSnapshot({
+      config,
+      job,
+      capture,
+      dryRun,
+      fakeDecisionPath,
+      reportHandoffPhase
+    });
+    reportHandoffPhase('dom_apply_pending');
+    const applied = await applyPreparedKakaoDecision({ config, job, prepared, dryRun });
+    const finalized = await finalizePreparedKakaoDecision({ config, job, applied });
+    reportHandoffPhase('complete');
+    return finalized;
+  } catch (error) {
+    reportHandoffPhase('failed');
+    throw error;
+  }
 }
 
 function summarizeJob(job) {

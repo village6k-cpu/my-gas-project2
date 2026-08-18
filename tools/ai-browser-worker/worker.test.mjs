@@ -156,6 +156,39 @@ test('Kakao room snapshots are immutable and contain no live DOM handles', () =>
   assert.throws(() => { snapshot.navigation.status = 'mutated'; }, TypeError);
 });
 
+test('worker handoff phase reporter writes an atomic per-job pre-mutation proof', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'kakao-worker-phase-'));
+  try {
+    const reporter = workerModule.createWorkerHandoffPhaseReporter({
+      config: { jobLogPath: path.join(temp, 'jobs.ndjson') },
+      job: { jobId: 'dom-safe-handoff-1' },
+      pid: 4242,
+      now: () => new Date('2026-08-18T01:00:00.000Z')
+    });
+
+    reporter('initial_hermes_in_flight');
+
+    const state = JSON.parse(fs.readFileSync(reporter.statePath, 'utf8'));
+    assert.equal(state.schema, 'kakao-worker-handoff-phase/v1');
+    assert.equal(state.jobId, 'dom-safe-handoff-1');
+    assert.equal(state.workerPid, 4242);
+    assert.equal(state.phase, 'initial_hermes_in_flight');
+    assert.equal(state.recordedAt, '2026-08-18T01:00:00.000Z');
+    assert.equal(fs.readdirSync(path.dirname(reporter.statePath)).some((name) => name.endsWith('.tmp')), false);
+
+    const blocked = path.join(temp, 'not-a-directory');
+    fs.writeFileSync(blocked, 'x');
+    const unavailableReporter = workerModule.createWorkerHandoffPhaseReporter({
+      config: { jobLogPath: path.join(blocked, 'jobs.ndjson') },
+      job: { jobId: 'dom-safe-handoff-2' }
+    });
+    assert.doesNotThrow(() => unavailableReporter('initial_hermes_in_flight'));
+    assert.equal(unavailableReporter('initial_hermes_in_flight'), null);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test('apply phase rechecks the snapshot and passes Hermes prose through without reinterpretation', async () => {
   const job = {
     jobId: 'job-apply-1',

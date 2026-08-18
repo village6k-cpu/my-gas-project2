@@ -84,6 +84,44 @@ test('the watchdog observes first and only restarts through the ownership-valida
   );
 });
 
+test('busy bridge handoff requires a current per-job phase proof for stdin Hermes', () => {
+  assert.match(bridgeRestart, /kakao-worker-handoff-phase\/v1/);
+  assert.match(bridgeRestart, /worker-phases/);
+  assert.match(bridgeRestart, /initial_hermes_in_flight/);
+  assert.match(bridgeRestart, /workerPid/);
+  assert.match(bridgeRestart, /hermes-stdin-runner\\\.py/);
+  assert.match(bridgeRestart, /Get-ProcessingDurableWorkerState/);
+  assert.doesNotMatch(
+    bridgeRestart,
+    /CreationDate[\s\S]{0,300}(?:TotalSeconds|AddSeconds)/,
+    'elapsed-time guesses must never substitute for an explicit pre-mutation phase proof'
+  );
+});
+
+test('worker advances the handoff phase before every mutation and post-action boundary', () => {
+  const worker = read('tools/ai-browser-worker/worker.mjs');
+  const prepareStart = worker.indexOf('export async function prepareKakaoDecisionFromSnapshot');
+  const prepareEnd = worker.indexOf('export async function applyPreparedKakaoDecision', prepareStart);
+  const prepare = worker.slice(prepareStart, prepareEnd);
+  const initial = prepare.indexOf("reportHandoffPhase('initial_hermes_in_flight')");
+  const initialHermes = prepare.indexOf('await runHermesDecision(prompt, config');
+  const initialFinished = prepare.indexOf("reportHandoffPhase('initial_hermes_finished')");
+  const mutation = prepare.indexOf("reportHandoffPhase('sheet_mutation_boundary')");
+  const append = prepare.indexOf('await appendToSheet(config, sheetPayload)');
+  const postAction = prepare.indexOf("reportHandoffPhase('post_action_hermes_in_flight')");
+  const postActionHermes = prepare.indexOf('await runHermesPostActionDecision({');
+
+  for (const [label, index] of Object.entries({ initial, initialHermes, initialFinished, mutation, append, postAction, postActionHermes })) {
+    assert.ok(index >= 0, `${label} marker must exist`);
+  }
+  assert.ok(initial < initialHermes);
+  assert.ok(initialHermes < initialFinished);
+  assert.ok(initialFinished < mutation);
+  assert.ok(mutation < append);
+  assert.ok(append < postAction);
+  assert.ok(postAction < postActionHermes);
+});
+
 test('the runbook documents production always-on operation after the cutover contract', () => {
   assert.match(runbook, /^##\s+Production operation \(post-cutover\)$/m);
   const cutover = runbook.indexOf('## Cutover');
