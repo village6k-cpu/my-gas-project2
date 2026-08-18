@@ -134,14 +134,16 @@ assert.equal(createSheet.cell(2, 6), fields.phone);
 
 const existingRow = ['2026-07-01', '잘못된이름', 'contract-link', '입금자', fields.tradeId, '000', '발행처', '메모', 123000];
 const existingSheet = new FakeSheet([header(), existingRow]);
-const existingResult = context.ensureTradeLedgerRowOnSheet_(existingSheet, fields, { dryRun: false });
-assert.equal(existingResult.created, false, 'existing trade ID must be repaired in place');
-assert.equal(existingResult.row, 2);
+assert.throws(
+  () => context.ensureTradeLedgerRowOnSheet_(existingSheet, fields, { dryRun: false, mustExist: true }),
+  /identity conflict|정체 불일치/,
+  'an existing trade ID owned by different ledger identity must fail closed'
+);
 assert.equal(existingSheet.getLastRow(), 2, 'existing trade ID must never append a second row');
-assert.equal(existingSheet.cell(2, 1), fields.startDate);
-assert.equal(existingSheet.cell(2, 2), fields.customerName);
+assert.equal(existingSheet.cell(2, 1), '2026-07-01');
+assert.equal(existingSheet.cell(2, 2), '잘못된이름');
 assert.equal(existingSheet.cell(2, 5), fields.tradeId);
-assert.equal(existingSheet.cell(2, 6), fields.phone);
+assert.equal(existingSheet.cell(2, 6), '000');
 assert.equal(existingSheet.cell(2, 3), 'contract-link', 'repair must preserve contract URL');
 assert.equal(existingSheet.cell(2, 4), '입금자', 'repair must preserve payer name');
 assert.equal(existingSheet.cell(2, 9), 123000, 'repair must preserve payment amount');
@@ -151,6 +153,18 @@ assert.throws(
   () => context.ensureTradeLedgerRowOnSheet_(duplicateSheet, fields, { dryRun: false }),
   /중복/,
   'duplicate trade IDs must fail closed instead of choosing an arbitrary ledger row',
+);
+
+const exactRow = [fields.startDate, fields.customerName, 'contract-link', '입금자', fields.tradeId, fields.phone];
+const exactSheet = new FakeSheet([header(), exactRow]);
+const exactResult = context.ensureTradeLedgerRowOnSheet_(exactSheet, fields, { dryRun: true, mustExist: true });
+assert.equal(exactResult.created, false);
+assert.equal(exactSheet.writeCount, 0, 'mustExist verification must be read-only');
+
+assert.throws(
+  () => context.ensureTradeLedgerRowOnSheet_(new FakeSheet([header()]), fields, { dryRun: true, mustExist: true }),
+  /missing|없음/,
+  'mustExist must reject a missing authoritative ledger row'
 );
 
 console.log('trade-ledger-registration-repair.behavior.test.js OK');
