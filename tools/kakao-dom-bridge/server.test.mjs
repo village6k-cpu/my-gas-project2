@@ -11,6 +11,7 @@ const {
   compactQueueAuditRecord,
   buildP0SlackEscalationClaim,
   buildP0SlackEscalationMessage,
+  p0SlackEscalationBackoffMs,
   p0SlackEscalationDue,
   createKakaoPhaseScheduler,
   registerAcceptedRoomEvent,
@@ -68,6 +69,47 @@ test('P0 Slack escalation claim is durable and produces a deterministic Slack me
   assert.equal(message.thread_ts, '100.1');
   assert.equal(message.reply_broadcast, true);
   assert.equal(message.client_msg_id, first.clientMessageId);
+});
+
+test('P0 Slack escalation backs off exponentially and stops at the attempt cap', () => {
+  const base = {
+    id: 'p0-row', status: 'open', customer_name: '백남준', title: '즉시 확인',
+    payload: {
+      alert_level: 'p0', alert_reason: '금액 또는 장비 사고',
+      slack_delivery: { status: 'delivered', channel_id: 'CINV', message_ts: '100.1', thread_ts: '100.1', delivered_at: '2026-08-18T00:00:00.000Z' }
+    }
+  };
+  assert.equal(p0SlackEscalationBackoffMs(0, 600_000, 3_600_000), 600_000);
+  assert.equal(p0SlackEscalationBackoffMs(1, 600_000, 3_600_000), 1_200_000);
+  assert.equal(p0SlackEscalationBackoffMs(2, 600_000, 3_600_000), 2_400_000);
+  assert.equal(p0SlackEscalationBackoffMs(6, 600_000, 3_600_000), 3_600_000);
+  const afterFirst = {
+    ...base,
+    payload: { ...base.payload, critical_delivery: { status: 'delivered', attempt: 1, last_sent_at: '2026-08-18T00:10:00.000Z' } }
+  };
+  assert.equal(p0SlackEscalationDue(afterFirst, { nowMs: Date.parse('2026-08-18T00:29:59.000Z'), repeatMs: 600_000 }).due, false);
+  assert.equal(p0SlackEscalationDue(afterFirst, { nowMs: Date.parse('2026-08-18T00:30:00.000Z'), repeatMs: 600_000 }).due, true);
+  const exhausted = {
+    ...base,
+    payload: { ...base.payload, critical_delivery: { status: 'delivered', attempt: 159, last_sent_at: '2026-08-18T00:10:00.000Z' } }
+  };
+  assert.equal(p0SlackEscalationDue(exhausted, { nowMs: Date.parse('2026-08-19T00:00:00.000Z') }).reason, 'max_attempts');
+  assert.equal(p0SlackEscalationDue(base, { nowMs: Date.parse('2026-08-19T00:00:00.000Z'), maxAttempts: 0 }).reason, 'disabled');
+});
+
+test('P0 escalation without an initial Slack card falls back to a standalone channel message', () => {
+  const row = {
+    id: 'p0-row-2', status: 'open', customer_name: '김손님', title: '즉시 확인',
+    created_at: '2026-08-18T00:00:00.000Z', updated_at: '2026-08-18T00:00:00.000Z',
+    payload: { alert_level: 'p0', alert_reason: '초기 카드 전달 실패' }
+  };
+  const due = p0SlackEscalationDue(row, { nowMs: Date.parse('2026-08-18T00:10:00.000Z'), repeatMs: 600_000 });
+  assert.equal(due.due, true);
+  const claim = buildP0SlackEscalationClaim(row, { nowMs: Date.parse('2026-08-18T00:10:00.000Z'), repeatMs: 600_000 });
+  const message = buildP0SlackEscalationMessage(row, claim, { mentionUserIds: ['UOWNER'], fallbackChannelId: 'CFOLLOWUP' });
+  assert.equal(message.channel, 'CFOLLOWUP');
+  assert.equal(message.thread_ts, undefined);
+  assert.equal(message.reply_broadcast, false);
 });
 
 function deferred() {

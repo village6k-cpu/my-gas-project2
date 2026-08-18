@@ -77,9 +77,16 @@ const CONFIG = {
   slackActionPollIntervalMs: Number(process.env.SLACK_ACTION_POLL_INTERVAL_MS || 10_000),
   p0SlackEscalationEnabled: readBooleanEnvironment(process.env.P0_SLACK_ESCALATION_ENABLED, true),
   p0SlackEscalationIntervalMs: Math.max(15_000, Number(process.env.P0_SLACK_ESCALATION_INTERVAL_MS || 60_000)),
-  p0SlackEscalationRepeatMs: Math.max(60_000, Number(process.env.P0_SLACK_ESCALATION_REPEAT_MS || 180_000)),
+  // 재알림은 10분에서 시작해 회차마다 2배(상한 1시간) 백오프. 구 기본값
+  // 3분 × 160회는 2026-08-19 야간 @channel 308연발 사고로 폐기.
+  p0SlackEscalationRepeatMs: Math.max(60_000, Number(process.env.P0_SLACK_ESCALATION_REPEAT_MS || 600_000)),
+  p0SlackEscalationMaxIntervalMs: Math.max(60_000, Number(process.env.P0_SLACK_ESCALATION_MAX_INTERVAL_MS || 3_600_000)),
   p0SlackEscalationClaimTtlMs: Math.max(30_000, Number(process.env.P0_SLACK_ESCALATION_CLAIM_TTL_MS || 120_000)),
-  p0SlackEscalationMaxAttempts: Math.max(1, Number(process.env.P0_SLACK_ESCALATION_MAX_ATTEMPTS || 160)),
+  // 0 = 재알림 전면 비활성. 미설정·이상값은 3회.
+  p0SlackEscalationMaxAttempts: (() => {
+    const parsed = Number(process.env.P0_SLACK_ESCALATION_MAX_ATTEMPTS);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 3;
+  })(),
   slackBotToken: process.env.SLACK_BOT_TOKEN || '',
   followUpRowsEnabled: process.env.AI_WORKER_FOLLOW_UP_ITEMS_ENABLED !== '0' && process.env.KAKAO_FOLLOW_UP_ITEMS_ENABLED !== '0',
   slackCardDeliveryEnabled: process.env.SLACK_AGENT_CARD_DELIVERY_ENABLED === '1',
@@ -229,10 +236,18 @@ function deterministicP0SlackMessageId(rowId, attempt) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+export function p0SlackEscalationBackoffMs(deliveredAttempts, repeatMs = 600_000, maxIntervalMs = 3_600_000) {
+  const attempts = Math.max(0, Number(deliveredAttempts || 0));
+  const base = Math.max(1, Number(repeatMs) || 600_000);
+  const cap = Math.max(base, Number(maxIntervalMs) || base);
+  return Math.min(base * 2 ** attempts, cap);
+}
+
 export function p0SlackEscalationDue(row = {}, {
   nowMs = Date.now(),
-  repeatMs = 180_000,
-  maxAttempts = 160
+  repeatMs = 600_000,
+  maxIntervalMs = 3_600_000,
+  maxAttempts = 3
 } = {}) {
   const payload = objectPayload(row.payload);
   if (String(payload.alert_level || payload.alertLevel || '').trim() !== 'p0') {
@@ -241,19 +256,20 @@ export function p0SlackEscalationDue(row = {}, {
   if (['done', 'dismissed'].includes(String(row.status || '').trim())) {
     return { due: false, reason: 'closed' };
   }
+  if (Number(maxAttempts) <= 0) return { due: false, reason: 'disabled' };
   const slackDelivery = objectPayload(payload.slack_delivery);
-  if (slackDelivery.status !== 'delivered' || !(slackDelivery.channel_id && (slackDelivery.thread_ts || slackDelivery.message_ts))) {
-    return { due: false, reason: 'initial_slack_delivery_missing' };
-  }
   const critical = objectPayload(payload.critical_delivery);
   const deliveredAttempts = Math.max(0, Number(critical.attempt || 0));
   if (deliveredAttempts >= maxAttempts) return { due: false, reason: 'max_attempts' };
   if (critical.status === 'claimed' && timestampMs(critical.claim_expires_at) > nowMs) {
     return { due: false, reason: 'claimed' };
   }
+  const intervalMs = p0SlackEscalationBackoffMs(deliveredAttempts, repeatMs, maxIntervalMs);
   const explicitNextMs = timestampMs(critical.next_at);
+  // 첫 카드 전달이 실패한 P0도 침묵시키지 않는다: 스레드가 없으면 행 시각 기준으로
+  // 기한을 계산하고, 메시지는 폴백 채널로 단독 발송된다.
   const referenceMs = timestampMs(critical.last_sent_at || critical.last_attempt_at || slackDelivery.delivered_at || row.updated_at || row.created_at);
-  const dueAtMs = explicitNextMs || (referenceMs ? referenceMs + repeatMs : nowMs);
+  const dueAtMs = explicitNextMs || (referenceMs ? referenceMs + intervalMs : nowMs);
   if (nowMs < dueAtMs) return { due: false, reason: 'interval', dueAtMs };
   return { due: true, reason: 'due', attempt: deliveredAttempts + 1, dueAtMs };
 }
@@ -272,7 +288,7 @@ export function buildP0SlackEscalationClaim(row = {}, options = {}) {
   };
 }
 
-export function buildP0SlackEscalationMessage(row = {}, claim = {}, { mentionUserIds = [] } = {}) {
+export function buildP0SlackEscalationMessage(row = {}, claim = {}, { mentionUserIds = [], fallbackChannelId = '' } = {}) {
   const payload = objectPayload(row.payload);
   const delivery = objectPayload(payload.slack_delivery);
   const mentions = Array.from(new Set((Array.isArray(mentionUserIds) ? mentionUserIds : [])
@@ -283,10 +299,12 @@ export function buildP0SlackEscalationMessage(row = {}, claim = {}, { mentionUse
   const customer = String(row.customer_name || '고객').slice(0, 120);
   const title = String(row.title || '즉시 확인이 필요한 사건').slice(0, 240);
   const reason = String(payload.alert_reason || payload.alertReason || 'AI가 P0 즉시 확인으로 판단').slice(0, 1000);
+  const channel = delivery.channel_id || String(fallbackChannelId || '').trim();
+  const threadTs = delivery.channel_id ? (delivery.thread_ts || delivery.message_ts) : '';
   return {
-    channel: delivery.channel_id,
-    thread_ts: delivery.thread_ts || delivery.message_ts,
-    reply_broadcast: true,
+    channel,
+    ...(threadTs ? { thread_ts: threadTs } : {}),
+    reply_broadcast: Boolean(threadTs),
     client_msg_id: claim.clientMessageId,
     text: `${attention} 🚨 P0 미확인 알림 ${claim.attempt}회 · ${customer} · ${title} · ${reason}`,
     unfurl_links: false,
@@ -1753,6 +1771,7 @@ async function deliverDueP0SlackEscalation(row, nowMs = Date.now()) {
   const options = {
     nowMs,
     repeatMs: CONFIG.p0SlackEscalationRepeatMs,
+    maxIntervalMs: CONFIG.p0SlackEscalationMaxIntervalMs,
     maxAttempts: CONFIG.p0SlackEscalationMaxAttempts,
     claimTtlMs: CONFIG.p0SlackEscalationClaimTtlMs
   };
@@ -1760,6 +1779,9 @@ async function deliverDueP0SlackEscalation(row, nowMs = Date.now()) {
   if (!due.due) return { ok: false, skipped: true, reason: due.reason, id: row.id };
   const claim = buildP0SlackEscalationClaim(row, options);
   const priorCritical = objectPayload(row?.payload?.critical_delivery);
+  const nextRetryAtIso = (fromMs, deliveredAttempts) => new Date(
+    fromMs + p0SlackEscalationBackoffMs(deliveredAttempts, CONFIG.p0SlackEscalationRepeatMs, CONFIG.p0SlackEscalationMaxIntervalMs)
+  ).toISOString();
   const claimedRows = await compareAndSwapP0Delivery(row, {
     ...priorCritical,
     status: 'claimed',
@@ -1771,37 +1793,67 @@ async function deliverDueP0SlackEscalation(row, nowMs = Date.now()) {
     error: null
   });
   if (claimedRows.length !== 1) return { ok: false, skipped: true, reason: 'claim_conflict', id: row.id };
-  const claimedRow = claimedRows[0];
   const latest = await fetchFollowUpRowById(row.id);
   if (!latest || ['done', 'dismissed'].includes(String(latest.status || '').trim())) {
     return { ok: false, skipped: true, reason: 'closed_after_claim', id: row.id };
   }
   const activeRow = latest;
   const message = buildP0SlackEscalationMessage(activeRow, claim, {
-    mentionUserIds: followUpConfig().slackMentionUserIds
+    mentionUserIds: followUpConfig().slackMentionUserIds,
+    fallbackChannelId: followUpConfig().slackFollowUpChannel
   });
+  if (!message.channel) {
+    await compareAndSwapP0Delivery(activeRow, {
+      ...objectPayload(activeRow?.payload?.critical_delivery),
+      status: 'skipped_no_channel',
+      claim_attempt: null,
+      claim_expires_at: null,
+      next_at: nextRetryAtIso(nowMs, Math.max(0, claim.attempt - 1)),
+      error: 'no_slack_channel_for_p0_escalation'
+    }).catch(() => {});
+    return { ok: false, skipped: true, reason: 'no_channel', id: row.id };
+  }
   try {
     const posted = await slackApi('chat.postMessage', message);
     const deliveredAt = nowIso();
-    const finalRows = await compareAndSwapP0Delivery(activeRow, {
-      ...objectPayload(activeRow?.payload?.critical_delivery),
+    const deliveredCritical = {
       status: 'delivered',
       attempt: claim.attempt,
       claim_attempt: null,
       claim_expires_at: null,
       last_sent_at: deliveredAt,
-      next_at: new Date(Date.parse(deliveredAt) + CONFIG.p0SlackEscalationRepeatMs).toISOString(),
+      next_at: nextRetryAtIso(Date.parse(deliveredAt), claim.attempt),
       client_message_id: claim.clientMessageId,
       message_ts: posted.ts || null,
       error: null
-    });
-    return {
-      ok: true,
-      id: row.id,
-      attempt: claim.attempt,
-      messageTs: posted.ts || null,
-      reconciliationRequired: finalRows.length !== 1
     };
+    // 메시지는 이미 나갔다. delivered 기록이 유실되면 다음 스윕이 같은 회차를
+    // 다시 발사하므로, 최신 행을 다시 읽어서라도 기록을 남긴다.
+    let recorded = false;
+    let recordRow = activeRow;
+    for (let recordTry = 0; recordTry < 3 && !recorded && recordRow; recordTry += 1) {
+      if (['done', 'dismissed'].includes(String(recordRow.status || '').trim())) {
+        recorded = true;
+        break;
+      }
+      try {
+        const updated = await compareAndSwapP0Delivery(recordRow, {
+          ...objectPayload(recordRow?.payload?.critical_delivery),
+          ...deliveredCritical
+        });
+        recorded = updated.length === 1;
+      } catch { /* 아래 재조회 후 재시도 */ }
+      if (!recorded) recordRow = await fetchFollowUpRowById(row.id).catch(() => null);
+    }
+    if (!recorded) {
+      appendNdjson('errors.ndjson', {
+        at: nowIso(),
+        type: 'p0_slack_escalation_record_failed',
+        id: row.id,
+        attempt: claim.attempt
+      });
+    }
+    return { ok: true, id: row.id, attempt: claim.attempt, messageTs: posted.ts || null, recorded };
   } catch (error) {
     const attemptedAt = nowIso();
     await compareAndSwapP0Delivery(activeRow, {
@@ -1809,7 +1861,7 @@ async function deliverDueP0SlackEscalation(row, nowMs = Date.now()) {
       status: 'retry_pending',
       claim_attempt: claim.attempt,
       last_attempt_at: attemptedAt,
-      next_at: new Date(Date.parse(attemptedAt) + CONFIG.p0SlackEscalationRepeatMs).toISOString(),
+      next_at: nextRetryAtIso(Date.parse(attemptedAt), Math.max(0, claim.attempt - 1)),
       client_message_id: claim.clientMessageId,
       error: String(error.message || error).slice(0, 1000)
     }).catch(() => {});
@@ -2993,6 +3045,7 @@ const server = http.createServer(async (req, res) => {
           p0SlackEscalationEnabled: CONFIG.p0SlackEscalationEnabled,
           p0SlackEscalationIntervalMs: CONFIG.p0SlackEscalationIntervalMs,
           p0SlackEscalationRepeatMs: CONFIG.p0SlackEscalationRepeatMs,
+          p0SlackEscalationMaxIntervalMs: CONFIG.p0SlackEscalationMaxIntervalMs,
           p0SlackEscalationMaxAttempts: CONFIG.p0SlackEscalationMaxAttempts,
           slackChannels: CONFIG.slackChannels,
           kakaoTabCleanupEnabled: CONFIG.kakaoTabCleanupEnabled,
