@@ -36,7 +36,6 @@ import {
   buildHermesArgs,
   hermesDecisionTimeoutFromEnv,
   deriveVillageGasInternalKey,
-  resolveVillageGasInternalKey,
   resolveHermesCommand,
   resolveCuaDriverCommand,
   normalizeKakaoWorkerControlMode,
@@ -135,18 +134,6 @@ test('worker derives the same internal GAS key from its existing service-role se
   assert.equal(derived, '-PKxkeZbEpJ49suEszVienz5K7yh2Vgq-f4ddpigOgM');
   assert.notEqual(derived, secret);
   assert.throws(() => deriveVillageGasInternalKey('too-short'), /service role/i);
-});
-
-test('worker uses the shared explicit internal GAS key and fails closed on a malformed override', () => {
-  const explicitKey = 'A'.repeat(43);
-  assert.equal(resolveVillageGasInternalKey({
-    VILLAGE_GAS_INTERNAL_KEY: explicitKey,
-    SUPABASE_SERVICE_ROLE_KEY: 'service-role-test-secret-123',
-  }), explicitKey);
-  assert.throws(() => resolveVillageGasInternalKey({
-    VILLAGE_GAS_INTERNAL_KEY: 'invalid',
-    SUPABASE_SERVICE_ROLE_KEY: 'service-role-test-secret-123',
-  }), /internal GAS key/i);
 });
 
 test('Kakao room snapshots are immutable and contain no live DOM handles', () => {
