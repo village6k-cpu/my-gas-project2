@@ -614,7 +614,7 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 예약/가격/FAQ/무시를 AI가 분류한다. 미리보기 텍스트만으로 예약·가격·FAQ를 확정하지 않는다.
 - 킬 스위치 상태는 paused / price_paused / active 중 하나다. paused면 실제 자동 발송은 중단하고 시트/처리판 기록은 계속한다. price_paused면 가격 자동 응답만 중단한다.
 - CURRENT_CONFIRMED_POLICY가 최신 FAQ/정책 기준이다. RAG가 충돌하면 현재 정책으로 고치고, 없는 정책 FAQ는 high/retrieved RAG로 보강하거나 draft_only/follow_up.
-- 가격 문의는 세트마스터 단가, 고객할인(고객DB I열 우선), 장기할인으로 직접 계산해 답한다. 요청된 모든 독립 품목의 단가가 양수로 확인되고 금액 산식대로 계산됐을 때만 safetyClass="sensitive_commitment" + grounding="authoritative_sheet"로 auto_send 가능. 독립 품목의 단가가 0/빈값이거나 조회/계산 근거가 불완전하면 부분합계를 전체 금액처럼 안내하지 말고 초안/follow_up. price_paused면 가격 자동발송 금지.
+- 가격 문의는 세트마스터 단가, 고객할인(고객DB I열 우선), 장기할인으로 직접 계산해 답한다. 청구 라인 = 별도로 과금되는 품목 하나. 세트는 세트 전체가 청구 라인 1개이고 세트마스터 G열 단가가 그 근거의 전부다. 세트 구성품·포함 액세서리(AC라인, 소프트박스, 케이블 등)는 청구 라인이 아니므로 단가 0·미등록(❓)·모델선택 필요 표시가 있어도 가격 근거를 깨지 않는다 — 그런 표시는 등록 절차 이슈일 뿐이다. 요청된 모든 청구 라인의 단가가 세트마스터/시트에서 확인되고 금액 산식대로 계산됐을 때만 safetyClass="sensitive_commitment" + grounding="authoritative_sheet"로 auto_send 가능. 일부 청구 라인의 단가를 못 찾았으면 부분합계를 전체 금액처럼 안내하지 말고 초안/follow_up. price_paused면 가격 자동발송 금지.
 - 서류(계약서/견적서/세금계산서/거래명세서)는 계산 생략 금지. 거래ID는 계약마스터+스케줄상세 대표/단품 L열 단가로 수량×일수×단가 계산; RQ는 확인요청 결과+세트마스터 단가로 부분계산하고 미등록/단가불명은 "미계산/확인 필요"로 표시한다.
 -반복견적=내예약 견적 안내
 - ${policyCalcRuleLine}
@@ -691,7 +691,7 @@ TASK:
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
 12-1. For real-world mutations set requiresHumanAction=true, allowed actionFamily, stable businessKey; otherwise false, "none", "".
-13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for grounded, high-confidence replies safe to send under the kill-switch policy. For auto_send, explicitly choose safetyClass, grounding, requiresRag, attachmentKeys, alreadyDelivered. Text alone can never grant an auto-send or attachment. Class guide: 시트 조회·계산 근거의 약속형 답변(가격 견적 등)은 모든 독립 품목의 단가가 확인된 경우에만 sensitive_commitment+grounding="authoritative_sheet"로 auto_send; 정책 근거는 current_policy_answer, RAG 근거는 rag_grounded_answer(requiresRag=true). 현재 대여 장비 사고와 근거 없는 약속/분쟁은 draft_only + owner review. Otherwise use draft_only or no_reply.
+13. If a reply is useful, put suggested_reply_draft on that single follow_up_item instead of creating an extra reply_needed card. Also fill reply_decision. Set reply_decision.replyMode="auto_send" only for grounded, high-confidence replies safe to send under the kill-switch policy. For auto_send, explicitly choose safetyClass, grounding, requiresRag, attachmentKeys, alreadyDelivered. Text alone can never grant an auto-send or attachment. Class guide: 시트 조회·계산 근거의 약속형 답변(가격 견적 등)은 모든 청구 라인(세트는 세트마스터 G열 단가로 라인 1개; 구성품 ❓는 무관)의 단가가 확인된 경우에만 sensitive_commitment+grounding="authoritative_sheet"로 auto_send; 정책 근거는 current_policy_answer, RAG 근거는 rag_grounded_answer(requiresRag=true). 현재 대여 장비 사고와 근거 없는 약속/분쟁은 draft_only + owner review. Otherwise use draft_only or no_reply.
 14. Return only the final machine-readable JSON below.
 
 FINAL OUTPUT FORMAT:

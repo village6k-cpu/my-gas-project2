@@ -7070,6 +7070,16 @@ test('policy content lives in current-confirmed-policy.json and gates fail close
   }
 });
 
+test('set quotes are grounded by 세트마스터 alone — component ❓ rows never block pricing', () => {
+  // 2026-08-17 567399b가 "모든 독립 품목의 단가" 문구를 넣으면서 세트 구성품(AC라인 등,
+  // 단가 없는 포함 액세서리)까지 품목으로 세어 세트 견적 자동발송이 멈췄다(강소원 사례).
+  // 청구 라인 정의를 프롬프트에 고정해 같은 회귀를 막는다.
+  const prompt = buildHermesPrompt({ id: 'job-price' }, { ragContext: { enabled: true } });
+  assert.match(prompt, /세트는 세트 전체가 청구 라인 1개/);
+  assert.match(prompt, /가격 근거를 깨지 않는다/);
+  assert.doesNotMatch(prompt, /모든 독립 품목의 단가/);
+});
+
 test('terminal acknowledgement is an advisory prompt hint, never a code-level skip', () => {
   const withHint = buildHermesPrompt({ id: 'job-hint' }, { terminalAckHint: { matched: true, reason: 'terminal_acknowledgement' } });
   assert.match(withHint, /TERMINAL_ACK_HINT/);
