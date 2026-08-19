@@ -108,12 +108,23 @@ $recoveryAction = Get-KakaoLiveRecoveryAction -BridgeContractHealthy $bridgeHeal
     -RuntimeState $runtimeState -BridgeBusy $bridgeBusy -WatcherProbeHealthy $watcherProbeHealthy
 
 if ($recoveryAction -eq 'none') {
-    $bridgeSource = Get-Item -LiteralPath (Join-Path $PSScriptRoot '..\..\tools\kakao-dom-bridge\server.mjs')
+    # 브리지는 worker.mjs를 in-process import하고 정책 JSON을 읽으므로, server.mjs만
+    # 보면 worker/정책 변경이 배포돼도 재시작이 걸리지 않는다 (2026-08-19 실측).
+    $bridgeSourcePaths = @(
+        (Join-Path $PSScriptRoot '..\..\tools\kakao-dom-bridge\server.mjs'),
+        (Join-Path $PSScriptRoot '..\..\tools\ai-browser-worker\worker.mjs'),
+        (Join-Path $PSScriptRoot '..\..\tools\ai-browser-worker\current-confirmed-policy.json')
+    )
+    $bridgeSourceLastWriteUtc = ($bridgeSourcePaths |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } |
+        Sort-Object -Descending |
+        Select-Object -First 1)
     $bridgeRecord = Read-OwnedProcessRecord -Name 'bridge'
-    if ($null -ne $bridgeRecord -and (Test-OwnedProcessRecord -Record $bridgeRecord)) {
+    if ($null -ne $bridgeRecord -and (Test-OwnedProcessRecord -Record $bridgeRecord) -and $null -ne $bridgeSourceLastWriteUtc) {
         $bridgeProcess = Get-Process -Id ([int]$bridgeRecord.Pid) -ErrorAction Stop
         $recoveryAction = Get-KakaoLiveSourceRefreshAction `
-            -SourceLastWriteTimeUtc $bridgeSource.LastWriteTimeUtc `
+            -SourceLastWriteTimeUtc $bridgeSourceLastWriteUtc `
             -ProcessStartTimeUtc $bridgeProcess.StartTime.ToUniversalTime() `
             -BridgeBusy $bridgeBusy
     }

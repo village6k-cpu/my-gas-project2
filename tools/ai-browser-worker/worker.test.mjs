@@ -66,6 +66,8 @@ import {
   mergeAdditionsOnlySheetPayloadWithExistingRequest,
   mutablePolicyAutoReplyRisk,
   currentConfirmedPolicyAutoReplySupport,
+  loadCurrentConfirmedPolicyConfig,
+  resetCurrentConfirmedPolicyConfigCache,
   autoReplyRequiresRagSupport,
   buildAutoReplyRagQuestion,
   evaluateAutoReplyRagSupport,
@@ -7036,6 +7038,47 @@ test('currentConfirmedPolicyAutoReplySupport allows owner-confirmed latest disco
     topics: ['business_hours_policy'],
     failedTopics: []
   });
+});
+
+test('policy content lives in current-confirmed-policy.json and gates fail closed without it', () => {
+  const config = loadCurrentConfirmedPolicyConfig();
+  assert.ok(config, 'the policy config file must ship with the worker');
+  assert.match(config.prompt.current_confirmed_policy, /학생 30%/);
+  assert.ok(config.topics.some((topic) => topic.key === 'long_term_discount_policy'));
+  // 확정 정책(+3시간)의 문구도 대여일수 검증에서 인정되어야 한다 (구 +6시간 문구만 인정하던 회귀 방지).
+  assert.equal(currentConfirmedPolicyAutoReplySupport({
+    latest_customer_message_cluster: '3시간 넘으면 하루 더 계산되나요?'
+  }, '3시간 이내 초과는 같은 일수이고, 그 이상은 +1일로 계산됩니다.').allowed, true);
+
+  // 설정 파일이 없으면 내장값으로 조용히 돌지 않고 정책 주제 auto_send를 전면 보류한다.
+  resetCurrentConfirmedPolicyConfigCache();
+  process.env.VILLAGE_POLICY_CONFIG_PATH = path.join(os.tmpdir(), 'no-such-policy-config.json');
+  try {
+    assert.deepEqual(currentConfirmedPolicyAutoReplySupport({
+      latest_customer_message_cluster: '학생할인 몇 프로인가요?'
+    }, '학생 할인은 30%입니다.'), {
+      applicable: false,
+      allowed: false,
+      reason: 'policy_config_unavailable'
+    });
+    assert.deepEqual(mutablePolicyAutoReplyRisk({
+      latest_customer_message_cluster: '학생할인 몇 프로인가요?'
+    }, ''), { mutable: true, reason: 'policy_config_unavailable' });
+  } finally {
+    delete process.env.VILLAGE_POLICY_CONFIG_PATH;
+    resetCurrentConfirmedPolicyConfigCache();
+  }
+});
+
+test('terminal acknowledgement is an advisory prompt hint, never a code-level skip', () => {
+  const withHint = buildHermesPrompt({ id: 'job-hint' }, { terminalAckHint: { matched: true, reason: 'terminal_acknowledgement' } });
+  assert.match(withHint, /TERMINAL_ACK_HINT/);
+  assert.match(withHint, /운영 맥락이 남아 있거나 실질 질문이 보이면 이 힌트를 무시/);
+  const withoutHint = buildHermesPrompt({ id: 'job-plain' }, {});
+  assert.doesNotMatch(withoutHint, /TERMINAL_ACK_HINT/);
+  // 조기 반환 경로가 다시 생기면 안 된다: 워커 소스에 스킵 상태가 존재하지 않아야 한다.
+  const workerSource = fs.readFileSync(new URL('./worker.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(workerSource, /ai_skipped_terminal_acknowledgement/);
 });
 
 test('buildAutoReplyRagQuestion includes current Kakao context and proposed reply without asking current stock truth', () => {

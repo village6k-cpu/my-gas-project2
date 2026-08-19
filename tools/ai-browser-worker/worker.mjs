@@ -574,8 +574,14 @@ export function buildHermesPrompt(job, options = {}) {
   const ragContextText = options.ragContext
     ? `\nREAD-ONLY VILLAGE-AI RAG TOOL:\n${options.ragContext.enabled ? 'enabled' : 'disabled'}; command: node tools/ai-browser-worker/worker.mjs --rag-lookup; input: {question,userRole:"customer",context?}; output: {text,confidence,ownerReview,knowledgeSource,usedSources,topSimilarity,logId,error}.\nUse as long-term reference memory after Kakao; put visible Kakao context in the question string itself. RAG must not replace current Kakao screen evidence or Sheets/GAS, and never covers inventory, booking, mutations, or duplicates. CURRENT_CONFIRMED_POLICY wins over older RAG conflicts. Uncovered policy FAQ: high/retrieved RAG may support auto_send; low/no_match/error ignore; ownerReview=true review. RAG 답변을 그대로 복붙하지 말고 현재 Kakao 대화와 합성한다.\n`
     : '';
-  const currentConfirmedPolicyText = options.ragContext
-    ? `\nCURRENT_CONFIRMED_POLICY: 주소=서울 마포구 동교로 23길 32 엠페로빌딩 2층, 지도=https://naver.me/FCAutZta, 영업=24시간. 절차=장비명+기간→가용확인→방문수령→반납, 필수=장비명/수량/반출일시/반납일시/예약자명/연락처. 할인=학생 30%, 개인사업자/프리랜서 20%, 단골=개사프20%+10%, 제휴=개사프20%+20%. 장기=2일10%,3~5일20%,6~9일35%,10~14일40%,15~19일45%,20일+50%. 계산=할인 곱셈, 24시간 1일, +3시간 동일, 3시간 초과 +1일, VAT=할인후*1.1 10원 올림.\n`
+  const promptPolicyConfig = loadCurrentConfirmedPolicyConfig();
+  const currentConfirmedPolicyText = options.ragContext && promptPolicyConfig
+    ? `\nCURRENT_CONFIRMED_POLICY: ${promptPolicyConfig.prompt.current_confirmed_policy}\n`
+    : '';
+  const policyCalcRuleLine = text(promptPolicyConfig?.prompt?.calc_rule_line).trim()
+    || '금액 산식은 CURRENT_CONFIRMED_POLICY를 따른다. 정책 설정이 없으면 금액 확정 안내는 auto_send하지 않는다.';
+  const terminalAckHintText = options.terminalAckHint?.matched
+    ? `\nTERMINAL_ACK_HINT (advisory): 외부 DOM 휴리스틱이 최신 고객 메시지를 단순 종결 인사로 분류했다. 이것은 판단이 아니라 참고 신호다. 화면을 직접 확인해 동의하면 reply_decision.replyMode=no_reply로 빠르게 종결하라. 예약/입금/장비/일정 등 운영 맥락이 남아 있거나 실질 질문이 보이면 이 힌트를 무시하고 정상 판단하라.\n`
     : '';
   const brainContextText = options.brainContext?.enabled
     ? `\nVILLAGE BRAIN OWNER CONTEXT (read-only, advisory):\n${options.brainContext.contextPath ? `- 사장 판단 기준·운영 해석 문서(file 도구로 read-only 열람): ${options.brainContext.contextPath}\n` : ''}${options.brainContext.customerProfilesPath ? `- 고객 프로필 JSONL(1인 1줄: name/segment/누적방문/미수금/사고이력/이탈주의): ${options.brainContext.customerProfilesPath} — 파일이 크니 전체를 읽지 말고 현재 고객명이 포함된 줄만 찾아 읽어라.\n` : ''}- 단골/VIP 여부, 미수금, 과거 사고이력, 사장 응대 기준을 파악해 사장처럼 응대하는 데 쓴다. 프로필의 segment는 참고용이며 할인유형은 여전히 고객DB I열이 우선한다.\n- 이 블록은 빌리지 자체 VILLAGE_Brain 산출물이다. Garry Tan의 별도 오픈소스 GBrain과 혼동하지 않는다.\n- advisory다: 재고/예약/가격/정책의 근거가 아니다. CURRENT_CONFIRMED_POLICY와 시트/화면이 항상 우선하며, brain 파일을 auto_send grounding으로 선언할 수 없다.\n`
@@ -611,7 +617,7 @@ CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 가격 문의는 세트마스터 단가, 고객할인(고객DB I열 우선), 장기할인으로 직접 계산해 답한다. 요청된 모든 독립 품목의 단가가 양수로 확인되고 금액 산식대로 계산됐을 때만 safetyClass="sensitive_commitment" + grounding="authoritative_sheet"로 auto_send 가능. 독립 품목의 단가가 0/빈값이거나 조회/계산 근거가 불완전하면 부분합계를 전체 금액처럼 안내하지 말고 초안/follow_up. price_paused면 가격 자동발송 금지.
 - 서류(계약서/견적서/세금계산서/거래명세서)는 계산 생략 금지. 거래ID는 계약마스터+스케줄상세 대표/단품 L열 단가로 수량×일수×단가 계산; RQ는 확인요청 결과+세트마스터 단가로 부분계산하고 미등록/단가불명은 "미계산/확인 필요"로 표시한다.
 -반복견적=내예약 견적 안내
-- 금액 산식: 24시간=1일, +3시간 동일, 3시간 초과 +1일; 정가×고객/제휴/단골 할인×장기할인×VAT1.1, 10원 올림.
+- ${policyCalcRuleLine}
 - unread/미처리면 오래된 메시지도 검토한다. 날짜만 오래된 backfill/row movement는 자동발송하지 않는다.
 - 유입로그 단서는 evidence에만 보존한다. API 별도 worker 책임이다.
 
@@ -657,7 +663,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 JOB EVIDENCE FROM SUPABASE:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
 ${currentConfirmedPolicyText}
-${navigationContextText}${recentBotSendsText}${correctionsText}
+${navigationContextText}${terminalAckHintText}${recentBotSendsText}${correctionsText}
 ${lookupContextText}${ragContextText}${brainContextText}
 SHEETS TOOL AVAILABLE VIA GAS API:
 - The outer worker owns the configured GAS endpoint; Hermes does not need its raw URL or credential.
@@ -6451,6 +6457,40 @@ function latestCustomerMessageForRag(decision = {}, job = {}) {
   return text(latest?.message || job.preview_text || job.previewText || job.payload?.previewText).trim();
 }
 
+// 확정 정책의 내용(요율·시간·산식·검증 패턴)은 코드가 아니라 설정 파일이 소유한다.
+// 정책이 바뀌면 current-confirmed-policy.json만 고친다 — 프롬프트와 게이트가 같은
+// 소스를 읽으므로 둘이 어긋날 수 없다 (2026-08-19 AI-first 재설계).
+const DEFAULT_POLICY_CONFIG_PATH = path.resolve(__dirname, 'current-confirmed-policy.json');
+let cachedPolicyConfig;
+let policyConfigLoadErrorLogged = false;
+
+export function loadCurrentConfirmedPolicyConfig(configPath = process.env.VILLAGE_POLICY_CONFIG_PATH || DEFAULT_POLICY_CONFIG_PATH) {
+  if (cachedPolicyConfig !== undefined && cachedPolicyConfig?.__path === configPath) return cachedPolicyConfig;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (!Array.isArray(parsed?.topics) || !parsed.topics.length
+      || !text(parsed?.prompt?.current_confirmed_policy).trim()
+      || !text(parsed?.mutable_policy_trigger?.pattern).trim()) {
+      throw new Error('topics/prompt/mutable_policy_trigger가 비어 있음');
+    }
+    cachedPolicyConfig = { ...parsed, __path: configPath };
+  } catch (error) {
+    // 정책 파일이 깨지면 옛 내장값으로 조용히 돌지 않는다: 게이트는 정책 주제
+    // auto_send를 전면 보류(fail-closed)하고 프롬프트에서 정책 블록이 빠진다.
+    if (!policyConfigLoadErrorLogged) {
+      console.error(`[current-confirmed-policy] 설정 로드 실패(${configPath}): ${error.message}`);
+      policyConfigLoadErrorLogged = true;
+    }
+    cachedPolicyConfig = null;
+  }
+  return cachedPolicyConfig;
+}
+
+export function resetCurrentConfirmedPolicyConfigCache() {
+  cachedPolicyConfig = undefined;
+  policyConfigLoadErrorLogged = false;
+}
+
 export function mutablePolicyAutoReplyRisk(decision = {}, replyText = '') {
   const visibleMessages = Array.isArray(decision.visible_messages_used)
     ? decision.visible_messages_used.map((message) => message?.message)
@@ -6462,7 +6502,10 @@ export function mutablePolicyAutoReplyRisk(decision = {}, replyText = '') {
     replyText,
     ...visibleMessages
   ].map(text).join(' ').normalize('NFKC');
-  if (/(학생\s*할인|학생할인|학생가|비학생|할인율|몇\s*(?:프로|퍼센트)|\d+\s*%|가격|요금|견적|단가|할인|제휴|단골|사업자|프리랜서|보증금|환불|결제|계좌|입금|세금\s*계산|세금계산|거래\s*명세|거래명세|VAT|부가세)/i.test(combined)) {
+  const policyConfig = loadCurrentConfirmedPolicyConfig();
+  if (!policyConfig) return { mutable: true, reason: 'policy_config_unavailable' };
+  const trigger = new RegExp(policyConfig.mutable_policy_trigger.pattern, policyConfig.mutable_policy_trigger.flags || '');
+  if (trigger.test(combined)) {
     return { mutable: true, reason: 'mutable_policy_terms' };
   }
   return { mutable: false, reason: 'not_mutable_policy' };
@@ -6493,80 +6536,28 @@ export function currentConfirmedPolicyAutoReplySupport(decision = {}, replyText 
     ...visibleMessages
   ].map(text).join(' ').normalize('NFKC');
   const reply = text(replyText || decision.reply_decision?.text || decision.suggested_reply_draft).normalize('NFKC');
+  const policyConfig = loadCurrentConfirmedPolicyConfig();
+  if (!policyConfig) {
+    return { applicable: false, allowed: false, reason: 'policy_config_unavailable' };
+  }
   const checks = [];
-
-  if (/(학생\s*할인|학생할인|학생가)/.test(combined) && !/비학생/.test(combined)) {
-    checks.push({
-      topic: 'student_discount_rate',
-      ok: hasNearbyPolicyRate(reply, /학생\s*(?:할인|가)?/, 30) || /30\s*(?:%|퍼센트|프로)[^.\n]{0,30}학생/.test(reply)
+  for (const topic of policyConfig.topics) {
+    const trigger = new RegExp(topic.trigger, topic.trigger_flags || '');
+    if (!trigger.test(combined)) continue;
+    if (topic.trigger_exclude && new RegExp(topic.trigger_exclude, topic.trigger_exclude_flags || '').test(combined)) continue;
+    const ok = (topic.accept || []).some((rule) => {
+      if (rule.type === 'nearby_rate') return hasNearbyPolicyRate(reply, new RegExp(rule.label), rule.rate);
+      if (rule.type === 'reply_match') return new RegExp(rule.pattern, rule.flags || '').test(reply);
+      return false;
     });
-  }
-  if (/(개인\s*사업자|사업자|프리랜서|개사프)/.test(combined)) {
-    checks.push({
-      topic: 'business_freelancer_discount_rate',
-      ok: hasNearbyPolicyRate(reply, /개인\s*사업자|사업자|프리랜서|개사프/, 20) || /20\s*(?:%|퍼센트|프로)[^.\n]{0,40}(?:개인\s*사업자|사업자|프리랜서|개사프)/.test(reply)
-    });
-  }
-  if (/단골/.test(combined)) {
-    checks.push({
-      topic: 'regular_customer_discount_rate',
-      ok: hasNearbyPolicyRate(reply, /단골/, 10) || /단골[^.\n]{0,60}(?:개인\s*사업자|프리랜서)[^.\n]{0,60}20\s*(?:%|퍼센트|프로)/.test(reply)
-    });
-  }
-  if (/제휴/.test(combined)) {
-    checks.push({
-      topic: 'partner_discount_rate',
-      ok: hasNearbyPolicyRate(reply, /제휴/, 20)
-    });
-  }
-  if (/(장기\s*할인|장기할인|2일|3~5일|3-5일|6~9일|10~14일|15~19일|20일\s*(?:이상|\+)?)/.test(combined)) {
-    checks.push({
-      topic: 'long_term_discount_policy',
-      ok: /(2일[^.\n]{0,20}10\s*(?:%|퍼센트|프로)|3\s*[~-]\s*5일[^.\n]{0,20}20\s*(?:%|퍼센트|프로)|6\s*[~-]\s*9일[^.\n]{0,20}35\s*(?:%|퍼센트|프로)|10\s*[~-]\s*14일[^.\n]{0,20}40\s*(?:%|퍼센트|프로)|15\s*[~-]\s*19일[^.\n]{0,20}45\s*(?:%|퍼센트|프로)|20일\s*(?:이상|\+)?[^.\n]{0,20}50\s*(?:%|퍼센트|프로)|장기\s*할인)/.test(reply)
-    });
-  }
-  if (/(영업\s*시간|운영\s*시간|몇\s*시(?:부터|까지)|언제\s*(?:열|닫)|24\s*시간)/.test(combined)) {
-    checks.push({
-      topic: 'business_hours_policy',
-      ok: /24\s*시간/.test(reply)
-    });
-  }
-  if (/(대여\s*일수|6\s*시간|하루|1일\s*계산|(?:렌탈|대여)[^.\n]{0,30}24\s*시간)/.test(combined) && !/(영업\s*시간|운영\s*시간)/.test(combined)) {
-    checks.push({
-      topic: 'rental_day_policy',
-      ok: /(24\s*시간[^.\n]{0,20}1일|6\s*시간[^.\n]{0,40}(?:같은\s*일수|\+1일|추가|초과))/.test(reply)
-    });
-  }
-  if (/(VAT|vat|부가세|최종\s*금액|최종금액)/i.test(combined)) {
-    checks.push({
-      topic: 'vat_final_amount_policy',
-      ok: /(VAT|vat|부가세|1\.1|10\s*%|10원\s*단위|올림)/i.test(reply)
-    });
-  }
-  if (/(할인\s*계산|할인율\s*계산|곱셈|더하기|합산)/.test(combined)) {
-    checks.push({
-      topic: 'discount_multiplier_policy',
-      ok: /(곱셈|곱해서|곱해|0\.7\s*\*\s*0\.8|더하지\s*않)/.test(reply)
-    });
+    checks.push({ topic: topic.key, ok });
   }
 
   if (!checks.length) {
-    const unconfirmedMutable = includesAny(combined, [
-      /비학생/,
-      /보증금/,
-      /환불/,
-      /취소/,
-      /계좌/,
-      /입금/,
-      /결제/,
-      /세금\s*계산|세금계산/,
-      /거래\s*명세|거래명세/,
-      /현금\s*영수|현금영수/,
-      /주차/,
-      /배송|퀵/,
-      /연장/,
-      /파손|분실/
-    ]);
+    const unconfirmedMutable = includesAny(
+      combined,
+      (policyConfig.unconfirmed_mutable_triggers || []).map((pattern) => new RegExp(pattern))
+    );
     return {
       applicable: false,
       allowed: false,
@@ -6611,7 +6602,7 @@ export function buildAutoReplyRagQuestion({ decision = {}, job = {}, replyText =
   return [
     '빌리지 카카오 자동응답 검증용 RAG 질문입니다.',
     '현재 재고/예약 가능 여부/스케줄 확정은 판단하지 말고, 과거 빌리지 대화/문서는 정책/절차/말투 예시로 확인해 주세요.',
-    mutablePolicy.mutable ? '주의: 현재 확정 정책(학생30%, 개사프20%, 장기할인표, VAT/일수 계산)과 충돌하면 현재 확정 정책이 우선입니다. 확정 정책에 없는 보증금/환불/계좌/증빙 등은 RAG 근거로 판단하세요.' : '',
+    mutablePolicy.mutable ? text(loadCurrentConfirmedPolicyConfig()?.prompt?.rag_conflict_note) : '',
     customer ? `고객명: ${customer}` : '',
     `분류: ${text(decision.classification || 'unknown')}`,
     latestCustomer ? `최신 고객 메시지: ${latestCustomer}` : '',
@@ -8163,17 +8154,8 @@ export async function prepareKakaoDecisionFromSnapshot({
   if (!snapshot || snapshot.schema !== 'kakao-room-snapshot/v1') throw new Error('immutable Kakao room snapshot is required');
   const navigationContext = snapshot.navigation;
   const timings = createWorkerTimingRecorder();
-  if (!dryRun && capture?.terminalAcknowledgement?.matched) {
-    return {
-      status: 'ai_skipped_terminal_acknowledgement',
-      snapshot,
-      terminalAcknowledgement: capture.terminalAcknowledgement,
-      followUpResult: { inserted: 0, skipped: true, reason: 'terminal_acknowledgement_no_action', rows: [] },
-      slackDeliveryResult: { skipped: true, reason: 'terminal_acknowledgement_no_card', results: [] },
-      autoReplyResult: { attempted: false, sent: false, reason: 'terminal_acknowledgement_no_reply' },
-      timings: timings.snapshot()
-    };
-  }
+  // 종결 인사 여부는 코드가 아니라 AI가 판단한다. DOM 휴리스틱 분류는 조기 반환
+  // 대신 프롬프트 힌트(TERMINAL_ACK_HINT)로만 전달된다 (2026-08-19 AI-first 재설계).
   const freshnessGuard = createJobFreshnessGuard({
     bridgeUrl: config.bridgeUrl,
     roomKey: job.roomKey || job.room_key || '',
@@ -8193,7 +8175,7 @@ export async function prepareKakaoDecisionFromSnapshot({
     freshnessGuard.throwIfSuperseded();
     const recentBotSends = buildRecentBotSendsPromptText(config, job);
     const corrections = buildCorrectionsPromptText(config);
-    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext, brainContext, recentBotSends, corrections });
+    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext, brainContext, recentBotSends, corrections, terminalAckHint: capture?.terminalAcknowledgement });
     if (dryRun) {
       return { status: 'dry_run', snapshot, job: summarizeJob(job), lookupContext, ragContext, brainContext, prompt, timings: timings.snapshot() };
     }
