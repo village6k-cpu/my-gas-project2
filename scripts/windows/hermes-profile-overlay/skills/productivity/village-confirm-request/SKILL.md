@@ -72,7 +72,7 @@ Without a reqID, reconcile by requester: `{"예약자명":"이름","반출일":"
 If authoritative lookup finds one unregistered existing partial request for the same customer and interval, use `update` with a wrapper containing the verified request ID and the complete AI-planned request:
 
 ```json
-{"reqID":"RQ-260723-003","request":{"반출일":"2026-07-26","반출시간":"20:00","반납일":"2026-07-28","반납시간":"20:00","예약자명":"이재민","연락처":"010-7432-3925","장비":[{"이름":"석자 그리드","수량":1},{"이름":"석자 플로피","수량":1},{"이름":"NANLUX Evoke 1200B","수량":1}]}}
+{"reqID":"RQ-260723-003","request":{"반출일":"2026-07-26","반출시간":"20:00","반납일":"2026-07-28","반납시간":"20:00","예약자명":"홍길동","연락처":"010-0000-0000","장비":[{"이름":"석자 그리드","수량":1},{"이름":"석자 플로피","수량":1},{"이름":"NANLUX Evoke 1200B","수량":1}]}}
 ```
 
 Pipe that JSON to the fixed runner with the `update` command. It catalog-preflights the complete plan, calls `updateRequest` once, and verifies the entire request group by readback. Do not fall back to ad-hoc Python, raw GAS calls, source-code archaeology, or a second insert when this bounded route applies.
