@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { isAuthedRequest as isAuthed } from "@/lib/server/authCache";
 import { getInventoryAuditServiceClient } from "@/lib/server/inventoryAuditDb";
 import { getVillageGasInternalKey } from "@/lib/server/gasInternalKey.mjs";
+import { classifyGasResponseForAudit } from "@/lib/server/gasResponseAudit.mjs";
 
 export const maxDuration = 60;
 
@@ -334,6 +335,12 @@ async function callGet(req: NextRequest) {
   return fetch(url, { redirect: "follow", signal: AbortSignal.timeout(40_000) })
     .then(async (r) => {
       const body = await r.text();
+      console.info("[api/gas] upstream", {
+        method: "GET",
+        action,
+        upstreamStatus: r.status,
+        ...classifyGasResponseForAudit(body),
+      });
       if (isWrite) {
         // 쓰기 직후 재조회가 쓰기 이전 캐시를 받아 화면이 되돌아 보이지 않도록 관련 읽기 캐시 무효화
         if (!photoWrite) invalidateCacheForWrite(action);
@@ -388,6 +395,12 @@ async function callPost(req: NextRequest) {
       signal: AbortSignal.timeout(60_000),
     });
     let responseBody = await r.text();
+    console.info("[api/gas] upstream", {
+      method: "POST",
+      action,
+      upstreamStatus: r.status,
+      ...classifyGasResponseForAudit(responseBody),
+    });
     if (completionAction && r.ok) {
       let confirmed: Record<string, unknown> | null = null;
       try {
