@@ -14,7 +14,8 @@ const NO_STORE_HEADERS = {
 const VILLAGE_OPS_API_URL =
   process.env.VILLAGE_OPS_API_URL ??
   "https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec";
-const VILLAGE_OPS_API_KEY = process.env.VILLAGE_OPS_API_KEY ?? process.env.VILLAGE_OPS_KEY ?? process.env.GAS_API_KEY ?? "village2026";
+// 공개 키 폴백 금지 — env 미설정이면 빈 키로 GAS에서 403으로 크게 실패해야 한다.
+const VILLAGE_OPS_API_KEY = process.env.VILLAGE_OPS_API_KEY ?? process.env.VILLAGE_OPS_KEY ?? process.env.GAS_API_KEY ?? "";
 
 type MyPageResult = {
   success?: boolean;

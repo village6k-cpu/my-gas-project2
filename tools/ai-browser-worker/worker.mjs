@@ -22,7 +22,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec';
-const DEFAULT_SHEET_API_KEY = 'village2026';
+// 공개 키 폴백 금지 — 키가 구성되지 않은 경로는 조용히 공개 키로 강등되는 대신
+// 서버에서 403으로 크게 실패해야 한다 (2026-08-19 권한 감사).
+const DEFAULT_SHEET_API_KEY = '';
 const VILLAGE_SHEET_ID = '17cl0YlZYA6j9hlTqPFIe5J0UdjuLcfxZyQfKGF00Ksk';
 const VILLAGE_OPS_SHEET_ID = '1ssb6EyuRRCU04Zf4UAtdbpYYkWcseGqnhWVONdrqol8';
 const DEFAULT_KAKAO_CHANNEL_MANAGER_URL = 'https://business.kakao.com/_xhPMls/chats?t_src=business_partnercenter&t_ch=lnb&t_obj=%EB%82%B4%EC%B1%84%ED%8C%85_%ED%81%B4%EB%A6%AD';
@@ -922,6 +924,11 @@ export function validateAiDecisionContract(decision = {}) {
     };
   }
 
+  if (Array.isArray(decision.follow_up_items) && decision.follow_up_items.length
+    && typeof decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== 'boolean') {
+    errors.push('follow_up_items require an explicit boolean safety_checks.latest_customer_message_after_last_staff_reply');
+  }
+
   if (decision.should_write_to_sheet === true) {
     const row = decision.sheet_row_candidate && typeof decision.sheet_row_candidate === 'object'
       ? decision.sheet_row_candidate
@@ -1788,10 +1795,20 @@ function normalizeP0FollowUpItems(decision = {}) {
 }
 
 export function buildFollowUpRows(decision, job = {}) {
+  let items = normalizeP0FollowUpItems(decision);
   // Hermes has already inspected the opened conversation and determined turn
-  // ownership. Do not reinterpret staff prose as a new customer task here.
-  if (decision?.safety_checks?.latest_customer_message_after_last_staff_reply === false) return [];
-  const items = normalizeP0FollowUpItems(decision);
+  // ownership. Do not reinterpret staff prose as a new customer task here —
+  // 단, AI가 P0로 지정한 사고·즉시확인 항목은 사장이 마지막으로 말한 대화에서도
+  // 유지한다. 대화를 열고도 판정 필드를 빼먹은 결정은 fail-closed로 잠그되,
+  // 대화를 열지 못한 결정(discovery 실패)은 사람 분류용 후속 항목을 보존한다.
+  const turnChecks = decision?.safety_checks || {};
+  const staffLatestTurn = turnChecks.latest_customer_message_after_last_staff_reply === false
+    || (turnChecks.kakao_conversation_opened === true
+      && typeof turnChecks.latest_customer_message_after_last_staff_reply !== 'boolean');
+  if (staffLatestTurn) {
+    items = items.filter((item) => item && typeof item === 'object' && item.alertLevel === 'p0');
+    if (!items.length) return [];
+  }
   const rawJobId = text(job.id || job.jobId || '');
   const jobId = isUuid(rawJobId) ? rawJobId : null;
   const roomKey = text(job.room_key || job.roomKey || job.payload?.roomKey || '').slice(0, 240);
@@ -2766,10 +2783,12 @@ export function buildCanonicalFollowUpCases(decision = {}, job = {}, rows = [], 
   const sourceRows = (Array.isArray(rows) ? rows : []).filter(Boolean);
   // With no independent operational failure row, a staff-latest conversation
   // is already answered and must not become a customer inquiry Slack card.
-  if (
-    decision?.safety_checks?.latest_customer_message_after_last_staff_reply === false
-    && sourceRows.length === 0
-  ) return [];
+  // 대화를 열고도 판정 필드를 빼먹은 결정도 카드가 새지 않도록 함께 잠근다.
+  const caseTurnChecks = decision?.safety_checks || {};
+  const caseStaffLatestTurn = caseTurnChecks.latest_customer_message_after_last_staff_reply === false
+    || (caseTurnChecks.kakao_conversation_opened === true
+      && typeof caseTurnChecks.latest_customer_message_after_last_staff_reply !== 'boolean');
+  if (caseStaffLatestTurn && sourceRows.length === 0) return [];
   const inquiryBase = buildInquiryCaseRow(decision, job, sourceRows);
   if (!inquiryBase) return [];
   const replyDecision = decision?.reply_decision && typeof decision.reply_decision === 'object'
@@ -6408,8 +6427,20 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = 
   return { allowed: true, reason: safetyClass, text: textValue, replyMode: mode, confidence, safetyClass, grounding };
 }
 
+// 직원 개인 이름은 코드에 고정하지 않고 env로 관리한다. 하드코딩 시 신입 직원의
+// 수동응대가 학습·판정에서 조용히 누락된다.
+const STAFF_SENDER_LABEL_PATTERN = (() => {
+  const roles = ['빌리지', '직원', '운영자', '상담원', '매니저', 'village'];
+  const names = String(process.env.VILLAGE_STAFF_NAMES || '김준영,최재형')
+    .split(/[\s,]+/)
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return new RegExp(`(${[...roles, ...names].join('|')})`, 'i');
+})();
+
 export function isStaffSenderLabel(value = '') {
-  return /(빌리지|김준영|최재형|직원|운영자|상담원|매니저|village)/i.test(text(value));
+  return STAFF_SENDER_LABEL_PATTERN.test(text(value));
 }
 
 function latestCustomerMessageForRag(decision = {}, job = {}) {
@@ -7111,7 +7142,7 @@ export function buildAutoReplyDedupeKey({ decision = {}, job = {}, replyText = '
 // 목적 (2026-08-11 사례A/B 진단): (1) 화면의 빌리지측 버블 중 이 목록에 없는 것 = 사장(사람)의
 // 수동 응대임을 모델이 판별할 수 있게 하고, (2) 봇이 이미 보낸 질문/안내를 반복 발송하지 않게
 // 자기 발송 이력을 자각시킨다. 실패는 조용히 빈 문자열로 강등 — 프롬프트 빌드를 막지 않는다.
-export function buildRecentBotSendsPromptText(config, job = {}, { limit = 5, windowMs = 48 * 60 * 60 * 1000, now = new Date(), maxLines = 3000 } = {}) {
+export function buildRecentBotSendsPromptText(config, job = {}, { limit = 5, windowMs = 7 * 24 * 60 * 60 * 1000, now = new Date(), maxLines = 3000 } = {}) {
   try {
     if (!config?.autoSendLogPath || !fs.existsSync(config.autoSendLogPath)) return '';
     const roomKey = normalizeAutoReplyText(job.room_key || job.roomKey || job.payload?.roomKey || '');
@@ -7129,15 +7160,21 @@ export function buildRecentBotSendsPromptText(config, job = {}, { limit = 5, win
       if (!Number.isFinite(sentAt.getTime()) || now.getTime() - sentAt.getTime() > windowMs) continue;
       const entryRoom = normalizeAutoReplyText(String(entry.dedupeKey || '').split('|')[0] || '');
       const entryCustomer = normalizeAutoReplyText(entry.customer || '');
-      const matched = (roomKey && entryRoom && entryRoom === roomKey)
-        || (customer && entryCustomer && entryCustomer === customer);
+      // dedupeKey 첫 세그먼트는 방 키가 없던 발송에선 고객 이름이 들어간다.
+      // 양쪽 방 키를 아는 발송은 방 키 일치를 요구해 동명이인 발송이 다른 방의
+      // RECENT_BOT_SENDS로 새어 들어가는 것을 막고, 이름 폴백은 방 키가 없던
+      // 발송에만 허용한다.
+      const entryRoomIsFallbackName = Boolean(entryRoom && entryCustomer && entryRoom === entryCustomer);
+      const matched = (roomKey && entryRoom && !entryRoomIsFallbackName)
+        ? entryRoom === roomKey
+        : Boolean(customer && entryCustomer && entryCustomer === customer);
       if (!matched) continue;
       const sentText = normalizeAutoReplyText(entry?.result?.text || '');
       if (!sentText) continue;
       sends.push(`- [${entry.at}] ${sentText.slice(0, 200)}`);
     }
     if (!sends.length) return '';
-    return `\nRECENT_BOT_SENDS (자동응대 봇이 이 방/고객에게 최근 48시간 내 실제 발송한 메시지, 최신이 마지막):\n${sends.slice(-limit).join('\n')}\n`;
+    return `\nRECENT_BOT_SENDS (자동응대 봇이 이 방/고객에게 최근 7일 내 실제 발송한 메시지, 최신이 마지막):\n${sends.slice(-limit).join('\n')}\n`;
   } catch {
     return '';
   }

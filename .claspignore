@@ -11,6 +11,12 @@ tools/**
 # GitHub Pages (GAS에 올릴 필요 없음)
 docs/**
 
+# 레거시 UI — ?page= 라우팅 폐지로 서빙 경로가 없고 village2026 write 호출이
+# 하드코딩돼 있어 GAS에 올리지 않는다. 저장소에는 정적 테스트 대상으로 유지 (2026-08-19).
+dashboard.html
+requestManage.html
+timelineMobile.html
+
 # Vercel 앱 (GAS와 무관)
 apps/**
 

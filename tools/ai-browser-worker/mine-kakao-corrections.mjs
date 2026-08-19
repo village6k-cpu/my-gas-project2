@@ -169,17 +169,41 @@ function argValue(argv, name, fallback) {
   return index !== -1 && argv[index + 1] ? argv[index + 1] : fallback;
 }
 
+// 야간 예약작업은 env 파일 없이 실행된다. 리포 상대 경로는 프로덕션 브리지가
+// QUEUE_DIR(%LOCALAPPDATA%\Village\kakao-production\queue)를 쓰는 순간 빈 경로가
+// 되므로(2026-08-18 밤 학습 정지 원인), 실존하는 후보를 순서대로 찾는다.
+export function resolveDefaultAutoSendLogPath(env = process.env) {
+  if (env.AI_WORKER_AUTO_SEND_LOG) return env.AI_WORKER_AUTO_SEND_LOG;
+  const candidates = [
+    path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson'),
+    env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, 'Village', 'kakao-production', 'queue', 'auto-replies.ndjson') : ''
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return candidates[candidates.length - 1];
+}
+
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (isMain) {
   const argv = process.argv.slice(2);
+  const outPath = argValue(argv, '--out', process.env.KAKAO_CORRECTIONS_PATH
+    || (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Village', 'kakao-corrections', 'corrections-latest.md') : path.resolve(__dirname, 'corrections-latest.md')));
   const result = runMiner({
-    logPath: argValue(argv, '--log', process.env.AI_WORKER_AUTO_SEND_LOG || path.resolve(__dirname, '../kakao-dom-bridge/queue/auto-replies.ndjson')),
-    outPath: argValue(argv, '--out', process.env.KAKAO_CORRECTIONS_PATH
-      || (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Village', 'kakao-corrections', 'corrections-latest.md') : path.resolve(__dirname, 'corrections-latest.md'))),
+    logPath: argValue(argv, '--log', resolveDefaultAutoSendLogPath()),
+    outPath,
     hours: Number(argValue(argv, '--hours', 36)) || 36,
     maxCards: Number(argValue(argv, '--max-cards', 8)) || 8,
     dryRun: argv.includes('--dry-run')
   });
+  // 무성 실패 금지: 예약작업 VBS는 종료코드를 버리므로, 성공/실패를 상태 파일로
+  // 남겨 언제 마지막으로 돌았고 왜 실패했는지 아침에 확인할 수 있게 한다.
+  try {
+    const statusPath = path.join(path.dirname(outPath), 'miner-status.json');
+    fs.mkdirSync(path.dirname(statusPath), { recursive: true });
+    const { preview, ...slim } = result;
+    fs.writeFileSync(statusPath, JSON.stringify({ at: new Date().toISOString(), ...slim }, null, 2), 'utf8');
+  } catch {}
   console.log(JSON.stringify(result, null, 2));
   process.exit(result.ok ? 0 : 1);
 }

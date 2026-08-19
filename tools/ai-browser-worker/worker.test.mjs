@@ -2556,6 +2556,7 @@ test('already_answered unregistered reservation stays valid when an actionable s
   const preservedUnregistered = validateAiDecisionContract({
     should_write_to_sheet: false,
     classification: 'already_answered',
+    safety_checks: { latest_customer_message_after_last_staff_reply: false },
     reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
     existing_confirm_request_ids: [],
     follow_up_items: [{
@@ -5702,6 +5703,30 @@ test('buildFollowUpRows preserves Hermes follow-ups even when conversation disco
   assert.equal(rows[0].payload.follow_up_task_key, 'manual_chat_discovery');
 });
 
+test('staff-latest turns keep only P0 follow-up rows and never leak inquiry cards', () => {
+  const staffLatest = {
+    classification: 'reservation',
+    confidence: 'high',
+    customer: { name: '한결' },
+    safety_checks: { kakao_conversation_opened: true, latest_customer_message_after_last_staff_reply: false },
+    follow_up_items: [
+      { type: 'reply_needed', route: 'other', taskKey: 'ack', title: '확인 답장', summary: '사장이 이미 답한 건' },
+      { type: 'incident', route: 'schedule', taskKey: 'damage', title: '장비 파손 즉시 확인', summary: '파손 신고', alert_level: 'p0', alert_reason: '대여 중 파손' }
+    ]
+  };
+  const rows = buildFollowUpRows(staffLatest, { roomKey: 'chat:staff-latest' });
+  assert.equal(rows.length, 1, 'P0 항목은 사장이 마지막으로 말한 대화에서도 살아남아야 한다');
+  assert.equal(rows[0].title, '장비 파손 즉시 확인');
+  assert.equal(buildCanonicalFollowUpCases(staffLatest, { room_key: 'chat:staff-latest' }, []).length, 0);
+
+  // 대화를 열고도 판정 필드를 빼먹은 결정은 fail-closed로 잠근다.
+  const omitted = { ...staffLatest, safety_checks: { kakao_conversation_opened: true } };
+  assert.equal(buildCanonicalFollowUpCases(omitted, { room_key: 'chat:omitted' }, []).length, 0);
+  const verdict = validateAiDecisionContract(omitted);
+  assert.equal(verdict.valid, false);
+  assert.match(verdict.errors.join('|'), /latest_customer_message_after_last_staff_reply/);
+});
+
 test('buildFollowUpRows uses a stable semantic key for same customer task across repeated jobs', () => {
   const first = buildFollowUpRows({
     classification: 'faq',
@@ -7695,8 +7720,10 @@ test('buildRecentBotSendsPromptText lists only fresh sends for the same room or 
   const now = new Date('2026-08-11T12:00:00.000Z');
   const lines = [
     JSON.stringify({ at: '2026-08-11T03:43:00.000Z', customer: '임선', dedupeKey: 'chat:12345|반출 변경|반납 일시를 알려주세요', result: { sent: true, text: '반납 날짜와 시간을 한 번만 다시 알려주세요!' } }),
-    JSON.stringify({ at: '2026-08-05T03:43:00.000Z', customer: '임선', dedupeKey: 'chat:12345|옛 메시지|옛 답장', result: { sent: true, text: '48시간 밖의 옛 발송' } }),
+    JSON.stringify({ at: '2026-08-03T03:43:00.000Z', customer: '임선', dedupeKey: 'chat:12345|옛 메시지|옛 답장', result: { sent: true, text: '7일 밖의 옛 발송' } }),
     JSON.stringify({ at: '2026-08-11T04:00:00.000Z', customer: '박수정', dedupeKey: 'chat:99999|다른 방|다른 답장', result: { sent: true, text: '다른 방 발송' } }),
+    JSON.stringify({ at: '2026-08-11T04:05:00.000Z', customer: '임선', dedupeKey: 'chat:77777|동명이인 방|다른 답장', result: { sent: true, text: '다른 방의 동명이인 발송' } }),
+    JSON.stringify({ at: '2026-08-11T04:07:00.000Z', customer: '임선', dedupeKey: '임선|방키 없던 발송|답장', result: { sent: true, text: '방 키 없던 시절의 같은 고객 발송' } }),
     JSON.stringify({ at: '2026-08-11T04:10:00.000Z', customer: '임선', dedupeKey: 'chat:12345|차단|차단', result: { sent: false, text: '차단된 시도' } })
   ];
   fs.writeFileSync(logPath, lines.join(String.fromCharCode(10)));
@@ -7706,13 +7733,15 @@ test('buildRecentBotSendsPromptText lists only fresh sends for the same room or 
   assert.match(block, /반납 날짜와 시간을 한 번만 다시 알려주세요!/);
   assert.doesNotMatch(block, /옛 발송/);
   assert.doesNotMatch(block, /다른 방 발송/);
+  assert.doesNotMatch(block, /동명이인 발송/, '방 키를 아는 동명이인 발송은 다른 방에 주입되면 안 된다');
+  assert.match(block, /방 키 없던 시절의 같은 고객 발송/, '방 키가 없던 발송은 이름 폴백으로 매칭한다');
   assert.doesNotMatch(block, /차단된 시도/);
   assert.equal(buildRecentBotSendsPromptText({ autoSendLogPath: logPath }, {}, { now }), '');
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 test('buildHermesPrompt embeds the recent bot sends block and the owner-manual policy lines', () => {
-  const sendsBlock = ['', 'RECENT_BOT_SENDS (자동응대 봇이 이 방/고객에게 최근 48시간 내 실제 발송한 메시지, 최신이 마지막):', '- [2026-08-11T03:43:00.000Z] 반납 날짜와 시간을 한 번만 다시 알려주세요!', ''].join(String.fromCharCode(10));
+  const sendsBlock = ['', 'RECENT_BOT_SENDS (자동응대 봇이 이 방/고객에게 최근 7일 내 실제 발송한 메시지, 최신이 마지막):', '- [2026-08-11T03:43:00.000Z] 반납 날짜와 시간을 한 번만 다시 알려주세요!', ''].join(String.fromCharCode(10));
   const prompt = buildHermesPrompt({ id: 'job-1' }, { recentBotSends: sendsBlock });
   assert.match(prompt, /RECENT_BOT_SENDS/);
   assert.match(prompt, /사장\(사람\)의 수동 응대/);

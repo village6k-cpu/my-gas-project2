@@ -1611,7 +1611,8 @@ function runFunction(funcName, params) {
     "testRegisterAlimtalk",
     "testGuideAlimtalk",
     "diagGuideAlimtalkSchedule",
-    "markGuideAlimtalkSent"
+    "markGuideAlimtalkSent",
+    "configureTradeIdReservationSecretV1"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -1650,6 +1651,11 @@ function runFunction(funcName, params) {
     if (funcName === "updateRequestItem" && params.args) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
       var result = updateRequestItem(args);
+      return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "configureTradeIdReservationSecretV1" && params.args) {
+      var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
+      var result = configureTradeIdReservationSecretV1(typeof args === "string" ? args : (args && args.secret));
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "excludeEquipFromRequest" && params.args) {

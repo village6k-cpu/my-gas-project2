@@ -7963,22 +7963,35 @@ function getVillageOpsApiKey_(props) {
 }
 
 function getTradeIdReservationApiKey_(props) {
-  var secret = String(props.getProperty("POPBILL_SECRET_KEY") || "").trim();
+  // 전용 시크릿(TRADE_ID_RESERVATION_SECRET)이 서버·호출자 양쪽에 설정되면
+  // 팝빌 시크릿 커플링이 끊긴다. 미설정 시에만 이행기 폴백.
+  var dedicated = String(props.getProperty("TRADE_ID_RESERVATION_SECRET") || "").trim();
+  var secret = dedicated.length >= 32 ? dedicated : String(props.getProperty("POPBILL_SECRET_KEY") || "").trim();
   if (secret.length < 16) throw new Error("거래ID 전용 인증키 미설정");
   return Utilities.base64EncodeWebSafe(
     Utilities.computeHmacSha256Signature("village-trade-id-reservation-v1", secret)
   ).replace(/=+$/g, "");
 }
 
-function getTradeIdReservationOperationId_(fields, apiKey) {
+/** run 전용(internal key 필요): 거래ID 선점 전용 시크릿을 설정·회전한다. */
+function configureTradeIdReservationSecretV1(secret) {
+  var next = String(secret || "").trim();
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(next)) throw new Error("secret은 32~128자 base64url이어야 합니다");
+  PropertiesService.getScriptProperties().setProperty("TRADE_ID_RESERVATION_SECRET", next);
+  return { success: true, configured: true };
+}
+
+function getTradeIdReservationOperationId_(fields) {
   fields = fields || {};
   var reqID = String(fields.reqID || "").trim();
   var customerName = String(fields.customerName || "").trim().replace(/\s+/g, " ");
   var phoneKey = String(fields.phone || "").replace(/\D/g, "");
   var startDate = String(fields.startDate || "").trim();
   var identity = [startDate, customerName, phoneKey].join("\u001f");
+  // 다이제스트 키는 인증키와 무관한 고정 목적 문자열이다. 인증키로 파생하면
+  // 시크릿 회전 때마다 기존 영수증이 조회 불가가 된다 (2026-08-19 확인).
   var digest = Utilities.base64EncodeWebSafe(
-    Utilities.computeHmacSha256Signature(identity, apiKey)
+    Utilities.computeHmacSha256Signature(identity, "village-trade-reservation-identity-v1")
   ).replace(/=+$/g, "").slice(0, 16);
   if (digest.length !== 16) throw new Error("거래ID 선점 식별자 생성 실패");
   return "confirm-register:" + reqID + ":" + digest;
@@ -7998,7 +8011,7 @@ function reserveExternalTradeId_(fields) {
   var props = PropertiesService.getScriptProperties();
   var apiUrl = getVillageOpsApiUrl_(props);
   var apiKey = getTradeIdReservationApiKey_(props);
-  var operationId = getTradeIdReservationOperationId_(fields, apiKey);
+  var operationId = getTradeIdReservationOperationId_(fields);
   if (!apiUrl) throw new Error("거래ID 선점 API URL 미설정");
   var payload = {
     action: "reserveTradeId",
@@ -11714,6 +11727,42 @@ function _normalizeConfirmRequestSchedule_(request) {
   return req;
 }
 
+/** 시트 셀 값(Date 객체 또는 문자열)을 YYYY-MM-DD 문자열로 강제한다. */
+function _coerceConfirmRequestDateText_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return Utilities.formatDate(value, 'Asia/Seoul', 'yyyy-MM-dd');
+  }
+  return String(value == null ? "" : value).trim();
+}
+
+/** 시트 셀 값(Date 객체 또는 "H:mm" 문자열)을 HH:mm 문자열로 강제한다. */
+function _coerceConfirmRequestTimeText_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return Utilities.formatDate(value, 'Asia/Seoul', 'HH:mm');
+  }
+  return String(value == null ? "" : value).trim();
+}
+
+/**
+ * 시트에서 읽어온 반출·반납 일시를 입력 경로와 같은 경계로 정규화한다.
+ * 등록·재확인·수정 경로가 이걸 거치지 않으면 수동 편집으로 들어온 24:00이나
+ * 분 단위 시각이 계약마스터·계약서까지 원문 그대로 흘러간다.
+ */
+function _normalizeConfirmRequestWindowFields_(반출일, 반출시간, 반납일, 반납시간) {
+  var normalized = _normalizeConfirmRequestSchedule_({
+    반출일: _coerceConfirmRequestDateText_(반출일),
+    반출시간: _coerceConfirmRequestTimeText_(반출시간),
+    반납일: _coerceConfirmRequestDateText_(반납일),
+    반납시간: _coerceConfirmRequestTimeText_(반납시간)
+  });
+  return {
+    반출일: normalized.반출일,
+    반출시간: normalized.반출시간,
+    반납일: normalized.반납일,
+    반납시간: normalized.반납시간
+  };
+}
+
 /**
  * 확인요청 시트에 데이터 입력 후 가용확인까지 자동 실행
  * @param {Object} req - {
@@ -12327,6 +12376,13 @@ function _updateRequestUnderLock_(req) {
     var 반출시간 = req.반출시간 !== undefined ? req.반출시간 : origFirst[2];
     var 반납일 = req.반납일 || origFirst[3];
     var 반납시간 = req.반납시간 !== undefined ? req.반납시간 : origFirst[4];
+    // updateRequest는 입력 경로의 정규화를 우회해 24:00·분 단위 시각을 시트에
+    // 심을 수 있었다. 병합된 최종 일시를 같은 경계로 정규화한 뒤에만 쓴다.
+    var 수정시간창 = _normalizeConfirmRequestWindowFields_(반출일, 반출시간, 반납일, 반납시간);
+    반출일 = 수정시간창.반출일;
+    반출시간 = 수정시간창.반출시간;
+    반납일 = 수정시간창.반납일;
+    반납시간 = 수정시간창.반납시간;
     var 예약자명 = req.예약자명 !== undefined ? req.예약자명 : origFirst[10];
     var 연락처 = req.연락처 !== undefined ? req.연락처 : origFirst[11];
     // 할인유형(M, idx12)·비고(Q, idx16)는 장비 목록 변경 시에도 보존해야 한다.
@@ -12661,6 +12717,20 @@ function _processByReqID(sheet, triggerRow) {
       반납일 = allData[i][3];
       반납시간 = allData[i][4];
       break;
+    }
+  }
+
+  // 수동 편집으로 들어온 24:00·분 단위 시각을 입력 경로와 같은 경계로 맞춘다.
+  // 재확인은 가용성 계산이 목적이므로 형식이 깨진 값이면 기존 동작(원본 그대로)을 보존한다.
+  if (반출일 && 반납일) {
+    try {
+      const 확인시간창 = _normalizeConfirmRequestWindowFields_(반출일, 반출시간, 반납일, 반납시간);
+      반출일 = 확인시간창.반출일;
+      반출시간 = 확인시간창.반출시간;
+      반납일 = 확인시간창.반납일;
+      반납시간 = 확인시간창.반납시간;
+    } catch (normErr) {
+      Logger.log("재확인 시간 정규화 생략(" + triggerReqID + "): " + normErr.message);
     }
   }
 
@@ -14656,10 +14726,25 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   // fmtDT()로 "yyyy-MM-dd HH:mm" 형태 얻은 후 분리
   const 반출dtStr = fmtDT(반출일, 반출시간);
   const 반납dtStr = fmtDT(반납일, 반납시간);
-  const 반출일str = 반출dtStr.split(' ')[0] || "";
-  const 반출시간str = 반출dtStr.split(' ')[1] || "";
-  const 반납일str = 반납dtStr.split(' ')[0] || "";
-  const 반납시간str = 반납dtStr.split(' ')[1] || "";
+  let 반출일str = 반출dtStr.split(' ')[0] || "";
+  let 반출시간str = 반출dtStr.split(' ')[1] || "";
+  let 반납일str = 반납dtStr.split(' ')[0] || "";
+  let 반납시간str = 반납dtStr.split(' ')[1] || "";
+
+  // 수동 편집으로 시트에 남은 24:00·분 단위 시각도 입력 경로와 같은 경계로
+  // 정규화한 뒤에만 스케줄상세·계약마스터·계약서에 기록한다.
+  try {
+    const 등록시간창 = _normalizeConfirmRequestWindowFields_(반출일str, 반출시간str, 반납일str, 반납시간str);
+    반출일str = 등록시간창.반출일;
+    반출시간str = 등록시간창.반출시간;
+    반납일str = 등록시간창.반납일;
+    반납시간str = 등록시간창.반납시간;
+  } catch (normErr) {
+    sheet.getRange(triggerRow, 15).setValue("❌ 반출·반납 일시 형식 오류: " + normErr.message);
+    sheet.getRange(triggerRow, 15).setBackground("#FFC7CE");
+    sheet.getRange(triggerRow, 14).clearContent();
+    return;
+  }
 
     // ── 동일 예약자명+일정 기존 거래 합치기 모드 ──
     var mergeMode = false;
