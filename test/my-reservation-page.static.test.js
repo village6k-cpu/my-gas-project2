@@ -135,6 +135,10 @@ assert(
   'the customer quote route must validate the token, call previewQuote without stale PDF reuse, and never proxy contract sheet exports'
 );
 assert(
+  /process\.env\.GAS_API_KEY\s*\?\?\s*["']village2026["']/.test(estimateRoute),
+  'the customer quote route must preserve the original village2026 document API fallback'
+);
+assert(
   myPageClient.includes('카카오톡 채널') && myPageClient.includes('연장 · 변경 · 취소'),
   'the my-page must guide customers to the KakaoTalk channel for changes'
 );

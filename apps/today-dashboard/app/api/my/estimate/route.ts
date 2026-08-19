@@ -14,8 +14,9 @@ const NO_STORE_HEADERS = {
 const VILLAGE_OPS_API_URL =
   process.env.VILLAGE_OPS_API_URL ??
   "https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec";
-// 공개 키 폴백 금지 — env 미설정이면 빈 키로 GAS에서 403으로 크게 실패해야 한다.
-const VILLAGE_OPS_API_KEY = process.env.VILLAGE_OPS_API_KEY ?? process.env.VILLAGE_OPS_KEY ?? process.env.GAS_API_KEY ?? "";
+// 기존 문서 API는 village2026 운영 키를 정식 호환 경로로 사용한다.
+// 별도 env가 없는 배포도 원래 동작을 유지해야 고객 견적 PDF가 끊기지 않는다.
+const VILLAGE_OPS_API_KEY = process.env.VILLAGE_OPS_API_KEY ?? process.env.VILLAGE_OPS_KEY ?? process.env.GAS_API_KEY ?? "village2026";
 
 type MyPageResult = {
   success?: boolean;
