@@ -41,8 +41,10 @@ assert.doesNotMatch(failureMarker, /getRange\([^\n]+,\s*14\)/,
   'ledger reservation failure must preserve N-column owner approval for retry');
 
 const fetchCalls = [];
+const hmacCalls = [];
 const properties = new Map([
   ['POPBILL_SECRET_KEY', 'popbill-secret-for-test'],
+  ['TRADE_ID_RESERVATION_SECRET', 'stale-random-secret-that-must-not-control-runtime'],
   ['VILLAGE_OPS_API_URL', 'https://script.google.com/macros/s/example/exec']
 ]);
 const context = vm.createContext({
@@ -51,7 +53,10 @@ const context = vm.createContext({
   String,
   Error,
   Utilities: {
-    computeHmacSha256Signature: (value) => Array.from(Buffer.from(String(value), 'utf8')),
+    computeHmacSha256Signature: (value, key) => {
+      hmacCalls.push({ value: String(value), key: String(key) });
+      return Array.from(Buffer.from(String(value), 'utf8'));
+    },
     base64EncodeWebSafe: (bytes) => Buffer.from(bytes).toString('base64url')
   },
   PropertiesService: {
@@ -85,6 +90,16 @@ assert.match(posted.operationId, /^confirm-register:RQ-260818-001:[A-Za-z0-9_-]{
 assert.doesNotMatch(posted.operationId, /테스트고객|010-1234-5678/,
   'the idempotency key must not expose customer PII');
 assert.ok(posted.key, 'the server-only reservation key must be included');
+assert.equal(
+  hmacCalls.find((call) => call.value === 'village-trade-id-reservation-v2')?.key,
+  'popbill-secret-for-test',
+  'the caller must derive the reservation credential from the durable shared server root, not a manually synchronized random property'
+);
+assert.equal(
+  hmacCalls.some((call) => call.key === 'stale-random-secret-that-must-not-control-runtime'),
+  false,
+  'a stale TRADE_ID_RESERVATION_SECRET must not be able to break all registrations'
+);
 
 context.reserveExternalTradeId_({
   reqID: 'RQ-260818-001', customerName: '다른고객', phone: '010-9999-9999', startDate: '2026-08-21'
@@ -106,7 +121,7 @@ assert.throws(
     reqID: 'RQ-260818-002', customerName: '테스트고객', phone: '010-1234-5678', startDate: '2026-08-20'
   }),
   /전용 인증키 미설정/,
-  'the browser-visible default key must never authorize trade ID reservation'
+  'a leftover manual reservation property must not bypass the missing durable server root'
 );
 assert.equal(fetchCalls.length, 3, 'missing secure key must fail before any network call');
 

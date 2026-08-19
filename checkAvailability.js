@@ -7963,22 +7963,14 @@ function getVillageOpsApiKey_(props) {
 }
 
 function getTradeIdReservationApiKey_(props) {
-  // 전용 시크릿(TRADE_ID_RESERVATION_SECRET)이 서버·호출자 양쪽에 설정되면
-  // 팝빌 시크릿 커플링이 끊긴다. 미설정 시에만 이행기 폴백.
-  var dedicated = String(props.getProperty("TRADE_ID_RESERVATION_SECRET") || "").trim();
-  var secret = dedicated.length >= 32 ? dedicated : String(props.getProperty("POPBILL_SECRET_KEY") || "").trim();
+  // 두 GAS에 같은 랜덤 Script Property를 수동 복제하면 한쪽만 회전되는 순간
+  // 모든 등록이 중단된다. 이미 양쪽 서버에 존재하는 비공개 루트에서 용도별
+  // 자격증명을 직접 파생해 원문은 보내지 않되 설정 드리프트는 없앤다.
+  var secret = String(props.getProperty("POPBILL_SECRET_KEY") || "").trim();
   if (secret.length < 16) throw new Error("거래ID 전용 인증키 미설정");
   return Utilities.base64EncodeWebSafe(
-    Utilities.computeHmacSha256Signature("village-trade-id-reservation-v1", secret)
+    Utilities.computeHmacSha256Signature("village-trade-id-reservation-v2", secret)
   ).replace(/=+$/g, "");
-}
-
-/** run 전용(internal key 필요): 거래ID 선점 전용 시크릿을 설정·회전한다. */
-function configureTradeIdReservationSecretV1(secret) {
-  var next = String(secret || "").trim();
-  if (!/^[A-Za-z0-9_-]{32,128}$/.test(next)) throw new Error("secret은 32~128자 base64url이어야 합니다");
-  PropertiesService.getScriptProperties().setProperty("TRADE_ID_RESERVATION_SECRET", next);
-  return { success: true, configured: true };
 }
 
 function getTradeIdReservationOperationId_(fields) {
