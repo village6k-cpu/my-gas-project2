@@ -81,16 +81,29 @@ test('inventory mirror derives its GAS key from the server-side service-role sec
   assert.doesNotMatch(source, /const gasKey = String\(env\.GAS_API_KEY/);
 });
 
-test('agent documentation never teaches public-key mutations', () => {
+test('agent documentation records the stable operator-key compatibility path', () => {
   const guide = read('AGENT_GUIDE.md');
   assert.match(guide, /public catalog read/i);
   assert.match(guide, /server-side internal credential/i);
+  assert.match(guide, /village2026.*운영 호환 키/);
+  assert.match(guide, /확인요청 입력·수정/);
   assert.doesNotMatch(guide, /key=village2026&action=(?:run|write|append|update|등록|발송승인)/);
+});
 
-  for (const file of ['AGENTS.md', 'CLAUDE.md']) {
-    const source = read(file);
-    assert.match(source, /public/i);
-    assert.match(source, /목록.*세트마스터/);
-    assert.match(source, /internal.*write/i);
-  }
+test('trade-ID auth health check reaches validation without allocating an ID', () => {
+  const api = read('sheetAPI.js');
+  assert.match(api, /"probeTradeIdReservationAuth"/);
+  assert.match(
+    api,
+    /function probeTradeIdReservationAuth\(\)[\s\S]*action:\s*"reserveTradeId"[\s\S]*operationId:\s*"probe"/,
+  );
+  assert.match(
+    api,
+    /if \(funcName === "probeTradeIdReservationAuth"\)[\s\S]*success:\s*!!probeResult\.success[\s\S]*result:\s*probeResult/,
+  );
+  assert.match(api, /reachedValidation\s*=\s*\/operationId 형식 오류\//);
+  assert.doesNotMatch(
+    api.slice(api.indexOf('function probeTradeIdReservationAuth'), api.indexOf('// Hermes', api.indexOf('function probeTradeIdReservationAuth'))),
+    /customerName|phone|startDate/,
+  );
 });

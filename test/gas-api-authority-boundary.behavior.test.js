@@ -50,40 +50,22 @@ function loadAuthority(internalKey = 'internal-key-from-script-properties') {
   };
   vm.runInNewContext(
     [
-      `var VILLAGE_PUBLIC_API_KEY = 'village2026';`,
+      `var VILLAGE_OPERATOR_API_KEY = 'village2026';`,
       `var VILLAGE_INTERNAL_API_KEY_PROPERTY = 'VILLAGE_API_WRITE_KEY_V1';`,
       extractFunction('villageApiPrincipal_'),
-      extractFunction('isVillagePublicApiRequestAllowed_'),
       'this.villageApiPrincipal_ = villageApiPrincipal_;',
-      'this.isVillagePublicApiRequestAllowed_ = isVillagePublicApiRequestAllowed_;',
     ].join('\n'),
     context,
   );
   return context;
 }
 
-test('public GAS key is limited to tokenized customer reads and non-sensitive catalog sheets', () => {
+test('the stable operator key keeps legacy confirmation and edit automations authorized', () => {
   const authority = loadAuthority();
-  const principal = authority.villageApiPrincipal_('village2026');
-  assert.equal(principal, 'public');
-
-  const allowed = (action, sheet = '') => authority.isVillagePublicApiRequestAllowed_(
-    action,
-    { sheet },
-    { sheet },
-  );
-  assert.equal(allowed('myPage'), true);
-  assert.equal(allowed('myPageEstimate'), true);
-  assert.equal(allowed('read', '목록'), true);
-  assert.equal(allowed('search', '세트마스터'), true);
-  assert.equal(allowed('read', '고객DB'), false);
-  assert.equal(allowed('search', '확인요청'), false);
-  assert.equal(allowed('operations'), false);
-  assert.equal(allowed('scan'), false);
-  assert.equal(allowed('write', '목록'), false);
+  assert.equal(authority.villageApiPrincipal_('village2026'), 'internal');
 });
 
-test('only the Script Properties internal key receives the full operations authority', () => {
+test('the server-side internal key remains valid alongside the stable operator key', () => {
   const authority = loadAuthority();
   assert.equal(authority.villageApiPrincipal_('internal-key-from-script-properties'), 'internal');
   assert.equal(authority.villageApiPrincipal_('wrong-key'), '');

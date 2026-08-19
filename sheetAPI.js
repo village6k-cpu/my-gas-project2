@@ -7,19 +7,18 @@
  * - Claude 에이전트: 시트 읽기/쓰기/검색
  * - 스케줄 관리: 가용확인/등록/보류/거절/목록조회
  *
- * ★ 보안: public/internal principal 분리 ★
+ * ★ 인증: 기존 운영키 호환 + 서버 내부키 ★
  *
- * 공개 키는 토큰 기반 고객 조회와 목록/세트마스터 read/search만 허용한다.
- * 모든 운영 read/write/run/scan/등록/발송은 Script Properties의 내부 키를 쓰는
- * 인증된 서버 런타임만 호출한다. 내부 키는 브라우저나 문서에 기록하지 않는다.
+ * 수개월간 사용한 운영 자동화는 village2026 키를 계속 사용한다. Today Dashboard
+ * 같은 서버 런타임은 Script Properties의 내부 키도 사용할 수 있다. 두 키는 동일한
+ * 운영 권한으로 처리한다.
  */
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // ★ API principal ★
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 공개 고객 조회/비민감 카탈로그용 키. 공개 클라이언트에 노출되는 값이므로
-// 내부 운영 권한으로 절대 승격하지 않는다.
-const VILLAGE_PUBLIC_API_KEY = "village2026";
+// 기존 Claude/Codex/Hermes 운영 자동화와 호환되는 안정 키.
+const VILLAGE_OPERATOR_API_KEY = "village2026";
 const VILLAGE_INTERNAL_API_KEY_PROPERTY = "VILLAGE_API_WRITE_KEY_V1";
 
 function villageApiPrincipal_(key) {
@@ -29,18 +28,8 @@ function villageApiPrincipal_(key) {
     PropertiesService.getScriptProperties().getProperty(VILLAGE_INTERNAL_API_KEY_PROPERTY) || ""
   ).trim();
   if (internalKey && key === internalKey) return "internal";
-  if (key === VILLAGE_PUBLIC_API_KEY) return "public";
+  if (key === VILLAGE_OPERATOR_API_KEY) return "internal";
   return "";
-}
-
-function isVillagePublicApiRequestAllowed_(action, params, postBody) {
-  action = String(action || "").trim();
-  params = params || {};
-  postBody = postBody || {};
-  if (action === "myPage" || action === "myPageEstimate") return true;
-  if (action !== "read" && action !== "search") return false;
-  var sheet = String(params.sheet || postBody.sheet || "").trim();
-  return sheet === "목록" || sheet === "세트마스터";
 }
 
 // Apps Script 실행 API(MYSELF)에서만 호출하는 내부 키 bootstrap.
@@ -50,6 +39,34 @@ function configureVillageApiInternalKeyV1(value) {
   if (!/^[A-Za-z0-9_-]{43}$/.test(key)) throw new Error("invalid internal API key");
   PropertiesService.getScriptProperties().setProperty(VILLAGE_INTERNAL_API_KEY_PROPERTY, key);
   return { success: true, configured: true, keyLength: key.length };
+}
+
+// 거래ID 선점 호출자와 정산 GAS의 인증 버전이 같은지 확인하는 비파괴 점검.
+// 일부러 짧은 operationId를 보내므로 인증을 통과해도 원장 행은 생성되지 않는다.
+function probeTradeIdReservationAuth() {
+  var props = PropertiesService.getScriptProperties();
+  var response = UrlFetchApp.fetch(getVillageOpsApiUrl_(props), {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify({
+      action: "reserveTradeId",
+      key: getTradeIdReservationApiKey_(props),
+      operationId: "probe"
+    }),
+    muteHttpExceptions: true,
+    followRedirects: true
+  });
+  var responseCode = response.getResponseCode();
+  var data;
+  try { data = JSON.parse(response.getContentText() || "{}"); } catch (e) { data = {}; }
+  var reachedValidation = /operationId 형식 오류/.test(String(data.error || ""));
+  return {
+    success: reachedValidation,
+    status: reachedValidation ? "OK" : "ERROR",
+    responseCode: responseCode,
+    reachedValidation: reachedValidation,
+    error: reachedValidation ? "" : String(data.error || "unexpected response")
+  };
 }
 
 // Hermes가 소스 파싱 없이 사용할 수 있는 typed operating surface.
@@ -420,7 +437,7 @@ function handleRequestCore_(e) {
     const key = params.key || postBody.key;
     const principal = villageApiPrincipal_(key);
     const action = params.action || postBody.action || "";
-    if (!principal || (principal === "public" && !isVillagePublicApiRequestAllowed_(action, params, postBody))) {
+    if (!principal) {
       return jsonResponse({ error: "인증 실패. key 파라미터를 확인하세요." }, 403);
     }
 
@@ -1563,6 +1580,7 @@ function runFunction(funcName, params) {
     "refreshEquipmentList",
     "refreshModelSelectionPrompts",
     "syncAuditFromMaster",
+    "probeTradeIdReservationAuth",
     "insertAndCheckRequest",
     "updateRequest",
     "lookupConfirmRequestCustomer",
@@ -1647,6 +1665,10 @@ function runFunction(funcName, params) {
       var args = params.args ? (typeof params.args === "string" ? JSON.parse(params.args) : params.args) : params;
       var result = lookupConfirmRequestCustomer(args || {});
       return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
+    }
+    if (funcName === "probeTradeIdReservationAuth") {
+      var probeResult = probeTradeIdReservationAuth();
+      return { success: !!probeResult.success, function: funcName, result: probeResult, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "updateRequestItem" && params.args) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;

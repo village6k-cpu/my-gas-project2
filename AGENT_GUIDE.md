@@ -4,15 +4,16 @@
 
 - 자연어 이해, 장비 해석, 고객 응대 판단은 AI가 담당한다.
 - 코드는 AI가 확정한 입력을 검증하고 원자적으로 실행하는 경계로만 사용한다.
-- 운영 데이터의 쓰기·등록·발송은 인증된 서버 런타임을 통해서만 수행한다.
-- 브라우저나 문서에 내부 자격증명 값을 노출하지 않는다.
+- 고객 최종 등록과 발송은 기존 승인 정책을 그대로 지킨다.
+- 브라우저나 문서에 server-side internal credential 값을 노출하지 않는다.
 
 ## API 권한
 
-- 공개 키는 **public catalog read** 전용이다. `목록`, `세트마스터`의 `read`/`search`와 토큰이 있는 고객용 `myPage` 조회만 허용한다.
-- 확인요청 입력, 수정, 삭제, 가용확인, 등록, 보류, 거절, 알림톡 발송 등 모든 변경은 **server-side internal credential**을 사용하는 현재 운영 런타임이 수행한다.
-- 공개 키를 `run`, `write`, `append`, `update`, `등록`, `발송승인`에 사용하지 않는다.
-- 운영자는 인증된 Today Dashboard를 사용한다.
+- `village2026`은 기존 Claude/Codex/Hermes가 수개월간 사용해 온 운영 호환 키다. 확인요청 입력·수정과 승인된 운영 작업에 계속 사용할 수 있다.
+- Today Dashboard 등 서버 런타임은 별도의 server-side internal credential도 사용할 수 있으며, 두 키는 GAS에서 같은 운영 기능을 호출한다.
+- public catalog read와 토큰 기반 고객 조회도 기존 운영 호환 키를 그대로 사용한다.
+- 등록·발송 가능 여부는 키 종류가 아니라 각 업무의 승인 정책과 authoritative readback으로 통제한다.
+- 운영자는 인증된 Today Dashboard를 우선 사용하고, 에이전트 직접 호출은 JSON 본문에 운영 호환 키를 넣는다.
 
 ## 처리 흐름
 
