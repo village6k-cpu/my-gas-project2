@@ -89,21 +89,3 @@ test('agent documentation records the stable operator-key compatibility path', (
   assert.match(guide, /확인요청 입력·수정/);
   assert.doesNotMatch(guide, /key=village2026&action=(?:run|write|append|update|등록|발송승인)/);
 });
-
-test('trade-ID auth health check reaches validation without allocating an ID', () => {
-  const api = read('sheetAPI.js');
-  assert.match(api, /"probeTradeIdReservationAuth"/);
-  assert.match(
-    api,
-    /function probeTradeIdReservationAuth\(\)[\s\S]*action:\s*"reserveTradeId"[\s\S]*operationId:\s*"probe"/,
-  );
-  assert.match(
-    api,
-    /if \(funcName === "probeTradeIdReservationAuth"\)[\s\S]*success:\s*!!probeResult\.success[\s\S]*result:\s*probeResult/,
-  );
-  assert.match(api, /reachedValidation\s*=\s*\/operationId 형식 오류\//);
-  assert.doesNotMatch(
-    api.slice(api.indexOf('function probeTradeIdReservationAuth'), api.indexOf('// Hermes', api.indexOf('function probeTradeIdReservationAuth'))),
-    /customerName|phone|startDate/,
-  );
-});

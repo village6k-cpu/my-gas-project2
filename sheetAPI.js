@@ -41,34 +41,6 @@ function configureVillageApiInternalKeyV1(value) {
   return { success: true, configured: true, keyLength: key.length };
 }
 
-// 거래ID 선점 호출자와 정산 GAS의 인증 버전이 같은지 확인하는 비파괴 점검.
-// 일부러 짧은 operationId를 보내므로 인증을 통과해도 원장 행은 생성되지 않는다.
-function probeTradeIdReservationAuth() {
-  var props = PropertiesService.getScriptProperties();
-  var response = UrlFetchApp.fetch(getVillageOpsApiUrl_(props), {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify({
-      action: "reserveTradeId",
-      key: getTradeIdReservationApiKey_(props),
-      operationId: "probe"
-    }),
-    muteHttpExceptions: true,
-    followRedirects: true
-  });
-  var responseCode = response.getResponseCode();
-  var data;
-  try { data = JSON.parse(response.getContentText() || "{}"); } catch (e) { data = {}; }
-  var reachedValidation = /operationId 형식 오류/.test(String(data.error || ""));
-  return {
-    success: reachedValidation,
-    status: reachedValidation ? "OK" : "ERROR",
-    responseCode: responseCode,
-    reachedValidation: reachedValidation,
-    error: reachedValidation ? "" : String(data.error || "unexpected response")
-  };
-}
-
 // Hermes가 소스 파싱 없이 사용할 수 있는 typed operating surface.
 // 확인요청 쓰기 계열은 requestSchema를 함께 광고한다 — 스키마를 API가 알려주지 않으면
 // 계획 모델이 필드명을 추측(customerName 등)하다 실패하는 근본 원인이 된다.
@@ -1580,7 +1552,6 @@ function runFunction(funcName, params) {
     "refreshEquipmentList",
     "refreshModelSelectionPrompts",
     "syncAuditFromMaster",
-    "probeTradeIdReservationAuth",
     "insertAndCheckRequest",
     "updateRequest",
     "lookupConfirmRequestCustomer",
@@ -1629,8 +1600,7 @@ function runFunction(funcName, params) {
     "testRegisterAlimtalk",
     "testGuideAlimtalk",
     "diagGuideAlimtalkSchedule",
-    "markGuideAlimtalkSent",
-    "configureTradeIdReservationSecretV1"
+    "markGuideAlimtalkSent"
   ];
 
   if (!allowedFunctions.includes(funcName)) {
@@ -1666,18 +1636,9 @@ function runFunction(funcName, params) {
       var result = lookupConfirmRequestCustomer(args || {});
       return { success: !result.error, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
-    if (funcName === "probeTradeIdReservationAuth") {
-      var probeResult = probeTradeIdReservationAuth();
-      return { success: !!probeResult.success, function: funcName, result: probeResult, executionTime: (new Date() - startTime) + "ms" };
-    }
     if (funcName === "updateRequestItem" && params.args) {
       var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
       var result = updateRequestItem(args);
-      return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
-    }
-    if (funcName === "configureTradeIdReservationSecretV1" && params.args) {
-      var args = typeof params.args === "string" ? JSON.parse(params.args) : params.args;
-      var result = configureTradeIdReservationSecretV1(typeof args === "string" ? args : (args && args.secret));
       return { success: true, function: funcName, result: result, executionTime: (new Date() - startTime) + "ms" };
     }
     if (funcName === "excludeEquipFromRequest" && params.args) {

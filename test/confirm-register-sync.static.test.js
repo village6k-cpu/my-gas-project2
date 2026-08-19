@@ -100,11 +100,27 @@ const registerBody = backend.slice(
   backend.indexOf('function registerByReqID('),
   backend.indexOf('function processRegistrationQueue_('),
 );
+const registerLockAt = registerBody.indexOf('regLock.tryLock(30000)');
+const tradeIdAllocationAt = registerBody.indexOf('const prefix거래 = dateStr');
 const ledgerEnsureAt = registerBody.indexOf('ensureTradeLedgerRowOnSheet_(ledgerContext.sheet');
+const registerUnlockAt = registerBody.indexOf('regLock.releaseLock()');
+assert(
+  registerLockAt >= 0 &&
+    tradeIdAllocationAt > registerLockAt &&
+    ledgerEnsureAt > tradeIdAllocationAt &&
+    registerUnlockAt > ledgerEnsureAt,
+  'the original ScriptLock must cover trade-ID allocation, contract/schedule writes, and direct ledger confirmation'
+);
+assert(
+  !registerBody.includes('reserveExternalTradeId_(') &&
+    !backend.includes('village-trade-id-reservation-v1'),
+  'registration must not add a synchronous external GAS reservation round trip before local writes'
+);
+const scheduleWriteAt = registerBody.indexOf('schedSheet.getRange(setRow');
 const sharedCompleteAt = registerBody.indexOf('markRequestRegistered_(sheet, allData, reqID, 거래ID');
 assert(
-  ledgerEnsureAt >= 0 && sharedCompleteAt > ledgerEnsureAt,
-  'normal and merge registration must both ensure 거래내역 before the shared completion marker'
+  scheduleWriteAt >= 0 && ledgerEnsureAt > scheduleWriteAt && sharedCompleteAt > ledgerEnsureAt,
+  'registration must write schedules, directly ensure 거래내역, then mark the request complete'
 );
 assert(
   api.includes('"repairMissingTradeLedgerRow"') &&

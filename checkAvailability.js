@@ -7962,85 +7962,6 @@ function getVillageOpsApiKey_(props) {
   ).trim();
 }
 
-function getTradeIdReservationApiKey_(props) {
-  // 전용 시크릿(TRADE_ID_RESERVATION_SECRET)이 서버·호출자 양쪽에 설정되면
-  // 팝빌 시크릿 커플링이 끊긴다. 미설정 시에만 이행기 폴백.
-  var dedicated = String(props.getProperty("TRADE_ID_RESERVATION_SECRET") || "").trim();
-  var secret = dedicated.length >= 32 ? dedicated : String(props.getProperty("POPBILL_SECRET_KEY") || "").trim();
-  if (secret.length < 16) throw new Error("거래ID 전용 인증키 미설정");
-  return Utilities.base64EncodeWebSafe(
-    Utilities.computeHmacSha256Signature("village-trade-id-reservation-v1", secret)
-  ).replace(/=+$/g, "");
-}
-
-/** run 전용(internal key 필요): 거래ID 선점 전용 시크릿을 설정·회전한다. */
-function configureTradeIdReservationSecretV1(secret) {
-  var next = String(secret || "").trim();
-  if (!/^[A-Za-z0-9_-]{32,128}$/.test(next)) throw new Error("secret은 32~128자 base64url이어야 합니다");
-  PropertiesService.getScriptProperties().setProperty("TRADE_ID_RESERVATION_SECRET", next);
-  return { success: true, configured: true };
-}
-
-function getTradeIdReservationOperationId_(fields) {
-  fields = fields || {};
-  var reqID = String(fields.reqID || "").trim();
-  var customerName = String(fields.customerName || "").trim().replace(/\s+/g, " ");
-  var phoneKey = String(fields.phone || "").replace(/\D/g, "");
-  var startDate = String(fields.startDate || "").trim();
-  var identity = [startDate, customerName, phoneKey].join("\u001f");
-  // 다이제스트 키는 인증키와 무관한 고정 목적 문자열이다. 인증키로 파생하면
-  // 시크릿 회전 때마다 기존 영수증이 조회 불가가 된다 (2026-08-19 확인).
-  var digest = Utilities.base64EncodeWebSafe(
-    Utilities.computeHmacSha256Signature(identity, "village-trade-reservation-identity-v1")
-  ).replace(/=+$/g, "").slice(0, 16);
-  if (digest.length !== 16) throw new Error("거래ID 선점 식별자 생성 실패");
-  return "confirm-register:" + reqID + ":" + digest;
-}
-
-/** 외부 거래원장 자체의 ScriptLock 안에서 신규 거래ID와 기준 행을 먼저 선점한다. */
-function reserveExternalTradeId_(fields) {
-  fields = fields || {};
-  var reqID = String(fields.reqID || "").trim();
-  var customerName = String(fields.customerName || "").trim();
-  var phone = String(fields.phone || "").trim();
-  var startDate = String(fields.startDate || "").trim();
-  if (!/^RQ-\d{6}-\d{3}$/.test(reqID)) throw new Error("요청ID 형식 오류: " + reqID);
-  if (!customerName || !phone || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
-    throw new Error("거래ID 선점 필수값 오류");
-  }
-  var props = PropertiesService.getScriptProperties();
-  var apiUrl = getVillageOpsApiUrl_(props);
-  var apiKey = getTradeIdReservationApiKey_(props);
-  var operationId = getTradeIdReservationOperationId_(fields);
-  if (!apiUrl) throw new Error("거래ID 선점 API URL 미설정");
-  var payload = {
-    action: "reserveTradeId",
-    key: apiKey,
-    operationId: operationId,
-    customerName: customerName,
-    phone: phone,
-    startDate: startDate
-  };
-  var response = UrlFetchApp.fetch(apiUrl, {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true,
-    followRedirects: true
-  });
-  var responseCode = response.getResponseCode();
-  var text = response.getContentText();
-  var data;
-  try { data = JSON.parse(text || "{}"); } catch (parseErr) {
-    throw new Error("거래ID 선점 응답 JSON 오류 (HTTP " + responseCode + ")");
-  }
-  if (responseCode < 200 || responseCode >= 300 || !data || data.success !== true ||
-      String(data.status || "").toUpperCase() !== "OK" || !/^\d{6}-\d{3}$/.test(String(data.tradeId || ""))) {
-    throw new Error("거래ID 선점 실패: " + String((data && data.error) || ("HTTP " + responseCode)));
-  }
-  return data;
-}
-
 function getVillageTradeSheet_() {
   var 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
   if (!개고생URL) throw new Error("개고생2_URL 미설정");
@@ -14015,34 +13936,6 @@ function markRequestLedgerPending_(sheet, allData, reqID, tradeID) {
   }
 }
 
-function markRequestLedgerReservationFailed_(sheet, allData, reqID, message) {
-  var first = true;
-  for (var i = 0; i < allData.length; i++) {
-    if (allData[i][0] !== reqID) continue;
-    if (allData[i][14] === "거절" || allData[i][14] === "보류" || allData[i][14] === "제외") continue;
-    var row = i + 2;
-    if (first) {
-      sheet.getRange(row, 15).setValue("❌ 외부 거래원장 연결 실패 — 등록 중단: " + message);
-      sheet.getRange(row, 15).setBackground("#FFC7CE");
-      first = false;
-    } else {
-      sheet.getRange(row, 15).clearContent();
-      sheet.getRange(row, 15).setBackground(null);
-    }
-  }
-}
-
-function markRequestLedgerReserved_(sheet, allData, reqID, tradeID) {
-  for (var i = 0; i < allData.length; i++) {
-    if (allData[i][0] !== reqID) continue;
-    if (allData[i][14] === "거절" || allData[i][14] === "보류" || allData[i][14] === "제외") continue;
-    var row = i + 2;
-    sheet.getRange(row, 15).setValue("⏳ 외부 거래원장 선점 완료");
-    sheet.getRange(row, 16).setValue(tradeID);
-    sheet.getRange(row, 15, 1, 2).setBackground("#E8F0FE");
-  }
-}
-
 function finalizeQueuedRequestFromExistingTrade_(sheet, allData, reqID, tradeID) {
   if (!tradeID) return false;
   try {
@@ -14798,46 +14691,62 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
       allData, reqID, mergeTargetTID, mergeTargetScheduleRows
     );
 
-  // ── 거래ID/외부 원장 행을 로컬 쓰기보다 먼저 선점 ──
-  // 신규 번호 판단은 개고생2.0 자체의 ScriptLock 안에서만 한다. 조회 실패를 로컬 번호로
-  // 대체하면 중복 ID와 반쪽 등록이 생기므로, 어떤 오류든 계약·스케줄 쓰기 전에 중단한다.
+  // ── 거래ID 생성: YYMMDD-NNN ──
+  // registerByReqID 전체의 ScriptLock 안에서 양쪽 시트 최대번호를 읽고 즉시 기록하므로
+  // 같은 빌리지 등록 경로끼리는 동시에 같은 번호를 발급할 수 없다.
+  const now = new Date();
+  const dateStr = Utilities.formatDate(now, "Asia/Seoul", "yyMMdd");
+  const prefix거래 = dateStr;
   const contractLastRow = contractSheet.getLastRow();
-  var 거래ID;
-  var ledgerContext;
-  var ledgerWrite;
+  let maxNum = 0;
+
+  if (contractLastRow >= 2) {
+    const ids = contractSheet.getRange(2, 1, contractLastRow - 1, 1).getValues().flat();
+    ids.forEach(id => {
+      if (id && id.toString().startsWith(prefix거래 + "-")) {
+        const parts = id.toString().split("-");
+        const num = parseInt(parts[1]);
+        if (num > maxNum) maxNum = num;
+      }
+    });
+  }
+
+  // 개고생2.0 거래내역도 같은 스프레드시트 권한으로 직접 확인한다.
   try {
-    ledgerContext = openTradeLedgerContext_();
-    if (mergeMode && mergeTargetTID) {
-      거래ID = mergeTargetTID;
-      ledgerWrite = ensureTradeLedgerRowOnSheet_(ledgerContext.sheet, {
-        tradeId: 거래ID,
-        startDate: 반출일str,
-        customerName: 예약자명,
-        phone: 연락처
-      }, { dryRun: true, mustExist: true });
-    } else {
-      var reservation = reserveExternalTradeId_({
-        reqID: reqID,
-        startDate: 반출일str,
-        customerName: 예약자명,
-        phone: 연락처
-      });
-      거래ID = String(reservation.tradeId || "").trim();
-      ledgerWrite = ensureTradeLedgerRowOnSheet_(ledgerContext.sheet, {
-        tradeId: 거래ID,
-        startDate: 반출일str,
-        customerName: 예약자명,
-        phone: 연락처
-      }, { dryRun: true, mustExist: true });
-      if (Number(reservation.row) && Number(reservation.row) !== Number(ledgerWrite.row)) {
-        throw new Error("거래ID 선점 행 읽기검증 실패: " + 거래ID);
+    const 개고생URL = PropertiesService.getScriptProperties().getProperty("개고생2_URL");
+    if (개고생URL) {
+      const 개고생SS = SpreadsheetApp.openByUrl(개고생URL);
+      const 거래시트 = 개고생SS.getSheetByName("거래내역");
+      if (거래시트) {
+        const _dCol = 거래시트.getRange(2, 5, Math.max(1, 거래시트.getLastRow() - 1), 1).getValues();
+        let 거래lastRow = 1;
+        for (let ri = _dCol.length - 1; ri >= 0; ri--) {
+          if (_dCol[ri][0] !== "" && _dCol[ri][0] != null) {
+            거래lastRow = ri + 2;
+            break;
+          }
+        }
+        if (거래lastRow >= 2) {
+          const 거래ids = 거래시트.getRange(2, 5, 거래lastRow - 1, 1).getValues().flat();
+          거래ids.forEach(id => {
+            if (id && id.toString().startsWith(prefix거래 + "-")) {
+              const parts = id.toString().split("-");
+              const num = parseInt(parts[1]);
+              if (num > maxNum) maxNum = num;
+            }
+          });
+        }
       }
     }
-    markRequestLedgerReserved_(sheet, allData, reqID, 거래ID);
-  } catch (ledgerReservationErr) {
-    markRequestLedgerReservationFailed_(sheet, allData, reqID, ledgerReservationErr.message);
-    Logger.log("거래ID 선점 실패(로컬 쓰기 0건): " + reqID + " / " + ledgerReservationErr.message);
-    return;
+  } catch (err) {
+    // 연결 시트 접근 실패 시 기존처럼 계약마스터 번호를 사용한다.
+  }
+
+  var 거래ID;
+  if (mergeMode && mergeTargetTID) {
+    거래ID = mergeTargetTID;
+  } else {
+    거래ID = `${prefix거래}-${String(maxNum + 1).padStart(3, "0")}`;
   }
 
   // ── 회차 계산 (24시간=1회차, 3시간 이내 초과는 같은 회차) ──
@@ -14959,8 +14868,25 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
   // ── 스케줄상세 가독성 포맷팅 ──
   formatScheduleSheet(schedSheet);
 
-  // ── 개고생2.0 거래내역은 로컬 쓰기 전에 이미 선점·읽기검증 완료 ──
-  sheet.getRange(triggerRow, 15).setValue("✅ 개고생2.0 확인완료 (행" + ledgerWrite.row + ")");
+  // ── 개고생2.0 거래내역 보장 ──
+  // 외부 웹앱 왕복 없이 연결된 시트에 직접 기록하고 읽기검증한다.
+  sheet.getRange(triggerRow, 15).setValue("⏳ 개고생2.0 입력 중...");
+  var ledgerContext;
+  try {
+    ledgerContext = openTradeLedgerContext_();
+    var ledgerWrite = ensureTradeLedgerRowOnSheet_(ledgerContext.sheet, {
+      tradeId: 거래ID,
+      startDate: 반출일str,
+      customerName: 예약자명,
+      phone: 연락처
+    }, { dryRun: false });
+    sheet.getRange(triggerRow, 15).setValue("✅ 개고생2.0 확인완료 (행" + ledgerWrite.row + ")");
+  } catch (ledgerErr) {
+    markRequestLedgerPending_(sheet, allData, reqID, 거래ID);
+    enqueuePendingRegister_(reqID, 30000);
+    Logger.log("거래내역 저장 실패(등록대기 유지): " + reqID + " / " + ledgerErr.message);
+    return;
+  }
 
     // ── 개고생2.0 고객DB에 고객/할인유형 반영 (신규·합침 공통) ──
     // 합침 등록에서도 카톡 확정 할인·수정된 연락처가 고객DB에 남아야 다음 예약이 정확하다.
