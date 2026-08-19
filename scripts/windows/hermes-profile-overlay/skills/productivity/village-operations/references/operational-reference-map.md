@@ -32,12 +32,17 @@ explicit migration seed even when they are not repeated in the compact root.
 - `registered-quote-personal-business-loyal-discount.md`
 - `registered-quote-remove-standalone-items.md`
 - `registered-quote-schedule-item-correction.md`
+- `registered-quote-zero-price-and-kakao-diff.md`
 - `registered-quote-stable-link-cost-control.md`
 - `registered-trade-correction-send-invoice.md`
 - `registered-trade-date-change-remove-item.md`
+- `registered-trade-camera-set-swap-merge.md`
+- `burano-direct-registration-pitfalls.md`
 - `approved-manual-quote-send-verification.md`
 - `corrected-manual-quote-resend-fallback.md`
 - `quote-preview-urlfetch-quota-drive-fallback.md`
+- `village-batch-quote-kakao-send.md`
+- `windows-kakao-combined-quote-send.md`
 
 ## Documents, tax, payment, and settlement
 
@@ -48,6 +53,7 @@ explicit migration seed even when they are not repeated in the compact root.
 - `document-date-mismatch-day-of-month-fallback.md`
 - `document-channel-misroute-cleanup.md`
 - `kakao-standard-document-attachments.md`
+- `kakao-quote-pdf-send-pitfalls.md`
 - `tax-invoice-info-lookup.md`
 - `tax-invoice-issuance-workflow.md`
 - `direct-tax-invoice-issue-route.md`
