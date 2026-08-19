@@ -11,5 +11,12 @@ export function deriveVillageGasInternalKey(serviceRoleSecret) {
 }
 
 export function getVillageGasInternalKey(environment = process.env) {
+  const explicit = String(environment.VILLAGE_GAS_INTERNAL_KEY || "").trim();
+  if (explicit) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(explicit)) {
+      throw new Error("Explicit internal GAS key is invalid");
+    }
+    return explicit;
+  }
   return deriveVillageGasInternalKey(environment.SUPABASE_SERVICE_ROLE_KEY);
 }

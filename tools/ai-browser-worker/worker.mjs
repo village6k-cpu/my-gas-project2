@@ -4113,6 +4113,17 @@ export function deriveVillageGasInternalKey(serviceRoleSecret) {
     .digest('base64url');
 }
 
+export function resolveVillageGasInternalKey(environment = process.env) {
+  const explicit = String(environment.VILLAGE_GAS_INTERNAL_KEY || '').trim();
+  if (explicit) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(explicit)) {
+      throw new Error('Explicit internal GAS key is invalid');
+    }
+    return explicit;
+  }
+  return deriveVillageGasInternalKey(environment.SUPABASE_SERVICE_ROLE_KEY);
+}
+
 export function requireConfig() {
   if (process.env.HERMES_HOME) {
     loadEnvFile(path.resolve(process.env.HERMES_HOME, '.env'), HERMES_RAG_ENV_KEYS);
@@ -4128,7 +4139,7 @@ export function requireConfig() {
     serviceRoleKey,
     table: process.env.SUPABASE_TABLE || 'ai_processing_events',
     gasApiUrl: process.env.GAS_API_URL || DEFAULT_GAS_API_URL,
-    sheetApiKey: deriveVillageGasInternalKey(serviceRoleKey),
+    sheetApiKey: resolveVillageGasInternalKey(process.env),
     hermesCommand: resolveHermesCommand(process.env.HERMES_WORKER_COMMAND || 'hermes'),
     hermesPythonModule: process.env.HERMES_WORKER_COMMAND_MODE === 'python_module',
     hermesProfile: process.env.HERMES_WORKER_PROFILE || '',
