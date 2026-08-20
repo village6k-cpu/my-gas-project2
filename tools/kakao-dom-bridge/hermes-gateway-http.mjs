@@ -126,7 +126,7 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
         if (receipt.lease_id && receipt.lease_id !== leaseId) throw requestError(409, 'lease_id_mismatch');
         const fencedReceipt = { ...receipt, lease_id: leaseId };
         await channel.recordToolReceipt(fencedReceipt);
-        sendJson(res, 200, { receipt: fencedReceipt });
+        sendJson(res, 200, fencedReceipt);
         return true;
       }
 

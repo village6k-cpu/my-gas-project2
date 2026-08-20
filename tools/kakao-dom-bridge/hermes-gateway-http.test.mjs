@@ -134,7 +134,10 @@ test('Gateway HTTP forwards the claim lease id into confirmation execution and r
     assert.equal(response.status, 200);
     assert.equal(confirmationCalls[0].lease_id, leaseId);
     assert.equal(channel.calls.receipt[0].lease_id, leaseId);
-    assert.equal((await response.json()).receipt.lease_id, leaseId);
+    const receipt = await response.json();
+    assert.equal(receipt.schema, 'village-confirmation-receipt/v1');
+    assert.equal(receipt.receipt_id, 'receipt-1');
+    assert.equal(receipt.lease_id, leaseId);
   } finally {
     await app.close();
   }
