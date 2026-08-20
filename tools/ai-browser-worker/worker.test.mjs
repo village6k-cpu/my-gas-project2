@@ -932,13 +932,14 @@ function completePostActionDecision(overrides = {}) {
       due_hint: 'now'
     }],
     suggested_reply_draft: '확인해보니 요청하신 일정에 장비 대여가 가능합니다. 예약 진행해드릴까요?',
+    owner_review_required: true,
     reply_decision: {
-      replyMode: 'auto_send',
+      replyMode: 'draft_only',
       text: '확인해보니 요청하신 일정에 장비 대여가 가능합니다. 예약 진행해드릴까요?',
       confidence: 'high',
       reason: '실제 확인요청 결과가 가용임',
       shouldCreateTask: true,
-      safetyClass: 'authoritative_availability_answer',
+      safetyClass: 'no_send',
       grounding: 'authoritative_sheet',
       requiresRag: false,
       attachmentKeys: [],
@@ -3663,7 +3664,9 @@ test('buildHermesPostActionPrompt delegates result interpretation and reply pros
   assert.match(prompt, /소니 FX3 바디세트/);
   assert.match(prompt, /outer code.*must not author customer-facing prose/is);
   assert.match(prompt, /"should_write_to_sheet": false/);
-  assert.match(prompt, /authoritative_availability_answer/);
+  assert.match(prompt, /replyMode="draft_only"/);
+  assert.match(prompt, /owner_review_required.*true/is);
+  assert.doesNotMatch(prompt, /may choose replyMode="auto_send"/);
   assert.match(prompt, /FINAL_JSON/);
 });
 
@@ -3715,47 +3718,33 @@ test('validateAiPostActionDecisionContract prevents code-side or unsafe availabi
   assert.equal(rewriteValidation.valid, false);
   assert.ok(rewriteValidation.errors.some((error) => error.includes('should_write_to_sheet must be false')));
 
-  const unavailableAutoSend = validateAiPostActionDecisionContract(
-    completePostActionDecision({
-      reply_decision: {
-        text: '요청하신 일정에는 해당 장비 가용 수량이 없습니다. 대체 장비나 다른 일정을 확인해드릴까요?'
-      }
-    }),
-    { status: 'unavailable', payload: { status: 'unavailable', results: [{ result: '가용0' }] } }
-  );
-  assert.equal(unavailableAutoSend.valid, true);
+  for (const status of ['available', 'warning', 'unavailable', 'unknown']) {
+    const forcedAutoSend = validateAiPostActionDecisionContract(
+      completePostActionDecision({
+        owner_review_required: false,
+        reply_decision: {
+          replyMode: 'auto_send',
+          text: status === 'unknown'
+            ? '요청 접수했습니다. 재고 확인 후 바로 안내드릴게요.'
+            : '확인 결과를 안내드립니다.',
+          safetyClass: status === 'unknown' ? 'simple_ack' : 'authoritative_availability_answer'
+        }
+      }),
+      { status, payload: { status, results: [] } }
+    );
+    assert.equal(forcedAutoSend.valid, false, `${status} schedule result must require owner review`);
+    assert.ok(forcedAutoSend.errors.some((error) => error.includes('owner review')));
+  }
 
-  const unknownAcknowledgement = validateAiPostActionDecisionContract(
+  const missingScheduleTask = validateAiPostActionDecisionContract(
     completePostActionDecision({
-      reply_decision: {
-        text: '요청 접수했습니다. 재고 확인 후 바로 안내드릴게요.',
-        safetyClass: 'simple_ack',
-        grounding: 'authoritative_sheet'
-      }
+      follow_up_items: [],
+      reply_decision: { shouldCreateTask: false }
     }),
-    { status: 'unknown', payload: { status: 'unknown', results: [] } }
-  );
-  assert.equal(unknownAcknowledgement.valid, true);
-
-  const falseUnknownClaim = validateAiPostActionDecisionContract(
-    completePostActionDecision({
-      reply_decision: {
-        text: '요청하신 장비 가능합니다.',
-        safetyClass: 'simple_ack',
-        grounding: 'authoritative_sheet'
-      }
-    }),
-    { status: 'unknown', payload: { status: 'unknown', results: [] } }
-  );
-  assert.equal(falseUnknownClaim.valid, false);
-  assert.ok(falseUnknownClaim.errors.some((error) => error.includes('simple acknowledgement')));
-
-  const claimsConfirmed = validateAiPostActionDecisionContract(
-    completePostActionDecision({ reply_decision: { text: '예약 확정되었습니다.' } }),
     availableReport
   );
-  assert.equal(claimsConfirmed.valid, false);
-  assert.ok(claimsConfirmed.errors.some((error) => error.includes('booking confirmation')));
+  assert.equal(missingScheduleTask.valid, false);
+  assert.ok(missingScheduleTask.errors.some((error) => error.includes('schedule follow-up')));
 });
 
 test('runHermesPostActionDecision returns a typed AI reconciliation over authoritative sheet facts', async () => {
@@ -3781,7 +3770,8 @@ test('runHermesPostActionDecision returns a typed AI reconciliation over authori
   assert.equal(result.attempts, 1);
   assert.equal(result.decision.post_action_reconciled, true);
   assert.equal(result.decision.authoritative_sheet_result.status, 'available');
-  assert.equal(result.decision.reply_decision.safetyClass, 'authoritative_availability_answer');
+  assert.equal(result.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(result.decision.owner_review_required, true);
   assert.match(prompts[0], /RQ-260724-001/);
 });
 
@@ -6185,19 +6175,22 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
     post_action_reconciled: true,
     authoritative_sheet_result: { status: 'available', reqID: 'RQ-260724-001' }
   };
-  assert.equal(canAutoSendCustomerAnswer(authoritativeAvailability, { autoSendEnabled: true }).allowed, true);
-  assert.equal(canAutoSendCustomerAnswer({
-    ...authoritativeAvailability,
-    authoritative_sheet_result: { status: 'unavailable', reqID: 'RQ-260724-001' },
-    reply_decision: {
-      ...authoritativeAvailability.reply_decision,
-      text: '요청하신 일정에는 해당 장비 가용 수량이 없습니다. 다른 일정을 확인해드릴까요?'
-    }
-  }, { autoSendEnabled: true }).allowed, true);
-  assert.equal(canAutoSendCustomerAnswer({
-    ...authoritativeAvailability,
-    reply_decision: { ...authoritativeAvailability.reply_decision, text: '예약 확정되었습니다.' }
-  }, { autoSendEnabled: true }).reason, 'authoritative_availability_contains_unverified_commitment');
+  for (const status of ['available', 'warning', 'unavailable', 'unknown']) {
+    const forcedAutoSend = {
+      ...authoritativeAvailability,
+      owner_review_required: false,
+      authoritative_sheet_result: { status, reqID: 'RQ-260724-001' },
+      reply_decision: {
+        ...authoritativeAvailability.reply_decision,
+        replyMode: 'auto_send',
+        safetyClass: status === 'unknown' ? 'simple_ack' : 'authoritative_availability_answer'
+      }
+    };
+    assert.deepEqual(canAutoSendCustomerAnswer(forcedAutoSend, { autoSendEnabled: true }), {
+      allowed: false,
+      reason: 'schedule_result_requires_owner_review'
+    });
+  }
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, reply_decision: { ...baseDecision.reply_decision, replyMode: 'draft_only' } }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, confidence: 'medium', reply_decision: { ...baseDecision.reply_decision, confidence: 'medium' } }, { autoSendEnabled: true }).allowed, false);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, suggested_reply_draft: '예약 확정됐습니다', reply_decision: { ...baseDecision.reply_decision, text: '예약 확정됐습니다' } }, { autoSendEnabled: true }).allowed, false);
@@ -6241,6 +6234,49 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   });
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'faq', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).allowed, true);
   assert.equal(canAutoSendCustomerAnswer({ ...baseDecision, classification: 'price', kill_switch_observed: 'price_paused' }, { autoSendEnabled: true }).reason, 'kill_switch_price_paused');
+});
+
+test('screenshot-like schedule warning is owner-only while an ordinary FAQ remains auto-sendable', () => {
+  const scheduleWarning = {
+    ...completePostActionDecision(),
+    post_action_reconciled: true,
+    authoritative_sheet_result: {
+      status: 'warning',
+      reqID: 'RQ-260820-009',
+      results: [{ result: '⚠️ 겹침(가용0)', detail: '백상원 반납8/22 11:40(40분겹침)' }]
+    },
+    owner_review_required: false,
+    reply_decision: {
+      ...completePostActionDecision().reply_decision,
+      replyMode: 'auto_send',
+      safetyClass: 'authoritative_availability_answer',
+      text: '8/22 11:00~23:00 기준으로 다시 확인했습니다. 일부 구성은 일정이 겹칩니다.'
+    }
+  };
+  assert.deepEqual(canAutoSendCustomerAnswer(scheduleWarning, { autoSendEnabled: true }), {
+    allowed: false,
+    reason: 'schedule_result_requires_owner_review'
+  });
+
+  const ordinaryFaq = {
+    classification: 'faq',
+    confidence: 'high',
+    kill_switch_observed: 'active',
+    reply_decision: {
+      replyMode: 'auto_send',
+      confidence: 'high',
+      text: '네, 신분증은 방문하실 때 지참해주시면 됩니다.',
+      safetyClass: 'simple_ack',
+      grounding: 'visible_conversation',
+      requiresRag: false
+    },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    }
+  };
+  assert.equal(canAutoSendCustomerAnswer(ordinaryFaq, { autoSendEnabled: true }).allowed, true);
 });
 
 function equipmentIncidentDecision(overrides = {}) {
