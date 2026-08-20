@@ -207,19 +207,21 @@ test('buildKakaoGatewayTurn builds a bounded credential-safe native Hermes event
     capture: { snapshot }
   });
 
-  assert.equal(turn.schema, 'village-kakao-gateway-event/v1');
-  assert.equal(turn.job_id, 'gateway-job-1');
-  assert.equal(turn.room_key, 'chat:gateway-1');
-  assert.equal(turn.room_revision, 7);
-  assert.equal(turn.detected_at, '2026-08-21T01:02:03.000Z');
-  assert.match(turn.prompt, /FINAL_JSON/);
-  assert.match(turn.prompt, /AI-first Kakao rental-shop worker task/);
-  assert.match(turn.prompt, /village_confirmation_request/);
-  assert.equal(turn.snapshot, snapshot);
-  assert.equal(turn.lookup_evidence.kill_switch.status, 'active');
-  assert.deepEqual(turn.raw.evidence.lookup.kill_switch, { status: 'active', error: null });
-  assert.ok(Buffer.byteLength(JSON.stringify(turn.raw)) <= 32 * 1024);
-  assert.equal(JSON.stringify(turn).includes('internal-sheet-secret'), false);
+  assert.deepEqual(Object.keys(turn).sort(), ['event', 'internal']);
+  assert.deepEqual(Object.keys(turn.event).sort(), ['detected_at', 'job_id', 'prompt', 'raw', 'room_key', 'room_revision', 'schema']);
+  assert.equal(turn.event.schema, 'village-kakao-gateway-event/v1');
+  assert.equal(turn.event.job_id, 'gateway-job-1');
+  assert.equal(turn.event.room_key, 'chat:gateway-1');
+  assert.equal(turn.event.room_revision, 7);
+  assert.equal(turn.event.detected_at, '2026-08-21T01:02:03.000Z');
+  assert.match(turn.event.prompt, /FINAL_JSON/);
+  assert.match(turn.event.prompt, /AI-first Kakao rental-shop worker task/);
+  assert.match(turn.event.prompt, /village_confirmation_request/);
+  assert.equal(turn.internal.snapshot, snapshot);
+  assert.equal(turn.internal.lookupContext.kill_switch.status, 'active');
+  assert.deepEqual(turn.event.raw.evidence.lookup.kill_switch, { status: 'active', error: null });
+  assert.ok(Buffer.byteLength(JSON.stringify(turn.event), 'utf8') <= 1_048_576);
+  assert.equal(JSON.stringify(turn.event).includes('internal-sheet-secret'), false);
 });
 
 test('buildKakaoGatewayTurn never invokes Hermes, mutation, delivery, follow-up, or Slack dependencies', async () => {
@@ -255,7 +257,107 @@ test('buildKakaoGatewayTurn never invokes Hermes, mutation, delivery, follow-up,
     dependencies
   });
 
-  assert.equal(turn.lookup_evidence.kill_switch.status, 'paused');
+  assert.equal(turn.internal.lookupContext.kill_switch.status, 'paused');
+});
+
+test('buildKakaoGatewayTurn keeps adversarial internal lookup evidence out of the bounded plugin event', async () => {
+  const job = {
+    jobId: 'gateway-job-large-internal', roomKey: 'chat:gateway-large', roomRevision: 4,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '정책 문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const oversizedSecret = `internal-lookup-secret-${'x'.repeat(1_100_000)}`;
+  const lookupContext = {
+    generated_at: '2026-08-21T01:02:05.000Z',
+    job_preview_text: oversizedSecret,
+    kill_switch: { status: 'active', error: null },
+    lookup_policy: { mode: 'read_only', allowed_methods: ['GET'], forbidden_actions: ['write'] },
+    lookup_tool: { command: 'read-only', stdin_schema: { queries: [{ domain: 'schedule', query: 'term', column: 'A' }] }, domains: ['schedule'], max_queries: 1, behavior: 'read only' },
+    lookup_urls: { private_template: oversizedSecret },
+    note: oversizedSecret
+  };
+  const turn = await workerModule.buildKakaoGatewayTurn({
+    config: { bridgeUrl: '', jobLogPath: '' },
+    job,
+    capture: { snapshot },
+    dependencies: { buildReadOnlyLookupContext: async () => lookupContext }
+  });
+
+  assert.equal(turn.internal.lookupContext, lookupContext);
+  assert.equal(turn.internal.lookupContext.lookup_urls.private_template, oversizedSecret);
+  assert.ok(Buffer.byteLength(JSON.stringify(turn.event), 'utf8') <= 1_048_576);
+  assert.equal(JSON.stringify(turn.event).includes('internal-lookup-secret-'), false);
+});
+
+test('buildKakaoGatewayTurn rejects job coordinates that do not exactly match the immutable snapshot before reads', async () => {
+  const snapshotJob = {
+    jobId: 'snapshot-job', roomKey: 'chat:snapshot', roomRevision: 5,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job: snapshotJob, capturedAt: '2026-08-21T01:02:04.000Z' });
+  for (const [job, reason] of [
+    [{ ...snapshotJob, jobId: 'other-job' }, 'job_id'],
+    [{ ...snapshotJob, roomKey: 'chat:other' }, 'room_key'],
+    [{ ...snapshotJob, roomRevision: 6 }, 'room_revision']
+  ]) {
+    let reads = 0;
+    await assert.rejects(
+      workerModule.buildKakaoGatewayTurn({
+        config: { bridgeUrl: '', jobLogPath: '' },
+        job,
+        capture: { snapshot },
+        dependencies: { buildReadOnlyLookupContext: async () => { reads += 1; return {}; } }
+      }),
+      new RegExp(`${reason}.*snapshot`, 'i')
+    );
+    assert.equal(reads, 0);
+  }
+});
+
+test('buildKakaoGatewayTurn fails closed when prompt evidence would exceed the plugin body cap', async () => {
+  const job = {
+    jobId: 'gateway-job-over-cap', roomKey: 'chat:gateway-over-cap', roomRevision: 8,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  await assert.rejects(
+    workerModule.buildKakaoGatewayTurn({
+      config: { bridgeUrl: '', jobLogPath: '' },
+      job,
+      capture: { snapshot },
+      dependencies: {
+        buildReadOnlyLookupContext: async () => ({ kill_switch: { status: 'active', error: null } }),
+        buildHermesPrompt: () => `FINAL_JSON ${'x'.repeat(1_048_576)}`
+      }
+    }),
+    /exceeds 1048576 byte limit/i
+  );
+});
+
+test('Gateway extraction and legacy dry-run each perform one freshness check while legacy keeps the full lookup context', async () => {
+  const job = {
+    jobId: 'gateway-job-freshness', roomKey: 'chat:gateway-freshness', roomRevision: 6,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('/worker/freshness')) return { ok: true, status: 200, text: async () => JSON.stringify({ current: true }) };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [['active']] }) };
+  };
+  const config = {
+    bridgeUrl: 'http://127.0.0.1:8787', jobLogPath: '', gasApiUrl: 'https://script.example/exec',
+    sheetApiKey: 'legacy-internal-key', fetchImpl
+  };
+
+  await workerModule.buildKakaoGatewayTurn({ config, job, capture: { snapshot } });
+  assert.equal(calls.filter((url) => url.includes('/worker/freshness')).length, 1);
+
+  calls.length = 0;
+  const prepared = await workerModule.prepareKakaoDecisionFromSnapshot({ config, job, capture: { snapshot }, dryRun: true });
+  assert.equal(calls.filter((url) => url.includes('/worker/freshness')).length, 1);
+  assert.match(prepared.lookupContext.lookup_urls.kill_switch_read, /legacy-internal-key/);
 });
 
 test('prepareKakaoDecisionFromSnapshot honors an already-aborted bridge deadline', async () => {

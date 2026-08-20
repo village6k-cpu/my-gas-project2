@@ -8242,6 +8242,20 @@ function buildBoundedGatewayTerminalAck(value) {
   };
 }
 
+const MAX_KAKAO_GATEWAY_EVENT_BYTES = 1_048_576;
+
+function assertBoundedGatewayEvent(event) {
+  let serialized;
+  try {
+    serialized = JSON.stringify(event);
+  } catch {
+    throw new Error('Gateway event must be JSON serializable');
+  }
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_KAKAO_GATEWAY_EVENT_BYTES) {
+    throw new Error(`Gateway event exceeds ${MAX_KAKAO_GATEWAY_EVENT_BYTES} byte limit`);
+  }
+}
+
 function buildBoundedGatewayRaw({ job = {}, snapshot, lookupEvidence, ragContext, brainContext, recentBotSends, corrections, terminalAcknowledgement }) {
   const compactJob = buildCompactJobForPrompt(job);
   return {
@@ -8308,19 +8322,23 @@ function buildBoundedGatewayRaw({ job = {}, snapshot, lookupEvidence, ragContext
   };
 }
 
-export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, dependencies = {}, signal = null } = {}) {
+export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, dependencies = {}, signal = null, freshnessGuard: suppliedFreshnessGuard = null } = {}) {
   const snapshot = capture?.snapshot;
   if (!snapshot || snapshot.schema !== 'kakao-room-snapshot/v1') throw new Error('immutable Kakao room snapshot is required');
-  const jobId = text(job.jobId || job.id || snapshot.jobId).trim();
-  const roomKey = text(job.roomKey || job.room_key || snapshot.roomKey).trim();
-  const roomRevision = Number(job.roomRevision || job.room_revision || snapshot.roomRevision || 0);
+  const jobId = text(job.jobId || job.id).trim();
+  const roomKey = text(job.roomKey || job.room_key).trim();
+  const roomRevision = Number(job.roomRevision ?? job.room_revision);
   const detectedAt = text(job.detectedAt || job.detected_at || job.lastEventAt || snapshot.capturedAt).trim();
   if (!jobId) throw new Error('Gateway turn job_id is required');
   if (!roomKey) throw new Error('Gateway turn room_key is required');
   if (!Number.isInteger(roomRevision) || roomRevision <= 0) throw new Error('Gateway turn room_revision must be positive');
   if (!isGatewayIsoTimestamp(detectedAt)) throw new Error('Gateway turn detected_at must be an ISO timestamp');
+  if (jobId !== text(snapshot.jobId).trim()) throw new Error('Gateway turn job_id must exactly match immutable snapshot');
+  if (roomKey !== text(snapshot.roomKey).trim()) throw new Error('Gateway turn room_key must exactly match immutable snapshot');
+  if (roomRevision !== Number(snapshot.roomRevision)) throw new Error('Gateway turn room_revision must exactly match immutable snapshot');
 
-  const freshnessGuard = createJobFreshnessGuard({
+  const ownsFreshnessGuard = !suppliedFreshnessGuard;
+  const freshnessGuard = suppliedFreshnessGuard || createJobFreshnessGuard({
     bridgeUrl: config.bridgeUrl,
     roomKey,
     roomRevision,
@@ -8342,7 +8360,7 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
     freshnessGuard.throwIfSuperseded();
     const recentBotSends = (dependencies.buildRecentBotSendsPromptText || buildRecentBotSendsPromptText)(config, job);
     const corrections = (dependencies.buildCorrectionsPromptText || buildCorrectionsPromptText)(config);
-    const prompt = (dependencies.buildHermesPrompt || buildHermesPrompt)(job, {
+    const prompt = text((dependencies.buildHermesPrompt || buildHermesPrompt)(job, {
       gasApiUrl: config.gasApiUrl,
       lookupContext,
       navigationContext: snapshot.navigation,
@@ -8352,8 +8370,8 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
       corrections,
       terminalAckHint: capture?.terminalAcknowledgement,
       gatewayConfirmationToolAvailable: dependencies.gatewayConfirmationToolAvailable !== false
-    });
-    if (!text(prompt).trim()) throw new Error('Gateway turn prompt is required');
+    })).trim();
+    if (!prompt) throw new Error('Gateway turn prompt is required');
     const lookupEvidence = buildGatewayLookupEvidence(lookupContext);
     const raw = buildBoundedGatewayRaw({
       job,
@@ -8365,24 +8383,30 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
       corrections,
       terminalAcknowledgement: capture?.terminalAcknowledgement || null
     });
-    return {
+    const event = {
       schema: 'village-kakao-gateway-event/v1',
       job_id: jobId,
       room_key: roomKey,
       room_revision: roomRevision,
       prompt,
       detected_at: detectedAt,
-      raw,
-      snapshot,
-      lookup_evidence: lookupEvidence,
-      rag_context: ragContext,
-      brain_context: brainContext,
-      recent_bot_sends: recentBotSends,
-      corrections,
-      terminal_ack_hint: buildBoundedGatewayTerminalAck(capture?.terminalAcknowledgement)
+      raw
+    };
+    assertBoundedGatewayEvent(event);
+    return {
+      event,
+      internal: {
+        snapshot,
+        lookupContext,
+        ragContext,
+        brainContext,
+        recentBotSends,
+        corrections,
+        terminalAcknowledgement: capture?.terminalAcknowledgement || null
+      }
     };
   } finally {
-    freshnessGuard.stop();
+    if (ownsFreshnessGuard) freshnessGuard.stop();
   }
 }
 
@@ -8398,21 +8422,6 @@ export async function prepareKakaoDecisionFromSnapshot({
   const snapshot = capture?.snapshot;
   if (!snapshot || snapshot.schema !== 'kakao-room-snapshot/v1') throw new Error('immutable Kakao room snapshot is required');
   const timings = createWorkerTimingRecorder();
-  let turn;
-  try {
-    turn = await buildKakaoGatewayTurn({
-      config,
-      job,
-      capture,
-      signal,
-      dependencies: { gatewayConfirmationToolAvailable: false }
-    });
-  } catch (error) {
-    if (/superseded_by_newer_room_event/.test(String(error?.message || error || ''))) {
-      return { status: 'superseded_by_newer_room_event', snapshot, superseded: true, timings: timings.snapshot() };
-    }
-    throw error;
-  }
   // 종결 인사 여부는 코드가 아니라 AI가 판단한다. DOM 휴리스틱 분류는 조기 반환
   // 대신 프롬프트 힌트(TERMINAL_ACK_HINT)로만 전달된다 (2026-08-19 AI-first 재설계).
   const freshnessGuard = createJobFreshnessGuard({
@@ -8427,14 +8436,17 @@ export async function prepareKakaoDecisionFromSnapshot({
     signal
   });
   try {
-    freshnessGuard.throwIfSuperseded();
-    const lookupContext = turn.lookup_evidence;
-    const ragContext = turn.rag_context;
-    const brainContext = turn.brain_context;
+    const { event, internal } = await buildKakaoGatewayTurn({
+      config,
+      job,
+      capture,
+      signal,
+      dependencies: { gatewayConfirmationToolAvailable: false },
+      freshnessGuard
+    });
+    const { lookupContext, ragContext, brainContext } = internal;
     timings.mark('lookup');
-    await freshnessGuard.checkNow();
-    freshnessGuard.throwIfSuperseded();
-    const prompt = turn.prompt;
+    const prompt = event.prompt;
     if (dryRun) {
       return { status: 'dry_run', snapshot, job: summarizeJob(job), lookupContext, ragContext, brainContext, prompt, timings: timings.snapshot() };
     }
