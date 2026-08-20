@@ -15,6 +15,8 @@ import {
   prepareKakaoDecisionFromSnapshot
 } from '../ai-browser-worker/worker.mjs';
 import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-browser-worker/follow-up-case-lifecycle.mjs';
+import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
+import { createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 
 function loadSelectedEnvFile(filePath, keys = []) {
   const allowed = new Set(keys);
@@ -46,6 +48,10 @@ const CONFIG = {
   maxWaitMs: Number(process.env.MAX_WAIT_MS || 300_000),
   startupMutationIgnoreMs: Number(process.env.STARTUP_MUTATION_IGNORE_MS || 4000),
   queueDir: path.resolve(process.env.QUEUE_DIR || './queue'),
+  hermesTransport: String(process.env.KAKAO_HERMES_TRANSPORT || 'cli').trim() || 'cli',
+  hermesBridgeToken: String(process.env.KAKAO_HERMES_BRIDGE_TOKEN || '').trim(),
+  hermesLeaseMs: Number(process.env.KAKAO_HERMES_LEASE_MS || 300_000),
+  hermesMaxAttempts: Number(process.env.KAKAO_HERMES_MAX_ATTEMPTS || 2),
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   supabaseTable: process.env.SUPABASE_TABLE || '',
@@ -210,6 +216,21 @@ const state = {
   seenGroupingTexts: new Set(),
   lastContentScriptStartedAtMs: 0
 };
+
+const gatewayTransportEnabled = ['gateway', 'gateway_no_send'].includes(CONFIG.hermesTransport)
+  && Boolean(CONFIG.hermesBridgeToken.trim());
+const gatewayChannel = gatewayTransportEnabled
+  ? createHermesGatewayChannel({
+    directory: CONFIG.queueDir,
+    leaseMs: CONFIG.hermesLeaseMs,
+    maxAttempts: CONFIG.hermesMaxAttempts
+  })
+  : null;
+const gatewayHttpHandler = createHermesGatewayHttpHandler({
+  token: CONFIG.hermesBridgeToken,
+  channel: gatewayChannel,
+  transport: CONFIG.hermesTransport
+});
 
 function ensureQueueDir() {
   fs.mkdirSync(CONFIG.queueDir, { recursive: true });
@@ -3060,6 +3081,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     const url = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
+
+    if (await gatewayHttpHandler(req, res, url)) return;
 
     if (req.method === 'GET' && url.pathname === '/health') {
       return json(res, 200, {

@@ -491,3 +491,13 @@ test('a meaningful live top-row change remains eligible without an unread counte
   assert.equal(hasUnreadCount(liveCustomerRow), false);
   assert.equal(shouldQueueTopRowEvent(liveCustomerRow), true);
 });
+
+test('server keeps Gateway HTTP disabled by default and dispatches it before public routes', async () => {
+  const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  assert.match(source, /hermesTransport:\s*String\(process\.env\.KAKAO_HERMES_TRANSPORT\s*\|\|\s*'cli'\)\.trim\(\)\s*\|\|\s*'cli'/);
+  assert.match(source, /hermesBridgeToken:\s*String\(process\.env\.KAKAO_HERMES_BRIDGE_TOKEN\s*\|\|\s*''\)\.trim\(\)/);
+  assert.match(source, /KAKAO_HERMES_LEASE_MS/);
+  assert.match(source, /KAKAO_HERMES_MAX_ATTEMPTS/);
+  assert.match(source, /createHermesGatewayHttpHandler/);
+  assert.ok(source.indexOf('gatewayHttpHandler(req, res, url)') < source.indexOf("url.pathname === '/health'"));
+});
