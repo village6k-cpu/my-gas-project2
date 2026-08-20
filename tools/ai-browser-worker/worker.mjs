@@ -8247,7 +8247,11 @@ const MAX_KAKAO_GATEWAY_EVENT_BYTES = 1_048_576;
 function assertBoundedGatewayEvent(event) {
   let serialized;
   try {
-    serialized = JSON.stringify(event);
+    // The plugin accepts a Python json.dumps(..., ensure_ascii=True) body. Pretty
+    // formatting is intentionally conservative for its default comma/colon spaces.
+    serialized = JSON.stringify(event, null, 1).replace(/[\u0080-\uFFFF]/g, (character) => (
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`
+    ));
   } catch {
     throw new Error('Gateway event must be JSON serializable');
   }
