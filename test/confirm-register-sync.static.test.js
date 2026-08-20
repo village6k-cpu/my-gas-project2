@@ -50,6 +50,28 @@ assert(
     /findConfirmRequestRowByReqID_\(sheet, pendingReqID\)/.test(backend),
   '_runPendingRegister must recover O-column 등록대기 rows even when the property queue is empty, and processRegistrationQueue_ must use reqID-based fresh row lookup'
 );
+const pendingRunnerBody = backend.slice(
+  backend.indexOf('function _runPendingRegister()'),
+  backend.indexOf('/**\n * 특정 행의 요청ID를 기준으로 같은 ID의 모든 행을 일괄 등록'),
+);
+const pendingWatchdogAt = pendingRunnerBody.indexOf('ensurePendingRegisterTrigger_(60000)');
+const pendingQueueDeleteAt = pendingRunnerBody.indexOf("props.deleteProperty(\"_pendingRegisterQueue\")");
+const pendingRegisterAt = pendingRunnerBody.indexOf('registerByReqID(sheet, qRow, { fromQueue: true })');
+const pendingReadUnlockAt = pendingRunnerBody.indexOf('drainLock.releaseLock()');
+const pendingClaimLockAt = pendingRunnerBody.indexOf('var claimLock = LockService.getScriptLock()');
+assert(
+  pendingWatchdogAt >= 0 &&
+    pendingReadUnlockAt >= 0 &&
+    pendingWatchdogAt > pendingReadUnlockAt &&
+    pendingClaimLockAt > pendingWatchdogAt &&
+    pendingWatchdogAt < pendingQueueDeleteAt &&
+    pendingWatchdogAt < pendingRegisterAt,
+  '_runPendingRegister must release its read lock, arm a watchdog outside the lock, then claim the durable queue before starting registration'
+);
+assert(
+  /var drainLocked = false;[\s\S]{0,120}try \{ drainLocked = drainLock\.tryLock\(10000\); \} catch \(drainLockErr\) \{\}[\s\S]{0,120}if \(!drainLocked\) \{[\s\S]{0,180}ensurePendingRegisterTrigger_\(30000\);[\s\S]{0,80}return;/.test(pendingRunnerBody),
+  '_runPendingRegister must preserve its watchdog and avoid queue access when the claim lock fails or throws'
+);
 assert(
   /if \(REGISTER_QUEUE_PROCESSING_\) return;/.test(backend) &&
     /try \{\s*registerByReqID\(sheet, pendingRow, \{ fromQueue: true \}\);[\s\S]{0,260}catch \(e\) \{[\s\S]{0,160}등록 실패/.test(backend),
@@ -104,12 +126,22 @@ const registerLockAt = registerBody.indexOf('regLock.tryLock(30000)');
 const tradeIdAllocationAt = registerBody.indexOf('const prefix거래 = dateStr');
 const ledgerEnsureAt = registerBody.indexOf('ensureTradeLedgerRowOnSheet_(ledgerContext.sheet');
 const registerUnlockAt = registerBody.indexOf('regLock.releaseLock()');
+const deferredScheduleFormatAt = registerBody.indexOf('requestScheduleFormat_()');
 assert(
   registerLockAt >= 0 &&
     tradeIdAllocationAt > registerLockAt &&
     ledgerEnsureAt > tradeIdAllocationAt &&
     registerUnlockAt > ledgerEnsureAt,
   'the original ScriptLock must cover trade-ID allocation, contract/schedule writes, and direct ledger confirmation'
+);
+assert(
+  !registerBody.includes('formatScheduleSheet(') && deferredScheduleFormatAt > registerUnlockAt,
+  'registration must publish its durable result and release ScriptLock before deferring full schedule formatting'
+);
+assert(
+  /function requestScheduleFormat_\(\)/.test(backend) &&
+    /function _runPendingScheduleFormat\(\)[\s\S]{0,800}ensurePendingScheduleFormatTrigger_\(300000\)[\s\S]{0,500}formatScheduleSheet\(/.test(backend),
+  'deferred schedule formatting must keep its own watchdog alive before the expensive full-sheet write starts'
 );
 assert(
   !registerBody.includes('reserveExternalTradeId_(') &&

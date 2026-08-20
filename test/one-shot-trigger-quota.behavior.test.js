@@ -188,6 +188,8 @@ test('모든 one-shot 스케줄러가 공용 프리미티브를 쓴다 (직접 n
     'syncTemplateMasterDebounced',
     'processCancelledTradeCleanup',
     'flushDashboardStructureProjectionQueue_',
+    '_runPendingRegister',
+    '_runPendingScheduleFormat',
   ];
 
   for (const [file, source] of Object.entries(sources)) {
@@ -324,6 +326,9 @@ test('취소 정리 트리거 헬퍼는 이름이 잠금 상태를 정직하게 
 
 test('one-shot 핸들러 목록에 반복 트리거가 섞이지 않았다', () => {
   const list = section(read('Code.js'), 'var ONE_SHOT_TRIGGER_HANDLERS_', '];');
+  for (const required of ['_runPendingRegister', '_runPendingScheduleFormat']) {
+    assert.ok(list.includes(`'${required}'`), `${required} must participate in shared one-shot quota recovery`);
+  }
   for (const recurring of ['flushDirtyToSupabase', 'warmDashboardCache', 'onEditInstallable',
     'onChangeInstallable', 'autoClearRequests', 'checkGuideAlimtalk', 'onEditSupabaseMark',
     'syncTemplateMasterFromSetMaster', 'runGrowthAutopilotWeekly']) {

@@ -14039,22 +14039,30 @@ function markRegisterQueued_(sheet, row) {
 }
 
 function ensurePendingRegisterTrigger_(delayMs) {
-  var hasTrigger = false;
-  try {
-    var triggers = ScriptApp.getProjectTriggers();
-    for (var i = 0; i < triggers.length; i++) {
-      if (triggers[i].getHandlerFunction && triggers[i].getHandlerFunction() === "_runPendingRegister") {
-        hasTrigger = true;
-        break;
-      }
-    }
-  } catch (e) {}
-  if (!hasTrigger) {
-    ScriptApp.newTrigger("_runPendingRegister")
-      .timeBased()
-      .after(delayMs || 1000)
-      .create();
+  replaceOneShotTrigger_("_runPendingRegister", delayMs || 1000);
+}
+
+function readPendingRegisterQueue_(props) {
+  var queue = [];
+  try { queue = JSON.parse(props.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
+  if (!Array.isArray(queue)) queue = [];
+
+  // 구버전 단일 속성도 읽기 단계에서만 흡수한다. 실제 삭제(claim)는 살아 있는
+  // watchdog을 만든 다음 두 번째 ScriptLock 안에서 수행한다.
+  var legacy = props.getProperty("_pendingRegister");
+  if (legacy) {
+    try {
+      var li = JSON.parse(legacy);
+      if (li && li.reqID && queue.indexOf(li.reqID) === -1) queue.push(li.reqID);
+    } catch (le) {}
   }
+
+  var unique = [];
+  for (var i = 0; i < queue.length; i++) {
+    var reqID = String(queue[i] || "").trim();
+    if (reqID && unique.indexOf(reqID) === -1) unique.push(reqID);
+  }
+  return unique;
 }
 
 function enqueuePendingRegister_(reqID, delayMs) {
@@ -14203,34 +14211,53 @@ function scheduleRegister(reqID) {
  * 시간 기반 트리거에서 호출 — pendingRegister 처리
  */
 function _runPendingRegister() {
-  // 트리거 자기 자신 삭제
-  var triggers = ScriptApp.getProjectTriggers();
-  triggers.forEach(function(t) {
-    if (t.getHandlerFunction() === "_runPendingRegister") {
-      ScriptApp.deleteTrigger(t);
-    }
-  });
-
   var props = PropertiesService.getScriptProperties();
-  // 큐 읽기→비우기를 락으로 감싸 동시 추가분 유실 방지
+  // 1단계는 읽기만 한다. 트리거 I/O를 ScriptLock 밖에서 완료하기 전에는
+  // durable queue를 지우지 않아야 GAS hard-kill에도 실행 경로가 남는다.
   var drainLock = LockService.getScriptLock();
-  var drainLocked = drainLock.tryLock(10000);
+  var drainLocked = false;
+  try { drainLocked = drainLock.tryLock(10000); } catch (drainLockErr) {}
+  if (!drainLocked) {
+    ensurePendingRegisterTrigger_(30000);
+    return;
+  }
   var queue = [];
   try {
-    try { queue = JSON.parse(props.getProperty("_pendingRegisterQueue") || "[]"); } catch (qe) {}
-    // 구버전 단일 속성도 큐로 흡수 (배포 경계 호환)
-    var legacy = props.getProperty("_pendingRegister");
-    if (legacy) {
-      props.deleteProperty("_pendingRegister");
-      try {
-        var li = JSON.parse(legacy);
-        if (li && li.reqID && queue.indexOf(li.reqID) === -1) queue.push(li.reqID);
-      } catch (le) {}
-    }
-    if (queue.length) props.deleteProperty("_pendingRegisterQueue");
+    queue = readPendingRegisterQueue_(props);
   } finally {
-    if (drainLocked) drainLock.releaseLock();
+    drainLock.releaseLock();
   }
+
+  if (queue.length) {
+    // 속성 큐를 claim하기 전에 살아 있는 watchdog을 남긴다. 이 아래에서 GAS가
+    // timeout/hard-kill돼 catch/finally가 생략돼도 O열 처리중 상태를 다시 집는다.
+    ensurePendingRegisterTrigger_(60000);
+
+    // 트리거 예약 중 추가된 reqID까지 다시 읽어 한 번에 claim한다. enqueue도 같은
+    // ScriptLock을 쓰므로, 이 잠금 뒤에 추가된 요청은 다음 속성 큐/트리거에 남는다.
+    var claimLock = LockService.getScriptLock();
+    var claimLocked = false;
+    try { claimLocked = claimLock.tryLock(10000); } catch (claimLockErr) {}
+    if (!claimLocked) {
+      ensurePendingRegisterTrigger_(30000);
+      return;
+    }
+    var claimAlreadyTaken = false;
+    try {
+      queue = readPendingRegisterQueue_(props);
+      // 다른 워커가 먼저 claim했다면 그 워커와 watchdog에 맡긴다.
+      if (!queue.length) {
+        claimAlreadyTaken = true;
+      } else {
+        props.deleteProperty("_pendingRegisterQueue");
+        props.deleteProperty("_pendingRegister");
+      }
+    } finally {
+      claimLock.releaseLock();
+    }
+    if (claimAlreadyTaken) return;
+  }
+
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("확인요청");
   if (!sheet) return;
@@ -14238,6 +14265,8 @@ function _runPendingRegister() {
   recoverPartiallyRegisteredRequests_(sheet);
 
   if (!queue.length) {
+    var sheetPendingReqIDs = collectPendingRegisterReqIDs_(sheet);
+    if (sheetPendingReqIDs.length) ensurePendingRegisterTrigger_(60000);
     processRegistrationQueue_(sheet);
     return;
   }
@@ -14368,6 +14397,7 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     return;
   }
   var _postRegisterAlimtalk = null; // 락 해제 후 보낼 알림톡 payload (외부 HTTP를 락 밖으로)
+  var _postRegisterScheduleFormat = false; // 9천+ 행 전체 서식은 등록 락 밖의 별도 워커로
   var _regPerf = { lockWaitMs: Date.now() - _regPerfT0, reqID: "" };
   try {
   // 락 획득 후 시트 데이터를 새로 읽어야 정확함
@@ -14866,7 +14896,9 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
     });
 
   // ── 스케줄상세 가독성 포맷팅 ──
-  formatScheduleSheet(schedSheet);
+  // 전체 시트 서식은 수천 행 배경/테두리를 다시 써서 등록 임계구역을 수분간 붙잡는다.
+  // 데이터 등록과 무관한 cosmetic 작업이므로 완료 상태를 확정한 뒤 별도 워커에 맡긴다.
+  _postRegisterScheduleFormat = true;
 
   // ── 개고생2.0 거래내역 보장 ──
   // 외부 웹앱 왕복 없이 연결된 시트에 직접 기록하고 읽기검증한다.
@@ -14955,6 +14987,12 @@ function registerByReqID(sheet, triggerRow, registerOptions) {
       }
       _regPerf.alimtalkMs = Date.now() - _almT0;
       _postRegisterAlimtalk = null;
+    }
+    if (_postRegisterScheduleFormat) {
+      try { requestScheduleFormat_(); } catch (formatQueueErr) {
+        Logger.log("스케줄 서식 비동기 예약 실패(등록은 정상): " + formatQueueErr.message);
+      }
+      _postRegisterScheduleFormat = false;
     }
     var _drainT0 = Date.now();
     try {
@@ -17007,6 +17045,36 @@ function normalizeScheduleDetailSetNames(schedSheet) {
 
   formatScheduleSheet(schedSheet);
   return { updatedRows: updated, checkedRows: rowCount };
+}
+
+function ensurePendingScheduleFormatTrigger_(delayMs) {
+  replaceOneShotTrigger_("_runPendingScheduleFormat", delayMs || 1000);
+}
+
+function requestScheduleFormat_() {
+  PropertiesService.getScriptProperties().setProperty("_pendingScheduleFormat", String(Date.now()));
+  ensurePendingScheduleFormatTrigger_(1000);
+}
+
+function _runPendingScheduleFormat() {
+  var props = PropertiesService.getScriptProperties();
+  var claimedMarker = props.getProperty("_pendingScheduleFormat");
+  if (!claimedMarker) return;
+
+  // 전체 서식 쓰기 전에 다음 실행을 먼저 남긴다. GAS가 하드킬돼 finally가 생략돼도
+  // cosmetic 작업만 재시도되며 등록 데이터/등록 큐는 이미 완료 상태다.
+  ensurePendingScheduleFormatTrigger_(300000);
+  var formatted = false;
+  try {
+    formatScheduleSheet();
+    formatted = true;
+  } finally {
+    // 실행 중 새 등록이 서식을 다시 dirty로 만들었다면 그 최신 요청은 지우지 않는다.
+    if (formatted && props.getProperty("_pendingScheduleFormat") === claimedMarker) {
+      props.deleteProperty("_pendingScheduleFormat");
+    }
+    if (props.getProperty("_pendingScheduleFormat")) ensurePendingScheduleFormatTrigger_(300000);
+  }
 }
 
 function formatScheduleSheet(schedSheet) {
