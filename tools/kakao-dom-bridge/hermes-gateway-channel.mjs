@@ -1,21 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import {
+  mkdir as defaultMkdir,
+  readFile as defaultReadFile,
+  readdir as defaultReaddir,
+  rename as defaultRename,
+  unlink as defaultUnlink,
+  writeFile as defaultWriteFile
+} from 'node:fs/promises';
 import path from 'node:path';
 
 const TERMINAL_STATES = new Set(['completed', 'superseded', 'failed']);
 const JOB_STATES = new Set(['ready', 'claimed', 'completed', 'superseded', 'retry_wait', 'failed']);
 
-function clone(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
-function iso(now) {
-  return new Date(now).toISOString();
-}
-
-function digest(value) {
-  return createHash('sha256').update(value).digest('hex');
-}
+const clone = (value) => JSON.parse(JSON.stringify(value));
+const iso = (value) => new Date(value).toISOString();
+const digest = (value) => createHash('sha256').update(value).digest('hex');
 
 function channelError(code, message) {
   const error = new Error(message);
@@ -23,9 +22,9 @@ function channelError(code, message) {
   return error;
 }
 
-function requiredString(value, name) {
+function requiredString(value, name, code = 'invalid_event') {
   const normalized = String(value ?? '').trim();
-  if (!normalized) throw channelError('invalid_event', `${name} is required`);
+  if (!normalized) throw channelError(code, name + ' is required');
   return normalized;
 }
 
@@ -38,63 +37,126 @@ function positiveRevision(value) {
 }
 
 function normalizeEvent(event) {
-  const jobId = requiredString(event?.job_id ?? event?.jobId, 'job_id');
-  const roomKey = requiredString(event?.room_key ?? event?.roomKey, 'room_key');
-  const roomRevision = positiveRevision(event?.room_revision ?? event?.roomRevision);
   return {
-    job_id: jobId,
-    room_key: roomKey,
-    room_revision: roomRevision,
+    job_id: requiredString(event?.job_id ?? event?.jobId, 'job_id'),
+    room_key: requiredString(event?.room_key ?? event?.roomKey, 'room_key'),
+    room_revision: positiveRevision(event?.room_revision ?? event?.roomRevision),
     event: clone(event)
   };
 }
 
-function sameResult(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right);
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]));
+  }
+  return value;
 }
 
-export function createHermesGatewayChannel({ directory, leaseMs = 300_000, maxAttempts = 2, now = Date.now } = {}) {
+const sameResult = (left, right) => JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right));
+const isObjectOrNull = (value) => value === null || (value && typeof value === 'object' && !Array.isArray(value));
+const isValidIso = (value) => typeof value === 'string'
+  && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)
+  && Number.isFinite(Date.parse(value));
+
+function validateReceipt(receipt) {
+  if (receipt?.schema !== 'village-confirmation-receipt/v1') throw channelError('invalid_receipt', 'receipt schema is invalid');
+  requiredString(receipt?.receipt_id ?? receipt?.receiptId, 'receipt_id', 'invalid_receipt');
+  if (!String(receipt?.status ?? '').trim()) throw channelError('invalid_receipt', 'receipt status is required');
+  if (!Array.isArray(receipt?.availability_report)) throw channelError('invalid_receipt', 'availability_report must be a list');
+  if (!isObjectOrNull(receipt?.authoritative_sheet_result)) throw channelError('invalid_receipt', 'authoritative_sheet_result must be an object or null');
+  if (!isValidIso(receipt?.created_at)) throw channelError('invalid_receipt', 'created_at must be ISO-8601');
+  if (!(receipt?.error === null || typeof receipt?.error === 'string' || isObjectOrNull(receipt?.error))) {
+    throw channelError('invalid_receipt', 'error must be null, a string, or an object');
+  }
+}
+
+export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAttempts = 2, now = Date.now, storage = {} } = {}) {
   const queueDirectory = path.join(requiredString(directory, 'directory'), 'hermes-gateway');
   const leaseDuration = Number(leaseMs);
   const maximumAttempts = Number(maxAttempts);
   if (!Number.isFinite(leaseDuration) || leaseDuration <= 0) throw channelError('invalid_config', 'leaseMs must be positive');
   if (!Number.isInteger(maximumAttempts) || maximumAttempts < 1) throw channelError('invalid_config', 'maxAttempts must be a positive integer');
 
+  const fs = {
+    mkdir: defaultMkdir, readFile: defaultReadFile, readdir: defaultReaddir, rename: defaultRename,
+    unlink: defaultUnlink, writeFile: defaultWriteFile, ...storage
+  };
   const jobs = new Map();
   let initialized = false;
+  let needsReconciliation = false;
   let queueOrder = 0;
   let mutationTail = Promise.resolve();
-
   const currentTime = () => {
     const value = now();
     const milliseconds = value instanceof Date ? value.getTime() : Number(value);
     if (!Number.isFinite(milliseconds)) throw channelError('invalid_clock', 'now() must return a timestamp');
     return milliseconds;
   };
+  const fileFor = (jobId) => path.join(queueDirectory, digest(jobId) + '.json');
 
-  const fileFor = (jobId) => path.join(queueDirectory, `${digest(jobId)}.json`);
+  async function persist(nextJob) {
+    const target = fileFor(nextJob.job_id);
+    const temporary = target + '.' + process.pid + '.' + randomUUID() + '.tmp';
+    try {
+      await fs.writeFile(temporary, JSON.stringify(nextJob) + '\n', 'utf8');
+      await fs.rename(temporary, target);
+    } catch (error) {
+      await fs.unlink(temporary).catch(() => {});
+      throw error;
+    }
+  }
 
   async function initialize() {
     if (initialized) return;
-    await mkdir(queueDirectory, { recursive: true });
-    const names = await readdir(queueDirectory);
-    for (const name of names) {
+    await fs.mkdir(queueDirectory, { recursive: true });
+    for (const name of await fs.readdir(queueDirectory)) {
       if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
-      const job = JSON.parse(await readFile(path.join(queueDirectory, name), 'utf8'));
+      const job = JSON.parse(await fs.readFile(path.join(queueDirectory, name), 'utf8'));
       if (!JOB_STATES.has(job.state) || !job.job_id || path.basename(fileFor(job.job_id)) !== name) {
-        throw channelError('invalid_persisted_job', `invalid persisted Hermes Gateway job: ${name}`);
+        throw channelError('invalid_persisted_job', 'invalid persisted Hermes Gateway job: ' + name);
       }
       jobs.set(job.job_id, job);
       queueOrder = Math.max(queueOrder, Number(job.queue_order) || 0);
     }
     initialized = true;
+    needsReconciliation = true;
   }
 
-  async function persist(job) {
-    const target = fileFor(job.job_id);
-    const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(job)}\n`, 'utf8');
-    await rename(temporary, target);
+  async function update(job, changes) {
+    const next = { ...job, ...clone(changes), updated_at: iso(currentTime()) };
+    await persist(next);
+    jobs.set(next.job_id, next);
+    return next;
+  }
+
+  function roomJobs(roomKey) {
+    return [...jobs.values()].filter((job) => job.room_key === roomKey)
+      .sort((left, right) => right.room_revision - left.room_revision || right.queue_order - left.queue_order);
+  }
+
+  const authoritativeJob = (roomKey) => roomJobs(roomKey)[0] ?? null;
+  const isAuthoritative = (job) => authoritativeJob(job.room_key)?.job_id === job.job_id;
+
+  async function reconcileRoom(roomKey) {
+    const authoritative = authoritativeJob(roomKey);
+    if (!authoritative) return;
+    for (const older of roomJobs(roomKey)) {
+      if (older.job_id === authoritative.job_id || TERMINAL_STATES.has(older.state)) continue;
+      await update(older, {
+        state: 'superseded', superseded_by: authoritative.job_id, superseded_lease_id: older.lease_id,
+        claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null
+      });
+    }
+  }
+
+  async function reconcilePending() {
+    if (!needsReconciliation) return;
+    for (const job of [...jobs.values()]) {
+      if (job.state === 'retry_wait') await update(job, { state: 'ready' });
+    }
+    for (const roomKey of new Set([...jobs.values()].map((job) => job.room_key))) await reconcileRoom(roomKey);
+    needsReconciliation = false;
   }
 
   async function mutate(operation) {
@@ -104,51 +166,28 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300_000, maxAt
     await previous;
     try {
       await initialize();
+      await reconcilePending();
       return await operation();
     } finally {
       release();
     }
   }
 
-  async function update(job, changes) {
-    Object.assign(job, changes, { updated_at: iso(currentTime()) });
-    await persist(job);
-    return clone(job);
-  }
-
-  function roomJobs(roomKey) {
-    return [...jobs.values()]
-      .filter((job) => job.room_key === roomKey)
-      .sort((left, right) => right.room_revision - left.room_revision || right.queue_order - left.queue_order);
-  }
-
   async function reapExpiredLeasesInternal() {
     const nowMs = currentTime();
     const reaped = [];
-    for (const job of jobs.values()) {
+    for (const job of [...jobs.values()]) {
       if (job.state !== 'claimed' || Number(job.lease_expires_at_ms) > nowMs) continue;
-      if (job.attempts >= maximumAttempts) {
-        await update(job, {
-          state: 'failed',
-          claimed_by: null,
-          lease_id: null,
-          lease_expires_at: null,
-          lease_expires_at_ms: null,
-          human_review_required: true,
-          error: { type: 'lease_retry_exhausted', attempts: job.attempts }
-        });
-      } else {
-        await update(job, {
-          state: 'retry_wait',
-          claimed_by: null,
-          lease_id: null,
-          lease_expires_at: null,
-          lease_expires_at_ms: null,
+      const next = job.attempts >= maximumAttempts
+        ? await update(job, {
+          state: 'failed', claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
+          human_review_required: true, error: { type: 'lease_retry_exhausted', attempts: job.attempts }
+        })
+        : await update(job, {
+          state: 'ready', claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
           error: { type: 'lease_expired', attempts: job.attempts }
         });
-        await update(job, { state: 'ready' });
-      }
-      reaped.push(clone(job));
+      reaped.push(clone(next));
     }
     return reaped;
   }
@@ -161,87 +200,59 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300_000, maxAt
     }
   }
 
+  function assertCurrentLease(job, envelope) {
+    const leaseId = requiredString(envelope?.lease_id ?? envelope?.leaseId, 'lease_id', 'stale_lease');
+    if (job.state !== 'claimed' || job.lease_id !== leaseId || Number(job.lease_expires_at_ms) <= currentTime()) {
+      throw channelError('stale_lease', 'mutation lease is no longer current');
+    }
+  }
+
   async function claimOnce(consumerId) {
     await reapExpiredLeasesInternal();
-    const activeRooms = new Set([...jobs.values()]
-      .filter((job) => job.state === 'claimed')
-      .map((job) => job.room_key));
+    const activeRooms = new Set([...jobs.values()].filter((job) => job.state === 'claimed' && isAuthoritative(job)).map((job) => job.room_key));
     const candidate = [...jobs.values()]
-      .filter((job) => job.state === 'ready' && !activeRooms.has(job.room_key))
+      .filter((job) => job.state === 'ready' && isAuthoritative(job) && !activeRooms.has(job.room_key))
       .sort((left, right) => left.queue_order - right.queue_order)[0];
     if (!candidate) return null;
     const nowMs = currentTime();
-    return update(candidate, {
-      state: 'claimed',
-      attempts: candidate.attempts + 1,
-      claimed_by: consumerId,
-      lease_id: randomUUID(),
-      lease_expires_at: iso(nowMs + leaseDuration),
-      lease_expires_at_ms: nowMs + leaseDuration,
-      error: null
-    });
+    return clone(await update(candidate, {
+      state: 'claimed', attempts: candidate.attempts + 1, claimed_by: consumerId, lease_id: randomUUID(),
+      lease_expires_at: iso(nowMs + leaseDuration), lease_expires_at_ms: nowMs + leaseDuration, error: null
+    }));
   }
 
   return {
     async enqueue(event) {
       return mutate(async () => {
         const normalized = normalizeEvent(event);
-        const existingById = jobs.get(normalized.job_id);
-        if (existingById) {
-          if (existingById.room_key !== normalized.room_key || existingById.room_revision !== normalized.room_revision) {
+        const existing = jobs.get(normalized.job_id);
+        if (existing) {
+          if (existing.room_key !== normalized.room_key || existing.room_revision !== normalized.room_revision) {
             throw channelError('job_id_conflict', 'job_id is already bound to another room revision');
           }
-          return clone(existingById);
+          return clone(existing);
         }
-
-        const existingRoomJobs = roomJobs(normalized.room_key);
-        const latest = existingRoomJobs[0];
-        if (latest && normalized.room_revision < latest.room_revision) {
-          throw channelError('stale_room_revision', 'cannot enqueue an older room revision');
-        }
+        const latest = authoritativeJob(normalized.room_key);
+        if (latest && normalized.room_revision < latest.room_revision) throw channelError('stale_room_revision', 'cannot enqueue an older room revision');
         if (latest && normalized.room_revision === latest.room_revision) return clone(latest);
-
-        for (const older of existingRoomJobs.filter((job) => !TERMINAL_STATES.has(job.state))) {
-          await update(older, {
-            state: 'superseded',
-            superseded_by: normalized.job_id,
-            claimed_by: null,
-            lease_id: null,
-            lease_expires_at: null,
-            lease_expires_at_ms: null
-          });
-        }
-
         const nowMs = currentTime();
         const job = {
-          schema: 'village-hermes-gateway-job/v1',
-          ...normalized,
-          state: 'ready',
-          attempts: 0,
-          queue_order: ++queueOrder,
-          created_at: iso(nowMs),
-          updated_at: iso(nowMs),
-          claimed_by: null,
-          lease_id: null,
-          lease_expires_at: null,
-          lease_expires_at_ms: null,
-          superseded_by: null,
-          tool_receipts: [],
-          result: null,
-          outcome: null,
-          error: null,
-          human_review_required: false
+          schema: 'village-hermes-gateway-job/v1', ...normalized, state: 'ready', attempts: 0, queue_order: ++queueOrder,
+          created_at: iso(nowMs), updated_at: iso(nowMs), claimed_by: null, lease_id: null, lease_expires_at: null,
+          lease_expires_at_ms: null, superseded_by: null, superseded_lease_id: null, tool_receipts: [], result: null,
+          outcome: null, error: null, human_review_required: false
         };
-        jobs.set(job.job_id, job);
         await persist(job);
-        return clone(job);
+        jobs.set(job.job_id, job);
+        needsReconciliation = true;
+        await reconcilePending();
+        return clone(jobs.get(job.job_id));
       });
     },
 
     async claim({ consumerId, waitMs = 0 } = {}) {
       const consumer = requiredString(consumerId, 'consumerId');
-      const timeout = Math.max(0, Number(waitMs) || 0);
-      const deadline = currentTime() + timeout;
+      const deadline = currentTime() + Math.max(0, Number(waitMs) || 0);
       do {
         const claimed = await mutate(() => claimOnce(consumer));
         if (claimed || currentTime() >= deadline) return claimed;
@@ -251,26 +262,24 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300_000, maxAt
 
     async recordToolReceipt(receipt) {
       return mutate(async () => {
-        const jobId = requiredString(receipt?.job_id ?? receipt?.jobId, 'job_id');
-        const job = jobs.get(jobId);
+        validateReceipt(receipt);
+        const job = jobs.get(requiredString(receipt?.job_id ?? receipt?.jobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
         assertEnvelope(job, receipt);
-        const receiptId = requiredString(receipt?.receipt_id ?? receipt?.receiptId, 'receipt_id');
+        const receiptId = requiredString(receipt?.receipt_id ?? receipt?.receiptId, 'receipt_id', 'invalid_receipt');
         const existing = job.tool_receipts.find((item) => item.receipt_id === receiptId);
         if (existing) {
           if (!sameResult(existing, receipt)) throw channelError('receipt_conflict', 'receipt_id already has another value');
           return clone(job);
         }
-        if (job.state !== 'claimed') throw channelError('job_not_claimed', 'tool receipts require an active claim');
-        job.tool_receipts.push(clone(receipt));
-        return update(job, {});
+        assertCurrentLease(job, receipt);
+        return clone(await update(job, { tool_receipts: [...job.tool_receipts, clone(receipt)] }));
       });
     },
 
     async complete(result) {
       return mutate(async () => {
-        const jobId = requiredString(result?.job_id ?? result?.jobId, 'job_id');
-        const job = jobs.get(jobId);
+        const job = jobs.get(requiredString(result?.job_id ?? result?.jobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
         assertEnvelope(job, result);
         if (job.state === 'completed') {
@@ -278,57 +287,42 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300_000, maxAt
           throw channelError('completion_conflict', 'job already has another completion result');
         }
         if (job.state === 'superseded') throw channelError('stale_room_revision', 'superseded jobs cannot complete');
-        if (job.state !== 'claimed') throw channelError('job_not_claimed', 'only a claimed job can complete');
-        return update(job, {
-          state: 'completed',
-          result: clone(result),
-          claimed_by: null,
-          lease_id: null,
-          lease_expires_at: null,
-          lease_expires_at_ms: null
-        });
+        assertCurrentLease(job, result);
+        return clone(await update(job, {
+          state: 'completed', result: clone(result), claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null
+        }));
       });
     },
 
     async recordOutcome(outcome) {
       return mutate(async () => {
-        const jobId = requiredString(outcome?.job_id ?? outcome?.jobId, 'job_id');
-        const job = jobs.get(jobId);
+        const job = jobs.get(requiredString(outcome?.job_id ?? outcome?.jobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
         assertEnvelope(job, outcome);
         const kind = requiredString(outcome?.outcome, 'outcome');
         if (job.outcome && sameResult(job.outcome, outcome)) return clone(job);
         if (kind === 'no_final') {
-          if (job.state !== 'claimed') throw channelError('job_not_claimed', 'no_final requires an active claim');
-          return update(job, {
-            state: 'failed',
-            outcome: clone(outcome),
-            claimed_by: null,
-            lease_id: null,
-            lease_expires_at: null,
-            lease_expires_at_ms: null,
-            human_review_required: true,
-            error: { type: 'no_final' }
-          });
+          assertCurrentLease(job, outcome);
+          return clone(await update(job, {
+            state: 'failed', outcome: clone(outcome), claimed_by: null, lease_id: null, lease_expires_at: null,
+            lease_expires_at_ms: null, human_review_required: true, error: { type: 'no_final' }
+          }));
         }
-        if (kind === 'cancelled' && job.state === 'superseded') {
-          return update(job, { outcome: clone(outcome) });
+        const leaseId = requiredString(outcome?.lease_id ?? outcome?.leaseId, 'lease_id', 'stale_lease');
+        if (kind === 'cancelled' && job.state === 'superseded' && job.superseded_lease_id === leaseId) {
+          return clone(await update(job, { outcome: clone(outcome) }));
         }
         throw channelError('invalid_outcome', 'only no_final and superseded cancelled outcomes are accepted');
       });
     },
 
-    async reapExpiredLeases() {
-      return mutate(reapExpiredLeasesInternal);
-    },
-
+    async reapExpiredLeases() { return mutate(reapExpiredLeasesInternal); },
     async get(jobId) {
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId, 'job_id'));
         return job ? clone(job) : null;
       });
     },
-
     async status() {
       return mutate(async () => {
         const counts = Object.fromEntries([...JOB_STATES].map((state) => [state, 0]));
