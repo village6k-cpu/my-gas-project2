@@ -4585,11 +4585,11 @@ The first Hermes pass understood the Kakao conversation and the outer worker exe
 BOUNDARY:
 - The outer code may transport, validate, execute, and verify structured decisions. It must not author customer-facing prose or mechanically infer business meaning from keywords.
 - You own the semantic interpretation of the complete result rows, the appropriate response, tone, priority, route, and stable taskKey.
-- Do not write to Sheets, send Kakao, click UI, or mutate anything in this pass. Set "should_write_to_sheet": false. The outer worker alone executes a later approved auto_send.
+- Do not write to Sheets, send Kakao, click UI, or mutate anything in this pass. Set "should_write_to_sheet": false. The outer worker must expose your draft for owner approval and must never auto-send a schedule result.
 - Preserve the initial decision's verified customer identity, visible Kakao evidence, sender order, and safety_checks unless the authoritative result directly changes a conclusion.
 - Do not claim that a booking is confirmed or completed. A 가용 result proves availability only.
-- For available, warning, or unavailable results, you may choose replyMode="auto_send" with safetyClass="authoritative_availability_answer", grounding="authoritative_sheet", requiresRag=false, and high confidence when the wording reports only the verified result rows plus a safe next question. Never turn a warning or unavailable result into a positive availability claim.
-- For unknown, contradictory, or incomplete results, you may still choose a short high-confidence replyMode="auto_send" acknowledgement with safetyClass="simple_ack" and grounding="authoritative_sheet". It may only say the request was received and that checking will continue; it must not claim availability, price, booking, or completion. Keep an explicit schedule follow-up for the unresolved work.
+- For every available, warning, unavailable, unknown, contradictory, or incomplete result, choose replyMode="draft_only", safetyClass="no_send", grounding="authoritative_sheet", requiresRag=false, shouldCreateTask=true, and owner_review_required=true. This owner-approval boundary is mandatory even for a short acknowledgement.
+- Create a polished customer-ready draft from the exact result rows and keep an explicit schedule follow-up so the owner can review and send it. Never turn a warning or unavailable result into a positive availability claim.
 - Use exact equipment names and all result rows. Do not drop an item, merge different items, or substitute a catalog guess.
 
 Return a complete decision object, not a patch. Print FINAL_JSON and exactly one fenced JSON object shaped like this:
@@ -4624,16 +4624,17 @@ Return a complete decision object, not a patch. Print FINAL_JSON and exactly one
     "due_hint": "now" | "today" | "tomorrow" | "this_week" | null
   }],
   "sheet_row_candidate": {},
+  "owner_review_required": true,
   "suggested_human_review_action": string,
   "suggested_reply_draft": string,
   "reply_decision": {
-    "replyMode": "auto_send" | "draft_only" | "no_reply",
+    "replyMode": "draft_only",
     "text": string,
     "confidence": "high" | "medium" | "low" | "no_match",
     "reason": string,
-    "shouldCreateTask": boolean,
-    "safetyClass": "authoritative_availability_answer" | "simple_ack" | "sensitive_commitment" | "no_send",
-    "grounding": "authoritative_sheet" | "visible_conversation" | "none",
+    "shouldCreateTask": true,
+    "safetyClass": "no_send",
+    "grounding": "authoritative_sheet",
     "requiresRag": false,
     "attachmentKeys": [],
     "alreadyDelivered": false
@@ -4670,42 +4671,27 @@ export function validateAiPostActionDecisionContract(decision = {}, report = {})
   const reply = decisionReply(decision);
   const mode = text(reply.replyMode || reply.reply_mode).trim();
   const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
-  if (mode !== 'auto_send' && !followUps.some((item) => text(item?.route || item?.follow_up_route).trim() === 'schedule')) {
-    errors.push('post-action non-auto-send result requires an explicit schedule follow-up');
+  const hasScheduleFollowUp = followUps.some((item) => text(item?.route || item?.follow_up_route).trim() === 'schedule');
+  if (mode !== 'draft_only') {
+    errors.push('post-action schedule result requires owner review and replyMode=draft_only');
   }
-  if (mode === 'auto_send') {
-    const safetyClass = replySafetyClass(decision);
-    const grounding = replyGrounding(decision);
-    const status = text(report?.status || report?.payload?.status).trim();
-    const replyText = text(reply.text).normalize('NFKC');
-    if (safetyClass === 'authoritative_availability_answer') {
-      if (!new Set(['available', 'warning', 'unavailable']).has(status)) {
-        errors.push('post-action authoritative availability answer requires available, warning, or unavailable sheet facts');
-      }
-      if (grounding !== 'authoritative_sheet') {
-        errors.push('post-action auto_send requires authoritative_sheet grounding');
-      }
-    } else if (safetyClass === 'simple_ack') {
-      if (!new Set(['authoritative_sheet', 'visible_conversation']).has(grounding)) {
-        errors.push('post-action simple acknowledgement requires grounded conversation or sheet facts');
-      }
-      if (/(?:재고|장비|대여|예약)?\s*가능(?:합니다|해요|하세요|함)?|예약\s*(?:확정|완료)|[0-9,]+\s*(?:원|만원)|입금|계좌|금액/.test(replyText)) {
-        errors.push('post-action simple acknowledgement must not claim availability, booking, or price');
-      }
-    } else {
-      errors.push('post-action auto_send requires authoritative_availability_answer or simple_ack');
-    }
-    if (replyRequiresRag(decision) !== false) {
-      errors.push('post-action auto_send requires requiresRag=false');
-    }
-    if (/(예약|대여)\s*(?:확정|완료)|(?:확정|예약)\s*(?:됐|되었습니다|완료)/.test(replyText)) {
-      errors.push('post-action availability answer must not claim booking confirmation');
-    }
-    if (decision?.safety_checks?.kakao_conversation_opened !== true
-      || decision?.safety_checks?.did_not_classify_from_preview_only !== true
-      || decision?.safety_checks?.latest_customer_message_after_last_staff_reply !== true) {
-      errors.push('post-action auto_send requires preserved verified Kakao safety checks');
-    }
+  if (decision?.owner_review_required !== true && decision?.ownerReviewRequired !== true) {
+    errors.push('post-action schedule result requires owner review');
+  }
+  if (reply.shouldCreateTask !== true && reply.should_create_task !== true) {
+    errors.push('post-action owner review requires shouldCreateTask=true');
+  }
+  if (!hasScheduleFollowUp) {
+    errors.push('post-action owner review requires an explicit schedule follow-up');
+  }
+  if (replySafetyClass(decision) !== 'no_send') {
+    errors.push('post-action owner review requires safetyClass=no_send');
+  }
+  if (replyGrounding(decision) !== 'authoritative_sheet') {
+    errors.push('post-action owner review requires authoritative_sheet grounding');
+  }
+  if (replyRequiresRag(decision) !== false) {
+    errors.push('post-action owner review requires requiresRag=false');
   }
   return { valid: errors.length === 0, errors };
 }
@@ -6385,6 +6371,10 @@ function currencyAmountsInReply(value = '') {
 
 export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = {}) {
   if (!config.autoSendEnabled) return { allowed: false, reason: 'auto_send_disabled' };
+  if (decision?.post_action_reconciled === true
+    || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object')) {
+    return { allowed: false, reason: 'schedule_result_requires_owner_review' };
+  }
   if (customerEquipmentIncidentRisk(decision).risk) {
     return { allowed: false, reason: 'customer_equipment_incident_requires_human' };
   }
