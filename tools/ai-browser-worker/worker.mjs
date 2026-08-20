@@ -4137,6 +4137,7 @@ export function requireConfig() {
     // Kakao worker for more than six minutes on Windows.
     hermesTimeoutMs: hermesDecisionTimeoutFromEnv(process.env),
     hermesMaxTurns: Number(process.env.HERMES_WORKER_MAX_TURNS || '90'),
+    hermesSkills: process.env.HERMES_WORKER_SKILLS || 'village-operations,village-confirm-request',
     bridgeUrl: process.env.KAKAO_DOM_BRIDGE_URL || `http://127.0.0.1:${process.env.PORT || 8787}`,
     freshnessPollMs: Math.max(250, Number(process.env.KAKAO_JOB_FRESHNESS_POLL_MS || 1000) || 1000),
     jobLogPath: process.env.KAKAO_JOB_LOG_PATH || path.resolve(__dirname, '../kakao-dom-bridge/queue/jobs.ndjson'),
@@ -4546,6 +4547,36 @@ export function buildHermesPostActionPrompt({
 } = {}) {
   const report = buildSheetAvailabilityReport(sheetResult, sheetPayload);
   if (!report) throw new Error('A concrete sheet availability result is required for post-action reasoning');
+  const compactInitialDecision = {
+    classification: initialDecision?.classification,
+    confidence: initialDecision?.confidence,
+    reason: initialDecision?.reason,
+    kill_switch_observed: initialDecision?.kill_switch_observed,
+    customer: initialDecision?.customer,
+    safety_checks: initialDecision?.safety_checks,
+    visible_messages_used: Array.isArray(initialDecision?.visible_messages_used)
+      ? initialDecision.visible_messages_used.slice(-20)
+      : [],
+    reservation_inquiry: initialDecision?.reservation_inquiry,
+    existing_confirm_request_ids: initialDecision?.existing_confirm_request_ids,
+    follow_up_items: Array.isArray(initialDecision?.follow_up_items)
+      ? initialDecision.follow_up_items.slice(0, 12).map((item) => ({
+          type: item?.type,
+          route: item?.route || item?.follow_up_route,
+          taskKey: item?.taskKey || item?.task_key,
+          priority: item?.priority,
+          status: item?.status,
+          title: item?.title,
+          customer_name: item?.customer_name,
+          summary: item?.summary,
+          recommended_action: item?.recommended_action,
+          blocking_reason: item?.blocking_reason,
+          due_hint: item?.due_hint
+        }))
+      : [],
+    suggested_human_review_action: initialDecision?.suggested_human_review_action,
+    reply_decision: initialDecision?.reply_decision
+  };
 
   return `POST-ACTION HERMES AI REASONING PASS
 
@@ -4557,8 +4588,8 @@ BOUNDARY:
 - Do not write to Sheets, send Kakao, click UI, or mutate anything in this pass. Set "should_write_to_sheet": false. The outer worker alone executes a later approved auto_send.
 - Preserve the initial decision's verified customer identity, visible Kakao evidence, sender order, and safety_checks unless the authoritative result directly changes a conclusion.
 - Do not claim that a booking is confirmed or completed. A 가용 result proves availability only.
-- For an unequivocal available result, you may choose replyMode="auto_send" only with safetyClass="authoritative_availability_answer", grounding="authoritative_sheet", requiresRag=false, high confidence, and wording limited to the verified availability plus the next question.
-- For warning, unavailable, unknown, contradictory, or incomplete results, use draft_only or no_reply and create an explicit schedule follow-up. Do not soften the facts into a false availability claim.
+- For available, warning, or unavailable results, you may choose replyMode="auto_send" with safetyClass="authoritative_availability_answer", grounding="authoritative_sheet", requiresRag=false, and high confidence when the wording reports only the verified result rows plus a safe next question. Never turn a warning or unavailable result into a positive availability claim.
+- For unknown, contradictory, or incomplete results, you may still choose a short high-confidence replyMode="auto_send" acknowledgement with safetyClass="simple_ack" and grounding="authoritative_sheet". It may only say the request was received and that checking will continue; it must not claim availability, price, booking, or completion. Keep an explicit schedule follow-up for the unresolved work.
 - Use exact equipment names and all result rows. Do not drop an item, merge different items, or substitute a catalog guess.
 
 Return a complete decision object, not a patch. Print FINAL_JSON and exactly one fenced JSON object shaped like this:
@@ -4601,7 +4632,7 @@ Return a complete decision object, not a patch. Print FINAL_JSON and exactly one
     "confidence": "high" | "medium" | "low" | "no_match",
     "reason": string,
     "shouldCreateTask": boolean,
-    "safetyClass": "authoritative_availability_answer" | "sensitive_commitment" | "no_send",
+    "safetyClass": "authoritative_availability_answer" | "simple_ack" | "sensitive_commitment" | "no_send",
     "grounding": "authoritative_sheet" | "visible_conversation" | "none",
     "requiresRag": false,
     "attachmentKeys": [],
@@ -4613,7 +4644,7 @@ JOB CONTEXT:
 ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
 
 INITIAL HERMES DECISION:
-${JSON.stringify(initialDecision, null, 2)}
+${JSON.stringify(compactInitialDecision, null, 2)}
 
 EXECUTED SHEET REQUEST:
 ${JSON.stringify(sheetPayload?.args || null, null, 2)}
@@ -4646,19 +4677,27 @@ export function validateAiPostActionDecisionContract(decision = {}, report = {})
     const safetyClass = replySafetyClass(decision);
     const grounding = replyGrounding(decision);
     const status = text(report?.status || report?.payload?.status).trim();
-    if (safetyClass !== 'authoritative_availability_answer') {
-      errors.push('post-action auto_send requires authoritative_availability_answer');
-    }
-    if (status !== 'available') {
-      errors.push('post-action auto_send requires an available authoritative result');
-    }
-    if (grounding !== 'authoritative_sheet') {
-      errors.push('post-action auto_send requires authoritative_sheet grounding');
+    const replyText = text(reply.text).normalize('NFKC');
+    if (safetyClass === 'authoritative_availability_answer') {
+      if (!new Set(['available', 'warning', 'unavailable']).has(status)) {
+        errors.push('post-action authoritative availability answer requires available, warning, or unavailable sheet facts');
+      }
+      if (grounding !== 'authoritative_sheet') {
+        errors.push('post-action auto_send requires authoritative_sheet grounding');
+      }
+    } else if (safetyClass === 'simple_ack') {
+      if (!new Set(['authoritative_sheet', 'visible_conversation']).has(grounding)) {
+        errors.push('post-action simple acknowledgement requires grounded conversation or sheet facts');
+      }
+      if (/(?:재고|장비|대여|예약)?\s*가능(?:합니다|해요|하세요|함)?|예약\s*(?:확정|완료)|[0-9,]+\s*(?:원|만원)|입금|계좌|금액/.test(replyText)) {
+        errors.push('post-action simple acknowledgement must not claim availability, booking, or price');
+      }
+    } else {
+      errors.push('post-action auto_send requires authoritative_availability_answer or simple_ack');
     }
     if (replyRequiresRag(decision) !== false) {
-      errors.push('post-action availability answer requires requiresRag=false');
+      errors.push('post-action auto_send requires requiresRag=false');
     }
-    const replyText = text(reply.text).normalize('NFKC');
     if (/(예약|대여)\s*(?:확정|완료)|(?:확정|예약)\s*(?:됐|되었습니다|완료)/.test(replyText)) {
       errors.push('post-action availability answer must not claim booking confirmation');
     }
@@ -5024,7 +5063,10 @@ export function buildHermesArgs(prompt, config = {}) {
   if (config.hermesProfile) args.push('--profile', config.hermesProfile);
   const configuredMaxTurns = Number(config.hermesMaxTurns || 90);
   const maxTurns = Math.min(90, Math.max(4, Number.isFinite(configuredMaxTurns) ? Math.floor(configuredMaxTurns) : 90));
-  args.push('chat', '--yolo', '--max-turns', String(maxTurns), '-Q', '-t', HERMES_WORKER_TOOLSETS, '-q', prompt);
+  args.push('chat', '--yolo', '--max-turns', String(maxTurns), '-Q', '-t', HERMES_WORKER_TOOLSETS);
+  const skills = text(config.hermesSkills).trim();
+  if (skills) args.push('-s', skills);
+  args.push('-q', prompt);
   return args;
 }
 
@@ -6375,7 +6417,9 @@ export function canAutoSendCustomerAnswer(decision = {}, config = {}, context = 
   }
   if (safetyClass === 'authoritative_availability_answer') {
     const authoritativeStatus = text(decision?.authoritative_sheet_result?.status).trim();
-    if (grounding !== 'authoritative_sheet' || authoritativeStatus !== 'available' || requiresRag !== false) {
+    if (grounding !== 'authoritative_sheet'
+      || !new Set(['available', 'warning', 'unavailable']).has(authoritativeStatus)
+      || requiresRag !== false) {
       return { allowed: false, reason: 'authoritative_availability_grounding_mismatch' };
     }
     if (/(예약|대여)\s*(?:확정|완료)|(?:확정|예약)\s*(?:됐|되었습니다|완료)|환불|파손|분실|[0-9,]+\s*(?:원|만원)|입금|계좌|금액/.test(textValue)) {
@@ -7939,9 +7983,17 @@ export function createJobFreshnessGuard({
   jobId = '',
   detectedAt = '',
   pollIntervalMs = 1000,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  signal = null
 } = {}) {
   const controller = new AbortController();
+  const propagateExternalAbort = () => {
+    if (!controller.signal.aborted) {
+      controller.abort(signal?.reason || new Error('kakao_worker_aborted'));
+    }
+  };
+  if (signal?.aborted) propagateExternalAbort();
+  else signal?.addEventListener('abort', propagateExternalAbort, { once: true });
   const bridgeEnabled = Boolean(String(bridgeUrl || '').trim() && String(roomKey || '').trim() && Number(roomRevision) > 0);
   const logEnabled = Boolean(String(jobLogPath || '').trim() && String(roomKey || '').trim() && String(jobId || '').trim() && detectedAt);
   const enabled = bridgeEnabled || logEnabled;
@@ -7986,6 +8038,7 @@ export function createJobFreshnessGuard({
     },
     stop() {
       if (timer) clearInterval(timer);
+      signal?.removeEventListener('abort', propagateExternalAbort);
     }
   };
 }
@@ -8148,7 +8201,8 @@ export async function prepareKakaoDecisionFromSnapshot({
   capture,
   dryRun = false,
   fakeDecisionPath = '',
-  reportHandoffPhase = () => {}
+  reportHandoffPhase = () => {},
+  signal = null
 } = {}) {
   const snapshot = capture?.snapshot;
   if (!snapshot || snapshot.schema !== 'kakao-room-snapshot/v1') throw new Error('immutable Kakao room snapshot is required');
@@ -8164,9 +8218,11 @@ export async function prepareKakaoDecisionFromSnapshot({
     jobId: job.jobId || job.id || '',
     detectedAt: job.detectedAt || job.detected_at || job.lastEventAt || '',
     pollIntervalMs: config.freshnessPollMs,
-    fetchImpl: config.fetchImpl || fetch
+    fetchImpl: config.fetchImpl || fetch,
+    signal
   });
   try {
+    freshnessGuard.throwIfSuperseded();
     const lookupContext = await buildReadOnlyLookupContext(config, job);
     const ragContext = buildReadOnlyRagContext(config);
     const brainContext = buildBrainContext(config);
@@ -8362,7 +8418,7 @@ export async function prepareKakaoDecisionFromSnapshot({
   }
 }
 
-export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun = false, dependencies = {} } = {}) {
+export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun = false, dependencies = {}, signal = null } = {}) {
   if (!prepared || !prepared.snapshot) throw new Error('prepared Kakao decision is required');
   if (dryRun || prepared.status !== 'ai_prepared') {
     return {
@@ -8378,7 +8434,8 @@ export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun
     jobId: job.jobId || job.id || '',
     detectedAt: job.detectedAt || job.detected_at || job.lastEventAt || '',
     pollIntervalMs: config.freshnessPollMs,
-    fetchImpl: config.fetchImpl || fetch
+    fetchImpl: config.fetchImpl || fetch,
+    signal
   });
   let navigationContext = null;
   let closeResult = null;
@@ -8387,6 +8444,7 @@ export async function applyPreparedKakaoDecision({ config, job, prepared, dryRun
   const sendReply = dependencies.sendReply || maybeAutoSendReply;
   const closeNavigation = dependencies.closeNavigation || closeCapturedKakaoNavigation;
   try {
+    freshnessGuard.throwIfSuperseded();
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
     if (config.openTargetChat) {

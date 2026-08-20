@@ -1070,6 +1070,7 @@ export function createKakaoPhaseScheduler({
   finalize,
   manualSend,
   decisionConcurrency = 2,
+  workerTimeoutMs = 0,
   now = Date.now
 } = {}) {
   for (const [name, fn] of Object.entries({ capture, decide, apply, finalize, manualSend })) {
@@ -1078,37 +1079,70 @@ export function createKakaoPhaseScheduler({
   const domLane = createSerialExecutor();
   const decisionLane = createBoundedExecutor(decisionConcurrency);
   return {
-    async run(job) {
-      const totalStartedAt = now();
-      const phaseTimings = {};
-      const captureQueuedAt = now();
-      const snapshot = await domLane.run(async () => {
-        const startedAt = now();
-        phaseTimings.captureQueueMs = startedAt - captureQueuedAt;
-        try { return await capture(job); }
-        finally { phaseTimings.captureMs = now() - startedAt; }
-      });
-      const decisionQueuedAt = now();
-      const prepared = await decisionLane.run(async () => {
-        const startedAt = now();
-        phaseTimings.decisionQueueMs = startedAt - decisionQueuedAt;
-        try { return await decide(snapshot, job); }
-        finally { phaseTimings.decisionMs = now() - startedAt; }
-      });
-      const applyQueuedAt = now();
-      const applied = await domLane.run(async () => {
-        const startedAt = now();
-        phaseTimings.applyQueueMs = startedAt - applyQueuedAt;
-        try { return await apply(prepared, job); }
-        finally { phaseTimings.applyMs = now() - startedAt; }
-      });
-      const finalizeStartedAt = now();
-      const finalized = await finalize(applied, job);
-      phaseTimings.finalizeMs = now() - finalizeStartedAt;
-      phaseTimings.totalMs = now() - totalStartedAt;
-      return finalized && typeof finalized === 'object'
-        ? { ...finalized, phaseTimings }
-        : { value: finalized, phaseTimings };
+    async run(job, options = {}) {
+      const controller = new AbortController();
+      const externalSignal = options.signal || null;
+      const propagateExternalAbort = () => {
+        if (!controller.signal.aborted) {
+          controller.abort(externalSignal?.reason || new Error('kakao_phase_aborted'));
+        }
+      };
+      if (externalSignal?.aborted) propagateExternalAbort();
+      else externalSignal?.addEventListener('abort', propagateExternalAbort, { once: true });
+      const timeoutMs = Number(workerTimeoutMs);
+      const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? setTimeout(() => controller.abort(new Error(`worker timed out after ${timeoutMs}ms`)), timeoutMs)
+        : null;
+      timer?.unref?.();
+      const signal = controller.signal;
+      const throwIfAborted = () => {
+        if (!signal?.aborted) return;
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : new Error(String(signal.reason || 'kakao_phase_aborted'));
+      };
+      try {
+        const totalStartedAt = now();
+        const phaseTimings = {};
+        throwIfAborted();
+        const captureQueuedAt = now();
+        const snapshot = await domLane.run(async () => {
+          throwIfAborted();
+          const startedAt = now();
+          phaseTimings.captureQueueMs = startedAt - captureQueuedAt;
+          try { return await capture(job, { signal }); }
+          finally { phaseTimings.captureMs = now() - startedAt; }
+        });
+        throwIfAborted();
+        const decisionQueuedAt = now();
+        const prepared = await decisionLane.run(async () => {
+          throwIfAborted();
+          const startedAt = now();
+          phaseTimings.decisionQueueMs = startedAt - decisionQueuedAt;
+          try { return await decide(snapshot, job, { signal }); }
+          finally { phaseTimings.decisionMs = now() - startedAt; }
+        });
+        throwIfAborted();
+        const applyQueuedAt = now();
+        const applied = await domLane.run(async () => {
+          throwIfAborted();
+          const startedAt = now();
+          phaseTimings.applyQueueMs = startedAt - applyQueuedAt;
+          try { return await apply(prepared, job, { signal }); }
+          finally { phaseTimings.applyMs = now() - startedAt; }
+        });
+        throwIfAborted();
+        const finalizeStartedAt = now();
+        const finalized = await finalize(applied, job, { signal });
+        phaseTimings.finalizeMs = now() - finalizeStartedAt;
+        phaseTimings.totalMs = now() - totalStartedAt;
+        return finalized && typeof finalized === 'object'
+          ? { ...finalized, phaseTimings }
+          : { value: finalized, phaseTimings };
+      } finally {
+        if (timer) clearTimeout(timer);
+        externalSignal?.removeEventListener('abort', propagateExternalAbort);
+      }
     },
     runManual(payload) {
       return domLane.run(() => manualSend(payload));
@@ -1411,9 +1445,20 @@ function getKakaoPhaseScheduler() {
   kakaoWorkerRuntimeConfig = loadKakaoWorkerRuntimeConfig();
   kakaoPhaseScheduler = createKakaoPhaseScheduler({
     decisionConcurrency: CONFIG.aiDecisionConcurrency,
+    workerTimeoutMs: CONFIG.workerTimeoutMs,
     capture: (job) => captureKakaoRoomSnapshot({ config: kakaoWorkerRuntimeConfig, job }),
-    decide: (capture, job) => prepareKakaoDecisionFromSnapshot({ config: kakaoWorkerRuntimeConfig, job, capture }),
-    apply: (prepared, job) => applyPreparedKakaoDecision({ config: kakaoWorkerRuntimeConfig, job, prepared }),
+    decide: (capture, job, { signal } = {}) => prepareKakaoDecisionFromSnapshot({
+      config: kakaoWorkerRuntimeConfig,
+      job,
+      capture,
+      signal
+    }),
+    apply: (prepared, job, { signal } = {}) => applyPreparedKakaoDecision({
+      config: kakaoWorkerRuntimeConfig,
+      job,
+      prepared,
+      signal
+    }),
     finalize: (applied, job) => finalizePreparedKakaoDecision({ config: kakaoWorkerRuntimeConfig, job, applied }),
     manualSend: (payload) => (typeof payload?.execute === 'function' ? payload.execute() : processManualSend(payload))
   });
