@@ -170,6 +170,51 @@ test('Kakao room snapshots are immutable and contain no live DOM handles', () =>
   assert.throws(() => { snapshot.navigation.status = 'mutated'; }, TypeError);
 });
 
+test('prepareKakaoDecisionFromSnapshot honors an already-aborted bridge deadline', async () => {
+  const deadline = new AbortController();
+  const deadlineError = new Error('bridge end-to-end deadline expired');
+  deadline.abort(deadlineError);
+  const job = { jobId: 'job-deadline', roomKey: 'chat:deadline', roomRevision: 1, previewText: '문의' };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-20T00:00:00.000Z' });
+
+  await assert.rejects(
+    workerModule.prepareKakaoDecisionFromSnapshot({
+      config: {},
+      job,
+      capture: { snapshot },
+      dryRun: true,
+      signal: deadline.signal
+    }),
+    (error) => error === deadlineError
+  );
+});
+
+test('applyPreparedKakaoDecision fails closed when the bridge deadline is already aborted', async () => {
+  const deadline = new AbortController();
+  const deadlineError = new Error('bridge deadline expired before Kakao send');
+  deadline.abort(deadlineError);
+  const job = { jobId: 'job-apply-deadline', roomKey: 'chat:apply', roomRevision: 2, previewText: '문의' };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-20T00:00:00.000Z' });
+  let sendAttempted = false;
+
+  await assert.rejects(
+    applyPreparedKakaoDecision({
+      config: { openTargetChat: false },
+      job,
+      prepared: { status: 'ai_prepared', snapshot, decision: {}, sheetResult: null },
+      signal: deadline.signal,
+      dependencies: {
+        sendReply: async () => {
+          sendAttempted = true;
+          return { attempted: true, sent: true };
+        }
+      }
+    }),
+    (error) => error === deadlineError
+  );
+  assert.equal(sendAttempted, false);
+});
+
 test('worker handoff phase reporter writes an atomic per-job pre-mutation proof', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'kakao-worker-phase-'));
   try {
@@ -1467,6 +1512,16 @@ test('buildHermesArgs preserves the Mac-parity reasoning budget without exposing
   assert.ok(args.includes('--yolo'));
   assert.ok(buildHermesArgs('prompt text', { hermesMaxTurns: 18 }).includes('18'));
   assert.ok(buildHermesArgs('prompt text', { hermesMaxTurns: 90 }).includes('90'));
+});
+
+test('buildHermesArgs uses the native Hermes skill preload flag for the Kakao worker', () => {
+  const args = buildHermesArgs('prompt text', {
+    hermesSkills: 'village-operations,village-confirm-request'
+  });
+  const skillFlag = args.indexOf('-s');
+
+  assert.ok(skillFlag > 0);
+  assert.equal(args[skillFlag + 1], 'village-operations,village-confirm-request');
 });
 
 test('resolveHermesCommand finds hermes in launchctl-safe fallback dirs', () => {
@@ -3612,6 +3667,42 @@ test('buildHermesPostActionPrompt delegates result interpretation and reply pros
   assert.match(prompt, /FINAL_JSON/);
 });
 
+test('buildHermesPostActionPrompt carries forward facts without duplicating bulky first-pass evidence', () => {
+  const bulkyEvidence = `BULKY_EVIDENCE_${'x'.repeat(50000)}`;
+  const prompt = buildHermesPostActionPrompt({
+    job: { id: 'job-compact', room_key: 'preview:hong', preview_text: '예약 가능할까요?' },
+    initialDecision: completeSheetDecision({
+      customer: { name: '홍길동' },
+      visible_messages_used: [{ sender: '홍길동', message: '예약 가능할까요?', time: '오후 1:00' }],
+      follow_up_items: [{
+        type: 'schedule_check',
+        route: 'schedule',
+        taskKey: 'compact-task',
+        priority: 'high',
+        status: 'open',
+        title: '가용 확인',
+        customer_name: '홍길동',
+        summary: '가용 확인 필요',
+        recommended_action: '시트 결과 확인',
+        suggested_reply_draft: '',
+        evidence: [bulkyEvidence],
+        blocking_reason: null,
+        due_hint: 'now'
+      }]
+    }),
+    sheetResult: {
+      reqID: 'RQ-260724-001',
+      results: [{ 장비명: '소니 FX3 바디세트', 수량: '1', 결과: '✅ 가용1', 상세: '예약 가능' }]
+    },
+    sheetPayload: { args: { 예약자명: '홍길동', 장비: [{ 이름: '소니 FX3 바디세트', 수량: 1 }] } }
+  });
+
+  assert.doesNotMatch(prompt, /BULKY_EVIDENCE_/);
+  assert.match(prompt, /compact-task/);
+  assert.match(prompt, /RQ-260724-001/);
+  assert.ok(prompt.length < 20000, `post-action prompt unexpectedly large: ${prompt.length}`);
+});
+
 test('validateAiPostActionDecisionContract prevents code-side or unsafe availability shortcuts', () => {
   const availableReport = {
     status: 'available',
@@ -3625,11 +3716,39 @@ test('validateAiPostActionDecisionContract prevents code-side or unsafe availabi
   assert.ok(rewriteValidation.errors.some((error) => error.includes('should_write_to_sheet must be false')));
 
   const unavailableAutoSend = validateAiPostActionDecisionContract(
-    completePostActionDecision(),
+    completePostActionDecision({
+      reply_decision: {
+        text: '요청하신 일정에는 해당 장비 가용 수량이 없습니다. 대체 장비나 다른 일정을 확인해드릴까요?'
+      }
+    }),
     { status: 'unavailable', payload: { status: 'unavailable', results: [{ result: '가용0' }] } }
   );
-  assert.equal(unavailableAutoSend.valid, false);
-  assert.ok(unavailableAutoSend.errors.some((error) => error.includes('available authoritative result')));
+  assert.equal(unavailableAutoSend.valid, true);
+
+  const unknownAcknowledgement = validateAiPostActionDecisionContract(
+    completePostActionDecision({
+      reply_decision: {
+        text: '요청 접수했습니다. 재고 확인 후 바로 안내드릴게요.',
+        safetyClass: 'simple_ack',
+        grounding: 'authoritative_sheet'
+      }
+    }),
+    { status: 'unknown', payload: { status: 'unknown', results: [] } }
+  );
+  assert.equal(unknownAcknowledgement.valid, true);
+
+  const falseUnknownClaim = validateAiPostActionDecisionContract(
+    completePostActionDecision({
+      reply_decision: {
+        text: '요청하신 장비 가능합니다.',
+        safetyClass: 'simple_ack',
+        grounding: 'authoritative_sheet'
+      }
+    }),
+    { status: 'unknown', payload: { status: 'unknown', results: [] } }
+  );
+  assert.equal(falseUnknownClaim.valid, false);
+  assert.ok(falseUnknownClaim.errors.some((error) => error.includes('simple acknowledgement')));
 
   const claimsConfirmed = validateAiPostActionDecisionContract(
     completePostActionDecision({ reply_decision: { text: '예약 확정되었습니다.' } }),
@@ -6069,8 +6188,12 @@ test('canAutoSendCustomerAnswer only allows high-confidence AI-approved safe rep
   assert.equal(canAutoSendCustomerAnswer(authoritativeAvailability, { autoSendEnabled: true }).allowed, true);
   assert.equal(canAutoSendCustomerAnswer({
     ...authoritativeAvailability,
-    authoritative_sheet_result: { status: 'unavailable', reqID: 'RQ-260724-001' }
-  }, { autoSendEnabled: true }).reason, 'authoritative_availability_grounding_mismatch');
+    authoritative_sheet_result: { status: 'unavailable', reqID: 'RQ-260724-001' },
+    reply_decision: {
+      ...authoritativeAvailability.reply_decision,
+      text: '요청하신 일정에는 해당 장비 가용 수량이 없습니다. 다른 일정을 확인해드릴까요?'
+    }
+  }, { autoSendEnabled: true }).allowed, true);
   assert.equal(canAutoSendCustomerAnswer({
     ...authoritativeAvailability,
     reply_decision: { ...authoritativeAvailability.reply_decision, text: '예약 확정되었습니다.' }

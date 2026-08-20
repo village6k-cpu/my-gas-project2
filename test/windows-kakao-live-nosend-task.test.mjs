@@ -240,7 +240,7 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
     const canonicalHermesHome = path.join(process.env.LOCALAPPDATA, 'hermes');
     assert.deepEqual(health.applied, {
       actionPoll: '1',
-      catchupTimeout: '540000',
+      catchupTimeout: '300000',
       hermesHome: canonicalHermesHome
     });
     assert.deepEqual(health.contract, {
@@ -257,10 +257,11 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
       DEBOUNCE_MS: '15000',
       MAX_WAIT_MS: '45000',
       WORKER_SLOW_ALERT_MS: '30000',
-      WORKER_TIMEOUT_MS: '540000',
-      WORKER_CATCHUP_TIMEOUT_MS: '540000',
-      HERMES_WORKER_TIMEOUT_MS: '480000',
+      WORKER_TIMEOUT_MS: '300000',
+      WORKER_CATCHUP_TIMEOUT_MS: '300000',
+      HERMES_WORKER_TIMEOUT_MS: '240000',
       HERMES_WORKER_MAX_TURNS: '90',
+      HERMES_WORKER_SKILLS: 'village-operations,village-confirm-request',
       KAKAO_AI_DOM_SPLIT_ENABLED: '1',
       KAKAO_AI_DECISION_CONCURRENCY: '2'
     });

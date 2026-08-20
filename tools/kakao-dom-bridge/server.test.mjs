@@ -176,6 +176,52 @@ test('slow Hermes decisions release the DOM lane for another room and manual sen
   await roomA;
 });
 
+test('phase scheduler propagates a bridge deadline into an active Hermes decision', async () => {
+  const controller = new AbortController();
+  const deadlineError = new Error('bridge deadline exceeded');
+  const scheduler = createKakaoPhaseScheduler({
+    capture: async (job) => ({ job }),
+    decide: async (snapshot, job, options = {}) => {
+      if (!options.signal) throw new Error('missing phase abort signal');
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      });
+    },
+    apply: async (prepared) => prepared,
+    finalize: async (applied) => applied,
+    manualSend: async (payload) => payload
+  });
+
+  const run = scheduler.run({ roomKey: 'deadline-room' }, { signal: controller.signal });
+  controller.abort(deadlineError);
+
+  await assert.rejects(run, (error) => error === deadlineError);
+});
+
+test('phase scheduler enforces the configured end-to-end worker timeout', async () => {
+  const scheduler = createKakaoPhaseScheduler({
+    workerTimeoutMs: 20,
+    capture: async (job) => ({ job }),
+    decide: async (snapshot, job, options = {}) => {
+      if (!options.signal) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return { snapshot };
+      }
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      });
+    },
+    apply: async (prepared) => prepared,
+    finalize: async (applied) => applied,
+    manualSend: async (payload) => payload
+  });
+
+  await assert.rejects(
+    scheduler.run({ roomKey: 'timed-room' }),
+    /worker timed out after 20ms/
+  );
+});
+
 test('worker result audit keeps phase timings and AI attempt counts without customer payload', () => {
   const audit = buildWorkerResultAudit({
     status: 'ai_completed',
