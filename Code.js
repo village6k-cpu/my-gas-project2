@@ -1381,7 +1381,8 @@ var ONE_SHOT_TRIGGER_HANDLERS_ = [
   'syncTemplateMasterDebounced',
   'processCancelledTradeCleanup',
   'flushDashboardStructureProjectionQueue_',
-  '_runPendingRegister'
+  '_runPendingRegister',
+  '_runPendingScheduleFormat'
 ];
 
 function isTriggerQuotaError_(err) {
