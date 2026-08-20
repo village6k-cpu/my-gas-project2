@@ -670,6 +670,7 @@ SHEETS TOOL AVAILABLE VIA GAS API:
 - Target sheet for reservation inquiry candidates: 확인요청
 - Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true. Be 적극적: if the latest customer turn is a reservation-format request with enough fields for a review row, set should_write_to_sheet=true.
 - Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write when appropriate.
+${options.gatewayConfirmationToolAvailable ? '- In a native Gateway turn, you may call village_confirmation_request only when you judge authoritative schedule or availability confirmation is necessary. Interpret its server result in this turn; every such result remains owner-review-only and is never a Kakao auto-send authority.\n' : ''}
 
 TASK:
 1. Use supplied BROWSER NAVIGATION RESULT/live DevTools DOM first; it is isolated automation Chrome evidence.
@@ -8185,6 +8186,206 @@ export async function captureKakaoRoomSnapshot({ config, job, dryRun = false } =
   }
 }
 
+function isGatewayIsoTimestamp(value = '') {
+  const raw = text(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(raw)) return false;
+  const parsed = new Date(raw);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === raw;
+}
+
+function boundedGatewayText(value = '', maxChars = 0) {
+  const raw = text(value);
+  return maxChars > 0 && raw.length > maxChars ? `${raw.slice(0, Math.max(0, maxChars - 1))}…` : raw;
+}
+
+function boundedGatewayStringList(values, { maxItems = 20, maxChars = 160 } = {}) {
+  return Array.isArray(values)
+    ? values.map((value) => boundedGatewayText(value, maxChars)).filter(Boolean).slice(0, maxItems)
+    : [];
+}
+
+function buildGatewayLookupEvidence(lookupContext = {}) {
+  return {
+    generated_at: boundedGatewayText(lookupContext.generated_at, 64).trim(),
+    kill_switch: {
+      status: text(lookupContext.kill_switch?.status || 'not_checked').trim() || 'not_checked',
+      error: lookupContext.kill_switch?.error == null ? null : boundedGatewayText(lookupContext.kill_switch.error, 500)
+    },
+    lookup_policy: {
+      mode: boundedGatewayText(lookupContext.lookup_policy?.mode || 'read_only', 80),
+      allowed_methods: boundedGatewayStringList(lookupContext.lookup_policy?.allowed_methods, { maxItems: 8, maxChars: 16 }),
+      forbidden_actions: boundedGatewayStringList(lookupContext.lookup_policy?.forbidden_actions, { maxItems: 20, maxChars: 80 })
+    },
+    lookup_tool: lookupContext.lookup_tool
+      ? {
+          command: boundedGatewayText(lookupContext.lookup_tool.command, 500),
+          stdin_schema: {
+            queries: [{
+              domain: boundedGatewayText(lookupContext.lookup_tool.stdin_schema?.queries?.[0]?.domain, 160),
+              query: boundedGatewayText(lookupContext.lookup_tool.stdin_schema?.queries?.[0]?.query, 500),
+              column: boundedGatewayText(lookupContext.lookup_tool.stdin_schema?.queries?.[0]?.column, 160)
+            }]
+          },
+          domains: boundedGatewayStringList(lookupContext.lookup_tool.domains, { maxItems: 12, maxChars: 80 }),
+          max_queries: Number.isFinite(Number(lookupContext.lookup_tool.max_queries)) ? Number(lookupContext.lookup_tool.max_queries) : 0,
+          behavior: boundedGatewayText(lookupContext.lookup_tool.behavior, 1_000)
+        }
+      : null
+  };
+}
+
+function buildBoundedGatewayTerminalAck(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    matched: value.matched === true,
+    reason: boundedGatewayText(value.reason, 160)
+  };
+}
+
+function buildBoundedGatewayRaw({ job = {}, snapshot, lookupEvidence, ragContext, brainContext, recentBotSends, corrections, terminalAcknowledgement }) {
+  const compactJob = buildCompactJobForPrompt(job);
+  return {
+    job: {
+      id: boundedGatewayText(compactJob.id, 160),
+      source: boundedGatewayText(compactJob.source, 160),
+      status: boundedGatewayText(compactJob.status, 160),
+      room_key: boundedGatewayText(compactJob.room_key, 320),
+      event_hash: boundedGatewayText(compactJob.event_hash, 320),
+      preview_text: boundedGatewayText(compactJob.preview_text, 4_000),
+      navigation_hints: Array.isArray(compactJob.navigation_hints)
+        ? compactJob.navigation_hints.map((value) => boundedGatewayText(value, 160)).slice(0, 4)
+        : [],
+      unread_count: Number.isFinite(Number(compactJob.unread_count)) ? Number(compactJob.unread_count) : null,
+      detected_at: boundedGatewayText(compactJob.detected_at, 64)
+    },
+    snapshot: {
+      schema: snapshot.schema,
+      job_id: boundedGatewayText(snapshot.jobId, 160),
+      room_key: boundedGatewayText(snapshot.roomKey, 320),
+      room_revision: Number(snapshot.roomRevision),
+      captured_at: boundedGatewayText(snapshot.capturedAt, 64),
+      evidence_hash: boundedGatewayText(snapshot.evidenceHash, 128),
+      navigation: {
+        status: boundedGatewayText(snapshot.navigation?.status, 160),
+        reason: boundedGatewayText(snapshot.navigation?.reason, 500),
+        via_devtools: snapshot.navigation?.via_devtools === true,
+        already_open: snapshot.navigation?.already_open === true,
+        opened_by_devtools_search: snapshot.navigation?.opened_by_devtools_search === true,
+        search: snapshot.navigation?.search
+          ? {
+              attempted: snapshot.navigation.search.attempted === true,
+              status: boundedGatewayText(snapshot.navigation.search.status, 160),
+              reason: boundedGatewayText(snapshot.navigation.search.reason, 500)
+            }
+          : null,
+        conversation_evidence: {
+          source: boundedGatewayText(snapshot.navigation?.conversation_evidence?.source, 160),
+          title: boundedGatewayText(snapshot.navigation?.conversation_evidence?.title, 500),
+          hint_matched: snapshot.navigation?.conversation_evidence?.hint_matched === true,
+          hints: Array.isArray(snapshot.navigation?.conversation_evidence?.hints)
+            ? snapshot.navigation.conversation_evidence.hints.map((value) => boundedGatewayText(value, 160)).slice(0, 20)
+            : [],
+          visible_static_text_tail: boundedGatewayText(snapshot.navigation?.conversation_evidence?.visible_static_text_tail, 16_000),
+          note: boundedGatewayText(snapshot.navigation?.conversation_evidence?.note, 500)
+        }
+      }
+    },
+    evidence: {
+      lookup: lookupEvidence,
+      rag: {
+        enabled: ragContext?.enabled === true,
+        unavailable_reason: boundedGatewayText(ragContext?.unavailable_reason, 500)
+      },
+      brain: {
+        enabled: brainContext?.enabled === true,
+        context_path: boundedGatewayText(brainContext?.contextPath, 500),
+        customer_profiles_path: boundedGatewayText(brainContext?.customerProfilesPath, 500)
+      },
+      recent_bot_sends: boundedGatewayText(recentBotSends, 4_000),
+      corrections: boundedGatewayText(corrections, 2_000),
+      terminal_ack_hint: buildBoundedGatewayTerminalAck(terminalAcknowledgement)
+    }
+  };
+}
+
+export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, dependencies = {}, signal = null } = {}) {
+  const snapshot = capture?.snapshot;
+  if (!snapshot || snapshot.schema !== 'kakao-room-snapshot/v1') throw new Error('immutable Kakao room snapshot is required');
+  const jobId = text(job.jobId || job.id || snapshot.jobId).trim();
+  const roomKey = text(job.roomKey || job.room_key || snapshot.roomKey).trim();
+  const roomRevision = Number(job.roomRevision || job.room_revision || snapshot.roomRevision || 0);
+  const detectedAt = text(job.detectedAt || job.detected_at || job.lastEventAt || snapshot.capturedAt).trim();
+  if (!jobId) throw new Error('Gateway turn job_id is required');
+  if (!roomKey) throw new Error('Gateway turn room_key is required');
+  if (!Number.isInteger(roomRevision) || roomRevision <= 0) throw new Error('Gateway turn room_revision must be positive');
+  if (!isGatewayIsoTimestamp(detectedAt)) throw new Error('Gateway turn detected_at must be an ISO timestamp');
+
+  const freshnessGuard = createJobFreshnessGuard({
+    bridgeUrl: config.bridgeUrl,
+    roomKey,
+    roomRevision,
+    jobLogPath: config.jobLogPath,
+    jobId,
+    detectedAt,
+    pollIntervalMs: config.freshnessPollMs,
+    fetchImpl: dependencies.fetchImpl || config.fetchImpl || fetch,
+    signal
+  });
+  try {
+    freshnessGuard.throwIfSuperseded();
+    const lookupContext = await (dependencies.buildReadOnlyLookupContext || buildReadOnlyLookupContext)(config, job, {
+      fetchImpl: dependencies.fetchImpl || config.fetchImpl || fetch
+    });
+    const ragContext = (dependencies.buildReadOnlyRagContext || buildReadOnlyRagContext)(config);
+    const brainContext = (dependencies.buildBrainContext || buildBrainContext)(config);
+    await freshnessGuard.checkNow();
+    freshnessGuard.throwIfSuperseded();
+    const recentBotSends = (dependencies.buildRecentBotSendsPromptText || buildRecentBotSendsPromptText)(config, job);
+    const corrections = (dependencies.buildCorrectionsPromptText || buildCorrectionsPromptText)(config);
+    const prompt = (dependencies.buildHermesPrompt || buildHermesPrompt)(job, {
+      gasApiUrl: config.gasApiUrl,
+      lookupContext,
+      navigationContext: snapshot.navigation,
+      ragContext,
+      brainContext,
+      recentBotSends,
+      corrections,
+      terminalAckHint: capture?.terminalAcknowledgement,
+      gatewayConfirmationToolAvailable: dependencies.gatewayConfirmationToolAvailable !== false
+    });
+    if (!text(prompt).trim()) throw new Error('Gateway turn prompt is required');
+    const lookupEvidence = buildGatewayLookupEvidence(lookupContext);
+    const raw = buildBoundedGatewayRaw({
+      job,
+      snapshot,
+      lookupEvidence,
+      ragContext,
+      brainContext,
+      recentBotSends,
+      corrections,
+      terminalAcknowledgement: capture?.terminalAcknowledgement || null
+    });
+    return {
+      schema: 'village-kakao-gateway-event/v1',
+      job_id: jobId,
+      room_key: roomKey,
+      room_revision: roomRevision,
+      prompt,
+      detected_at: detectedAt,
+      raw,
+      snapshot,
+      lookup_evidence: lookupEvidence,
+      rag_context: ragContext,
+      brain_context: brainContext,
+      recent_bot_sends: recentBotSends,
+      corrections,
+      terminal_ack_hint: buildBoundedGatewayTerminalAck(capture?.terminalAcknowledgement)
+    };
+  } finally {
+    freshnessGuard.stop();
+  }
+}
+
 export async function prepareKakaoDecisionFromSnapshot({
   config,
   job,
@@ -8196,8 +8397,22 @@ export async function prepareKakaoDecisionFromSnapshot({
 } = {}) {
   const snapshot = capture?.snapshot;
   if (!snapshot || snapshot.schema !== 'kakao-room-snapshot/v1') throw new Error('immutable Kakao room snapshot is required');
-  const navigationContext = snapshot.navigation;
   const timings = createWorkerTimingRecorder();
+  let turn;
+  try {
+    turn = await buildKakaoGatewayTurn({
+      config,
+      job,
+      capture,
+      signal,
+      dependencies: { gatewayConfirmationToolAvailable: false }
+    });
+  } catch (error) {
+    if (/superseded_by_newer_room_event/.test(String(error?.message || error || ''))) {
+      return { status: 'superseded_by_newer_room_event', snapshot, superseded: true, timings: timings.snapshot() };
+    }
+    throw error;
+  }
   // 종결 인사 여부는 코드가 아니라 AI가 판단한다. DOM 휴리스틱 분류는 조기 반환
   // 대신 프롬프트 힌트(TERMINAL_ACK_HINT)로만 전달된다 (2026-08-19 AI-first 재설계).
   const freshnessGuard = createJobFreshnessGuard({
@@ -8213,15 +8428,13 @@ export async function prepareKakaoDecisionFromSnapshot({
   });
   try {
     freshnessGuard.throwIfSuperseded();
-    const lookupContext = await buildReadOnlyLookupContext(config, job);
-    const ragContext = buildReadOnlyRagContext(config);
-    const brainContext = buildBrainContext(config);
+    const lookupContext = turn.lookup_evidence;
+    const ragContext = turn.rag_context;
+    const brainContext = turn.brain_context;
     timings.mark('lookup');
     await freshnessGuard.checkNow();
     freshnessGuard.throwIfSuperseded();
-    const recentBotSends = buildRecentBotSendsPromptText(config, job);
-    const corrections = buildCorrectionsPromptText(config);
-    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext, brainContext, recentBotSends, corrections, terminalAckHint: capture?.terminalAcknowledgement });
+    const prompt = turn.prompt;
     if (dryRun) {
       return { status: 'dry_run', snapshot, job: summarizeJob(job), lookupContext, ragContext, brainContext, prompt, timings: timings.snapshot() };
     }
