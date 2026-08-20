@@ -10,6 +10,7 @@ import { buildSlackFollowUpMessage, buildSlackRoutingConfig, deliverSlackFollowU
 import {
   applyPreparedKakaoDecision,
   captureKakaoRoomSnapshot,
+  executeVillageConfirmationRequest,
   finalizePreparedKakaoDecision,
   loadKakaoWorkerRuntimeConfig,
   prepareKakaoDecisionFromSnapshot
@@ -229,7 +230,23 @@ const gatewayChannel = gatewayTransportEnabled
 const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
   channel: gatewayChannel,
-  transport: CONFIG.hermesTransport
+  transport: CONFIG.hermesTransport,
+  executeConfirmation: gatewayTransportEnabled
+    ? async (request) => {
+        kakaoWorkerRuntimeConfig ||= loadKakaoWorkerRuntimeConfig();
+        return executeVillageConfirmationRequest({
+          config: kakaoWorkerRuntimeConfig,
+          job: {
+            jobId: request.job_id,
+            roomKey: request.room_key,
+            roomRevision: request.room_revision,
+            detectedAt: request.detected_at || ''
+          },
+          roomRevision: request.room_revision,
+          decision: request.decision
+        });
+      }
+    : null
 });
 
 function ensureQueueDir() {

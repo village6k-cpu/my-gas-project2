@@ -1112,6 +1112,190 @@ function completeSheetDecision(overrides = {}) {
   };
 }
 
+function confirmationFreshnessGuard({ stale = false } = {}) {
+  let checks = 0;
+  return {
+    signal: new AbortController().signal,
+    async checkNow() { checks += 1; },
+    throwIfSuperseded() {
+      if (stale && checks > 0) throw new Error('superseded_by_newer_room_event:8');
+    },
+    stop() {},
+    get checks() { return checks; }
+  };
+}
+
+test('executeVillageConfirmationRequest reuses additions-only merge, customer discount enrichment, and authoritative availability', async () => {
+  const decision = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260820-001'],
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: 'additions_only',
+      equipment: [{ item: 'C스탠드', quantity: 2 }]
+    }
+  });
+  const freshnessGuard = confirmationFreshnessGuard();
+  const appended = [];
+  let executionState = null;
+  const forbidden = { hermes: 0, kakao: 0, followUp: 0, slack: 0, reconciliation: 0 };
+
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-confirm-1', roomKey: 'room-confirm-1', roomRevision: 7 },
+    roomRevision: 7,
+    decision,
+    dependencies: {
+      freshnessGuard,
+      fetchExistingConfirmRequestResultForDecision: async () => ({
+        success: true,
+        duplicate: true,
+        reqID: 'RQ-260820-001',
+        topLevelEquipment: [{ 이름: '소니 FX3 바디세트', 수량: 1 }],
+        results: []
+      }),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
+        payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
+        lookup: { matched: true, discountType: '학생' }
+      }),
+      appendToSheet: async (_config, payload) => {
+        assert.ok(freshnessGuard.checks >= 1, 'freshness must be checked immediately before the GAS mutation');
+        appended.push(payload);
+        return {
+          success: true,
+          duplicate: false,
+          reqID: 'RQ-260821-101',
+          results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
+        };
+      },
+      ensureConfirmRequestDiscountApplied: async () => ({ updated: true, discountType: '학생' }),
+      randomUUID: () => 'receipt-confirm-1',
+      now: () => new Date('2026-08-21T04:05:06.000Z'),
+      onExecutionState: (state) => { executionState = state; },
+      runHermesDecision: async () => { forbidden.hermes += 1; },
+      sendKakaoMessage: async () => { forbidden.kakao += 1; },
+      upsertFollowUpRows: async () => { forbidden.followUp += 1; },
+      deliverSlackFollowUpRows: async () => { forbidden.slack += 1; },
+      runHermesPostActionDecision: async () => { forbidden.reconciliation += 1; }
+    }
+  });
+
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].args.입력모드, 'full_plan');
+  assert.equal(appended[0].args.할인유형, '학생');
+  assert.deepEqual(appended[0].args.장비, [
+    { 이름: '소니 FX3 바디세트', 수량: 1 },
+    { 이름: 'C스탠드', 수량: 2 }
+  ]);
+  assert.deepEqual(receipt, {
+    schema: 'village-confirmation-receipt/v1',
+    receipt_id: 'receipt-confirm-1',
+    job_id: 'job-confirm-1',
+    room_key: 'room-confirm-1',
+    room_revision: 7,
+    status: 'ok',
+    availability_report: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }],
+    authoritative_sheet_result: {
+      success: true,
+      duplicate: false,
+      reqID: 'RQ-260821-101',
+      results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
+    },
+    created_at: '2026-08-21T04:05:06.000Z',
+    error: null
+  });
+  assert.equal(executionState.sheetPayload.args.할인유형, '학생');
+  assert.equal(executionState.customerDbDiscountLookup.discountType, '학생');
+  assert.deepEqual(forbidden, { hermes: 0, kakao: 0, followUp: 0, slack: 0, reconciliation: 0 });
+});
+
+test('executeVillageConfirmationRequest returns a typed validation failure without mutating GAS', async () => {
+  let appendCalls = 0;
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-invalid', roomKey: 'room-invalid', roomRevision: 7 },
+    roomRevision: 7,
+    decision: { should_write_to_sheet: true, sheet_row_candidate: {} },
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      appendToSheet: async () => { appendCalls += 1; },
+      randomUUID: () => 'receipt-invalid',
+      now: () => new Date('2026-08-21T04:05:06.000Z')
+    }
+  });
+
+  assert.equal(appendCalls, 0);
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.authoritative_sheet_result, null);
+  assert.deepEqual(receipt.availability_report, []);
+  assert.equal(receipt.error.type, 'invalid_decision');
+  assert.ok(receipt.error.validation_errors.length > 0);
+});
+
+test('executeVillageConfirmationRequest rejects stale correlation and stale freshness before mutation', async () => {
+  const decision = completeSheetDecision();
+  let appendCalls = 0;
+  const appendToSheet = async () => { appendCalls += 1; };
+  const common = {
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-stale', roomKey: 'room-stale', roomRevision: 7 },
+    decision,
+    dependencies: { appendToSheet, randomUUID: () => 'receipt-stale', now: () => new Date('2026-08-21T04:05:06.000Z') }
+  };
+
+  await assert.rejects(
+    workerModule.executeVillageConfirmationRequest({ ...common, roomRevision: 6, dependencies: { ...common.dependencies, freshnessGuard: confirmationFreshnessGuard() } }),
+    /stale_room_revision/
+  );
+  await assert.rejects(
+    workerModule.executeVillageConfirmationRequest({ ...common, roomRevision: 7, dependencies: { ...common.dependencies, freshnessGuard: confirmationFreshnessGuard({ stale: true }) } }),
+    /superseded_by_newer_room_event/
+  );
+  assert.equal(appendCalls, 0);
+});
+
+test('executeVillageConfirmationRequest preserves missing-contact GAS rejection as a failed authoritative receipt', async () => {
+  const decision = completeSheetDecision({ sheet_row_candidate: { phone: '' } });
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-no-contact', roomKey: 'room-no-contact', roomRevision: 7 },
+    roomRevision: 7,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
+      appendToSheet: async () => ({ success: false, error_type: 'no_contact', error: '연락처 필요' }),
+      randomUUID: () => 'receipt-no-contact',
+      now: () => new Date('2026-08-21T04:05:06.000Z')
+    }
+  });
+
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.authoritative_sheet_result, null);
+  assert.deepEqual(receipt.availability_report, []);
+  assert.deepEqual(receipt.error, { type: 'no_contact', message: '연락처 필요' });
+});
+
+test('executeVillageConfirmationRequest converts a thrown GAS failure into a typed failed receipt', async () => {
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-gas-error', roomKey: 'room-gas-error', roomRevision: 7 },
+    roomRevision: 7,
+    decision: completeSheetDecision(),
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
+      appendToSheet: async () => { throw new Error('GAS offline'); },
+      randomUUID: () => 'receipt-gas-error',
+      now: () => new Date('2026-08-21T04:05:06.000Z')
+    }
+  });
+
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.authoritative_sheet_result, null);
+  assert.deepEqual(receipt.availability_report, []);
+  assert.deepEqual(receipt.error, { type: 'gas_request_failed', message: 'GAS offline' });
+});
+
 function completePostActionDecision(overrides = {}) {
   const base = {
     should_write_to_sheet: false,

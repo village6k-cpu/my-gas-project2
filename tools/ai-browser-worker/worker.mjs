@@ -8414,6 +8414,202 @@ export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, de
   }
 }
 
+function confirmationRequestOperationError(code, message) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+  return error;
+}
+
+function confirmationReceiptError(type, message, extra = {}) {
+  return {
+    type: text(type).trim() || 'confirmation_failed',
+    message: text(message).trim().slice(0, 1000) || 'Confirmation request failed',
+    ...extra
+  };
+}
+
+export async function executeVillageConfirmationRequest({
+  config = {},
+  job = {},
+  roomRevision = job.roomRevision ?? job.room_revision,
+  decision = {},
+  dependencies = {},
+  signal = null
+} = {}) {
+  const jobId = text(job.jobId || job.job_id || job.id).trim();
+  const roomKey = text(job.roomKey || job.room_key).trim();
+  const jobRevision = Number(job.roomRevision ?? job.room_revision);
+  const requestedRevision = Number(roomRevision);
+  if (!jobId) throw confirmationRequestOperationError('invalid_confirmation_request', 'job_id is required');
+  if (!roomKey) throw confirmationRequestOperationError('invalid_confirmation_request', 'room_key is required');
+  if (typeof roomRevision !== 'number' || !Number.isInteger(requestedRevision) || requestedRevision <= 0) {
+    throw confirmationRequestOperationError('invalid_confirmation_request', 'room_revision must be a positive integer');
+  }
+  if (!Number.isInteger(jobRevision) || jobRevision !== requestedRevision) {
+    throw confirmationRequestOperationError('stale_room_revision', 'requested room revision does not match the job');
+  }
+
+  const uuid = dependencies.randomUUID || randomUUID;
+  const now = dependencies.now || (() => new Date());
+  const receiptId = text(uuid()).trim();
+  if (!receiptId) throw confirmationRequestOperationError('invalid_confirmation_receipt', 'receipt_id generation failed');
+  const createdAtValue = now();
+  const createdAt = (createdAtValue instanceof Date ? createdAtValue : new Date(createdAtValue)).toISOString();
+  const buildReceipt = ({ status, authoritativeSheetResult = null, availabilityReport = [], error = null }) => ({
+    schema: 'village-confirmation-receipt/v1',
+    receipt_id: receiptId,
+    job_id: jobId,
+    room_key: roomKey,
+    room_revision: requestedRevision,
+    status,
+    availability_report: Array.isArray(availabilityReport) ? availabilityReport : [],
+    authoritative_sheet_result: authoritativeSheetResult,
+    created_at: createdAt,
+    error
+  });
+
+  const validation = (dependencies.validateAiDecisionContract || validateAiDecisionContract)(decision);
+  if (!validation?.valid) {
+    return buildReceipt({
+      status: 'failed',
+      error: confirmationReceiptError('invalid_decision', 'AI decision contract validation failed', {
+        validation_errors: Array.isArray(validation?.errors) ? validation.errors.slice(0, 20).map((entry) => text(entry).slice(0, 300)) : []
+      })
+    });
+  }
+
+  const freshnessGuard = dependencies.freshnessGuard || createJobFreshnessGuard({
+    bridgeUrl: config.bridgeUrl,
+    roomKey,
+    roomRevision: requestedRevision,
+    jobLogPath: config.jobLogPath,
+    jobId,
+    detectedAt: job.detectedAt || job.detected_at || job.lastEventAt || '',
+    pollIntervalMs: config.freshnessPollMs,
+    fetchImpl: config.fetchImpl || fetch,
+    signal
+  });
+  const ownsFreshnessGuard = !dependencies.freshnessGuard;
+  const appendImpl = dependencies.appendToSheet || appendToSheet;
+  const fetchExistingImpl = dependencies.fetchExistingConfirmRequestResultForDecision || fetchExistingConfirmRequestResultForDecision;
+  const enrichDiscountImpl = dependencies.enrichSheetPayloadWithCustomerDbDiscount || enrichSheetPayloadWithCustomerDbDiscount;
+  const ensureDiscountImpl = dependencies.ensureConfirmRequestDiscountApplied || ensureConfirmRequestDiscountApplied;
+  const notifyExecutionState = typeof dependencies.onExecutionState === 'function'
+    ? dependencies.onExecutionState
+    : () => {};
+
+  let executedDecision = decision;
+  let sheetPayload = buildSheetAppendPayload(executedDecision, { apiKey: config.sheetApiKey });
+  let sheetResult = null;
+  let existingRequestResult = null;
+  let customerDbDiscountLookup = null;
+  let discountPatchResult = null;
+  let availabilityReport = null;
+  try {
+    freshnessGuard.throwIfSuperseded();
+    if (sheetPayload?.args?.입력모드 === 'additions_only') {
+      let existingRequestForMerge = null;
+      if (executedDecision?.reservation_inquiry?.already_registered !== true) {
+        existingRequestForMerge = await fetchExistingImpl(config, executedDecision, []);
+      }
+      const merged = mergeAdditionsOnlySheetPayloadWithExistingRequest(sheetPayload, executedDecision, existingRequestForMerge);
+      if (!merged.ok) {
+        sheetResult = {
+          success: false,
+          error: merged.error,
+          error_type: 'existing_confirm_request_merge_failed',
+          recoverable: false
+        };
+      }
+      sheetPayload = merged.payload;
+    }
+
+    if (executedDecision.should_write_to_sheet === true && !sheetPayload && !sheetResult) {
+      sheetResult = {
+        success: false,
+        error: 'Validated decision did not produce a safe confirmation-request payload',
+        error_type: 'invalid_sheet_payload',
+        recoverable: false
+      };
+    }
+
+    if (sheetPayload) {
+      try {
+        const enriched = await enrichDiscountImpl(config, sheetPayload);
+        sheetPayload = enriched.payload;
+        customerDbDiscountLookup = enriched.lookup;
+        if (customerDbDiscountLookup?.discountType) {
+          executedDecision = {
+            ...executedDecision,
+            sheet_row_candidate: {
+              ...(executedDecision.sheet_row_candidate || {}),
+              discount_type: customerDbDiscountLookup.discountType
+            }
+          };
+        }
+      } catch (error) {
+        customerDbDiscountLookup = { matched: false, error: text(error?.message || error).slice(0, 500) };
+      }
+
+      await freshnessGuard.checkNow();
+      freshnessGuard.throwIfSuperseded();
+      try {
+        sheetResult = await appendImpl(config, sheetPayload);
+      } catch (error) {
+        sheetResult = {
+          success: false,
+          error: text(error?.message || error).slice(0, 1000) || 'GAS request failed',
+          error_type: 'gas_request_failed',
+          recoverable: false
+        };
+      }
+
+      if (customerDbDiscountLookup?.discountType && sheetResult?.success === true) {
+        await freshnessGuard.checkNow();
+        freshnessGuard.throwIfSuperseded();
+        try {
+          discountPatchResult = await ensureDiscountImpl(config, sheetResult, sheetPayload, customerDbDiscountLookup);
+        } catch (error) {
+          discountPatchResult = { updated: false, error: text(error?.message || error).slice(0, 500) };
+        }
+      }
+    }
+
+    if (!sheetResult) {
+      existingRequestResult = await fetchExistingImpl(config, executedDecision, []);
+    }
+    const authoritativeSheetResult = sheetResult?.success === false
+      ? null
+      : (sheetResult || existingRequestResult);
+    availabilityReport = buildSheetAvailabilityReport(authoritativeSheetResult, sheetPayload);
+    const operationState = {
+      decision: executedDecision,
+      sheetResult,
+      sheetPayload,
+      customerDbDiscountLookup,
+      discountPatchResult,
+      existingRequestResult,
+      authoritativeSheetResult,
+      availabilityReport
+    };
+    notifyExecutionState(operationState);
+    if (sheetResult?.success === false) {
+      return buildReceipt({
+        status: 'failed',
+        error: confirmationReceiptError(sheetResult.error_type || 'gas_rejected', sheetResult.error || 'GAS rejected confirmation request')
+      });
+    }
+    return buildReceipt({
+      status: authoritativeSheetResult ? 'ok' : 'no_action',
+      authoritativeSheetResult: authoritativeSheetResult || null,
+      availabilityReport: availabilityReport?.rows || [],
+      error: null
+    });
+  } finally {
+    if (ownsFreshnessGuard) freshnessGuard.stop();
+  }
+}
+
 export async function prepareKakaoDecisionFromSnapshot({
   config,
   job,
@@ -8487,70 +8683,39 @@ export async function prepareKakaoDecisionFromSnapshot({
       decision.kill_switch_observed = lookupContext.kill_switch.status;
     }
 
-    let sheetPayload = buildSheetAppendPayload(decision, { apiKey: config.sheetApiKey });
-    let sheetPreparationFailure = null;
-    if (sheetPayload?.args?.입력모드 === 'additions_only') {
-      let existingRequestForMerge = null;
-      if (decision?.reservation_inquiry?.already_registered !== true) {
-        existingRequestForMerge = await fetchExistingConfirmRequestResultForDecision(config, decision, []);
-      }
-      const merged = mergeAdditionsOnlySheetPayloadWithExistingRequest(
-        sheetPayload,
-        decision,
-        existingRequestForMerge
-      );
-      if (merged.ok) {
-        sheetPayload = merged.payload;
-      } else {
-        sheetPayload = null;
-        sheetPreparationFailure = {
-          success: false,
-          error: merged.error,
-          error_type: 'existing_confirm_request_merge_failed',
-          recoverable: false
-        };
-      }
-    }
-    let customerDbDiscountLookup = null;
-    if (sheetPayload) {
-      try {
-        const enriched = await enrichSheetPayloadWithCustomerDbDiscount(config, sheetPayload);
-        sheetPayload = enriched.payload;
-        customerDbDiscountLookup = enriched.lookup;
-        if (customerDbDiscountLookup?.discountType) {
-          decision = {
-            ...decision,
-            sheet_row_candidate: {
-              ...(decision.sheet_row_candidate || {}),
-              discount_type: customerDbDiscountLookup.discountType
-            }
-          };
-        }
-      } catch (error) {
-        customerDbDiscountLookup = { matched: false, error: error.message.slice(0, 500) };
-      }
-    }
     reportHandoffPhase('sheet_mutation_boundary');
-    const sheetResult = sheetPreparationFailure || await appendToSheet(config, sheetPayload);
-    let discountPatchResult = null;
-    if (sheetPayload && customerDbDiscountLookup?.discountType) {
-      try {
-        discountPatchResult = await ensureConfirmRequestDiscountApplied(config, sheetResult, sheetPayload, customerDbDiscountLookup);
-      } catch (error) {
-        discountPatchResult = { updated: false, error: error.message.slice(0, 500) };
-      }
-    }
-    const initialFollowUpRows = [
-      ...buildFollowUpRows(decision, job),
-      ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)
-    ];
-    const existingRequestResult = sheetResult
-      ? null
-      : await fetchExistingConfirmRequestResultForDecision(config, decision, initialFollowUpRows);
-    const authoritativeSheetResult = sheetResult?.success === false
-      ? null
-      : (sheetResult || existingRequestResult);
-    const availabilityReport = buildSheetAvailabilityReport(authoritativeSheetResult, sheetPayload);
+    let confirmationState = null;
+    await executeVillageConfirmationRequest({
+      config,
+      job,
+      roomRevision: job.roomRevision || job.room_revision || 0,
+      decision,
+      dependencies: {
+        freshnessGuard,
+        onExecutionState: (state) => { confirmationState = state; }
+      },
+      signal: freshnessGuard.signal
+    });
+    confirmationState ||= {
+      decision,
+      sheetResult: null,
+      sheetPayload: null,
+      customerDbDiscountLookup: null,
+      discountPatchResult: null,
+      existingRequestResult: null,
+      authoritativeSheetResult: null,
+      availabilityReport: null
+    };
+    decision = confirmationState.decision;
+    const {
+      sheetResult,
+      sheetPayload,
+      customerDbDiscountLookup,
+      discountPatchResult,
+      existingRequestResult,
+      authoritativeSheetResult,
+      availabilityReport
+    } = confirmationState;
     let postActionResult = null;
     let postActionOutputTail = '';
     if (availabilityReport) {

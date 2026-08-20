@@ -54,6 +54,29 @@ function requiredLeaseId(body) {
   return leaseId;
 }
 
+function exactClaimForConfirmation(job, body, leaseId) {
+  return job
+    && job.state === 'claimed'
+    && String(job.job_id || '') === String(body?.job_id || '')
+    && String(job.room_key || '') === String(body?.room_key || '')
+    && Number(job.room_revision) === body?.room_revision
+    && typeof body?.room_revision === 'number'
+    && Number.isInteger(body.room_revision)
+    && Number(body.room_revision) > 0
+    && String(job.lease_id || '') === leaseId;
+}
+
+function matchingTrustedReceipt(job, body, leaseId) {
+  if (!exactClaimForConfirmation(job, body, leaseId)) return null;
+  return (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).find((receipt) => (
+    receipt?.schema === 'village-confirmation-receipt/v1'
+    && String(receipt.job_id || '') === String(body.job_id || '')
+    && String(receipt.room_key || '') === String(body.room_key || '')
+    && Number(receipt.room_revision) === Number(body.room_revision)
+    && String(receipt.lease_id || '') === leaseId
+  )) || null;
+}
+
 function parseWaitMs(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) throw requestError(400, 'invalid_wait_ms');
@@ -67,6 +90,7 @@ function channelErrorResponse(error) {
 
 export function createHermesGatewayHttpHandler({ token, channel, executeConfirmation, transport = 'cli' } = {}) {
   const gatewayConfigured = GATEWAY_TRANSPORTS.has(transport) && Boolean(String(token || '').trim()) && Boolean(channel);
+  const confirmationInFlight = new Map();
 
   return async function handleHermesGatewayRequest(req, res, url) {
     if (!url.pathname.startsWith('/hermes/v1/')) return false;
@@ -120,13 +144,39 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
       if (req.method === 'POST' && url.pathname === '/hermes/v1/tools/confirmation-request') {
         const body = await readJsonBody(req);
         const leaseId = requiredLeaseId(body);
+        if (transport === 'gateway_no_send') throw requestError(403, 'writes_disabled');
+        if (typeof channel.get !== 'function') throw requestError(503, 'confirmation_fencing_unavailable');
+        const claimedJob = await channel.get(body?.job_id);
+        if (!exactClaimForConfirmation(claimedJob, body, leaseId)) throw requestError(409, 'stale_lease');
+        const trustedReceipt = matchingTrustedReceipt(claimedJob, body, leaseId);
+        if (trustedReceipt) {
+          sendJson(res, 200, trustedReceipt);
+          return true;
+        }
         if (typeof executeConfirmation !== 'function') throw requestError(503, 'confirmation_unavailable');
-        const receipt = await executeConfirmation(body);
-        if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) throw requestError(502, 'invalid_confirmation_receipt');
-        if (receipt.lease_id && receipt.lease_id !== leaseId) throw requestError(409, 'lease_id_mismatch');
-        const fencedReceipt = { ...receipt, lease_id: leaseId };
-        await channel.recordToolReceipt(fencedReceipt);
-        sendJson(res, 200, fencedReceipt);
+        const operationKey = [body.job_id, body.room_key, body.room_revision, leaseId].map((value) => String(value)).join('\u0000');
+        let operation = confirmationInFlight.get(operationKey);
+        if (!operation) {
+          operation = (async () => {
+            const receipt = await executeConfirmation(body);
+            if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) throw requestError(502, 'invalid_confirmation_receipt');
+            if (String(receipt.job_id || '') !== String(body.job_id || '')
+              || String(receipt.room_key || '') !== String(body.room_key || '')
+              || Number(receipt.room_revision) !== Number(body.room_revision)) {
+              throw requestError(502, 'confirmation_receipt_correlation_mismatch');
+            }
+            if (receipt.lease_id && receipt.lease_id !== leaseId) throw requestError(409, 'lease_id_mismatch');
+            const fencedReceipt = { ...receipt, lease_id: leaseId };
+            await channel.recordToolReceipt(fencedReceipt);
+            return fencedReceipt;
+          })();
+          confirmationInFlight.set(operationKey, operation);
+        }
+        try {
+          sendJson(res, 200, await operation);
+        } finally {
+          if (confirmationInFlight.get(operationKey) === operation) confirmationInFlight.delete(operationKey);
+        }
         return true;
       }
 

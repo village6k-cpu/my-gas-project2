@@ -9,7 +9,7 @@ const token = 'test-token-not-a-secret';
 const leaseId = 'lease-opaque-1';
 
 function makeChannel() {
-  const calls = { claim: [], complete: [], outcome: [], receipt: [] };
+  const calls = { claim: [], complete: [], outcome: [], receipt: [], get: [] };
   return {
     calls,
     async claim(options) {
@@ -22,6 +22,10 @@ function makeChannel() {
     async complete(body) { calls.complete.push(body); return { state: 'completed' }; },
     async recordOutcome(body) { calls.outcome.push(body); return { state: 'failed' }; },
     async recordToolReceipt(body) { calls.receipt.push(body); return { state: 'claimed' }; },
+    async get(jobId) {
+      calls.get.push(jobId);
+      return { job_id: jobId, room_key: 'room-1', room_revision: 3, state: 'claimed', lease_id: leaseId, tool_receipts: [] };
+    },
     async status() {
       return { counts: { ready: 2, claimed: 1, completed: 4, superseded: 0, retry_wait: 0, failed: 0 }, oldest_lease_age_ms: 1234, last_completed_job_id: 'private-job' };
     }
@@ -138,6 +142,193 @@ test('Gateway HTTP forwards the claim lease id into confirmation execution and r
     assert.equal(receipt.schema, 'village-confirmation-receipt/v1');
     assert.equal(receipt.receipt_id, 'receipt-1');
     assert.equal(receipt.lease_id, leaseId);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP returns an exactly fenced trusted receipt without repeating confirmation execution', async () => {
+  const channel = makeChannel();
+  const persisted = {
+    schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-existing', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+    status: 'ok', availability_report: [], authoritative_sheet_result: { success: true, reqID: 'RQ-260821-001' },
+    created_at: '2026-08-21T00:00:00.000Z', error: null, lease_id: leaseId
+  };
+  channel.get = async (jobId) => {
+    channel.calls.get.push(jobId);
+    return { job_id: jobId, room_key: 'room-1', room_revision: 3, state: 'claimed', lease_id: leaseId, tool_receipts: [persisted] };
+  };
+  let executionCalls = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway', executeConfirmation: async () => { executionCalls += 1; throw new Error('must not replay GAS'); }
+  }));
+  try {
+    const body = { job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId, decision: { should_write_to_sheet: true, sheet_row_candidate: {} } };
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), persisted);
+    assert.equal(executionCalls, 0);
+    assert.equal(channel.calls.receipt.length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP coalesces concurrent duplicate confirmation requests before receipt persistence', async () => {
+  const channel = makeChannel();
+  let releaseBothGets;
+  const bothGets = new Promise((resolve) => { releaseBothGets = resolve; });
+  let getCalls = 0;
+  channel.get = async (jobId) => {
+    getCalls += 1;
+    if (getCalls === 2) releaseBothGets();
+    await bothGets;
+    return { job_id: jobId, room_key: 'room-1', room_revision: 3, state: 'claimed', lease_id: leaseId, tool_receipts: [] };
+  };
+  let releaseExecution;
+  const executionGate = new Promise((resolve) => { releaseExecution = resolve; });
+  let executionCalls = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway', executeConfirmation: async () => {
+      executionCalls += 1;
+      await executionGate;
+      return {
+        schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-concurrent', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+        status: 'ok', availability_report: [], authoritative_sheet_result: null, created_at: '2026-08-21T00:00:00.000Z', error: null
+      };
+    }
+  }));
+  try {
+    const init = {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId, decision: { should_write_to_sheet: true, sheet_row_candidate: {} } })
+    };
+    const first = gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', init);
+    const second = gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', init);
+    await bothGets;
+    releaseExecution();
+    const responses = await Promise.all([first, second]);
+    assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+    assert.deepEqual(await Promise.all(responses.map((response) => response.json())), [
+      {
+        schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-concurrent', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+        status: 'ok', availability_report: [], authoritative_sheet_result: null, created_at: '2026-08-21T00:00:00.000Z', error: null,
+        lease_id: leaseId
+      },
+      {
+        schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-concurrent', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+        status: 'ok', availability_report: [], authoritative_sheet_result: null, created_at: '2026-08-21T00:00:00.000Z', error: null,
+        lease_id: leaseId
+      }
+    ]);
+    assert.equal(executionCalls, 1);
+    assert.equal(channel.calls.receipt.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP does not reuse a receipt from another lease', async () => {
+  const channel = makeChannel();
+  channel.get = async (jobId) => ({
+    job_id: jobId, room_key: 'room-1', room_revision: 3, state: 'claimed', lease_id: leaseId,
+    tool_receipts: [{
+      schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-old', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+      status: 'ok', availability_report: [], authoritative_sheet_result: null, created_at: '2026-08-21T00:00:00.000Z', error: null,
+      lease_id: 'expired-lease'
+    }]
+  });
+  let executionCalls = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    executeConfirmation: async () => {
+      executionCalls += 1;
+      return {
+        schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-new', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+        status: 'ok', availability_report: [], authoritative_sheet_result: null, created_at: '2026-08-21T01:00:00.000Z', error: null
+      };
+    }
+  }));
+  try {
+    const body = { job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId, decision: { should_write_to_sheet: true, sheet_row_candidate: {} } };
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).receipt_id, 'receipt-new');
+    assert.equal(executionCalls, 1);
+    assert.equal(channel.calls.receipt.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP rejects a boolean room revision before confirmation execution', async () => {
+  const channel = makeChannel();
+  channel.get = async (jobId) => ({
+    job_id: jobId, room_key: 'room-1', room_revision: 1, state: 'claimed', lease_id: leaseId, tool_receipts: []
+  });
+  let executionCalls = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway', executeConfirmation: async () => {
+      executionCalls += 1;
+      return {
+        schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-boolean', job_id: 'job-1', room_key: 'room-1', room_revision: 1,
+        status: 'ok', availability_report: [], authoritative_sheet_result: null, created_at: '2026-08-21T00:00:00.000Z', error: null
+      };
+    }
+  }));
+  try {
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ job_id: 'job-1', room_key: 'room-1', room_revision: true, lease_id: leaseId, decision: {} })
+    });
+    assert.equal(response.status, 409);
+    assert.equal(executionCalls, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP gateway_no_send rejects confirmation writes before execution', async () => {
+  const channel = makeChannel();
+  let executionCalls = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway_no_send', executeConfirmation: async () => { executionCalls += 1; }
+  }));
+  try {
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId, decision: {} })
+    });
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { error: 'writes_disabled' });
+    assert.equal(executionCalls, 0);
+    assert.equal(channel.calls.receipt.length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP fails closed when durable receipt persistence fails', async () => {
+  const channel = makeChannel();
+  channel.recordToolReceipt = async () => { throw Object.assign(new Error('disk unavailable'), { code: 'receipt_persist_failed' }); };
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway', executeConfirmation: async () => ({
+      schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-unpersisted', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+      status: 'ok', availability_report: [], authoritative_sheet_result: null, created_at: '2026-08-21T00:00:00.000Z', error: null
+    })
+  }));
+  try {
+    const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId, decision: {} })
+    });
+    assert.notEqual(response.status, 200);
+    const body = await response.json();
+    assert.notEqual(body.receipt_id, 'receipt-unpersisted');
   } finally {
     await app.close();
   }
