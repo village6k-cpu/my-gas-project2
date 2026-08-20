@@ -227,26 +227,36 @@ const gatewayChannel = gatewayTransportEnabled
     maxAttempts: CONFIG.hermesMaxAttempts
   })
   : null;
+export function createGatewayConfirmationExecutor({ getConfig, executeOperation = executeVillageConfirmationRequest } = {}) {
+  if (typeof getConfig !== 'function') throw new Error('Gateway confirmation config loader is required');
+  if (typeof executeOperation !== 'function') throw new Error('Gateway confirmation operation is required');
+  return async (request, { assertCurrentClaim } = {}) => executeOperation({
+    config: getConfig(),
+    job: {
+      jobId: request.job_id,
+      roomKey: request.room_key,
+      roomRevision: request.room_revision,
+      detectedAt: request.detected_at || ''
+    },
+    roomRevision: request.room_revision,
+    decision: request.decision,
+    dependencies: { assertCurrentClaim }
+  });
+}
+
+const gatewayConfirmationExecutor = gatewayTransportEnabled
+  ? createGatewayConfirmationExecutor({
+      getConfig: () => {
+        kakaoWorkerRuntimeConfig ||= loadKakaoWorkerRuntimeConfig();
+        return kakaoWorkerRuntimeConfig;
+      }
+    })
+  : null;
 const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
   channel: gatewayChannel,
   transport: CONFIG.hermesTransport,
-  executeConfirmation: gatewayTransportEnabled
-    ? async (request) => {
-        kakaoWorkerRuntimeConfig ||= loadKakaoWorkerRuntimeConfig();
-        return executeVillageConfirmationRequest({
-          config: kakaoWorkerRuntimeConfig,
-          job: {
-            jobId: request.job_id,
-            roomKey: request.room_key,
-            roomRevision: request.room_revision,
-            detectedAt: request.detected_at || ''
-          },
-          roomRevision: request.room_revision,
-          decision: request.decision
-        });
-      }
-    : null
+  executeConfirmation: gatewayConfirmationExecutor
 });
 
 function ensureQueueDir() {

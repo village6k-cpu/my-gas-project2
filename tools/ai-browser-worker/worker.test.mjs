@@ -1112,13 +1112,13 @@ function completeSheetDecision(overrides = {}) {
   };
 }
 
-function confirmationFreshnessGuard({ stale = false } = {}) {
+function confirmationFreshnessGuard({ stale = false, staleAfterChecks = stale ? 1 : Number.POSITIVE_INFINITY } = {}) {
   let checks = 0;
   return {
     signal: new AbortController().signal,
     async checkNow() { checks += 1; },
     throwIfSuperseded() {
-      if (stale && checks > 0) throw new Error('superseded_by_newer_room_event:8');
+      if (checks >= staleAfterChecks) throw new Error('superseded_by_newer_room_event:8');
     },
     stop() {},
     get checks() { return checks; }
@@ -1136,6 +1136,7 @@ test('executeVillageConfirmationRequest reuses additions-only merge, customer di
   });
   const freshnessGuard = confirmationFreshnessGuard();
   const appended = [];
+  let leaseChecks = 0;
   let executionState = null;
   const forbidden = { hermes: 0, kakao: 0, followUp: 0, slack: 0, reconciliation: 0 };
 
@@ -1159,6 +1160,7 @@ test('executeVillageConfirmationRequest reuses additions-only merge, customer di
       }),
       appendToSheet: async (_config, payload) => {
         assert.ok(freshnessGuard.checks >= 1, 'freshness must be checked immediately before the GAS mutation');
+        assert.ok(leaseChecks >= 1, 'the current claim must be fenced immediately before the GAS mutation');
         appended.push(payload);
         return {
           success: true,
@@ -1167,7 +1169,11 @@ test('executeVillageConfirmationRequest reuses additions-only merge, customer di
           results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
         };
       },
-      ensureConfirmRequestDiscountApplied: async () => ({ updated: true, discountType: '학생' }),
+      ensureConfirmRequestDiscountApplied: async () => {
+        assert.ok(leaseChecks >= 2, 'the current claim must be fenced again before the discount mutation');
+        return { updated: true, discountType: '학생' };
+      },
+      assertCurrentClaim: async () => { leaseChecks += 1; },
       randomUUID: () => 'receipt-confirm-1',
       now: () => new Date('2026-08-21T04:05:06.000Z'),
       onExecutionState: (state) => { executionState = state; },
@@ -1205,6 +1211,7 @@ test('executeVillageConfirmationRequest reuses additions-only merge, customer di
   });
   assert.equal(executionState.sheetPayload.args.할인유형, '학생');
   assert.equal(executionState.customerDbDiscountLookup.discountType, '학생');
+  assert.equal(leaseChecks, 2);
   assert.deepEqual(forbidden, { hermes: 0, kakao: 0, followUp: 0, slack: 0, reconciliation: 0 });
 });
 
@@ -1294,6 +1301,146 @@ test('executeVillageConfirmationRequest converts a thrown GAS failure into a typ
   assert.equal(receipt.authoritative_sheet_result, null);
   assert.deepEqual(receipt.availability_report, []);
   assert.deepEqual(receipt.error, { type: 'gas_request_failed', message: 'GAS offline' });
+});
+
+test('executeVillageConfirmationRequest returns a persistable partial receipt when freshness changes after the primary write', async () => {
+  const freshnessGuard = confirmationFreshnessGuard({ staleAfterChecks: 2 });
+  let appendCalls = 0;
+  let discountCalls = 0;
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-stale-after-write', roomKey: 'room-stale-after-write', roomRevision: 7 },
+    roomRevision: 7,
+    decision: completeSheetDecision(),
+    dependencies: {
+      freshnessGuard,
+      assertCurrentClaim: async () => {},
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
+        payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
+        lookup: { matched: true, discountType: '학생' }
+      }),
+      appendToSheet: async () => {
+        appendCalls += 1;
+        return {
+          success: true,
+          reqID: 'RQ-260821-201',
+          results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
+        };
+      },
+      ensureConfirmRequestDiscountApplied: async () => { discountCalls += 1; },
+      randomUUID: () => 'receipt-stale-after-write',
+      now: () => new Date('2026-08-21T05:00:00.000Z')
+    }
+  });
+
+  assert.equal(appendCalls, 1);
+  assert.equal(discountCalls, 0);
+  assert.equal(receipt.status, 'partial_success');
+  assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260821-201');
+  assert.equal(receipt.availability_report.length, 1);
+  assert.equal(receipt.error.type, 'stale_after_primary_write');
+});
+
+test('executeVillageConfirmationRequest preserves GAS partial-success evidence and executed payload', async () => {
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-partial', roomKey: 'room-partial', roomRevision: 7 },
+    roomRevision: 7,
+    decision: completeSheetDecision(),
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      assertCurrentClaim: async () => {},
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
+      appendToSheet: async () => ({
+        success: false,
+        partial_success: true,
+        error_type: 'set_component_selection_failed',
+        error: '세트 구성 선택 반영 실패',
+        reqID: 'RQ-260821-202',
+        results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '⚠️ 모델 선택 필요', detail: 'F열 확인' }]
+      }),
+      randomUUID: () => 'receipt-partial',
+      now: () => new Date('2026-08-21T05:01:00.000Z')
+    }
+  });
+
+  assert.equal(receipt.status, 'partial_success');
+  assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260821-202');
+  assert.equal(receipt.authoritative_sheet_result.partial_success, true);
+  assert.equal(receipt.authoritative_sheet_result.executed_payload.func, 'insertAndCheckRequest');
+  assert.equal(receipt.authoritative_sheet_result.executed_payload.args.예약자명, '홍길동');
+  assert.deepEqual(receipt.availability_report, [
+    { equipment: '소니 FX3 바디세트', quantity: '1', result: '⚠️ 모델 선택 필요', detail: 'F열 확인' }
+  ]);
+  assert.deepEqual(receipt.error, { type: 'set_component_selection_failed', message: '세트 구성 선택 반영 실패' });
+});
+
+test('executeVillageConfirmationRequest reports discount patch failure without replaying or erasing the primary write', async () => {
+  let appendCalls = 0;
+  let discountCalls = 0;
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-discount-failure', roomKey: 'room-discount-failure', roomRevision: 7 },
+    roomRevision: 7,
+    decision: completeSheetDecision(),
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      assertCurrentClaim: async () => {},
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
+        payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
+        lookup: { matched: true, discountType: '학생' }
+      }),
+      appendToSheet: async () => {
+        appendCalls += 1;
+        return {
+          success: true,
+          reqID: 'RQ-260821-203',
+          results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
+        };
+      },
+      ensureConfirmRequestDiscountApplied: async () => {
+        discountCalls += 1;
+        throw new Error('할인 M열 반영 실패');
+      },
+      randomUUID: () => 'receipt-discount-failure',
+      now: () => new Date('2026-08-21T05:02:00.000Z')
+    }
+  });
+
+  assert.equal(appendCalls, 1);
+  assert.equal(discountCalls, 1);
+  assert.equal(receipt.status, 'partial_success');
+  assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260821-203');
+  assert.equal(receipt.error.type, 'discount_patch_failed');
+  assert.match(receipt.error.message, /할인 M열 반영 실패/);
+});
+
+test('executeVillageConfirmationRequest treats a non-applied required discount patch as partial success', async () => {
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-discount-not-applied', roomKey: 'room-discount-not-applied', roomRevision: 7 },
+    roomRevision: 7,
+    decision: completeSheetDecision(),
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      assertCurrentClaim: async () => {},
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
+        payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
+        lookup: { matched: true, discountType: '학생' }
+      }),
+      appendToSheet: async () => ({ success: true, reqID: 'RQ-260821-204', results: [] }),
+      ensureConfirmRequestDiscountApplied: async () => ({ skipped: true, reason: 'req_row_not_found', reqID: 'RQ-260821-204' }),
+      randomUUID: () => 'receipt-discount-not-applied',
+      now: () => new Date('2026-08-21T05:03:00.000Z')
+    }
+  });
+
+  assert.equal(receipt.status, 'partial_success');
+  assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260821-204');
+  assert.deepEqual(receipt.error, {
+    type: 'discount_patch_failed',
+    message: 'Discount patch was not applied: req_row_not_found'
+  });
 });
 
 function completePostActionDecision(overrides = {}) {

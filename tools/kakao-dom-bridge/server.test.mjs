@@ -14,6 +14,7 @@ const {
   p0SlackEscalationBackoffMs,
   p0SlackEscalationDue,
   createKakaoPhaseScheduler,
+  createGatewayConfirmationExecutor,
   registerAcceptedRoomEvent,
   semanticRoomEventIdentity,
   hasUnreadCount,
@@ -26,6 +27,32 @@ const {
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+
+test('server confirmation executor forwards the channel claim fence into the worker mutation boundary', async () => {
+  let leaseChecks = 0;
+  let operationArgs = null;
+  const assertCurrentClaim = async () => { leaseChecks += 1; };
+  const executor = createGatewayConfirmationExecutor({
+    getConfig: () => ({ sheetApiKey: 'test-internal-key' }),
+    executeOperation: async (args) => {
+      operationArgs = args;
+      await args.dependencies.assertCurrentClaim();
+      return { status: 'ok' };
+    }
+  });
+
+  const result = await executor({
+    job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+    detected_at: '2026-08-21T00:00:00.000Z', decision: { should_write_to_sheet: true }
+  }, { assertCurrentClaim });
+
+  assert.deepEqual(result, { status: 'ok' });
+  assert.equal(leaseChecks, 1);
+  assert.equal(operationArgs.job.jobId, 'job-1');
+  assert.equal(operationArgs.job.roomKey, 'room-1');
+  assert.equal(operationArgs.job.roomRevision, 3);
+  assert.equal(operationArgs.dependencies.assertCurrentClaim, assertCurrentClaim);
+});
 
 test('P0 Slack escalation repeats only after the durable interval and stops on closure', () => {
   const row = {

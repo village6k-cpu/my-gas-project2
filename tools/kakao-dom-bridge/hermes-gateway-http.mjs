@@ -54,7 +54,27 @@ function requiredLeaseId(body) {
   return leaseId;
 }
 
-function exactClaimForConfirmation(job, body, leaseId) {
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]));
+  }
+  return value;
+}
+
+export function confirmationRequestDigest(body = {}) {
+  const payload = {
+    schema: body.schema || 'village-confirmation-request/v1',
+    job_id: body.job_id,
+    room_key: body.room_key,
+    room_revision: body.room_revision,
+    decision: body.decision
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalJson(payload)), 'utf8').digest('hex');
+}
+
+function exactClaimForConfirmation(job, body, leaseId, nowMs) {
+  const leaseExpiresAt = Number(job?.lease_expires_at_ms);
   return job
     && job.state === 'claimed'
     && String(job.job_id || '') === String(body?.job_id || '')
@@ -63,18 +83,22 @@ function exactClaimForConfirmation(job, body, leaseId) {
     && typeof body?.room_revision === 'number'
     && Number.isInteger(body.room_revision)
     && Number(body.room_revision) > 0
-    && String(job.lease_id || '') === leaseId;
+    && String(job.lease_id || '') === leaseId
+    && Number.isFinite(leaseExpiresAt)
+    && leaseExpiresAt > nowMs;
 }
 
-function matchingTrustedReceipt(job, body, leaseId) {
-  if (!exactClaimForConfirmation(job, body, leaseId)) return null;
-  return (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).find((receipt) => (
+function trustedReceiptForRequest(job, body, leaseId, requestDigest, nowMs) {
+  if (!exactClaimForConfirmation(job, body, leaseId, nowMs)) return { receipt: null, conflict: false };
+  const claimReceipts = (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).filter((receipt) => (
     receipt?.schema === 'village-confirmation-receipt/v1'
     && String(receipt.job_id || '') === String(body.job_id || '')
     && String(receipt.room_key || '') === String(body.room_key || '')
     && Number(receipt.room_revision) === Number(body.room_revision)
     && String(receipt.lease_id || '') === leaseId
-  )) || null;
+  ));
+  const receipt = claimReceipts.find((candidate) => candidate.request_digest === requestDigest) || null;
+  return { receipt, conflict: !receipt && claimReceipts.length > 0 };
 }
 
 function parseWaitMs(value) {
@@ -88,7 +112,7 @@ function channelErrorResponse(error) {
   return { status, error: error?.status ? error.message : String(error?.code || 'invalid_request') };
 }
 
-export function createHermesGatewayHttpHandler({ token, channel, executeConfirmation, transport = 'cli' } = {}) {
+export function createHermesGatewayHttpHandler({ token, channel, executeConfirmation, transport = 'cli', now = Date.now } = {}) {
   const gatewayConfigured = GATEWAY_TRANSPORTS.has(transport) && Boolean(String(token || '').trim()) && Boolean(channel);
   const confirmationInFlight = new Map();
 
@@ -146,19 +170,36 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
         const leaseId = requiredLeaseId(body);
         if (transport === 'gateway_no_send') throw requestError(403, 'writes_disabled');
         if (typeof channel.get !== 'function') throw requestError(503, 'confirmation_fencing_unavailable');
+        const requestDigest = confirmationRequestDigest(body);
+        const currentTime = () => {
+          const value = now();
+          const milliseconds = value instanceof Date ? value.getTime() : Number(value);
+          if (!Number.isFinite(milliseconds)) throw requestError(503, 'confirmation_clock_unavailable');
+          return milliseconds;
+        };
+        const assertCurrentClaim = async () => {
+          const currentJob = await channel.get(body?.job_id);
+          if (!exactClaimForConfirmation(currentJob, body, leaseId, currentTime())) throw requestError(409, 'stale_lease');
+          return currentJob;
+        };
         const claimedJob = await channel.get(body?.job_id);
-        if (!exactClaimForConfirmation(claimedJob, body, leaseId)) throw requestError(409, 'stale_lease');
-        const trustedReceipt = matchingTrustedReceipt(claimedJob, body, leaseId);
-        if (trustedReceipt) {
-          sendJson(res, 200, trustedReceipt);
+        if (!exactClaimForConfirmation(claimedJob, body, leaseId, currentTime())) throw requestError(409, 'stale_lease');
+        const trusted = trustedReceiptForRequest(claimedJob, body, leaseId, requestDigest, currentTime());
+        if (trusted.conflict) throw requestError(409, 'confirmation_request_conflict');
+        if (trusted.receipt) {
+          sendJson(res, 200, trusted.receipt);
           return true;
         }
         if (typeof executeConfirmation !== 'function') throw requestError(503, 'confirmation_unavailable');
-        const operationKey = [body.job_id, body.room_key, body.room_revision, leaseId].map((value) => String(value)).join('\u0000');
-        let operation = confirmationInFlight.get(operationKey);
-        if (!operation) {
-          operation = (async () => {
-            const receipt = await executeConfirmation(body);
+        const claimKey = [body.job_id, body.room_key, body.room_revision, leaseId].map((value) => String(value)).join('\u0000');
+        let inFlight = confirmationInFlight.get(claimKey);
+        if (inFlight && inFlight.requestDigest !== requestDigest) {
+          throw requestError(409, 'confirmation_request_conflict');
+        }
+        if (!inFlight) {
+          const operation = (async () => {
+            await assertCurrentClaim();
+            const receipt = await executeConfirmation(body, { assertCurrentClaim });
             if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) throw requestError(502, 'invalid_confirmation_receipt');
             if (String(receipt.job_id || '') !== String(body.job_id || '')
               || String(receipt.room_key || '') !== String(body.room_key || '')
@@ -166,16 +207,20 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
               throw requestError(502, 'confirmation_receipt_correlation_mismatch');
             }
             if (receipt.lease_id && receipt.lease_id !== leaseId) throw requestError(409, 'lease_id_mismatch');
-            const fencedReceipt = { ...receipt, lease_id: leaseId };
+            if (receipt.request_digest && receipt.request_digest !== requestDigest) {
+              throw requestError(502, 'confirmation_receipt_request_mismatch');
+            }
+            const fencedReceipt = { ...receipt, lease_id: leaseId, request_digest: requestDigest };
             await channel.recordToolReceipt(fencedReceipt);
             return fencedReceipt;
           })();
-          confirmationInFlight.set(operationKey, operation);
+          inFlight = { requestDigest, operation };
+          confirmationInFlight.set(claimKey, inFlight);
         }
         try {
-          sendJson(res, 200, await operation);
+          sendJson(res, 200, await inFlight.operation);
         } finally {
-          if (confirmationInFlight.get(operationKey) === operation) confirmationInFlight.delete(operationKey);
+          if (confirmationInFlight.get(claimKey) === inFlight) confirmationInFlight.delete(claimKey);
         }
         return true;
       }

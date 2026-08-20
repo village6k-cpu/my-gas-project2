@@ -8428,6 +8428,31 @@ function confirmationReceiptError(type, message, extra = {}) {
   };
 }
 
+function authoritativePrimarySheetEvidence(sheetResult, sheetPayload) {
+  if (!sheetResult || typeof sheetResult !== 'object' || Array.isArray(sheetResult)) return null;
+  const reqID = extractSheetRequestId(sheetResult);
+  const rows = normalizeAvailabilityResultRows(sheetResult);
+  const hasWriteEvidence = sheetResult.success === true
+    || sheetResult.partial_success === true
+    || Boolean(reqID)
+    || rows.length > 0;
+  if (!hasWriteEvidence) return null;
+  if (sheetResult.success === true) return sheetResult;
+  return {
+    ...sheetResult,
+    executed_payload: sheetPayload
+      ? {
+          action: sheetPayload.action || null,
+          func: sheetPayload.func || null,
+          args: sheetPayload.args || null,
+          setComponentSelections: Array.isArray(sheetPayload.setComponentSelections)
+            ? sheetPayload.setComponentSelections
+            : []
+        }
+      : null
+  };
+}
+
 export async function executeVillageConfirmationRequest({
   config = {},
   job = {},
@@ -8494,6 +8519,9 @@ export async function executeVillageConfirmationRequest({
   const fetchExistingImpl = dependencies.fetchExistingConfirmRequestResultForDecision || fetchExistingConfirmRequestResultForDecision;
   const enrichDiscountImpl = dependencies.enrichSheetPayloadWithCustomerDbDiscount || enrichSheetPayloadWithCustomerDbDiscount;
   const ensureDiscountImpl = dependencies.ensureConfirmRequestDiscountApplied || ensureConfirmRequestDiscountApplied;
+  const assertCurrentClaim = typeof dependencies.assertCurrentClaim === 'function'
+    ? dependencies.assertCurrentClaim
+    : async () => {};
   const notifyExecutionState = typeof dependencies.onExecutionState === 'function'
     ? dependencies.onExecutionState
     : () => {};
@@ -8505,6 +8533,8 @@ export async function executeVillageConfirmationRequest({
   let customerDbDiscountLookup = null;
   let discountPatchResult = null;
   let availabilityReport = null;
+  let postPrimaryError = null;
+  let discountPatchError = null;
   try {
     freshnessGuard.throwIfSuperseded();
     if (sheetPayload?.args?.입력모드 === 'additions_only') {
@@ -8553,6 +8583,7 @@ export async function executeVillageConfirmationRequest({
 
       await freshnessGuard.checkNow();
       freshnessGuard.throwIfSuperseded();
+      await assertCurrentClaim();
       try {
         sheetResult = await appendImpl(config, sheetPayload);
       } catch (error) {
@@ -8563,14 +8594,46 @@ export async function executeVillageConfirmationRequest({
           recoverable: false
         };
       }
+      if (!sheetResult || typeof sheetResult !== 'object' || Array.isArray(sheetResult)) {
+        sheetResult = {
+          success: false,
+          error: 'GAS confirmation request returned no structured result',
+          error_type: 'invalid_gas_response',
+          recoverable: false
+        };
+      }
 
       if (customerDbDiscountLookup?.discountType && sheetResult?.success === true) {
-        await freshnessGuard.checkNow();
-        freshnessGuard.throwIfSuperseded();
         try {
-          discountPatchResult = await ensureDiscountImpl(config, sheetResult, sheetPayload, customerDbDiscountLookup);
+          await freshnessGuard.checkNow();
+          freshnessGuard.throwIfSuperseded();
+          await assertCurrentClaim();
         } catch (error) {
-          discountPatchResult = { updated: false, error: text(error?.message || error).slice(0, 500) };
+          const message = text(error?.message || error).slice(0, 1000) || 'Freshness changed after the primary confirmation write';
+          postPrimaryError = confirmationReceiptError('stale_after_primary_write', message);
+          discountPatchResult = { updated: false, skipped: true, reason: 'stale_after_primary_write', error: message };
+        }
+        if (!postPrimaryError) {
+          try {
+            discountPatchResult = await ensureDiscountImpl(config, sheetResult, sheetPayload, customerDbDiscountLookup);
+            if (discountPatchResult?.error) {
+              discountPatchError = confirmationReceiptError('discount_patch_failed', discountPatchResult.error);
+            } else {
+              const skipReason = text(discountPatchResult?.reason).trim();
+              const acceptedSkip = skipReason === 'already_applied'
+                || (skipReason === 'duplicate_request_not_patched' && sheetResult?.duplicate === true);
+              if (discountPatchResult?.updated !== true && !acceptedSkip) {
+                discountPatchError = confirmationReceiptError(
+                  'discount_patch_failed',
+                  `Discount patch was not applied: ${skipReason || 'missing_patch_result'}`
+                );
+              }
+            }
+          } catch (error) {
+            const message = text(error?.message || error).slice(0, 1000) || 'Discount patch failed';
+            discountPatchResult = { updated: false, error: message };
+            discountPatchError = confirmationReceiptError('discount_patch_failed', message);
+          }
         }
       }
     }
@@ -8578,9 +8641,8 @@ export async function executeVillageConfirmationRequest({
     if (!sheetResult) {
       existingRequestResult = await fetchExistingImpl(config, executedDecision, []);
     }
-    const authoritativeSheetResult = sheetResult?.success === false
-      ? null
-      : (sheetResult || existingRequestResult);
+    const primarySheetEvidence = authoritativePrimarySheetEvidence(sheetResult, sheetPayload);
+    const authoritativeSheetResult = primarySheetEvidence || existingRequestResult;
     availabilityReport = buildSheetAvailabilityReport(authoritativeSheetResult, sheetPayload);
     const operationState = {
       decision: executedDecision,
@@ -8590,12 +8652,24 @@ export async function executeVillageConfirmationRequest({
       discountPatchResult,
       existingRequestResult,
       authoritativeSheetResult,
-      availabilityReport
+      availabilityReport,
+      postPrimaryError,
+      discountPatchError
     };
     notifyExecutionState(operationState);
+    if (postPrimaryError || discountPatchError) {
+      return buildReceipt({
+        status: 'partial_success',
+        authoritativeSheetResult: authoritativeSheetResult || null,
+        availabilityReport: availabilityReport?.rows || [],
+        error: postPrimaryError || discountPatchError
+      });
+    }
     if (sheetResult?.success === false) {
       return buildReceipt({
-        status: 'failed',
+        status: authoritativeSheetResult ? 'partial_success' : 'failed',
+        authoritativeSheetResult: authoritativeSheetResult || null,
+        availabilityReport: availabilityReport?.rows || [],
         error: confirmationReceiptError(sheetResult.error_type || 'gas_rejected', sheetResult.error || 'GAS rejected confirmation request')
       });
     }
