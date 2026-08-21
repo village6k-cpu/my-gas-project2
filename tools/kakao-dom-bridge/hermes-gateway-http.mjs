@@ -252,7 +252,7 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
         if (durable.reservation) throw requestError(409, 'confirmation_operation_unresolved');
         if (!exactClaimForConfirmation(claimedJob, body, leaseId, currentTime())) throw requestError(409, 'stale_lease');
         if (typeof executeConfirmation !== 'function') throw requestError(503, 'confirmation_unavailable');
-        const operation = (async () => {
+        const operation = Promise.resolve().then(async () => {
             const reserved = await channel.reserveToolOperation({
               tool: 'confirmation_request',
               job_id: body.job_id,
@@ -288,7 +288,7 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
             };
             await channel.recordToolReceipt(fencedReceipt);
             return fencedReceipt;
-          })();
+          });
         inFlight = { requestDigest, operation };
         confirmationInFlight.set(claimKey, inFlight);
         try {
