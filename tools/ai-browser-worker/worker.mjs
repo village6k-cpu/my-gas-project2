@@ -8261,7 +8261,13 @@ function buildBoundedGatewayTerminalAck(value) {
   };
 }
 
-const MAX_KAKAO_GATEWAY_EVENT_BYTES = 1_048_576;
+const MAX_KAKAO_GATEWAY_RESPONSE_BYTES = 1_048_576;
+// `{"event":{...seven fields...,"lease_id":"<UUID>"}}` adds exactly 60
+// compact-JSON bytes around the durable event emitted by this builder.
+const KAKAO_GATEWAY_CLAIM_ENVELOPE_BYTES = 60;
+const MAX_KAKAO_GATEWAY_EVENT_BYTES = (
+  MAX_KAKAO_GATEWAY_RESPONSE_BYTES - KAKAO_GATEWAY_CLAIM_ENVELOPE_BYTES
+);
 
 function assertBoundedGatewayEvent(event) {
   let serialized;
@@ -8275,7 +8281,9 @@ function assertBoundedGatewayEvent(event) {
     throw new Error('Gateway event must be JSON serializable');
   }
   if (Buffer.byteLength(serialized, 'utf8') > MAX_KAKAO_GATEWAY_EVENT_BYTES) {
-    throw new Error(`Gateway event exceeds ${MAX_KAKAO_GATEWAY_EVENT_BYTES} byte limit`);
+    throw new Error(
+      `Gateway event plus claim envelope exceeds ${MAX_KAKAO_GATEWAY_RESPONSE_BYTES} byte limit`
+    );
   }
 }
 

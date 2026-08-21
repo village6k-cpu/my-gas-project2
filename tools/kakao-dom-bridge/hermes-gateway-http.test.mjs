@@ -44,7 +44,10 @@ function makeChannel() {
       calls.claim.push(options);
       return {
         job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId,
-        event: { schema: 'village-kakao-gateway-event/v1', job_id: 'job-1', room_key: 'room-1', room_revision: 3, prompt: 'read only' }
+        event: {
+          schema: 'village-kakao-gateway-event/v1', job_id: 'job-1', room_key: 'room-1',
+          room_revision: 3, prompt: 'read only', detected_at: '2026-08-21T00:00:00.000Z', raw: { bounded: true }
+        }
       };
     },
     async complete(body) { calls.complete.push(body); return { state: 'completed' }; },
@@ -134,9 +137,40 @@ test('Gateway HTTP claims a snake-case event with its opaque lease id', async ()
     assert.equal(body.event.room_revision, 3);
     assert.equal(body.event.lease_id, leaseId);
     assert.equal(body.event.schema, 'village-kakao-gateway-event/v1');
+    assert.deepEqual(Object.keys(body.event).sort(), [
+      'detected_at', 'job_id', 'lease_id', 'prompt', 'raw', 'room_key', 'room_revision', 'schema'
+    ]);
+    assert.equal('local_context' in body.event, false);
   } finally {
     await app.close();
   }
+});
+
+test('Gateway HTTP emits exact durable seven-field event plus lease and never local context', async () => {
+  await withRealGatewayChannel(async ({ channel }) => {
+    const event = {
+      schema: 'village-kakao-gateway-event/v1', job_id: 'job-contract', room_key: 'room-contract',
+      room_revision: 4, prompt: '정확한 이벤트', detected_at: '2026-08-21T00:00:00.000Z', raw: { safe: '근거' }
+    };
+    await channel.enqueue(event, { localContext: { secret: 'local-only' } });
+    const app = await start(createHermesGatewayHttpHandler({ token, channel, transport: 'gateway' }));
+    try {
+      const response = await gatewayFetch(app.url, '/hermes/v1/events?consumer_id=gateway-contract&wait_ms=0');
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.deepEqual(
+        Object.fromEntries(Object.entries(body.event).filter(([key]) => key !== 'lease_id')),
+        event
+      );
+      assert.match(body.event.lease_id, /\S/);
+      assert.deepEqual(Object.keys(body.event).sort(), [
+        'detected_at', 'job_id', 'lease_id', 'prompt', 'raw', 'room_key', 'room_revision', 'schema'
+      ]);
+      assert.equal(JSON.stringify(body).includes('local-only'), false);
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 test('Gateway HTTP requires its bearer token and does not echo it', async () => {

@@ -354,6 +354,26 @@ test('buildKakaoGatewayTurn fails closed when non-ASCII event JSON exceeds the p
   );
 });
 
+test('buildKakaoGatewayTurn reserves the claim wrapper and UUID lease inside the 1 MiB response cap', async () => {
+  const job = {
+    jobId: 'gateway-job-envelope-cap', roomKey: 'chat:gateway-envelope-cap', roomRevision: 10,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  await assert.rejects(
+    workerModule.buildKakaoGatewayTurn({
+      config: { bridgeUrl: '', jobLogPath: '' },
+      job,
+      capture: { snapshot },
+      dependencies: {
+        buildReadOnlyLookupContext: async () => ({ kill_switch: { status: 'active', error: null } }),
+        buildHermesPrompt: () => `FINAL_JSON ${'가'.repeat(174_460)}`
+      }
+    }),
+    /claim envelope.*1048576|1048576.*claim envelope/i
+  );
+});
+
 test('Gateway extraction and legacy dry-run each perform one freshness check while legacy keeps the full lookup context', async () => {
   const job = {
     jobId: 'gateway-job-freshness', roomKey: 'chat:gateway-freshness', roomRevision: 6,
