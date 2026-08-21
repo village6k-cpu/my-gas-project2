@@ -55,6 +55,16 @@ export function resolveHermesTransport(value) {
   return normalized;
 }
 
+export function resolveHermesMaxAttempts(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 2;
+  const attempts = Number(raw);
+  if (!Number.isInteger(attempts) || attempts < 1 || attempts > 2) {
+    throw new Error('KAKAO_HERMES_MAX_ATTEMPTS must be either 1 or 2');
+  }
+  return attempts;
+}
+
 export function kakaoSendAllowedForTransport(value) {
   return resolveHermesTransport(value) !== 'gateway_no_send';
 }
@@ -74,7 +84,7 @@ const CONFIG = {
   hermesTransport: resolveHermesTransport(process.env.KAKAO_HERMES_TRANSPORT),
   hermesBridgeToken: String(process.env.KAKAO_HERMES_BRIDGE_TOKEN || '').trim(),
   hermesLeaseMs: Number(process.env.KAKAO_HERMES_LEASE_MS || 300_000),
-  hermesMaxAttempts: Number(process.env.KAKAO_HERMES_MAX_ATTEMPTS || 2),
+  hermesMaxAttempts: resolveHermesMaxAttempts(process.env.KAKAO_HERMES_MAX_ATTEMPTS),
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   supabaseTable: process.env.SUPABASE_TABLE || '',
@@ -225,13 +235,50 @@ function notificationAudit(result) {
   if (String(result?.follow_up_id || '').trim()) {
     return { follow_up_id: String(result.follow_up_id).trim().slice(0, 160) };
   }
+  const slackDelivery = result?.slackDeliveryResult;
+  const slackResults = Array.isArray(slackDelivery?.results) ? slackDelivery.results : [];
   return {
     inserted: Math.max(0, Number(result?.inserted || 0)),
     rows: Array.isArray(result?.rows) ? result.rows.length : 0,
-    slack_delivered: Array.isArray(result?.slackDeliveryResult?.results)
-      ? result.slackDeliveryResult.results.every((entry) => entry?.ok !== false && !entry?.error)
-      : null
+    slack_delivered: slackDelivery?.skipped === true || slackResults.length === 0
+      ? null
+      : slackResults.every((entry) => entry?.ok !== false && !entry?.error && entry?.status !== 'error')
   };
+}
+
+export function assertGatewayFailureNotificationDelivered(result = {}, { slackEnabled = false } = {}) {
+  if (result?.skipped === true || result?.error || result?.slackDeliveryError) {
+    throw new Error(`gateway_failure_notification_not_delivered: ${String(
+      result?.error || result?.slackDeliveryError || result?.reason || 'unknown'
+    ).slice(0, 500)}`);
+  }
+  const rows = Array.isArray(result?.rows) ? result.rows : [];
+  const delivery = result?.slackDeliveryResult;
+  if (!delivery) {
+    if (slackEnabled && rows.length > 0) {
+      throw new Error('gateway_failure_notification_slack_failed: missing Slack delivery result');
+    }
+    return true;
+  }
+  const results = Array.isArray(delivery.results) ? delivery.results : [];
+  const failed = results.find((entry) => entry?.ok === false || entry?.error || entry?.status === 'error');
+  if (delivery.error || failed) {
+    throw new Error(`gateway_failure_notification_slack_failed: ${String(
+      delivery.error || failed?.error || failed?.status || delivery.reason || 'unknown'
+    ).slice(0, 500)}`);
+  }
+  if (delivery.skipped === true) {
+    const intentionalSkip = (!slackEnabled && delivery.reason === 'disabled')
+      || (rows.length === 0 && delivery.reason === 'no_rows');
+    if (!intentionalSkip) {
+      throw new Error(`gateway_failure_notification_slack_failed: ${String(delivery.reason || 'unexpected_skip').slice(0, 500)}`);
+    }
+    return true;
+  }
+  if (slackEnabled && rows.length > 0 && results.length === 0) {
+    throw new Error('gateway_failure_notification_slack_failed: missing Slack delivery evidence');
+  }
+  return true;
 }
 
 export function createGatewayFailureNotificationCoordinator({ channel, notify } = {}) {
@@ -1886,17 +1933,9 @@ async function notifyGatewayTerminalFailure({ durableJob, error }) {
     failed_at: nowIso(),
     gateway_error_type: String(durableJob?.error?.type || error?.code || 'gateway_job_failed').slice(0, 120)
   });
-  if (followUpResult?.skipped === true || followUpResult?.error || followUpResult?.slackDeliveryError) {
-    throw new Error(`gateway_failure_notification_not_delivered: ${String(
-      followUpResult?.error || followUpResult?.slackDeliveryError || followUpResult?.reason || 'unknown'
-    ).slice(0, 500)}`);
-  }
-  const failedSlack = (Array.isArray(followUpResult?.slackDeliveryResult?.results)
-    ? followUpResult.slackDeliveryResult.results
-    : []).find((result) => result?.ok === false || result?.error || result?.status === 'error');
-  if (failedSlack) {
-    throw new Error(`gateway_failure_notification_slack_failed: ${String(failedSlack.error || failedSlack.status).slice(0, 500)}`);
-  }
+  assertGatewayFailureNotificationDelivered(followUpResult, {
+    slackEnabled: CONFIG.slackCardDeliveryEnabled
+  });
   await updateSupabaseEventByHash(durableJob.job_id, {
     status: 'needs_human_review',
     error_message: String(error?.message || error).slice(0, 1000),

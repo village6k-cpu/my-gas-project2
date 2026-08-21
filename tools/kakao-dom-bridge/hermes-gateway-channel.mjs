@@ -162,7 +162,9 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   const leaseDuration = Number(leaseMs);
   const maximumAttempts = Number(maxAttempts);
   if (!Number.isFinite(leaseDuration) || leaseDuration <= 0) throw channelError('invalid_config', 'leaseMs must be positive');
-  if (!Number.isInteger(maximumAttempts) || maximumAttempts < 1) throw channelError('invalid_config', 'maxAttempts must be a positive integer');
+  if (!Number.isInteger(maximumAttempts) || maximumAttempts < 1 || maximumAttempts > 2) {
+    throw channelError('invalid_config', 'maxAttempts must be either 1 or 2');
+  }
 
   const fs = {
     mkdir: defaultMkdir, readFile: defaultReadFile, readdir: defaultReaddir, rename: defaultRename,
@@ -299,7 +301,13 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           }
         });
       }
-      if (job.state === 'failed' && job.human_review_required === true && !job.failure_notification) {
+      const missingOperationalFailureNotification = !job.failure_notification
+        && job.human_review_required === true
+        && (job.state === 'failed'
+          || (job.state === 'superseded'
+            && job.error?.type === 'confirmation_operation_unresolved'
+            && Boolean(job.tool_operation)));
+      if (missingOperationalFailureNotification) {
         await update(jobs.get(job.job_id), { failure_notification: pendingFailureNotification(job) });
       }
     }

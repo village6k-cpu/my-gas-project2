@@ -7,6 +7,7 @@ const {
   buildCorsHeaders,
   buildHealthConfig,
   buildGatewayHealthReadback,
+  assertGatewayFailureNotificationDelivered,
   buildWorkerResultAudit,
   buildWorkerTreeKillInvocation,
   compactQueueAuditRecord,
@@ -30,6 +31,7 @@ const {
   roomKeyForDebounce,
   recoverFailedGatewayDispatch,
   resolveHermesTransport,
+  resolveHermesMaxAttempts,
   shouldDetachWorkerProcess,
   shouldQueueTopRowEvent,
   shouldSkipSupabaseRowAsLowValue,
@@ -43,6 +45,15 @@ test('Hermes transport defaults only to CLI and rejects unknown values without a
   assert.equal(resolveHermesTransport('gateway'), 'gateway');
   assert.equal(resolveHermesTransport('gateway_no_send'), 'gateway_no_send');
   assert.throws(() => resolveHermesTransport('gateawy'), /Unsupported KAKAO_HERMES_TRANSPORT/);
+});
+
+test('Hermes Gateway max-attempt environment boundary defaults to two and rejects a third claim', () => {
+  assert.equal(resolveHermesMaxAttempts(undefined), 2);
+  assert.equal(resolveHermesMaxAttempts(''), 2);
+  assert.equal(resolveHermesMaxAttempts('1'), 1);
+  assert.equal(resolveHermesMaxAttempts('2'), 2);
+  assert.throws(() => resolveHermesMaxAttempts('3'), /KAKAO_HERMES_MAX_ATTEMPTS/);
+  assert.throws(() => resolveHermesMaxAttempts('1.5'), /KAKAO_HERMES_MAX_ATTEMPTS/);
 });
 
 test('AI job dispatcher preserves the exact legacy CLI path when transport is missing', async () => {
@@ -228,6 +239,50 @@ test('Gateway failure notification recovery is durable and retries notification 
   assert.equal(notificationCalls, 2);
   assert.equal(workCalls, 0);
   assert.deepEqual(await restarted.recover(), []);
+});
+
+test('Gateway failure notification keeps pending when enabled Slack returns a nested skipped error', async () => {
+  const badDelivery = {
+    inserted: 1,
+    rows: [{ id: 'failure-card-1' }],
+    slackDeliveryResult: {
+      skipped: true,
+      reason: 'two_channel_preflight_failed',
+      error: 'Slack routing preflight failed',
+      results: []
+    }
+  };
+  assert.throws(
+    () => assertGatewayFailureNotificationDelivered(badDelivery, { slackEnabled: true }),
+    /gateway_failure_notification_slack_failed/
+  );
+  assert.doesNotThrow(() => assertGatewayFailureNotificationDelivered({
+    inserted: 0, rows: [],
+    slackDeliveryResult: { skipped: true, reason: 'no_rows', results: [] }
+  }, { slackEnabled: true }));
+  assert.doesNotThrow(() => assertGatewayFailureNotificationDelivered({
+    inserted: 1, rows: [{ id: 'failure-card-disabled' }],
+    slackDeliveryResult: { skipped: true, reason: 'disabled', results: [] }
+  }, { slackEnabled: false }));
+
+  let marks = 0;
+  const channel = {
+    async listPendingFailureNotifications() {
+      return [{ job_id: 'nested-slack-failure', error: { type: 'lease_retry_exhausted' } }];
+    },
+    async markFailureNotified() { marks += 1; }
+  };
+  const coordinator = createGatewayFailureNotificationCoordinator({
+    channel,
+    notify: async () => {
+      assertGatewayFailureNotificationDelivered(badDelivery, { slackEnabled: true });
+      return badDelivery;
+    }
+  });
+  const result = await coordinator.recover();
+  assert.equal(result[0].notified, false);
+  assert.match(result[0].error, /gateway_failure_notification_slack_failed/);
+  assert.equal(marks, 0);
 });
 
 test('Gateway health readback requires a fresh consumer and exposes only safe aggregate fields', () => {

@@ -854,3 +854,45 @@ test('channel status reports consumer freshness coordinates, oldest active claim
     assert.equal((await channel.get(claim.job_id)).state, 'claimed');
   });
 });
+
+test('rejects a claim-attempt cap above two so one event can never receive a third Hermes claim', async () => {
+  await assert.rejects(
+    withChannel(async () => {}, { maxAttempts: 3 }),
+    { code: 'invalid_config' }
+  );
+});
+
+test('restart backfills a pending notification for a legacy superseded unresolved confirmation operation', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('legacy-superseded-operation', 'legacy-superseded-room', 1));
+    const oldClaim = await channel.claim({ consumerId: 'gateway-native', waitMs: 0 });
+    await channel.reserveToolOperation(confirmationOperation(oldClaim));
+    await channel.enqueue(event('legacy-newer-job', 'legacy-superseded-room', 2));
+
+    const oldPath = path.join(
+      directory,
+      'hermes-gateway',
+      `${createHash('sha256').update(oldClaim.job_id).digest('hex')}.json`
+    );
+    const legacyPersisted = JSON.parse(await readFile(oldPath, 'utf8'));
+    assert.equal(legacyPersisted.state, 'superseded');
+    assert.equal(legacyPersisted.human_review_required, true);
+    assert.equal(legacyPersisted.error.type, 'confirmation_operation_unresolved');
+    assert.ok(legacyPersisted.tool_operation);
+    delete legacyPersisted.failure_notification;
+    await realWriteFile(oldPath, `${JSON.stringify(legacyPersisted)}\n`, 'utf8');
+
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    const recovered = await restarted.get(oldClaim.job_id);
+    assert.equal(recovered.state, 'superseded');
+    assert.equal(recovered.failure_notification.state, 'pending');
+    assert.deepEqual(
+      (await restarted.listPendingFailureNotifications()).map((job) => job.job_id),
+      [oldClaim.job_id]
+    );
+    assert.equal((await restarted.claim({ consumerId: 'gateway-native', waitMs: 0 })).job_id, 'legacy-newer-job');
+    assert.equal(await restarted.claim({ consumerId: 'gateway-native', waitMs: 0 }), null);
+  });
+});
