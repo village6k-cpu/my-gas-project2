@@ -96,6 +96,21 @@ function sameToolOperationEnvelope(reservation, operation) {
     && reservation?.request_digest === operation.request_digest;
 }
 
+function exactReceiptForToolOperation(job) {
+  const reservation = job?.tool_operation;
+  if (!reservation || reservation.state !== 'completed') return null;
+  return (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).find((receipt) => (
+    receipt?.schema === 'village-confirmation-receipt/v1'
+    && receipt.receipt_id === reservation.receipt_id
+    && receipt.operation_id === reservation.operation_id
+    && receipt.job_id === reservation.job_id
+    && receipt.room_key === reservation.room_key
+    && receipt.room_revision === reservation.room_revision
+    && receipt.lease_id === reservation.lease_id
+    && receipt.request_digest === reservation.request_digest
+  )) || null;
+}
+
 function validatePersistedToolOperation(job) {
   const reservation = job?.tool_operation;
   if (reservation == null) return;
@@ -269,6 +284,33 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     }
   }
 
+  async function rejectUnresolvedToolOperation(job, { outcome = null } = {}) {
+    if (job.state === 'failed' && job.error?.type === 'confirmation_operation_unresolved') {
+      throw channelError('confirmation_operation_unresolved', 'confirmation operation requires human review');
+    }
+    if (job.state === 'superseded' && job.error?.type === 'confirmation_operation_unresolved') {
+      throw channelError('confirmation_operation_unresolved', 'superseded confirmation operation requires human review');
+    }
+    const operation = job.tool_operation;
+    const error = {
+      type: 'confirmation_operation_unresolved',
+      operation_id: operation.operation_id,
+      operation_state: operation.state,
+      reason: operation.state === 'completed' ? 'exact_receipt_missing' : 'receipt_not_persisted'
+    };
+    await update(job, {
+      state: 'failed',
+      claimed_by: null,
+      lease_id: null,
+      lease_expires_at: null,
+      lease_expires_at_ms: null,
+      human_review_required: true,
+      error,
+      ...(outcome ? { outcome: clone(outcome) } : {})
+    });
+    throw channelError('confirmation_operation_unresolved', 'confirmation operation requires human review');
+  }
+
   async function claimOnce(consumerId) {
     await reapExpiredLeasesInternal();
     const activeRooms = new Set([...jobs.values()].filter((job) => job.state === 'claimed' && isAuthoritative(job)).map((job) => job.room_key));
@@ -389,6 +431,12 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const job = jobs.get(requiredString(result?.job_id ?? result?.jobId, 'job_id'));
         if (!job) throw channelError('unknown_job', 'job does not exist');
         assertEnvelope(job, result);
+        if (job.tool_operation && !exactReceiptForToolOperation(job)) {
+          return rejectUnresolvedToolOperation(job);
+        }
+        if (job.state === 'failed' && job.error?.type === 'confirmation_operation_unresolved') {
+          throw channelError('confirmation_operation_unresolved', 'confirmation operation requires human review');
+        }
         if (job.state === 'completed') {
           if (sameResult(job.result, result)) return clone(job);
           throw channelError('completion_conflict', 'job already has another completion result');
@@ -409,6 +457,9 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const kind = requiredString(outcome?.outcome, 'outcome');
         if (job.outcome && sameResult(job.outcome, outcome)) return clone(job);
         if (kind === 'no_final') {
+          if (job.tool_operation && !exactReceiptForToolOperation(job)) {
+            return rejectUnresolvedToolOperation(job, { outcome });
+          }
           assertCurrentLease(job, outcome);
           return clone(await update(job, {
             state: 'failed', outcome: clone(outcome), claimed_by: null, lease_id: null, lease_expires_at: null,

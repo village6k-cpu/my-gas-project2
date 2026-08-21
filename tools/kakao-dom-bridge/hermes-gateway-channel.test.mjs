@@ -399,3 +399,122 @@ test('accepts an exact reserved receipt after a newer same-room revision superse
     assert.equal(recorded.tool_operation.state, 'completed');
   });
 });
+
+test('a result submitted before its reserved confirmation receipt fails terminally and survives restart', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('job-result-before-receipt', 'room-result-before-receipt', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(confirmationOperation(claim));
+    const result = {
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, final: { reply_mode: 'draft_only' }
+    };
+
+    await assert.rejects(channel.complete(result), { code: 'confirmation_operation_unresolved' });
+    const failed = await channel.get(claim.job_id);
+    assert.equal(failed.state, 'failed');
+    assert.equal(failed.human_review_required, true);
+    assert.equal(failed.error.type, 'confirmation_operation_unresolved');
+    assert.equal(failed.error.operation_id, reserved.reservation.operation_id);
+    assert.equal(failed.error.operation_state, 'reserved');
+
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    const recovered = await restarted.get(claim.job_id);
+    assert.equal(recovered.state, 'failed');
+    assert.equal(recovered.human_review_required, true);
+    assert.equal((await restarted.status()).counts.completed, 0);
+    assert.equal((await restarted.status()).counts.failed, 1);
+    assert.equal(await restarted.claim({ consumerId: 'gateway-2', waitMs: 0 }), null);
+  });
+});
+
+test('a late exact receipt enriches an unresolved result job without auto-completing or retrying it', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-late-result-receipt', 'room-late-result-receipt', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(confirmationOperation(claim));
+    const result = {
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, final: { reply_mode: 'draft_only' }
+    };
+    await assert.rejects(channel.complete(result), { code: 'confirmation_operation_unresolved' });
+
+    const withReceipt = await channel.recordToolReceipt(
+      confirmationReceipt(claim, reserved.reservation.operation_id)
+    );
+    assert.equal(withReceipt.tool_receipts.length, 1);
+    assert.equal(withReceipt.tool_operation.state, 'completed');
+    assert.equal(withReceipt.state, 'failed');
+    assert.equal(withReceipt.human_review_required, true);
+    assert.equal(withReceipt.error.type, 'confirmation_operation_unresolved');
+    await assert.rejects(channel.complete(result), { code: 'confirmation_operation_unresolved' });
+    assert.equal(await channel.claim({ consumerId: 'gateway-2', waitMs: 0 }), null);
+  });
+});
+
+test('a completed operation missing its exact persisted receipt fails closed instead of completing the job', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('job-corrupt-operation', 'room-corrupt-operation', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(confirmationOperation(claim));
+    const jobPath = path.join(
+      directory,
+      'hermes-gateway',
+      `${createHash('sha256').update(claim.job_id).digest('hex')}.json`
+    );
+    const persisted = JSON.parse(await readFile(jobPath, 'utf8'));
+    persisted.tool_operation = {
+      ...persisted.tool_operation,
+      state: 'completed',
+      receipt_id: 'receipt-never-persisted',
+      completed_at: '2026-08-21T00:00:00.000Z'
+    };
+    await realWriteFile(jobPath, JSON.stringify(persisted) + '\n', 'utf8');
+
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    await assert.rejects(restarted.complete({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, final: { reply_mode: 'draft_only' }
+    }), { code: 'confirmation_operation_unresolved' });
+    const failed = await restarted.get(claim.job_id);
+    assert.equal(failed.state, 'failed');
+    assert.equal(failed.human_review_required, true);
+    assert.equal(failed.error.reason, 'exact_receipt_missing');
+    assert.equal(failed.error.operation_id, reserved.reservation.operation_id);
+  });
+});
+
+test('no_final and superseded cancellation preserve unresolved confirmation operation evidence', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-no-final-operation', 'room-no-final-operation', 1));
+    const noFinalClaim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    const noFinalReservation = await channel.reserveToolOperation(confirmationOperation(noFinalClaim));
+    await assert.rejects(channel.recordOutcome({
+      job_id: noFinalClaim.job_id, room_key: noFinalClaim.room_key, room_revision: noFinalClaim.room_revision,
+      lease_id: noFinalClaim.lease_id, outcome: 'no_final'
+    }), { code: 'confirmation_operation_unresolved' });
+    const noFinal = await channel.get(noFinalClaim.job_id);
+    assert.equal(noFinal.state, 'failed');
+    assert.equal(noFinal.human_review_required, true);
+    assert.equal(noFinal.error.type, 'confirmation_operation_unresolved');
+    assert.equal(noFinal.error.operation_id, noFinalReservation.reservation.operation_id);
+
+    await channel.enqueue(event('job-cancelled-operation', 'room-cancelled-operation', 1));
+    const cancelledClaim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    const cancelledReservation = await channel.reserveToolOperation(confirmationOperation(cancelledClaim));
+    await channel.enqueue(event('job-cancelled-new-turn', 'room-cancelled-operation', 2));
+    await channel.recordOutcome({
+      job_id: cancelledClaim.job_id, room_key: cancelledClaim.room_key, room_revision: cancelledClaim.room_revision,
+      lease_id: cancelledClaim.lease_id, outcome: 'cancelled'
+    });
+    const cancelled = await channel.get(cancelledClaim.job_id);
+    assert.equal(cancelled.state, 'superseded');
+    assert.equal(cancelled.human_review_required, true);
+    assert.equal(cancelled.error.type, 'confirmation_operation_unresolved');
+    assert.equal(cancelled.error.operation_id, cancelledReservation.reservation.operation_id);
+  });
+});

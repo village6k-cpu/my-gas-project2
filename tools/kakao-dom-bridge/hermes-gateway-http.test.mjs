@@ -175,6 +175,37 @@ test('Gateway HTTP forwards the exact lease id for results and outcomes', async 
   }
 });
 
+test('Gateway HTTP rejects a result submitted before its reserved confirmation receipt and persists human review', async () => {
+  await withRealGatewayChannel(async ({ channel, clock }) => {
+    await channel.enqueue({ job_id: 'job-result-http', room_key: 'room-result-http', room_revision: 1 });
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    await channel.reserveToolOperation({
+      tool: 'confirmation_request', job_id: claim.job_id, room_key: claim.room_key,
+      room_revision: claim.room_revision, lease_id: claim.lease_id, request_digest: 'digest-http-result'
+    });
+    const app = await start(createHermesGatewayHttpHandler({
+      token, channel, transport: 'gateway', now: () => clock.now
+    }));
+    try {
+      const response = await gatewayFetch(app.url, '/hermes/v1/results', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+          lease_id: claim.lease_id, final: { reply_mode: 'draft_only' }
+        })
+      });
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), { error: 'confirmation_operation_unresolved' });
+      const failed = await channel.get(claim.job_id);
+      assert.equal(failed.state, 'failed');
+      assert.equal(failed.human_review_required, true);
+      assert.equal(failed.error.type, 'confirmation_operation_unresolved');
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 test('Gateway HTTP forwards the claim lease id into confirmation execution and receipt persistence', async () => {
   const channel = makeChannel();
   const confirmationCalls = [];
