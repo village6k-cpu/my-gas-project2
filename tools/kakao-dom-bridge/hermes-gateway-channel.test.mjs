@@ -518,3 +518,77 @@ test('no_final and superseded cancellation preserve unresolved confirmation oper
     assert.equal(cancelled.error.operation_id, cancelledReservation.reservation.operation_id);
   });
 });
+
+test('wrong or missing result leases cannot preempt a reserved confirmation operation', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-wrong-result-lease', 'room-wrong-result-lease', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(confirmationOperation(claim));
+    const original = await channel.get(claim.job_id);
+
+    for (const suppliedLease of [undefined, '', 'different-lease']) {
+      const result = {
+        job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+        final: { reply_mode: 'draft_only' },
+        ...(suppliedLease === undefined ? {} : { lease_id: suppliedLease })
+      };
+      await assert.rejects(channel.complete(result), { code: 'stale_lease' });
+      assert.deepEqual(await channel.get(claim.job_id), original);
+    }
+
+    await channel.recordToolReceipt(confirmationReceipt(claim, reserved.reservation.operation_id));
+    const completed = await channel.complete({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, final: { reply_mode: 'draft_only' }
+    });
+    assert.equal(completed.state, 'completed');
+  });
+});
+
+test('wrong or missing no_final leases cannot hide or terminally preempt a reserved operation', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-wrong-outcome-lease', 'room-wrong-outcome-lease', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(confirmationOperation(claim));
+    const original = await channel.get(claim.job_id);
+
+    for (const suppliedLease of [undefined, '', 'different-lease']) {
+      const outcome = {
+        job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+        outcome: 'no_final',
+        ...(suppliedLease === undefined ? {} : { lease_id: suppliedLease })
+      };
+      await assert.rejects(channel.recordOutcome(outcome), { code: 'stale_lease' });
+      assert.deepEqual(await channel.get(claim.job_id), original);
+    }
+
+    await channel.recordToolReceipt(confirmationReceipt(claim, reserved.reservation.operation_id));
+    const completed = await channel.complete({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, final: { reply_mode: 'draft_only' }
+    });
+    assert.equal(completed.state, 'completed');
+  });
+});
+
+test('an already failed unresolved operation still rejects a wrong lease without rewriting evidence', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-failed-wrong-lease', 'room-failed-wrong-lease', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    await channel.reserveToolOperation(confirmationOperation(claim));
+    const exactResult = {
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, final: { reply_mode: 'draft_only' }
+    };
+    await assert.rejects(channel.complete(exactResult), { code: 'confirmation_operation_unresolved' });
+    const failed = await channel.get(claim.job_id);
+
+    await assert.rejects(
+      channel.complete({ ...exactResult, lease_id: 'different-lease' }),
+      { code: 'stale_lease' }
+    );
+    assert.deepEqual(await channel.get(claim.job_id), failed);
+    await assert.rejects(channel.complete(exactResult), { code: 'confirmation_operation_unresolved' });
+    assert.deepEqual(await channel.get(claim.job_id), failed);
+  });
+});

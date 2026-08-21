@@ -284,6 +284,16 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     }
   }
 
+  function assertToolOperationLease(job, envelope) {
+    const leaseId = requiredString(envelope?.lease_id ?? envelope?.leaseId, 'lease_id', 'stale_lease');
+    if (!job.tool_operation || job.tool_operation.lease_id !== leaseId) {
+      throw channelError('stale_lease', 'mutation lease does not match the durable tool operation');
+    }
+    if (job.state === 'claimed' && job.lease_id !== leaseId) {
+      throw channelError('stale_lease', 'mutation lease is no longer the current claim');
+    }
+  }
+
   async function rejectUnresolvedToolOperation(job, { outcome = null } = {}) {
     if (job.state === 'failed' && job.error?.type === 'confirmation_operation_unresolved') {
       throw channelError('confirmation_operation_unresolved', 'confirmation operation requires human review');
@@ -432,9 +442,11 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         if (!job) throw channelError('unknown_job', 'job does not exist');
         assertEnvelope(job, result);
         if (job.tool_operation && !exactReceiptForToolOperation(job)) {
+          assertToolOperationLease(job, result);
           return rejectUnresolvedToolOperation(job);
         }
         if (job.state === 'failed' && job.error?.type === 'confirmation_operation_unresolved') {
+          assertToolOperationLease(job, result);
           throw channelError('confirmation_operation_unresolved', 'confirmation operation requires human review');
         }
         if (job.state === 'completed') {
@@ -458,6 +470,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         if (job.outcome && sameResult(job.outcome, outcome)) return clone(job);
         if (kind === 'no_final') {
           if (job.tool_operation && !exactReceiptForToolOperation(job)) {
+            assertToolOperationLease(job, outcome);
             return rejectUnresolvedToolOperation(job, { outcome });
           }
           assertCurrentLease(job, outcome);

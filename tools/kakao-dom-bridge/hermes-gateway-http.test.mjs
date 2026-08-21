@@ -206,6 +206,63 @@ test('Gateway HTTP rejects a result submitted before its reserved confirmation r
   });
 });
 
+test('Gateway HTTP wrong-lease results and no_final outcomes leave reserved operations untouched', async () => {
+  await withRealGatewayChannel(async ({ channel, clock }) => {
+    const cases = [
+      { pathname: '/hermes/v1/results', suffix: 'result', payload: { final: { reply_mode: 'draft_only' } } },
+      { pathname: '/hermes/v1/outcomes', suffix: 'outcome', payload: { outcome: 'no_final' } }
+    ];
+    const app = await start(createHermesGatewayHttpHandler({
+      token, channel, transport: 'gateway', now: () => clock.now
+    }));
+    try {
+      for (const entry of cases) {
+        await channel.enqueue({
+          job_id: `job-http-wrong-${entry.suffix}`,
+          room_key: `room-http-wrong-${entry.suffix}`,
+          room_revision: 1
+        });
+        const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+        const requestDigest = `digest-http-wrong-${entry.suffix}`;
+        const reserved = await channel.reserveToolOperation({
+          tool: 'confirmation_request', job_id: claim.job_id, room_key: claim.room_key,
+          room_revision: claim.room_revision, lease_id: claim.lease_id, request_digest: requestDigest
+        });
+        const original = await channel.get(claim.job_id);
+        const wrong = await gatewayFetch(app.url, entry.pathname, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+            lease_id: 'different-lease', ...entry.payload
+          })
+        });
+        assert.equal(wrong.status, 409);
+        assert.deepEqual(await wrong.json(), { error: 'stale_lease' });
+        assert.deepEqual(await channel.get(claim.job_id), original);
+
+        await channel.recordToolReceipt({
+          schema: 'village-confirmation-receipt/v1', receipt_id: `receipt-http-${entry.suffix}`,
+          job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+          lease_id: claim.lease_id, request_digest: requestDigest, operation_id: reserved.reservation.operation_id,
+          status: 'ok', availability_report: [], authoritative_sheet_result: null,
+          created_at: '2026-08-21T00:00:00.000Z', error: null
+        });
+        const correct = await gatewayFetch(app.url, '/hermes/v1/results', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+            lease_id: claim.lease_id, final: { reply_mode: 'draft_only' }
+          })
+        });
+        assert.equal(correct.status, 200);
+        assert.equal((await channel.get(claim.job_id)).state, 'completed');
+      }
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 test('Gateway HTTP forwards the claim lease id into confirmation execution and receipt persistence', async () => {
   const channel = makeChannel();
   const confirmationCalls = [];
