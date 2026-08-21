@@ -11,6 +11,7 @@ import path from 'node:path';
 
 const TERMINAL_STATES = new Set(['completed', 'superseded', 'failed']);
 const JOB_STATES = new Set(['ready', 'claimed', 'completed', 'superseded', 'retry_wait', 'failed']);
+const TOOL_OPERATION_STATES = new Set(['reserved', 'completed']);
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const iso = (value) => new Date(value).toISOString();
@@ -71,6 +72,48 @@ function validateReceipt(receipt) {
   }
 }
 
+function normalizeToolOperation(operation) {
+  const tool = requiredString(operation?.tool, 'tool', 'invalid_tool_operation');
+  if (tool !== 'confirmation_request') {
+    throw channelError('invalid_tool_operation', 'unsupported tool operation');
+  }
+  return {
+    tool,
+    job_id: requiredString(operation?.job_id ?? operation?.jobId, 'job_id', 'invalid_tool_operation'),
+    room_key: requiredString(operation?.room_key ?? operation?.roomKey, 'room_key', 'invalid_tool_operation'),
+    room_revision: positiveRevision(operation?.room_revision ?? operation?.roomRevision),
+    lease_id: requiredString(operation?.lease_id ?? operation?.leaseId, 'lease_id', 'stale_lease'),
+    request_digest: requiredString(operation?.request_digest ?? operation?.requestDigest, 'request_digest', 'invalid_tool_operation')
+  };
+}
+
+function sameToolOperationEnvelope(reservation, operation) {
+  return reservation?.tool === operation.tool
+    && reservation?.job_id === operation.job_id
+    && reservation?.room_key === operation.room_key
+    && reservation?.room_revision === operation.room_revision
+    && reservation?.lease_id === operation.lease_id
+    && reservation?.request_digest === operation.request_digest;
+}
+
+function validatePersistedToolOperation(job) {
+  const reservation = job?.tool_operation;
+  if (reservation == null) return;
+  if (reservation.schema !== 'village-tool-operation-reservation/v1'
+    || !TOOL_OPERATION_STATES.has(reservation.state)
+    || !isValidIso(reservation.created_at)
+    || !String(reservation.operation_id || '').trim()) {
+    throw channelError('invalid_persisted_job', 'persisted tool operation is invalid');
+  }
+  const normalized = normalizeToolOperation(reservation);
+  if (normalized.job_id !== job.job_id
+    || normalized.room_key !== job.room_key
+    || normalized.room_revision !== job.room_revision
+    || (reservation.state === 'completed' && !String(reservation.receipt_id || '').trim())) {
+    throw channelError('invalid_persisted_job', 'persisted tool operation does not match its job');
+  }
+}
+
 export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAttempts = 2, now = Date.now, storage = {} } = {}) {
   const queueDirectory = path.join(requiredString(directory, 'directory'), 'hermes-gateway');
   const leaseDuration = Number(leaseMs);
@@ -116,6 +159,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       if (!JOB_STATES.has(job.state) || !job.job_id || path.basename(fileFor(job.job_id)) !== name) {
         throw channelError('invalid_persisted_job', 'invalid persisted Hermes Gateway job: ' + name);
       }
+      validatePersistedToolOperation(job);
       jobs.set(job.job_id, job);
       queueOrder = Math.max(queueOrder, Number(job.queue_order) || 0);
     }
@@ -145,7 +189,15 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       if (older.job_id === authoritative.job_id || TERMINAL_STATES.has(older.state)) continue;
       await update(older, {
         state: 'superseded', superseded_by: authoritative.job_id, superseded_lease_id: older.lease_id,
-        claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null
+        claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
+        ...(older.tool_operation ? {
+          human_review_required: true,
+          error: {
+            type: 'confirmation_operation_unresolved',
+            operation_id: older.tool_operation.operation_id,
+            operation_state: older.tool_operation.state
+          }
+        } : {})
       });
     }
   }
@@ -178,7 +230,17 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     const reaped = [];
     for (const job of [...jobs.values()]) {
       if (job.state !== 'claimed' || Number(job.lease_expires_at_ms) > nowMs) continue;
-      const next = job.attempts >= maximumAttempts
+      const next = job.tool_operation
+        ? await update(job, {
+          state: 'failed', claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
+          human_review_required: true,
+          error: {
+            type: 'confirmation_operation_unresolved',
+            operation_id: job.tool_operation.operation_id,
+            operation_state: job.tool_operation.state
+          }
+        })
+        : job.attempts >= maximumAttempts
         ? await update(job, {
           state: 'failed', claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
           human_review_required: true, error: { type: 'lease_retry_exhausted', attempts: job.attempts }
@@ -240,7 +302,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           schema: 'village-hermes-gateway-job/v1', ...normalized, state: 'ready', attempts: 0, queue_order: ++queueOrder,
           created_at: iso(nowMs), updated_at: iso(nowMs), claimed_by: null, lease_id: null, lease_expires_at: null,
           lease_expires_at_ms: null, superseded_by: null, superseded_lease_id: null, tool_receipts: [], result: null,
-          outcome: null, error: null, human_review_required: false
+          tool_operation: null, outcome: null, error: null, human_review_required: false
         };
         await persist(job);
         jobs.set(job.job_id, job);
@@ -260,6 +322,33 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       } while (true);
     },
 
+    async reserveToolOperation(operation) {
+      return mutate(async () => {
+        const normalized = normalizeToolOperation(operation);
+        const job = jobs.get(normalized.job_id);
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        assertEnvelope(job, normalized);
+        if (job.tool_operation) {
+          if (!sameToolOperationEnvelope(job.tool_operation, normalized)) {
+            throw channelError('confirmation_operation_conflict', 'job already has another confirmation operation');
+          }
+          return { created: false, reservation: clone(job.tool_operation) };
+        }
+        assertCurrentLease(job, normalized);
+        const reservation = {
+          schema: 'village-tool-operation-reservation/v1',
+          operation_id: randomUUID(),
+          ...normalized,
+          state: 'reserved',
+          created_at: iso(currentTime()),
+          receipt_id: null,
+          completed_at: null
+        };
+        const next = await update(job, { tool_operation: reservation });
+        return { created: true, reservation: clone(next.tool_operation) };
+      });
+    },
+
     async recordToolReceipt(receipt) {
       return mutate(async () => {
         validateReceipt(receipt);
@@ -272,8 +361,26 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           if (!sameResult(existing, receipt)) throw channelError('receipt_conflict', 'receipt_id already has another value');
           return clone(job);
         }
-        assertCurrentLease(job, receipt);
-        return clone(await update(job, { tool_receipts: [...job.tool_receipts, clone(receipt)] }));
+        const reservation = job.tool_operation;
+        if (!reservation) throw channelError('operation_fence_required', 'receipt has no durable tool operation reservation');
+        const operationId = requiredString(receipt?.operation_id ?? receipt?.operationId, 'operation_id', 'operation_fence_mismatch');
+        const receiptOperation = normalizeToolOperation({ ...receipt, tool: 'confirmation_request' });
+        if (reservation.operation_id !== operationId || !sameToolOperationEnvelope(reservation, receiptOperation)) {
+          throw channelError('operation_fence_mismatch', 'receipt does not match its durable tool operation reservation');
+        }
+        if (reservation.state === 'completed') {
+          throw channelError('receipt_conflict', 'tool operation already has another receipt');
+        }
+        const completedAt = iso(currentTime());
+        return clone(await update(job, {
+          tool_receipts: [...job.tool_receipts, clone(receipt)],
+          tool_operation: {
+            ...reservation,
+            state: 'completed',
+            receipt_id: receiptId,
+            completed_at: completedAt
+          }
+        }));
       });
     },
 

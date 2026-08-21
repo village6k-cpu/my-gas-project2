@@ -230,7 +230,7 @@ const gatewayChannel = gatewayTransportEnabled
 export function createGatewayConfirmationExecutor({ getConfig, executeOperation = executeVillageConfirmationRequest } = {}) {
   if (typeof getConfig !== 'function') throw new Error('Gateway confirmation config loader is required');
   if (typeof executeOperation !== 'function') throw new Error('Gateway confirmation operation is required');
-  return async (request, { assertCurrentClaim } = {}) => executeOperation({
+  return async (request, { assertCurrentClaim, operationFence } = {}) => executeOperation({
     config: getConfig(),
     job: {
       jobId: request.job_id,
@@ -240,7 +240,7 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
     },
     roomRevision: request.room_revision,
     decision: request.decision,
-    dependencies: { assertCurrentClaim }
+    dependencies: { assertCurrentClaim, operationFence }
   });
 }
 

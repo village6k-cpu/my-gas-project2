@@ -32,6 +32,12 @@ test('server confirmation executor forwards the channel claim fence into the wor
   let leaseChecks = 0;
   let operationArgs = null;
   const assertCurrentClaim = async () => { leaseChecks += 1; };
+  const operationFence = {
+    schema: 'village-tool-operation-reservation/v1', operation_id: 'operation-1',
+    tool: 'confirmation_request', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+    lease_id: 'lease-1', request_digest: 'digest-1', state: 'reserved',
+    created_at: '2026-08-21T00:00:00.000Z', receipt_id: null, completed_at: null
+  };
   const executor = createGatewayConfirmationExecutor({
     getConfig: () => ({ sheetApiKey: 'test-internal-key' }),
     executeOperation: async (args) => {
@@ -44,7 +50,7 @@ test('server confirmation executor forwards the channel claim fence into the wor
   const result = await executor({
     job_id: 'job-1', room_key: 'room-1', room_revision: 3,
     detected_at: '2026-08-21T00:00:00.000Z', decision: { should_write_to_sheet: true }
-  }, { assertCurrentClaim });
+  }, { assertCurrentClaim, operationFence });
 
   assert.deepEqual(result, { status: 'ok' });
   assert.equal(leaseChecks, 1);
@@ -52,6 +58,7 @@ test('server confirmation executor forwards the channel claim fence into the wor
   assert.equal(operationArgs.job.roomKey, 'room-1');
   assert.equal(operationArgs.job.roomRevision, 3);
   assert.equal(operationArgs.dependencies.assertCurrentClaim, assertCurrentClaim);
+  assert.equal(operationArgs.dependencies.operationFence, operationFence);
 });
 
 test('P0 Slack escalation repeats only after the durable interval and stops on closure', () => {

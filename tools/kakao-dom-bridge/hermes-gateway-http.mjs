@@ -88,17 +88,44 @@ function exactClaimForConfirmation(job, body, leaseId, nowMs) {
     && leaseExpiresAt > nowMs;
 }
 
-function trustedReceiptForRequest(job, body, leaseId, requestDigest, nowMs) {
-  if (!exactClaimForConfirmation(job, body, leaseId, nowMs)) return { receipt: null, conflict: false };
-  const claimReceipts = (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).filter((receipt) => (
+function durableOperationForRequest(job, body, leaseId, requestDigest) {
+  if (!job
+    || String(job.job_id || '') !== String(body?.job_id || '')
+    || String(job.room_key || '') !== String(body?.room_key || '')
+    || Number(job.room_revision) !== Number(body?.room_revision)) {
+    return { reservation: null, receipt: null, conflict: false };
+  }
+  const reservation = job.tool_operation;
+  if (!reservation) return { reservation: null, receipt: null, conflict: false };
+  const matches = reservation.schema === 'village-tool-operation-reservation/v1'
+    && reservation.tool === 'confirmation_request'
+    && String(reservation.job_id || '') === String(body.job_id || '')
+    && String(reservation.room_key || '') === String(body.room_key || '')
+    && Number(reservation.room_revision) === Number(body.room_revision)
+    && String(reservation.lease_id || '') === leaseId
+    && String(reservation.request_digest || '') === requestDigest
+    && String(reservation.operation_id || '').trim();
+  if (!matches) return { reservation, receipt: null, conflict: true };
+  const receipt = (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).find((candidate) => (
+    candidate?.schema === 'village-confirmation-receipt/v1'
+    && String(candidate.job_id || '') === String(body.job_id || '')
+    && String(candidate.room_key || '') === String(body.room_key || '')
+    && Number(candidate.room_revision) === Number(body.room_revision)
+    && String(candidate.lease_id || '') === leaseId
+    && String(candidate.request_digest || '') === requestDigest
+    && String(candidate.operation_id || '') === reservation.operation_id
+  )) || null;
+  return { reservation, receipt, conflict: false };
+}
+
+function unfencedReceiptConflict(job, body, leaseId) {
+  return (Array.isArray(job?.tool_receipts) ? job.tool_receipts : []).some((receipt) => (
     receipt?.schema === 'village-confirmation-receipt/v1'
     && String(receipt.job_id || '') === String(body.job_id || '')
     && String(receipt.room_key || '') === String(body.room_key || '')
     && Number(receipt.room_revision) === Number(body.room_revision)
     && String(receipt.lease_id || '') === leaseId
   ));
-  const receipt = claimReceipts.find((candidate) => candidate.request_digest === requestDigest) || null;
-  return { receipt, conflict: !receipt && claimReceipts.length > 0 };
 }
 
 function parseWaitMs(value) {
@@ -108,7 +135,11 @@ function parseWaitMs(value) {
 }
 
 function channelErrorResponse(error) {
-  const status = error?.status || (['stale_lease', 'stale_room_revision', 'completion_conflict', 'receipt_conflict'].includes(error?.code) ? 409 : 400);
+  const status = error?.status || ([
+    'stale_lease', 'stale_room_revision', 'completion_conflict', 'receipt_conflict',
+    'confirmation_operation_conflict', 'confirmation_operation_unresolved',
+    'operation_fence_required', 'operation_fence_mismatch'
+  ].includes(error?.code) ? 409 : 400);
   return { status, error: error?.status ? error.message : String(error?.code || 'invalid_request') };
 }
 
@@ -169,7 +200,9 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
         const body = await readJsonBody(req);
         const leaseId = requiredLeaseId(body);
         if (transport === 'gateway_no_send') throw requestError(403, 'writes_disabled');
-        if (typeof channel.get !== 'function') throw requestError(503, 'confirmation_fencing_unavailable');
+        if (typeof channel.get !== 'function' || typeof channel.reserveToolOperation !== 'function') {
+          throw requestError(503, 'confirmation_fencing_unavailable');
+        }
         const requestDigest = confirmationRequestDigest(body);
         const currentTime = () => {
           const value = now();
@@ -182,24 +215,58 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
           if (!exactClaimForConfirmation(currentJob, body, leaseId, currentTime())) throw requestError(409, 'stale_lease');
           return currentJob;
         };
-        const claimedJob = await channel.get(body?.job_id);
-        if (!exactClaimForConfirmation(claimedJob, body, leaseId, currentTime())) throw requestError(409, 'stale_lease');
-        const trusted = trustedReceiptForRequest(claimedJob, body, leaseId, requestDigest, currentTime());
-        if (trusted.conflict) throw requestError(409, 'confirmation_request_conflict');
-        if (trusted.receipt) {
-          sendJson(res, 200, trusted.receipt);
-          return true;
-        }
-        if (typeof executeConfirmation !== 'function') throw requestError(503, 'confirmation_unavailable');
         const claimKey = [body.job_id, body.room_key, body.room_revision, leaseId].map((value) => String(value)).join('\u0000');
         let inFlight = confirmationInFlight.get(claimKey);
         if (inFlight && inFlight.requestDigest !== requestDigest) {
           throw requestError(409, 'confirmation_request_conflict');
         }
-        if (!inFlight) {
-          const operation = (async () => {
+        if (inFlight) {
+          try {
+            sendJson(res, 200, await inFlight.operation);
+          } finally {
+            if (confirmationInFlight.get(claimKey) === inFlight) confirmationInFlight.delete(claimKey);
+          }
+          return true;
+        }
+        const claimedJob = await channel.get(body?.job_id);
+        inFlight = confirmationInFlight.get(claimKey);
+        if (inFlight && inFlight.requestDigest !== requestDigest) {
+          throw requestError(409, 'confirmation_request_conflict');
+        }
+        if (inFlight) {
+          try {
+            sendJson(res, 200, await inFlight.operation);
+          } finally {
+            if (confirmationInFlight.get(claimKey) === inFlight) confirmationInFlight.delete(claimKey);
+          }
+          return true;
+        }
+        const durable = durableOperationForRequest(claimedJob, body, leaseId, requestDigest);
+        if (durable.conflict || (!durable.reservation && unfencedReceiptConflict(claimedJob, body, leaseId))) {
+          throw requestError(409, 'confirmation_request_conflict');
+        }
+        if (durable.receipt) {
+          sendJson(res, 200, durable.receipt);
+          return true;
+        }
+        if (durable.reservation) throw requestError(409, 'confirmation_operation_unresolved');
+        if (!exactClaimForConfirmation(claimedJob, body, leaseId, currentTime())) throw requestError(409, 'stale_lease');
+        if (typeof executeConfirmation !== 'function') throw requestError(503, 'confirmation_unavailable');
+        const operation = (async () => {
+            const reserved = await channel.reserveToolOperation({
+              tool: 'confirmation_request',
+              job_id: body.job_id,
+              room_key: body.room_key,
+              room_revision: body.room_revision,
+              lease_id: leaseId,
+              request_digest: requestDigest
+            });
+            if (!reserved?.created || !reserved?.reservation) {
+              throw requestError(409, 'confirmation_operation_unresolved');
+            }
+            const operationFence = reserved.reservation;
             await assertCurrentClaim();
-            const receipt = await executeConfirmation(body, { assertCurrentClaim });
+            const receipt = await executeConfirmation(body, { assertCurrentClaim, operationFence });
             if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) throw requestError(502, 'invalid_confirmation_receipt');
             if (String(receipt.job_id || '') !== String(body.job_id || '')
               || String(receipt.room_key || '') !== String(body.room_key || '')
@@ -210,13 +277,20 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
             if (receipt.request_digest && receipt.request_digest !== requestDigest) {
               throw requestError(502, 'confirmation_receipt_request_mismatch');
             }
-            const fencedReceipt = { ...receipt, lease_id: leaseId, request_digest: requestDigest };
+            if (receipt.operation_id && receipt.operation_id !== operationFence.operation_id) {
+              throw requestError(502, 'confirmation_receipt_operation_mismatch');
+            }
+            const fencedReceipt = {
+              ...receipt,
+              lease_id: leaseId,
+              request_digest: requestDigest,
+              operation_id: operationFence.operation_id
+            };
             await channel.recordToolReceipt(fencedReceipt);
             return fencedReceipt;
           })();
-          inFlight = { requestDigest, operation };
-          confirmationInFlight.set(claimKey, inFlight);
-        }
+        inFlight = { requestDigest, operation };
+        confirmationInFlight.set(claimKey, inFlight);
         try {
           sendJson(res, 200, await inFlight.operation);
         } finally {

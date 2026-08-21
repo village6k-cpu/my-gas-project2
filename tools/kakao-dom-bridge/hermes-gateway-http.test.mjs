@@ -2,8 +2,12 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import http from 'node:http';
 import { EventEmitter } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 
+import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 
 function canonicalTestJson(value) {
@@ -29,10 +33,10 @@ const token = 'test-token-not-a-secret';
 const leaseId = 'lease-opaque-1';
 
 function makeChannel() {
-  const calls = { claim: [], complete: [], outcome: [], receipt: [], get: [] };
+  const calls = { claim: [], complete: [], outcome: [], reservation: [], receipt: [], get: [] };
   const job = {
     job_id: 'job-1', room_key: 'room-1', room_revision: 3, state: 'claimed', lease_id: leaseId,
-    lease_expires_at_ms: 9_999_999_999_999, tool_receipts: []
+    lease_expires_at_ms: 9_999_999_999_999, tool_operation: null, tool_receipts: []
   };
   return {
     calls,
@@ -45,9 +49,21 @@ function makeChannel() {
     },
     async complete(body) { calls.complete.push(body); return { state: 'completed' }; },
     async recordOutcome(body) { calls.outcome.push(body); return { state: 'failed' }; },
+    async reserveToolOperation(body) {
+      calls.reservation.push(structuredClone(body));
+      if (job.tool_operation) return { created: false, reservation: structuredClone(job.tool_operation) };
+      job.tool_operation = {
+        schema: 'village-tool-operation-reservation/v1', operation_id: 'operation-opaque-1',
+        state: 'reserved', created_at: '2026-08-21T00:00:00.000Z', ...structuredClone(body)
+      };
+      return { created: true, reservation: structuredClone(job.tool_operation) };
+    },
     async recordToolReceipt(body) {
       calls.receipt.push(body);
       job.tool_receipts.push(structuredClone(body));
+      if (job.tool_operation) {
+        job.tool_operation = { ...job.tool_operation, state: 'completed', receipt_id: body.receipt_id };
+      }
       return structuredClone(job);
     },
     async get(jobId) {
@@ -82,6 +98,17 @@ function gatewayFetch(base, pathname, init = {}) {
     ...init,
     headers: { authorization: `Bearer ${token}`, ...(init.headers || {}) }
   });
+}
+
+async function withRealGatewayChannel(run) {
+  const directory = await mkdtemp(path.join(tmpdir(), 'hermes-gateway-http-'));
+  const clock = { now: Date.parse('2026-08-21T00:00:00.000Z') };
+  const channel = createHermesGatewayChannel({ directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now });
+  try {
+    await run({ channel, clock, directory });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 test('Gateway HTTP claims a snake-case event with its opaque lease id', async () => {
@@ -183,13 +210,20 @@ test('Gateway HTTP returns an exactly fenced trusted receipt without repeating c
     schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-existing', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
     status: 'ok', availability_report: [], authoritative_sheet_result: { success: true, reqID: 'RQ-260821-001' },
     created_at: '2026-08-21T00:00:00.000Z', error: null, lease_id: leaseId,
-    request_digest: expectedConfirmationRequestDigest(body)
+    request_digest: expectedConfirmationRequestDigest(body), operation_id: 'operation-existing'
   };
   channel.get = async (jobId) => {
     channel.calls.get.push(jobId);
     return {
       job_id: jobId, room_key: 'room-1', room_revision: 3, state: 'claimed', lease_id: leaseId,
-      lease_expires_at_ms: 9_999_999_999_999, tool_receipts: [persisted]
+      lease_expires_at_ms: 9_999_999_999_999,
+      tool_operation: {
+        schema: 'village-tool-operation-reservation/v1', operation_id: 'operation-existing', tool: 'confirmation_request',
+        job_id: jobId, room_key: 'room-1', room_revision: 3, lease_id: leaseId,
+        request_digest: expectedConfirmationRequestDigest(body), state: 'completed',
+        created_at: '2026-08-21T00:00:00.000Z', receipt_id: 'receipt-existing', completed_at: '2026-08-21T00:00:00.000Z'
+      },
+      tool_receipts: [persisted]
     };
   };
   let executionCalls = 0;
@@ -251,14 +285,16 @@ test('Gateway HTTP coalesces concurrent duplicate confirmation requests before r
       {
         schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-concurrent', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
         status: 'ok', availability_report: [], authoritative_sheet_result: null, created_at: '2026-08-21T00:00:00.000Z', error: null,
-        lease_id: leaseId,
-        request_digest: expectedConfirmationRequestDigest(JSON.parse(init.body))
+         lease_id: leaseId,
+         request_digest: expectedConfirmationRequestDigest(JSON.parse(init.body)),
+         operation_id: 'operation-opaque-1'
       },
       {
         schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-concurrent', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
         status: 'ok', availability_report: [], authoritative_sheet_result: null, created_at: '2026-08-21T00:00:00.000Z', error: null,
-        lease_id: leaseId,
-        request_digest: expectedConfirmationRequestDigest(JSON.parse(init.body))
+         lease_id: leaseId,
+         request_digest: expectedConfirmationRequestDigest(JSON.parse(init.body)),
+         operation_id: 'operation-opaque-1'
       }
     ]);
     assert.equal(executionCalls, 1);
@@ -290,6 +326,120 @@ test('Gateway HTTP rejects an expired claim before confirmation execution', asyn
   } finally {
     await app.close();
   }
+});
+
+test('Gateway HTTP durably reserves before a write and persists its exact receipt after the lease expires', async () => {
+  await withRealGatewayChannel(async ({ channel, clock }) => {
+    await channel.enqueue({ job_id: 'job-expiring-write', room_key: 'room-expiring-write', room_revision: 1 });
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    let writes = 0;
+    const app = await start(createHermesGatewayHttpHandler({
+      token, channel, transport: 'gateway', now: () => clock.now,
+      executeConfirmation: async (request, { assertCurrentClaim, operationFence }) => {
+        await assertCurrentClaim();
+        assert.equal(operationFence.request_digest, expectedConfirmationRequestDigest(request));
+        writes += 1;
+        clock.now += 1_000;
+        return {
+          schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-expiring-write',
+          job_id: request.job_id, room_key: request.room_key, room_revision: request.room_revision,
+          status: 'ok', availability_report: [], authoritative_sheet_result: { success: true, reqID: 'RQ-260821-001' },
+          created_at: '2026-08-21T00:00:01.000Z', error: null
+        };
+      }
+    }));
+    try {
+      const request = {
+        job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+        lease_id: claim.lease_id, decision: { should_write_to_sheet: true, sheet_row_candidate: { customer_name: '홍길동' } }
+      };
+      const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request)
+      });
+      assert.equal(response.status, 200);
+      const receipt = await response.json();
+      assert.equal(receipt.receipt_id, 'receipt-expiring-write');
+      assert.match(receipt.operation_id, /^[0-9a-f-]{36}$/);
+      const persisted = await channel.get(claim.job_id);
+      assert.equal(writes, 1);
+      assert.equal(persisted.tool_receipts.length, 1);
+      assert.equal(persisted.tool_operation.state, 'completed');
+      assert.equal(persisted.tool_operation.operation_id, receipt.operation_id);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+test('Gateway HTTP persists an exact reserved receipt when a newer room revision supersedes the write', async () => {
+  await withRealGatewayChannel(async ({ channel, clock }) => {
+    await channel.enqueue({ job_id: 'job-write-old', room_key: 'room-write', room_revision: 1 });
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    let writes = 0;
+    const app = await start(createHermesGatewayHttpHandler({
+      token, channel, transport: 'gateway', now: () => clock.now,
+      executeConfirmation: async (request, { assertCurrentClaim }) => {
+        await assertCurrentClaim();
+        writes += 1;
+        await channel.enqueue({ job_id: 'job-write-new', room_key: request.room_key, room_revision: 2 });
+        return {
+          schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-superseded-write',
+          job_id: request.job_id, room_key: request.room_key, room_revision: request.room_revision,
+          status: 'ok', availability_report: [], authoritative_sheet_result: { success: true, reqID: 'RQ-260821-002' },
+          created_at: '2026-08-21T00:00:00.000Z', error: null
+        };
+      }
+    }));
+    try {
+      const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+          lease_id: claim.lease_id, decision: { should_write_to_sheet: true, sheet_row_candidate: {} }
+        })
+      });
+      assert.equal(response.status, 200);
+      const persisted = await channel.get(claim.job_id);
+      assert.equal(writes, 1);
+      assert.equal(persisted.state, 'superseded');
+      assert.equal(persisted.tool_receipts.length, 1);
+      assert.equal(persisted.tool_operation.state, 'completed');
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+test('Gateway HTTP rejects a restarted unresolved reservation without executing confirmation again', async () => {
+  await withRealGatewayChannel(async ({ channel, clock, directory }) => {
+    await channel.enqueue({ job_id: 'job-unresolved-http', room_key: 'room-unresolved-http', room_revision: 1 });
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    const request = {
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, decision: { should_write_to_sheet: true, sheet_row_candidate: {} }
+    };
+    await channel.reserveToolOperation({
+      tool: 'confirmation_request', job_id: request.job_id, room_key: request.room_key,
+      room_revision: request.room_revision, lease_id: request.lease_id,
+      request_digest: expectedConfirmationRequestDigest(request)
+    });
+    const restarted = createHermesGatewayChannel({ directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now });
+    let executions = 0;
+    const app = await start(createHermesGatewayHttpHandler({
+      token, channel: restarted, transport: 'gateway', now: () => clock.now,
+      executeConfirmation: async () => { executions += 1; throw new Error('must not replay reserved write'); }
+    }));
+    try {
+      const response = await gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request)
+      });
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), { error: 'confirmation_operation_unresolved' });
+      assert.equal(executions, 0);
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 test('Gateway HTTP rejects a sequential different decision under the same claim without another execution', async () => {
@@ -484,6 +634,7 @@ test('Gateway HTTP gateway_no_send rejects confirmation writes before execution'
     assert.equal(response.status, 403);
     assert.deepEqual(await response.json(), { error: 'writes_disabled' });
     assert.equal(executionCalls, 0);
+    assert.equal(channel.calls.reservation.length, 0);
     assert.equal(channel.calls.receipt.length, 0);
   } finally {
     await app.close();
