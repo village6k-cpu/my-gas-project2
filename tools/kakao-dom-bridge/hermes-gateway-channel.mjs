@@ -12,6 +12,7 @@ import path from 'node:path';
 const TERMINAL_STATES = new Set(['completed', 'superseded', 'failed']);
 const JOB_STATES = new Set(['ready', 'claimed', 'completed', 'superseded', 'retry_wait', 'failed']);
 const TOOL_OPERATION_STATES = new Set(['reserved', 'completed']);
+const APPLICATION_STATES = new Set(['pending', 'claimed', 'applying', 'applied', 'finalized', 'failed']);
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const iso = (value) => new Date(value).toISOString();
@@ -129,6 +130,16 @@ function validatePersistedToolOperation(job) {
   }
 }
 
+function validatePersistedApplication(job) {
+  const application = job?.application;
+  if (application == null) return;
+  if (!APPLICATION_STATES.has(application.state)
+    || !isValidIso(application.created_at)
+    || (application.state !== 'pending' && !String(application.application_id || '').trim())) {
+    throw channelError('invalid_persisted_job', 'persisted application state is invalid');
+  }
+}
+
 export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAttempts = 2, now = Date.now, storage = {} } = {}) {
   const queueDirectory = path.join(requiredString(directory, 'directory'), 'hermes-gateway');
   const leaseDuration = Number(leaseMs);
@@ -175,6 +186,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         throw channelError('invalid_persisted_job', 'invalid persisted Hermes Gateway job: ' + name);
       }
       validatePersistedToolOperation(job);
+      validatePersistedApplication(job);
       jobs.set(job.job_id, job);
       queueOrder = Math.max(queueOrder, Number(job.queue_order) || 0);
     }
@@ -221,6 +233,30 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     if (!needsReconciliation) return;
     for (const job of [...jobs.values()]) {
       if (job.state === 'retry_wait') await update(job, { state: 'ready' });
+      if (job.application?.state === 'claimed') {
+        await update(job, {
+          application: {
+            ...job.application,
+            state: 'pending',
+            application_id: null,
+            claimed_at: null,
+            error: null
+          }
+        });
+      } else if (job.application?.state === 'applying' || job.application?.state === 'applied') {
+        const interruptedState = job.application.state;
+        await update(job, {
+          human_review_required: true,
+          application: {
+            ...job.application,
+            state: 'failed',
+            failed_at: iso(currentTime()),
+            error: {
+              type: interruptedState === 'applying' ? 'ambiguous_post_apply_restart' : 'incomplete_finalize_restart'
+            }
+          }
+        });
+      }
     }
     for (const roomKey of new Set([...jobs.values()].map((job) => job.room_key))) await reconcileRoom(roomKey);
     needsReconciliation = false;
@@ -336,7 +372,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   }
 
   return {
-    async enqueue(event) {
+    async enqueue(event, { localContext = null } = {}) {
       return mutate(async () => {
         const normalized = normalizeEvent(event);
         const existing = jobs.get(normalized.job_id);
@@ -354,7 +390,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           schema: 'village-hermes-gateway-job/v1', ...normalized, state: 'ready', attempts: 0, queue_order: ++queueOrder,
           created_at: iso(nowMs), updated_at: iso(nowMs), claimed_by: null, lease_id: null, lease_expires_at: null,
           lease_expires_at_ms: null, superseded_by: null, superseded_lease_id: null, tool_receipts: [], result: null,
-          tool_operation: null, outcome: null, error: null, human_review_required: false
+          tool_operation: null, outcome: null, error: null, human_review_required: false,
+          local_context: localContext === null ? null : clone(localContext), application: null
         };
         await persist(job);
         jobs.set(job.job_id, job);
@@ -456,7 +493,127 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         if (job.state === 'superseded') throw channelError('stale_room_revision', 'superseded jobs cannot complete');
         assertCurrentLease(job, result);
         return clone(await update(job, {
-          state: 'completed', result: clone(result), claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null
+          state: 'completed', result: clone(result), claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
+          application: {
+            state: 'pending',
+            application_id: null,
+            created_at: iso(currentTime()),
+            claimed_at: null,
+            applying_at: null,
+            applied_at: null,
+            finalized_at: null,
+            failed_at: null,
+            applied_audit: null,
+            final_audit: null,
+            error: null
+          }
+        }));
+      });
+    },
+
+    async claimApplication({ jobId } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId, 'job_id'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        if (job.state !== 'completed' || job.application?.state !== 'pending') {
+          return { claimed: false, job: clone(job) };
+        }
+        const applicationId = randomUUID();
+        const claimedAt = iso(currentTime());
+        const next = await update(job, {
+          application: {
+            ...job.application,
+            state: 'claimed',
+            application_id: applicationId,
+            claimed_at: claimedAt
+          }
+        });
+        return { claimed: true, application_id: applicationId, job: clone(next) };
+      });
+    },
+
+    async listPendingApplications() {
+      return mutate(async () => [...jobs.values()]
+        .filter((job) => job.state === 'completed' && job.application?.state === 'pending')
+        .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
+        .map(clone));
+    },
+
+    async beginApplication({ job_id: jobId, jobId: camelJobId, application_id: applicationId, applicationId: camelApplicationId } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        const suppliedId = requiredString(applicationId ?? camelApplicationId, 'application_id', 'stale_application');
+        if (job.application?.state !== 'claimed' || job.application.application_id !== suppliedId) {
+          throw channelError('stale_application', 'application claim is no longer current');
+        }
+        return clone(await update(job, {
+          application: {
+            ...job.application,
+            state: 'applying',
+            applying_at: iso(currentTime())
+          }
+        }));
+      });
+    },
+
+    async recordApplicationApplied({ job_id: jobId, jobId: camelJobId, application_id: applicationId, applicationId: camelApplicationId, audit = null } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        const suppliedId = requiredString(applicationId ?? camelApplicationId, 'application_id', 'stale_application');
+        if (job.application?.state !== 'applying' || job.application.application_id !== suppliedId) {
+          throw channelError('stale_application', 'application claim is no longer current');
+        }
+        return clone(await update(job, {
+          application: {
+            ...job.application,
+            state: 'applied',
+            applied_at: iso(currentTime()),
+            applied_audit: audit === null ? null : clone(audit)
+          }
+        }));
+      });
+    },
+
+    async finalizeApplication({ job_id: jobId, jobId: camelJobId, application_id: applicationId, applicationId: camelApplicationId, audit = null } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        const suppliedId = requiredString(applicationId ?? camelApplicationId, 'application_id', 'stale_application');
+        if (job.application?.state !== 'applied' || job.application.application_id !== suppliedId) {
+          throw channelError('stale_application', 'application claim is no longer current');
+        }
+        return clone(await update(job, {
+          application: {
+            ...job.application,
+            state: 'finalized',
+            finalized_at: iso(currentTime()),
+            final_audit: audit === null ? null : clone(audit)
+          }
+        }));
+      });
+    },
+
+    async failApplication({ job_id: jobId, jobId: camelJobId, application_id: applicationId, applicationId: camelApplicationId, error = null } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        const suppliedId = requiredString(applicationId ?? camelApplicationId, 'application_id', 'stale_application');
+        if (!['claimed', 'applying', 'applied'].includes(job.application?.state) || job.application.application_id !== suppliedId) {
+          throw channelError('stale_application', 'application claim is no longer current');
+        }
+        const normalizedError = error && typeof error === 'object' && !Array.isArray(error)
+          ? clone(error)
+          : { type: 'gateway_application_failed', message: String(error || 'Gateway result application failed').slice(0, 1000) };
+        return clone(await update(job, {
+          human_review_required: true,
+          application: {
+            ...job.application,
+            state: 'failed',
+            failed_at: iso(currentTime()),
+            error: normalizedError
+          }
         }));
       });
     },

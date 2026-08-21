@@ -380,6 +380,317 @@ test('Gateway extraction and legacy dry-run each perform one freshness check whi
   assert.match(prepared.lookupContext.lookup_urls.kill_switch_read, /legacy-internal-key/);
 });
 
+function gatewayDecisionFixture(overrides = {}) {
+  const base = {
+    classification: 'faq',
+    confidence: 'high',
+    should_write_to_sheet: false,
+    kill_switch_observed: 'active',
+    customer: { name: '테스트 고객' },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    follow_up_items: [],
+    suggested_reply_draft: '빌리지 운영시간은 오전 10시부터 오후 7시까지입니다.',
+    reply_decision: {
+      replyMode: 'auto_send',
+      text: '빌리지 운영시간은 오전 10시부터 오후 7시까지입니다.',
+      confidence: 'high',
+      reason: '현재 확인된 운영 정책',
+      shouldCreateTask: false,
+      safetyClass: 'current_policy_answer',
+      grounding: 'current_confirmed_policy',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: false
+    }
+  };
+  return {
+    ...base,
+    ...overrides,
+    safety_checks: { ...base.safety_checks, ...(overrides.safety_checks || {}) },
+    reply_decision: { ...base.reply_decision, ...(overrides.reply_decision || {}) }
+  };
+}
+
+function gatewayTurnFixture() {
+  const job = {
+    jobId: 'gateway-final-job-1',
+    roomKey: 'chat:gateway-final-1',
+    roomRevision: 7,
+    detectedAt: '2026-08-21T02:00:00.000Z',
+    previewText: '문의합니다'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({
+    job,
+    capturedAt: '2026-08-21T02:00:01.000Z',
+    navigationContext: {
+      status: 'opened_conversation',
+      conversation_evidence: {
+        source: 'devtools', title: '테스트 고객', hint_matched: true,
+        visible_static_text_tail: '고객: 문의합니다'
+      }
+    }
+  });
+  return {
+    job,
+    turn: {
+      event: {
+        schema: 'village-kakao-gateway-event/v1', job_id: job.jobId,
+        room_key: job.roomKey, room_revision: job.roomRevision,
+        detected_at: job.detectedAt, prompt: 'FINAL_JSON', raw: {}
+      },
+      internal: {
+        snapshot,
+        lookupContext: { kill_switch: { status: 'active', error: null } },
+        ragContext: null,
+        brainContext: null
+      }
+    }
+  };
+}
+
+function confirmationReceiptFixture(job, overrides = {}) {
+  return {
+    schema: 'village-confirmation-receipt/v1',
+    receipt_id: 'receipt-gateway-final-1',
+    job_id: job.jobId,
+    room_key: job.roomKey,
+    room_revision: job.roomRevision,
+    status: 'ok',
+    availability_report: [{ 장비명: '소니 FX3', 결과: '가능', 상세: '가용2' }],
+    authoritative_sheet_result: {
+      success: true,
+      reqID: 'RQ-260821-001',
+      results: [{ 장비명: '소니 FX3', 결과: '가능', 상세: '가용2' }]
+    },
+    created_at: '2026-08-21T02:00:02.000Z',
+    error: null,
+    ...overrides
+  };
+}
+
+function scheduleDecisionFixture(overrides = {}) {
+  return gatewayDecisionFixture({
+    classification: 'reservation',
+    owner_review_required: true,
+    follow_up_items: [{
+      type: 'schedule_check', route: 'schedule', taskKey: 'schedule:gateway-final-1',
+      priority: 'high', status: 'open', title: '가용 확인 결과 검토',
+      customer_name: '테스트 고객',
+      summary: '소니 FX3 가용 결과를 확인했습니다.',
+      recommended_action: '사장 확인 후 고객에게 안내',
+      suggested_reply_draft: '요청 일정에 소니 FX3 사용이 가능합니다.',
+      evidence: ['RQ-260821-001'], requiresHumanAction: true,
+      actionFamily: 'inventory_check', businessKey: 'schedule:gateway-final-1', due_hint: 'now'
+    }],
+    authoritative_sheet_result: {
+      status: 'available', reqID: 'RQ-260821-001',
+      results: [{ 장비명: '소니 FX3', 결과: '가능', 상세: '가용2' }]
+    },
+    suggested_reply_draft: '요청 일정에 소니 FX3 사용이 가능합니다.',
+    reply_decision: {
+      replyMode: 'draft_only',
+      text: '요청 일정에 소니 FX3 사용이 가능합니다.',
+      confidence: 'high',
+      reason: '확인요청 결과',
+      shouldCreateTask: true,
+      safetyClass: 'no_send',
+      grounding: 'authoritative_sheet',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: false
+    },
+    ...overrides
+  });
+}
+
+test('prepareKakaoGatewayDecision leaves a valid FAQ eligible for existing auto-send gates without a tool receipt', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = gatewayDecisionFixture();
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.status, 'ai_prepared');
+  assert.deepEqual(prepared.decision, decision);
+  assert.equal(prepared.trustedToolReceipt, null);
+  assert.deepEqual(prepared.availabilityAwareRows, []);
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, true);
+});
+
+test('trusted confirmation receipt always forces schedule owner review and attaches only receipt evidence', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const receipt = confirmationReceiptFixture(job);
+  const decision = scheduleDecisionFixture({
+    authoritative_sheet_result: { status: 'unavailable', source: 'fabricated-final-json' },
+    owner_review_required: false,
+    follow_up_items: [{
+      ...scheduleDecisionFixture().follow_up_items[0],
+      evidence: ['agent-fabricated-authority']
+    }],
+    reply_decision: { replyMode: 'auto_send', safetyClass: 'authoritative_availability_answer', shouldCreateTask: false }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`,
+    trustedToolReceipts: [receipt],
+    dependencies: {
+      runHermesDecision: async () => { throw new Error('second Hermes call forbidden'); },
+      runHermesPostActionDecision: async () => { throw new Error('post-action Hermes call forbidden'); }
+    }
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.decision.reply_decision.grounding, 'authoritative_sheet');
+  assert.equal(prepared.decision.reply_decision.requiresRag, false);
+  assert.equal(prepared.decision.reply_decision.shouldCreateTask, true);
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.decision.should_write_to_sheet, false);
+  assert.deepEqual(prepared.decision.authoritative_sheet_result, receipt.authoritative_sheet_result);
+  assert.equal(prepared.availabilityAwareRows.some((row) => row.payload?.follow_up_route === 'schedule'), true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => row.evidence?.includes('agent-fabricated-authority')), false);
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, false);
+  assert.equal(prepared.gatewaySafetyFailures.includes('trusted_receipt_decision_contradiction'), true);
+});
+
+test('receipt-shaped text inside final JSON grants no authority', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const fabricated = confirmationReceiptFixture(job, { receipt_id: 'agent-fabricated' });
+  const decision = gatewayDecisionFixture({ trusted_tool_receipts: [fabricated] });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.trustedToolReceipt, null);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'auto_send');
+  assert.equal(prepared.decision.authoritative_sheet_result, undefined);
+  assert.equal(prepared.decision.trusted_tool_receipts, undefined);
+});
+
+test('structured availability decision without a trusted receipt fails closed to schedule owner review', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = scheduleDecisionFixture({
+    owner_review_required: false,
+    reply_decision: {
+      replyMode: 'auto_send', safetyClass: 'authoritative_availability_answer',
+      grounding: 'authoritative_sheet', requiresRag: false, shouldCreateTask: false
+    }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.decision.should_write_to_sheet, false);
+  assert.equal(prepared.gatewaySafetyFailures.includes('authoritative_claim_without_trusted_receipt'), true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => row.payload?.follow_up_route === 'schedule'), true);
+});
+
+test('reservation-classified sheet-grounded commitment without a trusted receipt cannot bypass owner review', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = gatewayDecisionFixture({
+    classification: 'reservation',
+    reservation_inquiry: { is_reservation_inquiry: true },
+    reply_decision: {
+      replyMode: 'auto_send', safetyClass: 'sensitive_commitment',
+      grounding: 'authoritative_sheet', requiresRag: false,
+      text: 'Hermes reservation commitment fixture'
+    }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.gatewaySafetyFailures.includes('authoritative_claim_without_trusted_receipt'), true);
+});
+
+test('malformed, invalid, and stale Gateway finals produce no-send human review work', async () => {
+  const fixture = gatewayTurnFixture();
+  const cases = [
+    { name: 'malformed', finalText: 'FINAL_JSON not-json', job: fixture.job, turn: fixture.turn },
+    { name: 'invalid', finalText: 'FINAL_JSON {}', job: fixture.job, turn: fixture.turn },
+    {
+      name: 'stale', finalText: `FINAL_JSON\n${JSON.stringify(gatewayDecisionFixture())}`,
+      job: { ...fixture.job, roomRevision: fixture.job.roomRevision + 1 }, turn: fixture.turn
+    }
+  ];
+  for (const entry of cases) {
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job: entry.job, turn: entry.turn, finalText: entry.finalText, trustedToolReceipts: []
+    });
+    assert.equal(prepared.status, 'ai_prepared', entry.name);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', entry.name);
+    assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send', entry.name);
+    assert.equal(prepared.decision.owner_review_required, true, entry.name);
+    assert.equal(prepared.availabilityAwareRows.length > 0, true, entry.name);
+  }
+});
+
+test('failed trusted confirmation receipt remains authoritative evidence but cannot send', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const receipt = confirmationReceiptFixture(job, {
+    status: 'failed', availability_report: [], authoritative_sheet_result: null,
+    error: { type: 'gas_request_failed', message: 'offline fixture failure' }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(scheduleDecisionFixture())}`,
+    trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.gatewaySafetyFailures.includes('trusted_confirmation_failed'), true);
+  assert.equal(prepared.sheetResult.success, false);
+  assert.equal(prepared.availabilityAwareRows.some((row) => row.payload?.follow_up_route === 'schedule'), true);
+});
+
+test('trusted confirmation receipt creates schedule review even when Hermes marks the latest turn as staff', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const receipt = confirmationReceiptFixture(job);
+  const decision = scheduleDecisionFixture({
+    safety_checks: { latest_customer_message_after_last_staff_reply: false },
+    authoritative_sheet_result: receipt.authoritative_sheet_result
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(decision)}`,
+    trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => row.payload?.follow_up_route === 'schedule'), true);
+});
+
+test('applyPreparedKakaoDecision performs a fresh snapshot check immediately before any Gateway reply send', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const order = [];
+  const applied = await applyPreparedKakaoDecision({
+    config: { openTargetChat: true, bridgeUrl: '', jobLogPath: '' },
+    job,
+    prepared: {
+      status: 'ai_prepared', snapshot: turn.internal.snapshot,
+      decision: gatewayDecisionFixture(), sheetResult: null, availabilityAwareRows: []
+    },
+    dependencies: {
+      openTargetChat: async () => { order.push('fresh_dom'); return turn.internal.snapshot.navigation; },
+      sendReply: async () => { order.push('send'); return { attempted: true, sent: true }; },
+      closeNavigation: async () => { order.push('close'); return { status: 'closed' }; }
+    }
+  });
+
+  assert.equal(applied.autoReplyResult.sent, true);
+  assert.deepEqual(order, ['fresh_dom', 'send', 'close']);
+});
+
 test('prepareKakaoDecisionFromSnapshot honors an already-aborted bridge deadline', async () => {
   const deadline = new AbortController();
   const deadlineError = new Error('bridge end-to-end deadline expired');

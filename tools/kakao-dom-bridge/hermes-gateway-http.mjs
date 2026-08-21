@@ -143,7 +143,7 @@ function channelErrorResponse(error) {
   return { status, error: error?.status ? error.message : String(error?.code || 'invalid_request') };
 }
 
-export function createHermesGatewayHttpHandler({ token, channel, executeConfirmation, transport = 'cli', now = Date.now } = {}) {
+export function createHermesGatewayHttpHandler({ token, channel, executeConfirmation, enqueueResultApplication, transport = 'cli', now = Date.now } = {}) {
   const gatewayConfigured = GATEWAY_TRANSPORTS.has(transport) && Boolean(String(token || '').trim()) && Boolean(channel);
   const confirmationInFlight = new Map();
 
@@ -183,7 +183,14 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
       if (req.method === 'POST' && url.pathname === '/hermes/v1/results') {
         const body = await readJsonBody(req);
         requiredLeaseId(body);
-        await channel.complete(body);
+        const completed = await channel.complete(body);
+        if (typeof enqueueResultApplication === 'function') {
+          try {
+            await enqueueResultApplication(completed);
+          } catch {
+            throw requestError(503, 'result_application_enqueue_failed');
+          }
+        }
         sendJson(res, 200, { ok: true });
         return true;
       }

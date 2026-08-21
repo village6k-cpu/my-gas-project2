@@ -15,6 +15,7 @@ const {
   p0SlackEscalationDue,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
+  createGatewayResultApplicationCoordinator,
   registerAcceptedRoomEvent,
   semanticRoomEventIdentity,
   hasUnreadCount,
@@ -59,6 +60,251 @@ test('server confirmation executor forwards the channel claim fence into the wor
   assert.equal(operationArgs.job.roomRevision, 3);
   assert.equal(operationArgs.dependencies.assertCurrentClaim, assertCurrentClaim);
   assert.equal(operationArgs.dependencies.operationFence, operationFence);
+});
+
+test('Gateway result coordinator serializes prepare, fresh DOM apply, finalize, and audit exactly once', async () => {
+  const order = [];
+  let applicationState = 'pending';
+  const durableJob = {
+    job_id: 'job-result-apply', room_key: 'room-result-apply', room_revision: 2,
+    event: { schema: 'village-kakao-gateway-event/v1', job_id: 'job-result-apply', room_key: 'room-result-apply', room_revision: 2 },
+    local_context: {
+      job: { jobId: 'job-result-apply', roomKey: 'room-result-apply', roomRevision: 2 },
+      turn_internal: { snapshot: { schema: 'kakao-room-snapshot/v1', jobId: 'job-result-apply', roomKey: 'room-result-apply', roomRevision: 2 } }
+    },
+    result: { content: 'FINAL_JSON {}' }, tool_receipts: [], application: { state: 'pending' }
+  };
+  const channel = {
+    async claimApplication() {
+      if (applicationState !== 'pending') return { claimed: false, job: structuredClone(durableJob) };
+      applicationState = 'claimed';
+      return { claimed: true, application_id: 'application-1', job: structuredClone({ ...durableJob, application: { state: 'claimed' } }) };
+    },
+    async beginApplication() { order.push('persist_applying'); applicationState = 'applying'; },
+    async recordApplicationApplied() { order.push('persist_applied'); applicationState = 'applied'; },
+    async finalizeApplication() { order.push('persist_finalized'); applicationState = 'finalized'; },
+    async failApplication() { throw new Error('unexpected failure'); }
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel,
+    getConfig: () => ({ openTargetChat: false }),
+    prepare: async () => { order.push('prepare'); return { status: 'ai_prepared', snapshot: durableJob.local_context.turn_internal.snapshot }; },
+    apply: async () => { order.push('apply_fresh_dom'); return { prepared: { status: 'ai_prepared' }, autoReplyResult: { sent: false } }; },
+    finalize: async () => { order.push('finalize_followup'); return { status: 'ai_completed', autoReplyResult: { sent: false } }; },
+    record: async () => { order.push('audit'); }
+  });
+
+  const first = await coordinator.enqueue(durableJob);
+  const duplicate = await coordinator.enqueue(durableJob);
+  assert.equal(first.accepted, true);
+  assert.equal(duplicate.accepted, false);
+  await coordinator.idle();
+  assert.deepEqual(order, ['prepare', 'persist_applying', 'apply_fresh_dom', 'persist_applied', 'finalize_followup', 'audit', 'persist_finalized']);
+});
+
+test('Gateway result coordinator keeps one application lane across rooms', async () => {
+  const order = [];
+  const states = new Map();
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const channel = {
+    async claimApplication({ jobId }) {
+      if (states.has(jobId)) return { claimed: false };
+      states.set(jobId, 'applying');
+      return {
+        claimed: true, application_id: `application-${jobId}`,
+        job: {
+          job_id: jobId, room_key: `room-${jobId}`, room_revision: 1,
+          event: { job_id: jobId, room_key: `room-${jobId}`, room_revision: 1 },
+          local_context: { job: { jobId, roomKey: `room-${jobId}`, roomRevision: 1 }, turn_internal: { snapshot: {} } },
+          result: { content: 'FINAL_JSON {}' }, tool_receipts: []
+        }
+      };
+    },
+    async beginApplication() {},
+    async recordApplicationApplied({ job_id }) { states.set(job_id, 'applied'); },
+    async finalizeApplication({ job_id }) { states.set(job_id, 'finalized'); },
+    async failApplication() {}
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel, getConfig: () => ({}),
+    prepare: async ({ job }) => ({ status: 'ai_prepared', snapshot: {}, id: job.jobId }),
+    apply: async ({ job, prepared }) => {
+      order.push(`start:${job.jobId}`);
+      if (job.jobId === 'one') await firstGate;
+      order.push(`end:${job.jobId}`);
+      return { prepared, autoReplyResult: { sent: false } };
+    },
+    finalize: async ({ applied }) => ({ ...applied.prepared, status: 'ai_completed' }),
+    record: async () => {}
+  });
+
+  await coordinator.enqueue({ job_id: 'one' });
+  await coordinator.enqueue({ job_id: 'two' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ['start:one']);
+  releaseFirst();
+  await coordinator.idle();
+  assert.deepEqual(order, ['start:one', 'end:one', 'start:two', 'end:two']);
+});
+
+test('Gateway result coordinator trusts only the receipt fenced by the durable channel operation', async () => {
+  let receivedReceipts = null;
+  const exact = {
+    schema: 'village-confirmation-receipt/v1', receipt_id: 'receipt-exact',
+    operation_id: 'operation-exact', lease_id: 'lease-exact', request_digest: 'digest-exact',
+    job_id: 'job-receipt-provenance', room_key: 'room-receipt-provenance', room_revision: 1,
+    status: 'ok', availability_report: [], authoritative_sheet_result: null,
+    created_at: '2026-08-21T00:00:00.000Z', error: null
+  };
+  const fabricated = { ...exact, receipt_id: 'receipt-fabricated', operation_id: 'other-operation' };
+  const durableJob = {
+    job_id: exact.job_id, room_key: exact.room_key, room_revision: exact.room_revision,
+    event: { job_id: exact.job_id, room_key: exact.room_key, room_revision: exact.room_revision },
+    local_context: {
+      job: { jobId: exact.job_id, roomKey: exact.room_key, roomRevision: exact.room_revision },
+      turn_internal: { snapshot: {} }
+    },
+    result: { content: 'FINAL_JSON {}' },
+    tool_operation: {
+      schema: 'village-tool-operation-reservation/v1', state: 'completed',
+      operation_id: exact.operation_id, receipt_id: exact.receipt_id,
+      lease_id: exact.lease_id, request_digest: exact.request_digest,
+      job_id: exact.job_id, room_key: exact.room_key, room_revision: exact.room_revision
+    },
+    tool_receipts: [fabricated, exact]
+  };
+  const channel = {
+    async claimApplication() { return { claimed: true, application_id: 'application-provenance', job: structuredClone(durableJob) }; },
+    async beginApplication() {},
+    async recordApplicationApplied() {}, async finalizeApplication() {}, async failApplication() {}
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel, getConfig: () => ({}),
+    prepare: async ({ trustedToolReceipts }) => {
+      receivedReceipts = trustedToolReceipts;
+      return { status: 'ai_prepared', snapshot: {} };
+    },
+    apply: async ({ prepared }) => ({ prepared, autoReplyResult: { sent: false } }),
+    finalize: async ({ applied }) => ({ ...applied.prepared, status: 'ai_completed' })
+  });
+  await coordinator.enqueue(durableJob);
+  await coordinator.idle();
+  assert.deepEqual(receivedReceipts, [exact]);
+});
+
+test('Gateway result coordinator records audit before terminal finalize and fails closed when recording crashes', async () => {
+  const order = [];
+  const durableJob = {
+    job_id: 'job-record-crash', room_key: 'room-record-crash', room_revision: 1,
+    event: { job_id: 'job-record-crash', room_key: 'room-record-crash', room_revision: 1 },
+    local_context: {
+      job: { jobId: 'job-record-crash', roomKey: 'room-record-crash', roomRevision: 1 },
+      turn_internal: { snapshot: {} }
+    },
+    result: { content: 'FINAL_JSON {}' }, tool_receipts: []
+  };
+  const channel = {
+    async claimApplication() { return { claimed: true, application_id: 'application-record-crash', job: structuredClone(durableJob) }; },
+    async beginApplication() { order.push('persist_applying'); },
+    async recordApplicationApplied() { order.push('persist_applied'); },
+    async finalizeApplication() { order.push('persist_finalized'); },
+    async failApplication() { order.push('persist_failed_review'); }
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel, getConfig: () => ({}),
+    prepare: async () => ({ status: 'ai_prepared', snapshot: {} }),
+    apply: async ({ prepared }) => ({ prepared, autoReplyResult: { sent: false } }),
+    finalize: async ({ applied }) => { order.push('finalize_followup'); return { ...applied.prepared, status: 'ai_completed' }; },
+    record: async () => { order.push('audit'); throw new Error('offline audit failure'); },
+    onFailure: async () => { order.push('human_review'); }
+  });
+
+  await coordinator.enqueue(durableJob);
+  await coordinator.idle();
+  assert.deepEqual(order, ['persist_applying', 'persist_applied', 'finalize_followup', 'audit', 'persist_failed_review', 'human_review']);
+  assert.equal(order.includes('persist_finalized'), false);
+});
+
+test('Gateway result coordinator marks an apply-phase crash ambiguous and never replays DOM apply', async () => {
+  const order = [];
+  let claimed = false;
+  let applyCount = 0;
+  const durableJob = {
+    job_id: 'job-apply-crash', room_key: 'room-apply-crash', room_revision: 1,
+    event: { job_id: 'job-apply-crash', room_key: 'room-apply-crash', room_revision: 1 },
+    local_context: {
+      job: { jobId: 'job-apply-crash', roomKey: 'room-apply-crash', roomRevision: 1 },
+      turn_internal: { snapshot: {} }
+    },
+    result: { content: 'FINAL_JSON {}' }, tool_receipts: [], application: { state: 'pending' }
+  };
+  const channel = {
+    async claimApplication() {
+      if (claimed) return { claimed: false, job: { ...durableJob, application: { state: 'failed' } } };
+      claimed = true;
+      return { claimed: true, application_id: 'application-apply-crash', job: structuredClone({ ...durableJob, application: { state: 'claimed' } }) };
+    },
+    async beginApplication() { order.push('persist_applying'); },
+    async recordApplicationApplied() { order.push('unexpected_applied'); },
+    async finalizeApplication() { order.push('unexpected_finalized'); },
+    async failApplication() { order.push('persist_failed_review'); }
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel, getConfig: () => ({}),
+    prepare: async () => ({ status: 'ai_prepared', snapshot: {} }),
+    apply: async () => { applyCount += 1; order.push('apply'); throw new Error('uncertain DOM outcome'); },
+    finalize: async () => { order.push('unexpected_finalize'); },
+    record: async () => { order.push('unexpected_audit'); },
+    onFailure: async ({ durableJob: failedJob }) => {
+      order.push(`human_review:${failedJob.application.state}`);
+    }
+  });
+
+  assert.equal((await coordinator.enqueue(durableJob)).accepted, true);
+  await coordinator.idle();
+  assert.equal((await coordinator.enqueue(durableJob)).accepted, false);
+  await coordinator.idle();
+  assert.equal(applyCount, 1);
+  assert.deepEqual(order, ['persist_applying', 'apply', 'persist_failed_review', 'human_review:applying']);
+});
+
+test('Gateway result coordinator recovers only durable pending applications after restart', async () => {
+  const order = [];
+  let state = 'pending';
+  const durableJob = {
+    job_id: 'job-startup-pending', room_key: 'room-startup-pending', room_revision: 1,
+    event: { job_id: 'job-startup-pending', room_key: 'room-startup-pending', room_revision: 1 },
+    local_context: {
+      job: { jobId: 'job-startup-pending', roomKey: 'room-startup-pending', roomRevision: 1 },
+      turn_internal: { snapshot: {} }
+    },
+    result: { content: 'FINAL_JSON {}' }, tool_receipts: [], application: { state: 'pending' }
+  };
+  const channel = {
+    async listPendingApplications() { return [structuredClone(durableJob)]; },
+    async claimApplication() {
+      if (state !== 'pending') return { claimed: false };
+      state = 'claimed';
+      return { claimed: true, application_id: 'application-startup', job: structuredClone({ ...durableJob, application: { state: 'claimed' } }) };
+    },
+    async beginApplication() { state = 'applying'; order.push('apply_boundary'); },
+    async recordApplicationApplied() { state = 'applied'; },
+    async finalizeApplication() { state = 'finalized'; },
+    async failApplication() { state = 'failed'; }
+  };
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel, getConfig: () => ({}),
+    prepare: async () => ({ status: 'ai_prepared', snapshot: {} }),
+    apply: async ({ prepared }) => { order.push('apply'); return { prepared, autoReplyResult: { sent: false } }; },
+    finalize: async ({ applied }) => ({ ...applied.prepared, status: 'ai_completed' })
+  });
+
+  const recovered = await coordinator.recoverPendingApplications();
+  await coordinator.idle();
+  assert.deepEqual(recovered, [{ accepted: true, application_id: 'application-startup' }]);
+  assert.deepEqual(order, ['apply_boundary', 'apply']);
+  assert.equal(state, 'finalized');
 });
 
 test('P0 Slack escalation repeats only after the durable interval and stops on closure', () => {

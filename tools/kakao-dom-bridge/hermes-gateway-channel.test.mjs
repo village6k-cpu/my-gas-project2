@@ -592,3 +592,150 @@ test('an already failed unresolved operation still rejects a wrong lease without
     assert.deepEqual(await channel.get(claim.job_id), failed);
   });
 });
+
+test('Gateway channel keeps local turn context durable but exposes only the bounded event to a claim', async () => {
+  await withChannel(async ({ channel }) => {
+    const gatewayEvent = {
+      ...event('job-local-context', 'room-local-context', 1),
+      schema: 'village-kakao-gateway-event/v1', prompt: 'bounded prompt', raw: { safe: true }
+    };
+    const localContext = {
+      job: { jobId: 'job-local-context', roomKey: 'room-local-context', roomRevision: 1 },
+      turn_internal: { snapshot: { schema: 'kakao-room-snapshot/v1' }, private_lookup: 'local-only' }
+    };
+    await channel.enqueue(gatewayEvent, { localContext });
+
+    const claimed = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    assert.deepEqual(claimed.event, gatewayEvent);
+    assert.equal('local_context' in claimed.event, false);
+    assert.deepEqual((await channel.get(gatewayEvent.job_id)).local_context, localContext);
+  });
+});
+
+test('completed Gateway result creates one durable application claim and finalizes in order', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-application', 'room-application', 1), {
+      localContext: { job: { jobId: 'job-application', roomKey: 'room-application', roomRevision: 1 } }
+    });
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    const completed = await channel.complete({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, content: 'FINAL_JSON {}'
+    });
+    assert.equal(completed.application.state, 'pending');
+
+    const application = await channel.claimApplication({ jobId: claim.job_id });
+    assert.equal(application.claimed, true);
+    assert.equal(application.job.application.state, 'claimed');
+    assert.equal(typeof application.application_id, 'string');
+    assert.equal((await channel.claimApplication({ jobId: claim.job_id })).claimed, false);
+
+    const applying = await channel.beginApplication({
+      job_id: claim.job_id, application_id: application.application_id
+    });
+    assert.equal(applying.application.state, 'applying');
+
+    const applied = await channel.recordApplicationApplied({
+      job_id: claim.job_id, application_id: application.application_id,
+      audit: { auto_reply_sent: false }
+    });
+    assert.equal(applied.application.state, 'applied');
+    const finalized = await channel.finalizeApplication({
+      job_id: claim.job_id, application_id: application.application_id,
+      audit: { status: 'ai_completed' }
+    });
+    assert.equal(finalized.application.state, 'finalized');
+    assert.equal((await channel.claimApplication({ jobId: claim.job_id })).claimed, false);
+  });
+});
+
+test('restart during an applying DOM phase fails human-review instead of replaying Kakao apply', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('job-ambiguous-apply', 'room-ambiguous-apply', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    await channel.complete({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, content: 'FINAL_JSON {}'
+    });
+    const application = await channel.claimApplication({ jobId: claim.job_id });
+    await channel.beginApplication({ job_id: claim.job_id, application_id: application.application_id });
+
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    const recovered = await restarted.get(claim.job_id);
+    assert.equal(recovered.application.state, 'failed');
+    assert.equal(recovered.human_review_required, true);
+    assert.equal(recovered.application.error.type, 'ambiguous_post_apply_restart');
+    assert.equal((await restarted.claimApplication({ jobId: claim.job_id })).claimed, false);
+  });
+});
+
+test('restart after durable DOM apply but before finalize requires human review without replaying apply', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('job-incomplete-finalize', 'room-incomplete-finalize', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    await channel.complete({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, content: 'FINAL_JSON {}'
+    });
+    const application = await channel.claimApplication({ jobId: claim.job_id });
+    await channel.beginApplication({ job_id: claim.job_id, application_id: application.application_id });
+    await channel.recordApplicationApplied({
+      job_id: claim.job_id, application_id: application.application_id,
+      audit: { auto_reply_sent: false }
+    });
+
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    const recovered = await restarted.get(claim.job_id);
+    assert.equal(recovered.application.state, 'failed');
+    assert.equal(recovered.human_review_required, true);
+    assert.equal(recovered.application.error.type, 'incomplete_finalize_restart');
+    assert.equal((await restarted.claimApplication({ jobId: claim.job_id })).claimed, false);
+  });
+});
+
+test('restart keeps a completed pending application safely claimable before any DOM apply began', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('job-pending-restart', 'room-pending-restart', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    await channel.complete({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, content: 'FINAL_JSON {}'
+    });
+
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    const pending = await restarted.listPendingApplications();
+    assert.deepEqual(pending.map((job) => job.job_id), [claim.job_id]);
+    const application = await restarted.claimApplication({ jobId: claim.job_id });
+    assert.equal(application.claimed, true);
+    assert.equal(application.job.application.state, 'claimed');
+  });
+});
+
+test('restart before the DOM apply boundary returns a claimed application to pending', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('job-claimed-restart', 'room-claimed-restart', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    await channel.complete({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, content: 'FINAL_JSON {}'
+    });
+    const firstApplication = await channel.claimApplication({ jobId: claim.job_id });
+    assert.equal(firstApplication.job.application.state, 'claimed');
+
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    const recovered = await restarted.get(claim.job_id);
+    assert.equal(recovered.application.state, 'pending');
+    assert.equal(recovered.human_review_required, false);
+    const reclaimed = await restarted.claimApplication({ jobId: claim.job_id });
+    assert.equal(reclaimed.claimed, true);
+    assert.notEqual(reclaimed.application_id, firstApplication.application_id);
+  });
+});

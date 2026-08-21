@@ -175,6 +175,37 @@ test('Gateway HTTP forwards the exact lease id for results and outcomes', async 
   }
 });
 
+test('Gateway HTTP hands the durably completed result to the local application enqueue seam', async () => {
+  const channel = makeChannel();
+  const enqueued = [];
+  channel.complete = async (body) => {
+    channel.calls.complete.push(body);
+    return {
+      state: 'completed', job_id: body.job_id, room_key: body.room_key,
+      room_revision: body.room_revision, result: body, application: { state: 'pending' }
+    };
+  };
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    enqueueResultApplication: async (job) => { enqueued.push(structuredClone(job)); }
+  }));
+  try {
+    const body = {
+      job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+      lease_id: leaseId, content: 'FINAL_JSON {}'
+    };
+    const response = await gatewayFetch(app.url, '/hermes/v1/results', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    });
+    assert.equal(response.status, 200);
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].application.state, 'pending');
+    assert.deepEqual(enqueued[0].result, body);
+  } finally {
+    await app.close();
+  }
+});
+
 test('Gateway HTTP rejects a result submitted before its reserved confirmation receipt and persists human review', async () => {
   await withRealGatewayChannel(async ({ channel, clock }) => {
     await channel.enqueue({ job_id: 'job-result-http', room_key: 'room-result-http', room_revision: 1 });

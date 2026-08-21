@@ -13,7 +13,8 @@ import {
   executeVillageConfirmationRequest,
   finalizePreparedKakaoDecision,
   loadKakaoWorkerRuntimeConfig,
-  prepareKakaoDecisionFromSnapshot
+  prepareKakaoDecisionFromSnapshot,
+  prepareKakaoGatewayDecision
 } from '../ai-browser-worker/worker.mjs';
 import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-browser-worker/follow-up-case-lifecycle.mjs';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
@@ -244,6 +245,123 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
   });
 }
 
+export function createGatewayResultApplicationCoordinator({
+  channel,
+  getConfig,
+  prepare = prepareKakaoGatewayDecision,
+  apply = applyPreparedKakaoDecision,
+  finalize = finalizePreparedKakaoDecision,
+  record = async () => {},
+  onFailure = async () => {}
+} = {}) {
+  if (!channel
+    || typeof channel.claimApplication !== 'function'
+    || typeof channel.beginApplication !== 'function'
+    || typeof channel.recordApplicationApplied !== 'function'
+    || typeof channel.finalizeApplication !== 'function'
+    || typeof channel.failApplication !== 'function') {
+    throw new Error('Gateway application channel is required');
+  }
+  if (typeof getConfig !== 'function') throw new Error('Gateway application config loader is required');
+  let applicationTail = Promise.resolve();
+
+  function exactDurableToolReceipts(durableJob) {
+    const operation = durableJob?.tool_operation;
+    if (!operation || operation.state !== 'completed') return [];
+    const exact = (Array.isArray(durableJob?.tool_receipts) ? durableJob.tool_receipts : []).find((receipt) => (
+      receipt?.schema === 'village-confirmation-receipt/v1'
+      && receipt.receipt_id === operation.receipt_id
+      && receipt.operation_id === operation.operation_id
+      && receipt.lease_id === operation.lease_id
+      && receipt.request_digest === operation.request_digest
+      && receipt.job_id === durableJob.job_id
+      && receipt.room_key === durableJob.room_key
+      && receipt.room_revision === durableJob.room_revision
+    ));
+    return exact ? [exact] : [];
+  }
+
+  async function runApplication(claimed) {
+    const durableJob = claimed.job;
+    const localContext = durableJob?.local_context;
+    const job = localContext?.job;
+    const internal = localContext?.turn_internal;
+    const event = durableJob?.event;
+    if (!job || !internal || !event) throw new Error('gateway_local_turn_context_missing');
+    const startedAt = Date.now();
+    const prepared = await prepare({
+      config: getConfig(),
+      job,
+      turn: { event, internal },
+      finalText: String(durableJob?.result?.content ?? durableJob?.result?.final_text ?? ''),
+      trustedToolReceipts: exactDurableToolReceipts(durableJob)
+    });
+    await channel.beginApplication({
+      job_id: durableJob.job_id,
+      application_id: claimed.application_id
+    });
+    durableJob.application = { ...(durableJob.application || {}), state: 'applying' };
+    const applied = await apply({ config: getConfig(), job, prepared });
+    await channel.recordApplicationApplied({
+      job_id: durableJob.job_id,
+      application_id: claimed.application_id,
+      audit: {
+        auto_reply_attempted: applied?.autoReplyResult?.attempted === true,
+        auto_reply_sent: applied?.autoReplyResult?.sent === true,
+        snapshot_changed: applied?.snapshotChanged === true,
+        superseded: applied?.superseded === true
+      }
+    });
+    durableJob.application = { ...(durableJob.application || {}), state: 'applied' };
+    const finalized = await finalize({ config: getConfig(), job, applied });
+    const elapsedMs = Date.now() - startedAt;
+    await record({ durableJob, job, finalized, elapsedMs });
+    await channel.finalizeApplication({
+      job_id: durableJob.job_id,
+      application_id: claimed.application_id,
+      audit: {
+        status: String(finalized?.status || ''),
+        follow_up_inserted: Number(finalized?.followUpResult?.inserted || 0),
+        auto_reply_sent: finalized?.autoReplyResult?.sent === true
+      }
+    });
+    return finalized;
+  }
+
+  async function enqueueCompletedJob(completedJob = {}) {
+    const jobId = String(completedJob?.job_id || '').trim();
+    if (!jobId) throw new Error('Gateway completed job_id is required');
+    const claimed = await channel.claimApplication({ jobId });
+    if (!claimed?.claimed) return { accepted: false, reason: claimed?.job?.application?.state || 'not_pending' };
+    const application = applicationTail.then(() => runApplication(claimed));
+    applicationTail = application.catch(async (error) => {
+      try {
+        await channel.failApplication({
+          job_id: claimed.job.job_id,
+          application_id: claimed.application_id,
+          error: { type: 'gateway_application_failed', message: String(error?.message || error).slice(0, 1000) }
+        });
+      } catch {}
+      try { await onFailure({ durableJob: claimed.job, error }); } catch {}
+    });
+    return { accepted: true, application_id: claimed.application_id };
+  }
+
+  return {
+    enqueue: enqueueCompletedJob,
+    async recoverPendingApplications() {
+      if (typeof channel.listPendingApplications !== 'function') {
+        throw new Error('Gateway application recovery channel is required');
+      }
+      const pending = await channel.listPendingApplications();
+      const recovered = [];
+      for (const job of pending) recovered.push(await enqueueCompletedJob(job));
+      return recovered;
+    },
+    async idle() { await applicationTail; }
+  };
+}
+
 const gatewayConfirmationExecutor = gatewayTransportEnabled
   ? createGatewayConfirmationExecutor({
       getConfig: () => {
@@ -256,7 +374,10 @@ const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
   channel: gatewayChannel,
   transport: CONFIG.hermesTransport,
-  executeConfirmation: gatewayConfirmationExecutor
+  executeConfirmation: gatewayConfirmationExecutor,
+  enqueueResultApplication: gatewayTransportEnabled
+    ? (completedJob) => getGatewayResultApplicationCoordinator().enqueue(completedJob)
+    : null
 });
 
 function ensureQueueDir() {
@@ -1487,6 +1608,59 @@ function runWorker(job) {
 let workerChain = Promise.resolve();
 let kakaoPhaseScheduler = null;
 let kakaoWorkerRuntimeConfig = null;
+let gatewayResultApplicationCoordinator = null;
+
+async function recordGatewayApplicationResult({ durableJob, job, finalized, elapsedMs }) {
+  const result = {
+    code: 0,
+    signal: null,
+    timedOut: false,
+    stdout: JSON.stringify(finalized),
+    stderr: '',
+    phased: true,
+    gateway: true,
+    elapsedMs,
+    audit: buildWorkerResultAudit(finalized, elapsedMs)
+  };
+  appendNdjson('worker-results.ndjson', { at: nowIso(), jobId: durableJob.job_id, result });
+  try {
+    await updateSupabaseEventByHash(durableJob.job_id, buildWorkerResultPatch(job, result));
+  } catch (error) {
+    state.failedSupabaseWrites += 1;
+    appendNdjson('errors.ndjson', { at: nowIso(), type: 'gateway_supabase_job_update', message: error.message, jobId: durableJob.job_id });
+    throw error;
+  }
+}
+
+function getGatewayResultApplicationCoordinator() {
+  if (gatewayResultApplicationCoordinator) return gatewayResultApplicationCoordinator;
+  gatewayResultApplicationCoordinator = createGatewayResultApplicationCoordinator({
+    channel: gatewayChannel,
+    getConfig: () => {
+      kakaoWorkerRuntimeConfig ||= loadKakaoWorkerRuntimeConfig();
+      return kakaoWorkerRuntimeConfig;
+    },
+    record: recordGatewayApplicationResult,
+    onFailure: async ({ durableJob, error }) => {
+      const job = durableJob?.local_context?.job || {
+        jobId: durableJob?.job_id,
+        roomKey: durableJob?.room_key,
+        roomRevision: durableJob?.room_revision
+      };
+      const followUpResult = await createWorkerFailureFollowUp(job, error, {
+        origin: 'hermes_gateway_result_application',
+        ambiguous_dom_apply: durableJob?.application?.state === 'applying'
+      });
+      await updateSupabaseEventByHash(durableJob.job_id, {
+        status: 'needs_human_review',
+        error_message: String(error?.message || error).slice(0, 1000),
+        completed_at: nowIso(),
+        payload: { ...job, ai_worker_result: { failure_follow_up: followUpResult } }
+      }).catch(() => {});
+    }
+  });
+  return gatewayResultApplicationCoordinator;
+}
 
 function getKakaoPhaseScheduler() {
   if (kakaoPhaseScheduler) return kakaoPhaseScheduler;
@@ -3272,6 +3446,11 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     console.info(`[dom-bridge] queue dir: ${CONFIG.queueDir}`);
     console.info(`[dom-bridge] supabase: ${CONFIG.supabaseUrl && CONFIG.supabaseTable ? 'enabled' : 'disabled'}`);
     console.info(`[dom-bridge] worker: ${CONFIG.workerCommand ? CONFIG.workerCommand : 'disabled'}`);
+    if (gatewayTransportEnabled) {
+      getGatewayResultApplicationCoordinator().recoverPendingApplications().catch((error) => {
+        appendNdjson('errors.ndjson', { at: nowIso(), type: 'gateway_application_recovery', message: error.message });
+      });
+    }
     if (CONFIG.supabaseRecoveryEnabled) {
       setTimeout(() => runSupabaseRecoverySweep('startup'), 5000).unref?.();
       setInterval(() => runSupabaseRecoverySweep('interval'), CONFIG.supabaseRecoveryIntervalMs).unref?.();

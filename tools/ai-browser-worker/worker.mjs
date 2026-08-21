@@ -8684,6 +8684,320 @@ export async function executeVillageConfirmationRequest({
   }
 }
 
+function canonicalGatewayDecisionValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalGatewayDecisionValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalGatewayDecisionValue(value[key])]));
+  }
+  return value;
+}
+
+function sameGatewayDecisionValue(left, right) {
+  return JSON.stringify(canonicalGatewayDecisionValue(left)) === JSON.stringify(canonicalGatewayDecisionValue(right));
+}
+
+function validGatewayReceiptTimestamp(value) {
+  return typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+function exactTrustedConfirmationReceipt(receipt, { jobId, roomKey, roomRevision }) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return false;
+  if (receipt.schema !== 'village-confirmation-receipt/v1') return false;
+  if (!text(receipt.receipt_id).trim() || !text(receipt.status).trim()) return false;
+  if (receipt.job_id !== jobId || receipt.room_key !== roomKey || receipt.room_revision !== roomRevision) return false;
+  if (!Array.isArray(receipt.availability_report)) return false;
+  if (!(receipt.authoritative_sheet_result === null
+    || (receipt.authoritative_sheet_result && typeof receipt.authoritative_sheet_result === 'object' && !Array.isArray(receipt.authoritative_sheet_result)))) return false;
+  if (!validGatewayReceiptTimestamp(receipt.created_at)) return false;
+  if (!(receipt.error === null || typeof receipt.error === 'string'
+    || (receipt.error && typeof receipt.error === 'object' && !Array.isArray(receipt.error)))) return false;
+  return true;
+}
+
+function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
+  const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
+  const classification = text(decision?.classification).trim();
+  const reservationAuthorityClaim = classification === 'reservation'
+    && (replySafetyClass(decision) === 'sensitive_commitment' || replyGrounding(decision) === 'authoritative_sheet');
+  return decision?.should_write_to_sheet === true
+    || decision?.post_action_reconciled === true
+    || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object')
+    || replySafetyClass(decision) === 'authoritative_availability_answer'
+    || reservationAuthorityClaim
+    || followUps.some((item) => text(item?.route || item?.follow_up_route).trim() === 'schedule');
+}
+
+function stripAgentSuppliedReceiptFields(decision = {}) {
+  const {
+    trusted_tool_receipts: _trustedToolReceipts,
+    trustedToolReceipts: _camelTrustedToolReceipts,
+    tool_receipts: _toolReceipts,
+    toolReceipts: _camelToolReceipts,
+    confirmation_receipt: _confirmationReceipt,
+    confirmationReceipt: _camelConfirmationReceipt,
+    trusted_confirmation_receipt: _trustedConfirmationReceipt,
+    ...withoutReceipts
+  } = decision;
+  return withoutReceipts;
+}
+
+function gatewayReviewFollowUpItem({ decision = {}, job = {}, schedule = false, reason, receipt = null }) {
+  const customerName = text(
+    decision?.customer?.name
+    || decision?.sheet_row_candidate?.customer_name
+    || job?.customer_name
+    || job?.customerName
+    || '미확인 고객'
+  ).slice(0, 120);
+  const jobId = text(job?.jobId || job?.job_id || job?.id).trim();
+  const receiptId = text(receipt?.receipt_id).trim();
+  const status = text(receipt?.status).trim();
+  const route = schedule ? 'schedule' : 'other';
+  return {
+    type: schedule ? 'schedule_check' : 'reply_needed',
+    route,
+    taskKey: `gateway:${route}:${jobId || 'unknown'}`,
+    priority: schedule || status === 'failed' ? 'high' : 'normal',
+    status: 'open',
+    customer_name: customerName,
+    title: schedule ? `${customerName} 스케줄 결과 사장 확인 필요` : `${customerName} Hermes 결과 확인 필요`,
+    summary: text(reason).trim().slice(0, 1000) || 'Gateway 결과를 자동 적용할 수 없어 사람 확인이 필요합니다.',
+    recommended_action: schedule
+      ? '권위 있는 확인요청 결과와 대화 초안을 대조한 뒤 사장이 직접 발송 여부를 결정하세요.'
+      : '최신 카카오 대화와 Hermes 결과를 직접 확인한 뒤 답변 여부를 결정하세요.',
+    suggested_reply_draft: text(decision?.suggested_reply_draft || decisionReply(decision).text).slice(0, 1000),
+    evidence: [receiptId ? `receipt_id: ${receiptId}` : '', status ? `receipt_status: ${status}` : '', jobId ? `job_id: ${jobId}` : ''].filter(Boolean),
+    due_hint: 'now',
+    alertLevel: 'none'
+  };
+}
+
+function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason, receipt = null, authoritativeSheetResult = undefined } = {}) {
+  const originalFollowUps = (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : []).map((item) => {
+    if (!receipt || !item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const {
+      authoritative_sheet_result: _agentAuthority,
+      confirmation_receipt: _agentReceipt,
+      trusted_confirmation_receipt: _agentTrustedReceipt,
+      trusted_tool_receipts: _agentTrustedReceipts,
+      ...withoutAgentAuthority
+    } = item;
+    return { ...withoutAgentAuthority, evidence: [] };
+  });
+  const hasScheduleFollowUp = originalFollowUps.some((item) => text(item?.route || item?.follow_up_route).trim() === 'schedule');
+  const followUpItems = schedule && hasScheduleFollowUp
+    ? originalFollowUps
+    : [...originalFollowUps, gatewayReviewFollowUpItem({ decision, job, schedule, reason, receipt })];
+  const {
+    trusted_tool_receipts: _ignoredTrustedReceipts,
+    tool_receipts: _ignoredToolReceipts,
+    confirmation_receipt: _ignoredConfirmationReceipt,
+    authoritative_sheet_result: _ignoredFinalAuthority,
+    ...safeBase
+  } = decision && typeof decision === 'object' && !Array.isArray(decision) ? decision : {};
+  return {
+    ...safeBase,
+    classification: text(safeBase.classification).trim() || (schedule ? 'reservation' : 'human_review'),
+    confidence: text(safeBase.confidence).trim() || 'low',
+    should_write_to_sheet: false,
+    owner_review_required: true,
+    safety_checks: {
+      ...(safeBase.safety_checks && typeof safeBase.safety_checks === 'object' ? safeBase.safety_checks : {}),
+      latest_customer_message_after_last_staff_reply:
+        typeof safeBase?.safety_checks?.latest_customer_message_after_last_staff_reply === 'boolean'
+          ? safeBase.safety_checks.latest_customer_message_after_last_staff_reply
+          : true
+    },
+    follow_up_items: followUpItems,
+    suggested_reply_draft: text(safeBase.suggested_reply_draft || decisionReply(safeBase).text),
+    ...(authoritativeSheetResult !== undefined ? { authoritative_sheet_result: authoritativeSheetResult } : {}),
+    reply_decision: {
+      ...decisionReply(safeBase),
+      replyMode: 'draft_only',
+      text: text(decisionReply(safeBase).text || safeBase.suggested_reply_draft),
+      confidence: text(decisionReply(safeBase).confidence || safeBase.confidence).trim() || 'low',
+      reason: text(reason).trim().slice(0, 1000) || 'Gateway safety gate requires owner review.',
+      shouldCreateTask: true,
+      safetyClass: 'no_send',
+      grounding: schedule && receipt ? 'authoritative_sheet' : 'none',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: false
+    }
+  };
+}
+
+function sheetResultFromTrustedReceipt(receipt) {
+  if (!receipt) return null;
+  if (receipt.authoritative_sheet_result) return receipt.authoritative_sheet_result;
+  if (receipt.status === 'failed' || receipt.error) {
+    return {
+      success: false,
+      error_type: text(receipt?.error?.type || 'confirmation_failed').trim() || 'confirmation_failed',
+      error: text(receipt?.error?.message || receipt.error || `confirmation receipt status: ${receipt.status}`).slice(0, 1000),
+      recoverable: false
+    };
+  }
+  if (receipt.availability_report.length) {
+    return { success: true, results: receipt.availability_report, source: 'trusted_confirmation_receipt' };
+  }
+  return null;
+}
+
+export async function prepareKakaoGatewayDecision({
+  config = {},
+  job = {},
+  turn,
+  finalText = '',
+  trustedToolReceipts = [],
+  dependencies = {}
+} = {}) {
+  void config;
+  void dependencies;
+  const event = turn?.event;
+  const internal = turn?.internal;
+  const snapshot = internal?.snapshot;
+  const jobId = text(job.jobId || job.job_id || job.id).trim();
+  const roomKey = text(job.roomKey || job.room_key).trim();
+  const roomRevision = Number(job.roomRevision ?? job.room_revision);
+  const safetyFailures = [];
+  let decision = null;
+
+  const exactTurn = event?.schema === 'village-kakao-gateway-event/v1'
+    && snapshot?.schema === 'kakao-room-snapshot/v1'
+    && jobId && roomKey && Number.isInteger(roomRevision) && roomRevision > 0
+    && event.job_id === jobId && event.room_key === roomKey && event.room_revision === roomRevision
+    && snapshot.jobId === jobId && snapshot.roomKey === roomKey && snapshot.roomRevision === roomRevision;
+  if (!exactTurn) safetyFailures.push('stale_gateway_turn');
+
+  if (exactTurn) {
+    try {
+      decision = extractJsonObject(finalText);
+    } catch {
+      safetyFailures.push('malformed_gateway_final');
+    }
+  }
+  if (decision) {
+    const validation = validateAiDecisionContract(decision);
+    if (!validation.valid) safetyFailures.push('invalid_gateway_decision');
+    decision = stripAgentSuppliedReceiptFields(decision);
+    if (!text(decision.kill_switch_observed).trim() && internal?.lookupContext?.kill_switch?.status) {
+      decision.kill_switch_observed = internal.lookupContext.kill_switch.status;
+    }
+  }
+
+  const receiptCoordinates = { jobId, roomKey, roomRevision };
+  const suppliedReceipts = Array.isArray(trustedToolReceipts) ? trustedToolReceipts : [];
+  const exactReceipts = exactTurn
+    ? suppliedReceipts.filter((receipt) => exactTrustedConfirmationReceipt(receipt, receiptCoordinates))
+    : [];
+  if (suppliedReceipts.length !== exactReceipts.length) safetyFailures.push('invalid_trusted_receipt');
+  if (exactReceipts.length > 1 && exactReceipts.some((receipt) => !sameGatewayDecisionValue(receipt, exactReceipts[0]))) {
+    safetyFailures.push('conflicting_trusted_receipts');
+  }
+  const trustedToolReceipt = exactReceipts[0] || null;
+  const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
+  const parsedDecisionValid = decision && !safetyFailures.includes('invalid_gateway_decision');
+
+  let sheetResult = null;
+  let sheetPayload = null;
+  let reason = '';
+  if (trustedToolReceipt) {
+    sheetResult = sheetResultFromTrustedReceipt(trustedToolReceipt);
+    const receiptFailed = trustedToolReceipt.status === 'failed' || trustedToolReceipt.error !== null;
+    const report = buildSheetAvailabilityReport(sheetResult, null);
+    const postActionValidation = parsedDecisionValid
+      ? validateAiPostActionDecisionContract(decision, report || {})
+      : { valid: false, errors: ['invalid base decision'] };
+    const finalAuthority = decision?.authoritative_sheet_result;
+    if (!postActionValidation.valid
+      || (finalAuthority && !sameGatewayDecisionValue(finalAuthority, trustedToolReceipt.authoritative_sheet_result))) {
+      safetyFailures.push('trusted_receipt_decision_contradiction');
+    }
+    if (receiptFailed) safetyFailures.push('trusted_confirmation_failed');
+    reason = receiptFailed
+      ? '권위 있는 확인요청 작업이 실패 또는 부분 실패하여 사장 확인이 필요합니다.'
+      : '권위 있는 확인요청 결과는 사장 확인 후에만 고객에게 안내할 수 있습니다.';
+    decision = forceGatewayOwnerReviewDecision(decision || {}, {
+      job, schedule: true, reason, receipt: trustedToolReceipt,
+      authoritativeSheetResult: trustedToolReceipt.authoritative_sheet_result
+    });
+    decision.post_action_reconciled = !receiptFailed && !safetyFailures.includes('trusted_receipt_decision_contradiction');
+    decision.trusted_confirmation_receipt = trustedToolReceipt;
+  } else if (structuredScheduleClaim) {
+    safetyFailures.push('authoritative_claim_without_trusted_receipt');
+    reason = '구조화된 스케줄 주장이 있지만 채널에 영속화된 권위 있는 확인요청 receipt가 없습니다.';
+    decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: true, reason });
+  } else if (!parsedDecisionValid || !exactTurn || safetyFailures.includes('invalid_trusted_receipt')) {
+    reason = safetyFailures.includes('stale_gateway_turn')
+      ? 'Gateway 결과가 현재 작업과 동일한 방/리비전/스냅샷에 속하지 않습니다.'
+      : 'Hermes Gateway 최종 JSON을 안전하게 검증할 수 없습니다.';
+    decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: false, reason });
+  }
+
+  const baseFollowUpRows = [
+    ...buildFollowUpRows(decision, job),
+    ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)
+  ];
+  let availabilityAwareRows = enrichFollowUpRowsWithSheetAvailability(
+    baseFollowUpRows,
+    sheetResult,
+    sheetPayload,
+    decision,
+    job
+  );
+  if (!availabilityAwareRows.length && decision?.owner_review_required === true) {
+    const scheduleReview = Boolean(trustedToolReceipt || structuredScheduleClaim);
+    const fallbackDecision = {
+      ...decision,
+      safety_checks: {
+        ...(decision.safety_checks && typeof decision.safety_checks === 'object' ? decision.safety_checks : {}),
+        latest_customer_message_after_last_staff_reply: true
+      },
+      follow_up_items: [gatewayReviewFollowUpItem({
+        decision,
+        job,
+        schedule: scheduleReview,
+        reason,
+        receipt: trustedToolReceipt
+      })]
+    };
+    availabilityAwareRows = enrichFollowUpRowsWithSheetAvailability(
+      buildFollowUpRows(fallbackDecision, job),
+      sheetResult,
+      sheetPayload,
+      fallbackDecision,
+      job
+    );
+  }
+  return {
+    status: 'ai_prepared',
+    snapshot,
+    decision,
+    sheetResult,
+    sheetPayload,
+    customerDbDiscountLookup: null,
+    discountPatchResult: null,
+    existingRequestResult: null,
+    postActionResult: trustedToolReceipt ? {
+      skipped: true,
+      reason: 'completed_inside_native_gateway_turn',
+      receipt_id: trustedToolReceipt.receipt_id,
+      status: trustedToolReceipt.status
+    } : null,
+    availabilityAwareRows,
+    hermesAttempts: 1,
+    hermesRecovered: false,
+    hermesOutputTail: text(finalText).slice(-4000),
+    postActionOutputTail: '',
+    trustedToolReceipt,
+    gatewaySafetyFailures: Array.from(new Set(safetyFailures)),
+    timings: {}
+  };
+}
+
 export async function prepareKakaoDecisionFromSnapshot({
   config,
   job,
