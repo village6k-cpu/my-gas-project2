@@ -17,6 +17,7 @@ const {
   p0SlackEscalationDue,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
+  createGatewayApplicationFailureNotifier,
   createGatewayFailureNotificationCoordinator,
   createGatewayResultApplicationCoordinator,
   createAiJobDispatcher,
@@ -797,6 +798,68 @@ test('Gateway result coordinator leaves failure notification pending when human-
   const retry = await coordinator.recoverApplicationFailureNotifications();
   assert.equal(marked, 0);
   assert.deepEqual(retry, [{ job_id: failedJob.job_id, notified: false, error: 'owner card unavailable' }]);
+});
+
+test('Gateway application recovery keeps nested Slack skipped errors pending without replaying DOM work', async () => {
+  let marks = 0;
+  let statusUpdates = 0;
+  let domWork = 0;
+  const durableJob = {
+    job_id: 'application-nested-slack-error', room_key: 'application-nested-room', room_revision: 1,
+    local_context: {
+      job: { jobId: 'application-nested-slack-error', roomKey: 'application-nested-room', roomRevision: 1 }
+    },
+    application: {
+      state: 'failed', application_id: 'application-nested-id',
+      error: { type: 'ambiguous_post_apply_restart' },
+      failure_notification: { state: 'pending' }
+    }
+  };
+  const channel = {
+    async listPendingApplicationFailureNotifications() { return [structuredClone(durableJob)]; },
+    async markApplicationFailureNotified() { marks += 1; },
+    async claimApplication() { domWork += 1; },
+    async beginApplication() { domWork += 1; },
+    async recordApplicationApplied() { domWork += 1; },
+    async finalizeApplication() { domWork += 1; },
+    async failApplication() { domWork += 1; }
+  };
+  const onFailure = createGatewayApplicationFailureNotifier({
+    slackEnabled: true,
+    createFollowUp: async () => ({
+      inserted: 1,
+      rows: [{ id: 'application-failure-card' }],
+      slackDeliveryResult: {
+        skipped: true,
+        reason: 'two_channel_preflight_failed',
+        error: 'Slack routing unavailable',
+        results: []
+      }
+    }),
+    updateStatus: async () => { statusUpdates += 1; }
+  });
+  const coordinator = createGatewayResultApplicationCoordinator({
+    channel,
+    getConfig: () => ({}),
+    prepare: async () => { domWork += 1; },
+    apply: async () => { domWork += 1; },
+    finalize: async () => { domWork += 1; },
+    onFailure
+  });
+
+  const recovered = await coordinator.recoverApplicationFailureNotifications();
+  assert.deepEqual({
+    notified: recovered[0].notified,
+    error: recovered[0].error || '',
+    marks,
+    statusUpdates
+  }, {
+    notified: false,
+    error: 'gateway_failure_notification_slack_failed: Slack routing unavailable',
+    marks: 0,
+    statusUpdates: 0
+  });
+  assert.equal(domWork, 0);
 });
 
 test('Gateway result coordinator audit elapsed time includes durable Hermes session and tool wait', async () => {

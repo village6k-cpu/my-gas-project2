@@ -281,6 +281,41 @@ export function assertGatewayFailureNotificationDelivered(result = {}, { slackEn
   return true;
 }
 
+export function createGatewayApplicationFailureNotifier({
+  slackEnabled = false,
+  createFollowUp,
+  updateStatus,
+  now = () => new Date().toISOString()
+} = {}) {
+  if (typeof createFollowUp !== 'function') throw new Error('Gateway application failure follow-up creator is required');
+  if (typeof updateStatus !== 'function') throw new Error('Gateway application failure status updater is required');
+  return async ({ durableJob, error }) => {
+    const job = durableJob?.local_context?.job || {
+      jobId: durableJob?.job_id,
+      roomKey: durableJob?.room_key,
+      roomRevision: durableJob?.room_revision
+    };
+    const followUpResult = await createFollowUp({
+      job,
+      error,
+      context: {
+        origin: 'hermes_gateway_result_application',
+        ambiguous_dom_apply: ['ambiguous_dom_apply_failure', 'ambiguous_post_apply_restart'].includes(
+          durableJob?.application?.error?.type || error?.code
+        )
+      }
+    });
+    assertGatewayFailureNotificationDelivered(followUpResult, { slackEnabled });
+    await updateStatus(durableJob.job_id, {
+      status: 'needs_human_review',
+      error_message: String(error?.message || error).slice(0, 1000),
+      completed_at: now(),
+      payload: { ...job, ai_worker_result: { failure_follow_up: followUpResult } }
+    });
+    return followUpResult;
+  };
+}
+
 export function createGatewayFailureNotificationCoordinator({ channel, notify } = {}) {
   if (!channel
     || typeof channel.listPendingFailureNotifications !== 'function'
@@ -1985,36 +2020,12 @@ function getGatewayResultApplicationCoordinator() {
     channel: gatewayChannel,
     getConfig: () => getKakaoWorkerRuntimeConfigForTransport(),
     record: recordGatewayApplicationResult,
-    onFailure: async ({ durableJob, error }) => {
-      const job = durableJob?.local_context?.job || {
-        jobId: durableJob?.job_id,
-        roomKey: durableJob?.room_key,
-        roomRevision: durableJob?.room_revision
-      };
-      const followUpResult = await createWorkerFailureFollowUp(job, error, {
-        origin: 'hermes_gateway_result_application',
-        ambiguous_dom_apply: ['ambiguous_dom_apply_failure', 'ambiguous_post_apply_restart'].includes(
-          durableJob?.application?.error?.type || error?.code
-        )
-      });
-      if (followUpResult?.skipped === true || followUpResult?.error || followUpResult?.slackDeliveryError) {
-        throw new Error(`gateway_failure_notification_not_delivered: ${String(
-          followUpResult?.error || followUpResult?.slackDeliveryError || followUpResult?.reason || 'unknown'
-        ).slice(0, 500)}`);
-      }
-      const failedSlack = (Array.isArray(followUpResult?.slackDeliveryResult?.results)
-        ? followUpResult.slackDeliveryResult.results
-        : []).find((result) => result?.ok === false || result?.error || result?.status === 'error');
-      if (failedSlack) {
-        throw new Error(`gateway_failure_notification_slack_failed: ${String(failedSlack.error || failedSlack.status).slice(0, 500)}`);
-      }
-      await updateSupabaseEventByHash(durableJob.job_id, {
-        status: 'needs_human_review',
-        error_message: String(error?.message || error).slice(0, 1000),
-        completed_at: nowIso(),
-        payload: { ...job, ai_worker_result: { failure_follow_up: followUpResult } }
-      });
-    }
+    onFailure: createGatewayApplicationFailureNotifier({
+      slackEnabled: CONFIG.slackCardDeliveryEnabled,
+      createFollowUp: ({ job, error, context }) => createWorkerFailureFollowUp(job, error, context),
+      updateStatus: updateSupabaseEventByHash,
+      now: nowIso
+    })
   });
   return gatewayResultApplicationCoordinator;
 }
