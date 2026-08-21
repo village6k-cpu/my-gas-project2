@@ -6,6 +6,7 @@ process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
 const {
   buildCorsHeaders,
   buildHealthConfig,
+  buildGatewayHealthReadback,
   buildWorkerResultAudit,
   buildWorkerTreeKillInvocation,
   compactQueueAuditRecord,
@@ -15,19 +16,257 @@ const {
   p0SlackEscalationDue,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
+  createGatewayFailureNotificationCoordinator,
   createGatewayResultApplicationCoordinator,
+  createAiJobDispatcher,
+  configForHermesTransport,
   registerAcceptedRoomEvent,
   semanticRoomEventIdentity,
   hasUnreadCount,
   mergeQueuedRoomJobs,
+  kakaoSendAllowedForTransport,
   mapWorkerPayloadToSupabaseStatus,
   normalizeEvent,
   roomKeyForDebounce,
+  recoverFailedGatewayDispatch,
+  resolveHermesTransport,
   shouldDetachWorkerProcess,
   shouldQueueTopRowEvent,
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+
+test('Hermes transport defaults only to CLI and rejects unknown values without activating Gateway', () => {
+  assert.equal(resolveHermesTransport(undefined), 'cli');
+  assert.equal(resolveHermesTransport(''), 'cli');
+  assert.equal(resolveHermesTransport('cli'), 'cli');
+  assert.equal(resolveHermesTransport('gateway'), 'gateway');
+  assert.equal(resolveHermesTransport('gateway_no_send'), 'gateway_no_send');
+  assert.throws(() => resolveHermesTransport('gateawy'), /Unsupported KAKAO_HERMES_TRANSPORT/);
+});
+
+test('AI job dispatcher preserves the exact legacy CLI path when transport is missing', async () => {
+  const calls = [];
+  const dispatcher = createAiJobDispatcher({
+    transport: undefined,
+    runLegacy: async (job, context) => {
+      calls.push({ job, context });
+      return { ok: true, legacy: true };
+    },
+    capture: async () => { throw new Error('Gateway capture must not run'); },
+    buildTurn: async () => { throw new Error('Gateway turn builder must not run'); },
+    channel: { enqueue: async () => { throw new Error('Gateway channel must not run'); } }
+  });
+  const job = { jobId: 'cli-job', roomKey: 'cli-room', roomRevision: 1 };
+  const result = await dispatcher(job, { origin: 'test' });
+  assert.deepEqual(result, { ok: true, legacy: true });
+  assert.deepEqual(calls, [{ job, context: { origin: 'test' } }]);
+});
+
+test('Gateway dispatcher captures once and enqueues only seven plugin fields with local context kept durable', async () => {
+  const calls = [];
+  const enqueued = [];
+  const job = {
+    jobId: 'gateway-job', roomKey: 'gateway-room', roomRevision: 4,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: 'customer text'
+  };
+  const snapshot = {
+    schema: 'kakao-room-snapshot/v1', jobId: job.jobId, roomKey: job.roomKey,
+    roomRevision: job.roomRevision, capturedAt: '2026-08-21T01:02:04.000Z'
+  };
+  const internal = { snapshot, private_lookup: { secret: 'local only' } };
+  const event = {
+    schema: 'village-kakao-gateway-event/v1', job_id: job.jobId, room_key: job.roomKey,
+    room_revision: job.roomRevision, prompt: 'native Hermes prompt',
+    detected_at: job.detectedAt, raw: { safe: true }
+  };
+  const dispatcher = createAiJobDispatcher({
+    transport: 'gateway',
+    getConfig: () => ({ autoSendEnabled: true }),
+    capture: async ({ config, job: capturedJob }) => {
+      calls.push(['capture', config, capturedJob]);
+      return { snapshot };
+    },
+    buildTurn: async ({ config, job: builtJob, capture }) => {
+      calls.push(['build', config, builtJob, capture]);
+      return { event, internal };
+    },
+    channel: {
+      async enqueue(envelope, options) {
+        enqueued.push({ envelope: structuredClone(envelope), options: structuredClone(options) });
+        return { job_id: envelope.job_id, state: 'ready' };
+      }
+    },
+    runLegacy: async () => { throw new Error('legacy Hermes child path must not run'); }
+  });
+
+  const result = await dispatcher(job, { origin: 'live_dom_event' });
+  assert.equal(result.queued, true);
+  assert.equal(calls.filter(([kind]) => kind === 'capture').length, 1);
+  assert.equal(calls.filter(([kind]) => kind === 'build').length, 1);
+  assert.deepEqual(Object.keys(enqueued[0].envelope).sort(), [
+    'detected_at', 'job_id', 'prompt', 'raw', 'room_key', 'room_revision', 'schema'
+  ]);
+  assert.deepEqual(enqueued[0].envelope, event);
+  assert.deepEqual(enqueued[0].options.localContext, { job, turn_internal: internal });
+  assert.equal(JSON.stringify(enqueued[0].envelope).includes('local only'), false);
+});
+
+test('gateway_no_send still builds a native turn while forcing all runtime send and write gates off', async () => {
+  assert.equal(kakaoSendAllowedForTransport('gateway_no_send'), false);
+  assert.equal(kakaoSendAllowedForTransport('gateway'), true);
+  assert.equal(kakaoSendAllowedForTransport('cli'), true);
+  assert.deepEqual(
+    configForHermesTransport({ autoSendEnabled: true, windowsWritesEnabled: true, marker: 'shared' }, 'gateway_no_send'),
+    { autoSendEnabled: false, windowsWritesEnabled: false, marker: 'shared' }
+  );
+  let seenConfig = null;
+  let legacyCalls = 0;
+  const dispatcher = createAiJobDispatcher({
+    transport: 'gateway_no_send',
+    getConfig: () => ({ autoSendEnabled: true, windowsWritesEnabled: true, marker: 'preserved' }),
+    capture: async ({ config, job }) => {
+      seenConfig = config;
+      return { snapshot: { schema: 'kakao-room-snapshot/v1', jobId: job.jobId, roomKey: job.roomKey, roomRevision: job.roomRevision } };
+    },
+    buildTurn: async ({ config, job }) => {
+      assert.equal(config.autoSendEnabled, false);
+      assert.equal(config.windowsWritesEnabled, false);
+      return {
+        event: {
+          schema: 'village-kakao-gateway-event/v1', job_id: job.jobId, room_key: job.roomKey,
+          room_revision: job.roomRevision, prompt: 'reason natively', detected_at: '2026-08-21T00:00:00.000Z', raw: {}
+        },
+        internal: { snapshot: {} }
+      };
+    },
+    channel: { enqueue: async () => ({ state: 'ready' }) },
+    runLegacy: async () => { legacyCalls += 1; }
+  });
+  const result = await dispatcher({ jobId: 'nosend-job', roomKey: 'nosend-room', roomRevision: 1 });
+  assert.equal(result.queued, true);
+  assert.equal(seenConfig.autoSendEnabled, false);
+  assert.equal(seenConfig.windowsWritesEnabled, false);
+  assert.equal(seenConfig.marker, 'preserved');
+  assert.equal(legacyCalls, 0);
+});
+
+test('Gateway dispatcher surfaces an existing terminal failed job for human review instead of reporting queue success', async () => {
+  const job = { jobId: 'already-failed', roomKey: 'failed-room', roomRevision: 2 };
+  const dispatcher = createAiJobDispatcher({
+    transport: 'gateway',
+    getConfig: () => ({}),
+    capture: async () => ({ snapshot: {} }),
+    buildTurn: async () => ({
+      event: {
+        schema: 'village-kakao-gateway-event/v1', job_id: job.jobId, room_key: job.roomKey,
+        room_revision: job.roomRevision, prompt: 'native', detected_at: '2026-08-21T00:00:00.000Z', raw: {}
+      },
+      internal: { snapshot: {} }
+    }),
+    channel: {
+      enqueue: async () => ({
+        job_id: job.jobId, state: 'failed', human_review_required: true,
+        error: { type: 'lease_retry_exhausted' }
+      })
+    },
+    runLegacy: async () => { throw new Error('legacy path must not run'); }
+  });
+  assert.deepEqual(await dispatcher(job), {
+    ok: false, queued: false, transport: 'gateway', job_id: job.jobId,
+    state: 'failed', human_review_required: true, error_type: 'lease_retry_exhausted'
+  });
+
+  let recoveryCalls = 0;
+  assert.equal(await recoverFailedGatewayDispatch({
+    result: await dispatcher(job),
+    recover: async () => { recoveryCalls += 1; return [{ job_id: job.jobId, notified: true }]; }
+  }), true);
+  assert.equal(await recoverFailedGatewayDispatch({
+    result: { ok: true, queued: false, state: 'completed' },
+    recover: async () => { recoveryCalls += 1; }
+  }), false);
+  assert.equal(recoveryCalls, 1);
+});
+
+test('Gateway failure notification recovery is durable and retries notification without rerunning work', async () => {
+  let delivered = false;
+  let notificationCalls = 0;
+  let workCalls = 0;
+  const failedJob = {
+    job_id: 'failed-job', room_key: 'failed-room', room_revision: 1,
+    local_context: { job: { jobId: 'failed-job', roomKey: 'failed-room', roomRevision: 1 } },
+    error: { type: 'lease_retry_exhausted' },
+    failure_notification: { state: 'pending' }
+  };
+  const channel = {
+    async listPendingFailureNotifications() { return delivered ? [] : [structuredClone(failedJob)]; },
+    async markFailureNotified({ job_id, audit }) {
+      assert.equal(job_id, failedJob.job_id);
+      assert.deepEqual(audit, { follow_up_id: 'follow-up-1' });
+      delivered = true;
+    }
+  };
+  const first = createGatewayFailureNotificationCoordinator({
+    channel,
+    notify: async () => { notificationCalls += 1; throw new Error('temporary Slack outage'); }
+  });
+  assert.deepEqual(await first.recover(), [{ job_id: failedJob.job_id, notified: false, error: 'temporary Slack outage' }]);
+  assert.equal(delivered, false);
+
+  const restarted = createGatewayFailureNotificationCoordinator({
+    channel,
+    notify: async ({ durableJob }) => {
+      notificationCalls += 1;
+      assert.equal(durableJob.job_id, failedJob.job_id);
+      return { follow_up_id: 'follow-up-1' };
+    },
+    runWork: async () => { workCalls += 1; }
+  });
+  assert.deepEqual(await restarted.recover(), [{ job_id: failedJob.job_id, notified: true }]);
+  assert.equal(delivered, true);
+  assert.equal(notificationCalls, 2);
+  assert.equal(workCalls, 0);
+  assert.deepEqual(await restarted.recover(), []);
+});
+
+test('Gateway health readback requires a fresh consumer and exposes only safe aggregate fields', () => {
+  const readback = buildGatewayHealthReadback({
+    transport: 'gateway', gatewayConfigured: true,
+    nowMs: Date.parse('2026-08-21T00:02:00.000Z'), consumerFreshnessMs: 180_000,
+    status: {
+      counts: { ready: 2, claimed: 1, retry_wait: 0, failed: 3, completed: 4, superseded: 1 },
+      application_counts: { pending: 1, claimed: 0, applying: 0, applied: 0, finalized: 3, failed: 1 },
+      failure_notification_counts: { pending: 2, delivered: 5 },
+      unnotified_application_failures: 1,
+      oldest_lease_age_ms: 75_000,
+      last_completed_job_id: 'completed-job',
+      last_consumer_id: 'gateway-consumer-1',
+      last_consumer_seen_at: '2026-08-21T00:00:30.000Z',
+      token: 'must-not-leak', prompt: 'must-not-leak', local_context: { secret: true }
+    }
+  });
+  assert.deepEqual(readback, {
+    transport: 'gateway', gatewayConfigured: true, gatewayReady: true,
+    consumer: { id: 'gateway-consumer-1', last_seen_at: '2026-08-21T00:00:30.000Z', age_ms: 90_000, fresh: true },
+    queue: { ready: 2, claimed: 1, retry: 0, failed: 3, oldest_claim_age_ms: 75_000, last_completed_job_id: 'completed-job' },
+    application_counts: { pending: 1, claimed: 0, applying: 0, applied: 0, finalized: 3, failed: 1 },
+    failure_notification_counts: { pending: 2, delivered: 5 },
+    unnotified_application_failures: 1
+  });
+  assert.equal(JSON.stringify(readback).includes('must-not-leak'), false);
+  const stale = buildGatewayHealthReadback({
+    transport: 'gateway', gatewayConfigured: true,
+    nowMs: Date.parse('2026-08-21T00:05:00.001Z'), consumerFreshnessMs: 180_000,
+    status: {
+      last_consumer_id: 'gateway-consumer-1', last_consumer_seen_at: '2026-08-21T00:00:30.000Z',
+      oldest_lease_age_ms: null
+    }
+  });
+  assert.equal(stale.gatewayReady, false);
+  assert.equal(stale.consumer.fresh, false);
+  assert.equal(stale.queue.oldest_claim_age_ms, null);
+});
 
 test('server confirmation executor forwards the channel claim fence into the worker mutation boundary', async () => {
   let leaseChecks = 0;
@@ -1012,7 +1251,7 @@ test('a meaningful live top-row change remains eligible without an unread counte
 
 test('server keeps Gateway HTTP disabled by default and dispatches it before public routes', async () => {
   const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
-  assert.match(source, /hermesTransport:\s*String\(process\.env\.KAKAO_HERMES_TRANSPORT\s*\|\|\s*'cli'\)\.trim\(\)\s*\|\|\s*'cli'/);
+  assert.match(source, /hermesTransport:\s*resolveHermesTransport\(process\.env\.KAKAO_HERMES_TRANSPORT\)/);
   assert.match(source, /hermesBridgeToken:\s*String\(process\.env\.KAKAO_HERMES_BRIDGE_TOKEN\s*\|\|\s*''\)\.trim\(\)/);
   assert.match(source, /KAKAO_HERMES_LEASE_MS/);
   assert.match(source, /KAKAO_HERMES_MAX_ATTEMPTS/);

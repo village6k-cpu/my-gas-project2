@@ -147,6 +147,16 @@ function validatePersistedApplication(job) {
   }
 }
 
+function validatePersistedFailureNotification(job) {
+  const notification = job?.failure_notification;
+  if (notification == null) return;
+  if (!FAILURE_NOTIFICATION_STATES.has(notification.state)
+    || !isValidIso(notification.created_at)
+    || (notification.state === 'delivered' && !isValidIso(notification.notified_at))) {
+    throw channelError('invalid_persisted_job', 'persisted Gateway failure notification is invalid');
+  }
+}
+
 export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAttempts = 2, now = Date.now, storage = {} } = {}) {
   const queueDirectory = path.join(requiredString(directory, 'directory'), 'hermes-gateway');
   const leaseDuration = Number(leaseMs);
@@ -163,6 +173,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   let needsReconciliation = false;
   let queueOrder = 0;
   let mutationTail = Promise.resolve();
+  let lastConsumerId = null;
+  let lastConsumerSeenAt = null;
   const currentTime = () => {
     const value = now();
     const milliseconds = value instanceof Date ? value.getTime() : Number(value);
@@ -194,6 +206,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       }
       validatePersistedToolOperation(job);
       validatePersistedApplication(job);
+      validatePersistedFailureNotification(job);
       jobs.set(job.job_id, job);
       queueOrder = Math.max(queueOrder, Number(job.queue_order) || 0);
     }
@@ -216,6 +229,12 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   const authoritativeJob = (roomKey) => roomJobs(roomKey)[0] ?? null;
   const isAuthoritative = (job) => authoritativeJob(job.room_key)?.job_id === job.job_id;
 
+  function pendingFailureNotification(job, atMs = currentTime()) {
+    return job?.failure_notification || {
+      state: 'pending', created_at: iso(atMs), notified_at: null, audit: null
+    };
+  }
+
   async function reconcileRoom(roomKey) {
     const authoritative = authoritativeJob(roomKey);
     if (!authoritative) return;
@@ -224,8 +243,10 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       await update(older, {
         state: 'superseded', superseded_by: authoritative.job_id, superseded_lease_id: older.lease_id,
         claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
+        claimed_at: null, claimed_at_ms: null,
         ...(older.tool_operation ? {
           human_review_required: true,
+          failure_notification: pendingFailureNotification(older),
           error: {
             type: 'confirmation_operation_unresolved',
             operation_id: older.tool_operation.operation_id,
@@ -278,6 +299,9 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           }
         });
       }
+      if (job.state === 'failed' && job.human_review_required === true && !job.failure_notification) {
+        await update(jobs.get(job.job_id), { failure_notification: pendingFailureNotification(job) });
+      }
     }
     for (const roomKey of new Set([...jobs.values()].map((job) => job.room_key))) await reconcileRoom(roomKey);
     needsReconciliation = false;
@@ -305,7 +329,9 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       const next = job.tool_operation
         ? await update(job, {
           state: 'failed', claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
+          claimed_at: null, claimed_at_ms: null,
           human_review_required: true,
+          failure_notification: pendingFailureNotification(job, nowMs),
           error: {
             type: 'confirmation_operation_unresolved',
             operation_id: job.tool_operation.operation_id,
@@ -315,10 +341,13 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         : job.attempts >= maximumAttempts
         ? await update(job, {
           state: 'failed', claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
-          human_review_required: true, error: { type: 'lease_retry_exhausted', attempts: job.attempts }
+          claimed_at: null, claimed_at_ms: null,
+          human_review_required: true, failure_notification: pendingFailureNotification(job, nowMs),
+          error: { type: 'lease_retry_exhausted', attempts: job.attempts }
         })
         : await update(job, {
           state: 'ready', claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
+          claimed_at: null, claimed_at_ms: null,
           error: { type: 'lease_expired', attempts: job.attempts }
         });
       reaped.push(clone(next));
@@ -371,7 +400,10 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       lease_id: null,
       lease_expires_at: null,
       lease_expires_at_ms: null,
+      claimed_at: null,
+      claimed_at_ms: null,
       human_review_required: true,
+      failure_notification: pendingFailureNotification(job),
       error,
       ...(outcome ? { outcome: clone(outcome) } : {})
     });
@@ -388,6 +420,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     const nowMs = currentTime();
     return clone(await update(candidate, {
       state: 'claimed', attempts: candidate.attempts + 1, claimed_by: consumerId, lease_id: randomUUID(),
+      claimed_at: iso(nowMs), claimed_at_ms: nowMs,
       lease_expires_at: iso(nowMs + leaseDuration), lease_expires_at_ms: nowMs + leaseDuration, error: null
     }));
   }
@@ -410,9 +443,10 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const job = {
           schema: 'village-hermes-gateway-job/v1', ...normalized, state: 'ready', attempts: 0, queue_order: ++queueOrder,
           created_at: iso(nowMs), updated_at: iso(nowMs), claimed_by: null, lease_id: null, lease_expires_at: null,
-          lease_expires_at_ms: null, superseded_by: null, superseded_lease_id: null, tool_receipts: [], result: null,
+          lease_expires_at_ms: null, claimed_at: null, claimed_at_ms: null,
+          superseded_by: null, superseded_lease_id: null, tool_receipts: [], result: null,
           tool_operation: null, outcome: null, error: null, human_review_required: false,
-          local_context: localContext === null ? null : clone(localContext), application: null
+          failure_notification: null, local_context: localContext === null ? null : clone(localContext), application: null
         };
         await persist(job);
         jobs.set(job.job_id, job);
@@ -424,6 +458,9 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
 
     async claim({ consumerId, waitMs = 0 } = {}) {
       const consumer = requiredString(consumerId, 'consumerId');
+      const seenAtMs = currentTime();
+      lastConsumerId = consumer.slice(0, 128);
+      lastConsumerSeenAt = iso(seenAtMs);
       const deadline = currentTime() + Math.max(0, Number(waitMs) || 0);
       do {
         const claimed = await mutate(() => claimOnce(consumer));
@@ -515,6 +552,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         assertCurrentLease(job, result);
         return clone(await update(job, {
           state: 'completed', result: clone(result), claimed_by: null, lease_id: null, lease_expires_at: null, lease_expires_at_ms: null,
+          claimed_at: null, claimed_at_ms: null,
           application: {
             state: 'pending',
             application_id: null,
@@ -694,7 +732,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           assertCurrentLease(job, outcome);
           return clone(await update(job, {
             state: 'failed', outcome: clone(outcome), claimed_by: null, lease_id: null, lease_expires_at: null,
-            lease_expires_at_ms: null, human_review_required: true, error: { type: 'no_final' }
+            lease_expires_at_ms: null, claimed_at: null, claimed_at_ms: null,
+            human_review_required: true, failure_notification: pendingFailureNotification(job), error: { type: 'no_final' }
           }));
         }
         const leaseId = requiredString(outcome?.lease_id ?? outcome?.leaseId, 'lease_id', 'stale_lease');
@@ -706,6 +745,30 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     },
 
     async reapExpiredLeases() { return mutate(reapExpiredLeasesInternal); },
+    async listPendingFailureNotifications() {
+      return mutate(async () => [...jobs.values()]
+        .filter((job) => job.failure_notification?.state === 'pending')
+        .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
+        .map(clone));
+    },
+    async markFailureNotified({ job_id: jobId, jobId: camelJobId, audit = null } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        const notification = job.failure_notification;
+        if (!notification) throw channelError('stale_notification', 'Gateway failure notification is not pending');
+        if (notification.state === 'delivered') return clone(job);
+        if (notification.state !== 'pending') throw channelError('stale_notification', 'Gateway failure notification is not pending');
+        return clone(await update(job, {
+          failure_notification: {
+            ...notification,
+            state: 'delivered',
+            notified_at: iso(currentTime()),
+            audit: audit === null ? null : clone(audit)
+          }
+        }));
+      });
+    },
     async get(jobId) {
       return mutate(async () => {
         const job = jobs.get(requiredString(jobId, 'job_id'));
@@ -716,19 +779,36 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
       return mutate(async () => {
         const counts = Object.fromEntries([...JOB_STATES].map((state) => [state, 0]));
         const applicationCounts = Object.fromEntries([...APPLICATION_STATES].map((state) => [state, 0]));
+        const failureNotificationCounts = Object.fromEntries([...FAILURE_NOTIFICATION_STATES].map((state) => [state, 0]));
         let lastCompleted = null;
+        let oldestLeaseAgeMs = null;
+        const nowMs = currentTime();
         for (const job of jobs.values()) {
           counts[job.state] += 1;
           if (job.application?.state) applicationCounts[job.application.state] += 1;
+          if (job.failure_notification?.state) failureNotificationCounts[job.failure_notification.state] += 1;
+          if (job.state === 'claimed') {
+            const claimedAtMs = Number(job.claimed_at_ms);
+            const fallbackClaimedAtMs = Number(job.lease_expires_at_ms) - leaseDuration;
+            const effectiveClaimedAtMs = Number.isFinite(claimedAtMs) ? claimedAtMs : fallbackClaimedAtMs;
+            if (Number.isFinite(effectiveClaimedAtMs)) {
+              const age = Math.max(0, nowMs - effectiveClaimedAtMs);
+              oldestLeaseAgeMs = oldestLeaseAgeMs === null ? age : Math.max(oldestLeaseAgeMs, age);
+            }
+          }
           if (job.state === 'completed' && (!lastCompleted || job.updated_at > lastCompleted.updated_at)) lastCompleted = job;
         }
         return {
           counts,
           application_counts: applicationCounts,
+          failure_notification_counts: failureNotificationCounts,
           unnotified_application_failures: [...jobs.values()].filter((job) => (
             job.application?.state === 'failed' && job.application?.failure_notification?.state === 'pending'
           )).length,
-          last_completed_job_id: lastCompleted?.job_id ?? null
+          oldest_lease_age_ms: oldestLeaseAgeMs,
+          last_completed_job_id: lastCompleted?.job_id ?? null,
+          last_consumer_id: lastConsumerId,
+          last_consumer_seen_at: lastConsumerSeenAt
         };
       });
     }

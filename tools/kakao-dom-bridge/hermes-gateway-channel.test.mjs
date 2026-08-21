@@ -751,3 +751,106 @@ test('restart before the DOM apply boundary returns a claimed application to pen
     assert.notEqual(reclaimed.application_id, firstApplication.application_id);
   });
 });
+
+test('a newer same-room native event is claimable immediately and the superseded cancellation stays terminal', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    const firstEvent = { ...event('interrupt-old', 'interrupt-room', 1), schema: 'village-kakao-gateway-event/v1', prompt: 'old', raw: {} };
+    const newerEvent = { ...event('interrupt-new', 'interrupt-room', 2), schema: 'village-kakao-gateway-event/v1', prompt: 'new', raw: {} };
+    await channel.enqueue(firstEvent);
+    const firstClaim = await channel.claim({ consumerId: 'gateway-native', waitMs: 0 });
+    await channel.enqueue(newerEvent);
+    const newerClaim = await channel.claim({ consumerId: 'gateway-native', waitMs: 0 });
+    assert.equal(newerClaim.job_id, newerEvent.job_id);
+    assert.deepEqual(newerClaim.event, newerEvent);
+    await channel.recordOutcome({
+      job_id: firstClaim.job_id, room_key: firstClaim.room_key, room_revision: firstClaim.room_revision,
+      lease_id: firstClaim.lease_id, outcome: 'cancelled'
+    });
+    clock.now += 5_000;
+    await channel.reapExpiredLeases();
+    assert.equal((await channel.get(firstClaim.job_id)).state, 'superseded');
+    assert.equal((await channel.get(firstClaim.job_id)).outcome.outcome, 'cancelled');
+  });
+});
+
+test('lease expiry re-exposes the exact same native event and local context once, then creates durable human review notification', async () => {
+  await withChannel(async ({ channel, clock, directory }) => {
+    const nativeEvent = { ...event('retry-exact', 'retry-room', 1), schema: 'village-kakao-gateway-event/v1', prompt: 'same turn', raw: { revision: 1 } };
+    const localContext = { job: { jobId: nativeEvent.job_id }, turn_internal: { private_lookup: 'same local evidence' } };
+    await channel.enqueue(nativeEvent, { localContext });
+    const first = await channel.claim({ consumerId: 'gateway-native', waitMs: 0 });
+    clock.now += 1_000;
+    await channel.reapExpiredLeases();
+    const second = await channel.claim({ consumerId: 'gateway-native', waitMs: 0 });
+    assert.equal(second.job_id, first.job_id);
+    assert.equal(second.room_key, first.room_key);
+    assert.equal(second.room_revision, first.room_revision);
+    assert.deepEqual(second.event, first.event);
+    assert.deepEqual((await channel.get(second.job_id)).local_context, localContext);
+    assert.notEqual(second.lease_id, first.lease_id);
+    clock.now += 1_000;
+    await channel.reapExpiredLeases();
+    const failed = await channel.get(second.job_id);
+    assert.equal(failed.state, 'failed');
+    assert.equal(failed.human_review_required, true);
+    assert.equal(failed.failure_notification.state, 'pending');
+
+    const restarted = createHermesGatewayChannel({ directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now });
+    assert.deepEqual((await restarted.listPendingFailureNotifications()).map((job) => job.job_id), [second.job_id]);
+    await restarted.markFailureNotified({ job_id: second.job_id, audit: { follow_up_id: 'follow-up-retry' } });
+    assert.deepEqual(await restarted.listPendingFailureNotifications(), []);
+    assert.equal((await restarted.get(second.job_id)).failure_notification.state, 'delivered');
+  });
+});
+
+test('confirmation reservation never retries after lease expiry and no_final is terminal with durable notification', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    await channel.enqueue(event('reserved-no-retry', 'reserved-room', 1));
+    const reservedClaim = await channel.claim({ consumerId: 'gateway-native', waitMs: 0 });
+    await channel.reserveToolOperation(confirmationOperation(reservedClaim));
+    clock.now += 1_000;
+    await channel.reapExpiredLeases();
+    const reservedFailed = await channel.get(reservedClaim.job_id);
+    assert.equal(reservedFailed.state, 'failed');
+    assert.equal(reservedFailed.error.type, 'confirmation_operation_unresolved');
+    assert.equal(reservedFailed.failure_notification.state, 'pending');
+    assert.equal(await channel.claim({ consumerId: 'gateway-native', waitMs: 0 }), null);
+
+    await channel.enqueue(event('no-final-notify', 'no-final-room', 1));
+    const noFinalClaim = await channel.claim({ consumerId: 'gateway-native', waitMs: 0 });
+    await channel.recordOutcome({
+      job_id: noFinalClaim.job_id, room_key: noFinalClaim.room_key, room_revision: noFinalClaim.room_revision,
+      lease_id: noFinalClaim.lease_id, outcome: 'no_final'
+    });
+    const noFinal = await channel.get(noFinalClaim.job_id);
+    assert.equal(noFinal.state, 'failed');
+    assert.equal(noFinal.error.type, 'no_final');
+    assert.equal(noFinal.failure_notification.state, 'pending');
+    assert.equal(await channel.claim({ consumerId: 'gateway-native', waitMs: 0 }), null);
+  });
+});
+
+test('channel status reports consumer freshness coordinates, oldest active claim, completion, and notification counts without payloads', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    await channel.enqueue(event('status-claimed', 'status-room-a', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-status-consumer', waitMs: 0 });
+    clock.now += 250;
+    await channel.enqueue(event('status-completed', 'status-room-b', 1));
+    const completedClaim = await channel.claim({ consumerId: 'gateway-status-consumer', waitMs: 0 });
+    await channel.complete({
+      job_id: completedClaim.job_id, room_key: completedClaim.room_key, room_revision: completedClaim.room_revision,
+      lease_id: completedClaim.lease_id, content: 'FINAL_JSON {}'
+    });
+    clock.now += 250;
+    const status = await channel.status();
+    assert.equal(status.last_consumer_id, 'gateway-status-consumer');
+    assert.equal(status.last_consumer_seen_at, '2026-08-21T00:00:00.250Z');
+    assert.equal(status.oldest_lease_age_ms, 500);
+    assert.equal(status.last_completed_job_id, completedClaim.job_id);
+    assert.deepEqual(status.failure_notification_counts, { pending: 0, delivered: 0 });
+    assert.equal('event' in status, false);
+    assert.equal('local_context' in status, false);
+    assert.equal('result' in status, false);
+    assert.equal((await channel.get(claim.job_id)).state, 'claimed');
+  });
+});

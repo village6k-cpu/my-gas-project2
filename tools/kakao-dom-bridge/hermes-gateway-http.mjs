@@ -143,7 +143,66 @@ function channelErrorResponse(error) {
   return { status, error: error?.status ? error.message : String(error?.code || 'invalid_request') };
 }
 
-export function createHermesGatewayHttpHandler({ token, channel, executeConfirmation, enqueueResultApplication, transport = 'cli', now = Date.now } = {}) {
+function safeNonNegativeInteger(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.floor(number) : 0;
+}
+
+export function buildGatewayHealthReadback({
+  transport = 'cli', gatewayConfigured = false, status = {}, nowMs = Date.now(), consumerFreshnessMs = 600_000
+} = {}) {
+  const currentMs = Number(nowMs);
+  const freshnessMs = Math.max(1, Number(consumerFreshnessMs) || 600_000);
+  const consumerId = String(status?.last_consumer_id || '').trim().slice(0, 128) || null;
+  const seenAt = String(status?.last_consumer_seen_at || '').trim();
+  const seenAtMs = Date.parse(seenAt);
+  const consumerAgeMs = Number.isFinite(currentMs) && Number.isFinite(seenAtMs)
+    ? Math.max(0, currentMs - seenAtMs)
+    : null;
+  const consumerFresh = Boolean(consumerId) && consumerAgeMs !== null && consumerAgeMs <= freshnessMs;
+  const counts = status?.counts && typeof status.counts === 'object' ? status.counts : {};
+  const applicationCounts = status?.application_counts && typeof status.application_counts === 'object'
+    ? status.application_counts
+    : {};
+  const failureNotificationCounts = status?.failure_notification_counts && typeof status.failure_notification_counts === 'object'
+    ? status.failure_notification_counts
+    : {};
+  const oldestClaimAge = status?.oldest_lease_age_ms === null || status?.oldest_lease_age_ms === undefined
+    ? null
+    : Number(status.oldest_lease_age_ms);
+  return {
+    transport: String(transport || 'cli'),
+    gatewayConfigured: Boolean(gatewayConfigured),
+    gatewayReady: Boolean(gatewayConfigured) && consumerFresh,
+    consumer: {
+      id: consumerId,
+      last_seen_at: Number.isFinite(seenAtMs) ? seenAt : null,
+      age_ms: consumerAgeMs,
+      fresh: consumerFresh
+    },
+    queue: {
+      ready: safeNonNegativeInteger(counts.ready),
+      claimed: safeNonNegativeInteger(counts.claimed),
+      retry: safeNonNegativeInteger(counts.retry_wait),
+      failed: safeNonNegativeInteger(counts.failed),
+      oldest_claim_age_ms: Number.isFinite(oldestClaimAge) && oldestClaimAge >= 0 ? oldestClaimAge : null,
+      last_completed_job_id: String(status?.last_completed_job_id || '').trim().slice(0, 160) || null
+    },
+    application_counts: Object.fromEntries(
+      ['pending', 'claimed', 'applying', 'applied', 'finalized', 'failed']
+        .map((key) => [key, safeNonNegativeInteger(applicationCounts[key])])
+    ),
+    failure_notification_counts: Object.fromEntries(
+      ['pending', 'delivered'].map((key) => [key, safeNonNegativeInteger(failureNotificationCounts[key])])
+    ),
+    unnotified_application_failures: safeNonNegativeInteger(status?.unnotified_application_failures)
+  };
+}
+
+export function createHermesGatewayHttpHandler({
+  token, channel, executeConfirmation, enqueueResultApplication, recoverFailureNotifications,
+  transport = 'cli', now = Date.now, consumerFreshnessMs = 600_000
+} = {}) {
   const gatewayConfigured = GATEWAY_TRANSPORTS.has(transport) && Boolean(String(token || '').trim()) && Boolean(channel);
   const confirmationInFlight = new Map();
 
@@ -164,6 +223,9 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
         const consumerId = String(url.searchParams.get('consumer_id') || '').trim();
         if (!consumerId) throw requestError(400, 'consumer_id_required');
         const claimed = await channel.claim({ consumerId, waitMs: parseWaitMs(url.searchParams.get('wait_ms') || '0') });
+        if (typeof recoverFailureNotifications === 'function') {
+          await Promise.resolve(recoverFailureNotifications()).catch(() => {});
+        }
         if (!claimed) {
           sendJson(res, 200, { event: null });
           return true;
@@ -199,6 +261,9 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
         const body = await readJsonBody(req);
         requiredLeaseId(body);
         await channel.recordOutcome(body);
+        if (typeof recoverFailureNotifications === 'function') {
+          await Promise.resolve(recoverFailureNotifications()).catch(() => {});
+        }
         sendJson(res, 200, { ok: true });
         return true;
       }
@@ -308,17 +373,11 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
 
       if (req.method === 'GET' && url.pathname === '/hermes/v1/status') {
         const status = await channel.status();
-        const oldestLeaseAge = status?.oldest_lease_age_ms ?? status?.oldestLeaseAgeMs ?? null;
-        sendJson(res, 200, {
-          transport,
-          gatewayConfigured: true,
-          counts: status?.counts && typeof status.counts === 'object' ? status.counts : {},
-          application_counts: status?.application_counts && typeof status.application_counts === 'object'
-            ? status.application_counts
-            : {},
-          unnotified_application_failures: Math.max(0, Number(status?.unnotified_application_failures || 0)),
-          oldest_lease_age_ms: Number.isFinite(oldestLeaseAge) ? oldestLeaseAge : null
-        });
+        const current = now();
+        const currentMs = current instanceof Date ? current.getTime() : Number(current);
+        sendJson(res, 200, buildGatewayHealthReadback({
+          transport, gatewayConfigured: true, status, nowMs: currentMs, consumerFreshnessMs
+        }));
         return true;
       }
     } catch (error) {

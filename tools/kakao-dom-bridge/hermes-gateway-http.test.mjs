@@ -75,9 +75,13 @@ function makeChannel() {
       return {
         counts: { ready: 2, claimed: 1, completed: 4, superseded: 0, retry_wait: 0, failed: 0 },
         application_counts: { pending: 1, claimed: 0, applying: 0, applied: 0, finalized: 2, failed: 1 },
+        failure_notification_counts: { pending: 2, delivered: 3 },
         unnotified_application_failures: 1,
         oldest_lease_age_ms: 1234,
-        last_completed_job_id: 'private-job'
+        last_completed_job_id: 'private-job',
+        last_consumer_id: 'gateway-test-consumer',
+        last_consumer_seen_at: '2026-08-21T00:00:00.000Z',
+        token: 'must-not-leak', prompt: 'must-not-leak', local_context: { secret: true }
       };
     }
   };
@@ -800,17 +804,47 @@ test('Gateway HTTP caps request bodies at 1,048,576 bytes', async () => {
 });
 
 test('Gateway HTTP status exposes only gateway-safe queue health', async () => {
-  const app = await start(createHermesGatewayHttpHandler({ token, channel: makeChannel(), transport: 'gateway' }));
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel: makeChannel(), transport: 'gateway',
+    now: () => Date.parse('2026-08-21T00:01:00.000Z'), consumerFreshnessMs: 180_000
+  }));
   try {
     const response = await gatewayFetch(app.url, '/hermes/v1/status');
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), {
-      transport: 'gateway', gatewayConfigured: true,
-      counts: { ready: 2, claimed: 1, completed: 4, superseded: 0, retry_wait: 0, failed: 0 },
+      transport: 'gateway', gatewayConfigured: true, gatewayReady: true,
+      consumer: {
+        id: 'gateway-test-consumer', last_seen_at: '2026-08-21T00:00:00.000Z', age_ms: 60_000, fresh: true
+      },
+      queue: {
+        ready: 2, claimed: 1, retry: 0, failed: 0,
+        oldest_claim_age_ms: 1234, last_completed_job_id: 'private-job'
+      },
       application_counts: { pending: 1, claimed: 0, applying: 0, applied: 0, finalized: 2, failed: 1 },
-      unnotified_application_failures: 1,
-      oldest_lease_age_ms: 1234
+      failure_notification_counts: { pending: 2, delivered: 3 },
+      unnotified_application_failures: 1
     });
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP runs durable failure-notification recovery after terminal outcomes and lease reaping', async () => {
+  const channel = makeChannel();
+  let recoveries = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    recoverFailureNotifications: async () => { recoveries += 1; }
+  }));
+  try {
+    const outcome = await gatewayFetch(app.url, '/hermes/v1/outcomes', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId, outcome: 'no_final' })
+    });
+    assert.equal(outcome.status, 200);
+    const events = await gatewayFetch(app.url, '/hermes/v1/events?consumer_id=gateway-1&wait_ms=0');
+    assert.equal(events.status, 200);
+    assert.equal(recoveries, 2);
   } finally {
     await app.close();
   }
