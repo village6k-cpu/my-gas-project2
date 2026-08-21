@@ -667,6 +667,16 @@ test('restart during an applying DOM phase fails human-review instead of replayi
     assert.equal(recovered.application.state, 'failed');
     assert.equal(recovered.human_review_required, true);
     assert.equal(recovered.application.error.type, 'ambiguous_post_apply_restart');
+    assert.equal(recovered.application.failure_notification.state, 'pending');
+    assert.deepEqual((await restarted.listPendingApplicationFailureNotifications()).map((job) => job.job_id), [claim.job_id]);
+    const notified = await restarted.markApplicationFailureNotified({
+      job_id: claim.job_id,
+      application_id: application.application_id,
+      audit: { follow_up_created: true }
+    });
+    assert.equal(notified.application.failure_notification.state, 'delivered');
+    assert.deepEqual(await restarted.listPendingApplicationFailureNotifications(), []);
+    assert.equal((await restarted.status()).unnotified_application_failures, 0);
     assert.equal((await restarted.claimApplication({ jobId: claim.job_id })).claimed, false);
   });
 });
@@ -693,6 +703,8 @@ test('restart after durable DOM apply but before finalize requires human review 
     assert.equal(recovered.application.state, 'failed');
     assert.equal(recovered.human_review_required, true);
     assert.equal(recovered.application.error.type, 'incomplete_finalize_restart');
+    assert.equal(recovered.application.failure_notification.state, 'pending');
+    assert.deepEqual((await restarted.listPendingApplicationFailureNotifications()).map((job) => job.job_id), [claim.job_id]);
     assert.equal((await restarted.claimApplication({ jobId: claim.job_id })).claimed, false);
   });
 });

@@ -653,6 +653,41 @@ test('failed trusted confirmation receipt remains authoritative evidence but can
   assert.equal(prepared.availabilityAwareRows.some((row) => row.payload?.follow_up_route === 'schedule'), true);
 });
 
+test('partial trusted receipt preserves availability evidence and exposes its failure without positive guidance', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const receipt = confirmationReceiptFixture(job, {
+    status: 'partial_success',
+    authoritative_sheet_result: {
+      success: true,
+      reqID: 'RQ-260821-203',
+      results: [{ equipment: '소니 FX3', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
+    },
+    availability_report: [{ equipment: '소니 FX3', quantity: '1', result: '✅ 가용1', detail: '보유1' }],
+    error: { type: 'discount_patch_failed', message: '할인 M열 반영 실패' }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(scheduleDecisionFixture({
+      authoritative_sheet_result: receipt.authoritative_sheet_result
+    }))}`,
+    trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.sheetResult.success, false);
+  assert.equal(prepared.sheetResult.partial_success, true);
+  assert.equal(prepared.sheetResult.authoritative_success, true);
+  assert.equal(prepared.sheetResult.reqID, 'RQ-260821-203');
+  assert.equal(prepared.sheetResult.results.length, 1);
+  assert.equal(prepared.sheetResult.error_type, 'discount_patch_failed');
+  assert.match(prepared.sheetResult.error, /할인 M열 반영 실패/);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => /할인 M열 반영 실패/.test(`${row.summary} ${row.blocking_reason} ${row.evidence}`)), true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => /후속 처리 일부가 실패/.test(row.summary || '')), true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => /입력을 거절/.test(row.summary || '')), false);
+  assert.equal(prepared.availabilityAwareRows.some((row) => /고객에게 가능 안내 후/.test(row.recommended_action || '')), false);
+});
+
 test('trusted confirmation receipt creates schedule review even when Hermes marks the latest turn as staff', async () => {
   const { job, turn } = gatewayTurnFixture();
   const receipt = confirmationReceiptFixture(job);

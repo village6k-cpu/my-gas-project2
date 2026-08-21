@@ -72,7 +72,13 @@ function makeChannel() {
     },
     setJob(patch) { Object.assign(job, structuredClone(patch)); },
     async status() {
-      return { counts: { ready: 2, claimed: 1, completed: 4, superseded: 0, retry_wait: 0, failed: 0 }, oldest_lease_age_ms: 1234, last_completed_job_id: 'private-job' };
+      return {
+        counts: { ready: 2, claimed: 1, completed: 4, superseded: 0, retry_wait: 0, failed: 0 },
+        application_counts: { pending: 1, claimed: 0, applying: 0, applied: 0, finalized: 2, failed: 1 },
+        unnotified_application_failures: 1,
+        oldest_lease_age_ms: 1234,
+        last_completed_job_id: 'private-job'
+      };
     }
   };
 }
@@ -801,6 +807,8 @@ test('Gateway HTTP status exposes only gateway-safe queue health', async () => {
     assert.deepEqual(await response.json(), {
       transport: 'gateway', gatewayConfigured: true,
       counts: { ready: 2, claimed: 1, completed: 4, superseded: 0, retry_wait: 0, failed: 0 },
+      application_counts: { pending: 1, claimed: 0, applying: 0, applied: 0, finalized: 2, failed: 1 },
+      unnotified_application_failures: 1,
       oldest_lease_age_ms: 1234
     });
   } finally {

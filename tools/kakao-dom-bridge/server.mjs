@@ -248,6 +248,7 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
 export function createGatewayResultApplicationCoordinator({
   channel,
   getConfig,
+  now = Date.now,
   prepare = prepareKakaoGatewayDecision,
   apply = applyPreparedKakaoDecision,
   finalize = finalizePreparedKakaoDecision,
@@ -259,11 +260,77 @@ export function createGatewayResultApplicationCoordinator({
     || typeof channel.beginApplication !== 'function'
     || typeof channel.recordApplicationApplied !== 'function'
     || typeof channel.finalizeApplication !== 'function'
-    || typeof channel.failApplication !== 'function') {
+    || typeof channel.failApplication !== 'function'
+    || typeof channel.listPendingApplicationFailureNotifications !== 'function'
+    || typeof channel.markApplicationFailureNotified !== 'function') {
     throw new Error('Gateway application channel is required');
   }
   if (typeof getConfig !== 'function') throw new Error('Gateway application config loader is required');
+  if (typeof now !== 'function') throw new Error('Gateway application clock is required');
   let applicationTail = Promise.resolve();
+
+  function currentTimeMs() {
+    const value = now();
+    const milliseconds = value instanceof Date ? value.getTime() : Number(value);
+    if (!Number.isFinite(milliseconds)) throw new Error('Gateway application clock returned an invalid timestamp');
+    return milliseconds;
+  }
+
+  function exactIsoTimestampMs(value) {
+    if (typeof value !== 'string'
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return null;
+    const milliseconds = Date.parse(value);
+    return Number.isFinite(milliseconds) ? milliseconds : null;
+  }
+
+  function totalElapsedBaselineMs(durableJob, job, localStartedAt) {
+    const candidates = [
+      durableJob?.event?.detected_at,
+      durableJob?.event?.detectedAt,
+      job?.detected_at,
+      job?.detectedAt,
+      durableJob?.created_at
+    ].map(exactIsoTimestampMs).filter((value) => value !== null && value <= localStartedAt);
+    return candidates.length ? Math.min(...candidates) : localStartedAt;
+  }
+
+  function assertGatewayFinalizationSucceeded(finalized = {}) {
+    if (finalized?.superseded === true || finalized?.status === 'superseded_by_newer_room_event') return;
+    const decision = finalized?.decision || {};
+    const reply = decision?.reply_decision || {};
+    const ownerReviewExpected = decision?.owner_review_required === true
+      || decision?.ownerReviewRequired === true
+      || reply?.shouldCreateTask === true
+      || reply?.should_create_task === true;
+    const followUp = finalized?.followUpResult || {};
+    const persistedRows = Array.isArray(followUp.rows) ? followUp.rows : [];
+    if (followUp.error) {
+      throw new Error(`gateway_owner_review_persistence_failed: ${String(followUp.error).slice(0, 500)}`);
+    }
+    if (ownerReviewExpected && (followUp.skipped === true || persistedRows.length === 0)) {
+      throw new Error('gateway_owner_review_not_persisted: required owner-review row is missing');
+    }
+
+    const slack = finalized?.slackDeliveryResult || {};
+    if (slack.error) {
+      throw new Error(`gateway_owner_review_slack_failed: ${String(slack.error).slice(0, 500)}`);
+    }
+    const failedSlackResult = (Array.isArray(slack.results) ? slack.results : []).find((result) => (
+      result?.ok === false || Boolean(result?.error) || result?.status === 'error'
+    ));
+    if (failedSlackResult) {
+      throw new Error(`gateway_owner_review_slack_failed: ${String(failedSlackResult.error || failedSlackResult.status || 'delivery failed').slice(0, 500)}`);
+    }
+    if (slack.skipped === true) {
+      const reason = String(slack.reason || '').trim();
+      const intentionalSkip = reason === 'disabled'
+        || (reason === 'no_rows' && !ownerReviewExpected && persistedRows.length === 0)
+        || (reason === 'automation_audit_rows' && !ownerReviewExpected);
+      if (!intentionalSkip) {
+        throw new Error(`gateway_owner_review_slack_failed: unexpected skip ${reason || 'unknown'}`);
+      }
+    }
+  }
 
   function exactDurableToolReceipts(durableJob) {
     const operation = durableJob?.tool_operation;
@@ -288,7 +355,8 @@ export function createGatewayResultApplicationCoordinator({
     const internal = localContext?.turn_internal;
     const event = durableJob?.event;
     if (!job || !internal || !event) throw new Error('gateway_local_turn_context_missing');
-    const startedAt = Date.now();
+    const localStartedAt = currentTimeMs();
+    const elapsedBaselineAt = totalElapsedBaselineMs(durableJob, job, localStartedAt);
     const prepared = await prepare({
       config: getConfig(),
       job,
@@ -314,8 +382,11 @@ export function createGatewayResultApplicationCoordinator({
     });
     durableJob.application = { ...(durableJob.application || {}), state: 'applied' };
     const finalized = await finalize({ config: getConfig(), job, applied });
-    const elapsedMs = Date.now() - startedAt;
-    await record({ durableJob, job, finalized, elapsedMs });
+    assertGatewayFinalizationSucceeded(finalized);
+    const finishedAt = currentTimeMs();
+    const elapsedMs = Math.max(0, finishedAt - elapsedBaselineAt);
+    const localApplicationElapsedMs = Math.max(0, finishedAt - localStartedAt);
+    await record({ durableJob, job, finalized, elapsedMs, localApplicationElapsedMs });
     await channel.finalizeApplication({
       job_id: durableJob.job_id,
       application_id: claimed.application_id,
@@ -328,6 +399,26 @@ export function createGatewayResultApplicationCoordinator({
     return finalized;
   }
 
+  function failureErrorForJob(job = {}) {
+    const details = job?.application?.error;
+    const message = String(details?.message || details?.type || 'Gateway application requires human review').slice(0, 1000);
+    const error = new Error(message);
+    if (details?.type) error.code = details.type;
+    return error;
+  }
+
+  async function notifyApplicationFailure(failedJob, error, source) {
+    await onFailure({ durableJob: failedJob, error });
+    await channel.markApplicationFailureNotified({
+      job_id: failedJob.job_id,
+      application_id: failedJob.application.application_id,
+      audit: {
+        source,
+        error_type: String(failedJob.application?.error?.type || error?.code || 'gateway_application_failed').slice(0, 120)
+      }
+    });
+  }
+
   async function enqueueCompletedJob(completedJob = {}) {
     const jobId = String(completedJob?.job_id || '').trim();
     if (!jobId) throw new Error('Gateway completed job_id is required');
@@ -335,14 +426,20 @@ export function createGatewayResultApplicationCoordinator({
     if (!claimed?.claimed) return { accepted: false, reason: claimed?.job?.application?.state || 'not_pending' };
     const application = applicationTail.then(() => runApplication(claimed));
     applicationTail = application.catch(async (error) => {
+      let failedJob = null;
       try {
-        await channel.failApplication({
+        const failureType = claimed.job.application?.state === 'applying'
+          ? 'ambiguous_dom_apply_failure'
+          : 'gateway_application_failed';
+        failedJob = await channel.failApplication({
           job_id: claimed.job.job_id,
           application_id: claimed.application_id,
-          error: { type: 'gateway_application_failed', message: String(error?.message || error).slice(0, 1000) }
+          error: { type: failureType, message: String(error?.message || error).slice(0, 1000) }
         });
       } catch {}
-      try { await onFailure({ durableJob: claimed.job, error }); } catch {}
+      if (failedJob) {
+        try { await notifyApplicationFailure(failedJob, error, 'runtime_failure'); } catch {}
+      }
     });
     return { accepted: true, application_id: claimed.application_id };
   }
@@ -356,6 +453,24 @@ export function createGatewayResultApplicationCoordinator({
       const pending = await channel.listPendingApplications();
       const recovered = [];
       for (const job of pending) recovered.push(await enqueueCompletedJob(job));
+      return recovered;
+    },
+    async recoverApplicationFailureNotifications() {
+      const pending = await channel.listPendingApplicationFailureNotifications();
+      const recovered = [];
+      for (const job of pending) {
+        const error = failureErrorForJob(job);
+        try {
+          await notifyApplicationFailure(job, error, 'startup_recovery');
+          recovered.push({ job_id: job.job_id, notified: true });
+        } catch (notificationError) {
+          recovered.push({
+            job_id: job.job_id,
+            notified: false,
+            error: String(notificationError?.message || notificationError).slice(0, 1000)
+          });
+        }
+      }
       return recovered;
     },
     async idle() { await applicationTail; }
@@ -1610,7 +1725,9 @@ let kakaoPhaseScheduler = null;
 let kakaoWorkerRuntimeConfig = null;
 let gatewayResultApplicationCoordinator = null;
 
-async function recordGatewayApplicationResult({ durableJob, job, finalized, elapsedMs }) {
+async function recordGatewayApplicationResult({ durableJob, job, finalized, elapsedMs, localApplicationElapsedMs }) {
+  const audit = buildWorkerResultAudit(finalized, elapsedMs);
+  audit.localApplicationElapsedMs = Math.max(0, Math.round(Number(localApplicationElapsedMs) || 0));
   const result = {
     code: 0,
     signal: null,
@@ -1620,7 +1737,8 @@ async function recordGatewayApplicationResult({ durableJob, job, finalized, elap
     phased: true,
     gateway: true,
     elapsedMs,
-    audit: buildWorkerResultAudit(finalized, elapsedMs)
+    localApplicationElapsedMs,
+    audit
   };
   appendNdjson('worker-results.ndjson', { at: nowIso(), jobId: durableJob.job_id, result });
   try {
@@ -1649,14 +1767,27 @@ function getGatewayResultApplicationCoordinator() {
       };
       const followUpResult = await createWorkerFailureFollowUp(job, error, {
         origin: 'hermes_gateway_result_application',
-        ambiguous_dom_apply: durableJob?.application?.state === 'applying'
+        ambiguous_dom_apply: ['ambiguous_dom_apply_failure', 'ambiguous_post_apply_restart'].includes(
+          durableJob?.application?.error?.type || error?.code
+        )
       });
+      if (followUpResult?.skipped === true || followUpResult?.error || followUpResult?.slackDeliveryError) {
+        throw new Error(`gateway_failure_notification_not_delivered: ${String(
+          followUpResult?.error || followUpResult?.slackDeliveryError || followUpResult?.reason || 'unknown'
+        ).slice(0, 500)}`);
+      }
+      const failedSlack = (Array.isArray(followUpResult?.slackDeliveryResult?.results)
+        ? followUpResult.slackDeliveryResult.results
+        : []).find((result) => result?.ok === false || result?.error || result?.status === 'error');
+      if (failedSlack) {
+        throw new Error(`gateway_failure_notification_slack_failed: ${String(failedSlack.error || failedSlack.status).slice(0, 500)}`);
+      }
       await updateSupabaseEventByHash(durableJob.job_id, {
         status: 'needs_human_review',
         error_message: String(error?.message || error).slice(0, 1000),
         completed_at: nowIso(),
         payload: { ...job, ai_worker_result: { failure_follow_up: followUpResult } }
-      }).catch(() => {});
+      });
     }
   });
   return gatewayResultApplicationCoordinator;
@@ -3447,7 +3578,13 @@ if (process.env.KAKAO_DOM_BRIDGE_NO_LISTEN !== '1') {
     console.info(`[dom-bridge] supabase: ${CONFIG.supabaseUrl && CONFIG.supabaseTable ? 'enabled' : 'disabled'}`);
     console.info(`[dom-bridge] worker: ${CONFIG.workerCommand ? CONFIG.workerCommand : 'disabled'}`);
     if (gatewayTransportEnabled) {
-      getGatewayResultApplicationCoordinator().recoverPendingApplications().catch((error) => {
+      const coordinator = getGatewayResultApplicationCoordinator();
+      (async () => {
+        await coordinator.recoverPendingApplications();
+        const notifications = await coordinator.recoverApplicationFailureNotifications();
+        const failed = notifications.filter((entry) => entry.notified === false);
+        if (failed.length) throw new Error(`${failed.length} Gateway application failure notification(s) remain pending`);
+      })().catch((error) => {
         appendNdjson('errors.ndjson', { at: nowIso(), type: 'gateway_application_recovery', message: error.message });
       });
     }

@@ -313,6 +313,10 @@ export function createHermesGatewayHttpHandler({ token, channel, executeConfirma
           transport,
           gatewayConfigured: true,
           counts: status?.counts && typeof status.counts === 'object' ? status.counts : {},
+          application_counts: status?.application_counts && typeof status.application_counts === 'object'
+            ? status.application_counts
+            : {},
+          unnotified_application_failures: Math.max(0, Number(status?.unnotified_application_failures || 0)),
           oldest_lease_age_ms: Number.isFinite(oldestLeaseAge) ? oldestLeaseAge : null
         });
         return true;

@@ -4511,10 +4511,18 @@ export function buildSheetAvailabilityReport(sheetResult = null, sheetPayload = 
   const headline = lines.length ? lines.join(' / ') : '가용확인 결과 없음';
   const reqLabel = reqID ? `확인요청 ${reqID}` : '확인요청';
   const duplicateNote = sheetResult?.duplicate ? '기존 중복 RQ에서 읽은 결과입니다. ' : '';
-  const summary = `${duplicateNote}${reqLabel} 가용확인 결과: ${headline}`;
+  const partialFailure = sheetResult?.partial_success === true;
+  const partialErrorType = text(sheetResult?.error_type || sheetResult?.receipt_error?.type).trim();
+  const partialError = text(sheetResult?.error || sheetResult?.receipt_error?.message || sheetResult?.receipt_error).trim();
+  const partialNote = partialFailure
+    ? ` 후속 처리 일부 실패${partialErrorType ? `(${partialErrorType})` : ''}${partialError ? `: ${partialError}` : ''}.`
+    : '';
+  const summary = `${duplicateNote}${reqLabel} 가용확인 결과: ${headline}${partialNote}`;
 
   let recommendedAction = `${reqLabel} 결과가 비어 있거나 판독되지 않았습니다. 같은 조건으로 가용확인을 다시 실행하거나 시트 I/J열을 확인한 뒤 고객에게 안내하세요.`;
-  if (status === 'available') {
+  if (partialFailure) {
+    recommendedAction = `${reqLabel} 입력/가용 결과는 생성됐지만 후속 처리 일부가 실패했습니다. 고객에게 가용 가능을 안내하지 말고 실패 항목을 먼저 확인·복구한 뒤 전체 결과를 다시 검토하세요.`;
+  } else if (status === 'available') {
     recommendedAction = `${reqLabel} 결과가 가용입니다. 고객에게 가능 안내 후 예약 진행 여부를 확인하세요.`;
   } else if (status === 'warning') {
     recommendedAction = `${reqLabel} 결과에 경고가 있습니다. 상세 결과를 기준으로 부족/겹침/모델 선택 필요 여부를 확인하고, 가능 단정 없이 대안 또는 추가확인을 안내하세요.`;
@@ -4535,7 +4543,11 @@ export function buildSheetAvailabilityReport(sheetResult = null, sheetPayload = 
       reqID,
       status,
       duplicate: sheetResult?.duplicate === true,
-      results: rows
+      results: rows,
+      partial_success: partialFailure,
+      receipt_status: text(sheetResult?.receipt_status).trim() || null,
+      error_type: partialErrorType || null,
+      error: partialError || null
     }
   };
 }
@@ -5010,6 +5022,7 @@ export function buildSheetFailureFollowUpRows(decision, job = {}, sheetResult = 
     .slice(0, 16);
   const isValidation = sheetResult.error_type === 'sheet_validation';
   const isNoContact = sheetResult.error_type === 'no_contact';
+  const isPartial = sheetResult.partial_success === true;
   return [{
     follow_up_key: [
       normalizeKeyPart(roomKey, 120),
@@ -5024,9 +5037,15 @@ export function buildSheetFailureFollowUpRows(decision, job = {}, sheetResult = 
     type: 'reservation_review',
     priority: isValidation ? 'urgent' : 'high',
     status: 'open',
-    title: isNoContact ? `${customerName} 연락처 요청 필요` : `${customerName} 확인요청 시트 입력 확인 필요`,
-    summary: `GAS가 확인요청 입력을 거절했습니다: ${error}`,
-    recommended_action: isNoContact
+    title: isNoContact
+      ? `${customerName} 연락처 요청 필요`
+      : (isPartial ? `${customerName} 확인요청 후속 처리 확인 필요` : `${customerName} 확인요청 시트 입력 확인 필요`),
+    summary: isPartial
+      ? `확인요청 입력/가용 결과는 생성됐지만 후속 처리 일부가 실패했습니다: ${error}`
+      : `GAS가 확인요청 입력을 거절했습니다: ${error}`,
+    recommended_action: isPartial
+      ? '권위 있는 가용 결과는 증거로 보존하되, 실패한 후속 처리를 먼저 복구하고 전체 상태를 다시 검토할 때까지 고객 안내를 보류하세요.'
+      : isNoContact
       ? '확인요청은 연락처 없이도 생성되어야 합니다. 운영 GAS 배포 상태를 확인하고, 고객에게는 등록 전 필요한 연락처를 요청하세요.'
       : '날짜/시간/장비명/드롭다운 값을 확인한 뒤 확인요청을 수동 수정하거나 고객에게 필요한 정보를 다시 확인하세요.',
     suggested_reply_draft: '',
@@ -8831,8 +8850,25 @@ function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason,
 
 function sheetResultFromTrustedReceipt(receipt) {
   if (!receipt) return null;
-  if (receipt.authoritative_sheet_result) return receipt.authoritative_sheet_result;
-  if (receipt.status === 'failed' || receipt.error) {
+  const authoritative = receipt.authoritative_sheet_result;
+  const incomplete = receipt.status === 'partial_success' || receipt.status === 'failed' || receipt.error !== null;
+  if (authoritative && incomplete) {
+    const receiptErrorType = text(receipt?.error?.type || (receipt.status === 'failed' ? 'confirmation_failed' : 'confirmation_partial')).trim();
+    const receiptError = text(receipt?.error?.message || receipt.error || `confirmation receipt status: ${receipt.status}`).slice(0, 1000);
+    return {
+      ...authoritative,
+      success: false,
+      authoritative_success: authoritative.success === true,
+      partial_success: receipt.status === 'partial_success',
+      receipt_status: receipt.status,
+      receipt_error: receipt.error,
+      error_type: receiptErrorType,
+      error: receiptError,
+      results: Array.isArray(authoritative.results) ? authoritative.results : receipt.availability_report
+    };
+  }
+  if (authoritative) return authoritative;
+  if (incomplete) {
     return {
       success: false,
       error_type: text(receipt?.error?.type || 'confirmation_failed').trim() || 'confirmation_failed',

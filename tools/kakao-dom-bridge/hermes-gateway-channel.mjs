@@ -13,6 +13,7 @@ const TERMINAL_STATES = new Set(['completed', 'superseded', 'failed']);
 const JOB_STATES = new Set(['ready', 'claimed', 'completed', 'superseded', 'retry_wait', 'failed']);
 const TOOL_OPERATION_STATES = new Set(['reserved', 'completed']);
 const APPLICATION_STATES = new Set(['pending', 'claimed', 'applying', 'applied', 'finalized', 'failed']);
+const FAILURE_NOTIFICATION_STATES = new Set(['pending', 'delivered']);
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const iso = (value) => new Date(value).toISOString();
@@ -138,6 +139,12 @@ function validatePersistedApplication(job) {
     || (application.state !== 'pending' && !String(application.application_id || '').trim())) {
     throw channelError('invalid_persisted_job', 'persisted application state is invalid');
   }
+  const notification = application.failure_notification;
+  if (notification != null && (!FAILURE_NOTIFICATION_STATES.has(notification.state)
+    || !isValidIso(notification.created_at)
+    || (notification.state === 'delivered' && !isValidIso(notification.notified_at)))) {
+    throw channelError('invalid_persisted_job', 'persisted application failure notification is invalid');
+  }
 }
 
 export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAttempts = 2, now = Date.now, storage = {} } = {}) {
@@ -245,14 +252,28 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         });
       } else if (job.application?.state === 'applying' || job.application?.state === 'applied') {
         const interruptedState = job.application.state;
+        const failedAt = iso(currentTime());
         await update(job, {
           human_review_required: true,
           application: {
             ...job.application,
             state: 'failed',
-            failed_at: iso(currentTime()),
+            failed_at: failedAt,
             error: {
               type: interruptedState === 'applying' ? 'ambiguous_post_apply_restart' : 'incomplete_finalize_restart'
+            },
+            failure_notification: {
+              state: 'pending', created_at: failedAt, notified_at: null, audit: null
+            }
+          }
+        });
+      } else if (job.application?.state === 'failed' && !job.application.failure_notification) {
+        const createdAt = isValidIso(job.application.failed_at) ? job.application.failed_at : iso(currentTime());
+        await update(job, {
+          application: {
+            ...job.application,
+            failure_notification: {
+              state: 'pending', created_at: createdAt, notified_at: null, audit: null
             }
           }
         });
@@ -505,7 +526,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
             failed_at: null,
             applied_audit: null,
             final_audit: null,
-            error: null
+            error: null,
+            failure_notification: null
           }
         }));
       });
@@ -535,6 +557,14 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     async listPendingApplications() {
       return mutate(async () => [...jobs.values()]
         .filter((job) => job.state === 'completed' && job.application?.state === 'pending')
+        .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
+        .map(clone));
+    },
+
+    async listPendingApplicationFailureNotifications() {
+      return mutate(async () => [...jobs.values()]
+        .filter((job) => job.application?.state === 'failed'
+          && job.application?.failure_notification?.state === 'pending')
         .sort((left, right) => Number(left.queue_order || 0) - Number(right.queue_order || 0))
         .map(clone));
     },
@@ -606,13 +636,44 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const normalizedError = error && typeof error === 'object' && !Array.isArray(error)
           ? clone(error)
           : { type: 'gateway_application_failed', message: String(error || 'Gateway result application failed').slice(0, 1000) };
+        const failedAt = iso(currentTime());
         return clone(await update(job, {
           human_review_required: true,
           application: {
             ...job.application,
             state: 'failed',
-            failed_at: iso(currentTime()),
-            error: normalizedError
+            failed_at: failedAt,
+            error: normalizedError,
+            failure_notification: {
+              state: 'pending', created_at: failedAt, notified_at: null, audit: null
+            }
+          }
+        }));
+      });
+    },
+
+    async markApplicationFailureNotified({ job_id: jobId, jobId: camelJobId, application_id: applicationId, applicationId: camelApplicationId, audit = null } = {}) {
+      return mutate(async () => {
+        const job = jobs.get(requiredString(jobId ?? camelJobId, 'job_id'));
+        if (!job) throw channelError('unknown_job', 'job does not exist');
+        const suppliedId = requiredString(applicationId ?? camelApplicationId, 'application_id', 'stale_application');
+        const notification = job.application?.failure_notification;
+        if (job.application?.state !== 'failed' || job.application.application_id !== suppliedId || !notification) {
+          throw channelError('stale_application', 'application failure notification is no longer current');
+        }
+        if (notification.state === 'delivered') return clone(job);
+        if (notification.state !== 'pending') {
+          throw channelError('stale_application', 'application failure notification is no longer pending');
+        }
+        return clone(await update(job, {
+          application: {
+            ...job.application,
+            failure_notification: {
+              ...notification,
+              state: 'delivered',
+              notified_at: iso(currentTime()),
+              audit: audit === null ? null : clone(audit)
+            }
           }
         }));
       });
@@ -654,12 +715,21 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     async status() {
       return mutate(async () => {
         const counts = Object.fromEntries([...JOB_STATES].map((state) => [state, 0]));
+        const applicationCounts = Object.fromEntries([...APPLICATION_STATES].map((state) => [state, 0]));
         let lastCompleted = null;
         for (const job of jobs.values()) {
           counts[job.state] += 1;
+          if (job.application?.state) applicationCounts[job.application.state] += 1;
           if (job.state === 'completed' && (!lastCompleted || job.updated_at > lastCompleted.updated_at)) lastCompleted = job;
         }
-        return { counts, last_completed_job_id: lastCompleted?.job_id ?? null };
+        return {
+          counts,
+          application_counts: applicationCounts,
+          unnotified_application_failures: [...jobs.values()].filter((job) => (
+            job.application?.state === 'failed' && job.application?.failure_notification?.state === 'pending'
+          )).length,
+          last_completed_job_id: lastCompleted?.job_id ?? null
+        };
       });
     }
   };
