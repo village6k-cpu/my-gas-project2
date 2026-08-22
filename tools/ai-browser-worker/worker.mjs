@@ -670,6 +670,7 @@ SHEETS TOOL AVAILABLE VIA GAS API:
 - Target sheet for reservation inquiry candidates: 확인요청
 - Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true. Be 적극적: if the latest customer turn is a reservation-format request with enough fields for a review row, set should_write_to_sheet=true.
 - Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write when appropriate.
+${options.gatewayConfirmationToolAvailable ? '- In a native Gateway turn, you may call village_confirmation_request only when you judge authoritative schedule or availability confirmation is necessary. Interpret its server result in this turn; every such result remains owner-review-only and is never a Kakao auto-send authority.\n' : ''}
 
 TASK:
 1. Use supplied BROWSER NAVIGATION RESULT/live DevTools DOM first; it is isolated automation Chrome evidence.
@@ -4510,10 +4511,18 @@ export function buildSheetAvailabilityReport(sheetResult = null, sheetPayload = 
   const headline = lines.length ? lines.join(' / ') : '가용확인 결과 없음';
   const reqLabel = reqID ? `확인요청 ${reqID}` : '확인요청';
   const duplicateNote = sheetResult?.duplicate ? '기존 중복 RQ에서 읽은 결과입니다. ' : '';
-  const summary = `${duplicateNote}${reqLabel} 가용확인 결과: ${headline}`;
+  const partialFailure = sheetResult?.partial_success === true;
+  const partialErrorType = text(sheetResult?.error_type || sheetResult?.receipt_error?.type).trim();
+  const partialError = text(sheetResult?.error || sheetResult?.receipt_error?.message || sheetResult?.receipt_error).trim();
+  const partialNote = partialFailure
+    ? ` 후속 처리 일부 실패${partialErrorType ? `(${partialErrorType})` : ''}${partialError ? `: ${partialError}` : ''}.`
+    : '';
+  const summary = `${duplicateNote}${reqLabel} 가용확인 결과: ${headline}${partialNote}`;
 
   let recommendedAction = `${reqLabel} 결과가 비어 있거나 판독되지 않았습니다. 같은 조건으로 가용확인을 다시 실행하거나 시트 I/J열을 확인한 뒤 고객에게 안내하세요.`;
-  if (status === 'available') {
+  if (partialFailure) {
+    recommendedAction = `${reqLabel} 입력/가용 결과는 생성됐지만 후속 처리 일부가 실패했습니다. 고객에게 가용 가능을 안내하지 말고 실패 항목을 먼저 확인·복구한 뒤 전체 결과를 다시 검토하세요.`;
+  } else if (status === 'available') {
     recommendedAction = `${reqLabel} 결과가 가용입니다. 고객에게 가능 안내 후 예약 진행 여부를 확인하세요.`;
   } else if (status === 'warning') {
     recommendedAction = `${reqLabel} 결과에 경고가 있습니다. 상세 결과를 기준으로 부족/겹침/모델 선택 필요 여부를 확인하고, 가능 단정 없이 대안 또는 추가확인을 안내하세요.`;
@@ -4534,7 +4543,11 @@ export function buildSheetAvailabilityReport(sheetResult = null, sheetPayload = 
       reqID,
       status,
       duplicate: sheetResult?.duplicate === true,
-      results: rows
+      results: rows,
+      partial_success: partialFailure,
+      receipt_status: text(sheetResult?.receipt_status).trim() || null,
+      error_type: partialErrorType || null,
+      error: partialError || null
     }
   };
 }
@@ -5009,6 +5022,7 @@ export function buildSheetFailureFollowUpRows(decision, job = {}, sheetResult = 
     .slice(0, 16);
   const isValidation = sheetResult.error_type === 'sheet_validation';
   const isNoContact = sheetResult.error_type === 'no_contact';
+  const isPartial = sheetResult.partial_success === true;
   return [{
     follow_up_key: [
       normalizeKeyPart(roomKey, 120),
@@ -5023,9 +5037,15 @@ export function buildSheetFailureFollowUpRows(decision, job = {}, sheetResult = 
     type: 'reservation_review',
     priority: isValidation ? 'urgent' : 'high',
     status: 'open',
-    title: isNoContact ? `${customerName} 연락처 요청 필요` : `${customerName} 확인요청 시트 입력 확인 필요`,
-    summary: `GAS가 확인요청 입력을 거절했습니다: ${error}`,
-    recommended_action: isNoContact
+    title: isNoContact
+      ? `${customerName} 연락처 요청 필요`
+      : (isPartial ? `${customerName} 확인요청 후속 처리 확인 필요` : `${customerName} 확인요청 시트 입력 확인 필요`),
+    summary: isPartial
+      ? `확인요청 입력/가용 결과는 생성됐지만 후속 처리 일부가 실패했습니다: ${error}`
+      : `GAS가 확인요청 입력을 거절했습니다: ${error}`,
+    recommended_action: isPartial
+      ? '권위 있는 가용 결과는 증거로 보존하되, 실패한 후속 처리를 먼저 복구하고 전체 상태를 다시 검토할 때까지 고객 안내를 보류하세요.'
+      : isNoContact
       ? '확인요청은 연락처 없이도 생성되어야 합니다. 운영 GAS 배포 상태를 확인하고, 고객에게는 등록 전 필요한 연락처를 요청하세요.'
       : '날짜/시간/장비명/드롭다운 값을 확인한 뒤 확인요청을 수동 수정하거나 고객에게 필요한 정보를 다시 확인하세요.',
     suggested_reply_draft: '',
@@ -8185,6 +8205,843 @@ export async function captureKakaoRoomSnapshot({ config, job, dryRun = false } =
   }
 }
 
+function isGatewayIsoTimestamp(value = '') {
+  const raw = text(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(raw)) return false;
+  const parsed = new Date(raw);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === raw;
+}
+
+function boundedGatewayText(value = '', maxChars = 0) {
+  const raw = text(value);
+  return maxChars > 0 && raw.length > maxChars ? `${raw.slice(0, Math.max(0, maxChars - 1))}…` : raw;
+}
+
+function boundedGatewayStringList(values, { maxItems = 20, maxChars = 160 } = {}) {
+  return Array.isArray(values)
+    ? values.map((value) => boundedGatewayText(value, maxChars)).filter(Boolean).slice(0, maxItems)
+    : [];
+}
+
+function buildGatewayLookupEvidence(lookupContext = {}) {
+  return {
+    generated_at: boundedGatewayText(lookupContext.generated_at, 64).trim(),
+    kill_switch: {
+      status: text(lookupContext.kill_switch?.status || 'not_checked').trim() || 'not_checked',
+      error: lookupContext.kill_switch?.error == null ? null : boundedGatewayText(lookupContext.kill_switch.error, 500)
+    },
+    lookup_policy: {
+      mode: boundedGatewayText(lookupContext.lookup_policy?.mode || 'read_only', 80),
+      allowed_methods: boundedGatewayStringList(lookupContext.lookup_policy?.allowed_methods, { maxItems: 8, maxChars: 16 }),
+      forbidden_actions: boundedGatewayStringList(lookupContext.lookup_policy?.forbidden_actions, { maxItems: 20, maxChars: 80 })
+    },
+    lookup_tool: lookupContext.lookup_tool
+      ? {
+          command: boundedGatewayText(lookupContext.lookup_tool.command, 500),
+          stdin_schema: {
+            queries: [{
+              domain: boundedGatewayText(lookupContext.lookup_tool.stdin_schema?.queries?.[0]?.domain, 160),
+              query: boundedGatewayText(lookupContext.lookup_tool.stdin_schema?.queries?.[0]?.query, 500),
+              column: boundedGatewayText(lookupContext.lookup_tool.stdin_schema?.queries?.[0]?.column, 160)
+            }]
+          },
+          domains: boundedGatewayStringList(lookupContext.lookup_tool.domains, { maxItems: 12, maxChars: 80 }),
+          max_queries: Number.isFinite(Number(lookupContext.lookup_tool.max_queries)) ? Number(lookupContext.lookup_tool.max_queries) : 0,
+          behavior: boundedGatewayText(lookupContext.lookup_tool.behavior, 1_000)
+        }
+      : null
+  };
+}
+
+function buildBoundedGatewayTerminalAck(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    matched: value.matched === true,
+    reason: boundedGatewayText(value.reason, 160)
+  };
+}
+
+const MAX_KAKAO_GATEWAY_RESPONSE_BYTES = 1_048_576;
+// `{"event":{...seven fields...,"lease_id":"<UUID>"}}` adds exactly 60
+// compact-JSON bytes around the durable event emitted by this builder.
+const KAKAO_GATEWAY_CLAIM_ENVELOPE_BYTES = 60;
+const MAX_KAKAO_GATEWAY_EVENT_BYTES = (
+  MAX_KAKAO_GATEWAY_RESPONSE_BYTES - KAKAO_GATEWAY_CLAIM_ENVELOPE_BYTES
+);
+
+function assertBoundedGatewayEvent(event) {
+  let serialized;
+  try {
+    // The plugin accepts a Python json.dumps(..., ensure_ascii=True) body. Pretty
+    // formatting is intentionally conservative for its default comma/colon spaces.
+    serialized = JSON.stringify(event, null, 1).replace(/[\u0080-\uFFFF]/g, (character) => (
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`
+    ));
+  } catch {
+    throw new Error('Gateway event must be JSON serializable');
+  }
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_KAKAO_GATEWAY_EVENT_BYTES) {
+    throw new Error(
+      `Gateway event plus claim envelope exceeds ${MAX_KAKAO_GATEWAY_RESPONSE_BYTES} byte limit`
+    );
+  }
+}
+
+function buildBoundedGatewayRaw({ job = {}, snapshot, lookupEvidence, ragContext, brainContext, recentBotSends, corrections, terminalAcknowledgement }) {
+  const compactJob = buildCompactJobForPrompt(job);
+  return {
+    job: {
+      id: boundedGatewayText(compactJob.id, 160),
+      source: boundedGatewayText(compactJob.source, 160),
+      status: boundedGatewayText(compactJob.status, 160),
+      room_key: boundedGatewayText(compactJob.room_key, 320),
+      event_hash: boundedGatewayText(compactJob.event_hash, 320),
+      preview_text: boundedGatewayText(compactJob.preview_text, 4_000),
+      navigation_hints: Array.isArray(compactJob.navigation_hints)
+        ? compactJob.navigation_hints.map((value) => boundedGatewayText(value, 160)).slice(0, 4)
+        : [],
+      unread_count: Number.isFinite(Number(compactJob.unread_count)) ? Number(compactJob.unread_count) : null,
+      detected_at: boundedGatewayText(compactJob.detected_at, 64)
+    },
+    snapshot: {
+      schema: snapshot.schema,
+      job_id: boundedGatewayText(snapshot.jobId, 160),
+      room_key: boundedGatewayText(snapshot.roomKey, 320),
+      room_revision: Number(snapshot.roomRevision),
+      captured_at: boundedGatewayText(snapshot.capturedAt, 64),
+      evidence_hash: boundedGatewayText(snapshot.evidenceHash, 128),
+      navigation: {
+        status: boundedGatewayText(snapshot.navigation?.status, 160),
+        reason: boundedGatewayText(snapshot.navigation?.reason, 500),
+        via_devtools: snapshot.navigation?.via_devtools === true,
+        already_open: snapshot.navigation?.already_open === true,
+        opened_by_devtools_search: snapshot.navigation?.opened_by_devtools_search === true,
+        search: snapshot.navigation?.search
+          ? {
+              attempted: snapshot.navigation.search.attempted === true,
+              status: boundedGatewayText(snapshot.navigation.search.status, 160),
+              reason: boundedGatewayText(snapshot.navigation.search.reason, 500)
+            }
+          : null,
+        conversation_evidence: {
+          source: boundedGatewayText(snapshot.navigation?.conversation_evidence?.source, 160),
+          title: boundedGatewayText(snapshot.navigation?.conversation_evidence?.title, 500),
+          hint_matched: snapshot.navigation?.conversation_evidence?.hint_matched === true,
+          hints: Array.isArray(snapshot.navigation?.conversation_evidence?.hints)
+            ? snapshot.navigation.conversation_evidence.hints.map((value) => boundedGatewayText(value, 160)).slice(0, 20)
+            : [],
+          visible_static_text_tail: boundedGatewayText(snapshot.navigation?.conversation_evidence?.visible_static_text_tail, 16_000),
+          note: boundedGatewayText(snapshot.navigation?.conversation_evidence?.note, 500)
+        }
+      }
+    },
+    evidence: {
+      lookup: lookupEvidence,
+      rag: {
+        enabled: ragContext?.enabled === true,
+        unavailable_reason: boundedGatewayText(ragContext?.unavailable_reason, 500)
+      },
+      brain: {
+        enabled: brainContext?.enabled === true,
+        context_path: boundedGatewayText(brainContext?.contextPath, 500),
+        customer_profiles_path: boundedGatewayText(brainContext?.customerProfilesPath, 500)
+      },
+      recent_bot_sends: boundedGatewayText(recentBotSends, 4_000),
+      corrections: boundedGatewayText(corrections, 2_000),
+      terminal_ack_hint: buildBoundedGatewayTerminalAck(terminalAcknowledgement)
+    }
+  };
+}
+
+export async function buildKakaoGatewayTurn({ config = {}, job = {}, capture, dependencies = {}, signal = null, freshnessGuard: suppliedFreshnessGuard = null } = {}) {
+  const snapshot = capture?.snapshot;
+  if (!snapshot || snapshot.schema !== 'kakao-room-snapshot/v1') throw new Error('immutable Kakao room snapshot is required');
+  const jobId = text(job.jobId || job.id).trim();
+  const roomKey = text(job.roomKey || job.room_key).trim();
+  const roomRevision = Number(job.roomRevision ?? job.room_revision);
+  const detectedAt = text(job.detectedAt || job.detected_at || job.lastEventAt || snapshot.capturedAt).trim();
+  if (!jobId) throw new Error('Gateway turn job_id is required');
+  if (!roomKey) throw new Error('Gateway turn room_key is required');
+  if (!Number.isInteger(roomRevision) || roomRevision <= 0) throw new Error('Gateway turn room_revision must be positive');
+  if (!isGatewayIsoTimestamp(detectedAt)) throw new Error('Gateway turn detected_at must be an ISO timestamp');
+  if (jobId !== text(snapshot.jobId).trim()) throw new Error('Gateway turn job_id must exactly match immutable snapshot');
+  if (roomKey !== text(snapshot.roomKey).trim()) throw new Error('Gateway turn room_key must exactly match immutable snapshot');
+  if (roomRevision !== Number(snapshot.roomRevision)) throw new Error('Gateway turn room_revision must exactly match immutable snapshot');
+
+  const ownsFreshnessGuard = !suppliedFreshnessGuard;
+  const freshnessGuard = suppliedFreshnessGuard || createJobFreshnessGuard({
+    bridgeUrl: config.bridgeUrl,
+    roomKey,
+    roomRevision,
+    jobLogPath: config.jobLogPath,
+    jobId,
+    detectedAt,
+    pollIntervalMs: config.freshnessPollMs,
+    fetchImpl: dependencies.fetchImpl || config.fetchImpl || fetch,
+    signal
+  });
+  try {
+    freshnessGuard.throwIfSuperseded();
+    const lookupContext = await (dependencies.buildReadOnlyLookupContext || buildReadOnlyLookupContext)(config, job, {
+      fetchImpl: dependencies.fetchImpl || config.fetchImpl || fetch
+    });
+    const ragContext = (dependencies.buildReadOnlyRagContext || buildReadOnlyRagContext)(config);
+    const brainContext = (dependencies.buildBrainContext || buildBrainContext)(config);
+    await freshnessGuard.checkNow();
+    freshnessGuard.throwIfSuperseded();
+    const recentBotSends = (dependencies.buildRecentBotSendsPromptText || buildRecentBotSendsPromptText)(config, job);
+    const corrections = (dependencies.buildCorrectionsPromptText || buildCorrectionsPromptText)(config);
+    const prompt = text((dependencies.buildHermesPrompt || buildHermesPrompt)(job, {
+      gasApiUrl: config.gasApiUrl,
+      lookupContext,
+      navigationContext: snapshot.navigation,
+      ragContext,
+      brainContext,
+      recentBotSends,
+      corrections,
+      terminalAckHint: capture?.terminalAcknowledgement,
+      gatewayConfirmationToolAvailable: dependencies.gatewayConfirmationToolAvailable !== false
+    })).trim();
+    if (!prompt) throw new Error('Gateway turn prompt is required');
+    const lookupEvidence = buildGatewayLookupEvidence(lookupContext);
+    const raw = buildBoundedGatewayRaw({
+      job,
+      snapshot,
+      lookupEvidence,
+      ragContext,
+      brainContext,
+      recentBotSends,
+      corrections,
+      terminalAcknowledgement: capture?.terminalAcknowledgement || null
+    });
+    const event = {
+      schema: 'village-kakao-gateway-event/v1',
+      job_id: jobId,
+      room_key: roomKey,
+      room_revision: roomRevision,
+      prompt,
+      detected_at: detectedAt,
+      raw
+    };
+    assertBoundedGatewayEvent(event);
+    return {
+      event,
+      internal: {
+        snapshot,
+        lookupContext,
+        ragContext,
+        brainContext,
+        recentBotSends,
+        corrections,
+        terminalAcknowledgement: capture?.terminalAcknowledgement || null
+      }
+    };
+  } finally {
+    if (ownsFreshnessGuard) freshnessGuard.stop();
+  }
+}
+
+function confirmationRequestOperationError(code, message) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+  return error;
+}
+
+function confirmationReceiptError(type, message, extra = {}) {
+  return {
+    type: text(type).trim() || 'confirmation_failed',
+    message: text(message).trim().slice(0, 1000) || 'Confirmation request failed',
+    ...extra
+  };
+}
+
+function authoritativePrimarySheetEvidence(sheetResult, sheetPayload) {
+  if (!sheetResult || typeof sheetResult !== 'object' || Array.isArray(sheetResult)) return null;
+  const reqID = extractSheetRequestId(sheetResult);
+  const rows = normalizeAvailabilityResultRows(sheetResult);
+  const hasWriteEvidence = sheetResult.success === true
+    || sheetResult.partial_success === true
+    || Boolean(reqID)
+    || rows.length > 0;
+  if (!hasWriteEvidence) return null;
+  if (sheetResult.success === true) return sheetResult;
+  return {
+    ...sheetResult,
+    executed_payload: sheetPayload
+      ? {
+          action: sheetPayload.action || null,
+          func: sheetPayload.func || null,
+          args: sheetPayload.args || null,
+          setComponentSelections: Array.isArray(sheetPayload.setComponentSelections)
+            ? sheetPayload.setComponentSelections
+            : []
+        }
+      : null
+  };
+}
+
+export async function executeVillageConfirmationRequest({
+  config = {},
+  job = {},
+  roomRevision = job.roomRevision ?? job.room_revision,
+  decision = {},
+  dependencies = {},
+  signal = null
+} = {}) {
+  const jobId = text(job.jobId || job.job_id || job.id).trim();
+  const roomKey = text(job.roomKey || job.room_key).trim();
+  const jobRevision = Number(job.roomRevision ?? job.room_revision);
+  const requestedRevision = Number(roomRevision);
+  if (!jobId) throw confirmationRequestOperationError('invalid_confirmation_request', 'job_id is required');
+  if (!roomKey) throw confirmationRequestOperationError('invalid_confirmation_request', 'room_key is required');
+  if (typeof roomRevision !== 'number' || !Number.isInteger(requestedRevision) || requestedRevision <= 0) {
+    throw confirmationRequestOperationError('invalid_confirmation_request', 'room_revision must be a positive integer');
+  }
+  if (!Number.isInteger(jobRevision) || jobRevision !== requestedRevision) {
+    throw confirmationRequestOperationError('stale_room_revision', 'requested room revision does not match the job');
+  }
+
+  const uuid = dependencies.randomUUID || randomUUID;
+  const now = dependencies.now || (() => new Date());
+  const receiptId = text(uuid()).trim();
+  if (!receiptId) throw confirmationRequestOperationError('invalid_confirmation_receipt', 'receipt_id generation failed');
+  const createdAtValue = now();
+  const createdAt = (createdAtValue instanceof Date ? createdAtValue : new Date(createdAtValue)).toISOString();
+  const buildReceipt = ({ status, authoritativeSheetResult = null, availabilityReport = [], error = null }) => ({
+    schema: 'village-confirmation-receipt/v1',
+    receipt_id: receiptId,
+    job_id: jobId,
+    room_key: roomKey,
+    room_revision: requestedRevision,
+    status,
+    availability_report: Array.isArray(availabilityReport) ? availabilityReport : [],
+    authoritative_sheet_result: authoritativeSheetResult,
+    created_at: createdAt,
+    error
+  });
+
+  const validation = (dependencies.validateAiDecisionContract || validateAiDecisionContract)(decision);
+  if (!validation?.valid) {
+    return buildReceipt({
+      status: 'failed',
+      error: confirmationReceiptError('invalid_decision', 'AI decision contract validation failed', {
+        validation_errors: Array.isArray(validation?.errors) ? validation.errors.slice(0, 20).map((entry) => text(entry).slice(0, 300)) : []
+      })
+    });
+  }
+
+  const freshnessGuard = dependencies.freshnessGuard || createJobFreshnessGuard({
+    bridgeUrl: config.bridgeUrl,
+    roomKey,
+    roomRevision: requestedRevision,
+    jobLogPath: config.jobLogPath,
+    jobId,
+    detectedAt: job.detectedAt || job.detected_at || job.lastEventAt || '',
+    pollIntervalMs: config.freshnessPollMs,
+    fetchImpl: config.fetchImpl || fetch,
+    signal
+  });
+  const ownsFreshnessGuard = !dependencies.freshnessGuard;
+  const appendImpl = dependencies.appendToSheet || appendToSheet;
+  const fetchExistingImpl = dependencies.fetchExistingConfirmRequestResultForDecision || fetchExistingConfirmRequestResultForDecision;
+  const enrichDiscountImpl = dependencies.enrichSheetPayloadWithCustomerDbDiscount || enrichSheetPayloadWithCustomerDbDiscount;
+  const ensureDiscountImpl = dependencies.ensureConfirmRequestDiscountApplied || ensureConfirmRequestDiscountApplied;
+  const assertCurrentClaim = typeof dependencies.assertCurrentClaim === 'function'
+    ? dependencies.assertCurrentClaim
+    : async () => {};
+  const notifyExecutionState = typeof dependencies.onExecutionState === 'function'
+    ? dependencies.onExecutionState
+    : () => {};
+
+  let executedDecision = decision;
+  let sheetPayload = buildSheetAppendPayload(executedDecision, { apiKey: config.sheetApiKey });
+  let sheetResult = null;
+  let existingRequestResult = null;
+  let customerDbDiscountLookup = null;
+  let discountPatchResult = null;
+  let availabilityReport = null;
+  let postPrimaryError = null;
+  let discountPatchError = null;
+  try {
+    freshnessGuard.throwIfSuperseded();
+    if (sheetPayload?.args?.입력모드 === 'additions_only') {
+      let existingRequestForMerge = null;
+      if (executedDecision?.reservation_inquiry?.already_registered !== true) {
+        existingRequestForMerge = await fetchExistingImpl(config, executedDecision, []);
+      }
+      const merged = mergeAdditionsOnlySheetPayloadWithExistingRequest(sheetPayload, executedDecision, existingRequestForMerge);
+      if (!merged.ok) {
+        sheetResult = {
+          success: false,
+          error: merged.error,
+          error_type: 'existing_confirm_request_merge_failed',
+          recoverable: false
+        };
+      }
+      sheetPayload = merged.payload;
+    }
+
+    if (executedDecision.should_write_to_sheet === true && !sheetPayload && !sheetResult) {
+      sheetResult = {
+        success: false,
+        error: 'Validated decision did not produce a safe confirmation-request payload',
+        error_type: 'invalid_sheet_payload',
+        recoverable: false
+      };
+    }
+
+    if (sheetPayload) {
+      try {
+        const enriched = await enrichDiscountImpl(config, sheetPayload);
+        sheetPayload = enriched.payload;
+        customerDbDiscountLookup = enriched.lookup;
+        if (customerDbDiscountLookup?.discountType) {
+          executedDecision = {
+            ...executedDecision,
+            sheet_row_candidate: {
+              ...(executedDecision.sheet_row_candidate || {}),
+              discount_type: customerDbDiscountLookup.discountType
+            }
+          };
+        }
+      } catch (error) {
+        customerDbDiscountLookup = { matched: false, error: text(error?.message || error).slice(0, 500) };
+      }
+
+      await freshnessGuard.checkNow();
+      freshnessGuard.throwIfSuperseded();
+      await assertCurrentClaim();
+      try {
+        sheetResult = await appendImpl(config, sheetPayload);
+      } catch (error) {
+        sheetResult = {
+          success: false,
+          error: text(error?.message || error).slice(0, 1000) || 'GAS request failed',
+          error_type: 'gas_request_failed',
+          recoverable: false
+        };
+      }
+      if (!sheetResult || typeof sheetResult !== 'object' || Array.isArray(sheetResult)) {
+        sheetResult = {
+          success: false,
+          error: 'GAS confirmation request returned no structured result',
+          error_type: 'invalid_gas_response',
+          recoverable: false
+        };
+      }
+
+      if (customerDbDiscountLookup?.discountType && sheetResult?.success === true) {
+        try {
+          await freshnessGuard.checkNow();
+          freshnessGuard.throwIfSuperseded();
+          await assertCurrentClaim();
+        } catch (error) {
+          const message = text(error?.message || error).slice(0, 1000) || 'Freshness changed after the primary confirmation write';
+          postPrimaryError = confirmationReceiptError('stale_after_primary_write', message);
+          discountPatchResult = { updated: false, skipped: true, reason: 'stale_after_primary_write', error: message };
+        }
+        if (!postPrimaryError) {
+          try {
+            discountPatchResult = await ensureDiscountImpl(config, sheetResult, sheetPayload, customerDbDiscountLookup);
+            if (discountPatchResult?.error) {
+              discountPatchError = confirmationReceiptError('discount_patch_failed', discountPatchResult.error);
+            } else {
+              const skipReason = text(discountPatchResult?.reason).trim();
+              const acceptedSkip = skipReason === 'already_applied'
+                || (skipReason === 'duplicate_request_not_patched' && sheetResult?.duplicate === true);
+              if (discountPatchResult?.updated !== true && !acceptedSkip) {
+                discountPatchError = confirmationReceiptError(
+                  'discount_patch_failed',
+                  `Discount patch was not applied: ${skipReason || 'missing_patch_result'}`
+                );
+              }
+            }
+          } catch (error) {
+            const message = text(error?.message || error).slice(0, 1000) || 'Discount patch failed';
+            discountPatchResult = { updated: false, error: message };
+            discountPatchError = confirmationReceiptError('discount_patch_failed', message);
+          }
+        }
+      }
+    }
+
+    if (!sheetResult) {
+      existingRequestResult = await fetchExistingImpl(config, executedDecision, []);
+    }
+    const primarySheetEvidence = authoritativePrimarySheetEvidence(sheetResult, sheetPayload);
+    const authoritativeSheetResult = primarySheetEvidence || existingRequestResult;
+    availabilityReport = buildSheetAvailabilityReport(authoritativeSheetResult, sheetPayload);
+    const operationState = {
+      decision: executedDecision,
+      sheetResult,
+      sheetPayload,
+      customerDbDiscountLookup,
+      discountPatchResult,
+      existingRequestResult,
+      authoritativeSheetResult,
+      availabilityReport,
+      postPrimaryError,
+      discountPatchError
+    };
+    notifyExecutionState(operationState);
+    if (postPrimaryError || discountPatchError) {
+      return buildReceipt({
+        status: 'partial_success',
+        authoritativeSheetResult: authoritativeSheetResult || null,
+        availabilityReport: availabilityReport?.rows || [],
+        error: postPrimaryError || discountPatchError
+      });
+    }
+    if (sheetResult?.success === false) {
+      return buildReceipt({
+        status: authoritativeSheetResult ? 'partial_success' : 'failed',
+        authoritativeSheetResult: authoritativeSheetResult || null,
+        availabilityReport: availabilityReport?.rows || [],
+        error: confirmationReceiptError(sheetResult.error_type || 'gas_rejected', sheetResult.error || 'GAS rejected confirmation request')
+      });
+    }
+    return buildReceipt({
+      status: authoritativeSheetResult ? 'ok' : 'no_action',
+      authoritativeSheetResult: authoritativeSheetResult || null,
+      availabilityReport: availabilityReport?.rows || [],
+      error: null
+    });
+  } finally {
+    if (ownsFreshnessGuard) freshnessGuard.stop();
+  }
+}
+
+function canonicalGatewayDecisionValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalGatewayDecisionValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalGatewayDecisionValue(value[key])]));
+  }
+  return value;
+}
+
+function sameGatewayDecisionValue(left, right) {
+  return JSON.stringify(canonicalGatewayDecisionValue(left)) === JSON.stringify(canonicalGatewayDecisionValue(right));
+}
+
+function validGatewayReceiptTimestamp(value) {
+  return typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+function exactTrustedConfirmationReceipt(receipt, { jobId, roomKey, roomRevision }) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return false;
+  if (receipt.schema !== 'village-confirmation-receipt/v1') return false;
+  if (!text(receipt.receipt_id).trim() || !text(receipt.status).trim()) return false;
+  if (receipt.job_id !== jobId || receipt.room_key !== roomKey || receipt.room_revision !== roomRevision) return false;
+  if (!Array.isArray(receipt.availability_report)) return false;
+  if (!(receipt.authoritative_sheet_result === null
+    || (receipt.authoritative_sheet_result && typeof receipt.authoritative_sheet_result === 'object' && !Array.isArray(receipt.authoritative_sheet_result)))) return false;
+  if (!validGatewayReceiptTimestamp(receipt.created_at)) return false;
+  if (!(receipt.error === null || typeof receipt.error === 'string'
+    || (receipt.error && typeof receipt.error === 'object' && !Array.isArray(receipt.error)))) return false;
+  return true;
+}
+
+function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
+  const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
+  const classification = text(decision?.classification).trim();
+  const reservationAuthorityClaim = classification === 'reservation'
+    && (replySafetyClass(decision) === 'sensitive_commitment' || replyGrounding(decision) === 'authoritative_sheet');
+  return decision?.should_write_to_sheet === true
+    || decision?.post_action_reconciled === true
+    || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object')
+    || replySafetyClass(decision) === 'authoritative_availability_answer'
+    || reservationAuthorityClaim
+    || followUps.some((item) => text(item?.route || item?.follow_up_route).trim() === 'schedule');
+}
+
+function stripAgentSuppliedReceiptFields(decision = {}) {
+  const {
+    trusted_tool_receipts: _trustedToolReceipts,
+    trustedToolReceipts: _camelTrustedToolReceipts,
+    tool_receipts: _toolReceipts,
+    toolReceipts: _camelToolReceipts,
+    confirmation_receipt: _confirmationReceipt,
+    confirmationReceipt: _camelConfirmationReceipt,
+    trusted_confirmation_receipt: _trustedConfirmationReceipt,
+    ...withoutReceipts
+  } = decision;
+  return withoutReceipts;
+}
+
+function gatewayReviewFollowUpItem({ decision = {}, job = {}, schedule = false, reason, receipt = null }) {
+  const customerName = text(
+    decision?.customer?.name
+    || decision?.sheet_row_candidate?.customer_name
+    || job?.customer_name
+    || job?.customerName
+    || '미확인 고객'
+  ).slice(0, 120);
+  const jobId = text(job?.jobId || job?.job_id || job?.id).trim();
+  const receiptId = text(receipt?.receipt_id).trim();
+  const status = text(receipt?.status).trim();
+  const route = schedule ? 'schedule' : 'other';
+  return {
+    type: schedule ? 'schedule_check' : 'reply_needed',
+    route,
+    taskKey: `gateway:${route}:${jobId || 'unknown'}`,
+    priority: schedule || status === 'failed' ? 'high' : 'normal',
+    status: 'open',
+    customer_name: customerName,
+    title: schedule ? `${customerName} 스케줄 결과 사장 확인 필요` : `${customerName} Hermes 결과 확인 필요`,
+    summary: text(reason).trim().slice(0, 1000) || 'Gateway 결과를 자동 적용할 수 없어 사람 확인이 필요합니다.',
+    recommended_action: schedule
+      ? '권위 있는 확인요청 결과와 대화 초안을 대조한 뒤 사장이 직접 발송 여부를 결정하세요.'
+      : '최신 카카오 대화와 Hermes 결과를 직접 확인한 뒤 답변 여부를 결정하세요.',
+    suggested_reply_draft: text(decision?.suggested_reply_draft || decisionReply(decision).text).slice(0, 1000),
+    evidence: [receiptId ? `receipt_id: ${receiptId}` : '', status ? `receipt_status: ${status}` : '', jobId ? `job_id: ${jobId}` : ''].filter(Boolean),
+    due_hint: 'now',
+    alertLevel: 'none'
+  };
+}
+
+function forceGatewayOwnerReviewDecision(decision = {}, { job, schedule, reason, receipt = null, authoritativeSheetResult = undefined } = {}) {
+  const originalFollowUps = (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : []).map((item) => {
+    if (!receipt || !item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const {
+      authoritative_sheet_result: _agentAuthority,
+      confirmation_receipt: _agentReceipt,
+      trusted_confirmation_receipt: _agentTrustedReceipt,
+      trusted_tool_receipts: _agentTrustedReceipts,
+      ...withoutAgentAuthority
+    } = item;
+    return { ...withoutAgentAuthority, evidence: [] };
+  });
+  const hasScheduleFollowUp = originalFollowUps.some((item) => text(item?.route || item?.follow_up_route).trim() === 'schedule');
+  const followUpItems = schedule && hasScheduleFollowUp
+    ? originalFollowUps
+    : [...originalFollowUps, gatewayReviewFollowUpItem({ decision, job, schedule, reason, receipt })];
+  const {
+    trusted_tool_receipts: _ignoredTrustedReceipts,
+    tool_receipts: _ignoredToolReceipts,
+    confirmation_receipt: _ignoredConfirmationReceipt,
+    authoritative_sheet_result: _ignoredFinalAuthority,
+    ...safeBase
+  } = decision && typeof decision === 'object' && !Array.isArray(decision) ? decision : {};
+  return {
+    ...safeBase,
+    classification: text(safeBase.classification).trim() || (schedule ? 'reservation' : 'human_review'),
+    confidence: text(safeBase.confidence).trim() || 'low',
+    should_write_to_sheet: false,
+    owner_review_required: true,
+    safety_checks: {
+      ...(safeBase.safety_checks && typeof safeBase.safety_checks === 'object' ? safeBase.safety_checks : {}),
+      latest_customer_message_after_last_staff_reply:
+        typeof safeBase?.safety_checks?.latest_customer_message_after_last_staff_reply === 'boolean'
+          ? safeBase.safety_checks.latest_customer_message_after_last_staff_reply
+          : true
+    },
+    follow_up_items: followUpItems,
+    suggested_reply_draft: text(safeBase.suggested_reply_draft || decisionReply(safeBase).text),
+    ...(authoritativeSheetResult !== undefined ? { authoritative_sheet_result: authoritativeSheetResult } : {}),
+    reply_decision: {
+      ...decisionReply(safeBase),
+      replyMode: 'draft_only',
+      text: text(decisionReply(safeBase).text || safeBase.suggested_reply_draft),
+      confidence: text(decisionReply(safeBase).confidence || safeBase.confidence).trim() || 'low',
+      reason: text(reason).trim().slice(0, 1000) || 'Gateway safety gate requires owner review.',
+      shouldCreateTask: true,
+      safetyClass: 'no_send',
+      grounding: schedule && receipt ? 'authoritative_sheet' : 'none',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: false
+    }
+  };
+}
+
+function sheetResultFromTrustedReceipt(receipt) {
+  if (!receipt) return null;
+  const authoritative = receipt.authoritative_sheet_result;
+  const incomplete = receipt.status === 'partial_success' || receipt.status === 'failed' || receipt.error !== null;
+  if (authoritative && incomplete) {
+    const receiptErrorType = text(receipt?.error?.type || (receipt.status === 'failed' ? 'confirmation_failed' : 'confirmation_partial')).trim();
+    const receiptError = text(receipt?.error?.message || receipt.error || `confirmation receipt status: ${receipt.status}`).slice(0, 1000);
+    return {
+      ...authoritative,
+      success: false,
+      authoritative_success: authoritative.success === true,
+      partial_success: receipt.status === 'partial_success',
+      receipt_status: receipt.status,
+      receipt_error: receipt.error,
+      error_type: receiptErrorType,
+      error: receiptError,
+      results: Array.isArray(authoritative.results) ? authoritative.results : receipt.availability_report
+    };
+  }
+  if (authoritative) return authoritative;
+  if (incomplete) {
+    return {
+      success: false,
+      error_type: text(receipt?.error?.type || 'confirmation_failed').trim() || 'confirmation_failed',
+      error: text(receipt?.error?.message || receipt.error || `confirmation receipt status: ${receipt.status}`).slice(0, 1000),
+      recoverable: false
+    };
+  }
+  if (receipt.availability_report.length) {
+    return { success: true, results: receipt.availability_report, source: 'trusted_confirmation_receipt' };
+  }
+  return null;
+}
+
+export async function prepareKakaoGatewayDecision({
+  config = {},
+  job = {},
+  turn,
+  finalText = '',
+  trustedToolReceipts = [],
+  dependencies = {}
+} = {}) {
+  void config;
+  void dependencies;
+  const event = turn?.event;
+  const internal = turn?.internal;
+  const snapshot = internal?.snapshot;
+  const jobId = text(job.jobId || job.job_id || job.id).trim();
+  const roomKey = text(job.roomKey || job.room_key).trim();
+  const roomRevision = Number(job.roomRevision ?? job.room_revision);
+  const safetyFailures = [];
+  let decision = null;
+
+  const exactTurn = event?.schema === 'village-kakao-gateway-event/v1'
+    && snapshot?.schema === 'kakao-room-snapshot/v1'
+    && jobId && roomKey && Number.isInteger(roomRevision) && roomRevision > 0
+    && event.job_id === jobId && event.room_key === roomKey && event.room_revision === roomRevision
+    && snapshot.jobId === jobId && snapshot.roomKey === roomKey && snapshot.roomRevision === roomRevision;
+  if (!exactTurn) safetyFailures.push('stale_gateway_turn');
+
+  if (exactTurn) {
+    try {
+      decision = extractJsonObject(finalText);
+    } catch {
+      safetyFailures.push('malformed_gateway_final');
+    }
+  }
+  if (decision) {
+    const validation = validateAiDecisionContract(decision);
+    if (!validation.valid) safetyFailures.push('invalid_gateway_decision');
+    decision = stripAgentSuppliedReceiptFields(decision);
+    if (!text(decision.kill_switch_observed).trim() && internal?.lookupContext?.kill_switch?.status) {
+      decision.kill_switch_observed = internal.lookupContext.kill_switch.status;
+    }
+  }
+
+  const receiptCoordinates = { jobId, roomKey, roomRevision };
+  const suppliedReceipts = Array.isArray(trustedToolReceipts) ? trustedToolReceipts : [];
+  const exactReceipts = exactTurn
+    ? suppliedReceipts.filter((receipt) => exactTrustedConfirmationReceipt(receipt, receiptCoordinates))
+    : [];
+  if (suppliedReceipts.length !== exactReceipts.length) safetyFailures.push('invalid_trusted_receipt');
+  if (exactReceipts.length > 1 && exactReceipts.some((receipt) => !sameGatewayDecisionValue(receipt, exactReceipts[0]))) {
+    safetyFailures.push('conflicting_trusted_receipts');
+  }
+  const trustedToolReceipt = exactReceipts[0] || null;
+  const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
+  const parsedDecisionValid = decision && !safetyFailures.includes('invalid_gateway_decision');
+
+  let sheetResult = null;
+  let sheetPayload = null;
+  let reason = '';
+  if (trustedToolReceipt) {
+    sheetResult = sheetResultFromTrustedReceipt(trustedToolReceipt);
+    const receiptFailed = trustedToolReceipt.status === 'failed' || trustedToolReceipt.error !== null;
+    const report = buildSheetAvailabilityReport(sheetResult, null);
+    const postActionValidation = parsedDecisionValid
+      ? validateAiPostActionDecisionContract(decision, report || {})
+      : { valid: false, errors: ['invalid base decision'] };
+    const finalAuthority = decision?.authoritative_sheet_result;
+    if (!postActionValidation.valid
+      || (finalAuthority && !sameGatewayDecisionValue(finalAuthority, trustedToolReceipt.authoritative_sheet_result))) {
+      safetyFailures.push('trusted_receipt_decision_contradiction');
+    }
+    if (receiptFailed) safetyFailures.push('trusted_confirmation_failed');
+    reason = receiptFailed
+      ? '권위 있는 확인요청 작업이 실패 또는 부분 실패하여 사장 확인이 필요합니다.'
+      : '권위 있는 확인요청 결과는 사장 확인 후에만 고객에게 안내할 수 있습니다.';
+    decision = forceGatewayOwnerReviewDecision(decision || {}, {
+      job, schedule: true, reason, receipt: trustedToolReceipt,
+      authoritativeSheetResult: trustedToolReceipt.authoritative_sheet_result
+    });
+    decision.post_action_reconciled = !receiptFailed && !safetyFailures.includes('trusted_receipt_decision_contradiction');
+    decision.trusted_confirmation_receipt = trustedToolReceipt;
+  } else if (structuredScheduleClaim) {
+    safetyFailures.push('authoritative_claim_without_trusted_receipt');
+    reason = '구조화된 스케줄 주장이 있지만 채널에 영속화된 권위 있는 확인요청 receipt가 없습니다.';
+    decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: true, reason });
+  } else if (!parsedDecisionValid || !exactTurn || safetyFailures.includes('invalid_trusted_receipt')) {
+    reason = safetyFailures.includes('stale_gateway_turn')
+      ? 'Gateway 결과가 현재 작업과 동일한 방/리비전/스냅샷에 속하지 않습니다.'
+      : 'Hermes Gateway 최종 JSON을 안전하게 검증할 수 없습니다.';
+    decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: false, reason });
+  }
+
+  const baseFollowUpRows = [
+    ...buildFollowUpRows(decision, job),
+    ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)
+  ];
+  let availabilityAwareRows = enrichFollowUpRowsWithSheetAvailability(
+    baseFollowUpRows,
+    sheetResult,
+    sheetPayload,
+    decision,
+    job
+  );
+  if (!availabilityAwareRows.length && decision?.owner_review_required === true) {
+    const scheduleReview = Boolean(trustedToolReceipt || structuredScheduleClaim);
+    const fallbackDecision = {
+      ...decision,
+      safety_checks: {
+        ...(decision.safety_checks && typeof decision.safety_checks === 'object' ? decision.safety_checks : {}),
+        latest_customer_message_after_last_staff_reply: true
+      },
+      follow_up_items: [gatewayReviewFollowUpItem({
+        decision,
+        job,
+        schedule: scheduleReview,
+        reason,
+        receipt: trustedToolReceipt
+      })]
+    };
+    availabilityAwareRows = enrichFollowUpRowsWithSheetAvailability(
+      buildFollowUpRows(fallbackDecision, job),
+      sheetResult,
+      sheetPayload,
+      fallbackDecision,
+      job
+    );
+  }
+  return {
+    status: 'ai_prepared',
+    snapshot,
+    decision,
+    sheetResult,
+    sheetPayload,
+    customerDbDiscountLookup: null,
+    discountPatchResult: null,
+    existingRequestResult: null,
+    postActionResult: trustedToolReceipt ? {
+      skipped: true,
+      reason: 'completed_inside_native_gateway_turn',
+      receipt_id: trustedToolReceipt.receipt_id,
+      status: trustedToolReceipt.status
+    } : null,
+    availabilityAwareRows,
+    hermesAttempts: 1,
+    hermesRecovered: false,
+    hermesOutputTail: text(finalText).slice(-4000),
+    postActionOutputTail: '',
+    trustedToolReceipt,
+    gatewaySafetyFailures: Array.from(new Set(safetyFailures)),
+    timings: {}
+  };
+}
+
 export async function prepareKakaoDecisionFromSnapshot({
   config,
   job,
@@ -8196,7 +9053,6 @@ export async function prepareKakaoDecisionFromSnapshot({
 } = {}) {
   const snapshot = capture?.snapshot;
   if (!snapshot || snapshot.schema !== 'kakao-room-snapshot/v1') throw new Error('immutable Kakao room snapshot is required');
-  const navigationContext = snapshot.navigation;
   const timings = createWorkerTimingRecorder();
   // 종결 인사 여부는 코드가 아니라 AI가 판단한다. DOM 휴리스틱 분류는 조기 반환
   // 대신 프롬프트 힌트(TERMINAL_ACK_HINT)로만 전달된다 (2026-08-19 AI-first 재설계).
@@ -8212,16 +9068,17 @@ export async function prepareKakaoDecisionFromSnapshot({
     signal
   });
   try {
-    freshnessGuard.throwIfSuperseded();
-    const lookupContext = await buildReadOnlyLookupContext(config, job);
-    const ragContext = buildReadOnlyRagContext(config);
-    const brainContext = buildBrainContext(config);
+    const { event, internal } = await buildKakaoGatewayTurn({
+      config,
+      job,
+      capture,
+      signal,
+      dependencies: { gatewayConfirmationToolAvailable: false },
+      freshnessGuard
+    });
+    const { lookupContext, ragContext, brainContext } = internal;
     timings.mark('lookup');
-    await freshnessGuard.checkNow();
-    freshnessGuard.throwIfSuperseded();
-    const recentBotSends = buildRecentBotSendsPromptText(config, job);
-    const corrections = buildCorrectionsPromptText(config);
-    const prompt = buildHermesPrompt(job, { gasApiUrl: config.gasApiUrl, lookupContext, navigationContext, ragContext, brainContext, recentBotSends, corrections, terminalAckHint: capture?.terminalAcknowledgement });
+    const prompt = event.prompt;
     if (dryRun) {
       return { status: 'dry_run', snapshot, job: summarizeJob(job), lookupContext, ragContext, brainContext, prompt, timings: timings.snapshot() };
     }
@@ -8258,70 +9115,39 @@ export async function prepareKakaoDecisionFromSnapshot({
       decision.kill_switch_observed = lookupContext.kill_switch.status;
     }
 
-    let sheetPayload = buildSheetAppendPayload(decision, { apiKey: config.sheetApiKey });
-    let sheetPreparationFailure = null;
-    if (sheetPayload?.args?.입력모드 === 'additions_only') {
-      let existingRequestForMerge = null;
-      if (decision?.reservation_inquiry?.already_registered !== true) {
-        existingRequestForMerge = await fetchExistingConfirmRequestResultForDecision(config, decision, []);
-      }
-      const merged = mergeAdditionsOnlySheetPayloadWithExistingRequest(
-        sheetPayload,
-        decision,
-        existingRequestForMerge
-      );
-      if (merged.ok) {
-        sheetPayload = merged.payload;
-      } else {
-        sheetPayload = null;
-        sheetPreparationFailure = {
-          success: false,
-          error: merged.error,
-          error_type: 'existing_confirm_request_merge_failed',
-          recoverable: false
-        };
-      }
-    }
-    let customerDbDiscountLookup = null;
-    if (sheetPayload) {
-      try {
-        const enriched = await enrichSheetPayloadWithCustomerDbDiscount(config, sheetPayload);
-        sheetPayload = enriched.payload;
-        customerDbDiscountLookup = enriched.lookup;
-        if (customerDbDiscountLookup?.discountType) {
-          decision = {
-            ...decision,
-            sheet_row_candidate: {
-              ...(decision.sheet_row_candidate || {}),
-              discount_type: customerDbDiscountLookup.discountType
-            }
-          };
-        }
-      } catch (error) {
-        customerDbDiscountLookup = { matched: false, error: error.message.slice(0, 500) };
-      }
-    }
     reportHandoffPhase('sheet_mutation_boundary');
-    const sheetResult = sheetPreparationFailure || await appendToSheet(config, sheetPayload);
-    let discountPatchResult = null;
-    if (sheetPayload && customerDbDiscountLookup?.discountType) {
-      try {
-        discountPatchResult = await ensureConfirmRequestDiscountApplied(config, sheetResult, sheetPayload, customerDbDiscountLookup);
-      } catch (error) {
-        discountPatchResult = { updated: false, error: error.message.slice(0, 500) };
-      }
-    }
-    const initialFollowUpRows = [
-      ...buildFollowUpRows(decision, job),
-      ...buildSheetFailureFollowUpRows(decision, job, sheetResult, sheetPayload)
-    ];
-    const existingRequestResult = sheetResult
-      ? null
-      : await fetchExistingConfirmRequestResultForDecision(config, decision, initialFollowUpRows);
-    const authoritativeSheetResult = sheetResult?.success === false
-      ? null
-      : (sheetResult || existingRequestResult);
-    const availabilityReport = buildSheetAvailabilityReport(authoritativeSheetResult, sheetPayload);
+    let confirmationState = null;
+    await executeVillageConfirmationRequest({
+      config,
+      job,
+      roomRevision: job.roomRevision || job.room_revision || 0,
+      decision,
+      dependencies: {
+        freshnessGuard,
+        onExecutionState: (state) => { confirmationState = state; }
+      },
+      signal: freshnessGuard.signal
+    });
+    confirmationState ||= {
+      decision,
+      sheetResult: null,
+      sheetPayload: null,
+      customerDbDiscountLookup: null,
+      discountPatchResult: null,
+      existingRequestResult: null,
+      authoritativeSheetResult: null,
+      availabilityReport: null
+    };
+    decision = confirmationState.decision;
+    const {
+      sheetResult,
+      sheetPayload,
+      customerDbDiscountLookup,
+      discountPatchResult,
+      existingRequestResult,
+      authoritativeSheetResult,
+      availabilityReport
+    } = confirmationState;
     let postActionResult = null;
     let postActionOutputTail = '';
     if (availabilityReport) {

@@ -6,7 +6,8 @@
   "description": "Local bridge for the Village Kakao DOM watcher. Receives browser events, debounces, and wakes the AI-first browser coworker.",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs"
+    "check": "node --check server.mjs",
+    "test": "node --test *.test.mjs"
   },
   "engines": {
     "node": ">=18"

@@ -100,6 +100,9 @@ test('busy bridge handoff requires a current per-job phase proof for stdin Herme
 
 test('worker advances the handoff phase before every mutation and post-action boundary', () => {
   const worker = read('tools/ai-browser-worker/worker.mjs');
+  const operationStart = worker.indexOf('export async function executeVillageConfirmationRequest');
+  const operationEnd = worker.indexOf('export async function prepareKakaoGatewayDecision', operationStart);
+  const operation = worker.slice(operationStart, operationEnd);
   const prepareStart = worker.indexOf('export async function prepareKakaoDecisionFromSnapshot');
   const prepareEnd = worker.indexOf('export async function applyPreparedKakaoDecision', prepareStart);
   const prepare = worker.slice(prepareStart, prepareEnd);
@@ -107,19 +110,40 @@ test('worker advances the handoff phase before every mutation and post-action bo
   const initialHermes = prepare.indexOf('await runHermesDecision(prompt, config');
   const initialFinished = prepare.indexOf("reportHandoffPhase('initial_hermes_finished')");
   const mutation = prepare.indexOf("reportHandoffPhase('sheet_mutation_boundary')");
-  const append = prepare.indexOf('await appendToSheet(config, sheetPayload)');
+  const execute = prepare.indexOf('await executeVillageConfirmationRequest({');
   const postAction = prepare.indexOf("reportHandoffPhase('post_action_hermes_in_flight')");
   const postActionHermes = prepare.indexOf('await runHermesPostActionDecision({');
+  const append = operation.indexOf('sheetResult = await appendImpl(config, sheetPayload)');
+  const freshnessCheck = operation.lastIndexOf('await freshnessGuard.checkNow()', append);
+  const freshnessFence = operation.lastIndexOf('freshnessGuard.throwIfSuperseded()', append);
+  const claimFence = operation.lastIndexOf('await assertCurrentClaim()', append);
 
-  for (const [label, index] of Object.entries({ initial, initialHermes, initialFinished, mutation, append, postAction, postActionHermes })) {
+  for (const [label, index] of Object.entries({
+    operationStart,
+    operationEnd,
+    initial,
+    initialHermes,
+    initialFinished,
+    mutation,
+    execute,
+    postAction,
+    postActionHermes,
+    freshnessCheck,
+    freshnessFence,
+    claimFence,
+    append
+  })) {
     assert.ok(index >= 0, `${label} marker must exist`);
   }
   assert.ok(initial < initialHermes);
   assert.ok(initialHermes < initialFinished);
   assert.ok(initialFinished < mutation);
-  assert.ok(mutation < append);
-  assert.ok(append < postAction);
+  assert.ok(mutation < execute);
+  assert.ok(execute < postAction);
   assert.ok(postAction < postActionHermes);
+  assert.ok(freshnessCheck < freshnessFence);
+  assert.ok(freshnessFence < claimFence);
+  assert.ok(claimFence < append);
 });
 
 test('the runbook documents production always-on operation after the cutover contract', () => {

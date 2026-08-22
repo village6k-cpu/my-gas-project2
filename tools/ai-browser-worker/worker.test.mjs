@@ -170,6 +170,582 @@ test('Kakao room snapshots are immutable and contain no live DOM handles', () =>
   assert.throws(() => { snapshot.navigation.status = 'mutated'; }, TypeError);
 });
 
+test('buildKakaoGatewayTurn builds a bounded credential-safe native Hermes event from read-only evidence', async () => {
+  const job = {
+    jobId: 'gateway-job-1',
+    roomKey: 'chat:gateway-1',
+    roomRevision: 7,
+    detectedAt: '2026-08-21T01:02:03.000Z',
+    previewText: 'FX3 내일 가능할까요?'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({
+    job,
+    capturedAt: '2026-08-21T01:02:04.000Z',
+    navigationContext: {
+      status: 'opened_target_chat',
+      conversation_evidence: {
+        source: 'devtools',
+        title: '고객님',
+        hint_matched: true,
+        visible_static_text_tail: '고객: FX3 내일 가능할까요?'
+      }
+    }
+  });
+  const turn = await workerModule.buildKakaoGatewayTurn({
+    config: {
+      gasApiUrl: 'https://script.example/exec',
+      sheetApiKey: 'internal-sheet-secret',
+      bridgeUrl: '',
+      jobLogPath: '',
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ data: [['active']] })
+      })
+    },
+    job,
+    capture: { snapshot }
+  });
+
+  assert.deepEqual(Object.keys(turn).sort(), ['event', 'internal']);
+  assert.deepEqual(Object.keys(turn.event).sort(), ['detected_at', 'job_id', 'prompt', 'raw', 'room_key', 'room_revision', 'schema']);
+  assert.equal(turn.event.schema, 'village-kakao-gateway-event/v1');
+  assert.equal(turn.event.job_id, 'gateway-job-1');
+  assert.equal(turn.event.room_key, 'chat:gateway-1');
+  assert.equal(turn.event.room_revision, 7);
+  assert.equal(turn.event.detected_at, '2026-08-21T01:02:03.000Z');
+  assert.match(turn.event.prompt, /FINAL_JSON/);
+  assert.match(turn.event.prompt, /AI-first Kakao rental-shop worker task/);
+  assert.match(turn.event.prompt, /village_confirmation_request/);
+  assert.equal(turn.internal.snapshot, snapshot);
+  assert.equal(turn.internal.lookupContext.kill_switch.status, 'active');
+  assert.deepEqual(turn.event.raw.evidence.lookup.kill_switch, { status: 'active', error: null });
+  assert.ok(Buffer.byteLength(JSON.stringify(turn.event), 'utf8') <= 1_048_576);
+  assert.equal(JSON.stringify(turn.event).includes('internal-sheet-secret'), false);
+});
+
+test('buildKakaoGatewayTurn never invokes Hermes, mutation, delivery, follow-up, or Slack dependencies', async () => {
+  const job = {
+    jobId: 'gateway-job-read-only',
+    roomKey: 'chat:gateway-read-only',
+    roomRevision: 3,
+    detectedAt: '2026-08-21T01:02:03.000Z',
+    previewText: '정책 문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const forbidden = [
+    'runHermesDecision',
+    'appendToSheet',
+    'sendReply',
+    'insertFollowUpRows',
+    'deliverSlackFollowUpRows'
+  ];
+  const dependencies = Object.fromEntries(forbidden.map((name) => [name, async () => {
+    throw new Error(`${name} must not be called while building a Gateway turn`);
+  }]));
+
+  const turn = await workerModule.buildKakaoGatewayTurn({
+    config: {
+      gasApiUrl: 'https://script.example/exec',
+      sheetApiKey: 'internal-sheet-secret',
+      bridgeUrl: '',
+      jobLogPath: '',
+      fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ data: [['paused']] }) })
+    },
+    job,
+    capture: { snapshot },
+    dependencies
+  });
+
+  assert.equal(turn.internal.lookupContext.kill_switch.status, 'paused');
+});
+
+test('buildKakaoGatewayTurn keeps adversarial internal lookup evidence out of the bounded plugin event', async () => {
+  const job = {
+    jobId: 'gateway-job-large-internal', roomKey: 'chat:gateway-large', roomRevision: 4,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '정책 문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const oversizedSecret = `internal-lookup-secret-${'x'.repeat(1_100_000)}`;
+  const lookupContext = {
+    generated_at: '2026-08-21T01:02:05.000Z',
+    job_preview_text: oversizedSecret,
+    kill_switch: { status: 'active', error: null },
+    lookup_policy: { mode: 'read_only', allowed_methods: ['GET'], forbidden_actions: ['write'] },
+    lookup_tool: { command: 'read-only', stdin_schema: { queries: [{ domain: 'schedule', query: 'term', column: 'A' }] }, domains: ['schedule'], max_queries: 1, behavior: 'read only' },
+    lookup_urls: { private_template: oversizedSecret },
+    note: oversizedSecret
+  };
+  const turn = await workerModule.buildKakaoGatewayTurn({
+    config: { bridgeUrl: '', jobLogPath: '' },
+    job,
+    capture: { snapshot },
+    dependencies: { buildReadOnlyLookupContext: async () => lookupContext }
+  });
+
+  assert.equal(turn.internal.lookupContext, lookupContext);
+  assert.equal(turn.internal.lookupContext.lookup_urls.private_template, oversizedSecret);
+  assert.ok(Buffer.byteLength(JSON.stringify(turn.event), 'utf8') <= 1_048_576);
+  assert.equal(JSON.stringify(turn.event).includes('internal-lookup-secret-'), false);
+});
+
+test('buildKakaoGatewayTurn rejects job coordinates that do not exactly match the immutable snapshot before reads', async () => {
+  const snapshotJob = {
+    jobId: 'snapshot-job', roomKey: 'chat:snapshot', roomRevision: 5,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job: snapshotJob, capturedAt: '2026-08-21T01:02:04.000Z' });
+  for (const [job, reason] of [
+    [{ ...snapshotJob, jobId: 'other-job' }, 'job_id'],
+    [{ ...snapshotJob, roomKey: 'chat:other' }, 'room_key'],
+    [{ ...snapshotJob, roomRevision: 6 }, 'room_revision']
+  ]) {
+    let reads = 0;
+    await assert.rejects(
+      workerModule.buildKakaoGatewayTurn({
+        config: { bridgeUrl: '', jobLogPath: '' },
+        job,
+        capture: { snapshot },
+        dependencies: { buildReadOnlyLookupContext: async () => { reads += 1; return {}; } }
+      }),
+      new RegExp(`${reason}.*snapshot`, 'i')
+    );
+    assert.equal(reads, 0);
+  }
+});
+
+test('buildKakaoGatewayTurn fails closed when prompt evidence would exceed the plugin body cap', async () => {
+  const job = {
+    jobId: 'gateway-job-over-cap', roomKey: 'chat:gateway-over-cap', roomRevision: 8,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  await assert.rejects(
+    workerModule.buildKakaoGatewayTurn({
+      config: { bridgeUrl: '', jobLogPath: '' },
+      job,
+      capture: { snapshot },
+      dependencies: {
+        buildReadOnlyLookupContext: async () => ({ kill_switch: { status: 'active', error: null } }),
+        buildHermesPrompt: () => `FINAL_JSON ${'x'.repeat(1_048_576)}`
+      }
+    }),
+    /exceeds 1048576 byte limit/i
+  );
+});
+
+test('buildKakaoGatewayTurn fails closed when non-ASCII event JSON exceeds the plugin ASCII body cap', async () => {
+  const job = {
+    jobId: 'gateway-job-ascii-cap', roomKey: 'chat:gateway-ascii-cap', roomRevision: 9,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  await assert.rejects(
+    workerModule.buildKakaoGatewayTurn({
+      config: { bridgeUrl: '', jobLogPath: '' },
+      job,
+      capture: { snapshot },
+      dependencies: {
+        buildReadOnlyLookupContext: async () => ({ kill_switch: { status: 'active', error: null } }),
+        buildHermesPrompt: () => `FINAL_JSON ${'가'.repeat(180_000)}`
+      }
+    }),
+    /exceeds 1048576 byte limit/i
+  );
+});
+
+test('buildKakaoGatewayTurn reserves the claim wrapper and UUID lease inside the 1 MiB response cap', async () => {
+  const job = {
+    jobId: 'gateway-job-envelope-cap', roomKey: 'chat:gateway-envelope-cap', roomRevision: 10,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  await assert.rejects(
+    workerModule.buildKakaoGatewayTurn({
+      config: { bridgeUrl: '', jobLogPath: '' },
+      job,
+      capture: { snapshot },
+      dependencies: {
+        buildReadOnlyLookupContext: async () => ({ kill_switch: { status: 'active', error: null } }),
+        buildHermesPrompt: () => `FINAL_JSON ${'가'.repeat(174_460)}`
+      }
+    }),
+    /claim envelope.*1048576|1048576.*claim envelope/i
+  );
+});
+
+test('Gateway extraction and legacy dry-run each perform one freshness check while legacy keeps the full lookup context', async () => {
+  const job = {
+    jobId: 'gateway-job-freshness', roomKey: 'chat:gateway-freshness', roomRevision: 6,
+    detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('/worker/freshness')) return { ok: true, status: 200, text: async () => JSON.stringify({ current: true }) };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [['active']] }) };
+  };
+  const config = {
+    bridgeUrl: 'http://127.0.0.1:8787', jobLogPath: '', gasApiUrl: 'https://script.example/exec',
+    sheetApiKey: 'legacy-internal-key', fetchImpl
+  };
+
+  await workerModule.buildKakaoGatewayTurn({ config, job, capture: { snapshot } });
+  assert.equal(calls.filter((url) => url.includes('/worker/freshness')).length, 1);
+
+  calls.length = 0;
+  const prepared = await workerModule.prepareKakaoDecisionFromSnapshot({ config, job, capture: { snapshot }, dryRun: true });
+  assert.equal(calls.filter((url) => url.includes('/worker/freshness')).length, 1);
+  assert.match(prepared.lookupContext.lookup_urls.kill_switch_read, /legacy-internal-key/);
+});
+
+function gatewayDecisionFixture(overrides = {}) {
+  const base = {
+    classification: 'faq',
+    confidence: 'high',
+    should_write_to_sheet: false,
+    kill_switch_observed: 'active',
+    customer: { name: '테스트 고객' },
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    follow_up_items: [],
+    suggested_reply_draft: '빌리지 운영시간은 오전 10시부터 오후 7시까지입니다.',
+    reply_decision: {
+      replyMode: 'auto_send',
+      text: '빌리지 운영시간은 오전 10시부터 오후 7시까지입니다.',
+      confidence: 'high',
+      reason: '현재 확인된 운영 정책',
+      shouldCreateTask: false,
+      safetyClass: 'current_policy_answer',
+      grounding: 'current_confirmed_policy',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: false
+    }
+  };
+  return {
+    ...base,
+    ...overrides,
+    safety_checks: { ...base.safety_checks, ...(overrides.safety_checks || {}) },
+    reply_decision: { ...base.reply_decision, ...(overrides.reply_decision || {}) }
+  };
+}
+
+function gatewayTurnFixture() {
+  const job = {
+    jobId: 'gateway-final-job-1',
+    roomKey: 'chat:gateway-final-1',
+    roomRevision: 7,
+    detectedAt: '2026-08-21T02:00:00.000Z',
+    previewText: '문의합니다'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({
+    job,
+    capturedAt: '2026-08-21T02:00:01.000Z',
+    navigationContext: {
+      status: 'opened_conversation',
+      conversation_evidence: {
+        source: 'devtools', title: '테스트 고객', hint_matched: true,
+        visible_static_text_tail: '고객: 문의합니다'
+      }
+    }
+  });
+  return {
+    job,
+    turn: {
+      event: {
+        schema: 'village-kakao-gateway-event/v1', job_id: job.jobId,
+        room_key: job.roomKey, room_revision: job.roomRevision,
+        detected_at: job.detectedAt, prompt: 'FINAL_JSON', raw: {}
+      },
+      internal: {
+        snapshot,
+        lookupContext: { kill_switch: { status: 'active', error: null } },
+        ragContext: null,
+        brainContext: null
+      }
+    }
+  };
+}
+
+function confirmationReceiptFixture(job, overrides = {}) {
+  return {
+    schema: 'village-confirmation-receipt/v1',
+    receipt_id: 'receipt-gateway-final-1',
+    job_id: job.jobId,
+    room_key: job.roomKey,
+    room_revision: job.roomRevision,
+    status: 'ok',
+    availability_report: [{ 장비명: '소니 FX3', 결과: '가능', 상세: '가용2' }],
+    authoritative_sheet_result: {
+      success: true,
+      reqID: 'RQ-260821-001',
+      results: [{ 장비명: '소니 FX3', 결과: '가능', 상세: '가용2' }]
+    },
+    created_at: '2026-08-21T02:00:02.000Z',
+    error: null,
+    ...overrides
+  };
+}
+
+function scheduleDecisionFixture(overrides = {}) {
+  return gatewayDecisionFixture({
+    classification: 'reservation',
+    owner_review_required: true,
+    follow_up_items: [{
+      type: 'schedule_check', route: 'schedule', taskKey: 'schedule:gateway-final-1',
+      priority: 'high', status: 'open', title: '가용 확인 결과 검토',
+      customer_name: '테스트 고객',
+      summary: '소니 FX3 가용 결과를 확인했습니다.',
+      recommended_action: '사장 확인 후 고객에게 안내',
+      suggested_reply_draft: '요청 일정에 소니 FX3 사용이 가능합니다.',
+      evidence: ['RQ-260821-001'], requiresHumanAction: true,
+      actionFamily: 'inventory_check', businessKey: 'schedule:gateway-final-1', due_hint: 'now'
+    }],
+    authoritative_sheet_result: {
+      status: 'available', reqID: 'RQ-260821-001',
+      results: [{ 장비명: '소니 FX3', 결과: '가능', 상세: '가용2' }]
+    },
+    suggested_reply_draft: '요청 일정에 소니 FX3 사용이 가능합니다.',
+    reply_decision: {
+      replyMode: 'draft_only',
+      text: '요청 일정에 소니 FX3 사용이 가능합니다.',
+      confidence: 'high',
+      reason: '확인요청 결과',
+      shouldCreateTask: true,
+      safetyClass: 'no_send',
+      grounding: 'authoritative_sheet',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: false
+    },
+    ...overrides
+  });
+}
+
+test('prepareKakaoGatewayDecision leaves a valid FAQ eligible for existing auto-send gates without a tool receipt', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = gatewayDecisionFixture();
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.status, 'ai_prepared');
+  assert.deepEqual(prepared.decision, decision);
+  assert.equal(prepared.trustedToolReceipt, null);
+  assert.deepEqual(prepared.availabilityAwareRows, []);
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, true);
+});
+
+test('trusted confirmation receipt always forces schedule owner review and attaches only receipt evidence', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const receipt = confirmationReceiptFixture(job);
+  const decision = scheduleDecisionFixture({
+    authoritative_sheet_result: { status: 'unavailable', source: 'fabricated-final-json' },
+    owner_review_required: false,
+    follow_up_items: [{
+      ...scheduleDecisionFixture().follow_up_items[0],
+      evidence: ['agent-fabricated-authority']
+    }],
+    reply_decision: { replyMode: 'auto_send', safetyClass: 'authoritative_availability_answer', shouldCreateTask: false }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`,
+    trustedToolReceipts: [receipt],
+    dependencies: {
+      runHermesDecision: async () => { throw new Error('second Hermes call forbidden'); },
+      runHermesPostActionDecision: async () => { throw new Error('post-action Hermes call forbidden'); }
+    }
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.decision.reply_decision.grounding, 'authoritative_sheet');
+  assert.equal(prepared.decision.reply_decision.requiresRag, false);
+  assert.equal(prepared.decision.reply_decision.shouldCreateTask, true);
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.decision.should_write_to_sheet, false);
+  assert.deepEqual(prepared.decision.authoritative_sheet_result, receipt.authoritative_sheet_result);
+  assert.equal(prepared.availabilityAwareRows.some((row) => row.payload?.follow_up_route === 'schedule'), true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => row.evidence?.includes('agent-fabricated-authority')), false);
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, false);
+  assert.equal(prepared.gatewaySafetyFailures.includes('trusted_receipt_decision_contradiction'), true);
+});
+
+test('receipt-shaped text inside final JSON grants no authority', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const fabricated = confirmationReceiptFixture(job, { receipt_id: 'agent-fabricated' });
+  const decision = gatewayDecisionFixture({ trusted_tool_receipts: [fabricated] });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.trustedToolReceipt, null);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'auto_send');
+  assert.equal(prepared.decision.authoritative_sheet_result, undefined);
+  assert.equal(prepared.decision.trusted_tool_receipts, undefined);
+});
+
+test('structured availability decision without a trusted receipt fails closed to schedule owner review', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = scheduleDecisionFixture({
+    owner_review_required: false,
+    reply_decision: {
+      replyMode: 'auto_send', safetyClass: 'authoritative_availability_answer',
+      grounding: 'authoritative_sheet', requiresRag: false, shouldCreateTask: false
+    }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.decision.should_write_to_sheet, false);
+  assert.equal(prepared.gatewaySafetyFailures.includes('authoritative_claim_without_trusted_receipt'), true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => row.payload?.follow_up_route === 'schedule'), true);
+});
+
+test('reservation-classified sheet-grounded commitment without a trusted receipt cannot bypass owner review', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = gatewayDecisionFixture({
+    classification: 'reservation',
+    reservation_inquiry: { is_reservation_inquiry: true },
+    reply_decision: {
+      replyMode: 'auto_send', safetyClass: 'sensitive_commitment',
+      grounding: 'authoritative_sheet', requiresRag: false,
+      text: 'Hermes reservation commitment fixture'
+    }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.gatewaySafetyFailures.includes('authoritative_claim_without_trusted_receipt'), true);
+});
+
+test('malformed, invalid, and stale Gateway finals produce no-send human review work', async () => {
+  const fixture = gatewayTurnFixture();
+  const cases = [
+    { name: 'malformed', finalText: 'FINAL_JSON not-json', job: fixture.job, turn: fixture.turn },
+    { name: 'invalid', finalText: 'FINAL_JSON {}', job: fixture.job, turn: fixture.turn },
+    {
+      name: 'stale', finalText: `FINAL_JSON\n${JSON.stringify(gatewayDecisionFixture())}`,
+      job: { ...fixture.job, roomRevision: fixture.job.roomRevision + 1 }, turn: fixture.turn
+    }
+  ];
+  for (const entry of cases) {
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job: entry.job, turn: entry.turn, finalText: entry.finalText, trustedToolReceipts: []
+    });
+    assert.equal(prepared.status, 'ai_prepared', entry.name);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', entry.name);
+    assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send', entry.name);
+    assert.equal(prepared.decision.owner_review_required, true, entry.name);
+    assert.equal(prepared.availabilityAwareRows.length > 0, true, entry.name);
+  }
+});
+
+test('failed trusted confirmation receipt remains authoritative evidence but cannot send', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const receipt = confirmationReceiptFixture(job, {
+    status: 'failed', availability_report: [], authoritative_sheet_result: null,
+    error: { type: 'gas_request_failed', message: 'offline fixture failure' }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(scheduleDecisionFixture())}`,
+    trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.gatewaySafetyFailures.includes('trusted_confirmation_failed'), true);
+  assert.equal(prepared.sheetResult.success, false);
+  assert.equal(prepared.availabilityAwareRows.some((row) => row.payload?.follow_up_route === 'schedule'), true);
+});
+
+test('partial trusted receipt preserves availability evidence and exposes its failure without positive guidance', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const receipt = confirmationReceiptFixture(job, {
+    status: 'partial_success',
+    authoritative_sheet_result: {
+      success: true,
+      reqID: 'RQ-260821-203',
+      results: [{ equipment: '소니 FX3', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
+    },
+    availability_report: [{ equipment: '소니 FX3', quantity: '1', result: '✅ 가용1', detail: '보유1' }],
+    error: { type: 'discount_patch_failed', message: '할인 M열 반영 실패' }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(scheduleDecisionFixture({
+      authoritative_sheet_result: receipt.authoritative_sheet_result
+    }))}`,
+    trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.sheetResult.success, false);
+  assert.equal(prepared.sheetResult.partial_success, true);
+  assert.equal(prepared.sheetResult.authoritative_success, true);
+  assert.equal(prepared.sheetResult.reqID, 'RQ-260821-203');
+  assert.equal(prepared.sheetResult.results.length, 1);
+  assert.equal(prepared.sheetResult.error_type, 'discount_patch_failed');
+  assert.match(prepared.sheetResult.error, /할인 M열 반영 실패/);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => /할인 M열 반영 실패/.test(`${row.summary} ${row.blocking_reason} ${row.evidence}`)), true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => /후속 처리 일부가 실패/.test(row.summary || '')), true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => /입력을 거절/.test(row.summary || '')), false);
+  assert.equal(prepared.availabilityAwareRows.some((row) => /고객에게 가능 안내 후/.test(row.recommended_action || '')), false);
+});
+
+test('trusted confirmation receipt creates schedule review even when Hermes marks the latest turn as staff', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const receipt = confirmationReceiptFixture(job);
+  const decision = scheduleDecisionFixture({
+    safety_checks: { latest_customer_message_after_last_staff_reply: false },
+    authoritative_sheet_result: receipt.authoritative_sheet_result
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(decision)}`,
+    trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.availabilityAwareRows.some((row) => row.payload?.follow_up_route === 'schedule'), true);
+});
+
+test('applyPreparedKakaoDecision performs a fresh snapshot check immediately before any Gateway reply send', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const order = [];
+  const applied = await applyPreparedKakaoDecision({
+    config: { openTargetChat: true, bridgeUrl: '', jobLogPath: '' },
+    job,
+    prepared: {
+      status: 'ai_prepared', snapshot: turn.internal.snapshot,
+      decision: gatewayDecisionFixture(), sheetResult: null, availabilityAwareRows: []
+    },
+    dependencies: {
+      openTargetChat: async () => { order.push('fresh_dom'); return turn.internal.snapshot.navigation; },
+      sendReply: async () => { order.push('send'); return { attempted: true, sent: true }; },
+      closeNavigation: async () => { order.push('close'); return { status: 'closed' }; }
+    }
+  });
+
+  assert.equal(applied.autoReplyResult.sent, true);
+  assert.deepEqual(order, ['fresh_dom', 'send', 'close']);
+});
+
 test('prepareKakaoDecisionFromSnapshot honors an already-aborted bridge deadline', async () => {
   const deadline = new AbortController();
   const deadlineError = new Error('bridge end-to-end deadline expired');
@@ -901,6 +1477,337 @@ function completeSheetDecision(overrides = {}) {
     sheet_row_candidate: { ...base.sheet_row_candidate, ...(overrides.sheet_row_candidate || {}) }
   };
 }
+
+function confirmationFreshnessGuard({ stale = false, staleAfterChecks = stale ? 1 : Number.POSITIVE_INFINITY } = {}) {
+  let checks = 0;
+  return {
+    signal: new AbortController().signal,
+    async checkNow() { checks += 1; },
+    throwIfSuperseded() {
+      if (checks >= staleAfterChecks) throw new Error('superseded_by_newer_room_event:8');
+    },
+    stop() {},
+    get checks() { return checks; }
+  };
+}
+
+test('executeVillageConfirmationRequest reuses additions-only merge, customer discount enrichment, and authoritative availability', async () => {
+  const decision = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260820-001'],
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: 'additions_only',
+      equipment: [{ item: 'C스탠드', quantity: 2 }]
+    }
+  });
+  const freshnessGuard = confirmationFreshnessGuard();
+  const appended = [];
+  let leaseChecks = 0;
+  let executionState = null;
+  const forbidden = { hermes: 0, kakao: 0, followUp: 0, slack: 0, reconciliation: 0 };
+
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-confirm-1', roomKey: 'room-confirm-1', roomRevision: 7 },
+    roomRevision: 7,
+    decision,
+    dependencies: {
+      freshnessGuard,
+      fetchExistingConfirmRequestResultForDecision: async () => ({
+        success: true,
+        duplicate: true,
+        reqID: 'RQ-260820-001',
+        topLevelEquipment: [{ 이름: '소니 FX3 바디세트', 수량: 1 }],
+        results: []
+      }),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
+        payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
+        lookup: { matched: true, discountType: '학생' }
+      }),
+      appendToSheet: async (_config, payload) => {
+        assert.ok(freshnessGuard.checks >= 1, 'freshness must be checked immediately before the GAS mutation');
+        assert.ok(leaseChecks >= 1, 'the current claim must be fenced immediately before the GAS mutation');
+        appended.push(payload);
+        return {
+          success: true,
+          duplicate: false,
+          reqID: 'RQ-260821-101',
+          results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
+        };
+      },
+      ensureConfirmRequestDiscountApplied: async () => {
+        assert.ok(leaseChecks >= 2, 'the current claim must be fenced again before the discount mutation');
+        return { updated: true, discountType: '학생' };
+      },
+      assertCurrentClaim: async () => { leaseChecks += 1; },
+      randomUUID: () => 'receipt-confirm-1',
+      now: () => new Date('2026-08-21T04:05:06.000Z'),
+      onExecutionState: (state) => { executionState = state; },
+      runHermesDecision: async () => { forbidden.hermes += 1; },
+      sendKakaoMessage: async () => { forbidden.kakao += 1; },
+      upsertFollowUpRows: async () => { forbidden.followUp += 1; },
+      deliverSlackFollowUpRows: async () => { forbidden.slack += 1; },
+      runHermesPostActionDecision: async () => { forbidden.reconciliation += 1; }
+    }
+  });
+
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].args.입력모드, 'full_plan');
+  assert.equal(appended[0].args.할인유형, '학생');
+  assert.deepEqual(appended[0].args.장비, [
+    { 이름: '소니 FX3 바디세트', 수량: 1 },
+    { 이름: 'C스탠드', 수량: 2 }
+  ]);
+  assert.deepEqual(receipt, {
+    schema: 'village-confirmation-receipt/v1',
+    receipt_id: 'receipt-confirm-1',
+    job_id: 'job-confirm-1',
+    room_key: 'room-confirm-1',
+    room_revision: 7,
+    status: 'ok',
+    availability_report: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }],
+    authoritative_sheet_result: {
+      success: true,
+      duplicate: false,
+      reqID: 'RQ-260821-101',
+      results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
+    },
+    created_at: '2026-08-21T04:05:06.000Z',
+    error: null
+  });
+  assert.equal(executionState.sheetPayload.args.할인유형, '학생');
+  assert.equal(executionState.customerDbDiscountLookup.discountType, '학생');
+  assert.equal(leaseChecks, 2);
+  assert.deepEqual(forbidden, { hermes: 0, kakao: 0, followUp: 0, slack: 0, reconciliation: 0 });
+});
+
+test('executeVillageConfirmationRequest returns a typed validation failure without mutating GAS', async () => {
+  let appendCalls = 0;
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-invalid', roomKey: 'room-invalid', roomRevision: 7 },
+    roomRevision: 7,
+    decision: { should_write_to_sheet: true, sheet_row_candidate: {} },
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      appendToSheet: async () => { appendCalls += 1; },
+      randomUUID: () => 'receipt-invalid',
+      now: () => new Date('2026-08-21T04:05:06.000Z')
+    }
+  });
+
+  assert.equal(appendCalls, 0);
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.authoritative_sheet_result, null);
+  assert.deepEqual(receipt.availability_report, []);
+  assert.equal(receipt.error.type, 'invalid_decision');
+  assert.ok(receipt.error.validation_errors.length > 0);
+});
+
+test('executeVillageConfirmationRequest rejects stale correlation and stale freshness before mutation', async () => {
+  const decision = completeSheetDecision();
+  let appendCalls = 0;
+  const appendToSheet = async () => { appendCalls += 1; };
+  const common = {
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-stale', roomKey: 'room-stale', roomRevision: 7 },
+    decision,
+    dependencies: { appendToSheet, randomUUID: () => 'receipt-stale', now: () => new Date('2026-08-21T04:05:06.000Z') }
+  };
+
+  await assert.rejects(
+    workerModule.executeVillageConfirmationRequest({ ...common, roomRevision: 6, dependencies: { ...common.dependencies, freshnessGuard: confirmationFreshnessGuard() } }),
+    /stale_room_revision/
+  );
+  await assert.rejects(
+    workerModule.executeVillageConfirmationRequest({ ...common, roomRevision: 7, dependencies: { ...common.dependencies, freshnessGuard: confirmationFreshnessGuard({ stale: true }) } }),
+    /superseded_by_newer_room_event/
+  );
+  assert.equal(appendCalls, 0);
+});
+
+test('executeVillageConfirmationRequest preserves missing-contact GAS rejection as a failed authoritative receipt', async () => {
+  const decision = completeSheetDecision({ sheet_row_candidate: { phone: '' } });
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-no-contact', roomKey: 'room-no-contact', roomRevision: 7 },
+    roomRevision: 7,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
+      appendToSheet: async () => ({ success: false, error_type: 'no_contact', error: '연락처 필요' }),
+      randomUUID: () => 'receipt-no-contact',
+      now: () => new Date('2026-08-21T04:05:06.000Z')
+    }
+  });
+
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.authoritative_sheet_result, null);
+  assert.deepEqual(receipt.availability_report, []);
+  assert.deepEqual(receipt.error, { type: 'no_contact', message: '연락처 필요' });
+});
+
+test('executeVillageConfirmationRequest converts a thrown GAS failure into a typed failed receipt', async () => {
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-gas-error', roomKey: 'room-gas-error', roomRevision: 7 },
+    roomRevision: 7,
+    decision: completeSheetDecision(),
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
+      appendToSheet: async () => { throw new Error('GAS offline'); },
+      randomUUID: () => 'receipt-gas-error',
+      now: () => new Date('2026-08-21T04:05:06.000Z')
+    }
+  });
+
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.authoritative_sheet_result, null);
+  assert.deepEqual(receipt.availability_report, []);
+  assert.deepEqual(receipt.error, { type: 'gas_request_failed', message: 'GAS offline' });
+});
+
+test('executeVillageConfirmationRequest returns a persistable partial receipt when freshness changes after the primary write', async () => {
+  const freshnessGuard = confirmationFreshnessGuard({ staleAfterChecks: 2 });
+  let appendCalls = 0;
+  let discountCalls = 0;
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-stale-after-write', roomKey: 'room-stale-after-write', roomRevision: 7 },
+    roomRevision: 7,
+    decision: completeSheetDecision(),
+    dependencies: {
+      freshnessGuard,
+      assertCurrentClaim: async () => {},
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
+        payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
+        lookup: { matched: true, discountType: '학생' }
+      }),
+      appendToSheet: async () => {
+        appendCalls += 1;
+        return {
+          success: true,
+          reqID: 'RQ-260821-201',
+          results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
+        };
+      },
+      ensureConfirmRequestDiscountApplied: async () => { discountCalls += 1; },
+      randomUUID: () => 'receipt-stale-after-write',
+      now: () => new Date('2026-08-21T05:00:00.000Z')
+    }
+  });
+
+  assert.equal(appendCalls, 1);
+  assert.equal(discountCalls, 0);
+  assert.equal(receipt.status, 'partial_success');
+  assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260821-201');
+  assert.equal(receipt.availability_report.length, 1);
+  assert.equal(receipt.error.type, 'stale_after_primary_write');
+});
+
+test('executeVillageConfirmationRequest preserves GAS partial-success evidence and executed payload', async () => {
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-partial', roomKey: 'room-partial', roomRevision: 7 },
+    roomRevision: 7,
+    decision: completeSheetDecision(),
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      assertCurrentClaim: async () => {},
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
+      appendToSheet: async () => ({
+        success: false,
+        partial_success: true,
+        error_type: 'set_component_selection_failed',
+        error: '세트 구성 선택 반영 실패',
+        reqID: 'RQ-260821-202',
+        results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '⚠️ 모델 선택 필요', detail: 'F열 확인' }]
+      }),
+      randomUUID: () => 'receipt-partial',
+      now: () => new Date('2026-08-21T05:01:00.000Z')
+    }
+  });
+
+  assert.equal(receipt.status, 'partial_success');
+  assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260821-202');
+  assert.equal(receipt.authoritative_sheet_result.partial_success, true);
+  assert.equal(receipt.authoritative_sheet_result.executed_payload.func, 'insertAndCheckRequest');
+  assert.equal(receipt.authoritative_sheet_result.executed_payload.args.예약자명, '홍길동');
+  assert.deepEqual(receipt.availability_report, [
+    { equipment: '소니 FX3 바디세트', quantity: '1', result: '⚠️ 모델 선택 필요', detail: 'F열 확인' }
+  ]);
+  assert.deepEqual(receipt.error, { type: 'set_component_selection_failed', message: '세트 구성 선택 반영 실패' });
+});
+
+test('executeVillageConfirmationRequest reports discount patch failure without replaying or erasing the primary write', async () => {
+  let appendCalls = 0;
+  let discountCalls = 0;
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-discount-failure', roomKey: 'room-discount-failure', roomRevision: 7 },
+    roomRevision: 7,
+    decision: completeSheetDecision(),
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      assertCurrentClaim: async () => {},
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
+        payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
+        lookup: { matched: true, discountType: '학생' }
+      }),
+      appendToSheet: async () => {
+        appendCalls += 1;
+        return {
+          success: true,
+          reqID: 'RQ-260821-203',
+          results: [{ equipment: '소니 FX3 바디세트', quantity: '1', result: '✅ 가용1', detail: '보유1' }]
+        };
+      },
+      ensureConfirmRequestDiscountApplied: async () => {
+        discountCalls += 1;
+        throw new Error('할인 M열 반영 실패');
+      },
+      randomUUID: () => 'receipt-discount-failure',
+      now: () => new Date('2026-08-21T05:02:00.000Z')
+    }
+  });
+
+  assert.equal(appendCalls, 1);
+  assert.equal(discountCalls, 1);
+  assert.equal(receipt.status, 'partial_success');
+  assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260821-203');
+  assert.equal(receipt.error.type, 'discount_patch_failed');
+  assert.match(receipt.error.message, /할인 M열 반영 실패/);
+});
+
+test('executeVillageConfirmationRequest treats a non-applied required discount patch as partial success', async () => {
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-discount-not-applied', roomKey: 'room-discount-not-applied', roomRevision: 7 },
+    roomRevision: 7,
+    decision: completeSheetDecision(),
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      assertCurrentClaim: async () => {},
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
+        payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
+        lookup: { matched: true, discountType: '학생' }
+      }),
+      appendToSheet: async () => ({ success: true, reqID: 'RQ-260821-204', results: [] }),
+      ensureConfirmRequestDiscountApplied: async () => ({ skipped: true, reason: 'req_row_not_found', reqID: 'RQ-260821-204' }),
+      randomUUID: () => 'receipt-discount-not-applied',
+      now: () => new Date('2026-08-21T05:03:00.000Z')
+    }
+  });
+
+  assert.equal(receipt.status, 'partial_success');
+  assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260821-204');
+  assert.deepEqual(receipt.error, {
+    type: 'discount_patch_failed',
+    message: 'Discount patch was not applied: req_row_not_found'
+  });
+});
 
 function completePostActionDecision(overrides = {}) {
   const base = {
