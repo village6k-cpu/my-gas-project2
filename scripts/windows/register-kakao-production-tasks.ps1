@@ -27,7 +27,17 @@ param(
     [ValidateRange(2, 120)]
     [int]$WatchdogIntervalMinutes = 5,
 
-    [switch]$ConfirmProductionOwnership
+    [string]$BenchmarkReportPath = (Join-Path (Join-Path $PSScriptRoot '..\..') 'docs\kakao-hermes-gateway-benchmark-report.json'),
+
+    [string]$PluginReceiptPath = (Join-Path $env:LOCALAPPDATA 'hermes\profiles\kakaoworker\plugin-state\kakao_village.json'),
+
+    [string]$SmokeEvidencePath = '',
+
+    [switch]$ConfirmProductionOwnership,
+
+    [switch]$ConfirmKakaoGatewayCutover,
+
+    [switch]$PlanOnly
 )
 
 Set-StrictMode -Version Latest
@@ -35,15 +45,14 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'KakaoStaging.Common.psm1') -Force
 
-if (-not $ConfirmProductionOwnership.IsPresent) {
-    throw 'Production registration requires -ConfirmProductionOwnership: confirm the Mac (or any other machine) no longer owns the Kakao bridge/worker before enabling an always-on write path.'
-}
-
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') -ErrorAction Stop).Path
 $resolvedEnvFile = (Resolve-Path -LiteralPath $EnvFile -ErrorAction Stop).Path
 $resolvedChromePath = (Resolve-Path -LiteralPath $ChromePath -ErrorAction Stop).Path
 $resolvedNodePath = (Resolve-Path -LiteralPath $NodePath -ErrorAction Stop).Path
 $resolvedHermesPythonPath = (Resolve-Path -LiteralPath $HermesPythonPath -ErrorAction Stop).Path
+$resolvedBenchmarkReportPath = (Resolve-Path -LiteralPath $BenchmarkReportPath -ErrorAction Stop).Path
+$resolvedPluginReceiptPath = [IO.Path]::GetFullPath($PluginReceiptPath)
+$resolvedSmokeEvidencePath = if ([string]::IsNullOrWhiteSpace($SmokeEvidencePath)) { '' } else { [IO.Path]::GetFullPath($SmokeEvidencePath) }
 $startScriptPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'start-kakao-live.ps1') -ErrorAction Stop).Path
 $watchdogScriptPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'watch-kakao-production.ps1') -ErrorAction Stop).Path
 
@@ -58,7 +67,8 @@ $powerShellExecutable = (Resolve-Path -LiteralPath $powerShellExecutable -ErrorA
 function New-ProductionArgumentLine {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
-        [Parameter(Mandatory = $true)][bool]$WithEnableWrites
+        [Parameter(Mandatory = $true)][bool]$WithEnableWrites,
+        [switch]$GatewayMaintenance
     )
 
     $parts = @(
@@ -75,7 +85,14 @@ function New-ProductionArgumentLine {
         '-NodePath',
         (ConvertTo-WindowsCommandLineArgument -Value $resolvedNodePath),
         '-HermesPythonPath',
-        (ConvertTo-WindowsCommandLineArgument -Value $resolvedHermesPythonPath)
+        (ConvertTo-WindowsCommandLineArgument -Value $resolvedHermesPythonPath),
+        '-BenchmarkReportPath',
+        (ConvertTo-WindowsCommandLineArgument -Value $resolvedBenchmarkReportPath),
+        '-PluginReceiptPath',
+        (ConvertTo-WindowsCommandLineArgument -Value $resolvedPluginReceiptPath),
+        '-SmokeEvidencePath',
+        (ConvertTo-WindowsCommandLineArgument -Value $resolvedSmokeEvidencePath),
+        '-ConfirmKakaoGatewayCutover'
     )
     if ($IncludeGateway.IsPresent) {
         if ([string]::IsNullOrWhiteSpace($HermesPath)) {
@@ -91,14 +108,51 @@ function New-ProductionArgumentLine {
     if ($WithEnableWrites) {
         $parts += '-EnableWrites'
     }
+    if ($GatewayMaintenance.IsPresent) {
+        $parts += '-GatewayMaintenance'
+    }
     # -Confirm는 넘기지 않는다. 두 스크립트 모두 ConfirmImpact Medium이라 기본
     # ConfirmPreference(High)에서 프롬프트 없이 진행되고, powershell.exe -File은
     # `-Confirm:$false` 형태 인자를 신뢰성 있게 바인딩하지 못한다.
     return $parts -join ' '
 }
 
-$startArguments = New-ProductionArgumentLine -ScriptPath $startScriptPath -WithEnableWrites $false
+$startArguments = New-ProductionArgumentLine -ScriptPath $startScriptPath -WithEnableWrites $false -GatewayMaintenance
 $watchdogArguments = New-ProductionArgumentLine -ScriptPath $watchdogScriptPath -WithEnableWrites $false
+
+$registrationPlan = [pscustomobject]@{
+    schema = 'village-kakao-production-task-plan/v2'
+    mode = if ($PlanOnly.IsPresent) { 'plan' } else { 'apply' }
+    benchmarkReportPath = $resolvedBenchmarkReportPath
+    pluginReceiptPath = $resolvedPluginReceiptPath
+    smokeEvidencePath = $resolvedSmokeEvidencePath
+    requiredConfirmations = @('ConfirmProductionOwnership', 'ConfirmKakaoGatewayCutover')
+    tasks = @(
+        [pscustomobject]@{ name = 'Village-Kakao-Production-Start'; enabled = $true; arguments = $startArguments },
+        [pscustomobject]@{ name = 'Village-Kakao-Production-Watchdog'; enabled = $true; arguments = $watchdogArguments }
+    )
+    rootSlackGatewayMutated = $false
+}
+if ($PlanOnly.IsPresent) {
+    $registrationPlan | ConvertTo-Json -Depth 6
+    return
+}
+
+if (-not $ConfirmProductionOwnership.IsPresent) {
+    throw 'Production registration requires -ConfirmProductionOwnership: confirm the Mac (or any other machine) no longer owns the Kakao bridge/worker before enabling an always-on write path.'
+}
+if (-not $ConfirmKakaoGatewayCutover.IsPresent) {
+    throw 'Production registration requires -ConfirmKakaoGatewayCutover after an accepted provider-backed benchmark.'
+}
+if ([string]::IsNullOrWhiteSpace($resolvedSmokeEvidencePath) -or
+    -not (Test-Path -LiteralPath $resolvedSmokeEvidencePath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $resolvedPluginReceiptPath -PathType Leaf)) {
+    throw 'Production registration requires existing plugin receipt and native smoke evidence files.'
+}
+$benchmarkReport = [IO.File]::ReadAllText($resolvedBenchmarkReportPath, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
+if ($benchmarkReport.accepted -ne $true -or $benchmarkReport.latency_status -ne 'pass') {
+    throw 'Production registration refuses a blocked or failed Kakao Gateway benchmark.'
+}
 
 $enabledSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn

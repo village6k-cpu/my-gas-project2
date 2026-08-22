@@ -1,0 +1,27 @@
+{
+  "schema": "village-kakao-hermes-benchmark-report/v1",
+  "measurement_kind": "offline_structural",
+  "sample_count": 20,
+  "baseline_sample_count": 23,
+  "baseline_total_median_ms": 176300.0,
+  "baseline_total_p95_ms": 246300.0,
+  "gateway_total_median_ms": 4.195,
+  "gateway_total_p95_ms": 28.706,
+  "gateway_agent_median_ms": 4.195,
+  "gateway_agent_p95_ms": 28.706,
+  "process_starts_per_request": 0.0,
+  "post_action_agent_runs_per_schedule": 0.0,
+  "session_reuse_rate": 1.0,
+  "schedule_owner_review_rate": 1.0,
+  "send_count": 0,
+  "write_count": 0,
+  "median_improvement_rate": 0.9999762053318207,
+  "p95_improvement_rate": 0.9998834510759237,
+  "comparable_config": false,
+  "latency_status": "blocked",
+  "accepted": false,
+  "blockers": [
+    "provider_backed_measurement_required",
+    "model_provider_reasoning_tools_or_skills_drift"
+  ]
+}

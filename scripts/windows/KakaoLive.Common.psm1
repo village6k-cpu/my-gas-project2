@@ -3,7 +3,10 @@ $ErrorActionPreference = 'Stop'
 
 function Get-KakaoLiveRuntimeContract {
     [CmdletBinding()]
-    param()
+    param(
+        [ValidateSet('cli', 'gateway')]
+        [string]$HermesTransport = 'cli'
+    )
 
     return [ordered]@{
         AI_WORKER_LIVE                    = '1'
@@ -15,6 +18,7 @@ function Get-KakaoLiveRuntimeContract {
         SUPABASE_RECOVERY_ENABLED         = '1'
         KAKAO_TAB_CLEANUP_ENABLED         = '1'
         HERMES_WORKER_COMMAND_MODE        = 'python_module'
+        KAKAO_HERMES_TRANSPORT            = $HermesTransport
         HERMES_HOME                       = (Join-Path $env:LOCALAPPDATA 'hermes')
         DEBOUNCE_MS                       = '15000'
         MAX_WAIT_MS                       = '45000'
@@ -31,11 +35,183 @@ function Get-KakaoLiveRuntimeContract {
 
 function Set-KakaoLiveRuntimeEnvironment {
     [CmdletBinding()]
-    param()
+    param(
+        [ValidateSet('cli', 'gateway')]
+        [string]$HermesTransport = 'cli'
+    )
 
-    foreach ($entry in (Get-KakaoLiveRuntimeContract).GetEnumerator()) {
+    foreach ($entry in (Get-KakaoLiveRuntimeContract -HermesTransport $HermesTransport).GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
     }
+}
+
+function Get-KakaoFileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '')
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        $sha.Dispose()
+    }
+}
+
+function Get-KakaoStringSha256 {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value)))).Replace('-', '')
+    }
+    finally { $sha.Dispose() }
+}
+
+function Test-KakaoPluginInstallReceipt {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][psobject]$Receipt)
+
+    try {
+        if ($Receipt.schema -ne 'village-kakao-plugin-install/v1' -or $Receipt.pluginName -ne 'kakao_village') {
+            return $false
+        }
+        $expectedTarget = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'hermes\profiles\kakaoworker\plugins\kakao_village')).TrimEnd('\', '/')
+        $target = [IO.Path]::GetFullPath([string]$Receipt.targetPluginPath).TrimEnd('\', '/')
+        if (-not [string]::Equals($target, $expectedTarget, [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $target -PathType Container)) {
+            return $false
+        }
+
+        $manifest = @($Receipt.fileManifest)
+        if ($manifest.Count -eq 0 -or [string]$Receipt.manifestSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+            return $false
+        }
+        $expectedRelativePaths = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+        $canonicalRows = New-Object System.Collections.ArrayList
+        foreach ($entry in @($manifest | Sort-Object relativePath)) {
+            $relative = ([string]$entry.relativePath).Replace('/', '\')
+            if ([string]::IsNullOrWhiteSpace($relative) -or [IO.Path]::IsPathRooted($relative) -or
+                @($relative -split '[\\/]' | Where-Object { $_ -eq '..' }).Count -gt 0 -or
+                [string]$entry.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+                return $false
+            }
+            $filePath = [IO.Path]::GetFullPath((Join-Path $target $relative))
+            if (-not $filePath.StartsWith($target + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+                -not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+                return $false
+            }
+            $file = Get-Item -LiteralPath $filePath -Force -ErrorAction Stop
+            $actualSha = Get-KakaoFileSha256 -Path $filePath
+            if ([Int64]$entry.bytes -ne [Int64]$file.Length -or
+                -not [string]::Equals($actualSha, [string]$entry.sha256, [StringComparison]::OrdinalIgnoreCase) -or
+                -not $expectedRelativePaths.Add($relative.Replace('\', '/'))) {
+                return $false
+            }
+            [void]$canonicalRows.Add(('{0}|{1}|{2}' -f $relative.Replace('\', '/'), $file.Length, $actualSha))
+        }
+
+        $actualRelativePaths = @(
+            Get-ChildItem -LiteralPath $target -File -Force -Recurse -ErrorAction Stop |
+                Where-Object { $_.FullName -notmatch '[\\/]__pycache__[\\/]' } |
+                ForEach-Object { $_.FullName.Substring($target.Length).TrimStart('\', '/').Replace('\', '/') }
+        )
+        if ($actualRelativePaths.Count -ne $expectedRelativePaths.Count -or
+            @($actualRelativePaths | Where-Object { -not $expectedRelativePaths.Contains($_) }).Count -gt 0) {
+            return $false
+        }
+        $actualManifestSha = Get-KakaoStringSha256 -Value (@($canonicalRows) -join "`n")
+        return [string]::Equals($actualManifestSha, [string]$Receipt.manifestSha256, [StringComparison]::OrdinalIgnoreCase)
+    }
+    catch { return $false }
+}
+
+function Get-KakaoGatewayCutoverPlan {
+    [CmdletBinding()]
+    param(
+        [string]$BenchmarkReportPath = '',
+        [switch]$RollbackToCli
+    )
+
+    if ($RollbackToCli.IsPresent) {
+        return [pscustomobject]@{
+            schema = 'village-kakao-hermes-cutover-plan/v1'
+            action = 'rollback_to_cli'
+            transport = 'cli'
+            requiredConfirmation = 'ConfirmKakaoGatewayCutover'
+            stopTask = 'Hermes_Gateway_Kakaoworker'
+            leaveRootSlackGatewayUntouched = $true
+            leaveHealthyChromeUntouched = $true
+            steps = @(
+                'verify-explicit-owner-confirmation'
+                'stop-only-kakaoworker-gateway'
+                'restart-only-owned-bridge-as-cli'
+                'verify-cli-health-and-preserve-kakao-cdp'
+            )
+        }
+    }
+
+    return [pscustomobject]@{
+        schema = 'village-kakao-hermes-cutover-plan/v1'
+        action = 'cutover_to_gateway'
+        transport = 'gateway'
+        requiredConfirmation = 'ConfirmKakaoGatewayCutover'
+        benchmarkReportPath = $BenchmarkReportPath
+        requiredBenchmark = [pscustomobject]@{ accepted = $true; latency_status = 'pass' }
+        steps = @(
+            'verify-provider-backed-benchmark'
+            'verify-reviewed-plugin-receipt-and-runtime-hash'
+            'verify-model-contract-and-native-session-smoke'
+            'verify-bridge-queue-idle'
+            'verify-kakao-authenticated-and-watcher-ready'
+            'restart-only-owned-bridge-as-gateway'
+            'start-only-kakaoworker-gateway'
+            'verify-consumer-freshness-and-zero-failed-jobs'
+        )
+        rollback = Get-KakaoGatewayCutoverPlan -BenchmarkReportPath $BenchmarkReportPath -RollbackToCli
+    }
+}
+
+function Test-KakaoGatewayCutoverHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Health,
+        [Parameter(Mandatory = $true)][psobject]$RuntimeProbe,
+        [Parameter(Mandatory = $true)][psobject]$GatewayRuntime,
+        [Parameter(Mandatory = $true)][psobject]$SmokeEvidence
+    )
+
+    $gateway = $Health.gateway
+    $queue = if ($null -ne $gateway) { $gateway.queue } else { $null }
+    $config = $Health.config
+    $pluginPath = [string]$GatewayRuntime.pluginPath
+    $manifestSha256 = [string]$GatewayRuntime.manifestSha256
+    $profile = [string]$GatewayRuntime.profile
+    $pid = [int]$GatewayRuntime.pid
+    $killSwitchObserved = [string]$SmokeEvidence.killSwitchObserved
+
+    return [bool](
+        $Health.ok -eq $true -and
+        $null -ne $config -and $config.hermesTransport -eq 'gateway' -and
+        $config.scheduleOwnerReviewRequired -eq $true -and
+        $config.killSwitchPolicyEnforced -eq $true -and
+        $null -ne $gateway -and $gateway.gatewayReady -eq $true -and
+        $null -ne $gateway.consumer -and $gateway.consumer.fresh -eq $true -and
+        $null -ne $queue -and $queue.ready -eq 0 -and
+        $queue.claimed -eq 0 -and $queue.retry -eq 0 -and $queue.failed -eq 0 -and
+        $gateway.unnotified_application_failures -eq 0 -and
+        (Test-KakaoLiveRuntimeProbe -Probe $RuntimeProbe) -and
+        $GatewayRuntime.pluginReceiptVerified -eq $true -and
+        -not [string]::IsNullOrWhiteSpace($pluginPath) -and
+        $manifestSha256 -match '^[0-9a-fA-F]{64}$' -and
+        $profile -eq 'kakaoworker' -and $pid -gt 0 -and
+        $SmokeEvidence.nativeSessionResult -eq 'pass' -and
+        $SmokeEvidence.scheduleOwnerReviewRequired -eq $true -and
+        $SmokeEvidence.sendCount -eq 0 -and $SmokeEvidence.writeCount -eq 0 -and
+        $killSwitchObserved -in @('active', 'price_paused')
+    )
 }
 
 function Test-KakaoLiveBridgeContract {
@@ -337,5 +513,8 @@ Export-ModuleMember -Function @(
     'New-KakaoLoginStdinPayload',
     'Get-KakaoLoginReference',
     'Invoke-KakaoLoginRecovery',
-    'Get-KakaoLiveStartupPlan'
+    'Get-KakaoLiveStartupPlan',
+    'Get-KakaoGatewayCutoverPlan',
+    'Test-KakaoGatewayCutoverHealth',
+    'Test-KakaoPluginInstallReceipt'
 )

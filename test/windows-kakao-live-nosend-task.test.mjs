@@ -263,6 +263,7 @@ test('full-live startup contract enables customer replies, Slack cards, and appr
       SUPABASE_RECOVERY_ENABLED: '1',
       KAKAO_TAB_CLEANUP_ENABLED: '1',
       HERMES_WORKER_COMMAND_MODE: 'python_module',
+      KAKAO_HERMES_TRANSPORT: 'cli',
       HERMES_HOME: canonicalHermesHome,
       DEBOUNCE_MS: '15000',
       MAX_WAIT_MS: '45000',

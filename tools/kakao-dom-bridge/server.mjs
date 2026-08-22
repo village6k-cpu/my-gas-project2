@@ -158,7 +158,9 @@ export function buildHealthConfig(config = {}) {
     autoSendEnabled: Boolean(config.autoSendEnabled),
     workerDryRun: Boolean(config.workerDryRun),
     windowsWritesEnabled: Boolean(config.windowsWritesEnabled),
-    startupCatchupSupported: Boolean(config.startupCatchupSupported)
+    startupCatchupSupported: Boolean(config.startupCatchupSupported),
+    scheduleOwnerReviewRequired: true,
+    killSwitchPolicyEnforced: true
   };
 }
 
