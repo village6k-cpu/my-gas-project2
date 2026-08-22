@@ -74,6 +74,8 @@ function New-ProductionArgumentLine {
     $parts = @(
         '-NoProfile',
         '-NonInteractive',
+        '-WindowStyle',
+        'Hidden',
         '-ExecutionPolicy',
         'Bypass',
         '-File',
@@ -156,10 +158,10 @@ if ($benchmarkReport.accepted -ne $true -or $benchmarkReport.latency_status -ne 
 
 $enabledSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn
-# RepetitionDuration을 MaxValue로 명시해 모든 PS/OS 조합에서 무기한 반복을 보장한다.
+# Windows Task Scheduler가 거부하는 TimeSpan.MaxValue 대신 충분히 긴 10년 반복창을 사용한다.
 $watchdogTrigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Now.AddMinutes(2)) `
     -RepetitionInterval (New-TimeSpan -Minutes $WatchdogIntervalMinutes) `
-    -RepetitionDuration ([TimeSpan]::MaxValue)
+    -RepetitionDuration (New-TimeSpan -Days 3650)
 
 $taskDefinitions = @(
     [pscustomobject]@{

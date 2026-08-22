@@ -95,6 +95,9 @@ test('production tasks carry recorded Gateway approval while preserving root Sla
   assert.match(watchdog, /Hermes_Gateway_Kakaoworker_Native/);
   assert.doesNotMatch(watchdog, /restart-hermes-gateway\.ps1[^\r\n]+-Target\s+root/i);
   assert.match(gatewayTaskRegistration, /root[\s\S]{0,160}mutated\s*=\s*\$false/i);
+  assert.match(registerProduction, /-WindowStyle['"],?\s*['"]Hidden/i);
+  assert.match(registerProduction, /RepetitionDuration\s+\(New-TimeSpan\s+-Days\s+3650\)/i);
+  assert.doesNotMatch(registerProduction, /\[TimeSpan\]::MaxValue/i);
 });
 
 test('production task registration is an explicit post-cutover approval, not a staging default', () => {
