@@ -69,6 +69,37 @@ test('kakaoworker launcher requires an exact plugin receipt and never uses the i
   assert.match(source, /gateway['"],?\s*['"]run/i);
 });
 
+test('Gateway bridge token setup is plan-first, profile-scoped, atomic, and idempotent', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'kakao-gateway-token-'));
+  const profileRoot = path.join(temp, 'profiles', 'kakaoworker');
+  const envFile = path.join(profileRoot, '.env.windows-production');
+  fs.mkdirSync(profileRoot, { recursive: true });
+  fs.writeFileSync(envFile, 'PORT=8787\n');
+  const script = path.join(scripts, 'ensure-kakao-hermes-bridge-token.ps1');
+  const base = `& ${psLiteral(script)} -ProfileRoot ${psLiteral(profileRoot)} -EnvFile ${psLiteral(envFile)}`;
+
+  const plan = parse(run(`${base} -PlanOnly`));
+  assert.deepEqual(plan, { ok: true, mode: 'plan', changed: false, wouldChange: true, tokenEntryPresent: false });
+  assert.equal(fs.readFileSync(envFile, 'utf8'), 'PORT=8787\n');
+
+  const first = parse(run(base));
+  const firstContent = fs.readFileSync(envFile, 'utf8');
+  const token = firstContent.match(/^KAKAO_HERMES_BRIDGE_TOKEN=([^\r\n]+)$/m)?.[1];
+  assert.deepEqual(first, { ok: true, mode: 'apply', changed: true, wouldChange: true, tokenEntryPresent: true });
+  assert.match(token || '', /^[A-Za-z0-9_-]{43}$/);
+  assert.doesNotMatch(JSON.stringify(first), new RegExp(token));
+
+  const second = parse(run(base));
+  assert.deepEqual(second, { ok: true, mode: 'apply', changed: false, wouldChange: false, tokenEntryPresent: true });
+  assert.equal(fs.readFileSync(envFile, 'utf8'), firstContent);
+
+  const outside = path.join(temp, 'outside.env');
+  fs.writeFileSync(outside, 'PORT=8787\n');
+  const escaped = run(`& ${psLiteral(script)} -ProfileRoot ${psLiteral(profileRoot)} -EnvFile ${psLiteral(outside)}`);
+  assert.notEqual(escaped.status, 0);
+  assert.match(escaped.stderr, /escapes kakaoworker profile/i);
+});
+
 test('no-send health requires Gateway transport, fresh consumer, and every send/write gate off', () => {
   const modulePath = path.join(scripts, 'KakaoLiveNoSend.Common.psm1');
   const result = parse(run(`
