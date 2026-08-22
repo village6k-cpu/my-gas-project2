@@ -16,6 +16,9 @@ param(
 
     [string]$HermesPath,
 
+    [ValidateSet('cli', 'gateway')]
+    [string]$HermesTransport = 'cli',
+
     [switch]$IncludeGateway,
 
     [switch]$EnableWrites
@@ -120,6 +123,7 @@ try {
     else {
         Set-KakaoStagingSafeEnvironment
     }
+    [Environment]::SetEnvironmentVariable('KAKAO_HERMES_TRANSPORT', $HermesTransport, 'Process')
     [Environment]::SetEnvironmentVariable('VILLAGE_AI_WORKER_CMD', $workerCommand, 'Process')
 
     if ([string]::IsNullOrWhiteSpace($env:HERMES_HOME)) {

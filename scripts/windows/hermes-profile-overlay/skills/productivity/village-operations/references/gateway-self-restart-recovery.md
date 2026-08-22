@@ -5,14 +5,14 @@ Use this when the automation being diagnosed is the same service that is carryin
 ## Pattern
 
 1. Triage first while the gateway is still alive:
-   - service manager status (`hermes gateway status`, Scheduled Task status: `schtasks.exe /Query /TN Hermes_Gateway /V /FO LIST`, likewise `Hermes_Gateway_Kakaoworker`)
+   - service manager status (`hermes gateway status`, Scheduled Task status: `schtasks.exe /Query /TN Hermes_Gateway /V /FO LIST`, likewise `Hermes_Gateway_Kakaoworker_Native`)
    - scheduler status if jobs depend on the gateway (`hermes cron status`)
    - recent gateway/agent logs for repeating errors
    - platform token/API reachability where safe (for Slack Socket Mode, `apps.connections.open` is a non-sending token probe)
 2. If a restart is needed, create a detached recovery script before restarting. The script should:
    - sleep briefly so the current turn can finish tool dispatch
    - capture old PID
-   - restart/kickstart the supervisor (ONLY via `powershell.exe -NoProfile -File C:\Village\my-gas-project2\scripts\windows\restart-hermes-gateway.ps1` — it stops, then re-ignites via the `Hermes_Gateway`/`Hermes_Gateway_Kakaoworker` scheduled tasks for clean lineage; raw `hermes gateway restart` from an agent shell is FORBIDDEN — Redirection Guard inherits into the new gateway and breaks skills junctions with 448)
+   - restart/kickstart the supervisor (ONLY via `powershell.exe -NoProfile -File C:\Village\my-gas-project2\scripts\windows\restart-hermes-gateway.ps1` — it stops, then re-ignites via the `Hermes_Gateway`/`Hermes_Gateway_Kakaoworker_Native` scheduled tasks for clean lineage; raw `hermes gateway restart` from an agent shell is FORBIDDEN — Redirection Guard inherits into the new gateway and breaks skills junctions with 448)
    - wait for the new process
    - verify service status, cron/scheduler status, and platform connectivity
    - inspect post-restart log tail for recurrence of the exact error class

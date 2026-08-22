@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import math
 import json
 import re
 import sqlite3
+import statistics
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,190 @@ MUTATING_OR_SEND_TOOLS = re.compile(
     r"(?:skill_manage|send|message|slack|kakao|sheet|schedule|terminal|browser|computer)",
     re.IGNORECASE,
 )
+
+
+def percentile_nearest_rank(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, math.ceil(percentile * len(ordered)) - 1))
+    return float(ordered[index])
+
+
+def mean(values: list[float]) -> float:
+    return float(statistics.fmean(values)) if values else 0.0
+
+
+def analyze_ab_evidence(path: Path) -> dict[str, Any]:
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    if evidence.get("schema") != "village-kakao-hermes-benchmark-evidence/v1":
+        raise ValueError("unsupported A/B benchmark evidence schema")
+    baseline = evidence.get("baseline")
+    gateway = evidence.get("gateway")
+    if not isinstance(baseline, dict) or not isinstance(gateway, dict):
+        raise ValueError("benchmark evidence requires baseline and gateway objects")
+    samples = gateway.get("samples")
+    if not isinstance(samples, list):
+        raise ValueError("gateway samples must be a list")
+
+    blockers: list[str] = []
+    measurement_kind = evidence.get("measurement_kind")
+    if measurement_kind != "provider_backed":
+        blockers.append("provider_backed_measurement_required")
+    sample_count = len(samples)
+    if sample_count < 20:
+        blockers.append("gateway_sample_count_below_20")
+    baseline_sample_count = baseline.get("sample_count")
+    if not isinstance(baseline_sample_count, int) or baseline_sample_count < 20:
+        blockers.append("baseline_sample_count_below_20")
+
+    comparable_config = baseline.get("config") == gateway.get("config")
+    if not comparable_config:
+        blockers.append("model_provider_reasoning_tools_or_skills_drift")
+
+    totals = [float(sample.get("total_ms", 0)) for sample in samples if isinstance(sample, dict)]
+    agents = [float(sample.get("agent_ms", 0)) for sample in samples if isinstance(sample, dict)]
+    process_starts = [float(sample.get("process_starts", 0)) for sample in samples if isinstance(sample, dict)]
+    session_reuse = [bool(sample.get("session_reused")) for sample in samples if isinstance(sample, dict)]
+    schedules = [sample for sample in samples if isinstance(sample, dict) and sample.get("schedule") is True]
+    post_actions = [float(sample.get("post_action_agent_runs", 0)) for sample in schedules]
+    owner_reviews = [bool(sample.get("owner_review_required")) for sample in schedules]
+    send_count = sum(int(sample.get("send_count", 0)) for sample in samples if isinstance(sample, dict))
+    write_count = sum(int(sample.get("write_count", 0)) for sample in samples if isinstance(sample, dict))
+
+    process_starts_per_request = mean(process_starts)
+    post_action_per_schedule = mean(post_actions)
+    session_reuse_rate = mean([1.0 if value else 0.0 for value in session_reuse])
+    owner_review_rate = mean([1.0 if value else 0.0 for value in owner_reviews])
+    structural_checks = [
+        (process_starts_per_request == 0, "process_starts_per_request_nonzero"),
+        (post_action_per_schedule == 0, "post_action_agent_runs_per_schedule_nonzero"),
+        (session_reuse_rate == 1, "session_reuse_rate_below_100_percent"),
+        (bool(schedules) and owner_review_rate == 1, "schedule_owner_review_rate_below_100_percent"),
+        (send_count == 0, "customer_send_count_nonzero"),
+        (write_count == 0, "live_write_count_nonzero"),
+    ]
+    for passed, blocker in structural_checks:
+        if not passed:
+            blockers.append(blocker)
+
+    baseline_median = float(baseline.get("total_median_ms", 0))
+    baseline_p95 = float(baseline.get("total_p95_ms", 0))
+    gateway_median = float(statistics.median(totals)) if totals else 0.0
+    gateway_p95 = percentile_nearest_rank(totals, 0.95)
+    gateway_agent_median = float(statistics.median(agents)) if agents else 0.0
+    gateway_agent_p95 = percentile_nearest_rank(agents, 0.95)
+    median_improvement = 1 - (gateway_median / baseline_median) if baseline_median > 0 else 0.0
+    p95_improvement = 1 - (gateway_p95 / baseline_p95) if baseline_p95 > 0 else 0.0
+
+    latency_prerequisites = (
+        measurement_kind == "provider_backed"
+        and sample_count >= 20
+        and isinstance(baseline_sample_count, int)
+        and baseline_sample_count >= 20
+        and comparable_config
+    )
+    if not latency_prerequisites:
+        latency_status = "blocked"
+    else:
+        latency_status = "pass" if median_improvement >= 0.40 and p95_improvement >= 0.30 else "fail"
+        if median_improvement < 0.40:
+            blockers.append("median_improvement_below_40_percent")
+        if p95_improvement < 0.30:
+            blockers.append("p95_improvement_below_30_percent")
+
+    return {
+        "schema": "village-kakao-hermes-benchmark-report/v1",
+        "measurement_kind": measurement_kind,
+        "sample_count": sample_count,
+        "baseline_sample_count": baseline_sample_count,
+        "baseline_total_median_ms": baseline_median,
+        "baseline_total_p95_ms": baseline_p95,
+        "gateway_total_median_ms": gateway_median,
+        "gateway_total_p95_ms": gateway_p95,
+        "gateway_agent_median_ms": gateway_agent_median,
+        "gateway_agent_p95_ms": gateway_agent_p95,
+        "process_starts_per_request": process_starts_per_request,
+        "post_action_agent_runs_per_schedule": post_action_per_schedule,
+        "session_reuse_rate": session_reuse_rate,
+        "schedule_owner_review_rate": owner_review_rate,
+        "send_count": send_count,
+        "write_count": write_count,
+        "median_improvement_rate": median_improvement,
+        "p95_improvement_rate": p95_improvement,
+        "comparable_config": comparable_config,
+        "latency_status": latency_status,
+        "accepted": not blockers,
+        "blockers": blockers,
+    }
+
+
+def render_ab_report_markdown(report: dict[str, Any], evidence: dict[str, Any]) -> str:
+    """Render the human report from the same calculated acceptance object."""
+    run_id = str(evidence.get("run_id") or "")
+    compact_date = run_id[:8] if re.fullmatch(r"\d{8}.*", run_id) else ""
+    date = (
+        f"{compact_date[:4]}-{compact_date[4:6]}-{compact_date[6:8]}"
+        if compact_date
+        else "unspecified"
+    )
+    accepted = report.get("accepted") is True
+    decision = "ACCEPTED — eligible for the guarded live cutover gate" if accepted else "BLOCKED"
+    compact_json = json.dumps(report, ensure_ascii=True, separators=(",", ":"))
+    blockers = report.get("blockers") if isinstance(report.get("blockers"), list) else []
+    blocker_text = "none" if not blockers else ", ".join(str(item) for item in blockers)
+    return (
+        "# Kakao Hermes Gateway benchmark gate\n\n"
+        f"Date: {date}  \n"
+        f"Decision: **{decision}**\n\n"
+        "## Provider-backed result\n\n"
+        f"- measured requests: baseline {report['baseline_sample_count']}, Gateway {report['sample_count']}\n"
+        f"- median: {report['baseline_total_median_ms'] / 1000:.3f}s -> "
+        f"{report['gateway_total_median_ms'] / 1000:.3f}s "
+        f"({report['median_improvement_rate'] * 100:.1f}% improvement)\n"
+        f"- P95: {report['baseline_total_p95_ms'] / 1000:.3f}s -> "
+        f"{report['gateway_total_p95_ms'] / 1000:.3f}s "
+        f"({report['p95_improvement_rate'] * 100:.1f}% improvement)\n"
+        f"- persistent-session reuse: {report['session_reuse_rate'] * 100:.0f}%\n"
+        f"- schedule owner-review: {report['schedule_owner_review_rate'] * 100:.0f}%\n"
+        f"- process starts/request: {report['process_starts_per_request']}\n"
+        f"- post-action agent runs/schedule: {report['post_action_agent_runs_per_schedule']}\n"
+        f"- Kakao sends: {report['send_count']}; live writes: {report['write_count']}\n"
+        f"- comparable model/provider/reasoning/tools/skills: {str(report['comparable_config']).lower()}\n"
+        f"- blockers: {blocker_text}\n\n"
+        "## Machine-generated analyzer result\n\n"
+        "Input: `docs/kakao-hermes-gateway-benchmark-evidence.json`\n\n"
+        "```json\n"
+        f"{compact_json}\n"
+        "```\n\n"
+        "This report authorizes only the next guarded cutover gate. It does not by itself "
+        "authorize customer sends or business-data writes.\n"
+    )
+
+
+def build_native_smoke_evidence(
+    report: dict[str, Any], evidence: dict[str, Any], kill_switch_observed: str
+) -> dict[str, Any]:
+    """Derive the cutover smoke receipt from provider and safety evidence."""
+    gateway = evidence.get("gateway") if isinstance(evidence.get("gateway"), dict) else {}
+    samples = gateway.get("samples") if isinstance(gateway.get("samples"), list) else []
+    provider_terminals_proven = bool(samples) and all(
+        isinstance(sample, dict)
+        and int(sample.get("provider_calls", 0)) > 0
+        and sample.get("terminal") == "result"
+        for sample in samples
+    )
+    return {
+        "schema": "village-kakao-native-smoke/v1",
+        "nativeSessionResult": (
+            "pass" if report.get("accepted") is True and provider_terminals_proven else "fail"
+        ),
+        "scheduleOwnerReviewRequired": report.get("schedule_owner_review_rate") == 1,
+        "sendCount": int(report.get("send_count", 0)),
+        "writeCount": int(report.get("write_count", 0)),
+        "killSwitchObserved": kill_switch_observed,
+        "benchmarkRunId": str(evidence.get("run_id") or ""),
+    }
 
 
 def parse_json_response(text: str) -> Any:
@@ -211,12 +397,50 @@ def analyze_session(db_path: Path, session_id: str) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", required=True, type=Path)
-    parser.add_argument("--session-id", required=True)
-    parser.add_argument("--fixtures", required=True, type=Path)
-    parser.add_argument("--case-id", required=True)
-    parser.add_argument("--response", required=True, type=Path)
+    parser.add_argument("--ab-evidence", type=Path)
+    parser.add_argument("--output-report", type=Path)
+    parser.add_argument("--markdown-report", type=Path)
+    parser.add_argument("--smoke-report", type=Path)
+    parser.add_argument("--kill-switch-observed", choices=("active", "price_paused"))
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--session-id")
+    parser.add_argument("--fixtures", type=Path)
+    parser.add_argument("--case-id")
+    parser.add_argument("--response", type=Path)
     args = parser.parse_args()
+
+    if args.ab_evidence is not None:
+        evidence = json.loads(args.ab_evidence.read_text(encoding="utf-8"))
+        report = analyze_ab_evidence(args.ab_evidence)
+        if args.output_report is not None:
+            args.output_report.write_text(
+                json.dumps(report, ensure_ascii=True, indent=2) + "\n",
+                encoding="utf-8",
+                newline="",
+            )
+        if args.markdown_report is not None:
+            args.markdown_report.write_text(
+                render_ab_report_markdown(report, evidence),
+                encoding="utf-8",
+                newline="",
+            )
+        if args.smoke_report is not None:
+            if args.kill_switch_observed is None:
+                parser.error("--smoke-report requires --kill-switch-observed")
+            smoke = build_native_smoke_evidence(report, evidence, args.kill_switch_observed)
+            args.smoke_report.write_text(
+                json.dumps(smoke, ensure_ascii=True, indent=2) + "\n",
+                encoding="utf-8",
+                newline="",
+            )
+        print(json.dumps(report, ensure_ascii=True))
+        return 0
+    missing = [
+        name for name in ("db", "session_id", "fixtures", "case_id", "response")
+        if getattr(args, name) is None
+    ]
+    if missing:
+        parser.error("legacy analysis requires " + ", ".join(f"--{name.replace('_', '-')}" for name in missing))
 
     fixture = load_expected(args.fixtures, args.case_id)
     response_expected = {

@@ -6,6 +6,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$HermesPythonPath,
 
+    [ValidateSet('cli', 'gateway')]
+    [string]$HermesTransport = 'cli',
+
     [switch]$AllowDurableQueueRecovery,
 
     [switch]$AllowCompletedWorkerHandoff,
@@ -276,9 +279,9 @@ if (-not [string]::Equals($resolvedHermesPythonPath, $canonicalHermesPythonPath,
 [Environment]::SetEnvironmentVariable('HERMES_WORKER_COMMAND', $resolvedHermesPythonPath, 'Process')
 [Environment]::SetEnvironmentVariable('HERMES_WORKER_COMMAND_MODE', 'python_module', 'Process')
 Set-KakaoStagingSafeEnvironment -EnableWrites
-Set-KakaoLiveRuntimeEnvironment
+Set-KakaoLiveRuntimeEnvironment -HermesTransport $HermesTransport
 
-$required = Get-KakaoLiveRuntimeContract
+$required = Get-KakaoLiveRuntimeContract -HermesTransport $HermesTransport
 foreach ($name in $required.Keys) {
     if ([Environment]::GetEnvironmentVariable($name, 'Process') -ne $required[$name]) {
         throw "Full-live runtime setting mismatch: $name"

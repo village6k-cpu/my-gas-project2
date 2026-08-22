@@ -18,7 +18,9 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$MacHermesHome = 'C:\Village\MacMiniMirror\restored\.hermes',
 
-    [switch]$ProfileScoped
+    [switch]$ProfileScoped,
+
+    [string]$KakaoPluginSourcePath = ''
 )
 
 Set-StrictMode -Version Latest
@@ -1083,6 +1085,27 @@ try {
         }
     }
 
+    $pluginSync = $null
+    if (-not [string]::IsNullOrWhiteSpace($KakaoPluginSourcePath)) {
+        $pluginSyncScript = Join-Path $PSScriptRoot 'sync-kakao-hermes-plugin.ps1'
+        if (-not (Test-Path -LiteralPath $pluginSyncScript -PathType Leaf)) {
+            throw "Kakao plugin sync script is missing: '$pluginSyncScript'."
+        }
+        $pluginHermesHome = if ($ProfileScoped.IsPresent) {
+            Split-Path -Parent (Split-Path -Parent $resolvedProfileHome)
+        }
+        else {
+            $resolvedProfileHome
+        }
+        $pluginSyncJson = & $pluginSyncScript `
+            -SourcePluginPath $KakaoPluginSourcePath `
+            -HermesHome $pluginHermesHome
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Kakao plugin sync failed.'
+        }
+        $pluginSync = $pluginSyncJson | ConvertFrom-Json -ErrorAction Stop
+    }
+
     [pscustomobject]@{
         ok            = $true
         scope         = if ($ProfileScoped.IsPresent) { 'worker-profile' } else { 'hermes-home' }
@@ -1095,6 +1118,7 @@ try {
         canonical     = @('village-history-evidence', 'village-operations', 'village-capability-development', 'village-confirm-request')
         profileScoped = @('rpa-automation-operations')
         excluded      = $rootExcludedSkills
+        plugin        = $pluginSync
     } | ConvertTo-Json -Depth 4 -Compress
 }
 finally {

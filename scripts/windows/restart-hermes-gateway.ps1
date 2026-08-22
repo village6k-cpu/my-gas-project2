@@ -76,7 +76,7 @@ $Profiles = @{
         Match    = { param($cmd) ($cmd -match 'hermes_cli\.main') -and ($cmd -match 'gateway') -and ($cmd -match '\brun\b') -and ($cmd -notmatch '--profile') }
     }
     'kakaoworker' = @{
-        Task     = 'Hermes_Gateway_Kakaoworker'
+        Task     = 'Hermes_Gateway_Kakaoworker_Native'
         PidFile  = Join-Path $HermesHome 'profiles\kakaoworker\gateway.pid'
         StopArgs = @('-m', 'hermes_cli.main', '--profile', 'kakaoworker', 'gateway', 'stop')
         Match    = { param($cmd) ($cmd -match 'hermes_cli\.main') -and ($cmd -match 'gateway') -and ($cmd -match '\brun\b') -and ($cmd -match '--profile\s+kakaoworker') }
