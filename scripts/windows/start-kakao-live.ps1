@@ -211,7 +211,10 @@ if ($ConfirmKakaoGatewayCutover.IsPresent -and -not $GatewayMaintenance.IsPresen
     }
     $preHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:8787/health' -TimeoutSec 5
     $preProbe = Get-KakaoWatcherRuntime
-    $queue = $preHealth.gateway.queue
+    $queue = if ($preHealth.PSObject.Properties.Name -contains 'gateway' -and $null -ne $preHealth.gateway) {
+        $preHealth.gateway.queue
+    }
+    else { $null }
     $bridgeIdle = -not [bool]$preHealth.state.workerRunning -and [int]$preHealth.state.workerQueueLength -eq 0 -and
         [int]$preHealth.state.openRooms -eq 0 -and
         ($null -eq $queue -or ([int]$queue.ready -eq 0 -and [int]$queue.claimed -eq 0 -and [int]$queue.retry -eq 0))

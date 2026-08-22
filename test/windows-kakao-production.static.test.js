@@ -49,6 +49,13 @@ test('native Gateway cutover is explicit, benchmark-gated, plan-only, and rollba
   assert.equal(benchmarkReport.latency_status, 'pass');
 });
 
+test('Gateway cutover treats an absent legacy health gateway section as an empty queue', () => {
+  assert.match(
+    liveStart,
+    /\$preHealth\.PSObject\.Properties\.Name\s+-contains\s+['"]gateway['"][\s\S]{0,220}\$preHealth\.gateway/,
+  );
+});
+
 test('Gateway production health requires direct plugin, consumer, queue, Kakao, and safety readback', () => {
   assert.match(liveCommon, /function\s+Test-KakaoGatewayCutoverHealth/i);
   assert.match(liveCommon, /function\s+Test-KakaoPluginInstallReceipt/i);
