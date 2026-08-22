@@ -154,7 +154,7 @@ function Get-KakaoworkerGatewayRuntime {
 }
 
 function Test-KakaoworkerGatewayTaskDefinition {
-    $task = Get-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker' -ErrorAction SilentlyContinue
+    $task = Get-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker_Native' -ErrorAction SilentlyContinue
     $actions = if ($null -ne $task) { @($task.Actions) } else { @() }
     if ($actions.Count -ne 1) { return $false }
     $expectedPowerShell = [IO.Path]::GetFullPath('C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')
@@ -169,9 +169,9 @@ function Test-KakaoworkerGatewayTaskDefinition {
 }
 
 function Start-KakaoworkerGatewayRuntime {
-    $taskName = 'Hermes_Gateway_Kakaoworker'
+    $taskName = 'Hermes_Gateway_Kakaoworker_Native'
     if (-not (Test-KakaoworkerGatewayTaskDefinition)) {
-        throw 'Hermes_Gateway_Kakaoworker task is missing or does not match the reviewed launcher.'
+        throw 'Hermes_Gateway_Kakaoworker_Native task is missing or does not match the reviewed launcher.'
     }
     Enable-ScheduledTask -TaskName $taskName | Out-Null
     $gatewayRestart = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'restart-hermes-gateway.ps1')).Path
@@ -180,7 +180,7 @@ function Start-KakaoworkerGatewayRuntime {
 }
 
 function Invoke-KakaoGatewayRollback {
-    $taskName = 'Hermes_Gateway_Kakaoworker'
+    $taskName = 'Hermes_Gateway_Kakaoworker_Native'
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($null -ne $task) {
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -207,7 +207,7 @@ if ($RollbackToCli.IsPresent) {
 
 if ($ConfirmKakaoGatewayCutover.IsPresent -and -not $GatewayMaintenance.IsPresent) {
     if (-not (Test-KakaoworkerGatewayTaskDefinition)) {
-        throw 'Gateway cutover requires the reviewed Hermes_Gateway_Kakaoworker task definition.'
+        throw 'Gateway cutover requires the reviewed Hermes_Gateway_Kakaoworker_Native task definition.'
     }
     $preHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:8787/health' -TimeoutSec 5
     $preProbe = Get-KakaoWatcherRuntime
@@ -222,10 +222,10 @@ if ($ConfirmKakaoGatewayCutover.IsPresent -and -not $GatewayMaintenance.IsPresen
     $restartScript = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'Restart-KakaoBridgeLive.ps1')).Path
     & $restartScript -EnvFile $resolvedEnvFile -HermesPythonPath $resolvedHermesPythonPath `
         -HermesTransport 'gateway' -Confirm:$false | Out-Null
-    $gatewayTaskName = 'Hermes_Gateway_Kakaoworker'
+    $gatewayTaskName = 'Hermes_Gateway_Kakaoworker_Native'
     if ($null -eq (Get-ScheduledTask -TaskName $gatewayTaskName -ErrorAction SilentlyContinue)) {
         Invoke-KakaoGatewayRollback | Out-Null
-        throw 'Hermes_Gateway_Kakaoworker task is not registered.'
+        throw 'Hermes_Gateway_Kakaoworker_Native task is not registered.'
     }
     Enable-ScheduledTask -TaskName $gatewayTaskName | Out-Null
     Start-ScheduledTask -TaskName $gatewayTaskName

@@ -40,7 +40,7 @@ test('kakaoworker Gateway task plan is profile-scoped, clean-lineage, and disabl
   const disabled = parse(run(base));
   const enabled = parse(run(`${base} -EnableKakaoworker`));
 
-  assert.equal(disabled.kakaoworker.taskName, 'Hermes_Gateway_Kakaoworker');
+  assert.equal(disabled.kakaoworker.taskName, 'Hermes_Gateway_Kakaoworker_Native');
   assert.equal(disabled.kakaoworker.enabled, false);
   assert.equal(enabled.kakaoworker.enabled, true);
   assert.equal(disabled.kakaoworker.profile, 'kakaoworker');
@@ -53,6 +53,7 @@ test('kakaoworker Gateway task plan is profile-scoped, clean-lineage, and disabl
   assert.equal(path.resolve(disabled.kakaoworker.pluginPath), path.resolve(path.join(hermesHome, 'profiles', 'kakaoworker', 'plugins', 'kakao_village')));
   assert.equal(disabled.root.taskName, 'Hermes_Gateway');
   assert.equal(disabled.root.mutated, false);
+  assert.equal(disabled.kakaoworker.legacyTaskPreserved, 'Hermes_Gateway_Kakaoworker');
 });
 
 test('kakaoworker launcher requires an exact plugin receipt and never uses the incomplete .venv', () => {
@@ -93,4 +94,3 @@ test('no-send health requires Gateway transport, fresh consumer, and every send/
   `));
   assert.deepEqual(result, { safe: true, stale: false, write: false });
 });
-

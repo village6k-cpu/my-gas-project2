@@ -141,7 +141,7 @@ function Get-KakaoGatewayCutoverPlan {
             action = 'rollback_to_cli'
             transport = 'cli'
             requiredConfirmation = 'ConfirmKakaoGatewayCutover'
-            stopTask = 'Hermes_Gateway_Kakaoworker'
+            stopTask = 'Hermes_Gateway_Kakaoworker_Native'
             leaveRootSlackGatewayUntouched = $true
             leaveHealthyChromeUntouched = $true
             steps = @(

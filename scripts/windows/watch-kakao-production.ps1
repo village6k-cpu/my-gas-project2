@@ -118,7 +118,7 @@ function Invoke-KakaoLiveEvaluator {
 }
 
 function Test-KakaoworkerGatewayHealthy {
-    $task = Get-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker' -ErrorAction SilentlyContinue
+    $task = Get-ScheduledTask -TaskName 'Hermes_Gateway_Kakaoworker_Native' -ErrorAction SilentlyContinue
     $pidPath = Join-Path $env:LOCALAPPDATA 'hermes\profiles\kakaoworker\gateway.pid'
     if ($null -eq $task -or $task.State -eq 'Disabled' -or -not (Test-Path -LiteralPath $pidPath -PathType Leaf)) {
         return $false
@@ -148,7 +148,7 @@ if ($ConfirmKakaoGatewayCutover.IsPresent) {
         throw 'Gateway watchdog refuses installed plugin hash drift.'
     }
     if (-not (Test-KakaoworkerGatewayHealthy)) {
-        if (-not $PSCmdlet.ShouldProcess('Hermes_Gateway_Kakaoworker', 'Heal only the kakaoworker Gateway')) { return }
+        if (-not $PSCmdlet.ShouldProcess('Hermes_Gateway_Kakaoworker_Native', 'Heal only the kakaoworker Gateway')) { return }
         $gatewayRestart = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'restart-hermes-gateway.ps1')).Path
         & $gatewayRestart -Target kakaoworker -HealOnly | Out-Null
         if (-not (Test-KakaoworkerGatewayHealthy)) { throw 'kakaoworker Gateway recovery failed.' }

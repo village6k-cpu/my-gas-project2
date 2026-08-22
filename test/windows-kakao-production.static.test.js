@@ -36,7 +36,7 @@ test('native Gateway cutover is explicit, benchmark-gated, plan-only, and rollba
   const rollbackStart = liveStart.indexOf('function Invoke-KakaoGatewayRollback');
   const rollbackEnd = liveStart.indexOf('if ($RollbackToCli.IsPresent)', rollbackStart);
   const rollback = liveStart.slice(rollbackStart, rollbackEnd);
-  assert.match(rollback, /Hermes_Gateway_Kakaoworker/i);
+  assert.match(rollback, /Hermes_Gateway_Kakaoworker_Native/i);
   assert.match(rollback, /leaveHealthyChromeUntouched/i);
   assert.doesNotMatch(rollback, /--profile['"]?\s*,?\s*['"]root|TaskName\s+['"]Hermes_Gateway['"]/i);
 
@@ -85,7 +85,7 @@ test('production tasks carry recorded Gateway approval while preserving root Sla
   assert.match(registerProduction, /PlanOnly[\s\S]{0,1600}ConvertTo-Json/i);
   assert.match(watchdog, /\[switch\]\$ConfirmKakaoGatewayCutover/);
   assert.match(watchdog, /GatewayMaintenance/);
-  assert.match(watchdog, /Hermes_Gateway_Kakaoworker/);
+  assert.match(watchdog, /Hermes_Gateway_Kakaoworker_Native/);
   assert.doesNotMatch(watchdog, /restart-hermes-gateway\.ps1[^\r\n]+-Target\s+root/i);
   assert.match(gatewayTaskRegistration, /root[\s\S]{0,160}mutated\s*=\s*\$false/i);
 });

@@ -61,9 +61,11 @@ test('root Slack gateway stays independent while Kakao gets a disabled-by-defaul
     'utf8'
   );
 
-  assert.match(register, /Register-ScheduledTask[\s\S]*Hermes_Gateway_Kakaoworker/i);
+  assert.match(register, /Register-ScheduledTask[\s\S]*Hermes_Gateway_Kakaoworker_Native/i);
   assert.match(register, /if\s*\(\$EnableKakaoworker\.IsPresent\)/i);
-  assert.match(register, /Disable-ScheduledTask[\s\S]*Hermes_Gateway_Kakaoworker/i);
+  assert.match(register, /Disable-ScheduledTask[\s\S]*Hermes_Gateway_Kakaoworker_Native/i);
+  assert.match(register, /Register-ScheduledTask[\s\S]*-ErrorAction\s+Stop/i);
+  assert.doesNotMatch(register, /RepetitionDuration\s+\(\[TimeSpan\]::MaxValue\)/i);
   assert.match(register, /-Target\s+root\s+-HealOnly/i);
   assert.match(restart, /if\s*\(\$Target\s+-eq\s+['"]all['"]\)\s*\{\s*\$targets\s*=\s*@\(['"]root['"]\)\s*\}/i);
   assert.match(restart, /profiles\\kakaoworker\\gateway\.pid/i);
