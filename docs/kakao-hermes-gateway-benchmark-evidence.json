@@ -1,0 +1,52 @@
+{
+  "schema": "village-kakao-hermes-benchmark-evidence/v1",
+  "measurement_kind": "offline_structural",
+  "baseline": {
+    "sample_count": 23,
+    "total_median_ms": 176300,
+    "total_p95_ms": 246300,
+    "source": "2026-08-20 completed production outcomes",
+    "config": {
+      "provider": "xai-oauth",
+      "model": "grok-4.5",
+      "reasoning_effort": "xhigh",
+      "max_turns": 90,
+      "disabled_toolsets": ["computer_use"],
+      "tools_signature": "not-recorded-production-2026-08-20",
+      "skills_signature": "not-recorded-production-2026-08-20"
+    }
+  },
+  "gateway": {
+    "config": {
+      "provider": "xai-oauth",
+      "model": "grok-4.5",
+      "reasoning_effort": "xhigh",
+      "max_turns": 90,
+      "disabled_toolsets": ["computer_use"],
+      "tools_signature": "kakao-plugin-25e1dd7cf332e6b65b68c0de428495e89413befe7decec1da4729e9212dd87a4",
+      "skills_signature": "current-reviewed-offline-profile"
+    },
+    "samples": [
+      { "run": 1, "scenario": "faq", "attempt": 1, "total_ms": 16.829, "agent_ms": 16.829, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": false, "send_count": 0, "write_count": 0 },
+      { "run": 1, "scenario": "faq", "attempt": 1, "total_ms": 28.325, "agent_ms": 28.325, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": false, "send_count": 0, "write_count": 0 },
+      { "run": 1, "scenario": "faq_parallel_room", "attempt": 1, "total_ms": 28.408, "agent_ms": 28.408, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": false, "send_count": 0, "write_count": 0 },
+      { "run": 1, "scenario": "schedule_mixed_availability", "attempt": 1, "total_ms": 28.706, "agent_ms": 28.706, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": true, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 1, "scenario": "malformed_final", "attempt": 1, "total_ms": 2.513, "agent_ms": 2.513, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 1, "scenario": "stale_revision", "attempt": 1, "total_ms": 3.739, "agent_ms": 3.739, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 1, "scenario": "timeout_then_success", "attempt": 1, "total_ms": 22.498, "agent_ms": 22.498, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 1, "scenario": "timeout_then_success", "attempt": 2, "total_ms": 2.005, "agent_ms": 2.005, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 1, "scenario": "timeout_terminal", "attempt": 1, "total_ms": 4.915, "agent_ms": 4.915, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 1, "scenario": "timeout_terminal", "attempt": 2, "total_ms": 4.847, "agent_ms": 4.847, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 2, "scenario": "faq", "attempt": 1, "total_ms": 2.378, "agent_ms": 2.378, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": false, "send_count": 0, "write_count": 0 },
+      { "run": 2, "scenario": "faq", "attempt": 1, "total_ms": 29.994, "agent_ms": 29.994, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": false, "send_count": 0, "write_count": 0 },
+      { "run": 2, "scenario": "faq_parallel_room", "attempt": 1, "total_ms": 26.853, "agent_ms": 26.853, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": false, "send_count": 0, "write_count": 0 },
+      { "run": 2, "scenario": "schedule_mixed_availability", "attempt": 1, "total_ms": 4.651, "agent_ms": 4.651, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": true, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 2, "scenario": "malformed_final", "attempt": 1, "total_ms": 2.925, "agent_ms": 2.925, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 2, "scenario": "stale_revision", "attempt": 1, "total_ms": 1.895, "agent_ms": 1.895, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 2, "scenario": "timeout_then_success", "attempt": 1, "total_ms": 2.547, "agent_ms": 2.547, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 2, "scenario": "timeout_then_success", "attempt": 2, "total_ms": 2.466, "agent_ms": 2.466, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 2, "scenario": "timeout_terminal", "attempt": 1, "total_ms": 2.663, "agent_ms": 2.663, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 },
+      { "run": 2, "scenario": "timeout_terminal", "attempt": 2, "total_ms": 2.004, "agent_ms": 2.004, "process_starts": 0, "post_action_agent_runs": 0, "session_reused": true, "schedule": false, "owner_review_required": true, "send_count": 0, "write_count": 0 }
+    ]
+  }
+}
