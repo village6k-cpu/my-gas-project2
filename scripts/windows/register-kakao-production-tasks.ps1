@@ -56,13 +56,7 @@ $resolvedSmokeEvidencePath = if ([string]::IsNullOrWhiteSpace($SmokeEvidencePath
 $startScriptPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'start-kakao-live.ps1') -ErrorAction Stop).Path
 $watchdogScriptPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'watch-kakao-production.ps1') -ErrorAction Stop).Path
 
-$powerShellExecutable = if ($PSVersionTable.PSEdition -eq 'Core') {
-    Join-Path $PSHOME 'pwsh.exe'
-}
-else {
-    Join-Path $PSHOME 'powershell.exe'
-}
-$powerShellExecutable = (Resolve-Path -LiteralPath $powerShellExecutable -ErrorAction Stop).Path
+$powerShellExecutable = (Resolve-Path -LiteralPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -ErrorAction Stop).Path
 
 function New-ProductionArgumentLine {
     param(

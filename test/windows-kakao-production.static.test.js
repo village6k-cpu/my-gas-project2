@@ -96,6 +96,8 @@ test('production tasks carry recorded Gateway approval while preserving root Sla
   assert.doesNotMatch(watchdog, /restart-hermes-gateway\.ps1[^\r\n]+-Target\s+root/i);
   assert.match(gatewayTaskRegistration, /root[\s\S]{0,160}mutated\s*=\s*\$false/i);
   assert.match(registerProduction, /-WindowStyle['"],?\s*['"]Hidden/i);
+  assert.match(registerProduction, /C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe/i);
+  assert.doesNotMatch(registerProduction, /Join-Path\s+\$PSHOME/i);
   assert.match(registerProduction, /RepetitionDuration\s+\(New-TimeSpan\s+-Days\s+3650\)/i);
   assert.doesNotMatch(registerProduction, /\[TimeSpan\]::MaxValue/i);
   assert.match(registerProduction, /function\s+Set-ExistingHiddenTaskWrapper/i);
