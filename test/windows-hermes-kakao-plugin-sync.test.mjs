@@ -80,6 +80,7 @@ test('PlanOnly reports the exact reviewed manifest and merged config without cre
   assert.deepEqual(result.configPlan.pluginsEnabled, ['existing_plugin', 'kakao_village']);
   assert.equal(result.configPlan.platforms.kakao_village.enabled, true);
   assert.equal(result.configPlan.platforms.slack.enabled, true);
+  assert.deepEqual(result.configPlan.platformToolsets.kakao_village, ['skills', 'village']);
   assert.deepEqual(result.fileManifest.map((entry) => entry.relativePath).sort(), [
     'README.md', '__init__.py', 'adapter.py', 'plugin.yaml'
   ].sort());
@@ -107,6 +108,7 @@ test('sync atomically installs only reviewed files, preserves config, and is ide
   assert.match(config, /kakao_village/);
   assert.match(config, /slack:[\s\S]*enabled:\s*true/);
   assert.match(config, /kakao_village:[\s\S]*enabled:\s*true/);
+  assert.match(config, /platform_toolsets:[\s\S]*kakao_village:\s*\[skills, village\]/);
 
   const second = runSync(fixture);
   assert.equal(second.changed, false);
@@ -117,6 +119,20 @@ test('sync refuses dirty reviewed sources', () => {
   const fixture = makeFixture();
   writeFileSync(path.join(fixture.source, 'adapter.py'), 'VALUE = "dirty"\n');
   assert.match(runSync({ ...fixture, expectOk: false }), /dirty|tracked|source/i);
+});
+
+test('sync ignores only generated Python cache dirt and rejects other untracked source', () => {
+  const fixture = makeFixture();
+  const cache = path.join(fixture.source, '__pycache__');
+  mkdirSync(cache);
+  writeFileSync(path.join(cache, 'adapter.cpython-311.pyc'), Buffer.from([0, 1, 2, 3]));
+
+  const planned = runSync({ ...fixture, planOnly: true });
+  assert.equal(planned.ok, true);
+  assert.equal(planned.fileManifest.some(({ relativePath }) => relativePath.includes('__pycache__')), false);
+
+  writeFileSync(path.join(fixture.source, 'unreviewed.py'), 'VALUE = "unreviewed"\n');
+  assert.match(runSync({ ...fixture, planOnly: true, expectOk: false }), /dirty|untracked|source/i);
 });
 
 test('sync refuses missing descriptors, binaries, secrets, and source reparse escapes', () => {

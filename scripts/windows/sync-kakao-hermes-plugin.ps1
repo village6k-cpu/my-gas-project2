@@ -28,6 +28,7 @@ $encoding = New-Object System.Text.UTF8Encoding($false)
 $allowedExtensions = @('.py', '.yaml', '.yml', '.md')
 $forbiddenExtensions = @('.exe', '.dll', '.com', '.bat', '.cmd', '.ps1', '.sh', '.pem', '.key', '.pfx', '.p12')
 $ignoredParts = @('tests', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache')
+$requiredPlatformToolsets = @('skills', 'village')
 
 function Get-FullPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -161,7 +162,18 @@ function Assert-CleanGitSource {
     if ($statusExit -ne 0) {
         throw "Cannot inspect reviewed plugin source git status."
     }
-    if (@($status | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
+    $unsafeStatus = @($status | Where-Object {
+        $line = [string]$_
+        if ([string]::IsNullOrWhiteSpace($line)) { return $false }
+        if ($line -match '^\?\?\s+(.+)$') {
+            $untrackedPath = $matches[1].Trim('"').Replace('\', '/')
+            if (@($untrackedPath -split '/' | Where-Object { $_ -eq '__pycache__' }).Count -gt 0) {
+                return $false
+            }
+        }
+        return $true
+    })
+    if ($unsafeStatus.Count -gt 0) {
         throw "Reviewed plugin source is dirty or contains untracked files."
     }
     return $repoRoot
@@ -177,6 +189,20 @@ function Insert-StringLines {
     for ($i = 0; $i -lt $Index; $i++) { [void]$result.Add($Lines[$i]) }
     foreach ($line in $NewLines) { [void]$result.Add($line) }
     for ($i = $Index; $i -lt $Lines.Count; $i++) { [void]$result.Add($Lines[$i]) }
+    return [string[]]$result.ToArray()
+}
+
+function Replace-StringLines {
+    param(
+        [string[]]$Lines,
+        [int]$Start,
+        [int]$End,
+        [string[]]$NewLines
+    )
+    $result = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $Start; $i++) { [void]$result.Add($Lines[$i]) }
+    foreach ($line in $NewLines) { [void]$result.Add($line) }
+    for ($i = $End; $i -lt $Lines.Count; $i++) { [void]$result.Add($Lines[$i]) }
     return [string[]]$result.ToArray()
 }
 
@@ -235,9 +261,22 @@ function Get-ConfigPlan {
         }
     }
     $platformMap[$pluginName] = [ordered]@{ enabled = $true }
+
+    $toolsetMap = [ordered]@{}
+    $platformToolsets = Find-TopSection -Lines $lines -Name 'platform_toolsets'
+    if ($platformToolsets.start -ge 0) {
+        for ($i = $platformToolsets.start + 1; $i -lt $platformToolsets.end; $i++) {
+            if ($lines[$i] -match '^\s{2}([A-Za-z0-9_-]+):\s*\[(.*)\]\s*$') {
+                $values = @($matches[2] -split ',' | ForEach-Object { $_.Trim().Trim("'", '"') } | Where-Object { $_ })
+                $toolsetMap[$matches[1]] = $values
+            }
+        }
+    }
+    $toolsetMap[$pluginName] = @($requiredPlatformToolsets)
     return [pscustomobject]@{
         pluginsEnabled = @($enabled | Select-Object -Unique)
         platforms = [pscustomobject]$platformMap
+        platformToolsets = [pscustomobject]$toolsetMap
     }
 }
 
@@ -301,6 +340,32 @@ function Merge-ProfileConfig {
             }
             if ($enabledIndex -ge 0) { $lines[$enabledIndex] = '    enabled: true' }
             else { $lines = Insert-StringLines -Lines $lines -Index ($platformStart + 1) -NewLines @('    enabled: true') }
+        }
+    }
+
+    $platformToolsets = Find-TopSection -Lines $lines -Name 'platform_toolsets'
+    $requiredToolsetLine = "  ${pluginName}: [" + ($requiredPlatformToolsets -join ', ') + ']'
+    if ($platformToolsets.start -lt 0) {
+        if ($lines.Count -gt 0) { $lines = Insert-StringLines -Lines $lines -Index $lines.Count -NewLines @('') }
+        $lines = Insert-StringLines -Lines $lines -Index $lines.Count -NewLines @('platform_toolsets:', $requiredToolsetLine)
+    }
+    else {
+        $entryStart = -1
+        $entryEnd = $platformToolsets.end
+        for ($i = $platformToolsets.start + 1; $i -lt $platformToolsets.end; $i++) {
+            if ($lines[$i] -match ('^\s{{2}}{0}:\s*' -f [regex]::Escape($pluginName))) {
+                $entryStart = $i
+                for ($j = $i + 1; $j -lt $platformToolsets.end; $j++) {
+                    if ($lines[$j] -match '^\s{2}[A-Za-z0-9_-]+:\s*') { $entryEnd = $j; break }
+                }
+                break
+            }
+        }
+        if ($entryStart -lt 0) {
+            $lines = Insert-StringLines -Lines $lines -Index $platformToolsets.end -NewLines @($requiredToolsetLine)
+        }
+        else {
+            $lines = Replace-StringLines -Lines $lines -Start $entryStart -End $entryEnd -NewLines @($requiredToolsetLine)
         }
     }
     return (($lines -join "`r`n").TrimEnd() + "`r`n")

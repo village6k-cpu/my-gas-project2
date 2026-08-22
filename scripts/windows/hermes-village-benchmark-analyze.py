@@ -135,6 +135,74 @@ def analyze_ab_evidence(path: Path) -> dict[str, Any]:
     }
 
 
+def render_ab_report_markdown(report: dict[str, Any], evidence: dict[str, Any]) -> str:
+    """Render the human report from the same calculated acceptance object."""
+    run_id = str(evidence.get("run_id") or "")
+    compact_date = run_id[:8] if re.fullmatch(r"\d{8}.*", run_id) else ""
+    date = (
+        f"{compact_date[:4]}-{compact_date[4:6]}-{compact_date[6:8]}"
+        if compact_date
+        else "unspecified"
+    )
+    accepted = report.get("accepted") is True
+    decision = "ACCEPTED — eligible for the guarded live cutover gate" if accepted else "BLOCKED"
+    compact_json = json.dumps(report, ensure_ascii=True, separators=(",", ":"))
+    blockers = report.get("blockers") if isinstance(report.get("blockers"), list) else []
+    blocker_text = "none" if not blockers else ", ".join(str(item) for item in blockers)
+    return (
+        "# Kakao Hermes Gateway benchmark gate\n\n"
+        f"Date: {date}  \n"
+        f"Decision: **{decision}**\n\n"
+        "## Provider-backed result\n\n"
+        f"- measured requests: baseline {report['baseline_sample_count']}, Gateway {report['sample_count']}\n"
+        f"- median: {report['baseline_total_median_ms'] / 1000:.3f}s -> "
+        f"{report['gateway_total_median_ms'] / 1000:.3f}s "
+        f"({report['median_improvement_rate'] * 100:.1f}% improvement)\n"
+        f"- P95: {report['baseline_total_p95_ms'] / 1000:.3f}s -> "
+        f"{report['gateway_total_p95_ms'] / 1000:.3f}s "
+        f"({report['p95_improvement_rate'] * 100:.1f}% improvement)\n"
+        f"- persistent-session reuse: {report['session_reuse_rate'] * 100:.0f}%\n"
+        f"- schedule owner-review: {report['schedule_owner_review_rate'] * 100:.0f}%\n"
+        f"- process starts/request: {report['process_starts_per_request']}\n"
+        f"- post-action agent runs/schedule: {report['post_action_agent_runs_per_schedule']}\n"
+        f"- Kakao sends: {report['send_count']}; live writes: {report['write_count']}\n"
+        f"- comparable model/provider/reasoning/tools/skills: {str(report['comparable_config']).lower()}\n"
+        f"- blockers: {blocker_text}\n\n"
+        "## Machine-generated analyzer result\n\n"
+        "Input: `docs/kakao-hermes-gateway-benchmark-evidence.json`\n\n"
+        "```json\n"
+        f"{compact_json}\n"
+        "```\n\n"
+        "This report authorizes only the next guarded cutover gate. It does not by itself "
+        "authorize customer sends or business-data writes.\n"
+    )
+
+
+def build_native_smoke_evidence(
+    report: dict[str, Any], evidence: dict[str, Any], kill_switch_observed: str
+) -> dict[str, Any]:
+    """Derive the cutover smoke receipt from provider and safety evidence."""
+    gateway = evidence.get("gateway") if isinstance(evidence.get("gateway"), dict) else {}
+    samples = gateway.get("samples") if isinstance(gateway.get("samples"), list) else []
+    provider_terminals_proven = bool(samples) and all(
+        isinstance(sample, dict)
+        and int(sample.get("provider_calls", 0)) > 0
+        and sample.get("terminal") == "result"
+        for sample in samples
+    )
+    return {
+        "schema": "village-kakao-native-smoke/v1",
+        "nativeSessionResult": (
+            "pass" if report.get("accepted") is True and provider_terminals_proven else "fail"
+        ),
+        "scheduleOwnerReviewRequired": report.get("schedule_owner_review_rate") == 1,
+        "sendCount": int(report.get("send_count", 0)),
+        "writeCount": int(report.get("write_count", 0)),
+        "killSwitchObserved": kill_switch_observed,
+        "benchmarkRunId": str(evidence.get("run_id") or ""),
+    }
+
+
 def parse_json_response(text: str) -> Any:
     candidates = [text.strip()]
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
@@ -330,6 +398,10 @@ def analyze_session(db_path: Path, session_id: str) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ab-evidence", type=Path)
+    parser.add_argument("--output-report", type=Path)
+    parser.add_argument("--markdown-report", type=Path)
+    parser.add_argument("--smoke-report", type=Path)
+    parser.add_argument("--kill-switch-observed", choices=("active", "price_paused"))
     parser.add_argument("--db", type=Path)
     parser.add_argument("--session-id")
     parser.add_argument("--fixtures", type=Path)
@@ -338,7 +410,30 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.ab_evidence is not None:
-        print(json.dumps(analyze_ab_evidence(args.ab_evidence), ensure_ascii=True))
+        evidence = json.loads(args.ab_evidence.read_text(encoding="utf-8"))
+        report = analyze_ab_evidence(args.ab_evidence)
+        if args.output_report is not None:
+            args.output_report.write_text(
+                json.dumps(report, ensure_ascii=True, indent=2) + "\n",
+                encoding="utf-8",
+                newline="",
+            )
+        if args.markdown_report is not None:
+            args.markdown_report.write_text(
+                render_ab_report_markdown(report, evidence),
+                encoding="utf-8",
+                newline="",
+            )
+        if args.smoke_report is not None:
+            if args.kill_switch_observed is None:
+                parser.error("--smoke-report requires --kill-switch-observed")
+            smoke = build_native_smoke_evidence(report, evidence, args.kill_switch_observed)
+            args.smoke_report.write_text(
+                json.dumps(smoke, ensure_ascii=True, indent=2) + "\n",
+                encoding="utf-8",
+                newline="",
+            )
+        print(json.dumps(report, ensure_ascii=True))
         return 0
     missing = [
         name for name in ("db", "session_id", "fixtures", "case_id", "response")

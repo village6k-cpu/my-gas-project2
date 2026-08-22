@@ -45,8 +45,8 @@ test('native Gateway cutover is explicit, benchmark-gated, plan-only, and rollba
   const firstHealthCall = liveStart.indexOf('Invoke-RestMethod');
   assert.ok(planIndex >= 0 && confirmationIndex > planIndex);
   assert.ok(firstHealthCall > confirmationIndex, 'no live probe or transition may occur before explicit cutover confirmation');
-  assert.equal(benchmarkReport.accepted, false);
-  assert.equal(benchmarkReport.latency_status, 'blocked');
+  assert.equal(benchmarkReport.accepted, true);
+  assert.equal(benchmarkReport.latency_status, 'pass');
 });
 
 test('Gateway production health requires direct plugin, consumer, queue, Kakao, and safety readback', () => {

@@ -191,14 +191,19 @@ The handler must accept `handler(args: dict, **kwargs) -> str` and require:
 
 ```python
 {
-    "job_id": "job-1",
-    "room_key": "room-1",
-    "room_revision": 7,
     "decision": {"should_write_to_sheet": True, "sheet_row_candidate": {}},
 }
 ```
 
-Assert that it forwards the typed payload unchanged except for the schema tag, returns the bridge payload through `tools.registry.tool_result`, propagates an authoritative receipt, and returns `tool_error` for invalid input, bridge refusal, timeout, or stale revision. Assert that it never invents availability rows or customer prose.
+Assert that it forwards the typed decision unchanged, injects `job_id`, `room_key`,
+`room_revision`, and `lease_id` only from the active task-local native turn,
+returns the bridge payload through `tools.registry.tool_result`, propagates an
+authoritative receipt, and returns `tool_error` for invalid input, bridge
+refusal, timeout, or stale revision. Assert that it never invents availability
+rows or customer prose. This replaces the original model-supplied transport
+fields after the provider-backed benchmark proved that stock Gateway does not
+expose those fields in model input and a persistent session can reuse stale
+correlation.
 
 - [ ] **Step 2: Run the tool test and confirm RED**
 
