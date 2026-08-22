@@ -119,6 +119,61 @@ function New-ProductionArgumentLine {
     return $parts -join ' '
 }
 
+function ConvertTo-VbsStringLiteral {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+    return '"' + $Value.Replace('"', '""') + '"'
+}
+
+function Set-ExistingHiddenTaskWrapper {
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$PowerShellArguments
+    )
+
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    if (-not [bool]$task.Settings.Enabled) {
+        throw "Existing production task '$TaskName' is disabled."
+    }
+    $actions = @($task.Actions)
+    if ($actions.Count -ne 1 -or [IO.Path]::GetFileName([string]$actions[0].Execute) -ine 'wscript.exe') {
+        throw "Existing production task '$TaskName' is not an approved hidden-wrapper task."
+    }
+    $actionArguments = [string]$actions[0].Arguments
+    if ($actionArguments -notmatch '^//B\s+//Nologo\s+"([^"]+\.vbs)"$') {
+        throw "Existing production task '$TaskName' has an unexpected wrapper action."
+    }
+    $wrapperPath = [IO.Path]::GetFullPath($matches[1])
+    $expectedWrapperPath = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Village\hidden-tasks\$TaskName.vbs"))
+    if (-not [string]::Equals($wrapperPath, $expectedWrapperPath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $wrapperPath -PathType Leaf)) {
+        throw "Existing production task '$TaskName' wrapper path is outside the approved runtime directory."
+    }
+    foreach ($path in @((Split-Path -Parent $wrapperPath), $wrapperPath)) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Existing production task '$TaskName' wrapper path is a reparse point."
+        }
+    }
+
+    $commandLine = '"' + $powerShellExecutable + '" ' + $PowerShellArguments
+    $content = 'CreateObject("WScript.Shell").Run ' + (ConvertTo-VbsStringLiteral -Value $commandLine) + ', 0, False' + "`r`n"
+    $suffix = [Guid]::NewGuid().ToString('N')
+    $temporary = "$wrapperPath.tmp.$suffix"
+    $backup = "$wrapperPath.backup.$suffix"
+    $encoding = New-Object Text.UTF8Encoding($false)
+    try {
+        [IO.File]::WriteAllText($temporary, $content, $encoding)
+        [IO.File]::Replace($temporary, $wrapperPath, $backup, $true)
+        if (Test-Path -LiteralPath $backup) { [IO.File]::Delete($backup) }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) }
+    }
+    if ([IO.File]::ReadAllText($wrapperPath, [Text.Encoding]::UTF8) -ne $content) {
+        throw "Existing production task '$TaskName' wrapper verification failed."
+    }
+}
+
 $startArguments = New-ProductionArgumentLine -ScriptPath $startScriptPath -WithEnableWrites $false -GatewayMaintenance
 $watchdogArguments = New-ProductionArgumentLine -ScriptPath $watchdogScriptPath -WithEnableWrites $false
 
@@ -182,8 +237,19 @@ if (-not $PSCmdlet.ShouldProcess('Village Windows Kakao production scheduled tas
     return
 }
 
+$registrationModes = New-Object System.Collections.ArrayList
 foreach ($definition in $taskDefinitions) {
-    Register-ScheduledTask -TaskName $definition.Name -Action $definition.Action -Trigger $definition.Trigger -Settings $enabledSettings -Description $definition.Description -Force | Out-Null
+    try {
+        Register-ScheduledTask -TaskName $definition.Name -Action $definition.Action -Trigger $definition.Trigger -Settings $enabledSettings -Description $definition.Description -Force | Out-Null
+        [void]$registrationModes.Add("$($definition.Name):registered")
+    }
+    catch {
+        # Some long-lived tasks have an administrator-owned ACL. Do not bypass
+        # that ACL or create duplicate triggers: update only their exact,
+        # already-registered profile-scoped hidden wrapper atomically.
+        Set-ExistingHiddenTaskWrapper -TaskName $definition.Name -PowerShellArguments ([string]$definition.Action.Arguments)
+        [void]$registrationModes.Add("$($definition.Name):wrapper_updated")
+    }
 }
 
 # 스테이징 시절의 비활성 태스크가 남아 있으면 혼동을 막기 위해 상태만 보고한다(삭제하지 않음).
@@ -194,4 +260,4 @@ foreach ($stagingTaskName in @('Village-Kakao-Staging-Status', 'Village-Kakao-St
     }
 }
 
-Write-Output 'Village-Kakao-Production-Start and Village-Kakao-Production-Watchdog registered and enabled.'
+Write-Output ('Village Kakao production persistence updated: ' + ($registrationModes -join ', '))

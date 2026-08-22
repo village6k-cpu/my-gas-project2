@@ -98,6 +98,10 @@ test('production tasks carry recorded Gateway approval while preserving root Sla
   assert.match(registerProduction, /-WindowStyle['"],?\s*['"]Hidden/i);
   assert.match(registerProduction, /RepetitionDuration\s+\(New-TimeSpan\s+-Days\s+3650\)/i);
   assert.doesNotMatch(registerProduction, /\[TimeSpan\]::MaxValue/i);
+  assert.match(registerProduction, /function\s+Set-ExistingHiddenTaskWrapper/i);
+  assert.match(registerProduction, /wscript\.exe[\s\S]{0,1200}hidden-tasks/i);
+  assert.match(registerProduction, /\[IO\.File\]::Replace\(/i);
+  assert.doesNotMatch(registerProduction, /Unregister-ScheduledTask|Remove-ScheduledTask/i);
 });
 
 test('production task registration is an explicit post-cutover approval, not a staging default', () => {
