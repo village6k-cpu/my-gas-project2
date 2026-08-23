@@ -224,6 +224,64 @@ test('buildKakaoGatewayTurn builds a bounded credential-safe native Hermes event
   assert.equal(JSON.stringify(turn.event).includes('internal-sheet-secret'), false);
 });
 
+function createGatewayReadySnapshot(job, capturedAt = '2026-08-21T01:02:04.000Z') {
+  return createImmutableKakaoRoomSnapshot({
+    job,
+    capturedAt,
+    navigationContext: {
+      status: 'opened_target_chat',
+      conversation_evidence: {
+        source: 'test_fixture',
+        title: '테스트 고객',
+        hint_matched: true,
+        hints: ['테스트 고객'],
+        visible_static_text_tail: '테스트 고객\n실제 고객 문의 내용'
+      }
+    }
+  });
+}
+
+test('buildKakaoGatewayTurn rejects header-only Kakao evidence before any lookup or Hermes handoff', async () => {
+  const job = {
+    jobId: 'gateway-job-header-only',
+    roomKey: 'chat:4981161999642866',
+    roomRevision: 1,
+    detectedAt: '2026-08-23T00:00:00.000Z',
+    previewText: '예약 양식'
+  };
+  const snapshot = createImmutableKakaoRoomSnapshot({
+    job,
+    capturedAt: '2026-08-23T00:00:01.000Z',
+    navigationContext: {
+      status: 'opened_target_chat',
+      conversation_evidence: {
+        source: 'live_kakao_dom_after_navigation',
+        title: '이상율 - 빌리지 - 카카오비즈니스 파트너센터',
+        hint_matched: true,
+        hints: ['이상율'],
+        visible_static_text_tail: '이상율,친구아님,상담상태,상담중,중요 채팅방 활성화,메모 내용 미리보기,사이드 메뉴 열기'
+      }
+    }
+  });
+  let lookupCalls = 0;
+
+  await assert.rejects(
+    workerModule.buildKakaoGatewayTurn({
+      config: { bridgeUrl: '', jobLogPath: '' },
+      job,
+      capture: { snapshot },
+      dependencies: {
+        buildReadOnlyLookupContext: async () => {
+          lookupCalls += 1;
+          return {};
+        }
+      }
+    }),
+    (error) => error?.code === 'kakao_conversation_evidence_unavailable'
+  );
+  assert.equal(lookupCalls, 0);
+});
+
 test('buildKakaoGatewayTurn never invokes Hermes, mutation, delivery, follow-up, or Slack dependencies', async () => {
   const job = {
     jobId: 'gateway-job-read-only',
@@ -232,7 +290,7 @@ test('buildKakaoGatewayTurn never invokes Hermes, mutation, delivery, follow-up,
     detectedAt: '2026-08-21T01:02:03.000Z',
     previewText: '정책 문의'
   };
-  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const snapshot = createGatewayReadySnapshot(job);
   const forbidden = [
     'runHermesDecision',
     'appendToSheet',
@@ -265,7 +323,7 @@ test('buildKakaoGatewayTurn keeps adversarial internal lookup evidence out of th
     jobId: 'gateway-job-large-internal', roomKey: 'chat:gateway-large', roomRevision: 4,
     detectedAt: '2026-08-21T01:02:03.000Z', previewText: '정책 문의'
   };
-  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const snapshot = createGatewayReadySnapshot(job);
   const oversizedSecret = `internal-lookup-secret-${'x'.repeat(1_100_000)}`;
   const lookupContext = {
     generated_at: '2026-08-21T01:02:05.000Z',
@@ -319,7 +377,7 @@ test('buildKakaoGatewayTurn fails closed when prompt evidence would exceed the p
     jobId: 'gateway-job-over-cap', roomKey: 'chat:gateway-over-cap', roomRevision: 8,
     detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
   };
-  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const snapshot = createGatewayReadySnapshot(job);
   await assert.rejects(
     workerModule.buildKakaoGatewayTurn({
       config: { bridgeUrl: '', jobLogPath: '' },
@@ -339,7 +397,7 @@ test('buildKakaoGatewayTurn fails closed when non-ASCII event JSON exceeds the p
     jobId: 'gateway-job-ascii-cap', roomKey: 'chat:gateway-ascii-cap', roomRevision: 9,
     detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
   };
-  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const snapshot = createGatewayReadySnapshot(job);
   await assert.rejects(
     workerModule.buildKakaoGatewayTurn({
       config: { bridgeUrl: '', jobLogPath: '' },
@@ -359,7 +417,7 @@ test('buildKakaoGatewayTurn reserves the claim wrapper and UUID lease inside the
     jobId: 'gateway-job-envelope-cap', roomKey: 'chat:gateway-envelope-cap', roomRevision: 10,
     detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
   };
-  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const snapshot = createGatewayReadySnapshot(job);
   await assert.rejects(
     workerModule.buildKakaoGatewayTurn({
       config: { bridgeUrl: '', jobLogPath: '' },
@@ -379,7 +437,7 @@ test('Gateway extraction and legacy dry-run each perform one freshness check whi
     jobId: 'gateway-job-freshness', roomKey: 'chat:gateway-freshness', roomRevision: 6,
     detectedAt: '2026-08-21T01:02:03.000Z', previewText: '문의'
   };
-  const snapshot = createImmutableKakaoRoomSnapshot({ job, capturedAt: '2026-08-21T01:02:04.000Z' });
+  const snapshot = createGatewayReadySnapshot(job);
   const calls = [];
   const fetchImpl = async (url) => {
     calls.push(String(url));
@@ -2657,6 +2715,79 @@ test('openKakaoTargetChatViaDevtools selects the exact room target when the popu
   assert.equal(result.status, 'opened_target_chat');
   assert.equal(result.already_open, true);
   assert.equal(result.conversation_target.id, 'chat');
+  assert.equal(result.conversation_evidence.hint_matched, true);
+});
+
+test('openKakaoTargetChatViaDevtools waits past a header-only Kakao render until real conversation text exists', async () => {
+  const targets = [
+    { type: 'page', id: 'list', title: '카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats', webSocketDebuggerUrl: 'ws://list' },
+    { type: 'page', id: 'chat', title: '이상율 - 빌리지 - 카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats/4981161999642866', webSocketDebuggerUrl: 'ws://chat' }
+  ];
+  const fetchImpl = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(targets) });
+  let evidenceReads = 0;
+  const evaluateImpl = async () => {
+    evidenceReads += 1;
+    return evidenceReads === 1
+      ? {
+          title: targets[1].title,
+          href: targets[1].url,
+          text: '이상율\n친구아님\n상담상태\n상담중\n중요 채팅방 활성화\n메모 내용 미리보기\n사이드 메뉴 열기'
+        }
+      : {
+          title: targets[1].title,
+          href: targets[1].url,
+          text: '이상율\n예약 양식\n소니 ECM-673\n8월 25일 19시 ~ 8월 27일 24시\n오후09:01'
+        };
+  };
+
+  const result = await openKakaoTargetChatViaDevtools({
+    room_key: 'chat:4981161999642866',
+    customer_name: '이상율',
+    preview_text: '예약 양식'
+  }, {
+    cdpBaseUrl: 'http://127.0.0.1:9223',
+    fetchImpl,
+    evaluateImpl,
+    evidenceMaxAttempts: 2,
+    evidencePollMs: 0,
+    sleepImpl: async () => {}
+  });
+
+  assert.equal(evidenceReads, 2);
+  assert.equal(result.status, 'opened_target_chat');
+  assert.match(result.conversation_evidence.visible_static_text_tail.join(' '), /ECM-673/);
+});
+
+test('openKakaoTargetChatViaDevtools fails closed when Kakao stays header-only', async () => {
+  const targets = [
+    { type: 'page', id: 'list', title: '카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats', webSocketDebuggerUrl: 'ws://list' },
+    { type: 'page', id: 'chat', title: '이상율 - 빌리지 - 카카오비즈니스 파트너센터', url: 'https://business.kakao.com/_xhPMls/chats/4981161999642866', webSocketDebuggerUrl: 'ws://chat' }
+  ];
+  const fetchImpl = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(targets) });
+  let evidenceReads = 0;
+
+  const result = await openKakaoTargetChatViaDevtools({
+    room_key: 'chat:4981161999642866',
+    customer_name: '이상율',
+    preview_text: '예약 양식'
+  }, {
+    cdpBaseUrl: 'http://127.0.0.1:9223',
+    fetchImpl,
+    evaluateImpl: async () => {
+      evidenceReads += 1;
+      return {
+        title: targets[1].title,
+        href: targets[1].url,
+        text: '이상율\n친구아님\n상담상태\n상담중\n중요 채팅방 활성화\n메모 내용 미리보기\n사이드 메뉴 열기'
+      };
+    },
+    evidenceMaxAttempts: 2,
+    evidencePollMs: 0,
+    sleepImpl: async () => {}
+  });
+
+  assert.equal(evidenceReads, 2);
+  assert.equal(result.status, 'conversation_evidence_unavailable');
   assert.equal(result.conversation_evidence.hint_matched, true);
 });
 

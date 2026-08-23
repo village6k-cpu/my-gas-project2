@@ -22,6 +22,9 @@ const {
   createGatewayResultApplicationCoordinator,
   createAiJobDispatcher,
   configForHermesTransport,
+  classifyInitialScanIngress,
+  gatewayDispatchFailurePolicy,
+  finalizeGatewayDispatchFailurePolicy,
   registerAcceptedRoomEvent,
   semanticRoomEventIdentity,
   hasUnreadCount,
@@ -38,6 +41,75 @@ const {
   shouldSkipSupabaseRowAsLowValue,
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
+
+test('Gateway initial unread scans become no-send startup catch-up work even when legacy scan processing is disabled', () => {
+  for (const hermesTransport of ['gateway', 'gateway_no_send']) {
+    const result = classifyInitialScanIngress({
+      reason: 'initial_scan', roomKey: 'chat:recovery', unreadCount: 2,
+      previewText: '중요 이상율 2 예약 양식'
+    }, { processInitialScan: false, hermesTransport });
+    assert.equal(result.action, 'queue');
+    assert.equal(result.event.reason, 'startup_catchup');
+    assert.equal(result.event.originalReason, 'initial_scan');
+    assert.equal(result.event.recoveryOnly, true);
+  }
+});
+
+test('initial scan ingress remains conservative for CLI and rows without a visible unread count', () => {
+  assert.deepEqual(classifyInitialScanIngress({
+    reason: 'initial_scan', roomKey: 'chat:cli', unreadCount: 1
+  }, { processInitialScan: false, hermesTransport: 'cli' }), {
+    action: 'ignore', reason: 'initial_scan_disabled'
+  });
+  assert.deepEqual(classifyInitialScanIngress({
+    reason: 'initial_scan', roomKey: 'chat:read', unreadCount: 0
+  }, { processInitialScan: true, hermesTransport: 'gateway' }), {
+    action: 'ignore', reason: 'initial_scan_without_unread'
+  });
+  const ordinary = { reason: 'mutation', roomKey: 'chat:live', unreadCount: 1 };
+  assert.deepEqual(classifyInitialScanIngress(ordinary, {
+    processInitialScan: false, hermesTransport: 'gateway'
+  }), { action: 'continue', event: ordinary });
+});
+
+test('missing Kakao conversation evidence gets exactly one durable retry before human review', () => {
+  const error = new Error('conversation body not rendered');
+  error.code = 'kakao_conversation_evidence_unavailable';
+  assert.deepEqual(gatewayDispatchFailurePolicy(error, { recoveryAttempts: 0 }), {
+    status: 'ai_worker_error',
+    retryable: true,
+    notifyHuman: false,
+    errorType: 'kakao_conversation_evidence_unavailable'
+  });
+  assert.deepEqual(gatewayDispatchFailurePolicy(error, { recoveryAttempts: 1 }), {
+    status: 'needs_human_review',
+    retryable: false,
+    notifyHuman: true,
+    errorType: 'kakao_conversation_evidence_unavailable'
+  });
+  assert.deepEqual(gatewayDispatchFailurePolicy(new Error('invalid contract'), { recoveryAttempts: 0 }), {
+    status: 'needs_human_review',
+    retryable: false,
+    notifyHuman: true,
+    errorType: 'gateway_dispatch_failed'
+  });
+});
+
+test('a retry that cannot be durably recorded is promoted to immediate human review', () => {
+  const retry = {
+    status: 'ai_worker_error', retryable: true, notifyHuman: false,
+    errorType: 'kakao_conversation_evidence_unavailable'
+  };
+  assert.deepEqual(finalizeGatewayDispatchFailurePolicy(retry, { ok: true }), retry);
+  assert.deepEqual(finalizeGatewayDispatchFailurePolicy(retry, { skipped: true }), {
+    status: 'needs_human_review', retryable: false, notifyHuman: true,
+    errorType: 'kakao_conversation_evidence_unavailable'
+  });
+  assert.deepEqual(finalizeGatewayDispatchFailurePolicy(retry, null), {
+    status: 'needs_human_review', retryable: false, notifyHuman: true,
+    errorType: 'kakao_conversation_evidence_unavailable'
+  });
+});
 
 test('Hermes transport defaults only to CLI and rejects unknown values without activating Gateway', () => {
   assert.equal(resolveHermesTransport(undefined), 'cli');

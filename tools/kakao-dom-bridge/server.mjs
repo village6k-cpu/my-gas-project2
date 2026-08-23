@@ -1089,6 +1089,25 @@ export function hasUnreadCount(event = {}) {
   return /안읽|읽지\s*않은|새\s*메시지|unread/i.test(preview);
 }
 
+export function classifyInitialScanIngress(event = {}, {
+  processInitialScan = true,
+  hermesTransport = 'cli'
+} = {}) {
+  if (event?.reason !== 'initial_scan') return { action: 'continue', event };
+  if (!hasUnreadCount(event)) return { action: 'ignore', reason: 'initial_scan_without_unread' };
+  const gatewayEnabled = ['gateway', 'gateway_no_send'].includes(resolveHermesTransport(hermesTransport));
+  if (!gatewayEnabled && !processInitialScan) return { action: 'ignore', reason: 'initial_scan_disabled' };
+  return {
+    action: 'queue',
+    event: {
+      ...event,
+      reason: 'startup_catchup',
+      originalReason: 'initial_scan',
+      recoveryOnly: true
+    }
+  };
+}
+
 function hasDatedPreview(text) {
   return daysSinceDatedPreview(text) !== null;
 }
@@ -3174,39 +3193,96 @@ function getAiJobDispatcher() {
   return aiJobDispatcher;
 }
 
+export function gatewayDispatchFailurePolicy(error, { recoveryAttempts = 0 } = {}) {
+  const errorType = String(error?.code || '').trim() || 'gateway_dispatch_failed';
+  const transientEvidenceFailure = errorType === 'kakao_conversation_evidence_unavailable';
+  if (transientEvidenceFailure && Number(recoveryAttempts || 0) < 1) {
+    return {
+      status: 'ai_worker_error',
+      retryable: true,
+      notifyHuman: false,
+      errorType
+    };
+  }
+  return {
+    status: 'needs_human_review',
+    retryable: false,
+    notifyHuman: true,
+    errorType
+  };
+}
+
+export function finalizeGatewayDispatchFailurePolicy(policy = {}, persistenceResult = null) {
+  if (policy.retryable !== true || persistenceResult?.ok === true) return policy;
+  return {
+    status: 'needs_human_review',
+    retryable: false,
+    notifyHuman: true,
+    errorType: policy.errorType || 'gateway_dispatch_failed'
+  };
+}
+
 async function recordGatewayDispatchFailure(job, error, context = {}) {
+  const initialPolicy = gatewayDispatchFailurePolicy(error, {
+    recoveryAttempts: Number(job?.recoveryAttempt ?? job?.bridge_recovery?.attempts ?? 0) || 0
+  });
   state.failedWorkerRuns += 1;
   appendNdjson('errors.ndjson', {
     at: nowIso(), type: 'gateway_dispatch', message: String(error?.message || error), job
   });
   let failureFollowUp = null;
-  try {
-    failureFollowUp = await createWorkerFailureFollowUp(job, error, {
-      ...context,
-      origin: context.origin || 'hermes_gateway_dispatch',
-      failed_at: nowIso()
-    });
-    appendNdjson('worker-failure-followups.ndjson', {
-      at: nowIso(), jobId: job.jobId, result: failureFollowUp
-    });
-  } catch (followUpError) {
-    state.failedSupabaseWrites += 1;
-    appendNdjson('errors.ndjson', {
-      at: nowIso(), type: 'gateway_dispatch_failure_followup', message: followUpError.message, jobId: job.jobId
-    });
-  }
-  await updateSupabaseEventByHash(job.jobId, {
-    status: 'needs_human_review',
+  const buildStatusPatch = (policy) => ({
+    status: policy.status,
     error_message: String(error?.message || error).slice(0, 1000),
     completed_at: nowIso(),
-    payload: { ...job, ai_worker_result: { error: String(error?.message || error).slice(0, 1000), failure_follow_up: failureFollowUp } }
-  }).catch((supabaseError) => {
-    state.failedSupabaseWrites += 1;
-    appendNdjson('errors.ndjson', {
-      at: nowIso(), type: 'gateway_dispatch_supabase_update', message: supabaseError.message, jobId: job.jobId
-    });
+    payload: {
+      ...job,
+      ai_worker_result: {
+        error: String(error?.message || error).slice(0, 1000),
+        error_type: policy.errorType,
+        retryable: policy.retryable,
+        failure_follow_up: failureFollowUp
+      }
+    }
   });
-  return { ok: false, error };
+  let retryPersistence = null;
+  if (initialPolicy.retryable) {
+    try {
+      retryPersistence = await updateSupabaseEventByHash(job.jobId, buildStatusPatch(initialPolicy));
+    } catch (supabaseError) {
+      state.failedSupabaseWrites += 1;
+      appendNdjson('errors.ndjson', {
+        at: nowIso(), type: 'gateway_dispatch_supabase_retry_update', message: supabaseError.message, jobId: job.jobId
+      });
+    }
+  }
+  const policy = finalizeGatewayDispatchFailurePolicy(initialPolicy, retryPersistence);
+  if (policy.notifyHuman) {
+    try {
+      failureFollowUp = await createWorkerFailureFollowUp(job, error, {
+        ...context,
+        origin: context.origin || 'hermes_gateway_dispatch',
+        failed_at: nowIso()
+      });
+      appendNdjson('worker-failure-followups.ndjson', {
+        at: nowIso(), jobId: job.jobId, result: failureFollowUp
+      });
+    } catch (followUpError) {
+      state.failedSupabaseWrites += 1;
+      appendNdjson('errors.ndjson', {
+        at: nowIso(), type: 'gateway_dispatch_failure_followup', message: followUpError.message, jobId: job.jobId
+      });
+    }
+  }
+  if (!initialPolicy.retryable || policy.notifyHuman) {
+    await updateSupabaseEventByHash(job.jobId, buildStatusPatch(policy)).catch((supabaseError) => {
+      state.failedSupabaseWrites += 1;
+      appendNdjson('errors.ndjson', {
+        at: nowIso(), type: 'gateway_dispatch_supabase_update', message: supabaseError.message, jobId: job.jobId
+      });
+    });
+  }
+  return { ok: false, error, retryable: policy.retryable, status: policy.status };
 }
 
 async function dispatchAiJob(job, context = {}) {
@@ -3633,7 +3709,7 @@ async function cleanupIdleKakaoConversationTabs(reason = 'interval', { allowQueu
 async function handleEvent(req, res) {
   const body = await readRequestBody(req);
   const raw = JSON.parse(body || '{}');
-  const event = normalizeEvent(raw);
+  let event = normalizeEvent(raw);
 
   state.received += 1;
   appendNdjson('events.ndjson', event);
@@ -3683,9 +3759,19 @@ async function handleEvent(req, res) {
     return json(res, 202, { ok: true, ignored: 'startup_mutation', queuedForAi: false });
   }
 
-  if (event.reason === 'initial_scan' && !CONFIG.processInitialScan) {
-    appendNdjson('initial-scans.ndjson', event);
-    return json(res, 202, { ok: true, initialScan: true, queuedForAi: false });
+  const initialScanIngress = classifyInitialScanIngress(event, CONFIG);
+  if (initialScanIngress.action === 'ignore') {
+    appendNdjson('initial-scans.ndjson', { ...event, ignored: initialScanIngress.reason });
+    return json(res, 202, {
+      ok: true,
+      initialScan: true,
+      ignored: initialScanIngress.reason,
+      queuedForAi: false
+    });
+  }
+  if (initialScanIngress.action === 'queue') {
+    appendNdjson('initial-scans.ndjson', initialScanIngress.event);
+    event = initialScanIngress.event;
   }
 
   if (isPageContainerPreview(event.previewText, event.roomKey)) {

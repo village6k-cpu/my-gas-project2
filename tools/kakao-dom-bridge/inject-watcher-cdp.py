@@ -241,7 +241,69 @@ def extract_watcher_version(content_js: str) -> str:
 
 def probe_watcher(cdp: CDPWebSocket) -> dict[str, Any] | None:
     verify = cdp.call("Runtime.evaluate", {
-        "expression": r"(() => { const w = window.__villageKakaoWatcherInstance; const s = w?.state; const eligible = /^(?:\/_?[^/]+)?\/chats\/?$/.test(location.pathname); const scanAt = Number(s?.lastTopRowsScanAt || 0); return ({hasWatcher: !!w, watcherVersion: w?.version || '', started: s?.started ?? false, observer: !!s?.observer, heartbeatTimer: !!s?.heartbeatTimer, topRowPollTimer: !!s?.topRowPollTimer, transportReady: typeof globalThis.__villageKakaoBridgeSend === 'function', pageEligible: eligible, topRowsCount: Number(s?.lastTopRowsCount || 0), topRowsScanAgeMs: scanAt > 0 ? Math.max(0, Date.now() - scanAt) : null, extensionVersion: document.documentElement?.dataset?.villageKakaoExtensionWatcherVersion || '', extensionStatus: document.documentElement?.dataset?.villageKakaoExtensionWatcherStatus || ''}); })()",
+        "expression": r"""(async () => {
+            const w = window.__villageKakaoWatcherInstance;
+            const s = w?.state;
+            const eligible = /^(?:\/_?[^/]+)?\/chats\/?$/.test(location.pathname);
+            const scanAt = Number(s?.lastTopRowsScanAt || 0);
+            let liveListProbeOk = false;
+            let liveListItemCount = null;
+            let liveListUnreadCount = null;
+            let liveListHeadExpectedCount = null;
+            let liveListHeadMatchCount = null;
+            let liveListError = null;
+            try {
+                const profileMatch = /^\/([^/]+)\/chats\/?$/.exec(location.pathname);
+                if (!profileMatch) throw new Error('profile_path_unavailable');
+                const response = await fetch(
+                    `/api/profiles/${encodeURIComponent(profileMatch[1])}/chats/search?size=100`,
+                    {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: {'Content-Type': 'application/json'},
+                        body: '{}'
+                    }
+                );
+                if (!response.ok) throw new Error(`http_${response.status}`);
+                const payload = await response.json();
+                const items = Array.isArray(payload?.items) ? payload.items : [];
+                const liveHeadIds = items.slice(0, 5).map((item) => String(item?.id || '')).filter(Boolean);
+                const domIds = new Set(
+                    [...document.querySelectorAll('input[id^="chat-select-"]')]
+                        .map((input) => String(input.id || '').slice('chat-select-'.length))
+                        .filter(Boolean)
+                );
+                liveListProbeOk = true;
+                liveListItemCount = items.length;
+                liveListUnreadCount = items.filter(
+                    (item) => Number(item?.unread_count || 0) > 0 || item?.is_read === false
+                ).length;
+                liveListHeadExpectedCount = liveHeadIds.length;
+                liveListHeadMatchCount = liveHeadIds.filter((id) => domIds.has(id)).length;
+            } catch (error) {
+                liveListError = String(error?.message || error || 'live_list_probe_failed').slice(0, 120);
+            }
+            return ({
+                hasWatcher: !!w,
+                watcherVersion: w?.version || '',
+                started: s?.started ?? false,
+                observer: !!s?.observer,
+                heartbeatTimer: !!s?.heartbeatTimer,
+                topRowPollTimer: !!s?.topRowPollTimer,
+                transportReady: typeof globalThis.__villageKakaoBridgeSend === 'function',
+                pageEligible: eligible,
+                topRowsCount: Number(s?.lastTopRowsCount || 0),
+                topRowsScanAgeMs: scanAt > 0 ? Math.max(0, Date.now() - scanAt) : null,
+                liveListProbeOk,
+                liveListItemCount,
+                liveListUnreadCount,
+                liveListHeadExpectedCount,
+                liveListHeadMatchCount,
+                liveListError,
+                extensionVersion: document.documentElement?.dataset?.villageKakaoExtensionWatcherVersion || '',
+                extensionStatus: document.documentElement?.dataset?.villageKakaoExtensionWatcherStatus || ''
+            });
+        })()""",
         "awaitPromise": True,
         "returnByValue": True,
     })
@@ -250,6 +312,11 @@ def probe_watcher(cdp: CDPWebSocket) -> dict[str, Any] | None:
 
 
 def watcher_is_healthy(value: dict[str, Any] | None, expected_extension_version: str | None = None) -> bool:
+    live_item_count = int((value or {}).get("liveListItemCount") or 0)
+    visible_row_count = int((value or {}).get("topRowsCount") or 0)
+    minimum_visible_rows = min(live_item_count, 5)
+    expected_head_count = int((value or {}).get("liveListHeadExpectedCount") or 0)
+    matched_head_count = int((value or {}).get("liveListHeadMatchCount") or 0)
     return bool(
         value
         and value.get("hasWatcher")
@@ -259,7 +326,9 @@ def watcher_is_healthy(value: dict[str, Any] | None, expected_extension_version:
         and value.get("topRowPollTimer")
         and value.get("transportReady")
         and value.get("pageEligible")
-        and int(value.get("topRowsCount") or 0) > 0
+        and value.get("liveListProbeOk") is True
+        and visible_row_count >= minimum_visible_rows
+        and matched_head_count >= expected_head_count
         and value.get("topRowsScanAgeMs") is not None
         and int(value.get("topRowsScanAgeMs") or 0) <= 120_000
         and (
@@ -267,6 +336,24 @@ def watcher_is_healthy(value: dict[str, Any] | None, expected_extension_version:
             or value.get("watcherVersion") == expected_extension_version
         )
     )
+
+
+def watcher_probe_state(
+    value: dict[str, Any] | None,
+    expected_extension_version: str | None = None,
+) -> str:
+    if watcher_is_healthy(value, expected_extension_version):
+        return "healthy"
+    if value and value.get("liveListProbeOk") is False:
+        return "live_list_probe_failed"
+    return "watcher_repair_required"
+
+
+def watcher_should_reload(
+    value: dict[str, Any] | None,
+    expected_extension_version: str | None = None,
+) -> bool:
+    return watcher_probe_state(value, expected_extension_version) == "watcher_repair_required"
 
 
 def main() -> int:
@@ -340,7 +427,7 @@ def main() -> int:
         if args.probe_only:
             value = probe_watcher(cdp)
             healthy = watcher_is_healthy(value, expected_extension_version)
-            state = "healthy" if healthy else "watcher_repair_required"
+            state = watcher_probe_state(value, expected_extension_version)
             print(json.dumps({"ok": healthy, **classification, "state": state, "watcherReady": healthy, "watcher": value}, ensure_ascii=False))
             return 0 if healthy else 2
         injection = build_injection(content_js)
@@ -354,7 +441,7 @@ def main() -> int:
             raise RuntimeError(json.dumps(result["result"]["exceptionDetails"], ensure_ascii=False))
         value = probe_watcher(cdp)
         reloaded = False
-        if not watcher_is_healthy(value, expected_extension_version):
+        if watcher_should_reload(value, expected_extension_version):
             reloaded = True
             cdp.call("Page.reload", {"ignoreCache": True})
             repair_deadline = time.time() + args.wait
@@ -364,7 +451,7 @@ def main() -> int:
                 if watcher_is_healthy(value, expected_extension_version):
                     break
         healthy = watcher_is_healthy(value, expected_extension_version)
-        state = "healthy" if healthy else "watcher_repair_required"
+        state = watcher_probe_state(value, expected_extension_version)
         print(json.dumps({"ok": healthy, **classification, "state": state, "watcherReady": healthy, "reloaded": reloaded, "watcher": value}, ensure_ascii=False))
         return 0 if healthy else 2
     finally:
