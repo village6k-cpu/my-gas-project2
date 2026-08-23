@@ -429,7 +429,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     return clone(await update(candidate, {
       state: 'claimed', attempts: candidate.attempts + 1, claimed_by: consumerId, lease_id: randomUUID(),
       claimed_at: iso(nowMs), claimed_at_ms: nowMs,
-      lease_expires_at: iso(nowMs + leaseDuration), lease_expires_at_ms: nowMs + leaseDuration, error: null
+      lease_expires_at: iso(nowMs + leaseDuration), lease_expires_at_ms: nowMs + leaseDuration,
+      outcome: null, error: null
     }));
   }
 
@@ -743,6 +744,14 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
             return rejectUnresolvedToolOperation(job, { outcome });
           }
           assertCurrentLease(job, outcome);
+          if (!job.tool_operation && job.attempts < maximumAttempts) {
+            return clone(await update(job, {
+              state: 'ready', outcome: clone(outcome), claimed_by: null, lease_id: null,
+              lease_expires_at: null, lease_expires_at_ms: null, claimed_at: null, claimed_at_ms: null,
+              human_review_required: false, failure_notification: null,
+              error: { type: 'no_final_retry', attempts: job.attempts }
+            }));
+          }
           return clone(await update(job, {
             state: 'failed', outcome: clone(outcome), claimed_by: null, lease_id: null, lease_expires_at: null,
             lease_expires_at_ms: null, claimed_at: null, claimed_at_ms: null,
