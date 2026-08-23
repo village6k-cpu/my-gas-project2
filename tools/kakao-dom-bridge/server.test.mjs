@@ -446,16 +446,95 @@ test('server confirmation validator rejects invalid decisions before durable res
       ? { valid: true, errors: [] }
       : { valid: false, errors: ['discount required'] }
   });
-  assert.deepEqual(validator({ decision: { sheet_row_candidate: { discount_type: '' } } }), {
+  assert.deepEqual(await validator({ decision: { sheet_row_candidate: { discount_type: '' } } }), {
     valid: false,
     errors: ['discount required']
   });
-  assert.deepEqual(validator({ decision: { sheet_row_candidate: { discount_type: '일반' } } }), {
+  assert.deepEqual(await validator({ decision: { sheet_row_candidate: { discount_type: '일반' } } }), {
     valid: true,
     errors: []
   });
   const serverSource = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
   assert.match(serverSource, /validateConfirmation:\s*gatewayConfirmationValidator/);
+});
+
+test('server confirmation validator rejects a claimed existing RQ that is absent from live GAS', async () => {
+  const lookups = [];
+  const validator = createGatewayConfirmationValidator({
+    getConfig: () => ({ gasApiUrl: 'https://gas.example/exec', sheetApiKey: 'secret' }),
+    fetchExistingRequest: async (_config, decision) => {
+      lookups.push(structuredClone(decision.existing_confirm_request_ids));
+      return null;
+    }
+  });
+  const decision = {
+    classification: 'already_answered',
+    should_write_to_sheet: false,
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    existing_confirm_request_ids: ['RQ-260823-001'],
+    safety_checks: {
+      kakao_conversation_opened: true,
+      did_not_classify_from_preview_only: true,
+      latest_customer_message_after_last_staff_reply: true
+    },
+    sheet_row_candidate: {},
+    follow_up_items: [{
+      type: 'reservation_review',
+      route: 'schedule',
+      taskKey: 'reservation:kim-hyeji:2026-09-02:canon-rf-100-500',
+      priority: 'high',
+      status: 'open',
+      title: 'Existing confirmation request review',
+      customer_name: '김혜지',
+      summary: 'Review the existing confirmation request result before replying.',
+      recommended_action: 'Use the authoritative request result for owner review.',
+      suggested_reply_draft: '',
+      evidence: ['Hermes claimed RQ-260823-001 exists.'],
+      blocking_reason: '',
+      due_hint: 'now'
+    }],
+    reply_decision: {
+      replyMode: 'no_reply',
+      text: '',
+      confidence: 'high',
+      reason: 'Staff already replied; verify the claimed request before closing the turn.',
+      shouldCreateTask: true,
+      safetyClass: 'no_send',
+      grounding: 'visible_conversation',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: true
+    }
+  };
+
+  assert.deepEqual(await validator({ decision }), {
+    valid: false,
+    errors: [
+      'existing confirm request RQ-260823-001 was not found in the live sheet; if the reservation remains unregistered, correct the decision and write it'
+    ]
+  });
+  assert.deepEqual(lookups, [['RQ-260823-001']]);
+
+  const verified = createGatewayConfirmationValidator({
+    getConfig: () => ({ gasApiUrl: 'https://gas.example/exec', sheetApiKey: 'secret' }),
+    fetchExistingRequest: async () => ({ reqID: 'RQ-260823-001', results: [] })
+  });
+  assert.deepEqual(await verified({ decision }), { valid: true, errors: [] });
+
+  const unavailable = createGatewayConfirmationValidator({
+    getConfig: () => ({ gasApiUrl: 'https://gas.example/exec', sheetApiKey: 'secret' }),
+    fetchExistingRequest: async () => ({
+      reqID: 'RQ-260823-001',
+      results: [],
+      lookup_error: 'network timeout'
+    })
+  });
+  assert.deepEqual(await unavailable({ decision }), {
+    valid: false,
+    errors: [
+      'existing confirm request RQ-260823-001 could not be verified in the live sheet; retry the tool before finishing'
+    ]
+  });
 });
 
 test('server default confirmation validator matches the safe sheet payload boundary', () => {

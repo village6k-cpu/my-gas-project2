@@ -2297,7 +2297,7 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   assert.match(prompt, /missing phone is NOT a sheet-write blocker/s);
 });
 
-test('buildHermesPrompt makes the native confirmation tool the only Gateway sheet-write path', () => {
+test('buildHermesPrompt makes the native confirmation tool verify both writes and claimed existing RQs', () => {
   const prompt = buildHermesPrompt(
     { id: 'job-gateway-write', preview_text: '9월 2일 캐논 100-500 예약할게요' },
     { gatewayConfirmationToolAvailable: true }
@@ -2306,6 +2306,8 @@ test('buildHermesPrompt makes the native confirmation tool the only Gateway shee
   assert.match(prompt, /Gateway.*FINAL_JSON.*바깥 워커.*확인요청.*입력하지 않는다/s);
   assert.match(prompt, /should_write_to_sheet=true.*village_confirmation_request.*반드시.*먼저 호출/s);
   assert.match(prompt, /완성된.*decision.*should_write_to_sheet=true/s);
+  assert.match(prompt, /existing_confirm_request_ids.*village_confirmation_request.*검증/s);
+  assert.match(prompt, /should_write_to_sheet=false.*기존 RQ.*실재 여부/s);
   assert.match(prompt, /no_action.*입력 성공.*아니다/s);
   assert.doesNotMatch(prompt, /Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true/);
 });
@@ -4940,6 +4942,27 @@ test('fetchExistingConfirmRequestResultForDecision reads RQ result rows from 확
   assert.deepEqual(result.topLevelEquipment, [
     { 이름: '소니 캠 AX-700', 수량: 1 }
   ]);
+});
+
+test('fetchExistingConfirmRequestResultForDecision returns null when GAS has no exact RQ row', async () => {
+  const result = await fetchExistingConfirmRequestResultForDecision({
+    gasApiUrl: 'https://gas.example/exec',
+    sheetApiKey: 'secret',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        sheet: '확인요청',
+        query: 'RQ-260823-001',
+        count: 0,
+        results: []
+      })
+    })
+  }, {
+    existing_confirm_request_ids: ['RQ-260823-001']
+  }, []);
+
+  assert.equal(result, null);
 });
 
 test('fetchExistingConfirmRequestResultForDecision never infers RQ ids from prose', async () => {

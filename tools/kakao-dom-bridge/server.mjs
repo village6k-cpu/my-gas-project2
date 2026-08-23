@@ -12,6 +12,7 @@ import {
   buildKakaoGatewayTurn,
   captureKakaoRoomSnapshot,
   executeVillageConfirmationRequest,
+  fetchExistingConfirmRequestResultForDecision,
   finalizePreparedKakaoDecision,
   loadKakaoWorkerRuntimeConfig,
   prepareKakaoDecisionFromSnapshot,
@@ -472,9 +473,51 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
   });
 }
 
-export function createGatewayConfirmationValidator({ validateDecision = validateVillageConfirmationExecutionDecision } = {}) {
+export function createGatewayConfirmationValidator({
+  validateDecision = validateVillageConfirmationExecutionDecision,
+  getConfig = () => ({}),
+  fetchExistingRequest = fetchExistingConfirmRequestResultForDecision
+} = {}) {
   if (typeof validateDecision !== 'function') throw new Error('Gateway confirmation validator is required');
-  return (request = {}) => validateDecision(request.decision);
+  if (typeof getConfig !== 'function') throw new Error('Gateway confirmation config loader is required');
+  if (typeof fetchExistingRequest !== 'function') throw new Error('Gateway existing confirmation lookup is required');
+  return (request = {}) => {
+    const validation = validateDecision(request.decision);
+    if (!validation?.valid) return validation;
+    const decision = request?.decision && typeof request.decision === 'object' ? request.decision : {};
+    const claimedRequestIds = Array.from(new Set(
+      (Array.isArray(decision.existing_confirm_request_ids) ? decision.existing_confirm_request_ids : [])
+        .map((value) => String(value || '').trim().toUpperCase())
+        .filter((value) => /^RQ-\d{6}-\d{3}$/.test(value))
+    ));
+    if (decision.should_write_to_sheet !== false || !claimedRequestIds.length) return validation;
+    return (async () => {
+      const config = getConfig();
+      for (const reqID of claimedRequestIds) {
+        const existing = await fetchExistingRequest(config, {
+          ...decision,
+          existing_confirm_request_ids: [reqID]
+        }, []);
+        if (existing?.lookup_error) {
+          return {
+            valid: false,
+            errors: [
+              `existing confirm request ${reqID} could not be verified in the live sheet; retry the tool before finishing`
+            ]
+          };
+        }
+        if (String(existing?.reqID || '').trim().toUpperCase() !== reqID) {
+          return {
+            valid: false,
+            errors: [
+              `existing confirm request ${reqID} was not found in the live sheet; if the reservation remains unregistered, correct the decision and write it`
+            ]
+          };
+        }
+      }
+      return validation;
+    })();
+  };
 }
 
 export function createGatewayResultApplicationCoordinator({
@@ -715,7 +758,9 @@ const gatewayConfirmationExecutor = gatewayTransportEnabled
     })
   : null;
 const gatewayConfirmationValidator = gatewayTransportEnabled
-  ? createGatewayConfirmationValidator()
+  ? createGatewayConfirmationValidator({
+      getConfig: () => getKakaoWorkerRuntimeConfigForTransport()
+    })
   : null;
 const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
