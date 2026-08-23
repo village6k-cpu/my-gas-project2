@@ -104,6 +104,30 @@ test('coalesces duplicate jobs and supersedes an older same-room revision', asyn
   });
 });
 
+test('reports the durable latest room revision after restart so new events cannot collide with completed work', async () => {
+  await withChannel(async ({ directory, channel, clock }) => {
+    await channel.enqueue(event('job-old', 'room-restarted', 7));
+    const claim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    await channel.complete({
+      job_id: claim.job_id,
+      room_key: claim.room_key,
+      room_revision: claim.room_revision,
+      lease_id: claim.lease_id,
+      content: 'FINAL_JSON {}'
+    });
+
+    const restarted = createHermesGatewayChannel({
+      directory,
+      leaseMs: 1_000,
+      maxAttempts: 2,
+      now: () => clock.now
+    });
+
+    assert.equal(await restarted.latestRoomRevision('room-restarted'), 7);
+    assert.equal(await restarted.latestRoomRevision('room-new'), 0);
+  });
+});
+
 test('requeues only an expired lease and fails terminally after the second claim expires', async () => {
   await withChannel(async ({ channel, clock }) => {
     await channel.enqueue(event('job-a1', 'room-a', 1));

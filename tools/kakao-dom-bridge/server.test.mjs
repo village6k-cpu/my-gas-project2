@@ -1214,6 +1214,33 @@ test('room revisions ignore unread-badge duplicates and supersede older semantic
   assert.equal(newer.changed, true);
 });
 
+test('room revisions continue after the durable Gateway revision when the bridge restarts', () => {
+  const versions = new Map();
+  const firstAfterRestart = registerAcceptedRoomEvent(
+    versions,
+    'chat:restarted',
+    '김혜지 새 예약 요청',
+    7
+  );
+  const duplicate = registerAcceptedRoomEvent(
+    versions,
+    'chat:restarted',
+    '김혜지 새 예약 요청',
+    7
+  );
+  const newer = registerAcceptedRoomEvent(
+    versions,
+    'chat:restarted',
+    '김혜지 추가 메시지',
+    7
+  );
+
+  assert.equal(firstAfterRestart.revision, 8);
+  assert.equal(duplicate.revision, 8);
+  assert.equal(duplicate.changed, false);
+  assert.equal(newer.revision, 9);
+});
+
 test('identical reply text at a later displayed time is a new room revision', () => {
   const earlier = semanticRoomEventIdentity({ previewText: '홍길동 네', displayTime: '오전 9:10' });
   const unreadMutation = semanticRoomEventIdentity({ previewText: '홍길동 2 네', displayTime: '오전 9:10' });
@@ -1239,8 +1266,10 @@ test('production queue uses the phase scheduler and publishes freshness before d
   assert.match(source, /CONFIG\.aiDomSplitEnabled\s*\?\s*run\(\)\s*:\s*workerChain\.then/);
   assert.match(source, /getKakaoPhaseScheduler\(\)\.runManual/);
   assert.match(source, /url\.pathname === '\/worker\/freshness'/);
-  const revisionIndex = source.indexOf('registerAcceptedRoomEvent(state.roomVersions');
+  const revisionIndex = source.indexOf('const roomVersion = registerAcceptedRoomEvent(');
+  const durableRevisionIndex = source.lastIndexOf('gatewayChannel.latestRoomRevision', revisionIndex);
   const supabaseIndex = source.indexOf("await writeSupabaseEvent(event, 'event')", revisionIndex);
+  assert.ok(durableRevisionIndex >= 0 && durableRevisionIndex < revisionIndex, 'durable Gateway revision must seed the in-memory revision');
   assert.ok(revisionIndex >= 0 && supabaseIndex > revisionIndex, 'freshness revision must advance before Supabase latency');
   assert.match(source, /readBooleanEnvironment\(process\.env\.KAKAO_AI_DOM_SPLIT_ENABLED, false\)/);
   assert.match(source, /getKakaoPhaseScheduler\(\)\.runManual\(\{[\s\S]*?cleanupIdleKakaoConversationTabs\('worker_finished'/);
