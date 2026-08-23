@@ -944,9 +944,7 @@ export function validateAiDecisionContract(decision = {}) {
   }
 
   if (decision.should_write_to_sheet === true) {
-    if (!hasRequiredSheetSafetyChecks(decision)) {
-      errors.push('sheet writes require explicit safety_checks that prove the Kakao conversation state');
-    }
+    errors.push(...sheetSafetyValidationErrors(decision));
     const row = decision.sheet_row_candidate && typeof decision.sheet_row_candidate === 'object'
       ? decision.sheet_row_candidate
       : {};
@@ -1257,6 +1255,42 @@ function hasRequiredSheetSafetyChecks(decision) {
   const checks = decision?.safety_checks || {};
   if (isStaffConfirmedUnregisteredSheetCandidate(decision)) return true;
   return REQUIRED_SHEET_SAFETY_CHECKS.every((key) => checks[key] === true);
+}
+
+function sheetSafetyValidationErrors(decision = {}) {
+  if (hasRequiredSheetSafetyChecks(decision)) return [];
+  const checks = decision?.safety_checks || {};
+  const reservation = decision?.reservation_inquiry || {};
+  const equipment = Array.isArray(reservation.equipment_requested) ? reservation.equipment_requested : [];
+  const errors = [];
+  if (checks.kakao_conversation_opened !== true) {
+    errors.push('sheet writes require safety_checks.kakao_conversation_opened=true');
+  }
+  if (checks.did_not_classify_from_preview_only !== true) {
+    errors.push('sheet writes require safety_checks.did_not_classify_from_preview_only=true');
+  }
+  if (checks.latest_customer_message_after_last_staff_reply === false) {
+    if (checks.no_auto_reply_sent !== true) {
+      errors.push('staff-confirmed sheet writes require safety_checks.no_auto_reply_sent=true');
+    }
+    if (reservation.is_reservation_inquiry !== true && equipment.length === 0) {
+      errors.push('staff-confirmed sheet writes require explicit reservation evidence');
+    }
+    if (reservation.confirmed !== true) {
+      errors.push('staff-confirmed sheet writes require reservation_inquiry.confirmed=true');
+    }
+    if (reservation.already_registered !== false) {
+      errors.push('staff-confirmed sheet writes require reservation_inquiry.already_registered=false');
+    }
+    if (checks.duplicate_checked_contract_master !== true
+      && checks.duplicate_checked_schedule_detail !== true
+      && checks.duplicate_checked_request_sheet !== true) {
+      errors.push('staff-confirmed sheet writes require at least one explicit duplicate check');
+    }
+  } else if (checks.latest_customer_message_after_last_staff_reply !== true) {
+    errors.push('sheet writes require an explicit boolean safety_checks.latest_customer_message_after_last_staff_reply');
+  }
+  return errors.length ? errors : ['sheet writes require explicit safety_checks that prove the Kakao conversation state'];
 }
 
 function normalizeSheetEquipmentItems(decision = {}) {

@@ -841,7 +841,10 @@ test('Gateway HTTP preflight rejection does not reserve the lease and a correcte
       })
     });
     assert.equal(invalid.status, 422);
-    assert.deepEqual(await invalid.json(), { error: 'invalid_confirmation_request' });
+    assert.deepEqual(await invalid.json(), {
+      error: 'invalid_confirmation_request',
+      validation_errors: ['sheet_row_candidate.discount_type must be an explicit allowed value']
+    });
     assert.equal(channel.calls.reservation.length, 0, 'invalid input must not consume the durable operation fence');
     assert.equal(executionCalls, 0);
 

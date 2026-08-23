@@ -25,9 +25,10 @@ function hasBearerToken(header, token) {
   return crypto.timingSafeEqual(expected, supplied);
 }
 
-function requestError(status, error) {
+function requestError(status, error, metadata = {}) {
   const value = new Error(error);
   value.status = status;
+  Object.assign(value, metadata);
   return value;
 }
 
@@ -140,7 +141,11 @@ function channelErrorResponse(error) {
     'confirmation_operation_conflict', 'confirmation_operation_unresolved',
     'operation_fence_required', 'operation_fence_mismatch'
   ].includes(error?.code) ? 409 : 400);
-  return { status, error: error?.status ? error.message : String(error?.code || 'invalid_request') };
+  return {
+    status,
+    error: error?.status ? error.message : String(error?.code || 'invalid_request'),
+    validationErrors: Array.isArray(error?.validationErrors) ? error.validationErrors : []
+  };
 }
 
 function safeNonNegativeInteger(value) {
@@ -274,7 +279,13 @@ export function createHermesGatewayHttpHandler({
         if (transport === 'gateway_no_send') throw requestError(403, 'writes_disabled');
         if (typeof validateConfirmation === 'function') {
           const validation = await validateConfirmation(body);
-          if (!validation?.valid) throw requestError(422, 'invalid_confirmation_request');
+          if (!validation?.valid) {
+            const validationErrors = (Array.isArray(validation?.errors) ? validation.errors : [])
+              .map((entry) => String(entry || '').trim().slice(0, 300))
+              .filter(Boolean)
+              .slice(0, 20);
+            throw requestError(422, 'invalid_confirmation_request', { validationErrors });
+          }
         }
         if (typeof channel.get !== 'function' || typeof channel.reserveToolOperation !== 'function') {
           throw requestError(503, 'confirmation_fencing_unavailable');
@@ -386,7 +397,10 @@ export function createHermesGatewayHttpHandler({
       }
     } catch (error) {
       const response = channelErrorResponse(error);
-      sendJson(res, response.status, { error: response.error });
+      sendJson(res, response.status, {
+        error: response.error,
+        ...(response.validationErrors.length ? { validation_errors: response.validationErrors } : {})
+      });
       return true;
     }
 
