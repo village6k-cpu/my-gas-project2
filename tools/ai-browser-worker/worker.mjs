@@ -586,6 +586,18 @@ export function buildHermesPrompt(job, options = {}) {
   const brainContextText = options.brainContext?.enabled
     ? `\nVILLAGE BRAIN OWNER CONTEXT (read-only, advisory):\n${options.brainContext.contextPath ? `- 사장 판단 기준·운영 해석 문서(file 도구로 read-only 열람): ${options.brainContext.contextPath}\n` : ''}${options.brainContext.customerProfilesPath ? `- 고객 프로필 JSONL(1인 1줄: name/segment/누적방문/미수금/사고이력/이탈주의): ${options.brainContext.customerProfilesPath} — 파일이 크니 전체를 읽지 말고 현재 고객명이 포함된 줄만 찾아 읽어라.\n` : ''}- 단골/VIP 여부, 미수금, 과거 사고이력, 사장 응대 기준을 파악해 사장처럼 응대하는 데 쓴다. 프로필의 segment는 참고용이며 할인유형은 여전히 고객DB I열이 우선한다.\n- 이 블록은 빌리지 자체 VILLAGE_Brain 산출물이다. Garry Tan의 별도 오픈소스 GBrain과 혼동하지 않는다.\n- advisory다: 재고/예약/가격/정책의 근거가 아니다. CURRENT_CONFIRMED_POLICY와 시트/화면이 항상 우선하며, brain 파일을 auto_send grounding으로 선언할 수 없다.\n`
     : '';
+  const sheetExecutionText = options.gatewayConfirmationToolAvailable
+    ? `GATEWAY NATIVE SHEET EXECUTION CONTRACT:
+- In a Gateway turn, FINAL_JSON alone does not write anything. 바깥 워커는 FINAL_JSON만 보고 확인요청을 입력하지 않는다.
+- If your complete business decision has should_write_to_sheet=true, call village_confirmation_request 반드시 먼저 호출하고, only then emit FINAL_JSON.
+- Call it with the 완성된 decision, including should_write_to_sheet=true and the complete sheet_row_candidate. Do not use it as a lookup with should_write_to_sheet=false.
+- A no_action receipt is not 입력 성공이 아니다. If the row still needs to be written, correct the decision and call the tool with should_write_to_sheet=true before finishing.
+- Interpret the authoritative receipt in this turn. Every schedule/availability result is owner-review-only and is never Kakao auto-send authority.`
+    : `SHEETS TOOL AVAILABLE VIA GAS API:
+- The outer worker owns the configured GAS endpoint; Hermes does not need its raw URL or credential.
+- Target sheet for reservation inquiry candidates: 확인요청
+- Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true. Be 적극적: if the latest customer turn is a reservation-format request with enough fields for a review row, set should_write_to_sheet=true.
+- Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write when appropriate.`;
   return `AI-first Kakao rental-shop worker task.
 
 CRITICAL RULES:
@@ -665,12 +677,7 @@ ${JSON.stringify(buildCompactJobForPrompt(job), null, 2)}
 ${currentConfirmedPolicyText}
 ${navigationContextText}${terminalAckHintText}${recentBotSendsText}${correctionsText}
 ${lookupContextText}${ragContextText}${brainContextText}
-SHEETS TOOL AVAILABLE VIA GAS API:
-- The outer worker owns the configured GAS endpoint; Hermes does not need its raw URL or credential.
-- Target sheet for reservation inquiry candidates: 확인요청
-- Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true. Be 적극적: if the latest customer turn is a reservation-format request with enough fields for a review row, set should_write_to_sheet=true.
-- Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write when appropriate.
-${options.gatewayConfirmationToolAvailable ? '- In a native Gateway turn, you may call village_confirmation_request only when you judge authoritative schedule or availability confirmation is necessary. Interpret its server result in this turn; every such result remains owner-review-only and is never a Kakao auto-send authority.\n' : ''}
+${sheetExecutionText}
 
 TASK:
 1. Use supplied BROWSER NAVIGATION RESULT/live DevTools DOM first; it is isolated automation Chrome evidence.
