@@ -111,6 +111,16 @@ test('a retry that cannot be durably recorded is promoted to immediate human rev
   });
 });
 
+test('event ingress canonicalizes valid high-precision ISO timestamps for the strict Gateway contract', () => {
+  const event = normalizeEvent({
+    roomKey: 'chat:operator-recovery',
+    reason: 'operator_recovery',
+    detectedAt: '2026-08-23T00:54:20.1696859Z'
+  });
+  assert.equal(event.detectedAt, '2026-08-23T00:54:20.169Z');
+  assert.equal(event.raw.detectedAt, '2026-08-23T00:54:20.1696859Z');
+});
+
 test('Hermes transport defaults only to CLI and rejects unknown values without activating Gateway', () => {
   assert.equal(resolveHermesTransport(undefined), 'cli');
   assert.equal(resolveHermesTransport(''), 'cli');
