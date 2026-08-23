@@ -3680,6 +3680,34 @@ test('confirmation execution preflight rejects a complete sheet row when require
   });
 });
 
+test('staff-confirmed confirmation preflight names the missing duplicate evidence and accepts a repaired decision', () => {
+  const decision = completeSheetDecision({
+    safety_checks: {
+      latest_customer_message_after_last_staff_reply: false,
+      no_auto_reply_sent: true,
+      duplicate_checked_contract_master: false,
+      duplicate_checked_schedule_detail: false,
+      duplicate_checked_request_sheet: false
+    },
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      confirmed: true,
+      already_registered: false,
+      equipment_requested: [{ raw_text: '소니 100-400mm', quantity: 1 }]
+    }
+  });
+
+  const missing = workerModule.validateVillageConfirmationExecutionDecision(decision);
+  assert.equal(missing.valid, false);
+  assert.match(missing.errors.join('|'), /duplicate check/i);
+
+  decision.safety_checks.duplicate_checked_request_sheet = true;
+  assert.deepEqual(workerModule.validateVillageConfirmationExecutionDecision(decision), {
+    valid: true,
+    errors: []
+  });
+});
+
 test('already_answered unregistered reservation stays valid when an actionable schedule follow-up preserves the work', () => {
   const preservedUnregistered = validateAiDecisionContract({
     should_write_to_sheet: false,
