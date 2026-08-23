@@ -2297,6 +2297,19 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   assert.match(prompt, /missing phone is NOT a sheet-write blocker/s);
 });
 
+test('buildHermesPrompt makes the native confirmation tool the only Gateway sheet-write path', () => {
+  const prompt = buildHermesPrompt(
+    { id: 'job-gateway-write', preview_text: '9월 2일 캐논 100-500 예약할게요' },
+    { gatewayConfirmationToolAvailable: true }
+  );
+
+  assert.match(prompt, /Gateway.*FINAL_JSON.*바깥 워커.*확인요청.*입력하지 않는다/s);
+  assert.match(prompt, /should_write_to_sheet=true.*village_confirmation_request.*반드시.*먼저 호출/s);
+  assert.match(prompt, /완성된.*decision.*should_write_to_sheet=true/s);
+  assert.match(prompt, /no_action.*입력 성공.*아니다/s);
+  assert.doesNotMatch(prompt, /Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true/);
+});
+
 test('buildHermesPrompt treats read catch-up rows as possible missed reservations', () => {
   const prompt = buildHermesPrompt({ id: 'job-read', preview_text: '중요 최민석 감사합니다. 견적서 부탁드리겠습니다 5월 29일' });
 
