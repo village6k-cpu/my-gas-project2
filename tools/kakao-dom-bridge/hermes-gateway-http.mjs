@@ -200,7 +200,7 @@ export function buildGatewayHealthReadback({
 }
 
 export function createHermesGatewayHttpHandler({
-  token, channel, executeConfirmation, enqueueResultApplication, recoverFailureNotifications,
+  token, channel, executeConfirmation, validateConfirmation, enqueueResultApplication, recoverFailureNotifications,
   transport = 'cli', now = Date.now, consumerFreshnessMs = 600_000
 } = {}) {
   const gatewayConfigured = GATEWAY_TRANSPORTS.has(transport) && Boolean(String(token || '').trim()) && Boolean(channel);
@@ -272,6 +272,10 @@ export function createHermesGatewayHttpHandler({
         const body = await readJsonBody(req);
         const leaseId = requiredLeaseId(body);
         if (transport === 'gateway_no_send') throw requestError(403, 'writes_disabled');
+        if (typeof validateConfirmation === 'function') {
+          const validation = await validateConfirmation(body);
+          if (!validation?.valid) throw requestError(422, 'invalid_confirmation_request');
+        }
         if (typeof channel.get !== 'function' || typeof channel.reserveToolOperation !== 'function') {
           throw requestError(503, 'confirmation_fencing_unavailable');
         }

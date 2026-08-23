@@ -4695,6 +4695,16 @@ test('buildSheetAvailabilityReport turns GAS results into availability-based act
     ]
   });
   assert.equal(setUnavailable.status, 'unavailable', '세트 헤더의 본체 불가 근거는 무시하면 안 된다');
+
+  const unregistered = buildSheetAvailabilityReport({
+    reqID: 'RQ-260823-001',
+    results: [
+      { 장비명: '캐논 RF 100-500', 수량: '1', 결과: '❓ 미등록 장비', 상세: '장비마스터/세트마스터에 없음' }
+    ]
+  });
+  assert.equal(unregistered.status, 'unregistered');
+  assert.match(unregistered.recommendedAction, /정확.*장비명.*가용.*재확인/);
+  assert.doesNotMatch(unregistered.recommendedAction, /결과가 비어/);
 });
 
 test('buildHermesPostActionPrompt delegates result interpretation and reply prose to Hermes', () => {

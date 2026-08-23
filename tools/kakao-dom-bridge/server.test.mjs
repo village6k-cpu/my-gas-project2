@@ -17,6 +17,7 @@ const {
   p0SlackEscalationDue,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
+  createGatewayConfirmationValidator,
   createGatewayApplicationFailureNotifier,
   createGatewayFailureNotificationCoordinator,
   createGatewayResultApplicationCoordinator,
@@ -437,6 +438,24 @@ test('server confirmation executor forwards the channel claim fence into the wor
   assert.equal(operationArgs.job.roomRevision, 3);
   assert.equal(operationArgs.dependencies.assertCurrentClaim, assertCurrentClaim);
   assert.equal(operationArgs.dependencies.operationFence, operationFence);
+});
+
+test('server confirmation validator rejects invalid decisions before durable reservation wiring', async () => {
+  const validator = createGatewayConfirmationValidator({
+    validateDecision: (decision) => decision.sheet_row_candidate?.discount_type
+      ? { valid: true, errors: [] }
+      : { valid: false, errors: ['discount required'] }
+  });
+  assert.deepEqual(validator({ decision: { sheet_row_candidate: { discount_type: '' } } }), {
+    valid: false,
+    errors: ['discount required']
+  });
+  assert.deepEqual(validator({ decision: { sheet_row_candidate: { discount_type: '일반' } } }), {
+    valid: true,
+    errors: []
+  });
+  const serverSource = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  assert.match(serverSource, /validateConfirmation:\s*gatewayConfirmationValidator/);
 });
 
 test('Gateway result coordinator serializes prepare, fresh DOM apply, finalize, and audit exactly once', async () => {

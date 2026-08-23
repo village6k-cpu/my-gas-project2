@@ -4492,6 +4492,7 @@ export function classifyAvailabilityRows(rows = []) {
   const combined = decisiveRows.map((row) => `${row.result} ${row.detail}`).join(' ').normalize('NFKC');
   if (/(❌|가용\s*0|가용0|사용\s*중|전량\s*사용|불가)/.test(combined)) return 'unavailable';
   if (/(⚠️|부족|겹침|모델\s*선택|확인\s*필요)/.test(combined)) return 'warning';
+  if (/(❓|미등록)/.test(combined)) return 'unregistered';
   if (decisiveRows.every((row) => /(✅|가용\s*[1-9]\d*)/.test(`${row.result} ${row.detail}`))) return 'available';
   return 'unknown';
 }
@@ -4535,6 +4536,8 @@ export function buildSheetAvailabilityReport(sheetResult = null, sheetPayload = 
     recommendedAction = `${reqLabel} 결과에 경고가 있습니다. 상세 결과를 기준으로 부족/겹침/모델 선택 필요 여부를 확인하고, 가능 단정 없이 대안 또는 추가확인을 안내하세요.`;
   } else if (status === 'unavailable') {
     recommendedAction = `${reqLabel} 결과가 가용 불가 또는 가용0입니다. 고객에게 가능하다고 안내하지 말고 대체 일정/대체 장비를 확인하세요.`;
+  } else if (status === 'unregistered') {
+    recommendedAction = `${reqLabel} 결과가 미등록 장비입니다. 장비마스터/세트마스터의 정확한 장비명으로 보정한 뒤 가용을 재확인하고, 확인 전에는 고객에게 가능하다고 안내하지 마세요.`;
   }
 
   return {
