@@ -804,6 +804,64 @@ test('Gateway HTTP gateway_no_send rejects confirmation writes before execution'
   }
 });
 
+test('Gateway HTTP preflight rejection does not reserve the lease and a corrected request can execute', async () => {
+  const channel = makeChannel();
+  let executionCalls = 0;
+  const app = await start(createHermesGatewayHttpHandler({
+    token,
+    channel,
+    transport: 'gateway',
+    validateConfirmation: (request) => request.decision?.sheet_row_candidate?.discount_type
+      ? { valid: true, errors: [] }
+      : { valid: false, errors: ['sheet_row_candidate.discount_type must be an explicit allowed value'] },
+    executeConfirmation: async (request) => {
+      executionCalls += 1;
+      return {
+        schema: 'village-confirmation-receipt/v1',
+        receipt_id: 'receipt-corrected-preflight',
+        job_id: request.job_id,
+        room_key: request.room_key,
+        room_revision: request.room_revision,
+        status: 'ok',
+        availability_report: [],
+        authoritative_sheet_result: null,
+        created_at: '2026-08-23T00:00:00.000Z',
+        error: null
+      };
+    }
+  }));
+  try {
+    const common = { job_id: 'job-1', room_key: 'room-1', room_revision: 3, lease_id: leaseId };
+    const invalid = await gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...common,
+        decision: { should_write_to_sheet: true, sheet_row_candidate: { customer_name: '안중섭', discount_type: '' } }
+      })
+    });
+    assert.equal(invalid.status, 422);
+    assert.deepEqual(await invalid.json(), { error: 'invalid_confirmation_request' });
+    assert.equal(channel.calls.reservation.length, 0, 'invalid input must not consume the durable operation fence');
+    assert.equal(executionCalls, 0);
+
+    const corrected = await gatewayFetch(app.url, '/hermes/v1/tools/confirmation-request', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...common,
+        decision: { should_write_to_sheet: true, sheet_row_candidate: { customer_name: '안중섭', discount_type: '일반' } }
+      })
+    });
+    assert.equal(corrected.status, 200);
+    assert.equal((await corrected.json()).receipt_id, 'receipt-corrected-preflight');
+    assert.equal(channel.calls.reservation.length, 1);
+    assert.equal(executionCalls, 1);
+  } finally {
+    await app.close();
+  }
+});
+
 test('Gateway HTTP fails closed when durable receipt persistence fails', async () => {
   const channel = makeChannel();
   channel.recordToolReceipt = async () => { throw Object.assign(new Error('disk unavailable'), { code: 'receipt_persist_failed' }); };
