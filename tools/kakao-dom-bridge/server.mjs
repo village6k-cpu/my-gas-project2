@@ -879,7 +879,9 @@ export function normalizeEvent(raw = {}) {
   const customerName = String(raw.customerName || raw.customer_name || '').slice(0, 120);
   const messagePreview = String(raw.messagePreview || raw.message_preview || '').slice(0, 500);
   const displayTime = String(raw.displayTime || raw.display_time || '').slice(0, 80);
-  const detectedAt = String(raw.detectedAt || raw.detected_at || nowIso());
+  const detectedAtInput = String(raw.detectedAt || raw.detected_at || nowIso());
+  const detectedAtMs = Date.parse(detectedAtInput);
+  const detectedAt = Number.isFinite(detectedAtMs) ? new Date(detectedAtMs).toISOString() : nowIso();
   const eventHash = String(raw.eventHash || raw.event_hash || sha256(JSON.stringify({ source, roomKey, previewText, detectedAt })));
   const unreadCount = raw.unreadCount ?? raw.unread_count ?? inferKakaoUnreadCountFromPreview(previewText);
 
