@@ -591,7 +591,8 @@ export function buildHermesPrompt(job, options = {}) {
 - In a Gateway turn, FINAL_JSON alone does not write anything. 바깥 워커는 FINAL_JSON만 보고 확인요청을 입력하지 않는다.
 - If your complete business decision has should_write_to_sheet=true, call village_confirmation_request 반드시 먼저 호출하고, only then emit FINAL_JSON.
 - Call it with the 완성된 decision. For should_write_to_sheet=true, include the complete sheet_row_candidate so the tool can write exactly that decision.
-- If existing_confirm_request_ids is non-empty, call village_confirmation_request before FINAL_JSON with should_write_to_sheet=false so the bridge can 검증 the claimed existing RQ against the live sheet. This false mode is only for 기존 RQ 실재 여부의 authoritative verification, never a general read-only lookup.
+- When existing_confirm_request_ids names an unchanged existing RQ, call village_confirmation_request once with should_write_to_sheet=false to 검증 기존 RQ 실재 여부; never pre-verify a write.
+- For a pending-RQ replacement, make one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ in that operation.
 - If that verification says an existing RQ was not found and the reservation remains unregistered, correct the decision to should_write_to_sheet=true and call the tool again with the complete sheet row before finishing.
 - A no_action receipt is not 입력 성공이 아니다. If the row still needs to be written, correct the decision and call the tool with should_write_to_sheet=true before finishing.
 - Interpret the authoritative receipt in this turn. Every schedule/availability result is owner-review-only and is never Kakao auto-send authority.`
@@ -655,7 +656,7 @@ REPLY TONE POLICY:
 
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
-- 세트/장비마스터를 조회한다. 신규 예약은 equipment_write_mode="full_plan"+전체 목록, 기존 예약/RQ 추가는 "additions_only"+이번 추가·증가분만. Do not repeat existing equipment.
+- 세트/장비마스터를 조회한다. 신규="full_plan"+전체 목록, 기존 추가/증가="additions_only"+delta. 미등록 RQ 장비 삭제/교체="replace_full_plan"+complete final plan. Do not repeat existing equipment in additions_only.
 - 세트 옵션은 set_component_selections로만 지정: 600X 젬볼 => 어퓨쳐 600X/소프트박스/젬볼 90. Never add set options as top-level equipment.
 - 예약 메시지에 명시된 예약자명/연락처는 프로필명보다 우선한다.
 - RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
@@ -694,9 +695,9 @@ TASK:
 9-1. For FAQ/procedure/policy/components auto_send, use CURRENT_CONFIRMED_POLICY first, otherwise call RAG and fill rag_usage. Outer worker verifies current-policy match or high-confidence retrieved support. Never use RAG for current stock/booking/schedule truth.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 10-1. Doc types은 서류 생성/발송/발행만. 확인요청/예약/가용/스케줄/파손/반납/정산은 견적서 단어가 섞여도 doc 아님; primary item에 합친다.
-11. For reservation-format requests, missing phone is NOT a sheet-write blocker. Search 고객DB by name; if a unique DB phone is found, use it, otherwise leave sheet_row_candidate.phone="" and still write 확인요청. discount_type: 고객DB I열 outranks Kakao; use DB 학생/개인사업자/프리랜서/단골/제휴/일반 when present, otherwise infer from Kakao. Missing equipment/duplicate lookup/phone goes to follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or an unchanged duplicate. An existing booking with newly added or increased equipment is not a duplicate: write only that delta with equipment_write_mode="additions_only". If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; phone may still be blank.
+11. For reservation-format requests, missing phone is NOT a sheet-write blocker. Search 고객DB by name; if a unique DB phone is found, use it, otherwise leave sheet_row_candidate.phone="" and still write 확인요청. discount_type: 고객DB I열 outranks Kakao; use DB 학생/개인사업자/프리랜서/단골/제휴/일반 when present, otherwise infer from Kakao. Missing equipment/duplicate lookup/phone goes to follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or an unchanged duplicate. An existing booking with newly added or increased equipment is not a duplicate. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; phone may still be blank.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
-11-2. Multiple/revised equipment: each equipment entry must be a separate top-level object. For a new unregistered booking use equipment_write_mode="full_plan" and the complete final plan. For an already registered booking or an existing RQ use equipment_write_mode="additions_only" and include only equipment newly added or quantity newly increased in the latest customer turn; never repeat the existing schedule/RQ equipment. Set plan_complete=true only after reconciling the correct write set for that mode. If the delta cannot be determined safely, set should_write_to_sheet=false and create one review follow-up instead of re-inserting the full plan.
+11-2. Multiple/revised equipment: separate top-level entries. New booking="full_plan"+complete plan; registered booking or pending-RQ additions="additions_only"+delta; pending-RQ removals/replacements/reductions="replace_full_plan"+complete final plan. Never replace a registered booking. Set plan_complete=true only after reconciling that write set; otherwise no write + one review follow-up.
 11-3. sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If the normalized return is not later than pickup, set should_write_to_sheet=false and create one review follow-up instead of guessing.
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
@@ -768,7 +769,7 @@ The JSON schema:
   ],
   "sheet_row_candidate": {
     "plan_complete": boolean,
-    "equipment_write_mode": "full_plan" | "additions_only",
+    "equipment_write_mode": "full_plan" | "additions_only" | "replace_full_plan",
     "customer_name": string,
     "equipment": [{ "item": string, "quantity": number | string | "" }],
     "set_component_selections": [{ "set_item": string, "component_item": string, "selected_item": string }],
@@ -960,8 +961,8 @@ export function validateAiDecisionContract(decision = {}) {
       errors.push('sheet_row_candidate.discount_type must be an explicit allowed value');
     }
     const equipmentWriteMode = text(row.equipment_write_mode).trim() || 'full_plan';
-    if (!['full_plan', 'additions_only'].includes(equipmentWriteMode)) {
-      errors.push('sheet_row_candidate.equipment_write_mode must be full_plan or additions_only');
+    if (!['full_plan', 'additions_only', 'replace_full_plan'].includes(equipmentWriteMode)) {
+      errors.push('sheet_row_candidate.equipment_write_mode must be full_plan, additions_only, or replace_full_plan');
     }
     const inquiry = decision.reservation_inquiry && typeof decision.reservation_inquiry === 'object'
       ? decision.reservation_inquiry
@@ -970,10 +971,14 @@ export function validateAiDecisionContract(decision = {}) {
       ? decision.existing_confirm_request_ids.map((value) => text(value).trim()).filter(Boolean)
       : [];
     const hasExistingBookingEvidence = inquiry.already_registered === true || existingIds.length > 0;
-    if (hasExistingBookingEvidence && equipmentWriteMode !== 'additions_only') {
+    if (inquiry.already_registered === true && equipmentWriteMode !== 'additions_only') {
       errors.push('existing booking equipment writes must use additions_only and must not repeat existing equipment');
     }
-    if (!hasExistingBookingEvidence && equipmentWriteMode === 'additions_only') {
+    if (existingIds.length > 0 && inquiry.already_registered !== true
+      && !['additions_only', 'replace_full_plan'].includes(equipmentWriteMode)) {
+      errors.push('existing pending RQ writes must use additions_only or replace_full_plan');
+    }
+    if (!hasExistingBookingEvidence && ['additions_only', 'replace_full_plan'].includes(equipmentWriteMode)) {
       errors.push('additions_only requires an existing registered booking or existing_confirm_request_ids');
     }
     if (!Array.isArray(row.equipment) || !row.equipment.length) {
@@ -1468,7 +1473,9 @@ export function buildSheetAppendPayload(decision, options = {}) {
     할인유형: text(row.discount_type).trim(),
     비고: memo,
     추가요청: extra,
-    입력모드: text(row.equipment_write_mode).trim() || 'full_plan',
+    입력모드: text(row.equipment_write_mode).trim() === 'replace_full_plan'
+      ? 'full_plan'
+      : text(row.equipment_write_mode).trim() || 'full_plan',
     // The AI has already reconciled catalog evidence and any customer wording.
     // GAS may validate and expand sets, but must not reinterpret this plan.
     장비명원문보존: true,
@@ -8696,6 +8703,35 @@ export async function executeVillageConfirmationRequest({
   let discountPatchError = null;
   try {
     freshnessGuard.throwIfSuperseded();
+    if (text(executedDecision?.sheet_row_candidate?.equipment_write_mode).trim() === 'replace_full_plan') {
+      const expectedIds = new Set(
+        (Array.isArray(executedDecision?.existing_confirm_request_ids)
+          ? executedDecision.existing_confirm_request_ids
+          : [])
+          .map((value) => text(value).trim().toUpperCase())
+          .filter((value) => /^RQ-\d{6}-\d{3}$/.test(value))
+      );
+      let verifiedExistingRequest = null;
+      try {
+        verifiedExistingRequest = await fetchExistingImpl(config, executedDecision, []);
+      } catch (error) {
+        verifiedExistingRequest = {
+          lookup_error: text(error?.message || error).slice(0, 500) || 'existing request lookup failed'
+        };
+      }
+      const actualId = text(verifiedExistingRequest?.reqID).trim().toUpperCase();
+      if (!actualId || !expectedIds.has(actualId)) {
+        sheetResult = {
+          success: false,
+          error: '기존 확인요청을 권위 시트에서 정확히 검증하지 못해 교체 입력을 중단했습니다.',
+          error_type: 'existing_confirm_request_replacement_verification_failed',
+          recoverable: false
+        };
+        sheetPayload = null;
+      } else {
+        existingRequestResult = verifiedExistingRequest;
+      }
+    }
     if (sheetPayload?.args?.입력모드 === 'additions_only') {
       let existingRequestForMerge = null;
       if (executedDecision?.reservation_inquiry?.already_registered !== true) {
