@@ -3661,6 +3661,25 @@ test('validateAiDecisionContract rejects missing AI semantics instead of reconst
   assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].summary')));
 });
 
+test('confirmation execution preflight rejects a complete sheet row when required safety evidence is missing', () => {
+  const missingSafetyEvidence = completeSheetDecision();
+  delete missingSafetyEvidence.safety_checks;
+
+  const contract = validateAiDecisionContract(missingSafetyEvidence);
+  assert.equal(contract.valid, false);
+  assert.match(contract.errors.join('|'), /safety_checks/);
+
+  const execution = workerModule.validateVillageConfirmationExecutionDecision(missingSafetyEvidence);
+  assert.equal(execution.valid, false);
+  assert.match(execution.errors.join('|'), /safe confirmation-request payload|safety_checks/);
+  assert.equal(buildSheetAppendPayload(missingSafetyEvidence, { apiKey: 'secret' }), null);
+
+  assert.deepEqual(workerModule.validateVillageConfirmationExecutionDecision(completeSheetDecision()), {
+    valid: true,
+    errors: []
+  });
+});
+
 test('already_answered unregistered reservation stays valid when an actionable schedule follow-up preserves the work', () => {
   const preservedUnregistered = validateAiDecisionContract({
     should_write_to_sheet: false,

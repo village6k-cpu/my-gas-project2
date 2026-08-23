@@ -944,6 +944,9 @@ export function validateAiDecisionContract(decision = {}) {
   }
 
   if (decision.should_write_to_sheet === true) {
+    if (!hasRequiredSheetSafetyChecks(decision)) {
+      errors.push('sheet writes require explicit safety_checks that prove the Kakao conversation state');
+    }
     const row = decision.sheet_row_candidate && typeof decision.sheet_row_candidate === 'object'
       ? decision.sheet_row_candidate
       : {};
@@ -1449,6 +1452,18 @@ export function buildSheetAppendPayload(decision, options = {}) {
     args,
     setComponentSelections
   };
+}
+
+export function validateVillageConfirmationExecutionDecision(decision = {}) {
+  const validation = validateAiDecisionContract(decision);
+  if (!validation.valid) return validation;
+  if (decision.should_write_to_sheet === true && !buildSheetAppendPayload(decision)) {
+    return {
+      valid: false,
+      errors: ['decision did not produce a safe confirmation-request payload']
+    };
+  }
+  return { valid: true, errors: [] };
 }
 
 function isUuid(value) {
