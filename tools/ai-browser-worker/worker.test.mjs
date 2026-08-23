@@ -1639,6 +1639,110 @@ test('executeVillageConfirmationRequest reuses additions-only merge, customer di
   assert.deepEqual(forbidden, { hermes: 0, kakao: 0, followUp: 0, slack: 0, reconciliation: 0 });
 });
 
+test('executeVillageConfirmationRequest executes pending RQ replacement only after exact authoritative verification', async () => {
+  const decision = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260823-010'],
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: 'replace_full_plan',
+      customer_name: '백남준',
+      phone: '010-8739-5793',
+      start_date: '2026-08-25',
+      pickup_time: '21:00',
+      end_date: '2026-08-26',
+      return_time: '21:00',
+      discount_type: '개인사업자/프리랜서',
+      equipment: [{ item: '캠기어 마크4 (75볼)', quantity: 2 }]
+    }
+  });
+  let lookupCalls = 0;
+  const appended = [];
+
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-replace-1', roomKey: 'room-replace-1', roomRevision: 3 },
+    roomRevision: 3,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      fetchExistingConfirmRequestResultForDecision: async () => {
+        lookupCalls += 1;
+        return {
+          success: true,
+          duplicate: true,
+          reqID: 'RQ-260823-010',
+          source: 'existing_confirm_request_lookup',
+          topLevelEquipment: [
+            { 이름: '소니 GM 70-200mm II', 수량: 2 },
+            { 이름: '셔틀러에이스 M (75볼)', 수량: 2 }
+          ],
+          results: []
+        };
+      },
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
+      appendToSheet: async (_config, payload) => {
+        appended.push(payload);
+        return {
+          success: true,
+          duplicate: false,
+          reqID: 'RQ-260823-013',
+          replacedReqIDs: ['RQ-260823-010'],
+          results: [{ equipment: '캠기어 마크4 (75볼)', quantity: '2', result: '✅ 가용2', detail: '보유3' }]
+        };
+      },
+      assertCurrentClaim: async () => {},
+      randomUUID: () => 'receipt-replace-1',
+      now: () => new Date('2026-08-23T14:30:00.000Z')
+    }
+  });
+
+  assert.equal(lookupCalls, 1);
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].args.입력모드, 'full_plan');
+  assert.deepEqual(appended[0].args.장비, [{ 이름: '캠기어 마크4 (75볼)', 수량: 2 }]);
+  assert.equal(receipt.status, 'ok');
+  assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260823-013');
+  assert.deepEqual(receipt.authoritative_sheet_result.replacedReqIDs, ['RQ-260823-010']);
+});
+
+test('executeVillageConfirmationRequest rejects unverified pending RQ replacement without GAS mutation', async () => {
+  const decision = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260823-010'],
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: 'replace_full_plan',
+      equipment: [{ item: '캠기어 마크4 (75볼)', quantity: 2 }]
+    }
+  });
+  let appendCalls = 0;
+
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-replace-missing', roomKey: 'room-replace-missing', roomRevision: 3 },
+    roomRevision: 3,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      fetchExistingConfirmRequestResultForDecision: async () => ({
+        success: true,
+        duplicate: true,
+        reqID: 'RQ-260823-999',
+        source: 'existing_confirm_request_lookup',
+        topLevelEquipment: [{ 이름: '다른 요청', 수량: 1 }],
+        results: []
+      }),
+      appendToSheet: async () => { appendCalls += 1; },
+      randomUUID: () => 'receipt-replace-missing',
+      now: () => new Date('2026-08-23T14:30:00.000Z')
+    }
+  });
+
+  assert.equal(appendCalls, 0);
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.authoritative_sheet_result, null);
+  assert.equal(receipt.error.type, 'existing_confirm_request_replacement_verification_failed');
+});
+
 test('executeVillageConfirmationRequest returns a typed validation failure without mutating GAS', async () => {
   let appendCalls = 0;
   const receipt = await workerModule.executeVillageConfirmationRequest({
@@ -2310,6 +2414,22 @@ test('buildHermesPrompt makes the native confirmation tool verify both writes an
   assert.match(prompt, /should_write_to_sheet=false.*기존 RQ.*실재 여부/s);
   assert.match(prompt, /no_action.*입력 성공.*아니다/s);
   assert.doesNotMatch(prompt, /Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true/);
+});
+
+test('buildHermesPrompt requires one native confirmation call for pending RQ replacement', () => {
+  const prompt = buildHermesPrompt(
+    { id: 'job-rq-replacement', preview_text: '렌즈는 빼고 캠기어 마크4 2개로 바꿔주세요' },
+    { gatewayConfirmationToolAvailable: true }
+  );
+
+  assert.match(prompt, /replace_full_plan/);
+  assert.match(prompt, /삭제.*교체.*complete final plan/s);
+  assert.match(prompt, /replacement.*one.*village_confirmation_request.*call/is);
+  assert.match(prompt, /unchanged.*existing RQ.*should_write_to_sheet=false/is);
+  assert.doesNotMatch(
+    prompt,
+    /If existing_confirm_request_ids is non-empty, call village_confirmation_request before FINAL_JSON with should_write_to_sheet=false/
+  );
 });
 
 test('buildHermesPrompt treats read catch-up rows as possible missed reservations', () => {
@@ -3905,6 +4025,51 @@ test('existing booking writes reject a repeated full plan and accept only the ad
 
   const payload = buildSheetAppendPayload(addition, { apiKey: 'secret' });
   assert.deepEqual(payload.args.장비, [{ 이름: '소니 GM 24-70mm II', 수량: 1 }]);
+});
+
+test('pending RQ replacement accepts one complete final plan and rejects unsafe replacement scopes', () => {
+  const replacement = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260823-010'],
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: false
+    },
+    sheet_row_candidate: {
+      equipment_write_mode: 'replace_full_plan',
+      customer_name: '백남준',
+      phone: '010-8739-5793',
+      start_date: '2026-08-25',
+      pickup_time: '21:00',
+      end_date: '2026-08-26',
+      return_time: '21:00',
+      discount_type: '개인사업자/프리랜서',
+      equipment: [{ item: '캠기어 마크4 (75볼)', quantity: 2 }]
+    }
+  });
+
+  assert.equal(validateAiDecisionContract(replacement).valid, true);
+  const payload = buildSheetAppendPayload(replacement, { apiKey: 'secret' });
+  assert.equal(payload.args.입력모드, 'full_plan');
+  assert.deepEqual(payload.args.장비, [{ 이름: '캠기어 마크4 (75볼)', 수량: 2 }]);
+
+  const withoutExactRequest = completeSheetDecision({
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: 'replace_full_plan',
+      equipment: [{ item: '캠기어 마크4 (75볼)', quantity: 2 }]
+    }
+  });
+  const registeredBooking = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260823-010'],
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: true },
+    sheet_row_candidate: {
+      equipment_write_mode: 'replace_full_plan',
+      equipment: [{ item: '캠기어 마크4 (75볼)', quantity: 2 }]
+    }
+  });
+
+  assert.equal(validateAiDecisionContract(withoutExactRequest).valid, false);
+  assert.equal(validateAiDecisionContract(registeredBooking).valid, false);
 });
 
 test('set component choice is not written as another top-level equipment item', () => {
