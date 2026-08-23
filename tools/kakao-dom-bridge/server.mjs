@@ -16,7 +16,7 @@ import {
   loadKakaoWorkerRuntimeConfig,
   prepareKakaoDecisionFromSnapshot,
   prepareKakaoGatewayDecision,
-  validateAiDecisionContract
+  validateVillageConfirmationExecutionDecision
 } from '../ai-browser-worker/worker.mjs';
 import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-browser-worker/follow-up-case-lifecycle.mjs';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
@@ -472,7 +472,7 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
   });
 }
 
-export function createGatewayConfirmationValidator({ validateDecision = validateAiDecisionContract } = {}) {
+export function createGatewayConfirmationValidator({ validateDecision = validateVillageConfirmationExecutionDecision } = {}) {
   if (typeof validateDecision !== 'function') throw new Error('Gateway confirmation validator is required');
   return (request = {}) => validateDecision(request.decision);
 }

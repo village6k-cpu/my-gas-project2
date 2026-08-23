@@ -458,6 +458,43 @@ test('server confirmation validator rejects invalid decisions before durable res
   assert.match(serverSource, /validateConfirmation:\s*gatewayConfirmationValidator/);
 });
 
+test('server default confirmation validator matches the safe sheet payload boundary', () => {
+  const validator = createGatewayConfirmationValidator();
+  const decision = {
+    classification: 'reservation',
+    should_write_to_sheet: true,
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: false,
+      confirmed: true,
+      equipment_requested: ['소니 FX3 바디세트']
+    },
+    sheet_row_candidate: {
+      plan_complete: true,
+      start_date: '2026-08-28',
+      pickup_time: '15:00',
+      end_date: '2026-08-29',
+      return_time: '15:00',
+      customer_name: '안재용',
+      phone: '010-0000-0000',
+      discount_type: '학생',
+      equipment_write_mode: 'full_plan',
+      equipment: [{ item: '소니 FX3 바디세트', quantity: 1 }]
+    }
+  };
+
+  const missing = validator({ decision });
+  assert.equal(missing.valid, false);
+  assert.match(missing.errors.join('|'), /safety_checks|safe confirmation-request payload/);
+
+  decision.safety_checks = {
+    kakao_conversation_opened: true,
+    did_not_classify_from_preview_only: true,
+    latest_customer_message_after_last_staff_reply: true
+  };
+  assert.deepEqual(validator({ decision }), { valid: true, errors: [] });
+});
+
 test('Gateway result coordinator serializes prepare, fresh DOM apply, finalize, and audit exactly once', async () => {
   const order = [];
   let applicationState = 'pending';
