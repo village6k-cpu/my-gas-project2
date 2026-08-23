@@ -590,7 +590,9 @@ export function buildHermesPrompt(job, options = {}) {
     ? `GATEWAY NATIVE SHEET EXECUTION CONTRACT:
 - In a Gateway turn, FINAL_JSON alone does not write anything. 바깥 워커는 FINAL_JSON만 보고 확인요청을 입력하지 않는다.
 - If your complete business decision has should_write_to_sheet=true, call village_confirmation_request 반드시 먼저 호출하고, only then emit FINAL_JSON.
-- Call it with the 완성된 decision, including should_write_to_sheet=true and the complete sheet_row_candidate. Do not use it as a lookup with should_write_to_sheet=false.
+- Call it with the 완성된 decision. For should_write_to_sheet=true, include the complete sheet_row_candidate so the tool can write exactly that decision.
+- If existing_confirm_request_ids is non-empty, call village_confirmation_request before FINAL_JSON with should_write_to_sheet=false so the bridge can 검증 the claimed existing RQ against the live sheet. This false mode is only for 기존 RQ 실재 여부의 authoritative verification, never a general read-only lookup.
+- If that verification says an existing RQ was not found and the reservation remains unregistered, correct the decision to should_write_to_sheet=true and call the tool again with the complete sheet row before finishing.
 - A no_action receipt is not 입력 성공이 아니다. If the row still needs to be written, correct the decision and call the tool with should_write_to_sheet=true before finishing.
 - Interpret the authoritative receipt in this turn. Every schedule/availability result is owner-review-only and is never Kakao auto-send authority.`
     : `SHEETS TOOL AVAILABLE VIA GAS API:
@@ -4839,10 +4841,11 @@ function mapConfirmRequestSearchDataToSheetResult(data = {}, reqID = '') {
       이름: text(row[5]).trim(),
       수량: Math.max(1, Number.parseInt(text(row[6]).trim(), 10) || 1)
     }));
+  const exactReqID = matchingRows.length ? reqID : '';
   return {
     success: true,
-    duplicate: true,
-    reqID,
+    duplicate: Boolean(exactReqID),
+    reqID: exactReqID,
     results: normalizeAvailabilityResultRows(resultRows),
     topLevelEquipment,
     source: 'existing_confirm_request_lookup',
