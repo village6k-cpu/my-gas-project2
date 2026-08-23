@@ -173,6 +173,45 @@ test('Gateway HTTP emits exact durable seven-field event plus lease and never lo
   });
 });
 
+test('Gateway HTTP reclaims one no_final event once and exposes no third lease', async () => {
+  await withRealGatewayChannel(async ({ channel }) => {
+    const event = {
+      schema: 'village-kakao-gateway-event/v1', job_id: 'job-no-final-retry', room_key: 'room-no-final-retry',
+      room_revision: 1, prompt: 'retry the exact turn', detected_at: '2026-08-21T00:00:00.000Z', raw: { bounded: true }
+    };
+    await channel.enqueue(event, { localContext: { local: 'preserved' } });
+    const app = await start(createHermesGatewayHttpHandler({ token, channel, transport: 'gateway' }));
+    try {
+      const firstResponse = await gatewayFetch(app.url, '/hermes/v1/events?consumer_id=gateway-retry-1&wait_ms=0');
+      const first = (await firstResponse.json()).event;
+      const firstOutcome = await gatewayFetch(app.url, '/hermes/v1/outcomes', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...first, outcome: 'no_final' })
+      });
+      assert.equal(firstOutcome.status, 200);
+
+      const secondResponse = await gatewayFetch(app.url, '/hermes/v1/events?consumer_id=gateway-retry-2&wait_ms=0');
+      const second = (await secondResponse.json()).event;
+      assert.equal(second.job_id, first.job_id);
+      assert.notEqual(second.lease_id, first.lease_id);
+      assert.equal(JSON.stringify(second).includes('preserved'), false);
+      const secondOutcome = await gatewayFetch(app.url, '/hermes/v1/outcomes', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...second, outcome: 'no_final' })
+      });
+      assert.equal(secondOutcome.status, 200);
+
+      const exhaustedResponse = await gatewayFetch(app.url, '/hermes/v1/events?consumer_id=gateway-retry-3&wait_ms=0');
+      assert.deepEqual(await exhaustedResponse.json(), { event: null });
+      const exhausted = await channel.get(first.job_id);
+      assert.equal(exhausted.state, 'failed');
+      assert.equal(exhausted.failure_notification.state, 'pending');
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 test('Gateway HTTP requires its bearer token and does not echo it', async () => {
   const app = await start(createHermesGatewayHttpHandler({ token, channel: makeChannel(), transport: 'gateway' }));
   try {

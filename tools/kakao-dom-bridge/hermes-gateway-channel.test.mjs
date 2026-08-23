@@ -179,21 +179,41 @@ test('rejects a stale result revision without completing the claimed job', async
   });
 });
 
-test('treats no_final and superseded cancellation as terminal outcomes without retries', async () => {
-  await withChannel(async ({ channel }) => {
+test('retries no_final once before any tool reservation, then fails durably without a third claim', async () => {
+  await withChannel(async ({ directory, channel, clock }) => {
     await channel.enqueue(event('job-no-final', 'room-a', 1));
     const noFinalClaim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
     await channel.recordOutcome({ job_id: 'job-no-final', room_key: 'room-a', room_revision: 1, lease_id: noFinalClaim.lease_id, outcome: 'no_final' });
-    const noFinal = await channel.get('job-no-final');
-    assert.equal(noFinal.state, 'failed');
-    assert.equal(noFinal.error.type, 'no_final');
-    assert.equal(noFinal.human_review_required, true);
+    const retryable = await channel.get('job-no-final');
+    assert.equal(retryable.state, 'ready');
+    assert.equal(retryable.attempts, 1);
+    assert.equal(retryable.error.type, 'no_final_retry');
+    assert.equal(retryable.human_review_required, false);
+    assert.equal(retryable.failure_notification, null);
 
-    await channel.enqueue(event('job-old', 'room-b', 1));
-    const oldClaim = await channel.claim({ consumerId: 'gateway-1', waitMs: 0 });
-    await channel.enqueue(event('job-new', 'room-b', 2));
-    await channel.recordOutcome({ job_id: 'job-old', room_key: 'room-b', room_revision: 1, lease_id: oldClaim.lease_id, outcome: 'cancelled' });
-    const cancelled = await channel.get('job-old');
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    const retryClaim = await restarted.claim({ consumerId: 'gateway-2', waitMs: 0 });
+    assert.equal(retryClaim.job_id, noFinalClaim.job_id);
+    assert.equal(retryClaim.attempts, 2);
+    assert.notEqual(retryClaim.lease_id, noFinalClaim.lease_id);
+    await restarted.recordOutcome({
+      job_id: retryClaim.job_id, room_key: retryClaim.room_key, room_revision: retryClaim.room_revision,
+      lease_id: retryClaim.lease_id, outcome: 'no_final'
+    });
+    const exhausted = await restarted.get(retryClaim.job_id);
+    assert.equal(exhausted.state, 'failed');
+    assert.equal(exhausted.error.type, 'no_final');
+    assert.equal(exhausted.human_review_required, true);
+    assert.equal(exhausted.failure_notification.state, 'pending');
+    assert.equal(await restarted.claim({ consumerId: 'gateway-3', waitMs: 0 }), null);
+
+    await restarted.enqueue(event('job-old', 'room-b', 1));
+    const oldClaim = await restarted.claim({ consumerId: 'gateway-1', waitMs: 0 });
+    await restarted.enqueue(event('job-new', 'room-b', 2));
+    await restarted.recordOutcome({ job_id: 'job-old', room_key: 'room-b', room_revision: 1, lease_id: oldClaim.lease_id, outcome: 'cancelled' });
+    const cancelled = await restarted.get('job-old');
     assert.equal(cancelled.state, 'superseded');
     assert.equal(cancelled.outcome.outcome, 'cancelled');
   });
@@ -827,7 +847,7 @@ test('lease expiry re-exposes the exact same native event and local context once
   });
 });
 
-test('confirmation reservation never retries after lease expiry and no_final is terminal with durable notification', async () => {
+test('confirmation reservation never retries and no_final without a reservation retries only once', async () => {
   await withChannel(async ({ channel, clock }) => {
     await channel.enqueue(event('reserved-no-retry', 'reserved-room', 1));
     const reservedClaim = await channel.claim({ consumerId: 'gateway-native', waitMs: 0 });
@@ -846,10 +866,17 @@ test('confirmation reservation never retries after lease expiry and no_final is 
       job_id: noFinalClaim.job_id, room_key: noFinalClaim.room_key, room_revision: noFinalClaim.room_revision,
       lease_id: noFinalClaim.lease_id, outcome: 'no_final'
     });
-    const noFinal = await channel.get(noFinalClaim.job_id);
-    assert.equal(noFinal.state, 'failed');
-    assert.equal(noFinal.error.type, 'no_final');
-    assert.equal(noFinal.failure_notification.state, 'pending');
+    const retryClaim = await channel.claim({ consumerId: 'gateway-native', waitMs: 0 });
+    assert.equal(retryClaim.job_id, noFinalClaim.job_id);
+    assert.equal(retryClaim.attempts, 2);
+    await channel.recordOutcome({
+      job_id: retryClaim.job_id, room_key: retryClaim.room_key, room_revision: retryClaim.room_revision,
+      lease_id: retryClaim.lease_id, outcome: 'no_final'
+    });
+    const exhausted = await channel.get(retryClaim.job_id);
+    assert.equal(exhausted.state, 'failed');
+    assert.equal(exhausted.error.type, 'no_final');
+    assert.equal(exhausted.failure_notification.state, 'pending');
     assert.equal(await channel.claim({ consumerId: 'gateway-native', waitMs: 0 }), null);
   });
 });
