@@ -1529,16 +1529,23 @@ export function semanticRoomEventIdentity(event = {}) {
   return [preview, displayTime].filter(Boolean).join('\n');
 }
 
-export function registerAcceptedRoomEvent(versions, roomKey, semanticIdentity) {
+export function registerAcceptedRoomEvent(versions, roomKey, semanticIdentity, durableRevision = 0) {
   if (!(versions instanceof Map)) throw new TypeError('versions must be a Map');
   const key = String(roomKey || '').trim();
   const identity = String(semanticIdentity || '').trim();
   if (!key || !identity) throw new Error('roomKey and semanticIdentity are required');
   const previous = versions.get(key) || { revision: 0, semanticIdentity: '' };
   if (previous.semanticIdentity === identity) {
-    return { roomKey: key, revision: previous.revision, changed: false };
+    const synchronizedRevision = Math.max(Number(previous.revision || 0), Number(durableRevision || 0));
+    if (synchronizedRevision !== previous.revision) {
+      versions.set(key, { revision: synchronizedRevision, semanticIdentity: identity });
+    }
+    return { roomKey: key, revision: synchronizedRevision, changed: false };
   }
-  const next = { revision: Number(previous.revision || 0) + 1, semanticIdentity: identity };
+  const next = {
+    revision: Math.max(Number(previous.revision || 0), Number(durableRevision || 0)) + 1,
+    semanticIdentity: identity
+  };
   versions.set(key, next);
   return { roomKey: key, revision: next.revision, changed: true };
 }
@@ -3803,7 +3810,15 @@ async function handleEvent(req, res) {
 
   const acceptedRoomKey = roomKeyForDebounce(event);
   const acceptedIdentity = semanticRoomEventIdentity(event) || String(event.eventHash || '').trim();
-  const roomVersion = registerAcceptedRoomEvent(state.roomVersions, acceptedRoomKey, acceptedIdentity);
+  const durableRoomRevision = gatewayChannel && typeof gatewayChannel.latestRoomRevision === 'function'
+    ? await gatewayChannel.latestRoomRevision(acceptedRoomKey)
+    : 0;
+  const roomVersion = registerAcceptedRoomEvent(
+    state.roomVersions,
+    acceptedRoomKey,
+    acceptedIdentity,
+    durableRoomRevision
+  );
   event.roomRevision = roomVersion.revision;
 
   try {

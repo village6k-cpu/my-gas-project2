@@ -434,6 +434,11 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   }
 
   return {
+    async latestRoomRevision(roomKey) {
+      const key = requiredString(roomKey, 'roomKey');
+      return mutate(async () => Number(authoritativeJob(key)?.room_revision || 0));
+    },
+
     async enqueue(event, { localContext = null } = {}) {
       return mutate(async () => {
         const normalized = normalizeEvent(event);
