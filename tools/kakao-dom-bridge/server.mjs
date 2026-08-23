@@ -15,7 +15,8 @@ import {
   finalizePreparedKakaoDecision,
   loadKakaoWorkerRuntimeConfig,
   prepareKakaoDecisionFromSnapshot,
-  prepareKakaoGatewayDecision
+  prepareKakaoGatewayDecision,
+  validateAiDecisionContract
 } from '../ai-browser-worker/worker.mjs';
 import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-browser-worker/follow-up-case-lifecycle.mjs';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
@@ -471,6 +472,11 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
   });
 }
 
+export function createGatewayConfirmationValidator({ validateDecision = validateAiDecisionContract } = {}) {
+  if (typeof validateDecision !== 'function') throw new Error('Gateway confirmation validator is required');
+  return (request = {}) => validateDecision(request.decision);
+}
+
 export function createGatewayResultApplicationCoordinator({
   channel,
   getConfig,
@@ -708,12 +714,16 @@ const gatewayConfirmationExecutor = gatewayTransportEnabled
       getConfig: () => getKakaoWorkerRuntimeConfigForTransport()
     })
   : null;
+const gatewayConfirmationValidator = gatewayTransportEnabled
+  ? createGatewayConfirmationValidator()
+  : null;
 const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
   channel: gatewayChannel,
   transport: CONFIG.hermesTransport,
   consumerFreshnessMs: Math.max(60_000, CONFIG.hermesLeaseMs * 2),
   executeConfirmation: gatewayConfirmationExecutor,
+  validateConfirmation: gatewayConfirmationValidator,
   recoverFailureNotifications: gatewayTransportEnabled
     ? () => getGatewayFailureNotificationCoordinator().recover()
     : null,
