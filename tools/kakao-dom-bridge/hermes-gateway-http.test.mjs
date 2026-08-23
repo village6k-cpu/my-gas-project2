@@ -850,7 +850,7 @@ test('Gateway HTTP preflight rejection does not reserve the lease and a correcte
     token,
     channel,
     transport: 'gateway',
-    validateConfirmation: (request) => request.decision?.sheet_row_candidate?.discount_type
+    validateConfirmation: async (request) => request.decision?.sheet_row_candidate?.discount_type
       ? { valid: true, errors: [] }
       : { valid: false, errors: ['sheet_row_candidate.discount_type must be an explicit allowed value'] },
     executeConfirmation: async (request) => {
