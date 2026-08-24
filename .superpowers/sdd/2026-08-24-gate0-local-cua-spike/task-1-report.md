@@ -52,3 +52,11 @@ serializers rather than duplicate evidence handling.
 - Command: `node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check`
 - Result: 4 passed, 0 failed, 0 skipped; `git diff --check` passed.
 - Commit: `eb3d057 fix: close remaining Gate 0 evidence bypasses`
+
+## Exceptional credential-safety fix
+
+- Added value-level sensitive-pattern rejection across all serialized evidence strings.
+- Added exact regressions for `pointer: "password"` and `criterion: "token"`.
+- Command: `node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check`
+- Result: 4 passed, 0 failed, 0 skipped; `git diff --check` passed.
+- Commit: `215e952 fix: reject sensitive evidence values`
