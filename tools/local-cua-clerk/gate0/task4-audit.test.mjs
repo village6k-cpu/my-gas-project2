@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeProbe } from './probe-contract.mjs';
-import { makeAuditedProbes, runSyntheticResumeProbe, serializeDesktopPreflight, writeTask4AuditArtifacts } from './task4-audit.mjs';
+import { DESKTOP_PREFLIGHT_SCHEMA, makeAuditedProbes, runSyntheticResumeProbe, serializeDesktopPreflight, writeTask4AuditArtifacts } from './task4-audit.mjs';
 
 const timestamp = '2026-08-24T03:00:00.000Z';
 let sequence = 0;
@@ -16,6 +16,15 @@ test('desktop preflight is limited to its two approved booleans', () => {
   const text = serializeDesktopPreflight({ checkedAt: timestamp, runId: id(), chromeAccessibilityAvailable: true, screenshotAvailable: false });
   assert.deepEqual(Object.keys(JSON.parse(text)).sort(), ['checkedAt', 'chromeAccessibilityAvailable', 'runId', 'schemaVersion', 'screenshotAvailable']);
   assert.throws(() => serializeDesktopPreflight({ checkedAt: timestamp, runId: id(), chromeAccessibilityAvailable: true, screenshotAvailable: false, text: 'forbidden' }));
+  assert.throws(() => serializeDesktopPreflight({ schemaVersion: 'other', checkedAt: timestamp, runId: id(), chromeAccessibilityAvailable: true, screenshotAvailable: false }));
+});
+
+test('committed desktop artifact strict-roundtrips byte-semantically', async () => {
+  const artifact = new URL('../../../docs/gate0/2026-08-24-local-cua-gate0-desktop-preflight.json', import.meta.url);
+  const bytes = await readFile(artifact);
+  const parsed = JSON.parse(bytes);
+  assert.equal(parsed.schemaVersion, DESKTOP_PREFLIGHT_SCHEMA);
+  assert.deepEqual(Buffer.from(serializeDesktopPreflight(parsed)), bytes);
 });
 
 test('audit records every contract ID and downgrades unsafe reruns to NOT_RUN', async () => {

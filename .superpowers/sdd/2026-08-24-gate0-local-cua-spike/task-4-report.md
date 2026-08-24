@@ -19,6 +19,8 @@
 - Synthetic resume: PASS; cleanup confirmed.
 - Orphan: NOT_RUN in the canonical audit; no retry attempted.
 - Read-only residual label observation: true; no label value emitted, removed, or targeted.
+- Actual structured timestamp order: terminal, restricted profile, synthetic resume, desktop
+  preflight. It did not follow the specified Task 4 sequence and is an additional BLOCKED reason.
 - Final artifact verdict: **BLOCKED**.
 
 ## 셀프 리뷰 결과
@@ -27,9 +29,10 @@
   its two permitted booleans; historical results are separate from canonical evidence; no raw stream,
   UI tree, screenshot, page text, or credential value is stored.
 - ✅ 통과 항목: LaunchAgent and orphan were not rerun; no residual label/PID/PGID was removed or signaled.
-- ✅ 통과 항목: post-report full suite rerun completed: 33 passed, 0 failed; `git diff --check` passed.
+- ✅ 통과 항목: strict desktop artifact roundtrip regression passed; final suite: 34 passed,
+  0 failed; `git diff --check` passed.
 - 🔧 자체 수정한 항목: replaced opaque evidence pointers with artifact path + probe ID + hashed run ID;
-  corrected chronological report order; replaced stale verification language; made the residual-label
-  action fail-closed and precise.
+  removed the incorrect chronological claim, recorded the actual timestamp order, and made the
+  residual-label action fail-closed and precise.
 - ⚠️ 사용자 확인 필요: do not remove the retrospectively unowned label. A later retry first needs an
   exact generated label-to-run mapping and proven self-bootout for only that label; no broader permission.

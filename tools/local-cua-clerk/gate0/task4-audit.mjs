@@ -6,17 +6,19 @@ import { makeGate0Report, serializeGate0Report } from './gate0-report.mjs';
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const HASH = /^[a-f0-9]{16,64}$/;
+export const DESKTOP_PREFLIGHT_SCHEMA = 'gate0-desktop-preflight/v1';
+const DESKTOP_PREFLIGHT_FIELDS = Object.freeze(['schemaVersion', 'checkedAt', 'runId', 'chromeAccessibilityAvailable', 'screenshotAvailable']);
 const desktopShape = value => value && typeof value === 'object' && !Array.isArray(value)
-  && Object.keys(value).every(key => ['schemaVersion', 'checkedAt', 'runId', 'chromeAccessibilityAvailable', 'screenshotAvailable'].includes(key))
-  && value.schemaVersion === 'gate0-desktop-preflight/v1'
+  && Object.keys(value).every(key => DESKTOP_PREFLIGHT_FIELDS.includes(key))
+  && value.schemaVersion === DESKTOP_PREFLIGHT_SCHEMA
   && ISO.test(value.checkedAt) && HASH.test(value.runId)
   && typeof value.chromeAccessibilityAvailable === 'boolean'
   && typeof value.screenshotAvailable === 'boolean';
 
 export function serializeDesktopPreflight(input = {}) {
-  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['checkedAt', 'runId', 'chromeAccessibilityAvailable', 'screenshotAvailable'].includes(key))) throw new TypeError('invalid desktop preflight');
-  const { checkedAt = new Date().toISOString(), runId = makeRunId(), chromeAccessibilityAvailable, screenshotAvailable } = input;
-  const value = { schemaVersion: 'gate0-desktop-preflight/v1', checkedAt, runId, chromeAccessibilityAvailable, screenshotAvailable };
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !DESKTOP_PREFLIGHT_FIELDS.includes(key))) throw new TypeError('invalid desktop preflight');
+  const { schemaVersion = DESKTOP_PREFLIGHT_SCHEMA, checkedAt = new Date().toISOString(), runId = makeRunId(), chromeAccessibilityAvailable, screenshotAvailable } = input;
+  const value = { schemaVersion, checkedAt, runId, chromeAccessibilityAvailable, screenshotAvailable };
   if (!desktopShape(value)) throw new TypeError('invalid desktop preflight');
   return JSON.stringify(value, null, 2) + '\n';
 }

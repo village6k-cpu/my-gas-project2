@@ -6,7 +6,8 @@
 `docs/gate0/2026-08-24-local-cua-gate0-evidence.json`. This is not an autonomous-pass
 result: the fresh terminal and restricted records are blocked, and the fresh read-only
 LaunchAgent observation found a residual Gate 0 label. LaunchAgent and orphan execution were
-not repeated because their earlier cleanup is unresolved.
+not repeated because their earlier cleanup is unresolved. The artifact timestamp sequence also
+failed to follow the specified Task 4 sequence, which is an independent additional BLOCKED reason.
 
 ## Auditable artifacts
 
@@ -27,10 +28,17 @@ not repeated because their earlier cleanup is unresolved.
 - Pin correction commit: `8d7fb6e`
 - Fresh evidence window: `2026-08-24T02:37:50.625Z` through `2026-08-24T02:38:55.106Z`
 
-## Chronological audit record
+## Canonical audit record map
 
-The desktop preflight is intentionally outside the nine-probe contract. All remaining rows are
-canonical artifact records; every row identifies its exact artifact path, probe ID, and run ID.
+This table is a canonical record map, not a chronological execution claim. The desktop preflight
+is intentionally outside the nine-probe contract. All remaining rows are canonical artifact
+records; every row identifies its exact artifact path, probe ID, and run ID.
+
+Actual structured timestamp order was: `terminal_cua` at `2026-08-24T02:37:50.625Z`,
+`restricted_profile` at `2026-08-24T02:38:38.161Z`, `human_resume` at
+`2026-08-24T02:38:43.783Z`, then desktop preflight at `2026-08-24T02:38:55.104Z`.
+LaunchAgent and orphan audited reruns are `NOT_RUN`. This order did not follow the specified
+Task 4 sequence, so the result remains BLOCKED even apart from the other boundary failures.
 
 | Phase / probe | Audited status | Artifact reference |
 | --- | --- | --- |
@@ -71,8 +79,8 @@ self-bootout of only that label. Do not request or grant broader permissions.
 
 ## Verification and self-review
 
-- Post-report verification: `node --test tools/local-cua-clerk/gate0/*.test.mjs` — 33 passed,
-  0 failed; `git diff --check` — passed.
+- Final verification after the strict-roundtrip and ordering edits: `node --test
+  tools/local-cua-clerk/gate0/*.test.mjs` — 34 passed, 0 failed; `git diff --check` — passed.
 - Request coverage: all nine contract probe IDs are present in the artifact; the only live reruns were
   terminal, restricted profile, synthetic resume, desktop preflight, and read-only residual observation.
 - The report does not claim autonomous PASS or infer structured evidence from the earlier unsafe attempts.
