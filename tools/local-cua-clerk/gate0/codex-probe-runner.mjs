@@ -7,7 +7,7 @@ import { makeProbe } from './probe-contract.mjs';
 // This is deliberately immutable. Terminal and LaunchAgent runners import the
 // same bytes so a live probe cannot silently drift between launch modes.
 export const PROBE_PAYLOAD = Object.freeze(
-  'Use node_repl with @oai/sky only to check whether Chrome accessibility is available and whether screenshot capability is available. Return JSON only: {"chromeAccessibilityAvailable":true|false,"screenshotAvailable":true|false}. Do not return accessibility text, an AX tree, a screenshot, page text, credentials, or any other data. Do not click, type, submit, or mutate anything.',
+  'Use node_repl with @oai/sky only to check whether Chrome accessibility is available and whether screenshot capability is available. If node_repl is not present in your provided tools, do not use shell or command execution as a fallback; return both booleans as false. Return JSON only: {"chromeAccessibilityAvailable":true|false,"screenshotAvailable":true|false}. Do not return accessibility text, an AX tree, a screenshot, page text, credentials, or any other data. Do not click, type, submit, or mutate anything.',
 );
 export const PROBE_ARGS = Object.freeze(['exec', '--ephemeral', '--json']);
 export const PINNED_CODEX_PATH = '/Users/choijaehyeong/.codex/packages/standalone/releases/0.147.0-aarch64-apple-darwin/bin/codex';
@@ -170,10 +170,11 @@ export async function runCodexProbe({ codexPath = PINNED_CODEX_PATH, allowTestOv
   const outcome = await new Promise(resolve => {
     let settled = false;
     let escalation;
+    let timeoutStarted = false;
     const finish = value => { if (!settled) { settled = true; clearTimeout(timer); clearTimeout(escalation); resolve(value); } };
     handleChildError = () => finish(makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].command, pointer: 'spawn_error' }, errorClass: 'command_failed' }));
     if (childErrorSeen) handleChildError();
-    const timer = setTimeout(() => { void (async () => {
+    const timer = setTimeout(() => { timeoutStarted = true; void (async () => {
       let currentIdentity;
       try { currentIdentity = await boundedIdentity(identityReader, child.pid, deadline); } catch {}
       const owned = terminateOwnedGroup(child, codexPath, killImpl, expectedIdentity, currentIdentity);
@@ -181,6 +182,7 @@ export async function runCodexProbe({ codexPath = PINNED_CODEX_PATH, allowTestOv
       else finish(makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].timeout, pointer: 'child_group_not_terminated' }, errorClass: 'timeout' }));
     })(); }, Math.max(1, deadline - Date.now() - cleanupReserve));
     const handleClose = code => {
+      if (timeoutStarted) return;
       try {
         if (stdoutOverflowed) throw new Error('overflow');
         const result = parseProbeJsonl(stdout);

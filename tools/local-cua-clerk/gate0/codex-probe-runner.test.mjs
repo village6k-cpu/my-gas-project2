@@ -10,6 +10,9 @@ function child({ output = '', code = 0, pid = 1234, spawnfile = '/opt/codex', id
 
 test('fixed payload and JSONL parser accept one exact designated result only', () => {
   assert.equal(PROBE_ARGS[0], 'exec'); assert.match(PROBE_PAYLOAD, /JSON only/);
+  assert.match(PROBE_PAYLOAD, /If node_repl is not present/);
+  assert.match(PROBE_PAYLOAD, /do not use shell or command execution as a fallback/i);
+  assert.match(PROBE_PAYLOAD, /return both booleans as false/);
   assert.equal(PINNED_CODEX_PATH, '/Users/choijaehyeong/.codex/packages/standalone/releases/0.147.0-aarch64-apple-darwin/bin/codex');
   const designated = JSON.stringify({ type: 'item.completed', item: { id: 'safe-id', type: 'agent_message', text: JSON.stringify({ chromeAccessibilityAvailable: true, screenshotAvailable: false }) } });
   assert.deepEqual(parseProbeJsonl(designated), { chromeAccessibilityAvailable: true, screenshotAvailable: false });
@@ -44,6 +47,29 @@ test('timeout only kills an owned child group; unrelated identity is denied', as
   const result = await resultPromise; assert.equal(result.result, 'BLOCKED'); assert.equal(result.errorClass, 'timeout'); assert.deepEqual(signals, [[-4321, 'SIGTERM'], [-4321, 'SIGKILL']]);
   assert.equal(terminateOwnedGroup({ pid: 99, spawnfile: '/other' }, '/opt/codex', () => { throw new Error('must not kill'); }, 'x', 'x'), false);
   assert.equal(terminateOwnedGroup({ pid: 99, spawnfile: '/opt/codex' }, '/opt/codex', () => { throw new Error('must not kill'); }, 'x', undefined), false);
+});
+
+test('a close caused by the timeout TERM remains a timeout instead of command_failed', async () => {
+  const signals = [];
+  const c = new EventEmitter();
+  Object.assign(c, { pid: 4323, spawnfile: '/opt/codex', exitCode: null, signalCode: null, killed: false, stdout: new EventEmitter(), stderr: new EventEmitter() });
+  const result = await runCodexProbe({
+    codexPath: '/opt/codex',
+    allowTestOverrides: true,
+    timeoutMs: 60,
+    identityReader: async () => 'start-1',
+    spawnImpl: () => c,
+    killImpl: (pid, signal) => {
+      signals.push([pid, signal]);
+      if (signal === 'SIGTERM') queueMicrotask(() => { c.signalCode = 'SIGTERM'; c.emit('close', null, 'SIGTERM'); });
+    },
+    runId: '0123456789abcdef',
+  });
+  assert.equal(result.result, 'BLOCKED');
+  assert.equal(result.errorClass, 'timeout');
+  assert.equal(result.evidence.criterion, 'codex_probe_timeout');
+  assert.equal(result.evidence.pointer, 'child_group_not_terminated');
+  assert.deepEqual(signals, [[-4323, 'SIGTERM']]);
 });
 
 test('nonzero exit and false capabilities never pass; production path is pinned', async () => {

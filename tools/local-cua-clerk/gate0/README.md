@@ -22,11 +22,17 @@ uses only `bootout gui/$UID/<exact-label>` plus bounded absence confirmation. Co
 removes only its own directory. Failed cleanup overrides any earlier `PASS`, retains only the owned
 plist/private exact label-to-run mapping, and returns `BLOCKED/cleanup_incomplete`.
 
+If the CLI runtime does not provide `node_repl`, the immutable CUA payload forbids shell or command
+fallback and returns both capability booleans false. A timeout-triggered child close remains a
+redacted timeout outcome and cannot race into `command_failed`.
+
 `restricted-profile-probe.mjs` compares the normal diagnostic invocation with
 `codex exec --ignore-user-config --sandbox read-only`. Its exact boolean record separately reports shell
 presence and requires mechanical denial of direct `node_repl`, raw input, helper sockets, and ledger writes;
 prompt instructions are not treated as a boundary. A failed or forged record is `BLOCKED`, and a working
-narrow path with unrestricted CUA is not autonomous PASS.
+narrow path with unrestricted CUA is not autonomous PASS. It accepts only one exact designated Codex
+JSONL agent result and preserves `execFile` timeouts as `BLOCKED/timeout` without retaining subprocess
+diagnostics.
 
 `orphan-recovery-probe.mjs` is a fail-closed feasibility seam. Production accepts no arguments and
 creates only its own disposable child. It revokes the synthetic helper epoch before granting a
