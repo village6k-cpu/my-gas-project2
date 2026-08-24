@@ -617,7 +617,15 @@ test('server default confirmation validator matches the safe sheet payload bound
       is_reservation_inquiry: true,
       already_registered: false,
       confirmed: true,
-      equipment_requested: ['소니 FX3 바디세트']
+      equipment_requested: [{
+        raw_text: 'FX3',
+        normalized_guess: '소니 FX3 바디세트',
+        exact_name_from_equipment_catalog: '소니 FX3 바디세트',
+        exact_name_from_set_master: null,
+        catalog_match_status: 'matched',
+        quantity: 1,
+        confidence: 'high'
+      }]
     },
     sheet_row_candidate: {
       plan_complete: true,

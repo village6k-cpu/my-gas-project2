@@ -1621,11 +1621,36 @@ function completeSheetDecision(overrides = {}) {
       extra_request: ''
     }
   };
+  const sheetRow = { ...base.sheet_row_candidate, ...(overrides.sheet_row_candidate || {}) };
+  const generatedEquipmentRequest = sheetRow.equipment.map((item) => ({
+    raw_text: item.item,
+    normalized_guess: item.item,
+    exact_name_from_equipment_catalog: item.item,
+    exact_name_from_set_master: null,
+    catalog_match_status: 'matched',
+    quantity: item.quantity,
+    confidence: 'high'
+  }));
   return {
     ...base,
     ...overrides,
     safety_checks: { ...base.safety_checks, ...(overrides.safety_checks || {}) },
-    sheet_row_candidate: { ...base.sheet_row_candidate, ...(overrides.sheet_row_candidate || {}) }
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: false,
+      equipment_requested: generatedEquipmentRequest,
+      ...(overrides.reservation_inquiry || {})
+    },
+    sheet_row_candidate: sheetRow
+  };
+}
+
+function confirmationCatalogForDecision(decision) {
+  return {
+    status: 'ok',
+    source_sheets: ['장비마스터', '세트마스터'],
+    exact_names: decision.sheet_row_candidate.equipment.map((item) => item.item),
+    error: null
   };
 }
 
@@ -1641,6 +1666,196 @@ function confirmationFreshnessGuard({ stale = false, staleAfterChecks = stale ? 
     get checks() { return checks; }
   };
 }
+
+test('executeVillageConfirmationRequest writes AI-selected live catalog names instead of customer aliases', async () => {
+  const decision = completeSheetDecision({
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: false,
+      equipment_requested: [
+        {
+          raw_text: 'AX700 * 1대',
+          normalized_guess: 'AX700',
+          exact_name_from_equipment_catalog: '소니 캠 AX-700',
+          exact_name_from_set_master: null,
+          catalog_match_status: 'matched',
+          quantity: 1,
+          confidence: 'high'
+        },
+        {
+          raw_text: 'V-Mount 배터리 * 3개',
+          normalized_guess: 'V-Mount 배터리',
+          exact_name_from_equipment_catalog: 'V마운트 배터리',
+          exact_name_from_set_master: null,
+          catalog_match_status: 'matched',
+          quantity: 3,
+          confidence: 'high'
+        }
+      ]
+    },
+    sheet_row_candidate: {
+      equipment: [
+        { item: 'AX700', quantity: 1 },
+        { item: 'V-Mount 배터리', quantity: 3 }
+      ]
+    }
+  });
+  let appendedPayload = null;
+
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-catalog-match', roomKey: 'room-catalog-match', roomRevision: 1 },
+    roomRevision: 1,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => ({
+        status: 'ok',
+        source_sheets: ['장비마스터', '세트마스터'],
+        exact_names: ['소니 캠 AX-700', 'V마운트 배터리'],
+        error: null
+      }),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: {} }),
+      ensureConfirmRequestDiscountApplied: async () => ({ updated: false }),
+      appendToSheet: async (_config, payload) => {
+        appendedPayload = payload;
+        return { success: true, reqID: 'RQ-260824-099', results: [] };
+      }
+    }
+  });
+
+  assert.equal(receipt.status, 'ok');
+  assert.deepEqual(appendedPayload.args.장비, [
+    { 이름: '소니 캠 AX-700', 수량: 1 },
+    { 이름: 'V마운트 배터리', 수량: 3 }
+  ]);
+});
+
+test('executeVillageConfirmationRequest blocks an unverified alias before any GAS write', async () => {
+  const decision = completeSheetDecision({
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: false,
+      equipment_requested: [{
+        raw_text: 'AX700 * 1대',
+        normalized_guess: 'AX700',
+        exact_name_from_equipment_catalog: 'AX700',
+        exact_name_from_set_master: null,
+        catalog_match_status: 'matched',
+        quantity: 1,
+        confidence: 'high'
+      }]
+    },
+    sheet_row_candidate: { equipment: [{ item: 'AX700', quantity: 1 }] }
+  });
+  let writes = 0;
+
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-catalog-reject', roomKey: 'room-catalog-reject', roomRevision: 1 },
+    roomRevision: 1,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => ({
+        status: 'ok',
+        source_sheets: ['장비마스터', '세트마스터'],
+        exact_names: ['소니 캠 AX-700'],
+        error: null
+      }),
+      appendToSheet: async () => { writes += 1; return { success: true }; }
+    }
+  });
+
+  assert.equal(writes, 0);
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.error.type, 'equipment_catalog_verification_failed');
+});
+
+test('executeVillageConfirmationRequest does not treat a missing catalog decision as an unmatched original', async () => {
+  const decision = completeSheetDecision({
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: false,
+      equipment_requested: [{
+        raw_text: 'AX700 * 1대',
+        normalized_guess: 'AX700',
+        exact_name_from_equipment_catalog: null,
+        exact_name_from_set_master: null,
+        quantity: 1,
+        confidence: 'medium'
+      }]
+    },
+    sheet_row_candidate: { equipment: [{ item: 'AX700', quantity: 1 }] }
+  });
+  let writes = 0;
+
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-catalog-missing', roomKey: 'room-catalog-missing', roomRevision: 1 },
+    roomRevision: 1,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => ({
+        status: 'ok',
+        source_sheets: ['장비마스터', '세트마스터'],
+        exact_names: ['소니 캠 AX-700'],
+        error: null
+      }),
+      appendToSheet: async () => { writes += 1; return { success: true }; }
+    }
+  });
+
+  assert.equal(writes, 0);
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.error.type, 'invalid_decision');
+});
+
+test('executeVillageConfirmationRequest preserves customer wording only after an explicit AI unmatched decision', async () => {
+  const decision = completeSheetDecision({
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      already_registered: false,
+      equipment_requested: [{
+        raw_text: '직접 제작한 몽키리그 * 1개',
+        normalized_guess: '직접 제작한 몽키리그',
+        exact_name_from_equipment_catalog: null,
+        exact_name_from_set_master: null,
+        catalog_match_status: 'unmatched',
+        quantity: 1,
+        confidence: 'low'
+      }]
+    },
+    sheet_row_candidate: { equipment: [{ item: '직접 제작한 몽키리그', quantity: 1 }] }
+  });
+  let appendedPayload = null;
+
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-catalog-unmatched', roomKey: 'room-catalog-unmatched', roomRevision: 1 },
+    roomRevision: 1,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => ({
+        status: 'ok',
+        source_sheets: ['장비마스터', '세트마스터'],
+        exact_names: ['소니 캠 AX-700'],
+        error: null
+      }),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: {} }),
+      ensureConfirmRequestDiscountApplied: async () => ({ updated: false }),
+      appendToSheet: async (_config, payload) => {
+        appendedPayload = payload;
+        return { success: true, reqID: 'RQ-260824-100', results: [] };
+      }
+    }
+  });
+
+  assert.equal(receipt.status, 'ok');
+  assert.deepEqual(appendedPayload.args.장비, [{ 이름: '직접 제작한 몽키리그', 수량: 1 }]);
+});
 
 test('executeVillageConfirmationRequest reuses additions-only merge, customer discount enrichment, and authoritative availability', async () => {
   const decision = completeSheetDecision({
@@ -1664,6 +1879,7 @@ test('executeVillageConfirmationRequest reuses additions-only merge, customer di
     decision,
     dependencies: {
       freshnessGuard,
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
       fetchExistingConfirmRequestResultForDecision: async () => ({
         success: true,
         duplicate: true,
@@ -1758,6 +1974,7 @@ test('executeVillageConfirmationRequest executes pending RQ replacement only aft
     decision,
     dependencies: {
       freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
       fetchExistingConfirmRequestResultForDecision: async () => {
         lookupCalls += 1;
         return {
@@ -1816,6 +2033,7 @@ test('executeVillageConfirmationRequest rejects unverified pending RQ replacemen
     decision,
     dependencies: {
       freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
       fetchExistingConfirmRequestResultForDecision: async () => ({
         success: true,
         duplicate: true,
@@ -1867,7 +2085,12 @@ test('executeVillageConfirmationRequest rejects stale correlation and stale fres
     config: { sheetApiKey: 'internal-key' },
     job: { jobId: 'job-stale', roomKey: 'room-stale', roomRevision: 7 },
     decision,
-    dependencies: { appendToSheet, randomUUID: () => 'receipt-stale', now: () => new Date('2026-08-21T04:05:06.000Z') }
+    dependencies: {
+      appendToSheet,
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
+      randomUUID: () => 'receipt-stale',
+      now: () => new Date('2026-08-21T04:05:06.000Z')
+    }
   };
 
   await assert.rejects(
@@ -1890,6 +2113,7 @@ test('executeVillageConfirmationRequest preserves missing-contact GAS rejection 
     decision,
     dependencies: {
       freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
       enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
       appendToSheet: async () => ({ success: false, error_type: 'no_contact', error: '연락처 필요' }),
       randomUUID: () => 'receipt-no-contact',
@@ -1904,13 +2128,15 @@ test('executeVillageConfirmationRequest preserves missing-contact GAS rejection 
 });
 
 test('executeVillageConfirmationRequest converts a thrown GAS failure into a typed failed receipt', async () => {
+  const decision = completeSheetDecision();
   const receipt = await workerModule.executeVillageConfirmationRequest({
     config: { sheetApiKey: 'internal-key' },
     job: { jobId: 'job-gas-error', roomKey: 'room-gas-error', roomRevision: 7 },
     roomRevision: 7,
-    decision: completeSheetDecision(),
+    decision,
     dependencies: {
       freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
       enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
       appendToSheet: async () => { throw new Error('GAS offline'); },
       randomUUID: () => 'receipt-gas-error',
@@ -1925,6 +2151,7 @@ test('executeVillageConfirmationRequest converts a thrown GAS failure into a typ
 });
 
 test('executeVillageConfirmationRequest returns a persistable partial receipt when freshness changes after the primary write', async () => {
+  const decision = completeSheetDecision();
   const freshnessGuard = confirmationFreshnessGuard({ staleAfterChecks: 2 });
   let appendCalls = 0;
   let discountCalls = 0;
@@ -1932,9 +2159,10 @@ test('executeVillageConfirmationRequest returns a persistable partial receipt wh
     config: { sheetApiKey: 'internal-key' },
     job: { jobId: 'job-stale-after-write', roomKey: 'room-stale-after-write', roomRevision: 7 },
     roomRevision: 7,
-    decision: completeSheetDecision(),
+    decision,
     dependencies: {
       freshnessGuard,
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
       assertCurrentClaim: async () => {},
       enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
         payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
@@ -1963,13 +2191,15 @@ test('executeVillageConfirmationRequest returns a persistable partial receipt wh
 });
 
 test('executeVillageConfirmationRequest preserves GAS partial-success evidence and executed payload', async () => {
+  const decision = completeSheetDecision();
   const receipt = await workerModule.executeVillageConfirmationRequest({
     config: { sheetApiKey: 'internal-key' },
     job: { jobId: 'job-partial', roomKey: 'room-partial', roomRevision: 7 },
     roomRevision: 7,
-    decision: completeSheetDecision(),
+    decision,
     dependencies: {
       freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
       assertCurrentClaim: async () => {},
       enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
       appendToSheet: async () => ({
@@ -1997,15 +2227,17 @@ test('executeVillageConfirmationRequest preserves GAS partial-success evidence a
 });
 
 test('executeVillageConfirmationRequest reports discount patch failure without replaying or erasing the primary write', async () => {
+  const decision = completeSheetDecision();
   let appendCalls = 0;
   let discountCalls = 0;
   const receipt = await workerModule.executeVillageConfirmationRequest({
     config: { sheetApiKey: 'internal-key' },
     job: { jobId: 'job-discount-failure', roomKey: 'room-discount-failure', roomRevision: 7 },
     roomRevision: 7,
-    decision: completeSheetDecision(),
+    decision,
     dependencies: {
       freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
       assertCurrentClaim: async () => {},
       enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
         payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
@@ -2037,13 +2269,15 @@ test('executeVillageConfirmationRequest reports discount patch failure without r
 });
 
 test('executeVillageConfirmationRequest treats a non-applied required discount patch as partial success', async () => {
+  const decision = completeSheetDecision();
   const receipt = await workerModule.executeVillageConfirmationRequest({
     config: { sheetApiKey: 'internal-key' },
     job: { jobId: 'job-discount-not-applied', roomKey: 'room-discount-not-applied', roomRevision: 7 },
     roomRevision: 7,
-    decision: completeSheetDecision(),
+    decision,
     dependencies: {
       freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
       assertCurrentClaim: async () => {},
       enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({
         payload: { ...payload, args: { ...payload.args, 할인유형: '학생' } },
@@ -2232,9 +2466,9 @@ test('buildHermesPrompt uses compact job evidence instead of embedding full raw 
   assert.match(prompt, /JOB EVIDENCE FROM SUPABASE/);
   assert.doesNotMatch(prompt, /JOB FROM SUPABASE/);
   assert.equal(prompt.includes('x'.repeat(1000)), false);
-  // 2026-08-11: RECENT_BOT_SENDS/사장 수동응대 정책 추가로 기본 프롬프트가 ~19.0KB로 성장.
-  // payload 미포함 검증은 위의 x.repeat(1000) assert가 담당하므로 상한은 여유를 두고 20000.
-  assert.ok(prompt.length < 20000, `prompt too large: ${prompt.length}`);
+  // 2026-08-24: 장비별 catalog_match_status와 exact catalog 필드가 추가되어 기본 계약이 약 20.2KB다.
+  // payload 미포함 검증은 위의 x.repeat(1000) assert가 담당하므로 계약 본문 상한은 21KB로 둔다.
+  assert.ok(prompt.length < 21000, `prompt too large: ${prompt.length}`);
 });
 
 test('buildHermesPrompt uses navigation hints without letting code judge business meaning', () => {
@@ -2481,15 +2715,15 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   const prompt = buildHermesPrompt({ id: 'job-3', preview_text: 'a7s3 2대 견적' });
 
   assert.match(prompt, /장비명은 AI가 최대한 추론\/정규화해서.*F열 item/s);
-  assert.match(prompt, /정확 매칭이 불완전하면.*best normalized guess/s);
-  assert.match(prompt, /정규화가 애매해도.*확인요청 입력은 막지 않는다/s);
+  assert.match(prompt, /자동 제공된.*정확 장비명 카탈로그/s);
+  assert.match(prompt, /도저히 매칭할 수 없을 때만.*catalog_match_status="unmatched"/s);
   assert.match(prompt, /Q\/R에는 원문\/추론\/가용확인 후 안내/s);
   assert.match(prompt, /FX3.*A7S3.*FX6/s);
   assert.match(prompt, /할인유형: 고객DB I열이 카톡보다 우선/s);
   assert.match(prompt, /학생.*개인사업자\/프리랜서.*단골.*제휴.*일반/s);
   assert.match(prompt, /계약마스터.*스케줄상세.*확인요청/s);
   assert.match(prompt, /예약형식.*should_write_to_sheet=true/s);
-  assert.match(prompt, /불확실한 장비명.*입력 차단 사유가 아니라/s);
+  assert.match(prompt, /불확실한 장비명.*AI가 카탈로그 전체를 비교해 판단/s);
   assert.match(prompt, /연락처.*고객DB.*확인요청 생성은 막지 말고/s);
   assert.match(prompt, /missing phone is NOT a sheet-write blocker/s);
 });
@@ -2661,6 +2895,48 @@ test('buildReadOnlyLookupContext fetches kill switch and exposes read-only looku
   assert.match(context.lookup_urls.contract_master_recent_gviz, /%EA%B3%84%EC%95%BD%EB%A7%88%EC%8A%A4%ED%84%B0/);
 });
 
+test('buildReadOnlyLookupContext gives Hermes the current exact equipment and set catalog without a terminal lookup', async () => {
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    const sheet = parsed.searchParams.get('sheet');
+    const payload = sheet === '설정'
+      ? { sheet, rowCount: 0, headers: ['active'], data: [] }
+      : sheet === '장비마스터'
+        ? {
+            sheet,
+            rowCount: 2,
+            headers: ['지금 자', '장비ID', '카테고리', '장비명'],
+            data: [
+              ['카메라/렌즈', 'CAM-006', '카메라', '소니 캠 AX-700'],
+              ['기타', 'BAT-001', '배터리', 'V마운트 배터리']
+            ]
+          }
+        : {
+            sheet,
+            rowCount: 2,
+            headers: ['세트명', '구성장비명', '수량'],
+            data: [
+              ['아마란 300C', 'AC라인', 1],
+              ['마스 400S 프로', 'D탭*2 / SDI or HDMI*2 / 숏암*2', 1]
+            ]
+          };
+    return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+  };
+
+  const context = await buildReadOnlyLookupContext(
+    { gasApiUrl: 'https://script.example/exec', sheetApiKey: 'secret' },
+    { preview_text: 'AX700, V-Mount 배터리, 300C, Mars 400S Pro' },
+    { fetchImpl }
+  );
+
+  assert.deepEqual(context.equipment_catalog, {
+    status: 'ok',
+    source_sheets: ['장비마스터', '세트마스터'],
+    exact_names: ['소니 캠 AX-700', 'V마운트 배터리', '아마란 300C', '마스 400S 프로'],
+    error: null
+  });
+});
+
 test('buildReadOnlyLookupContext reads kill switch from GAS header-only read responses', async () => {
   const fetchImpl = async () => ({
     ok: true,
@@ -2700,6 +2976,30 @@ test('buildHermesPrompt gives AI one bounded batch read tool without exposing ra
   assert.match(prompt, /write\/insert\/register\/send APIs.*금지/s);
   assert.doesNotMatch(prompt, /script\.google\.com\/macros/);
   assert.doesNotMatch(prompt, /unsafe_prompt_leak|key=secret/);
+});
+
+test('buildHermesPrompt makes exact catalog selection and explicit unmatched fallback part of the typed decision', () => {
+  const prompt = buildHermesPrompt(
+    { id: 'job-catalog', preview_text: 'AX700, HDMI 롱라인' },
+    {
+      lookupContext: {
+        kill_switch: { status: 'active' },
+        lookup_policy: { mode: 'read_only' },
+        equipment_catalog: {
+          status: 'ok',
+          source_sheets: ['장비마스터', '세트마스터'],
+          exact_names: ['소니 캠 AX-700', 'HDMI 대'],
+          error: null
+        }
+      }
+    }
+  );
+
+  assert.match(prompt, /소니 캠 AX-700/);
+  assert.match(prompt, /HDMI 대/);
+  assert.match(prompt, /"exact_name_from_equipment_catalog": string \| null/);
+  assert.match(prompt, /"catalog_match_status": "matched" \| "unmatched"/);
+  assert.match(prompt, /equipment_requested.*sheet_row_candidate\.equipment.*one-to-one.*same order/s);
 });
 
 test('buildHermesPrompt requires existing RQ availability result before follow-up reporting', () => {
@@ -3901,6 +4201,28 @@ test('validateAiDecisionContract rejects missing AI semantics instead of reconst
   assert.ok(validation.errors.some((error) => error.includes('follow_up_items[0].summary')));
 });
 
+test('confirmation execution validation rejects incomplete catalog decisions before the native tool reservation', () => {
+  const missingStatus = completeSheetDecision();
+  delete missingStatus.reservation_inquiry.equipment_requested[0].catalog_match_status;
+  const mismatchedCount = completeSheetDecision();
+  mismatchedCount.reservation_inquiry.equipment_requested.push({
+    raw_text: '라이트돔',
+    normalized_guess: '라이트돔',
+    exact_name_from_equipment_catalog: null,
+    exact_name_from_set_master: null,
+    catalog_match_status: 'unmatched',
+    quantity: 1,
+    confidence: 'low'
+  });
+
+  const missingValidation = workerModule.validateVillageConfirmationExecutionDecision(missingStatus);
+  const countValidation = workerModule.validateVillageConfirmationExecutionDecision(mismatchedCount);
+  assert.equal(missingValidation.valid, false);
+  assert.ok(missingValidation.errors.some((error) => error.includes('catalog_match_status')));
+  assert.equal(countValidation.valid, false);
+  assert.ok(countValidation.errors.some((error) => error.includes('one-to-one')));
+});
+
 test('confirmation execution preflight rejects a complete sheet row when required safety evidence is missing', () => {
   const missingSafetyEvidence = completeSheetDecision();
   delete missingSafetyEvidence.safety_checks;
@@ -3933,7 +4255,15 @@ test('staff-confirmed confirmation preflight names the missing duplicate evidenc
       is_reservation_inquiry: true,
       confirmed: true,
       already_registered: false,
-      equipment_requested: [{ raw_text: '소니 100-400mm', quantity: 1 }]
+      equipment_requested: [{
+        raw_text: '소니 100-400mm',
+        normalized_guess: '소니 100-400mm',
+        exact_name_from_equipment_catalog: '소니 100-400mm',
+        exact_name_from_set_master: null,
+        catalog_match_status: 'matched',
+        quantity: 1,
+        confidence: 'high'
+      }]
     }
   });
 
