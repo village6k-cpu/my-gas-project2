@@ -281,6 +281,54 @@ async function fetchReadOnlyJson(url, { fetchImpl = fetch, timeoutMs = 30000 } =
   return data;
 }
 
+function catalogNamesFromSheetPayload(payload, headerName) {
+  const headers = Array.isArray(payload?.headers) ? payload.headers.map((value) => text(value).trim()) : [];
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  const columnIndex = headers.indexOf(headerName);
+  if (columnIndex < 0) throw new Error(`Equipment catalog response is missing ${headerName}`);
+  return rows
+    .map((row) => text(Array.isArray(row) ? row[columnIndex] : '').normalize('NFKC').trim())
+    .filter(Boolean);
+}
+
+export async function fetchEquipmentCatalogSnapshot(config = {}, options = {}) {
+  const gasApiUrl = config.gasApiUrl || DEFAULT_GAS_API_URL;
+  const sheetApiKey = config.sheetApiKey || DEFAULT_SHEET_API_KEY;
+  const sources = [
+    { sheet: '장비마스터', header: '장비명' },
+    { sheet: '세트마스터', header: '세트명' }
+  ];
+  try {
+    const payloads = await Promise.all(sources.map(({ sheet }) => fetchReadOnlyJson(
+      buildGasReadUrl(gasApiUrl, sheetApiKey, { action: 'read', sheet, limit: 1000 }),
+      options
+    )));
+    const exactNames = [];
+    const seen = new Set();
+    sources.forEach((source, index) => {
+      for (const name of catalogNamesFromSheetPayload(payloads[index], source.header)) {
+        if (seen.has(name)) continue;
+        seen.add(name);
+        exactNames.push(name);
+      }
+    });
+    if (!exactNames.length) throw new Error('Equipment catalog is empty');
+    return {
+      status: 'ok',
+      source_sheets: sources.map((source) => source.sheet),
+      exact_names: exactNames,
+      error: null
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      source_sheets: sources.map((source) => source.sheet),
+      exact_names: [],
+      error: text(error?.message || error).slice(0, 500) || 'Equipment catalog lookup failed'
+    };
+  }
+}
+
 function extractKillSwitchStatus(data) {
   return data?.data?.[0]?.[0] || data?.values?.[0]?.[0] || data?.value || data?.headers?.[0] || 'not_checked';
 }
@@ -439,18 +487,23 @@ export async function buildReadOnlyLookupContext(config, job = {}, options = {})
     range: 'A1'
   });
 
-  let killSwitch = { status: 'not_checked', error: null };
-  try {
-    const data = await fetchReadOnlyJson(killSwitchUrl, options);
-    killSwitch = { status: extractKillSwitchStatus(data), error: null };
-  } catch (error) {
-    killSwitch = { status: 'not_checked', error: error.message };
-  }
+  const [killSwitch, equipmentCatalog] = await Promise.all([
+    (async () => {
+      try {
+        const data = await fetchReadOnlyJson(killSwitchUrl, options);
+        return { status: extractKillSwitchStatus(data), error: null };
+      } catch (error) {
+        return { status: 'not_checked', error: error.message };
+      }
+    })(),
+    fetchEquipmentCatalogSnapshot(config, options)
+  ]);
 
   return {
     generated_at: new Date().toISOString(),
     job_preview_text: job.preview_text || job.previewText || '',
     kill_switch: killSwitch,
+    equipment_catalog: equipmentCatalog,
     lookup_policy: {
       mode: 'read_only',
       allowed_methods: ['GET'],
@@ -560,6 +613,7 @@ export function buildHermesPrompt(job, options = {}) {
     ? {
         kill_switch: options.lookupContext.kill_switch,
         lookup_policy: options.lookupContext.lookup_policy,
+        equipment_catalog: options.lookupContext.equipment_catalog,
         lookup_tool: options.lookupContext.lookup_tool
       }
     : null;
@@ -658,19 +712,20 @@ REPLY TONE POLICY:
 - 고객이 물은 것에만 답하고 불필요한 인사·재확인·마무리 문구를 반복하지 않는다. 매번 '편하게 말씀 주세요', '수고 많으셨습니다', '감사합니다' 같은 문구를 덧붙이지 않고, 이모지·느낌표는 대화 맥락에 자연스러울 때만 최소로 쓴다.
 
 EQUIPMENT AND SHEET SAFETY POLICY:
-- 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. 세트마스터 또는 목록 시트의 정확한 이름을 찾으면 그 정확명을 우선 사용하고, 정확 매칭이 불완전하면 AI의 best normalized guess를 쓴다.
+- 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. READ-ONLY VILLAGE LIVE LOOKUP에 자동 제공된 정확 장비명 카탈로그 equipment_catalog.exact_names 전체를 먼저 비교하고, 매칭 가능하면 그 문자열을 한 글자도 바꾸지 말고 exact_name_from_equipment_catalog와 F열 item에 쓴다.
 - 세트/장비마스터를 조회한다. 신규="full_plan"+전체 목록, 기존 추가/증가="additions_only"+delta. 미등록 RQ 장비 삭제/교체="replace_full_plan"+complete final plan. Do not repeat existing equipment in additions_only.
 - 세트 옵션은 set_component_selections로만 지정: 600X 젬볼 => 어퓨쳐 600X/소프트박스/젬볼 90. Never add set options as top-level equipment.
 - 예약 메시지에 명시된 예약자명/연락처는 프로필명보다 우선한다.
 - RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
-- 정규화가 애매해도 확인요청 입력은 막지 않는다. 실패 시 원문을 item에 넣고, Q/R에는 원문/추론/가용확인 후 안내 등 내부 설명을 넣지 않는다.
-- 약어/속어는 검색 키워드 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. AI는 가능한 한 장비명을 추론/정규화해야 하며, 원문 그대로 쓰는 것은 정규화 실패 시 fallback이다.
+- 불확실한 장비명도 코드 규칙으로 포기하지 말고 AI가 카탈로그 전체를 비교해 판단하고 대화 맥락으로 보강한다. 도저히 매칭할 수 없을 때만 catalog_match_status="unmatched", exact_name_from_equipment_catalog=null로 명시하고 고객 원문 장비명을 F열 item에 쓴다. 조회 실패·필드 누락을 unmatched로 가장하지 않는다. Q/R에는 원문/추론/가용확인 후 안내 같은 내부 설명을 넣지 않는다.
+- reservation_inquiry.equipment_requested and sheet_row_candidate.equipment must be one-to-one in the same order. 세트 옵션은 양쪽 장비 배열에 별도 품목으로 넣지 말고 set_component_selections에만 둔다.
+- 약어/속어는 AI 의미 판단 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. confidently matchable이면 catalog_match_status="matched"와 정확 카탈로그명을 쓰며, 원문은 정말 매칭 불가능한 경우만 fallback이다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
 - 할인유형: 고객DB I열이 카톡보다 우선. DB 값(학생/개인사업자/프리랜서/단골/제휴/일반)이 있으면 sheet_row_candidate.discount_type에 그대로 쓰고, 없을 때만 카톡에서 학생/개사프/일반 추론.
 - 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리한다. 없거나 동명이인이어도 확인요청 생성은 막지 말고 sheet_row_candidate.phone=""로 둔다. 연락처는 등록 단계 필수라 follow_up/답장에서는 연락처 요청을 남긴다.
 - 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
-- 예약형식이면 확인요청 입력이 기본이다. 불확실한 장비명/중복확인/연락처 없음은 입력 차단 사유가 아니라 follow_up/evidence 대상이다. F열 item은 best 장비명으로 넣고, Q/R에는 AI 설명을 넣지 않는다. 연락처는 있으면 넣고 없으면 L열 공란으로 둔다.
+- 예약형식이면 확인요청 입력이 기본이다. 장비마다 matched+정확 카탈로그명 또는 explicit unmatched 판정이 필요하다. 중복확인/연락처 없음은 입력 차단 사유가 아니라 follow_up/evidence 대상이다. F열 item은 matched면 정확 카탈로그명, unmatched면 고객 원문을 넣고 Q/R에는 AI 설명을 넣지 않는다. 연락처는 있으면 넣고 없으면 L열 공란으로 둔다.
 - memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
 - 확인요청은 보수적인 정시 경계만 쓴다. 반출은 해당 시각의 시(hour)로 내림(12:59→12:00), 반납은 다음 시로 올림(18:01→19:00), 정시 HH:00은 그대로 둔다. 날짜와 함께 적힌 \`27일 24:00\`은 다음 날인 \`28일 00:00\`으로 정규화한다. 이 결과 반납이 반출 이후가 아니면 추측해서 쓰지 말고 확인 질문/후속조치를 만든다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
@@ -721,7 +776,7 @@ The JSON schema:
   "reservation_inquiry": {
     "is_reservation_inquiry": boolean,
     "is_test_message": boolean,
-    "equipment_requested": [{ "raw_text": string, "normalized_guess": string | null, "exact_name_from_set_master": string | null, "quantity": number | string | null, "confidence": "low" | "medium" | "high" }],
+    "equipment_requested": [{ "raw_text": string, "normalized_guess": string | null, "exact_name_from_equipment_catalog": string | null, "exact_name_from_set_master": string | null, "catalog_match_status": "matched" | "unmatched", "quantity": number | string | null, "confidence": "low" | "medium" | "high" }],
     "rental_start": string | null,
     "rental_end": string | null,
     "pickup_time": string | null,
@@ -1303,6 +1358,71 @@ function sheetSafetyValidationErrors(decision = {}) {
   return errors.length ? errors : ['sheet writes require explicit safety_checks that prove the Kakao conversation state'];
 }
 
+export function resolveEquipmentCatalogDecision(decision = {}, catalogSnapshot = {}) {
+  const row = decision?.sheet_row_candidate && typeof decision.sheet_row_candidate === 'object'
+    ? decision.sheet_row_candidate
+    : {};
+  const planned = Array.isArray(row.equipment) ? row.equipment : [];
+  const requested = Array.isArray(decision?.reservation_inquiry?.equipment_requested)
+    ? decision.reservation_inquiry.equipment_requested
+    : [];
+  if (catalogSnapshot?.status !== 'ok' || !Array.isArray(catalogSnapshot.exact_names)) {
+    return { ok: false, error: text(catalogSnapshot?.error).trim() || 'live equipment catalog is unavailable' };
+  }
+  if (!planned.length || requested.length !== planned.length) {
+    return { ok: false, error: 'equipment_requested must correspond one-to-one with the planned sheet equipment' };
+  }
+  const catalogNames = new Set(catalogSnapshot.exact_names.map((name) => text(name).normalize('NFKC').trim()).filter(Boolean));
+  if (!catalogNames.size) return { ok: false, error: 'live equipment catalog is empty' };
+
+  const itemNameMap = new Map();
+  const resolvedEquipment = [];
+  for (let index = 0; index < planned.length; index += 1) {
+    const plannedItem = planned[index] || {};
+    const requestItem = requested[index] || {};
+    const originalPlannedName = text(plannedItem.item).normalize('NFKC').trim();
+    const matchStatus = text(requestItem.catalog_match_status).trim();
+    const exactName = text(
+      requestItem.exact_name_from_equipment_catalog || requestItem.exact_name_from_set_master
+    ).normalize('NFKC').trim();
+    let resolvedName = '';
+
+    if (matchStatus === 'matched') {
+      if (!exactName || !catalogNames.has(exactName)) {
+        return { ok: false, error: `equipment_requested[${index}] matched name is not in the live catalog` };
+      }
+      resolvedName = exactName;
+    } else if (matchStatus === 'unmatched') {
+      if (exactName) return { ok: false, error: `equipment_requested[${index}] unmatched item must not claim an exact catalog name` };
+      resolvedName = originalPlannedName || text(requestItem.normalized_guess || requestItem.raw_text).normalize('NFKC').trim();
+      if (!resolvedName) return { ok: false, error: `equipment_requested[${index}] unmatched customer wording is required` };
+    } else {
+      return { ok: false, error: `equipment_requested[${index}].catalog_match_status must be matched or unmatched` };
+    }
+
+    itemNameMap.set(originalPlannedName, resolvedName);
+    resolvedEquipment.push({ ...plannedItem, item: resolvedName });
+  }
+
+  const selections = Array.isArray(row.set_component_selections)
+    ? row.set_component_selections.map((selection) => ({
+        ...selection,
+        set_item: itemNameMap.get(text(selection?.set_item).normalize('NFKC').trim()) || selection?.set_item
+      }))
+    : row.set_component_selections;
+  return {
+    ok: true,
+    decision: {
+      ...decision,
+      sheet_row_candidate: {
+        ...row,
+        equipment: resolvedEquipment,
+        ...(selections === undefined ? {} : { set_component_selections: selections })
+      }
+    }
+  };
+}
+
 function normalizeSheetEquipmentItems(decision = {}) {
   const row = decision.sheet_row_candidate || {};
   if (!Array.isArray(row.equipment)) return [];
@@ -1503,6 +1623,31 @@ export function buildSheetAppendPayload(decision, options = {}) {
 export function validateVillageConfirmationExecutionDecision(decision = {}) {
   const validation = validateAiDecisionContract(decision);
   if (!validation.valid) return validation;
+  if (decision.should_write_to_sheet === true) {
+    const planned = Array.isArray(decision?.sheet_row_candidate?.equipment)
+      ? decision.sheet_row_candidate.equipment
+      : [];
+    const requested = Array.isArray(decision?.reservation_inquiry?.equipment_requested)
+      ? decision.reservation_inquiry.equipment_requested
+      : [];
+    const catalogErrors = [];
+    if (requested.length !== planned.length) {
+      catalogErrors.push('reservation_inquiry.equipment_requested must correspond one-to-one with sheet_row_candidate.equipment in the same order');
+    } else {
+      requested.forEach((item, index) => {
+        const matchStatus = text(item?.catalog_match_status).trim();
+        const exactCatalogName = text(item?.exact_name_from_equipment_catalog).trim();
+        if (!['matched', 'unmatched'].includes(matchStatus)) {
+          catalogErrors.push(`reservation_inquiry.equipment_requested[${index}].catalog_match_status must be matched or unmatched`);
+        } else if (matchStatus === 'matched' && !exactCatalogName) {
+          catalogErrors.push(`reservation_inquiry.equipment_requested[${index}].exact_name_from_equipment_catalog is required when matched`);
+        } else if (matchStatus === 'unmatched' && exactCatalogName) {
+          catalogErrors.push(`reservation_inquiry.equipment_requested[${index}] must not claim an exact catalog name when unmatched`);
+        }
+      });
+    }
+    if (catalogErrors.length) return { valid: false, errors: catalogErrors };
+  }
   if (decision.should_write_to_sheet === true && !buildSheetAppendPayload(decision)) {
     return {
       valid: false,
@@ -8360,6 +8505,9 @@ function boundedGatewayStringList(values, { maxItems = 20, maxChars = 160 } = {}
 }
 
 function buildGatewayLookupEvidence(lookupContext = {}) {
+  const equipmentCatalog = lookupContext.equipment_catalog && typeof lookupContext.equipment_catalog === 'object'
+    ? lookupContext.equipment_catalog
+    : null;
   return {
     generated_at: boundedGatewayText(lookupContext.generated_at, 64).trim(),
     kill_switch: {
@@ -8371,6 +8519,14 @@ function buildGatewayLookupEvidence(lookupContext = {}) {
       allowed_methods: boundedGatewayStringList(lookupContext.lookup_policy?.allowed_methods, { maxItems: 8, maxChars: 16 }),
       forbidden_actions: boundedGatewayStringList(lookupContext.lookup_policy?.forbidden_actions, { maxItems: 20, maxChars: 80 })
     },
+    equipment_catalog: equipmentCatalog
+      ? {
+          status: boundedGatewayText(equipmentCatalog.status, 40),
+          source_sheets: boundedGatewayStringList(equipmentCatalog.source_sheets, { maxItems: 4, maxChars: 80 }),
+          exact_names: boundedGatewayStringList(equipmentCatalog.exact_names, { maxItems: 1000, maxChars: 200 }),
+          error: equipmentCatalog.error == null ? null : boundedGatewayText(equipmentCatalog.error, 500)
+        }
+      : null,
     lookup_tool: lookupContext.lookup_tool
       ? {
           command: boundedGatewayText(lookupContext.lookup_tool.command, 500),
@@ -8662,7 +8818,7 @@ export async function executeVillageConfirmationRequest({
     error
   });
 
-  const validation = (dependencies.validateAiDecisionContract || validateAiDecisionContract)(decision);
+  const validation = (dependencies.validateAiDecisionContract || validateVillageConfirmationExecutionDecision)(decision);
   if (!validation?.valid) {
     return buildReceipt({
       status: 'failed',
@@ -8688,6 +8844,7 @@ export async function executeVillageConfirmationRequest({
   const fetchExistingImpl = dependencies.fetchExistingConfirmRequestResultForDecision || fetchExistingConfirmRequestResultForDecision;
   const enrichDiscountImpl = dependencies.enrichSheetPayloadWithCustomerDbDiscount || enrichSheetPayloadWithCustomerDbDiscount;
   const ensureDiscountImpl = dependencies.ensureConfirmRequestDiscountApplied || ensureConfirmRequestDiscountApplied;
+  const fetchEquipmentCatalogImpl = dependencies.fetchEquipmentCatalogSnapshot || fetchEquipmentCatalogSnapshot;
   const assertCurrentClaim = typeof dependencies.assertCurrentClaim === 'function'
     ? dependencies.assertCurrentClaim
     : async () => {};
@@ -8696,7 +8853,7 @@ export async function executeVillageConfirmationRequest({
     : () => {};
 
   let executedDecision = decision;
-  let sheetPayload = buildSheetAppendPayload(executedDecision, { apiKey: config.sheetApiKey });
+  let sheetPayload = null;
   let sheetResult = null;
   let existingRequestResult = null;
   let customerDbDiscountLookup = null;
@@ -8706,6 +8863,21 @@ export async function executeVillageConfirmationRequest({
   let discountPatchError = null;
   try {
     freshnessGuard.throwIfSuperseded();
+    if (executedDecision.should_write_to_sheet === true) {
+      const catalogSnapshot = await fetchEquipmentCatalogImpl(config, { fetchImpl: config.fetchImpl || fetch });
+      const catalogResolution = resolveEquipmentCatalogDecision(executedDecision, catalogSnapshot);
+      if (!catalogResolution.ok) {
+        return buildReceipt({
+          status: 'failed',
+          error: confirmationReceiptError(
+            'equipment_catalog_verification_failed',
+            catalogResolution.error || 'Equipment catalog verification failed'
+          )
+        });
+      }
+      executedDecision = catalogResolution.decision;
+    }
+    sheetPayload = buildSheetAppendPayload(executedDecision, { apiKey: config.sheetApiKey });
     if (text(executedDecision?.sheet_row_candidate?.equipment_write_mode).trim() === 'replace_full_plan') {
       const expectedIds = new Set(
         (Array.isArray(executedDecision?.existing_confirm_request_ids)
