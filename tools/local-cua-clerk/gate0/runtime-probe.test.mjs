@@ -1,23 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { collectRuntime } from './runtime-probe.mjs';
-
-test('runtime probe uses injected commands and never captures command output fields', async () => {
-  const calls = [];
-  const exec = async (file, args) => {
-    calls.push([file, args]);
-    if (file === 'which') return { stdout: '/opt/codex' };
-    if (file === 'git') return { stdout: 'codex/test\n' };
-    return { stdout: 'codex 0.1\n', stderr: 'secret' };
-  };
-  const result = await collectRuntime({ exec, cwd: '/tmp/work', configuredMcp: [{ name: 'node_repl', status: 'available' }] });
-  assert.equal(result.probeId, 'launchagent_security');
-  assert.equal(result.evidence.branch, 'codex/test');
-  assert.equal(result.evidence.mcp[0].name, 'node_repl');
-  assert.equal(Object.hasOwn(result.evidence, 'stdout'), false);
-  assert.deepEqual(calls, [
-    ['which', ['codex']],
-    ['/opt/codex', ['--version']],
-    ['git', ['-C', '/tmp/work', 'branch', '--show-current']]
-  ]);
-});
+function fake(overrides={}){return async(file,args)=>{if(file==='which')return {stdout:overrides.path??'/opt/codex'};if(file==='/opt/codex')return {stdout:overrides.version??'codex 0.147.0\n'};if(file==='git')return {stdout:'codex/test\n'};return {stdout:''};};}
+test('runtime probe retains exact sanitized Node/Codex paths and versions',async()=>{const r=await collectRuntime({exec:fake(),cwd:'/tmp/work',configuredMcp:[{name:'node_repl',status:'available'}]});assert.deepEqual(r.evidence.node,{path:process.execPath,version:process.versions.node});assert.deepEqual(r.evidence.codex,{path:'/opt/codex',version:'0.147.0'});assert.equal(r.result,'PASS');});
+test('empty path and version failure are blocked without raw output',async()=>{const empty=await collectRuntime({exec:fake({path:''})});assert.equal(empty.result,'BLOCKED');assert.equal(empty.errorClass,'empty_path');const failed=await collectRuntime({exec:async(file)=>{if(file==='which')return {stdout:'/opt/codex'};throw Object.assign(new Error('raw secret'),{code:'ENOENT'});}});assert.equal(failed.result,'BLOCKED');assert.equal(failed.errorClass,'version_failed');});

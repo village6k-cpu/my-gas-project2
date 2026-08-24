@@ -11,7 +11,9 @@ stdout/stderr and environment values are never included.
 
 `node --test tools/local-cua-clerk/gate0/*.test.mjs`
 
-Actual result: 3 tests passed, 0 failed, 0 skipped.
+Review-fix command: `node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check`
+
+Review-fix actual result: 4 tests passed, 0 failed, 0 skipped; `git diff --check` passed.
 
 ## Files changed
 
@@ -28,6 +30,8 @@ Actual result: 3 tests passed, 0 failed, 0 skipped.
 - ✅ Unknown fields, sensitive keys/values, and hard Gate 0 failures are rejected/classified.
 - ✅ Runtime commands are injectable and only allowlisted paths/versions/branch/platform/MCP/capabilities are retained.
 - ✅ No GUI, credentials, HomeTax, GAS, or Sheets actions performed.
+- ✅ PASS now requires all nine probe IDs and the five restricted-profile assertions; incomplete evidence is `SUPERVISED_ONLY`/`BLOCKED`.
+- ✅ Runtime evidence includes validated Node/Codex paths and versions; empty path and version failure are `BLOCKED`.
 - ⚠️ Live probe runners and live evidence are intentionally deferred to Tasks 2–4.
 
 ## Concerns
@@ -35,3 +39,7 @@ Actual result: 3 tests passed, 0 failed, 0 skipped.
 The approved contract is intentionally conservative: missing runtime commands are `BLOCKED`, and
 orphan/evidence integrity failures block the whole Gate 0 report. Later tasks should import these
 serializers rather than duplicate evidence handling.
+
+## Review-fix commit
+
+`be916720cc13716ae08b64131e7aaef6500ef44e` (`fix: enforce fail-closed Gate 0 contract`)
