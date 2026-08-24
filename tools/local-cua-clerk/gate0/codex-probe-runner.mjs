@@ -10,7 +10,7 @@ export const PROBE_PAYLOAD = Object.freeze(
   'Use node_repl with @oai/sky only to check whether Chrome accessibility is available and whether screenshot capability is available. Return JSON only: {"chromeAccessibilityAvailable":true|false,"screenshotAvailable":true|false}. Do not return accessibility text, an AX tree, a screenshot, page text, credentials, or any other data. Do not click, type, submit, or mutate anything.',
 );
 export const PROBE_ARGS = Object.freeze(['exec', '--ephemeral', '--json']);
-export const PINNED_CODEX_PATH = '/opt/homebrew/bin/codex';
+export const PINNED_CODEX_PATH = '/Users/choijaehyeong/.codex/packages/standalone/releases/0.147.0-aarch64-apple-darwin/bin/codex';
 
 const BOOLEAN_KEYS = new Set(['chromeAccessibilityAvailable', 'screenshotAvailable']);
 const ERROR_CLASSES = new Set(['command_failed', 'timeout', 'malformed_evidence', 'not_available']);

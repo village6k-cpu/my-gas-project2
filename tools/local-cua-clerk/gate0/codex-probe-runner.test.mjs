@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { parseProbeJsonl, runCodexProbe, terminateOwnedGroup, PROBE_PAYLOAD, PROBE_ARGS } from './codex-probe-runner.mjs';
+import { parseProbeJsonl, runCodexProbe, terminateOwnedGroup, PINNED_CODEX_PATH, PROBE_PAYLOAD, PROBE_ARGS } from './codex-probe-runner.mjs';
 
 function child({ output = '', code = 0, pid = 1234, spawnfile = '/opt/codex', identity = 'start-1' } = {}) {
   const c = new EventEmitter(); c.pid = pid; c.spawnfile = spawnfile; c.startIdentity = identity; c.pidStartIdentity = identity; c.exitCode = null; c.signalCode = null; c.killed = false; c.stdout = new EventEmitter(); c.stderr = new EventEmitter(); c.once = c.once.bind(c);
@@ -10,6 +10,7 @@ function child({ output = '', code = 0, pid = 1234, spawnfile = '/opt/codex', id
 
 test('fixed payload and JSONL parser retain only the two booleans', () => {
   assert.equal(PROBE_ARGS[0], 'exec'); assert.match(PROBE_PAYLOAD, /JSON only/);
+  assert.equal(PINNED_CODEX_PATH, '/Users/choijaehyeong/.codex/packages/standalone/releases/0.147.0-aarch64-apple-darwin/bin/codex');
   assert.deepEqual(parseProbeJsonl('{"type":"message","result":{"chromeAccessibilityAvailable":true,"screenshotAvailable":false,"text":"redacted"}}'), { chromeAccessibilityAvailable: true, screenshotAvailable: false });
   assert.throws(() => parseProbeJsonl('{"chromeAccessibilityAvailable":true}'));
   assert.throws(() => parseProbeJsonl('not json'));
