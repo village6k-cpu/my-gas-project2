@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "gate1-desktop-cua/v1",
+  "status": "PASS",
+  "checkedAt": "2026-08-24T11:20:34.405Z",
+  "runId": "7cd30f0bcf02bba2",
+  "evidence": {
+    "threadCreated": true,
+    "fixedActionDispatched": true,
+    "nodeReplCallCompleted": true,
+    "desktopThreadCuaAvailable": true,
+    "chromeWasRunning": true,
+    "chromeAccessibilityAvailable": true,
+    "screenshotAvailable": true,
+    "resultValidated": true,
+    "cleanupCompleted": true
+  }
+}
