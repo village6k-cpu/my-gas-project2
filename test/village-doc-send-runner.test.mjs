@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { executeVillageDocumentCommand, planVillageDocumentCommand } from '../tools/village-doc-send/runner.mjs';
+import {
+  executeVillageDocumentCommand,
+  executeVillageDocumentRequest,
+  planVillageDocumentCommand
+} from '../tools/village-doc-send/runner.mjs';
 
 test('plans natural Slack command by resolving customer/date to tradeId before document action', async () => {
   const calls = [];
@@ -136,4 +140,49 @@ test('runner blocks payment update wording in document-send workflow', async () 
   assert.equal(result.reason, 'payment_out_of_scope_for_document_channel');
 });
 
+test('structured native quote request sends the exact trade once in supply-only mode', async () => {
+  const calls = [];
+  const result = await executeVillageDocumentRequest({
+    document_type: 'quote',
+    trade_id: '260822-001',
+    tax_mode: 'supply_only'
+  }, {
+    documentApiBaseUrl: 'https://docs.example/exec',
+    documentApiKey: 'doc-key',
+    fetchJson: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return {
+        status: 'OK', action: 'sendEstimate', tradeID: '260822-001',
+        taxMode: 'supply_only', message: '견적서 발송 요청 완료'
+      };
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.tradeId, '260822-001');
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    action: 'sendEstimate',
+    id: '260822-001',
+    taxMode: 'supply_only',
+    key: 'doc-key'
+  });
+});
+
+test('structured native document request rejects an unsupported tax mode before any send', async () => {
+  let calls = 0;
+  const result = await executeVillageDocumentRequest({
+    document_type: 'quote',
+    trade_id: '260822-001',
+    tax_mode: 'remove_tax_lines'
+  }, {
+    documentApiBaseUrl: 'https://docs.example/exec',
+    documentApiKey: 'doc-key',
+    fetchJson: async () => { calls += 1; return { status: 'OK' }; }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'invalid_tax_mode');
+  assert.equal(calls, 0);
+});
 

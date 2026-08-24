@@ -12,6 +12,10 @@ import path from 'node:path';
 const TERMINAL_STATES = new Set(['completed', 'superseded', 'failed']);
 const JOB_STATES = new Set(['ready', 'claimed', 'completed', 'superseded', 'retry_wait', 'failed']);
 const TOOL_OPERATION_STATES = new Set(['reserved', 'completed']);
+const TOOL_RECEIPT_SCHEMAS = new Map([
+  ['confirmation_request', 'village-confirmation-receipt/v1'],
+  ['document_send', 'village-document-receipt/v1']
+]);
 const APPLICATION_STATES = new Set(['pending', 'claimed', 'applying', 'applied', 'finalized', 'failed']);
 const FAILURE_NOTIFICATION_STATES = new Set(['pending', 'delivered']);
 
@@ -63,11 +67,18 @@ const isValidIso = (value) => typeof value === 'string'
   && Number.isFinite(Date.parse(value));
 
 function validateReceipt(receipt) {
-  if (receipt?.schema !== 'village-confirmation-receipt/v1') throw channelError('invalid_receipt', 'receipt schema is invalid');
+  if (!new Set(TOOL_RECEIPT_SCHEMAS.values()).has(receipt?.schema)) throw channelError('invalid_receipt', 'receipt schema is invalid');
   requiredString(receipt?.receipt_id ?? receipt?.receiptId, 'receipt_id', 'invalid_receipt');
   if (!String(receipt?.status ?? '').trim()) throw channelError('invalid_receipt', 'receipt status is required');
-  if (!Array.isArray(receipt?.availability_report)) throw channelError('invalid_receipt', 'availability_report must be a list');
-  if (!isObjectOrNull(receipt?.authoritative_sheet_result)) throw channelError('invalid_receipt', 'authoritative_sheet_result must be an object or null');
+  if (receipt.schema === 'village-confirmation-receipt/v1') {
+    if (!Array.isArray(receipt?.availability_report)) throw channelError('invalid_receipt', 'availability_report must be a list');
+    if (!isObjectOrNull(receipt?.authoritative_sheet_result)) throw channelError('invalid_receipt', 'authoritative_sheet_result must be an object or null');
+  } else {
+    if (receipt?.document_type !== 'quote') throw channelError('invalid_receipt', 'document_type must be quote');
+    if (!/^\d{6}-\d{3}$/.test(String(receipt?.trade_id || ''))) throw channelError('invalid_receipt', 'trade_id is invalid');
+    if (!['vat_included', 'supply_only'].includes(receipt?.tax_mode)) throw channelError('invalid_receipt', 'tax_mode is invalid');
+    if (!isObjectOrNull(receipt?.authoritative_document_result)) throw channelError('invalid_receipt', 'authoritative_document_result must be an object or null');
+  }
   if (!isValidIso(receipt?.created_at)) throw channelError('invalid_receipt', 'created_at must be ISO-8601');
   if (!(receipt?.error === null || typeof receipt?.error === 'string' || isObjectOrNull(receipt?.error))) {
     throw channelError('invalid_receipt', 'error must be null, a string, or an object');
@@ -76,7 +87,7 @@ function validateReceipt(receipt) {
 
 function normalizeToolOperation(operation) {
   const tool = requiredString(operation?.tool, 'tool', 'invalid_tool_operation');
-  if (tool !== 'confirmation_request') {
+  if (!TOOL_RECEIPT_SCHEMAS.has(tool)) {
     throw channelError('invalid_tool_operation', 'unsupported tool operation');
   }
   return {
@@ -102,7 +113,7 @@ function exactReceiptForToolOperation(job) {
   const reservation = job?.tool_operation;
   if (!reservation || reservation.state !== 'completed') return null;
   return (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).find((receipt) => (
-    receipt?.schema === 'village-confirmation-receipt/v1'
+    receipt?.schema === TOOL_RECEIPT_SCHEMAS.get(reservation.tool)
     && receipt.receipt_id === reservation.receipt_id
     && receipt.operation_id === reservation.operation_id
     && receipt.job_id === reservation.job_id
@@ -525,7 +536,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const reservation = job.tool_operation;
         if (!reservation) throw channelError('operation_fence_required', 'receipt has no durable tool operation reservation');
         const operationId = requiredString(receipt?.operation_id ?? receipt?.operationId, 'operation_id', 'operation_fence_mismatch');
-        const receiptOperation = normalizeToolOperation({ ...receipt, tool: 'confirmation_request' });
+        const receiptOperation = normalizeToolOperation({ ...receipt, tool: reservation.tool });
         if (reservation.operation_id !== operationId || !sameToolOperationEnvelope(reservation, receiptOperation)) {
           throw channelError('operation_fence_mismatch', 'receipt does not match its durable tool operation reservation');
         }
