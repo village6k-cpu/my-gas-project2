@@ -23,13 +23,21 @@ const ORPHAN_BOOLEAN_KEYS = Object.freeze(['registeredOwnedChild', 'daemonEpochR
 
 const ENUMS = Object.freeze({
   terminal_cua: { status: ['available', 'denied', 'unknown'], criterion: ['chrome_accessibility_screenshot', 'codex_probe', 'codex_probe_identity', 'codex_probe_timeout'], pointer: ['boolean_only', 'preflight_unavailable', 'identity_capture_failed_child_reaped', 'cleanup_incomplete', 'child_group_escalated', 'child_group_not_terminated', 'spawn_error', 'capability_unavailable', 'malformed_jsonl', 'output_limit_exceeded', 'command_failed'] },
-  launchagent_cua: { status: ['available', 'denied', 'unknown'], criterion: ['chrome_accessibility_screenshot', 'launchagent_probe', 'launchagent_probe_timeout', 'temporary_launchagent_cleanup', 'live_reexecution'], pointer: ['boolean_only', 'bounded_wait', 'launchctl_error', 'cleanup_incomplete', 'cleanup_mapping_retained', 'exact_label_bootout_confirmed', 'prior_cleanup_unresolved', 'output_limit_exceeded'] },
+  launchagent_cua: { status: ['available', 'denied', 'unknown'], criterion: ['chrome_accessibility_screenshot', 'launchagent_probe', 'launchagent_probe_identity', 'launchagent_probe_timeout', 'temporary_launchagent_cleanup', 'live_reexecution'], pointer: ['boolean_only', 'bounded_wait', 'launchctl_error', 'cleanup_incomplete', 'cleanup_mapping_retained', 'exact_label_bootout_confirmed', 'prior_cleanup_unresolved', 'preflight_unavailable', 'identity_capture_failed_child_reaped', 'child_group_escalated', 'child_group_not_terminated', 'spawn_error', 'capability_unavailable', 'malformed_jsonl', 'output_limit_exceeded', 'command_failed'] },
   human_auth_boundary: { status: ['available', 'unknown'], criterion: ['safe_login_boundary'], pointer: ['human_boundary_observed', 'not_opened'] },
   human_resume: { status: ['clean', 'unknown'], criterion: ['human_interruption_resume'], pointer: ['audited_resume_confirmed', 'historical_synthetic_only', 'not_run_no_live_fix'] },
   launchagent_security: { status: ['clean', 'denied', 'unknown'], criterion: ['temporary_launchagent_cleanup'], pointer: ['exact_label_bootout_confirmed', 'residual_label_present', 'residual_label_unavailable', 'cleanup_mapping_retained'] },
   single_instance_lease: { status: ['clean', 'unknown'], criterion: ['single_instance_lease', 'lease_probe'], pointer: ['lease_exclusion_confirmed', 'not_implemented'] },
   typed_evidence: { status: ['clean', 'unknown'], criterion: ['contract_unit_suite'], pointer: ['tests_passed', 'tests_failed'] },
   orphan_recovery: { status: ['clean', 'denied', 'unknown'], criterion: ['identity_checked_orphan_cleanup', 'live_reexecution', 'disposable_child', 'identity'], pointer: ['private_recovery_authority_consumed', 'prior_cleanup_unresolved', 'spawn_failed', 'cleanup_blocked', 'cleanup_incomplete', 'cleanup_attempted'] },
+});
+const LAUNCHAGENT_POINTERS_BY_CRITERION = Object.freeze({
+  chrome_accessibility_screenshot: Object.freeze(['boolean_only']),
+  launchagent_probe: Object.freeze(['launchctl_error', 'spawn_error', 'capability_unavailable', 'malformed_jsonl', 'output_limit_exceeded', 'command_failed']),
+  launchagent_probe_identity: Object.freeze(['preflight_unavailable', 'identity_capture_failed_child_reaped', 'cleanup_incomplete']),
+  launchagent_probe_timeout: Object.freeze(['bounded_wait', 'child_group_escalated', 'child_group_not_terminated']),
+  temporary_launchagent_cleanup: Object.freeze(['cleanup_incomplete', 'cleanup_mapping_retained', 'exact_label_bootout_confirmed']),
+  live_reexecution: Object.freeze(['prior_cleanup_unresolved']),
 });
 const SAFE_ENUM_VALUES = new Set(Object.values(ENUMS).flatMap(group => Object.values(group).flat()));
 const SAFE_EVIDENCE_KEYS = new Set([
@@ -67,6 +75,7 @@ function validateSummary(probeId, evidence, extraKeys = []) {
   exactKeys(evidence, [...SUMMARY_KEYS, ...extraKeys], `${probeId} evidence`);
   const allowed = ENUMS[probeId];
   for (const key of SUMMARY_KEYS) if (!allowed[key].includes(evidence[key])) throw new TypeError(`invalid ${probeId} ${key}`);
+  if (probeId === 'launchagent_cua' && !LAUNCHAGENT_POINTERS_BY_CRITERION[evidence.criterion]?.includes(evidence.pointer)) throw new TypeError('invalid launchagent_cua criterion-pointer pair');
 }
 
 function validateRestricted(evidence, result) {

@@ -14,11 +14,15 @@ export const PINNED_CODEX_PATH = '/Users/choijaehyeong/.codex/packages/standalon
 
 const BOOLEAN_KEYS = new Set(['chromeAccessibilityAvailable', 'screenshotAvailable']);
 const ERROR_CLASSES = new Set(['command_failed', 'timeout', 'malformed_evidence', 'not_available']);
+const FAILURE_CRITERIA = Object.freeze({
+  terminal_cua: Object.freeze({ command: 'codex_probe', identity: 'codex_probe_identity', timeout: 'codex_probe_timeout' }),
+  launchagent_cua: Object.freeze({ command: 'launchagent_probe', identity: 'launchagent_probe_identity', timeout: 'launchagent_probe_timeout' }),
+});
 export const MAX_JSONL_BYTES = 64 * 1024;
 const readProcessStart = promisify(execFile);
 const identityEqual = (a, b) => typeof a === 'string' && typeof b === 'string' ? a === b : JSON.stringify(a) === JSON.stringify(b);
 async function defaultIdentityReader(pid) { const r = await readProcessStart('/bin/ps', ['-p', String(pid), '-o', 'pid=,pgid=,ppid=,sess=,lstart=']); const parts = String(r.stdout).trim().split(/\s+/); if (parts.length < 5) throw new Error('identity'); return Object.freeze({ pid: parts[0], pgid: parts[1], ppid: parts[2], session: parts[3], start: parts.slice(4).join(' ') }); }
-async function boundedIdentity(reader, pid, deadline) { const remaining = deadline - Date.now(); if (remaining <= 0) return undefined; let timer; const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(undefined), remaining); }); try { return await Promise.race([Promise.resolve().then(() => reader(pid)), timeout]); } finally { clearTimeout(timer); } }
+async function boundedIdentity(reader, pid, deadline) { const remaining = deadline - Date.now(); if (remaining <= 0) return undefined; let timer; const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(undefined), remaining); }); try { return await Promise.race([Promise.resolve().then(() => reader(pid)), timeout]); } catch { return undefined; } finally { clearTimeout(timer); } }
 
 async function cleanupExactChild(child, codexPath, deadline) {
   if (!child || child.spawnfile !== codexPath || !Number.isInteger(child.pid) || child.pid <= 1) return false;
@@ -129,8 +133,15 @@ export async function runCodexProbe({ codexPath = PINNED_CODEX_PATH, allowTestOv
   if (probeId !== 'terminal_cua' && probeId !== 'launchagent_cua') throw new TypeError('invalid probe id');
   const cleanupReserve = Math.min(50, Math.max(10, Math.floor(timeoutMs / 2)));
   const deadline = Date.now() + timeoutMs;
-  if (await boundedIdentity(identityReader, process.pid, deadline - cleanupReserve) === undefined) return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'codex_probe_identity', pointer: 'preflight_unavailable' }, errorClass: 'timeout' });
-  const child = spawnImpl(codexPath, [...PROBE_ARGS, PROBE_PAYLOAD], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (await boundedIdentity(identityReader, process.pid, deadline - cleanupReserve) === undefined) return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].identity, pointer: 'preflight_unavailable' }, errorClass: 'timeout' });
+  let child;
+  try { child = spawnImpl(codexPath, [...PROBE_ARGS, PROBE_PAYLOAD], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); } catch {
+    return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].command, pointer: 'spawn_error' }, errorClass: 'command_failed' });
+  }
+  if (!child || typeof child !== 'object') return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].command, pointer: 'spawn_error' }, errorClass: 'command_failed' });
+  let childErrorSeen = false;
+  let handleChildError;
+  child.once?.('error', () => { childErrorSeen = true; handleChildError?.(); });
   let stdout = '';
   let stdoutBytes = 0;
   let stdoutOverflowed = false;
@@ -150,22 +161,25 @@ export async function runCodexProbe({ codexPath = PINNED_CODEX_PATH, allowTestOv
   child.stderr?.on('data', () => {}); // Never retain or print subprocess diagnostics.
   let expectedIdentity;
   try { expectedIdentity = await boundedIdentity(identityReader, child.pid, deadline - cleanupReserve); } catch { expectedIdentity = undefined; }
+  if (childErrorSeen) return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].command, pointer: 'spawn_error' }, errorClass: 'command_failed' });
   if (expectedIdentity === undefined) {
     const reaped = await cleanupExactChild(child, codexPath, deadline);
-    return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'codex_probe_identity', pointer: reaped ? 'identity_capture_failed_child_reaped' : 'cleanup_incomplete' }, errorClass: 'timeout' });
+    if (childErrorSeen) return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].command, pointer: 'spawn_error' }, errorClass: 'command_failed' });
+    return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].identity, pointer: reaped ? 'identity_capture_failed_child_reaped' : 'cleanup_incomplete' }, errorClass: 'timeout' });
   }
   const outcome = await new Promise(resolve => {
     let settled = false;
     let escalation;
     const finish = value => { if (!settled) { settled = true; clearTimeout(timer); clearTimeout(escalation); resolve(value); } };
+    handleChildError = () => finish(makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].command, pointer: 'spawn_error' }, errorClass: 'command_failed' }));
+    if (childErrorSeen) handleChildError();
     const timer = setTimeout(() => { void (async () => {
       let currentIdentity;
       try { currentIdentity = await boundedIdentity(identityReader, child.pid, deadline); } catch {}
       const owned = terminateOwnedGroup(child, codexPath, killImpl, expectedIdentity, currentIdentity);
-      if (owned) escalation = setTimeout(() => { void (async () => { let latest; try { latest = await boundedIdentity(identityReader, child.pid, deadline); } catch {} const revalidated = latest !== undefined && identityEqual(latest, expectedIdentity) && terminateOwnedGroup(child, codexPath, killImpl, expectedIdentity, latest, null); if (revalidated) { try { killImpl(-child.pid, 'SIGKILL'); } catch {} } finish(makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'codex_probe_timeout', pointer: revalidated ? 'child_group_escalated' : 'child_group_not_terminated' }, errorClass: 'timeout' })); })(); }, 25);
-      else finish(makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'codex_probe_timeout', pointer: 'child_group_not_terminated' }, errorClass: 'timeout' }));
+      if (owned) escalation = setTimeout(() => { void (async () => { let latest; try { latest = await boundedIdentity(identityReader, child.pid, deadline); } catch {} const revalidated = latest !== undefined && identityEqual(latest, expectedIdentity) && terminateOwnedGroup(child, codexPath, killImpl, expectedIdentity, latest, null); if (revalidated) { try { killImpl(-child.pid, 'SIGKILL'); } catch {} } finish(makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].timeout, pointer: revalidated ? 'child_group_escalated' : 'child_group_not_terminated' }, errorClass: 'timeout' })); })(); }, 25);
+      else finish(makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: FAILURE_CRITERIA[probeId].timeout, pointer: 'child_group_not_terminated' }, errorClass: 'timeout' }));
     })(); }, Math.max(1, deadline - Date.now() - cleanupReserve));
-    child.once?.('error', () => finish(makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'codex_probe', pointer: 'spawn_error' }, errorClass: 'command_failed' })));
     const handleClose = code => {
       try {
         if (stdoutOverflowed) throw new Error('overflow');
@@ -176,7 +190,7 @@ export async function runCodexProbe({ codexPath = PINNED_CODEX_PATH, allowTestOv
       } catch (error) {
         const notAvailable = error?.message === 'not_available';
         const overflow = error?.message === 'overflow';
-        finish(makeProbe({ probeId, result: notAvailable ? 'FAIL' : 'BLOCKED', checkedAt: now(), runId, evidence: { status: notAvailable ? 'denied' : 'unknown', criterion: 'codex_probe', pointer: notAvailable ? 'capability_unavailable' : overflow ? 'output_limit_exceeded' : (code === 0 ? 'malformed_jsonl' : 'command_failed') }, errorClass: notAvailable ? 'not_available' : (overflow || code === 0 ? 'malformed_evidence' : 'command_failed') }));
+        finish(makeProbe({ probeId, result: notAvailable ? 'FAIL' : 'BLOCKED', checkedAt: now(), runId, evidence: { status: notAvailable ? 'denied' : 'unknown', criterion: FAILURE_CRITERIA[probeId].command, pointer: notAvailable ? 'capability_unavailable' : overflow ? 'output_limit_exceeded' : (code === 0 ? 'malformed_jsonl' : 'command_failed') }, errorClass: notAvailable ? 'not_available' : (overflow || code === 0 ? 'malformed_evidence' : 'command_failed') }));
       }
     };
     if (earlyClose !== undefined) handleClose(earlyClose); else child.once?.('close', handleClose);

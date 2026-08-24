@@ -47,3 +47,12 @@ test('sensitive-looking values and unknown nested keys are rejected', () => {
 test('fixed safe enum strings remain accepted', () => {
   for (const probeId of PROBE_IDS) assert.doesNotThrow(() => pass(probeId));
 });
+
+test('LaunchAgent failure criterion rejects pointers from a different failure class', () => {
+  assert.throws(() => makeProbe({
+    probeId: 'launchagent_cua',
+    result: 'BLOCKED',
+    evidence: { status: 'unknown', criterion: 'launchagent_probe_identity', pointer: 'command_failed' },
+    errorClass: 'command_failed',
+  }), /invalid launchagent_cua criterion-pointer pair/);
+});
