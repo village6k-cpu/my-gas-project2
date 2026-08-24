@@ -1,0 +1,5 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { makeProbe, serializeEvidence, deriveVerdict } from './probe-contract.mjs';
+test('strict contract rejects unknown and sensitive evidence', () => { assert.throws(() => serializeEvidence({ probeId: 'x', evidence: { nope: true } }), /unknown evidence field/); assert.throws(() => serializeEvidence({ evidence: { apiKey: 'secret' } }), /sensitive/); assert.throws(() => serializeEvidence({ evidence: { status: 'stdout leaked' } }), /sensitive/); });
+test('probe and verdict are fail closed', () => { const pass = makeProbe({ probeId: 'typed_evidence', result: 'PASS', evidence: { capabilities: { safe: true } } }); assert.equal(deriveVerdict([pass]), 'PASS'); assert.equal(deriveVerdict([{ probeId: 'launchagent_cua', result: 'FAIL' }]), 'SUPERVISED_ONLY'); assert.equal(deriveVerdict([{ probeId: 'orphan_recovery', result: 'FAIL' }]), 'BLOCKED'); assert.equal(deriveVerdict([{ probeId: 'launchagent_cua', result: 'BLOCKED' }]), 'BLOCKED'); });
