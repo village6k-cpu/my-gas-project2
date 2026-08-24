@@ -33,3 +33,16 @@ action was performed. Task 4 remains responsible for live disposable-child valid
   restricted assertion set proves a narrow action path while all raw/global CUA capabilities are denied.
 - The orphan runner's live default child path is not exercised here; only injected seams and adversarial unit
   tests were run.
+
+## Review fixes
+
+- Restricted-profile model claims can no longer produce `PASS`; an out-of-band denial/helper check is required
+  in a later live gate. Restricted PASS evidence now requires all comparison booleans, including explicit direct
+  `node_repl` denial and both shell observations.
+- Orphan grants are bound in a private ownership registry to the exact PID/PGID/executable/start identity and
+  are consumed before the first signal, preventing partial-cleanup replay.
+- Identity capture failure uses only the exact spawned child handle for a bounded cleanup attempt and records
+  `cleanup_incomplete` when the handle remains alive.
+
+Review-fix verification: `node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check` — **30 passed,
+0 failed, 0 skipped; diff check passed.**

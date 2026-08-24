@@ -54,8 +54,10 @@ export async function runRestrictedProfileProbe({ codexPath = PINNED_CODEX_PATH,
     return makeProbe({ probeId: 'restricted_profile', result: 'BLOCKED', checkedAt: now(), runId, evidence: { assertions: Object.fromEntries(ASSERTION_KEYS.map(k => [k, false])), normalShellPresent: Boolean(normal?.shellPresent), restrictedShellPresent: Boolean(restricted?.shellPresent), directNodeReplDenied: restricted?.directNodeReplAllowed === false }, errorClass: error?.message === 'malformed' ? 'malformed_evidence' : 'command_failed' });
   }
   const evidence = evidenceFor(normal, restricted);
-  const safe = ASSERTION_KEYS.every(key => restricted[key] === (key === 'narrowActionPathWorks'));
-  return makeProbe({ probeId: 'restricted_profile', result: safe ? 'PASS' : 'FAIL', checkedAt: now(), runId, evidence, ...(safe ? {} : { errorClass: restricted.directNodeReplAllowed ? 'permission_boundary' : 'not_available' }) });
+  const claimedSafe = ASSERTION_KEYS.every(key => restricted[key] === (key === 'narrowActionPathWorks'));
+  // A model-produced record is not an independent security boundary. Task 4 must
+  // supply an out-of-band denial/helper check before this can ever become PASS.
+  return makeProbe({ probeId: 'restricted_profile', result: 'FAIL', checkedAt: now(), runId, evidence, errorClass: claimedSafe ? 'permission_boundary' : (restricted.directNodeReplAllowed ? 'permission_boundary' : 'not_available') });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) process.stdout.write(JSON.stringify(await runRestrictedProfileProbe()) + '\n');
