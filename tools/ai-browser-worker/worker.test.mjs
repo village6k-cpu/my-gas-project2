@@ -3002,6 +3002,28 @@ test('buildHermesPrompt makes exact catalog selection and explicit unmatched fal
   assert.match(prompt, /equipment_requested.*sheet_row_candidate\.equipment.*one-to-one.*same order/s);
 });
 
+test('buildHermesPrompt keeps customer-requested parenthetical accessories as covered equipment', () => {
+  const prompt = buildHermesPrompt(
+    { id: 'job-parenthetical-equipment', preview_text: '아마란 300C * 1세트 (라이트돔)' },
+    {
+      lookupContext: {
+        kill_switch: { status: 'active' },
+        lookup_policy: { mode: 'read_only' },
+        equipment_catalog: {
+          status: 'ok',
+          source_sheets: ['장비마스터', '세트마스터'],
+          exact_names: ['아마란 300C', '어퓨쳐 라이트돔 미니 SE', '어퓨쳐 라이트돔 90'],
+          error: null
+        }
+      }
+    }
+  );
+
+  assert.match(prompt, /괄호.*장비.*별도 top-level.*equipment_requested.*sheet_row_candidate\.equipment/s);
+  assert.match(prompt, /세트마스터.*포함 구성품.*확인.*때만.*set_component_selections/s);
+  assert.match(prompt, /모델이 모호.*누락.*unmatched.*고객 원문/s);
+});
+
 test('buildHermesPrompt requires existing RQ availability result before follow-up reporting', () => {
   const prompt = buildHermesPrompt({ id: 'job-rq', preview_text: '최재원 AX-700 가능 문의' });
 

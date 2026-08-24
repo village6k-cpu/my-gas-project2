@@ -719,6 +719,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
 - 불확실한 장비명도 코드 규칙으로 포기하지 말고 AI가 카탈로그 전체를 비교해 판단하고 대화 맥락으로 보강한다. 도저히 매칭할 수 없을 때만 catalog_match_status="unmatched", exact_name_from_equipment_catalog=null로 명시하고 고객 원문 장비명을 F열 item에 쓴다. 조회 실패·필드 누락을 unmatched로 가장하지 않는다. Q/R에는 원문/추론/가용확인 후 안내 같은 내부 설명을 넣지 않는다.
 - reservation_inquiry.equipment_requested and sheet_row_candidate.equipment must be one-to-one in the same order. 세트 옵션은 양쪽 장비 배열에 별도 품목으로 넣지 말고 set_component_selections에만 둔다.
+- 고객이 괄호 안에도 장비/액세서리를 명시하면(예: 아마란 300C 1세트 (라이트돔)) 고객이 요청한 별도 top-level 장비로 보고 reservation_inquiry.equipment_requested와 sheet_row_candidate.equipment 양쪽에 모두 포함한다. 현재 세트마스터 조회에서 그 장비가 해당 세트의 포함 구성품임을 확인한 때만 top-level에서 제외하고 set_component_selections로 처리한다. 모델이 모호하면 임의 모델을 고르거나 누락하지 말고 catalog_match_status="unmatched"와 고객 원문을 별도 품목으로 보존해 사장 확인 대상으로 남긴다.
 - 약어/속어는 AI 의미 판단 힌트다. 예: FX3, A7S3, FX6, FX9, A7M4, A7C2, 2470gm2 등. confidently matchable이면 catalog_match_status="matched"와 정확 카탈로그명을 쓰며, 원문은 정말 매칭 불가능한 경우만 fallback이다.
 - 렌즈 힌트: 70-200 GM II -> 소니 GM 70-200mm II, 24-70 GM II -> 소니 GM 24-70mm II, 16-35 -> 소니 GM 16-35mm.
 - 조명/기타 힌트: 600x -> 어퓨쳐 600X, 파보튜브 30xr -> 파보튜브 II 30XR, 시대/C대 -> C스탠드, 줌 F6/윈 F6 -> 줌 F6.
