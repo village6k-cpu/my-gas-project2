@@ -44,9 +44,33 @@ test('identity reuse between TERM and escalation denies SIGKILL', async () => {
 });
 
 test('hung identity reader is bounded and fails closed without signaling', async () => {
-  const c = child({ pid: 77 }); const signals = [];
-  const result = await runCodexProbe({ codexPath: '/opt/codex', allowTestOverrides: true, timeoutMs: 10, identityReader: () => new Promise(() => {}), spawnImpl: () => c, killImpl: (pid, signal) => signals.push([pid, signal]), runId: '0123456789abcdef' });
-  assert.equal(result.result, 'BLOCKED'); assert.equal(result.errorClass, 'timeout'); assert.deepEqual(signals, []);
+  let spawned = 0; const signals = [];
+  const result = await runCodexProbe({ codexPath: '/opt/codex', allowTestOverrides: true, timeoutMs: 20, identityReader: () => new Promise(() => {}), spawnImpl: () => { spawned += 1; return child({ pid: 77 }); }, killImpl: (pid, signal) => signals.push([pid, signal]), runId: '0123456789abcdef' });
+  assert.equal(result.result, 'BLOCKED'); assert.equal(result.errorClass, 'timeout'); assert.equal(spawned, 0); assert.deepEqual(signals, []);
+});
+
+test('delayed identity capture preserves cleanup reserve and total bound', async () => {
+  const signals = []; let reads = 0;
+  const c = new EventEmitter(); c.pid = 79; c.spawnfile = '/opt/codex'; c.exitCode = null; c.signalCode = null; c.killed = false; c.stdout = new EventEmitter(); c.stderr = new EventEmitter();
+  const started = Date.now();
+  const result = await runCodexProbe({ codexPath: '/opt/codex', allowTestOverrides: true, timeoutMs: 100, identityReader: async () => { reads += 1; if (reads === 2) await new Promise(resolve => setTimeout(resolve, 10)); return 'start-1'; }, spawnImpl: () => c, killImpl: (pid, signal) => signals.push([pid, signal]), runId: '0123456789abcdef' });
+  assert.equal(result.result, 'BLOCKED'); assert.deepEqual(signals, [[-79, 'SIGTERM'], [-79, 'SIGKILL']]); assert.ok(Date.now() - started < 200);
+});
+
+test('post-spawn identity failure reaps the exact child handle', async () => {
+  let reads = 0; const directSignals = [];
+  const c = new EventEmitter(); c.pid = 80; c.spawnfile = '/opt/codex'; c.exitCode = null; c.signalCode = null; c.killed = false; c.stdout = new EventEmitter(); c.stderr = new EventEmitter();
+  c.kill = signal => { directSignals.push(signal); setTimeout(() => { c.exitCode = 0; c.emit('close', 0); }, 2); return true; };
+  const result = await runCodexProbe({ codexPath: '/opt/codex', allowTestOverrides: true, timeoutMs: 80, identityReader: () => { reads += 1; return reads === 1 ? Promise.resolve('preflight') : new Promise(() => {}); }, spawnImpl: () => c, killImpl: () => { throw new Error('group signal forbidden'); }, runId: '0123456789abcdef' });
+  assert.equal(result.result, 'BLOCKED'); assert.equal(result.evidence.pointer, 'identity_capture_failed_child_reaped'); assert.deepEqual(directSignals, ['SIGTERM']);
+});
+
+test('post-spawn identity failure reports incomplete cleanup when child never closes', async () => {
+  let reads = 0; const directSignals = [];
+  const c = new EventEmitter(); c.pid = 81; c.spawnfile = '/opt/codex'; c.exitCode = null; c.signalCode = null; c.killed = false; c.stdout = new EventEmitter(); c.stderr = new EventEmitter(); c.kill = signal => { directSignals.push(signal); return true; };
+  const started = Date.now();
+  const result = await runCodexProbe({ codexPath: '/opt/codex', allowTestOverrides: true, timeoutMs: 60, identityReader: () => { reads += 1; return reads === 1 ? Promise.resolve('preflight') : new Promise(() => {}); }, spawnImpl: () => c, killImpl: () => { throw new Error('group signal forbidden'); }, runId: '0123456789abcdef' });
+  assert.equal(result.result, 'BLOCKED'); assert.equal(result.evidence.pointer, 'cleanup_incomplete'); assert.deepEqual(directSignals, ['SIGTERM', 'SIGKILL']); assert.ok(Date.now() - started < 150);
 });
 
 test('reaped child denies both TERM and KILL even with matching identity', () => {

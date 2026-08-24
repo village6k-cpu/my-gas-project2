@@ -25,13 +25,17 @@ invoked.
 
 Command: `node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check`
 
-Result after review fixes: 16 tests passed, 0 failed, 0 skipped; `git diff --check` passed.
+Result after review fixes: 19 tests passed, 0 failed, 0 skipped; `git diff --check` passed.
 
 Review fixes: pinned production Codex/runner paths with explicit test-only overrides, mandatory
 captured/rechecked child executable and start identity, nonzero-exit and false-capability denial,
 SIGTERM/SIGKILL bounded escalation, and unconditional exact-label bootout after bootstrap attempt.
 Adversarial tests cover all of those cases plus partial bootstrap, success/timeout cleanup, and
-repeated/idempotent cleanup behavior.
+repeated/idempotent cleanup behavior. The final targeted fix also proves zero-spawn on a hung
+identity preflight, preserves a cleanup reserve after delayed identity capture, and waits for the
+exact child handle to close after post-spawn identity failure. If that child does not close after
+bounded TERM/KILL through its own handle, the evidence says `cleanup_incomplete`; no group signal
+or cleanup success is claimed.
 
 Review-fix commits: `c4e7d8c` and current identity/escalation fix commit.
 

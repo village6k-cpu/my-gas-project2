@@ -19,6 +19,38 @@ const identityEqual = (a, b) => typeof a === 'string' && typeof b === 'string' ?
 async function defaultIdentityReader(pid) { const r = await readProcessStart('/bin/ps', ['-p', String(pid), '-o', 'pid=,pgid=,ppid=,sess=,lstart=']); const parts = String(r.stdout).trim().split(/\s+/); if (parts.length < 5) throw new Error('identity'); return Object.freeze({ pid: parts[0], pgid: parts[1], ppid: parts[2], session: parts[3], start: parts.slice(4).join(' ') }); }
 async function boundedIdentity(reader, pid, deadline) { const remaining = deadline - Date.now(); if (remaining <= 0) return undefined; let timer; const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(undefined), remaining); }); try { return await Promise.race([Promise.resolve().then(() => reader(pid)), timeout]); } finally { clearTimeout(timer); } }
 
+async function cleanupExactChild(child, codexPath, deadline) {
+  if (!child || child.spawnfile !== codexPath || !Number.isInteger(child.pid) || child.pid <= 1) return false;
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  if (typeof child.kill !== 'function' || typeof child.once !== 'function') return false;
+
+  const waitForClose = until => new Promise(resolve => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve(true);
+    const remaining = until - Date.now();
+    if (remaining <= 0) return resolve(false);
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener?.('close', onClose);
+      resolve(value);
+    };
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(false), remaining);
+    child.once('close', onClose);
+  });
+
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return false;
+  try { child.kill('SIGTERM'); } catch { return false; }
+  const termDeadline = Math.min(deadline, Date.now() + Math.max(1, Math.floor(remaining / 2)));
+  if (await waitForClose(termDeadline)) return true;
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  try { child.kill('SIGKILL'); } catch { return false; }
+  return waitForClose(deadline);
+}
+
 function safeErrorClass(value) { return ERROR_CLASSES.has(value) ? value : 'command_failed'; }
 
 function collectBooleans(value, out) {
@@ -76,7 +108,10 @@ export async function runCodexProbe({ codexPath = PINNED_CODEX_PATH, allowTestOv
   child.stderr?.on('data', () => {}); // Never retain or print subprocess diagnostics.
   let expectedIdentity;
   try { expectedIdentity = await boundedIdentity(identityReader, child.pid, deadline - cleanupReserve); } catch { expectedIdentity = undefined; }
-  if (expectedIdentity === undefined) { try { child.kill?.('SIGTERM'); } catch {} return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'codex_probe_identity', pointer: 'cleanup_incomplete' }, errorClass: 'timeout' }); }
+  if (expectedIdentity === undefined) {
+    const reaped = await cleanupExactChild(child, codexPath, deadline);
+    return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'codex_probe_identity', pointer: reaped ? 'identity_capture_failed_child_reaped' : 'cleanup_incomplete' }, errorClass: 'timeout' });
+  }
   const outcome = await new Promise(resolve => {
     let settled = false;
     let escalation;
