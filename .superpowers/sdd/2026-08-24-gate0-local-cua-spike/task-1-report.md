@@ -43,3 +43,12 @@ serializers rather than duplicate evidence handling.
 ## Review-fix commit
 
 `3810646` (`fix: enforce fail-closed Gate 0 contract`)
+
+## Final review-fix
+
+- Added exact probe-ID substitution rejection and exact nested schemas for runtime, MCP, and capability evidence.
+- Branch collection failure now yields `BLOCKED` with a redacted error class.
+- Runtime tests use `mkdtemp`/cleanup and cover the review reproducers.
+- Command: `node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check`
+- Result: 4 passed, 0 failed, 0 skipped; `git diff --check` passed.
+- Commit: `eb3d057 fix: close remaining Gate 0 evidence bypasses`
