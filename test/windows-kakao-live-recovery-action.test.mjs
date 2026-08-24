@@ -118,6 +118,35 @@ function gatewayCutoverHealth({ failed = 0, fresh = true, receiptVerified = true
   }).trim() === 'True';
 }
 
+function gatewayWatchdogHealth({
+  ready = 0,
+  claimed = 0,
+  retry = 0,
+  failed = 0,
+  unnotified = 0,
+  fresh = true,
+  receiptVerified = true
+} = {}) {
+  const escapedPath = modulePath.replaceAll("'", "''");
+  const command = [
+    `$ErrorActionPreference='Stop'`,
+    `Import-Module '${escapedPath}' -Force`,
+    `$health=[pscustomobject]@{ok=$true; config=[pscustomobject]@{hermesTransport='gateway'; scheduleOwnerReviewRequired=$true; killSwitchPolicyEnforced=$true}; gateway=[pscustomobject]@{gatewayReady=$true; consumer=[pscustomobject]@{fresh=$${fresh ? 'true' : 'false'}}; queue=[pscustomobject]@{ready=${ready}; claimed=${claimed}; retry=${retry}; failed=${failed}}; unnotified_application_failures=${unnotified}}}`,
+    `$probe=[pscustomobject]@{state='healthy'; cdpReady=$true; authenticated=$true; watcherReady=$true}`,
+    `$runtime=[pscustomobject]@{profile='kakaoworker'; pid=123; pluginPath='C:\\fixture\\kakao_village'; manifestSha256=('a' * 64); pluginReceiptVerified=$${receiptVerified ? 'true' : 'false'}}`,
+    `$smoke=[pscustomobject]@{nativeSessionResult='pass'; scheduleOwnerReviewRequired=$true; sendCount=0; writeCount=0; killSwitchObserved='active'}`,
+    `Test-KakaoGatewayWatchdogHealth -Health $health -RuntimeProbe $probe -GatewayRuntime $runtime -SmokeEvidence $smoke`
+  ].join('; ');
+  try {
+    return execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+      encoding: 'utf8',
+      windowsHide: true
+    }).trim() === 'True';
+  } catch {
+    return false;
+  }
+}
+
 function verifyPluginReceipt({ tamper = false } = {}) {
   const temp = mkdtempSync(path.join(tmpdir(), 'kakao-plugin-receipt-'));
   try {
@@ -192,6 +221,16 @@ test('Gateway cutover health fails closed on queue, consumer, or plugin receipt 
   assert.equal(gatewayCutoverHealth({ failed: 1 }), false);
   assert.equal(gatewayCutoverHealth({ fresh: false }), false);
   assert.equal(gatewayCutoverHealth({ receiptVerified: false }), false);
+});
+
+test('Gateway watchdog ignores terminal history but still requires an idle safe live path', () => {
+  assert.equal(gatewayWatchdogHealth(), true);
+  assert.equal(gatewayWatchdogHealth({ failed: 3, unnotified: 1 }), true);
+  assert.equal(gatewayWatchdogHealth({ ready: 1 }), false);
+  assert.equal(gatewayWatchdogHealth({ claimed: 1 }), false);
+  assert.equal(gatewayWatchdogHealth({ retry: 1 }), false);
+  assert.equal(gatewayWatchdogHealth({ fresh: false }), false);
+  assert.equal(gatewayWatchdogHealth({ receiptVerified: false }), false);
 });
 
 test('plugin receipt verification hashes the exact installed profile files', () => {

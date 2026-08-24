@@ -182,11 +182,11 @@ if ($unhealthy.Count -eq 0) {
             pluginReceiptVerified = Test-KakaoPluginInstallReceipt -Receipt $pluginReceipt
         }
         $gatewayOnlyProbe = [pscustomobject]@{ state = 'healthy'; cdpReady = $true; authenticated = $true; watcherReady = $true }
-        if (-not (Test-KakaoGatewayCutoverHealth -Health $gatewayHealth -RuntimeProbe $gatewayOnlyProbe `
+        if (-not (Test-KakaoGatewayWatchdogHealth -Health $gatewayHealth -RuntimeProbe $gatewayOnlyProbe `
             -GatewayRuntime $gatewayRuntime -SmokeEvidence $smokeEvidence)) {
             throw 'Gateway watchdog direct plugin/consumer/queue/safety readback failed; refusing broad recovery.'
         }
-        if (Test-KakaoGatewayCutoverHealth -Health $gatewayHealth -RuntimeProbe $runtimeProbe `
+        if (Test-KakaoGatewayWatchdogHealth -Health $gatewayHealth -RuntimeProbe $runtimeProbe `
             -GatewayRuntime $gatewayRuntime -SmokeEvidence $smokeEvidence) { return }
     }
     elseif (Test-KakaoLiveRuntimeProbe -Probe $runtimeProbe) { return }

@@ -174,13 +174,14 @@ function Get-KakaoGatewayCutoverPlan {
     }
 }
 
-function Test-KakaoGatewayCutoverHealth {
+function Test-KakaoGatewayHealthContract {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][psobject]$Health,
         [Parameter(Mandatory = $true)][psobject]$RuntimeProbe,
         [Parameter(Mandatory = $true)][psobject]$GatewayRuntime,
-        [Parameter(Mandatory = $true)][psobject]$SmokeEvidence
+        [Parameter(Mandatory = $true)][psobject]$SmokeEvidence,
+        [Parameter(Mandatory = $true)][bool]$RequireCleanHistory
     )
 
     $gateway = $Health.gateway
@@ -200,8 +201,10 @@ function Test-KakaoGatewayCutoverHealth {
         $null -ne $gateway -and $gateway.gatewayReady -eq $true -and
         $null -ne $gateway.consumer -and $gateway.consumer.fresh -eq $true -and
         $null -ne $queue -and $queue.ready -eq 0 -and
-        $queue.claimed -eq 0 -and $queue.retry -eq 0 -and $queue.failed -eq 0 -and
-        $gateway.unnotified_application_failures -eq 0 -and
+        $queue.claimed -eq 0 -and $queue.retry -eq 0 -and
+        (-not $RequireCleanHistory -or (
+            $queue.failed -eq 0 -and $gateway.unnotified_application_failures -eq 0
+        )) -and
         (Test-KakaoLiveRuntimeProbe -Probe $RuntimeProbe) -and
         $GatewayRuntime.pluginReceiptVerified -eq $true -and
         -not [string]::IsNullOrWhiteSpace($pluginPath) -and
@@ -212,6 +215,32 @@ function Test-KakaoGatewayCutoverHealth {
         $SmokeEvidence.sendCount -eq 0 -and $SmokeEvidence.writeCount -eq 0 -and
         $killSwitchObserved -in @('active', 'price_paused')
     )
+}
+
+function Test-KakaoGatewayCutoverHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Health,
+        [Parameter(Mandatory = $true)][psobject]$RuntimeProbe,
+        [Parameter(Mandatory = $true)][psobject]$GatewayRuntime,
+        [Parameter(Mandatory = $true)][psobject]$SmokeEvidence
+    )
+
+    return Test-KakaoGatewayHealthContract -Health $Health -RuntimeProbe $RuntimeProbe `
+        -GatewayRuntime $GatewayRuntime -SmokeEvidence $SmokeEvidence -RequireCleanHistory $true
+}
+
+function Test-KakaoGatewayWatchdogHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Health,
+        [Parameter(Mandatory = $true)][psobject]$RuntimeProbe,
+        [Parameter(Mandatory = $true)][psobject]$GatewayRuntime,
+        [Parameter(Mandatory = $true)][psobject]$SmokeEvidence
+    )
+
+    return Test-KakaoGatewayHealthContract -Health $Health -RuntimeProbe $RuntimeProbe `
+        -GatewayRuntime $GatewayRuntime -SmokeEvidence $SmokeEvidence -RequireCleanHistory $false
 }
 
 function Test-KakaoLiveBridgeContract {
@@ -516,5 +545,6 @@ Export-ModuleMember -Function @(
     'Get-KakaoLiveStartupPlan',
     'Get-KakaoGatewayCutoverPlan',
     'Test-KakaoGatewayCutoverHealth',
+    'Test-KakaoGatewayWatchdogHealth',
     'Test-KakaoPluginInstallReceipt'
 )
