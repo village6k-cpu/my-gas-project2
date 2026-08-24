@@ -36,7 +36,63 @@ def healthy_probe(**overrides):
     return value
 
 
+def healthy_extension_probe(**overrides):
+    value = {
+        "hasWatcher": False,
+        "started": False,
+        "observer": False,
+        "heartbeatTimer": False,
+        "topRowPollTimer": False,
+        "transportReady": False,
+        "pageEligible": True,
+        "topRowsCount": 0,
+        "topRowsScanAgeMs": None,
+        "watcherVersion": "",
+        "liveListProbeOk": True,
+        "liveListItemCount": 100,
+        "liveListHeadExpectedCount": 5,
+        "liveListHeadMatchCount": 5,
+        "extensionVersion": "2026-08-13-cdp-health-v16",
+        "extensionStatus": "running",
+    }
+    value.update(overrides)
+    return value
+
+
 class WatcherHealthTest(unittest.TestCase):
+    def test_accepts_the_running_extension_after_a_repair_reload_removes_the_cdp_watcher(self):
+        self.assertTrue(
+            INJECTOR.watcher_is_healthy(
+                healthy_extension_probe(),
+                "2026-08-13-cdp-health-v16",
+            )
+        )
+
+    def test_does_not_reload_a_live_list_owned_by_the_running_extension(self):
+        probe = healthy_extension_probe()
+
+        self.assertEqual(
+            INJECTOR.watcher_probe_state(
+                probe,
+                "2026-08-13-cdp-health-v16",
+            ),
+            "healthy",
+        )
+        self.assertFalse(
+            INJECTOR.watcher_should_reload(
+                probe,
+                "2026-08-13-cdp-health-v16",
+            )
+        )
+
+    def test_running_extension_still_rejects_a_stale_dom_head(self):
+        self.assertFalse(
+            INJECTOR.watcher_is_healthy(
+                healthy_extension_probe(liveListHeadMatchCount=0),
+                "2026-08-13-cdp-health-v16",
+            )
+        )
+
     def test_rejects_a_fresh_watcher_scanning_a_stale_one_row_kakao_list(self):
         probe = healthy_probe(topRowsCount=1, liveListItemCount=100)
 

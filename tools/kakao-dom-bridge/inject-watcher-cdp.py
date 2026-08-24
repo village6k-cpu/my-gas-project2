@@ -312,23 +312,27 @@ def probe_watcher(cdp: CDPWebSocket) -> dict[str, Any] | None:
 
 
 def watcher_is_healthy(value: dict[str, Any] | None, expected_extension_version: str | None = None) -> bool:
+    if not value:
+        return False
     live_item_count = int((value or {}).get("liveListItemCount") or 0)
     visible_row_count = int((value or {}).get("topRowsCount") or 0)
     minimum_visible_rows = min(live_item_count, 5)
     expected_head_count = int((value or {}).get("liveListHeadExpectedCount") or 0)
     matched_head_count = int((value or {}).get("liveListHeadMatchCount") or 0)
-    return bool(
-        value
-        and value.get("hasWatcher")
+    live_list_consistent = bool(
+        value.get("pageEligible")
+        and value.get("liveListProbeOk") is True
+        and expected_head_count >= minimum_visible_rows
+        and matched_head_count >= minimum_visible_rows
+    )
+    cdp_watcher_healthy = bool(
+        value.get("hasWatcher")
         and value.get("started")
         and value.get("observer")
         and value.get("heartbeatTimer")
         and value.get("topRowPollTimer")
         and value.get("transportReady")
-        and value.get("pageEligible")
-        and value.get("liveListProbeOk") is True
         and visible_row_count >= minimum_visible_rows
-        and matched_head_count >= expected_head_count
         and value.get("topRowsScanAgeMs") is not None
         and int(value.get("topRowsScanAgeMs") or 0) <= 120_000
         and (
@@ -336,6 +340,14 @@ def watcher_is_healthy(value: dict[str, Any] | None, expected_extension_version:
             or value.get("watcherVersion") == expected_extension_version
         )
     )
+    extension_watcher_healthy = bool(
+        value.get("extensionStatus") == "running"
+        and (
+            not expected_extension_version
+            or value.get("extensionVersion") == expected_extension_version
+        )
+    )
+    return live_list_consistent and (cdp_watcher_healthy or extension_watcher_healthy)
 
 
 def watcher_probe_state(
