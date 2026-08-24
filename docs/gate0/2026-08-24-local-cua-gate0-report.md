@@ -2,10 +2,21 @@
 
 ## Verdict
 
-**BLOCKED.** This is not an autonomous-pass result. The terminal and one-shot LaunchAgent
-observations both returned redacted `command_failed` outcomes, the restricted profile did not
-produce mechanical-denial evidence, a temporary Gate 0 LaunchAgent label remained after its
-runner returned, and the fixed orphan probe returned `pid_reuse` with cleanup unconfirmed.
+**BLOCKED**, derived from the committed nine-record artifact at
+`docs/gate0/2026-08-24-local-cua-gate0-evidence.json`. This is not an autonomous-pass
+result: the fresh terminal and restricted records are blocked, and the fresh read-only
+LaunchAgent observation found a residual Gate 0 label. LaunchAgent and orphan execution were
+not repeated because their earlier cleanup is unresolved.
+
+## Auditable artifacts
+
+- Contract artifact: `docs/gate0/2026-08-24-local-cua-gate0-evidence.json`
+  - generated with `serializeGate0Report()`
+  - schema: `gate0-report/v1`; nine unique contract records; derived verdict: `BLOCKED`
+- Non-contract desktop preflight: `docs/gate0/2026-08-24-local-cua-gate0-desktop-preflight.json`
+  - schema: `gate0-desktop-preflight/v1`; only `checkedAt`, hashed `runId`, and the two approved booleans
+- Strict generator and coverage: `tools/local-cua-clerk/gate0/task4-audit.mjs` and
+  `tools/local-cua-clerk/gate0/task4-audit.test.mjs`
 
 ## Execution record
 
@@ -13,34 +24,39 @@ runner returned, and the fixed orphan probe returned `pid_reuse` with cleanup un
 - Pinned Codex binary: `/Users/choijaehyeong/.codex/packages/standalone/releases/0.147.0-aarch64-apple-darwin/bin/codex`
 - Codex version: `codex-cli 0.147.0`
 - Node version: `v22.22.3`
-- Configuration verification began: `2026-08-24T02:22:55Z`
-- Report evidence window closed: `2026-08-24T02:27:41Z`
 - Pin correction commit: `8d7fb6e`
-- Fixed payload: terminal and one-shot LaunchAgent runners imported the same immutable payload.
+- Fresh evidence window: `2026-08-24T02:37:50.625Z` through `2026-08-24T02:38:55.106Z`
 
-## Approved Gate 0 probes
+## Chronological audit record
 
-| Probe ID / criterion | Result | Redacted evidence pointer |
+The desktop preflight is intentionally outside the nine-probe contract. All remaining rows are
+canonical artifact records; every row identifies its exact artifact path, probe ID, and run ID.
+
+| Phase / probe | Audited status | Artifact reference |
 | --- | --- | --- |
-| Desktop Chrome baseline | PASS | `EV-BASELINE-BOOLEAN-ONLY`: Chrome accessibility and screenshot booleans were both true through `node_repl` + `@oai/sky`. |
-| Desktop permission boundary | PASS | `EV-PERMISSION-NO-PROMPT`: subject observed; no permission/security prompt was accepted or changed. |
-| `terminal_cua` | BLOCKED | `EV-TERMINAL-COMMAND-FAILED`: fixed read-only payload; runner returned `command_failed`. |
-| `launchagent_cua` | BLOCKED | `EV-LAUNCHAGENT-COMMAND-FAILED`: same fixed payload; one-shot runner returned `command_failed`. |
-| `human_auth_boundary` | NOT_RUN | `EV-SAFE-LOGIN-NOT-OBSERVED`: HomeTax was intentionally not opened for this synthetic run. |
-| `human_resume` | PASS | `EV-SYNTHETIC-RESUME-CLEANED`: non-credential checkpoint was written, resumed, and removed. |
-| `launchagent_security` | BLOCKED | `EV-LAUNCHAGENT-LABEL-REMAINS`: read-only check found a temporary Gate 0 label; its temporary directory was absent. Attribution is not available, so no label was removed. |
-| `single_instance_lease` | NOT_RUN | `EV-NO-LEASE-HARNESS`: no approved live lease probe exists in this Gate 0 harness. |
-| `restricted_profile` | BLOCKED | `EV-RESTRICTED-COMMAND-FAILED`: no mechanical direct-node-repl/input/helper/ledger denial and narrow-helper proof was obtained. |
-| `typed_evidence` | PASS | `EV-UNIT-SUITE-30-PASS`: the redacted contract and adversarial suite passed. |
-| `orphan_recovery` | BLOCKED | `EV-ORPHAN-PID-REUSE-CLEANUP-UNCONFIRMED`: fixed runner returned `pid_reuse`; `cleanupCompleted` was false. No external PID or process group was targeted. |
+| Desktop Chrome baseline (non-contract) | PASS | `docs/gate0/2026-08-24-local-cua-gate0-desktop-preflight.json` · `2ae7ac74b7f502f7` — both approved booleans true through `node_repl` + `@oai/sky`. |
+| `terminal_cua` | BLOCKED | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `terminal_cua` · `d9912e9b46a741ef` — `command_failed`. |
+| `launchagent_cua` | NOT_RUN | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `launchagent_cua` · `3b0756ff641acfc2` — live re-execution prohibited while prior cleanup is unresolved. |
+| `launchagent_security` | BLOCKED | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `launchagent_security` · `8d283382dc94ed47` — fresh read-only boolean: residual Gate 0 label present; no label value emitted or persisted. |
+| `human_auth_boundary` | NOT_RUN | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `human_auth_boundary` · `ac31ab3d6de32e13` — safe login boundary not opened. |
+| `restricted_profile` | BLOCKED | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `restricted_profile` · `36d0f3633b570022` — `command_failed`; no mechanical boundary proof. |
+| `human_resume` | PASS | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `human_resume` · `803d6b2a5be569b9` — synthetic non-credential checkpoint completed and cleaned. |
+| `single_instance_lease` | NOT_RUN | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `single_instance_lease` · `cac45f30fa3cd847` — no approved live lease harness. |
+| `typed_evidence` | PASS | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `typed_evidence` · `ec5cee7d9530edb0` — full contract unit suite passed. |
+| `orphan_recovery` | NOT_RUN | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `orphan_recovery` · `3af0305e705ddb30` — live re-execution prohibited while prior cleanup is unresolved. |
+
+## Historical, non-audited observations
+
+Before the structured audit artifact existed, an earlier one-shot LaunchAgent attempt returned the
+fixed class `command_failed`, and an earlier orphan attempt returned `pid_reuse` with cleanup not
+confirmed. Those observations are not canonical evidence, are not used for the verdict, and were
+not rerun. No residual label, PID, or process group was targeted.
 
 ## Required user action
 
-No permission grant, credential entry, or HomeTax action is requested. Do not approve a broader
-runtime. Before any later retry, an operator must establish ownership of the residual temporary
-Gate 0 LaunchAgent label and remove only that exact owned label. The orphan probe's child handle
-is no longer available outside its completed runner, so cleanup is intentionally fail-closed and
-unconfirmed; no PID or process group should be targeted manually from this report.
+Do not manually remove the current retrospectively unowned label; this run cannot safely self-clean
+it. Before any retry, first implement and preserve an exact generated label-to-run mapping and prove
+self-bootout of only that label. Do not request or grant broader permissions.
 
 ## Safety confirmation
 
@@ -48,14 +64,15 @@ unconfirmed; no PID or process group should be targeted manually from this repor
   or transmitted.
 - No credential, cookie, certificate value, autofill value, page text, accessibility tree,
   screenshot, subprocess stream, or raw JSONL was emitted or persisted.
-- No Slack post, GAS deployment, Sheets mutation, permission grant, or unrelated process signal occurred.
-- No persistent LaunchAgent was intentionally installed. The one-shot runner was used; its residual
-  label prevents a cleanup-pass claim, while its temporary directory is absent.
+- No Slack post, GAS deployment, Sheets mutation, permission grant, persistent LaunchAgent install,
+  residual-label removal, or unrelated process signal occurred.
+- The earlier orphan child is not claimed reaped: its exact handle is unavailable, so cleanup remains
+  fail-closed and unconfirmed.
 
 ## Verification and self-review
 
-- `node --test tools/local-cua-clerk/gate0/*.test.mjs`: 30 passed, 0 failed.
-- `git diff --check`: passed before report creation; rerun after this report is required before handoff.
-- Requested probe order was followed: desktop baseline, terminal runner, one-shot LaunchAgent,
-  permission-boundary observation, restricted profile, synthetic resume, orphan recovery.
-- Result classification is conservative: any blocked criterion prevents autonomous PASS.
+- Post-report verification: `node --test tools/local-cua-clerk/gate0/*.test.mjs` — 33 passed,
+  0 failed; `git diff --check` — passed.
+- Request coverage: all nine contract probe IDs are present in the artifact; the only live reruns were
+  terminal, restricted profile, synthetic resume, desktop preflight, and read-only residual observation.
+- The report does not claim autonomous PASS or infer structured evidence from the earlier unsafe attempts.

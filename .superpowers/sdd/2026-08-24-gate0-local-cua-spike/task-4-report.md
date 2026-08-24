@@ -1,38 +1,35 @@
-# Task 4 report — live Gate 0 verdict
+# Task 4 report — audited Gate 0 verdict
 
-## Implementation summary
+## 작업 요약
 
-Corrected the production Gate 0 Codex pin to the verified standalone `0.147.0` binary and added
-an exact-path regression. Created the final redacted Gate 0 report after running the approved
-live probes in the required order.
+- 요청 사항: 안전한 재수집으로 Gate 0 증거를 감사 가능하게 만들고, 잔존 정리가 미확인된
+  LaunchAgent·orphan 재실행 없이 보수적 최종 판정을 게시.
+- 변경 내용: `serializeGate0Report()` 기반 9-레코드 증거 artifact, 두 boolean 전용 desktop
+  preflight serializer, synthetic resume probe, 회귀 테스트, 그리고 artifact run ID를 연결한 보고서를 추가.
+- 변경 파일/시트: `tools/local-cua-clerk/gate0/task4-audit.*`, `docs/gate0/2026-08-24-local-cua-gate0-*`,
+  이 보고서. Sheets/GAS는 변경하지 않음.
 
-## Commit and verification
+## Redacted live status
 
-- Pin commit: `8d7fb6e` (`fix: pin Gate 0 runner to resolved Codex binary`)
-- Pin regression + full suite: 30 passed, 0 failed.
-- Live verdict: **BLOCKED**.
-- Final verification to run after report creation: full suite and `git diff --check`.
+- Desktop preflight: PASS; approved two booleans true.
+- Terminal: BLOCKED / `command_failed`.
+- LaunchAgent: NOT_RUN in the canonical audit; no retry attempted.
+- Permission boundary: NOT_RUN; safe login boundary not opened.
+- Restricted profile: BLOCKED / `command_failed`; mechanical boundary remains unproven.
+- Synthetic resume: PASS; cleanup confirmed.
+- Orphan: NOT_RUN in the canonical audit; no retry attempted.
+- Read-only residual label observation: true; no label value emitted, removed, or targeted.
+- Final artifact verdict: **BLOCKED**.
 
-## Redacted live statuses
+## 셀프 리뷰 결과
 
-- Desktop Sky baseline: PASS; both approved booleans true; no security prompt observed.
-- Terminal runner: BLOCKED / `command_failed`.
-- One-shot temporary LaunchAgent runner: BLOCKED / `command_failed`.
-- Permission boundary: no prompt accepted or changed.
-- Restricted profile: BLOCKED / `command_failed`; no mechanical-denial helper proof.
-- Synthetic non-credential resume: PASS; checkpoint cleanup confirmed.
-- Orphan recovery: BLOCKED / `pid_reuse`; cleanup unconfirmed. No external PID/PGID was targeted.
-- LaunchAgent cleanup verification: temporary directory absent, but a temporary Gate 0 label remains.
-  Its exact ownership is unavailable after the runner ended, so it was not removed.
-
-## Safety confirmation
-
-No HomeTax access, tax mutation, credential inspection, Slack post, GAS deployment, Sheets change,
-permission grant, or unrelated-process signal occurred. No persistent LaunchAgent was intentionally
-installed; residual-label cleanup is explicitly not claimed.
-
-## Concern
-
-The blocked outcome must remain the final Gate 0 verdict until the terminal/LaunchAgent failures,
-residual owned-label cleanup, orphan child cleanup confirmation, and restricted-profile mechanical
-boundary are independently fixed and retested. This task did not patch around live failures.
+- ✅ 통과 항목: artifact has exactly nine schema-valid contract records; desktop artifact has only
+  its two permitted booleans; historical results are separate from canonical evidence; no raw stream,
+  UI tree, screenshot, page text, or credential value is stored.
+- ✅ 통과 항목: LaunchAgent and orphan were not rerun; no residual label/PID/PGID was removed or signaled.
+- ✅ 통과 항목: post-report full suite rerun completed: 33 passed, 0 failed; `git diff --check` passed.
+- 🔧 자체 수정한 항목: replaced opaque evidence pointers with artifact path + probe ID + hashed run ID;
+  corrected chronological report order; replaced stale verification language; made the residual-label
+  action fail-closed and precise.
+- ⚠️ 사용자 확인 필요: do not remove the retrospectively unowned label. A later retry first needs an
+  exact generated label-to-run mapping and proven self-bootout for only that label; no broader permission.
