@@ -1,51 +1,46 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { execFile as nodeExecFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { makeProbe } from './probe-contract.mjs';
 
 const execFile = promisify(nodeExecFile);
 const identityEqual = (a, b) => Boolean(a && b) && ['pid', 'pgid', 'executable', 'start'].every(key => a[key] === b[key]);
 const validPid = value => Number.isInteger(value) && value > 1;
-const revokedEpochs = new Set();
 
-// Registry and authorization are module-private. The public runner creates its
-// own disposable child and never accepts a caller-supplied target or grant.
-function createRegistry() { return new Map(); }
-function createGrant(registry, epoch, grantId, identity) { registry.set(grantId, { epoch, identity: Object.freeze({ ...identity }), consumed: false }); }
-function authorize(registry, grantId, epoch, identity) { const entry = registry.get(grantId); return entry && !entry.consumed && entry.epoch === epoch && identityEqual(entry.identity, identity) ? entry : undefined; }
-
-// Pure adversarial seam: never spawns, signals, mutates input, or calls effects.
-export function simulateOrphanRecoveryDecision({ registryEntry, activeEpoch, revokedEpochs: revoked = [], orphan, observations = [], aliveAfterTerm = true } = {}) {
-  const actions = []; const entry = registryEntry && { ...registryEntry, identity: registryEntry.identity && { ...registryEntry.identity } };
-  if (!entry || entry.consumed || entry.epoch !== activeEpoch || revoked.includes(entry.epoch) || !identityEqual(entry.identity, orphan)) return Object.freeze({ allowed: false, reason: entry?.epoch !== activeEpoch ? 'wrong_epoch' : 'revoked_or_replayed', actions });
-  if (!validPid(orphan?.pid) || !validPid(orphan?.pgid) || !identityEqual(entry.identity, observations[0]) || !identityEqual(entry.identity, observations[1])) return Object.freeze({ allowed: false, reason: 'identity_mismatch', actions });
-  entry.consumed = true; actions.push('SIGTERM');
-  if (aliveAfterTerm && !identityEqual(entry.identity, observations[2])) return Object.freeze({ allowed: false, reason: 'pid_reuse', actions });
-  if (aliveAfterTerm) actions.push('SIGKILL');
-  return Object.freeze({ allowed: true, reason: 'cleaned', actions });
+function createRecoveryAuthority(identity) {
+  return { authorityId: `recovery-${randomUUID()}`, identity: Object.freeze({ ...identity }), consumed: false };
 }
 
-async function recover(registry, grantId, epoch, orphan, identityReader, signal, isAlive) {
-  if (revokedEpochs.has(epoch)) return { result: 'BLOCKED', reason: 'revoked_or_replayed', signals: [] };
-  const entry = authorize(registry, grantId, epoch, orphan);
-  if (!entry) return { result: 'BLOCKED', reason: 'identity_mismatch', signals: [] };
-  if (!orphan || !validPid(orphan.pid) || !validPid(orphan.pgid)) return { result: 'BLOCKED', reason: 'identity_mismatch', signals: [] };
-  let current;
-  try { current = await identityReader(orphan.pid); } catch { return { result: 'BLOCKED', reason: 'identity_mismatch', signals: [] }; }
-  if (!identityEqual(entry.identity, current)) return { result: 'BLOCKED', reason: 'pid_reuse', signals: [] };
-  let beforeTerm;
-  try { beforeTerm = await identityReader(orphan.pid); } catch { return { result: 'BLOCKED', reason: 'identity_mismatch', signals: [] }; }
-  if (!identityEqual(entry.identity, beforeTerm)) return { result: 'BLOCKED', reason: 'pid_reuse', signals: [] };
-  entry.consumed = true;
-  const signals = [];
-  try { if (!signal(-orphan.pgid, 'SIGTERM')) return { result: 'BLOCKED', reason: 'command_failed', signals }; signals.push('SIGTERM'); } catch { return { result: 'BLOCKED', reason: 'command_failed', signals }; }
-  if (isAlive()) {
-    let latest;
-    try { latest = await identityReader(orphan.pid); } catch { return { result: 'BLOCKED', reason: 'identity_mismatch', signals }; }
-    if (!identityEqual(entry.identity, latest)) return { result: 'BLOCKED', reason: 'pid_reuse', signals };
-    try { if (!signal(-orphan.pgid, 'SIGKILL')) return { result: 'BLOCKED', reason: 'command_failed', signals }; signals.push('SIGKILL'); } catch { return { result: 'BLOCKED', reason: 'command_failed', signals }; }
+function denyUnrelatedTarget(authority, target) {
+  return !identityEqual(authority.identity, target);
+}
+
+// Pure adversarial seam. It plans decisions only and can never spawn or signal.
+export function simulateOrphanRecoveryDecision({ daemonEpochRevoked = false, recoveryAuthority, target, beforeTerm, beforeKill, unrelatedTarget, reusedTarget, groupAbsentAfterTerm = false, groupAbsentAfterKill = false } = {}) {
+  const authority = recoveryAuthority && { ...recoveryAuthority, identity: recoveryAuthority.identity && { ...recoveryAuthority.identity } };
+  const actions = [];
+  const checks = {
+    daemonEpochRevoked,
+    unrelatedPidProtected: Boolean(authority && denyUnrelatedTarget(authority, unrelatedTarget)),
+    pidReuseBlocked: Boolean(authority && denyUnrelatedTarget(authority, reusedTarget)),
+    exactIdentityVerified: false,
+    recoveryAuthorityConsumed: false,
+    processGroupAbsent: false,
+  };
+  if (!daemonEpochRevoked || !authority || authority.consumed || !validPid(target?.pid) || !validPid(target?.pgid) || !identityEqual(authority.identity, target)) return Object.freeze({ allowed: false, reason: 'authority_denied', actions, checks: Object.freeze(checks) });
+  if (!checks.unrelatedPidProtected || !checks.pidReuseBlocked || !identityEqual(authority.identity, beforeTerm)) return Object.freeze({ allowed: false, reason: 'identity_mismatch', actions, checks: Object.freeze(checks) });
+  checks.exactIdentityVerified = true;
+  checks.recoveryAuthorityConsumed = true;
+  actions.push('SIGTERM');
+  if (groupAbsentAfterTerm) {
+    checks.processGroupAbsent = true;
+    return Object.freeze({ allowed: true, reason: 'cleaned', actions, checks: Object.freeze(checks) });
   }
-  return { result: 'PASS', reason: 'cleaned', signals };
+  if (!identityEqual(authority.identity, beforeKill)) return Object.freeze({ allowed: false, reason: 'pid_reuse', actions, checks: Object.freeze(checks) });
+  actions.push('SIGKILL');
+  checks.processGroupAbsent = groupAbsentAfterKill;
+  return Object.freeze({ allowed: checks.processGroupAbsent, reason: checks.processGroupAbsent ? 'cleaned' : 'cleanup_incomplete', actions, checks: Object.freeze(checks) });
 }
 
 async function defaultIdentityReader(pid) {
@@ -54,32 +49,99 @@ async function defaultIdentityReader(pid) {
   if (parts.length < 5) throw new Error('identity');
   return { pid: Number(parts[0]), pgid: Number(parts[1]), executable: parts[2], start: parts.slice(3).join(' ') };
 }
-async function cleanupExactChild(child) { if (!child || typeof child.kill !== 'function') return 'cleanup_incomplete'; try { child.kill('SIGTERM'); } catch { return 'cleanup_incomplete'; } return child.exitCode === null && child.signalCode === null ? 'cleanup_incomplete' : 'cleanup_attempted'; }
+
+function defaultGroupAbsent(pgid) {
+  try { process.kill(-pgid, 0); return false; }
+  catch (error) { return error?.code === 'ESRCH'; }
+}
+
+async function waitForGroupAbsence(pgid, deadline) {
+  while (Date.now() < deadline) {
+    if (defaultGroupAbsent(pgid)) return true;
+    await new Promise(resolve => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
+  }
+  return defaultGroupAbsent(pgid);
+}
+
+async function cleanupExactChild(child, timeoutMs = 500) {
+  if (!child || typeof child.kill !== 'function' || typeof child.once !== 'function') return 'cleanup_incomplete';
+  const wait = deadline => new Promise(resolve => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve(true);
+    let timer;
+    const done = value => { clearTimeout(timer); child.removeListener?.('close', closed); resolve(value); };
+    const closed = () => done(true);
+    timer = setTimeout(() => done(false), Math.max(1, deadline - Date.now()));
+    child.once('close', closed);
+  });
+  const deadline = Date.now() + timeoutMs;
+  try { child.kill('SIGTERM'); } catch { return 'cleanup_incomplete'; }
+  if (await wait(Date.now() + Math.floor(timeoutMs / 2))) return 'cleanup_attempted';
+  try { child.kill('SIGKILL'); } catch { return 'cleanup_incomplete'; }
+  return await wait(deadline) ? 'cleanup_attempted' : 'cleanup_incomplete';
+}
+
+async function recoverWithPrivateAuthority({ authority, daemonEpochRevoked, registeredOwnedChild, target, identityReader, deadline }) {
+  const unrelated = { ...target, pid: target.pid + 1, pgid: target.pgid + 1 };
+  const reused = { ...target, start: `${target.start}-reused` };
+  const state = {
+    registeredOwnedChild: registeredOwnedChild && validPid(target.pid) && validPid(target.pgid) && identityEqual(authority.identity, target),
+    daemonEpochRevoked,
+    recoveryAuthorityConsumed: false,
+    exactIdentityVerified: false,
+    unrelatedPidProtected: denyUnrelatedTarget(authority, unrelated),
+    pidReuseBlocked: denyUnrelatedTarget(authority, reused),
+    termSent: false,
+    killSent: false,
+    processGroupAbsent: false,
+    cleanupCompleted: false,
+  };
+  if (!state.registeredOwnedChild || !state.daemonEpochRevoked || authority.consumed || !state.unrelatedPidProtected || !state.pidReuseBlocked) return { reason: 'identity_mismatch', state };
+  let beforeTerm;
+  try { beforeTerm = await identityReader(target.pid); } catch { return { reason: 'identity_mismatch', state }; }
+  if (!identityEqual(authority.identity, beforeTerm)) return { reason: 'pid_reuse', state };
+  state.exactIdentityVerified = true;
+  authority.consumed = true;
+  state.recoveryAuthorityConsumed = true;
+  try { process.kill(-target.pgid, 'SIGTERM'); state.termSent = true; } catch { return { reason: 'command_failed', state }; }
+  const termDeadline = Math.min(deadline, Date.now() + Math.max(1, Math.floor((deadline - Date.now()) / 2)));
+  state.processGroupAbsent = await waitForGroupAbsence(target.pgid, termDeadline);
+  if (!state.processGroupAbsent) {
+    let beforeKill;
+    try { beforeKill = await identityReader(target.pid); } catch { return { reason: 'identity_mismatch', state }; }
+    if (!identityEqual(authority.identity, beforeKill)) return { reason: 'pid_reuse', state };
+    try { process.kill(-target.pgid, 'SIGKILL'); state.killSent = true; } catch { return { reason: 'command_failed', state }; }
+    state.processGroupAbsent = await waitForGroupAbsence(target.pgid, deadline);
+  }
+  state.cleanupCompleted = state.processGroupAbsent;
+  return { reason: state.cleanupCompleted ? 'cleaned' : 'cleanup_incomplete', state };
+}
 
 export async function runOrphanRecoveryProbe() {
   const spawnOwned = () => nodeSpawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
-  const identityReader = defaultIdentityReader, signalImpl = process.kill, now = () => new Date().toISOString(), runId = undefined;
+  const identityReader = defaultIdentityReader, now = () => new Date().toISOString(), runId = undefined;
+  const deadline = Date.now() + 2_000;
   let child;
   try { child = await spawnOwned(); } catch { return makeProbe({ probeId: 'orphan_recovery', result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'disposable_child', pointer: 'spawn_failed' }, errorClass: 'command_failed' }); }
-  const executable = child?.spawnfile ?? process.execPath;
   const pid = child?.pid;
-  const pgid = child?.pgid ?? pid;
   let identity;
   try { identity = await identityReader(pid); } catch {
     const cleanup = await cleanupExactChild(child);
     return makeProbe({ probeId: 'orphan_recovery', result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'identity', pointer: cleanup }, errorClass: cleanup === 'cleanup_incomplete' ? 'cleanup_incomplete' : 'identity_mismatch' });
   }
-  const orphan = { pid, pgid, executable, start: identity.start };
-  const registry = createRegistry();
-  const epoch = `epoch-${Date.now()}`;
-  const grantId = `grant-${Date.now()}`;
-  createGrant(registry, epoch, grantId, orphan);
-  const recovered = await recover(registry, grantId, epoch, orphan, identityReader, signalImpl, () => child.exitCode === null && child.signalCode === null);
-  revokedEpochs.add(epoch);
-  const replay = revokedEpochs.has(epoch) ? { result: 'BLOCKED', reason: 'revoked_or_replayed', signals: [] } : await recover(registry, grantId, epoch, orphan, identityReader, signalImpl, () => child.exitCode === null && child.signalCode === null);
-  const evidence = { status: recovered.result === 'PASS' && replay.result === 'BLOCKED' ? 'clean' : 'denied', criterion: 'identity_checked_orphan_cleanup', pointer: recovered.result === 'PASS' ? 'private_registry_replay_denied' : 'cleanup_blocked', registeredOwnedChild: true, exactIdentityVerified: recovered.result === 'PASS', activeEpochVerified: recovered.result === 'PASS', oneTimeGrantConsumed: replay.result === 'BLOCKED', unrelatedPidProtected: true, cleanupCompleted: recovered.result === 'PASS' && recovered.signals.includes('SIGTERM'), termSent: recovered.signals.includes('SIGTERM'), killSent: recovered.signals.includes('SIGKILL'), identityMatched: recovered.result === 'PASS', epochValid: recovered.result === 'PASS', pidReuseBlocked: replay.result === 'BLOCKED' };
-  const pass = recovered.result === 'PASS' && replay.result === 'BLOCKED' && evidence.cleanupCompleted;
-  return makeProbe({ probeId: 'orphan_recovery', result: pass ? 'PASS' : 'BLOCKED', checkedAt: now(), runId, evidence, ...(pass ? {} : { errorClass: recovered.reason === 'cleaned' ? 'cleanup_incomplete' : recovered.reason }) });
+  const target = { pid, pgid: identity.pgid, executable: identity.executable, start: identity.start };
+  const registeredOwnedChild = validPid(pid) && validPid(identity.pgid) && identity.pid === pid && identity.executable === child.spawnfile && identityEqual(target, identity);
+  if (!registeredOwnedChild) {
+    const cleanup = await cleanupExactChild(child);
+    return makeProbe({ probeId: 'orphan_recovery', result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'identity', pointer: cleanup }, errorClass: cleanup === 'cleanup_incomplete' ? 'cleanup_incomplete' : 'identity_mismatch' });
+  }
+  const daemonEpoch = { id: `daemon-${randomUUID()}`, revoked: false };
+  const authority = createRecoveryAuthority(target);
+  daemonEpoch.revoked = true; // Revoke helper/daemon authority before recovery begins.
+  const recovered = await recoverWithPrivateAuthority({ authority, daemonEpochRevoked: daemonEpoch.revoked, registeredOwnedChild, target, identityReader, deadline });
+  const pass = recovered.reason === 'cleaned' && recovered.state.cleanupCompleted;
+  const evidence = { status: pass ? 'clean' : 'denied', criterion: 'identity_checked_orphan_cleanup', pointer: pass ? 'private_recovery_authority_consumed' : (recovered.reason === 'cleanup_incomplete' ? 'cleanup_incomplete' : 'cleanup_blocked'), ...recovered.state };
+  const errorClass = recovered.reason === 'cleaned' ? undefined : (['pid_reuse', 'identity_mismatch', 'command_failed', 'cleanup_incomplete'].includes(recovered.reason) ? recovered.reason : 'cleanup_incomplete');
+  return makeProbe({ probeId: 'orphan_recovery', result: pass ? 'PASS' : 'BLOCKED', checkedAt: now(), runId, evidence, ...(errorClass ? { errorClass } : {}) });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) process.stdout.write(JSON.stringify(await runOrphanRecoveryProbe()) + '\n');

@@ -14,6 +14,7 @@ export const PINNED_CODEX_PATH = '/Users/choijaehyeong/.codex/packages/standalon
 
 const BOOLEAN_KEYS = new Set(['chromeAccessibilityAvailable', 'screenshotAvailable']);
 const ERROR_CLASSES = new Set(['command_failed', 'timeout', 'malformed_evidence', 'not_available']);
+export const MAX_JSONL_BYTES = 64 * 1024;
 const readProcessStart = promisify(execFile);
 const identityEqual = (a, b) => typeof a === 'string' && typeof b === 'string' ? a === b : JSON.stringify(a) === JSON.stringify(b);
 async function defaultIdentityReader(pid) { const r = await readProcessStart('/bin/ps', ['-p', String(pid), '-o', 'pid=,pgid=,ppid=,sess=,lstart=']); const parts = String(r.stdout).trim().split(/\s+/); if (parts.length < 5) throw new Error('identity'); return Object.freeze({ pid: parts[0], pgid: parts[1], ppid: parts[2], session: parts[3], start: parts.slice(4).join(' ') }); }
@@ -53,25 +54,54 @@ async function cleanupExactChild(child, codexPath, deadline) {
 
 function safeErrorClass(value) { return ERROR_CLASSES.has(value) ? value : 'command_failed'; }
 
-function collectBooleans(value, out) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-  for (const [key, item] of Object.entries(value)) {
-    if (BOOLEAN_KEYS.has(key) && typeof item === 'boolean') out[key] = item;
-    if (item && typeof item === 'object') collectBooleans(item, out);
-  }
+function containsProbeBooleanKey(value) {
+  if (!value || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some(containsProbeBooleanKey);
+  return Object.entries(value).some(([key, nested]) => BOOLEAN_KEYS.has(key) || containsProbeBooleanKey(nested));
+}
+
+function exactBooleanRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value).sort();
+  if (keys.length !== 2 || keys[0] !== 'chromeAccessibilityAvailable' || keys[1] !== 'screenshotAvailable') return undefined;
+  if (typeof value.chromeAccessibilityAvailable !== 'boolean' || typeof value.screenshotAvailable !== 'boolean') return undefined;
+  return Object.freeze({ chromeAccessibilityAvailable: value.chromeAccessibilityAvailable, screenshotAvailable: value.screenshotAvailable });
+}
+
+function designatedResult(event) {
+  const direct = exactBooleanRecord(event);
+  if (direct) return direct;
+  if (event?.type !== 'item.completed' || event?.item?.type !== 'agent_message' || typeof event.item.text !== 'string') return undefined;
+  const eventKeys = Object.keys(event).sort();
+  const itemKeys = Object.keys(event.item).sort();
+  const eventExact = eventKeys.length === 2 && eventKeys[0] === 'item' && eventKeys[1] === 'type';
+  const itemExact = (itemKeys.length === 2 && itemKeys[0] === 'text' && itemKeys[1] === 'type')
+    || (itemKeys.length === 3 && itemKeys[0] === 'id' && itemKeys[1] === 'text' && itemKeys[2] === 'type' && typeof event.item.id === 'string');
+  if (!eventExact || !itemExact) throw new Error('malformed');
+  let record;
+  try { record = JSON.parse(event.item.text); } catch { throw new Error('malformed'); }
+  const parsed = exactBooleanRecord(record);
+  if (!parsed) throw new Error('malformed');
+  return parsed;
 }
 
 export function parseProbeJsonl(text) {
-  const found = {};
-  const lines = String(text ?? '').split(/\r?\n/).filter(Boolean);
+  const source = String(text ?? '');
+  if (Buffer.byteLength(source) > MAX_JSONL_BYTES) throw new Error('overflow');
+  const lines = source.split(/\r?\n/).filter(Boolean);
   if (!lines.length) throw new Error('malformed');
+  let found;
   for (const line of lines) {
     let event;
     try { event = JSON.parse(line); } catch { throw new Error('malformed'); }
-    collectBooleans(event, found);
+    const result = designatedResult(event);
+    if (result) {
+      if (found) throw new Error('malformed');
+      found = result;
+    } else if (containsProbeBooleanKey(event)) throw new Error('malformed');
   }
-  if (typeof found.chromeAccessibilityAvailable !== 'boolean' || typeof found.screenshotAvailable !== 'boolean') throw new Error('malformed');
-  return Object.freeze(found);
+  if (!found) throw new Error('malformed');
+  return found;
 }
 
 function makeEvidence(result, checkedAt, runId) {
@@ -102,9 +132,21 @@ export async function runCodexProbe({ codexPath = PINNED_CODEX_PATH, allowTestOv
   if (await boundedIdentity(identityReader, process.pid, deadline - cleanupReserve) === undefined) return makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'codex_probe_identity', pointer: 'preflight_unavailable' }, errorClass: 'timeout' });
   const child = spawnImpl(codexPath, [...PROBE_ARGS, PROBE_PAYLOAD], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
+  let stdoutBytes = 0;
+  let stdoutOverflowed = false;
   let earlyClose;
   child.once?.('close', code => { earlyClose = code; });
-  child.stdout?.on('data', chunk => { stdout += String(chunk); });
+  child.stdout?.on('data', chunk => {
+    if (stdoutOverflowed) return;
+    const bytes = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+    if (stdoutBytes + bytes > MAX_JSONL_BYTES) {
+      stdoutOverflowed = true;
+      stdout = '';
+      return;
+    }
+    stdoutBytes += bytes;
+    stdout += String(chunk);
+  });
   child.stderr?.on('data', () => {}); // Never retain or print subprocess diagnostics.
   let expectedIdentity;
   try { expectedIdentity = await boundedIdentity(identityReader, child.pid, deadline - cleanupReserve); } catch { expectedIdentity = undefined; }
@@ -126,11 +168,16 @@ export async function runCodexProbe({ codexPath = PINNED_CODEX_PATH, allowTestOv
     child.once?.('error', () => finish(makeProbe({ probeId, result: 'BLOCKED', checkedAt: now(), runId, evidence: { status: 'unknown', criterion: 'codex_probe', pointer: 'spawn_error' }, errorClass: 'command_failed' })));
     const handleClose = code => {
       try {
+        if (stdoutOverflowed) throw new Error('overflow');
         const result = parseProbeJsonl(stdout);
         if (code !== 0) throw new Error('command');
         if (!result.chromeAccessibilityAvailable || !result.screenshotAvailable) throw new Error('not_available');
         finish(makeProbe({ probeId, result: 'PASS', checkedAt: now(), runId, evidence: { status: 'available', criterion: 'chrome_accessibility_screenshot', pointer: 'boolean_only' } }));
-      } catch (error) { const notAvailable = error?.message === 'not_available'; finish(makeProbe({ probeId, result: notAvailable ? 'FAIL' : 'BLOCKED', checkedAt: now(), runId, evidence: { status: notAvailable ? 'denied' : 'unknown', criterion: 'codex_probe', pointer: notAvailable ? 'capability_unavailable' : (code === 0 ? 'malformed_jsonl' : 'command_failed') }, errorClass: notAvailable ? 'not_available' : (code === 0 ? 'malformed_evidence' : 'command_failed') })); }
+      } catch (error) {
+        const notAvailable = error?.message === 'not_available';
+        const overflow = error?.message === 'overflow';
+        finish(makeProbe({ probeId, result: notAvailable ? 'FAIL' : 'BLOCKED', checkedAt: now(), runId, evidence: { status: notAvailable ? 'denied' : 'unknown', criterion: 'codex_probe', pointer: notAvailable ? 'capability_unavailable' : overflow ? 'output_limit_exceeded' : (code === 0 ? 'malformed_jsonl' : 'command_failed') }, errorClass: notAvailable ? 'not_available' : (overflow || code === 0 ? 'malformed_evidence' : 'command_failed') }));
+      }
     };
     if (earlyClose !== undefined) handleClose(earlyClose); else child.once?.('close', handleClose);
   });
@@ -140,7 +187,7 @@ export async function runCodexProbe({ codexPath = PINNED_CODEX_PATH, allowTestOv
 if (import.meta.url === `file://${process.argv[1]}`) {
   const value = name => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : undefined; };
   const output = value('--output');
-  const result = await runCodexProbe({ codexPath: value('--codex-path'), probeId: value('--probe-id') ?? 'terminal_cua' });
+  const result = await runCodexProbe({ codexPath: value('--codex-path'), probeId: value('--probe-id') ?? 'terminal_cua', runId: value('--run-id') });
   if (output) await writeFile(output, JSON.stringify(result) + '\n', { mode: 0o600 });
   else process.stdout.write(JSON.stringify(result) + '\n');
 }

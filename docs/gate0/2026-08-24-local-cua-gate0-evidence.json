@@ -42,13 +42,13 @@
     {
       "schemaVersion": "gate0-probe/v1",
       "probeId": "human_resume",
-      "result": "PASS",
+      "result": "NOT_RUN",
       "checkedAt": "2026-08-24T02:38:43.783Z",
       "runId": "803d6b2a5be569b9",
       "evidence": {
-        "status": "clean",
-        "criterion": "synthetic_resume",
-        "pointer": "checkpoint_cleaned"
+        "status": "unknown",
+        "criterion": "human_interruption_resume",
+        "pointer": "historical_synthetic_only"
       }
     },
     {
@@ -105,7 +105,9 @@
       "evidence": {
         "status": "clean",
         "criterion": "contract_unit_suite",
-        "pointer": "tests_passed"
+        "pointer": "tests_passed",
+        "allRowsValidated": true,
+        "sensitiveValuesRejected": true
       }
     },
     {

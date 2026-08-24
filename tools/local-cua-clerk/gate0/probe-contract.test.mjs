@@ -1,7 +1,49 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeProbe, deriveVerdict, serializeEvidence, PROBE_IDS } from './probe-contract.mjs';
-const base=id=>makeProbe({probeId:id,result:'PASS',evidence:id==='restricted_profile'?{assertions:{directNodeReplAllowed:false,rawInputInjectionAllowed:false,helperSocketAccessAllowed:false,ledgerWriteAllowed:false,narrowActionPathWorks:true},normalShellPresent:true,restrictedShellPresent:false,directNodeReplDenied:true}:id==='orphan_recovery'?{registeredOwnedChild:true,exactIdentityVerified:true,activeEpochVerified:true,oneTimeGrantConsumed:true,unrelatedPidProtected:true,cleanupCompleted:true}:{}});
-test('verdict requires the complete Gate 0 probe set and restricted assertions',()=>{assert.equal(deriveVerdict([base('terminal_cua')]),'SUPERVISED_ONLY');assert.equal(deriveVerdict(PROBE_IDS.map(base)),'PASS');const rows=PROBE_IDS.map(base);rows.find(x=>x.probeId==='restricted_profile').evidence.assertions.ledgerWriteAllowed=true;assert.equal(deriveVerdict(rows),'SUPERVISED_ONLY');const substituted=PROBE_IDS.map(id=>base(id));substituted[0]={...substituted[0],probeId:'unlisted_probe'};assert.equal(deriveVerdict(substituted),'SUPERVISED_ONLY');});
-test('schema rejects free text, malformed identity, nested unknown evidence, and sensitive values',()=>{assert.throws(()=>serializeEvidence({...base('terminal_cua'),evidence:{pointer:'arbitrary prose'}}),/invalid pointer/);assert.throws(()=>makeProbe({probeId:'terminal_cua',result:'PASS',runId:'not-a-hash'}),/runId/);assert.throws(()=>makeProbe({probeId:'terminal_cua',result:'PASS',checkedAt:'yesterday'}),/checkedAt/);assert.throws(()=>makeProbe({probeId:'terminal_cua',result:'PASS',evidence:{node:{path:'/x',version:'1.2.3',stdout:'leak'}}}),/invalid node/);assert.throws(()=>makeProbe({probeId:'terminal_cua',result:'PASS',evidence:{mcp:[{name:'x',status:'available',stderr:'leak'}]}}),/invalid MCP/);assert.throws(()=>makeProbe({probeId:'terminal_cua',result:'PASS',evidence:{pointer:'password'}}),/sensitive value/);assert.throws(()=>makeProbe({probeId:'terminal_cua',result:'PASS',evidence:{criterion:'token'}}),/sensitive value/);assert.throws(()=>makeProbe({probeId:'terminal_cua',result:'PASS',evidence:{unknown:true}}),/unknown evidence/);});
-test('restricted PASS requires every comparison field and direct node_repl denial',()=>{const ev=base('restricted_profile').evidence;assert.throws(()=>makeProbe({probeId:'restricted_profile',result:'PASS',evidence:{...ev,directNodeReplDenied:false}}),/does not prove/);const {directNodeReplDenied:_,...omitted}=ev;assert.throws(()=>makeProbe({probeId:'restricted_profile',result:'PASS',evidence:omitted}),/missing restricted profile field/);assert.equal(deriveVerdict(PROBE_IDS.map(id=>id==='restricted_profile'?makeProbe({probeId:id,result:'PASS',evidence:ev}):base(id))),'PASS');const rows=PROBE_IDS.map(base);rows.find(x=>x.probeId==='restricted_profile').evidence.directNodeReplDenied=false;assert.equal(deriveVerdict(rows),'SUPERVISED_ONLY');});
+
+const passEvidence = probeId => ({
+  terminal_cua: { status: 'available', criterion: 'chrome_accessibility_screenshot', pointer: 'boolean_only' },
+  launchagent_cua: { status: 'available', criterion: 'chrome_accessibility_screenshot', pointer: 'boolean_only' },
+  human_auth_boundary: { status: 'available', criterion: 'safe_login_boundary', pointer: 'human_boundary_observed' },
+  human_resume: { status: 'clean', criterion: 'human_interruption_resume', pointer: 'audited_resume_confirmed' },
+  launchagent_security: { status: 'clean', criterion: 'temporary_launchagent_cleanup', pointer: 'exact_label_bootout_confirmed', bootstrapOwned: true, exactLabelBootout: true, ownDirectoryRemoved: true, recoveryMappingRetained: false },
+  single_instance_lease: { status: 'clean', criterion: 'single_instance_lease', pointer: 'lease_exclusion_confirmed', concurrentRunDenied: true, leaseReleased: true },
+  restricted_profile: { assertions: { directNodeReplAllowed: false, rawInputInjectionAllowed: false, helperSocketAccessAllowed: false, ledgerWriteAllowed: false, narrowActionPathWorks: true }, normalShellPresent: true, restrictedShellPresent: false, directNodeReplDenied: true },
+  typed_evidence: { status: 'clean', criterion: 'contract_unit_suite', pointer: 'tests_passed', allRowsValidated: true, sensitiveValuesRejected: true },
+  orphan_recovery: { status: 'clean', criterion: 'identity_checked_orphan_cleanup', pointer: 'private_recovery_authority_consumed', registeredOwnedChild: true, daemonEpochRevoked: true, recoveryAuthorityConsumed: true, exactIdentityVerified: true, unrelatedPidProtected: true, pidReuseBlocked: true, termSent: true, killSent: false, processGroupAbsent: true, cleanupCompleted: true },
+}[probeId]);
+const pass = probeId => makeProbe({ probeId, result: 'PASS', evidence: passEvidence(probeId) });
+
+test('every probe rejects empty or partial PASS evidence', () => {
+  for (const probeId of PROBE_IDS) assert.throws(() => makeProbe({ probeId, result: 'PASS', evidence: {} }), { name: 'TypeError' }, probeId);
+});
+
+test('valid complete global set passes and incomplete set stays supervised', () => {
+  assert.equal(deriveVerdict(PROBE_IDS.map(pass)), 'PASS');
+  assert.equal(deriveVerdict([pass('terminal_cua')]), 'SUPERVISED_ONLY');
+});
+
+test('deriveVerdict validates forged rows before considering PASS', () => {
+  const forged = PROBE_IDS.map(pass).map(row => ({ ...row }));
+  forged[0] = { ...forged[0], evidence: {} };
+  assert.equal(deriveVerdict(forged), 'BLOCKED');
+  const unknown = PROBE_IDS.map(pass).map(row => ({ ...row }));
+  unknown[0] = { ...unknown[0], forged: true };
+  assert.equal(deriveVerdict(unknown), 'BLOCKED');
+});
+
+test('sensitive-looking values and unknown nested keys are rejected', () => {
+  assert.throws(() => makeProbe({ probeId: 'terminal_cua', result: 'PASS', evidence: { status: 'available', criterion: 'chrome_accessibility_screenshot', pointer: 'customer_12345' } }), /sensitive value/);
+  for (const pointer of ['person@example.com', '010-1234-5678', 'page_checkout', 'AX_customer']) {
+    assert.throws(() => makeProbe({ probeId: 'terminal_cua', result: 'PASS', evidence: { status: 'available', criterion: 'chrome_accessibility_screenshot', pointer } }), /sensitive value/);
+  }
+  const restricted = structuredClone(passEvidence('restricted_profile'));
+  restricted.assertions.rawOutput = false;
+  assert.throws(() => makeProbe({ probeId: 'restricted_profile', result: 'PASS', evidence: restricted }), /sensitive field|unknown or missing/);
+  assert.throws(() => serializeEvidence({ ...pass('terminal_cua'), extra: true }), /probe has unknown or missing keys/);
+});
+
+test('fixed safe enum strings remain accepted', () => {
+  for (const probeId of PROBE_IDS) assert.doesNotThrow(() => pass(probeId));
+});

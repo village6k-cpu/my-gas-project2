@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as orphanModule from './orphan-recovery-probe.mjs';
-import { makeProbe, deriveVerdict, PROBE_IDS } from './probe-contract.mjs';
+import { makeProbe } from './probe-contract.mjs';
 
 const identity = { pid: 2345, pgid: 2345, executable: '/usr/bin/node', start: 'epoch-start-1' };
-const entry = (overrides = {}) => ({ grantId: 'grant-1', epoch: 'epoch-1', identity, consumed: false, ...overrides });
-const observations = (last = identity) => [identity, identity, last];
+const authority = (overrides = {}) => ({ authorityId: 'recovery-1', identity, consumed: false, ...overrides });
+const base = overrides => ({ daemonEpochRevoked: true, recoveryAuthority: authority(), target: identity, beforeTerm: identity, beforeKill: identity, unrelatedTarget: { ...identity, pid: 3456, pgid: 3456 }, reusedTarget: { ...identity, start: 'reused-start' }, groupAbsentAfterKill: true, ...overrides });
 
 test('production export has no injection surface; simulator is the only test seam', () => {
   assert.deepEqual(Object.keys(orphanModule).sort(), ['runOrphanRecoveryProbe', 'simulateOrphanRecoveryDecision'].sort());
@@ -14,31 +14,39 @@ test('production export has no injection surface; simulator is the only test sea
 });
 
 test('pure simulator allows only exact registered identity and returns a plan without effects', () => {
-  const result = orphanModule.simulateOrphanRecoveryDecision({ registryEntry: entry(), activeEpoch: 'epoch-1', orphan: identity, observations: observations() });
-  assert.deepEqual(result, { allowed: true, reason: 'cleaned', actions: ['SIGTERM', 'SIGKILL'] });
+  const result = orphanModule.simulateOrphanRecoveryDecision(base());
+  assert.equal(result.allowed, true); assert.equal(result.reason, 'cleaned'); assert.deepEqual(result.actions, ['SIGTERM', 'SIGKILL']);
+  assert.equal(result.checks.daemonEpochRevoked, true); assert.equal(result.checks.recoveryAuthorityConsumed, true); assert.equal(result.checks.processGroupAbsent, true);
 });
 
-test('wrong or revoked epoch denies before any action', () => {
-  const wrong = orphanModule.simulateOrphanRecoveryDecision({ registryEntry: entry(), activeEpoch: 'epoch-2', orphan: identity, observations: observations() });
-  const revoked = orphanModule.simulateOrphanRecoveryDecision({ registryEntry: entry(), activeEpoch: 'epoch-1', revokedEpochs: ['epoch-1'], orphan: identity, observations: observations() });
-  assert.deepEqual(wrong.actions, []); assert.deepEqual(revoked.actions, []); assert.equal(wrong.allowed, false); assert.equal(revoked.allowed, false);
+test('daemon/helper epoch must be revoked before separate recovery authority can act', () => {
+  const result = orphanModule.simulateOrphanRecoveryDecision(base({ daemonEpochRevoked: false }));
+  assert.equal(result.allowed, false); assert.equal(result.reason, 'authority_denied'); assert.deepEqual(result.actions, []); assert.equal(result.checks.recoveryAuthorityConsumed, false);
 });
 
-test('same grant replay and caller-state reset cannot produce a second plan', () => {
-  const consumed = entry({ consumed: true });
-  const replay = orphanModule.simulateOrphanRecoveryDecision({ registryEntry: consumed, activeEpoch: 'epoch-1', orphan: identity, observations: observations() });
-  const freshCallerState = orphanModule.simulateOrphanRecoveryDecision({ registryEntry: entry(), activeEpoch: 'epoch-1', revokedEpochs: ['epoch-1'], orphan: identity, observations: observations() });
-  assert.deepEqual(replay.actions, []); assert.deepEqual(freshCallerState.actions, []);
+test('one-use recovery authority replay is denied before any action', () => {
+  const result = orphanModule.simulateOrphanRecoveryDecision(base({ recoveryAuthority: authority({ consumed: true }) }));
+  assert.equal(result.allowed, false); assert.deepEqual(result.actions, []);
 });
 
-test('PID reuse and unregistered/mismatched targets are denied without actions', () => {
-  const reused = orphanModule.simulateOrphanRecoveryDecision({ registryEntry: entry(), activeEpoch: 'epoch-1', orphan: identity, observations: observations({ ...identity, start: 'reused' }) });
-  const mismatched = orphanModule.simulateOrphanRecoveryDecision({ registryEntry: entry({ identity: { ...identity, pid: 9999 } }), activeEpoch: 'epoch-1', orphan: identity, observations: observations() });
-  assert.deepEqual(reused.actions, ['SIGTERM']); assert.equal(reused.allowed, false); assert.deepEqual(mismatched.actions, []);
+test('unrelated PID check is side-effect-free and denies before TERM', () => {
+  const result = orphanModule.simulateOrphanRecoveryDecision(base({ unrelatedTarget: identity }));
+  assert.equal(result.checks.unrelatedPidProtected, false); assert.equal(result.allowed, false); assert.deepEqual(result.actions, []);
 });
 
-test('empty orphan evidence cannot pass and global PASS needs positive orphan proof', () => {
-  assert.throws(() => makeProbe({ probeId: 'orphan_recovery', result: 'PASS', evidence: {} }), /orphan recovery does not prove/);
-  const rows = PROBE_IDS.map(id => id === 'orphan_recovery' ? makeProbe({ probeId: id, result: 'PASS', evidence: { registeredOwnedChild: true, exactIdentityVerified: true, activeEpochVerified: true, oneTimeGrantConsumed: true, unrelatedPidProtected: true, cleanupCompleted: true } }) : makeProbe({ probeId: id, result: 'PASS', evidence: id === 'restricted_profile' ? { assertions: { directNodeReplAllowed: false, rawInputInjectionAllowed: false, helperSocketAccessAllowed: false, ledgerWriteAllowed: false, narrowActionPathWorks: true }, normalShellPresent: true, restrictedShellPresent: false, directNodeReplDenied: true } : {} }));
-  assert.equal(deriveVerdict(rows), 'PASS'); rows.find(row => row.probeId === 'orphan_recovery').evidence.cleanupCompleted = false; assert.equal(deriveVerdict(rows), 'SUPERVISED_ONLY');
+test('actual PID identity reuse before KILL is denied and KILL is not planned', () => {
+  const result = orphanModule.simulateOrphanRecoveryDecision(base({ beforeKill: { ...identity, start: 'reused-start' } }));
+  assert.equal(result.allowed, false); assert.equal(result.reason, 'pid_reuse'); assert.deepEqual(result.actions, ['SIGTERM']); assert.equal(result.checks.pidReuseBlocked, true);
+});
+
+test('cleanup completes only after observed process-group absence', () => {
+  const incomplete = orphanModule.simulateOrphanRecoveryDecision(base({ groupAbsentAfterKill: false }));
+  assert.equal(incomplete.allowed, false); assert.equal(incomplete.reason, 'cleanup_incomplete'); assert.equal(incomplete.checks.processGroupAbsent, false);
+  const afterTerm = orphanModule.simulateOrphanRecoveryDecision(base({ groupAbsentAfterTerm: true, groupAbsentAfterKill: false }));
+  assert.equal(afterTerm.allowed, true); assert.deepEqual(afterTerm.actions, ['SIGTERM']); assert.equal(afterTerm.checks.processGroupAbsent, true);
+});
+
+test('complete orphan PASS evidence reflects every matching safety check', () => {
+  assert.doesNotThrow(() => makeProbe({ probeId: 'orphan_recovery', result: 'PASS', evidence: { status: 'clean', criterion: 'identity_checked_orphan_cleanup', pointer: 'private_recovery_authority_consumed', registeredOwnedChild: true, daemonEpochRevoked: true, recoveryAuthorityConsumed: true, exactIdentityVerified: true, unrelatedPidProtected: true, pidReuseBlocked: true, termSent: true, killSent: true, processGroupAbsent: true, cleanupCompleted: true } }));
+  assert.throws(() => makeProbe({ probeId: 'orphan_recovery', result: 'PASS', evidence: {} }), /unknown or missing|requires complete/);
 });

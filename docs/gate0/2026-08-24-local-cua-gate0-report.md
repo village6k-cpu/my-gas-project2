@@ -9,6 +9,10 @@ LaunchAgent observation found a residual Gate 0 label. LaunchAgent and orphan ex
 not repeated because their earlier cleanup is unresolved. The artifact timestamp sequence also
 failed to follow the specified Task 4 sequence, which is an independent additional BLOCKED reason.
 
+Contract correction time: `2026-08-24T03:10:08Z`. This correction performed no live probe. It
+preserved the original record timestamps/run IDs, downgraded `human_resume` to `NOT_RUN`, and added
+the strict typed-evidence booleans required by the corrected schema.
+
 ## Auditable artifacts
 
 - Contract artifact: `docs/gate0/2026-08-24-local-cua-gate0-evidence.json`
@@ -35,7 +39,7 @@ is intentionally outside the nine-probe contract. All remaining rows are canonic
 records; every row identifies its exact artifact path, probe ID, and run ID.
 
 Actual structured timestamp order was: `terminal_cua` at `2026-08-24T02:37:50.625Z`,
-`restricted_profile` at `2026-08-24T02:38:38.161Z`, `human_resume` at
+`restricted_profile` at `2026-08-24T02:38:38.161Z`, the historical synthetic checkpoint record at
 `2026-08-24T02:38:43.783Z`, then desktop preflight at `2026-08-24T02:38:55.104Z`.
 LaunchAgent and orphan audited reruns are `NOT_RUN`. This order did not follow the specified
 Task 4 sequence, so the result remains BLOCKED even apart from the other boundary failures.
@@ -48,7 +52,7 @@ Task 4 sequence, so the result remains BLOCKED even apart from the other boundar
 | `launchagent_security` | BLOCKED | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `launchagent_security` · `8d283382dc94ed47` — fresh read-only boolean: residual Gate 0 label present; no label value emitted or persisted. |
 | `human_auth_boundary` | NOT_RUN | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `human_auth_boundary` · `ac31ab3d6de32e13` — safe login boundary not opened. |
 | `restricted_profile` | BLOCKED | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `restricted_profile` · `36d0f3633b570022` — `command_failed`; no mechanical boundary proof. |
-| `human_resume` | PASS | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `human_resume` · `803d6b2a5be569b9` — synthetic non-credential checkpoint completed and cleaned. |
+| `human_resume` | NOT_RUN | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `human_resume` · `803d6b2a5be569b9` — prior same-function file roundtrip is historical only; no audited human interruption/resume occurred. |
 | `single_instance_lease` | NOT_RUN | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `single_instance_lease` · `cac45f30fa3cd847` — no approved live lease harness. |
 | `typed_evidence` | PASS | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `typed_evidence` · `ec5cee7d9530edb0` — full contract unit suite passed. |
 | `orphan_recovery` | NOT_RUN | `docs/gate0/2026-08-24-local-cua-gate0-evidence.json` · `orphan_recovery` · `3af0305e705ddb30` — live re-execution prohibited while prior cleanup is unresolved. |
@@ -58,13 +62,16 @@ Task 4 sequence, so the result remains BLOCKED even apart from the other boundar
 Before the structured audit artifact existed, an earlier one-shot LaunchAgent attempt returned the
 fixed class `command_failed`, and an earlier orphan attempt returned `pid_reuse` with cleanup not
 confirmed. Those observations are not canonical evidence, are not used for the verdict, and were
-not rerun. No residual label, PID, or process group was targeted.
+not rerun. The prior synthetic checkpoint file roundtrip is also historical, non-audited evidence
+and cannot satisfy `human_resume`. No residual label, PID, or process group was targeted.
 
 ## Required user action
 
 Do not manually remove the current retrospectively unowned label; this run cannot safely self-clean
-it. Before any retry, first implement and preserve an exact generated label-to-run mapping and prove
-self-bootout of only that label. Do not request or grant broader permissions.
+it. The corrected runner can preserve a new run's private exact label-to-run mapping, but that code
+was not live-tested in this fix wave and must never be aimed at the old residual label. A future,
+separately approved retry may prove self-bootout only for its own freshly generated label. Do not
+request or grant broader permissions.
 
 ## Safety confirmation
 
@@ -79,8 +86,10 @@ self-bootout of only that label. Do not request or grant broader permissions.
 
 ## Verification and self-review
 
-- Final verification after the strict-roundtrip and ordering edits: `node --test
-  tools/local-cua-clerk/gate0/*.test.mjs` — 34 passed, 0 failed; `git diff --check` — passed.
+- Final fix-wave verification: `node --test tools/local-cua-clerk/gate0/*.test.mjs` — 42 passed,
+  0 failed on each full-suite run; committed desktop and nine-record artifacts strict-roundtripped;
+  `git diff --check` passed.
 - Request coverage: all nine contract probe IDs are present in the artifact; the only live reruns were
-  terminal, restricted profile, synthetic resume, desktop preflight, and read-only residual observation.
+  historical work before this correction. This fix wave ran no live probe, LaunchAgent, orphan,
+  CUA, HomeTax, Slack, GAS, or Sheets action.
 - The report does not claim autonomous PASS or infer structured evidence from the earlier unsafe attempts.

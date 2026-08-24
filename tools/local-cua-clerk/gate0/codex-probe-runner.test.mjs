@@ -1,25 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { parseProbeJsonl, runCodexProbe, terminateOwnedGroup, PINNED_CODEX_PATH, PROBE_PAYLOAD, PROBE_ARGS } from './codex-probe-runner.mjs';
+import { parseProbeJsonl, runCodexProbe, terminateOwnedGroup, PINNED_CODEX_PATH, PROBE_PAYLOAD, PROBE_ARGS, MAX_JSONL_BYTES } from './codex-probe-runner.mjs';
 
 function child({ output = '', code = 0, pid = 1234, spawnfile = '/opt/codex', identity = 'start-1' } = {}) {
   const c = new EventEmitter(); c.pid = pid; c.spawnfile = spawnfile; c.startIdentity = identity; c.pidStartIdentity = identity; c.exitCode = null; c.signalCode = null; c.killed = false; c.stdout = new EventEmitter(); c.stderr = new EventEmitter(); c.once = c.once.bind(c);
   queueMicrotask(() => { if (output) c.stdout.emit('data', output); c.emit('close', code); }); return c;
 }
 
-test('fixed payload and JSONL parser retain only the two booleans', () => {
+test('fixed payload and JSONL parser accept one exact designated result only', () => {
   assert.equal(PROBE_ARGS[0], 'exec'); assert.match(PROBE_PAYLOAD, /JSON only/);
   assert.equal(PINNED_CODEX_PATH, '/Users/choijaehyeong/.codex/packages/standalone/releases/0.147.0-aarch64-apple-darwin/bin/codex');
-  assert.deepEqual(parseProbeJsonl('{"type":"message","result":{"chromeAccessibilityAvailable":true,"screenshotAvailable":false,"text":"redacted"}}'), { chromeAccessibilityAvailable: true, screenshotAvailable: false });
+  const designated = JSON.stringify({ type: 'item.completed', item: { id: 'safe-id', type: 'agent_message', text: JSON.stringify({ chromeAccessibilityAvailable: true, screenshotAvailable: false }) } });
+  assert.deepEqual(parseProbeJsonl(designated), { chromeAccessibilityAvailable: true, screenshotAvailable: false });
+  assert.deepEqual(parseProbeJsonl('{"chromeAccessibilityAvailable":true,"screenshotAvailable":false}'), { chromeAccessibilityAvailable: true, screenshotAvailable: false });
   assert.throws(() => parseProbeJsonl('{"chromeAccessibilityAvailable":true}'));
   assert.throws(() => parseProbeJsonl('not json'));
+  assert.throws(() => parseProbeJsonl('{"chromeAccessibilityAvailable":true,"screenshotAvailable":true}\n{"chromeAccessibilityAvailable":false,"screenshotAvailable":false}'));
+  assert.throws(() => parseProbeJsonl('{"chromeAccessibilityAvailable":true,"screenshotAvailable":true,"extra":false}'));
+  assert.throws(() => parseProbeJsonl('{"type":"message","chromeAccessibilityAvailable":true,"screenshotAvailable":true}'));
+  assert.throws(() => parseProbeJsonl(JSON.stringify({ type: 'item.completed', screenshotAvailable: true, item: { type: 'agent_message', text: '{"chromeAccessibilityAvailable":true,"screenshotAvailable":true}' } })));
+  assert.throws(() => parseProbeJsonl(' '.repeat(MAX_JSONL_BYTES + 1)), /overflow/);
 });
 
 test('runner uses pinned path and emits contract without subprocess text', async () => {
   let called;
   const result = await runCodexProbe({ codexPath: '/opt/codex', allowTestOverrides: true, identityReader: async () => 'start-1', spawnImpl: (path, args, opts) => { called = { path, args, opts }; return child({ output: '{"chromeAccessibilityAvailable":true,"screenshotAvailable":true}\n' }); }, now: () => '2026-08-24T00:00:00.000Z', runId: '0123456789abcdef' });
   assert.equal(result.result, 'PASS'); assert.equal(result.probeId, 'terminal_cua'); assert.equal(called.path, '/opt/codex'); assert.equal(called.args[0], 'exec'); assert.equal(called.opts.detached, true); assert.equal(Object.hasOwn(result.evidence, 'text'), false);
+});
+
+test('runner caps retained JSONL and returns redacted malformed evidence on overflow', async () => {
+  const oversized = `${'x'.repeat(MAX_JSONL_BYTES)}\n{"chromeAccessibilityAvailable":true,"screenshotAvailable":true}`;
+  const result = await runCodexProbe({ codexPath: '/opt/codex', allowTestOverrides: true, identityReader: async () => 'start-1', spawnImpl: () => child({ output: oversized }), runId: '0123456789abcdef' });
+  assert.equal(result.result, 'BLOCKED');
+  assert.equal(result.errorClass, 'malformed_evidence');
+  assert.equal(result.evidence.pointer, 'output_limit_exceeded');
+  assert.equal(JSON.stringify(result).includes('xxxx'), false);
 });
 
 test('timeout only kills an owned child group; unrelated identity is denied', async () => {
