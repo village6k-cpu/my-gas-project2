@@ -42,4 +42,4 @@ serializers rather than duplicate evidence handling.
 
 ## Review-fix commit
 
-`be916720cc13716ae08b64131e7aaef6500ef44e` (`fix: enforce fail-closed Gate 0 contract`)
+`3810646` (`fix: enforce fail-closed Gate 0 contract`)
