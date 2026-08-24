@@ -18,6 +18,8 @@ const {
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
   createGatewayConfirmationValidator,
+  createGatewayDocumentExecutor,
+  resolveGatewayDocumentConfig,
   createGatewayApplicationFailureNotifier,
   createGatewayFailureNotificationCoordinator,
   createGatewayResultApplicationCoordinator,
@@ -438,6 +440,75 @@ test('server confirmation executor forwards the channel claim fence into the wor
   assert.equal(operationArgs.job.roomRevision, 3);
   assert.equal(operationArgs.dependencies.assertCurrentClaim, assertCurrentClaim);
   assert.equal(operationArgs.dependencies.operationFence, operationFence);
+});
+
+test('server document executor fences then sends the exact registered supply-only quote and returns a correlated receipt', async () => {
+  const calls = [];
+  let leaseChecks = 0;
+  const executor = createGatewayDocumentExecutor({
+    getConfig: () => ({ documentApiBaseUrl: 'https://docs.example/exec', documentApiKey: 'doc-key' }),
+    executeRequest: async (request, options) => {
+      calls.push({ request, options });
+      return {
+        ok: true, documentType: 'quote', tradeId: '260822-001', taxMode: 'supply_only',
+        response: { status: 'OK', tradeID: '260822-001', taxMode: 'supply_only', pdfUrl: 'https://drive.example/quote.pdf' }
+      };
+    },
+    randomUUID: () => 'document-receipt-1',
+    now: () => new Date('2026-08-24T01:00:00.000Z')
+  });
+
+  const receipt = await executor({
+    job_id: 'job-document', room_key: 'room-document', room_revision: 9,
+    document_type: 'quote', trade_id: '260822-001', tax_mode: 'supply_only'
+  }, { assertCurrentClaim: async () => { leaseChecks += 1; } });
+
+  assert.equal(leaseChecks, 1);
+  assert.deepEqual(calls, [{
+    request: { document_type: 'quote', trade_id: '260822-001', tax_mode: 'supply_only' },
+    options: { documentApiBaseUrl: 'https://docs.example/exec', documentApiKey: 'doc-key' }
+  }]);
+  assert.deepEqual(receipt, {
+    schema: 'village-document-receipt/v1', receipt_id: 'document-receipt-1',
+    job_id: 'job-document', room_key: 'room-document', room_revision: 9, status: 'ok',
+    document_type: 'quote', trade_id: '260822-001', tax_mode: 'supply_only',
+    authoritative_document_result: {
+      status: 'OK', tradeID: '260822-001', taxMode: 'supply_only', pdfUrl: 'https://drive.example/quote.pdf'
+    },
+    created_at: '2026-08-24T01:00:00.000Z', error: null
+  });
+});
+
+test('server document executor turns transport exceptions into a durable failed receipt', async () => {
+  const executor = createGatewayDocumentExecutor({
+    getConfig: () => ({ documentApiBaseUrl: 'https://docs.example/exec', documentApiKey: 'doc-key' }),
+    executeRequest: async () => { throw new Error('network reset after request'); },
+    randomUUID: () => 'document-receipt-failed-1',
+    now: () => new Date('2026-08-24T01:01:00.000Z')
+  });
+
+  const receipt = await executor({
+    job_id: 'job-document-failed', room_key: 'room-document', room_revision: 10,
+    document_type: 'quote', trade_id: '260822-001', tax_mode: 'supply_only'
+  }, { assertCurrentClaim: async () => {} });
+
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.error.type, 'document_send_exception');
+  assert.match(receipt.error.message, /network reset after request/);
+});
+
+test('gateway document config uses explicit overrides or the existing internal GAS credential', () => {
+  assert.deepEqual(resolveGatewayDocumentConfig({
+    documentApiBaseUrl: '', documentApiKey: ''
+  }, { sheetApiKey: 'derived-internal-key' }), {
+    documentApiBaseUrl: 'https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec',
+    documentApiKey: 'derived-internal-key'
+  });
+  assert.deepEqual(resolveGatewayDocumentConfig({
+    documentApiBaseUrl: 'https://override.example/exec', documentApiKey: 'override-key'
+  }, { sheetApiKey: 'derived-internal-key' }), {
+    documentApiBaseUrl: 'https://override.example/exec', documentApiKey: 'override-key'
+  });
 });
 
 test('server confirmation validator rejects invalid decisions before durable reservation wiring', async () => {
@@ -1429,6 +1500,7 @@ test('health config exposes the live safety contract used by supervised restarts
 
   const source = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
   assert.match(source, /startupCatchupSupported:\s*true/);
+  assert.match(source, /documentExecutionConfigured:\s*Boolean\(/);
   assert.doesNotMatch(
     source,
     /startupCatchupSupported:\s*process\.env\.PROCESS_INITIAL_SCAN/,

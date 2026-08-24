@@ -141,6 +141,30 @@ export async function executeVillageDocumentCommand(input, options = {}) {
   };
 }
 
+export async function executeVillageDocumentRequest(request = {}, options = {}) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    return { ok: false, reason: 'invalid_document_request' };
+  }
+  const documentType = String(request.document_type || '').trim();
+  const tradeId = String(request.trade_id || '').trim();
+  const taxMode = String(request.tax_mode || 'vat_included').trim();
+  if (documentType !== 'quote') return { ok: false, reason: 'unsupported_document_type' };
+  if (!/^\d{6}-\d{3}$/.test(tradeId)) return { ok: false, reason: 'invalid_trade_id' };
+  if (!['vat_included', 'supply_only'].includes(taxMode)) return { ok: false, reason: 'invalid_tax_mode' };
+
+  const action = buildDocumentAction({ intent: 'send_quote', tradeId, taxMode });
+  const outbound = buildDocumentRequest({
+    documentApiBaseUrl: options.documentApiBaseUrl,
+    documentApiKey: options.documentApiKey,
+    action
+  });
+  const response = await (options.fetchJson || defaultFetchJson)(outbound.url, outbound.options);
+  const success = !response?.error && response?.status !== 'ERROR';
+  return success
+    ? { ok: true, documentType, tradeId, taxMode, action, response }
+    : { ok: false, reason: 'document_api_error', documentType, tradeId, taxMode, action, response };
+}
+
 function parseCliArgs(argv) {
   const execute = argv.includes('--execute');
   const input = argv.filter((arg) => arg !== '--execute').join(' ').trim();

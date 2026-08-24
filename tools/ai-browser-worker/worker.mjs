@@ -592,7 +592,10 @@ export function buildHermesPrompt(job, options = {}) {
 - If your complete business decision has should_write_to_sheet=true, call village_confirmation_request 반드시 먼저 호출하고, only then emit FINAL_JSON.
 - Call it with the 완성된 decision. For should_write_to_sheet=true, include the complete sheet_row_candidate so the tool can write exactly that decision.
 - When existing_confirm_request_ids names an unchanged existing RQ, call village_confirmation_request once with should_write_to_sheet=false to 검증 기존 RQ 실재 여부; never pre-verify a write.
+- For a pending-RQ addition, make one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only"; the executor verifies the exact RQ and merges its authoritative full plan inside that same operation. Never spend the operation fence on a should_write_to_sheet=false pre-read.
 - For a pending-RQ replacement, make one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ in that operation.
+- For an explicit registered-trade quote send, call village_document_send with the exact trade_id before FINAL_JSON. Choose tax_mode="supply_only" only for an explicit VAT-exclusive request; otherwise use "vat_included".
+- A successful correlated village_document_send receipt is the only delivery authority. Do not promise that a quote was or will be sent without that receipt; on tool failure use draft_only + owner review.
 - If that verification says an existing RQ was not found and the reservation remains unregistered, correct the decision to should_write_to_sheet=true and call the tool again with the complete sheet row before finishing.
 - A no_action receipt is not 입력 성공이 아니다. If the row still needs to be written, correct the decision and call the tool with should_write_to_sheet=true before finishing.
 - Interpret the authoritative receipt in this turn. Every schedule/availability result is owner-review-only and is never Kakao auto-send authority.`
@@ -8911,6 +8914,21 @@ function exactTrustedConfirmationReceipt(receipt, { jobId, roomKey, roomRevision
   return true;
 }
 
+function exactTrustedDocumentReceipt(receipt, { jobId, roomKey, roomRevision }) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return false;
+  if (receipt.schema !== 'village-document-receipt/v1') return false;
+  if (!text(receipt.receipt_id).trim() || !text(receipt.status).trim()) return false;
+  if (receipt.job_id !== jobId || receipt.room_key !== roomKey || receipt.room_revision !== roomRevision) return false;
+  if (receipt.document_type !== 'quote' || !/^\d{6}-\d{3}$/.test(text(receipt.trade_id).trim())) return false;
+  if (!['vat_included', 'supply_only'].includes(text(receipt.tax_mode).trim())) return false;
+  if (!(receipt.authoritative_document_result === null
+    || (receipt.authoritative_document_result && typeof receipt.authoritative_document_result === 'object'
+      && !Array.isArray(receipt.authoritative_document_result)))) return false;
+  if (!validGatewayReceiptTimestamp(receipt.created_at)) return false;
+  return receipt.error === null || typeof receipt.error === 'string'
+    || (receipt.error && typeof receipt.error === 'object' && !Array.isArray(receipt.error));
+}
+
 function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
   const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
   const classification = text(decision?.classification).trim();
@@ -8924,6 +8942,13 @@ function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
     || followUps.some((item) => text(item?.route || item?.follow_up_route).trim() === 'schedule');
 }
 
+function gatewayDecisionHasStructuredDocumentClaim(decision = {}) {
+  return (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : []).some((item) => (
+    text(item?.route || item?.follow_up_route).trim() === 'document'
+    && text(item?.type).trim() === 'quote_send'
+  ));
+}
+
 function stripAgentSuppliedReceiptFields(decision = {}) {
   const {
     trusted_tool_receipts: _trustedToolReceipts,
@@ -8933,6 +8958,8 @@ function stripAgentSuppliedReceiptFields(decision = {}) {
     confirmation_receipt: _confirmationReceipt,
     confirmationReceipt: _camelConfirmationReceipt,
     trusted_confirmation_receipt: _trustedConfirmationReceipt,
+    document_receipt: _documentReceipt,
+    trusted_document_receipt: _trustedDocumentReceipt,
     ...withoutReceipts
   } = decision;
   return withoutReceipts;
@@ -9102,30 +9129,37 @@ export async function prepareKakaoGatewayDecision({
 
   const receiptCoordinates = { jobId, roomKey, roomRevision };
   const suppliedReceipts = Array.isArray(trustedToolReceipts) ? trustedToolReceipts : [];
-  const exactReceipts = exactTurn
+  const exactConfirmationReceipts = exactTurn
     ? suppliedReceipts.filter((receipt) => exactTrustedConfirmationReceipt(receipt, receiptCoordinates))
     : [];
+  const exactDocumentReceipts = exactTurn
+    ? suppliedReceipts.filter((receipt) => exactTrustedDocumentReceipt(receipt, receiptCoordinates))
+    : [];
+  const exactReceipts = [...exactConfirmationReceipts, ...exactDocumentReceipts];
   if (suppliedReceipts.length !== exactReceipts.length) safetyFailures.push('invalid_trusted_receipt');
   if (exactReceipts.length > 1 && exactReceipts.some((receipt) => !sameGatewayDecisionValue(receipt, exactReceipts[0]))) {
     safetyFailures.push('conflicting_trusted_receipts');
   }
-  const trustedToolReceipt = exactReceipts[0] || null;
+  const trustedConfirmationReceipt = exactConfirmationReceipts[0] || null;
+  const trustedDocumentReceipt = exactDocumentReceipts[0] || null;
+  const trustedToolReceipt = trustedConfirmationReceipt || trustedDocumentReceipt;
   const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
+  const structuredDocumentClaim = decision ? gatewayDecisionHasStructuredDocumentClaim(decision) : false;
   const parsedDecisionValid = decision && !safetyFailures.includes('invalid_gateway_decision');
 
   let sheetResult = null;
   let sheetPayload = null;
   let reason = '';
-  if (trustedToolReceipt) {
-    sheetResult = sheetResultFromTrustedReceipt(trustedToolReceipt);
-    const receiptFailed = trustedToolReceipt.status === 'failed' || trustedToolReceipt.error !== null;
+  if (trustedConfirmationReceipt) {
+    sheetResult = sheetResultFromTrustedReceipt(trustedConfirmationReceipt);
+    const receiptFailed = trustedConfirmationReceipt.status === 'failed' || trustedConfirmationReceipt.error !== null;
     const report = buildSheetAvailabilityReport(sheetResult, null);
     const postActionValidation = parsedDecisionValid
       ? validateAiPostActionDecisionContract(decision, report || {})
       : { valid: false, errors: ['invalid base decision'] };
     const finalAuthority = decision?.authoritative_sheet_result;
     if (!postActionValidation.valid
-      || (finalAuthority && !sameGatewayDecisionValue(finalAuthority, trustedToolReceipt.authoritative_sheet_result))) {
+      || (finalAuthority && !sameGatewayDecisionValue(finalAuthority, trustedConfirmationReceipt.authoritative_sheet_result))) {
       safetyFailures.push('trusted_receipt_decision_contradiction');
     }
     if (receiptFailed) safetyFailures.push('trusted_confirmation_failed');
@@ -9133,15 +9167,43 @@ export async function prepareKakaoGatewayDecision({
       ? '권위 있는 확인요청 작업이 실패 또는 부분 실패하여 사장 확인이 필요합니다.'
       : '권위 있는 확인요청 결과는 사장 확인 후에만 고객에게 안내할 수 있습니다.';
     decision = forceGatewayOwnerReviewDecision(decision || {}, {
-      job, schedule: true, reason, receipt: trustedToolReceipt,
-      authoritativeSheetResult: trustedToolReceipt.authoritative_sheet_result
+      job, schedule: true, reason, receipt: trustedConfirmationReceipt,
+      authoritativeSheetResult: trustedConfirmationReceipt.authoritative_sheet_result
     });
     decision.post_action_reconciled = !receiptFailed && !safetyFailures.includes('trusted_receipt_decision_contradiction');
-    decision.trusted_confirmation_receipt = trustedToolReceipt;
+    decision.trusted_confirmation_receipt = trustedConfirmationReceipt;
+  } else if (trustedDocumentReceipt) {
+    const authoritativeDocumentResult = trustedDocumentReceipt.authoritative_document_result;
+    const receiptFailed = trustedDocumentReceipt.status !== 'ok' || trustedDocumentReceipt.error !== null
+      || !authoritativeDocumentResult
+      || authoritativeDocumentResult.status !== 'OK'
+      || text(authoritativeDocumentResult.tradeID).trim() !== text(trustedDocumentReceipt.trade_id).trim()
+      || text(authoritativeDocumentResult.taxMode).trim() !== text(trustedDocumentReceipt.tax_mode).trim()
+      || !text(authoritativeDocumentResult.pdfUrl).trim();
+    if (receiptFailed) {
+      safetyFailures.push('trusted_document_failed');
+      reason = '권위 있는 견적서 발송 작업이 실패하여 사장 확인이 필요합니다.';
+      decision = forceGatewayOwnerReviewDecision(decision || {}, {
+        job, schedule: false, reason, receipt: trustedDocumentReceipt
+      });
+    } else {
+      decision = {
+        ...decision,
+        owner_review_required: false,
+        follow_up_items: (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [])
+          .filter((item) => !(text(item?.route || item?.follow_up_route).trim() === 'document'
+            && text(item?.type).trim() === 'quote_send')),
+        trusted_document_receipt: trustedDocumentReceipt
+      };
+    }
   } else if (structuredScheduleClaim) {
     safetyFailures.push('authoritative_claim_without_trusted_receipt');
     reason = '구조화된 스케줄 주장이 있지만 채널에 영속화된 권위 있는 확인요청 receipt가 없습니다.';
     decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: true, reason });
+  } else if (structuredDocumentClaim) {
+    safetyFailures.push('document_execution_without_trusted_receipt');
+    reason = '구조화된 견적서 발송 업무가 있지만 채널에 영속화된 권위 있는 document receipt가 없습니다.';
+    decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: false, reason });
   } else if (!parsedDecisionValid || !exactTurn || safetyFailures.includes('invalid_trusted_receipt')) {
     reason = safetyFailures.includes('stale_gateway_turn')
       ? 'Gateway 결과가 현재 작업과 동일한 방/리비전/스냅샷에 속하지 않습니다.'
@@ -9161,7 +9223,7 @@ export async function prepareKakaoGatewayDecision({
     job
   );
   if (!availabilityAwareRows.length && decision?.owner_review_required === true) {
-    const scheduleReview = Boolean(trustedToolReceipt || structuredScheduleClaim);
+    const scheduleReview = Boolean(trustedConfirmationReceipt || structuredScheduleClaim);
     const fallbackDecision = {
       ...decision,
       safety_checks: {

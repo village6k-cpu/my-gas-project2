@@ -32,6 +32,21 @@ function confirmationReceipt(claim, operationId, requestDigest = 'request-digest
   };
 }
 
+function documentOperation(claim, requestDigest = 'document-digest-1') {
+  return { ...confirmationOperation(claim, requestDigest), tool: 'document_send' };
+}
+
+function documentReceipt(claim, operationId, requestDigest = 'document-digest-1') {
+  return {
+    schema: 'village-document-receipt/v1', receipt_id: 'document-receipt-1',
+    job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+    lease_id: claim.lease_id, request_digest: requestDigest, operation_id: operationId,
+    status: 'ok', document_type: 'quote', trade_id: '260822-001', tax_mode: 'supply_only',
+    authoritative_document_result: { status: 'OK', tradeID: '260822-001', taxMode: 'supply_only' },
+    created_at: '2026-08-21T00:00:00.000Z', error: null
+  };
+}
+
 async function withChannel(run, options = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), 'hermes-gateway-channel-'));
   const clock = { now: Date.parse('2026-08-21T00:00:00.000Z') };
@@ -71,6 +86,27 @@ test('persists every job atomically under a SHA-256 name and recovers it after r
       now: () => clock.now
     });
     assert.equal((await restarted.get('job-private-1')).state, 'ready');
+  });
+});
+
+test('persists an exact native document receipt before allowing the Hermes result to complete', async () => {
+  await withChannel(async ({ channel }) => {
+    await channel.enqueue(event('job-document', 'room-document', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-document', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(documentOperation(claim));
+    const receipt = documentReceipt(claim, reserved.reservation.operation_id);
+
+    await channel.recordToolReceipt(receipt);
+    await channel.complete({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, content: 'FINAL_JSON {"reply_decision":{"replyMode":"no_reply"}}'
+    });
+
+    const persisted = await channel.get(claim.job_id);
+    assert.equal(persisted.state, 'completed');
+    assert.equal(persisted.tool_operation.tool, 'document_send');
+    assert.equal(persisted.tool_operation.state, 'completed');
+    assert.deepEqual(persisted.tool_receipts, [receipt]);
   });
 });
 

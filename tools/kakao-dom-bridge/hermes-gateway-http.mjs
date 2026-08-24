@@ -74,6 +74,19 @@ export function confirmationRequestDigest(body = {}) {
   return crypto.createHash('sha256').update(JSON.stringify(canonicalJson(payload)), 'utf8').digest('hex');
 }
 
+export function documentRequestDigest(body = {}) {
+  const payload = {
+    schema: body.schema || 'village-document-request/v1',
+    job_id: body.job_id,
+    room_key: body.room_key,
+    room_revision: body.room_revision,
+    document_type: body.document_type,
+    trade_id: body.trade_id,
+    tax_mode: body.tax_mode
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalJson(payload)), 'utf8').digest('hex');
+}
+
 function exactClaimForConfirmation(job, body, leaseId, nowMs) {
   const leaseExpiresAt = Number(job?.lease_expires_at_ms);
   return job
@@ -127,6 +140,46 @@ function unfencedReceiptConflict(job, body, leaseId) {
     && Number(receipt.room_revision) === Number(body.room_revision)
     && String(receipt.lease_id || '') === leaseId
   ));
+}
+
+function durableDocumentOperationForRequest(job, body, leaseId, requestDigest) {
+  if (!job
+    || String(job.job_id || '') !== String(body?.job_id || '')
+    || String(job.room_key || '') !== String(body?.room_key || '')
+    || Number(job.room_revision) !== Number(body?.room_revision)) {
+    return { reservation: null, receipt: null, conflict: false };
+  }
+  const reservation = job.tool_operation;
+  if (!reservation) return { reservation: null, receipt: null, conflict: false };
+  const matches = reservation.schema === 'village-tool-operation-reservation/v1'
+    && reservation.tool === 'document_send'
+    && String(reservation.job_id || '') === String(body.job_id || '')
+    && String(reservation.room_key || '') === String(body.room_key || '')
+    && Number(reservation.room_revision) === Number(body.room_revision)
+    && String(reservation.lease_id || '') === leaseId
+    && String(reservation.request_digest || '') === requestDigest
+    && String(reservation.operation_id || '').trim();
+  if (!matches) return { reservation, receipt: null, conflict: true };
+  const receipt = (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).find((candidate) => (
+    candidate?.schema === 'village-document-receipt/v1'
+    && String(candidate.job_id || '') === String(body.job_id || '')
+    && String(candidate.room_key || '') === String(body.room_key || '')
+    && Number(candidate.room_revision) === Number(body.room_revision)
+    && String(candidate.lease_id || '') === leaseId
+    && String(candidate.request_digest || '') === requestDigest
+    && String(candidate.operation_id || '') === reservation.operation_id
+  )) || null;
+  return { reservation, receipt, conflict: false };
+}
+
+function validateDocumentBody(body) {
+  return body?.schema === 'village-document-request/v1'
+    && body?.document_type === 'quote'
+    && /^\d{6}-\d{3}$/.test(String(body?.trade_id || ''))
+    && ['vat_included', 'supply_only'].includes(body?.tax_mode)
+    && typeof body?.room_revision === 'number'
+    && Number.isInteger(body.room_revision)
+    && body.room_revision > 0;
 }
 
 function parseWaitMs(value) {
@@ -205,11 +258,13 @@ export function buildGatewayHealthReadback({
 }
 
 export function createHermesGatewayHttpHandler({
-  token, channel, executeConfirmation, validateConfirmation, enqueueResultApplication, recoverFailureNotifications,
+  token, channel, executeConfirmation, validateConfirmation, executeDocument, validateDocument,
+  enqueueResultApplication, recoverFailureNotifications,
   transport = 'cli', now = Date.now, consumerFreshnessMs = 600_000
 } = {}) {
   const gatewayConfigured = GATEWAY_TRANSPORTS.has(transport) && Boolean(String(token || '').trim()) && Boolean(channel);
   const confirmationInFlight = new Map();
+  const documentInFlight = new Map();
 
   return async function handleHermesGatewayRequest(req, res, url) {
     if (!url.pathname.startsWith('/hermes/v1/')) return false;
@@ -382,6 +437,87 @@ export function createHermesGatewayHttpHandler({
           sendJson(res, 200, await inFlight.operation);
         } finally {
           if (confirmationInFlight.get(claimKey) === inFlight) confirmationInFlight.delete(claimKey);
+        }
+        return true;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/hermes/v1/tools/document-send') {
+        const body = await readJsonBody(req);
+        const leaseId = requiredLeaseId(body);
+        if (transport === 'gateway_no_send') throw requestError(403, 'writes_disabled');
+        if (!validateDocumentBody(body)) throw requestError(422, 'invalid_document_request');
+        if (typeof validateDocument === 'function') {
+          const validation = await validateDocument(body);
+          if (!validation?.valid) throw requestError(422, 'invalid_document_request', {
+            validationErrors: Array.isArray(validation?.errors) ? validation.errors : []
+          });
+        }
+        if (typeof channel.get !== 'function' || typeof channel.reserveToolOperation !== 'function') {
+          throw requestError(503, 'document_fencing_unavailable');
+        }
+        const requestDigest = documentRequestDigest(body);
+        const currentTime = () => {
+          const value = now();
+          const milliseconds = value instanceof Date ? value.getTime() : Number(value);
+          if (!Number.isFinite(milliseconds)) throw requestError(503, 'document_clock_unavailable');
+          return milliseconds;
+        };
+        const assertCurrentClaim = async () => {
+          const currentJob = await channel.get(body.job_id);
+          if (!exactClaimForConfirmation(currentJob, body, leaseId, currentTime())) throw requestError(409, 'stale_lease');
+          return currentJob;
+        };
+        const claimKey = [body.job_id, body.room_key, body.room_revision, leaseId].map(String).join('\u0000');
+        let inFlight = documentInFlight.get(claimKey);
+        if (inFlight && inFlight.requestDigest !== requestDigest) throw requestError(409, 'document_request_conflict');
+        if (inFlight) {
+          sendJson(res, 200, await inFlight.operation);
+          return true;
+        }
+        const claimedJob = await channel.get(body.job_id);
+        inFlight = documentInFlight.get(claimKey);
+        if (inFlight && inFlight.requestDigest !== requestDigest) throw requestError(409, 'document_request_conflict');
+        if (inFlight) {
+          sendJson(res, 200, await inFlight.operation);
+          return true;
+        }
+        const durable = durableDocumentOperationForRequest(claimedJob, body, leaseId, requestDigest);
+        if (durable.conflict) throw requestError(409, 'document_request_conflict');
+        if (durable.receipt) {
+          sendJson(res, 200, durable.receipt);
+          return true;
+        }
+        if (durable.reservation) throw requestError(409, 'document_operation_unresolved');
+        if (!exactClaimForConfirmation(claimedJob, body, leaseId, currentTime())) throw requestError(409, 'stale_lease');
+        if (typeof executeDocument !== 'function') throw requestError(503, 'document_unavailable');
+        const operation = Promise.resolve().then(async () => {
+          const reserved = await channel.reserveToolOperation({
+            tool: 'document_send', job_id: body.job_id, room_key: body.room_key,
+            room_revision: body.room_revision, lease_id: leaseId, request_digest: requestDigest
+          });
+          if (!reserved?.created || !reserved?.reservation) throw requestError(409, 'document_operation_unresolved');
+          const operationFence = reserved.reservation;
+          await assertCurrentClaim();
+          const receipt = await executeDocument(body, { assertCurrentClaim, operationFence });
+          if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) throw requestError(502, 'invalid_document_receipt');
+          if (String(receipt.job_id || '') !== String(body.job_id || '')
+            || String(receipt.room_key || '') !== String(body.room_key || '')
+            || Number(receipt.room_revision) !== Number(body.room_revision)) {
+            throw requestError(502, 'document_receipt_correlation_mismatch');
+          }
+          if (receipt.lease_id && receipt.lease_id !== leaseId) throw requestError(409, 'lease_id_mismatch');
+          const fencedReceipt = {
+            ...receipt, lease_id: leaseId, request_digest: requestDigest, operation_id: operationFence.operation_id
+          };
+          await channel.recordToolReceipt(fencedReceipt);
+          return fencedReceipt;
+        });
+        inFlight = { requestDigest, operation };
+        documentInFlight.set(claimKey, inFlight);
+        try {
+          sendJson(res, 200, await operation);
+        } finally {
+          if (documentInFlight.get(claimKey) === inFlight) documentInFlight.delete(claimKey);
         }
         return true;
       }
