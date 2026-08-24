@@ -60,3 +60,18 @@ Review-fix verification: `node --test tools/local-cua-clerk/gate0/*.test.mjs && 
 
 Second review verification: `node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check` — **31 passed,
 0 failed, 0 skipped; diff check passed.**
+
+## Exceptional third review fixes
+
+- The production orphan runner now accepts no dependency, target, grant, epoch, registry, or capability
+  overrides. It uses fixed module-private spawn, identity, and signal implementations and creates only its own
+  disposable child.
+- The sole additional export is a side-effect-free pure decision simulator. It returns only an allow/deny action
+  plan and cannot spawn, signal, kill, or mutate caller state. Export-surface and arbitrary-target regressions
+  prove ordinary importers cannot inject a real target or signaling implementation.
+- Production epoch revocation is private and occurs after the first recovery attempt; replay is denied before
+  any later signal. Exact identity checks, private consumed grants, and exact-child capture-failure cleanup are
+  preserved.
+
+Exceptional review verification: `node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check` — **30
+passed, 0 failed, 0 skipped; diff check passed.**
