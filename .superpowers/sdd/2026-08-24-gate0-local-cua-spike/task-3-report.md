@@ -46,3 +46,17 @@ action was performed. Task 4 remains responsible for live disposable-child valid
 
 Review-fix verification: `node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check` — **30 passed,
 0 failed, 0 skipped; diff check passed.**
+
+## Second review fixes
+
+- Orphan grant creation, registration, and recovery are now private; the module exports only the runner.
+  Injected tests can supply a child/identity/signal seam but cannot authorize an arbitrary target.
+- The private registry binds grant ID, epoch, and exact child identity together and owns consumption state.
+  Caller-supplied used sets cannot reset replay protection.
+- `orphan_recovery: PASS` requires positive registered-child, exact-identity, active-epoch, one-time-consumed,
+  unrelated-PID, and cleanup-completed booleans. Empty evidence cannot contribute to global PASS.
+- Regressions cover public export absence, same-ID/different-epoch denial, fresh-run replay isolation, and
+  positive global orphan proof.
+
+Second review verification: `node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check` — **31 passed,
+0 failed, 0 skipped; diff check passed.**
