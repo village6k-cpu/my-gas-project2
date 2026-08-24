@@ -28,14 +28,18 @@ export function selectUniqueTradeCandidate(payload = {}) {
   return { ok: false, reason: 'ambiguous', candidates };
 }
 
-export function buildDocumentAction({ intent, tradeId }) {
+export function buildDocumentAction({ intent, tradeId, taxMode = 'vat_included' }) {
   if (!tradeId) throw new Error('tradeId is required');
 
   if (intent === 'send_quote') {
     return {
       project: 'my-gas-project',
       method: 'POST',
-      body: { action: 'sendEstimate', id: tradeId },
+      body: {
+        action: 'sendEstimate',
+        id: tradeId,
+        ...(taxMode === 'supply_only' ? { taxMode: 'supply_only' } : {})
+      },
     };
   }
 

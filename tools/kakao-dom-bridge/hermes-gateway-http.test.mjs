@@ -29,6 +29,19 @@ function expectedConfirmationRequestDigest(body) {
   return createHash('sha256').update(JSON.stringify(canonicalTestJson(payload))).digest('hex');
 }
 
+function expectedDocumentRequestDigest(body) {
+  const payload = {
+    schema: body.schema || 'village-document-request/v1',
+    job_id: body.job_id,
+    room_key: body.room_key,
+    room_revision: body.room_revision,
+    document_type: body.document_type,
+    trade_id: body.trade_id,
+    tax_mode: body.tax_mode
+  };
+  return createHash('sha256').update(JSON.stringify(canonicalTestJson(payload))).digest('hex');
+}
+
 const token = 'test-token-not-a-secret';
 const leaseId = 'lease-opaque-1';
 
@@ -141,6 +154,50 @@ test('Gateway HTTP claims a snake-case event with its opaque lease id', async ()
       'detected_at', 'job_id', 'lease_id', 'prompt', 'raw', 'room_key', 'room_revision', 'schema'
     ]);
     assert.equal('local_context' in body.event, false);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Gateway HTTP executes and durably receipts one exact native supply-only quote send', async () => {
+  const channel = makeChannel();
+  let executions = 0;
+  const body = {
+    schema: 'village-document-request/v1', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+    lease_id: leaseId, document_type: 'quote', trade_id: '260822-001', tax_mode: 'supply_only'
+  };
+  const app = await start(createHermesGatewayHttpHandler({
+    token, channel, transport: 'gateway',
+    executeDocument: async (request) => {
+      executions += 1;
+      assert.deepEqual(request, body);
+      return {
+        schema: 'village-document-receipt/v1', receipt_id: 'document-receipt-1',
+        job_id: 'job-1', room_key: 'room-1', room_revision: 3, status: 'ok',
+        document_type: 'quote', trade_id: '260822-001', tax_mode: 'supply_only',
+        authoritative_document_result: { status: 'OK', tradeID: '260822-001', taxMode: 'supply_only' },
+        created_at: '2026-08-24T01:00:00.000Z', error: null
+      };
+    }
+  }));
+  try {
+    const init = { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
+    const first = await gatewayFetch(app.url, '/hermes/v1/tools/document-send', init);
+    const firstReceipt = await first.json();
+    const second = await gatewayFetch(app.url, '/hermes/v1/tools/document-send', init);
+    const secondReceipt = await second.json();
+
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(executions, 1);
+    assert.deepEqual(secondReceipt, firstReceipt);
+    assert.deepEqual(channel.calls.reservation, [{
+      tool: 'document_send', job_id: 'job-1', room_key: 'room-1', room_revision: 3,
+      lease_id: leaseId, request_digest: expectedDocumentRequestDigest(body)
+    }]);
+    assert.equal(channel.calls.receipt.length, 1);
+    assert.equal(channel.calls.receipt[0].schema, 'village-document-receipt/v1');
+    assert.equal(channel.calls.receipt[0].operation_id, 'operation-opaque-1');
   } finally {
     await app.close();
   }

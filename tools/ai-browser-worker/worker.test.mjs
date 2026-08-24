@@ -550,6 +550,50 @@ function confirmationReceiptFixture(job, overrides = {}) {
   };
 }
 
+function documentReceiptFixture(job, overrides = {}) {
+  return {
+    schema: 'village-document-receipt/v1',
+    receipt_id: 'document-receipt-gateway-final-1',
+    job_id: job.jobId,
+    room_key: job.roomKey,
+    room_revision: job.roomRevision,
+    status: 'ok',
+    document_type: 'quote',
+    trade_id: '260822-001',
+    tax_mode: 'supply_only',
+    authoritative_document_result: {
+      status: 'OK', tradeID: '260822-001', taxMode: 'supply_only', pdfUrl: 'https://drive.example/quote.pdf'
+    },
+    created_at: '2026-08-24T01:00:00.000Z',
+    error: null,
+    ...overrides
+  };
+}
+
+function documentDecisionFixture(overrides = {}) {
+  return gatewayDecisionFixture({
+    classification: 'faq',
+    owner_review_required: false,
+    follow_up_items: [{
+      type: 'quote_send', route: 'document', taskKey: 'quote:260822-001:supply_only',
+      priority: 'high', status: 'open', title: '이재환 공급가 견적 발송', customer_name: '이재환',
+      summary: '고객이 공급가 기준 견적서를 요청했습니다.',
+      recommended_action: '거래 260822-001 공급가 견적서를 발송합니다.',
+      suggested_reply_draft: '요청하신 공급가 기준 견적서 보내드렸습니다.',
+      evidence: ['거래ID 260822-001'], requiresHumanAction: true,
+      actionFamily: 'document_approval', businessKey: 'quote:260822-001:supply_only', due_hint: 'now'
+    }],
+    suggested_reply_draft: '요청하신 공급가 기준 견적서 보내드렸습니다.',
+    reply_decision: {
+      replyMode: 'auto_send', text: '요청하신 공급가 기준 견적서 보내드렸습니다.',
+      confidence: 'high', reason: 'native document receipt', shouldCreateTask: false,
+      safetyClass: 'sensitive_commitment', grounding: 'authoritative_sheet', requiresRag: false,
+      attachmentKeys: [], alreadyDelivered: false
+    },
+    ...overrides
+  });
+}
+
 function scheduleDecisionFixture(overrides = {}) {
   return gatewayDecisionFixture({
     classification: 'reservation',
@@ -597,6 +641,55 @@ test('prepareKakaoGatewayDecision leaves a valid FAQ eligible for existing auto-
   assert.equal(prepared.trustedToolReceipt, null);
   assert.deepEqual(prepared.availabilityAwareRows, []);
   assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, true);
+});
+
+test('document promise without a durable native receipt fails closed instead of auto-replying', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(documentDecisionFixture())}`,
+    trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.gatewaySafetyFailures.includes('document_execution_without_trusted_receipt'), true);
+});
+
+test('successful durable native document receipt allows delivered wording and removes the stale send task', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const receipt = documentReceiptFixture(job);
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(documentDecisionFixture())}`,
+    trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'auto_send');
+  assert.equal(prepared.decision.owner_review_required, false);
+  assert.deepEqual(prepared.decision.trusted_document_receipt, receipt);
+  assert.equal(prepared.decision.follow_up_items.some((item) => item.type === 'quote_send'), false);
+  assert.equal(prepared.gatewaySafetyFailures.length, 0);
+});
+
+test('document receipt cannot claim success without an exact authoritative trade and tax-mode result', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const receipt = documentReceiptFixture(job, {
+    authoritative_document_result: {
+      status: 'OK', tradeID: '260822-999', taxMode: 'vat_included', pdfUrl: 'https://drive.example/wrong.pdf'
+    }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(documentDecisionFixture())}`,
+    trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.gatewaySafetyFailures.includes('trusted_document_failed'), true);
 });
 
 test('trusted confirmation receipt always forces schedule owner review and attaches only receipt evidence', async () => {
@@ -2430,6 +2523,31 @@ test('buildHermesPrompt requires one native confirmation call for pending RQ rep
     prompt,
     /If existing_confirm_request_ids is non-empty, call village_confirmation_request before FINAL_JSON with should_write_to_sheet=false/
   );
+});
+
+test('buildHermesPrompt requires one write call for pending RQ additions instead of consuming the fence on a pre-read', () => {
+  const prompt = buildHermesPrompt(
+    { id: 'job-rq-additions', preview_text: '기존 예약에 V마운트 배터리 3개랑 서튼 100볼 하나 추가해 주세요' },
+    { gatewayConfirmationToolAvailable: true }
+  );
+
+  assert.match(prompt, /pending-RQ addition.*one.*village_confirmation_request.*call/is);
+  assert.match(prompt, /should_write_to_sheet=true.*additions_only/is);
+  assert.match(prompt, /executor.*verif.*exact RQ.*merge/is);
+  assert.match(prompt, /unchanged.*existing RQ.*should_write_to_sheet=false/is);
+});
+
+test('buildHermesPrompt requires native document execution before any quote-delivery promise', () => {
+  const prompt = buildHermesPrompt(
+    { id: 'job-native-quote', preview_text: '260822-001 공급가 기준 견적서 보내주세요' },
+    { gatewayConfirmationToolAvailable: true }
+  );
+
+  assert.match(prompt, /village_document_send/);
+  assert.match(prompt, /registered.*quote.*exact trade_id/is);
+  assert.match(prompt, /supply_only.*VAT-exclusive/is);
+  assert.match(prompt, /successful.*receipt.*only.*delivery/is);
+  assert.match(prompt, /do not promise.*without.*receipt/is);
 });
 
 test('buildHermesPrompt treats read catch-up rows as possible missed reservations', () => {

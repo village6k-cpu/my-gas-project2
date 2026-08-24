@@ -22,8 +22,11 @@ import {
 import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-browser-worker/follow-up-case-lifecycle.mjs';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { buildGatewayHealthReadback, createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
+import { executeVillageDocumentRequest } from '../village-doc-send/runner.mjs';
 
 export { buildGatewayHealthReadback } from './hermes-gateway-http.mjs';
+
+const DEFAULT_VILLAGE_DOCUMENT_API_URL = 'https://script.google.com/macros/s/AKfycbwX2V0SqRf23DCwaVojlc5YFXKTfMNLBt68edpGmCx8j0i9hkYdP_bXHKEGIcde2iS5EA/exec';
 
 function loadSelectedEnvFile(filePath, keys = []) {
   const allowed = new Set(keys);
@@ -87,6 +90,8 @@ const CONFIG = {
   hermesBridgeToken: String(process.env.KAKAO_HERMES_BRIDGE_TOKEN || '').trim(),
   hermesLeaseMs: Number(process.env.KAKAO_HERMES_LEASE_MS || 300_000),
   hermesMaxAttempts: resolveHermesMaxAttempts(process.env.KAKAO_HERMES_MAX_ATTEMPTS),
+  documentApiBaseUrl: String(process.env.VILLAGE_DOCUMENT_API_URL || '').trim(),
+  documentApiKey: String(process.env.VILLAGE_DOCUMENT_API_KEY || process.env.VILLAGE_OPS_KEY || '').trim(),
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   supabaseTable: process.env.SUPABASE_TABLE || '',
@@ -471,6 +476,67 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
   });
 }
 
+export function createGatewayDocumentExecutor({
+  getConfig,
+  executeRequest = executeVillageDocumentRequest,
+  randomUUID: uuid = crypto.randomUUID,
+  now = () => new Date()
+} = {}) {
+  if (typeof getConfig !== 'function') throw new Error('Gateway document config loader is required');
+  if (typeof executeRequest !== 'function') throw new Error('Gateway document operation is required');
+  return async (request, { assertCurrentClaim } = {}) => {
+    const checkClaim = typeof assertCurrentClaim === 'function' ? assertCurrentClaim : async () => {};
+    await checkClaim();
+    const config = getConfig();
+    let result;
+    try {
+      result = await executeRequest({
+        document_type: request.document_type,
+        trade_id: request.trade_id,
+        tax_mode: request.tax_mode
+      }, {
+        documentApiBaseUrl: config.documentApiBaseUrl,
+        documentApiKey: config.documentApiKey
+      });
+    } catch (error) {
+      result = {
+        ok: false,
+        reason: 'document_send_exception',
+        response: { error: String(error?.message || error).slice(0, 1000) }
+      };
+    }
+    const receiptId = String(uuid() || '').trim();
+    if (!receiptId) throw new Error('document receipt id generation failed');
+    const created = now();
+    const createdAt = (created instanceof Date ? created : new Date(created)).toISOString();
+    const success = result?.ok === true;
+    return {
+      schema: 'village-document-receipt/v1',
+      receipt_id: receiptId,
+      job_id: request.job_id,
+      room_key: request.room_key,
+      room_revision: request.room_revision,
+      status: success ? 'ok' : 'failed',
+      document_type: request.document_type,
+      trade_id: request.trade_id,
+      tax_mode: request.tax_mode,
+      authoritative_document_result: success ? result.response : (result?.response || null),
+      created_at: createdAt,
+      error: success ? null : {
+        type: String(result?.reason || 'document_send_failed'),
+        message: String(result?.response?.error || result?.reason || 'document send failed').slice(0, 1000)
+      }
+    };
+  };
+}
+
+export function resolveGatewayDocumentConfig(config = {}, workerConfig = {}) {
+  return {
+    documentApiBaseUrl: String(config.documentApiBaseUrl || DEFAULT_VILLAGE_DOCUMENT_API_URL).trim(),
+    documentApiKey: String(config.documentApiKey || workerConfig.sheetApiKey || '').trim()
+  };
+}
+
 export function createGatewayConfirmationValidator({
   validateDecision = validateVillageConfirmationExecutionDecision,
   getConfig = () => ({}),
@@ -608,8 +674,11 @@ export function createGatewayResultApplicationCoordinator({
   function exactDurableToolReceipts(durableJob) {
     const operation = durableJob?.tool_operation;
     if (!operation || operation.state !== 'completed') return [];
+    const expectedSchema = operation.tool === 'document_send'
+      ? 'village-document-receipt/v1'
+      : 'village-confirmation-receipt/v1';
     const exact = (Array.isArray(durableJob?.tool_receipts) ? durableJob.tool_receipts : []).find((receipt) => (
-      receipt?.schema === 'village-confirmation-receipt/v1'
+      receipt?.schema === expectedSchema
       && receipt.receipt_id === operation.receipt_id
       && receipt.operation_id === operation.operation_id
       && receipt.lease_id === operation.lease_id
@@ -760,6 +829,14 @@ const gatewayConfirmationValidator = gatewayTransportEnabled
       getConfig: () => getKakaoWorkerRuntimeConfigForTransport()
     })
   : null;
+const gatewayDocumentExecutor = gatewayTransportEnabled
+  ? createGatewayDocumentExecutor({
+      getConfig: () => resolveGatewayDocumentConfig(
+        CONFIG,
+        getKakaoWorkerRuntimeConfigForTransport()
+      )
+    })
+  : null;
 const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
   channel: gatewayChannel,
@@ -767,6 +844,7 @@ const gatewayHttpHandler = createHermesGatewayHttpHandler({
   consumerFreshnessMs: Math.max(60_000, CONFIG.hermesLeaseMs * 2),
   executeConfirmation: gatewayConfirmationExecutor,
   validateConfirmation: gatewayConfirmationValidator,
+  executeDocument: gatewayDocumentExecutor,
   recoverFailureNotifications: gatewayTransportEnabled
     ? () => getGatewayFailureNotificationCoordinator().recover()
     : null,
@@ -3898,6 +3976,9 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/health') {
       const gatewayStatus = gatewayChannel ? await gatewayChannel.status() : {};
+      const documentExecutionConfig = gatewayTransportEnabled
+        ? resolveGatewayDocumentConfig(CONFIG, getKakaoWorkerRuntimeConfigForTransport())
+        : {};
       const gatewayReadback = buildGatewayHealthReadback({
         transport: CONFIG.hermesTransport,
         gatewayConfigured: gatewayTransportEnabled,
@@ -3917,6 +3998,9 @@ const server = http.createServer(async (req, res) => {
           workerEnabled: Boolean(CONFIG.workerCommand),
           hermesTransport: CONFIG.hermesTransport,
           gatewayConfigured: gatewayTransportEnabled,
+          documentExecutionConfigured: Boolean(
+            documentExecutionConfig.documentApiBaseUrl && documentExecutionConfig.documentApiKey
+          ),
           ...buildHealthConfig(configForHermesTransport(CONFIG, CONFIG.hermesTransport)),
           workerTimeoutMs: CONFIG.workerTimeoutMs,
           aiDomSplitEnabled: CONFIG.aiDomSplitEnabled,
