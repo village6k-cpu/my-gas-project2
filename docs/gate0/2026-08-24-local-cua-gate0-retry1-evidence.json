@@ -1,0 +1,128 @@
+{
+  "schemaVersion": "gate0-report/v1",
+  "verdict": "BLOCKED",
+  "probes": [
+    {
+      "schemaVersion": "gate0-probe/v1",
+      "probeId": "terminal_cua",
+      "result": "BLOCKED",
+      "checkedAt": "2026-08-24T09:31:05.377Z",
+      "runId": "52df94fc4b8dd747",
+      "evidence": {
+        "status": "unknown",
+        "criterion": "codex_probe",
+        "pointer": "command_failed"
+      },
+      "errorClass": "command_failed"
+    },
+    {
+      "schemaVersion": "gate0-probe/v1",
+      "probeId": "launchagent_cua",
+      "result": "BLOCKED",
+      "checkedAt": "2026-08-24T09:31:48.989Z",
+      "runId": "5920a82ffd319df4",
+      "evidence": {
+        "status": "unknown",
+        "criterion": "launchagent_probe_timeout",
+        "pointer": "bounded_wait"
+      },
+      "errorClass": "timeout"
+    },
+    {
+      "schemaVersion": "gate0-probe/v1",
+      "probeId": "human_auth_boundary",
+      "result": "NOT_RUN",
+      "checkedAt": "2026-08-24T09:31:56.060Z",
+      "runId": "ce4bc54d4bdcc903",
+      "evidence": {
+        "status": "unknown",
+        "criterion": "safe_login_boundary",
+        "pointer": "not_opened"
+      }
+    },
+    {
+      "schemaVersion": "gate0-probe/v1",
+      "probeId": "human_resume",
+      "result": "NOT_RUN",
+      "checkedAt": "2026-08-24T09:32:42.731Z",
+      "runId": "08b914edecd3d5c4",
+      "evidence": {
+        "status": "unknown",
+        "criterion": "human_interruption_resume",
+        "pointer": "not_run_no_live_fix"
+      }
+    },
+    {
+      "schemaVersion": "gate0-probe/v1",
+      "probeId": "launchagent_security",
+      "result": "BLOCKED",
+      "checkedAt": "2026-08-24T09:34:16.742Z",
+      "runId": "d18912f3543abe50",
+      "evidence": {
+        "status": "unknown",
+        "criterion": "temporary_launchagent_cleanup",
+        "pointer": "residual_label_unavailable"
+      },
+      "errorClass": "not_available"
+    },
+    {
+      "schemaVersion": "gate0-probe/v1",
+      "probeId": "single_instance_lease",
+      "result": "NOT_RUN",
+      "checkedAt": "2026-08-24T09:34:16.742Z",
+      "runId": "e0f69ec206084c57",
+      "evidence": {
+        "status": "unknown",
+        "criterion": "lease_probe",
+        "pointer": "not_implemented"
+      }
+    },
+    {
+      "schemaVersion": "gate0-probe/v1",
+      "probeId": "restricted_profile",
+      "result": "BLOCKED",
+      "checkedAt": "2026-08-24T09:32:36.496Z",
+      "runId": "8e6e179bba39f25b",
+      "evidence": {
+        "assertions": {
+          "directNodeReplAllowed": false,
+          "rawInputInjectionAllowed": false,
+          "helperSocketAccessAllowed": false,
+          "ledgerWriteAllowed": false,
+          "narrowActionPathWorks": false
+        },
+        "normalShellPresent": false,
+        "restrictedShellPresent": false,
+        "directNodeReplDenied": false
+      },
+      "errorClass": "command_failed"
+    },
+    {
+      "schemaVersion": "gate0-probe/v1",
+      "probeId": "typed_evidence",
+      "result": "PASS",
+      "checkedAt": "2026-08-24T09:34:16.742Z",
+      "runId": "18b363f05a728dd7",
+      "evidence": {
+        "status": "clean",
+        "criterion": "contract_unit_suite",
+        "pointer": "tests_passed",
+        "allRowsValidated": true,
+        "sensitiveValuesRejected": true
+      }
+    },
+    {
+      "schemaVersion": "gate0-probe/v1",
+      "probeId": "orphan_recovery",
+      "result": "BLOCKED",
+      "checkedAt": "2026-08-24T09:33:12.578Z",
+      "runId": "b103849fcdde26b6",
+      "evidence": {
+        "status": "unknown",
+        "criterion": "identity",
+        "pointer": "cleanup_attempted"
+      },
+      "errorClass": "identity_mismatch"
+    }
+  ]
+}
