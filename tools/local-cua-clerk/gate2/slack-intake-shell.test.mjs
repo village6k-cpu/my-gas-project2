@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -515,6 +515,26 @@ test('ledger setup failure is redacted and fails before action or delivery', asy
   assert.equal(JSON.stringify(receipt).includes(ledgerDir), false);
   assert.equal(executions, 0);
   assert.equal(posts, 0);
+});
+
+test('an existing broad-permission ledger directory is rejected without changing its mode', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  await chmod(ledgerDir, 0o755);
+  let executions = 0;
+  let posts = 0;
+
+  const receipt = await shell.processSyntheticSlackEnvelope(callOptions({
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return GATE1_PASS; },
+    resultSink: async () => { posts += 1; return { delivered: true }; },
+  }));
+
+  assert.equal(receipt.status, 'BLOCKED');
+  assert.equal(receipt.errorClass, 'ledger_failed');
+  assert.equal(executions, 0);
+  assert.equal(posts, 0);
+  assert.equal((await stat(ledgerDir)).mode & 0o777, 0o755);
 });
 
 test('custom action execution is unavailable unless the explicit test seam is enabled', async t => {

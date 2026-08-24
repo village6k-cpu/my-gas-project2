@@ -1,0 +1,17 @@
+{
+  "name": "village-local-cua-slack-clerk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test *.test.mjs",
+    "check": "node --check slack-socket-connector.mjs && node --check socket-mode-runner.mjs",
+    "start": "node socket-mode-runner.mjs"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "dependencies": {
+    "@slack/bolt": "5.0.0"
+  }
+}

@@ -12,6 +12,8 @@ export const LEDGER_SCHEMA_VERSION = 'gate2-slack-ledger/v1';
 export const DELIVERY_SCHEMA_VERSION = 'gate2-slack-delivery/v1';
 export const EMPLOYEE_ID = 'village-tax-document-clerk';
 export const ALLOWED_ACTION = 'desktop_readiness';
+export const SYNTHETIC_SLACK_SOURCE = 'synthetic_local';
+export const SOCKET_SLACK_SOURCE = 'slack_socket_mode';
 
 const EVIDENCE_KEYS = Object.freeze([
   'envelopeValidated',
@@ -181,13 +183,13 @@ export function serializeSlackReceipt(receipt) {
   return `${JSON.stringify(validateSlackReceipt(receipt), null, 2)}\n`;
 }
 
-function validateEnvelope(envelope) {
+function validateEnvelope(envelope, expectedSource) {
   if (jsonByteLength(envelope) > MAX_ENVELOPE_BYTES) return false;
   try { exactKeys(envelope, ENVELOPE_KEYS, 'Gate 2 envelope'); }
   catch { return false; }
   return Boolean(
     envelope.schemaVersion === ENVELOPE_SCHEMA_VERSION
-    && envelope.source === 'synthetic_local'
+    && envelope.source === expectedSource
     && typeof envelope.teamId === 'string'
     && SLACKISH_ID.test(envelope.teamId)
     && typeof envelope.channelId === 'string'
@@ -309,10 +311,14 @@ function serializeLedgerRecord(record) {
 
 async function ensureLedgerDirectory(ledgerDir) {
   if (typeof ledgerDir !== 'string' || !isAbsolute(ledgerDir)) throw new TypeError('ledgerDir must be absolute');
-  await mkdir(ledgerDir, { recursive: true, mode: 0o700 });
+  const created = await mkdir(ledgerDir, { recursive: true, mode: 0o700 });
   const info = await lstat(ledgerDir);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new TypeError('ledgerDir must be a real directory');
-  await chmod(ledgerDir, 0o700);
+  if (created === undefined) {
+    if ((info.mode & 0o077) !== 0) throw new TypeError('existing ledgerDir must already be private');
+  } else {
+    await chmod(ledgerDir, 0o700);
+  }
 }
 
 async function createExclusiveRecord(path, record) {
@@ -512,7 +518,7 @@ async function deliverResult({
   });
 }
 
-export async function processSyntheticSlackEnvelope({
+async function processSlackEnvelopeForSource({
   envelope,
   allowedRoute,
   ledgerDir,
@@ -521,7 +527,7 @@ export async function processSyntheticSlackEnvelope({
   allowTestOverrides = false,
   now = () => new Date().toISOString(),
   deliveryTimeoutMs = 10_000,
-} = {}) {
+} = {}, expectedSource) {
   validateAllowedRoute(allowedRoute);
   if (typeof resultSink !== 'function') throw new TypeError('resultSink is required');
   if (typeof actionRunner !== 'function') throw new TypeError('actionRunner must be a function');
@@ -536,7 +542,7 @@ export async function processSyntheticSlackEnvelope({
   const timestamp = checkedAt(now);
   const zeroRequestId = '0000000000000000';
 
-  if (!validateEnvelope(envelope)) {
+  if (!validateEnvelope(envelope, expectedSource)) {
     return receipt({
       status: 'REJECTED', errorClass: 'invalid_envelope', checkedAt: timestamp,
       requestId: zeroRequestId,
@@ -717,4 +723,12 @@ export async function processSyntheticSlackEnvelope({
     executionCompleted,
     resumedDelivery: false,
   });
+}
+
+export function processSyntheticSlackEnvelope(options) {
+  return processSlackEnvelopeForSource(options, SYNTHETIC_SLACK_SOURCE);
+}
+
+export function processSocketSlackEnvelope(options) {
+  return processSlackEnvelopeForSource(options, SOCKET_SLACK_SOURCE);
 }
