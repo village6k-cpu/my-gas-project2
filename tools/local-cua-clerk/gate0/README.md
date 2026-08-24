@@ -16,3 +16,14 @@ serializes a `makeProbe()` result. `launch-agent-probe.mjs` writes a one-shot pl
 temporary directory, bootstraps it in `gui/$UID`, waits with a deadline, then boots out its exact
 label and removes only that directory. Neither runner retains subprocess stdout/stderr; the CLI
 output file contains only the Task 1 probe contract.
+
+`restricted-profile-probe.mjs` compares the normal diagnostic invocation with
+`codex exec --ignore-user-config --sandbox read-only`. Its exact boolean record separately reports shell
+presence and requires mechanical denial of direct `node_repl`, raw input, helper sockets, and ledger writes;
+prompt instructions are not treated as a boundary. A failed or forged record is `BLOCKED`, and a working
+narrow path with unrestricted CUA is not autonomous PASS.
+
+`orphan-recovery-probe.mjs` is a fail-closed feasibility seam. It authorizes only a synthetic, one-use epoch
+grant and a child PID/PGID whose executable and start identity match immediately before TERM and before KILL.
+Wrong epochs, reused grants, PID reuse, identity mismatch, and unrelated targets produce `BLOCKED` with no
+signal. The live disposable-child invocation is intentionally deferred to Task 4.

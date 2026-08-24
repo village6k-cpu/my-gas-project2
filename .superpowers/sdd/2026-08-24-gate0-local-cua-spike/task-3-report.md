@@ -1,0 +1,35 @@
+# Task 3 report — restricted-profile and orphan-recovery feasibility
+
+## Implementation summary
+
+Implemented the fail-closed Task 3 feasibility layer on top of the Task 1 evidence contract and Task 2
+identity seams.
+
+- `restricted-profile-probe.mjs` compares normal diagnostic execution with the exact restricted invocation
+  `codex exec --ignore-user-config --sandbox read-only`. It accepts one exact boolean record only, records
+  normal/restricted shell presence separately, and requires mechanical denial of direct `node_repl`, raw input,
+  helper sockets, and ledger writes before the narrow action path can pass.
+- `orphan-recovery-probe.mjs` authorizes only synthetic one-use epoch grants and identity-matched disposable
+  child PID/PGID records. It re-reads executable/start identity before TERM and before KILL, and blocks wrong
+  epochs, reused grants, PID reuse, identity mismatch, and unrelated targets without signaling.
+- Adversarial tests cover forged evidence, malformed output, direct `node_repl` still available, command failure,
+  wrong epoch, revoked/reused grants, executable/start mismatch, PID reuse, and unrelated PID protection.
+- README documents the restricted boundary and states that live disposable-child validation remains Task 4.
+
+## Verification
+
+Command:
+
+`node --test tools/local-cua-clerk/gate0/*.test.mjs && git diff --check`
+
+Result: **27 passed, 0 failed, 0 skipped; `git diff --check` passed.**
+
+No real Codex, node_repl, GUI, raw input, launchctl, HomeTax, credential, GAS, Sheets, or unrelated process
+action was performed. Task 4 remains responsible for live disposable-child validation.
+
+## Concerns
+
+- The restricted probe intentionally returns `SUPERVISED_ONLY` at Gate 0 report level unless the complete
+  restricted assertion set proves a narrow action path while all raw/global CUA capabilities are denied.
+- The orphan runner's live default child path is not exercised here; only injected seams and adversarial unit
+  tests were run.
