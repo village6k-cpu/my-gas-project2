@@ -6,7 +6,7 @@ Use when the user asks for many already-registered reservations to be quoted aga
 
 The deployed registered `previewQuote` route reads the trade's current `계약마스터` 할인유형. If existing trades are marked `개인사업자/프리랜서`, the official preview will not include the extra `단골10%` unless the underlying trade discount is changed. Do **not** mutate all historical contracts just to make a one-off collection/preview.
 
-Instead, use official registered preview only as source data, then generate an approval-gated local quote bundle with the requested ad-hoc discount stack.
+Prefer official `previewQuote` discount overrides when the requested stack is deployed (for example, `discountType=학생단골` for 학생30% × 단골10%). Download and bundle the official Drive PDFs; use a locally recreated layout only when the official route cannot render the requested stack.
 
 ## Safe workflow
 
@@ -31,6 +31,22 @@ Instead, use official registered preview only as source data, then generate an a
    - zip integrity passes.
    - extract PDF text with `pdftotext -layout 'C:/...' -` or render a page-1 PNG thumbnail with `uv run --with PyMuPDF python` (fitz `get_pixmap`); visually verify Korean glyphs, table fit, discount label, and final total.
 7. Report clearly: `고객 발송은 아직 안 했음`.
+
+## Fast verification after a bundle exists
+
+When staff asks whether the total in an already generated or sent bundle is correct, verify the existing local artifacts before doing any finance, GAS, Drive, or payment-ledger query:
+
+```powershell
+uv run --offline --with pymupdf python `
+  "C:/Village/runtimes/my-gas-project2-production/scripts/windows/village-quote-bundle-verify.py" `
+  verify --summary "C:/Village/quote-previews/{bundle}/summary.json" --deadline-ms 20000
+```
+
+Run this as one foreground terminal call with a 30-second tool timeout. The verifier reads only local `summary.json`, individual CSVs, individual PDFs, and the combined PDF. A success result supplies one authoritative `total` and four matching evidence totals; answer the staff question immediately from that result.
+
+If it returns `quote_bundle_mismatch`, `unreadable_quote_total`, or another error, report that the bundle could not be verified and stop. Do not compensate with a sequential multi-trade remote loop in the same response. Regeneration or a finance/deposit audit is a separate operation chosen only after the failed local evidence is reported.
+
+Deposit framing is separate from quote arithmetic. A question such as “입금은 약 100만인데 합본이 142만이 맞나?” first asks whether the bundle sum is correct. Verify and answer that question first. Query deposits only when staff explicitly asks for paid, unpaid, or shortage reconciliation.
 
 ## Parsing pitfall
 
