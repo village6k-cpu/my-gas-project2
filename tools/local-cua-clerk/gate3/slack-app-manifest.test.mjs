@@ -2,20 +2,25 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-test('the install manifest creates a distinct mention-only Socket Mode bot with the minimum scopes', async () => {
+test('the install manifest creates a distinct Korean-command Socket Mode bot with the minimum scopes', async () => {
   const manifest = JSON.parse(await readFile(new URL('./slack-app-manifest.json', import.meta.url), 'utf8'));
 
   assert.equal(manifest._metadata.major_version, 1);
-  assert.equal(manifest.display_information.name, '빌리지 세무·서류 담당');
-  assert.equal(manifest.features.bot_user.display_name, '세무·서류 담당');
+  assert.equal(manifest.display_information.name, '맥에이전트');
+  assert.equal(manifest.features.bot_user.display_name, 'mac-agent');
+  assert.match(manifest.features.bot_user.display_name, /^[a-z0-9_-]+$/);
   assert.equal(manifest.features.bot_user.always_online, false);
   assert.deepEqual(manifest.oauth_config.scopes.bot, [
     'app_mentions:read',
     'channels:history',
     'chat:write',
   ]);
-  assert.deepEqual(manifest.settings.event_subscriptions.bot_events, ['app_mention']);
+  assert.deepEqual(manifest.settings.event_subscriptions.bot_events, [
+    'app_mention',
+    'message.channels',
+  ]);
   assert.equal(manifest.settings.socket_mode_enabled, true);
+  assert.equal(manifest.settings.is_hosted, false);
   assert.equal(manifest.settings.org_deploy_enabled, false);
   assert.equal(manifest.settings.token_rotation_enabled, false);
   assert.equal(manifest.features.slash_commands, undefined);

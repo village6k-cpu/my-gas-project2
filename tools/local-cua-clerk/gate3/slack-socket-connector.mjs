@@ -70,7 +70,7 @@ export function adaptSlackAppMention({ body, route } = {}) {
     || !event
     || typeof event !== 'object'
     || Array.isArray(event)
-    || event.type !== 'app_mention'
+    || !['app_mention', 'message'].includes(event.type)
     || typeof event.user !== 'string'
     || typeof event.channel !== 'string'
     || typeof event.text !== 'string'
@@ -94,7 +94,10 @@ export function adaptSlackAppMention({ body, route } = {}) {
   if (event.user !== route.allowedUserId) return rejected('unauthorized_actor');
 
   const normalizedText = event.text.normalize('NFKC').replace(/\s+/g, ' ').trim();
-  if (normalizedText !== `<@${route.botUserId}> 상태 확인`) {
+  const commandMatched = event.type === 'app_mention'
+    ? normalizedText === `<@${route.botUserId}> 상태 확인`
+    : normalizedText === '맥에이전트 상태 확인';
+  if (!commandMatched) {
     return rejected('command_not_allowed');
   }
 
@@ -164,9 +167,9 @@ export function deterministicSlackMessageId(requestId) {
 
 function formatSlackResult(result) {
   if (result.status === 'PASS') {
-    return `✅ 세무·서류 담당 준비 상태: 정상\n요청 ID: ${result.requestId}`;
+    return `:white_check_mark: 맥에이전트 준비 상태: 정상\n요청 ID: ${result.requestId}`;
   }
-  return `⚠️ 세무·서류 담당 준비 상태: 확인 필요\n오류 분류: ${result.errorClass}\n요청 ID: ${result.requestId}`;
+  return `:warning: 맥에이전트 준비 상태: 확인 필요\n오류 분류: ${result.errorClass}\n요청 ID: ${result.requestId}`;
 }
 
 function ambiguousDelivery() {

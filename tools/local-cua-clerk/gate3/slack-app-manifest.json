@@ -3,13 +3,13 @@
     "major_version": 1
   },
   "display_information": {
-    "name": "빌리지 세무·서류 담당",
+    "name": "맥에이전트",
     "description": "승인된 문서 채널에서 이 Mac의 고정 로컬 CUA 업무를 수행하는 별도 직원",
     "background_color": "#2f6b4f"
   },
   "features": {
     "bot_user": {
-      "display_name": "세무·서류 담당",
+      "display_name": "mac-agent",
       "always_online": false
     }
   },
@@ -25,11 +25,13 @@
   "settings": {
     "event_subscriptions": {
       "bot_events": [
-        "app_mention"
+        "app_mention",
+        "message.channels"
       ]
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": true,
+    "is_hosted": false,
     "token_rotation_enabled": false
   }
 }

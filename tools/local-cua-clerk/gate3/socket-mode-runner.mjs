@@ -180,7 +180,7 @@ export async function startSocketModeConnector({
   }
 
   await app.init();
-  app.event('app_mention', async ({ body, client }) => {
+  const eventHandler = async ({ body, client }) => {
     try {
       return await handler({
         body,
@@ -191,7 +191,9 @@ export async function startSocketModeConnector({
     } catch {
       return handlerFailure();
     }
-  });
+  };
+  app.event('app_mention', eventHandler);
+  app.event('message', eventHandler);
   await app.start();
   let stopped = false;
   return Object.freeze({

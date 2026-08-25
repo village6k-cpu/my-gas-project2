@@ -38,6 +38,18 @@ const BODY = Object.freeze({
   }),
 });
 
+const KOREAN_BODY = Object.freeze({
+  ...BODY,
+  event_id: 'Ev0LOCALCUA0003',
+  event: Object.freeze({
+    ...BODY.event,
+    type: 'message',
+    text: '맥에이전트 상태 확인',
+    ts: '1787623203.000004',
+    event_ts: '1787623203000004',
+  }),
+});
+
 const CHECKED_AT = '2026-08-25T03:00:00.000Z';
 const GATE1_PASS = Object.freeze({
   schemaVersion: 'gate1-desktop-cua/v1',
@@ -102,6 +114,25 @@ test('an exact owner app mention maps to the fixed live Gate 2 envelope without 
   assert.equal(JSON.stringify(decision).includes(ROUTE.botUserId), false);
 });
 
+test('an exact Korean employee command maps to the same fixed envelope without an English mention', async () => {
+  const connector = await loadConnector();
+  const decision = connector.adaptSlackAppMention({ body: KOREAN_BODY, route: ROUTE });
+
+  assert.deepEqual(decision, {
+    accepted: true,
+    envelope: {
+      schemaVersion: 'gate2-slack-envelope/v1',
+      source: 'slack_socket_mode',
+      teamId: ROUTE.teamId,
+      channelId: ROUTE.channelId,
+      eventId: KOREAN_BODY.event_id,
+      threadTs: KOREAN_BODY.event.ts,
+      action: 'desktop_readiness',
+    },
+  });
+  assert.equal(JSON.stringify(decision).includes(KOREAN_BODY.event.text), false);
+});
+
 test('a mention in an existing thread preserves the parent thread timestamp', async () => {
   const connector = await loadConnector();
   const body = {
@@ -130,6 +161,9 @@ test('identity, route, actor, bot-generated, and command mutations reject before
     [{ ...BODY, event: { ...BODY.event, subtype: 'bot_message' } }, 'invalid_event'],
     [{ ...BODY, event: { ...BODY.event, text: `<@U_OTHER> 상태 확인` } }, 'command_not_allowed'],
     [{ ...BODY, event: { ...BODY.event, text: `<@${ROUTE.botUserId}> 홈택스 발급` } }, 'command_not_allowed'],
+    [{ ...KOREAN_BODY, event: { ...KOREAN_BODY.event, text: '맥에이전트 홈택스 발급' } }, 'command_not_allowed'],
+    [{ ...KOREAN_BODY, event: { ...KOREAN_BODY.event, user: 'U_OTHER' } }, 'unauthorized_actor'],
+    [{ ...KOREAN_BODY, event: { ...KOREAN_BODY.event, bot_id: 'B_OTHER' } }, 'invalid_event'],
     [{ ...BODY, event: { ...BODY.event, text: `<@${ROUTE.botUserId}> 상태 확인 ${'x'.repeat(300)}` } }, 'invalid_event'],
   ];
 
@@ -215,7 +249,7 @@ test('the Slack result sink posts once in the original thread and requires an ex
   const postCalls = [];
   const replyCalls = [];
   const postedTs = '1787623202.000003';
-  const expectedText = '✅ 세무·서류 담당 준비 상태: 정상\n요청 ID: 0123456789abcdef';
+  const expectedText = ':white_check_mark: 맥에이전트 준비 상태: 정상\n요청 ID: 0123456789abcdef';
   const client = {
     chat: {
       postMessage: async payload => {
@@ -279,7 +313,7 @@ test('the Slack result sink posts once in the original thread and requires an ex
 test('readback targets the just-posted timestamp even when a thread already has more than fifteen replies', async () => {
   const connector = await loadConnector();
   const postedTs = '1787623299.000099';
-  const text = '✅ 세무·서류 담당 준비 상태: 정상\n요청 ID: 0123456789abcdef';
+  const text = ':white_check_mark: 맥에이전트 준비 상태: 정상\n요청 ID: 0123456789abcdef';
   const olderReplies = Array.from({ length: 15 }, (_, index) => ({
     type: 'message',
     user: ROUTE.allowedUserId,
@@ -355,7 +389,7 @@ test('a Slack explicit non-delivery is retryable, while exceptions and unverifia
           messages: [{
             type: 'message',
             user: 'U_OTHER',
-            text: '✅ 세무·서류 담당 준비 상태: 정상\n요청 ID: 0123456789abcdef',
+            text: ':white_check_mark: 맥에이전트 준비 상태: 정상\n요청 ID: 0123456789abcdef',
             ts: '1787623202.000003',
             thread_ts: BODY.event.ts,
           }],
@@ -377,7 +411,7 @@ test('BLOCKED delivery text is fixed and raw or malformed payloads never reach S
       errorClass: 'action_blocked',
     },
   };
-  const expectedText = '⚠️ 세무·서류 담당 준비 상태: 확인 필요\n오류 분류: action_blocked\n요청 ID: 0123456789abcdef';
+  const expectedText = ':warning: 맥에이전트 준비 상태: 확인 필요\n오류 분류: action_blocked\n요청 ID: 0123456789abcdef';
   const sink = connector.createSlackResultSink({
     botUserId: ROUTE.botUserId,
     client: {

@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "test": "node --test *.test.mjs",
-    "check": "node --check slack-socket-connector.mjs && node --check socket-mode-runner.mjs",
-    "start": "node socket-mode-runner.mjs"
+    "check": "node --check slack-socket-connector.mjs && node --check socket-mode-runner.mjs && node --check mac-agent-launcher.mjs && node --check mac-agent-service-entrypoint.mjs",
+    "start": "node socket-mode-runner.mjs",
+    "install-service": "node mac-agent-launcher.mjs install"
   },
   "engines": {
     "node": ">=20.18.1"

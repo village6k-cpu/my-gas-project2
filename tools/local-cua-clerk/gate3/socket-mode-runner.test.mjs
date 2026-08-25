@@ -121,7 +121,7 @@ test('auth.test must prove the configured workspace and distinct bot identity be
   assert.equal(JSON.stringify(failed).includes(rawMarker), false);
 });
 
-test('the Socket Mode runtime preflights identity, registers only app_mention, and then starts', async () => {
+test('the Socket Mode runtime preflights identity, registers only the two fixed command events, and then starts', async () => {
   const runner = await loadRunner();
   assert.equal(typeof runner?.startSocketModeConnector, 'function');
   const instances = [];
@@ -162,8 +162,8 @@ test('the Socket Mode runtime preflights identity, registers only app_mention, a
     developerMode: false,
     deferInitialization: true,
   });
-  assert.deepEqual(lifecycle, ['auth.test', 'init', 'event:app_mention', 'start']);
-  assert.deepEqual(instances[0].listeners.map(({ name }) => name), ['app_mention']);
+  assert.deepEqual(lifecycle, ['auth.test', 'init', 'event:app_mention', 'event:message', 'start']);
+  assert.deepEqual(instances[0].listeners.map(({ name }) => name), ['app_mention', 'message']);
   assert.equal(instances[0].startCalls, 1);
 
   const body = { type: 'event_callback', event: { type: 'app_mention' } };
@@ -177,6 +177,13 @@ test('the Socket Mode runtime preflights identity, registers only app_mention, a
   assert.equal(handlerCalls[0].client, eventClient);
   assert.deepEqual(handlerCalls[0].route, runtime.route);
   assert.equal(handlerCalls[0].ledgerDir, ENV.LOCAL_CUA_LEDGER_DIR);
+
+  const messageBody = { type: 'event_callback', event: { type: 'message' } };
+  assert.deepEqual(
+    await instances[0].listeners[1].callback({ body: messageBody, client: eventClient }),
+    { status: 'PASS' },
+  );
+  assert.equal(handlerCalls[1].body, messageBody);
   assert.equal(JSON.stringify(runtime).includes(ENV.LOCAL_CUA_SLACK_APP_TOKEN), false);
   assert.equal(JSON.stringify(runtime).includes(ENV.LOCAL_CUA_SLACK_BOT_TOKEN), false);
 
