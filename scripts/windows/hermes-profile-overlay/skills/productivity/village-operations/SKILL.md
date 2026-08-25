@@ -146,6 +146,14 @@ directly.
   authorization plus provider readback.
 - Never infer a current balance from historical Brain material.
 
+### Local Studio Mac HomeTax handoff
+
+When Popbill cannot perform an explicitly owner-authorized cash-receipt issue,
+handoff only that exact operation to `맥에이전트` on **이 로컬 스튜디오맥**.
+Open [the fixed Studio Mac HomeTax handoff contract](references/local-studio-mac-handoff.md)
+before replying. The same Slack thread is authoritative: `스튜디오맥 접수` is
+not completion, and only the MacAgent final readback proves issuance.
+
 ## Returns and equipment
 
 - Distinguish not-yet-due, overdue, missing-accessory, damage, inventory-count,

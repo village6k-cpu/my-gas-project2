@@ -14,6 +14,8 @@ const ENV = Object.freeze({
   LOCAL_CUA_SLACK_APP_ID: 'A0LOCALCUA01',
   LOCAL_CUA_SLACK_BOT_USER_ID: 'U0LOCALCUA01',
   LOCAL_CUA_SLACK_ALLOWED_USER_ID: 'U03EB8L0QDR',
+  LOCAL_CUA_SLACK_HEYBILLY_USER_ID: 'U0B66DNKXRU',
+  LOCAL_CUA_SLACK_HEYBILLY_BOT_ID: 'B0B68FQLVS6',
   LOCAL_CUA_LEDGER_DIR: '/tmp/village-local-cua-clerk/ledger',
 });
 
@@ -42,6 +44,10 @@ test('runtime configuration requires a separate complete bot identity and never 
       appId: ENV.LOCAL_CUA_SLACK_APP_ID,
       botUserId: ENV.LOCAL_CUA_SLACK_BOT_USER_ID,
       allowedUserId: ENV.LOCAL_CUA_SLACK_ALLOWED_USER_ID,
+    },
+    handoffSource: {
+      userId: ENV.LOCAL_CUA_SLACK_HEYBILLY_USER_ID,
+      botId: ENV.LOCAL_CUA_SLACK_HEYBILLY_BOT_ID,
     },
   });
 
@@ -177,6 +183,7 @@ test('the Socket Mode runtime preflights identity, registers only the two fixed 
   assert.equal(handlerCalls[0].client, eventClient);
   assert.deepEqual(handlerCalls[0].route, runtime.route);
   assert.equal(handlerCalls[0].ledgerDir, ENV.LOCAL_CUA_LEDGER_DIR);
+  assert.deepEqual(handlerCalls[0].handoffSource, runtime.handoffSource);
 
   const messageBody = { type: 'event_callback', event: { type: 'message' } };
   assert.deepEqual(

@@ -1,8 +1,8 @@
 # Gate 3 — 별도 Slack 직원 커넥터
 
-이 디렉터리는 기존 헤이빌리와 분리된 `맥에이전트` Slack 앱을 이 Mac의 Gate 2
-원장과 Gate 1 읽기 전용 CUA 브리지에 연결한다. 현재 허용 액션은 `상태 확인` →
-`desktop_readiness` 하나뿐이다.
+이 디렉터리는 기존 헤이빌리와 분리된 `맥에이전트` Slack 앱을 이 로컬 스튜디오맥의
+Gate 2 원장과 Gate 1 CUA 워커에 연결한다. 사람의 `상태 확인`과, 정확히 고정된 HeyBilly
+`MAC_AGENT_HANDOFF_V1` 현금영수증 인계만 허용한다.
 
 ## 현재 상태
 
@@ -10,7 +10,9 @@
 - 전용 `com.village.mac-agent` 사용자 LaunchAgent가 로그인 세션에서 상시 실행
 - Slack에서 `맥에이전트 상태 확인` 한글 호출·한글 작성자명·동일 스레드 정상 회신과 원장
   `completed` 확인
-- 홈택스 접속·로그인·조회·발급·수정은 하지 않음
+- HeyBilly 사용자 ID와 bot ID를 별도로 고정하고 다른 봇·과거 이벤트·편집 이벤트를 선차단
+- 접수 → 스튜디오맥 단일 CUA 실행 → 고정 화면 readback → 동일 스레드 최종 회신 구현
+- 세금계산서, 임의 자연어, 다른 HomeTax 업무는 허용하지 않음
 
 ## 설치 구성
 
@@ -23,7 +25,8 @@
 4. `.env.example`의 값은 저장소 밖
    `~/Library/Application Support/village-local-cua-clerk/slack.env` 권한 `0600`에만 둔다.
 5. `auth.test`에서 확인한 새 bot user ID와 앱 설정의 app ID를 환경파일에 고정한다.
-6. 설치 뒤 Slack Marketplace의 `맥에이전트 > 구성 > 봇 사용자 > 편집`에서 워크스페이스
+6. HeyBilly의 Slack user ID와 bot ID를 `LOCAL_CUA_SLACK_HEYBILLY_*`에 별도로 고정한다.
+7. 설치 뒤 Slack Marketplace의 `맥에이전트 > 구성 > 봇 사용자 > 편집`에서 워크스페이스
    표시명을 `맥에이전트`로 저장한다. 이 단계는 ASCII 내부 이름을 바꾸지 않는다.
 
 토큰 값은 코드, Git, plist, 명령행, 로그, 보고서에 넣지 않는다. 원장은 같은 전용 디렉터리의
@@ -71,6 +74,11 @@ Node의 주변 환경변수를 사용하지 않고 비밀파일을 매 시작마
 - 고정 팀·채널·앱·봇·허용 사용자와 모두 일치해야 한다.
 - 사용자는 채널에 정확히 `맥에이전트 상태 확인`을 입력한다. 기존 직접 멘션 방식은
   호환용으로만 유지한다.
+- HeyBilly 인계는 10분 이내의 새 이벤트, 정확한 HeyBilly user+bot 쌍, 부모 스레드,
+  소문자 UUIDv4 인계 ID와 고정 키의 `MAC_AGENT_HANDOFF_V1`만 수용한다.
+- 고객 데이터는 실행 중 메모리에만 두고 원장에는 opaque handoff ID와 고정 상태만 남긴다.
+- 동일 handoff ID는 한 번만 실행하며, `running`·전달 불명 상태는 사람 확인 없이 재실행하지 않는다.
+- 진행상황은 원 요청 스레드에 `스튜디오맥 접수`와 최종 완료/사용자 확인 필요로 표시한다.
 - Slack 원문은 Gate 2 envelope로 매핑한 직후 폐기하며 원장에 저장하지 않는다.
 - 최상위 메시지는 그 메시지의 `ts`, 기존 스레드는 부모 `thread_ts`로 회신한다.
 - `chat.postMessage` 결과를 `conversations.replies`에서 같은 봇·같은 본문·같은 `ts`로 다시

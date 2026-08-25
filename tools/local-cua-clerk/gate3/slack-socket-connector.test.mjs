@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -47,6 +47,39 @@ const KOREAN_BODY = Object.freeze({
     text: '맥에이전트 상태 확인',
     ts: '1787623203.000004',
     event_ts: '1787623203000004',
+  }),
+});
+
+const HEYBILLY_SOURCE = Object.freeze({
+  userId: 'U0B66DNKXRU',
+  botId: 'B0B68FQLVS6',
+});
+
+const HEYBILLY_HANDOFF_TEXT = `<@${ROUTE.botUserId}> 작업 요청 (홈택스 CUA)
+[MAC_AGENT_HANDOFF_V1]
+handoff_id: hb-7af43b0c-4b65-4bb4-a04a-b249cc9cf360
+task_type: hometax_cash_receipt_issue
+authorization: owner_explicit
+customer_name: 박민경
+transaction_id: 260530-012
+transaction_date: 2026-06-27
+amount_krw: 464310
+purpose: income_deduction
+phone: 010-4045-7379
+item: 2026-06-27 렌탈 (260530-012)
+[/MAC_AGENT_HANDOFF_V1]`;
+
+const HEYBILLY_HANDOFF_BODY = Object.freeze({
+  ...BODY,
+  event_id: 'Ev0HEYBILLY0001',
+  event: Object.freeze({
+    ...BODY.event,
+    user: HEYBILLY_SOURCE.userId,
+    bot_id: HEYBILLY_SOURCE.botId,
+    subtype: 'bot_message',
+    text: HEYBILLY_HANDOFF_TEXT,
+    ts: '1787621822.559059',
+    thread_ts: '1787621371.680329',
   }),
 });
 
@@ -131,6 +164,84 @@ test('an exact Korean employee command maps to the same fixed envelope without a
     },
   });
   assert.equal(JSON.stringify(decision).includes(KOREAN_BODY.event.text), false);
+});
+
+test('an exact HeyBilly bot handoff creates one transient Studio Mac task without persisting the brief in its envelope', async () => {
+  const connector = await loadConnector();
+
+  const decision = connector.adaptSlackAppMention({
+    body: HEYBILLY_HANDOFF_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    nowEpochSeconds: HEYBILLY_HANDOFF_BODY.event_time,
+  });
+
+  assert.equal(decision.accepted, true);
+  assert.equal(decision.kind, 'heybilly_handoff');
+  assert.deepEqual(decision.task, {
+    schemaVersion: 'gate1-studio-mac-task/v1',
+    action: 'hometax_cash_receipt_issue',
+    handoffId: 'hb-7af43b0c-4b65-4bb4-a04a-b249cc9cf360',
+    authorization: 'owner_explicit',
+    customerName: '박민경',
+    transactionId: '260530-012',
+    transactionDate: '2026-06-27',
+    amountKrw: 464310,
+    purpose: 'income_deduction',
+    phone: '010-4045-7379',
+    item: '2026-06-27 렌탈 (260530-012)',
+  });
+  assert.deepEqual(decision.envelope, {
+    schemaVersion: 'gate2-heybilly-envelope/v1',
+    source: 'slack_socket_mode',
+    teamId: ROUTE.teamId,
+    channelId: ROUTE.channelId,
+    eventId: HEYBILLY_HANDOFF_BODY.event_id,
+    threadTs: HEYBILLY_HANDOFF_BODY.event.thread_ts,
+    action: 'studio_mac_cua_handoff',
+    taskType: 'hometax_cash_receipt_issue',
+    handoffId: 'hb-7af43b0c-4b65-4bb4-a04a-b249cc9cf360',
+  });
+  assert.equal(JSON.stringify(decision.envelope).includes(HEYBILLY_HANDOFF_TEXT), false);
+  assert.equal(JSON.stringify(decision.envelope).includes('010-4045-7379'), false);
+  assert.equal(JSON.stringify(decision.envelope).includes('박민경'), false);
+  assert.equal(JSON.stringify(decision.envelope).includes('464310'), false);
+  assert.equal(JSON.stringify(decision.envelope).includes(HEYBILLY_SOURCE.userId), false);
+  assert.equal(JSON.stringify(decision.envelope).includes(HEYBILLY_SOURCE.botId), false);
+});
+
+test('HeyBilly handoffs reject stale, edited, mismatched, and malformed events before creating a task', async () => {
+  const connector = await loadConnector();
+  const accepted = connector.adaptSlackAppMention({
+    body: HEYBILLY_HANDOFF_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    nowEpochSeconds: HEYBILLY_HANDOFF_BODY.event_time + 60,
+  });
+  assert.equal(accepted.accepted, true);
+
+  const cases = [
+    [{ ...HEYBILLY_HANDOFF_BODY, event_time: HEYBILLY_HANDOFF_BODY.event_time - 601 }, HEYBILLY_SOURCE, 'stale_event'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, subtype: 'message_changed' } }, HEYBILLY_SOURCE, 'invalid_event'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, bot_id: 'B0OTHERBOT01' } }, HEYBILLY_SOURCE, 'invalid_event'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, user: 'U0OTHERBOT01' } }, HEYBILLY_SOURCE, 'invalid_event'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: HEYBILLY_HANDOFF_TEXT.replace('amount_krw: 464310', 'amount_krw: 464310\namount_krw: 1') } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: HEYBILLY_HANDOFF_TEXT.replace('hb-7af43b0c-4b65-4bb4-a04a-b249cc9cf360', 'hb-010-4045-7379') } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: HEYBILLY_HANDOFF_TEXT.replace('purpose: income_deduction', 'purpose: expense_proof') } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: HEYBILLY_HANDOFF_TEXT.replace('item:', 'unknown_key: injected\nitem:') } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+  ];
+
+  for (const [body, handoffSource, errorClass] of cases) {
+    const decision = connector.adaptSlackAppMention({
+      body,
+      route: ROUTE,
+      handoffSource,
+      nowEpochSeconds: HEYBILLY_HANDOFF_BODY.event_time,
+    });
+    assert.deepEqual(decision, { accepted: false, errorClass });
+    assert.equal('task' in decision, false);
+    assert.equal('envelope' in decision, false);
+  }
 });
 
 test('a mention in an existing thread preserves the parent thread timestamp', async () => {
@@ -310,6 +421,68 @@ test('the Slack result sink posts once in the original thread and requires an ex
   }]);
 });
 
+test('the Studio Mac status sink posts fixed Korean ACK and final messages with exact same-thread readback', async () => {
+  const connector = await loadConnector();
+  assert.equal(typeof connector?.createStudioMacStatusSink, 'function');
+  const posted = [];
+  const client = {
+    chat: {
+      postMessage: async payload => {
+        const ts = `1787623300.00000${posted.length + 1}`;
+        posted.push({ ...payload, ts });
+        return { ok: true, channel: payload.channel, ts };
+      },
+    },
+    conversations: {
+      replies: async ({ oldest }) => ({
+        ok: true,
+        messages: posted
+          .filter(message => message.ts === oldest)
+          .map(message => ({
+            type: 'message',
+            user: ROUTE.botUserId,
+            text: message.text,
+            ts: message.ts,
+            thread_ts: message.thread_ts,
+          })),
+      }),
+    },
+  };
+  const sink = connector.createStudioMacStatusSink({ client, botUserId: ROUTE.botUserId });
+  const base = {
+    schemaVersion: 'gate2-studio-mac-status/v1',
+    requestId: '0123456789abcdef',
+    route: { teamId: ROUTE.teamId, channelId: ROUTE.channelId, threadTs: BODY.event.ts },
+  };
+
+  assert.deepEqual(await sink({ ...base, phase: 'ACK' }), { delivered: true });
+  assert.deepEqual(await sink({
+    ...base,
+    phase: 'FINAL',
+    result: {
+      status: 'COMPLETED',
+      resultCode: 'cash_receipt_issued',
+      authorizationNumber: 'Z56524383',
+    },
+  }), { delivered: true });
+  assert.deepEqual(await sink({
+    ...base,
+    phase: 'FINAL',
+    result: {
+      status: 'NEEDS_USER',
+      resultCode: 'user_action_required',
+      need: 'captcha_required',
+    },
+  }), { delivered: true });
+
+  assert.equal(posted[0].text, '🟡 스튜디오맥에서 접수했습니다\n요청 ID: 0123456789abcdef');
+  assert.equal(posted[1].text, '✅ 스튜디오맥 작업 완료\n현금영수증 승인번호: Z56524383\n요청 ID: 0123456789abcdef');
+  assert.equal(posted[2].text, '⚠️ 스튜디오맥에서 사용자 확인이 필요합니다\n필요 조치: CAPTCHA 확인\n요청 ID: 0123456789abcdef');
+  assert.equal(JSON.stringify(posted).includes('맥북'), false);
+  assert.deepEqual(posted.map(message => message.thread_ts), [BODY.event.ts, BODY.event.ts, BODY.event.ts]);
+  assert.notEqual(posted[0].client_msg_id, posted[1].client_msg_id);
+});
+
 test('readback targets the just-posted timestamp even when a thread already has more than fifteen replies', async () => {
   const connector = await loadConnector();
   const postedTs = '1787623299.000099';
@@ -481,6 +654,80 @@ test('the connector handler runs Gate 1 once, verifies one Slack reply, and supp
   assert.equal(retry.status, 'DUPLICATE');
   assert.equal(executions, 1);
   assert.equal(posted.length, 1);
+});
+
+test('the connector handler routes one exact HeyBilly handoff to the local Studio Mac worker and suppresses its retry', async t => {
+  const connector = await loadConnector();
+  const ledgerDir = await tempLedger(t);
+  let executions = 0;
+  const posted = [];
+  const client = {
+    chat: {
+      postMessage: async payload => {
+        const ts = `1787623400.00000${posted.length + 1}`;
+        posted.push({ ...payload, ts });
+        return { ok: true, channel: payload.channel, ts };
+      },
+    },
+    conversations: {
+      replies: async ({ oldest }) => ({
+        ok: true,
+        messages: posted
+          .filter(message => message.ts === oldest)
+          .map(message => ({
+            type: 'message',
+            user: ROUTE.botUserId,
+            text: message.text,
+            ts: message.ts,
+            thread_ts: message.thread_ts,
+          })),
+      }),
+    },
+  };
+  const options = {
+    body: HEYBILLY_HANDOFF_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    ledgerDir,
+    client,
+    handoffActionRunner: async ({ task }) => {
+      executions += 1;
+      assert.deepEqual(task, connector.adaptSlackAppMention({
+        body: HEYBILLY_HANDOFF_BODY,
+        route: ROUTE,
+        handoffSource: HEYBILLY_SOURCE,
+        nowEpochSeconds: HEYBILLY_HANDOFF_BODY.event_time,
+      }).task);
+      return {
+        schemaVersion: 'studio-mac-cua-result/v1',
+        status: 'COMPLETED',
+        resultCode: 'cash_receipt_issued',
+        authorizationNumber: 'Z56524383',
+        duplicateFound: false,
+        readbackVerified: true,
+        mutationObserved: true,
+        need: null,
+        errorClass: null,
+      };
+    },
+    allowTestOverrides: true,
+    now: () => CHECKED_AT,
+    eventNowEpochSeconds: HEYBILLY_HANDOFF_BODY.event_time,
+  };
+
+  const first = await connector.handleSlackAppMention(options);
+  const retry = await connector.handleSlackAppMention(options);
+  assert.equal(first.status, 'PASS');
+  assert.equal(retry.status, 'DUPLICATE');
+  assert.equal(executions, 1);
+  assert.deepEqual(posted.map(message => message.text.split('\n')[0]), [
+    '🟡 스튜디오맥에서 접수했습니다',
+    '✅ 스튜디오맥 작업 완료',
+  ]);
+  const raw = (await Promise.all((await readdir(ledgerDir)).map(name => readFile(join(ledgerDir, name), 'utf8')))).join('\n');
+  assert.equal(raw.includes('박민경'), false);
+  assert.equal(raw.includes('010-4045-7379'), false);
+  assert.equal(raw.includes('464310'), false);
 });
 
 test('the connector handler rejects unauthorized actors before disk, execution, or Slack calls', async t => {

@@ -23,7 +23,15 @@ revalidates the exact child identity before TERM and again before KILL; PID reus
 The bridge never serializes a thread id, turn id, MCP arguments/result outside the four booleans,
 accessibility text, screenshot URL/image, page content, subprocess output, or credentials. It does
 not click, type, navigate, log in, use HomeTax, receive Slack events, or perform tax/document
-mutations. Those belong to later gates.
+mutations.
+
+`studio-mac-codex-worker.mjs` is the separate, narrowly authorized mutation worker for this local
+Studio Mac. It accepts only one typed `hometax_cash_receipt_issue` task with `owner_explicit`, starts
+the pinned Codex app-server in a fresh ephemeral thread, and permits only HomeTax cash-receipt work.
+Certificate login uses the first certificate and the first Chrome native-autofill suggestion without
+reading or serializing the secret. A completion is returned only after a fixed `node_repl` readback
+independently finds the exact approval number and amount in Chrome accessibility state. Lock,
+CAPTCHA, missing autofill, timeout, or ambiguous readback returns a fixed non-success state.
 
 Tests:
 

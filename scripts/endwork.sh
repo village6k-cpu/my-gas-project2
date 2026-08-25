@@ -28,7 +28,7 @@ echo "▶ git fetch origin $BRANCH..."
 git fetch origin "$BRANCH"
 BEHIND="$(git rev-list --count "HEAD..origin/$BRANCH" 2>/dev/null || echo 0)"
 if [[ "$BEHIND" != "0" ]]; then
-  echo "❌ origin/$BRANCH 에 로컬에 없는 커밋 $BEHIND개가 있습니다."
+  echo "❌ origin/$BRANCH 에 로컬에 없는 커밋 ${BEHIND}개가 있습니다."
   echo "→ 다른 맥 작업분을 먼저 ./scripts/startwork.sh 로 가져온 뒤 다시 종료 작업을 하세요."
   exit 1
 fi

@@ -12,6 +12,8 @@ const REQUIRED_ENV = Object.freeze([
   'LOCAL_CUA_SLACK_APP_ID',
   'LOCAL_CUA_SLACK_BOT_USER_ID',
   'LOCAL_CUA_SLACK_ALLOWED_USER_ID',
+  'LOCAL_CUA_SLACK_HEYBILLY_USER_ID',
+  'LOCAL_CUA_SLACK_HEYBILLY_BOT_ID',
   'LOCAL_CUA_LEDGER_DIR',
 ]);
 const TEAM_ID = /^T[A-Z0-9]{8,63}$/;
@@ -54,6 +56,18 @@ export function loadSocketModeConfig(env = process.env) {
   ) {
     throw new TypeError('invalid LOCAL_CUA Slack route identity');
   }
+  const handoffSource = {
+    userId: values.LOCAL_CUA_SLACK_HEYBILLY_USER_ID,
+    botId: values.LOCAL_CUA_SLACK_HEYBILLY_BOT_ID,
+  };
+  if (
+    !USER_ID.test(handoffSource.userId)
+    || !BOT_ID.test(handoffSource.botId)
+    || handoffSource.userId === route.botUserId
+    || handoffSource.userId === route.allowedUserId
+  ) {
+    throw new TypeError('invalid LOCAL_CUA HeyBilly identity');
+  }
   if (!isAbsolute(values.LOCAL_CUA_LEDGER_DIR)) {
     throw new TypeError('LOCAL_CUA_LEDGER_DIR must be absolute');
   }
@@ -69,6 +83,7 @@ export function loadSocketModeConfig(env = process.env) {
     botToken: values.LOCAL_CUA_SLACK_BOT_TOKEN,
     ledgerDir: values.LOCAL_CUA_LEDGER_DIR,
     route: Object.freeze(route),
+    handoffSource: Object.freeze(handoffSource),
   });
 }
 
@@ -186,6 +201,7 @@ export async function startSocketModeConnector({
         body,
         client,
         route: config.route,
+        handoffSource: config.handoffSource,
         ledgerDir: config.ledgerDir,
       });
     } catch {
@@ -199,6 +215,7 @@ export async function startSocketModeConnector({
   return Object.freeze({
     identity,
     route: config.route,
+    handoffSource: config.handoffSource,
     ledgerDir: config.ledgerDir,
     stop: async () => {
       if (stopped) return;

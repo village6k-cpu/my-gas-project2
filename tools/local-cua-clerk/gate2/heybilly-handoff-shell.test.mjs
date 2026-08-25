@@ -1,0 +1,337 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+async function loadShell() {
+  try { return await import('./heybilly-handoff-shell.mjs'); }
+  catch { return null; }
+}
+
+const ROUTE = Object.freeze({ teamId: 'T03EB8LSB18', channelId: 'C0B7CLP4KDY' });
+const ENVELOPE = Object.freeze({
+  schemaVersion: 'gate2-heybilly-envelope/v1',
+  source: 'slack_socket_mode',
+  teamId: ROUTE.teamId,
+  channelId: ROUTE.channelId,
+  eventId: 'Ev0HEYBILLY0001',
+  threadTs: '1787621371.680329',
+  action: 'studio_mac_cua_handoff',
+  taskType: 'hometax_cash_receipt_issue',
+  handoffId: 'hb-7af43b0c-4b65-4bb4-a04a-b249cc9cf360',
+});
+const TASK = Object.freeze({
+  schemaVersion: 'gate1-studio-mac-task/v1',
+  action: 'hometax_cash_receipt_issue',
+  handoffId: ENVELOPE.handoffId,
+  authorization: 'owner_explicit',
+  customerName: '박민경',
+  transactionId: '260530-012',
+  transactionDate: '2026-06-27',
+  amountKrw: 464310,
+  purpose: 'income_deduction',
+  phone: '010-4045-7379',
+  item: '2026-06-27 렌탈 (260530-012)',
+});
+const RESULT = Object.freeze({
+  schemaVersion: 'studio-mac-cua-result/v1',
+  status: 'COMPLETED',
+  resultCode: 'cash_receipt_issued',
+  authorizationNumber: 'Z56524383',
+  duplicateFound: false,
+  readbackVerified: true,
+  mutationObserved: true,
+  need: null,
+  errorClass: null,
+});
+const NOW = '2026-08-25T04:00:00.000Z';
+const REQUEST_ID = createHash('sha256')
+  .update(`${ENVELOPE.teamId}\0heybilly\0${ENVELOPE.handoffId}`)
+  .digest('hex')
+  .slice(0, 16);
+
+async function tempLedger(t) {
+  const path = await mkdtemp(join(tmpdir(), 'studio-mac-handoff-test-'));
+  t.after(() => rm(path, { recursive: true, force: true }));
+  return path;
+}
+
+function options({ ledgerDir, actionRunner, statusSink, envelope = ENVELOPE, task = TASK } = {}) {
+  return {
+    envelope,
+    task,
+    allowedRoute: ROUTE,
+    ledgerDir,
+    actionRunner,
+    statusSink,
+    allowTestOverrides: true,
+    now: () => NOW,
+    deliveryTimeoutMs: 100,
+  };
+}
+
+test('one typed HeyBilly handoff is acknowledged, executed once on Studio Mac, and finalized in the same thread', async t => {
+  const shell = await loadShell();
+  assert.equal(typeof shell?.processHeyBillyHandoff, 'function');
+  const ledgerDir = await tempLedger(t);
+  const calls = [];
+  const receipt = await shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: async input => {
+      calls.push({ type: 'run', input });
+      return RESULT;
+    },
+    statusSink: async payload => {
+      calls.push({ type: 'post', payload });
+      return { delivered: true };
+    },
+  }));
+
+  assert.deepEqual(calls.map(call => call.type), ['post', 'run', 'post']);
+  assert.equal(calls[0].payload.phase, 'ACK');
+  assert.equal(calls[0].payload.route.threadTs, ENVELOPE.threadTs);
+  assert.deepEqual(calls[1].input, { requestId: REQUEST_ID, task: TASK });
+  assert.equal(calls[2].payload.phase, 'FINAL');
+  assert.deepEqual(calls[2].payload.result, {
+    status: 'COMPLETED',
+    resultCode: 'cash_receipt_issued',
+    authorizationNumber: 'Z56524383',
+  });
+  assert.deepEqual(receipt, {
+    schemaVersion: 'gate2-studio-mac-receipt/v1',
+    status: 'PASS',
+    requestId: REQUEST_ID,
+  });
+
+  const entries = (await readdir(ledgerDir)).sort();
+  assert.deepEqual(entries, ['.studio-mac-task-digest.key', `${REQUEST_ID}.studio-mac.json`]);
+  const path = join(ledgerDir, `${REQUEST_ID}.studio-mac.json`);
+  const raw = await readFile(path, 'utf8');
+  assert.equal(JSON.parse(raw).state, 'completed');
+  assert.equal(raw.includes(TASK.customerName), false);
+  assert.equal(raw.includes(TASK.phone), false);
+  assert.equal(raw.includes(String(TASK.amountKrw)), false);
+  assert.equal(raw.includes(TASK.item), false);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.equal((await stat(join(ledgerDir, '.studio-mac-task-digest.key'))).mode & 0o777, 0o600);
+});
+
+test('an explicit ACK non-delivery retries only the ACK before the first execution', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  const phases = [];
+  let executions = 0;
+  const deliveries = [false, true, true];
+  const call = () => shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return RESULT; },
+    statusSink: async payload => {
+      phases.push(payload.phase);
+      return { delivered: deliveries.shift() };
+    },
+  }));
+
+  const first = await call();
+  assert.equal(first.status, 'BLOCKED');
+  assert.equal(first.errorClass, 'post_failed');
+  assert.equal(executions, 0);
+
+  const resumed = await call();
+  assert.equal(resumed.status, 'PASS');
+  assert.equal(executions, 1);
+  assert.deepEqual(phases, ['ACK', 'ACK', 'FINAL']);
+});
+
+test('an ACK resume is bound to the original private task digest before posting or execution', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  let posts = 0;
+  let executions = 0;
+  const first = await shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return RESULT; },
+    statusSink: async () => { posts += 1; return { delivered: false }; },
+  }));
+  assert.equal(first.errorClass, 'post_failed');
+
+  const changedTask = { ...TASK, amountKrw: TASK.amountKrw + 1 };
+  const resumed = await shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    task: changedTask,
+    actionRunner: async () => { executions += 1; return RESULT; },
+    statusSink: async () => { posts += 1; return { delivered: true }; },
+  }));
+
+  assert.equal(resumed.status, 'BLOCKED');
+  assert.equal(resumed.errorClass, 'task_mismatch');
+  assert.equal(posts, 1);
+  assert.equal(executions, 0);
+  const raw = await readFile(join(ledgerDir, `${REQUEST_ID}.studio-mac.json`), 'utf8');
+  assert.equal(raw.includes(TASK.customerName), false);
+  assert.equal(raw.includes(TASK.phone), false);
+  assert.equal(raw.includes(String(TASK.amountKrw)), false);
+});
+
+test('concurrent ACK resumes have one atomic claim and never start two Studio Mac jobs', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  let executions = 0;
+  const initial = () => shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return RESULT; },
+    statusSink: async () => ({ delivered: false }),
+  }));
+  assert.equal((await initial()).errorClass, 'post_failed');
+  assert.equal(executions, 0);
+
+  let ackCalls = 0;
+  let release;
+  const wait = new Promise(resolve => { release = resolve; });
+  const resume = () => shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return RESULT; },
+    statusSink: async payload => {
+      if (payload.phase === 'ACK') {
+        ackCalls += 1;
+        if (ackCalls === 1) await wait;
+      }
+      return { delivered: true };
+    },
+  }));
+
+  const first = resume();
+  while (ackCalls === 0) await new Promise(resolve => setImmediate(resolve));
+  const second = await resume();
+  release();
+  const firstResult = await first;
+
+  assert.equal(ackCalls, 1);
+  assert.equal(firstResult.status, 'PASS');
+  assert.equal(second.status, 'BLOCKED');
+  assert.equal(second.errorClass, 'in_progress');
+  assert.equal(executions, 1);
+});
+
+test('an explicit final non-delivery retries only the final post and never executes twice', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  const phases = [];
+  let executions = 0;
+  const deliveries = [true, false, true];
+  const call = () => shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return RESULT; },
+    statusSink: async payload => {
+      phases.push(payload.phase);
+      return { delivered: deliveries.shift() };
+    },
+  }));
+
+  assert.equal((await call()).errorClass, 'post_failed');
+  assert.equal(executions, 1);
+  const resumed = await call();
+  assert.equal(resumed.status, 'PASS');
+  assert.equal(executions, 1);
+  assert.deepEqual(phases, ['ACK', 'FINAL', 'FINAL']);
+});
+
+test('a retry observed after execution starts is fail-closed as needs_review and never starts a second CUA job', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  let executions = 0;
+  let release;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const call = () => shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return waiting; },
+    statusSink: async () => ({ delivered: true }),
+  }));
+
+  const first = call();
+  while (executions === 0) await new Promise(resolve => setImmediate(resolve));
+  const retry = await call();
+  assert.equal(retry.status, 'BLOCKED');
+  assert.equal(retry.errorClass, 'needs_review');
+  assert.equal(executions, 1);
+
+  release(RESULT);
+  assert.equal((await first).status, 'PASS');
+});
+
+test('a Studio Mac user-action result is finalized without being mistaken for successful issuance', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  const phases = [];
+  const needsUser = {
+    schemaVersion: 'studio-mac-cua-result/v1',
+    status: 'NEEDS_USER',
+    resultCode: 'user_action_required',
+    authorizationNumber: null,
+    duplicateFound: false,
+    readbackVerified: false,
+    mutationObserved: false,
+    need: 'captcha_required',
+    errorClass: null,
+  };
+  const receipt = await shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: async () => needsUser,
+    statusSink: async payload => {
+      phases.push(payload);
+      return { delivered: true };
+    },
+  }));
+
+  assert.equal(receipt.status, 'BLOCKED');
+  assert.equal(receipt.errorClass, 'user_action_required');
+  assert.deepEqual(phases.map(payload => payload.phase), ['ACK', 'FINAL']);
+  assert.deepEqual(phases[1].result, {
+    status: 'NEEDS_USER',
+    resultCode: 'user_action_required',
+    need: 'captcha_required',
+  });
+  const raw = await readFile(join(ledgerDir, `${REQUEST_ID}.studio-mac.json`), 'utf8');
+  assert.equal(JSON.parse(raw).state, 'completed');
+});
+
+test('concurrent final-delivery resumes have one atomic claim and never post the same result twice', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  let executions = 0;
+  const firstDeliveries = [true, false];
+  const initial = () => shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return RESULT; },
+    statusSink: async () => ({ delivered: firstDeliveries.shift() }),
+  }));
+  assert.equal((await initial()).errorClass, 'post_failed');
+  assert.equal(executions, 1);
+
+  let finalCalls = 0;
+  let release;
+  const wait = new Promise(resolve => { release = resolve; });
+  const resume = () => shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return RESULT; },
+    statusSink: async payload => {
+      assert.equal(payload.phase, 'FINAL');
+      finalCalls += 1;
+      if (finalCalls === 1) await wait;
+      return { delivered: true };
+    },
+  }));
+
+  const first = resume();
+  while (finalCalls === 0) await new Promise(resolve => setImmediate(resolve));
+  const second = await resume();
+  release();
+  const firstResult = await first;
+
+  assert.equal(finalCalls, 1);
+  assert.equal(firstResult.status, 'PASS');
+  assert.equal(second.status, 'BLOCKED');
+  assert.equal(second.errorClass, 'in_progress');
+  assert.equal(executions, 1);
+});
