@@ -1654,6 +1654,56 @@ function confirmationCatalogForDecision(decision) {
   };
 }
 
+test('sheet mutation rejects a 12-hour reinterpretation of a bare Village source hour', () => {
+  const wrong = completeSheetDecision({
+    latest_customer_message_cluster: '8월 25일 5시~8월 26일 24시',
+    sheet_row_candidate: {
+      start_date: '2026-08-25',
+      pickup_time: '17:00',
+      end_date: '2026-08-27',
+      return_time: '00:00'
+    }
+  });
+  const rejected = validateAiDecisionContract(wrong);
+  assert.equal(rejected.valid, false);
+  assert.ok(rejected.errors.some((error) => /5시.*05:00.*17:00|17:00.*5시.*05:00/i.test(error)));
+
+  const literal = completeSheetDecision({
+    latest_customer_message_cluster: '8월 25일 5시~8월 26일 24시',
+    sheet_row_candidate: {
+      start_date: '2026-08-25',
+      pickup_time: '05:00',
+      end_date: '2026-08-27',
+      return_time: '00:00'
+    }
+  });
+  assert.equal(validateAiDecisionContract(literal).valid, true);
+
+  const explicitPm = completeSheetDecision({
+    latest_customer_message_cluster: '8월 25일 오후 5시~오후 8시',
+    sheet_row_candidate: { pickup_time: '17:00', return_time: '20:00' }
+  });
+  assert.equal(validateAiDecisionContract(explicitPm).valid, true);
+
+  const explicit24Hour = completeSheetDecision({
+    latest_customer_message_cluster: '8월 25일 17시~20시',
+    sheet_row_candidate: { pickup_time: '17:00', return_time: '20:00' }
+  });
+  assert.equal(validateAiDecisionContract(explicit24Hour).valid, true);
+
+  const oneClockWrong = completeSheetDecision({
+    latest_customer_message_cluster: '반출은 5시로 부탁드려요',
+    sheet_row_candidate: { pickup_time: '17:00', return_time: '20:00' }
+  });
+  assert.equal(validateAiDecisionContract(oneClockWrong).valid, false);
+
+  const oneClockLiteral = completeSheetDecision({
+    latest_customer_message_cluster: '반출은 5시로 부탁드려요',
+    sheet_row_candidate: { pickup_time: '05:00', return_time: '20:00' }
+  });
+  assert.equal(validateAiDecisionContract(oneClockLiteral).valid, true);
+});
+
 function confirmationFreshnessGuard({ stale = false, staleAfterChecks = stale ? 1 : Number.POSITIVE_INFINITY } = {}) {
   let checks = 0;
   return {
@@ -2402,6 +2452,14 @@ test('buildHermesPrompt applies the owner-confirmed conservative whole-hour requ
   assert.match(prompt, /정시 HH:00/);
   assert.match(prompt, /27일 24:00[^\n]{0,120}28일 00:00/);
   assert.doesNotMatch(prompt, /outer code.*never floor or round/is);
+});
+
+test('buildHermesPrompt defines bare Korean hours as literal Village 24-hour time', () => {
+  const prompt = buildHermesPrompt({ id: 'job-bare-hour', preview_text: '8월 25일 5시부터 8월 26일 24시까지' });
+  assert.match(prompt, /오전.?오후.*없는.*5시.*05:00/is);
+  assert.match(prompt, /오후\s*5시.*17:00/is);
+  assert.match(prompt, /17시.*17:00/is);
+  assert.match(prompt, /추측.*12시간|12시간.*추측/is);
 });
 
 test('buildHermesPrompt allows read-only vision when DOM or AX evidence is insufficient', () => {
