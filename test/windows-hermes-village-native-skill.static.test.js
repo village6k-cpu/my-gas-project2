@@ -9,6 +9,7 @@ const {
 const root = path.resolve(__dirname, '..');
 const overlayRoot = path.join(root, 'scripts', 'windows', 'hermes-profile-overlay', 'skills');
 const operationsRoot = path.join(overlayRoot, 'productivity', 'village-operations');
+const confirmRequestRoot = path.join(overlayRoot, 'productivity', 'village-confirm-request');
 const capabilityRoot = path.join(overlayRoot, 'productivity', 'village-capability-development');
 const brainRoot = path.join(overlayRoot, 'village', 'village-brain-first');
 const syncScript = fs.readFileSync(
@@ -203,6 +204,18 @@ test('confirmation-request skill preserves AI judgment while enforcing the owner
     archive.slice(Math.max(0, obsolete24Offset - 200), obsolete24Offset + 420),
     /obsolete[\s\S]{0,220}24:00[\s\S]{0,260}(?:written date|적힌 날짜)[\s\S]{0,180}(?:next day|다음 날)/i
   );
+});
+
+test('confirmation-request execution skill pins bare Korean hours to Village literal 24-hour time', () => {
+  const skill = loadSkill(confirmRequestRoot);
+  assertNativeEnvelope(skill);
+  assert.match(skill.body, /5시[\s\S]{0,80}05:00/i);
+  assert.match(skill.body, /오후\s*5시[\s\S]{0,80}17:00/i);
+  assert.match(skill.body, /17시[\s\S]{0,80}17:00/i);
+  assert.match(skill.body, /시간원문[\s\S]{0,220}(?:required|필수)[\s\S]{0,220}(?:strip|제거)/i);
+  assert.match(skill.body, /24시|24:00/i);
+  assert.match(skill.body, /must never override[\s\S]{0,160}plausible overnight default/i);
+  assert.match(skill.body, /Never add 12 hours[\s\S]{0,180}guessed time[\s\S]{0,120}owner/i);
 });
 
 test('registered-trade command resolves one centrally documented active runtime root', () => {

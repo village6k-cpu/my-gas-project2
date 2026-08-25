@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
+import villageTimeContract from '../../scripts/windows/village-time-contract.js';
 import {
   inquiryConversationKey,
   actionFamilyForFollowUp,
@@ -20,6 +21,7 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const { extractVillageClockTokens, validateVillageRentalTimeSource } = villageTimeContract;
 
 const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbyRff4-lLXmne-iPIEf87x4-CH_5wb-Uv5dCGymELLrpiKluhg2gDdLdVP4Y0MmxnnT/exec';
 // 공개 키 폴백 금지 — 키가 구성되지 않은 경로는 조용히 공개 키로 강등되는 대신
@@ -757,7 +759,7 @@ TASK:
 11. For reservation-format requests, missing phone is NOT a sheet-write blocker. Search 고객DB by name; if a unique DB phone is found, use it, otherwise leave sheet_row_candidate.phone="" and still write 확인요청. discount_type: 고객DB I열 outranks Kakao; use DB 학생/개인사업자/프리랜서/단골/제휴/일반 when present, otherwise infer from Kakao. Missing equipment/duplicate lookup/phone goes to follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or an unchanged duplicate. An existing booking with newly added or increased equipment is not a duplicate. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; phone may still be blank.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
 11-2. Multiple/revised equipment: separate top-level entries. New booking="full_plan"+complete plan; registered booking or pending-RQ additions="additions_only"+delta; pending-RQ removals/replacements/reductions="replace_full_plan"+complete final plan. Never replace a registered booking. Set plan_complete=true only after reconciling that write set; otherwise no write + one review follow-up.
-11-3. sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If the normalized return is not later than pickup, set should_write_to_sheet=false and create one review follow-up instead of guessing.
+11-3. sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM. Village uses literal 24-hour time: 오전/오후 표시가 없는 \`5시\` means \`05:00\` and \`17시\` means \`17:00\`; only explicit \`오후 5시\` means \`17:00\`. 맥락을 추측해 12시간을 더하지 마라. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If the normalized return is not later than pickup, set should_write_to_sheet=false and create one review follow-up instead of guessing.
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
 12-1. For real-world mutations set requiresHumanAction=true, allowed actionFamily, stable businessKey; otherwise false, "none", "".
@@ -1015,6 +1017,35 @@ export function validateAiDecisionContract(decision = {}) {
     if (!isStrictIsoDate(row.end_date)) errors.push('sheet_row_candidate.end_date must be YYYY-MM-DD');
     if (!isStrictConfirmRequestTime(row.pickup_time)) errors.push('sheet_row_candidate.pickup_time must be HH:MM');
     if (!isStrictConfirmRequestTime(row.return_time)) errors.push('sheet_row_candidate.return_time must be HH:MM');
+    const customerTimeSource = text(decision.latest_customer_message_cluster).trim()
+      || (Array.isArray(decision.conversation_turns)
+        ? decision.conversation_turns
+          .filter((turn) => text(turn?.speaker_type).trim() === 'customer')
+          .map((turn) => text(turn?.message).trim())
+          .filter(Boolean)
+          .join(' ')
+        : '');
+    const customerClockTokens = extractVillageClockTokens(customerTimeSource);
+    if (customerClockTokens.length >= 2) {
+      const timeValidation = validateVillageRentalTimeSource({
+        sourceText: customerTimeSource,
+        pickupTime: row.pickup_time,
+        returnTime: row.return_time,
+        pairMode: 'last'
+      });
+      if (!timeValidation.ok) errors.push(...timeValidation.errors);
+    } else if (customerClockTokens.length === 1) {
+      const [token] = customerClockTokens;
+      const candidateTimes = [text(row.pickup_time).trim(), text(row.return_time).trim()];
+      if (!token.marker && token.sourceHour >= 1 && token.sourceHour <= 11) {
+        const pmGuess = `${String(token.sourceHour + 12).padStart(2, '0')}:${String(token.minute).padStart(2, '0')}`;
+        if (!candidateTimes.includes(token.normalized) && candidateTimes.includes(pmGuess)) {
+          errors.push(
+            `sheet time conflicts with bare customer clock ${token.raw}: Village 24-hour rule requires ${token.normalized}, not ${pmGuess}`
+          );
+        }
+      }
+    }
     if (!text(row.customer_name).trim()) errors.push('sheet_row_candidate.customer_name is required');
     if (!CONFIRM_REQUEST_DISCOUNT_TYPES.has(text(row.discount_type).trim())) {
       errors.push('sheet_row_candidate.discount_type must be an explicit allowed value');

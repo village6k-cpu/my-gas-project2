@@ -29,6 +29,7 @@ function requestFixture(overrides = {}) {
     반출시간: '05:00',
     반납일: '2026-07-23',
     반납시간: '14:00',
+    시간원문: '5시~14시',
     예약자명: '테스트 고객',
     장비: [
       { 이름: '어퓨처 600C', 수량: 2 },
@@ -151,6 +152,7 @@ test('unregistered customer wording is preserved as an equipment row instead of 
     pickupTime: '10:00',
     returnDate: '2026-08-13',
     returnTime: '18:00',
+    timeSource: '10시~18시',
     customerName: '장민혁',
     items: [{ name: '20-70', quantity: 1 }]
   };
@@ -286,6 +288,7 @@ test('AI-planned mixed return times are preflighted together and created as two 
     requestFixture({
       반납일: '2026-08-02',
       반납시간: '06:00',
+      시간원문: '5시~6시',
       장비: [
         { 이름: '소니 FX3 풀세트', 수량: 2 },
         { 이름: '소니 GM 24-70mm II', 수량: 1 }
@@ -294,6 +297,7 @@ test('AI-planned mixed return times are preflighted together and created as two 
     requestFixture({
       반납일: '2026-08-01',
       반납시간: '06:00',
+      시간원문: '5시~6시',
       장비: [
         { 이름: '파보튜브 II 30X', 수량: 2 },
         { 이름: '아마란 F21C', 수량: 1 }
@@ -425,6 +429,7 @@ test('English alias fields (customerName, pickupDate, items, ...) are mapped to 
     pickupTime: '5:00',
     returnDate: '2026.07.23',
     returnTime: '14:00:00',
+    timeSource: '5시~14시',
     customerName: '테스트 고객',
     phone: '010-1234-5678',
     items: [
@@ -445,6 +450,41 @@ test('English alias fields (customerName, pickupDate, items, ...) are mapped to 
       { 이름: '고독스 라이트돔 90', 수량: 1 }
     ]
   });
+});
+
+test('Village bare Korean hours stay literal 24-hour values and cannot be reinterpreted as PM', () => {
+  assert.throws(
+    () => normalizeConfirmationRequest(requestFixture({
+      반출일: '2026-08-25',
+      반출시간: '17:00',
+      반납일: '2026-08-27',
+      반납시간: '00:00',
+      시간원문: '8월 25일 5시~8월 26일 24시'
+    })),
+    /5시.*05:00.*17:00|17:00.*5시.*05:00/i
+  );
+
+  const literal = normalizeConfirmationRequest(requestFixture({
+    반출일: '2026-08-25',
+    반출시간: '05:00',
+    반납일: '2026-08-27',
+    반납시간: '00:00',
+    시간원문: '8월 25일 5시~8월 26일 24시'
+  }));
+  assert.equal(literal.반출시간, '05:00');
+  assert.equal(literal.반납시간, '00:00');
+  assert.equal(Object.hasOwn(literal, '시간원문'), false, 'source evidence must not leak into the sheet payload');
+
+  assert.equal(normalizeConfirmationRequest(requestFixture({
+    반출시간: '17:00',
+    반납시간: '20:00',
+    시간원문: '오후 5시~오후 8시'
+  })).반출시간, '17:00');
+  assert.equal(normalizeConfirmationRequest(requestFixture({
+    반출시간: '17:00',
+    반납시간: '20:00',
+    시간원문: '17시~20시'
+  })).반출시간, '17:00');
 });
 
 test('conflicting alias and canonical values fail loudly instead of silently picking one', () => {
