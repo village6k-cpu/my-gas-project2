@@ -2,13 +2,14 @@
 
 const fs = require('node:fs');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
+const { validateVillageRentalTimeSource } = require('./village-time-contract.js');
 
 const MAX_EQUIPMENT = 40;
 const MAX_BATCH_REQUESTS = 10;
 const MAX_RECONCILE_GROUPS = 10;
 const ALLOWED_REQUEST_FIELDS = new Set([
   '반출일', '반출시간', '반납일', '반납시간', '예약자명', '연락처',
-  '할인유형', '업체명', '장비', '비고', '추가요청'
+  '할인유형', '업체명', '장비', '비고', '추가요청', '시간원문'
 ]);
 const ALLOWED_ITEM_FIELDS = new Set(['이름', '수량']);
 
@@ -46,6 +47,10 @@ const REQUEST_FIELD_ALIASES = new Map(Object.entries({
   return_time: '반납시간',
   endTime: '반납시간',
   end_time: '반납시간',
+  timeSource: '시간원문',
+  time_source: '시간원문',
+  rentalTimeSource: '시간원문',
+  rental_time_source: '시간원문',
   equipment: '장비',
   equipments: '장비',
   equipmentList: '장비',
@@ -294,6 +299,13 @@ function normalizeConfirmationRequest(request) {
     예약자명: requiredText(canonicalRequest.예약자명, '예약자명', 80),
     장비: equipment
   };
+  const timeSource = requiredText(canonicalRequest.시간원문, '시간원문', 500);
+  const timeValidation = validateVillageRentalTimeSource({
+    sourceText: timeSource,
+    pickupTime: normalized.반출시간,
+    returnTime: normalized.반납시간
+  });
+  if (!timeValidation.ok) throw new Error(timeValidation.errors.join('; '));
   for (const key of ['연락처', '할인유형', '업체명', '비고', '추가요청']) {
     if (canonicalRequest[key] !== undefined && canonicalRequest[key] !== null && String(canonicalRequest[key]).trim()) {
       normalized[key] = requiredText(canonicalRequest[key], key, key === '비고' || key === '추가요청' ? 180 : 80);
@@ -710,7 +722,7 @@ async function main() {
     process.stdout.write(
       'Usage: village-confirm-request.js <resolve|create|create-batch|update|reconcile> [--input-file PATH] [--env-file PATH]\n'
       + '  resolve      {"queries":["장비 검색어", ...]} — 목록 시트에서 정확한 장비명 후보 조회 (읽기 전용)\n'
-      + '  create       {"반출일","반출시간","반납일","반납시간","예약자명","장비":[{"이름","수량"}], ...} — 확인요청 1건 생성+검증\n'
+      + '  create       {"반출일","반출시간","반납일","반납시간","시간원문","예약자명","장비":[{"이름","수량"}], ...} — 확인요청 1건 생성+검증\n'
       + '  create-batch {"requests":[<create payload>, ...]} — 여러 스케줄 그룹을 한 번에 생성+검증\n'
       + '  update       {"reqID":"RQ-YYMMDD-NNN","request":<create payload>} — 기존 미등록 요청 전체 교체+검증\n'
       + '  reconcile    {"reqID":"RQ-..."} 또는 {"예약자명":"이름","반출일":"YYYY-MM-DD"?} — 쓰기 성공 여부가\n'
