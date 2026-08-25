@@ -6,7 +6,7 @@ Use when the user asks for many already-registered reservations to be quoted aga
 
 The deployed registered `previewQuote` route reads the trade's current `계약마스터` 할인유형. If existing trades are marked `개인사업자/프리랜서`, the official preview will not include the extra `단골10%` unless the underlying trade discount is changed. Do **not** mutate all historical contracts just to make a one-off collection/preview.
 
-Prefer official `previewQuote` discount overrides when the requested stack is deployed (for example, `discountType=학생단골` for 학생30% × 단골10%). Download and bundle the official Drive PDFs; use a locally recreated layout only when the official route cannot render the requested stack.
+Prefer official `previewQuote` discount overrides when the requested stack is deployed (for example, `discountType=단골` for 사업자20% × 단골10% or `discountType=학생단골` for 학생30% × 단골10%). Download the official Drive PDFs through `uc?export=download` and bundle those; use a locally recreated layout only when the official route cannot render the requested stack.
 
 ## Safe workflow
 

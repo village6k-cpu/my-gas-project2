@@ -112,6 +112,8 @@ test('registered quote bundle totals use one bounded local verification before r
 
   assert.equal(fs.existsSync(verifierPath), true);
   assert.match(operations, /batch-registered-quotes-ad-hoc-loyal-discount\.md/);
+  assert.match(reference, /discountType=단골/);
+  assert.match(reference, /uc\?export=download/);
   assert.match(reference, /village-quote-bundle-verify\.py/);
   assert.match(reference, /uv run --offline --with pymupdf/);
   assert.match(reference, /--deadline-ms 20000/);
