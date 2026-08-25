@@ -93,6 +93,35 @@ test('native Village candidates preserve authority and Windows source boundaries
   }
 });
 
+test('registered quote bundle totals use one bounded local verification before remote audit', () => {
+  const operations = fs.readFileSync(path.join(operationsSkillRoot, 'SKILL.md'), 'utf8');
+  const reference = fs.readFileSync(
+    path.join(
+      operationsSkillRoot,
+      'references',
+      'batch-registered-quotes-ad-hoc-loyal-discount.md'
+    ),
+    'utf8'
+  );
+  const verifierPath = path.join(
+    root,
+    'scripts',
+    'windows',
+    'village-quote-bundle-verify.py'
+  );
+
+  assert.equal(fs.existsSync(verifierPath), true);
+  assert.match(operations, /batch-registered-quotes-ad-hoc-loyal-discount\.md/);
+  assert.match(reference, /village-quote-bundle-verify\.py/);
+  assert.match(reference, /uv run --offline --with pymupdf/);
+  assert.match(reference, /--deadline-ms 20000/);
+  assert.match(reference, /one foreground terminal call with a 30-second tool timeout/i);
+  assert.match(reference, /reads only local `summary\.json`, individual CSVs, individual PDFs, and the combined PDF/i);
+  assert.match(reference, /answer the staff question immediately/i);
+  assert.match(reference, /Do not compensate with a sequential multi-trade remote loop/i);
+  assert.match(reference, /Query deposits only when staff explicitly asks/i);
+});
+
 test('retired Village routing artifacts are not shipped in the candidate overlay', () => {
   assert.equal(
     fs.existsSync(path.join(root, 'scripts', 'windows', 'hermes-profile-overlay', 'skills', 'village', 'village-runtime-router', 'SKILL.md')),

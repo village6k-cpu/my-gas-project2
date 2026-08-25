@@ -128,6 +128,11 @@ interprets business intent.
 For the common fast preview path, open
 [manual Kakao single quote preview](references/manual-kakao-single-quote-preview.md).
 
+For registered multi-trade quote bundles, ad-hoc stacked discounts, or a question
+about an existing bundle total, open
+[registered batch quote verification](references/batch-registered-quotes-ad-hoc-loyal-discount.md)
+before querying remote ledgers.
+
 For a registered-trade item, quantity, or price correction, open
 [registered quote/schedule item correction](references/registered-quote-schedule-item-correction.md)
 directly.
