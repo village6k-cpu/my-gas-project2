@@ -1265,7 +1265,7 @@ test('registered readback rejects a full-plan-shaped desired_after that masks an
   assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_readback_contradiction'), true);
 });
 
-test('최승식 registered replacement cannot finalize against stale readback and creates one urgent no-send owner review', async () => {
+test('등록 교체 회귀 cannot finalize against stale readback and creates one urgent no-send owner review', async () => {
   const { job, turn } = gatewayTurnFixture();
   const mutation = registeredMutationFixture();
   const staleReceipt = registeredReceiptFixture(job, {
@@ -7743,8 +7743,8 @@ test('deliverSlackFollowUpRows delivers real DOM watcher task rows even when aud
     type: 'reservation_review',
     status: 'open',
     priority: 'high',
-    title: '최승식 예약 변경 확인 필요',
-    customer_name: '최승식',
+    title: '테스트 고객 예약 변경 확인 필요',
+    customer_name: '테스트 고객',
     summary: 'DOM watcher 실시간 고객 태스크',
     payload: { daily_audit_20260608: { discovered_by: 'audit' } }
   }]);
