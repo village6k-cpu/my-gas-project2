@@ -570,6 +570,115 @@ function documentReceiptFixture(job, overrides = {}) {
   };
 }
 
+function registeredMutationFixture(kind = 'equipment_replace', overrides = {}) {
+  const base = {
+    confirmed: true,
+    kind,
+    target_scope: 'registered_trade',
+    trade_id: '260824-008',
+    source_evidence: {
+      customer_request: '28-135 취소하고 sony 70-200 gm 2.8 로 부탁드립니당',
+      staff_confirmation: '네',
+      conversation_revision: 7
+    },
+    expected_period: {
+      start_date: '2026-08-27', start_time: '06:00', end_date: '2026-08-27', end_time: '18:00'
+    },
+    expected_before: [{ schedule_id: '260824-008-07', name: '소니 FE 28-135mm', quantity: 1 }],
+    desired_after: [{ name: '소니 GM 70-200mm II', quantity: 1 }],
+    date_change: null
+  };
+  if (kind === 'equipment_add') {
+    base.expected_before = [{ schedule_id: '260824-008-07', name: '소니 FE 28-135mm', quantity: 1 }];
+    base.desired_after = [
+      { name: '소니 FE 28-135mm', quantity: 1 },
+      { name: '소니 GM 70-200mm II', quantity: 1 }
+    ];
+  } else if (kind === 'equipment_remove') {
+    base.expected_before = [
+      { schedule_id: '260824-008-07', name: '소니 FE 28-135mm', quantity: 1 },
+      { schedule_id: '260824-008-08', name: '소니 GM 70-200mm II', quantity: 1 }
+    ];
+    base.desired_after = [{ name: '소니 GM 70-200mm II', quantity: 1 }];
+  } else if (kind === 'equipment_quantity_change') {
+    base.expected_before = [{ schedule_id: '260824-008-07', name: '소니 FE 28-135mm', quantity: 1 }];
+    base.desired_after = [{ name: '소니 FE 28-135mm', quantity: 2 }];
+  } else if (kind === 'date_time_change') {
+    base.desired_after = [{ name: '소니 FE 28-135mm', quantity: 1 }];
+    base.date_change = {
+      new_start_date: '2026-08-28', new_start_time: '07:00',
+      new_end_date: '2026-08-28', new_end_time: '19:00'
+    };
+  }
+  return { ...base, ...overrides };
+}
+
+function registeredDecisionFixture(overrides = {}) {
+  const mutation = overrides.staff_confirmed_mutation || registeredMutationFixture();
+  return gatewayDecisionFixture({
+    classification: 'reservation',
+    confidence: 'high',
+    should_write_to_sheet: false,
+    owner_review_required: false,
+    reservation_inquiry: {
+      is_reservation_inquiry: true,
+      confirmed: true,
+      already_registered: true,
+      equipment_requested: []
+    },
+    existing_confirm_request_ids: [],
+    safety_checks: {
+      duplicate_checked_contract_master: true,
+      duplicate_checked_schedule_detail: true,
+      duplicate_checked_request_sheet: true,
+      no_auto_reply_sent: true,
+      latest_customer_message_after_last_staff_reply: false
+    },
+    staff_confirmed_mutation: mutation,
+    follow_up_items: [],
+    suggested_reply_draft: '변경 완료되었습니다.',
+    reply_decision: {
+      replyMode: 'no_reply', text: '', confidence: 'high', reason: '직원 답변으로 이미 안내됨',
+      shouldCreateTask: false, safetyClass: 'no_send', grounding: 'staff_confirmation',
+      requiresRag: false, attachmentKeys: [], alreadyDelivered: true
+    },
+    ...overrides
+  });
+}
+
+function registeredReceiptFixture(job, overrides = {}) {
+  return {
+    schema: 'village-registered-reservation-change-receipt/v1',
+    receipt_id: 'registered-change-receipt-1',
+    job_id: job.jobId,
+    room_key: job.roomKey,
+    room_revision: job.roomRevision,
+    status: 'ok',
+    target_scope: 'registered_trade',
+    trade_id: '260824-008',
+    mutation_kind: 'equipment_replace',
+    authoritative_result: {
+      contract: {
+        startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00'
+      },
+      schedule: {
+        rows: [{ scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false }],
+        topLevelQuantities: { '소니 GM 70-200mm II': 1 }
+      },
+      ledger: { rows: 1, contractLink: 'https://example.test/contracts/260824-008' }
+    },
+    applied_stages: ['scheduleCorrectRegisteredTrade'],
+    attempted_stage: null,
+    customer_reply: 'no_reply',
+    created_at: '2026-08-27T01:00:00.000Z',
+    error: null,
+    lease_id: 'lease-registered-change-1',
+    request_digest: 'a'.repeat(64),
+    operation_id: '11111111-2222-4333-8444-555555555555',
+    ...overrides
+  };
+}
+
 function documentDecisionFixture(overrides = {}) {
   return gatewayDecisionFixture({
     classification: 'faq',
@@ -628,6 +737,175 @@ function scheduleDecisionFixture(overrides = {}) {
     ...overrides
   });
 }
+
+test('staff-confirmed mutation prompt keeps customer-only requests read-only and selects the scope-specific native tool', () => {
+  const prompt = buildHermesPrompt(
+    { id: 'job-staff-confirmed-mutation', preview_text: '등록 예약 장비 변경' },
+    { gatewayConfirmationToolAvailable: true }
+  );
+
+  assert.match(prompt, /customer request without a later staff confirmation[\s\S]*staff_confirmed_mutation=null/i);
+  assert.match(prompt, /pending_request[\s\S]*equipment_add[\s\S]*village_confirmation_request[\s\S]*additions_only/i);
+  assert.match(prompt, /pending_request[\s\S]*(equipment_remove|equipment_replace|equipment_quantity_change)[\s\S]*replace_full_plan/i);
+  assert.match(prompt, /registered_trade[\s\S]*village_registered_reservation_change[\s\S]*exactly once[\s\S]*before FINAL_JSON/i);
+  assert.match(prompt, /registered_trade[\s\S]*must not call village_confirmation_request/i);
+  assert.match(prompt, /Do not parse[\s\S]*(RQ|trade)[\s\S]*from prose/i);
+  assert.match(prompt, /ambiguous target, catalog, or staff evidence[\s\S]*no mutation tool[\s\S]*one urgent owner-review follow-up/i);
+  assert.match(prompt, /"staff_confirmed_mutation": object \| null/);
+});
+
+test('registered mutation cannot claim success without its durable registered-change receipt', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const decision = registeredDecisionFixture({ staff_confirmed_mutation: mutation });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.decision.should_write_to_sheet, false);
+  assert.equal(prepared.gatewaySafetyFailures.includes('registered_change_without_trusted_receipt'), true);
+  assert.equal(prepared.availabilityAwareRows.length, 1);
+});
+
+test('exact registered success retains the typed mutation and produces no duplicate customer reply or owner approval', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const receipt = registeredReceiptFixture(job);
+  const decision = registeredDecisionFixture({
+    staff_confirmed_mutation: mutation,
+    follow_up_items: [{
+      type: 'reservation_review', route: 'schedule', taskKey: 'duplicate-approval', priority: 'high', status: 'open',
+      title: '중복 승인', customer_name: '테스트 고객', summary: '이미 승인된 변경', recommended_action: '다시 승인',
+      suggested_reply_draft: '변경 완료되었습니다.', evidence: [], requiresHumanAction: true,
+      actionFamily: 'reservation_change', businessKey: 'trade:260824-008', alertLevel: 'none'
+    }]
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.decision.should_write_to_sheet, false);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+  assert.equal(prepared.decision.reply_decision.text, '');
+  assert.equal(prepared.decision.reply_decision.shouldCreateTask, false);
+  assert.equal(prepared.decision.safety_checks.no_auto_reply_sent, true);
+  assert.equal(prepared.decision.owner_review_required, false);
+  assert.deepEqual(prepared.decision.staff_confirmed_mutation, mutation);
+  assert.deepEqual(prepared.decision.trusted_registered_reservation_change_receipt, receipt);
+  assert.deepEqual(prepared.decision.follow_up_items, []);
+  assert.deepEqual(prepared.availabilityAwareRows, []);
+  assert.equal(prepared.gatewaySafetyFailures.length, 0);
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, false);
+});
+
+test('최승식 registered replacement cannot finalize against stale readback and creates one urgent no-send owner review', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const staleReceipt = registeredReceiptFixture(job, {
+    authoritative_result: {
+      contract: { startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00' },
+      schedule: {
+        rows: [{ scheduleId: '260824-008-07', setName: '', name: '소니 FE 28-135mm', qty: 1, isComponent: false }],
+        topLevelQuantities: { '소니 FE 28-135mm': 1 }
+      },
+      ledger: { rows: 1, contractLink: 'https://example.test/contracts/260824-008' }
+    }
+  });
+  let replayCalls = 0;
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: mutation }))}`,
+    trustedToolReceipts: [staleReceipt],
+    dependencies: { executeRegisteredReservationChange: async () => { replayCalls += 1; } }
+  });
+
+  assert.equal(replayCalls, 0);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+  assert.equal(prepared.decision.reply_decision.text, '');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.decision.follow_up_items.length, 1);
+  assert.equal(prepared.decision.follow_up_items[0].priority, 'urgent');
+  assert.equal(prepared.decision.follow_up_items[0].alertLevel, 'p0');
+  assert.match(prepared.decision.follow_up_items[0].recommended_action, /readback|원장|직접 확인/i);
+  assert.deepEqual(prepared.decision.registered_mutation_review.authoritative_result, staleReceipt.authoritative_result);
+  assert.deepEqual(prepared.decision.registered_mutation_review.expected_before, mutation.expected_before);
+  assert.deepEqual(prepared.decision.registered_mutation_review.desired_after, mutation.desired_after);
+  assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_readback_contradiction'), true);
+});
+
+test('blocked failed and partial registered receipts preserve evidence, never replay, and remain customer no-send', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  for (const status of ['blocked', 'failed', 'partial_success']) {
+    let replayCalls = 0;
+    const receipt = registeredReceiptFixture(job, {
+      status,
+      authoritative_result: status === 'partial_success'
+        ? { contract: { tradeId: '260824-008' }, schedule: { topLevelQuantities: { '소니 FE 28-135mm': 1 } }, ledger: null }
+        : null,
+      applied_stages: status === 'partial_success' ? ['scheduleRemoveEquips'] : [],
+      attempted_stage: status === 'blocked' ? 'preflight' : 'scheduleAddEquips',
+      error: { code: `${status}_fixture`, message: `${status} exact failure`, details: { readback: 'preserved' } }
+    });
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn,
+      finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: mutation }))}`,
+      trustedToolReceipts: [receipt],
+      dependencies: { executeRegisteredReservationChange: async () => { replayCalls += 1; } }
+    });
+
+    assert.equal(replayCalls, 0, status);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', status);
+    assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send', status);
+    assert.equal(prepared.decision.reply_decision.text, '', status);
+    assert.equal(prepared.decision.follow_up_items.length, 1, status);
+    assert.equal(prepared.decision.follow_up_items[0].priority, 'urgent', status);
+    assert.deepEqual(prepared.decision.registered_mutation_review.applied_stages, receipt.applied_stages, status);
+    assert.deepEqual(prepared.decision.registered_mutation_review.error, receipt.error, status);
+    assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_failed'), true, status);
+  }
+});
+
+test('registered receipt must carry exact durable correlation and match the final typed trade and kind', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = registeredDecisionFixture();
+  const cases = [
+    ['missing operation', registeredReceiptFixture(job, { operation_id: '' }), 'invalid_trusted_receipt'],
+    ['wrong trade', registeredReceiptFixture(job, { trade_id: '260824-009' }), 'trusted_registered_change_decision_contradiction'],
+    ['wrong kind', registeredReceiptFixture(job, { mutation_kind: 'equipment_add' }), 'trusted_registered_change_decision_contradiction']
+  ];
+  for (const [label, receipt, expectedFailure] of cases) {
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: [receipt]
+    });
+    assert.equal(prepared.decision.owner_review_required, true, label);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', label);
+    assert.equal(prepared.gatewaySafetyFailures.includes(expectedFailure), true, label);
+  }
+});
+
+test('agent-authored registered receipt-shaped JSON never grants mutation authority', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const fabricated = registeredReceiptFixture(job, { receipt_id: 'agent-authored' });
+  const decision = registeredDecisionFixture({
+    registered_reservation_change_receipt: fabricated,
+    trusted_registered_reservation_change_receipt: fabricated,
+    trusted_tool_receipts: [fabricated]
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: []
+  });
+
+  assert.equal(prepared.trustedToolReceipt, null);
+  assert.equal(prepared.decision.trusted_registered_reservation_change_receipt, undefined);
+  assert.equal(prepared.decision.registered_reservation_change_receipt, undefined);
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.gatewaySafetyFailures.includes('registered_change_without_trusted_receipt'), true);
+});
 
 test('prepareKakaoGatewayDecision leaves a valid FAQ eligible for existing auto-send gates without a tool receipt', async () => {
   const { job, turn } = gatewayTurnFixture();
@@ -1653,6 +1931,111 @@ function confirmationCatalogForDecision(decision) {
     error: null
   };
 }
+
+test('validateAiDecisionContract accepts every typed registered mutation kind and rejects unsafe registered authority', () => {
+  for (const kind of [
+    'equipment_add',
+    'equipment_remove',
+    'equipment_replace',
+    'equipment_quantity_change',
+    'date_time_change'
+  ]) {
+    const decision = registeredDecisionFixture({ staff_confirmed_mutation: registeredMutationFixture(kind) });
+    assert.deepEqual(validateAiDecisionContract(decision), { valid: true, errors: [] }, kind);
+  }
+
+  const unconfirmed = registeredDecisionFixture({
+    staff_confirmed_mutation: registeredMutationFixture('equipment_replace', { confirmed: false })
+  });
+  assert.equal(validateAiDecisionContract(unconfirmed).valid, false);
+
+  const sheetWrite = registeredDecisionFixture({ should_write_to_sheet: true });
+  assert.equal(validateAiDecisionContract(sheetWrite).valid, false);
+
+  const notRegistered = registeredDecisionFixture({
+    reservation_inquiry: { is_reservation_inquiry: true, confirmed: true, already_registered: false }
+  });
+  assert.equal(validateAiDecisionContract(notRegistered).valid, false);
+
+  const missingAuthority = registeredDecisionFixture({
+    safety_checks: { duplicate_checked_contract_master: false, duplicate_checked_schedule_detail: false }
+  });
+  assert.equal(validateAiDecisionContract(missingAuthority).valid, false);
+
+  const claimsNewRq = registeredDecisionFixture({ existing_confirm_request_ids: ['RQ-260827-001'] });
+  assert.equal(validateAiDecisionContract(claimsNewRq).valid, false);
+});
+
+test('validateAiDecisionContract requires an exact pending RQ and sheet plan for staff-confirmed pending changes', () => {
+  const mutation = {
+    confirmed: true,
+    kind: 'equipment_replace',
+    target_scope: 'pending_request',
+    request_id: 'RQ-260824-008',
+    source_evidence: {
+      customer_request: '28-135 빼고 70-200으로 변경', staff_confirmation: '네', conversation_revision: 7
+    },
+    expected_before: [{ name: '소니 FE 28-135mm', quantity: 1 }],
+    desired_after: [{ name: '소니 GM 70-200mm II', quantity: 1 }],
+    date_change: null
+  };
+  const validDecision = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260824-008'],
+    staff_confirmed_mutation: mutation,
+    sheet_row_candidate: {
+      equipment_write_mode: 'replace_full_plan',
+      equipment: [{ item: '소니 GM 70-200mm II', quantity: 1 }]
+    },
+    safety_checks: { no_auto_reply_sent: true },
+    reservation_inquiry: { confirmed: true, already_registered: false }
+  });
+  assert.deepEqual(validateAiDecisionContract(validDecision), { valid: true, errors: [] });
+
+  const wrongRequest = structuredClone(validDecision);
+  wrongRequest.existing_confirm_request_ids = ['RQ-260824-009'];
+  assert.equal(validateAiDecisionContract(wrongRequest).valid, false);
+
+  const extraRequest = structuredClone(validDecision);
+  extraRequest.existing_confirm_request_ids.push('RQ-260824-009');
+  assert.equal(validateAiDecisionContract(extraRequest).valid, false);
+
+  const wrongPlan = structuredClone(validDecision);
+  wrongPlan.sheet_row_candidate.equipment = [{ item: '소니 FE 28-135mm', quantity: 1 }];
+  assert.equal(validateAiDecisionContract(wrongPlan).valid, false);
+
+  const pendingRegistered = structuredClone(validDecision);
+  pendingRegistered.reservation_inquiry.already_registered = true;
+  assert.equal(validateAiDecisionContract(pendingRegistered).valid, false);
+});
+
+test('customer-only mutation request stays typed null and ambiguous typed evidence remains one owner-review task', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const customerOnly = gatewayDecisionFixture({ staff_confirmed_mutation: null });
+  assert.deepEqual(validateAiDecisionContract(customerOnly), { valid: true, errors: [] });
+
+  const ambiguous = registeredDecisionFixture({
+    staff_confirmed_mutation: null,
+    owner_review_required: true,
+    follow_up_items: [{
+      type: 'reservation_review', route: 'schedule', taskKey: 'ambiguous-staff-mutation',
+      priority: 'urgent', status: 'open', title: '예약 변경 근거 확인', customer_name: '테스트 고객',
+      summary: '대상 거래 또는 직원 확정 근거가 모호합니다.', recommended_action: '대화와 원장을 직접 확인하세요.',
+      suggested_reply_draft: '', evidence: [], requiresHumanAction: true,
+      actionFamily: 'reservation_change', businessKey: 'room:ambiguous', alertLevel: 'p0', alertReason: '변경 대상 불명확'
+    }],
+    reply_decision: {
+      replyMode: 'draft_only', text: '', confidence: 'low', reason: '모호한 근거', shouldCreateTask: true,
+      safetyClass: 'no_send', grounding: 'none', requiresRag: false, attachmentKeys: [], alreadyDelivered: false
+    }
+  });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(ambiguous)}`, trustedToolReceipts: []
+  });
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.follow_up_items.length, 1);
+  assert.equal(prepared.availabilityAwareRows.length, 1);
+  assert.equal(prepared.trustedToolReceipt, null);
+});
 
 test('sheet mutation rejects a 12-hour reinterpretation of a bare Village source hour', () => {
   const wrong = completeSheetDecision({
