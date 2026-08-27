@@ -44,6 +44,7 @@ function harness({
   checkoutStarted = false,
   leaseError = '',
   structureQueuePending = false,
+  useRealRemovalPreflight = false,
 } = {}) {
   const gas = fs.readFileSync(path.join(root, 'checkAvailability.js'), 'utf8');
   const body = section(
@@ -95,6 +96,11 @@ function harness({
     DASHBOARD_STRUCTURE_QUEUE_PREFIX_: 'dashboardStructureQueue_',
     dashboardTradeMutationLeaseError_() {
       return leaseError ? { error: leaseError, code: 'BUSY', retryable: true } : null;
+    },
+    resolveDashboardRemovalRows_(removalData, _tradeId, scheduleId) {
+      return removalData
+        .map((row, index) => String(row[0]) === String(scheduleId) ? index + 2 : 0)
+        .filter(Boolean);
     },
     isDashboardTradeCheckoutStarted_() { return checkoutStarted; },
     normalizeDashboardAddEntries_(entries) {
@@ -180,10 +186,12 @@ function harness({
     calls.reads += 1;
     return calls.reads === 1 ? baseline : successState();
   };
-  context.preflightRegisteredTradeRemoval_ = () => {
-    calls.preflight.push('remove');
-    return { success: true, scheduleIds: ['260813-005-01'] };
-  };
+  if (!useRealRemovalPreflight) {
+    context.preflightRegisteredTradeRemoval_ = () => {
+      calls.preflight.push('remove');
+      return { success: true, scheduleIds: ['260813-005-01'] };
+    };
+  }
   context.verifyRegisteredTradeCorrectionState_ = (_baseline, finalState) => finalState;
 
   return { context, calls, verifyActual, baseline };
@@ -192,13 +200,71 @@ function harness({
 const input = {
   tradeId: '260813-005',
   operationId: '8f6c77d1-8828-4a85-bf74-13815d96bf51',
+  expectedPeriod: {
+    startDate: '2026-08-17', startTime: '04:30',
+    endDate: '2026-08-20', endTime: '04:30',
+  },
   dateChange: {
     newStartDate: '2026-08-18', newEndDate: '2026-08-21',
     startTime: '04:30', endTime: '04:30', allowConflicts: false,
   },
-  remove: [{ scheduleId: '260813-005-01', expectedName: 'FX9' }],
+  remove: [{ scheduleId: '260813-005-01', expectedName: 'FX9', expectedQty: 1 }],
   add: [{ name: 'BURANO 8K', qty: 1 }],
 };
+
+function assertNoWriteSideEffects(calls) {
+  assert.deepEqual(calls.mutate, []);
+  assert.equal(calls.regenerations, 0);
+  assert.deepEqual(calls.triggerLockStates, []);
+}
+
+test('a removal quantity baseline mismatch fails before every write', () => {
+  const { context, calls } = harness({ useRealRemovalPreflight: true });
+
+  assert.throws(
+    () => context.correct({
+      ...input,
+      expectedPeriod: undefined,
+      remove: [{ ...input.remove[0], expectedQty: 2 }],
+    }),
+    /수량이 일치하지 않습니다/,
+  );
+
+  assertNoWriteSideEffects(calls);
+});
+
+test('a contract period baseline mismatch fails before removal or add preflight', () => {
+  const { context, calls } = harness();
+
+  assert.throws(
+    () => context.correct({
+      ...input,
+      expectedPeriod: { ...input.expectedPeriod, endTime: '05:00' },
+    }),
+    /baseline period mismatch/i,
+  );
+
+  assert.deepEqual(calls.preflight, []);
+  assertNoWriteSideEffects(calls);
+});
+
+test('a replacement stock conflict after target allocation exclusion fails before every write', () => {
+  const { context, calls } = harness({ addPreflightError: 'BURANO unavailable' });
+
+  assert.throws(() => context.correct(input), /BURANO unavailable/);
+
+  assert.deepEqual(calls.preflight, ['remove', 'add']);
+  assertNoWriteSideEffects(calls);
+});
+
+test('a replacement available only after exact target allocation exclusion preflights and succeeds', () => {
+  const { context, calls } = harness();
+  const result = context.correct(input);
+
+  assert.deepEqual(calls.preflight, ['remove', 'add']);
+  assert.deepEqual(calls.mutate, ['date', 'add', 'remove']);
+  assert.equal(result.success, true);
+});
 
 test('one correction preflights all item deltas, locks once, adds before remove, and regenerates after unlock', () => {
   const { context, calls } = harness();

@@ -90,6 +90,12 @@ function createFetchFixture({ responseByAction = {} } = {}) {
 const fullInput = {
   tradeId: '260810-003',
   operationId,
+  expectedPeriod: {
+    startDate: '2026-08-11',
+    startTime: '05:00',
+    endDate: '2026-08-14',
+    endTime: '05:00',
+  },
   dateChange: {
     newStartDate: '2026-08-12',
     newEndDate: '2026-08-15',
@@ -97,13 +103,78 @@ const fullInput = {
     endTime: '05:00',
     allowConflicts: false,
   },
-  remove: [{ scheduleId: '260810-003-04', expectedName: '소니 GM 줌렌즈 세트' }],
+  remove: [{ scheduleId: '260810-003-04', expectedName: '소니 GM 줌렌즈 세트', expectedQty: 1 }],
   add: [
     { name: '소니 GM 24-70mm F2.8 GM II', qty: 1 },
     { name: '소니 GM 70-200mm F2.8 GM II', qty: 1 },
   ],
   sendEstimate: true,
 };
+
+test('normalizes an exact baseline period and removal quantity', () => {
+  const normalized = normalizeCorrectionInput({
+    tradeId: '260824-008',
+    operationId: '11111111-2222-4333-8444-555555555555',
+    expectedPeriod: {
+      startDate: '2026-08-27',
+      startTime: '06:00',
+      endDate: '2026-08-27',
+      endTime: '18:00',
+    },
+    remove: [{
+      scheduleId: '260824-008-07',
+      expectedName: '소니 FE 28-135mm',
+      expectedQty: 1,
+    }],
+    add: [{ name: '소니 GM 70-200mm II', qty: 1 }],
+  });
+
+  assert.equal(normalized.remove[0].expectedQty, 1);
+  assert.equal(normalized.expectedPeriod.startTime, '06:00');
+});
+
+test('rejects invalid supplied baseline expectations without narrowing legacy CLI inputs', () => {
+  const base = {
+    tradeId: '260824-008',
+    operationId: '11111111-2222-4333-8444-555555555555',
+    expectedPeriod: {
+      startDate: '2026-08-27', startTime: '06:00',
+      endDate: '2026-08-27', endTime: '18:00',
+    },
+    remove: [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }],
+  };
+
+  for (const expectedQty of [0, 1.5, 100]) {
+    assert.throws(
+      () => normalizeCorrectionInput({ ...base, remove: [{ ...base.remove[0], expectedQty }] }),
+      /expectedQty/i,
+    );
+  }
+  assert.throws(
+    () => normalizeCorrectionInput({ ...base, remove: [{ ...base.remove[0], expectedQty: '1' }] }),
+    /expectedQty/i,
+  );
+  assert.throws(
+    () => normalizeCorrectionInput({ ...base, expectedPeriod: { ...base.expectedPeriod, startTime: '24:00' } }),
+    /startTime/i,
+  );
+  assert.throws(
+    () => normalizeCorrectionInput({ ...base, expectedPeriod: { ...base.expectedPeriod, unexpected: true } }),
+    /expectedPeriod/i,
+  );
+  assert.throws(
+    () => normalizeCorrectionInput({ ...base, expectedPeriod: { ...base.expectedPeriod, endTime: '06:00' } }),
+    /after start/i,
+  );
+
+  const legacy = normalizeCorrectionInput({
+    tradeId: base.tradeId,
+    operationId: base.operationId,
+    remove: [{ scheduleId: base.remove[0].scheduleId, expectedName: base.remove[0].expectedName }],
+  });
+  assert.equal(legacy.expectedPeriod, null);
+  assert.equal(Object.hasOwn(legacy.remove[0], 'expectedQty'), false);
+});
 
 test('strict input requires exact identity and rejects a generic write surface', () => {
   assert.throws(
@@ -143,6 +214,7 @@ test('one explicit run performs one correction POST, one send POST, and zero sea
   assert.deepEqual(fixture.calls[0].body.args, {
     tradeId: fullInput.tradeId,
     operationId,
+    expectedPeriod: fullInput.expectedPeriod,
     dateChange: fullInput.dateChange,
     remove: fullInput.remove,
     add: fullInput.add,
