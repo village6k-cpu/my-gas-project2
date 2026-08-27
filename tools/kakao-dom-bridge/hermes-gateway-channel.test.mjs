@@ -493,14 +493,35 @@ test('restart makes an unresolved registered reservation change human-review-onl
       directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
     });
 
-    assert.equal((await restarted.get(claim.job_id)).tool_operation.operation_id, reserved.reservation.operation_id);
-    clock.now += 1_000;
-    await restarted.reapExpiredLeases();
     const review = await restarted.get(claim.job_id);
     assert.equal(review.state, 'failed');
     assert.equal(review.human_review_required, true);
     assert.equal(review.error.type, 'confirmation_operation_unresolved');
+    assert.equal(review.error.operation_id, reserved.reservation.operation_id);
+    assert.equal(review.error.operation_state, 'reserved');
+    assert.equal(review.failure_notification.state, 'pending');
     assert.equal(await restarted.claim({ consumerId: 'gateway-after-restart', waitMs: 0 }), null);
+
+    const restartedAgain = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    const durableReview = await restartedAgain.get(claim.job_id);
+    assert.equal(durableReview.state, 'failed');
+    assert.equal(durableReview.human_review_required, true);
+    assert.equal(durableReview.failure_notification.state, 'pending');
+
+    const withLateEvidence = await restarted.recordToolReceipt(
+      registeredReservationChangeReceipt(claim, reserved.reservation.operation_id)
+    );
+    assert.equal(withLateEvidence.state, 'failed');
+    assert.equal(withLateEvidence.human_review_required, true);
+    assert.equal(withLateEvidence.failure_notification.state, 'pending');
+    assert.equal(withLateEvidence.tool_operation.state, 'completed');
+    assert.equal(withLateEvidence.tool_receipts.length, 1);
+    await assert.rejects(restarted.complete({
+      job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+      lease_id: claim.lease_id, final: { reply_mode: 'no_reply' }
+    }), { code: 'confirmation_operation_unresolved' });
   });
 });
 
