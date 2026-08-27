@@ -4,10 +4,13 @@ const fs = require('node:fs');
 const { DEFAULT_ENV_FILE, parseEnv } = require('./village-live-read.js');
 
 const ALLOWED_INPUT_FIELDS = new Set([
-  'tradeId', 'operationId', 'dateChange', 'remove', 'add', 'sendEstimate'
+  'tradeId', 'operationId', 'expectedPeriod', 'dateChange', 'remove', 'add', 'sendEstimate'
 ]);
 const ALLOWED_DATE_FIELDS = new Set([
   'newStartDate', 'newEndDate', 'startTime', 'endTime', 'allowConflicts'
+]);
+const ALLOWED_EXPECTED_PERIOD_FIELDS = new Set([
+  'startDate', 'startTime', 'endDate', 'endTime'
 ]);
 
 class CorrectionStageError extends Error {
@@ -100,6 +103,32 @@ function normalizeDateChange(value) {
   return normalized;
 }
 
+function normalizeExpectedPeriod(value) {
+  if (value === undefined) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('expectedPeriod must be an object');
+  }
+  for (const field of Object.keys(value)) {
+    if (!ALLOWED_EXPECTED_PERIOD_FIELDS.has(field)) {
+      throw new Error(`Unsupported or forbidden expectedPeriod field: ${field}`);
+    }
+  }
+  const normalized = {
+    startDate: normalizeDate(value.startDate, 'expectedPeriod.startDate'),
+    startTime: normalizeTime(value.startTime, 'expectedPeriod.startTime'),
+    endDate: normalizeDate(value.endDate, 'expectedPeriod.endDate'),
+    endTime: normalizeTime(value.endTime, 'expectedPeriod.endTime'),
+  };
+  if (!normalized.startTime || !normalized.endTime) {
+    throw new Error('expectedPeriod.startTime and endTime are required');
+  }
+  if (Date.parse(`${normalized.endDate}T${normalized.endTime}:00Z`)
+      <= Date.parse(`${normalized.startDate}T${normalized.startTime}:00Z`)) {
+    throw new Error('expectedPeriod end instant must be after start instant');
+  }
+  return normalized;
+}
+
 function normalizeCorrectionInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error('correction input must be a JSON object');
@@ -126,7 +155,7 @@ function normalizeCorrectionInput(input) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       throw new Error(`remove[${index}] must be an object`);
     }
-    const allowed = new Set(['scheduleId', 'expectedName']);
+    const allowed = new Set(['scheduleId', 'expectedName', 'expectedQty']);
     for (const field of Object.keys(entry)) {
       if (!allowed.has(field)) throw new Error(`Unsupported or forbidden remove field: ${field}`);
     }
@@ -136,10 +165,20 @@ function normalizeCorrectionInput(input) {
     }
     if (seenScheduleIds.has(scheduleId)) throw new Error(`duplicate removal scheduleId: ${scheduleId}`);
     seenScheduleIds.add(scheduleId);
-    return {
+    const normalizedRemoval = {
       scheduleId,
       expectedName: requiredText(entry.expectedName, `remove[${index}].expectedName`, 160)
     };
+    if (entry.expectedQty !== undefined) {
+      if (typeof entry.expectedQty !== 'number'
+          || !Number.isSafeInteger(entry.expectedQty)
+          || entry.expectedQty < 1
+          || entry.expectedQty > 99) {
+        throw new Error(`remove[${index}].expectedQty must be an integer from 1 to 99`);
+      }
+      normalizedRemoval.expectedQty = entry.expectedQty;
+    }
+    return normalizedRemoval;
   });
 
   const addInput = input.add === undefined ? [] : input.add;
@@ -164,6 +203,7 @@ function normalizeCorrectionInput(input) {
   const normalized = {
     tradeId,
     operationId,
+    expectedPeriod: normalizeExpectedPeriod(input.expectedPeriod),
     dateChange: normalizeDateChange(input.dateChange),
     remove,
     add,
@@ -286,6 +326,7 @@ async function runRegisteredTradeCorrection({
     const args = {
       tradeId: normalized.tradeId,
       operationId: normalized.operationId,
+      ...(normalized.expectedPeriod ? { expectedPeriod: normalized.expectedPeriod } : {}),
       ...(normalized.dateChange ? { dateChange: normalized.dateChange } : {}),
       ...(normalized.remove.length ? { remove: normalized.remove } : {}),
       ...(normalized.add.length ? { add: normalized.add } : {})

@@ -18019,7 +18019,7 @@ function parseWithClaude(text, imageBase64, imageMediaType) {
 }
 function normalizeRegisteredTradeCorrection_(args) {
   args = args || {};
-  var allowed = { tradeId: true, operationId: true, dateChange: true, remove: true, add: true };
+  var allowed = { tradeId: true, operationId: true, expectedPeriod: true, dateChange: true, remove: true, add: true };
   Object.keys(args).forEach(function(key) {
     if (!allowed[key]) throw new Error('지원하지 않거나 금지된 등록거래 보정 필드: ' + key);
   });
@@ -18045,6 +18045,27 @@ function normalizeRegisteredTradeCorrection_(args) {
     var text = String(value || '').trim();
     if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(text)) throw new Error(label + '은 HH:mm 형식이어야 합니다');
     return text;
+  }
+
+  var expectedPeriod = null;
+  if (args.expectedPeriod !== undefined) {
+    if (!args.expectedPeriod || typeof args.expectedPeriod !== 'object' || Array.isArray(args.expectedPeriod)) {
+      throw new Error('expectedPeriod은 객체여야 합니다');
+    }
+    var expectedPeriodAllowed = { startDate: true, startTime: true, endDate: true, endTime: true };
+    Object.keys(args.expectedPeriod).forEach(function(key) {
+      if (!expectedPeriodAllowed[key]) throw new Error('지원하지 않는 expectedPeriod 필드: ' + key);
+    });
+    expectedPeriod = {
+      startDate: validDate_(args.expectedPeriod.startDate, 'expectedPeriod.startDate'),
+      startTime: validTime_(args.expectedPeriod.startTime, 'expectedPeriod.startTime'),
+      endDate: validDate_(args.expectedPeriod.endDate, 'expectedPeriod.endDate'),
+      endTime: validTime_(args.expectedPeriod.endTime, 'expectedPeriod.endTime')
+    };
+    if (Date.parse(expectedPeriod.endDate + 'T' + expectedPeriod.endTime + ':00Z')
+        <= Date.parse(expectedPeriod.startDate + 'T' + expectedPeriod.startTime + ':00Z')) {
+      throw new Error('expectedPeriod 종료 시각은 시작 시각보다 뒤여야 합니다');
+    }
   }
 
   var dateChange = null;
@@ -18075,7 +18096,7 @@ function normalizeRegisteredTradeCorrection_(args) {
   remove = remove.map(function(entry) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('remove 항목은 객체여야 합니다');
     Object.keys(entry).forEach(function(key) {
-      if (key !== 'scheduleId' && key !== 'expectedName') throw new Error('지원하지 않는 remove 필드: ' + key);
+      if (key !== 'scheduleId' && key !== 'expectedName' && key !== 'expectedQty') throw new Error('지원하지 않는 remove 필드: ' + key);
     });
     var scheduleId = String(entry && entry.scheduleId || '').trim();
     var expectedName = String(entry && entry.expectedName || '').trim();
@@ -18085,7 +18106,14 @@ function normalizeRegisteredTradeCorrection_(args) {
     if (!expectedName || expectedName.length > 160) throw new Error('remove expectedName 필수');
     if (removeSeen[scheduleId]) throw new Error('remove scheduleId 중복: ' + scheduleId);
     removeSeen[scheduleId] = true;
-    return { scheduleId: scheduleId, expectedName: expectedName };
+    var normalizedRemoval = { scheduleId: scheduleId, expectedName: expectedName };
+    if (entry.expectedQty !== undefined) {
+      if (typeof entry.expectedQty !== 'number' || !Number.isInteger(entry.expectedQty) || entry.expectedQty < 1 || entry.expectedQty > 99) {
+        throw new Error('remove expectedQty는 1~99 정수여야 합니다');
+      }
+      normalizedRemoval.expectedQty = entry.expectedQty;
+    }
+    return normalizedRemoval;
   });
 
   if (args.add !== undefined && !Array.isArray(args.add)) throw new Error('add는 배열이어야 합니다');
@@ -18103,7 +18131,7 @@ function normalizeRegisteredTradeCorrection_(args) {
   });
   if (add.length > 100) throw new Error('add는 최대 100개입니다');
   if (!dateChange && !remove.length && !add.length) throw new Error('날짜·제거·추가 중 하나 이상이 필요합니다');
-  return { tradeId: tradeId, operationId: operationId, dateChange: dateChange, remove: remove, add: add };
+  return { tradeId: tradeId, operationId: operationId, expectedPeriod: expectedPeriod, dateChange: dateChange, remove: remove, add: add };
 }
 
 function registeredTradeCorrectionDate_(raw, display) {
@@ -18220,6 +18248,9 @@ function preflightRegisteredTradeRemoval_(state, removals) {
     if (!row) throw new Error('removal preflight: 스케줄ID를 찾을 수 없습니다: ' + removal.scheduleId);
     if (row.name !== removal.expectedName) {
       throw new Error('removal preflight: 장비명이 일치하지 않습니다: ' + removal.scheduleId);
+    }
+    if (removal.expectedQty !== undefined && Number(row.qty) !== Number(removal.expectedQty)) {
+      throw new Error('removal preflight: 수량이 일치하지 않습니다: ' + removal.scheduleId);
     }
     var tradeId = String(removal.scheduleId || '').split('-').slice(0, 2).join('-');
     var expandedRows = resolveDashboardRemovalRows_(removalData, tradeId, removal.scheduleId, '');
@@ -18397,6 +18428,14 @@ function correctRegisteredTrade(args) {
   var failure = null;
   try {
     lockedBaseline = readRegisteredTradeCorrectionState_(correction.tradeId, false);
+    if (correction.expectedPeriod && (
+      lockedBaseline.contract.startDate !== correction.expectedPeriod.startDate ||
+      lockedBaseline.contract.startTime !== correction.expectedPeriod.startTime ||
+      lockedBaseline.contract.endDate !== correction.expectedPeriod.endDate ||
+      lockedBaseline.contract.endTime !== correction.expectedPeriod.endTime
+    )) {
+      throw new Error('baseline period mismatch');
+    }
     // ScriptLock does not cover the HTTP portions of checkout/return/setup/aux
     // transitions. Their durable lease is the cross-operation exclusion signal.
     var correctionLeaseBlock = dashboardTradeMutationLeaseError_(
