@@ -1074,28 +1074,6 @@ const registeredComponentProjectionCases = [
     afterRows: REGISTERED_SET_ROWS.filter((row) => row.scheduleId !== '260824-008-02')
   },
   {
-    name: 'component replace preserves its set siblings and adds the exact catalog item',
-    mutation: registeredMutationFixture('equipment_replace', {
-      expected_before: [{ schedule_id: '260824-008-02', name: '소프트박스', quantity: 1 }],
-      desired_after: [{ name: '젬볼 90', quantity: 1 }]
-    }),
-    afterRows: [
-      ...REGISTERED_SET_ROWS.filter((row) => row.scheduleId !== '260824-008-02'),
-      { scheduleId: '260824-008-100', setName: '', name: '젬볼 90', qty: 1, isComponent: false }
-    ]
-  },
-  {
-    name: 'component quantity change preserves its set identity and adds the requested catalog quantity',
-    mutation: registeredMutationFixture('equipment_quantity_change', {
-      expected_before: [{ schedule_id: '260824-008-02', name: '소프트박스', quantity: 1 }],
-      desired_after: [{ name: '소프트박스', quantity: 2 }]
-    }),
-    afterRows: [
-      ...REGISTERED_SET_ROWS.filter((row) => row.scheduleId !== '260824-008-02'),
-      { scheduleId: '260824-008-100', setName: '', name: '소프트박스', qty: 2, isComponent: false }
-    ]
-  },
-  {
     name: 'set-header remove deletes only the targeted header and its following component block',
     mutation: registeredMutationFixture('equipment_remove', {
       expected_before: [{ schedule_id: '260824-008-01', name: '어퓨쳐 600X 세트', quantity: 1 }],
@@ -1136,6 +1114,58 @@ for (const scenario of registeredComponentProjectionCases) {
     assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
     assert.equal(prepared.decision.owner_review_required, false);
     assert.deepEqual(prepared.availabilityAwareRows, []);
+  });
+}
+
+const registeredImpossibleComponentRewriteCases = [
+  {
+    name: 'component replacement cannot approve a detached top-level replacement',
+    mutation: registeredMutationFixture('equipment_replace', {
+      expected_before: [{ schedule_id: '260824-008-02', name: '소프트박스', quantity: 1 }],
+      desired_after: [{ name: '젬볼 90', quantity: 1 }]
+    }),
+    afterRows: [
+      ...REGISTERED_SET_ROWS.filter((row) => row.scheduleId !== '260824-008-02'),
+      { scheduleId: '260824-008-100', setName: '', name: '젬볼 90', qty: 1, isComponent: false }
+    ]
+  },
+  {
+    name: 'component quantity change cannot approve a detached top-level re-add',
+    mutation: registeredMutationFixture('equipment_quantity_change', {
+      expected_before: [{ schedule_id: '260824-008-02', name: '소프트박스', quantity: 1 }],
+      desired_after: [{ name: '소프트박스', quantity: 2 }]
+    }),
+    afterRows: [
+      ...REGISTERED_SET_ROWS.filter((row) => row.scheduleId !== '260824-008-02'),
+      { scheduleId: '260824-008-100', setName: '', name: '소프트박스', qty: 2, isComponent: false }
+    ]
+  }
+];
+
+for (const scenario of registeredImpossibleComponentRewriteCases) {
+  test(`registered production readback rejects ${scenario.name} without replay`, async () => {
+    const { job, turn } = gatewayTurnFixture();
+    const receipt = registeredReceiptFixture(job, {
+      mutation_kind: scenario.mutation.kind,
+      authoritative_result: {
+        before: registeredAuthoritativeState({ rows: REGISTERED_SET_ROWS }),
+        after: registeredAuthoritativeState({ rows: scenario.afterRows })
+      }
+    });
+    let replayCalls = 0;
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn,
+      finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: scenario.mutation }))}`,
+      trustedToolReceipts: [receipt],
+      dependencies: { executeRegisteredReservationChange: async () => { replayCalls += 1; } }
+    });
+
+    assert.equal(replayCalls, 0);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+    assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+    assert.equal(prepared.decision.owner_review_required, true);
+    assert.equal(prepared.decision.follow_up_items.length, 1);
+    assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_readback_contradiction'), true);
   });
 }
 

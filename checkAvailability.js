@@ -9101,14 +9101,14 @@ function dashboardAddEquipments(tid, entries, options) {
       if (spec.components.length > 0) {
         maxN++;
         newRows.push([
-          tid + "-" + ("0" + maxN).slice(-2),
+          tid + "-" + String(maxN).padStart(2, "0"),
           tid, spec.name, spec.name, spec.qty, 반출일, 반출시간, 반납일, 반납시간,
           "대기", "", spec.price, 예약자명
         ]);
         spec.components.forEach(function(component) {
           maxN++;
           newRows.push([
-            tid + "-" + ("0" + maxN).slice(-2),
+            tid + "-" + String(maxN).padStart(2, "0"),
             tid, spec.name, component.name, (component.qty || 1) * spec.qty, 반출일, 반출시간, 반납일, 반납시간,
             "대기", "", 0, 예약자명
           ]);
@@ -9117,7 +9117,7 @@ function dashboardAddEquipments(tid, entries, options) {
         maxN++;
         var setMasterName = spec.isSetMasterItem ? spec.name : "";
         newRows.push([
-          tid + "-" + ("0" + maxN).slice(-2),
+          tid + "-" + String(maxN).padStart(2, "0"),
           tid, setMasterName, spec.name, spec.qty, 반출일, 반출시간, 반납일, 반납시간,
           "대기", "", spec.price, 예약자명
         ]);
@@ -9989,14 +9989,14 @@ function dashboardAddEquipment(tid, equipName, qty) {
     if (components.length > 0) {
       maxN++;
       newRows.push([
-        tid + "-" + ("0" + maxN).slice(-2),
+        tid + "-" + String(maxN).padStart(2, "0"),
         tid, equipName, equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
         "대기", "", price, 예약자명
       ]);
       components.forEach(function(c) {
         maxN++;
         newRows.push([
-          tid + "-" + ("0" + maxN).slice(-2),
+          tid + "-" + String(maxN).padStart(2, "0"),
           tid, equipName, c.name, (c.qty || 1) * qty, 반출일, 반출시간, 반납일, 반납시간,
           "대기", "", 0, 예약자명
         ]);
@@ -10004,7 +10004,7 @@ function dashboardAddEquipment(tid, equipName, qty) {
     } else {
       maxN++;
       newRows.push([
-        tid + "-" + ("0" + maxN).slice(-2),
+        tid + "-" + String(maxN).padStart(2, "0"),
         tid, equipName, equipName, qty, 반출일, 반출시간, 반납일, 반납시간,
         "대기", "", 0, 예약자명
       ]);
@@ -18574,6 +18574,35 @@ function correctRegisteredTrade(args) {
       throw new Error(correctionLeaseBlock.error || '같은 거래의 다른 작업을 처리 중입니다.');
     }
     removalPlan = preflightRegisteredTradeRemoval_(lockedBaseline, correction.remove);
+    if (correction.add.length) {
+      var baselineRowsById = {};
+      (lockedBaseline.schedule.rows || []).forEach(function(row) {
+        baselineRowsById[String(row.scheduleId || '').trim()] = row;
+      });
+      var componentReaddTargets = correction.remove.map(function(removal) {
+        return baselineRowsById[String(removal.scheduleId || '').trim()];
+      }).filter(function(row) {
+        return row && row.isComponent;
+      });
+      if (componentReaddTargets.length) {
+        var blockedComponentIds = componentReaddTargets.map(function(row) {
+          return String(row.scheduleId || '').trim();
+        });
+        return {
+          success: false,
+          status: 'ERROR',
+          code: 'UNSAFE_COMPONENT_READD',
+          retryable: false,
+          tradeId: correction.tradeId,
+          operationId: correction.operationId,
+          attemptedStage: 'preflight',
+          stages: [],
+          appliedStages: [],
+          error: '세트 구성품의 소속을 정확히 보존할 수 없어 자동 재추가를 차단했습니다: ' + blockedComponentIds.join(', '),
+          customerNotificationSent: false
+        };
+      }
+    }
     if (correction.remove.length) {
       var plannedRemovalIds = {};
       removalPlan.scheduleIds.forEach(function(scheduleId) { plannedRemovalIds[scheduleId] = true; });

@@ -311,6 +311,45 @@ test('BUSY is attempted once, sends nothing, and is never automatically retried'
   assert.equal(fixture.calls.filter((call) => call.action === 'sendEstimate').length, 0);
 });
 
+test('unsafe component re-add stays typed, customer no-send, and is never replayed', async () => {
+  const fixture = createFetchFixture({
+    responseByAction: {
+      scheduleCorrectRegisteredTrade: {
+        success: false,
+        status: 'ERROR',
+        code: 'UNSAFE_COMPONENT_READD',
+        retryable: false,
+        tradeId: '260810-003',
+        operationId,
+        attemptedStage: 'preflight',
+        stages: [],
+        appliedStages: [],
+        error: '세트 구성품의 소속을 정확히 보존할 수 없어 자동 재추가를 차단했습니다: 260810-003-05',
+        customerNotificationSent: false,
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => runRegisteredTradeCorrection({
+      config, input: { ...fullInput, sendEstimate: false }, fetchImpl: fixture.fetchImpl, timeoutMs: 1_000,
+    }),
+    (error) => {
+      assert.equal(error.stage, 'scheduleCorrectRegisteredTrade');
+      assert.equal(error.outcomeUnknown, false);
+      assert.deepEqual(error.appliedStages, []);
+      assert.equal(error.details.code, 'UNSAFE_COMPONENT_READD');
+      assert.equal(error.details.tradeId, '260810-003');
+      assert.equal(error.details.operationId, operationId);
+      assert.equal(error.details.attemptedStage, 'preflight');
+      assert.equal(error.details.customerNotificationSent, false);
+      return true;
+    },
+  );
+  assert.equal(fixture.calls.filter((call) => call.action === 'scheduleCorrectRegisteredTrade').length, 1);
+  assert.equal(fixture.calls.filter((call) => call.action === 'sendEstimate').length, 0);
+});
+
 test('server-reported partial state is surfaced as unknown and never followed by send', async () => {
   const partialReadback = {
     contract: { startDate: '2026-08-12' },
