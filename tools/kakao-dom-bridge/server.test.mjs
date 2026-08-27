@@ -804,16 +804,35 @@ test('Task 7 replays the sanitized registered replacement across the durable cha
 test('Task 7 conflict performs zero correction writes and leaves one durable owner notification pending', async () => {
   let correctionCalls = 0;
   let correctionWrites = 0;
+  const fakeGasOperations = [];
+  const fakeCorrectionGas = {
+    async preflight(input) {
+      fakeGasOperations.push({ stage: 'preflight', input: structuredClone(input) });
+      return { conflicts: [{ name: '소니 GM 70-200mm II', available: 0, requested: 1 }] };
+    },
+    async write(input) {
+      correctionWrites += 1;
+      fakeGasOperations.push({ stage: 'write', input: structuredClone(input) });
+    }
+  };
   const replay = await createTask7Replay({
     id: 'conflict',
-    runRegisteredTradeCorrection: async () => {
+    runRegisteredTradeCorrection: async ({ input }) => {
       correctionCalls += 1;
+      const preflight = await fakeCorrectionGas.preflight(input);
+      if (!preflight.conflicts.length) {
+        await fakeCorrectionGas.write(input);
+        return {
+          ok: true, verified: true, tradeId: input.tradeId,
+          readback: task7AuthoritativeReadback(), appliedStages: ['scheduleCorrectRegisteredTrade']
+        };
+      }
       const error = new Error('replacement stock conflict');
       error.name = 'CorrectionStageError';
       error.stage = 'preflight';
       error.appliedStages = [];
       error.outcomeUnknown = false;
-      error.details = { conflicts: [{ name: '소니 GM 70-200mm II', available: 0, requested: 1 }] };
+      error.details = preflight;
       throw error;
     },
     finalize: async (prepared) => {
@@ -838,6 +857,11 @@ test('Task 7 conflict performs zero correction writes and leaves one durable own
     assert.deepEqual(receipt.applied_stages, []);
     assert.equal(receipt.attempted_stage, 'preflight');
     assert.equal(correctionCalls, 1);
+    assert.deepEqual(fakeGasOperations.map((operation) => operation.stage), ['preflight']);
+    assert.equal(fakeGasOperations[0].input.tradeId, TASK7_INCIDENT.trade_id);
+    assert.deepEqual(fakeGasOperations[0].input.remove, [{
+      scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1
+    }]);
     assert.equal(correctionWrites, 0);
     await replay.completeHermesFinal();
 
@@ -857,6 +881,32 @@ test('Task 7 conflict performs zero correction writes and leaves one durable own
 test('Task 7 partial write persists stage evidence, never replays after restart, and notifies only on delivery', async () => {
   let correctionCalls = 0;
   let correctionWrites = 0;
+  const notificationAttempts = [];
+  const notificationStatusUpdates = [];
+  let notificationDeliveryAvailable = false;
+  const applicationFailureNotifier = createGatewayApplicationFailureNotifier({
+    slackEnabled: true,
+    createFollowUp: async ({ job, error, context }) => {
+      notificationAttempts.push(notificationDeliveryAvailable);
+      assert.equal(job.jobId, 'task7-partial-job');
+      assert.match(error.message, /gateway_owner_review_slack_failed/);
+      assert.equal(context.origin, 'hermes_gateway_result_application');
+      return {
+        inserted: 1,
+        rows: [{ id: 'task7-partial-failure-notification' }],
+        slackDeliveryResult: {
+          skipped: false,
+          results: [notificationDeliveryAvailable
+            ? { ok: true, rowId: 'task7-partial-failure-notification', channelId: 'C-OFFLINE', ts: '1.0' }
+            : { ok: false, rowId: 'task7-partial-failure-notification', error: 'Slack still offline' }]
+        }
+      };
+    },
+    updateStatus: async (jobId, patch) => {
+      notificationStatusUpdates.push({ jobId, patch: structuredClone(patch) });
+    },
+    now: () => '2026-08-27T01:00:01.000Z'
+  });
   const replay = await createTask7Replay({
     id: 'partial',
     runRegisteredTradeCorrection: async () => {
@@ -884,7 +934,7 @@ test('Task 7 partial write persists stage evidence, never replays after restart,
       },
       autoReplyResult: { attempted: false, sent: false }
     }),
-    onFailure: async () => { throw new Error('owner notification remains offline'); }
+    onFailure: applicationFailureNotifier
   });
   try {
     const receipt = await replay.executeTool();
@@ -943,19 +993,22 @@ test('Task 7 partial write persists stage evidence, never replays after restart,
         prepare: async () => { recoveryWork += 1; },
         apply: async () => { recoveryWork += 1; },
         finalize: async () => { recoveryWork += 1; },
-        onFailure: async () => { throw new Error('Slack still offline'); }
+        onFailure: applicationFailureNotifier
       });
       assert.deepEqual(await failedDelivery.recoverApplicationFailureNotifications(), [{
-        job_id: replay.claim.job_id, notified: false, error: 'Slack still offline'
+        job_id: replay.claim.job_id,
+        notified: false,
+        error: 'gateway_failure_notification_slack_failed: Slack still offline'
       }]);
       assert.equal((await restarted.listPendingApplicationFailureNotifications()).length, 1);
 
+      notificationDeliveryAvailable = true;
       const delivered = createGatewayResultApplicationCoordinator({
         channel: restarted, getConfig: () => ({}),
         prepare: async () => { recoveryWork += 1; },
         apply: async () => { recoveryWork += 1; },
         finalize: async () => { recoveryWork += 1; },
-        onFailure: async () => {}
+        onFailure: applicationFailureNotifier
       });
       assert.deepEqual(await delivered.recoverApplicationFailureNotifications(), [{
         job_id: replay.claim.job_id, notified: true
@@ -963,6 +1016,15 @@ test('Task 7 partial write persists stage evidence, never replays after restart,
       assert.equal((await restarted.listPendingApplicationFailureNotifications()).length, 0);
       assert.equal(recoveryWork, 0);
       assert.equal(replayedCorrections, 0);
+      assert.deepEqual(notificationAttempts, [false, false, true]);
+      assert.equal(notificationStatusUpdates.length, 1);
+      assert.equal(notificationStatusUpdates[0].jobId, replay.claim.job_id);
+      assert.equal(notificationStatusUpdates[0].patch.status, 'needs_human_review');
+      assert.equal(notificationStatusUpdates[0].patch.completed_at, '2026-08-27T01:00:01.000Z');
+      assert.deepEqual(
+        notificationStatusUpdates[0].patch.payload.ai_worker_result.failure_follow_up.slackDeliveryResult.results,
+        [{ ok: true, rowId: 'task7-partial-failure-notification', channelId: 'C-OFFLINE', ts: '1.0' }]
+      );
     } finally {
       await restartedApp.close();
     }
