@@ -9377,9 +9377,10 @@ function registeredAuthoritativeSnapshot(value, { tradeId, requireLedger }) {
       isComponent: raw?.isComponent
     };
     const match = /^(\d{6}-\d{3})-\d{2,}$/.exec(row.scheduleId);
+    const derivedIsComponent = Boolean(row.setName) && row.setName !== row.name;
     if (!match || match[1] !== tradeId || rowsById.has(row.scheduleId)
       || !row.name || !Number.isInteger(row.qty) || row.qty <= 0
-      || typeof row.isComponent !== 'boolean') return null;
+      || typeof row.isComponent !== 'boolean' || row.isComponent !== derivedIsComponent) return null;
     rows.push(row);
     rowsById.set(row.scheduleId, row);
     if (!row.isComponent) calculatedTopLevel[row.name] = (calculatedTopLevel[row.name] || 0) + row.qty;
@@ -9430,29 +9431,33 @@ function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
   if (!sameGatewayDecisionValue(before.contract, expectedPeriod)
     || !sameGatewayDecisionValue(after.contract, desiredPeriod)) return false;
 
-  const removalDelta = registeredMutationDeltaQuantities(mutation?.expected_before);
   const additionDelta = registeredMutationDeltaQuantities(mutation?.desired_after);
-  if (!removalDelta || !additionDelta) return false;
+  if (!additionDelta) return false;
   const projectedTopLevel = { ...before.topLevel };
   const removedIds = new Set();
   for (const expected of mutation.expected_before) {
     const scheduleId = text(expected?.schedule_id).trim();
     const current = before.rowsById.get(scheduleId);
-    if (!current || current.isComponent || current.name !== text(expected?.name).trim()
+    if (!current || current.name !== text(expected?.name).trim()
       || current.qty !== Number(expected?.quantity)) return false;
-    if (current.setName) {
-      for (const row of before.rows) {
-        if (row.setName === current.setName) removedIds.add(row.scheduleId);
+    const targetIndex = before.rows.indexOf(current);
+    removedIds.add(scheduleId);
+    if (!current.isComponent) {
+      const setKey = current.setName || current.name;
+      for (let index = targetIndex + 1; index < before.rows.length; index += 1) {
+        const following = before.rows[index];
+        if (!following.isComponent || following.setName !== setKey) break;
+        removedIds.add(following.scheduleId);
       }
-    } else {
-      removedIds.add(scheduleId);
     }
   }
-  for (const [name, quantity] of Object.entries(removalDelta)) {
-    const remaining = (projectedTopLevel[name] || 0) - quantity;
+  for (const scheduleId of removedIds) {
+    const row = before.rowsById.get(scheduleId);
+    if (row.isComponent) continue;
+    const remaining = (projectedTopLevel[row.name] || 0) - row.qty;
     if (remaining < 0) return false;
-    if (remaining === 0) delete projectedTopLevel[name];
-    else projectedTopLevel[name] = remaining;
+    if (remaining === 0) delete projectedTopLevel[row.name];
+    else projectedTopLevel[row.name] = remaining;
   }
   for (const [name, quantity] of Object.entries(additionDelta)) {
     projectedTopLevel[name] = (projectedTopLevel[name] || 0) + quantity;
@@ -9468,10 +9473,18 @@ function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
     }
   }
   const addedNames = new Set(Object.keys(additionDelta));
+  let activeAddedSetName = '';
   for (const row of after.rows) {
-    if (before.rowsById.has(row.scheduleId)) continue;
-    const addedIdentity = row.isComponent ? row.setName : row.name;
-    if (!addedNames.has(addedIdentity)) return false;
+    if (before.rowsById.has(row.scheduleId)) {
+      activeAddedSetName = '';
+      continue;
+    }
+    if (!row.isComponent) {
+      if (!addedNames.has(row.name)) return false;
+      activeAddedSetName = row.setName === row.name ? row.name : '';
+    } else if (!activeAddedSetName || row.setName !== activeAddedSetName) {
+      return false;
+    }
   }
   return true;
 }
