@@ -3904,6 +3904,22 @@ test('buildHermesPrompt makes the native confirmation tool verify both writes an
   assert.match(prompt, /existing_confirm_request_ids.*village_confirmation_request.*검증/s);
   assert.match(prompt, /should_write_to_sheet=false.*기존 RQ.*실재 여부/s);
   assert.match(prompt, /no_action.*입력 성공.*아니다/s);
+  assert.match(
+    prompt,
+    /existing RQ.*authoritative no-record result.*existing_confirm_request_ids=\[\].*reservation_inquiry\.already_registered=false.*explicit genuinely-new reclassification.*only then.*should_write_to_sheet=true/is
+  );
+  assert.match(
+    prompt,
+    /no_action.*never authorizes a retry.*authoritative no-record result.*existing_confirm_request_ids=\[\].*reservation_inquiry\.already_registered=false.*explicit genuinely-new reclassification.*should_write_to_sheet=true.*otherwise remain read-only\/invalid/is
+  );
+  assert.doesNotMatch(
+    prompt,
+    /If that verification says an existing RQ was not found.*correct the decision to should_write_to_sheet=true/is
+  );
+  assert.doesNotMatch(
+    prompt,
+    /If the row still needs to be written.*call the tool with should_write_to_sheet=true/is
+  );
   assert.doesNotMatch(prompt, /Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true/);
 });
 
