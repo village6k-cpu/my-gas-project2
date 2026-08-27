@@ -1,10 +1,9 @@
 import { execFile, spawn as nodeSpawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { PINNED_CODEX_PATH } from '../gate0/codex-probe-runner.mjs';
 
 export const BRIDGE_SCHEMA_VERSION = 'gate1-desktop-cua/v1';
-export const GATE1_CODEX_PATH = PINNED_CODEX_PATH;
+export const GATE1_CODEX_PATH = '/Applications/ChatGPT.app/Contents/Resources/codex';
 
 const EVIDENCE_KEYS = Object.freeze([
   'threadCreated',
@@ -304,7 +303,7 @@ export async function runDesktopCuaBridge({
     };
     const send = message => {
       try {
-        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
+        child.stdin.write(`${JSON.stringify(message)}\n`);
         return true;
       } catch {
         finish('command_failed');

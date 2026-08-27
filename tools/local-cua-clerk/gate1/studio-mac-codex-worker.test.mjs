@@ -77,12 +77,17 @@ function fakeAppServer(finalResult = ISSUED, {
     status: 'inProgress',
     items: [],
     error: null,
+    startedAt: 1_000,
+    completedAt: null,
+    durationMs: null,
+    itemsView: 'full',
   };
   const agentMessage = {
     id: 'agent-message-1',
     type: 'agentMessage',
     text: JSON.stringify(finalResult),
     ...(finalPhase === null ? {} : { phase: finalPhase }),
+    memoryCitation: null,
   };
   const completedAgentMessage = {
     ...agentMessage,
@@ -117,11 +122,11 @@ function fakeAppServer(finalResult = ISSUED, {
         emit({ method: 'turn/started', params: { threadId: 'thread-studio-mac', turn } });
         if (commentaryMessage) emit({
           method: 'item/completed',
-          params: { threadId: 'thread-studio-mac', turnId: turn.id, item: commentaryMessage },
+          params: { completedAtMs: 1_001_000, threadId: 'thread-studio-mac', turnId: turn.id, item: commentaryMessage },
         });
         emit({
           method: 'item/completed',
-          params: { threadId: 'thread-studio-mac', turnId: turn.id, item: agentMessage },
+          params: { completedAtMs: 1_002_000, threadId: 'thread-studio-mac', turnId: turn.id, item: agentMessage },
         });
         emit({
           method: 'turn/completed',
@@ -130,6 +135,8 @@ function fakeAppServer(finalResult = ISSUED, {
             turn: {
               ...turn,
               status: 'completed',
+              completedAt: 1_002,
+              durationMs: 2_000,
               items: [...(commentaryMessage ? [commentaryMessage] : []), completedAgentMessage],
             },
           },
@@ -139,7 +146,10 @@ function fakeAppServer(finalResult = ISSUED, {
         emit({
           id: message.id,
           result: {
+            _meta: { source: 'node_repl' },
             content: [{ type: 'text', text: JSON.stringify(verificationEvidence) }],
+            isError: false,
+            structuredContent: null,
           },
         });
       }
@@ -194,6 +204,7 @@ test('one authorized handoff creates one Studio Mac ephemeral Codex turn and ret
   assert.deepEqual(fake.sent.map(message => message.method), [
     'initialize', 'initialized', 'thread/start', 'turn/start', 'thread/start', 'mcpServer/tool/call',
   ]);
+  assert.equal(fake.sent.some(message => Object.hasOwn(message, 'jsonrpc')), false);
   const [threadStart, readbackThreadStart] = fake.sent.filter(message => message.method === 'thread/start');
   assert.equal(threadStart.params.ephemeral, true);
   assert.equal(threadStart.params.approvalPolicy, 'never');
@@ -234,6 +245,27 @@ test('one authorized handoff creates one Studio Mac ephemeral Codex turn and ret
   assert.equal(JSON.stringify(result).includes(TASK.customerName), false);
   assert.equal(JSON.stringify(result).includes(TASK.phone), false);
   assert.deepEqual(fake.signals, []);
+});
+
+test('the default worker launches the Codex binary bundled with this Studio Mac app', async () => {
+  const worker = await loadWorker();
+  const appCodexPath = '/Applications/ChatGPT.app/Contents/Resources/codex';
+  const fake = fakeAppServer(NEEDS_USER, { spawnfile: appCodexPath });
+  let launchedPath;
+
+  await worker.runStudioMacCodexWorker({
+    task: TASK,
+    requestId: '0123456789abcdef',
+    allowTestOverrides: true,
+    spawnImpl(path) {
+      launchedPath = path;
+      return fake.child;
+    },
+    identityReader: async () => 'studio-mac-child-1',
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(launchedPath, appCodexPath);
 });
 
 test('the worker revalidates the exact Gate 1 task contract before any child can spawn', async () => {

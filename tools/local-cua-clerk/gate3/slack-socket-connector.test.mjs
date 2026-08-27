@@ -291,6 +291,7 @@ test('HeyBilly handoffs reject stale, edited, mismatched, and malformed events b
   assert.equal(accepted.accepted, true);
 
   const cases = [
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: '```\n' + renderedObservedBase.replace('task_type: hometax_cash_receipt_issue\nauthorization: owner_explicit', 'authorization: owner_explicit\ntask_type: hometax_cash_receipt_issue') + '\n```' } }, HEYBILLY_SOURCE, 'command_not_allowed'],
     [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: '```text ' + renderedObservedBase.replaceAll('\n', ' ').replace('task_type:', 'unknown_key: injected task_type:') + ' ```' } }, HEYBILLY_SOURCE, 'command_not_allowed'],
     [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: '```\n' + renderedObservedBase.replace(`@${ROUTE.botUserId} 작업 요청`, `@${ROUTE.botUserId}\t작업   요청`) + '\n```' } }, HEYBILLY_SOURCE, 'command_not_allowed'],
     [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: '```\n' + renderedObservedBase.replace('*** 박민경', '***     박민경   ') + '\n```' } }, HEYBILLY_SOURCE, 'command_not_allowed'],

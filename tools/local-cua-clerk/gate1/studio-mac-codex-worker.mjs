@@ -1,10 +1,9 @@
 import { execFile, spawn as nodeSpawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { PINNED_CODEX_PATH } from '../gate0/codex-probe-runner.mjs';
 
 export const STUDIO_MAC_TASK_SCHEMA_VERSION = 'gate1-studio-mac-task/v1';
 export const STUDIO_MAC_RESULT_SCHEMA_VERSION = 'studio-mac-cua-result/v1';
-export const STUDIO_MAC_CODEX_PATH = PINNED_CODEX_PATH;
+export const STUDIO_MAC_CODEX_PATH = '/Applications/ChatGPT.app/Contents/Resources/codex';
 
 const ACTION = 'hometax_cash_receipt_issue';
 const TASK_KEYS = Object.freeze([
@@ -92,6 +91,16 @@ function exactKeys(value, expected, name) {
   const actual = Object.keys(value).sort();
   const wanted = [...expected].sort();
   if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+    throw new TypeError(`${name} has unknown or missing keys`);
+  }
+}
+
+function requiredAndAllowedKeys(value, required, optional, name) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${name} must be an object`);
+  }
+  const allowed = new Set([...required, ...optional]);
+  if (required.some(key => !Object.hasOwn(value, key)) || Object.keys(value).some(key => !allowed.has(key))) {
     throw new TypeError(`${name} has unknown or missing keys`);
   }
 }
@@ -346,21 +355,51 @@ function responseFor(message, expectedId) {
 }
 
 function exactTurn(value, expectedStatus) {
-  try { exactKeys(value, ['id', 'status', 'items', 'error'], 'Codex turn'); }
+  try {
+    requiredAndAllowedKeys(
+      value,
+      ['id', 'status', 'items'],
+      ['error', 'startedAt', 'completedAt', 'durationMs', 'itemsView'],
+      'Codex turn',
+    );
+  }
   catch { return undefined; }
+  const validNullableInteger = key => !Object.hasOwn(value, key) || value[key] === null || Number.isInteger(value[key]);
   if (
     typeof value.id !== 'string'
     || value.id.length === 0
     || value.status !== expectedStatus
     || !Array.isArray(value.items)
-    || value.error !== null
+    || (Object.hasOwn(value, 'error') && value.error !== null)
+    || !validNullableInteger('startedAt')
+    || !validNullableInteger('completedAt')
+    || !validNullableInteger('durationMs')
+    || (Object.hasOwn(value, 'itemsView') && !['notLoaded', 'summary', 'full'].includes(value.itemsView))
   ) return undefined;
   return value;
 }
 
+function validMemoryCitation(value) {
+  if (value === null) return true;
+  try { exactKeys(value, ['entries', 'threadIds'], 'memory citation'); }
+  catch { return false; }
+  if (!Array.isArray(value.entries) || !Array.isArray(value.threadIds)) return false;
+  if (value.threadIds.some(threadId => typeof threadId !== 'string')) return false;
+  return value.entries.every(entry => {
+    try { exactKeys(entry, ['path', 'lineStart', 'lineEnd', 'note'], 'memory citation entry'); }
+    catch { return false; }
+    return typeof entry.path === 'string'
+      && Number.isInteger(entry.lineStart)
+      && entry.lineStart >= 0
+      && Number.isInteger(entry.lineEnd)
+      && entry.lineEnd >= 0
+      && typeof entry.note === 'string';
+  });
+}
+
 function exactAgentMessage(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const allowed = new Set(['id', 'type', 'text', 'phase']);
+  const allowed = new Set(['id', 'type', 'text', 'phase', 'memoryCitation']);
   if (Object.keys(value).some(key => !allowed.has(key))) return undefined;
   if (
     typeof value.id !== 'string'
@@ -369,6 +408,7 @@ function exactAgentMessage(value) {
     || typeof value.text !== 'string'
     || Buffer.byteLength(value.text, 'utf8') > MAX_AGENT_MESSAGE_BYTES
     || !['commentary', 'final_answer'].includes(value.phase)
+    || (Object.hasOwn(value, 'memoryCitation') && !validMemoryCitation(value.memoryCitation))
   ) return undefined;
   return value;
 }
@@ -384,8 +424,16 @@ function parseAgentResult(item) {
 }
 
 function parseVerificationResult(value) {
-  try { exactKeys(value, ['content'], 'readback verification response'); }
+  try {
+    requiredAndAllowedKeys(
+      value,
+      ['content'],
+      ['_meta', 'isError', 'structuredContent'],
+      'readback verification response',
+    );
+  }
   catch { return undefined; }
+  if (Object.hasOwn(value, 'isError') && value.isError !== false && value.isError !== null) return undefined;
   if (!Array.isArray(value.content) || value.content.length !== 1) return undefined;
   const block = value.content[0];
   try { exactKeys(block, ['type', 'text'], 'readback verification block'); }
@@ -515,7 +563,7 @@ export async function runStudioMacCodexWorker({
     };
     const send = message => {
       try {
-        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
+        child.stdin.write(`${JSON.stringify(message)}\n`);
         return true;
       } catch {
         finish('command_failed');
@@ -681,9 +729,14 @@ export async function runStudioMacCodexWorker({
         if (message.method === 'item/completed') {
           const params = notificationEnvelope(message, 'item/completed');
           if (!params) return finish('malformed_result');
-          try { exactKeys(params, ['threadId', 'turnId', 'item'], 'item/completed params'); }
+          try { exactKeys(params, ['completedAtMs', 'threadId', 'turnId', 'item'], 'item/completed params'); }
           catch { return finish('malformed_result'); }
-          if (params.threadId !== threadId || params.turnId !== turnId || !turnStarted) {
+          if (
+            !Number.isInteger(params.completedAtMs)
+            || params.threadId !== threadId
+            || params.turnId !== turnId
+            || !turnStarted
+          ) {
             return finish('malformed_result');
           }
           if (params.item?.type !== 'agentMessage') continue;

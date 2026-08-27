@@ -33,6 +33,7 @@ const HEYBILLY_TASK_SCHEMA_VERSION = 'gate1-studio-mac-task/v1';
 const HEYBILLY_ENVELOPE_SCHEMA_VERSION = 'gate2-heybilly-envelope/v1';
 const HEYBILLY_ACTION = 'studio_mac_cua_handoff';
 const HEYBILLY_TASK_TYPE = 'hometax_cash_receipt_issue';
+const HEYBILLY_READINESS_TASK_TYPE = 'studio_mac_cua_readiness';
 const HANDOFF_MAX_AGE_SECONDS = 600;
 const HANDOFF_MAX_FUTURE_SKEW_SECONDS = 60;
 const HANDOFF_KEYS = Object.freeze([
@@ -158,7 +159,57 @@ function canonicalizeRenderedHeyBillyHandoff(text, botUserId) {
   lines[0] = `<@${botUserId}> 작업 요청 (홈택스 CUA)`;
   lines[5] = `customer_name: ${customer[1]}`;
   lines[10] = `phone: ${phone[1]}`;
+  if (
+    lines[1] !== '[MAC_AGENT_HANDOFF_V1]'
+    || lines[12] !== '[/MAC_AGENT_HANDOFF_V1]'
+    || HANDOFF_KEYS.some((key, index) => !lines[index + 2].startsWith(`${key}: `))
+  ) {
+    return undefined;
+  }
   return lines.join('\n');
+}
+
+function canonicalizeRenderedHeyBillyReadinessHandoff(text, botUserId) {
+  const lines = text.split('\n');
+  if (
+    lines.length !== 6
+    || lines[0] !== `@${botUserId} 작업 요청 (스튜디오맥 CUA 상태 확인)`
+  ) return undefined;
+  lines[0] = `<@${botUserId}> 작업 요청 (스튜디오맥 CUA 상태 확인)`;
+  return lines.join('\n');
+}
+
+function unwrapObservedHeyBillyReadinessHandoff(text, botUserId) {
+  const fenced = /^```([^`\r\n][\s\S]+)\n```$/u.exec(text);
+  if (!fenced || fenced[1].includes('```')) return undefined;
+  const lines = fenced[1].split('\n');
+  if (
+    lines.length !== 6
+    || lines[0] !== `@${botUserId} 작업 요청 (스튜디오맥 CUA 상태 확인)`
+    || lines[5] !== '[/MAC_..._V1]'
+  ) return undefined;
+  lines[0] = `<@${botUserId}> 작업 요청 (스튜디오맥 CUA 상태 확인)`;
+  lines[5] = '[/MAC_AGENT_READINESS_V1]';
+  return Object.freeze({ fenced: true, collapsed: false, text: lines.join('\n') });
+}
+
+function parseHeyBillyReadinessHandoff(text, botUserId) {
+  const transport = unwrapSlackSafeHandoff(text)
+    ?? unwrapObservedHeyBillyReadinessHandoff(text, botUserId);
+  if (!transport?.fenced || transport.collapsed) return undefined;
+  const canonicalized = canonicalizeRenderedHeyBillyReadinessHandoff(transport.text, botUserId);
+  const lines = (canonicalized ?? transport.text).split('\n');
+  if (
+    lines.length !== 6
+    || lines[0] !== `<@${botUserId}> 작업 요청 (스튜디오맥 CUA 상태 확인)`
+    || lines[1] !== '[MAC_AGENT_READINESS_V1]'
+    || lines[3] !== `task_type: ${HEYBILLY_READINESS_TASK_TYPE}`
+    || lines[4] !== 'authorization: read_only'
+    || lines[5] !== '[/MAC_AGENT_READINESS_V1]'
+  ) return undefined;
+  const handoff = /^handoff_id: (hb-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.exec(lines[2]);
+  if (!handoff) return undefined;
+  return Object.freeze({ handoffId: handoff[1] });
 }
 
 function parseHeyBillyHandoff(text, botUserId) {
@@ -288,6 +339,22 @@ export function adaptSlackAppMention({
     const ageSeconds = nowEpochSeconds - body.event_time;
     if (ageSeconds > HANDOFF_MAX_AGE_SECONDS || ageSeconds < -HANDOFF_MAX_FUTURE_SKEW_SECONDS) {
       return rejected('stale_event');
+    }
+    const readiness = parseHeyBillyReadinessHandoff(event.text, route.botUserId);
+    if (readiness) {
+      return Object.freeze({
+        accepted: true,
+        kind: 'heybilly_readiness',
+        envelope: Object.freeze({
+          schemaVersion: ENVELOPE_SCHEMA_VERSION,
+          source: LIVE_SLACK_SOURCE,
+          teamId: route.teamId,
+          channelId: route.channelId,
+          eventId: readiness.handoffId,
+          threadTs: event.thread_ts,
+          action: ALLOWED_ACTION,
+        }),
+      });
     }
     const task = parseHeyBillyHandoff(event.text, route.botUserId);
     if (!task) return rejected('command_not_allowed');

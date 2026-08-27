@@ -1,8 +1,9 @@
 # Gate 3 — 별도 Slack 직원 커넥터
 
 이 디렉터리는 기존 헤이빌리와 분리된 `맥에이전트` Slack 앱을 이 로컬 스튜디오맥의
-Gate 2 원장과 Gate 1 CUA 워커에 연결한다. 사람의 `상태 확인`과, 정확히 고정된 HeyBilly
-`MAC_AGENT_HANDOFF_V1` 현금영수증 인계만 허용한다.
+Gate 2 원장과 Gate 1 CUA 워커에 연결한다. 사람의 `상태 확인`, PII 없는 HeyBilly
+`studio_mac_cua_readiness`, 정확히 고정된 HeyBilly 현금영수증
+`MAC_AGENT_HANDOFF_V1` 인계만 허용한다.
 
 ## 현재 상태
 
@@ -81,9 +82,17 @@ Node의 주변 환경변수를 사용하지 않고 비밀파일을 매 시작마
   일반 멘션·고객명 강조·전화 링크 변환은 고정 13줄 위치와 값 일치가 모두 맞을 때만
   원래 필드로 복원한다. 실측된 한 줄 공백 축약형도 고정 필드 13개·순서·구분자·값이
   전부 일치할 때만 복원하며, 다른 변형은 계속 거부한다.
+- HeyBilly readiness는 별도 `[MAC_AGENT_READINESS_V1]` fenced 6줄 계약의
+  `studio_mac_cua_readiness`와 `authorization: read_only`만 수용한다.
+  실측된 HeyBilly 코드 블록의 여는 fence 직후 줄바꿈 생략과 정확한
+  `[/MAC_..._V1]` 닫힘 표기는 나머지 5줄이 모두 일치할 때만 이 readiness 경로에서
+  원래 값으로 복원하며, 금융 인계에는 적용하지 않는다.
+  고객·거래·금액·전화 등 금융/PII 필드는
+  허용하지 않으며 기존 Gate 2 `desktop_readiness` 원장과 Gate 1 CUA 브리지를 재사용한다.
 - 고객 데이터는 실행 중 메모리에만 두고 원장에는 opaque handoff ID와 고정 상태만 남긴다.
 - 동일 handoff ID는 한 번만 실행하며, `running`·전달 불명 상태는 사람 확인 없이 재실행하지 않는다.
-- 진행상황은 원 요청 스레드에 `스튜디오맥 접수`와 최종 완료/사용자 확인 필요로 표시한다.
+- 현금영수증 인계 진행상황은 원 요청 스레드에 `스튜디오맥 접수`와 최종 완료/사용자 확인
+  필요로 표시하고, readiness는 같은 스레드에 준비 상태 최종 결과만 표시한다.
 - Slack 원문은 Gate 2 envelope로 매핑한 직후 폐기하며 원장에 저장하지 않는다.
 - 최상위 메시지는 그 메시지의 `ts`, 기존 스레드는 부모 `thread_ts`로 회신한다.
 - `chat.postMessage` 결과를 `conversations.replies`에서 같은 봇·같은 본문·같은 `ts`로 다시
