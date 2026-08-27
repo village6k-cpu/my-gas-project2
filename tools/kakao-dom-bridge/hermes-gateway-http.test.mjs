@@ -543,6 +543,13 @@ test('Gateway HTTP returns registered change unresolved after restart without re
       request_digest: expectedRegisteredReservationChangeDigest(request)
     });
     const restarted = createHermesGatewayChannel({ directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now });
+    const review = await restarted.get(claim.job_id);
+    assert.equal(review.state, 'failed');
+    assert.equal(review.human_review_required, true);
+    assert.equal(review.error.type, 'confirmation_operation_unresolved');
+    assert.equal(review.error.operation_state, 'reserved');
+    assert.equal(review.failure_notification.state, 'pending');
+    assert.equal(await restarted.claim({ consumerId: 'gateway-after-restart', waitMs: 0 }), null);
     let executions = 0;
     const app = await start(createHermesGatewayHttpHandler({
       token, channel: restarted, transport: 'gateway', now: () => clock.now,

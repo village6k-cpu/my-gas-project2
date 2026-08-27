@@ -196,6 +196,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
   const jobs = new Map();
   let initialized = false;
   let needsReconciliation = false;
+  let needsStartupOperationReconciliation = false;
   let queueOrder = 0;
   let mutationTail = Promise.resolve();
   let lastConsumerId = null;
@@ -237,6 +238,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
     }
     initialized = true;
     needsReconciliation = true;
+    needsStartupOperationReconciliation = jobs.size > 0;
   }
 
   async function update(job, changes) {
@@ -284,6 +286,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
 
   async function reconcilePending() {
     if (!needsReconciliation) return;
+    const reconcileRestartedOperations = needsStartupOperationReconciliation;
     for (const job of [...jobs.values()]) {
       if (job.state === 'retry_wait') await update(job, { state: 'ready' });
       if (job.application?.state === 'claimed') {
@@ -324,18 +327,42 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           }
         });
       }
-      const missingOperationalFailureNotification = !job.failure_notification
-        && job.human_review_required === true
-        && (job.state === 'failed'
-          || (job.state === 'superseded'
-            && job.error?.type === 'confirmation_operation_unresolved'
-            && Boolean(job.tool_operation)));
+      let reconciledJob = jobs.get(job.job_id);
+      if (reconcileRestartedOperations
+        && reconciledJob.tool_operation?.state === 'reserved'
+        && !TERMINAL_STATES.has(reconciledJob.state)) {
+        const operation = reconciledJob.tool_operation;
+        reconciledJob = await update(reconciledJob, {
+          state: 'failed',
+          claimed_by: null,
+          lease_id: null,
+          lease_expires_at: null,
+          lease_expires_at_ms: null,
+          claimed_at: null,
+          claimed_at_ms: null,
+          human_review_required: true,
+          failure_notification: pendingFailureNotification(reconciledJob),
+          error: {
+            type: 'confirmation_operation_unresolved',
+            operation_id: operation.operation_id,
+            operation_state: operation.state,
+            reason: 'receipt_not_persisted'
+          }
+        });
+      }
+      const missingOperationalFailureNotification = !reconciledJob.failure_notification
+        && reconciledJob.human_review_required === true
+        && (reconciledJob.state === 'failed'
+          || (reconciledJob.state === 'superseded'
+            && reconciledJob.error?.type === 'confirmation_operation_unresolved'
+            && Boolean(reconciledJob.tool_operation)));
       if (missingOperationalFailureNotification) {
-        await update(jobs.get(job.job_id), { failure_notification: pendingFailureNotification(job) });
+        await update(reconciledJob, { failure_notification: pendingFailureNotification(reconciledJob) });
       }
     }
     for (const roomKey of new Set([...jobs.values()].map((job) => job.room_key))) await reconcileRoom(roomKey);
     needsReconciliation = false;
+    needsStartupOperationReconciliation = false;
   }
 
   async function mutate(operation) {
