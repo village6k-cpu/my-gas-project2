@@ -998,10 +998,11 @@ function normalizedStaffMutationPlan(rows, nameField) {
   }));
 }
 
-function staffConfirmedMutationDecisionErrors(decision, mutation) {
+function staffConfirmedMutationDecisionErrors(decision, mutation, options = {}) {
   if (mutation === null) return [];
   const errors = [];
-  const validation = validateStaffConfirmedMutation(mutation);
+  const roomRevision = options?.roomRevision;
+  const validation = validateStaffConfirmedMutation(mutation, { roomRevision });
   if (!validation.valid) {
     return validation.errors.map((error) => `staff_confirmed_mutation.${error}`);
   }
@@ -1056,8 +1057,9 @@ function staffConfirmedMutationDecisionErrors(decision, mutation) {
   return errors;
 }
 
-export function validateAiDecisionContract(decision = {}) {
+export function validateAiDecisionContract(decision = {}, options = {}) {
   const errors = [];
+  const roomRevision = options?.roomRevision;
   if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
     return { valid: false, errors: ['decision must be an object'] };
   }
@@ -1311,7 +1313,7 @@ export function validateAiDecisionContract(decision = {}) {
   }
 
   if (Object.hasOwn(decision, 'staff_confirmed_mutation')) {
-    errors.push(...staffConfirmedMutationDecisionErrors(decision, decision.staff_confirmed_mutation));
+    errors.push(...staffConfirmedMutationDecisionErrors(decision, decision.staff_confirmed_mutation, { roomRevision }));
   }
 
   return { valid: errors.length === 0, errors };
@@ -1731,8 +1733,9 @@ export function buildSheetAppendPayload(decision, options = {}) {
   };
 }
 
-export function validateVillageConfirmationExecutionDecision(decision = {}) {
-  const validation = validateAiDecisionContract(decision);
+export function validateVillageConfirmationExecutionDecision(decision = {}, options = {}) {
+  const roomRevision = options?.roomRevision;
+  const validation = validateAiDecisionContract(decision, { roomRevision });
   if (!validation.valid) return validation;
   if (decision.should_write_to_sheet === true) {
     const planned = Array.isArray(decision?.sheet_row_candidate?.equipment)
@@ -8929,7 +8932,9 @@ export async function executeVillageConfirmationRequest({
     error
   });
 
-  const validation = (dependencies.validateAiDecisionContract || validateVillageConfirmationExecutionDecision)(decision);
+  const validation = (dependencies.validateAiDecisionContract || validateVillageConfirmationExecutionDecision)(decision, {
+    roomRevision: requestedRevision
+  });
   if (!validation?.valid) {
     return buildReceipt({
       status: 'failed',
