@@ -882,6 +882,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           if (job.state === 'completed' && (!lastCompleted || job.updated_at > lastCompleted.updated_at)) lastCompleted = job;
           if (job.tool_operation?.tool === 'registered_reservation_change') {
             const operation = job.tool_operation;
+            const exactReceipt = exactReceiptForToolOperation(job);
             if (operation.state === 'reserved') {
               registeredReservationChange.reserved += 1;
               const createdAtMs = Date.parse(operation.created_at);
@@ -894,14 +895,17 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
             } else if (operation.state === 'completed') {
               registeredReservationChange.completed += 1;
             }
-            if (job.human_review_required === true) registeredReservationChange.failed_human_review += 1;
+            const receiptRequiresHumanReview = exactReceipt?.schema === 'village-registered-reservation-change-receipt/v1'
+              && ['blocked', 'failed', 'partial_success'].includes(exactReceipt.status);
+            if (receiptRequiresHumanReview || job.human_review_required === true) {
+              registeredReservationChange.failed_human_review += 1;
+            }
             if (job.failure_notification?.state === 'pending') {
               registeredReservationChange.pending_failure_notifications += 1;
             }
             if (hasPendingApplicationFailureNotification(job)) {
               registeredReservationChange.pending_failure_notifications += 1;
             }
-            const exactReceipt = exactReceiptForToolOperation(job);
             const completedAtMs = Date.parse(operation.completed_at);
             const successfulCompletion = exactReceipt?.schema === 'village-registered-reservation-change-receipt/v1'
               && exactReceipt.status === 'ok'
