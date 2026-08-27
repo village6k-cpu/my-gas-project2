@@ -9847,6 +9847,13 @@ export async function prepareKakaoGatewayDecision({
     if (!parsedDecisionValid) {
       reason = '직원 확정 pending RQ typed 결정이 현재 방/리비전 계약을 충족하지 못했습니다.';
       decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: true, reason });
+    } else if (exactConfirmationReceipts.length > 1
+      || exactReceipts.length > 1
+      || safetyFailures.includes('invalid_trusted_receipt')
+      || safetyFailures.includes('conflicting_trusted_receipts')) {
+      safetyFailures.push('pending_change_receipt_set_invalid');
+      reason = '직원 확정 pending RQ 변경을 확정할 수 있는 exact confirmation receipt가 단 하나로 확정되지 않았습니다.';
+      decision = forceGatewayOwnerReviewDecision(decision || {}, { job, schedule: true, reason });
     } else if (!trustedConfirmationReceipt) {
       safetyFailures.push('pending_change_without_trusted_receipt');
       reason = '직원 확정 pending RQ 변경이 있지만 채널에 영속화된 confirmation receipt가 없습니다.';

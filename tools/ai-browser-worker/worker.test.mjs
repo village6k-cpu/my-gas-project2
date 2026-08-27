@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { spawnSync } from 'node:child_process';
@@ -744,6 +745,41 @@ function pendingReceiptFixture(job, overrides = {}) {
   });
 }
 
+function extractSourceFunction(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `${name} must exist`);
+  const bodyStart = source.indexOf('{', start);
+  let depth = 0;
+  let quote = '';
+  let escaped = false;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '{') depth += 1;
+    if (char === '}' && --depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`unterminated ${name}`);
+}
+
+function productionRunFunctionResponse(insertResult) {
+  const sheetApiSource = fs.readFileSync(path.resolve('sheetAPI.js'), 'utf8');
+  const context = { insertAndCheckRequest: () => structuredClone(insertResult) };
+  vm.runInNewContext(
+    `${extractSourceFunction(sheetApiSource, 'runFunction')}\nthis.runFunction = runFunction;`,
+    context
+  );
+  return context.runFunction('insertAndCheckRequest', { args: { typed: true } });
+}
+
 function documentDecisionFixture(overrides = {}) {
   return gatewayDecisionFixture({
     classification: 'faq',
@@ -866,6 +902,29 @@ test('exact typed pending success finalizes no-reply without duplicate owner rev
   assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, false);
 });
 
+test('production sheetAPI runFunction preserves exact pending fence evidence through worker finalization', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = pendingDecisionFixture();
+  const productionResult = pendingReceiptFixture(job).authoritative_sheet_result;
+  productionResult.replacedRows = [42];
+  productionResult.staff_confirmed_pending_mutation.internal_only = 'must-not-cross-runFunction';
+  productionResult.staff_confirmed_pending_mutation.final_plan[0].internal_only = 'must-not-cross-runFunction';
+  const authoritativeSheetResult = productionRunFunctionResponse(productionResult);
+  const receipt = pendingReceiptFixture(job, { authoritative_sheet_result: authoritativeSheetResult });
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: [receipt]
+  });
+
+  assert.deepEqual(authoritativeSheetResult.replacedReqIDs, ['RQ-260824-008']);
+  assert.equal(authoritativeSheetResult.staff_confirmed_pending_mutation.target_request_id, 'RQ-260824-008');
+  assert.equal(Object.hasOwn(authoritativeSheetResult, 'replacedRows'), false);
+  assert.equal(Object.hasOwn(authoritativeSheetResult.staff_confirmed_pending_mutation, 'internal_only'), false);
+  assert.equal(Object.hasOwn(authoritativeSheetResult.staff_confirmed_pending_mutation.final_plan[0], 'internal_only'), false);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+  assert.equal(prepared.decision.owner_review_required, false);
+  assert.deepEqual(prepared.availabilityAwareRows, []);
+});
+
 test('typed pending stale or missing durable receipt stays no-send with one owner review', async () => {
   const { job, turn } = gatewayTurnFixture();
   const decision = pendingDecisionFixture();
@@ -888,6 +947,28 @@ test('typed pending stale or missing durable receipt stays no-send with one owne
     assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send', label);
     assert.equal(prepared.decision.owner_review_required, true, label);
     assert.equal(prepared.availabilityAwareRows.length, 1, label);
+  }
+});
+
+test('typed pending success rejects invalid, conflicting, or duplicate trusted receipt sets', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = pendingDecisionFixture();
+  const exact = pendingReceiptFixture(job);
+  const cases = [
+    ['exact plus stale', [exact, pendingReceiptFixture({ ...job, roomRevision: job.roomRevision + 1 })], 'invalid_trusted_receipt'],
+    ['conflicting exact-shaped', [exact, pendingReceiptFixture(job, { receipt_id: 'conflicting-exact-receipt' })], 'conflicting_trusted_receipts'],
+    ['duplicate exact', [exact, structuredClone(exact)], 'pending_change_receipt_set_invalid']
+  ];
+  for (const [label, receipts, expectedFailure] of cases) {
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: receipts
+    });
+    assert.notEqual(prepared.decision.reply_decision.replyMode, 'no_reply', label);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', label);
+    assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send', label);
+    assert.equal(prepared.decision.owner_review_required, true, label);
+    assert.equal(prepared.availabilityAwareRows.length, 1, label);
+    assert.equal(prepared.gatewaySafetyFailures.includes(expectedFailure), true, label);
   }
 });
 

@@ -126,6 +126,17 @@ function pendingFence({ requestId = 'RQ-260824-008', expectedBefore, expectedPer
   };
 }
 
+function exactTargetMissingPeriod(component) {
+  const period = {
+    start: '2026-08-27', startTime: '06:00', end: '2026-08-27', endTime: '18:00'
+  };
+  period[component] = '';
+  return new FakeSheet([requestRow({
+    reqID: 'RQ-260824-008', ...period,
+    equip: '소니 FE 28-135mm', qty: 1, name: '테스트 고객', phone: '010-1111-2222'
+  })]);
+}
+
 const dateChangeSheet = new FakeSheet([
   requestRow({
     reqID: 'RQ-260824-008', start: '2026-08-27', startTime: '06:00', end: '2026-08-27', endTime: '18:00',
@@ -189,7 +200,18 @@ for (const blocked of [
     })]),
     fence: pendingFence(),
     pattern: /수정할 수 없|mutable/i
-  }
+  },
+  ...[
+    ['missing start date', 'start'],
+    ['missing start time', 'startTime'],
+    ['missing end date', 'end'],
+    ['missing end time', 'endTime']
+  ].map(([label, component]) => ({
+    label,
+    sheet: exactTargetMissingPeriod(component),
+    fence: pendingFence(),
+    pattern: /기대.*기간|baseline.*period/i
+  }))
 ]) {
   const writesBefore = blocked.sheet.writeCount;
   assert.throws(

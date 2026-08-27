@@ -11554,13 +11554,17 @@ function _resolveStaffConfirmedPendingRequestFence_(sheet, fence) {
   if (!_confirmRequestEquipListEquivalent_(group.topLevelEquipItems, expectedItems)) {
     throw new Error("직원확정 기대 장비 baseline plan이 현재 확인요청과 다릅니다: " + requestId);
   }
-  if (!_confirmRequestSamePeriod_(
-    group,
-    expectedPeriod.start_date,
-    expectedPeriod.start_time,
-    expectedPeriod.end_date,
-    expectedPeriod.end_time
-  )) {
+  var currentPeriod = {
+    start_date: String(group.startDate || "").trim(),
+    start_time: String(group.startTime || "").trim(),
+    end_date: String(group.endDate || "").trim(),
+    end_time: String(group.endTime || "").trim()
+  };
+  if (!currentPeriod.start_date || !currentPeriod.start_time || !currentPeriod.end_date || !currentPeriod.end_time ||
+      currentPeriod.start_date !== expectedPeriod.start_date ||
+      currentPeriod.start_time !== expectedPeriod.start_time ||
+      currentPeriod.end_date !== expectedPeriod.end_date ||
+      currentPeriod.end_time !== expectedPeriod.end_time) {
     throw new Error("직원확정 기대 기간 baseline period가 현재 확인요청과 다릅니다: " + requestId);
   }
   return { group: group, expectedBefore: expectedBefore, expectedPeriod: expectedPeriod };
