@@ -2537,6 +2537,65 @@ test('executeVillageConfirmationRequest rejects stale correlation and stale fres
   assert.equal(appendCalls, 0);
 });
 
+test('executeVillageConfirmationRequest rejects stale pending staff evidence before appendToSheet', async () => {
+  const decision = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260824-008'],
+    staff_confirmed_mutation: {
+      confirmed: true,
+      kind: 'equipment_replace',
+      target_scope: 'pending_request',
+      request_id: 'RQ-260824-008',
+      source_evidence: {
+        customer_request: '28-135 빼고 70-200으로 변경',
+        staff_confirmation: '네',
+        conversation_revision: 7
+      },
+      expected_before: [{ name: '소니 FE 28-135mm', quantity: 1 }],
+      desired_after: [{ name: '소니 GM 70-200mm II', quantity: 1 }],
+      date_change: null
+    },
+    sheet_row_candidate: {
+      equipment_write_mode: 'replace_full_plan',
+      equipment: [{ item: '소니 GM 70-200mm II', quantity: 1 }]
+    },
+    safety_checks: { no_auto_reply_sent: true },
+    reservation_inquiry: { confirmed: true, already_registered: false }
+  });
+  let appendCalls = 0;
+
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-stale-staff-evidence', roomKey: 'room-stale-staff-evidence', roomRevision: 8 },
+    roomRevision: 8,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
+      fetchExistingConfirmRequestResultForDecision: async () => ({
+        success: true,
+        duplicate: true,
+        reqID: 'RQ-260824-008',
+        source: 'existing_confirm_request_lookup',
+        topLevelEquipment: [{ 이름: '소니 FE 28-135mm', 수량: 1 }],
+        results: []
+      }),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
+      appendToSheet: async () => {
+        appendCalls += 1;
+        return { success: true, reqID: 'RQ-260824-009', results: [] };
+      },
+      assertCurrentClaim: async () => {},
+      randomUUID: () => 'receipt-stale-staff-evidence',
+      now: () => new Date('2026-08-24T01:00:00.000Z')
+    }
+  });
+
+  assert.equal(appendCalls, 0);
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.error.type, 'invalid_decision');
+  assert.ok(receipt.error.validation_errors.some((error) => /conversation_revision does not match room revision/.test(error)));
+});
+
 test('executeVillageConfirmationRequest preserves missing-contact GAS rejection as a failed authoritative receipt', async () => {
   const decision = completeSheetDecision({ sheet_row_candidate: { phone: '' } });
   const receipt = await workerModule.executeVillageConfirmationRequest({
