@@ -18,6 +18,7 @@ import {
   buildFollowUpCaseLifecycle,
   mergeFollowUpCaseLifecycle
 } from './follow-up-case-lifecycle.mjs';
+import { validateStaffConfirmedMutation } from './staff-confirmed-mutation.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -650,6 +651,13 @@ export function buildHermesPrompt(job, options = {}) {
 - When existing_confirm_request_ids names an unchanged existing RQ, call village_confirmation_request once with should_write_to_sheet=false to 검증 기존 RQ 실재 여부; never pre-verify a write.
 - For a pending-RQ addition, make one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only"; the executor verifies the exact RQ and merges its authoritative full plan inside that same operation. Never spend the operation fence on a should_write_to_sheet=false pre-read.
 - For a pending-RQ replacement, make one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ in that operation.
+- A customer request without a later staff confirmation is read-only: set staff_confirmed_mutation=null and call no mutation tool.
+- For target_scope="pending_request" and kind="equipment_add", call village_confirmation_request once with additions_only. For pending_request equipment_remove, equipment_replace, equipment_quantity_change, or date_time_change, call village_confirmation_request once with replace_full_plan.
+- For target_scope="registered_trade", call village_registered_reservation_change exactly once before FINAL_JSON. Retain the exact typed staff_confirmed_mutation in FINAL_JSON, set should_write_to_sheet=false, replyMode="no_reply", safety_checks.no_auto_reply_sent=true, and do not send another customer reply after success.
+- A registered_trade mutation must not call village_confirmation_request and must never claim that a new RQ is the registered change.
+- Do not parse RQ or trade IDs from prose. Only exact typed fields backed by authoritative lookups count.
+- For ambiguous target, catalog, or staff evidence: set staff_confirmed_mutation=null, call no mutation tool, make no customer success claim, and create one urgent owner-review follow-up.
+- blocked, failed, partial_success, or contradictory registered readback is draft-only/no-send owner review. Never call either mutation tool again to replay it.
 - For an explicit registered-trade quote send, call village_document_send with the exact trade_id before FINAL_JSON. Choose tax_mode="supply_only" only for an explicit VAT-exclusive request; otherwise use "vat_included".
 - A successful correlated village_document_send receipt is the only delivery authority. Do not promise that a quote was or will be sent without that receipt; on tool failure use draft_only + owner review.
 - If that verification says an existing RQ was not found and the reservation remains unregistered, correct the decision to should_write_to_sheet=true and call the tool again with the complete sheet row before finishing.
@@ -805,6 +813,7 @@ The JSON schema:
   "latest_staff_message": string | null,
   "visible_messages_used": [{ "sender": string, "message": string, "time": string | null }],
   "existing_confirm_request_ids": ["RQ-YYMMDD-NNN"],
+  "staff_confirmed_mutation": object | null,
   "rag_usage": { "used": boolean, "required_for_auto_send": boolean, "question": string | null, "logId": string | null, "confidence": string | null, "knowledgeSource": string | null, "usedSources": array, "applied_to_reply": boolean, "reason": string },
   "follow_up_items": [
     {
@@ -979,6 +988,72 @@ function replyAttachmentKeys(decision = {}) {
 function replyAlreadyDelivered(decision = {}) {
   const reply = decisionReply(decision);
   return reply.alreadyDelivered ?? reply.already_delivered;
+}
+
+function normalizedStaffMutationPlan(rows, nameField) {
+  if (!Array.isArray(rows)) return null;
+  return rows.map((row) => ({
+    name: text(row?.[nameField]).trim(),
+    quantity: Number(row?.quantity)
+  }));
+}
+
+function staffConfirmedMutationDecisionErrors(decision, mutation) {
+  if (mutation === null) return [];
+  const errors = [];
+  const validation = validateStaffConfirmedMutation(mutation);
+  if (!validation.valid) {
+    return validation.errors.map((error) => `staff_confirmed_mutation.${error}`);
+  }
+  const inquiry = decision?.reservation_inquiry && typeof decision.reservation_inquiry === 'object'
+    ? decision.reservation_inquiry
+    : {};
+  const safetyChecks = decision?.safety_checks && typeof decision.safety_checks === 'object'
+    ? decision.safety_checks
+    : {};
+  const existingIds = Array.isArray(decision?.existing_confirm_request_ids)
+    ? decision.existing_confirm_request_ids.map((value) => text(value).trim()).filter(Boolean)
+    : [];
+
+  if (mutation.target_scope === 'registered_trade') {
+    if (decision.should_write_to_sheet !== false) {
+      errors.push('registered staff_confirmed_mutation requires should_write_to_sheet=false');
+    }
+    if (inquiry.already_registered !== true) {
+      errors.push('registered staff_confirmed_mutation requires reservation_inquiry.already_registered=true');
+    }
+    if (safetyChecks.duplicate_checked_contract_master !== true
+      || safetyChecks.duplicate_checked_schedule_detail !== true) {
+      errors.push('registered staff_confirmed_mutation requires authoritative contract and schedule checks');
+    }
+    if (safetyChecks.no_auto_reply_sent !== true) {
+      errors.push('registered staff_confirmed_mutation requires safety_checks.no_auto_reply_sent=true');
+    }
+    if (existingIds.length > 0) {
+      errors.push('registered staff_confirmed_mutation must not claim a confirmation request ID');
+    }
+    return errors;
+  }
+
+  if (decision.should_write_to_sheet !== true) {
+    errors.push('pending staff_confirmed_mutation requires should_write_to_sheet=true');
+  }
+  if (inquiry.already_registered === true) {
+    errors.push('pending staff_confirmed_mutation requires reservation_inquiry.already_registered=false');
+  }
+  if (existingIds.length !== 1 || existingIds[0] !== mutation.request_id) {
+    errors.push('pending staff_confirmed_mutation requires one exact matching existing_confirm_request_ids entry');
+  }
+  const expectedMode = mutation.kind === 'equipment_add' ? 'additions_only' : 'replace_full_plan';
+  if (text(decision?.sheet_row_candidate?.equipment_write_mode).trim() !== expectedMode) {
+    errors.push(`pending ${mutation.kind} requires sheet_row_candidate.equipment_write_mode=${expectedMode}`);
+  }
+  const desiredPlan = normalizedStaffMutationPlan(mutation.desired_after, 'name');
+  const sheetPlan = normalizedStaffMutationPlan(decision?.sheet_row_candidate?.equipment, 'item');
+  if (!sameGatewayDecisionValue(desiredPlan, sheetPlan)) {
+    errors.push('pending staff_confirmed_mutation desired_after must equal the normalized sheet_row_candidate equipment plan');
+  }
+  return errors;
 }
 
 export function validateAiDecisionContract(decision = {}) {
@@ -1233,6 +1308,10 @@ export function validateAiDecisionContract(decision = {}) {
         }
       });
     }
+  }
+
+  if (Object.hasOwn(decision, 'staff_confirmed_mutation')) {
+    errors.push(...staffConfirmedMutationDecisionErrors(decision, decision.staff_confirmed_mutation));
   }
 
   return { valid: errors.length === 0, errors };
@@ -9133,12 +9212,84 @@ function exactTrustedDocumentReceipt(receipt, { jobId, roomKey, roomRevision }) 
     || (receipt.error && typeof receipt.error === 'object' && !Array.isArray(receipt.error));
 }
 
+function exactTrustedRegisteredReservationChangeReceipt(receipt, { jobId, roomKey, roomRevision }) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return false;
+  if (receipt.schema !== 'village-registered-reservation-change-receipt/v1') return false;
+  if (!text(receipt.receipt_id).trim()
+    || !text(receipt.lease_id).trim()
+    || !/^[a-f0-9]{64}$/i.test(text(receipt.request_digest).trim())
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text(receipt.operation_id).trim())) return false;
+  if (receipt.job_id !== jobId || receipt.room_key !== roomKey || receipt.room_revision !== roomRevision) return false;
+  if (receipt.target_scope !== 'registered_trade' || !/^\d{6}-\d{3}$/.test(text(receipt.trade_id).trim())) return false;
+  if (!['equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change']
+    .includes(text(receipt.mutation_kind).trim())) return false;
+  if (!['ok', 'blocked', 'failed', 'partial_success'].includes(text(receipt.status).trim())) return false;
+  if (!Array.isArray(receipt.applied_stages)
+    || receipt.applied_stages.some((stage) => !text(stage).trim())) return false;
+  if (!(receipt.attempted_stage === null || text(receipt.attempted_stage).trim())) return false;
+  if (receipt.customer_reply !== 'no_reply' || !validGatewayReceiptTimestamp(receipt.created_at)) return false;
+  const authoritativeResult = receipt.authoritative_result;
+  if (!(authoritativeResult === null
+    || (authoritativeResult && typeof authoritativeResult === 'object' && !Array.isArray(authoritativeResult)))) return false;
+  const validError = receipt.error === null || typeof receipt.error === 'string'
+    || (receipt.error && typeof receipt.error === 'object' && !Array.isArray(receipt.error));
+  if (!validError) return false;
+  if (receipt.status === 'ok') return authoritativeResult !== null && receipt.error === null;
+  return receipt.error !== null;
+}
+
+function registeredMutationDesiredQuantities(mutation) {
+  const quantities = {};
+  for (const row of Array.isArray(mutation?.desired_after) ? mutation.desired_after : []) {
+    const name = text(row?.name).trim();
+    const quantity = Number(row?.quantity);
+    if (!name || !Number.isInteger(quantity) || quantity <= 0) return null;
+    quantities[name] = (quantities[name] || 0) + quantity;
+  }
+  return quantities;
+}
+
+function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
+  const authoritative = receipt?.authoritative_result;
+  const contract = authoritative?.contract;
+  const schedule = authoritative?.schedule;
+  const ledger = authoritative?.ledger;
+  if (!contract || typeof contract !== 'object' || Array.isArray(contract)
+    || !schedule || typeof schedule !== 'object' || Array.isArray(schedule)
+    || !ledger || typeof ledger !== 'object' || Array.isArray(ledger)) return false;
+  const expectedPeriod = mutation?.date_change === null
+    ? {
+        startDate: mutation?.expected_period?.start_date,
+        startTime: mutation?.expected_period?.start_time,
+        endDate: mutation?.expected_period?.end_date,
+        endTime: mutation?.expected_period?.end_time
+      }
+    : {
+        startDate: mutation?.date_change?.new_start_date,
+        startTime: mutation?.date_change?.new_start_time,
+        endDate: mutation?.date_change?.new_end_date,
+        endTime: mutation?.date_change?.new_end_time
+      };
+  if (!sameGatewayDecisionValue({
+    startDate: contract.startDate,
+    startTime: contract.startTime,
+    endDate: contract.endDate,
+    endTime: contract.endTime
+  }, expectedPeriod)) return false;
+  const desired = registeredMutationDesiredQuantities(mutation);
+  const topLevel = schedule.topLevelQuantities;
+  if (!desired || !topLevel || typeof topLevel !== 'object' || Array.isArray(topLevel)) return false;
+  const normalizedTopLevel = Object.fromEntries(Object.entries(topLevel).map(([name, quantity]) => [name, Number(quantity)]));
+  return sameGatewayDecisionValue(normalizedTopLevel, desired);
+}
+
 function gatewayDecisionHasStructuredScheduleClaim(decision = {}) {
   const followUps = Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [];
   const classification = text(decision?.classification).trim();
   const reservationAuthorityClaim = classification === 'reservation'
     && (replySafetyClass(decision) === 'sensitive_commitment' || replyGrounding(decision) === 'authoritative_sheet');
   return decision?.should_write_to_sheet === true
+    || (decision?.staff_confirmed_mutation && typeof decision.staff_confirmed_mutation === 'object')
     || decision?.post_action_reconciled === true
     || (decision?.authoritative_sheet_result && typeof decision.authoritative_sheet_result === 'object')
     || replySafetyClass(decision) === 'authoritative_availability_answer'
@@ -9164,9 +9315,128 @@ function stripAgentSuppliedReceiptFields(decision = {}) {
     trusted_confirmation_receipt: _trustedConfirmationReceipt,
     document_receipt: _documentReceipt,
     trusted_document_receipt: _trustedDocumentReceipt,
+    registered_reservation_change_receipt: _registeredReservationChangeReceipt,
+    trusted_registered_reservation_change_receipt: _trustedRegisteredReservationChangeReceipt,
+    registered_mutation_review: _registeredMutationReview,
+    registered_mutation_readback: _registeredMutationReadback,
+    authoritative_registered_result: _authoritativeRegisteredResult,
     ...withoutReceipts
   } = decision;
   return withoutReceipts;
+}
+
+function registeredMutationOwnerReviewItem({ decision = {}, job = {}, receipt = null, reason }) {
+  const mutation = decision?.staff_confirmed_mutation || {};
+  const customerName = text(
+    decision?.customer?.name
+    || decision?.sheet_row_candidate?.customer_name
+    || job?.customer_name
+    || job?.customerName
+    || '미확인 고객'
+  ).slice(0, 120);
+  const jobId = text(job?.jobId || job?.job_id || job?.id).trim();
+  const tradeId = text(mutation?.trade_id || receipt?.trade_id).trim();
+  return {
+    type: 'reservation_review',
+    route: 'schedule',
+    taskKey: `registered-mutation-review:${tradeId || jobId || 'unknown'}`,
+    priority: 'urgent',
+    status: 'open',
+    customer_name: customerName,
+    title: `${customerName} 등록예약 변경 즉시 확인 필요`,
+    summary: text(reason).trim().slice(0, 1000) || '등록예약 변경 결과를 권위 있는 원장과 대조할 수 없습니다.',
+    recommended_action: `거래 ${tradeId || '미확인'}의 계약마스터·스케줄상세 readback과 적용 단계를 직접 확인하고, 고객에게는 확인 전 성공 안내를 보내지 마세요.`,
+    suggested_reply_draft: '',
+    evidence: [
+      tradeId ? `trade_id: ${tradeId}` : '',
+      receipt?.receipt_id ? `receipt_id: ${receipt.receipt_id}` : '',
+      receipt?.status ? `receipt_status: ${receipt.status}` : '',
+      receipt?.attempted_stage ? `attempted_stage: ${receipt.attempted_stage}` : ''
+    ].filter(Boolean),
+    requiresHumanAction: true,
+    actionFamily: 'reservation_change',
+    businessKey: tradeId ? `trade:${tradeId}` : `job:${jobId || 'unknown'}`,
+    blocking_reason: text(receipt?.error?.message || receipt?.error || reason).slice(0, 1000) || null,
+    due_hint: 'now',
+    alertLevel: 'p0',
+    alertReason: '등록예약 변경의 적용 결과가 실패·부분 적용·모순 상태여서 즉시 원장 확인이 필요합니다.'
+  };
+}
+
+function forceRegisteredMutationOwnerReview(decision = {}, { job, receipt = null, reason } = {}) {
+  const mutation = decision?.staff_confirmed_mutation && typeof decision.staff_confirmed_mutation === 'object'
+    ? decision.staff_confirmed_mutation
+    : null;
+  return {
+    ...decision,
+    classification: 'reservation',
+    should_write_to_sheet: false,
+    owner_review_required: true,
+    post_action_reconciled: false,
+    safety_checks: {
+      ...(decision?.safety_checks && typeof decision.safety_checks === 'object' ? decision.safety_checks : {}),
+      latest_customer_message_after_last_staff_reply: true,
+      no_auto_reply_sent: true
+    },
+    follow_up_items: [registeredMutationOwnerReviewItem({ decision, job, receipt, reason })],
+    suggested_reply_draft: '',
+    registered_mutation_review: {
+      trade_id: text(mutation?.trade_id || receipt?.trade_id).trim() || null,
+      mutation_kind: text(mutation?.kind || receipt?.mutation_kind).trim() || null,
+      expected_before: Array.isArray(mutation?.expected_before) ? mutation.expected_before : [],
+      desired_after: Array.isArray(mutation?.desired_after) ? mutation.desired_after : [],
+      date_change: mutation?.date_change ?? null,
+      applied_stages: Array.isArray(receipt?.applied_stages) ? receipt.applied_stages : [],
+      attempted_stage: receipt?.attempted_stage ?? null,
+      authoritative_result: receipt?.authoritative_result ?? null,
+      error: receipt?.error ?? null
+    },
+    ...(receipt ? { trusted_registered_reservation_change_receipt: receipt } : {}),
+    reply_decision: {
+      ...decisionReply(decision),
+      replyMode: 'draft_only',
+      text: '',
+      confidence: 'low',
+      reason: text(reason).trim().slice(0, 1000) || 'Registered mutation requires owner review.',
+      shouldCreateTask: true,
+      safetyClass: 'no_send',
+      grounding: receipt ? 'authoritative_sheet' : 'none',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: false
+    }
+  };
+}
+
+function forceRegisteredMutationSuccess(decision = {}, receipt) {
+  return {
+    ...decision,
+    should_write_to_sheet: false,
+    owner_review_required: false,
+    post_action_reconciled: true,
+    safety_checks: {
+      ...(decision?.safety_checks && typeof decision.safety_checks === 'object' ? decision.safety_checks : {}),
+      no_auto_reply_sent: true
+    },
+    follow_up_items: (Array.isArray(decision?.follow_up_items) ? decision.follow_up_items : [])
+      .filter((item) => text(item?.type).trim() === 'completed_log' && text(item?.status).trim() === 'done'),
+    suggested_reply_draft: '',
+    registered_mutation_readback: receipt.authoritative_result,
+    trusted_registered_reservation_change_receipt: receipt,
+    reply_decision: {
+      ...decisionReply(decision),
+      replyMode: 'no_reply',
+      text: '',
+      confidence: 'high',
+      reason: '직원 확정 변경이 권위 있는 원장 readback으로 검증되어 중복 고객 답장을 보내지 않습니다.',
+      shouldCreateTask: false,
+      safetyClass: 'no_send',
+      grounding: 'authoritative_sheet',
+      requiresRag: false,
+      attachmentKeys: [],
+      alreadyDelivered: true
+    }
+  };
 }
 
 function gatewayReviewFollowUpItem({ decision = {}, job = {}, schedule = false, reason, receipt = null }) {
@@ -9325,6 +9595,13 @@ export async function prepareKakaoGatewayDecision({
   if (decision) {
     const validation = validateAiDecisionContract(decision);
     if (!validation.valid) safetyFailures.push('invalid_gateway_decision');
+    if (decision.staff_confirmed_mutation && typeof decision.staff_confirmed_mutation === 'object') {
+      const mutationValidation = validateStaffConfirmedMutation(decision.staff_confirmed_mutation, { roomRevision });
+      if (!mutationValidation.valid) {
+        safetyFailures.push('invalid_staff_confirmed_mutation');
+        safetyFailures.push('invalid_gateway_decision');
+      }
+    }
     decision = stripAgentSuppliedReceiptFields(decision);
     if (!text(decision.kill_switch_observed).trim() && internal?.lookupContext?.kill_switch?.status) {
       decision.kill_switch_observed = internal.lookupContext.kill_switch.status;
@@ -9339,14 +9616,19 @@ export async function prepareKakaoGatewayDecision({
   const exactDocumentReceipts = exactTurn
     ? suppliedReceipts.filter((receipt) => exactTrustedDocumentReceipt(receipt, receiptCoordinates))
     : [];
-  const exactReceipts = [...exactConfirmationReceipts, ...exactDocumentReceipts];
+  const exactRegisteredChangeReceipts = exactTurn
+    ? suppliedReceipts.filter((receipt) => exactTrustedRegisteredReservationChangeReceipt(receipt, receiptCoordinates))
+    : [];
+  const exactReceipts = [...exactConfirmationReceipts, ...exactDocumentReceipts, ...exactRegisteredChangeReceipts];
   if (suppliedReceipts.length !== exactReceipts.length) safetyFailures.push('invalid_trusted_receipt');
   if (exactReceipts.length > 1 && exactReceipts.some((receipt) => !sameGatewayDecisionValue(receipt, exactReceipts[0]))) {
     safetyFailures.push('conflicting_trusted_receipts');
   }
   const trustedConfirmationReceipt = exactConfirmationReceipts[0] || null;
   const trustedDocumentReceipt = exactDocumentReceipts[0] || null;
-  const trustedToolReceipt = trustedConfirmationReceipt || trustedDocumentReceipt;
+  const trustedRegisteredChangeReceipt = exactRegisteredChangeReceipts[0] || null;
+  const trustedToolReceipt = trustedRegisteredChangeReceipt || trustedConfirmationReceipt || trustedDocumentReceipt;
+  const structuredRegisteredMutation = decision?.staff_confirmed_mutation?.target_scope === 'registered_trade';
   const structuredScheduleClaim = decision ? gatewayDecisionHasStructuredScheduleClaim(decision) : false;
   const structuredDocumentClaim = decision ? gatewayDecisionHasStructuredDocumentClaim(decision) : false;
   const parsedDecisionValid = decision && !safetyFailures.includes('invalid_gateway_decision');
@@ -9354,7 +9636,46 @@ export async function prepareKakaoGatewayDecision({
   let sheetResult = null;
   let sheetPayload = null;
   let reason = '';
-  if (trustedConfirmationReceipt) {
+  if (structuredRegisteredMutation) {
+    const mutation = decision.staff_confirmed_mutation;
+    if (!parsedDecisionValid) {
+      reason = '직원 확정 등록예약 변경의 typed 결정이 현재 방/리비전 계약을 충족하지 못했습니다.';
+      decision = forceRegisteredMutationOwnerReview(decision || {}, {
+        job, receipt: trustedRegisteredChangeReceipt, reason
+      });
+    } else if (!trustedRegisteredChangeReceipt) {
+      safetyFailures.push('registered_change_without_trusted_receipt');
+      reason = '직원 확정 등록예약 변경이 있지만 채널에 영속화된 registered-change receipt가 없습니다.';
+      decision = forceRegisteredMutationOwnerReview(decision || {}, { job, reason });
+    } else if (trustedRegisteredChangeReceipt.trade_id !== mutation.trade_id
+      || trustedRegisteredChangeReceipt.mutation_kind !== mutation.kind) {
+      safetyFailures.push('trusted_registered_change_decision_contradiction');
+      reason = '영속화된 등록예약 변경 receipt의 거래 또는 변경 종류가 최종 typed 결정과 일치하지 않습니다.';
+      decision = forceRegisteredMutationOwnerReview(decision || {}, {
+        job, receipt: trustedRegisteredChangeReceipt, reason
+      });
+    } else if (trustedRegisteredChangeReceipt.status === 'ok'
+      && exactRegisteredMutationAuthoritativeReadback(trustedRegisteredChangeReceipt, mutation)) {
+      decision = forceRegisteredMutationSuccess(decision, trustedRegisteredChangeReceipt);
+    } else {
+      if (trustedRegisteredChangeReceipt.status === 'ok') {
+        safetyFailures.push('trusted_registered_change_readback_contradiction');
+        reason = '등록예약 변경 receipt는 성공이지만 권위 있는 readback이 typed desired-after 상태와 일치하지 않습니다.';
+      } else {
+        safetyFailures.push('trusted_registered_change_failed');
+        reason = '등록예약 변경이 차단·실패·부분 적용되어 즉시 사장 확인이 필요합니다.';
+      }
+      decision = forceRegisteredMutationOwnerReview(decision || {}, {
+        job, receipt: trustedRegisteredChangeReceipt, reason
+      });
+    }
+  } else if (trustedRegisteredChangeReceipt) {
+    safetyFailures.push('trusted_registered_change_decision_contradiction');
+    reason = '영속화된 등록예약 변경 receipt와 일치하는 final typed mutation이 없습니다.';
+    decision = forceRegisteredMutationOwnerReview(decision || {}, {
+      job, receipt: trustedRegisteredChangeReceipt, reason
+    });
+  } else if (trustedConfirmationReceipt) {
     sheetResult = sheetResultFromTrustedReceipt(trustedConfirmationReceipt);
     const receiptFailed = trustedConfirmationReceipt.status === 'failed' || trustedConfirmationReceipt.error !== null;
     const report = buildSheetAvailabilityReport(sheetResult, null);
@@ -9427,7 +9748,7 @@ export async function prepareKakaoGatewayDecision({
     job
   );
   if (!availabilityAwareRows.length && decision?.owner_review_required === true) {
-    const scheduleReview = Boolean(trustedConfirmationReceipt || structuredScheduleClaim);
+    const scheduleReview = Boolean(trustedConfirmationReceipt || trustedRegisteredChangeReceipt || structuredScheduleClaim);
     const fallbackDecision = {
       ...decision,
       safety_checks: {
