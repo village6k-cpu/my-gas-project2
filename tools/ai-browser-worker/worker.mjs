@@ -646,11 +646,11 @@ export function buildHermesPrompt(job, options = {}) {
   const sheetExecutionText = options.gatewayConfirmationToolAvailable
     ? `GATEWAY NATIVE SHEET EXECUTION CONTRACT:
 - In a Gateway turn, FINAL_JSON alone does not write anything. 바깥 워커는 FINAL_JSON만 보고 확인요청을 입력하지 않는다.
-- If your complete business decision has should_write_to_sheet=true, call village_confirmation_request 반드시 먼저 호출하고, only then emit FINAL_JSON.
-- Call it with the 완성된 decision. For should_write_to_sheet=true, include the complete sheet_row_candidate so the tool can write exactly that decision.
+- If a complete genuinely new or exact typed pending decision has should_write_to_sheet=true, call village_confirmation_request 반드시 먼저 호출하고, only then emit FINAL_JSON.
+- For that authorized write, call it with the 완성된 decision and complete sheet_row_candidate.
 - When existing_confirm_request_ids names an unchanged existing RQ, call village_confirmation_request once with should_write_to_sheet=false to 검증 기존 RQ 실재 여부; never pre-verify a write.
-- For a pending-RQ addition, make one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only"; the executor verifies the exact RQ and merges its authoritative full plan inside that same operation. Never spend the operation fence on a should_write_to_sheet=false pre-read.
-- For a pending-RQ replacement, make one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ in that operation.
+- Typed pending-RQ addition: one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="additions_only"; the executor verifies the exact RQ and merges the authoritative plan. Never pre-read with the operation fence.
+- Typed pending-RQ replacement: one village_confirmation_request call with should_write_to_sheet=true + equipment_write_mode="replace_full_plan"; the executor verifies the exact RQ.
 - A customer request without a later staff confirmation is read-only: set staff_confirmed_mutation=null and call no mutation tool.
 - For target_scope="pending_request" and kind="equipment_add", call village_confirmation_request once with additions_only. For pending_request equipment_remove, equipment_replace, equipment_quantity_change, or date_time_change, call village_confirmation_request once with replace_full_plan.
 - Exact staff-confirmed registered_trade add/remove/replace/quantity/date_time changes use only village_registered_reservation_change exactly once before FINAL_JSON. Retain the typed mutation, set should_write_to_sheet=false, replyMode="no_reply", no_auto_reply_sent=true, and send no duplicate success reply.
@@ -666,7 +666,7 @@ export function buildHermesPrompt(job, options = {}) {
     : `SHEETS TOOL AVAILABLE VIA GAS API:
 - The outer worker owns the configured GAS endpoint; Hermes does not need its raw URL or credential.
 - Target sheet for reservation inquiry candidates: 확인요청
-- Outer worker writes to 확인요청 when your FINAL_JSON says should_write_to_sheet=true. Be 적극적: if the latest customer turn is a reservation-format request with enough fields for a review row, set should_write_to_sheet=true.
+- Outer worker writes only a genuinely new reservation-format request with no registered trade/RQ when FINAL_JSON says should_write_to_sheet=true. Existing records require the typed route.
 - Do not call write/insert/register/send APIs yourself in this Hermes prompt. Return the final decision JSON only; outer worker will write when appropriate.`;
   return `AI-first Kakao rental-shop worker task.
 
@@ -678,12 +678,13 @@ CRITICAL RULES:
 - 미리보기만 보고 분류하지 마라. 채팅방을 열어 실제 대화 맥락을 확인해야 한다.
 - Use the bounded tool budget deliberately: batch independent read-only checks, avoid repeats, and finish FINAL_JSON before exhausting the turn budget or global timeout. Batch read-only lookups only when query breadth/detail are preserved.
 - Once sufficient, return FINAL_JSON immediately. Tool/API failures are evidence gaps: encode uncertainty in confidence/reason/follow-up; never substitute an apology or progress report.
+- 기존 등록/기존 RQ customer-only 변경은 read-only다. 정확한 이후 직원 확인과 일치하는 typed staff_confirmed_mutation만 허용하며, registered changes use the native route.
 - 답장/시트 처리에 과도하게 보수적으로 굴지 않는다. 전송 기능이 켜진 환경에서는 AI가 reply_decision.replyMode="auto_send"로 명시하고 confidence가 high이며 kill switch가 active일 때 근거가 확보된 답변을 자동발송 후보로 둔다. 전송 기능이 꺼진 환경에서는 suggested_reply_draft/follow_up_items만 만든다.
 - 자동발송 범위는 주제(카테고리)가 아니라 근거로 정한다. 사장이 직접 응대하듯 답한다: 화면/시트/CURRENT_CONFIRMED_POLICY/high·retrieved RAG 근거가 있고 confidence high면 일반 가격·환불정책·파손규정·세금 안내는 auto_send 후보다. 근거 없는 확정·금액·보상 약속은 draft_only. 입금·결제는 시트/화면으로 확인되기 전에는 완료 단정 금지(접수 ACK는 auto_send 가능). 직원 가능안내 뒤 고객 수락이면 짧은 예약완료 auto_send 가능.
 - 예외(항상 사장 확인): 고객이 현재 대여/수령 장비의 기스·흠집·스크래치·파손·고장·작동이상·분실을 알린 실제 사고, 파손·분실 배상 다툼, 환불 분쟁, 법적 문제 제기, 강한 항의는 근거가 있어도 auto_send 금지. 계속 사용/그대로 수령/교체/배상 여부를 임의로 승인하지 말고 draft_only + owner_review_required=true + urgent damage_repair로 올린다.
 - follow_up_items의 alertLevel은 네 판단이다. 사장을 깨워야 하거나 즉시 확인하지 않으면 고객·금전·장비 피해가 커지는 사건만 "p0"로 하고 구체적인 alertReason을 쓴다. 단순히 priority가 urgent이거나 특정 단어가 있다는 이유만으로 p0로 올리지 않는다. 나머지는 "none"이다.
-- 예약 확정, 재고 가능 단정, 가격 확정은 화면/시트 근거 없이 단정하지 않는다. 하지만 고객이 예약형식에 맞게 정보를 준 경우 확인요청 시트 입력은 적극 수행한다.
-- Google Sheets 입력은 API로 가능하다. 어떤 값을 넣을지는 AI가 판단하되, 예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다.
+- 예약 확정, 재고 가능 단정, 가격 확정은 근거 없이 단정하지 않는다. Genuinely new 예약형식만 확인요청 입력을 적극 수행한다.
+- Google Sheets API 입력에서 충분한 genuinely new 예약형식은 should_write_to_sheet=true가 기본이다.
 
 CLAUDE COWORKER POLICY TO CARRY FORWARD:
 - 최근 1시간 내 새 메시지 후보라도 반드시 채팅방을 열고, 화면에서 보이는 메시지 + 가능하면 최근 24시간 맥락을 확인한다.
@@ -723,7 +724,7 @@ REPLY TONE POLICY:
 
 EQUIPMENT AND SHEET SAFETY POLICY:
 - 장비명은 AI가 최대한 추론/정규화해서 확인요청 F열 item에 넣는다. READ-ONLY VILLAGE LIVE LOOKUP에 자동 제공된 정확 장비명 카탈로그 equipment_catalog.exact_names 전체를 먼저 비교하고, 매칭 가능하면 그 문자열을 한 글자도 바꾸지 말고 exact_name_from_equipment_catalog와 F열 item에 쓴다.
-- 세트/장비마스터를 조회한다. equipment_write_mode는 신규/pending-RQ에만 적용: 신규="full_plan"+전체, pending 추가/증가="additions_only"+delta, pending 삭제/교체/감소="replace_full_plan"+최종 전체. 등록 변경은 정확한 직원 확인 뒤 village_registered_reservation_change만 쓴다. Do not repeat existing equipment in additions_only.
+- 세트/장비마스터를 조회한다. equipment_write_mode: genuinely new="full_plan"+전체; typed pending 추가/증가="additions_only"+delta; typed pending 삭제/교체/감소="replace_full_plan"+complete final plan. Do not repeat existing equipment in additions_only.
 - 세트 옵션은 set_component_selections로만 지정: 600X 젬볼 => 어퓨쳐 600X/소프트박스/젬볼 90. Never add set options as top-level equipment.
 - 예약 메시지에 명시된 예약자명/연락처는 프로필명보다 우선한다.
 - RAG는 장비명 정규화/예약자명/연락처 추출에 사용 금지.
@@ -736,7 +737,7 @@ EQUIPMENT AND SHEET SAFETY POLICY:
 - 할인유형: 고객DB I열이 카톡보다 우선. DB 값(학생/개인사업자/프리랜서/단골/제휴/일반)이 있으면 sheet_row_candidate.discount_type에 그대로 쓰고, 없을 때만 카톡에서 학생/개사프/일반 추론.
 - 예약문의인데 연락처가 없으면 고객DB를 예약자명으로 먼저 조회한다. 정확히 1명 매칭되면 sheet_row_candidate.phone에 넣고 계속 처리한다. 없거나 동명이인이어도 확인요청 생성은 막지 말고 sheet_row_candidate.phone=""로 둔다. 연락처는 등록 단계 필수라 follow_up/답장에서는 연락처 요청을 남긴다.
 - 중복 입력 방지: 계약마스터, 스케줄상세, 확인요청 3단계를 확인한다. 불완전성/판단근거는 follow_up/evidence에만 남기고 Q/R에는 쓰지 않는다.
-- 예약형식이면 확인요청 입력이 기본이다. 장비마다 matched+정확 카탈로그명 또는 explicit unmatched 판정이 필요하다. 중복확인/연락처 없음은 입력 차단 사유가 아니라 follow_up/evidence 대상이다. F열 item은 matched면 정확 카탈로그명, unmatched면 고객 원문을 넣고 Q/R에는 AI 설명을 넣지 않는다. 연락처는 있으면 넣고 없으면 L열 공란으로 둔다.
+- 기존 레코드가 없는 genuinely new 예약형식만 확인요청 입력이 기본이다. 장비마다 matched+정확 카탈로그명 또는 explicit unmatched가 필요하다. 중복확인/연락처 없음은 신규 입력의 차단 사유가 아니다. F열은 matched면 정확명, unmatched면 고객 원문; Q/R에는 AI 설명 금지. 연락처 없으면 L열 공란.
 - memo/extra_request 기본값은 빈 문자열. 계약서에 보여도 되는 짧은 현장 요청만 허용한다. 카카오 원문/요약/AI 판단/중복조회/정규화/가용확인 후 안내는 금지한다.
 - 확인요청은 보수적인 정시 경계만 쓴다. 반출은 해당 시각의 시(hour)로 내림(12:59→12:00), 반납은 다음 시로 올림(18:01→19:00), 정시 HH:00은 그대로 둔다. 날짜와 함께 적힌 \`27일 24:00\`은 다음 날인 \`28일 00:00\`으로 정규화한다. 이 결과 반납이 반출 이후가 아니면 추측해서 쓰지 말고 확인 질문/후속조치를 만든다.
 - read-catchup에서 기존 RQ를 발견하면 should_write_to_sheet=false는 중복 방지일 뿐이다. reason에는 "기존 RQ 발견으로 중복 입력 방지"라고 쓰고 자동화 처리 결과라고 단정하지 않는다.
@@ -764,9 +765,9 @@ TASK:
 9-1. For FAQ/procedure/policy/components auto_send, use CURRENT_CONFIRMED_POLICY first, otherwise call RAG and fill rag_usage. Outer worker verifies current-policy match or high-confidence retrieved support. Never use RAG for current stock/booking/schedule truth.
 10. Decide whether this is reservation inquiry, price inquiry, FAQ, ignored message, or already-answered message.
 10-1. Doc types은 서류 생성/발송/발행만. 확인요청/예약/가용/스케줄/파손/반납/정산은 견적서 단어가 섞여도 doc 아님; primary item에 합친다.
-11. For reservation-format requests, missing phone is NOT a sheet-write blocker. Search 고객DB by name; if a unique DB phone is found, use it, otherwise leave sheet_row_candidate.phone="" and still write 확인요청. discount_type: 고객DB I열 outranks Kakao; use DB 학생/개인사업자/프리랜서/단골/제휴/일반 when present, otherwise infer from Kakao. Missing equipment/duplicate lookup/phone goes to follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or an unchanged duplicate. An existing booking with newly added or increased equipment is not a duplicate. If newest actionable message is staff/outbound, write only for staff-confirmed-unregistered; phone may still be blank.
+11. For genuinely new reservation-format requests with no registered trade/RQ, missing phone is NOT a sheet-write blocker. Search 고객DB by name; use one exact phone or leave phone="". 고객DB I열 discount_type outranks Kakao. Put missing equipment/duplicate lookup/phone in follow_up/evidence, not Q/R. Set false for non-reservation, unopened/mismatched chat, unclear sender order, or unchanged duplicate. If newest is staff/outbound, write only staff-confirmed-unregistered.
 11-1. Never invent or fill a request_id for 확인요청. The outer worker calls GAS insertAndCheckRequest, and GAS must generate the real RQ-YYMMDD-NNN request ID.
-11-2. Multiple/revised equipment: separate top-level entries. New="full_plan"+complete plan; pending-RQ additions="additions_only"+delta; pending-RQ remove/replace/reduce="replace_full_plan"+complete final plan. Registered changes use the native route above, never equipment_write_mode. Set plan_complete=true only after reconciling that pending/new write set; otherwise no write + one review follow-up.
+11-2. Separate top-level equipment. Genuinely new="full_plan"+complete plan; exact typed pending additions="additions_only"+delta; exact typed pending remove/replace/reduce="replace_full_plan"+final plan. Registered changes use the native route, never equipment_write_mode. Otherwise no write + one review.
 11-3. sheet_row_candidate date/time must be API-safe YYYY-MM-DD and HH:MM. Village uses literal 24-hour time: 오전/오후 표시가 없는 \`5시\` means \`05:00\` and \`17시\` means \`17:00\`; only explicit \`오후 5시\` means \`17:00\`. 맥락을 추측해 12시간을 더하지 마라. Apply the conservative confirmation-request boundary: pickup minutes floor to the hour, return minutes ceil to the hour, and exact hours stay unchanged. \`8월 27일 24:00\` means \`2026-08-28 00:00\`. If the normalized return is not later than pickup, set should_write_to_sheet=false and create one review follow-up instead of guessing.
 11-4. If you find an existing matching RQ, read its 확인요청 result/detail (I/J) before writing follow_up_items. The follow-up must report the availability result itself, not ask the owner to inspect the RQ. If I/J is blank or unavailable, say so and ask for recheck.
 12. One follow_up_item per customer cluster: primary type, route, stable taskKey; put secondary work in recommended_action/evidence.
@@ -1057,6 +1058,31 @@ function staffConfirmedMutationDecisionErrors(decision, mutation, options = {}) 
   return errors;
 }
 
+function existingRecordWriteGateErrors(decision, options = {}) {
+  if (decision?.should_write_to_sheet !== true) return [];
+  const inquiry = decision?.reservation_inquiry && typeof decision.reservation_inquiry === 'object'
+    ? decision.reservation_inquiry
+    : {};
+  const existingIds = Array.isArray(decision?.existing_confirm_request_ids)
+    ? decision.existing_confirm_request_ids.map((value) => text(value).trim()).filter(Boolean)
+    : [];
+  if (inquiry.already_registered === true) {
+    return ['existing registered booking writes require the typed registered mutation route with should_write_to_sheet=false'];
+  }
+  if (!existingIds.length) return [];
+  const mutation = decision?.staff_confirmed_mutation;
+  if (!mutation || typeof mutation !== 'object' || Array.isArray(mutation)) {
+    return ['existing pending RQ writes require an exact valid staff_confirmed_mutation'];
+  }
+  const mutationErrors = staffConfirmedMutationDecisionErrors(decision, mutation, options);
+  if (mutation.target_scope !== 'pending_request' || mutationErrors.length > 0) {
+    return mutationErrors.length > 0
+      ? mutationErrors
+      : ['existing pending RQ writes require an exact valid staff_confirmed_mutation'];
+  }
+  return [];
+}
+
 export function validateAiDecisionContract(decision = {}, options = {}) {
   const errors = [];
   const roomRevision = options?.roomRevision;
@@ -1085,6 +1111,7 @@ export function validateAiDecisionContract(decision = {}, options = {}) {
   }
 
   if (decision.should_write_to_sheet === true) {
+    errors.push(...existingRecordWriteGateErrors(decision, { roomRevision }));
     errors.push(...sheetSafetyValidationErrors(decision));
     const row = decision.sheet_row_candidate && typeof decision.sheet_row_candidate === 'object'
       ? decision.sheet_row_candidate
@@ -9006,6 +9033,18 @@ export async function executeVillageConfirmationRequest({
     created_at: createdAt,
     error
   });
+
+  const existingRecordGateErrors = existingRecordWriteGateErrors(decision, {
+    roomRevision: requestedRevision
+  });
+  if (existingRecordGateErrors.length) {
+    return buildReceipt({
+      status: 'failed',
+      error: confirmationReceiptError('invalid_decision', 'AI decision contract validation failed', {
+        validation_errors: existingRecordGateErrors
+      })
+    });
+  }
 
   const validation = (dependencies.validateAiDecisionContract || validateVillageConfirmationExecutionDecision)(decision, {
     roomRevision: requestedRevision
