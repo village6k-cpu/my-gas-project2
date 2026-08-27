@@ -679,6 +679,71 @@ function registeredReceiptFixture(job, overrides = {}) {
   };
 }
 
+function pendingMutationFixture(overrides = {}) {
+  return {
+    confirmed: true,
+    kind: 'equipment_replace',
+    target_scope: 'pending_request',
+    request_id: 'RQ-260824-008',
+    source_evidence: {
+      customer_request: '28-135 빼고 70-200으로 변경',
+      staff_confirmation: '네',
+      conversation_revision: 7
+    },
+    expected_before: [{ name: '소니 FE 28-135mm', quantity: 1 }],
+    desired_after: [{ name: '소니 GM 70-200mm II', quantity: 1 }],
+    date_change: null,
+    ...overrides
+  };
+}
+
+function pendingDecisionFixture(overrides = {}) {
+  const mutation = overrides.staff_confirmed_mutation || pendingMutationFixture();
+  return completeSheetDecision({
+    existing_confirm_request_ids: [mutation.request_id],
+    staff_confirmed_mutation: mutation,
+    reservation_inquiry: { is_reservation_inquiry: true, confirmed: true, already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: mutation.kind === 'equipment_add' ? 'additions_only' : 'replace_full_plan',
+      customer_name: '테스트 고객',
+      phone: '010-1111-2222',
+      start_date: '2026-08-28', pickup_time: '07:00', end_date: '2026-08-28', return_time: '19:00',
+      equipment: mutation.desired_after.map((row) => ({ item: row.name, quantity: row.quantity }))
+    },
+    safety_checks: { no_auto_reply_sent: true },
+    follow_up_items: [],
+    reply_decision: {
+      replyMode: 'no_reply', text: '', confidence: 'high', reason: '직원 확정', shouldCreateTask: false,
+      safetyClass: 'no_send', grounding: 'staff_confirmation', requiresRag: false, attachmentKeys: [], alreadyDelivered: true
+    },
+    ...overrides
+  });
+}
+
+function pendingReceiptFixture(job, overrides = {}) {
+  return confirmationReceiptFixture(job, {
+    authoritative_sheet_result: {
+      success: true,
+      reqID: 'RQ-260824-011',
+      replacedReqIDs: ['RQ-260824-008'],
+      staff_confirmed_pending_mutation: {
+        target_scope: 'pending_request',
+        target_request_id: 'RQ-260824-008',
+        expected_before: [{ name: '소니 FE 28-135mm', quantity: 1 }],
+        expected_period: {
+          start_date: '2026-08-27', start_time: '06:00', end_date: '2026-08-27', end_time: '18:00'
+        },
+        replacement_request_id: 'RQ-260824-011',
+        final_plan: [{ name: '소니 GM 70-200mm II', quantity: 1 }],
+        final_period: {
+          start_date: '2026-08-28', start_time: '07:00', end_date: '2026-08-28', end_time: '19:00'
+        }
+      }
+    },
+    ...overrides
+  });
+}
+
 function documentDecisionFixture(overrides = {}) {
   return gatewayDecisionFixture({
     classification: 'faq',
@@ -768,6 +833,62 @@ test('registered mutation cannot claim success without its durable registered-ch
   assert.equal(prepared.decision.should_write_to_sheet, false);
   assert.equal(prepared.gatewaySafetyFailures.includes('registered_change_without_trusted_receipt'), true);
   assert.equal(prepared.availabilityAwareRows.length, 1);
+});
+
+test('exact typed pending success finalizes no-reply without duplicate owner review', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = pendingMutationFixture();
+  const decision = pendingDecisionFixture({
+    staff_confirmed_mutation: mutation,
+    follow_up_items: [{
+      type: 'reservation_review', route: 'schedule', taskKey: 'duplicate-pending-approval', priority: 'urgent', status: 'open',
+      title: '중복 확인', customer_name: '테스트 고객', summary: '중복 검토', recommended_action: '다시 승인',
+      suggested_reply_draft: '', evidence: [], requiresHumanAction: true, actionFamily: 'reservation_change',
+      businessKey: 'request:RQ-260824-008', alertLevel: 'p0', alertReason: '중복'
+    }]
+  });
+  const receipt = pendingReceiptFixture(job);
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: [receipt]
+  });
+
+  assert.equal(prepared.decision.should_write_to_sheet, false);
+  assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+  assert.equal(prepared.decision.reply_decision.text, '');
+  assert.equal(prepared.decision.reply_decision.shouldCreateTask, false);
+  assert.equal(prepared.decision.safety_checks.no_auto_reply_sent, true);
+  assert.equal(prepared.decision.owner_review_required, false);
+  assert.deepEqual(prepared.decision.staff_confirmed_mutation, mutation);
+  assert.deepEqual(prepared.decision.trusted_confirmation_receipt, receipt);
+  assert.deepEqual(prepared.decision.follow_up_items, []);
+  assert.deepEqual(prepared.availabilityAwareRows, []);
+  assert.equal(prepared.gatewaySafetyFailures.length, 0);
+  assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, false);
+});
+
+test('typed pending stale or missing durable receipt stays no-send with one owner review', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const decision = pendingDecisionFixture();
+  const staleReceipt = pendingReceiptFixture(job, {
+    authoritative_sheet_result: {
+      success: true,
+      reqID: 'RQ-260824-011',
+      replacedReqIDs: ['RQ-260824-999'],
+      staff_confirmed_pending_mutation: {
+        ...pendingReceiptFixture(job).authoritative_sheet_result.staff_confirmed_pending_mutation,
+        target_request_id: 'RQ-260824-999'
+      }
+    }
+  });
+  for (const [label, receipts] of [['missing', []], ['stale', [staleReceipt]]]) {
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn, finalText: `FINAL_JSON\n${JSON.stringify(decision)}`, trustedToolReceipts: receipts
+    });
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', label);
+    assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send', label);
+    assert.equal(prepared.decision.owner_review_required, true, label);
+    assert.equal(prepared.availabilityAwareRows.length, 1, label);
+  }
 });
 
 test('exact registered success retains the typed mutation and produces no duplicate customer reply or owner approval', async () => {
@@ -2293,7 +2414,20 @@ test('executeVillageConfirmationRequest preserves customer wording only after an
 test('executeVillageConfirmationRequest reuses additions-only merge, customer discount enrichment, and authoritative availability', async () => {
   const decision = completeSheetDecision({
     existing_confirm_request_ids: ['RQ-260820-001'],
+    staff_confirmed_mutation: {
+      confirmed: true,
+      kind: 'equipment_add',
+      target_scope: 'pending_request',
+      request_id: 'RQ-260820-001',
+      source_evidence: {
+        customer_request: 'C스탠드 2개 추가해주세요', staff_confirmation: '네', conversation_revision: 7
+      },
+      expected_before: [{ name: '소니 FX3 바디세트', quantity: 1 }],
+      desired_after: [{ name: 'C스탠드', quantity: 2 }],
+      date_change: null
+    },
     reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    safety_checks: { no_auto_reply_sent: true },
     sheet_row_candidate: {
       equipment_write_mode: 'additions_only',
       equipment: [{ item: 'C스탠드', quantity: 2 }]
@@ -2317,6 +2451,9 @@ test('executeVillageConfirmationRequest reuses additions-only merge, customer di
         success: true,
         duplicate: true,
         reqID: 'RQ-260820-001',
+        requestPeriod: {
+          start_date: '2026-08-21', pickup_time: '10:00', end_date: '2026-08-22', return_time: '18:00'
+        },
         topLevelEquipment: [{ 이름: '소니 FX3 바디세트', 수량: 1 }],
         results: []
       }),
@@ -2358,6 +2495,14 @@ test('executeVillageConfirmationRequest reuses additions-only merge, customer di
     { 이름: '소니 FX3 바디세트', 수량: 1 },
     { 이름: 'C스탠드', 수량: 2 }
   ]);
+  assert.deepEqual(appended[0].args.staff_confirmed_pending_mutation, {
+    target_scope: 'pending_request',
+    request_id: 'RQ-260820-001',
+    expected_before: [{ name: '소니 FX3 바디세트', quantity: 1 }],
+    expected_period: {
+      start_date: '2026-08-21', start_time: '10:00', end_date: '2026-08-22', end_time: '18:00'
+    }
+  });
   assert.deepEqual(receipt, {
     schema: 'village-confirmation-receipt/v1',
     receipt_id: 'receipt-confirm-1',
@@ -2446,6 +2591,51 @@ test('executeVillageConfirmationRequest executes pending RQ replacement only aft
   assert.equal(receipt.status, 'ok');
   assert.equal(receipt.authoritative_sheet_result.reqID, 'RQ-260823-013');
   assert.deepEqual(receipt.authoritative_sheet_result.replacedReqIDs, ['RQ-260823-010']);
+});
+
+test('typed pending execution carries exact request baseline and period through the GAS payload', async () => {
+  const decision = pendingDecisionFixture();
+  let appendedPayload = null;
+  const receipt = await workerModule.executeVillageConfirmationRequest({
+    config: { sheetApiKey: 'internal-key' },
+    job: { jobId: 'job-pending-fence', roomKey: 'room-pending-fence', roomRevision: 7 },
+    roomRevision: 7,
+    decision,
+    dependencies: {
+      freshnessGuard: confirmationFreshnessGuard(),
+      fetchEquipmentCatalogSnapshot: async () => confirmationCatalogForDecision(decision),
+      fetchExistingConfirmRequestResultForDecision: async () => ({
+        success: true,
+        duplicate: true,
+        reqID: 'RQ-260824-008',
+        source: 'existing_confirm_request_lookup',
+        requestPeriod: {
+          start_date: '2026-08-27', pickup_time: '06:00', end_date: '2026-08-27', return_time: '18:00'
+        },
+        topLevelEquipment: [{ 이름: '소니 FE 28-135mm', 수량: 1 }],
+        results: []
+      }),
+      enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => ({ payload, lookup: { matched: false } }),
+      appendToSheet: async (_config, payload) => {
+        appendedPayload = payload;
+        return pendingReceiptFixture({ jobId: 'job-pending-fence', roomKey: 'room-pending-fence', roomRevision: 7 })
+          .authoritative_sheet_result;
+      },
+      assertCurrentClaim: async () => {},
+      randomUUID: () => 'receipt-pending-fence',
+      now: () => new Date('2026-08-27T01:00:00.000Z')
+    }
+  });
+
+  assert.equal(receipt.status, 'ok');
+  assert.deepEqual(appendedPayload.args.staff_confirmed_pending_mutation, {
+    target_scope: 'pending_request',
+    request_id: 'RQ-260824-008',
+    expected_before: [{ name: '소니 FE 28-135mm', quantity: 1 }],
+    expected_period: {
+      start_date: '2026-08-27', start_time: '06:00', end_date: '2026-08-27', end_time: '18:00'
+    }
+  });
 });
 
 test('executeVillageConfirmationRequest rejects unverified pending RQ replacement without GAS mutation', async () => {

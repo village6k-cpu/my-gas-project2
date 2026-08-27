@@ -24,8 +24,8 @@ assert.match(
 
 assert.match(
   source,
-  /var replacedGroups = _findReplaceableConfirmRequestGroups_\(sheet, reqForDedupe, requestedEquipItems\);[\s\S]*_deleteConfirmRequestGroups_\(sheet, replacedGroups\)/,
-  '새 확인요청을 쓰기 전에 stale RQ 그룹을 삭제해야 한다'
+  /var replacedGroups = staffConfirmedPendingFence[\s\S]*_findReplaceableConfirmRequestGroups_\(sheet, reqForDedupe, requestedEquipItems\);[\s\S]*_deleteConfirmRequestGroups_\(sheet, replacedGroups\)/,
+  'typed pending은 exact fenced RQ를, 일반 입력은 stale RQ 그룹을 새 확인요청 쓰기 전에 삭제해야 한다'
 );
 
 assert.match(

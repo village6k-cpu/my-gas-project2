@@ -11476,6 +11476,96 @@ function _isMutableConfirmRequestGroup_(group) {
   return !/(등록완료|등록대기|등록\s*처리|개고생2\.0|거절|보류)/.test(statusText);
 }
 
+function _normalizeStaffConfirmedPendingPlan_(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("직원확정 확인요청의 기대 장비 baseline plan이 필요합니다.");
+  }
+  return rows.map(function(row, index) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw new Error("직원확정 기대 장비 형식 오류: " + index);
+    }
+    var name = String(row.name || "").trim();
+    var quantity = Number(row.quantity);
+    if (!name || !Number.isInteger(quantity) || quantity <= 0) {
+      throw new Error("직원확정 기대 장비 형식 오류: " + index);
+    }
+    return { name: name, quantity: quantity };
+  });
+}
+
+function _normalizeStaffConfirmedPendingPeriod_(period) {
+  if (!period || typeof period !== "object" || Array.isArray(period)) {
+    throw new Error("직원확정 확인요청의 기대 기간 baseline period가 필요합니다.");
+  }
+  function exactDate(value) {
+    var raw = String(value || "").trim();
+    var match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return "";
+    var candidate = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+    return candidate.getUTCFullYear() === Number(match[1]) &&
+      candidate.getUTCMonth() === Number(match[2]) - 1 &&
+      candidate.getUTCDate() === Number(match[3]) ? raw : "";
+  }
+  function exactTime(value) {
+    var match = String(value || "").trim().match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+    return match ? { hour: Number(match[1]), minute: Number(match[2]) } : null;
+  }
+  var startDate = exactDate(period.start_date);
+  var endDate = exactDate(period.end_date);
+  var startTime = exactTime(period.start_time);
+  var endTime = exactTime(period.end_time);
+  if (!startDate || !endDate || !startTime || !endTime) {
+    throw new Error("직원확정 기대 기간 baseline period 형식 오류");
+  }
+  return {
+    start_date: startDate,
+    start_time: String(startTime.hour).padStart(2, "0") + ":" + String(startTime.minute).padStart(2, "0"),
+    end_date: endDate,
+    end_time: String(endTime.hour).padStart(2, "0") + ":" + String(endTime.minute).padStart(2, "0")
+  };
+}
+
+/**
+ * typed pending mutation의 exact RQ와 baseline을 실제 쓰기 lock 안에서 다시 검증한다.
+ * 실패하면 행 삭제나 새 RQ ID 예약 전에 예외를 발생시킨다.
+ */
+function _resolveStaffConfirmedPendingRequestFence_(sheet, fence) {
+  if (fence === undefined || fence === null) return null;
+  if (!fence || typeof fence !== "object" || Array.isArray(fence) || fence.target_scope !== "pending_request") {
+    throw new Error("직원확정 확인요청 fence 형식 오류");
+  }
+  var requestId = String(fence.request_id || "").trim().toUpperCase();
+  if (!/^RQ-\d{6}-\d{3}$/.test(requestId)) {
+    throw new Error("직원확정 대상 요청ID 형식 오류");
+  }
+  var expectedBefore = _normalizeStaffConfirmedPendingPlan_(fence.expected_before);
+  var expectedPeriod = _normalizeStaffConfirmedPendingPeriod_(fence.expected_period);
+  var groups = _buildConfirmRequestGroups_(sheet).filter(function(group) {
+    return String(group.reqID || "").trim().toUpperCase() === requestId;
+  });
+  if (groups.length !== 1) {
+    throw new Error("직원확정 대상 확인요청을 정확히 찾을 수 없습니다: " + requestId);
+  }
+  var group = groups[0];
+  if (!_isMutableConfirmRequestGroup_(group)) {
+    throw new Error("직원확정 대상 확인요청은 수정할 수 없습니다: " + requestId);
+  }
+  var expectedItems = expectedBefore.map(function(row) { return { name: row.name, qty: row.quantity }; });
+  if (!_confirmRequestEquipListEquivalent_(group.topLevelEquipItems, expectedItems)) {
+    throw new Error("직원확정 기대 장비 baseline plan이 현재 확인요청과 다릅니다: " + requestId);
+  }
+  if (!_confirmRequestSamePeriod_(
+    group,
+    expectedPeriod.start_date,
+    expectedPeriod.start_time,
+    expectedPeriod.end_date,
+    expectedPeriod.end_time
+  )) {
+    throw new Error("직원확정 기대 기간 baseline period가 현재 확인요청과 다릅니다: " + requestId);
+  }
+  return { group: group, expectedBefore: expectedBefore, expectedPeriod: expectedPeriod };
+}
+
 function _findDuplicateConfirmRequest_(sheet, req, requestedEquipItems) {
   var reqName = String(req.예약자명 || "").trim();
   var reqDate = _confirmRequestDateKey_(req.반출일);
@@ -11738,6 +11828,10 @@ function _insertAndCheckRequest(req) {
     return { name: matchedName, qty: e.수량 || 1 };
   }).filter(function(item) { return item && item.name; });
   var requestedEquipNames = requestedEquipItems.map(function(item) { return item.name; });
+  var staffConfirmedPendingFence = _resolveStaffConfirmedPendingRequestFence_(
+    sheet,
+    req.staff_confirmed_pending_mutation
+  );
 
   // 연락처는 고객DB로 보강하고, 할인유형은 카톡 판정을 최우선으로 적용한다.
   // - 연락처 미입력: 고객DB 이름 매칭이 정확히 1개일 때만 보강
@@ -11776,7 +11870,9 @@ function _insertAndCheckRequest(req) {
   var reqForDedupe = Object.assign({}, req, { 연락처: resolvedPhone, 할인유형: resolvedDiscount });
 
   // ── 중복 체크: 같은 예약자명/연락처 + 반출·반납창 + 같은 최상위 장비/수량 ──
-  var duplicateRequest = _findDuplicateConfirmRequest_(sheet, reqForDedupe, requestedEquipItems);
+  var duplicateRequest = staffConfirmedPendingFence
+    ? null
+    : _findDuplicateConfirmRequest_(sheet, reqForDedupe, requestedEquipItems);
   if (duplicateRequest) {
     return {
       reqID: duplicateRequest.reqID,
@@ -11802,7 +11898,9 @@ function _insertAndCheckRequest(req) {
   const dateStr = Utilities.formatDate(now, "Asia/Seoul", "yyMMdd");
   var reqID = _reserveNextConfirmRequestId_(sheet, dateStr);
 
-  var replacedGroups = _findReplaceableConfirmRequestGroups_(sheet, reqForDedupe, requestedEquipItems);
+  var replacedGroups = staffConfirmedPendingFence
+    ? [staffConfirmedPendingFence.group]
+    : _findReplaceableConfirmRequestGroups_(sheet, reqForDedupe, requestedEquipItems);
   var replacedReqIDs = replacedGroups.map(function(group) { return group.reqID; });
   var replacedRows = 0;
   if (replacedGroups.length > 0) {
@@ -11906,12 +12004,25 @@ function _insertAndCheckRequest(req) {
   // 가용확인 결과 읽기 — 세트 전개로 행이 늘어날 수 있으므로 reqID 기준으로 전체 읽기
   SpreadsheetApp.flush();
   var results = [];
+  var finalTopLevelPlan = [];
+  var finalPeriod = null;
   var sheetLastRow = sheet.getLastRow();
   for (var r = startRow; r <= sheetLastRow; r++) {
     var rowData = sheet.getRange(r, 1, 1, 17).getDisplayValues()[0];
     if (rowData[0] !== reqID) break;  // 다른 reqID가 나오면 종료
+    if (!finalPeriod && rowData[1]) {
+      finalPeriod = {
+        start_date: String(rowData[1] || "").trim(),
+        start_time: String(rowData[2] || "").trim(),
+        end_date: String(rowData[3] || "").trim(),
+        end_time: String(rowData[4] || "").trim()
+      };
+    }
     var equipName = rowData[5];  // F
     if (!equipName) continue;    // 빈 행 스킵
+    if (String(rowData[16] || "").trim().indexOf("[세트]") !== 0) {
+      finalTopLevelPlan.push({ name: String(equipName).trim(), quantity: Number(rowData[6]) || 1 });
+    }
     results.push({
       장비명: equipName,
       수량: rowData[6],     // G
@@ -11924,6 +12035,17 @@ function _insertAndCheckRequest(req) {
   if (replacedReqIDs.length > 0) {
     response.replacedReqIDs = replacedReqIDs;
     response.replacedRows = replacedRows;
+  }
+  if (staffConfirmedPendingFence) {
+    response.staff_confirmed_pending_mutation = {
+      target_scope: "pending_request",
+      target_request_id: staffConfirmedPendingFence.group.reqID,
+      expected_before: staffConfirmedPendingFence.expectedBefore,
+      expected_period: staffConfirmedPendingFence.expectedPeriod,
+      replacement_request_id: reqID,
+      final_plan: finalTopLevelPlan,
+      final_period: finalPeriod
+    };
   }
   return response;
 }
