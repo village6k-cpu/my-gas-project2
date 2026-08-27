@@ -9431,6 +9431,14 @@ function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
   if (!sameGatewayDecisionValue(before.contract, expectedPeriod)
     || !sameGatewayDecisionValue(after.contract, desiredPeriod)) return false;
 
+  if (Array.isArray(mutation?.desired_after) && mutation.desired_after.length > 0) {
+    const componentRewriteRequested = (mutation.expected_before || []).some((expected) => {
+      const current = before.rowsById.get(text(expected?.schedule_id).trim());
+      return current?.isComponent === true;
+    });
+    if (componentRewriteRequested) return false;
+  }
+
   const additionDelta = registeredMutationDeltaQuantities(mutation?.desired_after);
   if (!additionDelta) return false;
   const projectedTopLevel = { ...before.topLevel };
