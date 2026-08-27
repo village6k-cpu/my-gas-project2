@@ -1055,6 +1055,155 @@ test('all five registered delta kinds finalize only when before plus typed delta
   }
 });
 
+const REGISTERED_SET_ROWS = [
+  { scheduleId: '260824-008-01', setName: '어퓨쳐 600X 세트', name: '어퓨쳐 600X 세트', qty: 1, isComponent: false },
+  { scheduleId: '260824-008-02', setName: '어퓨쳐 600X 세트', name: '소프트박스', qty: 1, isComponent: true },
+  { scheduleId: '260824-008-03', setName: '어퓨쳐 600X 세트', name: '반사갓', qty: 1, isComponent: true },
+  { scheduleId: '260824-008-10', setName: '어퓨쳐 600X 세트', name: '어퓨쳐 600X 세트', qty: 1, isComponent: false },
+  { scheduleId: '260824-008-11', setName: '어퓨쳐 600X 세트', name: '소프트박스', qty: 1, isComponent: true },
+  { scheduleId: '260824-008-20', setName: '', name: '소프트박스', qty: 1, isComponent: false }
+];
+
+const registeredComponentProjectionCases = [
+  {
+    name: 'component remove deletes only the exact targeted component row',
+    mutation: registeredMutationFixture('equipment_remove', {
+      expected_before: [{ schedule_id: '260824-008-02', name: '소프트박스', quantity: 1 }],
+      desired_after: []
+    }),
+    afterRows: REGISTERED_SET_ROWS.filter((row) => row.scheduleId !== '260824-008-02')
+  },
+  {
+    name: 'component replace preserves its set siblings and adds the exact catalog item',
+    mutation: registeredMutationFixture('equipment_replace', {
+      expected_before: [{ schedule_id: '260824-008-02', name: '소프트박스', quantity: 1 }],
+      desired_after: [{ name: '젬볼 90', quantity: 1 }]
+    }),
+    afterRows: [
+      ...REGISTERED_SET_ROWS.filter((row) => row.scheduleId !== '260824-008-02'),
+      { scheduleId: '260824-008-100', setName: '', name: '젬볼 90', qty: 1, isComponent: false }
+    ]
+  },
+  {
+    name: 'component quantity change preserves its set identity and adds the requested catalog quantity',
+    mutation: registeredMutationFixture('equipment_quantity_change', {
+      expected_before: [{ schedule_id: '260824-008-02', name: '소프트박스', quantity: 1 }],
+      desired_after: [{ name: '소프트박스', quantity: 2 }]
+    }),
+    afterRows: [
+      ...REGISTERED_SET_ROWS.filter((row) => row.scheduleId !== '260824-008-02'),
+      { scheduleId: '260824-008-100', setName: '', name: '소프트박스', qty: 2, isComponent: false }
+    ]
+  },
+  {
+    name: 'set-header remove deletes only the targeted header and its following component block',
+    mutation: registeredMutationFixture('equipment_remove', {
+      expected_before: [{ schedule_id: '260824-008-01', name: '어퓨쳐 600X 세트', quantity: 1 }],
+      desired_after: []
+    }),
+    afterRows: REGISTERED_SET_ROWS.slice(3)
+  },
+  {
+    name: 'set-header replace preserves a later same-set instance and verifies the new set group',
+    mutation: registeredMutationFixture('equipment_replace', {
+      expected_before: [{ schedule_id: '260824-008-01', name: '어퓨쳐 600X 세트', quantity: 1 }],
+      desired_after: [{ name: '어퓨쳐 1200D 세트', quantity: 1 }]
+    }),
+    afterRows: [
+      ...REGISTERED_SET_ROWS.slice(3),
+      { scheduleId: '260824-008-100', setName: '어퓨쳐 1200D 세트', name: '어퓨쳐 1200D 세트', qty: 1, isComponent: false },
+      { scheduleId: '260824-008-101', setName: '어퓨쳐 1200D 세트', name: '헤드 케이블', qty: 1, isComponent: true }
+    ]
+  }
+];
+
+for (const scenario of registeredComponentProjectionCases) {
+  test(`registered production readback ${scenario.name}`, async () => {
+    const { job, turn } = gatewayTurnFixture();
+    const receipt = registeredReceiptFixture(job, {
+      mutation_kind: scenario.mutation.kind,
+      authoritative_result: {
+        before: registeredAuthoritativeState({ rows: REGISTERED_SET_ROWS }),
+        after: registeredAuthoritativeState({ rows: scenario.afterRows })
+      }
+    });
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn,
+      finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: scenario.mutation }))}`,
+      trustedToolReceipts: [receipt]
+    });
+
+    assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply');
+    assert.equal(prepared.decision.owner_review_required, false);
+    assert.deepEqual(prepared.availabilityAwareRows, []);
+  });
+}
+
+const registeredSetContradictionCases = [
+  {
+    name: 'component removal also deletes an untargeted sibling',
+    mutation: registeredMutationFixture('equipment_remove', {
+      expected_before: [{ schedule_id: '260824-008-02', name: '소프트박스', quantity: 1 }],
+      desired_after: []
+    }),
+    afterRows: REGISTERED_SET_ROWS.filter((row) => !['260824-008-02', '260824-008-03'].includes(row.scheduleId))
+  },
+  {
+    name: 'set-header removal also deletes a component from the later same-set instance',
+    mutation: registeredMutationFixture('equipment_remove', {
+      expected_before: [{ schedule_id: '260824-008-01', name: '어퓨쳐 600X 세트', quantity: 1 }],
+      desired_after: []
+    }),
+    afterRows: [REGISTERED_SET_ROWS[3], REGISTERED_SET_ROWS[5]]
+  },
+  {
+    name: 'target schedule ID does not have the confirmed exact catalog name',
+    mutation: registeredMutationFixture('equipment_remove', {
+      expected_before: [{ schedule_id: '260824-008-02', name: '젬볼 90', quantity: 1 }],
+      desired_after: []
+    }),
+    afterRows: REGISTERED_SET_ROWS.filter((row) => row.scheduleId !== '260824-008-02')
+  },
+  {
+    name: 'replacement component is attached to a different set identity',
+    mutation: registeredMutationFixture('equipment_replace', {
+      expected_before: [{ schedule_id: '260824-008-01', name: '어퓨쳐 600X 세트', quantity: 1 }],
+      desired_after: [{ name: '어퓨쳐 1200D 세트', quantity: 1 }]
+    }),
+    afterRows: [
+      ...REGISTERED_SET_ROWS.slice(3),
+      { scheduleId: '260824-008-100', setName: '어퓨쳐 1200D 세트', name: '어퓨쳐 1200D 세트', qty: 1, isComponent: false },
+      { scheduleId: '260824-008-101', setName: '다른 세트', name: '헤드 케이블', qty: 1, isComponent: true }
+    ]
+  }
+];
+
+for (const scenario of registeredSetContradictionCases) {
+  test(`registered production readback rejects ${scenario.name} without replay`, async () => {
+    const { job, turn } = gatewayTurnFixture();
+    const receipt = registeredReceiptFixture(job, {
+      mutation_kind: scenario.mutation.kind,
+      authoritative_result: {
+        before: registeredAuthoritativeState({ rows: REGISTERED_SET_ROWS }),
+        after: registeredAuthoritativeState({ rows: scenario.afterRows })
+      }
+    });
+    let replayCalls = 0;
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn,
+      finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: scenario.mutation }))}`,
+      trustedToolReceipts: [receipt],
+      dependencies: { executeRegisteredReservationChange: async () => { replayCalls += 1; } }
+    });
+
+    assert.equal(replayCalls, 0);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+    assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send');
+    assert.equal(prepared.decision.owner_review_required, true);
+    assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_readback_contradiction'), true);
+  });
+}
+
 test('registered success rejects missing before evidence or any unrelated-row mutation without replay', async () => {
   const { job, turn } = gatewayTurnFixture();
   const mutation = registeredMutationFixture();
