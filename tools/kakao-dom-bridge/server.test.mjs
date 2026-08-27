@@ -768,7 +768,6 @@ test('server registered change executor maps authenticated worker config into th
       expectedPeriod: {
         startDate: '2026-08-28', startTime: '09:00', endDate: '2026-08-29', endTime: '18:00'
       },
-      dateChange: null,
       remove: [{ scheduleId: '260824-008-07', expectedName: '기존 렌즈', expectedQty: 1 }],
       add: [{ name: '교체 렌즈', qty: 1 }],
       sendEstimate: false
@@ -811,7 +810,6 @@ test('Task 7 replays the sanitized registered replacement across the durable cha
         expectedPeriod: {
           startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00'
         },
-        dateChange: null,
         remove: [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }],
         add: [{ name: '소니 GM 70-200mm II', qty: 1 }],
         sendEstimate: false

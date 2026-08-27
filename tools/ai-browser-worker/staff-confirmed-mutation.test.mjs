@@ -36,6 +36,12 @@ const PENDING_MUTATION = {
   date_change: null
 };
 
+const REAL_RUNNER_CONFIG = {
+  VILLAGE2_API_URL: 'https://script.google.com/macros/s/example/exec',
+  VILLAGE2_API_KEY: 'synthetic-internal-key'
+};
+const REAL_RUNNER_OPERATION_ID = '11111111-2222-4333-8444-555555555555';
+
 function clone(value) {
   return structuredClone(value);
 }
@@ -120,6 +126,51 @@ function request(overrides = {}) {
     },
     ...overrides
   };
+}
+
+function installAuthenticatedCorrectionFetch(t, { before, after, events = [] }) {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  t.after(() => { globalThis.fetch = previousFetch; });
+  globalThis.fetch = async (url, options = {}) => {
+    events.push('fetch');
+    assert.equal(String(url), REAL_RUNNER_CONFIG.VILLAGE2_API_URL);
+    assert.equal(options.method, 'POST');
+    const body = JSON.parse(options.body);
+    assert.equal(body.key, REAL_RUNNER_CONFIG.VILLAGE2_API_KEY);
+    calls.push(body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        status: 'CORRECTED',
+        tradeId: '260824-008',
+        operationId: REAL_RUNNER_OPERATION_ID,
+        stages: ['scheduleCorrectRegisteredTrade'],
+        contractRegeneration: {
+          success: true,
+          url: 'https://example.test/contracts/260824-008',
+          fileId: 'contract-260824-008'
+        },
+        readback: after,
+        authoritativeReadback: { before, after },
+        customerNotificationSent: false
+      })
+    };
+  };
+  return calls;
+}
+
+function realRunnerRequest(mutation, assertCurrentClaim) {
+  const value = request({ config: REAL_RUNNER_CONFIG, mutation });
+  value.dependencies = {
+    operationFence: { operation_id: REAL_RUNNER_OPERATION_ID },
+    assertCurrentClaim,
+    randomUUID: value.dependencies.randomUUID,
+    now: value.dependencies.now
+  };
+  return value;
 }
 
 test('validates canonical registered and pending staff-confirmed mutation scopes', () => {
@@ -213,7 +264,6 @@ test('projects a registered mutation with exact expected period and quantities',
   assert.deepEqual(buildRegisteredTradeCorrectionInput(MUTATION, 'operation-260827-001'), {
     tradeId: '260824-008', operationId: 'operation-260827-001',
     expectedPeriod: { startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00' },
-    dateChange: null,
     remove: [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }],
     add: [{ name: '소니 GM 70-200mm II', qty: 1 }],
     sendEstimate: false
@@ -232,6 +282,70 @@ test('projects a registered date change with the exact new date-time field names
   assert.deepEqual(buildRegisteredTradeCorrectionInput(mutation, 'operation-date-change').dateChange, {
     newStartDate: '2026-08-28', startTime: '07:00', newEndDate: '2026-08-28', endTime: '19:00', allowConflicts: false
   });
+});
+
+test('equipment mutation crosses the real correction runner seam once without an empty date change', async (t) => {
+  const before = authoritativeState({ rows: [
+    { scheduleId: '260824-008-07', setName: '', name: '소니 FE 28-135mm', qty: 1, isComponent: false },
+    { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false }
+  ] });
+  const after = authoritativeState({ rows: [
+    { scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false },
+    { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false }
+  ] });
+  const events = [];
+  const calls = installAuthenticatedCorrectionFetch(t, { before, after, events });
+
+  const receipt = await executeVillageRegisteredReservationChange(
+    realRunnerRequest(clone(MUTATION), async () => { events.push('claim'); })
+  );
+
+  assert.deepEqual(events, ['claim', 'fetch']);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].action, 'scheduleCorrectRegisteredTrade');
+  assert.deepEqual(calls[0].args, {
+    tradeId: '260824-008',
+    operationId: REAL_RUNNER_OPERATION_ID,
+    expectedPeriod: { startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00' },
+    remove: [{ scheduleId: '260824-008-07', expectedName: '소니 FE 28-135mm', expectedQty: 1 }],
+    add: [{ name: '소니 GM 70-200mm II', qty: 1 }]
+  });
+  assert.equal(Object.hasOwn(calls[0].args, 'dateChange'), false);
+  assert.equal(receipt.status, 'ok');
+  assert.equal(receipt.trade_id, '260824-008');
+  assert.equal(receipt.customer_reply, 'no_reply');
+  assert.deepEqual(receipt.authoritative_result, { before, after });
+});
+
+test('date-time mutation crosses the real correction runner seam once with the exact date change', async (t) => {
+  const before = authoritativeState();
+  const after = authoritativeState({
+    startDate: '2026-08-28', startTime: '07:00', endDate: '2026-08-28', endTime: '19:00'
+  });
+  const events = [];
+  const calls = installAuthenticatedCorrectionFetch(t, { before, after, events });
+  const mutation = registeredMutation('date_time_change');
+
+  const receipt = await executeVillageRegisteredReservationChange(
+    realRunnerRequest(mutation, async () => { events.push('claim'); })
+  );
+
+  assert.deepEqual(events, ['claim', 'fetch']);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, {
+    tradeId: '260824-008',
+    operationId: REAL_RUNNER_OPERATION_ID,
+    expectedPeriod: { startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00' },
+    dateChange: {
+      newStartDate: '2026-08-28',
+      newEndDate: '2026-08-28',
+      startTime: '07:00',
+      endTime: '19:00',
+      allowConflicts: false
+    }
+  });
+  assert.equal(receipt.status, 'ok');
+  assert.deepEqual(receipt.authoritative_result, { before, after });
 });
 
 test('executes exactly once with the operation fence and claim immediately before the correction', async () => {
