@@ -14,7 +14,8 @@ const JOB_STATES = new Set(['ready', 'claimed', 'completed', 'superseded', 'retr
 const TOOL_OPERATION_STATES = new Set(['reserved', 'completed']);
 const TOOL_RECEIPT_SCHEMAS = new Map([
   ['confirmation_request', 'village-confirmation-receipt/v1'],
-  ['document_send', 'village-document-receipt/v1']
+  ['document_send', 'village-document-receipt/v1'],
+  ['registered_reservation_change', 'village-registered-reservation-change-receipt/v1']
 ]);
 const APPLICATION_STATES = new Set(['pending', 'claimed', 'applying', 'applied', 'finalized', 'failed']);
 const FAILURE_NOTIFICATION_STATES = new Set(['pending', 'delivered']);
@@ -73,11 +74,22 @@ function validateReceipt(receipt) {
   if (receipt.schema === 'village-confirmation-receipt/v1') {
     if (!Array.isArray(receipt?.availability_report)) throw channelError('invalid_receipt', 'availability_report must be a list');
     if (!isObjectOrNull(receipt?.authoritative_sheet_result)) throw channelError('invalid_receipt', 'authoritative_sheet_result must be an object or null');
-  } else {
+  } else if (receipt.schema === 'village-document-receipt/v1') {
     if (receipt?.document_type !== 'quote') throw channelError('invalid_receipt', 'document_type must be quote');
     if (!/^\d{6}-\d{3}$/.test(String(receipt?.trade_id || ''))) throw channelError('invalid_receipt', 'trade_id is invalid');
     if (!['vat_included', 'supply_only'].includes(receipt?.tax_mode)) throw channelError('invalid_receipt', 'tax_mode is invalid');
     if (!isObjectOrNull(receipt?.authoritative_document_result)) throw channelError('invalid_receipt', 'authoritative_document_result must be an object or null');
+  } else {
+    if (receipt?.target_scope !== 'registered_trade') throw channelError('invalid_receipt', 'target_scope must be registered_trade');
+    if (!/^\d{6}-\d{3}$/.test(String(receipt?.trade_id || ''))) throw channelError('invalid_receipt', 'trade_id is invalid');
+    if (!['equipment_add', 'equipment_remove', 'equipment_replace', 'equipment_quantity_change', 'date_time_change']
+      .includes(receipt?.mutation_kind)) throw channelError('invalid_receipt', 'mutation_kind is invalid');
+    if (!isObjectOrNull(receipt?.authoritative_result)) throw channelError('invalid_receipt', 'authoritative_result must be an object or null');
+    if (!Array.isArray(receipt?.applied_stages)) throw channelError('invalid_receipt', 'applied_stages must be a list');
+    if (!(receipt?.attempted_stage === null || typeof receipt?.attempted_stage === 'string')) {
+      throw channelError('invalid_receipt', 'attempted_stage must be null or a string');
+    }
+    if (receipt?.customer_reply !== 'no_reply') throw channelError('invalid_receipt', 'customer_reply must be no_reply');
   }
   if (!isValidIso(receipt?.created_at)) throw channelError('invalid_receipt', 'created_at must be ISO-8601');
   if (!(receipt?.error === null || typeof receipt?.error === 'string' || isObjectOrNull(receipt?.error))) {
@@ -815,6 +827,14 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
         const failureNotificationCounts = Object.fromEntries([...FAILURE_NOTIFICATION_STATES].map((state) => [state, 0]));
         let lastCompleted = null;
         let oldestLeaseAgeMs = null;
+        const registeredReservationChange = {
+          reserved: 0,
+          completed: 0,
+          failed_human_review: 0,
+          pending_failure_notifications: 0,
+          oldest_reserved_age_ms: null,
+          last_success_at: null
+        };
         const nowMs = currentTime();
         for (const job of jobs.values()) {
           counts[job.state] += 1;
@@ -830,6 +850,35 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
             }
           }
           if (job.state === 'completed' && (!lastCompleted || job.updated_at > lastCompleted.updated_at)) lastCompleted = job;
+          if (job.tool_operation?.tool === 'registered_reservation_change') {
+            const operation = job.tool_operation;
+            if (operation.state === 'reserved') {
+              registeredReservationChange.reserved += 1;
+              const createdAtMs = Date.parse(operation.created_at);
+              if (Number.isFinite(createdAtMs)) {
+                const age = Math.max(0, nowMs - createdAtMs);
+                registeredReservationChange.oldest_reserved_age_ms = registeredReservationChange.oldest_reserved_age_ms === null
+                  ? age
+                  : Math.max(registeredReservationChange.oldest_reserved_age_ms, age);
+              }
+            } else if (operation.state === 'completed') {
+              registeredReservationChange.completed += 1;
+            }
+            if (job.human_review_required === true) registeredReservationChange.failed_human_review += 1;
+            if (job.failure_notification?.state === 'pending') {
+              registeredReservationChange.pending_failure_notifications += 1;
+            }
+            const exactReceipt = exactReceiptForToolOperation(job);
+            const successfulReceipt = exactReceipt?.schema === 'village-registered-reservation-change-receipt/v1'
+              && exactReceipt.status === 'ok'
+              && isValidIso(exactReceipt.created_at)
+              ? exactReceipt
+              : null;
+            if (successfulReceipt && (!registeredReservationChange.last_success_at
+              || successfulReceipt.created_at > registeredReservationChange.last_success_at)) {
+              registeredReservationChange.last_success_at = successfulReceipt.created_at;
+            }
+          }
         }
         return {
           counts,
@@ -841,7 +890,8 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           oldest_lease_age_ms: oldestLeaseAgeMs,
           last_completed_job_id: lastCompleted?.job_id ?? null,
           last_consumer_id: lastConsumerId,
-          last_consumer_seen_at: lastConsumerSeenAt
+          last_consumer_seen_at: lastConsumerSeenAt,
+          registered_reservation_change: registeredReservationChange
         };
       });
     }
