@@ -12,6 +12,7 @@ const KINDS = new Set([
 ]);
 const TRADE_ID = /^\d{6}-\d{3}$/;
 const REQUEST_ID = /^RQ-\d{6}-\d{3}$/;
+const SCHEDULE_ID = /^(\d{6}-\d{3})-\d{2}$/;
 const TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -41,7 +42,7 @@ function exactDate(value) {
   return candidate.getUTCFullYear() === year && candidate.getUTCMonth() === month - 1 && candidate.getUTCDate() === day;
 }
 
-function validateRows(rows, { registered, label, errors }) {
+function validateRows(rows, { registered, tradeId, label, errors }) {
   if (!Array.isArray(rows)) {
     errors.push(`${label} must be an array`);
     return;
@@ -57,8 +58,11 @@ function validateRows(rows, { registered, label, errors }) {
     if (!Number.isInteger(row.quantity) || row.quantity <= 0) errors.push(`${rowLabel}.quantity must be a positive integer`);
     if (registered && label === 'expected_before') {
       const scheduleId = text(row.schedule_id);
-      if (!new RegExp(`^${TRADE_ID.source.slice(1, -1)}-\\d{2}$`).test(scheduleId)) {
+      const match = SCHEDULE_ID.exec(scheduleId);
+      if (!match) {
         errors.push(`${rowLabel}.schedule_id is invalid`);
+      } else if (match[1] !== tradeId) {
+        errors.push(`${rowLabel}.schedule_id does not belong to trade_id`);
       } else if (seenScheduleIds.has(scheduleId)) {
         errors.push(`${rowLabel}.schedule_id must be unique`);
       } else {
@@ -114,17 +118,17 @@ export function validateStaffConfirmedMutation(mutation, { roomRevision } = {}) 
   const registered = scope === 'registered_trade';
   if (registered) {
     if (!TRADE_ID.test(text(mutation.trade_id))) errors.push('trade_id is invalid');
-    if (mutation.request_id !== undefined && mutation.request_id !== null) errors.push('request_id is forbidden for registered_trade');
+    if (Object.hasOwn(mutation, 'request_id')) errors.push('request_id is forbidden for registered_trade');
     validatePeriod(mutation.expected_period, 'expected_period', errors);
   }
   if (scope === 'pending_request') {
     if (!REQUEST_ID.test(text(mutation.request_id))) errors.push('request_id is invalid');
-    if (mutation.trade_id !== undefined && mutation.trade_id !== null) errors.push('trade_id is forbidden for pending_request');
-    if (mutation.expected_period !== undefined && mutation.expected_period !== null) errors.push('expected_period is forbidden for pending_request');
+    if (Object.hasOwn(mutation, 'trade_id')) errors.push('trade_id is forbidden for pending_request');
+    if (Object.hasOwn(mutation, 'expected_period')) errors.push('expected_period is forbidden for pending_request');
   }
 
-  validateRows(mutation.expected_before, { registered, label: 'expected_before', errors });
-  validateRows(mutation.desired_after, { registered, label: 'desired_after', errors });
+  validateRows(mutation.expected_before, { registered, tradeId: text(mutation.trade_id), label: 'expected_before', errors });
+  validateRows(mutation.desired_after, { registered, tradeId: text(mutation.trade_id), label: 'desired_after', errors });
   if (!Array.isArray(mutation.expected_before) || !Array.isArray(mutation.desired_after)) {
     // Row validators provide the specific errors; this branch only avoids an invalid empty-change decision.
   } else if (mutation.expected_before.length === 0 && mutation.desired_after.length === 0 && mutation.date_change === null) {
@@ -225,9 +229,10 @@ export async function executeVillageRegisteredReservationChange(request = {}, op
     await assertCurrentClaim();
     const result = await runner({ config, input });
     if (result?.ok !== true || result?.verified !== true || text(result.tradeId) !== mutation.trade_id || !isRecord(result.readback)) {
+      const appliedStages = Array.isArray(result?.appliedStages) ? result.appliedStages : [];
       return buildReceipt({
-        status: 'failed',
-        appliedStages: result?.appliedStages || [],
+        status: appliedStages.length > 0 ? 'partial_success' : 'failed',
+        appliedStages,
         error: mutationError('invalid_authoritative_result', 'registered correction returned incomplete authoritative result')
       });
     }
@@ -244,7 +249,7 @@ export async function executeVillageRegisteredReservationChange(request = {}, op
     }
     if (stageError) {
       return buildReceipt({
-        status: 'blocked', appliedStages, attemptedStage,
+        status: appliedStages.length > 0 ? 'partial_success' : 'blocked', appliedStages, attemptedStage,
         error: mutationError('gas_rejected', text(error?.message) || 'GAS rejected registered correction', error?.details ?? null)
       });
     }
