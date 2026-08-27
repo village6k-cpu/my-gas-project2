@@ -2903,9 +2903,20 @@ test('executeVillageConfirmationRequest reuses additions-only merge, customer di
 });
 
 test('executeVillageConfirmationRequest executes pending RQ replacement only after exact authoritative verification', async () => {
-  const decision = completeSheetDecision({
+  const mutation = pendingMutationFixture({
+    request_id: 'RQ-260823-010',
+    source_evidence: {
+      customer_request: '캠기어 마크4 2개로 변경', staff_confirmation: '네', conversation_revision: 3
+    },
+    expected_before: [
+      { name: '소니 GM 70-200mm II', quantity: 2 },
+      { name: '셔틀러에이스 M (75볼)', quantity: 2 }
+    ],
+    desired_after: [{ name: '캠기어 마크4 (75볼)', quantity: 2 }]
+  });
+  const decision = pendingDecisionFixture({
+    staff_confirmed_mutation: mutation,
     existing_confirm_request_ids: ['RQ-260823-010'],
-    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
     sheet_row_candidate: {
       equipment_write_mode: 'replace_full_plan',
       customer_name: '백남준',
@@ -2936,6 +2947,9 @@ test('executeVillageConfirmationRequest executes pending RQ replacement only aft
           duplicate: true,
           reqID: 'RQ-260823-010',
           source: 'existing_confirm_request_lookup',
+          requestPeriod: {
+            start_date: '2026-08-25', pickup_time: '21:00', end_date: '2026-08-26', return_time: '21:00'
+          },
           topLevelEquipment: [
             { 이름: '소니 GM 70-200mm II', 수량: 2 },
             { 이름: '셔틀러에이스 M (75볼)', 수량: 2 }
@@ -3015,9 +3029,17 @@ test('typed pending execution carries exact request baseline and period through 
 });
 
 test('executeVillageConfirmationRequest rejects unverified pending RQ replacement without GAS mutation', async () => {
-  const decision = completeSheetDecision({
+  const mutation = pendingMutationFixture({
+    request_id: 'RQ-260823-010',
+    source_evidence: {
+      customer_request: '캠기어 마크4 2개로 변경', staff_confirmation: '네', conversation_revision: 3
+    },
+    expected_before: [{ name: '소니 GM 70-200mm II', quantity: 2 }],
+    desired_after: [{ name: '캠기어 마크4 (75볼)', quantity: 2 }]
+  });
+  const decision = pendingDecisionFixture({
+    staff_confirmed_mutation: mutation,
     existing_confirm_request_ids: ['RQ-260823-010'],
-    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
     sheet_row_candidate: {
       equipment_write_mode: 'replace_full_plan',
       equipment: [{ item: '캠기어 마크4 (75볼)', quantity: 2 }]
@@ -3074,6 +3096,80 @@ test('executeVillageConfirmationRequest returns a typed validation failure witho
   assert.deepEqual(receipt.availability_report, []);
   assert.equal(receipt.error.type, 'invalid_decision');
   assert.ok(receipt.error.validation_errors.length > 0);
+});
+
+test('executeVillageConfirmationRequest rejects untyped existing-record writes before catalog lookup or append even for legacy validators', async () => {
+  const cases = [
+    {
+      name: 'registered addition',
+      decision: completeSheetDecision({
+        reservation_inquiry: { is_reservation_inquiry: true, already_registered: true },
+        sheet_row_candidate: {
+          equipment_write_mode: 'additions_only',
+          equipment: [{ item: '로닌 링그립', quantity: 1 }]
+        }
+      })
+    },
+    {
+      name: 'pending addition',
+      decision: completeSheetDecision({
+        existing_confirm_request_ids: ['RQ-260823-010'],
+        reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+        sheet_row_candidate: {
+          equipment_write_mode: 'additions_only',
+          equipment: [{ item: '로닌 링그립', quantity: 1 }]
+        }
+      })
+    },
+    {
+      name: 'pending replacement',
+      decision: completeSheetDecision({
+        existing_confirm_request_ids: ['RQ-260823-010'],
+        reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+        sheet_row_candidate: {
+          equipment_write_mode: 'replace_full_plan',
+          equipment: [{ item: '캠기어 마크4 (75볼)', quantity: 2 }]
+        }
+      })
+    }
+  ];
+
+  for (const { name, decision } of cases) {
+    const calls = { catalog: 0, existing: 0, discount: 0, append: 0 };
+    const receipt = await workerModule.executeVillageConfirmationRequest({
+      config: { sheetApiKey: 'internal-key' },
+      job: { jobId: `job-${name}`, roomKey: `room-${name}`, roomRevision: 7 },
+      roomRevision: 7,
+      decision,
+      dependencies: {
+        validateAiDecisionContract: () => ({ valid: true, errors: [] }),
+        freshnessGuard: confirmationFreshnessGuard(),
+        fetchEquipmentCatalogSnapshot: async () => {
+          calls.catalog += 1;
+          return confirmationCatalogForDecision(decision);
+        },
+        fetchExistingConfirmRequestResultForDecision: async () => {
+          calls.existing += 1;
+          return null;
+        },
+        enrichSheetPayloadWithCustomerDbDiscount: async (_config, payload) => {
+          calls.discount += 1;
+          return { payload, lookup: { matched: false } };
+        },
+        appendToSheet: async () => {
+          calls.append += 1;
+          return { success: true, reqID: 'RQ-260827-999', results: [] };
+        },
+        randomUUID: () => `receipt-${name}`,
+        now: () => new Date('2026-08-27T01:00:00.000Z')
+      }
+    });
+
+    assert.equal(receipt.status, 'failed', name);
+    assert.equal(receipt.error.type, 'invalid_decision', name);
+    assert.ok(receipt.error.validation_errors.some((error) => /staff_confirmed_mutation|registered mutation route/i.test(error)), name);
+    assert.deepEqual(calls, { catalog: 0, existing: 0, discount: 0, append: 0 }, name);
+  }
 });
 
 test('executeVillageConfirmationRequest rejects stale correlation and stale freshness before mutation', async () => {
@@ -3788,7 +3884,9 @@ test('buildHermesPrompt prefers sheet writes for reservation-format requests', (
   assert.match(prompt, /할인유형: 고객DB I열이 카톡보다 우선/s);
   assert.match(prompt, /학생.*개인사업자\/프리랜서.*단골.*제휴.*일반/s);
   assert.match(prompt, /계약마스터.*스케줄상세.*확인요청/s);
-  assert.match(prompt, /예약형식.*should_write_to_sheet=true/s);
+  assert.match(prompt, /genuinely new.*예약형식.*should_write_to_sheet=true/is);
+  assert.match(prompt, /기존 등록.*기존 RQ.*staff_confirmed_mutation/s);
+  assert.doesNotMatch(prompt, /예약형식이 충분하면 should_write_to_sheet=true를 기본값으로 둔다/);
   assert.match(prompt, /불확실한 장비명.*AI가 카탈로그 전체를 비교해 판단/s);
   assert.match(prompt, /연락처.*고객DB.*확인요청 생성은 막지 말고/s);
   assert.match(prompt, /missing phone is NOT a sheet-write blocker/s);
@@ -5513,13 +5611,13 @@ test('buildHermesPrompt requires sender separation and customer turn clustering'
   assert.match(prompt, /conversation_turns/);
 });
 
-test('buildHermesPrompt requires additions-only equipment for an existing booking', () => {
+test('buildHermesPrompt keeps existing-record changes read-only until the exact typed staff-confirmed route', () => {
   const prompt = buildHermesPrompt({ id: 'job-addon', preview_text: '기존 예약에 렌즈 하나 추가해주세요' });
   assert.match(prompt, /equipment_write_mode/);
-  assert.match(prompt, /additions_only/);
-  assert.match(prompt, /do not repeat existing equipment/i);
-  assert.match(prompt, /existing booking with newly added or increased equipment is not a duplicate/i);
-  assert.doesNotMatch(prompt, /never concatenated or delta-only/i);
+  assert.match(prompt, /genuinely new.*full_plan/is);
+  assert.match(prompt, /기존.*read-only.*staff_confirmed_mutation/is);
+  assert.match(prompt, /registered changes.*native route/is);
+  assert.doesNotMatch(prompt, /An existing booking with newly added or increased equipment is not a duplicate/);
 });
 
 test('buildHermesPrompt treats a requested set option as a component selection, not separate equipment', () => {
@@ -5529,7 +5627,7 @@ test('buildHermesPrompt treats a requested set option as a component selection, 
   assert.match(prompt, /never add.*top-level equipment/i);
 });
 
-test('existing booking writes reject a repeated full plan and accept only the added equipment', () => {
+test('untyped existing-record writes are rejected while a genuinely new request remains writable', () => {
   const repeated = completeSheetDecision({
     reservation_inquiry: {
       is_reservation_inquiry: true,
@@ -5553,23 +5651,59 @@ test('existing booking writes reject a repeated full plan and accept only the ad
       equipment: [{ item: '소니 GM 24-70mm II', quantity: 1 }]
     }
   });
+  const pendingAddition = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260823-010'],
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: 'additions_only',
+      equipment: [{ item: '소니 GM 24-70mm II', quantity: 1 }]
+    }
+  });
+  const pendingReplacement = completeSheetDecision({
+    existing_confirm_request_ids: ['RQ-260823-010'],
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: 'replace_full_plan',
+      equipment: [{ item: '소니 GM 24-70mm II', quantity: 1 }]
+    }
+  });
+  const genuinelyNew = completeSheetDecision({
+    existing_confirm_request_ids: [],
+    reservation_inquiry: { is_reservation_inquiry: true, already_registered: false },
+    sheet_row_candidate: {
+      equipment_write_mode: 'full_plan',
+      equipment: [{ item: '소니 GM 24-70mm II', quantity: 1 }]
+    }
+  });
 
   const repeatedValidation = validateAiDecisionContract(repeated);
   assert.equal(repeatedValidation.valid, false);
   assert.ok(repeatedValidation.errors.some((error) => error.includes('additions_only')));
-  assert.equal(validateAiDecisionContract(addition).valid, true);
-
-  const payload = buildSheetAppendPayload(addition, { apiKey: 'secret' });
-  assert.deepEqual(payload.args.장비, [{ 이름: '소니 GM 24-70mm II', 수량: 1 }]);
+  for (const decision of [addition, pendingAddition, pendingReplacement]) {
+    const validation = validateAiDecisionContract(decision);
+    assert.equal(validation.valid, false);
+    assert.ok(validation.errors.some((error) => /staff_confirmed_mutation|registered mutation route/i.test(error)));
+    assert.equal(buildSheetAppendPayload(decision, { apiKey: 'secret' }), null);
+  }
+  assert.deepEqual(validateAiDecisionContract(genuinelyNew), { valid: true, errors: [] });
+  assert.deepEqual(
+    buildSheetAppendPayload(genuinelyNew, { apiKey: 'secret' }).args.장비,
+    [{ 이름: '소니 GM 24-70mm II', 수량: 1 }]
+  );
 });
 
-test('pending RQ replacement accepts one complete final plan and rejects unsafe replacement scopes', () => {
-  const replacement = completeSheetDecision({
-    existing_confirm_request_ids: ['RQ-260823-010'],
-    reservation_inquiry: {
-      is_reservation_inquiry: true,
-      already_registered: false
+test('typed pending RQ replacement accepts one complete final plan and rejects unsafe replacement scopes', () => {
+  const replacementMutation = pendingMutationFixture({
+    request_id: 'RQ-260823-010',
+    source_evidence: {
+      customer_request: '캠기어 마크4 2개로 변경', staff_confirmation: '네', conversation_revision: 7
     },
+    expected_before: [{ name: '소니 GM 70-200mm II', quantity: 2 }],
+    desired_after: [{ name: '캠기어 마크4 (75볼)', quantity: 2 }]
+  });
+  const replacement = pendingDecisionFixture({
+    staff_confirmed_mutation: replacementMutation,
+    existing_confirm_request_ids: ['RQ-260823-010'],
     sheet_row_candidate: {
       equipment_write_mode: 'replace_full_plan',
       customer_name: '백남준',
@@ -6054,10 +6188,22 @@ test('buildSheetAppendPayload rejects unresolved relative dates while the bounda
   assert.equal(payload, null);
 });
 
-test('additions-only pending RQ writes merge the authoritative full plan instead of replacing it', () => {
-  const decision = completeSheetDecision({
+test('typed additions-only pending RQ writes merge the authoritative full plan instead of replacing it', () => {
+  const mutation = pendingMutationFixture({
+    kind: 'equipment_add',
+    request_id: 'RQ-260818-005',
+    expected_before: [
+      { name: '소니 FX6 바디세트', quantity: 1 },
+      { name: 'C스탠드', quantity: 1 }
+    ],
+    desired_after: [
+      { name: 'C스탠드', quantity: 2 },
+      { name: '로닌 링그립', quantity: 1 }
+    ]
+  });
+  const decision = pendingDecisionFixture({
+    staff_confirmed_mutation: mutation,
     existing_confirm_request_ids: ['RQ-260818-005'],
-    reservation_inquiry: { already_registered: false },
     sheet_row_candidate: {
       equipment_write_mode: 'additions_only',
       equipment: [
@@ -6086,10 +6232,16 @@ test('additions-only pending RQ writes merge the authoritative full plan instead
   ]);
 });
 
-test('additions-only pending RQ writes fail closed without an authoritative full plan', () => {
-  const decision = completeSheetDecision({
+test('typed additions-only pending RQ writes fail closed without an authoritative full plan', () => {
+  const mutation = pendingMutationFixture({
+    kind: 'equipment_add',
+    request_id: 'RQ-260818-005',
+    expected_before: [{ name: '소니 FX6 바디세트', quantity: 1 }],
+    desired_after: [{ name: '로닌 링그립', quantity: 1 }]
+  });
+  const decision = pendingDecisionFixture({
+    staff_confirmed_mutation: mutation,
     existing_confirm_request_ids: ['RQ-260818-005'],
-    reservation_inquiry: { already_registered: false },
     sheet_row_candidate: {
       equipment_write_mode: 'additions_only',
       equipment: [{ item: '로닌 링그립', quantity: 1 }]
@@ -6103,7 +6255,7 @@ test('additions-only pending RQ writes fail closed without an authoritative full
   assert.equal(merged.payload, null);
 });
 
-test('additions-only registered booking keeps the AI delta but crosses GAS as a standalone full plan', () => {
+test('untyped additions-only registered booking never builds a confirmation payload', () => {
   const decision = completeSheetDecision({
     reservation_inquiry: { already_registered: true },
     sheet_row_candidate: {
@@ -6112,12 +6264,8 @@ test('additions-only registered booking keeps the AI delta but crosses GAS as a 
     }
   });
   const payload = buildSheetAppendPayload(decision, { apiKey: 'secret' });
-
-  const merged = mergeAdditionsOnlySheetPayloadWithExistingRequest(payload, decision, null);
-
-  assert.equal(merged.ok, true);
-  assert.equal(merged.payload.args.입력모드, 'full_plan');
-  assert.deepEqual(merged.payload.args.장비, [{ 이름: '로닌 링그립', 수량: 1 }]);
+  assert.equal(validateAiDecisionContract(decision).valid, false);
+  assert.equal(payload, null);
 });
 
 test('buildSheetAppendPayload allows reservation-format writes when non-blocking checks are incomplete', () => {
