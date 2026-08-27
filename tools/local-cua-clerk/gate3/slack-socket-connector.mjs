@@ -48,6 +48,35 @@ const HANDOFF_KEYS = Object.freeze([
   'phone',
   'item',
 ]);
+const OBSERVED_REISSUE_KEYS = Object.freeze([
+  'handoff_id',
+  'task_type',
+  'priority',
+  'authorization',
+  'status_check',
+  'customer_name',
+  'kakao_room',
+  'room_key',
+  'transaction_id',
+  'transaction_date',
+  'rental_period',
+  'amount_krw',
+  'purpose',
+  'id_type',
+  'phone_for_cash_receipt',
+  'booking_phone_on_ledger',
+  'depositor',
+  'payment_method',
+  'deposit_status',
+  'ledger_live_readback',
+  'why_hermes_stopped',
+  'duplicate_guard',
+  'post_issue_backfill',
+  'customer_kakao_send',
+  'item',
+]);
+const HANDOFF_ID = /^hb-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const COMPACT_HANDOFF_ID = /^hb-([0-9a-f]{8})([0-9a-f]{4})(4[0-9a-f]{3})([89ab][0-9a-f]{3})([0-9a-f]{12})$/;
 const DELIVERY_ERRORS = new Set(['action_blocked', 'malformed_action_result']);
 
 function exactKeys(value, expected, name) {
@@ -322,10 +351,126 @@ function parseKrw(value) {
     : undefined;
 }
 
+function normalizeHeyBillyHandoffId(value) {
+  if (HANDOFF_ID.test(value)) return value;
+  const compact = COMPACT_HANDOFF_ID.exec(value);
+  return compact ? `hb-${compact.slice(1).join('-')}` : undefined;
+}
+
+function parseSlackPhone(value) {
+  const plain = /^(01[016789]-\d{3,4}-\d{4})$/.exec(value);
+  if (plain) return plain[1];
+  const linked = /^<tel:(01[016789]-\d{3,4}-\d{4})\|(01[016789]-\d{3,4}-\d{4})>$/.exec(value);
+  return linked && linked[1] === linked[2] ? linked[1] : undefined;
+}
+
 function isCalendarDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const date = new Date(`${value}T00:00:00.000Z`);
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function parseObservedHeyBillyReissue(text, botUserId) {
+  if (text.includes('\r') || text.includes('\u0000') || text.normalize('NFKC') !== text) return undefined;
+  const lines = text.split('\n');
+  if (lines.length !== 42 || lines[1] !== '' || lines[2] !== '```text') return undefined;
+  if (lines[3] !== '[MAC_AGENT_HANDOFF_V1]') return undefined;
+  const closingIndex = lines.indexOf('[/MAC_AGENT_HANDOFF_V1]');
+  if (
+    closingIndex !== 37
+    || lines[38] !== '```'
+    || lines[39] !== ''
+    || !/^[^\u0000-\u001f\u007f]{1,512}$/u.test(lines[40])
+    || lines[41] !== ''
+  ) return undefined;
+
+  const values = Object.create(null);
+  const foundKeys = [];
+  const continuations = Object.create(null);
+  let activeKey;
+  for (const line of lines.slice(4, closingIndex)) {
+    const keyed = /^([a-z_]+):(?: (.*))?$/.exec(line);
+    if (keyed) {
+      const [, key, value = ''] = keyed;
+      if (Object.hasOwn(values, key)) return undefined;
+      values[key] = value;
+      foundKeys.push(key);
+      activeKey = key;
+      continue;
+    }
+    const continuation = /^  ([KLON])=[^\u0000-\u001f\u007f]{1,180}$/u.exec(line);
+    if (!['ledger_live_readback', 'post_issue_backfill'].includes(activeKey) || !continuation) {
+      return undefined;
+    }
+    (continuations[activeKey] ??= []).push(continuation[1]);
+  }
+  if (
+    foundKeys.length !== OBSERVED_REISSUE_KEYS.length
+    || foundKeys.some((key, index) => key !== OBSERVED_REISSUE_KEYS[index])
+    || continuations.ledger_live_readback?.join('') !== 'KLON'
+    || continuations.post_issue_backfill?.join('') !== 'KLON'
+    || values.ledger_live_readback !== ''
+    || values.post_issue_backfill !== ''
+  ) return undefined;
+
+  const customerName = values.customer_name;
+  const escapedBotUserId = botUserId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const header = new RegExp(
+    `^<@${escapedBotUserId}> 작업 요청 \\(홈택스 CUA\\) — ([가-힣A-Za-z0-9 .()_-]{2,40}) 현금영수증 재지시$`,
+    'u',
+  ).exec(lines[0]);
+  const handoffId = normalizeHeyBillyHandoffId(values.handoff_id);
+  const amountKrw = parseKrw(values.amount_krw);
+  const phone = parseSlackPhone(values.phone_for_cash_receipt);
+  const bookingPhone = parseSlackPhone(values.booking_phone_on_ledger);
+  const period = /^(\d{4}-\d{2}-\d{2})\s*~\s*(\d{4}-\d{2}-\d{2})$/.exec(values.rental_period);
+  if (
+    !header
+    || header[1] !== customerName
+    || !handoffId
+    || values.task_type !== HEYBILLY_TASK_TYPE
+    || values.priority !== 'high'
+    || values.authorization !== 'owner_explicit'
+    || values.status_check !== 'NOT_ISSUED'
+    || !/^[가-힣A-Za-z0-9 .()_-]{2,40}$/u.test(customerName)
+    || !/^[가-힣A-Za-z0-9 .()_-]{1,80}$/u.test(values.kakao_room)
+    || !/^chat:\d{8,20}$/.test(values.room_key)
+    || !/^\d{6}-\d{3}$/.test(values.transaction_id)
+    || !isCalendarDate(values.transaction_date)
+    || !period
+    || period[1] !== values.transaction_date
+    || !isCalendarDate(period[1])
+    || !isCalendarDate(period[2])
+    || period[2] < period[1]
+    || amountKrw === undefined
+    || values.purpose !== 'income_deduction'
+    || values.id_type !== 'phone'
+    || !phone
+    || !bookingPhone
+    || !/^[가-힣A-Za-z0-9 .()_-]{1,40}$/u.test(values.depositor)
+    || values.payment_method !== '계좌이체(VAT포함)'
+    || values.deposit_status !== '입금완료'
+    || !/^[^\r\n\u0000-\u001f\u007f]{1,180}$/u.test(values.why_hermes_stopped)
+    || values.duplicate_guard !== 'search Hometax same date+amount+phone before issue'
+    || values.customer_kakao_send !== 'do_not_auto_send'
+    || Buffer.byteLength(values.item, 'utf8') > 180
+    || !values.item.startsWith(`${values.transaction_date} `)
+    || !values.item.includes(`(${values.transaction_id})`)
+  ) return undefined;
+
+  return Object.freeze({
+    schemaVersion: HEYBILLY_TASK_SCHEMA_VERSION,
+    action: HEYBILLY_TASK_TYPE,
+    handoffId,
+    authorization: 'owner_explicit',
+    customerName,
+    transactionId: values.transaction_id,
+    transactionDate: values.transaction_date,
+    amountKrw,
+    purpose: 'income_deduction',
+    phone,
+    item: values.item,
+  });
 }
 
 function parsePlainHeyBillyRelay(text, botUserId, eventId) {
@@ -481,6 +626,7 @@ export function adaptSlackAppMention({
       });
     }
     const task = parseHeyBillyHandoff(event.text, route.botUserId)
+      ?? parseObservedHeyBillyReissue(event.text, route.botUserId)
       ?? parsePlainHeyBillyRelay(event.text, route.botUserId, body.event_id);
     if (!task) return rejected('command_not_allowed');
     return Object.freeze({

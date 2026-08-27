@@ -24,6 +24,10 @@ const PHONE = /^01[016789]-\d{3,4}-\d{4}$/;
 const AUTHORIZATION_NUMBER = /^[A-Za-z0-9-]{6,32}$/;
 const MAX_EVENT_BYTES = 256 * 1024;
 const MAX_AGENT_MESSAGE_BYTES = 8 * 1024;
+const DIAGNOSTIC_PHASES = new Set([
+  'initialize', 'threadStart', 'threadName', 'mcpStartup', 'turnStart', 'turnRunning',
+  'verificationThreadStart', 'verificationMcpStartup', 'verifyReadback',
+]);
 
 const NEEDS = Object.freeze([
   'studio_mac_locked',
@@ -204,6 +208,18 @@ function blockedResult(errorClass) {
     need: null,
     errorClass: safeError,
   });
+}
+
+function emitFixedFailureDiagnostic(errorClass, phase) {
+  if (process.env.LOCAL_CUA_WORKER_DIAGNOSTICS !== '1') return;
+  const safeErrorClass = ERROR_CLASSES.includes(errorClass) ? errorClass : 'command_failed';
+  const safePhase = DIAGNOSTIC_PHASES.has(phase) ? phase : 'initialize';
+  process.stderr.write(`${JSON.stringify({
+    schemaVersion: 'studio-mac-worker-diagnostic/v1',
+    status: 'BLOCKED',
+    errorClass: safeErrorClass,
+    phase: safePhase,
+  })}\n`);
 }
 
 function fixedTaskPrompt(task) {
@@ -547,6 +563,8 @@ export async function runStudioMacCodexWorker({
   let verificationThreadId;
   let turnId;
   let turnStarted = false;
+  let turnStartedNotificationSeen = false;
+  let mainMcpReady = false;
   let finalAgent;
   let finalResult;
   let phase = 'initialize';
@@ -559,7 +577,7 @@ export async function runStudioMacCodexWorker({
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ errorClass });
+      resolve({ errorClass, phase });
     };
     const send = message => {
       try {
@@ -651,7 +669,7 @@ export async function runStudioMacCodexWorker({
               method: 'thread/start',
               params: {
                 cwd: process.cwd(),
-                ephemeral: true,
+                ephemeral: false,
                 approvalPolicy: 'never',
                 sandbox: 'read-only',
                 serviceName: 'village-local-studio-mac-hometax-cua',
@@ -664,8 +682,23 @@ export async function runStudioMacCodexWorker({
           if (phase === 'threadStart') {
             threadId = response.result?.thread?.id;
             if (typeof threadId !== 'string' || threadId.length === 0) return finish('command_failed');
+            phase = 'threadName';
+            pendingId = 11;
+            send({
+              id: pendingId,
+              method: 'thread/name/set',
+              params: {
+                threadId,
+                name: `맥에이전트 · 현금영수증 · ${requestId}`,
+              },
+            });
+            continue;
+          }
+
+          if (phase === 'threadName') {
             phase = 'mcpStartup';
             pendingId = undefined;
+            if (mainMcpReady) startTurn();
             continue;
           }
 
@@ -699,9 +732,12 @@ export async function runStudioMacCodexWorker({
         }
 
         if (typeof message?.method !== 'string') return finish('malformed_result');
-        if (phase === 'mcpStartup') {
+        if (phase === 'threadName' || phase === 'mcpStartup') {
           const readiness = startupReadiness(message, threadId);
-          if (readiness === 'ready') startTurn();
+          if (readiness === 'ready') {
+            mainMcpReady = true;
+            if (phase === 'mcpStartup') startTurn();
+          }
           else if (readiness === 'invalid' || readiness === 'failed') finish('command_failed');
           continue;
         }
@@ -719,10 +755,11 @@ export async function runStudioMacCodexWorker({
           try { exactKeys(params, ['threadId', 'turn'], 'turn/started params'); }
           catch { return finish('malformed_result'); }
           const started = exactTurn(params.turn, 'inProgress');
-          if (!started || params.threadId !== threadId || started.id !== turnId || turnStarted) {
+          if (!started || params.threadId !== threadId || started.id !== turnId || turnStartedNotificationSeen) {
             return finish('malformed_result');
           }
           turnStarted = true;
+          turnStartedNotificationSeen = true;
           continue;
         }
 
@@ -735,10 +772,13 @@ export async function runStudioMacCodexWorker({
             !Number.isInteger(params.completedAtMs)
             || params.threadId !== threadId
             || params.turnId !== turnId
-            || !turnStarted
           ) {
             return finish('malformed_result');
           }
+          // The app-server can flush the correlated first item before this client
+          // observes turn/started. Matching thread and turn IDs are sufficient proof
+          // that the accepted turn is running; a later turn/started is still checked.
+          turnStarted = true;
           if (params.item?.type !== 'agentMessage') continue;
           const exactAgent = exactAgentMessage(params.item);
           if (!exactAgent) return finish('malformed_result');
@@ -797,6 +837,9 @@ export async function runStudioMacCodexWorker({
     child, codexPath, expectedIdentity, identityReader, timeoutMs: cleanupTimeoutMs,
   });
   if (!cleanupCompleted) return blockedResult('cleanup_incomplete');
-  if (outcome.errorClass) return blockedResult(outcome.errorClass);
+  if (outcome.errorClass) {
+    emitFixedFailureDiagnostic(outcome.errorClass, outcome.phase);
+    return blockedResult(outcome.errorClass);
+  }
   return finalResult ?? blockedResult('outcome_unknown');
 }

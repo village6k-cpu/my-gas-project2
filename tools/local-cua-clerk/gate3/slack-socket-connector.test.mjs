@@ -112,6 +112,59 @@ const HEYBILLY_PLAIN_RELAY_BODY = Object.freeze({
   }),
 });
 
+const HEYBILLY_OBSERVED_REISSUE_TEXT = `<@${ROUTE.botUserId}> 작업 요청 (홈택스 CUA) — 테스트고객 현금영수증 재지시
+
+\`\`\`text
+[MAC_AGENT_HANDOFF_V1]
+handoff_id: hb-7af43b0c4b654bb4a04ab249cc9cf360
+task_type: hometax_cash_receipt_issue
+priority: high
+authorization: owner_explicit
+status_check: NOT_ISSUED
+customer_name: 테스트고객
+kakao_room: 테스트방
+room_key: chat:1234567890
+transaction_id: 260530-012
+transaction_date: 2026-06-27
+rental_period: 2026-06-27 ~ 2026-06-29
+amount_krw: 464310
+purpose: income_deduction
+id_type: phone
+phone_for_cash_receipt: <tel:010-5164-8069|010-5164-8069>
+booking_phone_on_ledger: <tel:010-4045-7379|010-4045-7379>
+depositor: 테스트
+payment_method: 계좌이체(VAT포함)
+deposit_status: 입금완료
+ledger_live_readback:
+  K=미발행
+  L=과거발행
+  O=관리키없음
+  N=현금영수증 실적 아님
+why_hermes_stopped: Popbill 권한 없음
+duplicate_guard: search Hometax same date+amount+phone before issue
+post_issue_backfill:
+  K=발행완료
+  L=발행완료
+  O=승인번호
+  N=고객 자동 발송 안 함
+customer_kakao_send: do_not_auto_send
+item: 2026-06-27 렌탈 (260530-012)
+[/MAC_AGENT_HANDOFF_V1]
+\`\`\`
+
+승인번호 확인까지 같은 스레드에 보고합니다.
+`;
+
+const HEYBILLY_OBSERVED_REISSUE_BODY = Object.freeze({
+  ...HEYBILLY_HANDOFF_BODY,
+  event_id: 'Ev0HEYBILLYLIVE01',
+  event: Object.freeze({
+    ...HEYBILLY_HANDOFF_BODY.event,
+    text: HEYBILLY_OBSERVED_REISSUE_TEXT,
+    ts: '1787835183.617639',
+  }),
+});
+
 const CHECKED_AT = '2026-08-25T03:00:00.000Z';
 const GATE1_PASS = Object.freeze({
   schemaVersion: 'gate1-desktop-cua/v1',
@@ -270,6 +323,75 @@ test('a plain HeyBilly relay is structured locally on Studio Mac without a Herme
   assert.equal(JSON.stringify(decision.envelope).includes(HEYBILLY_PLAIN_RELAY_TEXT), false);
   assert.equal(JSON.stringify(decision.envelope).includes('010-4045-7379'), false);
   assert.equal(JSON.stringify(decision.envelope).includes('테스트고객'), false);
+});
+
+test('the exact 42-line HeyBilly reissue rendering observed in Slack is normalized locally', async () => {
+  const connector = await loadConnector();
+
+  const decision = connector.adaptSlackAppMention({
+    body: HEYBILLY_OBSERVED_REISSUE_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    nowEpochSeconds: HEYBILLY_OBSERVED_REISSUE_BODY.event_time,
+  });
+
+  assert.equal(decision.accepted, true);
+  assert.equal(decision.kind, 'heybilly_handoff');
+  assert.deepEqual(decision.task, {
+    schemaVersion: 'gate1-studio-mac-task/v1',
+    action: 'hometax_cash_receipt_issue',
+    handoffId: 'hb-7af43b0c-4b65-4bb4-a04a-b249cc9cf360',
+    authorization: 'owner_explicit',
+    customerName: '테스트고객',
+    transactionId: '260530-012',
+    transactionDate: '2026-06-27',
+    amountKrw: 464310,
+    purpose: 'income_deduction',
+    phone: '010-5164-8069',
+    item: '2026-06-27 렌탈 (260530-012)',
+  });
+  assert.equal(decision.envelope.handoffId, decision.task.handoffId);
+  assert.equal(JSON.stringify(decision.envelope).includes('010-5164-8069'), false);
+  assert.equal(JSON.stringify(decision.envelope).includes('010-4045-7379'), false);
+  assert.equal(JSON.stringify(decision.envelope).includes('테스트고객'), false);
+  assert.equal(JSON.stringify(decision.envelope).includes('464310'), false);
+});
+
+test('the observed reissue rendering rejects identity, phone, date, and field-order mutations', async () => {
+  const connector = await loadConnector();
+  const mutations = [
+    HEYBILLY_OBSERVED_REISSUE_TEXT.replace(
+      'hb-7af43b0c4b654bb4a04ab249cc9cf360',
+      'hb-7af43b0c4b655bb4a04ab249cc9cf360',
+    ),
+    HEYBILLY_OBSERVED_REISSUE_TEXT.replace(
+      '<tel:010-5164-8069|010-5164-8069>',
+      '<tel:010-5164-8069|010-0000-0000>',
+    ),
+    HEYBILLY_OBSERVED_REISSUE_TEXT.replace(
+      'item: 2026-06-27 렌탈 (260530-012)',
+      'item: 2026-06-28 렌탈 (260530-012)',
+    ),
+    HEYBILLY_OBSERVED_REISSUE_TEXT.replace(
+      'priority: high\nauthorization: owner_explicit',
+      'authorization: owner_explicit\npriority: high',
+    ),
+    HEYBILLY_OBSERVED_REISSUE_TEXT.replace('  K=미발행\n  L=과거발행', '  L=과거발행\n  K=미발행'),
+    HEYBILLY_OBSERVED_REISSUE_TEXT.replace('— 테스트고객 현금영수증 재지시', '— 다른고객 현금영수증 재지시'),
+  ];
+
+  for (const text of mutations) {
+    const decision = connector.adaptSlackAppMention({
+      body: {
+        ...HEYBILLY_OBSERVED_REISSUE_BODY,
+        event: { ...HEYBILLY_OBSERVED_REISSUE_BODY.event, text },
+      },
+      route: ROUTE,
+      handoffSource: HEYBILLY_SOURCE,
+      nowEpochSeconds: HEYBILLY_OBSERVED_REISSUE_BODY.event_time,
+    });
+    assert.deepEqual(decision, { accepted: false, errorClass: 'command_not_allowed' });
+  }
 });
 
 test('plain relays reject inconsistent or broadened financial data before the Studio Mac worker', async () => {

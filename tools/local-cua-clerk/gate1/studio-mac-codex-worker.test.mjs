@@ -51,6 +51,7 @@ function fakeAppServer(finalResult = ISSUED, {
   closeOnSignal = true,
   commentaryText = null,
   finalPhase = 'final_answer',
+  emitTurnStarted = true,
   silent = false,
   spawnfile = '/opt/codex',
   verificationEvidence = {
@@ -117,9 +118,10 @@ function fakeAppServer(finalResult = ISSUED, {
           },
         });
       }
+      if (message.method === 'thread/name/set') emit({ id: message.id, result: {} });
       if (message.method === 'turn/start') {
         emit({ id: message.id, result: { turn } });
-        emit({ method: 'turn/started', params: { threadId: 'thread-studio-mac', turn } });
+        if (emitTurnStarted) emit({ method: 'turn/started', params: { threadId: 'thread-studio-mac', turn } });
         if (commentaryMessage) emit({
           method: 'item/completed',
           params: { completedAtMs: 1_001_000, threadId: 'thread-studio-mac', turnId: turn.id, item: commentaryMessage },
@@ -176,7 +178,7 @@ function fakeAppServer(finalResult = ISSUED, {
   return { child, sent, signals };
 }
 
-test('one authorized handoff creates one Studio Mac ephemeral Codex turn and returns only the validated issuance result', async () => {
+test('one authorized handoff creates one persisted Studio Mac Codex task and returns only the validated issuance result', async () => {
   const worker = await loadWorker();
   assert.equal(typeof worker?.runStudioMacCodexWorker, 'function');
   const fake = fakeAppServer();
@@ -202,11 +204,11 @@ test('one authorized handoff creates one Studio Mac ephemeral Codex turn and ret
     options: { stdio: ['pipe', 'pipe', 'pipe'] },
   });
   assert.deepEqual(fake.sent.map(message => message.method), [
-    'initialize', 'initialized', 'thread/start', 'turn/start', 'thread/start', 'mcpServer/tool/call',
+    'initialize', 'initialized', 'thread/start', 'thread/name/set', 'turn/start', 'thread/start', 'mcpServer/tool/call',
   ]);
   assert.equal(fake.sent.some(message => Object.hasOwn(message, 'jsonrpc')), false);
   const [threadStart, readbackThreadStart] = fake.sent.filter(message => message.method === 'thread/start');
-  assert.equal(threadStart.params.ephemeral, true);
+  assert.equal(threadStart.params.ephemeral, false);
   assert.equal(threadStart.params.approvalPolicy, 'never');
   assert.equal(threadStart.params.sandbox, 'read-only');
   assert.equal(threadStart.params.serviceName, 'village-local-studio-mac-hometax-cua');
@@ -216,6 +218,13 @@ test('one authorized handoff creates one Studio Mac ephemeral Codex turn and ret
   assert.match(threadStart.params.developerInstructions, /user_action_required/);
   assert.match(threadStart.params.developerInstructions, /execution_blocked/);
   assert.doesNotMatch(threadStart.params.developerInstructions, /MacBook|맥북/i);
+  const threadName = fake.sent.find(message => message.method === 'thread/name/set');
+  assert.deepEqual(threadName.params, {
+    threadId: 'thread-studio-mac',
+    name: '맥에이전트 · 현금영수증 · 0123456789abcdef',
+  });
+  assert.equal(JSON.stringify(threadName).includes(TASK.customerName), false);
+  assert.equal(JSON.stringify(threadName).includes(TASK.phone), false);
   assert.equal(readbackThreadStart.params.ephemeral, true);
   assert.equal(readbackThreadStart.params.approvalPolicy, 'never');
   assert.equal(readbackThreadStart.params.sandbox, 'read-only');
@@ -496,6 +505,22 @@ test('commentary agent messages may precede one exact final JSON agent message',
 
   assert.deepEqual(result, ISSUED);
   assert.equal(fake.sent.filter(message => message.method === 'mcpServer/tool/call').length, 1);
+});
+
+test('a correlated first item proves the turn started when turn/started was missed during the response race', async () => {
+  const worker = await loadWorker();
+  const fake = fakeAppServer(NEEDS_USER, { emitTurnStarted: false });
+  const result = await worker.runStudioMacCodexWorker({
+    task: TASK,
+    requestId: '0123456789abcdef',
+    codexPath: '/opt/codex',
+    allowTestOverrides: true,
+    spawnImpl: () => fake.child,
+    identityReader: async () => 'studio-mac-child-1',
+    timeoutMs: 1_000,
+  });
+
+  assert.deepEqual(result, NEEDS_USER);
 });
 
 test('a phase-less agent message cannot be promoted to the final financial result', async () => {
