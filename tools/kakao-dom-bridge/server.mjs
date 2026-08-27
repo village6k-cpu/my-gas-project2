@@ -696,7 +696,9 @@ export function createGatewayResultApplicationCoordinator({
     if (!operation || operation.state !== 'completed') return [];
     const expectedSchema = operation.tool === 'document_send'
       ? 'village-document-receipt/v1'
-      : 'village-confirmation-receipt/v1';
+      : operation.tool === 'registered_reservation_change'
+        ? 'village-registered-reservation-change-receipt/v1'
+        : 'village-confirmation-receipt/v1';
     const exact = (Array.isArray(durableJob?.tool_receipts) ? durableJob.tool_receipts : []).find((receipt) => (
       receipt?.schema === expectedSchema
       && receipt.receipt_id === operation.receipt_id

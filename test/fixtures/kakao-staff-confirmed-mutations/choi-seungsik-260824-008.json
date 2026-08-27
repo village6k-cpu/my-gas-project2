@@ -1,0 +1,25 @@
+{
+  "room_revision": 8,
+  "trade_id": "260824-008",
+  "customer_change_text": "28-135 취소하고 sony 70-200 gm 2.8 로 부탁드립니당",
+  "staff_confirmation_text": "네",
+  "expected_period": {
+    "start_date": "2026-08-27",
+    "start_time": "06:00",
+    "end_date": "2026-08-27",
+    "end_time": "18:00"
+  },
+  "exact_old_rows": [
+    {
+      "schedule_id": "260824-008-07",
+      "name": "소니 FE 28-135mm",
+      "quantity": 1
+    }
+  ],
+  "exact_desired_rows": [
+    {
+      "name": "소니 GM 70-200mm II",
+      "quantity": 1
+    }
+  ]
+}
