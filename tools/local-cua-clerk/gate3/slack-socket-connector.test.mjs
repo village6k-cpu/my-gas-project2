@@ -165,6 +165,29 @@ const HEYBILLY_OBSERVED_REISSUE_BODY = Object.freeze({
   }),
 });
 
+const HEYBILLY_GENERAL_TEXT = `<@${ROUTE.botUserId}> 작업 요청
+Chrome에서 현재 열려 있는 문서의 발급 상태를 확인하고 결과만 보고해.`;
+
+const HEYBILLY_GENERAL_BODY = Object.freeze({
+  ...HEYBILLY_HANDOFF_BODY,
+  event_id: 'Ev0HEYBILLYGENERAL1',
+  event: Object.freeze({
+    ...HEYBILLY_HANDOFF_BODY.event,
+    text: HEYBILLY_GENERAL_TEXT,
+    ts: '1787835200.617640',
+  }),
+});
+
+const GENERAL_RESULT = Object.freeze({
+  schemaVersion: 'studio-mac-general-result/v1',
+  status: 'COMPLETED',
+  summary: '발급 상태 확인을 완료했습니다.',
+  mutationObserved: false,
+  readbackVerified: true,
+  need: null,
+  errorClass: null,
+});
+
 const CHECKED_AT = '2026-08-25T03:00:00.000Z';
 const GATE1_PASS = Object.freeze({
   schemaVersion: 'gate1-desktop-cua/v1',
@@ -227,6 +250,92 @@ test('an exact owner app mention maps to the fixed live Gate 2 envelope without 
   assert.equal(JSON.stringify(decision).includes(ROUTE.allowedUserId), false);
   assert.equal(JSON.stringify(decision).includes(ROUTE.appId), false);
   assert.equal(JSON.stringify(decision).includes(ROUTE.botUserId), false);
+});
+
+test('a simple natural-language HeyBilly relay maps to one general Studio Mac Codex handoff', async () => {
+  const connector = await loadConnector();
+  const decision = connector.adaptSlackAppMention({
+    body: HEYBILLY_GENERAL_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    nowEpochSeconds: HEYBILLY_GENERAL_BODY.event_time,
+  });
+
+  assert.deepEqual(decision, {
+    accepted: true,
+    kind: 'heybilly_general',
+    envelope: {
+      schemaVersion: 'gate2-heybilly-general-envelope/v1',
+      source: 'slack_socket_mode',
+      teamId: ROUTE.teamId,
+      channelId: ROUTE.channelId,
+      eventId: HEYBILLY_GENERAL_BODY.event_id,
+      threadTs: HEYBILLY_GENERAL_BODY.event.thread_ts,
+      action: 'studio_mac_general_handoff',
+      handoffId: 'hb-ca981da7-b71d-47ea-afba-952f4931709b',
+    },
+    task: {
+      schemaVersion: 'gate1-studio-mac-general-task/v1',
+      action: 'general_local_cua',
+      handoffId: 'hb-ca981da7-b71d-47ea-afba-952f4931709b',
+      authorization: 'owner_explicit',
+      instruction: 'Chrome에서 현재 열려 있는 문서의 발급 상태를 확인하고 결과만 보고해.',
+    },
+  });
+});
+
+test('general relays accept only the exact fresh HeyBilly activation and a non-empty bounded instruction', async () => {
+  const connector = await loadConnector();
+  const rendered = connector.adaptSlackAppMention({
+    body: {
+      ...HEYBILLY_GENERAL_BODY,
+      event: {
+        ...HEYBILLY_GENERAL_BODY.event,
+        text: HEYBILLY_GENERAL_TEXT.replace(`<@${ROUTE.botUserId}>`, `@${ROUTE.botUserId}`),
+      },
+    },
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    nowEpochSeconds: HEYBILLY_GENERAL_BODY.event_time,
+  });
+  assert.equal(rendered.accepted, true);
+  assert.equal(rendered.kind, 'heybilly_general');
+
+  const cases = [
+    [HEYBILLY_GENERAL_TEXT.replace('\nChrome', ' Chrome'), 'command_not_allowed'],
+    [`<@${ROUTE.botUserId}> 작업 요청\n`, 'command_not_allowed'],
+    [`<@${ROUTE.botUserId}> 작업 요청\n\`\`\`text\n상태 확인\n\`\`\``, 'command_not_allowed'],
+    [`<@${ROUTE.botUserId}> 작업 요청\n[MAC_AGENT_HANDOFF_V1]`, 'command_not_allowed'],
+    [`<@${ROUTE.botUserId}>  작업 요청\n상태 확인`, 'command_not_allowed'],
+  ];
+  for (const [text, errorClass] of cases) {
+    const decision = connector.adaptSlackAppMention({
+      body: { ...HEYBILLY_GENERAL_BODY, event: { ...HEYBILLY_GENERAL_BODY.event, text } },
+      route: ROUTE,
+      handoffSource: HEYBILLY_SOURCE,
+      nowEpochSeconds: HEYBILLY_GENERAL_BODY.event_time,
+    });
+    assert.deepEqual(decision, { accepted: false, errorClass });
+  }
+
+  const wrongBot = connector.adaptSlackAppMention({
+    body: {
+      ...HEYBILLY_GENERAL_BODY,
+      event: { ...HEYBILLY_GENERAL_BODY.event, bot_id: 'B0WRONGBOT01' },
+    },
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    nowEpochSeconds: HEYBILLY_GENERAL_BODY.event_time,
+  });
+  assert.deepEqual(wrongBot, { accepted: false, errorClass: 'invalid_event' });
+
+  const stale = connector.adaptSlackAppMention({
+    body: HEYBILLY_GENERAL_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    nowEpochSeconds: HEYBILLY_GENERAL_BODY.event_time + 601,
+  });
+  assert.deepEqual(stale, { accepted: false, errorClass: 'stale_event' });
 });
 
 test('an exact Korean employee command maps to the same fixed envelope without an English mention', async () => {
@@ -777,6 +886,109 @@ test('the Studio Mac status sink posts fixed Korean ACK and final messages with 
   assert.notEqual(posted[0].client_msg_id, posted[1].client_msg_id);
 });
 
+test('the general Studio Mac sink escapes Slack metacharacters and requires exact same-thread bot readback', async () => {
+  const connector = await loadConnector();
+  const postedTs = '1787623300.000099';
+  const summary = '완료 <!channel> <@U0OTHERUSER> & 확인';
+  let postedText;
+  const payload = {
+    schemaVersion: 'gate2-studio-mac-general-status/v1',
+    phase: 'FINAL',
+    requestId: '0123456789abcdef',
+    route: { teamId: ROUTE.teamId, channelId: ROUTE.channelId, threadTs: BODY.event.ts },
+    result: { ...GENERAL_RESULT, summary },
+  };
+  const sink = connector.createGeneralStudioMacStatusSink({
+    botUserId: ROUTE.botUserId,
+    client: {
+      chat: {
+        postMessage: async message => {
+          postedText = message.text;
+          return { ok: true, channel: ROUTE.channelId, ts: postedTs };
+        },
+      },
+      conversations: {
+        replies: async () => ({
+          ok: true,
+          messages: [{
+            type: 'message',
+            user: ROUTE.botUserId,
+            text: postedText,
+            ts: postedTs,
+            thread_ts: BODY.event.ts,
+          }],
+        }),
+      },
+    },
+  });
+
+  assert.deepEqual(await sink(payload), { delivered: true });
+  assert.match(postedText, /&lt;!channel&gt;/);
+  assert.match(postedText, /&lt;@U0OTHERUSER&gt;/);
+  assert.match(postedText, /&amp; 확인/);
+  assert.equal(postedText.includes('<!channel>'), false);
+  assert.equal(postedText.includes('<@U0OTHERUSER>'), false);
+});
+
+test('the general Studio Mac sink rejects wrong bot, text, timestamp, thread, and missing readback', async () => {
+  const connector = await loadConnector();
+  const postedTs = '1787623300.000099';
+  const payload = {
+    schemaVersion: 'gate2-studio-mac-general-status/v1',
+    phase: 'FINAL',
+    requestId: '0123456789abcdef',
+    route: { teamId: ROUTE.teamId, channelId: ROUTE.channelId, threadTs: BODY.event.ts },
+    result: GENERAL_RESULT,
+  };
+  const cases = [
+    message => ({ ...message, user: 'U0WRONGBOT' }),
+    message => ({ ...message, text: `${message.text} 변조` }),
+    message => ({ ...message, ts: '1787623300.000100' }),
+    message => ({ ...message, thread_ts: '1787623300.000101' }),
+    () => null,
+  ];
+
+  for (const mutate of cases) {
+    let postedText;
+    const sink = connector.createGeneralStudioMacStatusSink({
+      botUserId: ROUTE.botUserId,
+      client: {
+        chat: {
+          postMessage: async message => {
+            postedText = message.text;
+            return { ok: true, channel: ROUTE.channelId, ts: postedTs };
+          },
+        },
+        conversations: {
+          replies: async () => {
+            const exact = {
+              type: 'message',
+              user: ROUTE.botUserId,
+              text: postedText,
+              ts: postedTs,
+              thread_ts: BODY.event.ts,
+            };
+            const candidate = mutate(exact);
+            return { ok: true, messages: candidate === null ? [] : [candidate] };
+          },
+        },
+      },
+    });
+    await assert.rejects(sink(payload), /Slack delivery is ambiguous/);
+  }
+
+  let reads = 0;
+  const explicitFailure = connector.createGeneralStudioMacStatusSink({
+    botUserId: ROUTE.botUserId,
+    client: {
+      chat: { postMessage: async () => ({ ok: false }) },
+      conversations: { replies: async () => { reads += 1; return { ok: true, messages: [] }; } },
+    },
+  });
+  assert.deepEqual(await explicitFailure(payload), { delivered: false });
+  assert.equal(reads, 0);
+});
+
 test('readback targets the just-posted timestamp even when a thread already has more than fifteen replies', async () => {
   const connector = await loadConnector();
   const postedTs = '1787623299.000099';
@@ -1034,6 +1246,123 @@ test('the connector handler routes one plain HeyBilly relay to the local Studio 
   assert.equal(raw.includes('테스트고객'), false);
   assert.equal(raw.includes('010-4045-7379'), false);
   assert.equal(raw.includes('464310'), false);
+});
+
+test('the connector handler creates one general Codex task and reports its result in the owner thread', async t => {
+  const connector = await loadConnector();
+  const ledgerDir = await tempLedger(t);
+  let executions = 0;
+  const posted = [];
+  const client = {
+    chat: {
+      postMessage: async payload => {
+        const ts = `1787835300.00000${posted.length + 1}`;
+        posted.push({ ...payload, ts });
+        return { ok: true, channel: payload.channel, ts };
+      },
+    },
+    conversations: {
+      replies: async ({ oldest, latest }) => {
+        if (latest === HEYBILLY_GENERAL_BODY.event.thread_ts) {
+          return {
+            ok: true,
+            messages: [{
+              type: 'message',
+              user: ROUTE.allowedUserId,
+              ts: HEYBILLY_GENERAL_BODY.event.thread_ts,
+            }],
+          };
+        }
+        return {
+          ok: true,
+          messages: posted
+            .filter(message => message.ts === oldest)
+            .map(message => ({
+              type: 'message',
+              user: ROUTE.botUserId,
+              text: message.text,
+              ts: message.ts,
+              thread_ts: message.thread_ts,
+            })),
+        };
+      },
+    },
+  };
+  const decision = connector.adaptSlackAppMention({
+    body: HEYBILLY_GENERAL_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    nowEpochSeconds: HEYBILLY_GENERAL_BODY.event_time,
+  });
+  const options = {
+    body: HEYBILLY_GENERAL_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    ledgerDir,
+    client,
+    generalHandoffActionRunner: async input => {
+      executions += 1;
+      assert.deepEqual(input.task, decision.task);
+      return GENERAL_RESULT;
+    },
+    allowTestOverrides: true,
+    now: () => CHECKED_AT,
+    eventNowEpochSeconds: HEYBILLY_GENERAL_BODY.event_time,
+  };
+
+  const first = await connector.handleSlackAppMention(options);
+  const retry = await connector.handleSlackAppMention(options);
+  assert.equal(first.status, 'PASS');
+  assert.equal(retry.status, 'DUPLICATE');
+  assert.equal(executions, 1);
+  assert.deepEqual(posted.map(message => message.thread_ts), [
+    HEYBILLY_GENERAL_BODY.event.thread_ts,
+    HEYBILLY_GENERAL_BODY.event.thread_ts,
+  ]);
+  assert.deepEqual(posted.map(message => message.text.split('\n')[0]), [
+    ':large_yellow_circle: 스튜디오맥에서 새 Codex 작업을 접수했습니다',
+    ':white_check_mark: 스튜디오맥 작업 완료',
+  ]);
+  assert.match(posted[1].text, /발급 상태 확인을 완료했습니다/);
+  const raw = (await Promise.all((await readdir(ledgerDir)).map(name => readFile(join(ledgerDir, name), 'utf8')))).join('\n');
+  assert.equal(raw.includes(decision.task.instruction), false);
+  assert.equal(raw.includes(GENERAL_RESULT.summary), false);
+});
+
+test('a general relay rejects a non-owner parent before ledger, Slack post, or Codex execution', async t => {
+  const connector = await loadConnector();
+  const ledgerDir = await tempLedger(t);
+  let posts = 0;
+  let executions = 0;
+  const result = await connector.handleSlackAppMention({
+    body: HEYBILLY_GENERAL_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    ledgerDir,
+    client: {
+      chat: { postMessage: async () => { posts += 1; return { ok: false }; } },
+      conversations: {
+        replies: async () => ({
+          ok: true,
+          messages: [{
+            type: 'message',
+            user: 'U0NOTTHEOWNER',
+            ts: HEYBILLY_GENERAL_BODY.event.thread_ts,
+          }],
+        }),
+      },
+    },
+    generalHandoffActionRunner: async () => { executions += 1; return GENERAL_RESULT; },
+    allowTestOverrides: true,
+    now: () => CHECKED_AT,
+    eventNowEpochSeconds: HEYBILLY_GENERAL_BODY.event_time,
+  });
+
+  assert.equal(result.status, 'REJECTED');
+  assert.equal(result.errorClass, 'unauthorized_actor');
+  assert.equal(posts, 0);
+  assert.equal(executions, 0);
+  assert.deepEqual(await readdir(ledgerDir), []);
 });
 
 test('a HeyBilly financial relay requires the configured owner on the parent Slack thread', async t => {

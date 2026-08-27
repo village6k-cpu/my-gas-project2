@@ -7,7 +7,11 @@ import {
   processSocketSlackEnvelope,
   SOCKET_SLACK_SOURCE,
 } from '../gate2/slack-intake-shell.mjs';
-import { processHeyBillyHandoff } from '../gate2/heybilly-handoff-shell.mjs';
+import {
+  processGeneralHeyBillyHandoff,
+  processHeyBillyHandoff,
+} from '../gate2/heybilly-handoff-shell.mjs';
+import { validateStudioMacGeneralResult } from '../gate1/studio-mac-codex-worker.mjs';
 
 export const LIVE_SLACK_SOURCE = SOCKET_SLACK_SOURCE;
 
@@ -34,6 +38,10 @@ const HEYBILLY_ENVELOPE_SCHEMA_VERSION = 'gate2-heybilly-envelope/v1';
 const HEYBILLY_ACTION = 'studio_mac_cua_handoff';
 const HEYBILLY_TASK_TYPE = 'hometax_cash_receipt_issue';
 const HEYBILLY_READINESS_TASK_TYPE = 'studio_mac_cua_readiness';
+const HEYBILLY_GENERAL_TASK_SCHEMA_VERSION = 'gate1-studio-mac-general-task/v1';
+const HEYBILLY_GENERAL_ENVELOPE_SCHEMA_VERSION = 'gate2-heybilly-general-envelope/v1';
+const HEYBILLY_GENERAL_ACTION = 'studio_mac_general_handoff';
+const HEYBILLY_GENERAL_TASK_TYPE = 'general_local_cua';
 const HANDOFF_MAX_AGE_SECONDS = 600;
 const HANDOFF_MAX_FUTURE_SKEW_SECONDS = 60;
 const HANDOFF_KEYS = Object.freeze([
@@ -473,6 +481,35 @@ function parseObservedHeyBillyReissue(text, botUserId) {
   });
 }
 
+function parseGeneralHeyBillyRelay(text, botUserId, eventId) {
+  if (
+    text.includes('\r')
+    || text.includes('\u0000')
+    || text.includes('```')
+    || text.includes('[MAC_AGENT_')
+    || text.normalize('NFKC') !== text
+  ) return undefined;
+  const splitAt = text.indexOf('\n');
+  if (splitAt < 1) return undefined;
+  const header = text.slice(0, splitAt);
+  if (header !== `<@${botUserId}> 작업 요청` && header !== `@${botUserId} 작업 요청`) return undefined;
+  const instruction = text.slice(splitAt + 1);
+  if (
+    instruction !== instruction.trim()
+    || Buffer.byteLength(instruction, 'utf8') < 1
+    || Buffer.byteLength(instruction, 'utf8') > 6000
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(instruction)
+  ) return undefined;
+  const handoffId = derivedHeyBillyHandoffId(eventId);
+  return Object.freeze({
+    schemaVersion: HEYBILLY_GENERAL_TASK_SCHEMA_VERSION,
+    action: HEYBILLY_GENERAL_TASK_TYPE,
+    handoffId,
+    authorization: 'owner_explicit',
+    instruction,
+  });
+}
+
 function parsePlainHeyBillyRelay(text, botUserId, eventId) {
   const normalized = text.normalize('NFKC');
   if (normalized.includes('```') || normalized.includes('\u0000')) return undefined;
@@ -628,22 +665,40 @@ export function adaptSlackAppMention({
     const task = parseHeyBillyHandoff(event.text, route.botUserId)
       ?? parseObservedHeyBillyReissue(event.text, route.botUserId)
       ?? parsePlainHeyBillyRelay(event.text, route.botUserId, body.event_id);
-    if (!task) return rejected('command_not_allowed');
+    if (task) {
+      return Object.freeze({
+        accepted: true,
+        kind: 'heybilly_handoff',
+        envelope: Object.freeze({
+          schemaVersion: HEYBILLY_ENVELOPE_SCHEMA_VERSION,
+          source: LIVE_SLACK_SOURCE,
+          teamId: route.teamId,
+          channelId: route.channelId,
+          eventId: body.event_id,
+          threadTs: event.thread_ts,
+          action: HEYBILLY_ACTION,
+          taskType: task.action,
+          handoffId: task.handoffId,
+        }),
+        task,
+      });
+    }
+    const generalTask = parseGeneralHeyBillyRelay(event.text, route.botUserId, body.event_id);
+    if (!generalTask) return rejected('command_not_allowed');
     return Object.freeze({
       accepted: true,
-      kind: 'heybilly_handoff',
+      kind: 'heybilly_general',
       envelope: Object.freeze({
-        schemaVersion: HEYBILLY_ENVELOPE_SCHEMA_VERSION,
+        schemaVersion: HEYBILLY_GENERAL_ENVELOPE_SCHEMA_VERSION,
         source: LIVE_SLACK_SOURCE,
         teamId: route.teamId,
         channelId: route.channelId,
         eventId: body.event_id,
         threadTs: event.thread_ts,
-        action: HEYBILLY_ACTION,
-        taskType: task.action,
-        handoffId: task.handoffId,
+        action: HEYBILLY_GENERAL_ACTION,
+        handoffId: generalTask.handoffId,
       }),
-      task,
+      task: generalTask,
     });
   }
 
@@ -936,6 +991,100 @@ export function createStudioMacStatusSink({ client, botUserId } = {}) {
   };
 }
 
+function validateGeneralStudioMacStatus(payload) {
+  const keys = ['schemaVersion', 'phase', 'requestId', 'route', ...(payload?.phase === 'FINAL' ? ['result'] : [])];
+  exactKeys(payload, keys, 'general Studio Mac status');
+  exactKeys(payload.route, ['teamId', 'channelId', 'threadTs'], 'general Studio Mac status route');
+  if (
+    payload.schemaVersion !== 'gate2-studio-mac-general-status/v1'
+    || !['ACK', 'FINAL'].includes(payload.phase)
+    || !REQUEST_ID.test(payload.requestId)
+    || !TEAM_ID.test(payload.route.teamId)
+    || !CHANNEL_ID.test(payload.route.channelId)
+    || !THREAD_TS.test(payload.route.threadTs)
+  ) throw new TypeError('invalid general Studio Mac status');
+  if (payload.phase === 'FINAL') validateStudioMacGeneralResult(payload.result);
+  return payload;
+}
+
+function slackSafeSummary(value) {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function formatGeneralStudioMacStatus(status) {
+  if (status.phase === 'ACK') {
+    return `:large_yellow_circle: 스튜디오맥에서 새 Codex 작업을 접수했습니다\nCodex 작업: 맥에이전트 · ${status.requestId}\n요청 ID: ${status.requestId}`;
+  }
+  const summary = slackSafeSummary(status.result.summary);
+  if (status.result.status === 'COMPLETED') {
+    return `:white_check_mark: 스튜디오맥 작업 완료\n${summary}\n요청 ID: ${status.requestId}`;
+  }
+  if (status.result.status === 'NEEDS_USER') {
+    return `:warning: 스튜디오맥 작업에 사용자 확인이 필요합니다\n${summary}\n요청 ID: ${status.requestId}`;
+  }
+  return `:warning: 스튜디오맥 작업 결과를 확인해야 합니다\n${summary}\n오류 분류: ${status.result.errorClass}\n요청 ID: ${status.requestId}`;
+}
+
+export function createGeneralStudioMacStatusSink({ client, botUserId } = {}) {
+  if (
+    !client
+    || typeof client !== 'object'
+    || typeof client.chat?.postMessage !== 'function'
+    || typeof client.conversations?.replies !== 'function'
+  ) throw new TypeError('invalid Slack client');
+  if (!USER_ID.test(botUserId)) throw new TypeError('invalid Slack bot user');
+
+  return async payload => {
+    const status = validateGeneralStudioMacStatus(payload);
+    const text = formatGeneralStudioMacStatus(status);
+    let posted;
+    try {
+      posted = await client.chat.postMessage({
+        channel: status.route.channelId,
+        thread_ts: status.route.threadTs,
+        text,
+        client_msg_id: deterministicStudioMacMessageId(status.requestId, `GENERAL_${status.phase}`),
+        reply_broadcast: false,
+        unfurl_links: false,
+        unfurl_media: false,
+      });
+    } catch {
+      throw ambiguousDelivery();
+    }
+    if (posted?.ok === false) return Object.freeze({ delivered: false });
+    if (
+      posted?.ok !== true
+      || posted.channel !== status.route.channelId
+      || typeof posted.ts !== 'string'
+      || !THREAD_TS.test(posted.ts)
+    ) throw ambiguousDelivery();
+
+    let thread;
+    try {
+      thread = await client.conversations.replies({
+        channel: status.route.channelId,
+        ts: status.route.threadTs,
+        oldest: posted.ts,
+        inclusive: true,
+        limit: 1,
+      });
+    } catch {
+      throw ambiguousDelivery();
+    }
+    if (thread?.ok !== true || !Array.isArray(thread.messages)) throw ambiguousDelivery();
+    const confirmed = thread.messages.some(message => (
+      message
+      && message.type === 'message'
+      && message.user === botUserId
+      && message.text === text
+      && message.ts === posted.ts
+      && message.thread_ts === status.route.threadTs
+    ));
+    if (!confirmed) throw ambiguousDelivery();
+    return Object.freeze({ delivered: true });
+  };
+}
+
 function connectorRejection(errorClass) {
   return Object.freeze({
     schemaVersion: 'gate3-slack-decision/v1',
@@ -979,6 +1128,7 @@ export async function handleSlackAppMention({
   client,
   actionRunner,
   handoffActionRunner,
+  generalHandoffActionRunner,
   allowTestOverrides = false,
   now,
   eventNowEpochSeconds,
@@ -1005,6 +1155,25 @@ export async function handleSlackAppMention({
       ledgerDir,
       statusSink: createStudioMacStatusSink({ client, botUserId: route.botUserId }),
       ...(handoffActionRunner === undefined ? {} : { actionRunner: handoffActionRunner }),
+      allowTestOverrides,
+      ...(now === undefined ? {} : { now }),
+      ...(deliveryTimeoutMs === undefined ? {} : { deliveryTimeoutMs }),
+    });
+  }
+
+  if (decision.kind === 'heybilly_general') {
+    if (!await verifyOwnerThreadRequest({
+      client,
+      route,
+      threadTs: decision.envelope.threadTs,
+    })) return connectorRejection('unauthorized_actor');
+    return processGeneralHeyBillyHandoff({
+      envelope: decision.envelope,
+      task: decision.task,
+      allowedRoute: { teamId: route.teamId, channelId: route.channelId },
+      ledgerDir,
+      statusSink: createGeneralStudioMacStatusSink({ client, botUserId: route.botUserId }),
+      ...(generalHandoffActionRunner === undefined ? {} : { actionRunner: generalHandoffActionRunner }),
       allowTestOverrides,
       ...(now === undefined ? {} : { now }),
       ...(deliveryTimeoutMs === undefined ? {} : { deliveryTimeoutMs }),
