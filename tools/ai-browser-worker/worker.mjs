@@ -660,8 +660,8 @@ export function buildHermesPrompt(job, options = {}) {
 - blocked, failed, partial_success, or contradictory registered readback is draft-only/no-send owner review. Never call either mutation tool again to replay it.
 - For an explicit registered-trade quote send, call village_document_send with the exact trade_id before FINAL_JSON. Choose tax_mode="supply_only" only for an explicit VAT-exclusive request; otherwise use "vat_included".
 - A successful correlated village_document_send receipt is the only delivery authority. Do not promise that a quote was or will be sent without that receipt; on tool failure use draft_only + owner review.
-- If that verification says an existing RQ was not found and the reservation remains unregistered, correct the decision to should_write_to_sheet=true and call the tool again with the complete sheet row before finishing.
-- A no_action receipt is not 입력 성공이 아니다. If the row still needs to be written, correct the decision and call the tool with should_write_to_sheet=true before finishing.
+- If verification of an existing RQ returns an authoritative no-record result, retry a write only after setting existing_confirm_request_ids=[], reservation_inquiry.already_registered=false, and recording an explicit genuinely-new reclassification; only then may should_write_to_sheet=true. If any condition is missing or ambiguous, remain read-only/invalid and do not call the tool again.
+- A no_action receipt is not 입력 성공이 아니다 and never authorizes a retry. A later write requires an authoritative no-record result, existing_confirm_request_ids=[], reservation_inquiry.already_registered=false, and explicit genuinely-new reclassification before should_write_to_sheet=true; otherwise remain read-only/invalid and do not call any mutation tool again.
 - Interpret the authoritative receipt in this turn. Every schedule/availability result is owner-review-only and is never Kakao auto-send authority.`
     : `SHEETS TOOL AVAILABLE VIA GAS API:
 - The outer worker owns the configured GAS endpoint; Hermes does not need its raw URL or credential.
