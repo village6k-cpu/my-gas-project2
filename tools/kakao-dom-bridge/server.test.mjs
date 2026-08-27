@@ -52,12 +52,24 @@ const {
   shouldSkipWorkerForPreview
 } = await import('./server.mjs');
 
-const TASK7_INCIDENT = JSON.parse(await readFile(new URL(
-  '../../test/fixtures/kakao-staff-confirmed-mutations/choi-seungsik-260824-008.json',
+const TASK7_NEUTRAL_INCIDENT_URL = new URL(
+  '../../test/fixtures/kakao-staff-confirmed-mutations/incident-registered-replacement-001.json',
   import.meta.url
-), 'utf8'));
+);
+const TASK7_INCIDENT = JSON.parse(await readFile(TASK7_NEUTRAL_INCIDENT_URL, 'utf8'));
 const TASK7_TOKEN = 'task-7-local-token';
 const TASK7_NOW = Date.parse('2026-08-27T01:00:00.000Z');
+
+test('Task 7 loads the sanitized replay fixture through a neutral incident identifier', async () => {
+  const incident = JSON.parse(await readFile(TASK7_NEUTRAL_INCIDENT_URL, 'utf8'));
+  assert.equal(incident.trade_id, '260824-008');
+  assert.equal(incident.room_revision, 8);
+  assert.deepEqual(incident.exact_old_rows, [{
+    schedule_id: '260824-008-07',
+    name: '소니 FE 28-135mm',
+    quantity: 1
+  }]);
+});
 
 function task7Mutation(overrides = {}) {
   return {

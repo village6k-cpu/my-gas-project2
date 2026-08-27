@@ -1106,6 +1106,148 @@ test('channel status derives non-sensitive registered change aggregates from dur
   });
 });
 
+test('registered change last success uses durable operation completion after the pre-work receipt timestamp', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    clock.now = Date.parse('2026-08-21T12:00:00.000Z');
+    await channel.enqueue(event('registered-timing-success', 'registered-timing-room', 1));
+    const claim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+    const reservation = await channel.reserveToolOperation(registeredReservationChangeOperation(claim, 'timing-digest'));
+    clock.now += 60_000;
+    await channel.recordToolReceipt(registeredReservationChangeReceipt(
+      claim,
+      reservation.reservation.operation_id,
+      'timing-digest',
+      {
+        receipt_id: 'registered-timing-receipt',
+        created_at: '2026-08-21T11:59:00.000Z'
+      }
+    ));
+
+    const persisted = await channel.get(claim.job_id);
+    assert.equal(persisted.tool_operation.completed_at, '2026-08-21T12:01:00.000Z');
+    assert.equal((await channel.status()).registered_reservation_change.last_success_at, '2026-08-21T12:01:00.000Z');
+  });
+});
+
+test('registered change last success compares parsed completion instants and ignores invalid completion timestamps', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    const completions = new Map([
+      ['registered-completion-later', '2026-08-21T00:00:00.999Z'],
+      ['registered-completion-earlier', '2026-08-21T00:00:00Z'],
+      ['registered-completion-invalid', 'not-an-iso-timestamp']
+    ]);
+
+    for (const [jobId] of completions) {
+      await channel.enqueue(event(jobId, `${jobId}-room`, 1));
+      const claim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+      const requestDigest = `${jobId}-digest`;
+      const reservation = await channel.reserveToolOperation(registeredReservationChangeOperation(claim, requestDigest));
+      await channel.recordToolReceipt(registeredReservationChangeReceipt(
+        claim,
+        reservation.reservation.operation_id,
+        requestDigest,
+        { receipt_id: `${jobId}-receipt`, created_at: '2026-08-20T00:00:00.000Z' }
+      ));
+
+      const jobPath = path.join(
+        directory,
+        'hermes-gateway',
+        `${createHash('sha256').update(jobId).digest('hex')}.json`
+      );
+      const persisted = JSON.parse(await readFile(jobPath, 'utf8'));
+      persisted.tool_operation.completed_at = completions.get(jobId);
+      await realWriteFile(jobPath, `${JSON.stringify(persisted)}\n`, 'utf8');
+    }
+
+    clock.now = Date.parse('2026-08-21T01:00:00.000Z');
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+    assert.equal(
+      (await restarted.status()).registered_reservation_change.last_success_at,
+      '2026-08-21T00:00:00.999Z'
+    );
+  });
+});
+
+test('registered change status counts pending top-level and application notifications only for registered operations', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    async function completeRegisteredJob(jobId) {
+      await channel.enqueue(event(jobId, `${jobId}-room`, 1));
+      const claim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+      const requestDigest = `${jobId}-digest`;
+      const reservation = await channel.reserveToolOperation(registeredReservationChangeOperation(claim, requestDigest));
+      await channel.recordToolReceipt(registeredReservationChangeReceipt(
+        claim,
+        reservation.reservation.operation_id,
+        requestDigest,
+        { receipt_id: `${jobId}-receipt` }
+      ));
+      await channel.complete({
+        job_id: claim.job_id,
+        room_key: claim.room_key,
+        room_revision: claim.room_revision,
+        lease_id: claim.lease_id,
+        final: { reply_mode: 'no_reply' }
+      });
+      return claim;
+    }
+
+    async function failApplication(jobId) {
+      const application = await channel.claimApplication({ jobId });
+      await channel.beginApplication({ job_id: jobId, application_id: application.application_id });
+      await channel.failApplication({
+        job_id: jobId,
+        application_id: application.application_id,
+        error: { type: 'test_application_failure' }
+      });
+      return application;
+    }
+
+    const nestedPending = await completeRegisteredJob('registered-nested-pending');
+    await failApplication(nestedPending.job_id);
+
+    const nestedDelivered = await completeRegisteredJob('registered-nested-delivered');
+    const deliveredApplication = await failApplication(nestedDelivered.job_id);
+    await channel.markApplicationFailureNotified({
+      job_id: nestedDelivered.job_id,
+      application_id: deliveredApplication.application_id,
+      audit: { delivered: true }
+    });
+
+    await channel.enqueue(event('registered-top-pending', 'registered-top-pending-room', 1));
+    const topPendingClaim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+    await channel.reserveToolOperation(registeredReservationChangeOperation(topPendingClaim, 'top-pending-digest'));
+    clock.now += 1_001;
+    await channel.reapExpiredLeases();
+
+    await channel.enqueue(event('registered-top-delivered', 'registered-top-delivered-room', 1));
+    const topDeliveredClaim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+    await channel.reserveToolOperation(registeredReservationChangeOperation(topDeliveredClaim, 'top-delivered-digest'));
+    clock.now += 1_001;
+    await channel.reapExpiredLeases();
+    await channel.markFailureNotified({
+      job_id: topDeliveredClaim.job_id,
+      audit: { delivered: true }
+    });
+
+    await channel.enqueue(event('nonregistered-nested-pending', 'nonregistered-nested-pending-room', 1));
+    const nonregisteredClaim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+    await channel.complete({
+      job_id: nonregisteredClaim.job_id,
+      room_key: nonregisteredClaim.room_key,
+      room_revision: nonregisteredClaim.room_revision,
+      lease_id: nonregisteredClaim.lease_id,
+      final: { reply_mode: 'draft_only' }
+    });
+    await failApplication(nonregisteredClaim.job_id);
+
+    const status = await channel.status();
+    assert.equal(status.unnotified_application_failures, 2);
+    assert.equal(status.registered_reservation_change.pending_failure_notifications, 2);
+  });
+});
+
 test('rejects a claim-attempt cap above two so one event can never receive a third Hermes claim', async () => {
   await assert.rejects(
     withChannel(async () => {}, { maxAttempts: 3 }),

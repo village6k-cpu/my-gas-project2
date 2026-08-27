@@ -645,7 +645,7 @@ git commit -m "feat: apply staff confirmed Kakao mutations"
 
 **Files:**
 
-- Create: `test/fixtures/kakao-staff-confirmed-mutations/choi-seungsik-260824-008.json`
+- Create: `test/fixtures/kakao-staff-confirmed-mutations/incident-registered-replacement-001.json`
 - Modify only if a fixture loader is needed: `tools/ai-browser-worker/staff-confirmed-mutation.test.mjs`
 - Modify only if a fixture loader is needed: `tools/kakao-dom-bridge/server.test.mjs`
 
