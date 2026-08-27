@@ -36,6 +36,7 @@ class FakeRange {
 class FakeSheet {
   constructor(rows) {
     this.rows = rows;
+    this.writeCount = 0;
   }
   getLastRow() {
     return this.rows.length + 1;
@@ -45,6 +46,10 @@ class FakeSheet {
     assert.equal(col, 1);
     assert.equal(numCols, 18);
     return new FakeRange(this.rows.slice(0, numRows));
+  }
+  deleteRow(row) {
+    this.writeCount += 1;
+    this.rows.splice(row - 2, 1);
   }
 }
 
@@ -107,6 +112,99 @@ assert.deepEqual(
   context._findReplaceableConfirmRequestGroups_(registeredSheet, baseReq, [{ name: '소니 90mm 매크로', qty: 1 }]),
   [],
   '거래ID/등록완료가 있는 RQ는 자동 삭제하면 안 된다'
+);
+
+function pendingFence({ requestId = 'RQ-260824-008', expectedBefore, expectedPeriod } = {}) {
+  return {
+    target_scope: 'pending_request',
+    request_id: requestId,
+    expected_before: expectedBefore || [{ name: '소니 FE 28-135mm', quantity: 1 }],
+    expected_period: expectedPeriod || {
+      start_date: '2026-08-27', start_time: '06:00',
+      end_date: '2026-08-27', end_time: '18:00'
+    }
+  };
+}
+
+const dateChangeSheet = new FakeSheet([
+  requestRow({
+    reqID: 'RQ-260824-008', start: '2026-08-27', startTime: '06:00', end: '2026-08-27', endTime: '18:00',
+    equip: '소니 FE 28-135mm', qty: 1, name: '테스트 고객', phone: '010-1111-2222'
+  }),
+  requestRow({
+    reqID: 'RQ-260824-009', start: '2026-08-28', startTime: '07:00', end: '2026-08-28', endTime: '19:00',
+    equip: '형제 RQ 장비', qty: 1, name: '테스트 고객', phone: '010-1111-2222'
+  })
+]);
+const exactDateChange = context._resolveStaffConfirmedPendingRequestFence_(dateChangeSheet, pendingFence());
+assert.equal(exactDateChange.group.reqID, 'RQ-260824-008', '날짜 변경이어도 typed request ID의 기존 RQ를 선택해야 한다');
+assert.equal(context._deleteConfirmRequestGroups_(dateChangeSheet, [exactDateChange.group]), 1);
+assert.equal(dateChangeSheet.writeCount, 1);
+assert.deepEqual(dateChangeSheet.rows.map((row) => row[0]), ['RQ-260824-009'], '날짜가 같은 다른 RQ가 아니라 exact target만 삭제해야 한다');
+
+const siblingSheet = new FakeSheet([
+  requestRow({
+    reqID: 'RQ-260824-008', start: '2026-08-27', startTime: '06:00', end: '2026-08-27', endTime: '18:00',
+    equip: '소니 FE 28-135mm', qty: 1, name: '테스트 고객', phone: '010-1111-2222'
+  }),
+  requestRow({
+    reqID: 'RQ-260824-010', start: '2026-08-27', startTime: '06:00', end: '2026-08-27', endTime: '18:00',
+    equip: '소니 GM 70-200mm II', qty: 1, name: '테스트 고객', phone: '010-1111-2222'
+  })
+]);
+const exactSiblingTarget = context._resolveStaffConfirmedPendingRequestFence_(siblingSheet, pendingFence());
+assert.equal(exactSiblingTarget.group.reqID, 'RQ-260824-008');
+assert.deepEqual(exactSiblingTarget.group.rows, [2], '같은 고객/기간의 sibling RQ는 exact target 그룹에 포함되면 안 된다');
+
+for (const blocked of [
+  {
+    label: 'stale expected plan',
+    sheet: siblingSheet,
+    fence: pendingFence({ expectedBefore: [{ name: '다른 장비', quantity: 1 }] }),
+    pattern: /기대.*장비|baseline.*plan/i
+  },
+  {
+    label: 'stale expected period',
+    sheet: siblingSheet,
+    fence: pendingFence({ expectedPeriod: { start_date: '2026-08-26', start_time: '06:00', end_date: '2026-08-26', end_time: '18:00' } }),
+    pattern: /기대.*기간|baseline.*period/i
+  },
+  {
+    label: 'missing target',
+    sheet: siblingSheet,
+    fence: pendingFence({ requestId: 'RQ-260824-999' }),
+    pattern: /찾을 수 없|missing/i
+  },
+  {
+    label: 'missing request id',
+    sheet: siblingSheet,
+    fence: { ...pendingFence(), request_id: '' },
+    pattern: /요청ID|request.id/i
+  },
+  {
+    label: 'nonmutable target',
+    sheet: new FakeSheet([requestRow({
+      reqID: 'RQ-260824-008', start: '2026-08-27', startTime: '06:00', end: '2026-08-27', endTime: '18:00',
+      equip: '소니 FE 28-135mm', qty: 1, name: '테스트 고객', phone: '010-1111-2222', status: '보류'
+    })]),
+    fence: pendingFence(),
+    pattern: /수정할 수 없|mutable/i
+  }
+]) {
+  const writesBefore = blocked.sheet.writeCount;
+  assert.throws(
+    () => context._resolveStaffConfirmedPendingRequestFence_(blocked.sheet, blocked.fence),
+    blocked.pattern,
+    blocked.label
+  );
+  assert.equal(blocked.sheet.writeCount, writesBefore, `${blocked.label} must cause zero writes`);
+}
+
+assert.equal(context._deleteConfirmRequestGroups_(siblingSheet, [exactSiblingTarget.group]), 1);
+assert.deepEqual(
+  siblingSheet.rows.map((row) => row[0]),
+  ['RQ-260824-010'],
+  '같은 고객/기간의 sibling RQ는 exact target 교체 후에도 그대로 남아야 한다'
 );
 
 console.log('confirm request stale replacement behavior checks passed');
