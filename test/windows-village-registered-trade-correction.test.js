@@ -19,6 +19,46 @@ function response(payload, { ok = true, status = 200 } = {}) {
 }
 
 function correctedPayload(overrides = {}) {
+  const before = {
+    contract: {
+      startDate: '2026-08-11', startTime: '05:00',
+      endDate: '2026-08-14', endTime: '05:00', rounds: 3,
+    },
+    schedule: {
+      periods: ['2026-08-11|05:00|2026-08-14|05:00'],
+      rows: [
+        { scheduleId: '260810-003-04', setName: '', name: '소니 GM 줌렌즈 세트', qty: 1, isComponent: false },
+        { scheduleId: '260810-003-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false },
+      ],
+      topLevelQuantities: { '소니 GM 줌렌즈 세트': 1, '소니 FX3': 1 },
+    },
+    ledger: null,
+  };
+  const after = {
+    contract: {
+      startDate: '2026-08-12', startTime: '05:00',
+      endDate: '2026-08-15', endTime: '05:00', rounds: 3,
+    },
+    schedule: {
+      periods: ['2026-08-12|05:00|2026-08-15|05:00'],
+      rows: [
+        { scheduleId: '260810-003-12', setName: '', name: '소니 GM 24-70mm F2.8 GM II', qty: 1, isComponent: false },
+        { scheduleId: '260810-003-13', setName: '', name: '소니 GM 70-200mm F2.8 GM II', qty: 1, isComponent: false },
+        { scheduleId: '260810-003-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false },
+      ],
+      topLevelQuantities: {
+        '소니 GM 24-70mm F2.8 GM II': 1,
+        '소니 GM 70-200mm F2.8 GM II': 1,
+        '소니 FX3': 1,
+      },
+    },
+    ledger: {
+      rows: 1,
+      startDate: '2026-08-12',
+      contractLink: 'https://docs.google.com/spreadsheets/d/corrected-contract/edit',
+      links: ['https://docs.google.com/spreadsheets/d/corrected-contract/edit'],
+    },
+  };
   return {
     success: true,
     status: 'CORRECTED',
@@ -31,29 +71,8 @@ function correctedPayload(overrides = {}) {
       fileId: 'corrected-contract',
       linkUpdate: { success: true },
     },
-    readback: {
-      contract: {
-        startDate: '2026-08-12', startTime: '05:00',
-        endDate: '2026-08-15', endTime: '05:00', rounds: 3,
-      },
-      schedule: {
-        periods: ['2026-08-12|05:00|2026-08-15|05:00'],
-        rows: [
-          { scheduleId: '260810-003-12', setName: '', name: '소니 GM 24-70mm F2.8 GM II', qty: 1, isComponent: false },
-          { scheduleId: '260810-003-13', setName: '', name: '소니 GM 70-200mm F2.8 GM II', qty: 1, isComponent: false },
-        ],
-        topLevelQuantities: {
-          '소니 GM 24-70mm F2.8 GM II': 1,
-          '소니 GM 70-200mm F2.8 GM II': 1,
-        },
-      },
-      ledger: {
-        rows: 1,
-        startDate: '2026-08-12',
-        contractLink: 'https://docs.google.com/spreadsheets/d/corrected-contract/edit',
-        links: ['https://docs.google.com/spreadsheets/d/corrected-contract/edit'],
-      },
-    },
+    readback: after,
+    authoritativeReadback: { before, after },
     customerNotificationSent: false,
     ...overrides,
   };
@@ -223,7 +242,29 @@ test('one explicit run performs one correction POST, one send POST, and zero sea
   assert.equal(result.verified, true);
   assert.equal(result.send.accepted, true);
   assert.equal(result.readback.contract.rounds, 3);
+  assert.equal(result.authoritativeReadback.before.schedule.topLevelQuantities['소니 FX3'], 1);
+  assert.equal(result.authoritativeReadback.after.schedule.topLevelQuantities['소니 FX3'], 1);
   assert.doesNotMatch(JSON.stringify(result), /synthetic-key/);
+});
+
+test('a correction response without the locked authoritative before envelope is rejected', async () => {
+  const fixture = createFetchFixture({
+    responseByAction: {
+      scheduleCorrectRegisteredTrade: correctedPayload({ authoritativeReadback: null }),
+    },
+  });
+
+  await assert.rejects(
+    runRegisteredTradeCorrection({ config, input: { ...fullInput, sendEstimate: false }, fetchImpl: fixture.fetchImpl }),
+    (error) => {
+      assert.equal(error.name, 'CorrectionStageError');
+      assert.equal(error.stage, 'scheduleCorrectRegisteredTrade');
+      assert.equal(error.outcomeUnknown, true);
+      assert.match(error.message, /authoritative.*before|before.*readback/i);
+      return true;
+    },
+  );
+  assert.equal(fixture.calls.length, 1);
 });
 
 test('a correction without explicit send makes only the single correction request', async () => {

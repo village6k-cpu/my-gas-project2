@@ -9332,9 +9332,9 @@ function exactTrustedRegisteredReservationChangeReceipt(receipt, { jobId, roomKe
   return receipt.error !== null;
 }
 
-function registeredMutationDesiredQuantities(mutation) {
+function registeredMutationDeltaQuantities(rows) {
   const quantities = {};
-  for (const row of Array.isArray(mutation?.desired_after) ? mutation.desired_after : []) {
+  for (const row of Array.isArray(rows) ? rows : []) {
     const name = text(row?.name).trim();
     const quantity = Number(row?.quantity);
     if (!name || !Number.isInteger(quantity) || quantity <= 0) return null;
@@ -9343,38 +9343,137 @@ function registeredMutationDesiredQuantities(mutation) {
   return quantities;
 }
 
-function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
-  const authoritative = receipt?.authoritative_result;
-  const contract = authoritative?.contract;
-  const schedule = authoritative?.schedule;
-  const ledger = authoritative?.ledger;
+function registeredAuthoritativeSnapshot(value, { tradeId, requireLedger }) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const contract = value.contract;
+  const schedule = value.schedule;
+  const ledger = value.ledger;
   if (!contract || typeof contract !== 'object' || Array.isArray(contract)
     || !schedule || typeof schedule !== 'object' || Array.isArray(schedule)
-    || !ledger || typeof ledger !== 'object' || Array.isArray(ledger)) return false;
-  const expectedPeriod = mutation?.date_change === null
-    ? {
-        startDate: mutation?.expected_period?.start_date,
-        startTime: mutation?.expected_period?.start_time,
-        endDate: mutation?.expected_period?.end_date,
-        endTime: mutation?.expected_period?.end_time
-      }
+    || (requireLedger && (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)))) return null;
+  const period = {
+    startDate: text(contract.startDate).trim(),
+    startTime: text(contract.startTime).trim(),
+    endDate: text(contract.endDate).trim(),
+    endTime: text(contract.endTime).trim()
+  };
+  const periodKey = `${period.startDate}|${period.startTime}|${period.endDate}|${period.endTime}`;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(period.startDate)
+    || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(period.startTime)
+    || !/^\d{4}-\d{2}-\d{2}$/.test(period.endDate)
+    || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(period.endTime)
+    || !Array.isArray(schedule.periods)
+    || !sameGatewayDecisionValue(schedule.periods, [periodKey])
+    || !Array.isArray(schedule.rows)) return null;
+  const rows = [];
+  const rowsById = new Map();
+  const calculatedTopLevel = {};
+  for (const raw of schedule.rows) {
+    const row = {
+      scheduleId: text(raw?.scheduleId).trim(),
+      setName: text(raw?.setName).trim(),
+      name: text(raw?.name).trim(),
+      qty: Number(raw?.qty),
+      isComponent: raw?.isComponent
+    };
+    const match = /^(\d{6}-\d{3})-\d{2,}$/.exec(row.scheduleId);
+    if (!match || match[1] !== tradeId || rowsById.has(row.scheduleId)
+      || !row.name || !Number.isInteger(row.qty) || row.qty <= 0
+      || typeof row.isComponent !== 'boolean') return null;
+    rows.push(row);
+    rowsById.set(row.scheduleId, row);
+    if (!row.isComponent) calculatedTopLevel[row.name] = (calculatedTopLevel[row.name] || 0) + row.qty;
+  }
+  const topLevel = schedule.topLevelQuantities;
+  if (!topLevel || typeof topLevel !== 'object' || Array.isArray(topLevel)) return null;
+  const normalizedTopLevel = {};
+  for (const [name, rawQuantity] of Object.entries(topLevel)) {
+    const quantity = Number(rawQuantity);
+    if (!text(name).trim() || !Number.isInteger(quantity) || quantity <= 0) return null;
+    normalizedTopLevel[name] = quantity;
+  }
+  if (!sameGatewayDecisionValue(normalizedTopLevel, calculatedTopLevel)) return null;
+  return { contract: period, rows, rowsById, topLevel: normalizedTopLevel };
+}
+
+function sameRegisteredScheduleRow(left, right) {
+  return left?.scheduleId === right?.scheduleId
+    && left?.setName === right?.setName
+    && left?.name === right?.name
+    && left?.qty === right?.qty
+    && left?.isComponent === right?.isComponent;
+}
+
+function exactRegisteredMutationAuthoritativeReadback(receipt, mutation) {
+  const authoritative = receipt?.authoritative_result;
+  const before = registeredAuthoritativeSnapshot(authoritative?.before, {
+    tradeId: text(mutation?.trade_id).trim(), requireLedger: false
+  });
+  const after = registeredAuthoritativeSnapshot(authoritative?.after, {
+    tradeId: text(mutation?.trade_id).trim(), requireLedger: true
+  });
+  if (!before || !after) return false;
+  const expectedPeriod = {
+    startDate: mutation?.expected_period?.start_date,
+    startTime: mutation?.expected_period?.start_time,
+    endDate: mutation?.expected_period?.end_date,
+    endTime: mutation?.expected_period?.end_time
+  };
+  const desiredPeriod = mutation?.date_change === null
+    ? expectedPeriod
     : {
         startDate: mutation?.date_change?.new_start_date,
         startTime: mutation?.date_change?.new_start_time,
         endDate: mutation?.date_change?.new_end_date,
         endTime: mutation?.date_change?.new_end_time
       };
-  if (!sameGatewayDecisionValue({
-    startDate: contract.startDate,
-    startTime: contract.startTime,
-    endDate: contract.endDate,
-    endTime: contract.endTime
-  }, expectedPeriod)) return false;
-  const desired = registeredMutationDesiredQuantities(mutation);
-  const topLevel = schedule.topLevelQuantities;
-  if (!desired || !topLevel || typeof topLevel !== 'object' || Array.isArray(topLevel)) return false;
-  const normalizedTopLevel = Object.fromEntries(Object.entries(topLevel).map(([name, quantity]) => [name, Number(quantity)]));
-  return sameGatewayDecisionValue(normalizedTopLevel, desired);
+  if (!sameGatewayDecisionValue(before.contract, expectedPeriod)
+    || !sameGatewayDecisionValue(after.contract, desiredPeriod)) return false;
+
+  const removalDelta = registeredMutationDeltaQuantities(mutation?.expected_before);
+  const additionDelta = registeredMutationDeltaQuantities(mutation?.desired_after);
+  if (!removalDelta || !additionDelta) return false;
+  const projectedTopLevel = { ...before.topLevel };
+  const removedIds = new Set();
+  for (const expected of mutation.expected_before) {
+    const scheduleId = text(expected?.schedule_id).trim();
+    const current = before.rowsById.get(scheduleId);
+    if (!current || current.isComponent || current.name !== text(expected?.name).trim()
+      || current.qty !== Number(expected?.quantity)) return false;
+    if (current.setName) {
+      for (const row of before.rows) {
+        if (row.setName === current.setName) removedIds.add(row.scheduleId);
+      }
+    } else {
+      removedIds.add(scheduleId);
+    }
+  }
+  for (const [name, quantity] of Object.entries(removalDelta)) {
+    const remaining = (projectedTopLevel[name] || 0) - quantity;
+    if (remaining < 0) return false;
+    if (remaining === 0) delete projectedTopLevel[name];
+    else projectedTopLevel[name] = remaining;
+  }
+  for (const [name, quantity] of Object.entries(additionDelta)) {
+    projectedTopLevel[name] = (projectedTopLevel[name] || 0) + quantity;
+  }
+  if (!sameGatewayDecisionValue(after.topLevel, projectedTopLevel)) return false;
+
+  for (const row of before.rows) {
+    const finalRow = after.rowsById.get(row.scheduleId);
+    if (removedIds.has(row.scheduleId)) {
+      if (finalRow) return false;
+    } else if (!sameRegisteredScheduleRow(row, finalRow)) {
+      return false;
+    }
+  }
+  const addedNames = new Set(Object.keys(additionDelta));
+  for (const row of after.rows) {
+    if (before.rowsById.has(row.scheduleId)) continue;
+    const addedIdentity = row.isComponent ? row.setName : row.name;
+    if (!addedNames.has(addedIdentity)) return false;
+  }
+  return true;
 }
 
 function exactPendingMutationAuthoritativeReadback(receipt, decision) {

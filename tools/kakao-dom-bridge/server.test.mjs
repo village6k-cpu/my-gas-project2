@@ -129,13 +129,40 @@ function task7AuthoritativeReadback() {
       endTime: TASK7_INCIDENT.expected_period.end_time
     },
     schedule: {
+      periods: [`${TASK7_INCIDENT.expected_period.start_date}|${TASK7_INCIDENT.expected_period.start_time}|${TASK7_INCIDENT.expected_period.end_date}|${TASK7_INCIDENT.expected_period.end_time}`],
       rows: [{
         scheduleId: '260824-008-08', setName: '', name: desired.name,
         qty: desired.quantity, isComponent: false
       }],
       topLevelQuantities: { [desired.name]: desired.quantity }
     },
-    ledger: { rows: 1, contractLink: 'https://example.test/contracts/260824-008' }
+    ledger: {
+      rows: 1,
+      startDate: TASK7_INCIDENT.expected_period.start_date,
+      contractLink: 'https://example.test/contracts/260824-008',
+      links: ['https://example.test/contracts/260824-008']
+    }
+  };
+}
+
+function task7AuthoritativeBeforeReadback() {
+  const expected = TASK7_INCIDENT.exact_old_rows[0];
+  return {
+    contract: {
+      startDate: TASK7_INCIDENT.expected_period.start_date,
+      startTime: TASK7_INCIDENT.expected_period.start_time,
+      endDate: TASK7_INCIDENT.expected_period.end_date,
+      endTime: TASK7_INCIDENT.expected_period.end_time
+    },
+    schedule: {
+      periods: [`${TASK7_INCIDENT.expected_period.start_date}|${TASK7_INCIDENT.expected_period.start_time}|${TASK7_INCIDENT.expected_period.end_date}|${TASK7_INCIDENT.expected_period.end_time}`],
+      rows: [{
+        scheduleId: expected.schedule_id, setName: '', name: expected.name,
+        qty: expected.quantity, isComponent: false
+      }],
+      topLevelQuantities: { [expected.name]: expected.quantity }
+    },
+    ledger: null
   };
 }
 
@@ -737,7 +764,12 @@ test('Task 7 replays the sanitized registered replacement across the durable cha
       assert.match(input.operationId, /^[0-9a-f-]{36}$/i);
       return {
         ok: true, verified: true, tradeId: TASK7_INCIDENT.trade_id,
-        readback: task7AuthoritativeReadback(), appliedStages: ['scheduleCorrectRegisteredTrade']
+        readback: task7AuthoritativeReadback(),
+        authoritativeReadback: {
+          before: task7AuthoritativeBeforeReadback(),
+          after: task7AuthoritativeReadback()
+        },
+        appliedStages: ['scheduleCorrectRegisteredTrade']
       };
     }
   });
@@ -746,7 +778,10 @@ test('Task 7 replays the sanitized registered replacement across the durable cha
     assert.equal(correctionCalls, 1);
     assert.equal(receipt.schema, 'village-registered-reservation-change-receipt/v1');
     assert.equal(receipt.status, 'ok');
-    assert.deepEqual(receipt.authoritative_result, task7AuthoritativeReadback());
+    assert.deepEqual(receipt.authoritative_result, {
+      before: task7AuthoritativeBeforeReadback(),
+      after: task7AuthoritativeReadback()
+    });
     await replay.completeHermesFinal();
 
     assert.deepEqual(replay.counts(), { applyCalls: 1, finalizeCalls: 1 });
