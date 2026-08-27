@@ -4,8 +4,9 @@ Gate 2는 실제 Slack에 연결하지 않고 `village-tax-document-clerk` 직�
 검증한다. 고정된 합성 이벤트 하나만 받아 Gate 1의 읽기 전용 `desktop_readiness`를 실행하고,
 로컬 가짜 전달구로 결과를 전달한 뒤 같은 이벤트의 재실행을 막는다.
 
-`heybilly-handoff-shell.mjs`는 별도 경로로, 정확한 HeyBilly 구조화 인계를 이 로컬
-스튜디오맥의 단일 CUA FIFO에 넣는다. 같은 Slack 스레드의 접수 readback이 끝난 뒤에만 실행하고,
+`heybilly-handoff-shell.mjs`는 별도 경로로, Gate 3가 헤이빌리 Slack 인계를 이 로컬에서
+구조화한 task를 스튜디오맥의 단일 CUA FIFO에 넣는다. 같은 Slack 스레드의 접수
+readback이 끝난 뒤에만 실행하고,
 `running` 이후 재수신은 자동 재실행하지 않는다. 원장에는 고객명·전화·금액·품목·Slack 원문을
 저장하지 않는다. 인계 ID는 비식별 소문자 UUIDv4만 허용하고, 재개 시 원본 작업과의 일치는
 권한 `0600` 로컬 비밀키로 만든 HMAC 지문으로만 확인한다.

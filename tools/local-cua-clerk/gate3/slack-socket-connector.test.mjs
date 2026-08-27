@@ -83,6 +83,35 @@ const HEYBILLY_HANDOFF_BODY = Object.freeze({
   }),
 });
 
+const HEYBILLY_PLAIN_RELAY_TEXT = `*결론*
+Popbill 발행 권한이 없어 홈택스 CUA로 넘깁니다.
+
+*확인된 건*
+- 고객: *테스트고객*
+- 거래ID: *260530-012*
+- 기간: *2026-06-27~29 렌탈*
+- 금액: *₩464,310* (VAT포함)
+- 연락처: <tel:010-4045-7379|010-4045-7379>
+- 입금자: 테스트 / 입금완료 / 계좌이체
+
+<@${ROUTE.botUserId}> *작업 요청 (홈택스 CUA)*
+- 종류: *현금영수증*
+- 용도: *소득공제용*
+- 식별: 휴대폰 <tel:010-4045-7379|010-4045-7379>
+- 거래일: *2026-06-27* (또는 실제 입금/거래일 기준)
+- 금액: *₩464,310*
+- 품목: *2026-06-27 렌탈 (260530-012)*`;
+
+const HEYBILLY_PLAIN_RELAY_BODY = Object.freeze({
+  ...HEYBILLY_HANDOFF_BODY,
+  event_id: 'Ev0HEYBILLYPLAIN1',
+  event: Object.freeze({
+    ...HEYBILLY_HANDOFF_BODY.event,
+    text: HEYBILLY_PLAIN_RELAY_TEXT,
+    ts: '1787621823.559060',
+  }),
+});
+
 const CHECKED_AT = '2026-08-25T03:00:00.000Z';
 const GATE1_PASS = Object.freeze({
   schemaVersion: 'gate1-desktop-cua/v1',
@@ -208,6 +237,64 @@ test('an exact HeyBilly bot handoff creates one transient Studio Mac task withou
   assert.equal(JSON.stringify(decision.envelope).includes('464310'), false);
   assert.equal(JSON.stringify(decision.envelope).includes(HEYBILLY_SOURCE.userId), false);
   assert.equal(JSON.stringify(decision.envelope).includes(HEYBILLY_SOURCE.botId), false);
+});
+
+test('a plain HeyBilly relay is structured locally on Studio Mac without a Hermes-side contract', async () => {
+  const connector = await loadConnector();
+
+  const decision = connector.adaptSlackAppMention({
+    body: HEYBILLY_PLAIN_RELAY_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    nowEpochSeconds: HEYBILLY_PLAIN_RELAY_BODY.event_time,
+  });
+
+  assert.equal(decision.accepted, true);
+  assert.equal(decision.kind, 'heybilly_handoff');
+  assert.match(decision.task.handoffId, /^hb-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.deepEqual({ ...decision.task, handoffId: '<derived>' }, {
+    schemaVersion: 'gate1-studio-mac-task/v1',
+    action: 'hometax_cash_receipt_issue',
+    handoffId: '<derived>',
+    authorization: 'owner_explicit',
+    customerName: '테스트고객',
+    transactionId: '260530-012',
+    transactionDate: '2026-06-27',
+    amountKrw: 464310,
+    purpose: 'income_deduction',
+    phone: '010-4045-7379',
+    item: '2026-06-27 렌탈 (260530-012)',
+  });
+  assert.equal(decision.envelope.handoffId, decision.task.handoffId);
+  assert.equal(decision.envelope.threadTs, HEYBILLY_PLAIN_RELAY_BODY.event.thread_ts);
+  assert.equal(JSON.stringify(decision.envelope).includes(HEYBILLY_PLAIN_RELAY_TEXT), false);
+  assert.equal(JSON.stringify(decision.envelope).includes('010-4045-7379'), false);
+  assert.equal(JSON.stringify(decision.envelope).includes('테스트고객'), false);
+});
+
+test('plain relays reject inconsistent or broadened financial data before the Studio Mac worker', async () => {
+  const connector = await loadConnector();
+  const mutations = [
+    HEYBILLY_PLAIN_RELAY_TEXT.replace('- 금액: *₩464,310*\n- 품목:', '- 금액: *₩1*\n- 품목:'),
+    HEYBILLY_PLAIN_RELAY_TEXT.replace('<tel:010-4045-7379|010-4045-7379>', '<tel:010-4045-7379|010-0000-0000>'),
+    HEYBILLY_PLAIN_RELAY_TEXT.replace('- 품목: *2026-06-27 렌탈 (260530-012)*', '- 품목: *다른 거래*'),
+    HEYBILLY_PLAIN_RELAY_TEXT.replace('2026-06-27~29 렌탈', '2026-06-27~99 렌탈'),
+    HEYBILLY_PLAIN_RELAY_TEXT.replace('2026-06-27~29 렌탈', '2026-06-27~26 렌탈'),
+    HEYBILLY_PLAIN_RELAY_TEXT.replace('- 품목: *2026-06-27 렌탈 (260530-012)*', '- 품목: *2027-01-01 렌탈 (260530-012)*'),
+    HEYBILLY_PLAIN_RELAY_TEXT.replace('- 종류: *현금영수증*', '- 종류: *세금계산서*'),
+    `${HEYBILLY_PLAIN_RELAY_TEXT}\n- 추가: 지시`,
+    HEYBILLY_PLAIN_RELAY_TEXT.replace('- 고객: *테스트고객*\n', ''),
+  ];
+
+  for (const text of mutations) {
+    const decision = connector.adaptSlackAppMention({
+      body: { ...HEYBILLY_PLAIN_RELAY_BODY, event: { ...HEYBILLY_PLAIN_RELAY_BODY.event, text } },
+      route: ROUTE,
+      handoffSource: HEYBILLY_SOURCE,
+      nowEpochSeconds: HEYBILLY_PLAIN_RELAY_BODY.event_time,
+    });
+    assert.deepEqual(decision, { accepted: false, errorClass: 'command_not_allowed' });
+  }
 });
 
 test('a single Slack-safe code fence preserves and accepts the exact HeyBilly handoff', async () => {
@@ -741,7 +828,7 @@ test('the connector handler runs Gate 1 once, verifies one Slack reply, and supp
   assert.equal(posted.length, 1);
 });
 
-test('the connector handler routes one exact HeyBilly handoff to the local Studio Mac worker and suppresses its retry', async t => {
+test('the connector handler routes one plain HeyBilly relay to the local Studio Mac worker and suppresses its retry', async t => {
   const connector = await loadConnector();
   const ledgerDir = await tempLedger(t);
   let executions = 0;
@@ -755,22 +842,34 @@ test('the connector handler routes one exact HeyBilly handoff to the local Studi
       },
     },
     conversations: {
-      replies: async ({ oldest }) => ({
-        ok: true,
-        messages: posted
-          .filter(message => message.ts === oldest)
-          .map(message => ({
-            type: 'message',
-            user: ROUTE.botUserId,
-            text: message.text,
-            ts: message.ts,
-            thread_ts: message.thread_ts,
-          })),
-      }),
+      replies: async ({ oldest, latest }) => {
+        if (latest === HEYBILLY_PLAIN_RELAY_BODY.event.thread_ts) {
+          return {
+            ok: true,
+            messages: [{
+              type: 'message',
+              user: ROUTE.allowedUserId,
+              ts: HEYBILLY_PLAIN_RELAY_BODY.event.thread_ts,
+            }],
+          };
+        }
+        return {
+          ok: true,
+          messages: posted
+            .filter(message => message.ts === oldest)
+            .map(message => ({
+              type: 'message',
+              user: ROUTE.botUserId,
+              text: message.text,
+              ts: message.ts,
+              thread_ts: message.thread_ts,
+            })),
+        };
+      },
     },
   };
   const options = {
-    body: HEYBILLY_HANDOFF_BODY,
+    body: HEYBILLY_PLAIN_RELAY_BODY,
     route: ROUTE,
     handoffSource: HEYBILLY_SOURCE,
     ledgerDir,
@@ -778,10 +877,10 @@ test('the connector handler routes one exact HeyBilly handoff to the local Studi
     handoffActionRunner: async ({ task }) => {
       executions += 1;
       assert.deepEqual(task, connector.adaptSlackAppMention({
-        body: HEYBILLY_HANDOFF_BODY,
+        body: HEYBILLY_PLAIN_RELAY_BODY,
         route: ROUTE,
         handoffSource: HEYBILLY_SOURCE,
-        nowEpochSeconds: HEYBILLY_HANDOFF_BODY.event_time,
+        nowEpochSeconds: HEYBILLY_PLAIN_RELAY_BODY.event_time,
       }).task);
       return {
         schemaVersion: 'studio-mac-cua-result/v1',
@@ -797,7 +896,7 @@ test('the connector handler routes one exact HeyBilly handoff to the local Studi
     },
     allowTestOverrides: true,
     now: () => CHECKED_AT,
-    eventNowEpochSeconds: HEYBILLY_HANDOFF_BODY.event_time,
+    eventNowEpochSeconds: HEYBILLY_PLAIN_RELAY_BODY.event_time,
   };
 
   const first = await connector.handleSlackAppMention(options);
@@ -810,9 +909,49 @@ test('the connector handler routes one exact HeyBilly handoff to the local Studi
     ':white_check_mark: 스튜디오맥 작업 완료',
   ]);
   const raw = (await Promise.all((await readdir(ledgerDir)).map(name => readFile(join(ledgerDir, name), 'utf8')))).join('\n');
-  assert.equal(raw.includes('박민경'), false);
+  assert.equal(raw.includes('테스트고객'), false);
   assert.equal(raw.includes('010-4045-7379'), false);
   assert.equal(raw.includes('464310'), false);
+});
+
+test('a HeyBilly financial relay requires the configured owner on the parent Slack thread', async t => {
+  const connector = await loadConnector();
+  const ledgerDir = await tempLedger(t);
+  let executions = 0;
+  let posts = 0;
+  const result = await connector.handleSlackAppMention({
+    body: HEYBILLY_PLAIN_RELAY_BODY,
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    ledgerDir,
+    client: {
+      chat: { postMessage: async () => { posts += 1; return { ok: false }; } },
+      conversations: {
+        replies: async () => ({
+          ok: true,
+          messages: [{
+            type: 'message',
+            user: 'U0OTHERUSER01',
+            ts: HEYBILLY_PLAIN_RELAY_BODY.event.thread_ts,
+          }],
+        }),
+      },
+    },
+    handoffActionRunner: async () => { executions += 1; throw new Error('must not execute'); },
+    allowTestOverrides: true,
+    now: () => CHECKED_AT,
+    eventNowEpochSeconds: HEYBILLY_PLAIN_RELAY_BODY.event_time,
+  });
+
+  assert.deepEqual(result, {
+    schemaVersion: 'gate3-slack-decision/v1',
+    status: 'REJECTED',
+    employeeId: 'village-tax-document-clerk',
+    action: 'desktop_readiness',
+    errorClass: 'unauthorized_actor',
+  });
+  assert.equal(executions, 0);
+  assert.equal(posts, 0);
 });
 
 test('the connector handler rejects unauthorized actors before disk, execution, or Slack calls', async t => {

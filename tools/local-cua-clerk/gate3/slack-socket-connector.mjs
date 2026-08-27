@@ -280,6 +280,130 @@ function parseHeyBillyHandoff(text, botUserId) {
   });
 }
 
+function derivedHeyBillyHandoffId(eventId) {
+  const chars = createHash('sha256')
+    .update(`village-local-studio-mac-relay:${eventId}`)
+    .digest('hex')
+    .slice(0, 32)
+    .split('');
+  chars[12] = '4';
+  chars[16] = ['8', '9', 'a', 'b'][Number.parseInt(chars[16], 16) % 4];
+  const hex = chars.join('');
+  return `hb-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function oneLineCapture(lines, pattern) {
+  const matches = lines.map(line => pattern.exec(line)).filter(Boolean);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function phoneValue(line, prefix) {
+  const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const plain = new RegExp(`^\\s*- ${escapedPrefix} \\*?(01[016789]-\\d{3,4}-\\d{4})\\*?$`, 'u').exec(line);
+  if (plain) return plain[1];
+  const linked = new RegExp(
+    `^\\s*- ${escapedPrefix} <tel:(01[016789]-\\d{3,4}-\\d{4})\\|(01[016789]-\\d{3,4}-\\d{4})>$`,
+    'u',
+  ).exec(line);
+  return linked && linked[1] === linked[2] ? linked[1] : undefined;
+}
+
+function onePhoneValue(lines, prefix) {
+  const matches = lines.map(line => phoneValue(line, prefix)).filter(Boolean);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function parseKrw(value) {
+  const digits = value.replaceAll(',', '');
+  if (!/^\d{1,9}$/.test(digits)) return undefined;
+  const amount = Number(digits);
+  return Number.isSafeInteger(amount) && amount >= 1 && amount <= 100_000_000
+    ? amount
+    : undefined;
+}
+
+function isCalendarDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function parsePlainHeyBillyRelay(text, botUserId, eventId) {
+  const normalized = text.normalize('NFKC');
+  if (normalized.includes('```') || normalized.includes('\u0000')) return undefined;
+  const lines = normalized.split('\n').map(line => line.trimEnd());
+  const escapedBotUserId = botUserId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const headerPattern = new RegExp(
+    `^(?:\\*?(?:<@${escapedBotUserId}>|@${escapedBotUserId}) 작업 요청 \\(홈택스 CUA\\)\\*?`
+      + `|(?:<@${escapedBotUserId}>|@${escapedBotUserId}) \\*작업 요청 \\(홈택스 CUA\\)\\*)$`,
+    'u',
+  );
+  const headerIndexes = lines
+    .map((line, index) => (headerPattern.test(line) ? index : -1))
+    .filter(index => index >= 0);
+  if (headerIndexes.length !== 1) return undefined;
+  const headerIndex = headerIndexes[0];
+  const before = lines.slice(0, headerIndex);
+  const taskLines = lines.slice(headerIndex + 1);
+  if (taskLines.length !== 6) return undefined;
+
+  const customer = oneLineCapture(before, /^\s*- 고객: \*?([가-힣A-Za-z0-9 .()_-]{2,40})\*?$/u);
+  const transaction = oneLineCapture(before, /^\s*- 거래ID: \*?(\d{6}-\d{3})\*?$/u);
+  const period = oneLineCapture(before, /^\s*- 기간: \*?(\d{4}-\d{2}-\d{2})(?:~(\d{1,2}))? 렌탈\*?$/u);
+  const confirmedAmount = oneLineCapture(before, /^\s*- 금액: \*?[₩￦]([\d,]+)\*? \(VAT포함\)$/u);
+  const confirmedPhone = onePhoneValue(before, '연락처:');
+  const phone = phoneValue(taskLines[2], '식별: 휴대폰');
+  const transactionDate = /^\s*- 거래일: \*?(\d{4}-\d{2}-\d{2})\*?(?: \([^\r\n)]{1,80}\))?$/u.exec(taskLines[3]);
+  const taskAmount = /^\s*- 금액: \*?[₩￦]([\d,]+)(?:원)?\*?(?: \(VAT포함\))?$/u.exec(taskLines[4]);
+  const item = /^\s*- 품목: \*?([^*\r\n\u0000-\u001f\u007f]{1,180})\*?$/u.exec(taskLines[5]);
+  if (
+    !/^- 종류: \*?현금영수증\*?$/u.test(taskLines[0])
+    || !/^- 용도: \*?소득공제용\*?$/u.test(taskLines[1])
+    || !customer
+    || !transaction
+    || !period
+    || !confirmedAmount
+    || !confirmedPhone
+    || !phone
+    || !transactionDate
+    || !taskAmount
+    || !item
+  ) return undefined;
+
+  const amountKrw = parseKrw(taskAmount[1]);
+  const confirmedAmountKrw = parseKrw(confirmedAmount[1]);
+  const periodEnd = period[2] === undefined
+    ? period[1]
+    : `${period[1].slice(0, 8)}${String(Number(period[2])).padStart(2, '0')}`;
+  const itemDate = /^(\d{4}-\d{2}-\d{2}) 렌탈(?:\s|$)/u.exec(item[1]);
+  if (
+    amountKrw === undefined
+    || confirmedAmountKrw !== amountKrw
+    || confirmedPhone !== phone
+    || period[1] !== transactionDate[1]
+    || !isCalendarDate(transactionDate[1])
+    || !isCalendarDate(periodEnd)
+    || periodEnd < period[1]
+    || !itemDate
+    || itemDate[1] !== transactionDate[1]
+    || !item[1].includes(transaction[1])
+  ) return undefined;
+
+  return Object.freeze({
+    schemaVersion: HEYBILLY_TASK_SCHEMA_VERSION,
+    action: HEYBILLY_TASK_TYPE,
+    handoffId: derivedHeyBillyHandoffId(eventId),
+    authorization: 'owner_explicit',
+    customerName: customer[1],
+    transactionId: transaction[1],
+    transactionDate: transactionDate[1],
+    amountKrw,
+    purpose: 'income_deduction',
+    phone,
+    item: item[1],
+  });
+}
+
 export function adaptSlackAppMention({
   body,
   route,
@@ -356,7 +480,8 @@ export function adaptSlackAppMention({
         }),
       });
     }
-    const task = parseHeyBillyHandoff(event.text, route.botUserId);
+    const task = parseHeyBillyHandoff(event.text, route.botUserId)
+      ?? parsePlainHeyBillyRelay(event.text, route.botUserId, body.event_id);
     if (!task) return rejected('command_not_allowed');
     return Object.freeze({
       accepted: true,
@@ -675,6 +800,31 @@ function connectorRejection(errorClass) {
   });
 }
 
+async function verifyOwnerThreadRequest({ client, route, threadTs }) {
+  if (typeof client?.conversations?.replies !== 'function') return false;
+  let thread;
+  try {
+    thread = await client.conversations.replies({
+      channel: route.channelId,
+      ts: threadTs,
+      latest: threadTs,
+      inclusive: true,
+      limit: 1,
+    });
+  } catch {
+    return false;
+  }
+  if (thread?.ok !== true || !Array.isArray(thread.messages)) return false;
+  return thread.messages.some(message => (
+    message
+    && message.type === 'message'
+    && message.ts === threadTs
+    && message.user === route.allowedUserId
+    && message.bot_id === undefined
+    && message.subtype === undefined
+  ));
+}
+
 export async function handleSlackAppMention({
   body,
   route,
@@ -697,6 +847,11 @@ export async function handleSlackAppMention({
   if (!decision.accepted) return connectorRejection(decision.errorClass);
 
   if (decision.kind === 'heybilly_handoff') {
+    if (!await verifyOwnerThreadRequest({
+      client,
+      route,
+      threadTs: decision.envelope.threadTs,
+    })) return connectorRejection('unauthorized_actor');
     return processHeyBillyHandoff({
       envelope: decision.envelope,
       task: decision.task,

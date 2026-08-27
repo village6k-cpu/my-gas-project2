@@ -1,9 +1,8 @@
 # Gate 3 — 별도 Slack 직원 커넥터
 
 이 디렉터리는 기존 헤이빌리와 분리된 `맥에이전트` Slack 앱을 이 로컬 스튜디오맥의
-Gate 2 원장과 Gate 1 CUA 워커에 연결한다. 사람의 `상태 확인`, PII 없는 HeyBilly
-`studio_mac_cua_readiness`, 정확히 고정된 HeyBilly 현금영수증
-`MAC_AGENT_HANDOFF_V1` 인계만 허용한다.
+Gate 2 원장과 Gate 1 Codex/CUA 워커에 연결한다. 헤이빌리는 Slack에서 인계만 하고,
+인계 검증·구조화·Codex 작업·Chrome CUA·홈택스 실행은 모두 이 스튜디오맥에서 한다.
 
 ## 현재 상태
 
@@ -12,6 +11,7 @@ Gate 2 원장과 Gate 1 CUA 워커에 연결한다. 사람의 `상태 확인`, P
 - Slack에서 `맥에이전트 상태 확인` 한글 호출·한글 작성자명·동일 스레드 정상 회신과 원장
   `completed` 확인
 - HeyBilly 사용자 ID와 bot ID를 별도로 고정하고 다른 봇·과거 이벤트·편집 이벤트를 선차단
+- 실제 HeyBilly 문장형 인계를 맥에이전트가 로컬에서 구조화하며 Hermes/AX2 프로필 배포를 필수 조건으로 두지 않음
 - 접수 → 스튜디오맥 단일 CUA 실행 → 고정 화면 readback → 동일 스레드 최종 회신 구현
 - 세금계산서, 임의 자연어, 다른 HomeTax 업무는 허용하지 않음
 
@@ -75,13 +75,13 @@ Node의 주변 환경변수를 사용하지 않고 비밀파일을 매 시작마
 - 고정 팀·채널·앱·봇·허용 사용자와 모두 일치해야 한다.
 - 사용자는 채널에 정확히 `맥에이전트 상태 확인`을 입력한다. 기존 직접 멘션 방식은
   호환용으로만 유지한다.
-- HeyBilly 인계는 10분 이내의 새 이벤트, 정확한 HeyBilly user+bot 쌍, 부모 스레드,
-  소문자 UUIDv4 인계 ID와 고정 키의 `MAC_AGENT_HANDOFF_V1`만 수용한다. 운영 인계는
-  Slack 자동 변환을 막는 단일 `text` 코드 블록으로 보내며, 파서는 앞뒤 설명이나 다른
-  코드 블록 언어가 없는 정확한 한 블록만 벗겨서 검증한다. 실제 HeyBilly 출력에서 확인된
-  일반 멘션·고객명 강조·전화 링크 변환은 고정 13줄 위치와 값 일치가 모두 맞을 때만
-  원래 필드로 복원한다. 실측된 한 줄 공백 축약형도 고정 필드 13개·순서·구분자·값이
-  전부 일치할 때만 복원하며, 다른 변형은 계속 거부한다.
+- HeyBilly 인계는 10분 이내의 새 이벤트, 정확한 HeyBilly user+bot 쌍, 부모 스레드만
+  수용한다. 현금영수증은 실제 Slack에서 사용하는 `작업 요청 (홈택스 CUA)` 문장형 인계의
+  고객·거래ID·기간·금액·연락처와 작업 블록을 **맥에이전트가 로컬에서** 교차 검증해
+  기존 구조화 task로 변환한다. Slack event ID에서 비식별 UUIDv4를 결정적으로 만들어
+  재시도를 같은 작업으로 묶는다. 기존 `MAC_AGENT_HANDOFF_V1` 형식은 호환용으로 유지한다.
+- 금융 인계는 실행 전 `conversations.replies` 읽기 검증으로 부모 스레드 작성자가 고정된
+  owner ID인지 확인하며, 다른 작성자이거나 조회가 불명확하면 디스크·CUA 실행 전에 거부한다.
 - HeyBilly readiness는 별도 `[MAC_AGENT_READINESS_V1]` fenced 6줄 계약의
   `studio_mac_cua_readiness`와 `authorization: read_only`만 수용한다.
   실측된 HeyBilly 코드 블록의 여는 fence 직후 줄바꿈 생략과 정확한
