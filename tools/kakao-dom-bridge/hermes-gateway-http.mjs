@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { validateStaffConfirmedMutation } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
 
 const MAX_BODY_BYTES = 1_048_576;
 const GATEWAY_TRANSPORTS = new Set(['gateway', 'gateway_no_send']);
@@ -87,6 +88,32 @@ export function documentRequestDigest(body = {}) {
   return crypto.createHash('sha256').update(JSON.stringify(canonicalJson(payload)), 'utf8').digest('hex');
 }
 
+export function registeredReservationChangeRequestDigest(body = {}) {
+  const payload = {
+    schema: body.schema || 'village-registered-reservation-change-request/v1',
+    job_id: body.job_id,
+    room_key: body.room_key,
+    room_revision: body.room_revision,
+    lease_id: body.lease_id,
+    mutation: body.mutation
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalJson(payload)), 'utf8').digest('hex');
+}
+
+export function validateRegisteredReservationChangeBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const allowedFields = new Set(['schema', 'job_id', 'room_key', 'room_revision', 'lease_id', 'mutation']);
+  if (Object.keys(body).some((key) => !allowedFields.has(key))) return false;
+  if (body.schema !== 'village-registered-reservation-change-request/v1'
+    || !String(body.job_id || '').trim()
+    || !String(body.room_key || '').trim()
+    || !Number.isInteger(body.room_revision)
+    || body.room_revision <= 0
+    || !String(body.lease_id || '').trim()) return false;
+  const validation = validateStaffConfirmedMutation(body.mutation, { roomRevision: body.room_revision });
+  return validation.valid === true && body.mutation?.target_scope === 'registered_trade';
+}
+
 function exactClaimForConfirmation(job, body, leaseId, nowMs) {
   const leaseExpiresAt = Number(job?.lease_expires_at_ms);
   return job
@@ -172,6 +199,36 @@ function durableDocumentOperationForRequest(job, body, leaseId, requestDigest) {
   return { reservation, receipt, conflict: false };
 }
 
+function durableRegisteredReservationChangeForRequest(job, body, leaseId, requestDigest) {
+  if (!job
+    || String(job.job_id || '') !== String(body?.job_id || '')
+    || String(job.room_key || '') !== String(body?.room_key || '')
+    || Number(job.room_revision) !== Number(body?.room_revision)) {
+    return { reservation: null, receipt: null, conflict: false };
+  }
+  const reservation = job.tool_operation;
+  if (!reservation) return { reservation: null, receipt: null, conflict: false };
+  const matches = reservation.schema === 'village-tool-operation-reservation/v1'
+    && reservation.tool === 'registered_reservation_change'
+    && String(reservation.job_id || '') === String(body.job_id || '')
+    && String(reservation.room_key || '') === String(body.room_key || '')
+    && Number(reservation.room_revision) === Number(body.room_revision)
+    && String(reservation.lease_id || '') === leaseId
+    && String(reservation.request_digest || '') === requestDigest
+    && String(reservation.operation_id || '').trim();
+  if (!matches) return { reservation, receipt: null, conflict: true };
+  const receipt = (Array.isArray(job.tool_receipts) ? job.tool_receipts : []).find((candidate) => (
+    candidate?.schema === 'village-registered-reservation-change-receipt/v1'
+    && String(candidate.job_id || '') === String(body.job_id || '')
+    && String(candidate.room_key || '') === String(body.room_key || '')
+    && Number(candidate.room_revision) === Number(body.room_revision)
+    && String(candidate.lease_id || '') === leaseId
+    && String(candidate.request_digest || '') === requestDigest
+    && String(candidate.operation_id || '') === reservation.operation_id
+  )) || null;
+  return { reservation, receipt, conflict: false };
+}
+
 function validateDocumentBody(body) {
   return body?.schema === 'village-document-request/v1'
     && body?.document_type === 'quote'
@@ -225,9 +282,14 @@ export function buildGatewayHealthReadback({
   const failureNotificationCounts = status?.failure_notification_counts && typeof status.failure_notification_counts === 'object'
     ? status.failure_notification_counts
     : {};
+  const registeredReservationChange = status?.registered_reservation_change
+    && typeof status.registered_reservation_change === 'object'
+    ? status.registered_reservation_change
+    : {};
   const oldestClaimAge = status?.oldest_lease_age_ms === null || status?.oldest_lease_age_ms === undefined
     ? null
     : Number(status.oldest_lease_age_ms);
+  const registeredLastSuccessAtMs = Date.parse(String(registeredReservationChange.last_success_at || ''));
   return {
     transport: String(transport || 'cli'),
     gatewayConfigured: Boolean(gatewayConfigured),
@@ -253,18 +315,33 @@ export function buildGatewayHealthReadback({
     failure_notification_counts: Object.fromEntries(
       ['pending', 'delivered'].map((key) => [key, safeNonNegativeInteger(failureNotificationCounts[key])])
     ),
-    unnotified_application_failures: safeNonNegativeInteger(status?.unnotified_application_failures)
+    unnotified_application_failures: safeNonNegativeInteger(status?.unnotified_application_failures),
+    registered_reservation_change: {
+      reserved: safeNonNegativeInteger(registeredReservationChange.reserved),
+      completed: safeNonNegativeInteger(registeredReservationChange.completed),
+      failed_human_review: safeNonNegativeInteger(registeredReservationChange.failed_human_review),
+      pending_failure_notifications: safeNonNegativeInteger(registeredReservationChange.pending_failure_notifications),
+      oldest_reserved_age_ms: registeredReservationChange.oldest_reserved_age_ms === null
+        || registeredReservationChange.oldest_reserved_age_ms === undefined
+        ? null
+        : safeNonNegativeInteger(registeredReservationChange.oldest_reserved_age_ms),
+      last_success_at: Number.isFinite(registeredLastSuccessAtMs)
+        ? new Date(registeredLastSuccessAtMs).toISOString()
+        : null
+    }
   };
 }
 
 export function createHermesGatewayHttpHandler({
   token, channel, executeConfirmation, validateConfirmation, executeDocument, validateDocument,
+  executeRegisteredReservationChange,
   enqueueResultApplication, recoverFailureNotifications,
   transport = 'cli', now = Date.now, consumerFreshnessMs = 600_000
 } = {}) {
   const gatewayConfigured = GATEWAY_TRANSPORTS.has(transport) && Boolean(String(token || '').trim()) && Boolean(channel);
   const confirmationInFlight = new Map();
   const documentInFlight = new Map();
+  const registeredReservationChangeInFlight = new Map();
 
   return async function handleHermesGatewayRequest(req, res, url) {
     if (!url.pathname.startsWith('/hermes/v1/')) return false;
@@ -437,6 +514,125 @@ export function createHermesGatewayHttpHandler({
           sendJson(res, 200, await inFlight.operation);
         } finally {
           if (confirmationInFlight.get(claimKey) === inFlight) confirmationInFlight.delete(claimKey);
+        }
+        return true;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/hermes/v1/tools/registered-reservation-change') {
+        const body = await readJsonBody(req);
+        const leaseId = requiredLeaseId(body);
+        if (transport === 'gateway_no_send') throw requestError(403, 'writes_disabled');
+        if (!validateRegisteredReservationChangeBody(body)) {
+          throw requestError(422, 'invalid_registered_reservation_change_request');
+        }
+        if (typeof channel.get !== 'function' || typeof channel.reserveToolOperation !== 'function'
+          || typeof channel.recordToolReceipt !== 'function') {
+          throw requestError(503, 'registered_reservation_change_fencing_unavailable');
+        }
+        const requestDigest = registeredReservationChangeRequestDigest(body);
+        const currentTime = () => {
+          const value = now();
+          const milliseconds = value instanceof Date ? value.getTime() : Number(value);
+          if (!Number.isFinite(milliseconds)) {
+            throw requestError(503, 'registered_reservation_change_clock_unavailable');
+          }
+          return milliseconds;
+        };
+        const assertCurrentClaim = async () => {
+          const currentJob = await channel.get(body.job_id);
+          if (!exactClaimForConfirmation(currentJob, body, leaseId, currentTime())) {
+            throw requestError(409, 'stale_lease');
+          }
+          return currentJob;
+        };
+        const claimKey = [body.job_id, body.room_key, body.room_revision, leaseId].map(String).join('\u0000');
+        const claimedJob = await channel.get(body.job_id);
+        let inFlight = registeredReservationChangeInFlight.get(claimKey);
+        if (inFlight && inFlight.requestDigest !== requestDigest) {
+          throw requestError(409, 'registered_reservation_change_conflict');
+        }
+        if (inFlight) {
+          try {
+            sendJson(res, 200, await inFlight.operation);
+          } finally {
+            if (registeredReservationChangeInFlight.get(claimKey) === inFlight) {
+              registeredReservationChangeInFlight.delete(claimKey);
+            }
+          }
+          return true;
+        }
+        const durable = durableRegisteredReservationChangeForRequest(claimedJob, body, leaseId, requestDigest);
+        if (durable.conflict) throw requestError(409, 'registered_reservation_change_conflict');
+        if (durable.receipt) {
+          sendJson(res, 200, durable.receipt);
+          return true;
+        }
+        if (durable.reservation) throw requestError(409, 'registered_reservation_change_unresolved');
+        if (!exactClaimForConfirmation(claimedJob, body, leaseId, currentTime())) {
+          throw requestError(409, 'stale_lease');
+        }
+        if (typeof executeRegisteredReservationChange !== 'function') {
+          throw requestError(503, 'registered_reservation_change_unavailable');
+        }
+        const operation = Promise.resolve().then(async () => {
+          let reserved;
+          try {
+            reserved = await channel.reserveToolOperation({
+              tool: 'registered_reservation_change',
+              job_id: body.job_id,
+              room_key: body.room_key,
+              room_revision: body.room_revision,
+              lease_id: leaseId,
+              request_digest: requestDigest
+            });
+          } catch (error) {
+            if (error?.code === 'confirmation_operation_conflict') {
+              throw requestError(409, 'registered_reservation_change_conflict');
+            }
+            throw error;
+          }
+          if (!reserved?.created || !reserved?.reservation) {
+            throw requestError(409, 'registered_reservation_change_unresolved');
+          }
+          const operationFence = reserved.reservation;
+          await assertCurrentClaim();
+          const receipt = await executeRegisteredReservationChange(body, { assertCurrentClaim, operationFence });
+          if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
+            || receipt.schema !== 'village-registered-reservation-change-receipt/v1') {
+            throw requestError(502, 'invalid_registered_reservation_change_receipt');
+          }
+          if (String(receipt.job_id || '') !== String(body.job_id || '')
+            || String(receipt.room_key || '') !== String(body.room_key || '')
+            || Number(receipt.room_revision) !== Number(body.room_revision)
+            || receipt.target_scope !== 'registered_trade'
+            || String(receipt.trade_id || '') !== String(body.mutation.trade_id || '')
+            || String(receipt.mutation_kind || '') !== String(body.mutation.kind || '')) {
+            throw requestError(502, 'registered_reservation_change_receipt_correlation_mismatch');
+          }
+          if (receipt.lease_id && receipt.lease_id !== leaseId) throw requestError(409, 'lease_id_mismatch');
+          if (receipt.request_digest && receipt.request_digest !== requestDigest) {
+            throw requestError(502, 'registered_reservation_change_receipt_request_mismatch');
+          }
+          if (receipt.operation_id && receipt.operation_id !== operationFence.operation_id) {
+            throw requestError(502, 'registered_reservation_change_receipt_operation_mismatch');
+          }
+          const fencedReceipt = {
+            ...receipt,
+            lease_id: leaseId,
+            request_digest: requestDigest,
+            operation_id: operationFence.operation_id
+          };
+          await channel.recordToolReceipt(fencedReceipt);
+          return fencedReceipt;
+        });
+        inFlight = { requestDigest, operation };
+        registeredReservationChangeInFlight.set(claimKey, inFlight);
+        try {
+          sendJson(res, 200, await inFlight.operation);
+        } finally {
+          if (registeredReservationChangeInFlight.get(claimKey) === inFlight) {
+            registeredReservationChangeInFlight.delete(claimKey);
+          }
         }
         return true;
       }

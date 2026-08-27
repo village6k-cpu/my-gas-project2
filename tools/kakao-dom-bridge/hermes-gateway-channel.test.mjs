@@ -47,6 +47,23 @@ function documentReceipt(claim, operationId, requestDigest = 'document-digest-1'
   };
 }
 
+function registeredReservationChangeOperation(claim, requestDigest = 'registered-change-digest-1') {
+  return { ...confirmationOperation(claim, requestDigest), tool: 'registered_reservation_change' };
+}
+
+function registeredReservationChangeReceipt(claim, operationId, requestDigest = 'registered-change-digest-1', overrides = {}) {
+  return {
+    schema: 'village-registered-reservation-change-receipt/v1', receipt_id: 'registered-change-receipt-1',
+    job_id: claim.job_id, room_key: claim.room_key, room_revision: claim.room_revision,
+    lease_id: claim.lease_id, request_digest: requestDigest, operation_id: operationId,
+    status: 'ok', target_scope: 'registered_trade', trade_id: '260824-008',
+    mutation_kind: 'equipment_replace', authoritative_result: { verified: true },
+    applied_stages: ['schedule_rows'], attempted_stage: null, customer_reply: 'no_reply',
+    created_at: '2026-08-21T00:00:00.000Z', error: null,
+    ...overrides
+  };
+}
+
 async function withChannel(run, options = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), 'hermes-gateway-channel-'));
   const clock = { now: Date.parse('2026-08-21T00:00:00.000Z') };
@@ -398,6 +415,92 @@ test('persists a channel-owned confirmation reservation and accepts only its exa
     assert.equal(recorded.tool_receipts.length, 1);
     assert.equal(recorded.tool_operation.state, 'completed');
     assert.equal(recorded.tool_operation.receipt_id, 'receipt-1');
+  });
+});
+
+test('persists and fences the exact registered reservation change operation envelope', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    await channel.enqueue(event('job-registered-change', 'room-registered-change', 6));
+    const claim = await channel.claim({ consumerId: 'gateway-registered-change', waitMs: 0 });
+    const operation = registeredReservationChangeOperation(claim);
+    const reserved = await channel.reserveToolOperation(operation);
+    const persisted = await channel.get(claim.job_id);
+
+    assert.equal(reserved.created, true);
+    assert.deepEqual(
+      Object.fromEntries(['tool', 'job_id', 'room_key', 'room_revision', 'lease_id', 'request_digest']
+        .map((key) => [key, persisted.tool_operation[key]])),
+      operation
+    );
+    assert.match(persisted.tool_operation.operation_id, /^[0-9a-f-]{36}$/);
+
+    await assert.rejects(
+      channel.reserveToolOperation({ ...operation, lease_id: '' }),
+      { code: 'stale_lease' }
+    );
+    await assert.rejects(
+      channel.reserveToolOperation({ ...operation, lease_id: 'wrong-lease' }),
+      { code: 'confirmation_operation_conflict' }
+    );
+    await assert.rejects(
+      channel.reserveToolOperation({ ...operation, request_digest: 'different-mutation-digest' }),
+      { code: 'confirmation_operation_conflict' }
+    );
+    await assert.rejects(
+      channel.reserveToolOperation({ ...operation, tool: 'confirmation_request' }),
+      { code: 'confirmation_operation_conflict' }
+    );
+    await assert.rejects(
+      channel.recordToolReceipt(registeredReservationChangeReceipt(claim, 'wrong-operation-id')),
+      { code: 'operation_fence_mismatch' }
+    );
+    await assert.rejects(
+      channel.recordToolReceipt(registeredReservationChangeReceipt(
+        claim, reserved.reservation.operation_id, undefined, { lease_id: '' }
+      )),
+      { code: 'stale_lease' }
+    );
+    await assert.rejects(
+      channel.recordToolReceipt(registeredReservationChangeReceipt(
+        claim, reserved.reservation.operation_id, undefined, { lease_id: 'wrong-lease' }
+      )),
+      { code: 'operation_fence_mismatch' }
+    );
+    await assert.rejects(
+      channel.recordToolReceipt(registeredReservationChangeReceipt(
+        claim, reserved.reservation.operation_id, 'different-mutation-digest'
+      )),
+      { code: 'operation_fence_mismatch' }
+    );
+
+    clock.now += 1_000;
+    await channel.reapExpiredLeases();
+    const recorded = await channel.recordToolReceipt(
+      registeredReservationChangeReceipt(claim, reserved.reservation.operation_id)
+    );
+    assert.equal(recorded.tool_operation.state, 'completed');
+    assert.equal(recorded.tool_operation.receipt_id, 'registered-change-receipt-1');
+    assert.equal(recorded.tool_receipts.length, 1);
+  });
+});
+
+test('restart makes an unresolved registered reservation change human-review-only and never replayable', async () => {
+  await withChannel(async ({ channel, directory, clock }) => {
+    await channel.enqueue(event('job-registered-restart', 'room-registered-restart', 2));
+    const claim = await channel.claim({ consumerId: 'gateway-registered-change', waitMs: 0 });
+    const reserved = await channel.reserveToolOperation(registeredReservationChangeOperation(claim));
+    const restarted = createHermesGatewayChannel({
+      directory, leaseMs: 1_000, maxAttempts: 2, now: () => clock.now
+    });
+
+    assert.equal((await restarted.get(claim.job_id)).tool_operation.operation_id, reserved.reservation.operation_id);
+    clock.now += 1_000;
+    await restarted.reapExpiredLeases();
+    const review = await restarted.get(claim.job_id);
+    assert.equal(review.state, 'failed');
+    assert.equal(review.human_review_required, true);
+    assert.equal(review.error.type, 'confirmation_operation_unresolved');
+    assert.equal(await restarted.claim({ consumerId: 'gateway-after-restart', waitMs: 0 }), null);
   });
 });
 
@@ -939,6 +1042,46 @@ test('channel status reports consumer freshness coordinates, oldest active claim
     assert.equal('local_context' in status, false);
     assert.equal('result' in status, false);
     assert.equal((await channel.get(claim.job_id)).state, 'claimed');
+  });
+});
+
+test('channel status derives non-sensitive registered change aggregates from durable jobs', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    await channel.enqueue(event('registered-success', 'registered-status-success', 1));
+    const successClaim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+    const successReservation = await channel.reserveToolOperation(registeredReservationChangeOperation(successClaim, 'success-digest'));
+    await channel.recordToolReceipt(registeredReservationChangeReceipt(
+      successClaim, successReservation.reservation.operation_id, 'success-digest',
+      { receipt_id: 'registered-success-receipt' }
+    ));
+    await channel.complete({
+      job_id: successClaim.job_id, room_key: successClaim.room_key,
+      room_revision: successClaim.room_revision, lease_id: successClaim.lease_id,
+      final: { reply_mode: 'no_reply' }
+    });
+
+    await channel.enqueue(event('registered-review', 'registered-status-review', 1));
+    const reviewClaim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+    await channel.reserveToolOperation(registeredReservationChangeOperation(reviewClaim, 'review-digest'));
+    clock.now += 1_000;
+    await channel.reapExpiredLeases();
+
+    await channel.enqueue(event('registered-reserved', 'registered-status-reserved', 1));
+    const reservedClaim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+    await channel.reserveToolOperation(registeredReservationChangeOperation(reservedClaim, 'reserved-digest'));
+    clock.now += 250;
+
+    const status = await channel.status();
+    assert.deepEqual(status.registered_reservation_change, {
+      reserved: 2,
+      completed: 1,
+      failed_human_review: 1,
+      pending_failure_notifications: 1,
+      oldest_reserved_age_ms: 1250,
+      last_success_at: '2026-08-21T00:00:00.000Z'
+    });
+    assert.equal(JSON.stringify(status.registered_reservation_change).includes('260824-008'), false);
+    assert.equal(JSON.stringify(status.registered_reservation_change).includes('equipment_replace'), false);
   });
 });
 

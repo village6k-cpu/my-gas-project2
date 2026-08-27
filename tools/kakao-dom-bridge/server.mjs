@@ -23,6 +23,7 @@ import { applyFollowUpCaseAction, validateFollowUpCaseAction } from '../ai-brows
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { buildGatewayHealthReadback, createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
 import { executeVillageDocumentRequest } from '../village-doc-send/runner.mjs';
+import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
 
 export { buildGatewayHealthReadback } from './hermes-gateway-http.mjs';
 
@@ -476,6 +477,25 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
   });
 }
 
+export function createGatewayRegisteredReservationChangeExecutor({
+  getConfig,
+  executeOperation = executeVillageRegisteredReservationChange
+} = {}) {
+  if (typeof getConfig !== 'function') throw new Error('Gateway registered reservation change config loader is required');
+  if (typeof executeOperation !== 'function') throw new Error('Gateway registered reservation change operation is required');
+  return async (request, { assertCurrentClaim, operationFence } = {}) => executeOperation({
+    config: getConfig(),
+    job: {
+      job_id: request.job_id,
+      room_key: request.room_key,
+      room_revision: request.room_revision
+    },
+    roomRevision: request.room_revision,
+    mutation: request.mutation,
+    dependencies: { assertCurrentClaim, operationFence }
+  });
+}
+
 export function createGatewayDocumentExecutor({
   getConfig,
   executeRequest = executeVillageDocumentRequest,
@@ -837,6 +857,11 @@ const gatewayDocumentExecutor = gatewayTransportEnabled
       )
     })
   : null;
+const gatewayRegisteredReservationChangeExecutor = gatewayTransportEnabled
+  ? createGatewayRegisteredReservationChangeExecutor({
+      getConfig: () => getKakaoWorkerRuntimeConfigForTransport()
+    })
+  : null;
 const gatewayHttpHandler = createHermesGatewayHttpHandler({
   token: CONFIG.hermesBridgeToken,
   channel: gatewayChannel,
@@ -845,6 +870,7 @@ const gatewayHttpHandler = createHermesGatewayHttpHandler({
   executeConfirmation: gatewayConfirmationExecutor,
   validateConfirmation: gatewayConfirmationValidator,
   executeDocument: gatewayDocumentExecutor,
+  executeRegisteredReservationChange: gatewayRegisteredReservationChangeExecutor,
   recoverFailureNotifications: gatewayTransportEnabled
     ? () => getGatewayFailureNotificationCoordinator().recover()
     : null,

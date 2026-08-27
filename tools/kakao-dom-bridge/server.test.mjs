@@ -17,6 +17,7 @@ const {
   p0SlackEscalationDue,
   createKakaoPhaseScheduler,
   createGatewayConfirmationExecutor,
+  createGatewayRegisteredReservationChangeExecutor,
   createGatewayConfirmationValidator,
   createGatewayDocumentExecutor,
   resolveGatewayDocumentConfig,
@@ -384,6 +385,10 @@ test('Gateway health readback requires a fresh consumer and exposes only safe ag
       last_completed_job_id: 'completed-job',
       last_consumer_id: 'gateway-consumer-1',
       last_consumer_seen_at: '2026-08-21T00:00:30.000Z',
+      registered_reservation_change: {
+        reserved: 2, completed: 5, failed_human_review: 1, pending_failure_notifications: 1,
+        oldest_reserved_age_ms: 45_000, last_success_at: '2026-08-21T00:00:20.000Z'
+      },
       token: 'must-not-leak', prompt: 'must-not-leak', local_context: { secret: true }
     }
   });
@@ -393,7 +398,11 @@ test('Gateway health readback requires a fresh consumer and exposes only safe ag
     queue: { ready: 2, claimed: 1, retry: 0, failed: 3, oldest_claim_age_ms: 75_000, last_completed_job_id: 'completed-job' },
     application_counts: { pending: 1, claimed: 0, applying: 0, applied: 0, finalized: 3, failed: 1 },
     failure_notification_counts: { pending: 2, delivered: 5 },
-    unnotified_application_failures: 1
+    unnotified_application_failures: 1,
+    registered_reservation_change: {
+      reserved: 2, completed: 5, failed_human_review: 1, pending_failure_notifications: 1,
+      oldest_reserved_age_ms: 45_000, last_success_at: '2026-08-21T00:00:20.000Z'
+    }
   });
   assert.equal(JSON.stringify(readback).includes('must-not-leak'), false);
   const stale = buildGatewayHealthReadback({
@@ -440,6 +449,48 @@ test('server confirmation executor forwards the channel claim fence into the wor
   assert.equal(operationArgs.job.roomRevision, 3);
   assert.equal(operationArgs.dependencies.assertCurrentClaim, assertCurrentClaim);
   assert.equal(operationArgs.dependencies.operationFence, operationFence);
+});
+
+test('server registered change executor maps the HTTP contract and forwards exact fence dependencies', async () => {
+  const assertCurrentClaim = async () => {};
+  const operationFence = {
+    schema: 'village-tool-operation-reservation/v1', operation_id: 'registered-operation-1',
+    tool: 'registered_reservation_change', job_id: 'registered-job-1', room_key: 'registered-room-1',
+    room_revision: 8, lease_id: 'registered-lease-1', request_digest: 'registered-digest-1',
+    state: 'reserved', created_at: '2026-08-27T00:00:00.000Z', receipt_id: null, completed_at: null
+  };
+  const mutation = {
+    confirmed: true, kind: 'equipment_replace', target_scope: 'registered_trade', trade_id: '260824-008',
+    source_evidence: { customer_request: '교체 요청', staff_confirmation: '교체 확정', conversation_revision: 8 },
+    expected_period: { start_date: '2026-08-28', start_time: '09:00', end_date: '2026-08-29', end_time: '18:00' },
+    expected_before: [{ schedule_id: '260824-008-07', name: '기존 렌즈', quantity: 1 }],
+    desired_after: [{ name: '교체 렌즈', quantity: 1 }], date_change: null
+  };
+  let received = null;
+  const executor = createGatewayRegisteredReservationChangeExecutor({
+    getConfig: () => ({ sheetApiKey: 'internal-key' }),
+    executeOperation: async (request) => {
+      received = request;
+      return { schema: 'village-registered-reservation-change-receipt/v1', status: 'ok' };
+    }
+  });
+
+  const result = await executor({
+    schema: 'village-registered-reservation-change-request/v1',
+    job_id: 'registered-job-1', room_key: 'registered-room-1', room_revision: 8,
+    lease_id: 'registered-lease-1', mutation
+  }, { assertCurrentClaim, operationFence });
+
+  assert.deepEqual(result, { schema: 'village-registered-reservation-change-receipt/v1', status: 'ok' });
+  assert.deepEqual(received, {
+    config: { sheetApiKey: 'internal-key' },
+    job: { job_id: 'registered-job-1', room_key: 'registered-room-1', room_revision: 8 },
+    roomRevision: 8,
+    mutation,
+    dependencies: { assertCurrentClaim, operationFence }
+  });
+  assert.equal(received.dependencies.assertCurrentClaim, assertCurrentClaim);
+  assert.equal(received.dependencies.operationFence, operationFence);
 });
 
 test('server document executor fences then sends the exact registered supply-only quote and returns a correlated receipt', async () => {
