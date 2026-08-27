@@ -864,6 +864,9 @@ test('staff-confirmed mutation prompt keeps customer-only requests read-only and
   assert.match(prompt, /pending_request[\s\S]*(equipment_remove|equipment_replace|equipment_quantity_change)[\s\S]*replace_full_plan/i);
   assert.match(prompt, /registered_trade[\s\S]*village_registered_reservation_change[\s\S]*exactly once[\s\S]*before FINAL_JSON/i);
   assert.match(prompt, /registered_trade[\s\S]*must not call village_confirmation_request/i);
+  assert.match(prompt, /equipment_write_mode[\s\S]*pending/i);
+  assert.doesNotMatch(prompt, /registered booking or pending-RQ additions="additions_only"/i);
+  assert.doesNotMatch(prompt, /Never replace a registered booking/i);
   assert.match(prompt, /Do not parse[\s\S]*(RQ|trade)[\s\S]*from prose/i);
   assert.match(prompt, /ambiguous target, catalog, or staff evidence[\s\S]*no mutation tool[\s\S]*one urgent owner-review follow-up/i);
   assert.match(prompt, /"staff_confirmed_mutation": object \| null/);

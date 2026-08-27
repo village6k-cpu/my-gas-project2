@@ -479,21 +479,45 @@ export function createGatewayConfirmationExecutor({ getConfig, executeOperation 
 
 export function createGatewayRegisteredReservationChangeExecutor({
   getConfig,
-  executeOperation = executeVillageRegisteredReservationChange
+  executeOperation = executeVillageRegisteredReservationChange,
+  runRegisteredTradeCorrection,
+  randomUUID = crypto.randomUUID,
+  now
 } = {}) {
   if (typeof getConfig !== 'function') throw new Error('Gateway registered reservation change config loader is required');
   if (typeof executeOperation !== 'function') throw new Error('Gateway registered reservation change operation is required');
-  return async (request, { assertCurrentClaim, operationFence } = {}) => executeOperation({
-    config: getConfig(),
-    job: {
-      job_id: request.job_id,
-      room_key: request.room_key,
-      room_revision: request.room_revision
-    },
-    roomRevision: request.room_revision,
-    mutation: request.mutation,
-    dependencies: { assertCurrentClaim, operationFence }
-  });
+  return async (request, { assertCurrentClaim, operationFence } = {}) => {
+    const dependencies = {
+      assertCurrentClaim,
+      operationFence,
+      ...(typeof runRegisteredTradeCorrection === 'function' ? { runRegisteredTradeCorrection } : {}),
+      ...(typeof randomUUID === 'function' ? { randomUUID } : {}),
+      ...(typeof now === 'function' ? { now } : {})
+    };
+    return executeOperation({
+      config: resolveGatewayRegisteredReservationChangeConfig(getConfig()),
+      job: {
+        job_id: request.job_id,
+        room_key: request.room_key,
+        room_revision: request.room_revision
+      },
+      roomRevision: request.room_revision,
+      mutation: request.mutation,
+      dependencies
+    });
+  };
+}
+
+export function resolveGatewayRegisteredReservationChangeConfig(workerConfig = {}) {
+  const gasApiUrl = String(workerConfig.gasApiUrl || '').trim();
+  const sheetApiKey = String(workerConfig.sheetApiKey || '').trim();
+  if (!gasApiUrl || !sheetApiKey) {
+    throw new Error('Gateway registered reservation change configuration is incomplete');
+  }
+  return {
+    VILLAGE2_API_URL: gasApiUrl,
+    VILLAGE2_API_KEY: sheetApiKey
+  };
 }
 
 export function createGatewayDocumentExecutor({

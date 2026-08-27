@@ -1129,6 +1129,71 @@ test('registered change last success uses durable operation completion after the
   });
 });
 
+test('registered change status counts exact blocked failed and partial receipts after notification delivery without double-counting infrastructure review', async () => {
+  await withChannel(async ({ channel, clock }) => {
+    async function persistReceipt(jobId, status, { makeInfrastructureFailure = false } = {}) {
+      await channel.enqueue(event(jobId, `${jobId}-room`, 1));
+      const claim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+      const requestDigest = `${jobId}-digest`;
+      const reservation = await channel.reserveToolOperation(registeredReservationChangeOperation(claim, requestDigest));
+      await channel.recordToolReceipt(registeredReservationChangeReceipt(
+        claim,
+        reservation.reservation.operation_id,
+        requestDigest,
+        {
+          receipt_id: `${jobId}-receipt`,
+          status,
+          authoritative_result: status === 'ok' ? { verified: true } : null,
+          applied_stages: status === 'partial_success' ? ['scheduleRemoveEquips'] : [],
+          error: status === 'ok' ? null : { code: `${status}_fixture` }
+        }
+      ));
+      await channel.complete({
+        job_id: claim.job_id, room_key: claim.room_key,
+        room_revision: claim.room_revision, lease_id: claim.lease_id,
+        final: { reply_mode: status === 'ok' ? 'no_reply' : 'draft_only' }
+      });
+      if (makeInfrastructureFailure) {
+        const application = await channel.claimApplication({ jobId });
+        await channel.beginApplication({ job_id: jobId, application_id: application.application_id });
+        await channel.failApplication({
+          job_id: jobId,
+          application_id: application.application_id,
+          error: { type: 'fixture_application_failure' }
+        });
+        await channel.markApplicationFailureNotified({
+          job_id: jobId,
+          application_id: application.application_id,
+          audit: { delivered: true }
+        });
+      }
+    }
+
+    await persistReceipt('registered-receipt-ok', 'ok');
+    await persistReceipt('registered-receipt-blocked', 'blocked');
+    await persistReceipt('registered-receipt-failed', 'failed');
+    await persistReceipt('registered-receipt-partial', 'partial_success', { makeInfrastructureFailure: true });
+
+    await channel.enqueue(event('registered-unresolved-infrastructure', 'registered-unresolved-room', 1));
+    const unresolvedClaim = await channel.claim({ consumerId: 'gateway-status', waitMs: 0 });
+    await channel.reserveToolOperation(registeredReservationChangeOperation(unresolvedClaim, 'unresolved-digest'));
+    clock.now += 1_001;
+    await channel.reapExpiredLeases();
+    await channel.markFailureNotified({
+      job_id: unresolvedClaim.job_id,
+      audit: { delivered: true }
+    });
+
+    const aggregate = (await channel.status()).registered_reservation_change;
+    assert.equal(aggregate.failed_human_review, 4);
+    assert.equal(aggregate.pending_failure_notifications, 0);
+    assert.deepEqual(Object.keys(aggregate).sort(), [
+      'completed', 'failed_human_review', 'last_success_at', 'oldest_reserved_age_ms',
+      'pending_failure_notifications', 'reserved'
+    ]);
+  });
+});
+
 test('registered change last success compares parsed completion instants and ignores invalid completion timestamps', async () => {
   await withChannel(async ({ channel, directory, clock }) => {
     const completions = new Map([

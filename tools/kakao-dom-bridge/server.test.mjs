@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createHermesGatewayChannel } from './hermes-gateway-channel.mjs';
 import { createHermesGatewayHttpHandler } from './hermes-gateway-http.mjs';
-import { executeVillageRegisteredReservationChange } from '../ai-browser-worker/staff-confirmed-mutation.mjs';
 
 process.env.KAKAO_DOM_BRIDGE_NO_LISTEN = '1';
 const {
@@ -262,16 +261,13 @@ async function createTask7Replay({ id, runRegisteredTradeCorrection, finalize, o
     onFailure: typeof onFailure === 'function' ? onFailure : async () => {}
   });
   const executeRegisteredReservationChange = createGatewayRegisteredReservationChangeExecutor({
-    getConfig: () => ({ sheetApiKey: 'offline-fake-only' }),
-    executeOperation: async (request) => executeVillageRegisteredReservationChange({
-      ...request,
-      dependencies: {
-        ...request.dependencies,
-        runRegisteredTradeCorrection,
-        randomUUID: () => `task7-${id}-receipt`,
-        now: () => new Date(TASK7_NOW)
-      }
-    })
+    getConfig: () => ({
+      gasApiUrl: 'https://script.google.com/macros/s/offline-fixture/exec',
+      sheetApiKey: 'offline-fake-only'
+    }),
+    runRegisteredTradeCorrection,
+    randomUUID: () => `task7-${id}-receipt`,
+    now: () => new Date(TASK7_NOW)
   });
   const handler = createHermesGatewayHttpHandler({
     token: TASK7_TOKEN, channel, transport: 'gateway', now: () => TASK7_NOW,
@@ -714,7 +710,7 @@ test('server confirmation executor forwards the channel claim fence into the wor
   assert.equal(operationArgs.dependencies.operationFence, operationFence);
 });
 
-test('server registered change executor maps the HTTP contract and forwards exact fence dependencies', async () => {
+test('server registered change executor maps authenticated worker config into the real correction runner contract', async () => {
   const assertCurrentClaim = async () => {};
   const operationFence = {
     schema: 'village-tool-operation-reservation/v1', operation_id: 'registered-operation-1',
@@ -729,12 +725,24 @@ test('server registered change executor maps the HTTP contract and forwards exac
     expected_before: [{ schedule_id: '260824-008-07', name: '기존 렌즈', quantity: 1 }],
     desired_after: [{ name: '교체 렌즈', quantity: 1 }], date_change: null
   };
-  let received = null;
+  const runnerCalls = [];
+  const authoritativeAfter = { contract: {}, schedule: {}, ledger: {} };
   const executor = createGatewayRegisteredReservationChangeExecutor({
-    getConfig: () => ({ sheetApiKey: 'internal-key' }),
-    executeOperation: async (request) => {
-      received = request;
-      return { schema: 'village-registered-reservation-change-receipt/v1', status: 'ok' };
+    getConfig: () => ({
+      gasApiUrl: 'https://script.google.com/macros/s/internal-only/exec',
+      sheetApiKey: 'internal-key',
+      publicCatalogKey: 'must-not-be-forwarded'
+    }),
+    runRegisteredTradeCorrection: async (request) => {
+      runnerCalls.push(request);
+      return {
+        ok: true,
+        verified: true,
+        tradeId: mutation.trade_id,
+        readback: authoritativeAfter,
+        authoritativeReadback: { before: { contract: {}, schedule: {} }, after: authoritativeAfter },
+        appliedStages: ['scheduleCorrectRegisteredTrade']
+      };
     }
   });
 
@@ -744,16 +752,51 @@ test('server registered change executor maps the HTTP contract and forwards exac
     lease_id: 'registered-lease-1', mutation
   }, { assertCurrentClaim, operationFence });
 
-  assert.deepEqual(result, { schema: 'village-registered-reservation-change-receipt/v1', status: 'ok' });
-  assert.deepEqual(received, {
-    config: { sheetApiKey: 'internal-key' },
-    job: { job_id: 'registered-job-1', room_key: 'registered-room-1', room_revision: 8 },
-    roomRevision: 8,
-    mutation,
-    dependencies: { assertCurrentClaim, operationFence }
+  assert.equal(result.schema, 'village-registered-reservation-change-receipt/v1');
+  assert.equal(result.status, 'ok');
+  assert.match(result.receipt_id, /^[0-9a-f-]{36}$/i);
+  assert.equal(JSON.stringify(result).includes('internal-key'), false);
+  assert.equal(runnerCalls.length, 1);
+  assert.deepEqual(runnerCalls[0], {
+    config: {
+      VILLAGE2_API_URL: 'https://script.google.com/macros/s/internal-only/exec',
+      VILLAGE2_API_KEY: 'internal-key'
+    },
+    input: {
+      tradeId: '260824-008',
+      operationId: 'registered-operation-1',
+      expectedPeriod: {
+        startDate: '2026-08-28', startTime: '09:00', endDate: '2026-08-29', endTime: '18:00'
+      },
+      dateChange: null,
+      remove: [{ scheduleId: '260824-008-07', expectedName: '기존 렌즈', expectedQty: 1 }],
+      add: [{ name: '교체 렌즈', qty: 1 }],
+      sendEstimate: false
+    }
   });
-  assert.equal(received.dependencies.assertCurrentClaim, assertCurrentClaim);
-  assert.equal(received.dependencies.operationFence, operationFence);
+});
+
+test('server registered change executor rejects missing authenticated transport config before the correction runner', async () => {
+  const mutation = task7Mutation();
+  const operationFence = { operation_id: 'registered-operation-missing-config' };
+  for (const config of [
+    { gasApiUrl: '', sheetApiKey: 'internal-key' },
+    { gasApiUrl: 'https://script.google.com/macros/s/internal-only/exec', sheetApiKey: '' }
+  ]) {
+    let runnerCalls = 0;
+    const executor = createGatewayRegisteredReservationChangeExecutor({
+      getConfig: () => config,
+      runRegisteredTradeCorrection: async () => { runnerCalls += 1; }
+    });
+    await assert.rejects(
+      executor({
+        job_id: 'registered-missing-config', room_key: 'registered-room', room_revision: 8,
+        mutation
+      }, { assertCurrentClaim: async () => {}, operationFence }),
+      /registered reservation change configuration is incomplete/i
+    );
+    assert.equal(runnerCalls, 0);
+  }
 });
 
 test('Task 7 replays the sanitized registered replacement across the durable channel and worker exactly once', async () => {
@@ -815,16 +858,13 @@ test('Task 7 replays the sanitized registered replacement across the durable cha
     });
     let restartCorrectionCalls = 0;
     const restartExecutor = createGatewayRegisteredReservationChangeExecutor({
-      getConfig: () => ({ sheetApiKey: 'offline-fake-only' }),
-      executeOperation: async (request) => executeVillageRegisteredReservationChange({
-        ...request,
-        dependencies: {
-          ...request.dependencies,
-          runRegisteredTradeCorrection: async () => { restartCorrectionCalls += 1; },
-          randomUUID: () => 'must-not-create-another-receipt',
-          now: () => new Date(TASK7_NOW)
-        }
-      })
+      getConfig: () => ({
+        gasApiUrl: 'https://script.google.com/macros/s/offline-fixture/exec',
+        sheetApiKey: 'offline-fake-only'
+      }),
+      runRegisteredTradeCorrection: async () => { restartCorrectionCalls += 1; },
+      randomUUID: () => 'must-not-create-another-receipt',
+      now: () => new Date(TASK7_NOW)
     });
     const restartedApp = await startTask7Http(createHermesGatewayHttpHandler({
       token: TASK7_TOKEN, channel: restarted, transport: 'gateway', now: () => TASK7_NOW,
@@ -1009,16 +1049,13 @@ test('Task 7 partial write persists stage evidence, never replays after restart,
     });
     let replayedCorrections = 0;
     const restartedExecutor = createGatewayRegisteredReservationChangeExecutor({
-      getConfig: () => ({ sheetApiKey: 'offline-fake-only' }),
-      executeOperation: async (request) => executeVillageRegisteredReservationChange({
-        ...request,
-        dependencies: {
-          ...request.dependencies,
-          runRegisteredTradeCorrection: async () => { replayedCorrections += 1; },
-          randomUUID: () => 'must-not-create-partial-receipt',
-          now: () => new Date(TASK7_NOW)
-        }
-      })
+      getConfig: () => ({
+        gasApiUrl: 'https://script.google.com/macros/s/offline-fixture/exec',
+        sheetApiKey: 'offline-fake-only'
+      }),
+      runRegisteredTradeCorrection: async () => { replayedCorrections += 1; },
+      randomUUID: () => 'must-not-create-partial-receipt',
+      now: () => new Date(TASK7_NOW)
     });
     const restartedApp = await startTask7Http(createHermesGatewayHttpHandler({
       token: TASK7_TOKEN, channel: restarted, transport: 'gateway', now: () => TASK7_NOW,
