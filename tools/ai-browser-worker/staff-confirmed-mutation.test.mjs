@@ -99,6 +99,25 @@ test('rejects invalid staff-confirmed mutation identities, evidence, scope field
   }
 });
 
+test('rejects null fields belonging to the other mutation scope and a baseline from another trade', () => {
+  const registeredWithRequest = { ...clone(MUTATION), request_id: null };
+  const pendingWithTrade = { ...clone(PENDING_MUTATION), trade_id: null };
+  const pendingWithPeriod = { ...clone(PENDING_MUTATION), expected_period: null };
+  const crossTradeBaseline = {
+    ...clone(MUTATION),
+    expected_before: [{ ...MUTATION.expected_before[0], schedule_id: '260824-009-07' }]
+  };
+  for (const [label, mutation] of [
+    ['registered request_id null', registeredWithRequest],
+    ['pending trade_id null', pendingWithTrade],
+    ['pending expected_period null', pendingWithPeriod],
+    ['cross-trade schedule ID', crossTradeBaseline]
+  ]) {
+    assert.equal(valid(mutation).valid, false, label);
+  }
+  assert.throws(() => buildRegisteredTradeCorrectionInput(crossTradeBaseline, 'operation-260827-001'));
+});
+
 test('projects a registered mutation with exact expected period and quantities', () => {
   assert.deepEqual(buildRegisteredTradeCorrectionInput(MUTATION, 'operation-260827-001'), {
     tradeId: '260824-008', operationId: 'operation-260827-001',
@@ -196,6 +215,46 @@ test('preserves unknown partial correction stage evidence without retry', async 
   assert.deepEqual(receipt.applied_stages, ['scheduleCorrectRegisteredTrade']);
   assert.equal(receipt.attempted_stage, 'scheduleCorrectRegisteredTrade');
   assert.equal(receipt.error.code, 'outcome_unknown');
+});
+
+test('preserves known applied correction stages as partial success without retry', async () => {
+  let calls = 0;
+  const receipt = await executeVillageRegisteredReservationChange(request({
+    dependencies: {
+      ...request().dependencies,
+      runRegisteredTradeCorrection: async () => {
+        calls += 1;
+        const error = new Error('contract regeneration rejected after schedule correction');
+        error.name = 'CorrectionStageError';
+        error.stage = 'contractRegeneration';
+        error.outcomeUnknown = false;
+        error.appliedStages = ['scheduleCorrectRegisteredTrade'];
+        throw error;
+      }
+    }
+  }));
+  assert.equal(calls, 1);
+  assert.equal(receipt.status, 'partial_success');
+  assert.deepEqual(receipt.applied_stages, ['scheduleCorrectRegisteredTrade']);
+  assert.equal(receipt.attempted_stage, 'contractRegeneration');
+  assert.equal(receipt.error.code, 'gas_rejected');
+});
+
+test('preserves applied result stages as partial success when authoritative readback is incomplete', async () => {
+  let calls = 0;
+  const receipt = await executeVillageRegisteredReservationChange(request({
+    dependencies: {
+      ...request().dependencies,
+      runRegisteredTradeCorrection: async () => {
+        calls += 1;
+        return { ok: true, verified: false, tradeId: '260824-008', appliedStages: ['scheduleCorrectRegisteredTrade'] };
+      }
+    }
+  }));
+  assert.equal(calls, 1);
+  assert.equal(receipt.status, 'partial_success');
+  assert.deepEqual(receipt.applied_stages, ['scheduleCorrectRegisteredTrade']);
+  assert.equal(receipt.error.code, 'invalid_authoritative_result');
 });
 
 test('returns failed receipt for an unstructured failure before any write and rejects stale job correlation', async () => {
