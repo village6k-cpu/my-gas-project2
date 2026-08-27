@@ -212,13 +212,15 @@ export function buildRegisteredTradeCorrectionInput(mutation, operationId) {
       endDate: mutation.expected_period.end_date,
       endTime: mutation.expected_period.end_time
     },
-    dateChange: mutation.date_change === null ? null : {
-      newStartDate: mutation.date_change.new_start_date,
-      startTime: mutation.date_change.new_start_time,
-      newEndDate: mutation.date_change.new_end_date,
-      endTime: mutation.date_change.new_end_time,
-      allowConflicts: false
-    },
+    ...(mutation.date_change === null ? {} : {
+      dateChange: {
+        newStartDate: mutation.date_change.new_start_date,
+        startTime: mutation.date_change.new_start_time,
+        newEndDate: mutation.date_change.new_end_date,
+        endTime: mutation.date_change.new_end_time,
+        allowConflicts: false
+      }
+    }),
     remove: mutation.expected_before.map((row) => ({
       scheduleId: row.schedule_id, expectedName: row.name, expectedQty: row.quantity
     })),
