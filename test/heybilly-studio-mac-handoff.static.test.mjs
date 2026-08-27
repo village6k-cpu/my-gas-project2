@@ -12,6 +12,7 @@ test('HeyBilly has one exact owner-authorized handoff contract for the local Stu
   assert.match(contract, /\[MAC_AGENT_HANDOFF_V1\]/);
   assert.match(contract, /task_type: hometax_cash_receipt_issue/);
   assert.match(contract, /authorization: owner_explicit/);
+  assert.match(contract, /Slack\s+reply itself must be one fenced `text` block/);
   for (const key of [
     'handoff_id', 'customer_name', 'transaction_id', 'transaction_date',
     'amount_krw', 'purpose', 'phone', 'item',

@@ -210,8 +210,78 @@ test('an exact HeyBilly bot handoff creates one transient Studio Mac task withou
   assert.equal(JSON.stringify(decision.envelope).includes(HEYBILLY_SOURCE.botId), false);
 });
 
+test('a single Slack-safe code fence preserves and accepts the exact HeyBilly handoff', async () => {
+  const connector = await loadConnector();
+
+  for (const openingFence of ['```', '```text']) {
+    const decision = connector.adaptSlackAppMention({
+      body: {
+        ...HEYBILLY_HANDOFF_BODY,
+        event: {
+          ...HEYBILLY_HANDOFF_BODY.event,
+          text: `${openingFence}\n${HEYBILLY_HANDOFF_TEXT}\n\`\`\``,
+        },
+      },
+      route: ROUTE,
+      handoffSource: HEYBILLY_SOURCE,
+      nowEpochSeconds: HEYBILLY_HANDOFF_BODY.event_time,
+    });
+
+    assert.equal(decision.accepted, true);
+    assert.equal(decision.kind, 'heybilly_handoff');
+    assert.equal(decision.task.handoffId, 'hb-7af43b0c-4b65-4bb4-a04a-b249cc9cf360');
+  }
+});
+
+test('a fenced handoff accepts only the bounded HeyBilly rendering observed in live Slack', async () => {
+  const connector = await loadConnector();
+
+  for (const renderedCustomerLabel of ['***', '_*_', 'customer_name:']) {
+    const rendered = HEYBILLY_HANDOFF_TEXT
+      .replace(`<@${ROUTE.botUserId}>`, `@${ROUTE.botUserId}`)
+      .replace('customer_name: 박민경', `${renderedCustomerLabel} 박민경`)
+      .replace('phone: 010-4045-7379', 'phone: <tel:010-4045-7379|010-4045-7379>');
+    const decision = connector.adaptSlackAppMention({
+      body: {
+        ...HEYBILLY_HANDOFF_BODY,
+        event: { ...HEYBILLY_HANDOFF_BODY.event, text: `\`\`\`\n${rendered}\n\`\`\`` },
+      },
+      route: ROUTE,
+      handoffSource: HEYBILLY_SOURCE,
+      nowEpochSeconds: HEYBILLY_HANDOFF_BODY.event_time,
+    });
+
+    assert.equal(decision.accepted, true);
+    assert.equal(decision.kind, 'heybilly_handoff');
+    assert.equal(decision.task.customerName, '박민경');
+    assert.equal(decision.task.phone, '010-4045-7379');
+  }
+
+  const collapsed = HEYBILLY_HANDOFF_TEXT
+    .replace(`<@${ROUTE.botUserId}>`, `@${ROUTE.botUserId}`)
+    .replace('phone: 010-4045-7379', 'phone: <tel:010-4045-7379|010-4045-7379>')
+    .replaceAll('\n', ' ');
+  const collapsedDecision = connector.adaptSlackAppMention({
+    body: {
+      ...HEYBILLY_HANDOFF_BODY,
+      event: { ...HEYBILLY_HANDOFF_BODY.event, text: `\`\`\`text ${collapsed} \`\`\`` },
+    },
+    route: ROUTE,
+    handoffSource: HEYBILLY_SOURCE,
+    nowEpochSeconds: HEYBILLY_HANDOFF_BODY.event_time,
+  });
+  assert.equal(collapsedDecision.accepted, true);
+  assert.equal(collapsedDecision.task.handoffId, 'hb-7af43b0c-4b65-4bb4-a04a-b249cc9cf360');
+  assert.equal(collapsedDecision.task.customerName, '박민경');
+  assert.equal(collapsedDecision.task.phone, '010-4045-7379');
+});
+
 test('HeyBilly handoffs reject stale, edited, mismatched, and malformed events before creating a task', async () => {
   const connector = await loadConnector();
+  const renderedObservedBase = HEYBILLY_HANDOFF_TEXT
+    .replace(`<@${ROUTE.botUserId}>`, `@${ROUTE.botUserId}`)
+    .replace('customer_name: 박민경', '*** 박민경')
+    .replace('phone: 010-4045-7379', 'phone: <tel:010-4045-7379|010-4045-7379>');
   const accepted = connector.adaptSlackAppMention({
     body: HEYBILLY_HANDOFF_BODY,
     route: ROUTE,
@@ -221,6 +291,11 @@ test('HeyBilly handoffs reject stale, edited, mismatched, and malformed events b
   assert.equal(accepted.accepted, true);
 
   const cases = [
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: '```text ' + renderedObservedBase.replaceAll('\n', ' ').replace('task_type:', 'unknown_key: injected task_type:') + ' ```' } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: '```\n' + renderedObservedBase.replace(`@${ROUTE.botUserId} 작업 요청`, `@${ROUTE.botUserId}\t작업   요청`) + '\n```' } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: '```\n' + renderedObservedBase.replace('*** 박민경', '***     박민경   ') + '\n```' } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: '```\n' + renderedObservedBase.replace('tel:010-4045-7379|', 'tel:call-me-at-010-4045-7379|') + '\n```' } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: '```\n' + renderedObservedBase.replace('tel:010-4045-7379|', 'tel:٠10-4045-7379|') + '\n```' } }, HEYBILLY_SOURCE, 'command_not_allowed'],
     [{ ...HEYBILLY_HANDOFF_BODY, event_time: HEYBILLY_HANDOFF_BODY.event_time - 601 }, HEYBILLY_SOURCE, 'stale_event'],
     [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, subtype: 'message_changed' } }, HEYBILLY_SOURCE, 'invalid_event'],
     [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, bot_id: 'B0OTHERBOT01' } }, HEYBILLY_SOURCE, 'invalid_event'],
@@ -229,6 +304,12 @@ test('HeyBilly handoffs reject stale, edited, mismatched, and malformed events b
     [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: HEYBILLY_HANDOFF_TEXT.replace('hb-7af43b0c-4b65-4bb4-a04a-b249cc9cf360', 'hb-010-4045-7379') } }, HEYBILLY_SOURCE, 'command_not_allowed'],
     [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: HEYBILLY_HANDOFF_TEXT.replace('purpose: income_deduction', 'purpose: expense_proof') } }, HEYBILLY_SOURCE, 'command_not_allowed'],
     [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: HEYBILLY_HANDOFF_TEXT.replace('item:', 'unknown_key: injected\nitem:') } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: `앞 설명\n\`\`\`text\n${HEYBILLY_HANDOFF_TEXT}\n\`\`\`` } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: `\`\`\`json\n${HEYBILLY_HANDOFF_TEXT}\n\`\`\`` } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: `\`\`\`text\n${HEYBILLY_HANDOFF_TEXT}\n\`\`\`\n뒤 설명` } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: `｀｀｀ｔｅｘｔ\n${HEYBILLY_HANDOFF_TEXT}\n｀｀｀` } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: `\`\`\`text\n${HEYBILLY_HANDOFF_TEXT.replace('item: 2026-06-27 렌탈 (260530-012)', 'item: 렌탈```내용')}\n\`\`\`` } }, HEYBILLY_SOURCE, 'command_not_allowed'],
+    [{ ...HEYBILLY_HANDOFF_BODY, event: { ...HEYBILLY_HANDOFF_BODY.event, text: `\`\`\`\n${HEYBILLY_HANDOFF_TEXT.replace(`<@${ROUTE.botUserId}>`, `@${ROUTE.botUserId}`).replace('customer_name: 박민경', '*** 박민경').replace('phone: 010-4045-7379', 'phone: <tel:010-4045-7379|010-0000-0000>')}\n\`\`\`` } }, HEYBILLY_SOURCE, 'command_not_allowed'],
   ];
 
   for (const [body, handoffSource, errorClass] of cases) {
@@ -441,7 +522,10 @@ test('the Studio Mac status sink posts fixed Korean ACK and final messages with 
           .map(message => ({
             type: 'message',
             user: ROUTE.botUserId,
-            text: message.text,
+            text: message.text
+              .replace('🟡', ':large_yellow_circle:')
+              .replace('✅', ':white_check_mark:')
+              .replace('⚠️', ':warning:'),
             ts: message.ts,
             thread_ts: message.thread_ts,
           })),
@@ -475,9 +559,9 @@ test('the Studio Mac status sink posts fixed Korean ACK and final messages with 
     },
   }), { delivered: true });
 
-  assert.equal(posted[0].text, '🟡 스튜디오맥에서 접수했습니다\n요청 ID: 0123456789abcdef');
-  assert.equal(posted[1].text, '✅ 스튜디오맥 작업 완료\n현금영수증 승인번호: Z56524383\n요청 ID: 0123456789abcdef');
-  assert.equal(posted[2].text, '⚠️ 스튜디오맥에서 사용자 확인이 필요합니다\n필요 조치: CAPTCHA 확인\n요청 ID: 0123456789abcdef');
+  assert.equal(posted[0].text, ':large_yellow_circle: 스튜디오맥에서 접수했습니다\n요청 ID: 0123456789abcdef');
+  assert.equal(posted[1].text, ':white_check_mark: 스튜디오맥 작업 완료\n현금영수증 승인번호: Z56524383\n요청 ID: 0123456789abcdef');
+  assert.equal(posted[2].text, ':warning: 스튜디오맥에서 사용자 확인이 필요합니다\n필요 조치: CAPTCHA 확인\n요청 ID: 0123456789abcdef');
   assert.equal(JSON.stringify(posted).includes('맥북'), false);
   assert.deepEqual(posted.map(message => message.thread_ts), [BODY.event.ts, BODY.event.ts, BODY.event.ts]);
   assert.notEqual(posted[0].client_msg_id, posted[1].client_msg_id);
@@ -721,8 +805,8 @@ test('the connector handler routes one exact HeyBilly handoff to the local Studi
   assert.equal(retry.status, 'DUPLICATE');
   assert.equal(executions, 1);
   assert.deepEqual(posted.map(message => message.text.split('\n')[0]), [
-    '🟡 스튜디오맥에서 접수했습니다',
-    '✅ 스튜디오맥 작업 완료',
+    ':large_yellow_circle: 스튜디오맥에서 접수했습니다',
+    ':white_check_mark: 스튜디오맥 작업 완료',
   ]);
   const raw = (await Promise.all((await readdir(ledgerDir)).map(name => readFile(join(ledgerDir, name), 'utf8')))).join('\n');
   assert.equal(raw.includes('박민경'), false);

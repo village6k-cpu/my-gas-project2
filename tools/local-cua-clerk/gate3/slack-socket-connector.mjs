@@ -88,15 +88,95 @@ function rejected(errorClass) {
   return Object.freeze({ accepted: false, errorClass });
 }
 
+function unwrapSlackSafeHandoff(text) {
+  if (!text.startsWith('```')) {
+    return text.includes('```') ? undefined : Object.freeze({ fenced: false, collapsed: false, text });
+  }
+  const fenced = /^```(?:text)?\n([\s\S]+)\n```$/u.exec(text);
+  if (fenced && !fenced[1].includes('```')) {
+    return Object.freeze({ fenced: true, collapsed: false, text: fenced[1] });
+  }
+  const collapsed = /^```(?:text)? ([^`\r\n]+) ```$/u.exec(text);
+  if (!collapsed) return undefined;
+  return Object.freeze({ fenced: true, collapsed: true, text: collapsed[1] });
+}
+
+function canonicalizeCollapsedHeyBillyHandoff(text, botUserId) {
+  const escapedBotUserId = botUserId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const collapsed = new RegExp(
+    `^@${escapedBotUserId} {1,2}작업 요청 \\(홈택스 CUA\\) `
+      + '\\[MAC_AGENT_HANDOFF_V1\\] '
+      + 'handoff_id: (hb-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}) '
+      + 'task_type: hometax_cash_receipt_issue '
+      + 'authorization: owner_explicit '
+      + 'customer_name: ([가-힣A-Za-z0-9.()_-][가-힣A-Za-z0-9 .()_-]{0,38}[가-힣A-Za-z0-9.()_-]) '
+      + 'transaction_id: (\\d{6}-\\d{3}) '
+      + 'transaction_date: (\\d{4}-\\d{2}-\\d{2}) '
+      + 'amount_krw: (\\d{1,9}) '
+      + 'purpose: income_deduction '
+      + 'phone: <tel:(01[016789]-\\d{3,4}-\\d{4})\\|\\6> '
+      + 'item: (.{1,180}) '
+      + '\\[/MAC_AGENT_HANDOFF_V1\\]$',
+    'u',
+  ).exec(text);
+  if (!collapsed) return undefined;
+  return [
+    `<@${botUserId}> 작업 요청 (홈택스 CUA)`,
+    '[MAC_AGENT_HANDOFF_V1]',
+    `handoff_id: ${collapsed[1]}`,
+    'task_type: hometax_cash_receipt_issue',
+    'authorization: owner_explicit',
+    `customer_name: ${collapsed[2]}`,
+    `transaction_id: ${collapsed[3]}`,
+    `transaction_date: ${collapsed[4]}`,
+    `amount_krw: ${collapsed[5]}`,
+    'purpose: income_deduction',
+    `phone: ${collapsed[6]}`,
+    `item: ${collapsed[7]}`,
+    '[/MAC_AGENT_HANDOFF_V1]',
+  ].join('\n');
+}
+
+function canonicalizeRenderedHeyBillyHandoff(text, botUserId) {
+  const lines = text.split('\n');
+  if (lines.length !== 13) return undefined;
+  const escapedBotUserId = botUserId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const renderedHeader = new RegExp(
+    `^@${escapedBotUserId} {1,2}작업 요청 \\(홈택스 CUA\\)$`,
+    'u',
+  );
+  const customer = /^customer_name: ([가-힣A-Za-z0-9.()_-][가-힣A-Za-z0-9 .()_-]{0,38}[가-힣A-Za-z0-9.()_-])$/u.exec(lines[5])
+    ?? /^(?:\*{3}|_\*_) ([가-힣A-Za-z0-9.()_-][가-힣A-Za-z0-9 .()_-]{0,38}[가-힣A-Za-z0-9.()_-])$/u.exec(lines[5]);
+  const phone = /^phone: <tel:(010-\d{4}-\d{4})\|\1>$/u.exec(lines[10]);
+  if (
+    !renderedHeader.test(lines[0])
+    || !customer
+    || !phone
+  ) {
+    return undefined;
+  }
+  lines[0] = `<@${botUserId}> 작업 요청 (홈택스 CUA)`;
+  lines[5] = `customer_name: ${customer[1]}`;
+  lines[10] = `phone: ${phone[1]}`;
+  return lines.join('\n');
+}
+
 function parseHeyBillyHandoff(text, botUserId) {
-  const normalized = text.normalize('NFKC');
+  const transport = unwrapSlackSafeHandoff(text);
+  if (transport === undefined) return undefined;
+  const normalized = transport.text.normalize('NFKC');
+  if (normalized.includes('```')) return undefined;
   const escapedBotUserId = botUserId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(
     `^\\*?<@${escapedBotUserId}>\\s+작업\\s*요청\\s*\\(홈택스\\s+CUA\\)\\*?\\n`
       + '\\[MAC_AGENT_HANDOFF_V1\\]\\n([\\s\\S]+)\\n\\[/MAC_AGENT_HANDOFF_V1\\]$',
     'u',
   );
-  const match = pattern.exec(normalized);
+  const canonicalized = transport.collapsed
+    ? canonicalizeCollapsedHeyBillyHandoff(normalized, botUserId)
+    : canonicalizeRenderedHeyBillyHandoff(normalized, botUserId);
+  const match = pattern.exec(normalized)
+    ?? (transport.fenced ? pattern.exec(canonicalized ?? '') : undefined);
   if (!match) return undefined;
 
   const values = Object.create(null);
@@ -438,12 +518,12 @@ function validateStudioMacStatus(payload) {
 
 function formatStudioMacStatus(status) {
   if (status.phase === 'ACK') {
-    return `🟡 스튜디오맥에서 접수했습니다\n요청 ID: ${status.requestId}`;
+    return `:large_yellow_circle: 스튜디오맥에서 접수했습니다\n요청 ID: ${status.requestId}`;
   }
   if (status.result.status === 'COMPLETED') {
     const title = status.result.resultCode === 'cash_receipt_issued'
-      ? '✅ 스튜디오맥 작업 완료\n현금영수증 승인번호'
-      : '✅ 스튜디오맥 중복 확인 완료\n기존 현금영수증 승인번호';
+      ? ':white_check_mark: 스튜디오맥 작업 완료\n현금영수증 승인번호'
+      : ':white_check_mark: 스튜디오맥 중복 확인 완료\n기존 현금영수증 승인번호';
     return `${title}: ${status.result.authorizationNumber}\n요청 ID: ${status.requestId}`;
   }
   if (status.result.status === 'NEEDS_USER') {
@@ -453,9 +533,9 @@ function formatStudioMacStatus(status) {
       captcha_required: 'CAPTCHA 확인',
       hometax_reauthentication_required: '홈택스 재로그인',
     };
-    return `⚠️ 스튜디오맥에서 사용자 확인이 필요합니다\n필요 조치: ${needs[status.result.need]}\n요청 ID: ${status.requestId}`;
+    return `:warning: 스튜디오맥에서 사용자 확인이 필요합니다\n필요 조치: ${needs[status.result.need]}\n요청 ID: ${status.requestId}`;
   }
-  return `⚠️ 스튜디오맥 작업 결과를 확인해야 합니다\n오류 분류: ${status.result.errorClass}\n요청 ID: ${status.requestId}`;
+  return `:warning: 스튜디오맥 작업 결과를 확인해야 합니다\n오류 분류: ${status.result.errorClass}\n요청 ID: ${status.requestId}`;
 }
 
 export function createStudioMacStatusSink({ client, botUserId } = {}) {

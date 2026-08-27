@@ -3,9 +3,12 @@
 Use this contract only when Popbill cannot perform an explicitly owner-authorized
 cash-receipt issue. The execution host is `맥에이전트` on **이 로컬 스튜디오맥**.
 
-Reply once in the original Slack thread with the following fixed block. Use a
-fresh lowercase UUIDv4 for every business handoff, copy only verified fields, and
-do not add keys or prose after the closing marker.
+Reply once in the original Slack thread with the following fixed block. The Slack
+reply itself must be one fenced `text` block. The opening and closing fences are
+part of the transport contract: do not send the payload as ordinary Slack text,
+and do not add prose before the opening fence or after the closing fence. This
+prevents Slack from rewriting field names, mentions, or phone numbers. Use a fresh
+lowercase UUIDv4 for every business handoff and copy only verified fields.
 
 ```text
 <@U0BSAFTPTS9> 작업 요청 (홈택스 CUA)
