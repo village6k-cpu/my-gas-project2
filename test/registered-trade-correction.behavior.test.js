@@ -55,7 +55,7 @@ function harness({
 
   const calls = {
     preflight: [], mutate: [], lockTries: 0, lockReleases: 0,
-    regenerations: 0, lockHeldDuringRegeneration: null, triggerLockStates: [], reads: 0,
+    regenerations: 0, notifications: 0, lockHeldDuringRegeneration: null, triggerLockStates: [], reads: 0,
   };
   let lockHeld = false;
   const baseline = {
@@ -175,6 +175,10 @@ function harness({
         linkUpdate: { success: true },
       };
     },
+    sendRegisteredTradeCorrectionNotification_() {
+      calls.notifications += 1;
+      return { sent: true };
+    },
     ensureDashboardStructureProjectionTrigger_() {
       calls.triggerLockStates.push(lockHeld);
     },
@@ -215,6 +219,7 @@ const input = {
 function assertNoWriteSideEffects(calls) {
   assert.deepEqual(calls.mutate, []);
   assert.equal(calls.regenerations, 0);
+  assert.equal(calls.notifications, 0);
   assert.deepEqual(calls.triggerLockStates, []);
 }
 
