@@ -35,6 +35,7 @@ function correctionFailureDetails(payload) {
     stages: Array.isArray(payload.stages) ? payload.stages.slice() : [],
     appliedStages: Array.isArray(payload.appliedStages) ? payload.appliedStages.slice() : [],
     readback: payload.readback ?? null,
+    authoritativeReadback: payload.authoritativeReadback ?? null,
     readbackError: String(payload.readbackError || ''),
     customerNotificationSent: payload.customerNotificationSent,
   };
@@ -345,6 +346,16 @@ async function runRegisteredTradeCorrection({
       && correctionPayload.readback.contract
       && correctionPayload.readback.schedule
       && correctionPayload.readback.ledger;
+    const authoritativeReadback = correctionPayload.authoritativeReadback;
+    const validAuthoritativeReadback = authoritativeReadback
+      && authoritativeReadback.before
+      && authoritativeReadback.before.contract
+      && authoritativeReadback.before.schedule
+      && authoritativeReadback.after
+      && authoritativeReadback.after.contract
+      && authoritativeReadback.after.schedule
+      && authoritativeReadback.after.ledger
+      && JSON.stringify(authoritativeReadback.after) === JSON.stringify(correctionPayload.readback);
     const validRegeneration = correctionPayload.contractRegeneration
       && correctionPayload.contractRegeneration.success === true
       && correctionPayload.contractRegeneration.url
@@ -353,12 +364,13 @@ async function runRegisteredTradeCorrection({
       returnedTradeId !== normalized.tradeId
       || returnedOperationId !== normalized.operationId
       || !validReadback
+      || !validAuthoritativeReadback
       || !validRegeneration
       || correctionPayload.customerNotificationSent !== false
     ) {
       throw new CorrectionStageError(
         'scheduleCorrectRegisteredTrade',
-        'scheduleCorrectRegisteredTrade returned incomplete or mismatched authoritative readback',
+        'scheduleCorrectRegisteredTrade returned incomplete or mismatched authoritative before/after readback',
         {
           outcomeUnknown: true,
           appliedStages,
@@ -407,7 +419,8 @@ async function runRegisteredTradeCorrection({
         }
       : null,
     send,
-    readback: correctionPayload?.readback || null
+    readback: correctionPayload?.readback || null,
+    authoritativeReadback: correctionPayload?.authoritativeReadback || null
   };
 }
 

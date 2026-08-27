@@ -12,7 +12,7 @@ const KINDS = new Set([
 ]);
 const TRADE_ID = /^\d{6}-\d{3}$/;
 const REQUEST_ID = /^RQ-\d{6}-\d{3}$/;
-const SCHEDULE_ID = /^(\d{6}-\d{3})-\d{2}$/;
+const SCHEDULE_ID = /^(\d{6}-\d{3})-\d{2,}$/;
 const TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -92,6 +92,56 @@ function validateDateChange(dateChange, errors) {
   }
 }
 
+function periodInstant(period, prefix = '') {
+  const startDate = text(period?.[`${prefix}start_date`]);
+  const startTime = text(period?.[`${prefix}start_time`]);
+  const endDate = text(period?.[`${prefix}end_date`]);
+  const endTime = text(period?.[`${prefix}end_time`]);
+  if (!exactDate(startDate) || !TIME.test(startTime) || !exactDate(endDate) || !TIME.test(endTime)) return null;
+  const start = Date.parse(`${startDate}T${startTime}:00Z`);
+  const end = Date.parse(`${endDate}T${endTime}:00Z`);
+  return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
+}
+
+function rowQuantitiesByName(rows) {
+  const quantities = new Map();
+  for (const row of rows) {
+    const name = text(row?.name);
+    const quantity = Number(row?.quantity);
+    if (!name || !Number.isInteger(quantity) || quantity <= 0) return null;
+    quantities.set(name, (quantities.get(name) || 0) + quantity);
+  }
+  return quantities;
+}
+
+function validateRegisteredKindShape(mutation, errors) {
+  const before = Array.isArray(mutation.expected_before) ? mutation.expected_before : [];
+  const after = Array.isArray(mutation.desired_after) ? mutation.desired_after : [];
+  const hasDateChange = mutation.date_change !== null;
+  const shapeError = () => errors.push(`${mutation.kind} has an invalid affected-row delta shape`);
+  if (mutation.kind === 'equipment_add') {
+    if (before.length !== 0 || after.length === 0 || hasDateChange) shapeError();
+  } else if (mutation.kind === 'equipment_remove') {
+    if (before.length === 0 || after.length !== 0 || hasDateChange) shapeError();
+  } else if (mutation.kind === 'equipment_replace') {
+    if (before.length === 0 || after.length === 0 || hasDateChange) shapeError();
+  } else if (mutation.kind === 'equipment_quantity_change') {
+    const beforeQuantities = rowQuantitiesByName(before);
+    const afterQuantities = rowQuantitiesByName(after);
+    const beforeNames = beforeQuantities ? [...beforeQuantities.keys()].sort() : [];
+    const afterNames = afterQuantities ? [...afterQuantities.keys()].sort() : [];
+    const namesMatch = JSON.stringify(beforeNames) === JSON.stringify(afterNames);
+    const quantityDiffers = namesMatch && beforeNames.some((name) => beforeQuantities.get(name) !== afterQuantities.get(name));
+    if (!before.length || !after.length || hasDateChange || !namesMatch || !quantityDiffers) shapeError();
+  } else if (mutation.kind === 'date_time_change') {
+    const expected = periodInstant(mutation.expected_period);
+    const desired = periodInstant(mutation.date_change, 'new_');
+    if (before.length !== 0 || after.length !== 0 || !hasDateChange
+      || !expected || !desired || desired.end <= desired.start
+      || (expected.start === desired.start && expected.end === desired.end)) shapeError();
+  }
+}
+
 function mutationError(code, message, details = null) {
   return { code, message, ...(details === null ? {} : { details }) };
 }
@@ -120,6 +170,10 @@ export function validateStaffConfirmedMutation(mutation, { roomRevision } = {}) 
     if (!TRADE_ID.test(text(mutation.trade_id))) errors.push('trade_id is invalid');
     if (Object.hasOwn(mutation, 'request_id')) errors.push('request_id is forbidden for registered_trade');
     validatePeriod(mutation.expected_period, 'expected_period', errors);
+    const expectedInstant = periodInstant(mutation.expected_period);
+    if (expectedInstant && expectedInstant.end <= expectedInstant.start) {
+      errors.push('expected_period end instant must be after start instant');
+    }
   }
   if (scope === 'pending_request') {
     if (!REQUEST_ID.test(text(mutation.request_id))) errors.push('request_id is invalid');
@@ -138,6 +192,7 @@ export function validateStaffConfirmedMutation(mutation, { roomRevision } = {}) 
   if (mutation.date_change !== null) {
     validateDateChange(mutation.date_change, errors);
   }
+  if (registered && KINDS.has(mutation.kind)) validateRegisteredKindShape(mutation, errors);
   return { valid: errors.length === 0, errors };
 }
 
@@ -228,7 +283,13 @@ export async function executeVillageRegisteredReservationChange(request = {}, op
   try {
     await assertCurrentClaim();
     const result = await runner({ config, input });
-    if (result?.ok !== true || result?.verified !== true || text(result.tradeId) !== mutation.trade_id || !isRecord(result.readback)) {
+    const authoritativeReadback = result?.authoritativeReadback;
+    const hasExactAuthoritativeEnvelope = isRecord(authoritativeReadback)
+      && isRecord(authoritativeReadback.before)
+      && isRecord(authoritativeReadback.after)
+      && isRecord(result?.readback)
+      && JSON.stringify(authoritativeReadback.after) === JSON.stringify(result.readback);
+    if (result?.ok !== true || result?.verified !== true || text(result.tradeId) !== mutation.trade_id || !hasExactAuthoritativeEnvelope) {
       const appliedStages = Array.isArray(result?.appliedStages) ? result.appliedStages : [];
       return buildReceipt({
         status: appliedStages.length > 0 ? 'partial_success' : 'failed',
@@ -236,7 +297,7 @@ export async function executeVillageRegisteredReservationChange(request = {}, op
         error: mutationError('invalid_authoritative_result', 'registered correction returned incomplete authoritative result')
       });
     }
-    return buildReceipt({ status: 'ok', authoritativeResult: result.readback, appliedStages: result.appliedStages || [] });
+    return buildReceipt({ status: 'ok', authoritativeResult: authoritativeReadback, appliedStages: result.appliedStages || [] });
   } catch (error) {
     const stageError = error instanceof CorrectionStageError || error?.name === 'CorrectionStageError';
     const appliedStages = Array.isArray(error?.appliedStages) ? error.appliedStages : [];

@@ -272,7 +272,7 @@ test('a replacement available only after exact target allocation exclusion prefl
 });
 
 test('one correction preflights all item deltas, locks once, adds before remove, and regenerates after unlock', () => {
-  const { context, calls } = harness();
+  const { context, calls, baseline } = harness();
   const result = context.correct(input);
 
   assert.deepEqual(calls.preflight, ['remove', 'add']);
@@ -285,6 +285,10 @@ test('one correction preflights all item deltas, locks once, adds before remove,
   assert.equal(result.success, true);
   assert.equal(result.customerNotificationSent, false);
   assert.equal(result.readback.ledger.contractLink, 'https://docs.example/contract');
+  assert.deepEqual(result.authoritativeReadback.before, baseline);
+  assert.deepEqual(result.authoritativeReadback.after, result.readback);
+  assert.equal(result.authoritativeReadback.before.schedule.topLevelQuantities.FX9, 1);
+  assert.equal(result.authoritativeReadback.after.schedule.topLevelQuantities['BURANO 8K'], 1);
 });
 
 test('BUSY is terminal for this invocation and never spins or mutates', () => {

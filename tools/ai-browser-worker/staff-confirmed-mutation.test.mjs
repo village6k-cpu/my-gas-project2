@@ -44,6 +44,46 @@ function valid(mutation, options = { roomRevision: 8 }) {
   return validateStaffConfirmedMutation(mutation, options);
 }
 
+function registeredMutation(kind) {
+  const mutation = clone(MUTATION);
+  mutation.kind = kind;
+  if (kind === 'equipment_add') {
+    mutation.expected_before = [];
+    mutation.desired_after = [{ name: '배터리', quantity: 1 }];
+  } else if (kind === 'equipment_remove') {
+    mutation.desired_after = [];
+  } else if (kind === 'equipment_quantity_change') {
+    mutation.desired_after = [{ name: mutation.expected_before[0].name, quantity: 2 }];
+  } else if (kind === 'date_time_change') {
+    mutation.expected_before = [];
+    mutation.desired_after = [];
+    mutation.date_change = {
+      new_start_date: '2026-08-28', new_start_time: '07:00',
+      new_end_date: '2026-08-28', new_end_time: '19:00'
+    };
+  }
+  return mutation;
+}
+
+function authoritativeState({
+  startDate = '2026-08-27', startTime = '06:00', endDate = '2026-08-27', endTime = '18:00',
+  rows = []
+} = {}) {
+  const topLevelQuantities = {};
+  for (const row of rows) {
+    if (!row.isComponent) topLevelQuantities[row.name] = (topLevelQuantities[row.name] || 0) + row.qty;
+  }
+  return {
+    contract: { startDate, startTime, endDate, endTime },
+    schedule: {
+      periods: [`${startDate}|${startTime}|${endDate}|${endTime}`],
+      rows,
+      topLevelQuantities
+    },
+    ledger: { rows: 1, startDate, contractLink: 'https://example.test/contracts/260824-008', links: ['https://example.test/contracts/260824-008'] }
+  };
+}
+
 function request(overrides = {}) {
   return {
     config: { internalKey: 'test-key' },
@@ -58,7 +98,20 @@ function request(overrides = {}) {
         verified: true,
         tradeId: '260824-008',
         appliedStages: ['scheduleCorrectRegisteredTrade'],
-        readback: { contract: { tradeId: '260824-008' }, schedule: [{ scheduleId: '260824-008-08' }], ledger: { tradeId: '260824-008' } },
+        authoritativeReadback: {
+          before: authoritativeState({ rows: [
+            { scheduleId: '260824-008-07', setName: '', name: '소니 FE 28-135mm', qty: 1, isComponent: false },
+            { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false }
+          ] }),
+          after: authoritativeState({ rows: [
+            { scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false },
+            { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false }
+          ] })
+        },
+        readback: authoritativeState({ rows: [
+          { scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false },
+          { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 1, isComponent: false }
+        ] }),
         contractRegeneration: { success: true, url: 'https://example.test/contract', fileId: 'file-1' },
         send: { attempted: false, accepted: false }
       }),
@@ -72,6 +125,44 @@ function request(overrides = {}) {
 test('validates canonical registered and pending staff-confirmed mutation scopes', () => {
   assert.deepEqual(valid(MUTATION), { valid: true, errors: [] });
   assert.deepEqual(valid(PENDING_MUTATION), { valid: true, errors: [] });
+});
+
+test('enforces the strict affected-row delta union for all five registered mutation kinds', () => {
+  for (const kind of [
+    'equipment_add', 'equipment_remove', 'equipment_replace',
+    'equipment_quantity_change', 'date_time_change'
+  ]) {
+    assert.deepEqual(valid(registeredMutation(kind)), { valid: true, errors: [] }, kind);
+  }
+
+  const invalid = [
+    ['add with removal delta', { ...registeredMutation('equipment_add'), expected_before: clone(MUTATION.expected_before) }],
+    ['add without addition delta', { ...registeredMutation('equipment_add'), desired_after: [] }],
+    ['remove with addition delta', { ...registeredMutation('equipment_remove'), desired_after: clone(MUTATION.desired_after) }],
+    ['replace without removal delta', { ...registeredMutation('equipment_replace'), expected_before: [] }],
+    ['quantity with different identity', { ...registeredMutation('equipment_quantity_change'), desired_after: [{ name: '다른 장비', quantity: 2 }] }],
+    ['quantity without a quantity change', { ...registeredMutation('equipment_quantity_change'), desired_after: [{ name: MUTATION.expected_before[0].name, quantity: 1 }] }],
+    ['equipment kind with date delta', { ...registeredMutation('equipment_replace'), date_change: registeredMutation('date_time_change').date_change }],
+    ['date change with equipment removal delta', { ...registeredMutation('date_time_change'), expected_before: clone(MUTATION.expected_before) }],
+    ['date change with unchanged period', {
+      ...registeredMutation('date_time_change'),
+      date_change: { new_start_date: '2026-08-27', new_start_time: '06:00', new_end_date: '2026-08-27', new_end_time: '18:00' }
+    }]
+  ];
+  for (const [label, mutation] of invalid) assert.equal(valid(mutation).valid, false, label);
+});
+
+test('accepts schedule suffixes of two or more digits and rejects malformed or cross-trade IDs', () => {
+  assert.equal(valid({
+    ...clone(MUTATION),
+    expected_before: [{ ...MUTATION.expected_before[0], schedule_id: '260824-008-100' }]
+  }).valid, true);
+  for (const schedule_id of ['260824-008-1', '260824-008-x100', '260824-009-100']) {
+    assert.equal(valid({
+      ...clone(MUTATION),
+      expected_before: [{ ...MUTATION.expected_before[0], schedule_id }]
+    }).valid, false, schedule_id);
+  }
 });
 
 test('rejects invalid staff-confirmed mutation identities, evidence, scope fields, and unsafe model fields', () => {
@@ -145,6 +236,7 @@ test('projects a registered date change with the exact new date-time field names
 
 test('executes exactly once with the operation fence and claim immediately before the correction', async () => {
   const events = [];
+  const authoritativeReadback = (await request().dependencies.runRegisteredTradeCorrection()).authoritativeReadback;
   const result = await executeVillageRegisteredReservationChange(request({
     dependencies: {
       ...request().dependencies,
@@ -162,12 +254,30 @@ test('executes exactly once with the operation fence and claim immediately befor
     schema: 'village-registered-reservation-change-receipt/v1', receipt_id: 'receipt-260827-001',
     job_id: 'job-260827-001', room_key: 'room-123', room_revision: 8, status: 'ok',
     target_scope: 'registered_trade', trade_id: '260824-008', mutation_kind: 'equipment_replace',
-    authoritative_result: {
-      contract: { tradeId: '260824-008' }, schedule: [{ scheduleId: '260824-008-08' }], ledger: { tradeId: '260824-008' }
-    },
+    authoritative_result: authoritativeReadback,
     applied_stages: ['scheduleCorrectRegisteredTrade'], attempted_stage: null,
     customer_reply: 'no_reply', created_at: '2026-08-27T00:00:00.000Z', error: null
   });
+});
+
+test('refuses success when the correction omits the authoritative before and after envelope', async () => {
+  let calls = 0;
+  const receipt = await executeVillageRegisteredReservationChange(request({
+    dependencies: {
+      ...request().dependencies,
+      runRegisteredTradeCorrection: async () => {
+        calls += 1;
+        const result = await request().dependencies.runRegisteredTradeCorrection();
+        delete result.authoritativeReadback;
+        return result;
+      }
+    }
+  }));
+
+  assert.equal(calls, 1);
+  assert.equal(receipt.status, 'partial_success');
+  assert.equal(receipt.authoritative_result, null);
+  assert.equal(receipt.error.code, 'invalid_authoritative_result');
 });
 
 test('returns blocked receipt for explicit pre-write GAS rejection without retry', async () => {

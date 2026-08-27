@@ -18704,6 +18704,9 @@ function correctRegisteredTrade(args) {
       attemptedStage: attemptedStage,
       error: error && error.message ? error.message : String(error || 'unknown'),
       readback: partialReadback,
+      authoritativeReadback: lockedBaseline && partialReadback
+        ? { before: lockedBaseline, after: partialReadback }
+        : null,
       readbackError: readbackError,
       customerNotificationSent: false
     };
@@ -18747,6 +18750,7 @@ function correctRegisteredTrade(args) {
     stages: stages,
     contractRegeneration: regeneration,
     readback: verifiedState,
+    authoritativeReadback: { before: lockedBaseline, after: verifiedState },
     customerNotificationSent: false
   };
 }

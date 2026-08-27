@@ -590,28 +590,41 @@ function registeredMutationFixture(kind = 'equipment_replace', overrides = {}) {
     date_change: null
   };
   if (kind === 'equipment_add') {
-    base.expected_before = [{ schedule_id: '260824-008-07', name: '소니 FE 28-135mm', quantity: 1 }];
-    base.desired_after = [
-      { name: '소니 FE 28-135mm', quantity: 1 },
-      { name: '소니 GM 70-200mm II', quantity: 1 }
-    ];
-  } else if (kind === 'equipment_remove') {
-    base.expected_before = [
-      { schedule_id: '260824-008-07', name: '소니 FE 28-135mm', quantity: 1 },
-      { schedule_id: '260824-008-08', name: '소니 GM 70-200mm II', quantity: 1 }
-    ];
+    base.expected_before = [];
     base.desired_after = [{ name: '소니 GM 70-200mm II', quantity: 1 }];
+  } else if (kind === 'equipment_remove') {
+    base.desired_after = [];
   } else if (kind === 'equipment_quantity_change') {
     base.expected_before = [{ schedule_id: '260824-008-07', name: '소니 FE 28-135mm', quantity: 1 }];
     base.desired_after = [{ name: '소니 FE 28-135mm', quantity: 2 }];
   } else if (kind === 'date_time_change') {
-    base.desired_after = [{ name: '소니 FE 28-135mm', quantity: 1 }];
+    base.expected_before = [];
+    base.desired_after = [];
     base.date_change = {
       new_start_date: '2026-08-28', new_start_time: '07:00',
       new_end_date: '2026-08-28', new_end_time: '19:00'
     };
   }
   return { ...base, ...overrides };
+}
+
+function registeredAuthoritativeState({
+  startDate = '2026-08-27', startTime = '06:00', endDate = '2026-08-27', endTime = '18:00',
+  rows = []
+} = {}) {
+  const topLevelQuantities = {};
+  for (const row of rows) {
+    if (!row.isComponent) topLevelQuantities[row.name] = (topLevelQuantities[row.name] || 0) + row.qty;
+  }
+  return {
+    contract: { startDate, startTime, endDate, endTime },
+    schedule: {
+      periods: [`${startDate}|${startTime}|${endDate}|${endTime}`],
+      rows,
+      topLevelQuantities
+    },
+    ledger: { rows: 1, startDate, contractLink: 'https://example.test/contracts/260824-008', links: ['https://example.test/contracts/260824-008'] }
+  };
 }
 
 function registeredDecisionFixture(overrides = {}) {
@@ -648,6 +661,7 @@ function registeredDecisionFixture(overrides = {}) {
 }
 
 function registeredReceiptFixture(job, overrides = {}) {
+  const unrelated = { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 2, isComponent: false };
   return {
     schema: 'village-registered-reservation-change-receipt/v1',
     receipt_id: 'registered-change-receipt-1',
@@ -659,14 +673,14 @@ function registeredReceiptFixture(job, overrides = {}) {
     trade_id: '260824-008',
     mutation_kind: 'equipment_replace',
     authoritative_result: {
-      contract: {
-        startDate: '2026-08-27', startTime: '06:00', endDate: '2026-08-27', endTime: '18:00'
-      },
-      schedule: {
-        rows: [{ scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false }],
-        topLevelQuantities: { '소니 GM 70-200mm II': 1 }
-      },
-      ledger: { rows: 1, contractLink: 'https://example.test/contracts/260824-008' }
+      before: registeredAuthoritativeState({ rows: [
+        { scheduleId: '260824-008-07', setName: '', name: '소니 FE 28-135mm', qty: 1, isComponent: false },
+        unrelated
+      ] }),
+      after: registeredAuthoritativeState({ rows: [
+        { scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false },
+        unrelated
+      ] })
     },
     applied_stages: ['scheduleCorrectRegisteredTrade'],
     attempted_stage: null,
@@ -1001,6 +1015,105 @@ test('exact registered success retains the typed mutation and produces no duplic
   assert.deepEqual(prepared.availabilityAwareRows, []);
   assert.equal(prepared.gatewaySafetyFailures.length, 0);
   assert.equal(canAutoSendCustomerAnswer(prepared.decision, { autoSendEnabled: true }).allowed, false);
+});
+
+test('all five registered delta kinds finalize only when before plus typed delta equals authoritative after', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const oldRow = { scheduleId: '260824-008-07', setName: '', name: '소니 FE 28-135mm', qty: 1, isComponent: false };
+  const unrelated = { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 2, isComponent: false };
+  const added = { scheduleId: '260824-008-100', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false };
+  const cases = [
+    ['equipment_add', [oldRow, unrelated], [oldRow, unrelated, added], {}],
+    ['equipment_remove', [oldRow, unrelated], [unrelated], {}],
+    ['equipment_replace', [oldRow, unrelated], [unrelated, added], {}],
+    ['equipment_quantity_change', [oldRow, unrelated], [
+      { scheduleId: '260824-008-100', setName: '', name: oldRow.name, qty: 2, isComponent: false }, unrelated
+    ], {}],
+    ['date_time_change', [oldRow, unrelated], [oldRow, unrelated], {
+      startDate: '2026-08-28', startTime: '07:00', endDate: '2026-08-28', endTime: '19:00'
+    }]
+  ];
+
+  for (const [kind, beforeRows, afterRows, afterPeriod] of cases) {
+    const mutation = registeredMutationFixture(kind);
+    const receipt = registeredReceiptFixture(job, {
+      mutation_kind: kind,
+      authoritative_result: {
+        before: registeredAuthoritativeState({ rows: beforeRows }),
+        after: registeredAuthoritativeState({ rows: afterRows, ...afterPeriod })
+      }
+    });
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn,
+      finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: mutation }))}`,
+      trustedToolReceipts: [receipt]
+    });
+
+    assert.equal(prepared.decision.reply_decision.replyMode, 'no_reply', kind);
+    assert.equal(prepared.decision.owner_review_required, false, kind);
+    assert.deepEqual(prepared.availabilityAwareRows, [], kind);
+  }
+});
+
+test('registered success rejects missing before evidence or any unrelated-row mutation without replay', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture();
+  const exact = registeredReceiptFixture(job);
+  const missingBefore = registeredReceiptFixture(job, {
+    authoritative_result: { after: exact.authoritative_result.after }
+  });
+  const unrelatedChanged = registeredReceiptFixture(job, {
+    authoritative_result: {
+      before: exact.authoritative_result.before,
+      after: registeredAuthoritativeState({ rows: [
+        { scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false },
+        { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 3, isComponent: false }
+      ] })
+    }
+  });
+
+  for (const [label, receipt] of [['missing before', missingBefore], ['unrelated changed', unrelatedChanged]]) {
+    let replayCalls = 0;
+    const prepared = await workerModule.prepareKakaoGatewayDecision({
+      config: {}, job, turn,
+      finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: mutation }))}`,
+      trustedToolReceipts: [receipt],
+      dependencies: { executeRegisteredReservationChange: async () => { replayCalls += 1; } }
+    });
+
+    assert.equal(replayCalls, 0, label);
+    assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only', label);
+    assert.equal(prepared.decision.reply_decision.safetyClass, 'no_send', label);
+    assert.equal(prepared.decision.owner_review_required, true, label);
+    assert.equal(prepared.decision.follow_up_items.length, 1, label);
+    assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_readback_contradiction'), true, label);
+  }
+});
+
+test('registered readback rejects a full-plan-shaped desired_after that masks an unrelated quantity change', async () => {
+  const { job, turn } = gatewayTurnFixture();
+  const mutation = registeredMutationFixture('equipment_replace', {
+    desired_after: [
+      { name: '소니 GM 70-200mm II', quantity: 1 },
+      { name: '소니 FX3', quantity: 3 }
+    ]
+  });
+  const legacyFullPlanReceipt = registeredReceiptFixture(job, {
+    authoritative_result: registeredAuthoritativeState({ rows: [
+      { scheduleId: '260824-008-08', setName: '', name: '소니 GM 70-200mm II', qty: 1, isComponent: false },
+      { scheduleId: '260824-008-99', setName: '', name: '소니 FX3', qty: 3, isComponent: false }
+    ] })
+  });
+
+  const prepared = await workerModule.prepareKakaoGatewayDecision({
+    config: {}, job, turn,
+    finalText: `FINAL_JSON\n${JSON.stringify(registeredDecisionFixture({ staff_confirmed_mutation: mutation }))}`,
+    trustedToolReceipts: [legacyFullPlanReceipt]
+  });
+
+  assert.equal(prepared.decision.reply_decision.replyMode, 'draft_only');
+  assert.equal(prepared.decision.owner_review_required, true);
+  assert.equal(prepared.gatewaySafetyFailures.includes('trusted_registered_change_readback_contradiction'), true);
 });
 
 test('최승식 registered replacement cannot finalize against stale readback and creates one urgent no-send owner review', async () => {
