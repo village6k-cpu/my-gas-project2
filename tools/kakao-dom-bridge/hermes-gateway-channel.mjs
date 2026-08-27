@@ -66,6 +66,8 @@ const isObjectOrNull = (value) => value === null || (value && typeof value === '
 const isValidIso = (value) => typeof value === 'string'
   && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)
   && Number.isFinite(Date.parse(value));
+const hasPendingApplicationFailureNotification = (job) => job?.application?.state === 'failed'
+  && job.application?.failure_notification?.state === 'pending';
 
 function validateReceipt(receipt) {
   if (!new Set(TOOL_RECEIPT_SCHEMAS.values()).has(receipt?.schema)) throw channelError('invalid_receipt', 'receipt schema is invalid');
@@ -862,6 +864,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           oldest_reserved_age_ms: null,
           last_success_at: null
         };
+        let registeredLastSuccessAtMs = null;
         const nowMs = currentTime();
         for (const job of jobs.values()) {
           counts[job.state] += 1;
@@ -895,15 +898,20 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
             if (job.failure_notification?.state === 'pending') {
               registeredReservationChange.pending_failure_notifications += 1;
             }
+            if (hasPendingApplicationFailureNotification(job)) {
+              registeredReservationChange.pending_failure_notifications += 1;
+            }
             const exactReceipt = exactReceiptForToolOperation(job);
-            const successfulReceipt = exactReceipt?.schema === 'village-registered-reservation-change-receipt/v1'
+            const completedAtMs = Date.parse(operation.completed_at);
+            const successfulCompletion = exactReceipt?.schema === 'village-registered-reservation-change-receipt/v1'
               && exactReceipt.status === 'ok'
-              && isValidIso(exactReceipt.created_at)
-              ? exactReceipt
+              && isValidIso(operation.completed_at)
+              && Number.isFinite(completedAtMs)
+              ? operation.completed_at
               : null;
-            if (successfulReceipt && (!registeredReservationChange.last_success_at
-              || successfulReceipt.created_at > registeredReservationChange.last_success_at)) {
-              registeredReservationChange.last_success_at = successfulReceipt.created_at;
+            if (successfulCompletion && (registeredLastSuccessAtMs === null || completedAtMs > registeredLastSuccessAtMs)) {
+              registeredLastSuccessAtMs = completedAtMs;
+              registeredReservationChange.last_success_at = successfulCompletion;
             }
           }
         }
@@ -911,9 +919,7 @@ export function createHermesGatewayChannel({ directory, leaseMs = 300000, maxAtt
           counts,
           application_counts: applicationCounts,
           failure_notification_counts: failureNotificationCounts,
-          unnotified_application_failures: [...jobs.values()].filter((job) => (
-            job.application?.state === 'failed' && job.application?.failure_notification?.state === 'pending'
-          )).length,
+          unnotified_application_failures: [...jobs.values()].filter(hasPendingApplicationFailureNotification).length,
           oldest_lease_age_ms: oldestLeaseAgeMs,
           last_completed_job_id: lastCompleted?.job_id ?? null,
           last_consumer_id: lastConsumerId,
