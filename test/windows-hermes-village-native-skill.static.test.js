@@ -41,7 +41,7 @@ function assertNativeEnvelope(skill) {
     `${skill.skillPath} description must be one sentence`
   );
   assert.ok(
-    skill.body.split(/\r?\n/).length <= 220,
+    skill.body.replace(/\r?\n$/, '').split(/\r?\n/).length <= 200,
     `${skill.skillPath} exceeds the native complex-skill envelope`
   );
 
