@@ -76,11 +76,20 @@ $Profiles = @{
         Match    = { param($cmd) ($cmd -match 'hermes_cli\.main') -and ($cmd -match 'gateway') -and ($cmd -match '\brun\b') -and ($cmd -notmatch '--profile') }
     }
     'kakaoworker' = @{
-        Task     = 'Hermes_Gateway_Kakaoworker'
+        Task     = 'Hermes_Gateway_Kakaoworker_Native'
         PidFile  = Join-Path $HermesHome 'profiles\kakaoworker\gateway.pid'
         StopArgs = @('-m', 'hermes_cli.main', '--profile', 'kakaoworker', 'gateway', 'stop')
         Match    = { param($cmd) ($cmd -match 'hermes_cli\.main') -and ($cmd -match 'gateway') -and ($cmd -match '\brun\b') -and ($cmd -match '--profile\s+kakaoworker') }
     }
+}
+
+function Test-GatewayScheduledTaskReady {
+    param([string]$TaskName)
+    try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        return $null -ne $task -and [string]$task.State -ne 'Disabled'
+    }
+    catch { return $false }
 }
 
 function Get-GatewayPidFromFile {
@@ -143,6 +152,13 @@ function Get-ProfileGatewayProcs {
 function Invoke-OneRestart {
     param([string]$Name, [switch]$HealMode)
     $info  = $Profiles[$Name]
+    # Never stop a healthy gateway until its clean-lineage start task is
+    # proven present and enabled. A retired/no-op task previously turned an
+    # otherwise recoverable Kakao restart into a full worker outage.
+    if (-not (Test-GatewayScheduledTaskReady -TaskName $info.Task)) {
+        Write-Log ("{0}: FAIL - 예약작업 {1} 없음 또는 비활성; 실행 중 게이트웨이는 보존" -f $Name, $info.Task)
+        return $false
+    }
     $procs = @(Get-ProfileGatewayProcs -Match $info.Match -PidFile $info.PidFile)
     $poisoned = @($procs | Where-Object { [VillageMit]::RedirectionTrust([uint32]$_.ProcessId) -eq 1 })
 

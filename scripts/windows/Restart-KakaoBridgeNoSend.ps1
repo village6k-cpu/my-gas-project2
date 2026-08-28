@@ -30,15 +30,7 @@ $resolvedHermesPythonPath = (Resolve-Path -LiteralPath $HermesPythonPath -ErrorA
 [Environment]::SetEnvironmentVariable('HERMES_WORKER_COMMAND_MODE', 'python_module', 'Process')
 Set-KakaoStagingSafeEnvironment -EnableWrites
 Set-KakaoLiveNoSendEnvironment
-$required = @{
-  AI_WORKER_LIVE = '1'
-  AI_WORKER_AUTO_SEND = '0'
-  AI_WORKER_DRY_RUN = '0'
-  SLACK_ACTION_POLL_ENABLED = '0'
-  SLACK_AGENT_CARD_DELIVERY_ENABLED = '1'
-  VILLAGE_WINDOWS_WRITES_ENABLED = '1'
-  HERMES_WORKER_COMMAND_MODE = 'python_module'
-}
+$required = Get-KakaoLiveNoSendRuntimeContract
 foreach ($name in $required.Keys) {
   if ([Environment]::GetEnvironmentVariable($name, 'Process') -ne $required[$name]) {
     throw "Unsafe runtime setting: $name"
@@ -78,8 +70,7 @@ try {
   if ($null -eq $post) {
     throw 'Restarted bridge did not become healthy.'
   }
-  if (-not $post.config.workerLive -or $post.config.autoSendEnabled -or
-      $post.config.slackActionPollEnabled -or -not $post.config.slackCardDeliveryEnabled) {
+  if (-not (Test-KakaoLiveNoSendHealth -Health $post)) {
     throw 'Restarted bridge safety/runtime settings mismatch.'
   }
 
