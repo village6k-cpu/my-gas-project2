@@ -1,7 +1,7 @@
 ---
 name: village-operations
 description: Use when staff requests Village operational work.
-version: 2.0.0
+version: 2.1.0
 author: Village
 license: private
 platforms: [windows]
@@ -75,6 +75,22 @@ For an authorized mutation:
 
 On timeout or ambiguous failure, inspect readback before retrying. Never blindly
 repeat a possibly completed write or send.
+
+## Local Studio Mac general handoff
+
+When the owner explicitly asks to do an operation through `맥에이전트`,
+`스튜디오맥`, or local `CUA`, hand off the requested operation instead of
+executing it on AX2. Open
+[the Studio Mac handoff contract](references/local-studio-mac-handoff.md)
+and use its exact plain-text general template once in the current Slack thread.
+Build the second line by copying the owner's one-line task text verbatim,
+deleting only the route-selection clause and its adjacent separator punctuation
+or whitespace, then trimming the two ends. Never summarize, paraphrase, or infer
+missing task content. If that does not leave one complete non-empty line, ask
+one focused question instead of handing off. The MacAgent reply `스튜디오맥
+접수` is only an acknowledgement; only its final reply in the same thread proves
+the outcome. Use the specialized HomeTax or readiness template instead when
+either one applies.
 
 ## Confirmation requests and reservations
 
@@ -153,6 +169,10 @@ handoff only that exact operation to `맥에이전트` on **이 로컬 스튜디
 Open [the fixed Studio Mac HomeTax handoff contract](references/local-studio-mac-handoff.md)
 before replying. The same Slack thread is authoritative: `스튜디오맥 접수` is
 not completion, and only the MacAgent final readback proves issuance.
+For an owner-requested, read-only connectivity check, use only the separate
+`studio_mac_cua_readiness` template in that contract. Never add customer or
+financial fields to the readiness block, and never treat its `PASS` as mutation
+authority or issuance evidence.
 
 ## Returns and equipment
 

@@ -25,9 +25,21 @@ accessibility text, screenshot URL/image, page content, subprocess output, or cr
 not click, type, navigate, log in, use HomeTax, receive Slack events, or perform tax/document
 mutations.
 
-`studio-mac-codex-worker.mjs` is the separate, narrowly authorized mutation worker for this local
-Studio Mac. It accepts only one typed `hometax_cash_receipt_issue` task with `owner_explicit`, starts
-the pinned Codex app-server in a fresh ephemeral thread, and permits only HomeTax cash-receipt work.
+`studio-mac-codex-worker.mjs` is the separate authorized worker for this local Studio Mac. Its typed
+`hometax_cash_receipt_issue` profile retains the strict HomeTax contract, while its
+`general_local_cua` profile accepts one bounded natural-language task only after the Slack layer has
+proved the fixed HeyBilly source and owner-authored parent thread. Both profiles start the Codex
+app-server in a fresh **persisted** task whose PII-free name contains only `맥에이전트` and the request
+ID. They share the same app-server protocol and exact-child cleanup but use separate input/result
+schemas. The general profile is forbidden from delegating to AX2 or another computer and requires
+`readbackVerified=true` before any completed result.
+
+두 profile 모두 첫 CUA 관찰의 잠금 오류를 곧바로 실제 잠금으로 확정하지 않는다. Chrome 기준
+안전 좌표 클릭과 macOS `System Events` 좌표 클릭을 각각 정확히 한 번만 시도한 뒤 같은 관찰을
+재확인하며, 그래도 잠금 오류일 때만 `studio_mac_locked`로 중단한다. 이 절차는 인증을 우회하지
+않고 화면보호기 오판만 제거한다.
+
+The HomeTax profile permits only cash-receipt work.
 Certificate login uses the first certificate and the first Chrome native-autofill suggestion without
 reading or serializing the secret. A completion is returned only after a fixed `node_repl` readback
 independently finds the exact approval number and amount in Chrome accessibility state. Lock,

@@ -52,6 +52,37 @@ const REQUEST_ID = createHash('sha256')
   .digest('hex')
   .slice(0, 16);
 
+const GENERAL_ENVELOPE = Object.freeze({
+  schemaVersion: 'gate2-heybilly-general-envelope/v1',
+  source: 'slack_socket_mode',
+  teamId: ROUTE.teamId,
+  channelId: ROUTE.channelId,
+  eventId: 'Ev0HEYBILLYGENERAL1',
+  threadTs: '1787621371.680329',
+  action: 'studio_mac_general_handoff',
+  handoffId: 'hb-816f4136-c4a8-47c6-9e10-61710e79f05c',
+});
+const GENERAL_TASK = Object.freeze({
+  schemaVersion: 'gate1-studio-mac-general-task/v1',
+  action: 'general_local_cua',
+  handoffId: GENERAL_ENVELOPE.handoffId,
+  authorization: 'owner_explicit',
+  instruction: 'Chrome에서 현재 열려 있는 문서의 발급 상태를 확인하고 결과만 보고해.',
+});
+const GENERAL_RESULT = Object.freeze({
+  schemaVersion: 'studio-mac-general-result/v1',
+  status: 'COMPLETED',
+  summary: '발급 상태 확인을 완료했습니다.',
+  mutationObserved: false,
+  readbackVerified: true,
+  need: null,
+  errorClass: null,
+});
+const GENERAL_REQUEST_ID = createHash('sha256')
+  .update(`${GENERAL_ENVELOPE.teamId}\0heybilly-general\0${GENERAL_ENVELOPE.handoffId}`)
+  .digest('hex')
+  .slice(0, 16);
+
 async function tempLedger(t) {
   const path = await mkdtemp(join(tmpdir(), 'studio-mac-handoff-test-'));
   t.after(() => rm(path, { recursive: true, force: true }));
@@ -116,6 +147,179 @@ test('one typed HeyBilly handoff is acknowledged, executed once on Studio Mac, a
   assert.equal(raw.includes(TASK.item), false);
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.equal((await stat(join(ledgerDir, '.studio-mac-task-digest.key'))).mode & 0o777, 0o600);
+});
+
+test('one general HeyBilly handoff executes once on the shared Studio Mac queue without persisting its instruction or summary', async t => {
+  const shell = await loadShell();
+  assert.equal(typeof shell?.processGeneralHeyBillyHandoff, 'function');
+  const ledgerDir = await tempLedger(t);
+  const calls = [];
+  const invoke = () => shell.processGeneralHeyBillyHandoff({
+    envelope: GENERAL_ENVELOPE,
+    task: GENERAL_TASK,
+    allowedRoute: ROUTE,
+    ledgerDir,
+    actionRunner: async input => {
+      calls.push({ type: 'run', input });
+      return GENERAL_RESULT;
+    },
+    statusSink: async payload => {
+      calls.push({ type: 'post', payload });
+      return { delivered: true };
+    },
+    allowTestOverrides: true,
+    now: () => NOW,
+    deliveryTimeoutMs: 100,
+  });
+
+  const receipt = await invoke();
+  assert.deepEqual(calls.map(call => call.type), ['post', 'run', 'post']);
+  assert.equal(calls[0].payload.phase, 'ACK');
+  assert.equal(calls[0].payload.route.threadTs, GENERAL_ENVELOPE.threadTs);
+  assert.deepEqual(calls[1].input, { requestId: GENERAL_REQUEST_ID, task: GENERAL_TASK });
+  assert.equal(calls[2].payload.phase, 'FINAL');
+  assert.deepEqual(calls[2].payload.result, GENERAL_RESULT);
+  assert.deepEqual(receipt, {
+    schemaVersion: 'gate2-studio-mac-general-receipt/v1',
+    status: 'PASS',
+    requestId: GENERAL_REQUEST_ID,
+  });
+
+  const path = join(ledgerDir, `${GENERAL_REQUEST_ID}.studio-mac-general.json`);
+  const raw = await readFile(path, 'utf8');
+  const record = JSON.parse(raw);
+  assert.equal(record.state, 'completed');
+  assert.equal(record.result.readbackVerified, true);
+  assert.equal(raw.includes(GENERAL_TASK.instruction), false);
+  assert.equal(raw.includes(GENERAL_RESULT.summary), false);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+
+  const beforeDuplicate = calls.length;
+  assert.equal((await invoke()).status, 'DUPLICATE');
+  assert.equal(calls.length, beforeDuplicate);
+});
+
+test('typed and general handoffs share one Studio Mac FIFO and never manipulate the desktop concurrently', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  let active = 0;
+  let maxConcurrent = 0;
+  const releases = [];
+  const starts = [];
+  const blockingRunner = (label, result) => async () => {
+    active += 1;
+    maxConcurrent = Math.max(maxConcurrent, active);
+    starts.push(label);
+    await new Promise(resolve => { releases.push(resolve); });
+    active -= 1;
+    return result;
+  };
+
+  const typed = shell.processHeyBillyHandoff(options({
+    ledgerDir,
+    actionRunner: blockingRunner('typed', RESULT),
+    statusSink: async () => ({ delivered: true }),
+  }));
+  const general = shell.processGeneralHeyBillyHandoff({
+    envelope: GENERAL_ENVELOPE,
+    task: GENERAL_TASK,
+    allowedRoute: ROUTE,
+    ledgerDir,
+    actionRunner: blockingRunner('general', GENERAL_RESULT),
+    statusSink: async () => ({ delivered: true }),
+    allowTestOverrides: true,
+    now: () => NOW,
+    deliveryTimeoutMs: 100,
+  });
+
+  while (starts.length < 1) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(starts.length, 1);
+  assert.equal(maxConcurrent, 1);
+  releases.shift()();
+  while (starts.length < 2) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(maxConcurrent, 1);
+  releases.shift()();
+  assert.deepEqual((await Promise.all([typed, general])).map(value => value.status), ['PASS', 'PASS']);
+  assert.equal(maxConcurrent, 1);
+});
+
+test('an unconfirmed general final is never retried or re-executed because its summary is not persisted', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  let executions = 0;
+  let posts = 0;
+  const invoke = () => shell.processGeneralHeyBillyHandoff({
+    envelope: GENERAL_ENVELOPE,
+    task: GENERAL_TASK,
+    allowedRoute: ROUTE,
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return GENERAL_RESULT; },
+    statusSink: async payload => {
+      posts += 1;
+      return { delivered: payload.phase === 'ACK' };
+    },
+    allowTestOverrides: true,
+    now: () => NOW,
+    deliveryTimeoutMs: 100,
+  });
+
+  const first = await invoke();
+  const retry = await invoke();
+  assert.equal(first.status, 'BLOCKED');
+  assert.equal(first.errorClass, 'delivery_unknown');
+  assert.equal(retry.status, 'BLOCKED');
+  assert.equal(retry.errorClass, 'delivery_unknown');
+  assert.equal(executions, 1);
+  assert.equal(posts, 2);
+});
+
+test('a general ACK resume is bound to the original private instruction digest before posting or execution', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  let posts = 0;
+  let executions = 0;
+  const base = task => shell.processGeneralHeyBillyHandoff({
+    envelope: GENERAL_ENVELOPE,
+    task,
+    allowedRoute: ROUTE,
+    ledgerDir,
+    actionRunner: async () => { executions += 1; return GENERAL_RESULT; },
+    statusSink: async () => { posts += 1; return { delivered: false }; },
+    allowTestOverrides: true,
+    now: () => NOW,
+    deliveryTimeoutMs: 100,
+  });
+
+  assert.equal((await base(GENERAL_TASK)).errorClass, 'post_failed');
+  const changed = await base({ ...GENERAL_TASK, instruction: '다른 브라우저 업무를 실행해.' });
+  assert.equal(changed.status, 'BLOCKED');
+  assert.equal(changed.errorClass, 'task_mismatch');
+  assert.equal(posts, 1);
+  assert.equal(executions, 0);
+});
+
+test('a general outcome-unknown result tells Slack that the desktop mutation state needs review', async t => {
+  const shell = await loadShell();
+  const ledgerDir = await tempLedger(t);
+  const payloads = [];
+  const receipt = await shell.processGeneralHeyBillyHandoff({
+    envelope: GENERAL_ENVELOPE,
+    task: GENERAL_TASK,
+    allowedRoute: ROUTE,
+    ledgerDir,
+    actionRunner: async () => { throw new Error('not serialized'); },
+    statusSink: async payload => { payloads.push(payload); return { delivered: true }; },
+    allowTestOverrides: true,
+    now: () => NOW,
+    deliveryTimeoutMs: 100,
+  });
+
+  assert.equal(receipt.status, 'BLOCKED');
+  assert.equal(receipt.errorClass, 'outcome_unknown');
+  assert.deepEqual(payloads.map(payload => payload.phase), ['ACK', 'FINAL']);
+  assert.equal(payloads[1].result.errorClass, 'outcome_unknown');
+  assert.equal(payloads[1].result.summary, '작업 변경 여부를 확인해야 합니다.');
+  assert.equal(payloads[1].result.readbackVerified, false);
 });
 
 test('an explicit ACK non-delivery retries only the ACK before the first execution', async t => {

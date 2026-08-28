@@ -185,6 +185,7 @@ test('one local request dispatches one fixed MCP action and returns validated al
     options: { stdio: ['pipe', 'pipe', 'pipe'] },
   });
   assert.deepEqual(fake.sent.map(message => message.method), ['initialize', 'initialized', 'thread/start', 'mcpServer/tool/call']);
+  assert.equal(fake.sent.some(message => Object.hasOwn(message, 'jsonrpc')), false);
   const threadStart = fake.sent.find(message => message.method === 'thread/start');
   assert.equal(threadStart.params.ephemeral, true);
   assert.equal(threadStart.params.sandbox, 'read-only');
@@ -199,6 +200,26 @@ test('one local request dispatches one fixed MCP action and returns validated al
   assert.doesNotMatch(action.params.arguments.code, /\.click\(|\.type_text\(|\.press_key\(|\.scroll\(|\.set_value\(/);
   assert.equal(JSON.stringify(result).includes('thread-safe'), false);
   assert.deepEqual(fake.signals, []);
+});
+
+test('the default readiness bridge launches the Codex binary bundled with this Studio Mac app', async () => {
+  const bridge = await loadBridge();
+  const appCodexPath = '/Applications/ChatGPT.app/Contents/Resources/codex';
+  const fake = fakeAppServer();
+  let launchedPath;
+
+  await bridge.runDesktopCuaBridge({
+    allowTestOverrides: true,
+    spawnImpl(path) {
+      launchedPath = path;
+      return fake.child;
+    },
+    runId: 'f123456789abcdef',
+    timeoutMs: 1_000,
+    identityReader: async () => 'start-1',
+  });
+
+  assert.equal(launchedPath, appCodexPath);
 });
 
 test('matched false capability evidence returns a redacted BLOCKED record', async () => {

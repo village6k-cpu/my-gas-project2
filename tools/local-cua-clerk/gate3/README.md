@@ -1,8 +1,8 @@
 # Gate 3 — 별도 Slack 직원 커넥터
 
 이 디렉터리는 기존 헤이빌리와 분리된 `맥에이전트` Slack 앱을 이 로컬 스튜디오맥의
-Gate 2 원장과 Gate 1 CUA 워커에 연결한다. 사람의 `상태 확인`과, 정확히 고정된 HeyBilly
-`MAC_AGENT_HANDOFF_V1` 현금영수증 인계만 허용한다.
+Gate 2 원장과 Gate 1 Codex/CUA 워커에 연결한다. 헤이빌리는 Slack에서 인계만 하고,
+인계 검증·구조화·Codex 작업·Chrome CUA·홈택스 실행은 모두 이 스튜디오맥에서 한다.
 
 ## 현재 상태
 
@@ -11,8 +11,10 @@ Gate 2 원장과 Gate 1 CUA 워커에 연결한다. 사람의 `상태 확인`과
 - Slack에서 `맥에이전트 상태 확인` 한글 호출·한글 작성자명·동일 스레드 정상 회신과 원장
   `completed` 확인
 - HeyBilly 사용자 ID와 bot ID를 별도로 고정하고 다른 봇·과거 이벤트·편집 이벤트를 선차단
+- 실제 HeyBilly 문장형 인계를 맥에이전트가 로컬에서 구조화하며 Hermes/AX2 프로필 배포를 필수 조건으로 두지 않음
 - 접수 → 스튜디오맥 단일 CUA 실행 → 고정 화면 readback → 동일 스레드 최종 회신 구현
-- 세금계산서, 임의 자연어, 다른 HomeTax 업무는 허용하지 않음
+- 정확한 `@맥에이전트 작업 요청` 활성화 뒤의 자연어 한 건을 새 persisted Codex 작업으로 처리하는 범용 경로 구현
+- typed HomeTax와 범용 작업은 같은 스튜디오맥 FIFO를 사용하며 AX2에서는 CUA를 실행하지 않음
 
 ## 설치 구성
 
@@ -74,16 +76,37 @@ Node의 주변 환경변수를 사용하지 않고 비밀파일을 매 시작마
 - 고정 팀·채널·앱·봇·허용 사용자와 모두 일치해야 한다.
 - 사용자는 채널에 정확히 `맥에이전트 상태 확인`을 입력한다. 기존 직접 멘션 방식은
   호환용으로만 유지한다.
-- HeyBilly 인계는 10분 이내의 새 이벤트, 정확한 HeyBilly user+bot 쌍, 부모 스레드,
-  소문자 UUIDv4 인계 ID와 고정 키의 `MAC_AGENT_HANDOFF_V1`만 수용한다.
+- HeyBilly 인계는 10분 이내의 새 이벤트, 정확한 HeyBilly user+bot 쌍, 부모 스레드만
+  수용한다. 현금영수증은 실제 Slack에서 사용하는 `작업 요청 (홈택스 CUA)` 문장형 인계의
+  고객·거래ID·기간·금액·연락처와 작업 블록을 **맥에이전트가 로컬에서** 교차 검증해
+  기존 구조화 task로 변환한다. Slack event ID에서 비식별 UUIDv4를 결정적으로 만들어
+  재시도를 같은 작업으로 묶는다. 기존 `MAC_AGENT_HANDOFF_V1` 형식은 호환용으로 유지한다.
+- 범용 인계는 HeyBilly가 `<@맥에이전트> 작업 요청` 한 줄 다음에 자연어 본문을 붙이면 된다.
+  대표가 이 형식을 외울 필요는 없고 HeyBilly가 생성한다. 코드펜스·숨은 필드·빈 본문은 범용
+  경로로 승격하지 않으며, task 이름에는 요청 ID만 넣는다. 자연어 원문은 승인된 Codex 작업
+  기록에는 남지만 로컬 원장·서비스 로그·ACK에는 복제하지 않는다.
+- 금융·범용 인계는 실행 전 `conversations.replies` 읽기 검증으로 부모 스레드 작성자가 고정된
+  owner ID인지 확인하며, 다른 작성자이거나 조회가 불명확하면 디스크·CUA 실행 전에 거부한다.
+- HeyBilly readiness는 별도 `[MAC_AGENT_READINESS_V1]` fenced 6줄 계약의
+  `studio_mac_cua_readiness`와 `authorization: read_only`만 수용한다.
+  실측된 HeyBilly 코드 블록의 여는 fence 직후 줄바꿈 생략과 정확한
+  `[/MAC_..._V1]` 닫힘 표기는 나머지 5줄이 모두 일치할 때만 이 readiness 경로에서
+  원래 값으로 복원하며, 금융 인계에는 적용하지 않는다.
+  고객·거래·금액·전화 등 금융/PII 필드는
+  허용하지 않으며 기존 Gate 2 `desktop_readiness` 원장과 Gate 1 CUA 브리지를 재사용한다.
 - 고객 데이터는 실행 중 메모리에만 두고 원장에는 opaque handoff ID와 고정 상태만 남긴다.
 - 동일 handoff ID는 한 번만 실행하며, `running`·전달 불명 상태는 사람 확인 없이 재실행하지 않는다.
-- 진행상황은 원 요청 스레드에 `스튜디오맥 접수`와 최종 완료/사용자 확인 필요로 표시한다.
+- 현금영수증 인계 진행상황은 원 요청 스레드에 `스튜디오맥 접수`와 최종 완료/사용자 확인
+  필요로 표시한다. 범용 인계는 PII 없는 Codex 작업명과 접수 상태를 먼저 표시하고, strict
+  결과 summary를 같은 스레드 FINAL 한 번에 표시한다. readiness는 같은 스레드에 준비 상태
+  최종 결과만 표시한다.
 - Slack 원문은 Gate 2 envelope로 매핑한 직후 폐기하며 원장에 저장하지 않는다.
 - 최상위 메시지는 그 메시지의 `ts`, 기존 스레드는 부모 `thread_ts`로 회신한다.
 - `chat.postMessage` 결과를 `conversations.replies`에서 같은 봇·같은 본문·같은 `ts`로 다시
   확인해야만 전달 완료로 기록한다.
 - 쓰기 결과가 애매하거나 readback이 없으면 `delivery_unknown`으로 멈추고 자동 재발송하지 않는다.
+- 범용 `outcome_unknown`은 변경이 없다는 뜻이 아니라 **변경 여부 확인 필요**이며, persisted
+  Codex 작업과 실제 화면을 사람이 확인하기 전에는 재실행하지 않는다.
 
 ## 테스트
 

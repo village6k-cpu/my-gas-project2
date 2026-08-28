@@ -45,12 +45,33 @@ const NEEDS_USER = Object.freeze({
   errorClass: null,
 });
 
+const GENERAL_TASK = Object.freeze({
+  schemaVersion: 'gate1-studio-mac-general-task/v1',
+  action: 'general_local_cua',
+  handoffId: 'hb-816f4136-c4a8-47c6-9e10-61710e79f05c',
+  authorization: 'owner_explicit',
+  instruction: 'Chrome에서 현재 열려 있는 문서의 발급 상태를 확인하고 결과만 보고해.',
+});
+
+const GENERAL_COMPLETED = Object.freeze({
+  schemaVersion: 'studio-mac-general-result/v1',
+  status: 'COMPLETED',
+  summary: '발급 상태 확인을 완료했습니다.',
+  mutationObserved: false,
+  readbackVerified: true,
+  need: null,
+  errorClass: null,
+});
+
 function fakeAppServer(finalResult = ISSUED, {
   completionResult = finalResult,
   closeOnEnd = true,
   closeOnSignal = true,
   commentaryText = null,
   finalPhase = 'final_answer',
+  emitTurnStarted = true,
+  emittedAtMsValue,
+  emitTransientNodeCancellation = false,
   silent = false,
   spawnfile = '/opt/codex',
   verificationEvidence = {
@@ -77,12 +98,17 @@ function fakeAppServer(finalResult = ISSUED, {
     status: 'inProgress',
     items: [],
     error: null,
+    startedAt: 1_000,
+    completedAt: null,
+    durationMs: null,
+    itemsView: 'full',
   };
   const agentMessage = {
     id: 'agent-message-1',
     type: 'agentMessage',
     text: JSON.stringify(finalResult),
     ...(finalPhase === null ? {} : { phase: finalPhase }),
+    memoryCitation: null,
   };
   const completedAgentMessage = {
     ...agentMessage,
@@ -104,6 +130,22 @@ function fakeAppServer(finalResult = ISSUED, {
         const starts = sent.filter(candidate => candidate.method === 'thread/start').length;
         const startedThreadId = starts === 1 ? 'thread-studio-mac' : 'thread-studio-mac-readback';
         emit({ id: message.id, result: { thread: { id: startedThreadId } } });
+        if (emitTransientNodeCancellation) {
+          emit({
+            emittedAtMs: 1,
+            method: 'mcpServer/startupStatus/updated',
+            params: {
+              name: 'node_repl', status: 'cancelled', threadId: startedThreadId, error: null, failureReason: null,
+            },
+          });
+          emit({
+            emittedAtMs: 2,
+            method: 'mcpServer/startupStatus/updated',
+            params: {
+              name: 'node_repl', status: 'starting', threadId: startedThreadId, error: null, failureReason: null,
+            },
+          });
+        }
         emit({
           emittedAtMs: 1,
           method: 'mcpServer/startupStatus/updated',
@@ -112,24 +154,34 @@ function fakeAppServer(finalResult = ISSUED, {
           },
         });
       }
+      if (message.method === 'thread/name/set') emit({ id: message.id, result: {} });
       if (message.method === 'turn/start') {
         emit({ id: message.id, result: { turn } });
-        emit({ method: 'turn/started', params: { threadId: 'thread-studio-mac', turn } });
+        if (emitTurnStarted) emit({
+          ...(emittedAtMsValue === undefined ? {} : { emittedAtMs: emittedAtMsValue }),
+          method: 'turn/started',
+          params: { threadId: 'thread-studio-mac', turn },
+        });
         if (commentaryMessage) emit({
+          ...(emittedAtMsValue === undefined ? {} : { emittedAtMs: emittedAtMsValue }),
           method: 'item/completed',
-          params: { threadId: 'thread-studio-mac', turnId: turn.id, item: commentaryMessage },
+          params: { completedAtMs: 1_001_000, threadId: 'thread-studio-mac', turnId: turn.id, item: commentaryMessage },
         });
         emit({
+          ...(emittedAtMsValue === undefined ? {} : { emittedAtMs: emittedAtMsValue }),
           method: 'item/completed',
-          params: { threadId: 'thread-studio-mac', turnId: turn.id, item: agentMessage },
+          params: { completedAtMs: 1_002_000, threadId: 'thread-studio-mac', turnId: turn.id, item: agentMessage },
         });
         emit({
+          ...(emittedAtMsValue === undefined ? {} : { emittedAtMs: emittedAtMsValue }),
           method: 'turn/completed',
           params: {
             threadId: 'thread-studio-mac',
             turn: {
               ...turn,
               status: 'completed',
+              completedAt: 1_002,
+              durationMs: 2_000,
               items: [...(commentaryMessage ? [commentaryMessage] : []), completedAgentMessage],
             },
           },
@@ -139,7 +191,10 @@ function fakeAppServer(finalResult = ISSUED, {
         emit({
           id: message.id,
           result: {
+            _meta: { source: 'node_repl' },
             content: [{ type: 'text', text: JSON.stringify(verificationEvidence) }],
+            isError: false,
+            structuredContent: null,
           },
         });
       }
@@ -166,7 +221,7 @@ function fakeAppServer(finalResult = ISSUED, {
   return { child, sent, signals };
 }
 
-test('one authorized handoff creates one Studio Mac ephemeral Codex turn and returns only the validated issuance result', async () => {
+test('one authorized handoff creates one persisted Studio Mac Codex task and returns only the validated issuance result', async () => {
   const worker = await loadWorker();
   assert.equal(typeof worker?.runStudioMacCodexWorker, 'function');
   const fake = fakeAppServer();
@@ -192,10 +247,11 @@ test('one authorized handoff creates one Studio Mac ephemeral Codex turn and ret
     options: { stdio: ['pipe', 'pipe', 'pipe'] },
   });
   assert.deepEqual(fake.sent.map(message => message.method), [
-    'initialize', 'initialized', 'thread/start', 'turn/start', 'thread/start', 'mcpServer/tool/call',
+    'initialize', 'initialized', 'thread/start', 'thread/name/set', 'turn/start', 'thread/start', 'mcpServer/tool/call',
   ]);
+  assert.equal(fake.sent.some(message => Object.hasOwn(message, 'jsonrpc')), false);
   const [threadStart, readbackThreadStart] = fake.sent.filter(message => message.method === 'thread/start');
-  assert.equal(threadStart.params.ephemeral, true);
+  assert.equal(threadStart.params.ephemeral, false);
   assert.equal(threadStart.params.approvalPolicy, 'never');
   assert.equal(threadStart.params.sandbox, 'read-only');
   assert.equal(threadStart.params.serviceName, 'village-local-studio-mac-hometax-cua');
@@ -204,7 +260,17 @@ test('one authorized handoff creates one Studio Mac ephemeral Codex turn and ret
   assert.match(threadStart.params.developerInstructions, /cash_receipt_already_issued/);
   assert.match(threadStart.params.developerInstructions, /user_action_required/);
   assert.match(threadStart.params.developerInstructions, /execution_blocked/);
+  assert.match(threadStart.params.developerInstructions, /sky\.click\(\{app:'com\.google\.Chrome',x:100,y:100\}\)/);
+  assert.match(threadStart.params.developerInstructions, /\/usr\/bin\/osascript/);
+  assert.match(threadStart.params.developerInstructions, /재확인/);
   assert.doesNotMatch(threadStart.params.developerInstructions, /MacBook|맥북/i);
+  const threadName = fake.sent.find(message => message.method === 'thread/name/set');
+  assert.deepEqual(threadName.params, {
+    threadId: 'thread-studio-mac',
+    name: '맥에이전트 · 현금영수증 · 0123456789abcdef',
+  });
+  assert.equal(JSON.stringify(threadName).includes(TASK.customerName), false);
+  assert.equal(JSON.stringify(threadName).includes(TASK.phone), false);
   assert.equal(readbackThreadStart.params.ephemeral, true);
   assert.equal(readbackThreadStart.params.approvalPolicy, 'never');
   assert.equal(readbackThreadStart.params.sandbox, 'read-only');
@@ -234,6 +300,169 @@ test('one authorized handoff creates one Studio Mac ephemeral Codex turn and ret
   assert.equal(JSON.stringify(result).includes(TASK.customerName), false);
   assert.equal(JSON.stringify(result).includes(TASK.phone), false);
   assert.deepEqual(fake.signals, []);
+});
+
+test('one owner-authorized natural-language handoff creates one persisted general Studio Mac Codex task', async () => {
+  const worker = await loadWorker();
+  assert.equal(typeof worker?.runStudioMacGeneralWorker, 'function');
+  assert.equal(typeof worker?.validateStudioMacGeneralTask, 'function');
+  assert.equal(typeof worker?.validateStudioMacGeneralResult, 'function');
+  const fake = fakeAppServer(GENERAL_COMPLETED, { completionResult: GENERAL_COMPLETED });
+
+  const result = await worker.runStudioMacGeneralWorker({
+    task: GENERAL_TASK,
+    requestId: 'fedcba9876543210',
+    codexPath: '/opt/codex',
+    allowTestOverrides: true,
+    spawnImpl: () => fake.child,
+    identityReader: async () => 'studio-mac-general-child-1',
+    timeoutMs: 1_000,
+  });
+
+  assert.deepEqual(result, GENERAL_COMPLETED);
+  assert.deepEqual(fake.sent.map(message => message.method), [
+    'initialize', 'initialized', 'thread/start', 'thread/name/set', 'turn/start',
+  ]);
+  const threadStart = fake.sent.find(message => message.method === 'thread/start');
+  assert.equal(threadStart.params.ephemeral, false);
+  assert.equal(threadStart.params.serviceName, 'village-local-studio-mac-general-cua');
+  assert.match(threadStart.params.developerInstructions, /이 로컬 스튜디오맥/);
+  assert.match(threadStart.params.developerInstructions, /대표가 명시적으로 요청한 범위/);
+  assert.match(threadStart.params.developerInstructions, /AX2를 사용하지 않는다/);
+  assert.match(threadStart.params.developerInstructions, /sky\.click\(\{app:'com\.google\.Chrome',x:100,y:100\}\)/);
+  assert.match(threadStart.params.developerInstructions, /\/usr\/bin\/osascript/);
+  assert.match(threadStart.params.developerInstructions, /재확인/);
+  assert.doesNotMatch(threadStart.params.developerInstructions, /MacBook|맥북/i);
+  const threadName = fake.sent.find(message => message.method === 'thread/name/set');
+  assert.deepEqual(threadName.params, {
+    threadId: 'thread-studio-mac',
+    name: '맥에이전트 · fedcba9876543210',
+  });
+  assert.equal(JSON.stringify(threadName).includes(GENERAL_TASK.instruction), false);
+  const turnStart = fake.sent.find(message => message.method === 'turn/start');
+  assert.equal(turnStart.params.clientUserMessageId, 'fedcba9876543210');
+  assert.deepEqual(turnStart.params.outputSchema.required, [
+    'schemaVersion', 'status', 'summary', 'mutationObserved', 'readbackVerified', 'need', 'errorClass',
+  ]);
+  assert.deepEqual(JSON.parse(turnStart.params.input[0].text.split('\n').at(-1)), GENERAL_TASK);
+});
+
+test('current app-server emittedAtMs envelopes are accepted for the persisted general task lifecycle', async () => {
+  const worker = await loadWorker();
+  const fake = fakeAppServer(GENERAL_COMPLETED, {
+    completionResult: GENERAL_COMPLETED,
+    emittedAtMsValue: 1_000,
+  });
+
+  const result = await worker.runStudioMacGeneralWorker({
+    task: GENERAL_TASK,
+    requestId: '1234567890abcdef',
+    codexPath: '/opt/codex',
+    allowTestOverrides: true,
+    spawnImpl: () => fake.child,
+    identityReader: async () => 'studio-mac-general-child-current-envelope',
+    timeoutMs: 1_000,
+  });
+
+  assert.deepEqual(result, GENERAL_COMPLETED);
+});
+
+test('a malformed app-server emittedAtMs envelope is rejected', async () => {
+  const worker = await loadWorker();
+  const fake = fakeAppServer(GENERAL_COMPLETED, {
+    completionResult: GENERAL_COMPLETED,
+    emittedAtMsValue: 'not-a-number',
+  });
+
+  const result = await worker.runStudioMacGeneralWorker({
+    task: GENERAL_TASK,
+    requestId: 'abcdef1234567890',
+    codexPath: '/opt/codex',
+    allowTestOverrides: true,
+    spawnImpl: () => fake.child,
+    identityReader: async () => 'studio-mac-general-child-invalid-envelope',
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(result.status, 'BLOCKED');
+  assert.equal(result.errorClass, 'malformed_result');
+});
+
+test('a transient node_repl cancellation followed by restart and ready does not abort the task', async () => {
+  const worker = await loadWorker();
+  const fake = fakeAppServer(GENERAL_COMPLETED, {
+    completionResult: GENERAL_COMPLETED,
+    emittedAtMsValue: 1_000,
+    emitTransientNodeCancellation: true,
+  });
+
+  const result = await worker.runStudioMacGeneralWorker({
+    task: GENERAL_TASK,
+    requestId: '0abcdef123456789',
+    codexPath: '/opt/codex',
+    allowTestOverrides: true,
+    spawnImpl: () => fake.child,
+    identityReader: async () => 'studio-mac-general-child-restarted-node-repl',
+    timeoutMs: 1_000,
+  });
+
+  assert.deepEqual(result, GENERAL_COMPLETED);
+});
+
+test('general task and result contracts reject broadened or unverified work before spawning', async () => {
+  const worker = await loadWorker();
+  const invalidTasks = [
+    { ...GENERAL_TASK, action: 'shell_command' },
+    { ...GENERAL_TASK, authorization: 'inferred' },
+    { ...GENERAL_TASK, instruction: '' },
+    { ...GENERAL_TASK, instruction: `확인${'가'.repeat(6001)}` },
+    { ...GENERAL_TASK, instruction: '확인\u0000실행' },
+    { ...GENERAL_TASK, extra: 'not allowed' },
+  ];
+  for (const task of invalidTasks) {
+    assert.throws(() => worker.validateStudioMacGeneralTask(task), /general task/);
+  }
+  assert.throws(() => worker.validateStudioMacGeneralResult({
+    ...GENERAL_COMPLETED,
+    readbackVerified: false,
+  }), /inconsistent/);
+  assert.throws(() => worker.validateStudioMacGeneralResult({
+    ...GENERAL_COMPLETED,
+    status: 'NEEDS_USER',
+    need: 'user_decision_required',
+  }), /inconsistent/);
+
+  let spawns = 0;
+  await assert.rejects(worker.runStudioMacGeneralWorker({
+    task: { ...GENERAL_TASK, authorization: 'inferred' },
+    requestId: 'fedcba9876543210',
+    codexPath: '/opt/codex',
+    allowTestOverrides: true,
+    spawnImpl: () => { spawns += 1; return fakeAppServer(GENERAL_COMPLETED).child; },
+    identityReader: async () => 'never',
+  }), /general task/);
+  assert.equal(spawns, 0);
+});
+
+test('the default worker launches the Codex binary bundled with this Studio Mac app', async () => {
+  const worker = await loadWorker();
+  const appCodexPath = '/Applications/ChatGPT.app/Contents/Resources/codex';
+  const fake = fakeAppServer(NEEDS_USER, { spawnfile: appCodexPath });
+  let launchedPath;
+
+  await worker.runStudioMacCodexWorker({
+    task: TASK,
+    requestId: '0123456789abcdef',
+    allowTestOverrides: true,
+    spawnImpl(path) {
+      launchedPath = path;
+      return fake.child;
+    },
+    identityReader: async () => 'studio-mac-child-1',
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(launchedPath, appCodexPath);
 });
 
 test('the worker revalidates the exact Gate 1 task contract before any child can spawn', async () => {
@@ -464,6 +693,22 @@ test('commentary agent messages may precede one exact final JSON agent message',
 
   assert.deepEqual(result, ISSUED);
   assert.equal(fake.sent.filter(message => message.method === 'mcpServer/tool/call').length, 1);
+});
+
+test('a correlated first item proves the turn started when turn/started was missed during the response race', async () => {
+  const worker = await loadWorker();
+  const fake = fakeAppServer(NEEDS_USER, { emitTurnStarted: false });
+  const result = await worker.runStudioMacCodexWorker({
+    task: TASK,
+    requestId: '0123456789abcdef',
+    codexPath: '/opt/codex',
+    allowTestOverrides: true,
+    spawnImpl: () => fake.child,
+    identityReader: async () => 'studio-mac-child-1',
+    timeoutMs: 1_000,
+  });
+
+  assert.deepEqual(result, NEEDS_USER);
 });
 
 test('a phase-less agent message cannot be promoted to the final financial result', async () => {

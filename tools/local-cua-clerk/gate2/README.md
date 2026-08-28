@@ -4,11 +4,19 @@ Gate 2는 실제 Slack에 연결하지 않고 `village-tax-document-clerk` 직�
 검증한다. 고정된 합성 이벤트 하나만 받아 Gate 1의 읽기 전용 `desktop_readiness`를 실행하고,
 로컬 가짜 전달구로 결과를 전달한 뒤 같은 이벤트의 재실행을 막는다.
 
-`heybilly-handoff-shell.mjs`는 별도 경로로, 정확한 HeyBilly 구조화 인계를 이 로컬
-스튜디오맥의 단일 CUA FIFO에 넣는다. 같은 Slack 스레드의 접수 readback이 끝난 뒤에만 실행하고,
+`heybilly-handoff-shell.mjs`는 별도 경로로, Gate 3가 헤이빌리 Slack 인계를 이 로컬에서
+구조화한 task를 스튜디오맥의 단일 CUA FIFO에 넣는다. 같은 Slack 스레드의 접수
+readback이 끝난 뒤에만 실행하고,
 `running` 이후 재수신은 자동 재실행하지 않는다. 원장에는 고객명·전화·금액·품목·Slack 원문을
 저장하지 않는다. 인계 ID는 비식별 소문자 UUIDv4만 허용하고, 재개 시 원본 작업과의 일치는
 권한 `0600` 로컬 비밀키로 만든 HMAC 지문으로만 확인한다.
+
+같은 파일의 범용 경로는 `general_local_cua` 자연어 본문을 메모리에서만 Gate 1로 전달하고,
+기존 HomeTax 경로와 **같은** `studioMacQueue`를 사용한다. 따라서 두 Codex 작업이 같은 Chrome
+화면을 동시에 조작하지 않는다. 범용 원장에는 instruction과 결과 summary를 저장하지 않고
+HMAC 지문, 고정 상태, `mutationObserved`·`readbackVerified`만 남긴다. summary를 재구성할 수
+없으므로 범용 FINAL의 전달이 명확히 확인되지 않으면 `final_delivery_unknown`으로 닫고 자동
+재전송·재실행하지 않는다. 결과 원본은 persisted Codex 작업에서 확인한다.
 
 ## 현재 가능한 것
 
@@ -27,6 +35,9 @@ Gate 2는 실제 Slack에 연결하지 않고 `village-tax-document-clerk` 직�
 - Slack 앱 설치, Events API, Socket Mode, 서명 검증, OAuth 또는 실제 메시지 발송
 - 홈택스 접속, 로그인, 인증서 선택, 조회, 발급·수정·취소
 - 자연어 해석, 임의 프롬프트 실행, 여러 액션 또는 상시 데몬
+
+위 제한은 `synthetic_local` 준비도 경로에만 해당한다. 실제 Slack의 범용 자연어 인계는 Gate 3가
+고정 HeyBilly 정체성·새 이벤트·owner 부모 스레드를 확인한 뒤 별도 general envelope로 호출한다.
 
 `source`는 반드시 `synthetic_local`이어야 하므로 실제 Slack 이벤트를 이 셸에 그대로 넣어도
 거부된다. 실제 커넥터는 다음 게이트에서 Slack 서명·설치·채널 권한을 별도로 증명한 뒤 붙인다.
