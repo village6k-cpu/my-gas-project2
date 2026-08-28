@@ -116,6 +116,15 @@ test('no-send transition forcibly disables customer send and approval polling', 
   });
 });
 
+test('no-send restart preflight validates the same fail-closed runtime contract it applies', () => {
+  const source = readFileSync(path.join(scripts, 'Restart-KakaoBridgeNoSend.ps1'), 'utf8');
+
+  assert.match(source, /\$required\s*=\s*Get-KakaoLiveNoSendRuntimeContract/);
+  assert.match(source, /Test-KakaoLiveNoSendHealth\s+-Health\s+\$post/);
+  assert.doesNotMatch(source, /SLACK_AGENT_CARD_DELIVERY_ENABLED\s*=\s*'1'/);
+  assert.doesNotMatch(source, /VILLAGE_WINDOWS_WRITES_ENABLED\s*=\s*'1'/);
+});
+
 test('live/no-send runtime repairs authentication and watcher without enabling full-live', () => {
   const modulePath = path.join(scripts, 'KakaoLiveNoSend.Common.psm1');
   const result = runPowerShell(`

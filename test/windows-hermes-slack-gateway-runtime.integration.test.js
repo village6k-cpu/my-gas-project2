@@ -69,3 +69,25 @@ test('reboot owns only the root messaging gateway; Kakao work stays on the bridg
   assert.match(register, /-Target\s+root\s+-HealOnly/i);
   assert.match(restart, /if\s*\(\$Target\s+-eq\s+['"]all['"]\)\s*\{\s*\$targets\s*=\s*@\(['"]root['"]\)\s*\}/i);
 });
+
+test('manual Kakao gateway restart uses the native task and validates it before stopping the live worker', () => {
+  const root = path.resolve(__dirname, '..');
+  const restart = fs.readFileSync(
+    path.join(root, 'scripts', 'windows', 'restart-hermes-gateway.ps1'),
+    'utf8'
+  );
+  const recoveryReference = fs.readFileSync(
+    path.join(root, 'scripts', 'windows', 'hermes-profile-overlay', 'skills', 'productivity',
+      'village-operations', 'references', 'gateway-self-restart-recovery.md'),
+    'utf8'
+  );
+
+  assert.match(restart, /Task\s*=\s*['"]Hermes_Gateway_Kakaoworker_Native['"]/i);
+  assert.doesNotMatch(restart, /Task\s*=\s*['"]Hermes_Gateway_Kakaoworker['"]/i);
+  const preflightIndex = restart.indexOf('Test-GatewayScheduledTaskReady -TaskName $info.Task');
+  const processScanIndex = restart.indexOf('Get-ProfileGatewayProcs -Match $info.Match');
+  assert.ok(preflightIndex >= 0 && preflightIndex < processScanIndex,
+    'scheduled task readiness must be proven before the live worker is stopped');
+  assert.match(recoveryReference, /Hermes_Gateway_Kakaoworker_Native/);
+  assert.doesNotMatch(recoveryReference, /Hermes_Gateway_Kakaoworker(?!_Native)/);
+});
