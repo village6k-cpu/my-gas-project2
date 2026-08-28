@@ -212,7 +212,7 @@ function generalReceipt(status, requestId, errorClass) {
 }
 
 function generalTerminalReceipt(result, requestId) {
-  if (result.status === 'COMPLETED') return generalReceipt('PASS', requestId);
+  if (result.status === 'COMPLETED') return generalReceipt('BLOCKED', requestId, 'needs_review');
   if (result.status === 'NEEDS_USER') return generalReceipt('BLOCKED', requestId, 'user_action_required');
   return generalReceipt('BLOCKED', requestId, result.errorClass);
 }

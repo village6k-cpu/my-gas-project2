@@ -181,8 +181,9 @@ test('one general HeyBilly handoff executes once on the shared Studio Mac queue 
   assert.deepEqual(calls[2].payload.result, GENERAL_RESULT);
   assert.deepEqual(receipt, {
     schemaVersion: 'gate2-studio-mac-general-receipt/v1',
-    status: 'PASS',
+    status: 'BLOCKED',
     requestId: GENERAL_REQUEST_ID,
+    errorClass: 'needs_review',
   });
 
   const path = join(ledgerDir, `${GENERAL_REQUEST_ID}.studio-mac-general.json`);
@@ -239,7 +240,7 @@ test('typed and general handoffs share one Studio Mac FIFO and never manipulate 
   while (starts.length < 2) await new Promise(resolve => setImmediate(resolve));
   assert.equal(maxConcurrent, 1);
   releases.shift()();
-  assert.deepEqual((await Promise.all([typed, general])).map(value => value.status), ['PASS', 'PASS']);
+  assert.deepEqual((await Promise.all([typed, general])).map(value => value.status), ['PASS', 'BLOCKED']);
   assert.equal(maxConcurrent, 1);
 });
 

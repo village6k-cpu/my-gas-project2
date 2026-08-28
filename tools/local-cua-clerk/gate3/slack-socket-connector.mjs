@@ -510,6 +510,32 @@ function parseGeneralHeyBillyRelay(text, botUserId, eventId) {
   });
 }
 
+function parseOwnerGeneralMention(text, botUserId, eventId) {
+  const prefix = `<@${botUserId}> `;
+  if (
+    !text.startsWith(prefix)
+    || text.includes('\r')
+    || text.includes('\u0000')
+    || text.normalize('NFKC') !== text
+  ) return undefined;
+  const instruction = text.slice(prefix.length);
+  if (
+    instruction === '상태 확인'
+    || instruction !== instruction.trim()
+    || Buffer.byteLength(instruction, 'utf8') < 1
+    || Buffer.byteLength(instruction, 'utf8') > 6000
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(instruction)
+  ) return undefined;
+  const handoffId = derivedHeyBillyHandoffId(eventId);
+  return Object.freeze({
+    schemaVersion: HEYBILLY_GENERAL_TASK_SCHEMA_VERSION,
+    action: HEYBILLY_GENERAL_TASK_TYPE,
+    handoffId,
+    authorization: 'owner_explicit',
+    instruction,
+  });
+}
+
 function parsePlainHeyBillyRelay(text, botUserId, eventId) {
   const normalized = text.normalize('NFKC');
   if (normalized.includes('```') || normalized.includes('\u0000')) return undefined;
@@ -608,6 +634,13 @@ export function adaptSlackAppMention({
     && event.bot_id === handoffSource.botId
     && (event.subtype === undefined || event.subtype === 'bot_message')
   );
+  const isConfiguredOwner = Boolean(
+    event
+    && typeof event === 'object'
+    && !Array.isArray(event)
+    && event.user === route.allowedUserId
+    && event.type === 'app_mention'
+  );
   if (
     body.type !== 'event_callback'
     || typeof body.team_id !== 'string'
@@ -621,7 +654,9 @@ export function adaptSlackAppMention({
     || typeof event.user !== 'string'
     || typeof event.channel !== 'string'
     || typeof event.text !== 'string'
-    || Buffer.byteLength(event.text) > (isConfiguredHandoff ? MAX_HANDOFF_TEXT_BYTES : MAX_EVENT_TEXT_BYTES)
+    || Buffer.byteLength(event.text) > (
+      isConfiguredHandoff || isConfiguredOwner ? MAX_HANDOFF_TEXT_BYTES : MAX_EVENT_TEXT_BYTES
+    )
     || typeof event.ts !== 'string'
     || !THREAD_TS.test(event.ts)
     || (event.thread_ts !== undefined && (typeof event.thread_ts !== 'string' || !THREAD_TS.test(event.thread_ts)))
@@ -703,6 +738,27 @@ export function adaptSlackAppMention({
   }
 
   if (event.user !== route.allowedUserId) return rejected('unauthorized_actor');
+
+  const ownerGeneralTask = event.type === 'app_mention'
+    ? parseOwnerGeneralMention(event.text, route.botUserId, body.event_id)
+    : undefined;
+  if (ownerGeneralTask) {
+    return Object.freeze({
+      accepted: true,
+      kind: 'owner_general',
+      envelope: Object.freeze({
+        schemaVersion: HEYBILLY_GENERAL_ENVELOPE_SCHEMA_VERSION,
+        source: LIVE_SLACK_SOURCE,
+        teamId: route.teamId,
+        channelId: route.channelId,
+        eventId: body.event_id,
+        threadTs: event.thread_ts ?? event.ts,
+        action: HEYBILLY_GENERAL_ACTION,
+        handoffId: ownerGeneralTask.handoffId,
+      }),
+      task: ownerGeneralTask,
+    });
+  }
 
   const normalizedText = event.text.normalize('NFKC').replace(/\s+/g, ' ').trim();
   const commandMatched = event.type === 'app_mention'
@@ -1017,7 +1073,7 @@ function formatGeneralStudioMacStatus(status) {
   }
   const summary = slackSafeSummary(status.result.summary);
   if (status.result.status === 'COMPLETED') {
-    return `:white_check_mark: 스튜디오맥 작업 완료\n${summary}\n요청 ID: ${status.requestId}`;
+    return `:large_blue_circle: 스튜디오맥 Codex 실행 보고\n실제 결과 확인 필요\n${summary}\n요청 ID: ${status.requestId}`;
   }
   if (status.result.status === 'NEEDS_USER') {
     return `:warning: 스튜디오맥 작업에 사용자 확인이 필요합니다\n${summary}\n요청 ID: ${status.requestId}`;
@@ -1161,8 +1217,8 @@ export async function handleSlackAppMention({
     });
   }
 
-  if (decision.kind === 'heybilly_general') {
-    if (!await verifyOwnerThreadRequest({
+  if (decision.kind === 'heybilly_general' || decision.kind === 'owner_general') {
+    if (decision.kind === 'heybilly_general' && !await verifyOwnerThreadRequest({
       client,
       route,
       threadTs: decision.envelope.threadTs,
